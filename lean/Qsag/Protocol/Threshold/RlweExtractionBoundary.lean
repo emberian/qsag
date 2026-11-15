@@ -14,8 +14,8 @@ public solutions (`tooth_rlweUnitSis_refuted_by_euclidean_bound`). This module a
 establishes exact integer ULP, Q64 fast-filter equivalence, and 49,152-coordinate joint
 retry bounds for the production Q192 discrete Gaussian sampler.
 -/
-public import Qsag.RlweCyclotomicExtraction
-import all Qsag.RlweCyclotomicExtraction
+public import Qsag.Protocol.Threshold.RlweCyclotomicExtraction
+import all Qsag.Protocol.Threshold.RlweCyclotomicExtraction
 public import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag

@@ -4753,3 +4753,1586 @@ theorem AuthShamirWire.Valid.addPublic {ls keys x} (c : Goldilocks)
     rfl
 
 /-- Each of the seven preprocessed powers carries its own additive MAC shares. -/
+structure AuthSharedPow7Tuple where
+  r : AuthShamirWire
+  r2 : AuthShamirWire
+  r3 : AuthShamirWire
+  r4 : AuthShamirWire
+  r5 : AuthShamirWire
+  r6 : AuthShamirWire
+  r7 : AuthShamirWire
+  deriving DecidableEq, Repr
+
+def AuthSharedPow7Tuple.toTuple (t : AuthSharedPow7Tuple) : SharedPow7Tuple :=
+  ⟨t.r.shares, t.r2.shares, t.r3.shares, t.r4.shares,
+   t.r5.shares, t.r6.shares, t.r7.shares⟩
+
+def AuthSharedPow7Tuple.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (t : AuthSharedPow7Tuple) : Prop :=
+  t.toTuple.validAt ls ∧ t.r.Valid ls keys ∧ t.r2.Valid ls keys ∧
+  t.r3.Valid ls keys ∧ t.r4.Valid ls keys ∧ t.r5.Valid ls keys ∧
+  t.r6.Valid ls keys ∧ t.r7.Valid ls keys
+
+/-- The same binomial linear combination as `mpcPow7Shares`, including all seven MACs. -/
+def authPow7Output (keys : List GoldilocksExt2) (d : Goldilocks)
+    (t : AuthSharedPow7Tuple) : AuthShamirWire :=
+  let d2 := Goldilocks.mul d d
+  let d3 := Goldilocks.mul d2 d
+  let d4 := Goldilocks.mul d2 d2
+  let d5 := Goldilocks.mul d4 d
+  let d6 := Goldilocks.mul d4 d2
+  let d7 := Goldilocks.mul d4 d3
+  let c1 := Goldilocks.mul (Goldilocks.ofNat 7) d6
+  let c2 := Goldilocks.mul (Goldilocks.ofNat 21) d5
+  let c3 := Goldilocks.mul (Goldilocks.ofNat 35) d4
+  let c4 := Goldilocks.mul (Goldilocks.ofNat 35) d3
+  let c5 := Goldilocks.mul (Goldilocks.ofNat 21) d2
+  let c6 := Goldilocks.mul (Goldilocks.ofNat 7) d
+  (((t.r.scale c1).addPublic keys d7).add ((t.r2.scale c2).add (t.r3.scale c3))).add
+    (((t.r4.scale c4).add (t.r5.scale c5)).add ((t.r6.scale c6).add t.r7))
+
+theorem authPow7Output_shares (keys d t) :
+    (authPow7Output keys d t).shares = mpcPow7Shares d t.toTuple := by
+  simp only [authPow7Output, mpcPow7Shares, AuthSharedPow7Tuple.toTuple,
+    AuthShamirWire.add, AuthShamirWire.scale, AuthShamirWire.addPublic]
+
+/-- MAC propagation holds for every opened value, even before its MAC check is considered. -/
+theorem authPow7Output_valid {ls keys t} (d : Goldilocks)
+    (hOne : ringListSum ls = Goldilocks.one) (ht : AuthSharedPow7Tuple.Valid ls keys t) :
+    (authPow7Output keys d t).Valid ls keys := by
+  obtain ⟨_, h1, h2, h3, h4, h5, h6, h7⟩ := ht
+  exact ((h1.scale _).addPublic _ hOne |>.add ((h2.scale _).add (h3.scale _))).add
+    (((h4.scale _).add (h5.scale _)).add ((h6.scale _).add h7))
+
+/-- Active opening and MAC check followed by party-local propagation of all output MACs. -/
+def execAuthShamirPow7 (ls : List Goldilocks) (keys masks : List GoldilocksExt2)
+    (x : AuthShamirWire) (t : AuthSharedPow7Tuple)
+    (delta : Goldilocks) (devs : List GoldilocksExt2) : Option AuthShamirWire :=
+  let d := Goldilocks.add (lagrangeCombine ls (shareZipSub x.shares t.r.shares)) delta
+  (execActiveSharedPow7Round ls x.shares t.toTuple x.macs t.r.macs keys masks delta devs).map
+    (fun ys => ⟨ys, (authPow7Output keys d t).macs⟩)
+
+/-- The active gate's returned shares are the binomial expression at its actual opening. -/
+private theorem execActiveSharedPow7Round_output {ls xs t mx mr keys masks delta devs ys}
+    (h : execActiveSharedPow7Round ls xs t mx mr keys masks delta devs = some ys) :
+    ys = mpcPow7Shares (Goldilocks.add (lagrangeCombine ls (shareZipSub xs t.rSh)) delta) t := by
+  unfold execActiveSharedPow7Round evalSharedPow7Binomial at h
+  dsimp only at h
+  split at h
+  · exact (Option.some.inj h).symm
+  · cases h
+
+theorem execAuthShamirPow7_sound_or_pins_key {ls keys masks x t delta devs out}
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hx : AuthShamirWire.Valid ls keys x) (ht : AuthSharedPow7Tuple.Valid ls keys t)
+    (hm : masks.length = keys.length) (hz : ringListSum masks = CommRingOps.zero)
+    (h : execAuthShamirPow7 ls keys masks x t delta devs = some out) :
+    out.Valid ls keys ∧
+    ((delta = Goldilocks.zero ∧ lagrangeCombine ls out.shares = sbox7 (lagrangeCombine ls x.shares)) ∨
+     (delta ≠ Goldilocks.zero ∧ ringListSum keys =
+       CommRingOps.mul (ringListSum devs) (GoldilocksExt2.inv (GoldilocksExt2.ofBase delta)))) := by
+  unfold execAuthShamirPow7 at h
+  cases he : execActiveSharedPow7Round ls x.shares t.toTuple x.macs t.r.macs keys masks delta devs with
+  | none => simp only [he, Option.map_none] at h; cases h
+  | some ys =>
+    simp only [he, Option.map_some, Option.some.injEq] at h
+    subst out
+    have hy := execActiveSharedPow7Round_output he
+    have hv := authPow7Output_valid
+      (Goldilocks.add (lagrangeCombine ls (shareZipSub x.shares t.r.shares)) delta) hOne ht
+    refine ⟨?_, ?_⟩
+    · rw [hy]
+      exact hv
+    · obtain hok | hpin := execActiveSharedPow7Round_sound_or_pins_key
+        ls x.shares t.toTuple x.macs t.r.macs keys masks delta devs ys
+        hOne hx.1 ht.1 hx.2.1 ht.2.1.2.1 hm hx.2.2 ht.2.1.2.2 hz he
+      · exact .inl ⟨hok.1, hok.2.2⟩
+      · exact .inr hpin
+
+
+/-- Four authenticated Shamir wires, stored by lane. -/
+structure AuthShamirLane4 where
+  x0 : AuthShamirWire
+  x1 : AuthShamirWire
+  x2 : AuthShamirWire
+  x3 : AuthShamirWire
+
+/-- A width-12 authenticated state. Transposing its wire shares gives the party states. -/
+structure AuthShamirState12 where
+  b0 : AuthShamirLane4
+  b1 : AuthShamirLane4
+  b2 : AuthShamirLane4
+
+def AuthShamirWire.value (ls : List Goldilocks) (x : AuthShamirWire) : Goldilocks :=
+  lagrangeCombine ls x.shares
+
+theorem AuthShamirWire.value_add {ls keys x y}
+    (hx : AuthShamirWire.Valid ls keys x) (hy : AuthShamirWire.Valid ls keys y) :
+    (x.add y).value ls = Goldilocks.add (x.value ls) (y.value ls) := by
+  exact ringDot_zipAdd (hx.1.trans hy.1.symm)
+
+theorem AuthShamirWire.value_scale (ls c x) :
+    (AuthShamirWire.scale c x).value ls = Goldilocks.mul c (x.value ls) := by
+  exact ringDot_scale c ls x.shares
+
+theorem AuthShamirWire.value_addPublic {ls keys x} (c : Goldilocks)
+    (hOne : ringListSum ls = Goldilocks.one) (hx : AuthShamirWire.Valid ls keys x) :
+    (x.addPublic keys c).value ls = Goldilocks.add c (x.value ls) := by
+  change ringDot ls (shareAddConst c x.shares) = _
+  have hOneMul : CommRingOps.mul Goldilocks.one c = c := LawfulCommRing.one_mul c
+  rw [ringDot_addConst c (Nat.le_of_eq hx.1.symm), hOne, hOneMul]
+  rfl
+
+def AuthShamirLane4.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (s : AuthShamirLane4) : Prop :=
+  s.x0.Valid ls keys ∧ s.x1.Valid ls keys ∧ s.x2.Valid ls keys ∧ s.x3.Valid ls keys
+
+def AuthShamirLane4.value (ls : List Goldilocks) (s : AuthShamirLane4) : Lane4 :=
+  ⟨s.x0.value ls, s.x1.value ls, s.x2.value ls, s.x3.value ls⟩
+
+def AuthShamirLane4.shares (s : AuthShamirLane4) : List Lane4 :=
+  zipLane4Shares s.x0.shares s.x1.shares s.x2.shares s.x3.shares
+
+def AuthShamirLane4.add (a b : AuthShamirLane4) : AuthShamirLane4 :=
+  ⟨a.x0.add b.x0, a.x1.add b.x1, a.x2.add b.x2, a.x3.add b.x3⟩
+
+def AuthShamirLane4.sum (a : AuthShamirLane4) : AuthShamirWire :=
+  (a.x0.add a.x1).add (a.x2.add a.x3)
+
+def AuthShamirLane4.applyM4 (a : AuthShamirLane4) : AuthShamirLane4 :=
+  let s := a.sum
+  ⟨s.add (a.x0.add (a.x1.scale (Goldilocks.ofNat 2))),
+   s.add (a.x1.add (a.x2.scale (Goldilocks.ofNat 2))),
+   s.add (a.x2.add (a.x3.scale (Goldilocks.ofNat 2))),
+   s.add (a.x3.add (a.x0.scale (Goldilocks.ofNat 2)))⟩
+
+theorem AuthShamirLane4.Valid.add {ls keys a b}
+    (ha : AuthShamirLane4.Valid ls keys a) (hb : AuthShamirLane4.Valid ls keys b) :
+    (a.add b).Valid ls keys :=
+  ⟨ha.1.add hb.1, ha.2.1.add hb.2.1, ha.2.2.1.add hb.2.2.1, ha.2.2.2.add hb.2.2.2⟩
+
+theorem AuthShamirLane4.Valid.sum {ls keys a} (ha : AuthShamirLane4.Valid ls keys a) :
+    a.sum.Valid ls keys :=
+  (ha.1.add ha.2.1).add (ha.2.2.1.add ha.2.2.2)
+
+theorem AuthShamirLane4.Valid.applyM4 {ls keys a} (ha : AuthShamirLane4.Valid ls keys a) :
+    a.applyM4.Valid ls keys :=
+  ⟨ha.sum.add (ha.1.add (ha.2.1.scale _)), ha.sum.add (ha.2.1.add (ha.2.2.1.scale _)),
+   ha.sum.add (ha.2.2.1.add (ha.2.2.2.scale _)), ha.sum.add (ha.2.2.2.add (ha.1.scale _))⟩
+
+theorem AuthShamirLane4.value_add {ls keys a b}
+    (ha : AuthShamirLane4.Valid ls keys a) (hb : AuthShamirLane4.Valid ls keys b) :
+    (a.add b).value ls = lane4Add (a.value ls) (b.value ls) := by
+  exact Lane4.ext (AuthShamirWire.value_add ha.1 hb.1)
+    (AuthShamirWire.value_add ha.2.1 hb.2.1)
+    (AuthShamirWire.value_add ha.2.2.1 hb.2.2.1)
+    (AuthShamirWire.value_add ha.2.2.2 hb.2.2.2)
+
+theorem AuthShamirLane4.value_sum {ls keys a} (ha : AuthShamirLane4.Valid ls keys a) :
+    a.sum.value ls = lane4Sum (a.value ls) := by
+  simp only [AuthShamirLane4.sum,
+    AuthShamirWire.value_add (ha.1.add ha.2.1) (ha.2.2.1.add ha.2.2.2),
+    AuthShamirWire.value_add ha.1 ha.2.1, AuthShamirWire.value_add ha.2.2.1 ha.2.2.2]
+  rfl
+
+theorem AuthShamirLane4.value_applyM4 {ls keys a} (ha : AuthShamirLane4.Valid ls keys a) :
+    a.applyM4.value ls = Qsag.applyM4 (a.value ls) := by
+  apply Lane4.ext
+  · change (a.sum.add (a.x0.add (a.x1.scale _))).value ls = _
+    rw [AuthShamirWire.value_add ha.sum (ha.1.add (ha.2.1.scale _)),
+      AuthShamirWire.value_add ha.1 (ha.2.1.scale _),
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+    rfl
+  · change (a.sum.add (a.x1.add (a.x2.scale _))).value ls = _
+    rw [AuthShamirWire.value_add ha.sum (ha.2.1.add (ha.2.2.1.scale _)),
+      AuthShamirWire.value_add ha.2.1 (ha.2.2.1.scale _),
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+    rfl
+  · change (a.sum.add (a.x2.add (a.x3.scale _))).value ls = _
+    rw [AuthShamirWire.value_add ha.sum (ha.2.2.1.add (ha.2.2.2.scale _)),
+      AuthShamirWire.value_add ha.2.2.1 (ha.2.2.2.scale _),
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+    rfl
+  · change (a.sum.add (a.x3.add (a.x0.scale _))).value ls = _
+    rw [AuthShamirWire.value_add ha.sum (ha.2.2.2.add (ha.1.scale _)),
+      AuthShamirWire.value_add ha.2.2.2 (ha.1.scale _),
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+    rfl
+
+def AuthShamirState12.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (s : AuthShamirState12) : Prop :=
+  s.b0.Valid ls keys ∧ s.b1.Valid ls keys ∧ s.b2.Valid ls keys
+
+def AuthShamirState12.value (ls : List Goldilocks) (s : AuthShamirState12) : Poseidon2State12 :=
+  ⟨s.b0.value ls, s.b1.value ls, s.b2.value ls⟩
+
+def AuthShamirState12.shares (s : AuthShamirState12) : List Poseidon2State12 :=
+  zipState12Shares s.b0.shares s.b1.shares s.b2.shares
+
+theorem AuthShamirLane4.shares_length {ls keys s} (hs : AuthShamirLane4.Valid ls keys s) :
+    s.shares.length = ls.length :=
+  zipLane4Shares_length hs.1.1 hs.2.1.1 hs.2.2.1.1 hs.2.2.2.1
+
+theorem AuthShamirState12.shares_length {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.shares.length = ls.length :=
+  zipState12Shares_length (AuthShamirLane4.shares_length hs.1)
+    (AuthShamirLane4.shares_length hs.2.1) (AuthShamirLane4.shares_length hs.2.2)
+
+theorem AuthShamirState12.combine_shares {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    lagrangeCombineState12 ls s.shares = s.value ls := by
+  rw [AuthShamirState12.shares, lagrangeCombineState12_zip ls _ _ _
+    (AuthShamirLane4.shares_length hs.1) (AuthShamirLane4.shares_length hs.2.1)
+    (AuthShamirLane4.shares_length hs.2.2)]
+  apply Poseidon2State12.ext
+  · exact lagrangeCombineLane4_zip ls _ _ _ _ hs.1.1.1 hs.1.2.1.1 hs.1.2.2.1.1 hs.1.2.2.2.1
+  · exact lagrangeCombineLane4_zip ls _ _ _ _ hs.2.1.1.1 hs.2.1.2.1.1 hs.2.1.2.2.1.1 hs.2.1.2.2.2.1
+  · exact lagrangeCombineLane4_zip ls _ _ _ _ hs.2.2.1.1 hs.2.2.2.1.1 hs.2.2.2.2.1.1 hs.2.2.2.2.2.1
+
+def AuthShamirState12.applyME (s : AuthShamirState12) : AuthShamirState12 :=
+  let y0 := s.b0.applyM4
+  let y1 := s.b1.applyM4
+  let y2 := s.b2.applyM4
+  let total := (y0.add y1).add y2
+  ⟨y0.add total, y1.add total, y2.add total⟩
+
+theorem AuthShamirState12.Valid.applyME {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyME.Valid ls keys := by
+  have h0 := hs.1.applyM4
+  have h1 := hs.2.1.applyM4
+  have h2 := hs.2.2.applyM4
+  have ht := (h0.add h1).add h2
+  exact ⟨h0.add ht, h1.add ht, h2.add ht⟩
+
+theorem AuthShamirState12.value_applyME {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyME.value ls = Qsag.applyME (s.value ls) := by
+  have h0 := hs.1.applyM4
+  have h1 := hs.2.1.applyM4
+  have h2 := hs.2.2.applyM4
+  have ht := (h0.add h1).add h2
+  simp only [AuthShamirState12.applyME, AuthShamirState12.value,
+    AuthShamirLane4.value_add h0 ht, AuthShamirLane4.value_add h1 ht,
+    AuthShamirLane4.value_add h2 ht, AuthShamirLane4.value_add (h0.add h1) h2,
+    AuthShamirLane4.value_add h0 h1, AuthShamirLane4.value_applyM4 hs.1,
+    AuthShamirLane4.value_applyM4 hs.2.1, AuthShamirLane4.value_applyM4 hs.2.2, Qsag.applyME]
+
+def AuthShamirState12.sum (s : AuthShamirState12) : AuthShamirWire :=
+  (s.b0.sum.add s.b1.sum).add s.b2.sum
+
+def AuthShamirState12.applyMI (s : AuthShamirState12) : AuthShamirState12 :=
+  let total := s.sum
+  ⟨⟨(s.b0.x0.scale (goldOfInt (-2))).add total, s.b0.x1.add total, (s.b0.x2.scale (goldOfInt (2))).add total, (s.b0.x3.scale (goldOfInt (4))).add total⟩,
+   ⟨(s.b1.x0.scale (goldOfInt (8))).add total, (s.b1.x1.scale (goldOfInt (16))).add total, (s.b1.x2.scale (goldOfInt (32))).add total, (s.b1.x3.scale (goldOfInt (64))).add total⟩,
+   ⟨(s.b2.x0.scale (goldOfInt (128))).add total, (s.b2.x1.scale (goldOfInt (256))).add total, (s.b2.x2.scale (goldOfInt (512))).add total, (s.b2.x3.scale (goldOfInt (1024))).add total⟩⟩
+
+theorem AuthShamirState12.Valid.sum {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.sum.Valid ls keys := (hs.1.sum.add hs.2.1.sum).add hs.2.2.sum
+
+theorem AuthShamirState12.Valid.applyMI {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyMI.Valid ls keys := by
+  have ht := hs.sum
+  refine ⟨⟨?_, ?_, ?_, ?_⟩, ⟨?_, ?_, ?_, ?_⟩, ⟨?_, ?_, ?_, ?_⟩⟩
+  · exact (hs.1.1.scale _).add ht
+  · exact hs.1.2.1.add ht
+  · exact (hs.1.2.2.1.scale _).add ht
+  · exact (hs.1.2.2.2.scale _).add ht
+  · exact (hs.2.1.1.scale _).add ht
+  · exact (hs.2.1.2.1.scale _).add ht
+  · exact (hs.2.1.2.2.1.scale _).add ht
+  · exact (hs.2.1.2.2.2.scale _).add ht
+  · exact (hs.2.2.1.scale _).add ht
+  · exact (hs.2.2.2.1.scale _).add ht
+  · exact (hs.2.2.2.2.1.scale _).add ht
+  · exact (hs.2.2.2.2.2.scale _).add ht
+
+theorem AuthShamirState12.value_sum {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.sum.value ls = state12Sum (s.value ls) := by
+  simp only [AuthShamirState12.sum,
+    AuthShamirWire.value_add (hs.1.sum.add hs.2.1.sum) hs.2.2.sum,
+    AuthShamirWire.value_add hs.1.sum hs.2.1.sum,
+    AuthShamirLane4.value_sum hs.1, AuthShamirLane4.value_sum hs.2.1,
+    AuthShamirLane4.value_sum hs.2.2]
+  rfl
+
+theorem AuthShamirState12.value_applyMI {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.applyMI.value ls = Qsag.applyMI (s.value ls) := by
+  apply Poseidon2State12.ext <;> apply Lane4.ext
+  · change ((s.b0.x0.scale (goldOfInt (-2))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.1.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change (s.b0.x1.add s.sum).value ls = _
+    rw [AuthShamirWire.value_add hs.1.2.1 hs.sum, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b0.x2.scale (goldOfInt (2))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.1.2.2.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b0.x3.scale (goldOfInt (4))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.1.2.2.2.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b1.x0.scale (goldOfInt (8))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.1.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b1.x1.scale (goldOfInt (16))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.1.2.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b1.x2.scale (goldOfInt (32))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.1.2.2.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b1.x3.scale (goldOfInt (64))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.1.2.2.2.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b2.x0.scale (goldOfInt (128))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.2.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b2.x1.scale (goldOfInt (256))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.2.2.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b2.x2.scale (goldOfInt (512))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.2.2.2.1.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+  · change ((s.b2.x3.scale (goldOfInt (1024))).add s.sum).value ls = _
+    rw [AuthShamirWire.value_add (hs.2.2.2.2.2.scale _) hs.sum, AuthShamirWire.value_scale, AuthShamirState12.value_sum hs]
+    rfl
+
+
+def AuthShamirLane4.addPublic (keys : List GoldilocksExt2) (rc : Lane4)
+    (s : AuthShamirLane4) : AuthShamirLane4 :=
+  ⟨s.x0.addPublic keys rc.x0, s.x1.addPublic keys rc.x1,
+   s.x2.addPublic keys rc.x2, s.x3.addPublic keys rc.x3⟩
+
+theorem AuthShamirLane4.Valid.addPublic {ls keys s} (rc : Lane4)
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirLane4.Valid ls keys s) :
+    (s.addPublic keys rc).Valid ls keys :=
+  ⟨hs.1.addPublic _ hOne, hs.2.1.addPublic _ hOne,
+   hs.2.2.1.addPublic _ hOne, hs.2.2.2.addPublic _ hOne⟩
+
+theorem AuthShamirLane4.value_addPublic {ls keys s} (rc : Lane4)
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirLane4.Valid ls keys s) :
+    (s.addPublic keys rc).value ls = lane4Add (s.value ls) rc := by
+  apply Lane4.ext
+  · change (s.x0.addPublic keys rc.x0).value ls = _
+    rw [AuthShamirWire.value_addPublic _ hOne hs.1]
+    exact LawfulCommRing.add_comm _ _
+  · change (s.x1.addPublic keys rc.x1).value ls = _
+    rw [AuthShamirWire.value_addPublic _ hOne hs.2.1]
+    exact LawfulCommRing.add_comm _ _
+  · change (s.x2.addPublic keys rc.x2).value ls = _
+    rw [AuthShamirWire.value_addPublic _ hOne hs.2.2.1]
+    exact LawfulCommRing.add_comm _ _
+  · change (s.x3.addPublic keys rc.x3).value ls = _
+    rw [AuthShamirWire.value_addPublic _ hOne hs.2.2.2]
+    exact LawfulCommRing.add_comm _ _
+
+def AuthShamirState12.addPublic (keys : List GoldilocksExt2) (rc : Poseidon2State12)
+    (s : AuthShamirState12) : AuthShamirState12 :=
+  ⟨s.b0.addPublic keys rc.b0, s.b1.addPublic keys rc.b1, s.b2.addPublic keys rc.b2⟩
+
+theorem AuthShamirState12.Valid.addPublic {ls keys s} (rc : Poseidon2State12)
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s) :
+    (s.addPublic keys rc).Valid ls keys :=
+  ⟨hs.1.addPublic _ hOne, hs.2.1.addPublic _ hOne, hs.2.2.addPublic _ hOne⟩
+
+theorem AuthShamirState12.value_addPublic {ls keys s} (rc : Poseidon2State12)
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s) :
+    (s.addPublic keys rc).value ls = state12Add (s.value ls) rc := by
+  exact Poseidon2State12.ext (AuthShamirLane4.value_addPublic _ hOne hs.1)
+    (AuthShamirLane4.value_addPublic _ hOne hs.2.1)
+    (AuthShamirLane4.value_addPublic _ hOne hs.2.2)
+
+/-- One gate's authenticated preprocessing and active deviations. -/
+structure ActiveShamirPow7Prep where
+  tuple : AuthSharedPow7Tuple
+  zeroMasks : List GoldilocksExt2
+  deltaD : Goldilocks
+  sigmaDevs : List GoldilocksExt2
+
+def ActiveShamirPow7Prep.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (p : ActiveShamirPow7Prep) : Prop :=
+  p.tuple.Valid ls keys ∧ p.zeroMasks.length = keys.length ∧
+  ringListSum p.zeroMasks = CommRingOps.zero
+
+@[expose] def ActiveShamirPow7Prep.Pins (keys : List GoldilocksExt2) (p : ActiveShamirPow7Prep) : Prop :=
+  p.deltaD ≠ Goldilocks.zero ∧ ringListSum keys =
+    CommRingOps.mul (ringListSum p.sigmaDevs) (GoldilocksExt2.inv (GoldilocksExt2.ofBase p.deltaD))
+
+instance (keys : List GoldilocksExt2) (p : ActiveShamirPow7Prep) : Decidable (p.Pins keys) :=
+  by unfold ActiveShamirPow7Prep.Pins; infer_instance
+
+/-- Gate order is 0–47 initial external, 48–69 internal, 70–117 terminal external. -/
+abbrev ActiveShamirPermPrep := Fin 118 → ActiveShamirPow7Prep
+
+private def activeShamirGateIndex (i : Nat) : Fin 118 := ⟨i % 118, Nat.mod_lt _ (by decide)⟩
+
+def execAuthShamirGateAt (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : ActiveShamirPermPrep) (i : Nat) (x : AuthShamirWire) : Option AuthShamirWire :=
+  let p := prep (activeShamirGateIndex i)
+  execAuthShamirPow7 ls keys p.zeroMasks x p.tuple p.deltaD p.sigmaDevs
+
+private theorem execAuthShamirGateAt_exact {ls keys prep i x out}
+    (hOne : ringListSum ls = Goldilocks.one) (hx : AuthShamirWire.Valid ls keys x)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hn : ∀ j, ¬ ActiveShamirPow7Prep.Pins keys (prep j))
+    (h : execAuthShamirGateAt ls keys prep i x = some out) :
+    out.Valid ls keys ∧ out.value ls = sbox7 (x.value ls) := by
+  have ht := hp (activeShamirGateIndex i)
+  obtain ⟨hv, he | he⟩ := execAuthShamirPow7_sound_or_pins_key hOne hx ht.1 ht.2.1 ht.2.2 h
+  · exact ⟨hv, he.2⟩
+  · exact False.elim (hn (activeShamirGateIndex i) he)
+
+def execAuthShamirLane4 (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : ActiveShamirPermPrep) (i : Nat) (s : AuthShamirLane4) : Option AuthShamirLane4 := do
+  let x0 ← execAuthShamirGateAt ls keys prep i s.x0
+  let x1 ← execAuthShamirGateAt ls keys prep (i + 1) s.x1
+  let x2 ← execAuthShamirGateAt ls keys prep (i + 2) s.x2
+  let x3 ← execAuthShamirGateAt ls keys prep (i + 3) s.x3
+  pure ⟨x0, x1, x2, x3⟩
+
+private theorem execAuthShamirLane4_exact {ls keys prep i s out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirLane4.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hn : ∀ j, ¬ ActiveShamirPow7Prep.Pins keys (prep j))
+    (h : execAuthShamirLane4 ls keys prep i s = some out) :
+    out.Valid ls keys ∧ out.value ls = sboxLane4 (s.value ls) := by
+  simp only [execAuthShamirLane4, Option.bind_eq_bind, Option.bind_eq_some_iff,
+    Option.pure_def, Option.some.injEq] at h
+  obtain ⟨x0, h0, x1, h1, x2, h2, x3, h3, rfl⟩ := h
+  obtain ⟨v0, e0⟩ := execAuthShamirGateAt_exact hOne hs.1 hp hn h0
+  obtain ⟨v1, e1⟩ := execAuthShamirGateAt_exact hOne hs.2.1 hp hn h1
+  obtain ⟨v2, e2⟩ := execAuthShamirGateAt_exact hOne hs.2.2.1 hp hn h2
+  obtain ⟨v3, e3⟩ := execAuthShamirGateAt_exact hOne hs.2.2.2 hp hn h3
+  exact ⟨⟨v0, v1, v2, v3⟩, Lane4.ext e0 e1 e2 e3⟩
+
+def execAuthShamirExternalRound (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : ActiveShamirPermPrep) (rc : Poseidon2State12)
+    (i : Nat) (s : AuthShamirState12) : Option AuthShamirState12 := do
+  let a := s.addPublic keys rc
+  let b0 ← execAuthShamirLane4 ls keys prep i a.b0
+  let b1 ← execAuthShamirLane4 ls keys prep (i + 4) a.b1
+  let b2 ← execAuthShamirLane4 ls keys prep (i + 8) a.b2
+  pure (AuthShamirState12.mk b0 b1 b2).applyME
+
+private theorem execAuthShamirExternalRound_exact {ls keys prep rc i s out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hn : ∀ j, ¬ ActiveShamirPow7Prep.Pins keys (prep j))
+    (h : execAuthShamirExternalRound ls keys prep rc i s = some out) :
+    out.Valid ls keys ∧ out.value ls = externalRound rc (s.value ls) := by
+  simp only [execAuthShamirExternalRound, Option.bind_eq_bind, Option.bind_eq_some_iff,
+    Option.pure_def, Option.some.injEq] at h
+  obtain ⟨b0, h0, b1, h1, b2, h2, rfl⟩ := h
+  have ha := hs.addPublic rc hOne
+  obtain ⟨v0, e0⟩ := execAuthShamirLane4_exact hOne ha.1 hp hn h0
+  obtain ⟨v1, e1⟩ := execAuthShamirLane4_exact hOne ha.2.1 hp hn h1
+  obtain ⟨v2, e2⟩ := execAuthShamirLane4_exact hOne ha.2.2 hp hn h2
+  have hv : (AuthShamirState12.mk b0 b1 b2).Valid ls keys := ⟨v0, v1, v2⟩
+  refine ⟨hv.applyME, ?_⟩
+  rw [AuthShamirState12.value_applyME hv]
+  have he : (AuthShamirState12.mk b0 b1 b2).value ls =
+      sboxState12 ((s.addPublic keys rc).value ls) := Poseidon2State12.ext e0 e1 e2
+  rw [he, AuthShamirState12.value_addPublic rc hOne hs]
+  rfl
+
+def execAuthShamirInternalRound (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : ActiveShamirPermPrep) (rc : Goldilocks)
+    (i : Nat) (s : AuthShamirState12) : Option AuthShamirState12 := do
+  let x0 ← execAuthShamirGateAt ls keys prep i (s.b0.x0.addPublic keys rc)
+  pure (AuthShamirState12.mk ⟨x0, s.b0.x1, s.b0.x2, s.b0.x3⟩ s.b1 s.b2).applyMI
+
+private theorem execAuthShamirInternalRound_exact {ls keys prep rc i s out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hn : ∀ j, ¬ ActiveShamirPow7Prep.Pins keys (prep j))
+    (h : execAuthShamirInternalRound ls keys prep rc i s = some out) :
+    out.Valid ls keys ∧ out.value ls = internalRound rc (s.value ls) := by
+  simp only [execAuthShamirInternalRound, Option.bind_eq_bind, Option.bind_eq_some_iff,
+    Option.pure_def, Option.some.injEq] at h
+  obtain ⟨x0, h0, rfl⟩ := h
+  obtain ⟨v0, e0⟩ := execAuthShamirGateAt_exact hOne (hs.1.1.addPublic rc hOne) hp hn h0
+  have hv : (AuthShamirState12.mk ⟨x0, s.b0.x1, s.b0.x2, s.b0.x3⟩ s.b1 s.b2).Valid ls keys :=
+    ⟨⟨v0, hs.1.2⟩, hs.2⟩
+  refine ⟨hv.applyMI, ?_⟩
+  rw [AuthShamirState12.value_applyMI hv]
+  rw [AuthShamirWire.value_addPublic _ hOne hs.1.1] at e0
+  change applyMI ⟨⟨x0.value ls, _, _, _⟩, _, _⟩ = _
+  rw [e0]
+  have hc : Goldilocks.add rc (s.b0.x0.value ls) = Goldilocks.add (s.b0.x0.value ls) rc :=
+    LawfulCommRing.add_comm _ _
+  rw [hc]
+  rfl
+
+/-- Execute a round list, carrying the authenticated state between rounds. -/
+def execAuthShamirRounds {RC : Type}
+    (step : RC → Nat → AuthShamirState12 → Option AuthShamirState12) (stride : Nat) :
+    List RC → Nat → AuthShamirState12 → Option AuthShamirState12
+  | [], _, s => some s
+  | rc :: rcs, i, s => (step rc i s).bind (execAuthShamirRounds step stride rcs (i + stride))
+
+private theorem execAuthShamirRounds_exact {RC : Type} {ls keys}
+    (step : RC → Nat → AuthShamirState12 → Option AuthShamirState12)
+    (plain : RC → Poseidon2State12 → Poseidon2State12) (stride : Nat)
+    (hstep : ∀ rc i s out, AuthShamirState12.Valid ls keys s → step rc i s = some out →
+      out.Valid ls keys ∧ out.value ls = plain rc (s.value ls)) :
+    ∀ rcs i s out, AuthShamirState12.Valid ls keys s →
+      execAuthShamirRounds step stride rcs i s = some out →
+      out.Valid ls keys ∧ out.value ls = runRounds plain rcs (s.value ls)
+  | [], _, _, _, hs, h => by
+    simp only [execAuthShamirRounds, Option.some.injEq] at h
+    subst h
+    exact ⟨hs, rfl⟩
+  | rc :: rcs, i, s, out, hs, h => by
+    simp only [execAuthShamirRounds, Option.bind_eq_some_iff] at h
+    obtain ⟨mid, hm, ho⟩ := h
+    obtain ⟨vm, em⟩ := hstep rc i s mid hs hm
+    obtain ⟨vo, eo⟩ := execAuthShamirRounds_exact step plain stride hstep rcs (i + stride) mid out vm ho
+    exact ⟨vo, by rw [eo, em]; rfl⟩
+
+/-- The full 30-round permutation: 48 + 22 + 48 share-grounded active pow7 gates.
+Every gate computes its MAC residual from the propagated MAC shares. -/
+def execActiveSharedPoseidon2Perm (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : ActiveShamirPermPrep) (s : AuthShamirState12) : Option AuthShamirState12 := do
+  let a ← execAuthShamirRounds (execAuthShamirExternalRound ls keys prep) 12
+    poseidon2InitialExtConsts 0 s.applyME
+  let b ← execAuthShamirRounds (execAuthShamirInternalRound ls keys prep) 1
+    poseidon2InternalConsts 48 a
+  execAuthShamirRounds (execAuthShamirExternalRound ls keys prep) 12
+    poseidon2TerminalExtConsts 70 b
+
+/-- Accepted full permutations are correct with authenticated output, or one of the 118
+active openings pins the global key. Only the initial state and preprocessing are assumed valid. -/
+theorem execActiveSharedPoseidon2Perm_sound_or_pins_key {ls keys prep s out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (h : execActiveSharedPoseidon2Perm ls keys prep s = some out) :
+    (out.Valid ls keys ∧ lagrangeCombineState12 ls out.shares =
+      poseidon2Perm12 (lagrangeCombineState12 ls s.shares)) ∨
+    (∃ j : Fin 118, (prep j).Pins keys) := by
+  by_cases hn : ∃ j : Fin 118, (prep j).Pins keys
+  · exact .inr hn
+  · have hnone : ∀ j, ¬ (prep j).Pins keys := fun j hj => hn ⟨j, hj⟩
+    simp only [execActiveSharedPoseidon2Perm, Option.bind_eq_bind, Option.bind_eq_some_iff] at h
+    obtain ⟨a, ha, b, hb, ho⟩ := h
+    have he := fun rc i s out hs h => execAuthShamirExternalRound_exact
+      (rc := rc) (i := i) (s := s) (out := out) hOne hs hp hnone h
+    have hi := fun rc i s out hs h => execAuthShamirInternalRound_exact
+      (rc := rc) (i := i) (s := s) (out := out) hOne hs hp hnone h
+    obtain ⟨va, ea⟩ := execAuthShamirRounds_exact _ externalRound 12 he _ _ _ _ hs.applyME ha
+    obtain ⟨vb, eb⟩ := execAuthShamirRounds_exact _ internalRound 1 hi _ _ _ _ va hb
+    obtain ⟨vo, eo⟩ := execAuthShamirRounds_exact _ externalRound 12 he _ _ _ _ vb ho
+    left
+    refine ⟨vo, ?_⟩
+    rw [AuthShamirState12.combine_shares vo, AuthShamirState12.combine_shares hs,
+      eo, eb, ea, AuthShamirState12.value_applyME hs]
+    rfl
+
+
+private theorem zipLane4Shares_projections :
+    ∀ (a b c d : List Goldilocks), a.length = b.length → a.length = c.length → a.length = d.length →
+      (zipLane4Shares a b c d).map (·.x0) = a ∧
+      (zipLane4Shares a b c d).map (·.x1) = b ∧
+      (zipLane4Shares a b c d).map (·.x2) = c ∧
+      (zipLane4Shares a b c d).map (·.x3) = d
+  | [], [], [], [], _, _, _ => by simp [zipLane4Shares]
+  | _ :: a, _ :: b, _ :: c, _ :: d, hb, hc, hd => by
+    obtain ⟨h0, h1, h2, h3⟩ := zipLane4Shares_projections a b c d
+      (Nat.succ.inj hb) (Nat.succ.inj hc) (Nat.succ.inj hd)
+    simp only [zipLane4Shares, List.map_cons, h0, h1, h2, h3, and_self]
+
+private theorem zipState12Shares_projections :
+    ∀ (a b c : List Lane4), a.length = b.length → a.length = c.length →
+      (zipState12Shares a b c).map (·.b0) = a ∧
+      (zipState12Shares a b c).map (·.b1) = b ∧
+      (zipState12Shares a b c).map (·.b2) = c
+  | [], [], [], _, _ => by simp [zipState12Shares]
+  | _ :: a, _ :: b, _ :: c, hb, hc => by
+    obtain ⟨h0, h1, h2⟩ := zipState12Shares_projections a b c (Nat.succ.inj hb) (Nat.succ.inj hc)
+    simp only [zipState12Shares, List.map_cons, h0, h1, h2, and_self]
+
+private theorem ringListZipAdd_maps {A : Type} (f g : A → Goldilocks) :
+    ∀ (xs : List A), ringListZipAdd (xs.map f) (xs.map g) = xs.map (fun x => Goldilocks.add (f x) (g x))
+  | [] => rfl
+  | _ :: xs => by simp only [List.map_cons, ringListZipAdd, ringListZipAdd_maps f g xs]; rfl
+
+private theorem zipLane4Shares_maps {A : Type} (f0 f1 f2 f3 : A → Goldilocks) :
+    ∀ (xs : List A), zipLane4Shares (xs.map f0) (xs.map f1) (xs.map f2) (xs.map f3) =
+      xs.map (fun x => ⟨f0 x, f1 x, f2 x, f3 x⟩)
+  | [] => rfl
+  | _ :: xs => by simp only [List.map_cons, zipLane4Shares, zipLane4Shares_maps f0 f1 f2 f3 xs]
+
+private theorem zipState12Shares_maps {A : Type} (f0 f1 f2 : A → Lane4) :
+    ∀ (xs : List A), zipState12Shares (xs.map f0) (xs.map f1) (xs.map f2) =
+      xs.map (fun x => ⟨f0 x, f1 x, f2 x⟩)
+  | [] => rfl
+  | _ :: xs => by simp only [List.map_cons, zipState12Shares, zipState12Shares_maps f0 f1 f2 xs]
+
+private theorem AuthShamirLane4.projections {ls keys s} (hs : AuthShamirLane4.Valid ls keys s) :
+    s.shares.map (·.x0) = s.x0.shares ∧ s.shares.map (·.x1) = s.x1.shares ∧
+    s.shares.map (·.x2) = s.x2.shares ∧ s.shares.map (·.x3) = s.x3.shares :=
+  zipLane4Shares_projections _ _ _ _ (hs.1.1.trans hs.2.1.1.symm)
+    (hs.1.1.trans hs.2.2.1.1.symm) (hs.1.1.trans hs.2.2.2.1.symm)
+
+private theorem AuthShamirState12.projections {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
+    s.shares.map (·.b0) = s.b0.shares ∧ s.shares.map (·.b1) = s.b1.shares ∧
+    s.shares.map (·.b2) = s.b2.shares :=
+  zipState12Shares_projections _ _ _
+    ((AuthShamirLane4.shares_length hs.1).trans (AuthShamirLane4.shares_length hs.2.1).symm)
+    ((AuthShamirLane4.shares_length hs.1).trans (AuthShamirLane4.shares_length hs.2.2).symm)
+
+theorem AuthShamirState12.shares_applyME {ls keys s}
+    (hs : AuthShamirState12.Valid ls keys s) :
+    (s.applyME).shares = s.shares.map Qsag.applyME := by
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
+  obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections hs.2.1
+  obtain ⟨h20, h21, h22, h23⟩ := AuthShamirLane4.projections hs.2.2
+  simp only [AuthShamirState12.applyME, AuthShamirState12.shares,
+    AuthShamirLane4.shares, AuthShamirLane4.applyM4,
+    AuthShamirLane4.sum, AuthShamirLane4.add, AuthShamirWire.add, AuthShamirWire.scale]
+  rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
+  simp only [shareScale, List.map_map, ringListZipAdd_maps,
+    zipLane4Shares_maps, zipState12Shares_maps]
+  rfl
+theorem AuthShamirState12.shares_applyMI {ls keys s}
+    (hs : AuthShamirState12.Valid ls keys s) :
+    (s.applyMI).shares = s.shares.map Qsag.applyMI := by
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
+  obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections hs.2.1
+  obtain ⟨h20, h21, h22, h23⟩ := AuthShamirLane4.projections hs.2.2
+  simp only [AuthShamirState12.applyMI, AuthShamirState12.shares, AuthShamirState12.sum,
+    AuthShamirLane4.shares, AuthShamirLane4.sum, AuthShamirWire.add, AuthShamirWire.scale]
+  rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
+  simp only [shareScale, List.map_map, ringListZipAdd_maps,
+    zipLane4Shares_maps, zipState12Shares_maps]
+  rfl
+theorem AuthShamirState12.shares_addPublic {ls keys s} (rc : Poseidon2State12)
+    (hs : AuthShamirState12.Valid ls keys s) :
+    (s.addPublic keys rc).shares = s.shares.map (fun x => state12Add x rc) := by
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
+  obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections hs.2.1
+  obtain ⟨h20, h21, h22, h23⟩ := AuthShamirLane4.projections hs.2.2
+  simp only [AuthShamirState12.addPublic, AuthShamirState12.shares,
+    AuthShamirLane4.shares, AuthShamirLane4.addPublic, AuthShamirWire.addPublic]
+  rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
+  simp only [shareAddConst, List.map_map, zipLane4Shares_maps, zipState12Shares_maps]
+  apply List.map_congr_left
+  intro x _
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;>
+    exact LawfulCommRing.add_comm _ _
+
+
+/-- Normalize the passive MAC transcript to the empty zero-sum list. The tuple is unchanged.
+This API stores a ready-made transcript rather than authenticated wires. -/
+def activeShamirPassivePrep (prep : ActiveShamirPermPrep) (i : Nat) :
+    SharedPow7Tuple × List GoldilocksExt2 := ((prep (activeShamirGateIndex i)).tuple.toTuple, [])
+
+/-- The corresponding frozen call-prep bundle, retaining all preprocessed Shamir powers. -/
+def activeShamirPassiveCallPrep (prep : ActiveShamirPermPrep) : Poseidon2CallPrep :=
+  ⟨(fun r k => activeShamirPassivePrep prep (12 * r + k)),
+   (fun r => activeShamirPassivePrep prep (48 + r)),
+   (fun r k => activeShamirPassivePrep prep (70 + 12 * r + k))⟩
+
+theorem activeShamirPassiveCallPrep_valid {ls keys prep}
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j)) :
+    (activeShamirPassiveCallPrep prep).validAt ls := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro r k
+    exact ⟨(hp _).1.1, rfl⟩
+  · intro r
+    exact ⟨(hp _).1.1, rfl⟩
+  · intro r k
+    exact ⟨(hp _).1.1, rfl⟩
+
+private theorem activeShamirNoPins {keys : List GoldilocksExt2} {prep : ActiveShamirPermPrep}
+    (hz : ∀ j : Fin 118, (prep j : ActiveShamirPow7Prep).deltaD = Goldilocks.zero) :
+    ∀ j, ¬ ActiveShamirPow7Prep.Pins keys (prep j) :=
+  fun j h => h.1 (hz j)
+
+private theorem execAuthShamirGateAt_refines {ls keys prep i x out}
+    (hz : ∀ j : Fin 118, (prep j : ActiveShamirPow7Prep).deltaD = Goldilocks.zero)
+    (h : execAuthShamirGateAt ls keys prep i x = some out) :
+    evalSharedPow7Binomial (lagrangeCombine ls (shareZipSub x.shares
+      (activeShamirPassivePrep prep i).1.rSh)) (activeShamirPassivePrep prep i).1
+      (activeShamirPassivePrep prep i).2 = some out.shares := by
+  let p := prep (activeShamirGateIndex i)
+  change execAuthShamirPow7 ls keys p.zeroMasks x p.tuple p.deltaD p.sigmaDevs = some out at h
+  unfold execAuthShamirPow7 at h
+  cases he : execActiveSharedPow7Round ls x.shares p.tuple.toTuple x.macs p.tuple.r.macs
+      keys p.zeroMasks p.deltaD p.sigmaDevs with
+  | none => simp only [he, Option.map_none] at h; cases h
+  | some ys =>
+    simp only [he, Option.map_some, Option.some.injEq] at h
+    subst out
+    have hy := execActiveSharedPow7Round_output he
+    have hz' : p.deltaD = Goldilocks.zero := hz _
+    rw [hz'] at hy
+    have hadd : ∀ a : Goldilocks, Goldilocks.add a Goldilocks.zero = a := LawfulCommRing.add_zero
+    rw [hadd] at hy
+    change evalSharedPow7Binomial _ p.tuple.toTuple [] = some ys
+    rw [hy]
+    rfl
+
+private theorem execAuthShamirLane4_refines {ls keys prep i s out}
+    (hz : ∀ j : Fin 118, (prep j : ActiveShamirPow7Prep).deltaD = Goldilocks.zero)
+    (h : execAuthShamirLane4 ls keys prep i s = some out) :
+    evalSharedLane4Sbox
+      (mkOnlineAuthGate ls s.x0.shares (activeShamirPassivePrep prep i))
+      (mkOnlineAuthGate ls s.x1.shares (activeShamirPassivePrep prep (i + 1)))
+      (mkOnlineAuthGate ls s.x2.shares (activeShamirPassivePrep prep (i + 2)))
+      (mkOnlineAuthGate ls s.x3.shares (activeShamirPassivePrep prep (i + 3))) = some out.shares := by
+  simp only [execAuthShamirLane4, Option.bind_eq_bind, Option.bind_eq_some_iff,
+    Option.pure_def, Option.some.injEq] at h
+  obtain ⟨x0, h0, x1, h1, x2, h2, x3, h3, rfl⟩ := h
+  have e0 := execAuthShamirGateAt_refines hz h0
+  have e1 := execAuthShamirGateAt_refines hz h1
+  have e2 := execAuthShamirGateAt_refines hz h2
+  have e3 := execAuthShamirGateAt_refines hz h3
+  simp only [evalSharedLane4Sbox, mkOnlineAuthGate, e0, e1, e2, e3, AuthShamirLane4.shares]
+
+private theorem execAuthShamirExternalRound_refines {ls keys prep rc i s out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (h : execAuthShamirExternalRound ls keys prep rc i s = some out) :
+    evalSharedPoseidon2ExternalRound rc s.shares
+      (mkOnlineExtRoundGates ls rc s.shares (fun k => activeShamirPassivePrep prep (i + k))) =
+      some out.shares := by
+  simp only [execAuthShamirExternalRound, Option.bind_eq_bind, Option.bind_eq_some_iff,
+    Option.pure_def, Option.some.injEq] at h
+  obtain ⟨b0, h0, b1, h1, b2, h2, rfl⟩ := h
+  have ha := hs.addPublic rc hOne
+  have hn := activeShamirNoPins (keys := keys) hz
+  obtain ⟨v0, _⟩ := execAuthShamirLane4_exact hOne ha.1 hp hn h0
+  obtain ⟨v1, _⟩ := execAuthShamirLane4_exact hOne ha.2.1 hp hn h1
+  obtain ⟨v2, _⟩ := execAuthShamirLane4_exact hOne ha.2.2 hp hn h2
+  have hv : (AuthShamirState12.mk b0 b1 b2).Valid ls keys := ⟨v0, v1, v2⟩
+  have e0 := execAuthShamirLane4_refines hz h0
+  have e1 := execAuthShamirLane4_refines hz h1
+  have e2 := execAuthShamirLane4_refines hz h2
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections ha
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections ha.1
+  obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections ha.2.1
+  obtain ⟨h20, h21, h22, h23⟩ := AuthShamirLane4.projections ha.2.2
+  have hadd := AuthShamirState12.shares_addPublic rc hs
+  rw [AuthShamirState12.shares_applyME hv]
+  unfold mkOnlineExtRoundGates
+  rw [← hadd]
+  rw [← hb0, List.map_map] at h00 h01 h02 h03
+  rw [← hb1, List.map_map] at h10 h11 h12 h13
+  rw [← hb2, List.map_map] at h20 h21 h22 h23
+  simp only [Function.comp_def] at h00 h01 h02 h03 h10 h11 h12 h13 h20 h21 h22 h23
+  simp only [Nat.add_assoc, Nat.reduceAdd] at e1 e2
+  simp only [evalSharedPoseidon2ExternalRound, h00, h01, h02, h03, h10, h11, h12, h13,
+    h20, h21, h22, h23, Nat.add_zero]
+  rw [e0, e1, e2]
+  simp only [AuthShamirState12.shares_length hs, AuthShamirLane4.shares_length v0,
+    beq_self_eq_true, ↓reduceIte]
+  rfl
+
+
+private theorem execAuthShamirInternalRound_refines {ls keys prep rc i s out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (h : execAuthShamirInternalRound ls keys prep rc i s = some out) :
+    evalSharedPoseidon2InternalRound rc s.shares
+      (mkOnlineAuthGate ls (s.shares.map (fun x => Goldilocks.add x.b0.x0 rc))
+        (activeShamirPassivePrep prep i)) = some out.shares := by
+  simp only [execAuthShamirInternalRound, Option.bind_eq_bind, Option.bind_eq_some_iff,
+    Option.pure_def, Option.some.injEq] at h
+  obtain ⟨x0, h0, rfl⟩ := h
+  obtain ⟨v0, _⟩ := execAuthShamirGateAt_exact hOne (hs.1.1.addPublic rc hOne) hp
+    (activeShamirNoPins hz) h0
+  have hv : (AuthShamirState12.mk ⟨x0, s.b0.x1, s.b0.x2, s.b0.x3⟩ s.b1 s.b2).Valid ls keys :=
+    ⟨⟨v0, hs.1.2⟩, hs.2⟩
+  have e0 := execAuthShamirGateAt_refines hz h0
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
+  rw [← hb0, List.map_map] at h00 h01 h02 h03
+  have hadd : (s.b0.x0.addPublic keys rc).shares =
+      s.shares.map (fun x => Goldilocks.add x.b0.x0 rc) := by
+    change shareAddConst rc s.b0.x0.shares = _
+    rw [← h00]
+    simp only [shareAddConst, List.map_map]
+    apply List.map_congr_left
+    intro x _
+    exact LawfulCommRing.add_comm _ _
+  rw [hadd] at e0
+  rw [AuthShamirState12.shares_applyMI hv]
+  simp only [Function.comp_def] at h01 h02 h03
+  simp only [evalSharedPoseidon2InternalRound, mkOnlineAuthGate]
+  rw [e0]
+  simp only [AuthShamirState12.shares_length hs, v0.1, beq_self_eq_true, ↓reduceIte,
+    h01, h02, h03, hb1, hb2]
+  rfl
+
+private theorem execAuthShamirExtRounds_refines {ls keys prep}
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero) (offset : Nat) :
+    ∀ rcs idx s out, AuthShamirState12.Valid ls keys s →
+      execAuthShamirRounds (execAuthShamirExternalRound ls keys prep) 12 rcs (offset + 12 * idx) s = some out →
+      runOnlineExtRounds ls rcs s.shares
+        (fun r k => activeShamirPassivePrep prep (offset + 12 * r + k)) idx = some out.shares
+  | [], _, _, _, _, h => by
+    simp only [execAuthShamirRounds, Option.some.injEq] at h
+    subst h
+    rfl
+  | rc :: rcs, idx, s, out, hs, h => by
+    simp only [execAuthShamirRounds, Option.bind_eq_some_iff] at h
+    obtain ⟨mid, hm, ho⟩ := h
+    have he := execAuthShamirExternalRound_refines hOne hs hp hz hm
+    have vm := (execAuthShamirExternalRound_exact hOne hs hp (activeShamirNoPins hz) hm).1
+    have hidx : offset + 12 * idx + 12 = offset + 12 * (idx + 1) := by omega
+    rw [hidx] at ho
+    have ih := execAuthShamirExtRounds_refines hOne hp hz offset rcs (idx + 1) mid out vm ho
+    simp only [runOnlineExtRounds, he]
+    exact ih
+
+private theorem execAuthShamirIntRounds_refines {ls keys prep}
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero) :
+    ∀ rcs idx s out, AuthShamirState12.Valid ls keys s →
+      execAuthShamirRounds (execAuthShamirInternalRound ls keys prep) 1 rcs (48 + idx) s = some out →
+      runOnlineIntRounds ls rcs s.shares (fun r => activeShamirPassivePrep prep (48 + r)) idx = some out.shares
+  | [], _, _, _, _, h => by
+    simp only [execAuthShamirRounds, Option.some.injEq] at h
+    subst h
+    rfl
+  | rc :: rcs, idx, s, out, hs, h => by
+    simp only [execAuthShamirRounds, Option.bind_eq_some_iff] at h
+    obtain ⟨mid, hm, ho⟩ := h
+    have he := execAuthShamirInternalRound_refines hOne hs hp hz hm
+    have vm := (execAuthShamirInternalRound_exact hOne hs hp (activeShamirNoPins hz) hm).1
+    have hidx : 48 + idx + 1 = 48 + (idx + 1) := by omega
+    rw [hidx] at ho
+    have ih := execAuthShamirIntRounds_refines hOne hp hz rcs (idx + 1) mid out vm ho
+    simp only [runOnlineIntRounds, he]
+    exact ih
+
+/-- An accepted zero-opening-deviation run has exactly the frozen passive API's party shares.
+This is stronger than requiring all deviations zero: arbitrary accepted sigma deviations are allowed.
+The corresponding passive prep retains every tuple and normalizes each zero-sum transcript to `[]`. -/
+theorem execActiveSharedPoseidon2Perm_refines_online {ls keys prep s out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (h : execActiveSharedPoseidon2Perm ls keys prep s = some out) :
+    runSharedPoseidon2PermOnline ls s.shares
+      (fun r k => activeShamirPassivePrep prep (12 * r + k))
+      (fun r => activeShamirPassivePrep prep (48 + r))
+      (fun r k => activeShamirPassivePrep prep (70 + 12 * r + k)) = some out.shares := by
+  simp only [execActiveSharedPoseidon2Perm, Option.bind_eq_bind, Option.bind_eq_some_iff] at h
+  obtain ⟨a, ha, b, hb, ho⟩ := h
+  have he := fun rc i s out hs h => execAuthShamirExternalRound_exact
+    (rc := rc) (i := i) (s := s) (out := out) hOne hs hp (activeShamirNoPins hz) h
+  have hi := fun rc i s out hs h => execAuthShamirInternalRound_exact
+    (rc := rc) (i := i) (s := s) (out := out) hOne hs hp (activeShamirNoPins hz) h
+  have va := (execAuthShamirRounds_exact _ externalRound 12 he _ _ _ _ hs.applyME ha).1
+  have vb := (execAuthShamirRounds_exact _ internalRound 1 hi _ _ _ _ va hb).1
+  have ea := execAuthShamirExtRounds_refines hOne hp hz 0 _ 0 _ _ hs.applyME ha
+  have eb := execAuthShamirIntRounds_refines hOne hp hz _ 0 _ _ va hb
+  have eo := execAuthShamirExtRounds_refines hOne hp hz 70 _ 0 _ _ vb ho
+  rw [AuthShamirState12.shares_applyME hs] at ea
+  simp only [Nat.zero_add] at ea
+  simp only [runSharedPoseidon2PermOnline, ea, eb, eo]
+
+
+private theorem execAuthShamirGateAt_complete {ls keys prep i x}
+    (hOne : ringListSum ls = Goldilocks.one) (hx : AuthShamirWire.Valid ls keys x)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (hd : ∀ j : Fin 118, ringListSum (prep j).sigmaDevs = CommRingOps.zero) :
+    ∃ out, execAuthShamirGateAt ls keys prep i x = some out ∧ out.Valid ls keys := by
+  let p := prep (activeShamirGateIndex i)
+  have ht : p.Valid ls keys := hp _
+  let d := lagrangeCombine ls (shareZipSub x.shares p.tuple.r.shares)
+  have hdl : (shareZipSub x.macs p.tuple.r.macs).length = keys.length :=
+    (shareZipSub_length_of_eq (hx.2.1.trans ht.1.2.1.2.1.symm)).trans hx.2.1
+  have hds : ringListSum (shareZipSub x.macs p.tuple.r.macs) =
+      CommRingOps.mul (ringListSum keys) (GoldilocksExt2.ofBase d) := by
+    rw [ringListSum_zipSub (hx.2.1.trans ht.1.2.1.2.1.symm), hx.2.2, ht.1.2.1.2.2,
+      ← LawfulCommRing.mul_sub, ← GoldilocksExt2.ofBase_sub]
+    congr 2
+    exact (ringDot_zipSub (hx.1.trans ht.1.2.1.1.symm)).symm
+  have hc : verifySpdzZeroSumMac (ringListZipAdd
+      (spdzComputeSigmas (GoldilocksExt2.ofBase d) (shareZipSub x.macs p.tuple.r.macs) keys p.zeroMasks)
+      p.sigmaDevs) = true := by
+    unfold verifySpdzZeroSumMac
+    rw [decide_eq_true_iff, ringListSum_zipAdd, ringListSum_spdzComputeSigmas _ hdl ht.2.1,
+      hds, ht.2.2, hd (activeShamirGateIndex i), LawfulCommRing.sub_self,
+      LawfulCommRing.add_zero, LawfulCommRing.add_zero]
+  have hz' : p.deltaD = Goldilocks.zero := hz _
+  have hadd : ∀ a : Goldilocks, Goldilocks.add a Goldilocks.zero = a := LawfulCommRing.add_zero
+  refine ⟨authPow7Output keys d p.tuple, ?_, authPow7Output_valid d hOne ht.1⟩
+  change execAuthShamirPow7 ls keys p.zeroMasks x p.tuple p.deltaD p.sigmaDevs = _
+  simp only [execAuthShamirPow7, execActiveSharedPow7Round, evalSharedPow7Binomial,
+    hz', hadd]
+  change (if verifySpdzZeroSumMac (ringListZipAdd
+    (spdzComputeSigmas (GoldilocksExt2.ofBase d) (shareZipSub x.macs p.tuple.r.macs) keys p.zeroMasks)
+    p.sigmaDevs) then some (mpcPow7Shares d p.tuple.toTuple) else none).map
+      (fun ys => ⟨ys, (authPow7Output keys d p.tuple).macs⟩) = some (authPow7Output keys d p.tuple)
+  rw [hc]
+  simp only [↓reduceIte, Option.map_some]
+  rw [← authPow7Output_shares keys d p.tuple]
+
+private theorem execAuthShamirLane4_complete {ls keys prep i s}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirLane4.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (hd : ∀ j : Fin 118, ringListSum (prep j).sigmaDevs = CommRingOps.zero) :
+    ∃ out, execAuthShamirLane4 ls keys prep i s = some out ∧ out.Valid ls keys := by
+  obtain ⟨x0, h0, v0⟩ := execAuthShamirGateAt_complete (i := i) hOne hs.1 hp hz hd
+  obtain ⟨x1, h1, v1⟩ := execAuthShamirGateAt_complete (i := i + 1) hOne hs.2.1 hp hz hd
+  obtain ⟨x2, h2, v2⟩ := execAuthShamirGateAt_complete (i := i + 2) hOne hs.2.2.1 hp hz hd
+  obtain ⟨x3, h3, v3⟩ := execAuthShamirGateAt_complete (i := i + 3) hOne hs.2.2.2 hp hz hd
+  refine ⟨⟨x0, x1, x2, x3⟩, ?_, ⟨v0, v1, v2, v3⟩⟩
+  simp only [execAuthShamirLane4, h0, h1, h2, h3, Option.bind_eq_bind, Option.bind_some, Option.pure_def]
+
+private theorem execAuthShamirExternalRound_complete {ls keys prep rc i s}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (hd : ∀ j : Fin 118, ringListSum (prep j).sigmaDevs = CommRingOps.zero) :
+    ∃ out, execAuthShamirExternalRound ls keys prep rc i s = some out ∧ out.Valid ls keys := by
+  have ha := hs.addPublic rc hOne
+  obtain ⟨b0, h0, v0⟩ := execAuthShamirLane4_complete (i := i) hOne ha.1 hp hz hd
+  obtain ⟨b1, h1, v1⟩ := execAuthShamirLane4_complete (i := i + 4) hOne ha.2.1 hp hz hd
+  obtain ⟨b2, h2, v2⟩ := execAuthShamirLane4_complete (i := i + 8) hOne ha.2.2 hp hz hd
+  have hv : (AuthShamirState12.mk b0 b1 b2).Valid ls keys := ⟨v0, v1, v2⟩
+  refine ⟨_, ?_, hv.applyME⟩
+  simp only [execAuthShamirExternalRound, h0, h1, h2, Option.bind_eq_bind, Option.bind_some, Option.pure_def]
+
+private theorem execAuthShamirInternalRound_complete {ls keys prep rc i s}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (hd : ∀ j : Fin 118, ringListSum (prep j).sigmaDevs = CommRingOps.zero) :
+    ∃ out, execAuthShamirInternalRound ls keys prep rc i s = some out ∧ out.Valid ls keys := by
+  obtain ⟨x0, h0, v0⟩ := execAuthShamirGateAt_complete (i := i) hOne
+    (hs.1.1.addPublic rc hOne) hp hz hd
+  have hv : (AuthShamirState12.mk ⟨x0, s.b0.x1, s.b0.x2, s.b0.x3⟩ s.b1 s.b2).Valid ls keys :=
+    ⟨⟨v0, hs.1.2⟩, hs.2⟩
+  refine ⟨_, ?_, hv.applyMI⟩
+  simp only [execAuthShamirInternalRound, h0, Option.bind_eq_bind, Option.bind_some, Option.pure_def]
+
+private theorem execAuthShamirRounds_complete {RC : Type} {ls keys}
+    (step : RC → Nat → AuthShamirState12 → Option AuthShamirState12) (stride : Nat)
+    (hc : ∀ rc i s, AuthShamirState12.Valid ls keys s →
+      ∃ out, step rc i s = some out ∧ out.Valid ls keys) :
+    ∀ rcs i s, AuthShamirState12.Valid ls keys s →
+      ∃ out, execAuthShamirRounds step stride rcs i s = some out ∧ out.Valid ls keys
+  | [], _, s, hs => ⟨s, rfl, hs⟩
+  | rc :: rcs, i, s, hs => by
+    obtain ⟨mid, hm, vm⟩ := hc rc i s hs
+    obtain ⟨out, ho, vo⟩ := execAuthShamirRounds_complete step stride hc rcs (i + stride) mid vm
+    exact ⟨out, by simp only [execAuthShamirRounds, hm, Option.bind_some, ho], vo⟩
+
+/-- Honest openings and zero-sum broadcast deviations never abort on valid authenticated input. -/
+theorem execActiveSharedPoseidon2Perm_complete {ls keys prep s}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (hd : ∀ j : Fin 118, ringListSum (prep j).sigmaDevs = CommRingOps.zero) :
+    ∃ out, execActiveSharedPoseidon2Perm ls keys prep s = some out ∧ out.Valid ls keys := by
+  have he := fun rc i s hs => execAuthShamirExternalRound_complete
+    (rc := rc) (i := i) (s := s) hOne hs hp hz hd
+  have hi := fun rc i s hs => execAuthShamirInternalRound_complete
+    (rc := rc) (i := i) (s := s) hOne hs hp hz hd
+  obtain ⟨a, ha, va⟩ := execAuthShamirRounds_complete _ 12 he poseidon2InitialExtConsts 0 _ hs.applyME
+  obtain ⟨b, hb, vb⟩ := execAuthShamirRounds_complete _ 1 hi poseidon2InternalConsts 48 a va
+  obtain ⟨out, ho, vo⟩ := execAuthShamirRounds_complete _ 12 he poseidon2TerminalExtConsts 70 b vb
+  exact ⟨out, by simp only [execActiveSharedPoseidon2Perm, ha, hb, ho,
+    Option.bind_eq_bind, Option.bind_some], vo⟩
+
+/-- Equality of the active and frozen passive share outputs, without an acceptance premise. -/
+theorem execActiveSharedPoseidon2Perm_honest_eq_online {ls keys prep s}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (hd : ∀ j : Fin 118, ringListSum (prep j).sigmaDevs = CommRingOps.zero) :
+    (execActiveSharedPoseidon2Perm ls keys prep s).map AuthShamirState12.shares =
+      runSharedPoseidon2PermOnline ls s.shares
+        (fun r k => activeShamirPassivePrep prep (12 * r + k))
+        (fun r => activeShamirPassivePrep prep (48 + r))
+        (fun r k => activeShamirPassivePrep prep (70 + 12 * r + k)) := by
+  obtain ⟨out, he, _⟩ := execActiveSharedPoseidon2Perm_complete hOne hs hp hz hd
+  rw [he, execActiveSharedPoseidon2Perm_refines_online hOne hs hp hz he]
+  rfl
+
+
+/-- Absorb eight authenticated message limbs, preserving the four capacity lanes. -/
+def authShamirAbsorbRate8 (s : AuthShamirState12) (m0 m1 : AuthShamirLane4) : AuthShamirState12 :=
+  ⟨s.b0.add m0, s.b1.add m1, s.b2⟩
+
+theorem authShamirAbsorbRate8_valid {ls keys s m0 m1}
+    (hs : AuthShamirState12.Valid ls keys s)
+    (h0 : AuthShamirLane4.Valid ls keys m0) (h1 : AuthShamirLane4.Valid ls keys m1) :
+    (authShamirAbsorbRate8 s m0 m1).Valid ls keys :=
+  ⟨hs.1.add h0, hs.2.1.add h1, hs.2.2⟩
+
+def execActiveShamirAbsorbRate8Block (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : ActiveShamirPermPrep) (s : AuthShamirState12) (m0 m1 : AuthShamirLane4) :
+    Option AuthShamirState12 :=
+  execActiveSharedPoseidon2Perm ls keys prep (authShamirAbsorbRate8 s m0 m1)
+
+/-- Single-block active sponge composition, with authenticated message limbs. -/
+theorem execActiveShamirAbsorbRate8Block_sound_or_pins_key {ls keys prep s m0 m1 out}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (h0 : AuthShamirLane4.Valid ls keys m0) (h1 : AuthShamirLane4.Valid ls keys m1)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (h : execActiveShamirAbsorbRate8Block ls keys prep s m0 m1 = some out) :
+    (out.Valid ls keys ∧ lagrangeCombineState12 ls out.shares =
+      poseidon2Perm12 ⟨lane4Add (s.value ls).b0 (m0.value ls),
+        lane4Add (s.value ls).b1 (m1.value ls), (s.value ls).b2⟩) ∨
+    (∃ j : Fin 118, (prep j).Pins keys) := by
+  have ha := authShamirAbsorbRate8_valid hs h0 h1
+  obtain hok | hpin := execActiveSharedPoseidon2Perm_sound_or_pins_key hOne ha hp h
+  · left
+    refine ⟨hok.1, ?_⟩
+    rw [hok.2, AuthShamirState12.combine_shares ha]
+    have he : (authShamirAbsorbRate8 s m0 m1).value ls =
+        ⟨lane4Add (s.value ls).b0 (m0.value ls),
+          lane4Add (s.value ls).b1 (m1.value ls), (s.value ls).b2⟩ :=
+      Poseidon2State12.ext (AuthShamirLane4.value_add hs.1 h0)
+        (AuthShamirLane4.value_add hs.2.1 h1) rfl
+    rw [he]
+  · exact .inr hpin
+
+/-- The active authenticated absorb block refines the existing passive block at the share level. -/
+theorem execActiveShamirAbsorbRate8Block_honest_eq {ls keys prep s m0 m1}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (h0 : AuthShamirLane4.Valid ls keys m0) (h1 : AuthShamirLane4.Valid ls keys m1)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hz : ∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero)
+    (hd : ∀ j : Fin 118, ringListSum (prep j).sigmaDevs = CommRingOps.zero) :
+    (execActiveShamirAbsorbRate8Block ls keys prep s m0 m1).map AuthShamirState12.shares =
+      shamirAbsorbRate8Block ls s.shares m0.x0.shares m0.x1.shares m0.x2.shares m0.x3.shares
+        m1.x0.shares m1.x1.shares m1.x2.shares m1.x3.shares (activeShamirPassiveCallPrep prep) := by
+  unfold execActiveShamirAbsorbRate8Block
+  rw [execActiveSharedPoseidon2Perm_honest_eq_online hOne (authShamirAbsorbRate8_valid hs h0 h1) hp hz hd]
+  obtain ⟨hb0, hb1, hb2⟩ := AuthShamirState12.projections hs
+  obtain ⟨h00, h01, h02, h03⟩ := AuthShamirLane4.projections hs.1
+  obtain ⟨h10, h11, h12, h13⟩ := AuthShamirLane4.projections hs.2.1
+  rw [← hb0, List.map_map] at h00 h01 h02 h03
+  rw [← hb1, List.map_map] at h10 h11 h12 h13
+  simp only [Function.comp_def] at h00 h01 h02 h03 h10 h11 h12 h13
+  unfold shamirAbsorbRate8Block
+  rw [h00, h01, h02, h03, h10, h11, h12, h13, hb2]
+  rfl
+
+/-- Small one-party authenticated zero state, for executable permutation witnesses. -/
+def demoAuthShamirZeroWire : AuthShamirWire := ⟨[Goldilocks.zero], [GoldilocksExt2.zero]⟩
+
+def demoAuthShamirZeroState : AuthShamirState12 :=
+  let b : AuthShamirLane4 := ⟨demoAuthShamirZeroWire, demoAuthShamirZeroWire,
+    demoAuthShamirZeroWire, demoAuthShamirZeroWire⟩
+  ⟨b, b, b⟩
+
+def demoAuthShamirZeroTuple : AuthSharedPow7Tuple :=
+  ⟨demoAuthShamirZeroWire, demoAuthShamirZeroWire, demoAuthShamirZeroWire,
+   demoAuthShamirZeroWire, demoAuthShamirZeroWire, demoAuthShamirZeroWire, demoAuthShamirZeroWire⟩
+
+def demoActiveShamirPermPrep : ActiveShamirPermPrep := fun _ =>
+  ⟨demoAuthShamirZeroTuple, [GoldilocksExt2.zero], Goldilocks.zero, [GoldilocksExt2.zero]⟩
+
+theorem demoActiveShamirPerm_valid :
+    demoAuthShamirZeroState.Valid [Goldilocks.one] [GoldilocksExt2.one] ∧
+    ∀ j, (demoActiveShamirPermPrep j).Valid [Goldilocks.one] [GoldilocksExt2.one] := by
+  constructor
+  · unfold AuthShamirState12.Valid AuthShamirLane4.Valid AuthShamirWire.Valid
+    decide +kernel
+  · intro j
+    change ActiveShamirPow7Prep.Valid _ _ ⟨demoAuthShamirZeroTuple, _, _, _⟩
+    unfold ActiveShamirPow7Prep.Valid AuthSharedPow7Tuple.Valid AuthShamirWire.Valid SharedPow7Tuple.validAt
+    decide +kernel
+
+theorem execActiveSharedPoseidon2Perm_inhabited :
+    (execActiveSharedPoseidon2Perm [Goldilocks.one] [GoldilocksExt2.one]
+      demoActiveShamirPermPrep demoAuthShamirZeroState).isSome = true := by
+  obtain ⟨out, he, _⟩ := execActiveSharedPoseidon2Perm_complete (by rfl)
+    demoActiveShamirPerm_valid.1 demoActiveShamirPerm_valid.2
+    (fun _ => rfl) (fun _ => rfl)
+  rw [he]
+  rfl
+
+/-- A nonzero first opening deviation, with honest sigma broadcasts, aborts the full permutation. -/
+theorem tooth_execActiveSharedPoseidon2Perm_aborts_on_forged_gate :
+    (execActiveSharedPoseidon2Perm [Goldilocks.one] [GoldilocksExt2.one]
+      (fun j => if j.val = 0 then { demoActiveShamirPermPrep j with deltaD := Goldilocks.one }
+        else demoActiveShamirPermPrep j) demoAuthShamirZeroState).isNone = true := by
+  decide +kernel
+
+/-- Compose an active authenticated Shamir gate with its online continuation.
+Failure is propagated before the continuation can release anything. -/
+def continueActiveShamirGate {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output) : Option Output :=
+  (execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs).bind finish
+
+theorem continueActiveShamirGate_abort {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output)
+    (h : execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs = none) :
+    continueActiveShamirGate lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs finish = none := by
+  simp only [continueActiveShamirGate, h, Option.bind_none]
+
+/-- Any online continuation receives a correct Shamir result, or the active
+opening pins the global MAC key. The MAC residual is computed from party shares
+by `execActiveSharedPow7Round`, not supplied as an `hSum` assumption. This local
+composition theorem does not assume that the continuation is an honest signer. -/
+theorem continueActiveShamirGate_sound_or_pins_key {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output) (out : Output)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hXLen : xSh.length = lambdas.length) (hTup : tup.validAt lambdas)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX = CommRingOps.mul (ringListSum alphaShares)
+      (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR = CommRingOps.mul (ringListSum alphaShares)
+      (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero)
+    (hAccept : continueActiveShamirGate lambdas xSh tup macX macR alphaShares zeroMasks
+      deltaD sigmaDevs finish = some out) :
+    (∃ ySh, finish ySh = some out ∧ ySh.length = lambdas.length ∧
+      lagrangeCombine lambdas ySh = sbox7 (lagrangeCombine lambdas xSh)) ∨
+    (deltaD ≠ Goldilocks.zero ∧ ringListSum alphaShares =
+      CommRingOps.mul (ringListSum sigmaDevs) (GoldilocksExt2.inv (GoldilocksExt2.ofBase deltaD))) := by
+  unfold continueActiveShamirGate at hAccept
+  cases he : execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs with
+  | none => rw [he] at hAccept; cases hAccept
+  | some y =>
+    rw [he] at hAccept
+    obtain hok | hpin := execActiveSharedPow7Round_sound_or_pins_key
+      lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs y
+      hSumOne hXLen hTup hMacXLen hMacRLen hMaskLen hMacXSum hMacRSum hZeroMask he
+    · exact .inl ⟨y, hAccept, hok.2⟩
+    · exact .inr hpin
+
+
+/-- A valid complete permutation execution supplies every premise of share refinement. -/
+theorem witness_active_shamir_permutation :
+    ∃ (ls : List Goldilocks) (keys : List GoldilocksExt2) (prep : ActiveShamirPermPrep)
+      (s out : AuthShamirState12),
+      ringListSum ls = Goldilocks.one ∧ s.Valid ls keys ∧
+      (∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j)) ∧
+      (∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero) ∧
+      execActiveSharedPoseidon2Perm ls keys prep s = some out := by
+  obtain ⟨out, he, _⟩ := execActiveSharedPoseidon2Perm_complete (by rfl)
+    demoActiveShamirPerm_valid.1 demoActiveShamirPerm_valid.2
+    (fun _ => rfl) (fun _ => rfl)
+  exact ⟨[Goldilocks.one], [GoldilocksExt2.one], demoActiveShamirPermPrep,
+    demoAuthShamirZeroState, out, rfl, demoActiveShamirPerm_valid.1,
+    demoActiveShamirPerm_valid.2, (fun _ => rfl), he⟩
+
+theorem tooth_active_shamir_no_forged_output (out : AuthShamirState12) :
+    execActiveSharedPoseidon2Perm [Goldilocks.one] [GoldilocksExt2.one]
+      (fun j => if j.val = 0 then { demoActiveShamirPermPrep j with deltaD := Goldilocks.one }
+        else demoActiveShamirPermPrep j) demoAuthShamirZeroState ≠ some out := by
+  intro h
+  have hn := tooth_execActiveSharedPoseidon2Perm_aborts_on_forged_gate
+  rw [h] at hn
+  cases hn
+
+#tooth_pair Qsag.execActiveSharedPoseidon2Perm_sound_or_pins_key vs Qsag.tooth_active_shamir_no_forged_output
+#verify_inhabited Qsag.execActiveSharedPoseidon2Perm_refines_online Qsag.witness_active_shamir_permutation
+
+/-- An authenticated rate-8 block contains eight authenticated message limbs. -/
+abbrev AuthShamirBlock := AuthShamirLane4 × AuthShamirLane4
+
+def AuthShamirBlock.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (b : AuthShamirBlock) : Prop := b.1.Valid ls keys ∧ b.2.Valid ls keys
+
+/-- Sequential active sponge execution. Each block consumes its own 118-gate preparation. -/
+def execActiveShamirBlocks (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : Nat → ActiveShamirPermPrep) :
+    Nat → AuthShamirState12 → List AuthShamirBlock → Option AuthShamirState12
+  | _, s, [] => some s
+  | i, s, b :: bs =>
+    (execActiveShamirAbsorbRate8Block ls keys (prep i) s b.1 b.2).bind
+      (fun next => execActiveShamirBlocks ls keys prep (i + 1) next bs)
+
+/-- Clear permutation semantics used only in the proof, never by the executor. -/
+def activeShamirBlocksValue (ls : List Goldilocks) :
+    Poseidon2State12 → List AuthShamirBlock → Poseidon2State12
+  | s, [] => s
+  | s, b :: bs => activeShamirBlocksValue ls
+      (poseidon2Perm12 ⟨lane4Add s.b0 (b.1.value ls),
+        lane4Add s.b1 (b.2.value ls), s.b2⟩) bs
+
+/-- An accepted multi-block computation either preserves authentication and the exact
+sponge value, or identifies a gate in a consumed block that pins the MAC key. -/
+theorem execActiveShamirBlocks_sound_or_pins_key
+    {ls keys prep} (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j)) :
+    ∀ (bs : List AuthShamirBlock) (i : Nat) (s out : AuthShamirState12),
+      s.Valid ls keys → (∀ b ∈ bs, b.Valid ls keys) →
+      execActiveShamirBlocks ls keys prep i s bs = some out →
+      (out.Valid ls keys ∧ out.value ls = activeShamirBlocksValue ls (s.value ls) bs) ∨
+      (∃ k j, i ≤ k ∧ k < i + bs.length ∧ (prep k j).Pins keys) := by
+  intro bs
+  induction bs with
+  | nil =>
+    intro i s out hs _ he
+    simp only [execActiveShamirBlocks, Option.some.injEq] at he
+    subst out
+    exact .inl ⟨hs, rfl⟩
+  | cons b bs ih =>
+    intro i s out hs hb he
+    have vb := hb b (by simp)
+    have vr : ∀ c ∈ bs, c.Valid ls keys := fun c hc => hb c (List.mem_cons_of_mem b hc)
+    unfold execActiveShamirBlocks at he
+    cases hm : execActiveShamirAbsorbRate8Block ls keys (prep i) s b.1 b.2 with
+    | none => simp only [hm, Option.bind_none] at he; cases he
+    | some mid =>
+      simp only [hm, Option.bind_some] at he
+      obtain good | bad := execActiveShamirAbsorbRate8Block_sound_or_pins_key
+        hOne hs vb.1 vb.2 (hp i) hm
+      · have hv : mid.value ls = poseidon2Perm12
+            ⟨lane4Add (s.value ls).b0 (b.1.value ls),
+             lane4Add (s.value ls).b1 (b.2.value ls), (s.value ls).b2⟩ := by
+          exact (AuthShamirState12.combine_shares good.1).symm.trans good.2
+        obtain tailGood | tailBad := ih (i + 1) mid out good.1 vr he
+        · have stepEq := congrArg (fun v => activeShamirBlocksValue ls v bs) hv
+          have result := tailGood.2.trans stepEq
+          left
+          refine ⟨tailGood.1, ?_⟩
+          rw [activeShamirBlocksValue]
+          exact result
+        · obtain ⟨k, j, hlo, hhi, hpin⟩ := tailBad
+          exact .inr ⟨k, j, by omega, by simp only [List.length_cons]; omega, hpin⟩
+      · obtain ⟨j, hpin⟩ := bad
+        exact .inr ⟨i, j, Nat.le_refl _, by simp [List.length_cons], hpin⟩
+
+/-- Continuations receive the authenticated final state only after every block accepts. -/
+def continueActiveShamirBlocks {Output : Type}
+    (ls : List Goldilocks) (keys : List GoldilocksExt2) (prep : Nat → ActiveShamirPermPrep)
+    (i : Nat) (s : AuthShamirState12) (bs : List AuthShamirBlock)
+    (finish : AuthShamirState12 → Option Output) : Option Output :=
+  (execActiveShamirBlocks ls keys prep i s bs).bind finish
+
+theorem continueActiveShamirBlocks_sound_or_pins_key {Output : Type}
+    {ls keys prep i s bs} (finish : AuthShamirState12 → Option Output) (out : Output)
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j))
+    (hs : AuthShamirState12.Valid ls keys s) (hb : ∀ b ∈ bs, AuthShamirBlock.Valid ls keys b)
+    (he : continueActiveShamirBlocks ls keys prep i s bs finish = some out) :
+    (∃ final, final.Valid ls keys ∧
+      final.value ls = activeShamirBlocksValue ls (s.value ls) bs ∧ finish final = some out) ∨
+    (∃ k j, i ≤ k ∧ k < i + bs.length ∧ (prep k j).Pins keys) := by
+  unfold continueActiveShamirBlocks at he
+  cases hx : execActiveShamirBlocks ls keys prep i s bs with
+  | none => simp only [hx, Option.bind_none] at he; cases he
+  | some final =>
+    simp only [hx, Option.bind_some] at he
+    obtain good | bad := execActiveShamirBlocks_sound_or_pins_key hOne hp bs i s final hs hb hx
+    · exact .inl ⟨final, good.1, good.2, he⟩
+    · exact .inr bad
+
+/-- Honest openings complete every block; no acceptance assumption is needed. -/
+theorem execActiveShamirBlocks_complete {ls keys prep}
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j))
+    (hz : ∀ i j, (prep i j).deltaD = Goldilocks.zero)
+    (hd : ∀ i j, ringListSum (prep i j).sigmaDevs = CommRingOps.zero) :
+    ∀ (bs : List AuthShamirBlock) (i : Nat) (s : AuthShamirState12),
+      s.Valid ls keys → (∀ b ∈ bs, b.Valid ls keys) →
+      ∃ out, execActiveShamirBlocks ls keys prep i s bs = some out ∧ out.Valid ls keys := by
+  intro bs
+  induction bs with
+  | nil => intro i s hs _; exact ⟨s, rfl, hs⟩
+  | cons b bs ih =>
+    intro i s hs hb
+    have vb := hb b (by simp)
+    obtain ⟨mid, hm, vm⟩ := execActiveSharedPoseidon2Perm_complete hOne
+      (authShamirAbsorbRate8_valid hs vb.1 vb.2) (hp i) (hz i) (hd i)
+    obtain ⟨out, ho, vo⟩ := ih (i + 1) mid vm (fun c hc => hb c (List.mem_cons_of_mem b hc))
+    exact ⟨out, by simp only [execActiveShamirBlocks, execActiveShamirAbsorbRate8Block,
+      hm, Option.bind_some, ho], vo⟩
+
+/-- Flatten authenticated blocks to the existing passive sponge's limb-share format. -/
+def authShamirBlocksLimbs : List AuthShamirBlock → List (List Goldilocks)
+  | [] => []
+  | b :: bs => b.1.x0.shares :: b.1.x1.shares :: b.1.x2.shares :: b.1.x3.shares ::
+      b.2.x0.shares :: b.2.x1.shares :: b.2.x2.shares :: b.2.x3.shares :: authShamirBlocksLimbs bs
+
+/-- Whole-stream share refinement to the sponge used by the threshold hash oracles. -/
+theorem execActiveShamirBlocks_honest_eq {ls keys prep}
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j))
+    (hz : ∀ i j, (prep i j).deltaD = Goldilocks.zero)
+    (hd : ∀ i j, ringListSum (prep i j).sigmaDevs = CommRingOps.zero) :
+    ∀ (bs : List AuthShamirBlock) (i : Nat) (s : AuthShamirState12),
+      s.Valid ls keys → (∀ b ∈ bs, b.Valid ls keys) →
+      (execActiveShamirBlocks ls keys prep i s bs).map AuthShamirState12.shares =
+        shamirAbsorbLimbStream ls s.shares (fun k => activeShamirPassiveCallPrep (prep k))
+          i (authShamirBlocksLimbs bs) := by
+  intro bs
+  induction bs with
+  | nil => intro i s _ _; rfl
+  | cons b bs ih =>
+    intro i s hs hb
+    have vb := hb b (by simp)
+    obtain ⟨mid, hm, vm⟩ := execActiveSharedPoseidon2Perm_complete hOne
+      (authShamirAbsorbRate8_valid hs vb.1 vb.2) (hp i) (hz i) (hd i)
+    have hm' : execActiveShamirAbsorbRate8Block ls keys (prep i) s b.1 b.2 = some mid := hm
+    have heq := execActiveShamirAbsorbRate8Block_honest_eq hOne hs vb.1 vb.2 (hp i) (hz i) (hd i)
+    rw [hm'] at heq
+    simp only [Option.map_some] at heq
+    simp only [execActiveShamirBlocks, hm', Option.bind_some,
+      authShamirBlocksLimbs, shamirAbsorbLimbStream, ← heq]
+    exact ih (i + 1) mid vm (fun c hc => hb c (List.mem_cons_of_mem b hc))
+
+/-! ### Constructive `GoldilocksExt2` Enumeration, Degree-`< t` Sacrificial Consistency & Active MAC Pin Bounds -/
+
+theorem goldilocksPrime_pos : 0 < goldilocksPrime := by decide
+
+def goldilocksExt2Card : Nat := goldilocksPrime * goldilocksPrime
+
+theorem goldilocksExt2Card_pos : 0 < goldilocksExt2Card := by
+  unfold goldilocksExt2Card
+  exact Nat.mul_pos goldilocksPrime_pos goldilocksPrime_pos
+
+theorem goldilocksExt2Card_gt_two_pow_126 : 2 ^ 126 < goldilocksExt2Card := by
+  unfold goldilocksExt2Card goldilocksPrime
+  decide
+
+/-- Constructive `0 Classical.choice` bijection `Fin goldilocksPrime ≃ Goldilocks`. -/
+def enumGoldilocks : SimpleEquiv (Fin goldilocksPrime) Goldilocks :=
+  { toFun := fun i => ⟨i.val, i.isLt⟩
+    invFun := fun x => ⟨x.val, x.isLt⟩
+    left_inv := fun ⟨_, _⟩ => rfl
+    right_inv := fun ⟨_, _⟩ => rfl }
+
+/-- Constructive `0 Classical.choice` bijection `Fin (goldilocksPrime^2) ≃ GoldilocksExt2`. -/
+def enumGoldilocksExt2 : SimpleEquiv (Fin goldilocksExt2Card) GoldilocksExt2 :=
+  { toFun := fun idx =>
+      ⟨enumGoldilocks.toFun (ucSplitLeft goldilocksPrime_pos idx),
+       enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx)⟩
+    invFun := fun x =>
+      ucPairFin (enumGoldilocks.invFun x.c0) (enumGoldilocks.invFun x.c1)
+    left_inv := fun idx => by
+      change ucPairFin (ucSplitLeft goldilocksPrime_pos idx)
+          (ucSplitRight goldilocksPrime_pos idx) = idx
+      exact ucPair_split goldilocksPrime_pos idx
+    right_inv := fun ⟨c0, c1⟩ => by
+      apply GoldilocksExt2.ext
+      · change (ucSplitLeft goldilocksPrime_pos
+            (ucPairFin (enumGoldilocks.invFun c0) (enumGoldilocks.invFun c1)) |> enumGoldilocks.toFun) = c0
+        rw [ucSplitLeft_pair goldilocksPrime_pos]
+        rfl
+      · change (ucSplitRight goldilocksPrime_pos
+            (ucPairFin (enumGoldilocks.invFun c0) (enumGoldilocks.invFun c1)) |> enumGoldilocks.toFun) = c1
+        rw [ucSplitRight_pair goldilocksPrime_pos]
+        rfl }
+
+/-- Constructive `0 Classical.choice` bijection `Fin (ucPow goldilocksPrime t) ≃ ShamirPadPoly Goldilocks t`. -/
+def enumShamirPadPolyGoldilocks :
+    (t : Nat) → SimpleEquiv (Fin (ucPow goldilocksPrime t)) (ShamirPadPoly Goldilocks t)
+  | 0 =>
+    { toFun := fun _ => ⟨[], rfl⟩
+      invFun := fun _ => ⟨0, Nat.zero_lt_one⟩
+      left_inv := fun ⟨v, hv⟩ => by
+        have hv1 : v < 1 := hv
+        have hv0 : v = 0 := by omega
+        subst hv0; rfl
+      right_inv := fun ⟨l, hl⟩ => Subtype.ext (List.eq_nil_of_length_eq_zero hl).symm }
+  | k + 1 =>
+    let prev := enumShamirPadPolyGoldilocks k
+    { toFun := fun idx =>
+        let p := prev.toFun (ucSplitLeft goldilocksPrime_pos idx)
+        let c := enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx)
+        ⟨c :: p.1, by simp [p.2]⟩
+      invFun := fun ⟨l, hl⟩ =>
+        let hd := l.headD Goldilocks.zero
+        let tl : ShamirPadPoly Goldilocks k := ⟨l.tail, by rw [List.length_tail, hl]; omega⟩
+        ucPairFin (prev.invFun tl) (enumGoldilocks.invFun hd)
+      left_inv := fun idx => by
+        change ucPairFin
+            (prev.invFun ⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).1, _⟩)
+            (enumGoldilocks.invFun (enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx))) = idx
+        have hSub : (⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).1,
+            (prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).2⟩ : ShamirPadPoly Goldilocks k) =
+            prev.toFun (ucSplitLeft goldilocksPrime_pos idx) := by
+          cases prev.toFun (ucSplitLeft goldilocksPrime_pos idx); rfl
+        rw [hSub, prev.left_inv, enumGoldilocks.left_inv]
+        exact ucPair_split goldilocksPrime_pos idx
+      right_inv := fun ⟨l, hl⟩ => by
+        apply Subtype.ext
+        cases l with
+        | nil => cases hl
+        | cons x xs =>
+          have hxs : xs.length = k := Nat.succ.inj hl
+          change enumGoldilocks.toFun
+              (ucSplitRight goldilocksPrime_pos
+                (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x))) ::
+            (prev.toFun
+              (ucSplitLeft goldilocksPrime_pos
+                (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x)))).1 = x :: xs
+          rw [ucSplitRight_pair goldilocksPrime_pos, ucSplitLeft_pair goldilocksPrime_pos,
+              enumGoldilocks.right_inv, prev.right_inv] }
+
+/-- Degree-`< t` Shamir sacrificial / polynomial consistency check over evaluation points `pts`. -/
+def verifyShamirPolyConsistent (t : Nat) (polyCoeffs : List Goldilocks)
+    (pts shares : List Goldilocks) : Bool :=
+  decide (polyCoeffs.length = t) &&
+  decide (pts.length = shares.length) &&
+  (List.zip pts shares).all (fun xy => decide (RoundPoly.evalCoeffs polyCoeffs xy.1 = xy.2))
+
+/-- **Degree-`< t` Shamir Consistency Uniqueness (`shamirPolyConsistent_unique_at_zero`)**:
+    Any two length-`t` (degree `< t`) polynomials certified by `verifyShamirPolyConsistent` against
+    the same share vector `shares` on `≥ t` duplicate-free evaluation points `pts` have **identical**
+    reconstructed secret `evalCoeffs P 0 = evalCoeffs Q 0`. -/
+theorem shamirPolyConsistent_unique_at_zero (t : Nat)
+    (P Q : List Goldilocks) (pts shares : List Goldilocks)
+    (hNodup : pts.Nodup) (hQuorum : t ≤ pts.length)
+    (hP : verifyShamirPolyConsistent t P pts shares = true)
+    (hQ : verifyShamirPolyConsistent t Q pts shares = true) :
+    RoundPoly.evalCoeffs P Goldilocks.zero = RoundPoly.evalCoeffs Q Goldilocks.zero := by
+  unfold verifyShamirPolyConsistent at hP hQ
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hP hQ
+  rcases hP with ⟨⟨hPLen, hPtsLen⟩, hPZip⟩
+  rcases hQ with ⟨⟨hQLen, _⟩, hQZip⟩
+  cases t with
+  | zero =>
+    rw [List.eq_nil_of_length_eq_zero hPLen, List.eq_nil_of_length_eq_zero hQLen]
+  | succ d =>
+    by_cases hEq0 : RoundPoly.evalCoeffs P Goldilocks.zero = RoundPoly.evalCoeffs Q Goldilocks.zero
+    · exact hEq0
+    · exfalso
+      let diff := polySubFixed P Q
+      have hDiffLen : diff.length ≤ d + 1 := by
+        rw [polySubFixed_length P Q (hPLen.trans hQLen.symm), hPLen]
+        exact Nat.le_refl (d + 1)
+      have hNz0 : RoundPoly.evalCoeffs diff Goldilocks.zero ≠ CommRingOps.zero := by
+        rw [evalCoeffs_subFixed P Q Goldilocks.zero (hPLen.trans hQLen.symm)]
+        intro hSub0
+        exact hEq0 (LawfulCommRing.sub_eq_zero_iff.mp hSub0)
+      have hAgreePts : ∀ x ∈ pts, RoundPoly.evalCoeffs P x = RoundPoly.evalCoeffs Q x := by
+        have hZipAll : ∀ (xs ys : List Goldilocks) (x : Goldilocks),
+            xs.length = ys.length → x ∈ xs → ∃ y, (x, y) ∈ List.zip xs ys := by
+          intro xs
+          induction xs with
+          | nil =>
+            intro _ _ _ hx
+            cases hx
+          | cons a as ih =>
+            intro ys x hLen hx
+            cases ys with
+            | nil => cases hLen
+            | cons b bs =>
+              rcases List.mem_cons.mp hx with rfl | hRest
+              · exact ⟨b, .head _⟩
+              · obtain ⟨y, hy⟩ := ih bs x (Nat.succ.inj hLen) hRest
+                exact ⟨y, .tail _ hy⟩
+        intro x hx
+        obtain ⟨y, hy⟩ := hZipAll pts shares x hPtsLen hx
+        exact (hPZip (x, y) hy).trans (hQZip (x, y) hy).symm
+      have hFiltAll :
+          pts.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)) = pts := by
+        apply List.filter_eq_self.mpr
+        intro x hx
+        rw [decide_eq_true_eq, evalCoeffs_subFixed P Q x (hPLen.trans hQLen.symm),
+            hAgreePts x hx, LawfulCommRing.sub_self]
+      have hRoots := RoundPoly.roots_nodup_length_le d diff pts hNodup hDiffLen ⟨Goldilocks.zero, hNz0⟩
+      rw [hFiltAll] at hRoots
+      omega
+
+/-- `#tooth`: Without enforcing the `< t` degree check (`P.length ≤ t`), a degree-`t` polynomial
+    (`length = t + 1`) agrees with an honest constant sharing on `t = 1` evaluation point (`x = 1`)
+    while forging a distinct reconstructed secret at `x = 0`! -/
+theorem tooth_shamir_unbounded_degree_forges_secret_at_zero :
+    ∃ (P Q : List Goldilocks) (pt : Goldilocks),
+      pt ≠ Goldilocks.zero ∧
+      P.length = 1 ∧
+      Q.length = 2 ∧
+      RoundPoly.evalCoeffs P pt = RoundPoly.evalCoeffs Q pt ∧
+      RoundPoly.evalCoeffs P Goldilocks.zero ≠ RoundPoly.evalCoeffs Q Goldilocks.zero := by
+  refine ⟨[Goldilocks.one], [Goldilocks.zero, Goldilocks.one], Goldilocks.one, ?_, rfl, rfl, ?_, ?_⟩
+  · decide +kernel
+  · decide +kernel
+  · decide +kernel
+
+/-- Boolean test for whether global SPDZ MAC key `alpha : GoldilocksExt2` is pinned by a gate
+    opening deviation `(deltaD, sigmaSum)`. -/
+def spdzGatePinsAlpha (alpha : GoldilocksExt2) (deltaD : Goldilocks)
+    (sigmaSum : GoldilocksExt2) : Bool :=
+  decide (deltaD ≠ Goldilocks.zero ∧
+    alpha = CommRingOps.mul sigmaSum (GoldilocksExt2.inv (GoldilocksExt2.ofBase deltaD)))
+
+/-- For any fixed gate deviation `(deltaD, sigmaSum)`, at most `1` of the `p^2` global MAC keys
+    in `GoldilocksExt2` satisfies `spdzGatePinsAlpha`. -/
+theorem spdzGatePinsAlpha_count_le_one (deltaD : Goldilocks) (sigmaSum : GoldilocksExt2) :
+    finSum goldilocksExt2Card
+      (fun idx => if spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) deltaD sigmaSum then 1 else 0) ≤ 1 := by
+  apply finSum_indicator_le_one_of_unique
+  intro i j hi hj
+  unfold spdzGatePinsAlpha at hi hj
+  rcases of_decide_eq_true hi with ⟨_, hEqI⟩
+  rcases of_decide_eq_true hj with ⟨_, hEqJ⟩
+  have hSame : enumGoldilocksExt2.toFun i = enumGoldilocksExt2.toFun j := hEqI.trans hEqJ.symm
+  have hInv := congrArg enumGoldilocksExt2.invFun hSame
+  rw [enumGoldilocksExt2.left_inv, enumGoldilocksExt2.left_inv] at hInv
+  exact hInv
+
+/-- Boolean test for whether any gate in `gates` pins global MAC key `alpha`. -/
+def anyGatePinsAlpha (alpha : GoldilocksExt2) (gates : List (Goldilocks × GoldilocksExt2)) : Bool :=
+  gates.any (fun g => spdzGatePinsAlpha alpha g.1 g.2)
+
+theorem anyGatePinsAlpha_nil (alpha : GoldilocksExt2) : anyGatePinsAlpha alpha [] = false := by
+  rfl
+
+/-- Across `gates.length` active SPDZ gates, at most `gates.length` out of `goldilocksExt2Card`
+    global `GoldilocksExt2` MAC keys are pinned. -/
+theorem spdzGateStream_pin_count_le :
+    ∀ (gates : List (Goldilocks × GoldilocksExt2)),
+      finSum goldilocksExt2Card
+        (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gates then 1 else 0) ≤
+        gates.length
+  | [] => by
+    have hZ : finSum goldilocksExt2Card
+        (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) [] then 1 else 0) =
+        finSum goldilocksExt2Card (fun _ => 0) :=
+      finSum_congr (fun _ => rfl)
+    rw [hZ, finSum_const]
+    omega
+  | g :: gs => by
+    have hOr := finSum_indicator_or_le
+      (fun idx => spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) g.1 g.2)
+      (fun idx => anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gs)
+    have hHead := spdzGatePinsAlpha_count_le_one g.1 g.2
+    have hTail := spdzGateStream_pin_count_le gs
+    have hStep :
+        finSum goldilocksExt2Card
+          (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) (g :: gs) then 1 else 0) =
+        finSum goldilocksExt2Card
+          (fun i => if (spdzGatePinsAlpha (enumGoldilocksExt2.toFun i) g.1 g.2 ||
+                        anyGatePinsAlpha (enumGoldilocksExt2.toFun i) gs) then 1 else 0) :=
+      finSum_congr (fun _ => rfl)
+    rw [hStep]
+    exact Nat.le_trans hOr
+      (by rw [List.length_cons, Nat.add_comm gs.length 1]; exact Nat.add_le_add hHead hTail)
+
+theorem witness_shamirPolyConsistent_inhabited :
+    ∃ (t : Nat) (P Q : List Goldilocks) (pts shares : List Goldilocks),
+      pts.Nodup ∧ t ≤ pts.length ∧
+      verifyShamirPolyConsistent t P pts shares = true ∧
+      verifyShamirPolyConsistent t Q pts shares = true := by
+  refine ⟨1, [Goldilocks.one], [Goldilocks.one], [Goldilocks.one], [Goldilocks.one],
+    by decide, by decide, ?_, ?_⟩
+  · decide +kernel
+  · decide +kernel
+
+#tooth_pair Qsag.shamirPolyConsistent_unique_at_zero vs Qsag.tooth_shamir_unbounded_degree_forges_secret_at_zero
+#verify_inhabited Qsag.shamirPolyConsistent_unique_at_zero Qsag.witness_shamirPolyConsistent_inhabited
+
+end Qsag
+end

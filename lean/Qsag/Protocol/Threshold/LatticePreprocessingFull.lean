@@ -3597,3 +3597,1826 @@ def intBvSum : (k : Nat) → (BitVec k → Int) → Int
     intBvSum k (fun v => f (BitVec.cons false v)) +
     intBvSum k (fun v => f (BitVec.cons true v))
 
+theorem bvSum_eq_enum_sum : ∀ (k : Nat) (f : BitVec k → Nat),
+    bvSum k f = ((bvEnum k).map f).sum
+  | 0, f => by simp [bvSum, bvEnum]
+  | k + 1, f => by
+    simp only [bvSum, bvEnum, List.map_append, List.sum_append, List.map_map,
+      bvSum_eq_enum_sum k]
+    rfl
+
+private theorem intBvSum_of_bvSum : ∀ (k : Nat) (f : BitVec k → Nat),
+    (bvSum k f : Int) = intBvSum k (fun v => (f v : Int))
+  | 0, _ => rfl
+  | k + 1, f => by
+    simp only [bvSum, intBvSum, Int.natCast_add, intBvSum_of_bvSum k]
+
+private theorem bvSum_congr {k : Nat} {f g : BitVec k → Nat} (h : ∀ v, f v = g v) :
+    bvSum k f = bvSum k g := by
+  induction k with
+  | zero => exact h 0#0
+  | succ k ih =>
+    simp only [bvSum, ih (fun v => h (BitVec.cons false v)), ih (fun v => h (BitVec.cons true v))]
+
+private theorem bvSum_const (k c : Nat) : bvSum k (fun _ => c) = (2 ^ k) * c := by
+  induction k with
+  | zero => simp [bvSum]
+  | succ k ih =>
+    simp only [bvSum, ih, Nat.pow_succ]
+    rw [Nat.mul_assoc, Nat.two_mul, Nat.mul_add]
+
+private theorem intBvSum_congr {k : Nat} {f g : BitVec k → Int} (h : ∀ v, f v = g v) :
+    intBvSum k f = intBvSum k g := by
+  induction k with
+  | zero => exact h 0#0
+  | succ k ih =>
+    simp only [intBvSum, ih (fun v => h (BitVec.cons false v)), ih (fun v => h (BitVec.cons true v))]
+
+private theorem intBvSum_const (k : Nat) (c : Int) :
+    intBvSum k (fun _ => c) = ((2 ^ k : Nat) : Int) * c := by
+  induction k with
+  | zero => simp [intBvSum]
+  | succ k ih =>
+    simp only [intBvSum, ih, Nat.pow_succ, Int.natCast_mul]
+    rw [← Int.mul_add ((2 ^ k : Nat) : Int) c c, Int.mul_assoc]
+    congr 1; omega
+
+private theorem intBvSum_add {k : Nat} (f g : BitVec k → Int) :
+    intBvSum k (fun v => f v + g v) = intBvSum k f + intBvSum k g := by
+  induction k with
+  | zero => rfl
+  | succ k ih => simp only [intBvSum, ih]; omega
+
+private theorem intBvSum_sub {k : Nat} (f g : BitVec k → Int) :
+    intBvSum k (fun v => f v - g v) = intBvSum k f - intBvSum k g := by
+  induction k with
+  | zero => rfl
+  | succ k ih => simp only [intBvSum, ih]; omega
+
+private theorem intBvSum_mul_left {k : Nat} (c : Int) (f : BitVec k → Int) :
+    intBvSum k (fun v => c * f v) = c * intBvSum k f := by
+  induction k with
+  | zero => rfl
+  | succ k ih => simp only [intBvSum, ih, Int.mul_add]
+
+private theorem intBvSum_mul_right {k : Nat} (f : BitVec k → Int) (c : Int) :
+    intBvSum k (fun v => f v * c) = intBvSum k f * c := by
+  induction k with
+  | zero => rfl
+  | succ k ih => simp only [intBvSum, ih, Int.add_mul]
+
+private theorem intBvSum_le {k : Nat} {f g : BitVec k → Int} (h : ∀ v, f v ≤ g v) :
+    intBvSum k f ≤ intBvSum k g := by
+  induction k with
+  | zero => exact h 0#0
+  | succ k ih =>
+    simp only [intBvSum]
+    have h0 := ih (fun v => h (BitVec.cons false v))
+    have h1 := ih (fun v => h (BitVec.cons true v))
+    omega
+
+private theorem intBvSum_comm (k₁ k₂ : Nat) (g : BitVec k₁ → BitVec k₂ → Int) :
+    intBvSum k₁ (fun u => intBvSum k₂ (fun v => g u v)) =
+    intBvSum k₂ (fun v => intBvSum k₁ (fun u => g u v)) := by
+  induction k₁ with
+  | zero => rfl
+  | succ k₁ ih =>
+    simp only [intBvSum]
+    rw [ih (fun u v => g (BitVec.cons false u) v),
+        ih (fun u v => g (BitVec.cons true u) v), ← intBvSum_add]
+
+private theorem intBvSum_indicator_one : ∀ (k : Nat) (target : BitVec k),
+    intBvSum k (fun y => if y = target then 1 else 0) = 1
+  | 0, target => by
+    have ht : target = 0#0 := BitVec.eq_nil target
+    subst ht; rfl
+  | k + 1, target => by
+    rw [← bvCons_split target]
+    simp only [intBvSum]
+    cases target.getLsbD k
+    · have hL : intBvSum k (fun v => if BitVec.cons false v = BitVec.cons false (target.setWidth k) then (1 : Int) else 0) =
+          intBvSum k (fun v => if v = target.setWidth k then 1 else 0) := by
+        apply intBvSum_congr; intro v; simp [bvCons_inj]
+      have hR : intBvSum k (fun v => if BitVec.cons true v = BitVec.cons false (target.setWidth k) then (1 : Int) else 0) =
+          intBvSum k (fun _ => 0) := by
+        apply intBvSum_congr; intro v; simp [bvCons_inj]
+      rw [hL, hR, intBvSum_indicator_one k, intBvSum_const]; simp
+    · have hL : intBvSum k (fun v => if BitVec.cons false v = BitVec.cons true (target.setWidth k) then (1 : Int) else 0) =
+          intBvSum k (fun _ => 0) := by
+        apply intBvSum_congr; intro v; simp [bvCons_inj]
+      have hR : intBvSum k (fun v => if BitVec.cons true v = BitVec.cons true (target.setWidth k) then (1 : Int) else 0) =
+          intBvSum k (fun v => if v = target.setWidth k then 1 else 0) := by
+        apply intBvSum_congr; intro v; simp [bvCons_inj]
+      rw [hL, hR, intBvSum_indicator_one k, intBvSum_const]; simp
+
+/-! ### 3.2 Bitwise-AND KOS Correlation, Exact Selective-Failure Fiber Count & Poisoning -/
+
+/-- Exact Hamming weight of `v : BitVec k`. -/
+def bvHammingWeight : {k : Nat} → BitVec k → Nat
+  | 0, _ => 0
+  | k + 1, v => (if v.getLsbD k then 1 else 0) + bvHammingWeight (v.setWidth k)
+
+theorem bvHammingWeight_le : ∀ {k : Nat} (v : BitVec k), bvHammingWeight v ≤ k
+  | 0, _ => Nat.le_refl 0
+  | k + 1, v => by
+    simp only [bvHammingWeight]
+    have ih := bvHammingWeight_le (v.setWidth k)
+    split <;> omega
+
+theorem bvHammingWeight_eq_zero_iff : ∀ {k : Nat} (v : BitVec k),
+    bvHammingWeight v = 0 ↔ v = 0#k
+  | 0, v => ⟨fun _ => BitVec.eq_nil v, fun _ => rfl⟩
+  | k + 1, v => by
+    simp only [bvHammingWeight]
+    have ih := bvHammingWeight_eq_zero_iff (v.setWidth k)
+    constructor
+    · intro h
+      have hBit : v.getLsbD k = false := by
+        cases hb : v.getLsbD k
+        · rfl
+        · simp only [hb, ↓reduceIte] at h; omega
+      simp only [hBit, Bool.false_eq_true, ↓reduceIte, Nat.zero_add] at h
+      have hRest : v.setWidth k = 0#k := ih.mp h
+      rw [← bvCons_split v, hBit, hRest, bvZero_eq_cons]
+    · intro h
+      subst h
+      have hSet0 : (0#(k + 1)).setWidth k = 0#k := setWidth_zero (k + 1) k
+      simp only [BitVec.getLsbD_zero, Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      exact ih.mpr hSet0
+
+private theorem bvHammingWeight_cons {k : Nat} (b : Bool) (u : BitVec k) :
+    bvHammingWeight (BitVec.cons b u) = (if b then 1 else 0) + bvHammingWeight u := by
+  simp only [bvHammingWeight, BitVec.getLsbD_cons, ↓reduceIte, setWidth_cons]
+
+private theorem one_toNat_pos (m : Nat) (hm : 1 ≤ m) : (1#m).toNat = 1 := by
+  change 1 % (2 ^ m) = 1
+  exact Nat.mod_eq_of_lt (Nat.one_lt_two_pow (by omega))
+
+private theorem one_eq_cons_false (k : Nat) : (1#(k + 2)) = BitVec.cons false (1#(k + 1)) := by
+  apply BitVec.eq_of_getLsbD_eq; intro i _
+  rw [BitVec.getLsbD_cons]
+  by_cases hik : i = k + 1
+  · subst hik
+    simp only [↓reduceIte, BitVec.getLsbD, one_toNat_pos (k + 2) (by omega)]
+    cases hBit : Nat.testBit 1 (k + 1)
+    · rfl
+    · have hk0 := Nat.testBit_one_eq_true_iff_self_eq_zero.mp hBit
+      omega
+  · simp only [hik, ↓reduceIte, BitVec.getLsbD,
+      one_toNat_pos (k + 2) (by omega), one_toNat_pos (k + 1) (by omega)]
+
+private theorem bvHammingWeight_one : ∀ (k : Nat), bvHammingWeight (1#(k + 1)) = 1
+  | 0 => by decide
+  | k + 1 => by rw [one_eq_cons_false k, bvHammingWeight_cons, bvHammingWeight_one k]; rfl
+
+private theorem bvAnd_cons {k : Nat} (b₁ b₂ : Bool) (u₁ u₂ : BitVec k) :
+    (BitVec.cons b₁ u₁ &&& BitVec.cons b₂ u₂) = BitVec.cons (b₁ && b₂) (u₁ &&& u₂) := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  simp only [BitVec.getLsbD_and, BitVec.getLsbD_cons]
+  split <;> rfl
+
+/-- Exact orthogonal fiber count: $|\{\Delta \in \mathrm{BitVec}\, k \mid (e \mathbin{\&} \Delta) = 0\}| = 2^{k - \mathrm{wt}(e)}$. -/
+theorem bvOrthogonalCount_exact : ∀ (k : Nat) (e : BitVec k),
+    bvSum k (fun delta => if (e &&& delta) = 0#k then 1 else 0) =
+      2 ^ (k - bvHammingWeight e)
+  | 0, e => by
+    simp only [bvSum, bvHammingWeight, Nat.sub_zero, Nat.pow_zero]
+    have h0 : (e &&& 0#0) = 0#0 := BitVec.eq_nil _
+    rw [h0]; rfl
+  | k + 1, e => by
+    have hSplit := bvCons_split e
+    have hWt := bvHammingWeight_le (e.setWidth k)
+    simp only [bvSum, bvHammingWeight]
+    have hTerm : ∀ (b : Bool) (d : BitVec k),
+        ((e &&& BitVec.cons b d) = 0#(k + 1)) ↔
+          ((e.getLsbD k && b) = false ∧ (e.setWidth k &&& d) = 0#k) := by
+      intro b d
+      conv => lhs; rw [← hSplit, bvAnd_cons, bvZero_eq_cons]
+      exact bvCons_inj
+    cases hb : e.getLsbD k
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      have hSub : k + 1 - bvHammingWeight (e.setWidth k) = (k - bvHammingWeight (e.setWidth k)) + 1 := by omega
+      have h0 : bvSum k (fun d => if (e &&& BitVec.cons false d) = 0#(k + 1) then 1 else 0) =
+          bvSum k (fun d => if (e.setWidth k &&& d) = 0#k then 1 else 0) := by
+        apply bvSum_congr; intro d
+        simp only [hTerm, hb, Bool.false_and, true_and]
+      have h1 : bvSum k (fun d => if (e &&& BitVec.cons true d) = 0#(k + 1) then 1 else 0) =
+          bvSum k (fun d => if (e.setWidth k &&& d) = 0#k then 1 else 0) := by
+        apply bvSum_congr; intro d
+        simp only [hTerm, hb, Bool.false_and, true_and]
+      rw [h0, h1, bvOrthogonalCount_exact k (e.setWidth k), hSub, Nat.pow_succ]
+      omega
+    · simp only [↓reduceIte]
+      have hSub : k + 1 - (1 + bvHammingWeight (e.setWidth k)) = k - bvHammingWeight (e.setWidth k) := by omega
+      have h0 : bvSum k (fun d => if (e &&& BitVec.cons false d) = 0#(k + 1) then 1 else 0) =
+          bvSum k (fun d => if (e.setWidth k &&& d) = 0#k then 1 else 0) := by
+        apply bvSum_congr; intro d
+        simp only [hTerm, hb, Bool.and_false, true_and]
+      have h1 : bvSum k (fun d => if (e &&& BitVec.cons true d) = 0#(k + 1) then 1 else 0) =
+          bvSum k (fun _ => 0) := by
+        apply bvSum_congr; intro d
+        simp only [hTerm, hb, Bool.and_true, Bool.true_eq_false, false_and, ↓reduceIte]
+      rw [h0, h1, bvOrthogonalCount_exact k (e.setWidth k), bvSum_const, hSub]
+      omega
+
+/-- Real 128-column KOS OT correlation row: $q_\ell = t_\ell \oplus (x_\ell \mathbin{\&} \Delta)$. -/
+@[expose] def kosBitwiseRowQ (tRow xRow delta : BitVec 128) : BitVec 128 :=
+  tRow ^^^ (xRow &&& delta)
+
+/-- **`kos_bitwise_selective_failure_exact` (`[P0-05]` Core Selective-Failure Theorem)**:
+    1. Injecting column-wise fault mask `e : BitVec 128` shifts `q_l` by `e &&& delta` (`kosBitwiseRowQ_fault`),
+       so the row correlation check passes **iff** `e &&& delta = 0#128`.
+    2. Over all $2^{128}$ uniform choices of `delta ∈ bvEnum 128`, **exact** count `2 ^ (128 - bvHammingWeight e)`
+       pass (`passCount * 2^w = 2^128`, exact probability $2^{-w}$, leaking at most $w$ bits of $\Delta$).
+    3. **`#tooth`**: A weight-1 fault (`e = 1#128`, `w = 1`) passes on `2^127` of `2^128` keys (exact probability
+       `1/2`, NOT $2^{-128}$!), proving why `s = 128` sacrifice + `128 × 384` `GF(2)` LHL amplification are mandatory! -/
+theorem kos_bitwise_selective_failure_exact (tRow xRow e : BitVec 128) :
+    let w := bvHammingWeight e
+    let passCount := bvSum 128 (fun delta => if (e &&& delta) = 0#128 then 1 else 0)
+    (∀ delta : BitVec 128,
+      kosBitwiseRowQ tRow (xRow ^^^ e) delta = kosBitwiseRowQ tRow xRow delta ^^^ (e &&& delta)) ∧
+    (∀ delta : BitVec 128,
+      kosBitwiseRowQ tRow (xRow ^^^ e) delta = kosBitwiseRowQ tRow xRow delta ↔ (e &&& delta) = 0#128) ∧
+    passCount = 2 ^ (128 - w) ∧
+    passCount * (2 ^ w) = 2 ^ 128 ∧
+    (bvHammingWeight (1#128) = 1 ∧
+     bvSum 128 (fun delta => if (1#128 &&& delta) = 0#128 then 1 else 0) = 2 ^ 127) := by
+  intro w passCount
+  have hXorDist : ∀ delta : BitVec 128,
+      kosBitwiseRowQ tRow (xRow ^^^ e) delta = kosBitwiseRowQ tRow xRow delta ^^^ (e &&& delta) := by
+    intro delta
+    unfold kosBitwiseRowQ
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [BitVec.getLsbD_xor, BitVec.getLsbD_and]
+    cases tRow.getLsbD i <;> cases xRow.getLsbD i <;> cases e.getLsbD i <;> cases delta.getLsbD i <;> rfl
+  have hIff : ∀ delta : BitVec 128,
+      kosBitwiseRowQ tRow (xRow ^^^ e) delta = kosBitwiseRowQ tRow xRow delta ↔ (e &&& delta) = 0#128 := by
+    intro delta
+    rw [hXorDist delta]
+    constructor
+    · intro hEq
+      have h := congrArg (kosBitwiseRowQ tRow xRow delta ^^^ ·) hEq
+      rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor] at h
+      exact h
+    · intro hZ; rw [hZ, BitVec.xor_zero]
+  have hCount : passCount = 2 ^ (128 - w) := bvOrthogonalCount_exact 128 e
+  have hWLe : w ≤ 128 := bvHammingWeight_le e
+  have hProd : passCount * (2 ^ w) = 2 ^ 128 := by
+    rw [hCount, ← Nat.pow_add]
+    have hAdd : 128 - w + w = 128 := by omega
+    rw [hAdd]
+  have hWt1 : bvHammingWeight (1#128) = 1 := bvHammingWeight_one 127
+  have hTooth1 : bvSum 128 (fun delta => if (1#128 &&& delta) = 0#128 then 1 else 0) = 2 ^ 127 := by
+    rw [bvOrthogonalCount_exact 128 (1#128), hWt1]
+  exact ⟨hXorDist, hIff, hCount, hProd, ⟨hWt1, hTooth1⟩⟩
+
+/-- Interactive $\mathbb{F}_{2^{128}}$ (`Tower128`) KOS linear-combination soundness when `e &&& delta ≠ 0#128`:
+    for any nonzero row discrepancy `e &&& delta ≠ 0#128` locked *before* `chi` is sampled, at most
+    `1` challenge `chi : Tower128` hits any target residual `rhs` (`≤ 1 / 2^128` forgery probability). -/
+theorem kos_gf2_128_sacrifice_linear_soundness
+    (e delta : BitVec 128) (hNonOrth : (e &&& delta) ≠ 0#128)
+    (rhs : Tower128) (chi₁ chi₂ : Tower128)
+    (h1 : towerMul 7 (unpackTower 7 (e &&& delta)) chi₁ = rhs)
+    (h2 : towerMul 7 (unpackTower 7 (e &&& delta)) chi₂ = rhs) :
+    chi₁ = chi₂ := by
+  have hNz : unpackTower 7 (e &&& delta) ≠ towerZero 7 := by
+    intro hZ
+    have hp := congrArg (packTower 7) hZ
+    rw [packTower_unpackTower, packTower_zero] at hp
+    exact hNonOrth hp
+  exact towerMul_cancel_left 7 (unpackTower 7 (e &&& delta)) chi₁ chi₂ hNz (h1.trans h2.symm)
+
+/-- Sticky-poisoning KOS Sender channel state (`poisoned = true` permanently disables future batches). -/
+structure KosSenderChannelState where
+  delta : BitVec 128
+  batchCtr : Nat
+  poisoned : Bool
+  deriving DecidableEq, Repr
+
+/-- KOS Sender check input (`eBatch` row fault, challenge `chi`, residual target `rhs`). -/
+structure KosBatchCheckInput where
+  rowFault : BitVec 128
+  chi : Tower128
+  claimedResidual : Tower128
+
+/-- Error-mutating KOS Sender `PartyMachine` permanently poisoning the channel on first check failure! -/
+def kosSenderChannelMachine : PartyMachine KosSenderChannelState KosBatchCheckInput Nat :=
+  PartyMachine.ofOutcome fun st inp =>
+    if st.poisoned then
+      .err st ()
+    else
+      let actualRes := towerMul 7 (unpackTower 7 (inp.rowFault &&& st.delta)) inp.chi
+      if actualRes = inp.claimedResidual then
+        .ok { st with batchCtr := st.batchCtr + 1 } st.batchCtr
+      else
+        .err { st with poisoned := true } ()
+
+/-- Once a KOS check fails (`poisoned = true`), no subsequent batch is ever accepted along any `ValidTrace`. -/
+theorem kosSenderChannel_poisoned_terminal :
+    ∀ {st stFinal : KosSenderChannelState} {trace : List (KosBatchCheckInput × Nat)},
+      st.poisoned = true →
+      kosSenderChannelMachine.ValidTrace st trace stFinal →
+      trace = [] ∧ stFinal.poisoned = true
+  | _, _, _, hPois, .nil _ => ⟨rfl, hPois⟩
+  | st, _, _, hPois, .accept hStep _ => by
+    unfold kosSenderChannelMachine PartyMachine.ofOutcome at hStep
+    simp [hPois] at hStep
+  | st, _, _, hPois, .reject inp _ hTail => by
+    have hPois' : (kosSenderChannelMachine.errStep st inp).poisoned = true := by
+      unfold kosSenderChannelMachine PartyMachine.ofOutcome
+      simp [hPois]
+    exact kosSenderChannel_poisoned_terminal hPois' hTail
+
+/-! ### 3.3 `128 × 384` `GF(2)` Universal Linear Hash & Constructive Finite Leftover Hash Lemma -/
+
+/-- `GF(2)` inner product $\bigoplus_{j=0}^{n-1} (r_j \land v_j)$ over `BitVec n`. -/
+def gf2Dot : (n : Nat) → BitVec n → BitVec n → Bool
+  | 0, _, _ => false
+  | n + 1, r, v => (r.getLsbD n && v.getLsbD n) ^^ gf2Dot n (r.setWidth n) (v.setWidth n)
+
+private theorem gf2Dot_zero_right : ∀ (n : Nat) (r : BitVec n), gf2Dot n r 0#n = false
+  | 0, _ => rfl
+  | n + 1, r => by
+    have hSet0 : (0#(n + 1)).setWidth n = 0#n := setWidth_zero (n + 1) n
+    simp only [gf2Dot, BitVec.getLsbD_zero, Bool.and_false, Bool.false_xor, hSet0, gf2Dot_zero_right n]
+
+private theorem gf2Dot_xor_right : ∀ (n : Nat) (r u v : BitVec n),
+    gf2Dot n r (u ^^^ v) = (gf2Dot n r u ^^ gf2Dot n r v)
+  | 0, _, _, _ => rfl
+  | n + 1, r, u, v => by
+    have hSet : (u ^^^ v).setWidth n = u.setWidth n ^^^ v.setWidth n := setWidth_xor n u v
+    simp only [gf2Dot, BitVec.getLsbD_xor, hSet, gf2Dot_xor_right n]
+    cases r.getLsbD n <;> cases u.getLsbD n <;> cases v.getLsbD n <;>
+      cases gf2Dot n (r.setWidth n) (u.setWidth n) <;>
+      cases gf2Dot n (r.setWidth n) (v.setWidth n) <;> rfl
+
+private theorem gf2Dot_comm : ∀ (n : Nat) (r v : BitVec n), gf2Dot n r v = gf2Dot n v r
+  | 0, _, _ => rfl
+  | n + 1, r, v => by
+    simp only [gf2Dot, Bool.and_comm, gf2Dot_comm n]
+
+/-- Exact hyperplane balance over $\mathrm{GF}(2)^n$: for any nonzero $v \in \mathrm{BitVec}\, n$ and $b \in \mathrm{Bool}$,
+    $|\{r \in \mathrm{BitVec}\, n \mid \langle r, v \rangle = b\}| = 2^{n - 1}$. -/
+theorem gf2Dot_balanced : ∀ (n : Nat) (v : BitVec n) (_hv : v ≠ 0#n) (b : Bool),
+    intBvSum n (fun r => if gf2Dot n r v = b then 1 else 0) = ((2 ^ (n - 1) : Nat) : Int)
+  | 0, v, hv, _ => False.elim (hv (BitVec.eq_nil v))
+  | n + 1, v, hv, b => by
+    simp only [intBvSum, Nat.add_sub_cancel]
+    have hConsStep : ∀ (rHi : Bool) (rLo : BitVec n),
+        gf2Dot (n + 1) (BitVec.cons rHi rLo) v =
+          ((rHi && v.getLsbD n) ^^ gf2Dot n rLo (v.setWidth n)) := by
+      intro rHi rLo
+      have hSet : (BitVec.cons rHi rLo).setWidth n = rLo := setWidth_cons rHi rLo
+      conv => lhs; unfold gf2Dot
+      simp only [BitVec.getLsbD_cons, ↓reduceIte, hSet]
+    cases hvHi : v.getLsbD n
+    · -- `v_hi = false` => `v.setWidth n ≠ 0#n` and `n ≥ 1`
+      have hvLo : v.setWidth n ≠ 0#n := by
+        intro hZeroLo
+        apply hv
+        have hSplit : BitVec.cons (v.getLsbD n) (v.setWidth n) = v := bvCons_split v
+        rw [← hSplit, hvHi, hZeroLo, bvZero_eq_cons]
+      have hnPos : 1 ≤ n := by
+        cases n with
+        | zero => exact False.elim (hvLo (BitVec.eq_nil _))
+        | succ n' => omega
+      have hL : intBvSum n (fun rLo => if gf2Dot (n + 1) (BitVec.cons false rLo) v = b then (1 : Int) else 0) =
+          intBvSum n (fun rLo => if gf2Dot n rLo (v.setWidth n) = b then 1 else 0) := by
+        apply intBvSum_congr; intro rLo; simp only [hConsStep, hvHi, Bool.and_false, Bool.false_xor]
+      have hR : intBvSum n (fun rLo => if gf2Dot (n + 1) (BitVec.cons true rLo) v = b then (1 : Int) else 0) =
+          intBvSum n (fun rLo => if gf2Dot n rLo (v.setWidth n) = b then 1 else 0) := by
+        apply intBvSum_congr; intro rLo; simp only [hConsStep, hvHi, Bool.and_false, Bool.false_xor]
+      rw [hL, hR, gf2Dot_balanced n (v.setWidth n) hvLo b]
+      have hPow : 2 ^ n = 2 ^ (n - 1) + 2 ^ (n - 1) := by
+        have hEq : n = (n - 1) + 1 := by omega
+        conv => lhs; rw [hEq, Nat.pow_succ]
+        omega
+      rw [hPow, Int.natCast_add]
+    · -- `v_hi = true` => for every `rLo`, `rHi = false` and `rHi = true` give opposite bits `g` and `!g`, summing to `1`!
+      rw [← intBvSum_add]
+      have hOneEach : ∀ rLo : BitVec n,
+          (if gf2Dot (n + 1) (BitVec.cons false rLo) v = b then (1 : Int) else 0) +
+          (if gf2Dot (n + 1) (BitVec.cons true rLo) v = b then 1 else 0) = 1 := by
+        intro rLo
+        rw [hConsStep false rLo, hConsStep true rLo, hvHi]
+        cases gf2Dot n rLo (v.setWidth n) <;> cases b <;> decide
+      rw [intBvSum_congr hOneEach, intBvSum_const, Int.mul_one]
+
+/-- Systematic $m \times (n + m)$ `GF(2)` universal linear hash $[R_{m \times n} \mid I_m]$:
+    at $n = 256, m = 128$, `BitVec (256 * 128) → BitVec (256 + 128) → BitVec 128` is
+    definitionally `BitVec 32768 → BitVec 384 → BitVec 128` matching `preprocessing.rs`! -/
+@[expose] def evalSystematicGF2 (n : Nat) : (m : Nat) → BitVec (n * m) → BitVec (n + m) → BitVec m
+  | 0, _, _ => 0#0
+  | m + 1, R, x =>
+    BitVec.cons
+      (x.getLsbD (n + m) ^^ gf2Dot n (R.extractLsb' (n * m) n) (x.setWidth n))
+      (evalSystematicGF2 n m (R.setWidth (n * m)) (x.setWidth (n + m)))
+
+/-- Concrete `128 × 384` `GF(2)` base-OT combiner (`256` entropy-slack bits + `128` systematic bits). -/
+abbrev evalGf2Combiner128x384 : BitVec 32768 → BitVec 384 → BitVec 128 :=
+  evalSystematicGF2 256 128
+
+theorem evalSystematicGF2_xor (n : Nat) : ∀ (m : Nat) (R : BitVec (n * m)) (x x' : BitVec (n + m)),
+    evalSystematicGF2 n m R (x ^^^ x') =
+      (evalSystematicGF2 n m R x ^^^ evalSystematicGF2 n m R x')
+  | 0, _, _, _ => (BitVec.eq_nil _).trans (BitVec.eq_nil _).symm
+  | m + 1, R, x, x' => by
+    have hSetCore : (x ^^^ x').setWidth n = x.setWidth n ^^^ x'.setWidth n := setWidth_xor n x x'
+    have hSetRest : (x ^^^ x').setWidth (n + m) = x.setWidth (n + m) ^^^ x'.setWidth (n + m) :=
+      setWidth_xor (n + m) x x'
+    have hConsXor : ∀ (b₁ b₂ : Bool) (u₁ u₂ : BitVec m),
+        (BitVec.cons b₁ u₁ ^^^ BitVec.cons b₂ u₂) = BitVec.cons (b₁ ^^ b₂) (u₁ ^^^ u₂) := by
+      intro b₁ b₂ u₁ u₂
+      apply BitVec.eq_of_getLsbD_eq; intro i _
+      simp only [BitVec.getLsbD_xor, BitVec.getLsbD_cons]
+      split <;> rfl
+    simp only [evalSystematicGF2, BitVec.getLsbD_xor, hSetCore, hSetRest, gf2Dot_xor_right,
+      evalSystematicGF2_xor n m, hConsXor]
+    congr 1
+    cases x.getLsbD (n + m) <;> cases x'.getLsbD (n + m) <;>
+      cases gf2Dot n (R.extractLsb' (n * m) n) (x.setWidth n) <;>
+      cases gf2Dot n (R.extractLsb' (n * m) n) (x'.setWidth n) <;> rfl
+
+private def bvAppendLoHi (a : Nat) : (b : Nat) → BitVec a → BitVec b → BitVec (a + b)
+  | 0, lo, _ => lo
+  | b + 1, lo, hi => BitVec.cons (hi.getLsbD b) (bvAppendLoHi a b lo (hi.setWidth b))
+
+private theorem bvAppendLoHi_setWidth (a : Nat) : ∀ (b : Nat) (lo : BitVec a) (hi : BitVec b),
+    (bvAppendLoHi a b lo hi).setWidth a = lo
+  | 0, lo, _ => by
+    apply BitVec.eq_of_getLsbD_eq; intro i hiLt
+    exact getLsbD_setWidth_of_lt lo hiLt
+  | b + 1, lo, hi => by
+    apply BitVec.eq_of_getLsbD_eq; intro i hiLt
+    have ih := bvAppendLoHi_setWidth a b lo (hi.setWidth b)
+    have hLtAb : i < a + b := by omega
+    rw [getLsbD_setWidth_of_lt _ hiLt]
+    dsimp only [bvAppendLoHi]
+    rw [getLsbD_cons_of_lt _ _ hLtAb]
+    have hEq := congrArg (fun v => v.getLsbD i) ih
+    rwa [getLsbD_setWidth_of_lt _ hiLt] at hEq
+
+private theorem bvAppendLoHi_extractHi (a : Nat) : ∀ (b : Nat) (lo : BitVec a) (hi : BitVec b),
+    (bvAppendLoHi a b lo hi).extractLsb' a b = hi
+  | 0, _, hi => (BitVec.eq_nil _).trans (BitVec.eq_nil hi).symm
+  | b + 1, lo, hi => by
+    apply BitVec.eq_of_getLsbD_eq; intro i hiLt
+    simp only [BitVec.getLsbD_extractLsb', hiLt, decide_true, Bool.true_and]
+    dsimp only [bvAppendLoHi]
+    by_cases hib : i = b
+    · subst hib
+      simp only [BitVec.getLsbD_cons]
+      split
+      · rfl
+      · rename_i hNe; exact False.elim (hNe rfl)
+    · have hltB : i < b := by omega
+      have hLtAb : a + i < a + b := by omega
+      rw [getLsbD_cons_of_lt _ _ hLtAb]
+      have ih := bvAppendLoHi_extractHi a b lo (hi.setWidth b)
+      have hExtr : ((bvAppendLoHi a b lo (hi.setWidth b)).extractLsb' a b).getLsbD i =
+          (hi.setWidth b).getLsbD i := by rw [ih]
+      simp only [BitVec.getLsbD_extractLsb', hltB, decide_true, Bool.true_and] at hExtr
+      rwa [getLsbD_setWidth_of_lt _ hltB] at hExtr
+
+private theorem intBvSum_split_lo_hi (a : Nat) : ∀ (b : Nat) (g : BitVec (a + b) → Int),
+    intBvSum (a + b) g = intBvSum b (fun hi => intBvSum a (fun lo => g (bvAppendLoHi a b lo hi)))
+  | 0, g => by
+    simp only [Nat.add_zero, intBvSum]
+    apply intBvSum_congr; intro lo; rfl
+  | b + 1, g => by
+    change intBvSum (a + b) (fun v => g (BitVec.cons false v)) +
+           intBvSum (a + b) (fun v => g (BitVec.cons true v)) =
+           intBvSum b (fun hi => intBvSum a (fun lo => g (bvAppendLoHi a (b + 1) lo (BitVec.cons false hi)))) +
+           intBvSum b (fun hi => intBvSum a (fun lo => g (bvAppendLoHi a (b + 1) lo (BitVec.cons true hi))))
+    rw [intBvSum_split_lo_hi a b, intBvSum_split_lo_hi a b]
+    congr 1
+    · apply intBvSum_congr; intro hi; apply intBvSum_congr; intro lo
+      have hSet : (BitVec.cons false hi).setWidth b = hi := setWidth_cons false hi
+      simp only [bvAppendLoHi, BitVec.getLsbD_cons, ↓reduceIte, hSet]
+    · apply intBvSum_congr; intro hi; apply intBvSum_congr; intro lo
+      have hSet : (BitVec.cons true hi).setWidth b = hi := setWidth_cons true hi
+      simp only [bvAppendLoHi, BitVec.getLsbD_cons, ↓reduceIte, hSet]
+
+private theorem evalSystematicGF2_zero_core_ne (n : Nat) :
+    ∀ (m : Nat) (R : BitVec (n * m)) (d : BitVec (n + m)),
+      d.setWidth n = 0#n → d ≠ 0#(n + m) → evalSystematicGF2 n m R d ≠ 0#m
+  | 0, _, d, hCore, hNe => by
+    intro _
+    apply hNe
+    apply BitVec.eq_of_getLsbD_eq; intro i hi
+    have hiN : i < n := by omega
+    have hBit : (d.setWidth n).getLsbD i = (0#n).getLsbD i := by rw [hCore]
+    rw [getLsbD_setWidth_of_lt _ hiN, BitVec.getLsbD_zero] at hBit
+    rw [BitVec.getLsbD_zero]
+    exact hBit
+  | m + 1, R, d, hCore, hNe => by
+    simp only [evalSystematicGF2, hCore, gf2Dot_zero_right, Bool.xor_false]
+    intro hEq0
+    rw [bvZero_eq_cons] at hEq0
+    obtain ⟨hBit0, hRest0⟩ := bvCons_inj.mp hEq0
+    have hCoreRest : (d.setWidth (n + m)).setWidth n = 0#n := by
+      apply BitVec.eq_of_getLsbD_eq; intro i hi
+      have hLt : i < n + m := by omega
+      rw [getLsbD_setWidth_of_lt _ hi, getLsbD_setWidth_of_lt _ hLt]
+      have hB : (d.setWidth n).getLsbD i = (0#n).getLsbD i := by rw [hCore]
+      rwa [getLsbD_setWidth_of_lt _ hi] at hB
+    have hRestZero : d.setWidth (n + m) = 0#(n + m) := by
+      by_cases hNz : d.setWidth (n + m) = 0#(n + m)
+      · exact hNz
+      · exact False.elim (evalSystematicGF2_zero_core_ne n m (R.setWidth (n * m))
+          (d.setWidth (n + m)) hCoreRest hNz hRest0)
+    apply hNe
+    have hSplit : BitVec.cons (d.getLsbD (n + m)) (d.setWidth (n + m)) = d := bvCons_split d
+    rw [← hSplit, hBit0, hRestZero]
+    exact (bvZero_eq_cons (n + m)).symm
+
+private theorem evalSystematicGF2_nonzero_core_exact (n : Nat) (hn : 1 ≤ n) :
+    ∀ (m : Nat) (d : BitVec (n + m)),
+      d.setWidth n ≠ 0#n →
+      intBvSum (n * m) (fun R => if evalSystematicGF2 n m R d = 0#m then 1 else 0) =
+        ((2 ^ (n * m - m) : Nat) : Int)
+  | 0, d, _ => by
+    simp only [Nat.mul_zero, Nat.sub_zero, Nat.pow_zero, intBvSum]
+    have h0 : evalSystematicGF2 n 0 0#0 d = 0#0 := rfl
+    simp only [h0, ↓reduceIte]
+    rfl
+  | m + 1, d, hCoreNz => by
+    change intBvSum (n * m + n) _ = _
+    rw [intBvSum_split_lo_hi (n * m) n]
+    have hCoreRest : (d.setWidth (n + m)).setWidth n = d.setWidth n := by
+      apply BitVec.eq_of_getLsbD_eq; intro i hi
+      have hLt : i < n + m := by omega
+      rw [getLsbD_setWidth_of_lt _ hi, getLsbD_setWidth_of_lt _ hLt, getLsbD_setWidth_of_lt _ hi]
+    have hInner : ∀ hi : BitVec n,
+        intBvSum (n * m) (fun lo =>
+          if evalSystematicGF2 n (m + 1) (bvAppendLoHi (n * m) n lo hi) d = 0#(m + 1) then (1 : Int) else 0) =
+        (if gf2Dot n hi (d.setWidth n) = d.getLsbD (n + m) then 1 else 0) *
+          ((2 ^ (n * m - m) : Nat) : Int) := by
+      intro hi
+      have hEach : ∀ lo : BitVec (n * m),
+          (if evalSystematicGF2 n (m + 1) (bvAppendLoHi (n * m) n lo hi) d = 0#(m + 1) then (1 : Int) else 0) =
+          (if gf2Dot n hi (d.setWidth n) = d.getLsbD (n + m) then 1 else 0) *
+            (if evalSystematicGF2 n m lo (d.setWidth (n + m)) = 0#m then 1 else 0) := by
+        intro lo
+        simp only [evalSystematicGF2, bvAppendLoHi_extractHi, bvAppendLoHi_setWidth]
+        conv => lhs; rw [bvZero_eq_cons]
+        by_cases hRow : gf2Dot n hi (d.setWidth n) = d.getLsbD (n + m)
+        · have hXor0 : (d.getLsbD (n + m) ^^ gf2Dot n hi (d.setWidth n)) = false := by
+            rw [hRow]; cases d.getLsbD (n + m) <;> rfl
+          rw [hXor0, hRow]
+          simp only [bvCons_inj, true_and, ↓reduceIte, Int.one_mul]
+        · have hXor1 : (d.getLsbD (n + m) ^^ gf2Dot n hi (d.setWidth n)) = true := by
+            cases hb1 : d.getLsbD (n + m) <;> cases hb2 : gf2Dot n hi (d.setWidth n) <;> simp_all
+          rw [hXor1]
+          simp only [hRow, bvCons_inj, Bool.true_eq_false, false_and, ↓reduceIte, Int.zero_mul]
+      rw [intBvSum_congr hEach, intBvSum_mul_left,
+          evalSystematicGF2_nonzero_core_exact n hn m (d.setWidth (n + m)) (hCoreRest.symm ▸ hCoreNz)]
+    rw [intBvSum_congr hInner, intBvSum_mul_right,
+        gf2Dot_balanced n (d.setWidth n) hCoreNz (d.getLsbD (n + m))]
+    rw [← Int.natCast_mul, ← Nat.pow_add]
+    congr 2
+    have hGe : m ≤ n * m := by
+      have := Nat.mul_le_mul_right m hn; simpa using this
+    have hMulSucc : n * (m + 1) = n * m + n := Nat.mul_succ n m
+    omega
+
+/-- **Exact 2-Universality of `evalSystematicGF2` (`evalSystematicGF2_two_universal`)**:
+    For every $n \ge 1, m \ge 0$ and distinct inputs $x \neq x' \in \mathrm{BitVec}\,(n + m)$,
+    at most $2^{nm - m} = |\mathcal{R}| / 2^m$ matrices $R$ collide (exact $2^{nm - m}$ when $x, x'$
+    differ in the lower $n$ slack bits, and $0$ collisions when they differ only in the upper $m$ bits!). -/
+theorem evalSystematicGF2_two_universal (n m : Nat) (hn : 1 ≤ n)
+    (x x' : BitVec (n + m)) (hNe : x ≠ x') :
+    intBvSum (n * m) (fun R => if evalSystematicGF2 n m R x = evalSystematicGF2 n m R x' then 1 else 0) ≤
+      ((2 ^ (n * m - m) : Nat) : Int) := by
+  let d := x ^^^ x'
+  have hdNe : d ≠ 0#(n + m) := by
+    intro hd0
+    apply hNe
+    have hx := congrArg (x ^^^ ·) hd0
+    dsimp only [d] at hx
+    rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor, BitVec.xor_zero] at hx
+    exact hx.symm
+  have hDiff : ∀ R : BitVec (n * m),
+      (evalSystematicGF2 n m R x = evalSystematicGF2 n m R x') ↔
+        (evalSystematicGF2 n m R d = 0#m) := by
+    intro R
+    dsimp only [d]
+    rw [evalSystematicGF2_xor]
+    constructor
+    · intro hEq; rw [hEq, BitVec.xor_self]
+    · intro hZ
+      have hx := congrArg (evalSystematicGF2 n m R x ^^^ ·) hZ
+      rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor, BitVec.xor_zero] at hx
+      exact hx.symm
+  have hCongr : intBvSum (n * m) (fun R => if evalSystematicGF2 n m R x = evalSystematicGF2 n m R x' then (1 : Int) else 0) =
+      intBvSum (n * m) (fun R => if evalSystematicGF2 n m R d = 0#m then 1 else 0) := by
+    apply intBvSum_congr; intro R; simp only [hDiff R]
+  rw [hCongr]
+  by_cases hCore : d.setWidth n = 0#n
+  · have hZeroEach : ∀ R : BitVec (n * m),
+        (if evalSystematicGF2 n m R d = 0#m then (1 : Int) else 0) = 0 := by
+      intro R
+      have hNz := evalSystematicGF2_zero_core_ne n m R d hCore hdNe
+      simp only [hNz, ↓reduceIte]
+    rw [intBvSum_congr hZeroEach, intBvSum_const, Int.mul_zero]
+    exact Int.natCast_nonneg _
+  · rw [evalSystematicGF2_nonzero_core_exact n hn m d hCore]
+    exact Int.le_refl _
+
+/-! ### 3.4 Constructive Integer Cauchy-Schwarz & Finite Leftover Hash Lemma (`[P0-05]`) -/
+
+private theorem int_sq_nonneg (z : Int) : 0 ≤ z * z := by
+  by_cases h : 0 ≤ z
+  · exact Int.mul_nonneg h h
+  · have hn : 0 ≤ -z := by omega
+    have hm := Int.mul_nonneg hn hn
+    simpa only [Int.neg_mul_neg] using hm
+
+/-- Constructive hypercube Cauchy-Schwarz inequality (`0 Classical.choice`, `0` reals):
+    $\left(\sum_{u \in \mathrm{BitVec}\, k} |f(u)|\right)^2 \le 2^k \sum_{u \in \mathrm{BitVec}\, k} f(u)^2$. -/
+private theorem intBvSum_abs_sq_le : ∀ (k : Nat) (f : BitVec k → Int),
+    let s1 := intBvSum k (fun u => ((f u).natAbs : Int))
+    s1 * s1 ≤ ((2 ^ k : Nat) : Int) * intBvSum k (fun u => f u * f u)
+  | 0, f => by
+    simp only [intBvSum, Nat.pow_zero, Int.natCast_one, Int.one_mul]
+    have hAbsSq : ((f 0#0).natAbs : Int) * ((f 0#0).natAbs : Int) = f 0#0 * f 0#0 := by
+      rw [← Int.natCast_mul, Int.natAbs_mul_self]
+    rw [hAbsSq]; exact Int.le_refl _
+  | k + 1, f => by
+    simp only [intBvSum, Nat.pow_succ, Int.natCast_mul]
+    have ih0 := intBvSum_abs_sq_le k (fun v => f (BitVec.cons false v))
+    have ih1 := intBvSum_abs_sq_le k (fun v => f (BitVec.cons true v))
+    let A0 := intBvSum k (fun v => ((f (BitVec.cons false v)).natAbs : Int))
+    let A1 := intBvSum k (fun v => ((f (BitVec.cons true v)).natAbs : Int))
+    let S0 := intBvSum k (fun v => f (BitVec.cons false v) * f (BitVec.cons false v))
+    let S1 := intBvSum k (fun v => f (BitVec.cons true v) * f (BitVec.cons true v))
+    change (A0 + A1) * (A0 + A1) ≤ (((2 ^ k : Nat) : Int) * 2) * (S0 + S1)
+    have hDiffSq : 0 ≤ (A0 - A1) * (A0 - A1) := int_sq_nonneg (A0 - A1)
+    have hIdent : (A0 + A1) * (A0 + A1) + (A0 - A1) * (A0 - A1) = 2 * (A0 * A0 + A1 * A1) := by
+      simp only [Int.mul_add, Int.add_mul, Int.mul_sub, Int.sub_mul]
+      rw [Int.mul_comm A1 A0]
+      omega
+    have hTwoLe : (A0 + A1) * (A0 + A1) ≤ 2 * (A0 * A0 + A1 * A1) := by omega
+    have hSumIh : A0 * A0 + A1 * A1 ≤ ((2 ^ k : Nat) : Int) * S0 + ((2 ^ k : Nat) : Int) * S1 :=
+      Int.add_le_add ih0 ih1
+    have hRhsEq : 2 * (((2 ^ k : Nat) : Int) * S0 + ((2 ^ k : Nat) : Int) * S1) =
+        (((2 ^ k : Nat) : Int) * 2) * (S0 + S1) := by
+      rw [← Int.mul_add ((2 ^ k : Nat) : Int) S0 S1, ← Int.mul_assoc 2, Int.mul_comm 2 ((2 ^ k : Nat) : Int)]
+    exact Int.le_trans hTwoLe (hRhsEq ▸ Int.mul_le_mul_of_nonneg_left hSumIh (by decide))
+
+private theorem intBvSum_fiber_total {inBits m : Nat}
+    (h : BitVec inBits → BitVec m) (w : BitVec inBits → Int) :
+    intBvSum m (fun y => intBvSum inBits (fun x => if h x = y then w x else 0)) =
+      intBvSum inBits w := by
+  rw [intBvSum_comm]
+  apply intBvSum_congr; intro x
+  have hFactor : ∀ y : BitVec m,
+      (if h x = y then w x else 0) = w x * (if y = h x then 1 else 0) := by
+    intro y
+    by_cases hy : y = h x
+    · subst hy; simp only [↓reduceIte, Int.mul_one]
+    · have hne : h x ≠ y := fun heq => hy heq.symm
+      simp only [hy, hne, ↓reduceIte, Int.mul_zero]
+  rw [intBvSum_congr hFactor, intBvSum_mul_left, intBvSum_indicator_one, Int.mul_one]
+
+private theorem intBvSum_fiber_sq {inBits m : Nat}
+    (h : BitVec inBits → BitVec m) (w : BitVec inBits → Int) :
+    intBvSum m (fun y =>
+      let M := intBvSum inBits (fun x => if h x = y then w x else 0)
+      M * M) =
+    intBvSum inBits (fun x => intBvSum inBits (fun x' => if h x = h x' then w x * w x' else 0)) := by
+  have hExpandY : ∀ y : BitVec m,
+      (intBvSum inBits (fun x => if h x = y then w x else 0)) *
+      (intBvSum inBits (fun x' => if h x' = y then w x' else 0)) =
+      intBvSum inBits (fun x => intBvSum inBits (fun x' =>
+        (if h x = y then w x else 0) * (if h x' = y then w x' else 0))) := by
+    intro y
+    rw [← intBvSum_mul_right]
+    apply intBvSum_congr; intro x
+    rw [← intBvSum_mul_left]
+  rw [intBvSum_congr hExpandY, intBvSum_comm]
+  apply intBvSum_congr; intro x
+  rw [intBvSum_comm]
+  apply intBvSum_congr; intro x'
+  by_cases hEq : h x = h x'
+  · simp only [hEq, ↓reduceIte]
+    have hPair : ∀ y : BitVec m,
+        (if h x' = y then w x else 0) * (if h x' = y then w x' else 0) =
+          (w x * w x') * (if y = h x' then 1 else 0) := by
+      intro y
+      by_cases hy : y = h x'
+      · subst hy; simp only [↓reduceIte, Int.mul_one]
+      · have hne : h x' ≠ y := fun he => hy he.symm
+        simp only [hy, hne, ↓reduceIte, Int.mul_zero]
+    rw [intBvSum_congr hPair, intBvSum_mul_left, intBvSum_indicator_one, Int.mul_one]
+  · simp only [hEq, ↓reduceIte]
+    have hZero : ∀ y : BitVec m,
+        (if h x = y then w x else 0) * (if h x' = y then w x' else 0) = 0 := by
+      intro y
+      by_cases hy : h x = y
+      · subst hy
+        have hne' : h x' ≠ h x := fun he => hEq he.symm
+        simp only [↓reduceIte, hne', Int.mul_zero]
+      · simp only [hy, ↓reduceIte, Int.zero_mul]
+    rw [intBvSum_congr hZero, intBvSum_const, Int.mul_zero]
+
+/-- Unnormalized $L_1$ statistical distance numerator of $(R, H_R(X))$ from uniform $\mathcal{R} \times \mathrm{BitVec}\, m$.
+    Dividing `lhlScaledL1 H w` by `2 * 2^seedBits * 2^m * W` yields exact total variation distance $\Delta_{\mathrm{TV}}$. -/
+def lhlScaledL1 {seedBits inBits m : Nat}
+    (H : BitVec seedBits → BitVec inBits → BitVec m)
+    (w : BitVec inBits → Nat) : Nat :=
+  bvSum seedBits (fun R =>
+    bvSum m (fun y =>
+      natDist
+        ((2 ^ m) * bvSum inBits (fun x => if H R x = y then w x else 0))
+        (bvSum inBits w)))
+
+/-- **Constructive Finite Leftover Hash Lemma / Collision-Entropy Bound (`finite_lhl_collision_bound`)**:
+    For ANY 2-universal hash family `H : BitVec seedBits → BitVec inBits → BitVec m` (`m ≤ seedBits`)
+    and ANY finite source mass distribution `w : BitVec inBits → Nat` with total mass `W = bvSum inBits w > 0`
+    and collision mass `C2 = bvSum inBits (fun x => w x * w x)`:
+    $$\Delta_{\mathrm{TV}}\big((R, H_R(X)),\, U_{\mathcal{R}} \times U_m\big)^2 \le \frac{2^m \cdot C_2}{4 \cdot W^2},$$
+    certified constructively via `ratLe (L1^2, (2 * K * 2^m * W)^2) (2^m * C2, 4 * W^2)` (`0 Classical.choice`)! -/
+theorem finite_lhl_collision_bound {seedBits inBits m : Nat}
+    (H : BitVec seedBits → BitVec inBits → BitVec m)
+    (hLeBits : m ≤ seedBits)
+    (hTwoUniv : ∀ x x' : BitVec inBits, x ≠ x' →
+      intBvSum seedBits (fun R => if H R x = H R x' then 1 else 0) ≤
+        ((2 ^ (seedBits - m) : Nat) : Int))
+    (w : BitVec inBits → Nat)
+    (hWPos : 0 < bvSum inBits w) :
+    let K := 2 ^ seedBits
+    let W := bvSum inBits w
+    let C2 := bvSum inBits (fun x => w x * w x)
+    let L1 := lhlScaledL1 H w
+    L1 * L1 ≤ K * K * (2 ^ (3 * m)) * C2 ∧
+    ratLe (L1 * L1, (2 * K * (2 ^ m) * W) * (2 * K * (2 ^ m) * W))
+          ((2 ^ m) * C2, 4 * (W * W)) := by
+  intro K W C2 L1
+  let wInt : BitVec inBits → Int := fun x => (w x : Int)
+  let WInt : Int := intBvSum inBits wInt
+  let C2Int : Int := intBvSum inBits (fun x => wInt x * wInt x)
+  have hWEq : (W : Int) = WInt := intBvSum_of_bvSum inBits w
+  have hC2Eq : (C2 : Int) = C2Int := by
+    rw [intBvSum_of_bvSum]
+    apply intBvSum_congr; intro x; exact Int.natCast_mul (w x) (w x)
+  let diffFn : BitVec seedBits → BitVec m → Int := fun R y =>
+    ((2 ^ m : Nat) : Int) * intBvSum inBits (fun x => if H R x = y then wInt x else 0) - WInt
+  have hNatAbsEq : ∀ (a b : Nat), (natDist a b : Int) = (((a : Int) - (b : Int)).natAbs : Int) := by
+    intro a b; unfold natDist; split <;> omega
+  have hL1Int : (L1 : Int) = intBvSum seedBits (fun R => intBvSum m (fun y => ((diffFn R y).natAbs : Int))) := by
+    dsimp only [L1]
+    unfold lhlScaledL1
+    rw [intBvSum_of_bvSum]
+    apply intBvSum_congr; intro R
+    rw [intBvSum_of_bvSum]
+    apply intBvSum_congr; intro y
+    rw [hNatAbsEq, Int.natCast_mul, hWEq]
+    have hFib : (bvSum inBits (fun x => if H R x = y then w x else 0) : Int) =
+        intBvSum inBits (fun x => if H R x = y then wInt x else 0) := by
+      rw [intBvSum_of_bvSum]
+      apply intBvSum_congr; intro x; split <;> rfl
+    rw [hFib]
+  -- Variance expansion for each fixed seed `R`:
+  have hVarR : ∀ R : BitVec seedBits,
+      intBvSum m (fun y => diffFn R y * diffFn R y) =
+        ((2 ^ (2 * m) : Nat) : Int) *
+          intBvSum inBits (fun x => intBvSum inBits (fun x' => if H R x = H R x' then wInt x * wInt x' else 0)) -
+        ((2 ^ m : Nat) : Int) * (WInt * WInt) := by
+    intro R
+    let M : BitVec m → Int := fun y => intBvSum inBits (fun x => if H R x = y then wInt x else 0)
+    have hExpandSq : ∀ y : BitVec m,
+        diffFn R y * diffFn R y =
+          (((2 ^ (2 * m) : Nat) : Int) * (M y * M y) - (2 * ((2 ^ m : Nat) : Int) * WInt) * M y) + WInt * WInt := by
+      intro y
+      have hPow2m : ((2 ^ (2 * m) : Nat) : Int) = ((2 ^ m : Nat) : Int) * ((2 ^ m : Nat) : Int) := by
+        rw [← Int.natCast_mul, ← Nat.pow_add, Nat.two_mul]
+      dsimp only [diffFn, M]
+      rw [hPow2m]
+      let P := ((2 ^ m : Nat) : Int)
+      let My := intBvSum inBits (fun x => if H R x = y then wInt x else 0)
+      show (P * My - WInt) * (P * My - WInt) =
+        ((P * P) * (My * My) - (2 * P * WInt) * My) + WInt * WInt
+      calc
+        (P * My - WInt) * (P * My - WInt)
+          = (P * My) * (P * My) - (P * My) * WInt - WInt * (P * My) + WInt * WInt := by
+            simp only [Int.sub_mul, Int.mul_sub]; omega
+        _ = (P * P) * (My * My) - (2 * P * WInt) * My + WInt * WInt := by
+            have h1 : (P * My) * (P * My) = (P * P) * (My * My) := by
+              rw [Int.mul_assoc P My (P * My), ← Int.mul_assoc My P My, Int.mul_comm My P,
+                  Int.mul_assoc P My My, ← Int.mul_assoc P P (My * My)]
+            have h2 : (P * My) * WInt = (P * WInt) * My := by
+              rw [Int.mul_assoc, Int.mul_comm My WInt, ← Int.mul_assoc]
+            have h3 : WInt * (P * My) = (P * WInt) * My := by
+              rw [← Int.mul_assoc, Int.mul_comm WInt P]
+            rw [h1, h2, h3]
+            have h4 : (2 * P * WInt) * My = (P * WInt) * My + (P * WInt) * My := by
+              have : 2 * P * WInt = P * WInt + P * WInt := by
+                rw [Int.mul_assoc]; omega
+              rw [this, Int.add_mul]
+            omega
+    rw [intBvSum_congr hExpandSq, intBvSum_add, intBvSum_sub,
+        intBvSum_mul_left, intBvSum_mul_left, intBvSum_const,
+        intBvSum_fiber_total (H R) wInt, intBvSum_fiber_sq (H R) wInt]
+    let S := intBvSum inBits (fun x => intBvSum inBits (fun x' => if H R x = H R x' then wInt x * wInt x' else 0))
+    let P := ((2 ^ m : Nat) : Int)
+    let P2 := ((2 ^ (2 * m) : Nat) : Int)
+    show (P2 * S - (2 * P * WInt) * WInt) + P * (WInt * WInt) = P2 * S - P * (WInt * WInt)
+    have hMid : (2 * P * WInt) * WInt = P * (WInt * WInt) + P * (WInt * WInt) := by
+      have : 2 * P * WInt = P * WInt + P * WInt := by
+        rw [Int.mul_assoc]; omega
+      rw [this, Int.add_mul, Int.mul_assoc]
+    omega
+  -- Sum variance across all `R ∈ BitVec seedBits` and apply 2-universality:
+  have hPairBound : ∀ x x' : BitVec inBits,
+      intBvSum seedBits (fun R => if H R x = H R x' then wInt x * wInt x' else 0) ≤
+        (if x = x' then ((K : Nat) : Int) else ((2 ^ (seedBits - m) : Nat) : Int)) * (wInt x * wInt x') := by
+    intro x x'
+    have hFactor : ∀ R : BitVec seedBits,
+        (if H R x = H R x' then wInt x * wInt x' else 0) =
+          (if H R x = H R x' then 1 else 0) * (wInt x * wInt x') := by
+      intro R; split <;> simp only [Int.one_mul, Int.zero_mul]
+    rw [intBvSum_congr hFactor, intBvSum_mul_right]
+    have hNonneg : 0 ≤ wInt x * wInt x' := Int.mul_nonneg (Int.natCast_nonneg _) (Int.natCast_nonneg _)
+    by_cases hxx : x = x'
+    · subst hxx
+      simp only [↓reduceIte, intBvSum_const, Int.mul_one]
+      exact Int.le_refl _
+    · simp only [hxx, ↓reduceIte]
+      exact Int.mul_le_mul_of_nonneg_right (hTwoUniv x x' hxx) hNonneg
+  have hSumCollLe :
+      intBvSum seedBits (fun R =>
+        intBvSum inBits (fun x => intBvSum inBits (fun x' => if H R x = H R x' then wInt x * wInt x' else 0))) ≤
+      (K : Int) * C2Int + ((2 ^ (seedBits - m) : Nat) : Int) * (WInt * WInt) := by
+    rw [intBvSum_comm]
+    have hExch : ∀ x : BitVec inBits,
+        intBvSum seedBits (fun R => intBvSum inBits (fun x' => if H R x = H R x' then wInt x * wInt x' else 0)) =
+        intBvSum inBits (fun x' => intBvSum seedBits (fun R => if H R x = H R x' then wInt x * wInt x' else 0)) :=
+      fun _ => intBvSum_comm seedBits inBits _
+    rw [intBvSum_congr hExch]
+    have hStep1 :
+        intBvSum inBits (fun x => intBvSum inBits (fun x' =>
+          intBvSum seedBits (fun R => if H R x = H R x' then wInt x * wInt x' else 0))) ≤
+        intBvSum inBits (fun x => intBvSum inBits (fun x' =>
+          (if x = x' then (K : Int) * (wInt x * wInt x') else 0) +
+          ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x'))) := by
+      apply intBvSum_le; intro x; apply intBvSum_le; intro x'
+      have hb := hPairBound x x'
+      by_cases hxx : x = x'
+      · subst hxx
+        have hNonneg : 0 ≤ ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x) :=
+          Int.mul_nonneg (Int.natCast_nonneg _) (Int.mul_nonneg (Int.natCast_nonneg _) (Int.natCast_nonneg _))
+        simp only [↓reduceIte] at hb ⊢
+        omega
+      · simp only [hxx, ↓reduceIte] at hb ⊢
+        omega
+    have hDiag : intBvSum inBits (fun x => intBvSum inBits (fun x' =>
+        if x = x' then (K : Int) * (wInt x * wInt x') else 0)) = (K : Int) * C2Int := by
+      have hRow : ∀ x : BitVec inBits,
+          intBvSum inBits (fun x' => if x = x' then (K : Int) * (wInt x * wInt x') else 0) =
+            (K : Int) * (wInt x * wInt x) := by
+        intro x
+        have hEqInd : ∀ x' : BitVec inBits,
+            (if x = x' then (K : Int) * (wInt x * wInt x') else 0) =
+              ((K : Int) * (wInt x * wInt x)) * (if x' = x then 1 else 0) := by
+          intro x'
+          by_cases hx' : x' = x
+          · subst hx'; simp only [↓reduceIte, Int.mul_one]
+          · have hne : x ≠ x' := fun he => hx' he.symm
+            simp only [hx', hne, ↓reduceIte, Int.mul_zero]
+        rw [intBvSum_congr hEqInd, intBvSum_mul_left, intBvSum_indicator_one, Int.mul_one]
+      rw [intBvSum_congr hRow, intBvSum_mul_left]
+    have hAllPairs : intBvSum inBits (fun x => intBvSum inBits (fun x' =>
+        ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x'))) =
+        ((2 ^ (seedBits - m) : Nat) : Int) * (WInt * WInt) := by
+      have hRow : ∀ x : BitVec inBits,
+          intBvSum inBits (fun x' => ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x')) =
+            (((2 ^ (seedBits - m) : Nat) : Int) * wInt x) * WInt := by
+        intro x
+        have hAssoc : ∀ x' : BitVec inBits,
+            ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x') =
+              (((2 ^ (seedBits - m) : Nat) : Int) * wInt x) * wInt x' :=
+          fun _ => (Int.mul_assoc _ _ _).symm
+        rw [intBvSum_congr hAssoc, intBvSum_mul_left]
+      rw [intBvSum_congr hRow, intBvSum_mul_right, intBvSum_mul_left, Int.mul_assoc]
+    have hSplitSum :
+        intBvSum inBits (fun x => intBvSum inBits (fun x' =>
+          (if x = x' then (K : Int) * (wInt x * wInt x') else 0) +
+          ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x'))) =
+        (K : Int) * C2Int + ((2 ^ (seedBits - m) : Nat) : Int) * (WInt * WInt) := by
+      have hIn : ∀ x : BitVec inBits,
+          intBvSum inBits (fun x' =>
+            (if x = x' then (K : Int) * (wInt x * wInt x') else 0) +
+            ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x')) =
+          intBvSum inBits (fun x' => if x = x' then (K : Int) * (wInt x * wInt x') else 0) +
+          intBvSum inBits (fun x' => ((2 ^ (seedBits - m) : Nat) : Int) * (wInt x * wInt x')) :=
+        fun _ => intBvSum_add _ _
+      rw [intBvSum_congr hIn, intBvSum_add, hDiag, hAllPairs]
+    exact hSplitSum ▸ hStep1
+  have hTotVarLe :
+      intBvSum seedBits (fun R => intBvSum m (fun y => diffFn R y * diffFn R y)) ≤
+        ((2 ^ (2 * m) : Nat) : Int) * ((K : Int) * C2Int) := by
+    rw [intBvSum_congr hVarR, intBvSum_sub, intBvSum_mul_left, intBvSum_const]
+    have hMul := Int.mul_le_mul_of_nonneg_left hSumCollLe (Int.natCast_nonneg (2 ^ (2 * m)))
+    rw [Int.mul_add] at hMul
+    have hCancelTerm :
+        ((2 ^ (2 * m) : Nat) : Int) * (((2 ^ (seedBits - m) : Nat) : Int) * (WInt * WInt)) =
+        (((2 ^ seedBits : Nat) : Int)) * (((2 ^ m : Nat) : Int) * (WInt * WInt)) := by
+      rw [← Int.mul_assoc ((2 ^ (2 * m) : Nat) : Int), ← Int.mul_assoc ((2 ^ seedBits : Nat) : Int),
+          ← Int.natCast_mul, ← Int.natCast_mul]
+      congr 2
+      rw [← Nat.pow_add, ← Nat.pow_add]
+      congr 1
+      omega
+    dsimp only [K] at hMul ⊢
+    rw [hCancelTerm] at hMul
+    omega
+  -- Apply two-level constructive Cauchy-Schwarz (`seedBits` then `m`):
+  have hCsTotal : (L1 : Int) * (L1 : Int) ≤
+      (K : Int) * ((2 ^ m : Nat) : Int) *
+        intBvSum seedBits (fun R => intBvSum m (fun y => diffFn R y * diffFn R y)) := by
+    rw [hL1Int]
+    let rowAbs : BitVec seedBits → Int := fun R => intBvSum m (fun y => ((diffFn R y).natAbs : Int))
+    have hOuter := intBvSum_abs_sq_le seedBits rowAbs
+    have hAbsRowEq : intBvSum seedBits (fun R => ((rowAbs R).natAbs : Int)) = intBvSum seedBits rowAbs := by
+      apply intBvSum_congr; intro R
+      have hNonneg : 0 ≤ rowAbs R := by
+        dsimp only [rowAbs]
+        have hZeroLe : ∀ y : BitVec m, (0 : Int) ≤ ((diffFn R y).natAbs : Int) :=
+          fun _ => Int.natCast_nonneg _
+        have h1 := intBvSum_le hZeroLe
+        rw [intBvSum_const, Int.mul_zero] at h1
+        exact h1
+      omega
+    rw [hAbsRowEq] at hOuter
+    have hInnerEach : ∀ R : BitVec seedBits,
+        rowAbs R * rowAbs R ≤ ((2 ^ m : Nat) : Int) * intBvSum m (fun y => diffFn R y * diffFn R y) :=
+      fun R => intBvSum_abs_sq_le m (diffFn R)
+    have hSumInner := intBvSum_le hInnerEach
+    rw [intBvSum_mul_left] at hSumInner
+    have hStep := Int.le_trans hOuter (Int.mul_le_mul_of_nonneg_left hSumInner (Int.natCast_nonneg K))
+    simpa only [Int.mul_assoc] using hStep
+  have hFinalInt : (L1 : Int) * (L1 : Int) ≤
+      (((K * K * (2 ^ (3 * m)) * C2 : Nat) : Int)) := by
+    have h1 := Int.le_trans hCsTotal
+      (Int.mul_le_mul_of_nonneg_left hTotVarLe
+        (Int.mul_nonneg (Int.natCast_nonneg K) (Int.natCast_nonneg (2 ^ m))))
+    have hRhs : (K : Int) * ((2 ^ m : Nat) : Int) * (((2 ^ (2 * m) : Nat) : Int) * ((K : Int) * C2Int)) =
+        (((K * K * (2 ^ (3 * m)) * C2 : Nat) : Int)) := by
+      rw [← hC2Eq]
+      simp only [Int.natCast_mul]
+      have hPow3m : ((2 ^ m : Nat) : Int) * ((2 ^ (2 * m) : Nat) : Int) = ((2 ^ (3 * m) : Nat) : Int) := by
+        rw [← Int.natCast_mul, ← Nat.pow_add]; congr 2; omega
+      calc
+        (K : Int) * ((2 ^ m : Nat) : Int) * (((2 ^ (2 * m) : Nat) : Int) * ((K : Int) * (C2 : Int)))
+          = ((K : Int) * (K : Int)) * (((2 ^ m : Nat) : Int) * ((2 ^ (2 * m) : Nat) : Int)) * (C2 : Int) := by
+            simp only [Int.mul_assoc]
+            rw [Int.mul_comm ((2 ^ m : Nat) : Int) (((2 ^ (2 * m) : Nat) : Int) * ((K : Int) * (C2 : Int))),
+                Int.mul_assoc ((2 ^ (2 * m) : Nat) : Int) ((K : Int) * (C2 : Int)) ((2 ^ m : Nat) : Int),
+                Int.mul_comm ((K : Int) * (C2 : Int)) ((2 ^ m : Nat) : Int),
+                ← Int.mul_assoc ((2 ^ (2 * m) : Nat) : Int) ((2 ^ m : Nat) : Int),
+                Int.mul_comm ((2 ^ (2 * m) : Nat) : Int) ((2 ^ m : Nat) : Int),
+                ← Int.mul_assoc (((2 ^ m : Nat) : Int) * ((2 ^ (2 * m) : Nat) : Int)) (K : Int) (C2 : Int),
+                Int.mul_comm (((2 ^ m : Nat) : Int) * ((2 ^ (2 * m) : Nat) : Int)) (K : Int),
+                ← Int.mul_assoc (K : Int) (K : Int)]
+            simp only [Int.mul_assoc]
+        _ = (K : Int) * (K : Int) * ((2 ^ (3 * m) : Nat) : Int) * (C2 : Int) := by rw [hPow3m]
+    exact hRhs ▸ h1
+  have hMainNat : L1 * L1 ≤ K * K * (2 ^ (3 * m)) * C2 := by
+    rw [← Int.natCast_mul] at hFinalInt
+    exact Int.ofNat_le.mp hFinalInt
+  refine ⟨hMainNat, ?_⟩
+  unfold ratLe
+  have hKPos : 0 < K := Nat.two_pow_pos seedBits
+  have h2mPos : 0 < 2 ^ m := Nat.two_pow_pos m
+  have hDen1Pos : 0 < (2 * K * (2 ^ m) * W) * (2 * K * (2 ^ m) * W) := by
+    have hHalf : 0 < 2 * K * (2 ^ m) * W :=
+      Nat.mul_pos (Nat.mul_pos (Nat.mul_pos (by decide) hKPos) h2mPos) hWPos
+    exact Nat.mul_pos hHalf hHalf
+  have hDen2Pos : 0 < 4 * (W * W) := Nat.mul_pos (by decide) (Nat.mul_pos hWPos hWPos)
+  refine ⟨hDen1Pos, hDen2Pos, ?_⟩
+  have hMul := Nat.mul_le_mul_right (4 * (W * W)) hMainNat
+  have hEqRhs : K * K * (2 ^ (3 * m)) * C2 * (4 * (W * W)) =
+      (2 ^ m) * C2 * ((2 * K * (2 ^ m) * W) * (2 * K * (2 ^ m) * W)) := by
+    have hPowSplit : 2 ^ (3 * m) = (2 ^ m) * ((2 ^ m) * (2 ^ m)) := by
+      rw [← Nat.pow_add, ← Nat.pow_add]; congr 1; omega
+    rw [hPowSplit]
+    let k := K; let p := 2 ^ m; let c := C2; let w0 := W
+    show k * k * (p * (p * p)) * c * (4 * (w0 * w0)) =
+      p * c * ((2 * k * p * w0) * (2 * k * p * w0))
+    have hSq : (2 * k * p * w0) * (2 * k * p * w0) = 4 * (k * k) * (p * p) * (w0 * w0) := by
+      calc
+        (2 * k * p * w0) * (2 * k * p * w0)
+          = (2 * 2) * (k * k) * (p * p) * (w0 * w0) := by
+            simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+        _ = 4 * (k * k) * (p * p) * (w0 * w0) := rfl
+    rw [hSq]
+    simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+  exact hEqRhs ▸ hMul
+
+private theorem bvSum_bool_le_two_pow (k : Nat) (pred : BitVec k → Bool) :
+    bvSum k (fun x => if pred x then 1 else 0) ≤ 2 ^ k := by
+  have hInt : intBvSum k (fun x => (((if pred x then 1 else 0 : Nat) : Int))) ≤
+      intBvSum k (fun _ => 1) := by
+    apply intBvSum_le; intro x; split <;> decide
+  rw [← intBvSum_of_bvSum, intBvSum_const, Int.mul_one] at hInt
+  exact Int.ofNat_le.mp hInt
+
+private theorem lhl_part1_lhs_rearr (L2 WW Pm Pm2 Pn : Nat)
+    (hPn : Pn = Pm * Pm) (hPm2 : Pm2 = Pm * 4) :
+    L2 * (4 * WW) * Pn = (Pm * WW) * (L2 * Pm2) := by
+  subst hPn; subst hPm2
+  simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+
+private theorem lhl_part1_rhs_rearr (Pm C2 D2 Pn : Nat) :
+    Pm * C2 * D2 * Pn = Pm * (C2 * Pn) * D2 := by
+  simp only [Nat.mul_left_comm, Nat.mul_comm]
+
+private theorem lhl_part2_lhs_rearr (L1 P P2m2 : Nat) :
+    (L1 * L1) * (4 * (P * P)) * (P * P2m2) =
+      (4 * P) * ((P * L1) * (P * L1) * P2m2) := by
+  simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+
+private theorem lhl_part2_rhs_rearr (Pm P D2 P2m2 Pnm : Nat)
+    (hPow : Pm * P2m2 = 4 * Pnm) :
+    Pm * P * D2 * (P * P2m2) = (4 * P) * ((P * Pnm) * D2) := by
+  calc
+    Pm * P * D2 * (P * P2m2)
+      = (Pm * P2m2) * (P * P * D2) := by
+        simp only [Nat.mul_left_comm, Nat.mul_comm]
+    _ = (4 * Pnm) * (P * P * D2) := by rw [hPow]
+    _ = (4 * P) * ((P * Pnm) * D2) := by
+        simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+
+private theorem lhl_part2_jden_sq (Pnm D0 : Nat) :
+    1 * ((Pnm * D0) * (Pnm * D0)) = (Pnm * Pnm) * (D0 * D0) := by
+  rw [Nat.one_mul]
+  simp only [Nat.mul_assoc, Nat.mul_left_comm]
+
+/-- Parametric Leftover Hash Lemma & joint selective-failure bound for any 2-universal hash `H`. -/
+theorem lhl_security_of_two_universal {seedBits inBits m : Nat}
+    (n m2 m22 : Nat)
+    (H : BitVec seedBits → BitVec inBits → BitVec m)
+    (hLeBits : m ≤ seedBits)
+    (hInEq : inBits = n + m)
+    (h2m : n = 2 * m)
+    (hm2 : m2 = m + 2)
+    (hm22 : m22 = 2 * m + 2)
+    (hTwoUniv : ∀ x x' : BitVec inBits, x ≠ x' →
+      intBvSum seedBits (fun R => if H R x = H R x' then 1 else 0) ≤
+        ((2 ^ (seedBits - m) : Nat) : Int)) :
+    let K := 2 ^ seedBits
+    (∀ (w : BitVec inBits → Nat),
+      0 < bvSum inBits w →
+      bvSum inBits (fun x => w x * w x) * (2 ^ n) ≤ (bvSum inBits w) * (bvSum inBits w) →
+      let W := bvSum inBits w
+      let L1 := lhlScaledL1 H w
+      let Den := 2 * K * (2 ^ m) * W
+      ratLe (L1 * L1, Den * Den) (1, 2 ^ m2)) ∧
+    (∀ (passPred : BitVec inBits → Bool),
+      let wEvent : BitVec inBits → Nat := fun x => if passPred x then 1 else 0
+      let passCount := bvSum inBits wEvent
+      0 < passCount →
+      let L1 := lhlScaledL1 H wEvent
+      let jointNum := passCount * L1
+      let jointDen := (2 ^ inBits) * (2 * K * (2 ^ m) * passCount)
+      ratLe (jointNum * jointNum, jointDen * jointDen) (1, 2 ^ m22)) := by
+  intro K
+  constructor
+  · intro w hWPos hEnt W L1 Den
+    have hBase := (finite_lhl_collision_bound H hLeBits hTwoUniv w hWPos).2
+    unfold ratLe at hBase ⊢
+    dsimp only at hBase ⊢
+    refine ⟨hBase.1, Nat.two_pow_pos m2, ?_⟩
+    have hWWPos : 0 < W * W := Nat.mul_pos hWPos hWPos
+    have hPn : 2 ^ n = (2 ^ m) * (2 ^ m) := by rw [h2m, Nat.two_mul, Nat.pow_add]
+    have hPm2 : 2 ^ m2 = (2 ^ m) * 4 := by rw [hm2, Nat.pow_succ, Nat.pow_succ, Nat.mul_assoc]
+    have hStep1 := Nat.mul_le_mul_right (2 ^ n) hBase.2.2
+    have hStep2 : (2 ^ m) * bvSum inBits (fun x => w x * w x) * (Den * Den) * (2 ^ n) ≤
+        ((2 ^ m) * (W * W)) * (1 * (Den * Den)) := by
+      rw [lhl_part1_rhs_rearr, Nat.one_mul]
+      dsimp only [W]
+      exact Nat.mul_le_mul_right (Den * Den) (Nat.mul_le_mul_left (2 ^ m) hEnt)
+    have hCombined := Nat.le_trans hStep1 hStep2
+    rw [lhl_part1_lhs_rearr (L1 * L1) (W * W) (2 ^ m) (2 ^ m2) (2 ^ n) hPn hPm2] at hCombined
+    exact Nat.le_of_mul_le_mul_left hCombined (Nat.mul_pos (Nat.two_pow_pos m) hWWPos)
+  · intro passPred wEvent passCount hPassPos L1 jointNum jointDen
+    have hC2Eq : bvSum inBits (fun x => wEvent x * wEvent x) = passCount := by
+      dsimp only [passCount, wEvent]
+      apply bvSum_congr; intro x; cases passPred x <;> rfl
+    have hPassMax : passCount ≤ 2 ^ inBits := bvSum_bool_le_two_pow inBits passPred
+    have hBase := (finite_lhl_collision_bound H hLeBits hTwoUniv wEvent hPassPos).2
+    rw [hC2Eq] at hBase
+    unfold ratLe at hBase ⊢
+    dsimp only at hBase ⊢
+    let D0 := 2 * K * (2 ^ m) * passCount
+    have hD0Pos : 0 < D0 :=
+      Nat.mul_pos (Nat.mul_pos (Nat.mul_pos (by decide) (Nat.two_pow_pos seedBits)) (Nat.two_pow_pos m)) hPassPos
+    have hDenPos : 0 < jointDen * jointDen :=
+      Nat.mul_pos (Nat.mul_pos (Nat.two_pow_pos inBits) hD0Pos)
+                  (Nat.mul_pos (Nat.two_pow_pos inBits) hD0Pos)
+    refine ⟨hDenPos, Nat.two_pow_pos m22, ?_⟩
+    have hPow : (2 ^ m) * (2 ^ m22) = 4 * (2 ^ inBits) := by
+      have h1 : 2 ^ m22 = (2 ^ (2 * m)) * 4 := by
+        rw [hm22, Nat.pow_succ, Nat.pow_succ, Nat.mul_assoc]
+      have h2 : 2 ^ inBits = (2 ^ (2 * m)) * (2 ^ m) := by
+        rw [hInEq, h2m, Nat.pow_add]
+      rw [h1, h2]
+      simp only [Nat.mul_assoc, Nat.mul_comm]
+    have hStep1 := Nat.mul_le_mul_right (passCount * (2 ^ m22)) hBase.2.2
+    have hLhs := lhl_part2_lhs_rearr L1 passCount (2 ^ m22)
+    have hRhs := lhl_part2_rhs_rearr (2 ^ m) passCount (D0 * D0) (2 ^ m22) (2 ^ inBits) hPow
+    dsimp only [K, D0] at hStep1 hRhs ⊢
+    rw [hLhs, hRhs] at hStep1
+    have hRhsLe : (4 * passCount) * ((passCount * (2 ^ inBits)) * ((2 * (2 ^ seedBits) * (2 ^ m) * passCount) * (2 * (2 ^ seedBits) * (2 ^ m) * passCount))) ≤
+        (4 * passCount) * (1 * (jointDen * jointDen)) := by
+      apply Nat.mul_le_mul_left
+      dsimp only [jointDen, K]
+      rw [lhl_part2_jden_sq]
+      exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_right (2 ^ inBits) hPassMax)
+    exact Nat.le_of_mul_le_mul_left (Nat.le_trans hStep1 hRhsLe) (Nat.mul_pos (by decide) hPassPos)
+
+private theorem evalGf2Combiner128x384_two_universal :
+    ∀ x x' : BitVec 384, x ≠ x' →
+      intBvSum 32768 (fun R => if evalGf2Combiner128x384 R x = evalGf2Combiner128x384 R x' then 1 else 0) ≤
+        ((2 ^ (32768 - 128) : Nat) : Int) := by
+  have hGen : ∀ (n m seedBits inBits : Nat), 1 ≤ n → n * m = seedBits → n + m = inBits →
+      ∀ (H : BitVec seedBits → BitVec inBits → BitVec m),
+      HEq H (evalSystematicGF2 n m) →
+      ∀ x x' : BitVec inBits, x ≠ x' →
+        intBvSum seedBits (fun R => if H R x = H R x' then 1 else 0) ≤
+          ((2 ^ (seedBits - m) : Nat) : Int) := by
+    intro n m seedBits inBits hn hSeed hIn H hHEq
+    subst hSeed; subst hIn
+    cases hHEq
+    exact evalSystematicGF2_two_universal n m hn
+  exact hGen 256 128 32768 384 (by decide) rfl rfl evalGf2Combiner128x384 HEq.rfl
+
+/-- **`128 × 384` `GF(2)` Combiner Leftover Hash Lemma After `s = 128` Leakage Bits & Joint Selective-Failure Closure (`kos_combiner_128x384_lhl_security`)**:
+    Instantiating `finite_lhl_collision_bound` with the actual `128 × 384` `GF(2)` universal linear hash
+    `evalGf2Combiner128x384 = evalSystematicGF2 256 128`:
+    1. **128-Bit Leakage Bound (`s = 128` on `384`-bit high-entropy source)**: For ANY source distribution
+       `w : BitVec 384 → Nat` with collision entropy $H_2(X) \ge 384 - 128 = 256$ bits
+       (`C2 * 2^256 ≤ W^2`), statistical distance squared satisfies
+       `ratLe (L1^2, Den^2) (1, 2^130)` (`Δ_TV ≤ 2^(-65) < 2^(-64)`)!
+    2. **Unconditional Joint Selective-Failure Security (`p * Δ_TV < 2^(-128)`)**: For **EVERY** non-empty
+       adversarial pass predicate `passPred : BitVec 384 → Bool` (`0 < passCount`), the joint pass-and-distinguish
+       advantage `(passCount / 2^384) * Δ_TV` satisfies `ratLe (jointNum^2, jointDen^2) (1, 2^258)`
+       (`jointAdv ≤ 2^(-129) < 2^(-128)` unconditionally across all fault weights $0 \le w \le 384$)! -/
+theorem kos_combiner_128x384_lhl_security :
+    let K := 2 ^ 32768
+    (∀ (w : BitVec 384 → Nat),
+      0 < bvSum 384 w →
+      bvSum 384 (fun x => w x * w x) * (2 ^ 256) ≤ (bvSum 384 w) * (bvSum 384 w) →
+      let W := bvSum 384 w
+      let L1 := lhlScaledL1 evalGf2Combiner128x384 w
+      let Den := 2 * K * (2 ^ 128) * W
+      ratLe (L1 * L1, Den * Den) (1, 2 ^ 130)) ∧
+    (∀ (passPred : BitVec 384 → Bool),
+      let wEvent : BitVec 384 → Nat := fun x => if passPred x then 1 else 0
+      let passCount := bvSum 384 wEvent
+      0 < passCount →
+      let L1 := lhlScaledL1 evalGf2Combiner128x384 wEvent
+      let jointNum := passCount * L1
+      let jointDen := (2 ^ 384) * (2 * K * (2 ^ 128) * passCount)
+      ratLe (jointNum * jointNum, jointDen * jointDen) (1, 2 ^ 258)) :=
+  lhl_security_of_two_universal 256 130 258 evalGf2Combiner128x384 (by decide) rfl rfl rfl rfl
+    evalGf2Combiner128x384_two_universal
+
+
+/-! ## 4. Legacy Single-Tree GGM / SPCOT Model (V3 Forest Specification Below) -/
+
+/-! ### 4.1 Binary GGM Tree Expansion (`depth d`) & Punctured Co-Path Evaluation -/
+
+/-- Level-domain-separated length-doubling 128-bit PRG `lvl → BitVec 128 → (BitVec 128 × BitVec 128)`. -/
+abbrev GgmPrg := Nat → BitVec 128 → BitVec 128 × BitVec 128
+
+/-- Full depth-`d` binary GGM tree expansion mapping leaf index `idx : BitVec d` to its 128-bit leaf seed. -/
+@[expose] def ggmExpandFull (prg : GgmPrg) : (d : Nat) → Nat → BitVec 128 → BitVec d → BitVec 128
+  | 0, _, seed, _ => seed
+  | d + 1, lvl, seed, idx =>
+    let (sL, sR) := prg lvl seed
+    if idx.getLsbD d then
+      ggmExpandFull prg d (lvl + 1) sR (idx.setWidth d)
+    else
+      ggmExpandFull prg d (lvl + 1) sL (idx.setWidth d)
+
+/-- `d`-element sibling co-path for a punctured GGM tree of depth `d`. -/
+@[expose] def GgmCopath : Nat → Type
+  | 0 => Unit
+  | d + 1 => BitVec 128 × GgmCopath d
+
+/-- Construct the `d`-sibling co-path puncturing leaf `pStar : BitVec d` from root `seed`. -/
+def ggmMakeCopath (prg : GgmPrg) : (d : Nat) → Nat → BitVec 128 → BitVec d → GgmCopath d
+  | 0, _, _, _ => ()
+  | d + 1, lvl, seed, pStar =>
+    let (sL, sR) := prg lvl seed
+    if pStar.getLsbD d then
+      (sL, ggmMakeCopath prg d (lvl + 1) sR (pStar.setWidth d))
+    else
+      (sR, ggmMakeCopath prg d (lvl + 1) sL (pStar.setWidth d))
+
+/-- Receiver's punctured GGM tree evaluator: evaluates all `u ≠ pStar` from `copath` and outputs `0#128` at `pStar`. -/
+@[expose] def ggmExpandPunctured (prg : GgmPrg) :
+    (d : Nat) → Nat → BitVec d → GgmCopath d → BitVec d → BitVec 128
+  | 0, _, _, _, _ => 0#128
+  | d + 1, lvl, pStar, (sibSeed, rest), idx =>
+    if idx.getLsbD d = pStar.getLsbD d then
+      ggmExpandPunctured prg d (lvl + 1) (pStar.setWidth d) rest (idx.setWidth d)
+    else
+      ggmExpandFull prg d (lvl + 1) sibSeed (idx.setWidth d)
+
+/-- **Exact Punctured GGM Tree Recovery (`ggmExpandPunctured_exact`)**:
+    For every depth $d$ (including deployed $d \in \{14, 15\}$), root `seed`, and puncture `pStar : BitVec d`:
+    1. At `u = pStar`, `ggmExpandPunctured` evaluates to `0#128`.
+    2. At every `u ≠ pStar`, `ggmExpandPunctured` recovers the **exact** sender leaf `ggmExpandFull prg d lvl seed u`! -/
+theorem ggmExpandPunctured_exact (prg : GgmPrg) :
+    ∀ (d lvl : Nat) (seed : BitVec 128) (pStar : BitVec d),
+      let copath := ggmMakeCopath prg d lvl seed pStar
+      ggmExpandPunctured prg d lvl pStar copath pStar = 0#128 ∧
+      (∀ u : BitVec d, u ≠ pStar →
+        ggmExpandPunctured prg d lvl pStar copath u = ggmExpandFull prg d lvl seed u)
+  | 0, _, _, pStar => by
+    dsimp only
+    refine ⟨rfl, ?_⟩
+    intro u hNe
+    exact False.elim (hNe ((BitVec.eq_nil u).trans (BitVec.eq_nil pStar).symm))
+  | d + 1, lvl, seed, pStar => by
+    dsimp only
+    cases hPrg : prg lvl seed with
+    | mk sL sR =>
+      cases hp : pStar.getLsbD d
+      · have hCp : ggmMakeCopath prg (d + 1) lvl seed pStar =
+            (sR, ggmMakeCopath prg d (lvl + 1) sL (pStar.setWidth d)) := by
+          simp only [ggmMakeCopath, hPrg, hp, Bool.false_eq_true, ↓reduceIte]; rfl
+        rw [hCp]
+        have ih := ggmExpandPunctured_exact prg d (lvl + 1) sL (pStar.setWidth d)
+        dsimp only at ih
+        refine ⟨?_, ?_⟩
+        · simp only [ggmExpandPunctured, ↓reduceIte, ih.1]
+        · intro u huNe
+          have hFull : ggmExpandFull prg (d + 1) lvl seed u =
+              if u.getLsbD d then ggmExpandFull prg d (lvl + 1) sR (u.setWidth d)
+              else ggmExpandFull prg d (lvl + 1) sL (u.setWidth d) := by
+            simp only [ggmExpandFull, hPrg]
+          rw [hFull]
+          dsimp only [ggmExpandPunctured]
+          rw [hp]
+          cases hu : u.getLsbD d
+          · have huLoNe : u.setWidth d ≠ pStar.setWidth d := by
+              intro hEqLo
+              apply huNe
+              have hSu : BitVec.cons (u.getLsbD d) (u.setWidth d) = u := bvCons_split u
+              have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+              rw [← hSu, ← hSp, hu, hp, hEqLo]
+            simp only [Bool.false_eq_true, ↓reduceIte]
+            exact ih.2 (u.setWidth d) huLoNe
+          · simp only [Bool.true_eq_false, ↓reduceIte]
+      · have hCp : ggmMakeCopath prg (d + 1) lvl seed pStar =
+            (sL, ggmMakeCopath prg d (lvl + 1) sR (pStar.setWidth d)) := by
+          simp only [ggmMakeCopath, hPrg, hp, ↓reduceIte]; rfl
+        rw [hCp]
+        have ih := ggmExpandPunctured_exact prg d (lvl + 1) sR (pStar.setWidth d)
+        dsimp only at ih
+        refine ⟨?_, ?_⟩
+        · simp only [ggmExpandPunctured, ↓reduceIte, ih.1]
+        · intro u huNe
+          have hFull : ggmExpandFull prg (d + 1) lvl seed u =
+              if u.getLsbD d then ggmExpandFull prg d (lvl + 1) sR (u.setWidth d)
+              else ggmExpandFull prg d (lvl + 1) sL (u.setWidth d) := by
+            simp only [ggmExpandFull, hPrg]
+          rw [hFull]
+          dsimp only [ggmExpandPunctured]
+          rw [hp]
+          cases hu : u.getLsbD d
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+          · have huLoNe : u.setWidth d ≠ pStar.setWidth d := by
+              intro hEqLo
+              apply huNe
+              have hSu : BitVec.cons (u.getLsbD d) (u.setWidth d) = u := bvCons_split u
+              have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+              rw [← hSu, ← hSp, hu, hp, hEqLo]
+            simp only [↓reduceIte]
+            exact ih.2 (u.setWidth d) huLoNe
+
+/-- Keyed-ROM hiding of the punctured GGM leaf seed (`ggm_punctured_seed_keyed_rom_hiding`):
+    Because `root` / punctured path seeds have cardinality `2^128` (`> 0`), any `Q`-query oracle
+    distinguisher `A` trying to distinguish the punctured seed expansion from an independent random
+    function achieves advantage at most `2 * Q / 2^128` via `UcGames.hidingAdv_le`! -/
+theorem ggm_punctured_seed_keyed_rom_hiding {TagDom Cod : Type} (Q : Nat)
+    (basePrf : Fin (2 ^ 128) × TagDom → Cod)
+    (puncLeafFn : TagDom → Cod)
+    (A : OracleComp (Fin (2 ^ 128) × TagDom) Cod Bool)
+    (hQb : QueryBounded Q A) :
+    ratLe (natAbsDiff (keyedPrfRealAccept (2 ^ 128) basePrf puncLeafFn A)
+                      (keyedPrfIdealAccept (2 ^ 128) basePrf A),
+           2 ^ 128)
+          (2 * Q, 2 ^ 128) :=
+  (hidingAdv_le (2 ^ 128) Q (Nat.two_pow_pos 128) basePrf puncLeafFn A hQb).2
+
+/-! ### 4.2 Active SPCOT Consistency Check & Single-Use / Peer-ID Validated `PartyMachine` (`P1-06`) -/
+
+/-- Symbolic hypercube XOR sum $\bigoplus_{u \in \mathrm{BitVec}\, d} f(u)$ over `BitVec 128`. -/
+def bvXorSum128 : (d : Nat) → (BitVec d → BitVec 128) → BitVec 128
+  | 0, f => f 0#0
+  | d + 1, f =>
+    bvXorSum128 d (fun u => f (BitVec.cons false u)) ^^^
+    bvXorSum128 d (fun u => f (BitVec.cons true u))
+
+private theorem bvXorSum128_congr {d : Nat} {f g : BitVec d → BitVec 128} (h : ∀ u, f u = g u) :
+    bvXorSum128 d f = bvXorSum128 d g := by
+  induction d with
+  | zero => exact h 0#0
+  | succ d ih =>
+    simp only [bvXorSum128, ih (fun u => h (BitVec.cons false u)),
+      ih (fun u => h (BitVec.cons true u))]
+
+private theorem bvXorSum128_zero (d : Nat) : bvXorSum128 d (fun _ => 0#128) = 0#128 := by
+  induction d with
+  | zero => rfl
+  | succ d ih => simp only [bvXorSum128, ih, BitVec.xor_zero]
+
+private theorem bvXor128_four_rearr (a b c e : BitVec 128) :
+    (a ^^^ b) ^^^ (c ^^^ e) = (a ^^^ c) ^^^ (b ^^^ e) := by
+  apply BitVec.eq_of_getLsbD_eq; intro i _
+  simp only [BitVec.getLsbD_xor]
+  cases a.getLsbD i <;> cases b.getLsbD i <;> cases c.getLsbD i <;> cases e.getLsbD i <;> rfl
+
+private theorem bvXorSum128_xor {d : Nat} (f g : BitVec d → BitVec 128) :
+    bvXorSum128 d (fun u => f u ^^^ g u) = bvXorSum128 d f ^^^ bvXorSum128 d g := by
+  induction d with
+  | zero => rfl
+  | succ d ih =>
+    simp only [bvXorSum128, ih]
+    exact bvXor128_four_rearr _ _ _ _
+
+private theorem bvXorSum128_single : ∀ (d : Nat) (pStar : BitVec d) (val : BitVec 128),
+    bvXorSum128 d (fun u => if u = pStar then val else 0#128) = val
+  | 0, pStar, val => by
+    have hp : pStar = 0#0 := BitVec.eq_nil pStar
+    subst hp; rfl
+  | d + 1, pStar, val => by
+    have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+    rw [← hSp]
+    simp only [bvXorSum128]
+    cases pStar.getLsbD d
+    · have hL : bvXorSum128 d (fun u => if BitVec.cons false u = BitVec.cons false (pStar.setWidth d) then val else 0#128) =
+          bvXorSum128 d (fun u => if u = pStar.setWidth d then val else 0#128) := by
+        apply bvXorSum128_congr; intro u; simp only [bvCons_inj, true_and]
+      have hR : bvXorSum128 d (fun u => if BitVec.cons true u = BitVec.cons false (pStar.setWidth d) then val else 0#128) =
+          bvXorSum128 d (fun _ => 0#128) := by
+        apply bvXorSum128_congr; intro u; simp only [bvCons_inj, Bool.true_eq_false, false_and, ↓reduceIte]
+      rw [hL, hR, bvXorSum128_single d, bvXorSum128_zero, BitVec.xor_zero]
+    · have hL : bvXorSum128 d (fun u => if BitVec.cons false u = BitVec.cons true (pStar.setWidth d) then val else 0#128) =
+          bvXorSum128 d (fun _ => 0#128) := by
+        apply bvXorSum128_congr; intro u; simp only [bvCons_inj, Bool.false_eq_true, false_and, ↓reduceIte]
+      have hR : bvXorSum128 d (fun u => if BitVec.cons true u = BitVec.cons true (pStar.setWidth d) then val else 0#128) =
+          bvXorSum128 d (fun u => if u = pStar.setWidth d then val else 0#128) := by
+        apply bvXorSum128_congr; intro u; simp only [bvCons_inj, true_and]
+      rw [hL, hR, bvXorSum128_single d, bvXorSum128_zero, BitVec.zero_xor]
+
+/-- Honest SPCOT GGM-sum identity & malicious consistency check soundness (`spcot_consistency_soundness`):
+    1. Honest Receiver's `(bvXorSum128 d puncLeaves) ^^^ corrOffset` (with `corrOffset = bvXorSum128 d fullLeaves ^^^ delta`)
+       equals `fullLeaves pStar ^^^ delta` identically!
+    2. Degree-one core: a single non-zero discrepancy coefficient `errSum ≠ 0#128` multiplied by a
+       challenge hits any fixed target for at most one challenge value. This is not yet the bound for
+       the production check, whose leaf weights are `chi^(u+1)`: a discrepancy spread over several
+       leaves is a polynomial of degree up to `2^d` in `chi`, bounded by
+       `spcot_weighted_check_root_bound` (at most `2^d` accepting challenges, not one). -/
+theorem spcot_consistency_soundness {d : Nat}
+    (fullLeaves puncLeaves : BitVec d → BitVec 128) (pStar : BitVec d) (delta : BitVec 128)
+    (hPuncZero : puncLeaves pStar = 0#128)
+    (hPuncEq : ∀ u : BitVec d, u ≠ pStar → puncLeaves u = fullLeaves u) :
+    let corrOffset := bvXorSum128 d fullLeaves ^^^ delta
+    (bvXorSum128 d puncLeaves ^^^ corrOffset = fullLeaves pStar ^^^ delta) ∧
+    (∀ (errSum : BitVec 128), errSum ≠ 0#128 →
+      ∀ (target chi₁ chi₂ : Tower128),
+        towerMul 7 (unpackTower 7 errSum) chi₁ = target →
+        towerMul 7 (unpackTower 7 errSum) chi₂ = target →
+        chi₁ = chi₂) := by
+  intro corrOffset
+  have hDiffPoint : ∀ u : BitVec d,
+      fullLeaves u ^^^ puncLeaves u = (if u = pStar then fullLeaves pStar else 0#128) := by
+    intro u
+    by_cases hu : u = pStar
+    · subst hu; rw [hPuncZero, BitVec.xor_zero]; simp only [↓reduceIte]
+    · rw [hPuncEq u hu, BitVec.xor_self]; simp only [hu, ↓reduceIte]
+  have hSumDiff : bvXorSum128 d fullLeaves ^^^ bvXorSum128 d puncLeaves = fullLeaves pStar := by
+    rw [← bvXorSum128_xor, bvXorSum128_congr hDiffPoint, bvXorSum128_single]
+  refine ⟨?_, ?_⟩
+  · dsimp only [corrOffset]
+    have hRearr : bvXorSum128 d puncLeaves ^^^ (bvXorSum128 d fullLeaves ^^^ delta) =
+        (bvXorSum128 d fullLeaves ^^^ bvXorSum128 d puncLeaves) ^^^ delta := by
+      apply BitVec.eq_of_getLsbD_eq; intro i _
+      simp only [BitVec.getLsbD_xor]
+      cases (bvXorSum128 d puncLeaves).getLsbD i <;>
+        cases (bvXorSum128 d fullLeaves).getLsbD i <;>
+        cases delta.getLsbD i <;> rfl
+    rw [hRearr, hSumDiff]
+  · intro errSum hNz target chi₁ chi₂ h1 h2
+    have hTowerNz : unpackTower 7 errSum ≠ towerZero 7 := by
+      intro hZ
+      have hp := congrArg (packTower 7) hZ
+      rw [packTower_unpackTower, packTower_zero] at hp
+      exact hNz hp
+    exact towerMul_cancel_left 7 (unpackTower 7 errSum) chi₁ chi₂ hTowerNz (h1.trans h2.symm)
+
+/-- **Root bound for the `chi^(u+1)`-weighted SPCOT check (`spcot_weighted_check_root_bound`)**:
+    one repetition of the production check compares `mask + Σ_u chi^(u+1) · leaf[u]` between the
+    sender's full tree and the receiver's reconstruction (`pcg_dense.rs`, step 6). Writing `errBits`
+    for the per-leaf discrepancies in leaf order, the two sides agree exactly when `chi` is a root of
+    `mask' + Σ_u chi^(u+1) · errBits[u]`. If any leaf discrepancy is non-zero and was fixed before the
+    challenge, every duplicate-free list of accepting challenges has length at most
+    `m ≥ errBits.length`: `2^d / 2^128` per repetition at tree depth `d`, matching the Rust comment's
+    degree count and not `1 / 2^128`.
+    The proof is the polynomial-identity lemma behind `kos_batched_poly_check_sound` in
+    `Qsag.Preprocessing`: more accepting challenges than coefficients force every coefficient to zero.
+    Not covered here: the `gamma` weights across trees, the product bound over the two repetitions,
+    and the identification of this coefficient form with `evalPuncturedTreeSpcotCombo`'s
+    `spcotLeafWeight` sum. -/
+theorem spcot_weighted_check_root_bound (m : Nat) (errBits : List (BitVec 128)) (mask : Tower128)
+    (roots : List Tower128) (hNodup : roots.Nodup) (hLen : errBits.length ≤ m)
+    (hFault : ∃ e ∈ errBits, e ≠ 0#128)
+    (hAll : ∀ chi ∈ roots,
+      RoundPoly.evalCoeffs (mask :: errBits.map (fun e => unpackTower 7 e)) chi = towerZero 7) :
+    roots.length ≤ m := by
+  by_cases hSmall : roots.length ≤ m
+  · exact hSmall
+  · exfalso
+    obtain ⟨e, he, hne⟩ := hFault
+    have hLenCs : (mask :: errBits.map (fun e => unpackTower 7 e)).length ≤ roots.length := by
+      simp only [List.length_cons, List.length_map]; omega
+    have hZero : unpackTower 7 e = towerZero 7 :=
+      poly_coeffs_zero_of_vanish_nodup_local roots
+        (mask :: errBits.map (fun e => unpackTower 7 e)) hNodup hLenCs hAll
+        (unpackTower 7 e) (List.mem_cons_of_mem _ (List.mem_map_of_mem he))
+    have hp := congrArg (packTower 7) hZero
+    rw [packTower_unpackTower, packTower_zero] at hp
+    exact hne hp
+
+/-- Constant-term bit (`LSB`, coefficient of $1 \in \mathbb{F}_2 \subset \mathcal{T}_k$) of a binary tower element,
+    matching `(alpha.0 & 1) != 0` in `DensePcgPartySeed::validate_invariants` (`pcg_dense.rs:1260`). -/
+def towerLsb : {k : Nat} → TowerElem k → Bool
+  | 0, b => b
+  | _ + 1, a => towerLsb a.1
+
+theorem towerLsb_zero (k : Nat) : towerLsb (towerZero k) = false := by
+  induction k with
+  | zero => rfl
+  | succ k ih => exact ih
+
+theorem towerLsb_one (k : Nat) : towerLsb (towerOne k) = true := by
+  induction k with
+  | zero => rfl
+  | succ k ih => exact ih
+
+theorem towerLsb_add (k : Nat) (a b : TowerElem k) :
+    towerLsb (towerAdd k a b) = (towerLsb a ^^ towerLsb b) := by
+  induction k with
+  | zero => rfl
+  | succ k ih => exact ih a.1 b.1
+
+/-- Recursive extraction of the $\mathbb{F}_2$ constant-term slice from `TowerBitVec k`. -/
+def lowBitsChain : (k : Nat) → TowerBitVec k → BitVec 1
+  | 0, x => x
+  | k + 1, x => lowBitsChain k (lowBits k x)
+
+theorem lowBitsChain_packTower (k : Nat) (a : TowerElem k) :
+    lowBitsChain k (packTower k a) = BitVec.ofBool (towerLsb a) := by
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+    simp only [lowBitsChain, packTower, lowBits_join, towerLsb]
+    exact ih a.1
+
+theorem towerLsb_unpackTower (k : Nat) (x : TowerBitVec k) :
+    towerLsb (unpackTower k x) = (lowBitsChain k x).getLsbD 0 := by
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+    simp only [unpackTower, towerLsb, lowBitsChain]
+    exact ih (lowBits k x)
+
+/-- Fixed-length `cSHAKE256` wrapper (`cshake256_32` when `outLen = 32`, `pcg_dense.rs:750`). -/
+def cshake256Fixed (outLen : Nat) (domain input : List UInt8) : List UInt8 :=
+  cshake256Xof outLen domain input
+
+/-- `cSHAKE256` customization `"QSAG.DPCG.SPCOT.TAG/v1"` (`pcg_dense.rs:751`). -/
+def spcotTagDomain : List UInt8 := "QSAG.DPCG.SPCOT.TAG/v1".toUTF8.toList
+
+/-- `cSHAKE256` customization `"QSAG.DPCG.SPCOT.CHAL/v1"` (`pcg_dense.rs:651`). -/
+def spcotChalDomain : List UInt8 := "QSAG.DPCG.SPCOT.CHAL/v1".toUTF8.toList
+
+/-- Canonical 16-byte little-endian `Tower128` serializer matching `w.0.to_le_bytes()` (`pcg_dense.rs:748`). -/
+def encodeTower128Le (x : Tower128) : List UInt8 :=
+  encodeNatLeBytes 16 (packTower 7 x).toNat
+
+theorem encodeTower128Le_length (x : Tower128) : (encodeTower128Le x).length = 16 :=
+  encodeNatLeBytes_length 16 _
+
+theorem encodeTower128Le_injective {x y : Tower128}
+    (h : encodeTower128Le x = encodeTower128Le y) : x = y := by
+  unfold encodeTower128Le at h
+  have hxLt : (packTower 7 x).toNat < 256 ^ 16 := by
+    have := (packTower 7 x).isLt
+    have hPow : (2 : Nat) ^ 128 = 256 ^ 16 := by decide
+    omega
+  have hyLt : (packTower 7 y).toNat < 256 ^ 16 := by
+    have := (packTower 7 y).isLt
+    have hPow : (2 : Nat) ^ 128 = 256 ^ 16 := by decide
+    omega
+  have hDec := congrArg decodeNatLeBytes h
+  rw [decodeNatLeBytes_encodeNatLeBytes 16 _ hxLt,
+      decodeNatLeBytes_encodeNatLeBytes 16 _ hyLt] at hDec
+  exact packTower_injective 7 x y (BitVec.eq_of_toNat_eq hDec)
+
+/-- Active SPCOT consistency tag (`compute_spcot_check_tag` in `pcg_dense.rs:737-756`):
+    `cSHAKE256("QSAG.DPCG.SPCOT.TAG/v1", encodeMultiFrame [sessionId, u64le(senderId), u64le(receiverId), chalCoin, wBytes])`. -/
+@[expose] def computeSpcotCheckTag
+    (sessionId : List UInt8)
+    (senderId receiverId : Nat)
+    (chalCoin : List UInt8)
+    (wVals : Tower128 × Tower128) : List UInt8 :=
+  let sBytes := encodeNatLeBytes 8 senderId
+  let rBytes := encodeNatLeBytes 8 receiverId
+  let wBytes := encodeTower128Le wVals.1 ++ encodeTower128Le wVals.2
+  cshake256Fixed 32 spcotTagDomain
+    (encodeMultiFrame [sessionId, sBytes, rBytes, chalCoin, wBytes])
+
+/-- **Injective Multi-Frame Binding of `computeSpcotCheckTag` (`computeSpcotCheckTag_binding`)**:
+    Two SPCOT tag evaluations collide only if either every framed input field
+    `(sessionId, senderId, receiverId, chalCoin, wVals)` is identical, or they yield a constructive
+    `HashCollisionWitness` against `cshake256Fixed 32 spcotTagDomain` (`0 Classical.choice`). -/
+def computeSpcotCheckTag_binding
+    {sid₁ sid₂ : List UInt8} {s₁ s₂ r₁ r₂ : Nat} {coin₁ coin₂ : List UInt8}
+    {w₁ w₂ : Tower128 × Tower128}
+    (hs₁ : s₁ < 2 ^ 64) (hs₂ : s₂ < 2 ^ 64)
+    (hr₁ : r₁ < 2 ^ 64) (hr₂ : r₂ < 2 ^ 64)
+    (hTagEq : computeSpcotCheckTag sid₁ s₁ r₁ coin₁ w₁ = computeSpcotCheckTag sid₂ s₂ r₂ coin₂ w₂) :
+    PSum (sid₁ = sid₂ ∧ s₁ = s₂ ∧ r₁ = r₂ ∧ coin₁ = coin₂ ∧ w₁ = w₂)
+         (HashCollisionWitness (cshake256Fixed 32 spcotTagDomain)) :=
+  let m₁ := encodeMultiFrame [sid₁, encodeNatLeBytes 8 s₁, encodeNatLeBytes 8 r₁, coin₁,
+    encodeTower128Le w₁.1 ++ encodeTower128Le w₁.2]
+  let m₂ := encodeMultiFrame [sid₂, encodeNatLeBytes 8 s₂, encodeNatLeBytes 8 r₂, coin₂,
+    encodeTower128Le w₂.1 ++ encodeTower128Le w₂.2]
+  if hm : m₁ = m₂ then
+    PSum.inl <| by
+      have hList := encodeMultiFrame_injective hm
+      simp only [List.cons.injEq, and_true] at hList
+      rcases hList with ⟨hSid, hS, hR, hCoin, hW⟩
+      have hPow64 : (2 : Nat) ^ 64 = 256 ^ 8 := by decide
+      have hsEq : s₁ = s₂ := by
+        have hd := congrArg decodeNatLeBytes hS
+        rw [decodeNatLeBytes_encodeNatLeBytes 8 s₁ (hPow64 ▸ hs₁),
+            decodeNatLeBytes_encodeNatLeBytes 8 s₂ (hPow64 ▸ hs₂)] at hd
+        exact hd
+      have hrEq : r₁ = r₂ := by
+        have hd := congrArg decodeNatLeBytes hR
+        rw [decodeNatLeBytes_encodeNatLeBytes 8 r₁ (hPow64 ▸ hr₁),
+            decodeNatLeBytes_encodeNatLeBytes 8 r₂ (hPow64 ▸ hr₂)] at hd
+        exact hd
+      obtain ⟨hW1, hW2⟩ := List.append_inj hW (by simp [encodeTower128Le_length])
+      exact ⟨hSid, hsEq, hrEq, hCoin, Prod.ext (encodeTower128Le_injective hW1) (encodeTower128Le_injective hW2)⟩
+  else
+    PSum.inr ⟨m₁, m₂, hm, hTagEq⟩
+
+/-- Symbolic hypercube sum $\bigoplus_{u \in \mathrm{BitVec}\, d} f(u)$ in `Tower128`. -/
+def bvTowerSum128 : (d : Nat) → (BitVec d → Tower128) → Tower128
+  | 0, f => f 0#0
+  | d + 1, f =>
+    towerAdd 7
+      (bvTowerSum128 d (fun u => f (BitVec.cons false u)))
+      (bvTowerSum128 d (fun u => f (BitVec.cons true u)))
+
+private theorem bvTowerSum128_congr {d : Nat} {f g : BitVec d → Tower128}
+    (h : ∀ u, f u = g u) : bvTowerSum128 d f = bvTowerSum128 d g := by
+  induction d with
+  | zero => exact h 0#0
+  | succ d ih =>
+    simp only [bvTowerSum128, ih (fun u => h (BitVec.cons false u)),
+      ih (fun u => h (BitVec.cons true u))]
+
+private theorem bvTowerSum128_zero (d : Nat) :
+    bvTowerSum128 d (fun _ => towerZero 7) = towerZero 7 := by
+  induction d with
+  | zero => rfl
+  | succ d ih => simp only [bvTowerSum128, ih, towerAdd_zero]
+
+private theorem bvTowerSum128_add {d : Nat} (f g : BitVec d → Tower128) :
+    bvTowerSum128 d (fun u => towerAdd 7 (f u) (g u)) =
+      towerAdd 7 (bvTowerSum128 d f) (bvTowerSum128 d g) := by
+  induction d with
+  | zero => rfl
+  | succ d ih =>
+    simp only [bvTowerSum128, ih]
+    simp only [towerAdd_assoc, towerAdd_left_comm]
+
+private theorem bvTowerSum128_single : ∀ (d : Nat) (pStar : BitVec d) (val : Tower128),
+    bvTowerSum128 d (fun u => if u = pStar then val else towerZero 7) = val
+  | 0, pStar, val => by
+    have hp : pStar = 0#0 := BitVec.eq_nil pStar
+    subst hp; rfl
+  | d + 1, pStar, val => by
+    have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+    rw [← hSp]
+    simp only [bvTowerSum128]
+    cases pStar.getLsbD d
+    · have hL : bvTowerSum128 d (fun u => if BitVec.cons false u = BitVec.cons false (pStar.setWidth d) then val else towerZero 7) =
+          bvTowerSum128 d (fun u => if u = pStar.setWidth d then val else towerZero 7) := by
+        apply bvTowerSum128_congr; intro u; simp only [bvCons_inj, true_and]
+      have hR : bvTowerSum128 d (fun u => if BitVec.cons true u = BitVec.cons false (pStar.setWidth d) then val else towerZero 7) =
+          bvTowerSum128 d (fun _ => towerZero 7) := by
+        apply bvTowerSum128_congr; intro u; simp only [bvCons_inj, Bool.true_eq_false, false_and, ↓reduceIte]
+      rw [hL, hR, bvTowerSum128_single d, bvTowerSum128_zero, towerAdd_zero]
+    · have hL : bvTowerSum128 d (fun u => if BitVec.cons false u = BitVec.cons true (pStar.setWidth d) then val else towerZero 7) =
+          bvTowerSum128 d (fun _ => towerZero 7) := by
+        apply bvTowerSum128_congr; intro u; simp only [bvCons_inj, Bool.false_eq_true, false_and, ↓reduceIte]
+      have hR : bvTowerSum128 d (fun u => if BitVec.cons true u = BitVec.cons true (pStar.setWidth d) then val else towerZero 7) =
+          bvTowerSum128 d (fun u => if u = pStar.setWidth d then val else towerZero 7) := by
+        apply bvTowerSum128_congr; intro u; simp only [bvCons_inj, true_and]
+      rw [hL, hR, bvTowerSum128_single d, bvTowerSum128_zero, towerZero_add]
+
+/-- Repeated squaring $\chi^{2^d}$ in `Tower128` ($O(d)$ squarings). -/
+def towerSqPow128 : Nat → Tower128 → Tower128
+  | 0, x => x
+  | d + 1, x =>
+    let prev := towerSqPow128 d x
+    towerMul 7 prev prev
+
+/-- Vandermonde leaf weight $\chi^{u + 1} \in \mathrm{Tower128}$ evaluated in $O(d)$ multiplications
+    (`leaf_powers` in `pcg_dense.rs:665-668`). -/
+def spcotLeafWeight : {d : Nat} → Tower128 → BitVec d → Tower128
+  | 0, chi, _ => chi
+  | d + 1, chi, u =>
+    let lo := spcotLeafWeight chi (u.setWidth d)
+    if u.getLsbD d then towerMul 7 (towerSqPow128 d chi) lo else lo
+
+private theorem spcotLeafWeight_zero_idx (d : Nat) (chi : Tower128) :
+    spcotLeafWeight chi (0#d) = chi := by
+  induction d with
+  | zero => rfl
+  | succ d ih =>
+    simp only [spcotLeafWeight, BitVec.getLsbD_zero, Bool.false_eq_true, ↓reduceIte]
+    rw [setWidth_zero (d + 1) d, ih]
+
+/-- Map a squeezed 128-bit word into `Tower128 \ {0, 1}` (`squeeze_nonzero_tower128` in `pcg_dense.rs:627-636`). -/
+def sanitizeSpcotChallengeElem (raw : BitVec 128) : Tower128 :=
+  let t := unpackTower 7 raw
+  if decide (t = towerZero 7) || decide (t = towerOne 7) then towerX 7 else t
+
+theorem sanitizeSpcotChallengeElem_ne_zero (raw : BitVec 128) :
+    sanitizeSpcotChallengeElem raw ≠ towerZero 7 := by
+  unfold sanitizeSpcotChallengeElem
+  dsimp only
+  if h0 : unpackTower 7 raw = towerZero 7 then
+    simp only [h0, decide_true, Bool.true_or, ↓reduceIte]
+    decide
+  else if h1 : unpackTower 7 raw = towerOne 7 then
+    simp only [h1, decide_true, Bool.or_true, ↓reduceIte]
+    decide
+  else
+    simp only [h0, h1, decide_false, Bool.false_or, Bool.false_eq_true, ↓reduceIte]
+    exact h0
+
+/-- Derive `(gamma, chiBase)` in `Tower128 \ {0, 1}` for SPCOT repetition `rep` via `cSHAKE256`
+    with customization `"QSAG.DPCG.SPCOT.CHAL/v1"` (`derive_spcot_challenge_weights` in `pcg_dense.rs:643-661`). -/
+def deriveSpcotChallengePair
+    (sessionId : List UInt8)
+    (senderId receiverId treeDepth rep : Nat)
+    (chalCoin : List UInt8) : Tower128 × Tower128 :=
+  let chalInput :=
+    sessionId ++
+    encodeNatLeBytes 8 senderId ++
+    encodeNatLeBytes 8 receiverId ++
+    encodeNatLeBytes 4 treeDepth ++
+    encodeNatLeBytes 4 rep ++
+    chalCoin
+  let raw := cshake256Fixed 32 spcotChalDomain chalInput
+  let rawGamma := BitVec.ofNat 128 (decodeNatLeBytes (raw.take 16))
+  let rawChi := BitVec.ofNat 128 (decodeNatLeBytes (raw.drop 16))
+  (sanitizeSpcotChallengeElem rawGamma, sanitizeSpcotChallengeElem rawChi)
+
+theorem deriveSpcotChallengePair_ne_zero
+    (sessionId : List UInt8) (senderId receiverId treeDepth rep : Nat) (chalCoin : List UInt8) :
+    (deriveSpcotChallengePair sessionId senderId receiverId treeDepth rep chalCoin).1 ≠ towerZero 7 ∧
+    (deriveSpcotChallengePair sessionId senderId receiverId treeDepth rep chalCoin).2 ≠ towerZero 7 :=
+  ⟨sanitizeSpcotChallengeElem_ne_zero _, sanitizeSpcotChallengeElem_ne_zero _⟩
+
+/-- Convert a length-`d` sibling list into a typed `GgmCopath d`. -/
+def listToGgmCopath : (d : Nat) → List (BitVec 128) → GgmCopath d
+  | 0, _ => ()
+  | d + 1, [] => (0#128, listToGgmCopath d [])
+  | d + 1, s :: rest => (s, listToGgmCopath d rest)
+
+/-- Serialize a typed `GgmCopath d` to a length-`d` list of 128-bit sibling seeds. -/
+def ggmCopathToList : {d : Nat} → GgmCopath d → List (BitVec 128)
+  | 0, _ => []
+  | _ + 1, (s, rest) => s :: ggmCopathToList rest
+
+theorem ggmCopathToList_length : ∀ {d : Nat} (cp : GgmCopath d),
+    (ggmCopathToList cp).length = d
+  | 0, _ => rfl
+  | _ + 1, (_, rest) => congrArg Nat.succ (ggmCopathToList_length rest)
+
+theorem listToGgmCopath_toList : ∀ {d : Nat} (cp : GgmCopath d),
+    listToGgmCopath d (ggmCopathToList cp) = cp
+  | 0, () => rfl
+  | _ + 1, (_, rest) => Prod.ext rfl (listToGgmCopath_toList rest)
+
+/-- Evaluate Receiver's single-repetition SPCOT linear combination term
+    $\gamma \cdot \bigoplus_{u \in \mathrm{BitVec}\, d} \chi^{u+1} \cdot s'[u]$
+    (`eval_punctured_tree_spcot_term` in `pcg_dense.rs:714-733`). -/
+def evalPuncturedTreeSpcotCombo (d : Nat)
+    (gamma chi : Tower128)
+    (puncLeaves : BitVec d → BitVec 128)
+    (pStar : BitVec d)
+    (deltaCorr : Tower128) : Tower128 :=
+  let sum := bvTowerSum128 d (fun u =>
+    let eff := if u = pStar then deltaCorr else unpackTower 7 (puncLeaves u)
+    towerMul 7 (spcotLeafWeight chi u) eff)
+  towerMul 7 gamma sum
+
+/-- **Exact Sender–Receiver SPCOT Check-Value Agreement (`spcot_reconstruct_matches_sender`)**:
+    For every GGM PRG `prg`, depth `d`, root `seed`, Sender MAC key `alphaSender`, puncture `pStar`,
+    challenge weights `(gamma, chi)`, and 1-element $\mathbb{F}_{2^{128}}$ VOLE mask `(keySender, macRecv)`
+    satisfying `macRecv + keySender = (gamma * chi^{p* + 1}) * alphaSender`, Receiver's punctured
+    reconstruction equals Sender's full-tree linear combination identically! -/
+theorem spcot_reconstruct_matches_sender (prg : GgmPrg) (d : Nat)
+    (seed : BitVec 128) (alphaSender gamma chi keySender macRecv : Tower128)
+    (pStar : BitVec d)
+    (hVole : towerAdd 7 macRecv keySender =
+      towerMul 7 (towerMul 7 gamma (spcotLeafWeight chi pStar)) alphaSender) :
+    let fullLeaves := ggmExpandFull prg d 0 seed
+    let copath := ggmMakeCopath prg d 0 seed pStar
+    let puncLeaves := ggmExpandPunctured prg d 0 pStar copath
+    let corrOffset := towerAdd 7 (unpackTower 7 (bvXorSum128 d fullLeaves)) alphaSender
+    let deltaCorr := towerAdd 7 (unpackTower 7 (bvXorSum128 d puncLeaves)) corrOffset
+    let senderCombo := towerMul 7 gamma
+      (bvTowerSum128 d (fun u => towerMul 7 (spcotLeafWeight chi u) (unpackTower 7 (fullLeaves u))))
+    towerAdd 7 macRecv (evalPuncturedTreeSpcotCombo d gamma chi puncLeaves pStar deltaCorr) =
+      towerAdd 7 keySender senderCombo := by
+  intro fullLeaves copath puncLeaves corrOffset deltaCorr senderCombo
+  obtain ⟨hPuncZero, hPuncEq⟩ := ggmExpandPunctured_exact prg d 0 seed pStar
+  have hXorId := (spcot_consistency_soundness fullLeaves puncLeaves pStar (packTower 7 alphaSender)
+    hPuncZero hPuncEq).1
+  have hDeltaEq : deltaCorr = towerAdd 7 (unpackTower 7 (fullLeaves pStar)) alphaSender := by
+    apply packTower_injective 7
+    dsimp only [deltaCorr, corrOffset]
+    rw [packTower_add, packTower_add, packTower_add, packTower_unpackTower,
+        packTower_unpackTower, packTower_unpackTower]
+    exact hXorId
+  have hTermSplit : evalPuncturedTreeSpcotCombo d gamma chi puncLeaves pStar deltaCorr =
+      towerAdd 7 senderCombo
+        (towerMul 7 (towerMul 7 gamma (spcotLeafWeight chi pStar)) alphaSender) := by
+    unfold evalPuncturedTreeSpcotCombo
+    have hPoint : ∀ u : BitVec d,
+        towerMul 7 (spcotLeafWeight chi u)
+          (if u = pStar then deltaCorr else unpackTower 7 (puncLeaves u)) =
+        towerAdd 7
+          (towerMul 7 (spcotLeafWeight chi u) (unpackTower 7 (fullLeaves u)))
+          (if u = pStar then towerMul 7 (spcotLeafWeight chi pStar) alphaSender else towerZero 7) := by
+      intro u
+      if hu : u = pStar then
+        subst hu
+        simp only [↓reduceIte, hDeltaEq, towerMul_add_distrib]
+      else
+        simp only [hu, ↓reduceIte, towerAdd_zero]
+        dsimp only [puncLeaves, fullLeaves, copath]
+        rw [hPuncEq u hu]
+    rw [bvTowerSum128_congr hPoint, bvTowerSum128_add, bvTowerSum128_single,
+        towerMul_add_distrib, towerMul_assoc]
+  rw [hTermSplit]
+  have hKeyEq : keySender = towerAdd 7 macRecv
+      (towerMul 7 (towerMul 7 gamma (spcotLeafWeight chi pStar)) alphaSender) := by
+    rw [← hVole, towerAdd_cancel]
+  rw [hKeyEq]
+  rw [towerAdd_assoc 7 macRecv _ senderCombo,
+      towerAdd_comm 7 (towerMul 7 (towerMul 7 gamma (spcotLeafWeight chi pStar)) alphaSender) senderCombo]
+
+/-- Recursive check of peer Sender's `LSB(alpha_sender) == 1` correlation proof across 128 dedicated
+    OT-authenticated check rows (`lsb(M_i) ^^ k_i = x_i`). -/
+def verifySenderAlphaLsbAux : Nat → BitVec 128 → List Tower128 → BitVec 128 → Bool
+  | _, _, [], _ => true
+  | idx, choices, m :: rest, keyBits =>
+    decide ((towerLsb m ^^ keyBits.getLsbD idx) = choices.getLsbD idx) &&
+    verifySenderAlphaLsbAux (idx + 1) choices rest keyBits
+
+/-- Verify peer Sender's `LSB(alpha_sender) == 1` over 128 non-zero OT check correlations. -/
+def verifyPeerSenderAlphaLsb
+    (choices : BitVec 128) (recvMacs : List Tower128) (senderKeyLsbBits : BitVec 128) : Bool :=
+  decide (choices ≠ 0#128) &&
+  decide (recvMacs.length = 128) &&
+  verifySenderAlphaLsbAux 0 choices recvMacs senderKeyLsbBits
+
+/-- Construct Receiver's `n` OT-authenticated MACs starting at row `idx`:
+    `M_{idx + j} = K_{idx + j} + choices[idx + j] * alphaSender`. -/
+def mkSenderAlphaRecvMacsAux (alphaSender : Tower128) (senderKeys : Nat → Tower128)
+    (choices : BitVec 128) : Nat → Nat → List Tower128
+  | _, 0 => []
+  | idx, n + 1 =>
+    towerAdd 7 (senderKeys idx) (if choices.getLsbD idx then alphaSender else towerZero 7) ::
+      mkSenderAlphaRecvMacsAux alphaSender senderKeys choices (idx + 1) n
+
+/-- Construct Receiver's 128 OT-authenticated MACs `M_i = K_i + choices[i] * alphaSender`. -/
