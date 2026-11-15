@@ -5,12 +5,14 @@
 //! (`(2/3)^438 < 2^-256` classical soundness error; generic Grover search over the
 //! challenge space costs `> 2^128` oracle iterations).
 //!
-//! The distributed outer prover (`co_zk_mpc`) enforces active 1-of-3 malicious
+//! The RSS path of the distributed outer prover (`co_zk_mpc`) enforces active 1-of-3 malicious
 //! multiplication verification (per-flush `< 2^-186` prime-field and `< 2^-244`
 //! Boolean `AND` soundness with two-round transcript-bound coin-flipping) and pre-open circuit
 //! output-zero verification (`all_outputs_zero`) over confidential authenticated
 //! pairwise channels, providing non-identifiable abort against one actively
 //! corrupted physical custodian (`2`-of-`3` collusion reconstructs the witness).
+//! General `(t,n)` Shamir and n-of-n additive custody use the distinct,
+//! semi-honest trusted-preprocessing backend in `threshold_mpc`.
 //! See `SECURITY.md` for exact security bounds and assumptions.
 //!
 extern crate alloc;
@@ -45,6 +47,7 @@ mod ownership;
 pub use co_zk_mpc::CoZkCustodianShare;
 mod batch_hash;
 mod outer_mpc;
+pub mod threshold_mpc;
 mod parallel;
 mod secret;
 mod tape_sponge;
