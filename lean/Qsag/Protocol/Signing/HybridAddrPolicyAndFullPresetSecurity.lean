@@ -8,10 +8,10 @@ these are conditional reductions, not proofs of ECDSA, ML-DSA or a Rust refineme
 Address metadata binds the expected address; the Rust signing transcript itself omits HRP
 and address version. Applications needing network-exclusive signatures must bind them in msg.
 -/
-public import Qsag.Fips205
-import all Qsag.Fips205
+public import Qsag.Protocol.Signing.Fips205
+import all Qsag.Protocol.Signing.Fips205
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.UcGames
+import all Qsag.Oracle.UcGames
 public section
 namespace Qsag.HybridSecurity
 set_option autoImplicit false
