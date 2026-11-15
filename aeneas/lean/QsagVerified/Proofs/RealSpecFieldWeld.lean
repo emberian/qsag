@@ -58,6 +58,63 @@ def comapInputs {S In In' Out : Type} (A : Qsag.PartyMachine S In Out) (encIn : 
   step s i := A.step s (encIn i)
   errStep s i := A.errStep s (encIn i)
 
+/-- A trace of the pulled-back machine is a trace of the original on the encoded inputs. -/
+theorem comapInputs_validTrace {S In In' Out : Type} {A : Qsag.PartyMachine S In Out}
+    {encIn : In' → In} {s s' : S} {tr : List (In' × Out)}
+    (h : (comapInputs A encIn).ValidTrace s tr s') :
+    A.ValidTrace s (tr.map fun p => (encIn p.1, p.2)) s' := by
+  induction h with
+  | nil s => exact .nil s
+  | accept hStep _ ih => exact .accept hStep ih
+  | reject inp hNone _ ih => exact .reject (encIn inp) hNone ih
+
+/-- The step-exactness statement every guard weld proves: on each state and input the extracted
+    function returns normally, an accepted result is the spec step on the abstracted state and
+    input, and a rejected result is the spec's rejection with the abstracted post-state. -/
+@[expose]
+def ExtractedStepRefines {M I O E S I' O' : Type}
+    (f : M → I → Result (M × core.result.Result O E)) (encOut : O → O')
+    (A : Qsag.PartyMachine S I' O') (absSt : M → S) (absIn : I → I') : Prop :=
+  ∀ c i, match f c i with
+    | .ok (c', .Ok o) => A.step (absSt c) (absIn i) = some (absSt c', encOut o)
+    | .ok (c', .Err _) =>
+      A.step (absSt c) (absIn i) = none ∧ A.errStep (absSt c) (absIn i) = absSt c'
+    | _ => False
+
+/-- Exact step refinement gives a lockstep forward simulation whose relation is the graph of the
+    state abstraction. -/
+@[expose]
+def ExtractedStepRefines.forwardSim {M I O E S I' O' : Type}
+    {f : M → I → Result (M × core.result.Result O E)} {encOut : O → O'}
+    {A : Qsag.PartyMachine S I' O'} {absSt : M → S} {absIn : I → I'}
+    (h : ExtractedStepRefines f encOut A absSt absIn) :
+    Qsag.ForwardSim (extractedPartyMachine f encOut) (comapInputs A absIn) where
+  Rel c a := a = absSt c
+  sim_ok {c c' a inp out} hRel hStepC := by
+    subst hRel
+    have hc := h c inp
+    dsimp only [extractedPartyMachine, comapInputs] at hStepC ⊢
+    revert hc hStepC
+    generalize f c inp = r
+    rcases r with ⟨m1, o | e⟩ | _ | _
+    · intro hc hStepC
+      dsimp only at hc hStepC
+      simp only [Option.some.injEq, Prod.mk.injEq] at hStepC
+      obtain ⟨rfl, rfl⟩ := hStepC
+      rw [hc]
+      exact ⟨rfl, rfl⟩
+    all_goals intro _ hStepC; simp at hStepC
+  sim_err {c a inp} hRel hNoneC := by
+    subst hRel
+    have hc := h c inp
+    dsimp only [extractedPartyMachine, comapInputs] at hNoneC ⊢
+    revert hc hNoneC
+    generalize f c inp = r
+    rcases r with ⟨m1, o | e⟩ | _ | _
+    · intro _ hNoneC; simp at hNoneC
+    · intro hc _; exact hc
+    all_goals intro hc _; exact False.elim hc
+
 /-! ## 2. Goldilocks field kernels against `Qsag.Goldilocks` -/
 
 /-- The canonical field element denoted by an extracted `u64` Goldilocks word. -/
