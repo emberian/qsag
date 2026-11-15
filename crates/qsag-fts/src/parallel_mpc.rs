@@ -14,6 +14,7 @@ use qsag_accel::gf2_128::gf2_128_mul;
 use qsag_accel::goldilocks::pack_bytes32_to_limbs56;
 use qsag_accel::keccak::{commit_mpc_broadcast, cshake256_framed_32, cshake256_framed_xof};
 use qsag_accel::poseidon2::poseidon2_hash_limbs;
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretVec};
 
 /// Nonzero MDS diffusion constants in $\mathbb{F}_{2^{128}}$ for 2-lane Davies-Meyer compression.
 const GF128_MDS_A: u128 = 0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835;
@@ -142,15 +143,6 @@ impl AuthenticatedPowerShare {
 }
 /// Historical name retained for callers that store preprocessing allocations.
 pub type AuthenticatedBeaverTriple = AuthenticatedPowerShare;
-
-/// Secret field elements wiped when dropped: DKG samples and products, and reconstructed
-/// openings that no MAC check has accepted yet.
-struct SecretValues(Vec<u128>);
-impl Drop for SecretValues {
-    fn drop(&mut self) {
-        ct_zeroize_u128s(&mut self.0);
-    }
-}
 
 /// Authenticated share of an $\mathbb{F}_{2^{128}}$ wire (`val_sh`) + 2-lane BDOZ MAC (`mac[0..2]`).
 #[derive(Clone)]
@@ -792,14 +784,6 @@ impl Drop for PendingOpeningsGuard<'_> {
         for sh in self.0.iter_mut() {
             sh.clear_pending_openings();
         }
-    }
-}
-
-/// One party's MAC shares for a batch of wires, wiped when dropped.
-struct MacSharePairs(Vec<(u128, u128)>);
-impl Drop for MacSharePairs {
-    fn drop(&mut self) {
-        crate::release_gate::wipe_pairs(&mut self.0);
     }
 }
 
@@ -1460,43 +1444,46 @@ impl ParallelSeededThresholdSetup {
             );
             weights.push(bytes32_to_lanes(&wr));
         }
-        let tilde_x = accel
-            .bdoz_gf2_128_batch_dot(candidates.pairs(), &weights)
-            .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+        // A fold of candidates no MAC check has accepted yet.
+        let tilde_x = SecretBuffer(
+            accel
+                .bdoz_gf2_128_batch_dot(candidates.pairs(), &weights)
+                .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?,
+        );
         candidates.shed_encodings();
 
         // Phase 1 (Commit ONLY): Every party computes `sigma_i` strictly from its own private struct!
         let quorum: Vec<_> = shares.iter().map(|sh| sh.party_id).collect();
         let mut barriers = Vec::with_capacity(n);
         for (p_idx, sh) in shares.iter_mut().enumerate() {
-            let party_gammas = MacSharePairs(
+            let party_gammas: SecretVec<(u128, u128)> = SecretBuffer(
                 wires
                     .iter()
                     .map(|w_parties| (w_parties[p_idx].mac[0], w_parties[p_idx].mac[1]))
                     .collect(),
             );
-            let folded_gamma = accel
-                .bdoz_gf2_128_batch_dot(&party_gammas.0, &weights)
-                .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+            let folded_gamma = SecretBuffer(
+                accel
+                    .bdoz_gf2_128_batch_dot(&party_gammas, &weights)
+                    .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?,
+            );
             drop(party_gammas);
 
             // Private pairwise PRG zero-share `z_i = \bigoplus_{j != i} F(k_{min(i,j), max(i,j)}, sid || rt || tilde_digest)`!
-            let mut z0 = 0u128;
-            let mut z1 = 0u128;
+            let mut sigma = SecretBuffer([
+                folded_gamma.0.0 ^ gf2_128_mul(tilde_x.0.0, sh.bdoz_alpha_share[0]),
+                folded_gamma.0.1 ^ gf2_128_mul(tilde_x.0.1, sh.bdoz_alpha_share[1]),
+            ]);
             for (_, pair_seed) in &sh.pairwise_zero_seeds {
-                let prf = cshake256_framed_32(
+                let prf = SecretBytes::new(cshake256_framed_32(
                     b"QSAG.PSFTS.PAIR_ZERO_PRF.V2",
                     &[pair_seed, session_id, &rt_be, &tilde_digest],
-                );
-                let zero = bytes32_to_lanes(&prf);
-                z0 ^= zero.0;
-                z1 ^= zero.1;
+                ));
+                let zero = SecretBuffer(bytes32_to_lanes(&prf));
+                sigma[0] ^= zero.0.0;
+                sigma[1] ^= zero.0.1;
             }
-
-            let sigma0 = folded_gamma.0 ^ gf2_128_mul(tilde_x.0, sh.bdoz_alpha_share[0]) ^ z0;
-            let sigma1 = folded_gamma.1 ^ gf2_128_mul(tilde_x.1, sh.bdoz_alpha_share[1]) ^ z1;
-
-            let payload = lanes_to_bytes32(sigma0, sigma1);
+            let payload = SecretBytes::new(lanes_to_bytes32(sigma[0], sigma[1]));
             let salt = cshake256_framed_32(
                 b"QSAG.PSFTS.BAR_SALT.V2",
                 &[&sh.local_salt_seed, session_id, &rt_be, &tilde_digest],
@@ -1506,7 +1493,7 @@ impl ParallelSeededThresholdSetup {
                 *session_id,
                 round_tag,
                 quorum.clone(),
-                payload,
+                *payload,
                 salt,
             ));
         }
@@ -2084,5 +2071,72 @@ mod boundary_tests {
             verify_parallel_seeded_fts(&setup.pk, b"canonical-check", &bad_sig, &accel),
             Err(ParallelSeededError::InvalidAuthenticationPath)
         );
+    }
+}
+
+#[cfg(test)]
+mod secret_guard_tests {
+    use super::*;
+    use core::cell::Cell;
+    use qsag_asm::wipe::SecretWipe;
+
+    /// Counts erasures of slots that still hold a value.
+    #[derive(Clone, Copy)]
+    struct Probe<'a>(u128, &'a Cell<usize>);
+    impl SecretWipe for Probe<'_> {
+        fn secret_wipe(&mut self) {
+            if self.0 != 0 {
+                self.1.set(self.1.get() + 1);
+            }
+            self.0 = 0;
+        }
+    }
+
+    /// The shapes this crate holds secrets in (field-element vectors, MAC-share pair
+    /// vectors, fixed arrays) are erased when an error return drops them.
+    #[test]
+    fn value_and_pair_buffers_are_erased_on_error_return() {
+        fn fail<'a>(probe: Probe<'a>) -> Result<(), ParallelSeededError> {
+            let mut values: SecretVec<Probe<'a>> = SecretVec::with_capacity(3);
+            values.extend_from_slice(&[probe; 3]);
+            let _pairs: SecretVec<(Probe<'a>, Probe<'a>)> = SecretBuffer(vec![(probe, probe); 2]);
+            let _fixed = SecretBuffer([probe; 2]);
+            Err(ParallelSeededError::BdozMacCheckFailed)
+        }
+        let wiped = Cell::new(0);
+        assert!(fail(Probe(7, &wiped)).is_err());
+        assert_eq!(wiped.get(), 3 + 4 + 2);
+    }
+
+    /// A refused opening drops its reconstructed values; the share keeps nothing pending.
+    #[test]
+    fn refused_value_opening_leaves_no_pending_candidates() {
+        let accel = qsag_accel::CpuReferenceBackend::new();
+        let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            ParallelSeededParams {
+                tree_height: 1,
+                winternitz_w: 2,
+                num_chains: 2,
+                target_sum: 1,
+            },
+            2,
+            [61; 32],
+            [62; 32],
+            &accel,
+        )
+        .unwrap();
+        let wire: Vec<_> = setup
+            .shares
+            .iter()
+            .map(|s| AuthWire128 {
+                val_sh: s.sk_seed_lanes[0],
+                mac: s.sk_seed_macs[0],
+            })
+            .collect();
+        assert_eq!(
+            setup.open_and_verify_bdoz_wires(&[5; 32], 1, &[wire], None, Some((1, 0, 4)), &accel),
+            Err(ParallelSeededError::BdozMacCheckFailed)
+        );
+        assert!(setup.shares.iter().all(|s| s.pending_openings.is_empty()));
     }
 }

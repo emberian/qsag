@@ -212,8 +212,8 @@ impl ParallelSeededDkgRound1State {
             })
             .collect())
     }
-    fn sample(&self, label: &[u8], count: usize) -> SecretValues {
-        SecretValues(xof_field_elements(
+    fn sample(&self, label: &[u8], count: usize) -> SecretVec<u128> {
+        SecretBuffer(xof_field_elements(
             b"QSAG.DKG.PRIVATE.V1",
             &[
                 &self.entropy,
@@ -278,7 +278,7 @@ pub trait ParallelSeededDkgOt {
         peer: u16,
         context: [u8; 32],
         choices: &[u128],
-    ) -> Result<Vec<u128>, ParallelSeededError>;
+    ) -> Result<SecretVec<u128>, ParallelSeededError>;
 }
 
 /// GF(2^128) Gilboa multiplication using 128 binary OTs per field product.
@@ -323,7 +323,7 @@ impl<T: ParallelSeededDkgOt> ParallelSeededDkgProducts for ParallelSeededGilboaP
             }
             return Ok(Vec::new());
         }
-        let mut shares = SecretValues(Vec::with_capacity(operand.len()));
+        let mut shares = SecretBuffer(Vec::with_capacity(operand.len()));
         // Bound temporary OT storage independently of the preprocessing pool.
         for (batch, inputs) in operand.chunks(32).enumerate() {
             let context = cshake256_framed_32(
@@ -337,34 +337,29 @@ impl<T: ParallelSeededDkgOt> ParallelSeededDkgProducts for ParallelSeededGilboaP
                 ],
             );
             if self.party_id == sender {
-                let mut raw = vec![0u8; inputs.len() * 128 * 16];
+                // Guards, so a failing or unwinding OT backend still erases the pads.
+                let mut raw = SecretBuffer(vec![0u8; inputs.len() * 128 * 16]);
                 cshake256_framed_xof(b"QSAG.DKG.OT.PADS.V1", &[&self.entropy, &context], &mut raw);
-                let mut alternatives = Vec::with_capacity(inputs.len() * 128);
+                let mut alternatives = SecretVec::<[u128; 2]>::with_capacity(inputs.len() * 128);
+                let powers: [u128; 128] = core::array::from_fn(|bit| 1u128 << bit);
                 for (&x, pads) in inputs.iter().zip(raw.as_chunks::<{ 128 * 16 }>().0.iter()) {
-                    let powers: [u128; 128] = core::array::from_fn(|bit| 1u128 << bit);
-                    let mut basis = [0u128; 128];
+                    let mut basis = SecretBuffer([0u128; 128]);
                     // OT needs every product separately. The scale kernel retains
                     // all 128 outputs; a single mul_acc_batch dot product would
                     // XOR them together and destroy the alternatives.
-                    qsag_asm::bitslice::gf2_128_scale_xor(&mut basis, &powers, x);
+                    qsag_asm::bitslice::gf2_128_scale_xor(&mut basis.0, &powers, x);
                     let mut share = 0;
-                    for (pad, &term) in pads.as_chunks::<16>().0.iter().zip(&basis) {
+                    for (pad, &term) in pads.as_chunks::<16>().0.iter().zip(basis.iter()) {
                         let r = u128::from_le_bytes(*pad);
                         share ^= r;
                         alternatives.push([r, r ^ term]);
                     }
-                    ct_zeroize_u128s(&mut basis);
-                    shares.0.push(share);
+                    shares.push(share);
                 }
-                ct_zeroize_bytes(&mut raw);
-                let result = self.ot.send(receiver, context, &alternatives);
-                for pair in &mut alternatives {
-                    ct_zeroize_u128s(pair);
-                }
-                result?;
+                self.ot.send(receiver, context, &alternatives)?;
             } else {
-                let selected = SecretValues(self.ot.receive(sender, context, inputs)?);
-                if selected.0.len() != inputs.len() * 128 {
+                let selected = self.ot.receive(sender, context, inputs)?;
+                if selected.len() != inputs.len() * 128 {
                     return Err(ParallelSeededError::BdozMacCheckFailed);
                 }
                 shares.0.extend(
@@ -388,12 +383,12 @@ struct Products<'a, T> {
     sequence: u64,
 }
 impl<T: ParallelSeededDkgProducts> Products<'_, T> {
-    fn multiply(&mut self, x: &[u128], y: &[u128]) -> Result<SecretValues, ParallelSeededError> {
+    fn multiply(&mut self, x: &[u128], y: &[u128]) -> Result<SecretVec<u128>, ParallelSeededError> {
         if x.len() != y.len() {
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
         let id = self.backend.party_id();
-        let mut result = SecretValues(x.iter().zip(y).map(|(&a, &b)| gf2_128_mul(a, b)).collect());
+        let mut result = SecretBuffer(x.iter().zip(y).map(|(&a, &b)| gf2_128_mul(a, b)).collect::<Vec<u128>>());
         for &sender in self.roster {
             for &receiver in self.roster {
                 if sender == receiver {
@@ -416,7 +411,7 @@ impl<T: ParallelSeededDkgProducts> Products<'_, T> {
                 } else {
                     &[]
                 };
-                let part = SecretValues(
+                let part = SecretBuffer(
                     self.backend
                         .product_shares(context, sender, receiver, operand)?,
                 );
@@ -671,8 +666,8 @@ pub struct ParallelSeededDkgUnverifiedOutput {
     context: [u8; 32],
     layout: CheckLayout,
     alpha: [u128; 2],
-    values: SecretValues,
-    macs: [SecretValues; 2],
+    values: SecretVec<u128>,
+    macs: [SecretVec<u128>; 2],
     coin: [u8; 32],
     salt: [u8; 32],
     step: u8,
@@ -867,7 +862,7 @@ impl ParallelSeededDkgUnverifiedOutput {
             &[&self.context, &self.joint_coin, &transcript],
             3 * relations + 1,
         );
-        let mut tags = [0u128; 2];
+        let mut tags = SecretBuffer([0u128; 2]);
         for (lane, tag) in tags.iter_mut().enumerate() {
             let (alpha, mac) = (self.alpha[lane], &self.macs[lane].0);
             for index in 0..relations {
@@ -891,7 +886,7 @@ impl ParallelSeededDkgUnverifiedOutput {
             );
             *tag ^= gf2_128_mul(mac_weights[3 * relations], masked_tag);
         }
-        self.tags = tags;
+        self.tags = *tags;
         self.step = 3;
         Ok(ParallelSeededDkgCheckTagCommit {
             party_id: self.party_id,
@@ -1009,8 +1004,9 @@ pub fn finalize_parallel_seeded_dkg_party<T: ParallelSeededDkgProducts>(
         sk_prf_macs: [[0; 2]; 2],
         bdoz_alpha_share: [0; 2],
         local_salt_seed: cshake256_framed_32(b"QSAG.DKG.SALT.V1", &[&state.entropy, &frozen]),
-        pairwise_zero_seeds: Vec::new(),
-        beaver_pool: Vec::new(),
+        // Exact capacities: growth would free seed and share copies unerased.
+        pairwise_zero_seeds: Vec::with_capacity(state.config.roster.len() - 1),
+        beaver_pool: Vec::with_capacity(state.config.power_count),
         beaver_cursor: 0,
         epoch_uses: vec![0; 1usize << state.config.params.tree_height],
         poisoned: false,
@@ -1031,7 +1027,7 @@ pub fn finalize_parallel_seeded_dkg_party<T: ParallelSeededDkgProducts>(
         if peer == state.party_id {
             continue;
         }
-        let seed = if peer > state.party_id {
+        let seed = SecretBytes::new(if peer > state.party_id {
             state.pair_seed(peer, &frozen)
         } else {
             let mut found = packages.iter().filter(|p| p.sender == peer);
@@ -1042,8 +1038,8 @@ pub fn finalize_parallel_seeded_dkg_party<T: ParallelSeededDkgProducts>(
                 return Err(ParallelSeededError::InvalidThresholdParameters);
             }
             p.seed
-        };
-        share.pairwise_zero_seeds.push((peer, seed));
+        });
+        share.pairwise_zero_seeds.push((peer, *seed));
     }
     let private = state.sample(b"KEYS", 6);
     share.sk_seed_lanes.copy_from_slice(&private.0[..2]);
@@ -1056,18 +1052,19 @@ pub fn finalize_parallel_seeded_dkg_party<T: ParallelSeededDkgProducts>(
         sequence: 0,
     };
     let a = state.sample(b"POWER_MASKS", state.config.power_count);
-    let a2 = SecretValues(a.0.iter().map(|&x| gf2_128_mul(x, x)).collect());
+    let a2 = SecretBuffer(a.0.iter().map(|&x| gf2_128_mul(x, x)).collect::<Vec<u128>>());
     let a3 = products.multiply(&a.0, &a2.0)?;
-    let a4 = SecretValues(a2.0.iter().map(|&x| gf2_128_mul(x, x)).collect());
+    let a4 = SecretBuffer(a2.0.iter().map(|&x| gf2_128_mul(x, x)).collect::<Vec<u128>>());
     let a5 = products.multiply(&a.0, &a4.0)?;
-    let a6 = SecretValues(a3.0.iter().map(|&x| gf2_128_mul(x, x)).collect());
+    let a6 = SecretBuffer(a3.0.iter().map(|&x| gf2_128_mul(x, x)).collect::<Vec<u128>>());
     let a7 = products.multiply(&a3.0, &a4.0)?;
     // Output triples first, then one sacrificial triple per checked relation.
     let u = state.sample(b"BEAVER_U", layout.total_triples());
     let v = state.sample(b"BEAVER_V", layout.total_triples());
     let uv = products.multiply(&u.0, &v.0)?;
     let mask = state.sample(b"CHECK_MASK", 1);
-    let mut values = SecretValues(private.0[..4].to_vec());
+    let mut values = SecretVec::<u128>::with_capacity(layout.value_count());
+    values.extend_from_slice(&private[..4]);
     for (index, _) in a.0.iter().enumerate() {
         for power in [&a, &a2, &a3, &a4, &a5, &a6, &a7] {
             values.0.push(power.0[index]);
@@ -1082,7 +1079,7 @@ pub fn finalize_parallel_seeded_dkg_party<T: ParallelSeededDkgProducts>(
     }
     let mut macs = Vec::new();
     for alpha in share.bdoz_alpha_share {
-        let keys = SecretValues(vec![alpha; values.0.len()]);
+        let keys = SecretBuffer(vec![alpha; values.0.len()]);
         macs.push(products.multiply(&keys.0, &values.0)?);
     }
     let wire = |i: usize| AuthWire128 {
@@ -1184,18 +1181,20 @@ mod gilboa_tests {
             peer: u16,
             context: [u8; 32],
             choices: &[u128],
-        ) -> Result<Vec<u128>, ParallelSeededError> {
+        ) -> Result<SecretVec<u128>, ParallelSeededError> {
             let alternatives = self
                 .mailbox
                 .borrow_mut()
                 .remove(&(peer, self.id, context))
                 .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
             assert_eq!(alternatives.len(), choices.len() * 128);
-            Ok(alternatives
-                .iter()
-                .enumerate()
-                .map(|(i, pair)| pair[((choices[i / 128] >> (i % 128)) & 1) as usize])
-                .collect())
+            Ok(SecretBuffer(
+                alternatives
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pair)| pair[((choices[i / 128] >> (i % 128)) & 1) as usize])
+                    .collect(),
+            ))
         }
     }
 

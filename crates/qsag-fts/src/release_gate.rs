@@ -17,19 +17,13 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u128s};
 use qsag_accel::keccak::cshake256_framed_32;
+use qsag_asm::wipe::{SecretVec, wipe};
 use qsag_verified::fts_spn_guard::{
     FtsDeferredMacSession, WOTS_CS_BASE_W, WOTS_CS_CHAINS, WOTS_CS_TARGET_SUM,
 };
 use qsag_verified::{ConsumingOpeningGuard2Lane, OpeningReleasePermit};
 
 use crate::parallel_mpc::{ParallelSeededError, ParallelSeededParams};
-
-pub(crate) fn wipe_pairs(pairs: &mut [(u128, u128)]) {
-    for (lo, hi) in pairs {
-        ct_zeroize_u128s(core::slice::from_mut(lo));
-        ct_zeroize_u128s(core::slice::from_mut(hi));
-    }
-}
 
 /// Counts candidate buffers on the current thread, so a test can assert that a
 /// failed opening wiped every buffer it created and released none.
@@ -78,9 +72,9 @@ pub(crate) mod probe {
 /// encodings the check needs: the values, their byte string for the transcript
 /// digest, and the `(v, v)` pairs for the two-lane weighted fold.
 pub(crate) struct OpenedCandidates {
-    values: Vec<u128>,
-    digest_input: Vec<u8>,
-    pairs: Vec<(u128, u128)>,
+    values: SecretVec<u128>,
+    digest_input: SecretVec<u8>,
+    pairs: SecretVec<(u128, u128)>,
 }
 
 impl OpenedCandidates {
@@ -90,16 +84,16 @@ impl OpenedCandidates {
         #[cfg(test)]
         probe::created();
         Self {
-            values: Vec::with_capacity(wires),
-            digest_input: Vec::with_capacity(wires.saturating_mul(16)),
-            pairs: Vec::with_capacity(wires),
+            values: SecretVec::with_capacity(wires),
+            digest_input: SecretVec::with_capacity(wires.saturating_mul(16)),
+            pairs: SecretVec::with_capacity(wires),
         }
     }
 
     pub(crate) fn push(&mut self, value: u128) {
-        self.values.push(value);
-        self.digest_input.extend_from_slice(&value.to_le_bytes());
-        self.pairs.push((value, value));
+        self.values.push_wiping(value);
+        self.digest_input.extend_wiping(&value.to_le_bytes());
+        self.pairs.push_wiping((value, value));
     }
 
     pub(crate) fn digest_input(&self) -> &[u8] {
@@ -112,29 +106,18 @@ impl OpenedCandidates {
 
     /// Wipes the digest and fold encodings once both have been consumed.
     pub(crate) fn shed_encodings(&mut self) {
-        ct_zeroize_bytes(&mut self.digest_input);
+        wipe(&mut self.digest_input.0);
         self.digest_input.clear();
-        wipe_pairs(&mut self.pairs);
+        wipe(&mut self.pairs.0);
         self.pairs.clear();
-    }
-
-    fn wipe(&mut self) {
-        ct_zeroize_u128s(&mut self.values);
-        ct_zeroize_bytes(&mut self.digest_input);
-        wipe_pairs(&mut self.pairs);
     }
 }
 
+/// The field guards erase the three encodings; this only lets a test count buffers.
+#[cfg(test)]
 impl Drop for OpenedCandidates {
     fn drop(&mut self) {
-        self.wipe();
-        #[cfg(test)]
-        {
-            assert!(self.values.iter().all(|&v| v == 0));
-            assert!(self.digest_input.iter().all(|&b| b == 0));
-            assert!(self.pairs.iter().all(|&p| p == (0, 0)));
-            probe::wiped();
-        }
+        probe::wiped();
     }
 }
 
@@ -373,7 +356,7 @@ impl QuorumGate {
                     signature_chains,
                     session,
                     spn_rounds,
-                    candidates.values.clone(),
+                    candidates.values.0.clone(),
                 )
             })
             .collect();
@@ -556,21 +539,18 @@ mod tests {
     }
 
     #[test]
-    fn opened_candidates_wipe_every_encoding() {
+    fn opened_candidates_keep_three_encodings_and_shed_two() {
         let mut held = opened(&[u128::MAX, 7, 1 << 100]);
-        assert_eq!(held.values, [u128::MAX, 7, 1 << 100]);
+        assert_eq!(*held.values, [u128::MAX, 7, 1 << 100]);
         assert_eq!(held.digest_input().len(), 48);
         assert_eq!(held.pairs()[1], (7, 7));
+        // Growth past the stated capacity goes through the erasing path.
+        held.push(9);
+        assert_eq!((held.values.len(), held.pairs().len()), (4, 4));
 
         held.shed_encodings();
         assert!(held.digest_input().is_empty() && held.pairs().is_empty());
-        assert_eq!(held.values, [u128::MAX, 7, 1 << 100]);
-
-        let mut held = opened(&[u128::MAX, 7, 1 << 100]);
-        held.wipe();
-        assert_eq!(held.values, [0; 3]);
-        assert_eq!(held.digest_input(), [0u8; 48]);
-        assert_eq!(held.pairs(), [(0, 0); 3]);
+        assert_eq!(*held.values, [u128::MAX, 7, 1 << 100, 9]);
     }
 
     #[test]

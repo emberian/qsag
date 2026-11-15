@@ -460,7 +460,7 @@ impl<'a> ParallelSeededSignSession<'a> {
         }
         // Reconstructed openings: in the value phase these are candidates no MAC check
         // has accepted, so every exit wipes them.
-        let mut values = SecretValues(vec![0u128; self.payload.len()]);
+        let mut values = SecretBuffer(vec![0u128; self.payload.len()]);
         for &(id, digest) in &self.commitments {
             let mut matching = messages.iter().filter(
                 |m| matches!(m,ParallelSeededSignMessage::Opening {party_id,..} if *party_id==id),
@@ -696,7 +696,7 @@ impl<'a> ParallelSeededSignSession<'a> {
     }
     fn prepare_mac(&mut self, opened: Vec<u128>) -> Result<(), ParallelSeededError> {
         // Unverified candidates: the gate below takes them, every other exit wipes them.
-        let mut opened = SecretValues(opened);
+        let mut opened = SecretBuffer(opened);
         // Every masked power opening was accepted by the intermediate MAC round, which
         // precedes any output opening.
         if !self.share.pending_openings.is_empty() || opened.0.len() != 2 * self.jobs.len() {

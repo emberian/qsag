@@ -7,7 +7,7 @@
 //! protocol needs: no local residual leaves before the peer transcript is frozen,
 //! the opened transcript is the frozen one, and every lane sums to zero.
 use crate::HdError;
-use crate::erase::ct_zeroize_u32s;
+use qsag_asm::wipe::wipe;
 use alloc::vec::Vec;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_verified::HdCommittedZeroTest;
@@ -45,7 +45,7 @@ impl CommittedZeroGates {
                 HdCommittedZeroTest::new_awaiting_peer_commit(session, residual, modulus)
             })
             .collect();
-        ct_zeroize_u32s(residuals);
+        wipe(residuals);
         Self {
             session,
             modulus,
@@ -88,7 +88,7 @@ impl CommittedZeroGates {
             self.gates.push(next);
         }
         if let Some(opened) = &mut self.opened {
-            ct_zeroize_u32s(opened);
+            wipe(opened);
         }
         self.opened = None;
     }

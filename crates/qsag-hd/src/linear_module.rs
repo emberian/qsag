@@ -14,7 +14,7 @@ use qsag_accel::ct::{RedactedSecret, ct_lt_u64, ct_select_u64};
 use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
 
-use crate::erase::{ct_zeroize_bytes, ct_zeroize_u32s};
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretWipe, wipe};
 use crate::inventory::HdError;
 
 /// Canonical prime modulus $q = 8\_380\_417 = 2^{23} - 2^{13} + 1 \equiv 1 \pmod{512}$.
@@ -47,28 +47,6 @@ pub const MAX_NON_HARDENED_DERIVATION_DEPTH: u16 = 16;
 #[inline]
 pub const fn max_cbd2_linf_norm_after_depth(depth: u16) -> u32 {
     (depth as u32 + 1) * 2
-}
-
-/// Conservative worst-case $\ell_\infty$ coefficient bound $2 \cdot [S \cdot (1 + h) + u]$
-/// for a dealerless root summing $S = \binom{n}{t - 1}$ $\text{CBD}_2$ subset secrets after
-/// `hardened_steps` ($h$) hardened re-randomizations and `unhardened_steps` ($u$) public
-/// $\text{CBD}_2$ shifts.
-#[inline]
-pub const fn max_dealerless_cbd2_linf_norm(
-    num_subsets_s: u32,
-    hardened_steps: u32,
-    unhardened_steps: u32,
-) -> Option<u32> {
-    let Some(h_plus_1) = hardened_steps.checked_add(1) else {
-        return None;
-    };
-    let Some(scaled) = num_subsets_s.checked_mul(h_plus_1) else {
-        return None;
-    };
-    let Some(total) = scaled.checked_add(unhardened_steps) else {
-        return None;
-    };
-    total.checked_mul(2)
 }
 
 /// Barrett reduction for every u64 input. With mu=floor(2^64/q), the
@@ -134,9 +112,15 @@ pub struct RingPoly {
     pub coeffs: [u32; MODULE_N],
 }
 
+impl SecretWipe for RingPoly {
+    fn secret_wipe(&mut self) {
+        wipe(&mut self.coeffs);
+    }
+}
+
 impl Drop for RingPoly {
     fn drop(&mut self) {
-        ct_zeroize_u32s(&mut self.coeffs);
+        self.secret_wipe();
     }
 }
 
@@ -211,9 +195,9 @@ impl RingPoly {
     /// via bit-popcount difference (`0` floats, `0` divisions, `0` rejection branches!).
     pub fn sample_cbd2_ct(domain: &[u8], seed: &[u8], tag_idx: u32) -> Self {
         let idx_be = tag_idx.to_be_bytes();
-        let mut buf = [0u8; 128];
-        cshake256_framed_xof(domain, &[seed, &idx_be], &mut buf);
-        let mut coeffs = [0u32; MODULE_N];
+        let mut buf = SecretBuffer([0u8; 128]);
+        cshake256_framed_xof(domain, &[seed, &idx_be], &mut buf[..]);
+        let mut out = Self::zero();
         for (i, &byte) in buf.iter().enumerate() {
             // Two coefficients per byte (`4` bits each: `a0 + a1 - b0 - b1` in `[-2, 2]`).
             let lo = byte & 0x0F;
@@ -222,21 +206,22 @@ impl RingPoly {
             let neg_lo = (((lo >> 2) & 1) + ((lo >> 3) & 1)) as u32;
             let pos_hi = ((hi & 1) + ((hi >> 1) & 1)) as u32;
             let neg_hi = (((hi >> 2) & 1) + ((hi >> 3) & 1)) as u32;
-            coeffs[2 * i] = mod_q_sub(pos_lo, neg_lo);
-            coeffs[2 * i + 1] = mod_q_sub(pos_hi, neg_hi);
+            out.coeffs[2 * i] = mod_q_sub(pos_lo, neg_lo);
+            out.coeffs[2 * i + 1] = mod_q_sub(pos_hi, neg_hi);
         }
-        ct_zeroize_bytes(&mut buf);
-        Self { coeffs }
+        out
     }
 
     /// Fixed-work 192-bit reduction. Per coefficient TV distance is below q/2^192.
     /// There is no secret-dependent retry loop or division in the reduction.
     pub fn sample_uniform_mod_q(domain: &[u8], seed: &[u8], tag_idx: u32) -> Self {
-        let mut buf = [0u8; MODULE_N * 24];
-        cshake256_framed_xof(domain, &[seed, &tag_idx.to_be_bytes()], &mut buf);
-        let coeffs = core::array::from_fn(|i| reduce_wide_mod_q(&buf[i * 24..(i + 1) * 24]));
-        ct_zeroize_bytes(&mut buf);
-        Self { coeffs }
+        let mut buf = SecretBuffer([0u8; MODULE_N * 24]);
+        cshake256_framed_xof(domain, &[seed, &tag_idx.to_be_bytes()], &mut buf[..]);
+        let mut out = Self::zero();
+        for (coeff, wide) in out.coeffs.iter_mut().zip(buf.as_chunks::<24>().0) {
+            *coeff = reduce_wide_mod_q(wide);
+        }
+        out
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -248,7 +233,8 @@ impl RingPoly {
     }
 }
 
-/// Secret wrapper around `RingPoly` zeroized via `write_volatile` on `Drop` and `<REDACTED>` in `Debug`.
+/// Secret `RingPoly` with no public accessor and `<REDACTED>` in `Debug`; the
+/// inner polynomial erases itself on drop.
 pub struct SecretRingPoly(RingPoly);
 
 impl SecretRingPoly {
@@ -273,9 +259,9 @@ impl fmt::Debug for SecretRingPoly {
     }
 }
 
-impl Drop for SecretRingPoly {
-    fn drop(&mut self) {
-        ct_zeroize_u32s(&mut self.0.coeffs);
+impl SecretWipe for SecretRingPoly {
+    fn secret_wipe(&mut self) {
+        self.0.secret_wipe();
     }
 }
 
@@ -299,7 +285,7 @@ fn sample_scalar_uniform_mod_q(domain: &[u8], seed: &[u8], tag_idx: u32) -> u32 
     let mut buf = [0u8; 24];
     cshake256_framed_xof(domain, &[seed, &tag_idx.to_be_bytes()], &mut buf);
     let value = reduce_wide_mod_q(&buf);
-    ct_zeroize_bytes(&mut buf);
+    wipe(&mut buf);
     value
 }
 
@@ -508,15 +494,9 @@ impl LinearModulePartyShare {
         self.erase();
     }
     fn erase(&mut self) {
-        ct_zeroize_u32s(&mut self.spdz_alpha_shares);
-        for s in &mut self.s_shares {
-            ct_zeroize_u32s(&mut s.0.coeffs);
-        }
-        for lane in &mut self.spdz_macs {
-            for mac in lane {
-                ct_zeroize_u32s(&mut mac.0.coeffs);
-            }
-        }
+        wipe(&mut self.spdz_alpha_shares);
+        wipe(&mut self.s_shares);
+        wipe(&mut self.spdz_macs);
     }
 }
 
@@ -544,20 +524,19 @@ fn expand_linear_tweak(
     chain_code: &[u8; 32],
     pk_digest: &[u8; 32],
     child_index: u32,
-) -> ([RingPoly; MODULE_SECRET_L], [u8; 32]) {
+) -> ([RingPoly; MODULE_SECRET_L], SecretBytes<32>) {
     let idx_be = child_index.to_be_bytes();
-    let mut tweak_seed = cshake256_framed_32(
+    let tweak_seed = SecretBytes::<32>::new(cshake256_framed_32(
         b"QSAG.HD.LMOD.TWEAK_SEED.V1",
         &[chain_code, pk_digest, &idx_be],
-    );
-    let next_chain_code = cshake256_framed_32(
+    ));
+    let next_chain_code = SecretBytes::<32>::new(cshake256_framed_32(
         b"QSAG.HD.LMOD.NEXT_CC.V1",
         &[chain_code, pk_digest, &idx_be],
-    );
+    ));
     let tweaks = core::array::from_fn(|j| {
-        RingPoly::sample_cbd2_ct(b"QSAG.HD.LMOD.R_POLY.V2", &tweak_seed, j as u32)
+        RingPoly::sample_cbd2_ct(b"QSAG.HD.LMOD.R_POLY.V2", &tweak_seed[..], j as u32)
     });
-    ct_zeroize_bytes(&mut tweak_seed);
     (tweaks, next_chain_code)
 }
 
@@ -595,7 +574,7 @@ impl LinearModuleXPub {
         Ok(Self {
             seed_a: self.seed_a,
             t_vec: next_t,
-            chain_code: Some(next_cc),
+            chain_code: Some(*next_cc),
             matrix: Arc::clone(&self.matrix),
             depth_used: self.depth_used + 1,
             max_depth: self.max_depth,
@@ -844,9 +823,9 @@ pub(crate) fn setup_shamir_linear_module(
         })
         .collect();
     for coeffs in &mut alpha_coeffs {
-        ct_zeroize_u32s(coeffs);
+        wipe(coeffs);
     }
-    ct_zeroize_bytes(&mut ent);
+    wipe(&mut ent);
     Ok((
         LinearModuleXPub {
             seed_a,
@@ -971,7 +950,7 @@ pub(crate) fn reconstruct_for_recovery_or_test(
             }
         }
     }
-    ct_zeroize_u32s(&mut alpha);
+    wipe(&mut alpha);
     if difference != 0 {
         return Err(HdError::MacCheckFailed);
     }
@@ -1205,7 +1184,7 @@ pub(crate) fn trusted_dealer_rekey_child(
     hardened: bool,
 ) -> Result<(LinearModuleXPub, Vec<LinearModulePartyShare>), HdError> {
     let entropy = RedactedSecret::new(fresh_entropy);
-    ct_zeroize_bytes(&mut fresh_entropy);
+    wipe(&mut fresh_entropy);
     let parent_secret = match reconstruct_for_recovery_or_test(parents, expected) {
         Ok(s) => s,
         Err(e) => {
@@ -1280,7 +1259,7 @@ pub(crate) fn trusted_dealer_rekey_child(
     let pk = LinearModuleXPub {
         seed_a: expected.seed_a,
         t_vec: first.matrix.relation(&target),
-        chain_code: if hardened { None } else { Some(next_cc) },
+        chain_code: if hardened { None } else { Some(*next_cc) },
         matrix: Arc::clone(&first.matrix),
         depth_used: expected.depth_used + 1,
         max_depth: expected.max_depth,
@@ -1298,7 +1277,7 @@ pub(crate) fn trusted_dealer_rekey_child(
         }
         child.seed_a = pk.seed_a;
         child.t_vec = pk.t_vec.clone();
-        child.chain_code = RedactedSecret::new(next_cc);
+        child.chain_code = RedactedSecret::new(*next_cc);
         child.chain_code_key = RedactedSecret::new(*parent.chain_code_key.expose());
         child.hardened = hardened;
         child.derivation_index = child_index;

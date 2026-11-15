@@ -8,8 +8,9 @@
 //! ([`seeds`]). The supported model is an honest-majority committee
 //! (`n >= 2t - 1`, at most `t - 1` static malicious corruptions) with
 //! authenticated confidential channels and consistent broadcast, and security
-//! with abort; other committees are rejected. See `STATUS.md` for what is and is
-//! not established.
+//! with abort; other committees are rejected. The module documentation of
+//! [`seeds`] and of the dealerless rekey in [`linear_module`] states what is and
+//! is not established.
 
 extern crate alloc;
 #[cfg(any(test, feature = "std"))]
@@ -19,7 +20,6 @@ pub mod budget;
 pub mod poison;
 pub use poison::PoisonJournal;
 
-mod erase;
 pub mod inventory;
 pub mod linear_module;
 pub mod seeds;
@@ -54,6 +54,28 @@ mod tests {
     use super::*;
     use crate::linear_module::harness::{committee, honest};
     use crate::seeds::run_seed_ceremony;
+
+    #[test]
+    fn partial_field_buffers_are_erased_on_error() {
+        use core::cell::Cell;
+        use qsag_asm::wipe::{SecretBuffer, SecretWipe};
+        struct Probe<'a>(u32, &'a Cell<usize>);
+        impl SecretWipe for Probe<'_> {
+            fn secret_wipe(&mut self) {
+                self.0 = 0;
+                self.1.set(self.1.get() + 1);
+            }
+        }
+        fn fail(erased: &Cell<usize>) -> Result<(), ()> {
+            let mut words = SecretBuffer(Vec::with_capacity(7));
+            words.extend([11, 12, 13].map(|value| Probe(value, erased)));
+            Err(())?;
+            Ok(())
+        }
+        let erased = Cell::new(0);
+        assert!(fail(&erased).is_err());
+        assert_eq!(erased.get(), 3);
+    }
 
     #[test]
     fn test_pi_hd_commit_inventory_zero_online_round_watch_only_and_isolation() {

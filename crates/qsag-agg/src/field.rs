@@ -77,6 +77,21 @@ pub(crate) const fn ext2_square(x: GoldilocksExt2) -> GoldilocksExt2 {
     )
 }
 
+/// Karatsuba product over $\mathbb{F}_p[u]/(u^2 - 7)$ (`3` base multiplications), inlined into
+/// the quartic arithmetic. Equal to `GoldilocksExt2::const_mul`.
+#[inline(always)]
+pub(crate) const fn ext2_mul(a: GoldilocksExt2, b: GoldilocksExt2) -> GoldilocksExt2 {
+    let a0b0 = a.c0.const_mul(b.c0);
+    let a1b1 = a.c1.const_mul(b.c1);
+    let mid = a
+        .c0
+        .const_add(a.c1)
+        .const_mul(b.c0.const_add(b.c1))
+        .const_sub(a0b0)
+        .const_sub(a1b1);
+    GoldilocksExt2::new(a0b0.const_add(gl_mul_by_7(a1b1)), mid)
+}
+
 /// Fixed-work inverse `conj(x) / N(x)`, mapping zero to zero.
 #[inline]
 pub(crate) const fn ext2_inv_or_zero(x: GoldilocksExt2) -> GoldilocksExt2 {

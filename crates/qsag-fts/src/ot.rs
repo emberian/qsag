@@ -6,6 +6,7 @@ use crate::{ParallelSeededDkgOt, ParallelSeededError};
 use alloc::{collections::BTreeMap, collections::BTreeSet, vec::Vec};
 use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u64s, ct_zeroize_u128s};
 use qsag_accel::keccak::cshake256_framed_32;
+use qsag_asm::wipe::{SecretBuffer, SecretVec};
 use qsag_core::preprocessing::{
     KosOtChallengeMsg, KosOtProofMsg, KosOtUColsMsg, OtExtReceiverChannel, OtExtSenderChannel,
     OtPadPair, PartyPrivateRng,
@@ -211,13 +212,12 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         context: [u8; 32],
         choices: &[bool],
     ) -> Result<Vec<u128>, ParallelSeededError> {
-        let mut words = alloc::vec![0u64; choices.len().div_ceil(64)];
+        let mut words = SecretBuffer(alloc::vec![0u64; choices.len().div_ceil(64)]);
         for (i, &choice) in choices.iter().enumerate() {
             words[i / 64] |= u64::from(choice) << (i % 64);
         }
-        let result = self.receive_packed(peer, context, &words, choices.len());
-        ct_zeroize_u64s(&mut words);
-        result
+        self.receive_packed(peer, context, &words, choices.len())
+            .map(SecretBuffer::into_inner)
     }
     /// As [`Self::receive_values`], with choice `i` at bit `i % 64` of `choice_words[i / 64]`.
     /// Bits at and above `count` in the last word must be zero.
@@ -227,7 +227,7 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         context: [u8; 32],
         choice_words: &[u64],
         count: usize,
-    ) -> Result<Vec<u128>, ParallelSeededError> {
+    ) -> Result<SecretVec<u128>, ParallelSeededError> {
         self.begin(peer, context, false, count)?;
         let result = (|| {
             if choice_words.len() != count.div_ceil(64)
@@ -324,9 +324,9 @@ fn decrypt_chosen(
     pads: &[[u8; 48]],
     choice_words: &[u64],
     ciphertexts: &[[u128; 2]],
-) -> Vec<u128> {
+) -> SecretVec<u128> {
     let count = ciphertexts.len();
-    let mut output = Vec::with_capacity(count);
+    let mut output = SecretVec::<u128>::with_capacity(count);
     for base in (0..count).step_by(8) {
         let indices = core::array::from_fn(|lane| (base + lane).min(count - 1));
         let mut batch = pad_batch(
@@ -381,35 +381,25 @@ impl<W: AuthenticatedOtWire> ParallelSeededDkgOt for CommittedCorrelatedOt<W> {
         peer: u16,
         context: [u8; 32],
         choices: &[u128],
-    ) -> Result<Vec<u128>, ParallelSeededError> {
+    ) -> Result<SecretVec<u128>, ParallelSeededError> {
         let total = choices.len().checked_mul(128).ok_or_else(invalid)?;
         if total == 0 {
             return Err(invalid());
         }
-        let mut output = Vec::with_capacity(total);
-        let mut words = alloc::vec![0u64; choices.len().min(MAX_OTS / 128) * 2];
+        let mut output = SecretVec::<u128>::with_capacity(total);
+        let mut words = SecretBuffer(alloc::vec![0u64; choices.len().min(MAX_OTS / 128) * 2]);
         for (index, chunk) in choices.chunks(MAX_OTS / 128).enumerate() {
             let words = &mut words[..chunk.len() * 2];
             for (pair, &choice) in words.as_chunks_mut::<2>().0.iter_mut().zip(chunk) {
                 *pair = [choice as u64, (choice >> 64) as u64];
             }
-            let result = self.receive_packed(
+            let values = self.receive_packed(
                 peer,
                 chunk_context(&context, index, total),
                 words,
                 chunk.len() * 128,
-            );
-            ct_zeroize_u64s(words);
-            match result {
-                Ok(mut values) => {
-                    output.extend_from_slice(&values);
-                    ct_zeroize_u128s(&mut values);
-                }
-                Err(error) => {
-                    ct_zeroize_u128s(&mut output);
-                    return Err(error);
-                }
-            }
+            )?;
+            output.extend_from_slice(&values);
         }
         Ok(output)
     }
@@ -521,7 +511,7 @@ mod tests {
         );
         let values = ParallelSeededDkgOt::receive(&mut right, 0, [8; 32], &words).unwrap();
         assert_eq!(
-            values,
+            *values,
             (0u128..256)
                 .map(|i| i + 1000 * ((words[(i / 128) as usize] >> (i % 128)) & 1))
                 .collect::<Vec<_>>()
@@ -642,7 +632,7 @@ mod pad_tests {
                 let expected: Vec<u128> = (0..count)
                     .map(|i| alternatives[i][usize::from(bit(i))])
                     .collect();
-                assert_eq!(chosen, expected, "count {count} pattern {pattern:#x}");
+                assert_eq!(*chosen, expected, "count {count} pattern {pattern:#x}");
             }
         }
     }

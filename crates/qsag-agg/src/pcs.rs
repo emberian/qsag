@@ -5169,6 +5169,86 @@ struct BridgeRound {
     chals: [GoldilocksExt4; 3],
 }
 
+/// One term `weight * W(point)` of a linear evaluation claim on a committed multilinear `W`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WeightedPoint {
+    pub weight: GoldilocksExt4,
+    pub point: Vec<GoldilocksExt4>,
+}
+
+/// `kernel[i] += weight * prod_j point[j]^{bit_j(i)}` for `i < 2^point.len()`: the
+/// monomial-basis functional of `weight * W(point, 0, ..., 0)`.
+pub fn add_point_kernel(kernel: &mut [GoldilocksExt4], weight: GoldilocksExt4, point: &[GoldilocksExt4]) {
+    assert!(kernel.len() >= 1usize << point.len());
+    let mut table = Vec::with_capacity(1usize << point.len());
+    table.push(weight);
+    for &r in point {
+        for i in 0..table.len() {
+            let v = table[i] * r;
+            table.push(v);
+        }
+    }
+    for (dst, src) in kernel.iter_mut().zip(table) {
+        *dst += src;
+    }
+}
+
+/// Open the scalar blend $U = \sum_i \text{scalars}[i] \cdot W_i$ of a batch commitment against
+/// one linear functional: prove $\langle \text{coeffs}(U), \text{kernel} \rangle = \text{claim}$.
+///
+/// `kernel` holds the functional on the $2^\ell$ monomial coefficients followed by two zero
+/// overflow slots; `monomial_polys[i]` is `hypercube_to_monomial_coeffs` of polynomial `i`.
+/// Unlike [`whir_open_batch`], no per-polynomial evaluation is sent: the only values derived
+/// from an individual polynomial are its queried Stage-0 symbols. The caller binds the
+/// commitment, the scalars, the functional and the claim into `transcript` beforehand.
+pub fn whir_open_blend(
+    state: &HemWhirProverState,
+    scalars: &[GoldilocksExt4],
+    monomial_polys: &[Vec<Goldilocks>],
+    kernel: Vec<GoldilocksExt4>,
+    claim: GoldilocksExt4,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> HemWhirOpeningProof {
+    assert!(state.num_polys() >= 2 && scalars.len() == state.num_polys());
+    assert_eq!(monomial_polys.len(), state.num_polys());
+    assert_eq!(kernel.len(), (1usize << state.num_vars) + 2);
+    let weights: Vec<[GoldilocksExt4; 2]> =
+        scalars.iter().map(|&s| [s, GoldilocksExt4::ZERO]).collect();
+    whir_open_core(state, Some(monomial_polys), &weights, kernel, claim, transcript)
+}
+
+/// Verify a [`whir_open_blend`] proof for the functional
+/// $\sum_t \text{terms}[t].\text{weight} \cdot U(\text{terms}[t].\text{point})$.
+#[allow(clippy::too_many_arguments)]
+pub fn whir_verify_blend(
+    comm_0: &CanopyCommitment,
+    num_vars: usize,
+    scalars: &[GoldilocksExt4],
+    terms: &[WeightedPoint],
+    claim: GoldilocksExt4,
+    proof: &HemWhirOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+    schedule: &WhirSchedule,
+) -> bool {
+    if scalars.len() < 2 || terms.iter().any(|t| t.point.len() != num_vars) {
+        return false;
+    }
+    let weights: Vec<[GoldilocksExt4; 2]> =
+        scalars.iter().map(|&s| [s, GoldilocksExt4::ZERO]).collect();
+    let claims = terms
+        .iter()
+        .map(|t| KernelClaim::Point {
+            offset: 0,
+            weight: t.weight,
+            point: t.point.clone(),
+            overflow: [GoldilocksExt4::ZERO; 2],
+        })
+        .collect();
+    whir_verify_core_claims(
+        comm_0, &weights, num_vars, claims, claim, proof, transcript, schedule,
+    )
+}
+
 /// Verify the multi-stage `Hem` WHIR opening of $\sum_i \text{weights}[i] \cdot W_i$ at `init_point`
 /// against `comm_0`.
 fn whir_verify_core(
@@ -5180,12 +5260,35 @@ fn whir_verify_core(
     transcript: &mut FiatShamirTranscript<InstanceBound>,
     sched: &WhirSchedule,
 ) -> bool {
-    let num_vars = init_point.len();
+    whir_verify_core_claims(
+        comm_0,
+        weights,
+        init_point.len(),
+        vec![KernelClaim::initial(init_point.to_vec())],
+        init_sum_claim,
+        proof,
+        transcript,
+        sched,
+    )
+}
+
+/// [`whir_verify_core`] for an initial claim that is a weighted sum of evaluation functionals.
+#[allow(clippy::too_many_arguments)]
+fn whir_verify_core_claims(
+    comm_0: &CanopyCommitment,
+    weights: &[[GoldilocksExt4; 2]],
+    num_vars: usize,
+    init_claims: Vec<KernelClaim>,
+    init_sum_claim: GoldilocksExt4,
+    proof: &HemWhirOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+    sched: &WhirSchedule,
+) -> bool {
     let num_polys = weights.len();
     if !pcs_num_vars_supported(num_vars)
         || num_polys == 0
         || num_polys > MAX_BATCH_POLYS
-        || init_point.len() != num_vars
+        || init_claims.is_empty()
         || comm_0.log_leaves > 28
     {
         return false;
@@ -5224,8 +5327,8 @@ fn whir_verify_core(
             .take(num_stages.saturating_sub(1))
             .map(|s| 2 + s.num_queries)
             .sum::<usize>();
-    let mut kernel_claims = Vec::with_capacity(total_claims);
-    kernel_claims.push(KernelClaim::initial(init_point.to_vec()));
+    let mut kernel_claims = Vec::with_capacity(total_claims + init_claims.len());
+    kernel_claims.extend(init_claims);
     let mut cur_sum_claim = init_sum_claim;
     let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
     for e in proof.stage0_ood_evals {
