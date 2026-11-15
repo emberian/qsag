@@ -92,6 +92,69 @@ pub(crate) const fn ext2_mul(a: GoldilocksExt2, b: GoldilocksExt2) -> Goldilocks
     GoldilocksExt2::new(a0b0.const_add(gl_mul_by_7(a1b1)), mid)
 }
 
+/// `a + b` on canonical words: a carry out of 64 bits is worth `2^32 - 1`, and the sum is below
+/// `2p`, so one conditional subtraction canonicalizes it.
+#[inline(always)]
+const fn gl_add(a: Goldilocks, b: Goldilocks) -> Goldilocks {
+    let (s, carry) = a.to_canonical_u64().overflowing_add(b.to_canonical_u64());
+    Goldilocks::from_u64_reduced(s.wrapping_add(EPSILON & 0u64.wrapping_sub(carry as u64)))
+}
+
+/// `a - b` on canonical words: a borrow is repaid by adding `p`, i.e. subtracting `2^32 - 1`.
+#[inline(always)]
+const fn gl_sub(a: Goldilocks, b: Goldilocks) -> Goldilocks {
+    let (d, borrow) = a.to_canonical_u64().overflowing_sub(b.to_canonical_u64());
+    Goldilocks::from_u64_reduced(d.wrapping_sub(EPSILON & 0u64.wrapping_sub(borrow as u64)))
+}
+
+/// Reduce `lo + 2^64 * hi` (`lo, hi < 2^70`) to a canonical element, using
+/// $2^{64} \equiv 2^{32} - 1 \pmod p$ three times.
+#[inline(always)]
+const fn reduce_lo_hi(lo: u128, hi: u128) -> Goldilocks {
+    debug_assert!(lo >> 70 == 0 && hi >> 70 == 0);
+    // `x < 2^70 + 2^102`.
+    let x = lo + hi * EPSILON as u128;
+    // `y < 2^64 + 2^38 * 2^32`.
+    let y = (x as u64) as u128 + (x >> 64) * EPSILON as u128;
+    fold_small_carry(y as u64, (y >> 64) as u64)
+}
+
+/// Sum of base-field products as separate low-word and high-word accumulators, so several
+/// 128-bit products are added exactly and reduced once.
+#[derive(Clone, Copy)]
+struct WideAcc {
+    lo: u128,
+    hi: u128,
+}
+
+impl WideAcc {
+    const ZERO: Self = Self { lo: 0, hi: 0 };
+
+    /// Add `weight * a * b` for a small weight; at most `2^6` weighted products fit.
+    #[inline(always)]
+    const fn add_mul(self, a: Goldilocks, b: Goldilocks, weight: u128) -> Self {
+        let prod = (a.to_canonical_u64() as u128) * (b.to_canonical_u64() as u128);
+        Self {
+            lo: self.lo + weight * ((prod as u64) as u128),
+            hi: self.hi + weight * (prod >> 64),
+        }
+    }
+
+    /// Add a single field element.
+    #[inline(always)]
+    const fn add_elem(self, x: Goldilocks) -> Self {
+        Self {
+            lo: self.lo + x.to_canonical_u64() as u128,
+            hi: self.hi,
+        }
+    }
+
+    #[inline(always)]
+    const fn reduce(self) -> Goldilocks {
+        reduce_lo_hi(self.lo, self.hi)
+    }
+}
+
 /// Fixed-work inverse `conj(x) / N(x)`, mapping zero to zero.
 #[inline]
 pub(crate) const fn ext2_inv_or_zero(x: GoldilocksExt2) -> GoldilocksExt2 {
@@ -780,9 +843,16 @@ impl GoldilocksExt4 {
 
     #[inline(always)]
     pub const fn mul_base(self, s: Goldilocks) -> Self {
+        let z = WideAcc::ZERO;
         Self {
-            c0: self.c0.mul_base(s),
-            c1: self.c1.mul_base(s),
+            c0: GoldilocksExt2::new(
+                z.add_mul(self.c0.c0, s, 1).reduce(),
+                z.add_mul(self.c0.c1, s, 1).reduce(),
+            ),
+            c1: GoldilocksExt2::new(
+                z.add_mul(self.c1.c0, s, 1).reduce(),
+                z.add_mul(self.c1.c1, s, 1).reduce(),
+            ),
         }
     }
 
@@ -797,25 +867,22 @@ impl GoldilocksExt4 {
     #[inline(always)]
     pub const fn const_add(self, rhs: Self) -> Self {
         Self {
-            c0: self.c0.const_add(rhs.c0),
-            c1: self.c1.const_add(rhs.c1),
+            c0: GoldilocksExt2::new(gl_add(self.c0.c0, rhs.c0.c0), gl_add(self.c0.c1, rhs.c0.c1)),
+            c1: GoldilocksExt2::new(gl_add(self.c1.c0, rhs.c1.c0), gl_add(self.c1.c1, rhs.c1.c1)),
         }
     }
 
     #[inline(always)]
     pub const fn const_sub(self, rhs: Self) -> Self {
         Self {
-            c0: self.c0.const_sub(rhs.c0),
-            c1: self.c1.const_sub(rhs.c1),
+            c0: GoldilocksExt2::new(gl_sub(self.c0.c0, rhs.c0.c0), gl_sub(self.c0.c1, rhs.c0.c1)),
+            c1: GoldilocksExt2::new(gl_sub(self.c1.c0, rhs.c1.c0), gl_sub(self.c1.c1, rhs.c1.c1)),
         }
     }
 
     #[inline(always)]
     pub const fn const_neg(self) -> Self {
-        Self {
-            c0: self.c0.const_neg(),
-            c1: self.c1.const_neg(),
-        }
+        Self::ZERO.const_sub(self)
     }
 
     #[inline(always)]
@@ -826,9 +893,65 @@ impl GoldilocksExt4 {
         }
     }
 
-    /// Karatsuba multiplication over $\mathbb{F}_{p^2}[v]/(v^2 - u)$ (`3` $\mathbb{F}_{p^2}$ muls = `9` base muls).
+    /// Product in $\mathbb{F}_p[v]/(v^4 - 7)$. With polynomial-basis coefficients
+    /// `p = [c0.c0, c1.c0, c0.c1, c1.c1]` (powers `v^0..v^3`, since `u = v^2`), coefficient `k`
+    /// is `sum_{i+j=k} a_i b_j + 7 sum_{i+j=k+4} a_i b_j`. The sixteen 128-bit products are
+    /// accumulated exactly and each coefficient is reduced once.
     #[inline(always)]
     pub const fn const_mul(self, rhs: Self) -> Self {
+        self.mul_add(rhs, Self::ZERO)
+    }
+
+    /// `self * rhs + addend` with one reduction per coefficient.
+    #[inline(always)]
+    pub const fn mul_add(self, rhs: Self, addend: Self) -> Self {
+        let a = [self.c0.c0, self.c1.c0, self.c0.c1, self.c1.c1];
+        let b = [rhs.c0.c0, rhs.c1.c0, rhs.c0.c1, rhs.c1.c1];
+        let c = [addend.c0.c0, addend.c1.c0, addend.c0.c1, addend.c1.c1];
+        let mut out = [Goldilocks::ZERO; 4];
+        let mut k = 0;
+        while k < 4 {
+            let mut acc = WideAcc::ZERO.add_elem(c[k]);
+            let mut i = 0;
+            while i < 4 {
+                // `j = k - i` when that is in range, otherwise `j = k + 4 - i` with weight 7.
+                acc = if i <= k {
+                    acc.add_mul(a[i], b[k - i], 1)
+                } else {
+                    acc.add_mul(a[i], b[k + 4 - i], 7)
+                };
+                i += 1;
+            }
+            out[k] = acc.reduce();
+            k += 1;
+        }
+        Self {
+            c0: GoldilocksExt2::new(out[0], out[2]),
+            c1: GoldilocksExt2::new(out[1], out[3]),
+        }
+    }
+
+    /// Limb-wise sum and negation through the `qsag-core` base field; test references.
+    #[cfg(test)]
+    pub(crate) const fn tower_add(self, rhs: Self) -> Self {
+        Self {
+            c0: self.c0.const_add(rhs.c0),
+            c1: self.c1.const_add(rhs.c1),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn tower_neg(self) -> Self {
+        Self {
+            c0: self.c0.const_neg(),
+            c1: self.c1.const_neg(),
+        }
+    }
+
+    /// Karatsuba product over $\mathbb{F}_{p^2}[v]/(v^2 - u)$; the tower-form definition that
+    /// [`Self::const_mul`] is tested against.
+    #[cfg(test)]
+    pub(crate) const fn const_mul_tower(self, rhs: Self) -> Self {
         let v0 = ext2_mul(self.c0, rhs.c0);
         let v1 = ext2_mul(self.c1, rhs.c1);
         let mid = ext2_mul(self.c0.const_add(self.c1), rhs.c0.const_add(rhs.c1))
@@ -840,19 +963,19 @@ impl GoldilocksExt4 {
         }
     }
 
-    /// Complex-style squaring over $\mathbb{F}_{p^2}[v]/(v^2 - u)$ (`2` $\mathbb{F}_{p^2}$ muls = `6` base muls):
-    /// $(c_0 + c_1)(c_0 + u c_1) - c_0 c_1 - u(c_0 c_1) = c_0^2 + u c_1^2$.
+    /// Square in $\mathbb{F}_p[v]/(v^4 - 7)$: the ten distinct products of the polynomial-basis
+    /// coefficients, cross terms doubled, one reduction per coefficient.
     #[inline(always)]
     pub const fn square(self) -> Self {
-        let p0 = ext2_mul(self.c0, self.c1);
-        let up0 = ext2_mul_by_u(p0);
-        let t = ext2_mul(
-            self.c0.const_add(self.c1),
-            self.c0.const_add(ext2_mul_by_u(self.c1)),
-        );
+        let [a0, a1, a2, a3] = [self.c0.c0, self.c1.c0, self.c0.c1, self.c1.c1];
+        let z = WideAcc::ZERO;
+        let p0 = z.add_mul(a0, a0, 1).add_mul(a1, a3, 14).add_mul(a2, a2, 7);
+        let p1 = z.add_mul(a0, a1, 2).add_mul(a2, a3, 14);
+        let p2 = z.add_mul(a0, a2, 2).add_mul(a1, a1, 1).add_mul(a3, a3, 7);
+        let p3 = z.add_mul(a0, a3, 2).add_mul(a1, a2, 2);
         Self {
-            c0: t.const_sub(p0).const_sub(up0),
-            c1: p0.const_add(p0),
+            c0: GoldilocksExt2::new(p0.reduce(), p2.reduce()),
+            c1: GoldilocksExt2::new(p1.reduce(), p3.reduce()),
         }
     }
 
@@ -1269,7 +1392,7 @@ fn horner_ext4_interleaved(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> Gold
     let z4 = z.square().square();
     for block in blocks.iter().rev() {
         for lane in 0..4 {
-            lanes[lane] = lanes[lane] * z4 + block[lane];
+            lanes[lane] = lanes[lane].mul_add(z4, block[lane]);
         }
     }
     ((lanes[3] * z + lanes[2]) * z + lanes[1]) * z + lanes[0]
@@ -1794,6 +1917,41 @@ mod base_ntt_tests {
         }
     }
 
+    /// The single-reduction quartic product against the tower Karatsuba definition, including
+    /// operands whose every limb is `p - 1` (the largest accumulators).
+    #[test]
+    fn ext4_product_equals_tower_karatsuba() {
+        let top = Goldilocks::from_u64_reduced(GOLDILOCKS_PRIME - 1);
+        let v = sample(4 * 512, 0xE4);
+        let mut elems: Vec<GoldilocksExt4> = v
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|l| GoldilocksExt4::from_limbs(*l))
+            .collect();
+        elems.push(GoldilocksExt4::from_limbs([top; 4]));
+        elems.push(GoldilocksExt4::from_limbs([top, Goldilocks::ZERO, top, Goldilocks::ONE]));
+        elems.push(GoldilocksExt4::ZERO);
+        elems.push(GoldilocksExt4::ONE);
+        elems.push(GoldilocksExt4::V);
+        for (i, &x) in elems.iter().enumerate() {
+            for &y in &elems[i.saturating_sub(3)..] {
+                assert_eq!(
+                    x.mul_base(y.c0.c0),
+                    x.const_mul_tower(GoldilocksExt4::from_base(y.c0.c0))
+                );
+                assert_eq!(x.mul_ext2(y.c1), x.const_mul_tower(GoldilocksExt4::from_ext2(y.c1)));
+                assert_eq!(x.const_mul(y), x.const_mul_tower(y));
+                assert_eq!(y.const_mul(x), x.const_mul_tower(y));
+                assert_eq!(x.mul_add(y, x), x.const_mul_tower(y).tower_add(x));
+                assert_eq!(x + y, x.tower_add(y));
+                assert_eq!(x - y, x.tower_add(y.tower_neg()));
+                assert_eq!(-y, y.tower_neg());
+            }
+            assert_eq!(x.square(), x.const_mul_tower(x));
+        }
+    }
+
     #[test]
     fn inlined_ext2_product_equals_core_product() {
         let v = sample(64, 0xE2);
@@ -1806,6 +1964,116 @@ mod base_ntt_tests {
         let top = Goldilocks::from_u64_reduced(GOLDILOCKS_PRIME - 1);
         let e = GoldilocksExt2::new(top, top);
         assert_eq!(ext2_mul(e, e), e.const_mul(e));
+    }
+
+    /// The inlined base-field operations against the `qsag-core` definitions, on random words
+    /// and on every pair from the boundary set (carry, borrow and `2^32` limb edges).
+    #[test]
+    fn inlined_base_operations_equal_core_operations() {
+        let p = GOLDILOCKS_PRIME;
+        let mut xs: Vec<Goldilocks> = [
+            0,
+            1,
+            2,
+            0xFFFF_FFFF,
+            0x1_0000_0000,
+            0x1_0000_0001,
+            p / 2,
+            p / 2 + 1,
+            0xFFFF_FFFE_FFFF_FFFF,
+            p - 0x1_0000_0000,
+            p - 2,
+            p - 1,
+        ]
+        .into_iter()
+        .map(Goldilocks::from_u64_reduced)
+        .collect();
+        xs.extend(sample(200, 0xBA5E));
+        for &a in &xs {
+            for &b in &xs {
+                assert_eq!(gl_add(a, b), a.const_add(b));
+                assert_eq!(gl_sub(a, b), a.const_sub(b));
+                assert_eq!(
+                    WideAcc::ZERO.add_mul(a, b, 14).add_mul(b, b, 7).add_elem(a).reduce(),
+                    a.const_mul(b).const_mul(Goldilocks::from_u64_reduced(14))
+                        + b.const_mul(b).const_mul(Goldilocks::from_u64_reduced(7))
+                        + a
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing probe: run with --ignored --nocapture"]
+    fn bench_field_kernels() {
+        let n = 1usize << 22;
+        let base = sample(4 * n, 0xBE);
+        let coeffs: Vec<GoldilocksExt4> = base
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|l| GoldilocksExt4::from_limbs(*l))
+            .collect();
+        let z = coeffs[17];
+        let ns = |t: std::time::Instant, count: usize| t.elapsed().as_nanos() as f64 / count as f64;
+
+        let t = std::time::Instant::now();
+        let mut acc = z;
+        for c in &coeffs[..1 << 20] {
+            acc *= *c;
+        }
+        let chain_ns = ns(t, 1 << 20);
+
+        let t = std::time::Instant::now();
+        let mut sum = GoldilocksExt4::ZERO;
+        for c in &coeffs {
+            sum += *c * z;
+        }
+        let indep_ns = ns(t, n);
+
+        let t = std::time::Instant::now();
+        let h = horner_ext4_interleaved(&coeffs, z);
+        let horner_ns = ns(t, n);
+
+        for log_n in [14usize, 20, 24] {
+            let mut data = sample(1 << log_n, 5);
+            let t = std::time::Instant::now();
+            ntt_goldilocks_stages_blocked(&mut data, log_n, false);
+            let per = t.elapsed().as_nanos() as f64 / ((log_n << log_n) as f64 / 2.0);
+            std::println!("FIELD ntt_blocked log_n={log_n} ns_per_butterfly={per:.2} ({:?})", data[1]);
+        }
+
+        let t = std::time::Instant::now();
+        let mut sq = z;
+        for _ in 0..1 << 20 {
+            sq = sq.square();
+        }
+        let square_ns = ns(t, 1 << 20);
+        let t = std::time::Instant::now();
+        let mut mb = z;
+        for x in &base[..1 << 20] {
+            mb = mb.mul_base(*x);
+        }
+        let mul_base_ns = ns(t, 1 << 20);
+        std::println!(
+            "FIELD ext4_square_chain_ns={square_ns:.1} ext4_mul_base_chain_ns={mul_base_ns:.1} \
+             (checks {:?} {:?})",
+            sq.to_limbs()[0],
+            mb.to_limbs()[0]
+        );
+
+        let t = std::time::Instant::now();
+        let mut b = Goldilocks::ONE;
+        for x in &base[..1 << 22] {
+            b = b.const_mul(*x);
+        }
+        let base_chain_ns = ns(t, 1 << 22);
+        std::println!(
+            "FIELD ext4_mul_chain_ns={chain_ns:.1} ext4_mul_indep_ns={indep_ns:.1} \
+             horner_ns_per_coeff={horner_ns:.1} base_mul_chain_ns={base_chain_ns:.2} \
+             (checks {:?} {:?} {:?} {:?})",
+            acc.to_limbs()[0], sum.to_limbs()[0], h.to_limbs()[0], b
+        );
     }
 
     #[test]
