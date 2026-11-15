@@ -8,32 +8,14 @@ use alloc::vec::Vec;
 
 use crate::field::goldilocks::Goldilocks;
 
-/// Bijective 64-bit Stafford-13 avalanching step used exclusively to derive public
-/// nothing-up-my-sleeve `Poseidon2` round constants from `POSEIDON2_CONST_IV`.
-#[inline]
-pub const fn poseidon2_rc_bijection(x: u64) -> u64 {
-    let z0 = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let z1 = (z0 ^ (z0 >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    let z2 = (z1 ^ (z1 >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z2 ^ (z2 >> 31)
-}
-
-/// Domain IV of the round-constant generator, ASCII `"POS2_GL1"` (`poseidon2ConstIV`).
-pub const POSEIDON2_CONST_IV: u64 = 0x504F_5332_5F47_4C31;
-
-/// External rounds on each side of the internal rounds ($R_F = 8$ total).
-pub const POSEIDON2_HALF_EXTERNAL_ROUNDS: u64 = 4;
-
-/// Internal partial rounds ($R_P = 22$).
-pub const POSEIDON2_INTERNAL_ROUNDS: u64 = 22;
-
-/// `poseidon2ConstWord`: `(tag, round, lane)` absorbed into `POSEIDON2_CONST_IV`.
-#[inline]
-pub const fn poseidon2_const_word(tag: u64, round: u64, lane: u64) -> u64 {
-    poseidon2_rc_bijection(
-        poseidon2_rc_bijection(poseidon2_rc_bijection(POSEIDON2_CONST_IV ^ tag) ^ round) ^ lane,
-    )
-}
+/// The round-constant generator shared with the accelerator kernels: the bijective 64-bit
+/// Stafford-13 avalanching step (`poseidon2_rc_bijection`), its domain IV, ASCII
+/// `"POS2_GL1"` (`poseidon2ConstIV`), `poseidon2ConstWord` (`(tag, round, lane)` absorbed
+/// into the IV), and the round counts ($R_F = 2 \cdot 4$ external, $R_P = 22$ internal).
+pub use qsag_accel::poseidon2::{
+    POSEIDON2_CONST_IV, POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INTERNAL_ROUNDS,
+    poseidon2_const_word, poseidon2_rc_bijection,
+};
 
 /// `poseidon2ConstAt`: round constant reduced modulo $p$.
 #[inline]
@@ -68,7 +50,9 @@ fn poseidon2_apply_m4(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
 /// External diffusion layer $M_E = M_4 \otimes P_3$.
 pub fn poseidon2_apply_me(st: &mut Poseidon2State12) {
     // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
+    *st = [
+        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
+    ];
     let y0 = poseidon2_apply_m4([st[0], st[1], st[2], st[3]]);
     let y1 = poseidon2_apply_m4([st[4], st[5], st[6], st[7]]);
     let y2 = poseidon2_apply_m4([st[8], st[9], st[10], st[11]]);
@@ -78,7 +62,9 @@ pub fn poseidon2_apply_me(st: &mut Poseidon2State12) {
         st[4 + i] = y1[i] + s;
         st[8 + i] = y2[i] + s;
     }
-    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
+    *st = [
+        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
+    ];
 }
 
 /// Internal diffusion layer $M_I = \mathbf{1}\mathbf{1}^T + \text{diag}(-64, 1, 2, 4, \dots, 1024)$.
@@ -239,6 +225,22 @@ mod canonical_kat {
     fn poseidon2_canonical_sequence_kat() {
         let mut st = core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
         poseidon2_perm12(&mut st);
-        assert_eq!(st.map(|x| u64::from_be_bytes(x.to_be_bytes())), [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415]);
+        assert_eq!(
+            st.map(|x| u64::from_be_bytes(x.to_be_bytes())),
+            [
+                13782584570844608145,
+                13136387643152332171,
+                7171133015474200819,
+                7643370872200861694,
+                14144755201299840503,
+                16470027036684692562,
+                1748465969625202405,
+                1718729118078964347,
+                6141020819996733037,
+                16322330185628708898,
+                11650380702735067362,
+                2734959974607798415
+            ]
+        );
     }
 }

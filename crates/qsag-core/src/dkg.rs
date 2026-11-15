@@ -51,9 +51,9 @@ use crate::preprocessing::{
 use crate::sponge::keccak::{
     Cshake256Xof, cshake256_32 as cshake256_hash32, cshake256_32_multi_frame,
 };
-use crate::tsw_baggy::{
-    EpochLatchError as StatefulLatchError, MonotonicEpochLatch, StatefulEpochLatch,
-};
+#[cfg(feature = "std")]
+use crate::tsw_baggy::MonotonicEpochLatch;
+use crate::tsw_baggy::{EpochLatchError as StatefulLatchError, StatefulEpochLatch};
 use crate::wipe::{
     SecretBuffer, ct_eq_bytes, ct_eq_bytes32, ct_eq_u64, ct_select_u8, wipe_bytes, wipe_bytes32,
     wipe_ext2, wipe_gf256_slice, wipe_goldilocks, wipe_tower128_slice, wipe_u64s,
@@ -2875,7 +2875,6 @@ pub struct EpochLatchState {
 }
 
 const LATCH_WIRE_MAGIC: &[u8; 8] = b"QSAGLTC1";
-const FS_WAL_MAGIC: &[u8; 8] = b"QSAGWAL1";
 #[cfg(feature = "std")]
 const FS_WAL_MAGIC_V2: &[u8; 8] = b"QSAGWAL2";
 
@@ -3027,59 +3026,6 @@ impl StatefulEpochLatch for EpochLatchState {
         }
         Ok(())
     }
-}
-
-/// Encode a `97`-byte MAC-authenticated WAL record for [`MonotonicEpochLatch`].
-pub fn encode_authenticated_wal_record(
-    state: &MonotonicEpochLatch,
-    latch_mac_key: &[u8; 32],
-) -> [u8; 97] {
-    let mut out = [0u8; 97];
-    out[0..8].copy_from_slice(FS_WAL_MAGIC);
-    out[8..16].copy_from_slice(&state.next_epoch().to_be_bytes());
-    if let Some((ep, mu)) = state.in_flight() {
-        out[16] = 1;
-        out[17..25].copy_from_slice(&ep.to_be_bytes());
-        out[25..57].copy_from_slice(&mu);
-    }
-    let tag = cshake256_32_multi_frame(TAG_FS_WAL_LATCH_MAC, &[latch_mac_key, &out[0..65]]);
-    out[65..97].copy_from_slice(&tag);
-    out
-}
-
-/// Decode and constant-time verify a `97`-byte MAC-authenticated WAL record.
-pub fn decode_authenticated_wal_record(
-    bytes: &[u8],
-    latch_mac_key: &[u8; 32],
-) -> Result<MonotonicEpochLatch, StatefulLatchError> {
-    if bytes.len() != 97 || !ct_eq_bytes(&bytes[0..8], FS_WAL_MAGIC) || bytes[16] > 1 {
-        return Err(StatefulLatchError::PersistenceFailure);
-    }
-    let expected_tag =
-        cshake256_32_multi_frame(TAG_FS_WAL_LATCH_MAC, &[latch_mac_key, &bytes[0..65]]);
-    let actual_tag: [u8; 32] = core::array::from_fn(|array_index| (bytes[65..97])[array_index]);
-    if !ct_eq_bytes32(&expected_tag, &actual_tag) {
-        return Err(StatefulLatchError::PersistenceFailure);
-    }
-    let next_epoch = u64::from_be_bytes(core::array::from_fn(|array_index| {
-        (bytes[8..16])[array_index]
-    }));
-    let in_flight = if bytes[16] == 0 {
-        None
-    } else {
-        let ep = u64::from_be_bytes(core::array::from_fn(|array_index| {
-            (bytes[17..25])[array_index]
-        }));
-        if ep >= next_epoch {
-            return Err(StatefulLatchError::PersistenceFailure);
-        }
-        let mut mu = [0u8; 32];
-        mu.copy_from_slice(&bytes[25..57]);
-        Some((ep, mu))
-    };
-    Ok(MonotonicEpochLatch::from_recovered_wal(
-        next_epoch, in_flight,
-    ))
 }
 
 #[cfg(feature = "std")]
@@ -3881,16 +3827,6 @@ impl QuorumEpochLatchCluster {
         }
     }
 
-    pub fn acquire_latch_quorum(
-        &mut self,
-        participating_signers: &[usize],
-        epoch: u64,
-        mu: [u8; 32],
-    ) -> Result<(), EpochLatchError> {
-        self.reserve_quorum(participating_signers, epoch, mu, self.latch_quorum)
-            .map(|_| ())
-    }
-
     /// Reserve `(epoch, binding)` in a latch quorum and return the certificate a stateful signer
     /// requires. `binding` is [`epoch_latch_binding`] of the key, `epoch` and the message digest.
     ///
@@ -3952,6 +3888,7 @@ impl core::error::Error for EpochLatchError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tsw_baggy::MonotonicEpochLatch;
 
     #[test]
     fn scalar_dkg_checks_received_evaluations_and_degree_bound() {

@@ -18,40 +18,11 @@ use crate::wipe::{wipe_bytes, wipe_bytes32, wipe_u64s};
 pub const SHAKE256_RATE_BYTES: usize = 136;
 
 /// Number of 64-bit lanes in the `SHAKE256` / `cSHAKE256` rate ($136 / 8 = 17$).
-pub const SHAKE256_RATE_LANES: usize = 17;
+pub const SHAKE256_RATE_LANES: usize = SHAKE256_RATE_BYTES / 8;
 
-/// Standard 24 FIPS 202 `Keccak-f[1600]` round constants.
-pub const KECCAK_ROUND_CONSTANTS: [u64; 24] = [
-    0x0000_0000_0000_0001,
-    0x0000_0000_0000_8082,
-    0x8000_0000_0000_808a,
-    0x8000_0000_8000_8000,
-    0x0000_0000_0000_808b,
-    0x0000_0000_8000_0001,
-    0x8000_0000_8000_8081,
-    0x8000_0000_0000_8009,
-    0x0000_0000_0000_008a,
-    0x0000_0000_0000_0088,
-    0x0000_0000_8000_8009,
-    0x0000_0000_8000_000a,
-    0x0000_0000_8000_808b,
-    0x8000_0000_0000_008b,
-    0x8000_0000_0000_8089,
-    0x8000_0000_0000_8003,
-    0x8000_0000_0000_8002,
-    0x8000_0000_0000_0080,
-    0x0000_0000_0000_800a,
-    0x8000_0000_8000_000a,
-    0x8000_0000_8000_8081,
-    0x8000_0000_0000_8080,
-    0x0000_0000_8000_0001,
-    0x8000_0000_8000_8008,
-];
-
-/// FIPS 202 $\rho$ rotation offsets indexed by `x + 5 * y`.
-pub const KECCAK_ROTATION_OFFSETS: [u32; 25] = [
-    0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
-];
+/// The 24 FIPS 202 `Keccak-f[1600]` round constants and the $\rho$ rotation offsets indexed
+/// by `x + 5 * y`.
+pub use qsag_asm::{KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS};
 
 /// Domain customization tags for `FiatShamirTranscript`.
 pub const FS_SEED_CUSTOMIZATION: &[u8] = b"QSAG.CRYPTO.FS.SEED/v1";
@@ -1199,7 +1170,9 @@ mod tests {
         for word_len in [0usize, 1, 16, 17, 18, 53] {
             let inputs: [Vec<u8>; 8] = core::array::from_fn(|i| {
                 let len = (17 * i + 5) % 135;
-                (0..len).map(|j| ((i * 31 + j * 13 + 7) & 0xff) as u8).collect()
+                (0..len)
+                    .map(|j| ((i * 31 + j * 13 + 7) & 0xff) as u8)
+                    .collect()
             });
             let input_refs = core::array::from_fn(|i| inputs[i].as_slice());
             let mut bufs: [Vec<u64>; 8] = core::array::from_fn(|_| vec![0u64; word_len]);

@@ -177,7 +177,7 @@ fn main() {
         // levels.
         let chain_lanes =
             (params.num_layers - 3) * (1usize << params.subtree_height) * params.wots.chains;
-        let fors_lanes = params.signed_fors_trees_checked().unwrap() << params.fors_height;
+        let fors_lanes = params.pors.leaves();
         let waves =
             2 + 2 * (chain_lanes + fors_lanes).div_ceil(256) + 2 * chain_lanes.div_ceil(256);
         let before = e.stats();

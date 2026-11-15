@@ -10,19 +10,19 @@ use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use crate::wipe::ct_eq_u64;
 
 /// The Goldilocks prime $p = 2^{64} - 2^{32} + 1 = \text{0xFFFF\_FFFF\_0000\_0001}$.
-pub const GOLDILOCKS_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
+pub const GOLDILOCKS_PRIME: u64 = qsag_asm::GOLDILOCKS_PRIME;
 
 /// Reduction constant $\epsilon = 2^{32} - 1 = 2^{64} - p$.
-pub const GOLDILOCKS_EPSILON: u64 = 0xFFFF_FFFF;
+pub const GOLDILOCKS_EPSILON: u64 = qsag_asm::GOLDILOCKS_EPSILON;
 
 /// Multiplicative generator $g = 7$ of $\mathbb{F}_p^\times$ (and quadratic non-residue for $\mathbb{F}_{p^2}$).
-pub const GOLDILOCKS_GENERATOR: u64 = 7;
+pub const GOLDILOCKS_GENERATOR: u64 = qsag_accel::goldilocks::GOLDILOCKS_GENERATOR;
 
 /// Primitive $2^{32}$-th root of unity $\omega_{2^{32}} = 7^{2^{32} - 1} \bmod p$.
-pub const GOLDILOCKS_ROOT_2_32: u64 = 1_753_635_133_440_165_772;
+pub const GOLDILOCKS_ROOT_2_32: u64 = qsag_accel::goldilocks::GOLDILOCKS_ROOT_2_32;
 
 /// Maximum 2-adicity of $\mathbb{F}_p^\times$ ($2^{32} \mid p - 1$).
-pub const GOLDILOCKS_TWO_ADICITY: u32 = 32;
+pub const GOLDILOCKS_TWO_ADICITY: u32 = qsag_accel::goldilocks::GOLDILOCKS_TWO_ADICITY;
 
 /// Error returned when a 64-bit word lies in the non-canonical alias band $[p, 2^{64})$.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -562,17 +562,7 @@ impl MulAssign for GoldilocksExt2 {
     }
 }
 
-/// Deterministically wipe a slice of secret `Goldilocks` elements.
-#[inline(never)]
-pub fn wipe_goldilocks(buf: &mut [Goldilocks]) {
-    crate::wipe::wipe_goldilocks(buf);
-}
-
-/// Deterministically wipe a slice of secret `GoldilocksExt2` elements.
-#[inline(never)]
-pub fn wipe_ext2(buf: &mut [GoldilocksExt2]) {
-    crate::wipe::wipe_ext2(buf);
-}
+pub use crate::wipe::{wipe_ext2, wipe_goldilocks};
 
 /// Evaluate polynomial `coeffs[0] + coeffs[1]*x + ...` over `Goldilocks`.
 #[inline]
