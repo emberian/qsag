@@ -230,6 +230,30 @@ pub(super) struct DeltaCotPool {
     holder_rows: SecretBuffer<Vec<Vec<[Vec<u128>; 2]>>>,
 }
 
+fn stream_words_pair(
+    mid: &[u64; 25],
+    parts0: &[&[u8]],
+    out0: &mut [u64],
+    parts1: &[&[u8]],
+    out1: &mut [u64],
+) {
+    let mut seed0 = [0u8; 128];
+    let mut len0 = 0usize;
+    for part in parts0 {
+        seed0[len0..len0 + part.len()].copy_from_slice(part);
+        len0 += part.len();
+    }
+    let mut seed1 = [0u8; 128];
+    let mut len1 = 0usize;
+    for part in parts1 {
+        seed1[len1..len1 + part.len()].copy_from_slice(part);
+        len1 += part.len();
+    }
+    Cshake256WordStream4::fill_words_pair(mid, &seed0[..len0], out0, &seed1[..len1], out1);
+    wipe_bytes(&mut seed0);
+    wipe_bytes(&mut seed1);
+}
+
 fn extend_pair(
     session_id: &[u8; 32],
     job: &PairExtension,
@@ -246,38 +270,56 @@ fn extend_pair(
     // base-OT choice, plus `u` where that choice bit of `alpha` is set, giving `t0 ^ alpha_m rho`.
     let mut t_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(256));
     let mut q_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(256));
-    let mut t1 = SecretBuffer(vec![0u64; words]);
-    for col in 0..256 {
-        let col_le = (col as u64).to_le_bytes();
-        let mut t0 = vec![0u64; words];
-        let mut q = vec![0u64; words];
-        stream_words(
+    let mut t1_a = SecretBuffer(vec![0u64; words]);
+    let mut t1_b = SecretBuffer(vec![0u64; words]);
+    for pair in 0..128 {
+        let col_a = 2 * pair;
+        let col_b = col_a + 1;
+        let col_a_le = (col_a as u64).to_le_bytes();
+        let col_b_le = (col_b as u64).to_le_bytes();
+        let mut t0_a = vec![0u64; words];
+        let mut t0_b = vec![0u64; words];
+        let mut q_a = vec![0u64; words];
+        let mut q_b = vec![0u64; words];
+        stream_words_pair(
             &ABIT_COL_MID,
-            &[session_id, &holder_le, &owner_le, &col_le, &job.seeds0[col]],
-            &mut t0,
+            &[session_id, &holder_le, &owner_le, &col_a_le, &job.seeds0[col_a]],
+            &mut t0_a,
+            &[session_id, &holder_le, &owner_le, &col_a_le, &job.seeds1[col_a]],
+            &mut t1_a,
         );
-        stream_words(
+        stream_words_pair(
             &ABIT_COL_MID,
-            &[session_id, &holder_le, &owner_le, &col_le, &job.seeds1[col]],
-            &mut t1,
+            &[session_id, &holder_le, &owner_le, &col_b_le, &job.seeds0[col_b]],
+            &mut t0_b,
+            &[session_id, &holder_le, &owner_le, &col_b_le, &job.seeds1[col_b]],
+            &mut t1_b,
         );
-        stream_words(
+        stream_words_pair(
             &ABIT_COL_MID,
-            &[session_id, &holder_le, &owner_le, &col_le, &job.chosen[col]],
-            &mut q,
+            &[session_id, &holder_le, &owner_le, &col_a_le, &job.chosen[col_a]],
+            &mut q_a,
+            &[session_id, &holder_le, &owner_le, &col_b_le, &job.chosen[col_b]],
+            &mut q_b,
         );
-        let mask = 0u64.wrapping_sub(black_box(((delta[col / 128] >> (col % 128)) & 1) as u64));
+        let mask_a =
+            0u64.wrapping_sub(black_box(((delta[col_a / 128] >> (col_a % 128)) & 1) as u64));
+        let mask_b =
+            0u64.wrapping_sub(black_box(((delta[col_b / 128] >> (col_b % 128)) & 1) as u64));
         for w in 0..words {
-            q[w] ^= mask & (t0[w] ^ t1[w] ^ rho[w]);
+            q_a[w] ^= mask_a & (t0_a[w] ^ t1_a[w] ^ rho[w]);
+            q_b[w] ^= mask_b & (t0_b[w] ^ t1_b[w] ^ rho[w]);
         }
-        t_cols.push(t0);
-        q_cols.push(q);
+        t_cols.push(t0_a);
+        t_cols.push(t0_b);
+        q_cols.push(q_a);
+        q_cols.push(q_b);
     }
     let mut t_lanes: [Vec<u128>; 2] =
         core::array::from_fn(|l| transpose_cols128_to_rows(&t_cols[128 * l..128 * (l + 1)], words));
     let mut q_lanes: [Vec<u128>; 2] =
         core::array::from_fn(|l| transpose_cols128_to_rows(&q_cols[128 * l..128 * (l + 1)], words));
-    drop((t_cols, q_cols, t1));
+    drop((t_cols, q_cols, t1_a, t1_b));
 
     // KOS consistency check. The challenge is the holder's fresh randomness, sent only after
     // the owner's `u` columns; the sacrificial rows keep `x_bar` and `t_bar` uniform.
@@ -350,7 +392,20 @@ impl DeltaCotPool {
         }
 
         // Base OTs for this ceremony's key: the holder's choice bits are the bits of `alpha_i`.
-        let mut jobs = Vec::with_capacity(n * (n - 1));
+        // Pre-draw per-channel RNG inputs in canonical `(holder, owner)` order, then run all
+        // `n * (n - 1)` correlated OT channels + PRG extensions in parallel across threads.
+        struct PairBootstrapJob {
+            holder: usize,
+            owner: usize,
+            choice: [u64; 4],
+            sac_words: [u64; 4],
+            kos_chi_seed: [u8; 32],
+            chi_seed: [u8; 32],
+            s_chan: Option<crate::preprocessing::OtExtSenderChannel>,
+            r_chan: Option<crate::preprocessing::OtExtReceiverChannel>,
+            outcome: Option<Result<(PairExtension, [Vec<u128>; 2], [Vec<u128>; 2]), PreprocessError>>,
+        }
+        let mut boot_jobs = Vec::with_capacity(n * (n - 1));
         for holder in 0..n {
             let choice = [
                 delta[holder][0] as u64,
@@ -362,32 +417,110 @@ impl DeltaCotPool {
                 if owner == holder {
                     continue;
                 }
-                let (send, recv) =
-                    ot_mesh.run_correlated_ot_words(owner, holder, &choice, party_rngs)?;
-                let take = |pad: &[u8; 48]| -> [u8; 32] { core::array::from_fn(|i| pad[i]) };
-                jobs.push(PairExtension {
+                let s_chan = ot_mesh
+                    .senders
+                    .get_mut(owner)
+                    .and_then(|row| row.get_mut(holder))
+                    .and_then(Option::take)
+                    .ok_or(PreprocessError::ChannelPoisoned {
+                        sender_id: owner,
+                        receiver_id: holder,
+                    })?;
+                let r_chan = ot_mesh
+                    .receivers
+                    .get_mut(holder)
+                    .and_then(|row| row.get_mut(owner))
+                    .and_then(Option::take)
+                    .ok_or(PreprocessError::ChannelPoisoned {
+                        sender_id: owner,
+                        receiver_id: holder,
+                    })?;
+                let sac_words = [
+                    party_rngs[holder].next_u64(),
+                    party_rngs[holder].next_u64(),
+                    party_rngs[holder].next_u64(),
+                    party_rngs[holder].next_u64(),
+                ];
+                let kos_chi_seed = party_rngs[owner].next_bytes32();
+                let chi_seed = party_rngs[holder].next_bytes32();
+                boot_jobs.push(PairBootstrapJob {
                     holder,
                     owner,
-                    seeds0: SecretBuffer(send.iter().map(|pair| take(&pair.0)).collect()),
-                    seeds1: SecretBuffer(send.iter().map(|pair| take(&pair.1)).collect()),
-                    chosen: SecretBuffer(recv.iter().map(take).collect()),
-                    chi_seed: party_rngs[holder].next_bytes32(),
-                    rows: None,
+                    choice,
+                    sac_words,
+                    kos_chi_seed,
+                    chi_seed,
+                    s_chan: Some(s_chan),
+                    r_chan: Some(r_chan),
+                    outcome: None,
                 });
             }
         }
 
         let rho_ref = &rho;
         let delta_ref = &delta;
-        par_for_each(&mut jobs, |job| {
-            job.rows = Some(extend_pair(
-                session_id,
-                job,
-                &rho_ref[job.owner],
-                delta_ref[job.holder],
-                rows,
-            ));
+        par_for_each(&mut boot_jobs, |bjob| {
+            let s_chan = bjob.s_chan.as_mut().expect("sender channel taken");
+            let r_chan = bjob.r_chan.as_mut().expect("receiver channel taken");
+            let mut run = || -> Result<(PairExtension, [Vec<u128>; 2], [Vec<u128>; 2]), PreprocessError> {
+                let (r_pend, u_msg) = r_chan.round1_send_u_cols_with_sac(&bjob.choice, bjob.sac_words);
+                let (s_pend, chal_msg) =
+                    s_chan.round2_sample_challenge_with_chi(&u_msg, bjob.kos_chi_seed)?;
+                let (proof_msg, recv) = r_chan.round3_prove_and_finish(r_pend, &chal_msg);
+                let send = s_chan.round4_verify_and_finish(s_pend, &proof_msg)?;
+                let take = |pad: &[u8; 48]| -> [u8; 32] { core::array::from_fn(|i| pad[i]) };
+                let ext = PairExtension {
+                    holder: bjob.holder,
+                    owner: bjob.owner,
+                    seeds0: SecretBuffer(send.iter().map(|pair| take(&pair.0)).collect()),
+                    seeds1: SecretBuffer(send.iter().map(|pair| take(&pair.1)).collect()),
+                    chosen: SecretBuffer(recv.iter().map(take).collect()),
+                    chi_seed: bjob.chi_seed,
+                    rows: None,
+                };
+                let (t_lanes, q_lanes) = extend_pair(
+                    session_id,
+                    &ext,
+                    &rho_ref[bjob.owner],
+                    delta_ref[bjob.holder],
+                    rows,
+                )?;
+                Ok((ext, t_lanes, q_lanes))
+            };
+            let res = run();
+            crate::wipe::wipe_u64s(&mut bjob.choice);
+            crate::wipe::wipe_u64s(&mut bjob.sac_words);
+            crate::wipe::wipe_bytes32(&mut bjob.kos_chi_seed);
+            bjob.outcome = Some(res);
         });
+
+        let mut jobs = Vec::with_capacity(boot_jobs.len());
+        for mut bjob in boot_jobs {
+            if let Some(s_chan) = bjob.s_chan.take() {
+                ot_mesh.senders[bjob.owner][bjob.holder] = Some(s_chan);
+            }
+            if let Some(r_chan) = bjob.r_chan.take() {
+                ot_mesh.receivers[bjob.holder][bjob.owner] = Some(r_chan);
+            }
+            match bjob.outcome.take() {
+                Some(Ok((mut ext, t_lanes, q_lanes))) => {
+                    ext.rows = Some(Ok((t_lanes, q_lanes)));
+                    jobs.push(ext);
+                }
+                Some(Err(err)) => {
+                    jobs.push(PairExtension {
+                        holder: bjob.holder,
+                        owner: bjob.owner,
+                        seeds0: SecretBuffer(Vec::new()),
+                        seeds1: SecretBuffer(Vec::new()),
+                        chosen: SecretBuffer(Vec::new()),
+                        chi_seed: [0u8; 32],
+                        rows: Some(Err(err)),
+                    });
+                }
+                None => unreachable!("par_for_each populated every job"),
+            }
+        }
 
         let mut agg: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
             (0..n)
@@ -1438,35 +1571,67 @@ fn recursive_sacrifice(
     });
 
     // Claim `<a_vec, b_vec> = c` per instance, as additive shares.
-    let mut a_vec: SecretBuffer<[Vec<Vec<u128>>; 2]> = SecretBuffer(core::array::from_fn(|inst| {
-        (0..n)
-            .map(|p| {
-                (0..nbits)
-                    .map(|k| chi[inst][k] & bit_mask(word_bit(&a_bits[p], k)))
-                    .collect()
+    struct SacrificeInitSlot {
+        inst: usize,
+        p: usize,
+        a: Vec<u128>,
+        b: Vec<u128>,
+        cv: u128,
+        cm: [u128; 2],
+    }
+    let mut init_slots: Vec<SacrificeInitSlot> = (0..2)
+        .flat_map(|inst| {
+            (0..n).map(move |p| SacrificeInitSlot {
+                inst,
+                p,
+                a: Vec::new(),
+                b: Vec::new(),
+                cv: 0,
+                cm: [0u128; 2],
             })
-            .collect()
-    }));
-    let mut b_vec: SecretBuffer<[Vec<Vec<u128>>; 2]> = SecretBuffer(core::array::from_fn(|_| {
-        (0..n)
-            .map(|p| {
-                (0..nbits)
+        })
+        .collect();
+    {
+        let chi_ref = &chi;
+        par_for_each(&mut init_slots, |slot| {
+            let inst = slot.inst;
+            let p = slot.p;
+            slot.a = (0..nbits)
+                .map(|k| chi_ref[inst][k] & bit_mask(word_bit(&a_bits[p], k)))
+                .collect();
+            if inst == 0 {
+                slot.b = (0..nbits)
                     .map(|k| u128::from(word_bit(&b_bits[p], k)))
-                    .collect()
-            })
-            .collect()
-    }));
+                    .collect();
+            }
+            let mut cv = 0u128;
+            for k in 0..nbits {
+                cv ^= chi_ref[inst][k] & bit_mask(word_bit(&c_bits[p], k));
+            }
+            slot.cv = cv;
+            slot.cm = [
+                gf_dot(&chi_ref[inst], &mac_c[p][0]),
+                gf_dot(&chi_ref[inst], &mac_c[p][1]),
+            ];
+        });
+    }
+    let mut a_vec: SecretBuffer<[Vec<Vec<u128>>; 2]> =
+        SecretBuffer([vec![Vec::new(); n], vec![Vec::new(); n]]);
+    let mut b_vec: SecretBuffer<[Vec<Vec<u128>>; 2]> =
+        SecretBuffer([vec![Vec::new(); n], vec![Vec::new(); n]]);
     let mut c_val = SecretBuffer([vec![0u128; n], vec![0u128; n]]);
     let mut c_mac = SecretBuffer([vec![[0u128; 2]; n], vec![[0u128; 2]; n]]);
-    for inst in 0..2 {
-        for p in 0..n {
-            for k in 0..nbits {
-                c_val[inst][p] ^= chi[inst][k] & bit_mask(word_bit(&c_bits[p], k));
-            }
-            for lane in 0..2 {
-                c_mac[inst][p][lane] = gf_dot(&chi[inst], &mac_c[p][lane]);
-            }
+    for mut slot in init_slots {
+        a_vec[slot.inst][slot.p] = core::mem::take(&mut slot.a);
+        if slot.inst == 0 {
+            let b_copy = slot.b.clone();
+            b_vec[0][slot.p] = core::mem::take(&mut slot.b);
+            b_vec[1][slot.p] = b_copy;
         }
+        c_val[slot.inst][slot.p] = slot.cv;
+        c_mac[slot.inst][slot.p] = slot.cm;
+        slot.cv = 0;
+        slot.cm = [0; 2];
     }
     // Public coefficients of each raw bit in the folded entries.
     let mut tens_a: [Vec<u128>; 2] = [vec![1u128], vec![1u128]];
@@ -1479,14 +1644,39 @@ fn recursive_sacrifice(
         // `h[inst][party] = [h0, h1]` with `h0 = <a_even, b_odd>`, `h1 = <a_odd, b_even>`.
         let mut h = SecretBuffer([vec![[0u128; 2]; n], vec![[0u128; 2]; n]]);
         let mut halves: SecretBuffer<Vec<Vec<[Vec<u128>; 4]>>> =
-            SecretBuffer(vec![Vec::with_capacity(n), Vec::with_capacity(n)]);
-        for inst in 0..2 {
-            for p in 0..n {
-                let (a_even, a_odd) = split_even_odd(&a_vec[inst][p]);
-                let (b_even, b_odd) = split_even_odd(&b_vec[inst][p]);
-                h[inst][p][0] = gf_dot(&a_even[..pairs], &b_odd[..pairs]);
-                h[inst][p][1] = gf_dot(&a_odd[..pairs], &b_even[..pairs]);
-                halves[inst].push([a_even, a_odd, b_even, b_odd]);
+            SecretBuffer(vec![vec![[Vec::new(), Vec::new(), Vec::new(), Vec::new()]; n], vec![[Vec::new(), Vec::new(), Vec::new(), Vec::new()]; n]]);
+        {
+            struct SplitSlot {
+                inst: usize,
+                p: usize,
+                h_pair: [u128; 2],
+                parts: [Vec<u128>; 4],
+            }
+            let mut split_slots: Vec<SplitSlot> = (0..2)
+                .flat_map(|inst| {
+                    (0..n).map(move |p| SplitSlot {
+                        inst,
+                        p,
+                        h_pair: [0u128; 2],
+                        parts: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+                    })
+                })
+                .collect();
+            let a_ref = &a_vec.0;
+            let b_ref = &b_vec.0;
+            par_for_each(&mut split_slots, |slot| {
+                let (a_even, a_odd) = split_even_odd(&a_ref[slot.inst][slot.p]);
+                let (b_even, b_odd) = split_even_odd(&b_ref[slot.inst][slot.p]);
+                slot.h_pair = [
+                    gf_dot(&a_even[..pairs], &b_odd[..pairs]),
+                    gf_dot(&a_odd[..pairs], &b_even[..pairs]),
+                ];
+                slot.parts = [a_even, a_odd, b_even, b_odd];
+            });
+            for mut slot in split_slots {
+                h[slot.inst][slot.p] = slot.h_pair;
+                slot.h_pair = [0; 2];
+                halves[slot.inst][slot.p] = core::mem::take(&mut slot.parts);
             }
         }
 
@@ -1815,21 +2005,7 @@ pub(super) fn run_pi_triple_f2(
         }
     }
     let zero = vec![0u64; raw_triples];
-    let mac_a: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
-        (0..n)
-            .map(|p| pool.mac_bits(p, off_a, nbits, &zero))
-            .collect(),
-    );
-    let mac_b: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
-        (0..n)
-            .map(|p| pool.mac_bits(p, off_b, nbits, &zero))
-            .collect(),
-    );
-    let mac_c: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
-        (0..n)
-            .map(|p| pool.mac_bits(p, off_c, nbits, &d_c))
-            .collect(),
-    );
+    let (mac_a, mac_b, mac_c) = compute_mac_triples_parallel(&pool, n, nbits, [off_a, off_b, off_c], [&zero, &zero, &d_c]);
 
     finish_pi_triple_f2_from_authenticated_raw(
         session_id,
@@ -1967,21 +2143,7 @@ pub(super) fn run_silent_pi_triple_f2(
         }
     }
     let zero = vec![0u64; raw_triples];
-    let mac_a: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
-        (0..n)
-            .map(|p| pool.mac_bits(p, off_a, nbits, &d_a))
-            .collect(),
-    );
-    let mac_b: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
-        (0..n)
-            .map(|p| pool.mac_bits(p, off_b, nbits, &zero))
-            .collect(),
-    );
-    let mac_c: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
-        (0..n)
-            .map(|p| pool.mac_bits(p, off_c, nbits, &d_c))
-            .collect(),
-    );
+    let (mac_a, mac_b, mac_c) = compute_mac_triples_parallel(&pool, n, nbits, [off_a, off_b, off_c], [&d_a, &zero, &d_c]);
 
     finish_pi_triple_f2_from_authenticated_raw(
         session_id,
@@ -2002,6 +2164,52 @@ pub(super) fn run_silent_pi_triple_f2(
         party_rngs,
         faults,
     )
+}
+
+#[expect(
+    clippy::type_complexity,
+    reason = "Internal parallel helper returning authenticated MAC triples (mac_a, mac_b, mac_c)"
+)]
+fn compute_mac_triples_parallel(
+    pool: &DeltaCotPool,
+    n: usize,
+    nbits: usize,
+    offs: [usize; 3],
+    deltas: [&[u64]; 3],
+) -> (
+    SecretBuffer<Vec<[Vec<u128>; 2]>>,
+    SecretBuffer<Vec<[Vec<u128>; 2]>>,
+    SecretBuffer<Vec<[Vec<u128>; 2]>>,
+) {
+    struct MacSlot {
+        which: usize,
+        p: usize,
+        out: [Vec<u128>; 2],
+    }
+    let mut slots: Vec<MacSlot> = (0..3)
+        .flat_map(|which| {
+            (0..n).map(move |p| MacSlot {
+                which,
+                p,
+                out: [Vec::new(), Vec::new()],
+            })
+        })
+        .collect();
+    par_for_each(&mut slots, |slot| {
+        slot.out = pool.mac_bits(slot.p, offs[slot.which], nbits, deltas[slot.which]);
+    });
+    let mut mac_a = SecretBuffer(vec![[Vec::new(), Vec::new()]; n]);
+    let mut mac_b = SecretBuffer(vec![[Vec::new(), Vec::new()]; n]);
+    let mut mac_c = SecretBuffer(vec![[Vec::new(), Vec::new()]; n]);
+    for mut slot in slots {
+        let taken = core::mem::take(&mut slot.out);
+        match slot.which {
+            0 => mac_a[slot.p] = taken,
+            1 => mac_b[slot.p] = taken,
+            _ => mac_c[slot.p] = taken,
+        }
+    }
+    (mac_a, mac_b, mac_c)
 }
 
 #[expect(
@@ -2190,35 +2398,70 @@ fn finish_pi_triple_f2_from_authenticated_raw(
     )?;
     drop((e_sh_batch, e_mac_batch));
 
-    for k in 0..num_triples {
-        let k0 = bucket_perm[k] as usize;
-        let k1 = bucket_perm[num_triples + k] as usize;
-        let k2 = bucket_perm[2 * num_triples + k] as usize;
-        let d_open = &d_opened[k];
-        let e_open = &e_opened[k];
+    struct FinalPartyCombine {
+        p: usize,
+        b: Vec<[u64; 8]>,
+        c: Vec<[u64; 8]>,
+        b_mac: Vec<[[Tower128; 64]; 2]>,
+        c_mac: Vec<[[Tower128; 64]; 2]>,
+    }
+    let mut combine_jobs: Vec<FinalPartyCombine> = (0..n)
+        .map(|p| FinalPartyCombine {
+            p,
+            b: vec![[0u64; 8]; num_triples],
+            c: vec![[0u64; 8]; num_triples],
+            b_mac: vec![[[Tower128::ZERO; 64]; 2]; num_triples],
+            c_mac: vec![[[Tower128::ZERO; 64]; 2]; num_triples],
+        })
+        .collect();
+    {
+        let a_sh_ref = a_sh.as_slice();
+        let b_sh_ref = b_sh.as_slice();
+        let c_sh_ref = c_sh.as_slice();
+        let a_mac_ref = a_mac.as_slice();
+        let b_mac_ref = b_mac.as_slice();
+        let c_mac_ref = c_mac.as_slice();
+        let perm_ref = &bucket_perm;
+        let d_open_ref = &d_opened;
+        let e_open_ref = &e_opened;
+        par_for_each(&mut combine_jobs, |job| {
+            let p = job.p;
+            for k in 0..num_triples {
+                let k0 = perm_ref[k] as usize;
+                let k1 = perm_ref[num_triples + k] as usize;
+                let k2 = perm_ref[2 * num_triples + k] as usize;
+                let d_open = &d_open_ref[k];
+                let e_open = &e_open_ref[k];
 
-        for p in 0..n {
-            let da1 = bs_gf256_mul_planes_ct(d_open, &a_sh[p][k1]);
-            let mut c_mid = bs_gf256_xor(&bs_gf256_xor(&c_sh[p][k0], &c_sh[p][k1]), &da1);
-            final_b[p][k] = bs_gf256_xor(&b_sh[p][k0], &b_sh[p][k2]);
-            let eb2 = bs_gf256_mul_planes_ct(e_open, &b_sh[p][k2]);
-            final_c[p][k] = bs_gf256_xor(&bs_gf256_xor(&c_mid, &c_sh[p][k2]), &eb2);
-            wipe_u64s(&mut c_mid);
+                let da1 = bs_gf256_mul_planes_ct(d_open, &a_sh_ref[p][k1]);
+                let mut c_mid =
+                    bs_gf256_xor(&bs_gf256_xor(&c_sh_ref[p][k0], &c_sh_ref[p][k1]), &da1);
+                job.b[k] = bs_gf256_xor(&b_sh_ref[p][k0], &b_sh_ref[p][k2]);
+                let eb2 = bs_gf256_mul_planes_ct(e_open, &b_sh_ref[p][k2]);
+                job.c[k] = bs_gf256_xor(&bs_gf256_xor(&c_mid, &c_sh_ref[p][k2]), &eb2);
+                wipe_u64s(&mut c_mid);
 
-            for bit in 0..64 {
-                let d_gf = bs_gf256_extract_lane(d_open, bit);
-                let e_gf = bs_gf256_extract_lane(e_open, bit);
-                for lane in 0..2 {
-                    final_b_mac[p][k][lane][bit] =
-                        b_mac[p][k0][lane][bit].add(b_mac[p][k2][lane][bit]);
-                    final_c_mac[p][k][lane][bit] = c_mac[p][k0][lane][bit]
-                        .add(c_mac[p][k1][lane][bit])
-                        .add(a_mac[p][k1][lane][bit].mul_gf256(d_gf))
-                        .add(c_mac[p][k2][lane][bit])
-                        .add(b_mac[p][k2][lane][bit].mul_gf256(e_gf));
+                for bit in 0..64 {
+                    let d_gf = bs_gf256_extract_lane(d_open, bit);
+                    let e_gf = bs_gf256_extract_lane(e_open, bit);
+                    for lane in 0..2 {
+                        job.b_mac[k][lane][bit] =
+                            b_mac_ref[p][k0][lane][bit].add(b_mac_ref[p][k2][lane][bit]);
+                        job.c_mac[k][lane][bit] = c_mac_ref[p][k0][lane][bit]
+                            .add(c_mac_ref[p][k1][lane][bit])
+                            .add(a_mac_ref[p][k1][lane][bit].mul_gf256(d_gf))
+                            .add(c_mac_ref[p][k2][lane][bit])
+                            .add(b_mac_ref[p][k2][lane][bit].mul_gf256(e_gf));
+                    }
                 }
             }
-        }
+        });
+    }
+    for mut job in combine_jobs {
+        final_b[job.p] = core::mem::take(&mut job.b);
+        final_c[job.p] = core::mem::take(&mut job.c);
+        final_b_mac[job.p] = core::mem::take(&mut job.b_mac);
+        final_c_mac[job.p] = core::mem::take(&mut job.c_mac);
     }
     drop((a_sh, b_sh, c_sh, a_mac, b_mac, c_mac));
 
