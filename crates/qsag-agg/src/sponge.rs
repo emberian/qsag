@@ -1025,6 +1025,22 @@ pub const P2_DOMAIN_FS_ABSORB_LIMBS: u64 = 0x5032_4653_414C_4D42; // "P2FSALMB"
 pub const P2_DOMAIN_FS_SQUEEZE_BASE: u64 = 0x5032_4653_5351_4253; // "P2FSSQBS"
 pub const P2_DOMAIN_FS_SQUEEZE_EXT4: u64 = 0x5032_4653_5351_4534; // "P2FSSQE4"
 pub const P2_DOMAIN_FS_SQUEEZE_IDX: u64 = 0x5032_4653_5351_4958; // "P2FSSQIX"
+pub const P2_DOMAIN_FS_POW: u64 = 0x5032_4653_504F_5701; // "P2FSPOW\x01"
+
+/// Poseidon2 Proof-of-Work word of `nonce` against the transcript chain state `chain`
+/// (`nonce` enters as its two 32-bit halves, each a canonical limb).
+#[inline]
+pub fn poseidon2_pow_word(chain: [Goldilocks; 4], nonce: u64) -> u64 {
+    poseidon2_sponge_hash_limbs(
+        P2_DOMAIN_FS_POW,
+        chain,
+        &[
+            Goldilocks::from_u64_reduced(nonce & 0xFFFF_FFFF),
+            Goldilocks::from_u64_reduced(nonce >> 32),
+        ],
+    )[0]
+    .to_canonical_u64()
+}
 
 /// Encode 4 canonical `Goldilocks` limbs as 32 little-endian bytes.
 #[inline]
