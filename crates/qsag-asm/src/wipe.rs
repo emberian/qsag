@@ -1,17 +1,23 @@
 //! Secret-memory erasure shared by every crate in the workspace.
 //!
-//! One trait ([`SecretWipe`]), one scope guard ([`SecretBuffer`]) and one growable
-//! buffer ([`SecretVec`]), all built on [`crate::volatile_fill`]. This crate sits
-//! below every other workspace crate, so field and protocol crates implement
-//! [`SecretWipe`] for their own types and reuse the guards instead of redefining them.
+//! One trait ([`SecretWipe`]), one scope guard ([`SecretBuffer`], with the aliases
+//! [`SecretBytes`] and [`SecretVec`]) and one growable scratch buffer
+//! ([`SecretScratch`]), all built on [`crate::volatile_fill`]. This crate sits below
+//! every other workspace crate: `qsag_core::wipe` re-exports these items and adds the
+//! field-element implementations, and crates that do not depend on `qsag-core` import
+//! them from here. Protocol crates implement [`SecretWipe`] for their own types and
+//! reuse the guards instead of redefining them.
 //!
 //! What each guard covers:
 //! - [`SecretBuffer`] erases its contents when it leaves scope: normal return, `?`,
-//!   and unwinding. Around a `Vec` it also erases the spare capacity, so slots vacated
-//!   by `truncate`/`pop`/`clear` do not survive. It does not see a reallocation: a
-//!   plain `Vec` that grows inside it frees its old storage unerased.
-//! - [`SecretVec`] additionally erases the old allocation on growth and vacated
-//!   slots on truncation and consuming iteration. Use it for buffers that grow.
+//!   and unwinding. Around a `Vec` ([`SecretVec`]) it also erases the spare capacity,
+//!   so slots vacated by `truncate`/`pop`/`clear` do not survive. A `Vec` method
+//!   reached through `DerefMut` can still reallocate and free the old storage
+//!   unerased; grow with [`SecretBuffer::push_wiping`] / [`SecretBuffer::extend_wiping`]
+//!   or size the vector up front.
+//! - [`SecretScratch`] dereferences to a slice, so no reallocating `Vec` method is
+//!   reachable at all: growth erases the old allocation, truncation and consuming
+//!   iteration erase the vacated slots. Use it for scratch that grows and shrinks.
 
 use crate::volatile_fill;
 use core::ops::{Deref, DerefMut};
@@ -146,10 +152,44 @@ impl<T: SecretWipe + ?Sized> SecretWipe for alloc::boxed::Box<T> {
 /// Owns a secret and erases it when it leaves scope, on every exit path.
 pub struct SecretBuffer<T: SecretWipe>(pub T);
 
+/// Fixed-size secret byte array, for keys, seeds and digests held on the stack.
+pub type SecretBytes<const N: usize> = SecretBuffer<[u8; N]>;
+
+/// Heap-allocated secret vector.
+#[cfg(feature = "alloc")]
+pub type SecretVec<T> = SecretBuffer<alloc::vec::Vec<T>>;
+
 impl<T: SecretWipe> SecretBuffer<T> {
+    /// Same as the tuple constructor; usable through the type aliases, which the
+    /// tuple constructor is not.
     #[inline]
     pub const fn new(secret: T) -> Self {
         Self(secret)
+    }
+}
+
+impl<const N: usize> SecretBuffer<[u8; N]> {
+    #[inline]
+    pub const fn zeroed() -> Self {
+        Self([0u8; N])
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T: Copy + SecretWipe> SecretBuffer<alloc::vec::Vec<T>> {
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(alloc::vec::Vec::with_capacity(capacity))
+    }
+    /// [`secret_vec_push`] on the owned vector.
+    #[inline]
+    pub fn push_wiping(&mut self, item: T) {
+        secret_vec_push(&mut self.0, item);
+    }
+    /// [`secret_vec_extend_from_slice`] on the owned vector.
+    #[inline]
+    pub fn extend_wiping(&mut self, slice: &[T]) {
+        secret_vec_extend_from_slice(&mut self.0, slice);
     }
 }
 
@@ -185,7 +225,7 @@ impl<T: SecretWipe> Drop for SecretBuffer<T> {
 
 impl<T: SecretWipe> core::fmt::Debug for SecretBuffer<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("SecretBuffer(<REDACTED>)")
+        f.write_str("SecretBuffer([REDACTED])")
     }
 }
 
@@ -227,14 +267,14 @@ pub fn secret_vec_extend_from_slice<T: Copy + SecretWipe>(
     v.extend_from_slice(slice);
 }
 
-/// A growable secret buffer. Growth erases the old allocation before releasing
-/// it; truncation, consuming iteration and drop erase the vacated slots. It
-/// dereferences to a slice, so no `Vec` method that could reallocate is reachable.
+/// Growable secret scratch. Growth erases the old allocation before releasing it;
+/// truncation, consuming iteration and drop erase the vacated slots. It dereferences
+/// to a slice, so no `Vec` method that could reallocate is reachable.
 #[cfg(feature = "alloc")]
-pub struct SecretVec<T: SecretWipe + Copy>(alloc::vec::Vec<T>);
+pub struct SecretScratch<T: SecretWipe + Copy>(alloc::vec::Vec<T>);
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> SecretVec<T> {
+impl<T: SecretWipe + Copy> SecretScratch<T> {
     #[inline]
     pub const fn new() -> Self {
         Self(alloc::vec::Vec::new())
@@ -284,21 +324,21 @@ impl<T: SecretWipe + Copy> SecretVec<T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> Default for SecretVec<T> {
+impl<T: SecretWipe + Copy> Default for SecretScratch<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> Clone for SecretVec<T> {
+impl<T: SecretWipe + Copy> Clone for SecretScratch<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> Drop for SecretVec<T> {
+impl<T: SecretWipe + Copy> Drop for SecretScratch<T> {
     fn drop(&mut self) {
         self.0.secret_wipe();
         core::hint::black_box(self.0.as_mut_slice());
@@ -306,14 +346,14 @@ impl<T: SecretWipe + Copy> Drop for SecretVec<T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> core::fmt::Debug for SecretVec<T> {
+impl<T: SecretWipe + Copy> core::fmt::Debug for SecretScratch<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("SecretVec(<REDACTED>)")
+        f.write_str("SecretScratch([REDACTED])")
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> Deref for SecretVec<T> {
+impl<T: SecretWipe + Copy> Deref for SecretScratch<T> {
     type Target = [T];
     #[inline]
     fn deref(&self) -> &[T] {
@@ -322,7 +362,7 @@ impl<T: SecretWipe + Copy> Deref for SecretVec<T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> DerefMut for SecretVec<T> {
+impl<T: SecretWipe + Copy> DerefMut for SecretScratch<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut [T] {
         &mut self.0
@@ -331,14 +371,14 @@ impl<T: SecretWipe + Copy> DerefMut for SecretVec<T> {
 
 /// Takes ownership of an existing allocation; it is erased like any other.
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> From<alloc::vec::Vec<T>> for SecretVec<T> {
+impl<T: SecretWipe + Copy> From<alloc::vec::Vec<T>> for SecretScratch<T> {
     fn from(value: alloc::vec::Vec<T>) -> Self {
         Self(value)
     }
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> FromIterator<T> for SecretVec<T> {
+impl<T: SecretWipe + Copy> FromIterator<T> for SecretScratch<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iter = iter.into_iter();
         let mut out = Self::with_capacity(iter.size_hint().0);
@@ -348,7 +388,7 @@ impl<T: SecretWipe + Copy> FromIterator<T> for SecretVec<T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> Extend<T> for SecretVec<T> {
+impl<T: SecretWipe + Copy> Extend<T> for SecretScratch<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iter = iter.into_iter();
         self.reserve(iter.size_hint().0);
@@ -359,7 +399,7 @@ impl<T: SecretWipe + Copy> Extend<T> for SecretVec<T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, T: SecretWipe + Copy> IntoIterator for &'a SecretVec<T> {
+impl<'a, T: SecretWipe + Copy> IntoIterator for &'a SecretScratch<T> {
     type Item = &'a T;
     type IntoIter = core::slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -368,7 +408,7 @@ impl<'a, T: SecretWipe + Copy> IntoIterator for &'a SecretVec<T> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a, T: SecretWipe + Copy> IntoIterator for &'a mut SecretVec<T> {
+impl<'a, T: SecretWipe + Copy> IntoIterator for &'a mut SecretScratch<T> {
     type Item = &'a mut T;
     type IntoIter = core::slice::IterMut<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -376,11 +416,11 @@ impl<'a, T: SecretWipe + Copy> IntoIterator for &'a mut SecretVec<T> {
     }
 }
 
-/// Consuming iterator over a [`SecretVec`]: each slot is erased as it is yielded,
+/// Consuming iterator over a [`SecretScratch`]: each slot is erased as it is yielded,
 /// and the remainder when the iterator is dropped.
 #[cfg(feature = "alloc")]
 pub struct SecretIntoIter<T: SecretWipe + Copy> {
-    values: SecretVec<T>,
+    values: SecretScratch<T>,
     pos: usize,
 }
 
@@ -404,7 +444,7 @@ impl<T: SecretWipe + Copy> Iterator for SecretIntoIter<T> {
 impl<T: SecretWipe + Copy> ExactSizeIterator for SecretIntoIter<T> {}
 
 #[cfg(feature = "alloc")]
-impl<T: SecretWipe + Copy> IntoIterator for SecretVec<T> {
+impl<T: SecretWipe + Copy> IntoIterator for SecretScratch<T> {
     type Item = T;
     type IntoIter = SecretIntoIter<T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -458,6 +498,29 @@ mod tests {
     }
 
     #[test]
+    fn aliases_construct_and_grow_without_abandoning_storage() {
+        let wiped = Cell::new(0);
+        let probe = Probe {
+            value: 7,
+            wiped: &wiped,
+        };
+        let mut v: SecretVec<Probe<'_>> = SecretVec::with_capacity(1);
+        v.push_wiping(probe);
+        v.extend_wiping(&[probe; 8]);
+        assert_eq!(wiped.get(), 1, "the outgrown allocation was erased");
+        assert_eq!(v.len(), 9);
+        drop(v);
+        assert_eq!(wiped.get(), 10);
+
+        let mut key = SecretBytes::<32>::zeroed();
+        key.fill(0xa5);
+        assert_eq!(*SecretBytes::new([1u8; 4]), [1u8; 4]);
+        assert_eq!(std::format!("{key:?}"), "SecretBuffer([REDACTED])");
+        let released: [u8; 32] = key.into_inner();
+        assert_eq!(released, [0xa5; 32]);
+    }
+
+    #[test]
     fn nested_words_tuples_and_options_are_zeroed() {
         let mut words = vec![[u64::MAX; 8]; 3];
         words.secret_wipe();
@@ -488,13 +551,13 @@ mod tests {
     }
 
     #[test]
-    fn secret_vec_erases_growth_truncation_iteration_and_unwind() {
+    fn secret_scratch_erases_growth_truncation_iteration_and_unwind() {
         let wiped = Cell::new(0);
         let probe = Probe {
             value: 42,
             wiped: &wiped,
         };
-        let mut values = SecretVec::with_capacity(2);
+        let mut values = SecretScratch::with_capacity(2);
         values.extend([probe; 2]);
         values.reserve(3);
         assert_eq!(wiped.get(), 2, "growth erases the old allocation");
@@ -509,7 +572,7 @@ mod tests {
         assert_eq!(wiped.get(), 6, "an abandoned iterator erases the rest");
 
         let failed = (|| -> Result<(), ()> {
-            let _scratch: SecretVec<_> = [probe; 3].into_iter().collect();
+            let _scratch: SecretScratch<_> = [probe; 3].into_iter().collect();
             Err(())?;
             Ok(())
         })();
@@ -518,7 +581,7 @@ mod tests {
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _stack = SecretBuffer([probe; 4]);
-            let _heap: SecretVec<_> = [probe; 2].into_iter().collect();
+            let _heap: SecretScratch<_> = [probe; 2].into_iter().collect();
             panic!("injected failure");
         }));
         assert!(unwound.is_err());
@@ -526,8 +589,8 @@ mod tests {
     }
 
     #[test]
-    fn secret_vec_reuses_its_allocation_and_plain_vec_helpers_agree() {
-        let mut fields: SecretVec<[[u64; 4]; 2]> = vec![[[u64::MAX; 4]; 2]; 64].into();
+    fn secret_scratch_reuses_its_allocation_and_plain_vec_helpers_agree() {
+        let mut fields: SecretScratch<[[u64; 4]; 2]> = vec![[[u64::MAX; 4]; 2]; 64].into();
         let allocation = fields.as_ptr();
         fields.clear();
         fields.extend([[[7; 4]; 2]; 64]);

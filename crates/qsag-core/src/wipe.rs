@@ -143,38 +143,20 @@ pub fn ct_select_bytes32(choice: bool, if_true: &[u8; 32], if_false: &[u8; 32]) 
     out
 }
 
-/// Recursive volatile wiping of an owned secret value.
-///
-/// This trait, [`SecretBuffer`] and its aliases [`SecretBytes`] and [`SecretVec`] are the one
-/// zeroizing-wrapper API of the workspace (`no_std` + `alloc`). Other crates import them from
-/// `qsag_core::wipe` instead of defining their own; a crate-local secret type implements
-/// [`SecretWipe`] and is then usable inside [`SecretBuffer`], arrays, tuples, `Box` and `Vec`.
-///
-/// Every implementation must overwrite through `qsag_asm::volatile_fill` (or delegate to
-/// implementations that do), so the stores survive dead-store elimination.
-pub trait SecretWipe {
-    fn secret_wipe(&mut self);
-    /// Wipe a contiguous run. Word types override this with one bulk volatile fill.
-    fn wipe_slice(items: &mut [Self])
-    where
-        Self: Sized,
-    {
-        for item in items {
-            item.secret_wipe();
-        }
-    }
-}
-macro_rules! secret_word {
-    ($($t:ty),*) => { $(impl SecretWipe for $t {
-        fn secret_wipe(&mut self) {
-            qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-        }
-        fn wipe_slice(items: &mut [Self]) {
-            qsag_asm::volatile_fill(items, 0);
-        }
-    })* };
-}
-secret_word!(usize, u8, u16, u32, i16, u64, u128);
+// The zeroizing wrappers live in `qsag_asm::wipe`, below every workspace crate. This module
+// is their canonical path for crates that depend on `qsag-core`: it re-exports them and adds
+// the implementations for the field types defined here.
+//
+// * [`SecretWipe`]: recursive volatile wiping; implement it for a crate-local secret type.
+// * [`SecretBuffer`]: owner that wipes on return, on `?` and on unwinding.
+// * [`SecretBytes`]`<N>`: fixed-size alias, for keys, seeds and digests on the stack.
+// * [`SecretVec`]`<T>`: heap alias; grow it with `push_wiping` / `extend_wiping`.
+// * [`SecretScratch`]: vector whose growth, truncation and consuming iteration all wipe.
+pub use qsag_asm::wipe::{
+    SecretBuffer, SecretBytes, SecretIntoIter, SecretScratch, SecretVec, SecretWipe,
+    secret_vec_extend_from_slice, secret_vec_push, secret_vec_reserve, wipe,
+};
+
 impl SecretWipe for TowerGf256 {
     fn secret_wipe(&mut self) {
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
@@ -206,127 +188,6 @@ impl SecretWipe for GoldilocksExt2 {
     }
     fn wipe_slice(items: &mut [Self]) {
         volatile_zero_slice(items, GoldilocksExt2::ZERO);
-    }
-}
-impl<A: SecretWipe, B: SecretWipe> SecretWipe for (A, B) {
-    fn secret_wipe(&mut self) {
-        self.0.secret_wipe();
-        self.1.secret_wipe();
-    }
-}
-impl<A: SecretWipe, B: SecretWipe, C: SecretWipe> SecretWipe for (A, B, C) {
-    fn secret_wipe(&mut self) {
-        self.0.secret_wipe();
-        self.1.secret_wipe();
-        self.2.secret_wipe();
-    }
-}
-impl<T: SecretWipe, const N: usize> SecretWipe for [T; N] {
-    fn secret_wipe(&mut self) {
-        T::wipe_slice(self);
-    }
-}
-impl<T: SecretWipe> SecretWipe for alloc::boxed::Box<T> {
-    fn secret_wipe(&mut self) {
-        (**self).secret_wipe();
-    }
-}
-impl<T: SecretWipe> SecretWipe for alloc::vec::Vec<T> {
-    fn secret_wipe(&mut self) {
-        T::wipe_slice(self);
-    }
-}
-/// Wipe-aware vector growth: if `v` lacks capacity for `additional` items, allocates replacement
-/// storage, copies live elements, volatile-wipes the old allocation's live elements, and replaces `v`.
-#[inline]
-pub fn secret_vec_reserve<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, additional: usize) {
-    let needed = v
-        .len()
-        .checked_add(additional)
-        .expect("secret_vec_reserve overflow");
-    if needed > v.capacity() {
-        let new_cap = needed.max(v.capacity().saturating_mul(2)).max(8);
-        let mut next = alloc::vec::Vec::with_capacity(new_cap);
-        next.extend_from_slice(v.as_slice());
-        v.secret_wipe();
-        black_box(v.as_mut_slice());
-        *v = next;
-    }
-}
-/// Wipe-aware `Vec::push` that never abandons an unwiped old secret buffer on reallocation.
-#[inline]
-pub fn secret_vec_push<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, item: T) {
-    secret_vec_reserve(v, 1);
-    v.push(item);
-}
-/// Wipe-aware `Vec::extend_from_slice` that never abandons an unwiped old secret buffer on reallocation.
-#[inline]
-pub fn secret_vec_extend_from_slice<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, slice: &[T]) {
-    secret_vec_reserve(v, slice.len());
-    v.extend_from_slice(slice);
-}
-/// Owner of a secret value: wipes it on normal exit, on `?` and on unwinding.
-///
-/// The value is reachable through `Deref`/`DerefMut` or the public field. Moving the inner
-/// value out (`core::mem::take`, destructuring) leaves the caller responsible for it. `Vec`
-/// growth through `DerefMut` can reallocate and leave the old allocation unwiped; grow a
-/// [`SecretVec`] with [`SecretBuffer::push_wiping`] / [`SecretBuffer::extend_wiping`] or size it
-/// up front.
-pub struct SecretBuffer<T: SecretWipe>(pub T);
-/// Fixed-size zeroizing byte array, for keys, seeds and digests held on the stack.
-pub type SecretBytes<const N: usize> = SecretBuffer<[u8; N]>;
-/// Heap-allocated zeroizing vector.
-pub type SecretVec<T> = SecretBuffer<alloc::vec::Vec<T>>;
-impl<T: SecretWipe> SecretBuffer<T> {
-    /// Same as the tuple constructor; usable through the type aliases, which the tuple
-    /// constructor is not.
-    #[inline]
-    pub const fn new(value: T) -> Self {
-        Self(value)
-    }
-}
-impl<const N: usize> SecretBuffer<[u8; N]> {
-    #[inline]
-    pub const fn zeroed() -> Self {
-        Self([0u8; N])
-    }
-}
-impl<T: Copy + SecretWipe> SecretBuffer<alloc::vec::Vec<T>> {
-    #[inline]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self(alloc::vec::Vec::with_capacity(capacity))
-    }
-    /// [`secret_vec_push`] on the owned vector.
-    #[inline]
-    pub fn push_wiping(&mut self, item: T) {
-        secret_vec_push(&mut self.0, item);
-    }
-    /// [`secret_vec_extend_from_slice`] on the owned vector.
-    #[inline]
-    pub fn extend_wiping(&mut self, slice: &[T]) {
-        secret_vec_extend_from_slice(&mut self.0, slice);
-    }
-}
-impl<T: SecretWipe> core::fmt::Debug for SecretBuffer<T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("SecretBuffer([REDACTED])")
-    }
-}
-impl<T: SecretWipe> core::ops::Deref for SecretBuffer<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
-impl<T: SecretWipe> core::ops::DerefMut for SecretBuffer<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.0
-    }
-}
-impl<T: SecretWipe> Drop for SecretBuffer<T> {
-    fn drop(&mut self) {
-        self.0.secret_wipe();
-        black_box(&mut self.0);
     }
 }
 

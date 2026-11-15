@@ -15,7 +15,7 @@ std = ["qsag-asm/std", "qsag-accel/std"]
 qsag-accel = { path = "../qsag-accel", default-features = false }
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 # Strictly zero external crate dependencies.
-qsag-asm = { path = "../qsag-asm", default-features = false }
+qsag-asm = { path = "../qsag-asm", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # The policy barrier whose release token gates the Corduroy end-to-end signing test.
