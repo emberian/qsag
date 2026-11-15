@@ -969,6 +969,8 @@ mod tests {
             for (i, byte) in torn.iter_mut().enumerate().skip(torn_len / 2) {
                 *byte ^= 0xa5 ^ i as u8;
             }
+            // Model the durable writer: its temporary is private, just like the record.
+            std::fs::copy(&path, &tmp).unwrap();
             std::fs::write(&tmp, &torn).unwrap();
             let mut restarted = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
             let mut disk =
@@ -1027,6 +1029,7 @@ mod tests {
         assert_eq!(committed.len(), 16 + 40);
 
         for torn_len in [0usize, 1, 16, 24, committed.len() - 1] {
+            std::fs::copy(&path, &tmp).unwrap();
             std::fs::write(&tmp, &committed[..torn_len]).unwrap();
             let mut fence = FsPolicyGenerationFence::open_existing(&path, [9; 32]).unwrap();
             assert_eq!(fence.generation(), 7);

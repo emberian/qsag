@@ -9,11 +9,11 @@
 //! Tags are 256 bits; this is not a claim of 256-bit quantum forgery resistance.
 extern crate alloc;
 use alloc::vec::Vec;
-use qsag_asm::wipe::{SecretBuffer, SecretBytes};
 use qsag_accel::{
     ct::ct_eq_bytes,
     keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256},
 };
+use qsag_asm::wipe::{SecretBuffer, SecretBytes};
 
 const ROOT_DOMAIN: &[u8] = b"QSAG.MACAROON.ROOT.V1";
 const CAVEAT_DOMAIN: &[u8] = b"QSAG.MACAROON.CAVEAT.V1";
@@ -335,8 +335,7 @@ impl SpongeMacaroon {
                         return Err(CapabilityError::Denied);
                     }
                     d.token.authenticate(d.root_key)?;
-                    d.token
-                        .check(r, &[], Some(&parent_binding(&self.tag)))?;
+                    d.token.check(r, &[], Some(&parent_binding(&self.tag)))?;
                     true
                 }
             };
@@ -781,10 +780,7 @@ mod tests {
         role[8] = 1;
         for forged in [swapped, rekind, third, role] {
             let token = SpongeMacaroon::from_bytes(&forged).unwrap();
-            assert_eq!(
-                token.authenticate(&ROOT),
-                Err(CapabilityError::InvalidTag)
-            );
+            assert_eq!(token.authenticate(&ROOT), Err(CapabilityError::InvalidTag));
         }
         // Dropping the last caveat cannot be repaired without the previous chaining tag.
         let mut dropped = wire[..wire.len() - 42].to_vec();
@@ -799,10 +795,7 @@ mod tests {
         // Root and caveat hashing are separate domains over identical fields.
         let fields: &[&[u8]] = &[&[1; 32], &[2; 33], &[3; 32]];
         assert_ne!(mac_hash(true, fields), mac_hash(false, fields));
-        assert_ne!(
-            parent_binding(&[1; 32]),
-            mac_hash(false, &[&[1u8; 32][..]])
-        );
+        assert_ne!(parent_binding(&[1; 32]), mac_hash(false, &[&[1u8; 32][..]]));
     }
     #[test]
     fn caveat_bounds_match_on_mint_and_parse() {
