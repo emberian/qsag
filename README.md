@@ -2,7 +2,7 @@
   <img src="assets/qsag-mascot.png" alt="QSAG Mascot" width="240" />
 </p>
 
-Certificates cover historical pinned archives: the current build matches 0/16 certified x86-64 kernels and 6/7 AArch64 kernels; five current kernels lack certificates. This is a failed freshness gate, not production machine-code certification.
+The compiled-kernel freshness gate passes: fresh Rust 1.99.1 release archives match all **19 x86-64 and 9 AArch64 certified assembly kernels**, with zero changed, missing or unpinned kernels. The corresponding Lean certificate checks pass. This covers the named kernel bytes and their explicit ISA contracts; complete linked-program certification remains separate.
 
 The integrated main-library axiom audit checks **59,257 declarations, including 28,744 kernel theorem declarations, across 57 modules**, with **0 rejected axioms**. This includes private and compiler-generated declarations and 277 pure assurance-infrastructure declarations; 131 compile-time tactic declarations are excluded. Counts describe the checked definitions and premises, not complete production refinement. The combined extracted-MIR and custody audit checks **5,318 declarations / 2,093 theorems / 44 contributing modules**; the WHIR audit checks **1,558 / 718 / 7**. Both report **0 rejected axioms**. Sandboxed six-kernel challenge replay passes 107 main theorems and 65 MIR theorems plus 17 definitions.
 
@@ -135,4 +135,4 @@ The constructive proof policy is **0 sorry, 0 Classical.choice**, with permitted
 
 ## License
 
-Apache-2.0 OR MIT, at your option.
+Licensed under either of Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)) or MIT license ([LICENSE-MIT](LICENSE-MIT)) at your option.
