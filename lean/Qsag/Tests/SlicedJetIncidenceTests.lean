@@ -9,16 +9,16 @@ module
   slice `β = 0`; ten of them exceed the slice bound `9`. So the count on a slice is a count of
   nonpersistent candidates only.
 -/
-public import Qsag.CodingTheory.SlicedJetIncidence
-import all Qsag.CodingTheory.SlicedJetIncidence
-import all Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.SimpleRootStratification
-import all Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.SlicedJetIncidence
+import all Qsag.Coding.SlicedJetIncidence
+import all Qsag.Coding.PersistentPairsBound
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.SimpleRootStratification
+import all Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

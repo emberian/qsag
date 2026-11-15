@@ -2765,3 +2765,873 @@ private theorem monic_eq_of_dvd_same_deg {R : Type} [LawfulCommRing R] [Decidabl
     - **Exact Multiplicity Dichotomy**: either `Gj.deg = 1` (single rational sheet `ζ ∈ R_{Ej}`),
       or `2 ≤ Gj.deg` AND `Ej ∣ g₁` (multi-sheet space curve forces `sylResDeriv` to vanish modulo `Ej`),
     - In particular, `CoprimeZ Ej g₁ → Gj.deg = 1`. -/
+theorem curve_leaf_gcd_decomp {h_C H₀ : Nat} {C₁ : Poly2 E_fld} {P₀ : UPoly (Poly2 E_fld)}
+    (hC₁deg : C₁.natDeg ≤ h_C) (hC₁mon : coeffAt C₁.coeffs h_C = one)
+    (hP₀deg : P₀.natDeg ≤ H₀) :
+    let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+    let g₁ := sylResDeriv h_C H₀ (embedUZ.toFun C₁) P₀ one
+    ∀ (E : Poly2 E_fld), IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ U0 V0, add (mul U0 C1_mod) (mul V0 P0_mod) = Gj.poly) ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun C1_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun P0_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((Gj.deg = 1 ∧ ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              Gj.poly = sub X (C ζ) ∧ C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero) ∨
+           (2 ≤ Gj.deg ∧ ∃ Qg, g₁ = mul Ej Qg)) ∧
+          (CoprimeZ Ej g₁ → Gj.deg = 1) := by
+  dsimp only
+  let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+  let g₁ := sylResDeriv h_C H₀ (embedUZ.toFun C₁) P₀ one
+  have sum_append : ∀ xs ys : List Nat, (xs ++ ys).sum = xs.sum + ys.sum := by
+    intro xs ys; induction xs with
+    | nil => show ys.sum = 0 + ys.sum; omega
+    | cons x tl ih => show x + (tl ++ ys).sum = x + tl.sum + ys.sum; rw [ih]; omega
+  have eval2_mul_eq : ∀ (A B : Poly2 E_fld) (u w : E_fld),
+      (mul A B).eval2 u w = mul (A.eval2 u w) (B.eval2 u w) :=
+    fun A B u w => UPoly.eval₂_mul (UPoly.evalHom u) w A B
+  have aux : ∀ (fuel : Nat) (E : Poly2 E_fld), tdeg E ≤ fuel →
+      IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ U0 V0, add (mul U0 C1_mod) (mul V0 P0_mod) = Gj.poly) ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun C1_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((mapHom (ModMonic.modInl Gj)).toFun P0_mod).eval (ModMonic.modGen Gj) = zero ∧
+          ((Gj.deg = 1 ∧ ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              Gj.poly = sub X (C ζ) ∧ C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero) ∨
+           (2 ≤ Gj.deg ∧ ∃ Qg, g₁ = mul Ej Qg)) ∧
+          (CoprimeZ Ej g₁ → Gj.deg = 1) := by
+    intro fuel; induction fuel with
+    | zero => intros E hFuel _ hPos _; exfalso; omega
+    | succ fuel ih =>
+      intro E hFuel hPrim hPos ⟨Q_res, hQres⟩
+      have hEDeg : 1 ≤ E.natDeg := primY_natDeg_pos hPrim hPos
+      let φ := modPoly2Hom E hPrim hEDeg
+      let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+      let P0_mod := (mapHom φ).toFun P₀
+      have hC1_mod_mon : coeffAt C1_mod.coeffs h_C = one := by
+        dsimp only [C1_mod, embedUZ]
+        rw [coeffAt_mapHom, coeffAt_mapHom, hC₁mon, CHom.map_one, φ.map_one]
+      have hC1_mod_deg : C1_mod.natDeg ≤ h_C :=
+        Nat.le_trans (natDeg_mapHom_le φ _) (Nat.le_trans (natDeg_mapHom_le CHom C₁) hC₁deg)
+      have hP0_mod_deg : P0_mod.natDeg ≤ H₀ := Nat.le_trans (natDeg_mapHom_le φ P₀) hP₀deg
+      have hC1_mod_ne : C1_mod ≠ zero := fun e => by
+        rw [e, coeffs_zero, coeffAt_nil] at hC1_mod_mon
+        exact NontrivialRing.one_ne_zero hC1_mod_mon.symm
+      rcases d5_xgcd_mod E hPrim hEDeg C1_mod P0_mod hC1_mod_ne with
+        ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum⟩ |
+        ⟨G, U0, V0, _, hGmon, hBez, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩⟩
+      · have hT1 : 1 ≤ tdeg E₁ := Nat.le_trans hD1 (natDeg_le_tdeg E₁)
+        have hT2 : 1 ≤ tdeg E₂ := Nat.le_trans hD2 (natDeg_le_tdeg E₂)
+        obtain ⟨Es1, hS1, hR1, hL1⟩ := ih E₁ (by omega) hP1 hT1
+          ⟨mul E₂ Q_res, by rw [hQres, hMul, LawfulCommRing.mul_assoc]⟩
+        obtain ⟨Es2, hS2, hR2, hL2⟩ := ih E₂ (by omega) hP2 hT2
+          ⟨mul E₁ Q_res, by rw [hQres, hMul]; constructive_ring⟩
+        refine ⟨Es1 ++ Es2, by rw [List.map_append, sum_append, hS1, hS2, hSum], ?_, ?_⟩
+        · intro u w huw
+          rw [hMul, eval2_mul_eq] at huw
+          rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero huw with h0 | h0
+          · obtain ⟨Ej, hMem, hZ⟩ := hR1 u w h0
+            exact ⟨Ej, List.mem_append_left _ hMem, hZ⟩
+          · obtain ⟨Ej, hMem, hZ⟩ := hR2 u w h0
+            exact ⟨Ej, List.mem_append_right _ hMem, hZ⟩
+        · intro Ej hMem
+          rcases List.mem_append.mp hMem with hM | hM
+          · obtain ⟨hPj, hDj, Gj, ⟨QE1, hQE1⟩, hRest⟩ := hL1 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul QE1 E₂, by rw [hMul, hQE1, LawfulCommRing.mul_assoc]⟩, hRest⟩
+          · obtain ⟨hPj, hDj, Gj, ⟨QE2, hQE2⟩, hRest⟩ := hL2 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul E₁ QE2, by rw [hMul, hQE2]; constructive_ring⟩, hRest⟩
+      · let d_G := G.natDeg
+        have hQCNe : Q_C ≠ zero := fun e => hC1_mod_ne (by rw [hQC, e, LawfulCommRing.mul_zero])
+        have hdG_QC_le : d_G + Q_C.natDeg ≤ h_C := by
+          apply Decidable.byContradiction; intro hNot
+          have hz := C1_mod.coeffAt_eq_zero_of_natDeg_lt
+            (Nat.lt_of_le_of_lt hC1_mod_deg (Nat.lt_of_not_le hNot))
+          rw [hQC, (coeffAt_mul_top G Q_C).2] at hz
+          unfold lead at hz; rw [hGmon, LawfulCommRing.one_mul] at hz
+          exact lead_ne_zero hQCNe hz
+        if hdG0 : d_G = 0 then
+          exfalso
+          have hG1 := monic_deg_zero_eq_one G hdG0 hGmon
+          rw [hG1] at hBez
+          obtain ⟨r_inv, hUnit⟩ := isUnit_sylRes_of_bezout hC1_mod_deg
+            (by rw [hC1_mod_mon, LawfulCommRing.one_mul]) hP0_mod_deg hBez
+          have hRes0 : sylRes h_C H₀ C1_mod P0_mod = zero := by
+            rw [← map_sylRes φ]; change φ.toFun R_res = zero
+            rw [hQres, RingHom.map_mul, modPoly2Hom_self E hPrim hEDeg, LawfulCommRing.zero_mul]
+          rw [hRes0, LawfulCommRing.mul_zero] at hUnit
+          exact NontrivialRing.one_ne_zero hUnit.symm
+        else
+          have hdGPos : 1 ≤ d_G := by omega
+          let Gj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)) :=
+            ⟨G, d_G, hdGPos, Nat.le_refl d_G, hGmon⟩
+          have hGjRoot : ((mapHom (ModMonic.modInl Gj)).toFun Gj.poly).eval (ModMonic.modGen Gj) = zero :=
+            ModMonic.eval_modGen_eq_zero Gj
+          have hC1Sheet : ((mapHom (ModMonic.modInl Gj)).toFun C1_mod).eval (ModMonic.modGen Gj) = zero := by
+            rw [hQC, RingHom.map_mul]; show (evalHom (ModMonic.modGen Gj)).toFun _ = zero
+            rw [RingHom.map_mul, evalHom_apply, hGjRoot, LawfulCommRing.zero_mul]
+          have hP0Sheet : ((mapHom (ModMonic.modInl Gj)).toFun P0_mod).eval (ModMonic.modGen Gj) = zero := by
+            rw [hQP, RingHom.map_mul]; show (evalHom (ModMonic.modGen Gj)).toFun _ = zero
+            rw [RingHom.map_mul, evalHom_apply, hGjRoot, LawfulCommRing.zero_mul]
+          have hDichot :
+              ((Gj.deg = 1 ∧ ∃ ζ : ModMonic (monicFY E hPrim hEDeg),
+                  Gj.poly = sub X (C ζ) ∧ C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero) ∨
+               (2 ≤ Gj.deg ∧ ∃ Qg, g₁ = mul E Qg)) ∧
+              (CoprimeZ E g₁ → Gj.deg = 1) := by
+            if hdG2 : 2 ≤ d_G then
+              have hg1_zero : φ.toFun g₁ = zero := by
+                dsimp only [g₁]
+                rw [map_sylResDeriv φ, RingHom.map_one]
+                exact sylResDeriv_eq_zero_of_common_factor_ge_two hdG2 (by omega)
+                  hP0_mod_deg (Nat.le_refl d_G) hGmon hQC (by omega) hQP
+              have hDivG1 : ∃ Qg, g₁ = mul E Qg :=
+                (modPoly2Hom_eq_zero_iff E hPrim hEDeg g₁).mp hg1_zero
+              refine ⟨.inr ⟨hdG2, hDivG1⟩, fun ⟨u0, v0, c, hc, hCopEq⟩ => ?_⟩
+              exfalso
+              have hApp := congrArg φ.toFun hCopEq
+              rw [RingHom.map_add, RingHom.map_mul, RingHom.map_mul,
+                  modPoly2Hom_self E hPrim hEDeg, hg1_zero,
+                  LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hApp
+              exact modPoly2Hom_C_ne_zero E hPrim hEDeg hc hApp.symm
+            else
+              have hdG1 : d_G = 1 := by omega
+              obtain ⟨hGlin, hLinZ⟩ := monic_deg_one_eq_X_sub_C G hdG1 hGmon
+              let ζ := neg (coeffAt G.coeffs 0)
+              have hC1_root : C1_mod.eval ζ = zero := by
+                rw [hQC, hGlin]; show (evalHom ζ).toFun _ = zero
+                rw [RingHom.map_mul, evalHom_apply, hLinZ, LawfulCommRing.zero_mul]
+              have hP0_root : P0_mod.eval ζ = zero := by
+                rw [hQP, hGlin]; show (evalHom ζ).toFun _ = zero
+                rw [RingHom.map_mul, evalHom_apply, hLinZ, LawfulCommRing.zero_mul]
+              exact ⟨.inl ⟨hdG1, ζ, hGlin, hC1_root, hP0_root⟩, fun _ => hdG1⟩
+          refine ⟨[E], by show tdeg E + 0 = tdeg E; omega, fun u w h => ⟨E, .head _, h⟩, ?_⟩
+          intro Ej hMem; cases hMem with
+          | head =>
+            exact ⟨hPrim, hEDeg, Gj, ⟨one, (LawfulCommRing.mul_one E).symm⟩,
+              by show d_G ≤ h_C; omega, ⟨U0, V0, hBez⟩, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩,
+              hC1Sheet, hP0Sheet, hDichot.1, hDichot.2⟩
+          | tail _ hNil => cases hNil
+  intro E hPrim hPos hDiv
+  exact aux (tdeg E) E (Nat.le_refl _) hPrim hPos hDiv
+
+/-- **Three-Polynomial Multi-Sheet Fiber Refinement (`curve_three_poly_sheet_decomp`)**:
+    Given `(C₁, P₀)` and ANY third space polynomial `H : UPoly (Poly2 E_fld)` (e.g. a second
+    interpolation constraint or jet derivative), dynamically splits `E` into `Y`-primitive leaves
+    `Ej ∈ Es` so that on EVERY leaf `Ej`, in addition to the common `Z`-gcd `Gj` (`1 ≤ Gj.deg ≤ h_C`)
+    of `(C₁, P₀)`, one of three exhaustive sheet alternatives holds:
+    1. **Disjoint from sheet (`gcd(Gj, H) = 1`)**: `H(ModMonic.modGen Gj)` is invertible in the
+       sheet algebra `ModMonic Gj`, AND an explicit nonzero univariate polynomial `δ_u ∈ E_fld[U]`
+       (`δ_u ≠ 0`) vanishes at `u` for every affine common zero `(u, w, z) ∈ E_fld³` of `(Ej, C₁, P₀, H)`.
+    2. **Strict sheet-rank drop (`1 ≤ Kj.deg < Gj.deg`)**: an explicit monic `Kj : MonicPoly R_{Ej}`
+       with `Kj.deg < Gj.deg` divides `Gj.poly` (hence `C₁` and `P₀`) AND `H_mod`, extracting an
+       explicit base-curve root `ζ ∈ R_{Ej}` of all three `(C₁, P₀, H)` whenever `Kj.deg = 1`
+       (in particular whenever `Gj.deg = 2`, even though `Ej ∣ g₁`!).
+    3. **Full multi-sheet containment (`Kj.deg = Gj.deg`)**: `Gj.poly` divides `H_mod`. -/
+theorem curve_three_poly_sheet_decomp {h_C H₀ : Nat}
+    {C₁ : Poly2 E_fld} {P₀ : UPoly (Poly2 E_fld)} (H : UPoly (Poly2 E_fld))
+    (hC₁deg : C₁.natDeg ≤ h_C) (hC₁mon : coeffAt C₁.coeffs h_C = one)
+    (hP₀deg : P₀.natDeg ≤ H₀) :
+    let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+    ∀ (E : Poly2 E_fld), IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          let H_mod := (mapHom φ).toFun H
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          (((∃ h_inv : ModMonic Gj,
+               mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+            (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+               ∀ u w z : E_fld,
+                 Ej.eval2 u w = zero →
+                 C₁.eval2 u z = zero →
+                 (evalSpaceHom u w z).toFun P₀ = zero →
+                 (evalSpaceHom u w z).toFun H = zero →
+                 δ_u.eval u = zero)) ∨
+           (∃ Kj : MonicPoly (ModMonic (monicFY Ej hPj hDj)),
+              Kj.deg < Gj.deg ∧
+              (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+              (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+              (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+                C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+           (∃ Q_H, H_mod = mul Gj.poly Q_H)) := by
+  dsimp only
+  let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
+  have sum_append : ∀ xs ys : List Nat, (xs ++ ys).sum = xs.sum + ys.sum := by
+    intro xs ys; induction xs with
+    | nil => show ys.sum = 0 + ys.sum; omega
+    | cons x tl ih => show x + (tl ++ ys).sum = x + tl.sum + ys.sum; rw [ih]; omega
+  have eval2_mul_eq : ∀ (A B : Poly2 E_fld) (u w : E_fld),
+      (mul A B).eval2 u w = mul (A.eval2 u w) (B.eval2 u w) :=
+    fun A B u w => UPoly.eval₂_mul (UPoly.evalHom u) w A B
+  have aux : ∀ (fuel : Nat) (E : Poly2 E_fld), tdeg E ≤ fuel →
+      IsPrimY E → 1 ≤ tdeg E → (∃ Q_res, R_res = mul E Q_res) →
+      ∃ Es : List (Poly2 E_fld),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          let φ := modPoly2Hom Ej hPj hDj
+          let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+          let P0_mod := (mapHom φ).toFun P₀
+          let H_mod := (mapHom φ).toFun H
+          (∃ Q_E, E = mul Ej Q_E) ∧
+          Gj.deg ≤ h_C ∧
+          (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+          (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+          (((∃ h_inv : ModMonic Gj,
+               mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+            (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+               ∀ u w z : E_fld,
+                 Ej.eval2 u w = zero →
+                 C₁.eval2 u z = zero →
+                 (evalSpaceHom u w z).toFun P₀ = zero →
+                 (evalSpaceHom u w z).toFun H = zero →
+                 δ_u.eval u = zero)) ∨
+           (∃ Kj : MonicPoly (ModMonic (monicFY Ej hPj hDj)),
+              Kj.deg < Gj.deg ∧
+              (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+              (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+              (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+                C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+           (∃ Q_H, H_mod = mul Gj.poly Q_H)) := by
+    intro fuel; induction fuel with
+    | zero => intros E hFuel _ hPos _; exfalso; omega
+    | succ fuel ih =>
+      intro E hFuel hPrim hPos ⟨Q_res, hQres⟩
+      have hEDeg : 1 ≤ E.natDeg := primY_natDeg_pos hPrim hPos
+      have mergeSplit : ∀ (E₁ E₂ : Poly2 E_fld),
+          IsPrimY E₁ → IsPrimY E₂ → 1 ≤ E₁.natDeg → 1 ≤ E₂.natDeg →
+          E = mul E₁ E₂ → tdeg E₁ + tdeg E₂ = tdeg E →
+          ∃ Es : List (Poly2 E_fld),
+            (Es.map tdeg).sum = tdeg E ∧
+            (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+            ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+              (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+              let φ := modPoly2Hom Ej hPj hDj
+              let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+              let P0_mod := (mapHom φ).toFun P₀
+              let H_mod := (mapHom φ).toFun H
+              (∃ Q_E, E = mul Ej Q_E) ∧
+              Gj.deg ≤ h_C ∧
+              (∃ Q_C, C1_mod = mul Gj.poly Q_C) ∧
+              (∃ Q_P, P0_mod = mul Gj.poly Q_P) ∧
+              (((∃ h_inv : ModMonic Gj,
+                   mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+                (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+                   ∀ u w z : E_fld,
+                     Ej.eval2 u w = zero →
+                     C₁.eval2 u z = zero →
+                     (evalSpaceHom u w z).toFun P₀ = zero →
+                     (evalSpaceHom u w z).toFun H = zero →
+                     δ_u.eval u = zero)) ∨
+               (∃ Kj : MonicPoly (ModMonic (monicFY Ej hPj hDj)),
+                  Kj.deg < Gj.deg ∧
+                  (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+                  (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+                  (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+                    C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+               (∃ Q_H, H_mod = mul Gj.poly Q_H)) := by
+        intro E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+        have hT1 : 1 ≤ tdeg E₁ := Nat.le_trans hD1 (natDeg_le_tdeg E₁)
+        have hT2 : 1 ≤ tdeg E₂ := Nat.le_trans hD2 (natDeg_le_tdeg E₂)
+        obtain ⟨Es1, hS1, hR1, hL1⟩ := ih E₁ (by omega) hP1 hT1
+          ⟨mul E₂ Q_res, by rw [hQres, hMul, LawfulCommRing.mul_assoc]⟩
+        obtain ⟨Es2, hS2, hR2, hL2⟩ := ih E₂ (by omega) hP2 hT2
+          ⟨mul E₁ Q_res, by rw [hQres, hMul]; constructive_ring⟩
+        refine ⟨Es1 ++ Es2, by rw [List.map_append, sum_append, hS1, hS2, hSum], ?_, ?_⟩
+        · intro u w huw
+          rw [hMul, eval2_mul_eq] at huw
+          rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero huw with h0 | h0
+          · obtain ⟨Ej, hMem, hZ⟩ := hR1 u w h0
+            exact ⟨Ej, List.mem_append_left _ hMem, hZ⟩
+          · obtain ⟨Ej, hMem, hZ⟩ := hR2 u w h0
+            exact ⟨Ej, List.mem_append_right _ hMem, hZ⟩
+        · intro Ej hMem
+          rcases List.mem_append.mp hMem with hM | hM
+          · obtain ⟨hPj, hDj, Gj, ⟨QE1, hQE1⟩, hRest⟩ := hL1 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul QE1 E₂, by rw [hMul, hQE1, LawfulCommRing.mul_assoc]⟩, hRest⟩
+          · obtain ⟨hPj, hDj, Gj, ⟨QE2, hQE2⟩, hRest⟩ := hL2 Ej hM
+            exact ⟨hPj, hDj, Gj, ⟨mul E₁ QE2, by rw [hMul, hQE2]; constructive_ring⟩, hRest⟩
+      let φ := modPoly2Hom E hPrim hEDeg
+      let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+      let P0_mod := (mapHom φ).toFun P₀
+      let H_mod := (mapHom φ).toFun H
+      have hC1_mod_mon : coeffAt C1_mod.coeffs h_C = one := by
+        dsimp only [C1_mod, embedUZ]
+        rw [coeffAt_mapHom, coeffAt_mapHom, hC₁mon, CHom.map_one, φ.map_one]
+      have hC1_mod_deg : C1_mod.natDeg ≤ h_C :=
+        Nat.le_trans (natDeg_mapHom_le φ _) (Nat.le_trans (natDeg_mapHom_le CHom C₁) hC₁deg)
+      have hP0_mod_deg : P0_mod.natDeg ≤ H₀ := Nat.le_trans (natDeg_mapHom_le φ P₀) hP₀deg
+      have hC1_mod_ne : C1_mod ≠ zero := fun e => by
+        rw [e, coeffs_zero, coeffAt_nil] at hC1_mod_mon
+        exact NontrivialRing.one_ne_zero hC1_mod_mon.symm
+      rcases d5_xgcd_mod E hPrim hEDeg C1_mod P0_mod hC1_mod_ne with
+        ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum⟩ |
+        ⟨G, U0, V0, hGNe, hGmon, hBez, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩⟩
+      · exact mergeSplit E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+      · let d_G := G.natDeg
+        have hQCNe : Q_C ≠ zero := fun e => hC1_mod_ne (by rw [hQC, e, LawfulCommRing.mul_zero])
+        have hdG_QC_le : d_G + Q_C.natDeg ≤ h_C := by
+          apply Decidable.byContradiction; intro hNot
+          have hz := C1_mod.coeffAt_eq_zero_of_natDeg_lt
+            (Nat.lt_of_le_of_lt hC1_mod_deg (Nat.lt_of_not_le hNot))
+          rw [hQC, (coeffAt_mul_top G Q_C).2] at hz
+          unfold lead at hz; rw [hGmon, LawfulCommRing.one_mul] at hz
+          exact lead_ne_zero hQCNe hz
+        if hdG0 : d_G = 0 then
+          exfalso
+          have hG1 := monic_deg_zero_eq_one G hdG0 hGmon
+          rw [hG1] at hBez
+          obtain ⟨r_inv, hUnit⟩ := isUnit_sylRes_of_bezout hC1_mod_deg
+            (by rw [hC1_mod_mon, LawfulCommRing.one_mul]) hP0_mod_deg hBez
+          have hRes0 : sylRes h_C H₀ C1_mod P0_mod = zero := by
+            rw [← map_sylRes φ]; change φ.toFun R_res = zero
+            rw [hQres, RingHom.map_mul, modPoly2Hom_self E hPrim hEDeg, LawfulCommRing.zero_mul]
+          rw [hRes0, LawfulCommRing.mul_zero] at hUnit
+          exact NontrivialRing.one_ne_zero hUnit.symm
+        else
+          have hdGPos : 1 ≤ d_G := by omega
+          let Gj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)) :=
+            ⟨G, d_G, hdGPos, Nat.le_refl d_G, hGmon⟩
+          rcases d5_xgcd_mod E hPrim hEDeg Gj.poly H_mod hGNe with
+            ⟨E₁, E₂, hP1, hP2, hD1, hD2, hMul, hSum⟩ |
+            ⟨K, UH, VH, _, hKmon, hBezH, ⟨Q_G, hQG⟩, ⟨Q_H, hQH⟩⟩
+          · exact mergeSplit E₁ E₂ hP1 hP2 hD1 hD2 hMul hSum
+          · have hQG' : G = mul K Q_G := hQG
+            have hQGNe : Q_G ≠ zero := fun e => hGNe (by rw [hQG', e, LawfulCommRing.mul_zero])
+            have hKdeg_le : K.natDeg + Q_G.natDeg ≤ d_G := by
+              apply Decidable.byContradiction; intro hNot
+              have hz := G.coeffAt_eq_zero_of_natDeg_lt (k := K.natDeg + Q_G.natDeg) (by omega)
+              rw [hQG', (coeffAt_mul_top K Q_G).2] at hz
+              unfold lead at hz; rw [hKmon, LawfulCommRing.one_mul] at hz
+              exact lead_ne_zero hQGNe hz
+            have hLeaf :
+                ((∃ h_inv : ModMonic Gj,
+                    mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one) ∧
+                 (∃ δ_u : UPoly E_fld, δ_u ≠ zero ∧
+                    ∀ u w z : E_fld,
+                      E.eval2 u w = zero →
+                      C₁.eval2 u z = zero →
+                      (evalSpaceHom u w z).toFun P₀ = zero →
+                      (evalSpaceHom u w z).toFun H = zero →
+                      δ_u.eval u = zero)) ∨
+                (∃ Kj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)),
+                   Kj.deg < Gj.deg ∧
+                   (∃ Q_G, Gj.poly = mul Kj.poly Q_G) ∧
+                   (∃ Q_H, H_mod = mul Kj.poly Q_H) ∧
+                   (Kj.deg = 1 → ∃ ζ : ModMonic (monicFY E hPrim hEDeg),
+                     C1_mod.eval ζ = zero ∧ P0_mod.eval ζ = zero ∧ H_mod.eval ζ = zero)) ∨
+                (∃ Q_H, H_mod = mul Gj.poly Q_H) := by
+              if hK0 : K.natDeg = 0 then
+                left
+                have hK1 := monic_deg_zero_eq_one K hK0 hKmon
+                rw [hK1] at hBezH
+                have hUnitSheet : ∃ h_inv : ModMonic Gj,
+                    mul h_inv (((mapHom (ModMonic.modInl Gj)).toFun H_mod).eval (ModMonic.modGen Gj)) = one := by
+                  refine ⟨(ModMonic.modQuotHom Gj).toFun VH, ?_⟩
+                  rw [ModMonic.eval_mapHom_modInl Gj H_mod]
+                  have hApp := congrArg (ModMonic.modQuotHom Gj).toFun hBezH
+                  rw [RingHom.map_add, RingHom.map_mul, RingHom.map_mul,
+                      ModMonic.modQuotHom_self_eq_zero Gj,
+                      LawfulCommRing.mul_zero, LawfulCommRing.zero_add, RingHom.map_one] at hApp
+                  exact hApp
+                have hBez3 : add (add (mul (mul UH U0) C1_mod) (mul (mul UH V0) P0_mod))
+                    (mul VH H_mod) = one := by
+                  have hSubG : Gj.poly = add (mul U0 C1_mod) (mul V0 P0_mod) := hBez.symm
+                  have h1 := hBezH
+                  rw [hSubG] at h1
+                  calc add (add (mul (mul UH U0) C1_mod) (mul (mul UH V0) P0_mod)) (mul VH H_mod)
+                      = add (mul UH (add (mul U0 C1_mod) (mul V0 P0_mod))) (mul VH H_mod) := by
+                        constructive_ring
+                    _ = one := h1
+                obtain ⟨δ_u, hδNe, hδVan⟩ := bezout_space_finite_u_locus E hPrim hEDeg
+                  (embedUZ.toFun C₁) P₀ H (mul UH U0) (mul UH V0) VH hBez3
+                refine ⟨hUnitSheet, δ_u, hδNe, fun u w z hEuw hC1uz hP0uwz hHuwz => ?_⟩
+                exact hδVan u w z hEuw
+                  (by rw [evalSpaceHom_embedUZ]; exact hC1uz) hP0uwz hHuwz
+              else if hKLt : K.natDeg < d_G then
+                right; left
+                let Kj : MonicPoly (ModMonic (monicFY E hPrim hEDeg)) :=
+                  ⟨K, K.natDeg, by omega, Nat.le_refl K.natDeg, hKmon⟩
+                refine ⟨Kj, hKLt, ⟨Q_G, hQG⟩, ⟨Q_H, hQH⟩, fun hK1 => ?_⟩
+                obtain ⟨hKlin, hKlinZ⟩ := monic_deg_one_eq_X_sub_C K hK1 hKmon
+                let ζ := neg (coeffAt K.coeffs 0)
+                have hCRoot : C1_mod.eval ζ = zero := by
+                  rw [hQC, hQG', hKlin]; show (evalHom ζ).toFun _ = zero
+                  rw [RingHom.map_mul, RingHom.map_mul, evalHom_apply, hKlinZ,
+                      LawfulCommRing.zero_mul, LawfulCommRing.zero_mul]
+                have hPRoot : P0_mod.eval ζ = zero := by
+                  rw [hQP, hQG', hKlin]; show (evalHom ζ).toFun _ = zero
+                  rw [RingHom.map_mul, RingHom.map_mul, evalHom_apply, hKlinZ,
+                      LawfulCommRing.zero_mul, LawfulCommRing.zero_mul]
+                have hHRoot : H_mod.eval ζ = zero := by
+                  rw [hQH, hKlin]; show (evalHom ζ).toFun _ = zero
+                  rw [RingHom.map_mul, evalHom_apply, hKlinZ, LawfulCommRing.zero_mul]
+                exact ⟨ζ, hCRoot, hPRoot, hHRoot⟩
+              else
+                right; right
+                have hKEq : K.natDeg = d_G := by omega
+                have hGEqK := monic_eq_of_dvd_same_deg G K Q_G d_G
+                  (Nat.le_refl d_G) hGmon hKEq hKmon hQG
+                exact ⟨Q_H, by rw [hQH]; change mul K Q_H = mul G Q_H; rw [hGEqK]⟩
+            refine ⟨[E], by show tdeg E + 0 = tdeg E; omega, fun u w h => ⟨E, .head _, h⟩, ?_⟩
+            intro Ej hMem; cases hMem with
+            | head =>
+              exact ⟨hPrim, hEDeg, Gj, ⟨one, (LawfulCommRing.mul_one E).symm⟩,
+                by show d_G ≤ h_C; omega, ⟨Q_C, hQC⟩, ⟨Q_P, hQP⟩, hLeaf⟩
+            | tail _ hNil => cases hNil
+  intro E hPrim hPos hDiv
+  exact aux (tdeg E) E (Nat.le_refl _) hPrim hPos hDiv
+
+end MultiSheetCurveGcd
+end SylElim
+
+/-! ## §4. Constructive Inhabitedness Witnesses, `#tooth_pair` Counterexamples & Assurance Gates -/
+
+namespace Cwyz26EqualDegreeAndMultiFoldTests
+open CommRingOps RoundPoly UPoly Poly2 SylElim
+
+def gf (n : Nat) : Goldilocks := Goldilocks.ofNat n
+
+def qf (n : Nat) : QuarticGoldilocks :=
+  ⟨⟨Goldilocks.ofNat n, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩
+
+/-- Inhabitedness witness for `gsDecodeList_length_le_johnson` at `|D| = 5`, `d = 1`, `A = 3`. -/
+theorem inhabited_gsDecodeList_length_le_johnson :
+    ∃ (D : List Goldilocks) (word : Goldilocks → Goldilocks) (d A : Nat),
+      D.Nodup ∧ d + 1 ≤ A ∧ D.length * d < A * A ∧
+      JohnsonBound.johnsonBound D.length A d = 2 ∧ word (gf 0) = gf 0 :=
+  ⟨[gf 0, gf 1, gf 2, gf 3, gf 4], fun _ => gf 0, 1, 3,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel, rfl⟩
+
+/-- `#tooth`: dropping the positive-Johnson-denominator condition `D.length * d < A * A`
+    invalidates `gsDecodeList_length_le_johnson`: at `|D| = 4, d = 1, A = 2` (`4 * 1 = 2 * 2`),
+    `johnsonBound 4 2 1 = 0` while `gsDecodeList 1 2 D 0` contains the zero polynomial (`1 ≤ length`). -/
+theorem tooth_gsDecodeList_johnson_denominator_needed :
+    ∃ (D : List Goldilocks) (word : Goldilocks → Goldilocks) (d A : Nat),
+      D.Nodup ∧ d + 1 ≤ A ∧ D.length * d = A * A ∧
+      ¬ ((gsDecodeList d A D word).length ≤ JohnsonBound.johnsonBound D.length A d) := by
+  let D : List Goldilocks := [gf 0, gf 1, gf 2, gf 3]
+  have hDNd : D.Nodup := by decide +kernel
+  refine ⟨D, fun _ => CommRingOps.zero, 1, 2, hDNd, by decide, by decide, ?_⟩
+  intro hLe
+  have hJb0 : JohnsonBound.johnsonBound D.length 2 1 = 0 := by decide +kernel
+  rw [hJb0] at hLe
+  let pZero : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs []
+  have hMem : pZero ∈ gsDecodeList 1 2 D (fun _ => CommRingOps.zero) :=
+    (mem_gsDecodeList_iff (fun _ => CommRingOps.zero) hDNd (by decide) pZero).mpr
+      ⟨by decide, by decide +kernel⟩
+  have hPos := List.length_pos_of_mem hMem
+  omega
+
+/-- Explicit 16-element squared domain `[(qf 1)², ..., (qf 16)²]` in `QuarticGoldilocks`. -/
+def dom16Out : List QuarticGoldilocks :=
+  ((List.range 16).map (fun i => qf (i + 1))).map (fun x => CommRingOps.mul x x)
+
+/-- Explicit 32-element antipodal pre-fold domain `[qf 1, -qf 1, ..., qf 16, -qf 16]`. -/
+def dom32In : List QuarticGoldilocks :=
+  hemInterleave
+    ((List.range 16).map (fun i => qf (i + 1)))
+    ((List.range 16).map (fun i => CommRingOps.neg (qf (i + 1))))
+
+theorem antipodalPair_dom32_dom16 : IsAntipodalDomainPair dom32In dom16Out where
+  nodup_in := by decide +kernel
+  nodup_out := by decide +kernel
+  len_eq := by decide +kernel
+  two_ne_zero := by decide +kernel
+  even_nz := by
+    have hAll : ((List.range 16).all (fun idx =>
+        decide (dom32In.getD (2 * idx) CommRingOps.one ≠ CommRingOps.zero))) = true := by
+      decide +kernel
+    intro idx hIdx
+    exact of_decide_eq_true (List.all_eq_true.mp hAll idx (List.mem_range.mpr hIdx))
+  odd_neg := by
+    have hAll : ((List.range 16).all (fun idx =>
+        decide (dom32In.getD (2 * idx + 1) CommRingOps.zero =
+          CommRingOps.neg (dom32In.getD (2 * idx) CommRingOps.one)))) = true := by
+      decide +kernel
+    intro idx hIdx
+    exact of_decide_eq_true (List.all_eq_true.mp hAll idx (List.mem_range.mpr hIdx))
+  sq_eq := by
+    have hAll : ((List.range 16).all (fun idx =>
+        decide (dom16Out.getD idx CommRingOps.zero =
+          CommRingOps.mul (dom32In.getD (2 * idx) CommRingOps.one)
+            (dom32In.getD (2 * idx) CommRingOps.one)))) = true := by
+      decide +kernel
+    intro idx hIdx
+    exact of_decide_eq_true (List.all_eq_true.mp hAll idx (List.mem_range.mpr hIdx))
+
+private theorem zero_word_false_claim_on_dom16 (Fw : List QuarticGoldilocks)
+    (hLen : Fw.length ≤ 2)
+    (hAg : 10 ≤ (dom16Out.filter (fun z => decide (RoundPoly.evalCoeffs Fw z = qf 0))).length) :
+    ringDot Fw [qf 1, qf 0] ≠ qf 1 := by
+  intro hEq
+  have hDomNd : dom16Out.Nodup := by decide +kernel
+  have hTrim : trimPoly Fw = trimPoly ([] : List QuarticGoldilocks) :=
+    trimPoly_eq_of_agree_on_nodup hLen (Nat.zero_le 2)
+      (List.Pairwise.filter _ hDomNd) (Nat.le_trans (by decide) hAg)
+      (fun z hz => of_decide_eq_true (List.mem_filter.mp hz).2)
+  have hDot0 : ringDot Fw [qf 1, qf 0] = CommRingOps.zero := by
+    rw [← ringDot_trimPoly_eq, hTrim]; rfl
+  rw [hDot0] at hEq
+  exact (by decide +kernel : CommRingOps.zero ≠ qf 1) hEq
+
+/-- Joint inhabitedness witness for `sliced_equal_degree_three_challenge_bound` beyond the
+    Welch–Berlekamp radius (`|D| = 16`, `d = 1`, `A = 10`, `2|D| + (d + 1) + 1 = 35 ≥ 33 = 3(A + 1)`),
+    with a non-empty bad-challenge list `L` (`L.length = 1`). -/
+theorem inhabited_sliced_equal_degree_three_challenge_bound :
+    ∃ (D S_θ S kernel : List QuarticGoldilocks) (d A B m Dy : Nat)
+      (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g : QuarticGoldilocks)
+      (L : List (Fin (threePool S_θ S).length)),
+      D.Nodup ∧ S_θ.Nodup ∧ S.Nodup ∧ d + 2 ≤ A ∧
+      slicedParamsOk D.length (d + 1) (A + 1) B m Dy = true ∧
+      ((∀ Fw : List QuarticGoldilocks, Fw.length ≤ d + 1 →
+          A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Fw z = f z))).length →
+          ringDot Fw kernel ≠ e_f) ∨
+       (∀ Gw : List QuarticGoldilocks, Gw.length ≤ d + 1 →
+          A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Gw z = g z))).length →
+          ringDot Gw kernel ≠ e_g)) ∧
+      L.Nodup ∧
+      (∀ ch ∈ L, ¬¬ ∃ P : List QuarticGoldilocks,
+        P.length ≤ d + 2 ∧
+        A + 1 ≤ (D.filter (fun z =>
+          let t := (threePool S_θ S).get ch
+          let h_θ := CommRingOps.add (f z) (CommRingOps.mul t.1 (g z))
+          decide (RoundPoly.evalCoeffs P z =
+            CommRingOps.add (g z)
+              (CommRingOps.mul (CommRingOps.add t.2.1 (CommRingOps.mul t.2.2 z)) h_θ)))).length ∧
+        ringDot P kernel =
+          let t := (threePool S_θ S).get ch
+          hemFoldClaimUpdate e_f e_g c_f c_g t.1 t.2.1 t.2.2) ∧
+      L.length = 1 := by
+  refine ⟨dom16Out, dom16Out, dom16Out, [qf 1, qf 0], 1, 10, 7, 2, 4,
+    fun _ => qf 0, fun _ => qf 0, qf 1, qf 0, CommRingOps.neg (qf 1), qf 0,
+    [⟨0, by decide +kernel⟩],
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, .inl (fun Fw hLen hAg => zero_word_false_claim_on_dom16 Fw hLen hAg),
+    by decide +kernel, ?_, rfl⟩
+  intro ch hch hNo
+  cases hch with
+  | head =>
+    exact hNo ⟨[], by decide +kernel, by decide +kernel, by decide +kernel⟩
+  | tail _ hNil => cases hNil
+
+/-- `#tooth`: even when BOTH `(f, e_f)` and `(g, e_g)` fail `ringDot · kernel = e_*` on every
+    codeword, `hemFoldClaimUpdate` admits `S_θ.length * S.length` genuine accepting triples in
+    `threePool S_θ S` (so the `jbLo² · q_θ · q` term in `slicedThreeChallengeCount` cannot be zero). -/
+theorem tooth_three_challenge_lo_pair_forgery :
+    ∃ (S_θ S : List QuarticGoldilocks) (ch : Fin (threePool S_θ S).length),
+      let t := (threePool S_θ S).get ch
+      ringDot ([] : List QuarticGoldilocks) [qf 1, qf 0] ≠ qf 1 ∧
+      ringDot ([] : List QuarticGoldilocks) [qf 1, qf 0] =
+        hemFoldClaimUpdate (qf 1) (qf 1) (qf 0) (qf 0) t.1 t.2.1 t.2.2 ∧
+      1 ≤ slicedThreeChallengeCount 16 1 10 7 2 4 S_θ.length S.length :=
+  ⟨[qf 0], [CommRingOps.neg (qf 1)], ⟨0, by decide +kernel⟩,
+    by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- Total diagnostic accessor for `slicedThreeChallengeStageBound`. -/
+def slicedThreeChallengeStageProfile (nv : Nat) (g : HemStageGeom) : RatBound :=
+  match hemJohnsonQromTableRow nv g.stageIdx, slicedStageRow nv g.stageIdx with
+  | some r, some w => slicedThreeChallengeStageBound g r w
+  | _, _ => RatBound.one
+
+/-- Joint inhabitedness witness for `sliced_stage_three_challenge_supported_budget` (`nv = 24`, stage `0`). -/
+theorem inhabited_sliced_stage_three_challenge_supported_budget :
+    ∃ (nv : Nat) (g : HemStageGeom),
+      2 ≤ nv ∧ nv ≤ 24 ∧ g ∈ hemStageGeoms nv ∧ hemJohnsonQromStageExhaustive g = false :=
+  ⟨24, (hemStageGeoms 24).get ⟨0, by decide +kernel⟩,
+    by decide +kernel, by decide +kernel, list_get_mem _ _, by decide +kernel⟩
+
+/-- `#tooth`: the concrete 3-challenge stage-0 bound at `nv = 24` achieves `184` bits at
+    `Q + 1 ≤ 2^27`, yet fails `186` bits unscaled and fails `128` bits at `Q = 2^28`. -/
+theorem tooth_three_challenge_nv24_stage0_margin :
+    ∃ g : HemStageGeom,
+      g ∈ hemStageGeoms 24 ∧
+      atLeastBits 184 (slicedThreeChallengeStageProfile 24 g) ∧
+      ¬ atLeastBits 186 (slicedThreeChallengeStageProfile 24 g) ∧
+      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 28) (slicedThreeChallengeStageProfile 24 g)) :=
+  ⟨(hemStageGeoms 24).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- Joint inhabitedness witness for `sliced_singleStep_bridge_four_challenge_bound` on
+    `(dom32In, dom16Out)` with non-empty accepting quadruple list `L` (`L.length = 1`). -/
+theorem inhabited_sliced_singleStep_bridge_four_challenge_bound :
+    ∃ (D_in D_out S kernel : List QuarticGoldilocks) (d A B m Dy m_K : Nat)
+      (curOracle : Nat → QuarticGoldilocks)
+      (curClaim w₀ w₁ w₂ c_F c_G : QuarticGoldilocks)
+      (L : List (Fin (quadPool S).length)),
+      IsAntipodalDomainPair D_in D_out ∧
+      S.Nodup ∧ d + 2 ≤ A ∧ kernel.length = 2 * m_K ∧
+      slicedParamsOk D_out.length (d + 1) (A + 1) B m Dy = true ∧
+      (∀ Q : List QuarticGoldilocks,
+        polyWitnessValid D_in (2 * A) (2 * d + 1) curOracle kernel curClaim Q = false) ∧
+      L.Nodup ∧
+      (∀ ch ∈ L, ¬¬ ∃ P : List QuarticGoldilocks,
+        let q := (quadPool S).get ch
+        polyWitnessValid D_out (A + 1) (d + 1)
+          (hemVirtualFoldOracle q.2.1 q.2.2.1 q.2.2.2 D_in D_out curOracle)
+          (hemKernelFold q.1 kernel)
+          (hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G q.1 q.2.1 q.2.2.1 q.2.2.2) P = true) ∧
+      L.length = 1 := by
+  let S : List QuarticGoldilocks := [qf 1, CommRingOps.neg (qf 1)]
+  refine ⟨dom32In, dom16Out, S, [qf 1, qf 0, qf 0, qf 0], 1, 10, 7, 2, 4, 2,
+    fun _ => CommRingOps.zero, qf 1, qf 1, CommRingOps.neg (qf 1), qf 0, qf 0, qf 0,
+    [⟨0, by decide +kernel⟩],
+    antipodalPair_dom32_dom16, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, ?_, by decide +kernel, ?_, rfl⟩
+  · intro Q
+    cases hVal : polyWitnessValid dom32In 20 3 (fun _ => CommRingOps.zero)
+        [qf 1, qf 0, qf 0, qf 0] (qf 1) Q
+    · rfl
+    · exfalso
+      have hZero := polyWitnessValid_zeroOracle_claim dom32In 3 20 [qf 1, qf 0, qf 0, qf 0] Q (qf 1)
+        antipodalPair_dom32_dom16.nodup_in (by decide) hVal
+      exact (by decide +kernel : qf 1 ≠ CommRingOps.zero) hZero
+  · intro ch hch hNo
+    cases hch with
+    | head =>
+      exact hNo ⟨[], by decide +kernel⟩
+    | tail _ hNil => cases hNil
+
+/-- `#tooth`: dishonest 5-wire bridge `(w₀ = 1, w₁ = -1, w₂ = 0, c_F = 0, c_G = 0)` cancels a false
+    pre-fold claim `curClaim = 1` at `φ = 1` across EVERY `(θ, α, β) ∈ S³`, demonstrating why
+    `slicedFourChallengeCount` carries the cubic `|S|³` bridge-forgery term. -/
+theorem tooth_bridge_four_challenge_forgery_exists :
+    ∃ (S : List QuarticGoldilocks) (ch : Fin (quadPool S).length),
+      let q := (quadPool S).get ch
+      polyWitnessValid dom16Out 11 2
+        (hemVirtualFoldOracle q.2.1 q.2.2.1 q.2.2.2 dom32In dom16Out (fun _ => CommRingOps.zero))
+        (hemKernelFold q.1 [qf 1, qf 0, qf 0, qf 0])
+        (hemBridgeFoldClaim (qf 1) (qf 1) (CommRingOps.neg (qf 1)) (qf 0) (qf 0) (qf 0)
+          q.1 q.2.1 q.2.2.1 q.2.2.2) [] = true ∧
+      1 ≤ slicedFourChallengeCount 16 1 10 7 2 4 S.length :=
+  ⟨[qf 1], ⟨0, by decide +kernel⟩, by decide +kernel, by decide +kernel⟩
+
+/-- Total diagnostic accessor for `slicedMultiFoldStageBound`. -/
+def slicedMultiFoldStageProfile (nv : Nat) (g : HemStageGeom) : RatBound :=
+  match hemJohnsonQromTableRow nv g.stageIdx, slicedStageRow nv g.stageIdx with
+  | some r, some w => slicedMultiFoldStageBound g r w
+  | _, _ => RatBound.one
+
+/-- Joint inhabitedness witness for `sliced_multifold_stage_supported_budget` (`nv = 24`, stage `0`). -/
+theorem inhabited_sliced_multifold_stage_supported_budget :
+    ∃ (nv : Nat) (g : HemStageGeom),
+      2 ≤ nv ∧ nv ≤ 24 ∧ g ∈ hemStageGeoms nv ∧ hemJohnsonQromStageExhaustive g = false :=
+  inhabited_sliced_stage_three_challenge_supported_budget
+
+/-- `#tooth`: at `nv = 24`, stage `0` (`stepVars = 6`), the summed 6-step `slicedMultiFoldStageBound`
+    achieves `175` bits (tolerating `Q + 1 ≤ 2^22`), yet does NOT reach `186` bits (`stepVars ≤ 4` is
+    necessary for the `186`-bit tier in `sliced_multifold_stage_supported_budget`). -/
+theorem tooth_multifold_step6_below_186_bits :
+    ∃ g : HemStageGeom,
+      g ∈ hemStageGeoms 24 ∧
+      g.stepVars = 6 ∧
+      atLeastBits 175 (slicedMultiFoldStageProfile 24 g) ∧
+      ¬ atLeastBits 186 (slicedMultiFoldStageProfile 24 g) ∧
+      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27) (slicedMultiFoldStageProfile 24 g)) :=
+  ⟨(hemStageGeoms 24).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+private theorem isPrimY_W : IsPrimY (X : Poly2 Goldilocks) := by
+  refine ⟨by decide +kernel, fun f hf => ?_⟩
+  obtain ⟨q, hq⟩ := hf 1
+  have h1 : coeffAt (X : Poly2 Goldilocks).coeffs 1 = one := by decide +kernel
+  rw [h1] at hq
+  have hf0 : f ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hq, e, LawfulCommRing.zero_mul])
+  have hq0 : q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hq, e, LawfulCommRing.mul_zero])
+  have hd := UPoly.natDeg_mul hf0 hq0
+  rw [← hq, natDeg_one] at hd; omega
+
+/-- Joint inhabitedness witness for `SylElim.curve_leaf_gcd_decomp` on the smooth 2-sheet cylinder
+    `C₁ = Z² - 1`, `P₀ = W` (`C X`), `E = W` (`X`). -/
+theorem inhabited_curve_leaf_gcd_decomp :
+    ∃ (h_C H₀ : Nat) (C₁ E : Poly2 Goldilocks) (P₀ : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ h_C ∧ coeffAt C₁.coeffs h_C = one ∧ P₀.natDeg ≤ H₀ ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      (∃ Q_res, sylRes h_C H₀ (embedUZ.toFun C₁) P₀ = mul E Q_res) ∧
+      sylRes h_C H₀ (embedUZ.toFun C₁) P₀ ≠ zero :=
+  let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
+  ⟨2, 1, C₁, X, C X,
+    by decide +kernel, by decide +kernel, by decide +kernel,
+    isPrimY_W, by decide +kernel, ⟨X, by decide +kernel⟩, by decide +kernel⟩
+
+/-- `#tooth`: even when `C₁ = Z² - 1` is monic AND separable in `Z` (`sylRes 2 1 C₁ (hasse 1 C₁) ≠ 0`),
+    over `E = W` (`P₀ = W`) BOTH sheets `Z = ±1` vanish simultaneously, forcing `Gj.deg = 2` and
+    `Ej ∣ g₁` in `curve_leaf_gcd_decomp` (proving constructively that the `Ej ∣ g₁` multi-sheet
+    branch is algebraically realizable for smooth separable `C₁`!). -/
+theorem tooth_multisheet_smooth_cylinder_divides_g1 :
+    ∃ (C₁ : Poly2 Goldilocks) (P₀ : UPoly (Poly2 Goldilocks))
+      (Ej : Poly2 Goldilocks) (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+      (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+      sylRes 2 1 C₁ (UPoly.hasse 1 C₁) ≠ zero ∧
+      Gj.deg = 2 ∧
+      ∃ Qg, sylResDeriv 2 1 (embedUZ.toFun C₁) P₀ one = mul Ej Qg := by
+  let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
+  let P₀ : UPoly (Poly2 Goldilocks) := C X
+  obtain ⟨Es, _, hCover, hLeaves⟩ :=
+    SylElim.curve_leaf_gcd_decomp (h_C := 2) (H₀ := 1) (C₁ := C₁) (P₀ := P₀)
+      (by decide +kernel) (by decide +kernel) (by decide +kernel)
+      X isPrimY_W (by decide +kernel) ⟨X, by decide +kernel⟩
+  obtain ⟨Ej, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hPj, hDj, Gj, ⟨QE, hXE⟩, hDegLe2, ⟨U0, V0, hBez⟩, _, _, _, _, hDichot, _⟩ :=
+    hLeaves Ej hMem
+  rcases hDichot with ⟨hDeg1, _⟩ | ⟨hDeg2, hDivG1⟩
+  · exfalso
+    let φ := modPoly2Hom Ej hPj hDj
+    have hX0 : φ.toFun X = zero := (modPoly2Hom_eq_zero_iff Ej hPj hDj X).mpr ⟨QE, hXE⟩
+    have hP0_0 : (mapHom φ).toFun P₀ = zero := by
+      dsimp only [P₀]; rw [mapHom_C, hX0]; exact CHom.map_zero
+    rw [hP0_0, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hBez
+    let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
+    have hC1_deg : C1_mod.natDeg ≤ 2 :=
+      Nat.le_trans (natDeg_mapHom_le φ _)
+        (Nat.le_trans (natDeg_mapHom_le CHom C₁) (by decide +kernel))
+    have hC1_mon : coeffAt C1_mod.coeffs 2 = one := by
+      dsimp only [C1_mod, embedUZ]
+      have hTop : coeffAt C₁.coeffs 2 = one := by decide +kernel
+      rw [coeffAt_mapHom, coeffAt_mapHom, hTop, CHom.map_one, φ.map_one]
+    let M_C1 : MonicPoly (ModMonic (monicFY Ej hPj hDj)) := ⟨C1_mod, 2, by decide, hC1_deg, hC1_mon⟩
+    have hLt2 : (mul U0 M_C1.poly).natDeg < M_C1.deg := by
+      change (mul U0 C1_mod).natDeg < 2
+      rw [hBez]
+      exact Nat.lt_of_le_of_lt Gj.natDeg_le (by omega)
+    have hU0 := eq_zero_of_mul_monic_lt M_C1 hLt2
+    rw [hU0, LawfulCommRing.zero_mul] at hBez
+    have h10 : (one : ModMonic (monicFY Ej hPj hDj)) = zero := by
+      rw [← Gj.coeff_deg, ← hBez, coeffs_zero, coeffAt_nil]
+    exact NontrivialRing.one_ne_zero h10
+  · exact ⟨C₁, P₀, Ej, hPj, hDj, Gj, by decide +kernel, by omega, hDivG1⟩
+
+/-- Joint inhabitedness witness for `SylElim.curve_three_poly_sheet_decomp` (`C₁ = Z² - 1`,
+    `P₀ = W`, `H = Z`, `E = W`). -/
+theorem inhabited_curve_three_poly_sheet_decomp :
+    ∃ (h_C H₀ : Nat) (C₁ E : Poly2 Goldilocks) (P₀ H : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ h_C ∧ coeffAt C₁.coeffs h_C = one ∧ P₀.natDeg ≤ H₀ ∧ H.natDeg ≤ 1 ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      (∃ Q_res, sylRes h_C H₀ (embedUZ.toFun C₁) P₀ = mul E Q_res) :=
+  let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
+  ⟨2, 1, C₁, X, C X, X,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    isPrimY_W, by decide +kernel, ⟨X, by decide +kernel⟩⟩
+
+/-- `#tooth`: without resultant divisibility (`E ∤ sylRes`), `curve_three_poly_sheet_decomp` fails
+    on `C₁ = Z`, `P₀ = 1`, `H = Z`, `E = W`: no leaf can have a positive-degree common `Z`-gcd `Gj`. -/
+theorem tooth_three_poly_sheet_needs_divisibility :
+    ∃ (C₁ E : Poly2 Goldilocks) (P₀ H : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ 1 ∧ coeffAt C₁.coeffs 1 = one ∧ P₀.natDeg ≤ 0 ∧ H.natDeg ≤ 1 ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      ¬ ∃ Es : List (Poly2 Goldilocks),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg)
+          (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
+          (∃ Q_P, ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀) = mul Gj.poly Q_P) := by
+  refine ⟨X, X, one, X, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, isPrimY_W, by decide +kernel, ?_⟩
+  rintro ⟨Es, _, hCover, hLeaves⟩
+  obtain ⟨Ej, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hPj, hDj, Gj, ⟨QP, hQP⟩⟩ := hLeaves Ej hMem
+  rw [RingHom.map_one] at hQP
+  have hQPNe : QP ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQP, e, LawfulCommRing.mul_zero])
+  have hz : coeffAt (one : UPoly (ModMonic (monicFY Ej hPj hDj))).coeffs (Gj.deg + QP.natDeg) = zero := by
+    have hd1 : (one : UPoly (ModMonic (monicFY Ej hPj hDj))).natDeg = 0 := natDeg_one
+    have hPos : 1 ≤ Gj.deg := Gj.deg_pos
+    exact UPoly.coeffAt_eq_zero_of_natDeg_lt _ (by omega)
+  have hGjDegEq : Gj.poly.natDeg = Gj.deg := by
+    apply Nat.le_antisymm Gj.natDeg_le
+    apply Decidable.byContradiction; intro hNot
+    have hc := Gj.poly.coeffAt_eq_zero_of_natDeg_lt (Nat.lt_of_not_le hNot)
+    rw [Gj.coeff_deg] at hc
+    exact NontrivialRing.one_ne_zero hc
+  rw [hQP, ← hGjDegEq, (coeffAt_mul_top Gj.poly QP).2] at hz
+  unfold lead at hz
+  rw [hGjDegEq, Gj.coeff_deg, LawfulCommRing.one_mul] at hz
+  exact lead_ne_zero hQPNe hz
+
+#verify_constructive
+  Qsag.gsDecodeList_length_le_johnson
+  Qsag.equal_degree_bad_theta_count_le
+  Qsag.equal_degree_three_challenge_fold_bound
+  Qsag.sliced_equal_degree_three_challenge_bound
+  Qsag.sliced_stage_three_challenge_supported_budget
+
+#verify_constructive Qsag.antipodal_joint_agree_lifts
+#verify_constructive Qsag.singleStep_bridge_four_challenge_fold_bound
+#verify_constructive Qsag.sliced_singleStep_bridge_four_challenge_bound
+#verify_constructive Qsag.intraStage_kFold_state_restoration_soundness
+#verify_constructive Qsag.dfm175_budget_at_2pow22
+#verify_constructive Qsag.sliced_multifold_stage_supported_budget
+
+#verify_constructive
+  Qsag.SylElim.bezout_space_finite_u_locus
+  Qsag.SylElim.curve_leaf_gcd_decomp
+  Qsag.SylElim.curve_three_poly_sheet_decomp
+
+#verify_constructive
+  inhabited_gsDecodeList_length_le_johnson
+  tooth_gsDecodeList_johnson_denominator_needed
+  inhabited_sliced_equal_degree_three_challenge_bound
+  tooth_three_challenge_lo_pair_forgery
+  inhabited_sliced_stage_three_challenge_supported_budget
+  tooth_three_challenge_nv24_stage0_margin
+  inhabited_sliced_singleStep_bridge_four_challenge_bound
+  tooth_bridge_four_challenge_forgery_exists
+  inhabited_sliced_multifold_stage_supported_budget
+  tooth_multifold_step6_below_186_bits
+  inhabited_curve_leaf_gcd_decomp
+  tooth_multisheet_smooth_cylinder_divides_g1
+  inhabited_curve_three_poly_sheet_decomp
+  tooth_three_poly_sheet_needs_divisibility
+
+#verify_inhabited Qsag.gsDecodeList_length_le_johnson inhabited_gsDecodeList_length_le_johnson
+#tooth_pair Qsag.gsDecodeList_length_le_johnson vs tooth_gsDecodeList_johnson_denominator_needed
+
+#verify_inhabited Qsag.sliced_equal_degree_three_challenge_bound inhabited_sliced_equal_degree_three_challenge_bound
+#tooth_pair Qsag.sliced_equal_degree_three_challenge_bound vs tooth_three_challenge_lo_pair_forgery
+
+#verify_inhabited Qsag.sliced_stage_three_challenge_supported_budget inhabited_sliced_stage_three_challenge_supported_budget
+#tooth_pair Qsag.sliced_stage_three_challenge_supported_budget vs tooth_three_challenge_nv24_stage0_margin
+
+#verify_inhabited Qsag.sliced_singleStep_bridge_four_challenge_bound inhabited_sliced_singleStep_bridge_four_challenge_bound
+#tooth_pair Qsag.sliced_singleStep_bridge_four_challenge_bound vs tooth_bridge_four_challenge_forgery_exists
+
+#verify_inhabited Qsag.sliced_multifold_stage_supported_budget inhabited_sliced_multifold_stage_supported_budget
+#tooth_pair Qsag.sliced_multifold_stage_supported_budget vs tooth_multifold_step6_below_186_bits
+
+#verify_inhabited Qsag.SylElim.curve_leaf_gcd_decomp inhabited_curve_leaf_gcd_decomp
+#tooth_pair Qsag.SylElim.curve_leaf_gcd_decomp vs tooth_multisheet_smooth_cylinder_divides_g1
+
+#verify_inhabited Qsag.SylElim.curve_three_poly_sheet_decomp inhabited_curve_three_poly_sheet_decomp
+#tooth_pair Qsag.SylElim.curve_three_poly_sheet_decomp vs tooth_three_poly_sheet_needs_divisibility
+
+end Cwyz26EqualDegreeAndMultiFoldTests
+end Qsag
+end

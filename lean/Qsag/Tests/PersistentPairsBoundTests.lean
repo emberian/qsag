@@ -1,11 +1,11 @@
 module
 /- Nonempty instances and countermodels for the persistent CWYZ count. -/
-public import Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.CodingTheory.PersistentPairsBound
-import all Qsag.CodingTheory.AffineIncidenceBound
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.PersistentPairsBound
+import all Qsag.Coding.PersistentPairsBound
+import all Qsag.Coding.AffineIncidenceBound
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 public section
 namespace Qsag
 open CommRingOps RoundPoly
