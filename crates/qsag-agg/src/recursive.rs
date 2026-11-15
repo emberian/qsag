@@ -46,8 +46,12 @@ pub const HIERARCHICAL_HEM_WIRE_MAGIC: &[u8; 8] = b"QSAGHEM\x03";
 /// Canonical wire magic for compact [`SuccinctHierarchicalHemAggregate`] commitments.
 pub const SUCCINCT_HIERARCHICAL_HEM_WIRE_MAGIC: &[u8; 8] = b"QSAGSHM\x01";
 
-/// Upper bound on regional shard count accepted during canonical wire decoding.
-pub const MAX_HIERARCHY_SHARDS: usize = 4_096;
+/// Largest regional shard count: the outer chain trace has two rows per shard and
+/// `LOG_TRACE_COLS + log2(rows)` variables, which must not exceed
+/// [`crate::pcs::MAX_PCS_NUM_VARS`]. Wire decoding additionally requires the body to hold
+/// every claimed shard header before allocating.
+pub const MAX_HIERARCHY_SHARDS: usize =
+    1usize << (crate::pcs::MAX_PCS_NUM_VARS - LOG_TRACE_COLS - 1);
 
 /// Trusted regional registry entry, supplied independently of the proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,15 +465,24 @@ fn write_shard_commitment_frame_into(s: &ShardHemBatch, buf: &mut Vec<u8>) -> us
     start
 }
 
+// Per-thread frame buffers: a worker reuses its own allocations and never waits on another
+// thread. A thread whose locals are already torn down allocates a fresh buffer.
 #[cfg(feature = "std")]
-static SHARD_FRAME_SCRATCH_POOL: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+std::thread_local! {
+    static SHARD_FRAME_SCRATCH: core::cell::RefCell<Vec<Vec<u8>>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Frame buffers kept per thread (the widest digest path frames four shards at once).
+#[cfg(feature = "std")]
+const SHARD_FRAME_SCRATCH_PER_THREAD: usize = 8;
 
 fn build_shard_commitment_frame(s: &ShardHemBatch) -> FramedShardBuf {
     #[cfg(feature = "std")]
-    let mut buf = SHARD_FRAME_SCRATCH_POOL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .pop()
+    let mut buf = SHARD_FRAME_SCRATCH
+        .try_with(|pool| pool.borrow_mut().pop())
+        .ok()
+        .flatten()
         .unwrap_or_default();
     #[cfg(not(feature = "std"))]
     let mut buf = Vec::new();
@@ -482,13 +495,13 @@ fn recycle_shard_commitment_frame(frame: FramedShardBuf) {
     #[cfg(feature = "std")]
     {
         let mut buf = frame.buf;
-        let mut pool = SHARD_FRAME_SCRATCH_POOL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if pool.len() < 16 {
-            buf.clear();
-            pool.push(buf);
-        }
+        buf.clear();
+        let _ = SHARD_FRAME_SCRATCH.try_with(|pool| {
+            let mut pool = pool.borrow_mut();
+            if pool.len() < SHARD_FRAME_SCRATCH_PER_THREAD {
+                pool.push(buf);
+            }
+        });
     }
     #[cfg(not(feature = "std"))]
     let _ = frame;

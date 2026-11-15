@@ -209,7 +209,7 @@ pub fn vulkan_execution_counts() -> Option<(u64, u64, u64)> {
     ))
 }
 
-fn lightweight_words_commitment(domain: &[u8], words: &[u64]) -> [u8; 32] {
+fn words_commitment(domain: &[u8], words: &[u64]) -> [u8; 32] {
     digest_words_with_domain(domain, words)
 }
 
@@ -224,7 +224,7 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
     };
     let mut words: Vec<u64> = values.iter().map(|v| v.to_canonical_u64()).collect();
     let _phase = crate::profile::span("gpu_ntt_with_receipt");
-    let input_digest = lightweight_words_commitment(b"QSAG.HEM.NTT.INPUT/v2", &words);
+    let input_digest = words_commitment(b"QSAG.HEM.NTT.INPUT/v2", &words);
     let result = {
         let _phase = crate::profile::span("gpu_ntt_kernel_and_queue");
         device
@@ -232,7 +232,7 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
             .inner()
             .goldilocks_ntt_canonical_inplace(&mut words, false)
     };
-    let output_digest = lightweight_words_commitment(b"QSAG.HEM.NTT.OUTPUT/v2", &words);
+    let output_digest = words_commitment(b"QSAG.HEM.NTT.OUTPUT/v2", &words);
     let receipt = result.and_then(|()| {
         ExecutionReceipt::compute_audited(
             &device.key,

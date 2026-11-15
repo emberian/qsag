@@ -168,9 +168,7 @@ fn check_witness_row(
     stage: usize,
     spec: &WhirStageSpec,
     n: u128,
-    a: u128,
-    m: u128,
-    big_d: u128,
+    (a, m, big_d): (u128, u128, u128),
     query_target_bits: u32,
 ) {
     let d = n / spec.blowup as u128 + 2;
@@ -238,7 +236,7 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
                 a + spec.step_vars as u128,
                 spec.num_queries
             ));
-            check_witness_row(nv, stage, spec, n, a, m, big_d, 256);
+            check_witness_row(nv, stage, spec, n, (a, m, big_d), 256);
         }
     }
     assert_eq!(seen_base, WITNESSES.len());
@@ -274,7 +272,7 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
                     .unwrap_or_else(|| {
                         panic!("missing witness for regime={regime:?} nv={nv} stage={stage}")
                     });
-                check_witness_row(nv, stage, spec, n, a, m, big_d, target_bits);
+                check_witness_row(nv, stage, spec, n, (a, m, big_d), target_bits);
             }
         }
     }

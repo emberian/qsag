@@ -6506,30 +6506,31 @@ mod pcs_unit_tests {
         assert!(regime_batch_accepts(
             &schedule, &comm, &points, &evals, &proof, b"inst"
         ));
-        // `limb + p` encodes the same field element in eight non-canonical bytes.
-        let lift = |digest: &mut [u8; 32]| -> bool {
-            let mut word = [0u8; 8];
-            word.copy_from_slice(&digest[..8]);
-            let limb = u64::from_le_bytes(word);
-            match limb.checked_add(crate::field::GOLDILOCKS_PRIME) {
-                Some(lifted) => {
-                    digest[..8].copy_from_slice(&lifted.to_le_bytes());
-                    true
-                }
-                None => false,
-            }
+        // `5 + p` is a second eight-byte encoding of the limb `5`; digests are compared and
+        // hashed only in canonical form.
+        let mut canonical = [0u8; 32];
+        canonical[..8].copy_from_slice(&5u64.to_le_bytes());
+        let mut lifted = canonical;
+        lifted[..8].copy_from_slice(&(5 + crate::field::GOLDILOCKS_PRIME).to_le_bytes());
+        let key = poseidon2_canopy_key(0, comm.log_leaves);
+        assert!(poseidon2_canopy_node(key, 1, &canonical, &canonical).is_some());
+        assert!(poseidon2_canopy_node(key, 1, &lifted, &canonical).is_none());
+        assert!(poseidon2_canopy_node(key, 1, &canonical, &lifted).is_none());
+        assert!(poseidon2_canopy_commitment_root(0, comm.log_leaves, &canonical).is_some());
+        assert!(poseidon2_canopy_commitment_root(0, comm.log_leaves, &lifted).is_none());
+        let leaves = [(0usize, lifted)];
+        let one_leaf = CanopyCommitment {
+            root: comm.root,
+            log_leaves: 1,
         };
-        let mut lifted_any = false;
-        for i in 0..proof.opening.round0_multiproof.auth_siblings.len() {
-            let mut bad = proof.clone();
-            if lift(&mut bad.opening.round0_multiproof.auth_siblings[i]) {
-                lifted_any = true;
-                assert!(!regime_batch_accepts(
-                    &schedule, &comm, &points, &evals, &bad, b"inst"
-                ));
+        assert!(!verify_canopy_multiproof_with(
+            CanopyHash::Poseidon2 { stage_idx: 0 },
+            &one_leaf,
+            &leaves,
+            &CanopyMultiProof {
+                auth_siblings: vec![canonical],
             }
-        }
-        assert!(lifted_any, "no sibling limb below 2^32 - 1 to lift");
+        ));
         let mut bad = proof.clone();
         bad.opening.round0_multiproof.auth_siblings[0] = [0xFF; 32];
         assert!(!regime_batch_accepts(
