@@ -421,20 +421,16 @@ mod distributed_tests {
     extern crate std;
     use super::*;
     use alloc::{vec, vec::Vec};
-    use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u128s};
+    use qsag_accel::ct::ct_zeroize_bytes;
     use qsag_accel::keccak::cshake256_framed_xof;
+    use qsag_asm::wipe::{SecretBuffer, SecretVec};
     use qsag_accel::{CpuReferenceBackend, gf2_128::gf2_128_mul};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread;
 
     struct Packet {
         context: [u8; 32],
-        values: Vec<u128>,
-    }
-    impl Drop for Packet {
-        fn drop(&mut self) {
-            ct_zeroize_u128s(&mut self.values);
-        }
+        values: SecretVec<u128>,
     }
     // Three-party assisted oblivious products over separate private mailboxes.
     // The third participant supplies independent masks a,b,r and sees neither
@@ -452,7 +448,10 @@ mod distributed_tests {
             self.tx[peer as usize]
                 .as_ref()
                 .unwrap()
-                .send(Packet { context, values })
+                .send(Packet {
+                    context,
+                    values: SecretBuffer(values),
+                })
                 .unwrap();
         }
         fn receive(&self, peer: u16, context: [u8; 32]) -> Packet {
@@ -519,7 +518,7 @@ mod distributed_tests {
                 Ok(operand
                     .iter()
                     .zip(pads.values.as_chunks::<2>().0.iter())
-                    .zip(&remote.values)
+                    .zip(remote.values.iter())
                     .map(|((&x, pad), &other)| {
                         pad[1] ^ gf2_128_mul(if self.id == sender { x } else { pad[0] }, other)
                     })

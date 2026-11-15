@@ -23,6 +23,8 @@ use qsag_accel::ct::{
 };
 use qsag_accel::keccak::cshake256_framed_xof;
 
+use qsag_asm::wipe::SecretBuffer;
+
 use crate::u384::U384;
 
 const TAG_LEAF: &[u8] = b"QSAG.FTS.LEAF.V1";
@@ -848,14 +850,11 @@ fn squeeze_target_index(
     val
 }
 
-/// Eight equal-shape framed cSHAKE messages. Every length and address is public;
-/// the backend packs these states into KeccakState8x on AVX-512 hosts.
-fn framed_hash8<B: AcceleratorBackend, const F: usize>(
-    tag: &[u8],
-    frames: [[&[u8]; F]; 8],
-    out: &mut [[u8; 32]; 8],
-    accel: &B,
-) {
+/// Eight equal-shape framed cSHAKE messages. Every length and address is public.
+/// The states go to the CPU Keccak kernel (eight-way on AVX-512 hosts) and never to an
+/// accelerator backend: key generation is the only caller, and each of its hashes
+/// absorbs or produces a secret chain value.
+fn framed_hash8<const F: usize>(tag: &[u8], frames: [[&[u8]; F]; 8], out: &mut [[u8; 32]; 8]) {
     const RATE: usize = 136;
     assert!(tag.len() < 32);
     let mut messages = [[0u8; 512]; 8];
@@ -890,7 +889,7 @@ fn framed_hash8<B: AcceleratorBackend, const F: usize>(
                 *word ^= u64::from_le_bytes(*bytes);
             }
         }
-        accel.batch_keccak_f1600(&mut states);
+        qsag_core::sponge::keccak::keccak_f1600_batch(&mut states);
     }
     for (output, state) in out.iter_mut().zip(&states) {
         for (bytes, word) in output.as_chunks_mut::<8>().0.iter_mut().zip(state) {
@@ -909,14 +908,20 @@ impl FrontierFtsSigningKey {
     /// Generate a `FrontierSumFts` keypair from `(sk_seed, sk_prf, pk_seed)`.
     /// When `cache_tree == true`, caches chain values so signing runs in `< 1 ms` with constant-time
     /// slot selection across chain offsets `0..w`.
+    ///
+    /// The backend is never used: every hash of key generation involves a secret chain
+    /// value, and those stay on the CPU kernel. The parameter remains for existing callers.
     pub fn keygen<B: AcceleratorBackend>(
         profile: FrontierFtsProfile,
-        sk_seed: [u8; 32],
-        sk_prf: [u8; 32],
+        mut sk_seed: [u8; 32],
+        mut sk_prf: [u8; 32],
         pk_seed: [u8; 32],
         cache_tree: bool,
-        accel: &B,
+        _accel: &B,
     ) -> Self {
+        // Erase the by-value copies on every exit; the key keeps its own guarded copies.
+        let sk_seed = SecretBuffer(&mut sk_seed);
+        let sk_prf = SecretBuffer(&mut sk_prf);
         let p = profile.params();
         let pid = profile.pid_bytes();
         let n = p.node_bytes;
@@ -925,7 +930,7 @@ impl FrontierFtsSigningKey {
         let total_nodes = 1usize << (h + 1);
 
         // Compute bottom-up: if caching, store `[total_nodes * w * n]`; else store endpoints `[total_nodes * n]`.
-        let mut endpoints = vec![0u8; total_nodes * n];
+        let mut endpoints = SecretBuffer(vec![0u8; total_nodes * n]);
         let mut cache = if cache_tree {
             Some(vec![0u8; total_nodes * w * n])
         } else {
@@ -933,7 +938,7 @@ impl FrontierFtsSigningKey {
         };
 
         // Finish every level before its parents, batching eight independent chains.
-        let mut cur = [[0u8; 32]; 8];
+        let mut cur = SecretBuffer([[0u8; 32]; 8]);
         for depth in (1..=h).rev() {
             let begin = 1usize << depth;
             let end = 1usize << (depth + 1);
@@ -945,9 +950,10 @@ impl FrontierFtsSigningKey {
                 if depth == h {
                     framed_hash8(
                         TAG_LEAF,
-                        core::array::from_fn(|i| [pid.as_slice(), &pk_seed, &indices[i], &sk_seed]),
+                        core::array::from_fn(|i| {
+                            [pid.as_slice(), &pk_seed, &indices[i], sk_seed.as_slice()]
+                        }),
                         &mut cur,
-                        accel,
                     );
                 } else {
                     framed_hash8(
@@ -963,7 +969,6 @@ impl FrontierFtsSigningKey {
                             ]
                         }),
                         &mut cur,
-                        accel,
                     );
                 }
                 for step in 0..w {
@@ -975,19 +980,15 @@ impl FrontierFtsSigningKey {
                     }
                     if step + 1 < w {
                         let j_be = (step as u64).to_be_bytes();
-                        let mut next = [[0u8; 32]; 8];
+                        let mut next = SecretBuffer([[0u8; 32]; 8]);
                         framed_hash8(
                             TAG_CHAIN,
                             core::array::from_fn(|i| {
                                 [pid.as_slice(), &pk_seed, &indices[i], &j_be, &cur[i][..n]]
                             }),
                             &mut next,
-                            accel,
                         );
-                        cur = next;
-                        for lane in &mut next {
-                            ct_zeroize_bytes(lane);
-                        }
+                        *cur = *next;
                     }
                 }
                 for i in 0..count {
@@ -1006,11 +1007,6 @@ impl FrontierFtsSigningKey {
             &mut root,
         );
 
-        for lane in &mut cur {
-            ct_zeroize_bytes(lane);
-        }
-        ct_zeroize_bytes(&mut endpoints);
-
         let pk = FrontierFtsPublicKey {
             profile,
             pk_seed,
@@ -1018,8 +1014,8 @@ impl FrontierFtsSigningKey {
         };
         Self {
             profile,
-            sk_seed: RedactedSecret::new(sk_seed),
-            sk_prf: RedactedSecret::new(sk_prf),
+            sk_seed: RedactedSecret::new(**sk_seed),
+            sk_prf: RedactedSecret::new(**sk_prf),
             pk,
             uses_completed: 0,
             wal: None,
@@ -1573,6 +1569,116 @@ pub use batch::{
 #[cfg(test)]
 mod batch_hash_tests {
     use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use qsag_accel::{AccelError, CertifiedKernelPin, CpuReferenceBackend, KernelSlot, KernelTargetArch};
+
+    /// Counts every state or operand the backend is handed.
+    #[derive(Default)]
+    struct Recording(AtomicUsize);
+    impl Recording {
+        fn seen(&self, items: usize) {
+            self.0.fetch_add(items.max(1), Ordering::SeqCst);
+        }
+    }
+    impl AcceleratorBackend for Recording {
+        fn target_arch(&self) -> KernelTargetArch {
+            CpuReferenceBackend.target_arch()
+        }
+        fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
+            CpuReferenceBackend.kernel_pin(slot)
+        }
+        fn batch_keccak_f1600(&self, s: &mut [[u64; 25]]) {
+            self.seen(s.len());
+            CpuReferenceBackend.batch_keccak_f1600(s);
+        }
+        fn batch_poseidon2_perm12(&self, s: &mut [[u64; 12]]) {
+            self.seen(s.len());
+            CpuReferenceBackend.batch_poseidon2_perm12(s);
+        }
+        fn goldilocks_ntt_inplace(
+            &self,
+            b: &mut [u64],
+            t: &[u64],
+            i: bool,
+        ) -> Result<(), AccelError> {
+            self.seen(b.len());
+            CpuReferenceBackend.goldilocks_ntt_inplace(b, t, i)
+        }
+        fn coset_lde_ext2(
+            &self,
+            e: &[[u64; 2]],
+            b: usize,
+            s: u64,
+            o: &mut [[u64; 2]],
+        ) -> Result<(), AccelError> {
+            self.seen(e.len());
+            CpuReferenceBackend.coset_lde_ext2(e, b, s, o)
+        }
+        fn try_merkle_layer_poseidon2_at(
+            &self,
+            c: &[[u64; 4]],
+            p: &[u64; 4],
+            l: u32,
+            s: u64,
+            o: &mut [[u64; 4]],
+        ) -> Result<(), AccelError> {
+            self.seen(c.len());
+            CpuReferenceBackend.try_merkle_layer_poseidon2_at(c, p, l, s, o)
+        }
+        fn bdoz_gf2_128_batch_dot(
+            &self,
+            s: &[(u128, u128)],
+            w: &[(u128, u128)],
+        ) -> Result<(u128, u128), AccelError> {
+            self.seen(s.len());
+            CpuReferenceBackend.bdoz_gf2_128_batch_dot(s, w)
+        }
+    }
+
+    /// Every Keccak state of key generation holds a secret chain value, so the backend
+    /// must see none of them. The tree is checked against the one-hash-at-a-time
+    /// definition, which also pins the eight-lane path at a partial final batch.
+    #[test]
+    fn keygen_hands_no_state_to_the_backend_and_matches_the_scalar_tree() {
+        let profile = FrontierFtsProfile::Fast256Test;
+        let p = profile.params();
+        let (n, w, h) = (p.node_bytes, p.winternitz_w, p.tree_height);
+        let (sk_seed, sk_prf, pk_seed) = ([0x51; 32], [0x52; 32], [0x53; 32]);
+        let backend = Recording::default();
+        let key = FrontierFtsSigningKey::keygen(profile, sk_seed, sk_prf, pk_seed, true, &backend);
+        assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+
+        let pid = profile.pid_bytes();
+        let total = 1usize << (h + 1);
+        let mut chains = vec![0u8; total * w * n];
+        for v in (2..total).rev() {
+            let mut cur = [0u8; 32];
+            if v >= 1 << h {
+                fts_leaf_start(&pid, &pk_seed, &sk_seed, v as u32, &mut cur[..n]);
+            } else {
+                let end = |child: usize| (child * w + w - 1) * n;
+                let (left, right) = (end(2 * v), end(2 * v + 1));
+                let (l, r) = (chains[left..left + n].to_vec(), chains[right..right + n].to_vec());
+                fts_merge(&pid, &pk_seed, v as u32, &l, &r, &mut cur[..n]);
+            }
+            for step in 0..w {
+                chains[(v * w + step) * n..][..n].copy_from_slice(&cur[..n]);
+                if step + 1 < w {
+                    let mut next = [0u8; 32];
+                    fts_chain_step(&pid, &pk_seed, v as u32, step, &cur[..n], &mut next[..n]);
+                    cur = next;
+                }
+            }
+        }
+        let cached = key.cached_chains.as_ref().unwrap();
+        assert_eq!(cached[2 * w * n..], chains[2 * w * n..]);
+        let mut root = vec![0u8; n];
+        let end = |child: usize| &chains[(child * w + w - 1) * n..][..n];
+        fts_merge(&pid, &pk_seed, 1, end(2), end(3), &mut root);
+        assert_eq!(key.pk.root, root);
+        assert_eq!((key.sk_seed.expose(), key.sk_prf.expose()), (&sk_seed, &sk_prf));
+    }
+
     #[test]
     fn eight_lane_hash_matches_scalar_for_every_node_size_and_domain() {
         let pid = FrontierFtsProfile::Compact1122.pid_bytes();
@@ -1590,7 +1696,7 @@ mod batch_hash_tests {
                     ]
                 });
                 let mut actual = [[0; 32]; 8];
-                framed_hash8(tag, frames, &mut actual, &qsag_accel::CpuReferenceBackend);
+                framed_hash8(tag, frames, &mut actual);
                 for (fields, output) in frames.iter().zip(actual) {
                     let mut expected = [0; 32];
                     cshake256_framed_xof(tag, fields, &mut expected);
