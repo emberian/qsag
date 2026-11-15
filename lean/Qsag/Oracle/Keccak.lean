@@ -14,7 +14,8 @@ Self-contained Lean 4.35 sponge and byte-framing foundation (`Init` only, 0 Math
    and NIST SP 800-185 `cshake256Bytes`, verified against official NIST FIPS 202 test vectors.
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
+public import Qsag.Spec.Encoding
 
 public section
 namespace Qsag
@@ -22,86 +23,6 @@ namespace Qsag
 set_option autoImplicit false
 
 /-! ## 1. Fixed-Width Big-Endian Byte Framing & Collision Carriers -/
-
-/-- The low `w` bytes of `n` in big-endian order. -/
-@[expose] def be : Nat → Nat → List UInt8
-  | 0, _ => []
-  | w + 1, n => be w (n / 256) ++ [UInt8.ofNat (n % 256)]
-
-/-- Big-endian byte list decoded as a natural number. -/
-@[expose] def ofBE (bytes : List UInt8) : Nat :=
-  bytes.foldl (fun acc b => acc * 256 + b.toNat) 0
-
-@[simp] theorem length_be (w n : Nat) : (be w n).length = w := by
-  induction w generalizing n with
-  | zero => rfl
-  | succ w ih => simp [be, ih]
-
-theorem be_injective {w n m : Nat} (hn : n < 256 ^ w) (hm : m < 256 ^ w)
-    (h : be w n = be w m) : n = m := by
-  induction w generalizing n m with
-  | zero => simp at hn hm; omega
-  | succ w ih =>
-    simp only [be] at h
-    obtain ⟨hhi, hlo⟩ := List.append_inj h (by simp)
-    have hbyte : (UInt8.ofNat (n % 256)).toNat = (UInt8.ofNat (m % 256)).toNat := by
-      rw [List.cons.inj hlo |>.1]
-    simp only [UInt8.toNat_ofNat'] at hbyte
-    have hpow : 256 ^ (w + 1) = 256 ^ w * 256 := Nat.pow_succ ..
-    have hn' : n / 256 < 256 ^ w := (Nat.div_lt_iff_lt_mul (by decide)).mpr (hpow ▸ hn)
-    have hm' : m / 256 < 256 ^ w := (Nat.div_lt_iff_lt_mul (by decide)).mpr (hpow ▸ hm)
-    have hq := ih hn' hm' hhi
-    have h8 : (2 : Nat) ^ 8 = 256 := by decide
-    rw [h8] at hbyte
-    omega
-
-theorem ofBE_append_single (bytes : List UInt8) (b : UInt8) :
-    ofBE (bytes ++ [b]) = ofBE bytes * 256 + b.toNat := by
-  simp [ofBE, List.foldl_append]
-
-theorem ofBE_be {w n : Nat} (hn : n < 256 ^ w) : ofBE (be w n) = n := by
-  induction w generalizing n with
-  | zero => simp at hn; subst hn; rfl
-  | succ w ih =>
-    have hpow : 256 ^ (w + 1) = 256 ^ w * 256 := Nat.pow_succ ..
-    have hn' : n / 256 < 256 ^ w := (Nat.div_lt_iff_lt_mul (by decide)).mpr (hpow ▸ hn)
-    simp only [be, ofBE_append_single, ih hn', UInt8.toNat_ofNat']
-    have h8 : (2 : Nat) ^ 8 = 256 := by decide
-    rw [h8]
-    omega
-
-private theorem ofBE_lt_aux : ∀ (bytes : List UInt8) (acc : Nat),
-    bytes.foldl (fun acc b => acc * 256 + b.toNat) acc < (acc + 1) * 256 ^ bytes.length
-  | [], acc => by simp
-  | b :: rest, acc => by
-    have hb : b.toNat < 256 := b.toNat_lt
-    have ih := ofBE_lt_aux rest (acc * 256 + b.toNat)
-    simp only [List.foldl_cons, List.length_cons]
-    have hle : (acc * 256 + b.toNat + 1) ≤ (acc + 1) * 256 := by omega
-    have hmono := Nat.mul_le_mul_right (256 ^ rest.length) hle
-    rw [Nat.pow_succ, Nat.mul_comm (256 ^ rest.length) 256, ← Nat.mul_assoc]
-    omega
-
-theorem ofBE_lt (bytes : List UInt8) : ofBE bytes < 256 ^ bytes.length := by
-  have := ofBE_lt_aux bytes 0
-  simpa [ofBE] using this
-
-theorem be_ofBE (xs : List UInt8) : be xs.length (ofBE xs) = xs := by
-  suffices h : ∀ ys : List UInt8,
-      be ys.reverse.length (ofBE ys.reverse) = ys.reverse by
-    simpa only [List.reverse_reverse] using h xs.reverse
-  intro ys
-  induction ys with
-  | nil => rfl
-  | cons b ys ih =>
-    let zs := ys.reverse
-    rw [List.reverse_cons]
-    change be (zs ++ [b]).length (ofBE (zs ++ [b])) = zs ++ [b]
-    simp only [List.length_append, List.length_singleton, ofBE_append_single, be]
-    have hb := b.toNat_lt
-    have hdiv : (ofBE zs * 256 + b.toNat) / 256 = ofBE zs := by omega
-    have hmod : (ofBE zs * 256 + b.toNat) % 256 = b.toNat := by omega
-    rw [hdiv, hmod, ih, UInt8.ofNat_toNat]
 
 /-- Byte-oriented hash function `List UInt8 → List UInt8`. -/
 abbrev Hash := List UInt8 → List UInt8
@@ -865,21 +786,228 @@ def customizationPrefix (customization : List UInt8) : List UInt8 :=
 theorem cshake256Xof_empty_eq_shake256Xof (outLen : Nat) (input : List UInt8) :
     cshake256Xof outLen [] input = shake256Xof outLen input := by rfl
 
-/-! ## 6. Official NIST FIPS 202 `SHAKE256` Build-Time Conformance Vectors -/
 
--- NIST FIPS 202 SHAKE256("", 256) = 46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f
-example : shake256Xof 32 [] =
-    [0x46, 0xb9, 0xdd, 0x2b, 0x0b, 0xa8, 0x8d, 0x13,
-     0x23, 0x3b, 0x3f, 0xeb, 0x74, 0x3e, 0xeb, 0x24,
-     0x3f, 0xcd, 0x52, 0xea, 0x62, 0xb8, 0x1b, 0x82,
-     0xb5, 0x0c, 0x27, 0x64, 0x6e, 0xd5, 0x76, 0x2f] := by decide +kernel
+/-! ## Framing interface: prefix laws and padding equations -/
+private theorem append_left_cancel_local {α : Type} :
+    ∀ (xs : List α) {ys zs : List α}, xs ++ ys = xs ++ zs → ys = zs
+  | [], _, _, h => h
+  | _ :: xs, _, _, h => append_left_cancel_local xs (List.cons.inj h).2
 
--- NIST FIPS 202 SHAKE256("abc", 256) = 483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739
-example : shake256Xof 32 [0x61, 0x62, 0x63] =
-    [0x48, 0x33, 0x66, 0x60, 0x13, 0x60, 0xa8, 0x77,
-     0x1c, 0x68, 0x63, 0x08, 0x0c, 0xc4, 0x11, 0x4d,
-     0x8d, 0xb4, 0x45, 0x30, 0xf8, 0xf1, 0xe1, 0xee,
-     0x4f, 0x94, 0xea, 0x37, 0xe7, 0x8b, 0x57, 0x39] := by decide +kernel
+private theorem ofBE_natBytesLEAux :
+    ∀ (fuel x : Nat), x ≤ fuel → ofBE (natBytesLEAux fuel x).reverse = x
+  | 0, x, hx => by
+    obtain rfl : x = 0 := Nat.eq_zero_of_le_zero hx
+    rfl
+  | fuel + 1, x, hx => by
+    unfold natBytesLEAux
+    if hx0 : x = 0 then subst hx0; rfl
+    else
+      simp only [hx0, ↓reduceIte, List.reverse_cons, ofBE_append_single, UInt8.toNat_ofNat']
+      have hDivLe : x / 256 ≤ fuel :=
+        Nat.le_of_lt_succ (Nat.lt_of_lt_of_le (Nat.div_lt_self (Nat.pos_of_ne_zero hx0) (by decide)) hx)
+      rw [ofBE_natBytesLEAux fuel (x / 256) hDivLe]
+      have h8 : (2 : Nat) ^ 8 = 256 := rfl
+      rw [h8, Nat.mod_mod, Nat.mul_comm, Nat.div_add_mod]
+
+private theorem natBytesLEAux_last_nonzero :
+    ∀ (fuel x : Nat), 0 < x → x ≤ fuel →
+      ∃ b rest, (natBytesLEAux fuel x).reverse = b :: rest ∧ 0 < b.toNat
+  | 0, _, hxPos, hxLe => False.elim (Nat.not_lt_of_ge hxLe hxPos)
+  | fuel + 1, x, hxPos, hxLe => by
+    have hxNe : x ≠ 0 := Nat.ne_of_gt hxPos
+    unfold natBytesLEAux
+    simp only [hxNe, ↓reduceIte, List.reverse_cons]
+    if hq : x / 256 = 0 then
+      have hNil : natBytesLEAux fuel (x / 256) = [] := by
+        rw [hq]; cases fuel <;> simp [natBytesLEAux]
+      rw [hNil]
+      refine ⟨UInt8.ofNat (x % 256), [], rfl, ?_⟩
+      simp only [UInt8.toNat_ofNat']
+      have h8 : (2 : Nat) ^ 8 = 256 := rfl
+      have hDiv := Nat.div_add_mod x 256
+      rw [hq, Nat.mul_zero, Nat.zero_add] at hDiv
+      rw [h8, Nat.mod_mod, hDiv]; exact hxPos
+    else
+      have hDivLe : x / 256 ≤ fuel :=
+        Nat.le_of_lt_succ (Nat.lt_of_lt_of_le (Nat.div_lt_self hxPos (by decide)) hxLe)
+      obtain ⟨b, rest, hRev, hbPos⟩ := natBytesLEAux_last_nonzero fuel (x / 256) (Nat.pos_of_ne_zero hq) hDivLe
+      exact ⟨b, rest ++ [UInt8.ofNat (x % 256)], by rw [hRev, List.cons_append], hbPos⟩
+
+private theorem ofBE_foldl_ge :
+    ∀ (xs : List UInt8) (acc : Nat),
+      acc * 256 ^ xs.length ≤ xs.foldl (fun a u => a * 256 + u.toNat) acc
+  | [], _ => by simp
+  | u :: us, acc => by
+    simp only [List.foldl_cons, List.length_cons]
+    have h1 := Nat.mul_le_mul_right (256 ^ us.length) (Nat.le_add_right (acc * 256) u.toNat)
+    have h2 := ofBE_foldl_ge us (acc * 256 + u.toNat)
+    rw [Nat.pow_succ, Nat.mul_comm (256 ^ us.length) 256, ← Nat.mul_assoc]
+    exact Nat.le_trans h1 h2
+
+private theorem ofBE_cons_ge {b : UInt8} (hb : 0 < b.toNat) (rest : List UInt8) :
+    256 ^ rest.length ≤ ofBE (b :: rest) := by
+  unfold ofBE
+  simp only [List.foldl_cons, Nat.zero_mul, Nat.zero_add]
+  have h1 : 1 * 256 ^ rest.length ≤ b.toNat * 256 ^ rest.length :=
+    Nat.mul_le_mul_right (256 ^ rest.length) hb
+  rw [Nat.one_mul] at h1
+  exact Nat.le_trans h1 (ofBE_foldl_ge rest b.toNat)
+
+theorem ofBE_natBytesBE (x : Nat) : ofBE (natBytesBE x) = x := by
+  unfold natBytesBE
+  dsimp only
+  if hNil : natBytesLEAux x x = [] then
+    simp only [hNil, ↓reduceIte]
+    have hx0 : x = 0 := by
+      have h := ofBE_natBytesLEAux x x (Nat.le_refl x)
+      simpa [hNil, ofBE] using h.symm
+    subst hx0; rfl
+  else
+    simp only [hNil, ↓reduceIte]
+    exact ofBE_natBytesLEAux x x (Nat.le_refl x)
+
+private theorem append_inj_local {α : Type} :
+    ∀ {xs₁ xs₂ ys₁ ys₂ : List α},
+      xs₁ ++ ys₁ = xs₂ ++ ys₂ → xs₁.length = xs₂.length → xs₁ = xs₂ ∧ ys₁ = ys₂
+  | [], [], _, _, hEq, _ => ⟨rfl, hEq⟩
+  | _ :: _, [], _, _, _, hLen => by cases hLen
+  | [], _ :: _, _, _, _, hLen => by cases hLen
+  | x₁ :: xs₁, x₂ :: xs₂, _, _, hEq, hLen => by
+    obtain ⟨hx, hTail⟩ := List.cons.inj hEq
+    obtain ⟨hxs, hys⟩ := append_inj_local hTail (Nat.succ.inj hLen)
+    exact ⟨hx ▸ congrArg (x₁ :: ·) hxs, hys⟩
+
+private theorem pow_le_pow_right_local {b : Nat} (hb : 0 < b) :
+    ∀ {m n : Nat}, m ≤ n → b ^ m ≤ b ^ n
+  | _, _, h => by
+    induction h with
+    | refl => exact Nat.le_refl _
+    | step _ ih =>
+      rw [Nat.pow_succ]
+      exact Nat.le_trans (by simpa [Nat.mul_one] using ih) (Nat.mul_le_mul_left _ hb)
+
+private theorem lt_of_pow_lt_pow_256 :
+    ∀ (m n : Nat), 256 ^ m < 256 ^ n → m < n
+  | m, 0, h => False.elim (Nat.not_lt_of_ge (Nat.one_le_pow m 256 (by decide)) (by rw [Nat.pow_zero] at h; exact h))
+  | 0, n + 1, _ => Nat.zero_lt_succ n
+  | m + 1, n + 1, h => by
+    rw [Nat.pow_succ, Nat.pow_succ] at h
+    have hlt : 256 ^ m < 256 ^ n :=
+      if hm : 256 ^ m < 256 ^ n then hm
+      else False.elim (Nat.not_lt_of_ge (Nat.mul_le_mul_right 256 (Nat.le_of_not_lt hm)) h)
+    exact Nat.succ_lt_succ (lt_of_pow_lt_pow_256 m n hlt)
+
+private theorem natBytesBE_length_le_255 {x : Nat} (hx : x < 256 ^ 255) :
+    (natBytesBE x).length ≤ 255 := by
+  if hx0 : x = 0 then
+    subst hx0; decide
+  else
+    obtain ⟨b, rest, hRev, hbPos⟩ := natBytesLEAux_last_nonzero x x (Nat.pos_of_ne_zero hx0) (Nat.le_refl x)
+    have hNonNil : natBytesLEAux x x ≠ [] := fun hNil => by rw [hNil] at hRev; cases hRev
+    have hEq : natBytesBE x = b :: rest := by unfold natBytesBE; simp [hNonNil, hRev]
+    have hPowLe : 256 ^ rest.length ≤ x := by
+      rw [← ofBE_natBytesBE x, hEq]; exact ofBE_cons_ge hbPos rest
+    have hRestLt : rest.length < 255 := lt_of_pow_lt_pow_256 rest.length 255 (Nat.lt_of_le_of_lt hPowLe hx)
+    rw [hEq, List.length_cons]
+    exact hRestLt
+
+/-- Fast SP 800-185 bit-length bound witness avoiding kernel expansion of `256 ^ 255`. -/
+theorem bitlen_lt_sp800_bound {s : List UInt8} (h : s.length ≤ 65536) :
+    8 * s.length < 256 ^ 255 := by
+  have h1 : 8 * s.length ≤ 8 * 65536 := Nat.mul_le_mul_left 8 h
+  have h2 : 8 * 65536 < 256 ^ 3 := by decide
+  have h3 : 256 ^ 3 ≤ 256 ^ 255 := pow_le_pow_right_local (by decide) (by decide)
+  exact Nat.lt_of_le_of_lt h1 (Nat.lt_of_lt_of_le h2 h3)
+
+/-- **SP 800-185 `leftEncode` Prefix Injectivity (`leftEncode_prefix_inj`)**:
+    For all `x₁, x₂ < 256 ^ 255`, `leftEncode` is strictly left-self-delimiting. -/
+theorem leftEncode_prefix_inj {x₁ x₂ : Nat} {r₁ r₂ : List UInt8}
+    (hx₁ : x₁ < 256 ^ 255) (hx₂ : x₂ < 256 ^ 255)
+    (hEq : leftEncode x₁ ++ r₁ = leftEncode x₂ ++ r₂) :
+    x₁ = x₂ ∧ r₁ = r₂ := by
+  unfold leftEncode at hEq
+  simp only [List.cons_append, List.cons.injEq] at hEq
+  have hLen₁ := natBytesBE_length_le_255 hx₁
+  have hLen₂ := natBytesBE_length_le_255 hx₂
+  have hByte := congrArg UInt8.toNat hEq.1
+  simp only [UInt8.toNat_ofNat'] at hByte
+  have h8 : (2 : Nat) ^ 8 = 256 := rfl
+  rw [h8] at hByte
+  have hMod₁ : (natBytesBE x₁).length % 256 = (natBytesBE x₁).length :=
+    Nat.mod_eq_of_lt (Nat.lt_succ_of_le hLen₁)
+  have hMod₂ : (natBytesBE x₂).length % 256 = (natBytesBE x₂).length :=
+    Nat.mod_eq_of_lt (Nat.lt_succ_of_le hLen₂)
+  rw [hMod₁, hMod₂] at hByte
+  obtain ⟨hBytes, hRest⟩ := append_inj_local hEq.2 hByte
+  have hxEq : x₁ = x₂ := by rw [← ofBE_natBytesBE x₁, ← ofBE_natBytesBE x₂, hBytes]
+  exact ⟨hxEq, hRest⟩
+
+/-- **SP 800-185 `encodeString` Prefix Injectivity (`encodeString_prefix_inj`)**. -/
+theorem encodeString_prefix_inj {s₁ s₂ r₁ r₂ : List UInt8}
+    (hs₁ : 8 * s₁.length < 256 ^ 255) (hs₂ : 8 * s₂.length < 256 ^ 255)
+    (hEq : encodeString s₁ ++ r₁ = encodeString s₂ ++ r₂) :
+    s₁ = s₂ ∧ r₁ = r₂ := by
+  unfold encodeString at hEq
+  rw [List.append_assoc, List.append_assoc] at hEq
+  obtain ⟨hBitLen, hTail⟩ := leftEncode_prefix_inj hs₁ hs₂ hEq
+  exact append_inj_local hTail (Nat.eq_of_mul_eq_mul_left (by decide) hBitLen)
+
+private theorem pad_align_arith (L w : Nat) (hw : 0 < w) (hL : 1 ≤ L) :
+    (L + (w - L % w) % w) % w = 0 ∧ w ≤ L + (w - L % w) % w := by
+  have hDiv := Nat.div_add_mod L w
+  have hModLt : L % w < w := Nat.mod_lt L hw
+  if hRem0 : L % w = 0 then
+    rw [hRem0, Nat.sub_zero, Nat.mod_self, Nat.add_zero]
+    rw [hRem0, Nat.add_zero] at hDiv
+    cases hq : L / w with
+    | zero => rw [hq, Nat.mul_zero] at hDiv; exact False.elim (Nat.not_le_of_gt hL (Nat.le_of_eq hDiv.symm))
+    | succ k =>
+      rw [hq, Nat.mul_succ] at hDiv
+      exact ⟨hRem0, hDiv ▸ Nat.le_add_left w (w * k)⟩
+  else
+    rw [Nat.mod_eq_of_lt (Nat.sub_lt hw (Nat.pos_of_ne_zero hRem0))]
+    have hEq : L + (w - L % w) = w * (L / w) + w := by
+      conv => lhs; arg 1; rw [← hDiv]
+      rw [Nat.add_assoc, Nat.add_sub_of_le (Nat.le_of_lt hModLt)]
+    rw [hEq, ← Nat.mul_succ, Nat.mul_mod_right]
+    exact ⟨rfl, Nat.le_add_left w (w * (L / w))⟩
+
+theorem bytepad_length_mod (bytes : List UInt8) {w : Nat} (hw : 0 < w) :
+    (bytepad bytes w).length % w = 0 ∧ w ≤ (bytepad bytes w).length := by
+  have hwNe : w ≠ 0 := Nat.ne_of_gt hw
+  unfold bytepad
+  simp only [hwNe, ↓reduceIte, List.length_append, List.length_replicate]
+  exact pad_align_arith ((leftEncode w).length + bytes.length) w hw
+    (by unfold leftEncode; simp only [List.length_cons, Nat.add_right_comm, Nat.add_assoc]; exact Nat.le_add_left 1 _)
+
+
+theorem bytepad_eq (bytes : List UInt8) (width : Nat) :
+    bytepad bytes width =
+      if width = 0 then [] else
+        let z := leftEncode width ++ bytes
+        z ++ List.replicate ((width - z.length % width) % width) 0 := by
+  unfold bytepad
+  rfl
+
+theorem customizationPrefix_eq (s : List UInt8) :
+    customizationPrefix s = bytepad (encodeString [] ++ encodeString s) 136 := by
+  unfold customizationPrefix
+  rfl
+
+/-- Byte-length interface for one-byte SP 800-185 integers. -/
+theorem leftEncode_length_short {n : Nat} (h : n < 256) : (leftEncode n).length = 2 := by
+  cases n with
+  | zero => decide
+  | succ n =>
+    have hz : ∀ fuel, natBytesLEAux fuel 0 = [] := by
+      intro fuel; cases fuel <;> simp [natBytesLEAux]
+    simp [leftEncode, natBytesBE, natBytesLEAux, Nat.div_eq_of_lt h, hz]
+
+/-- Framing adds two bytes to strings shorter than 32 bytes. -/
+theorem encodeString_length_short {s : List UInt8} (h : s.length < 32) :
+    (encodeString s).length = 2 + s.length := by
+  unfold encodeString
+  rw [List.length_append, leftEncode_length_short (by omega)]
 
 end Qsag
 end
