@@ -3311,3 +3311,1615 @@ def qsag_aggregate_unforgeability_reduction
     those the log opened, or one of the four proof-system break witnesses. There is no
     caller-supplied oracle and no oracle premise: all of them are discharged from the log by
     `extractReachableHypertreeForgery_of_statelessLog`. -/
+def qsag_aggregate_unforgeability_reduction_of_statelessLog
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List PqSigningQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hStateless : inst.params.statefulJorts = false)
+    (hLayers : inst.params.numLayers ≤ 2 ^ 32)
+    (hFreshMsg : inst.message ∉
+      (signingOracleLog inst.suite inst.params sk_i queries).map Prod.fst)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    let table0 := (view.allTables.headD []).headD []
+    PSum (Sigma fun sig_i : PqHashSig =>
+            HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i
+              ((signingOracleLog inst.suite inst.params sk_i queries).flatMap fun e =>
+                (List.range inst.params.forsTrees).map fun j =>
+                  (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ inst.params.subtreeHeight),
+                   e.2.leafGlobalIdx % 2 ^ inst.params.subtreeHeight,
+                   sigForsLeafIdx inst.suite inst.params
+                     (derivePublicKey inst.suite inst.params sk_i) e.1 e.2 j)))
+      (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+          (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+          proof.agg.challenges)
+        (PSum (HashCollisionWitness pcsMerkleHash)
+          (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+            (WhirProximityHit arith dom proof.finalWord view.allTables proof)))) :=
+  match succinct_aggregation_signer_extraction arith dom inst law proof fs view
+          hAccept hBound i hPk hB hActive_i with
+  | .inr brk => .inr brk
+  | .inl ⟨sig_i, hVer_i⟩ =>
+    have hVerKey : verifyPqHashSig inst.suite inst.params
+        (derivePublicKey inst.suite inst.params sk_i) inst.message sig_i = true := by
+      rw [← hKey_i]; exact hVer_i
+    .inl ⟨sig_i, extractReachableHypertreeForgery_of_statelessLog inst.suite inst.params sk_i
+      queries inst.message sig_i hGeom hStateless hLayers hFreshMsg hVerKey⟩
+
+/-- **Aggregation unforgeability against an executed checked stateful signing oracle
+    (`qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog`, `0 Classical.choice`)**:
+    the stateful counterpart of `qsag_aggregate_unforgeability_reduction_of_statelessLog`. Signer
+    `i` runs `execCheckedStatefulOracle` from `initCheckedStatefulLatch` on the arbitrary query
+    list `queries`; freshness is stated against the log that run emitted, and every oracle
+    premise is discharged from it by `extractReachableHypertreeForgery_of_checkedStatefulLog`. -/
+def qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List CheckedStatefulQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hValidParams : inst.params.checkedStatefulValid = true)
+    (hFreshMsg : inst.message ∉
+      ((execCheckedStatefulOracle inst.suite inst.params sk_i initCheckedStatefulLatch
+        queries).emittedLog.map fun e => e.2.1))
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    let table0 := (view.allTables.headD []).headD []
+    PSum (Sigma fun sig_i : PqHashSig =>
+            HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i [])
+      (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+          (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+          proof.agg.challenges)
+        (PSum (HashCollisionWitness pcsMerkleHash)
+          (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+            (WhirProximityHit arith dom proof.finalWord view.allTables proof)))) :=
+  match succinct_aggregation_signer_extraction arith dom inst law proof fs view
+          hAccept hBound i hPk hB hActive_i with
+  | .inr brk => .inr brk
+  | .inl ⟨sig_i, hVer_i⟩ =>
+    have hVerKey : verifyPqHashSig inst.suite inst.params
+        (derivePublicKey inst.suite inst.params sk_i) inst.message sig_i = true := by
+      rw [← hKey_i]; exact hVer_i
+    .inl ⟨sig_i, extractReachableHypertreeForgery_of_checkedStatefulLog inst.suite inst.params
+      sk_i queries inst.message sig_i hGeom hValidParams hFreshMsg hVerKey⟩
+
+/-- Extraction view tree matching `MergeNode`. -/
+inductive SuccinctViewTree where
+  | leaf (view : SuccinctExtractionView)
+  | branch (view : SuccinctExtractionView) (left right : SuccinctViewTree)
+
+def ViewTreeBound (dom : WhirDomain) : MergeNode → SuccinctViewTree → Prop
+  | .leaf p _, .leaf v => StagesBound v.authPath dom.stages v.allTables p.stages
+  | .branch p _ left right, .branch v vl vr =>
+    StagesBound v.authPath dom.stages v.allTables p.stages ∧
+    ViewTreeBound dom left vl ∧ ViewTreeBound dom right vr
+  | _, _ => False
+
+end Aggregation
+
+/-- Node-by-node knowledge-soundness outcome across an entire recursive `MergeNode` tree. -/
+@[expose] def SuccinctTreeOutcome (arith : Aggregation.RowArithmetization)
+    (dom : Aggregation.WhirDomain) (inst : Aggregation.AggPublicInstance) :
+    Aggregation.MergeNode → Aggregation.SuccinctViewTree → Type
+  | .leaf p _, .leaf v => SuccinctOutcome arith dom inst p v
+  | .branch p _ left right, .branch v vl vr =>
+    SuccinctOutcome arith dom inst p v × SuccinctTreeOutcome arith dom inst left vl ×
+      SuccinctTreeOutcome arith dom inst right vr
+  | _, _ => PUnit
+
+namespace Aggregation
+
+theorem succinct_merge_tree_children_sound (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (budget : Nat) (p : SuccinctAggregateProof) (fs : List UInt8)
+    (left right : MergeNode)
+    (h : verifyMergeTree arith dom inst (budget + 1) (.branch p fs left right) = true) :
+    verifyMergeTree arith dom inst budget left = true ∧
+    verifyMergeTree arith dom inst budget right = true ∧
+    p.agg.childrenCommitment =
+      some (left.certificate.traceCommitment, right.certificate.traceCommitment) ∧
+    bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap = true ∧
+    p.agg.bitmap = bitmapUnionSpec left.certificate.bitmap right.certificate.bitmap ∧
+    verifySuccinctAggregate arith dom inst p fs = true := by
+  have h' : (decide (p.agg.childrenCommitment =
+        some (left.certificate.traceCommitment, right.certificate.traceCommitment)) &&
+      verifyMergeTree arith dom inst budget left &&
+      verifyMergeTree arith dom inst budget right &&
+      bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap &&
+      decide (p.agg.bitmap = bitmapUnionSpec left.certificate.bitmap right.certificate.bitmap) &&
+      verifySuccinctAggregate arith dom inst p fs) = true := h
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hNode⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hUnion⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hDisj⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hRight⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨hComm, hLeft⟩
+  exact ⟨hLeft, hRight, of_decide_eq_true hComm, hDisj, of_decide_eq_true hUnion, hNode⟩
+
+/-- **Knowledge Soundness of Recursive Succinct Merge Trees (`succinct_merge_tree_knowledge_soundness`,
+    `0 Classical.choice`)**:
+    Every node of an accepted `MergeNode` tree constructively yields valid `PqHashSig` witnesses
+    for all active signers or a concrete transcript-indexed WHIR break witness at that node. -/
+def succinct_merge_tree_knowledge_soundness (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst) :
+    ∀ (budget : Nat) (node : MergeNode) (views : SuccinctViewTree),
+      verifyMergeTree arith dom inst budget node = true →
+      ViewTreeBound dom node views → SuccinctTreeOutcome arith dom inst node views
+  | 0, _, _, h, _ => False.elim (Bool.false_ne_true h)
+  | _ + 1, .leaf p fs, .leaf v, h, hB =>
+    succinct_aggregation_knowledge_soundness arith dom inst law p fs v
+      (Bool.and_eq_true_iff.mp h).2 hB
+  | _ + 1, .leaf _ _, .branch _ _ _, _, hB => False.elim hB
+  | _ + 1, .branch _ _ _ _, .leaf _, _, hB => False.elim hB
+  | budget + 1, .branch p fs left right, .branch v vl vr, h, hB =>
+    have hU := succinct_merge_tree_children_sound arith dom inst budget p fs left right h
+    (succinct_aggregation_knowledge_soundness arith dom inst law p fs v hU.2.2.2.2.2 hB.1,
+      succinct_merge_tree_knowledge_soundness arith dom inst law budget left vl hU.1 hB.2.1,
+      succinct_merge_tree_knowledge_soundness arith dom inst law budget right vr hU.2.1 hB.2.2)
+
+/-- Propositional projection of `SuccinctOutcome`: either every active validator bit in
+    `proof.agg.bitmap` decodes from the committed Round-0 codeword `table0` to a valid
+    `verifyPqHashSig` signature, or one of the four transcript-indexed WHIR break witnesses
+    is inhabited. -/
+def SuccinctSoundOutcomeProp (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof)
+    (view : SuccinctExtractionView) : Prop :=
+  let table0 := (view.allTables.headD []).headD []
+  checkAllActiveSigners inst.suite inst.params inst.message inst.committee
+    proof.agg.bitmap (arith.decodeSigs table0) = true ∨
+  Nonempty (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+    (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+    proof.agg.challenges) ∨
+  Nonempty (HashCollisionWitness pcsMerkleHash) ∨
+  Nonempty (WhirStageQueryMiss proof.finalWord dom view.allTables proof) ∨
+  Nonempty (WhirProximityHit arith dom proof.finalWord view.allTables proof)
+
+theorem succinctOutcome_to_prop {arith : RowArithmetization} {dom : WhirDomain}
+    {inst : AggPublicInstance} {proof : SuccinctAggregateProof} {view : SuccinctExtractionView}
+    (out : SuccinctOutcome arith dom inst proof view) :
+    SuccinctSoundOutcomeProp arith dom inst proof view :=
+  match out with
+  | .inl ⟨_, hAll⟩ => .inl hAll
+  | .inr (.inl hit) => .inr (.inl ⟨hit⟩)
+  | .inr (.inr (.inl col)) => .inr (.inr (.inl ⟨col⟩))
+  | .inr (.inr (.inr (.inl miss))) => .inr (.inr (.inr (.inl ⟨miss⟩)))
+  | .inr (.inr (.inr (.inr prox))) => .inr (.inr (.inr (.inr ⟨prox⟩)))
+
+/-- **`Prop` Knowledge Soundness of Multi-Stage `GoldilocksExt4` WHIR
+    (`succinct_aggregation_knowledge_soundness_thm`)**:
+    Proved directly by projecting the constructive `0 Classical.choice` `PSum` extractor
+    `succinct_aggregation_knowledge_soundness`. -/
+theorem succinct_aggregation_knowledge_soundness_thm (arith : RowArithmetization)
+    (dom : WhirDomain) (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctSoundOutcomeProp arith dom inst proof view :=
+  succinctOutcome_to_prop
+    (succinct_aggregation_knowledge_soundness arith dom inst law proof fs view hAccept hBound)
+
+/-- Propositional projection of the end-to-end hypertree EUF-CMA + WHIR unforgeability reduction. -/
+def SuccinctUnforgeabilityProp (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (sk_i : PqSecretKey)
+    (revealedFors : List (UInt64 × Nat × Nat))
+    (proof : SuccinctAggregateProof) (view : SuccinctExtractionView) : Prop :=
+  let table0 := (view.allTables.headD []).headD []
+  (∃ sig_i : PqHashSig,
+    Nonempty (HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i revealedFors)) ∨
+  Nonempty (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+    (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+    proof.agg.challenges) ∨
+  Nonempty (HashCollisionWitness pcsMerkleHash) ∨
+  Nonempty (WhirStageQueryMiss proof.finalWord dom view.allTables proof) ∨
+  Nonempty (WhirProximityHit arith dom proof.finalWord view.allTables proof)
+
+private theorem unforgeabilityOutcome_to_prop {arith : RowArithmetization} {dom : WhirDomain}
+    {inst : AggPublicInstance} {sk_i : PqSecretKey}
+    {revealedFors : List (UInt64 × Nat × Nat)}
+    {proof : SuccinctAggregateProof} {view : SuccinctExtractionView}
+    (out :
+      let table0 := (view.allTables.headD []).headD []
+      PSum (Sigma fun sig_i : PqHashSig =>
+              HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i revealedFors)
+        (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+            (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+            proof.agg.challenges)
+          (PSum (HashCollisionWitness pcsMerkleHash)
+            (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+              (WhirProximityHit arith dom proof.finalWord view.allTables proof))))) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i revealedFors proof view :=
+  match out with
+  | .inl ⟨sig_i, brk⟩ => .inl ⟨sig_i, ⟨brk⟩⟩
+  | .inr (.inl hit) => .inr (.inl ⟨hit⟩)
+  | .inr (.inr (.inl col)) => .inr (.inr (.inl ⟨col⟩))
+  | .inr (.inr (.inr (.inl miss))) => .inr (.inr (.inr (.inl ⟨miss⟩)))
+  | .inr (.inr (.inr (.inr prox))) => .inr (.inr (.inr (.inr ⟨prox⟩)))
+
+/-- **`Prop` End-to-End Succinct `GoldilocksExt4` WHIR Aggregation Unforgeability Reduction
+    (`qsag_aggregate_unforgeability_reduction_thm`)**:
+    Proved directly by projecting the constructive `0 Classical.choice` extractor
+    `qsag_aggregate_unforgeability_reduction`. -/
+theorem qsag_aggregate_unforgeability_reduction_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queriedMsgs : List (List UInt8))
+    (qOracle : QueriedWotsOracle)
+    (revealedFors : List (UInt64 × Nat × Nat))
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hFreshMsg : inst.message ∉ queriedMsgs)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages)
+    (hStatefulLeaf0Msg : ∀ sig : PqHashSig, inst.params.statefulJorts = true →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        ∃ mPrev ∈ queriedMsgs,
+          hRoot = thPreHash inst.suite sk_i.pkSeed
+            (derivePublicKey inst.suite inst.params sk_i).pkRoot mPrev)
+    (hStatelessLayer0Root : ∀ sig : PqHashSig, inst.params.statefulJorts = false →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        hRoot = computeForsPk inst.suite inst.params sk_i
+          (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight))
+    (hUpperOracle : ∀ (l : Nat) (g : Nat), ReachableUpperHypertreePos inst.params l g →
+      let hRoot0 := computeXmssSubtreeRoot inst.suite inst.params sk_i
+        (UInt32.ofNat (l - 1)) (UInt64.ofNat g)
+      (∀ hRand hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+        let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+          (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+          (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (UInt32.ofNat (g % 2 ^ inst.params.subtreeHeight)) hCtr
+        let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+        checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+        recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) digH hChains =
+        computeWotsPk inst.suite inst.params sk_i (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight)) ∧
+      (∀ hRand hR hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hR, hCtr, hChains) → hR = hRoot0))
+    (hLayer0Valid : ∀ sig : PqHashSig, ∀ hRand hRoot0 hCtr hChains,
+      qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+      let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+        (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+        0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (UInt32.ofNat (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) hCtr
+      let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+      checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+      recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) digH hChains =
+      computeWotsPk inst.suite inst.params sk_i 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i revealedFors proof view :=
+  unforgeabilityOutcome_to_prop
+    (qsag_aggregate_unforgeability_reduction arith dom inst law proof fs view i hPk hB sk_i hKey_i
+      hActive_i queriedMsgs qOracle revealedFors hGeom hFreshMsg hAccept hBound
+      hStatefulLeaf0Msg hStatelessLayer0Root hUpperOracle hLayer0Valid)
+
+/-- **`Prop` Unforgeability Reduction Against an Executed Stateless Signing Oracle
+    (`qsag_aggregate_unforgeability_reduction_of_statelessLog_thm`)**. -/
+theorem qsag_aggregate_unforgeability_reduction_of_statelessLog_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List PqSigningQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hStateless : inst.params.statefulJorts = false)
+    (hLayers : inst.params.numLayers ≤ 2 ^ 32)
+    (hFreshMsg : inst.message ∉
+      (signingOracleLog inst.suite inst.params sk_i queries).map Prod.fst)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i
+      ((signingOracleLog inst.suite inst.params sk_i queries).flatMap fun e =>
+        (List.range inst.params.forsTrees).map fun j =>
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ inst.params.subtreeHeight),
+           e.2.leafGlobalIdx % 2 ^ inst.params.subtreeHeight,
+           sigForsLeafIdx inst.suite inst.params
+             (derivePublicKey inst.suite inst.params sk_i) e.1 e.2 j))
+      proof view :=
+  unforgeabilityOutcome_to_prop
+    (qsag_aggregate_unforgeability_reduction_of_statelessLog arith dom inst law proof fs view
+      i hPk hB sk_i hKey_i hActive_i queries hGeom hStateless hLayers hFreshMsg hAccept hBound)
+
+/-- **`Prop` Unforgeability Reduction Against an Executed Checked Stateful Signing Oracle
+    (`qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog_thm`)**. -/
+theorem qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog_thm
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List CheckedStatefulQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hValidParams : inst.params.checkedStatefulValid = true)
+    (hFreshMsg : inst.message ∉
+      ((execCheckedStatefulOracle inst.suite inst.params sk_i initCheckedStatefulLatch
+        queries).emittedLog.map fun e => e.2.1))
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctUnforgeabilityProp arith dom inst sk_i [] proof view :=
+  unforgeabilityOutcome_to_prop
+    (qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog arith dom inst law proof fs view
+      i hPk hB sk_i hKey_i hActive_i queries hGeom hValidParams hFreshMsg hAccept hBound)
+
+theorem verifyMergeTree_bitmap_length (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (budget : Nat) (node : MergeNode)
+    (h : verifyMergeTree arith dom inst budget node = true) :
+    node.certificate.bitmap.length = inst.committee.length := by
+  cases budget with
+  | zero => cases h
+  | succ b =>
+    cases node with
+    | leaf p fs =>
+      have hAcc := (Bool.and_eq_true_iff.mp h).2
+      exact (verifyAggregateAlgebra_facts inst.committee p.agg
+        (succinct_acceptance_facts arith dom inst p fs hAcc).2.2.2.1).1
+    | branch p fs left right =>
+      have hAcc := (succinct_merge_tree_children_sound arith dom inst b p fs left right h).2.2.2.2.2
+      exact (verifyAggregateAlgebra_facts inst.committee p.agg
+        (succinct_acceptance_facts arith dom inst p fs hAcc).2.2.2.1).1
+
+/-- Recursive propositional knowledge soundness + disjoint stake-popcount conservation across an
+    entire accepted `MergeNode` tree. -/
+def SuccinctMergeTreeSoundProp (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) : MergeNode → SuccinctViewTree → Prop
+  | .leaf p _, .leaf v => SuccinctSoundOutcomeProp arith dom inst p v
+  | .branch p _ left right, .branch v vl vr =>
+    SuccinctSoundOutcomeProp arith dom inst p v ∧
+    p.agg.childrenCommitment =
+      some (left.certificate.traceCommitment, right.certificate.traceCommitment) ∧
+    bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap = true ∧
+    p.agg.bitmap = bitmapUnionSpec left.certificate.bitmap right.certificate.bitmap ∧
+    bitmapPopcountSpec p.agg.bitmap =
+      bitmapPopcountSpec left.certificate.bitmap + bitmapPopcountSpec right.certificate.bitmap ∧
+    SuccinctMergeTreeSoundProp arith dom inst left vl ∧
+    SuccinctMergeTreeSoundProp arith dom inst right vr
+  | _, _ => False
+
+/-- **`Prop` Knowledge Soundness & Stake Conservation of Recursive Succinct Merge Trees
+    (`succinct_merge_tree_knowledge_soundness_thm`)**:
+    Proved directly by combining the constructive `0 Classical.choice` extractor
+    `succinct_merge_tree_knowledge_soundness` with `popcount_union_disjoint_eq_add` at every
+    internal branch node. -/
+theorem succinct_merge_tree_knowledge_soundness_thm (arith : RowArithmetization)
+    (dom : WhirDomain) (inst : AggPublicInstance) (law : arith.Lawful dom inst) :
+    ∀ (budget : Nat) (node : MergeNode) (views : SuccinctViewTree),
+      verifyMergeTree arith dom inst budget node = true →
+      ViewTreeBound dom node views →
+      SuccinctMergeTreeSoundProp arith dom inst node views
+  | 0, _, _, h, _ => False.elim (Bool.false_ne_true h)
+  | b + 1, .leaf p fs, .leaf v, h, hB =>
+    succinctOutcome_to_prop
+      (succinct_merge_tree_knowledge_soundness arith dom inst law (b + 1) (.leaf p fs) (.leaf v) h hB)
+  | _ + 1, .leaf _ _, .branch _ _ _, _, hB => False.elim hB
+  | _ + 1, .branch _ _ _ _, .leaf _, _, hB => False.elim hB
+  | budget + 1, .branch p fs left right, .branch v vl vr, h, hB => by
+    have hTree := succinct_merge_tree_knowledge_soundness arith dom inst law
+      (budget + 1) (.branch p fs left right) (.branch v vl vr) h hB
+    have hU := succinct_merge_tree_children_sound arith dom inst budget p fs left right h
+    have hLenL := verifyMergeTree_bitmap_length arith dom inst budget left hU.1
+    have hLenR := verifyMergeTree_bitmap_length arith dom inst budget right hU.2.1
+    have hPop : bitmapPopcountSpec p.agg.bitmap =
+        bitmapPopcountSpec left.certificate.bitmap +
+          bitmapPopcountSpec right.certificate.bitmap := by
+      rw [hU.2.2.2.2.1]
+      exact popcount_union_disjoint_eq_add left.certificate.bitmap right.certificate.bitmap
+        (hLenL.trans hLenR.symm) hU.2.2.2.1
+    exact ⟨succinctOutcome_to_prop hTree.1, hU.2.2.1, hU.2.2.2.1, hU.2.2.2.2.1, hPop,
+      succinct_merge_tree_knowledge_soundness_thm arith dom inst law budget left vl hU.1 hB.2.1,
+      succinct_merge_tree_knowledge_soundness_thm arith dom inst law budget right vr hU.2.1 hB.2.2⟩
+
+end Aggregation
+
+/-! ## 9. Adaptive Challenge-Vector & Falling-Factorial Query Counting Foundations -/
+
+private theorem filter_const_false {α : Type} : ∀ (l : List α), l.filter (fun _ => false) = []
+  | [] => rfl
+  | _ :: xs => filter_const_false xs
+
+theorem filter_length_le_self {α : Type} (p : α → Bool) :
+    ∀ (l : List α), (l.filter p).length ≤ l.length
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := filter_length_le_self p xs
+    cases hp : p x
+    · simp only [List.filter, hp, List.length_cons]; exact Nat.le_succ_of_le ih
+    · simp only [List.filter, hp, List.length_cons]; exact Nat.succ_le_succ ih
+
+theorem filter_flatMap_eq {α β : Type} (p : β → Bool) (f : α → List β) :
+    ∀ (l : List α), (l.flatMap f).filter p = l.flatMap (fun x => (f x).filter p)
+  | [] => rfl
+  | x :: xs => by
+    rw [List.flatMap_cons, List.flatMap_cons, List.filter_append, filter_flatMap_eq p f xs]
+
+theorem filter_map_length {α β : Type} (p : β → Bool) (f : α → β) :
+    ∀ (l : List α), ((l.map f).filter p).length = (l.filter (fun x => p (f x))).length
+  | [] => rfl
+  | x :: xs => by
+    have ih := filter_map_length p f xs
+    cases hp : p (f x)
+    · simp only [List.map, List.filter, hp]; exact ih
+    · simp only [List.map, List.filter, hp, List.length_cons]; exact congrArg Nat.succ ih
+
+private theorem length_flatMap_const {α β : Type} (k : Nat) (f : α → List β) :
+    ∀ (l : List α), (∀ c ∈ l, (f c).length = k) → (l.flatMap f).length = l.length * k
+  | [], _ => by show 0 = 0 * k; rw [Nat.zero_mul]
+  | c :: l, h => by
+    have ih := length_flatMap_const k f l (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hc := h c (List.mem_cons_self ..)
+    rw [List.flatMap_cons, List.length_append, ih, hc, List.length_cons, Nat.add_mul, Nat.one_mul,
+      Nat.add_comm]
+
+theorem length_flatMap_le_split {α β : Type} (b : α → Bool) (T M : Nat) (f : α → List β) :
+    ∀ (l : List α), (∀ c ∈ l, (f c).length ≤ if b c = true then T else M) →
+      (l.flatMap f).length ≤ (l.filter b).length * T + l.length * M
+  | [], _ => Nat.zero_le _
+  | c :: l, h => by
+    have ih := length_flatMap_le_split b T M f l (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hc := h c (List.mem_cons_self ..)
+    rw [List.flatMap_cons, List.length_append, List.length_cons, Nat.add_mul, Nat.one_mul]
+    cases hb : b c
+    · rw [hb] at hc; have _ : (f c).length ≤ M := hc
+      simp only [List.filter, hb]; omega
+    · rw [hb] at hc; have _ : (f c).length ≤ T := hc
+      simp only [List.filter, hb, List.length_cons]; rw [Nat.add_mul, Nat.one_mul]; omega
+
+/-- All length-`n` challenge vectors over `S`. -/
+def challengeVectors {α : Type} (S : List α) : Nat → List (List α)
+  | 0 => [[]]
+  | n + 1 => S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs))
+
+theorem challengeVectors_length {α : Type} (S : List α) :
+    ∀ (n : Nat), (challengeVectors S n).length = S.length ^ n
+  | 0 => rfl
+  | n + 1 => by
+    show (S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs))).length = _
+    rw [length_flatMap_const (S.length ^ n) _ S
+      (fun r _ => by rw [List.length_map, challengeVectors_length S n]),
+      Nat.pow_succ, Nat.mul_comm]
+
+def anyRoundEvent {α : Type} : (List α → α → Bool) → List α → Bool
+  | _, [] => false
+  | E, r :: rs => E [] r || anyRoundEvent (fun pre => E (r :: pre)) rs
+
+def roundBoundSum : (Nat → Nat) → Nat → Nat
+  | _, 0 => 0
+  | d, n + 1 => d 0 + roundBoundSum (fun j => d (j + 1)) n
+
+/-- **Adaptive Union Bound (`anyRoundEvent_count_le`)**:
+    Over any challenge domain `S`, if each round `j` has at most `d j` bad challenges conditioned
+    on any prefix, at most `(d 0 + ... + d (n - 1)) * |S|^(n - 1)` challenge vectors trigger `E`. -/
+theorem anyRoundEvent_count_le {α : Type} (S : List α) :
+    ∀ (n : Nat) (E : List α → α → Bool) (d : Nat → Nat),
+      (∀ pre, (S.filter (E pre)).length ≤ d pre.length) →
+      ((challengeVectors S n).filter (anyRoundEvent E)).length ≤
+        roundBoundSum d n * S.length ^ (n - 1)
+  | 0, E, _, _ => by
+    show (([[]] : List (List α)).filter (anyRoundEvent E)).length ≤ _
+    simp only [List.filter, anyRoundEvent]; exact Nat.zero_le _
+  | n + 1, E, d, h => by
+    show ((S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs))).filter
+      (anyRoundEvent E)).length ≤ (d 0 + roundBoundSum (fun j => d (j + 1)) n) * S.length ^ (n + 1 - 1)
+    rw [filter_flatMap_eq, Nat.add_sub_cancel]
+    let M := roundBoundSum (fun j => d (j + 1)) n * S.length ^ (n - 1)
+    have hEach : ∀ r ∈ S,
+        (((challengeVectors S n).map (fun rs => r :: rs)).filter (anyRoundEvent E)).length ≤
+          if E [] r = true then S.length ^ n else M := by
+      intro r _
+      rw [filter_map_length]
+      cases hE : E [] r
+      · have hfun : (fun rs => anyRoundEvent E (r :: rs)) =
+            anyRoundEvent (fun pre => E (r :: pre)) := by
+          funext rs; show (E [] r || anyRoundEvent (fun pre => E (r :: pre)) rs) = _
+          rw [hE]; rfl
+        rw [hfun]
+        exact anyRoundEvent_count_le S n (fun pre => E (r :: pre)) (fun j => d (j + 1))
+          (fun pre => h (r :: pre))
+      · have hle := filter_length_le_self (fun rs => anyRoundEvent E (r :: rs)) (challengeVectors S n)
+        rw [challengeVectors_length] at hle; exact hle
+    have hSplit := length_flatMap_le_split (E []) (S.length ^ n) M
+      (fun r => ((challengeVectors S n).map (fun rs => r :: rs)).filter (anyRoundEvent E)) S hEach
+    have hA : (S.filter (E [])).length * S.length ^ n ≤ d 0 * S.length ^ n :=
+      Nat.mul_le_mul_right _ (h [])
+    have hB : S.length * M ≤ roundBoundSum (fun j => d (j + 1)) n * S.length ^ n := by
+      cases n with
+      | zero =>
+        show S.length * (0 * S.length ^ (0 - 1)) ≤ _
+        rw [Nat.zero_mul, Nat.mul_zero]; exact Nat.zero_le _
+      | succ k =>
+        show S.length * (roundBoundSum (fun j => d (j + 1)) (k + 1) * S.length ^ (k + 1 - 1)) ≤ _
+        rw [Nat.add_sub_cancel, Nat.pow_succ, Nat.mul_left_comm, Nat.mul_comm S.length (S.length ^ k)]
+        exact Nat.le_refl _
+    rw [Nat.add_mul]
+    exact Nat.le_trans hSplit (Nat.add_le_add hA hB)
+
+def eraseFirstAt {α : Type} : Nat → List α → List α
+  | _, [] => []
+  | 0, _ :: xs => xs
+  | i + 1, x :: xs => x :: eraseFirstAt i xs
+
+theorem eraseFirstAt_length {α : Type} :
+    ∀ (i : Nat) (l : List α), i < l.length → (eraseFirstAt i l).length = l.length - 1
+  | 0, _ :: _, _ => rfl
+  | _ + 1, [], h => absurd h (Nat.not_lt_zero _)
+  | i + 1, _ :: xs, h => by
+    have ih := eraseFirstAt_length i xs (Nat.lt_of_succ_lt_succ h)
+    cases xs with
+    | nil => exact absurd (Nat.lt_of_succ_lt_succ h) (Nat.not_lt_zero _)
+    | cons _ _ => exact congrArg Nat.succ ih
+
+def countGood {α : Type} (p : α → Bool) (l : List α) : Nat := (l.filter p).length
+
+theorem countGood_add_complement {α : Type} (p : α → Bool) :
+    ∀ (l : List α), countGood p l + countGood (fun x => !p x) l = l.length
+  | [] => rfl
+  | x :: xs => by
+    have ih := countGood_add_complement p xs
+    cases hp : p x <;>
+      simp only [countGood, List.filter, hp, Bool.not_true, Bool.not_false, List.length_cons] at ih ⊢ <;>
+      omega
+
+theorem countGood_eraseFirstAt_good {α : Type} (p : α → Bool) :
+    ∀ (i : Nat) (l : List α) (hi : i < l.length), p (l[i]'hi) = true →
+      countGood p (eraseFirstAt i l) + 1 = countGood p l
+  | 0, x :: _, _, hx => by
+    have hx' : p x = true := hx
+    simp only [eraseFirstAt, countGood, List.filter, hx', List.length_cons]
+  | i + 1, y :: xs, hi, hx => by
+    have ih := countGood_eraseFirstAt_good p i xs (Nat.lt_of_succ_lt_succ hi) hx
+    cases hpy : p y
+    · simp only [eraseFirstAt, countGood, List.filter, hpy]
+      exact ih
+    · simp only [eraseFirstAt, countGood, List.filter, hpy, List.length_cons] at ih ⊢
+      omega
+
+/-- Ordered `q`-tuples drawn without replacement from `dom`. -/
+def aggDistinctTuples {α : Type} : Nat → List α → List (List α)
+  | 0, _ => [[]]
+  | q + 1, dom =>
+    (List.range dom.length).flatMap (fun i =>
+      match dom[i]? with
+      | none => []
+      | some x => (aggDistinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest))
+
+def fallingFactorial : Nat → Nat → Nat
+  | _, 0 => 1
+  | n, q + 1 => n * fallingFactorial (n - 1) q
+
+theorem fallingFactorial_pos : ∀ (n q : Nat), q ≤ n → 0 < fallingFactorial n q
+  | _, 0, _ => Nat.one_pos
+  | n, q + 1, h => by
+    show 0 < n * fallingFactorial (n - 1) q
+    exact Nat.mul_pos (Nat.lt_of_lt_of_le (Nat.succ_pos q) h)
+      (fallingFactorial_pos (n - 1) q (Nat.le_sub_of_add_le h))
+
+theorem fallingFactorial_of_lt : ∀ (n q : Nat), n < q → fallingFactorial n q = 0
+  | 0, _ + 1, _ => Nat.zero_mul _
+  | k + 1, q + 1, h => by
+    show (k + 1) * fallingFactorial k q = 0
+    rw [fallingFactorial_of_lt k q (Nat.lt_of_succ_lt_succ h), Nat.mul_zero]
+
+theorem aggDistinctTuples_length {α : Type} :
+    ∀ (q : Nat) (dom : List α),
+      (aggDistinctTuples q dom).length = fallingFactorial dom.length q
+  | 0, _ => rfl
+  | q + 1, dom => by
+    show ((List.range dom.length).flatMap _).length = dom.length * fallingFactorial (dom.length - 1) q
+    have hEach : ∀ i ∈ List.range dom.length,
+        (match dom[i]? with
+          | none => []
+          | some x => (aggDistinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest)).length =
+          fallingFactorial (dom.length - 1) q := by
+      intro i hi
+      have hlt : i < dom.length := List.mem_range.mp hi
+      rw [List.getElem?_eq_getElem hlt, List.length_map, aggDistinctTuples_length q,
+        eraseFirstAt_length i dom hlt]
+    rw [length_flatMap_const _ _ (List.range dom.length) hEach, List.length_range]
+
+private theorem range_filter_getElem_length {α : Type} (p : α → Bool) (dom : List α) :
+    ((List.range dom.length).filter (fun i =>
+      match dom[i]? with | none => false | some x => p x)).length = countGood p dom := by
+  induction dom with
+  | nil => rfl
+  | cons x xs ih =>
+    rw [List.length_cons, List.range_succ_eq_map, List.filter_cons]
+    have h0 : (match (x :: xs)[0]? with | none => false | some y => p y) = p x := rfl
+    have hS : ∀ j, (match (x :: xs)[j + 1]? with | none => false | some y => p y) =
+        (match xs[j]? with | none => false | some y => p y) := fun _ => rfl
+    rw [h0]
+    have hm := filter_map_length
+      (fun i => match (x :: xs)[i]? with | none => false | some y => p y) Nat.succ (List.range xs.length)
+    simp only [hS] at hm
+    cases hp : p x
+    · simp only [hp, Bool.false_eq_true, ↓reduceIte, countGood, List.filter]
+      exact hm.trans ih
+    · simp only [hp, ↓reduceIte, List.length_cons, countGood, List.filter]
+      exact congrArg Nat.succ (hm.trans ih)
+
+theorem aggDistinctTuples_all_good_length {α : Type} (p : α → Bool) :
+    ∀ (q : Nat) (dom : List α),
+      ((aggDistinctTuples q dom).filter (fun t => t.all p)).length =
+        fallingFactorial (countGood p dom) q
+  | 0, _ => rfl
+  | q + 1, dom => by
+    show (((List.range dom.length).flatMap _).filter (fun (t : List α) => t.all p)).length =
+      countGood p dom * fallingFactorial (countGood p dom - 1) q
+    rw [filter_flatMap_eq]
+    let isGoodIdx : Nat → Bool := fun i => match dom[i]? with | none => false | some x => p x
+    let F : Nat → List (List α) := fun i =>
+      (match dom[i]? with
+        | none => []
+        | some x => (aggDistinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest)).filter
+          (fun t => t.all p)
+    have hBadZero : ∀ i ∈ List.range dom.length, isGoodIdx i = false → (F i).length = 0 := by
+      intro i hi hfg
+      have hlt : i < dom.length := List.mem_range.mp hi
+      have hpx : p (dom[i]'hlt) = false := by
+        dsimp only [isGoodIdx] at hfg; rw [List.getElem?_eq_getElem hlt] at hfg; exact hfg
+      dsimp only [F]
+      rw [List.getElem?_eq_getElem hlt, filter_map_length]
+      have hfun : (fun rest : List α => (dom[i] :: rest).all p) = fun _ => false := by
+        funext rest; show (p dom[i] && rest.all p) = false; rw [hpx, Bool.false_and]
+      rw [hfun, filter_const_false]; rfl
+    have hGoodConst : ∀ i ∈ List.range dom.length, isGoodIdx i = true →
+        (F i).length = fallingFactorial (countGood p dom - 1) q := by
+      intro i hi hfg
+      have hlt : i < dom.length := List.mem_range.mp hi
+      have hpx : p (dom[i]'hlt) = true := by
+        dsimp only [isGoodIdx] at hfg; rw [List.getElem?_eq_getElem hlt] at hfg; exact hfg
+      dsimp only [F]
+      rw [List.getElem?_eq_getElem hlt, filter_map_length]
+      have hfun : (fun rest : List α => (dom[i] :: rest).all p) = fun rest => rest.all p := by
+        funext rest; show (p dom[i] && rest.all p) = rest.all p; rw [hpx, Bool.true_and]
+      rw [hfun, aggDistinctTuples_all_good_length p q (eraseFirstAt i dom)]
+      have hcnt := countGood_eraseFirstAt_good p i dom hlt hpx
+      have hsub : countGood p (eraseFirstAt i dom) = countGood p dom - 1 := by omega
+      rw [hsub]
+    have hLe := length_flatMap_le_split isGoodIdx (fallingFactorial (countGood p dom - 1) q) 0 F
+      (List.range dom.length) (fun i hi => by
+        cases hb : isGoodIdx i
+        · rw [hBadZero i hi hb]; exact Nat.zero_le 0
+        · rw [hGoodConst i hi hb]; exact Nat.le_refl _)
+    rw [Nat.mul_zero, Nat.add_zero, range_filter_getElem_length] at hLe
+    have hGe : countGood p dom * fallingFactorial (countGood p dom - 1) q ≤
+        ((List.range dom.length).flatMap F).length := by
+      have hSub : ((List.range dom.length).filter isGoodIdx).flatMap F =
+          (List.range dom.length).flatMap (fun i => if isGoodIdx i then F i else []) := by
+        induction (List.range dom.length) with
+        | nil => rfl
+        | cons a as ih =>
+          cases hb : isGoodIdx a <;> simp [List.filter, hb, ih]
+      have hEqLen : (((List.range dom.length).filter isGoodIdx).flatMap F).length =
+          countGood p dom * fallingFactorial (countGood p dom - 1) q := by
+        rw [length_flatMap_const (fallingFactorial (countGood p dom - 1) q) F
+          ((List.range dom.length).filter isGoodIdx)
+          (fun i hi => by
+            have hm := List.mem_filter.mp hi
+            exact hGoodConst i hm.1 hm.2),
+          range_filter_getElem_length]
+      rw [← hEqLen, hSub]
+      have hEqAll : ∀ l : List Nat, (∀ i ∈ l, isGoodIdx i = false → F i = []) →
+          (l.flatMap (fun i => if isGoodIdx i then F i else [])).length = (l.flatMap F).length := by
+        intro l hl
+        induction l with
+        | nil => rfl
+        | cons a as ih =>
+          cases hb : isGoodIdx a
+          · rw [List.flatMap_cons, List.flatMap_cons, hl a (.head _) hb]
+            simp [hb, ih (fun i hi => hl i (.tail _ hi))]
+          · simp [hb, ih (fun i hi => hl i (.tail _ hi))]
+      rw [hEqAll (List.range dom.length) (fun i hi hb =>
+        List.eq_nil_of_length_eq_zero (hBadZero i hi hb))]
+      exact Nat.le_refl _
+    exact Nat.le_antisymm hLe hGe
+
+private theorem fallingFactorial_mul_pow_le (a b : Nat) (hab : a ≤ b) :
+    ∀ (q g n : Nat), g ≤ n → b * g ≤ a * n →
+      fallingFactorial g q * b ^ q ≤ a ^ q * fallingFactorial n q
+  | 0, _, _, _, _ => by
+    show 1 * 1 ≤ 1 * 1; exact Nat.le_refl 1
+  | q + 1, g, n, hgn, hbg => by
+    rcases Nat.eq_zero_or_pos g with rfl | hgpos
+    · simp only [fallingFactorial, Nat.zero_mul]
+      exact Nat.zero_le _
+    · have h1 : b * (g - 1) ≤ a * (n - 1) := by
+        rw [Nat.mul_sub, Nat.mul_sub, Nat.mul_one, Nat.mul_one]
+        omega
+      have ih := fallingFactorial_mul_pow_le a b hab q (g - 1) (n - 1)
+        (Nat.sub_le_sub_right hgn 1) h1
+      show g * fallingFactorial (g - 1) q * (b ^ q * b) ≤
+        a ^ q * a * (n * fallingFactorial (n - 1) q)
+      have lhsEq : g * fallingFactorial (g - 1) q * (b ^ q * b) =
+          (b * g) * (fallingFactorial (g - 1) q * b ^ q) := by
+        simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+      have rhsEq : a ^ q * a * (n * fallingFactorial (n - 1) q) =
+          (a * n) * (a ^ q * fallingFactorial (n - 1) q) := by
+        simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+      rw [lhsEq, rhsEq]
+      exact Nat.mul_le_mul hbg ih
+
+/-- **General Without-Replacement Query-Miss Bound (`whir_query_miss_bound`)**:
+    Whenever `bad` has relative density at least `dn / dd`, the count of `q`-query tuples missing
+    `bad` entirely satisfies `missCount * dd ^ q ≤ (dd - dn) ^ q * totalTuples`. -/
+theorem whir_query_miss_bound {α : Type} (bad : α → Bool) (dom : List α) (q dn dd : Nat)
+    (hfar : dn * dom.length ≤ dd * countGood bad dom) :
+    ((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * dd ^ q ≤
+      (dd - dn) ^ q * (aggDistinctTuples q dom).length := by
+  rw [aggDistinctTuples_all_good_length, aggDistinctTuples_length]
+  have hsum := countGood_add_complement bad dom
+  have hGN : countGood (fun x => !bad x) dom ≤ dom.length := by omega
+  apply fallingFactorial_mul_pow_le (dd - dn) dd (Nat.sub_le dd dn) q _ _ hGN
+  rw [Nat.sub_mul]
+  have e : dd * dom.length = dd * countGood (fun x => !bad x) dom + dd * countGood bad dom := by
+    rw [← Nat.mul_add, Nat.add_comm, hsum]
+  omega
+
+/-! ## 10. Transcript-Bound WHIR Proximity, OOD, Fold & Query Soundness (`GoldilocksExt4`) -/
+
+namespace Aggregation
+
+/-- Tracked committed coset duet over `GoldilocksExt4`. -/
+structure TrackedDuetExt4 where
+  v0 : GoldilocksExt4
+  v1 : GoldilocksExt4
+  invTwoY0 : Goldilocks
+  invTwo : Goldilocks
+  next : GoldilocksExt4
+
+def foldDuetExt4Event (d : TrackedDuetExt4) (r : GoldilocksExt4) : Bool :=
+  (decide (foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.zero ≠ d.next) ||
+    decide (foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.one ≠ d.next)) &&
+  decide (foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo r = d.next)
+
+theorem foldDuetExt4Event_roots_le_one (d : TrackedDuetExt4) (S : List GoldilocksExt4)
+    (hS : S.Nodup) : (S.filter (foldDuetExt4Event d)).length ≤ 1 := by
+  cases hg : (decide (foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.zero ≠ d.next) ||
+      decide (foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.one ≠ d.next)) with
+  | false =>
+    have hfun : foldDuetExt4Event d = fun _ => false := by
+      funext r; unfold foldDuetExt4Event; rw [hg]; rfl
+    rw [hfun, filter_const_false]; exact Nat.zero_le 1
+  | true =>
+    have hfun : foldDuetExt4Event d =
+        fun r => decide (foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo r = d.next) := by
+      funext r; unfold foldDuetExt4Event; rw [hg]; rfl
+    rw [hfun]
+    have hne : ∃ r, foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo r ≠ d.next := by
+      cases h0 : decide (foldDuetExt4 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.zero ≠ d.next) with
+      | true => exact ⟨_, of_decide_eq_true h0⟩
+      | false => rw [h0] at hg; exact ⟨_, of_decide_eq_true hg⟩
+    exact whir_coset_duet_ext4_roots_le_one d.v0 d.v1 d.next d.invTwoY0 d.invTwo S hS hne
+
+private theorem filter_or_length_le {α : Type} (p q : α → Bool) :
+    ∀ (l : List α), (l.filter (fun x => p x || q x)).length ≤
+      (l.filter p).length + (l.filter q).length
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := filter_or_length_le p q xs
+    cases hp : p x <;> cases hq : q x <;>
+      simp only [List.filter, hp, hq, Bool.or_self, Bool.or_true, Bool.or_false,
+        List.length_cons] <;> omega
+
+private theorem filter_any_length_le {α β : Type} (S : List α) (ev : β → α → Bool) (k : Nat) :
+    ∀ (ds : List β), (∀ d ∈ ds, (S.filter (ev d)).length ≤ k) →
+      (S.filter (fun r => ds.any (fun d => ev d r))).length ≤ ds.length * k
+  | [], _ => by
+    show (S.filter (fun _ => false)).length ≤ _
+    rw [filter_const_false]; exact Nat.zero_le _
+  | d :: ds, h => by
+    have ih := filter_any_length_le S ev k ds (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hd := h d (List.mem_cons_self ..)
+    have hor := filter_or_length_le (ev d) (fun r => ds.any (fun d => ev d r)) S
+    rw [List.length_cons, Nat.add_mul, Nat.one_mul]
+    have hor' : (S.filter (fun r => (d :: ds).any (fun d => ev d r))).length ≤
+        (S.filter (ev d)).length + (S.filter (fun r => ds.any (fun d => ev d r))).length := hor
+    omega
+
+/-- Tracked pair of unequal list-decoded WHIR polynomials of degree `≤ maxDeg` tested by `z_ood`. -/
+structure TrackedOodPair (maxDeg : Nat) where
+  candA : List GoldilocksExt4
+  candB : List GoldilocksExt4
+  lenA : candA.length ≤ maxDeg + 1
+  lenB : candB.length ≤ maxDeg + 1
+  witnessPt : GoldilocksExt4
+
+def oodPairEvent {maxDeg : Nat} (p : TrackedOodPair maxDeg) (z : GoldilocksExt4) : Bool :=
+  decide (RoundPoly.evalCoeffs p.candA p.witnessPt ≠ RoundPoly.evalCoeffs p.candB p.witnessPt) &&
+  decide (RoundPoly.evalCoeffs p.candA z = RoundPoly.evalCoeffs p.candB z)
+
+theorem oodPairEvent_roots_le {maxDeg : Nat} (p : TrackedOodPair maxDeg)
+    (S : List GoldilocksExt4) (hS : S.Nodup) :
+    (S.filter (oodPairEvent p)).length ≤ maxDeg := by
+  cases hg : decide (RoundPoly.evalCoeffs p.candA p.witnessPt ≠
+      RoundPoly.evalCoeffs p.candB p.witnessPt) with
+  | false =>
+    have hfun : oodPairEvent p = fun _ => false := by
+      funext z; unfold oodPairEvent; rw [hg]; rfl
+    rw [hfun, filter_const_false]; exact Nat.zero_le _
+  | true =>
+    have hfun : oodPairEvent p =
+        fun z => decide (RoundPoly.evalCoeffs p.candA z = RoundPoly.evalCoeffs p.candB z) := by
+      funext z; unfold oodPairEvent; rw [hg, Bool.true_and]
+    rw [hfun]
+    exact whir_ood_pin_roots_le_degree maxDeg p.candA p.candB S hS p.lenA p.lenB
+      ⟨p.witnessPt, of_decide_eq_true hg⟩
+
+/-- **OOD List-Pinning Multi-Stage Challenge Bound (`whir_ood_hit_challenges_le`)**:
+    Across `n` WHIR stages with at most `pairsPerStage` list-decoding candidate pairs of degree
+    `≤ maxDeg` per stage, at most `n * (pairsPerStage * maxDeg) * |S|^(n - 1)` OOD challenge
+    vectors suffer a list-pinning collision. -/
+theorem whir_ood_hit_challenges_le (maxDeg : Nat) (S : List GoldilocksExt4) (hS : S.Nodup)
+    (n pairsPerStage : Nat)
+    (tracked : List GoldilocksExt4 → List (TrackedOodPair maxDeg))
+    (hPairs : ∀ pre, (tracked pre).length ≤ pairsPerStage) :
+    ((challengeVectors S n).filter
+      (anyRoundEvent (fun pre z => (tracked pre).any (fun p => oodPairEvent p z)))).length ≤
+      roundBoundSum (fun _ => pairsPerStage * maxDeg) n * S.length ^ (n - 1) := by
+  apply anyRoundEvent_count_le S n _ (fun _ => pairsPerStage * maxDeg)
+  intro pre
+  exact Nat.le_trans
+    (filter_any_length_le S oodPairEvent maxDeg (tracked pre)
+      (fun p _ => oodPairEvent_roots_le p S hS))
+    (Nat.mul_le_mul_right maxDeg (hPairs pre))
+
+private theorem strict_query_miss_from_slack {α : Type} (bad : α → Bool) (dom : List α)
+    (q alphaNum den b : Nat)
+    (hdom : q ≤ dom.length)
+    (hle : alphaNum ≤ den)
+    (hfar : (den - alphaNum) * dom.length ≤ den * countGood bad dom)
+    (hSlack : alphaNum ^ q * 2 ^ b < den ^ q) :
+    ((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * 2 ^ b <
+      (aggDistinctTuples q dom).length := by
+  have hb := whir_query_miss_bound bad dom q (den - alphaNum) den hfar
+  have hSub : den - (den - alphaNum) = alphaNum := by omega
+  rw [hSub] at hb
+  have hT : 0 < (aggDistinctTuples q dom).length := by
+    rw [aggDistinctTuples_length]; exact fallingFactorial_pos _ _ hdom
+  rcases Nat.lt_or_ge
+    (((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * 2 ^ b)
+    (aggDistinctTuples q dom).length with hlt | hge
+  · exact hlt
+  · exfalso
+    generalize ((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length = X at hb hge
+    generalize (aggDistinctTuples q dom).length = T at hb hge hT
+    generalize alphaNum ^ q = M at hb hSlack
+    generalize den ^ q = K at hb hSlack
+    have hX : 0 < X := by
+      cases X with
+      | zero => rw [Nat.zero_mul] at hge; exact absurd hT (Nat.not_lt.mpr hge)
+      | succ k => exact Nat.succ_pos k
+    have h1 : M * T ≤ M * (X * 2 ^ b) := Nat.mul_le_mul_left M hge
+    have h2 : M * (X * 2 ^ b) = X * (M * 2 ^ b) := Nat.mul_left_comm M X (2 ^ b)
+    have h3 : X * (M * 2 ^ b) < X * K := Nat.mul_lt_mul_of_pos_left hSlack hX
+    rw [h2] at h1
+    exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le h3 (Nat.le_trans hb h1))
+
+/-- **Unconditional `[BCIKS20]` Classical-128 Per-Stage Query Bound
+    (`whir_bciksJohnsonClassical128_query_miss_lt`)**:
+    For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonClassical128` (`q = (129, 65, 44, 33)`),
+    whenever `bad` has relative density `≥ 1 - (1 / √B_s + 1 / 512)` (positive proximity slack
+    `η = 1 / 512 > 0`, finite Johnson list size `L ≤ 256`), fewer than a `2^-128` fraction of
+    distinct query tuples miss `bad`. -/
+theorem whir_bciksJohnsonClassical128_query_miss_lt {α : Type}
+    (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .bciksJohnsonClassical128)
+    (bad : α → Bool) (dom : List α)
+    (hdom : s.numQueries ≤ dom.length)
+    (hfar : (512 - (512 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 512 * countGood bad dom) :
+    ((aggDistinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
+      2 ^ 128 < (aggDistinctTuples s.numQueries dom).length := by
+  have hSlack := (bciksJohnsonClassical128_positive_slack s hs).2
+  have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonClassical128,
+      512 / st.johnsonSqrtBlowup + 1 ≤ 512 := by decide
+  exact strict_query_miss_from_slack bad dom s.numQueries
+    (512 / s.johnsonSqrtBlowup + 1) 512 128 hdom (hAllLe s hs) hfar hSlack
+
+/-- **Unconditional `[BCIKS20]` QROM-128 Per-Stage Query Bound
+    (`whir_bciksJohnsonQrom128_query_miss_lt`)**:
+    For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonQrom128` (`q = (258, 130, 88, 66)`),
+    whenever `bad` has relative density `≥ 1 - (1 / √B_s + 1 / 1024)` (positive proximity slack
+    `η = 1 / 1024 > 0`, finite Johnson list size `L ≤ 512`), fewer than a `2^-256` fraction of
+    distinct query tuples miss `bad` (`+ 16`b PoW = `136` QROM Grover bits). -/
+theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
+    (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .bciksJohnsonQrom128)
+    (bad : α → Bool) (dom : List α)
+    (hdom : s.numQueries ≤ dom.length)
+    (hfar : (1024 - (1024 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 1024 * countGood bad dom) :
+    ((aggDistinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
+      2 ^ 256 < (aggDistinctTuples s.numQueries dom).length := by
+  have hSlack := (bciksJohnsonQrom128_positive_slack s hs).2
+  have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
+      1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
+  exact strict_query_miss_from_slack bad dom s.numQueries
+    (1024 / s.johnsonSqrtBlowup + 1) 1024 256 hdom (hAllLe s hs) hfar hSlack
+
+private theorem length_flatMap_scaled_le {α β : Type} (b : α → Bool) (K U V : Nat)
+    (f : α → List β) :
+    ∀ (l : List α), (∀ c ∈ l, (f c).length * K ≤ if b c = true then U else V) →
+      (l.flatMap f).length * K ≤ (l.filter b).length * U + l.length * V
+  | [], _ => by show 0 * K ≤ _; rw [Nat.zero_mul]; exact Nat.zero_le _
+  | c :: l, h => by
+    have ih := length_flatMap_scaled_le b K U V f l (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hc := h c (List.mem_cons_self ..)
+    rw [List.flatMap_cons, List.length_append, Nat.add_mul, List.length_cons,
+      Nat.add_mul l.length 1 V, Nat.one_mul]
+    cases hb : b c
+    · rw [hb] at hc; have _ : (f c).length * K ≤ V := hc
+      simp only [List.filter, hb]; omega
+    · rw [hb] at hc; have _ : (f c).length * K ≤ U := hc
+      simp only [List.filter, hb, List.length_cons]; rw [Nat.add_mul, Nat.one_mul]; omega
+
+def badTranscriptPairs {α β : Type} (S : List α) (n : Nat) (E : List α → α → Bool)
+    (dom : List β) (q : Nat) (bad : List α → β → Bool) : List (List α × List β) :=
+  (challengeVectors S n).flatMap (fun cs =>
+    ((aggDistinctTuples q dom).filter
+      (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map (fun t => (cs, t)))
+
+theorem transcript_bad_pairs_le {α β : Type} (S : List α) (n : Nat)
+    (E : List α → α → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (dom : List β) (q dn dd : Nat) (bad : List α → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      dn * dom.length ≤ dd * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom q bad).length * dd ^ q ≤
+      (roundBoundSum d n * S.length ^ (n - 1) * dd ^ q + S.length ^ n * (dd - dn) ^ q) *
+        (aggDistinctTuples q dom).length := by
+  have hEach : ∀ cs ∈ challengeVectors S n,
+      (((aggDistinctTuples q dom).filter
+        (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map
+          (fun t => (cs, t))).length * dd ^ q ≤
+        if anyRoundEvent E cs = true then (aggDistinctTuples q dom).length * dd ^ q
+        else (dd - dn) ^ q * (aggDistinctTuples q dom).length := by
+    intro cs hcs
+    rw [List.length_map]
+    cases hEv : anyRoundEvent E cs
+    · exact whir_query_miss_bound (bad cs) dom q dn dd (hfar cs hcs hEv)
+    · exact Nat.mul_le_mul_right _ (filter_length_le_self _ _)
+  have hSplit := length_flatMap_scaled_le (anyRoundEvent E) (dd ^ q)
+    ((aggDistinctTuples q dom).length * dd ^ q) ((dd - dn) ^ q * (aggDistinctTuples q dom).length)
+    (fun cs => ((aggDistinctTuples q dom).filter
+      (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map (fun t => (cs, t)))
+    (challengeVectors S n) hEach
+  have hCnt := anyRoundEvent_count_le S n E d hE
+  rw [challengeVectors_length] at hSplit
+  refine Nat.le_trans hSplit ?_
+  rw [Nat.add_mul]
+  apply Nat.add_le_add
+  · have h1 := Nat.mul_le_mul_right ((aggDistinctTuples q dom).length * dd ^ q) hCnt
+    have e : roundBoundSum d n * S.length ^ (n - 1) * ((aggDistinctTuples q dom).length * dd ^ q) =
+        roundBoundSum d n * S.length ^ (n - 1) * dd ^ q * (aggDistinctTuples q dom).length := by
+      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    rw [e] at h1; exact h1
+  · exact Nat.le_of_eq (Nat.mul_assoc _ _ _).symm
+
+private theorem error_arith (X D A s M K T c : Nat)
+    (h1 : X * K ≤ (D * A * K + s * A * M) * T)
+    (hD : 2 * (D * c) ≤ s) (hM : 2 * (M * c) < K)
+    (hA : 0 < A) (hT : 0 < T) (hs : 0 < s) : X * c < s * A * T := by
+  rcases Nat.lt_or_ge (X * c) (s * A * T) with hlt | hge
+  · exact hlt
+  · exfalso
+    have hP : 0 < s * A * T := Nat.mul_pos (Nat.mul_pos hs hA) hT
+    have e1 : 2 * c * ((D * A * K + s * A * M) * T) =
+        2 * (D * c) * (A * K * T) + 2 * (M * c) * (s * A * T) := by
+      rw [Nat.add_mul, Nat.mul_add]
+      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    have h1' : 2 * c * (X * K) ≤ 2 * (D * c) * (A * K * T) + 2 * (M * c) * (s * A * T) := by
+      rw [← e1]; exact Nat.mul_le_mul_left _ h1
+    have h2 : 2 * (D * c) * (A * K * T) ≤ K * (s * A * T) := by
+      have h := Nat.mul_le_mul_right (A * K * T) hD
+      have e : s * (A * K * T) = K * (s * A * T) := by
+        simp only [Nat.mul_comm, Nat.mul_left_comm]
+      rw [e] at h; exact h
+    have h3 : 2 * (M * c) * (s * A * T) < K * (s * A * T) := Nat.mul_lt_mul_of_pos_right hM hP
+    have h4 : 2 * (K * (s * A * T)) ≤ 2 * c * (X * K) := by
+      have h := Nat.mul_le_mul_left (2 * K) hge
+      have e : 2 * K * (X * c) = 2 * c * (X * K) := by
+        simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+      rw [e, Nat.mul_assoc] at h; exact h
+    have h5 := Nat.lt_of_le_of_lt (Nat.le_trans h4 h1') (Nat.add_lt_add_of_le_of_lt h2 h3)
+    rw [Nat.two_mul] at h5
+    exact Nat.lt_irrefl _ h5
+
+/-- Production `GoldilocksExt4` WHIR challenge-event budget covering 16 degree-8 row-sumcheck
+    rounds, 16 degree-2 shift-sumcheck rounds, 4 OOD list-pinning stages (`L ≤ 512`, `d ≤ 2^24`),
+    and parameterized `[BCIKS20]` correlated-agreement events (`≤ 2^44`, leaving `> 210` bits over
+    `p^4 > 2^255`). -/
+def productionExt4RoundEventBudget : Nat :=
+  productionAggParams.maxRowRounds * productionAggParams.rowSumcheckDegree +
+  productionAggParams.maxFoldRounds * productionAggParams.pcsSumcheckDegree +
+  2 ^ 44
+
+/-- **Joint `GoldilocksExt4` WHIR Unconditional `[BCIKS20]` Classical-128 Transcript Soundness
+    (`whir_bciksJohnsonClassical128_total_error_bound`)**:
+    Over `S : List GoldilocksExt4` (`p^4 ≤ S.length`), with challenge events bounded by
+    `productionExt4RoundEventBudget` (`< 2^-210`) and Stage-0 `BciksJohnsonClassical128` queries
+    (`q_0 = 129`, `η = 1 / 512 > 0`), the total bad `(challengeVector, queryTuple)` fraction is
+    strictly `< 2^-127` (`< 2^-210 + 2^-128`). -/
+theorem whir_bciksJohnsonClassical128_total_error_bound {β : Type}
+    (S : List GoldilocksExt4) (n : Nat) (hn : 0 < n)
+    (E : List GoldilocksExt4 → GoldilocksExt4 → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (hBudget : roundBoundSum d n ≤ productionExt4RoundEventBudget)
+    (hField : productionAggParams.fieldSize ≤ S.length)
+    (dom : List β) (hdom : 129 ≤ dom.length)
+    (bad : List GoldilocksExt4 → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      (512 - 257) * dom.length ≤ 512 * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom 129 bad).length * 2 ^ 127 <
+      S.length ^ n * (aggDistinctTuples 129 dom).length := by
+  have hJoint := transcript_bad_pairs_le S n E d hE dom 129 (512 - 257) 512 bad hfar
+  have hSub : 512 - (512 - 257) = 257 := rfl
+  rw [hSub] at hJoint
+  have hT : 0 < (aggDistinctTuples 129 dom).length := by
+    rw [aggDistinctTuples_length]; exact fallingFactorial_pos _ _ hdom
+  have hField' : goldilocksPrime ^ 4 ≤ S.length := hField
+  have hs : 0 < S.length := Nat.lt_of_lt_of_le (by decide : 0 < goldilocksPrime ^ 4) hField'
+  have hC : 2 * (productionExt4RoundEventBudget * 2 ^ 127) ≤ goldilocksPrime ^ 4 := by decide
+  have hM : 2 * (257 ^ 129 * 2 ^ 127) < 512 ^ 129 := by decide
+  have hD : 2 * (roundBoundSum d n * 2 ^ 127) ≤ S.length :=
+    Nat.le_trans (Nat.mul_le_mul_left 2 (Nat.mul_le_mul_right (2 ^ 127) hBudget))
+      (Nat.le_trans hC hField')
+  cases n with
+  | zero => exact absurd hn (Nat.lt_irrefl 0)
+  | succ k =>
+    have hpow : S.length ^ (k + 1) = S.length * S.length ^ k := by
+      rw [Nat.pow_succ, Nat.mul_comm]
+    rw [Nat.add_sub_cancel, hpow] at hJoint
+    rw [hpow]
+    exact error_arith _ _ _ _ _ _ _ _ hJoint hD hM (Nat.pow_pos hs) hT hs
+
+/-- **Joint `GoldilocksExt4` WHIR Unconditional `[BCIKS20]` QROM-128 Multi-Stage Transcript
+    Soundness (`whir_bciksJohnsonQrom128_total_error_bound`)**:
+    For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonQrom128` (`q = (258, 130, 88, 66)`,
+    positive Johnson proximity slack `η = 1 / 1024 > 0`, list size `L ≤ 512`), over any
+    `S : List GoldilocksExt4` (`p^4 ≤ S.length`) with challenge events bounded by
+    `productionExt4RoundEventBudget` (`< 2^-211`), the joint bad `(challengeVector, queryTuple)`
+    fraction is strictly `< 2^-210` (`< 2^-211 + 2^-256`, yielding `> 128` QROM bits against
+    `Q_RO ≤ 2^40` challenge queries and `16`-bit PoW Grover query grinding). -/
+theorem whir_bciksJohnsonQrom128_total_error_bound {β : Type}
+    (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .bciksJohnsonQrom128)
+    (S : List GoldilocksExt4) (n : Nat) (hn : 0 < n)
+    (E : List GoldilocksExt4 → GoldilocksExt4 → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (hBudget : roundBoundSum d n ≤ productionExt4RoundEventBudget)
+    (hField : productionAggParams.fieldSize ≤ S.length)
+    (dom : List β) (hdom : s.numQueries ≤ dom.length)
+    (bad : List GoldilocksExt4 → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      (1024 - (1024 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 1024 * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom s.numQueries bad).length * 2 ^ 210 <
+      S.length ^ n * (aggDistinctTuples s.numQueries dom).length := by
+  have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
+      1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
+  have hLe : 1024 / s.johnsonSqrtBlowup + 1 ≤ 1024 := hAllLe s hs
+  have hSub : 1024 - (1024 - (1024 / s.johnsonSqrtBlowup + 1)) =
+      1024 / s.johnsonSqrtBlowup + 1 := Nat.sub_sub_self hLe
+  have hJoint := transcript_bad_pairs_le S n E d hE dom s.numQueries
+    (1024 - (1024 / s.johnsonSqrtBlowup + 1)) 1024 bad hfar
+  rw [hSub] at hJoint
+  have hT : 0 < (aggDistinctTuples s.numQueries dom).length := by
+    rw [aggDistinctTuples_length]; exact fallingFactorial_pos _ _ hdom
+  have hField' : goldilocksPrime ^ 4 ≤ S.length := hField
+  have hsPos : 0 < S.length := Nat.lt_of_lt_of_le (by decide : 0 < goldilocksPrime ^ 4) hField'
+  have hC : 2 * (productionExt4RoundEventBudget * 2 ^ 210) ≤ goldilocksPrime ^ 4 := by decide
+  have hSlack := (bciksJohnsonQrom128_positive_slack s hs).2
+  have hM : 2 * ((1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 210) <
+      1024 ^ s.numQueries := by
+    have hPowLe : 2 * 2 ^ 210 ≤ 2 ^ 256 := by decide
+    have hRewrite : 2 * ((1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 210) =
+        (1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * (2 * 2 ^ 210) := by
+      simp only [Nat.mul_assoc, Nat.mul_comm]
+    rw [hRewrite]
+    exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_left _ hPowLe) hSlack
+  have hD : 2 * (roundBoundSum d n * 2 ^ 210) ≤ S.length :=
+    Nat.le_trans (Nat.mul_le_mul_left 2 (Nat.mul_le_mul_right (2 ^ 210) hBudget))
+      (Nat.le_trans hC hField')
+  cases n with
+  | zero => exact absurd hn (Nat.lt_irrefl 0)
+  | succ k =>
+    have hpow : S.length ^ (k + 1) = S.length * S.length ^ k := by
+      rw [Nat.pow_succ, Nat.mul_comm]
+    rw [Nat.add_sub_cancel, hpow] at hJoint
+    rw [hpow]
+    exact error_arith _ _ _ _ _ _ _ _ hJoint hD hM (Nat.pow_pos hsPos) hT hsPos
+
+/-- Concrete duplicate-free `List GoldilocksExt4` sample of size `k` (eliminating `List Unit`). -/
+def canonicalExt4Sample (k : Nat) : List GoldilocksExt4 :=
+  (List.range k).map (fun i => GoldilocksExt4.embedBase (Goldilocks.ofNat i))
+
+theorem canonicalExt4Sample_length (k : Nat) : (canonicalExt4Sample k).length = k := by
+  simp [canonicalExt4Sample]
+
+theorem canonicalExt4Sample_nodup {k : Nat} (hk : k ≤ goldilocksPrime) :
+    (canonicalExt4Sample k).Nodup := by
+  unfold canonicalExt4Sample
+  have hRange := nodup_range_constructive k
+  have hInjOn : ∀ a b, a < k → b < k →
+      GoldilocksExt4.embedBase (Goldilocks.ofNat a) =
+      GoldilocksExt4.embedBase (Goldilocks.ofNat b) → a = b := by
+    intro a b ha hb hEq
+    have hBase := GoldilocksExt4.embedBase_injective hEq
+    have hVal := congrArg Goldilocks.val hBase
+    simp only [Goldilocks.ofNat_val] at hVal
+    rwa [Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le ha hk),
+         Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le hb hk)] at hVal
+  have hAux : ∀ {xs : List Nat}, xs.Nodup → (∀ z ∈ xs, z < k) →
+      (xs.map (fun i => GoldilocksExt4.embedBase (Goldilocks.ofNat i))).Nodup := by
+    intro xs hnd hlt
+    induction hnd with
+    | nil => exact .nil
+    | @cons x rest hrel hndRest ih =>
+      refine .cons (fun b hb heq => ?_) (ih (fun z hz => hlt z (.tail _ hz)))
+      obtain ⟨y, hy, rfl⟩ := List.mem_map.mp hb
+      exact hrel y hy (hInjOn x y (hlt x (.head _)) (hlt y (.tail _ hy)) heq)
+  exact hAux hRange (fun z hz => List.mem_range.mp hz)
+
+private theorem countGood_lt_range (m : Nat) :
+    ∀ (n : Nat), countGood (fun i => decide (i < m)) (List.range n) = min m n
+  | 0 => by simp [countGood]
+  | n + 1 => by
+    rw [countGood, List.range_succ, List.filter_append, List.length_append]
+    have ih : (List.filter (fun i => decide (i < m)) (List.range n)).length = min m n :=
+      countGood_lt_range m n
+    rw [ih]
+    by_cases hlt : n < m <;> simp [hlt] <;> omega
+
+/-- Non-`Unit` `GoldilocksExt4` + positive-slack `[BCIKS20]` satisfiability witness. -/
+theorem whir_bciksJohnson_hypotheses_satisfiable :
+    ∃ (S : List GoldilocksExt4) (s : WhirStageSpec) (dom : List Nat) (bad : Nat → Bool),
+      S.Nodup ∧ 256 ≤ S.length ∧
+      s ∈ whirSchedule4Stage .bciksJohnsonClassical128 ∧
+      s.numQueries ≤ dom.length ∧
+      (512 - (512 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 512 * countGood bad dom ∧
+      countGood bad dom < dom.length := by
+  refine ⟨canonicalExt4Sample 256, ⟨0, 4, 2, 129, 16⟩, List.range 512, fun i => decide (i < 255),
+    canonicalExt4Sample_nodup (by decide), by simp [canonicalExt4Sample_length],
+    by decide, by simp, ?_, ?_⟩
+  · rw [countGood_lt_range, List.length_range, Nat.min_eq_left (by omega : 255 ≤ 512)]
+    dsimp only
+    omega
+  · rw [countGood_lt_range, List.length_range, Nat.min_eq_left (by omega : 255 ≤ 512)]
+    omega
+
+/-! ## 11. Genuine Reed–Solomon + Degree-7 S-Box `RowArithmetization.Lawful` Instance -/
+
+private def decodeLeb128 : List UInt8 → Option (Nat × List UInt8)
+  | [] => none
+  | b :: rest =>
+    if b.toNat < 128 then some (b.toNat, rest)
+    else
+      match decodeLeb128 rest with
+      | some (hi, tail) => some ((b.toNat - 128) + 128 * hi, tail)
+      | none => none
+
+private def decodeFields : Nat → List UInt8 → Option (List (List UInt8))
+  | 0, [] => some []
+  | 0, _ :: _ => none
+  | k + 1, bs =>
+    match decodeLeb128 bs with
+    | none => none
+    | some (len, rest) =>
+      if len ≤ rest.length then
+        match decodeFields k (rest.drop len) with
+        | some tl => some (rest.take len :: tl)
+        | none => none
+      else none
+
+private def decodeMultiFrame (bs : List UInt8) : Option (List (List UInt8)) :=
+  match decodeLeb128 bs with
+  | none => none
+  | some (cnt, rest) => decodeFields cnt rest
+
+private theorem uint8_toNat_of_lt_256 {n : Nat} (hn : n < 256) :
+    (UInt8.ofNat n).toNat = n := by
+  rw [UInt8.toNat_ofNat']
+  exact Nat.mod_eq_of_lt hn
+
+private theorem decodeLeb128_leb128Aux :
+    ∀ (f n : Nat) (rest : List UInt8),
+      n ≤ f →
+      decodeLeb128 (leb128Aux f n ++ rest) = some (n, rest)
+  | 0, n, rest, hn => by
+    have hz : n = 0 := by omega
+    subst hz; rfl
+  | f + 1, n, rest, hn => by
+    unfold leb128Aux
+    by_cases hlt : n < 128
+    · simp only [hlt, ↓reduceIte, List.singleton_append, decodeLeb128,
+        uint8_toNat_of_lt_256 (by omega : n < 256)]
+    · have hb : (UInt8.ofNat (128 + n % 128)).toNat = 128 + n % 128 :=
+        uint8_toNat_of_lt_256 (by omega)
+      have hNotLt : ¬ (128 + n % 128 < 128) := by omega
+      have ih := decodeLeb128_leb128Aux f (n / 128) rest (by omega)
+      simp only [hlt, ↓reduceIte, List.cons_append, decodeLeb128, hb, hNotLt, ih]
+      congr 1; congr 1; omega
+
+private theorem decodeLeb128_leb128 (n : Nat) (rest : List UInt8) :
+    decodeLeb128 (leb128 n ++ rest) = some (n, rest) :=
+  decodeLeb128_leb128Aux n n rest (Nat.le_refl n)
+
+private theorem decodeFields_encodeByteFields :
+    ∀ (fields : List (List UInt8)),
+      decodeFields fields.length (encodeByteFields fields) = some fields
+  | [] => by rw [encodeByteFields_nil]; rfl
+  | f :: fs => by
+    have hRest := decodeFields_encodeByteFields fs
+    rw [List.length_cons, encodeByteFields_cons, encodeListField_eq, List.append_assoc]
+    unfold decodeFields
+    rw [decodeLeb128_leb128]
+    dsimp only
+    have hLe : f.length ≤ (f ++ encodeByteFields fs).length := by simp
+    have hDrop : (f ++ encodeByteFields fs).drop f.length = encodeByteFields fs :=
+      List.drop_left' rfl
+    have hTake : (f ++ encodeByteFields fs).take f.length = f :=
+      List.take_left' rfl
+    simp only [hLe, ↓reduceIte, hDrop, hRest, hTake]
+
+private theorem decodeMultiFrame_encodeMultiFrame (fields : List (List UInt8)) :
+    decodeMultiFrame (encodeMultiFrame fields) = some fields := by
+  unfold decodeMultiFrame encodeMultiFrame
+  rw [decodeLeb128_leb128]
+  exact decodeFields_encodeByteFields fields
+
+/-- Degree-7 Goldilocks S-box $x \mapsto x^7$ (`gcd(7, p - 1) = 1`). -/
+def pow7Goldilocks (x : Goldilocks) : Goldilocks :=
+  let x2 := CommRingOps.mul x x
+  let x4 := CommRingOps.mul x2 x2
+  let x6 := CommRingOps.mul x4 x2
+  CommRingOps.mul x6 x
+
+def pow7Ext4 (x : GoldilocksExt4) : GoldilocksExt4 :=
+  let x2 := CommRingOps.mul x x
+  let x4 := CommRingOps.mul x2 x2
+  let x6 := CommRingOps.mul x4 x2
+  CommRingOps.mul x6 x
+
+theorem embedBase_pow7 (x : Goldilocks) :
+    GoldilocksExt4.embedBase (pow7Goldilocks x) = pow7Ext4 (GoldilocksExt4.embedBase x) := by
+  unfold pow7Goldilocks pow7Ext4
+  simp only [GoldilocksExt4.embedBase_mul]
+
+/-- Algebraic degree-7 S-box `TweakableHashSuite` (`rawHash_len = 32`) whose 1-layer stateful WOTS
+    chain computes `x_0^7 + seed` over `Goldilocks`. -/
+def sbox7RawHash (pre : List UInt8) : List UInt8 :=
+  match decodeMultiFrame pre with
+  | some [role, seedBytes, _adrsBytes, xBytes] =>
+    if role == tagThF then
+      let x := Goldilocks.ofNat (ofBE xBytes)
+      let s := Goldilocks.ofNat (ofBE seedBytes)
+      be 32 (CommRingOps.add (pow7Goldilocks x) s).val
+    else
+      0x40 :: be 31 0
+  | some [role, _seedBytes, _adrsBytes, e0Bytes, e1Bytes] =>
+    if role == tagThTl then
+      let e0 := Goldilocks.ofNat (ofBE e0Bytes)
+      let e1 := Goldilocks.ofNat (ofBE e1Bytes)
+      be 32 (CommRingOps.add e0 e1).val
+    else
+      0x40 :: be 31 0
+  | _ => 0x40 :: be 31 0
+
+theorem sbox7RawHash_len (pre : List UInt8) : (sbox7RawHash pre).length = 32 := by
+  unfold sbox7RawHash
+  split
+  · split <;> simp [length_be]
+  · split <;> simp [length_be]
+  · simp [length_be]
+
+def sbox7FieldSuite : TweakableHashSuite where
+  suiteId := "QSAG.PQ.SUITE.SBOX7/v1".toUTF8.toList
+  rawHash := sbox7RawHash
+  rawHash_len := sbox7RawHash_len
+
+def sbox7Params : PqHashParams := ⟨2, 2, 0, 1, 0, 0, 0, true⟩
+
+def mkSbox7Pk (seed root : Goldilocks) : PqPublicKey :=
+  { pkSeed := be 32 seed.val, pkRoot := be 32 root.val }
+
+def mkSbox7Sig (x0 : Goldilocks) : PqHashSig :=
+  { rRand := []
+    msgTswCtr := 0
+    leafGlobalIdx := 0
+    forsOpenings := []
+    layerSigs := [{ tswCtr := 0, wotsChains := [be 32 x0.val, be 32 0], authPath := [] }] }
+
+private theorem goldilocks_ofNat_ofBE_be32 (g : Goldilocks) :
+    Goldilocks.ofNat (ofBE (be 32 g.val)) = g := by
+  have hb : goldilocksPrime < 256 ^ 32 := by decide
+  rw [ofBE_be (Nat.lt_trans g.isLt hb)]
+  exact Goldilocks.ext (Nat.mod_eq_of_lt g.isLt)
+
+private theorem uint8_beq_self (x : UInt8) : (x == x) = true :=
+  Nat.beq_refl x.toBitVec.toNat
+
+private theorem list_uint8_beq_self : ∀ (xs : List UInt8), (xs == xs) = true
+  | [] => rfl
+  | x :: xs => by
+    change ((x == x) && (xs == xs)) = true
+    rw [uint8_beq_self x, list_uint8_beq_self xs]
+    rfl
+
+/-- Exact equivalence between `verifyPqHashSig` on `mkSbox7Sig x0` and the degree-7 field equation
+    `x0^7 + seed = root` in `Goldilocks`! -/
+theorem verifyPqHashSig_sbox7_iff (seed root x0 : Goldilocks) (msg : List UInt8) :
+    verifyPqHashSig sbox7FieldSuite sbox7Params (mkSbox7Pk seed root) msg (mkSbox7Sig x0) =
+      decide (CommRingOps.add (pow7Goldilocks x0) seed = root) := by
+  have hHmsg : ∀ (mu : List UInt8),
+      let hmsg := thHashMsg sbox7FieldSuite [] (be 32 seed.val) (be 32 root.val) mu 0 0 0 0
+      extractBaseWDigits 2 2 hmsg = [0, 1] := by
+    intro mu
+    have hCallGen : ∀ (cIdx : UInt32), thCall sbox7FieldSuite tagHMsg (be 32 seed.val)
+        ⟨0, 0, .wotsHash, 0, cIdx, UInt32.ofNat 0⟩ [[], be 32 root.val, mu, be 4 0] =
+        0x40 :: be 31 0 := by
+      intro cIdx
+      unfold thCall sbox7FieldSuite sbox7RawHash thPreimage
+      dsimp only
+      simp only [List.cons_append, List.nil_append]
+      rw [decodeMultiFrame_encodeMultiFrame]
+    dsimp only
+    unfold thHashMsg
+    rw [hCallGen 0, hCallGen 1]
+    decide
+  have hChain : thChainF sbox7FieldSuite (be 32 seed.val) ⟨0, 0, .wotsHash, 0, 0, 0⟩
+      (be 32 x0.val) = be 32 (CommRingOps.add (pow7Goldilocks x0) seed).val := by
+    unfold thChainF thCall sbox7FieldSuite sbox7RawHash thPreimage
+    dsimp only
+    simp only [List.cons_append, List.nil_append]
+    rw [decodeMultiFrame_encodeMultiFrame]
+    simp only [list_uint8_beq_self, ↓reduceIte, goldilocks_ofNat_ofBE_be32]
+  let end0 := CommRingOps.add (pow7Goldilocks x0) seed
+  have hTl : thTweakTl sbox7FieldSuite (be 32 seed.val) ⟨0, 0, .wotsPk, 0, 0, 0⟩
+      [be 32 end0.val, be 32 0] = be 32 end0.val := by
+    unfold thTweakTl thCall sbox7FieldSuite sbox7RawHash thPreimage
+    dsimp only
+    simp only [List.cons_append, List.nil_append]
+    rw [decodeMultiFrame_encodeMultiFrame]
+    have hZero : Goldilocks.ofNat (ofBE (be 32 0)) = Goldilocks.zero := by
+      simpa using goldilocks_ofNat_ofBE_be32 Goldilocks.zero
+    simp only [list_uint8_beq_self, ↓reduceIte, goldilocks_ofNat_ofBE_be32, hZero]
+    exact congrArg (fun g : Goldilocks => be 32 g.val) (LawfulCommRing.add_zero end0)
+  unfold verifyPqHashSig mkSbox7Pk mkSbox7Sig
+  simp only [Bool.not_true, ↓reduceIte, sbox7Params, ne_eq, not_true_eq_false,
+    Nat.mul_zero, Nat.pow_zero, Nat.lt_one_iff, List.isEmpty_nil]
+  let mu := thPreHash sbox7FieldSuite (be 32 seed.val) (be 32 root.val) msg
+  change (match verifyHypertreeLayers sbox7FieldSuite ⟨2, 2, 0, 1, 0, 0, 0, true⟩
+      (be 32 seed.val) (be 32 root.val) [] 0 0 mu
+      [{ tswCtr := 0, wotsChains := [be 32 x0.val, be 32 0], authPath := [] }] with
+    | some computedTopRoot => decide (computedTopRoot = be 32 root.val)
+    | none => false) = decide (end0 = root)
+  unfold verifyHypertreeLayers
+  have hU32 : UInt32.ofNat 0 = 0 := rfl
+  have hU64 : UInt64.ofNat 0 = 0 := rfl
+  simp only [Nat.pow_zero, Nat.mod_one, Nat.div_one, hU32, hU64]
+  rw [hHmsg mu]
+  have hTgt : checkTargetSum 2 2 (PqHashParams.targetSum ⟨2, 2, 0, 1, 0, 0, 0, true⟩) [0, 1] =
+      true := by decide
+  rw [hTgt]
+  simp only [Bool.not_true, ↓reduceIte, List.length_cons, List.length_nil, ne_eq, not_true_eq_false]
+  have hRec : recoverWotsPkFromSig sbox7FieldSuite ⟨2, 2, 0, 1, 0, 0, 0, true⟩ (be 32 seed.val)
+      0 0 0 [0, 1] [be 32 x0.val, be 32 0] = be 32 end0.val := by
+    unfold recoverWotsPkFromSig recoverWotsEndpoints
+    have hRange : List.range 2 = [0, 1] := rfl
+    rw [hRange]
+    simp only [List.map, List.getD_cons_zero, List.getD_cons_succ, Nat.sub_zero, Nat.sub_self,
+      wotsChainSteps, hU32]
+    rw [hChain, hTl]
+  rw [hRec]
+  simp only [walkMerkleAuthPath, verifyHypertreeLayers, Bool.false_eq_true, ↓reduceIte]
+  have hb : goldilocksPrime < 256 ^ 32 := by decide
+  if hEq : end0 = root then
+    have hBeEq : be 32 end0.val = be 32 root.val := congrArg (fun g : Goldilocks => be 32 g.val) hEq
+    rw [decide_eq_true hBeEq, decide_eq_true hEq]
+  else
+    have hNeBe : be 32 end0.val ≠ be 32 root.val := fun hBe =>
+      hEq (Goldilocks.ext (be_injective (Nat.lt_trans end0.isLt hb) (Nat.lt_trans root.isLt hb) hBe))
+    rw [decide_eq_false hNeBe, decide_eq_false hEq]
+
+/-- Primitive 8th root of unity in `Goldilocks` (`(2^24)^4 = 2^96 ≡ -1 (mod p)`). -/
+def omega8 : Goldilocks := ⟨2 ^ 24, by decide⟩
+
+/-- Multiplicative inverse of `2` in `Goldilocks` (`(p + 1) / 2 = 2^63 - 2^31 + 1`), given as a
+    direct literal so WHNF never unfolds 64-step Fermat exponentiation. -/
+def invTwoGold : Goldilocks := ⟨9223372034707292161, by decide⟩
+
+def powGold (base : Goldilocks) : Nat → Goldilocks
+  | 0 => Goldilocks.one
+  | k + 1 => CommRingOps.mul (powGold base k) base
+
+def omega8Domain : List GoldilocksExt4 :=
+  (List.range 8).map (fun j => GoldilocksExt4.embedBase (powGold omega8 j))
+
+private theorem omega8_pow_inj {i j : Nat} (hi : i < 8) (hj : j < 8)
+    (h : powGold omega8 i = powGold omega8 j) : i = j := by
+  have hv : (powGold omega8 i).val = (powGold omega8 j).val := congrArg Goldilocks.val h
+  rcases i with _ | _ | _ | _ | _ | _ | _ | _ | i <;> try omega
+  all_goals (rcases j with _ | _ | _ | _ | _ | _ | _ | _ | j <;> try omega)
+  all_goals (first | rfl | exact absurd hv (by decide))
+
+private theorem omega8Domain_getD_inj {i j : Nat} (hi : i < 8) (hj : j < 8)
+    (h : omega8Domain.getD i GoldilocksExt4.zero = omega8Domain.getD j GoldilocksExt4.zero) :
+    i = j := by
+  have hiL : i < omega8Domain.length := by simpa [omega8Domain] using hi
+  have hjL : j < omega8Domain.length := by simpa [omega8Domain] using hj
+  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hiL, Option.getD_some,
+      List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjL, Option.getD_some] at h
+  simp only [omega8Domain, List.getElem_map, List.getElem_range] at h
+  exact omega8_pow_inj hi hj (GoldilocksExt4.embedBase_injective h)
+
+theorem omega8Domain_nodup : omega8Domain.Nodup := by
+  unfold omega8Domain
+  have hAux : ∀ {xs : List Nat}, xs.Nodup → (∀ z ∈ xs, z < 8) →
+      (xs.map (fun j => GoldilocksExt4.embedBase (powGold omega8 j))).Nodup := by
+    intro xs hnd hlt
+    induction hnd with
+    | nil => exact .nil
+    | @cons x rest hrel hndRest ih =>
+      refine .cons (fun b hb heq => ?_) (ih (fun z hz => hlt z (.tail _ hz)))
+      obtain ⟨y, hy, rfl⟩ := List.mem_map.mp hb
+      exact hrel y hy (omega8_pow_inj (hlt x (.head _)) (hlt y (.tail _ hy))
+        (GoldilocksExt4.embedBase_injective heq))
+  exact hAux (nodup_range_constructive 8) (fun z hz => List.mem_range.mp hz)
+
+/-- Standard blowup-4 Reed–Solomon encoding of `P(Y) = a0 + a1 * Y` on `omega8Domain` (`8` points). -/
+def encodeLinearRs8 (a0 a1 : Goldilocks) : List GoldilocksExt4 :=
+  omega8Domain.map (RoundPoly.evalCoeffs
+    [GoldilocksExt4.embedBase a0, GoldilocksExt4.embedBase a1])
+
+/-- Deterministic coset-duet interpolation at `(omega_8^0, omega_8^4) = (1, -1)`. -/
+def recoverLinearCoeffs8 (table0 : List GoldilocksExt4) : GoldilocksExt4 × GoldilocksExt4 :=
+  let t0 := table0.getD 0 GoldilocksExt4.zero
+  let t4 := table0.getD 4 GoldilocksExt4.zero
+  let inv2 := GoldilocksExt4.embedBase invTwoGold
+  (CommRingOps.mul (CommRingOps.add t0 t4) inv2,
+   CommRingOps.mul (CommRingOps.sub t0 t4) inv2)
+
+/-- Genuine base-field blowup-4 Reed–Solomon codeword predicate (`length = 8`, all entries in
+    `F_p`, and all `8` evaluations match the degree-`< 2` interpolated polynomial). -/
+def isLinearBaseRs8 (table0 : List GoldilocksExt4) : Bool :=
+  (table0.length == 8) &&
+  table0.all GoldilocksExt4.isBase &&
+  let c := recoverLinearCoeffs8 table0
+  (List.range 8).all (fun j =>
+    table0.getD j GoldilocksExt4.zero ==
+      RoundPoly.evalCoeffs [c.1, c.2] (omega8Domain.getD j GoldilocksExt4.zero))
+
+theorem isLinearBaseRs8_eval_at {table0 : List GoldilocksExt4}
+    (h : isLinearBaseRs8 table0 = true) {j : Nat} (hj : j < 8) :
+    table0.getD j GoldilocksExt4.zero =
+      RoundPoly.evalCoeffs [(recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2]
+        (omega8Domain.getD j GoldilocksExt4.zero) := by
+  unfold isLinearBaseRs8 at h
+  rcases Bool.and_eq_true_iff.mp h with ⟨_, hAll⟩
+  have hMem : j ∈ List.range 8 := List.mem_range.mpr hj
+  exact eq_of_beq (List.all_eq_true.mp hAll j hMem)
+
+theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
+    isLinearBaseRs8 (encodeLinearRs8 a0 a1) = true ∧
+    recoverLinearCoeffs8 (encodeLinearRs8 a0 a1) =
+      (GoldilocksExt4.embedBase a0, GoldilocksExt4.embedBase a1) := by
+  have hTwoInv : CommRingOps.mul (CommRingOps.add CommRingOps.one CommRingOps.one)
+      (GoldilocksExt4.embedBase invTwoGold) = GoldilocksExt4.one := by decide +kernel
+  have hOmega0 : omega8Domain.getD 0 GoldilocksExt4.zero = CommRingOps.one := by decide +kernel
+  have hOmega4 : omega8Domain.getD 4 GoldilocksExt4.zero =
+      CommRingOps.neg CommRingOps.one := by decide +kernel
+  let c0 := GoldilocksExt4.embedBase a0
+  let c1 := GoldilocksExt4.embedBase a1
+  have hGet : ∀ j, j < 8 →
+      (encodeLinearRs8 a0 a1).getD j GoldilocksExt4.zero =
+        RoundPoly.evalCoeffs [c0, c1] (omega8Domain.getD j GoldilocksExt4.zero) := by
+    intro j hj
+    have hjDom : j < omega8Domain.length := by simpa [omega8Domain] using hj
+    rw [List.getD_eq_getElem?_getD, encodeLinearRs8, List.getElem?_map,
+        List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjDom]
+    rfl
+  have ht0 : (encodeLinearRs8 a0 a1).getD 0 GoldilocksExt4.zero = CommRingOps.add c0 c1 := by
+    rw [hGet 0 (by decide), hOmega0]
+    simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+      LawfulCommRing.one_mul]
+  have ht4 : (encodeLinearRs8 a0 a1).getD 4 GoldilocksExt4.zero = CommRingOps.sub c0 c1 := by
+    rw [hGet 4 (by decide), hOmega4]
+    simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    rw [LawfulCommRing.neg_mul, LawfulCommRing.one_mul, ← LawfulCommRing.sub_eq_add_neg]
+  have hRec : recoverLinearCoeffs8 (encodeLinearRs8 a0 a1) = (c0, c1) := by
+    unfold recoverLinearCoeffs8
+    dsimp only
+    rw [ht0, ht4]
+    have hSum : CommRingOps.add (CommRingOps.add c0 c1) (CommRingOps.sub c0 c1) =
+        CommRingOps.mul c0 (CommRingOps.add CommRingOps.one CommRingOps.one) := by
+      rw [LawfulCommRing.left_distrib, LawfulCommRing.mul_one,
+          LawfulCommRing.sub_eq_add_neg c0 c1, LawfulCommRing.add_add_add_comm,
+          LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+    have hDiff : CommRingOps.sub (CommRingOps.add c0 c1) (CommRingOps.sub c0 c1) =
+        CommRingOps.mul c1 (CommRingOps.add CommRingOps.one CommRingOps.one) := by
+      apply LawfulCommRing.add_left_cancel (a := CommRingOps.sub c0 c1)
+      rw [LawfulCommRing.add_sub_cancel_left, LawfulCommRing.left_distrib,
+          LawfulCommRing.mul_one, LawfulCommRing.sub_eq_add_neg c0 c1,
+          LawfulCommRing.add_assoc c0 (CommRingOps.neg c1) (CommRingOps.add c1 c1),
+          ← LawfulCommRing.add_assoc (CommRingOps.neg c1) c1 c1,
+          LawfulCommRing.add_left_neg, LawfulCommRing.zero_add]
+    rw [hSum, hDiff, LawfulCommRing.mul_assoc c0, LawfulCommRing.mul_assoc c1,
+        hTwoInv, GoldilocksExt4.one_eq_ringOne, LawfulCommRing.mul_one, LawfulCommRing.mul_one]
+  refine ⟨?_, hRec⟩
+  unfold isLinearBaseRs8
+  dsimp only
+  rw [hRec]
+  dsimp only [c0, c1]
+  have hLen : ((encodeLinearRs8 a0 a1).length == 8) = true := by simp [encodeLinearRs8, omega8Domain]
+  have hBaseAll : (encodeLinearRs8 a0 a1).all GoldilocksExt4.isBase = true := by
+    apply List.all_eq_true.mpr
+    intro z hz
+    unfold encodeLinearRs8 omega8Domain at hz
+    rw [List.map_map] at hz
+    obtain ⟨k, _, rfl⟩ := List.mem_map.mp hz
+    dsimp only [Function.comp_apply]
+    simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    rw [← GoldilocksExt4.embedBase_mul, ← GoldilocksExt4.embedBase_add]
+    exact GoldilocksExt4.isBase_embedBase _
+  have hEvalAll : (List.range 8).all (fun j =>
+      (encodeLinearRs8 a0 a1).getD j GoldilocksExt4.zero ==
+        RoundPoly.evalCoeffs [GoldilocksExt4.embedBase a0, GoldilocksExt4.embedBase a1]
+          (omega8Domain.getD j GoldilocksExt4.zero)) = true := by
+    apply List.all_eq_true.mpr
+    intro j hj
+    exact beq_iff_eq.mpr (hGet j (List.mem_range.mp hj))
+  rw [hLen, hBaseAll, hEvalAll]
+  rfl
+
+private theorem getD_set_ne {α : Type} (l : List α) (idx j : Nat) (v dflt : α) (hne : j ≠ idx) :
+    (l.set idx v).getD j dflt = l.getD j dflt := by
+  rw [List.getD_eq_getElem?_getD, List.getD_eq_getElem?_getD,
+      List.getElem?_set_ne (Ne.symm hne)]
+
+private theorem getD_set_eq {α : Type} (l : List α) (idx : Nat) (v dflt : α)
+    (hlt : idx < l.length) : (l.set idx v).getD idx dflt = v := by
+  rw [List.getD_eq_getElem?_getD, List.getElem?_set_self hlt, Option.getD_some]
+
+private theorem degree1_unique_from_two_points (p1 p2 : List GoldilocksExt4)
+    (x1 x2 z : GoldilocksExt4)
+    (hxNe : x1 ≠ x2) (hp1 : p1.length ≤ 2) (hp2 : p2.length ≤ 2)
+    (h1 : RoundPoly.evalCoeffs p1 x1 = RoundPoly.evalCoeffs p2 x1)
+    (h2 : RoundPoly.evalCoeffs p1 x2 = RoundPoly.evalCoeffs p2 x2)
+    (hz : RoundPoly.evalCoeffs p1 z ≠ RoundPoly.evalCoeffs p2 z) : False := by
+  have hNd : [x1, x2].Nodup := by simp [hxNe]
+  have hRoots := ext4_poly_roots_le_degree 1 p1 p2 [x1, x2] hNd hp1 hp2 ⟨z, hz⟩
+  simp only [List.filter, h1, h2, decide_true, List.length_cons, List.length_nil] at hRoots
+  omega
+
+/-- **`#tooth` Minimum-Distance Corruption Rejection (`tooth_corrupted_round0_symbol_rejected`)**:
+    Mutating ANY single symbol at ANY index `idx < 8` of ANY valid Round-0 codeword forces
+    `isLinearBaseRs8 = false` (proving `isRound0Codeword` is a genuine minimum-distance-7
+    Reed–Solomon check, never `fun _ => true`). -/

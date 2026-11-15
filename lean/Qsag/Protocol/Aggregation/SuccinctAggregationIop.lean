@@ -5914,3 +5914,2993 @@ theorem hmsgDetTreeResiduals_allZero_iff (pk : AggValidatorPk)
     dsimp only
     rw [hPermOut, hPermOut, computeHmsgDetTree_eq_states]
 
+/-! ### Polymorphic WOTS+C Layer, Hypertree, FORS, `RowGate7` AST, and `K`-Signer Trace Exactness -/
+
+private theorem shapeIte_allZero (p : Prop) [Decidable p]
+    (h : allZeroGoldilocks (if p then [] else [Goldilocks.one]) = true) : p := by
+  by_cases hp : p
+  · exact hp
+  · simp only [hp, ↓reduceIte] at h
+    exact absurd h (by decide)
+
+private theorem shapeIte_allZero_of (p : Prop) [Decidable p] (hp : p) :
+    allZeroGoldilocks (if p then [] else [Goldilocks.one]) = true := by
+  simp only [hp, ↓reduceIte]
+  rfl
+
+private def buildChainListWitnessPoly {DW V CW : Type}
+    (mkChain : Nat → DW → V → CW) :
+    List DW → List V → Nat → List CW
+  | [], _, _ => []
+  | _, [], _ => []
+  | d :: ds, v :: values, c => mkChain c d v :: buildChainListWitnessPoly mkChain ds values (c + 1)
+
+private def chainListResidualsPoly {DW CW RES : Type}
+    (cRes : Nat → DW → CW → List RES) (badRes : List RES) :
+    List DW → List CW → Nat → List RES
+  | [], [], _ => []
+  | d :: ds, w :: ws, c => cRes c d w ++ chainListResidualsPoly cRes badRes ds ws (c + 1)
+  | [], _ :: _, _ => badRes
+  | _ :: _, [], _ => badRes
+
+private theorem chainListResidualsPoly_allZero_iff {DW V CW RES : Type}
+    (mkChain : Nat → DW → V → CW)
+    (cRes : Nat → DW → CW → List RES)
+    (natOf : DW → Nat)
+    (sigOf : CW → V)
+    (endOf : CW → V)
+    (walkFn : Nat → Nat → Nat → V → V)
+    (badRes : List RES)
+    (zeroPred : List RES → Bool)
+    (dValid : DW → Prop)
+    (hNil : zeroPred [] = true) (hBad : zeroPred badRes = false)
+    (hAppend : ∀ a b, zeroPred (a ++ b) = (zeroPred a && zeroPred b))
+    (hChainIff : ∀ c d w, dValid d → (zeroPred (cRes c d w) = true ↔ w = mkChain c d (sigOf w)))
+    (hEndMk : ∀ c d v, dValid d → endOf (mkChain c d v) = walkFn c (natOf d) (3 - natOf d) v) :
+    ∀ (ds : List DW) (ws : List CW) (c : Nat),
+      (∀ d ∈ ds, dValid d) →
+      (zeroPred (chainListResidualsPoly cRes badRes ds ws c) = true ↔
+        ds.length = ws.length ∧
+        ws = buildChainListWitnessPoly mkChain ds (ws.map sigOf) c) ∧
+      (ds.length = ws.length →
+        ws = buildChainListWitnessPoly mkChain ds (ws.map sigOf) c →
+        ws.map endOf = recoverEndpointsPoly walkFn (ds.map natOf) (ws.map sigOf) c)
+  | [], [], _, _ => by
+    dsimp only [chainListResidualsPoly, buildChainListWitnessPoly, recoverEndpointsPoly, List.map_nil]
+    exact ⟨⟨fun _ => ⟨rfl, rfl⟩, fun _ => hNil⟩, fun _ _ => rfl⟩
+  | [], _ :: _, _, _ => by
+    dsimp only [chainListResidualsPoly]
+    exact ⟨⟨fun h => (by rw [hBad] at h; cases h), fun h => absurd h.1 (Nat.succ_ne_zero _).symm⟩,
+      fun h => absurd h (Nat.succ_ne_zero _).symm⟩
+  | _ :: _, [], _, _ => by
+    dsimp only [chainListResidualsPoly]
+    exact ⟨⟨fun h => (by rw [hBad] at h; cases h), fun h => absurd h.1 (Nat.succ_ne_zero _)⟩,
+      fun h => absurd h (Nat.succ_ne_zero _)⟩
+  | d :: ds, w :: ws, c, hAll => by
+    have hd : dValid d := hAll d (List.mem_cons_self ..)
+    have hTailValid : ∀ x ∈ ds, dValid x := fun x hx => hAll x (List.mem_cons_of_mem _ hx)
+    dsimp only [chainListResidualsPoly, buildChainListWitnessPoly, List.map_cons, recoverEndpointsPoly]
+    have ih := chainListResidualsPoly_allZero_iff mkChain cRes natOf sigOf endOf walkFn badRes zeroPred dValid
+      hNil hBad hAppend hChainIff hEndMk ds ws (c + 1) hTailValid
+    rw [hAppend, Bool.and_eq_true, hChainIff c d w hd]
+    refine ⟨?_, ?_⟩
+    · constructor
+      · rintro ⟨hw, hRest⟩
+        obtain ⟨hLen, hWs⟩ := ih.1.mp hRest
+        exact ⟨congrArg Nat.succ hLen, List.cons_eq_cons.mpr ⟨hw, hWs⟩⟩
+      · rintro ⟨hLen, hCons⟩
+        obtain ⟨hw, hWs⟩ := List.cons.inj hCons
+        exact ⟨hw, ih.1.mpr ⟨Nat.succ.inj hLen, hWs⟩⟩
+    · intro hLen hCons
+      obtain ⟨hw, hWs⟩ := List.cons.inj hCons
+      have hEnd0 : endOf w = walkFn c (natOf d) (3 - natOf d) (sigOf w) := by
+        have hE := hEndMk c d (sigOf w) hd
+        rw [← hw] at hE
+        exact hE
+      exact List.cons_eq_cons.mpr ⟨hEnd0, ih.2 (Nat.succ.inj hLen) hWs⟩
+
+def honestWotsChainsWitness (pkSeed : Digest4) (layer treeIdx kpIdx : Nat)
+    (digits : List Goldilocks) (sigVals : List Digest4) : List UnaryWotsChainWitness :=
+  buildChainListWitnessPoly
+    (fun c d v => honestUnaryWotsChainWitness pkSeed layer treeIdx kpIdx c d.val v)
+    digits sigVals 0
+
+def wotsChainsResiduals (pkSeed : Digest4) (layer treeIdx kpIdx : Nat)
+    (digits : List Goldilocks) (ws : List UnaryWotsChainWitness) : List Goldilocks :=
+  chainListResidualsPoly
+    (unaryWotsChainResiduals pkSeed layer treeIdx kpIdx)
+    [Goldilocks.one]
+    digits ws 0
+
+theorem wotsChainsResiduals_allZero_iff (pkSeed : Digest4) (layer treeIdx kpIdx : Nat)
+    (digits : List Goldilocks) (ws : List UnaryWotsChainWitness)
+    (hLt4 : ∀ d ∈ digits, d.val < 4) :
+    (allZeroGoldilocks (wotsChainsResiduals pkSeed layer treeIdx kpIdx digits ws) = true ↔
+      digits.length = ws.length ∧
+      ws = honestWotsChainsWitness pkSeed layer treeIdx kpIdx digits (ws.map UnaryWotsChainWitness.sigVal)) ∧
+    (digits.length = ws.length →
+      ws = honestWotsChainsWitness pkSeed layer treeIdx kpIdx digits (ws.map UnaryWotsChainWitness.sigVal) →
+      ws.map UnaryWotsChainWitness.endVal =
+        recoverAggWotsEndpoints pkSeed layer treeIdx kpIdx 0
+          (digits.map Goldilocks.val) (ws.map UnaryWotsChainWitness.sigVal)) :=
+  chainListResidualsPoly_allZero_iff
+    (fun c (d : Goldilocks) v => honestUnaryWotsChainWitness pkSeed layer treeIdx kpIdx c d.val v)
+    (unaryWotsChainResiduals pkSeed layer treeIdx kpIdx)
+    Goldilocks.val
+    UnaryWotsChainWitness.sigVal
+    UnaryWotsChainWitness.endVal
+    (wotsChainWalk pkSeed layer treeIdx kpIdx)
+    [Goldilocks.one]
+    allZeroGoldilocks
+    (fun d => d.val < 4)
+    rfl (by decide) allZeroGoldilocks_append
+    (fun c d w hd => unaryWotsChainResiduals_allZero_iff pkSeed layer treeIdx kpIdx c d w hd)
+    (fun c (d : Goldilocks) v hd => honestUnaryWotsChainWitness_endVal pkSeed layer treeIdx kpIdx c d.val v hd)
+    digits ws 0 hLt4
+
+
+private theorem map_sigOf_buildChainListWitnessPoly {DW V CW : Type}
+    (mkChain : Nat → DW → V → CW) (sigOf : CW → V)
+    (hSig : ∀ c d v, sigOf (mkChain c d v) = v) :
+    ∀ (ds : List DW) (values : List V) (c : Nat),
+      ds.length = values.length →
+      (buildChainListWitnessPoly mkChain ds values c).map sigOf = values
+  | [], [], _, _ => rfl
+  | [], _ :: _, _, h => absurd h (Nat.succ_ne_zero _).symm
+  | _ :: _, [], _, h => absurd h (Nat.succ_ne_zero _)
+  | d :: ds, v :: values, c, h => by
+    dsimp only [buildChainListWitnessPoly]
+    rw [List.map_cons, hSig, map_sigOf_buildChainListWitnessPoly mkChain sigOf hSig ds values (c + 1) (Nat.succ.inj h)]
+
+private theorem length_buildChainListWitnessPoly {DW V CW : Type}
+    (mkChain : Nat → DW → V → CW) :
+    ∀ (ds : List DW) (values : List V) (c : Nat),
+      ds.length = values.length →
+      (buildChainListWitnessPoly mkChain ds values c).length = values.length
+  | [], [], _, _ => rfl
+  | [], _ :: _, _, h => absurd h (Nat.succ_ne_zero _).symm
+  | _ :: _, [], _, h => absurd h (Nat.succ_ne_zero _)
+  | _ :: ds, _ :: values, c, h => by
+    dsimp only [buildChainListWitnessPoly]
+    rw [List.length_cons, length_buildChainListWitnessPoly mkChain ds values (c + 1) (Nat.succ.inj h)]
+    rfl
+
+private theorem map_sibOf_buildMerklePathWitnessPoly {D LW : Type}
+    (mkLvl : Nat → Nat → D → D → LW) (parentOf sibOf : LW → D)
+    (hSib : ∀ lvl idx cur sib, sibOf (mkLvl lvl idx cur sib) = sib) :
+    ∀ (sibs : List D) (lvl idx : Nat) (cur : D),
+      (buildMerklePathWitnessPoly mkLvl parentOf sibs lvl idx cur).map sibOf = sibs
+  | [], _, _, _ => rfl
+  | sib :: sibs, lvl, idx, cur => by
+    dsimp only [buildMerklePathWitnessPoly]
+    rw [List.map_cons, hSib, map_sibOf_buildMerklePathWitnessPoly mkLvl parentOf sibOf hSib sibs]
+
+private theorem length_buildMerklePathWitnessPoly {D LW : Type}
+    (mkLvl : Nat → Nat → D → D → LW) (parentOf : LW → D) :
+    ∀ (sibs : List D) (lvl idx : Nat) (cur : D),
+      (buildMerklePathWitnessPoly mkLvl parentOf sibs lvl idx cur).length = sibs.length
+  | [], _, _, _ => rfl
+  | _ :: sibs, lvl, idx, cur => by
+    dsimp only [buildMerklePathWitnessPoly]
+    rw [List.length_cons, length_buildMerklePathWitnessPoly mkLvl parentOf sibs]
+    rfl
+
+/-- Single WOTS+C + XMSS subtree layer execution trace witness (`verifyWotsLayer` sub-circuit). -/
+structure WotsLayerTraceWitness where
+  tswCtr   : Nat
+  decomp   : Hmsg5DecompWitness
+  chains   : List UnaryWotsChainWitness
+  pkSponge : SpongeAbsorbWitness
+  merkle   : List MerkleLevelWitness
+  rootOut  : Digest4
+  deriving DecidableEq, Repr
+
+def wotsLayerWitnessSig (w : WotsLayerTraceWitness) : WotsLayerSig :=
+  { tswCtr     := w.tswCtr
+    wotsChains := w.chains.map UnaryWotsChainWitness.sigVal
+    merklePath := w.merkle.map MerkleLevelWitness.sibling }
+
+def honestWotsLayerTraceWitness (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (layer treeIdx kpIdx : Nat) (hmsg : Digest5) (lsig : WotsLayerSig) : WotsLayerTraceWitness :=
+  let dec := honestHmsg5DecompWitness hmsg
+  let digitWires := hmsg5DigitWires geom dec
+  let chs := honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digitWires lsig.wotsChains
+  let endpoints := chs.map UnaryWotsChainWitness.endVal
+  let sp := honestSpongeAbsorbWitness
+    (wotsPkInitState pk.pkSeed layer treeIdx kpIdx endpoints.length) endpoints
+  let mPath := honestMerklePathWitness domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx sp.outDigest lsig.merklePath
+  let rt := (merklePathResiduals domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx sp.outDigest mPath).1
+  { tswCtr := lsig.tswCtr, decomp := dec, chains := chs, pkSponge := sp, merkle := mPath, rootOut := rt }
+
+def wotsLayerTraceResiduals (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (layer treeIdx kpIdx : Nat) (hmsg : Digest5) (w : WotsLayerTraceWitness) : List Goldilocks :=
+  let shapeRes :=
+    if w.chains.length == geom.wotsChains && w.merkle.length == geom.subtreeHeight then []
+    else [Goldilocks.one]
+  let digitWires := hmsg5DigitWires geom w.decomp
+  let endpoints := w.chains.map UnaryWotsChainWitness.endVal
+  let (walkedRt, mRes) :=
+    merklePathResiduals domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx w.pkSponge.outDigest w.merkle
+  shapeRes ++
+  hmsg5DecompResiduals geom hmsg w.decomp ++
+  wotsChainsResiduals pk.pkSeed layer treeIdx kpIdx digitWires w.chains ++
+  spongeAbsorbResiduals (wotsPkInitState pk.pkSeed layer treeIdx kpIdx endpoints.length) endpoints w.pkSponge ++
+  mRes ++
+  (lane4Sub w.rootOut walkedRt).toList
+
+theorem wotsLayerTraceResiduals_sound (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (layer treeIdx kpIdx : Nat) (hmsg : Digest5) (w : WotsLayerTraceWitness)
+    (hChainsLe : geom.wotsChains ≤ 128)
+    (hTargetBound : geom.targetSum < 3 * geom.wotsChains)
+    (hZero : allZeroGoldilocks (wotsLayerTraceResiduals geom pk layer treeIdx kpIdx hmsg w) = true) :
+    verifyWotsLayer geom pk layer treeIdx kpIdx hmsg (wotsLayerWitnessSig w) = some w.rootOut := by
+  unfold wotsLayerTraceResiduals at hZero
+  dsimp only at hZero
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, lane4Sub_toList_allZero_iff] at hZero
+  rcases hZero with ⟨⟨⟨⟨⟨hShape, hDec⟩, hCh⟩, hSp⟩, hM⟩, hRtEq⟩
+  have hLenChk := shapeIte_allZero _ hShape
+  · obtain ⟨hDecEq, ds, hExt, hSum, hWiresMap⟩ :=
+      (hmsg5DecompResiduals_allZero_iff geom hmsg w.decomp hChainsLe hTargetBound).mp hDec
+    obtain ⟨_, hDsLt4⟩ := extractWotsDigitsChecked_spec hChainsLe hExt
+    have hWiresLt4 : ∀ d ∈ hmsg5DigitWires geom w.decomp, d.val < 4 := by
+      intro d hd
+      have hMemMap : d.val ∈ (hmsg5DigitWires geom w.decomp).map Goldilocks.val := List.mem_map_of_mem hd
+      rw [hWiresMap] at hMemMap
+      exact hDsLt4 d.val hMemMap
+    have hChIff := wotsChainsResiduals_allZero_iff pk.pkSeed layer treeIdx kpIdx
+      (hmsg5DigitWires geom w.decomp) w.chains hWiresLt4
+    obtain ⟨hDigLenEq, hChEq⟩ := hChIff.1.mp hCh
+    have hEndEq := hChIff.2 hDigLenEq hChEq
+    rw [hWiresMap] at hEndEq
+    have hSpIff := wotsPkSpongeResiduals_allZero_iff pk.pkSeed layer treeIdx kpIdx
+      (w.chains.map UnaryWotsChainWitness.endVal) w.pkSponge
+    have hSpOut := hSpIff.2 (hSpIff.1.mp hSp)
+    have hMIff := merklePathResiduals_allZero_iff domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx
+      w.pkSponge.outDigest w.merkle
+    have hWalkOut := hMIff.2 (hMIff.1.mp hM)
+    unfold verifyWotsLayer wotsLayerWitnessSig
+    have hSigShape :
+        ((w.chains.map UnaryWotsChainWitness.sigVal).length == geom.wotsChains &&
+         (w.merkle.map MerkleLevelWitness.sibling).length == geom.subtreeHeight) = true := by
+      rw [List.length_map, List.length_map, Bool.and_eq_true]; exact hLenChk
+    simp only [hSigShape, ↓reduceIte, hExt, hSum, beq_self_eq_true, Option.some.injEq]
+    rw [← hEndEq, ← hSpOut, ← hWalkOut, ← hRtEq]
+
+theorem wotsLayerTraceResiduals_complete (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (layer treeIdx kpIdx : Nat) (hmsg : Digest5) (lsig : WotsLayerSig) (rt : Digest4)
+    (hChainsLe : geom.wotsChains ≤ 128)
+    (hTargetBound : geom.targetSum < 3 * geom.wotsChains)
+    (hVer : verifyWotsLayer geom pk layer treeIdx kpIdx hmsg lsig = some rt) :
+    let w := honestWotsLayerTraceWitness geom pk layer treeIdx kpIdx hmsg lsig
+    wotsLayerWitnessSig w = lsig ∧
+    w.rootOut = rt ∧
+    allZeroGoldilocks (wotsLayerTraceResiduals geom pk layer treeIdx kpIdx hmsg w) = true := by
+  intro w
+  unfold verifyWotsLayer at hVer
+  cases hShape : (lsig.wotsChains.length == geom.wotsChains && lsig.merklePath.length == geom.subtreeHeight)
+  · simp [hShape] at hVer
+  · simp only [hShape, ↓reduceIte] at hVer
+    rcases Bool.and_eq_true_iff.mp hShape with ⟨hChLenB, hMpLenB⟩
+    have hChLen : lsig.wotsChains.length = geom.wotsChains := eq_of_beq hChLenB
+    have hMpLen : lsig.merklePath.length = geom.subtreeHeight := eq_of_beq hMpLenB
+    cases hExt : extractWotsDigitsChecked geom hmsg with
+    | none => simp [hExt] at hVer
+    | some ds =>
+      simp only [hExt] at hVer
+      cases hSumB : (listNatSum ds == geom.targetSum)
+      · simp [hSumB] at hVer
+      · simp only [hSumB, ↓reduceIte, Option.some.injEq] at hVer
+        have hSum : listNatSum ds = geom.targetSum := eq_of_beq hSumB
+        obtain ⟨hDsLen, hDsLt4⟩ := extractWotsDigitsChecked_spec hChainsLe hExt
+        have hWiresMap :
+            (hmsg5DigitWires geom (honestHmsg5DecompWitness hmsg)).map Goldilocks.val = ds := by
+          unfold extractWotsDigitsChecked at hExt
+          cases hChk : checkDigest5Limbs63 hmsg
+          · simp [hChk] at hExt
+          · simp only [hChk, ↓reduceIte, Option.some.injEq] at hExt
+            subst hExt
+            unfold hmsg5DigitWires honestHmsg5DecompWitness honestLimb63DecompWitness
+            dsimp only
+            simp only [List.map_take, List.map_append, map_val_ofNat_extract, take4_extractLimbBase4Digits_31]
+        have hDecZero :
+            allZeroGoldilocks (hmsg5DecompResiduals geom hmsg (honestHmsg5DecompWitness hmsg)) = true :=
+          (hmsg5DecompResiduals_allZero_iff geom hmsg (honestHmsg5DecompWitness hmsg)
+            hChainsLe hTargetBound).mpr ⟨rfl, ds, hExt, hSum, hWiresMap⟩
+        let digWires := hmsg5DigitWires geom (honestHmsg5DecompWitness hmsg)
+        have hDigWiresLen : digWires.length = lsig.wotsChains.length := by
+          have h1 : digWires.length = ds.length := by rw [← hWiresMap, List.length_map]
+          omega
+        have hWiresLt4 : ∀ d ∈ digWires, d.val < 4 := by
+          intro d hd
+          have hm : d.val ∈ digWires.map Goldilocks.val := List.mem_map_of_mem hd
+          rw [hWiresMap] at hm
+          exact hDsLt4 d.val hm
+        have hSigMap :
+            (honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digWires lsig.wotsChains).map
+              UnaryWotsChainWitness.sigVal = lsig.wotsChains :=
+          map_sigOf_buildChainListWitnessPoly
+            (fun c (d : Goldilocks) v => honestUnaryWotsChainWitness pk.pkSeed layer treeIdx kpIdx c d.val v)
+            UnaryWotsChainWitness.sigVal (fun _ _ _ => rfl) digWires lsig.wotsChains 0 hDigWiresLen
+        have hChsLen :
+            (honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digWires lsig.wotsChains).length =
+              geom.wotsChains := by
+          unfold honestWotsChainsWitness
+          rw [length_buildChainListWitnessPoly _ digWires lsig.wotsChains 0 hDigWiresLen, hChLen]
+        have hSibMap :
+            ∀ (cur : Digest4),
+              (honestMerklePathWitness domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx cur lsig.merklePath).map
+                MerkleLevelWitness.sibling = lsig.merklePath :=
+          fun cur => map_sibOf_buildMerklePathWitnessPoly _ _ _ (fun _ _ _ _ => rfl) lsig.merklePath 1 kpIdx cur
+        have hMpWLen :
+            ∀ (cur : Digest4),
+              (honestMerklePathWitness domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx cur lsig.merklePath).length =
+                geom.subtreeHeight := by
+          intro cur
+          unfold honestMerklePathWitness
+          rw [length_buildMerklePathWitnessPoly, hMpLen]
+        have hSigEq : wotsLayerWitnessSig w = lsig := by
+          rcases lsig with ⟨ctr, chs, mp⟩
+          unfold wotsLayerWitnessSig
+          dsimp only [w, honestWotsLayerTraceWitness]
+          simp only [WotsLayerSig.mk.injEq]
+          exact ⟨trivial, hSigMap, hSibMap _⟩
+        have hChIff := wotsChainsResiduals_allZero_iff pk.pkSeed layer treeIdx kpIdx
+          digWires (honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digWires lsig.wotsChains) hWiresLt4
+        have hChZero :
+            allZeroGoldilocks (wotsChainsResiduals pk.pkSeed layer treeIdx kpIdx digWires
+              (honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digWires lsig.wotsChains)) = true := by
+          apply hChIff.1.mpr
+          refine ⟨?_, ?_⟩
+          · rw [hChsLen, ← hChLen]; exact hDigWiresLen
+          · rw [hSigMap]
+        have hEndEq :
+            (honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digWires lsig.wotsChains).map
+              UnaryWotsChainWitness.endVal =
+            recoverAggWotsEndpoints pk.pkSeed layer treeIdx kpIdx 0 ds lsig.wotsChains := by
+          have e0 := hChIff.2 (by rw [hChsLen, ← hChLen]; exact hDigWiresLen) (by rw [hSigMap])
+          rw [hWiresMap, hSigMap] at e0
+          exact e0
+        let eps := (honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digWires lsig.wotsChains).map
+          UnaryWotsChainWitness.endVal
+        let sp := honestSpongeAbsorbWitness (wotsPkInitState pk.pkSeed layer treeIdx kpIdx eps.length) eps
+        have hSpIff := wotsPkSpongeResiduals_allZero_iff pk.pkSeed layer treeIdx kpIdx eps sp
+        have hSpZero :
+            allZeroGoldilocks (spongeAbsorbResiduals (wotsPkInitState pk.pkSeed layer treeIdx kpIdx eps.length) eps sp) = true :=
+          hSpIff.1.mpr rfl
+        have hSpOut : sp.outDigest =
+            compressWotsEndpointsSponge pk.pkSeed layer treeIdx kpIdx
+              (recoverAggWotsEndpoints pk.pkSeed layer treeIdx kpIdx 0 ds lsig.wotsChains) := by
+          rw [hSpIff.2 rfl]
+          exact congrArg _ hEndEq
+        let mPath := honestMerklePathWitness domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx sp.outDigest lsig.merklePath
+        have hMIff := merklePathResiduals_allZero_iff domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx sp.outDigest mPath
+        have hMZero :
+            allZeroGoldilocks (merklePathResiduals domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx sp.outDigest mPath).2 = true :=
+          hMIff.1.mpr (by rw [hSibMap])
+        have hWalkEq :
+            (merklePathResiduals domainMerkleNode pk.pkSeed layer treeIdx xmssNodeAddr 1 kpIdx sp.outDigest mPath).1 = rt := by
+          rw [hMIff.2 (by rw [hSibMap]), hSibMap, hSpOut, hVer]
+        refine ⟨hSigEq, hWalkEq, ?_⟩
+        unfold wotsLayerTraceResiduals
+        dsimp only [w, honestWotsLayerTraceWitness]
+        have hWShape :
+            ((honestWotsChainsWitness pk.pkSeed layer treeIdx kpIdx digWires lsig.wotsChains).length == geom.wotsChains &&
+             mPath.length == geom.subtreeHeight) = true := by
+          rw [hChsLen, hMpWLen]; simp
+        simp only [allZeroGoldilocks_append, Bool.and_eq_true, lane4Sub_toList_allZero_iff]
+        exact ⟨⟨⟨⟨⟨shapeIte_allZero_of _ (Bool.and_eq_true_iff.mp hWShape), hDecZero⟩, hChZero⟩, hSpZero⟩,
+          hMZero⟩, trivial⟩
+
+/-- Single upper-hypertree layer trace node (`HmsgDetTree` + `WotsLayerTraceWitness`). -/
+structure UpperLayerTraceNode where
+  detHmsg  : HmsgDetTreeTraceWitness
+  wotsStep : WotsLayerTraceWitness
+  deriving DecidableEq, Repr
+
+private def buildUpperTracePoly {D LS NW : Type}
+    (mkNode : Nat → Nat → D → LS → (Nat × D × NW)) :
+    List LS → Nat → Nat → D → List NW
+  | [], _, _, _ => []
+  | lsig :: rest, layer, rem, curRt =>
+    let (nextRem, nextRt, nw) := mkNode layer rem curRt lsig
+    nw :: buildUpperTracePoly mkNode rest (layer + 1) nextRem nextRt
+
+private def upperTraceResidualsPoly {D NW RES : Type}
+    (nodeRes : Nat → Nat → D → NW → (Nat × D × List RES)) :
+    List NW → Nat → Nat → D → (D × List RES)
+  | [], _, _, curRt => (curRt, [])
+  | nw :: rest, layer, rem, curRt =>
+    let (nextRem, nextRt, r0) := nodeRes layer rem curRt nw
+    let (topRt, restRes) := upperTraceResidualsPoly nodeRes rest (layer + 1) nextRem nextRt
+    (topRt, r0 ++ restRes)
+
+private theorem upperTraceResidualsPoly_sound {D LS NW RES : Type}
+    (nodeRes : Nat → Nat → D → NW → (Nat × D × List RES))
+    (vStep : Nat → Nat → D → LS → Option (Nat × D))
+    (sigOf : NW → LS)
+    (zeroPred : List RES → Bool)
+    (hAppend : ∀ a b, zeroPred (a ++ b) = (zeroPred a && zeroPred b))
+    (hNodeSound : ∀ layer rem cur nw,
+      zeroPred (nodeRes layer rem cur nw).2.2 = true →
+      vStep layer rem cur (sigOf nw) = some ((nodeRes layer rem cur nw).1, (nodeRes layer rem cur nw).2.1)) :
+    ∀ (nws : List NW) (layer rem : Nat) (curRt : D),
+      zeroPred (upperTraceResidualsPoly nodeRes nws layer rem curRt).2 = true →
+      verifyUpperPoly vStep (nws.map sigOf) layer rem curRt =
+        some (upperTraceResidualsPoly nodeRes nws layer rem curRt).1
+  | [], _, _, _, _ => rfl
+  | nw :: rest, layer, rem, curRt, hZ => by
+    dsimp only [upperTraceResidualsPoly] at hZ ⊢
+    rw [List.map_cons]
+    dsimp only [verifyUpperPoly]
+    rw [hAppend, Bool.and_eq_true] at hZ
+    rw [hNodeSound layer rem curRt nw hZ.1]
+    exact upperTraceResidualsPoly_sound nodeRes vStep sigOf zeroPred hAppend hNodeSound
+      rest (layer + 1) (nodeRes layer rem curRt nw).1 (nodeRes layer rem curRt nw).2.1 hZ.2
+
+private theorem upperTraceResidualsPoly_complete {D LS NW RES : Type}
+    (mkNode : Nat → Nat → D → LS → (Nat × D × NW))
+    (nodeRes : Nat → Nat → D → NW → (Nat × D × List RES))
+    (vStep : Nat → Nat → D → LS → Option (Nat × D))
+    (sigOf : NW → LS)
+    (zeroPred : List RES → Bool)
+    (hNil : zeroPred [] = true)
+    (hAppend : ∀ a b, zeroPred (a ++ b) = (zeroPred a && zeroPred b))
+    (hNodeComplete : ∀ layer rem cur lsig nr nrt,
+      vStep layer rem cur lsig = some (nr, nrt) →
+      let out := mkNode layer rem cur lsig
+      out.1 = nr ∧ out.2.1 = nrt ∧ sigOf out.2.2 = lsig ∧
+      (nodeRes layer rem cur out.2.2).1 = nr ∧
+      (nodeRes layer rem cur out.2.2).2.1 = nrt ∧
+      zeroPred (nodeRes layer rem cur out.2.2).2.2 = true) :
+    ∀ (ls : List LS) (layer rem : Nat) (curRt topRt : D),
+      verifyUpperPoly vStep ls layer rem curRt = some topRt →
+      let nws := buildUpperTracePoly mkNode ls layer rem curRt
+      nws.map sigOf = ls ∧
+      (upperTraceResidualsPoly nodeRes nws layer rem curRt).1 = topRt ∧
+      zeroPred (upperTraceResidualsPoly nodeRes nws layer rem curRt).2 = true
+  | [], _, _, _, _, hVer => by
+    dsimp only [verifyUpperPoly, buildUpperTracePoly, upperTraceResidualsPoly, List.map_nil] at hVer ⊢
+    injection hVer with hEq
+    exact ⟨rfl, hEq, hNil⟩
+  | lsig :: rest, layer, rem, curRt, topRt, hVer => by
+    dsimp only [verifyUpperPoly] at hVer
+    cases hSt : vStep layer rem curRt lsig with
+    | none => simp [hSt] at hVer
+    | some pair =>
+      rcases pair with ⟨nr, nrt⟩
+      simp only [hSt] at hVer
+      obtain ⟨hMk1, hMk2, hSig, hRes1, hRes2, hResZ⟩ := hNodeComplete layer rem curRt lsig nr nrt hSt
+      obtain ⟨ihMap, ihTop, ihZ⟩ := upperTraceResidualsPoly_complete mkNode nodeRes vStep sigOf
+        zeroPred hNil hAppend hNodeComplete rest (layer + 1) nr nrt topRt hVer
+      dsimp only [buildUpperTracePoly]
+      obtain ⟨m1, m2, mnw, hMkEq⟩ : ∃ m1 m2 mnw, mkNode layer rem curRt lsig = (m1, m2, mnw) := ⟨_, _, _, rfl⟩
+      rw [hMkEq] at hMk1 hMk2 hSig hRes1 hRes2 hResZ ⊢
+      dsimp only at hMk1 hMk2 hSig hRes1 hRes2 hResZ ⊢
+      subst hMk1 hMk2
+      dsimp only [List.map_cons, upperTraceResidualsPoly]
+      rw [hRes1, hRes2, hAppend, Bool.and_eq_true]
+      exact ⟨List.cons_eq_cons.mpr ⟨hSig, ihMap⟩, ihTop, ⟨hResZ, ihZ⟩⟩
+
+
+def honestUpperLayersTrace (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (startLayer remIdx : Nat) (curRt : Digest4) (ls : List WotsLayerSig) : List UpperLayerTraceNode :=
+  buildUpperTracePoly
+    (fun l rem cur lsig =>
+      let kpIdx := rem % (2 ^ geom.subtreeHeight)
+      let treeIdx := rem / (2 ^ geom.subtreeHeight)
+      let dh := honestHmsgDetTreeTraceWitness pk l treeIdx kpIdx lsig.tswCtr cur
+      let wl := honestWotsLayerTraceWitness geom pk l treeIdx kpIdx dh.outMsg lsig
+      (treeIdx, wl.rootOut, { detHmsg := dh, wotsStep := wl }))
+    ls startLayer remIdx curRt
+
+def upperLayersTraceResiduals (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (startLayer remIdx : Nat) (curRt : Digest4) (nws : List UpperLayerTraceNode) :
+    (Digest4 × List Goldilocks) :=
+  upperTraceResidualsPoly
+    (fun l rem cur nw =>
+      let kpIdx := rem % (2 ^ geom.subtreeHeight)
+      let treeIdx := rem / (2 ^ geom.subtreeHeight)
+      let rH := hmsgDetTreeResiduals pk l treeIdx kpIdx nw.wotsStep.tswCtr cur nw.detHmsg
+      let rW := wotsLayerTraceResiduals geom pk l treeIdx kpIdx nw.detHmsg.outMsg nw.wotsStep
+      (treeIdx, nw.wotsStep.rootOut, rH ++ rW))
+    nws startLayer remIdx curRt
+
+theorem upperLayersTraceResiduals_sound (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (startLayer remIdx : Nat) (curRt : Digest4) (nws : List UpperLayerTraceNode)
+    (hChainsLe : geom.wotsChains ≤ 128)
+    (hTargetBound : geom.targetSum < 3 * geom.wotsChains)
+    (hZero : allZeroGoldilocks (upperLayersTraceResiduals geom pk startLayer remIdx curRt nws).2 = true) :
+    verifyUpperLayers geom pk startLayer remIdx curRt
+      (nws.map fun nw => wotsLayerWitnessSig nw.wotsStep) =
+      some (upperLayersTraceResiduals geom pk startLayer remIdx curRt nws).1 := by
+  unfold upperLayersTraceResiduals at hZero ⊢
+  unfold verifyUpperLayers
+  refine upperTraceResidualsPoly_sound _ _ (fun (nw : UpperLayerTraceNode) => wotsLayerWitnessSig nw.wotsStep)
+    allZeroGoldilocks allZeroGoldilocks_append ?_ nws startLayer remIdx curRt hZero
+  intro l rem cur nw hNodeZ
+  dsimp only at hNodeZ ⊢
+  rw [allZeroGoldilocks_append, Bool.and_eq_true] at hNodeZ
+  have hDetIff := hmsgDetTreeResiduals_allZero_iff pk l (rem / 2 ^ geom.subtreeHeight)
+    (rem % 2 ^ geom.subtreeHeight) nw.wotsStep.tswCtr cur nw.detHmsg
+  have hOutMsg := hDetIff.2 (hDetIff.1.mp hNodeZ.1)
+  have hWSound := wotsLayerTraceResiduals_sound geom pk l (rem / 2 ^ geom.subtreeHeight)
+    (rem % 2 ^ geom.subtreeHeight) nw.detHmsg.outMsg nw.wotsStep hChainsLe hTargetBound hNodeZ.2
+  have hCtr : (wotsLayerWitnessSig nw.wotsStep).tswCtr = nw.wotsStep.tswCtr := rfl
+  rw [hCtr, ← hOutMsg, hWSound]
+
+theorem upperLayersTraceResiduals_complete (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (startLayer remIdx : Nat) (curRt topRt : Digest4) (ls : List WotsLayerSig)
+    (hChainsLe : geom.wotsChains ≤ 128)
+    (hTargetBound : geom.targetSum < 3 * geom.wotsChains)
+    (hVer : verifyUpperLayers geom pk startLayer remIdx curRt ls = some topRt) :
+    let nws := honestUpperLayersTrace geom pk startLayer remIdx curRt ls
+    (nws.map fun nw => wotsLayerWitnessSig nw.wotsStep) = ls ∧
+    (upperLayersTraceResiduals geom pk startLayer remIdx curRt nws).1 = topRt ∧
+    allZeroGoldilocks (upperLayersTraceResiduals geom pk startLayer remIdx curRt nws).2 = true := by
+  unfold verifyUpperLayers at hVer
+  unfold honestUpperLayersTrace upperLayersTraceResiduals
+  refine upperTraceResidualsPoly_complete _ _ _ (fun (nw : UpperLayerTraceNode) => wotsLayerWitnessSig nw.wotsStep)
+    allZeroGoldilocks rfl allZeroGoldilocks_append ?_ ls startLayer remIdx curRt topRt hVer
+  intro l rem cur lsig nr nrt hSt
+  dsimp only at hSt ⊢
+  let kpIdx := rem % (2 ^ geom.subtreeHeight)
+  let treeIdx := rem / (2 ^ geom.subtreeHeight)
+  let hmsg := computeHmsgDetTree pk l treeIdx kpIdx lsig.tswCtr cur
+  change (match verifyWotsLayer geom pk l treeIdx kpIdx hmsg lsig with
+          | none => none | some nextRoot => some (treeIdx, nextRoot)) = some (nr, nrt) at hSt
+  cases hW : verifyWotsLayer geom pk l treeIdx kpIdx hmsg lsig with
+  | none => rw [hW] at hSt; cases hSt
+  | some rtOut =>
+    rw [hW] at hSt
+    simp only [Option.some.injEq, Prod.mk.injEq] at hSt
+    rcases hSt with ⟨hNr, hNrt⟩
+    subst hNr hNrt
+    let dh := honestHmsgDetTreeTraceWitness pk l treeIdx kpIdx lsig.tswCtr cur
+    have hDetIff := hmsgDetTreeResiduals_allZero_iff pk l treeIdx kpIdx lsig.tswCtr cur dh
+    have hDhOut : dh.outMsg = hmsg := hDetIff.2 rfl
+    have hDhZero : allZeroGoldilocks (hmsgDetTreeResiduals pk l treeIdx kpIdx lsig.tswCtr cur dh) = true :=
+      hDetIff.1.mpr rfl
+    have hWSub : verifyWotsLayer geom pk l treeIdx kpIdx dh.outMsg lsig = some rtOut := by
+      rw [hDhOut]; exact hW
+    obtain ⟨hWSig, hWRt, hWZero⟩ := wotsLayerTraceResiduals_complete geom pk l treeIdx kpIdx
+      dh.outMsg lsig rtOut hChainsLe hTargetBound hWSub
+    have hCtrEq : (honestWotsLayerTraceWitness geom pk l treeIdx kpIdx dh.outMsg lsig).tswCtr = lsig.tswCtr := rfl
+    refine ⟨rfl, hWRt, hWSig, rfl, hWRt, ?_⟩
+    rw [allZeroGoldilocks_append, Bool.and_eq_true, hCtrEq]
+    exact ⟨hDhZero, hWZero⟩
+
+
+/-! ### FORS Opening Sub-Circuit & 7-Limb `< 2^63` Stateless XOF Sub-Circuit -/
+
+private theorem forsLeafHash_eq_perm (geom : AggSigGeometry) (pkSeed val : Digest4)
+    (leafGlobalIdx j idx : Nat) :
+    forsLeafHash geom pkSeed val leafGlobalIdx j idx =
+      lane4Add (poseidon2Perm12
+        ⟨val, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx j idx⟩).b0 val := by
+  unfold forsLeafHash poseidon2Compress12FF
+  rfl
+
+structure ForsOpeningTraceWitness where
+  secretVal : Digest4
+  leafPerm  : Poseidon2PermWitness
+  merkle    : List MerkleLevelWitness
+  treeRoot  : Digest4
+  deriving DecidableEq, Repr
+
+def forsOpeningWitnessSig (w : ForsOpeningTraceWitness) : AggForsTreeOpening :=
+  { secretVal := w.secretVal
+    authPath  := w.merkle.map MerkleLevelWitness.sibling }
+
+def honestForsOpeningTraceWitness (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx t idx : Nat)
+    (op : AggForsTreeOpening) : ForsOpeningTraceWitness :=
+  let lp := honestPoseidon2PermWitness ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩
+  let leaf := lane4Add lp.output.b0 op.secretVal
+  let mp := honestMerklePathWitness domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf op.authPath
+  let rt := (merklePathResiduals domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf mp).1
+  { secretVal := op.secretVal, leafPerm := lp, merkle := mp, treeRoot := rt }
+
+def forsOpeningResiduals (geom : AggSigGeometry) (pkSeed : Digest4)
+    (leafGlobalIdx t idx : Nat) (w : ForsOpeningTraceWitness) : List Goldilocks :=
+  let shapeRes :=
+    if decide (idx < 2 ^ geom.forsHeight) && (w.merkle.length == geom.forsHeight) then []
+    else [Goldilocks.one]
+  let leaf := lane4Add w.leafPerm.output.b0 w.secretVal
+  let (walkedRt, mRes) := merklePathResiduals domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf w.merkle
+  shapeRes ++
+  permWithInputResiduals ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩ w.leafPerm ++
+  mRes ++
+  (lane4Sub w.treeRoot walkedRt).toList
+
+theorem forsOpeningResiduals_sound (geom : AggSigGeometry) (pkSeed : Digest4)
+    (leafGlobalIdx t idx : Nat) (w : ForsOpeningTraceWitness)
+    (hZero : allZeroGoldilocks (forsOpeningResiduals geom pkSeed leafGlobalIdx t idx w) = true) :
+    verifySingleForsOpening geom pkSeed leafGlobalIdx t idx (forsOpeningWitnessSig w) = some w.treeRoot := by
+  unfold forsOpeningResiduals at hZero
+  dsimp only at hZero
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, permWithInputResiduals_allZero_iff,
+    lane4Sub_toList_allZero_iff] at hZero
+  rcases hZero with ⟨⟨⟨hShape, hLp⟩, hM⟩, hRtEq⟩
+  have hChk := shapeIte_allZero _ hShape
+  · have hPermOut : (honestPoseidon2PermWitness ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩).output =
+        poseidon2Perm12 ⟨w.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩ := by
+      unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+    have hLeafEq : lane4Add w.leafPerm.output.b0 w.secretVal =
+        forsLeafHash geom pkSeed w.secretVal leafGlobalIdx t idx := by
+      rw [hLp, hPermOut, forsLeafHash_eq_perm]
+    have hMIff := merklePathResiduals_allZero_iff domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx
+      (lane4Add w.leafPerm.output.b0 w.secretVal) w.merkle
+    have hWalkEq := hMIff.2 (hMIff.1.mp hM)
+    unfold verifySingleForsOpening forsOpeningWitnessSig
+    rcases hChk with ⟨hIdxDec, hMpLenB⟩
+    have hIdxLt : idx < 2 ^ geom.forsHeight := of_decide_eq_true hIdxDec
+    simp only [hIdxLt, decide_true, List.length_map, hMpLenB, Bool.true_and, ↓reduceIte, Option.some.injEq]
+    rw [hRtEq, hWalkEq, hLeafEq]
+
+theorem forsOpeningResiduals_complete (geom : AggSigGeometry) (pkSeed : Digest4)
+    (leafGlobalIdx t idx : Nat) (op : AggForsTreeOpening) (rt : Digest4)
+    (hVer : verifySingleForsOpening geom pkSeed leafGlobalIdx t idx op = some rt) :
+    let w := honestForsOpeningTraceWitness geom pkSeed leafGlobalIdx t idx op
+    forsOpeningWitnessSig w = op ∧
+    w.treeRoot = rt ∧
+    allZeroGoldilocks (forsOpeningResiduals geom pkSeed leafGlobalIdx t idx w) = true := by
+  intro w
+  unfold verifySingleForsOpening at hVer
+  cases hChk : (decide (idx < 2 ^ geom.forsHeight) && (op.authPath.length == geom.forsHeight))
+  · simp [hChk] at hVer
+  · simp only [hChk, ↓reduceIte, Option.some.injEq] at hVer
+    rcases Bool.and_eq_true_iff.mp hChk with ⟨hIdxDec, hMpLenB⟩
+    have hMpLen : op.authPath.length = geom.forsHeight := eq_of_beq hMpLenB
+    have hPermOut : (honestPoseidon2PermWitness ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩).output =
+        poseidon2Perm12 ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩ := by
+      unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+    let lp := honestPoseidon2PermWitness ⟨op.secretVal, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx t idx⟩
+    let leaf := lane4Add lp.output.b0 op.secretVal
+    have hLeafEq : leaf = forsLeafHash geom pkSeed op.secretVal leafGlobalIdx t idx := by
+      dsimp only [leaf, lp]; rw [hPermOut, forsLeafHash_eq_perm]
+    let mp := honestMerklePathWitness domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf op.authPath
+    have hSibMap : mp.map MerkleLevelWitness.sibling = op.authPath :=
+      map_sibOf_buildMerklePathWitnessPoly _ _ _ (fun _ _ _ _ => rfl) op.authPath 1 idx leaf
+    have hMpWLen : mp.length = geom.forsHeight := by
+      dsimp only [mp]; unfold honestMerklePathWitness
+      rw [length_buildMerklePathWitnessPoly, hMpLen]
+    have hMIff := merklePathResiduals_allZero_iff domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf mp
+    have hMZero : allZeroGoldilocks (merklePathResiduals domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf mp).2 = true :=
+      hMIff.1.mpr (by rw [hSibMap])
+    have hWalkEq : (merklePathResiduals domainForsNode pkSeed 0 (forsHyperTreeIdx geom leafGlobalIdx)
+      (forsTreeNodeAddr geom leafGlobalIdx t) 1 idx leaf mp).1 = rt := by
+      rw [hMIff.2 (by rw [hSibMap]), hSibMap, hLeafEq, hVer]
+    have hSigEq : forsOpeningWitnessSig w = op := by
+      rcases op with ⟨sv, ap⟩
+      unfold forsOpeningWitnessSig
+      dsimp only [w, honestForsOpeningTraceWitness]
+      simp only [AggForsTreeOpening.mk.injEq]
+      exact ⟨trivial, hSibMap⟩
+    refine ⟨hSigEq, hWalkEq, ?_⟩
+    unfold forsOpeningResiduals
+    dsimp only [w, honestForsOpeningTraceWitness]
+    have hWChk : (decide (idx < 2 ^ geom.forsHeight) && (mp.length == geom.forsHeight)) = true := by
+      rw [hIdxDec, hMpWLen]; simp
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true,
+      permWithInputResiduals_allZero_iff, lane4Sub_toList_allZero_iff]
+    exact ⟨⟨⟨shapeIte_allZero_of _ (Bool.and_eq_true_iff.mp hWChk), trivial⟩, hMZero⟩, trivial⟩
+
+private def buildForsTracePoly {OP FW : Type}
+    (mkF : Nat → Nat → OP → FW) :
+    List Nat → List OP → Nat → List FW
+  | [], _, _ => []
+  | _, [], _ => []
+  | idx :: idxs, op :: ops, t => mkF t idx op :: buildForsTracePoly mkF idxs ops (t + 1)
+
+private def forsTraceResidualsPoly {FW RES : Type}
+    (fRes : Nat → Nat → FW → List RES) (badRes : List RES) :
+    List Nat → List FW → Nat → List RES
+  | [], [], _ => []
+  | idx :: idxs, w :: ws, t => fRes t idx w ++ forsTraceResidualsPoly fRes badRes idxs ws (t + 1)
+  | [], _ :: _, _ => badRes
+  | _ :: _, [], _ => badRes
+
+private theorem forsTraceResidualsPoly_sound {D OP FW RES : Type}
+    (fRes : Nat → Nat → FW → List RES)
+    (vStep : Nat → Nat → OP → Option D)
+    (sigOf : FW → OP)
+    (rtOf : FW → D)
+    (badRes : List RES)
+    (zeroPred : List RES → Bool)
+    (hBad : zeroPred badRes = false)
+    (hAppend : ∀ a b, zeroPred (a ++ b) = (zeroPred a && zeroPred b))
+    (hStepSound : ∀ t idx w, zeroPred (fRes t idx w) = true → vStep t idx (sigOf w) = some (rtOf w)) :
+    ∀ (idxs : List Nat) (ws : List FW) (t : Nat),
+      zeroPred (forsTraceResidualsPoly fRes badRes idxs ws t) = true →
+      idxs.length = ws.length ∧
+      verifyForsPoly vStep idxs (ws.map sigOf) t = some (ws.map rtOf)
+  | [], [], _, _ => ⟨rfl, rfl⟩
+  | [], _ :: _, _, hZ => by dsimp only [forsTraceResidualsPoly] at hZ; rw [hBad] at hZ; cases hZ
+  | _ :: _, [], _, hZ => by dsimp only [forsTraceResidualsPoly] at hZ; rw [hBad] at hZ; cases hZ
+  | idx :: idxs, w :: ws, t, hZ => by
+    dsimp only [forsTraceResidualsPoly] at hZ ⊢
+    rw [List.map_cons, List.map_cons]
+    dsimp only [verifyForsPoly]
+    rw [hAppend, Bool.and_eq_true] at hZ
+    rw [hStepSound t idx w hZ.1]
+    obtain ⟨hLen, hRest⟩ := forsTraceResidualsPoly_sound fRes vStep sigOf rtOf badRes zeroPred
+      hBad hAppend hStepSound idxs ws (t + 1) hZ.2
+    rw [hRest]
+    exact ⟨congrArg Nat.succ hLen, rfl⟩
+
+private theorem forsTraceResidualsPoly_complete {D OP FW RES : Type}
+    (mkF : Nat → Nat → OP → FW)
+    (fRes : Nat → Nat → FW → List RES)
+    (vStep : Nat → Nat → OP → Option D)
+    (sigOf : FW → OP)
+    (rtOf : FW → D)
+    (badRes : List RES)
+    (zeroPred : List RES → Bool)
+    (hNil : zeroPred [] = true)
+    (hAppend : ∀ a b, zeroPred (a ++ b) = (zeroPred a && zeroPred b))
+    (hStepComplete : ∀ t idx op rt,
+      vStep t idx op = some rt →
+      sigOf (mkF t idx op) = op ∧
+      rtOf (mkF t idx op) = rt ∧
+      zeroPred (fRes t idx (mkF t idx op)) = true) :
+    ∀ (idxs : List Nat) (ops : List OP) (t : Nat) (rts : List D),
+      verifyForsPoly vStep idxs ops t = some rts →
+      let ws := buildForsTracePoly mkF idxs ops t
+      ws.map sigOf = ops ∧
+      ws.map rtOf = rts ∧
+      zeroPred (forsTraceResidualsPoly fRes badRes idxs ws t) = true
+  | [], [], _, _, hVer => by
+    dsimp only [verifyForsPoly, buildForsTracePoly, forsTraceResidualsPoly, List.map_nil] at hVer ⊢
+    injection hVer with hEq
+    exact ⟨rfl, hEq, hNil⟩
+  | [], _ :: _, _, _, hVer => by dsimp only [verifyForsPoly] at hVer; cases hVer
+  | _ :: _, [], _, _, hVer => by dsimp only [verifyForsPoly] at hVer; cases hVer
+  | idx :: idxs, op :: ops, t, rts, hVer => by
+    dsimp only [verifyForsPoly] at hVer
+    cases hSt : vStep t idx op with
+    | none => simp [hSt] at hVer
+    | some rt0 =>
+      simp only [hSt] at hVer
+      cases hRest : verifyForsPoly vStep idxs ops (t + 1) with
+      | none => simp [hRest] at hVer
+      | some restRts =>
+        simp only [hRest, Option.some.injEq] at hVer
+        subst hVer
+        obtain ⟨hS0, hR0, hZ0⟩ := hStepComplete t idx op rt0 hSt
+        obtain ⟨ihS, ihR, ihZ⟩ := forsTraceResidualsPoly_complete mkF fRes vStep sigOf rtOf
+          badRes zeroPred hNil hAppend hStepComplete idxs ops (t + 1) restRts hRest
+        dsimp only [buildForsTracePoly, List.map_cons, forsTraceResidualsPoly]
+        rw [hAppend, Bool.and_eq_true]
+        exact ⟨List.cons_eq_cons.mpr ⟨hS0, ihS⟩, List.cons_eq_cons.mpr ⟨hR0, ihR⟩, ⟨hZ0, ihZ⟩⟩
+
+/-- Full FORS multi-tree opening + `compressForsRootsSponge` sub-circuit witness. -/
+structure ForsAndRecoverTraceWitness where
+  openings    : List ForsOpeningTraceWitness
+  rootsSponge : SpongeAbsorbWitness
+  forsPkOut   : Digest4
+  deriving DecidableEq, Repr
+
+def honestForsAndRecoverTraceWitness (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx : Nat)
+    (indices : List Nat) (ops : List AggForsTreeOpening) : ForsAndRecoverTraceWitness :=
+  let fws := buildForsTracePoly (honestForsOpeningTraceWitness geom pkSeed leafGlobalIdx) indices ops 0
+  let rts := fws.map ForsOpeningTraceWitness.treeRoot
+  let sp := honestSpongeAbsorbWitness (forsRootsInitState geom pkSeed leafGlobalIdx) rts
+  { openings := fws, rootsSponge := sp, forsPkOut := sp.outDigest }
+
+def forsAndRecoverTraceResiduals (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx : Nat)
+    (indices : List Nat) (w : ForsAndRecoverTraceWitness) : List Goldilocks :=
+  let shapeRes :=
+    if indices.length == geom.forsTrees && w.openings.length == geom.forsTrees then []
+    else [Goldilocks.one]
+  let rts := w.openings.map ForsOpeningTraceWitness.treeRoot
+  shapeRes ++
+  forsTraceResidualsPoly (forsOpeningResiduals geom pkSeed leafGlobalIdx) [Goldilocks.one] indices w.openings 0 ++
+  spongeAbsorbResiduals (forsRootsInitState geom pkSeed leafGlobalIdx) rts w.rootsSponge ++
+  (lane4Sub w.forsPkOut w.rootsSponge.outDigest).toList
+
+theorem forsAndRecoverTraceResiduals_sound (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx : Nat)
+    (indices : List Nat) (w : ForsAndRecoverTraceWitness)
+    (hZero : allZeroGoldilocks (forsAndRecoverTraceResiduals geom pkSeed leafGlobalIdx indices w) = true) :
+    verifyAndRecoverForsPk geom pkSeed leafGlobalIdx indices (w.openings.map forsOpeningWitnessSig) =
+      some w.forsPkOut := by
+  unfold forsAndRecoverTraceResiduals at hZero
+  dsimp only at hZero
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, lane4Sub_toList_allZero_iff] at hZero
+  rcases hZero with ⟨⟨⟨hShape, hF⟩, hSp⟩, hOutEq⟩
+  have hLenChk := shapeIte_allZero _ hShape
+  · obtain ⟨_, hVerF⟩ := forsTraceResidualsPoly_sound
+      (forsOpeningResiduals geom pkSeed leafGlobalIdx)
+      (verifySingleForsOpening geom pkSeed leafGlobalIdx)
+      forsOpeningWitnessSig ForsOpeningTraceWitness.treeRoot
+      [Goldilocks.one] allZeroGoldilocks (by decide) allZeroGoldilocks_append
+      (forsOpeningResiduals_sound geom pkSeed leafGlobalIdx) indices w.openings 0 hF
+    have hSpIff := forsRootsSpongeResiduals_allZero_iff geom pkSeed leafGlobalIdx
+      (w.openings.map ForsOpeningTraceWitness.treeRoot) w.rootsSponge
+    have hSpOut := hSpIff.2 (hSpIff.1.mp hSp)
+    unfold verifyAndRecoverForsPk verifyForsTreesAux
+    have hMapLen :
+        (indices.length == geom.forsTrees && (w.openings.map forsOpeningWitnessSig).length == geom.forsTrees) = true := by
+      rw [List.length_map, Bool.and_eq_true]; exact hLenChk
+    simp only [hMapLen, ↓reduceIte, hVerF, Option.some.injEq]
+    rw [hOutEq, hSpOut]
+
+theorem forsAndRecoverTraceResiduals_complete (geom : AggSigGeometry) (pkSeed : Digest4) (leafGlobalIdx : Nat)
+    (indices : List Nat) (ops : List AggForsTreeOpening) (fpk : Digest4)
+    (hVer : verifyAndRecoverForsPk geom pkSeed leafGlobalIdx indices ops = some fpk) :
+    let w := honestForsAndRecoverTraceWitness geom pkSeed leafGlobalIdx indices ops
+    w.openings.map forsOpeningWitnessSig = ops ∧
+    w.forsPkOut = fpk ∧
+    allZeroGoldilocks (forsAndRecoverTraceResiduals geom pkSeed leafGlobalIdx indices w) = true := by
+  intro w
+  unfold verifyAndRecoverForsPk verifyForsTreesAux at hVer
+  cases hLenChk : (indices.length == geom.forsTrees && ops.length == geom.forsTrees)
+  · simp [hLenChk] at hVer
+  · simp only [hLenChk, ↓reduceIte] at hVer
+    cases hFT : verifyForsPoly (verifySingleForsOpening geom pkSeed leafGlobalIdx) indices ops 0 with
+    | none => simp [hFT] at hVer
+    | some rts =>
+      simp only [hFT, Option.some.injEq] at hVer
+      obtain ⟨hMapS, hMapR, hFZ⟩ := forsTraceResidualsPoly_complete
+        (honestForsOpeningTraceWitness geom pkSeed leafGlobalIdx)
+        (forsOpeningResiduals geom pkSeed leafGlobalIdx)
+        (verifySingleForsOpening geom pkSeed leafGlobalIdx)
+        forsOpeningWitnessSig ForsOpeningTraceWitness.treeRoot
+        [Goldilocks.one] allZeroGoldilocks rfl allZeroGoldilocks_append
+        (forsOpeningResiduals_complete geom pkSeed leafGlobalIdx) indices ops 0 rts hFT
+      let fws := buildForsTracePoly (honestForsOpeningTraceWitness geom pkSeed leafGlobalIdx) indices ops 0
+      have hFwsLen : fws.length = ops.length := by
+        have h1 : (fws.map forsOpeningWitnessSig).length = ops.length := by rw [hMapS]
+        simpa only [List.length_map] using h1
+      let rtsW := fws.map ForsOpeningTraceWitness.treeRoot
+      let sp := honestSpongeAbsorbWitness (forsRootsInitState geom pkSeed leafGlobalIdx) rtsW
+      have hSpIff := forsRootsSpongeResiduals_allZero_iff geom pkSeed leafGlobalIdx rtsW sp
+      have hSpZ : allZeroGoldilocks (spongeAbsorbResiduals
+          (forsRootsInitState geom pkSeed leafGlobalIdx) rtsW sp) = true := hSpIff.1.mpr rfl
+      have hSpOut : sp.outDigest = fpk := by
+        rw [hSpIff.2 rfl]
+        have hRtsEq : rtsW = rts := hMapR
+        rw [hRtsEq, hVer]
+      refine ⟨hMapS, hSpOut, ?_⟩
+      unfold forsAndRecoverTraceResiduals
+      dsimp only [w, honestForsAndRecoverTraceWitness]
+      have hWLenChk : (indices.length == geom.forsTrees && fws.length == geom.forsTrees) = true := by
+        rw [hFwsLen]; exact hLenChk
+      simp only [allZeroGoldilocks_append, Bool.and_eq_true, lane4Sub_toList_allZero_iff]
+      exact ⟨⟨⟨shapeIte_allZero_of _ (Bool.and_eq_true_iff.mp hWLenChk), hFZ⟩, hSpZ⟩, trivial⟩
+
+/-- 2-block stateless XOF + 7-limb `< 2^63` quartic/MSB algebraic witness (`sig.rs:494`). -/
+structure StatelessXofTraceWitness where
+  perm0 : Poseidon2PermWitness
+  perm1 : Poseidon2PermWitness
+  lim0  : Limb63DecompWitness
+  lim1  : Limb63DecompWitness
+  lim2  : Limb63DecompWitness
+  lim3  : Limb63DecompWitness
+  lim4  : Limb63DecompWitness
+  lim5  : Limb63DecompWitness
+  lim6  : Limb63DecompWitness
+  deriving DecidableEq, Repr
+
+private def statelessXofIn0 (pk : AggValidatorPk) (mu : Digest5) : Poseidon2State12 :=
+  ⟨pk.pkSeed, pk.pkRoot, ⟨domainHMsgStateless, mu.limb4, Goldilocks.zero, poseidon2IvTag⟩⟩
+
+private def statelessXofIn1 (st0 : Poseidon2State12) (rRand : Digest4) (mu : Digest5) : Poseidon2State12 :=
+  let muLow : Digest4 := ⟨mu.limb0, mu.limb1, mu.limb2, mu.limb3⟩
+  ⟨lane4Add st0.b0 rRand, lane4Add st0.b1 muLow, st0.b2⟩
+
+private theorem statelessXofSpongeState_eq_states (pk : AggValidatorPk) (rRand : Digest4) (mu : Digest5) :
+    statelessXofSpongeState pk rRand mu =
+      poseidon2Perm12 (statelessXofIn1 (poseidon2Perm12 (statelessXofIn0 pk mu)) rRand mu) := by
+  unfold statelessXofSpongeState statelessXofIn0 statelessXofIn1
+  rfl
+
+attribute [local irreducible] statelessXofIn0 statelessXofIn1
+
+def honestStatelessXofTraceWitness (pk : AggValidatorPk) (rRand : Digest4) (mu : Digest5) :
+    StatelessXofTraceWitness :=
+  let p0 := honestPoseidon2PermWitness (statelessXofIn0 pk mu)
+  let p1 := honestPoseidon2PermWitness (statelessXofIn1 p0.output rRand mu)
+  let st := p1.output
+  { perm0 := p0, perm1 := p1
+    lim0 := honestLimb63DecompWitness st.b0.x0
+    lim1 := honestLimb63DecompWitness st.b0.x1
+    lim2 := honestLimb63DecompWitness st.b0.x2
+    lim3 := honestLimb63DecompWitness st.b0.x3
+    lim4 := honestLimb63DecompWitness st.b1.x0
+    lim5 := honestLimb63DecompWitness st.b1.x1
+    lim6 := honestLimb63DecompWitness st.b1.x2 }
+
+def extractStatelessXofPair (geom : AggSigGeometry) (w : StatelessXofTraceWitness) : (Nat × List Nat) :=
+  let st1 := w.perm1.output
+  let totalTreeBits := geom.numLayers * geom.subtreeHeight
+  let rawLeaf := (st1.b1.x1.val % (2 ^ 32)) + ((st1.b1.x2.val % (2 ^ 32)) * (2 ^ 32))
+  let leafGlobalIdx := rawLeaf % (2 ^ totalTreeBits)
+  let treeMod := 2 ^ geom.forsHeight
+  let indices := (List.range geom.forsTrees).map fun t =>
+    let limbVal := match t / 7 with
+      | 0 => st1.b0.x0.val
+      | 1 => st1.b0.x1.val
+      | 2 => st1.b0.x2.val
+      | 3 => st1.b0.x3.val
+      | _ => st1.b1.x0.val
+    (limbVal / (256 ^ (t % 7))) % treeMod
+  (leafGlobalIdx, indices)
+
+def statelessXofTraceResiduals (pk : AggValidatorPk) (rRand : Digest4) (mu : Digest5)
+    (w : StatelessXofTraceWitness) : List Goldilocks :=
+  let st := w.perm1.output
+  permWithInputResiduals (statelessXofIn0 pk mu) w.perm0 ++
+  permWithInputResiduals (statelessXofIn1 w.perm0.output rRand mu) w.perm1 ++
+  limb63DecompResiduals st.b0.x0 w.lim0 ++
+  limb63DecompResiduals st.b0.x1 w.lim1 ++
+  limb63DecompResiduals st.b0.x2 w.lim2 ++
+  limb63DecompResiduals st.b0.x3 w.lim3 ++
+  limb63DecompResiduals st.b1.x0 w.lim4 ++
+  limb63DecompResiduals st.b1.x1 w.lim5 ++
+  limb63DecompResiduals st.b1.x2 w.lim6
+
+theorem statelessXofTraceResiduals_sound (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (rRand : Digest4) (mu : Digest5) (w : StatelessXofTraceWitness)
+    (hZero : allZeroGoldilocks (statelessXofTraceResiduals pk rRand mu w) = true) :
+    deriveStatelessLeafAndForsChecked geom pk rRand mu = some (extractStatelessXofPair geom w) := by
+  have hPermOut : ∀ st : Poseidon2State12, (honestPoseidon2PermWitness st).output = poseidon2Perm12 st :=
+    fun st => by unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+  unfold statelessXofTraceResiduals at hZero
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, permWithInputResiduals_allZero_iff,
+    limb63DecompResiduals_allZero_iff] at hZero
+  rcases hZero with ⟨⟨⟨⟨⟨⟨⟨⟨hP0, hP1⟩, ⟨c0, _⟩⟩, ⟨c1, _⟩⟩, ⟨c2, _⟩⟩, ⟨c3, _⟩⟩, ⟨c4, _⟩⟩, ⟨c5, _⟩⟩, ⟨c6, _⟩⟩
+  have hStEq : w.perm1.output = statelessXofSpongeState pk rRand mu := by
+    rw [hP1, hP0, hPermOut, hPermOut, statelessXofSpongeState_eq_states]
+  unfold deriveStatelessLeafAndForsChecked extractStatelessXofPair
+  rw [← hStEq]
+  have hAll63 :
+      ([w.perm1.output.b0.x0, w.perm1.output.b0.x1, w.perm1.output.b0.x2, w.perm1.output.b0.x3,
+        w.perm1.output.b1.x0, w.perm1.output.b1.x1, w.perm1.output.b1.x2].all
+        (fun l => decide (l.val < 2 ^ 63))) = true := by
+    simp [c0, c1, c2, c3, c4, c5, c6]
+  simp only [hAll63, ↓reduceIte]
+
+theorem statelessXofTraceResiduals_complete (geom : AggSigGeometry) (pk : AggValidatorPk)
+    (rRand : Digest4) (mu : Digest5) (leafIdx : Nat) (indices : List Nat)
+    (hXof : deriveStatelessLeafAndForsChecked geom pk rRand mu = some (leafIdx, indices)) :
+    let w := honestStatelessXofTraceWitness pk rRand mu
+    extractStatelessXofPair geom w = (leafIdx, indices) ∧
+    allZeroGoldilocks (statelessXofTraceResiduals pk rRand mu w) = true := by
+  intro w
+  have hPermOut : ∀ st : Poseidon2State12, (honestPoseidon2PermWitness st).output = poseidon2Perm12 st :=
+    fun st => by unfold poseidon2Perm12 honestPoseidon2PermWitness; rfl
+  have hStEq : w.perm1.output = statelessXofSpongeState pk rRand mu := by
+    dsimp only [w, honestStatelessXofTraceWitness]
+    rw [hPermOut, hPermOut, statelessXofSpongeState_eq_states]
+  unfold deriveStatelessLeafAndForsChecked at hXof
+  rw [← hStEq] at hXof
+  cases hAll63 : ([w.perm1.output.b0.x0, w.perm1.output.b0.x1, w.perm1.output.b0.x2, w.perm1.output.b0.x3,
+                   w.perm1.output.b1.x0, w.perm1.output.b1.x1, w.perm1.output.b1.x2].all
+                   (fun l => decide (l.val < 2 ^ 63)))
+  · simp [hAll63] at hXof
+  · simp only [hAll63, ↓reduceIte, Option.some.injEq] at hXof
+    simp only [List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true, decide_eq_true_eq] at hAll63
+    rcases hAll63 with ⟨c0, c1, c2, c3, c4, c5, c6⟩
+    refine ⟨hXof, ?_⟩
+    unfold statelessXofTraceResiduals
+    dsimp only [w, honestStatelessXofTraceWitness]
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, permWithInputResiduals_allZero_iff,
+      limb63DecompResiduals_allZero_iff]
+    exact ⟨⟨⟨⟨⟨⟨⟨⟨trivial, trivial⟩, ⟨c0, trivial⟩⟩, ⟨c1, trivial⟩⟩, ⟨c2, trivial⟩⟩, ⟨c3, trivial⟩⟩, ⟨c4, trivial⟩⟩, ⟨c5, trivial⟩⟩, ⟨c6, trivial⟩⟩
+
+
+
+/-! ### Full `AggSignerTraceWitness`, `RowGate7` AST, `AggExecutionTrace`, & AIR Constraint Exactness -/
+
+/-- Non-zero field encoding of `AggSigProfile` (`1` for `XmssPoseidon2`, `2` for `CorduroyPoseidon2`). -/
+def profileFieldTag : AggSigProfile → Goldilocks
+  | .xmssPoseidon2 => Goldilocks.one
+  | .corduroyPoseidon2  => Goldilocks.ofNat 2
+
+theorem profileFieldTag_ne_zero (p : AggSigProfile) : profileFieldTag p ≠ Goldilocks.zero := by
+  cases p <;> decide
+
+theorem profileFieldTag_injective {p1 p2 : AggSigProfile}
+    (h : profileFieldTag p1 = profileFieldTag p2) : p1 = p2 := by
+  cases p1 <;> cases p2 <;> first | rfl | (exfalso; revert h; decide)
+
+inductive AggSignerModeTrace where
+  | stateful (leafIdx : Nat) (hmsg0 : HmsgStatefulTraceWitness)
+  | stateless (xof : StatelessXofTraceWitness)
+              (fors : ForsAndRecoverTraceWitness)
+              (hmsg0 : HmsgDetTreeTraceWitness)
+  deriving DecidableEq, Repr
+
+structure AggSignerTraceWitness where
+  profile    : AggSigProfile
+  rRand      : Digest4
+  modeTrace  : AggSignerModeTrace
+  layer0     : WotsLayerTraceWitness
+  upperNodes : List UpperLayerTraceNode
+  deriving DecidableEq, Repr
+
+def extractSignerWitnessSig (w : AggSignerTraceWitness) : AggNativeSignature :=
+  let (leafIdx, forsOps) := match w.modeTrace with
+    | .stateful idx _ => (idx, [])
+    | .stateless _ fors _ => (0, fors.openings.map forsOpeningWitnessSig)
+  { profile         := w.profile
+    rRand           := w.rRand
+    statefulLeafIdx := leafIdx
+    forsOpenings    := forsOps
+    layers          := wotsLayerWitnessSig w.layer0 ::
+                       w.upperNodes.map (fun nw => wotsLayerWitnessSig nw.wotsStep) }
+
+def signerTraceResiduals (geom : AggSigGeometry) (pk : AggValidatorPk) (msg : List UInt8)
+    (w : AggSignerTraceWitness) : List Goldilocks :=
+  let hdrOk := geom.wellFormed && (pk.profile == geom.profile) &&
+               (w.profile == geom.profile) && (w.upperNodes.length + 1 == geom.numLayers)
+  let hdrRes := if hdrOk then [] else [Goldilocks.one]
+  let mu := computeMessageMu pk msg
+  let bodyRes := match w.modeTrace with
+    | .stateful leafIdx hmsgW =>
+      let modeOk := (geom.forsTrees == 0) && decide (leafIdx < 2 ^ (geom.numLayers * geom.subtreeHeight))
+      let modeRes := if modeOk then [] else [Goldilocks.one]
+      let kp0 := leafIdx % (2 ^ geom.subtreeHeight)
+      let tr0 := leafIdx / (2 ^ geom.subtreeHeight)
+      let (topRt, upRes) := upperLayersTraceResiduals geom pk 1 tr0 w.layer0.rootOut w.upperNodes
+      modeRes ++
+      hmsgStatefulResiduals pk w.rRand mu kp0 w.layer0.tswCtr hmsgW ++
+      wotsLayerTraceResiduals geom pk 0 tr0 kp0 hmsgW.outMsg w.layer0 ++
+      upRes ++
+      (lane4Sub topRt pk.pkRoot).toList
+    | .stateless xofW forsW hmsgW =>
+      let modeOk := !(geom.forsTrees == 0)
+      let modeRes := if modeOk then [] else [Goldilocks.one]
+      let (leafIdx, forsIndices) := extractStatelessXofPair geom xofW
+      let kp0 := leafIdx % (2 ^ geom.subtreeHeight)
+      let tr0 := leafIdx / (2 ^ geom.subtreeHeight)
+      let (topRt, upRes) := upperLayersTraceResiduals geom pk 1 tr0 w.layer0.rootOut w.upperNodes
+      modeRes ++
+      statelessXofTraceResiduals pk w.rRand mu xofW ++
+      forsAndRecoverTraceResiduals geom pk.pkSeed leafIdx forsIndices forsW ++
+      hmsgDetTreeResiduals pk 0 tr0 kp0 w.layer0.tswCtr forsW.forsPkOut hmsgW ++
+      wotsLayerTraceResiduals geom pk 0 tr0 kp0 hmsgW.outMsg w.layer0 ++
+      upRes ++
+      (lane4Sub topRt pk.pkRoot).toList
+  hdrRes ++ bodyRes
+
+private theorem wellFormed_unpack_wots (geom : AggSigGeometry) (hWf : geom.wellFormed = true) :
+    geom.wotsChains ≤ 128 ∧ geom.targetSum < 3 * geom.wotsChains := by
+  unfold AggSigGeometry.wellFormed at hWf
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+  exact ⟨hWf.1.1.1.1.1.1.2, hWf.1.1.1.1.2⟩
+
+theorem signerTraceResiduals_sound (geom : AggSigGeometry) (pk : AggValidatorPk) (msg : List UInt8)
+    (w : AggSignerTraceWitness)
+    (hZero : allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true) :
+    verifyAggNativeSig geom pk msg (extractSignerWitnessSig w) = true := by
+  unfold signerTraceResiduals at hZero
+  dsimp only at hZero
+  rw [allZeroGoldilocks_append, Bool.and_eq_true] at hZero
+  rcases hZero with ⟨hHdr, hBody⟩
+  cases hHdrB : (geom.wellFormed && (pk.profile == geom.profile) &&
+                 (w.profile == geom.profile) && (w.upperNodes.length + 1 == geom.numLayers))
+  · rw [hHdrB] at hHdr; exact absurd hHdr (by decide)
+  · simp only [Bool.and_eq_true] at hHdrB
+    rcases hHdrB with ⟨⟨⟨hWf, hPkProfB⟩, hWProfB⟩, hLenB⟩
+    have hPkProf : pk.profile = geom.profile := eq_of_beq hPkProfB
+    have hWProf : w.profile = geom.profile := eq_of_beq hWProfB
+    have hUpperLen : w.upperNodes.length + 1 = geom.numLayers := eq_of_beq hLenB
+    obtain ⟨hChainsLe, hTargetBound⟩ := wellFormed_unpack_wots geom hWf
+    cases hMode : w.modeTrace with
+    | stateful leafIdx hmsgW =>
+      rw [hMode] at hBody
+      dsimp only at hBody
+      cases hMCond : ((geom.forsTrees == 0) && decide (leafIdx < 2 ^ (geom.numLayers * geom.subtreeHeight)))
+      · rw [hMCond] at hBody
+        simp only [allZeroGoldilocks_append, Bool.and_eq_true] at hBody
+        exact absurd hBody.1.1.1.1 (by decide)
+      · rw [hMCond] at hBody
+        simp only [allZeroGoldilocks_append, Bool.and_eq_true, lane4Sub_toList_allZero_iff] at hBody
+        rcases hBody with ⟨⟨⟨⟨-, hHm⟩, hW0⟩, hUp⟩, hTopEq⟩
+        rcases Bool.and_eq_true_iff.mp hMCond with ⟨hFors0, hLeafDec⟩
+        have hLeafLt : leafIdx < 2 ^ (geom.numLayers * geom.subtreeHeight) := of_decide_eq_true hLeafDec
+        let mu := computeMessageMu pk msg
+        let kp0 := leafIdx % (2 ^ geom.subtreeHeight)
+        let tr0 := leafIdx / (2 ^ geom.subtreeHeight)
+        have hHmIff := hmsgStatefulResiduals_allZero_iff pk w.rRand mu kp0 w.layer0.tswCtr hmsgW
+        have hHmOut : hmsgW.outMsg = computeHmsgStateful pk w.rRand mu kp0 w.layer0.tswCtr :=
+          hHmIff.2 (hHmIff.1.mp hHm)
+        have hVer0 := wotsLayerTraceResiduals_sound geom pk 0 tr0 kp0 hmsgW.outMsg w.layer0
+          hChainsLe hTargetBound hW0
+        rw [hHmOut] at hVer0
+        have hVerUp := upperLayersTraceResiduals_sound geom pk 1 tr0 w.layer0.rootOut w.upperNodes
+          hChainsLe hTargetBound hUp
+        rw [hTopEq] at hVerUp
+        unfold extractSignerWitnessSig
+        rw [hMode, hWProf]
+        dsimp only
+        refine verifyAggNativeSig_stateful_of_ok geom pk msg w.rRand leafIdx
+          (wotsLayerWitnessSig w.layer0)
+          (w.upperNodes.map fun nw => wotsLayerWitnessSig nw.wotsStep)
+          w.layer0.rootOut hWf hPkProf ?_ hFors0 hLeafLt hVer0 hVerUp
+        simpa only [List.length_map] using hUpperLen
+    | stateless xofW forsW hmsgW =>
+      rw [hMode] at hBody
+      dsimp only at hBody
+      simp only [allZeroGoldilocks_append, Bool.and_eq_true, lane4Sub_toList_allZero_iff] at hBody
+      rcases hBody with ⟨⟨⟨⟨⟨⟨hModeOk, hXofZ⟩, hForsZ⟩, hHmZ⟩, hW0Z⟩, hUpZ⟩, hTopEq⟩
+      cases hMCond : (!(geom.forsTrees == 0))
+      · rw [hMCond] at hModeOk; exact absurd hModeOk (by decide)
+      · have hFors0 : (geom.forsTrees == 0) = false := (Bool.not_eq_true' _).mp hMCond
+        let mu := computeMessageMu pk msg
+        have hXofOk := statelessXofTraceResiduals_sound geom pk w.rRand mu xofW hXofZ
+        let pair := extractStatelessXofPair geom xofW
+        have hForsOk := forsAndRecoverTraceResiduals_sound geom pk.pkSeed pair.1 pair.2 forsW hForsZ
+        let kp0 := pair.1 % (2 ^ geom.subtreeHeight)
+        let tr0 := pair.1 / (2 ^ geom.subtreeHeight)
+        have hHmIff := hmsgDetTreeResiduals_allZero_iff pk 0 tr0 kp0 w.layer0.tswCtr forsW.forsPkOut hmsgW
+        have hHmOut : hmsgW.outMsg = computeHmsgDetTree pk 0 tr0 kp0 w.layer0.tswCtr forsW.forsPkOut :=
+          hHmIff.2 (hHmIff.1.mp hHmZ)
+        have hVer0 := wotsLayerTraceResiduals_sound geom pk 0 tr0 kp0 hmsgW.outMsg w.layer0
+          hChainsLe hTargetBound hW0Z
+        rw [hHmOut] at hVer0
+        have hVerUp := upperLayersTraceResiduals_sound geom pk 1 tr0 w.layer0.rootOut w.upperNodes
+          hChainsLe hTargetBound hUpZ
+        rw [hTopEq] at hVerUp
+        unfold extractSignerWitnessSig
+        rw [hMode, hWProf]
+        dsimp only
+        refine verifyAggNativeSig_stateless_of_ok geom pk msg w.rRand
+          (forsW.openings.map forsOpeningWitnessSig)
+          (wotsLayerWitnessSig w.layer0)
+          (w.upperNodes.map fun nw => wotsLayerWitnessSig nw.wotsStep)
+          pair.1 pair.2 forsW.forsPkOut w.layer0.rootOut
+          hWf hPkProf ?_ hFors0 ?_ hForsOk hVer0 hVerUp
+        · simpa only [List.length_map] using hUpperLen
+        · exact hXofOk
+
+def buildHonestSignerTraceWitness (geom : AggSigGeometry) (pk : AggValidatorPk) (msg : List UInt8)
+    (sig : AggNativeSignature) : AggSignerTraceWitness :=
+  let mu := computeMessageMu pk msg
+  let lsig0 := sig.layers.headD { tswCtr := 0, wotsChains := [], merklePath := [] }
+  let upperLs := sig.layers.tail
+  if geom.forsTrees == 0 then
+    let kp0 := sig.statefulLeafIdx % (2 ^ geom.subtreeHeight)
+    let tr0 := sig.statefulLeafIdx / (2 ^ geom.subtreeHeight)
+    let hmW := honestHmsgStatefulTraceWitness pk sig.rRand mu kp0 lsig0.tswCtr
+    let w0 := honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0
+    let upW := honestUpperLayersTrace geom pk 1 tr0 w0.rootOut upperLs
+    { profile := sig.profile, rRand := sig.rRand,
+      modeTrace := .stateful sig.statefulLeafIdx hmW,
+      layer0 := w0, upperNodes := upW }
+  else
+    let xofW := honestStatelessXofTraceWitness pk sig.rRand mu
+    let (leafIdx, forsIndices) := extractStatelessXofPair geom xofW
+    let forsW := honestForsAndRecoverTraceWitness geom pk.pkSeed leafIdx forsIndices sig.forsOpenings
+    let kp0 := leafIdx % (2 ^ geom.subtreeHeight)
+    let tr0 := leafIdx / (2 ^ geom.subtreeHeight)
+    let hmW := honestHmsgDetTreeTraceWitness pk 0 tr0 kp0 lsig0.tswCtr forsW.forsPkOut
+    let w0 := honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0
+    let upW := honestUpperLayersTrace geom pk 1 tr0 w0.rootOut upperLs
+    { profile := sig.profile, rRand := sig.rRand,
+      modeTrace := .stateless xofW forsW hmW,
+      layer0 := w0, upperNodes := upW }
+
+private theorem allZeroGoldilocks_append_intro {a b : List Goldilocks}
+    (ha : allZeroGoldilocks a = true) (hb : allZeroGoldilocks b = true) :
+    allZeroGoldilocks (a ++ b) = true := by
+  rw [allZeroGoldilocks_append, ha, hb]
+  rfl
+
+theorem signerTraceResiduals_complete (geom : AggSigGeometry) (pk : AggValidatorPk) (msg : List UInt8)
+    (sig : AggNativeSignature)
+    (hVer : verifyAggNativeSig geom pk msg sig = true) :
+    let w := buildHonestSignerTraceWitness geom pk msg sig
+    extractSignerWitnessSig w = sig ∧
+    allZeroGoldilocks (signerTraceResiduals geom pk msg w) = true := by
+  intro w
+  unfold verifyAggNativeSig at hVer
+  rcases Bool.eq_false_or_eq_true (!geom.wellFormed || pk.profile != geom.profile ||
+      sig.profile != geom.profile || sig.layers.length != geom.numLayers) with hHdr | hHdr
+  · simp only [hHdr, ↓reduceIte] at hVer
+    cases hVer
+  · simp only [hHdr, Bool.false_eq_true, ↓reduceIte] at hVer
+    simp only [Bool.or_eq_false_iff, Bool.not_eq_false', bne_eq_false_iff_eq] at hHdr
+    rcases hHdr with ⟨⟨⟨hWf, hPkProf⟩, hSigProf⟩, hLayLen⟩
+    obtain ⟨hChainsLe, hTargetBound⟩ := wellFormed_unpack_wots geom hWf
+    cases hLayers : sig.layers with
+    | nil => rw [hLayers] at hVer; cases hVer
+    | cons lsig0 upperLs =>
+      rw [hLayers] at hVer
+      dsimp only at hVer
+      have hUpperLen : upperLs.length + 1 = geom.numLayers := by
+        rw [← hLayLen, hLayers]; simp
+      let mu := computeMessageMu pk msg
+      cases hFors0 : (geom.forsTrees == 0)
+      · -- Stateless
+        rw [hFors0] at hVer
+        simp only [Bool.false_eq_true, ↓reduceIte] at hVer
+        delta verifyAggNativeSigStateless at hVer
+        rcases unpackStatelessFlow hVer with
+          ⟨leafIdx, forsIndices, forsPk, root0, topRoot, hLeafNz, hXof, hForsVer, hW0, hUp, hTopBeq⟩
+        have hLeafZ : sig.statefulLeafIdx = 0 := bne_eq_false_iff_eq.mp hLeafNz
+        have hTopEq : topRoot = pk.pkRoot := eq_of_beq hTopBeq
+        obtain ⟨hXofPair, hXofZ⟩ := statelessXofTraceResiduals_complete geom pk sig.rRand mu leafIdx forsIndices hXof
+        obtain ⟨hForsMap, hForsOut, hForsZ⟩ := forsAndRecoverTraceResiduals_complete geom pk.pkSeed
+          leafIdx forsIndices sig.forsOpenings forsPk hForsVer
+        let kp0 := leafIdx % (2 ^ geom.subtreeHeight)
+        let tr0 := leafIdx / (2 ^ geom.subtreeHeight)
+        let hmW := honestHmsgDetTreeTraceWitness pk 0 tr0 kp0 lsig0.tswCtr forsPk
+        have hHmIff := hmsgDetTreeResiduals_allZero_iff pk 0 tr0 kp0 lsig0.tswCtr forsPk hmW
+        have hHmOut : hmW.outMsg = computeHmsgDetTree pk 0 tr0 kp0 lsig0.tswCtr forsPk := hHmIff.2 rfl
+        have hHmZ : allZeroGoldilocks (hmsgDetTreeResiduals pk 0 tr0 kp0 lsig0.tswCtr forsPk hmW) = true :=
+          hHmIff.1.mpr rfl
+        have hW0Sub : verifyWotsLayer geom pk 0 tr0 kp0 hmW.outMsg lsig0 = some root0 := by
+          rw [hHmOut]; exact hW0
+        obtain ⟨hW0Sig, hW0Rt, hW0Z⟩ := wotsLayerTraceResiduals_complete geom pk 0 tr0 kp0
+          hmW.outMsg lsig0 root0 hChainsLe hTargetBound hW0Sub
+        have hUpSub : verifyUpperLayers geom pk 1 tr0
+            (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs = some topRoot := by
+          rw [hW0Rt]; exact hUp
+        obtain ⟨hUpMap, hUpTop, hUpZ⟩ := upperLayersTraceResiduals_complete geom pk 1 tr0
+          _ topRoot upperLs hChainsLe hTargetBound hUpSub
+        have hUpWLen : (honestUpperLayersTrace geom pk 1 tr0
+            (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs).length + 1 =
+            geom.numLayers := by
+          have h1 : ((honestUpperLayersTrace geom pk 1 tr0
+              (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs).map
+              (fun nw => wotsLayerWitnessSig nw.wotsStep)).length = upperLs.length := by rw [hUpMap]
+          rw [List.length_map] at h1
+          omega
+        have hWDef : w = {
+            profile := sig.profile, rRand := sig.rRand,
+            modeTrace := .stateless (honestStatelessXofTraceWitness pk sig.rRand mu)
+                           (honestForsAndRecoverTraceWitness geom pk.pkSeed leafIdx forsIndices sig.forsOpenings) hmW,
+            layer0 := honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0,
+            upperNodes := honestUpperLayersTrace geom pk 1 tr0
+              (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs } := by
+          dsimp only [w, buildHonestSignerTraceWitness]
+          simp only [hLayers, List.headD_cons, List.tail_cons, hFors0, Bool.false_eq_true, ↓reduceIte]
+          rw [hXofPair]
+          dsimp only
+          rw [hForsOut]
+        rw [hWDef]
+        refine ⟨?_, ?_⟩
+        · rcases sig with ⟨pr, rr, sli, fops, lays⟩
+          dsimp only at hLeafZ hLayers hForsMap hW0Sig hUpMap ⊢
+          subst hLeafZ hLayers
+          unfold extractSignerWitnessSig
+          dsimp only
+          simp only [AggNativeSignature.mk.injEq, List.cons.injEq]
+          exact ⟨trivial, trivial, trivial, hForsMap, hW0Sig, hUpMap⟩
+        · unfold signerTraceResiduals
+          dsimp only
+          have hHdrTrue :
+              (geom.wellFormed && (pk.profile == geom.profile) &&
+               (sig.profile == geom.profile) &&
+               ((honestUpperLayersTrace geom pk 1 tr0
+              (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs).length + 1 == geom.numLayers)) = true := by
+            rw [hWf, hPkProf, hSigProf, hUpWLen]
+            simp only [beq_self_eq_true, Bool.and_self]
+          rw [hHdrTrue, hFors0, hXofPair, hForsOut]
+          have hNil : allZeroGoldilocks (if true = true then [] else [Goldilocks.one]) = true := by decide
+          have hNil' : allZeroGoldilocks (if (!false) = true then [] else [Goldilocks.one]) = true := by decide
+          have hCtr0 : (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).tswCtr = lsig0.tswCtr := rfl
+          refine allZeroGoldilocks_append_intro hNil
+            (allZeroGoldilocks_append_intro
+              (allZeroGoldilocks_append_intro
+                (allZeroGoldilocks_append_intro
+                  (allZeroGoldilocks_append_intro
+                    (allZeroGoldilocks_append_intro
+                      (allZeroGoldilocks_append_intro hNil' hXofZ) hForsZ) ?_) hW0Z) hUpZ)
+              ((lane4Sub_toList_allZero_iff _ _).mpr (hUpTop.trans hTopEq)))
+          rw [hCtr0]
+          exact hHmZ
+      · -- Stateful
+        rw [hFors0] at hVer
+        simp only [↓reduceIte] at hVer
+        unfold verifyAggNativeSigStateful at hVer
+        rcases Bool.eq_false_or_eq_true (!sig.forsOpenings.isEmpty ||
+            !(decide (sig.statefulLeafIdx < 2 ^ (geom.numLayers * geom.subtreeHeight)))) with hSChk | hSChk
+        · simp only [hSChk, ↓reduceIte] at hVer
+          cases hVer
+        · simp only [hSChk, Bool.false_eq_true, ↓reduceIte] at hVer
+          simp only [Bool.or_eq_false_iff, Bool.not_eq_false', List.isEmpty_iff, decide_eq_true_eq] at hSChk
+          rcases hSChk with ⟨hForsNil, hLeafLt⟩
+          let kp0 := sig.statefulLeafIdx % (2 ^ geom.subtreeHeight)
+          let tr0 := sig.statefulLeafIdx / (2 ^ geom.subtreeHeight)
+          let hmsg0 := computeHmsgStateful pk sig.rRand mu kp0 lsig0.tswCtr
+          change (match verifyWotsLayer geom pk 0 tr0 kp0 hmsg0 lsig0 with
+                  | none => false
+                  | some root0 =>
+                    match verifyUpperLayers geom pk 1 tr0 root0 upperLs with
+                    | none => false
+                    | some topRoot => topRoot == pk.pkRoot) = true at hVer
+          cases hW0 : verifyWotsLayer geom pk 0 tr0 kp0 hmsg0 lsig0 with
+          | none => rw [hW0] at hVer; cases hVer
+          | some root0 =>
+            rw [hW0] at hVer; dsimp only at hVer
+            cases hUp : verifyUpperLayers geom pk 1 tr0 root0 upperLs with
+            | none => rw [hUp] at hVer; cases hVer
+            | some topRoot =>
+              rw [hUp] at hVer; dsimp only at hVer
+              have hTopEq : topRoot = pk.pkRoot := eq_of_beq hVer
+              let hmW := honestHmsgStatefulTraceWitness pk sig.rRand mu kp0 lsig0.tswCtr
+              have hHmIff := hmsgStatefulResiduals_allZero_iff pk sig.rRand mu kp0 lsig0.tswCtr hmW
+              have hHmOut : hmW.outMsg = hmsg0 := hHmIff.2 rfl
+              have hHmZ : allZeroGoldilocks (hmsgStatefulResiduals pk sig.rRand mu kp0 lsig0.tswCtr hmW) = true :=
+                hHmIff.1.mpr rfl
+              have hW0Sub : verifyWotsLayer geom pk 0 tr0 kp0 hmW.outMsg lsig0 = some root0 := by
+                rw [hHmOut]; exact hW0
+              obtain ⟨hW0Sig, hW0Rt, hW0Z⟩ := wotsLayerTraceResiduals_complete geom pk 0 tr0 kp0
+                hmW.outMsg lsig0 root0 hChainsLe hTargetBound hW0Sub
+              have hUpSub : verifyUpperLayers geom pk 1 tr0
+                  (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs = some topRoot := by
+                rw [hW0Rt]; exact hUp
+              obtain ⟨hUpMap, hUpTop, hUpZ⟩ := upperLayersTraceResiduals_complete geom pk 1 tr0
+                _ topRoot upperLs hChainsLe hTargetBound hUpSub
+              have hUpWLen : (honestUpperLayersTrace geom pk 1 tr0
+                  (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs).length + 1 =
+                  geom.numLayers := by
+                have h1 : ((honestUpperLayersTrace geom pk 1 tr0
+              (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs).map
+                    (fun nw => wotsLayerWitnessSig nw.wotsStep)).length = upperLs.length := by rw [hUpMap]
+                rw [List.length_map] at h1
+                omega
+              have hWDef : w = {
+                  profile := sig.profile, rRand := sig.rRand,
+                  modeTrace := .stateful sig.statefulLeafIdx hmW,
+                  layer0 := honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0,
+                  upperNodes := honestUpperLayersTrace geom pk 1 tr0
+                    (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs } := by
+                dsimp only [w, buildHonestSignerTraceWitness]
+                simp only [hLayers, List.headD_cons, List.tail_cons, hFors0, ↓reduceIte, hmW, tr0, kp0, mu]
+              rw [hWDef]
+              refine ⟨?_, ?_⟩
+              · rcases sig with ⟨pr, rr, sli, fops, lays⟩
+                dsimp only at hForsNil hLayers hW0Sig hUpMap ⊢
+                subst hForsNil hLayers
+                unfold extractSignerWitnessSig
+                dsimp only
+                simp only [AggNativeSignature.mk.injEq, List.cons.injEq]
+                exact ⟨trivial, trivial, trivial, trivial, hW0Sig, hUpMap⟩
+              · unfold signerTraceResiduals
+                dsimp only
+                have hHdrTrue :
+                    (geom.wellFormed && (pk.profile == geom.profile) &&
+                     (sig.profile == geom.profile) &&
+                     ((honestUpperLayersTrace geom pk 1 tr0
+              (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).rootOut upperLs).length + 1 == geom.numLayers)) = true := by
+                  rw [hWf, hPkProf, hSigProf, hUpWLen]
+                  simp only [beq_self_eq_true, Bool.and_self]
+                have hModeTrue :
+                    ((geom.forsTrees == 0) && decide (sig.statefulLeafIdx < 2 ^ (geom.numLayers * geom.subtreeHeight))) = true := by
+                  rw [hFors0, decide_eq_true hLeafLt]
+                  rfl
+                rw [hHdrTrue, hModeTrue]
+                have hNil : allZeroGoldilocks (if true = true then [] else [Goldilocks.one]) = true := by decide
+                have hCtr0 : (honestWotsLayerTraceWitness geom pk 0 tr0 kp0 hmW.outMsg lsig0).tswCtr = lsig0.tswCtr := rfl
+                refine allZeroGoldilocks_append_intro hNil
+                  (allZeroGoldilocks_append_intro
+                    (allZeroGoldilocks_append_intro
+                      (allZeroGoldilocks_append_intro
+                        (allZeroGoldilocks_append_intro hNil ?_) hW0Z) hUpZ)
+                    ((lane4Sub_toList_allZero_iff _ _).mpr (hUpTop.trans hTopEq)))
+                rw [hCtr0]
+                exact hHmZ
+
+/-! ### Symbolic Degree-≤7 Row Gate AST (`trace.rs:ConstraintKind`) & Degree-8 Sumcheck Bridge -/
+
+/-- Algebraic row gate AST covering every constraint family in `crates/qsag-agg/src/trace.rs`
+    (constant, boundary pin, linear wire equality, Boolean selector, conditional mux, quartic
+    base-4 digit check, and septic `x^7` `Poseidon2` S-box). -/
+inductive RowGate7 where
+  | constGate (c : Goldilocks)
+  | colSubConst (col : Nat) (c : Goldilocks)
+  | colDiff (colA colB : Nat)
+  | boolBitGate (col : Nat)
+  | muxGate (selCol aCol bCol outCol : Nat)
+  | quarticBase4Gate (col : Nat)
+  | septicSboxGate (inCol : Nat) (rc : Goldilocks) (outCol : Nat)
+  deriving DecidableEq, Repr
+
+/-- Base-field evaluation of a `RowGate7` on column assignment `row : Nat → Goldilocks`. -/
+def evalRowGate7 (g : RowGate7) (row : Nat → Goldilocks) : Goldilocks :=
+  match g with
+  | .constGate c => c
+  | .colSubConst col c => Goldilocks.sub (row col) c
+  | .colDiff colA colB => Goldilocks.sub (row colA) (row colB)
+  | .boolBitGate col => boolBitResidual (row col)
+  | .muxGate selCol aCol bCol outCol =>
+    Goldilocks.sub (row outCol)
+      (Goldilocks.add (row aCol) (Goldilocks.mul (row selCol) (Goldilocks.sub (row bCol) (row aCol))))
+  | .quarticBase4Gate col => quarticBase4 (row col)
+  | .septicSboxGate inCol rc outCol =>
+    Goldilocks.sub (sbox7 (Goldilocks.add (row inCol) rc)) (row outCol)
+
+/-- Extension-field (`GoldilocksExt4`) evaluation of a `RowGate7`. -/
+def evalRowGate7Ext4 (g : RowGate7) (row : Nat → GoldilocksExt4) : GoldilocksExt4 :=
+  match g with
+  | .constGate c => GoldilocksExt4.embedBase c
+  | .colSubConst col c => CommRingOps.sub (row col) (GoldilocksExt4.embedBase c)
+  | .colDiff colA colB => CommRingOps.sub (row colA) (row colB)
+  | .boolBitGate col =>
+    CommRingOps.mul (row col) (CommRingOps.sub (row col) GoldilocksExt4.one)
+  | .muxGate selCol aCol bCol outCol =>
+    CommRingOps.sub (row outCol)
+      (CommRingOps.add (row aCol) (CommRingOps.mul (row selCol) (CommRingOps.sub (row bCol) (row aCol))))
+  | .quarticBase4Gate col =>
+    let d := row col
+    CommRingOps.mul
+      (CommRingOps.mul d (CommRingOps.sub d GoldilocksExt4.one))
+      (CommRingOps.mul
+        (CommRingOps.sub d (GoldilocksExt4.embedBase (Goldilocks.ofNat 2)))
+        (CommRingOps.sub d (GoldilocksExt4.embedBase (Goldilocks.ofNat 3))))
+  | .septicSboxGate inCol rc outCol =>
+    CommRingOps.sub (ext4Pow7 (CommRingOps.add (row inCol) (GoldilocksExt4.embedBase rc))) (row outCol)
+
+theorem evalRowGate7Ext4_embedBase (g : RowGate7) (row : Nat → Goldilocks) :
+    evalRowGate7Ext4 g (fun col => GoldilocksExt4.embedBase (row col)) =
+      GoldilocksExt4.embedBase (evalRowGate7 g row) := by
+  have hOne : (GoldilocksExt4.one : GoldilocksExt4) = GoldilocksExt4.embedBase Goldilocks.one := rfl
+  cases g with
+  | constGate c => rfl
+  | colSubConst col c =>
+    dsimp only [evalRowGate7Ext4, evalRowGate7]
+    exact (GoldilocksExt4.embedBase_sub _ _).symm
+  | colDiff colA colB =>
+    dsimp only [evalRowGate7Ext4, evalRowGate7]
+    exact (GoldilocksExt4.embedBase_sub _ _).symm
+  | boolBitGate col =>
+    dsimp only [evalRowGate7Ext4, evalRowGate7, boolBitResidual]
+    rw [hOne, ← GoldilocksExt4.embedBase_sub, ← GoldilocksExt4.embedBase_mul]
+    rfl
+  | muxGate selCol aCol bCol outCol =>
+    dsimp only [evalRowGate7Ext4, evalRowGate7]
+    rw [← GoldilocksExt4.embedBase_sub, ← GoldilocksExt4.embedBase_mul,
+        ← GoldilocksExt4.embedBase_add, ← GoldilocksExt4.embedBase_sub]
+    rfl
+  | quarticBase4Gate col =>
+    dsimp only [evalRowGate7Ext4, evalRowGate7, quarticBase4]
+    rw [hOne, ← GoldilocksExt4.embedBase_sub, ← GoldilocksExt4.embedBase_sub,
+        ← GoldilocksExt4.embedBase_sub, ← GoldilocksExt4.embedBase_mul,
+        ← GoldilocksExt4.embedBase_mul, ← GoldilocksExt4.embedBase_mul]
+    rfl
+  | septicSboxGate inCol rc outCol =>
+    dsimp only [evalRowGate7Ext4, evalRowGate7]
+    rw [← GoldilocksExt4.embedBase_add, ext4Pow7_embedBase, ← GoldilocksExt4.embedBase_sub]
+    rfl
+
+/-- Affine column interpolation `row(t)(col) = row0(col) + t * (row1(col) - row0(col))`. -/
+def interpolateRowExt4 (row0 row1 : Nat → GoldilocksExt4) (x : GoldilocksExt4) :
+    Nat → GoldilocksExt4 :=
+  fun col => RoundPoly.evalCoeffs (affineColPoly (row0 col) (row1 col)) x
+
+/-- Univariate polynomial (`length ≤ 8`, degree `≤ 7`) of `g` along the affine line from `row0` to `row1`. -/
+def evalRowGate7LinePoly (g : RowGate7) (row0 row1 : Nat → GoldilocksExt4) :
+    List GoldilocksExt4 :=
+  let colPoly (c : Nat) := affineColPoly (row0 c) (row1 c)
+  match g with
+  | .constGate c => [GoldilocksExt4.embedBase c]
+  | .colSubConst col c => RoundPoly.subCoeffs (colPoly col) [GoldilocksExt4.embedBase c]
+  | .colDiff colA colB => RoundPoly.subCoeffs (colPoly colA) (colPoly colB)
+  | .boolBitGate col =>
+    let p := colPoly col
+    polyMulCoeffs p (RoundPoly.subCoeffs p [GoldilocksExt4.one])
+  | .muxGate selCol aCol bCol outCol =>
+    let ps := colPoly selCol
+    let pa := colPoly aCol
+    let pb := colPoly bCol
+    let po := colPoly outCol
+    RoundPoly.subCoeffs po (polyAddCoeffs pa (polyMulCoeffs ps (RoundPoly.subCoeffs pb pa)))
+  | .quarticBase4Gate col =>
+    let p := colPoly col
+    let p01 := polyMulCoeffs p (RoundPoly.subCoeffs p [GoldilocksExt4.one])
+    let p23 := polyMulCoeffs
+      (RoundPoly.subCoeffs p [GoldilocksExt4.embedBase (Goldilocks.ofNat 2)])
+      (RoundPoly.subCoeffs p [GoldilocksExt4.embedBase (Goldilocks.ofNat 3)])
+    polyMulCoeffs p01 p23
+  | .septicSboxGate inCol rc outCol =>
+    let pin := polyAddCoeffs (colPoly inCol) [GoldilocksExt4.embedBase rc]
+    RoundPoly.subCoeffs (polyPow7 pin) (colPoly outCol)
+
+theorem evalRowGate7LinePoly_spec (g : RowGate7) (row0 row1 : Nat → GoldilocksExt4) :
+    (evalRowGate7LinePoly g row0 row1).length ≤ 8 ∧
+    (∀ x : GoldilocksExt4,
+      RoundPoly.evalCoeffs (evalRowGate7LinePoly g row0 row1) x =
+        evalRowGate7Ext4 g (interpolateRowExt4 row0 row1 x)) := by
+  have hConstEval : ∀ (v x : GoldilocksExt4), RoundPoly.evalCoeffs [v] x = v := fun v x => by
+    simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  cases g with
+  | constGate c =>
+    refine ⟨by simp [evalRowGate7LinePoly], fun x => hConstEval _ x⟩
+  | colSubConst col c =>
+    refine ⟨?_, fun x => ?_⟩
+    · simp [evalRowGate7LinePoly, RoundPoly.subCoeffs_length, affineColPoly]
+    · simp only [evalRowGate7LinePoly, RoundPoly.evalCoeffs_sub, hConstEval]
+      rfl
+  | colDiff colA colB =>
+    refine ⟨?_, fun x => ?_⟩
+    · simp [evalRowGate7LinePoly, RoundPoly.subCoeffs_length, affineColPoly]
+    · simp only [evalRowGate7LinePoly, RoundPoly.evalCoeffs_sub]
+      rfl
+  | boolBitGate col =>
+    refine ⟨?_, fun x => ?_⟩
+    · dsimp only [evalRowGate7LinePoly]
+      have h1 : (affineColPoly (row0 col) (row1 col)).length ≤ 2 := by simp [affineColPoly]
+      have h2 : (RoundPoly.subCoeffs (affineColPoly (row0 col) (row1 col)) [GoldilocksExt4.one]).length ≤ 2 := by
+        simp [RoundPoly.subCoeffs_length, affineColPoly]
+      have hM := polyMulCoeffs_length_le _ _ 1 1 h1 h2
+      omega
+    · simp only [evalRowGate7LinePoly, evalCoeffs_polyMulCoeffs, RoundPoly.evalCoeffs_sub, hConstEval]
+      rfl
+  | muxGate selCol aCol bCol outCol =>
+    refine ⟨?_, fun x => ?_⟩
+    · dsimp only [evalRowGate7LinePoly]
+      have hs : (affineColPoly (row0 selCol) (row1 selCol)).length ≤ 2 := by simp [affineColPoly]
+      have hba : (RoundPoly.subCoeffs (affineColPoly (row0 bCol) (row1 bCol))
+                    (affineColPoly (row0 aCol) (row1 aCol))).length ≤ 2 := by
+        simp [RoundPoly.subCoeffs_length, affineColPoly]
+      have hMul := polyMulCoeffs_length_le _ _ 1 1 hs hba
+      rw [RoundPoly.subCoeffs_length, polyAddCoeffs_length]
+      have ha : (affineColPoly (row0 aCol) (row1 aCol)).length = 2 := rfl
+      have ho : (affineColPoly (row0 outCol) (row1 outCol)).length = 2 := rfl
+      rw [ha, ho]
+      exact Nat.max_le.mpr ⟨by decide, Nat.max_le.mpr ⟨by decide, by omega⟩⟩
+    · simp only [evalRowGate7LinePoly, RoundPoly.evalCoeffs_sub, evalCoeffs_polyAddCoeffs,
+        evalCoeffs_polyMulCoeffs]
+      rfl
+  | quarticBase4Gate col =>
+    refine ⟨?_, fun x => ?_⟩
+    · dsimp only [evalRowGate7LinePoly]
+      have hp : (affineColPoly (row0 col) (row1 col)).length ≤ 2 := by simp [affineColPoly]
+      have hs1 : (RoundPoly.subCoeffs (affineColPoly (row0 col) (row1 col)) [GoldilocksExt4.one]).length ≤ 2 := by
+        simp [RoundPoly.subCoeffs_length, affineColPoly]
+      have hs2 : (RoundPoly.subCoeffs (affineColPoly (row0 col) (row1 col))
+                    [GoldilocksExt4.embedBase (Goldilocks.ofNat 2)]).length ≤ 2 := by
+        simp [RoundPoly.subCoeffs_length, affineColPoly]
+      have hs3 : (RoundPoly.subCoeffs (affineColPoly (row0 col) (row1 col))
+                    [GoldilocksExt4.embedBase (Goldilocks.ofNat 3)]).length ≤ 2 := by
+        simp [RoundPoly.subCoeffs_length, affineColPoly]
+      have hp01 := polyMulCoeffs_length_le _ _ 1 1 hp hs1
+      have hp23 := polyMulCoeffs_length_le _ _ 1 1 hs2 hs3
+      have hTot := polyMulCoeffs_length_le _ _ 2 2 hp01 hp23
+      omega
+    · simp only [evalRowGate7LinePoly, evalCoeffs_polyMulCoeffs, RoundPoly.evalCoeffs_sub, hConstEval]
+      rfl
+  | septicSboxGate inCol rc outCol =>
+    refine ⟨?_, fun x => ?_⟩
+    · dsimp only [evalRowGate7LinePoly]
+      have hPin : (polyAddCoeffs (affineColPoly (row0 inCol) (row1 inCol))
+                    [GoldilocksExt4.embedBase rc]).length ≤ 2 := by
+        simp [polyAddCoeffs_length, affineColPoly]
+      have hP7 := polyPow7_length_le_eight hPin
+      rw [RoundPoly.subCoeffs_length]
+      have ho : (affineColPoly (row0 outCol) (row1 outCol)).length = 2 := rfl
+      rw [ho]
+      exact Nat.max_le.mpr ⟨hP7, by decide⟩
+    · simp only [evalRowGate7LinePoly, RoundPoly.evalCoeffs_sub, evalCoeffs_polyPow7,
+        evalCoeffs_polyAddCoeffs, hConstEval]
+      rfl
+
+/-- Gamma-batched univariate degree-`≤ 7` row constraint polynomial. -/
+def batchRowGatesExt4 (gates : List (GoldilocksExt4 × RowGate7)) (row : Nat → GoldilocksExt4) :
+    GoldilocksExt4 :=
+  match gates with
+  | [] => GoldilocksExt4.zero
+  | (w, g) :: rest =>
+    CommRingOps.add (CommRingOps.mul w (evalRowGate7Ext4 g row)) (batchRowGatesExt4 rest row)
+
+def batchRowGatesLinePoly (gates : List (GoldilocksExt4 × RowGate7))
+    (row0 row1 : Nat → GoldilocksExt4) : List GoldilocksExt4 :=
+  match gates with
+  | [] => []
+  | (w, g) :: rest =>
+    polyAddCoeffs (polyScaleCoeffs w (evalRowGate7LinePoly g row0 row1))
+                  (batchRowGatesLinePoly rest row0 row1)
+
+theorem batchRowGatesLinePoly_spec (gates : List (GoldilocksExt4 × RowGate7))
+    (row0 row1 : Nat → GoldilocksExt4) :
+    (batchRowGatesLinePoly gates row0 row1).length ≤ 8 ∧
+    (∀ x : GoldilocksExt4,
+      RoundPoly.evalCoeffs (batchRowGatesLinePoly gates row0 row1) x =
+        batchRowGatesExt4 gates (interpolateRowExt4 row0 row1 x)) := by
+  induction gates with
+  | nil =>
+    exact ⟨by simp [batchRowGatesLinePoly], fun _ => rfl⟩
+  | cons wg rest ih =>
+    rcases wg with ⟨w, g⟩
+    obtain ⟨hG8, hGEval⟩ := evalRowGate7LinePoly_spec g row0 row1
+    refine ⟨?_, fun x => ?_⟩
+    · simp only [batchRowGatesLinePoly, polyAddCoeffs_length, polyScaleCoeffs_length]
+      exact Nat.max_le.mpr ⟨hG8, ih.1⟩
+    · simp only [batchRowGatesLinePoly, batchRowGatesExt4, evalCoeffs_polyAddCoeffs,
+        evalCoeffs_polyScaleCoeffs, hGEval x, ih.2 x]
+
+/-- **Exact Degree-8 Batched Row-Sumcheck Round Polynomial (`batchRowGatesRoundPoly_spec`)**:
+    For ANY weighted batch of `RowGate7` constraints (`Poseidon2` S-box, quartic base-4, mux,
+    Boolean selector, wire diff, and boundary pins), multiplying by `eq(tau_j, t)` yields at most
+    `rowSumcheckCoeffs = 9` `GoldilocksExt4` coefficients (`ROW_SUMCHECK_DEGREE = 8`)! -/
+theorem batchRowGatesRoundPoly_spec (tau_j : GoldilocksExt4)
+    (gates : List (GoldilocksExt4 × RowGate7)) (row0 row1 : Nat → GoldilocksExt4) :
+    (buildRowSumcheckRoundPoly tau_j (batchRowGatesLinePoly gates row0 row1)).length ≤ rowSumcheckCoeffs ∧
+    (∀ x : GoldilocksExt4,
+      RoundPoly.evalCoeffs (buildRowSumcheckRoundPoly tau_j (batchRowGatesLinePoly gates row0 row1)) x =
+        CommRingOps.mul (eqFactorExt4 tau_j x)
+          (batchRowGatesExt4 gates (interpolateRowExt4 row0 row1 x))) := by
+  obtain ⟨h8, hEval⟩ := batchRowGatesLinePoly_spec gates row0 row1
+  obtain ⟨h9, hR⟩ := rowSumcheckRoundPoly_spec tau_j (batchRowGatesLinePoly gates row0 row1) h8
+  exact ⟨h9, fun x => (hR x).trans (congrArg (CommRingOps.mul (eqFactorExt4 tau_j x)) (hEval x))⟩
+
+/-! ### Public Statement, Boundary Pinning, Execution Trace, & `trace_satisfies_constraints_iff_all_k_sigs_valid` -/
+
+/-- Public arithmetization statement `(geom, msg, committeePks, logRows)` binding `K ≥ 1` distinct
+    committee public keys and message `msg` to hypercube dimension `logRows` (`2^logRows` rows). -/
+structure AggArithPublicStmt where
+  geom         : AggSigGeometry
+  msg          : List UInt8
+  committeePks : List AggValidatorPk
+  logRows      : Nat
+  deriving DecidableEq, Repr
+
+@[expose] def AggArithPublicStmt.wellFormed (stmt : AggArithPublicStmt) : Bool :=
+  stmt.geom.wellFormed &&
+  !stmt.committeePks.isEmpty &&
+  decide stmt.committeePks.Nodup &&
+  decide (stmt.committeePks.length ≤ 2 ^ stmt.logRows) &&
+  stmt.committeePks.all (·.profile == stmt.geom.profile)
+
+/-- 14 public boundary field elements pinned on row `k` for `(pk, msg)`:
+    column `0` is `profileFieldTag pk.profile ∈ {1, 2}` (strictly non-zero for every `pk`),
+    columns `1..4` are `pk.pkSeed`, columns `5..8` are `pk.pkRoot`, and columns `9..13` are
+    `computeMessageMu pk msg` (`Digest5`). -/
+def expectedBoundaryCols (pk : AggValidatorPk) (msg : List UInt8) : List Goldilocks :=
+  let mu := computeMessageMu pk msg
+  [profileFieldTag pk.profile] ++ pk.pkSeed.toList ++ pk.pkRoot.toList ++
+    [mu.limb0, mu.limb1, mu.limb2, mu.limb3, mu.limb4]
+
+private def boundaryGatesFrom (idx : Nat) : List Goldilocks → List RowGate7
+  | [] => []
+  | c :: cs => RowGate7.colSubConst idx c :: boundaryGatesFrom (idx + 1) cs
+
+/-- Exact `RowGate7.colSubConst` boundary constraints for validator `pk` and `msg`. -/
+def boundaryRowGates (pk : AggValidatorPk) (msg : List UInt8) : List RowGate7 :=
+  boundaryGatesFrom 0 (expectedBoundaryCols pk msg)
+
+/-- Evaluate a list of `RowGate7` gates on a concrete row `List Goldilocks`. -/
+def evalRowGateList (gates : List RowGate7) (row : List Goldilocks) : List Goldilocks :=
+  gates.map (fun g => evalRowGate7 g (fun col => row.getD col Goldilocks.zero))
+
+private theorem boundaryGatesFrom_zero_at_col0 (c0 : Goldilocks) (cs : List Goldilocks)
+    (row : List Goldilocks)
+    (hZero : allZeroGoldilocks (evalRowGateList (boundaryGatesFrom 0 (c0 :: cs)) row) = true) :
+    row.getD 0 Goldilocks.zero = c0 := by
+  unfold boundaryGatesFrom evalRowGateList allZeroGoldilocks at hZero
+  simp only [List.map_cons, List.all_cons, Bool.and_eq_true] at hZero
+  exact (sub_eq_zero_iff_goldilocks _ _).mp hZero.1
+
+private theorem boundaryGatesFrom_exact :
+    ∀ (idx : Nat) (expected pfx sfx : List Goldilocks),
+      pfx.length = idx →
+      allZeroGoldilocks (evalRowGateList (boundaryGatesFrom idx expected) (pfx ++ expected ++ sfx)) = true
+  | _, [], _, _, _ => rfl
+  | idx, c :: cs, pfx, sfx, hLen => by
+    have hGet : (pfx ++ (c :: cs) ++ sfx).getD idx Goldilocks.zero = c := by
+      have hAssoc : pfx ++ (c :: cs) ++ sfx = pfx ++ (c :: (cs ++ sfx)) := by
+        simp [List.append_assoc]
+      rw [hAssoc, List.getD_eq_getElem?_getD, List.getElem?_append_right (by omega)]
+      simp [hLen]
+    have hSub : pfx ++ (c :: cs) ++ sfx = (pfx ++ [c]) ++ cs ++ sfx := by
+      simp [List.append_assoc]
+    have ih := boundaryGatesFrom_exact (idx + 1) cs (pfx ++ [c]) sfx (by simp [hLen])
+    unfold evalRowGateList allZeroGoldilocks at ih ⊢
+    simp only [boundaryGatesFrom, List.map_cons, List.all_cons, Bool.and_eq_true]
+    refine ⟨?_, ?_⟩
+    · dsimp only [evalRowGate7]
+      rw [hGet]
+      exact (sub_eq_zero_iff_goldilocks c c).mpr rfl
+    · rw [← hSub] at ih
+      exact ih
+
+private theorem allZero_flatMap_replicate_zeros :
+    ∀ (m n : Nat),
+      allZeroGoldilocks ((List.replicate m (List.replicate n Goldilocks.zero)).flatMap id) = true
+  | 0, _ => rfl
+  | m + 1, n => by
+    have hRepZero : ∀ k : Nat, allZeroGoldilocks (List.replicate k Goldilocks.zero) = true := by
+      intro k
+      induction k with
+      | zero => rfl
+      | succ k ih =>
+        unfold allZeroGoldilocks at ih ⊢
+        simp only [List.replicate_succ, List.all_cons, beq_self_eq_true, Bool.true_and]
+        exact ih
+    simp only [List.replicate_succ, List.flatMap_cons, id_eq, allZeroGoldilocks_append, Bool.and_eq_true]
+    exact ⟨hRepZero n, allZero_flatMap_replicate_zeros m n⟩
+
+private theorem getD_zero_replicate_zero (numCols : Nat) :
+    (List.replicate numCols Goldilocks.zero).getD 0 Goldilocks.zero = Goldilocks.zero := by
+  cases numCols <;> rfl
+
+/-! ### The 256-column `StepOp` execution table and its inter-row shift constraints (`trace.rs`) -/
+
+section StepOpTable
+
+local infixl:65 " +ₚ " => Goldilocks.add
+local infixl:65 " -ₚ " => Goldilocks.sub
+local infixl:70 " *ₚ " => Goldilocks.mul
+local notation "‹" n "›" => Goldilocks.ofNat n
+
+/-- `NUM_TRACE_COLS`. -/
+def stepOpNumCols : Nat := 256
+
+/-- `NUM_STATE_LIMBS`: the carried state registers `st[0..44]`. -/
+def stepOpNumStateLimbs : Nat := 44
+
+/-- `ST_CUR_ROOT` (4 limbs). -/
+def stCurRoot : Nat := 0
+/-- `ST_KP_IDX`. -/
+def stKpIdx : Nat := 4
+/-- `ST_TREE_LO`. -/
+def stTreeLo : Nat := 5
+/-- `ST_TREE_HI`. -/
+def stTreeHi : Nat := 6
+/-- `ST_REM_PACK` (6 limbs). -/
+def stRemPack : Nat := 7
+/-- `ST_MAIN_SPONGE` (12 limbs). -/
+def stMainSponge : Nat := 13
+/-- `ST_SUB_SPONGE` (12 limbs). -/
+def stSubSponge : Nat := 25
+/-- `ST_WORK` (4 limbs). -/
+def stWork : Nat := 37
+/-- `ST_CURSOR_IDX`. -/
+def stCursorIdx : Nat := 41
+/-- `ST_ACC_OR_U1`. -/
+def stAccOrU1 : Nat := 42
+/-- `ST_WOTS_U2`. -/
+def stWotsU2 : Nat := 43
+
+/-- One row of the execution table, grouped by the column blocks of `trace.rs`:
+    `COL_ST_IN = 0..12`, `COL_SBOX_OUT = 12..130` (4 external rounds of 12 lanes, 22 internal
+    rounds, 4 external rounds of 12 lanes), `COL_PREV_STATE = 130..174`,
+    `COL_NEXT_STATE = 174..218`, `COL_AUX = 218..256`. -/
+structure StepOpRow where
+  stIn        : Poseidon2State12
+  initExtSbox : List Poseidon2State12
+  intSbox     : List Goldilocks
+  termExtSbox : List Poseidon2State12
+  prevState   : List Goldilocks
+  nextState   : List Goldilocks
+  aux         : List Goldilocks
+  deriving DecidableEq, Repr
+
+/-- The column blocks have their `trace.rs` widths. -/
+def StepOpRow.wellShaped (r : StepOpRow) : Bool :=
+  r.initExtSbox.length == 4 && r.intSbox.length == 22 && r.termExtSbox.length == 4 &&
+  r.prevState.length == 44 && r.nextState.length == 44 && r.aux.length == 38
+
+/-- The cells of a row in `trace.rs` column order. -/
+def StepOpRow.cells (r : StepOpRow) : List Goldilocks :=
+  r.stIn.toList ++ r.initExtSbox.flatMap Poseidon2State12.toList ++ r.intSbox ++
+    r.termExtSbox.flatMap Poseidon2State12.toList ++ r.prevState ++ r.nextState ++ r.aux
+
+private theorem flatMap_state12_length :
+    ∀ (l : List Poseidon2State12), (l.flatMap Poseidon2State12.toList).length = 12 * l.length
+  | [] => rfl
+  | s :: l => by
+    have h12 : s.toList.length = 12 := rfl
+    rw [List.flatMap_cons, List.length_append, flatMap_state12_length l, List.length_cons, h12]
+    omega
+
+/-- A well-shaped row has exactly `NUM_TRACE_COLS = 256` cells. -/
+theorem StepOpRow.cells_length (r : StepOpRow) (h : r.wellShaped = true) :
+    r.cells.length = stepOpNumCols := by
+  unfold StepOpRow.wellShaped at h
+  simp only [Bool.and_eq_true, beq_iff_eq] at h
+  obtain ⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
+  have h12 : r.stIn.toList.length = 12 := rfl
+  have hc : r.cells.length =
+      r.stIn.toList.length + 12 * r.initExtSbox.length + r.intSbox.length +
+        12 * r.termExtSbox.length + r.prevState.length + r.nextState.length + r.aux.length := by
+    unfold StepOpRow.cells
+    simp only [List.length_append, flatMap_state12_length]
+  unfold stepOpNumCols
+  omega
+
+/-- Deterministic step opcodes of the per-signer state machine (`StepOp` in `trace.rs`). -/
+inductive StepOp where
+  | idle
+  | statefulHmsgBlock0
+  | statefulHmsgBlock1
+  | statefulHmsgSqueeze
+  | statelessDeriveBlock0
+  | statelessDeriveBlock1
+  | statelessDecompLimb (limbIdx : Nat)
+  | forsRootsSpongeInit
+  | forsLeafHash (treeJ packSlot : Nat)
+  | forsMerkleBlockA (treeJ lvl : Nat)
+  | forsMerkleBlockB (lvl : Nat) (isTreeLast isOddTree : Bool)
+  | forsRootsPairAbsorb (pairIdx : Nat)
+  | forsRootsFinalSqueeze
+  | detTreeHmsgBlock0 (layer : Nat)
+  | detTreeHmsgBlock1 (layer : Nat)
+  | hmsgDecompLimb (limbIdx : Nat)
+  | wotsTellInit (layer : Nat)
+  | wotsChainStep0 (layer chain packSlot : Nat)
+  | wotsChainStep1 (layer chain : Nat)
+  | wotsChainStep2 (layer chain : Nat) (isOdd : Bool)
+  | wotsTellPairAbsorb (pairIdx : Nat)
+  | wotsTellFinalSqueeze
+  | xmssMerkleBlockA (layer lvl : Nat)
+  | xmssMerkleBlockB (isLayerLast isTopFinal : Bool)
+  deriving DecidableEq, Repr
+
+/-- Algebraic constraint class of a step (`ConstraintKind` in `trace.rs`): the per-step public
+    constants `layer`, `chain`, `tree_j`, `lvl` are factored into the scalar `step_c0`. -/
+inductive StepConstraintKind where
+  | idle
+  | statefulHmsgBlock0
+  | statefulHmsgBlock1
+  | statefulHmsgSqueeze
+  | statelessDeriveBlock0
+  | statelessDeriveBlock1
+  | statelessDecompLimb (limbIdx : Nat)
+  | forsRootsSpongeInit
+  | forsLeafHash (packSlot : Nat)
+  | forsMerkleBlockA
+  | forsMerkleBlockB (isTreeLast isOddTree : Bool)
+  | forsRootsPairAbsorb (isLastPair : Bool)
+  | forsRootsFinalSqueeze
+  | detTreeHmsgBlock0
+  | detTreeHmsgBlock1
+  | hmsgDecompLimb (limbIdx : Nat)
+  | wotsTellInit
+  | wotsChainStep0 (packSlot : Nat)
+  | wotsChainStep1
+  | wotsChainStep2 (isOdd : Bool)
+  | wotsTellPairAbsorb (isLastPair : Bool)
+  | wotsTellFinalSqueeze
+  | xmssMerkleBlockA
+  | xmssMerkleBlockB (isLayerLast isTopFinal : Bool)
+  deriving DecidableEq, Repr
+
+/-- `wots_pack_slot`: the `ST_REM_PACK` limb holding the remaining-step count of a chain. -/
+def wotsPackSlot (chain : Nat) : Nat :=
+  if chain < 26 then 0 else if chain < 52 then 1 else if chain < 78 then 2
+  else if chain < 103 then 3 else 4
+
+/-- First chain of a `wots_pack_slot`. -/
+def wotsPackSlotStart : Nat → Nat
+  | 0 => 0
+  | 1 => 26
+  | 2 => 52
+  | 3 => 78
+  | _ => 103
+
+/-- `push_layer_wots_and_merkle`: one WOTS+C layer (`T_ell` sponge interleaved with the 128
+    three-step chains) followed by its subtree Merkle path. -/
+def pushLayerWotsAndMerkle (layer subHeight : Nat) (isTopFinal : Bool) : List StepOp :=
+  [StepOp.wotsTellInit layer] ++
+  (List.range 64).flatMap (fun pair =>
+    (List.range 2).flatMap (fun sub =>
+      [StepOp.wotsChainStep0 layer (2 * pair + sub) (wotsPackSlot (2 * pair + sub)),
+       StepOp.wotsChainStep1 layer (2 * pair + sub),
+       StepOp.wotsChainStep2 layer (2 * pair + sub) (sub == 1)]) ++
+    [StepOp.wotsTellPairAbsorb pair]) ++
+  [StepOp.wotsTellFinalSqueeze] ++
+  (List.range subHeight).flatMap (fun lvl =>
+    [StepOp.xmssMerkleBlockA layer lvl,
+     StepOp.xmssMerkleBlockB (lvl + 1 == subHeight) ((lvl + 1 == subHeight) && isTopFinal)])
+
+/-- `rows_per_signer`. -/
+def stepOpRowsPerSigner : AggSigProfile → Nat
+  | .xmssPoseidon2 => 512
+  | .corduroyPoseidon2 => 8192
+
+/-- The opcodes of one signer before `Idle` padding. -/
+def signerProgramBody : AggSigProfile → List StepOp
+  | .xmssPoseidon2 =>
+    [StepOp.statefulHmsgBlock0, StepOp.statefulHmsgBlock1, StepOp.statefulHmsgSqueeze] ++
+    (List.range 5).map StepOp.hmsgDecompLimb ++
+    pushLayerWotsAndMerkle 0 6 true
+  | .corduroyPoseidon2 =>
+    [StepOp.statelessDeriveBlock0, StepOp.statelessDeriveBlock1] ++
+    (List.range 7).map StepOp.statelessDecompLimb ++
+    [StepOp.forsRootsSpongeInit] ++
+    (List.range 16).flatMap (fun pair =>
+      (List.range 2).flatMap (fun sub =>
+        [StepOp.forsLeafHash (2 * pair + sub) ((2 * pair + sub) / 6)] ++
+        (List.range 8).flatMap (fun lvl =>
+          [StepOp.forsMerkleBlockA (2 * pair + sub) lvl,
+           StepOp.forsMerkleBlockB lvl (lvl + 1 == 8) (sub == 1)])) ++
+      [StepOp.forsRootsPairAbsorb pair]) ++
+    [StepOp.forsRootsFinalSqueeze] ++
+    (List.range 16).flatMap (fun layer =>
+      [StepOp.detTreeHmsgBlock0 layer, StepOp.detTreeHmsgBlock1 layer] ++
+      (List.range 5).map StepOp.hmsgDecompLimb ++
+      pushLayerWotsAndMerkle layer 4 (layer + 1 == 16))
+
+/-- `build_signer_program`: the fixed-length program shared by prover and verifier. -/
+def buildSignerProgram (profile : AggSigProfile) : List StepOp :=
+  signerProgramBody profile ++
+    List.replicate (stepOpRowsPerSigner profile - (signerProgramBody profile).length) StepOp.idle
+
+/-- The program fills exactly `rows_per_signer` rows and ends in at least one `Idle` row
+    (`470 < 512` and `8011 < 8192`). -/
+theorem buildSignerProgram_length :
+    (signerProgramBody .xmssPoseidon2).length = 470 ∧
+    (signerProgramBody .corduroyPoseidon2).length = 8011 ∧
+    (buildSignerProgram .xmssPoseidon2).length = 512 ∧
+    (buildSignerProgram .corduroyPoseidon2).length = 8192 := by
+  decide +kernel
+
+/-- `step_op_to_kind_and_c0`: constraint class and per-step public constant `step_c0`. -/
+def stepOpKindAndC0 : StepOp → StepConstraintKind × Nat
+  | .idle => (.idle, 0)
+  | .statefulHmsgBlock0 => (.statefulHmsgBlock0, 0)
+  | .statefulHmsgBlock1 => (.statefulHmsgBlock1, 0)
+  | .statefulHmsgSqueeze => (.statefulHmsgSqueeze, 0)
+  | .statelessDeriveBlock0 => (.statelessDeriveBlock0, 0)
+  | .statelessDeriveBlock1 => (.statelessDeriveBlock1, 0)
+  | .statelessDecompLimb l => (.statelessDecompLimb l, 0)
+  | .forsRootsSpongeInit => (.forsRootsSpongeInit, 0)
+  | .forsLeafHash j slot => (.forsLeafHash slot, j * 2 ^ 8)
+  | .forsMerkleBlockA j lvl => (.forsMerkleBlockA, (lvl + 1) * 2 ^ 32 + j * 2 ^ (7 - lvl))
+  | .forsMerkleBlockB _ isTreeLast isOddTree => (.forsMerkleBlockB isTreeLast isOddTree, 0)
+  | .forsRootsPairAbsorb pair => (.forsRootsPairAbsorb (pair + 1 == 16), 0)
+  | .forsRootsFinalSqueeze => (.forsRootsFinalSqueeze, 0)
+  | .detTreeHmsgBlock0 layer => (.detTreeHmsgBlock0, layer * 2 ^ 32)
+  | .detTreeHmsgBlock1 _ => (.detTreeHmsgBlock1, 0)
+  | .hmsgDecompLimb l => (.hmsgDecompLimb l, 0)
+  | .wotsTellInit layer => (.wotsTellInit, layer * 2 ^ 32)
+  | .wotsChainStep0 layer chain slot => (.wotsChainStep0 slot, layer * 2 ^ 44 + chain * 2 ^ 4)
+  | .wotsChainStep1 layer chain => (.wotsChainStep1, layer * 2 ^ 44 + chain * 2 ^ 4 + 1)
+  | .wotsChainStep2 layer chain isOdd =>
+    (.wotsChainStep2 isOdd, layer * 2 ^ 44 + chain * 2 ^ 4 + 2)
+  | .wotsTellPairAbsorb pair => (.wotsTellPairAbsorb (pair + 1 == 64), 0)
+  | .wotsTellFinalSqueeze => (.wotsTellFinalSqueeze, 0)
+  | .xmssMerkleBlockA layer lvl => (.xmssMerkleBlockA, layer * 2 ^ 48 + (lvl + 1) * 2 ^ 32)
+  | .xmssMerkleBlockB isLayerLast isTopFinal => (.xmssMerkleBlockB isLayerLast isTopFinal, 0)
+
+/-- Row values one opcode's transition constraints read (`OpRowInputs` in `trace.rs`). -/
+structure StepOpRowInputs where
+  prev    : Nat → Goldilocks
+  next    : Nat → Goldilocks
+  aux     : Nat → Goldilocks
+  stIn    : Nat → Goldilocks
+  permOut : Nat → Goldilocks
+  pkSeed  : Nat → Goldilocks
+  pkRoot  : Nat → Goldilocks
+  mu      : Nat → Goldilocks
+
+/-- `bool_check_generic`: `b * (1 - b)`. -/
+def stepBoolCheck (b : Goldilocks) : Goldilocks := b *ₚ (Goldilocks.one -ₚ b)
+
+/-- `Σ_{i < n} f i * w i`, accumulated from zero in index order. -/
+def stepWeightedSum (f : Nat → Goldilocks) (w : Nat → Nat) (n : Nat) : Goldilocks :=
+  (List.range n).foldl (fun acc i => acc +ₚ (f i *ₚ ‹w i›)) Goldilocks.zero
+
+/-- `Σ_{i < n} f i`, accumulated from zero in index order. -/
+def stepPlainSum (f : Nat → Goldilocks) (n : Nat) : Goldilocks :=
+  (List.range n).foldl (fun acc i => acc +ₚ f i) Goldilocks.zero
+
+/-- `j` lies in the register block `[a, a + n)`. -/
+def stepInBlock (a n j : Nat) : Bool := decide (a ≤ j) && decide (j < a + n)
+
+/-- `check_carry_unchanged`: every state limb outside `changed` is carried, `next = prev`. -/
+def stepCarryUnchanged (x : StepOpRowInputs) (changed : Nat → Bool) : List Goldilocks :=
+  (List.range 44).filterMap fun j => if changed j then none else some (x.next j -ₚ x.prev j)
+
+/-- `check_zero_elsewhere`: every state limb outside `kept` is zero in `next`. -/
+def stepZeroElsewhere (x : StepOpRowInputs) (kept : Nat → Bool) : List Goldilocks :=
+  (List.range 44).filterMap fun j => if kept j then none else some (x.next j)
+
+/-- `next[base + i] = perm_out[i]` for `i < n`. -/
+def stepNextIsPerm (x : StepOpRowInputs) (base n : Nat) : List Goldilocks :=
+  (List.range n).map fun i => x.next (base + i) -ₚ x.permOut i
+
+/-- Base-4 digits `aux[0..31]`, top bit `aux[31]`, and the reconstruction
+    `prev[ST_MAIN_SPONGE + l] = Σ aux[i] 4^i + aux[31] 2^62` of a `< 2^63` limb. -/
+def stepLimb63Decomp (x : StepOpRowInputs) (l : Nat) : List Goldilocks :=
+  (List.range 31).map (fun i => quarticBase4 (x.aux i)) ++
+  [stepBoolCheck (x.aux 31),
+   x.prev (stMainSponge + l) -ₚ
+     (stepWeightedSum x.aux (fun i => 4 ^ i) 31 +ₚ (x.aux 31 *ₚ ‹2 ^ 62›))]
+
+/-- Byte `sub` assembled from four base-4 digits of the limb. -/
+def stepByteVal (x : StepOpRowInputs) (sub : Nat) : Goldilocks :=
+  ((x.aux (4 * sub) +ₚ (x.aux (4 * sub + 1) *ₚ ‹4›)) +ₚ (x.aux (4 * sub + 2) *ₚ ‹16›)) +ₚ
+    (x.aux (4 * sub + 3) *ₚ ‹64›)
+
+/-- `expected_next[j]` after packing FORS indices `firstJ .. firstJ + count` (six bytes per
+    `ST_REM_PACK` limb). -/
+def stepForsPackExpected (x : StepOpRowInputs) (firstJ count j : Nat) : Goldilocks :=
+  (List.range count).foldl
+    (fun acc sub =>
+      if stRemPack + (firstJ + sub) / 6 = j then
+        acc +ₚ (stepByteVal x sub *ₚ ‹2 ^ (8 * ((firstJ + sub) % 6))›)
+      else acc)
+    (x.prev j)
+
+/-- Upper 28 bits of a 32-bit half of `leaf_global_idx`: digits `aux[2..16]`. -/
+def stepHi28 (x : StepOpRowInputs) : Goldilocks :=
+  stepWeightedSum (fun i => x.aux (2 + i)) (fun i => 4 ^ i) 14
+
+/-- `expected_next[j]` of `StatelessDecompLimb { limb_idx = l }`. -/
+def stepStatelessDecompExpected (x : StepOpRowInputs) (l j : Nat) : Goldilocks :=
+  if l < 4 then stepForsPackExpected x (7 * l) 7 j
+  else if l = 4 then stepForsPackExpected x 28 4 j
+  else if l = 5 then
+    (if j = stKpIdx then x.aux 0 +ₚ (x.aux 1 *ₚ ‹4›)
+     else if j = stTreeLo then stepHi28 x
+     else x.prev j)
+  else if l = 6 then
+    (if j = stTreeLo then x.prev stTreeLo +ₚ ((x.aux 0 +ₚ (x.aux 1 *ₚ ‹4›)) *ₚ ‹2 ^ 28›)
+     else if j = stTreeHi then stepHi28 x
+     else x.prev j)
+  else x.prev j
+
+/-- `expected_next[j]` of `HmsgDecompLimb { limb_idx = l }`: the remaining-step counts
+    `3 - d_r` packed two bits per chain, and the running digit sum. -/
+def stepHmsgDecompExpected (x : StepOpRowInputs) (l j : Nat) : Goldilocks :=
+  if j = stAccOrU1 then
+    x.prev stAccOrU1 +ₚ stepPlainSum x.aux (if l < 4 then 31 else 4)
+  else
+    (List.range (if l < 4 then 31 else 4)).foldl
+      (fun acc i =>
+        if stRemPack + wotsPackSlot (31 * l + i) = j then
+          acc +ₚ ((‹3› -ₚ x.aux i) *ₚ
+            ‹2 ^ (2 * (31 * l + i - wotsPackSlotStart (wotsPackSlot (31 * l + i))))›)
+        else acc)
+      (x.prev j)
+
+/-- Second sponge block of a 2-block Merkle node: `st_in = sub_sponge + [node, 1, IV, 0, ..]`. -/
+def stepMerkleBlockBInput (x : StepOpRowInputs) : List Goldilocks :=
+  (List.range 4).map (fun i => x.stIn i -ₚ (x.prev (stSubSponge + i) +ₚ x.prev (stWork + i))) ++
+  [x.stIn 4 -ₚ (x.prev (stSubSponge + 4) +ₚ Goldilocks.one),
+   x.stIn 5 -ₚ (x.prev (stSubSponge + 5) +ₚ poseidon2IvTag)] ++
+  (List.range 6).map (fun i => x.stIn (6 + i) -ₚ x.prev (stSubSponge + 6 + i))
+
+/-- First sponge block of a 2-block Merkle node with direction bit `aux[0]`, parent index
+    `aux[1]`, sibling `aux[2..6]` and address limb `meta0`. -/
+def stepMerkleBlockA (x : StepOpRowInputs) (domainTag meta0 : Goldilocks) : List Goldilocks :=
+  [stepBoolCheck (x.aux 0), x.prev stCursorIdx -ₚ ((x.aux 0 +ₚ x.aux 1) +ₚ x.aux 1)] ++
+  (List.range 4).flatMap (fun i =>
+    [x.stIn i -ₚ x.pkSeed i,
+     x.stIn (4 + i) -ₚ
+       (((Goldilocks.one -ₚ x.aux 0) *ₚ x.prev (stWork + i)) +ₚ (x.aux 0 *ₚ x.aux (2 + i))),
+     x.next (stWork + i) -ₚ
+       ((x.aux 0 *ₚ x.prev (stWork + i)) +ₚ ((Goldilocks.one -ₚ x.aux 0) *ₚ x.aux (2 + i)))]) ++
+  [x.stIn 8 -ₚ domainTag, x.stIn 9 -ₚ meta0, x.stIn 10 -ₚ x.prev stTreeLo,
+   x.stIn 11 -ₚ x.prev stTreeHi] ++
+  stepNextIsPerm x stSubSponge 12 ++
+  [x.next stCursorIdx -ₚ x.aux 1] ++
+  stepCarryUnchanged x
+    (fun j => stepInBlock stSubSponge 12 j || stepInBlock stWork 4 j || j == stCursorIdx)
+
+/-- Absorb `st_in = main_sponge + [blockA, blockB, 0]`. -/
+def stepSpongeAbsorbInput (x : StepOpRowInputs) (blockA blockB : Nat → Goldilocks) :
+    List Goldilocks :=
+  (List.range 4).flatMap (fun i =>
+    [x.stIn i -ₚ (x.prev (stMainSponge + i) +ₚ blockA i),
+     x.stIn (4 + i) -ₚ (x.prev (stMainSponge + 4 + i) +ₚ blockB i),
+     x.stIn (8 + i) -ₚ x.prev (stMainSponge + 8 + i)])
+
+/-- Final squeeze `st_in = main_sponge + [1, 0, ..]`. -/
+def stepSqueezeInput (x : StepOpRowInputs) : List Goldilocks :=
+  [x.stIn 0 -ₚ (x.prev stMainSponge +ₚ Goldilocks.one)] ++
+  (List.range 11).map (fun i => x.stIn (1 + i) -ₚ x.prev (stMainSponge + 1 + i))
+
+/-- One WOTS+C chain step hashing `cur` under the address limb `step_c0 + kp_idx * 2^16`. -/
+def stepWotsStepInput (x : StepOpRowInputs) (c0 : Goldilocks) : List Goldilocks :=
+  [x.stIn 8 -ₚ domainWotsStep, x.stIn 9 -ₚ (c0 +ₚ (x.prev stKpIdx *ₚ ‹2 ^ 16›)),
+   x.stIn 10 -ₚ x.prev stTreeLo, x.stIn 11 -ₚ x.prev stTreeHi]
+
+/-- `eval_single_op_constraints_generic`: the transition constraints of one opcode class, in
+    emission order. Every entry has degree at most 7 in the row cells. -/
+def stepOpConstraints (kind : StepConstraintKind) (c0 : Goldilocks) (x : StepOpRowInputs) :
+    List Goldilocks :=
+  match kind with
+  | .idle => (List.range 44).map x.next
+  | .statefulHmsgBlock0 =>
+    (List.range 6).map (fun i => stepBoolCheck (x.aux i)) ++
+    (List.range 32).map (fun i => stepBoolCheck (x.aux (6 + i))) ++
+    (List.range 4).flatMap (fun i =>
+      [x.stIn i -ₚ x.pkSeed i, x.stIn (4 + i) -ₚ x.pkRoot i,
+       x.next (stCurRoot + i) -ₚ x.pkRoot i]) ++
+    [x.stIn 8 -ₚ domainHMsgStateful,
+     x.stIn 9 -ₚ ((stepWeightedSum x.aux (fun i => 2 ^ i) 6 *ₚ ‹2 ^ 32›) +ₚ
+       stepWeightedSum (fun i => x.aux (6 + i)) (fun i => 2 ^ i) 32),
+     x.stIn 10 -ₚ x.mu 4, x.stIn 11 -ₚ poseidon2IvTag,
+     x.next stKpIdx -ₚ stepWeightedSum x.aux (fun i => 2 ^ i) 6] ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepZeroElsewhere x
+      (fun j => stepInBlock stCurRoot 4 j || j == stKpIdx || stepInBlock stMainSponge 12 j)
+  | .statefulHmsgBlock1 =>
+    stepSpongeAbsorbInput x x.aux x.mu ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepCarryUnchanged x (fun j => stepInBlock stMainSponge 12 j)
+  | .statefulHmsgSqueeze =>
+    stepSqueezeInput x ++
+    stepNextIsPerm x stMainSponge 12 ++
+    (List.range 6).map (fun s => x.next (stRemPack + s)) ++
+    [x.next stAccOrU1] ++
+    stepCarryUnchanged x
+      (fun j => stepInBlock stRemPack 6 j || stepInBlock stMainSponge 12 j || j == stAccOrU1)
+  | .statelessDeriveBlock0 =>
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.pkSeed i, x.stIn (4 + i) -ₚ x.pkRoot i]) ++
+    [x.stIn 8 -ₚ domainHMsgStateless, x.stIn 9 -ₚ x.mu 4, x.stIn 10,
+     x.stIn 11 -ₚ poseidon2IvTag] ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepZeroElsewhere x (fun j => stepInBlock stMainSponge 12 j)
+  | .statelessDeriveBlock1 =>
+    stepSpongeAbsorbInput x x.aux x.mu ++
+    stepNextIsPerm x stMainSponge 12 ++
+    (List.range 6).map (fun s => x.next (stRemPack + s)) ++
+    stepCarryUnchanged x (fun j => stepInBlock stMainSponge 12 j || stepInBlock stRemPack 6 j)
+  | .statelessDecompLimb l =>
+    stepLimb63Decomp x l ++
+    (List.range 44).map (fun j => x.next j -ₚ stepStatelessDecompExpected x l j)
+  | .forsRootsSpongeInit =>
+    (List.range 4).map (fun i => x.stIn i -ₚ x.pkSeed i) ++
+    [x.stIn 4 -ₚ x.prev stKpIdx, x.stIn 5 -ₚ x.prev stTreeLo, x.stIn 6 -ₚ x.prev stTreeHi,
+     x.stIn 7 -ₚ ‹32›, x.stIn 8 -ₚ domainForsRoots, x.stIn 9, x.stIn 10,
+     x.stIn 11 -ₚ poseidon2IvTag] ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepCarryUnchanged x (fun j => stepInBlock stMainSponge 12 j)
+  | .forsLeafHash slot =>
+    (List.range 4).map (fun k => quarticBase4 (x.aux (4 + k))) ++
+    [x.prev (stRemPack + slot) -ₚ
+       (stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4 +ₚ (x.aux 8 *ₚ ‹256›)),
+     x.next (stRemPack + slot) -ₚ x.aux 8] ++
+    (List.range 4).flatMap (fun i =>
+      [x.stIn i -ₚ x.aux i, x.stIn (4 + i) -ₚ x.pkSeed i,
+       x.next (stWork + i) -ₚ (x.permOut i +ₚ x.aux i)]) ++
+    [x.stIn 8 -ₚ domainForsLeaf,
+     x.stIn 9 -ₚ ((x.prev stKpIdx *ₚ ‹2 ^ 24›) +ₚ
+       (c0 +ₚ stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4)),
+     x.stIn 10 -ₚ x.prev stTreeLo, x.stIn 11 -ₚ x.prev stTreeHi,
+     x.next stCursorIdx -ₚ stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4] ++
+    stepCarryUnchanged x
+      (fun j => j == stRemPack + slot || stepInBlock stWork 4 j || j == stCursorIdx)
+  | .forsMerkleBlockA =>
+    stepMerkleBlockA x domainForsNode ((c0 +ₚ (x.prev stKpIdx *ₚ ‹2 ^ 16›)) +ₚ x.aux 1)
+  | .forsMerkleBlockB isTreeLast isOddTree =>
+    stepMerkleBlockBInput x ++
+    (if isTreeLast then [x.prev stCursorIdx] else []) ++
+    (if isTreeLast && !isOddTree then
+      stepNextIsPerm x stCurRoot 4 ++ stepCarryUnchanged x (fun j => stepInBlock stCurRoot 4 j)
+     else
+      stepNextIsPerm x stWork 4 ++ stepCarryUnchanged x (fun j => stepInBlock stWork 4 j))
+  | .forsRootsPairAbsorb isLastPair =>
+    (if isLastPair then (List.range 6).map (fun s => x.prev (stRemPack + s)) else []) ++
+    stepSpongeAbsorbInput x (fun i => x.prev (stCurRoot + i)) (fun i => x.prev (stWork + i)) ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepCarryUnchanged x (fun j => stepInBlock stMainSponge 12 j)
+  | .forsRootsFinalSqueeze =>
+    stepSqueezeInput x ++
+    stepNextIsPerm x stCurRoot 4 ++
+    stepCarryUnchanged x (fun j => stepInBlock stCurRoot 4 j)
+  | .detTreeHmsgBlock0 =>
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.pkSeed i, x.stIn (4 + i) -ₚ x.pkRoot i]) ++
+    [x.stIn 8 -ₚ domainHMsgDetTree, x.stIn 9 -ₚ (c0 +ₚ x.prev stKpIdx),
+     x.stIn 10 -ₚ x.prev stTreeLo, x.stIn 11 -ₚ x.prev stTreeHi] ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepCarryUnchanged x (fun j => stepInBlock stMainSponge 12 j)
+  | .detTreeHmsgBlock1 =>
+    (List.range 32).map (fun i => stepBoolCheck (x.aux i)) ++
+    (List.range 4).map (fun i =>
+      x.stIn i -ₚ (x.prev (stMainSponge + i) +ₚ x.prev (stCurRoot + i))) ++
+    [x.stIn 4 -ₚ (x.prev (stMainSponge + 4) +ₚ stepWeightedSum x.aux (fun i => 2 ^ i) 32),
+     x.stIn 5 -ₚ (x.prev (stMainSponge + 5) +ₚ Goldilocks.one)] ++
+    (List.range 6).map (fun i => x.stIn (6 + i) -ₚ x.prev (stMainSponge + 6 + i)) ++
+    stepNextIsPerm x stMainSponge 12 ++
+    (List.range 6).map (fun s => x.next (stRemPack + s)) ++
+    [x.next stAccOrU1] ++
+    stepCarryUnchanged x
+      (fun j => stepInBlock stRemPack 6 j || stepInBlock stMainSponge 12 j || j == stAccOrU1)
+  | .hmsgDecompLimb l =>
+    stepLimb63Decomp x l ++
+    (if l = 4 then [stepHmsgDecompExpected x l stAccOrU1 -ₚ ‹192›] else []) ++
+    (List.range 44).map (fun j => x.next j -ₚ stepHmsgDecompExpected x l j)
+  | .wotsTellInit =>
+    (List.range 4).map (fun i => x.stIn i -ₚ x.pkSeed i) ++
+    [x.stIn 4 -ₚ (c0 +ₚ x.prev stKpIdx), x.stIn 5 -ₚ x.prev stTreeLo,
+     x.stIn 6 -ₚ x.prev stTreeHi, x.stIn 7 -ₚ ‹128›, x.stIn 8 -ₚ domainWotsPk, x.stIn 9,
+     x.stIn 10, x.stIn 11 -ₚ poseidon2IvTag] ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepCarryUnchanged x (fun j => stepInBlock stMainSponge 12 j)
+  | .wotsChainStep0 slot =>
+    [stepBoolCheck (x.aux 4), stepBoolCheck (x.aux 5), stepBoolCheck (x.aux 6),
+     x.aux 5 *ₚ (Goldilocks.one -ₚ x.aux 4), x.aux 6 *ₚ (Goldilocks.one -ₚ x.aux 5),
+     x.prev (stRemPack + slot) -ₚ
+       ((‹3› -ₚ ((x.aux 4 +ₚ x.aux 5) +ₚ x.aux 6)) +ₚ (x.aux 7 *ₚ ‹4›)),
+     x.next (stRemPack + slot) -ₚ x.aux 7] ++
+    (List.range 4).flatMap (fun i =>
+      [x.stIn i -ₚ x.aux i, x.stIn (4 + i) -ₚ x.pkSeed i,
+       x.next (stWork + i) -ₚ
+         ((x.aux 4 *ₚ x.aux i) +ₚ ((Goldilocks.one -ₚ x.aux 4) *ₚ (x.permOut i +ₚ x.aux i)))]) ++
+    stepWotsStepInput x c0 ++
+    [x.next stAccOrU1 -ₚ x.aux 5, x.next stWotsU2 -ₚ x.aux 6] ++
+    stepCarryUnchanged x
+      (fun j => j == stRemPack + slot || stepInBlock stWork 4 j || j == stAccOrU1 ||
+        j == stWotsU2)
+  | .wotsChainStep1 =>
+    (List.range 4).flatMap (fun i =>
+      [x.stIn i -ₚ x.prev (stWork + i), x.stIn (4 + i) -ₚ x.pkSeed i,
+       x.next (stWork + i) -ₚ
+         ((x.prev stAccOrU1 *ₚ x.prev (stWork + i)) +ₚ
+           ((Goldilocks.one -ₚ x.prev stAccOrU1) *ₚ (x.permOut i +ₚ x.prev (stWork + i))))]) ++
+    stepWotsStepInput x c0 ++
+    stepCarryUnchanged x (fun j => stepInBlock stWork 4 j)
+  | .wotsChainStep2 isOdd =>
+    (List.range 4).flatMap (fun i =>
+      [x.stIn i -ₚ x.prev (stWork + i), x.stIn (4 + i) -ₚ x.pkSeed i,
+       x.next ((if isOdd then stWork else stSubSponge) + i) -ₚ
+         ((x.prev stWotsU2 *ₚ x.prev (stWork + i)) +ₚ
+           ((Goldilocks.one -ₚ x.prev stWotsU2) *ₚ (x.permOut i +ₚ x.prev (stWork + i))))]) ++
+    stepWotsStepInput x c0 ++
+    stepCarryUnchanged x (fun j => stepInBlock (if isOdd then stWork else stSubSponge) 4 j)
+  | .wotsTellPairAbsorb isLastPair =>
+    (if isLastPair then (List.range 5).map (fun s => x.prev (stRemPack + s)) else []) ++
+    stepSpongeAbsorbInput x (fun i => x.prev (stSubSponge + i)) (fun i => x.prev (stWork + i)) ++
+    stepNextIsPerm x stMainSponge 12 ++
+    stepCarryUnchanged x (fun j => stepInBlock stMainSponge 12 j)
+  | .wotsTellFinalSqueeze =>
+    stepSqueezeInput x ++
+    stepNextIsPerm x stWork 4 ++
+    [x.next stCursorIdx -ₚ x.prev stKpIdx] ++
+    stepCarryUnchanged x (fun j => stepInBlock stWork 4 j || j == stCursorIdx)
+  | .xmssMerkleBlockA =>
+    stepMerkleBlockA x domainMerkleNode (c0 +ₚ x.aux 1)
+  | .xmssMerkleBlockB isLayerLast isTopFinal =>
+    stepMerkleBlockBInput x ++
+    (if !isLayerLast then
+      stepNextIsPerm x stWork 4 ++ stepCarryUnchanged x (fun j => stepInBlock stWork 4 j)
+     else if isTopFinal then
+      [x.prev stCursorIdx] ++
+      (List.range 4).map (fun i => x.permOut i -ₚ x.pkRoot i) ++
+      (List.range 44).map x.next
+     else
+      [x.prev stCursorIdx] ++
+      (List.range 4).map (fun i => stepBoolCheck (x.aux i)) ++
+      (List.range 14).map (fun i => quarticBase4 (x.aux (4 + i))) ++
+      (List.range 2).map (fun i => quarticBase4 (x.aux (18 + i))) ++
+      (List.range 14).map (fun i => quarticBase4 (x.aux (20 + i))) ++
+      [x.prev stTreeLo -ₚ
+         (stepWeightedSum x.aux (fun i => 2 ^ i) 4 +ₚ
+           (stepWeightedSum (fun i => x.aux (4 + i)) (fun i => 4 ^ i) 14 *ₚ ‹16›)),
+       x.prev stTreeHi -ₚ
+         (stepWeightedSum (fun i => x.aux (18 + i)) (fun i => 4 ^ i) 2 +ₚ
+           (stepWeightedSum (fun i => x.aux (20 + i)) (fun i => 4 ^ i) 14 *ₚ ‹16›))] ++
+      stepNextIsPerm x stCurRoot 4 ++
+      [x.next stKpIdx -ₚ stepWeightedSum x.aux (fun i => 2 ^ i) 4,
+       x.next stTreeLo -ₚ
+         (stepWeightedSum (fun i => x.aux (4 + i)) (fun i => 4 ^ i) 14 +ₚ
+           (stepWeightedSum (fun i => x.aux (18 + i)) (fun i => 4 ^ i) 2 *ₚ ‹2 ^ 28›)),
+       x.next stTreeHi -ₚ stepWeightedSum (fun i => x.aux (20 + i)) (fun i => 4 ^ i) 14] ++
+      stepCarryUnchanged x
+        (fun j => stepInBlock stCurRoot 4 j || j == stKpIdx || j == stTreeLo || j == stTreeHi))
+
+/-- Group A (`eval_group_a_and_boundaries_generic`): the recomputed `Poseidon2` output of the
+    row and the 118 S-box residuals `(lane + rc)^7 - sbox_out`, each of degree 7. -/
+def stepOpPermTrace (row : StepOpRow) : Poseidon2State12 × List Goldilocks :=
+  let r1 := extRoundsResiduals poseidon2InitialExtConsts (applyME row.stIn) row.initExtSbox
+  let r2 := intRoundsResiduals poseidon2InternalConsts r1.1 row.intSbox
+  let r3 := extRoundsResiduals poseidon2TerminalExtConsts r2.1 row.termExtSbox
+  (r3.1, r1.2 ++ r2.2 ++ r3.2)
+
+/-- **Group A exactness.** If the S-box residuals of a row vanish, its recomputed permutation
+    output is `poseidon2Perm12` of its `COL_ST_IN` block. -/
+theorem stepOp256_groupA_exact (row : StepOpRow)
+    (h : allZeroGoldilocks (stepOpPermTrace row).2 = true) :
+    (stepOpPermTrace row).1 = poseidon2Perm12 row.stIn := by
+  have hKey : poseidon2PermResiduals
+      { input := row.stIn, initExtSbox := row.initExtSbox, intSbox := row.intSbox,
+        termExtSbox := row.termExtSbox, output := (stepOpPermTrace row).1 } =
+      (stepOpPermTrace row).2 ++
+        (state12Sub (stepOpPermTrace row).1 (stepOpPermTrace row).1).toList := rfl
+  have hZ : allZeroGoldilocks (poseidon2PermResiduals
+      { input := row.stIn, initExtSbox := row.initExtSbox, intSbox := row.intSbox,
+        termExtSbox := row.termExtSbox, output := (stepOpPermTrace row).1 }) = true := by
+    rw [hKey, allZeroGoldilocks_append, Bool.and_eq_true]
+    exact ⟨h, (state12Sub_toList_allZero_iff _ _).mpr rfl⟩
+  exact poseidon2PermResiduals_output_eq hZ
+
+/-- Boundary constraints of row `t` of a signer block of `rowsPerSigner` rows: the first row
+    has `prev = 0` and the last row has `next = 0`, for active and inactive slots alike. -/
+def stepOpBoundaryResiduals (rowsPerSigner t : Nat) (row : StepOpRow) : List Goldilocks :=
+  (List.range 44).flatMap fun j =>
+    [if t = 0 then row.prevState.getD j Goldilocks.zero else Goldilocks.zero,
+     if t + 1 = rowsPerSigner then row.nextState.getD j Goldilocks.zero else Goldilocks.zero]
+
+/-- Public inputs of one signer slot `(pk, mu)`; `none` is an inactive (blinding) slot, whose
+    opcode selectors are all gated off. -/
+abbrev StepOpSlot : Type := Option (AggValidatorPk × Digest5)
+
+/-- The values the opcode constraints of a row read. -/
+def stepOpRowInputs (pub : AggValidatorPk × Digest5) (row : StepOpRow) : StepOpRowInputs where
+  prev    := fun j => row.prevState.getD j Goldilocks.zero
+  next    := fun j => row.nextState.getD j Goldilocks.zero
+  aux     := fun i => row.aux.getD i Goldilocks.zero
+  stIn    := fun i => row.stIn.toList.getD i Goldilocks.zero
+  permOut := fun i => (stepOpPermTrace row).1.toList.getD i Goldilocks.zero
+  pkSeed  := fun i => pub.1.pkSeed.toList.getD i Goldilocks.zero
+  pkRoot  := fun i => pub.1.pkRoot.toList.getD i Goldilocks.zero
+  mu      := fun i =>
+    [pub.2.limb0, pub.2.limb1, pub.2.limb2, pub.2.limb3, pub.2.limb4].getD i Goldilocks.zero
+
+/-- All intra-row constraints of row `t` of a signer block: Group A, the boundary constraints,
+    and, for an active slot, the transition constraints of the opcode scheduled at `t`. -/
+def stepOp256RowResiduals (profile : AggSigProfile) (slot : StepOpSlot) (t : Nat)
+    (row : StepOpRow) : List Goldilocks :=
+  (stepOpPermTrace row).2 ++
+  stepOpBoundaryResiduals (stepOpRowsPerSigner profile) t row ++
+  match slot with
+  | none => []
+  | some pub =>
+    stepOpConstraints (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+      (Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2)
+      (stepOpRowInputs pub row)
+
+/-- Intra-row constraints of the rows from global index `g` on: row `g` belongs to slot
+    `g / rows_per_signer` at step `g % rows_per_signer`. -/
+def stepOp256IntraResidualsFrom (profile : AggSigProfile) (slots : List StepOpSlot) :
+    Nat → List StepOpRow → List Goldilocks
+  | _, [] => []
+  | g, row :: rest =>
+    stepOp256RowResiduals profile (slots.getD (g / stepOpRowsPerSigner profile) none)
+      (g % stepOpRowsPerSigner profile) row ++
+    stepOp256IntraResidualsFrom profile slots (g + 1) rest
+
+/-- Inter-row shift constraints between two consecutive rows: `NEXT_STATE` of the first equals
+    `PREV_STATE` of the second, limb by limb. They are not gated by any selector. -/
+def stepOpShiftResiduals (row rowNext : StepOpRow) : List Goldilocks :=
+  (List.range 44).map fun j =>
+    row.nextState.getD j Goldilocks.zero -ₚ rowNext.prevState.getD j Goldilocks.zero
+
+/-- Inter-row shift constraints of a table: one block per `r` with `r + 1 < T`. -/
+def stepOp256ShiftResiduals : List StepOpRow → List Goldilocks
+  | r :: r' :: rest => stepOpShiftResiduals r r' ++ stepOp256ShiftResiduals (r' :: rest)
+  | _ => []
+
+/-- A table of `slots.length * rows_per_signer` well-shaped rows on which every intra-row
+    constraint and every inter-row shift constraint vanishes. -/
+def stepOp256TableOk (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) : Bool :=
+  decide (0 < slots.length) &&
+  decide (rows.length = slots.length * stepOpRowsPerSigner profile) &&
+  rows.all StepOpRow.wellShaped &&
+  allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots 0 rows) &&
+  allZeroGoldilocks (stepOp256ShiftResiduals rows)
+
+/-- Project an intra-row constraint block from the flat residual stream. -/
+theorem stepOp256IntraResidualsFrom_row_at (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g i : Nat) (row : StepOpRow),
+      rows[i]? = some row →
+      allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots g rows) = true →
+      allZeroGoldilocks (stepOp256RowResiduals profile
+        (slots.getD ((g + i) / stepOpRowsPerSigner profile) none)
+        ((g + i) % stepOpRowsPerSigner profile) row) = true
+  | [], _, _, _, h, _ => by simp at h
+  | r :: rs, g, 0, row, h, hz => by
+    simp only [List.getElem?_cons_zero, Option.some.injEq] at h
+    subst row
+    rw [stepOp256IntraResidualsFrom, allZeroGoldilocks_append, Bool.and_eq_true] at hz
+    simpa only [Nat.add_zero] using hz.1
+  | r :: rs, g, i + 1, row, h, hz => by
+    rw [stepOp256IntraResidualsFrom, allZeroGoldilocks_append, Bool.and_eq_true] at hz
+    have hr := stepOp256IntraResidualsFrom_row_at profile slots rs (g + 1) i row h hz.2
+    simpa only [Nat.add_right_comm g 1 i, Nat.add_assoc] using hr
+
+/-- Every row of a valid table satisfies its actual scheduled constraint block. -/
+theorem stepOp256TableOk_row_at (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) (i : Nat) (row : StepOpRow)
+    (h : stepOp256TableOk profile slots rows = true) (hi : rows[i]? = some row) :
+    allZeroGoldilocks (stepOp256RowResiduals profile
+      (slots.getD (i / stepOpRowsPerSigner profile) none)
+      (i % stepOpRowsPerSigner profile) row) = true := by
+  unfold stepOp256TableOk at h
+  simp only [Bool.and_eq_true] at h
+  simpa only [Nat.zero_add] using
+    stepOp256IntraResidualsFrom_row_at profile slots rows 0 i row hi h.1.2
+
+/-- The shift constraints between two rows vanish exactly when the state is handed over. -/
+theorem stepOp256_shift_iff (r r' : StepOpRow) :
+    allZeroGoldilocks (stepOpShiftResiduals r r') = true ↔
+      ∀ j, j < 44 →
+        r.nextState.getD j Goldilocks.zero = r'.prevState.getD j Goldilocks.zero := by
+  unfold stepOpShiftResiduals allZeroGoldilocks
+  rw [List.all_map, List.all_eq_true]
+  constructor
+  · intro h j hj
+    exact (sub_eq_zero_iff_goldilocks _ _).mp (h j (List.mem_range.mpr hj))
+  · intro h j hj
+    exact (sub_eq_zero_iff_goldilocks _ _).mpr (h j (List.mem_range.mp hj))
+
+/-- On a table whose shift constraints vanish, every pair of consecutive rows hands over its
+    44 state limbs. -/
+theorem stepOp256_shift_links_rows :
+    ∀ (rows : List StepOpRow) (g : Nat) (r r' : StepOpRow),
+      rows[g]? = some r → rows[g + 1]? = some r' →
+      allZeroGoldilocks (stepOp256ShiftResiduals rows) = true →
+      ∀ j, j < 44 →
+        r.nextState.getD j Goldilocks.zero = r'.prevState.getD j Goldilocks.zero
+  | [], _, _, _, h, _, _ => absurd h (by simp)
+  | [_], _, _, _, _, h', _ => absurd h' (by simp)
+  | r0 :: r1 :: rest, 0, r, r', h, h', hz => by
+    simp only [List.getElem?_cons_zero, List.getElem?_cons_succ, Option.some.injEq] at h h'
+    subst h h'
+    unfold stepOp256ShiftResiduals at hz
+    rw [allZeroGoldilocks_append, Bool.and_eq_true] at hz
+    exact (stepOp256_shift_iff r0 r1).mp hz.1
+  | r0 :: r1 :: rest, g + 1, r, r', h, h', hz => by
+    simp only [List.getElem?_cons_succ] at h h'
+    unfold stepOp256ShiftResiduals at hz
+    rw [allZeroGoldilocks_append, Bool.and_eq_true] at hz
+    exact stepOp256_shift_links_rows (r1 :: rest) g r r' h h' hz.2
+
+/-- Pointwise completeness as well as soundness of the intra-row residual stream.
+    The offset is retained so this also applies to a block inside a larger table. -/
+theorem stepOp256IntraResidualsFrom_iff (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g : Nat),
+      allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots g rows) = true ↔
+      ∀ (i : Nat) (row : StepOpRow), rows[i]? = some row →
+        allZeroGoldilocks (stepOp256RowResiduals profile
+          (slots.getD ((g + i) / stepOpRowsPerSigner profile) none)
+          ((g + i) % stepOpRowsPerSigner profile) row) = true
+  | [], _ => by simp [stepOp256IntraResidualsFrom, allZeroGoldilocks]
+  | r :: rs, g => by
+    constructor
+    · exact fun h i row hi => stepOp256IntraResidualsFrom_row_at profile slots _ g i row hi h
+    · intro h
+      rw [stepOp256IntraResidualsFrom, allZeroGoldilocks_append, Bool.and_eq_true]
+      refine ⟨?_, (stepOp256IntraResidualsFrom_iff profile slots rs (g + 1)).mpr ?_⟩
+      · simpa only [Nat.add_zero] using h 0 r rfl
+      · intro i row hi
+        have hr := h (i + 1) row (by simpa only [List.getElem?_cons_succ] using hi)
+        simpa only [Nat.add_right_comm g 1 i, Nat.add_assoc] using hr
+
+/-- The entire shift stream vanishes exactly when every adjacent pair hands over all
+    44 limbs. This converse permits constructing tables from executions, including
+    transitions across signer-block boundaries. -/
+theorem stepOp256ShiftResiduals_iff :
+    ∀ (rows : List StepOpRow),
+      allZeroGoldilocks (stepOp256ShiftResiduals rows) = true ↔
+      ∀ (i : Nat) (r r' : StepOpRow), rows[i]? = some r → rows[i + 1]? = some r' →
+        ∀ j < 44, r.nextState.getD j Goldilocks.zero = r'.prevState.getD j Goldilocks.zero
+  | [] => by simp [stepOp256ShiftResiduals, allZeroGoldilocks]
+  | [r] => by simp [stepOp256ShiftResiduals, allZeroGoldilocks]
+  | r :: r' :: rest => by
+    constructor
+    · exact fun h i a b ha hb => stepOp256_shift_links_rows _ i a b ha hb h
+    · intro h
+      rw [stepOp256ShiftResiduals, allZeroGoldilocks_append, Bool.and_eq_true]
+      refine ⟨(stepOp256_shift_iff r r').mpr (h 0 r r' rfl rfl),
+        (stepOp256ShiftResiduals_iff (r' :: rest)).mpr ?_⟩
+      intro i a b ha hb
+      exact h (i + 1) a b ha hb
+
+/-- Both boundary gates are necessary and sufficient; no condition is imposed on an
+    interior row by the boundary residuals. -/
+theorem stepOpBoundaryResiduals_iff (rowsPerSigner t : Nat) (row : StepOpRow) :
+    allZeroGoldilocks (stepOpBoundaryResiduals rowsPerSigner t row) = true ↔
+      (∀ j < 44, t = 0 → row.prevState.getD j Goldilocks.zero = Goldilocks.zero) ∧
+      (∀ j < 44, t + 1 = rowsPerSigner →
+        row.nextState.getD j Goldilocks.zero = Goldilocks.zero) := by
+  unfold stepOpBoundaryResiduals allZeroGoldilocks
+  simp only [List.all_flatMap, List.all_eq_true, List.mem_range, List.all_cons,
+    List.all_nil, Bool.and_true, Bool.and_eq_true, beq_iff_eq]
+  by_cases hFirst : t = 0 <;> by_cases hLast : t + 1 = rowsPerSigner <;>
+    simp [hFirst, hLast, forall_and]
+
+/-- A pointwise interface to the original 256-column table checker. All actual rows,
+    including active slots, must satisfy their scheduled gate, and all adjacent rows
+    must agree. Neither a signature-verifier premise nor a surrogate table is used. -/
+theorem stepOp256TableOk_iff_rows (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) :
+    stepOp256TableOk profile slots rows = true ↔
+      0 < slots.length ∧
+      rows.length = slots.length * stepOpRowsPerSigner profile ∧
+      (∀ row ∈ rows, row.wellShaped = true) ∧
+      (∀ (i : Nat) (row : StepOpRow), rows[i]? = some row →
+        allZeroGoldilocks (stepOp256RowResiduals profile
+          (slots.getD (i / stepOpRowsPerSigner profile) none)
+          (i % stepOpRowsPerSigner profile) row) = true) ∧
+      (∀ (i : Nat) (r r' : StepOpRow), rows[i]? = some r → rows[i + 1]? = some r' →
+        ∀ j < 44, r.nextState.getD j Goldilocks.zero = r'.prevState.getD j Goldilocks.zero) := by
+  unfold stepOp256TableOk
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true,
+    stepOp256IntraResidualsFrom_iff, stepOp256ShiftResiduals_iff, Nat.zero_add, and_assoc]
+
+/-! #### Row sumcheck claims over `GoldilocksExt4` at hypercube points -/
+
+/-- `Σ_{v < n} f v` over `GoldilocksExt4`. -/
+def sumRangeExt4 (f : Nat → GoldilocksExt4) : Nat → GoldilocksExt4
+  | 0 => GoldilocksExt4.zero
+  | n + 1 => CommRingOps.add (sumRangeExt4 f n) (f n)
+
+private theorem sumRangeExt4_congr (f g : Nat → GoldilocksExt4) :
+    ∀ (n : Nat), (∀ v, v < n → f v = g v) → sumRangeExt4 f n = sumRangeExt4 g n
+  | 0, _ => rfl
+  | n + 1, h => by
+    show CommRingOps.add (sumRangeExt4 f n) (f n) = CommRingOps.add (sumRangeExt4 g n) (g n)
+    rw [sumRangeExt4_congr f g n (fun v hv => h v (Nat.lt_succ_of_lt hv)), h n (Nat.lt_succ_self n)]
+
+private theorem sumRangeExt4_kronecker (u : Nat) (F : Nat → GoldilocksExt4) :
+    ∀ (n : Nat),
+      sumRangeExt4
+        (fun v => CommRingOps.mul (if u = v then GoldilocksExt4.one else GoldilocksExt4.zero) (F v))
+        n = if u < n then F u else GoldilocksExt4.zero
+  | 0 => rfl
+  | n + 1 => by
+    show CommRingOps.add
+      (sumRangeExt4
+        (fun v => CommRingOps.mul (if u = v then GoldilocksExt4.one else GoldilocksExt4.zero) (F v))
+        n)
+      (CommRingOps.mul (if u = n then GoldilocksExt4.one else GoldilocksExt4.zero) (F n)) = _
+    rw [sumRangeExt4_kronecker u F n]
+    by_cases hLt : u < n
+    · have hNe : u ≠ n := Nat.ne_of_lt hLt
+      have hLt' : u < n + 1 := Nat.lt_succ_of_lt hLt
+      simp only [hLt, hNe, hLt', ↓reduceIte]
+      exact (congrArg (CommRingOps.add (F u)) (LawfulCommRing.zero_mul (F n))).trans
+        (LawfulCommRing.add_zero (F u))
+    · by_cases hEq : u = n
+      · subst hEq
+        simp only [Nat.lt_irrefl, Nat.lt_succ_self, ↓reduceIte]
+        exact (congrArg (CommRingOps.add GoldilocksExt4.zero) (LawfulCommRing.one_mul (F u))).trans
+          (LawfulCommRing.zero_add (F u))
+      · have hLt' : ¬ u < n + 1 := fun h => by omega
+        simp only [hLt, hEq, hLt', ↓reduceIte]
+        exact (congrArg (CommRingOps.add GoldilocksExt4.zero) (LawfulCommRing.zero_mul (F n))).trans
+          (LawfulCommRing.add_zero GoldilocksExt4.zero)
+
+private theorem hypercubePointExt4_length :
+    ∀ (ell u : Nat), (hypercubePointExt4 ell u).length = ell
+  | 0, _ => rfl
+  | ell + 1, u => by
+    show ((if u % 2 == 0 then GoldilocksExt4.zero else GoldilocksExt4.one) ::
+      hypercubePointExt4 ell (u / 2)).length = ell + 1
+    rw [List.length_cons, hypercubePointExt4_length ell (u / 2)]
+
+/-- Row-sumcheck claim of a term weighted by the equality kernel:
+    `Σ_{x ∈ {0,1}^ell} eq(tau, x) * C(x)`. -/
+def stepOpEqClaimExt4 (ell : Nat) (tau : List GoldilocksExt4) (C : Nat → GoldilocksExt4) :
+    GoldilocksExt4 :=
+  sumRangeExt4
+    (fun v => CommRingOps.mul (evalEqExt4 tau (hypercubePointExt4 ell v)) (C v)) (2 ^ ell)
+
+/-- At a hypercube point `tau = u` the equality-kernel claim is the value of the term at row
+    `u`. -/
+theorem stepOpEqClaimExt4_hypercube (ell u : Nat) (hu : u < 2 ^ ell)
+    (C : Nat → GoldilocksExt4) :
+    stepOpEqClaimExt4 ell (hypercubePointExt4 ell u) C = C u := by
+  unfold stepOpEqClaimExt4
+  rw [sumRangeExt4_congr _
+    (fun v => CommRingOps.mul (if u = v then GoldilocksExt4.one else GoldilocksExt4.zero) (C v))
+    (2 ^ ell)
+    (fun v hv => by rw [evalEqExt4_hypercube_kronecker ell u v hu hv]),
+    sumRangeExt4_kronecker u C (2 ^ ell)]
+  simp only [hu, ↓reduceIte]
+
+/-- Row-sumcheck claim of the inter-row shift constraint of one state limb with column
+    evaluations `N` (`NEXT_STATE`) and `P` (`PREV_STATE`) on the hypercube
+    (`eval_batched_row_constraints_ext4`): `Σ_x E_not_last(tau, x) * N(x) - Σ_x S_tau(x) * P(x)`. -/
+def stepOpShiftClaimExt4 (ell : Nat) (tau : List GoldilocksExt4)
+    (N P : Nat → GoldilocksExt4) : GoldilocksExt4 :=
+  CommRingOps.sub
+    (sumRangeExt4
+      (fun v => CommRingOps.mul (evalEqNotLastExt4 tau (hypercubePointExt4 ell v)) (N v)) (2 ^ ell))
+    (sumRangeExt4
+      (fun v => CommRingOps.mul (evalShiftKernelExt4 tau (hypercubePointExt4 ell v)) (P v)) (2 ^ ell))
+
+/-- **Inter-row shift equation over `GoldilocksExt4`.** At a hypercube point `tau = u` with
+    `u + 1 < 2^ell`, the shift claim is `N(u) - P(u + 1)`: the kernels `E_not_last` and `S_tau`
+    link `NEXT_STATE` of row `u` to `PREV_STATE` of row `u + 1`. -/
+theorem stepOpShiftClaimExt4_hypercube (ell u : Nat) (hu : u + 1 < 2 ^ ell)
+    (N P : Nat → GoldilocksExt4) :
+    stepOpShiftClaimExt4 ell (hypercubePointExt4 ell u) N P =
+      CommRingOps.sub (N u) (P (u + 1)) := by
+  have huLt : u < 2 ^ ell := Nat.lt_of_succ_lt hu
+  have hLen := hypercubePointExt4_length ell u
+  unfold stepOpShiftClaimExt4
+  have hN : sumRangeExt4
+      (fun v => CommRingOps.mul
+        (evalEqNotLastExt4 (hypercubePointExt4 ell u) (hypercubePointExt4 ell v)) (N v))
+      (2 ^ ell) = N u := by
+    rw [sumRangeExt4_congr _
+      (fun v => CommRingOps.mul (if u = v then GoldilocksExt4.one else GoldilocksExt4.zero) (N v))
+      (2 ^ ell)
+      (fun v hv => by
+        rw [evalEqNotLastExt4_hypercube ell _ v hLen hv,
+          evalEqExt4_hypercube_kronecker ell u v huLt hv]
+        by_cases hLast : v + 1 = 2 ^ ell
+        · have hNe : u ≠ v := fun h => by omega
+          simp only [hLast, hNe, ↓reduceIte]
+        · simp only [hLast, ↓reduceIte]),
+      sumRangeExt4_kronecker u N (2 ^ ell)]
+    simp only [huLt, ↓reduceIte]
+  have hP : sumRangeExt4
+      (fun v => CommRingOps.mul
+        (evalShiftKernelExt4 (hypercubePointExt4 ell u) (hypercubePointExt4 ell v)) (P v))
+      (2 ^ ell) = P (u + 1) := by
+    rw [sumRangeExt4_congr _
+      (fun v => CommRingOps.mul
+        (if u + 1 = v then GoldilocksExt4.one else GoldilocksExt4.zero) (P v))
+      (2 ^ ell)
+      (fun v hv => by
+        rw [evalShiftKernelExt4_hypercube ell _ v hLen hv]
+        by_cases hv0 : v = 0
+        · have hNe : u + 1 ≠ v := fun h => by omega
+          rw [ite_eq_left hv0, ite_eq_right hNe]
+        · have hvPred : v - 1 < 2 ^ ell := by omega
+          rw [evalEqExt4_hypercube_kronecker ell u (v - 1) huLt hvPred]
+          by_cases hEq : u = v - 1
+          · have hEq' : u + 1 = v := by omega
+            rw [ite_eq_right hv0, ite_eq_left hEq, ite_eq_left hEq']
+          · have hNe' : u + 1 ≠ v := fun h => by omega
+            rw [ite_eq_right hv0, ite_eq_right hEq, ite_eq_right hNe']),
+      sumRangeExt4_kronecker (u + 1) P (2 ^ ell)]
+    simp only [hu, ↓reduceIte]
+  rw [hN, hP]
+
+/-- Horner `gamma`-batching of a list of base-field residuals over `GoldilocksExt4`
+    (`eq_acc += g_pow * res; g_pow *= gamma`): `Σ_i gamma^i * res_i`. -/
+def stepOpBatchedExt4 (gamma : GoldilocksExt4) (res : List Goldilocks) : GoldilocksExt4 :=
+  RoundPoly.evalCoeffs (res.map GoldilocksExt4.embedBase) gamma
+
+private theorem stepOpBatchedExt4_zero_of_allZero (gamma : GoldilocksExt4) :
+    ∀ (res : List Goldilocks), allZeroGoldilocks res = true →
+      stepOpBatchedExt4 gamma res = CommRingOps.zero
+  | [], _ => rfl
+  | c :: rest, h => by
+    unfold allZeroGoldilocks at h
+    rw [List.all_cons, Bool.and_eq_true, beq_iff_eq] at h
+    have ih := stepOpBatchedExt4_zero_of_allZero gamma rest h.2
+    unfold stepOpBatchedExt4 at ih ⊢
+    rw [List.map_cons, RoundPoly.evalCoeffs_cons, ih, h.1, LawfulCommRing.mul_zero,
+      GoldilocksExt4.embedBase_zero]
+    exact LawfulCommRing.add_zero GoldilocksExt4.zero
+
+private theorem exists_ne_zero_of_not_allZero :
+    ∀ (l : List Goldilocks), allZeroGoldilocks l = false →
+      ∃ c, c ∈ l ∧ c ≠ Goldilocks.zero
+  | [], h => absurd h (by decide)
+  | c :: rest, h => by
+    by_cases hc : c = Goldilocks.zero
+    · have hb : (Goldilocks.zero == Goldilocks.zero) = true := by decide
+      have hr : allZeroGoldilocks rest = false := by
+        unfold allZeroGoldilocks at h ⊢
+        rw [List.all_cons, hc, hb, Bool.true_and] at h
+        exact h
+      obtain ⟨c', hm, hne⟩ := exists_ne_zero_of_not_allZero rest hr
+      exact ⟨c', List.mem_cons_of_mem _ hm, hne⟩
+    · exact ⟨c, List.mem_cons_self .., hc⟩
+
+private theorem filter_length_le_of_imp {α : Type} (p q : α → Bool)
+    (h : ∀ a, p a = true → q a = true) :
+    ∀ (l : List α), (l.filter p).length ≤ (l.filter q).length
+  | [] => Nat.le_refl _
+  | a :: l => by
+    have ih := filter_length_le_of_imp p q h l
+    cases hp : p a
+    · cases hq : q a
+      · simp only [List.filter_cons, hp, hq, Bool.false_eq_true, ↓reduceIte]
+        exact ih
+      · simp only [List.filter_cons, hp, hq, Bool.false_eq_true, ↓reduceIte, List.length_cons]
+        exact Nat.le_succ_of_le ih
+    · have hq := h a hp
+      simp only [List.filter_cons, hp, hq, ↓reduceIte, List.length_cons]
+      exact Nat.succ_le_succ ih
+
+private theorem filter_or_length_le {α : Type} (p q : α → Bool) :
+    ∀ (l : List α),
+      (l.filter (fun a => p a || q a)).length ≤ (l.filter p).length + (l.filter q).length
+  | [] => Nat.le_refl 0
+  | a :: l => by
+    have ih := filter_or_length_le p q l
+    cases hp : p a <;> cases hq : q a <;>
+      simp only [List.filter_cons, hp, hq, Bool.or_self, Bool.or_true,
+        Bool.or_false, Bool.false_eq_true, ↓reduceIte, List.length_cons] <;>
+      omega
+
+private theorem filter_eq_length_zero_of_not_mem {α : Type} [DecidableEq α] (z : α) :
+    ∀ (l : List α), z ∉ l → (l.filter (fun a => decide (a = z))).length = 0
+  | [], _ => rfl
+  | a :: l, h => by
+    have hne : a ≠ z := fun e => h (List.mem_cons.mpr (Or.inl e.symm))
+    have hd : decide (a = z) = false := decide_eq_false hne
+    have hl : z ∉ l := fun hm => h (List.mem_cons_of_mem _ hm)
+    rw [List.filter_cons, hd]
+    exact filter_eq_length_zero_of_not_mem z l hl
+
+private theorem nodup_filter_eq_length_le_one {α : Type} [DecidableEq α] (z : α) :
+    ∀ (l : List α), l.Nodup → (l.filter (fun a => decide (a = z))).length ≤ 1
+  | [], _ => Nat.zero_le 1
+  | a :: l, hnd => by
+    have hnd' := List.nodup_cons.mp hnd
+    by_cases ha : a = z
+    · have h0 := filter_eq_length_zero_of_not_mem z l (ha ▸ hnd'.1)
+      have hd : decide (a = z) = true := decide_eq_true ha
+      rw [List.filter_cons, hd]
+      exact Nat.le_of_eq (congrArg Nat.succ h0)
+    · have hd : decide (a = z) = false := decide_eq_false ha
+      rw [List.filter_cons, hd]
+      exact nodup_filter_eq_length_le_one z l hnd'.2
+
+/-- **Root bound for `gamma`-batching.** A coefficient list over `GoldilocksExt4` with a
+    non-zero entry, read as the polynomial `Σ_i gamma^i * c_i`, vanishes on at most
+    `length - 1` challenges of any duplicate-free list. -/
+theorem ext4_batched_roots_le (S : List GoldilocksExt4) (hS : S.Nodup) :
+    ∀ (cs : List GoldilocksExt4),
+      (∃ c, c ∈ cs ∧ c ≠ CommRingOps.zero) →
+      (S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length ≤
+        cs.length - 1
+  | [], h => by
+    obtain ⟨c, hc, _⟩ := h
+    cases hc
+  | c :: rest, h => by
+    by_cases hc0 : c = CommRingOps.zero
+    · obtain ⟨c', hmem, hne⟩ := h
+      have hmem' : c' ∈ rest := by
+        rcases List.mem_cons.mp hmem with hEq | hIn
+        · exact absurd (hEq.trans hc0) hne
+        · exact hIn
+      have hPos : 0 < rest.length := List.length_pos_of_mem hmem'
+      have ih := ext4_batched_roots_le S hS rest ⟨c', hmem', hne⟩
+      have hImp : ∀ r : GoldilocksExt4,
+          decide (RoundPoly.evalCoeffs (c :: rest) r = CommRingOps.zero) = true →
+          (decide (r = CommRingOps.zero) ||
+            decide (RoundPoly.evalCoeffs rest r = CommRingOps.zero)) = true := by
+        intro r hr
+        have hr' := of_decide_eq_true hr
+        rw [RoundPoly.evalCoeffs_cons, hc0, LawfulCommRing.zero_add] at hr'
+        rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hr' with h0 | h1
+        · rw [decide_eq_true h0, Bool.true_or]
+        · rw [decide_eq_true h1, Bool.or_true]
+      have h1 := filter_length_le_of_imp _ _ hImp S
+      have h2 := filter_or_length_le (fun r : GoldilocksExt4 => decide (r = CommRingOps.zero))
+        (fun r => decide (RoundPoly.evalCoeffs rest r = CommRingOps.zero)) S
+      have h3 := nodup_filter_eq_length_le_one (CommRingOps.zero : GoldilocksExt4) S hS
+      rw [List.length_cons]
+      omega
+    · have hNe : ∃ x₀ : GoldilocksExt4,
+          RoundPoly.evalCoeffs (c :: rest) x₀ ≠ CommRingOps.zero := by
+        refine ⟨CommRingOps.zero, ?_⟩
+        rw [RoundPoly.evalCoeffs_cons, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+        exact hc0
+      have hB := RoundPoly.roots_nodup_length_le rest.length (c :: rest) S hS
+        (Nat.le_of_eq (List.length_cons)) hNe
+      rw [List.length_cons, Nat.add_sub_cancel]
+      exact hB
+
+/-- **Terminal soundness of the batched row sumcheck at hypercube points.** Let `res v` be the
+    intra-row residuals of row `v`, batched with powers of `gamma`, and let the sumcheck claim
+    be taken at the hypercube point `tau = u`.
+    1. The claim equals the batched residuals of row `u`.
+    2. If every residual of row `u` vanishes, the claim is zero for every `gamma`.
+    3. If some residual of row `u` does not vanish, the claim is zero for at most
+       `(res u).length - 1` of the challenges `gamma` in any duplicate-free list. -/
+theorem stepOp256_ext4_sumcheck_sound (ell u : Nat) (hu : u < 2 ^ ell)
+    (res : Nat → List Goldilocks) (S : List GoldilocksExt4) (hS : S.Nodup) :
+    (∀ gamma : GoldilocksExt4,
+      stepOpEqClaimExt4 ell (hypercubePointExt4 ell u)
+        (fun v => stepOpBatchedExt4 gamma (res v)) = stepOpBatchedExt4 gamma (res u)) ∧
+    (allZeroGoldilocks (res u) = true →
+      ∀ gamma : GoldilocksExt4,
+        stepOpEqClaimExt4 ell (hypercubePointExt4 ell u)
+          (fun v => stepOpBatchedExt4 gamma (res v)) = CommRingOps.zero) ∧
+    (allZeroGoldilocks (res u) = false →
+      (S.filter (fun gamma => decide
+        (stepOpEqClaimExt4 ell (hypercubePointExt4 ell u)
+          (fun v => stepOpBatchedExt4 gamma (res v)) = CommRingOps.zero))).length ≤
+        (res u).length - 1) := by
+  have hClaim : ∀ gamma : GoldilocksExt4,
+      stepOpEqClaimExt4 ell (hypercubePointExt4 ell u)
+        (fun v => stepOpBatchedExt4 gamma (res v)) = stepOpBatchedExt4 gamma (res u) :=
+    fun gamma => stepOpEqClaimExt4_hypercube ell u hu _
+  refine ⟨hClaim, fun hZ gamma => ?_, fun hNz => ?_⟩
+  · rw [hClaim gamma]
+    exact stepOpBatchedExt4_zero_of_allZero gamma (res u) hZ
+  · have hf : (fun gamma => decide
+        (stepOpEqClaimExt4 ell (hypercubePointExt4 ell u)
+          (fun v => stepOpBatchedExt4 gamma (res v)) = CommRingOps.zero)) =
+        (fun gamma => decide
+          (RoundPoly.evalCoeffs ((res u).map GoldilocksExt4.embedBase) gamma =
+            CommRingOps.zero)) := by
+      funext gamma
+      rw [hClaim gamma]
+      rfl
+    obtain ⟨c, hc, hne⟩ := exists_ne_zero_of_not_allZero (res u) hNz
+    have hB := ext4_batched_roots_le S hS ((res u).map GoldilocksExt4.embedBase)
+      ⟨GoldilocksExt4.embedBase c, List.mem_map.mpr ⟨c, hc, rfl⟩,
+        fun h0 => hne (GoldilocksExt4.embedBase_injective h0)⟩
+    rw [hf]
+    rw [List.length_map] at hB
+    exact hB
+
+/-! #### Random-`tau` root counting -/
+
+/-- Every coordinate slice is represented by at most two coefficients. This definition also
+    covers inputs of the wrong length, on which the equality kernel is zero. -/
+def Ext4MultiAffine (F : List GoldilocksExt4 → GoldilocksExt4) : Prop :=
+  ∀ pre post, ∃ cs : List GoldilocksExt4, cs.length ≤ 2 ∧
+    ∀ r, RoundPoly.evalCoeffs cs r = F (pre ++ r :: post)
+
+private theorem ext4MultiAffine_scale (a : GoldilocksExt4)
+    {F : List GoldilocksExt4 → GoldilocksExt4} (h : Ext4MultiAffine F) :
+    Ext4MultiAffine (fun xs => CommRingOps.mul a (F xs)) := by
+  intro pre post
+  obtain ⟨cs, hlen, he⟩ := h pre post
+  exact ⟨polyScaleCoeffs a cs, by rw [polyScaleCoeffs_length]; exact hlen,
+    fun r => by rw [evalCoeffs_polyScaleCoeffs, he]⟩
+
+private theorem ext4MultiAffine_add {F G : List GoldilocksExt4 → GoldilocksExt4}
+    (hf : Ext4MultiAffine F) (hg : Ext4MultiAffine G) :
+    Ext4MultiAffine (fun xs => CommRingOps.add (F xs) (G xs)) := by
+  intro pre post
+  obtain ⟨cs, hc, ec⟩ := hf pre post
+  obtain ⟨ds, hd, ed⟩ := hg pre post
+  exact ⟨polyAddCoeffs cs ds, by rw [polyAddCoeffs_length]; exact Nat.max_le.mpr ⟨hc, hd⟩,
+    fun r => by rw [evalCoeffs_polyAddCoeffs, ec, ed]⟩
+
+private theorem eqFactorExt4_comm (a b : GoldilocksExt4) :
+    eqFactorExt4 a b = eqFactorExt4 b a := by
+  unfold eqFactorExt4
+  rw [LawfulCommRing.mul_comm (CommRingOps.sub _ a), LawfulCommRing.mul_comm a b]
+
+private theorem evalEqExt4_slice :
+    ∀ (pre post rx : List GoldilocksExt4),
+      ∃ cs : List GoldilocksExt4, cs.length ≤ 2 ∧
+        ∀ r, RoundPoly.evalCoeffs cs r = evalEqExt4 (pre ++ r :: post) rx
+  | [], post, [] => ⟨[], by decide, fun _ => rfl⟩
+  | [], post, x :: xs => by
+    refine ⟨polyScaleCoeffs (evalEqExt4 post xs) (eqFactorPoly x), ?_, ?_⟩
+    · rw [polyScaleCoeffs_length, eqFactorPoly_length]
+      exact Nat.le_refl _
+    · intro r
+      rw [evalCoeffs_polyScaleCoeffs, evalCoeffs_eqFactorPoly, eqFactorExt4_comm x r]
+      exact LawfulCommRing.mul_comm _ _
+  | _ :: _, _, [] => ⟨[], by decide, fun _ => rfl⟩
+  | t :: ts, post, x :: xs => by
+    obtain ⟨cs, hc, he⟩ := evalEqExt4_slice ts post xs
+    refine ⟨polyScaleCoeffs (eqFactorExt4 t x) cs, ?_, ?_⟩
+    · rw [polyScaleCoeffs_length]; exact hc
+    · intro r
+      rw [evalCoeffs_polyScaleCoeffs, he]
+      rfl
+
+/-- The actual equality-weighted row claim is multilinear in `tau`, with no restriction to
+    Boolean challenges. -/
+theorem stepOpEqClaimExt4_multiaffine (ell : Nat) (C : Nat → GoldilocksExt4) :
+    Ext4MultiAffine (fun tau => stepOpEqClaimExt4 ell tau C) := by
+  have hs : ∀ n, Ext4MultiAffine (fun tau => sumRangeExt4
+      (fun v => CommRingOps.mul (evalEqExt4 tau (hypercubePointExt4 ell v)) (C v)) n) := by
+    intro n
+    induction n with
+    | zero => exact fun _ _ => ⟨[], by decide, fun _ => rfl⟩
+    | succ n ih =>
+      apply ext4MultiAffine_add ih
+      have h := ext4MultiAffine_scale (C n)
+        (F := fun tau => evalEqExt4 tau (hypercubePointExt4 ell n))
+        (fun pre post => evalEqExt4_slice pre post (hypercubePointExt4 ell n))
+      simpa only [LawfulCommRing.mul_comm (C n)] using h
+  exact hs (2 ^ ell)
+
+/-- Constructive multivariate Schwartz–Zippel bound. A nonzero multilinear function of `n`
+    coordinates has at most `n * |S|^(n-1)` zeros on `S^n`, for any duplicate-free challenge
+    list `S`. The witness need not belong to `S^n`. -/
+theorem ext4_multiaffine_roots_le (S : List GoldilocksExt4) (hS : S.Nodup) :
+    ∀ (w : List GoldilocksExt4) (F : List GoldilocksExt4 → GoldilocksExt4),
+      Ext4MultiAffine F → F w ≠ CommRingOps.zero →
+      ((challengeVectors S w.length).filter (fun xs => decide (F xs = CommRingOps.zero))).length ≤
+        w.length * S.length ^ (w.length - 1)
+  | [], F, _, hn => by
+    simp only [List.length_nil, challengeVectors, List.filter_cons, decide_eq_false hn,
+      Bool.false_eq_true, ↓reduceIte, List.filter_nil, Nat.zero_mul]
+    exact Nat.le_refl _
+  | a :: w, F, hm, hn => by
+    let b := fun r => decide (F (r :: w) = CommRingOps.zero)
+    let M := w.length * S.length ^ (w.length - 1)
+    obtain ⟨cs, hc, he⟩ := hm [] w
+    have hb : (S.filter b).length ≤ 1 := by
+      have hn' : ∃ x, RoundPoly.evalCoeffs cs x ≠ CommRingOps.zero :=
+        ⟨a, fun hz => hn ((he a).symm.trans hz)⟩
+      have hr := RoundPoly.roots_nodup_length_le 1 cs S hS hc hn'
+      simpa only [he, List.nil_append] using hr
+    have hEach : ∀ r ∈ S,
+        (((challengeVectors S w.length).map (fun xs => r :: xs)).filter
+          (fun xs => decide (F xs = CommRingOps.zero))).length ≤
+            if b r = true then S.length ^ w.length else M := by
+      intro r _
+      rw [filter_map_length]
+      by_cases hz : F (r :: w) = CommRingOps.zero
+      · simp only [b, decide_eq_true hz, ↓reduceIte]
+        exact Nat.le_trans (filter_length_le_self _ _) (Nat.le_of_eq (challengeVectors_length S _))
+      · simp only [b, decide_eq_false hz, Bool.false_eq_true, ↓reduceIte]
+        exact ext4_multiaffine_roots_le S hS w (fun xs => F (r :: xs))
+          (fun pre post => hm (r :: pre) post) hz
+    have hsplit := length_flatMap_le_split b (S.length ^ w.length) M _ S hEach
+    have hA := Nat.mul_le_mul_right (S.length ^ w.length) hb
+    have hB : S.length * M ≤ w.length * S.length ^ w.length := by
+      cases w with
+      | nil => simp [M]
+      | cons c ws =>
+        simp only [M, List.length_cons, Nat.add_sub_cancel, Nat.pow_succ]
+        rw [Nat.mul_left_comm, Nat.mul_comm S.length (S.length ^ ws.length)]
+        exact Nat.le_refl _
+    change ((S.flatMap (fun r => (challengeVectors S w.length).map (fun xs => r :: xs))).filter
+      (fun xs => decide (F xs = CommRingOps.zero))).length ≤ _
+    rw [filter_flatMap_eq]
+    simp only [List.length_cons, Nat.add_sub_cancel, Nat.add_mul, Nat.one_mul]
+    exact Nat.le_trans hsplit (by omega)
+
+/-- A nonzero residual on the Boolean cube gives a nonzero multilinear equality-weighted
+    polynomial. Its zero fraction for uniform `tau` in `S^ell` is at most `ell / |S|`.
+    Taking `S` to enumerate `GoldilocksExt4` gives the quartic-field denominator. -/
+theorem stepOpEqClaimExt4_random_tau_roots_le (ell u : Nat) (hu : u < 2 ^ ell)
+    (C : Nat → GoldilocksExt4) (hn : C u ≠ CommRingOps.zero)
+    (S : List GoldilocksExt4) (hS : S.Nodup) :
+    ((challengeVectors S ell).filter
+      (fun tau => decide (stepOpEqClaimExt4 ell tau C = CommRingOps.zero))).length ≤
+        ell * S.length ^ (ell - 1) := by
+  have h := ext4_multiaffine_roots_le S hS (hypercubePointExt4 ell u)
+    (fun tau => stepOpEqClaimExt4 ell tau C) (stepOpEqClaimExt4_multiaffine ell C)
+    (fun hz => hn ((stepOpEqClaimExt4_hypercube ell u hu C).symm.trans hz))
+  simpa only [hypercubePointExt4_length] using h
+
+/-- Random-challenge lift for the existing row-residual interface. A violated row has at
+    most `length - 1` cancelling `gamma` values. For every other `gamma`, at most
+    `ell * |S|^(ell - 1)` choices of unrestricted `tau` make the weighted claim vanish. -/
+theorem stepOp256_ext4_random_tau_sound (ell u : Nat) (hu : u < 2 ^ ell)
+    (res : Nat → List Goldilocks) (hn : allZeroGoldilocks (res u) = false)
+    (S : List GoldilocksExt4) (hS : S.Nodup) :
+    (S.filter (fun gamma => decide (stepOpBatchedExt4 gamma (res u) =
+      CommRingOps.zero))).length ≤ (res u).length - 1 ∧
+    ∀ gamma, stepOpBatchedExt4 gamma (res u) ≠ CommRingOps.zero →
+      ((challengeVectors S ell).filter (fun tau => decide
+        (stepOpEqClaimExt4 ell tau (fun v => stepOpBatchedExt4 gamma (res v)) =
+          CommRingOps.zero))).length ≤ ell * S.length ^ (ell - 1) := by
+  refine ⟨?_, fun gamma hg => stepOpEqClaimExt4_random_tau_roots_le ell u hu _ hg S hS⟩
+  have h := (stepOp256_ext4_sumcheck_sound ell u hu res S hS).2.2 hn
+  simpa only [stepOpEqClaimExt4_hypercube ell u hu] using h
+
+private theorem sumRangeExt4_add (f g : Nat → GoldilocksExt4) :
+    ∀ n, sumRangeExt4 (fun v => CommRingOps.add (f v) (g v)) n =
+      CommRingOps.add (sumRangeExt4 f n) (sumRangeExt4 g n)
+  | 0 => (LawfulCommRing.add_zero _).symm
+  | n + 1 => by
+    simp only [sumRangeExt4, sumRangeExt4_add f g n]
+    rw [LawfulCommRing.add_assoc, ← LawfulCommRing.add_assoc (sumRangeExt4 g n),
+      LawfulCommRing.add_comm (sumRangeExt4 g n) (f n), LawfulCommRing.add_assoc,
+      ← LawfulCommRing.add_assoc]
+
+private theorem sumRangeExt4_scale (a : GoldilocksExt4) (f : Nat → GoldilocksExt4) :
+    ∀ n, sumRangeExt4 (fun v => CommRingOps.mul a (f v)) n =
+      CommRingOps.mul a (sumRangeExt4 f n)
+  | 0 => (LawfulCommRing.mul_zero _).symm
+  | n + 1 => by
+    simp only [sumRangeExt4, sumRangeExt4_scale a f n, LawfulCommRing.left_distrib]
+
+private theorem stepOpEqClaimExt4_add (ell : Nat) (tau : List GoldilocksExt4)
+    (f g : Nat → GoldilocksExt4) :
+    stepOpEqClaimExt4 ell tau (fun v => CommRingOps.add (f v) (g v)) =
+      CommRingOps.add (stepOpEqClaimExt4 ell tau f) (stepOpEqClaimExt4 ell tau g) := by
+  unfold stepOpEqClaimExt4
+  simp only [LawfulCommRing.left_distrib, sumRangeExt4_add]
+
+private theorem stepOpEqClaimExt4_scale (ell : Nat) (tau : List GoldilocksExt4)
+    (a : GoldilocksExt4) (f : Nat → GoldilocksExt4) :
+    stepOpEqClaimExt4 ell tau (fun v => CommRingOps.mul a (f v)) =
+      CommRingOps.mul a (stepOpEqClaimExt4 ell tau f) := by
+  unfold stepOpEqClaimExt4
+  rw [← sumRangeExt4_scale]
+  apply sumRangeExt4_congr
+  intro v _
+  rw [← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm _ a, LawfulCommRing.mul_assoc]
+
+/-- Fixed-order constraint columns. Selector-gated constraints occupy separate entries, so
+    each entry retains its own `gamma` exponent even at rows where its selector is zero. -/
