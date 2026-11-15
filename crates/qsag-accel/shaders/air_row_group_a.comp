@@ -190,39 +190,43 @@ void apply_m4_base(inout uint64_t v0, inout uint64_t v1, inout uint64_t v2, inou
     v0 = r0; v1 = r1; v2 = r2; v3 = r3;
 }
 
+// Canonical external matrix `M4 tensor P3` (`poseidon2_perm12.comp`, `poseidon2_apply_me`):
+// `M4` across the four contiguous triples (lanes `j, j+3, j+6, j+9`), then `P3 = J + I`
+// inside each triple.
 void apply_me_base(uint lid) {
-    [[dont_unroll]] for (uint g = 0u; g < 12u; g += 4u) {
-        uint64_t v0 = fp_reduce_u64(st_base_load(lid, g));
-        uint64_t v1 = fp_reduce_u64(st_base_load(lid, g + 1u));
-        uint64_t v2 = fp_reduce_u64(st_base_load(lid, g + 2u));
-        uint64_t v3 = fp_reduce_u64(st_base_load(lid, g + 3u));
+    [[dont_unroll]] for (uint j = 0u; j < 3u; ++j) {
+        uint64_t v0 = fp_reduce_u64(st_base_load(lid, j));
+        uint64_t v1 = fp_reduce_u64(st_base_load(lid, j + 3u));
+        uint64_t v2 = fp_reduce_u64(st_base_load(lid, j + 6u));
+        uint64_t v3 = fp_reduce_u64(st_base_load(lid, j + 9u));
         apply_m4_base(v0, v1, v2, v3);
-        st_base_store(lid, g, v0);
-        st_base_store(lid, g + 1u, v1);
-        st_base_store(lid, g + 2u, v2);
-        st_base_store(lid, g + 3u, v3);
+        st_base_store(lid, j, v0);
+        st_base_store(lid, j + 3u, v1);
+        st_base_store(lid, j + 6u, v2);
+        st_base_store(lid, j + 9u, v3);
     }
-    [[dont_unroll]] for (uint i = 0u; i < 4u; ++i) {
+    [[dont_unroll]] for (uint i = 0u; i < 12u; i += 3u) {
         uint64_t a0 = st_base_load(lid, i);
-        uint64_t a1 = st_base_load(lid, 4u + i);
-        uint64_t a2 = st_base_load(lid, 8u + i);
+        uint64_t a1 = st_base_load(lid, i + 1u);
+        uint64_t a2 = st_base_load(lid, i + 2u);
         uint64_t s = fp_add(fp_add(a0, a1), a2);
         st_base_store(lid, i, fp_add(a0, s));
-        st_base_store(lid, 4u + i, fp_add(a1, s));
-        st_base_store(lid, 8u + i, fp_add(a2, s));
+        st_base_store(lid, i + 1u, fp_add(a1, s));
+        st_base_store(lid, i + 2u, fp_add(a2, s));
     }
 }
 
+// Canonical internal matrix `J + diag(-64, 1, 2, 4, ..., 1024)`.
 void apply_mi_base(uint lid) {
     uint64_t s = 0ul;
     [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
         s = fp_add(s, st_base_load(lid, i));
     }
-    uint64_t v0 = st_base_load(lid, 0u);
-    st_base_store(lid, 0u, fp_add(fp_neg(fp_add(v0, v0)), s));
+    uint64_t v0 = fp_reduce_u64(st_base_load(lid, 0u));
+    st_base_store(lid, 0u, fp_add(fp_neg(fp_shl_canonical(v0, 6u)), s));
     st_base_store(lid, 1u, fp_add(st_base_load(lid, 1u), s));
     [[dont_unroll]] for (uint i = 2u; i < 12u; ++i) {
-        st_base_store(lid, i, fp_add(fp_shl_canonical(st_base_load(lid, i), i - 1u), s));
+        st_base_store(lid, i, fp_add(fp_shl_canonical(fp_reduce_u64(st_base_load(lid, i)), i - 1u), s));
     }
 }
 
@@ -247,6 +251,10 @@ u64vec4 fp4_sub(u64vec4 a, u64vec4 b) {
 
 u64vec4 fp4_neg(u64vec4 a) {
     return u64vec4(fp_neg(a.x), fp_neg(a.y), fp_neg(a.z), fp_neg(a.w));
+}
+
+u64vec4 fp4_reduce(u64vec4 a) {
+    return u64vec4(fp_reduce_u64(a.x), fp_reduce_u64(a.y), fp_reduce_u64(a.z), fp_reduce_u64(a.w));
 }
 
 u64vec4 fp4_shl_canonical(u64vec4 a, uint k) {
@@ -292,30 +300,27 @@ void apply_m4_ext4(inout u64vec4 v0, inout u64vec4 v1, inout u64vec4 v2, inout u
     v0 = r0; v1 = r1; v2 = r2; v3 = r3;
 }
 
+// `Ext4` lift of `apply_me_base`: the same base-field matrix applied coefficient-wise.
 void apply_me_ext4(uint lid) {
-    [[dont_unroll]] for (uint g = 0u; g < 12u; g += 4u) {
-        u64vec4 u0 = st_ext4_load(lid, g);
-        u64vec4 u1 = st_ext4_load(lid, g + 1u);
-        u64vec4 u2 = st_ext4_load(lid, g + 2u);
-        u64vec4 u3 = st_ext4_load(lid, g + 3u);
-        u64vec4 v0 = u64vec4(fp_reduce_u64(u0.x), fp_reduce_u64(u0.y), fp_reduce_u64(u0.z), fp_reduce_u64(u0.w));
-        u64vec4 v1 = u64vec4(fp_reduce_u64(u1.x), fp_reduce_u64(u1.y), fp_reduce_u64(u1.z), fp_reduce_u64(u1.w));
-        u64vec4 v2 = u64vec4(fp_reduce_u64(u2.x), fp_reduce_u64(u2.y), fp_reduce_u64(u2.z), fp_reduce_u64(u2.w));
-        u64vec4 v3 = u64vec4(fp_reduce_u64(u3.x), fp_reduce_u64(u3.y), fp_reduce_u64(u3.z), fp_reduce_u64(u3.w));
+    [[dont_unroll]] for (uint j = 0u; j < 3u; ++j) {
+        u64vec4 v0 = fp4_reduce(st_ext4_load(lid, j));
+        u64vec4 v1 = fp4_reduce(st_ext4_load(lid, j + 3u));
+        u64vec4 v2 = fp4_reduce(st_ext4_load(lid, j + 6u));
+        u64vec4 v3 = fp4_reduce(st_ext4_load(lid, j + 9u));
         apply_m4_ext4(v0, v1, v2, v3);
-        st_ext4_store(lid, g, v0);
-        st_ext4_store(lid, g + 1u, v1);
-        st_ext4_store(lid, g + 2u, v2);
-        st_ext4_store(lid, g + 3u, v3);
+        st_ext4_store(lid, j, v0);
+        st_ext4_store(lid, j + 3u, v1);
+        st_ext4_store(lid, j + 6u, v2);
+        st_ext4_store(lid, j + 9u, v3);
     }
-    [[dont_unroll]] for (uint i = 0u; i < 4u; ++i) {
+    [[dont_unroll]] for (uint i = 0u; i < 12u; i += 3u) {
         u64vec4 a0 = st_ext4_load(lid, i);
-        u64vec4 a1 = st_ext4_load(lid, 4u + i);
-        u64vec4 a2 = st_ext4_load(lid, 8u + i);
+        u64vec4 a1 = st_ext4_load(lid, i + 1u);
+        u64vec4 a2 = st_ext4_load(lid, i + 2u);
         u64vec4 s = fp4_add(fp4_add(a0, a1), a2);
         st_ext4_store(lid, i, fp4_add(a0, s));
-        st_ext4_store(lid, 4u + i, fp4_add(a1, s));
-        st_ext4_store(lid, 8u + i, fp4_add(a2, s));
+        st_ext4_store(lid, i + 1u, fp4_add(a1, s));
+        st_ext4_store(lid, i + 2u, fp4_add(a2, s));
     }
 }
 
@@ -324,11 +329,11 @@ void apply_mi_ext4(uint lid) {
     [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
         s = fp4_add(s, st_ext4_load(lid, i));
     }
-    u64vec4 v0 = st_ext4_load(lid, 0u);
-    st_ext4_store(lid, 0u, fp4_add(fp4_neg(fp4_add(v0, v0)), s));
+    u64vec4 v0 = fp4_reduce(st_ext4_load(lid, 0u));
+    st_ext4_store(lid, 0u, fp4_add(fp4_neg(fp4_shl_canonical(v0, 6u)), s));
     st_ext4_store(lid, 1u, fp4_add(st_ext4_load(lid, 1u), s));
     [[dont_unroll]] for (uint i = 2u; i < 12u; ++i) {
-        st_ext4_store(lid, i, fp4_add(fp4_shl_canonical(st_ext4_load(lid, i), i - 1u), s));
+        st_ext4_store(lid, i, fp4_add(fp4_shl_canonical(fp4_reduce(st_ext4_load(lid, i)), i - 1u), s));
     }
 }
 
