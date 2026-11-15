@@ -2755,3 +2755,3138 @@ def CorduroyForsUncoveredOrColliding (cfg : CorduroyParams) (pk : CorduroyPublic
 /-- **Unconditional Single-Hit FORS Non-Covering Theorem (`corduroy_single_leaf_hit_uncovered`)**:
     Whenever at most ONE query in `queries` mapped to `leafGlobalIdx`, `CorduroyForsUncoveredOrColliding`
     holds **unconditionally** (zero subset-covering failure probability!). -/
+theorem corduroy_single_leaf_hit_uncovered_with (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (queries : List CorduroySignedQuery)
+    (leafGlobalIdx : Nat) (forsIndices : List Nat)
+    (hForsPos : 0 < cfg.forsTrees) (hForsLen : forsIndices.length = cfg.forsTrees)
+    (hAtMostOne : (queries.filter (fun q => (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 == leafGlobalIdx)).length ≤ 1) :
+    CorduroyForsUncoveredOrCollidingWith eng cfg pk queries leafGlobalIdx forsIndices := by
+  let hits := queries.filter (fun q => (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 == leafGlobalIdx)
+  have hMemHits : ∀ q ∈ queries, (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx → q ∈ hits := by
+    intro q hMem hEq
+    exact List.mem_filter.mpr ⟨hMem, beq_iff_eq.mpr hEq⟩
+  cases hHitsEq : hits with
+  | nil =>
+    right
+    refine ⟨0, by omega, ?_⟩
+    intro q hMem hLeaf
+    have hIn := hMemHits q hMem hLeaf
+    rw [hHitsEq] at hIn
+    exact False.elim (List.not_mem_nil hIn)
+  | cons q0 restHits =>
+    cases restHits with
+    | cons _ _ =>
+      exfalso
+      change hits.length ≤ 1 at hAtMostOne
+      rw [hHitsEq] at hAtMostOne
+      simp only [List.length_cons] at hAtMostOne
+      omega
+    | nil =>
+      have hq0Mem : q0 ∈ queries ∧ (corduroyHashMsgWith eng cfg q0.sig.rRand pk q0.msg).1 = leafGlobalIdx := by
+        have hIn : q0 ∈ hits := by rw [hHitsEq]; exact List.mem_cons_self ..
+        obtain ⟨hm, hb⟩ := List.mem_filter.mp hIn
+        exact ⟨hm, beq_iff_eq.mp hb⟩
+      let qIdxs := (corduroyHashMsgWith eng cfg q0.sig.rRand pk q0.msg).2.1
+      by_cases hSameIdxs : qIdxs = forsIndices
+      · left
+        exact ⟨q0, hq0Mem.1, hq0Mem.2, hSameIdxs⟩
+      · right
+        have hqLen : qIdxs.length = forsIndices.length :=
+          (corduroyHashMsgWith_bounds eng cfg q0.sig.rRand pk q0.msg).2.1.trans hForsLen.symm
+        obtain ⟨idx, h1, h2, hDiff⟩ := findListDiffCoord qIdxs forsIndices hqLen hSameIdxs
+        refine ⟨idx, h2, ?_⟩
+        intro q hMem hLeaf
+        have hIn := hMemHits q hMem hLeaf
+        rw [hHitsEq, List.mem_singleton] at hIn
+        subst hIn
+        have hgd1 : qIdxs.getD idx 0 = qIdxs[idx]'h1 := by
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h1]; rfl
+        have hgd2 : forsIndices.getD idx 0 = forsIndices[idx]'h2 := by
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2]; rfl
+        change qIdxs.getD idx 0 ≠ forsIndices.getD idx 0
+        rw [hgd1, hgd2]
+        exact hDiff
+
+private def extractForwardChainCollisionWith (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx chainIdx : Nat) (steps startStep : Nat) (u1 u2 : Lane4)
+    (hNe : u1 ≠ u2)
+    (hEq : corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep steps u1 =
+      corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep steps u2) :
+    CorduroySpongeTweakCollisionWith eng pkSeed :=
+  match steps with
+  | 0 => False.elim (hNe hEq)
+  | steps' + 1 =>
+    let v1 := corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep u1
+    let v2 := corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep u2
+    if hv : v1 = v2 then
+      { adrs1 := wotsStepAdrs layer treeIdx kpIdx chainIdx startStep
+        in1   := [u1]
+        adrs2 := wotsStepAdrs layer treeIdx kpIdx chainIdx startStep
+        in2   := [u2]
+        distinctTweakOrInput := fun hPair => by
+          injection hPair with _ hIn
+          injection hIn with hU _
+          exact hNe hU
+        sameSpongeOutput := by
+          rw [← corduroyWotsStepWith_eq, ← corduroyWotsStepWith_eq]
+          exact hv }
+    else
+      extractForwardChainCollisionWith eng pkSeed layer treeIdx kpIdx chainIdx steps' (startStep + 1) v1 v2 hv hEq
+termination_by structural steps
+
+private theorem chainIterWith_one (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx chainIdx startStep : Nat) (val : Lane4) :
+    corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep 1 val =
+      corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep val := rfl
+
+private def extractEarlierDigitBreakWith (eng : CorduroyPermEngine) (sk : CorduroySecretKey)
+    (pkSeed : Lane4) (hSeed : pkSeed = sk.pkSeed)
+    (layer treeIdx kpIdx chainIdx dStar dHonest : Nat) (chStar : Lane4)
+    (hdLt : dStar < dHonest) (hdHonLe : dHonest ≤ 3)
+    (hPeakEq : corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx dStar (3 - dStar) chStar =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 3
+        (corduroyWotsSecretWith eng sk layer treeIdx kpIdx chainIdx)) :
+    PSum (CorduroySpongeTweakCollisionWith eng pkSeed) (CorduroyWotsChainPreimageWith eng sk) :=
+  let sec := corduroyWotsSecretWith eng sk layer treeIdx kpIdx chainIdx
+  let advPre := corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (dHonest - 1 - dStar) chStar
+  let honPre := corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 (dHonest - 1) sec
+  let advAtHon := corduroyWotsStepWith eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1) advPre
+  let honAtHon := corduroyWotsStepWith eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1) honPre
+  have hPeakSk : corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (3 - dStar) chStar =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 3 sec := by
+    dsimp only [sec]
+    rw [hSeed] at hPeakEq
+    exact hPeakEq
+  have hAdv1 : advAtHon = corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (dHonest - dStar) chStar := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1 - dStar) 1 dStar chStar
+    rw [show dStar + (dHonest - 1 - dStar) = dHonest - 1 by omega,
+        show (dHonest - 1 - dStar) + 1 = dHonest - dStar by omega,
+        chainIterWith_one] at hAdd
+    exact hAdd
+  have hAdv2 : corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) advAtHon =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dStar (3 - dStar) chStar := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - dStar) (3 - dHonest) dStar chStar
+    rw [show dStar + (dHonest - dStar) = dHonest by omega,
+        show (dHonest - dStar) + (3 - dHonest) = 3 - dStar by omega,
+        ← hAdv1] at hAdd
+    exact hAdd
+  have hHon1 : honAtHon = corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 dHonest sec := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx (dHonest - 1) 1 0 sec
+    rw [Nat.zero_add, show (dHonest - 1) + 1 = dHonest by omega, chainIterWith_one] at hAdd
+    exact hAdd
+  have hHon2 : corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) honAtHon =
+      corduroyChainIterWith eng sk.pkSeed layer treeIdx kpIdx chainIdx 0 3 sec := by
+    have hAdd := corduroyChainIterWith_add eng sk.pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) 0 sec
+    rw [Nat.zero_add, show dHonest + (3 - dHonest) = 3 by omega, ← hHon1] at hAdd
+    exact hAdd
+  have hTailEq : corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) advAtHon =
+      corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx dHonest (3 - dHonest) honAtHon := by
+    rw [hSeed]
+    exact (hAdv2.trans hPeakSk).trans hHon2.symm
+  if hAtEq : advAtHon = honAtHon then
+    if hPreEq : advPre = honPre then
+      .inr
+        { adrs := wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1)
+          dStar := dStar
+          dHonest := dHonest
+          candAtDStar := chStar
+          preimageLink := advPre
+          targetLink := honAtHon
+          stepStrictlyEarlier := hdLt
+          spongePreimageEq := by
+            rw [← corduroyWotsStepWith_eq]
+            exact hAtEq
+          honestChainMatch := Or.inl ⟨layer, treeIdx, kpIdx, chainIdx, hdHonLe, rfl, rfl, hPreEq, hHon1⟩ }
+    else
+      .inl
+        { adrs1 := wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1)
+          in1   := [advPre]
+          adrs2 := wotsStepAdrs layer treeIdx kpIdx chainIdx (dHonest - 1)
+          in2   := [honPre]
+          distinctTweakOrInput := fun hPair => by
+            injection hPair with _ hIn
+            injection hIn with hU _
+            exact hPreEq hU
+          sameSpongeOutput := by
+            rw [hSeed, ← corduroyWotsStepWith_eq, ← corduroyWotsStepWith_eq]
+            exact hAtEq }
+  else
+    .inl (extractForwardChainCollisionWith eng pkSeed layer treeIdx kpIdx chainIdx (3 - dHonest) dHonest advAtHon honAtHon hAtEq hTailEq)
+
+private theorem corduroyRecoverPeaksWith_getD (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx : Nat) (digits : List Nat) (chains : List Lane4) (startC i : Nat)
+    (hLen : chains.length = digits.length) (hi : i < digits.length) :
+    (corduroyRecoverPeaksWith eng pkSeed layer treeIdx kpIdx startC digits chains).getD i lane4Zero =
+      corduroyChainIterWith eng pkSeed layer treeIdx kpIdx (startC + i)
+        (digits.getD i 0) (3 - digits.getD i 0) (chains.getD i lane4Zero) := by
+  induction digits generalizing startC chains i with
+  | nil => exact absurd hi (Nat.not_lt_zero i)
+  | cons d ds ih =>
+    cases chains with
+    | nil => exact absurd hLen (by simp only [List.length_cons, List.length_nil]; omega)
+    | cons ch chs =>
+      cases i with
+      | zero =>
+        simp only [corduroyRecoverPeaksWith, List.getD_cons_zero, Nat.add_zero]
+      | succ i' =>
+        simp only [corduroyRecoverPeaksWith, List.getD_cons_succ]
+        rw [ih chs (startC + 1) i' (Nat.succ.inj hLen) (Nat.lt_of_succ_lt_succ hi)]
+        have hAssoc : (startC + 1) + i' = startC + (i' + 1) := by omega
+        rw [hAssoc]
+
+private def extractMerkleWalkCollisionWith (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (mkAdrs : Nat → Nat → CorduroyAdrs) (leafFn : Nat → Lane4)
+    (path : List Lane4) (lvl idx : Nat) (cur : Lane4)
+    (hCurNe : cur ≠ computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn lvl idx)
+    (hRootEq : walkCorduroyMerklePathWith eng pkSeed mkAdrs lvl idx cur path =
+      computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn (lvl + path.length) (idx / (2 ^ path.length))) :
+    CorduroySpongeTweakCollisionWith eng pkSeed :=
+  match path with
+  | [] =>
+    False.elim (hCurNe (by
+      dsimp only [walkCorduroyMerklePathWith, List.length_nil] at hRootEq
+      rw [Nat.add_zero, Nat.pow_zero, Nat.div_one] at hRootEq
+      exact hRootEq))
+  | sib :: rest =>
+    let parentIdx  := idx / 2
+    let leftStar   := if idx % 2 == 0 then cur else sib
+    let rightStar  := if idx % 2 == 0 then sib else cur
+    let parentStar := corduroyMerkleHashWith eng pkSeed (mkAdrs lvl parentIdx) leftStar rightStar
+    let honLeft    := computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn lvl (2 * parentIdx)
+    let honRight   := computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn lvl (2 * parentIdx + 1)
+    let honParent  := computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn (lvl + 1) parentIdx
+    have hWalkStep : walkCorduroyMerklePathWith eng pkSeed mkAdrs lvl idx cur (sib :: rest) =
+        walkCorduroyMerklePathWith eng pkSeed mkAdrs (lvl + 1) parentIdx parentStar rest := by
+      dsimp only [walkCorduroyMerklePathWith, parentIdx, parentStar, leftStar, rightStar]
+      by_cases hEven : (idx % 2 == 0) = true
+      · simp only [hEven, ↓reduceIte]
+      · have hFalse : (idx % 2 == 0) = false := Bool.eq_false_iff.mpr hEven
+        simp only [hFalse, Bool.false_eq_true, ↓reduceIte]
+    if hParEq : parentStar = honParent then
+      { adrs1 := mkAdrs lvl parentIdx
+        in1   := [leftStar, rightStar]
+        adrs2 := mkAdrs lvl parentIdx
+        in2   := [honLeft, honRight]
+        distinctTweakOrInput := fun hPair => by
+          injection hPair with _ hIn
+          injection hIn with hL hTail
+          injection hTail with hR _
+          dsimp only [leftStar, rightStar, honLeft, honRight, parentIdx] at hL hR
+          rcases Nat.mod_two_eq_zero_or_one idx with hEv | hOd
+          · have hIdx : 2 * (idx / 2) = idx := by omega
+            simp only [hEv, beq_self_eq_true, ↓reduceIte, hIdx] at hL
+            exact hCurNe hL
+          · have hNe0 : (idx % 2 == 0) = false := by rw [hOd]; decide
+            have hIdx : 2 * (idx / 2) + 1 = idx := by omega
+            simp only [hNe0, Bool.false_eq_true, ↓reduceIte, hIdx] at hR
+            exact hCurNe hR
+        sameSpongeOutput := hParEq }
+    else
+      extractMerkleWalkCollisionWith eng pkSeed mkAdrs leafFn rest (lvl + 1) parentIdx parentStar hParEq (by
+        have hNextRoot : walkCorduroyMerklePathWith eng pkSeed mkAdrs (lvl + 1) parentIdx parentStar rest =
+            computeCorduroyMerkleNodeWith eng pkSeed mkAdrs leafFn (lvl + (sib :: rest).length)
+              (idx / (2 ^ (sib :: rest).length)) := hWalkStep.symm.trans hRootEq
+        have hLvl : lvl + (sib :: rest).length = (lvl + 1) + rest.length := by
+          simp only [List.length_cons]; omega
+        have hDiv : idx / (2 ^ (sib :: rest).length) = parentIdx / (2 ^ rest.length) := by
+          dsimp only [parentIdx]
+          simp only [List.length_cons]
+          rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm 2 (2 ^ rest.length)]
+        rw [hLvl, hDiv] at hNextRoot
+        exact hNextRoot)
+termination_by structural path
+
+private def findQueryVisitingRemWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (L targetRem : Nat) (qs : List CorduroySignedQuery) :
+    Option { q : CorduroySignedQuery // q ∈ qs ∧
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 / (2 ^ (L * cfg.subtreeHeight)) = targetRem } :=
+  match qs with
+  | [] => none
+  | q :: rest =>
+    if hEq : (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 / (2 ^ (L * cfg.subtreeHeight)) = targetRem then
+      some ⟨q, ⟨List.mem_cons_self .., hEq⟩⟩
+    else
+      match findQueryVisitingRemWith eng cfg pk L targetRem rest with
+      | none => none
+      | some ⟨q', hMem', hEq'⟩ => some ⟨q', ⟨List.mem_cons_of_mem _ hMem', hEq'⟩⟩
+termination_by structural qs
+
+private theorem corduroyVerifyLayerWith_inv (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (layer treeIdx kpIdx : Nat) (childRoot nextRoot : Lane4) (lsig : CorduroyLayerSig)
+    (hVer : corduroyVerifyLayerWith eng cfg pk layer treeIdx kpIdx childRoot lsig = some nextRoot) :
+    lsig.wotsChains.length = cfg.wotsChains ∧
+    lsig.authPath.length = cfg.subtreeHeight ∧
+    lsig.tswCtr < 2 ^ 56 ∧
+    let hmsg := corduroyLayerHmsgWith eng pk layer treeIdx kpIdx lsig.tswCtr childRoot
+    let digits := corduroyExtractDigits cfg.wotsChains hmsg
+    let peaks := corduroyRecoverPeaksWith eng pk.pkSeed layer treeIdx kpIdx 0 digits lsig.wotsChains
+    let wotsPk := corduroyWotsPkCompressWith eng pk.pkSeed layer treeIdx kpIdx peaks
+    natListSum digits = cfg.targetSum ∧
+    walkCorduroyMerklePathWith eng pk.pkSeed (xmssMerkleAdrs layer treeIdx) 0 kpIdx wotsPk lsig.authPath = nextRoot := by
+  unfold corduroyVerifyLayerWith at hVer
+  by_cases hGuard : (lsig.wotsChains.length == cfg.wotsChains && lsig.authPath.length == cfg.subtreeHeight &&
+      decide (lsig.tswCtr < 2 ^ 56)) = true
+  · simp only [hGuard, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVer
+    simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hGuard
+    rcases hGuard with ⟨⟨hChLen, hPathLen⟩, hCtrLt⟩
+    refine ⟨hChLen, hPathLen, hCtrLt, ?_⟩
+    dsimp only
+    let hmsg := corduroyLayerHmsgWith eng pk layer treeIdx kpIdx lsig.tswCtr childRoot
+    let digits := corduroyExtractDigits cfg.wotsChains hmsg
+    change (if !(natListSum digits == cfg.targetSum) then none else _) = some nextRoot at hVer
+    by_cases hSum : (natListSum digits == cfg.targetSum) = true
+    · simp only [hSum, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hVer
+      exact ⟨beq_iff_eq.mp hSum, hVer⟩
+    · have hFalse : (natListSum digits == cfg.targetSum) = false := Bool.eq_false_iff.mpr hSum
+      simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+      exact absurd hVer (by simp)
+  · have hFalse : (lsig.wotsChains.length == cfg.wotsChains && lsig.authPath.length == cfg.subtreeHeight &&
+        decide (lsig.tswCtr < 2 ^ 56)) = false := Bool.eq_false_iff.mpr hGuard
+    simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+    exact absurd hVer (by simp)
+
+/-- Single-layer WOTS+C + Merkle constructive break extractor when `childRoot ≠ honChildRt` yet
+    `corduroyVerifyLayerWith` climbs to the honest subtree root! -/
+private def extractLayerBreakWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (hPk : pk = corduroyDerivePkWith eng cfg sk)
+    (hWf : cfg.wellFormed = true) (hFullDigits : cfg.wotsChains = 128)
+    (queries : List CorduroySignedQuery) (hHonQ : CorduroyQuerySetHonestWith eng cfg sk queries)
+    (L remIdx : Nat) (hLLt : L < cfg.numLayers)
+    (childRtStar : Lane4) (lsig : CorduroyLayerSig)
+    (hChildNe : childRtStar ≠
+      (if L = 0 then corduroyHonestForsPkWith eng cfg sk remIdx
+       else corduroyHonestSubtreeRootWith eng cfg sk (L - 1) remIdx))
+    (hVer : corduroyVerifyLayerWith eng cfg pk L (remIdx / (2 ^ cfg.subtreeHeight))
+      (remIdx % (2 ^ cfg.subtreeHeight)) childRtStar lsig =
+      some (corduroyHonestSubtreeRootWith eng cfg sk L (remIdx / (2 ^ cfg.subtreeHeight)))) :
+    PSum (CorduroySpongeTweakCollisionWith eng pk.pkSeed) (CorduroyWotsChainPreimageWith eng sk) :=
+  let subLeaves := 2 ^ cfg.subtreeHeight
+  let trL := remIdx / subLeaves
+  let kpL := remIdx % subLeaves
+  have hSeed : pk.pkSeed = sk.pkSeed := by rw [hPk]; rfl
+  have hKpLt : kpL < subLeaves := Nat.mod_lt _ (Nat.two_pow_pos _)
+  have hInv := corduroyVerifyLayerWith_inv eng cfg pk L trL kpL childRtStar
+    (corduroyHonestSubtreeRootWith eng cfg sk L trL) lsig hVer
+  let hmsgStar := corduroyLayerHmsgWith eng pk L trL kpL lsig.tswCtr childRtStar
+  let digitsStar := corduroyExtractDigits cfg.wotsChains hmsgStar
+  let peaksStar := corduroyRecoverPeaksWith eng pk.pkSeed L trL kpL 0 digitsStar lsig.wotsChains
+  let wotsPkStar := corduroyWotsPkCompressWith eng pk.pkSeed L trL kpL peaksStar
+  let honPeaks := corduroyHonestWotsPeaksWith eng cfg sk L trL kpL
+  let honWotsPk := corduroyHonestWotsPkWith eng cfg sk L trL kpL
+  if hWotsNe : wotsPkStar ≠ honWotsPk then
+    .inl (extractMerkleWalkCollisionWith eng pk.pkSeed (xmssMerkleAdrs L trL)
+      (corduroyHonestWotsPkWith eng cfg sk L trL) lsig.authPath 0 kpL wotsPkStar
+      (by
+        rw [hSeed]
+        exact hWotsNe)
+      (by
+        have hWalk := hInv.2.2.2.2
+        have hPathLen := hInv.2.1
+        rw [Nat.zero_add, hPathLen, Nat.div_eq_of_lt hKpLt]
+        dsimp only [wotsPkStar, peaksStar, digitsStar, hmsgStar, corduroyHonestSubtreeRootWith] at hWalk ⊢
+        rw [hSeed] at hWalk ⊢
+        exact hWalk))
+  else
+    have hWotsEq : wotsPkStar = honWotsPk := Decidable.of_not_not hWotsNe
+    if hPeaksNe : peaksStar ≠ honPeaks then
+      .inl
+        { adrs1 := wotsPkAdrs L trL kpL
+          in1   := peaksStar
+          adrs2 := wotsPkAdrs L trL kpL
+          in2   := honPeaks
+          distinctTweakOrInput := fun hPair => by
+            injection hPair with _ hIn
+            exact hPeaksNe hIn
+          sameSpongeOutput := by
+            have hComp : corduroyWotsPkCompressWith eng pk.pkSeed L trL kpL peaksStar =
+                corduroyWotsPkCompressWith eng pk.pkSeed L trL kpL honPeaks := by
+              change wotsPkStar = _
+              rw [hWotsEq]
+              unfold honWotsPk corduroyHonestWotsPkWith
+              rw [hSeed]
+            exact hComp }
+    else
+      have hPeaksEq : peaksStar = honPeaks := Decidable.of_not_not hPeaksNe
+      have hTargetLt : cfg.targetSum < 3 * cfg.wotsChains := by
+        unfold CorduroyParams.wellFormed at hWf
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+        exact hWf.1.1.1.1.1.1.1.1.2
+      have hChainsLe : cfg.wotsChains ≤ 128 := Nat.le_of_eq hFullDigits
+      have hDigStarSpec := corduroyExtractDigits_spec hChainsLe hmsgStar
+      have hDigLen : digitsStar.length = cfg.wotsChains := hDigStarSpec.1
+      match findQueryVisitingRemWith eng cfg pk L remIdx queries with
+      | none =>
+        let rep3 := List.replicate cfg.wotsChains 3
+        have hRepSum : natListSum rep3 = 3 * cfg.wotsChains := natListSum_replicate cfg.wotsChains 3
+        have hSumStar : natListSum digitsStar = cfg.targetSum := hInv.2.2.2.1
+        have hNeRep : digitsStar ≠ rep3 := fun hEq => by
+          rw [hEq, hRepSum] at hSumStar
+          omega
+        let ⟨c, hc⟩ := findSmallerDigitCoord digitsStar rep3
+          (hDigLen.trans List.length_replicate.symm) hNeRep (by omega)
+        have hcLt : c < cfg.wotsChains := by
+          rcases hc with ⟨h1, _, _⟩
+          omega
+        have hdStarLt3 : digitsStar.getD c 0 < 3 := by
+          rcases hc with ⟨h1, h2, hLtRep⟩
+          have hgd1 : digitsStar.getD c 0 = digitsStar[c]'h1 := by
+            rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h1]; rfl
+          have hgd2 : rep3[c]'h2 = 3 := List.getElem_replicate h2
+          rw [hgd2] at hLtRep
+          rw [hgd1]
+          exact hLtRep
+        have hCoordPeak : corduroyChainIterWith eng pk.pkSeed L trL kpL c
+            (digitsStar.getD c 0) (3 - digitsStar.getD c 0) (lsig.wotsChains.getD c lane4Zero) =
+            corduroyChainIterWith eng sk.pkSeed L trL kpL c 0 3 (corduroyWotsSecretWith eng sk L trL kpL c) := by
+          have hGet := congrArg (fun xs => xs.getD c lane4Zero) hPeaksEq
+          dsimp only [peaksStar, honPeaks, corduroyHonestWotsPeaksWith] at hGet
+          rw [corduroyRecoverPeaksWith_getD eng pk.pkSeed L trL kpL digitsStar lsig.wotsChains 0 c
+                (hInv.1.trans hDigLen.symm) (by rw [hDigLen]; exact hcLt),
+              Nat.zero_add,
+              getD_map_range _ lane4Zero cfg.wotsChains c hcLt] at hGet
+          exact hGet
+        extractEarlierDigitBreakWith eng sk pk.pkSeed hSeed L trL kpL c
+          (digitsStar.getD c 0) 3 (lsig.wotsChains.getD c lane4Zero) hdStarLt3 (Nat.le_refl 3) hCoordPeak
+      | some ⟨q, hqMem, hqRemEq⟩ =>
+        have hqHon := hHonQ.1 q hqMem
+        have hqCtrsLen : q.rand.layerCtrs.length = cfg.numLayers := hqHon.2.2.1
+        have hLLtQ : L < q.rand.layerCtrs.length := by omega
+        let ctrHon := q.rand.layerCtrs[L]'hLLtQ
+        let honChildRt :=
+          if L = 0 then corduroyHonestForsPkWith eng cfg sk remIdx
+          else corduroyHonestSubtreeRootWith eng cfg sk (L - 1) remIdx
+        let hmsgHon := corduroyLayerHmsgWith eng pk L trL kpL ctrHon honChildRt
+        let digitsHon := corduroyExtractDigits cfg.wotsChains hmsgHon
+        have hDigHonSpec := corduroyExtractDigits_spec hChainsLe hmsgHon
+        have hSumHon : natListSum digitsHon = cfg.targetSum := by
+          have hGrindL := hqHon.2.2.2 L hLLtQ
+          dsimp only at hGrindL
+          have hSigRand : q.sig.rRand = corduroyPrfMsgWith eng sk q.rand.optRand q.msg := by
+            rw [hqHon.1]; rfl
+          have hRemMatch : (corduroyHashMsgWith eng cfg (corduroyPrfMsgWith eng sk q.rand.optRand q.msg)
+              (corduroyDerivePkWith eng cfg sk) q.msg).1 / (2 ^ (L * cfg.subtreeHeight)) = remIdx := by
+            rw [← hSigRand, ← hPk]
+            exact hqRemEq
+          have hChildMatch :
+              (if L = 0 then
+                corduroyHonestForsPkWith eng cfg sk
+                  (corduroyHashMsgWith eng cfg (corduroyPrfMsgWith eng sk q.rand.optRand q.msg)
+                    (corduroyDerivePkWith eng cfg sk) q.msg).1
+               else
+                corduroyHonestSubtreeRootWith eng cfg sk (L - 1)
+                  ((corduroyHashMsgWith eng cfg (corduroyPrfMsgWith eng sk q.rand.optRand q.msg)
+                    (corduroyDerivePkWith eng cfg sk) q.msg).1 / (2 ^ (L * cfg.subtreeHeight)))) = honChildRt := by
+            dsimp only [honChildRt]
+            by_cases hL0 : L = 0
+            · subst hL0
+              simp only [↓reduceIte, Nat.zero_mul, Nat.pow_zero, Nat.div_one] at hRemMatch ⊢
+              rw [hRemMatch]
+            · simp only [hL0, ↓reduceIte]
+              rw [hRemMatch]
+          have hSumRaw := hGrindL.2
+          rw [hChildMatch, hRemMatch, ← hPk] at hSumRaw
+          exact hSumRaw
+        if hDigEq : digitsStar = digitsHon then
+          have hHmsgEq : hmsgStar = hmsgHon := by
+            dsimp only [digitsStar, digitsHon] at hDigEq
+            rw [hFullDigits] at hDigEq
+            exact corduroyExtractDigits_128_injective hDigEq
+          .inl
+            { adrs1 := layerHmsgAdrs L trL kpL lsig.tswCtr
+              in1   := [pk.pkRoot, childRtStar]
+              adrs2 := layerHmsgAdrs L trL kpL ctrHon
+              in2   := [pk.pkRoot, honChildRt]
+              distinctTweakOrInput := fun hPair => by
+                injection hPair with _ hIn
+                injection hIn with _ hTail
+                injection hTail with hChildEq _
+                exact hChildNe hChildEq
+              sameSpongeOutput := hHmsgEq }
+        else
+          let ⟨c, hc⟩ := wotsTargetSum_reused_smaller_digit cfg.targetSum digitsStar digitsHon
+            (hDigLen.trans hDigHonSpec.1.symm) hDigEq hInv.2.2.2.1 hSumHon
+          have hcLt : c < cfg.wotsChains := by
+            rcases hc with ⟨h1, _, _⟩
+            omega
+          have hdLt : digitsStar.getD c 0 < digitsHon.getD c 0 := by
+            rcases hc with ⟨h1, h2, hLt⟩
+            have hgd1 : digitsStar.getD c 0 = digitsStar[c]'h1 := by
+              rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h1]; rfl
+            have hgd2 : digitsHon.getD c 0 = digitsHon[c]'h2 := by
+              rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2]; rfl
+            rw [hgd1, hgd2]
+            exact hLt
+          have hdHonLe3 : digitsHon.getD c 0 ≤ 3 := by
+            rcases hc with ⟨_, h2, _⟩
+            have hgd2 : digitsHon.getD c 0 = digitsHon[c]'h2 := by
+              rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h2]; rfl
+            have hLt4 := hDigHonSpec.2 (digitsHon[c]'h2) (List.getElem_mem h2)
+            rw [hgd2]
+            omega
+          have hCoordPeak : corduroyChainIterWith eng pk.pkSeed L trL kpL c
+              (digitsStar.getD c 0) (3 - digitsStar.getD c 0) (lsig.wotsChains.getD c lane4Zero) =
+              corduroyChainIterWith eng sk.pkSeed L trL kpL c 0 3 (corduroyWotsSecretWith eng sk L trL kpL c) := by
+            have hGet := congrArg (fun xs => xs.getD c lane4Zero) hPeaksEq
+            dsimp only [peaksStar, honPeaks, corduroyHonestWotsPeaksWith] at hGet
+            rw [corduroyRecoverPeaksWith_getD eng pk.pkSeed L trL kpL digitsStar lsig.wotsChains 0 c
+                  (hInv.1.trans hDigLen.symm) (by rw [hDigLen]; exact hcLt),
+                Nat.zero_add,
+                getD_map_range _ lane4Zero cfg.wotsChains c hcLt] at hGet
+            exact hGet
+          extractEarlierDigitBreakWith eng sk pk.pkSeed hSeed L trL kpL c
+            (digitsStar.getD c 0) (digitsHon.getD c 0) (lsig.wotsChains.getD c lane4Zero)
+            hdLt hdHonLe3 hCoordPeak
+
+/-- Walk `lsigs` from a forged child root `curRoot ≠ honestChildRt` to `topRoot = honestTopRoot`,
+    constructively extracting the break at the exact layer where the forged path merges into the honest hypertree. -/
+private def extractHypertreeDivergenceWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (hPk : pk = corduroyDerivePkWith eng cfg sk)
+    (hWf : cfg.wellFormed = true) (hFullDigits : cfg.wotsChains = 128)
+    (queries : List CorduroySignedQuery) (hHonQ : CorduroyQuerySetHonestWith eng cfg sk queries)
+    (lsigs : List CorduroyLayerSig) (startL remIdx : Nat) (curRoot : Lane4)
+    (hPos : 0 < lsigs.length)
+    (hSumL : startL + lsigs.length = cfg.numLayers)
+    (hRemLt : remIdx < 2 ^ (lsigs.length * cfg.subtreeHeight))
+    (hCurNe : curRoot ≠ (if startL = 0 then corduroyHonestForsPkWith eng cfg sk remIdx
+                         else corduroyHonestSubtreeRootWith eng cfg sk (startL - 1) remIdx))
+    (hHypVer : corduroyVerifyHypertreeWith eng cfg pk startL remIdx curRoot lsigs =
+      some (corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0)) :
+    PSum (CorduroySpongeTweakCollisionWith eng pk.pkSeed) (CorduroyWotsChainPreimageWith eng sk) :=
+  match lsigs with
+  | [] => False.elim (Nat.not_lt_zero 0 hPos)
+  | lsig :: rest =>
+    let subLeaves := 2 ^ cfg.subtreeHeight
+    let trL := remIdx / subLeaves
+    match hLayer : corduroyVerifyLayerWith eng cfg pk startL trL (remIdx % subLeaves) curRoot lsig with
+    | none =>
+      False.elim (by
+        dsimp only [corduroyVerifyHypertreeWith] at hHypVer
+        change (match corduroyVerifyLayerWith eng cfg pk startL trL (remIdx % subLeaves) curRoot lsig with
+                | none => none
+                | some nextRoot => corduroyVerifyHypertreeWith eng cfg pk (startL + 1) trL nextRoot rest) = _ at hHypVer
+        simp [hLayer] at hHypVer)
+    | some nextRoot =>
+      have hRestVer : corduroyVerifyHypertreeWith eng cfg pk (startL + 1) trL nextRoot rest =
+          some (corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0) := by
+        dsimp only [corduroyVerifyHypertreeWith] at hHypVer
+        change (match corduroyVerifyLayerWith eng cfg pk startL trL (remIdx % subLeaves) curRoot lsig with
+                | none => none
+                | some nextRoot => corduroyVerifyHypertreeWith eng cfg pk (startL + 1) trL nextRoot rest) = _ at hHypVer
+        rw [hLayer] at hHypVer
+        exact hHypVer
+      if hMerge : nextRoot = corduroyHonestSubtreeRootWith eng cfg sk startL trL then
+        extractLayerBreakWith eng cfg sk pk hPk hWf hFullDigits queries hHonQ startL remIdx
+          (by simp only [List.length_cons] at hSumL; omega) curRoot lsig hCurNe
+          (by rw [hLayer, hMerge])
+      else
+        match rest with
+        | [] =>
+          False.elim (by
+            dsimp only [corduroyVerifyHypertreeWith] at hRestVer
+            injection hRestVer with hTopEq
+            simp only [List.length_singleton] at hSumL hRemLt
+            rw [Nat.one_mul] at hRemLt
+            have hTr0 : trL = 0 := Nat.div_eq_of_lt hRemLt
+            have hLTop : startL = cfg.numLayers - 1 := by omega
+            rw [← hLTop, ← hTr0] at hTopEq
+            exact hMerge hTopEq)
+        | lsig1 :: tail =>
+          extractHypertreeDivergenceWith eng cfg sk pk hPk hWf hFullDigits queries hHonQ
+            (lsig1 :: tail) (startL + 1) trL nextRoot
+            (Nat.zero_lt_succ _)
+            (by simp only [List.length_cons] at hSumL ⊢; omega)
+            (by
+              dsimp only [trL, subLeaves]
+              simp only [List.length_cons] at hRemLt ⊢
+              have hPow : 2 ^ ((tail.length + 1 + 1) * cfg.subtreeHeight) =
+                  (2 ^ cfg.subtreeHeight) * (2 ^ ((tail.length + 1) * cfg.subtreeHeight)) := by
+                rw [← Nat.pow_add]
+                have hE : (tail.length + 1 + 1) * cfg.subtreeHeight =
+                    cfg.subtreeHeight + (tail.length + 1) * cfg.subtreeHeight := by
+                  rw [Nat.add_mul (tail.length + 1) 1 cfg.subtreeHeight, Nat.one_mul, Nat.add_comm]
+                rw [hE]
+              rw [hPow] at hRemLt
+              apply (Nat.div_lt_iff_lt_mul (Nat.two_pow_pos cfg.subtreeHeight)).mpr
+              simpa only [Nat.mul_comm] using hRemLt)
+            (by
+              simp only [Nat.succ_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
+              exact hMerge)
+            hRestVer
+termination_by structural lsigs
+
+/-- Extract either a FORS sponge/Merkle collision OR exact secret recovery across all `k` FORS trees. -/
+private def extractForsTreesCollisionOrSecretsWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pkSeed : Lane4) (hSeed : pkSeed = sk.pkSeed) (leafGlobalIdx : Nat)
+    (idxs : List Nat) (ops : List CorduroyForsOpening) (roots : List Lane4) (startJ : Nat)
+    (hVer : corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx startJ idxs ops = some roots)
+    (hRootsEq : roots = ((List.range idxs.length).map fun t => corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx (startJ + t))) :
+    PSum (CorduroySpongeTweakCollisionWith eng pkSeed)
+      (∀ (t : Nat), t < idxs.length →
+        (ops.getD t { secretVal := lane4Zero, authPath := [] }).secretVal =
+          corduroyForsSecretWith eng sk leafGlobalIdx (startJ + t) (idxs.getD t 0)) :=
+  match idxs, ops with
+  | [], [] => .inr (fun t ht => False.elim (Nat.not_lt_zero t ht))
+  | [], _ :: _ => False.elim (by simp [corduroyVerifyForsTreesWith] at hVer)
+  | _ :: _, [] => False.elim (by simp [corduroyVerifyForsTreesWith] at hVer)
+  | idx :: restIdxs, op :: restOps =>
+    have hUnpack : idx < 2 ^ cfg.forsHeight ∧ op.authPath.length = cfg.forsHeight ∧
+        ∃ restRts, corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx (startJ + 1) restIdxs restOps = some restRts ∧
+          roots = walkCorduroyMerklePathWith eng pkSeed (forsNodeAdrs leafGlobalIdx startJ) 0 idx
+            (corduroyForsLeafHashWith eng pkSeed leafGlobalIdx startJ idx op.secretVal) op.authPath :: restRts := by
+      dsimp only [corduroyVerifyForsTreesWith] at hVer
+      by_cases hG : (decide (idx < 2 ^ cfg.forsHeight) && (op.authPath.length == cfg.forsHeight)) = true
+      · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVer
+        simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hG
+        refine ⟨hG.1, hG.2, ?_⟩
+        cases hRec : corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx (startJ + 1) restIdxs restOps with
+        | none => rw [hRec] at hVer; exact absurd hVer (by simp)
+        | some restRts =>
+          rw [hRec] at hVer
+          injection hVer with hEqR
+          exact ⟨restRts, rfl, hEqR.symm⟩
+      · have hFalse : (decide (idx < 2 ^ cfg.forsHeight) && (op.authPath.length == cfg.forsHeight)) = false :=
+          Bool.eq_false_iff.mpr hG
+        simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+        exact absurd hVer (by simp)
+    let leaf0 := corduroyForsLeafHashWith eng pkSeed leafGlobalIdx startJ idx op.secretVal
+    let honLeaf0 := corduroyHonestForsLeafWith eng sk leafGlobalIdx startJ idx
+    if hLeafNe : leaf0 ≠ honLeaf0 then
+      .inl (extractMerkleWalkCollisionWith eng pkSeed (forsNodeAdrs leafGlobalIdx startJ)
+        (corduroyHonestForsLeafWith eng sk leafGlobalIdx startJ) op.authPath 0 idx leaf0
+        (by
+          rw [hSeed]
+          exact hLeafNe)
+        (by
+          obtain ⟨hIdxLt, hPathLen, restRts, _, hRtsCons⟩ := hUnpack
+          rw [hRtsCons] at hRootsEq
+          simp only [List.length_cons, List.range_succ_eq_map, List.map_cons, Nat.add_zero, List.cons.injEq] at hRootsEq
+          have hRt0 := hRootsEq.1
+          rw [Nat.zero_add, hPathLen, Nat.div_eq_of_lt hIdxLt]
+          dsimp only [leaf0, corduroyHonestForsTreeRootWith] at hRt0 ⊢
+          rw [hSeed] at hRt0 ⊢
+          exact hRt0))
+    else
+      have hLeafEq : leaf0 = honLeaf0 := Decidable.of_not_not hLeafNe
+      if hSecNe : op.secretVal ≠ corduroyForsSecretWith eng sk leafGlobalIdx startJ idx then
+        .inl
+          { adrs1 := forsLeafAdrs leafGlobalIdx startJ idx
+            in1   := [op.secretVal]
+            adrs2 := forsLeafAdrs leafGlobalIdx startJ idx
+            in2   := [corduroyForsSecretWith eng sk leafGlobalIdx startJ idx]
+            distinctTweakOrInput := fun hPair => by
+              injection hPair with _ hIn
+              injection hIn with hU _
+              exact hSecNe hU
+            sameSpongeOutput := by
+              dsimp only [leaf0, honLeaf0, corduroyForsLeafHashWith, corduroyHonestForsLeafWith] at hLeafEq
+              rw [hSeed] at hLeafEq ⊢
+              exact hLeafEq }
+      else
+        have hSecEq : op.secretVal = corduroyForsSecretWith eng sk leafGlobalIdx startJ idx :=
+          Decidable.of_not_not hSecNe
+        let restRts := (List.range restIdxs.length).map fun t =>
+          corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx ((startJ + 1) + t)
+        have hRestVer : corduroyVerifyForsTreesWith eng cfg pkSeed leafGlobalIdx (startJ + 1) restIdxs restOps =
+            some restRts := by
+          obtain ⟨_, _, rts', hRec, hRtsCons⟩ := hUnpack
+          rw [hRtsCons] at hRootsEq
+          simp only [List.length_cons, List.range_succ_eq_map, List.map_cons, Nat.add_zero, List.cons.injEq] at hRootsEq
+          have hTailEq : rts' = restRts := by
+            rw [hRootsEq.2, List.map_map]
+            apply List.map_congr_left
+            intro t _
+            dsimp only [Function.comp]
+            have hAssoc : startJ + (t + 1) = (startJ + 1) + t := by omega
+            rw [hAssoc]
+          rw [← hTailEq]
+          exact hRec
+        match extractForsTreesCollisionOrSecretsWith eng cfg sk pkSeed hSeed leafGlobalIdx
+                restIdxs restOps restRts (startJ + 1) hRestVer rfl with
+        | .inl col => .inl col
+        | .inr hTailSec =>
+          .inr (fun t ht => by
+            cases t with
+            | zero =>
+              simp only [List.getD_cons_zero, Nat.add_zero]
+              exact hSecEq
+            | succ t' =>
+              simp only [List.getD_cons_succ]
+              have ht' : t' < restIdxs.length := Nat.lt_of_succ_lt_succ ht
+              have hStep := hTailSec t' ht'
+              have hAssoc : (startJ + 1) + t' = startJ + (t' + 1) := by omega
+              rw [hAssoc] at hStep
+              exact hStep)
+termination_by structural idxs
+
+private def findCollidingMsgHashQueryWith (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (leafGlobalIdx : Nat) (forsIndices : List Nat)
+    (qs : List CorduroySignedQuery) :
+    Option { q : CorduroySignedQuery // q ∈ qs ∧
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+      (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices } :=
+  match qs with
+  | [] => none
+  | q :: rest =>
+    if hMatch : (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+                (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices then
+      some ⟨q, ⟨List.mem_cons_self .., hMatch⟩⟩
+    else
+      match findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices rest with
+      | none => none
+      | some ⟨q', hMem', hM'⟩ => some ⟨q', ⟨List.mem_cons_of_mem _ hMem', hM'⟩⟩
+termination_by structural qs
+
+private theorem findCollidingMsgHashQueryWith_none (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (pk : CorduroyPublicKey) (leafGlobalIdx : Nat) (forsIndices : List Nat)
+    (qs : List CorduroySignedQuery)
+    (hNone : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices qs = none) :
+    ∀ q ∈ qs, ¬((corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+                (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices) := by
+  induction qs with
+  | nil => intro _ hMem; exact False.elim (List.not_mem_nil hMem)
+  | cons q rest ih =>
+    simp only [findCollidingMsgHashQueryWith] at hNone
+    by_cases hM : (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx ∧
+                  (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1 = forsIndices
+    · simp only [hM] at hNone
+      exact absurd hNone (by simp)
+    · simp only [hM] at hNone
+      have hSubNone : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices rest = none := by
+        cases hSub : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices rest with
+        | none => rfl
+        | some p => rw [hSub] at hNone; exact absurd hNone (by simp)
+      intro q' hMem'
+      rcases List.mem_cons.mp hMem' with rfl | hTail
+      · exact hM
+      · exact ih hSubNone q' hTail
+
+/-- Engine-parametric constructive multi-target EUF-CMA witness extractor. -/
+private def corduroy_euf_cma_extract_with
+    (eng : CorduroyPermEngine) (cfg : CorduroyParams)
+    (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePkWith eng cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonestWith eng cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerifyWith eng cfg pk msgStar sigStar = true)
+    (hForsRes : CorduroyForsUncoveredOrCollidingWith eng cfg pk queries
+      (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+      (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1) :
+    CorduroyBreakWith eng cfg pk sk :=
+  have hSeed : pk.pkSeed = sk.pkSeed := by rw [hPk]; rfl
+  have hUnpackVer : cfg.wellFormed = true ∧ sigStar.layerSigs.length = cfg.numLayers ∧
+      ∃ forsPkStar,
+        corduroyRecoverForsPkWith eng cfg pk.pkSeed
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1
+          sigStar.forsOpenings = some forsPkStar ∧
+        corduroyVerifyHypertreeWith eng cfg pk 0
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+          forsPkStar sigStar.layerSigs = some pk.pkRoot := by
+    unfold corduroyVerifyWith at hVer
+    by_cases hG : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = true
+    · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVer
+      simp only [Bool.and_eq_true, beq_iff_eq] at hG
+      refine ⟨hG.1, hG.2, ?_⟩
+      cases hF : corduroyRecoverForsPkWith eng cfg pk.pkSeed
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+          (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1
+          sigStar.forsOpenings with
+      | none => rw [hF] at hVer; exact absurd hVer (by simp)
+      | some forsPkStar =>
+        rw [hF] at hVer
+        dsimp only at hVer
+        cases hH : corduroyVerifyHypertreeWith eng cfg pk 0
+            (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+            forsPkStar sigStar.layerSigs with
+        | none => rw [hH] at hVer; exact absurd hVer (by simp)
+        | some topRt =>
+          rw [hH] at hVer
+          dsimp only at hVer
+          rw [beq_iff_eq] at hVer
+          rw [hVer] at hH
+          exact ⟨forsPkStar, rfl, hH⟩
+    · have hFalse : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = false :=
+        Bool.eq_false_iff.mpr hG
+      simp only [hFalse, Bool.not_false, ↓reduceIte] at hVer
+      exact absurd hVer (by simp)
+  let leafGlobalIdx := (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).1
+  let forsIndices   := (corduroyHashMsgWith eng cfg sigStar.rRand pk msgStar).2.1
+  match hFOpt : corduroyRecoverForsPkWith eng cfg pk.pkSeed leafGlobalIdx forsIndices sigStar.forsOpenings with
+  | none =>
+    False.elim (by
+      obtain ⟨_, _, _, hRec, _⟩ := hUnpackVer
+      rw [hFOpt] at hRec
+      exact absurd hRec (by simp))
+  | some forsPkStar =>
+    if hForsPkNe : forsPkStar ≠ corduroyHonestForsPkWith eng cfg sk leafGlobalIdx then
+      have hLayersPos : 0 < sigStar.layerSigs.length := by
+        have hWf := hUnpackVer.1
+        unfold CorduroyParams.wellFormed at hWf
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+        have hPos : 0 < cfg.numLayers := hWf.1.1.1.1.1.1.1.2
+        rw [hUnpackVer.2.1]
+        exact hPos
+      have hLeafLt : leafGlobalIdx < 2 ^ (sigStar.layerSigs.length * cfg.subtreeHeight) := by
+        rw [hUnpackVer.2.1]
+        exact (corduroyHashMsgWith_bounds eng cfg sigStar.rRand pk msgStar).1
+      have hHypEq : corduroyVerifyHypertreeWith eng cfg pk 0 leafGlobalIdx forsPkStar sigStar.layerSigs =
+          some (corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0) := by
+        obtain ⟨_, _, fp, hRec, hHyp⟩ := hUnpackVer
+        rw [hFOpt] at hRec
+        injection hRec with hFpEq
+        subst hFpEq
+        have hPkRt : pk.pkRoot = corduroyHonestSubtreeRootWith eng cfg sk (cfg.numLayers - 1) 0 := by
+          rw [hPk]; rfl
+        rw [hPkRt] at hHyp
+        exact hHyp
+      match extractHypertreeDivergenceWith eng cfg sk pk hPk hUnpackVer.1 hFullDigits queries hHonQ
+              sigStar.layerSigs 0 leafGlobalIdx forsPkStar hLayersPos
+              (by rw [Nat.zero_add]; exact hUnpackVer.2.1) hLeafLt
+              (by simp only [↓reduceIte]; exact hForsPkNe) hHypEq with
+      | .inl col => .spongeTweakCollision col
+      | .inr pre => .wotsChainPreimage pre
+    else
+      have hForsPkEq : forsPkStar = corduroyHonestForsPkWith eng cfg sk leafGlobalIdx :=
+        Decidable.of_not_not hForsPkNe
+      match hTreesOpt : corduroyVerifyForsTreesWith eng cfg pk.pkSeed leafGlobalIdx 0 forsIndices sigStar.forsOpenings with
+      | none =>
+        False.elim (by
+          unfold corduroyRecoverForsPkWith at hFOpt
+          by_cases hG : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = true
+          · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hTreesOpt] at hFOpt
+            exact absurd hFOpt (by simp)
+          · have hFalse : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = false :=
+              Bool.eq_false_iff.mpr hG
+            simp only [hFalse, Bool.not_false, ↓reduceIte] at hFOpt
+            exact absurd hFOpt (by simp))
+      | some rootsStar =>
+        have hCompEq : corduroyForsRootsCompressWith eng pk.pkSeed leafGlobalIdx rootsStar = forsPkStar := by
+          unfold corduroyRecoverForsPkWith at hFOpt
+          by_cases hG : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = true
+          · simp only [hG, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hTreesOpt, Option.some.injEq] at hFOpt
+            exact hFOpt
+          · have hFalse : (forsIndices.length == cfg.forsTrees && sigStar.forsOpenings.length == cfg.forsTrees) = false :=
+              Bool.eq_false_iff.mpr hG
+            simp only [hFalse, Bool.not_false, ↓reduceIte] at hFOpt
+            exact absurd hFOpt (by simp)
+        let honRoots := (List.range cfg.forsTrees).map (corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx)
+        if hRootsNe : rootsStar ≠ honRoots then
+          .spongeTweakCollision
+            { adrs1 := forsRootsAdrs leafGlobalIdx
+              in1   := rootsStar
+              adrs2 := forsRootsAdrs leafGlobalIdx
+              in2   := honRoots
+              distinctTweakOrInput := fun hPair => by
+                injection hPair with _ hIn
+                exact hRootsNe hIn
+              sameSpongeOutput := by
+                dsimp only [honRoots, corduroyForsRootsCompressWith, corduroyHonestForsPkWith] at hCompEq hForsPkEq ⊢
+                rw [hSeed] at hCompEq ⊢
+                exact hCompEq.trans hForsPkEq }
+        else
+          have hRootsEq : rootsStar = honRoots := Decidable.of_not_not hRootsNe
+          have hForsIdxLen : forsIndices.length = cfg.forsTrees :=
+            (corduroyHashMsgWith_bounds eng cfg sigStar.rRand pk msgStar).2.1
+          have hRootsShift : rootsStar =
+              ((List.range forsIndices.length).map fun t =>
+                corduroyHonestForsTreeRootWith eng cfg sk leafGlobalIdx (0 + t)) := by
+            rw [hRootsEq, hForsIdxLen]
+            apply List.map_congr_left
+            intro t _
+            rw [Nat.zero_add]
+          match extractForsTreesCollisionOrSecretsWith eng cfg sk pk.pkSeed hSeed leafGlobalIdx
+                  forsIndices sigStar.forsOpenings rootsStar 0 hTreesOpt hRootsShift with
+          | .inl col => .spongeTweakCollision col
+          | .inr hAllSec =>
+            match hCollSearch : findCollidingMsgHashQueryWith eng cfg pk leafGlobalIdx forsIndices queries with
+            | some ⟨q, hqMem, hSameLeaf, hSameDigest⟩ =>
+              .msgHashCollision
+                { r1   := sigStar.rRand
+                  pk1  := pk
+                  msg1 := msgStar
+                  r2   := q.sig.rRand
+                  pk2  := pk
+                  msg2 := q.msg
+                  distinctInputs := fun hEq => by
+                    injection hEq with _ hTail
+                    injection hTail with _ hMsgEq
+                    rw [hMsgEq] at hFresh
+                    exact hFresh (List.mem_map.mpr ⟨q, hqMem, rfl⟩)
+                  sameLeafIdx   := hSameLeaf.symm
+                  sameMsgDigest := hSameDigest.symm }
+            | none =>
+              have hNoColl := findCollidingMsgHashQueryWith_none eng cfg pk leafGlobalIdx forsIndices queries hCollSearch
+              have hUncovEx : ∃ k, k < forsIndices.length ∧
+                  ∀ q ∈ queries,
+                    (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx →
+                    (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1.getD k 0 ≠ forsIndices.getD k 0 := by
+                rcases hForsRes with ⟨q, hqMem, h1, h2⟩ | hEx
+                · exact False.elim (hNoColl q hqMem ⟨h1, h2⟩)
+                · exact hEx
+              let ⟨j, hjLt, _⟩ := findBoundedDecidableWitness
+                (fun k => ∀ q ∈ queries,
+                  (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).1 = leafGlobalIdx →
+                  (corduroyHashMsgWith eng cfg q.sig.rRand pk q.msg).2.1.getD k 0 ≠ forsIndices.getD k 0)
+                forsIndices.length hUncovEx
+              let candSec := (sigStar.forsOpenings.getD j { secretVal := lane4Zero, authPath := [] }).secretVal
+              let idxJ := forsIndices.getD j 0
+              have hSecMatch : candSec = corduroyForsSecretWith eng sk leafGlobalIdx j idxJ := by
+                have hM := hAllSec j hjLt
+                rw [Nat.zero_add] at hM
+                exact hM
+              .wotsChainPreimage
+                { adrs := forsLeafAdrs leafGlobalIdx j idxJ
+                  dStar := 0
+                  dHonest := 1
+                  candAtDStar := candSec
+                  preimageLink := candSec
+                  targetLink := corduroyHonestForsLeafWith eng sk leafGlobalIdx j idxJ
+                  stepStrictlyEarlier := Nat.zero_lt_one
+                  spongePreimageEq := by
+                    change corduroyForsLeafHashWith eng sk.pkSeed leafGlobalIdx j idxJ candSec = _
+                    rw [hSecMatch]
+                    rfl
+                  honestChainMatch := Or.inr ⟨leafGlobalIdx, j, idxJ, rfl, rfl, rfl, rfl, hSecMatch, rfl⟩ }
+
+/-- **Theorem 2: Constructive `Corduroy` Multi-Target EUF-CMA Witness Extractor (`corduroy_euf_cma_extract`)**:
+    Given `q_sig` honest signing queries `queries` and ANY valid `Corduroy` forgery `(msgStar, sigStar)`
+    on a fresh message `msgStar ∉ queries.map (·.msg)` (under standard multi-target FORS non-covering
+    `CorduroyForsUncoveredOrColliding`, which holds unconditionally whenever `≤ 1` query hit `leafGlobalIdx*`),
+    constructively (`Type`-valued, `0 Classical.choice`) extracts an explicit break of ONE of three
+    concrete `Poseidon2`/sponge problems:
+    - `CorduroyBreak.msgHashCollision`: distinct `(R, pk, msg) ≠ (R', pk', msg')` mapping to the same leaf index + message digest;
+    - `CorduroyBreak.spongeTweakCollision`: distinct `(adrs1, in1) ≠ (adrs2, in2)` producing the same 4-Goldilocks-limb sponge output;
+    - `CorduroyBreak.wotsChainPreimage`: explicit chain link inversion `d* < d_honest` via `targetSum` conservation. -/
+def corduroy_euf_cma_extract
+    (cfg : CorduroyParams) (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePk cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonest cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerify cfg pk msgStar sigStar = true)
+    (hForsRes : CorduroyForsUncoveredOrColliding cfg pk queries
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).1
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).2.1) :
+    CorduroyBreak cfg pk sk :=
+  (corduroy_euf_cma_extract_with corduroyPoseidon2Engine cfg sk pk queries msgStar sigStar
+    hPk hFullDigits hHonQ hFresh hVer hForsRes).toCanonical
+
+/-- `PSum`-formatted view of `corduroy_euf_cma_extract` (`0 Classical.choice`). -/
+def corduroy_euf_cma_extract_psum
+    (cfg : CorduroyParams) (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePk cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonest cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerify cfg pk msgStar sigStar = true)
+    (hForsRes : CorduroyForsUncoveredOrColliding cfg pk queries
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).1
+      (corduroyHashMsg cfg sigStar.rRand pk msgStar).2.1) :
+    PSum (CorduroyMsgHashCollision cfg)
+      (PSum (CorduroySpongeTweakCollision pk.pkSeed) (CorduroyWotsChainPreimage sk)) :=
+  (corduroy_euf_cma_extract cfg sk pk queries msgStar sigStar
+    hPk hFullDigits hHonQ hFresh hVer hForsRes).toPSum
+
+/-- Unconditional corollary of `corduroy_euf_cma_extract` whenever at most 1 query hit `leafGlobalIdx*`
+    (e.g., `1`-CMA or distinct-leaf `q_sig`-CMA — zero FORS subset-covering premise required!). -/
+def corduroy_euf_cma_extract_distinct_leaves
+    (cfg : CorduroyParams) (sk : CorduroySecretKey) (pk : CorduroyPublicKey)
+    (queries : List CorduroySignedQuery)
+    (msgStar : Lane4) (sigStar : CorduroySig)
+    (hPk : pk = corduroyDerivePk cfg sk)
+    (hFullDigits : cfg.wotsChains = 128)
+    (hHonQ : CorduroyQuerySetHonest cfg sk queries)
+    (hFresh : msgStar ∉ queries.map (·.msg))
+    (hVer : corduroyVerify cfg pk msgStar sigStar = true)
+    (hAtMostOneLeafHit : (queries.filter (fun q =>
+      (corduroyHashMsg cfg q.sig.rRand pk q.msg).1 ==
+        (corduroyHashMsg cfg sigStar.rRand pk msgStar).1)).length ≤ 1) :
+    CorduroyBreak cfg pk sk :=
+  have hWf : cfg.wellFormed = true := by
+    unfold corduroyVerify corduroyVerifyWith at hVer
+    by_cases hG : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = true
+    · simp only [Bool.and_eq_true] at hG; exact hG.1
+    · have hF : (cfg.wellFormed && (sigStar.layerSigs.length == cfg.numLayers)) = false :=
+        Bool.eq_false_iff.mpr hG
+      simp only [hF, Bool.not_false, ↓reduceIte] at hVer
+      exact absurd hVer (by simp)
+  have hForsPos : 0 < cfg.forsTrees := by
+    unfold CorduroyParams.wellFormed at hWf
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+    exact hWf.1.1.1.2
+  have hForsLen : (corduroyHashMsg cfg sigStar.rRand pk msgStar).2.1.length = cfg.forsTrees :=
+    (corduroyHashMsg_bounds cfg sigStar.rRand pk msgStar).2.1
+  corduroy_euf_cma_extract cfg sk pk queries msgStar sigStar hPk hFullDigits hHonQ hFresh hVer
+    (corduroy_single_leaf_hit_uncovered_with corduroyPoseidon2Engine cfg pk queries _ _
+      hForsPos hForsLen hAtMostOneLeafHit)
+
+/-! ## §3. Full Deployed 256-Column `Hem` `StepOp` AIR Completeness, Constructive Extraction & WHIR Wiring -/
+
+section HemStepOp256Machine
+
+local infixl:65 " +ₚ " => Goldilocks.add
+local infixl:65 " -ₚ " => Goldilocks.sub
+local infixl:70 " *ₚ " => Goldilocks.mul
+local notation "‹" n "›" => Goldilocks.ofNat n
+
+private theorem g_add_zero (a : Goldilocks) : a +ₚ Goldilocks.zero = a :=
+  LawfulCommRing.add_zero a
+private theorem g_zero_add (a : Goldilocks) : Goldilocks.zero +ₚ a = a :=
+  LawfulCommRing.zero_add a
+private theorem g_add_assoc (a b c : Goldilocks) : (a +ₚ b) +ₚ c = a +ₚ (b +ₚ c) :=
+  LawfulCommRing.add_assoc a b c
+private theorem g_add_comm (a b : Goldilocks) : a +ₚ b = b +ₚ a :=
+  LawfulCommRing.add_comm a b
+private theorem g_mul_zero (a : Goldilocks) : a *ₚ Goldilocks.zero = Goldilocks.zero :=
+  LawfulCommRing.mul_zero a
+private theorem g_zero_mul (a : Goldilocks) : Goldilocks.zero *ₚ a = Goldilocks.zero :=
+  LawfulCommRing.zero_mul a
+private theorem g_mul_one (a : Goldilocks) : a *ₚ Goldilocks.one = a :=
+  LawfulCommRing.mul_one a
+private theorem g_one_mul (a : Goldilocks) : Goldilocks.one *ₚ a = a :=
+  LawfulCommRing.one_mul a
+private theorem g_mul_assoc (a b c : Goldilocks) : (a *ₚ b) *ₚ c = a *ₚ (b *ₚ c) :=
+  LawfulCommRing.mul_assoc a b c
+private theorem g_mul_comm (a b : Goldilocks) : a *ₚ b = b *ₚ a :=
+  LawfulCommRing.mul_comm a b
+private theorem g_left_distrib (a b c : Goldilocks) : a *ₚ (b +ₚ c) = (a *ₚ b) +ₚ (a *ₚ c) :=
+  LawfulCommRing.left_distrib a b c
+private theorem g_sub_self (a : Goldilocks) : a -ₚ a = Goldilocks.zero :=
+  LawfulCommRing.sub_self a
+private theorem g_sub_eq_zero_iff {a b : Goldilocks} : a -ₚ b = Goldilocks.zero ↔ a = b :=
+  LawfulCommRing.sub_eq_zero_iff
+private theorem g_ofNat_add (a b : Nat) : Goldilocks.ofNat (a + b) = ‹a› +ₚ ‹b› := by
+  apply Goldilocks.ext
+  rw [Goldilocks.ofNat_val, Goldilocks.add_val, Goldilocks.ofNat_val, Goldilocks.ofNat_val,
+      Nat.add_mod]
+private theorem g_ofNat_mul (a b : Nat) : Goldilocks.ofNat (a * b) = ‹a› *ₚ ‹b› := by
+  apply Goldilocks.ext
+  rw [Goldilocks.ofNat_val, Goldilocks.mul_val, Goldilocks.ofNat_val, Goldilocks.ofNat_val,
+      Nat.mul_mod]
+
+/-! ### §3.1. Polymorphic No-Wrap Backward-Unpacking & `< 2^63` Limb Decomposition Lemmas -/
+
+/-- Evaluate a little-endian digit list in base `B`: `d_0 + B * (d_1 + B * ...)`. -/
+def evalBaseDigits (B : Nat) : List Nat → Nat
+  | [] => 0
+  | d :: ds => d + B * evalBaseDigits B ds
+
+theorem evalBaseDigits_lt_pow (B : Nat) (hB : 0 < B) :
+    ∀ (ds : List Nat), (∀ d ∈ ds, d < B) → evalBaseDigits B ds < B ^ ds.length
+  | [], _ => by simp [evalBaseDigits]
+  | d :: ds, hLt => by
+    have hd : d < B := hLt d (List.mem_cons_self ..)
+    have ih := evalBaseDigits_lt_pow B hB ds (fun x hx => hLt x (List.mem_cons_of_mem _ hx))
+    dsimp only [evalBaseDigits, List.length_cons]
+    rw [Nat.pow_succ, Nat.mul_comm _ B]
+    have hLe : 1 + evalBaseDigits B ds ≤ B ^ ds.length := by omega
+    calc d + B * evalBaseDigits B ds
+      _ < B + B * evalBaseDigits B ds := Nat.add_lt_add_right hd _
+      _ = B * (1 + evalBaseDigits B ds) := by rw [Nat.mul_add, Nat.mul_one]
+      _ ≤ B * B ^ ds.length := Nat.mul_le_mul_left B hLe
+
+theorem evalBaseDigits_inj (B : Nat) (hB : 0 < B) :
+    ∀ {ds1 ds2 : List Nat},
+      ds1.length = ds2.length →
+      (∀ d ∈ ds1, d < B) →
+      (∀ d ∈ ds2, d < B) →
+      evalBaseDigits B ds1 = evalBaseDigits B ds2 →
+      ds1 = ds2
+  | [], [], _, _, _, _ => rfl
+  | [], _ :: _, hLen, _, _, _ => False.elim (Nat.succ_ne_zero _ hLen.symm)
+  | _ :: _, [], hLen, _, _, _ => False.elim (Nat.succ_ne_zero _ hLen)
+  | d1 :: r1, d2 :: r2, hLen, hLt1, hLt2, hEq => by
+    have hd1 : d1 < B := hLt1 d1 (List.mem_cons_self ..)
+    have hd2 : d2 < B := hLt2 d2 (List.mem_cons_self ..)
+    dsimp only [evalBaseDigits] at hEq
+    have hMod := congrArg (· % B) hEq
+    rw [Nat.mul_comm B (evalBaseDigits B r1), Nat.mul_comm B (evalBaseDigits B r2),
+        Nat.add_mul_mod_self_right, Nat.add_mul_mod_self_right,
+        Nat.mod_eq_of_lt hd1, Nat.mod_eq_of_lt hd2] at hMod
+    subst hMod
+    have hCancel := Nat.add_left_cancel hEq
+    have hSubEq : evalBaseDigits B r1 = evalBaseDigits B r2 :=
+      Nat.eq_of_mul_eq_mul_left hB hCancel
+    rw [evalBaseDigits_inj B hB (Nat.succ.inj hLen)
+          (fun x hx => hLt1 x (List.mem_cons_of_mem _ hx))
+          (fun x hx => hLt2 x (List.mem_cons_of_mem _ hx)) hSubEq]
+
+/-- Multi-step in-field quotient-unpacking chain `p_m = ofNat d_m +ₚ (p_{m+1} *ₚ ofNat B)` ending at `qFinal`.
+    Instantiates simultaneously to:
+    - FORS index unpacking (`B = 256, k ≤ 6`, `256^6 = 2^48 < p`),
+    - WOTS remaining-step unpacking (`B = 4, k ≤ 26`, `4^26 = 2^52 < p`),
+    - FORS & XMSS Merkle cursor halving (`B = 2, k ∈ {4, 6, 8}`, `2^8 = 256 < p`). -/
+def UnpackChain (B : Nat) : Goldilocks → List Nat → Goldilocks → Prop
+  | pEnd, [], qFinal => pEnd = qFinal
+  | pCur, d :: rest, qFinal =>
+    d < B ∧ ∃ pNext : Goldilocks,
+      pCur = Goldilocks.ofNat d +ₚ (pNext *ₚ ‹B›) ∧
+      UnpackChain B pNext rest qFinal
+
+/-- **No-Wrap Backward-Unpacking Theorem (`baseBUnpackChain_backward`)**:
+    Whenever an `UnpackChain B p0 ds Goldilocks.zero` ends at `0` with `B ^ ds.length < goldilocksPrime`,
+    every intermediate field quotient is automatically canonical (`< B ^ (k - m) < p`, with ZERO
+    need for separate per-row quotient range checks!) and `p0.val = evalBaseDigits B ds`. -/
+theorem baseBUnpackChain_backward (B : Nat) (hB : 0 < B) :
+    ∀ (ds : List Nat) (p0 : Goldilocks),
+      B ^ ds.length < goldilocksPrime →
+      UnpackChain B p0 ds Goldilocks.zero →
+      p0.val = evalBaseDigits B ds ∧ p0.val < B ^ ds.length ∧ (∀ d ∈ ds, d < B)
+  | [], p0, _, hChain => by
+    dsimp only [UnpackChain] at hChain
+    subst hChain
+    exact ⟨rfl, by simp [Goldilocks.zero], fun _ h => False.elim (List.not_mem_nil h)⟩
+  | d :: rest, p0, hPowLtP, hChain => by
+    rcases hChain with ⟨hd, pNext, hp0, hSub⟩
+    have hSubPowLe : B ^ rest.length ≤ B ^ (d :: rest).length :=
+      Nat.pow_le_pow_right hB (Nat.le_succ _)
+    have hBLtP : B < goldilocksPrime := by
+      have hB1 : B ^ 1 ≤ B ^ (d :: rest).length :=
+        Nat.pow_le_pow_right hB (by simp)
+      rw [Nat.pow_one] at hB1
+      exact Nat.lt_of_le_of_lt hB1 hPowLtP
+    obtain ⟨hNextVal, hNextLt, hRestLt⟩ :=
+      baseBUnpackChain_backward B hB rest pNext (Nat.lt_of_le_of_lt hSubPowLe hPowLtP) hSub
+    have hdVal : (Goldilocks.ofNat d).val = d :=
+      Nat.mod_eq_of_lt (Nat.lt_trans hd hBLtP)
+    have hBVal : (Goldilocks.ofNat B).val = B :=
+      Nat.mod_eq_of_lt hBLtP
+    have hCombLt : d + pNext.val * B < B ^ (d :: rest).length := by
+      dsimp only [List.length_cons]
+      rw [Nat.pow_succ]
+      have hLe : pNext.val + 1 ≤ B ^ rest.length := hNextLt
+      calc d + pNext.val * B
+        _ < B + pNext.val * B := Nat.add_lt_add_right hd _
+        _ = (pNext.val + 1) * B := by rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+        _ ≤ B ^ rest.length * B := Nat.mul_le_mul_right B hLe
+    have hMulVal : (pNext *ₚ ‹B›).val = B * evalBaseDigits B rest := by
+      rw [Goldilocks.mul_val, hBVal, Nat.mod_eq_of_lt
+            (Nat.lt_of_le_of_lt (Nat.le_add_left _ d) (Nat.lt_trans hCombLt hPowLtP)),
+          hNextVal, Nat.mul_comm]
+    have hAddLtP : d + B * evalBaseDigits B rest < goldilocksPrime := by
+      rw [Nat.mul_comm B, ← hNextVal]
+      exact Nat.lt_trans hCombLt hPowLtP
+    have hp0Val : p0.val = evalBaseDigits B (d :: rest) := by
+      rw [hp0, Goldilocks.add_val, hdVal, hMulVal, Nat.mod_eq_of_lt hAddLtP]
+      rfl
+    refine ⟨hp0Val, ?_, ?_⟩
+    · rw [hp0Val, evalBaseDigits, Nat.mul_comm B, ← hNextVal]
+      exact hCombLt
+    · intro x hx
+      rcases List.mem_cons.mp hx with rfl | hTail
+      · exact hd
+      · exact hRestLt x hTail
+
+theorem extractLimbBase4Digits_getElem :
+    ∀ (count v i : Nat) (hi : i < (extractLimbBase4Digits count v).length),
+      (extractLimbBase4Digits count v)[i]'hi = (v / 4 ^ i) % 4
+  | 0, _, _, hi => False.elim (by simp [extractLimbBase4Digits] at hi)
+  | _ + 1, v, 0, _ => by simp [extractLimbBase4Digits]
+  | count + 1, v, i + 1, hi => by
+    have hi' : i < (extractLimbBase4Digits count (v / 4)).length := by
+      rw [extractLimbBase4Digits_length] at hi ⊢
+      omega
+    have hStep : (extractLimbBase4Digits (count + 1) v)[i + 1]'hi =
+        (extractLimbBase4Digits count (v / 4))[i]'hi' := rfl
+    rw [hStep, extractLimbBase4Digits_getElem count (v / 4) i hi',
+        Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm 4]
+
+private theorem evalGoldilocksBase4_snoc :
+    ∀ (xs : List Goldilocks) (y : Goldilocks),
+      evalGoldilocksBase4 (xs ++ [y]) =
+        evalGoldilocksBase4 xs +ₚ (y *ₚ ‹4 ^ xs.length›)
+  | [], y => by
+    show y +ₚ (‹4› *ₚ Goldilocks.zero) = Goldilocks.zero +ₚ (y *ₚ ‹1›)
+    have h1 : (‹1› : Goldilocks) = Goldilocks.one := Goldilocks.ext rfl
+    rw [h1, g_mul_zero, g_add_zero, g_zero_add, g_mul_one]
+  | x :: xs, y => by
+    show x +ₚ (‹4› *ₚ evalGoldilocksBase4 (xs ++ [y])) =
+      (x +ₚ (‹4› *ₚ evalGoldilocksBase4 xs)) +ₚ (y *ₚ ‹4 ^ (xs.length + 1)›)
+    rw [evalGoldilocksBase4_snoc xs y, g_left_distrib, g_add_assoc]
+    congr 1
+    have hPow : (‹4 ^ (xs.length + 1)› : Goldilocks) = ‹4› *ₚ ‹4 ^ xs.length› := by
+      rw [Nat.pow_succ, Nat.mul_comm]
+      exact g_ofNat_mul 4 (4 ^ xs.length)
+    rw [hPow, ← g_mul_assoc, g_mul_comm ‹4› y, g_mul_assoc]
+
+private theorem stepWeightedSum_pow4_eq_evalGoldilocksBase4 (f : Nat → Goldilocks) :
+    ∀ (n : Nat),
+      stepWeightedSum f (fun i => 4 ^ i) n = evalGoldilocksBase4 ((List.range n).map f)
+  | 0 => rfl
+  | n + 1 => by
+    unfold stepWeightedSum
+    rw [List.range_succ, List.foldl_append, List.foldl_cons, List.foldl_nil,
+        List.map_append, List.map_cons, List.map_nil, evalGoldilocksBase4_snoc,
+        List.length_map, List.length_range]
+    exact congrArg (· +ₚ (f n *ₚ ‹4 ^ n›)) (stepWeightedSum_pow4_eq_evalGoldilocksBase4 f n)
+
+theorem stepBoolCheck_eq_zero_iff (b : Goldilocks) :
+    stepBoolCheck b = Goldilocks.zero ↔ (b = Goldilocks.zero ∨ b = Goldilocks.one) := by
+  unfold stepBoolCheck
+  constructor
+  · intro h
+    have h' : CommRingOps.mul b (Goldilocks.one -ₚ b) = CommRingOps.zero := h
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h' with h0 | h1
+    · exact .inl h0
+    · exact .inr (g_sub_eq_zero_iff.mp h1).symm
+  · rintro (rfl | rfl)
+    · exact g_zero_mul _
+    · rw [g_sub_self, g_mul_zero]
+
+/-- Canonical `< 2^63` base-4 characterization of `stepLimb63Decomp`. -/
+theorem stepLimb63Decomp_allZero_iff (x : StepOpRowInputs) (l : Nat) :
+    allZeroGoldilocks (stepLimb63Decomp x l) = true ↔
+      (x.prev (stMainSponge + l)).val < 2 ^ 63 ∧
+      (∀ i < 31, x.aux i = Goldilocks.ofNat (((x.prev (stMainSponge + l)).val / 4 ^ i) % 4)) ∧
+      x.aux 31 = Goldilocks.ofNat ((x.prev (stMainSponge + l)).val / 4 ^ 31) := by
+  let v := x.prev (stMainSponge + l)
+  let w : Limb63DecompWitness :=
+    { limbVal := v
+      digits  := (List.range 31).map x.aux
+      topBit  := x.aux 31 }
+  have hPow62 : (‹2 ^ 62› : Goldilocks) = ‹4 ^ 31› := rfl
+  have hTail2 : ∀ (r0 r1 : Goldilocks),
+      allZeroGoldilocks [r0, r1] = ((r0 == Goldilocks.zero) && (r1 == Goldilocks.zero)) := by
+    intros; simp [allZeroGoldilocks]
+  have hHead3 : ∀ (r0 r1 r2 : Goldilocks) (rest : List Goldilocks),
+      allZeroGoldilocks ([r0, r1, r2] ++ rest) =
+        ((r0 == Goldilocks.zero) && (r1 == Goldilocks.zero) &&
+         (r2 == Goldilocks.zero) && allZeroGoldilocks rest) := by
+    intros; simp [allZeroGoldilocks, Bool.and_assoc]
+  have hEquiv : allZeroGoldilocks (stepLimb63Decomp x l) = true ↔
+      allZeroGoldilocks (limb63DecompResiduals v w) = true := by
+    unfold stepLimb63Decomp limb63DecompResiduals
+    dsimp only [w]
+    have hLen : (((List.range 31).map x.aux).length == 31) = true := by simp
+    rw [hLen, List.map_map]
+    simp only [↓reduceIte, allZeroGoldilocks_append, hTail2, hHead3, Bool.and_eq_true,
+      beq_iff_eq, g_sub_self, true_and, stepBoolCheck_eq_zero_iff,
+      boolBitResidual_eq_zero_iff, g_sub_eq_zero_iff,
+      stepWeightedSum_pow4_eq_evalGoldilocksBase4, hPow62]
+    have hMapEq : ((List.range 31).map (quarticBase4 ∘ x.aux)) =
+        (List.range 31).map (fun i => quarticBase4 (x.aux i)) := rfl
+    rw [hMapEq]
+    constructor
+    · rintro ⟨hQuart, hBit, hEq⟩
+      refine ⟨⟨hBit, ?_⟩, hQuart⟩
+      rw [g_mul_comm (‹4 ^ 31›) (x.aux 31)]
+      exact hEq.symm
+    · rintro ⟨⟨hBit, hEq⟩, hQuart⟩
+      refine ⟨hQuart, hBit, ?_⟩
+      rw [g_mul_comm (x.aux 31) (‹4 ^ 31›)]
+      exact hEq.symm
+  rw [hEquiv, limb63DecompResiduals_allZero_iff]
+  constructor
+  · rintro ⟨hLt, hWEq⟩
+    have hDigEq := congrArg Limb63DecompWitness.digits hWEq
+    have hTopEq := congrArg Limb63DecompWitness.topBit hWEq
+    dsimp only [w, honestLimb63DecompWitness] at hDigEq hTopEq
+    refine ⟨hLt, fun i hi => ?_, hTopEq⟩
+    have hGet := congrArg (fun ls => ls.getD i Goldilocks.zero) hDigEq
+    have hiL1 : i < ((List.range 31).map x.aux).length := by simp [hi]
+    have hiExt : i < (extractLimbBase4Digits 31 v.val).length := by
+      rw [extractLimbBase4Digits_length]; exact hi
+    have hiL2 : i < ((extractLimbBase4Digits 31 v.val).map Goldilocks.ofNat).length := by
+      simp [hiExt]
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hiL1, Option.getD_some,
+        List.getElem_map, List.getElem_range,
+        List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hiL2, Option.getD_some,
+        List.getElem_map, extractLimbBase4Digits_getElem 31 v.val i hiExt] at hGet
+    exact hGet
+  · rintro ⟨hLt, hAux, hTop⟩
+    refine ⟨hLt, ?_⟩
+    dsimp only [w, honestLimb63DecompWitness]
+    rw [hTop]
+    congr 1
+    apply List.ext_getElem
+    · simp [extractLimbBase4Digits_length]
+    · intro i hi1 hi2
+      have hi31 : i < 31 := by simpa using hi1
+      have hiExt : i < (extractLimbBase4Digits 31 v.val).length := by
+        rw [extractLimbBase4Digits_length]; exact hi31
+      rw [List.getElem_map, List.getElem_range, List.getElem_map,
+          extractLimbBase4Digits_getElem 31 v.val i hiExt]
+      exact hAux i hi31
+
+theorem stepByteVal_eq_of_limb63 (x : StepOpRowInputs) (l sub : Nat)
+    (hSub : sub < 7)
+    (hDecomp : allZeroGoldilocks (stepLimb63Decomp x l) = true) :
+    stepByteVal x sub =
+      Goldilocks.ofNat (((x.prev (stMainSponge + l)).val / 256 ^ sub) % 256) := by
+  obtain ⟨_, hAux, _⟩ := (stepLimb63Decomp_allZero_iff x l).mp hDecomp
+  let v := (x.prev (stMainSponge + l)).val
+  have e0 := hAux (4 * sub) (by omega)
+  have e1 := hAux (4 * sub + 1) (by omega)
+  have e2 := hAux (4 * sub + 2) (by omega)
+  have e3 := hAux (4 * sub + 3) (by omega)
+  unfold stepByteVal
+  rw [e0, e1, e2, e3]
+  simp only [← g_ofNat_mul, ← g_ofNat_add]
+  apply congrArg Goldilocks.ofNat
+  have hPow0 : 4 ^ (4 * sub) = 256 ^ sub := by
+    rw [Nat.pow_mul]
+  have hPow1 : 4 ^ (4 * sub + 1) = 256 ^ sub * 4 := by
+    rw [Nat.pow_add, hPow0]
+  have hPow2 : 4 ^ (4 * sub + 2) = 256 ^ sub * 16 := by
+    rw [Nat.pow_add, hPow0]
+  have hPow3 : 4 ^ (4 * sub + 3) = 256 ^ sub * 64 := by
+    rw [Nat.pow_add, hPow0]
+  rw [hPow0, hPow1, hPow2, hPow3,
+      ← Nat.div_div_eq_div_mul v (256 ^ sub) 4,
+      ← Nat.div_div_eq_div_mul v (256 ^ sub) 16,
+      ← Nat.div_div_eq_div_mul v (256 ^ sub) 64]
+  generalize v / 256 ^ sub = w
+  omega
+
+theorem stepLow4Bits_eq_of_limb63 (x : StepOpRowInputs) (l : Nat)
+    (hDecomp : allZeroGoldilocks (stepLimb63Decomp x l) = true) :
+    x.aux 0 +ₚ (x.aux 1 *ₚ ‹4›) =
+      Goldilocks.ofNat ((x.prev (stMainSponge + l)).val % 16) := by
+  obtain ⟨_, hAux, _⟩ := (stepLimb63Decomp_allZero_iff x l).mp hDecomp
+  rw [hAux 0 (by decide), hAux 1 (by decide)]
+  simp only [← g_ofNat_mul, ← g_ofNat_add, Nat.pow_zero, Nat.pow_one, Nat.div_one]
+  apply congrArg Goldilocks.ofNat
+  omega
+
+private theorem evalBase4Digits_map_div_mod :
+    ∀ (n w : Nat),
+      evalBase4Digits ((List.range n).map (fun i => (w / 4 ^ i) % 4)) = w % (4 ^ n)
+  | 0, w => by simp [evalBase4Digits, Nat.mod_one]
+  | n + 1, w => by
+    rw [List.range_succ_eq_map, List.map_cons, List.map_map]
+    dsimp only [evalBase4Digits]
+    have hShift :
+        (List.range n).map ((fun i => (w / 4 ^ i) % 4) ∘ Nat.succ) =
+        (List.range n).map (fun i => ((w / 4) / 4 ^ i) % 4) := by
+      congr 1; funext i
+      dsimp only [Function.comp]
+      rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm 4]
+    rw [hShift, evalBase4Digits_map_div_mod n (w / 4), Nat.pow_zero, Nat.div_one, Nat.pow_succ]
+    have hPowPos : 0 < 4 ^ n := Nat.pow_pos (by decide)
+    have hRemLt : (w / 4) % 4 ^ n < 4 ^ n := Nat.mod_lt _ hPowPos
+    have hW : w = (w % 4 + 4 * ((w / 4) % 4 ^ n)) + ((w / 4) / 4 ^ n) * (4 ^ n * 4) := by
+      have h1 := (Nat.mod_add_div w 4).symm
+      have h2 := (Nat.mod_add_div (w / 4) (4 ^ n)).symm
+      calc w
+        _ = w % 4 + 4 * (w / 4) := h1
+        _ = w % 4 + 4 * ((w / 4) % 4 ^ n + 4 ^ n * ((w / 4) / 4 ^ n)) := by rw [← h2]
+        _ = (w % 4 + 4 * ((w / 4) % 4 ^ n)) + ((w / 4) / 4 ^ n) * (4 ^ n * 4) := by
+          rw [Nat.mul_add, Nat.add_assoc]
+          congr 1
+          rw [← Nat.mul_assoc, Nat.mul_comm (4 * 4 ^ n), Nat.mul_comm 4 (4 ^ n)]
+    conv => rhs; rw [hW, Nat.add_mul_mod_self_right]
+    exact (Nat.mod_eq_of_lt (by omega)).symm
+
+theorem stepHi28_eq_of_limb63 (x : StepOpRowInputs) (l : Nat)
+    (hDecomp : allZeroGoldilocks (stepLimb63Decomp x l) = true) :
+    stepHi28 x = Goldilocks.ofNat (((x.prev (stMainSponge + l)).val % 2 ^ 32) / 16) := by
+  obtain ⟨_, hAux, _⟩ := (stepLimb63Decomp_allZero_iff x l).mp hDecomp
+  let v := (x.prev (stMainSponge + l)).val
+  unfold stepHi28
+  rw [stepWeightedSum_pow4_eq_evalGoldilocksBase4]
+  let ds := (List.range 14).map (fun i => x.aux (2 + i))
+  have hDsEq : ds = (List.range 14).map (fun i => Goldilocks.ofNat (((v / 16) / 4 ^ i) % 4)) := by
+    apply List.ext_getElem
+    · simp [ds]
+    · intro i hi1 _
+      have hi14 : i < 14 := by simpa [ds] using hi1
+      simp only [ds, List.getElem_map, List.getElem_range]
+      rw [hAux (2 + i) (by omega)]
+      apply congrArg Goldilocks.ofNat
+      have hPow : 4 ^ (2 + i) = 16 * 4 ^ i := by
+        rw [Nat.pow_add]
+      rw [hPow, ← Nat.div_div_eq_div_mul]
+  have h4LtP : 4 < goldilocksPrime := by decide
+  have hDsLt4 : ∀ d ∈ ds, d.val < 4 := by
+    rw [hDsEq]
+    intro d hd
+    obtain ⟨i, _, rfl⟩ := List.mem_map.mp hd
+    rw [Goldilocks.ofNat_val, Nat.mod_eq_of_lt (Nat.lt_trans (Nat.mod_lt _ (by decide)) h4LtP)]
+    exact Nat.mod_lt _ (by decide)
+  apply Goldilocks.ext
+  rw [evalGoldilocksBase4_val_of_lt4 ds (by simp [ds]) hDsLt4, hDsEq, List.map_map]
+  have hMapVal :
+      (List.range 14).map (Goldilocks.val ∘ fun i => Goldilocks.ofNat (((v / 16) / 4 ^ i) % 4)) =
+      (List.range 14).map (fun i => ((v / 16) / 4 ^ i) % 4) := by
+    congr 1; funext i
+    dsimp only [Function.comp]
+    rw [Goldilocks.ofNat_val]
+    exact Nat.mod_eq_of_lt (Nat.lt_trans (Nat.mod_lt _ (by decide)) h4LtP)
+  rw [hMapVal, evalBase4Digits_map_div_mod 14 (v / 16)]
+  have hPow14 : (4 : Nat) ^ 14 = 2 ^ 28 := rfl
+  have hPow32 : (2 : Nat) ^ 32 = 16 * 2 ^ 28 := rfl
+  rw [hPow14]
+  have hLtP : (v % 2 ^ 32) / 16 < goldilocksPrime := by
+    have : v % 2 ^ 32 < 2 ^ 32 := Nat.mod_lt _ (by decide)
+    have : (2 : Nat) ^ 28 < goldilocksPrime := by decide
+    omega
+  rw [Goldilocks.ofNat_val, Nat.mod_eq_of_lt hLtP]
+  have hDivMod : (v / 16) % (2 ^ 28) = (v % (16 * 2 ^ 28)) / 16 := by
+    have h1 := (Nat.mod_add_div v (16 * 2 ^ 28)).symm
+    conv => lhs; rw [h1]
+    have hRew : v % (16 * 2 ^ 28) + 16 * 2 ^ 28 * (v / (16 * 2 ^ 28)) =
+        v % (16 * 2 ^ 28) + ((2 ^ 28) * (v / (16 * 2 ^ 28))) * 16 := by
+      congr 1
+      simp only [Nat.mul_assoc, Nat.mul_comm]
+    rw [hRew, Nat.add_mul_div_right _ _ (by decide), Nat.add_mul_mod_self_left]
+    have hRemLt : (v % (16 * 2 ^ 28)) / 16 < 2 ^ 28 := by
+      have : v % (16 * 2 ^ 28) < 16 * 2 ^ 28 := Nat.mod_lt _ (by decide)
+      omega
+    exact Nat.mod_eq_of_lt hRemLt
+  rw [← hPow32] at hDivMod
+  exact hDivMod
+
+/-! ### §3.2. Guard/Transition Decomposition & Selector-Muxed 256-Column `StepOp` Equivalence -/
+
+/-- Valid index ranges of parameterized `StepConstraintKind` constructors (`trace.rs`). -/
+def StepConstraintKind.validSlot : StepConstraintKind → Bool
+  | .statelessDecompLimb l => decide (l < 7)
+  | .forsLeafHash slot     => decide (slot < 6)
+  | .hmsgDecompLimb l      => decide (l < 5)
+  | .wotsChainStep0 slot   => decide (slot < 5)
+  | _                      => true
+
+/-- Complete duplicate-free catalog of all 52 `StepConstraintKind` classes of the deployed machine. -/
+def allStepConstraintKinds : List StepConstraintKind :=
+  [.idle, .statefulHmsgBlock0, .statefulHmsgBlock1, .statefulHmsgSqueeze,
+   .statelessDeriveBlock0, .statelessDeriveBlock1] ++
+  (List.range 7).map StepConstraintKind.statelessDecompLimb ++
+  [.forsRootsSpongeInit] ++
+  (List.range 6).map StepConstraintKind.forsLeafHash ++
+  [.forsMerkleBlockA,
+   .forsMerkleBlockB false false, .forsMerkleBlockB false true,
+   .forsMerkleBlockB true false, .forsMerkleBlockB true true,
+   .forsRootsPairAbsorb false, .forsRootsPairAbsorb true,
+   .forsRootsFinalSqueeze,
+   .detTreeHmsgBlock0, .detTreeHmsgBlock1] ++
+  (List.range 5).map StepConstraintKind.hmsgDecompLimb ++
+  [.wotsTellInit] ++
+  (List.range 5).map StepConstraintKind.wotsChainStep0 ++
+  [.wotsChainStep1,
+   .wotsChainStep2 false, .wotsChainStep2 true,
+   .wotsTellPairAbsorb false, .wotsTellPairAbsorb true,
+   .wotsTellFinalSqueeze,
+   .xmssMerkleBlockA,
+   .xmssMerkleBlockB false false, .xmssMerkleBlockB false true,
+   .xmssMerkleBlockB true false, .xmssMerkleBlockB true true]
+
+theorem allStepConstraintKinds_nodup : allStepConstraintKinds.Nodup := by
+  decide +kernel
+
+theorem allStepConstraintKinds_validSlot :
+    ∀ k ∈ allStepConstraintKinds, k.validSlot = true := by
+  decide +kernel
+
+private theorem mem_allStepConstraintKinds_of_validSlot (k : StepConstraintKind)
+    (h : k.validSlot = true) : k ∈ allStepConstraintKinds := by
+  cases k with
+  | idle | statefulHmsgBlock0 | statefulHmsgBlock1 | statefulHmsgSqueeze
+  | statelessDeriveBlock0 | statelessDeriveBlock1 | forsRootsSpongeInit
+  | forsMerkleBlockA | forsRootsFinalSqueeze | detTreeHmsgBlock0 | detTreeHmsgBlock1
+  | wotsTellInit | wotsChainStep1 | wotsTellFinalSqueeze | xmssMerkleBlockA =>
+    decide +kernel
+  | forsMerkleBlockB a b => cases a <;> cases b <;> decide +kernel
+  | forsRootsPairAbsorb a => cases a <;> decide +kernel
+  | wotsChainStep2 a => cases a <;> decide +kernel
+  | wotsTellPairAbsorb a => cases a <;> decide +kernel
+  | xmssMerkleBlockB a b => cases a <;> cases b <;> decide +kernel
+  | statelessDecompLimb l =>
+    have hl : l < 7 := of_decide_eq_true h
+    rcases l with _ | _ | _ | _ | _ | _ | _ | l <;> first | decide +kernel | omega
+  | forsLeafHash slot =>
+    have hs : slot < 6 := of_decide_eq_true h
+    rcases slot with _ | _ | _ | _ | _ | _ | slot <;> first | decide +kernel | omega
+  | hmsgDecompLimb l =>
+    have hl : l < 5 := of_decide_eq_true h
+    rcases l with _ | _ | _ | _ | _ | l <;> first | decide +kernel | omega
+  | wotsChainStep0 slot =>
+    have hs : slot < 5 := of_decide_eq_true h
+    rcases slot with _ | _ | _ | _ | _ | slot <;> first | decide +kernel | omega
+
+private theorem wotsPackSlot_lt_5 (chain : Nat) : wotsPackSlot chain < 5 := by
+  unfold wotsPackSlot
+  split <;> try decide
+  split <;> try decide
+  split <;> try decide
+  split <;> decide
+
+private theorem pushLayerWotsAndMerkle_validSlot (layer subHeight : Nat) (isTopFinal : Bool) :
+    ∀ op ∈ pushLayerWotsAndMerkle layer subHeight isTopFinal,
+      (stepOpKindAndC0 op).1.validSlot = true := by
+  intro op hMem
+  unfold pushLayerWotsAndMerkle at hMem
+  simp only [List.mem_append, List.mem_flatMap, List.mem_range,
+    List.mem_cons, List.not_mem_nil, or_false] at hMem
+  rcases hMem with ((rfl | ⟨pair, _, ⟨sub, _, rfl | rfl | rfl⟩ | rfl⟩) | rfl) | ⟨lvl, _, rfl | rfl⟩
+  · rfl
+  · unfold stepOpKindAndC0; exact decide_eq_true (wotsPackSlot_lt_5 _)
+  · rfl
+  · rfl
+  · rfl
+  · rfl
+  · rfl
+  · rfl
+
+private theorem signerProgramBody_validSlot (profile : AggSigProfile) :
+    ∀ op ∈ signerProgramBody profile, (stepOpKindAndC0 op).1.validSlot = true := by
+  intro op hMem
+  cases profile with
+  | xmssPoseidon2 =>
+    unfold signerProgramBody at hMem
+    simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
+      List.mem_map, List.mem_range] at hMem
+    rcases hMem with ((rfl | rfl | rfl) | ⟨l, hl, rfl⟩) | hPush
+    · rfl
+    · rfl
+    · rfl
+    · exact decide_eq_true hl
+    · exact pushLayerWotsAndMerkle_validSlot 0 6 true op hPush
+  | corduroyPoseidon2 =>
+    unfold signerProgramBody at hMem
+    simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
+      List.mem_map, List.mem_flatMap, List.mem_range] at hMem
+    rcases hMem with (((((rfl | rfl) | ⟨l, hl, rfl⟩) | rfl) | hFors) | rfl) | ⟨layer, _, hLayer⟩
+    · rfl
+    · rfl
+    · exact decide_eq_true hl
+    · rfl
+    · rcases hFors with ⟨pair, hPair, ⟨sub, hSub, rfl | ⟨lvl, _, rfl | rfl⟩⟩ | rfl⟩
+      · exact decide_eq_true (by omega : (2 * pair + sub) / 6 < 6)
+      · rfl
+      · rfl
+      · rfl
+    · rfl
+    · rcases hLayer with ((rfl | rfl) | ⟨l, hl, rfl⟩) | hPush
+      · rfl
+      · rfl
+      · exact decide_eq_true hl
+      · exact pushLayerWotsAndMerkle_validSlot layer 4 (layer + 1 == 16) op hPush
+
+theorem buildSignerProgram_kind_mem_and_valid (profile : AggSigProfile) (t : Nat) :
+    (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1 ∈ allStepConstraintKinds ∧
+    (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1.validSlot = true := by
+  have hVal : (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1.validSlot = true := by
+    by_cases ht : t < (buildSignerProgram profile).length
+    · rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem ht, Option.getD_some]
+      have hMem := List.getElem_mem ht
+      unfold buildSignerProgram at hMem
+      rcases List.mem_append.mp hMem with hBody | hRep
+      · exact signerProgramBody_validSlot profile _ hBody
+      · have hIdle : (buildSignerProgram profile)[t] = StepOp.idle :=
+          (List.mem_replicate.mp hRep).2
+        rw [hIdle]; rfl
+    · rw [List.getD_eq_getElem?_getD, List.getElem?_eq_none (Nat.le_of_not_lt ht), Option.getD_none]
+      rfl
+  exact ⟨mem_allStepConstraintKinds_of_validSlot _ hVal, hVal⟩
+
+/-- Pure guard residuals of `stepMerkleBlockA` (independent of `x.next`). -/
+def stepMerkleBlockAGuards (x : StepOpRowInputs) (domainTag meta0 : Goldilocks) : List Goldilocks :=
+  [stepBoolCheck (x.aux 0), x.prev stCursorIdx -ₚ ((x.aux 0 +ₚ x.aux 1) +ₚ x.aux 1)] ++
+  (List.range 4).flatMap (fun i =>
+    [x.stIn i -ₚ x.pkSeed i,
+     x.stIn (4 + i) -ₚ
+       (((Goldilocks.one -ₚ x.aux 0) *ₚ x.prev (stWork + i)) +ₚ (x.aux 0 *ₚ x.aux (2 + i)))]) ++
+  [x.stIn 8 -ₚ domainTag, x.stIn 9 -ₚ meta0, x.stIn 10 -ₚ x.prev stTreeLo,
+   x.stIn 11 -ₚ x.prev stTreeHi]
+
+/-- Functional next-state of `stepMerkleBlockA` (independent of `x.next`). -/
+def stepMerkleBlockAExpectedNext (x : StepOpRowInputs) (j : Nat) : Goldilocks :=
+  if stepInBlock stSubSponge 12 j then x.permOut (j - stSubSponge)
+  else if stepInBlock stWork 4 j then
+    let i := j - stWork
+    (x.aux 0 *ₚ x.prev (stWork + i)) +ₚ ((Goldilocks.one -ₚ x.aux 0) *ₚ x.aux (2 + i))
+  else if j = stCursorIdx then x.aux 1
+  else x.prev j
+
+/-- Pure pre-state / `stIn` / `permOut` / `aux` guard residuals of one `StepConstraintKind`
+    (never reads `x.next`). -/
+def stepOpGuardResiduals (kind : StepConstraintKind) (c0 : Goldilocks) (x : StepOpRowInputs) :
+    List Goldilocks :=
+  match kind with
+  | .idle => []
+  | .statefulHmsgBlock0 =>
+    (List.range 6).map (fun i => stepBoolCheck (x.aux i)) ++
+    (List.range 32).map (fun i => stepBoolCheck (x.aux (6 + i))) ++
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.pkSeed i, x.stIn (4 + i) -ₚ x.pkRoot i]) ++
+    [x.stIn 8 -ₚ domainHMsgStateful,
+     x.stIn 9 -ₚ ((stepWeightedSum x.aux (fun i => 2 ^ i) 6 *ₚ ‹2 ^ 32›) +ₚ
+       stepWeightedSum (fun i => x.aux (6 + i)) (fun i => 2 ^ i) 32),
+     x.stIn 10 -ₚ x.mu 4, x.stIn 11 -ₚ poseidon2IvTag]
+  | .statefulHmsgBlock1 => stepSpongeAbsorbInput x x.aux x.mu
+  | .statefulHmsgSqueeze => stepSqueezeInput x
+  | .statelessDeriveBlock0 =>
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.pkSeed i, x.stIn (4 + i) -ₚ x.pkRoot i]) ++
+    [x.stIn 8 -ₚ domainHMsgStateless, x.stIn 9 -ₚ x.mu 4, x.stIn 10,
+     x.stIn 11 -ₚ poseidon2IvTag]
+  | .statelessDeriveBlock1 => stepSpongeAbsorbInput x x.aux x.mu
+  | .statelessDecompLimb l => stepLimb63Decomp x l
+  | .forsRootsSpongeInit =>
+    (List.range 4).map (fun i => x.stIn i -ₚ x.pkSeed i) ++
+    [x.stIn 4 -ₚ x.prev stKpIdx, x.stIn 5 -ₚ x.prev stTreeLo, x.stIn 6 -ₚ x.prev stTreeHi,
+     x.stIn 7 -ₚ ‹32›, x.stIn 8 -ₚ domainForsRoots, x.stIn 9, x.stIn 10,
+     x.stIn 11 -ₚ poseidon2IvTag]
+  | .forsLeafHash slot =>
+    (List.range 4).map (fun k => quarticBase4 (x.aux (4 + k))) ++
+    [x.prev (stRemPack + slot) -ₚ
+       (stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4 +ₚ (x.aux 8 *ₚ ‹256›))] ++
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.aux i, x.stIn (4 + i) -ₚ x.pkSeed i]) ++
+    [x.stIn 8 -ₚ domainForsLeaf,
+     x.stIn 9 -ₚ ((x.prev stKpIdx *ₚ ‹2 ^ 24›) +ₚ
+       (c0 +ₚ stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4)),
+     x.stIn 10 -ₚ x.prev stTreeLo, x.stIn 11 -ₚ x.prev stTreeHi]
+  | .forsMerkleBlockA =>
+    stepMerkleBlockAGuards x domainForsNode ((c0 +ₚ (x.prev stKpIdx *ₚ ‹2 ^ 16›)) +ₚ x.aux 1)
+  | .forsMerkleBlockB isTreeLast _ =>
+    stepMerkleBlockBInput x ++ (if isTreeLast then [x.prev stCursorIdx] else [])
+  | .forsRootsPairAbsorb isLastPair =>
+    (if isLastPair then (List.range 6).map (fun s => x.prev (stRemPack + s)) else []) ++
+    stepSpongeAbsorbInput x (fun i => x.prev (stCurRoot + i)) (fun i => x.prev (stWork + i))
+  | .forsRootsFinalSqueeze => stepSqueezeInput x
+  | .detTreeHmsgBlock0 =>
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.pkSeed i, x.stIn (4 + i) -ₚ x.pkRoot i]) ++
+    [x.stIn 8 -ₚ domainHMsgDetTree, x.stIn 9 -ₚ (c0 +ₚ x.prev stKpIdx),
+     x.stIn 10 -ₚ x.prev stTreeLo, x.stIn 11 -ₚ x.prev stTreeHi]
+  | .detTreeHmsgBlock1 =>
+    (List.range 32).map (fun i => stepBoolCheck (x.aux i)) ++
+    (List.range 4).map (fun i =>
+      x.stIn i -ₚ (x.prev (stMainSponge + i) +ₚ x.prev (stCurRoot + i))) ++
+    [x.stIn 4 -ₚ (x.prev (stMainSponge + 4) +ₚ stepWeightedSum x.aux (fun i => 2 ^ i) 32),
+     x.stIn 5 -ₚ (x.prev (stMainSponge + 5) +ₚ Goldilocks.one)] ++
+    (List.range 6).map (fun i => x.stIn (6 + i) -ₚ x.prev (stMainSponge + 6 + i))
+  | .hmsgDecompLimb l =>
+    stepLimb63Decomp x l ++
+    (if l = 4 then [stepHmsgDecompExpected x l stAccOrU1 -ₚ ‹192›] else [])
+  | .wotsTellInit =>
+    (List.range 4).map (fun i => x.stIn i -ₚ x.pkSeed i) ++
+    [x.stIn 4 -ₚ (c0 +ₚ x.prev stKpIdx), x.stIn 5 -ₚ x.prev stTreeLo,
+     x.stIn 6 -ₚ x.prev stTreeHi, x.stIn 7 -ₚ ‹128›, x.stIn 8 -ₚ domainWotsPk, x.stIn 9,
+     x.stIn 10, x.stIn 11 -ₚ poseidon2IvTag]
+  | .wotsChainStep0 slot =>
+    [stepBoolCheck (x.aux 4), stepBoolCheck (x.aux 5), stepBoolCheck (x.aux 6),
+     x.aux 5 *ₚ (Goldilocks.one -ₚ x.aux 4), x.aux 6 *ₚ (Goldilocks.one -ₚ x.aux 5),
+     x.prev (stRemPack + slot) -ₚ
+       ((‹3› -ₚ ((x.aux 4 +ₚ x.aux 5) +ₚ x.aux 6)) +ₚ (x.aux 7 *ₚ ‹4›))] ++
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.aux i, x.stIn (4 + i) -ₚ x.pkSeed i]) ++
+    stepWotsStepInput x c0
+  | .wotsChainStep1 =>
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.prev (stWork + i), x.stIn (4 + i) -ₚ x.pkSeed i]) ++
+    stepWotsStepInput x c0
+  | .wotsChainStep2 _ =>
+    (List.range 4).flatMap (fun i => [x.stIn i -ₚ x.prev (stWork + i), x.stIn (4 + i) -ₚ x.pkSeed i]) ++
+    stepWotsStepInput x c0
+  | .wotsTellPairAbsorb isLastPair =>
+    (if isLastPair then (List.range 5).map (fun s => x.prev (stRemPack + s)) else []) ++
+    stepSpongeAbsorbInput x (fun i => x.prev (stSubSponge + i)) (fun i => x.prev (stWork + i))
+  | .wotsTellFinalSqueeze => stepSqueezeInput x
+  | .xmssMerkleBlockA =>
+    stepMerkleBlockAGuards x domainMerkleNode (c0 +ₚ x.aux 1)
+  | .xmssMerkleBlockB isLayerLast isTopFinal =>
+    stepMerkleBlockBInput x ++
+    (if !isLayerLast then []
+     else if isTopFinal then
+       [x.prev stCursorIdx] ++ (List.range 4).map (fun i => x.permOut i -ₚ x.pkRoot i)
+     else
+       [x.prev stCursorIdx] ++
+       (List.range 4).map (fun i => stepBoolCheck (x.aux i)) ++
+       (List.range 14).map (fun i => quarticBase4 (x.aux (4 + i))) ++
+       (List.range 2).map (fun i => quarticBase4 (x.aux (18 + i))) ++
+       (List.range 14).map (fun i => quarticBase4 (x.aux (20 + i))) ++
+       [x.prev stTreeLo -ₚ
+          (stepWeightedSum x.aux (fun i => 2 ^ i) 4 +ₚ
+            (stepWeightedSum (fun i => x.aux (4 + i)) (fun i => 4 ^ i) 14 *ₚ ‹16›)),
+        x.prev stTreeHi -ₚ
+          (stepWeightedSum (fun i => x.aux (18 + i)) (fun i => 4 ^ i) 2 +ₚ
+            (stepWeightedSum (fun i => x.aux (20 + i)) (fun i => 4 ^ i) 14 *ₚ ‹16›))])
+
+/-- Deterministic next-state limb `j` (`0 ≤ j < 44`) of one `StepConstraintKind` (never reads `x.next`). -/
+def stepOpExpectedNext (kind : StepConstraintKind) (_c0 : Goldilocks) (x : StepOpRowInputs)
+    (j : Nat) : Goldilocks :=
+  match kind with
+  | .idle => Goldilocks.zero
+  | .statefulHmsgBlock0 =>
+    if stepInBlock stCurRoot 4 j then x.pkRoot (j - stCurRoot)
+    else if j = stKpIdx then stepWeightedSum x.aux (fun i => 2 ^ i) 6
+    else if stepInBlock stMainSponge 12 j then x.permOut (j - stMainSponge)
+    else Goldilocks.zero
+  | .statefulHmsgBlock1 | .forsRootsSpongeInit | .forsRootsPairAbsorb _
+  | .detTreeHmsgBlock0 | .wotsTellInit | .wotsTellPairAbsorb _ =>
+    if stepInBlock stMainSponge 12 j then x.permOut (j - stMainSponge) else x.prev j
+  | .statefulHmsgSqueeze | .detTreeHmsgBlock1 =>
+    if stepInBlock stRemPack 6 j then Goldilocks.zero
+    else if stepInBlock stMainSponge 12 j then x.permOut (j - stMainSponge)
+    else if j = stAccOrU1 then Goldilocks.zero
+    else x.prev j
+  | .statelessDeriveBlock0 =>
+    if stepInBlock stMainSponge 12 j then x.permOut (j - stMainSponge) else Goldilocks.zero
+  | .statelessDeriveBlock1 =>
+    if stepInBlock stMainSponge 12 j then x.permOut (j - stMainSponge)
+    else if stepInBlock stRemPack 6 j then Goldilocks.zero
+    else x.prev j
+  | .statelessDecompLimb l => stepStatelessDecompExpected x l j
+  | .forsLeafHash slot =>
+    if j = stRemPack + slot then x.aux 8
+    else if stepInBlock stWork 4 j then x.permOut (j - stWork) +ₚ x.aux (j - stWork)
+    else if j = stCursorIdx then stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4
+    else x.prev j
+  | .forsMerkleBlockA | .xmssMerkleBlockA => stepMerkleBlockAExpectedNext x j
+  | .forsMerkleBlockB isTreeLast isOddTree =>
+    if isTreeLast && !isOddTree then
+      if stepInBlock stCurRoot 4 j then x.permOut (j - stCurRoot) else x.prev j
+    else
+      if stepInBlock stWork 4 j then x.permOut (j - stWork) else x.prev j
+  | .forsRootsFinalSqueeze =>
+    if stepInBlock stCurRoot 4 j then x.permOut (j - stCurRoot) else x.prev j
+  | .hmsgDecompLimb l => stepHmsgDecompExpected x l j
+  | .wotsChainStep0 slot =>
+    if j = stRemPack + slot then x.aux 7
+    else if stepInBlock stWork 4 j then
+      let i := j - stWork
+      (x.aux 4 *ₚ x.aux i) +ₚ ((Goldilocks.one -ₚ x.aux 4) *ₚ (x.permOut i +ₚ x.aux i))
+    else if j = stAccOrU1 then x.aux 5
+    else if j = stWotsU2 then x.aux 6
+    else x.prev j
+  | .wotsChainStep1 =>
+    if stepInBlock stWork 4 j then
+      let i := j - stWork
+      (x.prev stAccOrU1 *ₚ x.prev (stWork + i)) +ₚ
+        ((Goldilocks.one -ₚ x.prev stAccOrU1) *ₚ (x.permOut i +ₚ x.prev (stWork + i)))
+    else x.prev j
+  | .wotsChainStep2 isOdd =>
+    let base := if isOdd then stWork else stSubSponge
+    if stepInBlock base 4 j then
+      let i := j - base
+      (x.prev stWotsU2 *ₚ x.prev (stWork + i)) +ₚ
+        ((Goldilocks.one -ₚ x.prev stWotsU2) *ₚ (x.permOut i +ₚ x.prev (stWork + i)))
+    else x.prev j
+  | .wotsTellFinalSqueeze =>
+    if stepInBlock stWork 4 j then x.permOut (j - stWork)
+    else if j = stCursorIdx then x.prev stKpIdx
+    else x.prev j
+  | .xmssMerkleBlockB isLayerLast isTopFinal =>
+    if !isLayerLast then
+      if stepInBlock stWork 4 j then x.permOut (j - stWork) else x.prev j
+    else if isTopFinal then
+      Goldilocks.zero
+    else
+      if stepInBlock stCurRoot 4 j then x.permOut (j - stCurRoot)
+      else if j = stKpIdx then stepWeightedSum x.aux (fun i => 2 ^ i) 4
+      else if j = stTreeLo then
+        stepWeightedSum (fun i => x.aux (4 + i)) (fun i => 4 ^ i) 14 +ₚ
+          (stepWeightedSum (fun i => x.aux (18 + i)) (fun i => 4 ^ i) 2 *ₚ ‹2 ^ 28›)
+      else if j = stTreeHi then
+        stepWeightedSum (fun i => x.aux (20 + i)) (fun i => 4 ^ i) 14
+      else x.prev j
+
+theorem stepOpGuardResiduals_congr_next (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (next' : Nat → Goldilocks) :
+    stepOpGuardResiduals kind c0 { x with next := next' } = stepOpGuardResiduals kind c0 x := by
+  cases kind <;> rfl
+
+theorem stepOpExpectedNext_congr_next (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (next' : Nat → Goldilocks) (j : Nat) :
+    stepOpExpectedNext kind c0 { x with next := next' } j = stepOpExpectedNext kind c0 x j := by
+  cases kind <;> rfl
+
+private theorem allZero_map_iff (n : Nat) (f : Nat → Goldilocks) :
+    allZeroGoldilocks ((List.range n).map f) = true ↔ ∀ i < n, f i = Goldilocks.zero := by
+  unfold allZeroGoldilocks
+  rw [List.all_map, List.all_eq_true]
+  constructor
+  · intro h i hi; exact beq_iff_eq.mp (h i (List.mem_range.mpr hi))
+  · intro h i hi; exact beq_iff_eq.mpr (h i (List.mem_range.mp hi))
+
+private theorem allZero_stepNextIsPerm_iff (x : StepOpRowInputs) (base n : Nat) :
+    allZeroGoldilocks (stepNextIsPerm x base n) = true ↔
+      ∀ i < n, x.next (base + i) = x.permOut i := by
+  unfold stepNextIsPerm
+  rw [allZero_map_iff]
+  simp only [g_sub_eq_zero_iff]
+
+private theorem allZero_filterMap_range_iff (n : Nat) (skip : Nat → Bool) (f : Nat → Goldilocks) :
+    allZeroGoldilocks ((List.range n).filterMap (fun j => if skip j then none else some (f j))) = true ↔
+      ∀ j < n, skip j = false → f j = Goldilocks.zero := by
+  unfold allZeroGoldilocks
+  rw [List.all_filterMap, List.all_eq_true]
+  constructor
+  · intro h j hj hSkip
+    have hMem := h j (List.mem_range.mpr hj)
+    simp only [hSkip, Bool.false_eq_true, ↓reduceIte, beq_iff_eq] at hMem
+    exact hMem
+  · intro h j hj
+    cases hSkip : skip j
+    · simp only [Bool.false_eq_true, ↓reduceIte, beq_iff_eq]
+      exact h j (List.mem_range.mp hj) hSkip
+    · rfl
+
+private theorem allZero_stepCarryUnchanged_iff (x : StepOpRowInputs) (changed : Nat → Bool) :
+    allZeroGoldilocks (stepCarryUnchanged x changed) = true ↔
+      ∀ j < 44, changed j = false → x.next j = x.prev j := by
+  unfold stepCarryUnchanged
+  rw [allZero_filterMap_range_iff]
+  simp only [g_sub_eq_zero_iff]
+
+private theorem allZero_stepZeroElsewhere_iff (x : StepOpRowInputs) (kept : Nat → Bool) :
+    allZeroGoldilocks (stepZeroElsewhere x kept) = true ↔
+      ∀ j < 44, kept j = false → x.next j = Goldilocks.zero := by
+  unfold stepZeroElsewhere
+  exact allZero_filterMap_range_iff 44 kept x.next
+
+private theorem allZero_flatMap_triple_iff (n : Nat) (g1 g2 nRes : Nat → Goldilocks) :
+    allZeroGoldilocks ((List.range n).flatMap (fun i => [g1 i, g2 i, nRes i])) = true ↔
+      allZeroGoldilocks ((List.range n).flatMap (fun i => [g1 i, g2 i])) = true ∧
+      ∀ i < n, nRes i = Goldilocks.zero := by
+  unfold allZeroGoldilocks
+  simp only [List.all_flatMap, List.all_cons, List.all_nil, Bool.and_true,
+    List.all_eq_true, List.mem_range, Bool.and_eq_true, beq_iff_eq]
+  constructor
+  · intro h
+    exact ⟨fun i hi => ⟨(h i hi).1, (h i hi).2.1⟩, fun i hi => (h i hi).2.2⟩
+  · rintro ⟨hg, hn⟩ i hi
+    exact ⟨(hg i hi).1, (hg i hi).2, hn i hi⟩
+
+private theorem stepInBlock_iff (a n j : Nat) :
+    stepInBlock a n j = true ↔ a ≤ j ∧ j < a + n := by
+  unfold stepInBlock
+  simp only [Bool.and_eq_true, decide_eq_true_eq]
+
+private theorem stepMerkleBlockA_iff (x : StepOpRowInputs) (domainTag meta0 : Goldilocks) :
+    allZeroGoldilocks (stepMerkleBlockA x domainTag meta0) = true ↔
+      allZeroGoldilocks (stepMerkleBlockAGuards x domainTag meta0) = true ∧
+      ∀ j < 44, x.next j = stepMerkleBlockAExpectedNext x j := by
+  unfold stepMerkleBlockA stepMerkleBlockAGuards
+  have hSingle : ∀ r : Goldilocks, allZeroGoldilocks [r] = (r == Goldilocks.zero) := by
+    intro r; simp [allZeroGoldilocks]
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_flatMap_triple_iff,
+    allZero_stepNextIsPerm_iff, hSingle, beq_iff_eq, g_sub_eq_zero_iff,
+    allZero_stepCarryUnchanged_iff]
+  constructor
+  · rintro ⟨⟨⟨⟨⟨hG0, hG1, hNextWork⟩, hG2⟩, hNextSub⟩, hNextCur⟩, hCarry⟩
+    refine ⟨⟨⟨hG0, hG1⟩, hG2⟩, fun j hj => ?_⟩
+    unfold stepMerkleBlockAExpectedNext
+    by_cases hSub : stepInBlock stSubSponge 12 j = true
+    · rw [hSub]; simp only [↓reduceIte]
+      obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stSubSponge 12 j).mp hSub
+      have hi : j - stSubSponge < 12 := by unfold stSubSponge at *; omega
+      have hAdd : stSubSponge + (j - stSubSponge) = j := by omega
+      simpa only [hAdd] using hNextSub (j - stSubSponge) hi
+    · have hSubF : stepInBlock stSubSponge 12 j = false := Bool.eq_false_iff.mpr hSub
+      rw [hSubF]; simp only [Bool.false_eq_true, ↓reduceIte]
+      by_cases hWk : stepInBlock stWork 4 j = true
+      · rw [hWk]; simp only [↓reduceIte]
+        obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stWork 4 j).mp hWk
+        have hi : j - stWork < 4 := by unfold stWork at *; omega
+        have hAdd : stWork + (j - stWork) = j := by omega
+        simpa only [hAdd] using hNextWork (j - stWork) hi
+      · have hWkF : stepInBlock stWork 4 j = false := Bool.eq_false_iff.mpr hWk
+        rw [hWkF]; simp only [Bool.false_eq_true, ↓reduceIte]
+        by_cases hCur : j = stCursorIdx
+        · subst hCur; simp [hNextCur]
+        · simp only [hCur, ↓reduceIte]
+          exact hCarry j hj (by simp [hSubF, hWkF, beq_false_of_ne hCur])
+  · rintro ⟨⟨⟨hG0, hG1⟩, hG2⟩, hNext⟩
+    refine ⟨⟨⟨⟨⟨hG0, hG1, fun i hi => ?_⟩, hG2⟩, fun i hi => ?_⟩, ?_⟩, fun j hj hCh => ?_⟩
+    · rw [hNext (stWork + i) (by unfold stWork; omega)]
+      unfold stepMerkleBlockAExpectedNext
+      have hSubF : stepInBlock stSubSponge 12 (stWork + i) = false := by
+        unfold stepInBlock stSubSponge stWork; simp
+      have hWkT : stepInBlock stWork 4 (stWork + i) = true := by
+        unfold stepInBlock stWork; simp; omega
+      have hSubIdx : stWork + i - stWork = i := by omega
+      simp [hSubF, hWkT, hSubIdx]
+    · rw [hNext (stSubSponge + i) (by unfold stSubSponge; omega)]
+      unfold stepMerkleBlockAExpectedNext
+      have hSubT : stepInBlock stSubSponge 12 (stSubSponge + i) = true := by
+        unfold stepInBlock stSubSponge; simp; omega
+      have hSubIdx : stSubSponge + i - stSubSponge = i := by omega
+      simp [hSubT, hSubIdx]
+    · rw [hNext stCursorIdx (by decide)]
+      unfold stepMerkleBlockAExpectedNext
+      have hSubF : stepInBlock stSubSponge 12 stCursorIdx = false := by decide
+      have hWkF : stepInBlock stWork 4 stCursorIdx = false := by decide
+      simp [hSubF, hWkF]
+    · rw [hNext j hj]
+      unfold stepMerkleBlockAExpectedNext
+      simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hCh
+      simp [hCh.1.1, hCh.1.2, hCh.2]
+
+private theorem stepBlockUpdate_iff (x : StepOpRowInputs) (base n : Nat)
+    (hEnd : base + n ≤ 44) :
+    (allZeroGoldilocks (stepNextIsPerm x base n) = true ∧
+     allZeroGoldilocks (stepCarryUnchanged x (fun j => stepInBlock base n j)) = true) ↔
+      ∀ j < 44, x.next j = (if stepInBlock base n j then x.permOut (j - base) else x.prev j) := by
+  rw [allZero_stepNextIsPerm_iff, allZero_stepCarryUnchanged_iff]
+  constructor
+  · rintro ⟨hPerm, hCarry⟩ j hj
+    cases hIn : stepInBlock base n j
+    · simp only [Bool.false_eq_true, ↓reduceIte]; exact hCarry j hj hIn
+    · simp only [↓reduceIte]
+      obtain ⟨hLo, hHi⟩ := (stepInBlock_iff base n j).mp hIn
+      have hAdd : base + (j - base) = j := by omega
+      simpa only [hAdd] using hPerm (j - base) (by omega)
+  · intro hNext
+    refine ⟨fun i hi => ?_, fun j hj hCh => ?_⟩
+    · rw [hNext (base + i) (by omega)]
+      have hIn : stepInBlock base n (base + i) = true :=
+        (stepInBlock_iff base n (base + i)).mpr ⟨by omega, by omega⟩
+      have hSub : base + i - base = i := by omega
+      simp [hIn, hSub]
+    · rw [hNext j hj, hCh]; rfl
+
+/-- **Exact Guard + Functional Transition Decomposition (`stepOpConstraints_iff_guard_and_next`)**:
+    For every valid `StepConstraintKind`, `stepOpConstraints kind c0 x` vanishes if and only if
+    its pure pre-state guard list `stepOpGuardResiduals kind c0 x` vanishes AND all 44 `next`
+    state limbs equal `stepOpExpectedNext kind c0 x j`. -/
+theorem stepOpConstraints_iff_guard_and_next (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (hValid : kind.validSlot = true) :
+    allZeroGoldilocks (stepOpConstraints kind c0 x) = true ↔
+      allZeroGoldilocks (stepOpGuardResiduals kind c0 x) = true ∧
+      ∀ j < 44, x.next j = stepOpExpectedNext kind c0 x j := by
+  have hSingle : ∀ r : Goldilocks, allZeroGoldilocks [r] = (r == Goldilocks.zero) := by
+    intro r; simp [allZeroGoldilocks]
+  have hPair : ∀ r0 r1 : Goldilocks,
+      allZeroGoldilocks [r0, r1] = ((r0 == Goldilocks.zero) && (r1 == Goldilocks.zero)) := by
+    intros; simp [allZeroGoldilocks]
+  cases kind with
+  | idle =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    rw [allZero_map_iff]
+    exact ⟨fun h => ⟨rfl, h⟩, fun h => h.2⟩
+  | statefulHmsgBlock0 =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    have hTail5 : ∀ (r0 r1 r2 r3 r4 : Goldilocks),
+        allZeroGoldilocks [r0, r1, r2, r3, r4] =
+          (allZeroGoldilocks [r0, r1, r2, r3] && (r4 == Goldilocks.zero)) := by
+      intros; simp [allZeroGoldilocks, Bool.and_assoc]
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_flatMap_triple_iff,
+      hTail5, beq_iff_eq, g_sub_eq_zero_iff, allZero_stepNextIsPerm_iff,
+      allZero_stepZeroElsewhere_iff]
+    constructor
+    · rintro ⟨⟨⟨⟨⟨hB6, hB32⟩, hStIn, hRoot⟩, hT4, hKp⟩, hMain⟩, hZero⟩
+      refine ⟨⟨⟨⟨hB6, hB32⟩, hStIn⟩, hT4⟩, fun j hj => ?_⟩
+      by_cases hC : stepInBlock stCurRoot 4 j = true
+      · rw [hC]; simp only [↓reduceIte]
+        obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stCurRoot 4 j).mp hC
+        have hAdd : stCurRoot + (j - stCurRoot) = j := by unfold stCurRoot at *; omega
+        simpa only [hAdd] using hRoot (j - stCurRoot) (by unfold stCurRoot at *; omega)
+      · have hCF : stepInBlock stCurRoot 4 j = false := Bool.eq_false_iff.mpr hC
+        rw [hCF]; simp only [Bool.false_eq_true, ↓reduceIte]
+        by_cases hK : j = stKpIdx
+        · subst hK; simp [hKp]
+        · simp only [hK, ↓reduceIte]
+          by_cases hM : stepInBlock stMainSponge 12 j = true
+          · rw [hM]; simp only [↓reduceIte]
+            obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stMainSponge 12 j).mp hM
+            have hAdd : stMainSponge + (j - stMainSponge) = j := by omega
+            simpa only [hAdd] using hMain (j - stMainSponge) (by unfold stMainSponge at *; omega)
+          · have hMF : stepInBlock stMainSponge 12 j = false := Bool.eq_false_iff.mpr hM
+            rw [hMF]; simp only [Bool.false_eq_true, ↓reduceIte]
+            exact hZero j hj (by simp [hCF, beq_false_of_ne hK, hMF])
+    · rintro ⟨⟨⟨⟨hB6, hB32⟩, hStIn⟩, hT4⟩, hNext⟩
+      refine ⟨⟨⟨⟨⟨hB6, hB32⟩, hStIn, fun i hi => ?_⟩, hT4, ?_⟩, fun i hi => ?_⟩, fun j hj hK => ?_⟩
+      · rw [hNext (stCurRoot + i) (by unfold stCurRoot; omega)]
+        have hC : stepInBlock stCurRoot 4 (stCurRoot + i) = true := by
+          unfold stepInBlock stCurRoot; simp; omega
+        have hSub : stCurRoot + i - stCurRoot = i := by omega
+        simp [hC, hSub]
+      · rw [hNext stKpIdx (by decide)]
+        have hCF : stepInBlock stCurRoot 4 stKpIdx = false := by decide
+        simp [hCF]
+      · rw [hNext (stMainSponge + i) (by unfold stMainSponge; omega)]
+        have hCF : stepInBlock stCurRoot 4 (stMainSponge + i) = false := by
+          unfold stepInBlock stCurRoot stMainSponge; simp; omega
+        have hKNe : stMainSponge + i ≠ stKpIdx := by unfold stMainSponge stKpIdx; omega
+        have hMT : stepInBlock stMainSponge 12 (stMainSponge + i) = true := by
+          unfold stepInBlock stMainSponge; simp; omega
+        have hSub : stMainSponge + i - stMainSponge = i := by omega
+        simp [hCF, hKNe, hMT, hSub]
+      · rw [hNext j hj]
+        simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hK
+        simp [hK.1.1, hK.1.2, hK.2]
+  | statefulHmsgBlock1 | forsRootsSpongeInit | forsRootsPairAbsorb _
+  | detTreeHmsgBlock0 | wotsTellInit | wotsTellPairAbsorb _ =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true]
+    rw [and_assoc]
+    exact and_congr_right' (stepBlockUpdate_iff x stMainSponge 12 (by decide))
+  | statefulHmsgSqueeze | detTreeHmsgBlock1 =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_stepNextIsPerm_iff,
+      allZero_map_iff, hSingle, beq_iff_eq, allZero_stepCarryUnchanged_iff]
+    rw [and_assoc, and_assoc, and_assoc]
+    apply and_congr_right'
+    constructor
+    · rintro ⟨hMain, hRem, hAcc, hCarry⟩ j hj
+      by_cases hR : stepInBlock stRemPack 6 j = true
+      · rw [hR]; simp only [↓reduceIte]
+        obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stRemPack 6 j).mp hR
+        have hAdd : stRemPack + (j - stRemPack) = j := by omega
+        simpa only [hAdd] using hRem (j - stRemPack) (by unfold stRemPack at *; omega)
+      · have hRF : stepInBlock stRemPack 6 j = false := Bool.eq_false_iff.mpr hR
+        rw [hRF]; simp only [Bool.false_eq_true, ↓reduceIte]
+        by_cases hM : stepInBlock stMainSponge 12 j = true
+        · rw [hM]; simp only [↓reduceIte]
+          obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stMainSponge 12 j).mp hM
+          have hAdd : stMainSponge + (j - stMainSponge) = j := by omega
+          simpa only [hAdd] using hMain (j - stMainSponge) (by unfold stMainSponge at *; omega)
+        · have hMF : stepInBlock stMainSponge 12 j = false := Bool.eq_false_iff.mpr hM
+          rw [hMF]; simp only [Bool.false_eq_true, ↓reduceIte]
+          by_cases hA : j = stAccOrU1
+          · subst hA; simp [hAcc]
+          · simp only [hA, ↓reduceIte]
+            exact hCarry j hj (by simp [hRF, hMF, beq_false_of_ne hA])
+    · intro hNext
+      refine ⟨fun i hi => ?_, fun s hs => ?_, ?_, fun j hj hCh => ?_⟩
+      · rw [hNext (stMainSponge + i) (by unfold stMainSponge; omega)]
+        have hRF : stepInBlock stRemPack 6 (stMainSponge + i) = false := by
+          unfold stepInBlock stRemPack stMainSponge; simp
+        have hMT : stepInBlock stMainSponge 12 (stMainSponge + i) = true := by
+          unfold stepInBlock stMainSponge; simp; omega
+        have hSub : stMainSponge + i - stMainSponge = i := by omega
+        simp [hRF, hMT, hSub]
+      · rw [hNext (stRemPack + s) (by unfold stRemPack; omega)]
+        have hRT : stepInBlock stRemPack 6 (stRemPack + s) = true := by
+          unfold stepInBlock stRemPack; simp; omega
+        simp [hRT]
+      · rw [hNext stAccOrU1 (by decide)]
+        have hRF : stepInBlock stRemPack 6 stAccOrU1 = false := by decide
+        have hMF : stepInBlock stMainSponge 12 stAccOrU1 = false := by decide
+        simp [hRF, hMF]
+      · rw [hNext j hj]
+        simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hCh
+        simp [hCh.1.1, hCh.1.2, hCh.2]
+  | statelessDeriveBlock0 =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_stepNextIsPerm_iff,
+      allZero_stepZeroElsewhere_iff]
+    rw [and_assoc]
+    apply and_congr_right'
+    constructor
+    · rintro ⟨hMain, hZero⟩ j hj
+      cases hM : stepInBlock stMainSponge 12 j
+      · simp only [Bool.false_eq_true, ↓reduceIte]; exact hZero j hj hM
+      · simp only [↓reduceIte]
+        obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stMainSponge 12 j).mp hM
+        have hAdd : stMainSponge + (j - stMainSponge) = j := by omega
+        simpa only [hAdd] using hMain (j - stMainSponge) (by unfold stMainSponge at *; omega)
+    · intro hNext
+      refine ⟨fun i hi => ?_, fun j hj hM => ?_⟩
+      · rw [hNext (stMainSponge + i) (by unfold stMainSponge; omega)]
+        have hMT : stepInBlock stMainSponge 12 (stMainSponge + i) = true := by
+          unfold stepInBlock stMainSponge; simp; omega
+        have hSub : stMainSponge + i - stMainSponge = i := by omega
+        simp [hMT, hSub]
+      · rw [hNext j hj, hM]; rfl
+  | statelessDeriveBlock1 =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_stepNextIsPerm_iff,
+      allZero_map_iff, allZero_stepCarryUnchanged_iff]
+    rw [and_assoc, and_assoc]
+    apply and_congr_right'
+    constructor
+    · rintro ⟨hMain, hRem, hCarry⟩ j hj
+      by_cases hM : stepInBlock stMainSponge 12 j = true
+      · rw [hM]; simp only [↓reduceIte]
+        obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stMainSponge 12 j).mp hM
+        have hAdd : stMainSponge + (j - stMainSponge) = j := by omega
+        simpa only [hAdd] using hMain (j - stMainSponge) (by unfold stMainSponge at *; omega)
+      · have hMF : stepInBlock stMainSponge 12 j = false := Bool.eq_false_iff.mpr hM
+        rw [hMF]; simp only [Bool.false_eq_true, ↓reduceIte]
+        by_cases hR : stepInBlock stRemPack 6 j = true
+        · rw [hR]; simp only [↓reduceIte]
+          obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stRemPack 6 j).mp hR
+          have hAdd : stRemPack + (j - stRemPack) = j := by omega
+          simpa only [hAdd] using hRem (j - stRemPack) (by unfold stRemPack at *; omega)
+        · have hRF : stepInBlock stRemPack 6 j = false := Bool.eq_false_iff.mpr hR
+          rw [hRF]; simp only [Bool.false_eq_true, ↓reduceIte]
+          exact hCarry j hj (by simp [hMF, hRF])
+    · intro hNext
+      refine ⟨fun i hi => ?_, fun s hs => ?_, fun j hj hCh => ?_⟩
+      · rw [hNext (stMainSponge + i) (by unfold stMainSponge; omega)]
+        have hMT : stepInBlock stMainSponge 12 (stMainSponge + i) = true := by
+          unfold stepInBlock stMainSponge; simp; omega
+        have hSub : stMainSponge + i - stMainSponge = i := by omega
+        simp [hMT, hSub]
+      · rw [hNext (stRemPack + s) (by unfold stRemPack; omega)]
+        have hMF : stepInBlock stMainSponge 12 (stRemPack + s) = false := by
+          unfold stepInBlock stRemPack stMainSponge; simp; omega
+        have hRT : stepInBlock stRemPack 6 (stRemPack + s) = true := by
+          unfold stepInBlock stRemPack; simp; omega
+        simp [hMF, hRT]
+      · rw [hNext j hj]
+        simp only [Bool.or_eq_false_iff] at hCh
+        simp [hCh.1, hCh.2]
+  | statelessDecompLimb l =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_map_iff, g_sub_eq_zero_iff]
+  | forsLeafHash slot =>
+    have hSlotLt : slot < 6 := by simpa [StepConstraintKind.validSlot] using hValid
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    have hTail5 : ∀ (r0 r1 r2 r3 r4 : Goldilocks),
+        allZeroGoldilocks [r0, r1, r2, r3, r4] =
+          (allZeroGoldilocks [r0, r1, r2, r3] && (r4 == Goldilocks.zero)) := by
+      intros; simp [allZeroGoldilocks, Bool.and_assoc]
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, hSingle, hPair, hTail5,
+      allZero_flatMap_triple_iff, beq_iff_eq, g_sub_eq_zero_iff,
+      allZero_stepCarryUnchanged_iff]
+    constructor
+    · rintro ⟨⟨⟨⟨hQ, hPack, hNextPack⟩, hIn, hNextWk⟩, hT4, hNextCur⟩, hCarry⟩
+      refine ⟨⟨⟨⟨hQ, hPack⟩, hIn⟩, hT4⟩, fun j hj => ?_⟩
+      by_cases hP : j = stRemPack + slot
+      · subst hP; simp [hNextPack]
+      · simp only [hP, ↓reduceIte]
+        by_cases hW : stepInBlock stWork 4 j = true
+        · rw [hW]; simp only [↓reduceIte]
+          obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stWork 4 j).mp hW
+          have hAdd : stWork + (j - stWork) = j := by omega
+          simpa only [hAdd] using hNextWk (j - stWork) (by unfold stWork at *; omega)
+        · have hWF : stepInBlock stWork 4 j = false := Bool.eq_false_iff.mpr hW
+          rw [hWF]; simp only [Bool.false_eq_true, ↓reduceIte]
+          by_cases hC : j = stCursorIdx
+          · subst hC; simp [hNextCur]
+          · simp only [hC, ↓reduceIte]
+            exact hCarry j hj (by simp [beq_false_of_ne hP, hWF, beq_false_of_ne hC])
+    · rintro ⟨⟨⟨⟨hQ, hPack⟩, hIn⟩, hT4⟩, hNext⟩
+      refine ⟨⟨⟨⟨hQ, hPack, ?_⟩, hIn, fun i hi => ?_⟩, hT4, ?_⟩, fun j hj hCh => ?_⟩
+      · rw [hNext (stRemPack + slot) (by unfold stRemPack; omega)]; simp
+      · rw [hNext (stWork + i) (by unfold stWork; omega)]
+        have hPNe : stWork + i ≠ stRemPack + slot := by unfold stWork stRemPack; omega
+        have hWT : stepInBlock stWork 4 (stWork + i) = true := by
+          unfold stepInBlock stWork; simp; omega
+        have hSub : stWork + i - stWork = i := by omega
+        simp [hPNe, hWT, hSub]
+      · rw [hNext stCursorIdx (by decide)]
+        have hPNe : stCursorIdx ≠ stRemPack + slot := by unfold stCursorIdx stRemPack; omega
+        have hWF : stepInBlock stWork 4 stCursorIdx = false := by decide
+        simp [hPNe, hWF]
+      · rw [hNext j hj]
+        simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hCh
+        simp [hCh.1.1, hCh.1.2, hCh.2]
+  | forsMerkleBlockA =>
+    exact stepMerkleBlockA_iff x domainForsNode ((c0 +ₚ (x.prev stKpIdx *ₚ ‹2 ^ 16›)) +ₚ x.aux 1)
+  | forsMerkleBlockB isTreeLast isOddTree =>
+    cases isTreeLast <;> cases isOddTree
+    · unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+      simp only [Bool.false_eq_true, Bool.false_and, ↓reduceIte, List.append_nil,
+        allZeroGoldilocks_append, Bool.and_eq_true]
+      exact and_congr_right' (stepBlockUpdate_iff x stWork 4 (by decide))
+    · unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+      simp only [Bool.false_eq_true, Bool.false_and, ↓reduceIte, List.append_nil,
+        allZeroGoldilocks_append, Bool.and_eq_true]
+      exact and_congr_right' (stepBlockUpdate_iff x stWork 4 (by decide))
+    · have hSplit :
+          stepOpConstraints (.forsMerkleBlockB true false) c0 x =
+            stepOpGuardResiduals (.forsMerkleBlockB true false) c0 x ++
+            (stepNextIsPerm x stCurRoot 4 ++
+             stepCarryUnchanged x (fun j => stepInBlock stCurRoot 4 j)) := by
+        simp only [stepOpConstraints, stepOpGuardResiduals,
+          Bool.not_false, Bool.and_self, ↓reduceIte, List.append_assoc]
+      rw [hSplit, allZeroGoldilocks_append, Bool.and_eq_true]
+      unfold stepOpExpectedNext
+      simp only [Bool.not_false, Bool.and_self, ↓reduceIte,
+        allZeroGoldilocks_append, Bool.and_eq_true]
+      exact and_congr_right' (stepBlockUpdate_iff x stCurRoot 4 (by decide))
+    · have hSplit :
+          stepOpConstraints (.forsMerkleBlockB true true) c0 x =
+            stepOpGuardResiduals (.forsMerkleBlockB true true) c0 x ++
+            (stepNextIsPerm x stWork 4 ++
+             stepCarryUnchanged x (fun j => stepInBlock stWork 4 j)) := by
+        simp only [stepOpConstraints, stepOpGuardResiduals,
+          Bool.not_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte, List.append_assoc]
+      rw [hSplit, allZeroGoldilocks_append, Bool.and_eq_true]
+      unfold stepOpExpectedNext
+      simp only [Bool.not_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte,
+        allZeroGoldilocks_append, Bool.and_eq_true]
+      exact and_congr_right' (stepBlockUpdate_iff x stWork 4 (by decide))
+  | forsRootsFinalSqueeze =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true]
+    rw [and_assoc]
+    exact and_congr_right' (stepBlockUpdate_iff x stCurRoot 4 (by decide))
+  | hmsgDecompLimb l =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_map_iff, g_sub_eq_zero_iff]
+  | wotsChainStep0 slot =>
+    have hSlotLt : slot < 5 := by simpa [StepConstraintKind.validSlot] using hValid
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    have hHead7 : ∀ (r0 r1 r2 r3 r4 r5 r6 : Goldilocks),
+        allZeroGoldilocks [r0, r1, r2, r3, r4, r5, r6] =
+          (allZeroGoldilocks [r0, r1, r2, r3, r4, r5] && (r6 == Goldilocks.zero)) := by
+      intros; simp [allZeroGoldilocks, Bool.and_assoc]
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, hHead7, hPair,
+      allZero_flatMap_triple_iff, beq_iff_eq, g_sub_eq_zero_iff,
+      allZero_stepCarryUnchanged_iff]
+    constructor
+    · rintro ⟨⟨⟨⟨⟨hU, hNextPack⟩, hIn, hNextWk⟩, hStepIn⟩, hNextU1, hNextU2⟩, hCarry⟩
+      refine ⟨⟨⟨hU, hIn⟩, hStepIn⟩, fun j hj => ?_⟩
+      by_cases hP : j = stRemPack + slot
+      · subst hP; simp [hNextPack]
+      · simp only [hP, ↓reduceIte]
+        by_cases hW : stepInBlock stWork 4 j = true
+        · rw [hW]; simp only [↓reduceIte]
+          obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stWork 4 j).mp hW
+          have hAdd : stWork + (j - stWork) = j := by omega
+          simpa only [hAdd] using hNextWk (j - stWork) (by unfold stWork at *; omega)
+        · have hWF : stepInBlock stWork 4 j = false := Bool.eq_false_iff.mpr hW
+          rw [hWF]; simp only [Bool.false_eq_true, ↓reduceIte]
+          by_cases hU1 : j = stAccOrU1
+          · subst hU1; simp [hNextU1]
+          · simp only [hU1, ↓reduceIte]
+            by_cases hU2 : j = stWotsU2
+            · subst hU2; simp [hNextU2]
+            · simp only [hU2, ↓reduceIte]
+              exact hCarry j hj
+                (by simp [beq_false_of_ne hP, hWF, beq_false_of_ne hU1, beq_false_of_ne hU2])
+    · rintro ⟨⟨⟨hU, hIn⟩, hStepIn⟩, hNext⟩
+      refine ⟨⟨⟨⟨⟨hU, ?_⟩, hIn, fun i hi => ?_⟩, hStepIn⟩, ?_, ?_⟩, fun j hj hCh => ?_⟩
+      · rw [hNext (stRemPack + slot) (by unfold stRemPack; omega)]; simp
+      · rw [hNext (stWork + i) (by unfold stWork; omega)]
+        have hPNe : stWork + i ≠ stRemPack + slot := by unfold stWork stRemPack; omega
+        have hWT : stepInBlock stWork 4 (stWork + i) = true := by
+          unfold stepInBlock stWork; simp; omega
+        have hSub : stWork + i - stWork = i := by omega
+        simp [hPNe, hWT, hSub]
+      · rw [hNext stAccOrU1 (by decide)]
+        have hPNe : stAccOrU1 ≠ stRemPack + slot := by unfold stAccOrU1 stRemPack; omega
+        have hWF : stepInBlock stWork 4 stAccOrU1 = false := by decide
+        simp [hPNe, hWF]
+      · rw [hNext stWotsU2 (by decide)]
+        have hPNe : stWotsU2 ≠ stRemPack + slot := by unfold stWotsU2 stRemPack; omega
+        have hWF : stepInBlock stWork 4 stWotsU2 = false := by decide
+        have hU1Ne : stWotsU2 ≠ stAccOrU1 := by decide
+        simp [hPNe, hWF, hU1Ne]
+      · rw [hNext j hj]
+        simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hCh
+        simp [hCh.1.1.1, hCh.1.1.2, hCh.1.2, hCh.2]
+  | wotsChainStep1 =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_flatMap_triple_iff,
+      g_sub_eq_zero_iff, allZero_stepCarryUnchanged_iff]
+    constructor
+    · rintro ⟨⟨⟨hIn, hNextWk⟩, hStepIn⟩, hCarry⟩
+      refine ⟨⟨hIn, hStepIn⟩, fun j hj => ?_⟩
+      cases hW : stepInBlock stWork 4 j
+      · simp only [Bool.false_eq_true, ↓reduceIte]; exact hCarry j hj hW
+      · simp only [↓reduceIte]
+        obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stWork 4 j).mp hW
+        have hAdd : stWork + (j - stWork) = j := by omega
+        simpa only [hAdd] using hNextWk (j - stWork) (by unfold stWork at *; omega)
+    · rintro ⟨⟨hIn, hStepIn⟩, hNext⟩
+      refine ⟨⟨⟨hIn, fun i hi => ?_⟩, hStepIn⟩, fun j hj hCh => ?_⟩
+      · rw [hNext (stWork + i) (by unfold stWork; omega)]
+        have hWT : stepInBlock stWork 4 (stWork + i) = true := by
+          unfold stepInBlock stWork; simp; omega
+        have hSub : stWork + i - stWork = i := by omega
+        simp [hWT, hSub]
+      · rw [hNext j hj, hCh]; rfl
+  | wotsChainStep2 isOdd =>
+    cases isOdd
+    · unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+      simp only [Bool.false_eq_true, ↓reduceIte, allZeroGoldilocks_append, Bool.and_eq_true,
+        allZero_flatMap_triple_iff, g_sub_eq_zero_iff, allZero_stepCarryUnchanged_iff]
+      constructor
+      · rintro ⟨⟨⟨hIn, hNextB⟩, hStepIn⟩, hCarry⟩
+        refine ⟨⟨hIn, hStepIn⟩, fun j hj => ?_⟩
+        cases hB : stepInBlock stSubSponge 4 j
+        · simp only [Bool.false_eq_true, ↓reduceIte]; exact hCarry j hj hB
+        · simp only [↓reduceIte]
+          obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stSubSponge 4 j).mp hB
+          have hAdd : stSubSponge + (j - stSubSponge) = j := by omega
+          simpa only [hAdd] using hNextB (j - stSubSponge) (by unfold stSubSponge at *; omega)
+      · rintro ⟨⟨hIn, hStepIn⟩, hNext⟩
+        refine ⟨⟨⟨hIn, fun i hi => ?_⟩, hStepIn⟩, fun j hj hCh => ?_⟩
+        · rw [hNext (stSubSponge + i) (by unfold stSubSponge; omega)]
+          have hBT : stepInBlock stSubSponge 4 (stSubSponge + i) = true := by
+            unfold stepInBlock stSubSponge; simp; omega
+          have hSub : stSubSponge + i - stSubSponge = i := by omega
+          simp [hBT, hSub]
+        · rw [hNext j hj, hCh]; rfl
+    · unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+      simp only [↓reduceIte, allZeroGoldilocks_append, Bool.and_eq_true,
+        allZero_flatMap_triple_iff, g_sub_eq_zero_iff, allZero_stepCarryUnchanged_iff]
+      constructor
+      · rintro ⟨⟨⟨hIn, hNextB⟩, hStepIn⟩, hCarry⟩
+        refine ⟨⟨hIn, hStepIn⟩, fun j hj => ?_⟩
+        cases hB : stepInBlock stWork 4 j
+        · simp only [Bool.false_eq_true, ↓reduceIte]; exact hCarry j hj hB
+        · simp only [↓reduceIte]
+          obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stWork 4 j).mp hB
+          have hAdd : stWork + (j - stWork) = j := by omega
+          simpa only [hAdd] using hNextB (j - stWork) (by unfold stWork at *; omega)
+      · rintro ⟨⟨hIn, hStepIn⟩, hNext⟩
+        refine ⟨⟨⟨hIn, fun i hi => ?_⟩, hStepIn⟩, fun j hj hCh => ?_⟩
+        · rw [hNext (stWork + i) (by unfold stWork; omega)]
+          have hBT : stepInBlock stWork 4 (stWork + i) = true := by
+            unfold stepInBlock stWork; simp; omega
+          have hSub : stWork + i - stWork = i := by omega
+          simp [hBT, hSub]
+        · rw [hNext j hj, hCh]; rfl
+  | wotsTellFinalSqueeze =>
+    unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+    simp only [allZeroGoldilocks_append, Bool.and_eq_true, allZero_stepNextIsPerm_iff,
+      hSingle, beq_iff_eq, g_sub_eq_zero_iff, allZero_stepCarryUnchanged_iff]
+    rw [and_assoc, and_assoc]
+    apply and_congr_right'
+    constructor
+    · rintro ⟨hWk, hCur, hCarry⟩ j hj
+      by_cases hW : stepInBlock stWork 4 j = true
+      · rw [hW]; simp only [↓reduceIte]
+        obtain ⟨hLo, hHi⟩ := (stepInBlock_iff stWork 4 j).mp hW
+        have hAdd : stWork + (j - stWork) = j := by omega
+        simpa only [hAdd] using hWk (j - stWork) (by unfold stWork at *; omega)
+      · have hWF : stepInBlock stWork 4 j = false := Bool.eq_false_iff.mpr hW
+        rw [hWF]; simp only [Bool.false_eq_true, ↓reduceIte]
+        by_cases hC : j = stCursorIdx
+        · subst hC; simp [hCur]
+        · simp only [hC, ↓reduceIte]
+          exact hCarry j hj (by simp [hWF, beq_false_of_ne hC])
+    · intro hNext
+      refine ⟨fun i hi => ?_, ?_, fun j hj hCh => ?_⟩
+      · rw [hNext (stWork + i) (by unfold stWork; omega)]
+        have hWT : stepInBlock stWork 4 (stWork + i) = true := by
+          unfold stepInBlock stWork; simp; omega
+        have hSub : stWork + i - stWork = i := by omega
+        simp [hWT, hSub]
+      · rw [hNext stCursorIdx (by decide)]
+        have hWF : stepInBlock stWork 4 stCursorIdx = false := by decide
+        simp [hWF]
+      · rw [hNext j hj]
+        simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hCh
+        simp [hCh.1, hCh.2]
+  | xmssMerkleBlockA =>
+    exact stepMerkleBlockA_iff x domainMerkleNode (c0 +ₚ x.aux 1)
+  | xmssMerkleBlockB isLayerLast isTopFinal =>
+    cases isLayerLast
+    · unfold stepOpConstraints stepOpGuardResiduals stepOpExpectedNext
+      simp only [Bool.not_false, ↓reduceIte, List.append_nil,
+        allZeroGoldilocks_append, Bool.and_eq_true]
+      exact and_congr_right' (stepBlockUpdate_iff x stWork 4 (by decide))
+    · cases isTopFinal
+      · -- `isLayerLast = true, isTopFinal = false`
+        have hSplitList :
+            stepOpConstraints (.xmssMerkleBlockB true false) c0 x =
+              stepOpGuardResiduals (.xmssMerkleBlockB true false) c0 x ++
+              (stepNextIsPerm x stCurRoot 4 ++
+               [x.next stKpIdx -ₚ stepWeightedSum x.aux (fun i => 2 ^ i) 4,
+                x.next stTreeLo -ₚ
+                  (stepWeightedSum (fun i => x.aux (4 + i)) (fun i => 4 ^ i) 14 +ₚ
+                    (stepWeightedSum (fun i => x.aux (18 + i)) (fun i => 4 ^ i) 2 *ₚ ‹2 ^ 28›)),
+                x.next stTreeHi -ₚ stepWeightedSum (fun i => x.aux (20 + i)) (fun i => 4 ^ i) 14] ++
+               stepCarryUnchanged x
+                 (fun j => stepInBlock stCurRoot 4 j || j == stKpIdx || j == stTreeLo || j == stTreeHi)) := by
+          simp only [stepOpConstraints, stepOpGuardResiduals,
+            Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.append_assoc]
+        rw [hSplitList, allZeroGoldilocks_append, Bool.and_eq_true]
+        apply and_congr_right'
+        unfold stepOpExpectedNext
+        have hTriple : ∀ (r0 r1 r2 : Goldilocks),
+            allZeroGoldilocks [r0, r1, r2] =
+              ((r0 == Goldilocks.zero) && (r1 == Goldilocks.zero) && (r2 == Goldilocks.zero)) := by
+          intros; simp [allZeroGoldilocks, Bool.and_assoc]
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, allZeroGoldilocks_append,
+          Bool.and_eq_true, allZero_stepNextIsPerm_iff, hTriple, beq_iff_eq,
+          g_sub_eq_zero_iff, allZero_stepCarryUnchanged_iff]
+        constructor
+        · rintro ⟨⟨hCur, ⟨hKp, hLo⟩, hHi⟩, hCarry⟩ j hj
+          by_cases hC : stepInBlock stCurRoot 4 j = true
+          · rw [hC]; simp only [↓reduceIte]
+            obtain ⟨hLoB, hHiB⟩ := (stepInBlock_iff stCurRoot 4 j).mp hC
+            have hAdd : stCurRoot + (j - stCurRoot) = j := by omega
+            simpa only [hAdd] using hCur (j - stCurRoot) (by unfold stCurRoot at *; omega)
+          · have hCF : stepInBlock stCurRoot 4 j = false := Bool.eq_false_iff.mpr hC
+            rw [hCF]; simp only [Bool.false_eq_true, ↓reduceIte]
+            by_cases hK : j = stKpIdx
+            · subst hK; simp [hKp]
+            · simp only [hK, ↓reduceIte]
+              by_cases hTL : j = stTreeLo
+              · subst hTL; simp [hLo]
+              · simp only [hTL, ↓reduceIte]
+                by_cases hTH : j = stTreeHi
+                · subst hTH; simp [hHi]
+                · simp only [hTH, ↓reduceIte]
+                  exact hCarry j hj
+                    (by simp [hCF, beq_false_of_ne hK, beq_false_of_ne hTL, beq_false_of_ne hTH])
+        · intro hNext
+          refine ⟨⟨fun i hi => ?_, ⟨?_, ?_⟩, ?_⟩, fun j hj hCh => ?_⟩
+          · rw [hNext (stCurRoot + i) (by unfold stCurRoot; omega)]
+            have hCT : stepInBlock stCurRoot 4 (stCurRoot + i) = true := by
+              unfold stepInBlock stCurRoot; simp; omega
+            have hSub : stCurRoot + i - stCurRoot = i := by omega
+            simp [hCT, hSub]
+          · rw [hNext stKpIdx (by decide)]
+            have hCF : stepInBlock stCurRoot 4 stKpIdx = false := by decide
+            simp [hCF]
+          · rw [hNext stTreeLo (by decide)]
+            have hCF : stepInBlock stCurRoot 4 stTreeLo = false := by decide
+            have hKNe : stTreeLo ≠ stKpIdx := by decide
+            simp [hCF, hKNe]
+          · rw [hNext stTreeHi (by decide)]
+            have hCF : stepInBlock stCurRoot 4 stTreeHi = false := by decide
+            have hKNe : stTreeHi ≠ stKpIdx := by decide
+            have hTLNe : stTreeHi ≠ stTreeLo := by decide
+            simp [hCF, hKNe, hTLNe]
+          · rw [hNext j hj]
+            simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hCh
+            simp [hCh.1.1.1, hCh.1.1.2, hCh.1.2, hCh.2]
+      · -- `isLayerLast = true, isTopFinal = true`
+        have hSplitList :
+            stepOpConstraints (.xmssMerkleBlockB true true) c0 x =
+              stepOpGuardResiduals (.xmssMerkleBlockB true true) c0 x ++
+              (List.range 44).map x.next := by
+          simp only [stepOpConstraints, stepOpGuardResiduals,
+            Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.append_assoc]
+        rw [hSplitList, allZeroGoldilocks_append, Bool.and_eq_true]
+        apply and_congr_right'
+        unfold stepOpExpectedNext
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, allZero_map_iff]
+
+/-- Selector-explicit 256-column `Hem` AIR row: pairs a `StepOpRow` (`256` witness columns)
+    with explicit field-valued `StepOp` selectors `sels` (`52` selectors over `allStepConstraintKinds`). -/
+structure HemStepOpSelectorRow where
+  row  : StepOpRow
+  sels : List Goldilocks
+  deriving DecidableEq, Repr
+
+/-- Index of a `StepConstraintKind` inside `allStepConstraintKinds`. -/
+def stepConstraintKindIdx (kind : StepConstraintKind) : Nat :=
+  allStepConstraintKinds.idxOf kind
+
+/-- Canonical one-hot selector vector for `kind` over `allStepConstraintKinds`. -/
+def oneHotStepSelectors (kind : StepConstraintKind) : List Goldilocks :=
+  allStepConstraintKinds.map fun k => if k == kind then Goldilocks.one else Goldilocks.zero
+
+/-- Selector booleanity residuals `s_k * (1 - s_k)` for all `k < allStepConstraintKinds.length`. -/
+def hemStepSelectorBoolResiduals (sels : List Goldilocks) : List Goldilocks :=
+  (List.range allStepConstraintKinds.length).map fun k =>
+    stepBoolCheck (sels.getD k Goldilocks.zero)
+
+/-- Selector pairwise-orthogonality residuals `s_i * s_j` for all `0 ≤ i < j < allStepConstraintKinds.length`. -/
+def hemStepSelectorOrthResiduals (sels : List Goldilocks) : List Goldilocks :=
+  (List.range allStepConstraintKinds.length).flatMap fun i =>
+    (List.range i).map fun j =>
+      sels.getD j Goldilocks.zero *ₚ sels.getD i Goldilocks.zero
+
+/-- Scheduled opcode pin residuals:
+    - On an inactive slot (`none`), every selector is pinned to `0`.
+    - On an active slot (`some _`), the scheduled selector `s_{uid_t}` is pinned to `1`. -/
+def hemStepSchedulePinResiduals (profile : AggSigProfile) (slot : StepOpSlot) (t : Nat)
+    (sels : List Goldilocks) : List Goldilocks :=
+  match slot with
+  | none =>
+    (List.range allStepConstraintKinds.length).map fun k => sels.getD k Goldilocks.zero
+  | some _ =>
+    let kind := (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+    [Goldilocks.one -ₚ sels.getD (stepConstraintKindIdx kind) Goldilocks.zero]
+
+/-- Selector-muxed opcode guard & next-state transition residuals on row `t`:
+    - Each `kind_k`'s pure pre-state guard list is gated by `s_k * g = 0`.
+    - On an active slot, each `next` limb satisfies `x.next j = Σ_k s_k * stepOpExpectedNext kind_k c0 x j`. -/
+def hemStepMuxedInputResiduals (c0 : Goldilocks) (x : StepOpRowInputs)
+    (sels : List Goldilocks) : List Goldilocks :=
+  let guardRes :=
+    (List.range allStepConstraintKinds.length).flatMap fun k =>
+      let sk := sels.getD k Goldilocks.zero
+      let kind := allStepConstraintKinds.getD k .idle
+      (stepOpGuardResiduals kind c0 x).map (fun g => sk *ₚ g)
+  let nextRes :=
+    (List.range 44).map fun j =>
+      x.next j -ₚ
+        (List.range allStepConstraintKinds.length).foldl
+          (fun acc k =>
+            acc +ₚ (sels.getD k Goldilocks.zero *ₚ
+              stepOpExpectedNext (allStepConstraintKinds.getD k .idle) c0 x j))
+          Goldilocks.zero
+  guardRes ++ nextRes
+
+/-- Read the shared mux evaluator's inputs from the committed row. -/
+def hemStepMuxedOpResiduals (slot : StepOpSlot) (c0 : Goldilocks) (row : StepOpRow)
+    (sels : List Goldilocks) : List Goldilocks :=
+  match slot with
+  | none => []
+  | some pub => hemStepMuxedInputResiduals c0 (stepOpRowInputs pub row) sels
+
+/-- Full intra-row residuals of a selector-explicit `HemStepOpSelectorRow` (including `s_i * s_j = 0`). -/
+def hemStepSelectorRowResiduals (profile : AggSigProfile) (slot : StepOpSlot) (t : Nat)
+    (sr : HemStepOpSelectorRow) : List Goldilocks :=
+  let c0 := Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2
+  (stepOpPermTrace sr.row).2 ++
+  stepOpBoundaryResiduals (stepOpRowsPerSigner profile) t sr.row ++
+  hemStepSelectorBoolResiduals sr.sels ++
+  hemStepSelectorOrthResiduals sr.sels ++
+  hemStepSchedulePinResiduals profile slot t sr.sels ++
+  hemStepMuxedOpResiduals slot c0 sr.row sr.sels
+
+/-- Mutated intra-row residuals omitting ONLY pairwise selector orthogonality `s_i * s_j = 0` (for `#tooth`). -/
+def hemStepSelectorRowResidualsOmitOrthogonality (profile : AggSigProfile) (slot : StepOpSlot)
+    (t : Nat) (sr : HemStepOpSelectorRow) : List Goldilocks :=
+  let c0 := Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2
+  (stepOpPermTrace sr.row).2 ++
+  stepOpBoundaryResiduals (stepOpRowsPerSigner profile) t sr.row ++
+  hemStepSelectorBoolResiduals sr.sels ++
+  hemStepSchedulePinResiduals profile slot t sr.sels ++
+  hemStepMuxedOpResiduals slot c0 sr.row sr.sels
+
+def hemStepSelectorIntraFrom (profile : AggSigProfile) (slots : List StepOpSlot) :
+    Nat → List HemStepOpSelectorRow → List Goldilocks
+  | _, [] => []
+  | g, sr :: rest =>
+    hemStepSelectorRowResiduals profile (slots.getD (g / stepOpRowsPerSigner profile) none)
+      (g % stepOpRowsPerSigner profile) sr ++
+    hemStepSelectorIntraFrom profile slots (g + 1) rest
+
+def hemStepSelectorIntraOmitOrthFrom (profile : AggSigProfile) (slots : List StepOpSlot) :
+    Nat → List HemStepOpSelectorRow → List Goldilocks
+  | _, [] => []
+  | g, sr :: rest =>
+    hemStepSelectorRowResidualsOmitOrthogonality profile
+      (slots.getD (g / stepOpRowsPerSigner profile) none)
+      (g % stepOpRowsPerSigner profile) sr ++
+    hemStepSelectorIntraOmitOrthFrom profile slots (g + 1) rest
+
+/-- Full selector-explicit 256-column `Hem` AIR validity predicate. -/
+def hemStepTraceValid (profile : AggSigProfile) (slots : List StepOpSlot)
+    (srows : List HemStepOpSelectorRow) : Bool :=
+  decide (0 < slots.length) &&
+  decide (srows.length = slots.length * stepOpRowsPerSigner profile) &&
+  srows.all (fun sr => sr.row.wellShaped && decide (sr.sels.length = allStepConstraintKinds.length)) &&
+  allZeroGoldilocks (hemStepSelectorIntraFrom profile slots 0 srows) &&
+  allZeroGoldilocks (stepOp256ShiftResiduals (srows.map HemStepOpSelectorRow.row))
+
+/-- Mutated selector-explicit 256-column `Hem` AIR validity predicate omitting ONLY `s_i * s_j = 0`. -/
+def hemStepTraceValidOmitOrthogonality (profile : AggSigProfile) (slots : List StepOpSlot)
+    (srows : List HemStepOpSelectorRow) : Bool :=
+  decide (0 < slots.length) &&
+  decide (srows.length = slots.length * stepOpRowsPerSigner profile) &&
+  srows.all (fun sr => sr.row.wellShaped && decide (sr.sels.length = allStepConstraintKinds.length)) &&
+  allZeroGoldilocks (hemStepSelectorIntraOmitOrthFrom profile slots 0 srows) &&
+  allZeroGoldilocks (stepOp256ShiftResiduals (srows.map HemStepOpSelectorRow.row))
+
+/-- Attach canonical scheduled selectors to a `StepOpRow` table. -/
+def attachHonestStepSelectorsFrom (profile : AggSigProfile) (slots : List StepOpSlot) :
+    Nat → List StepOpRow → List HemStepOpSelectorRow
+  | _, [] => []
+  | g, row :: rest =>
+    let slot := slots.getD (g / stepOpRowsPerSigner profile) none
+    let t := g % stepOpRowsPerSigner profile
+    let sels := match slot with
+      | none => List.replicate allStepConstraintKinds.length Goldilocks.zero
+      | some _ =>
+        oneHotStepSelectors (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+    { row := row, sels := sels } :: attachHonestStepSelectorsFrom profile slots (g + 1) rest
+
+def attachHonestStepSelectors (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) : List HemStepOpSelectorRow :=
+  attachHonestStepSelectorsFrom profile slots 0 rows
+
+private theorem allZero_orth_iff (sels : List Goldilocks) :
+    allZeroGoldilocks (hemStepSelectorOrthResiduals sels) = true ↔
+      ∀ i j, j < i → i < allStepConstraintKinds.length →
+        sels.getD j Goldilocks.zero *ₚ sels.getD i Goldilocks.zero = Goldilocks.zero := by
+  unfold hemStepSelectorOrthResiduals allZeroGoldilocks
+  simp only [List.all_flatMap, List.all_map, List.all_eq_true, List.mem_range,
+    Function.comp_apply, beq_iff_eq]
+  exact ⟨fun h i j hji hi => h i hi j hji, fun h i hi j hji => h i j hji hi⟩
+
+private theorem nodup_getElem_inj {α : Type} :
+    ∀ {xs : List α}, xs.Nodup → ∀ {i j : Nat} (hi : i < xs.length) (hj : j < xs.length),
+      xs[i]'hi = xs[j]'hj → i = j
+  | [], _, i, _, hi, _, _ => False.elim (Nat.not_lt_zero i hi)
+  | x :: xs, hNd, 0, 0, _, _, _ => rfl
+  | x :: xs, hNd, 0, j + 1, _, hj, hEq => by
+    obtain ⟨hNotMem, _⟩ := List.nodup_cons.mp hNd
+    simp only [List.getElem_cons_zero, List.getElem_cons_succ] at hEq
+    exact False.elim (hNotMem (hEq ▸ List.getElem_mem (Nat.lt_of_succ_lt_succ hj)))
+  | x :: xs, hNd, i + 1, 0, hi, _, hEq => by
+    obtain ⟨hNotMem, _⟩ := List.nodup_cons.mp hNd
+    simp only [List.getElem_cons_zero, List.getElem_cons_succ] at hEq
+    exact False.elim (hNotMem (hEq.symm ▸ List.getElem_mem (Nat.lt_of_succ_lt_succ hi)))
+  | x :: xs, hNd, i + 1, j + 1, hi, hj, hEq => by
+    obtain ⟨_, hNdTail⟩ := List.nodup_cons.mp hNd
+    simp only [List.getElem_cons_succ] at hEq
+    exact congrArg Nat.succ
+      (nodup_getElem_inj hNdTail (Nat.lt_of_succ_lt_succ hi) (Nat.lt_of_succ_lt_succ hj) hEq)
+
+section SelectorEquiv
+
+attribute [local irreducible] allStepConstraintKinds stepOpGuardResiduals stepOpExpectedNext
+  stepOpPermTrace stepOpBoundaryResiduals stepOpConstraints
+
+private theorem oneHot_getD_eq (kind : StepConstraintKind) (hMem : kind ∈ allStepConstraintKinds)
+    (k : Nat) (hk : k < allStepConstraintKinds.length) :
+    (oneHotStepSelectors kind).getD k Goldilocks.zero =
+      if k = stepConstraintKindIdx kind then Goldilocks.one else Goldilocks.zero := by
+  unfold oneHotStepSelectors stepConstraintKindIdx
+  have hkMap : k < (allStepConstraintKinds.map fun x =>
+      if x == kind then Goldilocks.one else Goldilocks.zero).length := by simp [hk]
+  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hkMap, Option.getD_some, List.getElem_map]
+  have hIdxLt : allStepConstraintKinds.idxOf kind < allStepConstraintKinds.length :=
+    List.idxOf_lt_length_of_mem hMem
+  by_cases hEqIdx : k = allStepConstraintKinds.idxOf kind
+  · subst hEqIdx
+    have hAt : allStepConstraintKinds[allStepConstraintKinds.idxOf kind]'hIdxLt = kind :=
+      List.getElem_idxOf hIdxLt
+    simp [hAt]
+  · have hNeElem : allStepConstraintKinds[k]'hk ≠ kind := by
+      intro hSame
+      apply hEqIdx
+      have hAt : allStepConstraintKinds[allStepConstraintKinds.idxOf kind]'hIdxLt = kind :=
+        List.getElem_idxOf hIdxLt
+      exact nodup_getElem_inj allStepConstraintKinds_nodup hk hIdxLt (hSame.trans hAt.symm)
+    simp [beq_false_of_ne hNeElem, hEqIdx]
+
+/-- **One-Hot Selector Collapse (`hemStepSelector_oneHot_collapse`)**:
+    Under pairwise orthogonality `s_i * s_j = 0` and scheduled pin `1 - s_{uid} = 0`,
+    `sels` is forced to equal `oneHotStepSelectors kind`. -/
+theorem hemStepSelector_oneHot_collapse (kind : StepConstraintKind) (sels : List Goldilocks)
+    (hMem : kind ∈ allStepConstraintKinds)
+    (hLen : sels.length = allStepConstraintKinds.length)
+    (hOrth : allZeroGoldilocks (hemStepSelectorOrthResiduals sels) = true)
+    (hPin : Goldilocks.one -ₚ sels.getD (stepConstraintKindIdx kind) Goldilocks.zero = Goldilocks.zero) :
+    sels = oneHotStepSelectors kind := by
+  have hOrthFn := (allZero_orth_iff sels).mp hOrth
+  have hUidOne : sels.getD (stepConstraintKindIdx kind) Goldilocks.zero = Goldilocks.one :=
+    (g_sub_eq_zero_iff.mp hPin).symm
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length :=
+    List.idxOf_lt_length_of_mem hMem
+  apply List.ext_getElem
+  · rw [hLen, oneHotStepSelectors, List.length_map]
+  · intro k hk1 hk2
+    have hkLt : k < allStepConstraintKinds.length := hLen ▸ hk1
+    have hLhs : sels[k]'hk1 = sels.getD k Goldilocks.zero := by
+      rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hk1, Option.getD_some]
+    have hRhs : (oneHotStepSelectors kind)[k]'hk2 =
+        (oneHotStepSelectors kind).getD k Goldilocks.zero := by
+      rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hk2, Option.getD_some]
+    rw [hLhs, hRhs, oneHot_getD_eq kind hMem k hkLt]
+    by_cases hEq : k = stepConstraintKindIdx kind
+    · subst hEq; simpa [List.getD_eq_getElem?_getD] using hUidOne
+    · simp only [hEq, ↓reduceIte]
+      by_cases hLt : k < stepConstraintKindIdx kind
+      · have hProd := hOrthFn (stepConstraintKindIdx kind) k hLt hUidLt
+        rw [hUidOne, g_mul_one] at hProd
+        exact hProd
+      · have hGt : stepConstraintKindIdx kind < k := by omega
+        have hProd := hOrthFn k (stepConstraintKindIdx kind) hGt hkLt
+        rw [hUidOne, g_one_mul] at hProd
+        exact hProd
+
+private theorem foldl_oneHot_sum (n uid : Nat) (hUid : uid < n) (f : Nat → Goldilocks) :
+    (List.range n).foldl
+      (fun acc k => acc +ₚ ((if k = uid then Goldilocks.one else Goldilocks.zero) *ₚ f k))
+      Goldilocks.zero = f uid := by
+  induction n with
+  | zero => omega
+  | succ m ih =>
+    rw [List.range_succ, List.foldl_append, List.foldl_cons, List.foldl_nil]
+    by_cases hEq : m = uid
+    · subst hEq
+      have hZeroPre : ∀ (ls : List Nat), (∀ k ∈ ls, k ≠ m) →
+          ls.foldl (fun acc k => acc +ₚ ((if k = m then Goldilocks.one else Goldilocks.zero) *ₚ f k))
+            Goldilocks.zero = Goldilocks.zero := by
+        intro ls hNe
+        induction ls with
+        | nil => rfl
+        | cons a as ihL =>
+          have haNe : a ≠ m := hNe a (List.mem_cons_self ..)
+          simp only [List.foldl_cons, haNe, ↓reduceIte, g_zero_mul, g_add_zero]
+          exact ihL (fun x hx => hNe x (List.mem_cons_of_mem _ hx))
+      rw [hZeroPre (List.range m) (fun k hk => Nat.ne_of_lt (List.mem_range.mp hk))]
+      simp only [↓reduceIte, g_one_mul, g_zero_add]
+    · have hLtM : uid < m := by omega
+      rw [ih hLtM]
+      simp only [hEq, ↓reduceIte, g_zero_mul, g_add_zero]
+
+private theorem getD_rep_zero :
+    ∀ (n j : Nat), (List.replicate n Goldilocks.zero).getD j Goldilocks.zero = Goldilocks.zero
+  | 0, _ => rfl
+  | _ + 1, 0 => rfl
+  | n + 1, j + 1 => getD_rep_zero n j
+
+private theorem foldl_congr_on {A B : Type} (f g : B → A → B) :
+    ∀ (xs : List A) (init : B), (∀ a ∈ xs, ∀ acc, f acc a = g acc a) →
+      xs.foldl f init = xs.foldl g init
+  | [], _, _ => rfl
+  | a :: rest, init, h =>
+    (congrArg (fun acc => rest.foldl f acc) (h a (List.mem_cons_self ..) init)).trans
+      (foldl_congr_on f g rest (g init a) (fun b hb acc => h b (List.mem_cons_of_mem a hb) acc))
+
+private theorem foldl_selector_sum (n uid : Nat) (hUid : uid < n)
+    (sel f : Nat → Goldilocks)
+    (hSel : ∀ k < n, sel k = if k = uid then Goldilocks.one else Goldilocks.zero) :
+    (List.range n).foldl (fun acc k => acc +ₚ (sel k *ₚ f k)) Goldilocks.zero = f uid := by
+  have h := foldl_congr_on
+    (fun acc k => acc +ₚ (sel k *ₚ f k))
+    (fun acc k => acc +ₚ ((if k = uid then Goldilocks.one else Goldilocks.zero) *ₚ f k))
+    (List.range n) Goldilocks.zero
+    (fun k hk acc => congrArg (fun v => acc +ₚ (v *ₚ f k)) (hSel k (List.mem_range.mp hk)))
+  exact h.trans (foldl_oneHot_sum n uid hUid f)
+
+private theorem hemStep_oneHot_fold (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (hMem : kind ∈ allStepConstraintKinds) (j : Nat) :
+    (List.range allStepConstraintKinds.length).foldl
+      (fun acc k => acc +ₚ ((oneHotStepSelectors kind).getD k Goldilocks.zero *ₚ
+        stepOpExpectedNext (allStepConstraintKinds.getD k .idle) c0 x j))
+      Goldilocks.zero = stepOpExpectedNext kind c0 x j := by
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length := by
+    unfold stepConstraintKindIdx
+    exact List.idxOf_lt_length_of_mem hMem
+  have hKindAtUid : allStepConstraintKinds.getD (stepConstraintKindIdx kind) .idle = kind := by
+    have hIdxLt : allStepConstraintKinds.idxOf kind < allStepConstraintKinds.length :=
+      List.idxOf_lt_length_of_mem hMem
+    unfold stepConstraintKindIdx
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hIdxLt, Option.getD_some]
+    exact List.getElem_idxOf hIdxLt
+  have h := foldl_selector_sum allStepConstraintKinds.length (stepConstraintKindIdx kind)
+    hUidLt (fun k => (oneHotStepSelectors kind).getD k Goldilocks.zero)
+    (fun k => stepOpExpectedNext (allStepConstraintKinds.getD k .idle) c0 x j)
+    (oneHot_getD_eq kind hMem)
+  exact h.trans (congrArg (fun k => stepOpExpectedNext k c0 x j) hKindAtUid)
+
+private theorem hemStep_oneHot_guards (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (hMem : kind ∈ allStepConstraintKinds) :
+    allZeroGoldilocks ((List.range allStepConstraintKinds.length).flatMap fun k =>
+      (stepOpGuardResiduals (allStepConstraintKinds.getD k .idle) c0 x).map
+        (fun g => (oneHotStepSelectors kind).getD k Goldilocks.zero *ₚ g)) = true ↔
+    allZeroGoldilocks (stepOpGuardResiduals kind c0 x) = true := by
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length := by
+    unfold stepConstraintKindIdx
+    exact List.idxOf_lt_length_of_mem hMem
+  have hKindAtUid : allStepConstraintKinds.getD (stepConstraintKindIdx kind) .idle = kind := by
+    have hIdxLt : allStepConstraintKinds.idxOf kind < allStepConstraintKinds.length :=
+      List.idxOf_lt_length_of_mem hMem
+    unfold stepConstraintKindIdx
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hIdxLt, Option.getD_some]
+    exact List.getElem_idxOf hIdxLt
+  constructor
+  · intro hGuards
+    unfold allZeroGoldilocks at hGuards ⊢
+    rw [List.all_flatMap, List.all_eq_true] at hGuards
+    have hAt := hGuards (stepConstraintKindIdx kind) (List.mem_range.mpr hUidLt)
+    rw [oneHot_getD_eq kind hMem _ hUidLt] at hAt
+    simp only [↓reduceIte, hKindAtUid, List.all_map] at hAt
+    have hComp : ((fun x => x == Goldilocks.zero) ∘ fun g => Goldilocks.one *ₚ g) =
+        (fun x => x == Goldilocks.zero) := by
+      funext g; simp only [Function.comp, g_one_mul]
+    rwa [hComp] at hAt
+  · intro hGuardOk
+    unfold allZeroGoldilocks at hGuardOk ⊢
+    rw [List.all_flatMap, List.all_eq_true]
+    intro k hkRange
+    have hk := List.mem_range.mp hkRange
+    rw [oneHot_getD_eq kind hMem k hk, List.all_map]
+    by_cases hEq : k = stepConstraintKindIdx kind
+    · simp only [hEq, ↓reduceIte, hKindAtUid]
+      have hComp : ((fun x => x == Goldilocks.zero) ∘ fun g => Goldilocks.one *ₚ g) =
+          (fun x => x == Goldilocks.zero) := by
+        funext g; simp only [Function.comp, g_one_mul]
+      rwa [hComp]
+    · simp only [hEq, ↓reduceIte]
+      have hComp0 : ((fun x => x == Goldilocks.zero) ∘ fun g => Goldilocks.zero *ₚ g) =
+          (fun _ => true) := by
+        funext g; simp only [Function.comp, g_zero_mul, beq_self_eq_true]
+      rw [hComp0]
+      exact List.all_eq_true.mpr (fun _ _ => rfl)
+
+private theorem hemStep_oneHot_mux (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (hMem : kind ∈ allStepConstraintKinds)
+    (hValid : kind.validSlot = true) :
+    allZeroGoldilocks (hemStepMuxedInputResiduals c0 x (oneHotStepSelectors kind)) = true ↔
+    allZeroGoldilocks (stepOpConstraints kind c0 x) = true := by
+  unfold hemStepMuxedInputResiduals
+  rw [allZeroGoldilocks_append, Bool.and_eq_true, hemStep_oneHot_guards kind c0 x hMem,
+    stepOpConstraints_iff_guard_and_next kind c0 x hValid]
+  apply and_congr_right'
+  rw [allZero_map_iff]
+  constructor
+  · intro h j hj
+    exact (g_sub_eq_zero_iff.mp (h j hj)).trans (hemStep_oneHot_fold kind c0 x hMem j)
+  · intro h j hj
+    exact g_sub_eq_zero_iff.mpr ((h j hj).trans (hemStep_oneHot_fold kind c0 x hMem j).symm)
+
+private theorem hemStep_oneHot_selectors (kind : StepConstraintKind)
+    (hMem : kind ∈ allStepConstraintKinds) :
+    allZeroGoldilocks (hemStepSelectorBoolResiduals (oneHotStepSelectors kind)) = true ∧
+    allZeroGoldilocks (hemStepSelectorOrthResiduals (oneHotStepSelectors kind)) = true ∧
+    Goldilocks.one -ₚ (oneHotStepSelectors kind).getD (stepConstraintKindIdx kind) Goldilocks.zero =
+      Goldilocks.zero := by
+  have hUidLt : stepConstraintKindIdx kind < allStepConstraintKinds.length := by
+    unfold stepConstraintKindIdx
+    exact List.idxOf_lt_length_of_mem hMem
+  refine ⟨?_, ?_, ?_⟩
+  · unfold hemStepSelectorBoolResiduals
+    rw [allZero_map_iff]; intro k hk
+    rw [oneHot_getD_eq kind hMem k hk]
+    by_cases hEq : k = stepConstraintKindIdx kind
+    · simp only [hEq, ↓reduceIte]
+      exact (stepBoolCheck_eq_zero_iff _).mpr (.inr rfl)
+    · simp only [hEq, ↓reduceIte]
+      exact (stepBoolCheck_eq_zero_iff _).mpr (.inl rfl)
+  · rw [allZero_orth_iff]; intro i j hji hi
+    rw [oneHot_getD_eq kind hMem j (Nat.lt_trans hji hi), oneHot_getD_eq kind hMem i hi]
+    by_cases hjU : j = stepConstraintKindIdx kind
+    · have hiNe : i ≠ stepConstraintKindIdx kind := by omega
+      simp only [hjU, hiNe, ↓reduceIte]
+      exact g_mul_zero _
+    · simp only [hjU, ↓reduceIte]
+      exact g_zero_mul _
+  · rw [oneHot_getD_eq kind hMem _ hUidLt]
+    simp only [↓reduceIte]
+    exact g_sub_self _
+
+private theorem hemStepSelectorInputs_iff (kind : StepConstraintKind) (c0 : Goldilocks)
+    (x : StepOpRowInputs) (sels : List Goldilocks) (permRes boundaryRes : List Goldilocks)
+    (hMem : kind ∈ allStepConstraintKinds) (hValid : kind.validSlot = true)
+    (hLen : sels.length = allStepConstraintKinds.length) :
+    allZeroGoldilocks
+        (permRes ++
+         boundaryRes ++
+         hemStepSelectorBoolResiduals sels ++
+         hemStepSelectorOrthResiduals sels ++
+         [Goldilocks.one -ₚ sels.getD (stepConstraintKindIdx kind) Goldilocks.zero] ++
+         hemStepMuxedInputResiduals c0 x sels) = true ↔
+      allZeroGoldilocks
+        (permRes ++
+         boundaryRes ++
+         stepOpConstraints kind c0 x) = true ∧
+      sels = oneHotStepSelectors kind := by
+  have hSingle : ∀ r : Goldilocks, allZeroGoldilocks [r] = (r == Goldilocks.zero) := by
+    intro r; simp [allZeroGoldilocks]
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true, hSingle, beq_iff_eq]
+  constructor
+  · rintro ⟨⟨⟨⟨⟨hGA, hBnd⟩, _⟩, hOrth⟩, hPin⟩, hMux⟩
+    have hEq := hemStepSelector_oneHot_collapse kind sels hMem hLen hOrth hPin
+    rw [hEq] at hMux
+    exact ⟨⟨⟨hGA, hBnd⟩, (hemStep_oneHot_mux kind c0 x hMem hValid).mp hMux⟩, hEq⟩
+  · rintro ⟨⟨⟨hGA, hBnd⟩, hOp⟩, hEq⟩
+    rw [hEq]
+    obtain ⟨hBool, hOrth, hPin⟩ := hemStep_oneHot_selectors kind hMem
+    exact ⟨⟨⟨⟨⟨hGA, hBnd⟩, hBool⟩, hOrth⟩, hPin⟩,
+      (hemStep_oneHot_mux kind c0 x hMem hValid).mpr hOp⟩
+
+
+private theorem hemStepSelectorRowActive_iff (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (rowsPerSigner t : Nat) (sr : HemStepOpSelectorRow)
+    (hMem : kind ∈ allStepConstraintKinds) (hValid : kind.validSlot = true)
+    (hLen : sr.sels.length = allStepConstraintKinds.length) :
+    allZeroGoldilocks
+        ((stepOpPermTrace sr.row).2 ++
+         stepOpBoundaryResiduals rowsPerSigner t sr.row ++
+         hemStepSelectorBoolResiduals sr.sels ++
+         hemStepSelectorOrthResiduals sr.sels ++
+         [Goldilocks.one -ₚ sr.sels.getD (stepConstraintKindIdx kind) Goldilocks.zero] ++
+         hemStepMuxedOpResiduals (some pub) c0 sr.row sr.sels) = true ↔
+      allZeroGoldilocks
+        ((stepOpPermTrace sr.row).2 ++
+         stepOpBoundaryResiduals rowsPerSigner t sr.row ++
+         stepOpConstraints kind c0 (stepOpRowInputs pub sr.row)) = true ∧
+      sr.sels = oneHotStepSelectors kind :=
+  hemStepSelectorInputs_iff kind c0 (stepOpRowInputs pub sr.row) sr.sels
+    (stepOpPermTrace sr.row).2 (stepOpBoundaryResiduals rowsPerSigner t sr.row)
+    hMem hValid hLen
+
+private theorem hemStepSelectorRowResiduals_iff (profile : AggSigProfile) (slot : StepOpSlot)
+    (t : Nat) (sr : HemStepOpSelectorRow)
+    (hLen : sr.sels.length = allStepConstraintKinds.length) :
+    allZeroGoldilocks (hemStepSelectorRowResiduals profile slot t sr) = true ↔
+      allZeroGoldilocks (stepOp256RowResiduals profile slot t sr.row) = true ∧
+      sr.sels = (match slot with
+        | none => List.replicate allStepConstraintKinds.length Goldilocks.zero
+        | some _ =>
+          oneHotStepSelectors (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1) := by
+  unfold hemStepSelectorRowResiduals stepOp256RowResiduals
+  cases slot with
+  | none =>
+    unfold hemStepSchedulePinResiduals hemStepMuxedOpResiduals
+    simp only [List.append_nil, allZeroGoldilocks_append, Bool.and_eq_true]
+    constructor
+    · rintro ⟨⟨⟨⟨hGA, hBnd⟩, _⟩, _⟩, hPin⟩
+      have hZeroAll := (allZero_map_iff allStepConstraintKinds.length
+        (fun k => sr.sels.getD k Goldilocks.zero)).mp hPin
+      refine ⟨⟨hGA, hBnd⟩, ?_⟩
+      apply List.ext_getElem
+      · rw [hLen, List.length_replicate]
+      · intro k hk1 _
+        have hGet : sr.sels[k]'hk1 = sr.sels.getD k Goldilocks.zero := by
+          rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hk1, Option.getD_some]
+        rw [hGet, List.getElem_replicate]
+        exact hZeroAll k (hLen ▸ hk1)
+    · rintro ⟨⟨hGA, hBnd⟩, hSelsEq⟩
+      refine ⟨⟨⟨⟨hGA, hBnd⟩, ?_⟩, ?_⟩, ?_⟩
+      · rw [hSelsEq]; unfold hemStepSelectorBoolResiduals
+        rw [allZero_map_iff]; intro k _
+        rw [getD_rep_zero]; exact (stepBoolCheck_eq_zero_iff _).mpr (.inl rfl)
+      · rw [hSelsEq, allZero_orth_iff]; intro i j _ _
+        rw [getD_rep_zero, g_zero_mul]
+      · rw [hSelsEq, allZero_map_iff]; intro k _; exact getD_rep_zero _ _
+  | some pub =>
+    obtain ⟨hMem, hValid⟩ := buildSignerProgram_kind_mem_and_valid profile t
+    unfold hemStepSchedulePinResiduals
+    exact hemStepSelectorRowActive_iff
+      (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+      (Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2)
+      pub (stepOpRowsPerSigner profile) t sr hMem hValid hLen
+
+private theorem hemStepSelectorIntraFrom_iff (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (srows : List HemStepOpSelectorRow) (g : Nat),
+      (∀ sr ∈ srows, sr.sels.length = allStepConstraintKinds.length) →
+      (allZeroGoldilocks (hemStepSelectorIntraFrom profile slots g srows) = true ↔
+        allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots g (srows.map HemStepOpSelectorRow.row)) = true ∧
+        srows = attachHonestStepSelectorsFrom profile slots g (srows.map HemStepOpSelectorRow.row))
+  | [], _, _ => by simp [hemStepSelectorIntraFrom, stepOp256IntraResidualsFrom, attachHonestStepSelectorsFrom]
+  | sr :: rest, g, hLens => by
+    simp only [List.map_cons, hemStepSelectorIntraFrom, stepOp256IntraResidualsFrom,
+      attachHonestStepSelectorsFrom]
+    rw [allZeroGoldilocks_append, allZeroGoldilocks_append, Bool.and_eq_true, Bool.and_eq_true,
+        hemStepSelectorRowResiduals_iff profile _ _ sr (hLens sr (List.mem_cons_self ..)),
+        hemStepSelectorIntraFrom_iff profile slots rest (g + 1)
+          (fun x hx => hLens x (List.mem_cons_of_mem _ hx))]
+    constructor
+    · rintro ⟨⟨hRowOk, hSelEq⟩, hRestOk, hRestEq⟩
+      refine ⟨⟨hRowOk, hRestOk⟩, ?_⟩
+      rw [← hRestEq]
+      cases sr; dsimp only at hSelEq ⊢; subst hSelEq; rfl
+    · rintro ⟨⟨hRowOk, hRestOk⟩, hConsEq⟩
+      injection hConsEq with hHeadEq hTailEq
+      have hSelEq : sr.sels = _ := (congrArg HemStepOpSelectorRow.sels hHeadEq)
+      exact ⟨⟨hRowOk, hSelEq⟩, hRestOk, hTailEq⟩
+
+private theorem attachHonestStepSelectorsFrom_map_row (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g : Nat),
+      (attachHonestStepSelectorsFrom profile slots g rows).map HemStepOpSelectorRow.row = rows
+  | [], _ => rfl
+  | r :: rs, g => congrArg (r :: ·) (attachHonestStepSelectorsFrom_map_row profile slots rs (g + 1))
+
+private theorem attachHonestStepSelectorsFrom_sels_len (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g : Nat) (sr : HemStepOpSelectorRow),
+      sr ∈ attachHonestStepSelectorsFrom profile slots g rows →
+      sr.sels.length = allStepConstraintKinds.length
+  | [], _, _, h => False.elim (List.not_mem_nil h)
+  | r :: rs, g, sr, h => by
+    rcases List.mem_cons.mp h with rfl | hTail
+    · dsimp only
+      cases slots.getD (g / stepOpRowsPerSigner profile) none with
+      | none => exact List.length_replicate
+      | some _ => unfold oneHotStepSelectors; exact List.length_map ..
+    · exact attachHonestStepSelectorsFrom_sels_len profile slots rs (g + 1) sr hTail
+
+/-- **Selector-Muxed 256-Column Equivalence (`hemStepTraceValid_iff_stepOp256TableOk`)**:
+    1. Attaching canonical scheduled selectors to any `rows` satisfies `hemStepTraceValid` iff
+       `stepOp256TableOk profile slots rows = true`.
+    2. Conversely, ANY selector-explicit trace `srows` satisfying `hemStepTraceValid` has
+       `srows = attachHonestStepSelectors profile slots (srows.map (·.row))` and
+       `stepOp256TableOk profile slots (srows.map (·.row)) = true`. -/
+theorem hemStepTraceValid_iff_stepOp256TableOk (profile : AggSigProfile) (slots : List StepOpSlot)
+    (srows : List HemStepOpSelectorRow) :
+    hemStepTraceValid profile slots srows = true ↔
+      stepOp256TableOk profile slots (srows.map HemStepOpSelectorRow.row) = true ∧
+      srows = attachHonestStepSelectors profile slots (srows.map HemStepOpSelectorRow.row) := by
+  unfold hemStepTraceValid stepOp256TableOk attachHonestStepSelectors
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.length_map, List.all_map, List.all_eq_true]
+  constructor
+  · rintro ⟨⟨⟨⟨hPos, hLen⟩, hShapedAndSels⟩, hIntra⟩, hShift⟩
+    have hShaped : ∀ x ∈ srows, x.row.wellShaped = true := fun x hx => (hShapedAndSels x hx).1
+    have hSelsLen : ∀ x ∈ srows, x.sels.length = allStepConstraintKinds.length :=
+      fun x hx => (hShapedAndSels x hx).2
+    obtain ⟨hIntraRow, hSrowsEq⟩ := (hemStepSelectorIntraFrom_iff profile slots srows 0 hSelsLen).mp hIntra
+    exact ⟨⟨⟨⟨⟨hPos, hLen⟩, hShaped⟩, hIntraRow⟩, hShift⟩, hSrowsEq⟩
+  · rintro ⟨⟨⟨⟨⟨hPos, hLen⟩, hShaped⟩, hIntraRow⟩, hShift⟩, hSrowsEq⟩
+    have hSelsLen : ∀ x ∈ srows, x.sels.length = allStepConstraintKinds.length := by
+      intro x hx
+      rw [hSrowsEq] at hx
+      exact attachHonestStepSelectorsFrom_sels_len profile slots _ 0 x hx
+    have hIntra := (hemStepSelectorIntraFrom_iff profile slots srows 0 hSelsLen).mpr ⟨hIntraRow, hSrowsEq⟩
+    exact ⟨⟨⟨⟨hPos, hLen⟩, fun x hx => ⟨hShaped x hx, hSelsLen x hx⟩⟩, hIntra⟩, hShift⟩
+
+theorem hemStepTraceValid_attachHonest_iff (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) :
+    hemStepTraceValid profile slots (attachHonestStepSelectors profile slots rows) = true ↔
+      stepOp256TableOk profile slots rows = true := by
+  rw [hemStepTraceValid_iff_stepOp256TableOk]
+  unfold attachHonestStepSelectors
+  rw [attachHonestStepSelectorsFrom_map_row]
+  simp
+
+end SelectorEquiv
+
+/-- A valid active table row executes the scheduled functional transition and satisfies
+    its guards; its permutation output is the actual Poseidon2 permutation. This theorem
+    projects facts from the original table, without adding a verifier-validity premise. -/
+theorem stepOp256TableOk_active_execution (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) (i : Nat) (row : StepOpRow) (pub : AggValidatorPk × Digest5)
+    (hTable : stepOp256TableOk profile slots rows = true)
+    (hRow : rows[i]? = some row)
+    (hSlot : slots.getD (i / stepOpRowsPerSigner profile) none = some pub) :
+    let op := (buildSignerProgram profile).getD (i % stepOpRowsPerSigner profile) StepOp.idle
+    let kind := (stepOpKindAndC0 op).1
+    let c0 := Goldilocks.ofNat (stepOpKindAndC0 op).2
+    (stepOpPermTrace row).1 = poseidon2Perm12 row.stIn ∧
+    allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true ∧
+    ∀ j < 44, row.nextState.getD j Goldilocks.zero =
+      stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j := by
+  have hr := stepOp256TableOk_row_at profile slots rows i row hTable hRow
+  unfold stepOp256RowResiduals at hr
+  rw [hSlot] at hr
+  simp only [allZeroGoldilocks_append, Bool.and_eq_true] at hr
+  obtain ⟨_, hValid⟩ := buildSignerProgram_kind_mem_and_valid profile
+    (i % stepOpRowsPerSigner profile)
+  exact ⟨stepOp256_groupA_exact row hr.1.1,
+    (stepOpConstraints_iff_guard_and_next _ _ _ hValid).mp hr.2⟩
+
+/-- Populate the 44 next-state cells by executing an opcode. The remaining 212 cells
+    are retained. This is an execution constructor, not a native-signature trace builder. -/
+def populateStepOpNext (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow) : StepOpRow :=
+  { row with nextState := (List.range 44).map (stepOpExpectedNext kind c0 (stepOpRowInputs pub row)) }
+
+private theorem populateStepOpNext_inputs (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow) :
+    stepOpRowInputs pub (populateStepOpNext kind c0 pub row) =
+      { stepOpRowInputs pub row with next := fun j =>
+          ((List.range 44).map (stepOpExpectedNext kind c0 (stepOpRowInputs pub row))).getD j Goldilocks.zero } := rfl
+
+/-- Every scheduled opcode admits exactly its functional next state once its guards
+    hold. This covers all active opcode classes, rather than just padding `Idle`. -/
+theorem populateStepOpNext_constraints_iff (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow)
+    (hValid : kind.validSlot = true) :
+    allZeroGoldilocks (stepOpConstraints kind c0
+      (stepOpRowInputs pub (populateStepOpNext kind c0 pub row))) = true ↔
+    allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true := by
+  rw [stepOpConstraints_iff_guard_and_next kind c0 _ hValid,
+    populateStepOpNext_inputs, stepOpGuardResiduals_congr_next]
+  have hNext : ∀ j < 44,
+      (stepOpRowInputs pub (populateStepOpNext kind c0 pub row)).next j =
+        stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j := by
+    intro j hj
+    simp [stepOpRowInputs, populateStepOpNext, List.getD_eq_getElem?_getD, hj]
+  constructor
+  · exact And.left
+  · intro hGuard
+    refine ⟨hGuard, ?_⟩
+    intro j hj
+    rw [stepOpExpectedNext_congr_next]
+    exact hNext j hj
+
+/-- An accepted row is unchanged by recomputing its next-state block. In particular,
+    the AIR cannot accept two different 44-cell next states for the same guarded inputs. -/
+theorem populateStepOpNext_eq_of_constraints (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow)
+    (hValid : kind.validSlot = true) (hLen : row.nextState.length = 44)
+    (hOk : allZeroGoldilocks (stepOpConstraints kind c0 (stepOpRowInputs pub row)) = true) :
+    populateStepOpNext kind c0 pub row = row := by
+  have hNext := ((stepOpConstraints_iff_guard_and_next kind c0 _ hValid).mp hOk).2
+  have hEq : (List.range 44).map (stepOpExpectedNext kind c0 (stepOpRowInputs pub row)) =
+      row.nextState := by
+    apply List.ext_getElem
+    · simp [hLen]
+    · intro i hi hi'
+      have hi44 : i < 44 := by simpa using hi
+      have he := hNext i hi44
+      simpa [stepOpRowInputs, List.getD_eq_getElem?_getD, hi'] using he.symm
+  simp [populateStepOpNext, hEq]
+
+/-- Guard/transition completeness for a scheduled active row, with both boundary gates
+    retained. Native-verifier completeness still requires constructing inputs satisfying
+    these guards along the complete signer program. -/
+theorem stepOp256RowResiduals_active_iff (profile : AggSigProfile)
+    (pub : AggValidatorPk × Digest5) (t : Nat) (row : StepOpRow) :
+    let op := (buildSignerProgram profile).getD t StepOp.idle
+    let kind := (stepOpKindAndC0 op).1
+    let c0 := Goldilocks.ofNat (stepOpKindAndC0 op).2
+    allZeroGoldilocks (stepOp256RowResiduals profile (some pub) t row) = true ↔
+      allZeroGoldilocks (stepOpPermTrace row).2 = true ∧
+      (∀ j < 44, t = 0 → row.prevState.getD j Goldilocks.zero = Goldilocks.zero) ∧
+      (∀ j < 44, t + 1 = stepOpRowsPerSigner profile →
+        row.nextState.getD j Goldilocks.zero = Goldilocks.zero) ∧
+      allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true ∧
+      (∀ j < 44, row.nextState.getD j Goldilocks.zero =
+        stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j) := by
+  dsimp only
+  unfold stepOp256RowResiduals
+  rw [allZeroGoldilocks_append, allZeroGoldilocks_append, Bool.and_eq_true, Bool.and_eq_true,
+    stepOpBoundaryResiduals_iff, stepOpConstraints_iff_guard_and_next _ _ _
+      (buildSignerProgram_kind_mem_and_valid profile t).2]
+  simp only [and_assoc, stepOpRowInputs]
+
+/-- A corrupted next-state limb is rejected even when the other row cells are arbitrary.
+    This pairs with the constructor above: the transition gate enforces its computed output. -/
+theorem tooth_stepOp_wrong_next_rejected (kind : StepConstraintKind) (c0 : Goldilocks)
+    (pub : AggValidatorPk × Digest5) (row : StepOpRow) (j : Nat)
+    (hValid : kind.validSlot = true) (hj : j < 44)
+    (hWrong : row.nextState.getD j Goldilocks.zero ≠
+      stepOpExpectedNext kind c0 (stepOpRowInputs pub row) j) :
+    allZeroGoldilocks (stepOpConstraints kind c0 (stepOpRowInputs pub row)) = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  exact hWrong (((stepOpConstraints_iff_guard_and_next kind c0 _ hValid).mp h).2 j hj)
+
+/-- Populate all permutation columns without assuming any opcode guards. -/
+def stepOpHonestPermutationRow (input : Poseidon2State12)
+    (prev next aux : List Goldilocks) : StepOpRow :=
+  let w := honestPoseidon2PermWitness input
+  ⟨input, w.initExtSbox, w.intSbox, w.termExtSbox, prev, next, aux⟩
+
+theorem stepOpHonestPermutationRow_groupA (input : Poseidon2State12)
+    (prev next aux : List Goldilocks) :
+    allZeroGoldilocks (stepOpPermTrace (stepOpHonestPermutationRow input prev next aux)).2 = true := by
+  let w := honestPoseidon2PermWitness input
+  have h := (poseidon2PermResiduals_allZero_iff w).mpr rfl
+  have he : poseidon2PermResiduals w =
+      (stepOpPermTrace (stepOpHonestPermutationRow input prev next aux)).2 ++
+      (state12Sub (stepOpPermTrace (stepOpHonestPermutationRow input prev next aux)).1
+        w.output).toList := rfl
+  rw [he, allZeroGoldilocks_append, Bool.and_eq_true] at h
+  exact h.1
+
+theorem stepOpHonestPermutationRow_wellShaped (input : Poseidon2State12)
+    (prev next aux : List Goldilocks)
+    (hp : prev.length = 44) (hn : next.length = 44) (ha : aux.length = 38) :
+    (stepOpHonestPermutationRow input prev next aux).wellShaped = true := by
+  have h1 : (honestPoseidon2PermWitness input).initExtSbox.length = 4 := rfl
+  have h2 : (honestPoseidon2PermWitness input).intSbox.length = 22 := rfl
+  have h3 : (honestPoseidon2PermWitness input).termExtSbox.length = 4 := rfl
+  simp only [stepOpHonestPermutationRow, StepOpRow.wellShaped, h1, h2, h3, hp, hn, ha,
+    beq_self_eq_true, Bool.and_self]
+
+/-- A non-padding active opcode has satisfiable guards and a full honest permutation
+    witness. This certificate concerns one row; it does not assert a valid whole signer slot. -/
+theorem inhabited_populateStepOpNext :
+    ∃ (kind : StepConstraintKind) (c0 : Goldilocks)
+      (pub : AggValidatorPk × Digest5) (row : StepOpRow),
+      kind.validSlot = true ∧ kind ≠ .idle ∧
+      allZeroGoldilocks (stepOpGuardResiduals kind c0 (stepOpRowInputs pub row)) = true ∧
+      row.wellShaped = true ∧
+      allZeroGoldilocks (stepOpPermTrace row).2 = true := by
+  let pub : AggValidatorPk × Digest5 :=
+    (⟨.corduroyPoseidon2, ⟨‹1›, ‹2›, ‹3›, ‹4›⟩, ⟨‹5›, ‹6›, ‹7›, ‹8›⟩⟩,
+      ⟨‹9›, ‹10›, ‹11›, ‹12›, ‹13›⟩)
+  let input : Poseidon2State12 :=
+    ⟨pub.1.pkSeed, pub.1.pkRoot, ⟨domainHMsgStateless, pub.2.limb4, Goldilocks.zero, poseidon2IvTag⟩⟩
+  let row := stepOpHonestPermutationRow input (List.replicate 44 Goldilocks.zero)
+    (List.replicate 44 Goldilocks.zero) (List.replicate 38 Goldilocks.zero)
+  refine ⟨.statelessDeriveBlock0, Goldilocks.zero, pub, row, rfl, by decide, ?_, ?_, ?_⟩
+  · change allZeroGoldilocks (stepOpGuardResiduals .statelessDeriveBlock0 Goldilocks.zero
+      (stepOpRowInputs pub row)) = true
+    decide +kernel
+  · exact stepOpHonestPermutationRow_wellShaped input _ _ _
+      (List.length_replicate ..) (List.length_replicate ..) (List.length_replicate ..)
+  · exact stepOpHonestPermutationRow_groupA input _ _ _
+
+#tooth_pair populateStepOpNext_constraints_iff vs tooth_stepOp_wrong_next_rejected
+#verify_inhabited populateStepOpNext_constraints_iff inhabited_populateStepOpNext
+
+/-! ### §3.4. Active-slot execution: per-signer row semantics
+
+`stepOp256TableOk` speaks about one flat list of rows. The lemmas below restrict it to one
+active signer slot, re-index its rows by the step `t` of `buildSignerProgram`, and expose every
+scheduled row as a guarded functional transition of the 44 carried limbs. -/
+
+/-- Row `t` of signer slot `k` of a table (`stepOpZeroRow` outside the table). -/

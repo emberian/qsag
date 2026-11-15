@@ -1636,3 +1636,1678 @@ def merklePathRoot (H : Hash) : List UInt8 → Nat → List (List UInt8) → Lis
   | node, idx, sib :: rest => merklePathRoot H (H (merkleNodeFrame idx node sib)) (idx / 2) rest
 
 /-- Constructive (`0 Classical.choice`) Merkle collision extractor along two equal-length paths. -/
+def merklePathCollision (H : Hash) :
+    ∀ (p1 p2 : List (List UInt8)) (n1 n2 : List UInt8) (idx : Nat),
+      p1.length = p2.length → n1 ≠ n2 →
+      merklePathRoot H n1 idx p1 = merklePathRoot H n2 idx p2 → HashCollisionWitness H
+  | [], [], _, _, _, _, hne, hroot => False.elim (hne hroot)
+  | [], _ :: _, _, _, _, hlen, _, _ => False.elim (Nat.succ_ne_zero _ hlen.symm)
+  | _ :: _, [], _, _, _, hlen, _, _ => False.elim (Nat.succ_ne_zero _ hlen)
+  | s1 :: r1, s2 :: r2, n1, n2, idx, hlen, hne, hroot =>
+    if hH : H (merkleNodeFrame idx n1 s1) = H (merkleNodeFrame idx n2 s2) then
+      ⟨merkleNodeFrame idx n1 s1, merkleNodeFrame idx n2 s2,
+        fun h => hne (merkleNodeFrame_node_injective h), hH⟩
+    else
+      merklePathCollision H r1 r2 _ _ (idx / 2) (Nat.succ.inj hlen) hH hroot
+
+/-- Stage-and-layer domain-separated leaf preimage of coset duet `(v0, v1)` over `GoldilocksExt4`. -/
+def duetLeafFrame (stageIdx layer g : Nat) (v0 v1 : GoldilocksExt4) : List UInt8 :=
+  encodeMultiFrame [(toString stageIdx).toUTF8.toList, (toString layer).toUTF8.toList,
+    (toString g).toUTF8.toList, GoldilocksExt4.encodeBytes32 v0, GoldilocksExt4.encodeBytes32 v1]
+
+theorem duetLeafFrame_injective {stageIdx layer g : Nat} {v0 v1 t0 t1 : GoldilocksExt4}
+    (h : duetLeafFrame stageIdx layer g v0 v1 = duetLeafFrame stageIdx layer g t0 t1) :
+    v0 = t0 ∧ v1 = t1 := by
+  have h1 := (List.cons.inj (encodeMultiFrame_injective h)).2
+  have h2 := (List.cons.inj h1).2
+  have h3 := (List.cons.inj h2).2
+  have h4 := List.cons.inj h3
+  exact ⟨GoldilocksExt4.encodeBytes32_injective h4.1,
+    GoldilocksExt4.encodeBytes32_injective (List.cons.inj h4.2).1⟩
+
+def duetOpeningCollision (stageIdx layer g : Nat) (v0 v1 t0 t1 : GoldilocksExt4)
+    (p1 p2 : List (List UInt8)) (root : List UInt8)
+    (hne : ¬ (v0 = t0 ∧ v1 = t1)) (hlen : p1.length = p2.length)
+    (h1 : merklePathRoot pcsMerkleHash (pcsMerkleHash (duetLeafFrame stageIdx layer g v0 v1)) g p1 = root)
+    (h2 : merklePathRoot pcsMerkleHash (pcsMerkleHash (duetLeafFrame stageIdx layer g t0 t1)) g p2 = root) :
+    HashCollisionWitness pcsMerkleHash :=
+  if hH : pcsMerkleHash (duetLeafFrame stageIdx layer g v0 v1) =
+      pcsMerkleHash (duetLeafFrame stageIdx layer g t0 t1) then
+    ⟨duetLeafFrame stageIdx layer g v0 v1, duetLeafFrame stageIdx layer g t0 t1,
+      fun h => hne (duetLeafFrame_injective h), hH⟩
+  else
+    merklePathCollision pcsMerkleHash p1 p2 _ _ g hlen hH (h1.trans h2.symm)
+
+def merkleDepthFuel : Nat → Nat → Nat
+  | 0, _ => 0
+  | fuel + 1, n => if n ≤ 1 then 0 else merkleDepthFuel fuel (n / 2) + 1
+
+def merkleDepth (n : Nat) : Nat := merkleDepthFuel n n
+
+/-- Kernel-reducible witness seed `"QSAG.POW.WITNESS/v2"` avoiding `@[extern] String.toUTF8`
+    during kernel reduction of 16-bit PoW KAT proofs. -/
+def powWitnessSeedV2 : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x4f, 0x57, 0x2e, 0x57, 0x49, 0x54, 0x4e, 0x45,
+   0x53, 0x53, 0x2f, 0x76, 0x32]
+
+/-- The low `w` bytes of `n` in little-endian order (`u64::to_le_bytes` at `w = 8`). -/
+def leBytes : Nat → Nat → List UInt8
+  | 0, _ => []
+  | w + 1, n => UInt8.ofNat (n % 256) :: leBytes w (n / 256)
+
+/-- Little-endian byte list decoded as a natural number (`u64::from_le_bytes` on 8 bytes). -/
+def ofLeBytes : List UInt8 → Nat
+  | [] => 0
+  | b :: bs => b.toNat + 256 * ofLeBytes bs
+
+@[simp] theorem length_leBytes (w n : Nat) : (leBytes w n).length = w := by
+  induction w generalizing n with
+  | zero => rfl
+  | succ w ih => simp [leBytes, ih]
+
+theorem ofLeBytes_leBytes (w n : Nat) : ofLeBytes (leBytes w n) = n % 256 ^ w := by
+  induction w generalizing n with
+  | zero => simp only [leBytes, ofLeBytes, Nat.pow_zero, Nat.mod_one]
+  | succ w ih =>
+    have hb : (UInt8.ofNat (n % 256)).toNat = n % 256 := by
+      rw [UInt8.toNat_ofNat']
+      exact Nat.mod_eq_of_lt (Nat.mod_lt _ (by decide))
+    rw [leBytes, ofLeBytes, ih, hb, Nat.pow_succ, Nat.mul_comm (256 ^ w) 256]
+    let p := 256 ^ w
+    have hpPos : 0 < p := Nat.pow_pos (by decide : 0 < 256)
+    have hr0 : n % 256 < 256 := Nat.mod_lt n (by decide)
+    have hr1 : (n / 256) % p < p := Nat.mod_lt (n / 256) hpPos
+    have hBound : n % 256 + 256 * ((n / 256) % p) < 256 * p := by
+      have h1 : (n / 256) % p + 1 ≤ p := hr1
+      have h2 := Nat.mul_le_mul_left 256 h1
+      omega
+    have hDecomp : n = (n % 256 + 256 * ((n / 256) % p)) + (256 * p) * ((n / 256) / p) := by
+      have e0 := (Nat.div_add_mod n 256).symm
+      have e1 := (Nat.div_add_mod (n / 256) p).symm
+      calc
+        n = 256 * (n / 256) + n % 256 := e0
+        _ = 256 * (p * ((n / 256) / p) + (n / 256) % p) + n % 256 := by rw [← e1]
+        _ = (n % 256 + 256 * ((n / 256) % p)) + (256 * p) * ((n / 256) / p) := by
+          rw [Nat.mul_add, ← Nat.mul_assoc, Nat.add_comm _ (n % 256), Nat.add_assoc,
+              Nat.add_comm (256 * ((n / 256) % p))]
+    conv => rhs; rw [hDecomp]
+    rw [Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hBound]
+
+/-- Customization string `"QSAG.PCS.POW2/v1"` of the deployed per-stage grinding hash (`POW_CUSTOM`
+    in `crates/qsag-agg/src/sponge.rs`, whose `cSHAKE256` midstate is `POW_MIDSTATE`), written as
+    kernel-reducible UTF-8 bytes so `decide +kernel` reduces `verifyWhirStagePow` directly. -/
+def whirPowCustomization : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x43, 0x53, 0x2e, 0x50, 0x4f, 0x57, 0x32, 0x2f, 0x76, 0x31]
+
+/-- The 64-bit grinding word of `cshake256_pow_u64_single` (`sponge.rs`): `cSHAKE256` under
+    `whirPowCustomization` of the 40-byte buffer `chal ++ nonce.to_le_bytes()`, with the first
+    eight output bytes read as a little-endian `u64`. -/
+def whirPowWord (chal : List UInt8) (powNonce : Nat) : Nat :=
+  ofLeBytes ((cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce)).take 8)
+
+/-- **Per-Stage WHIR Proof-of-Work (`verifyWhirStagePow`)**, the function of `verify_pcs_pow` in
+    `crates/qsag-agg/src/pcs.rs`: accept when `powBits = 0`; otherwise the challenge must be a
+    32-byte digest, the nonce a `u64`, and the low `powBits` bits of `whirPowWord chal powNonce`
+    must all be zero (`word & ((1 << powBits) - 1) == 0`).
+
+    Only this function is the deployed one. The 32-byte challenge the deployed verifier feeds it
+    is the running digest of its Fiat–Shamir transcript, which this module does not model;
+    `verifyOneWhirStage` feeds it `stagePowDigest` of this module's own transcript frame. -/
+def verifyWhirStagePow (chal : List UInt8) (powNonce powBits : Nat) : Bool :=
+  if powBits = 0 then true
+  else if powBits ≤ 64 ∧ chal.length = 32 ∧ powNonce < 2 ^ 64 then
+    decide (whirPowWord chal powNonce % 2 ^ powBits = 0)
+  else false
+
+/-- Kernel-reducible UTF-8 bytes of `"QSAG.AGG.WHIR.POW_DIGEST/v2"`. -/
+def tagStagePowDigestV2 : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x41, 0x47, 0x47, 0x2e, 0x57, 0x48, 0x49, 0x52, 0x2e,
+   0x50, 0x4f, 0x57, 0x5f, 0x44, 0x49, 0x47, 0x45, 0x53, 0x54, 0x2f, 0x76, 0x32]
+
+/-- 32-byte digest of this module's stage transcript frame, the challenge handed to
+    `verifyWhirStagePow`. The label is local to this model: the deployed challenge is the
+    transcript's running chain digest, which has no counterpart here. -/
+def stagePowDigest (seed : List UInt8) : List UInt8 :=
+  cshake256Bytes tagStagePowDigestV2 seed
+
+@[simp] theorem stagePowDigest_length (seed : List UInt8) : (stagePowDigest seed).length = 32 :=
+  cshake256Bytes_length _ _
+
+/-- At `powBits = 16` acceptance is exactly "the first two digest bytes are zero", for every
+    32-byte challenge and `u64` nonce. -/
+theorem verifyWhirStagePow_16_iff (chal : List UInt8) (powNonce : Nat)
+    (hLen : chal.length = 32) (hNonce : powNonce < 2 ^ 64) :
+    verifyWhirStagePow chal powNonce 16 = true ↔
+      ((cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce)).take 2).all
+        (· == 0) = true := by
+  have hGuard : (16 ≤ 64 ∧ chal.length = 32 ∧ powNonce < 2 ^ 64) := ⟨by decide, hLen, hNonce⟩
+  unfold verifyWhirStagePow whirPowWord
+  have h16 : ¬ ((16 : Nat) = 0) := by decide
+  rw [ite_eq_right_of_eq_false _ _ (eq_false h16), ite_eq_left_of_eq_true _ _ (eq_true hGuard),
+    decide_eq_true_iff]
+  have hDigLen := cshake256Bytes_length whirPowCustomization (chal ++ leBytes 8 powNonce)
+  generalize cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce) = dig at hDigLen ⊢
+  rcases dig with _ | ⟨b0, _ | ⟨b1, rest⟩⟩
+  · simp at hDigLen
+  · simp at hDigLen
+  · show ofLeBytes (b0 :: b1 :: rest.take 6) % 2 ^ 16 = 0 ↔ [b0, b1].all (· == 0) = true
+    have h0 := b0.toNat_lt
+    have h1 := b1.toNat_lt
+    simp only [ofLeBytes, List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true,
+      beq_iff_eq]
+    generalize ofLeBytes (rest.take 6) = r
+    constructor
+    · intro h
+      have hb0 : b0.toNat = 0 := by omega
+      have hb1 : b1.toNat = 0 := by omega
+      exact ⟨UInt8.toNat_inj.mp (hb0.trans UInt8.toNat_zero.symm),
+        UInt8.toNat_inj.mp (hb1.trans UInt8.toNat_zero.symm)⟩
+    · rintro ⟨hb0, hb1⟩
+      rw [hb0, hb1, UInt8.toNat_zero]
+      omega
+
+/-- Concrete inhabitedness witness: a genuine 16-bit `cSHAKE256` Proof-of-Work (`powBits = 16`,
+    nonce `5791`) on the digest of `powWitnessSeedV2`, checked by the Lean kernel. -/
+theorem inhabited_whir_stage_pow_16 :
+    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 5791 16 = true := by
+  decide +kernel
+
+/-- `#tooth` Invalid PoW Nonce Rejection (`powNonce = 0` fails 16-bit PoW on the witness digest). -/
+theorem tooth_whir_pow16_nonce0_rejected :
+    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 0 16 = false := by
+  decide +kernel
+
+/-- `#tooth`: a challenge that is not a 32-byte digest is rejected at every positive difficulty,
+    as is a nonce outside `u64`. -/
+theorem tooth_whir_pow_rejects_malformed_inputs (chal : List UInt8) (powNonce powBits : Nat)
+    (hBits : powBits ≠ 0) (hBad : chal.length ≠ 32 ∨ 2 ^ 64 ≤ powNonce) :
+    verifyWhirStagePow chal powNonce powBits = false := by
+  unfold verifyWhirStagePow
+  rw [ite_eq_right_of_eq_false _ _ (eq_false hBits)]
+  apply ite_eq_right_of_eq_false
+  apply eq_false
+  rintro ⟨_, hLen, hNonce⟩
+  rcases hBad with h | h
+  · exact h hLen
+  · exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le hNonce h)
+
+/-- Public domain parameters of a single WHIR rate-escalation stage `s`.
+    When `bindRowChallenges = true`, intra-stage coset folding evaluates directly at the
+    Fiat–Shamir row-sumcheck challenges (committed after `stageRoot` and `roundPolys`), while
+    `shiftPolys` still run against fresh `shiftChallenges`. -/
+structure WhirStageDomain where
+  stageIdx : Nat
+  blowup : Nat
+  groups0 : Nat
+  foldLayers : Nat
+  numQueries : Nat
+  powBits : Nat
+  invTwo : Goldilocks
+  invTwoY0 : Nat → Nat → Goldilocks
+  sampleFuel : Nat
+  bindRowChallenges : Bool := false
+
+/-- Public multi-stage WHIR domain schedule. -/
+structure WhirDomain where
+  stages : List WhirStageDomain
+
+structure FoldLayerOpening where
+  v0 : GoldilocksExt4
+  v1 : GoldilocksExt4
+  path : List (List UInt8)
+
+/-- Authenticated coset fiber opening for one stage query: `layers` walks the intra-stage fold
+    tree, and `nextStageBridge` authenticates the resulting folded value directly against the
+    next WHIR stage's Merkle root (`none` on the final stage, which checks `finalWord`). -/
+structure StageQueryOpening where
+  index : Nat
+  layers : List FoldLayerOpening
+  nextStageBridge : Option FoldLayerOpening := none
+
+/-- Proof transcript data for one WHIR stage `s`:
+    `stageRoot` -> squeeze `oodChallenge` -> absorb `oodEval` -> interleaved degree-2 shift/OOD
+    sumcheck (`shiftPolys`, `layerRoots`, `shiftChallenges`) -> `powNonce` -> `queries`. -/
+structure WhirStageProof where
+  stageRoot : List UInt8
+  oodChallenge : GoldilocksExt4
+  oodEval : GoldilocksExt4
+  shiftClaim : GoldilocksExt4
+  shiftPolys : List (List GoldilocksExt4)
+  layerRoots : List (List UInt8)
+  shiftChallenges : List GoldilocksExt4
+  foldChallenges : List GoldilocksExt4
+  shiftTerminalEval : GoldilocksExt4
+  powNonce : Nat
+  queries : List StageQueryOpening
+
+/-- Complete succinct `GoldilocksExt4` WHIR aggregate certificate: zero `PqHashSig` lists. -/
+structure SuccinctAggregateProof where
+  agg : AggregatedSignature
+  stages : List WhirStageProof
+  finalWord : List GoldilocksExt4
+
+def stageAllRoots (sp : WhirStageProof) : List (List UInt8) :=
+  sp.stageRoot :: sp.layerRoots
+
+/-- Squeeze the Fiat–Shamir OOD point `z_ood` after absorbing `stageRoot`. -/
+def deriveStageOodChallenge (prior : List UInt8) (stageRoot : List UInt8) : GoldilocksExt4 :=
+  squeezeExt4Challenge "QSAG.AGG.WHIR.OOD/v2".toUTF8.toList (encodeMultiFrame [prior, stageRoot])
+
+/-- Transcript state after absorbing `stageRoot`, `oodEval`, and `shiftClaim`. -/
+def stagePostOodTranscript (prior : List UInt8) (sp : WhirStageProof) : List UInt8 :=
+  encodeMultiFrame [prior, sp.stageRoot, GoldilocksExt4.encodeBytes32 sp.oodEval,
+    GoldilocksExt4.encodeBytes32 sp.shiftClaim]
+
+/-- Interleaved per-stage shift/fold challenge derivation (`[stageRoot] ++ layerRoots` paired with
+    `shiftPolys`). -/
+def deriveStageShiftChallenges (prior : List UInt8) :
+    List (List UInt8) → List (List GoldilocksExt4) → List GoldilocksExt4
+  | root :: roots, p :: ps =>
+    let frame := encodeMultiFrame [prior, root, encodePolyExt4 p]
+    let α := squeezeExt4Challenge "QSAG.AGG.WHIR.FOLD/v2".toUTF8.toList frame
+    α :: deriveStageShiftChallenges frame roots ps
+  | _, _ => []
+
+def stageFoldTranscriptTail (prior : List UInt8) :
+    List (List UInt8) → List (List GoldilocksExt4) → List UInt8
+  | root :: roots, p :: ps =>
+    stageFoldTranscriptTail (encodeMultiFrame [prior, root, encodePolyExt4 p]) roots ps
+  | _, _ => prior
+
+/-- Transcript frame whose `stagePowDigest` feeds `verifyWhirStagePow` for stage `sp`
+    (incorporates `finalWord` if final stage). -/
+def stagePowSeed (prior : List UInt8) (sp : WhirStageProof)
+    (nextRoot? : Option (List UInt8)) (finalWord : List GoldilocksExt4) : List UInt8 :=
+  let foldTail := stageFoldTranscriptTail (stagePostOodTranscript prior sp)
+    (stageAllRoots sp) sp.shiftPolys
+  match nextRoot? with
+  | some nextRoot => encodeMultiFrame [foldTail, nextRoot]
+  | none => encodeMultiFrame [foldTail, encodePolyExt4 finalWord]
+
+/-- Query-sampling seed after binding `powNonce`. -/
+def stageQuerySeed (powSeed : List UInt8) (powNonce : Nat) : List UInt8 :=
+  encodeMultiFrame [powSeed, be 8 powNonce]
+
+def sortedInsertDistinct (x : Nat) : List Nat → List Nat
+  | [] => [x]
+  | y :: ys =>
+    if x < y then x :: y :: ys else if x = y then y :: ys else y :: sortedInsertDistinct x ys
+
+def sampleDistinctLoop (cand : Nat → Nat) (target : Nat) : Nat → Nat → List Nat → List Nat
+  | 0, _, acc => acc
+  | fuel + 1, k, acc =>
+    if target ≤ acc.length then acc
+    else sampleDistinctLoop cand target fuel (k + 1) (sortedInsertDistinct (cand k) acc)
+
+def scanFillDistinct (target : Nat) : List Nat → List Nat → List Nat
+  | [], acc => acc
+  | x :: xs, acc =>
+    if target ≤ acc.length then acc
+    else scanFillDistinct target xs (sortedInsertDistinct x acc)
+
+def squeezeQueryIndex (seed : List UInt8) (groups k : Nat) : Nat :=
+  ofBE ((cshake256Bytes "QSAG.AGG.WHIR.QUERY/v2".toUTF8.toList
+    (encodeMultiFrame [seed, (toString k).toUTF8.toList])).take 8) % groups
+
+def deriveStageQueryIndices (sdom : WhirStageDomain) (qSeed : List UInt8) : List Nat :=
+  let target := min sdom.numQueries sdom.groups0
+  let sampled := sampleDistinctLoop (squeezeQueryIndex qSeed sdom.groups0)
+    target sdom.sampleFuel 0 []
+  scanFillDistinct target (List.range sdom.groups0) sampled
+
+def strictlyIncreasing : List Nat → Bool
+  | [] => true
+  | [_] => true
+  | x :: y :: ys => decide (x < y) && strictlyIncreasing (y :: ys)
+
+theorem strictlyIncreasing_head_lt :
+    ∀ (l : List Nat) (x : Nat), strictlyIncreasing (x :: l) = true → ∀ y ∈ l, x < y
+  | [], _, _, _, hy => by cases hy
+  | z :: zs, x, h, y, hy => by
+    have h' := Bool.and_eq_true_iff.mp h
+    have hxz : x < z := of_decide_eq_true h'.1
+    rcases List.mem_cons.mp hy with e | e
+    · rw [e]; exact hxz
+    · exact Nat.lt_trans hxz (strictlyIncreasing_head_lt zs z h'.2 y e)
+
+theorem strictlyIncreasing_nodup : ∀ (l : List Nat), strictlyIncreasing l = true → l.Nodup
+  | [], _ => List.Pairwise.nil
+  | x :: l, h => by
+    have htail : strictlyIncreasing l = true := by
+      cases l with
+      | nil => rfl
+      | cons z zs => exact (Bool.and_eq_true_iff.mp h).2
+    exact List.nodup_cons.mpr
+      ⟨fun hm => Nat.lt_irrefl x (strictlyIncreasing_head_lt l x h x hm),
+        strictlyIncreasing_nodup l htail⟩
+
+theorem mem_sortedInsertDistinct {x z : Nat} :
+    ∀ {l : List Nat}, z ∈ sortedInsertDistinct x l → z = x ∨ z ∈ l
+  | [], h => .inl (List.mem_singleton.mp h)
+  | y :: ys, h => by
+    simp only [sortedInsertDistinct] at h
+    if hlt : x < y then
+      simp only [hlt, ↓reduceIte, List.mem_cons] at h
+      rcases h with rfl | rfl | hm
+      · exact .inl rfl
+      · exact .inr (.head _)
+      · exact .inr (.tail _ hm)
+    else if heq : x = y then
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte] at h
+      exact .inr h
+    else
+      simp only [hlt, heq, ↓reduceIte, List.mem_cons] at h
+      rcases h with rfl | hm
+      · exact .inr (.head _)
+      · rcases mem_sortedInsertDistinct hm with rfl | hm'
+        · exact .inl rfl
+        · exact .inr (.tail _ hm')
+
+theorem strictlyIncreasing_sortedInsertDistinct (x : Nat) :
+    ∀ (l : List Nat), strictlyIncreasing l = true →
+      strictlyIncreasing (sortedInsertDistinct x l) = true
+  | [], _ => rfl
+  | y :: ys, h => by
+    simp only [sortedInsertDistinct]
+    if hlt : x < y then
+      simp only [hlt, ↓reduceIte, strictlyIncreasing, decide_true, Bool.true_and]
+      exact h
+    else if heq : x = y then
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte]
+      exact h
+    else
+      have hyx : y < x := by omega
+      simp only [hlt, heq, ↓reduceIte]
+      have hTail : strictlyIncreasing ys = true := by
+        cases ys with
+        | nil => rfl
+        | cons z zs => exact (Bool.and_eq_true_iff.mp h).2
+      have ih := strictlyIncreasing_sortedInsertDistinct x ys hTail
+      cases hIns : sortedInsertDistinct x ys with
+      | nil => rfl
+      | cons w ws =>
+        rw [hIns] at ih
+        have hwMem : w ∈ sortedInsertDistinct x ys := by rw [hIns]; exact .head _
+        have hyw : y < w := by
+          rcases mem_sortedInsertDistinct hwMem with rfl | hm
+          · exact hyx
+          · exact strictlyIncreasing_head_lt ys y h w hm
+        exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true hyw, ih⟩
+
+theorem strictlyIncreasing_sampleDistinctLoop (cand : Nat → Nat) (target : Nat) :
+    ∀ (fuel k : Nat) (acc : List Nat),
+      strictlyIncreasing acc = true →
+      strictlyIncreasing (sampleDistinctLoop cand target fuel k acc) = true
+  | 0, _, _, hAcc => hAcc
+  | fuel + 1, k, acc, hAcc => by
+    simp only [sampleDistinctLoop]
+    split
+    · exact hAcc
+    · exact strictlyIncreasing_sampleDistinctLoop cand target fuel (k + 1)
+        (sortedInsertDistinct (cand k) acc)
+        (strictlyIncreasing_sortedInsertDistinct (cand k) acc hAcc)
+
+theorem mem_sampleDistinctLoop_lt {cand : Nat → Nat} {bound : Nat}
+    (hCand : ∀ k, cand k < bound) (target : Nat) :
+    ∀ (fuel k : Nat) (acc : List Nat),
+      (∀ y ∈ acc, y < bound) →
+      ∀ z ∈ sampleDistinctLoop cand target fuel k acc, z < bound
+  | 0, _, _, hAcc, z, hz => hAcc z hz
+  | fuel + 1, k, acc, hAcc, z, hz => by
+    simp only [sampleDistinctLoop] at hz
+    split at hz
+    · exact hAcc z hz
+    · exact mem_sampleDistinctLoop_lt hCand target fuel (k + 1)
+        (sortedInsertDistinct (cand k) acc)
+        (fun w hw => by
+          rcases mem_sortedInsertDistinct hw with rfl | hm
+          · exact hCand k
+          · exact hAcc w hm) z hz
+
+theorem length_sortedInsertDistinct_of_not_mem (x : Nat) :
+    ∀ (l : List Nat), x ∉ l → (sortedInsertDistinct x l).length = l.length + 1
+  | [], _ => rfl
+  | y :: ys, hNot => by
+    simp only [sortedInsertDistinct]
+    if hlt : x < y then
+      simp [hlt]
+    else if heq : x = y then
+      exact False.elim (hNot (heq ▸ .head _))
+    else
+      simp only [hlt, heq, ↓reduceIte, List.length_cons]
+      have hNotYs : x ∉ ys := fun hm => hNot (.tail _ hm)
+      rw [length_sortedInsertDistinct_of_not_mem x ys hNotYs]
+
+theorem mem_sortedInsertDistinct_iff {x z : Nat} {l : List Nat} :
+    z ∈ sortedInsertDistinct x l ↔ z = x ∨ z ∈ l := by
+  constructor
+  · exact mem_sortedInsertDistinct
+  · intro h
+    induction l with
+    | nil =>
+      rcases h with rfl | hm
+      · exact .head _
+      · cases hm
+    | cons y ys ih =>
+      simp only [sortedInsertDistinct]
+      if hlt : x < y then
+        simp only [hlt, ↓reduceIte, List.mem_cons]
+        rcases h with rfl | hm
+        · exact .inl rfl
+        · exact .inr (List.mem_cons.mp hm)
+      else if heq : x = y then
+        subst heq
+        simp only [Nat.lt_irrefl, ↓reduceIte]
+        rcases h with rfl | hm
+        · exact .head _
+        · exact hm
+      else
+        simp only [hlt, heq, ↓reduceIte, List.mem_cons]
+        rcases h with rfl | hm
+        · exact .inr (ih (.inl rfl))
+        · rcases List.mem_cons.mp hm with rfl | hms
+          · exact .inl rfl
+          · exact .inr (ih (.inr hms))
+
+theorem length_sortedInsertDistinct_le (x : Nat) :
+    ∀ (l : List Nat), (sortedInsertDistinct x l).length ≤ l.length + 1
+  | [] => Nat.le_refl 1
+  | y :: ys => by
+    simp only [sortedInsertDistinct]
+    if hlt : x < y then
+      simp [hlt]
+    else if heq : x = y then
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte]
+      omega
+    else
+      simp only [hlt, heq, ↓reduceIte, List.length_cons]
+      exact Nat.succ_le_succ (length_sortedInsertDistinct_le x ys)
+
+theorem length_sortedInsertDistinct_of_mem (x : Nat) :
+    ∀ (l : List Nat), strictlyIncreasing l = true → x ∈ l →
+      (sortedInsertDistinct x l).length = l.length
+  | [], _, hMem => by cases hMem
+  | y :: ys, hInc, hMem => by
+    simp only [sortedInsertDistinct]
+    if hlt : x < y then
+      exfalso
+      rcases List.mem_cons.mp hMem with rfl | hm
+      · exact Nat.lt_irrefl _ hlt
+      · exact Nat.lt_asymm hlt (strictlyIncreasing_head_lt ys y hInc x hm)
+    else if heq : x = y then
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte]
+    else
+      have hTail : strictlyIncreasing ys = true := by
+        cases ys with
+        | nil => rfl
+        | cons z zs => exact (Bool.and_eq_true_iff.mp hInc).2
+      have hmYs : x ∈ ys := by
+        rcases List.mem_cons.mp hMem with rfl | hm
+        · exact False.elim (heq rfl)
+        · exact hm
+      simp only [hlt, heq, ↓reduceIte, List.length_cons]
+      exact congrArg Nat.succ (length_sortedInsertDistinct_of_mem x ys hTail hmYs)
+
+theorem length_sampleDistinctLoop_le (cand : Nat → Nat) (target : Nat) :
+    ∀ (fuel k : Nat) (acc : List Nat),
+      acc.length ≤ target →
+      (sampleDistinctLoop cand target fuel k acc).length ≤ target
+  | 0, _, _, hLe => hLe
+  | fuel + 1, k, acc, hLe => by
+    simp only [sampleDistinctLoop]
+    if hT : target ≤ acc.length then
+      simp [hT, hLe]
+    else
+      simp only [hT, ↓reduceIte]
+      have hIns := length_sortedInsertDistinct_le (cand k) acc
+      exact length_sampleDistinctLoop_le cand target fuel (k + 1) _ (by omega)
+
+theorem strictlyIncreasing_scanFillDistinct (target : Nat) :
+    ∀ (xs acc : List Nat),
+      strictlyIncreasing acc = true →
+      strictlyIncreasing (scanFillDistinct target xs acc) = true
+  | [], _, hAcc => hAcc
+  | x :: xs, acc, hAcc => by
+    simp only [scanFillDistinct]
+    split
+    · exact hAcc
+    · exact strictlyIncreasing_scanFillDistinct target xs _
+        (strictlyIncreasing_sortedInsertDistinct x acc hAcc)
+
+theorem mem_scanFillDistinct_lt {bound : Nat} (target : Nat) :
+    ∀ (xs acc : List Nat),
+      (∀ y ∈ xs, y < bound) →
+      (∀ y ∈ acc, y < bound) →
+      ∀ z ∈ scanFillDistinct target xs acc, z < bound
+  | [], acc, _, hAcc, z, hz => hAcc z hz
+  | x :: xs, acc, hXs, hAcc, z, hz => by
+    simp only [scanFillDistinct] at hz
+    split at hz
+    · exact hAcc z hz
+    · exact mem_scanFillDistinct_lt target xs _
+        (fun y hy => hXs y (.tail _ hy))
+        (fun w hw => by
+          rcases mem_sortedInsertDistinct hw with hEq | hm
+          · rw [hEq]; exact hXs x (.head _)
+          · exact hAcc w hm) z hz
+
+private theorem filter_ne_length_lt_of_mem (x : Nat) :
+    ∀ (acc : List Nat), x ∈ acc → (acc.filter (fun z => decide (z ≠ x))).length < acc.length
+  | [], hm => by cases hm
+  | a :: as, hm => by
+    rcases List.mem_cons.mp hm with hEq | hms
+    · subst hEq
+      simp only [List.filter, ne_eq, not_true_eq_false, decide_false, List.length_cons]
+      exact Nat.lt_succ_of_le (List.length_filter_le _ as)
+    · have ih := filter_ne_length_lt_of_mem x as hms
+      cases hd : decide (a ≠ x) <;> simp only [List.filter, hd, List.length_cons] <;> omega
+
+private theorem nodup_length_le_missing_add_acc :
+    ∀ (xs : List Nat), xs.Nodup →
+      ∀ (acc : List Nat),
+        xs.length ≤ (xs.filter (fun z => decide (z ∉ acc))).length + acc.length
+  | [], _, _ => Nat.zero_le _
+  | x :: xs, hNd, acc => by
+    obtain ⟨hxNot, hNdXs⟩ := List.nodup_cons.mp hNd
+    if hxAcc : x ∈ acc then
+      let acc0 := acc.filter (fun z => decide (z ≠ x))
+      have hLt : acc0.length < acc.length := filter_ne_length_lt_of_mem x acc hxAcc
+      have hFiltEq : xs.filter (fun z => decide (z ∉ acc0)) =
+          xs.filter (fun z => decide (z ∉ acc)) := by
+        apply List.filter_congr
+        intro z hz
+        have hzx : z ≠ x := fun hEq => hxNot (hEq ▸ hz)
+        by_cases hzAcc : z ∈ acc
+        · have hzAcc0 : z ∈ acc0 := List.mem_filter.mpr ⟨hzAcc, decide_eq_true hzx⟩
+          simp [hzAcc, hzAcc0]
+        · have hzNot0 : z ∉ acc0 := fun hm => hzAcc (List.mem_filter.mp hm).1
+          simp [hzAcc, hzNot0]
+      have ih := nodup_length_le_missing_add_acc xs hNdXs acc0
+      rw [hFiltEq] at ih
+      simp only [List.filter, hxAcc, not_true_eq_false, decide_false, List.length_cons]
+      omega
+    else
+      have ih := nodup_length_le_missing_add_acc xs hNdXs acc
+      simp only [List.filter, hxAcc, not_false_eq_true, decide_true, List.length_cons]
+      omega
+
+theorem length_scanFillDistinct (target : Nat) :
+    ∀ (xs acc : List Nat),
+      strictlyIncreasing acc = true →
+      xs.Nodup →
+      acc.length ≤ target →
+      target ≤ (xs.filter (fun z => decide (z ∉ acc))).length + acc.length →
+      (scanFillDistinct target xs acc).length = target
+  | [], acc, _, _, hLe, hGe => by
+    simp only [scanFillDistinct, List.filter, List.length_nil, Nat.zero_add] at hGe ⊢
+    omega
+  | x :: xs, acc, hInc, hNd, hLe, hGe => by
+    simp only [scanFillDistinct]
+    if hT : target ≤ acc.length then
+      simp only [hT, ↓reduceIte]
+      omega
+    else
+      simp only [hT, ↓reduceIte]
+      obtain ⟨hxNot, hNdXs⟩ := List.nodup_cons.mp hNd
+      let acc' := sortedInsertDistinct x acc
+      have hInc' : strictlyIncreasing acc' = true :=
+        strictlyIncreasing_sortedInsertDistinct x acc hInc
+      have hFiltEq : xs.filter (fun z => decide (z ∉ acc')) =
+          xs.filter (fun z => decide (z ∉ acc)) := by
+        apply List.filter_congr
+        intro z hz
+        have hzx : z ≠ x := fun hEq => hxNot (hEq ▸ hz)
+        by_cases hzAcc : z ∈ acc
+        · have hzAcc' : z ∈ acc' := mem_sortedInsertDistinct_iff.mpr (.inr hzAcc)
+          simp [hzAcc, hzAcc']
+        · have hzNot' : z ∉ acc' := fun hm => by
+            rcases mem_sortedInsertDistinct_iff.mp hm with hEq | hmAcc
+            · exact hzx hEq
+            · exact hzAcc hmAcc
+          simp [hzAcc, hzNot']
+      if hxAcc : x ∈ acc then
+        have hLenEq : acc'.length = acc.length :=
+          length_sortedInsertDistinct_of_mem x acc hInc hxAcc
+        simp only [List.filter, hxAcc, not_true_eq_false, decide_false] at hGe
+        exact length_scanFillDistinct target xs acc' hInc' hNdXs
+          (by omega) (by rw [hFiltEq, hLenEq]; exact hGe)
+      else
+        have hLenSucc : acc'.length = acc.length + 1 :=
+          length_sortedInsertDistinct_of_not_mem x acc hxAcc
+        simp only [List.filter, hxAcc, not_false_eq_true, decide_true, List.length_cons] at hGe
+        exact length_scanFillDistinct target xs acc' hInc' hNdXs
+          (by omega) (by rw [hFiltEq, hLenSucc]; omega)
+
+private theorem pairwise_snoc {α : Type} {R : α → α → Prop} {l : List α} {a : α}
+    (hl : List.Pairwise R l) (ha : ∀ x ∈ l, R x a) : List.Pairwise R (l ++ [a]) := by
+  induction hl with
+  | nil => exact .cons (fun _ h => nomatch h) .nil
+  | cons hhd _ ih =>
+    exact .cons
+      (fun y hy => match List.mem_append.mp hy with
+        | .inl hyl => hhd y hyl
+        | .inr hya => List.mem_singleton.mp hya ▸ ha _ (.head _))
+      (ih (fun x hx => ha x (.tail _ hx)))
+
+private theorem nodup_range_constructive : ∀ (n : Nat), (List.range n).Nodup
+  | 0 => .nil
+  | n + 1 => by
+    rw [List.range_succ]
+    exact pairwise_snoc (nodup_range_constructive n)
+      (fun x hx hEq => Nat.ne_of_lt (List.mem_range.mp hx) hEq)
+
+theorem deriveStageQueryIndices_props (sdom : WhirStageDomain) (qSeed : List UInt8)
+    (hGroups : 0 < sdom.groups0) :
+    let qs := deriveStageQueryIndices sdom qSeed
+    strictlyIncreasing qs = true ∧
+    qs.length = min sdom.numQueries sdom.groups0 ∧
+    (∀ z ∈ qs, z < sdom.groups0) := by
+  dsimp only [deriveStageQueryIndices]
+  let target := min sdom.numQueries sdom.groups0
+  let sampled := sampleDistinctLoop (squeezeQueryIndex qSeed sdom.groups0)
+    target sdom.sampleFuel 0 []
+  have hIncS : strictlyIncreasing sampled = true :=
+    strictlyIncreasing_sampleDistinctLoop _ target sdom.sampleFuel 0 [] rfl
+  have hLtS : ∀ y ∈ sampled, y < sdom.groups0 :=
+    mem_sampleDistinctLoop_lt (fun k => Nat.mod_lt _ hGroups) target sdom.sampleFuel 0 []
+      (fun _ hm => by cases hm)
+  have hLenS : sampled.length ≤ target :=
+    length_sampleDistinctLoop_le _ target sdom.sampleFuel 0 [] (Nat.zero_le _)
+  have hNdRange := nodup_range_constructive sdom.groups0
+  have hRange := nodup_length_le_missing_add_acc (List.range sdom.groups0) hNdRange sampled
+  rw [List.length_range] at hRange
+  have hTargetLe : target ≤ sdom.groups0 := Nat.min_le_right _ _
+  refine ⟨strictlyIncreasing_scanFillDistinct target _ sampled hIncS,
+    length_scanFillDistinct target _ sampled hIncS hNdRange hLenS (by omega),
+    mem_scanFillDistinct_lt target _ sampled (fun _ hy => List.mem_range.mp hy) hLtS⟩
+
+def expectedSlotOk (expected : Option GoldilocksExt4) (slot : Nat)
+    (v0 v1 : GoldilocksExt4) : Bool :=
+  match expected with
+  | none => true
+  | some e => decide ((if slot = 0 then v0 else v1) = e)
+
+def finalValueOk (finalWord : List GoldilocksExt4) (idx : Nat)
+    (expected : Option GoldilocksExt4) : Bool :=
+  match expected with
+  | none => false
+  | some e => decide (finalWord[idx]? = some e)
+
+/-- Verify a stage's terminal value: against `nextStageRoot` via `bridgeOp` if an intermediate
+    WHIR stage, or against `finalWord` if the final WHIR stage. -/
+def verifyStageTerminalTarget (nextStageInfo : Option (WhirStageDomain × List UInt8))
+    (finalWord : List GoldilocksExt4) (idx : Nat) (expected : Option GoldilocksExt4)
+    (bridgeOp : Option FoldLayerOpening) : Bool :=
+  match nextStageInfo, bridgeOp with
+  | none, none => finalValueOk finalWord idx expected
+  | some (nextDom, nextRoot), some br =>
+    decide (0 < nextDom.groups0) &&
+    expectedSlotOk expected (idx / nextDom.groups0) br.v0 br.v1 &&
+    decide (br.path.length = merkleDepth nextDom.groups0) &&
+    decide (merklePathRoot pcsMerkleHash
+      (pcsMerkleHash (duetLeafFrame nextDom.stageIdx 0 (idx % nextDom.groups0) br.v0 br.v1))
+      (idx % nextDom.groups0) br.path = nextRoot)
+  | _, _ => false
+
+/-- Intra-stage Merkle duet trajectory verifier over `GoldilocksExt4`. -/
+def verifyStageTrajectory (sdom : WhirStageDomain)
+    (nextStageInfo : Option (WhirStageDomain × List UInt8))
+    (finalWord : List GoldilocksExt4) (bridgeOp : Option FoldLayerOpening) :
+    Nat → Nat → Nat → Option GoldilocksExt4 → List (List UInt8) → List GoldilocksExt4 →
+      List FoldLayerOpening → Bool
+  | _, _, idx, expected, [], [], [] =>
+    verifyStageTerminalTarget nextStageInfo finalWord idx expected bridgeOp
+  | layer, groups, idx, expected, root :: roots, α :: αs, op :: ops =>
+    decide (0 < groups) &&
+    expectedSlotOk expected (idx / groups) op.v0 op.v1 &&
+    decide (op.path.length = merkleDepth groups) &&
+    decide (merklePathRoot pcsMerkleHash
+      (pcsMerkleHash (duetLeafFrame sdom.stageIdx layer (idx % groups) op.v0 op.v1))
+      (idx % groups) op.path = root) &&
+    verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp
+      (layer + 1) (groups / 2) (idx % groups)
+      (some (foldDuetExt4 op.v0 op.v1 (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α))
+      roots αs ops
+  | _, _, _, _, _, _, _ => false
+
+/-- Verify one WHIR stage's header, OOD challenge, degree-2 shift sumcheck, PoW, and queries. -/
+def verifyOneWhirStage (rowChallenges : List GoldilocksExt4)
+    (finalWord : List GoldilocksExt4) (prior : List UInt8)
+    (sdom : WhirStageDomain) (sp : WhirStageProof)
+    (nextStageInfo : Option (WhirStageDomain × List UInt8)) : Bool :=
+  let nextRoot? := nextStageInfo.map Prod.snd
+  let pSeed := stagePowSeed prior sp nextRoot? finalWord
+  let qSeed := stageQuerySeed pSeed sp.powNonce
+  let expectedFold := if sdom.bindRowChallenges then rowChallenges
+                      else sp.shiftChallenges
+  decide (sp.oodChallenge = deriveStageOodChallenge prior sp.stageRoot) &&
+  decide ((stageAllRoots sp).length = sdom.foldLayers) &&
+  decide (sp.shiftPolys.length = sdom.foldLayers) &&
+  decide (sp.shiftChallenges =
+    deriveStageShiftChallenges (stagePostOodTranscript prior sp) (stageAllRoots sp) sp.shiftPolys) &&
+  decide (sp.foldChallenges = expectedFold) &&
+  decide (sp.foldChallenges.length = sdom.foldLayers) &&
+  verifyShiftSumcheckChain sp.shiftClaim sp.shiftPolys sp.shiftChallenges sp.shiftTerminalEval &&
+  verifyWhirStagePow (stagePowDigest pSeed) sp.powNonce sdom.powBits &&
+  decide (sp.queries.map (·.index) = deriveStageQueryIndices sdom qSeed) &&
+  strictlyIncreasing (sp.queries.map (·.index)) &&
+  decide (sp.queries.length = min sdom.numQueries sdom.groups0) &&
+  sp.queries.all (fun q =>
+    decide (q.index < sdom.groups0) &&
+    verifyStageTrajectory sdom nextStageInfo finalWord q.nextStageBridge
+      0 sdom.groups0 q.index none (stageAllRoots sp) sp.foldChallenges q.layers)
+
+/-- Verify all WHIR stages sequentially, threading the Fiat–Shamir transcript from stage to stage. -/
+def verifyWhirStages (rowChallenges : List GoldilocksExt4) (finalWord : List GoldilocksExt4) :
+    List UInt8 → List WhirStageDomain → List WhirStageProof → Bool
+  | _, [], [] => true
+  | prior, [sdom], [sp] =>
+    verifyOneWhirStage rowChallenges finalWord prior sdom sp none
+  | prior, sdom :: nextDom :: restDoms, sp :: nextSp :: restProofs =>
+    let pSeed := stagePowSeed prior sp (some nextSp.stageRoot) finalWord
+    let qSeed := stageQuerySeed pSeed sp.powNonce
+    verifyOneWhirStage rowChallenges finalWord prior sdom sp (some (nextDom, nextSp.stageRoot)) &&
+    verifyWhirStages rowChallenges finalWord qSeed (nextDom :: restDoms) (nextSp :: restProofs)
+  | _, _, _ => false
+
+def collectAllFoldChallenges (proof : SuccinctAggregateProof) : List GoldilocksExt4 :=
+  proof.stages.flatMap (·.foldChallenges)
+
+/-- Public data of the row arithmetization over `GoldilocksExt4`:
+    - `decodeSigs`: extracts `List PqHashSig` from the committed Round-0 codeword `table0`
+    - `honestClaim` / `honestRound`: honest degree-8 row-sumcheck polynomial schedule
+    - `terminal`: verifier's algebraic gate evaluator on `(finalWord, rowChallenges, foldChallenges)`
+    - `isStageCodeword`: Reed–Solomon codeword predicate for stage position `pos` (`pos = 0` is Round-0)
+    - `isFinalCodeword`: Reed–Solomon early-stop codeword predicate on `finalWord`. -/
+structure RowArithmetization where
+  decodeSigs : List GoldilocksExt4 → List PqHashSig
+  honestClaim : List GoldilocksExt4 → GoldilocksExt4
+  honestRound : List GoldilocksExt4 → List GoldilocksExt4 → List GoldilocksExt4
+  terminal : List GoldilocksExt4 → List GoldilocksExt4 → List GoldilocksExt4 → GoldilocksExt4
+  isStageCodeword : Nat → List GoldilocksExt4 → Bool
+  isFinalCodeword : List GoldilocksExt4 → Bool
+
+def RowArithmetization.isRound0Codeword (arith : RowArithmetization)
+    (table0 : List GoldilocksExt4) : Bool :=
+  arith.isStageCodeword 0 table0
+
+/-- **Succinct Multi-Stage `GoldilocksExt4` WHIR Aggregate Verifier (`verifySuccinctAggregate`)**:
+    Verifies instance framing, regime match, degree-8 row sumcheck, Stage-0 root binding to
+    `agg.traceCommitment`, multi-stage WHIR OOD + degree-2 shift sumcheck + PoW + distinct fiber
+    trajectories, early-stop Reed–Solomon codeword `isFinalCodeword`, and terminal evaluation link.
+    Receives **zero** plaintext `PqHashSig` signatures. -/
+def verifySuccinctAggregate (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fsTranscript : List UInt8) : Bool :=
+  match proof.stages with
+  | [] => false
+  | sp0 :: _ =>
+    decide (fsTranscript = aggregateInstanceFrame inst proof.agg) &&
+    decide (proof.agg.regime = inst.regime) &&
+    decide (proof.agg.suite.suiteId = inst.suite.suiteId) &&
+    decide (proof.agg.params = inst.params) &&
+    decide (sp0.stageRoot = proof.agg.traceCommitment) &&
+    decide (proof.agg.challenges = deriveRowSumcheckChallenges fsTranscript proof.agg.roundPolys) &&
+    verifyAggregateAlgebra inst.committee proof.agg &&
+    decide (proof.agg.terminalEval =
+      arith.terminal proof.finalWord proof.agg.challenges (collectAllFoldChallenges proof)) &&
+    arith.isFinalCodeword proof.finalWord &&
+    verifyWhirStages proof.agg.challenges proof.finalWord
+      (rowSumcheckTranscriptTail fsTranscript proof.agg.roundPolys)
+      dom.stages proof.stages
+
+/-- Succinct signature-aggregation verifier entry point (upgraded in place: zero plaintext
+    `openedSignatures : List PqHashSig`). -/
+abbrev verifyAggregatedSignature := verifySuccinctAggregate
+
+/-- Recursive disjoint 2-to-1 merge tree of succinct WHIR certificates (zero plaintext signatures). -/
+inductive MergeNode where
+  | leaf (proof : SuccinctAggregateProof) (transcript : List UInt8)
+  | branch (proof : SuccinctAggregateProof) (transcript : List UInt8) (left right : MergeNode)
+
+def MergeNode.proof : MergeNode → SuccinctAggregateProof
+  | .leaf p _ => p
+  | .branch p _ _ _ => p
+
+def MergeNode.certificate (n : MergeNode) : AggregatedSignature := n.proof.agg
+
+/-- Recursive merge-tree verifier checking child commitments, disjoint validator bitmaps,
+    union conservation, and full succinct `GoldilocksExt4` WHIR verification at every node. -/
+def verifyMergeTree (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) : Nat → MergeNode → Bool
+  | 0, _ => false
+  | _ + 1, .leaf p fs =>
+    p.agg.childrenCommitment.isNone && verifySuccinctAggregate arith dom inst p fs
+  | budget + 1, .branch p fs left right =>
+    decide (p.agg.childrenCommitment =
+      some (left.certificate.traceCommitment, right.certificate.traceCommitment)) &&
+    verifyMergeTree arith dom inst budget left &&
+    verifyMergeTree arith dom inst budget right &&
+    bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap &&
+    decide (p.agg.bitmap = bitmapUnionSpec left.certificate.bitmap right.certificate.bitmap) &&
+    verifySuccinctAggregate arith dom inst p fs
+
+abbrev SuccinctMergeNode := MergeNode
+abbrev verifySuccinctMergeTree := verifyMergeTree
+
+theorem merge_tree_rejects_invalid_child (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (budget : Nat)
+    (p : SuccinctAggregateProof) (fs : List UInt8) (left right : MergeNode)
+    (h : verifyMergeTree arith dom inst budget left = false ∨
+         verifyMergeTree arith dom inst budget right = false) :
+    verifyMergeTree arith dom inst (budget + 1) (.branch p fs left right) = false := by
+  rcases h with h | h <;> simp only [verifyMergeTree, h, Bool.false_and, Bool.and_false]
+
+theorem merge_tree_rejects_overlap (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (budget : Nat)
+    (p : SuccinctAggregateProof) (fs : List UInt8) (left right : MergeNode)
+    (h : bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap = false) :
+    verifyMergeTree arith dom inst (budget + 1) (.branch p fs left right) = false := by
+  simp only [verifyMergeTree, h, Bool.false_and, Bool.and_false]
+
+theorem merge_tree_rejects_child_commitment (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (budget : Nat)
+    (p : SuccinctAggregateProof) (fs : List UInt8) (left right : MergeNode)
+    (h : p.agg.childrenCommitment ≠
+      some (left.certificate.traceCommitment, right.certificate.traceCommitment)) :
+    verifyMergeTree arith dom inst (budget + 1) (.branch p fs left right) = false := by
+  simp only [verifyMergeTree, decide_eq_false h, Bool.false_and]
+
+theorem merge_tree_depth_exhausted (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (tree : MergeNode) :
+    verifyMergeTree arith dom inst 0 tree = false := by rfl
+
+/-! ## 8. Constructive Multi-Stage WHIR Knowledge Soundness & Unforgeability Reduction -/
+
+def stageTerminalTableOk (nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4))
+    (finalWord : List GoldilocksExt4) (idx : Nat) (expected : Option GoldilocksExt4) : Bool :=
+  match nextStageOpt with
+  | none => finalValueOk finalWord idx expected
+  | some (nextDom, nextTable0) =>
+    decide (0 < nextDom.groups0) &&
+    expectedSlotOk expected (idx / nextDom.groups0)
+      (nextTable0.getD (idx % nextDom.groups0) CommRingOps.zero)
+      (nextTable0.getD (idx % nextDom.groups0 + nextDom.groups0) CommRingOps.zero)
+
+def stageTableTrajectoryOk (sdom : WhirStageDomain)
+    (nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4))
+    (finalWord : List GoldilocksExt4) :
+    Nat → Nat → Nat → Option GoldilocksExt4 → List (List GoldilocksExt4) →
+      List GoldilocksExt4 → Bool
+  | _, _, idx, expected, [], [] => stageTerminalTableOk nextStageOpt finalWord idx expected
+  | layer, groups, idx, expected, w :: ws, α :: αs =>
+    decide (0 < groups) &&
+    expectedSlotOk expected (idx / groups)
+      (w.getD (idx % groups) CommRingOps.zero)
+      (w.getD (idx % groups + groups) CommRingOps.zero) &&
+    stageTableTrajectoryOk sdom nextStageOpt finalWord (layer + 1) (groups / 2) (idx % groups)
+      (some (foldDuetExt4 (w.getD (idx % groups) CommRingOps.zero)
+        (w.getD (idx % groups + groups) CommRingOps.zero)
+        (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α)) ws αs
+  | _, _, _, _, _, _ => false
+
+/-- Binding predicate stating `tables` are the Merkle-committed layer tables of stage `stageIdx`. -/
+def StageLayersBound (authPath : Nat → Nat → Nat → List (List UInt8)) (stageIdx : Nat) :
+    Nat → Nat → List (List GoldilocksExt4) → List (List UInt8) → Prop
+  | _, _, [], [] => True
+  | layer, groups, w :: ws, root :: roots =>
+    (∀ g, g < groups →
+      merklePathRoot pcsMerkleHash
+        (pcsMerkleHash (duetLeafFrame stageIdx layer g (w.getD g CommRingOps.zero)
+          (w.getD (g + groups) CommRingOps.zero))) g (authPath stageIdx layer g) = root ∧
+      (authPath stageIdx layer g).length = merkleDepth groups) ∧
+    StageLayersBound authPath stageIdx (layer + 1) (groups / 2) ws roots
+  | _, _, _, _ => False
+
+/-- Binding predicate across all WHIR stages in `dom.stages` and `proof.stages`. -/
+def StagesBound (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    List WhirStageDomain → List (List (List GoldilocksExt4)) → List WhirStageProof → Prop
+  | [], [], [] => True
+  | sdom :: sdoms, stTables :: restTables, sp :: sps =>
+    stTables ≠ [] ∧
+    StageLayersBound authPath sdom.stageIdx 0 sdom.groups0 stTables (stageAllRoots sp) ∧
+    StagesBound authPath sdoms restTables sps
+  | _, _, _ => False
+
+def StageNextBound (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    Option (WhirStageDomain × List UInt8) → Option (WhirStageDomain × List GoldilocksExt4) → Prop
+  | none, none => True
+  | some (nd, nr), some (nd', nt0) =>
+    nd = nd' ∧
+    (∀ g, g < nd.groups0 →
+      merklePathRoot pcsMerkleHash
+        (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 g (nt0.getD g CommRingOps.zero)
+          (nt0.getD (g + nd.groups0) CommRingOps.zero))) g (authPath nd.stageIdx 0 g) = nr ∧
+      (authPath nd.stageIdx 0 g).length = merkleDepth nd.groups0)
+  | _, _ => False
+
+def stageTerminalSound (authPath : Nat → Nat → Nat → List (List UInt8))
+    (nextStageInfo : Option (WhirStageDomain × List UInt8))
+    (nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4))
+    (finalWord : List GoldilocksExt4) (idx : Nat) (expected : Option GoldilocksExt4)
+    (bridgeOp : Option FoldLayerOpening)
+    (hTerm : verifyStageTerminalTarget nextStageInfo finalWord idx expected bridgeOp = true)
+    (hNextBound : StageNextBound authPath nextStageInfo nextStageOpt) :
+    PSum (HashCollisionWitness pcsMerkleHash)
+      (PLift (stageTerminalTableOk nextStageOpt finalWord idx expected = true)) :=
+  match nextStageInfo, nextStageOpt, bridgeOp with
+  | none, none, none => .inr ⟨hTerm⟩
+  | none, none, some _ => False.elim (by simp [verifyStageTerminalTarget] at hTerm)
+  | none, some _, _ => False.elim hNextBound
+  | some _, none, _ => False.elim hNextBound
+  | some _, some _, none => False.elim (by simp [verifyStageTerminalTarget] at hTerm)
+  | some (nd, nr), some (nd', nt0), some br =>
+    have hEqDom : nd = nd' := hNextBound.1
+    have hU : 0 < nd.groups0 ∧ expectedSlotOk expected (idx / nd.groups0) br.v0 br.v1 = true ∧
+        br.path.length = merkleDepth nd.groups0 ∧
+        merklePathRoot pcsMerkleHash
+          (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 (idx % nd.groups0) br.v0 br.v1))
+          (idx % nd.groups0) br.path = nr := by
+      have h0 : (decide (0 < nd.groups0) &&
+          expectedSlotOk expected (idx / nd.groups0) br.v0 br.v1 &&
+          decide (br.path.length = merkleDepth nd.groups0) &&
+          decide (merklePathRoot pcsMerkleHash
+            (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 (idx % nd.groups0) br.v0 br.v1))
+            (idx % nd.groups0) br.path = nr)) = true := hTerm
+      rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, c4⟩
+      rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, c3⟩
+      rcases Bool.and_eq_true_iff.mp h0 with ⟨c1, c2⟩
+      exact ⟨of_decide_eq_true c1, c2, of_decide_eq_true c3, of_decide_eq_true c4⟩
+    have hBg := hNextBound.2 (idx % nd.groups0) (Nat.mod_lt _ hU.1)
+    if hMatch : br.v0 = nt0.getD (idx % nd.groups0) CommRingOps.zero ∧
+        br.v1 = nt0.getD (idx % nd.groups0 + nd.groups0) CommRingOps.zero then
+      .inr ⟨by
+        subst hEqDom
+        show (decide (0 < nd.groups0) &&
+          expectedSlotOk expected (idx / nd.groups0)
+            (nt0.getD (idx % nd.groups0) CommRingOps.zero)
+            (nt0.getD (idx % nd.groups0 + nd.groups0) CommRingOps.zero)) = true
+        rw [← hMatch.1, ← hMatch.2]
+        exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true hU.1, hU.2.1⟩⟩
+    else
+      .inl (duetOpeningCollision nd.stageIdx 0 (idx % nd.groups0) br.v0 br.v1 _ _
+        br.path (authPath nd.stageIdx 0 (idx % nd.groups0)) nr hMatch
+        (hU.2.2.1.trans hBg.2.symm) hU.2.2.2 hBg.1)
+
+def stageTrajectorySound (sdom : WhirStageDomain)
+    (nextStageInfo : Option (WhirStageDomain × List UInt8))
+    (nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4))
+    (finalWord : List GoldilocksExt4) (bridgeOp : Option FoldLayerOpening)
+    (authPath : Nat → Nat → Nat → List (List UInt8))
+    (roots : List (List UInt8)) :
+    ∀ (αs : List GoldilocksExt4) (ops : List FoldLayerOpening)
+      (tables : List (List GoldilocksExt4)) (layer groups idx : Nat)
+      (expected : Option GoldilocksExt4),
+      verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp
+        layer groups idx expected roots αs ops = true →
+      StageLayersBound authPath sdom.stageIdx layer groups tables roots →
+      StageNextBound authPath nextStageInfo nextStageOpt →
+      PSum (HashCollisionWitness pcsMerkleHash)
+        (PLift (stageTableTrajectoryOk sdom nextStageOpt finalWord
+          layer groups idx expected tables αs = true)) :=
+  match roots with
+  | [] => fun αs ops tables _ _ idx expected hV hB hN =>
+    match αs, ops, tables with
+    | [], [], [] =>
+      stageTerminalSound authPath nextStageInfo nextStageOpt finalWord idx expected bridgeOp hV hN
+    | [], [], _ :: _ => False.elim hB
+    | [], _ :: _, _ => False.elim (by simp [verifyStageTrajectory] at hV)
+    | _ :: _, ops, _ => False.elim (by cases ops <;> simp [verifyStageTrajectory] at hV)
+  | root :: roots => fun αs ops tables layer groups idx expected hV hB hN =>
+    match αs, ops, tables with
+    | [], ops, _ => False.elim (by cases ops <;> simp [verifyStageTrajectory] at hV)
+    | _ :: _, [], _ => False.elim (by simp [verifyStageTrajectory] at hV)
+    | _ :: _, _ :: _, [] => False.elim hB
+    | α :: αs, op :: ops, w :: ws =>
+      have hU : 0 < groups ∧ expectedSlotOk expected (idx / groups) op.v0 op.v1 = true ∧
+          op.path.length = merkleDepth groups ∧
+          merklePathRoot pcsMerkleHash
+            (pcsMerkleHash (duetLeafFrame sdom.stageIdx layer (idx % groups) op.v0 op.v1))
+            (idx % groups) op.path = root ∧
+          verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp (layer + 1) (groups / 2)
+            (idx % groups)
+            (some (foldDuetExt4 op.v0 op.v1 (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α))
+            roots αs ops = true := by
+        have h0 : (decide (0 < groups) &&
+            expectedSlotOk expected (idx / groups) op.v0 op.v1 &&
+            decide (op.path.length = merkleDepth groups) &&
+            decide (merklePathRoot pcsMerkleHash
+              (pcsMerkleHash (duetLeafFrame sdom.stageIdx layer (idx % groups) op.v0 op.v1))
+              (idx % groups) op.path = root) &&
+            verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp (layer + 1) (groups / 2)
+              (idx % groups)
+              (some (foldDuetExt4 op.v0 op.v1 (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α))
+              roots αs ops) = true := hV
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h5⟩
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h4⟩
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h3⟩
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h1, h2⟩
+        exact ⟨of_decide_eq_true h1, h2, of_decide_eq_true h3, of_decide_eq_true h4, h5⟩
+      have hBg := hB.1 (idx % groups) (Nat.mod_lt _ hU.1)
+      if hEq : op.v0 = w.getD (idx % groups) CommRingOps.zero ∧
+          op.v1 = w.getD (idx % groups + groups) CommRingOps.zero then
+        match stageTrajectorySound sdom nextStageInfo nextStageOpt finalWord bridgeOp authPath
+            roots αs ops ws (layer + 1) (groups / 2) (idx % groups) _ hU.2.2.2.2 hB.2 hN with
+        | .inl c => .inl c
+        | .inr ⟨hT⟩ => .inr ⟨by
+            show (decide (0 < groups) &&
+              expectedSlotOk expected (idx / groups)
+                (w.getD (idx % groups) CommRingOps.zero)
+                (w.getD (idx % groups + groups) CommRingOps.zero) &&
+              stageTableTrajectoryOk sdom nextStageOpt finalWord (layer + 1) (groups / 2)
+                (idx % groups)
+                (some (foldDuetExt4 (w.getD (idx % groups) CommRingOps.zero)
+                  (w.getD (idx % groups + groups) CommRingOps.zero)
+                  (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α)) ws αs) = true
+            rw [← hEq.1, ← hEq.2]
+            exact Bool.and_eq_true_iff.mpr
+              ⟨Bool.and_eq_true_iff.mpr ⟨decide_eq_true hU.1, hU.2.1⟩, hT⟩⟩
+      else
+        .inl (duetOpeningCollision sdom.stageIdx layer (idx % groups) op.v0 op.v1 _ _ op.path
+          (authPath sdom.stageIdx layer (idx % groups)) root hEq
+          (hU.2.2.1.trans hBg.2.symm) hU.2.2.2.1 hBg.1)
+termination_by structural roots
+
+def stageQueriesSound (sdom : WhirStageDomain)
+    (nextStageInfo : Option (WhirStageDomain × List UInt8))
+    (nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4))
+    (finalWord : List GoldilocksExt4)
+    (authPath : Nat → Nat → Nat → List (List UInt8))
+    (roots : List (List UInt8)) (αs : List GoldilocksExt4)
+    (tables : List (List GoldilocksExt4)) :
+    ∀ (qs : List StageQueryOpening),
+      qs.all (fun q => decide (q.index < sdom.groups0) &&
+        verifyStageTrajectory sdom nextStageInfo finalWord q.nextStageBridge
+          0 sdom.groups0 q.index none roots αs q.layers) = true →
+      StageLayersBound authPath sdom.stageIdx 0 sdom.groups0 tables roots →
+      StageNextBound authPath nextStageInfo nextStageOpt →
+      PSum (HashCollisionWitness pcsMerkleHash)
+        (PLift (∀ q ∈ qs, q.index < sdom.groups0 ∧
+          stageTableTrajectoryOk sdom nextStageOpt finalWord
+            0 sdom.groups0 q.index none tables αs = true))
+  | [], _, _, _ => .inr ⟨fun _ hq => by cases hq⟩
+  | q :: qs, hAll, hB, hN =>
+    have hSplit := Bool.and_eq_true_iff.mp hAll
+    have hq := Bool.and_eq_true_iff.mp hSplit.1
+    match stageTrajectorySound sdom nextStageInfo nextStageOpt finalWord q.nextStageBridge
+        authPath roots αs q.layers tables 0 sdom.groups0 q.index none hq.2 hB hN with
+    | .inl c => .inl c
+    | .inr ⟨h1⟩ =>
+      match stageQueriesSound sdom nextStageInfo nextStageOpt finalWord authPath roots αs
+          tables qs hSplit.2 hB hN with
+      | .inl c => .inl c
+      | .inr ⟨h2⟩ => .inr ⟨fun q' hq' => by
+          rcases List.mem_cons.mp hq' with e | e
+          · rw [e]; exact ⟨of_decide_eq_true hq.1, h1⟩
+          · exact h2 q' e⟩
+
+/-- Constructive bounded search (`0 Classical.choice`) for the first index `< n` failing `ok`. -/
+def firstFailBelow (ok : Nat → Bool) :
+    (n : Nat) → PSum { i : Nat // i < n ∧ ok i = false } (PLift (∀ i, i < n → ok i = true))
+  | 0 => .inr ⟨fun i h => absurd h (Nat.not_lt_zero i)⟩
+  | n + 1 =>
+    match firstFailBelow ok n with
+    | .inl ⟨i, hi, hb⟩ => .inl ⟨i, Nat.lt_succ_of_lt hi, hb⟩
+    | .inr ⟨hall⟩ =>
+      if h : ok n = true then
+        .inr ⟨fun i hi => by
+          rcases Nat.lt_or_ge i n with hlt | hge
+          · exact hall i hlt
+          · have hEq : i = n := Nat.le_antisymm (Nat.le_of_lt_succ hi) hge
+            rw [hEq]; exact h⟩
+      else .inl ⟨n, Nat.lt_succ_self n, Bool.eq_false_iff.mpr h⟩
+
+/-- Transcript-indexed query-miss witness at identified WHIR stage `stagePos`. -/
+structure WhirStageQueryMiss (finalWord : List GoldilocksExt4)
+    (dom : WhirDomain) (allTables : List (List (List GoldilocksExt4)))
+    (proof : SuccinctAggregateProof) where
+  stagePos : Nat
+  sdom : WhirStageDomain
+  sp : WhirStageProof
+  stTables : List (List GoldilocksExt4)
+  nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4)
+  dom_at : dom.stages[stagePos]? = some sdom
+  proof_at : proof.stages[stagePos]? = some sp
+  tables_at : allTables[stagePos]? = some stTables
+  badIndex : Nat
+  badIndex_lt : badIndex < sdom.groups0
+  bad : stageTableTrajectoryOk sdom nextStageOpt finalWord 0 sdom.groups0
+          badIndex none stTables sp.foldChallenges = false
+  queries_distinct : (sp.queries.map (·.index)).Nodup
+  queries_count : (sp.queries.map (·.index)).length = min sdom.numQueries sdom.groups0
+  queries_good : ∀ i ∈ sp.queries.map (·.index), i < sdom.groups0 ∧
+    stageTableTrajectoryOk sdom nextStageOpt finalWord 0 sdom.groups0
+      i none stTables sp.foldChallenges = true
+
+/-- Predicate asserting that EVERY coset index in EVERY WHIR stage folds consistently. -/
+def AllStagesConsistent (finalWord : List GoldilocksExt4) :
+    List WhirStageDomain → List (List (List GoldilocksExt4)) → List WhirStageProof → Prop
+  | [], [], [] => True
+  | [sdom], [stTables], [sp] =>
+    ∀ i, i < sdom.groups0 →
+      stageTableTrajectoryOk sdom none finalWord 0 sdom.groups0
+        i none stTables sp.foldChallenges = true
+  | sdom :: nextDom :: restDoms, stTables :: nextTables :: restTables, sp :: nextSp :: restProofs =>
+    (∀ i, i < sdom.groups0 →
+      stageTableTrajectoryOk sdom (some (nextDom, nextTables.headD [])) finalWord
+        0 sdom.groups0 i none stTables sp.foldChallenges = true) ∧
+    AllStagesConsistent finalWord (nextDom :: restDoms) (nextTables :: restTables)
+      (nextSp :: restProofs)
+  | _, _, _ => False
+
+/-- Transcript-indexed proximity-gap hit: at identified stage `stagePos`, the committed stage
+    word is NOT a valid stage Reed–Solomon codeword (`isStageCodeword stagePos = false`), yet all
+    stage trajectories fold consistently into `finalWord` (`isFinalCodeword = true`). -/
+structure WhirProximityHit (arith : RowArithmetization) (dom : WhirDomain)
+    (finalWord : List GoldilocksExt4) (allTables : List (List (List GoldilocksExt4)))
+    (proof : SuccinctAggregateProof) where
+  stagePos : Nat
+  sdom : WhirStageDomain
+  stTables : List (List GoldilocksExt4)
+  dom_at : dom.stages[stagePos]? = some sdom
+  tables_at : allTables[stagePos]? = some stTables
+  stage_not_codeword : arith.isStageCodeword stagePos (stTables.headD []) = false
+  final_in_code : arith.isFinalCodeword finalWord = true
+  all_consistent : AllStagesConsistent finalWord dom.stages allTables proof.stages
+
+private theorem unpack_one_stage_verify {rowChallenges finalWord : List GoldilocksExt4}
+    {prior : List UInt8} {sdom : WhirStageDomain} {sp : WhirStageProof}
+    {nextInfo : Option (WhirStageDomain × List UInt8)}
+    (h : verifyOneWhirStage rowChallenges finalWord prior sdom sp nextInfo = true) :
+    strictlyIncreasing (sp.queries.map (·.index)) = true ∧
+    sp.queries.length = min sdom.numQueries sdom.groups0 ∧
+    sp.queries.all (fun q =>
+      decide (q.index < sdom.groups0) &&
+      verifyStageTrajectory sdom nextInfo finalWord q.nextStageBridge
+        0 sdom.groups0 q.index none (stageAllRoots sp) sp.foldChallenges q.layers) = true := by
+  unfold verifyOneWhirStage at h
+  dsimp only at h
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, c12⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, c11⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨_, c10⟩
+  exact ⟨c10, of_decide_eq_true c11, c12⟩
+
+private theorem headRootBound {authPath : Nat → Nat → Nat → List (List UInt8)}
+    {nd : WhirStageDomain} {nt : List (List GoldilocksExt4)} {nsp : WhirStageProof}
+    (hne : nt ≠ [])
+    (hB : StageLayersBound authPath nd.stageIdx 0 nd.groups0 nt (stageAllRoots nsp)) :
+    ∀ g, g < nd.groups0 →
+      merklePathRoot pcsMerkleHash
+        (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 g
+          ((nt.headD []).getD g CommRingOps.zero)
+          ((nt.headD []).getD (g + nd.groups0) CommRingOps.zero)))
+        g (authPath nd.stageIdx 0 g) = nsp.stageRoot ∧
+      (authPath nd.stageIdx 0 g).length = merkleDepth nd.groups0 := by
+  cases nt with
+  | nil => exact False.elim (hne rfl)
+  | cons w0 _ => exact hB.1
+
+/-- Constructively walk all WHIR stages: extract a Merkle hash collision, a concrete
+    `WhirStageQueryMiss` at an identified stage, or prove `AllStagesConsistent`. -/
+def checkAllWhirStagesQueries (rowChallenges finalWord : List GoldilocksExt4)
+    (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    ∀ (prior : List UInt8) (sdoms : List WhirStageDomain)
+      (allTables : List (List (List GoldilocksExt4))) (sps : List WhirStageProof),
+      verifyWhirStages rowChallenges finalWord prior sdoms sps = true →
+      StagesBound authPath sdoms allTables sps →
+      PSum (HashCollisionWitness pcsMerkleHash)
+        (PSum
+          (Sigma fun pos : Nat =>
+            Sigma fun sdom : WhirStageDomain =>
+              Sigma fun sp : WhirStageProof =>
+                Sigma fun stTables : List (List GoldilocksExt4) =>
+                  Sigma fun nextOpt : Option (WhirStageDomain × List GoldilocksExt4) =>
+                    { idx : Nat //
+                      sdoms[pos]? = some sdom ∧ sps[pos]? = some sp ∧
+                      allTables[pos]? = some stTables ∧ idx < sdom.groups0 ∧
+                      stageTableTrajectoryOk sdom nextOpt finalWord 0 sdom.groups0
+                        idx none stTables sp.foldChallenges = false ∧
+                      (sp.queries.map (·.index)).Nodup ∧
+                      (sp.queries.map (·.index)).length = min sdom.numQueries sdom.groups0 ∧
+                      (∀ j ∈ sp.queries.map (·.index), j < sdom.groups0 ∧
+                        stageTableTrajectoryOk sdom nextOpt finalWord 0 sdom.groups0
+                          j none stTables sp.foldChallenges = true) })
+          (PLift (AllStagesConsistent finalWord sdoms allTables sps)))
+  | _, [], [], [], _, _ => .inr (.inr ⟨trivial⟩)
+  | _, [], _ :: _, _, _, hB => False.elim hB
+  | _, [], [], _ :: _, _, hB => False.elim hB
+  | _, _ :: _, [], _, _, hB => False.elim hB
+  | _, _ :: _, _ :: _, [], _, hB => False.elim hB
+  | prior, [sdom], [stTables], [sp], hVer, hB =>
+    have hU := unpack_one_stage_verify hVer
+    match stageQueriesSound sdom none none finalWord authPath (stageAllRoots sp)
+        sp.foldChallenges stTables sp.queries hU.2.2 hB.2.1 trivial with
+    | .inl col => .inl col
+    | .inr ⟨hQ⟩ =>
+      match firstFailBelow (fun i => stageTableTrajectoryOk sdom none finalWord
+          0 sdom.groups0 i none stTables sp.foldChallenges) sdom.groups0 with
+      | .inl ⟨badIdx, hLt, hBad⟩ =>
+        .inr (.inl ⟨0, sdom, sp, stTables, none, ⟨badIdx, rfl, rfl, rfl, hLt, hBad,
+          strictlyIncreasing_nodup _ hU.1,
+          by rw [List.length_map]; exact hU.2.1,
+          fun j hj => by
+            obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hj
+            exact hQ q hq⟩⟩)
+      | .inr ⟨hAll⟩ => .inr (.inr ⟨hAll⟩)
+  | _, [_], _ :: _ :: _, [_], _, hB => False.elim hB.2.2
+  | _, [_], [_], _ :: _ :: _, hVer, _ =>
+    False.elim (by simp [verifyWhirStages] at hVer)
+  | _, [_], _ :: _ :: _, _ :: _ :: _, _, hB => False.elim hB.2.2
+  | _, _ :: _ :: _, [_], [_], _, hB => False.elim hB.2.2
+  | _, _ :: _ :: _, [_], _ :: _ :: _, _, hB => False.elim hB.2.2
+  | _, _ :: _ :: _, _ :: _ :: _, [_], _, hB => False.elim hB.2.2
+  | prior, sdom :: nextDom :: restDoms, stTables :: nextTables :: restTables,
+      sp :: nextSp :: restProofs, hVer, hB =>
+    have hSplit := Bool.and_eq_true_iff.mp hVer
+    have hU := unpack_one_stage_verify hSplit.1
+    have hNextRoot := headRootBound hB.2.2.1 hB.2.2.2.1
+    match stageQueriesSound sdom (some (nextDom, nextSp.stageRoot))
+        (some (nextDom, nextTables.headD [])) finalWord authPath (stageAllRoots sp)
+        sp.foldChallenges stTables sp.queries hU.2.2 hB.2.1 ⟨rfl, hNextRoot⟩ with
+    | .inl col => .inl col
+    | .inr ⟨hQ⟩ =>
+      match firstFailBelow (fun i =>
+          stageTableTrajectoryOk sdom (some (nextDom, nextTables.headD [])) finalWord
+            0 sdom.groups0 i none stTables sp.foldChallenges) sdom.groups0 with
+      | .inl ⟨badIdx, hLt, hBad⟩ =>
+        .inr (.inl ⟨0, sdom, sp, stTables, some (nextDom, nextTables.headD []),
+          ⟨badIdx, rfl, rfl, rfl, hLt, hBad,
+            strictlyIncreasing_nodup _ hU.1,
+            by rw [List.length_map]; exact hU.2.1,
+            fun j hj => by
+              obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hj
+              exact hQ q hq⟩⟩)
+      | .inr ⟨hStage0⟩ =>
+        match checkAllWhirStagesQueries rowChallenges finalWord authPath _ (nextDom :: restDoms)
+            (nextTables :: restTables) (nextSp :: restProofs) hSplit.2 hB.2.2 with
+        | .inl col => .inl col
+        | .inr (.inl ⟨pos, sd, sp', st, nOpt, ⟨bi, hdAt, hpAt, htAt, rest⟩⟩) =>
+          .inr (.inl ⟨pos + 1, sd, sp', st, nOpt, ⟨bi, hdAt, hpAt, htAt, rest⟩⟩)
+        | .inr (.inr ⟨hRest⟩) => .inr (.inr ⟨⟨hStage0, hRest⟩⟩)
+
+/-- Constructively check `isStageCodeword (basePos + pos)` across every WHIR stage (`0 Classical`). -/
+def checkAllStageCodewordsAux (arith : RowArithmetization) :
+    ∀ (basePos : Nat) (sdoms : List WhirStageDomain) (allTables : List (List (List GoldilocksExt4))),
+      sdoms.length = allTables.length →
+      PSum
+        (Sigma fun pos : Nat =>
+          Sigma fun sdom : WhirStageDomain =>
+            Sigma fun stTables : List (List GoldilocksExt4) =>
+              PLift (sdoms[pos]? = some sdom ∧ allTables[pos]? = some stTables ∧
+                arith.isStageCodeword (basePos + pos) (stTables.headD []) = false))
+        (PLift (∀ pos sdom stTables,
+          sdoms[pos]? = some sdom → allTables[pos]? = some stTables →
+          arith.isStageCodeword (basePos + pos) (stTables.headD []) = true))
+  | _, [], [], _ => .inr ⟨fun pos _ _ h => by cases pos <;> cases h⟩
+  | _, [], _ :: _, hL => False.elim (Nat.zero_ne_add_one _ hL)
+  | _, _ :: _, [], hL => False.elim (Nat.add_one_ne_zero _ hL)
+  | basePos, sdom :: sdoms, stTables :: restTables, hL =>
+    if hOk : arith.isStageCodeword basePos (stTables.headD []) = true then
+      match checkAllStageCodewordsAux arith (basePos + 1) sdoms restTables (Nat.succ.inj hL) with
+      | .inl ⟨pos, sd, st, ⟨hd, ht, hf⟩⟩ =>
+        .inl ⟨pos + 1, sd, st, ⟨hd, ht, by
+          have hAdd : basePos + (pos + 1) = (basePos + 1) + pos := by omega
+          rwa [hAdd]⟩⟩
+      | .inr ⟨hRest⟩ => .inr ⟨fun pos sd st hd ht => by
+          cases pos with
+          | zero =>
+            cases hd; cases ht
+            simpa only [Nat.add_zero] using hOk
+          | succ k =>
+            have hAdd : basePos + (k + 1) = (basePos + 1) + k := by omega
+            rw [hAdd]
+            exact hRest k sd st hd ht⟩
+    else
+      .inl ⟨0, sdom, stTables, ⟨rfl, rfl, by
+        simpa only [Nat.add_zero] using Bool.eq_false_iff.mpr hOk⟩⟩
+
+theorem stagesBound_lengths {authPath : Nat → Nat → Nat → List (List UInt8)}
+    {sdoms : List WhirStageDomain} {allTables : List (List (List GoldilocksExt4))}
+    {sps : List WhirStageProof}
+    (h : StagesBound authPath sdoms allTables sps) :
+    sdoms.length = allTables.length ∧ sdoms.length = sps.length := by
+  induction sdoms generalizing allTables sps with
+  | nil =>
+    cases allTables with
+    | nil =>
+      cases sps with
+      | nil => exact ⟨rfl, rfl⟩
+      | cons _ _ => exact False.elim h
+    | cons _ _ => exact False.elim h
+  | cons _ sdoms ih =>
+    cases allTables with
+    | nil => exact False.elim h
+    | cons _ restTables =>
+      cases sps with
+      | nil => exact False.elim h
+      | cons _ restSps =>
+        obtain ⟨h1, h2⟩ := ih h.2.2
+        exact ⟨congrArg Nat.succ h1, congrArg Nat.succ h2⟩
+
+/-- Lawfulness contract on a multi-stage `GoldilocksExt4` WHIR row arithmetization:
+    - `complete`: whenever every stage table is a valid stage Reed–Solomon codeword, `verifyWhirStages`
+      accepts, and all stage trajectories fold consistently into `finalWord`, the honest degree-8
+      row-sumcheck chain verifies against `arith.terminal`.
+    - `sound`: for any valid Round-0 codeword `table0` whose decoded signatures fail
+      `checkAllActiveSigners`, the honest row-sumcheck claim `arith.honestClaim table0` is nonzero. -/
+structure RowArithmetization.Lawful (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) : Prop where
+  complete : ∀ (allTables : List (List (List GoldilocksExt4)))
+      (proof : SuccinctAggregateProof) (prior : List UInt8),
+    dom.stages.length = allTables.length →
+    (∀ pos sdom stTables,
+      dom.stages[pos]? = some sdom → allTables[pos]? = some stTables →
+      arith.isStageCodeword pos (stTables.headD []) = true) →
+    arith.isFinalCodeword proof.finalWord = true →
+    verifyWhirStages proof.agg.challenges proof.finalWord prior dom.stages proof.stages = true →
+    AllStagesConsistent proof.finalWord dom.stages allTables proof.stages →
+    verifySumcheckChain (arith.honestClaim ((allTables.headD []).headD []))
+      (adaptivePolys (arith.honestRound ((allTables.headD []).headD [])) proof.agg.challenges)
+      proof.agg.challenges
+      (arith.terminal proof.finalWord proof.agg.challenges (collectAllFoldChallenges proof)) = true
+  sound : ∀ (table0 : List GoldilocksExt4) (bitmap : SignerBitmapSpec),
+    arith.isRound0Codeword table0 = true →
+    bitmap.length = inst.committee.length →
+    checkAllActiveSigners inst.suite inst.params inst.message inst.committee bitmap
+      (arith.decodeSigs table0) = false →
+    arith.honestClaim table0 ≠ GoldilocksExt4.zero
+
+/-- Committed multi-stage tables and Merkle authentication paths read by the extractor. -/
+structure SuccinctExtractionView where
+  allTables : List (List (List GoldilocksExt4))
+  authPath : Nat → Nat → Nat → List (List UInt8)
+
+end Aggregation
+
+/-- Extraction outcome of `succinct_aggregation_knowledge_soundness`: valid `PqHashSig` witnesses
+    for every active signer, or one of four concrete transcript-indexed break witnesses over
+    `Aggregation.GoldilocksExt4`. -/
+@[expose] def SuccinctOutcome (arith : Aggregation.RowArithmetization)
+    (dom : Aggregation.WhirDomain) (inst : Aggregation.AggPublicInstance)
+    (proof : Aggregation.SuccinctAggregateProof)
+    (view : Aggregation.SuccinctExtractionView) : Type :=
+  let table0 := (view.allTables.headD []).headD []
+  PSum { _u : Unit // Aggregation.checkAllActiveSigners inst.suite inst.params inst.message
+      inst.committee proof.agg.bitmap (arith.decodeSigs table0) = true }
+    (PSum (Aggregation.SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+        (Aggregation.adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+        proof.agg.challenges)
+      (PSum (HashCollisionWitness Aggregation.pcsMerkleHash)
+        (PSum (Aggregation.WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+          (Aggregation.WhirProximityHit arith dom proof.finalWord view.allTables proof))))
+
+namespace Aggregation
+
+theorem succinct_acceptance_facts (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (h : verifySuccinctAggregate arith dom inst proof fs = true) :
+    fs = aggregateInstanceFrame inst proof.agg ∧
+    proof.agg.regime = inst.regime ∧
+    proof.agg.challenges = deriveRowSumcheckChallenges fs proof.agg.roundPolys ∧
+    verifyAggregateAlgebra inst.committee proof.agg = true ∧
+    proof.agg.terminalEval =
+      arith.terminal proof.finalWord proof.agg.challenges (collectAllFoldChallenges proof) ∧
+    arith.isFinalCodeword proof.finalWord = true ∧
+    verifyWhirStages proof.agg.challenges proof.finalWord
+      (rowSumcheckTranscriptTail fs proof.agg.roundPolys)
+      dom.stages proof.stages = true := by
+  unfold verifySuccinctAggregate at h
+  cases hSt : proof.stages with
+  | nil => rw [hSt] at h; cases h
+  | cons sp0 sps =>
+    rw [hSt] at h
+    dsimp only at h
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, c8⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, c7⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, c6⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, c5⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, c4⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨c1, c2⟩
+    exact ⟨of_decide_eq_true c1, of_decide_eq_true c2, of_decide_eq_true c4, c5,
+      of_decide_eq_true c6, c7, c8⟩
+
+theorem succinct_acceptance_header_facts (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (h : verifySuccinctAggregate arith dom inst proof fs = true) :
+    proof.agg.regime = inst.regime ∧
+    proof.agg.suite.suiteId = inst.suite.suiteId ∧
+    proof.agg.params = inst.params := by
+  unfold verifySuccinctAggregate at h
+  cases hSt : proof.stages with
+  | nil => rw [hSt] at h; cases h
+  | cons sp0 sps =>
+    rw [hSt] at h
+    dsimp only at h
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, cParams⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨h, cSuite⟩
+    rcases Bool.and_eq_true_iff.mp h with ⟨_, cReg⟩
+    exact ⟨of_decide_eq_true cReg, of_decide_eq_true cSuite, of_decide_eq_true cParams⟩
+
+theorem verifyAggregateAlgebra_facts (committee : List PqPublicKey) (agg : AggregatedSignature)
+    (h : verifyAggregateAlgebra committee agg = true) :
+    agg.bitmap.length = committee.length ∧ agg.claimedSum = GoldilocksExt4.zero ∧
+    verifySumcheckChain agg.claimedSum agg.roundPolys agg.challenges agg.terminalEval = true := by
+  unfold verifyAggregateAlgebra at h
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, hChain⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, hZero⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨hLen, _⟩
+  exact ⟨eq_of_beq hLen, eq_of_beq hZero, hChain⟩
+
+/-- **Constructive `0 Classical.choice` Knowledge Soundness of Multi-Stage `GoldilocksExt4` WHIR
+    (`succinct_aggregation_knowledge_soundness`)**:
+    Given an accepting `SuccinctAggregateProof` and committed stage tables `view`, constructively
+    outputs valid `PqHashSig` witnesses for every active validator bit or a concrete
+    `SumcheckSchwartzZippelHit`, `HashCollisionWitness`, `WhirStageQueryMiss`, or
+    `WhirProximityHit`. -/
+def succinct_aggregation_knowledge_soundness (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    SuccinctOutcome arith dom inst proof view :=
+  have hF := succinct_acceptance_facts arith dom inst proof fs hAccept
+  have hLens := stagesBound_lengths hBound
+  match checkAllWhirStagesQueries proof.agg.challenges proof.finalWord view.authPath
+      (rowSumcheckTranscriptTail fs proof.agg.roundPolys)
+      dom.stages view.allTables proof.stages hF.2.2.2.2.2.2 hBound with
+  | .inl col => .inr (.inr (.inl col))
+  | .inr (.inl ⟨pos, sdom, sp, stTables, nextOpt,
+      ⟨badIdx, hdAt, hpAt, htAt, hLt, hBad, hNd, hCnt, hGood⟩⟩) =>
+    .inr (.inr (.inr (.inl
+      { stagePos := pos, sdom := sdom, sp := sp, stTables := stTables, nextStageOpt := nextOpt,
+        dom_at := hdAt, proof_at := hpAt, tables_at := htAt,
+        badIndex := badIdx, badIndex_lt := hLt, bad := hBad,
+        queries_distinct := hNd, queries_count := hCnt, queries_good := hGood })))
+  | .inr (.inr ⟨hAllCons⟩) =>
+    match checkAllStageCodewordsAux arith 0 dom.stages view.allTables hLens.1 with
+    | .inl ⟨pos, sdom, stTables, ⟨hdAt, htAt, hNotCw⟩⟩ =>
+      .inr (.inr (.inr (.inr
+        { stagePos := pos, sdom := sdom, stTables := stTables,
+          dom_at := hdAt, tables_at := htAt,
+          stage_not_codeword := by simpa only [Nat.zero_add] using hNotCw,
+          final_in_code := hF.2.2.2.2.2.1,
+          all_consistent := hAllCons })))
+    | .inr ⟨hAllCw0⟩ =>
+      have hAllCw : ∀ pos sdom stTables,
+          dom.stages[pos]? = some sdom → view.allTables[pos]? = some stTables →
+          arith.isStageCodeword pos (stTables.headD []) = true := fun pos sdom stTables hd ht => by
+        simpa only [Nat.zero_add] using hAllCw0 pos sdom stTables hd ht
+      let table0 := (view.allTables.headD []).headD []
+      have hCode0 : arith.isRound0Codeword table0 = true := by
+        cases hP : proof.stages with
+        | nil =>
+          unfold verifySuccinctAggregate at hAccept
+          rw [hP] at hAccept; cases hAccept
+        | cons sp0 sps =>
+          cases hD : dom.stages with
+          | nil =>
+            have hL2 := hLens.2; rw [hD, hP] at hL2; cases hL2
+          | cons sd0 sds =>
+            cases hT : view.allTables with
+            | nil =>
+              have hL1 := hLens.1; rw [hD, hT] at hL1; cases hL1
+            | cons st0 sts =>
+              have h0 := hAllCw 0 sd0 st0 (by simp [hD]) (by simp [hT])
+              dsimp only [table0, RowArithmetization.isRound0Codeword]
+              simpa only [hT, List.headD_cons] using h0
+      if hSigs : checkAllActiveSigners inst.suite inst.params inst.message inst.committee
+          proof.agg.bitmap (arith.decodeSigs table0) = true then
+        .inl ⟨(), hSigs⟩
+      else
+        have hAlg := verifyAggregateAlgebra_facts inst.committee proof.agg hF.2.2.2.1
+        have hHon := law.complete view.allTables proof
+          (rowSumcheckTranscriptTail fs proof.agg.roundPolys)
+          hLens.1 hAllCw hF.2.2.2.2.2.1 hF.2.2.2.2.2.2 hAllCons
+        have hNz := law.sound table0 proof.agg.bitmap hCode0 hAlg.1 (Bool.eq_false_iff.mpr hSigs)
+        .inr (.inl (extractSumcheckHitFromChain 8 proof.agg.roundPolys proof.agg.claimedSum
+          (arith.honestClaim table0)
+          (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+          proof.agg.challenges proof.agg.terminalEval
+          (by rw [hAlg.2.1]; exact fun h => hNz h.symm) hAlg.2.2
+          (by rw [hF.2.2.2.2.1]; exact hHon)))
+
+/-- Per-signer witness extraction (`0 Classical.choice`) from an accepted WHIR certificate. -/
+def succinct_aggregation_signer_extraction (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages)
+    (i : Nat) (hi : i < inst.committee.length) (hb : i < proof.agg.bitmap.length)
+    (active : proof.agg.bitmap[i]'hb = true) :
+    let table0 := (view.allTables.headD []).headD []
+    PSum { sig : PqHashSig //
+        verifyPqHashSig inst.suite inst.params (inst.committee[i]'hi) inst.message sig = true }
+      (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+          (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+          proof.agg.challenges)
+        (PSum (HashCollisionWitness pcsMerkleHash)
+          (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+            (WhirProximityHit arith dom proof.finalWord view.allTables proof)))) :=
+  match succinct_aggregation_knowledge_soundness arith dom inst law proof fs view hAccept hBound with
+  | .inl ⟨_, hAll⟩ =>
+    .inl (extractActiveSignerSig inst.suite inst.params inst.message inst.committee
+      proof.agg.bitmap _ i hi hb hAll active)
+  | .inr brk => .inr brk
+
+/-- **End-to-End Succinct `GoldilocksExt4` WHIR Aggregation Unforgeability Reduction
+    (`qsag_aggregate_unforgeability_reduction`, `0 Classical.choice`)**:
+    Welds `verifySuccinctAggregate` + `succinct_aggregation_signer_extraction` directly into
+    `extractReachableHypertreeForgery` (`Qsag.HypertreeEufCma`) with zero black-box `hHonestSound`
+    premise and zero plaintext signatures in the verifier.
+
+    The upper-layer oracle premise `hUpperOracle` ranges only over
+    `ReachableUpperHypertreePos inst.params l g` (`0 < l < numLayers`, `g` inside the layer), the
+    positions a verification walk visits, so it is dischargeable from a finite signing log. The
+    two instantiations that discharge every oracle premise from an executed signing oracle are
+    `qsag_aggregate_unforgeability_reduction_of_statelessLog` and
+    `qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog`. Both production geometries
+    `(w, ℓ₁) ∈ {(4, 128), (16, 64)}` are covered. -/
+def qsag_aggregate_unforgeability_reduction
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queriedMsgs : List (List UInt8))
+    (qOracle : QueriedWotsOracle)
+    (revealedFors : List (UInt64 × Nat × Nat))
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hFreshMsg : inst.message ∉ queriedMsgs)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages)
+    (hStatefulLeaf0Msg : ∀ sig : PqHashSig, inst.params.statefulJorts = true →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        ∃ mPrev ∈ queriedMsgs,
+          hRoot = thPreHash inst.suite sk_i.pkSeed
+            (derivePublicKey inst.suite inst.params sk_i).pkRoot mPrev)
+    (hStatelessLayer0Root : ∀ sig : PqHashSig, inst.params.statefulJorts = false →
+      ∀ hRand hRoot hCtr hChains,
+        qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot, hCtr, hChains) →
+        hRoot = computeForsPk inst.suite inst.params sk_i
+          (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight))
+    (hUpperOracle : ∀ (l : Nat) (g : Nat), ReachableUpperHypertreePos inst.params l g →
+      let hRoot0 := computeXmssSubtreeRoot inst.suite inst.params sk_i
+        (UInt32.ofNat (l - 1)) (UInt64.ofNat g)
+      (∀ hRand hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+        let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+          (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+          (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (UInt32.ofNat (g % 2 ^ inst.params.subtreeHeight)) hCtr
+        let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+        checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+        recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) digH hChains =
+        computeWotsPk inst.suite inst.params sk_i (UInt32.ofNat l)
+          (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight)) ∧
+      (∀ hRand hR hCtr hChains,
+        qOracle (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ inst.params.subtreeHeight))
+          (g % 2 ^ inst.params.subtreeHeight) = some (hRand, hR, hCtr, hChains) → hR = hRoot0))
+    (hLayer0Valid : ∀ sig : PqHashSig, ∀ hRand hRoot0 hCtr hChains,
+      qOracle 0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) = some (hRand, hRoot0, hCtr, hChains) →
+      let hmH := thHashMsg inst.suite hRand sk_i.pkSeed
+        (derivePublicKey inst.suite inst.params sk_i).pkRoot hRoot0
+        0 (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (UInt32.ofNat (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) hCtr
+      let digH := extractBaseWDigits inst.params.w inst.params.ell1 hmH
+      checkTargetSum inst.params.w inst.params.ell1 inst.params.targetSum digH = true ∧
+      recoverWotsPkFromSig inst.suite inst.params sk_i.pkSeed 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight) digH hChains =
+      computeWotsPk inst.suite inst.params sk_i 0
+        (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
+        (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight)) :
+    let table0 := (view.allTables.headD []).headD []
+    PSum (Sigma fun sig_i : PqHashSig =>
+            HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i revealedFors)
+      (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+          (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+          proof.agg.challenges)
+        (PSum (HashCollisionWitness pcsMerkleHash)
+          (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+            (WhirProximityHit arith dom proof.finalWord view.allTables proof)))) :=
+  match succinct_aggregation_signer_extraction arith dom inst law proof fs view
+          hAccept hBound i hPk hB hActive_i with
+  | .inr brk => .inr brk
+  | .inl ⟨sig_i, hVer_i⟩ =>
+    have hVerKey : verifyPqHashSig inst.suite inst.params
+        (derivePublicKey inst.suite inst.params sk_i) inst.message sig_i = true := by
+      rw [← hKey_i]; exact hVer_i
+    .inl ⟨sig_i, extractReachableHypertreeForgery inst.suite inst.params sk_i inst.message sig_i
+      queriedMsgs qOracle revealedFors hGeom hFreshMsg hVerKey
+      (hStatefulLeaf0Msg sig_i) (hStatelessLayer0Root sig_i)
+      hUpperOracle (hLayer0Valid sig_i)⟩
+
+/-- **Aggregation unforgeability against an executed stateless signing oracle
+    (`qsag_aggregate_unforgeability_reduction_of_statelessLog`, `0 Classical.choice`)**:
+    signer `i` answers the arbitrary query list `queries` through `signingOracleLog`. An accepted
+    succinct aggregate whose bitmap marks signer `i` active, on a message absent from that log,
+    yields a `HypertreeForgeryBreak` against signer `i` whose revealed FORS leaves are exactly
+    those the log opened, or one of the four proof-system break witnesses. There is no
+    caller-supplied oracle and no oracle premise: all of them are discharged from the log by
+    `extractReachableHypertreeForgery_of_statelessLog`. -/
