@@ -70,6 +70,10 @@ namespace Qsag
 
 set_option autoImplicit false
 
+-- `Fin.instLinearOrderPackage` supplies a `BEq (Fin n)` whose package proofs use `Classical.choice`;
+-- without it `==` on `Fin` resolves to `instBEqOfDecidableEq`.
+attribute [-instance] Fin.instLinearOrderPackage
+
 open CommRingOps
 
 /-! ## §0. Ring identities used below -/

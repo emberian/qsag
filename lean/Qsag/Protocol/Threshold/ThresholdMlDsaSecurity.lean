@@ -37,6 +37,11 @@ import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import all Qsag.Math.Goldilocks
+import all Qsag.Math.Lattices
+import all Qsag.Math.Counting
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.HasseHensel
 
 public section
 namespace Qsag

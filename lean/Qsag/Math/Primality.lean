@@ -187,11 +187,13 @@ theorem IsPrimeNat.dvd_mul {q a b : Nat} (hq : IsPrimeNat q)
   rw [hab, Int.mul_assoc (q : Int), ← Int.mul_add] at hmul
   exact Int.ofNat_dvd.1 ⟨(k : Int) * (extGcd a q).2.1 + (extGcd a q).2.2 * (b : Int), hmul.symm⟩
 
-private def posRange : Nat → List Nat
+/-- The list `[n, n - 1, …, 1]` of positive naturals up to `n`; the index set shared by the
+    Fermat little theorem here and the cyclic-order argument in `Qsag.Math.EllipticCurves`. -/
+def posRange : Nat → List Nat
   | 0 => []
   | n + 1 => (n + 1) :: posRange n
 
-private theorem mem_posRange_iff {x : Nat} : ∀ {n : Nat}, x ∈ posRange n ↔ 1 ≤ x ∧ x ≤ n
+theorem mem_posRange_iff {x : Nat} : ∀ {n : Nat}, x ∈ posRange n ↔ 1 ≤ x ∧ x ≤ n
   | 0 => by
     constructor
     · intro h; cases h
@@ -208,7 +210,7 @@ private theorem mem_posRange_iff {x : Nat} : ∀ {n : Nat}, x ∈ posRange n ↔
       · exact .inl hEq
       · exact .inr ⟨hLo, by omega⟩
 
-private theorem posRange_nodup : ∀ (n : Nat), (posRange n).Nodup
+theorem posRange_nodup : ∀ (n : Nat), (posRange n).Nodup
   | 0 => .nil
   | n + 1 =>
     .cons
@@ -811,184 +813,13 @@ namespace Weierstrass
 /- `Weierstrass.IsPrime` and Euclid's lemma `IsPrime.dvd_mul` are the declarations of
    `ActiveMigrationZeroTest.lean`; this module certifies primes for that same predicate. -/
 
-private theorem dvd_mul_not_left {q a b : Nat} (hq : IsPrime q)
-    (hdvd : q ∣ a * b) (hna : ¬ (q ∣ a)) : q ∣ b := by
-  obtain ⟨hda, hdq⟩ := extGcd_dvd a q
-  have hg1 : (extGcd a q).1 = 1 := by
-    rcases hq.2 _ hdq with h1 | hqq
-    · exact h1
-    · rw [hqq] at hda
-      exact False.elim (hna hda)
-  have hbez := extGcd_bezout a q
-  rw [hg1] at hbez
-  obtain ⟨k, hk⟩ := hdvd
-  have hmul : ((a : Int) * (extGcd a q).2.1 + (q : Int) * (extGcd a q).2.2) * (b : Int) =
-      1 * (b : Int) := congrArg (· * (b : Int)) hbez
-  rw [Int.add_mul, Int.one_mul] at hmul
-  have hab : (a : Int) * (extGcd a q).2.1 * (b : Int) =
-      (q : Int) * ((k : Int) * (extGcd a q).2.1) := by
-    have hkInt : (a : Int) * (b : Int) = (q : Int) * (k : Int) := by exact_mod_cast hk
-    rw [Int.mul_right_comm (a : Int), hkInt, Int.mul_assoc]
-  rw [hab, Int.mul_assoc (q : Int), ← Int.mul_add] at hmul
-  exact Int.ofNat_dvd.1 ⟨(k : Int) * (extGcd a q).2.1 + (extGcd a q).2.2 * (b : Int), hmul.symm⟩
+/-! ### Fermat's Little Theorem for `Weierstrass.IsPrime` -/
 
-/-! ### Constructive Proof of Fermat's Little Theorem for `Weierstrass.IsPrime` -/
-
-private def posRange : Nat → List Nat
-  | 0 => []
-  | n + 1 => (n + 1) :: posRange n
-
-private theorem mem_posRange_iff (x : Nat) : ∀ (n : Nat), x ∈ posRange n ↔ 1 ≤ x ∧ x ≤ n
-  | 0 => Iff.intro (fun h => by cases h) (fun ⟨_, _⟩ => by omega)
-  | n + 1 => by
-    simp only [posRange, List.mem_cons, mem_posRange_iff x n]
-    refine ⟨?_, fun ⟨hLo, hHi⟩ => if hEq : x = n + 1 then .inl hEq else .inr ⟨hLo, by omega⟩⟩
-    rintro (rfl | ⟨hLo, hHi⟩)
-    · exact ⟨Nat.succ_pos n, Nat.le_refl _⟩
-    · exact ⟨hLo, Nat.le_trans hHi (Nat.le_succ n)⟩
-
-private theorem posRange_nodup : ∀ (n : Nat), (posRange n).Nodup
-  | 0 => .nil
-  | n + 1 => .cons (fun b hb heq => by have := ((mem_posRange_iff b n).1 hb).2; omega) (posRange_nodup n)
-
-private def listProd : List Nat → Nat
-  | [] => 1
-  | x :: xs => x * listProd xs
-
-private def eraseFirst (v : Nat) : List Nat → List Nat
-  | [] => []
-  | y :: ys => if y = v then ys else y :: eraseFirst v ys
-
-private theorem mem_of_mem_eraseFirst {v z : Nat} :
-    ∀ {ys : List Nat}, z ∈ eraseFirst v ys → z ∈ ys
-  | [], h => by cases h
-  | y :: ys, h => by
-    simp only [eraseFirst] at h
-    split at h
-    · exact .tail _ h
-    · cases h with
-      | head => exact .head _
-      | tail _ ht => exact .tail _ (mem_of_mem_eraseFirst ht)
-
-private theorem eraseFirst_spec {v : Nat} :
-    ∀ {ys : List Nat}, ys.Nodup → v ∈ ys →
-      listProd ys = v * listProd (eraseFirst v ys) ∧ (eraseFirst v ys).length + 1 = ys.length ∧
-      (eraseFirst v ys).Nodup ∧ (∀ z : Nat, z ≠ v → z ∈ ys → z ∈ eraseFirst v ys)
-  | [], _, hmem => by cases hmem
-  | y :: ys, .cons hrel hnd, hmem => by
-    dsimp only [eraseFirst]
-    if hy : y = v then
-      subst hy; simp only [↓reduceIte, listProd, List.length_cons]
-      refine ⟨trivial, trivial, hnd, fun z hzne hzmem => ?_⟩
-      cases hzmem with | head => exact False.elim (hzne rfl) | tail _ htail => exact htail
-    else
-      simp only [hy, ↓reduceIte, listProd, List.length_cons]
-      have hvTail : v ∈ ys := by
-        cases hmem with | head => exact False.elim (hy rfl) | tail _ ht => exact ht
-      obtain ⟨hprod, hlen, hnd', hsub⟩ := eraseFirst_spec hnd hvTail
-      refine ⟨by rw [hprod, ← Nat.mul_assoc, Nat.mul_comm y v, Nat.mul_assoc], by omega,
-        .cons (fun b hb heq => hrel b (mem_of_mem_eraseFirst hb) heq) hnd', fun z hzne hzmem => ?_⟩
-      cases hzmem with | head => exact .head _ | tail _ ht => exact .tail _ (hsub z hzne ht)
-
-private theorem listProd_eq_of_nodup_subset :
-    ∀ {xs ys : List Nat},
-      xs.Nodup → ys.Nodup → xs.length = ys.length →
-      (∀ x ∈ xs, x ∈ ys) → listProd xs = listProd ys
-  | [], [], _, _, _, _ => rfl
-  | [], _ :: _, _, _, hlen, _ => by cases hlen
-  | x :: xs, ys, .cons hrel hndX, hndY, hlen, hsub => by
-    obtain ⟨hprodY, hlenE, hndE, hmemE⟩ := eraseFirst_spec hndY (hsub x (.head _))
-    simp only [List.length_cons] at hlen
-    have ih := listProd_eq_of_nodup_subset hndX hndE (by omega) (fun z hz =>
-      hmemE z (fun heq => hrel z hz heq.symm) (hsub z (.tail _ hz)))
-    simp only [listProd, ih, hprodY]
-
-private theorem listProd_map_mul_mod (a q : Nat) :
-    ∀ (n : Nat),
-      listProd ((posRange n).map (fun i => (a * i) % q)) % q =
-      (a ^ n * listProd (posRange n)) % q
-  | 0 => by simp [posRange, listProd]
-  | n + 1 => by
-    simp only [posRange, List.map_cons, listProd]
-    rw [Nat.mul_mod ((a * (n + 1)) % q), Nat.mod_mod, listProd_map_mul_mod a q n, ← Nat.mul_mod]
-    have hcomm : a * (n + 1) * (a ^ n * listProd (posRange n)) =
-        a ^ (n + 1) * ((n + 1) * listProd (posRange n)) := by
-      rw [Nat.pow_succ, Nat.mul_comm (a ^ n) a]
-      rw [Nat.mul_assoc a (n + 1) (a ^ n * listProd (posRange n)),
-          ← Nat.mul_assoc (n + 1) (a ^ n) (listProd (posRange n)),
-          Nat.mul_comm (n + 1) (a ^ n),
-          Nat.mul_assoc (a ^ n) (n + 1) (listProd (posRange n)),
-          ← Nat.mul_assoc a (a ^ n) _]
-    rw [hcomm]
-
-private theorem not_dvd_listProd_posRange {q : Nat} (hq : IsPrime q) :
-    ∀ {n : Nat}, n < q → ¬ (q ∣ listProd (posRange n))
-  | 0, _, hdvd => by dsimp only [posRange, listProd] at hdvd; have := Nat.le_of_dvd (by decide) hdvd; have := hq.1; omega
-  | n + 1, hlt, hdvd => by
-    simp only [posRange, listProd] at hdvd
-    exact not_dvd_listProd_posRange hq (by omega)
-      (dvd_mul_not_left hq hdvd (fun h1 => by have := Nat.le_of_dvd (by omega) h1; omega))
-
-private theorem sub_dvd_of_mod_eq {x y q : Nat} (hle : y ≤ x) (hmod : x % q = y % q) :
-    q ∣ (x - y) := by
-  have hx := Nat.div_add_mod x q; have hy := Nat.div_add_mod y q
-  have hdivLe := Nat.div_le_div_right (c := q) hle
-  refine ⟨x / q - y / q, ?_⟩; rw [Nat.mul_sub]; omega
-
-private theorem one_le_pow_of_pos {a : Nat} (ha : 1 ≤ a) : ∀ k : Nat, 1 ≤ a ^ k
-  | 0 => Nat.le_refl 1
-  | k + 1 => Nat.pow_succ a k ▸ Nat.le_trans (one_le_pow_of_pos ha k) (Nat.le_mul_of_pos_right _ ha)
-
-/-- Fermat's Little Theorem: `a ^ (q - 1) ≡ 1 (mod q)` for prime `q` and `¬ (q ∣ a)`. -/
+/-- Fermat's Little Theorem: `a ^ (q - 1) ≡ 1 (mod q)` for prime `q` and `¬ (q ∣ a)`.
+    `Weierstrass.IsPrime` abbreviates `IsPrimeNat`, so this is `IsPrimeNat.pow_sub_one_mod`. -/
 theorem IsPrime.pow_sub_one_mod {q a : Nat} (hq : IsPrime q) (hna : ¬ (q ∣ a)) :
-    (a ^ (q - 1)) % q = 1 := by
-  let L := posRange (q - 1)
-  let f := fun i : Nat => (a * i) % q
-  have hMem : ∀ x ∈ L.map f, x ∈ L := by
-    intro x hx
-    obtain ⟨i, hi, rfl⟩ := List.mem_map.1 hx
-    obtain ⟨hi1, hi2⟩ := (mem_posRange_iff i (q - 1)).1 hi
-    have hni : ¬ (q ∣ i) := fun hd => by have := Nat.le_of_dvd (by omega) hd; have := hq.1; omega
-    have hnai : ¬ (q ∣ a * i) := fun hd => hni (dvd_mul_not_left hq (Nat.mul_comm a i ▸ hd) hna)
-    have hmodPos : 0 < (a * i) % q :=
-      if hz : (a * i) % q = 0 then False.elim (hnai (Nat.dvd_of_mod_eq_zero hz)) else by omega
-    have hmodLt : (a * i) % q < q := Nat.mod_lt _ (by have := hq.1; omega)
-    dsimp only [f]; exact (mem_posRange_iff _ (q - 1)).2 ⟨hmodPos, by omega⟩
-  have hInjLe : ∀ u v : Nat, u ≤ v → v ≤ q - 1 → (a * u) % q = (a * v) % q → u = v := by
-    intro u v huv hv hij
-    have hdvd : q ∣ a * (v - u) :=
-      (Nat.mul_sub a v u) ▸ sub_dvd_of_mod_eq (Nat.mul_le_mul_left a huv) hij.symm
-    have hdvdDiff : q ∣ (v - u) := dvd_mul_not_left hq hdvd hna
-    have hq2 := hq.1
-    if hdiff0 : v - u = 0 then omega else have := Nat.le_of_dvd (by omega) hdvdDiff; omega
-  have hInjOn : ∀ i j : Nat, i ∈ L → j ∈ L → f i = f j → i = j := by
-    intro i j hi hj hij; dsimp only [f] at hij
-    obtain ⟨_, hi2⟩ := (mem_posRange_iff i (q - 1)).1 hi
-    obtain ⟨_, hj2⟩ := (mem_posRange_iff j (q - 1)).1 hj
-    exact if hijLe : i ≤ j then hInjLe i j hijLe hj2 hij else (hInjLe j i (by omega) hi2 hij.symm).symm
-  have hNodupMap : (L.map f).Nodup := by
-    have hsubNd : ∀ {xs : List Nat}, xs.Nodup → (∀ z ∈ xs, z ∈ L) → (xs.map f).Nodup := by
-      intro xs hnd hxs; induction hnd with
-      | nil => exact .nil
-      | @cons x rest hrel _ ih =>
-        refine .cons (fun b hb heq => ?_) (ih (fun z hz => hxs z (.tail _ hz)))
-        obtain ⟨y, hy, rfl⟩ := List.mem_map.1 hb
-        exact hrel y hy (hInjOn x y (hxs x (.head _)) (hxs y (.tail _ hy)) heq)
-    exact hsubNd (posRange_nodup (q - 1)) (fun z hz => hz)
-  have hProdEq : listProd (L.map f) = listProd L :=
-    listProd_eq_of_nodup_subset hNodupMap (posRange_nodup (q - 1)) (by simp) hMem
-  have hModEq : (a ^ (q - 1) * listProd L) % q = (listProd L) % q := by
-    rw [← listProd_map_mul_mod a q (q - 1), hProdEq]
-  have haPos : 1 ≤ a := if ha0 : a = 0 then by subst ha0; exact False.elim (hna (Nat.dvd_zero q)) else by omega
-  have hpowPos : 1 ≤ a ^ (q - 1) := one_le_pow_of_pos haPos (q - 1)
-  have hdvdMul : q ∣ (a ^ (q - 1) - 1) * listProd L := by
-    have hsub : a ^ (q - 1) * listProd L - listProd L = (a ^ (q - 1) - 1) * listProd L := by
-      rw [Nat.sub_mul, Nat.one_mul]
-    exact hsub ▸ sub_dvd_of_mod_eq (Nat.le_mul_of_pos_left _ hpowPos) hModEq
-  have hnotF : ¬ (q ∣ listProd L) := not_dvd_listProd_posRange hq (by have := hq.1; omega)
-  obtain ⟨k, hk⟩ := dvd_mul_not_left hq (Nat.mul_comm (a ^ (q - 1) - 1) (listProd L) ▸ hdvdMul) hnotF
-  have hEq : a ^ (q - 1) = q * k + 1 := by omega
-  rw [hEq, Nat.mul_add_mod, Nat.mod_eq_of_lt hq.1]
+    (a ^ (q - 1)) % q = 1 :=
+  IsPrimeNat.pow_sub_one_mod hq hna
 
 end Weierstrass
 

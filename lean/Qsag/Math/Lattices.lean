@@ -2447,6 +2447,7 @@ end Fq204
 instance : LawfulField Fq204 where
   inv := Fq204.inv
   zero_ne_one := by decide
+  inv_zero := by decide
   mul_inv_cancel := Fq204.mul_inv_cancel
 
 /-! ### §1.3 256-Point Negacyclic Ring $R_q = \mathbb{Z}_q[X]/(X^{256} + 1)$ & 8-Stage NTT Isomorphism -/

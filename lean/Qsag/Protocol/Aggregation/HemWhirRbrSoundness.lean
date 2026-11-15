@@ -21,7 +21,10 @@ public import Qsag.Math.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Coding.Cwyz26
-import all Qsag.Math.Algebra
+import all Qsag.Math.Counting
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.HasseHensel
 import all Qsag.Coding.GuruswamiSudan
 import all Qsag.Coding.AffineProximity
 

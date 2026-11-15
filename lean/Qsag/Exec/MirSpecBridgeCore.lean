@@ -13,6 +13,7 @@ public import Qsag.Exec.InteractiveUcEngine
 public import Qsag.Custody.CustodySuiteFull
 public import Qsag.Protocol.Threshold.RssSlhFullSecurity
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
+import all Qsag.Math.CoeffPoly
 import all Qsag.Math.Goldilocks
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Exec.SimulationSpine
@@ -2288,8 +2289,8 @@ private theorem mem_erase_of_ne_local {α : Type} [BEq α] [LawfulBEq α] :
       · exact False.elim (hNe rfl)
       · exact hTail
 
-private theorem nodup_length_le_subset_fin {n : Nat} :
-    ∀ {xs ys : List (Fin n)}, xs.Nodup → (∀ x ∈ xs, x ∈ ys) → xs.length ≤ ys.length
+private theorem nodup_length_le_subset_decEq {α : Type} [DecidableEq α] :
+    ∀ {xs ys : List α}, xs.Nodup → (∀ x ∈ xs, x ∈ ys) → xs.length ≤ ys.length
   | [], _, _, _ => Nat.zero_le _
   | x :: xs, ys, hNd, hSub => by
     rcases List.nodup_cons.mp hNd with ⟨hxNot, hNdTail⟩
@@ -2298,10 +2299,16 @@ private theorem nodup_length_le_subset_fin {n : Nat} :
       intro z hz
       have hNe : z ≠ x := fun hEq => hxNot (hEq ▸ hz)
       exact mem_erase_of_ne_local hNe (hSub z (.tail _ hz))
-    have ih := nodup_length_le_subset_fin hNdTail hSubErase
+    have ih := nodup_length_le_subset_decEq hNdTail hSubErase
     have hLen := length_erase_add_one hxIn
     simp only [List.length_cons]
     omega
+
+/-- The counting bound at `Fin n`, with the structural `instDecidableEqFin` equality test (the
+    default `BEq (Fin n)` found through the order hierarchy carries a classical lawfulness proof). -/
+private theorem nodup_length_le_subset_fin {n : Nat} {xs ys : List (Fin n)}
+    (hNd : xs.Nodup) (hSub : ∀ x ∈ xs, x ∈ ys) : xs.length ≤ ys.length :=
+  @nodup_length_le_subset_decEq (Fin n) (instDecidableEqFin n) xs ys hNd hSub
 
 private theorem filter_compl_length {α : Type} (p : α → Bool) :
     ∀ (xs : List α), (xs.filter p).length + (xs.filter (fun x => !p x)).length = xs.length
@@ -2730,7 +2737,7 @@ theorem mirBeltLatch_quorum_discharges_idealTsig_approval {PK Msg : Type}
 /-! ## §5. Conditional 4-Layer Control-Flow & Authorization Refinement Chain (`isa_to_mir_to_protocol_to_ideal_sim`) -/
 
 /-- Domain/capacity separation block `"QSAGR1CM"` (`rate = 8, capacity = 4, sep = 1`) for Round-1
-    width-12 `Poseidon2` Davies–Meyer commitments. -/
+    width-12 `Poseidon2` weighted-feed-forward commitments. -/
 def round1CommitDomainBlock : Lane4 :=
   ⟨Goldilocks.ofNat 0x515341475231434D, Goldilocks.ofNat 8, Goldilocks.ofNat 4, Goldilocks.one⟩
 
@@ -2750,7 +2757,7 @@ theorem round1CommitState12_injective
   exact ⟨hn, hm, hs, hp, hb1⟩
 
 /-- Concrete algebraic Round-1 commitment opening over the full 30-round width-12 `Poseidon2`
-    Davies–Meyer compression: commits to `(nonceLimb, maskLimb, sessionTag, partyId)` together with
+    weighted compression `poseidon2CompressWeighted`: commits to `(nonceLimb, maskLimb, sessionTag, partyId)` together with
     4 full `Goldilocks` blinding limbs `blind : Lane4`. Hiding is not proved; this is a
     model commitment, without a byte-level refinement to the deployed commitment construction. -/
 structure Round1Opening where
@@ -2762,13 +2769,11 @@ structure Round1Opening where
   blind : Lane4
   deriving DecidableEq
 
-/-- Evaluate the full 30-round width-12 `Poseidon2` Davies–Meyer feed-forward compression
-    `let out := poseidon2Perm12 st; lane4Add out.b0 st.b0`, returning only the 4-limb (`256`-bit)
-    rate digest `Lane4`. -/
+/-- Evaluate the deployed 30-round width-12 `Poseidon2` compression with weighted feed-forward,
+    `poseidon2CompressWeighted st = (poseidon2Perm12 st).b0 + st.b0 + 2·st.b1 + 4·st.b2`, returning
+    the 4-limb (`256`-bit) digest `Lane4`. -/
 def computeRound1CommitB0 (nonceLimb maskLimb sessionTag partyId : Goldilocks) (blind : Lane4) : Lane4 :=
-  let st := round1CommitState12 nonceLimb maskLimb sessionTag partyId blind
-  let out := poseidon2Perm12 st
-  lane4Add out.b0 st.b0
+  poseidon2CompressWeighted (round1CommitState12 nonceLimb maskLimb sessionTag partyId blind)
 
 /-- Verify a single Round-1 commitment opening by recomputing `computeRound1CommitB0`. -/
 def verifyRound1Opening (op : Round1Opening) : Bool :=
@@ -2782,9 +2787,9 @@ theorem verifyRound1Opening_of_eq {op : Round1Opening}
   unfold verifyRound1Opening
   exact decide_eq_true h
 
-/-- Concrete collision witness against the 30-round width-12 `Poseidon2` Davies–Meyer compression:
-    two distinct domain-framed 12-limb states `st₁ ≠ st₂` (whose permutation outputs are also
-    distinct by `poseidon2Perm12_bijective`) colliding on `out.b0 + st.b0`. -/
+/-- Concrete collision witness against the deployed 30-round width-12 `Poseidon2` weighted
+    compression: two distinct domain-framed 12-limb states `st₁ ≠ st₂` (whose permutation outputs
+    are also distinct by `poseidon2Perm12_bijective`) colliding on `poseidon2CompressWeighted`. -/
 structure Round1CommitCollisionWitness where
   st₁ : Poseidon2State12
   st₂ : Poseidon2State12
@@ -2792,12 +2797,11 @@ structure Round1CommitCollisionWitness where
   nePerm : poseidon2Perm12 st₁ ≠ poseidon2Perm12 st₂
   dom₁ : st₁.b2 = round1CommitDomainBlock
   dom₂ : st₂.b2 = round1CommitDomainBlock
-  eqCommitB0 :
-    lane4Add (poseidon2Perm12 st₁).b0 st₁.b0 = lane4Add (poseidon2Perm12 st₂).b0 st₂.b0
+  eqCommitB0 : poseidon2CompressWeighted st₁ = poseidon2CompressWeighted st₂
 
 /-- **Constructive Commitment Binding (`extractRound1CommitCollision`, `0 Classical.choice`)**:
     Any two distinct verified `Round1Opening`s sharing `committedB0` constructively produce a
-    concrete `Round1CommitCollisionWitness` against the 30-round `poseidon2Perm12` Davies–Meyer
+    concrete `Round1CommitCollisionWitness` against the 30-round `poseidon2CompressWeighted`
     compression. -/
 def extractRound1CommitCollision (op₁ op₂ : Round1Opening)
     (hSameCommit : op₁.committedB0 = op₂.committedB0)
@@ -2813,9 +2817,9 @@ def extractRound1CommitCollision (op₁ op₂ : Round1Opening)
     dsimp only at hSameCommit hn hm hs hp hb
     subst hSameCommit hn hm hs hp hb
     exact hNe rfl
-  have hEq1 : op₁.committedB0 = lane4Add (poseidon2Perm12 st₁).b0 st₁.b0 :=
+  have hEq1 : op₁.committedB0 = poseidon2CompressWeighted st₁ :=
     of_decide_eq_true hVer₁
-  have hEq2 : op₂.committedB0 = lane4Add (poseidon2Perm12 st₂).b0 st₂.b0 :=
+  have hEq2 : op₂.committedB0 = poseidon2CompressWeighted st₂ :=
     of_decide_eq_true hVer₂
   { st₁ := st₁
     st₂ := st₂
@@ -3042,84 +3046,57 @@ private def lane4SubCoord (a b : Lane4) : Lane4 :=
 private def sboxLane4InvCoord (b : Lane4) : Lane4 :=
   ⟨sbox7Inv b.x0, sbox7Inv b.x1, sbox7Inv b.x2, sbox7Inv b.x3⟩
 
-/-- Explicit algebraic inverse $(M_4^{-1}(c - M_4 d) / 2)^{d_{\text{inv}}}$ of the retired 1-round formula. -/
+/-- Numerator of the `4 × 4` solve below: `8u` from `e`. -/
+private def oneRoundSolve8 (e : Lane4) : Lane4 :=
+  ⟨Goldilocks.sub (Goldilocks.sub (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 9) e.x0) e.x1) e.x2)
+     (Goldilocks.mul (Goldilocks.ofNat 12) e.x3),
+   Goldilocks.sub (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 3) e.x1) e.x2) e.x0,
+   Goldilocks.sub (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 3) e.x2) e.x1) e.x0,
+   Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 8) e.x3) (Goldilocks.mul (Goldilocks.ofNat 4) e.x0)⟩
+
+/-- Explicit algebraic inverse of the retired 1-round formula under the deployed `M_4 ⊗ P_3`
+    external layer. With `u = x^{∘7}` and `e = c - (applyME ⟨0, d, 0⟩).b0`,
+    `e₀ = 4u₀+2u₁+2u₂+6u₃`, `e₁ = 2u₀+4u₁+2u₂+3u₃`, `e₂ = 2u₀+2u₁+4u₂+3u₃`, `e₃ = 2u₀+u₁+u₂+4u₃`,
+    a linear system of determinant `32` solved by
+    `8u = (9e₀-e₁-e₂-12e₃, 3e₁-e₂-e₀, 3e₂-e₁-e₀, 8e₃-4e₀)`; the opening is `u^{∘ d_inv}`. -/
 def invertOneRoundApplyMECommitB0 (c : Lane4) : Lane4 :=
   let dom := Goldilocks.ofNat 0x515341475231434D
   let d : Lane4 := ⟨dom, Goldilocks.one, Goldilocks.zero, Goldilocks.zero⟩
-  let inv2G : Goldilocks := Goldilocks.ofNat 9223372034707292161
-  sboxLane4InvCoord (lane4Scale inv2G (applyM4Inv (lane4SubCoord c (applyM4 d))))
+  let inv8G : Goldilocks := Goldilocks.ofNat 16140901060737761281
+  sboxLane4InvCoord (lane4Scale inv8G (oneRoundSolve8 (lane4SubCoord c
+    (applyME ⟨⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, d,
+      ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩⟩).b0)))
 
-private theorem inv2G_mul_two_cancel (x : Goldilocks) :
-    Goldilocks.mul (Goldilocks.ofNat 9223372034707292161) (Goldilocks.mul (Goldilocks.ofNat 2) x) = x := by
-  change CommRingOps.mul (Goldilocks.ofNat 9223372034707292161)
-    (CommRingOps.mul (Goldilocks.ofNat 2) x) = x
+private theorem inv8G_mul_eight_cancel (x : Goldilocks) :
+    Goldilocks.mul (Goldilocks.ofNat 16140901060737761281) (Goldilocks.mul (Goldilocks.ofNat 8) x) = x := by
+  change CommRingOps.mul (Goldilocks.ofNat 16140901060737761281)
+    (CommRingOps.mul (Goldilocks.ofNat 8) x) = x
   rw [← LawfulCommRing.mul_assoc]
-  have hOne : CommRingOps.mul (Goldilocks.ofNat 9223372034707292161) (Goldilocks.ofNat 2) =
+  have hOne : CommRingOps.mul (Goldilocks.ofNat 16140901060737761281) (Goldilocks.ofNat 8) =
       CommRingOps.one := by decide
   rw [hOne]
   exact LawfulCommRing.one_mul x
 
-private theorem applyM4_zero_local : applyM4 lane4Zero = lane4Zero := by
-  decide
-
-private theorem applyME_e0_b1 (u : Lane4) :
-    (applyME ⟨u, lane4Zero, lane4Zero⟩).b1 = applyM4 u := by
-  unfold applyME
-  dsimp only
-  rw [applyM4_zero_local]
-  simp only [lane4Add_eq, lane4Zero_eq]
-  have h0L : ∀ x : Goldilocks, Goldilocks.add Goldilocks.zero x = x :=
-    fun x => LawfulCommRing.zero_add x
-  have h0R : ∀ x : Goldilocks, Goldilocks.add x Goldilocks.zero = x :=
-    fun x => LawfulCommRing.add_zero x
-  exact Lane4.ext
-    (by dsimp only; rw [h0R, h0R, h0L])
-    (by dsimp only; rw [h0R, h0R, h0L])
-    (by dsimp only; rw [h0R, h0R, h0L])
-    (by dsimp only; rw [h0R, h0R, h0L])
-
-private theorem lane4Scale_zero_local (c : Goldilocks) :
-    lane4Scale c lane4Zero = lane4Zero := by
-  rw [lane4Scale_eq, lane4Zero_eq]
-  have hz : Goldilocks.mul c Goldilocks.zero = Goldilocks.zero :=
-    LawfulCommRing.mul_zero c
-  exact Lane4.ext hz hz hz hz
-
-private theorem applyM4_scale_local (c : Goldilocks) (u : Lane4) :
-    applyM4 (lane4Scale c u) = lane4Scale c (applyM4 u) := by
-  have hSc := congrArg Poseidon2State12.b1 (applyME_scale c ⟨u, lane4Zero, lane4Zero⟩)
-  rw [state12Scale_eq, state12Scale_eq] at hSc
-  dsimp only at hSc
-  rw [lane4Scale_zero_local, applyME_e0_b1, applyME_e0_b1] at hSc
-  exact hSc
-
 private theorem oneRound_linear_extract (u d : Lane4) :
-    let st : Poseidon2State12 := ⟨u, d, ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩⟩
-    lane4SubCoord (applyME st).b0 (applyM4 d) = applyM4 (lane4Scale (Goldilocks.ofNat 2) u) := by
-  dsimp only
-  rw [← lane4Zero_eq]
-  unfold applyME
-  dsimp only
-  rw [applyM4_zero_local, applyM4_scale_local (Goldilocks.ofNat 2) u]
-  let mu := applyM4 u
-  let md := applyM4 d
-  change lane4SubCoord (lane4Add mu (lane4Add (lane4Add mu md) lane4Zero)) md =
-    lane4Scale (Goldilocks.ofNat 2) mu
-  simp only [lane4Add_eq, lane4Scale_eq, lane4Zero_eq]
-  unfold lane4SubCoord
-  dsimp only
+    oneRoundSolve8 (lane4SubCoord
+      (applyME ⟨u, d, ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩⟩).b0
+      (applyME ⟨⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, d,
+        ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩⟩).b0) =
+      lane4Scale (Goldilocks.ofNat 8) u := by
+  unfold oneRoundSolve8 lane4SubCoord applyME poseidon2Transpose3x4 poseidon2Transpose4x3
+    applyMEStd applyM4 lane4Sum
+  simp only [lane4Add_eq, lane4Scale_eq]
   have hz : Goldilocks.zero = goldOfInt 0 := rfl
-  have h2 : Goldilocks.ofNat 2 = goldOfInt 2 := by decide
   apply Lane4.ext <;>
-    (rw [← goldOfInt_nat mu.x0, ← goldOfInt_nat mu.x1, ← goldOfInt_nat mu.x2, ← goldOfInt_nat mu.x3,
-         ← goldOfInt_nat md.x0, ← goldOfInt_nat md.x1, ← goldOfInt_nat md.x2, ← goldOfInt_nat md.x3];
-     simp only [hz, h2, goldOfInt_add, goldOfInt_sub, goldOfInt_mul];
+    (dsimp only;
+     rw [← goldOfInt_nat u.x0, ← goldOfInt_nat u.x1, ← goldOfInt_nat u.x2, ← goldOfInt_nat u.x3,
+         ← goldOfInt_nat d.x0, ← goldOfInt_nat d.x1, ← goldOfInt_nat d.x2, ← goldOfInt_nat d.x3];
+     simp only [hz, ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_sub, goldOfInt_mul];
      congr 1; omega)
 
 /-- **`#tooth` Regression (`tooth_one_round_applyME_commitment_exposes_opening`)**:
-    Proves that the retired unblinded 1-round `applyME` formula $c = 2 M_4(x^{\circ 7}) + M_4 d$
-    is algebraically inverted by $(M_4^{-1}(c - M_4 d)/2)^{\circ d_{\text{inv}}}$ on EVERY 4-limb
-    opening, and concretely recovers `[17, 23, 31, 47]` from its commitment. -/
+    Proves that the retired unblinded 1-round encoding `(applyME ⟨x^{∘7}, d, 0⟩).b0` is
+    algebraically inverted by `invertOneRoundApplyMECommitB0` on EVERY 4-limb opening, and concretely recovers `[17, 23, 31, 47]` from its commitment. -/
 theorem tooth_one_round_applyME_commitment_exposes_opening :
     (∀ nonceLimb maskLimb sessionTag partyId : Goldilocks,
       invertOneRoundApplyMECommitB0
@@ -3136,11 +3113,12 @@ theorem tooth_one_round_applyME_commitment_exposes_opening :
     intro n m s p
     unfold invertOneRoundApplyMECommitB0 retiredOneRoundApplyMECommitB0
     dsimp only
-    rw [oneRound_linear_extract, applyM4Inv_applyM4]
+    rw [oneRound_linear_extract]
     simp only [lane4Scale_eq]
     unfold sboxLane4InvCoord
     dsimp only
-    rw [inv2G_mul_two_cancel, inv2G_mul_two_cancel, inv2G_mul_two_cancel, inv2G_mul_two_cancel]
+    rw [inv8G_mul_eight_cancel, inv8G_mul_eight_cancel, inv8G_mul_eight_cancel,
+      inv8G_mul_eight_cancel]
     exact Lane4.ext (sbox7Inv_sbox7 n) (sbox7Inv_sbox7 m) (sbox7Inv_sbox7 s) (sbox7Inv_sbox7 p)
   exact ⟨hAll, hAll (Goldilocks.ofNat 17) (Goldilocks.ofNat 23) (Goldilocks.ofNat 31) (Goldilocks.ofNat 47)⟩
 
@@ -5038,13 +5016,13 @@ theorem reconstructShamirSubset_correct {n t : Nat} (Q : ShamirThresholdSubset n
   have zero_eq : (CommRingOps.zero : Goldilocks) = Goldilocks.zero := rfl
   simp only [Q.points_eq, List.map_map, Function.comp_def, zero_eq] at coord
   apply Lane4.ext
-  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, ringDot, List.map_map,
       Function.comp_def] using coord 0
-  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, ringDot, List.map_map,
       Function.comp_def] using coord 1
-  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, ringDot, List.map_map,
       Function.comp_def] using coord 2
-  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, ringDot, List.map_map,
       Function.comp_def] using coord 3
 
 theorem assembleShamirSubsetSig_correct {n t : Nat} (Q : ShamirThresholdSubset n t)

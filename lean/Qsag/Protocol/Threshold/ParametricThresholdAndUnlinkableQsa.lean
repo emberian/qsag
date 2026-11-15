@@ -507,6 +507,12 @@ theorem zero_ne_one {q : Nat} [FactPrime q] : zero q ≠ one q := by
   rw [zero_val, one_val] at hv
   exact absurd hv (by decide)
 
+theorem inv_zero {q : Nat} [FactPrime q] : inv (zero q) = zero q := by
+  unfold inv
+  split
+  · rfl
+  · next h => exact absurd zero_val h
+
 /-- Bézout coefficients give a modular inverse: `a * u + q * v = 1` forces
     `a * (u mod q) ≡ 1 (mod q)` for `2 ≤ q`. -/
 private theorem bezout_emod_eq_one {q : Nat} (hq : 2 ≤ q) (a u v : Int)
@@ -570,6 +576,7 @@ instance (q : Nat) [FactPrime q] : LawfulCommRing (ZMod q) where
 instance (q : Nat) [FactPrime q] : LawfulField (ZMod q) where
   inv := ZMod.inv
   zero_ne_one := ZMod.zero_ne_one (q := q)
+  inv_zero := ZMod.inv_zero
   mul_inv_cancel := ZMod.mul_inv_cancel
 
 instance instFactPrimeGoldilocks : FactPrime goldilocksPrime :=

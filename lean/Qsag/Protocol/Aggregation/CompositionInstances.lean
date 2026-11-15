@@ -818,24 +818,32 @@ def poseidonEquiv : SimpleEquiv (State Lane4) (State Lane4) where
   left_inv x := congrArg lane4State (poseidon2Perm12Inv_left_inv ⟨x.1, x.2.1, x.2.2⟩)
   right_inv y := congrArg lane4State (poseidon2Perm12Inv_right_inv ⟨y.1, y.2.1, y.2.2⟩)
 
-/-- Consumer bridge: `poseidon2_compress12_ff` of `sig.rs`, as modelled by
-`poseidon2Compress12FF`, is `jiveCompress` with `extra = 0` over the modelled permutation. -/
+/-- Input-dependent part of the deployed weighted feed-forward beyond `in0`:
+`2·in1 + 4·tweak`. -/
+def weightedJiveExtra (x : State Lane4) : Lane4 :=
+  lane4Add (lane4Scale (Goldilocks.ofNat 2) x.2.1) (lane4Scale (Goldilocks.ofNat 4) x.2.2)
+
+/-- Consumer bridge: `poseidon2_compress12_ff` of `sponge.rs`, as modelled by
+`poseidon2Compress12FF` (`perm.b0 + in0 + 2·in1 + 4·tweak`), is `jiveCompress` with
+`extra = weightedJiveExtra` over the modelled permutation. -/
 theorem compress12FF_eq_jive (in0 in1 tweak : Lane4) :
     poseidon2Compress12FF in0 in1 tweak =
-      jiveCompress (fun _ => CommRingOps.zero) poseidonEquiv (in0, in1, tweak) := by
-  show lane4Add (poseidon2Perm12 ⟨in0, in1, tweak⟩).b0 in0 =
+      jiveCompress weightedJiveExtra poseidonEquiv (in0, in1, tweak) := by
+  show CommRingOps.add (poseidon2Perm12 ⟨in0, in1, tweak⟩).b0
+      (CommRingOps.add (CommRingOps.add in0 (lane4Scale (Goldilocks.ofNat 2) in1))
+        (lane4Scale (Goldilocks.ofNat 4) tweak)) =
     CommRingOps.add (poseidon2Perm12 ⟨in0, in1, tweak⟩).b0
-      (CommRingOps.add in0 CommRingOps.zero)
-  rw [LawfulCommRing.add_zero]
-  rfl
+      (CommRingOps.add in0 (CommRingOps.add (lane4Scale (Goldilocks.ofNat 2) in1)
+        (lane4Scale (Goldilocks.ofNat 4) tweak)))
+  rw [LawfulCommRing.add_assoc in0]
 
 /-- `checked_preimage_is_transcript_hit` stated for the modelled deployed compression. -/
 theorem deployed_compress_preimage_hits_transcript
     (t : List (State Lane4 × State Lane4)) (target : Lane4) (x y : State Lane4)
     (hc : Consistent poseidonEquiv t) (hm : (x, y) ∈ t)
     (hs : poseidon2Compress12FF x.1 x.2.1 x.2.2 = target) :
-    relation (fun _ => CommRingOps.zero) x y = target :=
-  checked_preimage_is_transcript_hit _ poseidonEquiv t target x y hc hm
+    relation weightedJiveExtra x y = target :=
+  checked_preimage_is_transcript_hit weightedJiveExtra poseidonEquiv t target x y hc hm
     ((compress12FF_eq_jive x.1 x.2.1 x.2.2).symm.trans hs)
 
 def realX : State Lane4 :=
@@ -855,7 +863,7 @@ theorem real_transcript_instance :
     ∃ p : SimpleEquiv (State Lane4) (State Lane4),
     ∃ t : List (State Lane4 × State Lane4), ∃ x y : State Lane4,
     ∃ target : Lane4, Consistent p t ∧ (x, y) ∈ t ∧
-      jiveCompress (fun _ => CommRingOps.zero) p x = target :=
+      jiveCompress weightedJiveExtra p x = target :=
   ⟨poseidonEquiv, realTranscript, realX, poseidonEquiv.toFun realX,
     poseidon2Compress12FF realX.1 realX.2.1 realX.2.2, real_transcript_consistent,
     List.mem_cons_of_mem _ (List.mem_singleton.mpr rfl),
@@ -869,11 +877,11 @@ theorem real_poseidon_nondegenerate :
 the same point misses that target under feed-forward. -/
 theorem real_poseidon_raw_vs_feedforward :
     rawTrunc poseidonEquiv (poseidonEquiv.invFun realY) = realY.1 ∧
-    jiveCompress (fun _ => CommRingOps.zero) poseidonEquiv (poseidonEquiv.invFun realY) ≠
+    jiveCompress weightedJiveExtra poseidonEquiv (poseidonEquiv.invFun realY) ≠
       realY.1 :=
   ⟨raw_inverse poseidonEquiv _ _ _, by decide +kernel⟩
 theorem real_poseidon_feedforward_misses :
-    ¬ (jiveCompress (fun _ => CommRingOps.zero) poseidonEquiv (poseidonEquiv.invFun realY) =
+    ¬ (jiveCompress weightedJiveExtra poseidonEquiv (poseidonEquiv.invFun realY) =
       realY.1) := real_poseidon_raw_vs_feedforward.2
 
 /- `bidirectional_bad_count` on GF(4): of three available answers exactly one lands on the

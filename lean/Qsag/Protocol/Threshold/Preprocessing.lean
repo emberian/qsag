@@ -35,7 +35,10 @@ public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Math.Algebra
+import all Qsag.Math.Counting
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.HasseHensel
 import all Qsag.Oracle.Qrom
 import all Qsag.Math.Goldilocks
 import all Qsag.Math.Gf2Pow128

@@ -63,6 +63,8 @@ Lean 4.35 formalization of QSAG's classical and quantum concrete security founda
 
 public import Qsag.Tactic.Prelude
 public import Qsag.Oracle.Qrom
+import all Qsag.Oracle.Qrom
+import all Qsag.Math.Counting
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Goldilocks
 import all Qsag.Math.Goldilocks
@@ -1892,6 +1894,7 @@ theorem tooth_hem_ext4_single_challenge_qrom_folding_ceiling :
 instance : LawfulField QuarticGoldilocks where
   inv := QuarticGoldilocks.inv
   zero_ne_one := by decide
+  inv_zero := QuarticGoldilocks.inv_zero
   mul_inv_cancel := QuarticGoldilocks.mul_inv_cancel
 
 /-- Concrete `QuarticGoldilocks` specialization of `committed_polynomial_pair_bad_lines_le_choose2`

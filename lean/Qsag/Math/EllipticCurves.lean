@@ -12,11 +12,14 @@ set_option exponentiation.threshold 512
 /-- Full-width 256-bit spending scalar / witness carrier. -/
 abbrev MigrationKey256 := BitVec 256
 
-/-- Exact `secp256k1` prime subgroup order `SECP_N` (`secp256k1_ct.rs:19-24`). -/
+/-- The `secp256k1` scalar modulus `SECP_N` (`secp256k1_ct.rs:19-24`). It is prime
+    (`secp256k1OrderPrime_isPrime`); that it is the order of the generator on the curve is the
+    hypothesis `Weierstrass.Secp256k1GroupLaws`, not a theorem of this file. -/
 @[expose] def SECP256K1_ORDER_N : Nat :=
   0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
-/-- Exact `Ed25519` prime subgroup order `ED_ORDER` (`scalar.rs:8-13`). -/
+/-- The `Ed25519` scalar modulus `ED_ORDER` (`scalar.rs:8-13`). This file uses it as a number;
+    neither its primality nor its role as a subgroup order is proved here. -/
 @[expose] def ED25519_ORDER_L : Nat :=
   0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
 
@@ -491,12 +494,14 @@ theorem Curve.add_eq_none_iff_neg (C : Curve) {P Q : Nat × Nat}
     exact ⟨hx.symm, hY.mpr hy⟩
 
 /-- The facts about a generator `G` that make `s ↦ [s]G` a faithful copy of `ℤ/n` on the
-    curve, with `n` and `p` odd. `smul_add` is the homomorphism law of the cyclic subgroup;
-    with `order` and `exact` it gives `[n - s]G = -[s]G` and injectivity on `[0, n)`.
-    None of the five group fields is derived here from the addition formulas. -/
+    curve, with `p` an odd prime and `n` an odd prime. `smul_add` is the homomorphism law of the
+    cyclic subgroup; with `order` and `exact` it gives `[n - s]G = -[s]G` and injectivity on
+    `[0, n)`. None of the four group fields (`onCurve`, `smul_add`, `order`, `exact`) is derived
+    here from the addition formulas. -/
 structure Curve.PrimeOrderGroup (C : Curve) (G : Point) (n : Nat) : Prop where
   p_prime  : IsPrime C.p
   p_odd    : C.p % 2 = 1
+  n_prime  : IsPrime n
   n_odd    : n % 2 = 1
   onCurve  : ∀ k, C.OnCurve (C.smul k G)
   smul_add : ∀ a b, C.smul (a + b) G = C.add (C.smul a G) (C.smul b G)
@@ -632,6 +637,11 @@ private theorem prime43 : IsPrime 43 := by
   have key : ∀ d, d < 44 → d ∣ 43 → d = 1 ∨ d = 43 := by decide
   exact key d (Nat.lt_succ_of_le (Nat.le_of_dvd (by decide) hd)) hd
 
+private theorem prime31 : IsPrime 31 := by
+  refine ⟨by decide, fun d hd => ?_⟩
+  have key : ∀ d, d < 32 → d ∣ 31 → d = 1 ∨ d = 31 := by decide
+  exact key d (Nat.lt_succ_of_le (Nat.le_of_dvd (by decide) hd)) hd
+
 private theorem secp7Mod43_table :
     ∀ i, i < 31 → ∀ j, j < 31 →
       secp7Mod43.add (secp7Mod43.smul i secp7Mod43G) (secp7Mod43.smul j secp7Mod43G) =
@@ -650,11 +660,12 @@ private theorem secp7Mod43_periodic : ∀ k,
     show secp7Mod43.add (secp7Mod43.smul k secp7Mod43G) secp7Mod43G = _
     rw [ih, hStep, (by omega : (k % 31 + 1) % 31 = (k + 1) % 31)]
 
-/-- The generator `(2, 12)` of `y² = x³ + 7` over `ℤ/43` has exact order `31`, and
-    all seven `PrimeOrderGroup` facts hold; the group table is checked by the kernel. -/
+/-- The generator `(2, 12)` of `y² = x³ + 7` over `ℤ/43` has exact prime order `31`, and
+    all eight `PrimeOrderGroup` facts hold; the group table is checked by the kernel. -/
 theorem secp7Mod43_group : secp7Mod43.PrimeOrderGroup secp7Mod43G 31 where
   p_prime := prime43
   p_odd := by decide
+  n_prime := prime31
   n_odd := by decide
   onCurve k := by
     have key : ∀ i, i < 31 → secp7Mod43.OnCurve (secp7Mod43.smul i secp7Mod43G) := by
@@ -708,10 +719,12 @@ theorem secp7Mod43_projection_coordinates :
 /-! #### `secp256k1`
 
 Checked by the kernel: the field prime and generator limbs of `secp256k1_ct.rs:8-40`,
-`p` and `n` odd, `p ≡ 3 (mod 4)`, `a = 0`, `b = 7`, and `G` on the curve. Not checked:
-primality of `p` and the four group facts of `PrimeOrderGroup` for `G` (closure of its
-multiples, the homomorphism law, `[n]G = O`, exact order). They are the hypothesis
-`Secp256k1GroupLaws`; SEC 2 v2.0 §2.4.1 states them for these parameters. -/
+`p` and `n` odd, `p ≡ 3 (mod 4)`, `a = 0`, `b = 7`, and `G` on the curve. Primality of
+`p` and of `n` is proved by Pocklington certificates (`secp256k1FieldPrime_isPrime`,
+`secp256k1OrderPrime_isPrime`). Not proved: the four group facts of `PrimeOrderGroup` for
+`G` (closure of its multiples, the homomorphism law, `[n]G = O`, exact order). They are
+what `Secp256k1GroupLaws` adds to the proved fields (`secp256k1GroupLaws_of_group_facts`);
+SEC 2 v2.0 §2.4.1 states them for these parameters. -/
 
 /-- `secp256k1` field prime `p = 2^256 - 2^32 - 977` (`secp256k1_ct.rs:8-13`). -/
 def SECP256K1_FIELD_P : Nat :=
@@ -757,11 +770,31 @@ theorem secp256k1_checked_parameters :
   refine ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
     by decide +kernel, rfl, rfl, by decide +kernel, by decide +kernel, by decide +kernel, rfl⟩
 
-/-- The unproved group facts for the `secp256k1` generator: `p` prime, every multiple
-    of `G` on the curve, `[a + b]G = [a]G + [b]G`, `[n]G = O`, and `[k]G ≠ O` for
-    `0 < k < n`. The two parity fields are proved in `secp256k1_checked_parameters`. -/
+/-- `PrimeOrderGroup` for the `secp256k1` generator. Its four group fields are unproved:
+    every multiple of `G` on the curve, `[a + b]G = [a]G + [b]G`, `[n]G = O`, and
+    `[k]G ≠ O` for `0 < k < n`. The other four fields are theorems: the parities are in
+    `secp256k1_checked_parameters`, and `p`, `n` are prime by `secp256k1FieldPrime_isPrime`
+    and `secp256k1OrderPrime_isPrime`. -/
 abbrev Secp256k1GroupLaws : Prop :=
   secp256k1Curve.PrimeOrderGroup secp256k1G SECP256K1_ORDER_N
+
+/-- `Secp256k1GroupLaws` from the four group facts alone; both primality fields and both
+    parity fields are discharged here. -/
+theorem secp256k1GroupLaws_of_group_facts
+    (onCurve : ∀ k, secp256k1Curve.OnCurve (secp256k1Curve.smul k secp256k1G))
+    (smul_add : ∀ a b, secp256k1Curve.smul (a + b) secp256k1G =
+      secp256k1Curve.add (secp256k1Curve.smul a secp256k1G) (secp256k1Curve.smul b secp256k1G))
+    (order : secp256k1Curve.smul SECP256K1_ORDER_N secp256k1G = none)
+    (exact : ∀ k, 0 < k → k < SECP256K1_ORDER_N → secp256k1Curve.smul k secp256k1G ≠ none) :
+    Secp256k1GroupLaws where
+  p_prime := secp256k1FieldPrime_isPrime
+  p_odd := secp256k1_checked_parameters.2.2.2.1
+  n_prime := secp256k1OrderPrime_isPrime
+  n_odd := secp256k1_checked_parameters.2.2.2.2.2.2.2.1
+  onCurve := onCurve
+  smul_add := smul_add
+  order := order
+  exact := exact
 
 end Weierstrass
 
@@ -1131,20 +1164,6 @@ private theorem order_dvd_of_pow_eq_one {g N d0 m : Nat} (hN : 2 ≤ N) (hd0 : 1
   exact if hRem0 : m % d0 = 0 then Nat.dvd_of_mod_eq_zero hRem0
         else False.elim (hMin (m % d0) (by omega) (Nat.mod_lt m (by omega)) hm')
 
-private def posRangeP : Nat → List Nat | 0 => [] | n + 1 => (n + 1) :: posRangeP n
-
-private theorem mem_posRangeP_iff {x : Nat} : ∀ (n : Nat), x ∈ posRangeP n ↔ 1 ≤ x ∧ x ≤ n
-  | 0 => Iff.intro (fun h => nomatch h) (fun ⟨_, _⟩ => by omega)
-  | n + 1 => by
-    simp only [posRangeP, List.mem_cons, mem_posRangeP_iff n]
-    exact Iff.intro
-      (by rintro (rfl | ⟨h1, h2⟩); exact ⟨Nat.succ_pos n, Nat.le_refl _⟩; exact ⟨h1, by omega⟩)
-      (fun ⟨h1, h2⟩ => if heq : x = n + 1 then .inl heq else .inr ⟨h1, by omega⟩)
-
-private theorem posRangeP_nodup : ∀ n : Nat, (posRangeP n).Nodup
-  | 0 => .nil
-  | n + 1 => .cons (fun _ hb heq => by have := ((mem_posRangeP_iff n).1 hb).2; omega) (posRangeP_nodup n)
-
 private def eraseOne (v : Nat) : List Nat → List Nat
   | [] => [] | y :: ys => if y = v then ys else y :: eraseOne v ys
 
@@ -1207,9 +1226,9 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
       rw [hqeEq, hNm1Eq, Nat.mul_comm p (d0 * c'), Nat.mul_div_left (d0 * c') (by have := hpPrime.1; omega), Nat.pow_mul]
       exact pow_mod_eq_one_rep hN2 hdPow c'
   have hdMinNm1 : ∀ k : Nat, 1 ≤ k → k < N - 1 → (g ^ k) % N ≠ 1 := hdEqNm1 ▸ hdMin
-  let L := posRangeP (N - 1); let f := fun k : Nat => (g ^ k) % N
+  let L := posRange (N - 1); let f := fun k : Nat => (g ^ k) % N
   have hMapMem : ∀ x ∈ L.map f, x ∈ L := by
-    intro x hx; obtain ⟨k, hk, rfl⟩ := List.mem_map.1 hx; obtain ⟨hk1, hkHi⟩ := (mem_posRangeP_iff (N - 1)).1 hk
+    intro x hx; obtain ⟨k, hk, rfl⟩ := List.mem_map.1 hx; obtain ⟨hk1, hkHi⟩ := (mem_posRange_iff (n := N - 1)).1 hk
     have hfkLt : (g ^ k) % N < N := Nat.mod_lt _ (by omega)
     have hfkPos : 1 ≤ (g ^ k) % N := by
       if hz : (g ^ k) % N = 0 then
@@ -1218,7 +1237,7 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
           exact Nat.dvd_mul_right_of_dvd (Nat.dvd_of_mod_eq_zero hz) _
         have := Nat.mod_eq_zero_of_dvd hdvdNm1; omega
       else omega
-    exact (mem_posRangeP_iff (N - 1)).2 ⟨hfkPos, by dsimp only [f]; omega⟩
+    exact (mem_posRange_iff (n := N - 1)).2 ⟨hfkPos, by dsimp only [f]; omega⟩
   have hInjStep : ∀ i j : Nat, 1 ≤ i → i < j → j ≤ N - 1 → f i = f j → False := by
     intro i j hi1 hij hjHi hEqF
     have hMulEq : ((g ^ j % N) * (g ^ (N - 1 - i) % N)) % N = ((g ^ i % N) * (g ^ (N - 1 - i) % N)) % N := by
@@ -1234,22 +1253,22 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
       | @cons a rest hrel _ ih =>
         refine .cons (fun b hb heq => ?_) (ih (fun z hz => hxs z (.tail _ hz)))
         obtain ⟨y, hy, rfl⟩ := List.mem_map.1 hb
-        obtain ⟨ha1, haHi⟩ := (mem_posRangeP_iff (N - 1)).1 (hxs a (.head _))
-        obtain ⟨hy1, hyHi⟩ := (mem_posRangeP_iff (N - 1)).1 (hxs y (.tail _ hy))
+        obtain ⟨ha1, haHi⟩ := (mem_posRange_iff (n := N - 1)).1 (hxs a (.head _))
+        obtain ⟨hy1, hyHi⟩ := (mem_posRange_iff (n := N - 1)).1 (hxs y (.tail _ hy))
         rcases Nat.lt_trichotomy a y with hlt | hEq | hgt
         · exact hInjStep a y ha1 hlt hyHi heq
         · exact hrel y hy hEq
         · exact hInjStep y a hy1 hgt haHi heq.symm
-    exact aux (posRangeP_nodup (N - 1)) (fun z hz => hz)
-  have hSurj := mem_of_nodup_subset_eq_length hMapNodup (posRangeP_nodup (N - 1)) (List.length_map f) hMapMem
+    exact aux (posRange_nodup (N - 1)) (fun z hz => hz)
+  have hSurj := mem_of_nodup_subset_eq_length hMapNodup (posRange_nodup (N - 1)) (List.length_map f) hMapMem
   refine ⟨hN2, fun d hd => ?_⟩
   if hd1' : d = 1 then exact .inl hd1'
   else if hdN : d = N then exact .inr hdN
   else
     exfalso
     have hdPos := Nat.pos_of_dvd_of_pos hd (by omega); have hdLeN := Nat.le_of_dvd (by omega) hd
-    obtain ⟨k, hkMem, hfkEq⟩ := List.mem_map.1 (hSurj d ((mem_posRangeP_iff (N - 1)).2 ⟨by omega, by omega⟩))
-    obtain ⟨hk1, hkHi⟩ := (mem_posRangeP_iff (N - 1)).1 hkMem; dsimp only [f] at hfkEq
+    obtain ⟨k, hkMem, hfkEq⟩ := List.mem_map.1 (hSurj d ((mem_posRange_iff (n := N - 1)).2 ⟨by omega, by omega⟩))
+    obtain ⟨hk1, hkHi⟩ := (mem_posRange_iff (n := N - 1)).1 hkMem; dsimp only [f] at hfkEq
     have hDivK := Nat.div_add_mod (g ^ k) N; rw [hfkEq] at hDivK
     have hdGk : d ∣ g ^ k := by rw [← hDivK]; exact Nat.dvd_add (Nat.dvd_trans hd (Nat.dvd_mul_right N _)) (Nat.dvd_refl d)
     have hdGNm1 : d ∣ g ^ (N - 1) := by
@@ -1370,7 +1389,16 @@ theorem pallas_and_bls381_moduli_prime :
     IsPrimeMod p_pallas ∧ IsPrimeMod q_pallas ∧ IsPrimeMod p_bls381 ∧ IsPrimeMod r_bls381 :=
   ⟨p_pallas_isPrime, q_pallas_isPrime, p_bls381_isPrime, r_bls381_isPrime⟩
 
-/-! ## 3. Complete Projective RCB Addition, Curve Membership & Prime Subgroup Order (`[q]G = O`, `[r]G_1 = O`) -/
+/-! ## 3. Projective RCB Addition Program, Curve Membership & Evaluation at the Scalar Moduli
+
+`rcbSmul p b3 P k` is a fuelled double-and-add program over the Renes–Costello–Batina addition
+formulas, computed with residues mod `p`. The two theorems below are kernel evaluations of that
+program: at `k = q_pallas` (resp. `r_bls381`) its output is a projective representative of the
+point at infinity, and at `k - 1` it represents `-G`. They are statements about `rcbSmul`. No
+theorem here identifies `rcbSmul` with scalar multiplication in the curve group (correctness of
+the formulas, associativity), so "`G` has prime order `q`" is not a theorem of this file; it
+follows from these evaluations and `q_pallas_isPrime` / `r_bls381_isPrime` only once that bridge
+is proved. -/
 
 structure RcbProjPoint where
   x : Nat
@@ -1410,6 +1438,10 @@ def rcbSmulFuel (p b3 : Nat) (base : RcbProjPoint) : Nat → Nat → RcbProjPoin
 
 def rcbSmul (p b3 : Nat) (base : RcbProjPoint) (k : Nat) : RcbProjPoint := rcbSmulFuel p b3 base 256 k
 
+/-- `orchardSpendAuthG` and `pastaPallasG` satisfy the Pallas curve equation; the program `rcbSmul`
+    run on each with scalar `q_pallas` returns a projective identity representative; and run on
+    `orchardSpendAuthG` with `q_pallas - 1` it returns a representative of `-orchardSpendAuthG`.
+    A computation of `rcbSmul`, not a statement about the order of the points in the curve group. -/
 theorem orchardSpendAuthG_onCurve_and_prime_subgroup_order :
     pallasCurve.onCurve orchardSpendAuthG = true ∧ pallasCurve.onCurve pastaPallasG = true ∧
     isProjIdentity p_pallas (rcbSmul p_pallas 15 (toRcbProj orchardSpendAuthG) q_pallas) = true ∧
@@ -1418,6 +1450,10 @@ theorem orchardSpendAuthG_onCurve_and_prime_subgroup_order :
       (pallasCurve.neg orchardSpendAuthG) = true :=
   ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
 
+/-- `bls381G1` satisfies the BLS12-381 `G_1` curve equation; `rcbSmul` run on it with scalar
+    `r_bls381` returns a projective identity representative, and with `r_bls381 - 1` a
+    representative of `-bls381G1`. A computation of `rcbSmul`, not a statement about the order
+    of `bls381G1` in the curve group. -/
 theorem bls381G1_onCurve_and_prime_subgroup_order :
     bls381Curve.onCurve bls381G1 = true ∧
     isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj bls381G1) r_bls381) = true ∧

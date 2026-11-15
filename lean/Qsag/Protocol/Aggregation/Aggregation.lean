@@ -4315,6 +4315,9 @@ theorem isLinearBaseRs8_eval_at {table0 : List GoldilocksExt4}
   have hMem : j ∈ List.range 8 := List.mem_range.mpr hj
   exact eq_of_beq (List.all_eq_true.mp hAll j hMem)
 
+private theorem ext4Zero_eq_ringZero : (GoldilocksExt4.zero : GoldilocksExt4) = CommRingOps.zero := by rfl
+private theorem ext4One_eq_ringOne : (GoldilocksExt4.one : GoldilocksExt4) = CommRingOps.one := by rfl
+
 theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
     isLinearBaseRs8 (encodeLinearRs8 a0 a1) = true ∧
     recoverLinearCoeffs8 (encodeLinearRs8 a0 a1) =
@@ -4360,7 +4363,7 @@ theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
           ← LawfulCommRing.add_assoc (CommRingOps.neg c1) c1 c1,
           LawfulCommRing.add_left_neg, LawfulCommRing.zero_add]
     rw [hSum, hDiff, LawfulCommRing.mul_assoc c0, LawfulCommRing.mul_assoc c1,
-        hTwoInv, GoldilocksExt4.one_eq_ringOne, LawfulCommRing.mul_one, LawfulCommRing.mul_one]
+        hTwoInv, ext4One_eq_ringOne, LawfulCommRing.mul_one, LawfulCommRing.mul_one]
   refine ⟨?_, hRec⟩
   unfold isLinearBaseRs8
   dsimp only
@@ -4543,7 +4546,7 @@ theorem evalCoeffs_polyMul :
   | p :: ps, qs, x => by
     simp only [polyMul, evalCoeffs_polyAdd, evalCoeffs_polyScale,
       RoundPoly.evalCoeffs, evalCoeffs_polyMul ps qs x]
-    rw [GoldilocksExt4.zero_eq_ringZero, LawfulCommRing.zero_add,
+    rw [ext4Zero_eq_ringZero, LawfulCommRing.zero_add,
         LawfulCommRing.right_distrib, LawfulCommRing.mul_assoc]
 
 theorem length_polyAdd :
@@ -4627,7 +4630,7 @@ theorem honestSbox7RoundPoly_eval (seed root : Goldilocks) (table0 : List Goldil
   dsimp only
   simp only [evalCoeffs_polyMul, evalCoeffs_polyAdd, RoundPoly.evalCoeffs,
     LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
-  rw [GoldilocksExt4.one_eq_ringOne, LawfulCommRing.mul_neg,
+  rw [ext4One_eq_ringOne, LawfulCommRing.mul_neg,
       LawfulCommRing.mul_one, ← LawfulCommRing.sub_eq_add_neg]
   rfl
 
@@ -4842,7 +4845,7 @@ private theorem sbox7_sum_zero_sound (seed root x : Goldilocks) (c1 : Goldilocks
           (GoldilocksExt4.embedBase (CommRingOps.sub seed root)))) =
       GoldilocksExt4.zero) :
     CommRingOps.add (pow7Goldilocks x) seed = root := by
-  rw [GoldilocksExt4.zero_eq_ringZero, GoldilocksExt4.one_eq_ringOne,
+  rw [ext4Zero_eq_ringZero, ext4One_eq_ringOne,
       LawfulCommRing.sub_self, LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
       LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
       LawfulCommRing.sub_zero, LawfulCommRing.one_mul,
@@ -4874,7 +4877,7 @@ private theorem sbox7_sum_zero_complete (seed x0 : Goldilocks) (c1 : GoldilocksE
           (GoldilocksExt4.embedBase (CommRingOps.sub seed root)))) =
       GoldilocksExt4.zero := by
   intro root
-  rw [GoldilocksExt4.zero_eq_ringZero, GoldilocksExt4.one_eq_ringOne,
+  rw [ext4Zero_eq_ringZero, ext4One_eq_ringOne,
       LawfulCommRing.sub_self, LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
       LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
       LawfulCommRing.sub_zero, LawfulCommRing.one_mul,
@@ -4996,7 +4999,7 @@ theorem rsSbox7TraceArith_lawful (seed root : Goldilocks) (msg : List UInt8) :
       simpa [rsSbox7TraceArith, rsSbox7TraceArithDelta, table1] using
         hAllCw 1 sbox7Stage1Dom [table1] rfl (by simp [hSt1Eq])
     have hT1_8 : table1.getD 8 CommRingOps.zero = table1.getD 0 CommRingOps.zero := by
-      rw [← GoldilocksExt4.zero_eq_ringZero]
+      rw [← ext4Zero_eq_ringZero]
       exact isConstExt4Rs_eq_head hCw1 (by decide)
     simp only [sbox7Stage1Dom, stageTableTrajectoryOk, stageTerminalTableOk,
       finalValueOk, expectedSlotOk, Nat.zero_mod, Nat.zero_add,
@@ -5449,7 +5452,7 @@ attribute [local irreducible] sbox7Stage0Proof sbox7Stage1Proof
   aggregateInstanceFrame rowSumcheckTranscriptTail stagePowSeed stageQuerySeed
   Goldilocks.add Goldilocks.mul Goldilocks.sub Goldilocks.neg
   GoldilocksExt2.add GoldilocksExt2.mul GoldilocksExt2.sub GoldilocksExt2.neg
-  GoldilocksExt4.add GoldilocksExt4.mul GoldilocksExt4.sub GoldilocksExt4.neg
+  QuarticGoldilocks.add QuarticGoldilocks.mul QuarticGoldilocks.sub QuarticGoldilocks.neg
 
 /-- Constructive end-to-end 2-stage `GoldilocksExt4` WHIR prover for `rsSbox7TraceArith`. -/
 def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
@@ -5633,7 +5636,7 @@ theorem succinct_knowledge_soundness_hypotheses_satisfiable :
   · dsimp only [rsSbox7Inst, rsSbox7TraceArith, rsSbox7TraceArithDelta, bundle,
       buildHonestSbox7WhirBundle, List.headD_cons, checkAllActiveSigners, decodeSbox7Sigs]
     rw [(isLinearBaseRs8_encodeLinearRs8 x0 b1).2]
-    simp [GoldilocksExt4.embedBase_c0_c0, verifyPqHashSig_sbox7_iff, root]
+    simp [verifyPqHashSig_sbox7_iff, root]
 
 attribute [local semireducible] cshake256Bytes pcsMerkleHash squeezeExt4Challenge
   deriveStageQueryIndices honestSbox7RoundPoly honestSbox7RoundPolyDelta pow7Ext4 pow7Goldilocks
@@ -5642,7 +5645,7 @@ attribute [local semireducible] cshake256Bytes pcsMerkleHash squeezeExt4Challeng
   aggregateInstanceFrame rowSumcheckTranscriptTail stagePowSeed stageQuerySeed
   Goldilocks.add Goldilocks.mul Goldilocks.sub Goldilocks.neg
   GoldilocksExt2.add GoldilocksExt2.mul GoldilocksExt2.sub GoldilocksExt2.neg
-  GoldilocksExt4.add GoldilocksExt4.mul GoldilocksExt4.sub GoldilocksExt4.neg
+  QuarticGoldilocks.add QuarticGoldilocks.mul QuarticGoldilocks.sub QuarticGoldilocks.neg
 
 /-- `#tooth` `strictlyIncreasing` rejects repeated query indices. -/
 theorem strictlyIncreasing_rejects_repeat (x : Nat) (xs : List Nat) :

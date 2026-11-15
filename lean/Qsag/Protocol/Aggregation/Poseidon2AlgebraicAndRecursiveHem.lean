@@ -1913,7 +1913,6 @@ theorem tooth_concrete_unscoped_shard_replay :
     (concreteHemShard false) 2 (by decide) (concreteHemShard_accepts false)
   exact ⟨h.1, rfl, rfl, h.2.2.2.1, h.2.2.2.2⟩
 
-/-- Nonvacuity of the deployed-width interpolation-margin premise. -/
 /-! ## 11. Succinct Outer Recursive `Hem` Aggregation (`bciksJohnsonQrom128`) & Soundness Composition -/
 
 def hemOuterDomainTag : List UInt8 :=

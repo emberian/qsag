@@ -177,9 +177,8 @@ impl voprf::Transport for LocalToprfEndpoint {
         }
         loop {
             let slot = guard.get(&key).ok_or(voprf::Error::Transport)?;
-            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
-                return Err(voprf::Error::Transport);
-            }
+            // A round every server completed is delivered even if a peer has
+            // already failed on it and aborted: the abort only stops later rounds.
             if slot.arrivals == TOPRF_SERVERS {
                 let inbox = core::array::from_fn(|sender| {
                     slot.private[sender]
@@ -188,6 +187,9 @@ impl voprf::Transport for LocalToprfEndpoint {
                         .unwrap_or_default()
                 });
                 return Ok(inbox);
+            }
+            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
+                return Err(voprf::Error::Transport);
             }
             guard = self
                 .hub
@@ -224,14 +226,16 @@ impl voprf::Transport for LocalToprfEndpoint {
         }
         loop {
             let slot = guard.get(&key).ok_or(voprf::Error::Transport)?;
-            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
-                return Err(voprf::Error::Transport);
-            }
+            // A round every server completed is delivered even if a peer has
+            // already failed on it and aborted: the abort only stops later rounds.
             if slot.arrivals == TOPRF_SERVERS {
                 let inbox = core::array::from_fn(|sender| {
                     slot.broadcast[sender].clone().unwrap_or_default()
                 });
                 return Ok(inbox);
+            }
+            if self.hub.aborted.load(Ordering::Acquire) || slot.aborted {
+                return Err(voprf::Error::Transport);
             }
             guard = self
                 .hub
@@ -1200,9 +1204,8 @@ impl MpcTransport for LocalMpcEndpoint {
         }
         loop {
             let slot = guard.get(&key).ok_or(MpcTransportError)?;
-            if slot.aborted {
-                return Err(MpcTransportError);
-            }
+            // A completed round is delivered even if a peer has already failed on
+            // it and aborted, so every custodian reports the protocol's own verdict.
             if slot.arrivals == n {
                 let mut recv_priv = Vec::with_capacity(n);
                 let mut recv_bcast = Vec::with_capacity(n);
@@ -1224,6 +1227,9 @@ impl MpcTransport for LocalMpcEndpoint {
                     private: recv_priv,
                     broadcast: recv_bcast,
                 });
+            }
+            if slot.aborted {
+                return Err(MpcTransportError);
             }
             guard = self.hub.cv.wait(guard).map_err(|_| MpcTransportError)?;
         }

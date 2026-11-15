@@ -2810,16 +2810,6 @@ private theorem qsum_zero_fn : ∀ (g : Fin 0 → Nat), qsum 0 g = 0 := by
   have h : qsum 0 g = qsum 0 (fun _ => 0) := qsum_congr (fun i => Fin.elim0 i)
   rw [h, qsum_const]
 
-private theorem qsum_mul_right {k : Nat} (c : Nat) (f : Fin k → Nat) :
-    qsum k (fun j => f j * c) = qsum k f * c := by
-  induction c with
-  | zero =>
-    have h0 : qsum k (fun _ => 0) = 0 := (qsum_const k 0).trans (Nat.mul_zero k)
-    simp only [Nat.mul_zero, h0]
-  | succ c ih =>
-    have hStep : (fun j : Fin k => f j * (c + 1)) = (fun j => f j * c + f j) := by
-      funext j; exact Nat.mul_succ (f j) c
-    rw [qsum_congr (fun j => congrFun hStep j), qsum_add, ih, Nat.mul_succ]
 
 /-- Constructive permutation invariance of `qsum`: any `SimpleEquiv (Fin M) (Fin M)` preserves
     exact counting sums (`0` statistical distance). -/
@@ -4698,11 +4688,11 @@ theorem qs_a_leaf_index_identifies_committee
           simp [(polyTape idx).2.2]
         have hLo : ringDot lambdas (pts.map (fun x =>
             RoundPoly.evalCoeffs (lo :: (polyTape idx).1.1) x)) = lo := by
-          rw [lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenLo hZ hH]
+          rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenLo hZ hH]
           simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
         have hHi : ringDot lambdas (pts.map (fun x =>
             RoundPoly.evalCoeffs (hi :: (polyTape idx).2.1) x)) = hi := by
-          rw [lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenHi hZ hH]
+          rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenHi hZ hH]
           simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
         rw [hLo, hHi, ← hUnp]
         exact packTower_unpackTower 8 trueNode
@@ -5223,20 +5213,20 @@ theorem tooth_unverified_lagrange_accepts_corrupted_share
     (hLamNz : lam₀ ≠ CommRingOps.zero) (hDeltaNz : delta ≠ CommRingOps.zero) :
     ringDot (lam₀ :: restLam) (CommRingOps.add s₀ delta :: restShares) ≠
       ringDot (lam₀ :: restLam) (s₀ :: restShares) := by
-  simp only [ringDot, LawfulCommRing.left_distrib]
+  simp only [ringDot_eq, dotVec_cons, LawfulCommRing.left_distrib]
   intro hEq
   have hRearr :
       CommRingOps.add (CommRingOps.add (CommRingOps.mul lam₀ s₀) (CommRingOps.mul lam₀ delta))
-        (ringDot restLam restShares) =
-      CommRingOps.add (CommRingOps.add (CommRingOps.mul lam₀ s₀) (ringDot restLam restShares))
+        (dotVec restLam restShares) =
+      CommRingOps.add (CommRingOps.add (CommRingOps.mul lam₀ s₀) (dotVec restLam restShares))
         (CommRingOps.mul lam₀ delta) := by
     rw [LawfulCommRing.add_assoc,
-        LawfulCommRing.add_comm (CommRingOps.mul lam₀ delta) (ringDot restLam restShares),
+        LawfulCommRing.add_comm (CommRingOps.mul lam₀ delta) (dotVec restLam restShares),
         ← LawfulCommRing.add_assoc]
   rw [hRearr] at hEq
   have hZeroMul : CommRingOps.mul lam₀ delta = CommRingOps.zero := by
     apply LawfulCommRing.add_left_cancel
-      (a := CommRingOps.add (CommRingOps.mul lam₀ s₀) (ringDot restLam restShares))
+      (a := CommRingOps.add (CommRingOps.mul lam₀ s₀) (dotVec restLam restShares))
     rw [LawfulCommRing.add_zero]
     exact hEq
   rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hZeroMul with h1 | h2
@@ -5384,7 +5374,7 @@ theorem preStepped_shamir_mac_free_self_verification
       · simp only [hd, ↓reduceIte, honestSubmitted, ↓reduceDIte]
         have hLen : (trueNodes i :: (tape i ⟨(digits i).val, hd⟩).1).length ≤ d + 1 := by
           simp [(tape i ⟨(digits i).val, hd⟩).2]
-        rw [lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLen hZero hHigher]
+        rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLen hZero hHigher]
         simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
       · have hdEq3 : (digits i).val = 3 := by have := (digits i).isLt; omega
         simp only [hd, ↓reduceIte]
@@ -5481,8 +5471,9 @@ theorem lagrange2WeightsTower_eval (k : Nat) {x₀ x₁ : TowerElem k} (hNe : x�
       let denom := towerInv k (towerAdd k x₀ x₁)
       have hInvOk : towerMul k (towerAdd k x₀ x₁) denom = towerOne k :=
         towerMul_inv k (towerAdd k x₀ x₁) hSumNz
-      dsimp only [lagrange2WeightsTower, List.map, ringDot, RoundPoly.evalCoeffs, CommRingOps.add,
-        CommRingOps.mul, CommRingOps.zero]
+      dsimp only [lagrange2WeightsTower, List.map, RoundPoly.evalCoeffs]
+      simp only [ringDot_eq, dotVec_cons, dotVec_nil_left]
+      dsimp only [CommRingOps.add, CommRingOps.mul, CommRingOps.zero]
       simp only [towerMul_zero, towerAdd_zero]
       rw [towerMul_add_distrib, towerMul_add_distrib]
       have hSlopeCancel :

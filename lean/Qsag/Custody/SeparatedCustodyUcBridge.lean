@@ -87,16 +87,6 @@ private theorem mem_of_filter_bool {α : Type} {p : α → Bool} {x : α} :
       · exact mem_of_filter_bool ht hp
       · exact .tail _ (mem_of_filter_bool ht hp)
 
-private theorem nodup_filter_bool {α : Type} (p : α → Bool) :
-    ∀ {xs : List α}, xs.Nodup → (xs.filter p).Nodup
-  | [], .nil => .nil
-  | x :: xs, .cons hNotMem hNd => by
-    unfold List.filter
-    cases hp : p x
-    · exact nodup_filter_bool p hNd
-    · exact .cons (fun y hy hEq => hNotMem y (mem_filter_bool hy).1 hEq)
-        (nodup_filter_bool p hNd)
-
 private theorem filter_partition_length {α : Type} (p : α → Bool) :
     ∀ (xs : List α), (xs.filter p).length + (xs.filter (fun x => !p x)).length = xs.length
   | [] => rfl

@@ -57,7 +57,7 @@ structure NetworkView where
 def incident (corrupt : Option (Fin 3)) (message : Envelope) : Bool :=
   match corrupt with
   | none => false
-  | some party => message.sender == party || message.receiver == party
+  | some party => decide (message.sender = party) || decide (message.receiver = party)
 
 def observe (corrupt : Option (Fin 3)) (network : Network) : NetworkView :=
   ⟨corrupt.map network.nodes.get, network.emitted.map Envelope.label,

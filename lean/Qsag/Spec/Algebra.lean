@@ -100,10 +100,11 @@ theorem sub_eq_zero_iff {a b : R} : sub a b = zero ↔ a = b := by
 
 end LawfulCommRing
 /-- Constructive field typeclass extending `LawfulCommRing F` with an explicit total inverse `inv`
-    satisfying `a * inv a = 1` for `a ≠ 0`. -/
+    satisfying `a * inv a = 1` for `a ≠ 0` and the totalization convention `inv 0 = 0`. -/
 class LawfulField (F : Type) extends LawfulCommRing F where
   inv : F → F
   zero_ne_one : (CommRingOps.zero : F) ≠ (CommRingOps.one : F)
+  inv_zero : inv CommRingOps.zero = CommRingOps.zero
   mul_inv_cancel : ∀ {a : F}, a ≠ CommRingOps.zero →
     CommRingOps.mul a (inv a) = CommRingOps.one
 

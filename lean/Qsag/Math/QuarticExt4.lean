@@ -399,6 +399,16 @@ instance : NoZeroDivisors QuarticGoldilocks where
 
 
 
+theorem QuarticGoldilocks.inv_zero :
+    QuarticGoldilocks.inv QuarticGoldilocks.zero = QuarticGoldilocks.zero := by
+  unfold QuarticGoldilocks.inv QuarticGoldilocks.zero
+  apply QuarticGoldilocks.ext <;> dsimp only
+  · exact LawfulCommRing.zero_mul _
+  · rw [LawfulCommRing.zero_mul]
+    have h1 := LawfulCommRing.add_left_neg (CommRingOps.zero : GoldilocksExt2)
+    rw [LawfulCommRing.add_zero] at h1
+    exact h1
+
 instance : Mul QuarticGoldilocks := ⟨QuarticGoldilocks.mul⟩
 instance : Inv QuarticGoldilocks := ⟨QuarticGoldilocks.inv⟩
 instance : LawfulField QuarticGoldilocks where
@@ -409,6 +419,7 @@ instance : LawfulField QuarticGoldilocks where
       simpa only [CommRingOps.zero, CommRingOps.one, QuarticGoldilocks.zero, QuarticGoldilocks.one,
         GoldilocksExt2.zero_c0, GoldilocksExt2.one_c0] using hz
     exact Nat.noConfusion (congrArg Goldilocks.val hf)
+  inv_zero := QuarticGoldilocks.inv_zero
   mul_inv_cancel := QuarticGoldilocks.mul_inv_cancel
 
 namespace GoldilocksField

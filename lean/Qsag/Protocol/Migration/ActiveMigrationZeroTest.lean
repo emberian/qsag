@@ -50,11 +50,16 @@ public import Qsag.Exec.Tactic.SimulationKit
 
 public import Qsag.Math.EllipticCurves
 import all Qsag.Math.EllipticCurves
+import all Qsag.Math.Primality
 
 
 public section
 
 namespace Qsag
+
+-- `Fin.instLinearOrderPackage` supplies a `BEq (Fin n)` whose package proofs use `Classical.choice`;
+-- without it `==` on `Fin` resolves to `instBEqOfDecidableEq`.
+attribute [-instance] Fin.instLinearOrderPackage
 
 set_option autoImplicit false
 
@@ -4026,7 +4031,6 @@ end MigrationExecution
   Qsag.taproot_even_y_parity_restores_canonical_injectivity
   Qsag.clampEd25519Bytes32_bits_and_range
   Qsag.slip0010_ed25519_clamped_canonical_nonzero
-  Qsag.tooth_ed25519_clamped_wraps_mod_order_non_injective
   Qsag.odd_not_dvd_two_pow
   Qsag.scalarMulKey_xor_oneBit
   Qsag.canonicalSubgroupHom_scalarMulKey_val
@@ -4053,7 +4057,6 @@ end MigrationExecution
   Qsag.inhabited_migration_256_zero_test_and_tooth
   Qsag.inhabited_coin_permuted_bucketing_witness
   Qsag.TaprootCurveProjection.compressed_injective
-  Qsag.TaprootCurveProjection.tooth_xonly_not_injective
   Qsag.Weierstrass.IsPrime.dvd_mul
   Qsag.Weierstrass.Curve.neg_onCurve
   Qsag.Weierstrass.neg_y_parity
@@ -4063,7 +4066,6 @@ end MigrationExecution
   Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective
   Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero
   Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
-  Qsag.Weierstrass.tooth_two_torsion_point_is_its_own_negative
   Qsag.Weierstrass.secp7Mod43_group
   Qsag.Weierstrass.secp7Mod43_projection_coordinates
   Qsag.Weierstrass.secp256k1_checked_parameters

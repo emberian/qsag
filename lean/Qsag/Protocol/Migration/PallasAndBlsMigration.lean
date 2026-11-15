@@ -5,7 +5,7 @@ module
 Items 1–3 are defined and proved in `Qsag.Math.EllipticCurves` and audited here; items 4–5 are this module.
 1. Exact `Pallas` (`y^2 = x^3 + 5`, `p_pallas`, `q_pallas`, `orchardSpendAuthG`) and `BLS12-381` (`y^2 = x^3 + 4`, `p_bls381`, `r_bls381`, `bls381G1`) parameters matching `pallas.rs` and `bls12_381.rs`.
 2. Constructive Lucas–Pratt primality verifier (`checkPrattStep_sound`, `checkPrattDAG_sound`) via binary `lucasPowMod`, certifying `p_pallas`, `q_pallas`, `r_bls381`, `p_bls381`, paired with Carmichael `561` (`#tooth`).
-3. Complete projective RCB addition (`rcbAdd`), curve membership, and prime subgroup annihilation (`[q_pallas] SpendAuthG = O`, `[r_bls381] G_1 = O`), paired with the `BLS12-381` 3-torsion point `(0, 2)` (`#tooth`).
+3. The projective RCB addition program (`rcbAdd`, `rcbSmul`), curve membership, and kernel evaluations of `rcbSmul` at the prime scalar moduli (output is a projective identity for `SpendAuthG` at `q_pallas` and for `G_1` at `r_bls381`; the bridge from `rcbSmul` to scalar multiplication in the curve group is not proved), paired with the `BLS12-381` 3-torsion point `(0, 2)` (`#tooth`).
 4. 3-party ZKBoo 2-of-3 discrete-log extraction (`zkboo_two_challenge_extraction_sound`) and Zcash Orchard RedPallas rerandomized `rk = [ask + alpha] SpendAuthG` binding extraction & unlinkability (`#tooth`).
 -/
 
