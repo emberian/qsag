@@ -43,7 +43,7 @@ const SCHEME_NAME: &str = "jorts-2of3-sha3";
 const MAX_CLI_TREE_HEIGHT: u64 = 20;
 
 const QUORUM_HELP: &str = "\
-qsag quorum <keygen|sign|refresh|reshare|verify> [options]
+qsag quorum <keygen|sign|refresh|reshare|verify|coupon> [options]
 
 Threshold Jorts custody ceremonies:
   - `--scheme jorts-2of3-sha3` (default): dealerless 2-of-3 RSS Jorts gated by FsBeltWal & FsCeremonyJournal.
@@ -56,6 +56,8 @@ subcommands:
   refresh  proactively refresh (t, n) custodian shares (Π_refresh) in place
   reshare  switch (t, n) -> (t', n') threshold & roster (Π_reshare) under the exact same public key
   verify   verify a qsag quorum signature against --public and --in / --message
+  coupon   volatile one-time coupons under a Baggy root key: keygen, session (mint a batch
+           and sign from it), verify (see 'qsag quorum coupon --help')
 ";
 
 const QUORUM_KEYGEN_HELP: &str = "\
@@ -139,7 +141,7 @@ fn tree_path(vault_dir: &str) -> String {
         .into_owned()
 }
 
-fn ensure_absent(path: &str) -> Result<(), CliError> {
+pub(crate) fn ensure_absent(path: &str) -> Result<(), CliError> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Err(CliError::usage(format!("{path} already exists"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -381,7 +383,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
     let Some((sub, rest)) = raw.split_first() else {
         eprint!("{QUORUM_HELP}");
         return Err(CliError::usage(
-            "quorum expects a subcommand (keygen, sign, refresh, reshare, verify)",
+            "quorum expects a subcommand (keygen, sign, refresh, reshare, verify, coupon)",
         ));
     };
     match sub.as_str() {
@@ -394,6 +396,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         "refresh" => crate::quorum_hem::refresh(rest),
         "reshare" => crate::quorum_hem::reshare(rest),
         "verify" => verify(rest),
+        "coupon" => crate::quorum_coupon::run(rest),
         other => Err(CliError::usage(format!(
             "unknown quorum subcommand '{other}' (try 'qsag quorum --help')"
         ))),
