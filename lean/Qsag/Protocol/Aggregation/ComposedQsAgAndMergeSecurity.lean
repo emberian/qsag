@@ -1,5 +1,5 @@
 module
-public import Qsag.Tactic.CommRing
+public import Qsag.Math.Tactic.CommRing
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import all Qsag.Protocol.Threshold.ThresholdApproval

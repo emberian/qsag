@@ -74,7 +74,7 @@ import all Qsag.Protocol.Aggregation.Aggregation
 import Lean
 
 import Qsag.Tactic.AssuranceKit
-import Qsag.Tactic.CommRing
+import Qsag.Math.Tactic.CommRing
 
 public section
 namespace Qsag

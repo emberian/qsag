@@ -41,15 +41,15 @@ Shamir `WOTS+C` evaluation tables over `TowerElem 7` ($\mathbb{F}_{2^{128}}$) an
      unopened prefixes, and MAC-free `SHAKE256` endpoint self-verification.
 -/
 
-public import Qsag.Math.Digest256
-public import Qsag.Math.Constructive
+public import Qsag.Spec.Encoding
+public import Qsag.Tactic.Prelude
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
-public import Qsag.Oracle.UcGames
+public import Qsag.Math.Gf2Pow128
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.BaggyAndRss256Security
 public import Qsag.Custody.CustodySuiteFull
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Threshold.BaggyAndRss256Security
 
 import Qsag.Tactic.AssuranceKit
@@ -2805,59 +2805,59 @@ private theorem dealAdditiveShares_rebalance_other (t : Nat) (missingSlot j : Fi
       have hjEq : j.val = t - 1 := by omega
       exact hNe (Fin.ext (hjEq.trans hMissEq.symm))
 
-private theorem finSum_zero_fn : ∀ (g : Fin 0 → Nat), finSum 0 g = 0 := by
+private theorem qsum_zero_fn : ∀ (g : Fin 0 → Nat), qsum 0 g = 0 := by
   intro g
-  have h : finSum 0 g = finSum 0 (fun _ => 0) := finSum_congr (fun i => Fin.elim0 i)
-  rw [h, finSum_const]
+  have h : qsum 0 g = qsum 0 (fun _ => 0) := qsum_congr (fun i => Fin.elim0 i)
+  rw [h, qsum_const]
 
-private theorem finSum_mul_right {k : Nat} (c : Nat) (f : Fin k → Nat) :
-    finSum k (fun j => f j * c) = finSum k f * c := by
+private theorem qsum_mul_right {k : Nat} (c : Nat) (f : Fin k → Nat) :
+    qsum k (fun j => f j * c) = qsum k f * c := by
   induction c with
   | zero =>
-    have h0 : finSum k (fun _ => 0) = 0 := (finSum_const k 0).trans (Nat.mul_zero k)
+    have h0 : qsum k (fun _ => 0) = 0 := (qsum_const k 0).trans (Nat.mul_zero k)
     simp only [Nat.mul_zero, h0]
   | succ c ih =>
     have hStep : (fun j : Fin k => f j * (c + 1)) = (fun j => f j * c + f j) := by
       funext j; exact Nat.mul_succ (f j) c
-    rw [finSum_congr (fun j => congrFun hStep j), finSum_add, ih, Nat.mul_succ]
+    rw [qsum_congr (fun j => congrFun hStep j), qsum_add, ih, Nat.mul_succ]
 
-/-- Constructive permutation invariance of `finSum`: any `SimpleEquiv (Fin M) (Fin M)` preserves
+/-- Constructive permutation invariance of `qsum`: any `SimpleEquiv (Fin M) (Fin M)` preserves
     exact counting sums (`0` statistical distance). -/
-theorem finSum_comp_simpleEquiv :
+theorem qsum_comp_simpleEquiv :
     ∀ (M : Nat) (bij : SimpleEquiv (Fin M) (Fin M)) (w : Fin M → Nat),
-      finSum M (fun i => w (bij.toFun i)) = finSum M w := by
+      qsum M (fun i => w (bij.toFun i)) = qsum M w := by
   intro M bij w
   have hPointwise : ∀ i : Fin M,
-      w (bij.toFun i) = finSum M (fun j => if j = bij.toFun i then w j else 0) := by
+      w (bij.toFun i) = qsum M (fun j => if j = bij.toFun i then w j else 0) := by
     intro i
     have hScale :
-        finSum M (fun j => if j = bij.toFun i then w j else 0) =
-        finSum M (fun j => (if j = bij.toFun i then 1 else 0) * w (bij.toFun i)) := by
-      apply finSum_congr
+        qsum M (fun j => if j = bij.toFun i then w j else 0) =
+        qsum M (fun j => (if j = bij.toFun i then 1 else 0) * w (bij.toFun i)) := by
+      apply qsum_congr
       intro j
       by_cases hj : j = bij.toFun i
       · subst hj; simp
       · simp [hj]
-    rw [hScale, finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
+    rw [hScale, qsum_mul_right, qsum_eq_indicator, Nat.one_mul]
   have hSwap : ∀ (a b : Nat) (g : Fin a → Fin b → Nat),
-      finSum a (fun i => finSum b (fun j => g i j)) =
-      finSum b (fun j => finSum a (fun i => g i j)) := by
+      qsum a (fun i => qsum b (fun j => g i j)) =
+      qsum b (fun j => qsum a (fun i => g i j)) := by
     intro a
-    -- Prove by induction on an auxiliary masked prefix sum on `a` using only `finSum_add` & `finSum_eq_indicator`!
+    -- Prove by induction on an auxiliary masked prefix sum on `a` using only `qsum_add` & `qsum_eq_indicator`!
     have hMask : ∀ (m : Nat), m ≤ a → ∀ (b : Nat) (g : Fin a → Fin b → Nat),
-        finSum a (fun i => if decide (i.val < m) then finSum b (fun j => g i j) else 0) =
-        finSum b (fun j => finSum a (fun i => if decide (i.val < m) then g i j else 0)) := by
+        qsum a (fun i => if decide (i.val < m) then qsum b (fun j => g i j) else 0) =
+        qsum b (fun j => qsum a (fun i => if decide (i.val < m) then g i j else 0)) := by
       intro m
       induction m with
       | zero =>
         intro _ b g
-        have hL : finSum a (fun _ => 0) = 0 := (finSum_const a 0).trans (Nat.mul_zero a)
-        have hB : finSum b (fun _ => 0) = 0 := (finSum_const b 0).trans (Nat.mul_zero b)
-        have hL' : finSum a (fun i : Fin a => if decide (i.val < 0) then finSum b (fun j => g i j) else 0) =
-            finSum a (fun _ => 0) := finSum_congr (fun _ => rfl)
-        have hR' : finSum b (fun j : Fin b => finSum a (fun i : Fin a => if decide (i.val < 0) then g i j else 0)) =
-            finSum b (fun _ => finSum a (fun _ => 0)) :=
-          finSum_congr (fun _ => finSum_congr (fun _ => rfl))
+        have hL : qsum a (fun _ => 0) = 0 := (qsum_const a 0).trans (Nat.mul_zero a)
+        have hB : qsum b (fun _ => 0) = 0 := (qsum_const b 0).trans (Nat.mul_zero b)
+        have hL' : qsum a (fun i : Fin a => if decide (i.val < 0) then qsum b (fun j => g i j) else 0) =
+            qsum a (fun _ => 0) := qsum_congr (fun _ => rfl)
+        have hR' : qsum b (fun j : Fin b => qsum a (fun i : Fin a => if decide (i.val < 0) then g i j else 0)) =
+            qsum b (fun _ => qsum a (fun _ => 0)) :=
+          qsum_congr (fun _ => qsum_congr (fun _ => rfl))
         rw [hL', hR', hL, hB]
       | succ m ih =>
         intro hmLe b g
@@ -2881,38 +2881,38 @@ theorem finSum_comp_simpleEquiv :
               have hNeIm : i ≠ im := fun he => hEqM (congrArg Fin.val he)
               simp [hLtM, hNotM1, hNeIm]
         have hOnePoint : ∀ (v : Nat),
-            finSum a (fun i => if i = im then v else 0) = v := by
+            qsum a (fun i => if i = im then v else 0) = v := by
           intro v
           have hSc : (fun i : Fin a => if i = im then v else 0) =
               (fun i => (if i = im then 1 else 0) * v) := by
             funext i; by_cases hi : i = im <;> simp [hi]
-          rw [finSum_congr (fun i => congrFun hSc i), finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
-        rw [finSum_congr (fun i => hDecomp (fun k => finSum b (fun j => g k j)) i),
-            finSum_add, ih (Nat.le_of_lt hmLt) b g, hOnePoint]
+          rw [qsum_congr (fun i => congrFun hSc i), qsum_mul_right, qsum_eq_indicator, Nat.one_mul]
+        rw [qsum_congr (fun i => hDecomp (fun k => qsum b (fun j => g k j)) i),
+            qsum_add, ih (Nat.le_of_lt hmLt) b g, hOnePoint]
         have hRHS :
-            finSum b (fun j => finSum a (fun i => if decide (i.val < m + 1) then g i j else 0)) =
-            finSum b (fun j =>
-              finSum a (fun i => if decide (i.val < m) then g i j else 0) +
-              finSum a (fun i => if i = im then g im j else 0)) := by
-          apply finSum_congr
+            qsum b (fun j => qsum a (fun i => if decide (i.val < m + 1) then g i j else 0)) =
+            qsum b (fun j =>
+              qsum a (fun i => if decide (i.val < m) then g i j else 0) +
+              qsum a (fun i => if i = im then g im j else 0)) := by
+          apply qsum_congr
           intro j
-          rw [← finSum_add]
-          exact finSum_congr (fun i => hDecomp (fun k => g k j) i)
-        rw [hRHS, finSum_add]
+          rw [← qsum_add]
+          exact qsum_congr (fun i => hDecomp (fun k => g k j) i)
+        rw [hRHS, qsum_add]
         congr 1
-        exact finSum_congr (fun j => (hOnePoint (g im j)).symm)
+        exact qsum_congr (fun j => (hOnePoint (g im j)).symm)
     intro b g
     have hFull := hMask a (Nat.le_refl a) b g
-    have hSimpL : finSum a (fun i : Fin a => if decide (i.val < a) then finSum b (fun j => g i j) else 0) =
-        finSum a (fun i => finSum b (fun j => g i j)) :=
-      finSum_congr (fun i => by simp [i.isLt])
-    have hSimpR : finSum b (fun j : Fin b => finSum a (fun i : Fin a => if decide (i.val < a) then g i j else 0)) =
-        finSum b (fun j => finSum a (fun i => g i j)) :=
-      finSum_congr (fun _ => finSum_congr (fun i => by simp [i.isLt]))
+    have hSimpL : qsum a (fun i : Fin a => if decide (i.val < a) then qsum b (fun j => g i j) else 0) =
+        qsum a (fun i => qsum b (fun j => g i j)) :=
+      qsum_congr (fun i => by simp [i.isLt])
+    have hSimpR : qsum b (fun j : Fin b => qsum a (fun i : Fin a => if decide (i.val < a) then g i j else 0)) =
+        qsum b (fun j => qsum a (fun i => g i j)) :=
+      qsum_congr (fun _ => qsum_congr (fun i => by simp [i.isLt]))
     rw [← hSimpL, ← hSimpR]
     exact hFull
-  rw [finSum_congr hPointwise, hSwap]
-  apply finSum_congr
+  rw [qsum_congr hPointwise, hSwap]
+  apply qsum_congr
   intro j
   have hRewrite :
       (fun i : Fin M => if j = bij.toFun i then w j else 0) =
@@ -2924,7 +2924,7 @@ theorem finSum_comp_simpleEquiv :
       simp
     · have hNe : j ≠ bij.toFun i := fun he => hij (by rw [he, bij.left_inv])
       simp [hij, hNe]
-  rw [finSum_congr (fun i => congrFun hRewrite i), finSum_mul_right, finSum_eq_indicator, Nat.one_mul]
+  rw [qsum_congr (fun i => congrFun hRewrite i), qsum_mul_right, qsum_eq_indicator, Nat.one_mul]
 
 /-! ### Multi-Turn `QuorumJortsTurn` Committee-Partitioned (`QS-A`) & Global-Quorum (`QS-B`) State Machine -/
 
@@ -3821,7 +3821,7 @@ private theorem runEchoTurns_emits {n : Nat}
        When `f < t`, every `t`-committee `Q` constructively yields an honest member `pHon ∈ Q \ Corrupt`
        and an involutive `SimpleEquiv` hiding `Q`'s `t`-of-`t` leaf secrets from `Corrupt`, AND for
        every other `t`-committee `Q' ≠ Q`, `Q'`'s share view has **exact `0` statistical distance**
-       (`finSum`) between any two leaf secrets `sec₁, sec₂`.
+       (`qsum`) between any two leaf secrets `sec₁, sec₂`.
     3. **(c) Multi-Turn Live Signing via `selectSubcommittee` under `≤ f` Faults (`n = 2 * f + 1`)**:
        Whenever `0 < t`, `echoQuorum ≤ t`, and `Online` has `t ≤ maskCard (maskDiff Online Corrupt)`,
        `live := selectSubcommittee t (maskDiff Online Corrupt) hOnlineHon` selects an all-honest
@@ -3873,8 +3873,8 @@ theorem committee_partitioned_jorts_safe_and_live_for_2f_plus_1
                 committeeViewerObservation t Q Q' sec₁ tape) ∧
             (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) (Fin (t - 1) → Digest256))
                (D : (Fin n → Option Digest256) → Bool),
-              finSum Card (fun r => if D (committeeViewerObservation t Q Q' sec₁ (enum.toFun r)) then 1 else 0) =
-                finSum Card (fun r => if D (committeeViewerObservation t Q Q' sec₂ (enum.toFun r)) then 1 else 0)))) ∧
+              qsum Card (fun r => if D (committeeViewerObservation t Q Q' sec₁ (enum.toFun r)) then 1 else 0) =
+                qsum Card (fun r => if D (committeeViewerObservation t Q Q' sec₂ (enum.toFun r)) then 1 else 0)))) ∧
     -- (c) Multi-turn live committee selection & signing round progression on QuorumJortsNetworkState:
     (0 < t → echoQuorum ≤ t →
       ∀ (Online : CustodiansMask n) (hOnlineHon : t ≤ maskCard (maskDiff Online Corrupt)),
@@ -4133,10 +4133,10 @@ theorem committee_partitioned_jorts_safe_and_live_for_2f_plus_1
         invFun := fun r => enum.invFun (bijCross.invFun (enum.toFun r))
         left_inv := fun r => by rw [enum.right_inv, bijCross.left_inv, enum.left_inv]
         right_inv := fun r => by rw [enum.right_inv, bijCross.right_inv, enum.left_inv] }
-    have hPerm := finSum_comp_simpleEquiv Card finBij
+    have hPerm := qsum_comp_simpleEquiv Card finBij
       (fun r => if D (committeeViewerObservation t Q Q' sec₂ (enum.toFun r)) then 1 else 0)
     rw [← hPerm]
-    apply finSum_congr
+    apply qsum_congr
     intro r
     dsimp only [finBij]
     rw [enum.right_inv, hViewEq (enum.toFun r)]
@@ -4571,10 +4571,10 @@ theorem qs_a_leaf_index_identifies_committee
             match o with
             | none => false
             | some sig => decide (committeeOfSignature n t subtreeHeight sig = some Q₁)
-          finSum Card (fun r =>
+          qsum Card (fun r =>
             if D (qsAPartitionedSign H masterSeed t subtreeHeight Q₁ ep₁ cnt₁ digits₁ ap₁ (enum₁.toFun r))
             then 1 else 0) = Card ∧
-          finSum Card (fun r =>
+          qsum Card (fun r =>
             if D (qsAPartitionedSign H masterSeed t subtreeHeight Q₂ ep₂ cnt₂ digits₂ ap₂ (enum₂.toFun r))
             then 1 else 0) = 0)) ∧
     -- (3) Contrast with QS-B global-tree quorum-independent leaf allocation over GF(2^128):
@@ -4651,7 +4651,7 @@ theorem qs_a_leaf_index_identifies_committee
             dsimp only [D]
             exact decide_eq_true hOfSig₁
           simp only [hD₁, ↓reduceIte]
-        rw [finSum_congr hEach₁, finSum_const, Nat.mul_one]
+        rw [qsum_congr hEach₁, qsum_const, Nat.mul_one]
       · have hEach₂ : ∀ r : Fin Card,
             (if D (qsAPartitionedSign H masterSeed t subtreeHeight Q₂ ep₂ cnt₂ digits₂ ap₂ (enum₂.toFun r))
              then 1 else 0) = 0 := by
@@ -4666,7 +4666,7 @@ theorem qs_a_leaf_index_identifies_committee
             rw [hOfSig₂]
             exact decide_eq_false hSomeNe
           simp only [hD₂, Bool.false_eq_true, ↓reduceIte]
-        rw [finSum_congr hEach₂, finSum_const, Nat.mul_zero]
+        rw [qsum_congr hEach₂, qsum_const, Nat.mul_zero]
   · intro d gLeaf counter digits authPath polyTape pts₁ lambdas₁ pts₂ lambdas₂ hZ₁ hH₁ hZ₂ hH₂
     have hRefEq : ∀ (pts lambdas : List (TowerElem 7)),
         ringDot lambdas (pts.map (fun _ => CommRingOps.one)) = CommRingOps.one →
@@ -4721,7 +4721,7 @@ theorem qs_a_leaf_index_identifies_committee
        `qsAPartitionedSign` outputs `some (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath)`!
     2. **Exact `0` Statistical Distance Conditional on Same Leaf Schedule**: Over any finite share
        randomness space `Card` (`enum : SimpleEquiv (Fin Card) (QsAChainShareTape t digits.length)`)
-       and any distinguisher `D : Option QuorumJortsSig → Bool`, `finSum` counts are identically equal! -/
+       and any distinguisher `D : Option QuorumJortsSig → Bool`, `qsum` counts are identically equal! -/
 theorem qs_a_single_signer_equiv_given_same_leaf_schedule
     {n t subtreeHeight : Nat} (hTPos : 0 < t)
     (H : List UInt8 → Digest256) (masterSeed : Digest256)
@@ -4737,10 +4737,10 @@ theorem qs_a_single_signer_equiv_given_same_leaf_schedule
         counter digits authPath shareTape = some refSig) ∧
     (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) (QsAChainShareTape t digits.length))
        (D : Option QuorumJortsSig → Bool),
-      finSum Card (fun r =>
+      qsum Card (fun r =>
         if D (qsAPartitionedSign H masterSeed t subtreeHeight selectedCommittee localEpoch
                 counter digits authPath (enum.toFun r)) then 1 else 0) =
-      finSum Card (fun _ => if D (some refSig) then 1 else 0)) := by
+      qsum Card (fun _ => if D (some refSig) then 1 else 0)) := by
   intro gLeaf refSig
   have hPointwise : ∀ shareTape : QsAChainShareTape t digits.length,
       qsAPartitionedSign H masterSeed t subtreeHeight selectedCommittee localEpoch
@@ -4758,7 +4758,7 @@ theorem qs_a_single_signer_equiv_given_same_leaf_schedule
     rw [reconstruct_dealAdditiveShares t hTPos]
   refine ⟨hPointwise, ?_⟩
   intro Card enum D
-  apply finSum_congr
+  apply qsum_congr
   intro r
   rw [hPointwise (enum.toFun r)]
 
@@ -5138,7 +5138,7 @@ def preSteppedPrefixRebalanceEquiv {R : Type} [LawfulCommRing R]
     1. `preSteppedPrefixRebalanceEquiv` maps `y₁`-tapes bijectively onto `y₂`-tapes with **exact
        pointwise equality** of `computePreSteppedAdvView`;
     2. Over ANY finite enumeration `SimpleEquiv (Fin Card) (PreSteppedShamirTape R d L)` and ANY
-       distinguisher `D : PreSteppedAdvView R L → Bool`, `finSum` counts are **identically equal**
+       distinguisher `D : PreSteppedAdvView R L → Bool`, `qsum` counts are **identically equal**
        (`0` bits leaked about `y_i^(0)` and `y_i^(1)`!). -/
 theorem preStepped_shamir_unopened_prefix_zero_knowledge {R : Type} [LawfulCommRing R]
     (inv : R → R) (hInv : ∀ x : R, x ≠ CommRingOps.zero → CommRingOps.mul x (inv x) = CommRingOps.one)
@@ -5154,8 +5154,8 @@ theorem preStepped_shamir_unopened_prefix_zero_knowledge {R : Type} [LawfulCommR
         computePreSteppedAdvView corruptPts digits y₁ tape) ∧
     (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) (PreSteppedShamirTape R d L))
        (D : PreSteppedAdvView R L → Bool),
-      finSum Card (fun r => if D (computePreSteppedAdvView corruptPts digits y₁ (enum.toFun r)) then 1 else 0) =
-        finSum Card (fun r => if D (computePreSteppedAdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)) := by
+      qsum Card (fun r => if D (computePreSteppedAdvView corruptPts digits y₁ (enum.toFun r)) then 1 else 0) =
+        qsum Card (fun r => if D (computePreSteppedAdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)) := by
   intro bij
   have hViewEq : ∀ tape : PreSteppedShamirTape R d L,
       computePreSteppedAdvView corruptPts digits y₂ (bij.toFun tape) =
@@ -5185,10 +5185,10 @@ theorem preStepped_shamir_unopened_prefix_zero_knowledge {R : Type} [LawfulCommR
       invFun := fun r => enum.invFun (bij.invFun (enum.toFun r))
       left_inv := fun r => by rw [enum.right_inv, bij.left_inv, enum.left_inv]
       right_inv := fun r => by rw [enum.right_inv, bij.right_inv, enum.left_inv] }
-  have hPerm := finSum_comp_simpleEquiv Card finBij
+  have hPerm := qsum_comp_simpleEquiv Card finBij
     (fun r => if D (computePreSteppedAdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)
   rw [← hPerm]
-  apply finSum_congr
+  apply qsum_congr
   intro r
   dsimp only [finBij]
   rw [enum.right_inv, hViewEq (enum.toFun r)]
@@ -5605,7 +5605,7 @@ def preSteppedDigest256RebalanceEquiv (d L : Nat)
     (`preStepped_tower128_digest256_zero_knowledge`)**:
     Over `TowerElem 7` (`GF(2^128)`) across `L` (e.g. `v = 128`) 256-bit `Digest256` chains, up to
     `t - 1` corrupt evaluation points `corruptPts` learn **exact `0` bits** (`0` statistical distance
-    in `finSum`) about every unopened 256-bit preimage `y_i^(k)` (`k ≠ d_i`)! -/
+    in `qsum`) about every unopened 256-bit preimage `y_i^(k)` (`k ≠ d_i`)! -/
 theorem preStepped_tower128_digest256_zero_knowledge
     (d L : Nat) (corruptPts : List (TowerElem 7))
     (hCard : corruptPts.length + 1 ≤ d + 1)
@@ -5619,8 +5619,8 @@ theorem preStepped_tower128_digest256_zero_knowledge
         computePreSteppedDigest256AdvView corruptPts digits y₁ tape) ∧
     (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) (PreSteppedDigest256ShamirTape d L))
        (D : PreSteppedDigest256AdvView L → Bool),
-      finSum Card (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₁ (enum.toFun r)) then 1 else 0) =
-        finSum Card (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)) := by
+      qsum Card (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₁ (enum.toFun r)) then 1 else 0) =
+        qsum Card (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)) := by
   intro bij
   have hInv7 : ∀ x : TowerElem 7, x ≠ CommRingOps.zero →
       CommRingOps.mul x (towerInv 7 x) = CommRingOps.one :=
@@ -5659,10 +5659,10 @@ theorem preStepped_tower128_digest256_zero_knowledge
       invFun := fun r => enum.invFun (bij.invFun (enum.toFun r))
       left_inv := fun r => by rw [enum.right_inv, bij.left_inv, enum.left_inv]
       right_inv := fun r => by rw [enum.right_inv, bij.right_inv, enum.left_inv] }
-  have hPerm := finSum_comp_simpleEquiv Card finBij
+  have hPerm := qsum_comp_simpleEquiv Card finBij
     (fun r => if D (computePreSteppedDigest256AdvView corruptPts digits y₂ (enum.toFun r)) then 1 else 0)
   rw [← hPerm]
-  apply finSum_congr
+  apply qsum_congr
   intro r
   dsimp only [finBij]
   rw [enum.right_inv, hViewEq (enum.toFun r)]

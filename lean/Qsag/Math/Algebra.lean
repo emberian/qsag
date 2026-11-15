@@ -1,7 +1,7 @@
 module
 public import Qsag.Spec.Algebra
 public import Qsag.Tactic.Prelude
-public import Qsag.Tactic.CommRing
+public import Qsag.Math.Tactic.CommRing
 
 public section
 -- Avoid the choice-based LawfulBEq derived from the Fin order package.

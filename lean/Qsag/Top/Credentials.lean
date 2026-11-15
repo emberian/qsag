@@ -16,6 +16,7 @@ Top-level composition module (zero `import all`) connecting:
 -/
 
 public import Qsag.Spec.Primitives
+public import Qsag.Oracle.SpecRatBridges
 public import Qsag.Spec.Parameters
 public import Qsag.Spec.Refines
 public import Qsag.Spec.GameBound

@@ -274,6 +274,19 @@ u64vec4 perm_at(uint i, uint idx, uint half_m, uint k_slot) {
     return load4_b4(off);
 }
 
+// Weighted 2-to-1 compression output limb `i` (`0..4`) of a tweaked hash row:
+// `perm_out[i] + in0[i] + 2 * st_in[4 + i] + 4 * st_in[8 + i]`, where `in0` is the value the
+// row constrains `st_in[i]` to (FORS leaf preimage, WOTS chain value), `st_in[4..8]` is the
+// second input (`pk_seed`) and `st_in[8..12]` is the domain/address tweak.
+u64vec4 weighted_feed_forward(u64vec4 in0, uint i, uint idx, uint half_m, uint k_slot, uint k_val) {
+    u64vec4 in1 = st_in_at(4u + i, idx, half_m, k_val);
+    u64vec4 tweak = st_in_at(8u + i, idx, half_m, k_val);
+    return fp4_add(
+        fp4_add(perm_at(i, idx, half_m, k_slot), in0),
+        fp4_add(fp4_mul_k(in1, 2u), fp4_mul_k(tweak, 4u))
+    );
+}
+
 u64vec4 signer_field_at(uint field_idx, uint idx, uint k_val) {
     if ((pc.flags & 1u) != 0u) {
         uint half_s = pc.cur_s >> 1u;
@@ -568,7 +581,7 @@ u64vec4 eval_single_op(
                 u64vec4 ai = aux_at(i, idx, half_m, k_val);
                 emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), ai));
                 emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
-                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), fp4_add(perm_at(i, idx, half_m, k_slot), ai)));
+                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), weighted_feed_forward(ai, i, idx, half_m, k_slot, k_val)));
             }
             u64vec4 tweak1 = fp4_add(fp4_mul_base(prev_at(4u, idx, half_m, k_val), 1ul << 24u), fp4_add(tmp_load(lid, 8u), tmp_load(lid, 0u)));
             [[dont_unroll]] for (uint i = 0u; i < 4u; ++i) {
@@ -671,7 +684,7 @@ u64vec4 eval_single_op(
                                                  : prev_at(37u + i, idx, half_m, k_val);
                 emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), cur_i));
                 emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
-                u64vec4 ff_i = fp4_add(perm_at(i, idx, half_m, k_slot), cur_i);
+                u64vec4 ff_i = weighted_feed_forward(cur_i, i, idx, half_m, k_slot, k_val);
                 u64vec4 ep_i = fp4_add(fp4_mul_full(u_sel, cur_i), fp4_mul_full(f_one_minus(u_sel), ff_i));
                 emit_term(acc, g, fp4_sub(next_at(dst_base + i, idx, half_m, k_val), ep_i));
             }

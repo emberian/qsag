@@ -899,6 +899,101 @@ impl Default for GpuBuffer {
     }
 }
 
+/// Bytes of one `Ext4` element and of one base-field word in a storage buffer.
+const EXT4_BYTES: u64 = 32;
+const WORD_BYTES: u64 = 8;
+
+fn length_overflow() -> VulkanError {
+    VulkanError::Accel(crate::AccelError::LengthOverflow)
+}
+
+fn out_of_range(what: &'static str, available: u64, requested: u64) -> VulkanError {
+    let clamp = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
+    VulkanError::Accel(crate::AccelError::LengthMismatch {
+        what,
+        expected: clamp(available),
+        actual: clamp(requested),
+    })
+}
+
+fn cmul(a: u64, b: u64) -> Result<u64, VulkanError> {
+    a.checked_mul(b).ok_or_else(length_overflow)
+}
+
+fn cadd(a: u64, b: u64) -> Result<u64, VulkanError> {
+    a.checked_add(b).ok_or_else(length_overflow)
+}
+
+/// `base + count * stride` elements, in bytes of `elem_bytes` each: the exclusive end of the
+/// range a shader or copy reaches when it indexes `base + i * stride` for `i < count`.
+fn span_end(base: u64, count: u64, stride: u64, elem_bytes: u64) -> Result<u64, VulkanError> {
+    cmul(cadd(base, cmul(count, stride)?)?, elem_bytes)
+}
+
+fn to_u32<T: TryInto<u32>>(value: T) -> Result<u32, VulkanError> {
+    value.try_into().map_err(|_| length_overflow())
+}
+
+fn to_u64(value: usize) -> u64 {
+    value as u64
+}
+
+/// `1 << num_vars` for `num_vars <= max_vars`.
+fn pow2_len(num_vars: usize, max_vars: usize) -> Result<usize, VulkanError> {
+    if num_vars > max_vars || num_vars >= usize::BITS as usize {
+        return Err(length_overflow());
+    }
+    Ok(1usize << num_vars)
+}
+
+impl GpuBuffer {
+    /// A range the device will read (copy source or shader input) must lie inside what the
+    /// current session reserved in this buffer.
+    fn check_read(&self, what: &'static str, end_bytes: u64) -> Result<(), VulkanError> {
+        if self.buffer == 0 || end_bytes > self.used || end_bytes > self.capacity {
+            return Err(out_of_range(what, self.used.min(self.capacity), end_bytes));
+        }
+        Ok(())
+    }
+
+    /// A range the device will write (copy destination or shader output) must lie inside the
+    /// allocation; it becomes part of what the session holds and what its scrub clears.
+    fn reserve_write(&mut self, what: &'static str, end_bytes: u64) -> Result<(), VulkanError> {
+        if self.buffer == 0 || end_bytes > self.capacity {
+            return Err(out_of_range(what, self.capacity, end_bytes));
+        }
+        let aligned = end_bytes.saturating_add(7) & !7;
+        self.used = self.used.max(aligned).min(self.capacity);
+        Ok(())
+    }
+}
+
+/// One `vkCmdCopyBuffer` region whose source range was checked against `src` (a read) and whose
+/// destination range fits `dst_capacity`. `size > 0` and nonzero handles are valid-usage rules.
+fn checked_copy(
+    what: &'static str,
+    src: &GpuBuffer,
+    src_offset: u64,
+    dst_capacity: u64,
+    dst_offset: u64,
+    size: u64,
+) -> Result<VkBufferCopy, VulkanError> {
+    let src_end = cadd(src_offset, size)?;
+    let dst_end = cadd(dst_offset, size)?;
+    if size == 0 {
+        return Err(out_of_range(what, 1, 0));
+    }
+    src.check_read(what, src_end)?;
+    if dst_end > dst_capacity {
+        return Err(out_of_range(what, dst_capacity, dst_end));
+    }
+    Ok(VkBufferCopy {
+        src_offset,
+        dst_offset,
+        size,
+    })
+}
+
 /// Driver calls whose result code a test can replace (see `RawVulkanEngine::injected_rc`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FaultPoint {
@@ -922,8 +1017,136 @@ enum EngineExecState {
     DeviceLostQuarantined,
 }
 
+/// Upper bound on the gamma weights one opcode consumes in `air_row_group_b.comp`
+/// (`emit_term` advances the gamma index once per constraint; the largest opcode emits
+/// fewer than 130).
+const AIR_MAX_OP_TERMS: u64 = 256;
+/// Upper bound on the selector entries of one row's opcode list.
+const AIR_MAX_OPS_PER_ROW: u64 = 4096;
+
+/// Largest `kind_arg` the shader accepts for `kind_id` (`trace::encode_constraint_kind`):
+/// limb and pack-slot indices select trace columns, the rest are flag bits.
+fn air_kind_arg_max(kind_id: u64) -> Option<u64> {
+    Some(match kind_id {
+        6 => 6,
+        8 => 5,
+        10 | 23 => 3,
+        15 | 17 => 4,
+        11 | 19 | 20 => 1,
+        0..=23 => 0,
+        _ => return None,
+    })
+}
+
+/// Host view of `vram_aux_in` during an AIR round: the static tables uploaded by
+/// `exec_prover_air_init_shard` followed (without overlap) by this round's dynamic words.
+struct AirTables<'a> {
+    static_words: &'a [u64],
+    dyn_words: &'a [u64],
+    dyn_word0: u64,
+}
+
+impl AirTables<'_> {
+    fn word(&self, idx: u64) -> Result<u64, VulkanError> {
+        let static_len = to_u64(self.static_words.len());
+        if idx < static_len {
+            return Ok(self.static_words[idx as usize]);
+        }
+        match idx.checked_sub(self.dyn_word0) {
+            Some(rel) if rel < to_u64(self.dyn_words.len()) => Ok(self.dyn_words[rel as usize]),
+            _ => Err(out_of_range(
+                "AIR table index (outside the uploaded tables)",
+                static_len.max(self.dyn_word0.saturating_add(to_u64(self.dyn_words.len()))),
+                idx,
+            )),
+        }
+    }
+
+    /// Everything `air_row_group_b.comp` reaches through uploaded indices: the sorted row
+    /// list, each reachable row's opcode header, and each opcode entry it names.
+    #[allow(clippy::too_many_arguments)]
+    fn validate_op_tables(
+        &self,
+        half_m: u64,
+        key_mask: Option<u64>,
+        key_count: u64,
+        sorted_u64_off: u64,
+        op_hdr_off: u64,
+        op_ent_off: u64,
+        gamma_limit_ext4: u64,
+    ) -> Result<(), VulkanError> {
+        let mut seen = std::vec![false; usize::try_from(key_count).map_err(|_| length_overflow())?];
+        for tid in 0..half_m {
+            let idx = self.word(cadd(sorted_u64_off, tid)?)?;
+            if idx >= half_m {
+                return Err(out_of_range("AIR sorted row index", half_m, idx));
+            }
+            let key = key_mask.map_or(idx, |mask| idx & mask);
+            let slot = seen
+                .get_mut(key as usize)
+                .ok_or_else(|| out_of_range("AIR opcode header index", key_count, key))?;
+            if core::mem::replace(slot, true) {
+                continue;
+            }
+            let hdr = cmul(cadd(op_hdr_off, key)?, 4)?;
+            let e_start = self.word(hdr)?;
+            let e_count = self.word(cadd(hdr, 1)?)?;
+            if e_count > AIR_MAX_OPS_PER_ROW || e_start > u64::from(u32::MAX) {
+                return Err(out_of_range(
+                    "AIR opcode list length",
+                    AIR_MAX_OPS_PER_ROW,
+                    e_count.max(e_start),
+                ));
+            }
+            for e in 0..e_count {
+                let ent = cmul(cadd(op_ent_off, cmul(cadd(e_start, e)?, 3)?)?, 4)?;
+                let kind_id = self.word(ent)?;
+                let kind_arg = self.word(cadd(ent, 1)?)?;
+                let gamma_base = self.word(cadd(ent, 2)?)?;
+                // The entry's two selector values end eleven words after its first.
+                self.word(cadd(ent, 11)?)?;
+                match air_kind_arg_max(kind_id) {
+                    Some(max) if kind_arg <= max => {}
+                    _ => return Err(out_of_range("AIR opcode kind or argument", 23, kind_id)),
+                }
+                if cadd(gamma_base, AIR_MAX_OP_TERMS)? > gamma_limit_ext4 {
+                    return Err(out_of_range(
+                        "AIR opcode gamma base",
+                        gamma_limit_ext4,
+                        gamma_base,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What `job_prover_whir_commit_round0` established for the current prover session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProverSessionDims {
+    num_polys: usize,
+    num_vars: usize,
+}
+
+/// Host copy of the static tables `exec_prover_air_init_shard` uploaded to the start of
+/// `vram_aux_in` (public gamma weights and row indices), so the tables the AIR shaders index
+/// through can be validated before dispatch. Dropped by any job that rewrites that buffer.
+struct AirShardState {
+    total_rows: u64,
+    static_words: std::vec::Vec<u64>,
+}
+
 #[derive(Default)]
 struct ProverArena {
+    /// `Some` between a successful round-0 commit and the next scrub of the session. Every
+    /// other prover entry point refuses to run without it.
+    session: Option<ProverSessionDims>,
+    /// `Some` between `exec_prover_air_init_shard` and the next job that rewrites `vram_aux_in`.
+    air: Option<AirShardState>,
+    /// Buffers whose scrub submission failed: they may still be referenced by the device, so
+    /// they are neither reused nor freed until teardown has established idle.
+    limbo: std::vec::Vec<GpuBuffer>,
     initialized: bool,
     twiddles_ready: bool,
     salt_seed_words: [u64; 4],
@@ -975,6 +1198,12 @@ pub(crate) struct RawVulkanEngine {
     fail_alloc_countdown: core::cell::Cell<Option<u32>>,
     #[cfg(test)]
     injected_rcs: core::cell::Cell<[Option<i32>; 4]>,
+    /// Test observation: `(alloc_gpu_buffer calls, prover descriptor refreshes)`.
+    #[cfg(test)]
+    mutation_counters: core::cell::Cell<(u64, u64)>,
+    /// Test observation of the last host mapping released: `(bytes, all bytes were zero)`.
+    #[cfg(test)]
+    last_unmapped: core::cell::Cell<Option<(u64, bool)>>,
     dsl_1buf: VkDescriptorSetLayout,
     dsl_2buf: VkDescriptorSetLayout,
     dsl_3buf: VkDescriptorSetLayout,
@@ -1877,6 +2106,10 @@ impl RawVulkanEngine {
             fail_alloc_countdown: core::cell::Cell::new(None),
             #[cfg(test)]
             injected_rcs: core::cell::Cell::new([None; 4]),
+            #[cfg(test)]
+            mutation_counters: core::cell::Cell::new((0, 0)),
+            #[cfg(test)]
+            last_unmapped: core::cell::Cell::new(None),
             dsl_1buf: 0,
             dsl_2buf: 0,
             dsl_3buf: 0,
@@ -2518,9 +2751,20 @@ impl RawVulkanEngine {
         Ok(())
     }
 
+    /// Free one buffer. Callers reach this only with idle established (`Ready`, or teardown
+    /// after a successful `vkDeviceWaitIdle`), so the device no longer reads or writes it.
+    /// A host mapping is zeroed over its whole capacity before it is released: staging may
+    /// hold job inputs or outputs, including those of the job that is displacing it.
     unsafe fn destroy_gpu_buffer(&mut self, buf: &mut GpuBuffer) {
         if !buf.mapped.is_null() && buf.memory != 0 {
             unsafe {
+                Self::wipe_mapping(buf.mapped, buf.capacity);
+                #[cfg(test)]
+                {
+                    let bytes = core::slice::from_raw_parts(buf.mapped, buf.capacity as usize);
+                    self.last_unmapped
+                        .set(Some((buf.capacity, bytes.iter().all(|&b| b == 0))));
+                }
                 (self.fns.unmap_memory)(self.device, buf.memory);
             }
             buf.mapped = null_mut();
@@ -2538,6 +2782,27 @@ impl RawVulkanEngine {
             buf.memory = 0;
         }
         buf.capacity = 0;
+        buf.used = 0;
+    }
+
+    /// Volatile zero fill of `len` bytes of a host mapping, followed by a compiler fence.
+    unsafe fn wipe_mapping(base: *mut u8, len: u64) {
+        let len = len as usize;
+        unsafe {
+            let align_off = base.align_offset(8).min(len);
+            for offset in 0..align_off {
+                core::ptr::write_volatile(base.add(offset), 0);
+            }
+            let words = (len - align_off) / 8;
+            let ptr64 = base.add(align_off).cast::<u64>();
+            for i in 0..words {
+                core::ptr::write_volatile(ptr64.add(i), 0);
+            }
+            for offset in (align_off + words * 8)..len {
+                core::ptr::write_volatile(base.add(offset), 0);
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     unsafe fn alloc_gpu_buffer(
@@ -2545,6 +2810,11 @@ impl RawVulkanEngine {
         byte_size: u64,
         host_staging: bool,
     ) -> Result<GpuBuffer, VulkanError> {
+        #[cfg(test)]
+        {
+            let (allocs, refreshes) = self.mutation_counters.get();
+            self.mutation_counters.set((allocs + 1, refreshes));
+        }
         #[cfg(test)]
         if let Some(rem) = self.fail_alloc_countdown.get() {
             if rem == 0 {
@@ -2741,7 +3011,8 @@ impl RawVulkanEngine {
                 .unwrap_or(required)
                 .max(MIN_BUFFER_ALLOC_BYTES);
             let new_buf = unsafe { self.alloc_gpu_buffer(target, true)? };
-            // `ensure_ready` returned `Ready`, so the displaced mapping holds no residue.
+            // `ensure_ready` returned `Ready`, so the device is done with the displaced mapping;
+            // `destroy_gpu_buffer` zeroes it (it can hold what this same job staged earlier).
             let mut old = core::mem::replace(&mut self.staging, new_buf);
             unsafe {
                 self.destroy_gpu_buffer(&mut old);
@@ -2803,6 +3074,11 @@ impl RawVulkanEngine {
                     }
                 }
             }
+        }
+        // No job touches staging, buffers, descriptors or the command pool while an earlier
+        // submission may still be in flight.
+        unsafe {
+            self.ensure_ready()?;
         }
         let mut guard = SettleOnExit(self, true);
         let res = job(guard.engine());
@@ -2970,7 +3246,12 @@ impl RawVulkanEngine {
         }
     }
 
+    /// Resetting the command pool while one of its command buffers is pending is undefined;
+    /// only a `Ready` engine may record.
     unsafe fn begin_cmd(&self) -> Result<(), VulkanError> {
+        if self.exec_state != EngineExecState::Ready {
+            return Err(VulkanError::WorkspacePoisoned);
+        }
         if let Some(code) = self.injected_rc(FaultPoint::BeginCmd) {
             return Err(VulkanError::VkResult {
                 op: "vkResetCommandPool",
@@ -3097,6 +3378,8 @@ impl RawVulkanEngine {
                 ),
             ]);
             self.prover.twiddles_ready = false;
+            self.prover.session = None;
+            self.prover.air = None;
             self.submit_and_wait()
         }
     }
@@ -3105,6 +3388,10 @@ impl RawVulkanEngine {
     /// precomputed public `twiddles_24` and buffer allocations for zero-alloc reuse.
     pub(crate) fn scrub_prover_session(&mut self) -> Result<(), VulkanError> {
         crate::ct::ct_zeroize_u64s(&mut self.prover.salt_seed_words);
+        // Whatever happens below, nothing may read this session's buffers again until a new
+        // round-0 commit re-establishes the arena.
+        self.prover.session = None;
+        self.prover.air = None;
         unsafe {
             self.settle_staging();
             self.ensure_ready()?;
@@ -3152,24 +3439,9 @@ impl RawVulkanEngine {
         if self.staging.mapped.is_null() {
             return;
         }
-        let len = bytes.min(self.staging.capacity) as usize;
         unsafe {
-            let base = self.staging.mapped;
-            let align_off = base.align_offset(8).min(len);
-            for offset in 0..align_off {
-                core::ptr::write_volatile(base.add(offset), 0);
-            }
-            let rem = len - align_off;
-            let words = rem / 8;
-            let ptr64 = base.add(align_off).cast::<u64>();
-            for i in 0..words {
-                core::ptr::write_volatile(ptr64.add(i), 0);
-            }
-            for offset in (align_off + words * 8)..len {
-                core::ptr::write_volatile(base.add(offset), 0);
-            }
+            Self::wipe_mapping(self.staging.mapped, bytes.min(self.staging.capacity));
         }
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     unsafe fn submit_and_wait(&mut self) -> Result<(), VulkanError> {
@@ -4560,6 +4832,9 @@ impl RawVulkanEngine {
                 }
             }
         }
+        unsafe {
+            self.ensure_ready()?;
+        }
         let mut guard = SettleProverOnExit(self, true);
         let res = job(guard.engine());
         guard.1 = res.is_err();
@@ -4567,11 +4842,24 @@ impl RawVulkanEngine {
         res
     }
 
+    /// Reserve `required` bytes of scratch in one prover buffer for the job being started,
+    /// replacing the buffer with a larger one if needed. The contents of a replaced buffer are
+    /// NOT carried over: use this only for a buffer the job is about to write, never for one it
+    /// reads (those go through [`GpuBuffer::check_read`]).
+    ///
+    /// A replacement is zero-filled, and the displaced buffer's session extent is zero-filled,
+    /// in one submission before the old buffer is freed. If that submission does not complete,
+    /// the old buffer stays installed, the new one is parked in `limbo` (the device may still
+    /// reference it), and the call fails.
     unsafe fn ensure_one_prover_buf(
         &mut self,
         slot_offset: fn(&mut ProverArena) -> &mut GpuBuffer,
         required: u64,
     ) -> Result<bool, VulkanError> {
+        // Defence in depth: never allocate, free or resubmit while a submission may be live.
+        if self.exec_state != EngineExecState::Ready {
+            return Err(VulkanError::WorkspacePoisoned);
+        }
         let req = required.max(MIN_BUFFER_ALLOC_BYTES);
         let cur_snap = {
             let cur = slot_offset(&mut self.prover);
@@ -4584,7 +4872,26 @@ impl RawVulkanEngine {
             }
         };
         let grew = if let Some(tgt) = self.plan_vram_growth(&cur_snap, req)? {
-            let new_buf = unsafe { self.alloc_gpu_buffer(tgt, false)? };
+            let mut new_buf = unsafe { self.alloc_gpu_buffer(tgt, false)? };
+            let scrubbed = unsafe {
+                self.begin_cmd().and_then(|()| {
+                    self.cmd_scrub_vram(&[
+                        (new_buf.buffer, new_buf.capacity & !7),
+                        (cur_snap.buffer, cur_snap.used.min(cur_snap.capacity) & !7),
+                    ]);
+                    self.submit_and_wait()
+                })
+            };
+            if let Err(e) = scrubbed {
+                if self.exec_state == EngineExecState::Ready {
+                    unsafe {
+                        self.destroy_gpu_buffer(&mut new_buf);
+                    }
+                } else {
+                    self.prover.limbo.push(new_buf);
+                }
+                return Err(e);
+            }
             let mut old = core::mem::replace(slot_offset(&mut self.prover), new_buf);
             unsafe {
                 self.destroy_gpu_buffer(&mut old);
@@ -4597,6 +4904,29 @@ impl RawVulkanEngine {
         let aligned_req = req.saturating_add(7) & !7;
         slot.used = slot.used.max(aligned_req).min(slot.capacity);
         Ok(grew)
+    }
+
+    /// The session established by a round-0 commit, or a clean error. Every prover entry point
+    /// other than the commit calls this before it validates ranges or records a command.
+    fn prover_session(&self) -> Result<ProverSessionDims, VulkanError> {
+        if self.exec_state != EngineExecState::Ready {
+            return Err(VulkanError::WorkspacePoisoned);
+        }
+        self.prover.session.ok_or_else(|| {
+            out_of_range(
+                "prover session arena (no committed round-0 witness)",
+                1,
+                0,
+            )
+        })
+    }
+
+    /// Reject a workgroup count the device cannot dispatch in one call.
+    fn check_wg_count(&self, count: u64) -> Result<u32, VulkanError> {
+        if count == 0 || count > u64::from(self.max_wg_x) {
+            return Err(VulkanError::UnsupportedDeviceLimits);
+        }
+        to_u32(count)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4691,13 +5021,23 @@ impl RawVulkanEngine {
 
         if changed {
             unsafe {
-                self.refresh_prover_descriptor_sets();
+                self.refresh_prover_descriptor_sets()?;
             }
         }
         Ok(())
     }
 
-    unsafe fn refresh_prover_descriptor_sets(&self) {
+    /// Rewrite all eight prover descriptor sets. Updating a set that a pending command buffer
+    /// uses is undefined, so this refuses unless the engine is `Ready`.
+    unsafe fn refresh_prover_descriptor_sets(&self) -> Result<(), VulkanError> {
+        if self.exec_state != EngineExecState::Ready {
+            return Err(VulkanError::WorkspacePoisoned);
+        }
+        #[cfg(test)]
+        {
+            let (allocs, refreshes) = self.mutation_counters.get();
+            self.mutation_counters.set((allocs, refreshes + 1));
+        }
         let mk_info = |buf: &GpuBuffer| VkDescriptorBufferInfo {
             buffer: buf.buffer,
             offset: 0,
@@ -4773,6 +5113,7 @@ impl RawVulkanEngine {
         unsafe {
             (self.fns.update_descriptor_sets)(self.device, 48, writes.as_ptr(), 0, null());
         }
+        Ok(())
     }
 
     unsafe fn dispatch_whir_lde_1d(
@@ -4914,6 +5255,9 @@ impl RawVulkanEngine {
     where
         F: FnMut(usize, usize, &mut [u64]),
     {
+        // A commit re-establishes the arena; until it succeeds there is no session.
+        self.prover.session = None;
+        self.prover.air = None;
         if num_polys == 0
             || !(2..=26).contains(&num_vars)
             || !blowup.is_power_of_two()
@@ -4932,34 +5276,40 @@ impl RawVulkanEngine {
         }
         let num_groups = domain_len / group_arity;
         let log_d = domain_len.trailing_zeros();
+        // These reach push constants and dispatch counts as `u32`.
+        to_u32(domain_len)?;
+        to_u32(num_polys)?;
+        to_u32(blowup)?;
 
         let total_poly_words = num_polys
             .checked_mul(c_len)
             .ok_or(crate::AccelError::LengthOverflow)?;
-        let req_witness = ((total_poly_words + extra_witness_words) as u64) * 8;
-        let req_mono = (total_poly_words as u64) * 8;
-        let req_cw0 = ((num_polys * domain_len) as u64) * 8;
-        let req_tree0 = ((2 * num_groups) as u64) * 32;
+        let (c, np, tpw) = (to_u64(c_len), to_u64(num_polys), to_u64(total_poly_words));
+        let extra = to_u64(extra_witness_words);
+        let req_witness = cmul(cadd(tpw, extra)?, WORD_BYTES)?;
+        let req_mono = cmul(tpw, WORD_BYTES)?;
+        let req_cw0 = cmul(cmul(np, to_u64(domain_len))?, WORD_BYTES)?;
+        let req_tree0 = cmul(cmul(2, to_u64(num_groups))?, EXT4_BYTES)?;
         let batch_sc_ext4 = if num_polys > 1 {
-            total_poly_words + num_polys * (c_len / 2)
+            cadd(tpw, cmul(np, c / 2)?)?
         } else {
-            total_poly_words
+            tpw
         };
-        let work_a_ext4 = ((c_len + 2) * 2).max(batch_sc_ext4);
-        let req_work_a = ((work_a_ext4 as u64) * 32).max((4 * c_len as u64) * 8);
-        let max_shard_half = (extra_witness_words / 256 / 2).max(1);
-        let work_b_ext4 = ((c_len + 2) * 2)
+        let work_a_ext4 = ((c + 2) * 2).max(batch_sc_ext4);
+        let req_work_a = cmul(work_a_ext4, EXT4_BYTES)?.max(cmul(4 * c, WORD_BYTES)?);
+        let max_shard_half = (extra / 256 / 2).max(1);
+        let work_b_ext4 = ((c + 2) * 2)
             .max(batch_sc_ext4)
-            .max(8 * max_shard_half * 12);
-        let req_work_b = (work_b_ext4 as u64) * 32;
+            .max(cmul(cmul(8, max_shard_half)?, 12)?);
+        let req_work_b = cmul(work_b_ext4, EXT4_BYTES)?;
 
-        let stg_cw_stride = max_stage1_domain_ext4.max(1024);
-        let stg_tr_stride = 2 * max_stage1_groups.max(512);
-        let req_cw_stage = (2 * stg_cw_stride as u64) * 32;
-        let req_tree_stage = (2 * stg_tr_stride as u64) * 32;
+        let stg_cw_stride = to_u32(max_stage1_domain_ext4.max(1024))?;
+        let stg_tr_stride = to_u32(cmul(2, to_u64(max_stage1_groups.max(512)))?)?;
+        let req_cw_stage = cmul(cmul(2, u64::from(stg_cw_stride))?, EXT4_BYTES)?;
+        let req_tree_stage = cmul(cmul(2, u64::from(stg_tr_stride))?, EXT4_BYTES)?;
         let req_aux_in = 8 * 1024 * 1024;
         let req_aux_b =
-            ((6 * (extra_witness_words / 256).max(1024)) as u64 * 32).max(8 * 1024 * 1024);
+            cmul(cmul(6, (extra / 256).max(1024))?, EXT4_BYTES)?.max(8 * 1024 * 1024);
         let req_partials = 4 * 1024 * 1024;
 
         unsafe {
@@ -4977,8 +5327,8 @@ impl RawVulkanEngine {
                 req_partials,
             )?;
         }
-        self.prover.stage_cw_stride_ext4 = stg_cw_stride as u32;
-        self.prover.stage_tree_stride_ext4 = stg_tr_stride as u32;
+        self.prover.stage_cw_stride_ext4 = stg_cw_stride;
+        self.prover.stage_tree_stride_ext4 = stg_tr_stride;
         for (i, slot) in self.prover.salt_seed_words.iter_mut().enumerate() {
             let mut b = [0u8; 8];
             b.copy_from_slice(&salt_seed[i * 8..(i + 1) * 8]);
@@ -5584,6 +5934,10 @@ impl RawVulkanEngine {
             for (i, w) in top_words.into_iter().enumerate() {
                 top_node[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
             }
+            self.prover.session = Some(ProverSessionDims {
+                num_polys,
+                num_vars,
+            });
             Ok((top_node, subs))
         }
     }
@@ -5596,19 +5950,43 @@ impl RawVulkanEngine {
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
             let num_polys = lambda_pows.len();
-            if num_polys == 0 || eq_kronecker_768.len() != 768 * num_polys {
+            if num_polys == 0 || num_polys.checked_mul(768) != Some(eq_kronecker_768.len()) {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
-            let c_len = 1usize << num_vars;
-            let need_work = ((num_polys * c_len + num_polys * (c_len / 2)) as u64) * 32;
-            let eq_bytes = (eq_kronecker_768.len() as u64) * 32;
-            let lam_bytes = (num_polys as u64) * 32;
-            let stg_bytes = eq_bytes + lam_bytes;
+            let c_len = pow2_len(num_vars, 26)?;
+            let dims = engine.prover_session()?;
+            engine.prover.air = None;
+            if num_vars != dims.num_vars {
+                return Err(out_of_range(
+                    "batch sumcheck num_vars (committed session)",
+                    to_u64(dims.num_vars),
+                    to_u64(num_vars),
+                ));
+            }
+            if num_polys != dims.num_polys {
+                return Err(out_of_range(
+                    "batch sumcheck num_polys (committed session)",
+                    to_u64(dims.num_polys),
+                    to_u64(num_polys),
+                ));
+            }
+            let (np, c) = (to_u64(num_polys), to_u64(c_len));
+            // One workgroup row per polynomial table.
+            engine.check_wg_count(np)?;
+            let need_work = cmul(cadd(cmul(np, c)?, cmul(np, c / 2)?)?, EXT4_BYTES)?;
+            let eq_bytes = cmul(to_u64(eq_kronecker_768.len()), EXT4_BYTES)?;
+            let lam_bytes = cmul(np, EXT4_BYTES)?;
+            let stg_bytes = cadd(eq_bytes, lam_bytes)?;
+            // Round 0 reads the committed witness as `num_polys` tables of `c_len` words.
+            engine.prover.vram_witness.check_read(
+                "vram_witness (batch sumcheck tables)",
+                span_end(0, np, c, WORD_BYTES)?,
+            )?;
             unsafe {
                 engine.ensure_one_prover_buf(|p| &mut p.vram_work_a, need_work)?;
                 engine.ensure_one_prover_buf(|p| &mut p.vram_work_b, need_work)?;
                 engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, stg_bytes)?;
-                engine.refresh_prover_descriptor_sets();
+                engine.refresh_prover_descriptor_sets()?;
                 engine.reserve_job_staging(stg_bytes)?;
 
                 let eq_flat = core::slice::from_raw_parts(
@@ -5706,12 +6084,40 @@ impl RawVulkanEngine {
         src_base: u32,
     ) -> Result<([u64; 4], [u64; 4]), VulkanError> {
         self.run_prover_job(|engine| {
+            engine.prover_session()?;
+            if num_polys == 0 || cur_len < 2 || !cur_len.is_power_of_two() {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            to_u32(cur_len)?;
+            to_u32(num_polys)?;
             let half = cur_len / 2;
-            let total_wg = half.div_ceil(256).max(1) as u32;
-            let part_bytes = (2 * total_wg as u64) * 32;
+            let total_wg = to_u32(half.div_ceil(256).max(1))?;
+            let part_bytes = cmul(2 * u64::from(total_wg), EXT4_BYTES)?;
+            let (np, len) = (to_u64(num_polys), to_u64(cur_len));
+            // Mode 3 reads `src_base + p * cur_len + 2 * gid (+ 1)` for `p < num_polys`.
+            let src_end = span_end(u64::from(src_base), np, len, EXT4_BYTES)?;
+            engine
+                .prover
+                .vram_work_a
+                .check_read("vram_work_a (sumcheck kernels)", src_end)?;
+            if round > 0 {
+                engine
+                    .prover
+                    .vram_work_b
+                    .check_read("vram_work_b (sumcheck tables)", src_end)?;
+            } else {
+                engine.prover.vram_witness.check_read(
+                    "vram_witness (sumcheck tables)",
+                    span_end(0, np, len, WORD_BYTES)?,
+                )?;
+            }
+            engine
+                .prover
+                .vram_aux_in
+                .check_read("vram_aux_in (lambda powers)", cmul(np, EXT4_BYTES)?)?;
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(part_bytes)?;
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
@@ -5809,8 +6215,41 @@ impl RawVulkanEngine {
         chal: [u64; 4],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
+            engine.prover_session()?;
+            if num_polys == 0 || cur_len < 2 || !cur_len.is_power_of_two() {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            to_u32(cur_len)?;
+            to_u32(num_polys)?;
             let half = cur_len / 2;
-            let total_wg = half.div_ceil(256).max(1) as u32;
+            let total_wg = to_u32(half.div_ceil(256).max(1))?;
+            let (np, len) = (to_u64(num_polys), to_u64(cur_len));
+            // Mode 4 reads like mode 3 and writes `dst_base + p * half + gid` in both buffers.
+            let src_end = span_end(u64::from(src_base), np, len, EXT4_BYTES)?;
+            let dst_end = span_end(u64::from(dst_base), np, to_u64(half), EXT4_BYTES)?;
+            engine
+                .prover
+                .vram_work_a
+                .check_read("vram_work_a (sumcheck kernels)", src_end)?;
+            if round > 0 {
+                engine
+                    .prover
+                    .vram_work_b
+                    .check_read("vram_work_b (sumcheck tables)", src_end)?;
+            } else {
+                engine.prover.vram_witness.check_read(
+                    "vram_witness (sumcheck tables)",
+                    span_end(0, np, len, WORD_BYTES)?,
+                )?;
+            }
+            engine
+                .prover
+                .vram_work_a
+                .reserve_write("vram_work_a (folded kernels)", dst_end)?;
+            engine
+                .prover
+                .vram_work_b
+                .reserve_write("vram_work_b (folded tables)", dst_end)?;
             unsafe {
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
                 engine.begin_cmd()?;
@@ -5867,21 +6306,43 @@ impl RawVulkanEngine {
             if out_tables.len() != elems || out_kernels.len() != elems {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
-            let slice_bytes = (elems as u64) * 32;
+            engine.prover_session()?;
+            if elems == 0 {
+                return Ok(());
+            }
+            let slice_bytes = cmul(to_u64(elems), EXT4_BYTES)?;
+            let both_bytes = cmul(slice_bytes, 2)?;
+            let src_off = cmul(u64::from(src_base), EXT4_BYTES)?;
+            // Refuse before staging grows: the source ranges must be session data.
+            let src_end = cadd(src_off, slice_bytes)?;
+            engine
+                .prover
+                .vram_work_b
+                .check_read("vram_work_b (sumcheck tail tables)", src_end)?;
+            engine
+                .prover
+                .vram_work_a
+                .check_read("vram_work_a (sumcheck tail kernels)", src_end)?;
             unsafe {
-                engine.reserve_job_staging(slice_bytes * 2)?;
+                engine.reserve_job_staging(both_bytes)?;
+                let stg_cap = engine.staging.capacity;
+                let ct = checked_copy(
+                    "vram_work_b (sumcheck tail tables)",
+                    &engine.prover.vram_work_b,
+                    src_off,
+                    stg_cap,
+                    0,
+                    slice_bytes,
+                )?;
+                let ck = checked_copy(
+                    "vram_work_a (sumcheck tail kernels)",
+                    &engine.prover.vram_work_a,
+                    src_off,
+                    stg_cap,
+                    slice_bytes,
+                    slice_bytes,
+                )?;
                 engine.begin_cmd()?;
-                let src_off = (src_base as u64) * 32;
-                let ct = VkBufferCopy {
-                    src_offset: src_off,
-                    dst_offset: 0,
-                    size: slice_bytes,
-                };
-                let ck = VkBufferCopy {
-                    src_offset: src_off,
-                    dst_offset: slice_bytes,
-                    size: slice_bytes,
-                };
                 (engine.fns.cmd_copy_buffer)(
                     engine.cmd_buf,
                     engine.prover.vram_work_b.buffer,
@@ -5926,16 +6387,44 @@ impl RawVulkanEngine {
         out_dots: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
-            let core_len = 1usize << num_vars;
+            let core_len = pow2_len(num_vars, 26)?;
+            engine.prover_session()?;
+            engine.prover.air = None;
             let k_len = core_len + 2;
             let num_dots = out_dots.len();
             let kron_bytes = 768u64 * 32;
-            let wg_k = k_len.div_ceil(256) as u32;
-            let wg_dot = core_len.div_ceil(256) as u32;
-            let part_bytes = ((num_dots as u64) * (wg_dot as u64) * 32).max(32);
+            let wg_k = to_u32(k_len.div_ceil(256))?;
+            let wg_dot = to_u32(core_len.div_ceil(256))?;
+            let nd = to_u64(num_dots);
+            if num_dots > 0 {
+                // One workgroup row per dot product.
+                engine.check_wg_count(nd)?;
+            }
+            let part_bytes = cmul(cmul(nd, u64::from(wg_dot))?, EXT4_BYTES)?.max(32);
+            // Mode 0 reads the 768-entry table from `vram_aux_in` and writes `k_len` kernel
+            // entries at the start of `vram_work_a`.
+            engine
+                .prover
+                .vram_aux_in
+                .reserve_write("vram_aux_in (monomial Kronecker table)", kron_bytes)?;
+            engine.prover.vram_work_a.reserve_write(
+                "vram_work_a (monomial kernel)",
+                cmul(to_u64(k_len), EXT4_BYTES)?,
+            )?;
+            if num_dots > 0 {
+                // Mode 1 reads `p * core_len + gid` words and `dot_k_offset + gid` kernels.
+                engine.prover.vram_mono.check_read(
+                    "vram_mono (dot product polynomials)",
+                    span_end(0, nd, to_u64(core_len), WORD_BYTES)?,
+                )?;
+                engine.prover.vram_work_a.check_read(
+                    "vram_work_a (dot product kernel)",
+                    span_end(u64::from(dot_k_offset), to_u64(core_len), 1, EXT4_BYTES)?,
+                )?;
+            }
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(kron_bytes.max(part_bytes))?;
                 let flat_in =
@@ -6105,20 +6594,38 @@ impl RawVulkanEngine {
         z_ood_kronecker_2x768: &[[u64; 4]; 1536],
     ) -> Result<[[u64; 4]; 2], VulkanError> {
         self.run_prover_job(|engine| {
-            let core_len = 1usize << num_vars;
+            let core_len = pow2_len(num_vars, 26)?;
+            engine.prover_session()?;
+            engine.prover.air = None;
             let coeff_len = core_len + 2;
             let gpu_eval_len = coeff_len.min(1usize << 24);
             let has_top_overflow = coeff_len > (1usize << 24) && !is_single;
             let num_polys = weights.len();
-            let w_bytes = ((2 * num_polys.max(1)) as u64) * 32;
+            to_u32(num_polys)?;
+            let w_bytes = cmul(cmul(2, to_u64(num_polys.max(1)))?, EXT4_BYTES)?;
             let z_bytes = 1536u64 * 32;
-            let wg_build = coeff_len.div_ceil(256) as u32;
-            let wg_c = gpu_eval_len.div_ceil(256) as u32;
-            let part_bytes = (2 * wg_c as u64) * 32;
+            let wg_build = to_u32(coeff_len.div_ceil(256))?;
+            let wg_c = to_u32(gpu_eval_len.div_ceil(256))?;
+            let part_bytes = cmul(2 * u64::from(wg_c), EXT4_BYTES)?;
             let read_bytes = part_bytes + if has_top_overflow { 32 } else { 0 };
+            // Mode 2 reads `p * core_len + gid` words of `vram_mono` (one polynomial when
+            // `is_single`) and writes `core_len + 2` coefficients at the start of `vram_work_b`.
+            let mono_polys = if is_single { 1 } else { to_u64(num_polys) };
+            engine.prover.vram_mono.check_read(
+                "vram_mono (opening polynomials)",
+                span_end(0, mono_polys, to_u64(core_len), WORD_BYTES)?,
+            )?;
+            engine
+                .prover
+                .vram_aux_in
+                .reserve_write("vram_aux_in (weights, OOD Kronecker tables)", w_bytes.max(z_bytes))?;
+            engine.prover.vram_work_b.reserve_write(
+                "vram_work_b (opening coefficients)",
+                cmul(to_u64(coeff_len), EXT4_BYTES)?,
+            )?;
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging((w_bytes + z_bytes).max(read_bytes))?;
                 if !is_single && !weights.is_empty() {
@@ -6272,11 +6779,14 @@ impl RawVulkanEngine {
                     &co,
                 );
                 if has_top_overflow {
-                    let ctop = VkBufferCopy {
-                        src_offset: (core_len as u64) * 32,
-                        dst_offset: part_bytes,
-                        size: 32,
-                    };
+                    let ctop = checked_copy(
+                        "vram_work_b (top opening coefficient)",
+                        &engine.prover.vram_work_b,
+                        cmul(to_u64(core_len), EXT4_BYTES)?,
+                        engine.staging.capacity,
+                        part_bytes,
+                        32,
+                    )?;
                     (engine.fns.cmd_copy_buffer)(
                         engine.cmd_buf,
                         engine.prover.vram_work_b.buffer,
@@ -6333,14 +6843,26 @@ impl RawVulkanEngine {
         xi_z_kronecker_2x768: &[[u64; 4]; 1536],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
+            engine.prover_session()?;
+            engine.prover.air = None;
             let one_bytes = 768u64 * 32;
             let both_bytes = 1536u64 * 32;
             let gpu_k_len = k_len.min(1usize << 24);
             let tail_count = k_len.saturating_sub(1usize << 24);
-            let tail_bytes = (tail_count as u64) * 32;
-            let wg = gpu_k_len.div_ceil(256) as u32;
+            let tail_bytes = cmul(to_u64(tail_count), EXT4_BYTES)?;
+            let wg = to_u32(gpu_k_len.div_ceil(256))?;
+            // Mode 0 accumulates into `k_base + gid` for `gid < k_len`; the kernel must already
+            // be session data. Checked before the tail vector below is sized from `k_len`.
+            engine.prover.vram_work_a.check_read(
+                "vram_work_a (OOD kernel)",
+                span_end(u64::from(k_base), to_u64(k_len), 1, EXT4_BYTES)?,
+            )?;
+            engine
+                .prover
+                .vram_aux_in
+                .reserve_write("vram_aux_in (OOD Kronecker table)", one_bytes)?;
             unsafe {
-                engine.reserve_job_staging(both_bytes + tail_bytes)?;
+                engine.reserve_job_staging(cadd(both_bytes, tail_bytes)?)?;
                 let flat = core::slice::from_raw_parts(
                     xi_z_kronecker_2x768.as_ptr().cast::<u64>(),
                     1536 * 4,
@@ -6458,11 +6980,22 @@ impl RawVulkanEngine {
         k_base: u32,
     ) -> Result<[[u64; 4]; 3], VulkanError> {
         self.run_prover_job(|engine| {
-            let total_wg = pairs_ck.div_ceil(256).max(1) as u32;
-            let part_bytes = (3 * total_wg as u64) * 32;
+            engine.prover_session()?;
+            to_u32(pairs_ck)?;
+            let total_wg = to_u32(pairs_ck.div_ceil(256).max(1))?;
+            let part_bytes = cmul(3 * u64::from(total_wg), EXT4_BYTES)?;
+            // Mode 5 reads `base + 2 * gid (+ 1)` for `gid < pairs_ck` in both buffers.
+            engine.prover.vram_work_b.check_read(
+                "vram_work_b (fold coefficients)",
+                span_end(u64::from(c_base), to_u64(pairs_ck), 2, EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_work_a.check_read(
+                "vram_work_a (fold kernel)",
+                span_end(u64::from(k_base), to_u64(pairs_ck), 2, EXT4_BYTES)?,
+            )?;
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(part_bytes)?;
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
@@ -6560,12 +7093,35 @@ impl RawVulkanEngine {
         phi: [u64; 4],
     ) -> Result<[[u64; 4]; 2], VulkanError> {
         self.run_prover_job(|engine| {
+            engine.prover_session()?;
+            to_u32(pairs_c)?;
             let max_threads = pairs_c.max(k_half as usize + 1);
-            let total_wg = max_threads.div_ceil(256).max(1) as u32;
-            let part_bytes = (2 * total_wg as u64) * 32;
+            let total_wg = to_u32(max_threads.div_ceil(256).max(1))?;
+            let part_bytes = cmul(2 * u64::from(total_wg), EXT4_BYTES)?;
+            // Mode 6 reads `k_src + 2 * gid (+ 1)` for `gid < k_half`, reads
+            // `c_base + 2 * gid (+ 1)` for `gid < min(pairs_c, k_half - 1)`, and writes
+            // `k_dst + gid` for `gid <= k_half`.
+            let kh = u64::from(k_half);
+            engine.prover.vram_work_a.check_read(
+                "vram_work_a (fold kernel)",
+                span_end(u64::from(k_src), kh, 2, EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_work_b.check_read(
+                "vram_work_b (fold coefficients)",
+                span_end(
+                    u64::from(c_base),
+                    to_u64(pairs_c).min(kh.saturating_sub(1)),
+                    2,
+                    EXT4_BYTES,
+                )?,
+            )?;
+            engine.prover.vram_work_a.reserve_write(
+                "vram_work_a (folded kernel)",
+                span_end(u64::from(k_dst), cadd(kh, 1)?, 1, EXT4_BYTES)?,
+            )?;
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(part_bytes)?;
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
@@ -6666,7 +7222,51 @@ impl RawVulkanEngine {
         norm_len: usize,
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
-            let total_wg = (m + 1).div_ceil(256).max(1) as u32;
+            engine.prover_session()?;
+            to_u32(m)?;
+            let total_wg = to_u32(cadd(to_u64(m), 1)?.div_ceil(256).max(1))?;
+            // Mode 7 reads `c_src + 2 * gid (+ 1)` for `gid < m` and writes `c_dst + gid` for
+            // `gid <= m`, both in `vram_work_b`.
+            engine.prover.vram_work_b.check_read(
+                "vram_work_b (fold coefficients)",
+                span_end(u64::from(c_src), to_u64(m), 2, EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_work_b.reserve_write(
+                "vram_work_b (folded coefficients)",
+                span_end(u64::from(c_dst), cadd(to_u64(m), 1)?, 1, EXT4_BYTES)?,
+            )?;
+            let normalize = normalize_to_zero && c_dst != 0 && norm_len > 0;
+            let norm_copy = if normalize {
+                // Same-buffer copies must not overlap: the source starts at `c_dst`.
+                let norm_bytes = cmul(to_u64(norm_len), EXT4_BYTES)?;
+                let src_off = cmul(u64::from(c_dst), EXT4_BYTES)?;
+                if norm_bytes > src_off {
+                    return Err(out_of_range(
+                        "fold normalisation length (overlaps its source)",
+                        src_off,
+                        norm_bytes,
+                    ));
+                }
+                let cp_b = checked_copy(
+                    "vram_work_b (fold normalisation)",
+                    &engine.prover.vram_work_b,
+                    src_off,
+                    engine.prover.vram_work_b.capacity,
+                    0,
+                    norm_bytes,
+                )?;
+                checked_copy(
+                    "vram_work_a (fold normalisation)",
+                    &engine.prover.vram_work_a,
+                    src_off,
+                    engine.prover.vram_work_a.capacity,
+                    0,
+                    norm_bytes,
+                )?;
+                Some(cp_b)
+            } else {
+                None
+            };
             unsafe {
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
                 engine.begin_cmd()?;
@@ -6703,18 +7303,13 @@ impl RawVulkanEngine {
                         aux5: 0,
                     },
                 );
-                if normalize_to_zero && c_dst != 0 && norm_len > 0 {
+                if let Some(cp) = norm_copy {
                     engine.cmd_barrier(
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_ACCESS_SHADER_WRITE_BIT,
                         VK_ACCESS_TRANSFER_READ_BIT,
                     );
-                    let cp = VkBufferCopy {
-                        src_offset: (c_dst as u64) * 32,
-                        dst_offset: 0,
-                        size: (norm_len as u64) * 32,
-                    };
                     (engine.fns.cmd_copy_buffer)(
                         engine.cmd_buf,
                         engine.prover.vram_work_b.buffer,
@@ -6750,11 +7345,30 @@ impl RawVulkanEngine {
             {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
+            engine.prover_session()?;
             let num_groups = domain_len / group_arity;
             let log_d = domain_len.trailing_zeros();
+            to_u32(domain_len)?;
+            to_u32(coeff_len)?;
+            to_u32(stage_idx)?;
             let slot = (stage_idx & 1) as u32;
             let cw_base = slot * engine.prover.stage_cw_stride_ext4;
             let tree_base = slot * engine.prover.stage_tree_stride_ext4;
+            // Mode 6 reads `coeff_len` coefficients from the start of `vram_work_b` and writes
+            // `domain_len` codeword entries at `cw_base`; modes 10-12 write tree nodes
+            // `tree_base + 1 .. tree_base + 2 * num_groups`.
+            engine.prover.vram_work_b.check_read(
+                "vram_work_b (stage coefficients)",
+                cmul(to_u64(coeff_len), EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_cw_stage.reserve_write(
+                "vram_cw_stage (stage codeword)",
+                span_end(u64::from(cw_base), to_u64(domain_len), 1, EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_tree_stage.reserve_write(
+                "vram_tree_stage (stage Merkle tree)",
+                span_end(u64::from(tree_base), to_u64(num_groups), 2, EXT4_BYTES)?,
+            )?;
 
             unsafe {
                 engine.reserve_job_staging(32)?;
@@ -6975,11 +7589,14 @@ impl RawVulkanEngine {
                     );
                 }
 
-                let copy_top = VkBufferCopy {
-                    src_offset: ((tree_base + 1) as u64) * 32,
-                    dst_offset: 0,
-                    size: 32,
-                };
+                let copy_top = checked_copy(
+                    "vram_tree_stage (stage top node)",
+                    &engine.prover.vram_tree_stage,
+                    cmul(cadd(u64::from(tree_base), 1)?, EXT4_BYTES)?,
+                    engine.staging.capacity,
+                    0,
+                    32,
+                )?;
                 engine.cmd_barrier(
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -7019,12 +7636,24 @@ impl RawVulkanEngine {
         z_ood_kronecker_2x768: &[[u64; 4]; 1536],
     ) -> Result<[[u64; 4]; 2], VulkanError> {
         self.run_prover_job(|engine| {
+            engine.prover_session()?;
+            engine.prover.air = None;
+            to_u32(coeff_len)?;
             let z_bytes = 1536u64 * 32;
-            let wg = coeff_len.div_ceil(256).max(1) as u32;
-            let part_bytes = (2 * wg as u64) * 32;
+            let wg = to_u32(coeff_len.div_ceil(256).max(1))?;
+            let part_bytes = cmul(2 * u64::from(wg), EXT4_BYTES)?;
+            // Mode 0 (`sub_op == 2`) reads `c_base + gid` for `gid < coeff_len`.
+            engine.prover.vram_work_b.check_read(
+                "vram_work_b (stage coefficients)",
+                span_end(u64::from(c_base), to_u64(coeff_len), 1, EXT4_BYTES)?,
+            )?;
+            engine
+                .prover
+                .vram_aux_in
+                .reserve_write("vram_aux_in (OOD Kronecker tables)", z_bytes)?;
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(z_bytes.max(part_bytes))?;
                 let flat_z = core::slice::from_raw_parts(
@@ -7162,23 +7791,36 @@ impl RawVulkanEngine {
             let num_q = q_indices.len();
             let num_s = sib_indices.len();
             let is_ext4 = stage_idx > 0;
-            let salt_words = if is_ext4 { 0 } else { 2 * num_q };
+            let (nq, ns) = (to_u64(num_q), to_u64(num_s));
+            let (arity, np, ng) = (
+                to_u64(group_arity),
+                to_u64(num_polys),
+                to_u64(num_groups),
+            );
+            let salt_words = if is_ext4 { 0 } else { cmul(2, nq)? };
             let fiber_words = if is_ext4 {
-                4 * group_arity * num_q
+                cmul(cmul(4, arity)?, nq)?
             } else {
-                num_polys * group_arity * num_q
+                cmul(cmul(np, arity)?, nq)?
             };
-            let expected_out = salt_words + fiber_words + 4 * num_s;
-            if out_words.len() != expected_out {
+            let expected_out = cadd(cadd(salt_words, fiber_words)?, cmul(4, ns)?)?;
+            if to_u64(out_words.len()) != expected_out {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
+            engine.prover_session()?;
             if expected_out == 0 {
                 return Ok(());
             }
+            engine.prover.air = None;
+            to_u32(num_q)?;
+            to_u32(num_s)?;
+            to_u32(group_arity)?;
+            to_u32(num_polys)?;
+            to_u32(num_groups)?;
 
             let in_words = num_q + num_s;
-            let in_bytes = (in_words.max(1) as u64) * 8;
-            let out_bytes = (expected_out as u64) * 8;
+            let in_bytes = cmul(to_u64(in_words.max(1)), WORD_BYTES)?;
+            let out_bytes = cmul(expected_out, WORD_BYTES)?;
             let slot = (stage_idx & 1) as u32;
             let t_base = if is_ext4 {
                 (slot * engine.prover.stage_tree_stride_ext4) as u64
@@ -7191,13 +7833,49 @@ impl RawVulkanEngine {
                 0
             };
             let max_threads = num_q.max(num_s).max(1);
+            // Mode 13 indexes the codeword and the tree through the uploaded index lists, so
+            // their contents are validated here: a query names a group, a sibling names a node.
+            if let Some(&bad) = q_indices.iter().find(|&&g| g >= ng) {
+                return Err(out_of_range("query group index", ng, bad));
+            }
+            let nodes = cmul(2, ng)?;
+            if let Some(&bad) = sib_indices.iter().find(|&&n| n >= nodes) {
+                return Err(out_of_range("Merkle sibling node index", nodes, bad));
+            }
+            if is_ext4 {
+                if num_q > 0 {
+                    engine.prover.vram_cw_stage.check_read(
+                        "vram_cw_stage (query fibers)",
+                        span_end(c_base, arity, ng, EXT4_BYTES)?,
+                    )?;
+                }
+                if num_s > 0 {
+                    engine.prover.vram_tree_stage.check_read(
+                        "vram_tree_stage (query siblings)",
+                        span_end(t_base, nodes, 1, EXT4_BYTES)?,
+                    )?;
+                }
+            } else {
+                if num_q > 0 {
+                    engine.prover.vram_cw0.check_read(
+                        "vram_cw0 (query fibers)",
+                        span_end(0, cmul(np, arity)?, ng, WORD_BYTES)?,
+                    )?;
+                }
+                if num_s > 0 {
+                    engine.prover.vram_tree0.check_read(
+                        "vram_tree0 (query siblings)",
+                        span_end(0, nodes, 1, EXT4_BYTES)?,
+                    )?;
+                }
+            }
 
             unsafe {
                 let mut regrew = false;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, in_bytes)?;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_partials, out_bytes)?;
                 if regrew {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(in_bytes.max(out_bytes))?;
                 engine.write_staging_u64s(0, q_indices);
@@ -7273,7 +7951,8 @@ impl RawVulkanEngine {
                     size_of::<WhirLdePushConsts>() as u32,
                     (&pc as *const WhirLdePushConsts).cast::<c_void>(),
                 );
-                (engine.fns.cmd_dispatch)(engine.cmd_buf, max_threads.div_ceil(256) as u32, 1, 1);
+                let gather_wg = engine.check_wg_count(to_u64(max_threads.div_ceil(256)))?;
+                (engine.fns.cmd_dispatch)(engine.cmd_buf, gather_wg, 1, 1);
                 engine.cmd_barrier(
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -7317,18 +7996,27 @@ impl RawVulkanEngine {
             if num_claims == 0 {
                 return Ok(());
             }
-            if z_pow_256.len() != num_claims * 256 {
+            if num_claims.checked_mul(256) != Some(z_pow_256.len()) {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
-            let z_bytes = (z_pow_256.len() as u64) * 8;
-            let m_bytes = (num_claims as u64) * 64;
-            let total_wg = k_len.div_ceil(256).max(1) as u32;
+            engine.prover_session()?;
+            engine.prover.air = None;
+            to_u32(num_claims)?;
+            to_u32(k_len)?;
+            let z_bytes = cmul(to_u64(z_pow_256.len()), WORD_BYTES)?;
+            let m_bytes = cmul(to_u64(num_claims), 64)?;
+            let total_wg = to_u32(k_len.div_ceil(256).max(1))?;
+            // Mode 8 accumulates into `k_base + gid` for `gid < k_len`.
+            engine.prover.vram_work_a.check_read(
+                "vram_work_a (shift-claim kernel)",
+                span_end(u64::from(k_base), to_u64(k_len), 1, EXT4_BYTES)?,
+            )?;
             unsafe {
                 let mut regrew = false;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, z_bytes)?;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_b, m_bytes)?;
                 if regrew {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(z_bytes + m_bytes)?;
                 engine.write_staging_u64s(0, z_pow_256);
@@ -7412,18 +8100,27 @@ impl RawVulkanEngine {
         out_coeffs: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
-            let bytes = (out_coeffs.len() as u64) * 32;
+            engine.prover_session()?;
+            let bytes = cmul(to_u64(out_coeffs.len()), EXT4_BYTES)?;
             if bytes == 0 {
                 return Ok(());
             }
+            let src_off = cmul(u64::from(c_base), EXT4_BYTES)?;
+            engine
+                .prover
+                .vram_work_b
+                .check_read("vram_work_b (final coefficients)", cadd(src_off, bytes)?)?;
             unsafe {
                 engine.reserve_job_staging(bytes)?;
+                let cp = checked_copy(
+                    "vram_work_b (final coefficients)",
+                    &engine.prover.vram_work_b,
+                    src_off,
+                    engine.staging.capacity,
+                    0,
+                    bytes,
+                )?;
                 engine.begin_cmd()?;
-                let cp = VkBufferCopy {
-                    src_offset: (c_base as u64) * 32,
-                    dst_offset: 0,
-                    size: bytes,
-                };
                 (engine.fns.cmd_copy_buffer)(
                     engine.cmd_buf,
                     engine.prover.vram_work_b.buffer,
@@ -7457,26 +8154,42 @@ impl RawVulkanEngine {
         static_gammas_ext4: &[[u64; 4]],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
-            if shift_tables_3m.len() != 3 * total_rows {
+            if total_rows < 2
+                || !total_rows.is_power_of_two()
+                || total_rows.checked_mul(3) != Some(shift_tables_3m.len())
+            {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
-            let sh_bytes = (shift_tables_3m.len() as u64) * 32;
-            let gm_bytes = (static_gammas_ext4.len().max(1) as u64) * 32;
-            let half_m = (total_rows / 2).max(1);
-            let need_wit = ((cols_base_word_offset as u64) + (256 * total_rows as u64)) * 8;
-            let need_wa = (2 * 256 * half_m as u64) * 32;
-            let need_wb = (8 * half_m as u64 * 12) * 32;
-            let need_ab = sh_bytes * 2;
-            let need_ain = gm_bytes + 4 * 1024 * 1024;
+            to_u32(total_rows)?;
+            engine.prover_session()?;
+            engine.prover.air = None;
+            let rows = to_u64(total_rows);
+            let sh_bytes = cmul(to_u64(shift_tables_3m.len()), EXT4_BYTES)?;
+            let gm_bytes = cmul(to_u64(static_gammas_ext4.len().max(1)), EXT4_BYTES)?;
+            let half_m = rows / 2;
+            let need_wa = cmul(cmul(2 * 256, half_m)?, EXT4_BYTES)?;
+            let need_wb = cmul(cmul(8 * 12, half_m)?, EXT4_BYTES)?;
+            let need_ab = cmul(sh_bytes, 2)?;
+            let need_ain = cadd(gm_bytes, 4 * 1024 * 1024)?;
+            // Mode 0 reads the row-major shard (`col_src + row * 256 + col`) and writes it
+            // column-major (`col_dst + col * rows + row`), both in `vram_witness`. The witness
+            // is session data from the commit: it is checked, never regrown.
+            engine.prover.vram_witness.check_read(
+                "vram_witness (shard witness rows)",
+                span_end(u64::from(witness_word_offset), rows, 256, WORD_BYTES)?,
+            )?;
+            engine.prover.vram_witness.reserve_write(
+                "vram_witness (shard witness columns)",
+                span_end(u64::from(cols_base_word_offset), rows, 256, WORD_BYTES)?,
+            )?;
             unsafe {
                 let mut regrew = false;
-                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_witness, need_wit)?;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_work_a, need_wa)?;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_work_b, need_wb)?;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_b, need_ab)?;
                 regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, need_ain)?;
                 if regrew {
-                    engine.refresh_prover_descriptor_sets();
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(sh_bytes + gm_bytes)?;
                 let flat_sh = core::slice::from_raw_parts(
@@ -7572,7 +8285,16 @@ impl RawVulkanEngine {
                     (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, 32, 1);
                     done += chunk;
                 }
-                engine.submit_and_wait()
+                engine.submit_and_wait()?;
+                let flat_static = core::slice::from_raw_parts(
+                    static_gammas_ext4.as_ptr().cast::<u64>(),
+                    static_gammas_ext4.len() * 4,
+                );
+                engine.prover.air = Some(AirShardState {
+                    total_rows: rows,
+                    static_words: flat_static.to_vec(),
+                });
+                Ok(())
             }
         })
     }
@@ -7596,22 +8318,116 @@ impl RawVulkanEngine {
         sorted_u64_off: u32,
     ) -> Result<[[u64; 4]; 8], VulkanError> {
         self.run_prover_job(|engine| {
-            let half_m = cur_m / 2;
-            let wgs_x = half_m.div_ceil(64).max(1) as u32;
-            if wgs_x > engine.max_wg_x {
-                return Err(VulkanError::UnsupportedDeviceLimits);
+            if cur_m < 2
+                || !cur_m.is_power_of_two()
+                || !cur_r.is_power_of_two()
+                || cur_s == 0
+                || (folding_signer && (cur_s < 2 || !cur_s.is_power_of_two()))
+            {
+                return Err(crate::AccelError::LengthOverflow.into());
             }
-            let dyn_bytes = (dyn_words.len().max(1) as u64) * 8;
-            let dyn_dst_off = (dyn_ext4_off as u64) * 32;
-            let part_bytes = (8 * wgs_x as u64) * 32;
+            to_u32(cur_m)?;
+            to_u32(cur_r)?;
+            to_u32(cur_s)?;
+            engine.prover_session()?;
+            let (m, r, sg) = (to_u64(cur_m), to_u64(cur_r), to_u64(cur_s));
+            let half_m = cur_m / 2;
+            let hm = m / 2;
+            let wgs_x = engine.check_wg_count(to_u64(half_m.div_ceil(64).max(1)))?;
+            // Rows index the step table (`idx & (cur_r - 1)` when folding signers, otherwise
+            // `idx` and `idx + cur_r / 2`) and the signer table (`idx / cur_r + cur_s / 2`).
+            let row_capacity = if folding_signer { cmul(sg, r)? } else { r };
+            if m > row_capacity {
+                return Err(out_of_range("AIR round rows (step/signer tables)", row_capacity, m));
+            }
+            let dyn_bytes = cmul(to_u64(dyn_words.len().max(1)), WORD_BYTES)?;
+            let dyn_dst_off = cmul(u64::from(dyn_ext4_off), EXT4_BYTES)?;
+            let dyn_word0 = cmul(u64::from(dyn_ext4_off), 4)?;
+            let part_bytes = cmul(8 * u64::from(wgs_x), EXT4_BYTES)?;
+            let (static_len, total_rows) = match engine.prover.air.as_ref() {
+                Some(air) => (to_u64(air.static_words.len()), air.total_rows),
+                None => {
+                    return Err(out_of_range(
+                        "AIR shard tables (not initialised, or overwritten since)",
+                        1,
+                        0,
+                    ));
+                }
+            };
+            if m > total_rows {
+                return Err(out_of_range("AIR round rows (shard)", total_rows, m));
+            }
+            // Group A reads 206 constraint gammas and 44 shift gammas from the static table.
+            if static_len < 250 * 4 {
+                return Err(out_of_range("AIR static gamma table", 250 * 4, static_len));
+            }
+            if dyn_word0 < static_len {
+                return Err(out_of_range(
+                    "AIR dynamic table offset (overlaps the static tables)",
+                    static_len,
+                    dyn_word0,
+                ));
+            }
+            // The dynamic tables share `vram_aux_in` with the static ones: reserve, never regrow.
+            engine.prover.vram_aux_in.reserve_write(
+                "vram_aux_in (AIR dynamic tables)",
+                cadd(dyn_dst_off, dyn_bytes)?,
+            )?;
+            engine.prover.vram_aux_in.check_read(
+                "vram_aux_in (AIR signer table)",
+                span_end(
+                    u64::from(signers_off),
+                    if folding_signer { sg } else { 1 },
+                    14,
+                    EXT4_BYTES,
+                )?,
+            )?;
+            engine.prover.vram_aux_in.check_read(
+                "vram_aux_in (AIR step table)",
+                span_end(u64::from(steps_off), r, 3, EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_aux_b.check_read(
+                "vram_aux_b (AIR shift tables)",
+                span_end(u64::from(sh_src), m, 3, EXT4_BYTES)?,
+            )?;
+            if is_round0_base {
+                engine.prover.vram_witness.check_read(
+                    "vram_witness (AIR base columns)",
+                    span_end(u64::from(col_src), m, 256, WORD_BYTES)?,
+                )?;
+            } else {
+                engine.prover.vram_work_a.check_read(
+                    "vram_work_a (AIR folded columns)",
+                    span_end(u64::from(col_src), m, 256, EXT4_BYTES)?,
+                )?;
+            }
+            // Group A writes 12 permutation outputs per row and evaluation point.
+            engine.prover.vram_work_b.reserve_write(
+                "vram_work_b (AIR permutation outputs)",
+                cmul(cmul(8 * 12, hm)?, EXT4_BYTES)?,
+            )?;
+            {
+                let gamma_limit_ext4 = engine.prover.vram_aux_in.used / EXT4_BYTES;
+                let air = engine.prover.air.as_ref().ok_or_else(length_overflow)?;
+                AirTables {
+                    static_words: &air.static_words,
+                    dyn_words,
+                    dyn_word0,
+                }
+                .validate_op_tables(
+                    hm,
+                    folding_signer.then(|| r - 1),
+                    if folding_signer { r } else { hm },
+                    u64::from(sorted_u64_off),
+                    u64::from(op_hdr_off),
+                    u64::from(op_ent_off),
+                    gamma_limit_ext4,
+                )?;
+            }
 
             unsafe {
-                let mut regrew = false;
-                regrew |= engine
-                    .ensure_one_prover_buf(|p| &mut p.vram_aux_in, dyn_dst_off + dyn_bytes)?;
-                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)?;
-                if regrew {
-                    engine.refresh_prover_descriptor_sets();
+                if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
+                    engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(dyn_bytes.max(part_bytes))?;
                 if !dyn_words.is_empty() {
@@ -7791,8 +8607,51 @@ impl RawVulkanEngine {
         chal: [u64; 4],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
+            if cur_m < 2 || !cur_m.is_power_of_two() {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            to_u32(cur_m)?;
+            engine.prover_session()?;
+            let m = to_u64(cur_m);
+            let hm = m / 2;
             let half_m = cur_m / 2;
-            let wgs_x = half_m.div_ceil(64).max(1) as u32;
+            let wgs_x = engine.check_wg_count(to_u64(half_m.div_ceil(64).max(1)))?;
+            match engine.prover.air.as_ref() {
+                Some(air) if m <= air.total_rows => {}
+                Some(air) => return Err(out_of_range("AIR round rows (shard)", air.total_rows, m)),
+                None => {
+                    return Err(out_of_range(
+                        "AIR shard tables (not initialised, or overwritten since)",
+                        1,
+                        0,
+                    ));
+                }
+            }
+            // Modes 3/4 read 256 columns of `cur_m` rows and write 256 columns of half as many
+            // into `vram_work_a`; mode 5 does the same for the 3 shift tables in `vram_aux_b`.
+            if is_round0_base {
+                engine.prover.vram_witness.check_read(
+                    "vram_witness (AIR base columns)",
+                    span_end(u64::from(col_src), m, 256, WORD_BYTES)?,
+                )?;
+            } else {
+                engine.prover.vram_work_a.check_read(
+                    "vram_work_a (AIR folded columns)",
+                    span_end(u64::from(col_src), m, 256, EXT4_BYTES)?,
+                )?;
+            }
+            engine.prover.vram_aux_b.check_read(
+                "vram_aux_b (AIR shift tables)",
+                span_end(u64::from(sh_src), m, 3, EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_work_a.reserve_write(
+                "vram_work_a (AIR folded columns)",
+                span_end(u64::from(col_dst), hm, 256, EXT4_BYTES)?,
+            )?;
+            engine.prover.vram_aux_b.reserve_write(
+                "vram_aux_b (AIR folded shift tables)",
+                span_end(u64::from(sh_dst), hm, 3, EXT4_BYTES)?,
+            )?;
             unsafe {
                 let kp_a = engine.prover_pipelines[ProverKernelSlot::AirRowGroupA as usize];
                 engine.begin_cmd()?;
@@ -7875,21 +8734,41 @@ impl RawVulkanEngine {
         out_shifts: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
-            let col_bytes = (out_cols.len() as u64) * 32;
-            let sh_bytes = (out_shifts.len() as u64) * 32;
-            let total_bytes = col_bytes + sh_bytes;
+            engine.prover_session()?;
+            let col_bytes = cmul(to_u64(out_cols.len()), EXT4_BYTES)?;
+            let sh_bytes = cmul(to_u64(out_shifts.len()), EXT4_BYTES)?;
+            let total_bytes = cadd(col_bytes, sh_bytes)?;
             if total_bytes == 0 {
                 return Ok(());
             }
+            let col_off = cmul(u64::from(col_src_ext4), EXT4_BYTES)?;
+            let sh_off = cmul(u64::from(sh_src_ext4), EXT4_BYTES)?;
+            // Refuse before staging grows: both sources must be session data.
+            if col_bytes > 0 {
+                engine
+                    .prover
+                    .vram_work_a
+                    .check_read("vram_work_a (AIR folded columns)", cadd(col_off, col_bytes)?)?;
+            }
+            if sh_bytes > 0 {
+                engine
+                    .prover
+                    .vram_aux_b
+                    .check_read("vram_aux_b (AIR shift tables)", cadd(sh_off, sh_bytes)?)?;
+            }
             unsafe {
                 engine.reserve_job_staging(total_bytes)?;
+                let stg_cap = engine.staging.capacity;
                 engine.begin_cmd()?;
                 if col_bytes > 0 {
-                    let cp = VkBufferCopy {
-                        src_offset: (col_src_ext4 as u64) * 32,
-                        dst_offset: 0,
-                        size: col_bytes,
-                    };
+                    let cp = checked_copy(
+                        "vram_work_a (AIR folded columns)",
+                        &engine.prover.vram_work_a,
+                        col_off,
+                        stg_cap,
+                        0,
+                        col_bytes,
+                    )?;
                     (engine.fns.cmd_copy_buffer)(
                         engine.cmd_buf,
                         engine.prover.vram_work_a.buffer,
@@ -7899,11 +8778,14 @@ impl RawVulkanEngine {
                     );
                 }
                 if sh_bytes > 0 {
-                    let cs = VkBufferCopy {
-                        src_offset: (sh_src_ext4 as u64) * 32,
-                        dst_offset: col_bytes,
-                        size: sh_bytes,
-                    };
+                    let cs = checked_copy(
+                        "vram_aux_b (AIR shift tables)",
+                        &engine.prover.vram_aux_b,
+                        sh_off,
+                        stg_cap,
+                        col_bytes,
+                        sh_bytes,
+                    )?;
                     (engine.fns.cmd_copy_buffer)(
                         engine.cmd_buf,
                         engine.prover.vram_aux_b.buffer,
@@ -7998,6 +8880,11 @@ impl RawVulkanEngine {
                 self.destroy_gpu_buffer(&mut p_ai);
                 self.destroy_gpu_buffer(&mut p_ab);
                 self.destroy_gpu_buffer(&mut p_pt);
+                for mut parked in core::mem::take(&mut self.prover.limbo) {
+                    self.destroy_gpu_buffer(&mut parked);
+                }
+                self.prover.session = None;
+                self.prover.air = None;
 
                 if self.prover.desc_pool != 0 {
                     (self.fns.destroy_descriptor_pool)(self.device, self.prover.desc_pool, null());

@@ -17,7 +17,7 @@ Self-contained Lean 4.35 algebraic sponge specification (`Init` + `Qsag.Goldiloc
 -/
 
 public import Qsag.Math.Goldilocks
-public import Qsag.Tactic.CommRing
+public import Qsag.Math.Tactic.CommRing
 public import Qsag.Oracle.Keccak
 
 public section
@@ -264,19 +264,11 @@ def lane4Scale (c : Goldilocks) (a : Lane4) : Lane4 :=
 def lane4Sum (a : Lane4) : Goldilocks :=
   Goldilocks.add (Goldilocks.add a.x0 a.x1) (Goldilocks.add a.x2 a.x3)
 
-<<<<<<< lean/Qsag/Oracle/Poseidon2.lean
-private def inv4G : Goldilocks := ⟨13835058052060938241, by decide⟩
-private def inv7G : Goldilocks := ⟨2635249152773512046, by decide⟩
-private def inv15G : Goldilocks := ⟨17216961131453612033, by decide⟩
-private def inv1024G : Goldilocks := ⟨18428729670909296641, by decide⟩
-private def inv3055G : Goldilocks := ⟨10802365021336396514, by decide⟩
-=======
 private def inv4G : Goldilocks := ⟨13835058052060938241, by decide +kernel⟩
 private def inv7G : Goldilocks := ⟨2635249152773512046, by decide +kernel⟩
 private def inv15G : Goldilocks := ⟨17216961131453612033, by decide +kernel⟩
 private def inv1024G : Goldilocks := ⟨18428729670909296641, by decide +kernel⟩
-private def inv2559G : Goldilocks := ⟨16817606062502628066, by decide +kernel⟩
->>>>>>> /Users/ember/.gemini/antigravity-cli/brain/b2b581fc-3b3a-42dc-9fb9-a018aa1a91d8/scratch/optimistic/arch-layer1/lean/Qsag/Oracle/Poseidon2.lean
+private def inv3055G : Goldilocks := ⟨10802365021336396514, by decide +kernel⟩
 
 private theorem ofNat_eq_goldOfInt (k : Nat) : Goldilocks.ofNat k = goldOfInt (k : Int) := by
   apply Goldilocks.ext
@@ -1426,7 +1418,6 @@ theorem poseidon2Hash32_length (msg : List UInt8) :
   unfold poseidon2Hash32 squeeze32Bytes
   simp [length_be]
 
-<<<<<<< lean/Qsag/Oracle/Poseidon2.lean
 /-- Weighted Jive input contribution, binding both rate blocks and the complete tweak. -/
 def poseidon2WeightedFeedForward (s : Poseidon2State12) : Lane4 :=
   lane4Add (lane4Add s.b0 (lane4Scale (Goldilocks.ofNat 2) s.b1))
@@ -1435,30 +1426,6 @@ def poseidon2WeightedFeedForward (s : Poseidon2State12) : Lane4 :=
 def poseidon2CompressWeighted (s : Poseidon2State12) : Lane4 :=
   lane4Add (poseidon2Perm12 s).b0 (poseidon2WeightedFeedForward s)
 
-/-! ## 5. Build-Time Conformance Vectors Matching Rust and SPIR-V -/
-
-example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩).toList.map (·.val) =
-    [17528629447354354351, 5014055130248055117, 10679077121839038553, 431078547345611051, 7807009921345120310, 2413869689279715014, 11875300792986830377, 1872634884137602556, 15069512080271275672, 14253608580209913153, 14550618143248480092, 107036164978639472] := by decide +kernel
-
-example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩).toList.map (·.val) =
-    [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415] := by decide +kernel
-
-example : poseidon2Hash32 [] =
-    [182, 168, 65, 106, 0, 54, 23, 124, 22, 116, 119, 199, 75, 253, 202, 145, 123, 13, 115, 200, 186, 143, 207, 66, 162, 161, 198, 9, 220, 37, 176, 162] := by decide +kernel
-
-example : poseidon2Hash32 [0] =
-    [116, 79, 15, 95, 17, 248, 202, 240, 45, 126, 192, 181, 89, 193, 185, 161, 98, 167, 199, 38, 214, 141, 4, 22, 97, 34, 223, 133, 16, 3, 170, 104] := by decide +kernel
-
-example : poseidon2Hash32 [1, 2, 3] =
-    [149, 79, 171, 160, 0, 49, 166, 60, 204, 121, 241, 71, 102, 130, 24, 17, 35, 162, 114, 249, 194, 254, 120, 46, 18, 111, 254, 27, 106, 81, 178, 227] := by decide +kernel
-
-example : poseidon2Hash32 [113, 115, 97, 103, 45, 112, 111, 115, 101, 105, 100, 111, 110, 50, 45, 107, 97, 116] =
-    [228, 156, 140, 147, 124, 10, 100, 197, 103, 106, 168, 7, 254, 196, 250, 183, 212, 130, 17, 26, 2, 139, 235, 15, 219, 46, 193, 238, 148, 50, 236, 229] := by decide +kernel
-
-example : (let out := poseidon2CompressWeighted ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩;
-    [out.x0.val, out.x1.val, out.x2.val, out.x3.val]) =
-    [13782584570844608185, 13136387643152332218, 7171133015474200873, 7643370872200861755] := by decide +kernel
-=======
 end Qsag
 end
 
@@ -5860,7 +5827,6 @@ theorem poseidon2_width12_cico_groebner_and_interpolation_bounds :
       rw [hPow2, hPow2]; exact Nat.mul_le_mul hGe hGe
     exact Nat.lt_of_lt_of_le (by decide +kernel : 2 ^ 128 < (2 ^ 70) ^ 2) hSq
 
->>>>>>> /Users/ember/.gemini/antigravity-cli/brain/b2b581fc-3b3a-42dc-9fb9-a018aa1a91d8/scratch/optimistic/arch-layer1/lean/Qsag/Oracle/Poseidon2.lean
 
 end Qsag
 end

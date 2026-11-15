@@ -34,7 +34,7 @@ import all Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import Qsag.Tactic.AssuranceKit
-import Qsag.Tactic.CommRing
+import Qsag.Math.Tactic.CommRing
 
 public section
 namespace Qsag

@@ -501,7 +501,45 @@ per-custodian store. Material is used once, including across aborts and
 forks; each batch stream needs its own supply; a stream that runs dry fails
 closed with `MissingPreprocessing` and there is no witness-opening fallback.
 
-@@PREP@@
+`threshold_prep::dealerless::run_dealerless_preprocessing` produces the key
+shares and the stores without any party that knows a key or a shared value.
+It targets security with abort against all quorum members but one:
+
+* Boolean triples and authenticated random words come from `qsag-core`'s
+  `Pi_triple_f2` ceremony, run n-of-n over the quorum and converted from
+  Shamir shares in the tower basis to additive shares in the polynomial basis.
+* Field values are authenticated MASCOT-style (Keller, Orsini, Scholl,
+  CCS 2016): the key holder is the OT receiver on the bits of its key share,
+  once per ordered pair, so its key is fixed structurally, and the owner's
+  consistency is enforced by an opened, masked random combination under a
+  commit-then-open MAC check. A further check binds each holder to one key
+  towards all owners.
+* Field triples follow MASCOT triple generation with privacy amplification
+  over `tau` components and `sigma` sacrificial triples: `tau = 3`, `sigma = 1`
+  for the 255/256-bit fields, `tau = 7`, `sigma = 2` for Goldilocks.
+* Doubly authenticated bits: each owner authenticates its bits under the
+  Boolean key and the field key, proves them to be bits with a pairwise
+  degree-2 check on the authentication correlation, and proves the two forms
+  equal by 128 masked subset-parity repetitions; the joint bit is the XOR over
+  owners, one field triple per XOR. A closing check ties the Boolean key used
+  here to the key of the `Pi_triple_f2` material.
+
+Every challenge comes from a commit-and-open coin drawn after the checked
+data is fixed; a failed check returns no material and erases all state. The
+parameter derivations and what each failed check can reveal are in the module
+documentation. Limits of what is delivered: it is an in-process ceremony
+driver in the model of `qsag-core`'s own preprocessing (all members' steps in
+one process on separated state, one transcript chain), not a wire protocol;
+its soundness arguments are written out but not machine-checked and have not
+had an independent review; and it relies on the security of the `qsag-core`
+OT mesh and `Pi_triple_f2`. Measured for three members: mesh setup about 3 s,
+a Goldilocks triple about 2 ms, a secp256k1 or Ed25519 triple about 5 ms, a
+doubly authenticated bit word 0.3 s (Goldilocks) to 0.8 s (large fields), a
+Boolean triple word about 3 ms.
+
+`threshold_prep::FixtureDealer` is a deterministic single-seed generator for
+tests and benchmarks. It knows every key and exists only under `cfg(test)` or
+the `test-dealer` feature; no constructor of the library takes a dealer.
 
 ### Cost
 
@@ -512,10 +550,12 @@ repetition batch evaluates about 155 million 64-lane `AND` words per
 custodian, about 1.1 billion per ceremony. In the authenticated engine each
 `AND` word consumes a triple of roughly 3 KiB per custodian, so a complete
 general-quorum ceremony needs on the order of 3 TiB of Boolean preprocessing
-per custodian. The unit tests therefore cover the engine's primitives,
-conversions and cheating cases, and byte-exact view and commitment synthesis
-on a small circuit, not a complete general-quorum ownership proof. The
-replicated three-custodian engine remains the practical path.
+per custodian, about five weeks of single-threaded Boolean ceremony at the
+measured rate, before any field material. The unit tests therefore cover the engine's
+primitives, conversions and cheating cases, byte-exact view and commitment
+synthesis on a small circuit, and the engine running on ceremony output, not
+a complete general-quorum ownership proof. The replicated three-custodian
+engine remains the practical path.
 
 In `std` builds the BLS fixed-base tables are cached process-wide with
 `OnceLock`; no-std builds retain allocation-based synthesis because

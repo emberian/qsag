@@ -1,7 +1,7 @@
 module
 
 import Qsag.Tactic.AssuranceKit
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 
 public section
 

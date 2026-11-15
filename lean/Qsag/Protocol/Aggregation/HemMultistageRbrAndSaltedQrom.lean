@@ -49,7 +49,7 @@ import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import all Qsag.Coding.GuruswamiSudan
-public import Qsag.Tactic.CommRing
+public import Qsag.Math.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
 
 public section

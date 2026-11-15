@@ -6,7 +6,7 @@ import Qsag.Math.Goldilocks
 import Qsag.Oracle.Poseidon2
 import Qsag.Oracle.Keccak
 import Qsag.Protocol.Signing.Fips205
-import Qsag.Math.BinaryTower
+import Qsag.Math.Gf2Pow128
 import Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import Qsag.Protocol.Migration.ActiveMigrationZeroTest
 import Qsag.Machine.ConstantTimeIsa

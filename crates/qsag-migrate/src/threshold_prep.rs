@@ -10,6 +10,8 @@ use crate::{
 };
 use alloc::{collections::VecDeque, vec::Vec};
 
+pub mod dealerless;
+
 /// How much material one stream needs, per kind and field.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Demand {

@@ -45,6 +45,7 @@ public import Qsag.Math.Gf2Pow128
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.Exec.Tactic.SimulationKit
 
 public import Qsag.Math.EllipticCurves
 

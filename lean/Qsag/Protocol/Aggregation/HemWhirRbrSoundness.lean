@@ -17,7 +17,7 @@ public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
 public import Qsag.Coding.Cwyz26
 public import Qsag.Coding.GuruswamiSudan
 public import Qsag.Oracle.Qrom
-public import Qsag.Tactic.CommRing
+public import Qsag.Math.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Coding.Cwyz26
