@@ -9,8 +9,9 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use qsag_accel::{
     ct::{ct_eq_bytes_mask, ct_zeroize_bytes, ct_zeroize_u64s},
     goldilocks::{GOLDILOCKS_PRIME as GOLDILOCKS_P, gl_add, gl_mul, gl_sub},
-    keccak::{KECCAK_RC, cshake256_framed_32, init_cshake256, keccak_f1600, reduce_192_zero_bias},
+    keccak::{KECCAK_RC, cshake256_framed_32, reduce_192_zero_bias},
 };
+use qsag_core::sponge::keccak::{Cshake256Xof, SHAKE256_RATE_BYTES, cshake256_static_midstate};
 use qsag_asm::{
     BitPlane256, SimdBackend, XorCombinePattern, detect_backend,
     gf2_64x128_clmul_acc_with_backend, gf2_128_dot_with_backend,
@@ -261,96 +262,44 @@ impl Drop for Envelope {
     }
 }
 
-/// High-throughput rate-136 (`17` `u64` lanes) Keccak sponge operating on native
-/// 64-bit words with zero heap allocations and volatile state zeroization on drop.
+/// Word-oriented view of the workspace SHAKE256 sponge: 64-bit words are
+/// absorbed and squeezed in little-endian byte order.
 #[derive(Clone)]
-struct WordSponge136 {
-    state: [u64; 25],
-    pos: usize,
-    squeezing: bool,
-}
-impl Drop for WordSponge136 {
-    fn drop(&mut self) {
-        ct_zeroize_u64s(&mut self.state);
-        self.pos = 0;
-    }
-}
+struct WordSponge136(Cshake256Xof);
 impl WordSponge136 {
-    const RATE_BYTES: usize = 136;
-    const RATE_LANES: usize = 17;
-
-    const fn new() -> Self {
-        Self {
-            state: [0u64; 25],
-            pos: 0,
-            squeezing: false,
-        }
+    fn new() -> Self {
+        Self(Cshake256Xof::new_shake256())
     }
 
     fn from_shake_seed(seed: &[u8; 32]) -> Self {
         let mut s = Self::new();
-        for (lane, chunk) in s.state[..4].iter_mut().zip(seed.chunks_exact(8)) {
-            let mut buf = [0u8; 8];
-            buf.copy_from_slice(chunk);
-            *lane = u64::from_le_bytes(buf);
-            ct_zeroize_bytes(&mut buf);
-        }
-        s.state[4] ^= 0x1f;
-        s.state[16] ^= 0x8000_0000_0000_0000;
-        keccak_f1600(&mut s.state);
-        s.pos = 0;
-        s.squeezing = true;
+        s.0.absorb(seed);
         s
     }
 
     fn absorb_u64(&mut self, word: u64) {
-        debug_assert!(!self.squeezing && self.pos % 8 == 0);
-        let lane = self.pos / 8;
-        self.state[lane] ^= word;
-        self.pos += 8;
-        if self.pos == Self::RATE_BYTES {
-            keccak_f1600(&mut self.state);
-            self.pos = 0;
-        }
+        self.0.absorb(&word.to_le_bytes());
     }
 
     fn absorb_bytes32(&mut self, bytes: &[u8; 32]) {
-        for chunk in bytes.chunks_exact(8) {
-            let mut buf = [0u8; 8];
-            buf.copy_from_slice(chunk);
-            self.absorb_u64(u64::from_le_bytes(buf));
-        }
+        self.0.absorb(bytes);
     }
 
     fn digest_clone(&self) -> [u8; 32] {
-        debug_assert!(!self.squeezing && self.pos % 8 == 0);
-        let mut st = self.state;
-        let lane = self.pos / 8;
-        st[lane] ^= 0x1f;
-        st[16] ^= 0x8000_0000_0000_0000;
-        keccak_f1600(&mut st);
         let mut out = [0u8; 32];
-        for (chunk, &w) in out.chunks_exact_mut(8).zip(&st[..4]) {
-            chunk.copy_from_slice(&w.to_le_bytes());
-        }
-        ct_zeroize_u64s(&mut st);
+        self.0.clone().squeeze(&mut out);
         out
     }
 
-    fn squeeze_u64s(&mut self, mut out: &mut [u64]) {
-        debug_assert!(self.squeezing && self.pos % 8 == 0);
-        let mut lane = self.pos / 8;
-        while !out.is_empty() {
-            if lane == Self::RATE_LANES {
-                keccak_f1600(&mut self.state);
-                lane = 0;
+    fn squeeze_u64s(&mut self, out: &mut [u64]) {
+        let mut block = Secret([0u8; SHAKE256_RATE_BYTES]);
+        for words in out.chunks_mut(SHAKE256_RATE_BYTES / 8) {
+            let bytes = &mut block[..8 * words.len()];
+            self.0.squeeze(bytes);
+            for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
+                *word = u64::from_le_bytes(chunk.try_into().unwrap());
             }
-            let take = (Self::RATE_LANES - lane).min(out.len());
-            out[..take].copy_from_slice(&self.state[lane..lane + take]);
-            lane += take;
-            out = &mut out[take..];
         }
-        self.pos = lane * 8;
     }
 
     fn squeeze_u64(&mut self) -> u64 {
@@ -386,45 +335,16 @@ impl WordSponge136 {
     }
 }
 
-/// Build the pre-absorbed 25-lane state for `cshake256_framed_32("QSAG.OUTER.MESSAGE.V1", ...)`
-/// after absorbing the 136-byte cSHAKE customization block, frame count `5`, `key` (`32`B),
-/// and `session` (`32`B) (`88` bytes = `11` lanes in block 1).
-fn build_mac_prefix(key: &[u8; 32], session: &[u8; 32]) -> [u64; 25] {
-    // NIST SP 800-185 bytepad(encode_string("") || encode_string("QSAG.OUTER.MESSAGE.V1"), 136)
-    let custom = b"QSAG.OUTER.MESSAGE.V1";
-    let mut block = [0u8; 136];
-    block[0] = 1;
-    block[1] = 136;
-    block[2] = 1;
-    block[3] = 0;
-    block[4] = 1;
-    block[5] = (custom.len() * 8) as u8;
-    block[6..6 + custom.len()].copy_from_slice(custom);
-
-    let mut state = [0u64; 25];
-    for (lane, chunk) in state[..17].iter_mut().zip(block.chunks_exact(8)) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(chunk);
-        *lane = u64::from_le_bytes(buf);
+/// `cshake256_framed_32("QSAG.OUTER.MESSAGE.V1", [key, session, ..])` with the
+/// frame count and the key and session frames already absorbed.
+fn build_mac_prefix(key: &[u8; 32], session: &[u8; 32]) -> Cshake256Xof {
+    let mut xof = Cshake256Xof::new(b"QSAG.OUTER.MESSAGE.V1");
+    xof.absorb(&5u64.to_le_bytes());
+    for frame in [key, session] {
+        xof.absorb(&32u64.to_le_bytes());
+        xof.absorb(frame);
     }
-    keccak_f1600(&mut state);
-
-    state[0] ^= 5u64;
-    state[1] ^= 32u64;
-    for (lane, chunk) in state[2..6].iter_mut().zip(key.chunks_exact(8)) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(chunk);
-        *lane ^= u64::from_le_bytes(buf);
-        ct_zeroize_bytes(&mut buf);
-    }
-    state[6] ^= 32u64;
-    for (lane, chunk) in state[7..11].iter_mut().zip(session.chunks_exact(8)) {
-        let mut buf = [0u8; 8];
-        buf.copy_from_slice(chunk);
-        *lane ^= u64::from_le_bytes(buf);
-        ct_zeroize_bytes(&mut buf);
-    }
-    state
+    xof
 }
 
 // ============================================================================
@@ -902,7 +822,7 @@ pub(crate) struct Engine<T> {
     pub(crate) batch_cancelled: Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>,
     session: [u8; 32],
     keys: [[u8; 32]; 2],
-    mac_prefix: [[u64; 25]; 2],
+    mac_prefix: [Cshake256Xof; 2],
     pads: [WordSponge136; 2],
     edge_sponges: [WordSponge136; 2],
     coin_rng: WordSponge136,
@@ -924,9 +844,6 @@ impl<T> Drop for Engine<T> {
     fn drop(&mut self) {
         for key in &mut self.keys {
             ct_zeroize_bytes(key);
-        }
-        for pref in &mut self.mac_prefix {
-            ct_zeroize_u64s(pref);
         }
         ct_zeroize_u64s(&mut self.scratch_r);
         ct_zeroize_u64s(&mut self.scratch_s);
@@ -1050,32 +967,22 @@ impl<T: Transport> Engine<T> {
         seq: u64,
         payload: &[u64],
     ) -> [u8; 32] {
-        let mut state = self.mac_prefix[peer];
-        let sr = (sender as u64 & 0xff) | ((recipient as u64 & 0xff) << 8);
-        let byte_len = (payload.len() as u64) * 8;
-        state[11] ^= 2u64;
-        state[12] ^= sr | (8u64 << 16);
-        state[13] ^= seq << 16;
-        state[14] ^= (seq >> 48) | (byte_len << 16);
-        let mut carry16 = byte_len >> 48;
-        let mut lane = 15usize;
-        for &w in payload {
-            state[lane] ^= carry16 | (w << 16);
-            carry16 = w >> 48;
-            lane += 1;
-            if lane == 17 {
-                keccak_f1600(&mut state);
-                lane = 0;
+        let mut xof = self.mac_prefix[peer].clone();
+        xof.absorb(&2u64.to_le_bytes());
+        xof.absorb(&[sender as u8, recipient as u8]);
+        xof.absorb(&8u64.to_le_bytes());
+        xof.absorb(&seq.to_le_bytes());
+        xof.absorb(&((payload.len() as u64) * 8).to_le_bytes());
+        let mut block = Secret([0u8; 8 * SHAKE256_RATE_BYTES]);
+        for words in payload.chunks(SHAKE256_RATE_BYTES) {
+            let bytes = &mut block[..8 * words.len()];
+            for (chunk, word) in bytes.chunks_exact_mut(8).zip(words) {
+                chunk.copy_from_slice(&word.to_le_bytes());
             }
+            xof.absorb(bytes);
         }
-        state[lane] ^= carry16 | (0x04u64 << 16);
-        state[16] ^= 0x8000_0000_0000_0000;
-        keccak_f1600(&mut state);
         let mut out = [0u8; 32];
-        for (chunk, &w) in out.chunks_exact_mut(8).zip(&state[..4]) {
-            chunk.copy_from_slice(&w.to_le_bytes());
-        }
-        ct_zeroize_u64s(&mut state);
+        xof.squeeze(&mut out);
         out
     }
 
@@ -3276,38 +3183,11 @@ impl<B: ShareBit> Sponge<B> {
         }
         Ok(out)
     }
-    /// Initialize a shared `cSHAKE256` sponge using the public pre-permuted `init_cshake256`
-    /// state directly (`0` MPC rounds for the public customization block).
+    /// Initialize a shared `cSHAKE256` sponge from the public permuted customization
+    /// block (`0` MPC rounds for it). The customization must fit one rate block.
     pub fn cshake_public<E: Core<Bit = B>>(e: &E, customization: &[u8]) -> Self {
-        let native = init_cshake256(b"", customization);
-        // Mirror the exact public 136-byte block permutation in constant shares.
         let mut s = Self::new(e);
-        let _ = native;
-        fn left(x: usize) -> Vec<u8> {
-            let bytes = x.to_be_bytes();
-            let i = bytes
-                .iter()
-                .position(|&x| x != 0)
-                .unwrap_or(bytes.len() - 1);
-            let mut out = vec![(bytes.len() - i) as u8];
-            out.extend_from_slice(&bytes[i..]);
-            out
-        }
-        let mut prefix = left(136);
-        prefix.extend(left(0));
-        prefix.extend(left(customization.len() * 8));
-        prefix.extend_from_slice(customization);
-        prefix.resize(prefix.len().div_ceil(136) * 136, 0);
-
-        let mut st = [0u64; 25];
-        for block in prefix.chunks_exact(136) {
-            for (lane, chunk) in st[..17].iter_mut().zip(block.chunks_exact(8)) {
-                let mut buf = [0u8; 8];
-                buf.copy_from_slice(chunk);
-                *lane ^= u64::from_le_bytes(buf);
-            }
-            keccak_f1600(&mut st);
-        }
+        let st = cshake256_static_midstate(customization);
         for (lane_idx, &w) in st.iter().enumerate() {
             for bit in 0..64 {
                 s.state[lane_idx * 64 + bit] =

@@ -3,27 +3,14 @@ use crate::{secret::SecretVec, zk_engine::PartyView};
 use alloc::vec::Vec;
 use qsag_accel::AcceleratorBackend;
 
-fn left_encode(n: usize, out: &mut Vec<u8>) {
-    let bytes = n.to_be_bytes();
-    let first = bytes
-        .iter()
-        .position(|&b| b != 0)
-        .unwrap_or(bytes.len() - 1);
-    out.push((bytes.len() - first) as u8);
-    out.extend_from_slice(&bytes[first..]);
-}
-
 /// Hash independent framed messages in lockstep, including unequal lengths and
 /// exact rate boundaries. Only public message lengths control scheduling.
 fn framed<B: AcceleratorBackend>(accel: &B, custom: &[u8], frames: &[Vec<&[u8]>]) -> Vec<[u8; 32]> {
-    let mut prefix = Vec::new();
-    if !custom.is_empty() {
-        left_encode(136, &mut prefix);
-        left_encode(0, &mut prefix);
-        left_encode(custom.len() * 8, &mut prefix);
-        prefix.extend_from_slice(custom);
-        prefix.resize(prefix.len().div_ceil(136) * 136, 0);
-    }
+    let prefix = if custom.is_empty() {
+        Vec::new()
+    } else {
+        qsag_core::sponge::keccak::cshake256_customization_prefix(custom)
+    };
     // Keep payloads borrowed. Only the small framing headers are owned.
     let headers: Vec<Vec<[u8; 8]>> = frames
         .iter()

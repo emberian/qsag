@@ -1370,13 +1370,18 @@ pub(crate) mod tests {
         dealer: FixtureDealer,
         batches: BTreeMap<usize, (std::string::String, Batch)>,
     }
+    enum Source {
+        Fixture(Arc<Mutex<Supply>>),
+        /// Material produced ahead of time by a preprocessing ceremony.
+        Stored(crate::threshold_prep::PartyPreprocessing),
+    }
     pub(crate) struct Network {
         position: usize,
         config: ThresholdConfig,
         senders: Vec<mpsc::Sender<Envelope>>,
         incoming: mpsc::Receiver<Envelope>,
         pending: BTreeMap<(u64, usize), Envelope>,
-        supply: Arc<Mutex<Supply>>,
+        source: Source,
         round: usize,
     }
     impl Network {
@@ -1385,8 +1390,13 @@ pub(crate) mod tests {
             request: std::string::String,
             make: impl FnOnce(&mut FixtureDealer) -> Batch,
             rows: impl FnOnce(&mut Batch) -> &mut Vec<Option<Vec<V>>>,
+            stored: impl FnOnce(&mut crate::threshold_prep::PartyPreprocessing) -> Result<Vec<V>, Error>,
         ) -> Result<Vec<V>, Error> {
-            let mut supply = self.supply.lock().unwrap();
+            let supply = match &mut self.source {
+                Source::Stored(store) => return stored(store),
+                Source::Fixture(supply) => supply,
+            };
+            let mut supply = supply.lock().unwrap();
             if !supply.batches.contains_key(&self.round) {
                 let batch = make(&mut supply.dealer);
                 supply.batches.insert(self.round, (request.clone(), batch));
@@ -1441,7 +1451,7 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::Triples(rows) => rows,
                     _ => unreachable!(),
-                },
+                },                |store| store.take_boolean_triples(count),
             )
         }
         fn take_auth_words(&mut self, count: usize) -> Result<Vec<AuthWord>, Error> {
@@ -1451,7 +1461,7 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::Words(rows) => rows,
                     _ => unreachable!(),
-                },
+                },                |store| store.take_auth_words(count),
             )
         }
         fn take_field_triples(
@@ -1465,7 +1475,7 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::FieldTriples(rows) => rows,
                     _ => unreachable!(),
-                },
+                },                |store| store.take_field_triples(field, count),
             )
         }
         fn take_field_randoms(
@@ -1479,7 +1489,7 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::FieldRandoms(rows) => rows,
                     _ => unreachable!(),
-                },
+                },                |store| store.take_field_randoms(field, count),
             )
         }
         fn take_dabits(
@@ -1493,7 +1503,7 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::DaBits(rows) => rows,
                     _ => unreachable!(),
-                },
+                },                |store| store.take_dabits(field, count),
             )
         }
     }
@@ -1511,17 +1521,44 @@ pub(crate) mod tests {
             .collect()
     }
     /// Run `f(party, MAC key share, transport)` on one thread per quorum
-    /// member and return the results in quorum order.
+    /// member and return the results in quorum order. Preprocessing comes
+    /// from the shared deterministic fixture, generated on demand.
     pub(crate) fn run<R: Send, F: Fn(usize, MacKeyShare, Network) -> R + Sync>(
         config: ThresholdConfig,
         f: F,
     ) -> Vec<R> {
         let dealer = FixtureDealer::new(&config, [13; 32]);
-        let mut mac_keys: Vec<_> = dealer.mac_key_shares().into_iter().map(Some).collect();
+        let mac_keys = dealer.mac_key_shares();
         let supply = Arc::new(Mutex::new(Supply {
             dealer,
             batches: BTreeMap::new(),
         }));
+        let parties = mac_keys
+            .into_iter()
+            .map(|keys| (keys, Source::Fixture(supply.clone())))
+            .collect();
+        run_parties(config, parties, f)
+    }
+
+    /// As [`run`], with each member's keys and stored material from a
+    /// preprocessing ceremony, in quorum order.
+    pub(crate) fn run_stored<R: Send, F: Fn(usize, MacKeyShare, Network) -> R + Sync>(
+        config: ThresholdConfig,
+        parties: Vec<(MacKeyShare, crate::threshold_prep::PartyPreprocessing)>,
+        f: F,
+    ) -> Vec<R> {
+        let parties = parties
+            .into_iter()
+            .map(|(keys, store)| (keys, Source::Stored(store)))
+            .collect();
+        run_parties(config, parties, f)
+    }
+
+    fn run_parties<R: Send, F: Fn(usize, MacKeyShare, Network) -> R + Sync>(
+        config: ThresholdConfig,
+        parties: Vec<(MacKeyShare, Source)>,
+        f: F,
+    ) -> Vec<R> {
         let (senders, receivers): (Vec<_>, Vec<_>) =
             (0..config.parties).map(|_| mpsc::channel()).unzip();
         let mut receivers: Vec<_> = receivers.into_iter().map(Some).collect();
@@ -1529,18 +1566,18 @@ pub(crate) mod tests {
             let handles: Vec<_> = config
                 .quorum
                 .iter()
+                .zip(parties)
                 .enumerate()
-                .map(|(position, &party)| {
+                .map(|(position, (&party, (keys, source)))| {
                     let network = Network {
                         position,
                         config: config.clone(),
                         senders: senders.clone(),
                         incoming: receivers[party].take().unwrap(),
                         pending: BTreeMap::new(),
-                        supply: supply.clone(),
+                        source,
                         round: 0,
                     };
-                    let keys = mac_keys[position].take().unwrap();
                     let f = &f;
                     scope.spawn(move || f(party, keys, network))
                 })
@@ -1752,6 +1789,16 @@ pub(crate) mod tests {
         F: Fn(&mut SpdzEngine<Network>, usize) -> Result<Vec<u64>, Error> + Sync,
     {
         let cfg = ThresholdConfig::new(3, 5, vec![0, 2, 4]).unwrap();
+        // Control: with nobody deviating the same steps succeed and agree.
+        let honest = run(cfg.clone(), |party, mac_keys, network| {
+            let mut engine = engine(&cfg, party, mac_keys, network);
+            let outcome = f(&mut engine, party);
+            assert!(!engine.failed);
+            outcome
+        });
+        let reference = honest[0].clone().expect("honest run must succeed");
+        assert!(!reference.is_empty());
+        assert!(honest.iter().all(|outcome| outcome.as_ref() == Ok(&reference)));
         let outcomes = run(cfg.clone(), |party, mac_keys, network| {
             let mut engine = engine(&cfg, party, mac_keys, network);
             if party == cheater {
