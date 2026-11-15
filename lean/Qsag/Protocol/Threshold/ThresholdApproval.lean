@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ThresholdApproval — Cryptographic Quorum Approval & Non-Empty Honest Threshold Gate
+# Qsag.Protocol.Threshold.ThresholdApproval — Cryptographic Quorum Approval & Non-Empty Honest Threshold Gate
 
 Formalizes the public state `IdealTsigState` of $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ together
 with structural and cryptographic quorum gates:
@@ -22,9 +22,9 @@ with structural and cryptographic quorum gates:
    signer-origin and secret-key secrecy still require the corresponding cryptographic assumptions.
 -/
 
-public import Qsag.Keccak
+public import Qsag.Oracle.Keccak
 public import Qsag.Tactic.AssuranceKit
-public import Qsag.UcGames
+public import Qsag.Oracle.UcGames
 
 public section
 namespace Qsag
