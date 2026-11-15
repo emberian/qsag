@@ -67,107 +67,110 @@ fn regular_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
     }
 }
 
-fn options() -> io::Result<OpenOptions> {
+/// `O_NOFOLLOW | O_NONBLOCK` for the targets whose `fcntl.h` values are known
+/// (`O_NONBLOCK` makes opening a FIFO fail instead of block). Linux `asm/fcntl.h`
+/// overrides `asm-generic` per architecture; Darwin uses `sys/fcntl.h`. `None` means
+/// the caller must fail closed rather than pass another target's constants.
+pub const fn open_nofollow_nonblock_flags(os: &str, arch: &str) -> Option<i32> {
+    match os.as_bytes() {
+        b"macos" => Some(0x100 | 0x4),
+        b"linux" => match arch.as_bytes() {
+            b"x86_64" | b"x86" | b"riscv64" | b"riscv32" | b"s390x" | b"loongarch64" => {
+                Some(0x20000 | 0x800)
+            }
+            b"aarch64" | b"arm" | b"powerpc" | b"powerpc64" => Some(0x8000 | 0x800),
+            b"mips" | b"mips64" => Some(0x20000 | 0x80),
+            b"sparc" | b"sparc64" => Some(0x20000 | 0x4000),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Open options for a private (`0600`) durable file whose final path component is
+/// never followed through a symlink. The caller adds the access mode. Targets
+/// without a known flag encoding get `Unsupported`.
+pub fn no_follow_options() -> io::Result<OpenOptions> {
+    let unsupported = || {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no-follow durable files are unavailable on this target",
+        )
+    };
+    let flags = open_nofollow_nonblock_flags(std::env::consts::OS, std::env::consts::ARCH)
+        .ok_or_else(unsupported)?;
     let mut options = OpenOptions::new();
-    // Linux UAPI asm/fcntl.h overrides asm-generic on ARM; Darwin uses sys/fcntl.h.
-    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
-    let flags = 0x8000 | 0x800; // O_NOFOLLOW | O_NONBLOCK (reject FIFOs without blocking).
-    #[cfg(all(
-        target_os = "linux",
-        any(
-            target_arch = "x86_64",
-            target_arch = "x86",
-            target_arch = "riscv64",
-            target_arch = "riscv32"
-        )
-    ))]
-    let flags = 0x20000 | 0x800;
-    #[cfg(target_os = "macos")]
-    let flags = 0x100 | 0x4;
-    #[cfg(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(
-                target_arch = "aarch64",
-                target_arch = "arm",
-                target_arch = "x86_64",
-                target_arch = "x86",
-                target_arch = "riscv64",
-                target_arch = "riscv32"
-            )
-        )
-    ))]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(flags);
         Ok(options)
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(
-                target_arch = "aarch64",
-                target_arch = "arm",
-                target_arch = "x86_64",
-                target_arch = "x86",
-                target_arch = "riscv64",
-                target_arch = "riscv32"
-            )
-        )
-    )))]
+    #[cfg(not(unix))]
     {
-        let _ = &mut options;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no-follow locking unavailable on this target",
-        ))
+        let _ = (flags, &mut options);
+        Err(unsupported())
     }
 }
 
-fn identity(meta: &fs::Metadata) -> [u8; 16] {
+/// `(st_dev, st_ino)` of an open file or `lstat` result; `None` where the target
+/// has no such identity.
+pub fn file_dev_ino(meta: &fs::Metadata) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let mut id = [0; 16];
-        id[..8].copy_from_slice(&meta.dev().to_le_bytes());
-        id[8..].copy_from_slice(&meta.ino().to_le_bytes());
-        id
+        Some((meta.dev(), meta.ino()))
     }
-    // No `(dev, ino)` identity off unix: every caller's identity comparison is vacuous there.
     #[cfg(not(unix))]
     {
         let _ = meta;
-        [0; 16]
+        None
     }
+}
+
+/// Canonical `dev_le64 || ino_le64` file identity. All zero off unix, where every
+/// identity comparison is therefore vacuous.
+pub fn file_identity(meta: &fs::Metadata) -> [u8; 16] {
+    let (dev, ino) = file_dev_ino(meta).unwrap_or((0, 0));
+    let mut id = [0; 16];
+    id[..8].copy_from_slice(&dev.to_le_bytes());
+    id[8..].copy_from_slice(&ino.to_le_bytes());
+    id
 }
 
 // Compare fstat(fd) with lstat(path), never just two pathname observations.
 fn verify_path(file: &File, path: &Path) -> io::Result<fs::Metadata> {
     let held = file.metadata()?;
     let named = regular_metadata(path)?.ok_or_else(invalid)?;
-    if !held.is_file() || identity(&held) != identity(&named) {
+    if !held.is_file() || file_identity(&held) != file_identity(&named) {
         return Err(invalid());
     }
     Ok(held)
 }
 
-// Failed reads must wipe partially loaded payloads. Allocate once at the observed
-// file length so Vec growth cannot abandon an unwiped secret allocation.
-struct ReadBuffer(std::vec::Vec<u8>);
-impl Drop for ReadBuffer {
-    fn drop(&mut self) {
-        crate::ct_memzero(&mut self.0);
-    }
-}
-
-fn sync_parent(path: &Path) -> io::Result<()> {
+/// Flush the directory entry of `path` (creation or rename) to stable storage.
+pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     File::open(parent)?.sync_all()
+}
+
+/// Write all of `bytes` at `offset`, independent of the descriptor's cursor on unix.
+pub fn write_at_exact(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.write_all_at(bytes, offset)
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::{Seek, SeekFrom};
+        let mut file = file;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(bytes)
+    }
 }
 
 impl LockedRecord {
@@ -212,7 +215,7 @@ impl LockedRecord {
         regular_metadata(&name)?;
         // A record without its sidecar is damage, not absence: keep `NotFound` for the record.
         let open_present = || {
-            options()?.read(true).write(true).open(&name).map_err(|e| {
+            no_follow_options()?.read(true).write(true).open(&name).map_err(|e| {
                 if present && e.kind() == io::ErrorKind::NotFound {
                     invalid()
                 } else {
@@ -224,7 +227,7 @@ impl LockedRecord {
             Sidecar::MustExist => (open_present()?, false),
             Sidecar::CreateOrOpen if present => (open_present()?, false),
             Sidecar::MustCreate | Sidecar::CreateOrOpen => {
-                match options()?
+                match no_follow_options()?
                     .read(true)
                     .write(true)
                     .create_new(true)
@@ -256,14 +259,14 @@ impl LockedRecord {
             }
         }
         let mut header = [0u8; 32];
-        let id = identity(&verify_path(&lock, &name)?);
+        let id = file_identity(&verify_path(&lock, &name)?);
         if fresh {
             header[..8].copy_from_slice(LOCK_MAGIC);
             File::open("/dev/urandom")?.read_exact(&mut header[8..16])?;
             header[16..].copy_from_slice(&id);
             lock.write_all(&header)?;
             lock.sync_all()?;
-            sync_parent(&path)?;
+            sync_parent_dir(&path)?;
         } else {
             lock.read_exact(&mut header)?;
             if &header[..8] != LOCK_MAGIC || header[16..] != id || lock.metadata()?.len() != 32 {
@@ -311,6 +314,14 @@ impl LockedRecord {
         self.seal
     }
 
+    /// `dev_le64 || ino_le64` of the sidecar inode this handle holds locked, taken
+    /// from the descriptor at acquisition and re-checked on every operation. Callers
+    /// that bind the sidecar into a MAC or KDF use this, never a fresh `lstat` of the
+    /// `.lock` pathname: that observes whatever the name points at now.
+    pub fn lock_inode(&self) -> [u8; 16] {
+        self.inode
+    }
+
     /// Canonical `dev_le64 || ino_le64 || nonce8` identity for a caller's MAC/KDF.
     ///
     /// This is public associated data, NOT a MAC. Authenticate all 24 bytes with
@@ -351,7 +362,7 @@ impl LockedRecord {
             return Err(io::Error::other("durable record handle is poisoned"));
         }
         let name = side_path(&self.path, ".lock");
-        if identity(&verify_path(&self._lock, &name)?) != self.inode {
+        if file_identity(&verify_path(&self._lock, &name)?) != self.inode {
             return Err(invalid());
         }
         // Read from the locked descriptor itself: reopening the pathname can
@@ -399,7 +410,7 @@ impl LockedRecord {
         (|| {
             self.check_lock()?;
             regular_metadata(&self.path)?;
-            let mut file = options()?.read(true).open(&self.path)?;
+            let mut file = no_follow_options()?.read(true).open(&self.path)?;
             let meta = verify_path(&file, &self.path)?;
             let raw_payload_len = meta.len().checked_sub(16).ok_or_else(invalid)?;
             if raw_payload_len > max_bytes as u64 {
@@ -414,15 +425,17 @@ impl LockedRecord {
             if &header[..8] != RECORD_MAGIC || header[8..] != self.seal {
                 return Err(invalid());
             }
-            let mut bytes = ReadBuffer(std::vec::Vec::new());
-            bytes.0.try_reserve_exact(len).map_err(io::Error::other)?;
-            bytes.0.resize(len, 0);
-            file.read_exact(&mut bytes.0)?;
+            // A failed read erases the partial payload. One allocation at the observed
+            // length: growth would abandon an unerased copy.
+            let mut bytes = crate::wipe::SecretBuffer(std::vec::Vec::new());
+            bytes.try_reserve_exact(len).map_err(io::Error::other)?;
+            bytes.resize(len, 0);
+            file.read_exact(&mut bytes)?;
             if verify_path(&file, &self.path)?.len() != meta.len() {
                 return Err(invalid());
             }
             self.check_lock()?;
-            Ok(core::mem::take(&mut bytes.0))
+            Ok(bytes.into_inner())
         })()
     }
 
@@ -440,7 +453,7 @@ impl LockedRecord {
             if regular_metadata(&name)?.is_some() {
                 fs::remove_file(&name)?;
             }
-            let mut file = options()?.write(true).create_new(true).open(&name)?;
+            let mut file = no_follow_options()?.write(true).create_new(true).open(&name)?;
             file.write_all(RECORD_MAGIC)?;
             file.write_all(&self.lock_seal())?;
             file.write_all(bytes)?;
@@ -450,7 +463,7 @@ impl LockedRecord {
             regular_metadata(&self.path)?;
             fs::rename(&name, &self.path)?;
             verify_path(&file, &self.path)?;
-            sync_parent(&self.path)?;
+            sync_parent_dir(&self.path)?;
             self.check_lock()
         })();
         if result.is_err() {
@@ -537,7 +550,7 @@ mod tests {
         // Model an attacker rewriting the unauthenticated inode fields while
         // keeping the nonce. Only the full authenticated identity distinguishes it.
         let mut header = fs::read(&name).unwrap();
-        header[16..].copy_from_slice(&identity(&fs::metadata(&name).unwrap()));
+        header[16..].copy_from_slice(&file_identity(&fs::metadata(&name).unwrap()));
         fs::write(&name, header).unwrap();
         let new = LockedRecord::open_existing(&path).unwrap();
         assert_eq!(old.lock_seal(), new.lock_seal());
