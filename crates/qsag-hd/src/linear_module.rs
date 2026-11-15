@@ -934,6 +934,33 @@ pub(crate) fn reconstruct_for_recovery_or_test(
     Ok(secret)
 }
 
+// These public tables are evaluated by the compiler, including the inverses.
+const fn public_powers(root: u32) -> [u32; MODULE_N] {
+    let mut out = [1; MODULE_N];
+    let mut i = 1;
+    while i < MODULE_N {
+        out[i] = (out[i - 1] as u64 * root as u64 % MODULE_Q as u64) as u32;
+        i += 1;
+    }
+    out
+}
+const fn public_inverse(x: u32) -> u32 {
+    let mut acc = 1u64;
+    let mut b = x as u64;
+    let mut e = MODULE_Q - 2;
+    while e != 0 {
+        if e & 1 != 0 { acc = acc * b % MODULE_Q as u64; }
+        b = b * b % MODULE_Q as u64;
+        e >>= 1;
+    }
+    acc as u32
+}
+const TWIST: [u32; MODULE_N] = public_powers(1753);
+const UNTWIST: [u32; MODULE_N] = public_powers(public_inverse(1753));
+const OMEGA: u32 = (1753u64 * 1753 % MODULE_Q as u64) as u32;
+const NTT_FORWARD: [u32; MODULE_N] = public_powers(OMEGA);
+const NTT_INVERSE: [u32; MODULE_N] = public_powers(public_inverse(OMEGA));
+
 fn cyclic_ntt(values: &mut [u32; MODULE_N], inverse: bool) {
     for i in 0..MODULE_N {
         let j = (i as u8).reverse_bits() as usize;
@@ -941,32 +968,21 @@ fn cyclic_ntt(values: &mut [u32; MODULE_N], inverse: bool) {
             values.swap(i, j);
         }
     }
-    let omega = mod_q_mul(1753, 1753);
-    let root = if inverse {
-        mod_q_inv_or_zero(omega)
-    } else {
-        omega
-    };
+    let twiddles = if inverse { &NTT_INVERSE } else { &NTT_FORWARD };
     let mut width = 2;
     while width <= MODULE_N {
-        let mut step = 1;
-        for _ in 0..MODULE_N / width {
-            step = mod_q_mul(step, root);
-        }
         for block in values.chunks_exact_mut(width) {
-            let mut w = 1;
             for j in 0..width / 2 {
                 let a = block[j];
-                let b = mod_q_mul(block[j + width / 2], w);
+                let b = mod_q_mul(block[j + width / 2], twiddles[j * (MODULE_N / width)]);
                 block[j] = mod_q_add(a, b);
                 block[j + width / 2] = mod_q_sub(a, b);
-                w = mod_q_mul(w, step);
             }
         }
         width *= 2;
     }
     if inverse {
-        let scale = mod_q_inv_or_zero(MODULE_N as u32);
+        let scale = public_inverse(MODULE_N as u32);
         for value in values {
             *value = mod_q_mul(*value, scale);
         }
@@ -1053,21 +1069,16 @@ pub struct ExpandedHdMatrix {
 }
 fn forward(poly: &RingPoly) -> RingPoly {
     let mut out = poly.clone();
-    let mut twist = 1;
-    for c in &mut out.coeffs {
+    for (c, twist) in out.coeffs.iter_mut().zip(TWIST) {
         *c = mod_q_mul(*c, twist);
-        twist = mod_q_mul(twist, 1753);
     }
     cyclic_ntt(&mut out.coeffs, false);
     out
 }
 fn inverse(mut poly: RingPoly) -> RingPoly {
     cyclic_ntt(&mut poly.coeffs, true);
-    let inv = mod_q_inv_or_zero(1753);
-    let mut twist = 1;
-    for c in &mut poly.coeffs {
+    for (c, twist) in poly.coeffs.iter_mut().zip(UNTWIST) {
         *c = mod_q_mul(*c, twist);
-        twist = mod_q_mul(twist, inv);
     }
     poly
 }
@@ -1099,6 +1110,38 @@ impl ExpandedHdMatrix {
     }
 }
 
+fn pack_coefficients(values: &[u32], out: &mut [u8]) {
+    let mut buffer = 0u64;
+    let mut bits = 0;
+    let mut cursor = 0;
+    for &value in values {
+        buffer |= u64::from(value & 0x7f_ffff) << bits;
+        bits += 23;
+        while bits >= 8 {
+            out[cursor] = buffer as u8;
+            cursor += 1;
+            buffer >>= 8;
+            bits -= 8;
+        }
+    }
+    if bits != 0 { out[cursor] = buffer as u8; }
+}
+fn unpack_coefficients(bytes: &[u8], values: &mut [u32]) {
+    let mut buffer = 0u64;
+    let mut bits = 0;
+    let mut cursor = 0;
+    for value in values {
+        while bits < 23 {
+            buffer |= u64::from(bytes[cursor]) << bits;
+            cursor += 1;
+            bits += 8;
+        }
+        *value = buffer as u32 & 0x7f_ffff;
+        buffer >>= 23;
+        bits -= 23;
+    }
+}
+
 impl RingPoly {
     /// Version 1 external coefficient codec: exactly 736 bytes, little-endian 23-bit residues.
     /// Transcript hashing deliberately retains its original four-byte encoding.
@@ -1107,25 +1150,15 @@ impl RingPoly {
             return Err(HdError::InvalidThresholdParameters);
         }
         let mut out = [0; 736];
-        for (i, &c) in self.coeffs.iter().enumerate() {
-            for bit in 0..23 {
-                out[(i * 23 + bit) / 8] |= (((c >> bit) & 1) as u8) << ((i * 23 + bit) % 8);
-            }
-        }
+        pack_coefficients(&self.coeffs, &mut out);
         Ok(out)
     }
     pub fn decode_packed_v1(bytes: &[u8]) -> Result<Self, HdError> {
         if bytes.len() != 736 {
             return Err(HdError::InvalidThresholdParameters);
         }
-        let out = Self {
-            coeffs: core::array::from_fn(|i| {
-                (0..23).fold(0, |acc, bit| {
-                    acc | (u32::from((bytes[(i * 23 + bit) / 8] >> ((i * 23 + bit) % 8)) & 1)
-                        << bit)
-                })
-            }),
-        };
+        let mut out = Self::zero();
+        unpack_coefficients(bytes, &mut out.coeffs);
         if out.coeffs.iter().any(|&c| c >= MODULE_Q) {
             return Err(HdError::InvalidThresholdParameters);
         }
