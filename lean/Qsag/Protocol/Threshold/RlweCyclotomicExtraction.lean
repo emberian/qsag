@@ -64,6 +64,7 @@ applies to the production verifier of `crates/qsag-core/src/preprocessing.rs`:
 -/
 
 public import Qsag.Math.Lattices
+import all Qsag.Math.Lattices
 import Qsag.Tactic.AssuranceKit
 
 public section

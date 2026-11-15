@@ -33,6 +33,7 @@ public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.HypertreeEufCma
 import all Init.Data.String.Defs
 import all Qsag.Protocol.Aggregation.UcGames
+import all Qsag.Math.Algebra
 import all Qsag.Oracle.Keccak
 import all Qsag.Protocol.Signing.HashSigs
 import all Qsag.Protocol.Signing.HypertreeEufCma
