@@ -16,7 +16,7 @@ pub mod u384;
 pub use frontier::{
     EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsParams, FrontierFtsProfile,
     FrontierFtsPublicKey, FrontierFtsSignature, FrontierFtsSigningKey, FtsEpochWal,
-    RotatedEpochVote, verify_frontier_fts,
+    RotatedEpochVote, verify_frontier_fts, FrontierVerifyInput, verify_frontier_fts_batch, RotatedEpochVerifyInput, verify_rotated_epoch_votes_batch,
 };
 #[cfg(any(test, feature = "testing-ephemeral"))]
 pub use parallel_mpc::InMemoryBurnLog;
