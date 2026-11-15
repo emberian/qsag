@@ -15,7 +15,8 @@
 //! has been accepted.
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u128s};
+use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u128s};
+use qsag_accel::keccak::cshake256_framed_32;
 use qsag_verified::fts_spn_guard::{
     FtsDeferredMacSession, WOTS_CS_BASE_W, WOTS_CS_CHAINS, WOTS_CS_TARGET_SUM,
 };
@@ -159,15 +160,12 @@ fn verified_shape(params: &ParallelSeededParams) -> bool {
 }
 
 fn candidate_binding(values: &[u128]) -> [u8; 32] {
-    let mut sponge = qsag_accel::keccak::Shake256::new();
-    sponge.absorb(b"QSAG.FTS.CANDIDATE_BINDING.V1");
-    sponge.absorb(&(values.len() as u64).to_be_bytes());
+    let mut encoded = Vec::with_capacity(values.len() * 16);
     for value in values {
-        sponge.absorb(&value.to_le_bytes());
+        encoded.extend_from_slice(&value.to_le_bytes());
     }
-    sponge.finalize(0x1f);
-    let mut digest = [0; 32];
-    sponge.squeeze(&mut digest);
+    let digest = cshake256_framed_32(b"QSAG.FTS.CANDIDATE_BINDING.V1", &[&encoded]);
+    ct_zeroize_bytes(&mut encoded);
     digest
 }
 
@@ -310,7 +308,7 @@ impl OutputGate {
                     if grant.session_id() == request
                         && grant.round_id() == 0
                         && grant.openings() == 1
-                        && candidate_binding(values) == *binding =>
+                        && ct_eq_bytes(&candidate_binding(values), binding) =>
                 {
                     Some(core::mem::take(values))
                 }

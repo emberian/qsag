@@ -691,25 +691,22 @@ impl<'a> ParallelSeededSignSession<'a> {
         }
     }
     fn prepare_mac(&mut self, opened: Vec<u128>) -> Result<(), ParallelSeededError> {
-        // The working copy and its encoding hold unverified candidates; both are wiped
-        // here, and the capacity is exact so no reallocation leaves a copy behind.
-        let pending = &self.share.pending_openings;
-        let mut values = SecretValues(Vec::with_capacity(opened.len() + pending.len()));
-        values.0.extend_from_slice(&opened);
-        values.0.extend(pending.iter().map(|(value, _)| *value));
-        let mut encoded = encode_values(&values.0);
+        // Unverified candidates: the gate below takes them, every other exit wipes them.
+        let mut opened = SecretValues(opened);
+        // Every masked power opening was accepted by the intermediate MAC round, which
+        // precedes any output opening.
+        if !self.share.pending_openings.is_empty() || opened.0.len() != 2 * self.jobs.len() {
+            return Err(ParallelSeededError::BdozMacCheckFailed);
+        }
+        let mut encoded = encode_values(&opened.0);
         let digest = cshake256_framed_32(
             b"QSAG.PSFTS.BATCH_VALUES.V4",
             &[&self.session, &self.sequence.to_be_bytes(), &encoded],
         );
         ct_zeroize_bytes(&mut encoded);
-        let wires = self
-            .jobs
-            .iter()
-            .flat_map(|job| job.state.iter())
-            .chain(self.share.pending_openings.iter().map(|(_, wire)| wire));
+        let wires = self.jobs.iter().flat_map(|job| job.state.iter());
         let mut sigma = [0u128; 2];
-        for (index, (wire, &value)) in wires.zip(&values.0).enumerate() {
+        for (index, (wire, &value)) in wires.zip(&opened.0).enumerate() {
             let random = cshake256_framed_32(
                 b"QSAG.PSFTS.BATCH_WEIGHT.V4",
                 &[&digest, &(index as u64).to_be_bytes()],
@@ -738,7 +735,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             self.mode == Mode::Chains,
             self.session,
             self.step_rounds,
-            opened,
+            core::mem::take(&mut opened.0),
         ));
         self.phase = Phase::MacCommit;
         Ok(())
