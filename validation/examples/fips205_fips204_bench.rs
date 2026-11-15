@@ -200,7 +200,7 @@ macro_rules! bench_ml_dsa {
             assert!(black_box(ok));
         });
         let (u_vr_wire_med, _) = measure_us(warm, $iters, || {
-            let pk_parsed = $up_mod::PublicKey::try_from_bytes(black_box(&u_pk_bytes)).unwrap();
+            let pk_parsed = $up_mod::PublicKey::try_from_bytes(black_box(u_pk_bytes)).unwrap();
             let ok = pk_parsed.verify(black_box(msg), black_box(&u_sig), black_box(ctx));
             assert!(black_box(ok));
         });
