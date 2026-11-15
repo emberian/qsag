@@ -8,9 +8,10 @@ description = "Zero-dependency no_std post-quantum threshold hash-based signatur
 [features]
 default = []
 testing-ephemeral = []
-std = ["qsag-asm/std"]
+std = ["qsag-asm/std", "qsag-accel/std"]
 
 [dependencies]
+qsag-accel = { path = "../qsag-accel", default-features = false }
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 # Strictly zero external crate dependencies.
 qsag-asm = { path = "../qsag-asm", default-features = false }
@@ -18,7 +19,6 @@ qsag-asm = { path = "../qsag-asm", default-features = false }
 [dev-dependencies]
 # The policy barrier whose release token gates the Corduroy end-to-end signing test.
 qsag-policy = { path = "../qsag-policy", features = ["test-dealer"] }
-qsag-accel = { path = "../qsag-accel" }
 qsag-addr = { path = "../qsag-addr" }
 
 [[example]]

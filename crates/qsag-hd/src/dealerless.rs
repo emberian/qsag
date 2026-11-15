@@ -68,6 +68,7 @@ use super::*;
 use crate::inventory::RekeyFault;
 use crate::seeds::CustodianSeeds;
 use qsag_accel::ct::ct_eq_bytes;
+use crate::erase::SecretWords;
 use qsag_accel::keccak::{Shake256, commit_mpc_broadcast, finalize_cshake256, init_cshake256};
 
 /// Independent sacrifice repetitions per MAC lane: soundness error `q^-7`.
@@ -872,7 +873,7 @@ impl<'a> RekeyRound1<'a> {
         core.b = alloc::vec![0; REPS];
         core.b_parent = alloc::vec![0; if has_parent { REPS } else { 0 }];
         core.mask_shares = alloc::vec![0; products];
-        let mut wide_masks = alloc::vec![0u32; products];
+        let mut wide_masks = SecretWords(alloc::vec![0u32; products]);
         for subset in seeds.held_subsets() {
             let weight = subset_poly_at(&xs, subset, own_x);
             let stream = |domain: &[u8]| {
@@ -888,7 +889,7 @@ impl<'a> RekeyRound1<'a> {
                 *b = mod_q_add(*b, mod_q_mul(field_from_stream(&mut keys), weight));
             }
             let mut masks = stream(b"QSAG.HD.REKEY.PRSS.MASKS.V1")?;
-            for (narrow, wide) in core.mask_shares.iter_mut().zip(&mut wide_masks) {
+            for (narrow, wide) in core.mask_shares.iter_mut().zip(wide_masks.iter_mut()) {
                 let r = field_from_stream(&mut masks);
                 let mut high = r;
                 for &power in &powers {
@@ -911,7 +912,7 @@ impl<'a> RekeyRound1<'a> {
                 values.extend(core.b_parent.iter().map(|&b| mod_q_mul(alpha, b)));
             }
         }
-        for (value, mask) in values.iter_mut().zip(&wide_masks) {
+        for (value, mask) in values.iter_mut().zip(wide_masks.iter()) {
             *value = mod_q_add(*value, *mask);
         }
         ct_zeroize_u32s(&mut wide_masks);
@@ -943,15 +944,15 @@ impl RekeyRound2 {
         transcript.squeeze(&mut core.products_digest);
 
         let plan = OpenPlan::new(&core.xs(), 2 * (usize::from(core.threshold) - 1));
-        let mut column = alloc::vec![0u32; products.len()];
-        let mut macs = Vec::with_capacity(count);
+        let mut column = SecretWords(alloc::vec![0u32; products.len()]);
+        let mut macs = SecretWords(Vec::with_capacity(count));
         for (index, &mask) in core.mask_shares.iter().enumerate() {
             for (slot, message) in column.iter_mut().zip(products) {
                 *slot = message.values[index];
             }
             macs.push(mod_q_sub(plan.open(&column)?, mask));
         }
-        core.macs = macs;
+        core.macs = core::mem::take(&mut macs.0);
         let opening = RekeyCoinOpening {
             party_id: core.party_id,
             seed: core.coin_seed,
@@ -1030,7 +1031,7 @@ impl RekeyRound4 {
             canonical(&message.values, count)?;
         }
         let plan = OpenPlan::new(&core.xs(), usize::from(core.threshold) - 1);
-        let mut column = alloc::vec![0u32; masked.len()];
+        let mut column = SecretWords(alloc::vec![0u32; masked.len()]);
         let mut rho = Vec::with_capacity(count);
         for index in 0..count {
             for (slot, message) in column.iter_mut().zip(masked) {
@@ -1062,8 +1063,16 @@ impl RekeyRound4 {
         core.zero_shares = zero_shares;
         let plan = OpenPlan::new(&core.xs(), usize::from(core.threshold) - 1);
         let weight = plan.to_zero.get(core.position).copied().unwrap_or(0);
-        let mut residuals: Vec<u32> = core.zero_shares.iter().map(|&v| mod_q_mul(weight, v)).collect();
-        core.zero_gates = Some(crate::zero_gate::CommittedZeroGates::hold(core.session, MODULE_Q, &mut residuals));
+        let mut residuals: Vec<u32> = core
+            .zero_shares
+            .iter()
+            .map(|&v| mod_q_mul(weight, v))
+            .collect();
+        core.zero_gates = Some(crate::zero_gate::CommittedZeroGates::hold(
+            core.session,
+            MODULE_Q,
+            &mut residuals,
+        ));
         let commit = RekeyZeroCommit {
             party_id: core.party_id,
             digest: core.zero_commitment(core.party_id, &core.zero_shares, &core.zero_salt),
@@ -1081,8 +1090,11 @@ impl RekeyRound5 {
         let mut core = self.0;
         ordered(&core.members, commits, |commit| commit.party_id)?;
         core.zero_commits = commits.to_vec();
-        let peers = crate::zero_gate::peer_transcript(&core.session, core.party_id,
-            commits.iter().map(|c| (c.party_id, c.digest)));
+        let peers = crate::zero_gate::peer_transcript(
+            &core.session,
+            core.party_id,
+            commits.iter().map(|c| (c.party_id, c.digest)),
+        );
         let gates = core.zero_gates.as_mut().ok_or(HdError::MacCheckFailed)?;
         gates.freeze(peers)?;
         gates.open()?;
@@ -1155,7 +1167,7 @@ impl RekeyRound6 {
             }
         }
         let plan = OpenPlan::new(&core.xs(), usize::from(core.threshold) - 1);
-        let mut column = alloc::vec![0u32; openings.len()];
+        let mut column = SecretWords(alloc::vec![0u32; openings.len()]);
         for index in 0..count {
             for (slot, opening) in column.iter_mut().zip(openings) {
                 *slot = opening.values[index];
@@ -1168,14 +1180,32 @@ impl RekeyRound6 {
                 });
             }
         }
-        let peers = crate::zero_gate::peer_transcript(&core.session, core.party_id,
-            core.zero_commits.iter().map(|c| (c.party_id, c.digest)));
-        let peer_sums: Vec<u32> = (0..count).map(|index| {
-            openings.iter().enumerate().filter(|(position, _)| *position != core.position)
-                .fold(0, |sum, (position, opening)| mod_q_add(sum,
-                    mod_q_mul(plan.to_zero.get(position).copied().unwrap_or(0), opening.values[index])))
-        }).collect();
-        core.zero_gates.as_mut().ok_or(HdError::MacCheckFailed)?.verify(peers, &peer_sums)?;
+        let peers = crate::zero_gate::peer_transcript(
+            &core.session,
+            core.party_id,
+            core.zero_commits.iter().map(|c| (c.party_id, c.digest)),
+        );
+        let peer_sums: Vec<u32> = (0..count)
+            .map(|index| {
+                openings
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, _)| *position != core.position)
+                    .fold(0, |sum, (position, opening)| {
+                        mod_q_add(
+                            sum,
+                            mod_q_mul(
+                                plan.to_zero.get(position).copied().unwrap_or(0),
+                                opening.values[index],
+                            ),
+                        )
+                    })
+            })
+            .collect();
+        core.zero_gates
+            .as_mut()
+            .ok_or(HdError::MacCheckFailed)?
+            .verify(peers, &peer_sums)?;
         if core
             .lineage
             .poison_journal

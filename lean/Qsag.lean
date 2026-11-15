@@ -68,4 +68,11 @@ public import Qsag.CorduroyAndHemAirCompleteness
 
 public import Qsag.ElfFunctionalEquiv
 
+public import Qsag.CodingTheory.PolyMv3
+public import Qsag.CodingTheory.SylvesterResultant
+public import Qsag.CodingTheory.DynamicGcdSplit
+public import Qsag.CodingTheory.UniversalHenselLift
+public import Qsag.CodingTheory.TrivariateGsExplainer
+
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.Tactic.ConstructiveRing

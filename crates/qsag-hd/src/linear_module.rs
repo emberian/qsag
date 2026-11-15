@@ -160,28 +160,28 @@ impl RingPoly {
     }
 
     pub fn add(&self, rhs: &Self) -> Self {
-        let mut out = [0u32; MODULE_N];
-        for (i, value) in out.iter_mut().enumerate() {
+        let mut out = Self::zero();
+        for (i, value) in out.coeffs.iter_mut().enumerate() {
             *value = mod_q_add(self.coeffs[i], rhs.coeffs[i]);
         }
-        Self { coeffs: out }
+        out
     }
 
     pub fn sub(&self, rhs: &Self) -> Self {
-        let mut out = [0u32; MODULE_N];
-        for (i, value) in out.iter_mut().enumerate() {
+        let mut out = Self::zero();
+        for (i, value) in out.coeffs.iter_mut().enumerate() {
             *value = mod_q_sub(self.coeffs[i], rhs.coeffs[i]);
         }
-        Self { coeffs: out }
+        out
     }
 
     pub fn scale(&self, scalar: u32) -> Self {
         let s = ct_reduce_mod_q_u64(scalar as u64);
-        let mut out = [0u32; MODULE_N];
-        for (i, value) in out.iter_mut().enumerate() {
+        let mut out = Self::zero();
+        for (i, value) in out.coeffs.iter_mut().enumerate() {
             *value = mod_q_mul(self.coeffs[i], s);
         }
-        Self { coeffs: out }
+        out
     }
 
     /// Fixed-schedule twisted NTT multiplication modulo X^256+1.

@@ -135,25 +135,21 @@ pub struct MigrationZkProof {
 }
 
 pub(crate) struct Tape {
-    sponge: Shake256,
+    sponge: crate::tape_sponge::TapeSponge,
     bit_buf: u64,
     bit_rem: u8,
 }
 impl Drop for Tape {
     fn drop(&mut self) {
-        // Shake256 erases its internal state through its own Drop implementation.
+        // The tape sponge erases its internal state through Drop.
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_buf), 0);
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_rem), 0);
     }
 }
 impl Tape {
     pub(crate) fn new(seed: &[u8; 32]) -> Self {
-        let mut s = Shake256::new();
-        s.absorb(b"QSAG.MIGRATE.TAPE.V3");
-        s.absorb(seed);
-        s.finalize(0x1f);
         Self {
-            sponge: s,
+            sponge: crate::tape_sponge::TapeSponge::new(seed),
             bit_buf: 0,
             bit_rem: 0,
         }
@@ -173,14 +169,7 @@ impl Tape {
             return [bit, 0, 0, 0];
         }
         if d == Domain::Gold {
-            loop {
-                let mut raw = [0; 8];
-                self.sponge.squeeze(&mut raw);
-                let v = u64::from_le_bytes(raw);
-                if v < GOLDILOCKS_PRIME {
-                    return [v, 0, 0, 0];
-                }
-            }
+            return [self.sponge.gold(), 0, 0, 0];
         }
         loop {
             let mut raw = [0; 32];
@@ -310,6 +299,7 @@ pub(crate) fn simulate(c: &Circuit, seeds: [[u8; 32]; 3]) -> [PartyView; 3] {
     }
     views
 }
+#[cfg(test)]
 pub(crate) fn commit(rep: usize, p: usize, view: &PartyView) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.MIGRATE.VIEW.V3",
@@ -426,7 +416,7 @@ pub fn prove_migration_in_domain<B: AcceleratorBackend>(
     witness: &LegacyOwnershipWitness,
     request: MigrationRequest,
     mut entropy: [u8; 32],
-    _accel: &B,
+    accel: &B,
 ) -> Result<(MigrationStatement, MigrationZkProof), MigrateError> {
     let result = (|| {
         if !witness.matches_commitment(&request.legacy) {
@@ -456,11 +446,14 @@ pub fn prove_migration_in_domain<B: AcceleratorBackend>(
             b"QSAG.MIGRATE.HEDGE.V4",
             &[&entropy, scalar.as_le_bytes(), &bytes],
         );
+        let views = crate::parallel::map(MIT_REPETITIONS, |rep| {
+            simulate(&circuit, seeds(&entropy, &bytes, rep))
+        });
+        let commitments = crate::batch_hash::commit_views(accel, &views);
         let mut all_views = Vec::with_capacity(MIT_REPETITIONS);
         let mut roots = Vec::with_capacity(MIT_REPETITIONS * 32);
-        for rep in 0..MIT_REPETITIONS {
-            let views = simulate(&circuit, seeds(&entropy, &bytes, rep));
-            let commits = core::array::from_fn(|p| commit(rep, p, &views[p]));
+        for (rep, views) in views.into_iter().enumerate() {
+            let commits = core::array::from_fn(|p| commitments[3 * rep + p]);
             roots.extend_from_slice(&rep_root(
                 rep,
                 &commits,
@@ -564,6 +557,23 @@ pub fn verify_migration_proof(
     expected_domain: &[u8; 32],
     expected_epoch: u64,
 ) -> Result<(), MigrateError> {
+    verify_migration_proof_with_backend(
+        statement,
+        proof,
+        expected_domain,
+        expected_epoch,
+        &qsag_accel::CpuReferenceBackend,
+    )
+}
+
+/// Verify with batched commitment hashing on the selected backend.
+pub fn verify_migration_proof_with_backend<B: AcceleratorBackend>(
+    statement: &MigrationStatement,
+    proof: &MigrationZkProof,
+    expected_domain: &[u8; 32],
+    expected_epoch: u64,
+    accel: &B,
+) -> Result<(), MigrateError> {
     if &statement.migration_domain != expected_domain || statement.epoch_anchor != expected_epoch {
         return Err(MigrateError::SessionMismatch);
     }
@@ -579,28 +589,48 @@ pub fn verify_migration_proof(
     let mut t = transcript(statement, &proof.views_merkle_root);
     let es = challenges(&mut t);
     // Authenticate both openings and all output shares before any gate replay.
-    let mut roots = Vec::with_capacity(MIT_REPETITIONS * 32);
-    for (rep, (view, &e)) in proof.repetitions.iter().zip(&es).enumerate() {
-        if view.opened_e != e {
-            return Err(MigrateError::MalformedProofStructure);
-        }
-        let e = e as usize;
+    if proof
+        .repetitions
+        .iter()
+        .zip(&es)
+        .any(|(v, &e)| v.opened_e != e)
+    {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let indexed: Vec<_> = proof
+        .repetitions
+        .iter()
+        .enumerate()
+        .flat_map(|(rep, view)| {
+            let e = view.opened_e as usize;
+            [(rep, e, &view.pair[0]), (rep, (e + 1) % 3, &view.pair[1])]
+        })
+        .collect();
+    let opened_commits = crate::batch_hash::commit_indexed(accel, &indexed);
+    let roots: Vec<u8> = crate::parallel::map(MIT_REPETITIONS, |rep| {
+        let view = &proof.repetitions[rep];
+        let e = view.opened_e as usize;
         let mut commits = [[0; 32]; 3];
-        commits[e] = commit(rep, e, &view.pair[0]);
-        commits[(e + 1) % 3] = commit(rep, (e + 1) % 3, &view.pair[1]);
+        commits[e] = opened_commits[2 * rep];
+        commits[(e + 1) % 3] = opened_commits[2 * rep + 1];
         commits[(e + 2) % 3] = view.hidden_party_commit;
         let mut outs = [&[][..]; 3];
         outs[e] = &view.pair[0].outputs;
         outs[(e + 1) % 3] = &view.pair[1].outputs;
         outs[(e + 2) % 3] = &view.hidden_outputs;
-        roots.extend_from_slice(&rep_root(rep, &commits, outs));
-    }
+        rep_root(rep, &commits, outs)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     if cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]) != proof.views_merkle_root {
         return Err(MigrateError::ViewsMerkleRootMismatch);
     }
     let circuit = crate::ownership::build(statement, &[0; 32]);
-    for (rep, view) in proof.repetitions.iter().enumerate() {
-        replay(&circuit, rep, view)?;
+    for result in crate::parallel::map(MIT_REPETITIONS, |rep| {
+        replay(&circuit, rep, &proof.repetitions[rep])
+    }) {
+        result?;
     }
     Ok(())
 }
@@ -811,6 +841,24 @@ pub(crate) mod tests {
                 &CpuReferenceBackend::new(),
             )
             .unwrap();
+            #[cfg(feature = "vulkan")]
+            if matches!(kind, LegacyCommitmentKind::Slip0010Ed25519(_)) {
+                let gpu =
+                    qsag_accel::VulkanSpirvBackend::try_new().expect("supported Vulkan device");
+                let before = gpu.cpu_fallback_count();
+                let actual =
+                    prove_migration_in_domain(&witness, request(kind), [31; 32], &gpu).unwrap();
+                assert_eq!(actual, (statement.clone(), proof.clone()));
+                verify_migration_proof_with_backend(
+                    &statement,
+                    &proof,
+                    &statement.migration_domain,
+                    statement.epoch_anchor,
+                    &gpu,
+                )
+                .unwrap();
+                assert_eq!(gpu.cpu_fallback_count(), before);
+            }
             assert_eq!(
                 verify_migration_proof(
                     &statement,

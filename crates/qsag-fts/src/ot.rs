@@ -10,6 +10,57 @@ use qsag_core::preprocessing::{
     PartyPrivateRng,
 };
 
+/// Four pads with the existing six-frame, fixed-width cSHAKE encoding.
+fn pad_batch(
+    context: &[u8; 32],
+    sender: u16,
+    receiver: u16,
+    indices: [usize; 4],
+    count: usize,
+    raw: [&[u8; 48]; 4],
+) -> [u128; 4] {
+    const MIDSTATE: [u64; 25] =
+        qsag_core::sponge::keccak::cshake256_static_midstate(b"QSAG.CUSTODY.OT.PAD.V1");
+    let mut states = [MIDSTATE; 4];
+    let mut blocks = [[0u8; 272]; 4];
+    for lane in 0..4 {
+        let sender = sender.to_be_bytes();
+        let receiver = receiver.to_be_bytes();
+        let index = (indices[lane] as u64).to_be_bytes();
+        let count = (count as u64).to_be_bytes();
+        let frames: [&[u8]; 6] = [raw[lane], context, &sender, &receiver, &index, &count];
+        blocks[lane][..8].copy_from_slice(&6u64.to_le_bytes());
+        let mut offset = 8;
+        for frame in frames {
+            blocks[lane][offset..offset + 8].copy_from_slice(&(frame.len() as u64).to_le_bytes());
+            offset += 8;
+            blocks[lane][offset..offset + frame.len()].copy_from_slice(frame);
+            offset += frame.len();
+        }
+        blocks[lane][offset] = 0x04;
+        blocks[lane][271] = 0x80;
+    }
+    for block in 0..2 {
+        for lane in 0..4 {
+            for (word, state_word) in states[lane].iter_mut().take(17).enumerate() {
+                let offset = block * 136 + word * 8;
+                *state_word ^=
+                    u64::from_le_bytes(core::array::from_fn(|b| blocks[lane][offset + b]));
+            }
+        }
+        qsag_core::sponge::keccak::keccak_f1600_batch(&mut states);
+    }
+    let result =
+        core::array::from_fn(|lane| states[lane][0] as u128 | ((states[lane][1] as u128) << 64));
+    for block in &mut blocks {
+        ct_zeroize_bytes(block);
+    }
+    for state in &mut states {
+        qsag_accel::ct::ct_zeroize_u64s(state);
+    }
+    result
+}
+
 pub enum CommittedOtMessage {
     Abort,
     Columns(KosOtUColsMsg),
@@ -100,29 +151,6 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         }
         Ok(())
     }
-    fn pad(
-        context: &[u8; 32],
-        sender: u16,
-        receiver: u16,
-        index: usize,
-        count: usize,
-        raw: &[u8; 48],
-    ) -> u128 {
-        let mut digest = cshake256_framed_32(
-            b"QSAG.CUSTODY.OT.PAD.V1",
-            &[
-                raw,
-                context,
-                &sender.to_be_bytes(),
-                &receiver.to_be_bytes(),
-                &(index as u64).to_be_bytes(),
-                &(count as u64).to_be_bytes(),
-            ],
-        );
-        let value = u128::from_le_bytes(core::array::from_fn(|i| digest[i]));
-        ct_zeroize_bytes(&mut digest);
-        value
-    }
     pub fn send_values(
         &mut self,
         peer: u16,
@@ -154,19 +182,29 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
             let mut pads = channel
                 .round4_verify_and_finish(pending, &proof)
                 .map_err(|_| invalid())?;
-            let ciphertexts = alternatives
-                .iter()
-                .zip(&pads)
-                .enumerate()
-                .map(|(i, (values, pads))| {
-                    [
-                        values[0]
-                            ^ Self::pad(&context, self.party, peer, i, alternatives.len(), &pads.0),
-                        values[1]
-                            ^ Self::pad(&context, self.party, peer, i, alternatives.len(), &pads.1),
-                    ]
-                })
-                .collect();
+            let mut ciphertexts = Vec::with_capacity(alternatives.len());
+            for base in (0..alternatives.len()).step_by(2) {
+                let other = (base + 1).min(alternatives.len() - 1);
+                let mut batch = pad_batch(
+                    &context,
+                    self.party,
+                    peer,
+                    [base, base, other, other],
+                    alternatives.len(),
+                    [&pads[base].0, &pads[base].1, &pads[other].0, &pads[other].1],
+                );
+                ciphertexts.push([
+                    alternatives[base][0] ^ batch[0],
+                    alternatives[base][1] ^ batch[1],
+                ]);
+                if other != base {
+                    ciphertexts.push([
+                        alternatives[other][0] ^ batch[2],
+                        alternatives[other][1] ^ batch[3],
+                    ]);
+                }
+                qsag_core::wipe::wipe_u128s(&mut batch);
+            }
             for (a, b) in &mut pads {
                 ct_zeroize_bytes(a);
                 ct_zeroize_bytes(b);
@@ -213,17 +251,27 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                 if ciphertexts.len() != choices.len() {
                     return Err(invalid());
                 }
-                Ok(choices
-                    .iter()
-                    .zip(&pads)
-                    .zip(ciphertexts)
-                    .enumerate()
-                    .map(|(i, ((&choice, pad), values))| {
-                        let mask = 0u128.wrapping_sub(u128::from(choice));
-                        let selected = (values[0] & !mask) | (values[1] & mask);
-                        selected ^ Self::pad(&context, peer, self.party, i, choices.len(), pad)
-                    })
-                    .collect())
+                let mut output = Vec::with_capacity(choices.len());
+                for base in (0..choices.len()).step_by(4) {
+                    let indices = core::array::from_fn(|lane| (base + lane).min(choices.len() - 1));
+                    let mut batch = pad_batch(
+                        &context,
+                        peer,
+                        self.party,
+                        indices,
+                        choices.len(),
+                        core::array::from_fn(|lane| &pads[indices[lane]]),
+                    );
+                    for (lane, pad) in batch.iter().enumerate().take((choices.len() - base).min(4))
+                    {
+                        let i = base + lane;
+                        let mask = 0u128.wrapping_sub(u128::from(choices[i]));
+                        let selected = (ciphertexts[i][0] & !mask) | (ciphertexts[i][1] & mask);
+                        output.push(selected ^ pad);
+                    }
+                    qsag_core::wipe::wipe_u128s(&mut batch);
+                }
+                Ok(output)
             })();
             for pad in &mut pads {
                 ct_zeroize_bytes(pad);
@@ -289,7 +337,7 @@ impl<W: AuthenticatedOtWire> ParallelSeededDkgOt for CommittedCorrelatedOt<W> {
                 Ok(mut values) => {
                     output.extend_from_slice(&values);
                     qsag_accel::ct::ct_zeroize_u128s(&mut values);
-                },
+                }
                 Err(error) => {
                     qsag_accel::ct::ct_zeroize_u128s(&mut output);
                     return Err(error);
@@ -379,5 +427,44 @@ mod tests {
         );
         assert!(right.receive_values(0, [7; 32], &choices).is_err());
         sender.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::*;
+    #[test]
+    fn batched_pad_matches_framed_reference() {
+        for count in [1usize, 3, 4, 127, 65536] {
+            let context = [0xa7; 32];
+            let raw: [[u8; 48]; 4] =
+                core::array::from_fn(|i| core::array::from_fn(|j| (i * 53 + j) as u8));
+            let indices = [0, 1, count - 1, usize::MAX];
+            let batch = pad_batch(
+                &context,
+                0x1234,
+                0xabcd,
+                indices,
+                count,
+                core::array::from_fn(|i| &raw[i]),
+            );
+            for lane in 0..4 {
+                let reference = cshake256_framed_32(
+                    b"QSAG.CUSTODY.OT.PAD.V1",
+                    &[
+                        &raw[lane],
+                        &context,
+                        &0x1234u16.to_be_bytes(),
+                        &0xabcdu16.to_be_bytes(),
+                        &(indices[lane] as u64).to_be_bytes(),
+                        &(count as u64).to_be_bytes(),
+                    ],
+                );
+                assert_eq!(
+                    batch[lane],
+                    u128::from_le_bytes(core::array::from_fn(|i| reference[i]))
+                );
+            }
+        }
     }
 }

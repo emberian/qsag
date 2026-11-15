@@ -4,6 +4,19 @@
 use qsag_core::sponge::keccak::Cshake256Xof;
 use qsag_core::wipe::ct_eq_bytes32;
 
+/// Owned temporary MAC key, including failed filesystem construction paths.
+pub(crate) struct SecretKey(pub(crate) [u8; 32]);
+impl core::ops::Deref for SecretKey {
+    type Target = [u8; 32];
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl core::ops::DerefMut for SecretKey {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+impl Drop for SecretKey {
+    fn drop(&mut self) { qsag_asm::ct_memzero(&mut self.0); }
+}
+
 fn absorb_framed(xof: &mut Cshake256Xof, part: &[u8]) {
     xof.absorb(&(part.len() as u64).to_be_bytes());
     xof.absorb(part);
@@ -46,7 +59,8 @@ pub fn mac32(key: &[u8; 32], domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 
 /// Constant-time check of a [`mac32`] tag.
 pub fn mac32_verify(key: &[u8; 32], domain: &[u8], parts: &[&[u8]], tag: &[u8; 32]) -> bool {
-    ct_eq_bytes32(&mac32(key, domain, parts), tag)
+    let expected = SecretKey(mac32(key, domain, parts));
+    ct_eq_bytes32(&expected, tag)
 }
 
 /// Counter-mode `SHAKE256` generator for one party's private randomness. The seed is the
@@ -88,6 +102,17 @@ impl SeedRng {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_tag_byte_is_authenticated() {
+        let key = [0x72; 32];
+        let tag = mac32(&key, b"test", &[b"payload"]);
+        assert!(mac32_verify(&key, b"test", &[b"payload"], &tag));
+        for i in 0..tag.len() {
+            let mut changed = tag;
+            changed[i] ^= 1;
+            assert!(!mac32_verify(&key, b"test", &[b"payload"], &changed));
+        }
+    }
     use super::*;
 
     #[test]

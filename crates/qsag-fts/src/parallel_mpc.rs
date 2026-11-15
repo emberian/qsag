@@ -1154,27 +1154,35 @@ impl ParallelSeededThresholdSetup {
         {
             return Err(ParallelSeededError::InvalidAuthenticationPath);
         }
+        let msg_epoch_tag = cshake256_framed_32(b"QSAG.FTS.EPOCH.MESSAGE.V1", &[msg]);
         for sh in &mut self.shares {
-            if sh.epoch_uses[ep_usize] >= 1 {
-                return Err(ParallelSeededError::EpochUseBudgetExhausted);
-            }
-            let count = sh.epoch_uses[ep_usize] + 1;
-            persistence.burn_epoch_before_sign(
-                &self.pk.pk_seed_bytes,
-                sh.party_id,
+            let prior = sh.epoch_uses[ep_usize];
+            let mut epoch_guard = qsag_verified::FtsEpochGuard::new_unused(
+                self.pk.pk_seed_bytes,
                 epoch,
-                count,
-            )?;
-            sh.epoch_uses[ep_usize] = count;
-            let (_, permit) = qsag_verified::FtsEpochGuard::new_unused(
-                self.pk.pk_seed_bytes, epoch, num_leaves as u32,
-            ).consume_epoch_once(self.pk.pk_seed_bytes, epoch,
-                cshake256_framed_32(b"QSAG.FTS.EPOCH.MESSAGE.V1", &[msg]));
+                num_leaves as u32,
+            );
+            if prior > 0 {
+                let (consumed, _) =
+                    epoch_guard.consume_epoch_once(self.pk.pk_seed_bytes, epoch, [0u8; 32]);
+                epoch_guard = consumed;
+            }
+            let (next_guard, permit) =
+                epoch_guard.consume_epoch_once(self.pk.pk_seed_bytes, epoch, msg_epoch_tag);
             let (key, authorized_epoch, _) = permit
-                .map_err(|_| ParallelSeededError::EpochUseBudgetExhausted)?.into_binding();
+                .map_err(|_| ParallelSeededError::EpochUseBudgetExhausted)?
+                .into_binding();
             if key != self.pk.pk_seed_bytes || authorized_epoch != epoch {
                 return Err(ParallelSeededError::PersistenceFailed);
             }
+            let next_uses = next_guard.used();
+            persistence.burn_epoch_before_sign(
+                &self.pk.pk_seed_bytes,
+                sh.party_id,
+                authorized_epoch,
+                next_uses,
+            )?;
+            sh.epoch_uses[ep_usize] = next_uses;
         }
         let use_cnt = self.shares[0].epoch_uses[ep_usize];
         if self

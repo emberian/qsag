@@ -2,6 +2,8 @@ module
 public import Qsag.ElfBinaryVerify
 public import Qsag.McRefine
 public import Qsag.ElfParse
+import Qsag.Tactic.AssuranceKit
+import Qsag.Constructive
 import all Qsag.ElfBinaryVerify
 import all Qsag.McRefine
 import all Qsag.ElfFixtureSlices
@@ -736,14 +738,14 @@ theorem stepX86Full_vmovGprToXmm (is64 : Bool) (dstVec srcGpr : Nat) :
        ⟨off, [], true⟩) := by rfl
 
 theorem stepX86Full_vpbroadcastQ (dst src : Nat) :
-    stepX86 ⟨off, len, .vpbroadcast true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+    stepX86 ⟨off, len, .vpbroadcast true true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
       (⟨off + len, g, y.set dst (bcastQword256 (y.get src).w0), cf, o, zf, true, false, m⟩,
-       ⟨off, [], true⟩) := by rfl
+       ⟨off, [], true⟩) := by cases dy <;> rfl
 
 theorem stepX86Full_vpbroadcastB (dst src : Nat) :
-    stepX86 ⟨off, len, .vpbroadcast false dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+    stepX86 ⟨off, len, .vpbroadcast false true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
       (⟨off + len, g, y.set dst (bcastByte256 (y.get src).w0.toUInt8), cf, o, zf, true, false, m⟩,
-       ⟨off, [], true⟩) := by rfl
+       ⟨off, [], true⟩) := by cases dy <;> rfl
 
 theorem stepX86Full_vgf2p8affine256 (dst s1 s2 : Nat) (imm : UInt8) :
     stepX86 ⟨off, len, .vgf2p8affineqb true dst s1 s2 imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
@@ -2051,12 +2053,12 @@ theorem gfniShamirMacCode_is_rlib_slice :
 def gfniShamirMacProg : List (DecodedInstr X86Instr) := [
   ⟨0, 10, .movImm true 0 0x71500a8a86be78ce⟩,
   ⟨10, 5, .vmovGprToXmm true 14 0⟩,
-  ⟨15, 5, .vpbroadcast true 14 14⟩,
+  ⟨15, 5, .vpbroadcast true true 14 14⟩,
   ⟨20, 10, .movImm true 0 0xa1e4f8e072a2700c⟩,
   ⟨30, 5, .vmovGprToXmm true 15 0⟩,
-  ⟨35, 5, .vpbroadcast true 15 15⟩,
+  ⟨35, 5, .vpbroadcast true true 15 15⟩,
   ⟨40, 4, .vmovGprToXmm false 3 2⟩,
-  ⟨44, 5, .vpbroadcast false 3 3⟩,
+  ⟨44, 5, .vpbroadcast false true 3 3⟩,
   ⟨49, 6, .vgf2p8affineqb true 3 3 14 0⟩,
   ⟨55, 4, .vload true 0 (.baseDisp 6 0)⟩,
   ⟨59, 4, .vload true 1 (.baseDisp 7 0)⟩,
@@ -2314,7 +2316,9 @@ def GfniMacPost (s₀ : X86State) (n : Word) (out : X86State) (m : MirShamirMac)
   (n ≠ 0 → out.ymm.get 0 = Vec256.zero ∧ out.ymm.get 1 = Vec256.zero ∧
     out.ymm.get 2 = Vec256.zero ∧ out.ymm.get 3 = Vec256.zero ∧
     out.ymm.get 14 = Vec256.zero ∧ out.ymm.get 15 = Vec256.zero) ∧
-  out.gpr.get 4 = s₀.gpr.get 4 ∧ out.gpr.get 3 = s₀.gpr.get 3 ∧ out.gpr.get 5 = s₀.gpr.get 5
+  out.gpr.get 4 = s₀.gpr.get 4 ∧ out.gpr.get 3 = s₀.gpr.get 3 ∧ out.gpr.get 5 = s₀.gpr.get 5 ∧
+  out.gpr.get 12 = s₀.gpr.get 12 ∧ out.gpr.get 13 = s₀.gpr.get 13 ∧
+  out.gpr.get 14 = s₀.gpr.get 14 ∧ out.gpr.get 15 = s₀.gpr.get 15
 
 def gfniShamirMacPosCert (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
     LoopRelationCert X86State MirShamirMac n gfniBodyStep mirGfniBodyStep
@@ -2430,7 +2434,7 @@ def gfniShamirMacUnrestrictedCert (fetch : Nat → Option (DecodedInstr X86Instr
     rw [ite_eq_left hg0, ite_eq_left rfl]
     obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, _, _, _, _, _, _, _⟩ := s₀
     have hr1 : r1 = 0 := hcount
-    refine ⟨⟨rfl, rfl, rfl, rfl, hr1, rfl, rfl, fun h => absurd rfl h, rfl, rfl, rfl⟩, rfl, rfl⟩
+    refine ⟨⟨rfl, rfl, rfl, rfl, hr1, rfl, rfl, fun h => absurd rfl h, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩, rfl, rfl⟩
   pos_cert := fun hn =>
     gfniShamirMacPosCert s₀ n.toNat (bv64_pos_of_ne_zero n hn) n.isLt
   pos_sched := fun _ => rfl
@@ -2488,7 +2492,7 @@ def gfniShamirMacUnrestrictedCert (fetch : Nat → Option (DecodedInstr X86Instr
     rw [ha101, gfni_exit_full fetch hf]
     have hmr := mirGfni_cuts_mem n.toNat r6 r7 (gfniScaledCoeff r2) n.toNat m
     refine ⟨?_, by simp [List.append_assoc, b16get_2], rfl⟩
-    refine ⟨rfl, rfl, hmr, rfl, rfl, rfl, rfl, ?_, rfl, rfl, rfl⟩
+    refine ⟨rfl, rfl, hmr, rfl, rfl, rfl, rfl, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
     intro _
     exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
@@ -2588,7 +2592,7 @@ def vpclmulBdozMacProg : List (DecodedInstr X86Instr) := [
   ⟨81, 2, .jcc 5 8⟩,
   ⟨83, 5, .movImm false 0 0x87⟩,
   ⟨88, 5, .vmovGprToXmm true 8 0⟩,
-  ⟨93, 5, .vpbroadcast true 8 8⟩,
+  ⟨93, 5, .vpbroadcast true true 8 8⟩,
   ⟨98, 6, .vpclmulqdq true 4 1 8 0x01⟩,
   ⟨104, 5, .vshiftImm .vpslldq true 5 4 8⟩,
   ⟨109, 5, .vshiftImm .vpsrldq true 6 4 8⟩,
@@ -2651,6 +2655,141 @@ def bdozMacAccum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Vec256 �
     let a := readMem256 mem pL
     let b := readMem256 mem pR
     bdozMacAccum k mem (pL + 32) (pR + 32) (karatsubaStepLo lo a b) (karatsubaStepHi hi a b)
+
+section Gf128MacAlgebra
+attribute [local irreducible] clmul64
+attribute [-instance] UInt8.instLawfulEqOrd BitVec.instLawfulEqOrd
+
+/-- Select either independent 128-bit SIMD lane in polynomial bit order. -/
+def gf128Lane (v : Vec256) (lane : Fin 2) : BitVec 128 :=
+  if lane.val = 0 then gf128Words v.w0 v.w1 else gf128Words v.w2 v.w3
+
+/-- Interpret the pair of unreduced SIMD accumulators as a polynomial. -/
+def gf128AccumLane (lo hi : Vec256) (lane : Fin 2) : BitVec 256 :=
+  gf128Lane hi lane ++ gf128Lane lo lane
+
+/-- XOR of unreduced polynomial products in the selected lane of n blocks.
+Pointer arithmetic is the machine's UInt64 arithmetic, including wrapping. -/
+def gf128BdozPolySum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Fin 2 → BitVec 256
+  | 0, _, _, _, _ => 0
+  | n+1, mem, pL, pR, lane =>
+      gf128PolyMul ((gf128Lane (readMem256 mem pL) lane).setWidth 256)
+        (gf128Lane (readMem256 mem pR) lane) ^^^
+      gf128BdozPolySum n mem (pL+32) (pR+32) lane
+
+/-- XOR of the mathematical GF(2^128) products in the selected lane of n blocks. -/
+def gf128BdozFieldSum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Fin 2 → BitVec 128
+  | 0, _, _, _, _ => 0
+  | n+1, mem, pL, pR, lane =>
+      gf128FieldMul (gf128Lane (readMem256 mem pL) lane)
+        (gf128Lane (readMem256 mem pR) lane) ^^^
+      gf128BdozFieldSum n mem (pL+32) (pR+32) lane
+
+theorem gf128BdozPolySum_reduce (n : Nat) (mem : UInt64 → UInt8)
+    (pL pR : UInt64) (lane : Fin 2) :
+    gf128Reduce (gf128BdozPolySum n mem pL pR lane) =
+      gf128BdozFieldSum n mem pL pR lane := by
+  induction n generalizing pL pR with
+  | zero => change gf128Reduce 0 = 0; decide +kernel
+  | succ n ih =>
+    simp only [gf128BdozPolySum, gf128BdozFieldSum, gf128Reduce_xor, ih, gf128FieldMul]
+
+private theorem gf128AccWords_product (l0 l1 h0 h1 : UInt64) (p00 p01 p10 p11 : Vec128) :
+    gf128Words (h0 ^^^ (p11.w0 ^^^ ((p10.w1 ^^^ p01.w1) >>> 0)))
+      (h1 ^^^ (p11.w1 ^^^ 0)) ++
+      gf128Words (l0 ^^^ (p00.w0 ^^^ 0))
+        (l1 ^^^ (p00.w1 ^^^ ((p10.w0 ^^^ p01.w0) <<< 0))) =
+    (gf128Words h0 h1 ++ gf128Words l0 l1) ^^^
+      (gf128Words (p11.w0 ^^^ p01.w1 ^^^ p10.w1) p11.w1 ++
+        gf128Words p00.w0 (p00.w1 ^^^ p01.w0 ^^^ p10.w0)) := by
+  simp only [UInt64.shiftLeft_zero, UInt64.shiftRight_zero, UInt64.xor_zero]
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hbound
+  simp only [gf128Words, BitVec.getLsbD_append, UInt64.toBitVec_xor, BitVec.getLsbD_xor]
+  by_cases h0 : i < 128 <;> by_cases h1 : i < 64 <;> by_cases h2 : i - 128 < 64 <;>
+    simp_all only [↓reduceIte, Bool.xor_assoc, Bool.xor_comm, Bool.xor_left_comm]
+
+private theorem gf128KaratsubaStep_lane (lo hi a b : Vec256) (lane : Fin 2) :
+    gf128AccumLane (karatsubaStepLo lo a b) (karatsubaStepHi hi a b) lane =
+      gf128AccumLane lo hi lane ^^^
+        gf128PolyMul ((gf128Lane a lane).setWidth 256) (gf128Lane b lane) := by
+  by_cases hl : lane.val = 0
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128_clmul_four_words]
+    exact gf128AccWords_product lo.w0 lo.w1 hi.w0 hi.w1
+      (clmul64 a.w0 b.w0) (clmul64 a.w0 b.w1) (clmul64 a.w1 b.w0) (clmul64 a.w1 b.w1)
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128_clmul_four_words]
+    exact gf128AccWords_product lo.w2 lo.w3 hi.w2 hi.w3
+      (clmul64 a.w2 b.w2) (clmul64 a.w2 b.w3) (clmul64 a.w3 b.w2) (clmul64 a.w3 b.w3)
+
+theorem gf128BdozAccum_polynomial (n : Nat) (mem : UInt64 → UInt8)
+    (pL pR : UInt64) (lo hi : Vec256) (lane : Fin 2) :
+    gf128AccumLane (bdozMacAccum n mem pL pR lo hi).1
+      (bdozMacAccum n mem pL pR lo hi).2 lane =
+      gf128AccumLane lo hi lane ^^^ gf128BdozPolySum n mem pL pR lane := by
+  induction n generalizing pL pR lo hi with
+  | zero => simp [bdozMacAccum, gf128BdozPolySum]
+  | succ n ih =>
+    simp only [bdozMacAccum, ih, gf128KaratsubaStep_lane, gf128BdozPolySum,
+      BitVec.xor_assoc]
+
+private theorem gf128ReduceWords (lo0 lo1 hi0 hi1 : UInt64) :
+    gf128Words
+      ((lo0 ^^^ (0 : UInt64)) ^^^ (clmul64 (hi0 ^^^ ((clmul64 hi1 0x87).w1 >>> (0 : UInt64))) 0x87).w0)
+      ((lo1 ^^^ ((clmul64 hi1 0x87).w0 <<< (0 : UInt64))) ^^^
+        (clmul64 (hi0 ^^^ ((clmul64 hi1 0x87).w1 >>> (0 : UInt64))) 0x87).w1) =
+      gf128WordReduce lo0 lo1 hi0 hi1 := by
+  simp only [UInt64.xor_zero, UInt64.shiftLeft_zero, UInt64.shiftRight_zero, gf128WordReduce]
+
+private theorem gf128Poly87Reduce_lane (lo hi : Vec256) (lane : Fin 2) :
+    gf128Lane (poly87Reduce256 lo hi) lane = gf128Reduce (gf128AccumLane lo hi lane) := by
+  by_cases hl : lane.val = 0
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128WordReduce_eq_reduce]
+    exact gf128ReduceWords lo.w0 lo.w1 hi.w0 hi.w1
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128WordReduce_eq_reduce]
+    exact gf128ReduceWords lo.w2 lo.w3 hi.w2 hi.w3
+
+/-- Each valid 128-bit lane of the reduced machine accumulator is the XOR
+of the n mathematical field products read from the corresponding input lane.
+The count-zero case is an algebraic identity, not execution of a zero-trip ABI call. -/
+theorem gf128_bdozMacAccum_field (n : Nat) (mem : UInt64 → UInt8)
+    (pL pR : UInt64) (lane : Nat) (hLane : lane < 2) :
+    gf128Lane
+      (poly87Reduce256 (bdozMacAccum n mem pL pR Vec256.zero Vec256.zero).1
+        (bdozMacAccum n mem pL pR Vec256.zero Vec256.zero).2) ⟨lane, hLane⟩ =
+      gf128BdozFieldSum n mem pL pR ⟨lane, hLane⟩ := by
+  rw [gf128Poly87Reduce_lane, gf128BdozAccum_polynomial]
+  have hz : gf128AccumLane Vec256.zero Vec256.zero ⟨lane, hLane⟩ = 0 := by
+    simp [gf128AccumLane, gf128Lane, Vec256.zero, gf128Words]
+  rw [hz]
+  simpa only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor] using
+    gf128BdozPolySum_reduce n mem pL pR ⟨lane, hLane⟩
+
+/-- Mutation tooth: dropping the z^0 product makes the one-times-one block wrong. -/
+theorem gf128_bdozMacAccum_field_tooth :
+    gf128Lane
+      (poly87Reduce256
+        (bdozMacAccum 1 (fun a => if a == 0 then 1 else 0) 0 0 Vec256.zero Vec256.zero).1
+        (bdozMacAccum 1 (fun a => if a == 0 then 1 else 0) 0 0 Vec256.zero Vec256.zero).2)
+      ⟨0, by decide⟩ ≠ 0 := by
+  decide +kernel
+
+/-- A valid lane and a nonzero field product inhabit the MAC specification. -/
+theorem gf128_bdozMacAccum_field_inhabited :
+    ∃ lane : Nat, ∃ hLane : lane < 2,
+      gf128BdozFieldSum 1 (fun a => if a == 0 then 1 else 0) 0 0 ⟨lane, hLane⟩ = 1 := by
+  refine ⟨0, by decide, ?_⟩
+  decide +kernel
+
+set_option maxRecDepth 4096 in
+#tooth_pair gf128_bdozMacAccum_field vs gf128_bdozMacAccum_field_tooth
+set_option maxRecDepth 4096 in
+#verify_inhabited gf128_bdozMacAccum_field gf128_bdozMacAccum_field_inhabited
+
+end Gf128MacAlgebra
 
 structure MirBdozMac where
   lhsPtr : UInt64
@@ -2727,16 +2866,15 @@ def vpclmulGuardedRun (fetch : Nat → Option (DecodedInstr X86Instr))
         pc := 178
         gpr := s.gpr.set 0 0
         ymmDirty := false
-        mem := writeMem256 s.mem (s.gpr.get 7) Vec256.zero
         halted := true },
-     [⟨0, [(s.gpr.get 7, 32)], true⟩])
+     [⟨0, [], true⟩])
   else runX86Fetch fetch fuel s
 
 def mirVpclmulRun (n : Word) (baseL baseR outP : UInt64) (mem : UInt64 → UInt8) :
     MirBdozMac × List StepObs :=
   if n = 0 then
-    (⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, 0, writeMem256 mem outP Vec256.zero⟩,
-     [⟨0, [(outP, 32)], true⟩])
+    (⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, 0, mem⟩,
+     [⟨0, [], true⟩])
   else
     let loop := runCuts mirVpclmulBodyStep n.toNat ⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, n.toNat, mem⟩
     let red := poly87Reduce256 loop.1.accLo loop.1.accHi
@@ -2867,12 +3005,24 @@ def VpclmulLoopPost (s₀ : X86State) (n : Nat) (a : X86State) (m : MirBdozMac) 
     m.remaining = 0 ∧
     m.mem = s₀.mem
 
+/-- Both zero and positive expected results use the polynomial-field specification. -/
+theorem vpclmulExpected_field (n : Word) (mem : UInt64 → UInt8) (pL pR : UInt64)
+    (lane : Nat) (hl : lane < 2) :
+    let acc := bdozMacAccum n.toNat mem pL pR Vec256.zero Vec256.zero
+    gf128Lane (if n = 0 then Vec256.zero else poly87Reduce256 acc.1 acc.2) ⟨lane, hl⟩ =
+      gf128BdozFieldSum n.toNat mem pL pR ⟨lane, hl⟩ := by
+  by_cases hn : n = 0
+  · subst n
+    simp [gf128Lane, gf128Words, gf128BdozFieldSum, Vec256.zero]
+  · simp only [hn, ↓reduceIte]
+    exact gf128_bdozMacAccum_field n.toNat mem pL pR lane hl
+
 def VpclmulPost (s₀ : X86State) (n : Word) (out : X86State) (m : MirBdozMac) : Prop :=
   let acc := bdozMacAccum n.toNat s₀.mem (s₀.gpr.get 6) (s₀.gpr.get 2) Vec256.zero Vec256.zero
   let expected := if n = 0 then Vec256.zero else poly87Reduce256 acc.1 acc.2
   out.halted = true ∧
   out.mem = m.mem ∧
-  out.mem = writeMem256 s₀.mem (s₀.gpr.get 7) expected ∧
+  out.mem = (if n = 0 then s₀.mem else writeMem256 s₀.mem (s₀.gpr.get 7) expected) ∧
   out.gpr.get 0 = 0 ∧ out.gpr.get 1 = 0 ∧
   out.ymmDirty = false ∧
   (n ≠ 0 → out.ymm.get 0 = Vec256.zero ∧ out.ymm.get 1 = Vec256.zero ∧
@@ -2880,7 +3030,11 @@ def VpclmulPost (s₀ : X86State) (n : Word) (out : X86State) (m : MirBdozMac) :
     out.ymm.get 4 = Vec256.zero ∧ out.ymm.get 5 = Vec256.zero ∧
     out.ymm.get 6 = Vec256.zero ∧ out.ymm.get 7 = Vec256.zero ∧
     out.ymm.get 8 = Vec256.zero) ∧
-  out.gpr.get 4 = s₀.gpr.get 4 ∧ out.gpr.get 3 = s₀.gpr.get 3 ∧ out.gpr.get 5 = s₀.gpr.get 5
+  out.gpr.get 4 = s₀.gpr.get 4 ∧ out.gpr.get 3 = s₀.gpr.get 3 ∧ out.gpr.get 5 = s₀.gpr.get 5 ∧
+  out.gpr.get 12 = s₀.gpr.get 12 ∧ out.gpr.get 13 = s₀.gpr.get 13 ∧
+  out.gpr.get 14 = s₀.gpr.get 14 ∧ out.gpr.get 15 = s₀.gpr.get 15 ∧
+  ∀ lane : Nat, ∀ hl : lane < 2, gf128Lane expected ⟨lane, hl⟩ =
+    gf128BdozFieldSum n.toNat s₀.mem (s₀.gpr.get 6) (s₀.gpr.get 2) ⟨lane, hl⟩
 
 def vpclmulPosCert (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
     LoopRelationCert X86State MirBdozMac n vpclmulBodyStep mirVpclmulBodyStep
@@ -2988,7 +3142,7 @@ def vpclmulBdozMacUnrestrictedCert (fetch : Nat → Option (DecodedInstr X86Inst
       ⟨s₀.gpr.get 6, s₀.gpr.get 2, s₀.gpr.get 7, Vec256.zero, Vec256.zero, n.toNat, s₀.mem⟩
       (VpclmulLoopPost s₀ n.toNat)
       (VpclmulPost s₀ n) where
-  zeroSchedule := [⟨0, [(s₀.gpr.get 7, 32)], true⟩]
+  zeroSchedule := [⟨0, [], true⟩]
   entrySchedule := vpclmulEntryObs
   bodySchedule := fun v => vpclmulBodyObs (ptrStride (s₀.gpr.get 6) 32 v) (ptrStride (s₀.gpr.get 2) 32 v)
   exitSchedule := vpclmulExitObs (s₀.gpr.get 7)
@@ -2999,7 +3153,8 @@ def vpclmulBdozMacUnrestrictedCert (fetch : Nat → Option (DecodedInstr X86Inst
     rw [ite_eq_left hg0, ite_eq_left rfl]
     obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, _, _, _, _, _, _, _⟩ := s₀
     have hr1 : r1 = 0 := hcount
-    refine ⟨⟨rfl, rfl, rfl, rfl, hr1, rfl, fun h => absurd rfl h, rfl, rfl, rfl⟩, rfl, rfl⟩
+    refine ⟨⟨rfl, rfl, rfl, rfl, hr1, rfl, fun h => absurd rfl h, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+      vpclmulExpected_field 0 (fun _ => 0) 0 0⟩, rfl, rfl⟩
   pos_cert := fun hn =>
     vpclmulPosCert s₀ n.toNat (bv64_pos_of_ne_zero n hn) n.isLt
   pos_sched := fun _ => rfl
@@ -3060,7 +3215,7 @@ def vpclmulBdozMacUnrestrictedCert (fetch : Nat → Option (DecodedInstr X86Inst
       dsimp only at h1 h2
       rw [h1, h2]
     refine ⟨?_, by simp [List.append_assoc, b16get_7], rfl⟩
-    refine ⟨rfl, rfl, ?_, rfl, rfl, rfl, ?_, rfl, rfl, rfl⟩
+    refine ⟨rfl, rfl, ?_, rfl, rfl, rfl, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, vpclmulExpected_field n m r6 r2⟩
     · simp only [b16get_2, b16get_6, b16get_7, ite_eq_right hn, hred]
     · intro _
       exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
@@ -3193,5 +3348,111 @@ theorem sydtv_all_five_kernels_inhabited :
   · exact ⟨⟨0, Bank32.const 8, Bank32.const Vec128.zero, false, false, false, false, fun _ => 0⟩, rfl, rfl, rfl⟩
   · exact ⟨⟨0, Bank16.const 4, Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩, rfl, rfl, rfl⟩
   · exact ⟨⟨0, Bank16.const 2, Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩, rfl, rfl, rfl⟩
+
+
+
+
+
+/-- Empty input follows the wrapper return: no output-buffer write or memory observation. -/
+theorem vpclmul_zero_preserves_memory (fetch : Nat → Option (DecodedInstr X86Instr))
+    (fuel : Nat) (s : X86State) (hz : s.gpr.get 1 = 0) :
+    (vpclmulGuardedRun fetch fuel s).1.mem = s.mem ∧
+    (vpclmulGuardedRun fetch fuel s).2 = [⟨0, [], true⟩] := by
+  simp [vpclmulGuardedRun, hz]
+
+theorem vpclmul_zero_store_mutation :
+    ∃ s : X86State, s.gpr.get 1 = 0 ∧
+      (vpclmulGuardedRun (fun _ => none) 0 s).1.mem 0 ≠
+        (writeMem256 s.mem (s.gpr.get 7) Vec256.zero) 0 := by
+  exact ⟨⟨0, Bank16.const 0, Bank16.const Vec256.zero,
+    false, false, false, false, false, fun _ => 0xa5⟩, by decide +kernel⟩
+
+theorem vpclmul_zero_inhabited :
+    ∃ s : X86State, s.gpr.get 1 = 0 ∧ s.mem 0 = 0xa5 :=
+  ⟨⟨0, Bank16.const 0, Bank16.const Vec256.zero,
+    false, false, false, false, false, fun _ => 0xa5⟩, rfl, rfl⟩
+
+#tooth_pair vpclmul_zero_preserves_memory vs vpclmul_zero_store_mutation
+#verify_inhabited vpclmul_zero_preserves_memory vpclmul_zero_inhabited
+
+/-- The certified postcondition entails the independent field specification,
+with both packed lanes and every positive block count. -/
+theorem VpclmulPost_field (s out : X86State) (n : Word) (m : MirBdozMac)
+    (hn : n ≠ 0) (h : VpclmulPost s n out m) :
+    ∃ v : Vec256, out.mem = writeMem256 s.mem (s.gpr.get 7) v ∧
+      ∀ lane : Nat, ∀ hl : lane < 2,
+        gf128Lane v ⟨lane, hl⟩ =
+          gf128BdozFieldSum n.toNat s.mem (s.gpr.get 6) (s.gpr.get 2) ⟨lane, hl⟩ := by
+  refine ⟨_, ?_, gf128_bdozMacAccum_field n.toNat s.mem (s.gpr.get 6) (s.gpr.get 2)⟩
+  simpa only [VpclmulPost, hn, ↓reduceIte] using h.2.2.1
+
+/-- A finite graph of certified loop cuts. Each node performs one actual cut step;
+the loop certificate's replay lemmas connect these steps to decoded instructions. -/
+def cutsGraph {S : Type} (step : S → S × List StepObs) (n : Nat) : TvGraph S where
+  node := fun pc => if pc < n then .Assign (fun s => (step s).1) (pc + 1) else .Ret (fun _ => 0)
+  entry := 0
+  loopHeads := []
+  fuel := n + 1
+
+private theorem cutsGraph_remaining {S : Type} (step : S → S × List StepObs)
+    (n k pc : Nat) (h : pc + k = n) (s : S) :
+    execFrom (cutsGraph step n) (fun _ => id) (k + 1) pc s =
+      .ret 0 (runCuts step k s).1 := by
+  induction k generalizing pc s with
+  | zero =>
+    have hp : pc = n := by omega
+    subst pc
+    simp [execFrom, cutsGraph, runCuts]
+  | succ k ih =>
+    have hp : pc < n := by omega
+    simpa only [execFrom, cutsGraph, List.not_mem_nil, ↓reduceIte, hp, runCuts] using
+      ih (pc + 1) (by omega) (step s).1
+
+theorem flatten_cutsGraph {S : Type} (step : S → S × List StepObs) (n : Nat) (s : S) :
+    evalFlattened (flattenDag (cutsGraph step n) (fun _ => id)) s =
+      .ret 0 (runCuts step n s).1 := by
+  rw [flattenDag_sound]
+  exact cutsGraph_remaining step n n 0 (Nat.zero_add n) s
+
+def FlattenedLoopRefines {A M : Type} {n : Nat}
+    {as : A → A × List StepObs} {ms : M → M × List StepObs}
+    {a : A} {m : M} {P : A → M → Prop}
+    (_cert : LoopRelationCert A M n as ms a m P) : Prop :=
+    ∃ af mf,
+      evalFlattened (flattenDag (cutsGraph as n) (fun _ => id)) a = .ret 0 af ∧
+      evalFlattened (flattenDag (cutsGraph ms n) (fun _ => id)) m = .ret 0 mf ∧
+      P af mf ∧ (runCuts as n a).2 = (runCuts ms n m).2
+
+/-- Flattened assembly and MIR cut graphs inherit the certificate's postcondition
+and equal leakage traces. This consumes the same certificate as byte replay. -/
+theorem LoopRelationCert.flattened_refinement {A M : Type} {n : Nat}
+    {as : A → A × List StepObs} {ms : M → M × List StepObs}
+    {a : A} {m : M} {P : A → M → Prop}
+    (c : LoopRelationCert A M n as ms a m P) :
+    FlattenedLoopRefines c := by
+  obtain ⟨hp, ha, hm⟩ := sewell_loop_relation_refinement_sound c
+  exact ⟨_, _, flatten_cutsGraph as n a, flatten_cutsGraph ms n m, hp, ha.trans hm.symm⟩
+
+theorem ctMemzeroX86PosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (ctMemzeroX86PosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (ctMemzeroX86PosCert s₀ n hn hbound)
+
+theorem ctMemzeroArmPosCert_flattened (s₀ : Arm64State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
+    (h1 : armGet s₀.gpr 1 = UInt64.ofNat n) (hpc : s₀.pc = 0) (hh : s₀.halted = false) :
+    FlattenedLoopRefines (ctMemzeroArmPosCert s₀ n hn hbound h1 hpc hh) :=
+  LoopRelationCert.flattened_refinement (ctMemzeroArmPosCert s₀ n hn hbound h1 hpc hh)
+
+theorem ctEqBytesPosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (ctEqBytesPosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (ctEqBytesPosCert s₀ n hn hbound)
+
+theorem gfniShamirMacPosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (gfniShamirMacPosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (gfniShamirMacPosCert s₀ n hn hbound)
+
+theorem vpclmulPosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (vpclmulPosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (vpclmulPosCert s₀ n hn hbound)
+
 
 end Qsag.SydTv

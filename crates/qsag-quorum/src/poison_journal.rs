@@ -203,8 +203,7 @@ impl core::fmt::Debug for FsDurablePoisonAndSessionJournal {
 
 impl Drop for FsDurablePoisonAndSessionJournal {
     fn drop(&mut self) {
-        self.key.fill(0);
-        core::hint::black_box(&mut self.key);
+        qsag_asm::ct_memzero(&mut self.key);
     }
 }
 
@@ -240,6 +239,7 @@ impl FsDurablePoisonAndSessionJournal {
         mode: JournalOpenMode,
         anchor: Option<Box<dyn ExternalMonotoneAnchor>>,
     ) -> Result<Self, NodeError> {
+        let key = crate::hash::SecretKey(key);
         // Consult the anchor before touching the directory.
         let retained = match (&anchor, mode) {
             (None, _) => None,
@@ -345,7 +345,7 @@ impl FsDurablePoisonAndSessionJournal {
             data_id,
             lock_seal,
             data_seal,
-            key,
+            key: key.0,
             session,
             generation: 0,
             state: STATE_ALLOCATED,
@@ -1032,8 +1032,8 @@ mod tests {
         let keys = deal_rss256_keys(&[0x99; 32]);
 
         // Process 1 creates the journal and constructs IsolatedRss256Party for `session_a`.
-        // Construction durably reserves `session_a` before any wave-0 pad or coin is derived,
-        // then crashes cleanly before recording poison.
+        // Construction durably reserves `session_a` before any initial-permutation pad or coin is
+        // derived, then crashes cleanly before recording poison.
         {
             let (mut endpoints, _) = InMemoryWireMesh::connect(3, session_a);
             let journal = FsDurablePoisonAndSessionJournal::open(
@@ -1049,7 +1049,7 @@ mod tests {
         }
 
         // Process 2 recovers the clean journal after crash and attempts to construct a party
-        // with the same `session_a`: MUST fail closed so wave-0 pads/coins never repeat!
+        // with the same `session_a`: MUST fail closed so initial-permutation pads/coins never repeat!
         let recovered = FsDurablePoisonAndSessionJournal::open(
             &path,
             key,

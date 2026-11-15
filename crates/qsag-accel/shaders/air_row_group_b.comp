@@ -1,0 +1,1101 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V 1.5 compute kernel for `ProverKernelSlot::AirRowGroupB`.
+// VRAM-resident sparse Group-B 24-opcode AIR row-constraint evaluator for both Round-0 base-field
+// (`is_base == 1`, `k_val in 2..=8`) and Rounds >= 1 `Ext4` (`is_base == 0`, `k_val in {0, 2..=8}`),
+// sorted by `op_uid` so Wave32 lanes execute uniform opcode branches with zero register spills.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Buf0 { uint64_t words[]; } b0; // cols_base
+layout(std430, set = 0, binding = 1) buffer Buf1 { uint64_t words[]; } b1; // cols_ext4
+layout(std430, set = 0, binding = 2) buffer Buf2 { uint64_t words[]; } b2; // shift_tables (`eq_tau`)
+layout(std430, set = 0, binding = 3) buffer Buf3 { uint64_t words[]; } b3; // sched + pub + op_pairs + sorted_idx
+layout(std430, set = 0, binding = 4) buffer Buf4 { uint64_t words[]; } b4; // vram_perm
+layout(std430, set = 0, binding = 5) buffer Buf5 { uint64_t words[]; } b5; // partials (accumulated onto Group A)
+
+layout(push_constant) uniform PushConsts {
+    uint is_base;        // 1 for Round 0 (`wg_y in 0..7 -> k_slot = wg_y + 1`), 0 for Rounds >= 1 (`wg_y in 0..8`)
+    uint cur_m;          // total rows (`half_m = cur_m / 2`)
+    uint cur_r;          // local step rows per signer
+    uint cur_s;          // signer slots (`half_s = cur_s / 2`)
+    uint flags;          // bit 0: folding_signer
+    uint col_src;        // `u64` offset in `b0` (Round 0) or `Ext4` offset in `b1` (Rounds >= 1)
+    uint sh_src;         // `Ext4` offset in `b2`
+    uint signers_off;    // `Ext4` offset in `b3` (`14` `Ext4`s/signer: act, pks[4], pkr[4], mu[5])
+    uint steps_off;      // `Ext4` offset in `b3` (`3` `Ext4`s/step: rf, rl, sc0)
+    uint op_hdr_off;     // `Ext4` offset in `b3` (`[start, count, 0, 0]`)
+    uint op_ent_off;     // `Ext4` offset in `b3` (`3` `Ext4`s/entry: `[meta, v0, dv]`)
+    uint sorted_u64_off; // `u64` offset in `b3` of `sorted_idx[0..half_m]`
+    uint out_off;        // `Ext4` offset in `b5`
+    uint base_x;
+    uint _pad0;
+    uint _pad1;
+} pc;
+
+const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
+const uint64_t GL_EPS = 0xFFFFFFFFul;
+
+const uint64_t POSEIDON2_CONST_IV      = 0x504F53325F474C31ul;
+const uint64_t DOMAIN_WOTS_STEP        = 0x5153414757535450ul;
+const uint64_t DOMAIN_WOTS_PK          = 0x5153414757504B31ul;
+const uint64_t DOMAIN_MERKLE_NODE      = 0x515341474D524B4Cul;
+const uint64_t DOMAIN_H_MSG_STATEFUL   = 0x51534147484D5331ul;
+const uint64_t DOMAIN_H_MSG_DET_TREE   = 0x5153414748445452ul;
+const uint64_t DOMAIN_H_MSG_STATELESS  = 0x515341474853544Cul;
+const uint64_t DOMAIN_FORS_LEAF        = 0x51534147464C4546ul;
+const uint64_t DOMAIN_FORS_NODE        = 0x51534147464E4F44ul;
+const uint64_t DOMAIN_FORS_ROOTS       = 0x5153414746525453ul;
+
+shared uint s_red[8][64];
+
+u64vec4 red_load(uint i) {
+    return u64vec4(
+        uint64_t(s_red[0][i]) | (uint64_t(s_red[1][i]) << 32u),
+        uint64_t(s_red[2][i]) | (uint64_t(s_red[3][i]) << 32u),
+        uint64_t(s_red[4][i]) | (uint64_t(s_red[5][i]) << 32u),
+        uint64_t(s_red[6][i]) | (uint64_t(s_red[7][i]) << 32u)
+    );
+}
+
+void red_store(uint i, u64vec4 v) {
+    s_red[0][i] = uint(v.x); s_red[1][i] = uint(v.x >> 32u);
+    s_red[2][i] = uint(v.y); s_red[3][i] = uint(v.y >> 32u);
+    s_red[4][i] = uint(v.z); s_red[5][i] = uint(v.z >> 32u);
+    s_red[6][i] = uint(v.w); s_red[7][i] = uint(v.w >> 32u);
+}
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
+}
+
+uint64_t fp_add(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t rem_p = GL_P - b_c;
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
+}
+
+uint64_t fp_sub(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t diff = a_c - b_c;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
+}
+
+uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
+    uint64_t hi_lo = hi & GL_EPS;
+    uint64_t hi_hi = hi >> 32u;
+    uint64_t mid = (hi_lo << 32u) - hi_lo;
+    uint64_t lo_c = fp_reduce_u64(lo);
+    return fp_sub(fp_add(lo_c, mid), hi_hi);
+}
+
+uint64_t fp_mul(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t a_lo = a_c & 0xFFFFFFFFul;
+    uint64_t a_hi = a_c >> 32u;
+    uint64_t b_lo = b_c & 0xFFFFFFFFul;
+    uint64_t b_hi = b_c >> 32u;
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    uint64_t mid = (p0 >> 32u) + (p1 & 0xFFFFFFFFul) + (p2 & 0xFFFFFFFFul);
+    uint64_t lo = (p0 & 0xFFFFFFFFul) | (mid << 32u);
+    uint64_t hi = p3 + (p1 >> 32u) + (p2 >> 32u) + (mid >> 32u);
+    return fp_reduce128(lo, hi);
+}
+
+u64vec2 fp2_add(u64vec2 a, u64vec2 b) { return u64vec2(fp_add(a.x, b.x), fp_add(a.y, b.y)); }
+u64vec2 fp2_sub(u64vec2 a, u64vec2 b) { return u64vec2(fp_sub(a.x, b.x), fp_sub(a.y, b.y)); }
+u64vec2 fp2_mul_by_u(u64vec2 a) { return u64vec2(fp_mul(a.y, 7ul), a.x); }
+
+u64vec2 fp2_mul(u64vec2 a, u64vec2 b) {
+    uint64_t a0b0 = fp_mul(a.x, b.x);
+    uint64_t a1b1 = fp_mul(a.y, b.y);
+    uint64_t mid = fp_sub(fp_sub(fp_mul(fp_add(a.x, a.y), fp_add(b.x, b.y)), a0b0), a1b1);
+    return u64vec2(fp_add(a0b0, fp_mul(a1b1, 7ul)), mid);
+}
+
+u64vec4 fp4_add(u64vec4 a, u64vec4 b) {
+    return u64vec4(fp_add(a.x, b.x), fp_add(a.y, b.y), fp_add(a.z, b.z), fp_add(a.w, b.w));
+}
+
+u64vec4 fp4_sub(u64vec4 a, u64vec4 b) {
+    return u64vec4(fp_sub(a.x, b.x), fp_sub(a.y, b.y), fp_sub(a.z, b.z), fp_sub(a.w, b.w));
+}
+
+u64vec4 fp4_mul_base(u64vec4 a, uint64_t s) {
+    if (pc.is_base != 0u) {
+        // When `a` is a base-field value stored in `.x`:
+        return u64vec4(fp_mul(a.x, s), 0ul, 0ul, 0ul);
+    }
+    return u64vec4(fp_mul(a.x, s), fp_mul(a.y, s), fp_mul(a.z, s), fp_mul(a.w, s));
+}
+
+u64vec4 fp4_scale_gamma(u64vec4 g, u64vec4 expr) {
+    if (pc.is_base != 0u) {
+        return u64vec4(fp_mul(g.x, expr.x), fp_mul(g.y, expr.x), fp_mul(g.z, expr.x), fp_mul(g.w, expr.x));
+    }
+    u64vec2 v0 = fp2_mul(g.xy, expr.xy);
+    u64vec2 v1 = fp2_mul(g.zw, expr.zw);
+    u64vec2 mid = fp2_sub(fp2_sub(fp2_mul(fp2_add(g.xy, g.zw), fp2_add(expr.xy, expr.zw)), v0), v1);
+    return u64vec4(fp2_add(v0, fp2_mul_by_u(v1)), mid);
+}
+
+u64vec4 fp4_mul_full(u64vec4 a, u64vec4 b) {
+    u64vec2 v0 = fp2_mul(a.xy, b.xy);
+    u64vec2 v1 = fp2_mul(a.zw, b.zw);
+    u64vec2 mid = fp2_sub(fp2_sub(fp2_mul(fp2_add(a.xy, a.zw), fp2_add(b.xy, b.zw)), v0), v1);
+    return u64vec4(fp2_add(v0, fp2_mul_by_u(v1)), mid);
+}
+
+// Field multiplication inside opcode evaluation (`1` base mul in Round 0, `9` base muls in Rounds >= 1).
+u64vec4 f_mul(u64vec4 a, u64vec4 b) {
+    if (pc.is_base != 0u) {
+        return u64vec4(fp_mul(a.x, b.x), 0ul, 0ul, 0ul);
+    }
+    return fp4_mul_full(a, b);
+}
+
+u64vec4 f_const(uint64_t v) {
+    return u64vec4(fp_reduce_u64(v), 0ul, 0ul, 0ul);
+}
+
+u64vec4 f_add_const(u64vec4 a, uint64_t v) {
+    a.x = fp_add(a.x, fp_reduce_u64(v));
+    return a;
+}
+
+u64vec4 f_sub_const(u64vec4 a, uint64_t v) {
+    a.x = fp_sub(a.x, fp_reduce_u64(v));
+    return a;
+}
+
+u64vec4 f_one_minus(u64vec4 a) {
+    return fp4_sub(u64vec4(1ul, 0ul, 0ul, 0ul), a);
+}
+
+u64vec4 f_bool_check(u64vec4 b) {
+    return f_mul(b, f_one_minus(b));
+}
+
+u64vec4 f_quartic_base4(u64vec4 d) {
+    u64vec4 d1 = f_sub_const(d, 1ul);
+    u64vec4 d2 = f_sub_const(d, 2ul);
+    u64vec4 d3 = f_sub_const(d, 3ul);
+    return f_mul(f_mul(d, d1), f_mul(d2, d3));
+}
+
+bool f_is_zero(u64vec4 a) {
+    if (pc.is_base != 0u) {
+        return a.x == 0ul;
+    }
+    return (a.x == 0ul) && (a.y == 0ul) && (a.z == 0ul) && (a.w == 0ul);
+}
+
+u64vec4 load4_b1(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b1.words[o], b1.words[o + 1u], b1.words[o + 2u], b1.words[o + 3u]);
+}
+
+u64vec4 load4_b2(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b2.words[o], b2.words[o + 1u], b2.words[o + 2u], b2.words[o + 3u]);
+}
+
+u64vec4 load4_b3(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b3.words[o], b3.words[o + 1u], b3.words[o + 2u], b3.words[o + 3u]);
+}
+
+u64vec4 load4_b4(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b4.words[o], b4.words[o + 1u], b4.words[o + 2u], b4.words[o + 3u]);
+}
+
+u64vec4 load4_b5(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b5.words[o], b5.words[o + 1u], b5.words[o + 2u], b5.words[o + 3u]);
+}
+
+void store4_b5(uint idx, u64vec4 v) {
+    uint o = idx * 4u;
+    b5.words[o] = v.x; b5.words[o + 1u] = v.y; b5.words[o + 2u] = v.z; b5.words[o + 3u] = v.w;
+}
+
+u64vec4 interp_f(u64vec4 v0, u64vec4 v1, uint k_val) {
+    if (k_val == 0u) {
+        return v0;
+    }
+    return fp4_add(v0, fp4_mul_base(fp4_sub(v1, v0), uint64_t(k_val)));
+}
+
+u64vec4 interp_ext4_full(u64vec4 v0, u64vec4 v1, uint k_val) {
+    if (k_val == 0u) {
+        return v0;
+    }
+    u64vec4 dv = fp4_sub(v1, v0);
+    uint64_t kv = uint64_t(k_val);
+    return fp4_add(v0, u64vec4(fp_mul(dv.x, kv), fp_mul(dv.y, kv), fp_mul(dv.z, kv), fp_mul(dv.w, kv)));
+}
+
+u64vec4 col_at(uint c, uint idx, uint half_m, uint k_val) {
+    uint base = pc.col_src + c * pc.cur_m;
+    if (pc.is_base != 0u) {
+        uint64_t r0 = fp_reduce_u64(b0.words[base + idx]);
+        if (k_val == 0u) {
+            return u64vec4(r0, 0ul, 0ul, 0ul);
+        }
+        uint64_t r1 = fp_reduce_u64(b0.words[base + idx + half_m]);
+        return u64vec4(fp_add(r0, fp_mul(fp_sub(r1, r0), uint64_t(k_val))), 0ul, 0ul, 0ul);
+    }
+    u64vec4 r0 = load4_b1(base + idx);
+    if (k_val == 0u) {
+        return r0;
+    }
+    u64vec4 r1 = load4_b1(base + idx + half_m);
+    return interp_ext4_full(r0, r1, k_val);
+}
+
+u64vec4 st_in_at(uint i, uint idx, uint half_m, uint k_val) { return col_at(i, idx, half_m, k_val); }
+u64vec4 prev_at(uint j, uint idx, uint half_m, uint k_val)  { return col_at(130u + j, idx, half_m, k_val); }
+u64vec4 next_at(uint j, uint idx, uint half_m, uint k_val)  { return col_at(174u + j, idx, half_m, k_val); }
+u64vec4 aux_at(uint i, uint idx, uint half_m, uint k_val)   { return col_at(218u + i, idx, half_m, k_val); }
+
+u64vec4 perm_at(uint i, uint idx, uint half_m, uint k_slot) {
+    if (pc.is_base != 0u) {
+        uint off = ((k_slot - 1u) * half_m + idx) * 12u + i;
+        return u64vec4(b4.words[off], 0ul, 0ul, 0ul);
+    }
+    uint off = (k_slot * half_m + idx) * 12u + i;
+    return load4_b4(off);
+}
+
+u64vec4 signer_field_at(uint field_idx, uint idx, uint k_val) {
+    bool folding_signer = (pc.flags & 1u) != 0u;
+    if (folding_signer) {
+        uint half_s = pc.cur_s >> 1u;
+        uint s0 = idx / pc.cur_r;
+        uint s1 = s0 + half_s;
+        u64vec4 v0 = load4_b3(pc.signers_off + s0 * 14u + field_idx);
+        u64vec4 v1 = load4_b3(pc.signers_off + s1 * 14u + field_idx);
+        return interp_f(v0, v1, k_val);
+    }
+    return load4_b3(pc.signers_off + field_idx);
+}
+
+void emit_term(inout u64vec4 op_acc, inout uint g_idx, u64vec4 expr) {
+    if (!f_is_zero(expr)) {
+        op_acc = fp4_add(op_acc, fp4_scale_gamma(load4_b3(g_idx), expr));
+    }
+    g_idx += 1u;
+}
+
+uint64_t shl_pow2(uint shift) {
+    return (shift == 62u) ? (1ul << 62u) : (1ul << shift);
+}
+
+u64vec4 eval_single_op(
+    uint kind_id,
+    uint kind_arg,
+    uint gamma_base,
+    u64vec4 step_c0,
+    uint idx,
+    uint half_m,
+    uint k_slot,
+    uint k_val
+) {
+    u64vec4 acc = u64vec4(0ul);
+    uint g = gamma_base;
+
+    switch (kind_id) {
+        case 0u: { // Idle
+            for (uint j = 0u; j < 44u; ++j) {
+                emit_term(acc, g, next_at(j, idx, half_m, k_val));
+            }
+            break;
+        }
+        case 1u: { // StatefulHmsgBlock0
+            u64vec4 kp_val = u64vec4(0ul);
+            for (uint i = 0u; i < 6u; ++i) {
+                u64vec4 ai = aux_at(i, idx, half_m, k_val);
+                emit_term(acc, g, f_bool_check(ai));
+                kp_val = fp4_add(kp_val, fp4_mul_base(ai, 1ul << i));
+            }
+            u64vec4 ctr_val = u64vec4(0ul);
+            for (uint i = 0u; i < 32u; ++i) {
+                u64vec4 ai = aux_at(6u + i, idx, half_m, k_val);
+                emit_term(acc, g, f_bool_check(ai));
+                ctr_val = fp4_add(ctr_val, fp4_mul_base(ai, 1ul << i));
+            }
+            u64vec4 kp_ctr = fp4_add(fp4_mul_base(kp_val, 1ul << 32u), ctr_val);
+            for (uint i = 0u; i < 4u; ++i) {
+                u64vec4 pks = signer_field_at(1u + i, idx, k_val);
+                u64vec4 pkr = signer_field_at(5u + i, idx, k_val);
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), pks));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), pkr));
+                emit_term(acc, g, fp4_sub(next_at(i, idx, half_m, k_val), pkr));
+            }
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_H_MSG_STATEFUL));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), kp_ctr));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), signer_field_at(9u + 4u, idx, k_val)));
+            emit_term(acc, g, f_sub_const(st_in_at(11u, idx, half_m, k_val), POSEIDON2_CONST_IV));
+            emit_term(acc, g, fp4_sub(next_at(4u, idx, half_m, k_val), kp_val));
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 5u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, next_at(j, idx, half_m, k_val));
+                }
+            }
+            break;
+        }
+        case 2u: { // StatefulHmsgBlock1
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), fp4_add(prev_at(13u + i, idx, half_m, k_val), aux_at(i, idx, half_m, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), fp4_add(prev_at(17u + i, idx, half_m, k_val), signer_field_at(9u + i, idx, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(8u + i, idx, half_m, k_val), prev_at(21u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 3u: { // StatefulHmsgSqueeze
+            emit_term(acc, g, fp4_sub(st_in_at(0u, idx, half_m, k_val), f_add_const(prev_at(13u, idx, half_m, k_val), 1ul)));
+            for (uint i = 1u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), prev_at(13u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint s = 0u; s < 6u; ++s) {
+                emit_term(acc, g, next_at(7u + s, idx, half_m, k_val));
+            }
+            emit_term(acc, g, next_at(42u, idx, half_m, k_val));
+            for (uint j = 0u; j < 44u; ++j) {
+                if ((j < 7u || j >= 25u) && j != 42u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 4u: { // StatelessDeriveBlock0
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(5u + i, idx, k_val)));
+            }
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_H_MSG_STATELESS));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), signer_field_at(9u + 4u, idx, k_val)));
+            emit_term(acc, g, st_in_at(10u, idx, half_m, k_val));
+            emit_term(acc, g, f_sub_const(st_in_at(11u, idx, half_m, k_val), POSEIDON2_CONST_IV));
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, next_at(j, idx, half_m, k_val));
+                }
+            }
+            break;
+        }
+        case 5u: { // StatelessDeriveBlock1
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), fp4_add(prev_at(13u + i, idx, half_m, k_val), aux_at(i, idx, half_m, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), fp4_add(prev_at(17u + i, idx, half_m, k_val), signer_field_at(9u + i, idx, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(8u + i, idx, half_m, k_val), prev_at(21u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint s = 0u; s < 6u; ++s) {
+                emit_term(acc, g, next_at(7u + s, idx, half_m, k_val));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 7u || j >= 25u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 6u: { // StatelessDecompLimb { limb_idx = kind_arg }
+            uint l = kind_arg;
+            u64vec4 recon = u64vec4(0ul);
+            for (uint i = 0u; i < 31u; ++i) {
+                u64vec4 ai = aux_at(i, idx, half_m, k_val);
+                emit_term(acc, g, f_quartic_base4(ai));
+                recon = fp4_add(recon, fp4_mul_base(ai, shl_pow2(2u * i)));
+            }
+            u64vec4 a31 = aux_at(31u, idx, half_m, k_val);
+            emit_term(acc, g, f_bool_check(a31));
+            recon = fp4_add(recon, fp4_mul_base(a31, 1ul << 62u));
+            emit_term(acc, g, fp4_sub(prev_at(13u + l, idx, half_m, k_val), recon));
+
+            u64vec4 kp_t  = prev_at(4u, idx, half_m, k_val);
+            u64vec4 tlo_t = prev_at(5u, idx, half_m, k_val);
+            u64vec4 thi_t = prev_at(6u, idx, half_m, k_val);
+            u64vec4 rem0  = prev_at(7u, idx, half_m, k_val);
+            u64vec4 rem1  = prev_at(8u, idx, half_m, k_val);
+            u64vec4 rem2  = prev_at(9u, idx, half_m, k_val);
+            u64vec4 rem3  = prev_at(10u, idx, half_m, k_val);
+            u64vec4 rem4  = prev_at(11u, idx, half_m, k_val);
+            u64vec4 rem5  = prev_at(12u, idx, half_m, k_val);
+
+            if (l <= 4u) {
+                uint count = (l < 4u) ? 7u : 4u;
+                uint base_j = (l < 4u) ? (7u * l) : 28u;
+                for (uint sub = 0u; sub < count; ++sub) {
+                    uint jj = base_j + sub;
+                    uint bb = 4u * sub;
+                    u64vec4 bv = fp4_add(
+                        fp4_add(aux_at(bb, idx, half_m, k_val), fp4_mul_base(aux_at(bb + 1u, idx, half_m, k_val), 4ul)),
+                        fp4_add(fp4_mul_base(aux_at(bb + 2u, idx, half_m, k_val), 16ul), fp4_mul_base(aux_at(bb + 3u, idx, half_m, k_val), 64ul))
+                    );
+                    uint slot = jj / 6u;
+                    uint pos = jj % 6u;
+                    u64vec4 term = fp4_mul_base(bv, 1ul << (8u * pos));
+                    switch (slot) {
+                        case 0u: rem0 = fp4_add(rem0, term); break;
+                        case 1u: rem1 = fp4_add(rem1, term); break;
+                        case 2u: rem2 = fp4_add(rem2, term); break;
+                        case 3u: rem3 = fp4_add(rem3, term); break;
+                        case 4u: rem4 = fp4_add(rem4, term); break;
+                        default: rem5 = fp4_add(rem5, term); break;
+                    }
+                }
+            } else if (l == 5u) {
+                kp_t = fp4_add(aux_at(0u, idx, half_m, k_val), fp4_mul_base(aux_at(1u, idx, half_m, k_val), 4ul));
+                u64vec4 hi28 = u64vec4(0ul);
+                for (uint i = 2u; i < 16u; ++i) {
+                    hi28 = fp4_add(hi28, fp4_mul_base(aux_at(i, idx, half_m, k_val), 1ul << (2u * (i - 2u))));
+                }
+                tlo_t = hi28;
+            } else if (l == 6u) {
+                u64vec4 nib = fp4_add(aux_at(0u, idx, half_m, k_val), fp4_mul_base(aux_at(1u, idx, half_m, k_val), 4ul));
+                tlo_t = fp4_add(tlo_t, fp4_mul_base(nib, 1ul << 28u));
+                u64vec4 hi28 = u64vec4(0ul);
+                for (uint i = 2u; i < 16u; ++i) {
+                    hi28 = fp4_add(hi28, fp4_mul_base(aux_at(i, idx, half_m, k_val), 1ul << (2u * (i - 2u))));
+                }
+                thi_t = hi28;
+            }
+
+            for (uint j = 0u; j < 44u; ++j) {
+                u64vec4 exp_j = (j == 4u) ? kp_t
+                              : (j == 5u) ? tlo_t
+                              : (j == 6u) ? thi_t
+                              : (j == 7u) ? rem0
+                              : (j == 8u) ? rem1
+                              : (j == 9u) ? rem2
+                              : (j == 10u) ? rem3
+                              : (j == 11u) ? rem4
+                              : (j == 12u) ? rem5
+                                           : prev_at(j, idx, half_m, k_val);
+                emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), exp_j));
+            }
+            break;
+        }
+        case 7u: { // ForsRootsSpongeInit
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+            }
+            emit_term(acc, g, fp4_sub(st_in_at(4u, idx, half_m, k_val), prev_at(4u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(5u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(6u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            emit_term(acc, g, f_sub_const(st_in_at(7u, idx, half_m, k_val), 32ul));
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_FORS_ROOTS));
+            emit_term(acc, g, st_in_at(9u, idx, half_m, k_val));
+            emit_term(acc, g, st_in_at(10u, idx, half_m, k_val));
+            emit_term(acc, g, f_sub_const(st_in_at(11u, idx, half_m, k_val), POSEIDON2_CONST_IV));
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 8u: { // ForsLeafHash { pack_slot = kind_arg }
+            uint slot = kind_arg;
+            u64vec4 idx_j = u64vec4(0ul);
+            for (uint k = 0u; k < 4u; ++k) {
+                u64vec4 ak = aux_at(4u + k, idx, half_m, k_val);
+                emit_term(acc, g, f_quartic_base4(ak));
+                idx_j = fp4_add(idx_j, fp4_mul_base(ak, 1ul << (2u * k)));
+            }
+            u64vec4 quot = aux_at(8u, idx, half_m, k_val);
+            emit_term(acc, g, fp4_sub(prev_at(7u + slot, idx, half_m, k_val), fp4_add(idx_j, fp4_mul_base(quot, 256ul))));
+            emit_term(acc, g, fp4_sub(next_at(7u + slot, idx, half_m, k_val), quot));
+            u64vec4 tweak1 = fp4_add(fp4_mul_base(prev_at(4u, idx, half_m, k_val), 1ul << 24u), fp4_add(step_c0, idx_j));
+            for (uint i = 0u; i < 4u; ++i) {
+                u64vec4 ai = aux_at(i, idx, half_m, k_val);
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), ai));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), fp4_add(perm_at(i, idx, half_m, k_slot), ai)));
+            }
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_FORS_LEAF));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), tweak1));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(11u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(next_at(41u, idx, half_m, k_val), idx_j));
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j != (7u + slot) && (j < 37u || j > 41u)) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 9u: { // ForsMerkleBlockA
+            u64vec4 bit = aux_at(0u, idx, half_m, k_val);
+            u64vec4 par = aux_at(1u, idx, half_m, k_val);
+            emit_term(acc, g, f_bool_check(bit));
+            emit_term(acc, g, fp4_sub(prev_at(41u, idx, half_m, k_val), fp4_add(bit, fp4_add(par, par))));
+            u64vec4 omb = f_one_minus(bit);
+            for (uint i = 0u; i < 4u; ++i) {
+                u64vec4 ni = prev_at(37u + i, idx, half_m, k_val);
+                u64vec4 si = aux_at(2u + i, idx, half_m, k_val);
+                u64vec4 li = fp4_add(f_mul(omb, ni), f_mul(bit, si));
+                u64vec4 ri = fp4_add(f_mul(bit, ni), f_mul(omb, si));
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), li));
+                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), ri));
+            }
+            u64vec4 meta0 = fp4_add(step_c0, fp4_add(fp4_mul_base(prev_at(4u, idx, half_m, k_val), 1ul << 16u), par));
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_FORS_NODE));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), meta0));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(11u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(25u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            emit_term(acc, g, fp4_sub(next_at(41u, idx, half_m, k_val), par));
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 25u || j > 41u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 10u: { // ForsMerkleBlockB { is_tree_last = bit 0, is_odd_tree = bit 1 }
+            bool is_tree_last = (kind_arg & 1u) != 0u;
+            bool is_odd_tree  = (kind_arg & 2u) != 0u;
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), fp4_add(prev_at(25u + i, idx, half_m, k_val), prev_at(37u + i, idx, half_m, k_val))));
+            }
+            emit_term(acc, g, fp4_sub(st_in_at(4u, idx, half_m, k_val), f_add_const(prev_at(29u, idx, half_m, k_val), 1ul)));
+            emit_term(acc, g, fp4_sub(st_in_at(5u, idx, half_m, k_val), f_add_const(prev_at(30u, idx, half_m, k_val), POSEIDON2_CONST_IV)));
+            for (uint i = 6u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), prev_at(25u + i, idx, half_m, k_val)));
+            }
+            if (is_tree_last) {
+                emit_term(acc, g, prev_at(41u, idx, half_m, k_val));
+            }
+            if (is_tree_last && !is_odd_tree) {
+                for (uint i = 0u; i < 4u; ++i) {
+                    emit_term(acc, g, fp4_sub(next_at(i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+                }
+                for (uint j = 4u; j < 44u; ++j) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            } else {
+                for (uint i = 0u; i < 4u; ++i) {
+                    emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+                }
+                for (uint j = 0u; j < 44u; ++j) {
+                    if (j < 37u || j >= 41u) {
+                        emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                    }
+                }
+            }
+            break;
+        }
+        case 11u: { // ForsRootsPairAbsorb { is_last_pair = kind_arg }
+            if (kind_arg != 0u) {
+                for (uint s = 0u; s < 6u; ++s) {
+                    emit_term(acc, g, prev_at(7u + s, idx, half_m, k_val));
+                }
+            }
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), fp4_add(prev_at(13u + i, idx, half_m, k_val), prev_at(i, idx, half_m, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), fp4_add(prev_at(17u + i, idx, half_m, k_val), prev_at(37u + i, idx, half_m, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(8u + i, idx, half_m, k_val), prev_at(21u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 12u: { // ForsRootsFinalSqueeze
+            emit_term(acc, g, fp4_sub(st_in_at(0u, idx, half_m, k_val), f_add_const(prev_at(13u, idx, half_m, k_val), 1ul)));
+            for (uint i = 1u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), prev_at(13u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 4u; j < 44u; ++j) {
+                emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+            }
+            break;
+        }
+        case 13u: { // DetTreeHmsgBlock0
+            u64vec4 layer_kp = fp4_add(step_c0, prev_at(4u, idx, half_m, k_val));
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(5u + i, idx, k_val)));
+            }
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_H_MSG_DET_TREE));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), layer_kp));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(11u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 14u: { // DetTreeHmsgBlock1
+            u64vec4 ctr_val = u64vec4(0ul);
+            for (uint i = 0u; i < 32u; ++i) {
+                u64vec4 ai = aux_at(i, idx, half_m, k_val);
+                emit_term(acc, g, f_bool_check(ai));
+                ctr_val = fp4_add(ctr_val, fp4_mul_base(ai, 1ul << i));
+            }
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), fp4_add(prev_at(13u + i, idx, half_m, k_val), prev_at(i, idx, half_m, k_val))));
+            }
+            emit_term(acc, g, fp4_sub(st_in_at(4u, idx, half_m, k_val), fp4_add(prev_at(17u, idx, half_m, k_val), ctr_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(5u, idx, half_m, k_val), f_add_const(prev_at(18u, idx, half_m, k_val), 1ul)));
+            for (uint i = 6u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), prev_at(13u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint s = 0u; s < 6u; ++s) {
+                emit_term(acc, g, next_at(7u + s, idx, half_m, k_val));
+            }
+            emit_term(acc, g, next_at(42u, idx, half_m, k_val));
+            for (uint j = 0u; j < 44u; ++j) {
+                if ((j < 7u || j >= 25u) && j != 42u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 15u: { // HmsgDecompLimb { limb_idx = kind_arg }
+            uint l = kind_arg;
+            u64vec4 recon = u64vec4(0ul);
+            for (uint i = 0u; i < 31u; ++i) {
+                u64vec4 ai = aux_at(i, idx, half_m, k_val);
+                emit_term(acc, g, f_quartic_base4(ai));
+                recon = fp4_add(recon, fp4_mul_base(ai, shl_pow2(2u * i)));
+            }
+            u64vec4 a31 = aux_at(31u, idx, half_m, k_val);
+            emit_term(acc, g, f_bool_check(a31));
+            recon = fp4_add(recon, fp4_mul_base(a31, 1ul << 62u));
+            emit_term(acc, g, fp4_sub(prev_at(13u + l, idx, half_m, k_val), recon));
+
+            u64vec4 d_rem0 = prev_at(7u, idx, half_m, k_val);
+            u64vec4 d_rem1 = prev_at(8u, idx, half_m, k_val);
+            u64vec4 d_rem2 = prev_at(9u, idx, half_m, k_val);
+            u64vec4 d_rem3 = prev_at(10u, idx, half_m, k_val);
+            u64vec4 d_rem4 = prev_at(11u, idx, half_m, k_val);
+            u64vec4 d_sum = u64vec4(0ul);
+
+            uint count = (l < 4u) ? 31u : 4u;
+            uint base_r = 31u * l;
+            u64vec4 three = f_const(3ul);
+            for (uint i = 0u; i < count; ++i) {
+                uint r = base_r + i;
+                u64vec4 d_r = aux_at(i, idx, half_m, k_val);
+                d_sum = fp4_add(d_sum, d_r);
+                uint slot = (r < 26u) ? 0u : (r < 52u) ? 1u : (r < 78u) ? 2u : (r < 103u) ? 3u : 4u;
+                uint s_start = (slot == 0u) ? 0u : (slot == 1u) ? 26u : (slot == 2u) ? 52u : (slot == 3u) ? 78u : 103u;
+                uint pos = r - s_start;
+                u64vec4 term = fp4_mul_base(fp4_sub(three, d_r), shl_pow2(2u * pos));
+                switch (slot) {
+                    case 0u: d_rem0 = fp4_add(d_rem0, term); break;
+                    case 1u: d_rem1 = fp4_add(d_rem1, term); break;
+                    case 2u: d_rem2 = fp4_add(d_rem2, term); break;
+                    case 3u: d_rem3 = fp4_add(d_rem3, term); break;
+                    default: d_rem4 = fp4_add(d_rem4, term); break;
+                }
+            }
+            u64vec4 acc_next = fp4_add(prev_at(42u, idx, half_m, k_val), d_sum);
+            if (l == 4u) {
+                emit_term(acc, g, f_sub_const(acc_next, 192ul));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                u64vec4 exp_j = (j == 7u)  ? d_rem0
+                              : (j == 8u)  ? d_rem1
+                              : (j == 9u)  ? d_rem2
+                              : (j == 10u) ? d_rem3
+                              : (j == 11u) ? d_rem4
+                              : (j == 42u) ? acc_next
+                                           : prev_at(j, idx, half_m, k_val);
+                emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), exp_j));
+            }
+            break;
+        }
+        case 16u: { // WotsTellInit
+            u64vec4 layer_kp = fp4_add(step_c0, prev_at(4u, idx, half_m, k_val));
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+            }
+            emit_term(acc, g, fp4_sub(st_in_at(4u, idx, half_m, k_val), layer_kp));
+            emit_term(acc, g, fp4_sub(st_in_at(5u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(6u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            emit_term(acc, g, f_sub_const(st_in_at(7u, idx, half_m, k_val), 128ul));
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_WOTS_PK));
+            emit_term(acc, g, st_in_at(9u, idx, half_m, k_val));
+            emit_term(acc, g, st_in_at(10u, idx, half_m, k_val));
+            emit_term(acc, g, f_sub_const(st_in_at(11u, idx, half_m, k_val), POSEIDON2_CONST_IV));
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 17u: { // WotsChainStep0 { pack_slot = kind_arg }
+            uint slot = kind_arg;
+            u64vec4 u0 = aux_at(4u, idx, half_m, k_val);
+            u64vec4 u1 = aux_at(5u, idx, half_m, k_val);
+            u64vec4 u2 = aux_at(6u, idx, half_m, k_val);
+            u64vec4 quot = aux_at(7u, idx, half_m, k_val);
+            emit_term(acc, g, f_bool_check(u0));
+            emit_term(acc, g, f_bool_check(u1));
+            emit_term(acc, g, f_bool_check(u2));
+            emit_term(acc, g, f_mul(u1, f_one_minus(u0)));
+            emit_term(acc, g, f_mul(u2, f_one_minus(u1)));
+
+            u64vec4 rem_r = fp4_sub(f_const(3ul), fp4_add(u0, fp4_add(u1, u2)));
+            emit_term(acc, g, fp4_sub(prev_at(7u + slot, idx, half_m, k_val), fp4_add(rem_r, fp4_mul_base(quot, 4ul))));
+            emit_term(acc, g, fp4_sub(next_at(7u + slot, idx, half_m, k_val), quot));
+
+            u64vec4 addr_limb = fp4_add(step_c0, fp4_mul_base(prev_at(4u, idx, half_m, k_val), 1ul << 16u));
+            u64vec4 omu0 = f_one_minus(u0);
+            for (uint i = 0u; i < 4u; ++i) {
+                u64vec4 sig_i = aux_at(i, idx, half_m, k_val);
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), sig_i));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                u64vec4 ff_i = fp4_add(perm_at(i, idx, half_m, k_slot), sig_i);
+                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), fp4_add(f_mul(u0, sig_i), f_mul(omu0, ff_i))));
+            }
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_WOTS_STEP));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), addr_limb));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(11u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(next_at(42u, idx, half_m, k_val), u1));
+            emit_term(acc, g, fp4_sub(next_at(43u, idx, half_m, k_val), u2));
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j != (7u + slot) && (j < 37u || j >= 41u) && j != 42u && j != 43u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 18u: { // WotsChainStep1
+            u64vec4 u1 = prev_at(42u, idx, half_m, k_val);
+            u64vec4 omu1 = f_one_minus(u1);
+            u64vec4 addr_limb = fp4_add(step_c0, fp4_mul_base(prev_at(4u, idx, half_m, k_val), 1ul << 16u));
+            for (uint i = 0u; i < 4u; ++i) {
+                u64vec4 cur_i = prev_at(37u + i, idx, half_m, k_val);
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), cur_i));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                u64vec4 ff_i = fp4_add(perm_at(i, idx, half_m, k_slot), cur_i);
+                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), fp4_add(f_mul(u1, cur_i), f_mul(omu1, ff_i))));
+            }
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_WOTS_STEP));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), addr_limb));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(11u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 37u || j >= 41u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 19u: { // WotsChainStep2 { is_odd = kind_arg }
+            bool is_odd = (kind_arg != 0u);
+            u64vec4 u2 = prev_at(43u, idx, half_m, k_val);
+            u64vec4 omu2 = f_one_minus(u2);
+            u64vec4 addr_limb = fp4_add(step_c0, fp4_mul_base(prev_at(4u, idx, half_m, k_val), 1ul << 16u));
+            for (uint i = 0u; i < 4u; ++i) {
+                u64vec4 cur_i = prev_at(37u + i, idx, half_m, k_val);
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), cur_i));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                u64vec4 ff_i = fp4_add(perm_at(i, idx, half_m, k_slot), cur_i);
+                u64vec4 ep_i = fp4_add(f_mul(u2, cur_i), f_mul(omu2, ff_i));
+                uint dst_s = is_odd ? (37u + i) : (25u + i);
+                emit_term(acc, g, fp4_sub(next_at(dst_s, idx, half_m, k_val), ep_i));
+            }
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_WOTS_STEP));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), addr_limb));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(11u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            for (uint j = 0u; j < 44u; ++j) {
+                bool changed = is_odd ? (j >= 37u && j < 41u) : (j >= 25u && j < 29u);
+                if (!changed) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 20u: { // WotsTellPairAbsorb { is_last_pair = kind_arg }
+            if (kind_arg != 0u) {
+                for (uint s = 0u; s < 5u; ++s) {
+                    emit_term(acc, g, prev_at(7u + s, idx, half_m, k_val));
+                }
+            }
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), fp4_add(prev_at(13u + i, idx, half_m, k_val), prev_at(25u + i, idx, half_m, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), fp4_add(prev_at(17u + i, idx, half_m, k_val), prev_at(37u + i, idx, half_m, k_val))));
+                emit_term(acc, g, fp4_sub(st_in_at(8u + i, idx, half_m, k_val), prev_at(21u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(13u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 13u || j >= 25u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 21u: { // WotsTellFinalSqueeze
+            emit_term(acc, g, fp4_sub(st_in_at(0u, idx, half_m, k_val), f_add_const(prev_at(13u, idx, half_m, k_val), 1ul)));
+            for (uint i = 1u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), prev_at(13u + i, idx, half_m, k_val)));
+            }
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            emit_term(acc, g, fp4_sub(next_at(41u, idx, half_m, k_val), prev_at(4u, idx, half_m, k_val)));
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 37u || j > 41u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        case 22u: { // XmssMerkleBlockA
+            u64vec4 bit = aux_at(0u, idx, half_m, k_val);
+            u64vec4 par = aux_at(1u, idx, half_m, k_val);
+            emit_term(acc, g, f_bool_check(bit));
+            emit_term(acc, g, fp4_sub(prev_at(41u, idx, half_m, k_val), fp4_add(bit, fp4_add(par, par))));
+            u64vec4 omb = f_one_minus(bit);
+            for (uint i = 0u; i < 4u; ++i) {
+                u64vec4 ni = prev_at(37u + i, idx, half_m, k_val);
+                u64vec4 si = aux_at(2u + i, idx, half_m, k_val);
+                u64vec4 li = fp4_add(f_mul(omb, ni), f_mul(bit, si));
+                u64vec4 ri = fp4_add(f_mul(bit, ni), f_mul(omb, si));
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), signer_field_at(1u + i, idx, k_val)));
+                emit_term(acc, g, fp4_sub(st_in_at(4u + i, idx, half_m, k_val), li));
+                emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), ri));
+            }
+            u64vec4 meta0 = fp4_add(step_c0, par);
+            emit_term(acc, g, f_sub_const(st_in_at(8u, idx, half_m, k_val), DOMAIN_MERKLE_NODE));
+            emit_term(acc, g, fp4_sub(st_in_at(9u, idx, half_m, k_val), meta0));
+            emit_term(acc, g, fp4_sub(st_in_at(10u, idx, half_m, k_val), prev_at(5u, idx, half_m, k_val)));
+            emit_term(acc, g, fp4_sub(st_in_at(11u, idx, half_m, k_val), prev_at(6u, idx, half_m, k_val)));
+            for (uint i = 0u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(next_at(25u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+            }
+            emit_term(acc, g, fp4_sub(next_at(41u, idx, half_m, k_val), par));
+            for (uint j = 0u; j < 44u; ++j) {
+                if (j < 25u || j > 41u) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+        default: { // 23u: XmssMerkleBlockB { is_layer_last = bit 0, is_top_final = bit 1 }
+            bool is_layer_last = (kind_arg & 1u) != 0u;
+            bool is_top_final  = (kind_arg & 2u) != 0u;
+            for (uint i = 0u; i < 4u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), fp4_add(prev_at(25u + i, idx, half_m, k_val), prev_at(37u + i, idx, half_m, k_val))));
+            }
+            emit_term(acc, g, fp4_sub(st_in_at(4u, idx, half_m, k_val), f_add_const(prev_at(29u, idx, half_m, k_val), 1ul)));
+            emit_term(acc, g, fp4_sub(st_in_at(5u, idx, half_m, k_val), f_add_const(prev_at(30u, idx, half_m, k_val), POSEIDON2_CONST_IV)));
+            for (uint i = 6u; i < 12u; ++i) {
+                emit_term(acc, g, fp4_sub(st_in_at(i, idx, half_m, k_val), prev_at(25u + i, idx, half_m, k_val)));
+            }
+            if (!is_layer_last) {
+                for (uint i = 0u; i < 4u; ++i) {
+                    emit_term(acc, g, fp4_sub(next_at(37u + i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+                }
+                for (uint j = 0u; j < 44u; ++j) {
+                    if (j < 37u || j >= 41u) {
+                        emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                    }
+                }
+            } else if (is_top_final) {
+                emit_term(acc, g, prev_at(41u, idx, half_m, k_val));
+                for (uint i = 0u; i < 4u; ++i) {
+                    emit_term(acc, g, fp4_sub(perm_at(i, idx, half_m, k_slot), signer_field_at(5u + i, idx, k_val)));
+                }
+                for (uint j = 0u; j < 44u; ++j) {
+                    emit_term(acc, g, next_at(j, idx, half_m, k_val));
+                }
+            } else {
+                emit_term(acc, g, prev_at(41u, idx, half_m, k_val));
+                u64vec4 next_kp = u64vec4(0ul);
+                for (uint i = 0u; i < 4u; ++i) {
+                    u64vec4 ai = aux_at(i, idx, half_m, k_val);
+                    emit_term(acc, g, f_bool_check(ai));
+                    next_kp = fp4_add(next_kp, fp4_mul_base(ai, 1ul << i));
+                }
+                u64vec4 lo_sh = u64vec4(0ul);
+                for (uint i = 0u; i < 14u; ++i) {
+                    u64vec4 ai = aux_at(4u + i, idx, half_m, k_val);
+                    emit_term(acc, g, f_quartic_base4(ai));
+                    lo_sh = fp4_add(lo_sh, fp4_mul_base(ai, 1ul << (2u * i)));
+                }
+                u64vec4 hi_nib = u64vec4(0ul);
+                for (uint i = 0u; i < 2u; ++i) {
+                    u64vec4 ai = aux_at(18u + i, idx, half_m, k_val);
+                    emit_term(acc, g, f_quartic_base4(ai));
+                    hi_nib = fp4_add(hi_nib, fp4_mul_base(ai, 1ul << (2u * i)));
+                }
+                u64vec4 next_thi = u64vec4(0ul);
+                for (uint i = 0u; i < 14u; ++i) {
+                    u64vec4 ai = aux_at(20u + i, idx, half_m, k_val);
+                    emit_term(acc, g, f_quartic_base4(ai));
+                    next_thi = fp4_add(next_thi, fp4_mul_base(ai, 1ul << (2u * i)));
+                }
+                emit_term(acc, g, fp4_sub(prev_at(5u, idx, half_m, k_val), fp4_add(next_kp, fp4_mul_base(lo_sh, 16ul))));
+                emit_term(acc, g, fp4_sub(prev_at(6u, idx, half_m, k_val), fp4_add(hi_nib, fp4_mul_base(next_thi, 16ul))));
+                for (uint i = 0u; i < 4u; ++i) {
+                    emit_term(acc, g, fp4_sub(next_at(i, idx, half_m, k_val), perm_at(i, idx, half_m, k_slot)));
+                }
+                emit_term(acc, g, fp4_sub(next_at(4u, idx, half_m, k_val), next_kp));
+                emit_term(acc, g, fp4_sub(next_at(5u, idx, half_m, k_val), fp4_add(lo_sh, fp4_mul_base(hi_nib, 1ul << 28u))));
+                emit_term(acc, g, fp4_sub(next_at(6u, idx, half_m, k_val), next_thi));
+                for (uint j = 7u; j < 44u; ++j) {
+                    emit_term(acc, g, fp4_sub(next_at(j, idx, half_m, k_val), prev_at(j, idx, half_m, k_val)));
+                }
+            }
+            break;
+        }
+    }
+    return acc;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_x = gl_WorkGroupID.x;
+    uint wg_y = gl_WorkGroupID.y;
+    uint half_m = pc.cur_m >> 1u;
+    uint tid = pc.base_x + gl_GlobalInvocationID.x;
+
+    uint k_slot = (pc.is_base != 0u) ? (wg_y + 1u) : wg_y;
+    uint k_val = (k_slot == 0u) ? 0u : (k_slot + 1u);
+    bool folding_signer = (pc.flags & 1u) != 0u;
+
+    u64vec4 row_total = u64vec4(0ul);
+    if (tid < half_m && k_slot < 8u) {
+        uint idx = uint(b3.words[pc.sorted_u64_off + tid]);
+        u64vec4 act_k = signer_field_at(0u, idx, k_val);
+
+        if (!f_is_zero(act_k)) {
+            u64vec4 sc0_k;
+            uint op_key;
+            if (folding_signer) {
+                uint loc = idx & (pc.cur_r - 1u);
+                sc0_k = load4_b3(pc.steps_off + loc * 3u + 2u);
+                op_key = loc;
+            } else {
+                uint half_r = pc.cur_r >> 1u;
+                u64vec4 sc0_0 = load4_b3(pc.steps_off + idx * 3u + 2u);
+                u64vec4 sc0_1 = load4_b3(pc.steps_off + (idx + half_r) * 3u + 2u);
+                sc0_k = interp_f(sc0_0, sc0_1, k_val);
+                op_key = idx;
+            }
+
+            u64vec4 hdr = load4_b3(pc.op_hdr_off + op_key);
+            uint e_start = uint(hdr.x);
+            uint e_count = uint(hdr.y);
+
+            u64vec4 eq_acc = u64vec4(0ul);
+            for (uint e = 0u; e < e_count; ++e) {
+                uint eo = pc.op_ent_off + (e_start + e) * 3u;
+                u64vec4 meta = load4_b3(eo);
+                u64vec4 v0   = load4_b3(eo + 1u);
+                u64vec4 dv   = load4_b3(eo + 2u);
+                u64vec4 raw_sel = (k_val == 0u) ? v0 : fp4_add(v0, fp4_mul_base(dv, uint64_t(k_val)));
+                u64vec4 sel = f_mul(act_k, raw_sel);
+                if (f_is_zero(sel)) {
+                    continue;
+                }
+                u64vec4 op_acc = eval_single_op(
+                    uint(meta.x),
+                    uint(meta.y),
+                    uint(meta.z),
+                    sc0_k,
+                    idx,
+                    half_m,
+                    k_slot,
+                    k_val
+                );
+                if (pc.is_base != 0u) {
+                    eq_acc = fp4_add(eq_acc, u64vec4(
+                        fp_mul(op_acc.x, sel.x), fp_mul(op_acc.y, sel.x),
+                        fp_mul(op_acc.z, sel.x), fp_mul(op_acc.w, sel.x)
+                    ));
+                } else {
+                    eq_acc = fp4_add(eq_acc, fp4_mul_full(sel, op_acc));
+                }
+            }
+
+            if (!(eq_acc.x == 0ul && eq_acc.y == 0ul && eq_acc.z == 0ul && eq_acc.w == 0ul)) {
+                uint sh_base = pc.sh_src;
+                u64vec4 eq0 = load4_b2(sh_base + idx);
+                u64vec4 eq1 = load4_b2(sh_base + idx + half_m);
+                u64vec4 cur_eq = interp_ext4_full(eq0, eq1, k_val);
+                row_total = fp4_mul_full(cur_eq, eq_acc);
+            }
+        }
+    }
+
+    red_store(lid, row_total);
+    barrier();
+    for (uint s = 32u; s >= 1u; s >>= 1u) {
+        if (lid < s) {
+            red_store(lid, fp4_add(red_load(lid), red_load(lid + s)));
+        }
+        barrier();
+    }
+
+    if (lid == 0u && k_slot < 8u) {
+        uint o_idx = pc.out_off + k_slot * gl_NumWorkGroups.x + wg_x;
+        store4_b5(o_idx, fp4_add(load4_b5(o_idx), red_load(0u)));
+    }
+}

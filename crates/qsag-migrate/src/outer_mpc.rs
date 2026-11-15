@@ -3053,32 +3053,6 @@ impl<T: Transport> Engine<T> {
         self.select(no_borrow, &difference, &corrected)
     }
 
-    pub fn field_sub_many(
-        &mut self,
-        a_words: &[Word],
-        b_words: &[Word],
-        d: Domain,
-    ) -> Result<Vec<Word>, Error> {
-        if a_words.is_empty() {
-            return Ok(Vec::new());
-        }
-        if d == Domain::Bit {
-            return Ok(a_words
-                .iter()
-                .zip(b_words)
-                .map(|(a, b)| self.xor(a, b))
-                .collect());
-        }
-        let ones = self.constant(u64::MAX);
-        let not_b: Vec<Word> = b_words
-            .iter()
-            .map(|b| b.iter().map(|&x| x ^ ones).collect())
-            .collect();
-        let (diffs, no_borrow) = self.add_many(a_words, &not_b, u64::MAX)?;
-        let (corrected, _) = self.add_public_many(&diffs, d.modulus(), 0, d.width())?;
-        self.select_many(&no_borrow, &diffs, &corrected)
-    }
-
     /// Carry-save tree; all compressors at a level share one network round.
     #[cfg(test)]
     fn sum_rows(&mut self, mut rows: Vec<Word>, width: usize) -> Result<Word, Error> {
@@ -3659,73 +3633,152 @@ impl<T: Transport> Engine<T> {
         Ok(all_out)
     }
 
-    /// Binary encoding of additive sharings without reconstructing their sums.
-    fn component_bits_many(&mut self, words: &[FieldWord], d: Domain) -> Result<Vec<Word>, Error> {
-        let width = d.width();
-        let make_owner = |owner: usize| -> Vec<Word> {
-            words
-                .iter()
-                .map(|a| {
-                    (0..width)
-                        .map(|bit| {
-                            Bit(core::array::from_fn(|j| {
-                                if (self.party + j) % 3 != owner {
-                                    0
-                                } else {
-                                    a.iter().enumerate().fold(0, |mask, (lane, value)| {
-                                        mask | (((value[j][bit / 64] >> (bit % 64)) & 1) << lane)
-                                    })
-                                }
-                            }))
-                        })
-                        .collect()
-                })
-                .collect()
-        };
-        let p0 = make_owner(0);
-        let p1 = make_owner(1);
-        let p2 = make_owner(2);
-        let sum01 = self.field_add_many(&p0, &p1, d)?;
-        self.field_add_many(&sum01, &p2, d)
+    fn component_owner_bits(&self, words: &[FieldWord], d: Domain, owner: usize) -> Vec<Word> {
+        words
+            .iter()
+            .map(|a| {
+                (0..d.width())
+                    .map(|bit| {
+                        Bit(core::array::from_fn(|j| {
+                            if (self.party + j) % 3 != owner {
+                                0
+                            } else {
+                                a.iter().enumerate().fold(0, |mask, (lane, value)| {
+                                    mask | (((value[j][bit / 64] >> (bit % 64)) & 1) << lane)
+                                })
+                            }
+                        }))
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
-    /// Convert binary to additive sharing with fresh uniformly random field masks.
-    /// All pending multiplications are actively verified before `v - r` opens.
+    /// Binary encoding of additive sharings without reconstructing their sums.
+    fn component_bits_many(&mut self, words: &[FieldWord], d: Domain) -> Result<Vec<Word>, Error> {
+        let p0 = self.component_owner_bits(words, d, 0);
+        let p1 = self.component_owner_bits(words, d, 1);
+        let p2 = self.component_owner_bits(words, d, 2);
+        let (sum01, carry1) = self.add_many(&p0, &p1, 0)?;
+        let (ring_sum, carry2) = self.add_many(&sum01, &p2, 0)?;
+        // S = ring_sum + (carry1+carry2)*2^n. Encode k*c with k in
+        // {0,1,2}, using mutually exclusive low/high bits of k, then reduce once.
+        // ring_sum + 2*c < 2*p for all supported fields, including Goldilocks.
+        let pairs: SecretVec<_> = carry1.iter().copied().zip(carry2.iter().copied()).collect();
+        let high = self.and(&pairs)?;
+        let c = Self::domain_c_const(d)[0];
+        let correction: Vec<Word> = carry1
+            .iter()
+            .zip(&carry2)
+            .zip(&high)
+            .map(|((&a, &b), &hi)| {
+                (0..d.width())
+                    .map(|bit| {
+                        let mut out = self.constant(0);
+                        if bit < 64 && (c >> bit) & 1 != 0 {
+                            out = out ^ a ^ b;
+                        }
+                        if bit < 64 && ((2 * c) >> bit) & 1 != 0 {
+                            out = out ^ hi;
+                        }
+                        out
+                    })
+                    .collect()
+            })
+            .collect();
+        self.field_add_many(&ring_sum, &correction, d)
+    }
+
+    /// Convert using a uniform mask in Z/(2^n), with secret carry correction.
+    /// If S = R0+R1+R2 = r+k*2^n and delta = v-r mod 2^n, then
+    /// v = S+delta-(k+borrow)*2^n. The three carry bits remain shared.
+    /// All pending multiplications are verified before the uniform delta opens.
     pub fn bits_to_field_many(
         &mut self,
         words: &[Word],
         d: Domain,
     ) -> Result<Vec<FieldWord>, Error> {
-        if words.is_empty() {
-            return Ok(Vec::new());
-        }
-        let width = d.width();
-        let mut all_out = Vec::with_capacity(words.len());
+        let mut out = Vec::with_capacity(words.len());
         for chunk in words.chunks(CONVERT_CHUNK_WORDS) {
-            let mut r_list: Vec<FieldWord> = (0..chunk.len()).map(|_| self.frandom(d)).collect();
-            let rb_list = self.component_bits_many(&r_list, d)?;
-            let deltas = self.field_sub_many(chunk, &rb_list, d)?;
-            let mut flat = Word::with_capacity(chunk.len() * width);
-            for dw in &deltas {
-                flat.extend_from_slice(dw);
+            let masks: Vec<FieldWord> = (0..chunk.len())
+                .map(|_| {
+                    (0..64)
+                        .map(|_| {
+                            core::array::from_fn(|side| {
+                                let mut raw = Secret([0; 4]);
+                                self.pads[side].squeeze_u64s(&mut raw[..d.width().div_ceil(64)]);
+                                if d == Domain::Ed {
+                                    raw[3] &= 0x7fff_ffff_ffff_ffff;
+                                }
+                                *raw
+                            })
+                        })
+                        .collect()
+                })
+                .collect();
+            out.extend(self.bits_to_field_masked(chunk, masks, d)?);
+        }
+        Ok(out)
+    }
+
+    fn bits_to_field_masked(
+        &mut self,
+        words: &[Word],
+        mut masks: Vec<FieldWord>,
+        d: Domain,
+    ) -> Result<Vec<FieldWord>, Error> {
+        let width = d.width();
+        let count = words.len();
+        let p0 = self.component_owner_bits(&masks, d, 0);
+        let p1 = self.component_owner_bits(&masks, d, 1);
+        let p2 = self.component_owner_bits(&masks, d, 2);
+        let (sum01, mut carries) = self.add_many(&p0, &p1, 0)?;
+        let (ring_mask, carry2) = self.add_many(&sum01, &p2, 0)?;
+        carries.extend_from_slice(&carry2);
+        let ones = self.constant(u64::MAX);
+        let not_mask: Vec<Word> = ring_mask
+            .iter()
+            .map(|w| w.iter().map(|&b| b ^ ones).collect())
+            .collect();
+        let (deltas, no_borrow) = self.add_many(words, &not_mask, u64::MAX)?;
+        carries.extend(no_borrow.iter().map(|&b| b ^ ones));
+        // Each raw component is below 2^n < 2p. This single conditional
+        // subtraction canonicalizes it, including the Goldilocks boundary.
+        for mask in &mut masks {
+            for pair in mask.iter_mut() {
+                for value in pair {
+                    *value = crate::scalar::sub(*value, d.modulus(), d.modulus());
+                }
             }
-            let opened = self.open(&flat)?;
-            for (r_fw, op_slice) in r_list.iter_mut().zip(opened.chunks_exact(width)) {
-                for (lane, pair) in r_fw.iter_mut().enumerate() {
-                    let mut value = [0u64; 4];
-                    for (bit, &word) in op_slice.iter().enumerate() {
-                        value[bit / 64] |= ((word >> lane) & 1) << (bit % 64);
-                    }
-                    for (j, part) in pair.iter_mut().enumerate() {
-                        if (self.party + j) % 3 == 0 {
-                            *part = d.add(*part, value);
-                        }
+        }
+        let lifted = self.lift_bits_many(&carries, d)?;
+        let mut corrected = Vec::with_capacity(count);
+        for (i, mask) in masks.iter().enumerate() {
+            let k = self.fadd(&lifted[i], &lifted[count + i], d);
+            let k_borrow = self.fadd(&k, &lifted[2 * count + i], d);
+            let correction = self.fscale(&k_borrow, Self::domain_c_const(d), d);
+            corrected.push(self.fsub(mask, &correction, d));
+        }
+        let mut flat = Word::with_capacity(count * width);
+        for delta in &deltas {
+            flat.extend_from_slice(delta);
+        }
+        let opened = self.open(&flat)?;
+        for (mask, bits) in corrected.iter_mut().zip(opened.chunks_exact(width)) {
+            for (lane, pair) in mask.iter_mut().enumerate() {
+                let mut value = [0; 4];
+                for (bit, &word) in bits.iter().enumerate() {
+                    value[bit / 64] |= ((word >> lane) & 1) << (bit % 64);
+                }
+                let value = crate::scalar::sub(value, d.modulus(), d.modulus());
+                for (side, part) in pair.iter_mut().enumerate() {
+                    if (self.party + side) % 3 == 0 {
+                        *part = d.add(*part, value);
                     }
                 }
             }
-            all_out.extend(r_list);
         }
-        Ok(all_out)
+        Ok(corrected)
     }
 
     #[cfg(test)]
@@ -3823,15 +3876,28 @@ impl<T: Transport> Engine<T> {
     }
 
     pub fn finverse(&mut self, a: &FieldWord, d: Domain) -> Result<FieldWord, Error> {
-        let exponent = crate::scalar::sub(d.modulus(), [2, 0, 0, 0], d.modulus());
-        let mut out = self.fconstant([1, 0, 0, 0]);
-        for i in (0..d.width()).rev() {
-            out = self.fmul(&out, &out, d)?;
-            if (exponent[i / 64] >> (i % 64)) & 1 != 0 {
-                out = self.fmul(&out, a, d)?;
+        // Opening authenticates all pending products first. Only the uniformly
+        // masked product is public; the mask and inverse remain replicated.
+        // Inversion gates require a nonzero operand. Bound retries so malformed
+        // zero operands abort instead of hanging a ceremony indefinitely.
+        for _ in 0..3 {
+            let mask = self.frandom(d);
+            let product = self.fmul(a, &mask, d)?;
+            let opened = self.fopen_many(&[product], d)?;
+            if opened[0].contains(&[0; 4]) {
+                continue;
             }
+            return Ok(mask
+                .iter()
+                .zip(&opened[0])
+                .map(|(r, u)| {
+                    let inverse = d.inverse(*u);
+                    r.map(|share| d.mul(share, inverse))
+                })
+                .collect());
         }
-        Ok(out)
+        self.poisoned = true;
+        Err(Error::InvalidProof)
     }
 }
 
@@ -3923,17 +3989,21 @@ pub(crate) mod tests {
             }
         }
     }
+    pub(crate) fn parallel_batches() -> usize {
+        if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1")
+            || std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24)
+        {
+            // Seven batches cover all 438 repetitions without a serial tail.
+            7
+        } else {
+            4
+        }
+    }
+
     impl Transport for Network {
         // Large test hosts overlap ceremonies, each with three custodians.
         fn max_parallel_batches(&self) -> usize {
-            if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1")
-                || std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24)
-            {
-                // Seven batches cover all 438 repetitions without a serial tail.
-                7
-            } else {
-                4
-            }
+            parallel_batches()
         }
 
         fn audit_transcript(&self) -> Option<(u64, u64)> {
@@ -4031,6 +4101,27 @@ pub(crate) mod tests {
             }
         });
     }
+    #[test]
+    fn masked_inverse_matches_plaintext_and_rejects_zero() {
+        run(|party, network| {
+            let mut e = Engine::new(party, [0x91; 32], keys(party), network).unwrap();
+            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+                let a = e.frandom(d);
+                let clear = e.fopen_many(core::slice::from_ref(&a), d).unwrap();
+                let inverse = e.finverse(&a, d).unwrap();
+                let actual = e.fopen_many(&[inverse], d).unwrap();
+                for (a, b) in clear[0].iter().zip(&actual[0]) {
+                    assert_eq!(d.mul(*a, *b), [1, 0, 0, 0]);
+                }
+            }
+            let zero = e.fconstant([0; 4]);
+            assert!(matches!(
+                e.finverse(&zero, Domain::Secp),
+                Err(Error::InvalidProof)
+            ));
+        });
+    }
+
     pub fn audited_networks() -> [(Network, AuditHandle); 3] {
         let mut networks = networks().map(Some);
         core::array::from_fn(|p| {
@@ -4514,6 +4605,86 @@ pub(crate) mod tests {
                             assert_eq!((word >> lane) & 1, (expected[bit / 64] >> (bit % 64)) & 1);
                         }
                     }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn ring_mask_conversion_covers_component_boundaries_and_all_carries() {
+        run(|party, network| {
+            let mut e = Engine::new(party, [0x63; 32], keys(party), network).unwrap();
+            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+                let max = match d {
+                    Domain::Gold => [u64::MAX, 0, 0, 0],
+                    Domain::Ed => [u64::MAX, u64::MAX, u64::MAX, 0x7fff_ffff_ffff_ffff],
+                    _ => [u64::MAX; 4],
+                };
+                let zero = [0; 4];
+                let one = [1, 0, 0, 0];
+                let last = crate::scalar::sub(d.modulus(), one, d.modulus());
+                let cases = [
+                    [zero; 3],
+                    [max, one, zero],
+                    [zero, max, one],
+                    [max; 3],
+                    [d.modulus(); 3],
+                    [last, d.modulus(), max],
+                    [last; 3],
+                ];
+                let expected: Vec<Value> =
+                    (0..64).map(|lane| [zero, one, last][lane % 3]).collect();
+                let clear: Vec<_> = (0..d.width())
+                    .map(|bit| {
+                        if party != 0 {
+                            return 0;
+                        }
+                        expected.iter().enumerate().fold(0, |word, (lane, value)| {
+                            word | (((value[bit / 64] >> (bit % 64)) & 1) << lane)
+                        })
+                    })
+                    .collect();
+                let input = e.share(&clear).unwrap();
+                let words: Vec<_> = cases.iter().map(|_| input.clone()).collect();
+                let masks: Vec<FieldWord> = cases
+                    .iter()
+                    .map(|case| {
+                        (0..64)
+                            .map(|_| core::array::from_fn(|side| case[(party + side) % 3]))
+                            .collect()
+                    })
+                    .collect();
+                let canonical: Vec<FieldWord> = masks
+                    .iter()
+                    .map(|mask| {
+                        mask.iter()
+                            .map(|pair| {
+                                pair.map(|v| crate::scalar::sub(v, d.modulus(), d.modulus()))
+                            })
+                            .collect()
+                    })
+                    .collect();
+                for (bits, case) in e
+                    .component_bits_many(&canonical, d)
+                    .unwrap()
+                    .iter()
+                    .zip(cases)
+                {
+                    let sum = case.into_iter().fold(zero, |acc, v| {
+                        d.add(acc, crate::scalar::sub(v, d.modulus(), d.modulus()))
+                    });
+                    let opened = e.open(bits).unwrap();
+                    for lane in 0..64 {
+                        let mut actual = [0; 4];
+                        for (bit, &word) in opened.iter().enumerate() {
+                            actual[bit / 64] |= ((word >> lane) & 1) << (bit % 64);
+                        }
+                        assert_eq!(actual, sum);
+                    }
+                }
+                let converted = e.bits_to_field_masked(&words, masks, d).unwrap();
+                for opened in e.fopen_many(&converted, d).unwrap() {
+                    assert_eq!(opened, expected);
                 }
             }
         });

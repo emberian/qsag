@@ -95,18 +95,18 @@ fn run(raw: &[String]) -> Result<(), CliError> {
 }
 
 fn main() -> ExitCode {
-    let raw: Vec<String> = match std::env::args_os()
-        .skip(1)
-        .map(|a| a.into_string())
-        .collect()
-    {
-        Ok(raw) => raw,
-        Err(_) => {
-            eprintln!("qsag: error: arguments must be valid UTF-8");
-            return ExitCode::from(exit::USAGE);
+    let mut raw = cli::SecretArgs(Vec::new());
+    for arg in std::env::args_os().skip(1) {
+        match arg.into_string() {
+            Ok(arg) => raw.0.push(arg),
+            Err(arg) => {
+                drop(cli::ZeroizingBuf(arg.into_encoded_bytes()));
+                eprintln!("qsag: error: arguments must be valid UTF-8");
+                return ExitCode::from(exit::USAGE);
+            }
         }
-    };
-    match run(&raw) {
+    }
+    match run(&raw.0) {
         Ok(()) => ExitCode::from(exit::OK),
         Err(err) => {
             eprintln!("qsag: error: {err}");

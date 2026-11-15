@@ -29,8 +29,11 @@ mod circuit;
 pub mod co_zk_mpc;
 mod ownership;
 pub use co_zk_mpc::CoZkCustodianShare;
+mod batch_hash;
 mod outer_mpc;
+mod parallel;
 mod secret;
+mod tape_sponge;
 pub use zk_engine::{
     MIT_PARTIES, MIT_REPETITIONS, MigrateError, MigrationRequest, MigrationStatement,
     MigrationZkProof, OpenedRepetitionView, prove_migration_in_domain, prove_migration_ownership,

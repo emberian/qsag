@@ -1,0 +1,725 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V 1.5 compute kernel for `ProverKernelSlot::AirRowGroupA`.
+// VRAM-resident witness transpose (`row-major -> col-major`), Round-0 base-field & Rounds >= 1
+// `Ext4` Poseidon2 Group-A + boundary + degree-2 shift-bus evaluation (emitting `perm_out[0..12]`
+// to `b4` for `AirRowGroupB`), and coalesced column/shift-table folding.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Buf0 { uint64_t words[]; } b0; // witness / cols_base
+layout(std430, set = 0, binding = 1) buffer Buf1 { uint64_t words[]; } b1; // cols_ext4 ping-pong
+layout(std430, set = 0, binding = 2) buffer Buf2 { uint64_t words[]; } b2; // shift_tables (eq_tau, nl, sh)
+layout(std430, set = 0, binding = 3) buffer Buf3 { uint64_t words[]; } b3; // sched + pub tables
+layout(std430, set = 0, binding = 4) buffer Buf4 { uint64_t words[]; } b4; // vram_perm
+layout(std430, set = 0, binding = 5) buffer Buf5 { uint64_t words[]; } b5; // partials
+
+layout(push_constant) uniform PushConsts {
+    u64vec4 chal;
+    uint    mode;       // 0=transpose, 1=eval_round0_base, 2=eval_ext4, 3=fold_round0, 4=fold_ext4, 5=fold_shifts
+    uint    cur_m;      // total rows in current round (`half = cur_m / 2`)
+    uint    cur_r;      // local step rows per signer in current round
+    uint    flags;      // bit 0: folding_signer
+    uint    col_src;    // `Ext4` base offset in `b1` (or `u64` witness offset in `b0`)
+    uint    col_dst;    // `Ext4` dst offset in `b1` (or `u64` cols_base offset in `b0`)
+    uint    sh_src;     // `Ext4` base offset in `b2` (`3 * cur_m` `Ext4`s)
+    uint    steps_off;  // `Ext4` offset in `b3` of `step_pub[0..cur_r]` (`3` `Ext4`s/step: rf, rl, sc0)
+    uint    out_off;    // `Ext4` offset in `b5` for partial sums (or `sh_dst` in mode 5)
+    uint    base_x;
+    uint    aux0;
+    uint    aux1;
+} pc;
+
+const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
+const uint64_t GL_EPS = 0xFFFFFFFFul;
+
+const uint64_t RC_EXT_INIT[48] = uint64_t[48](
+    0xFDA3872AFF6CE05Dul, 0xED0FC745B9C6495Bul, 0x9D4A1D75CA56751Ful, 0x21478BBCDAD17885ul,
+    0xAB50796FBF5FE8E4ul, 0x5162A1B8704BEA74ul, 0xA580070372A07498ul, 0x1EED28365F7E78DEul,
+    0x8E3B30EC8A038FF1ul, 0x304981CCA391AAEAul, 0xAC92EC4A1B06E950ul, 0xF71A7A990ECFCB5Dul,
+    0xEF0CA3A081E3B2CDul, 0x12831554DC6B2FA0ul, 0x55430D5E3FA8777Ful, 0xC13FA1980F8B3B3Eul,
+    0xF0FCF63D66B6F91Bul, 0x027799AD325D72D4ul, 0x52D5E98EBFFCAF99ul, 0x1B1F313E73474D0Cul,
+    0x2281D230035AD8B1ul, 0x10E2A54EACF5A642ul, 0x25EA832EEDD17175ul, 0xC7E9E09CCCCCA51Dul,
+    0x80409B59EA5A74D4ul, 0x1A7AB33C5331C21Cul, 0x7603BA7D318F36C7ul, 0x17048E4CD8752C18ul,
+    0x1E87AAAE642CAA37ul, 0xE50ADB5D20EA41E7ul, 0x6DBB327EE8D91842ul, 0xC8DCE552B55B7C92ul,
+    0x59057FBA3D66EFA5ul, 0x4EABDD085645BBD8ul, 0x51AD3DD41EF12666ul, 0xB689B16D245DD00Ful,
+    0x1BD072659A8FF2C9ul, 0xD1C8D36A42924DC1ul, 0xE4C329CD958F137Dul, 0x7F17B925BC78BE59ul,
+    0x8391AAC6F90B7908ul, 0x4B28370115DB8D54ul, 0x3A2C0C2D2D286512ul, 0x882608EBDEAD786Dul,
+    0x37C7DF185CC152DDul, 0xDC1F27243FACB794ul, 0x7747FF82D3E3CAD7ul, 0xD8F199768234A623ul
+);
+
+const uint64_t RC_INT[22] = uint64_t[22](
+    0xF731924A2CAB81C3ul, 0x255089C3FAB8168Dul, 0x3A3D76511C74EBA8ul, 0x48EADF244FC82AD4ul,
+    0xE30F632AC44C7191ul, 0x5FDC66FDC64EC0CDul, 0x6803C41A69874702ul, 0xC5C38296FA52132Ful,
+    0xBAD3E9CF2FDDCD81ul, 0x3AF68FF700854AA8ul, 0x4D8D3C348A3EE863ul, 0xA5BDA13ACAD01E85ul,
+    0x28182BBAFEBD907Eul, 0x13BCC0B1EEEEBEE8ul, 0x265109DE178C26A2ul, 0x3B225DF36DE85CE1ul,
+    0x3ACF9E9164C55E09ul, 0x90B166953084A6CAul, 0x8AB96AAE41B50F8Eul, 0xF7C88906BE121CF6ul,
+    0xF3CB9E9367497B0Bul, 0x0B8BCB26CD19E5FAul
+);
+
+const uint64_t RC_EXT_TERM[48] = uint64_t[48](
+    0xB70495E46A559CECul, 0xCB6713D4200E5452ul, 0x177C074EE0CC5FCEul, 0x6CCE1772A93FC829ul,
+    0x553810B2DE6A7215ul, 0xF7EC2DA54B00B0D6ul, 0x31B03974AF5BA20Aul, 0xE84A6FA369462250ul,
+    0xE3CA05DD13AA415Aul, 0x1FBE6A7B16CB5A5Aul, 0xF4293F809DC78676ul, 0x631246D895542634ul,
+    0xB76AB8647401EE88ul, 0xF873C49F77E7721Aul, 0xDF2C27C73649ECF8ul, 0x09BCC7B4B0181300ul,
+    0x39E821566741B4A4ul, 0xFC5F6B1A8CCFE5E0ul, 0x2CDF4BC6B240EB9Bul, 0x9C3DA97122A82287ul,
+    0x234AEEBCAAAA8BC3ul, 0x98A2067776D1B323ul, 0xF46592330118C9F8ul, 0x8BDF12E530D0A748ul,
+    0x0A57706D0A935206ul, 0xBBBEB66FDDEB378Bul, 0x7A566184C747CD1Eul, 0x0C7E07A6681F782Ful,
+    0x480703C5F50F18B3ul, 0xE88F37D72A053DC9ul, 0xD576672AEE7D43EAul, 0x49B9067B47E1C79Aul,
+    0x6FC27EB618A7A546ul, 0xE24F6CB7E1E1CDDFul, 0x49C0707C765CAEEBul, 0xA8C29664619D5FD6ul,
+    0xFAE6F26D3EB5538Bul, 0x4721CE08A39255B0ul, 0xA2B9A1FC2877F03Ful, 0x201069A2F920FF25ul,
+    0xD88DBAC1FEA4410Dul, 0x2ED4EAC1C05A2FADul, 0xA2E965EC082BD11Eul, 0x31D92A0350814968ul,
+    0xD3FF6275F9809F74ul, 0x9AD521BC0C7F82B1ul, 0x317619AB4F0393DCul, 0x675ED63C2A5DE772ul
+);
+
+shared uint s_red[8][64];
+
+u64vec4 red_load(uint i) {
+    return u64vec4(
+        uint64_t(s_red[0][i]) | (uint64_t(s_red[1][i]) << 32u),
+        uint64_t(s_red[2][i]) | (uint64_t(s_red[3][i]) << 32u),
+        uint64_t(s_red[4][i]) | (uint64_t(s_red[5][i]) << 32u),
+        uint64_t(s_red[6][i]) | (uint64_t(s_red[7][i]) << 32u)
+    );
+}
+
+void red_store(uint i, u64vec4 v) {
+    s_red[0][i] = uint(v.x); s_red[1][i] = uint(v.x >> 32u);
+    s_red[2][i] = uint(v.y); s_red[3][i] = uint(v.y >> 32u);
+    s_red[4][i] = uint(v.z); s_red[5][i] = uint(v.z >> 32u);
+    s_red[6][i] = uint(v.w); s_red[7][i] = uint(v.w >> 32u);
+}
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
+}
+
+uint64_t fp_add(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t rem_p = GL_P - b_c;
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
+}
+
+uint64_t fp_sub(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t diff = a_c - b_c;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
+}
+
+uint64_t fp_neg(uint64_t a) {
+    return fp_sub(0ul, a);
+}
+
+uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
+    uint64_t hi_lo = hi & GL_EPS;
+    uint64_t hi_hi = hi >> 32u;
+    uint64_t mid = (hi_lo << 32u) - hi_lo;
+    uint64_t lo_c = fp_reduce_u64(lo);
+    return fp_sub(fp_add(lo_c, mid), hi_hi);
+}
+
+uint64_t fp_mul(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t a_lo = a_c & 0xFFFFFFFFul;
+    uint64_t a_hi = a_c >> 32u;
+    uint64_t b_lo = b_c & 0xFFFFFFFFul;
+    uint64_t b_hi = b_c >> 32u;
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    uint64_t mid = (p0 >> 32u) + (p1 & 0xFFFFFFFFul) + (p2 & 0xFFFFFFFFul);
+    uint64_t lo = (p0 & 0xFFFFFFFFul) | (mid << 32u);
+    uint64_t hi = p3 + (p1 >> 32u) + (p2 >> 32u) + (mid >> 32u);
+    return fp_reduce128(lo, hi);
+}
+
+uint64_t fp_shl_canonical(uint64_t x, uint k) {
+    return fp_reduce128(x << k, x >> (64u - k));
+}
+
+uint64_t poseidon2_sbox7_base(uint64_t x) {
+    uint64_t x2 = fp_mul(x, x);
+    uint64_t x3 = fp_mul(x2, x);
+    uint64_t x4 = fp_mul(x2, x2);
+    return fp_mul(x3, x4);
+}
+
+void apply_m4_base(inout uint64_t v0, inout uint64_t v1, inout uint64_t v2, inout uint64_t v3) {
+    uint64_t s = fp_add(fp_add(v0, v1), fp_add(v2, v3));
+    uint64_t r0 = fp_add(s, fp_add(v0, fp_add(v1, v1)));
+    uint64_t r1 = fp_add(s, fp_add(v1, fp_add(v2, v2)));
+    uint64_t r2 = fp_add(s, fp_add(v2, fp_add(v3, v3)));
+    uint64_t r3 = fp_add(s, fp_add(v3, fp_add(v0, v0)));
+    v0 = r0; v1 = r1; v2 = r2; v3 = r3;
+}
+
+void apply_me_base(inout uint64_t st[12]) {
+    for (uint i = 0u; i < 12u; ++i) {
+        st[i] = fp_reduce_u64(st[i]);
+    }
+    apply_m4_base(st[0], st[1], st[2], st[3]);
+    apply_m4_base(st[4], st[5], st[6], st[7]);
+    apply_m4_base(st[8], st[9], st[10], st[11]);
+    for (uint i = 0u; i < 4u; ++i) {
+        uint64_t s = fp_add(fp_add(st[i], st[4u + i]), st[8u + i]);
+        st[i]      = fp_add(st[i], s);
+        st[4u + i] = fp_add(st[4u + i], s);
+        st[8u + i] = fp_add(st[8u + i], s);
+    }
+}
+
+void apply_mi_base(inout uint64_t st[12]) {
+    uint64_t s = 0ul;
+    for (uint i = 0u; i < 12u; ++i) {
+        s = fp_add(s, st[i]);
+    }
+    st[0] = fp_add(fp_neg(fp_add(st[0], st[0])), s);
+    st[1] = fp_add(st[1], s);
+    for (uint i = 2u; i < 12u; ++i) {
+        st[i] = fp_add(fp_shl_canonical(st[i], i - 1u), s);
+    }
+}
+
+u64vec2 fp2_add(u64vec2 a, u64vec2 b) { return u64vec2(fp_add(a.x, b.x), fp_add(a.y, b.y)); }
+u64vec2 fp2_sub(u64vec2 a, u64vec2 b) { return u64vec2(fp_sub(a.x, b.x), fp_sub(a.y, b.y)); }
+u64vec2 fp2_mul_by_u(u64vec2 a) { return u64vec2(fp_mul(a.y, 7ul), a.x); }
+
+u64vec2 fp2_mul(u64vec2 a, u64vec2 b) {
+    uint64_t a0b0 = fp_mul(a.x, b.x);
+    uint64_t a1b1 = fp_mul(a.y, b.y);
+    uint64_t mid = fp_sub(fp_sub(fp_mul(fp_add(a.x, a.y), fp_add(b.x, b.y)), a0b0), a1b1);
+    return u64vec2(fp_add(a0b0, fp_mul(a1b1, 7ul)), mid);
+}
+
+u64vec4 fp4_add(u64vec4 a, u64vec4 b) {
+    return u64vec4(fp_add(a.x, b.x), fp_add(a.y, b.y), fp_add(a.z, b.z), fp_add(a.w, b.w));
+}
+
+u64vec4 fp4_sub(u64vec4 a, u64vec4 b) {
+    return u64vec4(fp_sub(a.x, b.x), fp_sub(a.y, b.y), fp_sub(a.z, b.z), fp_sub(a.w, b.w));
+}
+
+u64vec4 fp4_neg(u64vec4 a) {
+    return u64vec4(fp_neg(a.x), fp_neg(a.y), fp_neg(a.z), fp_neg(a.w));
+}
+
+u64vec4 fp4_shl_canonical(u64vec4 a, uint k) {
+    return u64vec4(
+        fp_shl_canonical(a.x, k),
+        fp_shl_canonical(a.y, k),
+        fp_shl_canonical(a.z, k),
+        fp_shl_canonical(a.w, k)
+    );
+}
+
+u64vec4 fp4_mul_base(u64vec4 a, uint64_t s) {
+    return u64vec4(fp_mul(a.x, s), fp_mul(a.y, s), fp_mul(a.z, s), fp_mul(a.w, s));
+}
+
+u64vec4 fp4_mul(u64vec4 a, u64vec4 b) {
+    u64vec2 v0 = fp2_mul(a.xy, b.xy);
+    u64vec2 v1 = fp2_mul(a.zw, b.zw);
+    u64vec2 mid = fp2_sub(fp2_sub(fp2_mul(fp2_add(a.xy, a.zw), fp2_add(b.xy, b.zw)), v0), v1);
+    return u64vec4(fp2_add(v0, fp2_mul_by_u(v1)), mid);
+}
+
+u64vec4 fp4_sq(u64vec4 a) {
+    u64vec2 p0 = fp2_mul(a.xy, a.zw);
+    u64vec2 up0 = fp2_mul_by_u(p0);
+    u64vec2 t = fp2_mul(fp2_add(a.xy, a.zw), fp2_add(a.xy, fp2_mul_by_u(a.zw)));
+    return u64vec4(fp2_sub(fp2_sub(t, p0), up0), fp2_add(p0, p0));
+}
+
+u64vec4 poseidon2_sbox7_ext4(u64vec4 x) {
+    u64vec4 x2 = fp4_sq(x);
+    u64vec4 x3 = fp4_mul(x2, x);
+    u64vec4 x4 = fp4_sq(x2);
+    return fp4_mul(x3, x4);
+}
+
+void apply_m4_ext4(inout u64vec4 v0, inout u64vec4 v1, inout u64vec4 v2, inout u64vec4 v3) {
+    u64vec4 s = fp4_add(fp4_add(v0, v1), fp4_add(v2, v3));
+    u64vec4 r0 = fp4_add(s, fp4_add(v0, fp4_add(v1, v1)));
+    u64vec4 r1 = fp4_add(s, fp4_add(v1, fp4_add(v2, v2)));
+    u64vec4 r2 = fp4_add(s, fp4_add(v2, fp4_add(v3, v3)));
+    u64vec4 r3 = fp4_add(s, fp4_add(v3, fp4_add(v0, v0)));
+    v0 = r0; v1 = r1; v2 = r2; v3 = r3;
+}
+
+void apply_me_ext4(inout u64vec4 st[12]) {
+    for (uint i = 0u; i < 12u; ++i) {
+        st[i] = u64vec4(
+            fp_reduce_u64(st[i].x), fp_reduce_u64(st[i].y),
+            fp_reduce_u64(st[i].z), fp_reduce_u64(st[i].w)
+        );
+    }
+    apply_m4_ext4(st[0], st[1], st[2], st[3]);
+    apply_m4_ext4(st[4], st[5], st[6], st[7]);
+    apply_m4_ext4(st[8], st[9], st[10], st[11]);
+    for (uint i = 0u; i < 4u; ++i) {
+        u64vec4 s = fp4_add(fp4_add(st[i], st[4u + i]), st[8u + i]);
+        st[i]      = fp4_add(st[i], s);
+        st[4u + i] = fp4_add(st[4u + i], s);
+        st[8u + i] = fp4_add(st[8u + i], s);
+    }
+}
+
+void apply_mi_ext4(inout u64vec4 st[12]) {
+    u64vec4 s = u64vec4(0ul);
+    for (uint i = 0u; i < 12u; ++i) {
+        s = fp4_add(s, st[i]);
+    }
+    st[0] = fp4_add(fp4_neg(fp4_add(st[0], st[0])), s);
+    st[1] = fp4_add(st[1], s);
+    for (uint i = 2u; i < 12u; ++i) {
+        st[i] = fp4_add(fp4_shl_canonical(st[i], i - 1u), s);
+    }
+}
+
+u64vec4 load4_b1(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b1.words[o], b1.words[o + 1u], b1.words[o + 2u], b1.words[o + 3u]);
+}
+void store4_b1(uint idx, u64vec4 v) {
+    uint o = idx * 4u;
+    b1.words[o] = v.x; b1.words[o + 1u] = v.y; b1.words[o + 2u] = v.z; b1.words[o + 3u] = v.w;
+}
+
+u64vec4 load4_b2(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b2.words[o], b2.words[o + 1u], b2.words[o + 2u], b2.words[o + 3u]);
+}
+void store4_b2(uint idx, u64vec4 v) {
+    uint o = idx * 4u;
+    b2.words[o] = v.x; b2.words[o + 1u] = v.y; b2.words[o + 2u] = v.z; b2.words[o + 3u] = v.w;
+}
+
+u64vec4 load4_b3(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b3.words[o], b3.words[o + 1u], b3.words[o + 2u], b3.words[o + 3u]);
+}
+
+void store4_b4(uint idx, u64vec4 v) {
+    uint o = idx * 4u;
+    b4.words[o] = v.x; b4.words[o + 1u] = v.y; b4.words[o + 2u] = v.z; b4.words[o + 3u] = v.w;
+}
+
+void store4_b5(uint idx, u64vec4 v) {
+    uint o = idx * 4u;
+    b5.words[o] = v.x; b5.words[o + 1u] = v.y; b5.words[o + 2u] = v.z; b5.words[o + 3u] = v.w;
+}
+
+u64vec4 wg_reduce_64(uint lid, u64vec4 val) {
+    red_store(lid, val);
+    barrier();
+    for (uint s = 32u; s >= 1u; s >>= 1u) {
+        if (lid < s) {
+            red_store(lid, fp4_add(red_load(lid), red_load(lid + s)));
+        }
+        barrier();
+    }
+    return red_load(0u);
+}
+
+uint64_t col_base_at_k(uint c, uint idx, uint half_m, uint k_val) {
+    uint base = pc.col_dst + c * pc.cur_m;
+    uint64_t r0 = fp_reduce_u64(b0.words[base + idx]);
+    if (k_val == 0u) {
+        return r0;
+    }
+    uint64_t r1 = fp_reduce_u64(b0.words[base + idx + half_m]);
+    return fp_add(r0, fp_mul(fp_sub(r1, r0), uint64_t(k_val)));
+}
+
+u64vec4 col_ext4_at_k(uint c, uint idx, uint half_m, uint k_val) {
+    uint base = pc.col_src + c * pc.cur_m;
+    u64vec4 r0 = load4_b1(base + idx);
+    if (k_val == 0u) {
+        return r0;
+    }
+    u64vec4 r1 = load4_b1(base + idx + half_m);
+    return fp4_add(r0, fp4_mul_base(fp4_sub(r1, r0), uint64_t(k_val)));
+}
+
+u64vec4 interp_ext4(u64vec4 v0, u64vec4 v1, uint k_val) {
+    if (k_val == 0u) {
+        return v0;
+    }
+    return fp4_add(v0, fp4_mul_base(fp4_sub(v1, v0), uint64_t(k_val)));
+}
+
+bool is_zero4(u64vec4 a) {
+    return (a.x == 0ul) && (a.y == 0ul) && (a.z == 0ul) && (a.w == 0ul);
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg_x = gl_WorkGroupID.x;
+    uint wg_y = gl_WorkGroupID.y;
+
+    if (pc.mode == 0u) {
+        // Coalesced 8x8 tile witness transpose:
+        //   row-major `b0[col_src + row * 256 + col]` -> col-major `b0[col_dst + col * cur_m + row]`.
+        uint tile_row = (pc.base_x + wg_x) * 8u;
+        uint tile_col = wg_y * 8u; // `wg_y in 0..32` (`32 * 8 = 256` cols)
+        uint r_off = lid >> 3u;    // `0..7`
+        uint c_off = lid & 7u;     // `0..7`
+        uint row = tile_row + r_off;
+        uint col = tile_col + c_off;
+        uint64_t v = 0ul;
+        if (row < pc.cur_m && col < 256u) {
+            v = fp_reduce_u64(b0.words[pc.col_src + row * 256u + col]);
+        }
+        // Transpose via `s_red[0..1][0..63]` (`c_off * 8 + r_off` stored, read coalesced along `row`).
+        uint tr_slot = c_off * 8u + r_off;
+        s_red[0][tr_slot] = uint(v);
+        s_red[1][tr_slot] = uint(v >> 32u);
+        barrier();
+
+        uint out_c = tile_col + r_off;
+        uint out_r = tile_row + c_off;
+        if (out_r < pc.cur_m && out_c < 256u) {
+            uint rd_slot = r_off * 8u + c_off;
+            uint64_t tv = uint64_t(s_red[0][rd_slot]) | (uint64_t(s_red[1][rd_slot]) << 32u);
+            b0.words[pc.col_dst + out_c * pc.cur_m + out_r] = tv;
+        }
+        return;
+    }
+
+    if (pc.mode == 1u) {
+        // Round-0 base-field Group A + boundaries + degree-2 shift bus (`wg_y = k_slot in 0..8`).
+        // `k_slot == 0 -> k_val = 0` (`eq_acc == 0` identically; only shift bus runs!).
+        // `k_slot in 1..8 -> k_val = k_slot + 1` (`2..=8`).
+        uint half_m = pc.cur_m >> 1u;
+        uint idx = pc.base_x + gl_GlobalInvocationID.x;
+        uint k_slot = wg_y;
+        uint k_val = (k_slot == 0u) ? 0u : (k_slot + 1u);
+        bool folding_signer = (pc.flags & 1u) != 0u;
+
+        u64vec4 total = u64vec4(0ul);
+        if (idx < half_m && k_slot < 8u) {
+            uint sh_base = pc.sh_src;
+            u64vec4 nl0 = load4_b2(sh_base + pc.cur_m + idx);
+            u64vec4 nl1 = load4_b2(sh_base + pc.cur_m + idx + half_m);
+            u64vec4 sh0 = load4_b2(sh_base + 2u * pc.cur_m + idx);
+            u64vec4 sh1 = load4_b2(sh_base + 2u * pc.cur_m + idx + half_m);
+            u64vec4 cur_nl = interp_ext4(nl0, nl1, k_val);
+            u64vec4 cur_sh = interp_ext4(sh0, sh1, k_val);
+
+            // Shift-bus dot product at `k_val` (`next = cols[174..218], prev = cols[130..174]`):
+            u64vec4 cur_a = u64vec4(0ul);
+            u64vec4 cur_b = u64vec4(0ul);
+            for (uint j = 0u; j < 44u; ++j) {
+                u64vec4 g_sh = load4_b3(206u + j);
+                uint64_t p_v = col_base_at_k(130u + j, idx, half_m, k_val);
+                uint64_t n_v = col_base_at_k(174u + j, idx, half_m, k_val);
+                cur_a = fp4_add(cur_a, fp4_mul_base(g_sh, n_v));
+                cur_b = fp4_add(cur_b, fp4_mul_base(g_sh, p_v));
+            }
+            u64vec4 shift_part = fp4_sub(fp4_mul(cur_nl, cur_a), fp4_mul(cur_sh, cur_b));
+
+            if (k_slot == 0u) {
+                total = shift_part;
+            } else {
+                u64vec4 eq0 = load4_b2(sh_base + idx);
+                u64vec4 eq1 = load4_b2(sh_base + idx + half_m);
+                u64vec4 cur_eq = interp_ext4(eq0, eq1, k_val);
+
+                uint64_t rf_k;
+                uint64_t rl_k;
+                if (folding_signer) {
+                    uint loc = idx & (pc.cur_r - 1u);
+                    rf_k = (loc == 0u) ? 1ul : 0ul;
+                    rl_k = (loc + 1u == pc.cur_r) ? 1ul : 0ul;
+                } else {
+                    uint half_r = pc.cur_r >> 1u;
+                    uint64_t rf0 = (idx == 0u) ? 1ul : 0ul;
+                    uint64_t rf1 = (idx + half_r == 0u) ? 1ul : 0ul;
+                    uint64_t rl0 = (idx + 1u == pc.cur_r) ? 1ul : 0ul;
+                    uint64_t rl1 = (idx + half_r + 1u == pc.cur_r) ? 1ul : 0ul;
+                    rf_k = fp_add(rf0, fp_mul(fp_sub(rf1, rf0), uint64_t(k_val)));
+                    rl_k = fp_add(rl0, fp_mul(fp_sub(rl1, rl0), uint64_t(k_val)));
+                }
+
+                uint64_t st[12];
+                for (uint i = 0u; i < 12u; ++i) {
+                    st[i] = col_base_at_k(i, idx, half_m, k_val);
+                }
+                apply_me_base(st);
+
+                u64vec4 eq_acc = u64vec4(0ul);
+                uint c_idx = 0u;
+                uint sb_idx = 0u;
+
+                for (uint r = 0u; r < 4u; ++r) {
+                    for (uint lane = 0u; lane < 12u; ++lane) {
+                        uint64_t sbox_val = col_base_at_k(12u + sb_idx, idx, half_m, k_val);
+                        uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st[lane], RC_EXT_INIT[r * 12u + lane])), sbox_val);
+                        if (res != 0ul) {
+                            eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
+                        }
+                        st[lane] = sbox_val;
+                        c_idx += 1u;
+                        sb_idx += 1u;
+                    }
+                    apply_me_base(st);
+                }
+                for (uint r = 0u; r < 22u; ++r) {
+                    uint64_t sbox_val = col_base_at_k(12u + sb_idx, idx, half_m, k_val);
+                    uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st[0], RC_INT[r])), sbox_val);
+                    if (res != 0ul) {
+                        eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
+                    }
+                    st[0] = sbox_val;
+                    c_idx += 1u;
+                    sb_idx += 1u;
+                    apply_mi_base(st);
+                }
+                for (uint r = 0u; r < 4u; ++r) {
+                    for (uint lane = 0u; lane < 12u; ++lane) {
+                        uint64_t sbox_val = col_base_at_k(12u + sb_idx, idx, half_m, k_val);
+                        uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st[lane], RC_EXT_TERM[r * 12u + lane])), sbox_val);
+                        if (res != 0ul) {
+                            eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
+                        }
+                        st[lane] = sbox_val;
+                        c_idx += 1u;
+                        sb_idx += 1u;
+                    }
+                    apply_me_base(st);
+                }
+
+                // Write 12 base-field `perm_out` words to `b4` for `k_slot - 1` (`0..7`):
+                uint perm_off = ((k_slot - 1u) * half_m + idx) * 12u;
+                for (uint i = 0u; i < 12u; ++i) {
+                    b4.words[perm_off + i] = st[i];
+                }
+
+                if (rf_k != 0ul || rl_k != 0ul) {
+                    for (uint j = 0u; j < 44u; ++j) {
+                        if (rf_k != 0ul) {
+                            uint64_t pv = col_base_at_k(130u + j, idx, half_m, k_val);
+                            uint64_t res = fp_mul(rf_k, pv);
+                            if (res != 0ul) {
+                                eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
+                            }
+                        }
+                        c_idx += 1u;
+                        if (rl_k != 0ul) {
+                            uint64_t nv = col_base_at_k(174u + j, idx, half_m, k_val);
+                            uint64_t res = fp_mul(rl_k, nv);
+                            if (res != 0ul) {
+                                eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
+                            }
+                        }
+                        c_idx += 1u;
+                    }
+                }
+                total = fp4_add(fp4_mul(cur_eq, eq_acc), shift_part);
+            }
+        }
+
+        u64vec4 sum = wg_reduce_64(lid, total);
+        if (lid == 0u && k_slot < 8u) {
+            store4_b5(pc.out_off + k_slot * gl_NumWorkGroups.x + wg_x, sum);
+        }
+        return;
+    }
+
+    if (pc.mode == 2u) {
+        // Rounds >= 1 `Ext4` Group A + boundaries + degree-2 shift bus (`wg_y = k_slot in 0..8`).
+        uint half_m = pc.cur_m >> 1u;
+        uint idx = pc.base_x + gl_GlobalInvocationID.x;
+        uint k_slot = wg_y;
+        uint k_val = (k_slot == 0u) ? 0u : (k_slot + 1u);
+        bool folding_signer = (pc.flags & 1u) != 0u;
+
+        u64vec4 total = u64vec4(0ul);
+        if (idx < half_m && k_slot < 8u) {
+            uint sh_base = pc.sh_src;
+            u64vec4 eq0 = load4_b2(sh_base + idx);
+            u64vec4 eq1 = load4_b2(sh_base + idx + half_m);
+            u64vec4 nl0 = load4_b2(sh_base + pc.cur_m + idx);
+            u64vec4 nl1 = load4_b2(sh_base + pc.cur_m + idx + half_m);
+            u64vec4 sh0 = load4_b2(sh_base + 2u * pc.cur_m + idx);
+            u64vec4 sh1 = load4_b2(sh_base + 2u * pc.cur_m + idx + half_m);
+
+            u64vec4 cur_eq = interp_ext4(eq0, eq1, k_val);
+            u64vec4 cur_nl = interp_ext4(nl0, nl1, k_val);
+            u64vec4 cur_sh = interp_ext4(sh0, sh1, k_val);
+
+            u64vec4 cur_a = u64vec4(0ul);
+            u64vec4 cur_b = u64vec4(0ul);
+            for (uint j = 0u; j < 44u; ++j) {
+                u64vec4 g_sh = load4_b3(206u + j);
+                u64vec4 p_v = col_ext4_at_k(130u + j, idx, half_m, k_val);
+                u64vec4 n_v = col_ext4_at_k(174u + j, idx, half_m, k_val);
+                cur_a = fp4_add(cur_a, fp4_mul(g_sh, n_v));
+                cur_b = fp4_add(cur_b, fp4_mul(g_sh, p_v));
+            }
+            u64vec4 shift_part = fp4_sub(fp4_mul(cur_nl, cur_a), fp4_mul(cur_sh, cur_b));
+
+            u64vec4 rf_k;
+            u64vec4 rl_k;
+            if (folding_signer) {
+                uint loc = idx & (pc.cur_r - 1u);
+                uint so = pc.steps_off + loc * 3u;
+                rf_k = load4_b3(so);
+                rl_k = load4_b3(so + 1u);
+            } else {
+                uint half_r = pc.cur_r >> 1u;
+                uint so0 = pc.steps_off + idx * 3u;
+                uint so1 = pc.steps_off + (idx + half_r) * 3u;
+                rf_k = interp_ext4(load4_b3(so0), load4_b3(so1), k_val);
+                rl_k = interp_ext4(load4_b3(so0 + 1u), load4_b3(so1 + 1u), k_val);
+            }
+
+            u64vec4 st[12];
+            for (uint i = 0u; i < 12u; ++i) {
+                st[i] = col_ext4_at_k(i, idx, half_m, k_val);
+            }
+            apply_me_ext4(st);
+
+            u64vec4 eq_acc = u64vec4(0ul);
+            uint c_idx = 0u;
+            uint sb_idx = 0u;
+
+            for (uint r = 0u; r < 4u; ++r) {
+                for (uint lane = 0u; lane < 12u; ++lane) {
+                    u64vec4 sbox_val = col_ext4_at_k(12u + sb_idx, idx, half_m, k_val);
+                    u64vec4 st_rc = st[lane];
+                    st_rc.x = fp_add(st_rc.x, RC_EXT_INIT[r * 12u + lane]);
+                    u64vec4 res = fp4_sub(poseidon2_sbox7_ext4(st_rc), sbox_val);
+                    if (!is_zero4(res)) {
+                        eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
+                    }
+                    st[lane] = sbox_val;
+                    c_idx += 1u;
+                    sb_idx += 1u;
+                }
+                apply_me_ext4(st);
+            }
+            for (uint r = 0u; r < 22u; ++r) {
+                u64vec4 sbox_val = col_ext4_at_k(12u + sb_idx, idx, half_m, k_val);
+                u64vec4 st_rc = st[0];
+                st_rc.x = fp_add(st_rc.x, RC_INT[r]);
+                u64vec4 res = fp4_sub(poseidon2_sbox7_ext4(st_rc), sbox_val);
+                if (!is_zero4(res)) {
+                    eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
+                }
+                st[0] = sbox_val;
+                c_idx += 1u;
+                sb_idx += 1u;
+                apply_mi_ext4(st);
+            }
+            for (uint r = 0u; r < 4u; ++r) {
+                for (uint lane = 0u; lane < 12u; ++lane) {
+                    u64vec4 sbox_val = col_ext4_at_k(12u + sb_idx, idx, half_m, k_val);
+                    u64vec4 st_rc = st[lane];
+                    st_rc.x = fp_add(st_rc.x, RC_EXT_TERM[r * 12u + lane]);
+                    u64vec4 res = fp4_sub(poseidon2_sbox7_ext4(st_rc), sbox_val);
+                    if (!is_zero4(res)) {
+                        eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
+                    }
+                    st[lane] = sbox_val;
+                    c_idx += 1u;
+                    sb_idx += 1u;
+                }
+                apply_me_ext4(st);
+            }
+
+            // Write 12 `Ext4` `perm_out` values to `b4` for `k_slot` (`0..8`):
+            uint perm_off = (k_slot * half_m + idx) * 12u;
+            for (uint i = 0u; i < 12u; ++i) {
+                store4_b4(perm_off + i, st[i]);
+            }
+
+            bool rf_nz = !is_zero4(rf_k);
+            bool rl_nz = !is_zero4(rl_k);
+            if (rf_nz || rl_nz) {
+                for (uint j = 0u; j < 44u; ++j) {
+                    if (rf_nz) {
+                        u64vec4 pv = col_ext4_at_k(130u + j, idx, half_m, k_val);
+                        u64vec4 res = fp4_mul(rf_k, pv);
+                        if (!is_zero4(res)) {
+                            eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
+                        }
+                    }
+                    c_idx += 1u;
+                    if (rl_nz) {
+                        u64vec4 nv = col_ext4_at_k(174u + j, idx, half_m, k_val);
+                        u64vec4 res = fp4_mul(rl_k, nv);
+                        if (!is_zero4(res)) {
+                            eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
+                        }
+                    }
+                    c_idx += 1u;
+                }
+            }
+            total = fp4_add(fp4_mul(cur_eq, eq_acc), shift_part);
+        }
+
+        u64vec4 sum = wg_reduce_64(lid, total);
+        if (lid == 0u && k_slot < 8u) {
+            store4_b5(pc.out_off + k_slot * gl_NumWorkGroups.x + wg_x, sum);
+        }
+        return;
+    }
+
+    if (pc.mode == 3u) {
+        // Round-0 fold: base-field `cols_base` (`b0` at `col_src`) -> `cols_ext4` (`b1` at `col_dst`),
+        // `wg_y = col` (`0..256`), `idx < half = cur_m / 2`.
+        uint half_m = pc.cur_m >> 1u;
+        uint idx = pc.base_x + gl_GlobalInvocationID.x;
+        uint c = wg_y;
+        if (idx >= half_m || c >= 256u) {
+            return;
+        }
+        uint s_base = pc.col_src + c * pc.cur_m;
+        uint64_t r0 = fp_reduce_u64(b0.words[s_base + idx]);
+        uint64_t r1 = fp_reduce_u64(b0.words[s_base + idx + half_m]);
+        u64vec4 folded = fp4_add(u64vec4(r0, 0ul, 0ul, 0ul), fp4_mul_base(pc.chal, fp_sub(r1, r0)));
+        store4_b1(pc.col_dst + c * half_m + idx, folded);
+        return;
+    }
+
+    if (pc.mode == 4u) {
+        // Rounds >= 1 fold: `cols_ext4` (`b1` at `col_src`) -> `cols_ext4` (`b1` at `col_dst`),
+        // `wg_y = col` (`0..256`), `idx < half = cur_m / 2`.
+        uint half_m = pc.cur_m >> 1u;
+        uint idx = pc.base_x + gl_GlobalInvocationID.x;
+        uint c = wg_y;
+        if (idx >= half_m || c >= 256u) {
+            return;
+        }
+        uint s_base = pc.col_src + c * pc.cur_m;
+        u64vec4 r0 = load4_b1(s_base + idx);
+        u64vec4 r1 = load4_b1(s_base + idx + half_m);
+        u64vec4 folded = fp4_add(r0, fp4_mul(pc.chal, fp4_sub(r1, r0)));
+        store4_b1(pc.col_dst + c * half_m + idx, folded);
+        return;
+    }
+
+    if (pc.mode == 5u) {
+        // Fold the 3 shift tables `(eq_tau, eq_not_last, shift_tau)` (`wg_y in 0..3`):
+        //   `b2[sh_src + t * cur_m + idx]` -> `b2[out_off + t * half_m + idx]`.
+        uint half_m = pc.cur_m >> 1u;
+        uint idx = pc.base_x + gl_GlobalInvocationID.x;
+        uint t = wg_y;
+        if (idx >= half_m || t >= 3u) {
+            return;
+        }
+        uint s_base = pc.sh_src + t * pc.cur_m;
+        u64vec4 v0 = load4_b2(s_base + idx);
+        u64vec4 v1 = load4_b2(s_base + idx + half_m);
+        u64vec4 folded = fp4_add(v0, fp4_mul(pc.chal, fp4_sub(v1, v0)));
+        store4_b2(pc.out_off + t * half_m + idx, folded);
+        return;
+    }
+}

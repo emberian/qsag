@@ -141,30 +141,42 @@ impl<'a> ParallelSeededSignSession<'a> {
             return Err(ParallelSeededError::InvalidAuthenticationPath);
         }
         let count = share.epoch_uses[epoch as usize];
-        if count >= 1 {
-            return Err(ParallelSeededError::EpochUseBudgetExhausted);
+        let max_epochs = share.epoch_uses.len() as u32;
+        let mut epoch_guard =
+            qsag_verified::FtsEpochGuard::new_unused(pk.pk_seed_bytes, epoch, max_epochs);
+        if count > 0 {
+            let (consumed, _) = epoch_guard.consume_epoch_once(pk.pk_seed_bytes, epoch, [0u8; 32]);
+            epoch_guard = consumed;
+        }
+        let (next_guard, permit) = epoch_guard.consume_epoch_once(
+            pk.pk_seed_bytes,
+            epoch,
+            cshake256_framed_32(b"QSAG.FTS.EPOCH.MESSAGE.V1", &[msg]),
+        );
+        let (key, authorized_epoch, _) = permit
+            .map_err(|_| ParallelSeededError::EpochUseBudgetExhausted)?
+            .into_binding();
+        if key != pk.pk_seed_bytes || authorized_epoch != epoch {
+            return Err(ParallelSeededError::PersistenceFailed);
         }
         let needed = 2 * SPN_ROUNDS * (1 + pk.params.num_chains + pk.params.target_sum);
         if share.beaver_pool.len().saturating_sub(share.beaver_cursor) < needed {
             return Err(ParallelSeededError::BeaverPreprocessingExhausted);
         }
-        persistence.burn_epoch_before_sign(&pk.pk_seed_bytes, share.party_id, epoch, count + 1)?;
-        share.epoch_uses[epoch as usize] = count + 1;
-        let (_, permit) = qsag_verified::FtsEpochGuard::new_unused(
-            pk.pk_seed_bytes, epoch, share.epoch_uses.len() as u32,
-        ).consume_epoch_once(pk.pk_seed_bytes, epoch,
-            cshake256_framed_32(b"QSAG.FTS.EPOCH.MESSAGE.V1", &[msg]));
-        let (key, authorized_epoch, _) = permit
-            .map_err(|_| ParallelSeededError::EpochUseBudgetExhausted)?.into_binding();
-        if key != pk.pk_seed_bytes || authorized_epoch != epoch {
-            return Err(ParallelSeededError::PersistenceFailed);
-        }
-        let mut state = Self::new(share, request, Mode::Randomizer, count + 1);
+        let next_uses = next_guard.used();
+        persistence.burn_epoch_before_sign(
+            &pk.pk_seed_bytes,
+            share.party_id,
+            authorized_epoch,
+            next_uses,
+        )?;
+        share.epoch_uses[authorized_epoch as usize] = next_uses;
+        let mut state = Self::new(share, request, Mode::Randomizer, next_uses);
         let original = core::array::from_fn(|lane| AuthWire128 {
             val_sh: state.share.sk_prf_lanes[lane],
             mac: state.share.sk_prf_macs[lane],
         });
-        let tweak = derive_rand_tweak(&pk.pk_seed_bytes, epoch, count + 1, msg);
+        let tweak = derive_rand_tweak(&pk.pk_seed_bytes, authorized_epoch, next_uses, msg);
         state.jobs.push(Job {
             state: original.clone(),
             original,

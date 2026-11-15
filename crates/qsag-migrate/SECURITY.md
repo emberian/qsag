@@ -170,13 +170,39 @@ arithmetic wires use replicated additive shares in their native prime field
 (`Secp`, `Ed`, `Gold`). `share_uniform_lanes` reshares uniform 64-lane witness
 inputs across all repetitions.
 
-Conversions never open unmasked virtual values: a fresh uniform replicated field
-mask `R` is generated and decomposed into binary via a shared Boolean adder over
-its three separately owned components; B2A and A2B open **only** the masked
-difference `V - R` (in Boolean or prime-field form, respectively) **after**
-verifying all pending Boolean and prime-field multiplications. Auxiliary curve
-inverses are computed by shared Fermat exponentiation of the sum of the three
-virtual coordinate shares without opening any coordinate.
+Conversions never open unmasked virtual values. A2B still opens a difference
+masked by a uniform prime-field element. B2A instead samples each replicated
+mask component uniformly in `Z/(2^n)`, where `p = 2^n - c`. At most one corrupt
+custodian knows two components; the third makes their ring sum exactly uniform.
+Thus the only opened binary difference `delta = V - R mod 2^n` is exactly
+uniform, including for Goldilocks; this is not biased reduction of a field mask.
+
+For B2A, write the integer component sum as `S = R + k*2^n`. Two ring additions
+produce the two carry bits whose sum is `k`; subtraction produces the borrow
+bit `b`. The output field sharing is
+`S + delta - (k+b)*c mod p`. The three correction bits are converted by the
+existing actively checked bit-lifting gadget and remain secret. Raw components
+and public differences are canonicalized by one constant-time subtraction,
+since `2^n < 2p`. Boundary tests include components `p-1`, `p`, and `2^n-1`,
+both addition carries, and both subtraction-borrow cases across all 64 lanes.
+
+For A2B's component sum, two ring additions produce `R` and `k in {0,1,2}`.
+The low and high bits of `k` are mutually exclusive, so `k*c` is encoded with
+public XOR masks after one shared AND. A single modular addition yields the
+canonical result: `R + k*c < 2^n + 2c < 2p` for all three fields.
+
+Both directions verify **all** pending Boolean and prime-field multiplications
+before any masked difference opens. Automatic Boolean checks retain a partial
+chunk for the next batch; openings always check that remainder too. Auxiliary
+curve inverses multiply by a fresh shared field mask, authenticate that product,
+open the masked product, and scale the secret mask by its public inverse.
+For nonzero operands the opened product is uniform and independent of the
+operand. A zero product retries the mask, with an abort after three attempts;
+a zero operand therefore aborts and its zero status is revealed. The curve
+inversion gate requires a nonzero projective coordinate on valid witnesses.
+The active multiplication checks still run before the masked opening, so this
+is one multiplication plus one opening, not two total transport exchanges.
+Final ZKBoo shares and the proof format are unchanged; outer-MPC traffic changes.
 
 ### Mandatory active multiplication verification (`P0-01`)
 
@@ -210,7 +236,7 @@ is transmitted:
    Byte tables contain shares but are indexed only by public challenge masks;
    their storage is wiped with the rest of the verification scratch.
 3. **Prime-field multiplication verification (`< 2^-186` per flush):** Up to
-   `1,024` field words (`32,768 = 2^16` lane products) per flush are combined
+   `1,024` field words (`65,536 = 2^16` lane products) per flush are combined
    with independent uniform challenges and reduced by an Arity-2 logarithmic
    BBCGGI19 inner product plus a PRSS-masked base-case sacrifice with a non-zero
    challenge. The error numerator is `1 + 2*16 + 2 = 35`: the random linear
@@ -241,6 +267,15 @@ aborts immediately with
 opens.
 
 ### Witness-independent canonical tape sampling (`C0-5`)
+
+Native Goldilocks tape sampling scans three consecutive words and selects the
+first canonical candidate with masks. The word-aligned sponge scans fixed
+addresses and computes one next-state permutation regardless of its secret
+cursor. Masked cursor/state advancement consumes exactly the original rejection
+stream, including across rate boundaries and subsequent Boolean refills. Only
+three simultaneous rejections enter the fallback loop (probability less than
+2^-96 per independent uniform window). This is a source-level constant-work
+construction; it is not a claim of a compiler-level timing proof.
 
 Tape expansion first tries the fixed schedule (`QSAG.MIGRATE.TAPE.V3`),
 followed by an upfront batched range check (`less_than_modulus_many` and
@@ -321,7 +356,18 @@ Parallel transports may bound active repetition batches with
 `Transport::max_parallel_batches`; batches remain in ascending order and all
 438 repetitions still pass the same checks before opening. A completed batch
 releases and wipes evaluation scratch while retaining its authenticated engine
-for the opening rounds. The default transport limit permits all batches.
+for the opening rounds. The default transport limit permits all batches, subject to the local available
+parallelism cap (at most 16). Native proof repetitions and verifier replay use
+ordered scoped workers with the same cap when std is enabled; no-std remains
+serial. Tests allow seven live ceremony batches across custodians.
+
+The backend batch sponge hashes native party commitments and opened-view
+commitments in verification, including CoZK final verification through
+`prove_with_backend`. Secret shared commitments still use interactive Boolean
+permutations. An ordinary Keccak permutation on each share cannot substitute
+for those permutations, and unopened views are never reconstructed for GPU
+hashing. The optional `vulkan` tests require an actually supported backend and
+check that its CPU fallback counter does not increase.
 
 All 438 repetitions' view commitments and verified-zero output shares feed the
 ceremony-wide `QSAG.MIGRATE.ROOT.V3` Merkle/transcript root. Custodians execute

@@ -37,6 +37,6 @@ with tempfile.TemporaryDirectory(prefix='qsag-spirv-') as directory:
 if args.check:
     if re.sub(r'\s+', '', original) != re.sub(r'\s+', '', source):
         raise SystemExit('Embedded SPIR-V differs from shader regeneration')
-    print('All six embedded SPIR-V modules match glslangValidator 14.3.0 output')
+    print('All ten embedded SPIR-V modules match glslangValidator 14.3.0 output')
 else:
     path.write_text(source)

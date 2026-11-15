@@ -5,10 +5,10 @@
 //! though unlinking and recreating the budget journal on a new inode fails closed.
 use crate::HdError;
 use alloc::boxed::Box;
-use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::LockedRecord;
+use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -152,25 +152,46 @@ fn compute_record_bytes(
 
 impl DurableQueryBudget {
     pub fn checkpoint(&self) -> LedgerCheckpoint {
-        LedgerCheckpoint { generation: self.used, tag: self.last_mac }
+        LedgerCheckpoint {
+            generation: self.used,
+            tag: self.last_mac,
+        }
     }
-    pub fn open_at_least(path: impl AsRef<Path>, family: [u8; 32], key: [u8; 32], minimum: LedgerCheckpoint) -> Result<Self, HdError> {
+    pub fn open_at_least(
+        path: impl AsRef<Path>,
+        family: [u8; 32],
+        key: [u8; 32],
+        minimum: LedgerCheckpoint,
+    ) -> Result<Self, HdError> {
         let journal = Self::open(path, family, key)?;
         let current = journal.checkpoint();
-        if current.generation < minimum.generation ||
-            (current.generation == minimum.generation && current.tag != minimum.tag) {
+        if current.generation < minimum.generation
+            || (current.generation == minimum.generation && current.tag != minimum.tag)
+        {
             return Err(HdError::BudgetStorageFailed);
         }
         Ok(journal)
     }
-    pub fn create_anchored(path: impl AsRef<Path>, family: [u8; 32], key: [u8; 32], anchor: Box<dyn ExternalMonotoneAnchor>) -> Result<Self, HdError> {
-        if storage(anchor.load())?.is_some() { return Err(HdError::BudgetStorageFailed); }
+    pub fn create_anchored(
+        path: impl AsRef<Path>,
+        family: [u8; 32],
+        key: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> Result<Self, HdError> {
+        if storage(anchor.load())?.is_some() {
+            return Err(HdError::BudgetStorageFailed);
+        }
         let mut journal = Self::create(path, family, key)?;
         storage(anchor.advance(journal.checkpoint()))?;
         journal.anchor = Some(anchor);
         Ok(journal)
     }
-    pub fn open_anchored(path: impl AsRef<Path>, family: [u8; 32], key: [u8; 32], anchor: Box<dyn ExternalMonotoneAnchor>) -> Result<Self, HdError> {
+    pub fn open_anchored(
+        path: impl AsRef<Path>,
+        family: [u8; 32],
+        key: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> Result<Self, HdError> {
         let minimum = storage(anchor.load())?.ok_or(HdError::BudgetStorageFailed)?;
         let mut journal = Self::open_at_least(path, family, key, minimum)?;
         storage(anchor.advance(journal.checkpoint()))?;
@@ -399,16 +420,31 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn retained_checkpoint_rejects_same_inode_tail_truncation() {
-        let path = std::env::temp_dir().join(alloc::format!("retained-tail-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path = std::env::temp_dir().join(alloc::format!(
+            "retained-tail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let mut journal = DurableQueryBudget::create(&path, [1; 32], [2; 32]).unwrap();
         journal.reserve().unwrap();
         let checkpoint = journal.checkpoint();
         drop(journal);
-        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(FILE_PREFIX_BYTES as u64).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(FILE_PREFIX_BYTES as u64)
+            .unwrap();
         assert!(DurableQueryBudget::open_at_least(&path, [1; 32], [2; 32], checkpoint).is_err());
         std::fs::remove_file(&path).unwrap();
-        std::fs::remove_file(path.with_file_name(alloc::format!("{}.lock", path.file_name().unwrap().to_str().unwrap()))).unwrap();
+        std::fs::remove_file(path.with_file_name(alloc::format!(
+            "{}.lock",
+            path.file_name().unwrap().to_str().unwrap()
+        )))
+        .unwrap();
     }
 
     #[test]

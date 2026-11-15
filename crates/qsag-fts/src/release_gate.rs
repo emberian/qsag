@@ -13,13 +13,13 @@
 //! exists leaves nothing behind. [`QuorumGate`] takes that buffer by move and holds
 //! one [`OutputGate`] per party; nothing is released until every party's residual
 //! has been accepted.
-use alloc::vec::Vec;
 use alloc::boxed::Box;
-use qsag_verified::{ConsumingOpeningGuard2Lane, OpeningReleasePermit};
+use alloc::vec::Vec;
 use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u128s};
 use qsag_verified::fts_spn_guard::{
     FtsDeferredMacSession, WOTS_CS_BASE_W, WOTS_CS_CHAINS, WOTS_CS_TARGET_SUM,
 };
+use qsag_verified::{ConsumingOpeningGuard2Lane, OpeningReleasePermit};
 
 use crate::parallel_mpc::{ParallelSeededError, ParallelSeededParams};
 
@@ -162,7 +162,9 @@ fn candidate_binding(values: &[u128]) -> [u8; 32] {
     let mut sponge = qsag_accel::keccak::Shake256::new();
     sponge.absorb(b"QSAG.FTS.CANDIDATE_BINDING.V1");
     sponge.absorb(&(values.len() as u64).to_be_bytes());
-    for value in values { sponge.absorb(&value.to_le_bytes()); }
+    for value in values {
+        sponge.absorb(&value.to_le_bytes());
+    }
     sponge.finalize(0x1f);
     let mut digest = [0; 32];
     sponge.squeeze(&mut digest);
@@ -197,9 +199,15 @@ impl OutputGate {
         } else {
             let binding = candidate_binding(&values);
             Held::Bound {
-                guard: Some(Box::new(ConsumingOpeningGuard2Lane::new(session, 0, binding,
-                    u64::from(spn_rounds == 48 && !values.is_empty())))),
-                values, binding, permit: None,
+                guard: Some(Box::new(ConsumingOpeningGuard2Lane::new(
+                    session,
+                    0,
+                    binding,
+                    u64::from(spn_rounds == 48 && !values.is_empty()),
+                ))),
+                values,
+                binding,
+                permit: None,
             }
         };
         Self { session, held }
@@ -217,7 +225,12 @@ impl OutputGate {
                 }
                 core::hint::black_box(sessions);
             }
-            Held::Bound { values, guard, permit, .. } => {
+            Held::Bound {
+                values,
+                guard,
+                permit,
+                ..
+            } => {
                 ct_zeroize_u128s(values);
                 values.clear();
                 *guard = None;
@@ -240,13 +253,21 @@ impl OutputGate {
                 }
                 accepted
             }
-            Held::Bound { values, binding, guard, permit } => {
+            Held::Bound {
+                values,
+                binding,
+                guard,
+                permit,
+            } => {
                 if let Some(gate) = guard.take() {
-                    let gate = (*gate).absorb_opening(binding, &candidate_binding(values), residual);
+                    let gate =
+                        (*gate).absorb_opening(binding, &candidate_binding(values), residual);
                     let (_, granted) = gate.verify_once(&request, 0, binding);
                     *permit = granted;
                     permit.is_some()
-                } else { false }
+                } else {
+                    false
+                }
             }
         };
         if !accepted {
@@ -279,14 +300,22 @@ impl OutputGate {
                     None
                 }
             }
-            Held::Bound { values, binding, permit, .. } => {
-                match permit.take() {
-                    Some(grant) if grant.session_id() == request && grant.round_id() == 0
-                        && grant.openings() == 1 && candidate_binding(values) == *binding =>
-                        Some(core::mem::take(values)),
-                    _ => None,
+            Held::Bound {
+                values,
+                binding,
+                permit,
+                ..
+            } => match permit.take() {
+                Some(grant)
+                    if grant.session_id() == request
+                        && grant.round_id() == 0
+                        && grant.openings() == 1
+                        && candidate_binding(values) == *binding =>
+                {
+                    Some(core::mem::take(values))
                 }
-            }
+                _ => None,
+            },
         };
         match released {
             Some(values) => Ok(values),

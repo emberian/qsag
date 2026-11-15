@@ -15,6 +15,11 @@ use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_is_canonical};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_accel::poseidon2::poseidon2_hash_framed_limbs4;
+pub use qsag_verified::{
+    CanonicalIntent128, HybridRoleTag, INTENT_V1_MAGIC, IntentAddressVersion, IntentIdentityKind,
+    IntentSuiteTag, check_hybrid_domain_framing, decode_intent_128,
+    derive_hybrid_transcript_digest, encode_intent_128,
+};
 
 pub use bech32m::{
     AddrError, BECH32_LEGACY_CONST, BECH32M_CONST, HybridComponent, bech32_hrp_expand,
@@ -294,7 +299,7 @@ impl QsagAddress {
 fn validate_commitment(version: AddressVersion, commitment: &[u8; 32]) -> Result<(), AddrError> {
     if version == AddressVersion::V2Poseidon2 {
         for chunk in commitment.chunks_exact(8) {
-            let limb = u64::from_le_bytes(chunk.try_into().unwrap());
+            let limb = u64::from_le_bytes(core::array::from_fn(|i| chunk[i]));
             if !gl_is_canonical(limb) {
                 return Err(AddrError::NonCanonicalPoseidonLimb);
             }
@@ -385,6 +390,17 @@ impl HybridComponentAlgorithm {
 pub enum HybridRole {
     Classical = 0x01,
     PostQuantum = 0x02,
+}
+
+impl HybridRole {
+    /// Convert into the MIR-verified `qsag_verified::HybridRoleTag` domain separator.
+    #[inline]
+    pub const fn to_verified_tag(self) -> HybridRoleTag {
+        match self {
+            Self::Classical => HybridRoleTag::Classical,
+            Self::PostQuantum => HybridRoleTag::PostQuantum,
+        }
+    }
 }
 
 /// The classical and post-quantum algorithms fixed by a hybrid [`WitnessSuiteTag`].
@@ -683,11 +699,57 @@ impl HybridPinnedEnvelope {
         let commitments_ok = ct_eq_bytes(&classical_digest, &self.pk_classical_digest)
             & ct_eq_bytes(&pq_digest, &self.pk_pq_digest)
             & ct_eq_bytes(&id_commit, &self.id_commit)
-            & ct_eq_bytes(&id_commit, expected_id_commit);
+            & ct_eq_bytes(&id_commit, expected_id_commit)
+            & check_hybrid_domain_framing(
+                HYBRID_PINNED_MAGIC,
+                HybridRole::Classical as u8,
+                HybridRoleTag::Classical,
+                self.suite_tag as u16,
+                expected_id_commit,
+                &self.id_commit,
+            )
+            & check_hybrid_domain_framing(
+                HYBRID_PINNED_MAGIC,
+                HybridRole::PostQuantum as u8,
+                HybridRoleTag::PostQuantum,
+                self.suite_tag as u16,
+                expected_id_commit,
+                &self.id_commit,
+            );
         if !commitments_ok {
             return Err(AddrError::HybridCommitmentMismatch);
         }
         Ok(spec)
+    }
+
+    /// Derive the role-separated 32-byte `SHAKE256` signing transcript digest via the
+    /// MIR-verified `qsag_verified::derive_hybrid_transcript_digest` kernel after checking
+    /// `check_hybrid_domain_framing`.
+    pub fn signing_transcript_digest(
+        &self,
+        role: HybridRole,
+        msg: &[u8],
+    ) -> Result<[u8; 32], AddrError> {
+        self.validate_structure(&self.id_commit)?;
+        if !check_hybrid_domain_framing(
+            HYBRID_PINNED_MAGIC,
+            role as u8,
+            role.to_verified_tag(),
+            self.suite_tag as u16,
+            &self.id_commit,
+            &self.id_commit,
+        ) {
+            return Err(AddrError::HybridCommitmentMismatch);
+        }
+        derive_hybrid_transcript_digest(
+            role.to_verified_tag(),
+            self.suite_tag as u16,
+            &self.id_commit,
+            &self.pk_classical_digest,
+            &self.pk_pq_digest,
+            msg,
+        )
+        .ok_or(AddrError::HybridUnsupportedSuite(self.suite_tag as u16))
     }
 
     /// Conjunctive verification. [`Self::validate_structure`] must pass before either callback
@@ -722,28 +784,67 @@ impl HybridPinnedEnvelope {
         VC: FnOnce(&[u8], &[u8], &[u8]) -> bool,
         VP: FnOnce(&[u8], &[u8], &[u8]) -> bool,
     {
-        let transcript = |role| {
-            Self::signing_transcript(
-                role,
-                spec,
+        let verify_transcript_framing = |role: HybridRole, transcript: &[u8]| -> bool {
+            let Some(magic14) = transcript
+                .get(..14)
+                .and_then(|s| <[u8; 14]>::try_from(s).ok())
+            else {
+                return false;
+            };
+            let Some(&wire_role) = transcript.get(14) else {
+                return false;
+            };
+            let Some(wire_id) = transcript
+                .get(21..53)
+                .and_then(|s| <[u8; 32]>::try_from(s).ok())
+            else {
+                return false;
+            };
+            check_hybrid_domain_framing(
+                &magic14,
+                wire_role,
+                role.to_verified_tag(),
+                spec.suite_tag as u16,
+                &self.id_commit,
+                &wire_id,
+            ) && derive_hybrid_transcript_digest(
+                role.to_verified_tag(),
+                spec.suite_tag as u16,
                 &self.id_commit,
                 &self.pk_classical_digest,
                 &self.pk_pq_digest,
                 msg,
             )
+            .is_some_and(|d| ct_eq_bytes(&d, &qsag_verified::shake256_32(transcript)))
         };
-        if !verify_classical(
-            &self.pk_classical,
-            &transcript(HybridRole::Classical),
-            &self.sig_classical,
-        ) {
+        let classical_transcript = Self::signing_transcript(
+            HybridRole::Classical,
+            spec,
+            &self.id_commit,
+            &self.pk_classical_digest,
+            &self.pk_pq_digest,
+            msg,
+        );
+        if !verify_transcript_framing(HybridRole::Classical, &classical_transcript)
+            || !verify_classical(
+                &self.pk_classical,
+                &classical_transcript,
+                &self.sig_classical,
+            )
+        {
             return Err(AddrError::HybridVerificationFailed);
         }
-        if !verify_pq(
-            &self.pk_pq,
-            &transcript(HybridRole::PostQuantum),
-            &self.sig_pq,
-        ) {
+        let pq_transcript = Self::signing_transcript(
+            HybridRole::PostQuantum,
+            spec,
+            &self.id_commit,
+            &self.pk_classical_digest,
+            &self.pk_pq_digest,
+            msg,
+        );
+        if !verify_transcript_framing(HybridRole::PostQuantum, &pq_transcript)
+            || !verify_pq(&self.pk_pq, &pq_transcript, &self.sig_pq)
+        {
             return Err(AddrError::HybridVerificationFailed);
         }
         Ok(())
@@ -904,7 +1005,7 @@ impl HybridPinnedEnvelope {
         let read_component = |cursor: &mut usize,
                               expected_len: usize,
                               component: HybridComponent|
-         -> Result<Vec<u8>, AddrError> {
+         -> Result<&[u8], AddrError> {
             let hdr = bytes
                 .get(*cursor..*cursor + 4)
                 .ok_or(AddrError::InvalidEnvelopeWireFormat)?;
@@ -918,7 +1019,7 @@ impl HybridPinnedEnvelope {
             }
             let slice = &bytes[*cursor..*cursor + declared_len];
             *cursor += declared_len;
-            Ok(slice.to_vec())
+            Ok(slice)
         };
 
         let pk_classical = read_component(
@@ -953,10 +1054,10 @@ impl HybridPinnedEnvelope {
             id_commit,
             pk_classical_digest,
             pk_pq_digest,
-            pk_classical,
-            pk_pq,
-            sig_classical,
-            sig_pq,
+            pk_classical: pk_classical.to_vec(),
+            pk_pq: pk_pq.to_vec(),
+            sig_classical: sig_classical.to_vec(),
+            sig_pq: sig_pq.to_vec(),
         };
         env.validate_structure(&env.id_commit)?;
         Ok(env)
@@ -1594,6 +1695,86 @@ mod tests {
                 HybridComponent::ClassicalSignature
             ))
         );
+    }
+
+    #[test]
+    fn verified_hybrid_transcript_digest_and_canonical_intent128_kats() {
+        for suite in [SECP_SUITE, WitnessSuiteTag::HybridEd25519MlDsa65] {
+            let msg = b"qsag-verified hybrid transcript byte-identity check";
+            let env = toy_envelope(suite, msg);
+            let spec = HybridSuiteSpec::for_suite(suite).unwrap();
+            for role in [HybridRole::Classical, HybridRole::PostQuantum] {
+                let raw = HybridPinnedEnvelope::signing_transcript(
+                    role,
+                    &spec,
+                    &env.id_commit,
+                    &env.pk_classical_digest,
+                    &env.pk_pq_digest,
+                    msg,
+                );
+                let digest = env.signing_transcript_digest(role, msg).unwrap();
+                assert_eq!(digest, qsag_verified::shake256_32(&raw));
+                assert!(check_hybrid_domain_framing(
+                    HYBRID_PINNED_MAGIC,
+                    role as u8,
+                    role.to_verified_tag(),
+                    suite as u16,
+                    &env.id_commit,
+                    &env.id_commit,
+                ));
+                let other_role = match role {
+                    HybridRole::Classical => HybridRoleTag::PostQuantum,
+                    HybridRole::PostQuantum => HybridRoleTag::Classical,
+                };
+                assert!(!check_hybrid_domain_framing(
+                    HYBRID_PINNED_MAGIC,
+                    role as u8,
+                    other_role,
+                    suite as u16,
+                    &env.id_commit,
+                    &env.id_commit,
+                ));
+            }
+            assert_ne!(
+                env.signing_transcript_digest(HybridRole::Classical, msg)
+                    .unwrap(),
+                env.signing_transcript_digest(HybridRole::PostQuantum, msg)
+                    .unwrap()
+            );
+        }
+
+        let intent = CanonicalIntent128 {
+            suite_tag: IntentSuiteTag::HybridEd25519MlDsa65,
+            address_version: IntentAddressVersion::V2,
+            identity_kind: IntentIdentityKind::PolicyBound,
+            chain_id: 0x0102_0304_0506_0708,
+            nonce: 42,
+            timestamp_secs: 1_735_689_600,
+            amount_units: 123_456_789_012_345_678_901u128,
+            rolling_window_spent: 987_654_321u128,
+            recipient_commitment: [0xAB; 32],
+            payload_digest: [0xCD; 32],
+        };
+        let wire128 = encode_intent_128(&intent);
+        assert_eq!(&wire128[0..4], &INTENT_V1_MAGIC.to_be_bytes());
+        let decoded = decode_intent_128(&wire128).expect("canonical 128-byte intent must decode");
+        assert_eq!(decoded.suite_tag, intent.suite_tag);
+        assert_eq!(decoded.address_version, intent.address_version);
+        assert_eq!(decoded.identity_kind, intent.identity_kind);
+        assert_eq!(decoded.chain_id, intent.chain_id);
+        assert_eq!(decoded.nonce, intent.nonce);
+        assert_eq!(decoded.timestamp_secs, intent.timestamp_secs);
+        assert_eq!(decoded.amount_units, intent.amount_units);
+        assert_eq!(decoded.rolling_window_spent, intent.rolling_window_spent);
+        assert_eq!(decoded.recipient_commitment, intent.recipient_commitment);
+        assert_eq!(decoded.payload_digest, intent.payload_digest);
+
+        let mut bad_magic = wire128;
+        bad_magic[0] ^= 0x01;
+        assert!(decode_intent_128(&bad_magic).is_none());
+        let mut bad_suite = wire128;
+        bad_suite[4] = 0xFF;
+        assert!(decode_intent_128(&bad_suite).is_none());
     }
 }
 

@@ -174,7 +174,9 @@ impl PolicySignerGuardShare {
             }
             None
         };
-        if nonce_floor.is_some() || session_floor.is_some() || nonce_cursor != 0
+        if nonce_floor.is_some()
+            || session_floor.is_some()
+            || nonce_cursor != 0
             || session_cursor != 0
             || nonces.windows(2).any(|w| w[0] >= w[1])
             || sessions.windows(2).any(|w| w[0] >= w[1])
@@ -228,16 +230,17 @@ impl PolicySignerGuardShare {
             || velocity_generation < self.velocity_generation
             || window < self.current_window_id
             || (window == self.current_window_id && spend < self.accumulated_window_spend)
-            || (window == self.current_window_id && self
-                .burned_intent_nonces
-                .iter()
-                .any(|n| !nonces.contains(n) && !nonce_floor.is_some_and(|f| *n <= f))
-            || nonce_floor < self.min_nonce_watermark
-            || session_floor < self.min_session_watermark
-            || self
-                .burned_sessions
-                .iter()
-                .any(|s| !sessions.contains(s) && !session_floor.is_some_and(|f| *s <= f)))
+            || (window == self.current_window_id
+                && self
+                    .burned_intent_nonces
+                    .iter()
+                    .any(|n| !nonces.contains(n) && !nonce_floor.is_some_and(|f| *n <= f))
+                || nonce_floor < self.min_nonce_watermark
+                || session_floor < self.min_session_watermark
+                || self
+                    .burned_sessions
+                    .iter()
+                    .any(|s| !sessions.contains(s) && !session_floor.is_some_and(|f| *s <= f)))
             || next < self.next_slot.get()
             || (self.poisoned && !poisoned)
             || (self.require_authenticated_initiator && !authenticated)
@@ -452,7 +455,8 @@ impl FsPolicyGenerationFence {
             record,
             key,
             generation,
-            failed: false,        })
+            failed: false,
+        })
     }
 
     pub const fn generation(&self) -> u64 {
@@ -622,7 +626,8 @@ impl SharedWindowSpendLedger {
                 return Err(PolicyGuardError::InvalidCheckpoint);
             }
             let floor = present.then_some(raw);
-            if floor.is_some() || values.windows(2).any(|w| w[0] >= w[1])
+            if floor.is_some()
+                || values.windows(2).any(|w| w[0] >= w[1])
                 || values.iter().any(|v| floor.is_some_and(|f| *v <= f))
             {
                 return Err(PolicyGuardError::InvalidCheckpoint);
@@ -646,10 +651,11 @@ impl SharedWindowSpendLedger {
         .into_iter()
         .zip(&sets)
         {
-            if window == self.current_window_id && (*floor < old_floor
-                || old
-                    .iter()
-                    .any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f)))
+            if window == self.current_window_id
+                && (*floor < old_floor
+                    || old
+                        .iter()
+                        .any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f)))
             {
                 return Err(PolicyGuardError::Rollback);
             }
@@ -726,7 +732,11 @@ mod tests {
         // The verified guard came back with the snapshot's cap, spend and request nonce.
         let verified = restarted[0].verified_velocity.as_ref().unwrap();
         assert_eq!(
-            (verified.cap_units(), verified.spent_units(), verified.last_nonce()),
+            (
+                verified.cap_units(),
+                verified.spent_units(),
+                verified.last_nonce()
+            ),
             (100, 4, 1)
         );
         // It still enforces that cap: 97 more would exceed 100 and changes nothing.
@@ -740,7 +750,11 @@ mod tests {
             .record_approved_intent(100, 100, [7; 32], [8; 32])
             .unwrap();
         assert_eq!(
-            restarted[0].verified_velocity.as_ref().unwrap().last_nonce(),
+            restarted[0]
+                .verified_velocity
+                .as_ref()
+                .unwrap()
+                .last_nonce(),
             2
         );
         drop(disk);

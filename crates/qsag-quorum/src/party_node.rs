@@ -741,6 +741,23 @@ struct GateRecord {
 }
 
 impl GateRecord {
+    // Retain previous gates until their barrier, wiping the old allocation on growth.
+    fn reserve(&mut self, additional: usize) -> Result<(), NodeError> {
+        for words in [
+            &mut self.a_mine, &mut self.b_mine, &mut self.a_next,
+            &mut self.b_next, &mut self.pad_mine, &mut self.pad_next, &mut self.received,
+        ] {
+            let needed = words.len().checked_add(additional).ok_or(NodeError::Poisoned)?;
+            if needed > words.capacity() {
+                let mut next = Vec::new();
+                next.try_reserve_exact(needed).map_err(|_| NodeError::Poisoned)?;
+                next.extend_from_slice(words);
+                qsag_asm::volatile_fill(words, 0);
+                *words = next;
+            }
+        }
+        Ok(())
+    }
     fn wipe(&mut self) {
         for v in [
             &mut self.a_mine,
@@ -751,8 +768,8 @@ impl GateRecord {
             &mut self.pad_next,
             &mut self.received,
         ] {
-            v.fill(0);
-            core::hint::black_box(v.as_mut_slice());
+            qsag_asm::volatile_fill(&mut v[..], 0);
+
             v.clear();
         }
     }
@@ -800,14 +817,14 @@ impl<T: WireTransport, J: PoisonJournal> Drop for IsolatedRss256Party<T, J> {
     fn drop(&mut self) {
         self.record.wipe();
         for state in &mut self.states {
-            state.mine.fill(0);
-            state.next.fill(0);
-            core::hint::black_box(&mut state.mine);
-            core::hint::black_box(&mut state.next);
+            qsag_asm::volatile_fill(&mut state.mine[..], 0);
+            qsag_asm::volatile_fill(&mut state.next[..], 0);
+
+
         }
         for key in self.slot_keys.iter_mut().chain(&mut self.mac_keys) {
-            key.fill(0);
-            core::hint::black_box(key);
+            qsag_asm::volatile_fill(&mut key[..], 0);
+
         }
     }
 }
@@ -977,19 +994,20 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         let mut pad_next = Shake256Prg256::new(&self.slot_keys[1], &self.session_id, domain);
         let (succ, pred) = (self.succ(), self.pred());
         self.unverified = true;
+        self.record.reserve(n.checked_mul(25 * 24).ok_or(NodeError::Poisoned)?)?;
         struct ZeroizingWords(Vec<u64>);
         impl Drop for ZeroizingWords {
             fn drop(&mut self) {
-                self.0.fill(0);
-                core::hint::black_box(self.0.as_mut_slice());
+                qsag_asm::volatile_fill(&mut self.0[..], 0);
+
             }
         }
         struct ZeroizingStateBuf(Vec<[u64; 25]>);
         impl Drop for ZeroizingStateBuf {
             fn drop(&mut self) {
                 for st in &mut self.0 {
-                    st.fill(0);
-                    core::hint::black_box(st);
+                    qsag_asm::volatile_fill(&mut st[..], 0);
+
                 }
             }
         }
@@ -1501,10 +1519,10 @@ impl core::fmt::Debug for SharePair {
 }
 impl Drop for SharePair {
     fn drop(&mut self) {
-        self.mine.fill(0);
-        self.next.fill(0);
-        core::hint::black_box(&mut self.mine);
-        core::hint::black_box(&mut self.next);
+        qsag_asm::volatile_fill(&mut self.mine[..], 0);
+        qsag_asm::volatile_fill(&mut self.next[..], 0);
+
+
     }
 }
 impl core::fmt::Debug for Rss256PartyKeys {
@@ -1520,8 +1538,8 @@ impl Drop for Rss256PartyKeys {
             .chain(&mut self.mac_keys)
             .chain(core::iter::once(&mut self.rng_seed))
         {
-            key.fill(0);
-            core::hint::black_box(key);
+            qsag_asm::volatile_fill(&mut key[..], 0);
+
         }
     }
 }

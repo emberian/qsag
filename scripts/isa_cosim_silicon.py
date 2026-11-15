@@ -51,7 +51,7 @@ HARNESS = r'''
 #include <stdlib.h>
 
 void *alloc_mem(void) {
-  void *p = mmap(0,4096,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS|MAP_32BIT,-1,0);
+  void *p = mmap(0,32768,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS|MAP_32BIT,-1,0);
   return p == MAP_FAILED ? 0 : p;
 }
 int execute(const unsigned char *code, size_t len, unsigned max_steps,
@@ -302,9 +302,7 @@ def kernel_cases(path, selected=None):
     because the small-step model treats it as a function boundary, while
     callee-saved GPRs, RSP, and return-slot integrity are asserted separately.
     """
-    wanted = {'qsag_asm_goldilocks_mul_ct_x86_64', 'qsag_asm_transpose64x256_avx2',
-              'qsag_asm_gf2_128_mul_acc_pclmul', 'qsag_asm_gf2_128_mul_acc_vpclmul',
-              'qsag_asm_keccak_f1600_avx2_4x'}
+    wanted = {'qsag_asm_'+name for name in KERNEL_NAMES}
     if selected:
         if set(selected) - wanted:
             raise ValueError(f'unknown kernel selections: {set(selected)-wanted}')
@@ -632,6 +630,232 @@ def abi_teeth():
     assert any('dirty upper YMM0' in e for e in check_kernel_abi_obligations('ymm', g0, list(g0), ym_dirty, mem0, mem0))
 
 
+# Public assembly inventory: fixed-size calls have n=None (not a fictitious RCX count).
+KERNEL_NAMES = '''keccak_f1600_avx2_4x keccak_chi_mpc_avx2
+ gf256_shamir_mul_gfni gf256_shamir_mac_gfni gf256_shamir_mul_avx2 gf256_shamir_mac_avx2
+ tower128_bdoz_mac_vpclmul tower128_bdoz_mac_pclmul
+ goldilocks_mul_ct_x86_64 goldilocks_add_ct_x86_64 goldilocks_sub_ct_x86_64
+ goldilocks_pow7_ct_x86_64 goldilocks_dot2_adx_x86_64 ct_eq_32_x86_64
+ ct_eq_bytes_x86_64 ct_memzero_x86_64 transpose64x256_avx2
+ gf2_128_mul_acc_pclmul gf2_128_mul_acc_vpclmul'''.split()
+
+
+def count_stride(name):
+    if 'gf256_' in name or 'tower128_' in name or 'mul_acc_vpclmul' in name:
+        return 32
+    if 'mul_acc_pclmul' in name:
+        return 16
+    if 'ct_eq_bytes' in name or 'ct_memzero' in name:
+        return 1
+    return None
+
+
+def kernel_features(name):
+    required = set()
+    if any(s in name for s in ('avx2', 'gfni', 'pclmul')):
+        required.add('avx2')
+    if 'gfni' in name:
+        required.add('gfni')
+    if 'vpclmul' in name:
+        required.add('vpclmulqdq')
+    elif 'pclmul' in name:
+        required.add('pclmulqdq')
+    if 'goldilocks' in name and any(s in name for s in ('mul_ct', 'pow7', 'dot2')):
+        required.add('bmi2')
+    if 'dot2' in name:
+        required.add('adx')
+    return required
+
+
+# This calls the actual public Rust wrappers from the supplied fresh rlib. The
+# guard is not reimplemented in Python or copied into a replacement C function.
+WRAPPER_PROBE = r'''
+extern crate qsag_asm as q;
+fn main() {
+    let kind = std::env::args().nth(1).unwrap();
+    let backend = if kind.contains("gfni") || kind.contains("vpclmul") {
+        q::SimdBackend::X86Avx2GfniVpclmul
+    } else { q::SimdBackend::X86Avx2Pclmul };
+    let mut output = [0xa5u8; 96];
+    let before = output;
+    let zero = std::hint::black_box(0usize);
+    let input = [0x5au8; 96];
+    let pairs = [[0u128; 2]; 1];
+    let limbs = [[0u64; 2]; 1];
+    let mut acc = [0x123456789abcdef0u64, 0xfedcba9876543210];
+    let acc_before = acc;
+    if kind.contains("gf256_shamir_mul") {
+        q::gf256_shamir_mul_with_backend(&mut output[32..32+zero], &input[..zero], &input[..zero], backend);
+    } else if kind.contains("gf256_shamir_mac") {
+        q::gf256_shamir_mac_with_backend(&mut output[32..32+zero], &input[..zero], 0x97, backend);
+    } else if kind.contains("tower128") {
+        // This API returns a value; it has no caller output buffer to preserve.
+        assert_eq!(q::tower128_bdoz_2lane_poly_mac_with_backend(&pairs[..zero], &pairs[..zero], backend), [0, 0]);
+    } else if kind.contains("gf2_128") {
+        q::gf2_128_mul_acc_batch_with_backend(&mut acc, &limbs[..zero], &limbs[..zero], backend);
+    } else if kind.contains("ct_eq_bytes") {
+        assert!(q::ct_eq_bytes(&output[32..32+zero], &output[64..64+zero]));
+    } else if kind.contains("ct_memzero") {
+        q::ct_memzero(&mut output[32..32+zero]);
+    } else { panic!("unknown wrapper"); }
+    assert_eq!(output, before);
+    assert_eq!(acc, acc_before);
+}
+'''
+
+
+def zero_evidence(name, rows):
+    """Fail closed if the fresh disassembly no longer has the audited loop form.
+
+    All current count-taking symbols have straight-line setup followed by a
+    bottom-tested decrement/JNE loop. No forward branch can bypass its first
+    iteration. A future guarded symbol must be classified explicitly here.
+    """
+    branches = [(i, r) for i, r in enumerate(rows) if conditional(r[1]) or r[1] == 'jmp']
+    if not branches:
+        raise ValueError('count-taking symbol has no recognizable loop')
+    evidence = []
+    for i, (address, op, operand) in branches:
+        target = int(operand.split()[0], 16)
+        previous = rows[i-1]
+        if op not in ('jne', 'jnz') or target >= address or previous[1:] != ('dec', 'rcx'):
+            raise ValueError('unclassified zero-count control flow; review fresh disassembly')
+        evidence.append(dict(branch_offset=address-rows[0][0], mnemonic=op,
+                             target_offset=target-rows[0][0], counter='rcx'))
+    return dict(level='rust-wrapper', symbol_guard=False, bottom_tested_loops=evidence)
+
+
+def value_differences(expected, actual):
+    differences = []
+    for field in ('gprs', 'ymms', 'pc_trace'):
+        a, e = actual[field], expected[field]
+        for i in range(max(len(a), len(e))):
+            av, ev = (a[i] if i < len(a) else None), (e[i] if i < len(e) else None)
+            if av != ev:
+                differences.append(dict(field=field, index=i, silicon=av, lean=ev))
+    for i, (a, e) in enumerate(zip(bytes.fromhex(actual['stack_mem']), bytes.fromhex(expected['stack_mem']))):
+        if a != e:
+            differences.append(dict(field='memory', offset=i, silicon=f'{a:02x}', lean=f'{e:02x}'))
+    for field in ('steps', 'final_pc'):
+        if actual[field] != expected[field]:
+            differences.append(dict(field=field, silicon=actual[field], lean=expected[field]))
+    mask = int(expected['modeled_rflags_mask'], 16)
+    if (int(actual['rflags'], 16) ^ int(expected['rflags'], 16)) & mask:
+        differences.append(dict(field='rflags', mask=f'{mask:016x}', silicon=actual['rflags'], lean=expected['rflags']))
+    return differences
+
+
+def run_kernel_matrix(args, lib, base, oracle, directory, flags):
+    kernels = kernel_cases(args.kernel_elf, args.kernel_symbol)
+    disassembly = dict(disassemble_artifact(args.kernel_elf))
+    rlib = args.wrapper_rlib or args.kernel_elf
+    rust = directory/'wrapper.rs'
+    rust.write_text(WRAPPER_PROBE)
+    wrapper = directory/'wrapper-probe'
+    wrapper_error = None
+    if any(count_stride(name) for name, _, _ in kernels):
+        try:
+            subprocess.run(['rustc', '--edition=2024', str(rust), '--extern',
+                            f'qsag_asm={rlib.resolve()}', '-L',
+                            f'dependency={rlib.resolve().parent / "deps"}', '-o', str(wrapper)],
+                           check=True, capture_output=True, timeout=60)
+        except subprocess.SubprocessError:
+            wrapper_error = 'could not compile wrapper probe; supply the matching native qsag-asm rlib with --wrapper-rlib'
+    rng = random.Random(args.seed)
+    results = []
+    for full_name, code, _ in kernels:
+        name = full_name.split('/', 1)[1]
+        stride = count_stride(name)
+        counts = (0, 1, 2, 3, 4096//stride+1) if stride else (None,)
+        try:
+            zero = zero_evidence(name, disassembly[name]) if stride else dict(level='fixed-size', symbol_guard=None)
+        except ValueError as exc:
+            zero = dict(level='unclassified', reason=str(exc))
+        for n in counts:
+            row = dict(kernel=name, n=n, count_unit_bytes=stride, status='pass',
+                       level='symbol', rounds=[], zero_count=zero,
+                       code_sha256=hashlib.sha256(code+b'\xc3').hexdigest())
+            try:
+                if n == 0:
+                    if zero['level'] == 'unclassified':
+                        raise ValueError(zero['reason'])
+                    row['level'] = 'rust-wrapper'
+                    if wrapper_error:
+                        raise RuntimeError(wrapper_error)
+                    subprocess.run([str(wrapper), name], check=True, capture_output=True, timeout=20)
+                    row['reason'] = ('wrapper returns zero accumulator; API has no output-buffer argument'
+                                     if 'tower128' in name else 'wrapper early return preserves output and canaries')
+                elif kernel_features(name) - set(flags):
+                    row.update(status='skipped', reason='CPU missing '+', '.join(sorted(kernel_features(name)-set(flags))))
+                else:
+                    for round_index in range(args.kernel_rounds):
+                        # Keep fixed/small calls in one page; larger slice data live
+                        # after the dedicated first-page stack, in disjoint 8 KiB slots.
+                        large = stride is not None and n * stride > 512
+                        memory = rng.randbytes(32768 if large else 4096)
+                        g = [rng.getrandbits(64) for _ in range(16)]
+                        g[4] = base+3968
+                        dst, src, rhs, aux = (4096, 12288, 20480, 28672) if large else (0, 1024, 1536, 1792)
+                        row['memory_layout'] = dict(bytes=len(memory), stack_pointer_offset=3968,
+                                                    dst_offset=dst, src_offset=src, rhs_offset=rhs, auxiliary_offset=aux)
+                        g[7], g[6], g[2], g[1], g[8] = base+dst, base+src, base+rhs, n or 0, base+aux
+                        if 'goldilocks' in name:
+                            for reg in (7, 6, 2, 1):
+                                g[reg] = rng.getrandbits(64)
+                        elif 'ct_eq_bytes' in name:
+                            g[2] = n
+                        elif 'ct_memzero' in name:
+                            g[6] = n
+                        elif 'shamir_mac' in name:
+                            g[2] = rng.randrange(256)
+                        elif 'keccak_chi' in name:
+                            g[1] = base+aux
+                        # Include equal and unequal equality inputs across rounds.
+                        if 'ct_eq_' in name and round_index % 2 == 0:
+                            length = n if stride else 32
+                            memory = bytearray(memory)
+                            memory[src:src+length] = memory[dst:dst+length]
+                            memory = bytes(memory)
+                        ys = [rng.getrandbits(128) for _ in range(16)]
+                        f = 0x202 | (rng.getrandbits(12) & 0x8d5)
+                        case = dict(insn_bytes_or_kernel=code.hex(), initial_gprs=[f'{v:016x}' for v in g],
+                                    initial_ymms=[f'{v:064x}' for v in ys], initial_rflags=f'{f:016x}',
+                                    stack_base=f'{base:016x}', stack_mem=memory.hex())
+                        oracle.stdin.write(json.dumps(case)+'\n'); oracle.stdin.flush()
+                        line = oracle.stdout.readline()
+                        if not line:
+                            raise RuntimeError('oracle exited')
+                        expected = json.loads(line)
+                        if 'error' in expected:
+                            raise RuntimeError('oracle: '+expected['error'])
+                        ctypes.memmove(base, memory, len(memory))
+                        gs = (ctypes.c_uint64*16)(*g)
+                        ym = (ctypes.c_ubyte*512).from_buffer_copy(b''.join(v.to_bytes(32,'little') for v in ys))
+                        fs, steps, pc = ctypes.c_uint64(f), ctypes.c_uint(0), ctypes.c_uint64(0)
+                        trace = (ctypes.c_uint64*100000)()
+                        status = lib.execute(code, len(code), 100000, gs, ym, ctypes.byref(fs),
+                                             trace, ctypes.byref(steps), ctypes.byref(pc))
+                        if status:
+                            raise RuntimeError(f'hardware runner error {status}')
+                        mem = ctypes.string_at(base, len(memory))
+                        actual = dict(steps=steps.value, final_pc=f'{pc.value:016x}',
+                                      pc_trace=[f'{trace[i]:016x}' for i in range(steps.value)],
+                                      gprs=[f'{v:016x}' for v in gs],
+                                      ymms=[f'{int.from_bytes(bytes(ym[j*32:j*32+32]), "little"):064x}' for j in range(16)],
+                                      rflags=f'{fs.value:016x}', stack_mem=mem.hex())
+                        diffs = value_differences(expected, actual)
+                        abi = check_kernel_abi_obligations(name, g, list(gs), ym, memory, mem)
+                        row['rounds'].append(dict(round=round_index, steps=steps.value, differences=diffs, abi_violations=abi))
+                        if diffs or abi:
+                            row['status'] = 'fail'
+            except (ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                # No absolute scratch/build paths in structured evidence.
+                row.update(status='fail', reason=str(exc).replace(str(directory), '<scratch>').replace(str(args.kernel_elf), '<archive>'))
+            results.append(row)
+            print(f'{name} n={n if n is not None else "fixed"} {row["status"]} [{row["level"]}] {row.get("reason", "")}', flush=True)
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--count', type=int, default=4096)
@@ -639,15 +863,22 @@ def main():
     parser.add_argument('--scalar-probes', action='store_true', help='compatibility: scalar coverage is now always enabled')
     parser.add_argument('--ct-only', action='store_true', help='run only the whole-artifact CT gate')
     parser.add_argument('--ct-artifact', type=Path, action='append', default=[], help='audit every executable symbol in release ELF/rlib (repeatable)')
-    parser.add_argument('--kernel-elf', type=Path, help='also compare five current kernel bodies before RET')
-    parser.add_argument('--kernel-symbol', action='append', help='explicit kernel subset; default requires all five')
+    parser.add_argument('--kernel-elf', type=Path, help='compare all 19 exported kernel bodies before RET')
+    parser.add_argument('--kernel-symbol', action='append', help='explicit kernel subset; default requires all 19')
+    parser.add_argument('--wrapper-rlib', type=Path, help='matching Rust archive for zero-count wrapper checks; defaults to --kernel-elf')
     parser.add_argument('--kernel-rounds', type=int, default=2)
     parser.add_argument('--oracle', type=Path, default=Path(__file__).resolve().parents[1] / 'lean/.lake/build/bin/isa-cosim')
+    parser.add_argument('--json-output', type=Path, help='structured run evidence (no hostname or build paths)')
+    parser.add_argument('--kernels-only', action='store_true', help='omit instruction probes, retain gate and ABI self-tests')
     args = parser.parse_args()
+    if args.kernels_only and not args.kernel_elf:
+        parser.error('--kernels-only requires --kernel-elf')
     started = time.monotonic()
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
         parser.error('requires physical Linux x86_64 execution')
     abi_teeth()
+    teeth = gate_teeth()
+    kernel_results = []
     if args.ct_only:
         whole_artifact_gate(args.ct_artifact)
         return 0
@@ -657,9 +888,7 @@ def main():
         parser.error('--kernel-rounds must be positive')
     flags = next(line.split(':', 1)[1].split() for line in Path('/proc/cpuinfo').read_text().splitlines()
                  if line.split(':', 1)[0].strip() == 'flags')
-    for required in ('avx2', 'pclmulqdq', 'bmi2', 'adx'):
-        if required not in flags:
-            parser.error(f'CPU missing {required}')
+    missing_probe_features = set() if args.kernels_only else {'avx2', 'pclmulqdq', 'bmi2', 'adx'} - set(flags)
     has_vpclmul256 = 'vpclmulqdq' in flags
     with tempfile.TemporaryDirectory(prefix='isa-cosim-') as directory:
         path = Path(directory)
@@ -684,7 +913,6 @@ def main():
                 2**63-1, 0x7fffffff, 0x80000000, 0xffffffff, 2**64-2]
         coverage = {}
         instructions_executed = 0
-        abi_checks = 0
         flag_checks = {name: 0 for name in ('CF', 'PF', 'AF', 'ZF', 'SF', 'OF')}
         flag_bits = dict(zip(flag_checks, (0, 2, 4, 6, 7, 11)))
         mismatches = []
@@ -708,14 +936,12 @@ def main():
                                            ('cmov32', bytes([0x0f, 0x40+cc, 0xc1])),
                                            ('setcc', bytes([0x0f, 0x90+cc, 0xc0]))):
                             scheduled.append((f'conditions/{kind}/{cc}/{status}', code, 1))
+                if args.kernels_only or missing_probe_features:
+                    scheduled = []
+                if missing_probe_features:
+                    print('instruction probes skipped: CPU missing '+', '.join(sorted(missing_probe_features)), flush=True)
                 if args.kernel_elf:
-                    k_syms = args.kernel_symbol
-                    if not has_vpclmul256 and k_syms is None:
-                        k_syms = ['qsag_asm_goldilocks_mul_ct_x86_64', 'qsag_asm_transpose64x256_avx2',
-                                  'qsag_asm_gf2_128_mul_acc_pclmul', 'qsag_asm_keccak_f1600_avx2_4x']
-                    elif not has_vpclmul256 and 'qsag_asm_gf2_128_mul_acc_vpclmul' in k_syms:
-                        raise RuntimeError('selected 256-bit VPCLMUL kernel requires CPUID vpclmulqdq; select supported kernels explicitly')
-                    scheduled += kernel_cases(args.kernel_elf, k_syms) * args.kernel_rounds
+                    kernel_results = run_kernel_matrix(args, lib, base, oracle, path, flags)
                 for i, (name, code, steps) in enumerate(scheduled):
                     g = [edge[(i//len(suite)+j) % len(edge)] if i < len(suite)*len(edge) else rng.getrandbits(64) for j in range(16)]
                     g[4], g[7] = base+2048, base
@@ -737,15 +963,6 @@ def main():
                         f = 0x202 | sum(((status >> k) & 1) << bit for k, bit in enumerate((0, 2, 4, 6, 7, 11)))
                     if name.startswith('regression/'):
                         _, _, g[0], g[1], f = next(row for row in RFLAGS_REGRESSIONS if name == f'regression/{row[0]}')
-                    if name.startswith('kernel/'):
-                        memory = rng.randbytes(4096)
-                        g[4] = base + 3968  # 16-byte aligned RSP with return-slot & red-zone canaries
-                        # System V AMD64 ABI entry: clean upper YMM[255:128], arbitrary caller XMM[127:0]
-                        ys = [rng.getrandbits(128) for _ in range(16)]
-                        if 'goldilocks' in name:
-                            g[7], g[6] = rng.getrandbits(64), rng.getrandbits(64)
-                        else:
-                            g[7], g[6], g[2], g[1] = base, base+1024, base+1536, 2
                     case = dict(insn_bytes_or_kernel=code.hex(), initial_gprs=[f'{v:016x}' for v in g],
                                 initial_ymms=[f'{v:064x}' for v in ys], initial_rflags=f'{f:016x}',
                                 stack_base=f'{base:016x}', stack_mem=memory.hex())
@@ -786,11 +1003,6 @@ def main():
                                    if actual[key] != expected[key]]
                     if (fs.value ^ int(expected['rflags'], 16)) & mask:
                         differences.append('rflags')
-                    if name.startswith('kernel/'):
-                        abi_checks += 1
-                        abi_errs = check_kernel_abi_obligations(name, g, list(gs), ym, memory, actual_mem_bytes)
-                        if abi_errs:
-                            differences.append(f'abi:{abi_errs}')
                     if differences:
                         mismatches.append(dict(index=i, instruction=name, fields=differences,
                                                input=case, expected=expected, actual=actual))
@@ -798,19 +1010,30 @@ def main():
             finally:
                 oracle.stdin.close()
                 oracle.wait(timeout=10)
-        print(json.dumps(dict(vectors=len(scheduled), mismatches=len(mismatches), seed=args.seed,
+        print(json.dumps(dict(vectors=len(scheduled), mismatches=len(mismatches)+sum(r['status']=='fail' for r in kernel_results),
+                              kernel_passes=sum(r['status']=='pass' for r in kernel_results),
+                              kernel_skips=sum(r['status']=='skipped' for r in kernel_results), seed=args.seed,
                               coverage=coverage, skipped_rflags_cases=0,
-                              instructions_executed=instructions_executed,
-                              abi_kernel_checks=abi_checks,
+                              instructions_executed=instructions_executed+sum(t['steps'] for r in kernel_results for t in r['rounds']),
+                              abi_kernel_checks=sum(len(r['rounds']) for r in kernel_results),
                               flag_checks=flag_checks,
                               seconds=round(time.monotonic()-started, 3),
-                              host=platform.node(), hypervisor='hypervisor' in flags), indent=2))
+                              hypervisor='hypervisor' in flags), indent=2))
+        result = dict(schema_version=1, seed=args.seed, kernel_results=kernel_results,
+                      self_tests=dict(gate_teeth=teeth, abi_teeth='pass'),
+                      probe_vectors=len(scheduled), probe_mismatches=len(mismatches),
+                      probe_skip_reason=('CPU missing '+', '.join(sorted(missing_probe_features))) if missing_probe_features else None,
+                      cpu_features=sorted(set(flags) & {'avx2','pclmulqdq','vpclmulqdq','gfni','bmi2','adx'}),
+                      archive_sha256=hashlib.sha256(args.kernel_elf.read_bytes()).hexdigest() if args.kernel_elf else None)
+        result['exit_status'] = 1 if mismatches or missing_probe_features or any(r['status'] != 'pass' for r in kernel_results) else 0
+        if args.json_output:
+            args.json_output.write_text(json.dumps(result, indent=2)+'\n')
         if mismatches:
             print(json.dumps(mismatches[0], indent=2))
             return 1
         if args.ct_artifact:
             whole_artifact_gate(args.ct_artifact)
-        return 0
+        return result['exit_status']
 
 
 if __name__ == '__main__':

@@ -275,6 +275,14 @@ fn derive_sender_tree_roots(
     })
 }
 
+fn permute_ggm(states: &mut [[u64; 25]], backend: Option<&dyn qsag_accel::AcceleratorBackend>) {
+    if let Some(backend) = backend {
+        backend.batch_keccak_f1600(states);
+    } else {
+        qsag_asm::keccak_f1600_batch(states);
+    }
+}
+
 /// Expand a full GGM tree of `depth ∈ {14, 15}` using 4-way batched `Keccak-f[1600]`.
 fn ggm_expand_full_4x(
     dom: &GgmTreeDomain,
@@ -286,6 +294,15 @@ fn ggm_expand_full_4x(
 
 /// [`ggm_expand_full_4x`] for an arbitrary depth `d` (`2^d` leaves).
 fn ggm_expand_full_depth(dom: &GgmTreeDomain, d: usize, root_seed: &[u8; 32]) -> FullGgmExpansion {
+    ggm_expand_full_depth_with_backend(dom, d, root_seed, None)
+}
+
+fn ggm_expand_full_depth_with_backend(
+    dom: &GgmTreeDomain,
+    d: usize,
+    root_seed: &[u8; 32],
+    backend: Option<&dyn qsag_accel::AcceleratorBackend>,
+) -> FullGgmExpansion {
     let mut cur_level = SecretBuffer(vec![*root_seed]);
     let mut level_lr_xors = Vec::with_capacity(d);
 
@@ -294,14 +311,21 @@ fn ggm_expand_full_depth(dom: &GgmTreeDomain, d: usize, root_seed: &[u8; 32]) ->
         let mut l_xor = [0u8; 32];
         let mut r_xor = [0u8; 32];
 
+        let mut states = SecretBuffer(vec![
+            [0u64; 25];
+            cur_level.len().min(if backend.is_some() {
+                4096
+            } else {
+                4
+            })
+        ]);
         let mut base_idx = 0usize;
-        for chunk in cur_level.chunks(4) {
-            let mut states = SecretBuffer([[0u64; 25]; 4]);
+        for chunk in cur_level.chunks(if backend.is_some() { 4096 } else { 4 }) {
             for (lane, node) in states.iter_mut().zip(chunk.iter()) {
                 encode_ggm_node_state(dom, lvl as u8, (base_idx) as u32, node, lane);
                 base_idx += 1;
             }
-            qsag_asm::keccak_f1600_batch(&mut states[..chunk.len()]);
+            permute_ggm(&mut states[..chunk.len()], backend);
             for state in states.iter_mut().take(chunk.len()) {
                 let mut left = SecretBuffer([0u8; 32]);
                 let mut right = SecretBuffer([0u8; 32]);
@@ -395,6 +419,16 @@ fn ggm_expand_punctured_oblivious(
     punctured_idx: usize,
     copath: &[[u8; 32]],
 ) -> PuncturedGgmExpansion {
+    ggm_expand_punctured_with_backend(dom, d, punctured_idx, copath, None)
+}
+
+fn ggm_expand_punctured_with_backend(
+    dom: &GgmTreeDomain,
+    d: usize,
+    punctured_idx: usize,
+    copath: &[[u8; 32]],
+    backend: Option<&dyn qsag_accel::AcceleratorBackend>,
+) -> PuncturedGgmExpansion {
     let mut cur_level = SecretBuffer(vec![[0u8; 32]; 1]);
     let mut missing_prefix = 0usize;
     for (lvl, sibling_msg) in copath.iter().enumerate().take(d) {
@@ -402,17 +436,18 @@ fn ggm_expand_punctured_oblivious(
         let path_right = ct_bit_mask_u128(bit) as u8;
         let mut next_level = SecretBuffer(vec![[0u8; 32]; cur_level.len() * 2]);
         let mut known_xor = SecretBuffer([0u8; 32]);
+        let batch_size = if backend.is_some() { 4096 } else { 4 };
+        let mut states = SecretBuffer(vec![[0u64; 25]; cur_level.len().min(batch_size)]);
         for (batch, (chunk, out)) in cur_level
-            .chunks(4)
-            .zip(next_level.chunks_mut(8))
+            .chunks(batch_size)
+            .zip(next_level.chunks_mut(2 * batch_size))
             .enumerate()
         {
-            let base = batch * 4;
-            let mut states = SecretBuffer([[0u64; 25]; 4]);
+            let base = batch * batch_size;
             for (off, (state, seed)) in states.iter_mut().zip(chunk).enumerate() {
                 encode_ggm_node_state(dom, lvl as u8, (base + off) as u32, seed, state);
             }
-            qsag_asm::keccak_f1600_batch(&mut states[..chunk.len()]);
+            permute_ggm(&mut states[..chunk.len()], backend);
             for (off, (state, pair)) in states.iter().zip(out.chunks_mut(2)).enumerate() {
                 let known = !ct_eq_mask_u64((base + off) as u64, missing_prefix as u64) as u8;
                 for byte in 0..32 {
@@ -1706,6 +1741,25 @@ impl DensePcgPartySeed {
         self,
         burn_tracker: &mut T,
     ) -> Result<DensePcgExpandedVault, PreprocessError> {
+        self.expand_local_inner(burn_tracker, None)
+    }
+
+    /// Expand using a selected accelerator for bulk GGM permutations. The burn
+    /// and SPCOT checks are identical to [`Self::expand_local`]. Infallible Keccak
+    /// dispatch may fall back; inspect the backend fallback counter when timing.
+    pub fn expand_local_with_backend<T: SeedBurnTracker + ?Sized>(
+        self,
+        burn_tracker: &mut T,
+        backend: &dyn qsag_accel::AcceleratorBackend,
+    ) -> Result<DensePcgExpandedVault, PreprocessError> {
+        self.expand_local_inner(burn_tracker, Some(backend))
+    }
+
+    fn expand_local_inner<T: SeedBurnTracker + ?Sized>(
+        self,
+        burn_tracker: &mut T,
+        backend: Option<&dyn qsag_accel::AcceleratorBackend>,
+    ) -> Result<DensePcgExpandedVault, PreprocessError> {
         self.validate_invariants()?;
 
         let seed_id = self.seed_id();
@@ -1736,14 +1790,26 @@ impl DensePcgPartySeed {
             // peer `q` before any punctured leaf or correlation offset is used.
             let mut q_to_me_macs = vec![0u128; TOTAL_LPN_ROWS];
             let mut q_to_me_choices = vec![0u64; TOTAL_LPN_WORDS];
-            let mut w_recv = receiver_spcot_check_values(
+            let mut w_recv = match receiver_spcot_check_values_with_backend(
                 &self.session_id,
                 me,
                 depth,
                 peer,
                 &mut q_to_me_macs,
                 &mut q_to_me_choices,
-            );
+                backend,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    wipe_u128s(&mut q_to_me_macs);
+                    wipe_u64s(&mut q_to_me_choices);
+                    wipe_u64s(&mut a_words);
+                    wipe_u64s(&mut b_words);
+                    wipe_u64s(&mut cross_xor_words);
+                    wipe_u64s(&mut x_self_sum_words);
+                    return Err(error);
+                }
+            };
 
             let recomputed_tag =
                 compute_spcot_check_tag(&self.session_id, q, me, &peer.spcot_chal_coin, &w_recv);
@@ -1779,7 +1845,8 @@ impl DensePcgPartySeed {
                         receiver_id: q as u16,
                         tree_idx: tree_idx as u8,
                     };
-                    let full = ggm_expand_full_4x(&dom, depth, root_seed);
+                    let full =
+                        ggm_expand_full_depth_with_backend(&dom, depth.depth(), root_seed, backend);
                     let tap_ctx = LpnTapStreamCtx {
                         session_id: self.session_id,
                         sender_id: me as u16,
@@ -1933,14 +2000,15 @@ impl DensePcgPartySeed {
 /// `out_macs` / `out_choice_words`, and return the receiver check value of every repetition
 /// (`mask MAC + sum of per-tree terms`). The caller compares these against the sender's tag
 /// before using `out_macs` / `out_choice_words`.
-fn receiver_spcot_check_values(
+fn receiver_spcot_check_values_with_backend(
     session_id: &[u8; 32],
     receiver_id: usize,
     depth: PcgTreeDepth,
     peer: &DensePcgPeerSeed,
     out_macs: &mut [u128],
     out_choice_words: &mut [u64],
-) -> [Tower128; SPCOT_CHECK_REPS] {
+    backend: Option<&dyn qsag_accel::AcceleratorBackend>,
+) -> Result<[Tower128; SPCOT_CHECK_REPS], PreprocessError> {
     let sender_id = peer.peer_id as usize;
     let weights = derive_all_spcot_challenge_weights(
         session_id,
@@ -1949,10 +2017,10 @@ fn receiver_spcot_check_values(
         &peer.spcot_chal_coin,
         depth,
     );
-    let mut w_recv = peer.spcot_mask_macs;
+    let mut w_recv = SecretBuffer(peer.spcot_mask_macs);
 
-    for (partial, macs, choices) in tree_partials(|range| {
-        let mut w_recv = [Tower128::ZERO; SPCOT_CHECK_REPS];
+    for result in tree_partials(|range| {
+        let mut w_recv = SecretBuffer([Tower128::ZERO; SPCOT_CHECK_REPS]);
         let mut macs = SecretBuffer(vec![0u128; out_macs.len()]);
         let mut choices = SecretBuffer(vec![0u64; out_choice_words.len()]);
         for tree_idx in range {
@@ -1963,18 +2031,54 @@ fn receiver_spcot_check_values(
                 receiver_id: receiver_id as u16,
                 tree_idx: tree_idx as u8,
             };
-            let punc = ggm_expand_punctured_4x(&dom, depth, p_star, &peer.copaths[tree_idx]);
+            let punc = ggm_expand_punctured_with_backend(
+                &dom,
+                depth.depth(),
+                p_star,
+                &peer.copaths[tree_idx],
+                backend,
+            );
             let delta_corr = punc.punc_xor_sum.add(peer.corr_offsets[tree_idx]);
 
-            for (w, rep_weights) in w_recv.iter_mut().zip(weights.iter()) {
-                let term = eval_punctured_tree_spcot_term(
-                    rep_weights.tree_gammas[tree_idx],
-                    &rep_weights.leaf_powers,
-                    &punc.punc_leaves,
-                    p_star,
-                    delta_corr,
+            if let Some(backend) = backend {
+                let shares = SecretBuffer(
+                    punc.punc_leaves
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &leaf)| {
+                            let mask = ct_eq_mask_u128(i, p_star);
+                            let value = leaf ^ (mask & (leaf ^ delta_corr.0));
+                            [value, value]
+                        })
+                        .collect::<Vec<_>>(),
                 );
-                *w = w.add(term.combo);
+                let powers = SecretBuffer(
+                    (0..shares.len())
+                        .map(|i| [weights[0].leaf_powers[i].0, weights[1].leaf_powers[i].0])
+                        .collect::<Vec<_>>(),
+                );
+                let dot = SecretBuffer(
+                    crate::preprocessing::batch_bdoz_gf2128_dot(backend, &shares, &powers)
+                        .map_err(|_| PreprocessError::MacCheckFailed {
+                            phase: "pcg_dense_accelerator",
+                            accused_party: None,
+                        })?,
+                );
+                for rep in 0..SPCOT_CHECK_REPS {
+                    w_recv[rep] =
+                        w_recv[rep].add(weights[rep].tree_gammas[tree_idx].mul(Tower128(dot[rep])));
+                }
+            } else {
+                for (w, rep_weights) in w_recv.iter_mut().zip(weights.iter()) {
+                    let term = eval_punctured_tree_spcot_term(
+                        rep_weights.tree_gammas[tree_idx],
+                        &rep_weights.leaf_powers,
+                        &punc.punc_leaves,
+                        p_star,
+                        delta_corr,
+                    );
+                    *w = w.add(term.combo);
+                }
             }
 
             let tap_ctx = LpnTapStreamCtx {
@@ -1993,10 +2097,11 @@ fn receiver_spcot_check_values(
                 &mut choices,
             );
         }
-        (w_recv, macs, choices)
+        Ok::<_, PreprocessError>((w_recv, macs, choices))
     }) {
-        for (dst, src) in w_recv.iter_mut().zip(partial) {
-            *dst = dst.add(src);
+        let (partial, macs, choices) = result?;
+        for (dst, src) in w_recv.iter_mut().zip(partial.iter()) {
+            *dst = dst.add(*src);
         }
         for (dst, src) in out_macs.iter_mut().zip(macs.iter()) {
             *dst ^= src;
@@ -2005,7 +2110,7 @@ fn receiver_spcot_check_values(
             *dst ^= src;
         }
     }
-    w_recv
+    Ok(*w_recv)
 }
 
 // ============================================================================
@@ -2685,6 +2790,54 @@ const fn n_requires_derand_preview(num_parties: usize) -> bool {
 mod tests {
     use super::*;
 
+    fn assert_backend_vault_parity(backend: &dyn qsag_accel::AcceleratorBackend) {
+        let session = [0x39; 32];
+        let mut rngs = make_party_rngs(2, 0x48);
+        let mut mesh = OtMesh::establish_ideal_for_test(session, &mut rngs);
+        let seeds = setup_dense_pcg_seeds(session, PcgTreeDepth::TestDepth8, &mut mesh, &mut rngs)
+            .expect("setup");
+        for seed in seeds {
+            let copy = DensePcgPartySeed::from_wire_bytes(&seed.to_wire_bytes()).expect("decode");
+            let cpu = seed
+                .expand_local(&mut MemorySeedBurnTracker::new())
+                .expect("CPU expansion");
+            let accelerated = copy
+                .expand_local_with_backend(&mut MemorySeedBurnTracker::new(), backend)
+                .expect("backend expansion");
+            assert_eq!(cpu.a_words, accelerated.a_words);
+            assert_eq!(cpu.b_words, accelerated.b_words);
+            assert_eq!(cpu.c_words, accelerated.c_words);
+            assert_eq!(cpu.mac_alpha, accelerated.mac_alpha);
+            for (a, b) in cpu.peer_voles.iter().zip(&accelerated.peer_voles) {
+                assert_eq!(a.subfield_choice_words, b.subfield_choice_words);
+                assert_eq!(a.subfield_macs, b.subfield_macs);
+                assert_eq!(a.subfield_keys, b.subfield_keys);
+                assert_eq!(a.gf128_u_vals, b.gf128_u_vals);
+                assert_eq!(a.gf128_macs, b.gf128_macs);
+                assert_eq!(a.gf128_keys, b.gf128_keys);
+                assert_eq!(a.gf128_sender_dense_shares, b.gf128_sender_dense_shares);
+                assert_eq!(a.gf128_receiver_dense_shares, b.gf128_receiver_dense_shares);
+            }
+        }
+    }
+
+    #[test]
+    fn dense_backend_cpu_end_to_end_parity() {
+        assert_backend_vault_parity(&qsag_accel::CpuReferenceBackend);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "Requires an audited Vulkan device"]
+    fn dense_backend_vulkan_end_to_end_parity() {
+        let gpu = qsag_accel::vulkan::VulkanSpirvBackend::try_new().expect("audited Vulkan device");
+        std::eprintln!("GPU: {}", gpu.device_name());
+        let before = gpu.gpu_submission_count();
+        assert_backend_vault_parity(&gpu);
+        assert!(gpu.gpu_submission_count() > before);
+        assert_eq!(gpu.cpu_fallback_count(), 0);
+    }
+
     #[test]
     fn batched_spcot_sum_matches_scalar_field_with_punctures_and_tails() {
         let mut rng = PartyPrivateRng::from_seed([0x53; 32], b"spcot-dot-reference");
@@ -3065,14 +3218,16 @@ mod tests {
         let check_values = |seed: &DensePcgPartySeed| {
             let mut macs = vec![0u128; TOTAL_LPN_ROWS];
             let mut choices = vec![0u64; TOTAL_LPN_WORDS];
-            receiver_spcot_check_values(
+            receiver_spcot_check_values_with_backend(
                 &seed.session_id,
                 me,
                 depth,
                 &seed.peers[0],
                 &mut macs,
                 &mut choices,
+                None,
             )
+            .expect("CPU check")
         };
         let honest = check_values(&seed0);
 

@@ -25,14 +25,14 @@ pub mod linear_module;
 pub mod seeds;
 mod zero_gate;
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
+pub use inventory::recover_child_signing_seed_unchecked;
 pub use inventory::{
     HdError, InventoryChildProof, InventoryMasterPublicKey, InventoryPartyShareVault, RekeyFault,
     WatchOnlyInventoryTable, commit_inventory_public_keys, derive_inventory_vault,
     enroll_child_signing_seed_quorum, inventory_child_public_key, recover_child_signing_seed,
     verify_inventory_child_proof,
 };
-#[cfg(any(test, feature = "testing-ephemeral"))]
-pub use inventory::recover_child_signing_seed_unchecked;
 pub use linear_module::{
     AuthorizedHdProjection, DEFAULT_MAX_DERIVATION_DEPTH, LinearModulePartyShare, LinearModuleXPub,
     MAX_NON_HARDENED_DERIVATION_DEPTH, MODULE_K, MODULE_L, MODULE_MAC_LANES, MODULE_N, MODULE_Q,

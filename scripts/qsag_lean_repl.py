@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""qsag-lean-repl: Zero-trust sub-250ms incremental Lean 4.35 daemon for bb2/hbox."""
+"""qsag-lean-repl: Zero-trust sub-250ms incremental Lean 4.35 server daemon."""
 import argparse, json, os, resource, socket, subprocess, sys, time
 
 DEFAULT_LEAN = os.path.expanduser("~/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean")
@@ -143,7 +143,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sock", default=f"/tmp/qsag-lean-repl-{os.getuid()}.sock")
     ap.add_argument("action", choices=["serve", "mount", "eval"])
-    ap.add_argument("--repo", default="/home/build/qsag-conv/lean")
+    ap.add_argument(
+        "--repo",
+        default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lean"),
+    )
     ap.add_argument("--payload", default="{}")
     a = ap.parse_args()
     if a.action == "serve":

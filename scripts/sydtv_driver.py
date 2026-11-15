@@ -3,7 +3,7 @@
 
 No solver result is a certificate. --emit-lean writes a declaration whose proof
 must be checked by Lean. Certificate emission supports the scalar x86 and AArch64 memzero kernels. Unknown
-instructions, relocations, malformed ELF and unsupported certificate shapes fail
+instructions, overlapping relocations, malformed ELF and unsupported certificate shapes fail
 closed. Run on the Linux build host, e.g.
 python3 scripts/sydtv_driver.py --self-test --require-z3 --check-lean
 (--check-lean elaborates the emitted proposals with lake; --require-z3 refuses the
@@ -49,7 +49,7 @@ def cstring(data, offset):
     return data[offset:end].decode('utf-8', errors='strict')
 
 
-def elf_functions(data):
+def elf_functions(data, *, allow_empty=False):
     require(data[:6] == b'\x7fELF\x02\x01', 'expected little-endian ELF64')
     header = struct.unpack('<16sHHIQQQIHHHHHH', region(data, 0, 64))
     _, kind, machine, _, _, _, shoff, _, _, _, _, entsize, count, _ = header
@@ -76,16 +76,27 @@ def elf_functions(data):
                 if reloc[1] in (4, 9) and reloc[7] == idx:
                     width = 24 if reloc[1] == 4 else 16
                     require(reloc[9] == width and reloc[5] % width == 0, 'bad relocations')
-                    # Conservatively reject all symbols in a relocated section:
-                    # relocation writes can overlap a symbol from before its start.
-                    region(data, reloc[4], reloc[5])
-                    has_relocation |= reloc[5] != 0
+                    entries = region(data, reloc[4], reloc[5])
+                    widths = ({1: 8, 2: 4, 4: 4, 9: 4, 10: 4, 11: 4,
+                               24: 8, 41: 4, 42: 4} if machine == 62 else
+                              {257: 8, 258: 4, 259: 2, 260: 8, 261: 4, 262: 2,
+                               275: 4, 277: 4, 278: 4, 282: 4, 283: 4, 284: 4,
+                               285: 4, 286: 4, 299: 4, 311: 4, 312: 4})
+                    for pos in range(0, len(entries), width):
+                        location, info = struct.unpack_from('<QQ', entries, pos)
+                        reloc_type = info & 0xffffffff
+                        if reloc_type == 0:
+                            continue
+                        write_width = widths.get(reloc_type)
+                        # Unknown relocation kinds fail closed for this section.
+                        if write_width is None or relocation_overlaps(location, write_width, value, size):
+                            has_relocation = True
             if has_relocation:
                 continue  # Relocated functions are outside this closed-byte validator.
             symbol = cstring(strings, name)
             require(symbol not in output, 'duplicate function symbol')
             output[symbol] = (machine, region(data, section[4]+value, size))
-    require(output, 'no function symbols')
+    require(output or allow_empty, 'no function symbols')
     return output
 
 
@@ -99,7 +110,7 @@ def archive_functions(data):
         size = int(head[48:58].strip())
         payload = region(data, offset+60, size)
         if payload.startswith(b'\x7fELF'):
-            for name, value in elf_functions(payload).items():
+            for name, value in elf_functions(payload, allow_empty=True).items():
                 require(name not in output, 'duplicate archive symbol')
                 output[name] = value
         offset += 60 + size + size % 2
@@ -107,13 +118,23 @@ def archive_functions(data):
     return output
 
 
-def fixtures():
-    """Read the original compiled archive integers, not a hand-written byte mirror."""
+def relocation_overlaps(location, width, start, size):
+    return location < start + size and start < location + width
+
+
+def fixtures(generation='current'):
+    """Extract symbol bytes from the selected compiled archive literal."""
     text = (ROOT/'lean/Qsag/CompiledRlibFixtures.lean').read_text()
     result = {}
     for arch in ('x86', 'aarch64'):
-        size = int(re.search(r'def '+arch+r'RlibArchiveLen\s*: Nat :=\s*(\d+)', text)[1])
-        integer = int(re.search(r'def '+arch+r'RlibArchiveNat\s*: Nat :=\s*(0x[0-9A-Fa-f]+)', text)[1], 16)
+        if generation == 'current':
+            prefix = 'current' + ('X86' if arch == 'x86' else 'Aarch64')
+            match = re.search(r'def '+prefix+r'RlibLiteral[^:=]*: Nat × Nat :=\s*\((\d+),\s*(0x[0-9A-Fa-f]+)\)', text)
+            require(match is not None, 'missing current archive literal')
+            size, integer = int(match[1]), int(match[2], 16)
+        else:
+            size = int(re.search(r'def '+arch+r'RlibArchiveLen\s*: Nat :=\s*(\d+)', text)[1])
+            integer = int(re.search(r'def '+arch+r'RlibArchiveNat\s*: Nat :=\s*(0x[0-9A-Fa-f]+)', text)[1], 16)
         result.update(archive_functions(integer.to_bytes(size, 'little')))
     return result
 
@@ -141,6 +162,9 @@ def decode(code, machine):
                 (b'\x48\xff\xc7', 'Add', ('ptr', 1)),
                 (b'\x48\xff\xc9', 'Add', ('rem', -1)),
                 (b'\x0f\xae\xf0', 'Fence', ()), (b'\xc3', 'Ret', ())]
+    patterns += [(bytes.fromhex(b), 'Assign', (reg, 0)) for b, reg in
+                 [('31ff', 'ptr'), ('31f6', 'len'), ('31d2', 'rdx'), ('31c9', 'rem'),
+                  ('4531c0', 'r8'), ('4531c9', 'r9'), ('4531d2', 'r10'), ('4531db', 'r11')]]
     while pc < len(code):
         if machine == 62:
             if code[pc] in (0x75, 0x72, 0x76):
@@ -322,12 +346,28 @@ def check_induction(cfg, loop, smt, use_z3=True, require_z3=False):
     return 'modular affine normalization (untrusted)'
 
 
-def emit_lean(machine, code):
+def emit_lean(machine, code, generation="current"):
     """Proof proposal against the current `Qsag.SydTv` certificate API.
 
     The proposal is untrusted text: `--check-lean` elaborates it with the project toolchain,
     and only that elaboration says anything about it.
     """
+    if generation == 'current':
+        arch, index = ('x86_64', 15) if machine == 62 else ('aarch64', 6)
+        symbol = 'qsag_asm_ct_memzero_' + arch
+        require(fixtures('current').get(symbol) == (machine, code),
+                'no proved fresh certificate template for these bytes')
+        theorem = 'current_ct_memzero_' + arch + '_mc_refines'
+        source = (ROOT/'lean/Qsag/McRefine.lean').read_text()
+        statement = source.split('theorem ' + theorem, 1)[1].split(' := by', 1)[0]
+        collection = 'currentX86ExtractedSlices' if machine == 62 else 'currentAarch64ExtractedSlices'
+        literal = literal_brackets(', '.join(f'0x{x:02x}' for x in code))
+        return ('module\npublic import Qsag.McRefine\npublic section\nopen Qsag\n'
+                'namespace Qsag.SydTv.Generated\n'
+                f'theorem extracted_bytes : ({collection}[{index}]).code = '
+                f'({literal} : List UInt8) := by decide +kernel\n'
+                f'theorem certificate{statement} := Qsag.{theorem}\n'
+                'end Qsag.SydTv.Generated\n')
     require((machine, code) in ((62, X86_ZERO), (183, ARM_ZERO)),
             'no proved certificate template for these bytes')
     literal = ', '.join(f'0x{x:02x}' for x in code)
@@ -386,7 +426,20 @@ def literal_brackets(s):
 
 
 def self_test(require_z3=False):
-    fs = fixtures()
+    # Rust metadata members are valid ELF objects without executable functions.
+    # Permit these inside an archive, while rejecting an entirely empty input.
+    empty_elf = struct.pack('<16sHHIQQQIHHHHHH', b'\x7fELF\x02\x01' + bytes(10),
+                            1, 62, 1, 0, 0, 64, 0, 64, 0, 0, 64, 1, 0) + bytes(64)
+    require(elf_functions(empty_elf, allow_empty=True) == {}, 'metadata member rejected')
+    head = (f'{"metadata.o/":<16}{0:<12}{0:<6}{0:<6}{0:<8}{len(empty_elf):<10}`\n').encode()
+    for empty_input in (empty_elf, b'!<arch>\n' + head + empty_elf):
+        try:
+            archive_functions(empty_input)
+        except Rejected:
+            pass
+        else:
+            raise AssertionError('function-free input accepted')
+    fs = fixtures('historical')
     x = fs['qsag_asm_ct_memzero_x86_64']
     a = fs['qsag_asm_ct_memzero_aarch64']
     require(x == (62, X86_ZERO) and a == (183, ARM_ZERO), 'compiled fixture mismatch')
@@ -410,7 +463,7 @@ def self_test(require_z3=False):
                 print(f'self-test: machine {machine}: cut without the trip-count bound: z3 sat, rejected')
             else:
                 raise AssertionError('z3 accepted a cut without its trip-count bound')
-    require(all('LoopRelationCert' in emit_lean(*item) for item in (x, a)), 'certificate missing')
+    require(all('LoopRelationCert' in emit_lean(*item, generation='historical') for item in (x, a)), 'certificate missing')
     for mutant in [X86_ZERO[:13]+b'\x76'+X86_ZERO[14:], X86_ZERO[:-1], bytes([0x90])+X86_ZERO[1:]]:
         try:
             emit_lean(62, mutant)
@@ -429,11 +482,22 @@ def self_test(require_z3=False):
     for i in range(31):
         mem[i] = 0
     require(mem[-1] != 0, 'off-by-one counterexample lost')
-    print('self-test: PASS (compiled archives, two CFGs, affine/SMT cuts, fail-closed mutations)')
+    require(relocation_overlaps(96, 8, 100, 20), 'preceding relocation overlap missed')
+    require(not relocation_overlaps(92, 8, 100, 20), 'adjacent relocation falsely overlaps')
+    require(not relocation_overlaps(120, 8, 100, 20), 'following relocation falsely overlaps')
+    for name in ('qsag_asm_ct_memzero_x86_64', 'qsag_asm_ct_memzero_aarch64'):
+        machine, code = fixtures('current')[name]
+        cfg = decode(code, machine)
+        loops = natural_loops(cfg)
+        require(len(loops) == 1, 'fresh loop discovery failed')
+        check_induction(cfg, loops[0], flatten_cut_smt(cfg, loops[0]), require_z3=require_z3)
+        require('extracted_bytes' in emit_lean(machine, code), 'fresh byte binding missing')
+    print('self-test: PASS (historical/current archives, CFGs, affine/SMT cuts, relocation boundaries, fail-closed mutations)')
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--fixture-generation', choices=('current', 'historical'), default='current')
     p.add_argument('--self-test', action='store_true')
     p.add_argument('--elf', type=Path, help='ELF64 object or ar/rlib archive; default: compiled fixtures')
     p.add_argument('--symbol', default='qsag_asm_ct_memzero_x86_64')
@@ -449,17 +513,17 @@ def main():
         if not args.check_lean:
             return
     if args.check_lean:
-        fs = fixtures()
-        check_lean([(name, emit_lean(*fs[name]))
+        fs = fixtures(args.fixture_generation)
+        check_lean([(name, emit_lean(*fs[name], generation=args.fixture_generation))
                     for name in ('qsag_asm_ct_memzero_x86_64', 'qsag_asm_ct_memzero_aarch64')])
         return
-    fs = archive_functions(args.elf.read_bytes()) if args.elf else fixtures()
+    fs = archive_functions(args.elf.read_bytes()) if args.elf else fixtures(args.fixture_generation)
     require(args.symbol in fs, 'symbol not found')
     machine, code = fs[args.symbol]
     cfg = decode(code, machine)
     loops = natural_loops(cfg)
     if args.emit_lean:
-        print(emit_lean(machine, code), end='')
+        print(emit_lean(machine, code, args.fixture_generation), end='')
     elif args.smt:
         require(len(loops) == 1, 'select a single-loop function')
         print(flatten_cut_smt(cfg, loops[0]), end='')

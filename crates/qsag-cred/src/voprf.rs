@@ -60,53 +60,10 @@ use qsag_accel::{
     goldilocks::{gl_add, gl_sub},
     poseidon2::poseidon2_perm12,
 };
-// Owned secret containers are wiped on success, error, and unwinding. Transport
-// implementations own messages moved into exchange and must wipe those buffers.
-trait Wipe {
-    fn wipe(&mut self);
-}
-impl Wipe for u8 {
-    fn wipe(&mut self) {
-        *self = 0;
-    }
-}
-impl Wipe for u64 {
-    fn wipe(&mut self) {
-        *self = 0;
-    }
-}
-impl<T: Wipe, const N: usize> Wipe for [T; N] {
-    fn wipe(&mut self) {
-        for item in self {
-            item.wipe();
-        }
-    }
-}
-impl<T: Wipe> Wipe for Vec<T> {
-    fn wipe(&mut self) {
-        for item in self {
-            item.wipe();
-        }
-    }
-}
-struct Zeroizing<T: Wipe>(T);
-impl<T: Wipe> core::ops::Deref for Zeroizing<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
-impl<T: Wipe> core::ops::DerefMut for Zeroizing<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.0
-    }
-}
-impl<T: Wipe> Drop for Zeroizing<T> {
-    fn drop(&mut self) {
-        self.0.wipe();
-        core::hint::black_box(&mut self.0);
-    }
-}
+// Transport implementations own messages moved into exchange and must wipe them.
+use crate::secret_buffer::SecretBuffer as Zeroizing;
+#[cfg(test)]
+use crate::secret_buffer::Wipe;
 
 pub const SERVERS: usize = 5;
 pub const MAX_BATCH: usize = 64;
@@ -290,7 +247,7 @@ pub fn dkg<T: Transport>(
                         b"QSAG.TOPRF.DKG.COMMIT.V1",
                         &[&session, &[dealer as u8, i as u8, j as u8], value],
                     );
-                    if commitment != all_commits[dealer][ordinal * 32..(ordinal + 1) * 32] {
+                    if !qsag_accel::ct::ct_eq_bytes(&commitment, &all_commits[dealer][ordinal * 32..(ordinal + 1) * 32]) {
                         return Err(Error::BadDelivery { party: dealer });
                     }
                     joint.extend_from_slice(value);
@@ -537,10 +494,22 @@ pub fn blind(
 /// Output arrives over the server's authenticated private channel to the client.
 /// Fields are private so callers deserialize exclusively via [`Output::from_wire`] rather than
 /// mutating unauthenticated components in memory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Output {
     context: Context,
     components: Vec<[[u64; 5]; 4]>,
+}
+impl Drop for Output {
+    fn drop(&mut self) {
+        for item in &mut self.components {
+            for wire in item { ct_zeroize_u64s(wire); }
+        }
+    }
+}
+impl fmt::Debug for Output {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ToprfOutput(<REDACTED>)")
+    }
 }
 impl Output {
     pub const fn context(&self) -> &Context {
@@ -618,7 +587,7 @@ impl Server {
                     let digest = message
                         .get(component * 32..component * 32 + 32)
                         .ok_or(Error::BadDelivery { party })?;
-                    if expected.is_some_and(|e| e != digest) {
+                    if expected.is_some_and(|e| !qsag_accel::ct::ct_eq_bytes(e, digest)) {
                         return Err(Error::InconsistentShares);
                     }
                     expected = Some(digest);
@@ -892,7 +861,8 @@ impl Request {
     /// Canonical private request: 107-byte header, four 32-byte hidden salts,
     /// then 16 canonical 64-bit field limbs per item. No excluded share is sent.
     pub fn to_wire(&self) -> Vec<u8> {
-        let mut bytes = Vec::from(self.context.key);
+        let mut bytes = Zeroizing(Vec::with_capacity(235 + 128 * self.inputs.len()));
+        bytes.extend_from_slice(&self.context.key);
         bytes.extend_from_slice(&self.context.session);
         bytes.extend_from_slice(&self.context.counter.to_le_bytes());
         bytes.extend_from_slice(&(self.context.items as u16).to_le_bytes());
@@ -912,7 +882,7 @@ impl Request {
                 }
             }
         }
-        bytes
+        core::mem::take(&mut *bytes)
     }
     /// The receiving channel must additionally authenticate the client and quota.
     pub fn from_wire(bytes: &[u8]) -> Result<Self, Error> {
@@ -971,7 +941,8 @@ impl Output {
         {
             return Err(Error::Encoding);
         }
-        let mut bytes = Vec::from(self.context.key);
+        let mut bytes = Zeroizing(Vec::with_capacity(107 + 128 * self.context.items));
+        bytes.extend_from_slice(&self.context.key);
         bytes.extend_from_slice(&self.context.session);
         bytes.extend_from_slice(&self.context.counter.to_le_bytes());
         bytes.extend_from_slice(&(self.context.items as u16).to_le_bytes());
@@ -989,7 +960,7 @@ impl Output {
                 }
             }
         }
-        Ok(bytes)
+        Ok(core::mem::take(&mut *bytes))
     }
     /// `party` is the authenticated sender index from enrollment.
     pub fn from_wire(bytes: &[u8], party: usize) -> Result<Self, Error> {
@@ -1030,6 +1001,33 @@ impl Output {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn private_wire_rejects_hostile_lengths_and_noncanonical_shares() {
+        let context = Context { key: [1; 32], session: [2; 32], request: [3; 32], counter: 0, items: 1 };
+        let request = Request { context: context.clone(), party: 0, inputs: vec![[[7; 5]; 4]], salts: [[8; 32]; 5] };
+        let wire = request.to_wire();
+        assert_eq!(wire.len(), 235 + 128);
+        assert!(Request::from_wire(&wire).is_ok());
+        for count in [0, MAX_BATCH as u16 + 1, u16::MAX] {
+            let mut malformed = wire.clone();
+            malformed[72..74].copy_from_slice(&count.to_le_bytes());
+            assert!(Request::from_wire(&malformed).is_err());
+        }
+        let mut output = Output { context, components: vec![[[9; 5]; 4]] };
+        assert!(core::mem::needs_drop::<Output>());
+        assert_eq!(std::format!("{output:?}"), "ToprfOutput(<REDACTED>)");
+        let wire = output.to_wire(0).unwrap();
+        assert_eq!(wire.len(), 107 + 128);
+        assert!(Output::from_wire(&wire, 0).is_ok());
+        for count in [0, MAX_BATCH as u16 + 1, u16::MAX] {
+            let mut malformed = wire.clone();
+            malformed[72..74].copy_from_slice(&count.to_le_bytes());
+            assert!(Output::from_wire(&malformed, 0).is_err());
+        }
+        // Reject after some private limbs have already been serialized.
+        output.components[0][3][4] = qsag_accel::goldilocks::GOLDILOCKS_PRIME;
+        assert_eq!(output.to_wire(0), Err(Error::Encoding));
+    }
     use super::*;
     struct AbortTransport;
     impl Transport for AbortTransport {

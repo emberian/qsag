@@ -7,7 +7,7 @@
 /lean/.lake/
 **/.lake/
 
-# Verification / profiler / binary dump scratch artifacts
+# Verification / profiler / binary dump / ephemeral agent scratch artifacts
 /-o
 **/*.log
 **/*.disasm
@@ -17,6 +17,20 @@
 **/perf.data*
 **/benchmarks/
 aeneas/lean/*-evidence/
+lean/fixtures/*-elf/
+lean/fixtures/*validation*.json
+lean/Qsag/_Repl_*.lean
+crates/**/VALIDATION*.md
+crates/**/SUMMARY*.md
+crates/**/WAVE*.md
+**/*badword*
+.obb/
+ledger/
+.claude/
+.codex/
+**/*.tmp
+**/*.bak
+**/*.orig
 
 # OS / Editor files
 .DS_Store

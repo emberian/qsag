@@ -4,9 +4,9 @@
 //! private and use rollback-resistant storage: a complete old authenticated snapshot
 //! cannot be distinguished from current state without an external monotonic anchor.
 use alloc::boxed::Box;
-use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
+use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -85,27 +85,50 @@ impl DurableBurnJournal {
         Self::load(path.as_ref(), key, mac_key, false)
     }
     pub fn checkpoint(&self) -> LedgerCheckpoint {
-        LedgerCheckpoint { generation: self.entries.len() as u64, tag: self.last_tag }
+        LedgerCheckpoint {
+            generation: self.entries.len() as u64,
+            tag: self.last_tag,
+        }
     }
-    pub fn open_at_least(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32], minimum: LedgerCheckpoint) -> io::Result<Self> {
+    pub fn open_at_least(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        mac_key: [u8; 32],
+        minimum: LedgerCheckpoint,
+    ) -> io::Result<Self> {
         let journal = Self::open_existing(path, key, mac_key)?;
         journal.check_minimum(minimum)?;
         Ok(journal)
     }
     fn check_minimum(&self, minimum: LedgerCheckpoint) -> io::Result<()> {
         let current = self.checkpoint();
-        if current.generation < minimum.generation ||
-            (current.generation == minimum.generation && current.tag != minimum.tag) { return Err(invalid()); }
+        if current.generation < minimum.generation
+            || (current.generation == minimum.generation && current.tag != minimum.tag)
+        {
+            return Err(invalid());
+        }
         Ok(())
     }
-    pub fn create_anchored(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32], anchor: Box<dyn ExternalMonotoneAnchor>) -> io::Result<Self> {
-        if anchor.load()?.is_some() { return Err(invalid()); }
+    pub fn create_anchored(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        mac_key: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> io::Result<Self> {
+        if anchor.load()?.is_some() {
+            return Err(invalid());
+        }
         let mut journal = Self::create(path, key, mac_key)?;
         anchor.advance(journal.checkpoint())?;
         journal.anchor = Some(anchor);
         Ok(journal)
     }
-    pub fn open_anchored(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32], anchor: Box<dyn ExternalMonotoneAnchor>) -> io::Result<Self> {
+    pub fn open_anchored(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        mac_key: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> io::Result<Self> {
         let minimum = anchor.load()?.ok_or_else(invalid)?;
         let mut journal = Self::open_at_least(path, key, mac_key, minimum)?;
         anchor.advance(journal.checkpoint())?;
@@ -258,13 +281,28 @@ impl DurableBurnJournal {
 /// A successful reservation permanently spends exactly one WOTS leaf.
 pub struct FsWalFtsEpochLatch(pub DurableBurnJournal);
 impl FsWalFtsEpochLatch {
-    pub fn open_at_least(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32], minimum: LedgerCheckpoint) -> io::Result<Self> {
+    pub fn open_at_least(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        mac_key: [u8; 32],
+        minimum: LedgerCheckpoint,
+    ) -> io::Result<Self> {
         DurableBurnJournal::open_at_least(path, key, mac_key, minimum).map(Self)
     }
-    pub fn create_anchored(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32], anchor: Box<dyn ExternalMonotoneAnchor>) -> io::Result<Self> {
+    pub fn create_anchored(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        mac_key: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> io::Result<Self> {
         DurableBurnJournal::create_anchored(path, key, mac_key, anchor).map(Self)
     }
-    pub fn open_anchored(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32], anchor: Box<dyn ExternalMonotoneAnchor>) -> io::Result<Self> {
+    pub fn open_anchored(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        mac_key: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> io::Result<Self> {
         DurableBurnJournal::open_anchored(path, key, mac_key, anchor).map(Self)
     }
     pub fn create(path: impl AsRef<Path>, key: [u8; 32], mac_key: [u8; 32]) -> io::Result<Self> {
@@ -322,13 +360,24 @@ mod tests {
     use super::*;
     #[test]
     fn retained_checkpoint_rejects_same_inode_tail_truncation() {
-        let path = std::env::temp_dir().join(alloc::format!("retained-tail-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path = std::env::temp_dir().join(alloc::format!(
+            "retained-tail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let mut journal = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
         journal.reserve(&[1; 32], 0, 0).unwrap();
         let checkpoint = journal.checkpoint();
         drop(journal);
-        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(HEADER_LEN as u64).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(HEADER_LEN as u64)
+            .unwrap();
         assert!(DurableBurnJournal::open_at_least(&path, [1; 32], [2; 32], checkpoint).is_err());
         std::fs::remove_file(&path).unwrap();
     }

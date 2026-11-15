@@ -2033,6 +2033,155 @@ impl fmt::Debug for RssSlhMpcCluster {
     }
 }
 
+const RSS_DZK_FLUSH_PERMUTATIONS: usize = 16;
+const RSS_RELATION_WORDS_PER_PERMUTATION: usize = 24 * 1600;
+
+struct RssChunkPlan {
+    prf: Vec<Fips205Adrs>,
+    steps: Vec<(Vec<Fips205Adrs>, u64)>,
+}
+
+struct RssChunkResult {
+    prim: SecretBuffer<[[u64; 256]; 3]>,
+    sec: SecretBuffer<[[u64; 256]; 3]>,
+    relations: RssPendingDzkTriples,
+    permutations: usize,
+}
+
+type RssSpongeStates = (
+    SecretBuffer<[[u64; 1600]; 3]>,
+    SecretBuffer<[[u64; 1600]; 3]>,
+);
+
+fn rss_prf_states(
+    keys: &[RssKeyShare256; 3],
+    pk_seed: &[u8],
+    adrs_batch: &[Fips205Adrs],
+) -> RssSpongeStates {
+    let batch_len = adrs_batch.len();
+    let n = keys[0].key_len;
+    let active_mask = batch_active_mask(batch_len);
+    let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
+    let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
+
+    // Frame: `PK.seed (n B) || ADRS (32 B) || SK.seed (n B) || 0x1f ... 0x80` (`2*n + 32 <= 96 < 136`!)
+    let mut b = 0;
+    while b < batch_len {
+        let bit_b = 1u64 << b;
+        let adrs_bytes = adrs_batch[b].to_bytes();
+        // Public `PK.seed` at `0..n` -> slot 0 (`party 0` primary, `party 2` secondary)
+        let mut byte_idx = 0;
+        while byte_idx < n {
+            let v = pk_seed[byte_idx];
+            for bit in 0..8 {
+                if ((v >> bit) & 1) == 1 {
+                    let pos = 8 * byte_idx + bit;
+                    st_p[0][pos] |= bit_b;
+                    st_s[2][pos] |= bit_b;
+                }
+            }
+            byte_idx += 1;
+        }
+        // Public `ADRS` at `n..n+32`
+        let mut byte_idx = 0;
+        while byte_idx < 32 {
+            let v = adrs_bytes[byte_idx];
+            for bit in 0..8 {
+                if ((v >> bit) & 1) == 1 {
+                    let pos = 8 * (n + byte_idx) + bit;
+                    st_p[0][pos] |= bit_b;
+                    st_s[2][pos] |= bit_b;
+                }
+            }
+            byte_idx += 1;
+        }
+        // Padding `0x1f` at `2*n + 32` and `0x80` at `135`
+        let pad_off = 8 * (2 * n + 32);
+        for bit in 0..5 {
+            st_p[0][pad_off + bit] |= bit_b;
+            st_s[2][pad_off + bit] |= bit_b;
+        }
+        st_p[0][8 * 135 + 7] |= bit_b;
+        st_s[2][8 * 135 + 7] |= bit_b;
+        b += 1;
+    }
+    // Secret `SK.seed` at `n+32 .. 2*n+32` replicated across all active instances `active_mask`
+    let sk_bit_off = 8 * (n + 32);
+    for p in 0..3 {
+        let (sk_p, sk_s) = keys[p].sk_seed_shares();
+        for byte_idx in 0..n {
+            for bit in 0..8 {
+                let mp = 0u64.wrapping_sub(((sk_p[byte_idx] >> bit) & 1) as u64);
+                let ms = 0u64.wrapping_sub(((sk_s[byte_idx] >> bit) & 1) as u64);
+                st_p[p][sk_bit_off + 8 * byte_idx + bit] = mp & active_mask;
+                st_s[p][sk_bit_off + 8 * byte_idx + bit] = ms & active_mask;
+            }
+        }
+    }
+
+    (st_p, st_s)
+}
+
+fn rss_f_states(
+    n: usize,
+    pk_seed: &[u8],
+    adrs_batch: &[Fips205Adrs],
+    cur_p: &[[u64; 256]; 3],
+    cur_s: &[[u64; 256]; 3],
+) -> RssSpongeStates {
+    let batch_len = adrs_batch.len();
+    let n_bits = 8 * n;
+    let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
+    let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
+
+    let mut b = 0;
+    while b < batch_len {
+        let bit_b = 1u64 << b;
+        let adrs_bytes = adrs_batch[b].to_bytes();
+        let mut byte_idx = 0;
+        while byte_idx < n {
+            let v = pk_seed[byte_idx];
+            for bit in 0..8 {
+                if ((v >> bit) & 1) == 1 {
+                    let pos = 8 * byte_idx + bit;
+                    st_p[0][pos] |= bit_b;
+                    st_s[2][pos] |= bit_b;
+                }
+            }
+            byte_idx += 1;
+        }
+        let mut byte_idx = 0;
+        while byte_idx < 32 {
+            let v = adrs_bytes[byte_idx];
+            for bit in 0..8 {
+                if ((v >> bit) & 1) == 1 {
+                    let pos = 8 * (n + byte_idx) + bit;
+                    st_p[0][pos] |= bit_b;
+                    st_s[2][pos] |= bit_b;
+                }
+            }
+            byte_idx += 1;
+        }
+        let pad_off = 8 * (2 * n + 32);
+        for bit in 0..5 {
+            st_p[0][pad_off + bit] |= bit_b;
+            st_s[2][pad_off + bit] |= bit_b;
+        }
+        st_p[0][8 * 135 + 7] |= bit_b;
+        st_s[2][8 * 135 + 7] |= bit_b;
+        b += 1;
+    }
+    let m1_off = 8 * (n + 32);
+    for p in 0..3 {
+        for bit_idx in 0..n_bits {
+            st_p[p][m1_off + bit_idx] = cur_p[p][bit_idx];
+            st_s[p][m1_off + bit_idx] = cur_s[p][bit_idx];
+        }
+    }
+
+    (st_p, st_s)
+}
+
 impl RssSlhMpcCluster {
     /// Builds the cluster and derives its hedged mask session: every party contributes fresh
     /// private entropy to a joint coin, so mask and proof streams never repeat across clusters
@@ -2195,7 +2344,8 @@ impl RssSlhMpcCluster {
         states_prim: &mut [[u64; 1600]; 3],
         states_sec: &mut [[u64; 1600]; 3],
     ) -> Result<(), KeccakMpcError> {
-        const DEFERRED_DZK_FLUSH_WORDS: usize = 16 * 24 * 1600;
+        const DEFERRED_DZK_FLUSH_WORDS: usize =
+            RSS_DZK_FLUSH_PERMUTATIONS * RSS_RELATION_WORDS_PER_PERMUTATION;
         self.ensure_live()?;
         let ctr = self.next_ctr();
         eval_rss_keccak_f1600_batch64_record(
@@ -2216,6 +2366,192 @@ impl RssSlhMpcCluster {
                 &self.mask_session,
                 &mut self.party_rngs,
             )?;
+        }
+        Ok(())
+    }
+
+    /// Evaluate independent chains with reserved counters, then replay their relation
+    /// records through the original proof barriers in call order. No worker opens data
+    /// or draws verifier coins, so scheduling does not change the transcript.
+    fn evaluate_chunks(
+        &mut self,
+        pk_seed: &[u8],
+        plans: &[RssChunkPlan],
+        cut: &mut RssCutBuffer,
+    ) -> Result<(), KeccakMpcError> {
+        let group_size = if cfg!(feature = "std") { 12 } else { 1 };
+        for group in plans.chunks(group_size) {
+            self.evaluate_chunk_group(pk_seed, group, cut)?;
+        }
+        Ok(())
+    }
+
+    fn evaluate_chunk_group(
+        &mut self,
+        pk_seed: &[u8],
+        plans: &[RssChunkPlan],
+        cut: &mut RssCutBuffer,
+    ) -> Result<(), KeccakMpcError> {
+        self.ensure_live()?;
+        let initial_pending = self.pending_dzk.len_words() / RSS_RELATION_WORDS_PER_PERMUTATION;
+        let mut offset = 0usize;
+        let starts: Vec<_> = plans
+            .iter()
+            .map(|plan| {
+                let start = offset;
+                offset += 1 + plan.steps.iter().filter(|(_, mask)| *mask != 0).count();
+                start
+            })
+            .collect();
+        let session = &self.session_id;
+        let keys = &self.keys;
+        let mask_session = &self.mask_session;
+        let initial_ctr = self.batch_ctr;
+        let evaluate = |index: usize| -> Result<RssChunkResult, KeccakMpcError> {
+            let plan = &plans[index];
+            let batch_len = plan.prf.len();
+            let n_bits = 8 * keys[0].key_len;
+            let mut relations = RssPendingDzkTriples::new();
+            // Reserve once: growing these secret vectors would copy and wipe every
+            // prior witness allocation on each capacity doubling.
+            let permutations = 1 + plan.steps.iter().filter(|(_, mask)| *mask != 0).count();
+            let words = permutations * RSS_RELATION_WORDS_PER_PERMUTATION;
+            relations.a = core::array::from_fn(|_| Vec::with_capacity(words));
+            relations.b = core::array::from_fn(|_| Vec::with_capacity(words));
+            relations.c = core::array::from_fn(|_| Vec::with_capacity(words));
+            let mut ordinal = starts[index];
+            let mut permute = |prim: &mut [[u64; 1600]; 3], sec: &mut [[u64; 1600]; 3]| {
+                let ctr = initial_ctr.wrapping_add(ordinal as u64).wrapping_add(
+                    ((initial_pending + ordinal) / RSS_DZK_FLUSH_PERMUTATIONS) as u64,
+                );
+                ordinal += 1;
+                eval_rss_keccak_f1600_batch64_record(
+                    session,
+                    ctr,
+                    batch_len,
+                    prim,
+                    sec,
+                    mask_session,
+                    &mut relations,
+                )
+            };
+            let (mut state_p, mut state_s) = rss_prf_states(keys, pk_seed, &plan.prf);
+            permute(&mut state_p, &mut state_s)?;
+            let mut prim = SecretBuffer([[0u64; 256]; 3]);
+            let mut sec = SecretBuffer([[0u64; 256]; 3]);
+            for party in 0..3 {
+                prim[party][..n_bits].copy_from_slice(&state_p[party][..n_bits]);
+                sec[party][..n_bits].copy_from_slice(&state_s[party][..n_bits]);
+            }
+            for (addresses, exec_mask) in &plan.steps {
+                if *exec_mask == 0 {
+                    continue;
+                }
+                let (mut state_p, mut state_s) =
+                    rss_f_states(keys[0].key_len, pk_seed, addresses, &prim, &sec);
+                permute(&mut state_p, &mut state_s)?;
+                for party in 0..3 {
+                    for bit in 0..n_bits {
+                        prim[party][bit] =
+                            (prim[party][bit] & !exec_mask) | (state_p[party][bit] & exec_mask);
+                        sec[party][bit] =
+                            (sec[party][bit] & !exec_mask) | (state_s[party][bit] & exec_mask);
+                    }
+                }
+            }
+            Ok(RssChunkResult {
+                prim,
+                sec,
+                relations,
+                permutations: ordinal - starts[index],
+            })
+        };
+        #[cfg(feature = "std")]
+        let results = {
+            let mut results: Vec<_> = (0..plans.len()).map(|_| None).collect();
+            let workers = std::thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(12);
+            let chunk_size = plans.len().div_ceil(workers).max(1);
+            std::thread::scope(|scope| {
+                for (chunk, slots) in results.chunks_mut(chunk_size).enumerate() {
+                    let evaluate = &evaluate;
+                    scope.spawn(move || {
+                        for (offset, slot) in slots.iter_mut().enumerate() {
+                            *slot = Some(evaluate(chunk * chunk_size + offset));
+                        }
+                    });
+                }
+            });
+            results
+                .into_iter()
+                .map(|result| result.expect("every chunk evaluated"))
+                .collect::<Vec<_>>()
+        };
+        #[cfg(not(feature = "std"))]
+        let results = (0..plans.len()).map(evaluate).collect::<Vec<_>>();
+        for (plan, result) in plans.iter().zip(results) {
+            let mut result = match result {
+                Ok(result) => result,
+                Err(error) => return self.poisoned.fail(error),
+            };
+            if self.pending_dzk.len_words() == 0 && result.permutations <= RSS_DZK_FLUSH_PERMUTATIONS {
+                // Aligned chains already own exactly the next proof's witnesses.
+                // Transfer allocations instead of copying and wiping them twice.
+                core::mem::swap(&mut self.pending_dzk.a, &mut result.relations.a);
+                core::mem::swap(&mut self.pending_dzk.b, &mut result.relations.b);
+                core::mem::swap(&mut self.pending_dzk.c, &mut result.relations.c);
+                self.pending_dzk.lane_perms += result.relations.lane_perms;
+                self.batch_ctr = self.batch_ctr.wrapping_add(result.permutations as u64);
+                if result.permutations == RSS_DZK_FLUSH_PERMUTATIONS {
+                    let ctr = self.next_ctr();
+                    if let Err(error) = verify_rss_boolean_triples_bbcggi19(&self.session_id, ctr, &mut self.pending_dzk, &self.mask_session, &mut self.party_rngs) {
+                        return self.poisoned.fail(error);
+                    }
+                }
+            } else {
+            for permutation in 0..result.permutations {
+                self.next_ctr();
+                let start = permutation * RSS_RELATION_WORDS_PER_PERMUTATION;
+                let end = start + RSS_RELATION_WORDS_PER_PERMUTATION;
+                for party in 0..3 {
+                    secret_vec_extend_from_slice(
+                        &mut self.pending_dzk.a[party],
+                        &result.relations.a[party][start..end],
+                    );
+                    secret_vec_extend_from_slice(
+                        &mut self.pending_dzk.b[party],
+                        &result.relations.b[party][start..end],
+                    );
+                    secret_vec_extend_from_slice(
+                        &mut self.pending_dzk.c[party],
+                        &result.relations.c[party][start..end],
+                    );
+                }
+                self.pending_dzk.lane_perms += plan.prf.len() as u64;
+                if self.pending_dzk.len_words()
+                    >= RSS_DZK_FLUSH_PERMUTATIONS * RSS_RELATION_WORDS_PER_PERMUTATION
+                {
+                    let ctr = self.next_ctr();
+                    if let Err(error) = verify_rss_boolean_triples_bbcggi19(
+                        &self.session_id,
+                        ctr,
+                        &mut self.pending_dzk,
+                        &self.mask_session,
+                        &mut self.party_rngs,
+                    ) {
+                        return self.poisoned.fail(error);
+                    }
+                }
+            }
+            }
+            for party in 0..3 {
+                cut.push_party_slices(
+                    party,
+                    &result.prim[party][..8 * self.keys[0].key_len],
+                    &result.sec[party][..8 * self.keys[0].key_len],
+                );
+            }
         }
         Ok(())
     }
@@ -2290,64 +2626,7 @@ impl RssSlhMpcCluster {
         self.ensure_live()?;
         let batch_len = adrs_batch.len();
         let n = self.keys[0].key_len;
-        let active_mask = batch_active_mask(batch_len);
-        let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
-        let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
-
-        // Frame: `PK.seed (n B) || ADRS (32 B) || SK.seed (n B) || 0x1f ... 0x80` (`2*n + 32 <= 96 < 136`!)
-        let mut b = 0;
-        while b < batch_len {
-            let bit_b = 1u64 << b;
-            let adrs_bytes = adrs_batch[b].to_bytes();
-            // Public `PK.seed` at `0..n` -> slot 0 (`party 0` primary, `party 2` secondary)
-            let mut byte_idx = 0;
-            while byte_idx < n {
-                let v = pk_seed[byte_idx];
-                for bit in 0..8 {
-                    if ((v >> bit) & 1) == 1 {
-                        let pos = 8 * byte_idx + bit;
-                        st_p[0][pos] |= bit_b;
-                        st_s[2][pos] |= bit_b;
-                    }
-                }
-                byte_idx += 1;
-            }
-            // Public `ADRS` at `n..n+32`
-            let mut byte_idx = 0;
-            while byte_idx < 32 {
-                let v = adrs_bytes[byte_idx];
-                for bit in 0..8 {
-                    if ((v >> bit) & 1) == 1 {
-                        let pos = 8 * (n + byte_idx) + bit;
-                        st_p[0][pos] |= bit_b;
-                        st_s[2][pos] |= bit_b;
-                    }
-                }
-                byte_idx += 1;
-            }
-            // Padding `0x1f` at `2*n + 32` and `0x80` at `135`
-            let pad_off = 8 * (2 * n + 32);
-            for bit in 0..5 {
-                st_p[0][pad_off + bit] |= bit_b;
-                st_s[2][pad_off + bit] |= bit_b;
-            }
-            st_p[0][8 * 135 + 7] |= bit_b;
-            st_s[2][8 * 135 + 7] |= bit_b;
-            b += 1;
-        }
-        // Secret `SK.seed` at `n+32 .. 2*n+32` replicated across all active instances `active_mask`
-        let sk_bit_off = 8 * (n + 32);
-        for p in 0..3 {
-            let (sk_p, sk_s) = self.keys[p].sk_seed_shares();
-            for byte_idx in 0..n {
-                for bit in 0..8 {
-                    let mp = 0u64.wrapping_sub(((sk_p[byte_idx] >> bit) & 1) as u64);
-                    let ms = 0u64.wrapping_sub(((sk_s[byte_idx] >> bit) & 1) as u64);
-                    st_p[p][sk_bit_off + 8 * byte_idx + bit] = mp & active_mask;
-                    st_s[p][sk_bit_off + 8 * byte_idx + bit] = ms & active_mask;
-                }
-            }
-        }
+        let (mut st_p, mut st_s) = rss_prf_states(&self.keys, pk_seed, adrs_batch);
 
         if defer_dzk {
             self.permute_batch64_deferred(batch_len, &mut st_p, &mut st_s)?;
@@ -2370,6 +2649,7 @@ impl RssSlhMpcCluster {
     /// Evaluate up to `64` single-block `F(PK.seed, adrs_batch[b], secret_in)` instances in parallel
     /// (masked by `exec_mask`, keeping lanes with bit `0` in `exec_mask` unchanged for unequal WOTS+ step depths!).
     /// On error the chain shares in `cur_p` / `cur_s` are zeroed.
+    #[cfg(test)]
     fn eval_f_step_masked_batch64(
         &mut self,
         pk_seed: &[u8],
@@ -2386,55 +2666,9 @@ impl RssSlhMpcCluster {
         if exec_mask == 0 {
             return Ok(());
         }
-        let n = self.keys[0].key_len;
-        let n_bits = 8 * n;
-        let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
-        let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
-
-        let mut b = 0;
-        while b < batch_len {
-            let bit_b = 1u64 << b;
-            let adrs_bytes = adrs_batch[b].to_bytes();
-            let mut byte_idx = 0;
-            while byte_idx < n {
-                let v = pk_seed[byte_idx];
-                for bit in 0..8 {
-                    if ((v >> bit) & 1) == 1 {
-                        let pos = 8 * byte_idx + bit;
-                        st_p[0][pos] |= bit_b;
-                        st_s[2][pos] |= bit_b;
-                    }
-                }
-                byte_idx += 1;
-            }
-            let mut byte_idx = 0;
-            while byte_idx < 32 {
-                let v = adrs_bytes[byte_idx];
-                for bit in 0..8 {
-                    if ((v >> bit) & 1) == 1 {
-                        let pos = 8 * (n + byte_idx) + bit;
-                        st_p[0][pos] |= bit_b;
-                        st_s[2][pos] |= bit_b;
-                    }
-                }
-                byte_idx += 1;
-            }
-            let pad_off = 8 * (2 * n + 32);
-            for bit in 0..5 {
-                st_p[0][pad_off + bit] |= bit_b;
-                st_s[2][pad_off + bit] |= bit_b;
-            }
-            st_p[0][8 * 135 + 7] |= bit_b;
-            st_s[2][8 * 135 + 7] |= bit_b;
-            b += 1;
-        }
-        let m1_off = 8 * (n + 32);
-        for p in 0..3 {
-            for bit_idx in 0..n_bits {
-                st_p[p][m1_off + bit_idx] = cur_p[p][bit_idx];
-                st_s[p][m1_off + bit_idx] = cur_s[p][bit_idx];
-            }
-        }
+        let n_bits = 8 * self.keys[0].key_len;
+        let (mut st_p, mut st_s) =
+            rss_f_states(self.keys[0].key_len, pk_seed, adrs_batch, cur_p, cur_s);
 
         if let Err(e) = self.permute_batch64_deferred(batch_len, &mut st_p, &mut st_s) {
             wipe_rss_states(cur_p, cur_s);
@@ -2647,6 +2881,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
 
         // Now evaluate all `total_leaves = k * 2^a` leaf hashes `F(PK.seed, leaf_adrs, PRF(PK.seed, SK.seed, prf_adrs))`
         // in 64-wide bitsliced batches (unrevealed `sk` values NEVER leave secret shares!)
+        let mut plans = Vec::new();
         let mut leaf_cursor = 0usize;
         while leaf_cursor < total_leaves {
             let chunk_len = (total_leaves - leaf_cursor).min(64);
@@ -2665,22 +2900,16 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                 leaf_a.f6 = flat as u32;
                 leaf_batch.push(leaf_a);
             }
-            let (cur_p, cur_s) = self
-                .eval_prf_batch64_secret_deferred(pk_seed, &prf_batch)
-                .map_err(rss_oracle_abort)?;
-            let mut cur_p = SecretBuffer(cur_p);
-            let mut cur_s = SecretBuffer(cur_s);
-            let mask = batch_active_mask(chunk_len);
-            self.eval_f_step_masked_batch64(pk_seed, &leaf_batch, mask, &mut cur_p, &mut cur_s)
-                .map_err(rss_oracle_abort)?;
-            for p in 0..3 {
-                cut.push_party_slices(p, &cur_p[p][..8 * n], &cur_s[p][..8 * n]);
-                wipe_u64s(&mut cur_p[p]);
-                wipe_u64s(&mut cur_s[p]);
-            }
+            plans.push(RssChunkPlan {
+                prf: prf_batch,
+                steps: vec![(leaf_batch, batch_active_mask(chunk_len))],
+            });
             chunk_sizes.push(chunk_len);
             leaf_cursor += chunk_len;
         }
+
+        self.evaluate_chunks(pk_seed, &plans, &mut cut)
+            .map_err(rss_oracle_abort)?;
 
         let (opened_words, tok) = self
             .flush_verify_and_open_cut("rss_cut_fors_trees", &cut)
@@ -2752,6 +2981,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
         let mut cut = RssCutBuffer::new();
         let mut chunk_sizes = Vec::new();
 
+        let mut plans = Vec::new();
         let mut cursor = 0usize;
         while cursor < total_chains {
             let chunk_len = (total_chains - cursor).min(64);
@@ -2769,11 +2999,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                 a.f5 = ch;
                 prf_batch.push(a);
             }
-            let (cur_p, cur_s) = self
-                .eval_prf_batch64_secret_deferred(pk_seed, &prf_batch)
-                .map_err(rss_oracle_abort)?;
-            let mut cur_p = SecretBuffer(cur_p);
-            let mut cur_s = SecretBuffer(cur_s);
+            let mut steps = Vec::with_capacity(15);
             for step in 0..15u32 {
                 let mut step_batch = Vec::with_capacity(chunk_len);
                 for c in 0..chunk_len {
@@ -2789,17 +3015,18 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                     a.f6 = step;
                     step_batch.push(a);
                 }
-                self.eval_f_step_masked_batch64(pk_seed, &step_batch, mask, &mut cur_p, &mut cur_s)
-                    .map_err(rss_oracle_abort)?;
+                steps.push((step_batch, mask));
             }
-            for p in 0..3 {
-                cut.push_party_slices(p, &cur_p[p][..n_bits], &cur_s[p][..n_bits]);
-                wipe_u64s(&mut cur_p[p]);
-                wipe_u64s(&mut cur_s[p]);
-            }
+            plans.push(RssChunkPlan {
+                prf: prf_batch,
+                steps,
+            });
             chunk_sizes.push(chunk_len);
             cursor += chunk_len;
         }
+
+        self.evaluate_chunks(pk_seed, &plans, &mut cut)
+            .map_err(rss_oracle_abort)?;
 
         let (opened_words, tok) = self
             .flush_verify_and_open_cut("rss_cut_wots_pkgen", &cut)
@@ -2859,6 +3086,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
         let mut cut = RssCutBuffer::new();
         let mut chunk_sizes = Vec::new();
 
+        let mut plans = Vec::new();
         let mut cursor = 0usize;
         while cursor < total_chains {
             let chunk_len = (total_chains - cursor).min(64);
@@ -2883,12 +3111,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                 prf_batch.push(a);
                 c += 1;
             }
-            let (cur_p, cur_s) = self
-                .eval_prf_batch64_secret_deferred(pk_seed, &prf_batch)
-                .map_err(rss_oracle_abort)?;
-            let mut cur_p = SecretBuffer(cur_p);
-            let mut cur_s = SecretBuffer(cur_s);
-
+            let mut steps = Vec::with_capacity(15);
             for step in 0..15u32 {
                 let mut exec_mask = 0u64;
                 let mut step_batch = Vec::with_capacity(chunk_len);
@@ -2910,24 +3133,18 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                     step_batch.push(a);
                     c += 1;
                 }
-                self.eval_f_step_masked_batch64(
-                    pk_seed,
-                    &step_batch,
-                    exec_mask,
-                    &mut cur_p,
-                    &mut cur_s,
-                )
-                .map_err(rss_oracle_abort)?;
+                steps.push((step_batch, exec_mask));
             }
-
-            for p in 0..3 {
-                cut.push_party_slices(p, &cur_p[p][..n_bits], &cur_s[p][..n_bits]);
-                wipe_u64s(&mut cur_p[p]);
-                wipe_u64s(&mut cur_s[p]);
-            }
+            plans.push(RssChunkPlan {
+                prf: prf_batch,
+                steps,
+            });
             chunk_sizes.push(chunk_len);
             cursor += chunk_len;
         }
+
+        self.evaluate_chunks(pk_seed, &plans, &mut cut)
+            .map_err(rss_oracle_abort)?;
 
         let (opened_words, tok) = self
             .flush_verify_and_open_cut("rss_cut_wots_layer", &cut)
@@ -5515,6 +5732,95 @@ mod tests {
             .is_err()
         );
         assert_eq!(cluster.lane_permutations(), 0);
+    }
+
+    #[test]
+    fn scheduled_chunks_preserve_serial_shares_counters_and_verifier_rng() {
+        let make = || {
+            let mut rngs = make_rngs3(0x23);
+            let (keys, _) = run_dealerless_rss_dkg_2of3([0x44; 32], 16, &mut rngs).unwrap();
+            RssSlhMpcCluster::new([0x44; 32], keys, rngs).unwrap()
+        };
+        let mut serial = make();
+        let mut scheduled = make();
+        let pk_seed = serial.keys[0].pk_seed[..16].to_vec();
+        let plans: Vec<_> = (0..3)
+            .map(|chunk| {
+                let prf: Vec<_> = (0..3)
+                    .map(|lane| {
+                        let mut address = Fips205Adrs::ZERO;
+                        address.adrs_type = Fips205AdrsType::WotsPrf;
+                        address.f5 = chunk * 3 + lane;
+                        address
+                    })
+                    .collect();
+                let steps = (0..15)
+                    .map(|step| {
+                        (
+                            prf.iter()
+                                .map(|a| {
+                                    let mut a = *a;
+                                    a.adrs_type = Fips205AdrsType::WotsHash;
+                                    a.f6 = step;
+                                    a
+                                })
+                                .collect(),
+                            if chunk == 1 && step == 3 { 0 } else { 5 },
+                        )
+                    })
+                    .collect();
+                RssChunkPlan { prf, steps }
+            })
+            .collect();
+        // Exercise a barrier partway through a chunk, not just at its end.
+        for cluster in [&mut serial, &mut scheduled] {
+            let (mut p, mut s) = cluster
+                .eval_prf_batch64_secret_deferred(&pk_seed, &plans[0].prf)
+                .unwrap();
+            wipe_rss_states(&mut p, &mut s);
+        }
+        let mut expected = RssCutBuffer::new();
+        for plan in &plans {
+            let (p, s) = serial
+                .eval_prf_batch64_secret_deferred(&pk_seed, &plan.prf)
+                .unwrap();
+            let mut p = SecretBuffer(p);
+            let mut s = SecretBuffer(s);
+            for (addresses, mask) in &plan.steps {
+                serial
+                    .eval_f_step_masked_batch64(&pk_seed, addresses, *mask, &mut p, &mut s)
+                    .unwrap();
+            }
+            for party in 0..3 {
+                expected.push_party_slices(party, &p[party][..128], &s[party][..128]);
+            }
+        }
+        let mut actual = RssCutBuffer::new();
+        scheduled
+            .evaluate_chunks(&pk_seed, &plans, &mut actual)
+            .unwrap();
+        assert_eq!(expected.prim, actual.prim);
+        assert_eq!(expected.sec, actual.sec);
+        assert_eq!(serial.batch_ctr, scheduled.batch_ctr);
+        assert_eq!(serial.pending_dzk.a, scheduled.pending_dzk.a);
+        assert_eq!(serial.pending_dzk.b, scheduled.pending_dzk.b);
+        assert_eq!(serial.pending_dzk.c, scheduled.pending_dzk.c);
+        assert_eq!(serial.lane_permutations(), scheduled.lane_permutations());
+        let a = serial
+            .flush_verify_and_open_cut("test_chunk_parity", &expected)
+            .unwrap()
+            .0;
+        let b = scheduled
+            .flush_verify_and_open_cut("test_chunk_parity", &actual)
+            .unwrap()
+            .0;
+        assert_eq!(a, b);
+        for party in 0..3 {
+            assert_eq!(
+                serial.party_rngs[party].next_bytes32(),
+                scheduled.party_rngs[party].next_bytes32()
+            );
+        }
     }
 
     #[test]

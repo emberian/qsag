@@ -10,6 +10,7 @@ description = "Mixed-domain ZKBoo migration ownership and replicated outer-MPC p
 default = ["alloc"]
 alloc = ["qsag-accel/alloc", "qsag-addr/alloc"]
 std = ["alloc", "qsag-accel/std", "qsag-addr/std"]
+vulkan = ["std"]
 [dependencies]
 qsag-asm = { path = "../qsag-asm", default-features = false }
 qsag-accel = { path = "../qsag-accel", default-features = false }

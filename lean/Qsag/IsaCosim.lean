@@ -1,6 +1,7 @@
 module
 public import Qsag.ElfBinaryVerify
 import all Qsag.ElfBinaryVerify
+import Qsag.Tactic.AssuranceKit
 public section
 open Qsag
 
@@ -122,7 +123,7 @@ def step (d : DecodedInstr X86Instr) (st : X86State) (f : Flags) : Except String
     if c != 0 then
       let r := (out.gpr.get dst).toNat
       flags := putFlags f 1 (if out.cf then 1 else 0)
-      if kind == .shl || kind == .shr then
+      if kind == .shl || kind == .shr || kind == .sar then
         flags := undefFlags (putFlags flags 0xc4 (szp r w)) 16
       flags := if c == 1 then putFlags flags 2048 (if out.ofFlag then 2048 else 0) else undefFlags flags 2048
   | .cmovcc cc _ _ _ =>
@@ -151,9 +152,12 @@ def step (d : DecodedInstr X86Instr) (st : X86State) (f : Flags) : Except String
     throw "raw stepX86 OF diverges from architectural RFLAGS"
   return (out, flags)
 
-/-- Fallback ONLY when `decodeX86InstrAt` returns `none`: condition codes outside
-`{2,3,4,5}` (consuming `SF/PF/OF`), high-byte `AH..BH` `SETcc`, `SAR`, and legacy
-non-VEX `PCLMULQDQ`. Canonical `decodeX86InstrAt` always runs first. -/
+/-- Single-instruction probes for encodings whose architectural meaning needs state that
+`X86State` does not carry: `CMOVcc` / `SETcc` on condition codes outside `{2,3,4,5}` (they read
+`SF` / `PF`), high-byte `AH..BH` `SETcc`, and legacy non-VEX `PCLMULQDQ` (which preserves bits
+`[255:128]`, unlike the VEX form the verified decoder models). `run` consults this layer only for
+a byte string that `decodeX86Stream` rejects as a whole, so any code the verified decoder accepts
+(every certified kernel) executes through `stepX86` alone. -/
 def extra (bs : List UInt8) (st : X86State) (f : Flags) : Option (Except String (X86State × Flags × Nat)) := Id.run do
   let rex := (bs.headD 0).toNat
   let hasRex := 0x40 ≤ rex && rex ≤ 0x4f
@@ -178,24 +182,6 @@ def extra (bs : List UInt8) (st : X86State) (f : Flags) : Option (Except String 
       let old := (st.gpr.get dst).toNat
       let value := (old &&& (0xffffffffffffffff - (255 <<< shift))) ||| (v <<< shift)
       return ({ st with gpr := st.gpr.set dst (UInt64.ofNat value), pc := st.pc+p+3 }, f, p+3)
-  if op == 0xd1 && op2 ≥ 0xc0 && bs.length ≥ p+2 && (op2/8)%8 == 7 then
-    let dst := op2%8+(rex%2)*8
-    let w := if wide then 64 else 32
-    let a := (st.gpr.get dst).toNat % 2^w
-    let r := ((signed a w / 2) % (2^w : Nat)).toNat
-    let f1 := undefFlags (putFlags f 0xc5 (szp r w + if bit a 0 then 1 else 0)) 16
-    let flags := putFlags f1 2048 0
-    return some (.ok ({ st with pc := st.pc+p+2, gpr := st.gpr.set dst (UInt64.ofNat r), cf := bit flags.value 0, zf := bit flags.value 6, ofFlag := false }, flags, p+2))
-  if op == 0xc1 && op2 / 8 == 31 && bs.length ≥ p+3 then
-    let dst := op2%8+(rex%2)*8
-    let w := if wide then 64 else 32
-    let c := modrm % w
-    let a := (st.gpr.get dst).toNat % 2^w
-    let r := ((signed a w / (2^c : Nat)) % (2^w : Nat)).toNat
-    let flags := if c == 0 then f else
-      let f := undefFlags (putFlags f 0xc5 (szp r w + if bit a (c-1) then 1 else 0)) 16
-      if c == 1 then putFlags f 2048 0 else undefFlags f 2048
-    return some (.ok ({ st with pc := st.pc+p+3, gpr := st.gpr.set dst (UInt64.ofNat r), cf := bit flags.value 0, zf := bit flags.value 6, ofFlag := bit flags.value 11 }, flags, p+3))
   if bs.take 4 == [0x66, 0x0f, 0x3a, 0x44] && bs.length ≥ 6 then
     let m := (bs.getD 4 0).toNat
     if m ≥ 0xc0 then
@@ -208,7 +194,7 @@ def extra (bs : List UInt8) (st : X86State) (f : Flags) : Option (Except String 
       return some (.ok ({ out with ymm := out.ymm.set dst { v with w2 := old.w2, w3 := old.w3 } }, f, 6))
   return none
 
-def run (fuel : Nat) (code : List UInt8) (st : X86State) (f : Flags) :
+def runWith (allowExtra : Bool) (fuel : Nat) (code : List UInt8) (st : X86State) (f : Flags) :
     Except String (X86State × Flags × List Nat) :=
   if st.pc == code.length then pure (st, f, [])
   else if st.pc > code.length then .error s!"program counter {st.pc} escaped slice length {code.length}"
@@ -219,11 +205,26 @@ def run (fuel : Nat) (code : List UInt8) (st : X86State) (f : Flags) :
     let (out, flags) ← match decodeX86InstrAt st.pc bs with
       | some d => step d st f
       | none =>
-        match extra bs st f with
+        if !allowExtra then .error s!"instruction at {st.pc} is outside the verified decoder"
+        else match extra bs st f with
         | some result => do let (out, flags, _) ← result; pure (out, flags)
         | none => .error s!"unsupported instruction at {st.pc}"
-    let (finalOut, finalFlags, pcs) ← run n code out flags
+    let (finalOut, finalFlags, pcs) ← runWith allowExtra n code out flags
     pure (finalOut, finalFlags, out.pc :: pcs)
+
+/-- Cosimulate `code`. The `extra` probe layer is enabled exactly when the verified stream
+decoder rejects `code`. -/
+def run (fuel : Nat) (code : List UInt8) (st : X86State) (f : Flags) :
+    Except String (X86State × Flags × List Nat) :=
+  runWith (decodeX86Stream code).isNone fuel code st f
+
+/-- Code accepted by the verified decoder never reaches the `extra` probe layer. -/
+theorem run_verified_code_is_strict (fuel : Nat) (code : List UInt8) (st : X86State) (f : Flags)
+    (prog : List (DecodedInstr X86Instr)) (h : decodeX86Stream code = some prog) :
+    run fuel code st f = runWith false fuel code st f := by
+  unfold run
+  rw [h]
+  rfl
 
 structure EdgeVector where
   name : String
@@ -351,5 +352,17 @@ def checkEdgeVector (v : EdgeVector) : Bool :=
 
 theorem rflags_edge_vectors_verified :
     edgeCaseVectors.all checkEdgeVector = true := by decide +kernel
+
+
+theorem verified_prefix_mutation_rejected :
+    ∃ code : List UInt8, decodeX86Stream code = none ∧
+      decodeX86Stream (code.drop 1) = some [⟨0, 1, .ret⟩] := by
+  exact ⟨[0xf2, 0xc3], by decide +kernel⟩
+
+theorem strict_code_inhabited :
+    ∃ code prog, decodeX86Stream code = some prog := ⟨[0xc3], [⟨0, 1, .ret⟩], by decide +kernel⟩
+
+#tooth_pair run_verified_code_is_strict vs verified_prefix_mutation_rejected
+#verify_inhabited run_verified_code_is_strict strict_code_inhabited
 
 end IsaCosim

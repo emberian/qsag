@@ -18,6 +18,7 @@ import all Qsag.ElfParse
 import all Qsag.ElfBinaryVerify
 import all Qsag.ElfInvCerts
 
+import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag
 
@@ -456,5 +457,20 @@ theorem current_pmull_missing_wipe_rejected :
       [0x1F, 0x20, 0x03, 0xD5])
       currentAarch64SymbolContracts[3] qsag_asm_tower128_bdoz_mac_pmull_currentInv = false := by
   decide +kernel
+
+
+theorem current_certificate_mutation_tooth :
+    ∃ i : Nat,
+      certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts i = true ∧
+      certSliceAt currentX86ExtractedSlices currentX86SymbolContracts x86InvCerts i = false :=
+  ⟨13, currentX86_symbol_13_certificate, current_rejects_historical_certificate⟩
+
+theorem current_certificate_index_inhabited :
+    ∃ i : Nat, i < currentX86ExtractedSlices.length ∧
+      certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts i = true :=
+  ⟨13, by decide +kernel, currentX86_symbol_13_certificate⟩
+
+#tooth_pair currentX86_all_symbol_certificates vs current_certificate_mutation_tooth
+#verify_inhabited currentX86_all_symbol_certificates current_certificate_index_inhabited
 
 end Qsag

@@ -52,11 +52,11 @@ pub mod aarch64_asm;
 
 pub use bitslice::{
     BITSLICE_LANES, BitPlane256, KECCAK_STATE_BITS, KECCAK_STATE_BYTES, XorCombinePattern,
-    gf2_64x128_clmul_acc, gf2_64x128_clmul_acc_with_backend, gf2_128_dot,
-    gf2_128_dot_with_backend, gf2_128_mul_acc_batch, gf2_128_mul_acc_batch_with_backend,
-    gf2_128_mul_portable, gf2_xor_combine_planes, gf2_xor_combine_planes_with_backend,
-    pack_256x200_bitslice, pack_256x200_bitslice_with_backend, transpose64x256,
-    transpose64x256_with_backend, unpack_256x200_bitslice, unpack_256x200_bitslice_with_backend,
+    gf2_64x128_clmul_acc, gf2_64x128_clmul_acc_with_backend, gf2_128_dot, gf2_128_dot_with_backend,
+    gf2_128_mul_acc_batch, gf2_128_mul_acc_batch_with_backend, gf2_128_mul_portable,
+    gf2_xor_combine_planes, gf2_xor_combine_planes_with_backend, pack_256x200_bitslice,
+    pack_256x200_bitslice_with_backend, transpose64x256, transpose64x256_with_backend,
+    unpack_256x200_bitslice, unpack_256x200_bitslice_with_backend,
 };
 pub use cpuid::{
     CpuCapabilities, DitRequirement, HardwareDitGuard, HardwareDitStatus, HardwareDitUnavailable,

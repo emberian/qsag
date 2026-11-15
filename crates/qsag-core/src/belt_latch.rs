@@ -290,7 +290,7 @@ pub struct FsBeltWal {
     checkpoint: crate::durable_ledger::LedgerCheckpoint,
     anchor: Option<alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>>,
     release: core::cell::RefCell<Option<(crate::ceremony_journal::CeremonyReservation, u64)>>,
-    failed: core::cell::Cell<bool>,
+    failed: core::cell::Cell<Option<WalError>>,
 }
 
 #[cfg(feature = "std")]
@@ -315,9 +315,9 @@ impl FsBeltWal {
         self.checkpoint
     }
 
-    /// Whether an earlier write or anchor advance failed on this handle.
+    /// Whether an earlier write, read, authentication check, or anchor advance failed on this handle.
     pub fn is_failed(&self) -> bool {
-        self.failed.get()
+        self.failed.get().is_some()
     }
 
     fn advance_anchor_or_fail(
@@ -327,7 +327,7 @@ impl FsBeltWal {
         if let Some(anchor) = &self.anchor
             && crate::durable_ledger::advance_anchor(&**anchor, checkpoint).is_err()
         {
-            self.failed.set(true);
+            self.failed.set(Some(WalError::Io));
             return Err(WalError::Io);
         }
         Ok(())
@@ -381,16 +381,12 @@ impl FsBeltWal {
         permit: crate::ceremony_journal::CeremonyReleasePermit,
     ) -> std::io::Result<()> {
         *self.release.get_mut() = None;
-        if self.failed.get() {
+        if self.is_failed() {
             return Err(std::io::Error::other(
                 "belt latch log handle failed; reopen",
             ));
         }
-        *self.release.get_mut() = Some(
-            journal
-                .consume_belt_release(permit)
-                .inspect_err(|_| self.failed.set(true))?,
-        );
+        *self.release.get_mut() = Some(journal.consume_belt_release(permit)?);
         Ok(())
     }
 
@@ -473,7 +469,7 @@ impl FsBeltWal {
             },
             anchor: None,
             release: core::cell::RefCell::new(None),
-            failed: core::cell::Cell::new(false),
+            failed: core::cell::Cell::new(None),
         };
         let (encoded, ckpt) = wal.seal(1, &BeltLatchState::default());
         wal.record.replace(&encoded)?;
@@ -498,7 +494,7 @@ impl FsBeltWal {
             },
             anchor: None,
             release: core::cell::RefCell::new(None),
-            failed: core::cell::Cell::new(false),
+            failed: core::cell::Cell::new(None),
         };
         let raw = wal.record.read()?;
         let Some((ckpt, _)) = wal.unseal(&raw) else {
@@ -542,8 +538,8 @@ impl FsBeltWal {
 #[cfg(feature = "std")]
 impl DurableWal for FsBeltWal {
     fn authorize_open(&self, record: &BeltLatchRecord) -> Result<(), WalError> {
-        if self.failed.get() {
-            return Err(WalError::Io);
+        if let Some(err) = self.failed.get() {
+            return Err(err);
         }
         self.advance_anchor_or_fail(self.checkpoint)?;
         let (reservation, bound_epoch) = self.release.borrow_mut().take().ok_or(WalError::Io)?;
@@ -556,21 +552,21 @@ impl DurableWal for FsBeltWal {
     }
 
     fn sync_persist(&mut self, state: &BeltLatchState) -> Result<(), WalError> {
-        if self.failed.get() {
-            return Err(WalError::Io);
+        if let Some(err) = self.failed.get() {
+            return Err(err);
         }
         let current_raw = self.record.read().map_err(|_| {
-            self.failed.set(true);
+            self.failed.set(Some(WalError::Io));
             WalError::Io
         })?;
         let (on_disk_ckpt, _) = self.unseal(&current_raw).ok_or_else(|| {
-            self.failed.set(true);
+            self.failed.set(Some(WalError::Corrupt));
             WalError::Corrupt
         })?;
         if on_disk_ckpt.generation != self.checkpoint.generation
             || !ct_eq_bytes32(&on_disk_ckpt.tag, &self.checkpoint.tag)
         {
-            self.failed.set(true);
+            self.failed.set(Some(WalError::Corrupt));
             return Err(WalError::Corrupt);
         }
         let next_gen = self
@@ -580,7 +576,7 @@ impl DurableWal for FsBeltWal {
             .ok_or(WalError::Corrupt)?;
         let (encoded, next_ckpt) = self.seal(next_gen, state);
         if self.record.replace(&encoded).is_err() {
-            self.failed.set(true);
+            self.failed.set(Some(WalError::Io));
             return Err(WalError::Io);
         }
         self.advance_anchor_or_fail(next_ckpt)?;
@@ -589,19 +585,20 @@ impl DurableWal for FsBeltWal {
     }
 
     fn load(&self) -> Result<Option<BeltLatchState>, WalError> {
-        if self.failed.get() {
-            return Err(WalError::Io);
+        if let Some(err) = self.failed.get() {
+            return Err(err);
         }
-        match self.record.read().inspect_err(|_| self.failed.set(true)) {
+        match self.record.read() {
             Ok(raw) => {
                 let (ckpt, state) = self.unseal(&raw).ok_or_else(|| {
-                    self.failed.set(true);
+                    self.failed.set(Some(WalError::Corrupt));
                     WalError::Corrupt
                 })?;
                 if ckpt.generation < self.checkpoint.generation
                     || (ckpt.generation == self.checkpoint.generation
                         && !ct_eq_bytes32(&ckpt.tag, &self.checkpoint.tag))
                 {
+                    self.failed.set(Some(WalError::Corrupt));
                     return Err(WalError::Corrupt);
                 }
                 Ok(Some(state))
@@ -612,9 +609,13 @@ impl DurableWal for FsBeltWal {
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
                 ) =>
             {
+                self.failed.set(Some(WalError::Corrupt));
                 Err(WalError::Corrupt)
             }
-            Err(_) => Err(WalError::Io),
+            Err(_) => {
+                self.failed.set(Some(WalError::Io));
+                Err(WalError::Io)
+            }
         }
     }
 }
