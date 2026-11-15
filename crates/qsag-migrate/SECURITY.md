@@ -423,7 +423,7 @@ verification barrier are retained. Sixteen-gate initial blocks and 32,768-gate
 flushes reduce the degree bound to 54 and bound per-engine scratch memory. Projection scratch retains high-water-mark wiping; contiguous limb buffers
 are reused across flushes and owned by the same wipe-on-drop engine scratch.
 
-## General threshold custody (trusted preprocessing)
+## General quorum custody: authenticated additive sharing
 
 `CoZkCustodianShare::new_shamir` accepts any `2 <= t <= n <= 64` and an
 explicit sorted quorum of at least `t` distinct zero-based party identities.
@@ -436,41 +436,87 @@ XOR shares of the same bytes (not shares modulo the spending-scalar order).
 All selected participants must remain online; abort does not trigger a quorum
 change. A new quorum needs a new ceremony and fresh preprocessing.
 
-This path is **semi-honest MPC with a trusted offline preprocessing dealer**.
-For Shamir custody, privacy requires fewer than `t` colluding custodians;
-for additive custody it requires fewer than `n`. It is not an extension of
-the active 1-of-3 RSS security theorem. The original
-`new` constructor retains its RSS algorithm and active verification barriers.
-Do not use the general backend where online custodians may deviate from the
-protocol. Pairwise MACs authenticate messages but do not authenticate shared
-wire values or certify a dealer's triples. The ordinary final ZKBoo verifier
-still checks every returned proof, but this does not establish active privacy
-of the distributed computation. Malicious-secure general preprocessing and
-MAC-authenticated online wires remain future work.
+The selected quorum runs the same distributed prover as the three-custodian
+path (same circuit, 438 repetitions, Fiat-Shamir transcript, view encoding and
+verifier) on a different engine, `threshold_mpc::SpdzEngine`. Its sharing is
+additive over the quorum and every wire is authenticated, so it tolerates the
+corruption of all quorum members but one:
 
-`threshold_mpc::TrustedDealer` implements independent Boolean and prime-field
-Beaver triple generation without accepting witness material. Each output row
-belongs only to the corresponding position in `ThresholdConfig::quorum()`.
-Distribute those rows over confidential channels, erase dealer entropy and
-state before online execution, and implement the transport's consuming
-`take_boolean_triples` / `take_field_triples` methods. Each triple is used once,
-including across aborts and forks. Each batch substream requires a separate
-preprocessing supply. Missing preprocessing fails closed with
-`MissingPreprocessing`; no witness-opening fallback exists. The dealer and
-its seed must never be accessible to an online custodian. A dealer colluding
-with any party that observes mask openings can recover secret wires.
+* A Boolean wire is a 64-lane word `x` with the MAC `Delta * x(X)` in
+  `GF(2)[X]/(X^128 + X^7 + X^2 + X + 1)`, where `x(X)` has the lanes as
+  coefficients. XOR and constants are local. `AND` consumes one Beaver triple
+  whose components carry one MAC per lane, which is what lets a lane-wise
+  product with a public word stay authenticated.
+* A prime-field wire is one element per lane with the MAC `alpha * v`.
+  Goldilocks uses two independent keys, and a check uses an independent
+  challenge vector per key, because one 64-bit key or one 64-bit linear
+  combination alone would give only 64 bits.
+* Boolean-to-field conversion opens `x XOR r` for a doubly authenticated
+  random bit `r` and sets `[x]_p = c + (1 - 2c)[r]_p`. Field-to-Boolean opens
+  `v - rho` for a random `rho` assembled from doubly authenticated bits and adds
+  the public difference back in a Boolean adder. Neither direction takes an
+  input from a party, so there is no conversion bit a party could substitute.
+  For Goldilocks `rho` is rejected unless it is below the modulus (the
+  acceptance bit is opened, the rejected `rho` is discarded); for the 255- and
+  256-bit fields the excess above the modulus has probability below `2^-222`
+  per lane and is not sampled out.
+* Inputs are masked with authenticated random words. A lane-uniform input
+  (the witness) is masked with one authenticated bit spread over all lanes
+  and every party's masked word must be `0` or all ones, so no party can feed
+  different witnesses to different repetitions.
+* A challenged view is opened lane-selectively: the lanes of the unopened
+  head are one-time padded with authenticated random bits before the word is
+  opened, so the hidden head never leaves the sharing.
 
-The engine uses dynamic all-to-all authenticated channels in sorted quorum
-order (excluding self), binds `(t,n,quorum)` into the session MAC domain, and
-uses packed Boolean Beaver multiplication and additive field Beaver
-multiplication for the selected quorum. The three inner ZKBoo virtual parties,
-438 repetitions, Fiat-Shamir transcript, view encoding, and verifier are
-unchanged. Field/Boolean conversions operate on individual local components
-inside MPC and never open the represented value. Private tape contributions
-are independent per custodian and combined through additive sharing.
+Every broadcast is sent pairwise, authenticated by a channel MAC, and folded
+into a transcript chain. Values opened inside the protocol (Beaver
+differences, conversion masks) are *partially* opened: their MAC shares are
+queued. `SpdzEngine::check` settles the queue: the quorum compares
+transcript chains, flips a coin by commit-then-open, each party commits to
+`sigma_i = sum_j chi_j (m_ij - key_i * v_j)` for the coin-derived `chi`, and
+the `sigma_i` are opened and must sum to zero. The check runs before any
+output opening is sent, again before an opened output is returned to the
+caller, and inside every `agree`. A custodian that flips a wire share, lies
+in a Beaver opening, uses a wrong product share, forges a conversion mask or
+sends different values to different peers passes one check with probability
+at most `2^-127` (Boolean), `2^-126` (Goldilocks) or `2^-254` (secp256k1 and
+Ed25519 base fields). Any failed check, malformed or unauthenticated message,
+non-canonical share or exhausted preprocessing poisons the engine: it erases
+its MAC key shares and refuses all further work. Abort is not identifiable
+and not fair; one corrupt custodian can force it.
 
-The new backend is a correctness-oriented general path: conversion and
-communication cost grow with the active quorum. The active RSS backend
-remains the optimized 2-of-3 path. In `std` builds the BLS fixed-base tables
-are cached process-wide with `OnceLock`; no-std builds retain allocation-based
-synthesis because `std::sync::OnceLock` is unavailable.
+Privacy holds against any strict subset of the quorum, and for Shamir custody
+against fewer than `t` custodians overall. The security argument is the
+standard one for SPDZ (Damgard, Pastro, Smart, Zakarias, CRYPTO 2012; MAC
+check as in Damgard et al., ESORICS 2013) with the lane-packed Boolean MAC
+above; it is not machine-checked here, unlike parts of the replicated path.
+
+### Preprocessing
+
+The engine consumes witness-independent material through the transport's
+`take_*` methods: Boolean triples, authenticated random words, field triples,
+field randoms and doubly authenticated bits, all under the MAC key shares
+given to `CoZkCustodianShare`. `threshold_prep::PartyPreprocessing` is the
+per-custodian store. Material is used once, including across aborts and
+forks; each batch stream needs its own supply; a stream that runs dry fails
+closed with `MissingPreprocessing` and there is no witness-opening fallback.
+
+@@PREP@@
+
+### Cost
+
+The engine is correct and actively secure for the whole prover, but the
+prover's circuit is dominated by shared Keccak permutations (the SHAKE tapes
+and the cSHAKE view commitments). Measured on the replicated path, one
+repetition batch evaluates about 155 million 64-lane `AND` words per
+custodian, about 1.1 billion per ceremony. In the authenticated engine each
+`AND` word consumes a triple of roughly 3 KiB per custodian, so a complete
+general-quorum ceremony needs on the order of 3 TiB of Boolean preprocessing
+per custodian. The unit tests therefore cover the engine's primitives,
+conversions and cheating cases, and byte-exact view and commitment synthesis
+on a small circuit, not a complete general-quorum ownership proof. The
+replicated three-custodian engine remains the practical path.
+
+In `std` builds the BLS fixed-base tables are cached process-wide with
+`OnceLock`; no-std builds retain allocation-based synthesis because
+`std::sync::OnceLock` is unavailable.

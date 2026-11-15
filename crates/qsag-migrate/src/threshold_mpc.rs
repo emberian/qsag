@@ -338,6 +338,7 @@ pub(crate) struct SpdzEngine<T> {
     first: bool,
     peers: Vec<usize>,
     /// Session as given by the caller; batch engines derive theirs from it.
+    #[cfg(any(feature = "std", test))]
     root_session: [u8; 32],
     session: [u8; 32],
     link_keys: Vec<[u8; 32]>,
@@ -415,6 +416,7 @@ impl<T: Transport> SpdzEngine<T> {
         {
             return Err(Error::InvalidConfiguration);
         }
+        #[cfg(any(feature = "std", test))]
         let root_session = session;
         let session = cshake256_framed_32(b"QSAG.OUTER.SPDZ.V1", &[&session, &config.binding()]);
         let mut rng = Shake256::new();
@@ -442,6 +444,7 @@ impl<T: Transport> SpdzEngine<T> {
             config,
             party,
             peers,
+            #[cfg(any(feature = "std", test))]
             root_session,
             session,
             link_keys,
@@ -462,6 +465,7 @@ impl<T: Transport> SpdzEngine<T> {
     }
 
     /// Custody secrets for starting this custodian's batch engines.
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn custody(&self) -> ([u8; 32], ThresholdConfig, Vec<[u8; 32]>, MacKeyShare) {
         (
             self.root_session,
@@ -587,7 +591,16 @@ impl<T: Transport> SpdzEngine<T> {
         Ok(received)
     }
 
-    fn commitment(&self, label: &[u8], payload: &[u64], nonce: &[u8; 32]) -> [u64; 4] {
+    /// Hiding and binding commitment of the quorum member at `position` to
+    /// `payload` in the current round. Binding the position stops one member
+    /// from replaying another's commitment and opening.
+    fn commitment(
+        &self,
+        label: &[u8],
+        position: usize,
+        payload: &[u64],
+        nonce: &[u8; 32],
+    ) -> [u64; 4] {
         let mut bytes = bytes_of(payload);
         let digest = cshake256_framed_32(
             b"QSAG.OUTER.SPDZ.COMMIT.V1",
@@ -595,6 +608,7 @@ impl<T: Transport> SpdzEngine<T> {
                 label,
                 &self.session,
                 &self.sequence.to_le_bytes(),
+                &[position as u8],
                 &bytes,
                 nonce,
             ],
@@ -613,7 +627,13 @@ impl<T: Transport> SpdzEngine<T> {
     ) -> Result<Vec<SecretVec<u64>>, Error> {
         let mut nonce = [0u8; 32];
         self.rng.squeeze(&mut nonce);
-        let own_commit = self.commitment(label, payload, &nonce);
+        let mine = self
+            .config
+            .quorum
+            .iter()
+            .position(|&p| p == self.party)
+            .unwrap();
+        let own_commit = self.commitment(label, mine, payload, &nonce);
         let committed_at = self.sequence;
         let mut first: Vec<u64> = prefix.to_vec();
         first.extend_from_slice(&own_commit);
@@ -631,13 +651,13 @@ impl<T: Transport> SpdzEngine<T> {
         let now = self.sequence;
         self.sequence = committed_at;
         let mut ok = true;
-        for (commit, open) in commits.iter().zip(&opened) {
+        for (position, (commit, open)) in commits.iter().zip(&opened).enumerate() {
             let (body, nonce) = open.split_at(payload.len());
             let mut nonce_bytes = [0u8; 32];
             for (chunk, word) in nonce_bytes.chunks_exact_mut(8).zip(nonce) {
                 chunk.copy_from_slice(&word.to_le_bytes());
             }
-            ok &= commit[prefix.len()..] == self.commitment(label, body, &nonce_bytes);
+            ok &= commit[prefix.len()..] == self.commitment(label, position, body, &nonce_bytes);
         }
         self.sequence = now;
         if !ok {
@@ -804,12 +824,15 @@ impl<T: Transport> SpdzEngine<T> {
             }
         }
         self.pending_bits.extend_from_slice(&out);
-        self.pending_bit_macs
-            .extend(wires.iter().map(|w| w.mac()));
+        self.pending_bit_macs.extend(wires.iter().map(|w| w.mac()));
         Ok(out)
     }
 
-    fn partial_open_fields(&mut self, shares: &[[Value; 2]], d: Domain) -> Result<Vec<Value>, Error> {
+    fn partial_open_fields(
+        &mut self,
+        shares: &[[Value; 2]],
+        d: Domain,
+    ) -> Result<Vec<Value>, Error> {
         let own: SecretVec<u64> = shares.iter().flat_map(|s| s[0]).collect();
         let received = self.broadcast(&own)?;
         let mut out = vec![[0u64; 4]; shares.len()];
@@ -956,9 +979,8 @@ impl<T: Transport> Core for SpdzEngine<T> {
         out.reserve(k);
         for ((t, &d), &e) in triples.iter().zip(d).zip(e) {
             let share = t.c.share ^ (d & t.b.share) ^ (e & t.a.share);
-            let mac = pack_macs(&t.c.macs, u64::MAX)
-                ^ pack_macs(&t.b.macs, d)
-                ^ pack_macs(&t.a.macs, e);
+            let mac =
+                pack_macs(&t.c.macs, u64::MAX) ^ pack_macs(&t.b.macs, d) ^ pack_macs(&t.a.macs, e);
             out.push(ABit::new(share, mac) ^ self.public_bit(d & e));
         }
         #[cfg(test)]
@@ -976,15 +998,15 @@ impl<T: Transport> Core for SpdzEngine<T> {
     fn open(&mut self, bits: &[ABit]) -> Result<Vec<u64>, Error> {
         self.check()?;
         #[cfg(test)]
-        if let Some(Fault::FlipOpenedShare { lane }) = self.fault {
-            if !bits.is_empty() {
-                self.fault = None;
-                let mut forged: SecretVec<ABit> = bits.iter().copied().collect();
-                forged[0].0[0] ^= 1 << (lane & 63);
-                let opened = self.partial_open(&forged)?;
-                self.check()?;
-                return Ok(opened);
-            }
+        if let Some(Fault::FlipOpenedShare { lane }) = self.fault
+            && !bits.is_empty()
+        {
+            self.fault = None;
+            let mut forged: SecretVec<ABit> = bits.iter().copied().collect();
+            forged[0].0[0] ^= 1 << (lane & 63);
+            let opened = self.partial_open(&forged)?;
+            self.check()?;
+            return Ok(opened);
         }
         let opened = self.partial_open(bits)?;
         self.check()?;
@@ -1166,10 +1188,7 @@ impl<T: Transport> Core for SpdzEngine<T> {
             return Ok(Vec::new());
         }
         self.check()?;
-        let flat: SecretVec<[Value; 2]> = words
-            .iter()
-            .flat_map(|w| w.iter().map(|v| *v))
-            .collect();
+        let flat: SecretVec<[Value; 2]> = words.iter().flat_map(|w| w.iter().copied()).collect();
         let opened = self.partial_open_fields(&flat, d)?;
         self.check()?;
         Ok(opened.chunks_exact(64).map(|v| v.to_vec()).collect())
@@ -1352,6 +1371,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::threshold_prep::FixtureDealer;
     use std::{
+        boxed::Box,
         collections::BTreeMap,
         sync::{Arc, Mutex, mpsc},
         time::Duration,
@@ -1373,7 +1393,7 @@ pub(crate) mod tests {
     enum Source {
         Fixture(Arc<Mutex<Supply>>),
         /// Material produced ahead of time by a preprocessing ceremony.
-        Stored(crate::threshold_prep::PartyPreprocessing),
+        Stored(Box<crate::threshold_prep::PartyPreprocessing>),
     }
     pub(crate) struct Network {
         position: usize,
@@ -1402,7 +1422,10 @@ pub(crate) mod tests {
                 supply.batches.insert(self.round, (request.clone(), batch));
             }
             let (expected, batch) = supply.batches.get_mut(&self.round).unwrap();
-            assert_eq!(*expected, request, "quorum members disagree on preprocessing");
+            assert_eq!(
+                *expected, request,
+                "quorum members disagree on preprocessing"
+            );
             let rows = rows(batch);
             let mine = rows[self.position].take().unwrap();
             if rows.iter().all(Option::is_none) {
@@ -1451,7 +1474,8 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::Triples(rows) => rows,
                     _ => unreachable!(),
-                },                |store| store.take_boolean_triples(count),
+                },
+                |store| store.take_boolean_triples(count),
             )
         }
         fn take_auth_words(&mut self, count: usize) -> Result<Vec<AuthWord>, Error> {
@@ -1461,7 +1485,8 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::Words(rows) => rows,
                     _ => unreachable!(),
-                },                |store| store.take_auth_words(count),
+                },
+                |store| store.take_auth_words(count),
             )
         }
         fn take_field_triples(
@@ -1475,7 +1500,8 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::FieldTriples(rows) => rows,
                     _ => unreachable!(),
-                },                |store| store.take_field_triples(field, count),
+                },
+                |store| store.take_field_triples(field, count),
             )
         }
         fn take_field_randoms(
@@ -1489,7 +1515,8 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::FieldRandoms(rows) => rows,
                     _ => unreachable!(),
-                },                |store| store.take_field_randoms(field, count),
+                },
+                |store| store.take_field_randoms(field, count),
             )
         }
         fn take_dabits(
@@ -1503,7 +1530,8 @@ pub(crate) mod tests {
                 |b| match b {
                     Batch::DaBits(rows) => rows,
                     _ => unreachable!(),
-                },                |store| store.take_dabits(field, count),
+                },
+                |store| store.take_dabits(field, count),
             )
         }
     }
@@ -1549,7 +1577,7 @@ pub(crate) mod tests {
     ) -> Vec<R> {
         let parties = parties
             .into_iter()
-            .map(|(keys, store)| (keys, Source::Stored(store)))
+            .map(|(keys, store)| (keys, Source::Stored(Box::new(store))))
             .collect();
         run_parties(config, parties, f)
     }
@@ -1724,9 +1752,9 @@ pub(crate) mod tests {
                     let ar = engine.fadd(&a, &r, d);
                     let product = engine.fmul(&ar, &ar, d).unwrap();
                     let opened = engine.fopen_many(&[product, r], d).unwrap();
-                    for lane in 0..64 {
-                        let sum = d.add([7, 0, 0, 0], opened[1][lane]);
-                        assert_eq!(opened[0][lane], d.mul(sum, sum));
+                    for (square, r) in opened[0].iter().zip(&opened[1]) {
+                        let sum = d.add([7, 0, 0, 0], *r);
+                        assert_eq!(*square, d.mul(sum, sum));
                     }
                 }
                 engine.agree([18; 32]).unwrap();
@@ -1745,9 +1773,16 @@ pub(crate) mod tests {
                     .map(|lane| match lane % 3 {
                         0 => value,
                         1 => [17, 0, 0, 0],
-                        _ => [lane as u64, 1, 0, 0].map(|x| if d == Domain::Gold { x & !1 } else { x }),
+                        _ => [lane as u64, 1, 0, 0]
+                            .map(|x| if d == Domain::Gold { x & !1 } else { x }),
                     })
-                    .map(|v| if d == Domain::Gold { [v[0], 0, 0, 0] } else { v })
+                    .map(|v| {
+                        if d == Domain::Gold {
+                            [v[0], 0, 0, 0]
+                        } else {
+                            v
+                        }
+                    })
                     .collect();
                 let own: Vec<_> = (0..d.width())
                     .map(|bit| {
@@ -1768,7 +1803,9 @@ pub(crate) mod tests {
                     .collect();
                 let bits = engine.share(&contribution).unwrap();
                 let field = engine.bits_to_field(&bits, d).unwrap();
-                let opened = engine.fopen_many(&[field.iter().copied().collect()], d).unwrap();
+                let opened = engine
+                    .fopen_many(&[field.iter().copied().collect()], d)
+                    .unwrap();
                 assert_eq!(opened[0], expected);
                 let roundtrip = engine.field_to_bits(&field, d).unwrap();
                 assert_eq!(engine.open(&roundtrip).unwrap(), own);
@@ -1798,7 +1835,11 @@ pub(crate) mod tests {
         });
         let reference = honest[0].clone().expect("honest run must succeed");
         assert!(!reference.is_empty());
-        assert!(honest.iter().all(|outcome| outcome.as_ref() == Ok(&reference)));
+        assert!(
+            honest
+                .iter()
+                .all(|outcome| outcome.as_ref() == Ok(&reference))
+        );
         let outcomes = run(cfg.clone(), |party, mac_keys, network| {
             let mut engine = engine(&cfg, party, mac_keys, network);
             if party == cheater {
@@ -1916,6 +1957,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn stored_preprocessing_is_served_in_order_and_exhaustion_fails_closed() {
+        use crate::threshold_prep::{Demand, PartyPreprocessing};
+        let cfg = ThresholdConfig::new(3, 5, vec![0, 2, 4]).unwrap();
+        let mut dealer = FixtureDealer::new(&cfg, [21; 32]);
+        let field = ThresholdField::Goldilocks;
+        let mut stores: Vec<PartyPreprocessing> =
+            (0..3).map(|_| PartyPreprocessing::new()).collect();
+        for (store, words) in stores.iter_mut().zip(dealer.auth_words(2)) {
+            store.add_auth_words(words);
+        }
+        for (store, triples) in stores.iter_mut().zip(dealer.boolean_triples(1)) {
+            store.add_boolean_triples(triples);
+        }
+        for (store, dabits) in stores.iter_mut().zip(dealer.dabits(field, 1)) {
+            store.add_dabits(field, dabits);
+        }
+        let mut demand = Demand {
+            boolean_triples: 1,
+            auth_words: 2,
+            ..Demand::default()
+        };
+        demand.dabits[field.index()] = 1;
+        assert!(stores.iter().all(|store| store.remaining() == demand));
+        let parties = dealer.mac_key_shares().into_iter().zip(stores).collect();
+        run_stored(cfg.clone(), parties, |party, mac_keys, network| {
+            let mut engine = engine(&cfg, party, mac_keys, network);
+            let (a, b) = inputs(&mut engine, party).unwrap();
+            let c = engine.and(&[(a, b)]).unwrap();
+            let lifted = engine.lift_bits_many(&c, Domain::Gold).unwrap();
+            let total = |k: u64, r: u32| {
+                cfg.quorum
+                    .iter()
+                    .fold(0, |v, &p| v ^ k.rotate_left(r * p as u32))
+            };
+            let expected = total(0x0123_4567_89ab_cdef, 1) & total(0xfedc_ba98_7654_3210, 3);
+            assert_eq!(engine.open(&c).unwrap(), vec![expected]);
+            let opened = engine.fopen_many(&lifted, Domain::Gold).unwrap();
+            for (lane, value) in opened[0].iter().enumerate() {
+                assert_eq!(*value, [(expected >> lane) & 1, 0, 0, 0]);
+            }
+            // Everything stored has been used exactly once; one more request
+            // fails closed, consumes nothing and poisons the engine.
+            assert_eq!(
+                engine.and(&[(a, b)]).err(),
+                Some(Error::MissingPreprocessing)
+            );
+            assert!(engine.failed);
+            assert_eq!(engine.open(&c), Err(Error::MultiplicationCheck));
+        });
+    }
+
+    #[test]
     fn malformed_rounds_and_invalid_custody_are_rejected() {
         struct Altered;
         impl Transport for Altered {
@@ -1936,18 +2029,31 @@ pub(crate) mod tests {
         impl Transport for Empty {}
         let cfg = ThresholdConfig::new(2, 64, vec![0, 63]).unwrap();
         let mac_keys = || FixtureDealer::new(&cfg, [3; 32]).mac_key_shares().remove(0);
-        let state = |transport| SpdzEngine::new(0, [9; 32], cfg.clone(), keys(&cfg, 0), mac_keys(), transport);
+        let state = |transport| {
+            SpdzEngine::new(
+                0,
+                [9; 32],
+                cfg.clone(),
+                keys(&cfg, 0),
+                mac_keys(),
+                transport,
+            )
+        };
         let mut altered = state(Altered).unwrap();
         assert_eq!(altered.agree([1; 32]), Err(Error::Authentication(63)));
         assert_eq!(altered.agree([1; 32]), Err(Error::MultiplicationCheck));
-        let mut empty = SpdzEngine::new(0, [9; 32], cfg.clone(), keys(&cfg, 0), mac_keys(), Empty).unwrap();
+        let mut empty =
+            SpdzEngine::new(0, [9; 32], cfg.clone(), keys(&cfg, 0), mac_keys(), Empty).unwrap();
         assert_eq!(empty.share(&[1]).err(), Some(Error::MissingPreprocessing));
         assert_eq!(empty.open(&[]), Err(Error::MultiplicationCheck));
-        let mut empty = SpdzEngine::new(0, [9; 32], cfg.clone(), keys(&cfg, 0), mac_keys(), Empty).unwrap();
+        let mut empty =
+            SpdzEngine::new(0, [9; 32], cfg.clone(), keys(&cfg, 0), mac_keys(), Empty).unwrap();
         assert_eq!(empty.agree([1; 32]), Err(Error::InvalidConfiguration));
         assert_eq!(empty.agree([1; 32]), Err(Error::MultiplicationCheck));
         // Not a quorum member, wrong number of channel keys, non-canonical key share.
-        assert!(SpdzEngine::new(1, [9; 32], cfg.clone(), keys(&cfg, 0), mac_keys(), Empty).is_err());
+        assert!(
+            SpdzEngine::new(1, [9; 32], cfg.clone(), keys(&cfg, 0), mac_keys(), Empty).is_err()
+        );
         assert!(SpdzEngine::new(0, [9; 32], cfg.clone(), vec![], mac_keys(), Empty).is_err());
         let mut bad = mac_keys();
         bad.field[ThresholdField::Secp256k1.index()] = [u64::MAX; 4];
@@ -1965,8 +2071,16 @@ pub(crate) mod tests {
             .is_err()
         );
         assert!(
-            crate::CoZkCustodianShare::new_shamir(0, cfg.clone(), [0; 32], [0; 32], [0; 32], vec![], mac_keys())
-                .is_err()
+            crate::CoZkCustodianShare::new_shamir(
+                0,
+                cfg.clone(),
+                [0; 32],
+                [0; 32],
+                [0; 32],
+                vec![],
+                mac_keys()
+            )
+            .is_err()
         );
         for parties in [0, 1, 65, usize::MAX] {
             assert!(

@@ -326,14 +326,8 @@ impl CoZkCustodianShare {
         // Phase 1: Evaluate all batches, compute shared view commitments, and run
         // mandatory active multiplication checks on EVERY batch BEFORE opening any
         // commitment, public circuit output, or ZKBoo view.
-        let mut computed_batches = compute_batches(
-            &mut e,
-            &circuit,
-            witness,
-            &seeds,
-            children,
-            &self.entropy,
-        )?;
+        let mut computed_batches =
+            compute_batches(&mut e, &circuit, witness, &seeds, children, &self.entropy)?;
 
         // Cross-batch barrier: all custodians confirm every batch passed active
         // multiplication verification before ANY view commitment or output opens.
@@ -458,7 +452,9 @@ impl CoZkCustodianShare {
 pub(crate) trait ProverEngine: Core + Sized + Send {
     type Transport: Transport;
     /// Custody secrets a batch engine starts from; erased on drop.
+    #[cfg(any(feature = "std", test))]
     type BatchSeed: Send + Sync;
+    #[cfg(any(feature = "std", test))]
     fn batch_seed(&self, entropy: &[u8; 32]) -> Self::BatchSeed;
     /// Engine for `batch`, bound to a batch-specific session and entropy.
     /// It aborts at its next exchange once `cancelled` is set.
@@ -473,6 +469,7 @@ pub(crate) trait ProverEngine: Core + Sized + Send {
     /// the opening rounds.
     #[cfg(any(feature = "std", test))]
     fn finish_batch(&mut self);
+    #[cfg(any(feature = "std", test))]
     fn max_parallel_batches(&self) -> usize;
     #[cfg(test)]
     fn audit(
@@ -485,12 +482,14 @@ pub(crate) trait ProverEngine: Core + Sized + Send {
     }
 }
 
+#[cfg(any(feature = "std", test))]
 fn batch_session(session: &[u8; 32], batch: usize) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.OUTER.BATCH.V1",
         &[session, &(batch as u64).to_le_bytes()],
     )
 }
+#[cfg(any(feature = "std", test))]
 fn batch_entropy(entropy: &[u8; 32], session: &[u8; 32], batch: usize) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.OUTER.BATCH.ENTROPY.V1",
@@ -498,12 +497,14 @@ fn batch_entropy(entropy: &[u8; 32], session: &[u8; 32], batch: usize) -> [u8; 3
     )
 }
 
+#[cfg(any(feature = "std", test))]
 pub(crate) struct ReplicatedSeed {
     party: usize,
     session: [u8; 32],
     entropy: [u8; 32],
     keys: [[u8; 32]; 2],
 }
+#[cfg(any(feature = "std", test))]
 impl Drop for ReplicatedSeed {
     fn drop(&mut self) {
         ct_zeroize_bytes(&mut self.entropy);
@@ -514,7 +515,9 @@ impl Drop for ReplicatedSeed {
 }
 impl<T: Transport> ProverEngine for Engine<T> {
     type Transport = T;
+    #[cfg(any(feature = "std", test))]
     type BatchSeed = ReplicatedSeed;
+    #[cfg(any(feature = "std", test))]
     fn batch_seed(&self, entropy: &[u8; 32]) -> ReplicatedSeed {
         let (session, keys) = self.custody();
         ReplicatedSeed {
@@ -555,6 +558,7 @@ impl<T: Transport> ProverEngine for Engine<T> {
         self.release_verified_scratch();
         self.batch_cancelled = None;
     }
+    #[cfg(any(feature = "std", test))]
     fn max_parallel_batches(&self) -> usize {
         self.transport.max_parallel_batches()
     }
@@ -570,6 +574,7 @@ impl<T: Transport> ProverEngine for Engine<T> {
     }
 }
 
+#[cfg(any(feature = "std", test))]
 pub(crate) struct QuorumSeed {
     party: usize,
     session: [u8; 32],
@@ -578,6 +583,7 @@ pub(crate) struct QuorumSeed {
     peer_keys: Vec<[u8; 32]>,
     mac_keys: MacKeyShare,
 }
+#[cfg(any(feature = "std", test))]
 impl Drop for QuorumSeed {
     fn drop(&mut self) {
         ct_zeroize_bytes(&mut self.entropy);
@@ -588,7 +594,9 @@ impl Drop for QuorumSeed {
 }
 impl<T: Transport> ProverEngine for SpdzEngine<T> {
     type Transport = T;
+    #[cfg(any(feature = "std", test))]
     type BatchSeed = QuorumSeed;
+    #[cfg(any(feature = "std", test))]
     fn batch_seed(&self, entropy: &[u8; 32]) -> QuorumSeed {
         let (session, config, peer_keys, mac_keys) = self.custody();
         QuorumSeed {
@@ -632,6 +640,7 @@ impl<T: Transport> ProverEngine for SpdzEngine<T> {
     fn finish_batch(&mut self) {
         self.batch_cancelled = None;
     }
+    #[cfg(any(feature = "std", test))]
     fn max_parallel_batches(&self) -> usize {
         self.transport.max_parallel_batches()
     }
@@ -1278,7 +1287,8 @@ fn evaluate_inner<E: Core>(
         }
     }
 
-    let mut wires: Vec<Option<[SharedValue<E::Bit>; 3]>> = (0..c.nodes.len()).map(|_| None).collect();
+    let mut wires: Vec<Option<[SharedValue<E::Bit>; 3]>> =
+        (0..c.nodes.len()).map(|_| None).collect();
     let mut encodings: Vec<[Option<Word<E::Bit>>; 3]> =
         (0..c.nodes.len()).map(|_| [None, None, None]).collect();
 
@@ -2086,7 +2096,11 @@ mod tests {
             }
             let c = c.finish();
             let witness = e
-                .share_uniform_lanes(&[if contribution[0] & 1 != 0 { u64::MAX } else { 0 }])
+                .share_uniform_lanes(&[if contribution[0] & 1 != 0 {
+                    u64::MAX
+                } else {
+                    0
+                }])
                 .unwrap();
             let seeds: Vec<_> = (0..3)
                 .map(|head| {
@@ -2226,8 +2240,10 @@ mod tests {
         });
     }
 
-    // Bound both ceremonies and per-custodian batches, keeping the suite within
-    // the bounded builder memory budget while overlapping network synchronization.
+    // Bound concurrent ceremonies by the batch engines they run at once, so
+    // the suite stays within the host's cores and the builder memory budget.
+    // A full ceremony takes `parallel_batches()` units per custodian; a
+    // single-stream one takes one and may overlap a full ceremony.
     static HEAVY_CEREMONIES: (std::sync::Mutex<usize>, std::sync::Condvar) =
         (std::sync::Mutex::new(0), std::sync::Condvar::new());
     struct CeremonySlot(usize);
@@ -2235,11 +2251,8 @@ mod tests {
         fn acquire(batches: usize) -> Self {
             let (active, ready) = &HEAVY_CEREMONIES;
             let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
-            let limit = if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
-                8
-            } else {
-                outer_mpc::tests::parallel_batches()
-            };
+            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let limit = (cores / 3).max(outer_mpc::tests::parallel_batches()) + 2;
             while *count + batches > limit {
                 count = ready.wait(count).unwrap_or_else(|e| e.into_inner());
             }
@@ -2437,6 +2450,9 @@ mod tests {
     struct ZkbooFaultSpy {
         inner: Network,
         is_root: bool,
+        /// Offer no batch streams: the root engine evaluates the batches one
+        /// after another on the root stream.
+        single_stream: bool,
         fault: Option<FaultInjection>,
         precommit_or_view_opened: Arc<AtomicBool>,
     }
@@ -2452,9 +2468,13 @@ mod tests {
             self.precommit_or_view_opened.store(true, Ordering::SeqCst);
         }
         fn fork(&mut self, batch: usize) -> Option<Self> {
+            if self.single_stream {
+                return None;
+            }
             self.inner.fork(batch).map(|child| Self {
                 inner: child,
                 is_root: false,
+                single_stream: false,
                 // Inject the fault ONLY in batch 2 so all other batches are clean,
                 // proving the cross-batch barrier also blocks clean batches from opening!
                 fault: if batch == 2 { self.fault } else { None },
@@ -2463,15 +2483,30 @@ mod tests {
         }
         fn exchange(&mut self, out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
             // Root sequence 0 = STATEMENT, 1 = witness, 2..PRECOMMIT_SEQ = batch seeds, PRECOMMIT_SEQ = PRECOMMIT!
-            if self.is_root && out[0].sequence >= PRECOMMIT_SEQ {
+            // A single-stream root also carries the batch evaluation itself, so
+            // there only the explicit opening hook marks a release.
+            if self.is_root && !self.single_stream && out[0].sequence >= PRECOMMIT_SEQ {
                 self.precommit_or_view_opened.store(true, Ordering::SeqCst);
             }
             self.inner.exchange(out)
         }
     }
 
-    fn assert_zkboo_fault_aborts_cleanly(ed: bool, fault: FaultInjection, session_tag: u8) {
-        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
+    /// With `single_stream` the faulty custodian's root engine evaluates the
+    /// first batch itself and the fault fires there; otherwise the fault is
+    /// confined to batch 2 of seven concurrent batches, which also shows that
+    /// the clean batches are held back by the cross-batch barrier.
+    fn assert_zkboo_fault_aborts_cleanly(
+        ed: bool,
+        fault: FaultInjection,
+        session_tag: u8,
+        single_stream: bool,
+    ) {
+        let _ceremony_guard = CeremonySlot::acquire(if single_stream {
+            1
+        } else {
+            outer_mpc::tests::parallel_batches()
+        });
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x31 + seed_try; 32]);
             let kind = if ed {
@@ -2511,6 +2546,7 @@ mod tests {
                             let spy = ZkbooFaultSpy {
                                 inner: net,
                                 is_root: true,
+                                single_stream,
                                 fault: (p == 1).then_some(fault),
                                 precommit_or_view_opened: flag,
                             };
@@ -2567,6 +2603,7 @@ mod tests {
                 lane: 41,
             },
             0xd0,
+            false,
         );
     }
 
@@ -2580,6 +2617,7 @@ mod tests {
                 lane: 19,
             },
             0xe0,
+            true,
         );
     }
 
@@ -2593,11 +2631,16 @@ mod tests {
                 lane: 23,
             },
             0xf0,
+            true,
         );
     }
 
+    /// A substituted key share makes every repetition batch fail its own
+    /// output-zero check, so one batch reaches the abort. The custodians run
+    /// single-stream: the first batch is evaluated in full and the ceremony
+    /// must stop there, before anything is opened.
     fn assert_input_substitution_aborts(ed: bool, delta_64bit: bool, session_tag: u8) {
-        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
+        let _ceremony_guard = CeremonySlot::acquire(1);
         let mut verified = false;
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x41 + seed_try; 32]);
@@ -2646,6 +2689,7 @@ mod tests {
                             let spy = ZkbooFaultSpy {
                                 inner: net,
                                 is_root: true,
+                                single_stream: true,
                                 fault: None,
                                 precommit_or_view_opened: flag,
                             };
