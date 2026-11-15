@@ -1,4 +1,5 @@
 module
+import all Qsag.Spec.Encoding
 import all Qsag.Exec.RssParticipantGateBatches
 import all Qsag.Exec.RssSigningTreeCache
 import all Qsag.Exec.RssParticipantGateProducer

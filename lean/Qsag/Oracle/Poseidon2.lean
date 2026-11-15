@@ -5734,7 +5734,9 @@ instance : LawfulCommRing Block4 where
 def rawTrunc {D : Type} (p : SimpleEquiv (State D) (State D)) (x : State D) : D :=
   (p.toFun x).1
 
-/-- `extra = 0` matches agg/sponge.rs; `extra x = x.2.1 + seed` matches accel. -/
+/-- Feed-forward relation `y.1 + x.1 + extra x`. The deployed weighted compression
+    (`poseidon2CompressWeighted`, `poseidon2_compress12_ff` in `agg/sponge.rs`) is the instance
+    `extra x = 2 · x.2.1 + 4 · x.2.2`; `extra = 0` is the superseded partial feed-forward. -/
 def relation {D : Type} [LawfulCommRing D] (extra : State D → D)
     (x y : State D) : D := add y.1 (add x.1 (extra x))
 

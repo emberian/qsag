@@ -5833,7 +5833,11 @@ theorem inhabited_beltLatch_quorum_network_3f_plus_1 :
     maskCard Q = 5 ∧
     (netFinal.nodes p0).stagedWindow = [] ∧
     (Q, p0, rec₀) ∈ netFinal.certifiedReleases := by
-  decide
+  intro H MAC macKeys Corrupt Q rec₀ p0 p1 p2 p3 p4 trace netMid netFinal
+  have hRel : netFinal.certifiedReleases = [(Q, p0, rec₀)] := by decide
+  refine ⟨by decide, by decide, by decide, by decide, ?_⟩
+  rw [hRel]
+  exact List.Mem.head _
 
 /-- Inhabitedness witness 2 (`inhabited_committee_partitioned_jorts_2of3_and_3of5`):
     Multi-turn `(2, 3)` (`3` subtrees, `1` corrupt/offline) and `(3, 5)` (`10` subtrees, `2`
@@ -6727,6 +6731,7 @@ theorem tooth_used_quorum_permit_cannot_release {n : Nat} (H : List UInt8 → Di
 
 #verify_inhabited signingLedger_burn_safe inhabited_signing_ledger
 #tooth_pair runQuorumWireTrace_signature_safety vs tooth_used_quorum_permit_cannot_release
+#verify_constructive Qsag.inhabited_beltLatch_quorum_network_3f_plus_1
 
 end Qsag
 end

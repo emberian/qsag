@@ -1115,6 +1115,12 @@ theorem inhabited_deployed_gs_dimensions :
 
 
 
+#verify_constructive tooth_scalar_combiner_linear_n_over_q_floor
+#verify_constructive tooth_affine_combiner_zero_loss_linear_floor
+#verify_constructive inhabited_affine_proximity_gaps
+#verify_constructive tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold
+#verify_constructive tooth_checkWhirAffineWitness_rejects_perturbed_rows
+
 end Qsag
 
 namespace Qsag
@@ -1173,6 +1179,11 @@ theorem field_independent_bound_fails_example :
 #verify_constructive tooth_ge_card_needs_threshold field_independent_bound_fails_example
 #tooth_pair affineMcaBound_ge_card vs tooth_ge_card_needs_threshold
 #verify_inhabited affineMcaBound_ge_card inhabited_affineMcaBound_ge_card
+
+#verify_constructive inhabited_natCast_ne_zero
+#verify_inhabited Goldilocks.natCast_ne_zero inhabited_natCast_ne_zero
+#verify_constructive tooth_natCast_prime_eq_zero
+#tooth_pair Goldilocks.natCast_ne_zero vs tooth_natCast_prime_eq_zero
 
 end IncidenceTests
 
@@ -1392,6 +1403,13 @@ theorem tooth_assembly_needs_rest :
     IncidenceTests.field_independent_bound_fails_example⟩
 
 
+#verify_constructive inhabited_assembly
+#verify_inhabited cwyz26_affineMcaBound_of_nonExcluded inhabited_assembly
+#verify_constructive inhabited_sliced
+#verify_inhabited cwyz26_affineMcaBound_sliced inhabited_sliced
+#verify_constructive tooth_assembly_needs_rest
+#tooth_pair cwyz26_affineMcaBound_of_nonExcluded vs tooth_assembly_needs_rest
+
 end GapTests
 
 
@@ -1476,6 +1494,23 @@ theorem witness_depth15_isd :
     ∃ q l : Nat, q ≤ 32 ∧ sternDumerWorkExceedsPow2 pcgDepth15Cols pcgDenseRows pcgDenseWeightT q l 256 :=
   ⟨2, 52, by decide, (pcg_dense_depth15_prange_and_stern_dumer_pq128 2 52 (by decide)).1⟩
 
+
+#verify_constructive tooth_pcg_dense_depth14_stern_dumer_below_256
+#tooth_pair Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128 vs Qsag.tooth_pcg_dense_depth14_stern_dumer_below_256
+#verify_constructive tooth_omitting_accumulator_collapses_dual_lpn_bias
+#tooth_pair Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256 vs Qsag.tooth_omitting_accumulator_collapses_dual_lpn_bias
+#verify_constructive tooth_omitting_rejection_scaling_breaks_hvzk
+#tooth_pair Qsag.acceptProbExact_safe_cancels_shift vs Qsag.tooth_omitting_rejection_scaling_breaks_hvzk
+#verify_constructive tooth_tight_clipping_loses_boundary_preimage
+#tooth_pair Qsag.rlwe_accept_box_preimage_in_proposal_box vs Qsag.tooth_tight_clipping_loses_boundary_preimage
+#verify_constructive witness_accept_box_preimage
+#verify_inhabited Qsag.rlwe_accept_box_preimage_in_proposal_box Qsag.witness_accept_box_preimage
+#verify_constructive witness_acceptProb_cancellation
+#verify_inhabited Qsag.acceptProbExact_safe_cancels_shift Qsag.witness_acceptProb_cancellation
+#verify_constructive witness_dual_lpn_bias
+#verify_inhabited Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256 Qsag.witness_dual_lpn_bias
+#verify_constructive witness_depth15_isd
+#verify_inhabited Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128 Qsag.witness_depth15_isd
 
 end Qsag
 end
@@ -2717,6 +2752,15 @@ theorem tooth_three_poly_sheet_needs_divisibility :
   exact lead_ne_zero hQPNe hz
 
 
+#verify_constructive inhabited_curve_leaf_gcd_decomp
+#verify_inhabited Qsag.SylElim.curve_leaf_gcd_decomp inhabited_curve_leaf_gcd_decomp
+#verify_constructive tooth_multisheet_smooth_cylinder_divides_g1
+#tooth_pair Qsag.SylElim.curve_leaf_gcd_decomp vs tooth_multisheet_smooth_cylinder_divides_g1
+#verify_constructive inhabited_curve_three_poly_sheet_decomp
+#verify_inhabited Qsag.SylElim.curve_three_poly_sheet_decomp inhabited_curve_three_poly_sheet_decomp
+#verify_constructive tooth_three_poly_sheet_needs_divisibility
+#tooth_pair Qsag.SylElim.curve_three_poly_sheet_decomp vs tooth_three_poly_sheet_needs_divisibility
+
 end Qsag.Cwyz26EqualDegreeAndMultiFoldTests
 end
 
@@ -2745,6 +2789,8 @@ theorem inhabited_johnsonCert_sliced :
     by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide,
     by decide⟩
 
+
+#verify_constructive inhabited_johnsonCert_sliced
 
 end JohnsonCertTests
 
@@ -2796,6 +2842,8 @@ theorem tooth_packTower_is_not_the_poly_basis :
         0x295ac0b1f4731af9676aac9fa4b20b08#128 := by decide +kernel
     rw [h]; decide
   · decide +kernel
+
+#verify_constructive tooth_packTower_is_not_the_poly_basis
 
 end Qsag
 end

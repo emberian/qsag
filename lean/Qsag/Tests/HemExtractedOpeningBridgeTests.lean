@@ -4,6 +4,7 @@ public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
 public import Qsag.Tests.OracleAndQrom
 import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
+import all Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 import all Qsag.Oracle.Qrom
 import all Qsag.Tests.OracleAndQrom
 import all Qsag.Protocol.Aggregation.HemVerifierAcceptance

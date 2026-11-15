@@ -49,6 +49,13 @@ import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import all Qsag.Coding.GuruswamiSudan
+import all Qsag.Coding.ReedSolomon
+import all Qsag.Math.Counting
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.QuarticExt4
+import all Qsag.Math.Goldilocks
+import all Qsag.Math.Primality
 public import Qsag.Math.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
 
@@ -840,7 +847,7 @@ theorem tooth_verifyHemAffineWhir_unincremented_agree_accepts_all :
   · have hOne : qgNat 1 = CommRingOps.one := by decide
     have hc1 : c = CommRingOps.one := by
       rw [hOne] at hGDot
-      simpa only [ringDot, LawfulCommRing.mul_one, LawfulCommRing.add_zero] using hGDot
+      simpa only [ringDot_cons_cons, ringDot_nil_left, ringDot_nil_right, LawfulCommRing.mul_one, LawfulCommRing.add_zero] using hGDot
     subst hc1
     exact absurd hGAg (by decide +kernel)
   · simp only [List.length_cons] at hGLen
@@ -1056,7 +1063,7 @@ private theorem witEqDegInvalid :
   · have hOne : qgNat 1 = CommRingOps.one := by decide
     have hc1 : c = CommRingOps.one := by
       rw [hOne] at hDot
-      simpa only [ringDot, LawfulCommRing.mul_one, LawfulCommRing.add_zero] using hDot
+      simpa only [ringDot_cons_cons, ringDot_nil_left, ringDot_nil_right, LawfulCommRing.mul_one, LawfulCommRing.add_zero] using hDot
     subst hc1
     exact absurd hAg (by decide +kernel)
   · simp only [List.length_cons] at hLen

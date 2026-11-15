@@ -1,8 +1,5 @@
 module
 import all Qsag.Math.Counting
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.PolyRing
-import all Qsag.Math.HasseHensel
 import all Qsag.Oracle.FiatShamir
 import all Qsag.Math.Goldilocks
 import all Qsag.Oracle.Keccak
@@ -328,6 +325,12 @@ theorem tooth_walsh_single_trail_is_not_the_hull :
     walshTrailSum boolWalsh [fun x => x, fun _ => true] true true = 0 := by
   decide
 
+#verify_constructive tooth_big_endian_lane_framing_differs
+#verify_constructive tooth_swapped_mds_constants_change_round
+#verify_constructive tooth_untranslated_tower_constant_breaks_round
+#verify_constructive tooth_xor_constant_permutation_davies_meyer_collapses
+#verify_constructive tooth_walsh_single_trail_is_not_the_hull
+
 end Qsag
 
 section
@@ -552,6 +555,9 @@ theorem tooth_merkle_right_blind_compression_collides :
   unfold MerkleTweakCollision
   exact ⟨0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
 
+#verify_constructive tooth_bht_256bit_unrestricted_collision_ceiling_85bits
+#verify_constructive tooth_merkle_right_blind_compression_collides
+
 end Qsag
 end
 
@@ -604,6 +610,28 @@ theorem canopyToy_flipped_sibling_rejected :
       canopyToyLeaves
       [canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
        canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)] = false := by decide
+
+/-- `#tooth`: a proof differing from the honest one in a single sibling digest is rejected. -/
+theorem tooth_canopy_sibling_mutation :
+    ∃ proof : List Nat, proof ≠ canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        canopyToyLeaves proof = false :=
+  ⟨[canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
+    canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)],
+    by decide, canopyToy_flipped_sibling_rejected⟩
+
+#tooth_pair canopyToy_honest_accepted vs tooth_canopy_sibling_mutation
+
+/-- The exact-sibling-count premise is inhabited by the honest three-leaf opening. -/
+theorem inhabited_canopy_nonempty_opening :
+    ∃ (leaves : List (Nat × Nat)) (proof : List Nat),
+      leaves = canopyToyLeaves ∧ proof = canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        leaves proof = true :=
+  ⟨canopyToyLeaves, canopyToyProof, rfl, rfl, canopyToy_honest_accepted⟩
+
+#verify_inhabited verifyCanopyMultiproof_exact_sibling_count inhabited_canopy_nonempty_opening
+#verify_constructive tooth_canopy_sibling_mutation inhabited_canopy_nonempty_opening
 
 /-- A flipped leaf digest (leaf `2`) is rejected. -/
 theorem canopyToy_flipped_leaf_rejected :
@@ -827,6 +855,16 @@ theorem measured_parity_execution :
 
 
 
+#verify_constructive inhabited_canopy_multiproof_binding
+#verify_constructive tooth_onlineMerkle_empty_queries_unqueried_root
+#tooth_pair Qsag.onlineMerkle_preChallenge_unique vs Qsag.tooth_onlineMerkle_empty_queries_unqueried_root
+#verify_constructive witnessInitVec_pos
+#verify_constructive witnessCoverProof
+#verify_constructive inhabited_qrom_unitary_merkle_extract
+#verify_inhabited Qsag.qrom_unitary_multiRoot_merkle_extract_bound Qsag.inhabited_qrom_unitary_merkle_extract
+#verify_constructive tooth_qrom_self_target_not_local
+#verify_constructive tooth_qrom_query_record_changes_born_probability
+
 end Qsag
 
 namespace Qsag
@@ -1036,6 +1074,17 @@ theorem witness_poseidon2_margin : ∃ t rF rP, Poseidon2InterpolationMargin t r
   ⟨12, 8, 22, poseidon2_interpolation_margin_width12⟩
 
 
+#verify_constructive tooth_d3_not_permutation_on_goldilocks
+#verify_constructive tooth_d5_not_permutation_on_goldilocks
+#verify_constructive tooth_univariate_degree_alone_below_two_pow_128
+#verify_constructive tooth_poseidon2_margin_fails_at_rp17
+#tooth_pair Qsag.poseidon2_interpolation_margin_needs_26 vs Qsag.tooth_poseidon2_margin_fails_at_rp17
+#verify_constructive tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip
+#verify_constructive tooth_current_mi_has_rational_eigenvector
+#verify_constructive tooth_reduced_poseidon2_fails_cico_and_gsr
+#verify_constructive witness_poseidon2_margin
+#verify_inhabited Qsag.poseidon2_interpolation_margin_needs_26 Qsag.witness_poseidon2_margin
+
 end Qsag
 end
 
@@ -1169,6 +1218,11 @@ theorem unchecked_preimage_tooth : ∃ x : State Goldilocks,
     ¬ ∃ y, (x, y) ∈ ([] : List (State Goldilocks × State Goldilocks)) := by
   exact ⟨(zero, zero, zero), by decide, by intro ⟨_, h⟩; cases h⟩
 
+
+#verify_constructive raw_vs_feedforward_tooth
+#tooth_pair inverse_feedforward_relation vs raw_vs_feedforward_tooth
+#verify_constructive identity_collision_tooth
+#verify_constructive unchecked_preimage_tooth
 
 end Qsag.CrossProtocol
 end
@@ -1328,6 +1382,8 @@ theorem tooth_fourier_database_measurement_disturbs :
       QVec.queryMassOn (paritySuccess H) (measuredStateAt qromParityAdv H 1 (Nat.le_refl 1) xs))) = 16 := by
   decide +kernel
 
+
+#verify_constructive tooth_fourier_database_measurement_disturbs
 
 end Qsag
 end

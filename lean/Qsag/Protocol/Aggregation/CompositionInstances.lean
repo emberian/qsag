@@ -114,29 +114,29 @@ def lane (a b c d : Nat) : Digest4 :=
 def pkOf (v : Fin 2) : AggValidatorPk :=
   ⟨.xmssPoseidon2, auditPkSeed,
     if v.val = 0 then
-      lane 16945596955588827997 1136687691235573136 4428913278371232252 10291103310265643737
+      lane 4411130677596272051 12386187803866016865 4846206855630815541 13194810747827022671
     else
-      lane 12265140264472071061 5253724053322132489 17390123781785852686 10879873503153016772⟩
+      lane 17576564533966561130 16051823357764822570 14727583026633534692 1732328166828656438⟩
 def sigOf (v : Fin 2) : AggNativeSignature :=
   if v.val = 0 then
-    ⟨.xmssPoseidon2, auditRRand, 0, [], [⟨26,
-      [lane 13114432238372060916 12016953556726374818 3669076513781295907 7706576668694258860,
-       lane 5214530183828569437 8695090849526209258 6156362808110527505 11985450357935518617],
-      [lane 10115896709169784647 11913327531000105763 6390924361611074928
-        16255170532119731419]⟩]⟩
+    ⟨.xmssPoseidon2, auditRRand, 0, [], [⟨37,
+      [lane 8311586201798180139 8396487982263648832 16278201376156863497 5873789825944876137,
+       lane 11009790873695555519 14395406594536956999 11951049901538821830 10044662254597907680],
+      [lane 5524291857455771020 16376422686410664307 15963494650740044646
+        18098363549869475062]⟩]⟩
   else
-    ⟨.xmssPoseidon2, auditRRand, 1, [], [⟨39,
-      [lane 7595903029929658652 9263547598161348440 13664791488019126085 1155670949474771352,
-       lane 8658570619677982355 18095804502213908860 2332359881920542218 16611160752575072627],
-      [lane 6728612734466122233 15854675676448426872 13233423373936609707
-        12603034427201441080]⟩]⟩
+    ⟨.xmssPoseidon2, auditRRand, 1, [], [⟨45,
+      [lane 7345396832099288313 5628321512706338704 2904634915904338214 11778081422095187519,
+       lane 6519691662884691569 6995657412139860735 8574290930621241436 12609139020484668794],
+      [lane 13388180661509288011 5130805258596798721 8406673262598715289
+        15360960474733464499]⟩]⟩
 /-- The literals are the outputs of `deriveAggPublicKey` and of the honest signer
 `signAggNative` on `auditMsg` ("QSAG"), validator `v` at leaf `v`, with the target-sum
-counters `26` and `39` found by search. -/
+counters `37` and `45` found by search. -/
 theorem fixtures_are_modelled_outputs : ∀ v : Fin 2,
     pkOf v = deriveAggPublicKey compactAuditGeom (skOf v) auditPkSeed ∧
     sigOf v = signAggNative compactAuditGeom (skOf v) (pkOf v) auditMsg auditRRand v.val
-      (if v.val = 0 then 26 else 39) [] := by decide +kernel
+      (if v.val = 0 then 37 else 45) [] := by decide +kernel
 def otherMsg : List UInt8 := [0x51, 0x53, 0x41, 0x48]
 
 theorem native_accepts : ∀ v : Fin 2,
@@ -620,24 +620,24 @@ def realHk : Keys :=
   ⟨.secpMl44, encodeCompactJortsPk (pkOf 0), encodeCompactJortsPk (pkOf 1)⟩
 
 /-- Literal native signatures on the `cshakeHybridHash` classical/PQ transcripts for `paid`
-(`tswCtr = 534` and `2`), tied to `signAggNative` by `real_hybrid_sigs_are_modelled_outputs`. -/
+(`tswCtr = 21` and `122`), tied to `signAggNative` by `real_hybrid_sigs_are_modelled_outputs`. -/
 def realHybridSig0 : AggNativeSignature :=
-  ⟨.xmssPoseidon2, auditRRand, 0, [], [⟨534,
-    [lane 13114432238372060916 12016953556726374818 3669076513781295907 7706576668694258860,
-     lane 5214530183828569437 8695090849526209258 6156362808110527505 11985450357935518617],
-    [lane 10115896709169784647 11913327531000105763 6390924361611074928 16255170532119731419]⟩]⟩
+  ⟨.xmssPoseidon2, auditRRand, 0, [], [⟨21,
+    [lane 4152917893602010253 5344412802567744713 18406927796743773750 1962659585794765281,
+     lane 12873018474816122043 2869910227242953051 3097284758269903553 18326636155894048790],
+    [lane 5524291857455771020 16376422686410664307 15963494650740044646 18098363549869475062]⟩]⟩
 
 def realHybridSig1 : AggNativeSignature :=
-  ⟨.xmssPoseidon2, auditRRand, 1, [], [⟨2,
-    [lane 6827400690795841236 9142268317945543930 7533254204467450509 1080846719237328644,
-     lane 2579495626017817171 15292570552375798192 2116332967024616565 97932414014730607],
-    [lane 6728612734466122233 15854675676448426872 13233423373936609707 12603034427201441080]⟩]⟩
+  ⟨.xmssPoseidon2, auditRRand, 1, [], [⟨122,
+    [lane 10036846859147774993 15499800327978969217 15476824389852128619 15451031862181482938,
+     lane 14010823692816899133 11663312065820974772 3799621797402719272 6812636063505864400],
+    [lane 13388180661509288011 5130805258596798721 8406673262598715289 15360960474733464499]⟩]⟩
 
 theorem real_hybrid_sigs_are_modelled_outputs :
     realHybridSig0 = signAggNative compactAuditGeom (skOf 0) (pkOf 0)
-      (transcriptFields (transcript cshakeHybridHash realHk false paid)) auditRRand 0 534 [] ∧
+      (transcriptFields (transcript cshakeHybridHash realHk false paid)) auditRRand 0 21 [] ∧
     realHybridSig1 = signAggNative compactAuditGeom (skOf 1) (pkOf 1)
-      (transcriptFields (transcript cshakeHybridHash realHk true paid)) auditRRand 1 2 [] := by
+      (transcriptFields (transcript cshakeHybridHash realHk true paid)) auditRRand 1 122 [] := by
   decide +kernel
 
 def realEnvelopePaid : HybridPinnedEnvelope :=

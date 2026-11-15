@@ -1,4 +1,5 @@
-import Lean
+module
+meta import Lean
 
 /-!
 Security boundaries for volatile coupons and indexed one-time capability bundles.
@@ -14,6 +15,7 @@ brief is false. MAYO rollback exposes an oil-subspace vector, not automatically 
 basis or the entire key. Different messages need not produce independent vectors.
 -/
 
+public section
 namespace Qsag.VolatileCoupon
 
 /- Standalone negative-witness declaration; no dependency on repository tactics. -/
@@ -277,7 +279,7 @@ def consume {M : Type} (ready authorized : Bool) (request : M) : Bool × Option 
   cases ready <;> cases auth <;> simp_all [consume]
 
  theorem spent_never_releases {M : Type} (auth : Bool) (m : M) :
-    consume false auth m = (false, none) := rfl
+    consume false auth m = (false, none) := by rfl
 
  theorem one_slot_cannot_release_twice {M : Type} (ready a b : Bool)
     (m m' out out' : M) (h : (consume ready a m).2 = some out) :
@@ -351,7 +353,7 @@ structure Runtime (Share : Type) where
 def reboot {Share : Type} (d : Disk Share) : Runtime Share := ⟨d, []⟩
 
  theorem disk_rewind_has_no_coupons {Share : Type} (snapshot : Disk Share) :
-    (reboot snapshot).coupons = [] := rfl
+    (reboot snapshot).coupons = [] := by rfl
 
  theorem online_transition_has_zero_disk_writes {Share : Type}
     (s : Runtime Share) (remaining : List Nat) :
@@ -369,6 +371,7 @@ def coinWins (request coin : Bool) : Bool := request ^^ coin
     ([false, true].filter (fun coin => coinWins (!coin) coin)).length = 2 := by decide
 
 end Qsag.VolatileCoupon
+end
 
 #print axioms Qsag.VolatileCoupon.qsB_minimum
 #print axioms Qsag.VolatileCoupon.mayo_rollback_subspace_leak

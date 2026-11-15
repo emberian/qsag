@@ -1566,7 +1566,8 @@ theorem dfms_hem256_online_extraction_disturbance_bound {n cardAnc Q : Nat}
       · simp [hLe]
       · have hGt : Q < dfmsRecordedCount n D := by omega
         rw [ite_eq_right hLe, dfms_runtime_support 128 A Q (Nat.le_refl Q) D hGt]
-        simp [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+        simp only [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const,
+          Nat.mul_zero]
     · simp
   have h256 : 2 * 128 * n = 256 * n := by omega
   rw [dfmsTableSum_congr 128 n _ _ hTrunc, h256] at hBase

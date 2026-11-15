@@ -4,6 +4,9 @@ public import Qsag.Oracle.Qrom
 public import Qsag.Oracle.FiatShamir
 public import Qsag.Math.Goldilocks
 import all Qsag.Math.Goldilocks
+import all Qsag.Math.CoeffPoly
+import all Qsag.Math.PolyRing
+import all Qsag.Math.QuarticExt4
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
@@ -485,14 +488,34 @@ theorem inhabited_affineMcaBound
 
 /-! ### §2.1 `QuarticGoldilocks` Polynomial Algebra & 5-Scalar Linear-Functional Bridge -/
 
+theorem ringDot_nil_left {F : Type} [CommRingOps F] (v : List F) :
+    ringDot [] v = CommRingOps.zero := by unfold ringDot; exact dotVec_nil_left v
+
+theorem ringDot_nil_right {F : Type} [CommRingOps F] (xs : List F) :
+    ringDot xs [] = CommRingOps.zero := by unfold ringDot; exact dotVec_nil_right xs
+
+theorem ringDot_cons_cons {F : Type} [CommRingOps F] (a b : F) (as bs : List F) :
+    ringDot (a :: as) (b :: bs) = CommRingOps.add (CommRingOps.mul a b) (ringDot as bs) := by
+  unfold ringDot; exact dotVec_cons a b as bs
+
+theorem polyAddVar_nil_left {F : Type} [CommRingOps F] (ys : List F) :
+    polyAddVar [] ys = ys := by unfold polyAddVar; cases ys <;> rfl
+
+theorem polyAddVar_nil_right {F : Type} [CommRingOps F] (xs : List F) :
+    polyAddVar xs [] = xs := by unfold polyAddVar; cases xs <;> rfl
+
+theorem polyAddVar_cons_cons {F : Type} [CommRingOps F] (x y : F) (xs ys : List F) :
+    polyAddVar (x :: xs) (y :: ys) = CommRingOps.add x y :: polyAddVar xs ys := by
+  unfold polyAddVar; rfl
+
 theorem ringDot_polyAddVar {F : Type} [LawfulCommRing F] :
     ∀ (xs ys v : List F),
       ringDot (polyAddVar xs ys) v = CommRingOps.add (ringDot xs v) (ringDot ys v)
-  | [], _, _ => by simp only [polyAddVar, ringDot, LawfulCommRing.zero_add]
-  | _ :: _, [], _ => by simp only [polyAddVar, ringDot, LawfulCommRing.add_zero]
-  | _ :: _, _ :: _, [] => by simp only [polyAddVar, ringDot, LawfulCommRing.add_zero]
+  | [], _, _ => by simp only [polyAddVar_nil_left, ringDot_nil_left, LawfulCommRing.zero_add]
+  | _ :: _, [], _ => by simp only [polyAddVar_nil_right, ringDot_nil_left, LawfulCommRing.add_zero]
+  | _ :: _, _ :: _, [] => by simp only [polyAddVar_cons_cons, ringDot_nil_right, LawfulCommRing.add_zero]
   | x :: xs, y :: ys, k :: ks => by
-    simp only [polyAddVar, ringDot, ringDot_polyAddVar xs ys ks]
+    simp only [polyAddVar_cons_cons, ringDot_cons_cons, ringDot_polyAddVar xs ys ks]
     rw [LawfulCommRing.right_distrib,
         LawfulCommRing.add_assoc (CommRingOps.mul x k) (CommRingOps.mul y k) _,
         ← LawfulCommRing.add_assoc (CommRingOps.mul y k) (ringDot xs ks) _,
@@ -503,10 +526,10 @@ theorem ringDot_polyAddVar {F : Type} [LawfulCommRing F] :
 theorem ringDot_polyScaleVar {F : Type} [LawfulCommRing F] (c : F) :
     ∀ (xs v : List F),
       ringDot (polyScaleVar c xs) v = CommRingOps.mul c (ringDot xs v)
-  | [], _ => by simp only [polyScaleVar, List.map_nil, ringDot, LawfulCommRing.mul_zero]
-  | _ :: _, [] => by simp only [polyScaleVar, List.map_cons, ringDot, LawfulCommRing.mul_zero]
+  | [], _ => by simp only [polyScaleVar, List.map_nil, ringDot_nil_left, LawfulCommRing.mul_zero]
+  | _ :: _, [] => by simp only [polyScaleVar, List.map_cons, ringDot_nil_right, LawfulCommRing.mul_zero]
   | x :: xs, k :: ks => by
-    simp only [polyScaleVar, List.map_cons, ringDot]
+    simp only [polyScaleVar, List.map_cons, ringDot_cons_cons]
     change CommRingOps.add (CommRingOps.mul (CommRingOps.mul c x) k)
         (ringDot (polyScaleVar c xs) ks) = _
     rw [ringDot_polyScaleVar c xs ks, LawfulCommRing.mul_assoc c x k, ← LawfulCommRing.left_distrib]
@@ -530,17 +553,17 @@ theorem ringDot_affineCombine_eq_bridge {F : Type} [LawfulCommRing F]
         CommRingOps.add (ringDot (shiftPoly a) k) (ringDot (shiftPoly b) k) := by
     intro a b k
     cases k with
-    | nil => simp only [shiftPoly, ringDot, LawfulCommRing.add_zero]
+    | nil => simp only [shiftPoly, ringDot_nil_right, LawfulCommRing.add_zero]
     | cons _ ks =>
-      simp only [shiftPoly, ringDot, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+      simp only [shiftPoly, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
       exact ringDot_polyAddVar a b ks
   have hShiftScale : ∀ (c : F) (a k : List F),
       ringDot (shiftPoly (polyScaleVar c a)) k = CommRingOps.mul c (ringDot (shiftPoly a) k) := by
     intro c a k
     cases k with
-    | nil => simp only [shiftPoly, ringDot, LawfulCommRing.mul_zero]
+    | nil => simp only [shiftPoly, ringDot_nil_right, LawfulCommRing.mul_zero]
     | cons _ ks =>
-      simp only [shiftPoly, ringDot, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+      simp only [shiftPoly, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
       exact ringDot_polyScaleVar c a ks
   unfold affineCombine
   dsimp only
@@ -978,14 +1001,14 @@ theorem ringDot_zipFold {F : Type} [LawfulCommRing F] (φ : F) :
       ringDot c (List.zipWith (fun a b => CommRingOps.add a (CommRingOps.mul φ b)) kE kO) =
         CommRingOps.add (ringDot c kE) (CommRingOps.mul φ (ringDot c kO))
   | [], _, _, _ => by
-    simp only [ringDot, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    simp only [ringDot_nil_left, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
   | _ :: _, [], [], _ => by
-    simp only [List.zipWith_nil_left, ringDot, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    simp only [List.zipWith_nil_left, ringDot_nil_right, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
   | _ :: _, [], _ :: _, h => absurd h (Nat.succ_ne_zero _).symm
   | _ :: _, _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
   | x :: xs, a :: as, b :: bs, h => by
     have ih := ringDot_zipFold φ xs as bs (Nat.succ.inj h)
-    simp only [List.zipWith_cons_cons, ringDot]
+    simp only [List.zipWith_cons_cons, ringDot_cons_cons]
     rw [ih, LawfulCommRing.left_distrib x a (CommRingOps.mul φ b),
         ← LawfulCommRing.mul_assoc x φ b, LawfulCommRing.mul_comm x φ,
         LawfulCommRing.mul_assoc φ x b, LawfulCommRing.add_add_add_comm,

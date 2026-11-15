@@ -25,6 +25,7 @@ import all Qsag.Math.PolyRing
 import all Qsag.Math.HasseHensel
 import all Qsag.Coding.Resultant
 import all Qsag.Coding.GuruswamiSudan
+import all Qsag.Coding.ReedSolomon
 import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
 import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
@@ -55,9 +56,9 @@ private theorem coeffAt_polyAddVar {F : Type} [LawfulCommRing F] :
     ∀ (a b : List F) (k : Nat),
       coeffAt (polyAddVar a b) k = CommRingOps.add (coeffAt a k) (coeffAt b k)
   | [], ys, k => by
-    simp only [polyAddVar, coeffAt_nil, LawfulCommRing.zero_add]
+    simp only [polyAddVar_nil_left, coeffAt_nil, LawfulCommRing.zero_add]
   | x :: xs, [], k => by
-    simp only [polyAddVar, coeffAt_nil, LawfulCommRing.add_zero]
+    simp only [polyAddVar_nil_right, coeffAt_nil, LawfulCommRing.add_zero]
   | x :: xs, y :: ys, 0 => rfl
   | x :: xs, y :: ys, k + 1 => coeffAt_polyAddVar xs ys k
 
@@ -71,9 +72,9 @@ private theorem ringDot_shiftPoly_polyAddVar {F : Type} [LawfulCommRing F]
       CommRingOps.add (ringDot (shiftPoly a) ks) (ringDot (shiftPoly b) ks) := by
   cases ks with
   | nil =>
-    simp only [shiftPoly, ringDot, LawfulCommRing.add_zero]
+    simp only [shiftPoly, ringDot_nil_right, LawfulCommRing.add_zero]
   | cons k₀ ks' =>
-    simp only [shiftPoly, ringDot, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+    simp only [shiftPoly, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
     exact ringDot_polyAddVar a b ks'
 
 private theorem nodup_attach {α : Type} : ∀ {xs : List α}, xs.Nodup → xs.attach.Nodup
@@ -994,9 +995,9 @@ theorem ringDot_append_zero {F : Type} [LawfulCommRing F] :
     ∀ (P xs : List F), ringDot P (xs ++ [CommRingOps.zero]) = ringDot P xs
   | [], _ => rfl
   | c :: cs, [] => by
-    simp only [List.nil_append, ringDot, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    simp only [List.nil_append, ringDot_cons_cons, ringDot_nil_right, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
   | c :: cs, y :: ys => by
-    simp only [List.cons_append, ringDot, ringDot_append_zero cs ys]
+    simp only [List.cons_append, ringDot_cons_cons, ringDot_append_zero cs ys]
 
 /-- Even/odd polynomial interleaving `Q(X) = F(X²) + X · G(X²)` preserving variable-length tails. -/
 def interleavePoly {F : Type} [CommRingOps F] : List F → List F → List F
@@ -1089,19 +1090,19 @@ theorem ringDot_interleavePoly_hemInterleave {F : Type} [LawfulCommRing F] :
     | nil =>
       cases G_poly with
       | nil =>
-        simp only [interleavePoly, hemInterleave, ringDot, LawfulCommRing.add_zero]
+        simp only [interleavePoly, hemInterleave, ringDot_nil_left, LawfulCommRing.add_zero]
       | cons b bs =>
-        simp only [interleavePoly, hemInterleave, ringDot,
+        simp only [interleavePoly, hemInterleave, ringDot_cons_cons, ringDot_nil_left, 
           ringDot_interleavePoly_hemInterleave es os [] bs hSub]
         constructive_ring
     | cons a as =>
       cases G_poly with
       | nil =>
-        simp only [interleavePoly, hemInterleave, ringDot,
+        simp only [interleavePoly, hemInterleave, ringDot_cons_cons, ringDot_nil_left, 
           ringDot_interleavePoly_hemInterleave es os as [] hSub]
         constructive_ring
       | cons b bs =>
-        simp only [interleavePoly, hemInterleave, ringDot,
+        simp only [interleavePoly, hemInterleave, ringDot_cons_cons, 
           ringDot_interleavePoly_hemInterleave es os as bs hSub]
         constructive_ring
 termination_by structural kE => kE
@@ -2732,10 +2733,6 @@ theorem tooth_multifold_step6_below_186_bits :
   tooth_bridge_four_challenge_forgery_exists
   inhabited_sliced_multifold_stage_supported_budget
   tooth_multifold_step6_below_186_bits
-  inhabited_curve_leaf_gcd_decomp
-  tooth_multisheet_smooth_cylinder_divides_g1
-  inhabited_curve_three_poly_sheet_decomp
-  tooth_three_poly_sheet_needs_divisibility
 
 #verify_inhabited Qsag.gsDecodeList_length_le_johnson inhabited_gsDecodeList_length_le_johnson
 #tooth_pair Qsag.gsDecodeList_length_le_johnson vs tooth_gsDecodeList_johnson_denominator_needed

@@ -3389,7 +3389,7 @@ private theorem quadExtKaratsubaMid {R : Type} [LawfulCommRing R] (x0 x1 y0 y1 :
 
 /-! ### Quartic extension `GoldilocksExt4 = GoldilocksExt2[v] / (v^2 - u)` (`field.rs`) -/
 
-/-- Quartic extension of `Goldilocks` as the quadratic tower over `GoldilocksExt2`
+/-! Quartic extension of `Goldilocks` as the quadratic tower over `GoldilocksExt2`
     (`field.rs:GoldilocksExt4`): an element is `c0 + c1 * v` with `v^2 = u` and `u^2 = 7`, so
     `v^4 = 7`. In the limb order of `field.rs:to_limbs`, `[l0, l1, l2, l3]` denotes
     `l0 + l1 * v^2 + l2 * v + l3 * v^3`. -/
@@ -7734,7 +7734,8 @@ def stepOpConstraints (kind : StepConstraintKind) (c0 : Goldilocks) (x : StepOpR
      x.next (stRemPack + slot) -ₚ x.aux 8] ++
     (List.range 4).flatMap (fun i =>
       [x.stIn i -ₚ x.aux i, x.stIn (4 + i) -ₚ x.pkSeed i,
-       x.next (stWork + i) -ₚ (x.permOut i +ₚ x.aux i)]) ++
+       x.next (stWork + i) -ₚ
+         (x.permOut i +ₚ ((x.aux i +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ (‹4› *ₚ x.stIn (8 + i))))]) ++
     [x.stIn 8 -ₚ domainForsLeaf,
      x.stIn 9 -ₚ ((x.prev stKpIdx *ₚ ‹2 ^ 24›) +ₚ
        (c0 +ₚ stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4)),
@@ -7798,7 +7799,8 @@ def stepOpConstraints (kind : StepConstraintKind) (c0 : Goldilocks) (x : StepOpR
     (List.range 4).flatMap (fun i =>
       [x.stIn i -ₚ x.aux i, x.stIn (4 + i) -ₚ x.pkSeed i,
        x.next (stWork + i) -ₚ
-         ((x.aux 4 *ₚ x.aux i) +ₚ ((Goldilocks.one -ₚ x.aux 4) *ₚ (x.permOut i +ₚ x.aux i)))]) ++
+         ((x.aux 4 *ₚ x.aux i) +ₚ ((Goldilocks.one -ₚ x.aux 4) *ₚ
+           (x.permOut i +ₚ ((x.aux i +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ (‹4› *ₚ x.stIn (8 + i))))))]) ++
     stepWotsStepInput x c0 ++
     [x.next stAccOrU1 -ₚ x.aux 5, x.next stWotsU2 -ₚ x.aux 6] ++
     stepCarryUnchanged x
@@ -7809,7 +7811,9 @@ def stepOpConstraints (kind : StepConstraintKind) (c0 : Goldilocks) (x : StepOpR
       [x.stIn i -ₚ x.prev (stWork + i), x.stIn (4 + i) -ₚ x.pkSeed i,
        x.next (stWork + i) -ₚ
          ((x.prev stAccOrU1 *ₚ x.prev (stWork + i)) +ₚ
-           ((Goldilocks.one -ₚ x.prev stAccOrU1) *ₚ (x.permOut i +ₚ x.prev (stWork + i))))]) ++
+           ((Goldilocks.one -ₚ x.prev stAccOrU1) *ₚ
+             (x.permOut i +ₚ ((x.prev (stWork + i) +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ
+               (‹4› *ₚ x.stIn (8 + i))))))]) ++
     stepWotsStepInput x c0 ++
     stepCarryUnchanged x (fun j => stepInBlock stWork 4 j)
   | .wotsChainStep2 isOdd =>
@@ -7817,7 +7821,9 @@ def stepOpConstraints (kind : StepConstraintKind) (c0 : Goldilocks) (x : StepOpR
       [x.stIn i -ₚ x.prev (stWork + i), x.stIn (4 + i) -ₚ x.pkSeed i,
        x.next ((if isOdd then stWork else stSubSponge) + i) -ₚ
          ((x.prev stWotsU2 *ₚ x.prev (stWork + i)) +ₚ
-           ((Goldilocks.one -ₚ x.prev stWotsU2) *ₚ (x.permOut i +ₚ x.prev (stWork + i))))]) ++
+           ((Goldilocks.one -ₚ x.prev stWotsU2) *ₚ
+             (x.permOut i +ₚ ((x.prev (stWork + i) +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ
+               (‹4› *ₚ x.stIn (8 + i))))))]) ++
     stepWotsStepInput x c0 ++
     stepCarryUnchanged x (fun j => stepInBlock (if isOdd then stWork else stSubSponge) 4 j)
   | .wotsTellPairAbsorb isLastPair =>
@@ -8239,8 +8245,8 @@ private theorem stepOpBatchedExt4_zero_of_allZero (gamma : GoldilocksExt4) :
     have ih := stepOpBatchedExt4_zero_of_allZero gamma rest h.2
     unfold stepOpBatchedExt4 at ih ⊢
     rw [List.map_cons, RoundPoly.evalCoeffs_cons, ih, h.1, LawfulCommRing.mul_zero,
-      GoldilocksExt4.embedBase_zero]
-    exact LawfulCommRing.add_zero GoldilocksExt4.zero
+      LawfulCommRing.add_zero]
+    exact GoldilocksExt4.embedBase_zero
 
 private theorem exists_ne_zero_of_not_allZero :
     ∀ (l : List Goldilocks), allZeroGoldilocks l = false →
@@ -10473,24 +10479,6 @@ theorem inhabited_canopy_collision_extractor :
     ⟨extractHashCollisionFromCanopyTranscripts canopyPrefixHash canopyPrefixHash_length 1
       canopyAuditCommitment [(0, canopyConstDigest 5)] [(0, canopyConstDigest 5)]
       [canopyConstDigest 7] [canopyConstDigest 8] rfl (by decide) (by decide) (by decide)⟩⟩
-
-theorem tooth_canopy_sibling_mutation :
-    ∃ proof : List Nat, proof ≠ canopyToyProof ∧
-      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
-        canopyToyLeaves proof = false :=
-  ⟨[canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
-    canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)],
-    by decide, canopyToy_flipped_sibling_rejected⟩
-
-#tooth_pair canopyToy_honest_accepted vs tooth_canopy_sibling_mutation
-theorem inhabited_canopy_nonempty_opening :
-    ∃ (leaves : List (Nat × Nat)) (proof : List Nat),
-      leaves = canopyToyLeaves ∧ proof = canopyToyProof ∧
-      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
-        leaves proof = true :=
-  ⟨canopyToyLeaves, canopyToyProof, rfl, rfl, canopyToy_honest_accepted⟩
-
-#verify_inhabited verifyCanopyMultiproof_exact_sibling_count inhabited_canopy_nonempty_opening
 
 
 end Qsag

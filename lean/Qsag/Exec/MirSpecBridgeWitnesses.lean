@@ -871,6 +871,7 @@ private theorem hStep1_2 (s1₁ : Layer1ElfState)
     lift_accepted_step (sim_layer1_to_layer2 (n := 4) 3 samplePkPin signFn) hRel12_1 hStep2_2
   exact ⟨s1₂, hStep⟩
 
+attribute [-instance] Fin.instLinearOrderPackage in
 private theorem hSafe : FourLayerTraceSafe s4₀.policy.velocity_window_cap corrupt
     [(req1, out1), (req2, out2)] := by
   qsag_aux_lemma =>
@@ -882,6 +883,7 @@ private theorem hSafe : FourLayerTraceSafe s4₀.policy.velocity_window_cap corr
     rcases hp with rfl | rfl
     · exact ⟨⟨1, by decide⟩, by decide, by decide⟩
     · exact ⟨⟨1, by decide⟩, by decide, by decide⟩
+#verify_constructive hSafe
 end FourLayerWitness.HonestProof
 
 /-- Mutated Layer-1 machine replacing ONLY Link 2's authoritative `accumulatedSpend` check with

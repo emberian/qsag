@@ -74,8 +74,10 @@ public import Qsag.Coding.Cwyz26
 import all Qsag.Coding.Cwyz26
 
 public import Qsag.Math.QuarticExt4
+import all Qsag.Math.QuarticExt4
 
 public import Qsag.Spec.Bounds
+import all Qsag.Spec.Bounds
 public section
 namespace Qsag
 
