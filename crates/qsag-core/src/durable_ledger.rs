@@ -30,7 +30,8 @@ pub(crate) fn advance_anchor(
 ) -> std::io::Result<()> {
     if let Some(old) = anchor.load()?
         && (old.generation > checkpoint.generation
-            || (old.generation == checkpoint.generation && old.tag != checkpoint.tag))
+            || (old.generation == checkpoint.generation
+                && !ct_eq_bytes32(&old.tag, &checkpoint.tag)))
     {
         return Err(std::io::Error::other(
             "external anchor rejects rolled-back state",
@@ -71,6 +72,7 @@ impl Ledger {
         domain: &'static [u8],
     ) -> Result<Self, ()> {
         use std::io::Read;
+        let key_guard = crate::wipe::SecretBuffer(key);
         let path = path.into();
         let genesis = LockedRecord::create_new(path.clone()).map_err(|_| ())?;
         let paths = slot_paths(&path);
@@ -85,12 +87,14 @@ impl Ledger {
             .map_err(|_| ())?
             .read_exact(&mut ledger_id)
             .map_err(|_| ())?;
+        let owned_key = *key_guard;
+        drop(key_guard);
         let mut this = Self {
             genesis,
             slots,
             slot_seals,
             paths,
-            key,
+            key: owned_key,
             domain,
             ledger_id,
             checkpoint: LedgerCheckpoint {
@@ -118,9 +122,10 @@ impl Ledger {
         domain: &'static [u8],
         checkpoint: LedgerCheckpoint,
     ) -> Result<Self, ()> {
+        let key_guard = crate::wipe::SecretBuffer(key);
         let path = path.into();
         let genesis = LockedRecord::open_existing(&path).map_err(|_| ())?;
-        let bytes = genesis.read().map_err(|_| ())?;
+        let bytes = genesis.read_bounded(88).map_err(|_| ())?;
         if bytes.len() != 88 || &bytes[..8] != b"QSAGLDG2" {
             return Err(());
         }
@@ -140,12 +145,14 @@ impl Ledger {
                 .ok()
                 .filter(|slot| slot.lock_seal() == slot_seals[i])
         });
+        let owned_key = *key_guard;
+        drop(key_guard);
         let mut this = Self {
             genesis,
             slots,
             slot_seals,
             paths,
-            key,
+            key: owned_key,
             domain,
             ledger_id,
             checkpoint,
@@ -197,7 +204,17 @@ impl Ledger {
         bytes
     }
     fn check_genesis(&self) -> Result<(), ()> {
-        if self.failed || self.genesis.read().map_err(|_| ())? != self.genesis_bytes() {
+        if self.failed {
+            return Err(());
+        }
+        let actual = self.genesis.read_bounded(88).map_err(|_| ())?;
+        let expected = self.genesis_bytes();
+        if actual.len() != 88 || expected.len() != 88 || actual[..56] != expected[..56] {
+            return Err(());
+        }
+        let actual_tag: [u8; 32] = actual[56..88].try_into().map_err(|_| ())?;
+        let expected_tag: [u8; 32] = expected[56..88].try_into().map_err(|_| ())?;
+        if !ct_eq_bytes32(&actual_tag, &expected_tag) {
             return Err(());
         }
         Ok(())
@@ -210,7 +227,7 @@ impl Ledger {
         let bytes = self.slots[slot]
             .as_ref()
             .ok_or(())?
-            .read()
+            .read_bounded(LIMIT)
             .map_err(|_| ())?;
         if bytes.len() < 48 || bytes.len() > LIMIT {
             return Err(());

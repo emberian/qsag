@@ -40,6 +40,11 @@ pub enum FtsGuardError {
 }
 
 /// Single-use authorization token emitted when an `FtsEpochGuard` transitions `used: 0 -> 1`.
+///
+/// ```compile_fail
+/// use qsag_verified::FtsEpochPermit;
+/// let forged = FtsEpochPermit { key_id: [0; 32], authorized_epoch: 0, msg_digest: [0; 32] };
+/// ```
 pub struct FtsEpochPermit {
     key_id: [u8; 32],
     authorized_epoch: u32,

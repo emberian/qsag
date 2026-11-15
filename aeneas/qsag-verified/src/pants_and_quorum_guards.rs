@@ -74,8 +74,14 @@ pub enum BeltQuorumPhase {
 }
 
 /// Certified authorization token emitted when `BeltQuorumCore` reaches `SharesAuthorized`.
+///
+/// ```compile_fail
+/// use qsag_verified::BeltAuthorizationGrant;
+/// let forged = BeltAuthorizationGrant { authorized_epoch: 0, msg_tag: [0; 32], certified_acks: 3 };
+/// ```
 #[derive(Clone, Copy)]
 pub struct BeltAuthorizationGrant {
+    _private: (),
     pub authorized_epoch: u64,
     pub msg_tag: [u8; 32],
     pub certified_acks: u32,
@@ -455,6 +461,7 @@ impl BeltQuorumCore {
             return (self, Err(PantsGuardError::SharesAlreadyAuthorized));
         }
         let grant = BeltAuthorizationGrant {
+            _private: (),
             authorized_epoch: self.bound_epoch,
             msg_tag: self.bound_msg_tag,
             certified_acks: self.ack_count,
@@ -616,6 +623,11 @@ impl VerifiedWotsC256Guard {
 // ============================================================================
 
 /// Capability token returned ONLY when `VerifiedRssPoisonLatch::authorize_open` succeeds.
+///
+/// ```compile_fail
+/// use qsag_verified::RssOpenPermit;
+/// let forged = RssOpenPermit { verified_clean: true };
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct RssOpenPermit {
     verified_clean: bool,
@@ -807,8 +819,15 @@ pub struct WaistbandDerivationRequest {
 
 /// Permit emitted only when cache identity tags, static intermediate child root, and first-signed
 /// codeword lock all match.
+///
+/// ```compile_fail
+/// use qsag_verified::WaistbandAncestorPermit;
+/// let forged = WaistbandAncestorPermit { layer: 0, tree: 0, kp: 0,
+///     verified_child_root: [0; 32], authorized_codeword_tag: [0; 32] };
+/// ```
 #[derive(Clone, Copy)]
 pub struct WaistbandAncestorPermit {
+    _private: (),
     pub layer: u32,
     pub tree: u64,
     pub kp: u32,
@@ -970,6 +989,7 @@ impl VerifiedWaistbandRootGuard {
             );
         }
         let permit = WaistbandAncestorPermit {
+            _private: (),
             layer: self.ancestor_layer,
             tree: self.ancestor_tree,
             kp: self.ancestor_kp,

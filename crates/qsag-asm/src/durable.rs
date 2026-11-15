@@ -372,7 +372,18 @@ impl LockedRecord {
         Ok(())
     }
 
+    /// Default upper bound (`64 MiB`) enforced by [`LockedRecord::read`] before allocating a
+    /// heap payload buffer, preventing OOM kills if an attacker or filesystem corruption
+    /// substitutes a multi-gigabyte sparse regular file.
+    pub const MAX_DEFAULT_RECORD_BYTES: usize = 64 * 1024 * 1024;
+
     pub fn read(&self) -> io::Result<std::vec::Vec<u8>> {
+        self.read_bounded(Self::MAX_DEFAULT_RECORD_BYTES)
+    }
+
+    /// Read and authenticate the record payload while enforcing `payload_len <= max_bytes`
+    /// via `fstat` on the opened descriptor *before* any heap allocation.
+    pub fn read_bounded(&self, max_bytes: usize) -> io::Result<std::vec::Vec<u8>> {
         let _operation = self
             .operations
             .lock()
@@ -382,8 +393,14 @@ impl LockedRecord {
             regular_metadata(&self.path)?;
             let mut file = options()?.read(true).open(&self.path)?;
             let meta = verify_path(&file, &self.path)?;
-            let len = usize::try_from(meta.len().checked_sub(16).ok_or_else(invalid)?)
-                .map_err(|_| invalid())?;
+            let raw_payload_len = meta.len().checked_sub(16).ok_or_else(invalid)?;
+            if raw_payload_len > max_bytes as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "durable record exceeds bounded payload limit",
+                ));
+            }
+            let len = usize::try_from(raw_payload_len).map_err(|_| invalid())?;
             let mut header = [0u8; 16];
             file.read_exact(&mut header)?;
             if &header[..8] != RECORD_MAGIC || header[8..] != self.seal {
@@ -670,5 +687,31 @@ mod tests {
             LockedRecord::open_existing(path).unwrap().read().unwrap(),
             b"committed"
         );
+    }
+
+    #[test]
+    fn read_bounded_rejects_oversized_sparse_record_before_allocation() {
+        let temp = Temp::new();
+        let path = temp.record();
+        let record = LockedRecord::create_new(&path).unwrap();
+        record.replace(b"small-payload").unwrap();
+        assert_eq!(record.read_bounded(13).unwrap(), b"small-payload");
+        assert_eq!(
+            record.read_bounded(12).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        // Inflate the backing regular file to a 1 GiB sparse file while preserving its
+        // 16-byte header (`RECORD_MAGIC || seal`): both `read_bounded` and default `read`
+        // must reject via `fstat` before attempting any heap allocation.
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len((1u64 << 30) + 16).unwrap();
+        drop(file);
+
+        assert_eq!(
+            record.read_bounded(4096).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(record.read().unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 }

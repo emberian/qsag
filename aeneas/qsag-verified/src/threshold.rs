@@ -490,8 +490,15 @@ pub struct EpochSignRequest {
 }
 
 /// Verified signing authorization grant emitted by `EpochLatch::acquire_or_retry`.
+///
+/// ```compile_fail
+/// use qsag_verified::EpochAuthGrant;
+/// let forged = EpochAuthGrant { authorized_epoch: 0, msg_digest: [0; 32],
+///     r_rand: [0; 32], is_idempotent_retry: false };
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EpochAuthGrant {
+    _private: (),
     pub authorized_epoch: u64,
     pub msg_digest: [u8; 32],
     pub r_rand: [u8; 32],
@@ -615,6 +622,7 @@ impl EpochLatch {
                     return Ok((
                         self,
                         EpochAuthGrant {
+                            _private: (),
                             authorized_epoch: bound.epoch,
                             msg_digest: bound.msg_digest,
                             r_rand: bound.r_rand,
@@ -649,6 +657,7 @@ impl EpochLatch {
             last_bound: LastBoundEpoch::Bound(record),
         };
         let grant = EpochAuthGrant {
+            _private: (),
             authorized_epoch: assigned_epoch,
             msg_digest: req.msg_digest,
             r_rand: req.deterministic_r_rand,
