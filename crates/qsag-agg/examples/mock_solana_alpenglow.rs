@@ -26,7 +26,8 @@
 //!    - Unconditional Johnson-radius QROM (`BciksJohnsonQrom128`) only; refuted capacity-proximity
 //!      conjectures (`[CS25]`, `[KKH26]`) are purged.
 //!    - `QSAG_ALPENGLOW_FULL_COMMITTEE=1` gives every compact FTS profile 1,500 distinct key trees;
-//!      `QSAG_ALPENGLOW_JOINT_WORKERS=n` bounds the single-host whole-committee proves' concurrency.
+//!      `QSAG_ALPENGLOW_JOINT_WORKERS=n` bounds CPU workers; `QSAG_PROVER_JOBS` bounds active batches.
+//!      `QSAG_ALPENGLOW_SHARDS_PER_BATCH` (default2) bounds each joint opening's shard count.
 //!    - `QSAG_ALPENGLOW_SECTIONS=1`, `=2` or `=1,2` (default) selects the sections to run.
 
 use std::path::{Path, PathBuf};
@@ -46,7 +47,8 @@ use qsag_agg::{
 use qsag_fts::{
     EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
     FrontierFtsSignature, FrontierFtsSigningKey, FsWalFtsEpochLatch, FtsEpochWal, RotatedEpochVote,
-    verify_frontier_fts,
+    verify_frontier_fts, FrontierVerifyInput, RotatedEpochVerifyInput,
+    verify_frontier_fts_batch, verify_rotated_epoch_votes_batch,
 };
 
 const ALPENGLOW_VALIDATORS: usize = 1_500;
@@ -274,6 +276,31 @@ fn verify_fts_vote(v: &FtsVote, dp: &FrontierDpTable) -> bool {
             )
             .is_ok_and(|next| next.root.as_slice() == next_root),
     }
+}
+
+// Independent eight-lane hash work within each CPU worker; retains every vote's context
+// and the rotated envelope's expected next-key-root comparison.
+fn verify_fts_votes_batch(votes: &[&FtsVote], dp: &FrontierDpTable) -> bool {
+    let mut plain = Vec::new();
+    let mut rotated = Vec::new();
+    let mut next_roots = Vec::new();
+    for v in votes {
+        match &v.env {
+            FtsVoteEnvelope::Plain { msg, sig } => plain.push(FrontierVerifyInput {
+                pk: &v.pk, dp, message: msg, signature: sig,
+            }),
+            FtsVoteEnvelope::Rotated { vote, expected_digest, next_root } => {
+                rotated.push(RotatedEpochVerifyInput {
+                    current: &v.pk, dp, vote, chain_id: &ROTATION_CHAIN_ID,
+                    expected_epoch: ROTATION_EPOCH, expected_vote_digest: expected_digest,
+                });
+                next_roots.push(next_root);
+            }
+        }
+    }
+    verify_frontier_fts_batch(&plain).iter().all(Result::is_ok)
+        && verify_rotated_epoch_votes_batch(&rotated).into_iter().zip(next_roots)
+            .all(|(result, root)| result.is_ok_and(|next| next.root.as_slice() == root))
 }
 
 /// Keys for one validator: the current signing key and, for rotated votes, its next epoch key
@@ -514,7 +541,9 @@ fn bench_fts_rotor_profile(
     }
     let verify_1core_us = (t_1c.elapsed().as_secs_f64() * 1_000_000.0) / (single_count as f64);
 
-    // Multi-core parallel batch verification for 900 (60% slow path) & 1,200 (80% fast path) votes.
+    // Same vote work, scalar comparison or eight-lane hashing within each CPU worker.
+    let scalar_batches = std::env::var("QSAG_ALPENGLOW_SCALAR_VERIFY").ok().as_deref() == Some("1");
+    println!("    vote verification batches: {}", if scalar_batches { "scalar reference" } else { "eight-lane multibuffer" });
     let measure_batch = |count: usize| -> (f64, f64) {
         let slice = &votes[..count];
         let per_worker = count.div_ceil(workers);
@@ -525,12 +554,10 @@ fn bench_fts_rotor_profile(
                 let dp_ref = &dp;
                 for batch in slice.chunks(per_worker) {
                     scope.spawn(move || {
-                        for v in batch {
-                            assert!(
-                                verify_fts_vote(v, dp_ref),
-                                "parallel FTS notarization vote must verify"
-                            );
-                        }
+                        let valid = if scalar_batches {
+                            batch.iter().all(|v| verify_fts_vote(v, dp_ref))
+                        } else { verify_fts_votes_batch(batch, dp_ref) };
+                        assert!(valid, "FTS notarization votes must verify");
                     });
                 }
             });
@@ -986,8 +1013,8 @@ fn bench_section2_hem_finality_compression(
     let (single_all_p50, single_all_p99) = measure_agg_verify(None);
     let (single_1c_p50, single_1c_p99) = measure_agg_verify(Some(1));
 
-    // 2B. Jointly-witnessed multi-shard `HemAggregatedProof` (`max_shards_per_batch = 10` -> ONE
-    //     joint WHIR PCS opening!) AND regional 2-layer `HierarchicalHemAggregate`.
+    // 2B. Jointly witnessed, explicitly partitioned batch proofs AND the regional hierarchy.
+    // Each batch has its own full transcript/opening; the certificate retains every batch.
     let target_signers = std::env::var("QSAG_ALPENGLOW_SHARDS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -1035,7 +1062,7 @@ fn bench_section2_hem_finality_compression(
     // Bound a single batch's trace footprint as well as concurrent batch admission.
     // Every signer remains covered by the existing transcript-bound batch proofs and MergeNode.
     // More batches trade larger certificate bytes for bounded live witness memory.
-    joint_cfg.max_shards_per_batch = env_usize("QSAG_ALPENGLOW_SHARDS_PER_BATCH", 2);
+    joint_cfg.max_shards_per_batch = env_usize("QSAG_ALPENGLOW_SHARDS_PER_BATCH", joint_cfg.max_shards_per_batch);
     println!("    joint batch partition: <= {} shards/opening; QSAG_PROVER_JOBS={} (arithmetic workers remain independent)",
         joint_cfg.max_shards_per_batch, env_usize("QSAG_PROVER_JOBS", 1));
 
@@ -1548,5 +1575,32 @@ fn main() {
         println!(
             "\nVulkan totals: submissions={submissions} accepted_v5_receipts={receipts} cpu_fallbacks={fallbacks}"
         );
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+    #[test]
+    fn multibuffer_adapter_preserves_plain_context_and_rotated_next_root() {
+        let profile=FrontierFtsProfile::Compact1122;
+        let dp=FrontierDpTable::build(profile);
+        let accel=CpuReferenceBackend::new();
+        let mut votes=Vec::new();
+        for (idx,rotated) in [(0,false),(1,true)] {
+            let (sk,next_root)=fts_keygen(profile,0xD1,idx,rotated,&accel);
+            let mut sk=sk.attach_wal(Box::new(MemFtsWal::default())).unwrap();
+            let env=sign_fts_vote(&mut sk,&dp,next_root,idx as usize,&[33;32]);
+            votes.push(FtsVote{pk:sk.pk.clone(),env});
+        }
+        assert!(verify_fts_votes_batch(&votes.iter().collect::<Vec<_>>(),&dp));
+        assert!(votes.iter().all(|v|verify_fts_vote(v,&dp)));
+        if let FtsVoteEnvelope::Rotated{next_root,..}=&mut votes[1].env {next_root[0]^=1;}
+        assert!(!verify_fts_votes_batch(&votes.iter().collect::<Vec<_>>(),&dp));
+        assert!(!verify_fts_vote(&votes[1],&dp));
+        if let FtsVoteEnvelope::Rotated{next_root,..}=&mut votes[1].env {next_root[0]^=1;}
+        if let FtsVoteEnvelope::Plain{msg,..}=&mut votes[0].env {msg[0]^=1;}
+        assert!(!verify_fts_votes_batch(&votes.iter().collect::<Vec<_>>(),&dp));
+        assert!(!verify_fts_vote(&votes[0],&dp));
     }
 }

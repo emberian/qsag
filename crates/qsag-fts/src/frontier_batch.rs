@@ -9,6 +9,13 @@ pub struct FrontierVerifyInput<'a> {
     pub signature: &'a FrontierFtsSignature,
 }
 
+struct HashJob {
+    state: [u64; 25],
+    bytes: [u8; 272],
+    needs_prefix: bool,
+    chain_node: Option<u32>,
+}
+
 struct Lane<'a> {
     input: &'a FrontierVerifyInput<'a>,
     pid: [u8; 56],
@@ -17,6 +24,10 @@ struct Lane<'a> {
     index: usize,
     stack: Vec<(u32, [u8; 32])>,
     current: Option<(u32, usize, [u8; 32])>,
+    // This lane owns one immutable profile/key context. The cached state is after
+    // absorbing the first rate block of TAG_CHAIN for exactly this node. The step
+    // and chain value start in block two, so neither is part of this cache key.
+    chain_prefix: Option<(u32, [u64; 25])>,
 }
 
 impl<'a> Lane<'a> {
@@ -62,24 +73,38 @@ impl<'a> Lane<'a> {
             index: 0,
             stack: Vec::with_capacity(p.frontier_len),
             current: None,
+            chain_prefix: None,
         })
     }
 
     // Same left-to-right stack reduction as the scalar verifier; yields at every hash.
-    fn next(&mut self) -> Option<([u64; 25], [u8; 272])> {
+    fn next(&mut self) -> Option<HashJob> {
         let p = self.input.pk.profile.params();
         loop {
             if let Some((v, step, value)) = self.current.take() {
                 if step < p.winternitz_w - 1 {
                     self.current = Some((v, step + 1, value));
-                    return Some(frame(
+                    let (mut state, bytes) = frame(
                         false,
                         &self.pid,
                         &self.input.pk.pk_seed,
                         v,
                         &(step as u64).to_be_bytes(),
                         &value[..p.node_bytes],
-                    ));
+                    );
+                    let needs_prefix = match self.chain_prefix {
+                        Some((node, prefix)) if node == v => {
+                            state = prefix;
+                            false
+                        }
+                        _ => true,
+                    };
+                    return Some(HashJob {
+                        state,
+                        bytes,
+                        needs_prefix,
+                        chain_node: Some(v),
+                    });
                 }
                 self.stack.push((v, value));
             }
@@ -97,14 +122,20 @@ impl<'a> Lane<'a> {
                     if parent > 1 { 0 } else { p.winternitz_w - 1 },
                     [0; 32],
                 ));
-                return Some(frame(
+                let (state, bytes) = frame(
                     true,
                     &self.pid,
                     &self.input.pk.pk_seed,
                     parent,
                     &left[..p.node_bytes],
                     &right[..p.node_bytes],
-                ));
+                );
+                return Some(HashJob {
+                    state,
+                    bytes,
+                    needs_prefix: true,
+                    chain_node: None,
+                });
             }
             if self.index == self.frontier.len() {
                 return None;
@@ -152,45 +183,76 @@ fn frame(
     (if merge { MERGE } else { CHAIN }, bytes)
 }
 
+fn absorb_rate(state: &mut [u64; 25], bytes: &[u8]) {
+    for (word, src) in state[..17].iter_mut().zip(bytes.as_chunks::<8>().0.iter()) {
+        *word ^= u64::from_le_bytes(*src);
+    }
+}
+
 /// Verify up to eight independent hash streams at once using the existing Keccak batch backend.
+/// Reuses each node's invariant first chain block within its own key/profile lane.
 /// Returns one scalar-equivalent verdict per input in input order, with bounded workspace and
 /// no internal worker threads. Profiles, keys, messages, and DP tables may differ between lanes.
 pub fn verify_frontier_fts_batch(
     inputs: &[FrontierVerifyInput<'_>],
 ) -> Vec<Result<(), FrontierFtsError>> {
+    verify_batch_with_permutation(inputs, qsag_core::sponge::keccak::keccak_f1600_batch)
+}
+
+fn verify_batch_with_permutation(
+    inputs: &[FrontierVerifyInput<'_>],
+    mut permute: impl FnMut(&mut [[u64; 25]]),
+) -> Vec<Result<(), FrontierFtsError>> {
     let mut results = Vec::with_capacity(inputs.len());
     for chunk in inputs.chunks(8) {
         let mut lanes: Vec<_> = chunk.iter().map(Lane::new).collect();
         let mut states = Vec::with_capacity(8);
-        let mut blocks = Vec::with_capacity(8);
+        let mut jobs = Vec::with_capacity(8);
         let mut indices = Vec::with_capacity(8);
+        let mut prefix_states = Vec::with_capacity(8);
+        let mut prefix_indices = Vec::with_capacity(8);
         loop {
             states.clear();
-            blocks.clear();
+            jobs.clear();
             indices.clear();
+            prefix_states.clear();
+            prefix_indices.clear();
             for (i, lane) in lanes.iter_mut().enumerate() {
-                if let Ok(lane) = lane {
-                    if let Some((state, block)) = lane.next() {
-                        states.push(state);
-                        blocks.push(block);
-                        indices.push(i);
-                    }
+                if let Ok(lane) = lane
+                    && let Some(job) = lane.next()
+                {
+                    states.push(job.state);
+                    jobs.push(job);
+                    indices.push(i);
                 }
             }
             if states.is_empty() {
                 break;
             }
-            for block in 0..2 {
-                for (state, bytes) in states.iter_mut().zip(&blocks) {
-                    for (word, src) in state[..17]
-                        .iter_mut()
-                        .zip(bytes[block * 136..(block + 1) * 136].chunks_exact(8))
-                    {
-                        *word ^= u64::from_le_bytes(core::array::from_fn(|i| src[i]));
-                    }
+            for (j, job) in jobs.iter().enumerate() {
+                if job.needs_prefix {
+                    let mut state = job.state;
+                    absorb_rate(&mut state, &job.bytes[..136]);
+                    prefix_states.push(state);
+                    prefix_indices.push(j);
                 }
-                qsag_core::sponge::keccak::keccak_f1600_batch(&mut states);
             }
+            if !prefix_states.is_empty() {
+                permute(&mut prefix_states);
+            }
+            for (&state, &j) in prefix_states.iter().zip(&prefix_indices) {
+                states[j] = state;
+                if let Some(node) = jobs[j].chain_node {
+                    let Ok(lane) = &mut lanes[indices[j]] else {
+                        unreachable!()
+                    };
+                    lane.chain_prefix = Some((node, state));
+                }
+            }
+            for (state, job) in states.iter_mut().zip(&jobs) {
+                absorb_rate(state, &job.bytes[136..]);
+            }
+            permute(&mut states);
             for (state, i) in states.iter().zip(indices.iter().copied()) {
                 let Ok(lane) = &mut lanes[i] else {
                     unreachable!()
@@ -198,7 +260,7 @@ pub fn verify_frontier_fts_batch(
                 let Some((_, _, value)) = &mut lane.current else {
                     unreachable!()
                 };
-                for (dst, word) in value.chunks_exact_mut(8).zip(state) {
+                for (dst, word) in value.as_chunks_mut::<8>().0.iter_mut().zip(state) {
                     dst.copy_from_slice(&word.to_le_bytes());
                 }
             }
@@ -371,7 +433,64 @@ mod tests {
                 .map(|i| verify_frontier_fts(i.pk, i.dp, i.message, i.signature))
                 .collect();
             assert_eq!(verify_frontier_fts_batch(&inputs), expected);
+            assert_eq!(
+                verify_batch_with_permutation(&inputs, |states| {
+                    for state in states {
+                        qsag_core::sponge::keccak::keccak_f1600(state);
+                    }
+                }),
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn batch_heterogeneous_production_profiles() {
+        let profiles = [
+            FrontierFtsProfile::Compact514,
+            FrontierFtsProfile::Full256Bit,
+            FrontierFtsProfile::Compact1122,
+        ];
+        let tables: Vec<_> = profiles
+            .iter()
+            .map(|&p| FrontierDpTable::build(p))
+            .collect();
+        let mut keys = Vec::new();
+        let mut sigs = Vec::new();
+        for (i, &profile) in profiles.iter().enumerate() {
+            let mut key = FrontierFtsSigningKey::keygen(
+                profile,
+                [i as u8; 32],
+                [41; 32],
+                [42; 32],
+                true,
+                &CpuReferenceBackend::new(),
+            );
+            sigs.push(key.sign(&tables[i], b"profile test", &[43; 32]).unwrap());
+            keys.push(key);
+        }
+        let mut wrong_profile = keys[0].pk.clone();
+        wrong_profile.profile = FrontierFtsProfile::Compact1122;
+        let inputs: Vec<_> = (0..17)
+            .map(|j| {
+                let i = j % 3;
+                FrontierVerifyInput {
+                    pk: if j == 4 { &wrong_profile } else { &keys[i].pk },
+                    dp: &tables[i],
+                    message: b"profile test",
+                    signature: &sigs[i],
+                }
+            })
+            .collect();
+        let scalar: Vec<_> = inputs
+            .iter()
+            .map(|i| verify_frontier_fts(i.pk, i.dp, i.message, i.signature))
+            .collect();
+        assert!(scalar[0].is_ok());
+        assert!(scalar[1].is_ok());
+        assert!(scalar[2].is_ok());
+        assert!(scalar[4].is_err());
+        assert_eq!(verify_frontier_fts_batch(&inputs), scalar);
     }
 
     #[test]
@@ -483,6 +602,42 @@ mod tests {
                 scalar.as_micros(),
                 start.elapsed().as_micros()
             );
+            if count == 1200 {
+                for workers in [2, 8] {
+                    let start = std::time::Instant::now();
+                    std::thread::scope(|scope| {
+                        for chunk in inputs.chunks(count.div_ceil(workers)) {
+                            scope.spawn(move || {
+                                for input in chunk {
+                                    assert!(
+                                        verify_frontier_fts(
+                                            input.pk,
+                                            input.dp,
+                                            input.message,
+                                            input.signature
+                                        )
+                                        .is_ok()
+                                    );
+                                }
+                            });
+                        }
+                    });
+                    let scalar = start.elapsed();
+                    let start = std::time::Instant::now();
+                    std::thread::scope(|scope| {
+                        for chunk in inputs.chunks(count.div_ceil(workers)) {
+                            scope.spawn(move || {
+                                assert!(verify_frontier_fts_batch(chunk).iter().all(Result::is_ok))
+                            });
+                        }
+                    });
+                    std::eprintln!(
+                        "votes={count} workers={workers} scalar_us={} batch_us={}",
+                        scalar.as_micros(),
+                        start.elapsed().as_micros()
+                    );
+                }
+            }
         }
     }
 }
