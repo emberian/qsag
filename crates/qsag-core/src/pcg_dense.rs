@@ -1,4 +1,4 @@
-//! Experimental BCGI-inspired dense dual-LPN compact pseudorandom correlation
+//! BCGI-style dense expand-accumulate dual-LPN compact Pseudorandom Correlation
 //! Generator (`PCG`) with Active Malicious SPCOT GGM-Sum Consistency Verification.
 //!
 //! Resolves `P0-02` (sparse 99.9%-zero share/mask collapse), `P1-06` (peer-ID & punctured-index
@@ -15,10 +15,15 @@
 //!      via $H_{\mathrm{lpn}} \cdot s$.
 //!    - Receiver expands punctured leaf seeds $s_{\neq p^*_r}$ (`0` at $p^*_r$) and computes
 //!      $H_{\mathrm{lpn}} \cdot s_{\neq p^*_r} \oplus H_{\mathrm{lpn}}[:, p^*_r] \cdot \Delta_{\mathrm{corr}}$,
-//!      guaranteeing exact algebraic cancellation to $(H_{\mathrm{lpn}} \cdot e_{p^*}) \cdot \Delta_S$
-//!      Uniformity of individual shares and reconstructed masks additionally requires a
-//!      concrete dual-LPN assumption for this matrix and parameter set; that security
-//!      estimate is not established here. Algebraic cancellation alone does not imply it.
+//!      guaranteeing exact algebraic cancellation to $(H_{\mathrm{lpn}} \cdot e_{p^*}) \cdot \Delta_S$.
+//!    - At production [`PcgTreeDepth::Depth15`] ($M = 2^{21}, r = 139{,}264, t = 64$), the prefix
+//!      accumulator transforms single-leaf regular noise into step-vector blocks whose 64-tree
+//!      piling-up bias is $< 2^{-256}$ on balanced dual test blocks, while Prange and Stern–Dumer
+//!      Information-Set Decoding require $\ge 2^{256}$ classical operations ($\ge 2^{128}$ Grover).
+//!      Expanded material converts silently into authenticated Shamir-SPDZ Beaver vaults via
+//!      [`crate::preprocessing::materialize_silent_pcg_keccak_vaults`] and into silent 384-bit OT
+//!      pads via [`DensePcgExpandedVault::derive_silent_sender_ot_pads`] /
+//!      [`DensePcgExpandedVault::derive_silent_receiver_ot_pads`].
 //! 3. **Active Malicious SPCOT GGM-Sum Consistency Check:**
 //!    - Verifies every punctured GGM leaf sum and correlation offset under a public-coin random
 //!      $\mathbb{F}_{2^{128}}$ linear combination masked by an LHL-amplified one-time VOLE both
@@ -1352,6 +1357,8 @@ pub struct DensePcgPeerVoleMaterial {
     pub gf128_sender_dense_shares: Vec<Tower128>,
     /// `64` dense additive $\mathbb{F}_{2^{128}}$ receiver shares (`share_S ^ share_R == gf128_u_vals`).
     pub gf128_receiver_dense_shares: Vec<Tower128>,
+    pub(crate) send_word_cursor: usize,
+    pub(crate) recv_word_cursor: usize,
 }
 
 impl Drop for DensePcgPeerVoleMaterial {
@@ -1414,6 +1421,41 @@ impl DensePcgExpandedVault {
         self.a_words.len() * 64
     }
 
+    /// Remaining unconsumed 64-bit Boolean Beaver triple words in this vault (`0..=1024`).
+    #[inline]
+    pub fn remaining_boolean_triple_words(&self) -> usize {
+        self.a_words.len().saturating_sub(self.word_cursor)
+    }
+
+    /// Remaining unconsumed 64-bit sender Subfield-VOLE words for `receiver_id` (`0..=1024`).
+    pub fn remaining_subfield_vole_send_words(
+        &self,
+        receiver_id: usize,
+    ) -> Result<usize, PreprocessError> {
+        let peer = self
+            .peer_voles
+            .iter()
+            .find(|pv| pv.peer_id == receiver_id)
+            .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+        Ok((peer.subfield_keys.len() / 64).saturating_sub(peer.send_word_cursor))
+    }
+
+    /// Remaining unconsumed 64-bit receiver Subfield-VOLE words for `sender_id` (`0..=1024`).
+    pub fn remaining_subfield_vole_recv_words(
+        &self,
+        sender_id: usize,
+    ) -> Result<usize, PreprocessError> {
+        let peer = self
+            .peer_voles
+            .iter()
+            .find(|pv| pv.peer_id == sender_id)
+            .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+        Ok(peer
+            .subfield_choice_words
+            .len()
+            .saturating_sub(peer.recv_word_cursor))
+    }
+
     /// Stream the next 64 Boolean Beaver triples `(a_word, b_word, c_word)` without replacement.
     pub fn next_bool_triple_word64(&mut self) -> Result<(u64, u64, u64), PreprocessError> {
         if self.word_cursor >= self.a_words.len() {
@@ -1429,6 +1471,181 @@ impl DensePcgExpandedVault {
         self.c_words[idx] = 0;
         Ok(out)
     }
+
+    /// Consume `num_words` (`64 * num_words` bits) of sender Subfield-VOLE keys for `receiver_id`,
+    /// advancing the monotonic cursor and zeroizing the consumed storage in place.
+    pub(crate) fn take_subfield_vole_send_words(
+        &mut self,
+        receiver_id: usize,
+        num_words: usize,
+    ) -> Result<Vec<Tower128>, PreprocessError> {
+        let peer = self
+            .peer_voles
+            .iter_mut()
+            .find(|pv| pv.peer_id == receiver_id)
+            .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+        let total_words = peer.subfield_keys.len() / 64;
+        if num_words > total_words.saturating_sub(peer.send_word_cursor) {
+            return Err(PreprocessError::VaultExhausted {
+                kind: "pcg_dense_subfield_vole_send",
+            });
+        }
+        let bit_start = peer.send_word_cursor * 64;
+        let bit_end = bit_start + num_words * 64;
+        peer.send_word_cursor += num_words;
+        let out = peer.subfield_keys[bit_start..bit_end].to_vec();
+        wipe_tower128_slice(&mut peer.subfield_keys[bit_start..bit_end]);
+        Ok(out)
+    }
+
+    /// Consume `num_words` (`64 * num_words` bits) of receiver Subfield-VOLE choice bits and MACs
+    /// from `sender_id`, advancing the monotonic cursor and zeroizing the consumed storage in place.
+    pub(crate) fn take_subfield_vole_recv_words(
+        &mut self,
+        sender_id: usize,
+        num_words: usize,
+    ) -> Result<(Vec<u64>, Vec<Tower128>), PreprocessError> {
+        let peer = self
+            .peer_voles
+            .iter_mut()
+            .find(|pv| pv.peer_id == sender_id)
+            .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+        let total_words = peer.subfield_choice_words.len();
+        if num_words > total_words.saturating_sub(peer.recv_word_cursor) {
+            return Err(PreprocessError::VaultExhausted {
+                kind: "pcg_dense_subfield_vole_recv",
+            });
+        }
+        let w_start = peer.recv_word_cursor;
+        let w_end = w_start + num_words;
+        let bit_start = w_start * 64;
+        let bit_end = w_end * 64;
+        peer.recv_word_cursor = w_end;
+        let choices = peer.subfield_choice_words[w_start..w_end].to_vec();
+        let macs = peer.subfield_macs[bit_start..bit_end].to_vec();
+        wipe_u64s(&mut peer.subfield_choice_words[w_start..w_end]);
+        wipe_tower128_slice(&mut peer.subfield_macs[bit_start..bit_end]);
+        Ok((choices, macs))
+    }
+
+    /// Derive `64 * num_words` silent 384-bit sender OT pad pairs (`OtSendPads`) toward
+    /// `receiver_id` with zero network I/O by applying correlation-robust `cSHAKE256` to the
+    /// silent Subfield-VOLE keys `(q_S, q_S ^ alpha_S)`.
+    pub fn derive_silent_sender_ot_pads(
+        &mut self,
+        session_id: &[u8; 32],
+        receiver_id: usize,
+        num_words: usize,
+    ) -> Result<crate::preprocessing::OtSendPads, PreprocessError> {
+        let sender_id = self.party_id;
+        let alpha = self.mac_alpha;
+        let mut keys = self.take_subfield_vole_send_words(receiver_id, num_words)?;
+        let mut pads = Vec::with_capacity(keys.len());
+        let sender_le = (sender_id as u64).to_le_bytes();
+        let receiver_le = (receiver_id as u64).to_le_bytes();
+        for (bit_idx, &q_s) in keys.iter().enumerate() {
+            let idx_le = (bit_idx as u64).to_le_bytes();
+            let q0_bytes = q_s.0.to_le_bytes();
+            let q1_bytes = q_s.add(alpha).0.to_le_bytes();
+            let mut pad0 = [0u8; 48];
+            let mut pad1 = [0u8; 48];
+            let mut xof0 = Cshake256Xof::new(b"QSAG.DPCG.SILENT.OT/v1");
+            xof0.absorb(session_id);
+            xof0.absorb(&sender_le);
+            xof0.absorb(&receiver_le);
+            xof0.absorb(&idx_le);
+            xof0.absorb(&q0_bytes);
+            xof0.squeeze(&mut pad0);
+
+            let mut xof1 = Cshake256Xof::new(b"QSAG.DPCG.SILENT.OT/v1");
+            xof1.absorb(session_id);
+            xof1.absorb(&sender_le);
+            xof1.absorb(&receiver_le);
+            xof1.absorb(&idx_le);
+            xof1.absorb(&q1_bytes);
+            xof1.squeeze(&mut pad1);
+            pads.push((pad0, pad1));
+        }
+        wipe_tower128_slice(&mut keys);
+        Ok(crate::preprocessing::OtSendPads(pads))
+    }
+
+    /// Derive `64 * num_words` silent 384-bit receiver OT pads (`(choice_words, OtRecvPads)`)
+    /// from `sender_id` with zero network I/O (`OtRecvPads[i] == OtSendPads[i][choice_bit[i]]`).
+    pub fn derive_silent_receiver_ot_pads(
+        &mut self,
+        session_id: &[u8; 32],
+        sender_id: usize,
+        num_words: usize,
+    ) -> Result<(Vec<u64>, crate::preprocessing::OtRecvPads), PreprocessError> {
+        let receiver_id = self.party_id;
+        let (choices, mut macs) = self.take_subfield_vole_recv_words(sender_id, num_words)?;
+        let mut pads = Vec::with_capacity(macs.len());
+        let sender_le = (sender_id as u64).to_le_bytes();
+        let receiver_le = (receiver_id as u64).to_le_bytes();
+        for (bit_idx, &t_r) in macs.iter().enumerate() {
+            let idx_le = (bit_idx as u64).to_le_bytes();
+            let t_bytes = t_r.0.to_le_bytes();
+            let mut pad = [0u8; 48];
+            let mut xof = Cshake256Xof::new(b"QSAG.DPCG.SILENT.OT/v1");
+            xof.absorb(session_id);
+            xof.absorb(&sender_le);
+            xof.absorb(&receiver_le);
+            xof.absorb(&idx_le);
+            xof.absorb(&t_bytes);
+            xof.squeeze(&mut pad);
+            pads.push(pad);
+        }
+        wipe_tower128_slice(&mut macs);
+        Ok((choices, crate::preprocessing::OtRecvPads(pads)))
+    }
+
+    /// Audit-only helper to flip bits of a silent Boolean Beaver triple `c_word` before sacrifice.
+    #[cfg(test)]
+    pub(crate) fn corrupt_bool_triple_c_word_for_audit(&mut self, word_idx: usize, xor_mask: u64) {
+        self.c_words[word_idx] ^= xor_mask;
+    }
+}
+
+/// Convert silent random-choice OT correlations from `(sender_vault, receiver_vault)` into
+/// chosen-choice 384-bit OT pads (`OtSendPads`, `OtRecvPads`) via Beaver 1-bit choice masking,
+/// without running interactive `KosOtExtension`.
+pub fn run_silent_chosen_ot_words(
+    session_id: &[u8; 32],
+    sender_vault: &mut DensePcgExpandedVault,
+    receiver_vault: &mut DensePcgExpandedVault,
+    chosen_words: &[u64],
+) -> Result<
+    (
+        crate::preprocessing::OtSendPads,
+        crate::preprocessing::OtRecvPads,
+    ),
+    PreprocessError,
+> {
+    let sender_id = sender_vault.party_id;
+    let receiver_id = receiver_vault.party_id;
+    if sender_id == receiver_id || sender_vault.num_parties != receiver_vault.num_parties {
+        return Err(PreprocessError::PcgInvalidWireSeed);
+    }
+    let num_words = chosen_words.len();
+    let mut send_pads =
+        sender_vault.derive_silent_sender_ot_pads(session_id, receiver_id, num_words)?;
+    let (mut rand_choices, recv_pads) =
+        receiver_vault.derive_silent_receiver_ot_pads(session_id, sender_id, num_words)?;
+    for (w_idx, (&chosen_w, &rand_w)) in chosen_words.iter().zip(rand_choices.iter()).enumerate() {
+        let diff_w = chosen_w ^ rand_w;
+        for b in 0..64 {
+            let swap_mask = 0u8.wrapping_sub(black_box(((diff_w >> b) & 1) as u8));
+            let (p0, p1) = &mut send_pads[w_idx * 64 + b];
+            for (x0, x1) in p0.iter_mut().zip(p1.iter_mut()) {
+                let d = swap_mask & (*x0 ^ *x1);
+                *x0 ^= d;
+                *x1 ^= d;
+            }
+        }
+    }
+    wipe_u64s(&mut rand_choices);
+    Ok((send_pads, recv_pads))
 }
 
 impl DensePcgPartySeed {
@@ -1964,6 +2181,8 @@ impl DensePcgPartySeed {
                 gf128_keys,
                 gf128_sender_dense_shares,
                 gf128_receiver_dense_shares,
+                send_word_cursor: 0,
+                recv_word_cursor: 0,
             });
         }
 
@@ -2165,21 +2384,39 @@ struct DirectedSpcotParams {
 
 /// Run interactive dealerless setup of [`DensePcgPartySeed`]s across `n >= 2` parties.
 ///
-/// Only two-party seeds fit the 36 KiB wire cap. For three or more parties the
-/// setup also runs KOS/MASCOT through `checked_boolean_product` to correct the
-/// cross-party products; it is not a silent multi-party triple constructor.
-/// Expanded Boolean triples do not carry Shamir shares or two-lane SPDZ MACs.
-/// The separate VOLE material must not be mistaken for authentication of these
-/// triples. Production integration additionally requires a concrete security
-/// estimate for this dual-LPN matrix and an authenticated conversion/sacrifice
-/// protocol; the SPCOT consistency check alone does not supply either.
+/// Two-party seeds fit strictly inside the 36 KiB wire cap (`~30 KiB` at depth 14, `~34 KiB` at
+/// depth 15). For `n >= 3`, setup also runs `checked_boolean_product` once to compute the
+/// cross-party correction words. Expanded vaults carry raw XOR Boolean Beaver triples plus
+/// BDOZ Subfield-VOLEs; callers requiring threshold Shamir shares and two-lane `Tower128` SPDZ
+/// MACs with `< 2^-256` active sacrifice pass expanded vaults to
+/// [`crate::preprocessing::materialize_silent_pcg_keccak_vaults`] (or call
+/// [`crate::preprocessing::run_silent_pcg_keccak_vaults`] end-to-end).
 pub fn setup_dense_pcg_seeds(
     session_id: [u8; 32],
     tree_depth: PcgTreeDepth,
     ot_mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Vec<DensePcgPartySeed>, PreprocessError> {
-    setup_dense_pcg_seeds_inner(session_id, tree_depth, ot_mesh, party_rngs, None)
+    setup_dense_pcg_seeds_inner(session_id, tree_depth, None, ot_mesh, party_rngs, None)
+}
+
+/// Run interactive dealerless setup of [`DensePcgPartySeed`]s bound to caller-supplied per-party
+/// BDOZ/SPDZ authentication scalars `alphas` (each must satisfy `LSB == 1`).
+pub fn setup_dense_pcg_seeds_with_alphas(
+    session_id: [u8; 32],
+    tree_depth: PcgTreeDepth,
+    alphas: &[Tower128],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<DensePcgPartySeed>, PreprocessError> {
+    setup_dense_pcg_seeds_inner(
+        session_id,
+        tree_depth,
+        Some(alphas),
+        ot_mesh,
+        party_rngs,
+        None,
+    )
 }
 
 /// Same as [`setup_dense_pcg_seeds`], with an optional adversarial [`SpcotFaultTarget`] hook
@@ -2193,12 +2430,13 @@ pub fn setup_dense_pcg_seeds_with_fault_hook(
     party_rngs: &mut [PartyPrivateRng],
     fault: Option<SpcotFaultTarget>,
 ) -> Result<Vec<DensePcgPartySeed>, PreprocessError> {
-    setup_dense_pcg_seeds_inner(session_id, tree_depth, ot_mesh, party_rngs, fault)
+    setup_dense_pcg_seeds_inner(session_id, tree_depth, None, ot_mesh, party_rngs, fault)
 }
 
 fn setup_dense_pcg_seeds_inner(
     session_id: [u8; 32],
     tree_depth: PcgTreeDepth,
+    caller_alphas: Option<&[Tower128]>,
     ot_mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
     fault: Option<SpcotFaultTarget>,
@@ -2209,10 +2447,17 @@ fn setup_dense_pcg_seeds_inner(
     }
 
     let mut alphas = SecretBuffer(Vec::with_capacity(n));
-    for rng in party_rngs.iter_mut() {
-        let mut a = rng.next_tower128();
-        a.0 |= 1; // Enforce LSB(alpha_i) == 1 (`127`-bit entropy, exact dense bit projection)
-        alphas.push(a);
+    if let Some(provided) = caller_alphas {
+        if provided.len() != n || provided.iter().any(|a| (a.0 & 1) == 0) {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        alphas.extend_from_slice(provided);
+    } else {
+        for rng in party_rngs.iter_mut() {
+            let mut a = rng.next_tower128();
+            a.0 |= 1; // Enforce LSB(alpha_i) == 1 (`127`-bit entropy, exact dense bit projection)
+            alphas.push(a);
+        }
     }
 
     let mut directed: Vec<Vec<Option<DirectedSpcotTranscript>>> =

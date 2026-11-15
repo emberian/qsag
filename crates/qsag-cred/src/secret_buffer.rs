@@ -20,6 +20,13 @@ impl Wipe for u64 {
         qsag_accel::ct::ct_zeroize_u64s(core::slice::from_mut(self));
     }
 }
+impl Wipe for u128 {
+    fn wipe(&mut self) {
+        let mut limbs = [*self as u64, (*self >> 64) as u64];
+        qsag_accel::ct::ct_zeroize_u64s(&mut limbs);
+        *self = (limbs[0] as u128) | ((limbs[1] as u128) << 64);
+    }
+}
 impl Wipe for usize {
     fn wipe(&mut self) {
         qsag_asm::volatile_fill(core::slice::from_mut(self), 0);

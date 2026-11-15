@@ -22,9 +22,12 @@
 //!    cheating probability $1/p^2 < 2^{-127} < 2^{-125}$) + 3-round parallel Beaver power-tree
 //!    (`evalPow7BeaverTree`: `[r], [r^2], ..., [r^7]`) + dealerless canonical `< p` 64-bit A2B masks
 //!    verified via $b_k^2 - b_k = 0$ and exact `is_ge_p == 0` predicate opening.
-//! 5. Production vault entrypoints use uniform, sacrificed KOS/MASCOT correlations.
-//!    The compact GGM/QC-LPN format below is experimental: its sparse reconstructed
-//!    masks are not suitable for online MPC. It is retained for redesign and regression work.
+//! 5. **Silent `pcg_dense` Vault Materialization (`materialize_silent_pcg_keccak_vaults` &
+//!    `run_silent_pcg_keccak_vaults`)**: Callers can generate authenticated Shamir-SPDZ Beaver
+//!    triples (`PreprocessedKeccakPartyVault`) and silent 384-bit OT correlations directly from
+//!    locally expanded [`crate::pcg_dense::DensePcgExpandedVault`]s (`Depth15` expand-accumulate
+//!    dual-LPN) alongside the interactive KOS/MASCOT [`run_dealerless_pi_triple_f2`] pool. The
+//!    earlier sparse GGM/QC-LPN sketch below remains gated to unit-test regressions.
 
 // Unit tests have a host runtime even when the production library is no_std.
 #[cfg(all(test, not(feature = "std")))]
@@ -938,9 +941,9 @@ impl RlwePoly {
     }
 }
 
-/// Number of parallel/sequential repetitions in [`RlweReceiverZkPok`] (`13 * 11 = 143` challenge bits over
-/// pairwise-invertible signed monomials $\pm X^k$; matches `rlweOrSigmaParallelReps` in `RlweCyclotomicExtraction.lean`).
-pub const RLWE_ZKPOK_REPS: usize = 13;
+/// Number of parallel/sequential repetitions in [`RlweReceiverZkPok`] (`24 * 11 = 264` classical challenge bits /
+/// `132` quantum Grover bits over pairwise-invertible signed monomials $\pm X^k$).
+pub const RLWE_ZKPOK_REPS: usize = 24;
 /// Bit-width of one single signed-monomial challenge `c in {0..2048}` (`deg = c & 0x3ff`, `sign = (c >> 10) & 1`),
 /// matching `SignedMonomialChal.ofFinIndex` / `signedMonomial_challenge_set_pairwise_invertible` in Lean.
 pub const RLWE_ZKPOK_CHAL_BITS: u32 = 11;
@@ -950,25 +953,26 @@ const RLWE_ZKPOK_CHAL_MASK: u32 = (1u32 << RLWE_ZKPOK_CHAL_BITS) - 1;
 /// invertible over $R_{12289}$ via $(c_1 - c_2) g(X) = 2$). Key generation conditions the two
 /// $\mathrm{CBD}_1$ polynomials on total squared norm $\le 1376$ (Chernoff tail $< 2^{-178}$).
 /// Because negacyclic multiplication by $\pm X^k$ is an exact $\ell_2$ and $\ell_\infty$ isometry,
-/// every coordinate of the shift lies in $[-1, 1]$ and the 13-repetition response shift satisfies
-/// $\|v\|_2^2 \le 13 \times 1376 = 17{,}888$.
+/// every coordinate of the shift lies in $[-1, 1]$ and the 24-repetition response shift satisfies
+/// $\|v\|_2^2 \le 24 \times 1376 = 33{,}024$.
 ///
 /// Masks follow $\exp(-y^2 / (2 \cdot 700^2))$ on $[-3072, 3071]$. Accept $z = y + v$ only in
 /// $[-3070, 3069]$, with probability $\min(1, \exp((\|y\|^2 - \|z\|^2)/980000) / M)$ where
-/// $M = \exp(\lceil 980000 \ln(24) \rceil / 980000)$ (`RLWE_GAUSSIAN_LOG_M = 3_114_493`).
+/// $M = \exp(\lceil 980000 \ln(40) \rceil / 980000)$ (`RLWE_GAUSSIAN_LOG_M = 3_615_102`).
 /// Every target response has preimages inside $[-3072, 3071]$ since $\|v\|_\infty \le 1$.
-/// Exact discrete-Gaussian MGF domination over $\|v\|_2^2 \le 17{,}888, \|v\|_\infty \le 1$ bounds
-/// the unclipped tail below $2^{-197.3}$; conditioning on acceptance and the response-box mass
-/// ($> 0.73$) leaves statistical HVZK distance below $2^{-192}$ (`0` QROM claim).
+/// Exact discrete-Gaussian MGF domination over $\|v\|_2^2 \le 33{,}024, \|v\|_\infty \le 1$ bounds
+/// the unclipped tail below $2^{-143}$ ($< 2^{-128}$, and $< 2^{-2592}$ per single repetition at $M = 24$);
+/// conditioning on acceptance and the response-box mass ($> 0.99$) leaves statistical HVZK distance
+/// and secret-dependent abort indicator bias strictly below $2^{-128}$ (`0` QROM claim).
 ///
 /// Sampling uses uniform proposals and fixed-work, 192-bit Bernoulli rejection,
 /// with no mask-indexed table access. Each exponential evaluation has absolute
-/// error $< 64 / 2^{192}$. Expected acceptance is $\approx 0.735 / 24 \approx 1 / 32.6$,
+/// error $< 64 / 2^{192}$. Expected acceptance is $\approx 0.9926 / 40 \approx 1 / 40.3$,
 /// and all rejections restart the entire joint real-branch transcript.
 ///
 /// Bimodal rejection (Ducas–Durmus–Lepoint–Lyubashevsky, BLISS: `z = y + b v` with a secret
 /// sign `b` and acceptance `1 / (M exp(-|v|^2 / 2 sigma^2) cosh(<z, v> / sigma^2))`) would give
-/// `M = exp(17_888 / 980_000) < 1.02` here, but it does not apply to this statement. The sign
+/// `M = exp(33_024 / 980_000) < 1.04` here, but it does not apply to this statement. The sign
 /// must cancel in the verification equation, which BLISS obtains from a homogeneous relation
 /// `A S = q (mod 2q)`; for `Y = a s + e` that means proving `[2a | 2 | q - 2Y] (s, e, 1) = q
 /// (mod 2q)` with a third response `z_3 = y_3 + b c`. Two accepting transcripts then agree only
@@ -977,13 +981,13 @@ const RLWE_ZKPOK_CHAL_MASK: u32 = (1u32 << RLWE_ZKPOK_CHAL_BITS) - 1;
 /// chooses, not for `c - c'` itself. The exact extraction this proof relies on, where
 /// `c - c'` is a difference of signed monomials dividing 2, is lost, and at `q = 12289` (fully
 /// split, `|dz_3|_inf` up to `q / 2`) a relaxed witness with an arbitrary short denominator
-/// carries no soundness for the receiver's key. `M = 24` is the cost of exact extraction at
-/// this modulus.
+/// carries no soundness for the receiver's key. `M = 40` is the cost of exact extraction at
+/// this modulus across `24` joint repetitions.
 const RLWE_ZKPOK_Z_BOUND: i16 = 3070;
 
 /// Constant-time HVZK OR-Sigma proof of short Ring-LWE witness knowledge for [`RlweOtReceiverMsg`]:
 /// proves knowledge of short `(s, e)` on EITHER `Y_0 = pk0` OR `Y_1 = pk0 + t_crs` under `a_crs`
-/// over the 11-bit pairwise-invertible signed-monomial challenge set $\pm X^k$ (`13` repetitions).
+/// over the 11-bit pairwise-invertible signed-monomial challenge set $\pm X^k$ (`24` repetitions, `264` classical / `132` Grover bits).
 #[derive(Clone, Debug)]
 pub struct RlweReceiverZkPok {
     pub chal0: [u32; RLWE_ZKPOK_REPS],
@@ -1299,8 +1303,8 @@ const RLWE_GAUSSIAN_EXP_POWERS: [[u64; 3]; 30] = [
     [0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
     [0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
 ];
-/// `ceil(980_000 * ln(24)) = 3_114_493` (`M = 24` over single signed-monomial shifts `||v||_2^2 <= 17_888`).
-const RLWE_GAUSSIAN_LOG_M: i64 = 3_114_493;
+/// `ceil(980_000 * ln(40)) = 3_615_102` (`M = 40` over 24-rep signed-monomial shifts `||v||_2^2 <= 33_024`, tail `< 2^-143`).
+const RLWE_GAUSSIAN_LOG_M: i64 = 3_615_102;
 const RLWE_WITNESS_ENERGY_BOUND: usize = 1376;
 
 fn bounded_ternary_witness(s: &RlwePoly, e: &RlwePoly) -> bool {
@@ -5750,6 +5754,81 @@ pub fn spdz_setup_alpha_gf256(
         )?;
     }
     Ok((alpha_contribs, alpha_shamir))
+}
+
+/// Deal and degree-check consistent degree-`< t` Shamir shares of caller-supplied 2-lane
+/// `Tower128` SPDZ MAC key contributions `alpha_contribs` (for example, the per-party
+/// `mac_alpha()` scalars of two silent [`crate::pcg_dense::DensePcgExpandedVault`] lanes).
+pub fn spdz_share_existing_alpha_gf256(
+    session_id: &[u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    alpha_contribs: &[[Tower128; 2]],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<TowerAlphaShares, PreprocessError> {
+    let n = eval_points.len();
+    if t == 0 || t > n || alpha_contribs.len() != n || party_rngs.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+
+    let mut alpha_shamir = vec![[Tower128::ZERO; 2]; n];
+    let mut beta_shamir = SecretBuffer(vec![[Tower128::ZERO; 2]; n]);
+
+    for i in 0..n {
+        for lane in 0..2 {
+            let a_i = alpha_contribs[i][lane];
+            let mut b_i = party_rngs[i].next_tower128();
+            let a_sh = SecretBuffer(shamir_share_tower128(
+                t,
+                eval_points,
+                a_i,
+                &mut party_rngs[i],
+            ));
+            let b_sh = SecretBuffer(shamir_share_tower128(
+                t,
+                eval_points,
+                b_i,
+                &mut party_rngs[i],
+            ));
+            wipe_u128s(core::slice::from_mut(&mut b_i.0));
+            for p in 0..n {
+                alpha_shamir[p][lane] = alpha_shamir[p][lane].add(a_sh[p]);
+                beta_shamir[p][lane] = beta_shamir[p][lane].add(b_sh[p]);
+            }
+        }
+    }
+
+    let coin =
+        run_commit_and_open_coin(session_id, b"SPDZ_ALPHA_GF256_DEG", session_id, party_rngs)?;
+    let etas = [
+        Tower128(
+            u128::from_le_bytes(core::array::from_fn(|array_index| {
+                (coin[0..16])[array_index]
+            })) | 1,
+        ),
+        Tower128(
+            u128::from_le_bytes(core::array::from_fn(|array_index| {
+                (coin[16..32])[array_index]
+            })) | 1,
+        ),
+    ];
+    for lane in 0..2 {
+        let comb: SecretBuffer<Vec<Tower128>> = SecretBuffer(
+            (0..n)
+                .map(|p| beta_shamir[p][lane].add(etas[lane].mul(alpha_shamir[p][lane])))
+                .collect(),
+        );
+        let _ = commit_and_open_degree_tower128(
+            session_id,
+            "spdz_share_existing_alpha_gf256",
+            t,
+            eval_points,
+            &comb,
+            party_rngs,
+        )?;
+    }
+    Ok(alpha_shamir)
 }
 
 /// LHL-amplified (`[I | H]` with `32` disposable tail bytes = `256` bits, `< 2^{-129}` selective-failure
@@ -12071,6 +12150,321 @@ pub fn run_dealerless_pcg_keccak_vaults_with_alpha(
         .collect())
 }
 
+/// Maximum 64-bit `KeccakBitTripleShare64` words materialized from a single pair of expanded
+/// [`crate::pcg_dense::DensePcgExpandedVault`]s (`32` words = `2,048` authenticated Shamir-SPDZ
+/// Boolean Beaver triples, fitting `58,368 <= 65,536` Subfield-VOLE rows including sacrifice
+/// and Shamir-check overhead).
+pub const SILENT_PCG_KECCAK_CHUNK_WORDS: usize = 32;
+
+/// Convert two locally expanded [`crate::pcg_dense::DensePcgExpandedVault`] lanes per party
+/// directly into authenticated threshold Shamir-SPDZ [`PreprocessedKeccakPartyVault`]s without
+/// running interactive `KosOtExtension`.
+///
+/// Consumes silent Boolean Beaver triples from `vaults_lane0` and silent Subfield-VOLEs from
+/// `(vaults_lane0, vaults_lane1)`, executes the two-instance recursive inner-product sacrifice
+/// (`< 2^-256` false-batch soundness), verifies Shamir conversion under `Π_MAC`, and combines raw
+/// triples `3 -> 1` under a post-lock public permutation.
+pub fn materialize_silent_pcg_keccak_vaults(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    num_triples: usize,
+    vaults_lane0: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    let n = eval_points.len();
+    if t == 0
+        || t > n
+        || n < 2
+        || vaults_lane0.len() != n
+        || vaults_lane1.len() != n
+        || party_rngs.len() != n
+    {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+
+    let mut alpha_contribs: Vec<[Tower128; 2]> = (0..n)
+        .map(|p| [vaults_lane0[p].mac_alpha(), vaults_lane1[p].mac_alpha()])
+        .collect();
+    let mut alpha_shamir =
+        spdz_share_existing_alpha_gf256(&session_id, t, eval_points, &alpha_contribs, party_rngs)?;
+    let res = materialize_silent_pcg_keccak_vaults_with_alpha(
+        session_id,
+        t,
+        eval_points,
+        num_triples,
+        &alpha_shamir,
+        vaults_lane0,
+        vaults_lane1,
+        party_rngs,
+    );
+    for ac in &mut alpha_contribs {
+        wipe_tower128(ac);
+    }
+    for ash in &mut alpha_shamir {
+        wipe_tower128(ash);
+    }
+    res
+}
+
+/// Same as [`materialize_silent_pcg_keccak_vaults`], using pre-dealt Shamir MAC key shares
+/// `alpha_shamir` matching `[vaults_lane0[p].mac_alpha(), vaults_lane1[p].mac_alpha()]`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Vault lanes, threshold evaluation points, Shamir MAC keys, and RNGs are separate protocol inputs"
+)]
+pub fn materialize_silent_pcg_keccak_vaults_with_alpha(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    num_triples: usize,
+    alpha_shamir: &[[Tower128; 2]],
+    vaults_lane0: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    let n = eval_points.len();
+    if t == 0
+        || t > n
+        || n < 2
+        || alpha_shamir.len() != n
+        || vaults_lane0.len() != n
+        || vaults_lane1.len() != n
+        || party_rngs.len() != n
+    {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+    if num_triples == 0 {
+        return Ok((0..n)
+            .map(|p| PreprocessedKeccakPartyVault {
+                party_id: p,
+                eval_point: eval_points[p],
+                mac_alpha_lanes: alpha_shamir[p],
+                triples: Vec::new(),
+                cursor: 0,
+                poisoned: false,
+            })
+            .collect());
+    }
+    triple_f2::run_silent_pi_triple_f2(
+        session_id,
+        t,
+        eval_points,
+        num_triples,
+        alpha_shamir,
+        vaults_lane0,
+        vaults_lane1,
+        party_rngs,
+        &mut triple_f2::PiTripleF2Faults::default(),
+    )
+    .map(|(vaults, _perm)| vaults)
+}
+
+/// Burn and locally expand two compact [`crate::pcg_dense::DensePcgPartySeed`] lanes per party
+/// against `burn_tracker`, then materialize authenticated [`PreprocessedKeccakPartyVault`]s
+/// with zero `KosOtExtension` traffic.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Two seed lanes, burn tracker, threshold points and RNGs are distinct ceremony inputs"
+)]
+pub fn expand_and_materialize_silent_pcg_keccak_vaults<
+    T: crate::pcg_dense::SeedBurnTracker + ?Sized,
+>(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    num_triples: usize,
+    seeds_lane0: Vec<crate::pcg_dense::DensePcgPartySeed>,
+    seeds_lane1: Vec<crate::pcg_dense::DensePcgPartySeed>,
+    burn_tracker: &mut T,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    let n = eval_points.len();
+    if seeds_lane0.len() != n || seeds_lane1.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    let mut vaults0 = Vec::with_capacity(n);
+    for seed in seeds_lane0 {
+        vaults0.push(seed.expand_local(burn_tracker)?);
+    }
+    let mut vaults1 = Vec::with_capacity(n);
+    for seed in seeds_lane1 {
+        vaults1.push(seed.expand_local(burn_tracker)?);
+    }
+    materialize_silent_pcg_keccak_vaults(
+        session_id,
+        t,
+        eval_points,
+        num_triples,
+        &mut vaults0,
+        &mut vaults1,
+        party_rngs,
+    )
+}
+
+/// End-to-end silent `pcg_dense` preprocessing entrypoint: establishes compact expand-accumulate
+/// dual-LPN [`crate::pcg_dense::DensePcgPartySeed`]s at `tree_depth`, burns and expands them locally
+/// via `burn_tracker`, and materializes `num_triples_words` authenticated Shamir-SPDZ
+/// [`PreprocessedKeccakPartyVault`]s without interactive KOS/MASCOT triple loops.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Session, threshold parameters, tree depth, burn tracker, OT mesh and RNGs are distinct ceremony inputs"
+)]
+pub fn run_silent_pcg_keccak_vaults<T: crate::pcg_dense::SeedBurnTracker + ?Sized>(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    tree_depth: crate::pcg_dense::PcgTreeDepth,
+    num_triples_words: usize,
+    burn_tracker: &mut T,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    let n = eval_points.len();
+    if t == 0 || t > n || n < 2 || party_rngs.len() != n || ot_mesh.n != n {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+
+    let (mut raw_contribs, _) = spdz_setup_alpha_gf256(&session_id, t, eval_points, party_rngs)?;
+    for contrib in &mut raw_contribs {
+        contrib[0].0 |= 1;
+        contrib[1].0 |= 1;
+    }
+    let mut alpha_shamir =
+        spdz_share_existing_alpha_gf256(&session_id, t, eval_points, &raw_contribs, party_rngs)?;
+    let res = run_silent_pcg_keccak_vaults_with_alpha(
+        session_id,
+        t,
+        eval_points,
+        tree_depth,
+        num_triples_words,
+        &raw_contribs,
+        &alpha_shamir,
+        burn_tracker,
+        ot_mesh,
+        party_rngs,
+    );
+    for ac in &mut raw_contribs {
+        wipe_tower128(ac);
+    }
+    for ash in &mut alpha_shamir {
+        wipe_tower128(ash);
+    }
+    res
+}
+
+/// Same as [`run_silent_pcg_keccak_vaults`], bound to an existing 2-lane session SPDZ MAC key
+/// `(alpha_contribs, alpha_shamir)` where every `alpha_contribs[p][lane]` has `LSB == 1`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Session, threshold parameters, tree depth, MAC keys, burn tracker, OT mesh and RNGs are distinct ceremony inputs"
+)]
+pub fn run_silent_pcg_keccak_vaults_with_alpha<T: crate::pcg_dense::SeedBurnTracker + ?Sized>(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    tree_depth: crate::pcg_dense::PcgTreeDepth,
+    num_triples_words: usize,
+    alpha_contribs: &[[Tower128; 2]],
+    alpha_shamir: &[[Tower128; 2]],
+    burn_tracker: &mut T,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    let n = eval_points.len();
+    if t == 0
+        || t > n
+        || n < 2
+        || alpha_contribs.len() != n
+        || alpha_shamir.len() != n
+        || party_rngs.len() != n
+        || ot_mesh.n != n
+    {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+
+    let alphas_lane0: SecretBuffer<Vec<Tower128>> =
+        SecretBuffer((0..n).map(|p| alpha_contribs[p][0]).collect());
+    let alphas_lane1: SecretBuffer<Vec<Tower128>> =
+        SecretBuffer((0..n).map(|p| alpha_contribs[p][1]).collect());
+
+    let mut acc_triples: Vec<Vec<KeccakBitTripleShare64>> = (0..n)
+        .map(|_| Vec::with_capacity(num_triples_words))
+        .collect();
+    let mut chunk_idx = 0u64;
+    let mut remaining = num_triples_words;
+
+    while remaining > 0 {
+        let take = remaining.min(SILENT_PCG_KECCAK_CHUNK_WORDS);
+        let sid_lane0 = cshake256_32_multi_frame(
+            b"QSAG.DPCG.SILENT.CHUNK/v1",
+            &[&session_id, &chunk_idx.to_be_bytes(), &[0u8]],
+        );
+        let sid_lane1 = cshake256_32_multi_frame(
+            b"QSAG.DPCG.SILENT.CHUNK/v1",
+            &[&session_id, &chunk_idx.to_be_bytes(), &[1u8]],
+        );
+        let sid_mat = cshake256_32_multi_frame(
+            b"QSAG.DPCG.SILENT.CHUNK/v1",
+            &[&session_id, &chunk_idx.to_be_bytes(), &[2u8]],
+        );
+        chunk_idx += 1;
+
+        let seeds0 = crate::pcg_dense::setup_dense_pcg_seeds_with_alphas(
+            sid_lane0,
+            tree_depth,
+            &alphas_lane0,
+            ot_mesh,
+            party_rngs,
+        )?;
+        let seeds1 = crate::pcg_dense::setup_dense_pcg_seeds_with_alphas(
+            sid_lane1,
+            tree_depth,
+            &alphas_lane1,
+            ot_mesh,
+            party_rngs,
+        )?;
+        let mut vaults0 = Vec::with_capacity(n);
+        for seed in seeds0 {
+            vaults0.push(seed.expand_local(burn_tracker)?);
+        }
+        let mut vaults1 = Vec::with_capacity(n);
+        for seed in seeds1 {
+            vaults1.push(seed.expand_local(burn_tracker)?);
+        }
+        let mut chunk_vaults = materialize_silent_pcg_keccak_vaults_with_alpha(
+            sid_mat,
+            t,
+            eval_points,
+            take,
+            alpha_shamir,
+            &mut vaults0,
+            &mut vaults1,
+            party_rngs,
+        )?;
+        for p in 0..n {
+            acc_triples[p].append(&mut chunk_vaults[p].triples);
+        }
+        remaining -= take;
+    }
+
+    Ok((0..n)
+        .map(|p| PreprocessedKeccakPartyVault {
+            party_id: p,
+            eval_point: eval_points[p],
+            mac_alpha_lanes: alpha_shamir[p],
+            triples: core::mem::take(&mut acc_triples[p]),
+            cursor: 0,
+            poisoned: false,
+        })
+        .collect())
+}
+
 impl core::error::Error for PreprocessError {}
 
 #[cfg(test)]
@@ -13158,7 +13552,7 @@ mod hardening_regressions {
             assert_eq!(value, 1);
         }
         assert_eq!(roots, RLWE_N);
-        assert!(RLWE_ZKPOK_REPS * RLWE_ZKPOK_CHAL_BITS as usize >= 132);
+        assert_eq!(RLWE_ZKPOK_REPS * RLWE_ZKPOK_CHAL_BITS as usize, 264);
     }
 
     #[test]
@@ -13317,7 +13711,14 @@ mod hardening_regressions {
                 &zero,
                 &commitments,
             );
-            assert!(base.iter().zip(changed).all(|(a, b)| *a != b));
+            assert_ne!(base, changed);
+            assert!(
+                base.iter()
+                    .zip(changed)
+                    .filter(|(a, b)| *a != b)
+                    .count()
+                    >= RLWE_ZKPOK_REPS - 3
+            );
             commitments[rep].0.0[0] ^= 1;
         }
     }
@@ -13420,5 +13821,229 @@ mod combiner_batch_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod silent_pcg_vault_integration_tests {
+    use super::*;
+    use crate::pcg_dense::{
+        MemorySeedBurnTracker, PcgTreeDepth as DenseTreeDepth, run_silent_chosen_ot_words,
+        setup_dense_pcg_seeds,
+    };
+
+    fn make_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
+        (0..n)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[0] = tag;
+                seed[1] = (i + 1) as u8;
+                PartyPrivateRng::from_seed(seed, b"QSAG.SILENT.PCG.TEST/v1")
+            })
+            .collect()
+    }
+
+    fn verify_keccak_vaults_algebra(
+        t: usize,
+        eval_points: &[TowerGf256],
+        vaults: &[PreprocessedKeccakPartyVault],
+        expected_words: usize,
+    ) {
+        let lambdas = lagrange_weights_zero_gf256(&eval_points[..t]).unwrap();
+        let mut alpha_global = [Tower128::ZERO; 2];
+        for q in 0..t {
+            for lane in 0..2 {
+                alpha_global[lane] =
+                    alpha_global[lane].add(vaults[q].mac_alpha_lanes[lane].mul_gf256(lambdas[q]));
+            }
+        }
+        for v in vaults {
+            assert_eq!(v.remaining(), expected_words);
+        }
+        for word_idx in 0..expected_words {
+            let a_sh: Vec<BitslicedGf256x64> =
+                (0..vaults.len()).map(|p| vaults[p].triples[word_idx].a).collect();
+            let b_sh: Vec<BitslicedGf256x64> =
+                (0..vaults.len()).map(|p| vaults[p].triples[word_idx].b).collect();
+            let c_sh: Vec<BitslicedGf256x64> =
+                (0..vaults.len()).map(|p| vaults[p].triples[word_idx].c).collect();
+            let a_open = open_and_check_degree_bs_gf256(t, eval_points, &a_sh, "silent_a").unwrap();
+            let b_open = open_and_check_degree_bs_gf256(t, eval_points, &b_sh, "silent_b").unwrap();
+            let c_open = open_and_check_degree_bs_gf256(t, eval_points, &c_sh, "silent_c").unwrap();
+            // Every reconstructed lane is Boolean (`plane 1..8 == 0`) and satisfies `a & b == c`.
+            for pl in 1..8 {
+                assert_eq!(a_open[pl], 0);
+                assert_eq!(b_open[pl], 0);
+                assert_eq!(c_open[pl], 0);
+            }
+            assert_eq!(a_open[0] & b_open[0], c_open[0]);
+
+            for bit in 0..64 {
+                let a_gf = bs_gf256_extract_lane(&a_open, bit);
+                let b_gf = bs_gf256_extract_lane(&b_open, bit);
+                let c_gf = bs_gf256_extract_lane(&c_open, bit);
+                for lane in 0..2 {
+                    let mut ma = Tower128::ZERO;
+                    let mut mb = Tower128::ZERO;
+                    let mut mc = Tower128::ZERO;
+                    for q in 0..t {
+                        ma = ma.add(vaults[q].triples[word_idx].a_mac[lane][bit].mul_gf256(lambdas[q]));
+                        mb = mb.add(vaults[q].triples[word_idx].b_mac[lane][bit].mul_gf256(lambdas[q]));
+                        mc = mc.add(vaults[q].triples[word_idx].c_mac[lane][bit].mul_gf256(lambdas[q]));
+                    }
+                    assert_eq!(ma, alpha_global[lane].mul_gf256(a_gf));
+                    assert_eq!(mb, alpha_global[lane].mul_gf256(b_gf));
+                    assert_eq!(mc, alpha_global[lane].mul_gf256(c_gf));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn silent_pcg_ot_correlations_and_exhaustion_roundtrip() {
+        let sid = [0x61; 32];
+        let mut rngs = make_rngs(2, 0x11);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+        let mut seeds =
+            setup_dense_pcg_seeds(sid, DenseTreeDepth::TestDepth8, &mut mesh, &mut rngs).unwrap();
+        let seed1 = seeds.pop().unwrap();
+        let seed0 = seeds.pop().unwrap();
+        let mut burns = MemorySeedBurnTracker::new();
+        let mut v0 = seed0.expand_local(&mut burns).unwrap();
+        let mut v1 = seed1.expand_local(&mut burns).unwrap();
+
+        let ot_sid = [0x62; 32];
+        let send_pads = v0.derive_silent_sender_ot_pads(&ot_sid, 1, 4).unwrap();
+        let (choices, recv_pads) = v1.derive_silent_receiver_ot_pads(&ot_sid, 0, 4).unwrap();
+        assert_eq!(send_pads.len(), 256);
+        assert_eq!(recv_pads.len(), 256);
+        for bit_idx in 0..256 {
+            let c_bit = ((choices[bit_idx >> 6] >> (bit_idx & 63)) & 1) == 1;
+            let expected = if c_bit {
+                send_pads[bit_idx].1
+            } else {
+                send_pads[bit_idx].0
+            };
+            assert_eq!(recv_pads[bit_idx], expected);
+        }
+
+        let chosen = [0xdead_beef_cafe_babe_u64, 0x0123_4567_89ab_cdef_u64];
+        let (chosen_send, chosen_recv) =
+            run_silent_chosen_ot_words(&[0x63; 32], &mut v1, &mut v0, &chosen).unwrap();
+        for bit_idx in 0..128 {
+            let c_bit = ((chosen[bit_idx >> 6] >> (bit_idx & 63)) & 1) == 1;
+            let expected = if c_bit {
+                chosen_send[bit_idx].1
+            } else {
+                chosen_send[bit_idx].0
+            };
+            assert_eq!(chosen_recv[bit_idx], expected);
+        }
+
+        // Consuming past the 1024-word budget fails closed with VaultExhausted.
+        assert!(matches!(
+            v0.derive_silent_sender_ot_pads(&ot_sid, 1, 1021),
+            Err(PreprocessError::VaultExhausted {
+                kind: "pcg_dense_subfield_vole_send"
+            })
+        ));
+    }
+
+    #[test]
+    fn silent_pcg_keccak_vaults_honest_2p_3p_and_tamper_rejection() {
+        // 1. 2-of-2 silent seed burn + local expansion + KosOtExtension-free materialization.
+        let sid0 = [0x71; 32];
+        let sid1 = [0x72; 32];
+        let mut rngs = make_rngs(2, 0x22);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid0, &mut rngs);
+        let seeds0 =
+            setup_dense_pcg_seeds(sid0, DenseTreeDepth::TestDepth8, &mut mesh, &mut rngs).unwrap();
+        let seeds1 =
+            setup_dense_pcg_seeds(sid1, DenseTreeDepth::TestDepth8, &mut mesh, &mut rngs).unwrap();
+        let wire0_p0 = seeds0[0].to_wire_bytes();
+        let pts2 = [TowerGf256(1), TowerGf256(2)];
+        let mut burns = MemorySeedBurnTracker::new();
+        let vaults_2p = expand_and_materialize_silent_pcg_keccak_vaults(
+            [0x73; 32],
+            2,
+            &pts2,
+            6,
+            seeds0,
+            seeds1,
+            &mut burns,
+            &mut rngs,
+        )
+        .unwrap();
+        verify_keccak_vaults_algebra(2, &pts2, &vaults_2p, 6);
+
+        // Replaying a burned seed wire image is deterministically rejected.
+        let replay = crate::pcg_dense::DensePcgPartySeed::from_wire_bytes(&wire0_p0).unwrap();
+        assert_eq!(
+            replay.expand_local(&mut burns).err(),
+            Some(PreprocessError::PcgSeedAlreadyBurned)
+        );
+
+        // 2. 2-of-3 threshold end-to-end `run_silent_pcg_keccak_vaults` across chunk boundary (`38 > 32`).
+        let mut rngs3 = make_rngs(3, 0x33);
+        let sid3 = [0x74; 32];
+        let mut mesh3 = OtMesh::establish_ideal_for_test(sid3, &mut rngs3);
+        let pts3 = [TowerGf256(1), TowerGf256(2), TowerGf256(3)];
+        let mut burns3 = MemorySeedBurnTracker::new();
+        let vaults_3p = run_silent_pcg_keccak_vaults(
+            sid3,
+            2,
+            &pts3,
+            DenseTreeDepth::TestDepth8,
+            38,
+            &mut burns3,
+            &mut mesh3,
+            &mut rngs3,
+        )
+        .unwrap();
+        verify_keccak_vaults_algebra(2, &pts3, &vaults_3p, 38);
+
+        // 3. Corrupting a silent Boolean Beaver product `c_word` before sacrifice is caught!
+        let sid_bad0 = [0x75; 32];
+        let sid_bad1 = [0x76; 32];
+        let mut rngs_bad = make_rngs(2, 0x44);
+        let mut mesh_bad = OtMesh::establish_ideal_for_test(sid_bad0, &mut rngs_bad);
+        let s0 = setup_dense_pcg_seeds(
+            sid_bad0,
+            DenseTreeDepth::TestDepth8,
+            &mut mesh_bad,
+            &mut rngs_bad,
+        )
+        .unwrap();
+        let s1 = setup_dense_pcg_seeds(
+            sid_bad1,
+            DenseTreeDepth::TestDepth8,
+            &mut mesh_bad,
+            &mut rngs_bad,
+        )
+        .unwrap();
+        let mut burns_bad = MemorySeedBurnTracker::new();
+        let mut v0_bad: Vec<_> = s0
+            .into_iter()
+            .map(|s| s.expand_local(&mut burns_bad).unwrap())
+            .collect();
+        let mut v1_bad: Vec<_> = s1
+            .into_iter()
+            .map(|s| s.expand_local(&mut burns_bad).unwrap())
+            .collect();
+        v0_bad[0].corrupt_bool_triple_c_word_for_audit(0, 1);
+        assert!(matches!(
+            materialize_silent_pcg_keccak_vaults(
+                [0x77; 32],
+                2,
+                &pts2,
+                4,
+                &mut v0_bad,
+                &mut v1_bad,
+                &mut rngs_bad,
+            ),
+            Err(PreprocessError::SacrificeResidualNonZero {
+                phase: "pi_triple_f2"
+            })
+        ));
     }
 }

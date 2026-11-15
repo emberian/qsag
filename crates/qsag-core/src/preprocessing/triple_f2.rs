@@ -444,6 +444,116 @@ impl DeltaCotPool {
         })
     }
 
+    /// Populate a two-lane correlated-OT pool directly from two locally expanded silent
+    /// [`crate::pcg_dense::DensePcgExpandedVault`] lanes per party without running interactive
+    /// `KosOtExtension`. The first `b_words_prefix[p].len() * 64` bits of `rho[p]` are pinned
+    /// to `b_words_prefix[p]` via 1-bit Beaver derandomization against each peer's silent
+    /// Subfield-VOLE choice bits.
+    pub(super) fn from_silent_pcg_vaults(
+        vaults_lane0: &mut [crate::pcg_dense::DensePcgExpandedVault],
+        vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
+        rows: usize,
+        pair_rows: usize,
+        b_words_prefix: &[Vec<u64>],
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<Self, PreprocessError> {
+        let n = vaults_lane0.len();
+        if n < 2 || vaults_lane1.len() != n || b_words_prefix.len() != n || party_rngs.len() != n {
+            return Err(PreprocessError::InvalidThreshold { t: n, n });
+        }
+        for p in 0..n {
+            if vaults_lane0[p].party_id != p
+                || vaults_lane1[p].party_id != p
+                || vaults_lane0[p].num_parties != n
+                || vaults_lane1[p].num_parties != n
+            {
+                return Err(PreprocessError::PcgInvalidWireSeed);
+            }
+        }
+        let words = rows.div_ceil(64);
+        let rows = words * 64;
+        let prefix_words = b_words_prefix[0].len();
+        if prefix_words > words || b_words_prefix.iter().any(|v| v.len() != prefix_words) {
+            return Err(PreprocessError::InvalidThreshold { t: n, n });
+        }
+
+        let delta = SecretBuffer(
+            (0..n)
+                .map(|p| [vaults_lane0[p].mac_alpha().0, vaults_lane1[p].mac_alpha().0])
+                .collect::<Vec<Row>>(),
+        );
+        let mut rho = SecretBuffer(vec![vec![0u64; words]; n]);
+        for p in 0..n {
+            rho[p][..prefix_words].copy_from_slice(&b_words_prefix[p]);
+            for w in &mut rho[p][prefix_words..] {
+                *w = party_rngs[p].next_u64();
+            }
+        }
+
+        let mut agg: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+            (0..n)
+                .map(|_| [vec![0u128; rows], vec![0u128; rows]])
+                .collect(),
+        );
+        let mut owner_rows: SecretBuffer<Vec<Vec<[Vec<u128>; 2]>>> = SecretBuffer(
+            (0..n)
+                .map(|_| (0..n).map(|_| [Vec::new(), Vec::new()]).collect())
+                .collect(),
+        );
+        let mut holder_rows: SecretBuffer<Vec<Vec<[Vec<u128>; 2]>>> = SecretBuffer(
+            (0..n)
+                .map(|_| (0..n).map(|_| [Vec::new(), Vec::new()]).collect())
+                .collect(),
+        );
+
+        for holder in 0..n {
+            for owner in 0..n {
+                if holder == owner {
+                    continue;
+                }
+                let mut t_lanes: [Vec<u128>; 2] = [Vec::with_capacity(rows), Vec::with_capacity(rows)];
+                let mut q_lanes: [Vec<u128>; 2] = [Vec::with_capacity(rows), Vec::with_capacity(rows)];
+                for (lane, vaults) in [&mut *vaults_lane0, &mut *vaults_lane1].into_iter().enumerate() {
+                    let (mut x_words, mut macs) =
+                        vaults[owner].take_subfield_vole_recv_words(holder, words)?;
+                    let mut keys = vaults[holder].take_subfield_vole_send_words(owner, words)?;
+                    let holder_delta = delta[holder][lane];
+                    for k in 0..rows {
+                        let diff_bit = word_bit(&rho[owner], k) ^ word_bit(&x_words, k);
+                        let t_val = macs[k].0;
+                        let q_val = keys[k].0 ^ (bit_mask(diff_bit) & holder_delta);
+                        agg[owner][lane][k] ^= t_val;
+                        agg[holder][lane][k] ^= q_val;
+                        t_lanes[lane].push(t_val);
+                        q_lanes[lane].push(q_val);
+                    }
+                    wipe_u64s(&mut x_words);
+                    wipe_tower128(&mut macs);
+                    wipe_tower128(&mut keys);
+                    wipe_u128s(&mut t_lanes[lane][pair_rows..]);
+                    wipe_u128s(&mut q_lanes[lane][pair_rows..]);
+                    t_lanes[lane].truncate(pair_rows);
+                    q_lanes[lane].truncate(pair_rows);
+                }
+                owner_rows[holder][owner] = t_lanes;
+                holder_rows[holder][owner] = q_lanes;
+            }
+        }
+
+        Ok(Self {
+            n,
+            rows,
+            pair_rows,
+            pair_cursor: 0,
+            cursor: pair_rows,
+            delta,
+            rho,
+            agg,
+            owner_rows,
+            holder_rows,
+        })
+    }
+
     fn alloc(&mut self, count: usize) -> Result<usize, PreprocessError> {
         let start = self.cursor;
         if count > self.rows - start {
@@ -1721,9 +1831,207 @@ pub(super) fn run_pi_triple_f2(
             .collect(),
     );
 
+    finish_pi_triple_f2_from_authenticated_raw(
+        session_id,
+        t,
+        eval_points,
+        num_triples,
+        alpha_shamir,
+        pool,
+        &plan,
+        pads,
+        a_bits,
+        b_bits,
+        c_bits,
+        mac_a,
+        mac_b,
+        mac_c,
+        transcript,
+        party_rngs,
+        faults,
+    )
+}
+
+/// Authenticate, sacrifice (`< 2^-256` two-instance recursive fold), Shamir-convert, and `3 -> 1`
+/// bucket-combine silent Boolean Beaver triples drawn directly from locally expanded
+/// [`crate::pcg_dense::DensePcgExpandedVault`]s without running `KosOtExtension`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Silent PCG vaults, threshold evaluation points, MAC shares and private RNGs are distinct protocol inputs"
+)]
+pub(super) fn run_silent_pi_triple_f2(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    num_triples: usize,
+    alpha_shamir: &[[Tower128; 2]],
+    vaults_lane0: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    party_rngs: &mut [PartyPrivateRng],
+    faults: &mut PiTripleF2Faults<'_>,
+) -> Result<(Vec<PreprocessedKeccakPartyVault>, Vec<u32>), PreprocessError> {
+    let n = eval_points.len();
+    let raw_triples = 3 * num_triples;
+    let nbits = 64 * raw_triples;
+    let plan = FoldPlan::new(nbits)?;
+
+    let mut a_bits = SecretBuffer(vec![vec![0u64; raw_triples]; n]);
+    let mut b_bits = SecretBuffer(vec![vec![0u64; raw_triples]; n]);
+    let mut c_bits = SecretBuffer(vec![vec![0u64; raw_triples]; n]);
+    for p in 0..n {
+        for k in 0..raw_triples {
+            let (aw, bw, cw) = vaults_lane0[p].next_bool_triple_word64()?;
+            a_bits[p][k] = aw;
+            b_bits[p][k] = bw;
+            c_bits[p][k] = cw;
+        }
+    }
+    if let Some(hook) = faults.product_shares.as_mut() {
+        for p in 0..n {
+            hook(p, &mut c_bits[p]);
+        }
+    }
+
+    let mut pool = DeltaCotPool::from_silent_pcg_vaults(
+        vaults_lane0,
+        vaults_lane1,
+        plan.pool_rows(),
+        plan.pair_rows(),
+        &b_bits,
+        party_rngs,
+    )?;
+    let mut transcript = session_id;
+
+    let off_b = pool.alloc_pair(nbits)?;
+    let off_a = pool.alloc(nbits)?;
+    let off_c = pool.alloc(nbits)?;
+
+    // Prepare structured fold pads on `b` rows (AND shares are discarded because `c_bits` comes
+    // directly from the silent `DensePcgExpandedVault`, and `recursive_sacrifice` verifies `c == a & b`).
+    let unit = (1usize << plan.structured).max(64);
+    let ranges_per_pair = (worker_count() / (n * (n - 1))).max(1);
+    let range_len = nbits.div_ceil(ranges_per_pair).div_ceil(unit) * unit;
+    let mut pads = Vec::new();
+    for holder in 0..n {
+        for owner in 0..n {
+            if holder == owner {
+                continue;
+            }
+            for start in (0..nbits).step_by(range_len) {
+                let len = range_len.min(nbits - start);
+                pads.push(PairPads {
+                    holder,
+                    owner,
+                    start,
+                    len,
+                    planes: vec![0u128; 2 * plan.structured * len],
+                    spent_rounds: 0,
+                    send_sum: SecretBuffer(vec![[[0u128; 2]; 2]; plan.structured]),
+                    recv_sum: SecretBuffer(vec![[[0u128; 2]; 2]; plan.structured]),
+                    and_send: SecretBuffer(vec![0u64; len / 64]),
+                    and_recv: SecretBuffer(vec![0u64; len / 64]),
+                    round_recv: [[0u128; 2]; 2],
+                });
+            }
+        }
+    }
+    {
+        let (pool_ref, plan_ref, a_ref, b_ref) = (&pool, &plan, &a_bits, &b_bits);
+        par_for_each(&mut pads, |job| {
+            let (holder, owner) = (job.holder, job.owner);
+            hash_pair_pads(
+                job,
+                &session_id,
+                pool_ref,
+                plan_ref,
+                &a_ref[holder],
+                &b_ref[owner],
+            );
+        });
+    }
+
+    let mut d_a = vec![0u64; raw_triples];
+    for p in 0..n {
+        for (k, word) in a_bits[p].iter().enumerate() {
+            let d = *word ^ pool.rho[p][off_a / 64 + k];
+            absorb_transcript(&mut transcript, b"a", &d.to_le_bytes());
+            d_a[k] ^= d;
+        }
+    }
+    let mut d_c = vec![0u64; raw_triples];
+    for p in 0..n {
+        for (k, word) in c_bits[p].iter().enumerate() {
+            let d = *word ^ pool.rho[p][off_c / 64 + k];
+            absorb_transcript(&mut transcript, b"c", &d.to_le_bytes());
+            d_c[k] ^= d;
+        }
+    }
+    let zero = vec![0u64; raw_triples];
+    let mac_a: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| pool.mac_bits(p, off_a, nbits, &d_a))
+            .collect(),
+    );
+    let mac_b: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| pool.mac_bits(p, off_b, nbits, &zero))
+            .collect(),
+    );
+    let mac_c: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| pool.mac_bits(p, off_c, nbits, &d_c))
+            .collect(),
+    );
+
+    finish_pi_triple_f2_from_authenticated_raw(
+        session_id,
+        t,
+        eval_points,
+        num_triples,
+        alpha_shamir,
+        pool,
+        &plan,
+        pads,
+        a_bits,
+        b_bits,
+        c_bits,
+        mac_a,
+        mac_b,
+        mac_c,
+        transcript,
+        party_rngs,
+        faults,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Internal helper sharing sacrifice, Shamir conversion, and 3->1 combiner between KOS and silent PCG pools"
+)]
+fn finish_pi_triple_f2_from_authenticated_raw(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    num_triples: usize,
+    alpha_shamir: &[[Tower128; 2]],
+    mut pool: DeltaCotPool,
+    plan: &FoldPlan,
+    mut pads: Vec<PairPads>,
+    a_bits: SecretBuffer<Vec<Vec<u64>>>,
+    b_bits: SecretBuffer<Vec<Vec<u64>>>,
+    c_bits: SecretBuffer<Vec<Vec<u64>>>,
+    mac_a: SecretBuffer<Vec<[Vec<u128>; 2]>>,
+    mac_b: SecretBuffer<Vec<[Vec<u128>; 2]>>,
+    mac_c: SecretBuffer<Vec<[Vec<u128>; 2]>>,
+    mut transcript: [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    faults: &mut PiTripleF2Faults<'_>,
+) -> Result<(Vec<PreprocessedKeccakPartyVault>, Vec<u32>), PreprocessError> {
+    let n = eval_points.len();
+    let raw_triples = 3 * num_triples;
     recursive_sacrifice(
         &session_id,
-        &plan,
+        plan,
         &mut pool,
         &mut pads,
         [&a_bits, &b_bits, &c_bits],
