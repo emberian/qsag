@@ -35,7 +35,7 @@ import all Qsag.Custody.JortsBeltLatchAndQuorumSwitching
 import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import Qsag.Tactic.AssuranceKit
-import Qsag.Tactic.CommRing
+import Qsag.Math.Tactic.CommRing
 
 public section
 namespace Qsag

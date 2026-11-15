@@ -12,7 +12,7 @@ It is a local algebraic result; neither adaptive composition nor a Rust refineme
 is claimed here. The separate implementation refinement lives in the WHIR leaf project.
 -/
 public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
-public import Qsag.Tactic.CommRing
+public import Qsag.Math.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 
