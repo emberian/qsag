@@ -152,8 +152,8 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
     let mut out = Vec::with_capacity(parts.len());
     for path in parts {
         let raw = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
-        if raw.0.len() == 65 {
-            let pk = ValidatorPublicKey::from_bytes_canonical(&raw.0)
+        if let Ok(bytes) = <&[u8; 65]>::try_from(raw.0.as_slice()) {
+            let pk = ValidatorPublicKey::from_bytes_canonical(bytes)
                 .ok_or_else(|| CliError::input(format!("{path}: non-canonical 65B public key")))?;
             out.push(pk);
             continue;
@@ -191,14 +191,14 @@ pub fn load_validator_signature(path: &str) -> Result<ValidatorSignature, CliErr
     let raw = read_bounded_file(path, MAX_SIG_PROOF_BYTES)?;
     if raw.0.len() == AggSigProfile::JortsPoseidon2.raw_signature_bytes() {
         return ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &raw.0)
-            .ok_or_else(|| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 sig")));
+            .map_err(|_| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 sig")));
     }
     let text = std::str::from_utf8(&raw.0)
         .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
     let json = Json::parse(text)?;
     let sig_bytes = json.field_hex("signature")?;
     ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &sig_bytes)
-        .ok_or_else(|| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 signature")))
+        .map_err(|_| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 signature")))
 }
 
 fn load_proof(path: &str) -> Result<QsagAggregateProof, CliError> {
