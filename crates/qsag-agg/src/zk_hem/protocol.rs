@@ -91,6 +91,9 @@ pub struct Layout {
 impl Layout {
     /// Smallest table that holds the variable subcube, the masks and the opening blinders.
     pub fn new(shape: &Shape, regime: WhirSecurityRegime) -> Option<Self> {
+        if !regime.meets_qrom_128_floor() {
+            return None;
+        }
         let var_bits = shape.num_vars.next_power_of_two().trailing_zeros().max(1) as usize;
         let masks = ((shape.log_rows * 4) << ROW_MASK_BITS) + ((var_bits * 4) << COL_MASK_BITS);
         (var_bits + 1..=MAX_PCS_NUM_VARS).find_map(|log_cells| {
@@ -145,10 +148,16 @@ impl ZkHemProof {
         out.extend_from_slice(&self.commitment.to_bytes());
         let push = |out: &mut Vec<u8>, v: &E| out.extend_from_slice(&v.to_le_bytes());
         push(&mut out, &self.row_mask_sum);
-        self.row_rounds.iter().flatten().for_each(|v| push(&mut out, v));
+        self.row_rounds
+            .iter()
+            .flatten()
+            .for_each(|v| push(&mut out, v));
         self.row_values.iter().for_each(|v| push(&mut out, v));
         push(&mut out, &self.col_mask_sum);
-        self.col_rounds.iter().flatten().for_each(|v| push(&mut out, v));
+        self.col_rounds
+            .iter()
+            .flatten()
+            .for_each(|v| push(&mut out, v));
         self.companion_claims.iter().for_each(|v| push(&mut out, v));
         self.opening.push_bytes(&mut out);
         out
@@ -298,6 +307,7 @@ impl Mask {
                 }
                 let off = block(i, j);
                 cells[off..off + m.len()].copy_from_slice(&m);
+                qsag_asm::volatile_fill(&mut m, F::ZERO);
             }
         }
     }
@@ -372,8 +382,14 @@ fn claim_terms(inp: &ClaimInputs<'_>) -> Vec<WeightedPoint> {
         for i in 0..inp.log_rows {
             let block = inp.layout.row_mask_block(i, j);
             // sum g1 = 2^(n-1) sum_i (g1_i(0) + g1_i(1)).
-            push(lam[0] * row_half * limb, block_point(l, block, &zeros(ROW_MASK_BITS)));
-            push(lam[0] * row_half * limb, block_point(l, block, &ones(ROW_MASK_BITS)));
+            push(
+                lam[0] * row_half * limb,
+                block_point(l, block, &zeros(ROW_MASK_BITS)),
+            );
+            push(
+                lam[0] * row_half * limb,
+                block_point(l, block, &ones(ROW_MASK_BITS)),
+            );
             // g1(rx) = sum_i g1_i(rx_i).
             push(
                 lam[2] * limb,
@@ -382,8 +398,14 @@ fn claim_terms(inp: &ClaimInputs<'_>) -> Vec<WeightedPoint> {
         }
         for i in 0..k {
             let block = inp.layout.col_mask_block(inp.log_rows, i, j);
-            push(lam[1] * col_half * limb, block_point(l, block, &zeros(COL_MASK_BITS)));
-            push(lam[1] * col_half * limb, block_point(l, block, &ones(COL_MASK_BITS)));
+            push(
+                lam[1] * col_half * limb,
+                block_point(l, block, &zeros(COL_MASK_BITS)),
+            );
+            push(
+                lam[1] * col_half * limb,
+                block_point(l, block, &ones(COL_MASK_BITS)),
+            );
             push(
                 lam[3] * inp.rho2 * limb,
                 block_point(l, block, &pow2_coords(inp.ry[i], COL_MASK_BITS)),
@@ -421,7 +443,10 @@ fn add_sparse_point_kernel(kernel: &mut [E], weight: E, point: &[E]) {
 }
 
 fn batched_value(lambda: E, values: &[E]) -> E {
-    values.iter().rev().fold(E::ZERO, |acc, &v| acc * lambda + v)
+    values
+        .iter()
+        .rev()
+        .fold(E::ZERO, |acc, &v| acc * lambda + v)
 }
 
 fn start_transcript(
@@ -441,11 +466,7 @@ fn start_transcript(
         .bind_instance(&[statement, &public_bytes, &commitment.to_bytes()])
 }
 
-fn squeeze_point(
-    tr: &mut FiatShamirTranscript<InstanceBound>,
-    label: &[u8],
-    n: usize,
-) -> Vec<E> {
+fn squeeze_point(tr: &mut FiatShamirTranscript<InstanceBound>, label: &[u8], n: usize) -> Vec<E> {
     (0..n).map(|_| tr.squeeze_ext4(label)).collect()
 }
 
@@ -477,7 +498,9 @@ fn round_evals<const N: usize>(pairs: usize, per_pair: impl Fn(usize) -> [E; N] 
     if pairs >= 1 << 12 && crate::parallel_workers() > 1 {
         let idx: Vec<usize> = (0..pairs).collect();
         return crate::map_chunks_bounded_with_limit(&idx, crate::parallel_workers(), |chunk| {
-            chunk.iter().fold([E::ZERO; N], |acc, &i| add(acc, per_pair(i)))
+            chunk
+                .iter()
+                .fold([E::ZERO; N], |acc, &i| add(acc, per_pair(i)))
         })
         .into_iter()
         .fold([E::ZERO; N], add);
@@ -506,9 +529,11 @@ fn masked_sumcheck(
     let mut point = Vec::with_capacity(n);
     let mut last = None;
     for _ in 0..n {
-        let f = witness_round(last);
-        let g = mask.round_poly(&point);
+        let mut f = witness_round(last);
+        let mut g = mask.round_poly(&point);
         let masked: Vec<E> = f.iter().zip(&g).map(|(&f, &g)| f + rho * g).collect();
+        qsag_asm::volatile_fill(&mut f, E::ZERO);
+        qsag_asm::volatile_fill(&mut g, E::ZERO);
         tr.absorb_ext4_slice(label, &masked);
         let c = tr.squeeze_ext4(label);
         rounds.push(masked);
@@ -570,8 +595,12 @@ fn prove_with_claimed_publics(
     check: bool,
     claimed: Option<&[F]>,
 ) -> Result<ZkHemProof, ZkHemError> {
-    let layout = Layout::new(shape, regime).ok_or(ZkHemError::RelationTooLarge)?;
+    let Some(layout) = Layout::new(shape, regime) else {
+        qsag_asm::volatile_fill(&mut assignment, F::ZERO);
+        return Err(ZkHemError::RelationTooLarge);
+    };
     if assignment.len() != shape.num_vars {
+        qsag_asm::volatile_fill(&mut assignment, F::ZERO);
         return Err(ZkHemError::Unsatisfied);
     }
     // Coins are bound to the relation, the statement and the witness, so a repeated `seed`
@@ -599,12 +628,15 @@ fn prove_with_claimed_publics(
     let row_mask = Mask::sample(&mut stream, shape.log_rows, ROW_DEGREE);
     let col_mask = Mask::sample(&mut stream, layout.var_bits, COL_DEGREE);
     let mut table = vec![F::ZERO; cells];
-    row_mask.write(&mut table, ROW_MASK_BITS, |i, j| layout.row_mask_block(i, j));
+    row_mask.write(&mut table, ROW_MASK_BITS, |i, j| {
+        layout.row_mask_block(i, j)
+    });
     col_mask.write(&mut table, COL_MASK_BITS, |i, j| {
         layout.col_mask_block(shape.log_rows, i, j)
     });
     table[..shape.num_vars].copy_from_slice(&assignment);
-    let public_inputs = claimed.map_or_else(|| assignment[1..=shape.num_public].to_vec(), <[F]>::to_vec);
+    let public_inputs =
+        claimed.map_or_else(|| assignment[1..=shape.num_public].to_vec(), <[F]>::to_vec);
     for slot in &mut table[cells - layout.blind_cells..] {
         *slot = stream.next_base();
     }
@@ -654,7 +686,7 @@ fn prove_with_claimed_publics(
             }
         }
         let (teq, ts, ta, tb, tc) = (&teq, &ts, &ta, &tb, &tc);
-        let evals = round_evals::<{ ROW_DEGREE + 1 }>(teq.len() / 2, |i| {
+        let mut evals = round_evals::<{ ROW_DEGREE + 1 }>(teq.len() / 2, |i| {
             let step = |t: &Vec<E>| (t[2 * i], t[2 * i + 1] - t[2 * i]);
             let (mut e, de) = step(teq);
             let (mut s, ds) = step(ts);
@@ -671,7 +703,9 @@ fn prove_with_claimed_publics(
                 v
             })
         });
-        evals_to_coeffs(&evals)
+        let coeffs = evals_to_coeffs(&evals);
+        qsag_asm::volatile_fill(&mut evals, E::ZERO);
+        coeffs
     });
     for t in [&mut teq, &mut ts, &mut ta, &mut tb, &mut tc] {
         fold_in_place(t, rx[shape.log_rows - 1]);
@@ -682,11 +716,13 @@ fn prove_with_claimed_publics(
             .hypercube_evals
             .iter_mut()
             .chain(&mut state.codewords_0)
-            .chain(&mut state.monomial_coeffs)
         {
             qsag_asm::volatile_fill(secret, F::ZERO);
         }
         qsag_asm::volatile_fill(&mut tz, E::ZERO);
+        for t in [&mut ta, &mut tb, &mut tc] {
+            qsag_asm::volatile_fill(t, E::ZERO);
+        }
         return Err(ZkHemError::MaskRankDeficient);
     }
 
@@ -717,12 +753,14 @@ fn prove_with_claimed_publics(
             fold_in_place(&mut tz, c);
         }
         let (tm, tz) = (&tm, &tz);
-        let evals = round_evals::<{ COL_DEGREE + 1 }>(tm.len() / 2, |i| {
+        let mut evals = round_evals::<{ COL_DEGREE + 1 }>(tm.len() / 2, |i| {
             let (m0, m1) = (tm[2 * i], tm[2 * i + 1]);
             let (z0, z1) = (tz[2 * i], tz[2 * i + 1]);
             [m0 * z0, m1 * z1, (m1 + m1 - m0) * (z1 + z1 - z0)]
         });
-        evals_to_coeffs(&evals)
+        let coeffs = evals_to_coeffs(&evals);
+        qsag_asm::volatile_fill(&mut evals, E::ZERO);
+        coeffs
     });
     fold_in_place(&mut tm, ry[layout.var_bits - 1]);
     let matrix_at_point = tm[0];
@@ -747,7 +785,11 @@ fn prove_with_claimed_publics(
         if term.point.iter().filter(|c| !c.is_zero()).count() <= 16 {
             add_sparse_point_kernel(&mut kernel, term.weight, &term.point);
         } else {
-            let live = term.point.iter().rposition(|c| !c.is_zero()).map_or(0, |p| p + 1);
+            let live = term
+                .point
+                .iter()
+                .rposition(|c| !c.is_zero())
+                .map_or(0, |p| p + 1);
             add_point_kernel(&mut kernel, term.weight, &term.point[..live]);
         }
     }
@@ -782,7 +824,6 @@ fn prove_with_claimed_publics(
         .iter_mut()
         .chain(&mut state.hypercube_evals)
         .chain(&mut state.codewords_0)
-        .chain(&mut state.monomial_coeffs)
     {
         qsag_asm::volatile_fill(secret, F::ZERO);
     }
@@ -1035,7 +1076,10 @@ mod tests {
         for (k, mutate) in mutations.iter().enumerate() {
             let mut bad = proof.clone();
             mutate(&mut bad, &bump);
-            assert!(!verify(&shape, &[], b"s", regime, &bad), "mutation {k} accepted");
+            assert!(
+                !verify(&shape, &[], b"s", regime, &bad),
+                "mutation {k} accepted"
+            );
         }
         // A balanced change of a round polynomial keeps `p(0) + p(1)` but moves `p(c)`.
         let mut bad = proof.clone();
@@ -1105,7 +1149,8 @@ mod tests {
         for regime in REGIMES {
             let layout = Layout::new(&shape, regime).unwrap();
             let st0 = layout.schedule.stages[0];
-            let proof = prove(&shape, preimage_relation([1, 77]).1, b"s", regime, &[5; 32]).unwrap();
+            let proof =
+                prove(&shape, preimage_relation([1, 77]).1, b"s", regime, &[5; 32]).unwrap();
             let opened_per_table = proof.opening.round0_vals.len() / (1 + COMPANIONS);
             assert!(opened_per_table <= layout.blind_cells);
             assert_eq!(layout.blind_cells, st0.num_queries << st0.step_vars);
@@ -1140,8 +1185,7 @@ mod tests {
         let triple = |z: &[F]| -> [E; 3] {
             let eq = build_eq_table_ext4(&rx);
             [&shape.a, &shape.b, &shape.c].map(|m| {
-                (0..shape.num_rows())
-                    .fold(E::ZERO, |acc, i| acc + eq[i].mul_base(m.row_dot(i, z)))
+                (0..shape.num_rows()).fold(E::ZERO, |acc, i| acc + eq[i].mul_base(m.row_dot(i, z)))
             })
         };
         let want = triple(&z1);
@@ -1177,7 +1221,10 @@ mod tests {
             let z = s.next_base();
             let target = s.next_ext4();
             let pad = super::super::pad_inv(beta, (target - E::from_base(z)) * beta.get().inv());
-            assert_eq!(E::from_base(z) + beta.get() * pad_map(beta.get(), &pad), target);
+            assert_eq!(
+                E::from_base(z) + beta.get() * pad_map(beta.get(), &pad),
+                target
+            );
         }
     }
 

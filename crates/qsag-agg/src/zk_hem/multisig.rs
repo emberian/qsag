@@ -129,7 +129,9 @@ impl Policy {
             || members.len() > 1usize << depth
             || threshold == 0
             || threshold as usize > members.len()
-            || members.iter().any(|pk| pk.profile != AggSigProfile::JortsPoseidon2)
+            || members
+                .iter()
+                .any(|pk| pk.profile != AggSigProfile::JortsPoseidon2)
             || members
                 .iter()
                 .enumerate()
@@ -428,8 +430,7 @@ fn slot_gadget(
     for (level, bit) in index_bits.iter().enumerate() {
         let sibling = alloc4(cs, &slot.policy_path[level]);
         let left = select4(cs, bit, &sibling, &node);
-        let right: [Lc; 4] =
-            core::array::from_fn(|i| node[i].plus(&sibling[i]).minus(&left[i]));
+        let right: [Lc; 4] = core::array::from_fn(|i| node[i].plus(&sibling[i]).minus(&left[i]));
         let mut msg: Vec<Lc> = left.to_vec();
         msg.extend_from_slice(&right);
         msg.push(Lc::constant(f(POLICY_NODE_TAG)));
@@ -536,8 +537,7 @@ fn slot_gadget(
         let parent_idx = pack_bits(&leaf_bits[level + 1..]);
         let meta = parent_idx.plus_const(f(((level as u64) + 1) << 32));
         let left = select4(cs, &leaf_bits[level], &sibling, &node);
-        let right: [Lc; 4] =
-            core::array::from_fn(|i| node[i].plus(&sibling[i]).minus(&left[i]));
+        let right: [Lc; 4] = core::array::from_fn(|i| node[i].plus(&sibling[i]).minus(&left[i]));
         node = xmss_node(cs, &seed, meta, &left, &right);
     }
     enforce_equal4(cs, &node, &root);
@@ -560,6 +560,27 @@ fn synthesize(
         .collect();
     let (address_lc, message_limbs) = publics.split_at(4);
     let threshold_lc: Lc = cs.alloc(f(u64::from(threshold))).into();
+
+    // Bound the hidden threshold independently of Policy::new and the active slots.
+    // Both differences are below 128, so no field wrap can pass.
+    let lower = alloc_bits(
+        &mut cs,
+        u64::from(threshold.saturating_sub(1)),
+        params.slack_bits(),
+    );
+    cs.enforce_equal(
+        &threshold_lc.plus_const(F::ZERO - F::ONE),
+        &pack_bits(&lower),
+    );
+    let upper = alloc_bits(
+        &mut cs,
+        params.capacity.saturating_sub(threshold as usize) as u64,
+        params.slack_bits(),
+    );
+    cs.enforce_equal(
+        &Lc::constant(f(params.capacity as u64)).minus(&threshold_lc),
+        &pack_bits(&upper),
+    );
 
     let mut prev: Option<(Lc, Lc, [Lc; 4])> = None;
     let mut active_sum = Lc::zero();
@@ -661,7 +682,9 @@ impl MultisigRelation {
         if signers.len() < policy.threshold as usize
             || signers.len() > self.params.capacity
             || signers.is_empty()
-            || signers.windows(2).any(|w| w[0].member_index >= w[1].member_index)
+            || signers
+                .windows(2)
+                .any(|w| w[0].member_index >= w[1].member_index)
         {
             return Err(MultisigError::InvalidSignerSet);
         }
@@ -714,8 +737,14 @@ impl MultisigRelation {
             &slots,
         );
         debug_assert_eq!(shape, self.shape);
-        protocol::prove(&self.shape, assignment, &self.statement_bytes(), regime, seed)
-            .map_err(MultisigError::Proof)
+        protocol::prove(
+            &self.shape,
+            assignment,
+            &self.statement_bytes(),
+            regime,
+            seed,
+        )
+        .map_err(MultisigError::Proof)
     }
 
     /// Verify a proof for the policy address and message.
@@ -757,7 +786,10 @@ mod tests {
         let signatures = keys
             .iter_mut()
             .enumerate()
-            .map(|(i, kp)| kp.sign_stateful_for_unit_test(&MESSAGE, (i % 3) as u32).unwrap())
+            .map(|(i, kp)| {
+                kp.sign_stateful_for_unit_test(&MESSAGE, (i % 3) as u32)
+                    .unwrap()
+            })
             .collect();
         let policy = Policy::new(keys.iter().map(|k| k.pk).collect(), threshold, depth).unwrap();
         Fixture { policy, signatures }
@@ -822,6 +854,43 @@ mod tests {
     }
 
     #[test]
+    fn hand_built_zero_threshold_policy_is_rejected_by_the_relation() {
+        let params = MultisigParams {
+            capacity: 1,
+            depth: 1,
+        };
+        let rel = MultisigRelation::new(params).unwrap();
+        let fx = fixture(1, 1, 1);
+        let mut slots = rel
+            .slots(&fx.policy, &MESSAGE, &signers(&fx, &[0]))
+            .unwrap();
+        // Bypass Policy::new and derive the actual address of the malicious t=0 tree.
+        let malicious = Policy {
+            depth: fx.policy.depth,
+            threshold: 0,
+            members: fx.policy.members.clone(),
+            levels: fx.policy.levels.clone(),
+        };
+        slots[0].active = false;
+        let (shape, z) = synthesize(params, &malicious.address(), &MESSAGE, 0, &slots);
+        assert_eq!(&shape, rel.shape());
+        assert!(!shape.is_satisfied(&z));
+        assert_eq!(
+            protocol::prove(
+                &shape,
+                z,
+                &rel.statement_bytes(),
+                WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+                &[4; 32]
+            ),
+            Err(ZkHemError::Unsatisfied)
+        );
+        let (shape, z) = synthesize(params, &fx.policy.address(), &MESSAGE, 2, &slots);
+        assert_eq!(&shape, rel.shape());
+        assert!(!shape.is_satisfied(&z));
+    }
+
+    #[test]
     fn relation_is_satisfied_exactly_by_valid_signer_sets() {
         let params = MultisigParams {
             capacity: 3,
@@ -835,10 +904,13 @@ mod tests {
             assert_eq!(&shape, rel.shape());
             shape.is_satisfied(&z)
         };
-        let honest = rel.slots(&fx.policy, &MESSAGE, &signers(&fx, &[1, 3])).unwrap();
+        let honest = rel
+            .slots(&fx.policy, &MESSAGE, &signers(&fx, &[1, 3]))
+            .unwrap();
         assert!(run(&honest, 2));
         assert!(run(
-            &rel.slots(&fx.policy, &MESSAGE, &signers(&fx, &[0, 1, 2])).unwrap(),
+            &rel.slots(&fx.policy, &MESSAGE, &signers(&fx, &[0, 1, 2]))
+                .unwrap(),
             2
         ));
 
@@ -903,8 +975,14 @@ mod tests {
         let fx = fixture(3, 2, 2);
         let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
         let prove = |s: &[MultisigSigner]| rel.prove(&fx.policy, &MESSAGE, s, regime, &[1; 32]);
-        assert_eq!(prove(&signers(&fx, &[1])).unwrap_err(), MultisigError::InvalidSignerSet);
-        assert_eq!(prove(&signers(&fx, &[2, 1])).unwrap_err(), MultisigError::InvalidSignerSet);
+        assert_eq!(
+            prove(&signers(&fx, &[1])).unwrap_err(),
+            MultisigError::InvalidSignerSet
+        );
+        assert_eq!(
+            prove(&signers(&fx, &[2, 1])).unwrap_err(),
+            MultisigError::InvalidSignerSet
+        );
         assert_eq!(
             prove(&signers(&fx, &[0, 1, 2])).unwrap_err(),
             MultisigError::InvalidSignerSet
@@ -926,7 +1004,13 @@ mod tests {
         let fx = fixture(3, 2, 2);
         let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
         let proof = rel
-            .prove(&fx.policy, &MESSAGE, &signers(&fx, &[0, 2]), regime, &[4; 32])
+            .prove(
+                &fx.policy,
+                &MESSAGE,
+                &signers(&fx, &[0, 2]),
+                regime,
+                &[4; 32],
+            )
             .unwrap();
         let address = fx.policy.address();
         assert!(rel.verify(&address, &MESSAGE, regime, &proof));
@@ -954,12 +1038,24 @@ mod tests {
         };
         let other_fx = fixture(4, 1, 2);
         let single = rel
-            .prove(&other_fx.policy, &MESSAGE, &signers(&other_fx, &[3]), regime, &[5; 32])
+            .prove(
+                &other_fx.policy,
+                &MESSAGE,
+                &signers(&other_fx, &[3]),
+                regime,
+                &[5; 32],
+            )
             .unwrap();
         assert!(rel.verify(&other_fx.policy.address(), &MESSAGE, regime, &single));
         assert_eq!(fixed_len(&single), fixed_len(&proof));
         let again = rel
-            .prove(&fx.policy, &MESSAGE, &signers(&fx, &[0, 2]), regime, &[8; 32])
+            .prove(
+                &fx.policy,
+                &MESSAGE,
+                &signers(&fx, &[0, 2]),
+                regime,
+                &[8; 32],
+            )
             .unwrap();
         assert_eq!(fixed_len(&again), fixed_len(&proof));
         assert_ne!(again.to_bytes(), proof.to_bytes());
@@ -992,7 +1088,13 @@ mod tests {
         let chosen: Vec<usize> = (0..threshold as usize).map(|i| 2 * i).collect();
         let t = std::time::Instant::now();
         let proof = rel
-            .prove(&fx.policy, &MESSAGE, &signers(&fx, &chosen), regime, &[6; 32])
+            .prove(
+                &fx.policy,
+                &MESSAGE,
+                &signers(&fx, &chosen),
+                regime,
+                &[6; 32],
+            )
             .unwrap();
         let prove_ms = t.elapsed().as_secs_f64() * 1e3;
         let bytes = proof.to_bytes();
