@@ -72,6 +72,74 @@ import all Qsag.CodingTheory.AffineIncidenceBound
 import all Qsag.CodingTheory.Cwyz26AffineGap
 import all Qsag.Tactic.AssuranceKit
 import all Qsag.Tactic.ConstructiveRing
+import all Qsag.CodingTheory.BivariateFactorSplit
+import all Qsag.CodingTheory.BivariateGauss
+import all Qsag.CodingTheory.Cwyz26JohnsonCertificate
+import all Qsag.CodingTheory.GoldilocksCharacteristic
+import all Qsag.CodingTheory.JohnsonSetSystem
+import all Qsag.CodingTheory.MatrixDet
+import all Qsag.CodingTheory.ModMonicAlgebra
+import all Qsag.CodingTheory.NonpersistentIncidenceBound
+import all Qsag.CodingTheory.PersistentPairsBound
+import all Qsag.CodingTheory.PersistentPairsBoundTests
+import all Qsag.CodingTheory.PlaneBezoutResultant
+import all Qsag.CodingTheory.ShearedCurveGcd
+import all Qsag.CodingTheory.SlicedJetIncidence
+import all Qsag.CodingTheory.SlicedJetIncidenceTests
+import all Qsag.CodingTheory.SylvesterDeriv
+import all Qsag.CodingTheory.SylvesterElimination
+import all Qsag.CompleteMediationBoundary
+import all Qsag.ComposedQsAgAndMergeSecurity
+import all Qsag.CompositionInstances
+import all Qsag.CrossProtocolAndDualOracleComposition
+import all Qsag.DensePcgProductionTaps
+import all Qsag.DensePcgTapLinearTests
+import all Qsag.GoldilocksPrimalityAndExt4Field
+import all Qsag.HashTrailSampling
+import all Qsag.HemFoldDecompositionBridge
+import all Qsag.HemPointReductionSoundness
+import all Qsag.HemVerifierAcceptance
+import all Qsag.HemWhirRbrSoundness
+import all Qsag.HybridAddrPolicyAndFullPresetSecurity
+import all Qsag.PrattPrimalityCert
+import all Qsag.QromClassicalQueryTransfer
+import all Qsag.QromExtractionBoundary
+import all Qsag.QromMeasuredMerkleExtraction
+import all Qsag.QromMeasuredMerkleExtractionTests
+import all Qsag.QromMeasuredQueryExperiment
+import all Qsag.QromMerkleOnlineExtraction
+import all Qsag.RlweExtractionBoundary
+import all Qsag.Rss256TernaryRound
+import all Qsag.Rss256TwoPassProductProof
+import all Qsag.SeparatedCustodyChecks
+import all Qsag.SeparatedCustodyCore
+import all Qsag.SeparatedCustodyHistory
+import all Qsag.SeparatedCustodyHistoryChecks
+import all Qsag.SeparatedCustodyPolicy
+import all Qsag.SeparatedCustodySpine
+import all Qsag.SpongeFramingAndDomainSep
+import all Qsag.BlindVcCollisionFinder
+import all Qsag.CodingTheory.Cwyz26DeployedStages
+import all Qsag.HemExtractedOpeningBridge
+import all Qsag.HemExtractedOpeningBridgeTests
+import all Qsag.IdealOutputBoundary
+import all Qsag.ParallelSeededChainStepKat
+import all Qsag.ParallelSeededSpnPolyBasis
+import all Qsag.ProdCollisionAccounting
+import all Qsag.ProdCollisionEvents
+import all Qsag.ProdCollisionExtraction
+import all Qsag.ProdCollisionLayers
+import all Qsag.ProdCollisionWitness
+import all Qsag.QromBatchMerkleExtraction
+import all Qsag.SeparatedCustodyCollision
+import all Qsag.SeparatedCustodyRelease
+import all Qsag.SeparatedCustodyReleaseChecks
+import all Qsag.SignatureOutputAndCacheLaws
+import all Qsag.SpnCommittedDifferential
+import all Qsag.SpnFixedConstantTrail
+import all Qsag.SpnRoundConstantExperiment
+import all Qsag.SpnWalshHull
+import all Qsag.Tower128PolyBasisIso
 import Lean
 public meta import AxiomAuditSupport
 
@@ -175,7 +243,75 @@ run_cmd do
     `Qsag.ThresholdMlDsaAndToprf,
     `Qsag.ThresholdMlDsaSecurity,
     `Qsag.ThresholdMpc,
-    `Qsag.UcGames
+    `Qsag.UcGames,
+    `Qsag.CodingTheory.BivariateFactorSplit,
+    `Qsag.CodingTheory.BivariateGauss,
+    `Qsag.CodingTheory.Cwyz26JohnsonCertificate,
+    `Qsag.CodingTheory.GoldilocksCharacteristic,
+    `Qsag.CodingTheory.JohnsonSetSystem,
+    `Qsag.CodingTheory.MatrixDet,
+    `Qsag.CodingTheory.ModMonicAlgebra,
+    `Qsag.CodingTheory.NonpersistentIncidenceBound,
+    `Qsag.CodingTheory.PersistentPairsBound,
+    `Qsag.CodingTheory.PersistentPairsBoundTests,
+    `Qsag.CodingTheory.PlaneBezoutResultant,
+    `Qsag.CodingTheory.ShearedCurveGcd,
+    `Qsag.CodingTheory.SlicedJetIncidence,
+    `Qsag.CodingTheory.SlicedJetIncidenceTests,
+    `Qsag.CodingTheory.SylvesterDeriv,
+    `Qsag.CodingTheory.SylvesterElimination,
+    `Qsag.CompleteMediationBoundary,
+    `Qsag.ComposedQsAgAndMergeSecurity,
+    `Qsag.CompositionInstances,
+    `Qsag.CrossProtocolAndDualOracleComposition,
+    `Qsag.DensePcgProductionTaps,
+    `Qsag.DensePcgTapLinearTests,
+    `Qsag.GoldilocksPrimalityAndExt4Field,
+    `Qsag.HashTrailSampling,
+    `Qsag.HemFoldDecompositionBridge,
+    `Qsag.HemPointReductionSoundness,
+    `Qsag.HemVerifierAcceptance,
+    `Qsag.HemWhirRbrSoundness,
+    `Qsag.HybridAddrPolicyAndFullPresetSecurity,
+    `Qsag.PrattPrimalityCert,
+    `Qsag.QromClassicalQueryTransfer,
+    `Qsag.QromExtractionBoundary,
+    `Qsag.QromMeasuredMerkleExtraction,
+    `Qsag.QromMeasuredMerkleExtractionTests,
+    `Qsag.QromMeasuredQueryExperiment,
+    `Qsag.QromMerkleOnlineExtraction,
+    `Qsag.RlweExtractionBoundary,
+    `Qsag.Rss256TernaryRound,
+    `Qsag.Rss256TwoPassProductProof,
+    `Qsag.SeparatedCustodyChecks,
+    `Qsag.SeparatedCustodyCore,
+    `Qsag.SeparatedCustodyHistory,
+    `Qsag.SeparatedCustodyHistoryChecks,
+    `Qsag.SeparatedCustodyPolicy,
+    `Qsag.SeparatedCustodySpine,
+    `Qsag.SpongeFramingAndDomainSep,
+    `Qsag.BlindVcCollisionFinder,
+    `Qsag.CodingTheory.Cwyz26DeployedStages,
+    `Qsag.HemExtractedOpeningBridge,
+    `Qsag.HemExtractedOpeningBridgeTests,
+    `Qsag.IdealOutputBoundary,
+    `Qsag.ParallelSeededChainStepKat,
+    `Qsag.ParallelSeededSpnPolyBasis,
+    `Qsag.ProdCollisionAccounting,
+    `Qsag.ProdCollisionEvents,
+    `Qsag.ProdCollisionExtraction,
+    `Qsag.ProdCollisionLayers,
+    `Qsag.ProdCollisionWitness,
+    `Qsag.QromBatchMerkleExtraction,
+    `Qsag.SeparatedCustodyCollision,
+    `Qsag.SeparatedCustodyRelease,
+    `Qsag.SeparatedCustodyReleaseChecks,
+    `Qsag.SignatureOutputAndCacheLaws,
+    `Qsag.SpnCommittedDifferential,
+    `Qsag.SpnFixedConstantTrail,
+    `Qsag.SpnRoundConstantExperiment,
+    `Qsag.SpnWalshHull,
+    `Qsag.Tower128PolyBasisIso
   ]
 
   let privEnv := (← getEnv).setExporting false
