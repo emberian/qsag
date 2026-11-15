@@ -17,7 +17,11 @@ from pathlib import Path
 
 lean = Path(__file__).resolve().parents[1]
 qsag = lean / "Qsag"
-INFRASTRUCTURE = {"Qsag.Tactic.AssuranceKit", "Qsag.Tactic.ConstructiveRing"}
+# Proof-automation modules: any module with a `Tactic` path component (see `AxiomAuditSupport`).
+def is_infrastructure(m):
+    return "Tactic" in m.split(".")
+
+
 ORDER = ["Tactic", "Spec", "Math", "Coding", "Oracle", "Protocol", "Custody", "Exec", "Machine", "Top", "Tests"]
 
 excluded = set()
@@ -63,10 +67,14 @@ start = text.index("import Qsag\n") + len("import Qsag\n")
 end = text.index("import Lean\n")
 ordered = [m for g in groups for m in modules if group(m) == g]
 text = text[:start] + "".join(f"import all {m}\n" for m in ordered) + text[end:]
+imarker = "  let infrastructureModules : Array Name := #[\n"
+ia = text.index(imarker) + len(imarker)
+ib = text.index("\n  ]\n", ia)
+text = text[:ia] + ",\n".join(f"    `{m}" for m in ordered if is_infrastructure(m)) + text[ib:]
 marker = "  let auditedProofModules : Array Name := #[\n"
 a = text.index(marker) + len(marker)
 b = text.index("\n  ]\n", a)
-proof = [m for m in ordered if m not in INFRASTRUCTURE]
+proof = [m for m in ordered if not is_infrastructure(m)]
 text = text[:a] + ",\n".join(f"    `{m}" for m in proof) + text[b:]
 audit.write_text(text)
 print(f"{len(modules)} modules registered ({len(proof)} proof modules, {len(excluded)} excluded)")
