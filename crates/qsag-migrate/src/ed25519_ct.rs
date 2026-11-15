@@ -1,6 +1,7 @@
 //! RFC 8032 extended Edwards arithmetic over 2^255 - 19.
 //! Fixed loop bounds and masked table selection; timing needs host validation.
-use qsag_accel::ct::{ct_eq_u64, ct_select_u64, ct_zeroize_u64s};
+use crate::limbs;
+use qsag_accel::ct::{ct_eq_u64, ct_zeroize_u64s};
 
 const MASK: u64 = (1 << 51) - 1;
 const PRIME: [u64; 5] = [MASK - 18, MASK, MASK, MASK, MASK];
@@ -25,18 +26,15 @@ impl Field {
             }
             wide[0] += carry * 19;
         }
-        let mut limbs = wide.map(|x| x as u64);
+        let value = wide.map(|x| x as u64);
         let mut diff = [0u64; 5];
         let mut borrow = 0u64;
-        for ((slot, &x), &p) in diff.iter_mut().zip(&limbs).zip(&PRIME) {
+        for ((slot, &x), &p) in diff.iter_mut().zip(&value).zip(&PRIME) {
             let d = x.wrapping_sub(p + borrow);
             borrow = d >> 63;
             *slot = d & MASK;
         }
-        for (slot, &d) in limbs.iter_mut().zip(&diff) {
-            *slot = ct_select_u64(borrow == 0, d, *slot);
-        }
-        Self(limbs)
+        Self(limbs::ct_select(borrow == 0, diff, value))
     }
 
     fn add(&self, rhs: &Self) -> Self {
@@ -75,9 +73,7 @@ impl Field {
     }
 
     fn select(take: bool, yes: &Self, no: &Self) -> Self {
-        Self(core::array::from_fn(|i| {
-            ct_select_u64(take, yes.0[i], no.0[i])
-        }))
+        Self(limbs::ct_select(take, yes.0, no.0))
     }
 
     fn limbs(&self) -> [u64; 4] {
@@ -91,7 +87,7 @@ impl Field {
     }
 
     fn bytes(&self) -> [u8; 32] {
-        crate::scalar::encode(self.limbs())
+        limbs::to_le_bytes(self.limbs())
     }
 }
 
@@ -550,9 +546,9 @@ pub(crate) fn multiply_limbs(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 
 pub(crate) fn circuit_base_table() -> [[[u64; 4]; 4]; 16] {
     BASE_TABLE.map(|coords| {
-        let x = crate::scalar::decode(&Field(coords[0]).bytes());
-        let y = crate::scalar::decode(&Field(coords[1]).bytes());
-        let t = crate::scalar::decode(&Field(coords[2]).bytes());
+        let x = limbs::from_le_bytes(&Field(coords[0]).bytes());
+        let y = limbs::from_le_bytes(&Field(coords[1]).bytes());
+        let t = limbs::from_le_bytes(&Field(coords[2]).bytes());
         [x, y, [1, 0, 0, 0], t]
     })
 }

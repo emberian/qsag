@@ -22,7 +22,7 @@ use core::fmt;
 
 use qsag_accel::{
     AcceleratorBackend,
-    ct::{RedactedSecret, ct_eq_u64, ct_select_u64, ct_zeroize_bytes, ct_zeroize_u64s},
+    ct::{RedactedSecret, ct_zeroize_bytes, ct_zeroize_u64s},
     goldilocks::{GOLDILOCKS_PRIME, gl_add, gl_mul, gl_sub, pack_bytes32_to_limbs56},
     keccak::{InterleavedTranscript, cshake256_framed_32},
     poseidon2::{POSEIDON2_CONST_IV, poseidon2_const_at, poseidon2_hash_limbs},
@@ -30,6 +30,7 @@ use qsag_accel::{
 use qsag_addr::QsagAddress;
 
 use crate::{
+    limbs,
     scalar::NULLIFIER_DOMAIN,
     zk_engine::{
         MIT_REPETITIONS, MigrateError, MigrationZkProof, OpenedRepetitionView, PartyView,
@@ -129,109 +130,6 @@ pub const PASTA_PALLAS_GY: [u64; 4] = [2, 0, 0, 0];
 pub const NULLIFIER_TAG_PALLAS_AK: u64 = 3;
 pub const NULLIFIER_TAG_PALLAS_RK: u64 = 4;
 
-#[inline]
-fn sub4_borrow(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], bool) {
-    let mut out = [0u64; 4];
-    let mut br = 0u64;
-    for i in 0..4 {
-        let (d1, b1) = a[i].overflowing_sub(b[i]);
-        let (d2, b2) = d1.overflowing_sub(br);
-        out[i] = d2;
-        br = (b1 as u64) | (b2 as u64);
-    }
-    (out, br != 0)
-}
-
-#[inline]
-fn lt4(a: [u64; 4], b: [u64; 4]) -> bool {
-    sub4_borrow(a, b).1
-}
-
-#[inline]
-fn select4(choice: bool, t: [u64; 4], f: [u64; 4]) -> [u64; 4] {
-    [
-        ct_select_u64(choice, t[0], f[0]),
-        ct_select_u64(choice, t[1], f[1]),
-        ct_select_u64(choice, t[2], f[2]),
-        ct_select_u64(choice, t[3], f[3]),
-    ]
-}
-
-#[inline]
-fn add4_mod(a: [u64; 4], b: [u64; 4], m: [u64; 4]) -> [u64; 4] {
-    let mut sum = [0u64; 4];
-    let mut carry = 0u128;
-    for i in 0..4 {
-        let cur = (a[i] as u128) + (b[i] as u128) + carry;
-        sum[i] = cur as u64;
-        carry = cur >> 64;
-    }
-    let (diff, borrow) = sub4_borrow(sum, m);
-    select4((carry != 0) | !borrow, diff, sum)
-}
-
-#[inline]
-fn sub4_mod(a: [u64; 4], b: [u64; 4], m: [u64; 4]) -> [u64; 4] {
-    let (diff, borrow) = sub4_borrow(a, b);
-    let mut out = [0u64; 4];
-    let mut carry = 0u128;
-    for i in 0..4 {
-        let addend = ct_select_u64(borrow, m[i], 0);
-        let cur = (diff[i] as u128) + (addend as u128) + carry;
-        out[i] = cur as u64;
-        carry = cur >> 64;
-    }
-    out
-}
-
-/// Constant-time 4-limb CIOS Montgomery product `a * b * 2^-256 mod m` (`m < 2^255`).
-#[inline]
-fn cios_mont_mul4(a: [u64; 4], b: [u64; 4], m: [u64; 4], inv: u64) -> [u64; 4] {
-    let mut t = [0u64; 6];
-    for &ai in &a {
-        let mut carry = 0u128;
-        for j in 0..4 {
-            let cur = (t[j] as u128) + (ai as u128) * (b[j] as u128) + carry;
-            t[j] = cur as u64;
-            carry = cur >> 64;
-        }
-        let cur = (t[4] as u128) + carry;
-        t[4] = cur as u64;
-        t[5] = (cur >> 64) as u64;
-
-        let u = t[0].wrapping_mul(inv);
-        let cur0 = (t[0] as u128) + (u as u128) * (m[0] as u128);
-        let mut carry2 = cur0 >> 64;
-        for j in 1..4 {
-            let curj = (t[j] as u128) + (u as u128) * (m[j] as u128) + carry2;
-            t[j - 1] = curj as u64;
-            carry2 = curj >> 64;
-        }
-        let cur4 = (t[4] as u128) + carry2;
-        t[3] = cur4 as u64;
-        t[4] = t[5].wrapping_add((cur4 >> 64) as u64);
-        t[5] = 0;
-    }
-    let raw = [t[0], t[1], t[2], t[3]];
-    let (diff, borrow) = sub4_borrow(raw, m);
-    select4((t[4] != 0) | !borrow, diff, raw)
-}
-
-#[inline]
-fn pow4_ct(base: [u64; 4], exp: [u64; 4], m: [u64; 4], inv: u64, r2: [u64; 4]) -> [u64; 4] {
-    let mut b_m = cios_mont_mul4(base, r2, m, inv);
-    let mut acc_m = cios_mont_mul4([1, 0, 0, 0], r2, m, inv);
-    for limb in exp {
-        for bit in 0..64 {
-            let take = ((limb >> bit) & 1) == 1;
-            let prod = cios_mont_mul4(acc_m, b_m, m, inv);
-            acc_m = select4(take, prod, acc_m);
-            b_m = cios_mont_mul4(b_m, b_m, m, inv);
-        }
-    }
-    cios_mont_mul4(acc_m, [1, 0, 0, 0], m, inv)
-}
-
 /// Canonical element of the Pallas base field `F_p` (`0 <= self < p`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FpPallas(pub [u64; 4]);
@@ -244,26 +142,26 @@ impl FpPallas {
     pub const B: Self = Self([5, 0, 0, 0]);
 
     pub fn from_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let limbs = crate::scalar::decode(bytes);
-        if lt4(limbs, PALLAS_P) {
-            Some(Self(limbs))
+        let value = limbs::from_le_bytes(bytes);
+        if limbs::lt(value, PALLAS_P) {
+            Some(Self(value))
         } else {
             None
         }
     }
 
     pub fn to_le_bytes(self) -> [u8; 32] {
-        crate::scalar::encode(self.0)
+        limbs::to_le_bytes(self.0)
     }
 
     #[inline]
     pub fn ct_select(choice: bool, t: Self, f: Self) -> Self {
-        Self(select4(choice, t.0, f.0))
+        Self(limbs::ct_select(choice, t.0, f.0))
     }
 
     #[inline]
     pub fn is_zero(self) -> bool {
-        ct_eq_u64(self.0[0] | self.0[1] | self.0[2] | self.0[3], 0)
+        limbs::is_zero(self.0)
     }
 
     #[inline]
@@ -273,23 +171,23 @@ impl FpPallas {
 
     #[inline]
     pub fn add_mod(self, rhs: Self) -> Self {
-        Self(add4_mod(self.0, rhs.0, PALLAS_P))
+        Self(limbs::add_mod(self.0, rhs.0, PALLAS_P))
     }
 
     #[inline]
     pub fn sub_mod(self, rhs: Self) -> Self {
-        Self(sub4_mod(self.0, rhs.0, PALLAS_P))
+        Self(limbs::sub_mod(self.0, rhs.0, PALLAS_P))
     }
 
     #[inline]
     pub fn neg_mod(self) -> Self {
-        Self::ZERO.sub_mod(self)
+        Self(limbs::neg_mod(self.0, PALLAS_P))
     }
 
     #[inline]
     pub fn mul_mod(self, rhs: Self) -> Self {
-        let m1 = cios_mont_mul4(self.0, rhs.0, PALLAS_P, PALLAS_P_INV);
-        Self(cios_mont_mul4(m1, PALLAS_P_R2, PALLAS_P, PALLAS_P_INV))
+        let m1 = limbs::mont_mul(self.0, rhs.0, PALLAS_P, PALLAS_P_INV);
+        Self(limbs::mont_mul(m1, PALLAS_P_R2, PALLAS_P, PALLAS_P_INV))
     }
 
     #[inline]
@@ -299,7 +197,7 @@ impl FpPallas {
 
     /// Constant-time Fermat inversion `a^(p - 2) mod p` (`0 -> 0`).
     pub fn inv_or_zero(self) -> Self {
-        Self(pow4_ct(
+        Self(limbs::mont_pow(
             self.0,
             PALLAS_P_MINUS_2,
             PALLAS_P,
@@ -310,7 +208,7 @@ impl FpPallas {
 
     /// Constant-time 32-adic Tonelli-Shanks square root in `F_p`.
     pub fn sqrt_ct(self) -> Option<Self> {
-        let w = Self(pow4_ct(
+        let w = Self(limbs::mont_pow(
             self.0,
             PALLAS_S_MINUS_1_HALF,
             PALLAS_P,
@@ -326,13 +224,7 @@ impl FpPallas {
             for _ in 0..(r - 2) {
                 d = d.sq();
             }
-            let need_mul = ct_eq_u64(
-                (d.0[0] ^ minus_one.0[0])
-                    | (d.0[1] ^ minus_one.0[1])
-                    | (d.0[2] ^ minus_one.0[2])
-                    | (d.0[3] ^ minus_one.0[3]),
-                0,
-            );
+            let need_mul = limbs::ct_eq(d.0, minus_one.0);
             let c2 = c.sq();
             x = Self::ct_select(need_mul, x.mul_mod(c), x);
             b = Self::ct_select(need_mul, b.mul_mod(c2), b);
@@ -396,11 +288,11 @@ impl FqPallas {
     pub const ONE: Self = Self([1, 0, 0, 0]);
 
     pub fn from_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let mut limbs = crate::scalar::decode(bytes);
-        if lt4(limbs, PALLAS_Q) {
-            Some(Self(limbs))
+        let mut value = limbs::from_le_bytes(bytes);
+        if limbs::lt(value, PALLAS_Q) {
+            Some(Self(value))
         } else {
-            ct_zeroize_u64s(&mut limbs);
+            ct_zeroize_u64s(&mut value);
             None
         }
     }
@@ -411,43 +303,41 @@ impl FqPallas {
     }
 
     pub fn to_le_bytes(&self) -> [u8; 32] {
-        crate::scalar::encode(self.0)
+        limbs::to_le_bytes(self.0)
     }
 
     pub fn to_be_bytes(&self) -> [u8; 32] {
-        let mut le = self.to_le_bytes();
-        le.reverse();
-        le
+        limbs::to_be_bytes(self.0)
     }
 
     #[inline]
     pub fn is_zero(&self) -> bool {
-        ct_eq_u64(self.0[0] | self.0[1] | self.0[2] | self.0[3], 0)
+        limbs::is_zero(self.0)
     }
 
     #[inline]
     pub fn add_mod(&self, rhs: &Self) -> Self {
-        Self(add4_mod(self.0, rhs.0, PALLAS_Q))
+        Self(limbs::add_mod(self.0, rhs.0, PALLAS_Q))
     }
 
     #[inline]
     pub fn sub_mod(&self, rhs: &Self) -> Self {
-        Self(sub4_mod(self.0, rhs.0, PALLAS_Q))
+        Self(limbs::sub_mod(self.0, rhs.0, PALLAS_Q))
     }
 
     #[inline]
     pub fn neg_mod(&self) -> Self {
-        Self::ZERO.sub_mod(self)
+        Self(limbs::neg_mod(self.0, PALLAS_Q))
     }
 
     #[inline]
     pub fn mul_mod(&self, rhs: &Self) -> Self {
-        let m1 = cios_mont_mul4(self.0, rhs.0, PALLAS_Q, PALLAS_Q_INV);
-        Self(cios_mont_mul4(m1, PALLAS_Q_R2, PALLAS_Q, PALLAS_Q_INV))
+        let m1 = limbs::mont_mul(self.0, rhs.0, PALLAS_Q, PALLAS_Q_INV);
+        Self(limbs::mont_mul(m1, PALLAS_Q_R2, PALLAS_Q, PALLAS_Q_INV))
     }
 
     pub fn inv_or_zero(&self) -> Self {
-        Self(pow4_ct(
+        Self(limbs::mont_pow(
             self.0,
             PALLAS_Q_MINUS_2,
             PALLAS_Q,
@@ -860,9 +750,9 @@ impl PalDom {
     #[inline]
     fn canonical(self, x: Val4) -> bool {
         match self {
-            Self::Bit => x[0] <= 1 && x[1] == 0 && x[2] == 0 && x[3] == 0,
-            Self::Gold => x[0] < GOLDILOCKS_PRIME && x[1] == 0 && x[2] == 0 && x[3] == 0,
-            Self::PallasFp => lt4(x, PALLAS_P),
+            Self::Bit => limbs::lt(x, [2, 0, 0, 0]),
+            Self::Gold => limbs::lt(x, [GOLDILOCKS_PRIME, 0, 0, 0]),
+            Self::PallasFp => limbs::lt(x, PALLAS_P),
         }
     }
 
@@ -871,7 +761,7 @@ impl PalDom {
         match self {
             Self::Bit => [(a[0] ^ b[0]) & 1, 0, 0, 0],
             Self::Gold => [gl_add(a[0], b[0]), 0, 0, 0],
-            Self::PallasFp => add4_mod(a, b, PALLAS_P),
+            Self::PallasFp => limbs::add_mod(a, b, PALLAS_P),
         }
     }
 
@@ -880,7 +770,7 @@ impl PalDom {
         match self {
             Self::Bit => [(a[0] ^ b[0]) & 1, 0, 0, 0],
             Self::Gold => [gl_sub(a[0], b[0]), 0, 0, 0],
-            Self::PallasFp => sub4_mod(a, b, PALLAS_P),
+            Self::PallasFp => limbs::sub_mod(a, b, PALLAS_P),
         }
     }
 
@@ -1420,10 +1310,10 @@ impl PalTape {
             PalDom::PallasFp => loop {
                 let mut raw = [0u8; 32];
                 self.sponge.squeeze(&mut raw);
-                let mut v = crate::scalar::decode(&raw);
+                let mut v: Val4 = limbs::from_le_bytes(&raw);
                 ct_zeroize_bytes(&mut raw);
                 v[3] &= 0x7fff_ffff_ffff_ffff;
-                if lt4(v, PALLAS_P) {
+                if limbs::lt(v, PALLAS_P) {
                     return v;
                 }
             },
@@ -1435,7 +1325,7 @@ fn pal_put(out: &mut Vec<u8>, d: PalDom, v: Val4) {
     match d {
         PalDom::Bit => out.push((v[0] & 1) as u8),
         PalDom::Gold => out.extend_from_slice(&v[0].to_le_bytes()),
-        PalDom::PallasFp => out.extend_from_slice(&crate::scalar::encode(v)),
+        PalDom::PallasFp => out.extend_from_slice(&limbs::to_le_bytes::<4, 32>(v)),
     }
 }
 
@@ -1447,7 +1337,7 @@ fn pal_take(input: &mut &[u8], d: PalDom) -> Result<Val4, MigrateError> {
     let v = match d {
         PalDom::Bit => [u64::from(input[0]), 0, 0, 0],
         PalDom::Gold => [u64::from_le_bytes(input[..8].try_into().unwrap()), 0, 0, 0],
-        PalDom::PallasFp => crate::scalar::decode(input[..32].try_into().unwrap()),
+        PalDom::PallasFp => limbs::from_le_bytes::<4, 32>(input[..32].try_into().unwrap()),
     };
     *input = &input[len..];
     if !d.canonical(v) {

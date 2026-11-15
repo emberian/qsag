@@ -22,7 +22,7 @@ use core::fmt;
 
 use qsag_accel::{
     AcceleratorBackend,
-    ct::{RedactedSecret, ct_eq_u64, ct_select_u64, ct_zeroize_bytes, ct_zeroize_u64s},
+    ct::{RedactedSecret, ct_zeroize_bytes, ct_zeroize_u64s},
     goldilocks::{GOLDILOCKS_PRIME, gl_add, gl_mul, gl_sub, pack_bytes32_to_limbs56},
     keccak::{InterleavedTranscript, cshake256_framed_32},
     poseidon2::{POSEIDON2_CONST_IV, poseidon2_const_at, poseidon2_hash_limbs},
@@ -31,6 +31,7 @@ use qsag_accel::{
 use qsag_addr::QsagAddress;
 
 use crate::{
+    limbs,
     scalar::NULLIFIER_DOMAIN,
     zk_engine::{
         MIT_REPETITIONS, MigrateError, MigrationZkProof, OpenedRepetitionView, PartyView,
@@ -140,212 +141,6 @@ pub const BLS_G1_GY: [u64; 6] = [
 /// Subgroup tag separating `BLS12-381` validator scalars from `secp256k1` (1), `Ed25519` (2), and `Pallas` (3, 4).
 pub const NULLIFIER_TAG_BLS12_381_G1: u64 = 5;
 
-#[inline]
-fn sub6_borrow(a: [u64; 6], b: [u64; 6]) -> ([u64; 6], bool) {
-    let mut out = [0u64; 6];
-    let mut br = 0u64;
-    for i in 0..6 {
-        let (d1, b1) = a[i].overflowing_sub(b[i]);
-        let (d2, b2) = d1.overflowing_sub(br);
-        out[i] = d2;
-        br = (b1 as u64) | (b2 as u64);
-    }
-    (out, br != 0)
-}
-
-#[inline]
-fn lt6(a: [u64; 6], b: [u64; 6]) -> bool {
-    sub6_borrow(a, b).1
-}
-
-#[inline]
-fn select6(choice: bool, t: [u64; 6], f: [u64; 6]) -> [u64; 6] {
-    [
-        ct_select_u64(choice, t[0], f[0]),
-        ct_select_u64(choice, t[1], f[1]),
-        ct_select_u64(choice, t[2], f[2]),
-        ct_select_u64(choice, t[3], f[3]),
-        ct_select_u64(choice, t[4], f[4]),
-        ct_select_u64(choice, t[5], f[5]),
-    ]
-}
-
-#[inline]
-fn add6_mod(a: [u64; 6], b: [u64; 6], m: [u64; 6]) -> [u64; 6] {
-    let mut sum = [0u64; 6];
-    let mut carry = 0u128;
-    for i in 0..6 {
-        let cur = (a[i] as u128) + (b[i] as u128) + carry;
-        sum[i] = cur as u64;
-        carry = cur >> 64;
-    }
-    let (diff, borrow) = sub6_borrow(sum, m);
-    select6((carry != 0) | !borrow, diff, sum)
-}
-
-#[inline]
-fn sub6_mod(a: [u64; 6], b: [u64; 6], m: [u64; 6]) -> [u64; 6] {
-    let (diff, borrow) = sub6_borrow(a, b);
-    let mut out = [0u64; 6];
-    let mut carry = 0u128;
-    for i in 0..6 {
-        let addend = ct_select_u64(borrow, m[i], 0);
-        let cur = (diff[i] as u128) + (addend as u128) + carry;
-        out[i] = cur as u64;
-        carry = cur >> 64;
-    }
-    out
-}
-
-/// Constant-time 6-limb CIOS Montgomery product `a * b * 2^-384 mod m` (`m < 2^383`).
-#[inline]
-fn cios_mont_mul6(a: [u64; 6], b: [u64; 6], m: [u64; 6], inv: u64) -> [u64; 6] {
-    let mut t = [0u64; 8];
-    for &ai in &a {
-        let mut carry = 0u128;
-        for j in 0..6 {
-            let cur = (t[j] as u128) + (ai as u128) * (b[j] as u128) + carry;
-            t[j] = cur as u64;
-            carry = cur >> 64;
-        }
-        let cur = (t[6] as u128) + carry;
-        t[6] = cur as u64;
-        t[7] = (cur >> 64) as u64;
-
-        let u = t[0].wrapping_mul(inv);
-        let cur0 = (t[0] as u128) + (u as u128) * (m[0] as u128);
-        let mut carry2 = cur0 >> 64;
-        for j in 1..6 {
-            let curj = (t[j] as u128) + (u as u128) * (m[j] as u128) + carry2;
-            t[j - 1] = curj as u64;
-            carry2 = curj >> 64;
-        }
-        let cur6 = (t[6] as u128) + carry2;
-        t[5] = cur6 as u64;
-        t[6] = t[7].wrapping_add((cur6 >> 64) as u64);
-        t[7] = 0;
-    }
-    let raw = [t[0], t[1], t[2], t[3], t[4], t[5]];
-    let (diff, borrow) = sub6_borrow(raw, m);
-    select6((t[6] != 0) | !borrow, diff, raw)
-}
-
-#[inline]
-fn pow6_ct(base: [u64; 6], exp: [u64; 6]) -> [u64; 6] {
-    let mut b_m = cios_mont_mul6(base, BLS_P_R2, BLS_P, BLS_P_INV);
-    let mut acc_m = cios_mont_mul6([1, 0, 0, 0, 0, 0], BLS_P_R2, BLS_P, BLS_P_INV);
-    for limb in exp {
-        for bit in 0..64 {
-            let take = ((limb >> bit) & 1) == 1;
-            let prod = cios_mont_mul6(acc_m, b_m, BLS_P, BLS_P_INV);
-            acc_m = select6(take, prod, acc_m);
-            b_m = cios_mont_mul6(b_m, b_m, BLS_P, BLS_P_INV);
-        }
-    }
-    cios_mont_mul6(acc_m, [1, 0, 0, 0, 0, 0], BLS_P, BLS_P_INV)
-}
-
-#[inline]
-fn sub4_borrow(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], bool) {
-    let mut out = [0u64; 4];
-    let mut br = 0u64;
-    for i in 0..4 {
-        let (d1, b1) = a[i].overflowing_sub(b[i]);
-        let (d2, b2) = d1.overflowing_sub(br);
-        out[i] = d2;
-        br = (b1 as u64) | (b2 as u64);
-    }
-    (out, br != 0)
-}
-
-#[inline]
-fn lt4(a: [u64; 4], b: [u64; 4]) -> bool {
-    sub4_borrow(a, b).1
-}
-
-#[inline]
-fn select4(choice: bool, t: [u64; 4], f: [u64; 4]) -> [u64; 4] {
-    [
-        ct_select_u64(choice, t[0], f[0]),
-        ct_select_u64(choice, t[1], f[1]),
-        ct_select_u64(choice, t[2], f[2]),
-        ct_select_u64(choice, t[3], f[3]),
-    ]
-}
-
-#[inline]
-fn add4_mod(a: [u64; 4], b: [u64; 4], m: [u64; 4]) -> [u64; 4] {
-    let mut sum = [0u64; 4];
-    let mut carry = 0u128;
-    for i in 0..4 {
-        let cur = (a[i] as u128) + (b[i] as u128) + carry;
-        sum[i] = cur as u64;
-        carry = cur >> 64;
-    }
-    let (diff, borrow) = sub4_borrow(sum, m);
-    select4((carry != 0) | !borrow, diff, sum)
-}
-
-#[inline]
-fn sub4_mod(a: [u64; 4], b: [u64; 4], m: [u64; 4]) -> [u64; 4] {
-    let (diff, borrow) = sub4_borrow(a, b);
-    let mut out = [0u64; 4];
-    let mut carry = 0u128;
-    for i in 0..4 {
-        let addend = ct_select_u64(borrow, m[i], 0);
-        let cur = (diff[i] as u128) + (addend as u128) + carry;
-        out[i] = cur as u64;
-        carry = cur >> 64;
-    }
-    out
-}
-
-#[inline]
-fn cios_mont_mul4(a: [u64; 4], b: [u64; 4], m: [u64; 4], inv: u64) -> [u64; 4] {
-    let mut t = [0u64; 6];
-    for &ai in &a {
-        let mut carry = 0u128;
-        for j in 0..4 {
-            let cur = (t[j] as u128) + (ai as u128) * (b[j] as u128) + carry;
-            t[j] = cur as u64;
-            carry = cur >> 64;
-        }
-        let cur = (t[4] as u128) + carry;
-        t[4] = cur as u64;
-        t[5] = (cur >> 64) as u64;
-
-        let u = t[0].wrapping_mul(inv);
-        let cur0 = (t[0] as u128) + (u as u128) * (m[0] as u128);
-        let mut carry2 = cur0 >> 64;
-        for j in 1..4 {
-            let curj = (t[j] as u128) + (u as u128) * (m[j] as u128) + carry2;
-            t[j - 1] = curj as u64;
-            carry2 = curj >> 64;
-        }
-        let cur4 = (t[4] as u128) + carry2;
-        t[3] = cur4 as u64;
-        t[4] = t[5].wrapping_add((cur4 >> 64) as u64);
-        t[5] = 0;
-    }
-    let raw = [t[0], t[1], t[2], t[3]];
-    let (diff, borrow) = sub4_borrow(raw, m);
-    select4((t[4] != 0) | !borrow, diff, raw)
-}
-
-#[inline]
-fn decode6_le(bytes: &[u8; 48]) -> [u64; 6] {
-    core::array::from_fn(|i| u64::from_le_bytes(bytes[8 * i..8 * i + 8].try_into().unwrap()))
-}
-
-#[inline]
-fn encode6_le(limbs: [u64; 6]) -> [u8; 48] {
-    let mut out = [0u8; 48];
-    for (i, limb) in limbs.into_iter().enumerate() {
-        out[8 * i..8 * i + 8].copy_from_slice(&limb.to_le_bytes());
-    }
-    out
-}
-
 /// Canonical element of the `BLS12-381` base field `F_p` (`0 <= self < p`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FpBls381(pub [u64; 6]);
@@ -357,69 +152,65 @@ impl FpBls381 {
     /// `3 * b = 12` for `y^2 = x^3 + 4`.
     pub const B3: Self = Self([12, 0, 0, 0, 0, 0]);
 
-    pub fn from_le_bytes(bytes: &[u8; 48]) -> Option<Self> {
-        let limbs = decode6_le(bytes);
-        if lt6(limbs, BLS_P) {
-            Some(Self(limbs))
+    fn from_limbs(value: [u64; 6]) -> Option<Self> {
+        if limbs::lt(value, BLS_P) {
+            Some(Self(value))
         } else {
             None
         }
     }
 
+    pub fn from_le_bytes(bytes: &[u8; 48]) -> Option<Self> {
+        Self::from_limbs(limbs::from_le_bytes(bytes))
+    }
+
     pub fn from_be_bytes(bytes: &[u8; 48]) -> Option<Self> {
-        let mut le = *bytes;
-        le.reverse();
-        Self::from_le_bytes(&le)
+        Self::from_limbs(limbs::from_be_bytes(bytes))
     }
 
     pub fn to_le_bytes(self) -> [u8; 48] {
-        encode6_le(self.0)
+        limbs::to_le_bytes(self.0)
     }
 
     pub fn to_be_bytes(self) -> [u8; 48] {
-        let mut out = self.to_le_bytes();
-        out.reverse();
-        out
+        limbs::to_be_bytes(self.0)
     }
 
     #[inline]
     pub fn ct_select(choice: bool, t: Self, f: Self) -> Self {
-        Self(select6(choice, t.0, f.0))
+        Self(limbs::ct_select(choice, t.0, f.0))
     }
 
     #[inline]
     pub fn is_zero(self) -> bool {
-        ct_eq_u64(
-            self.0[0] | self.0[1] | self.0[2] | self.0[3] | self.0[4] | self.0[5],
-            0,
-        )
+        limbs::is_zero(self.0)
     }
 
     /// IETF / Zcash `BLS12-381` `A_flag`: returns `true` iff `self > -self mod p` (`self >= (p + 1) / 2`).
     #[inline]
     pub fn lexicographically_largest(self) -> bool {
-        !lt6(self.0, BLS_P_HALF_CEIL)
+        !limbs::lt(self.0, BLS_P_HALF_CEIL)
     }
 
     #[inline]
     pub fn add_mod(self, rhs: Self) -> Self {
-        Self(add6_mod(self.0, rhs.0, BLS_P))
+        Self(limbs::add_mod(self.0, rhs.0, BLS_P))
     }
 
     #[inline]
     pub fn sub_mod(self, rhs: Self) -> Self {
-        Self(sub6_mod(self.0, rhs.0, BLS_P))
+        Self(limbs::sub_mod(self.0, rhs.0, BLS_P))
     }
 
     #[inline]
     pub fn neg_mod(self) -> Self {
-        Self::ZERO.sub_mod(self)
+        Self(limbs::neg_mod(self.0, BLS_P))
     }
 
     #[inline]
     pub fn mul_mod(self, rhs: Self) -> Self {
-        let m1 = cios_mont_mul6(self.0, rhs.0, BLS_P, BLS_P_INV);
-        Self(cios_mont_mul6(m1, BLS_P_R2, BLS_P, BLS_P_INV))
+        let m1 = limbs::mont_mul(self.0, rhs.0, BLS_P, BLS_P_INV);
+        Self(limbs::mont_mul(m1, BLS_P_R2, BLS_P, BLS_P_INV))
     }
 
     #[inline]
@@ -427,14 +218,19 @@ impl FpBls381 {
         self.mul_mod(self)
     }
 
+    #[inline]
+    fn pow_ct(base: [u64; 6], exp: [u64; 6]) -> [u64; 6] {
+        limbs::mont_pow(base, exp, BLS_P, BLS_P_INV, BLS_P_R2)
+    }
+
     /// Constant-time Fermat inversion `a^(p - 2) mod p` (`0 -> 0`).
     pub fn inv_or_zero(self) -> Self {
-        Self(pow6_ct(self.0, BLS_P_MINUS_2))
+        Self(Self::pow_ct(self.0, BLS_P_MINUS_2))
     }
 
     /// Constant-time square root `a^((p + 1) / 4) mod p` (`p ≡ 3 (mod 4)`).
     pub fn sqrt_ct(self) -> Option<Self> {
-        let cand = Self(pow6_ct(self.0, BLS_P_PLUS_1_DIV_4));
+        let cand = Self(Self::pow_ct(self.0, BLS_P_PLUS_1_DIV_4));
         if cand.sq() == self {
             Some(cand)
         } else {
@@ -492,22 +288,21 @@ impl FrBls381 {
     pub const ZERO: Self = Self([0; 4]);
     pub const ONE: Self = Self([1, 0, 0, 0]);
 
-    pub fn from_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let mut limbs = crate::scalar::decode(bytes);
-        if lt4(limbs, BLS_R) {
-            Some(Self(limbs))
+    fn from_limbs(mut value: [u64; 4]) -> Option<Self> {
+        if limbs::lt(value, BLS_R) {
+            Some(Self(value))
         } else {
-            ct_zeroize_u64s(&mut limbs);
+            ct_zeroize_u64s(&mut value);
             None
         }
     }
 
+    pub fn from_le_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_limbs(limbs::from_le_bytes(bytes))
+    }
+
     pub fn from_be_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let mut le = *bytes;
-        le.reverse();
-        let out = Self::from_le_bytes(&le);
-        ct_zeroize_bytes(&mut le);
-        out
+        Self::from_limbs(limbs::from_be_bytes(bytes))
     }
 
     /// Parse an IETF / EIP-2333 big-endian `BLS12-381` secret scalar `sk ∈ [1, r - 1]`.
@@ -522,48 +317,42 @@ impl FrBls381 {
     }
 
     pub fn to_le_bytes(&self) -> [u8; 32] {
-        crate::scalar::encode(self.0)
+        limbs::to_le_bytes(self.0)
     }
 
     pub fn to_be_bytes(&self) -> [u8; 32] {
-        let mut le = self.to_le_bytes();
-        le.reverse();
-        le
+        limbs::to_be_bytes(self.0)
     }
 
     #[inline]
     pub fn is_zero(&self) -> bool {
-        ct_eq_u64(self.0[0] | self.0[1] | self.0[2] | self.0[3], 0)
+        limbs::is_zero(self.0)
     }
 
     #[inline]
     pub fn add_mod(&self, rhs: &Self) -> Self {
-        Self(add4_mod(self.0, rhs.0, BLS_R))
+        Self(limbs::add_mod(self.0, rhs.0, BLS_R))
     }
 
     #[inline]
     pub fn sub_mod(&self, rhs: &Self) -> Self {
-        Self(sub4_mod(self.0, rhs.0, BLS_R))
+        Self(limbs::sub_mod(self.0, rhs.0, BLS_R))
     }
 
     #[inline]
     pub fn mul_mod(&self, rhs: &Self) -> Self {
-        let m1 = cios_mont_mul4(self.0, rhs.0, BLS_R, BLS_R_INV);
-        Self(cios_mont_mul4(m1, BLS_R_R2, BLS_R, BLS_R_INV))
+        let m1 = limbs::mont_mul(self.0, rhs.0, BLS_R, BLS_R_INV);
+        Self(limbs::mont_mul(m1, BLS_R_R2, BLS_R, BLS_R_INV))
     }
 
     pub fn inv_or_zero(&self) -> Self {
-        let mut b_m = cios_mont_mul4(self.0, BLS_R_R2, BLS_R, BLS_R_INV);
-        let mut acc_m = cios_mont_mul4([1, 0, 0, 0], BLS_R_R2, BLS_R, BLS_R_INV);
-        for limb in BLS_R_MINUS_2 {
-            for bit in 0..64 {
-                let take = ((limb >> bit) & 1) == 1;
-                let prod = cios_mont_mul4(acc_m, b_m, BLS_R, BLS_R_INV);
-                acc_m = select4(take, prod, acc_m);
-                b_m = cios_mont_mul4(b_m, b_m, BLS_R, BLS_R_INV);
-            }
-        }
-        Self(cios_mont_mul4(acc_m, [1, 0, 0, 0], BLS_R, BLS_R_INV))
+        Self(limbs::mont_pow(
+            self.0,
+            BLS_R_MINUS_2,
+            BLS_R,
+            BLS_R_INV,
+            BLS_R_R2,
+        ))
     }
 
     pub fn compute_nullifier(&self, migration_domain: &[u8; 32]) -> [u64; 4] {
@@ -984,18 +773,9 @@ impl BlsDom {
     #[inline]
     fn canonical(self, x: Val6) -> bool {
         match self {
-            Self::Bit => {
-                x[0] <= 1 && x[1] == 0 && x[2] == 0 && x[3] == 0 && x[4] == 0 && x[5] == 0
-            }
-            Self::Gold => {
-                x[0] < GOLDILOCKS_PRIME
-                    && x[1] == 0
-                    && x[2] == 0
-                    && x[3] == 0
-                    && x[4] == 0
-                    && x[5] == 0
-            }
-            Self::BlsFp => lt6(x, BLS_P),
+            Self::Bit => limbs::lt(x, [2, 0, 0, 0, 0, 0]),
+            Self::Gold => limbs::lt(x, [GOLDILOCKS_PRIME, 0, 0, 0, 0, 0]),
+            Self::BlsFp => limbs::lt(x, BLS_P),
         }
     }
 
@@ -1004,7 +784,7 @@ impl BlsDom {
         match self {
             Self::Bit => [(a[0] ^ b[0]) & 1, 0, 0, 0, 0, 0],
             Self::Gold => [gl_add(a[0], b[0]), 0, 0, 0, 0, 0],
-            Self::BlsFp => add6_mod(a, b, BLS_P),
+            Self::BlsFp => limbs::add_mod(a, b, BLS_P),
         }
     }
 
@@ -1013,7 +793,7 @@ impl BlsDom {
         match self {
             Self::Bit => [(a[0] ^ b[0]) & 1, 0, 0, 0, 0, 0],
             Self::Gold => [gl_sub(a[0], b[0]), 0, 0, 0, 0, 0],
-            Self::BlsFp => sub6_mod(a, b, BLS_P),
+            Self::BlsFp => limbs::sub_mod(a, b, BLS_P),
         }
     }
 
@@ -1734,10 +1514,10 @@ impl BlsTape {
             BlsDom::BlsFp => loop {
                 let mut raw = [0u8; 48];
                 self.sponge.squeeze(&mut raw);
-                let mut v = decode6_le(&raw);
+                let mut v: Val6 = limbs::from_le_bytes(&raw);
                 ct_zeroize_bytes(&mut raw);
                 v[5] &= 0x1fff_ffff_ffff_ffff;
-                if lt6(v, BLS_P) {
+                if limbs::lt(v, BLS_P) {
                     return v;
                 }
             },
@@ -1749,7 +1529,7 @@ fn bls_put(out: &mut Vec<u8>, d: BlsDom, v: Val6) {
     match d {
         BlsDom::Bit => out.push((v[0] & 1) as u8),
         BlsDom::Gold => out.extend_from_slice(&v[0].to_le_bytes()),
-        BlsDom::BlsFp => out.extend_from_slice(&encode6_le(v)),
+        BlsDom::BlsFp => out.extend_from_slice(&limbs::to_le_bytes::<6, 48>(v)),
     }
 }
 
@@ -1768,7 +1548,7 @@ fn bls_take(input: &mut &[u8], d: BlsDom) -> Result<Val6, MigrateError> {
             0,
             0,
         ],
-        BlsDom::BlsFp => decode6_le(input[..48].try_into().unwrap()),
+        BlsDom::BlsFp => limbs::from_le_bytes::<6, 48>(input[..48].try_into().unwrap()),
     };
     *input = &input[len..];
     if !d.canonical(v) {

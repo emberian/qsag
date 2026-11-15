@@ -1,6 +1,6 @@
 //! Fixed-topology mixed-field ownership circuits and exact local conversions.
 use crate::{
-    scalar,
+    limbs, scalar,
     secp256k1_ct::{Fp256, SECP_P},
 };
 use alloc::vec::Vec;
@@ -22,7 +22,7 @@ pub(crate) enum Domain {
 }
 impl Domain {
     pub(crate) fn inverse(self, a: Value) -> Value {
-        let exp = scalar::sub(self.modulus(), [2, 0, 0, 0], self.modulus());
+        let exp = limbs::sub_mod(self.modulus(), [2, 0, 0, 0], self.modulus());
         let mut out = [1, 0, 0, 0];
         for i in (0..self.width()).rev() {
             out = self.mul(out, out);
@@ -50,7 +50,7 @@ impl Domain {
     }
     #[inline(always)]
     pub(crate) fn canonical(self, x: Value) -> bool {
-        scalar::less(x, self.modulus())
+        limbs::lt(x, self.modulus())
     }
     #[inline(always)]
     pub(crate) fn add(self, a: Value, b: Value) -> Value {
@@ -58,7 +58,7 @@ impl Domain {
             Self::Bit => [a[0] ^ b[0], 0, 0, 0],
             Self::Gold => [gl_add(a[0], b[0]), 0, 0, 0],
             Self::Secp => (Fp256(a) + Fp256(b)).0,
-            Self::Ed => scalar::add(a, b, scalar::ED_PRIME),
+            Self::Ed => limbs::add_mod(a, b, scalar::ED_PRIME),
         }
     }
     #[inline(always)]
@@ -67,7 +67,7 @@ impl Domain {
             Self::Bit => self.add(a, b),
             Self::Gold => [gl_sub(a[0], b[0]), 0, 0, 0],
             Self::Secp => (Fp256(a) - Fp256(b)).0,
-            Self::Ed => scalar::sub(a, b, scalar::ED_PRIME),
+            Self::Ed => limbs::sub_mod(a, b, scalar::ED_PRIME),
         }
     }
     #[inline(always)]
