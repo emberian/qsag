@@ -27,6 +27,7 @@ public import Qsag.SeparatedCustodyUcBridge
 public import Qsag.SeparatedCustodyCollision
 public import Qsag.SeparatedCustodyUcResource
 public import Qsag.SeparatedCustodyResourceSoundness
+public import Qsag.JortsBeltLatchAndQuorumSwitching
 public import Qsag.ThresholdIdealService
 public import Qsag.ThresholdIdealDurableService
 public import Qsag.ThresholdIdealServiceCustodyBridge
@@ -36,8 +37,11 @@ public import Qsag.RssParticipantSponge
 public import Qsag.RssParticipantBinding
 public import Qsag.RssParticipantNetwork
 public import Qsag.RssParticipantPassiveSimulation
+public import Qsag.RssParticipantFixedTape
 public import Qsag.RssParticipantGateChecks
 public import Qsag.RssParticipantGateWeights
+public import Qsag.RssParticipantGateEvidence
+public import Qsag.RssParticipantGateBatches
 public import Qsag.RssSigningEnrollment
 public import Qsag.RssSigningExecution
 public import Qsag.RssSigningPublicCompletion
@@ -418,7 +422,10 @@ theorem rss_participant_network_gate_and_signing_execution_chain
     (cutLayer : UInt32) (cutTree : UInt64) (cutKp : Nat) (cutDigits : List Nat)
     (hCutCheck : Qsag.checkTargetSum profile.params.w profile.params.ell1 profile.params.targetSum cutDigits = true)
     (gateDepth : Nat) (gateTbl : Qsag.RssParticipant.GateChecks.GateTable gateDepth)
-    (hTblInvalid : ¬ Qsag.RssParticipant.GateChecks.gateTableValid gateTbl) :
+    (hTblInvalid : ¬ Qsag.RssParticipant.GateChecks.gateTableValid gateTbl)
+    (validGateTbl : Qsag.RssParticipant.GateChecks.GateTable gateDepth)
+    (hTblValid : Qsag.RssParticipant.GateChecks.gateTableValid validGateTbl)
+    (gsTuple : Qsag.Rss256ProductProof.ChallengeTuple gateDepth) :
     (((Qsag.RssParticipant.cshakeForRequest profile request inv₁ phase₁ customization inputShares localTape).2.map
         Qsag.reconstructRssBytes) =
       some (Qsag.reconstructRssBytes (Qsag.mpcCshake256SharedRss 32 customization inputShares oldTape))) ∧
@@ -435,6 +442,7 @@ theorem rss_participant_network_gate_and_signing_execution_chain
     (Qsag.RssParticipant.runPassiveReal simNodes simRounds
       ((Qsag.RssParticipant.passiveTapeEquiv simKState simRounds).invFun simSamples)).n0 =
       Qsag.RssParticipant.runPassiveSimulator simNodes.n0 simRounds simSamples ∧
+    (Qsag.RssParticipant.forwardTape simKState simRounds simSamples).length = simSamples.length ∧
     Qsag.RssSigning.completeSelectedLeaf profile.params profile.material.pkSeed cutLayer cutTree cutKp cutDigits
       (Qsag.RssSigning.selectedValues profile cutLayer cutTree cutKp cutDigits) =
       Qsag.mpcComputeWotsPk Qsag.cshake256Suite profile.params
@@ -443,7 +451,9 @@ theorem rss_participant_network_gate_and_signing_execution_chain
     ((Qsag.Rss256ProductProof.challengeTuples chalPool gateDepth).filter (fun gs => decide
       (Qsag.RssParticipant.GateChecks.weightEval gs (Qsag.RssParticipant.GateChecks.claimedCoeffs gateTbl) =
         Qsag.RssParticipant.GateChecks.weightEval gs (Qsag.RssParticipant.GateChecks.trueCoeffs gateTbl)))).length ≤
-      Qsag.RssParticipant.GateChecks.weightBadBound chalPool.length gateDepth :=
+      Qsag.RssParticipant.GateChecks.weightBadBound chalPool.length gateDepth ∧
+    Qsag.RssParticipant.GateChecks.weightEval gsTuple (Qsag.RssParticipant.GateChecks.claimedCoeffs validGateTbl) =
+      Qsag.RssParticipant.GateChecks.weightEval gsTuple (Qsag.RssParticipant.GateChecks.trueCoeffs validGateTbl) :=
   ⟨Qsag.RssParticipant.cshakeForRequest_refines_existing profile request inv₁ phase₁ customization
      inputShares localTape oldTape hWf,
    Qsag.RssParticipant.other_invocation_aborts profile request inv₁ inv₂ phase₁ phase₂ node msgEnv
@@ -454,8 +464,41 @@ theorem rss_participant_network_gate_and_signing_execution_chain
    Qsag.RssSigning.enrolledSigningProgram_refines profile request,
    Qsag.RssSigning.honestSigningExecution_wire_refines profile request partTape firstCut,
    Qsag.RssParticipant.passive_prefix_simulation simNodes simBind simKState simRounds simCursor simSamples hSimRep,
+   Qsag.RssParticipant.forwardTape_length simKState simRounds simSamples,
    Qsag.RssSigning.selectedLeaf_from_actual_cut profile cutLayer cutTree cutKp cutDigits hCutCheck,
-   Qsag.RssParticipant.GateChecks.invalid_weighted_claim_equal_le gateDepth gateTbl hTblInvalid chalPool hPoolNd⟩
+   Qsag.RssParticipant.GateChecks.invalid_weighted_claim_equal_le gateDepth gateTbl hTblInvalid chalPool hPoolNd,
+   Qsag.RssParticipant.GateChecks.validTable_weighted_claim_eq gateDepth validGateTbl hTblValid gsTuple⟩
+
+/-- **Grouped Gate Batch Extraction & Quorum-Switching Leaf Disjointness
+    (`gate_batches_and_quorum_switching_disjointness`)**:
+    Composes `RssParticipantGateBatches.group_bad_gate_weight_bound` and
+    `JortsBeltLatchAndQuorumSwitching.qsB_signature_quorum_switching_disjoint`! -/
+theorem gate_batches_and_quorum_switching_disjointness
+    {d₁ d₂ : Nat}
+    (batchDepth : Nat) (hashes : List Qsag.RssSigning.HashEvidence)
+    (gates : List Qsag.RssParticipant.GateChecks.IndexedGate)
+    (hExtract : Qsag.RssParticipant.GateChecks.extractHashes hashes = some gates)
+    (hCap : gates.length ≤ 2 ^ batchDepth)
+    (hBadGate : ∃ i, i < gates.length ∧
+      let g := (gates.map Qsag.RssParticipant.GateChecks.IndexedGate.records).getD i
+        Qsag.RssParticipant.GateChecks.zeroTriple
+      ¬ Qsag.RssParticipant.GateChecks.relation g.1 g.2.1 g.2.2)
+    (S : List Qsag.Tower128) (hS : S.Nodup)
+    (H : List UInt8 → Qsag.Digest256) (masterSeed : Qsag.Digest256)
+    (height : Nat) (s₀ s₁ s₂ : Qsag.QsBGlobalAllocator) (c₁ c₂ : UInt32) (ds₁ ds₂ : List (Fin 4))
+    (path₁ path₂ : List Qsag.Digest256)
+    (tape₁ : Fin ds₁.length → Qsag.ShamirPadPoly (Qsag.TowerElem 7) d₁ × Qsag.ShamirPadPoly (Qsag.TowerElem 7) d₁)
+    (tape₂ : Fin ds₂.length → Qsag.ShamirPadPoly (Qsag.TowerElem 7) d₂ × Qsag.ShamirPadPoly (Qsag.TowerElem 7) d₂)
+    (pts₁ ws₁ pts₂ ws₂ : List (Qsag.TowerElem 7)) (sig₁ sig₂ : Qsag.QuorumJortsSig)
+    (hAlloc₁ : Qsag.qsBAllocateAndSign H masterSeed height s₀ c₁ ds₁ path₁ tape₁ pts₁ ws₁ = (s₁, some sig₁))
+    (hAlloc₂ : Qsag.qsBAllocateAndSign H masterSeed height s₁ c₂ ds₂ path₂ tape₂ pts₂ ws₂ = (s₂, some sig₂)) :
+    ((Qsag.Rss256ProductProof.challengeTuples S batchDepth).filter
+      (Qsag.RssParticipant.GateChecks.groupWeightAccept batchDepth hashes)).length ≤
+      Qsag.RssParticipant.GateChecks.weightBadBound S.length batchDepth ∧
+    sig₁.leaf ≠ sig₂.leaf :=
+  ⟨Qsag.RssParticipant.GateChecks.group_bad_gate_weight_bound batchDepth hashes gates hExtract hCap hBadGate S hS,
+   Qsag.qsB_signature_quorum_switching_disjoint H masterSeed height s₀ s₁ s₂ c₁ c₂ ds₁ ds₂ path₁ path₂
+     tape₁ tape₂ pts₁ ws₁ pts₂ ws₂ sig₁ sig₂ hAlloc₁ hAlloc₂⟩
 
 #verify_constructive
   Qsag.Top.rssSharedRelease_preserves_traces
@@ -464,6 +507,7 @@ theorem rss_participant_network_gate_and_signing_execution_chain
   Qsag.Top.threshold_durable_feedback_and_resource_burn_chain
   Qsag.Top.posix_wal_commit_and_anchor_rollback_fence
   Qsag.Top.rss_participant_network_gate_and_signing_execution_chain
+  Qsag.Top.gate_batches_and_quorum_switching_disjointness
 
 end Qsag.Top
 end

@@ -23,6 +23,7 @@ public import Qsag.Math.Gf2Pow128
 public import Qsag.PrattPrimalityCert
 public import Qsag.PallasAndBlsMigration
 public import Qsag.ActiveMigrationZeroTest
+public import Qsag.HdToprfAndMigrationSecurity
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -119,7 +120,9 @@ theorem active_migration_ceremony_qrom_and_gf2pow128_chain
     (hOwn : Qsag.MigrationExecution.FullForkStrategiesPrecedeOwnCoins p)
     (rep : Fin 438) (others : Qsag.MigrationExecution.FullCeremonyCoins)
     (qHash : Nat) (hqHash : qHash + 1 ≤ 2 ^ 56)
-    (a b : BitVec 128) :
+    (a b : BitVec 128)
+    (pSrv : Fin 3) (srvView : Fin 3 → Qsag.Goldilocks)
+    (hViewZero : srvView pSrv = CommRingOps.zero) (blindInput : Qsag.Goldilocks) :
     let fk := Qsag.MigrationExecution.repetitionFork rep
     let lane := Qsag.MigrationExecution.repetitionLane rep
     (relB (Qsag.migrationRepetitionWitness batches rep) = false ∧
@@ -136,6 +139,10 @@ theorem active_migration_ceremony_qrom_and_gf2pow128_chain
            Qsag.MigrationExecution.productionBaseCoins r).length) ∧
     (8 * (qHash + 1) ^ 2 * 2 ^ 438 * 2 ^ 128 ≤ 3 ^ 438 ∧
      (qHash + 1) * 2 ^ 438 * 2 ^ 192 ≤ 3 ^ 438) ∧
+    (∃ c : Fin 3 → Qsag.Goldilocks,
+      (Qsag.sum3 c = blindInput ∧ Qsag.rss3ServerView pSrv c = srvView) ∧
+      ∀ c' : Fin 3 → Qsag.Goldilocks,
+        Qsag.sum3 c' = blindInput → Qsag.rss3ServerView pSrv c' = srvView → c' = c) ∧
     ((Qsag.Math.Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits = Qsag.MigrationExecution.rustGf128Mul a b ∧
      (Qsag.Math.Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits =
        Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pclmulqdqFourProduct256 a b)) := by
@@ -143,8 +150,9 @@ theorem active_migration_ceremony_qrom_and_gf2pow128_chain
     Qsag.MigrationExecution.migration_unconditional_circuit_to_sacrifice_ceremony_bound
       gates relB hCirc batches hBatch hFalse st numSuper hEval hOpen hCap r hr otherGammas p hOwn rep others
   have hQrom := Qsag.MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness qHash hqHash
+  have hToprfPriv := Qsag.rss3_client_blind_perfect_privacy pSrv srvView hViewZero blindInput
   obtain ⟨_, hRustMul, _, hClmul, _⟩ := Qsag.Math.gf2Pow128_five_way_mul_agreement a b
-  exact ⟨hCer, hQrom, ⟨hRustMul, hClmul⟩⟩
+  exact ⟨hCer, hQrom, hToprfPriv, ⟨hRustMul, hClmul⟩⟩
 
 #verify_constructive
   Qsag.Top.legacy_curve_primality_extraction_and_ideal_migration_chain
