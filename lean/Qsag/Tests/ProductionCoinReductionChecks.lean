@@ -1,7 +1,7 @@
 module
-import Qsag.ProductionCoinReduction
-import all Qsag.ProductionCoinReduction
-import all Qsag.RssSlhFullSecurity
+import Qsag.Protocol.Threshold.ProductionCoinReduction
+import all Qsag.Protocol.Threshold.ProductionCoinReduction
+import all Qsag.Protocol.Threshold.RssSlhFullSecurity
 
 open Qsag Qsag.ProductionCoinReduction
 

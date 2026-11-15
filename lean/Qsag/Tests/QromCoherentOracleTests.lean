@@ -1,17 +1,17 @@
 module
 /- Executed coherent superposition and database-measurement controls. -/
-public import Qsag.QromCoherentMerkleBridge
-public import Qsag.HemExtractedOpeningBridgeTests
-import all Qsag.QromCoherentMerkleBridge
-import all Qsag.QromFourierSupport
-import all Qsag.QromCoherentOracleRegister
-import all Qsag.QromFourierTable
-import all Qsag.QromExtractionBoundary
-import all Qsag.QromMeasuredQueryExperiment
-import all Qsag.HemExtractedOpeningBridgeTests
-import all Qsag.QromMeasuredMerkleExtractionTests
-import all Qsag.HemExtractedOpeningBridge
-import all Qsag.MultiRoundFsQrom
+public import Qsag.Protocol.Aggregation.QromCoherentMerkleBridge
+public import Qsag.Tests.HemExtractedOpeningBridgeTests
+import all Qsag.Protocol.Aggregation.QromCoherentMerkleBridge
+import all Qsag.Oracle.QromFourierSupport
+import all Qsag.Oracle.QromCoherentOracleRegister
+import all Qsag.Oracle.QromFourierTable
+import all Qsag.Oracle.QromExtractionBoundary
+import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Tests.HemExtractedOpeningBridgeTests
+import all Qsag.Tests.QromMeasuredMerkleExtractionTests
+import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
+import all Qsag.Oracle.MultiRoundFsQrom
 
 public section
 namespace Qsag

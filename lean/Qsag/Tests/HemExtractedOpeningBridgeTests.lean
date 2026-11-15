@@ -1,14 +1,14 @@
 module
 /- Executed, nonconstant decoder consuming openings and the actual Hem checker. -/
-public import Qsag.HemExtractedOpeningBridge
-public import Qsag.QromMeasuredMerkleExtractionTests
-import all Qsag.HemExtractedOpeningBridge
-import all Qsag.QromBatchMerkleExtraction
-import all Qsag.QromMeasuredMerkleExtractionTests
-import all Qsag.QromMeasuredMerkleExtraction
-import all Qsag.QromMeasuredQueryExperiment
-import all Qsag.HemVerifierAcceptance
-import all Qsag.MultiRoundFsQrom
+public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
+public import Qsag.Tests.QromMeasuredMerkleExtractionTests
+import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
+import all Qsag.Oracle.QromBatchMerkleExtraction
+import all Qsag.Tests.QromMeasuredMerkleExtractionTests
+import all Qsag.Oracle.QromMeasuredMerkleExtraction
+import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
+import all Qsag.Oracle.MultiRoundFsQrom
 
 public section
 namespace Qsag

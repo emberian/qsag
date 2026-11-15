@@ -15,13 +15,13 @@ At one-bit digests the general bound exceeds one; these instances exercise the e
 and the failure event, not the size of the bound.
 -/
 
-public import Qsag.QromClassicalQueryTransfer
-import all Qsag.QromClassicalQueryTransfer
-import all Qsag.QromMeasuredMerkleExtraction
-import all Qsag.QromMeasuredQueryExperiment
-import all Qsag.QromMerkleOnlineExtraction
-import all Qsag.MultiRoundFsQrom
-import all Qsag.ConcreteSecurityBudget
+public import Qsag.Oracle.QromClassicalQueryTransfer
+import all Qsag.Oracle.QromClassicalQueryTransfer
+import all Qsag.Oracle.QromMeasuredMerkleExtraction
+import all Qsag.Oracle.QromMeasuredQueryExperiment
+import all Qsag.Oracle.QromMerkleOnlineExtraction
+import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Oracle.ConcreteSecurityBudget
 
 public section
 namespace Qsag

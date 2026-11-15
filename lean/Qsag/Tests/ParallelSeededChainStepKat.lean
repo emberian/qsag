@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ParallelSeededChainStepKat — executed-Rust known answer for `parallel_chain_step`
+# Qsag.Tests.ParallelSeededChainStepKat — executed-Rust known answer for `parallel_chain_step`
 
 `ParallelSeededSpnPolyBasis.rustParallelChainStep` is a transcription. This module evaluates
 it in the Lean kernel with `spnCshake256Framed32` as the hash and compares against the bytes
@@ -20,13 +20,13 @@ The evaluation is staged (tweak, lanes, six blocks of eight rounds, output) so t
 kernel check stays small; the intermediate states are checked, not trusted.
 -/
 
-public import Qsag.ParallelSeededSpnPolyBasis
-import all Qsag.ParallelSeededSpnPolyBasis
-import all Qsag.Tower128PolyBasisIso
-import all Qsag.ParallelSeededSpnSecurity
-import all Qsag.ActiveMigrationZeroTest
-import all Qsag.SimulationSpine
-import all Qsag.Keccak
+public import Qsag.Oracle.ParallelSeededSpnPolyBasis
+import all Qsag.Oracle.ParallelSeededSpnPolyBasis
+import all Qsag.Math.Tower128PolyBasisIso
+import all Qsag.Oracle.ParallelSeededSpnSecurity
+import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import all Qsag.Exec.SimulationSpine
+import all Qsag.Oracle.Keccak
 
 public section
 namespace Qsag
