@@ -123,7 +123,7 @@ theorem mlDsa65_87_highBits_bounds (r : Fq204) :
   unfold fips204HighBits32
   have hr := r.isLt; unfold mldsaQ at hr ⊢
   have hDiv512 : ((r.val + 261887) / 512) / 1023 = (r.val + 261887) / 523776 := by
-    rw [Nat.div_div_eq_div_mul]; rfl
+    rw [Nat.div_div_eq_div_mul]
   rw [hDiv512]
   if hWrap : 8380417 - 1 - 261888 < r.val then
     rw [ite_true hWrap]
@@ -418,19 +418,18 @@ private def consPadEquiv {n m : Nat}
     (SimpleEquiv.trans (SimpleEquiv.prodCongr bijHead bijRest)
       (SimpleEquiv.symm (splitPadsEquiv m)))
 
-private theorem consPadEquiv_zero {n m : Nat}
+private theorem traceSim_cons
+    (sampleInBall : List UInt8 → Poly256) (A : PolyMat4) (t1Scaled : PolyVec4)
+    (out : SimAttemptOutcome) (outsRest : List SimAttemptOutcome) {n : Nat}
     (bijHead : SimpleEquiv SealedAttemptPads SealedAttemptPads)
-    (bijRest : SimpleEquiv (Fin n → SealedAttemptPads) (Fin m → SealedAttemptPads))
+    (bijRest : SimpleEquiv (Fin n → SealedAttemptPads) (Fin outsRest.length → SealedAttemptPads))
     (padFn : Fin (n + 1) → SealedAttemptPads) :
-    (consPadEquiv bijHead bijRest).toFun padFn ⟨0, Nat.zero_lt_succ m⟩ =
-      bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ n⟩) := rfl
-
-private theorem consPadEquiv_succ {n m : Nat}
-    (bijHead : SimpleEquiv SealedAttemptPads SealedAttemptPads)
-    (bijRest : SimpleEquiv (Fin n → SealedAttemptPads) (Fin m → SealedAttemptPads))
-    (padFn : Fin (n + 1) → SealedAttemptPads) :
-    (fun i : Fin m => (consPadEquiv bijHead bijRest).toFun padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) =
-      bijRest.toFun (fun i : Fin n => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := rfl
+    thresholdMlDsaTraceSimulator sampleInBall A t1Scaled (out :: outsRest)
+      ((consPadEquiv bijHead bijRest).toFun padFn) =
+    thresholdMlDsaAttemptSimulator sampleInBall A t1Scaled out
+      (bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ n⟩)) ::
+    thresholdMlDsaTraceSimulator sampleInBall A t1Scaled outsRest
+      (bijRest.toFun (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) := rfl
 
 private theorem finSum_sim_eq_of_equiv {α β V : Type} {M : Nat}
     (bij : SimpleEquiv α β) (realFn : α → V) (simFn : β → V)
@@ -463,7 +462,7 @@ theorem threshold_mldsa_abort_transcript_zk
     (hFail : ∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) :
     let t1Scaled := power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2)
     let outs := sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu steps
-    ∃ (hLen : outs.length = steps.length)
+    ∃ (_hLen : outs.length = steps.length)
       (padBij : SimpleEquiv (Fin steps.length → SealedAttemptPads)
                             (Fin outs.length → SealedAttemptPads)),
       (∀ padFn,
@@ -494,10 +493,12 @@ theorem threshold_mldsa_abort_transcript_zk
       have hHd := sealedAttempt_sim_eq_real chalHash sampleInBall A s1 s2 stp.y mu stp.attempt
         stp.keccakTraceBits stp.failTag hHeadFail (padFn ⟨0, Nat.zero_lt_succ _⟩)
       have hTl := hEqRest (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
-      simp only [sealedTraceOutcomes, List.map_cons, thresholdMlDsaTraceSimulator,
-        realSealedSignTrace, consPadEquiv_zero, consPadEquiv_succ]
-      rw [hHd]
-      exact congrArg (_ :: ·) hTl
+      exact (traceSim_cons sampleInBall A (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
+        (sealedAttemptPublicOutcome chalHash sampleInBall A s1 s2 stp.y mu stp.attempt)
+        (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu rest)
+        (sealedStepPadEquiv chalHash sampleInBall A s1 s2 stp.y mu
+          stp.keccakTraceBits stp.failTag hHeadFail)
+        bijRest padFn).trans (by dsimp only [realSealedSignTrace]; rw [hHd, hTl])
     exact ⟨hLenCons,
       consPadEquiv (sealedStepPadEquiv chalHash sampleInBall A s1 s2 stp.y mu
         stp.keccakTraceBits stp.failTag hHeadFail) bijRest,
@@ -516,11 +517,11 @@ def inOpenNormBox (B : Nat) (z : Int) : Bool :=
 theorem fips204_z_plateau_shift_invariant
     (gamma1 beta : Nat) (hLt : beta < gamma1) (cs1 zStar : Int)
     (hCs1 : -((beta : Int)) ≤ cs1 ∧ cs1 ≤ (beta : Int))
-    (hBox : inOpenNormBox (gamma1 - beta) zStar = true) :
+    (hOpen : inOpenNormBox (gamma1 - beta) zStar = true) :
     finSum (2 * gamma1 - 1) (fun idx =>
       if maskCoordAt gamma1 idx + cs1 = zStar then 1 else 0) = 1 := by
-  unfold inOpenNormBox at hBox
-  have hZ := of_decide_eq_true hBox
+  unfold inOpenNormBox at hOpen
+  have hZ := of_decide_eq_true hOpen
   have hSub : ((gamma1 - beta : Nat) : Int) = (gamma1 : Int) - (beta : Int) :=
     Int.ofNat_sub (Nat.le_of_lt hLt)
   rw [hSub] at hZ
@@ -554,7 +555,7 @@ theorem fips204_z_plateau_shift_invariant
 
 def unsealedEarlyW1AbortHit (cs1 : Int) (idx : Fin 9) : Bool :=
   let y := maskCoordAt 5 idx
-  decide ((y + 4) / 2 = 4) && !inOpenNormBox 3 (y + cs1)
+  decide ((y + 4) / 2 = 3) && !inOpenNormBox 3 (y + cs1)
 
 def irwinHall2HitCount (cs1 zTarget : Int) : Nat :=
   finSum 5 (fun i => finSum 5 (fun j =>
@@ -664,6 +665,14 @@ theorem rss3_repeated_sacrifice_pq256
     exact False.elim (hCheat hErr0)
   · exact hBad
 
+private theorem mkRssSignAttemptOutcome_nextState
+    (stBurned : RssMlDsaSignerState) (usedAttempt : Nat)
+    (cTilde : List UInt8) (w z u maskW maskZ maskLow : PolyVec4)
+    (w1 : Fin 4 → NatTree 8) (h : Fin 4 → HintTree 8) (accept : Bool) :
+    (match mkRssSignAttemptOutcome stBurned usedAttempt cTilde w z u maskW maskZ maskLow w1 h accept with
+     | .ok st' _ => st' | .err st' _ => st') = stBurned := by
+  cases accept <;> rfl
+
 def runRssSacrificedTrace
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
     (sampleInBall : List UInt8 → Poly256) :
@@ -701,7 +710,9 @@ theorem rss_distributed_trace_refines_sacrificedSignStep
       | true =>
         cases rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
         | false => dsimp only; omega
-        | true => unfold rssSignCore mkRssSignAttemptOutcome; dsimp only; split <;> omega
+        | true =>
+          unfold rssSignCore; dsimp only; rw [mkRssSignAttemptOutcome_nextState]
+          dsimp only; omega
     obtain ⟨hTailMono, hTailRef⟩ :=
       rss_distributed_trace_refines_sacrificedSignStep chalHash sampleInBall stNext rest
     refine ⟨Nat.le_trans hStepMono hTailMono, ?_⟩

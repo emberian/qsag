@@ -14,6 +14,7 @@ public import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag
 set_option autoImplicit false
+set_option exponentiation.threshold 512
 
 /-! ## 1. Exact `Pallas` (`Orchard`) & `BLS12-381` (`Beacon`) Parameters and Limb Equivalence -/
 
@@ -67,8 +68,6 @@ def bls381G1 : SwPoint :=
   some (0x17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb,
         0x08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1)
 
-private def pow2_380 : Nat := (2 ^ 190) * (2 ^ 190)
-private def pow2_381 : Nat := (2 ^ 190) * (2 ^ 191)
 private def pow2_384 : Nat := (2 ^ 192) * (2 ^ 192)
 private theorem pow2_384_eq : pow2_384 = 2 ^ 384 := by rw [pow2_384, ← Nat.pow_add]
 
@@ -77,11 +76,11 @@ theorem pallas_and_bls381_limbs_and_bit_bounds :
     limbs6LeToNat bls381PLimbsLe = p_bls381 ∧ limbs4LeNat bls381RLimbsLe = r_bls381 ∧
     2 ^ 254 < p_pallas ∧ p_pallas < 2 ^ 255 ∧ p_pallas % 2 = 1 ∧
     2 ^ 254 < q_pallas ∧ q_pallas < 2 ^ 255 ∧ q_pallas % 2 = 1 ∧
-    pow2_380 < p_bls381 ∧ p_bls381 < pow2_381 ∧ p_bls381 % 4 = 3 ∧
+    2 ^ 380 < p_bls381 ∧ p_bls381 < 2 ^ 381 ∧ p_bls381 % 4 = 3 ∧
     2 ^ 254 < r_bls381 ∧ r_bls381 < 2 ^ 255 ∧ r_bls381 % 2 = 1 := by
   unfold limbs4LeNat limbs6LeToNat pallasPLimbsLe pallasQLimbsLe bls381PLimbsLe bls381RLimbsLe
-    p_pallas q_pallas p_bls381 r_bls381 pow2_380 pow2_381
-  decide
+    p_pallas q_pallas p_bls381 r_bls381
+  decide +kernel
 
 /-! ## 2. Constructive Lucas–Pratt Primality Certificates (`0 native_decide`, `0 Classical.choice`) -/
 
@@ -159,15 +158,15 @@ private theorem minPrimeDivAux_spec :
   | 0, n, d, hn2, _, hle, hno => by
     dsimp only [minPrimeDivAux]; exact ⟨hn2, Nat.dvd_refl n, fun k hk2 hklt => hno k hk2 (by omega)⟩
   | fuel + 1, n, d, hn2, hd, hle, hno => by
-    dsimp only [minPrimeDivAux]
-    if hmod : n % d = 0 then rw [if_pos hmod]; exact ⟨hd, Nat.dvd_of_mod_eq_zero hmod, hno⟩
-    else
-      rw [if_neg hmod]
+    dsimp only [minPrimeDivAux]; split
+    · next hmod => exact ⟨hd, Nat.dvd_of_mod_eq_zero hmod, hno⟩
+    · next hmod =>
       refine minPrimeDivAux_spec fuel n (d + 1) hn2 (by omega) (by omega) (fun k hk2 hklt => ?_)
       exact if hkd : k = d then fun hdvd => hmod (Nat.mod_eq_zero_of_dvd (hkd ▸ hdvd)) else hno k hk2 (by omega)
 
 private theorem minPrimeDiv_isPrime {n : Nat} (hn : 2 ≤ n) : IsPrimeMod (minPrimeDiv n) ∧ minPrimeDiv n ∣ n := by
-  unfold minPrimeDiv; rw [if_neg (by omega : ¬ n < 2)]
+  have hge : ¬ n < 2 := by omega
+  unfold minPrimeDiv; simp only [hge, ↓reduceIte]
   obtain ⟨hq2, hqdvd, hqmin⟩ := minPrimeDivAux_spec n n 2 hn (by decide) (by omega) (by intros; omega)
   refine ⟨⟨hq2, fun d hd => ?_⟩, hqdvd⟩
   if hd1 : d = 1 then exact .inl hd1
@@ -204,10 +203,9 @@ private theorem minOrderAux_spec (g N : Nat) :
       1 ≤ d ∧ d ≤ cur + fuel ∧ (g ^ d) % N = 1 ∧ (∀ k : Nat, 1 ≤ k → k < d → (g ^ k) % N ≠ 1)
   | 0, cur, hcur, hEnd, hMin => by dsimp only [minOrderAux]; exact ⟨hcur, Nat.le_refl cur, Nat.add_zero cur ▸ hEnd, hMin⟩
   | fuel + 1, cur, hcur, hEnd, hMin => by
-    dsimp only [minOrderAux]
-    if h1 : (g ^ cur) % N = 1 then rw [if_pos h1]; exact ⟨hcur, by omega, h1, hMin⟩
-    else
-      rw [if_neg h1]
+    dsimp only [minOrderAux]; split
+    · next h1 => exact ⟨hcur, by omega, h1, hMin⟩
+    · next h1 =>
       have res := minOrderAux_spec g N fuel (cur + 1) (by omega)
         (by rwa [show (cur + 1) + fuel = cur + (fuel + 1) by omega])
         (fun k hk1 hklt => if hkc : k = cur then hkc ▸ h1 else hMin k hk1 (by omega))
@@ -226,16 +224,17 @@ private theorem order_dvd_of_pow_eq_one {g N d0 m : Nat} (hN : 2 ≤ N) (hd0 : 1
 
 private def posRangeP : Nat → List Nat | 0 => [] | n + 1 => (n + 1) :: posRangeP n
 
-private theorem mem_posRangeP_iff {x : Nat} : ∀ {n : Nat}, x ∈ posRangeP n ↔ 1 ≤ x ∧ x ≤ n
-  | 0 => ⟨fun h => nomatch h, fun ⟨_, _⟩ => by omega⟩
+private theorem mem_posRangeP_iff {x : Nat} : ∀ (n : Nat), x ∈ posRangeP n ↔ 1 ≤ x ∧ x ≤ n
+  | 0 => Iff.intro (fun h => nomatch h) (fun ⟨_, _⟩ => by omega)
   | n + 1 => by
-    simp only [posRangeP, List.mem_cons, mem_posRangeP_iff]
-    refine ⟨?_, fun ⟨h1, h2⟩ => if heq : x = n + 1 then .inl heq else .inr ⟨h1, by omega⟩⟩
-    rintro (rfl | ⟨h1, h2⟩); exact ⟨Nat.succ_pos n, Nat.le_refl _⟩; exact ⟨h1, by omega⟩
+    simp only [posRangeP, List.mem_cons, mem_posRangeP_iff n]
+    exact Iff.intro
+      (by rintro (rfl | ⟨h1, h2⟩); exact ⟨Nat.succ_pos n, Nat.le_refl _⟩; exact ⟨h1, by omega⟩)
+      (fun ⟨h1, h2⟩ => if heq : x = n + 1 then .inl heq else .inr ⟨h1, by omega⟩)
 
 private theorem posRangeP_nodup : ∀ n : Nat, (posRangeP n).Nodup
   | 0 => .nil
-  | n + 1 => .cons (fun _ hb heq => by have := (mem_posRangeP_iff.1 hb).2; omega) (posRangeP_nodup n)
+  | n + 1 => .cons (fun _ hb heq => by have := ((mem_posRangeP_iff n).1 hb).2; omega) (posRangeP_nodup n)
 
 private def eraseOne (v : Nat) : List Nat → List Nat
   | [] => [] | y :: ys => if y = v then ys else y :: eraseOne v ys
@@ -251,12 +250,11 @@ private theorem eraseOne_spec {v : Nat} : ∀ {ys : List Nat}, ys.Nodup → v �
     (eraseOne v ys).length + 1 = ys.length ∧ (eraseOne v ys).Nodup ∧ (∀ z : Nat, z ≠ v → z ∈ ys → z ∈ eraseOne v ys)
   | [], _, hmem => nomatch hmem
   | y :: ys, .cons hrel hnd, hmem => by
-    dsimp only [eraseOne]
-    if hy : y = v then
-      subst hy; rw [if_pos rfl]; refine ⟨rfl, hnd, fun z hzne hz => ?_⟩
+    dsimp only [eraseOne]; split
+    · next hy =>
+      subst hy; refine ⟨rfl, hnd, fun z hzne hz => ?_⟩
       cases hz with | head => exact False.elim (hzne rfl) | tail _ ht => exact ht
-    else
-      rw [if_neg hy]
+    · next hy =>
       have hvTail : v ∈ ys := by cases hmem with | head => exact False.elim (hy rfl) | tail _ ht => exact ht
       obtain ⟨hlen, hnd', hsub⟩ := eraseOne_spec hnd hvTail
       refine ⟨by simp only [List.length_cons]; omega,
@@ -282,7 +280,7 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
   have hN2 : 2 ≤ N := by omega
   obtain ⟨hd1, hdLe, hdPow, hdMin⟩ := minOrderAux_spec g N (N - 2) 1 (by decide)
     (by rwa [show 1 + (N - 2) = N - 1 by omega]) (by intros; omega)
-  set d0 := minOrderAux g N 1 (N - 2)
+  let d0 := minOrderAux g N 1 (N - 2)
   have hdDvdNm1 : d0 ∣ (N - 1) := order_dvd_of_pow_eq_one hN2 hd1 hdPow hdMin hFermat
   have hdEqNm1 : d0 = N - 1 := by
     if hEq : d0 = N - 1 then exact hEq
@@ -290,19 +288,19 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
       exfalso; obtain ⟨c, hc⟩ := hdDvdNm1
       have hc2 : 2 ≤ c := by
         if hc0 : c = 0 then rw [hc0, Nat.mul_zero] at hc; omega
-        else if hc1 : c = 1 then rw [hc1, Nat.mul_one] at hc; exact hEq hc.symm
+        else if hc1 : c = 1 then rw [hc1, Nat.mul_one] at hc; exact False.elim (hEq hc.symm)
         else omega
       obtain ⟨hpPrime, c', hc'⟩ := minPrimeDiv_isPrime hc2
-      set p := minPrimeDiv c
+      let p := minPrimeDiv c
       have hNm1Eq : N - 1 = p * (d0 * c') := by rw [hc, hc', ← Nat.mul_assoc d0 p c', Nat.mul_comm d0 p, Nat.mul_assoc]
       obtain ⟨qe, hqeMem, hqeEq⟩ := prime_mem_of_dvd_facProd hpPrime hPrimes (by rw [hProd, hNm1Eq]; exact Nat.dvd_mul_right p _)
       refine hOrder qe hqeMem ?_
       rw [hqeEq, hNm1Eq, Nat.mul_comm p (d0 * c'), Nat.mul_div_left (d0 * c') (by have := hpPrime.1; omega), Nat.pow_mul]
       exact pow_mod_eq_one_rep hN2 hdPow c'
-  rw [hdEqNm1] at hdMin
+  have hdMinNm1 : ∀ k : Nat, 1 ≤ k → k < N - 1 → (g ^ k) % N ≠ 1 := hdEqNm1 ▸ hdMin
   let L := posRangeP (N - 1); let f := fun k : Nat => (g ^ k) % N
   have hMapMem : ∀ x ∈ L.map f, x ∈ L := by
-    intro x hx; obtain ⟨k, hk, rfl⟩ := List.mem_map.1 hx; obtain ⟨hk1, hkHi⟩ := mem_posRangeP_iff.1 hk
+    intro x hx; obtain ⟨k, hk, rfl⟩ := List.mem_map.1 hx; obtain ⟨hk1, hkHi⟩ := (mem_posRangeP_iff (N - 1)).1 hk
     have hfkLt : (g ^ k) % N < N := Nat.mod_lt _ (by omega)
     have hfkPos : 1 ≤ (g ^ k) % N := by
       if hz : (g ^ k) % N = 0 then
@@ -311,15 +309,15 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
           exact Nat.dvd_mul_right_of_dvd (Nat.dvd_of_mod_eq_zero hz) _
         have := Nat.mod_eq_zero_of_dvd hdvdNm1; omega
       else omega
-    exact mem_posRangeP_iff.2 ⟨hfkPos, by omega⟩
+    exact (mem_posRangeP_iff (N - 1)).2 ⟨hfkPos, by dsimp only [f]; omega⟩
   have hInjStep : ∀ i j : Nat, 1 ≤ i → i < j → j ≤ N - 1 → f i = f j → False := by
     intro i j hi1 hij hjHi hEqF
     have hMulEq : ((g ^ j % N) * (g ^ (N - 1 - i) % N)) % N = ((g ^ i % N) * (g ^ (N - 1 - i) % N)) % N := by
       dsimp only [f] at hEqF; rw [hEqF]
     rw [← Nat.mul_mod, ← Nat.mul_mod, ← Nat.pow_add, ← Nat.pow_add,
         show i + (N - 1 - i) = N - 1 by omega, show j + (N - 1 - i) = (N - 1) + (j - i) by omega,
-        Nat.pow_add, Nat.mul_mod, hFermat, Nat.one_mul, Nat.mod_mod, hFermat] at hMulEq
-    exact hdMin (j - i) (by omega) (by omega) hMulEq
+        Nat.pow_add, Nat.mul_mod, hFermat, Nat.one_mul, Nat.mod_mod] at hMulEq
+    exact hdMinNm1 (j - i) (by omega) (by omega) hMulEq
   have hMapNodup : (L.map f).Nodup := by
     have aux : ∀ {xs : List Nat}, xs.Nodup → (∀ z ∈ xs, z ∈ L) → (xs.map f).Nodup := by
       intro xs hnd hxs; induction hnd with
@@ -327,8 +325,8 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
       | @cons a rest hrel _ ih =>
         refine .cons (fun b hb heq => ?_) (ih (fun z hz => hxs z (.tail _ hz)))
         obtain ⟨y, hy, rfl⟩ := List.mem_map.1 hb
-        obtain ⟨ha1, haHi⟩ := mem_posRangeP_iff.1 (hxs a (.head _))
-        obtain ⟨hy1, hyHi⟩ := mem_posRangeP_iff.1 (hxs y (.tail _ hy))
+        obtain ⟨ha1, haHi⟩ := (mem_posRangeP_iff (N - 1)).1 (hxs a (.head _))
+        obtain ⟨hy1, hyHi⟩ := (mem_posRangeP_iff (N - 1)).1 (hxs y (.tail _ hy))
         rcases Nat.lt_trichotomy a y with hlt | hEq | hgt
         · exact hInjStep a y ha1 hlt hyHi heq
         · exact hrel y hy hEq
@@ -341,8 +339,8 @@ theorem isPrime_of_lucas_pratt {N g : Nat} {facs : List (Nat × Nat)}
   else
     exfalso
     have hdPos := Nat.pos_of_dvd_of_pos hd (by omega); have hdLeN := Nat.le_of_dvd (by omega) hd
-    obtain ⟨k, hkMem, hfkEq⟩ := List.mem_map.1 (hSurj d (mem_posRangeP_iff.2 ⟨by omega, by omega⟩))
-    obtain ⟨hk1, hkHi⟩ := mem_posRangeP_iff.1 hkMem; dsimp only [f] at hfkEq
+    obtain ⟨k, hkMem, hfkEq⟩ := List.mem_map.1 (hSurj d ((mem_posRangeP_iff (N - 1)).2 ⟨by omega, by omega⟩))
+    obtain ⟨hk1, hkHi⟩ := (mem_posRangeP_iff (N - 1)).1 hkMem; dsimp only [f] at hfkEq
     have hDivK := Nat.div_add_mod (g ^ k) N; rw [hfkEq] at hDivK
     have hdGk : d ∣ g ^ k := by rw [← hDivK]; exact Nat.dvd_add (Nat.dvd_trans hd (Nat.dvd_mul_right N _)) (Nat.dvd_refl d)
     have hdGNm1 : d ∣ g ^ (N - 1) := by
@@ -378,10 +376,10 @@ theorem checkPrattDAG_sound : ∀ (certs : List PrattCert) (known : List Nat),
 
 /-- `#tooth` Carmichael `561` passes `2^560 ≡ 1 (mod 561)` yet `checkPrattStep` deterministically rejects it. -/
 theorem tooth_carmichael_561_passes_fermat_but_fails_pratt :
-    lucasPowMod 384 2 560 561 = 1 ∧
-    checkPrattStep [2, 3, 5, 7] ⟨561, 2, [(2, 4), (5, 1), (7, 1)]⟩ = false ∧ ¬ IsPrimeMod 561 := by
-  refine ⟨by decide +kernel, by decide +kernel, fun hPrime => ?_⟩
-  rcases hPrime.2 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
+    ∃ c : PrattCert, c.n = 561 ∧ lucasPowMod 384 c.g (c.n - 1) c.n = 1 ∧
+      checkPrattStep [2, 3, 5, 7] c = false ∧ ¬ IsPrimeMod c.n := by
+  refine ⟨⟨561, 2, [(2, 4), (5, 1), (7, 1)]⟩, rfl, by decide +kernel, by decide +kernel, fun hPrime => ?_⟩
+  dsimp only at hPrime; rcases hPrime.2 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
 
 #tooth_pair Qsag.checkPrattStep_sound vs Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
 
@@ -531,10 +529,10 @@ def bls381Torsion3Point : SwPoint := some (0, 2)
 
 /-- `#tooth` `BLS12-381` 3-torsion point `(0, 2)` lies on `y^2 = x^3 + 4` yet fails `[r_bls381]P = O`. -/
 theorem tooth_bls381_torsion3_onCurve_but_off_subgroup :
-    bls381Curve.onCurve bls381Torsion3Point = true ∧
-    isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj bls381Torsion3Point) 3) = true ∧
-    isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj bls381Torsion3Point) r_bls381) = false :=
-  ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+    ∃ P : SwPoint, bls381Curve.onCurve P = true ∧
+      isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj P) 3) = true ∧
+      isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj P) r_bls381) = false :=
+  ⟨bls381Torsion3Point, by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 #tooth_pair Qsag.bls381G1_onCurve_and_prime_subgroup_order vs Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
 
@@ -585,20 +583,27 @@ def zkbooOpenedPair (shares : Fin 3 → Nat) (e : Fin 3) : Nat × Nat :=
   (shares e, shares ⟨(e.val + 1) % 3, Nat.mod_lt _ (by decide)⟩)
 
 def extractThreeShares (e1 e2 : Fin 3) (p1 p2 : Nat × Nat) : Nat × Nat × Nat :=
-  if e1.val = 0 then (if e2.val = 1 then (p1.1, p1.2, p2.2) else (p1.1, p1.2, p2.1))
-  else if e1.val = 1 then (if e2.val = 0 then (p2.1, p1.1, p1.2) else (p2.2, p1.1, p1.2))
-  else (if e2.val = 0 then (p1.2, p2.2, p1.1) else (p1.2, p2.1, p1.1))
+  match e1.val, e2.val with
+  | 0, 1 => (p1.1, p1.2, p2.2) | 0, _ => (p1.1, p1.2, p2.1)
+  | 1, 0 => (p2.1, p1.1, p1.2) | 1, _ => (p2.2, p1.1, p1.2)
+  | _, 0 => (p1.2, p2.2, p1.1) | _, _ => (p1.2, p2.1, p1.1)
 
 theorem extractThreeShares_complete (shares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2) :
     extractThreeShares e1 e2 (zkbooOpenedPair shares e1) (zkbooOpenedPair shares e2) =
       (shares 0, shares 1, shares 2) := by
   rcases e1 with ⟨v1, hv1⟩; rcases e2 with ⟨v2, hv2⟩
   have hNeVal : v1 ≠ v2 := fun h => hNe (Fin.ext h)
-  unfold extractThreeShares zkbooOpenedPair
+  have mk3 : ∀ {i0 i1 i2 : Fin 3}, i0.val = 0 → i1.val = 1 → i2.val = 2 →
+      (shares i0, shares i1, shares i2) = (shares 0, shares 1, shares 2) := fun h0 h1 h2 =>
+    Prod.ext (congrArg shares (Fin.ext h0))
+      (Prod.ext (congrArg shares (Fin.ext h1)) (congrArg shares (Fin.ext h2)))
+  dsimp only [extractThreeShares, zkbooOpenedPair]
   match v1, hv1, v2, hv2 with
-  | 0, _, 0, _ => exact False.elim (hNeVal rfl) | 0, _, 1, _ => rfl | 0, _, 2, _ => rfl
-  | 1, _, 0, _ => rfl | 1, _, 1, _ => exact False.elim (hNeVal rfl) | 1, _, 2, _ => rfl
-  | 2, _, 0, _ => rfl | 2, _, 1, _ => rfl | 2, _, 2, _ => exact False.elim (hNeVal rfl)
+  | 0, _, 0, _ => exact False.elim (hNeVal rfl)
+  | 0, _, 1, _ => exact mk3 rfl rfl rfl | 0, _, 2, _ => exact mk3 rfl rfl rfl
+  | 1, _, 0, _ => exact mk3 rfl rfl rfl | 1, _, 1, _ => exact False.elim (hNeVal rfl)
+  | 1, _, 2, _ => exact mk3 rfl rfl rfl | 2, _, 0, _ => exact mk3 rfl rfl rfl
+  | 2, _, 1, _ => exact mk3 rfl rfl rfl | 2, _, 2, _ => exact False.elim (hNeVal rfl)
   | _ + 3, hv, _, _ => omega | 0, _, _ + 3, hv => omega | 1, _, _ + 3, hv => omega | 2, _, _ + 3, hv => omega
 
 def ZkBooDlogCommitted {C : SwCurve} {G : SwPoint} {ord : Nat}
@@ -649,7 +654,8 @@ theorem primeSubgroup_smul_add_mod {C : SwCurve} {G : SwPoint} {ord : Nat}
   else
     have hMod : (ask + alpha) % ord = ask + alpha - ord := by
       rw [Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt (by omega)]
-    rw [hMod, show ask + alpha = ord + (ask + alpha - ord) by omega, grp.smul_add, grp.smul_ord, grp.add_none_left]
+    rw [hMod]
+    conv => rhs; rw [show ask + alpha = ord + (ask + alpha - ord) by omega, grp.smul_add, grp.smul_ord, grp.add_none_left]
 
 theorem orchard_redpallas_rerandomized_extraction_sound {C : SwCurve} {G rk : SwPoint}
     (grp : PrimeSubgroup C G q_pallas) (askShares alphaShares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2)
