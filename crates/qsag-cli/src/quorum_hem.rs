@@ -38,7 +38,7 @@
 
 use std::path::Path;
 
-use qsag_accel::keccak::cshake256_framed_32;
+use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
 use qsag_agg::{
     AggSigProfile, ValidatorPublicKey, ValidatorSignature, verify_individual_signature,
 };
@@ -63,8 +63,12 @@ const HEM_META_FORMAT: &str = "qsag-hem-quorum-meta-v2";
 const SIG_FORMAT: &str = "qsag-quorum-signature-v1";
 const MAX_VAULT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+const HEM_ENVELOPE_FORMAT: &str = "cshake256-iterated-v1";
+const HEM_SHARE_SEAL_MAGIC: &[u8; 24] = b"QSAG.HEM.SHARE.SEAL.V1\0\0";
+const HEM_SHARE_SEAL_HEADER_BYTES: usize = 24 + 8 + 8 + 32 + 32;
+
 pub const HEM_REFRESH_HELP: &str = "\
-qsag quorum refresh --vault-dir <dir> [--deterministic] [--json]
+qsag quorum refresh --vault-dir <dir> [--passphrase-env <VAR> | --passphrase-file <PATH>] [--deterministic] [--json]
 
 Execute proactive share refresh (Π_refresh) across all (t, n) custodians in --vault-dir,
 advancing quorum_epoch and overwriting custodian share files in place while preserving
@@ -73,11 +77,13 @@ the exact 65-byte validator public key and monotone leaf high-water mark.
 ";
 
 pub const HEM_RESHARE_HELP: &str = "\
-qsag quorum reshare --vault-dir <old_dir> [--signers <i,j,..>] --new-threshold <t'> --new-parties <n'> --out-vault-dir <new_dir> [--public-out <path>] [--deterministic] [--json]
+qsag quorum reshare --vault-dir <old_dir> [--signers <i,j,..>] --new-threshold <t'> --new-parties <n'> --out-vault-dir <new_dir> [--public-out <path>] [--passphrase-env <VAR> | --passphrase-file <PATH>] [--new-passphrase-env <VAR> | --new-passphrase-file <PATH>] [--deterministic] [--json]
 
 Execute dynamic (t, n) -> (t', n') quorum-switching (Π_reshare) using >= t custodians from
 --vault-dir, writing the new (t', n') custodian vault into --out-vault-dir WITHOUT changing
 the 65-byte validator public key, and permanently invalidating/wiping the retired vault.
+When --vault-dir is passphrase-sealed and --new-passphrase-* is omitted, the new vault is
+re-sealed under the source passphrase with a fresh KDF salt.
 --deterministic fixes only the session ID; private ceremony entropy remains fresh.
 ";
 
@@ -389,6 +395,222 @@ fn retired() -> CliError {
 }
 
 // ---------------------------------------------------------------------------------------
+// Passphrase Envelope (cshake256-iterated-v1)
+// ---------------------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct HemEnvelopeMeta {
+    salt: [u8; 32],
+    nonce: [u8; 32],
+    tag: [u8; 32],
+    encrypted_latch_seed: [u8; 32],
+}
+
+struct HemEnvelopeKeys {
+    salt: [u8; 32],
+    enc: Secret32,
+    mac: Secret32,
+}
+
+impl HemEnvelopeKeys {
+    fn derive_fresh(pass: &[u8]) -> Result<Self, CliError> {
+        if pass.is_empty() {
+            return Err(CliError::input("empty passphrase"));
+        }
+        let salt = os_random_32()?;
+        let (enc, mac) = derive_hem_envelope_keys(pass, &salt);
+        Ok(Self { salt, enc, mac })
+    }
+
+    fn from_salt(pass: &[u8], salt: [u8; 32]) -> Result<Self, CliError> {
+        if pass.is_empty() {
+            return Err(CliError::input("empty passphrase"));
+        }
+        let (enc, mac) = derive_hem_envelope_keys(pass, &salt);
+        Ok(Self { salt, enc, mac })
+    }
+}
+
+fn derive_hem_envelope_keys(pass: &[u8], salt: &[u8; 32]) -> (Secret32, Secret32) {
+    let mut state = Secret32([0u8; 32]);
+    cshake256_framed_xof(
+        b"QSAG.ENVELOPE.KDF.V1",
+        &[pass, salt, HEM_SCHEME_NAME.as_bytes()],
+        &mut state.0,
+    );
+    for i in 0..crate::envelope::KDF_ROUNDS {
+        let mut next = Secret32([0u8; 32]);
+        cshake256_framed_xof(
+            b"QSAG.ENVELOPE.ITER.V1",
+            &[&state.0, salt, &i.to_le_bytes()],
+            &mut next.0,
+        );
+        state = next;
+    }
+    let mut enc = Secret32([0u8; 32]);
+    cshake256_framed_xof(
+        b"QSAG.ENVELOPE.ENC.V1",
+        &[&state.0, salt, HEM_SCHEME_NAME.as_bytes()],
+        &mut enc.0,
+    );
+    let mut mac = Secret32([0u8; 32]);
+    cshake256_framed_xof(
+        b"QSAG.ENVELOPE.MAC.V1",
+        &[&state.0, salt, HEM_SCHEME_NAME.as_bytes()],
+        &mut mac.0,
+    );
+    (enc, mac)
+}
+
+fn crypt_latch_seed(
+    buf: &mut [u8; 32],
+    enc: &Secret32,
+    salt: &[u8; 32],
+    nonce: &[u8; 32],
+    generation: u64,
+) {
+    let mut stream = Secret32([0u8; 32]);
+    cshake256_framed_xof(
+        b"QSAG.HEM.LATCH.STREAM.V1",
+        &[
+            &enc.0,
+            salt,
+            nonce,
+            HEM_SCHEME_NAME.as_bytes(),
+            &generation.to_le_bytes(),
+        ],
+        &mut stream.0,
+    );
+    for (a, b) in buf.iter_mut().zip(stream.0.iter()) {
+        *a ^= *b;
+    }
+}
+
+fn crypt_share_payload(
+    bytes: &mut [u8],
+    enc: &Secret32,
+    salt: &[u8; 32],
+    nonce: &[u8; 32],
+    generation: u64,
+    party: usize,
+) {
+    let party_le = (party as u64).to_le_bytes();
+    let gen_le = generation.to_le_bytes();
+    for (blk_idx, block) in bytes.chunks_mut(32).enumerate() {
+        let mut stream = Secret32([0u8; 32]);
+        cshake256_framed_xof(
+            b"QSAG.HEM.SHARE.STREAM.V1",
+            &[
+                &enc.0,
+                salt,
+                nonce,
+                HEM_SCHEME_NAME.as_bytes(),
+                &gen_le,
+                &party_le,
+                &(blk_idx as u64).to_le_bytes(),
+            ],
+            &mut stream.0,
+        );
+        for (a, b) in block.iter_mut().zip(stream.0.iter()) {
+            *a ^= *b;
+        }
+    }
+}
+
+fn compute_share_seal_tag(
+    mac: &Secret32,
+    pk: &[u8; HEM_JORTS_PK_BYTES],
+    salt: &[u8; 32],
+    nonce: &[u8; 32],
+    generation: u64,
+    party: usize,
+    ciphertext: &[u8],
+) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.HEM.SHARE.TAG.V1",
+        &[
+            &mac.0,
+            HEM_SHARE_SEAL_MAGIC,
+            pk,
+            salt,
+            nonce,
+            &generation.to_le_bytes(),
+            &(party as u64).to_le_bytes(),
+            ciphertext,
+        ],
+    )
+}
+
+fn seal_share_bytes(
+    plain: &[u8],
+    keys: &HemEnvelopeKeys,
+    pk: &[u8; HEM_JORTS_PK_BYTES],
+    nonce: &[u8; 32],
+    generation: u64,
+    party: usize,
+) -> ZeroizingBuf {
+    let mut ct = ZeroizingBuf(plain.to_vec());
+    crypt_share_payload(&mut ct.0, &keys.enc, &keys.salt, nonce, generation, party);
+    let tag = compute_share_seal_tag(&keys.mac, pk, &keys.salt, nonce, generation, party, &ct.0);
+    let mut out = Vec::with_capacity(HEM_SHARE_SEAL_HEADER_BYTES + ct.0.len());
+    out.extend_from_slice(HEM_SHARE_SEAL_MAGIC);
+    out.extend_from_slice(&(party as u64).to_le_bytes());
+    out.extend_from_slice(&generation.to_le_bytes());
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(&ct.0);
+    ZeroizingBuf(out)
+}
+
+fn open_sealed_share_bytes(
+    sealed: &[u8],
+    keys: &HemEnvelopeKeys,
+    pk: &[u8; HEM_JORTS_PK_BYTES],
+    expected_nonce: &[u8; 32],
+    generation: u64,
+    party: usize,
+) -> Result<ZeroizingBuf, CliError> {
+    if sealed.len() <= HEM_SHARE_SEAL_HEADER_BYTES || &sealed[..24] != HEM_SHARE_SEAL_MAGIC {
+        return Err(CliError::state("CorruptSealedHemShareHeader"));
+    }
+    let rec_party = u64::from_le_bytes(sealed[24..32].try_into().unwrap());
+    let rec_gen = u64::from_le_bytes(sealed[32..40].try_into().unwrap());
+    if rec_party != party as u64 || rec_gen != generation {
+        return Err(CliError::state("HemSealedShareBindingMismatch"));
+    }
+    let rec_nonce: &[u8; 32] = sealed[40..72].try_into().unwrap();
+    if !qsag_accel::ct::ct_eq_bytes(rec_nonce, expected_nonce) {
+        return Err(CliError::state("HemSealedShareNonceMismatch"));
+    }
+    let rec_tag: &[u8; 32] = sealed[72..104].try_into().unwrap();
+    let ct = &sealed[104..];
+    let expected_tag = compute_share_seal_tag(
+        &keys.mac,
+        pk,
+        &keys.salt,
+        expected_nonce,
+        generation,
+        party,
+        ct,
+    );
+    if !qsag_accel::ct::ct_eq_bytes(rec_tag, &expected_tag) {
+        return Err(CliError::input(
+            "wrong passphrase or damaged sealed Hem quorum share",
+        ));
+    }
+    let mut plain = ZeroizingBuf(ct.to_vec());
+    crypt_share_payload(
+        &mut plain.0,
+        &keys.enc,
+        &keys.salt,
+        expected_nonce,
+        generation,
+        party,
+    );
+    Ok(plain)
+}
+
+// ---------------------------------------------------------------------------------------
 // Meta
 // ---------------------------------------------------------------------------------------
 
@@ -414,6 +636,7 @@ struct Meta {
     share_digests: Vec<[u8; 32]>,
     lock_id: (u64, u64),
     pending: Option<PendingReshare>,
+    envelope: Option<HemEnvelopeMeta>,
 }
 
 fn share_digest(party: usize, bytes: &[u8]) -> [u8; 32] {
@@ -445,10 +668,53 @@ impl Meta {
             share_digests: Vec::new(),
             lock_id,
             pending: None,
+            envelope: None,
         }
     }
 
-    /// Digest over every field, so an edited or damaged meta is refused.
+    fn latch_seed_on_disk(&self) -> &[u8; 32] {
+        match &self.envelope {
+            Some(env) => &env.encrypted_latch_seed,
+            None => &self.latch_seed.0,
+        }
+    }
+
+    fn compute_envelope_tag(
+        &self,
+        salt: &[u8; 32],
+        nonce: &[u8; 32],
+        encrypted_latch_seed: &[u8; 32],
+        mac: &Secret32,
+    ) -> [u8; 32] {
+        let mut flat_shares = Vec::with_capacity(self.share_digests.len() * 32);
+        for d in &self.share_digests {
+            flat_shares.extend_from_slice(d);
+        }
+        cshake256_framed_32(
+            b"QSAG.HEM.META.TAG.V1",
+            &[
+                &mac.0,
+                HEM_ENVELOPE_FORMAT.as_bytes(),
+                HEM_SCHEME_NAME.as_bytes(),
+                &(self.t as u64).to_le_bytes(),
+                &(self.n as u64).to_le_bytes(),
+                &self.quorum_epoch.to_le_bytes(),
+                &(self.high_water_leaf as u64).to_le_bytes(),
+                &(self.active_leaves as u64).to_le_bytes(),
+                &self.pk,
+                &self.directory_digest,
+                &self.generation.to_le_bytes(),
+                salt,
+                nonce,
+                encrypted_latch_seed,
+                &flat_shares,
+            ],
+        )
+    }
+
+    /// Digest over every on-disk field, so an edited or damaged meta is refused.
+    /// For unsealed vaults (`self.envelope.is_none()`), the frame sequence is 100%
+    /// byte-identical to unsealed v2 vaults.
     fn digest(&self) -> [u8; 32] {
         let mut frames: Vec<Vec<u8>> = vec![
             (self.t as u64).to_le_bytes().to_vec(),
@@ -459,7 +725,7 @@ impl Meta {
             vec![u8::from(self.invalidated)],
             self.pk.to_vec(),
             self.directory_digest.to_vec(),
-            self.latch_seed.0.to_vec(),
+            self.latch_seed_on_disk().to_vec(),
             self.generation.to_le_bytes().to_vec(),
             self.lock_id.0.to_le_bytes().to_vec(),
             self.lock_id.1.to_le_bytes().to_vec(),
@@ -473,6 +739,12 @@ impl Meta {
                 frames.push(pending.target.as_bytes().to_vec());
                 frames.push(pending.quorum_epoch.to_le_bytes().to_vec());
             }
+        }
+        if let Some(env) = &self.envelope {
+            frames.push(HEM_ENVELOPE_FORMAT.as_bytes().to_vec());
+            frames.push(env.salt.to_vec());
+            frames.push(env.nonce.to_vec());
+            frames.push(env.tag.to_vec());
         }
         let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
         let digest = cshake256_framed_32(b"QSAG.CLI.HEM.META_DIGEST.V2", &refs);
@@ -494,7 +766,7 @@ impl Meta {
             ("invalidated", Json::Bool(self.invalidated)),
             ("validator_public_key", Json::hex(&self.pk)),
             ("directory_digest", Json::hex(&self.directory_digest)),
-            ("latch_seed", Json::hex(&self.latch_seed.0)),
+            ("latch_seed", Json::hex(self.latch_seed_on_disk())),
             ("generation", Json::num(self.generation)),
             (
                 "share_digests",
@@ -503,6 +775,12 @@ impl Meta {
             ("vault_device", Json::num(self.lock_id.0)),
             ("vault_inode", Json::num(self.lock_id.1)),
         ];
+        if let Some(env) = &self.envelope {
+            members.push(("envelope", Json::str(HEM_ENVELOPE_FORMAT)));
+            members.push(("envelope_salt", Json::hex(&env.salt)));
+            members.push(("envelope_nonce", Json::hex(&env.nonce)));
+            members.push(("envelope_tag", Json::hex(&env.tag)));
+        }
         if let Some(pending) = &self.pending {
             members.push(("pending_reshare_target", Json::str(pending.target.clone())));
             members.push(("pending_reshare_epoch", Json::num(pending.quorum_epoch)));
@@ -532,6 +810,32 @@ impl Meta {
                 quorum_epoch: json.field_u64("pending_reshare_epoch")?,
             }),
         };
+        let latch_disk: [u8; 32] = from_hex_exact(json.field_str("latch_seed")?, "latch_seed")?;
+        let has_any_env = json.get("envelope").is_some()
+            || json.get("envelope_salt").is_some()
+            || json.get("envelope_nonce").is_some()
+            || json.get("envelope_tag").is_some();
+        let envelope = if has_any_env {
+            if json.get("envelope").is_none() {
+                return Err(CliError::input("damaged sealed Hem quorum envelope header"));
+            }
+            if json.field_str("envelope")? != HEM_ENVELOPE_FORMAT {
+                return Err(CliError::input("unsupported sealed Hem quorum envelope"));
+            }
+            Some(HemEnvelopeMeta {
+                salt: from_hex_exact(json.field_str("envelope_salt")?, "envelope_salt")?,
+                nonce: from_hex_exact(json.field_str("envelope_nonce")?, "envelope_nonce")?,
+                tag: from_hex_exact(json.field_str("envelope_tag")?, "envelope_tag")?,
+                encrypted_latch_seed: latch_disk,
+            })
+        } else {
+            None
+        };
+        let latch_seed = if envelope.is_some() {
+            Secret32([0u8; 32])
+        } else {
+            Secret32(latch_disk)
+        };
         let meta = Self {
             t: json.field_u64("threshold")? as usize,
             n: json.field_u64("parties")? as usize,
@@ -550,7 +854,7 @@ impl Meta {
                 json.field_str("directory_digest")?,
                 "directory_digest",
             )?,
-            latch_seed: Secret32(from_hex_exact(json.field_str("latch_seed")?, "latch_seed")?),
+            latch_seed,
             generation: json.field_u64("generation")?,
             share_digests,
             lock_id: (
@@ -558,6 +862,7 @@ impl Meta {
                 json.field_u64("vault_inode")?,
             ),
             pending,
+            envelope,
         };
         let recorded: [u8; 32] = from_hex_exact(json.field_str("meta_digest")?, "meta_digest")?;
         if !qsag_accel::ct::ct_eq_bytes(&recorded, &meta.digest()) {
@@ -567,6 +872,45 @@ impl Meta {
             return Err(corrupt());
         }
         Ok(meta)
+    }
+
+    fn unlock_with_passphrase(
+        &mut self,
+        pass: Option<&[u8]>,
+    ) -> Result<Option<HemEnvelopeKeys>, CliError> {
+        match (&self.envelope, pass) {
+            (None, None) => Ok(None),
+            (None, Some(_)) => Err(CliError::input(
+                "passphrase supplied for unencrypted Hem quorum vault",
+            )),
+            (Some(_), None) => Err(CliError::usage(
+                "sealed Hem quorum vault requires --passphrase-env or --passphrase-file",
+            )),
+            (Some(env), Some(pass_bytes)) => {
+                let keys = HemEnvelopeKeys::from_salt(pass_bytes, env.salt)?;
+                let expected_tag = self.compute_envelope_tag(
+                    &env.salt,
+                    &env.nonce,
+                    &env.encrypted_latch_seed,
+                    &keys.mac,
+                );
+                if !qsag_accel::ct::ct_eq_bytes(&expected_tag, &env.tag) {
+                    return Err(CliError::input(
+                        "wrong passphrase or damaged sealed Hem quorum vault",
+                    ));
+                }
+                let mut seed = Secret32(env.encrypted_latch_seed);
+                crypt_latch_seed(
+                    &mut seed.0,
+                    &keys.enc,
+                    &env.salt,
+                    &env.nonce,
+                    self.generation,
+                );
+                self.latch_seed = seed;
+                Ok(Some(keys))
+            }
+        }
     }
 
     fn read(vault_dir: &str) -> Result<Self, CliError> {
@@ -655,6 +999,7 @@ fn commit(
     vault_dir: &str,
     quorum: &HemDynamicShamirQuorum,
     meta: &mut Meta,
+    keys: Option<&HemEnvelopeKeys>,
     fresh: bool,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
@@ -662,11 +1007,22 @@ fn commit(
         .generation
         .checked_add(1)
         .ok_or_else(|| CliError::state("HemQuorumGenerationExhausted"))?;
+    let seal_nonce = if keys.is_some() {
+        Some(os_random_32()?)
+    } else {
+        None
+    };
     let mut digests = Vec::with_capacity(quorum.custodian_shares().len());
     for (party, share) in quorum.custodian_shares().iter().enumerate() {
         let raw = ZeroizingBuf(share.to_vault_bytes().map_err(map_quorum_err)?);
-        write_new(&share_path(vault_dir, party, generation), &raw.0, true)?;
-        digests.push(share_digest(party, &raw.0));
+        let on_disk = match (keys, &seal_nonce) {
+            (Some(k), Some(nonce)) => {
+                seal_share_bytes(&raw.0, k, &meta.pk, nonce, generation, party)
+            }
+            _ => raw,
+        };
+        write_new(&share_path(vault_dir, party, generation), &on_disk.0, true)?;
+        digests.push(share_digest(party, &on_disk.0));
         hook(Step::ShareStaged)?;
     }
     let (t, n) = quorum.threshold_and_size();
@@ -676,6 +1032,20 @@ fn commit(
     meta.high_water_leaf = quorum.high_water_leaf();
     meta.generation = generation;
     meta.share_digests = digests;
+    meta.envelope = match (keys, seal_nonce) {
+        (Some(k), Some(nonce)) => {
+            let mut enc_latch = meta.latch_seed.0;
+            crypt_latch_seed(&mut enc_latch, &k.enc, &k.salt, &nonce, generation);
+            let tag = meta.compute_envelope_tag(&k.salt, &nonce, &enc_latch, &k.mac);
+            Some(HemEnvelopeMeta {
+                salt: k.salt,
+                nonce,
+                tag,
+                encrypted_latch_seed: enc_latch,
+            })
+        }
+        _ => None,
+    };
     meta.write(vault_dir, fresh)?;
     hook(Step::MetaCommitted)?;
     remove_stale(vault_dir, Keep::Generation(generation))?;
@@ -686,6 +1056,7 @@ fn commit(
 fn retire(vault_dir: &str, meta: &mut Meta, hook: Hook<'_>) -> Result<(), CliError> {
     meta.invalidated = true;
     meta.pending = None;
+    meta.envelope = None;
     meta.latch_seed = Secret32([0u8; 32]);
     meta.share_digests = Vec::new();
     meta.generation = meta
@@ -707,6 +1078,7 @@ struct OpenVault {
     _lock: Vault,
     quorum: HemDynamicShamirQuorum,
     meta: Meta,
+    envelope_keys: Option<HemEnvelopeKeys>,
 }
 
 fn read_directory(
@@ -722,11 +1094,6 @@ fn read_directory(
 
 /// Load a vault in the old format: `custodian-<p>.share` files replaced one by one, then
 /// the meta.
-///
-/// An old writer interrupted while recording a signature left some shares one leaf ahead of
-/// the others and of the meta. Those vaults are brought forward to the highest mark any file
-/// recorded, which only burns leaves. One interrupted during a refresh has shares of two
-/// different sharings; that cannot be repaired and is refused as before.
 fn load_legacy(
     vault_dir: &str,
     json: &Json,
@@ -783,7 +1150,11 @@ fn load_legacy(
     Ok((quorum, latch_seed))
 }
 
-fn load_generation(vault_dir: &str, meta: &Meta) -> Result<HemDynamicShamirQuorum, CliError> {
+fn load_generation(
+    vault_dir: &str,
+    meta: &Meta,
+    keys: Option<&HemEnvelopeKeys>,
+) -> Result<HemDynamicShamirQuorum, CliError> {
     let public_dir = read_directory(vault_dir, &meta.directory_digest)?;
     if public_dir.pk.to_bytes() != meta.pk {
         return Err(CliError::state("HemQuorumPublicKeyMismatch"));
@@ -797,7 +1168,14 @@ fn load_generation(vault_dir: &str, meta: &Meta) -> Result<HemDynamicShamirQuoru
         if !qsag_accel::ct::ct_eq_bytes(&share_digest(p, &raw.0), expected) {
             return Err(CliError::state("HemQuorumShareDigestMismatch"));
         }
-        shares.push(HemShamirCustodianShare::from_vault_bytes(&raw.0).map_err(map_quorum_err)?);
+        let plain = match (&meta.envelope, keys) {
+            (Some(env), Some(k)) => {
+                open_sealed_share_bytes(&raw.0, k, &meta.pk, &env.nonce, meta.generation, p)?
+            }
+            (None, None) => raw,
+            _ => return Err(CliError::state("HemQuorumEnvelopeStateMismatch")),
+        };
+        shares.push(HemShamirCustodianShare::from_vault_bytes(&plain.0).map_err(map_quorum_err)?);
     }
     let quorum =
         HemDynamicShamirQuorum::from_persisted_shares(public_dir, shares, meta.latch_seed.0)
@@ -813,11 +1191,6 @@ fn load_generation(vault_dir: &str, meta: &Meta) -> Result<HemDynamicShamirQuoru
 }
 
 /// Settle a reshare that stopped after the old vault recorded its intent.
-///
-/// `Ok` means the new vault was never committed: what was staged for it is gone and the old
-/// vault is live again. If the new vault was committed, the old one is retired here and
-/// the retired error is returned. If the new vault's directory cannot be found the outcome
-/// is unknown and the old vault stays closed.
 fn settle_interrupted_reshare(
     vault_dir: &str,
     meta: &mut Meta,
@@ -829,8 +1202,7 @@ fn settle_interrupted_reshare(
     let target = pending.target.clone();
     let unknown = |why: &str| {
         CliError::state(format!(
-            "HemReshareInterrupted: a reshare of this vault into {target} did not finish and {why}; \
-             this vault stays closed so that it and its successor can never both sign"
+            "HemReshareInterrupted: a reshare of this vault into {target} did not finish and {why};              this vault stays closed so that it and its successor can never both sign"
         ))
     };
     if !exists(&target)? {
@@ -869,21 +1241,26 @@ fn settle_interrupted_reshare(
 /// Lock a vault and load its committed state, finishing whatever an interrupted command
 /// left: stale generations are wiped, an old-format vault is converted, an interrupted
 /// reshare is settled.
-fn open_vault(vault_dir: &str, hook: Hook<'_>) -> Result<OpenVault, CliError> {
+fn open_vault(vault_dir: &str, pass: Option<&[u8]>, hook: Hook<'_>) -> Result<OpenVault, CliError> {
     let (lock, lock_created) = lock_existing_vault(vault_dir)?;
     let lock_id = lock_identity(&lock)?;
     let json = Json::parse(&read_text(&meta_path(vault_dir))?)?;
 
     if json.field_str("format")? == HEM_META_FORMAT_V1 {
+        if pass.is_some() {
+            return Err(CliError::input(
+                "passphrase supplied for unencrypted Hem quorum vault",
+            ));
+        }
         let (quorum, latch_seed) = load_legacy(vault_dir, &json)?;
-        // The old-format shares loaded, so any generation file is an unfinished conversion.
         remove_stale(vault_dir, Keep::Legacy)?;
         let mut meta = Meta::new(&quorum, latch_seed, lock_id);
-        commit(vault_dir, &quorum, &mut meta, false, hook)?;
+        commit(vault_dir, &quorum, &mut meta, None, false, hook)?;
         return Ok(OpenVault {
             _lock: lock,
             quorum,
             meta,
+            envelope_keys: None,
         });
     }
 
@@ -892,17 +1269,18 @@ fn open_vault(vault_dir: &str, hook: Hook<'_>) -> Result<OpenVault, CliError> {
         return Err(crate::vault::corrupt());
     }
     if meta.invalidated {
-        // Finish wiping if retirement was interrupted after its commit.
         remove_stale(vault_dir, Keep::Nothing)?;
         return Err(retired());
     }
+    let envelope_keys = meta.unlock_with_passphrase(pass)?;
     settle_interrupted_reshare(vault_dir, &mut meta, &mut *hook)?;
-    let quorum = load_generation(vault_dir, &meta)?;
+    let quorum = load_generation(vault_dir, &meta, envelope_keys.as_ref())?;
     remove_stale(vault_dir, Keep::Generation(meta.generation))?;
     Ok(OpenVault {
         _lock: lock,
         quorum,
         meta,
+        envelope_keys,
     })
 }
 
@@ -915,8 +1293,13 @@ fn create_vault(
     vault_dir: &str,
     quorum: &HemDynamicShamirQuorum,
     latch_seed: Secret32,
+    pass: Option<&[u8]>,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
+    let keys = match pass {
+        Some(p) => Some(HemEnvelopeKeys::derive_fresh(p)?),
+        None => None,
+    };
     ensure_no_vault_files(vault_dir)?;
     private_dir(vault_dir, true)?;
     let lock = lock_new_vault(vault_dir)?;
@@ -927,7 +1310,7 @@ fn create_vault(
         &quorum.public_directory().to_bytes(),
         false,
     )?;
-    commit(vault_dir, quorum, &mut meta, true, hook)
+    commit(vault_dir, quorum, &mut meta, keys.as_ref(), true, hook)
 }
 
 struct Signed {
@@ -943,9 +1326,10 @@ fn sign_tx(
     ackers: Option<&str>,
     requested_epoch: Option<u64>,
     message: &[u8],
+    pass: Option<&[u8]>,
     hook: Hook<'_>,
 ) -> Result<Signed, CliError> {
-    let mut vault = open_vault(vault_dir, &mut *hook)?;
+    let mut vault = open_vault(vault_dir, pass, &mut *hook)?;
     let (t, n) = vault.quorum.threshold_and_size();
     let signers = match signers {
         Some(s) => parse_party_list(s, "signers", n)?,
@@ -964,13 +1348,18 @@ fn sign_tx(
         )));
     }
 
-    // Nothing is written if the reservation is refused.
     let reserved = vault
         .quorum
         .reserve_leaf(&signers, &ackers, message)
         .map_err(map_quorum_err)?;
-    // The leaf is out of the quorum; record that before its shares are combined.
-    commit(vault_dir, &vault.quorum, &mut vault.meta, false, &mut *hook)?;
+    commit(
+        vault_dir,
+        &vault.quorum,
+        &mut vault.meta,
+        vault.envelope_keys.as_ref(),
+        false,
+        &mut *hook,
+    )?;
     hook(Step::LeafBurned)?;
 
     let (leaf_epoch, sig) = vault
@@ -984,8 +1373,13 @@ fn sign_tx(
     })
 }
 
-fn refresh_tx(vault_dir: &str, deterministic: bool, hook: Hook<'_>) -> Result<OpenVault, CliError> {
-    let mut vault = open_vault(vault_dir, &mut *hook)?;
+fn refresh_tx(
+    vault_dir: &str,
+    deterministic: bool,
+    pass: Option<&[u8]>,
+    hook: Hook<'_>,
+) -> Result<OpenVault, CliError> {
+    let mut vault = open_vault(vault_dir, pass, &mut *hook)?;
     let pk_before = vault.quorum.public_key();
     let sid = if deterministic {
         cshake256_framed_32(
@@ -1010,7 +1404,14 @@ fn refresh_tx(vault_dir: &str, deterministic: bool, hook: Hook<'_>) -> Result<Op
         ));
     }
     vault.meta.latch_seed = Secret32(os_random_32()?);
-    commit(vault_dir, &vault.quorum, &mut vault.meta, false, hook)?;
+    commit(
+        vault_dir,
+        &vault.quorum,
+        &mut vault.meta,
+        vault.envelope_keys.as_ref(),
+        false,
+        hook,
+    )?;
     Ok(vault)
 }
 
@@ -1021,11 +1422,7 @@ struct Reshared {
 }
 
 /// Move custody from the vault in `old_vault_dir` to a new vault in `new_vault_dir`.
-///
-/// Order on disk: the old vault records the reshare; the new vault is written and
-/// committed; the old vault is retired. Stopped before the new vault's commit, the old
-/// vault undoes the reshare when next opened; stopped after it, the old vault retires
-/// itself when next opened. See [`settle_interrupted_reshare`].
+#[allow(clippy::too_many_arguments)]
 fn reshare_tx(
     old_vault_dir: &str,
     new_vault_dir: &str,
@@ -1033,6 +1430,8 @@ fn reshare_tx(
     new_t: usize,
     new_n: usize,
     deterministic: bool,
+    old_pass: Option<&[u8]>,
+    new_pass: Option<&[u8]>,
     hook: Hook<'_>,
 ) -> Result<Reshared, CliError> {
     if new_t < 2 || new_t > new_n || new_n > 64 {
@@ -1041,7 +1440,12 @@ fn reshare_tx(
         ));
     }
     ensure_no_vault_files(new_vault_dir)?;
-    let old = open_vault(old_vault_dir, &mut *hook)?;
+    let old = open_vault(old_vault_dir, old_pass, &mut *hook)?;
+    let effective_new_pass = new_pass.or(old_pass);
+    let new_keys = match effective_new_pass {
+        Some(p) => Some(HemEnvelopeKeys::derive_fresh(p)?),
+        None => None,
+    };
     let (old_t, old_n) = old.quorum.threshold_and_size();
     let old_signers = match signers {
         Some(s) => parse_party_list(s, "signers", old_n)?,
@@ -1064,13 +1468,13 @@ fn reshare_tx(
     };
     let new_latch_seed = Secret32(os_random_32()?);
 
-    // The ceremony runs in memory. The old vault's files are untouched by it.
     let mut old_party_rngs = fresh_party_rngs(old_n)?;
     let mut new_party_rngs = fresh_party_rngs(new_n)?;
     let OpenVault {
         _lock: old_lock,
         mut quorum,
         meta: mut old_meta,
+        envelope_keys: _,
     } = old;
     quorum
         .reshare_quorum(
@@ -1111,7 +1515,14 @@ fn reshare_tx(
         &quorum.public_directory().to_bytes(),
         false,
     )?;
-    commit(&target, &quorum, &mut new_meta, true, &mut *hook)?;
+    commit(
+        &target,
+        &quorum,
+        &mut new_meta,
+        new_keys.as_ref(),
+        true,
+        &mut *hook,
+    )?;
 
     retire(old_vault_dir, &mut old_meta, hook)?;
     drop(old_lock);
@@ -1129,6 +1540,7 @@ fn reshare_tx(
 pub fn keygen(args: &Args) -> Result<(), CliError> {
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
+    let passphrase = crate::envelope::passphrase(args)?;
     ensure_absent(public_out)?;
 
     let t = args.get_u64("threshold")?.unwrap_or(2) as usize;
@@ -1165,7 +1577,13 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
 
     let quorum = HemDynamicShamirQuorum::stage(ceremony_seed.0, t, n, active_leaves)
         .map_err(map_quorum_err)?;
-    create_vault(vault_dir, &quorum, latch_seed, &mut no_crash)?;
+    create_vault(
+        vault_dir,
+        &quorum,
+        latch_seed,
+        passphrase.as_deref(),
+        &mut no_crash,
+    )?;
 
     let public = write_public_json(&quorum.public_key(), t, n, 0, active_leaves);
     write_new(public_out, public.to_pretty().as_bytes(), false)?;
@@ -1183,6 +1601,7 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
 pub fn sign(args: &Args) -> Result<(), CliError> {
     let vault_dir = args.require("vault-dir")?;
     let out_path = args.require("out")?;
+    let passphrase = crate::envelope::passphrase(args)?;
     ensure_absent(out_path)?;
     if args.get("in").is_some() && args.get("message").is_some() {
         return Err(CliError::usage("pass either --message or --in, not both"));
@@ -1193,7 +1612,6 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         .ok_or_else(|| CliError::usage("missing required option --message (or --in)"))?;
     let message = read_input(msg_arg)?;
 
-    // The vault stays locked until the signature file is written.
     let Signed {
         leaf_epoch,
         sig,
@@ -1204,6 +1622,7 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         args.get("ackers"),
         args.get_u64("epoch")?,
         &message,
+        passphrase.as_deref(),
         &mut no_crash,
     )?;
     let quorum = &vault.quorum;
@@ -1258,14 +1677,24 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
 }
 
 pub fn refresh(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(raw, &["vault-dir"], &["deterministic", "json", "help"])?;
+    let args = Args::parse(
+        raw,
+        &["vault-dir", "passphrase-env", "passphrase-file"],
+        &["deterministic", "json", "help"],
+    )?;
     if args.flag("help") {
         print!("{HEM_REFRESH_HELP}");
         return Ok(());
     }
     args.no_positionals()?;
     let vault_dir = args.require("vault-dir")?;
-    let vault = refresh_tx(vault_dir, args.flag("deterministic"), &mut no_crash)?;
+    let passphrase = crate::envelope::passphrase(&args)?;
+    let vault = refresh_tx(
+        vault_dir,
+        args.flag("deterministic"),
+        passphrase.as_deref(),
+        &mut no_crash,
+    )?;
     let quorum = &vault.quorum;
 
     let (t, n) = quorum.threshold_and_size();
@@ -1301,6 +1730,10 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
             "new-parties",
             "out-vault-dir",
             "public-out",
+            "passphrase-env",
+            "passphrase-file",
+            "new-passphrase-env",
+            "new-passphrase-file",
         ],
         &["deterministic", "json", "help"],
     )?;
@@ -1311,6 +1744,9 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
     args.no_positionals()?;
     let old_vault_dir = args.require("vault-dir")?;
     let new_vault_dir = args.require("out-vault-dir")?;
+    let old_passphrase = crate::envelope::passphrase(&args)?;
+    let new_passphrase =
+        crate::envelope::passphrase_named(&args, "new-passphrase-env", "new-passphrase-file")?;
     let new_t = args
         .get_u64("new-threshold")?
         .ok_or_else(|| CliError::usage("missing required option --new-threshold"))?
@@ -1334,6 +1770,8 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
         new_t,
         new_n,
         args.flag("deterministic"),
+        old_passphrase.as_deref(),
+        new_passphrase.as_deref(),
         &mut no_crash,
     )?;
     let pk = quorum.public_key();
@@ -1483,7 +1921,7 @@ mod tests {
 
     fn new_vault(dir: &str, leaves: usize) -> HemJortsPublicKey {
         let quorum = stage(leaves);
-        create_vault(dir, &quorum, Secret32([0x33; 32]), &mut no_crash).unwrap();
+        create_vault(dir, &quorum, Secret32([0x33; 32]), None, &mut no_crash).unwrap();
         quorum.public_key()
     }
 
@@ -1522,7 +1960,7 @@ mod tests {
     }
 
     fn sign_ok(dir: &str, pk: &HemJortsPublicKey, message: &[u8]) -> u64 {
-        let signed = sign_tx(dir, None, None, None, message, &mut no_crash).unwrap();
+        let signed = sign_tx(dir, None, None, None, message, None, &mut no_crash).unwrap();
         assert!(verify_hem_jorts_signature(pk, message, &signed.sig));
         signed.leaf_epoch
     }
@@ -1588,6 +2026,7 @@ mod tests {
                 None,
                 None,
                 message.as_bytes(),
+                None,
                 &mut crash.hook(),
             );
             match outcome {
@@ -1622,7 +2061,7 @@ mod tests {
                         Meta::read(&vault).unwrap().high_water_leaf,
                         high_water + usize::from(committed)
                     );
-                    let opened = open_vault(&vault, &mut no_crash).unwrap();
+                    let opened = open_vault(&vault, None, &mut no_crash).unwrap();
                     high_water += usize::from(committed);
                     assert_eq!(opened.quorum.high_water_leaf(), high_water);
                     drop(opened);
@@ -1656,9 +2095,9 @@ mod tests {
 
         for at in 0.. {
             let mut crash = Crash::at(at);
-            let done = refresh_tx(&vault, false, &mut crash.hook()).is_ok();
+            let done = refresh_tx(&vault, false, None, &mut crash.hook()).is_ok();
             epoch += u64::from(crash.seen.contains(&Step::MetaCommitted));
-            let opened = open_vault(&vault, &mut no_crash).unwrap();
+            let opened = open_vault(&vault, None, &mut no_crash).unwrap();
             assert_eq!(opened.quorum.quorum_epoch(), epoch);
             assert_eq!(opened.quorum.public_key(), pk);
             drop(opened);
@@ -1683,11 +2122,12 @@ mod tests {
         for at in 0.. {
             let new = scratch.path(&format!("v{}", round + 1));
             let mut crash = Crash::at(at);
-            let done = reshare_tx(&old, &new, None, 2, 3, false, &mut crash.hook()).is_ok();
+            let done =
+                reshare_tx(&old, &new, None, 2, 3, false, None, None, &mut crash.hook()).is_ok();
             if !done {
                 boundaries.push(crash.boundary());
             }
-            match open_vault(&old, &mut no_crash) {
+            match open_vault(&old, None, &mut no_crash) {
                 Ok(opened) => {
                     // The old vault is live: the reshare was undone and nothing of the
                     // new vault remains.
@@ -1715,7 +2155,7 @@ mod tests {
                         ]
                     );
                     epoch += 1;
-                    let opened = open_vault(&new, &mut no_crash).unwrap();
+                    let opened = open_vault(&new, None, &mut no_crash).unwrap();
                     assert_eq!(opened.quorum.quorum_epoch(), epoch);
                     assert_eq!(opened.quorum.public_key(), pk);
                     drop(opened);
@@ -1749,12 +2189,14 @@ mod tests {
     fn reshare_stopped_at(old: &str, new: &str, boundary: Step) {
         for at in 0.. {
             let mut crash = Crash::at(at);
-            assert!(reshare_tx(old, new, None, 2, 3, false, &mut crash.hook()).is_err());
+            assert!(
+                reshare_tx(old, new, None, 2, 3, false, None, None, &mut crash.hook()).is_err()
+            );
             if crash.boundary() == boundary {
                 return;
             }
             // Stopped earlier: opening the old vault undoes the attempt.
-            drop(open_vault(old, &mut no_crash).unwrap());
+            drop(open_vault(old, None, &mut no_crash).unwrap());
         }
     }
 
@@ -1776,7 +2218,7 @@ mod tests {
         // If the new vault's directory cannot be found the outcome is unknown: refuse.
         std::fs::rename(&new, &moved).unwrap();
         let before = snapshot(&old);
-        let err = sign_tx(&old, None, None, None, b"m", &mut no_crash)
+        let err = sign_tx(&old, None, None, None, b"m", None, &mut no_crash)
             .err()
             .unwrap();
         assert!(
@@ -1789,7 +2231,7 @@ mod tests {
 
         // Found again and never committed: undone, even if the undo itself is interrupted.
         let mut crash = Crash::at(0);
-        assert!(open_vault(&old, &mut crash.hook()).is_err());
+        assert!(open_vault(&old, None, &mut crash.hook()).is_err());
         assert_eq!(crash.boundary(), Step::IntentCleared);
         assert!(files(&new).is_empty());
         assert_eq!(sign_ok(&old, &pk, b"old is live"), 0);
@@ -1798,8 +2240,8 @@ mod tests {
         // the old one retires itself instead of signing, however far the new one has moved.
         reshare_stopped_at(&old, &new, Step::MetaCommitted);
         assert_eq!(sign_ok(&new, &pk, b"new is live"), 1);
-        drop(refresh_tx(&new, false, &mut no_crash).unwrap());
-        let err = sign_tx(&old, None, None, None, b"m", &mut no_crash)
+        drop(refresh_tx(&new, false, None, &mut no_crash).unwrap());
+        let err = sign_tx(&old, None, None, None, b"m", None, &mut no_crash)
             .err()
             .unwrap();
         assert!(err.message.contains("ShareInvalidated"), "{}", err.message);
@@ -1820,8 +2262,8 @@ mod tests {
             let vault = scratch.path(&format!("crash-{at}"));
             write_legacy(&vault, &quorum, &shares, 0);
             let mut crash = Crash::at(at);
-            let converted = open_vault(&vault, &mut crash.hook()).is_ok();
-            let opened = open_vault(&vault, &mut no_crash).unwrap();
+            let converted = open_vault(&vault, None, &mut crash.hook()).is_ok();
+            let opened = open_vault(&vault, None, &mut no_crash).unwrap();
             assert_eq!(opened.quorum.high_water_leaf(), 0);
             assert_eq!(opened.quorum.quorum_epoch(), 0);
             assert_eq!(opened.meta.generation, 1);
@@ -1860,7 +2302,7 @@ mod tests {
             before[2].clone(),
         ];
         write_legacy(&torn_sign, &stage(3), &mixed, 0);
-        let opened = open_vault(&torn_sign, &mut no_crash).unwrap();
+        let opened = open_vault(&torn_sign, None, &mut no_crash).unwrap();
         assert_eq!(opened.quorum.high_water_leaf(), 1);
         drop(opened);
         assert_eq!(sign_ok(&torn_sign, &pk, b"next"), 1);
@@ -1878,7 +2320,7 @@ mod tests {
         ];
         write_legacy(&torn_refresh, &stage(3), &mixed, 0);
         let on_disk = snapshot(&torn_refresh);
-        assert!(open_vault(&torn_refresh, &mut no_crash).is_err());
+        assert!(open_vault(&torn_refresh, None, &mut no_crash).is_err());
         let mut now = snapshot(&torn_refresh);
         now.retain(|(name, _)| name != "quorum-meta.json.vault.lock");
         assert_eq!(now, on_disk);
@@ -1890,7 +2332,7 @@ mod tests {
         let meta = meta.replace("\"invalidated\": false", "\"invalidated\": true");
         replace_secret(&meta_path(&retired_dir), meta.as_bytes()).unwrap();
         let on_disk = snapshot(&retired_dir);
-        let err = open_vault(&retired_dir, &mut no_crash).err().unwrap();
+        let err = open_vault(&retired_dir, None, &mut no_crash).err().unwrap();
         assert!(err.message.contains("ShareInvalidated"), "{}", err.message);
         assert_eq!(snapshot(&retired_dir), on_disk);
     }
@@ -1907,7 +2349,7 @@ mod tests {
             replace_secret(&join(&vault, name), bytes).unwrap();
         };
         let refused = |why: &str| {
-            let err = open_vault(&vault, &mut no_crash).err().unwrap();
+            let err = open_vault(&vault, None, &mut no_crash).err().unwrap();
             assert!(err.message.contains(why), "{}", err.message);
         };
         let share = settled_files(&vault, 3)[0].clone();
@@ -1932,10 +2374,10 @@ mod tests {
             .replace(HEM_META_FORMAT, HEM_META_FORMAT_V1)
             .replace("\"high_water_leaf\": 1", "\"high_water_leaf\": 0");
         replace_secret(&meta_path(&vault), downgraded.as_bytes()).unwrap();
-        assert!(open_vault(&vault, &mut no_crash).is_err());
+        assert!(open_vault(&vault, None, &mut no_crash).is_err());
         restore("quorum-meta.json");
         assert_eq!(snapshot(&vault), good);
-        drop(open_vault(&vault, &mut no_crash).unwrap());
+        drop(open_vault(&vault, None, &mut no_crash).unwrap());
 
         // The whole vault copied elsewhere: its lock is a different file, so the copy is
         // refused. Two copies signing would use the same leaves for different messages.
@@ -1944,20 +2386,137 @@ mod tests {
         for (name, bytes) in &good {
             write_new(&join(&copy, name), bytes, true).unwrap();
         }
-        assert!(open_vault(&copy, &mut no_crash).is_err());
+        assert!(open_vault(&copy, None, &mut no_crash).is_err());
         assert_eq!(snapshot(&copy), good);
 
         // The lock replaced by another file, then removed.
         let lock = lock_path(&vault);
         std::fs::write(format!("{lock}.new"), [0u8; 32]).unwrap();
         std::fs::rename(format!("{lock}.new"), &lock).unwrap();
-        assert!(open_vault(&vault, &mut no_crash).is_err());
+        assert!(open_vault(&vault, None, &mut no_crash).is_err());
         std::fs::remove_file(&lock).unwrap();
-        assert!(open_vault(&vault, &mut no_crash).is_err());
+        assert!(open_vault(&vault, None, &mut no_crash).is_err());
         let mut now = snapshot(&vault);
         now.retain(|(name, _)| name != "quorum-meta.json.vault.lock");
         let mut expected = good.clone();
         expected.retain(|(name, _)| name != "quorum-meta.json.vault.lock");
         assert_eq!(now, expected);
+    }
+
+    #[test]
+    fn passphrase_sealed_vault_roundtrips_sign_refresh_reshare_and_rejects_wrong_passphrase() {
+        let scratch = Scratch::new("sealed-envelope");
+        let v1 = scratch.path("v1");
+        let v2 = scratch.path("v2");
+        let v3 = scratch.path("v3");
+        let pass_a = b"correct-horse-battery-staple-hem-a";
+        let pass_b = b"rotated-custody-passphrase-hem-b";
+
+        let quorum = stage(6);
+        let raw_latch = [0x7a; 32];
+        let raw_share0 = quorum.custodian_shares()[0].to_vault_bytes().unwrap();
+        let pk = quorum.public_key();
+        create_vault(
+            &v1,
+            &quorum,
+            Secret32(raw_latch),
+            Some(pass_a),
+            &mut no_crash,
+        )
+        .unwrap();
+
+        // Verify on-disk encryption: neither plaintext latch_seed nor plaintext share magic appears.
+        let meta_text = std::fs::read_to_string(meta_path(&v1)).unwrap();
+        assert!(meta_text.contains(HEM_ENVELOPE_FORMAT));
+        assert!(!meta_text.contains(&crate::codec::to_hex(&raw_latch)));
+        let disk_share0 = std::fs::read(share_path(&v1, 0, 1)).unwrap();
+        assert_eq!(&disk_share0[..24], HEM_SHARE_SEAL_MAGIC);
+        assert!(
+            !disk_share0
+                .windows(raw_share0.len().min(32))
+                .any(|w| w == &raw_share0[..raw_share0.len().min(32)])
+        );
+
+        // Missing or wrong passphrase fails closed without advancing generation or burning leaves.
+        let before = snapshot(&v1);
+        let err_missing = sign_tx(&v1, None, None, None, b"m0", None, &mut no_crash)
+            .err()
+            .unwrap();
+        assert_eq!(err_missing.code, 1);
+        assert!(err_missing.message.contains("requires --passphrase-env"));
+        let err_wrong = sign_tx(&v1, None, None, None, b"m0", Some(b"wrong"), &mut no_crash)
+            .err()
+            .unwrap();
+        assert_eq!(err_wrong.code, 1);
+        assert!(err_wrong.message.contains("wrong passphrase"));
+        assert_eq!(snapshot(&v1), before);
+
+        // Sign, refresh, reshare (inheriting pass_a), and reshare (rotating to pass_b).
+        let s0 = sign_tx(&v1, None, None, None, b"m0", Some(pass_a), &mut no_crash).unwrap();
+        assert_eq!(s0.leaf_epoch, 0);
+        assert!(verify_hem_jorts_signature(&pk, b"m0", &s0.sig));
+        drop(s0);
+
+        drop(refresh_tx(&v1, false, Some(pass_a), &mut no_crash).unwrap());
+        let s1 = sign_tx(&v1, None, None, None, b"m1", Some(pass_a), &mut no_crash).unwrap();
+        assert_eq!(s1.leaf_epoch, 1);
+        assert!(verify_hem_jorts_signature(&pk, b"m1", &s1.sig));
+        drop(s1);
+
+        // Reshare without --new-passphrase-* preserves sealing under pass_a (never strips encryption).
+        reshare_tx(
+            &v1,
+            &v2,
+            None,
+            2,
+            4,
+            false,
+            Some(pass_a),
+            None,
+            &mut no_crash,
+        )
+        .unwrap();
+        assert!(sign_tx(&v2, None, None, None, b"m2", None, &mut no_crash).is_err());
+        let s2 = sign_tx(&v2, None, None, None, b"m2", Some(pass_a), &mut no_crash).unwrap();
+        assert_eq!(s2.leaf_epoch, 2);
+        assert!(verify_hem_jorts_signature(&pk, b"m2", &s2.sig));
+        drop(s2);
+
+        // Reshare with explicit new passphrase rotates encryption to pass_b; even if interrupted
+        // right after new meta commits, opening old vault with pass_a settles cleanly.
+        for at in 0.. {
+            let mut crash = Crash::at(at);
+            let res = reshare_tx(
+                &v2,
+                &v3,
+                None,
+                3,
+                5,
+                false,
+                Some(pass_a),
+                Some(pass_b),
+                &mut crash.hook(),
+            );
+            assert!(res.is_err());
+            if crash.boundary() == Step::MetaCommitted {
+                break;
+            }
+            drop(open_vault(&v2, Some(pass_a), &mut no_crash).unwrap());
+        }
+        let err_retired = open_vault(&v2, Some(pass_a), &mut no_crash).err().unwrap();
+        assert!(err_retired.message.contains("ShareInvalidated"));
+        assert!(sign_tx(&v3, None, None, None, b"m3", Some(pass_a), &mut no_crash).is_err());
+        let s3 = sign_tx(&v3, None, None, None, b"m3", Some(pass_b), &mut no_crash).unwrap();
+        assert_eq!(s3.leaf_epoch, 3);
+        assert!(verify_hem_jorts_signature(&pk, b"m3", &s3.sig));
+
+        // Supplying a passphrase to an unsealed vault also fails closed.
+        let unsealed = scratch.path("unsealed");
+        let _ = new_vault(&unsealed, 2);
+        let err_unsolicited = open_vault(&unsealed, Some(pass_a), &mut no_crash)
+            .err()
+            .unwrap();
+        assert_eq!(err_unsolicited.code, 1);
+        assert!(err_unsolicited.message.contains("unencrypted"));
     }
 }

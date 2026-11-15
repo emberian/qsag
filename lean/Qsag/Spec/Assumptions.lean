@@ -51,13 +51,13 @@ def FramedCodec.collisionOfDigestEq {α : Type} [DecidableEq α]
     (c : FramedCodec α) (H : Bytes → Bytes) {x y : α}
     (hDigest : H (c.encode x) = H (c.encode y)) :
     PSum (x = y) (HashCollision H) :=
-  if hEq : x = y then
-    .inl hEq
-  else
+  match decEq x y with
+  | .isTrue hEq => .inl hEq
+  | .isFalse hNe =>
     .inr
       { m₁ := c.encode x
         m₂ := c.encode y
-        distinct := fun hEnc => hEq (c.encode_injective hEnc)
+        distinct := fun hEnc => hNe (c.encode_injective hEnc)
         collides := hDigest }
 
 theorem FramedCodec.collisionOfDigestEq_sound {α : Type} [DecidableEq α]
@@ -67,11 +67,9 @@ theorem FramedCodec.collisionOfDigestEq_sound {α : Type} [DecidableEq α]
     | .inl _ => x = y
     | .inr col => x ≠ y ∧ H col.m₁ = H col.m₂ ∧ col.m₁ ≠ col.m₂ := by
   unfold FramedCodec.collisionOfDigestEq
-  split
-  · rename_i hEq
-    exact hEq
-  · rename_i hNe
-    exact ⟨hNe, hDigest, fun hEnc => hNe (c.encode_injective hEnc)⟩
+  cases decEq x y with
+  | isTrue hEq => exact hEq
+  | isFalse hNe => exact ⟨hNe, hDigest, fun hEnc => hNe (c.encode_injective hEnc)⟩
 
 /-! ## 2. Standard-Model Tweakable-Hash, PRF, and Lattice Assumption Locales -/
 
@@ -139,7 +137,7 @@ structure HashSigAssumptions (n : Nat) where
   pre : SmDtPreAssumption n
 
 /-- Combined rational upper bound `εItsr + εTcr + εPre` for `HashSigAssumptions`. -/
-def HashSigAssumptions.totalBound {n : Nat} (A : HashSigAssumptions n) : RatBound :=
+@[expose] def HashSigAssumptions.totalBound {n : Nat} (A : HashSigAssumptions n) : RatBound :=
   (A.itsr.εItsr.add A.tcr.εTcr).add A.pre.εPre
 
 theorem HashSigAssumptions.forger_bound {n : Nat} (A : HashSigAssumptions n)
@@ -186,8 +184,7 @@ theorem HashSigAssumptions.forger_bound {n : Nat} (A : HashSigAssumptions n)
           A.itsr.εItsr.den * (A.tcr.εTcr.den * A.pre.εPre.den) := Nat.mul_assoc _ _ _
       rw [hDen]
       apply congrArg (· * (A.itsr.εItsr.den * (A.tcr.εTcr.den * A.pre.εPre.den)))
-      simp only [Nat.right_distrib, Nat.left_distrib, Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm,
-        Nat.add_assoc]
+      simp only [Nat.left_distrib, Nat.mul_left_comm, Nat.mul_comm, Nat.add_assoc]
     rw [hEq]
     exact Nat.le_refl _
   exact RatBound.le_trans h1 (RatBound.le_trans hTotal hAssoc)

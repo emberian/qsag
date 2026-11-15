@@ -1,5 +1,3 @@
-#![allow(clippy::needless_range_loop, clippy::type_complexity)]
-
 //! Credentials enrolled using the threshold symmetric OPRF in `voprf`.
 //!
 //! The issuer authorizes the disclosed issuance attributes and a proof of their
@@ -1664,10 +1662,16 @@ impl Fp5 {
         let c0 = gl_add(gl_mul(a[0], b[0]), Self::mul_by_3(t0_hi));
 
         let t1_lo = gl_add(gl_mul(a[0], b[1]), gl_mul(a[1], b[0]));
-        let t1_hi = gl_add(gl_add(gl_mul(a[2], b[4]), gl_mul(a[3], b[3])), gl_mul(a[4], b[2]));
+        let t1_hi = gl_add(
+            gl_add(gl_mul(a[2], b[4]), gl_mul(a[3], b[3])),
+            gl_mul(a[4], b[2]),
+        );
         let c1 = gl_add(t1_lo, Self::mul_by_3(t1_hi));
 
-        let t2_lo = gl_add(gl_add(gl_mul(a[0], b[2]), gl_mul(a[1], b[1])), gl_mul(a[2], b[0]));
+        let t2_lo = gl_add(
+            gl_add(gl_mul(a[0], b[2]), gl_mul(a[1], b[1])),
+            gl_mul(a[2], b[0]),
+        );
         let t2_hi = gl_add(gl_mul(a[3], b[4]), gl_mul(a[4], b[3]));
         let c2 = gl_add(t2_lo, Self::mul_by_3(t2_hi));
 
@@ -1680,7 +1684,10 @@ impl Fp5 {
 
         let c4 = gl_add(
             gl_add(gl_mul(a[0], b[4]), gl_mul(a[1], b[3])),
-            gl_add(gl_add(gl_mul(a[2], b[2]), gl_mul(a[3], b[1])), gl_mul(a[4], b[0])),
+            gl_add(
+                gl_add(gl_mul(a[2], b[2]), gl_mul(a[3], b[1])),
+                gl_mul(a[4], b[0]),
+            ),
         );
 
         Self([c0, c1, c2, c3, c4])
@@ -1750,7 +1757,11 @@ impl Drop for ZeroizingGgmTree {
     }
 }
 
-fn expand_ggm_tree_256(root_seed: &[u8; 32], presentation_nonce: &[u8; 32], rep: u32) -> ZeroizingGgmTree {
+fn expand_ggm_tree_256(
+    root_seed: &[u8; 32],
+    presentation_nonce: &[u8; 32],
+    rep: u32,
+) -> ZeroizingGgmTree {
     let mut tree = ZeroizingGgmTree([[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
     tree.0[1] = *root_seed;
     for depth in 0..VC_SD_GGM_DEPTH {
@@ -1788,9 +1799,9 @@ fn reconstruct_ggm_leaves_256(
     let mut known = [false; 2 * VC_SD_LIMBO_PARTIES];
     let leaf_pos = VC_SD_LIMBO_PARTIES + (hidden_party as usize);
 
-    for step in 0..VC_SD_GGM_DEPTH {
+    for (step, &sib_seed) in copath.iter().enumerate() {
         let sib_pos = (leaf_pos >> step) ^ 1;
-        tree.0[sib_pos] = copath[step];
+        tree.0[sib_pos] = sib_seed;
         known[sib_pos] = true;
     }
 
@@ -1851,18 +1862,24 @@ impl Shake256PartyBatch8 {
     ) -> Self {
         let mut state = qsag_asm::KeccakState8x::default();
         for lane in 0..3 {
-            let w = u64::from_le_bytes(PARTY_TAPE_DOMAIN_24[lane * 8..(lane + 1) * 8].try_into().unwrap());
+            let w = u64::from_le_bytes(
+                PARTY_TAPE_DOMAIN_24[lane * 8..(lane + 1) * 8]
+                    .try_into()
+                    .unwrap(),
+            );
             state.0[lane] = [w; 8];
         }
         for lane in 0..4 {
-            let w = u64::from_le_bytes(presentation_nonce[lane * 8..(lane + 1) * 8].try_into().unwrap());
+            let w = u64::from_le_bytes(
+                presentation_nonce[lane * 8..(lane + 1) * 8]
+                    .try_into()
+                    .unwrap(),
+            );
             state.0[3 + lane] = [w; 8];
         }
-        for inst in 0..8 {
+        for (inst, leaf_seed) in leaf_seeds.iter().enumerate() {
             for lane in 0..4 {
-                let w = u64::from_le_bytes(
-                    leaf_seeds[inst][lane * 8..(lane + 1) * 8].try_into().unwrap(),
-                );
+                let w = u64::from_le_bytes(leaf_seed[lane * 8..(lane + 1) * 8].try_into().unwrap());
                 state.0[7 + lane][inst] = w;
             }
             let tag = (rep as u64) | (((base_party + inst) as u64) << 32);
@@ -1883,19 +1900,24 @@ impl Shake256PartyBatch8 {
     fn extract_salts_1(&mut self) -> [[u8; 32]; 8] {
         debug_assert_eq!(self.word_pos, [0usize; 8]);
         let mut salts = [[0u8; 32]; 8];
-        for inst in 0..8 {
+        for (inst, (salt, pos)) in salts.iter_mut().zip(&mut self.word_pos).enumerate() {
             for lane in 0..4 {
-                salts[inst][lane * 8..(lane + 1) * 8]
+                salt[lane * 8..(lane + 1) * 8]
                     .copy_from_slice(&self.state.0[lane][inst].to_le_bytes());
             }
-            self.word_pos[inst] = 4;
+            *pos = 4;
         }
         salts
     }
 
     /// Squeeze `count` canonical Goldilocks field elements (`< GOLDILOCKS_PRIME`) into each
     /// active lane's destination buffer (`active_mask[inst] == false` skips inactive lanes).
-    fn squeeze_canonical_gl(&mut self, active_mask: [bool; 8], outs: &mut [Vec<u64>; 8], count: usize) {
+    fn squeeze_canonical_gl(
+        &mut self,
+        active_mask: [bool; 8],
+        outs: &mut [Vec<u64>; 8],
+        count: usize,
+    ) {
         let mut done = [false; 8];
         let mut all_done = true;
         for inst in 0..8 {
@@ -1932,9 +1954,9 @@ impl Shake256PartyBatch8 {
             }
             if need_perm {
                 qsag_asm::keccak_f1600_x8(&mut self.state);
-                for inst in 0..8 {
-                    if !done[inst] {
-                        self.word_pos[inst] = 0;
+                for (&is_done, pos) in done.iter().zip(&mut self.word_pos) {
+                    if !is_done {
+                        *pos = 0;
                     }
                 }
             }
@@ -2031,9 +2053,9 @@ fn expand_gamma_weights(gamma_seed: &[u8; 32], rep: u32) -> ([Fp5; SD_GRID_B], [
     );
     let mut theta = [Fp5::ZERO; SD_GRID_B];
     let mut eta = [Fp5::ZERO; SD_GRID_L];
-    for b in 0..SD_GRID_B {
+    for (b, slot) in theta.iter_mut().enumerate() {
         let base = b * 5;
-        theta[b] = Fp5([
+        *slot = Fp5([
             limbs[base],
             limbs[base + 1],
             limbs[base + 2],
@@ -2042,9 +2064,9 @@ fn expand_gamma_weights(gamma_seed: &[u8; 32], rep: u32) -> ([Fp5; SD_GRID_B], [
         ]);
     }
     let off = SD_GRID_B * 5;
-    for l in 0..SD_GRID_L {
+    for (l, slot) in eta.iter_mut().enumerate() {
         let base = off + l * 5;
-        eta[l] = Fp5([
+        *slot = Fp5([
             limbs[base],
             limbs[base + 1],
             limbs[base + 2],
@@ -2593,7 +2615,11 @@ fn eval_sd_party_shares(
         let g = SD_TOTAL_GATES + j;
         x_grid[g] = one_const;
         y_grid[g] = final_outs[j];
-        z_grid[g] = if party == 0 { expected_final_outs[j] } else { 0 };
+        z_grid[g] = if party == 0 {
+            expected_final_outs[j]
+        } else {
+            0
+        };
     }
     for g in SD_CHECKED_GATES..(SD_GRID_B * SD_GRID_L) {
         x_grid[g] = 0;
@@ -2604,15 +2630,23 @@ fn eval_sd_party_shares(
 
 /// Evaluate `R~(r) = sum_{d=0..B-1} coeff[d]*r^d + sum_{d=B+1..=2B} coeff[d-1]*r^d`
 /// (where the degree-`B` coefficient is identically zero).
-fn eval_r_poly_without_b(r_poly_without_b: &[[u64; 5]], r_powers: &[Fp5; 2 * SD_GRID_B + 1]) -> Fp5 {
+fn eval_r_poly_without_b(
+    r_poly_without_b: &[[u64; 5]],
+    r_powers: &[Fp5; 2 * SD_GRID_B + 1],
+) -> Fp5 {
     debug_assert_eq!(r_poly_without_b.len(), SD_RPOLY_COEFFS);
     let mut acc = Fp5::ZERO;
-    for d in 0..SD_GRID_B {
-        acc = acc.add(Fp5(r_poly_without_b[d]).mul(r_powers[d]));
+    for (coeff, &pow) in r_poly_without_b[..SD_GRID_B]
+        .iter()
+        .zip(&r_powers[..SD_GRID_B])
+    {
+        acc = acc.add(Fp5(*coeff).mul(pow));
     }
-    for idx in SD_GRID_B..SD_RPOLY_COEFFS {
-        let d = idx + 1;
-        acc = acc.add(Fp5(r_poly_without_b[idx]).mul(r_powers[d]));
+    for (coeff, &pow) in r_poly_without_b[SD_GRID_B..SD_RPOLY_COEFFS]
+        .iter()
+        .zip(&r_powers[SD_GRID_B + 1..=SD_RPOLY_COEFFS])
+    {
+        acc = acc.add(Fp5(*coeff).mul(pow));
     }
     acc
 }
@@ -2739,11 +2773,17 @@ fn eval_party_polynomial_shares(
     }
 
     let mut mask_at_r = Fp5::ZERO;
-    for d in 0..SD_GRID_B {
-        mask_at_r = mask_at_r.add(poly_mask[d].mul(tables.r_powers[d]));
+    for (&m, &pow) in poly_mask[..SD_GRID_B]
+        .iter()
+        .zip(&tables.r_powers[..SD_GRID_B])
+    {
+        mask_at_r = mask_at_r.add(m.mul(pow));
     }
-    for idx in SD_GRID_B..SD_RPOLY_COEFFS {
-        mask_at_r = mask_at_r.add(poly_mask[idx].mul(tables.r_powers[idx + 1]));
+    for (&m, &pow) in poly_mask[SD_GRID_B..SD_RPOLY_COEFFS]
+        .iter()
+        .zip(&tables.r_powers[SD_GRID_B + 1..=SD_RPOLY_COEFFS])
+    {
+        mask_at_r = mask_at_r.add(m.mul(pow));
     }
 
     let sigma_i = c_share.add(z_weighted).mul(r_b).sub(mask_at_r);
@@ -3239,14 +3279,12 @@ pub fn prove_selective_disclosure_with_profile(
             let base_p = batch * 8;
             let seeds_8: [[u8; 32]; 8] =
                 core::array::from_fn(|lane| ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]);
-            let mut prg =
-                Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
+            let mut prg = Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
             let salts = prg.extract_salts_1();
             prg.squeeze_canonical_gl([true; 8], &mut batch_tapes, total_party_limbs);
 
-            for lane in 0..8 {
+            for (lane, tape) in batch_tapes.iter_mut().enumerate() {
                 let p = base_p + lane;
-                let tape = &batch_tapes[lane];
                 let (u_p, v_p, c_p, m_p) = unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]);
                 for l in 0..SD_GRID_L {
                     u_sum[l] = u_sum[l].add(u_p[l]);
@@ -3276,7 +3314,7 @@ pub fn prove_selective_disclosure_with_profile(
                 } else {
                     salt_255 = salts[lane];
                 }
-                ct_zeroize_u64s(&mut batch_tapes[lane]);
+                ct_zeroize_u64s(tape);
             }
         }
 
@@ -3334,82 +3372,81 @@ pub fn prove_selective_disclosure_with_profile(
     let mut gamma_seed = [0u8; 32];
     tr.squeeze_bytes(b"VC_SD_LIMBO_GAMMA", &mut gamma_seed);
 
-    let r2a_polys: Vec<([Fp5; SD_GRID_B], [Fp5; SD_GRID_L], Vec<[u64; 5]>)> =
-        parallel_map_indexed(tau, |rep| {
-            let r1 = &r1_reps[rep];
-            let (theta, eta) = expand_gamma_weights(&gamma_seed, rep as u32);
-            const MASK64: u128 = 0xffff_ffff_ffff_ffff;
-            let mut poly_lo = [[0u128; 5]; 2 * SD_GRID_B + 1];
-            let mut poly_hi = [[0u128; 5]; 2 * SD_GRID_B + 1];
-            let mut poly_v = [Fp5::ZERO; 2 * SD_GRID_B + 1];
+    type R2aPolyRep = ([Fp5; SD_GRID_B], [Fp5; SD_GRID_L], Vec<[u64; 5]>);
+    let r2a_polys: Vec<R2aPolyRep> = parallel_map_indexed(tau, |rep| {
+        let r1 = &r1_reps[rep];
+        let (theta, eta) = expand_gamma_weights(&gamma_seed, rep as u32);
+        const MASK64: u128 = 0xffff_ffff_ffff_ffff;
+        let mut poly_lo = [[0u128; 5]; 2 * SD_GRID_B + 1];
+        let mut poly_hi = [[0u128; 5]; 2 * SD_GRID_B + 1];
+        let mut poly_v = [Fp5::ZERO; 2 * SD_GRID_B + 1];
 
-            for l in 0..SD_GRID_L {
-                // P_l(X) = u_l + sum_{b=0}^{B-1} (theta_b * eta_l * x_{b,l}) * X^{b+1}
-                // Q_l(X) = sum_{k=0}^{B-1} y_{B-1-k, l} * X^k + v_l * X^B
-                let mut p_coeffs = [Fp5::ZERO; SD_GRID_B + 1];
-                p_coeffs[0] = r1.u_sum[l];
-                let eta_l = eta[l];
-                for b in 0..SD_GRID_B {
-                    let xv = trace.x[b * SD_GRID_L + l];
-                    if xv != 0 {
-                        p_coeffs[b + 1] = theta[b].mul(eta_l).scale_fp(xv);
-                    }
+        for (l, &eta_l) in eta.iter().enumerate() {
+            // P_l(X) = u_l + sum_{b=0}^{B-1} (theta_b * eta_l * x_{b,l}) * X^{b+1}
+            // Q_l(X) = sum_{k=0}^{B-1} y_{B-1-k, l} * X^k + v_l * X^B
+            let mut p_coeffs = [Fp5::ZERO; SD_GRID_B + 1];
+            p_coeffs[0] = r1.u_sum[l];
+            for (b, &theta_b) in theta.iter().enumerate() {
+                let xv = trace.x[b * SD_GRID_L + l];
+                if xv != 0 {
+                    p_coeffs[b + 1] = theta_b.mul(eta_l).scale_fp(xv);
                 }
-                let mut y_col = [0u128; SD_GRID_B];
-                for k in 0..SD_GRID_B {
-                    y_col[k] = trace.y[(SD_GRID_B - 1 - k) * SD_GRID_L + l] as u128;
+            }
+            let mut y_col = [0u128; SD_GRID_B];
+            for (k, y_slot) in y_col.iter_mut().enumerate() {
+                *y_slot = trace.y[(SD_GRID_B - 1 - k) * SD_GRID_L + l] as u128;
+            }
+            let v_l = r1.v_sum[l];
+            for (j, &pj) in p_coeffs.iter().enumerate() {
+                if pj.is_zero() {
+                    continue;
                 }
-                let v_l = r1.v_sum[l];
-                for j in 0..=SD_GRID_B {
-                    let pj = p_coeffs[j];
-                    if pj.is_zero() {
-                        continue;
-                    }
-                    let pj_u128 = pj.0.map(|v| v as u128);
-                    // Degrees k in 0..B have scalar GF(p) coefficients y_{B-1-k, l}
-                    for k in 0..SD_GRID_B {
-                        let yv = y_col[k];
-                        if yv != 0 {
-                            let dst = j + k;
-                            for c in 0..5 {
-                                let p = pj_u128[c] * yv;
-                                poly_lo[dst][c] += p & MASK64;
-                                poly_hi[dst][c] += p >> 64;
-                            }
+                let pj_u128 = pj.0.map(|v| v as u128);
+                // Degrees k in 0..B have scalar GF(p) coefficients y_{B-1-k, l}
+                for (k, &yv) in y_col.iter().enumerate() {
+                    if yv != 0 {
+                        let dst = j + k;
+                        for c in 0..5 {
+                            let p = pj_u128[c] * yv;
+                            poly_lo[dst][c] += p & MASK64;
+                            poly_hi[dst][c] += p >> 64;
                         }
                     }
-                    poly_v[j + SD_GRID_B] = poly_v[j + SD_GRID_B].add(pj.mul(v_l));
+                }
+                poly_v[j + SD_GRID_B] = poly_v[j + SD_GRID_B].add(pj.mul(v_l));
+            }
+        }
+        let mut poly_full = [Fp5::ZERO; 2 * SD_GRID_B + 1];
+        for d in 0..=(2 * SD_GRID_B) {
+            poly_full[d] = reduce_fp5_split(&poly_lo[d], &poly_hi[d]).add(poly_v[d]);
+        }
+
+        // Verify degree-B coefficient equals `c_plain + sum_{b,l} theta_b * eta_l * z_{b,l}`:
+        let mut z_comb = Fp5::ZERO;
+        for (l, &eta_l) in eta.iter().enumerate() {
+            let mut col_z = Fp5::ZERO;
+            for (b, &theta_b) in theta.iter().enumerate() {
+                let zv = trace.z[b * SD_GRID_L + l];
+                if zv != 0 {
+                    col_z = col_z.add(theta_b.scale_fp(zv));
                 }
             }
-            let mut poly_full = [Fp5::ZERO; 2 * SD_GRID_B + 1];
-            for d in 0..=(2 * SD_GRID_B) {
-                poly_full[d] = reduce_fp5_split(&poly_lo[d], &poly_hi[d]).add(poly_v[d]);
-            }
+            z_comb = z_comb.add(eta_l.mul(col_z));
+        }
+        debug_assert_eq!(poly_full[SD_GRID_B], r1.c_plain.add(z_comb));
 
-            // Verify degree-B coefficient equals `c_plain + sum_{b,l} theta_b * eta_l * z_{b,l}`:
-            let mut z_comb = Fp5::ZERO;
-            for l in 0..SD_GRID_L {
-                let mut col_z = Fp5::ZERO;
-                for b in 0..SD_GRID_B {
-                    let zv = trace.z[b * SD_GRID_L + l];
-                    if zv != 0 {
-                        col_z = col_z.add(theta[b].scale_fp(zv));
-                    }
-                }
-                z_comb = z_comb.add(eta[l].mul(col_z));
-            }
-            debug_assert_eq!(poly_full[SD_GRID_B], r1.c_plain.add(z_comb));
-
-            let mut r_poly_without_b = Vec::with_capacity(SD_RPOLY_COEFFS);
-            for d in 0..SD_GRID_B {
-                r_poly_without_b.push(poly_full[d].add(r1.m_sum[d]).0);
-            }
-            for idx in SD_GRID_B..SD_RPOLY_COEFFS {
-                let d = idx + 1;
-                r_poly_without_b.push(poly_full[d].add(r1.m_sum[idx]).0);
-            }
-            (theta, eta, r_poly_without_b)
-        });
+        let mut r_poly_without_b = Vec::with_capacity(SD_RPOLY_COEFFS);
+        for (&pf, &ms) in poly_full[..SD_GRID_B].iter().zip(&r1.m_sum[..SD_GRID_B]) {
+            r_poly_without_b.push(pf.add(ms).0);
+        }
+        for (&pf, &ms) in poly_full[SD_GRID_B + 1..=SD_RPOLY_COEFFS]
+            .iter()
+            .zip(&r1.m_sum[SD_GRID_B..SD_RPOLY_COEFFS])
+        {
+            r_poly_without_b.push(pf.add(ms).0);
+        }
+        (theta, eta, r_poly_without_b)
+    });
     ct_zeroize_bytes(&mut gamma_seed);
     drop(trace);
 
@@ -3461,24 +3498,22 @@ pub fn prove_selective_disclosure_with_profile(
             let base_p = batch * 8;
             let seeds_8: [[u8; 32]; 8] =
                 core::array::from_fn(|lane| r1.ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]);
-            let mut prg =
-                Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
+            let mut prg = Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
             let _ = prg.extract_salts_1();
             prg.squeeze_canonical_gl([true; 8], &mut batch_tapes, total_party_limbs);
 
-            for lane in 0..8 {
+            for (lane, tape) in batch_tapes.iter_mut().enumerate() {
                 let p = base_p + lane;
-                let tape = &batch_tapes[lane];
                 let (u_p, v_p, mut c_p, m_p) = unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]);
                 let w_raw = &tape[PARTY_EXT_LIMBS..PARTY_EXT_LIMBS + num_secret_wires];
                 let z_raw = &tape[PARTY_EXT_LIMBS + num_secret_wires..];
 
                 if p == VC_SD_LIMBO_PARTIES - 1 {
-                    for k in 0..num_secret_wires {
-                        w_buf.0[k] = gl_add(w_raw[k], r1.delta_w[k]);
+                    for ((dst, &wr), &dw) in w_buf.0.iter_mut().zip(w_raw).zip(r1.delta_w.iter()) {
+                        *dst = gl_add(wr, dw);
                     }
-                    for g in 0..SD_TOTAL_GATES {
-                        z_buf.0[g] = gl_add(z_raw[g], r1.delta_z[g]);
+                    for ((dst, &zr), &dz) in z_buf.0.iter_mut().zip(z_raw).zip(r1.delta_z.iter()) {
+                        *dst = gl_add(zr, dz);
                     }
                     c_p = c_p.add(r1.delta_c);
                     eval_sd_party_shares(
@@ -3528,7 +3563,7 @@ pub fn prove_selective_disclosure_with_profile(
                     &beta_i,
                     sigma_i,
                 );
-                ct_zeroize_u64s(&mut batch_tapes[lane]);
+                ct_zeroize_u64s(tape);
             }
         }
         ct_zeroize_u64s(&mut x_grid);
@@ -3553,8 +3588,7 @@ pub fn prove_selective_disclosure_with_profile(
         }
     });
 
-    let mut r2b_bundle =
-        Vec::with_capacity(tau * (2 * SD_GRID_L * 40 + VC_SD_LIMBO_PARTIES * 32));
+    let mut r2b_bundle = Vec::with_capacity(tau * (2 * SD_GRID_L * 40 + VC_SD_LIMBO_PARTIES * 32));
     for out in &r2b_outs {
         for v in out.alpha.iter().chain(out.beta.iter()) {
             for &limb in v {
@@ -3768,56 +3802,52 @@ pub fn verify_presentation_with_profile(
 
     // Step V1 (parallel): reconstruct 255 GGM leaf seeds and Round-1 party commitments
     // (requiring only the first Keccak block per party to extract `salt_1[i]`).
-    let v_r1: Vec<([[u8; 32]; VC_SD_LIMBO_PARTIES], [[u8; 32]; VC_SD_LIMBO_PARTIES])> =
-        parallel_map_indexed(tau, |rep| {
-            let rep_u32 = rep as u32;
-            let o = &pres.opened_reps[rep];
-            let hidden = o.hidden_party as usize;
-            let leaves = reconstruct_ggm_leaves_256(
-                &o.ggm_copath,
-                o.hidden_party,
-                &pres.presentation_nonce,
-                rep_u32,
-            );
-            let aux_digest = o
-                .aux
-                .as_ref()
-                .map(|a| digest_limbo_aux(&a.delta_w, &a.delta_z, &a.delta_c));
+    type LimboPartyBytes = [[u8; 32]; VC_SD_LIMBO_PARTIES];
+    let v_r1: Vec<(LimboPartyBytes, LimboPartyBytes)> = parallel_map_indexed(tau, |rep| {
+        let rep_u32 = rep as u32;
+        let o = &pres.opened_reps[rep];
+        let hidden = o.hidden_party as usize;
+        let leaves = reconstruct_ggm_leaves_256(
+            &o.ggm_copath,
+            o.hidden_party,
+            &pres.presentation_nonce,
+            rep_u32,
+        );
+        let aux_digest = o
+            .aux
+            .as_ref()
+            .map(|a| digest_limbo_aux(&a.delta_w, &a.delta_z, &a.delta_c));
 
-            let mut com_1 = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
-            com_1[hidden] = o.com_1_hidden;
-            for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
-                let base_p = batch * 8;
-                let seeds_8: [[u8; 32]; 8] = core::array::from_fn(|lane| leaves[base_p + lane]);
-                let mut prg = Shake256PartyBatch8::new(
+        let mut com_1 = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
+        com_1[hidden] = o.com_1_hidden;
+        for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
+            let base_p = batch * 8;
+            let seeds_8: [[u8; 32]; 8] = core::array::from_fn(|lane| leaves[base_p + lane]);
+            let mut prg =
+                Shake256PartyBatch8::new(&pres.presentation_nonce, rep_u32, base_p, &seeds_8);
+            let salts = prg.extract_salts_1();
+            for lane in 0..8 {
+                let p = base_p + lane;
+                if p == hidden {
+                    continue;
+                }
+                let ad = if p == VC_SD_LIMBO_PARTIES - 1 {
+                    aux_digest.as_ref()
+                } else {
+                    None
+                };
+                com_1[p] = commit_limbo_party_r1(
                     &pres.presentation_nonce,
                     rep_u32,
-                    base_p,
-                    &seeds_8,
+                    p as u16,
+                    &seeds_8[lane],
+                    ad,
+                    &salts[lane],
                 );
-                let salts = prg.extract_salts_1();
-                for lane in 0..8 {
-                    let p = base_p + lane;
-                    if p == hidden {
-                        continue;
-                    }
-                    let ad = if p == VC_SD_LIMBO_PARTIES - 1 {
-                        aux_digest.as_ref()
-                    } else {
-                        None
-                    };
-                    com_1[p] = commit_limbo_party_r1(
-                        &pres.presentation_nonce,
-                        rep_u32,
-                        p as u16,
-                        &seeds_8[lane],
-                        ad,
-                        &salts[lane],
-                    );
-                }
             }
-            (leaves, com_1)
-        });
+        }
+        (leaves, com_1)
+    });
 
     let mut r1_bundle = Vec::with_capacity(tau * VC_SD_LIMBO_PARTIES * 32);
     for (_, com_1) in &v_r1 {
@@ -3885,23 +3915,22 @@ pub fn verify_presentation_with_profile(
             let _ = prg.extract_salts_1();
             prg.squeeze_canonical_gl(active_mask, &mut batch_tapes, total_party_limbs);
 
-            for lane in 0..8 {
+            for (lane, tape) in batch_tapes.iter_mut().enumerate() {
                 let p = base_p + lane;
                 if p == hidden {
                     continue;
                 }
-                let tape = &batch_tapes[lane];
                 let (u_p, v_p, mut c_p, m_p) = unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]);
                 let w_raw = &tape[PARTY_EXT_LIMBS..PARTY_EXT_LIMBS + expected_num_secret_wires];
                 let z_raw = &tape[PARTY_EXT_LIMBS + expected_num_secret_wires..];
 
                 if p == VC_SD_LIMBO_PARTIES - 1 {
                     let aux = o.aux.as_ref().expect("validated aux for opened party 255");
-                    for k in 0..expected_num_secret_wires {
-                        w_buf.0[k] = gl_add(w_raw[k], aux.delta_w[k]);
+                    for ((dst, &wr), &dw) in w_buf.0.iter_mut().zip(w_raw).zip(&aux.delta_w) {
+                        *dst = gl_add(wr, dw);
                     }
-                    for g in 0..SD_TOTAL_GATES {
-                        z_buf.0[g] = gl_add(z_raw[g], aux.delta_z[g]);
+                    for ((dst, &zr), &dz) in z_buf.0.iter_mut().zip(z_raw).zip(&aux.delta_z) {
+                        *dst = gl_add(zr, dz);
                     }
                     c_p = c_p.add(Fp5(aux.delta_c));
                     eval_sd_party_shares(
@@ -3951,7 +3980,7 @@ pub fn verify_presentation_with_profile(
                     &beta_i,
                     sigma_i,
                 );
-                ct_zeroize_u64s(&mut batch_tapes[lane]);
+                ct_zeroize_u64s(tape);
             }
         }
 
@@ -3981,8 +4010,7 @@ pub fn verify_presentation_with_profile(
     });
     ct_zeroize_bytes(&mut gamma_seed);
 
-    let mut r2b_bundle =
-        Vec::with_capacity(tau * (2 * SD_GRID_L * 40 + VC_SD_LIMBO_PARTIES * 32));
+    let mut r2b_bundle = Vec::with_capacity(tau * (2 * SD_GRID_L * 40 + VC_SD_LIMBO_PARTIES * 32));
     for (o, h_online) in pres.opened_reps.iter().zip(&v_h_online) {
         for v in o.alpha.iter().chain(o.beta.iter()) {
             for &limb in v {
@@ -4044,10 +4072,7 @@ impl SelectiveDisclosurePresentation {
             + 4
             + VC_ACCUMULATOR_DEPTH
             + 6 * VC_ACCUMULATOR_DEPTH;
-        let base_rep_bytes = 1
-            + VC_SD_GGM_DEPTH * 32
-            + 32
-            + (SD_RPOLY_COEFFS + 2 * SD_GRID_L) * 40;
+        let base_rep_bytes = 1 + VC_SD_GGM_DEPTH * 32 + 32 + (SD_RPOLY_COEFFS + 2 * SD_GRID_L) * 40;
         let aux_bytes = (num_secret_wires + SD_TOTAL_GATES + 5) * 8;
         let mode_extra = match self.mode {
             PresentationMode::UnlinkableFresh => 1,
@@ -4276,11 +4301,8 @@ impl SelectiveDisclosurePresentation {
             return Err(BlindVcError::SelectiveDisclosureProofInvalid);
         }
 
-        let num_secret_wires = (arity - disclosed_count)
-            + 4
-            + 4
-            + VC_ACCUMULATOR_DEPTH
-            + 6 * VC_ACCUMULATOR_DEPTH;
+        let num_secret_wires =
+            (arity - disclosed_count) + 4 + 4 + VC_ACCUMULATOR_DEPTH + 6 * VC_ACCUMULATOR_DEPTH;
         let base_rep_tail = VC_SD_GGM_DEPTH * 32 + 32 + (SD_RPOLY_COEFFS + 2 * SD_GRID_L) * 40;
         let aux_bytes = (num_secret_wires + SD_TOTAL_GATES + 5) * 8;
 
@@ -4436,12 +4458,17 @@ mod tests {
         let nonce = [0x3Cu8; 32];
         let rep = 19u32;
         let base_party = 40usize;
-        let seeds: [[u8; 32]; 8] = core::array::from_fn(|i| [(i as u8).wrapping_mul(29) ^ 0xA5; 32]);
+        let seeds: [[u8; 32]; 8] =
+            core::array::from_fn(|i| [(i as u8).wrapping_mul(29) ^ 0xA5; 32]);
 
         let mut batch = Shake256PartyBatch8::new(&nonce, rep, base_party, &seeds);
         let salts = batch.extract_salts_1();
         let mut outs: [Vec<u64>; 8] = core::array::from_fn(|_| Vec::new());
-        batch.squeeze_canonical_gl([true, false, true, true, true, false, true, true], &mut outs, 512);
+        batch.squeeze_canonical_gl(
+            [true, false, true, true, true, false, true, true],
+            &mut outs,
+            512,
+        );
 
         for inst in 0..8 {
             let mut sp = Shake256::new();
@@ -4481,11 +4508,11 @@ mod tests {
         for hidden in [0u8, 1, 127, 128, 254, 255] {
             let copath = extract_ggm_copath(&full, hidden);
             let rec = reconstruct_ggm_leaves_256(&copath, hidden, &nonce, 3);
-            for p in 0..VC_SD_LIMBO_PARTIES {
+            for (p, &leaf) in rec.iter().enumerate() {
                 if p == hidden as usize {
-                    assert_eq!(rec[p], [0u8; 32]);
+                    assert_eq!(leaf, [0u8; 32]);
                 } else {
-                    assert_eq!(rec[p], full.0[VC_SD_LIMBO_PARTIES + p]);
+                    assert_eq!(leaf, full.0[VC_SD_LIMBO_PARTIES + p]);
                 }
             }
         }
@@ -4789,8 +4816,7 @@ mod tests {
         presentation.opened_reps[0].alpha[0][0] =
             gl_sub(presentation.opened_reps[0].alpha[0][0], 1);
 
-        presentation.opened_reps[0].beta[0][0] =
-            gl_add(presentation.opened_reps[0].beta[0][0], 1);
+        presentation.opened_reps[0].beta[0][0] = gl_add(presentation.opened_reps[0].beta[0][0], 1);
         assert!(!verify_presentation_with_profile(
             &presentation,
             &root_attestation,
@@ -4803,10 +4829,13 @@ mod tests {
             holder.arity,
             profile
         ));
-        presentation.opened_reps[0].beta[0][0] =
-            gl_sub(presentation.opened_reps[0].beta[0][0], 1);
+        presentation.opened_reps[0].beta[0][0] = gl_sub(presentation.opened_reps[0].beta[0][0], 1);
 
-        if let Some(aux_rep) = presentation.opened_reps.iter_mut().find(|r| r.aux.is_some()) {
+        if let Some(aux_rep) = presentation
+            .opened_reps
+            .iter_mut()
+            .find(|r| r.aux.is_some())
+        {
             let aux = aux_rep.aux.as_mut().unwrap();
             aux.delta_z[0] = gl_add(aux.delta_z[0], 1);
             assert!(!verify_presentation_with_profile(
@@ -5021,7 +5050,8 @@ mod tests {
             let mut tampered = compact;
             let last = tampered.len() - 64;
             tampered[last] ^= 1;
-            if let Ok(bad_pres) = SelectiveDisclosurePresentation::from_compact_wire_bytes(&tampered)
+            if let Ok(bad_pres) =
+                SelectiveDisclosurePresentation::from_compact_wire_bytes(&tampered)
             {
                 assert!(!verify_presentation_with_profile(
                     &bad_pres,

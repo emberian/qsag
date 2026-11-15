@@ -257,8 +257,14 @@ theorem RatBound.toBudget_ofBudget (r : Qsag.RatBound) :
 theorem RatBound.le_iff_budget_le (r₁ r₂ : RatBound) :
     r₁.le r₂ ↔ Qsag.RatBound.le r₁.toBudget r₂.toBudget := Iff.rfl
 
+theorem RatBound.ofBudget_le_iff (r₁ r₂ : Qsag.RatBound) :
+    (RatBound.ofBudget r₁).le (RatBound.ofBudget r₂) ↔ Qsag.RatBound.le r₁ r₂ := Iff.rfl
+
 theorem RatBound.lt_iff_budget_lt (r₁ r₂ : RatBound) :
     r₁.lt r₂ ↔ Qsag.RatBound.lt r₁.toBudget r₂.toBudget := Iff.rfl
+
+theorem RatBound.ofBudget_lt_iff (r₁ r₂ : Qsag.RatBound) :
+    (RatBound.ofBudget r₁).lt (RatBound.ofBudget r₂) ↔ Qsag.RatBound.lt r₁ r₂ := Iff.rfl
 
 theorem RatBound.atLeastBits_iff_budget (b : Nat) (r : RatBound) :
     r.atLeastBits b ↔ Qsag.atLeastBits b r.toBudget := Iff.rfl

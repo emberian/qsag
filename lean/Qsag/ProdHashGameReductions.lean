@@ -504,7 +504,8 @@ theorem advAllWotsChainsWithCands_within (params : PqHashParams) (pkSeed : List 
       intro prev
       exact (HashSignAdv.Within.map _ (advWotsChainWithCands_within _ _ _ _ _ _ _ _)).mono
         (by omega) (Nat.le_refl 0)
-    exact (HashSignAdv.Within.bind hPrev hStep).mono (by rw [Nat.succ_mul]) (Nat.le_refl 0)
+    exact (HashSignAdv.Within.bind hPrev hStep).mono
+      (by rw [Nat.succ_mul]; exact Nat.le_refl _) (Nat.le_refl 0)
 
 theorem runHashSignAdv_advAllWotsChainsWithCands (suite : TweakableHashSuite) (params : PqHashParams)
     (sk : PqSecretKey) (pkSeed : List UInt8) (layer : UInt32) (tree : UInt64) (kp : Nat)
@@ -910,7 +911,6 @@ theorem runHashSignAdv_advDeriveProductionStatelessInputs (suite : TweakableHash
     rw [runHashSignAdv_bind, runHashSignAdv_advThXofMsgBlocks]
     dsimp only [runHashSignAdv]
     rw [← thXofMsg_eq_publicXofMsgBlocks]
-    rfl
 
 /-- Single-pass hypertree layer verifier recording `(ProdTargetIdx, forgedPreimage)` candidates. -/
 def hypertreeLayersWithCands (suite : TweakableHashSuite) (params : PqHashParams)
@@ -1307,11 +1307,14 @@ theorem publicVerifierWithTcrCands_fst (suite : TweakableHashSuite) (params : Pq
       · simp only [Bool.false_eq_true, ↓reduceIte]
         split
         · rfl
-        · cases deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot
+        · cases hD : deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot
               (thPreHash suite pk.pkSeed pk.pkRoot msg) with
           | none => rfl
           | some pr =>
             rcases pr with ⟨derivedLeafIdx, idxs⟩
+            have hIdxsLen : idxs.length = params.forsTrees :=
+              (deriveProductionStatelessInputs_bounds suite params sig.rRand pk.pkSeed pk.pkRoot
+                (thPreHash suite pk.pkSeed pk.pkRoot msg) derivedLeafIdx idxs hD).2.2.2.1
             dsimp only
             split
             · rfl
@@ -1319,7 +1322,8 @@ theorem publicVerifierWithTcrCands_fst (suite : TweakableHashSuite) (params : Pq
               have hLenEq : sig.forsOpenings.length = params.forsTrees := by
                 rename_i hNotNe _
                 exact Decidable.of_not_not hNotNe
-              simp only [hLenEq, ne_eq, not_true_eq_false, ↓reduceIte]
+              simp only [hLenEq, hIdxsLen, ne_eq, not_true_eq_false, decide_false, Bool.or_self,
+                Bool.false_eq_true, ↓reduceIte]
               rw [forsRootsWithCands_fst]
               cases recoverProductionForsTreeRoots suite params pk.pkSeed
                   (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
@@ -1337,10 +1341,13 @@ theorem publicVerifierWithTcrCands_fst (suite : TweakableHashSuite) (params : Pq
                      .forsRoots, UInt32.ofNat (sig.leafGlobalIdx % 2 ^ params.subtreeHeight), 0, 0⟩
                     roots := rfl
                 rw [hFpk, hypertreeLayersWithCands_fst]
+                rfl
       · simp only [↓reduceIte]
         split
         · rfl
-        · rw [hypertreeLayersWithCands_fst]
+        · dsimp only
+          rw [hypertreeLayersWithCands_fst]
+          rfl
 
 theorem publicVerifierWithTcrCands_cands_length_le (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
@@ -1561,16 +1568,16 @@ private theorem prodWalkMerkleExtract_mem_cands (suite : TweakableHashSuite) (pk
   | 0, _, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
   | _ + 1, _, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
   | h + 1, d, nodeIdx, localIdx, leaf, sib :: rest, hLe, hLt, hU, hW, c, hEx => by
-    unfold prodWalkMerkleExtract at hEx
-    dsimp only at hEx
+    simp only [prodWalkMerkleExtract] at hEx
     unfold walkMerkleKpWithCands
     by_cases hHalf : localIdx < 2 ^ h
-    · simp only [hHalf, ↓reduceIte] at hEx ⊢
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
       split at hEx
       · rename_i hSub
         exfalso
         have hW' := hW
-        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW'
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
         cases hW'
       · rename_i sub hSub
         have hSubKp : (walkMerkleKpWithCands suite pkSeed layer tree kind 0 h (d + 1)
@@ -1582,69 +1589,18 @@ private theorem prodWalkMerkleExtract_mem_cands (suite : TweakableHashSuite) (pk
         · obtain ⟨d', _, hMem⟩ := prodWalkMerkleExtract_mem_cands suite pkSeed layer tree kind
             leafFn U H C mkCol proj hProj h (d + 1) (2 * nodeIdx) localIdx leaf rest
             _ _ _ _ c hEx
-          exact ⟨d', rfl, List.mem_cons_of_mem _ hMem⟩
+          exact ⟨d', trivial, List.mem_cons_of_mem _ hMem⟩
         · injection hEx with hC
           subst hC
           rw [hProj]
-          exact ⟨d, rfl, List.mem_cons_self⟩
-
-private theorem prodWalkMerkleExtract_inr_prop (suite : TweakableHashSuite) (pkSeed : List UInt8)
-    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (leafFn : Nat → List UInt8)
-    (U H : Nat) (C : Type)
-    (mkCol : ∀ (h n : Nat) (a b : List UInt8),
-      h + 1 ≤ H → n * 2 ^ (h + 1) ≤ U → U < (n + 1) * 2 ^ (h + 1) →
-      thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩ [a, b] ≠
-        thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
-          [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
-           computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)] →
-      suite.rawHash
-          (thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
-            [a, b]) =
-        suite.rawHash
-          (thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
-            [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
-             computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)]) → C)
-    (P : C → Prop)
-    (hMk : ∀ h n a b hLe hLo hHi hNe hHash, P (mkCol h n a b hLe hLo hHi hNe hHash)) :
-    ∀ (h nodeIdx localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8))
-      (hLe : h ≤ H) (hLt : localIdx < 2 ^ h) (hU : nodeIdx * 2 ^ h + localIdx = U)
-      (hW : walkMerkleAuthPath suite pkSeed layer tree kind h nodeIdx localIdx leaf path =
-        some (computeMerkleNode suite pkSeed layer tree kind leafFn h nodeIdx)) (c : C),
-      prodWalkMerkleExtract suite pkSeed layer tree kind leafFn U H C mkCol
-        h nodeIdx localIdx leaf path hLe hLt hU hW = .inr c → P c
-  | 0, _, _, _, [], _, _, _, _, _, hEx => by cases hEx
-  | 0, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
-  | _ + 1, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
-  | h + 1, nodeIdx, localIdx, leaf, sib :: rest, hLe, hLt, hU, hW, c, hEx => by
-    unfold prodWalkMerkleExtract at hEx
-    dsimp only at hEx
-    by_cases hHalf : localIdx < 2 ^ h
-    · simp only [hHalf, ↓reduceIte] at hEx
-      split at hEx
-      · rename_i hSub
-        exfalso; have hW' := hW
-        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
-        · exact prodWalkMerkleExtract_inr_prop suite pkSeed layer tree kind leafFn U H C mkCol P hMk
-            h (2 * nodeIdx) localIdx leaf rest _ _ _ _ c hEx
-        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _
-    · simp only [hHalf, ↓reduceIte] at hEx
-      split at hEx
-      · rename_i hSub
-        exfalso; have hW' := hW
-        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
-        · exact prodWalkMerkleExtract_inr_prop suite pkSeed layer tree kind leafFn U H C mkCol P hMk
-            h (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest _ _ _ _ c hEx
-        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _
-    · simp only [hHalf, ↓reduceIte] at hEx ⊢
+          exact ⟨d, trivial, List.mem_cons_self⟩
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
       split at hEx
       · rename_i hSub
         exfalso
         have hW' := hW
-        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW'
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
         cases hW'
       · rename_i sub hSub
         have hSubKp : (walkMerkleKpWithCands suite pkSeed layer tree kind 0 h (d + 1)
@@ -1656,11 +1612,11 @@ private theorem prodWalkMerkleExtract_inr_prop (suite : TweakableHashSuite) (pkS
         · obtain ⟨d', _, hMem⟩ := prodWalkMerkleExtract_mem_cands suite pkSeed layer tree kind
             leafFn U H C mkCol proj hProj h (d + 1) (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest
             _ _ _ _ c hEx
-          exact ⟨d', rfl, List.mem_cons_of_mem _ hMem⟩
+          exact ⟨d', trivial, List.mem_cons_of_mem _ hMem⟩
         · injection hEx with hC
           subst hC
           rw [hProj]
-          exact ⟨d, rfl, List.mem_cons_self⟩
+          exact ⟨d, trivial, List.mem_cons_self⟩
 
 private theorem prodWalkMerkleExtract_inr_prop (suite : TweakableHashSuite) (pkSeed : List UInt8)
     (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (leafFn : Nat → List UInt8)
@@ -1690,26 +1646,25 @@ private theorem prodWalkMerkleExtract_inr_prop (suite : TweakableHashSuite) (pkS
   | 0, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
   | _ + 1, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
   | h + 1, nodeIdx, localIdx, leaf, sib :: rest, hLe, hLt, hU, hW, c, hEx => by
-    unfold prodWalkMerkleExtract at hEx
-    dsimp only at hEx
+    simp only [prodWalkMerkleExtract] at hEx
     by_cases hHalf : localIdx < 2 ^ h
-    · simp only [hHalf, ↓reduceIte] at hEx
+    · simp only [hHalf, ↓reduceDIte] at hEx
       split at hEx
       · rename_i hSub
         exfalso; have hW' := hW
-        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
         · exact prodWalkMerkleExtract_inr_prop suite pkSeed layer tree kind leafFn U H C mkCol P hMk
             h (2 * nodeIdx) localIdx leaf rest _ _ _ _ c hEx
         · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _
-    · simp only [hHalf, ↓reduceIte] at hEx
+    · simp only [hHalf, ↓reduceDIte] at hEx
       split at hEx
       · rename_i hSub
         exfalso; have hW' := hW
-        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
         · exact prodWalkMerkleExtract_inr_prop suite pkSeed layer tree kind leafFn U H C mkCol P hMk
             h (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest _ _ _ _ c hEx
         · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _
@@ -1762,16 +1717,16 @@ private theorem prodWalkMerkleKpExtract_mem_cands (suite : TweakableHashSuite) (
       rw [hPow, Nat.mul_add]
     have hR : 2 * (root * 2 ^ d + localBase) + 1 = root * 2 ^ (d + 1) + (2 * localBase + 1) := by
       rw [hPow, Nat.mul_add, Nat.add_assoc]
-    unfold prodWalkMerkleKpExtract at hEx
-    dsimp only at hEx
+    simp only [prodWalkMerkleKpExtract] at hEx
     unfold walkMerkleKpWithCands
     by_cases hHalf : localIdx < 2 ^ h
-    · simp only [hHalf, ↓reduceIte] at hEx ⊢
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
       split at hEx
       · rename_i hSub
         exfalso
         have hW' := hW
-        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte, hSub] at hW'
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
         cases hW'
       · rename_i sub hSub
         have hSubW : (walkMerkleKpWithCands suite pkSeed layer tree kind kp h (d + 1)
@@ -1788,73 +1743,13 @@ private theorem prodWalkMerkleKpExtract_mem_cands (suite : TweakableHashSuite) (
           subst hC
           rw [hProj]
           exact List.mem_cons_self
-
-private theorem prodWalkMerkleKpExtract_inr_prop (suite : TweakableHashSuite) (pkSeed : List UInt8)
-    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (kp : UInt32)
-    (leafFn : Nat → List UInt8) (root U H : Nat) (C : Type)
-    (mkCol : ∀ (h d b : Nat) (x y : List UInt8),
-      d + (h + 1) = H → b * 2 ^ (h + 1) ≤ U → U < (b + 1) * 2 ^ (h + 1) →
-      thPreimage tagThH pkSeed
-          ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩ [x, y] ≠
-        thPreimage tagThH pkSeed
-          ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩
-          [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
-             (2 * (root * 2 ^ d + b)) (2 * b),
-           computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
-             (2 * (root * 2 ^ d + b) + 1) (2 * b + 1)] →
-      suite.rawHash
-          (thPreimage tagThH pkSeed
-            ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩ [x, y]) =
-        suite.rawHash
-          (thPreimage tagThH pkSeed
-            ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩
-            [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
-               (2 * (root * 2 ^ d + b)) (2 * b),
-             computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
-               (2 * (root * 2 ^ d + b) + 1) (2 * b + 1)]) → C)
-    (P : C → Prop)
-    (hMk : ∀ h d b x y hD hLo hHi hNe hHash, P (mkCol h d b x y hD hLo hHi hNe hHash)) :
-    ∀ (h d localBase localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8))
-      (hD : d + h = H) (hLt : localIdx < 2 ^ h) (hU : localBase * 2 ^ h + localIdx = U)
-      (hW : walkMerkleAuthPathKp suite pkSeed layer tree kind kp h (root * 2 ^ d + localBase)
-        localIdx leaf path =
-        some (computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
-          (root * 2 ^ d + localBase) localBase)) (c : C),
-      prodWalkMerkleKpExtract suite pkSeed layer tree kind kp leafFn root U H C mkCol
-        h d localBase localIdx leaf path hD hLt hU hW = .inr c → P c
-  | 0, _, _, _, _, [], _, _, _, _, _, hEx => by cases hEx
-  | 0, _, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
-  | _ + 1, _, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
-  | h + 1, d, localBase, localIdx, leaf, sib :: rest, hD, hLt, hU, hW, c, hEx => by
-    unfold prodWalkMerkleKpExtract at hEx
-    dsimp only at hEx
-    by_cases hHalf : localIdx < 2 ^ h
-    · simp only [hHalf, ↓reduceIte] at hEx
-      split at hEx
-      · rename_i hSub
-        exfalso; have hW' := hW
-        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
-        · exact prodWalkMerkleKpExtract_inr_prop suite pkSeed layer tree kind kp leafFn root U H C
-            mkCol P hMk h (d + 1) (2 * localBase) localIdx leaf rest _ _ _ _ c hEx
-        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _ _
-    · simp only [hHalf, ↓reduceIte] at hEx
-      split at hEx
-      · rename_i hSub
-        exfalso; have hW' := hW
-        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
-        · exact prodWalkMerkleKpExtract_inr_prop suite pkSeed layer tree kind kp leafFn root U H C
-            mkCol P hMk h (d + 1) (2 * localBase + 1) (localIdx - 2 ^ h) leaf rest _ _ _ _ c hEx
-        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _ _
-    · simp only [hHalf, ↓reduceIte] at hEx ⊢
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
       split at hEx
       · rename_i hSub
         exfalso
         have hW' := hW
-        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte, hSub] at hW'
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
         cases hW'
       · rename_i sub hSub
         have hSubW : (walkMerkleKpWithCands suite pkSeed layer tree kind kp h (d + 1)
@@ -1910,26 +1805,25 @@ private theorem prodWalkMerkleKpExtract_inr_prop (suite : TweakableHashSuite) (p
   | 0, _, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
   | _ + 1, _, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
   | h + 1, d, localBase, localIdx, leaf, sib :: rest, hD, hLt, hU, hW, c, hEx => by
-    unfold prodWalkMerkleKpExtract at hEx
-    dsimp only at hEx
+    simp only [prodWalkMerkleKpExtract] at hEx
     by_cases hHalf : localIdx < 2 ^ h
-    · simp only [hHalf, ↓reduceIte] at hEx
+    · simp only [hHalf, ↓reduceDIte] at hEx
       split at hEx
       · rename_i hSub
         exfalso; have hW' := hW
-        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
         · exact prodWalkMerkleKpExtract_inr_prop suite pkSeed layer tree kind kp leafFn root U H C
             mkCol P hMk h (d + 1) (2 * localBase) localIdx leaf rest _ _ _ _ c hEx
         · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _ _
-    · simp only [hHalf, ↓reduceIte] at hEx
+    · simp only [hHalf, ↓reduceDIte] at hEx
       split at hEx
       · rename_i hSub
         exfalso; have hW' := hW
-        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte, hSub] at hW'; cases hW'
-      · dsimp only at hEx
-        split at hEx
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
         · exact prodWalkMerkleKpExtract_inr_prop suite pkSeed layer tree kind kp leafFn root U H C
             mkCol P hMk h (d + 1) (2 * localBase + 1) (localIdx - 2 ^ h) leaf rest _ _ _ _ c hEx
         · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _ _
@@ -1976,6 +1870,87 @@ private theorem prodChainExtract_mem_cands (suite : TweakableHashSuite) (sk : Pq
         subst hEq
         rw [hProj]
         exact List.mem_cons_self
+
+private theorem prodChainExtract_inr_prop (suite : TweakableHashSuite) (sk : PqSecretKey)
+    (layer : UInt32) (tree : UInt64) (kp r top : Nat) (C : Type)
+    (mkCol : ∀ (s : Nat) (x : List UInt8), s + 1 ≤ top →
+      thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x] ≠
+        thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+          [honestChainNode suite sk layer tree kp r s] →
+      suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x]) =
+        suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+            [honestChainNode suite sk layer tree kp r s]) → C)
+    (P : C → Prop)
+    (hMk : ∀ s x hs hNe hHash, P (mkCol s x hs hNe hHash)) :
+    ∀ (k s : Nat) (x : List UInt8) (hTop : s + k = top)
+      (hStep : wotsChainSteps suite sk.pkSeed layer tree kp r s k x =
+        honestChainNode suite sk layer tree kp r (s + k)) (c : C),
+      prodChainExtract suite sk layer tree kp r top C mkCol k s x hTop hStep = .inr c → P c
+  | 0, _, _, _, _, _, hEx => by cases hEx
+  | k + 1, s, x, hTop, hStep, c, hEx => by
+    unfold prodChainExtract at hEx
+    dsimp only at hEx
+    split at hEx
+    · rename_i c' hRec
+      injection hEx with hEq
+      subst hEq
+      exact prodChainExtract_inr_prop suite sk layer tree kp r top C mkCol P hMk k (s + 1) _ _ _
+        c' hRec
+    · split at hEx
+      · cases hEx
+      · injection hEx with hEq
+        subst hEq
+        exact hMk _ _ _ _ _
+
+private theorem prodAllChainsExtract_inr_prop (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) (kp : Nat)
+    (digF : List Nat) (chains : List (List UInt8)) (C : Type)
+    (mkCol : ∀ (r s : Nat) (x : List UInt8), r < params.ell1 → s + 1 ≤ params.w - 1 →
+      thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x] ≠
+        thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+          [honestChainNode suite sk layer tree kp r s] →
+      suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x]) =
+        suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+            [honestChainNode suite sk layer tree kp r s]) → C)
+    (P : C → Prop)
+    (hMk : ∀ r s x hr hs hNe hHash, P (mkCol r s x hr hs hNe hHash))
+    (hEnds : recoverWotsEndpoints suite params sk.pkSeed layer tree kp digF chains =
+      (List.range params.ell1).map fun r => honestChainNode suite sk layer tree kp r (params.w - 1))
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true) :
+    ∀ (m : Nat) (hmLe : m ≤ params.ell1) (c : C),
+      prodAllChainsExtract suite params sk layer tree kp digF chains C mkCol hEnds hTsw m hmLe =
+        .inr c → P c
+  | 0, _, _, hEx => by cases hEx
+  | m + 1, hmLe, c, hEx => by
+    unfold prodAllChainsExtract at hEx
+    dsimp only at hEx
+    split at hEx
+    · rename_i c' hPrev
+      injection hEx with hEq
+      subst hEq
+      exact prodAllChainsExtract_inr_prop suite params sk layer tree kp digF chains C mkCol P hMk
+        hEnds hTsw m _ c' hPrev
+    · split at hEx
+      · rename_i c' hCh
+        injection hEx with hEq
+        subst hEq
+        exact prodChainExtract_inr_prop suite sk layer tree kp m (params.w - 1) C
+          (fun s x hs hNe hHash => mkCol m s x hmLe hs hNe hHash) P
+          (fun s x hs hNe hHash => hMk m s x hmLe hs hNe hHash)
+          (params.w - 1 - digF.getD m 0) (digF.getD m 0) (chains.getD m []) _ _ c' hCh
+      · cases hEx
 
 private theorem prodAllChainsExtract_mem_cands (suite : TweakableHashSuite) (params : PqHashParams)
     (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) (kp : Nat)
@@ -2026,37 +2001,18 @@ private theorem prodAllChainsExtract_mem_cands (suite : TweakableHashSuite) (par
           (fun c0 => ((proj c0).2.1, (proj c0).2.2))
           (fun s x hs hNe hHash => by rw [hProj])
           (params.w - 1 - digF.getD m 0) (digF.getD m 0) (chains.getD m []) _ _ c' hCh
-        have hFst : (proj c').1 = m := by
-          clear hEx
-          generalize (params.w - 1 - digF.getD m 0) = k at hCh
-          revert hCh
-          generalize (digF.getD m 0) = s
-          generalize (chains.getD m []) = x
-          induction k generalizing s x with
-          | zero => intro _ _ h; cases h
-          | succ k' ih =>
-            intro hTop hStep h
-            unfold prodChainExtract at h
-            dsimp only at h
-            split at h
-            · rename_i c'' hSub
-              injection h with hc
-              subst hc
-              exact ih (s + 1) _ _ _ hSub
-            · dsimp only at h
-              split at h
-              · cases h
-              · injection h with hc
-                subst hc
-                rw [hProj]
+        have hFst : (proj c').1 = m :=
+          prodChainExtract_inr_prop suite sk layer tree kp m (params.w - 1) C
+            (fun s x hs hNe hHash => mkCol m s x hmLe hs hNe hHash)
+            (fun c0 => (proj c0).1 = m)
+            (fun s x hs hNe hHash => by rw [hProj])
+            (params.w - 1 - digF.getD m 0) (digF.getD m 0) (chains.getD m []) _ _ c' hCh
         exact List.mem_map.mpr ⟨((proj c').2.1, (proj c').2.2), hMem, by
-          cases hp : proj c' with
-          | mk a bc =>
-            cases bc with
-            | mk b d =>
-              rw [hp] at hFst ⊢
-              dsimp only at hFst ⊢
-              rw [hFst]⟩
+          rcases hp : proj c' with ⟨a, b, d⟩
+          rw [hp] at hFst
+          dsimp only at hFst ⊢
+          subst hFst
+          rfl⟩
       · cases hEx
 
 private theorem prodForsRootsExtract_mem_cands (suite : TweakableHashSuite) (params : PqHashParams)
@@ -2347,8 +2303,7 @@ private theorem prodLayerExtract_mem_cands (suite : TweakableHashSuite) (params 
       apply List.mem_append_right
       rw [allWotsChainsWithCands_fst, ← recoverWotsEndpoints_eq]
       exact List.mem_cons_self
-    · dsimp only at hEx
-      split at hEx
+    · split at hEx
       · rename_i w' hChEx
         injection hEx with hwEq
         subst hwEq
@@ -2368,50 +2323,24 @@ private theorem prodLayerExtract_mem_cands (suite : TweakableHashSuite) (params 
           (fun r s x hr hs hNe hHash =>
             ⟨.chainStep i r s, _, ⟨hi, hr, hs⟩, ⟨x, rfl⟩, hNe, hHash⟩)
           projCh (fun _ _ _ _ _ _ _ => rfl) _ hTsw params.ell1 (Nat.le_refl _) w' hChEx
-        have hTag : ∃ r s, w'.target = .chainStep i r s := by
-          clear hMw1 hMem
-          revert hChEx
-          generalize params.ell1 = m
-          intro hLe
-          induction m with
-          | zero => intro h; cases h
-          | succ m' ih =>
-            intro h
-            unfold prodAllChainsExtract at h
-            dsimp only at h
-            split at h
-            · rename_i c' hP; injection h with hc; subst hc; exact ih _ hP
-            · dsimp only at h
-              split at h
-              · rename_i c' hStepEx
-                injection h with hc; subst hc
-                generalize (params.w - 1 - digF.getD m' 0) = k at hStepEx
-                revert hStepEx
-                generalize (digF.getD m' 0) = s0
-                generalize ((sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD m' []) = x0
-                induction k generalizing s0 x0 with
-                | zero => intro _ _ h0; cases h0
-                | succ k' ihk =>
-                  intro _ _ h0
-                  unfold prodChainExtract at h0
-                  dsimp only at h0
-                  split at h0
-                  · rename_i c'' hSub; injection h0 with hc'; subst hc'; exact ihk _ _ _ _ hSub
-                  · dsimp only at h0
-                    split at h0
-                    · cases h0
-                    · injection h0 with hc'; subst hc'; exact ⟨m', s0, rfl⟩
-              · cases h
+        have hTag : ∃ r s, w'.target = .chainStep i r s :=
+          prodAllChainsExtract_inr_prop suite params sk (UInt32.ofNat i)
+            (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+              2 ^ params.subtreeHeight))
+            (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+            digF (sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains
+            (ProdTcrWitness suite params sk log msgStar sigStar)
+            (fun r s x hr hs hNe hHash =>
+              ⟨.chainStep i r s, _, ⟨hi, hr, hs⟩, ⟨x, rfl⟩, hNe, hHash⟩)
+            (fun w0 => ∃ r s, w0.target = .chainStep i r s)
+            (fun r s _ _ _ _ _ => ⟨r, s, rfl⟩) _ hTsw params.ell1 (Nat.le_refl _) w' hChEx
         obtain ⟨r, s, hT⟩ := hTag
         dsimp only [projCh] at hMem
         rw [hT] at hMem ⊢
         exact List.mem_map.mpr ⟨(r, s, w'.forged), hMem, rfl⟩
-      · dsimp only at hEx
-        split at hEx
+      · split at hEx
         · cases hEx
-        · rename_i subE _
-          rcases subE with ⟨e, he, hPos⟩
-          dsimp only at hEx
+        · rename_i e he hPos _
           split at hEx
           · split at hEx
             · rename_i hPre
@@ -2488,15 +2417,13 @@ private theorem prodHypertreeWalkExtract_mem_cands (suite : TweakableHashSuite)
               rw [hLs, hNextW] at hW0
               cases hW0
             · rename_i next hNextW
-              dsimp only at hEx
               cases hR : rest with
               | nil =>
                 subst hR
                 dsimp only at hEx
                 split at hEx
                 · cases hEx
-                · dsimp only at hEx
-                  split at hEx
+                · split at hEx
                   · rename_i w' hLay
                     injection hEx with hwEq
                     subst hwEq
@@ -2508,22 +2435,30 @@ private theorem prodHypertreeWalkExtract_mem_cands (suite : TweakableHashSuite)
                 subst hR
                 dsimp only at hEx
                 split at hEx
-                · dsimp only at hEx
-                  split at hEx
-                  · cases hEx
-                  · dsimp only at hEx
-                    split at hEx
-                    · rename_i w' hLay
-                      injection hEx with hwEq
-                      subst hwEq
-                      exact prodLayerExtract_mem_cands suite params sk log msgStar sigStar hw hPwf
-                        hLog hCons i _ cur lsig (r0 :: rs) hLs (of_decide_eq_true hCtrB) _ rfl
-                        (by rw [← hLs]; exact hDg ▸ hExt) hChLen _ _ _ w' hLay
-                    · cases hEx
-                · rename_i w' hUp
-                  dsimp only at hEx
+                · rename_i w' hStepEq
                   injection hEx with hwEq
                   subst hwEq
+                  have hUp : prodHypertreeWalkExtract suite params sk log msgStar sigStar hw hPwf
+                      hLog hCons (r0 :: rs) (i + 1) next
+                      (List.cons_ne_nil _ _)
+                      (fun j => by
+                        have h := hAlign (j + 1)
+                        rw [List.getD_cons_succ] at h
+                        rw [h, show i + (j + 1) = i + 1 + j by omega])
+                      (by rw [← hLenEq]; simp only [List.length_cons]; omega)
+                      (by
+                        obtain ⟨_, _, n', hW, hR0⟩ := hInv
+                        rw [hLs, hNextW] at hW
+                        have hn : next = n' := Option.some.inj hW
+                        rw [← hn, hStep] at hR0
+                        exact hR0) = .tcr w' := by
+                    split at hStepEq
+                    · cases hStepEq
+                    · injection hStepEq with h1
+                      injection h1 with h2
+                      subst h2
+                      assumption
+                    · cases hStepEq
                   have hSubMem := prodHypertreeWalkExtract_mem_cands suite params sk log msgStar
                     sigStar hw hPwf hLog hCons (r0 :: rs) (i + 1) next _ _ _ _ w' hUp
                   unfold hypertreeLayersWithCands
@@ -2545,7 +2480,7 @@ private theorem prodHypertreeWalkExtract_mem_cands (suite : TweakableHashSuite)
                           digits lsig.wotsChains params.ell1).1) =
                       recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i)
                         (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
-                          2 ^ params.subtreeHeight))
+                           2 ^ params.subtreeHeight))
                         (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
                           2 ^ params.subtreeHeight)
                         digits lsig.wotsChains := by
@@ -2570,14 +2505,54 @@ private theorem prodHypertreeWalkExtract_mem_cands (suite : TweakableHashSuite)
                             2 ^ params.subtreeHeight)
                           digits lsig.wotsChains params.ell1).1))
                       lsig.authPath).1 = some next := by
-                    rw [walkMerkleKpWithCands_fst, walkMerkleAuthPathKp_zero_eq, hWotsEq, hLs,
-                      hDg]
+                    rw [walkMerkleKpWithCands_fst, walkMerkleAuthPathKp_zero_eq, hWotsEq, ← hDg,
+                      hLs]
                     exact hNextW
                   rw [hMw1, hStep]
                   exact List.mem_append_right _ hSubMem
-                · dsimp only at hEx
-                  cases hEx
+                · cases hEx
+                · split at hEx
+                  · cases hEx
+                  · split at hEx
+                    · rename_i w' hLay
+                      injection hEx with hwEq
+                      subst hwEq
+                      exact prodLayerExtract_mem_cands suite params sk log msgStar sigStar hw hPwf
+                        hLog hCons i _ cur lsig (r0 :: rs) hLs (of_decide_eq_true hCtrB) _ rfl
+                        (by rw [← hLs]; exact hDg ▸ hExt) hChLen _ _ _ w' hLay
+                    · cases hEx
           · simp [hChLen] at hVerRaw
+
+private theorem production_forgery_extract_false (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hSt : params.statefulJorts = false)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    production_forgery_extract suite params sk queries msgStar sigStar hw hOneTime hFresh hAccept =
+      production_stateless_forgery_extract suite params sk queries msgStar sigStar hw hSt hFresh hAccept := by
+  unfold production_forgery_extract
+  split
+  · rfl
+  · rename_i hTrue; rw [hSt] at hTrue; cases hTrue
+
+private theorem production_forgery_extract_true (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hSt : params.statefulJorts = true)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    production_forgery_extract suite params sk queries msgStar sigStar hw hOneTime hFresh hAccept =
+      (match production_stateful_forgery_extract suite params sk queries msgStar sigStar hw hSt
+          (hOneTime hSt) hFresh hAccept with
+       | .inl w => .tcr w
+       | .inr h => .pre h) := by
+  unfold production_forgery_extract
+  split
+  · rename_i hFalse; rw [hSt] at hFalse; cases hFalse
+  · rfl
 
 /-- **Completeness of the Public Candidate Collector (`prodTcrOutput_mem_publicVerifierCands`):**
     Whenever `prodTcrOutput` extracts `(t, forged)` on outcome `o`, that exact pair appears in the
@@ -2592,14 +2567,63 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
     (t, forged) ∈
       (publicVerifierWithTcrCands suite params (derivePublicKey suite params o.sk)
         (productionSigningLog suite params o.sk o.queries) o.msgStar o.sigStar).2 := by
-  unfold prodTcrOutput prodOutcomeBreak at hOut
-  split at hOut
-  · rename_i hWin
+  by_cases hWin : prodEufCmaWin suite params o = true
+  · have hOut' :
+        (match production_forgery_extract suite params o.sk o.queries o.msgStar o.sigStar hw hOneTime
+          (fun e he hEq => by
+            unfold prodEufCmaWin at hWin
+            rw [Bool.and_eq_true] at hWin
+            exact of_decide_eq_true hWin.2 (List.mem_map.mpr ⟨e, he, hEq⟩))
+          (by
+            unfold prodEufCmaWin at hWin
+            rw [Bool.and_eq_true] at hWin
+            exact hWin.1) with
+         | .tcr w => some (w.target, w.forged)
+         | _ => none) = some (t, forged) := by
+      have hBrk : prodOutcomeBreak suite params hw o hOneTime =
+          some (production_forgery_extract suite params o.sk o.queries o.msgStar o.sigStar hw hOneTime
+            (fun e he hEq => by
+              unfold prodEufCmaWin at hWin
+              rw [Bool.and_eq_true] at hWin
+              exact of_decide_eq_true hWin.2 (List.mem_map.mpr ⟨e, he, hEq⟩))
+            (by
+              unfold prodEufCmaWin at hWin
+              rw [Bool.and_eq_true] at hWin
+              exact hWin.1)) := by
+        unfold prodOutcomeBreak
+        split
+        · rfl
+        · contradiction
+      unfold prodTcrOutput at hOut
+      rw [hBrk] at hOut
+      generalize production_forgery_extract _ _ _ _ _ _ _ _ _ _ = brk at hOut ⊢
+      cases brk <;> exact hOut
+    clear hOut
+    obtain ⟨wOut, hOut, rfl, rfl⟩ :
+        ∃ w : ProdTcrWitness suite params o.sk
+          (productionSigningLog suite params o.sk o.queries) o.msgStar o.sigStar,
+          production_forgery_extract suite params o.sk o.queries o.msgStar o.sigStar hw hOneTime
+            (fun e he hEq => by
+              unfold prodEufCmaWin at hWin
+              rw [Bool.and_eq_true] at hWin
+              exact of_decide_eq_true hWin.2 (List.mem_map.mpr ⟨e, he, hEq⟩))
+            (by
+              unfold prodEufCmaWin at hWin
+              rw [Bool.and_eq_true] at hWin
+              exact hWin.1) = .tcr w ∧
+          t = w.target ∧ forged = w.forged := by
+      split at hOut'
+      · rename_i w hEqW
+        simp only [Option.some.injEq, Prod.mk.injEq] at hOut'
+        exact ⟨w, hEqW, hOut'.1.symm, hOut'.2.symm⟩
+      · cases hOut'
+    clear hOut'
     have hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params o.sk)
         o.msgStar o.sigStar = true := by
-      unfold prodEufCmaWin at hWin
-      rw [Bool.and_eq_true] at hWin
-      exact hWin.1
+      have hWin' := hWin
+      unfold prodEufCmaWin at hWin'
+      rw [Bool.and_eq_true] at hWin'
+      exact hWin'.1
     have hAccRaw := hAccept
     rw [verifyProductionPqHashSig_eq] at hAccRaw
     unfold publicVerifierWithTcrCands
@@ -2611,19 +2635,19 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
           rcases hOr with h1 | h2
           · simp [h1] at hG2
           · simp [h2] at hG2
-        simp only [decide_eq_true_eq] at hG2
-        have hL1 : ¬ (o.sigStar.layerSigs.length ≠ params.numLayers) := fun h => hNotGuard (.inl h)
-        have hL2 : ¬ (o.sigStar.msgTswCtr ≠ 0) := fun h => hNotGuard (.inr h)
-        simp only [hL1, hL2, decide_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at hAccRaw ⊢
-        unfold production_forgery_extract at hOut
-        split at hOut
-        · rename_i hSt
+        have hL1 : o.sigStar.layerSigs.length = params.numLayers :=
+          Decidable.of_not_not (fun h => hNotGuard (.inl h))
+        have hL2 : o.sigStar.msgTswCtr = 0 :=
+          Decidable.of_not_not (fun h => hNotGuard (.inr h))
+        simp only [hL1, hL2, ne_eq, not_true_eq_false, decide_false, Bool.or_self,
+          Bool.false_eq_true, ↓reduceIte] at hAccRaw ⊢
+        by_cases hSt : params.statefulJorts = false
+        · rw [production_forgery_extract_false _ _ _ _ _ _ _ hSt] at hOut
           simp only [hSt, Bool.false_eq_true, ↓reduceIte] at hAccRaw ⊢
           cases hOps : decide (o.sigStar.forsOpenings.length ≠ params.forsTrees)
           · have hOpsEq : o.sigStar.forsOpenings.length = params.forsTrees :=
               Decidable.of_not_not (of_decide_eq_false hOps)
-            simp only [hOpsEq, ne_eq, not_true_eq_false, ↓reduceIte] at hAccRaw ⊢
-            dsimp only
+            simp only [hOpsEq, not_true_eq_false, ↓reduceIte] at hAccRaw ⊢
             have hMu : suite.rawHash (thPreimage tagHPre o.sk.pkSeed zeroAdrs
                 [(derivePublicKey suite params o.sk).pkRoot, o.msgStar]) =
                 thPreHash suite o.sk.pkSeed (derivePublicKey suite params o.sk).pkRoot o.msgStar := rfl
@@ -2650,7 +2674,6 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
                   rw [hFors] at hF0
                   cases hF0
                 · rename_i forsPkF hFors
-                  dsimp only at hOut
                   have hIdxsEq : prodSigForsIdxs suite params (derivePublicKey suite params o.sk)
                       o.msgStar o.sigStar = idxs := by
                     unfold prodSigForsIdxs; rw [hSeed, hD]
@@ -2677,8 +2700,8 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
                   rw [hRawFpk]
                   split at hOut
                   · rename_i w' hHtEx
-                    simp only [Option.some.injEq] at hOut
-                    rcases Prod.mk.inj hOut with ⟨rfl, rfl⟩
+                    injection hOut with hwEq
+                    subst hwEq
                     apply List.mem_append_right
                     apply List.mem_cons_of_mem
                     apply List.mem_append_right
@@ -2708,13 +2731,16 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
                     · rename_i rootsF hRSome
                       have hRootsEq : rootsF = roots :=
                         Option.some.inj (hRSome.symm.trans hRootsIdxs)
-                      dsimp only at hOut
                       split at hOut
-                      · dsimp only at hOut
-                        split at hOut
+                      · injection hOut with hwEq
+                        subst hwEq
+                        rw [← hRootsEq]
+                        apply List.mem_append_right
+                        exact List.mem_cons_self
+                      · split at hOut
                         · rename_i w' hFrEx
-                          simp only [Option.some.injEq] at hOut
-                          rcases Prod.mk.inj hOut with ⟨rfl, rfl⟩
+                          injection hOut with hwEq
+                          subst hwEq
                           apply List.mem_append_right
                           apply List.mem_cons_of_mem
                           apply List.mem_append_left
@@ -2722,30 +2748,26 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
                           exact prodForsRootsExtract_mem_cands suite params o.sk _ o.msgStar o.sigStar
                             hSt _ _ _ _ _ _ (fun _ _ _ _ _ _ _ _ _ _ _ _ => rfl) params.forsTrees 0
                             rootsF _ hRSome _ w' hFrEx
-                        · dsimp only at hOut
-                          split at hOut <;> cases hOut
-                      · simp only [Option.some.injEq] at hOut
-                        rcases Prod.mk.inj hOut with ⟨rfl, rfl⟩
-                        rw [← hRootsEq]
-                        apply List.mem_append_right
-                        exact List.mem_cons_self
+                        · split at hOut <;> cases hOut
           · have hOpsNe : o.sigStar.forsOpenings.length ≠ params.forsTrees := of_decide_eq_true hOps
             simp [hOpsNe] at hAccRaw
-        · rename_i hSt
+        · have hStT : params.statefulJorts = true := Bool.not_eq_false _ |>.mp hSt
+          clear hSt
+          have hSt := hStT
+          clear hStT
+          rw [production_forgery_extract_true _ _ _ _ _ _ _ hSt] at hOut
           simp only [hSt, ↓reduceIte] at hAccRaw ⊢
           cases hEmp : (!o.sigStar.forsOpenings.isEmpty)
           · simp only [Bool.false_eq_true, ↓reduceIte] at hAccRaw ⊢
-            dsimp only
             have hSeed : (derivePublicKey suite params o.sk).pkSeed = o.sk.pkSeed := rfl
             have hMu : suite.rawHash (thPreimage tagHPre o.sk.pkSeed zeroAdrs
                 [(derivePublicKey suite params o.sk).pkRoot, o.msgStar]) =
                 thPreHash suite o.sk.pkSeed (derivePublicKey suite params o.sk).pkRoot o.msgStar := rfl
             rw [hSeed, hMu]
-            dsimp only at hOut
             split at hOut
             · rename_i w0 hStEx
-              simp only [Option.some.injEq] at hOut
-              rcases Prod.mk.inj hOut with ⟨rfl, rfl⟩
+              injection hOut with hwEq0
+              subst hwEq0
               unfold production_stateful_forgery_extract at hStEx
               dsimp only at hStEx
               split at hStEx
@@ -2762,10 +2784,9 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
                 rw [h0] at hMem
                 exact hMem
               · cases hStEx
-              · rename_i e he _ _
-                dsimp only at hStEx
+              · rename_i e he _ _ _
                 split at hStEx
-                · rename_i hArgs
+                · rename_i hArgs _
                   exfalso
                   have hFresh : ∀ e' ∈ productionSigningLog suite params o.sk o.queries,
                       e'.1 ≠ o.msgStar := by
@@ -2786,7 +2807,14 @@ theorem prodTcrOutput_mem_publicVerifierCands (suite : TweakableHashSuite) (para
         · simp [h1] at hAccRaw
         · simp [h2] at hAccRaw
     · simp [hG1] at hAccRaw
-  · cases hOut
+  · have hBrk : prodOutcomeBreak suite params hw o hOneTime = none := by
+      unfold prodOutcomeBreak
+      split
+      · contradiction
+      · rfl
+    unfold prodTcrOutput at hOut
+    rw [hBrk] at hOut
+    cases hOut
 
 /-! ## 5. Explicit `Within` Challenger Games (`PRF`, `SM_DT_UD`, `ITSR`, `SM_DT_TCR`, `SM_DT_PRE`) -/
 
@@ -3024,6 +3052,7 @@ theorem smDtTcrWithinWin_discharges_prodSmTcrBreak (suite : TweakableHashSuite)
       (productionSigningLog suite params sk
         (runHashSignAdv suite params sk [] (B (derivePublicKey suite params sk))).2) := by
   unfold smDtTcrWithinWin smDtTcrChallengerCheck at hWin
+  dsimp only at hWin
   cases hOut : (runHashSignAdv suite params sk [] (B (derivePublicKey suite params sk))).1 with
   | none => rw [hOut] at hWin; cases hWin
   | some sub =>
@@ -3157,7 +3186,7 @@ theorem prodTcrEvent_captured_by_slot (suite : TweakableHashSuite) (params : PqH
     rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
     dsimp only
     rw [runHashSignAdv_bind, runHashSignAdv_advVerifyWithTcrCands]
-    dsimp only [smDtTcrChallengerCheck]
+    dsimp only [runHashSignAdv, smDtTcrChallengerCheck]
     have hIdxsEq : (match deriveProductionStatelessInputs suite params r.1.2.rRand pk.pkSeed
         pk.pkRoot (suite.rawHash (thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, r.1.1])) with
         | some (_, is) => is | none => []) =
@@ -3308,8 +3337,8 @@ theorem prodPreEvent_captured_by_slot (suite : TweakableHashSuite) (params : PqH
   dsimp only [HashSignAdv.bind]
   rw [runHashSignAdv_bind]
   dsimp only [advRawHash, runHashSignAdv]
-  rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
-  dsimp only
+  rw [runHashSignAdv_bind, runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+  dsimp only [runHashSignAdv]
   have hIdxsEq : (match deriveProductionStatelessInputs suite params r.1.2.rRand pk.pkSeed
       pk.pkRoot (suite.rawHash (thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, r.1.1])) with
       | some (_, is) => is | none => []) = idxs := rfl
@@ -3378,13 +3407,10 @@ private theorem hitCount_covered_by_fin {Ω : Type} (n : Nat) (ev : Ω → Bool)
       rw [← finSum_add]
       apply finSum_congr
       intro k
-      unfold hitCount
-      cases slotEv k ω <;> simp
+      simp only [hitCount]
     rw [hSplit]
     have hHead : hitCount ev (ω :: rest) =
-        (if ev ω = true then 1 else 0) + hitCount ev rest := by
-      unfold hitCount
-      cases ev ω <;> simp
+        (if ev ω = true then 1 else 0) + hitCount ev rest := rfl
     rw [hHead]
     cases hE : ev ω
     · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
@@ -3438,6 +3464,26 @@ theorem bestPreExtractorAdv_within (coins : List ProdExperimentCoin) (params : P
   unfold bestPreExtractorAdv
   split <;> exact preExtractorAdv_within params _ A hW pk
 
+private theorem hitCount_congr {Ω : Type} {p q : Ω → Bool} (h : ∀ ω, p ω = q ω) :
+    ∀ xs : List Ω, hitCount p xs = hitCount q xs
+  | [] => rfl
+  | ω :: rest => by
+    simp only [hitCount, h ω, hitCount_congr h rest]
+
+private theorem hitCount_le_of_imp {Ω : Type} {p q : Ω → Bool}
+    (h : ∀ ω, p ω = true → q ω = true) :
+    ∀ xs : List Ω, hitCount p xs ≤ hitCount q xs
+  | [] => Nat.le_refl 0
+  | ω :: rest => by
+    have ih := hitCount_le_of_imp h rest
+    simp only [hitCount]
+    by_cases hp : p ω = true
+    · simp only [hp, h ω hp, ↓reduceIte]
+      omega
+    · have hpF : p ω = false := Bool.eq_false_iff.mpr hp
+      simp only [hpF, Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      exact Nat.le_trans ih (Nat.le_add_left _ _)
+
 /-- **Master Seed-Withheld `Within` Hash-Signature Game Reduction Bound
     (`production_euf_cma_within_game_reduction_bound`):**
     For any EUF-CMA forger `A` making at most `qh` hash queries and `qs_max` signing queries with
@@ -3461,20 +3507,10 @@ theorem production_euf_cma_within_game_reduction_bound
       prfWithinAdv coins params (prfExtractorAdv params A) +
       hitCount (fun ω => eufCmaWithinWin ω.prfSuite params ω.sk A) coins := by
     unfold eufCmaRealWithinWins prfWithinAdv prfWithinGameBit prfExtractorAdv
-    have hT : hitCount (fun ω => (runHashSignAdv ω.pubSuite params ω.sk []
-        (eufCmaDistinguisherAdv params A (derivePublicKey ω.pubSuite params ω.sk))).1) coins =
-        hitCount (fun ω => eufCmaWithinWin ω.pubSuite params ω.sk A) coins := by
-      induction coins with
-      | nil => rfl
-      | cons ω rest ih =>
-        simp only [hitCount, eufCmaDistinguisherAdv_simulates, ih]
-    have hF : hitCount (fun ω => (runHashSignAdv ω.prfSuite params ω.sk []
-        (eufCmaDistinguisherAdv params A (derivePublicKey ω.prfSuite params ω.sk))).1) coins =
-        hitCount (fun ω => eufCmaWithinWin ω.prfSuite params ω.sk A) coins := by
-      induction coins with
-      | nil => rfl
-      | cons ω rest ih =>
-        simp only [hitCount, eufCmaDistinguisherAdv_simulates, ih]
+    have hT := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.pubSuite params ω.sk A) coins
+    have hF := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.prfSuite params ω.sk A) coins
     simp only [↓reduceIte, Bool.false_eq_true]
     rw [hT, hF]
     unfold natAbsDiff
@@ -3484,20 +3520,10 @@ theorem production_euf_cma_within_game_reduction_bound
       smDtUdWithinAdv coins params (udExtractorAdv params A) +
       hitCount (fun ω => eufCmaWithinWin ω.udSuite params ω.sk A) coins := by
     unfold smDtUdWithinAdv smDtUdWithinGameBit udExtractorAdv
-    have hT : hitCount (fun ω => (runHashSignAdv ω.prfSuite params ω.sk []
-        (eufCmaDistinguisherAdv params A (derivePublicKey ω.prfSuite params ω.sk))).1) coins =
-        hitCount (fun ω => eufCmaWithinWin ω.prfSuite params ω.sk A) coins := by
-      induction coins with
-      | nil => rfl
-      | cons ω rest ih =>
-        simp only [hitCount, eufCmaDistinguisherAdv_simulates, ih]
-    have hF : hitCount (fun ω => (runHashSignAdv ω.udSuite params ω.sk []
-        (eufCmaDistinguisherAdv params A (derivePublicKey ω.udSuite params ω.sk))).1) coins =
-        hitCount (fun ω => eufCmaWithinWin ω.udSuite params ω.sk A) coins := by
-      induction coins with
-      | nil => rfl
-      | cons ω rest ih =>
-        simp only [hitCount, eufCmaDistinguisherAdv_simulates, ih]
+    have hT := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.prfSuite params ω.sk A) coins
+    have hF := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.udSuite params ω.sk A) coins
     simp only [↓reduceIte, Bool.false_eq_true]
     rw [hT, hF]
     unfold natAbsDiff
@@ -3518,17 +3544,9 @@ theorem production_euf_cma_within_game_reduction_bound
     exact prodEufCmaWin_classified ω.udSuite params hw (outUd ω) (hOTUd ω) hWin
   have hItsrLe :
       hitCount (fun ω => prodItsrEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins ≤
-      itsrWithinWins coins params (itsrExtractorAdv A) := by
-    unfold itsrWithinWins
-    induction coins with
-    | nil => exact Nat.le_refl 0
-    | cons ω rest ih =>
-      unfold hitCount
-      cases hEv : prodItsrEvent ω.udSuite params hw (outUd ω) (hOTUd ω)
-      · simp only [Bool.false_eq_true, ↓reduceIte]
-        cases itsrWithinWin ω.udSuite params ω.sk (itsrExtractorAdv A) <;> simp <;> omega
-      · have hW' := prodItsrEvent_implies_itsrWithinWin ω.udSuite params hw ω.sk A hEv
-        simp only [hW', ↓reduceIte]; omega
+      itsrWithinWins coins params (itsrExtractorAdv A) :=
+    hitCount_le_of_imp
+      (fun ω hEv => prodItsrEvent_implies_itsrWithinWin ω.udSuite params hw ω.sk A hEv) coins
   have hTcrPos : 0 < prodPathTargetCount params qs_max := by unfold prodPathTargetCount; omega
   have hTcrLe :
       hitCount (fun ω => prodTcrEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins ≤
@@ -3556,15 +3574,16 @@ theorem production_euf_cma_within_game_reduction_bound
       have hBest := finSum_le_mul_bestFinIdx (prodPreCandidateCount params) hPrePos
         (fun k => smDtPreWithinWins coins params (preExtractorAdv params k.val A))
       unfold bestPreExtractorAdv smDtPreWithinWins at hBest ⊢
-      simp only [hPrePos, ↓reduceIte]
+      simp only [hPrePos]
       exact Nat.le_trans hCov hBest
     · have hZero : prodPreCandidateCount params = 0 := by omega
       have hNoEv : ∀ ω, prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω) = false := by
         intro ω
-        cases hEv : prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω)
-        · rfl
+        by_cases hEv : prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω) = true
         · obtain ⟨slot, _⟩ := prodPreEvent_captured_by_slot ω.udSuite params hw ω.sk A hEv
-          exact absurd slot.isLt (by rw [hZero]; exact Nat.not_lt_zero _)
+          have hLt := slot.isLt
+          omega
+        · exact Bool.eq_false_iff.mpr hEv
       have hCnt0 : hitCount (fun ω => prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins = 0 :=
         hitCount_eq_zero_of_all_false _ hNoEv coins
       rw [hCnt0]
@@ -3582,8 +3601,14 @@ def zeroRejectToySuite : TweakableHashSuite where
 theorem prodToyForgery_rejected_by_zeroSuite :
     verifyProductionPqHashSig zeroRejectToySuite prodToyStatefulParams
       (derivePublicKey zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩)
-      [] prodToyForgery = false :=
-  rfl
+      [] prodToyForgery = false := by
+  decide +kernel
+
+theorem prodToyForgery_zeroSuite_cands_nil :
+    (publicVerifierWithTcrCands zeroRejectToySuite prodToyStatefulParams
+      (derivePublicKey zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩)
+      [] [] prodToyForgery).2 = [] := by
+  decide +kernel
 
 def prodToyForgerAdv : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig) :=
   fun _ => .done ([], prodToyForgery)
@@ -3617,11 +3642,13 @@ theorem prodToyGameCoins_two_sided_nonvacuous :
   have hAccWin : eufCmaWithinWin crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
       prodToyForgerAdv = true := by
     unfold eufCmaWithinWin prodToyForgerAdv runHashSignAdv prodEufCmaWin productionSigningLog
+    dsimp only
     rw [prodToyForgery_accepted]
     rfl
   have hRejLose : eufCmaWithinWin zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩
       prodToyForgerAdv = false := by
     unfold eufCmaWithinWin prodToyForgerAdv runHashSignAdv prodEufCmaWin
+    dsimp only
     rw [prodToyForgery_rejected_by_zeroSuite]
     rfl
   have hRealCount :
@@ -3629,24 +3656,39 @@ theorem prodToyGameCoins_two_sided_nonvacuous :
     simp [eufCmaRealWithinWins, prodToyGameCoins, prodToyAcceptCoin, prodToyRejectCoin,
       hitCount, hAccWin, hRejLose]
   let B_tcr := bestTcrExtractorAdv prodToyGameCoins prodToyStatefulParams 0 prodToyForgerAdv
+  have hToyTcrEv :
+      (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+        (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+      prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+        (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        true := by
+    have hEqEv :
+        (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+          (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+            (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix
+          ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime := rfl
+    rw [hEqEv]
+    unfold prodTcrEvent
+    cases hOut : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime with
+    | none =>
+      have hc := prodToyForgery_returns_collision
+      rw [hOut] at hc; cases hc
+    | some p =>
+      exact (prodTcrOutput_sound crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime p.1 p.2 hOut).2.2.2
   have hTcrPos : 0 < smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams B_tcr := by
     obtain ⟨slot, hSlotWin⟩ := prodTcrEvent_captured_by_slot crumbToySuite prodToyStatefulParams
       prodToyRadix (qh := 0) (qs_max := 0) ⟨[], [], []⟩ prodToyForgerAdv prodToyForgerAdv_within
-      (by
-        unfold prodTcrEvent prodToyForgerAdv runHashSignAdv
-        cases hOut : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
-            ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ _ with
-        | none =>
-          have hc := prodToyForgery_returns_collision
-          have hIrr : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
-              ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime = none := hOut
-          rw [hIrr] at hc; cases hc
-        | some p =>
-          exact (prodTcrOutput_sound crumbToySuite prodToyStatefulParams prodToyRadix
-            ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ _ p.1 p.2 hOut).2.2.2)
+      hToyTcrEv
     have hSlotGe1 : 1 ≤ smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams
         (tcrExtractorAdv prodToyStatefulParams slot.val prodToyForgerAdv) := by
       unfold smDtTcrWithinWins prodToyGameCoins prodToyAcceptCoin hitCount
+      dsimp only
       simp only [hSlotWin, ↓reduceIte]
       omega
     have hBestGe := bestFinIdx_ge (prodPathTargetCount prodToyStatefulParams 0)
@@ -3654,26 +3696,42 @@ theorem prodToyGameCoins_two_sided_nonvacuous :
       (fun k => smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams
         (tcrExtractorAdv prodToyStatefulParams k.val prodToyForgerAdv)) slot
     exact Nat.lt_of_lt_of_le Nat.zero_lt_one (Nat.le_trans hSlotGe1 hBestGe)
-  have hRejTcrFalse : ∀ B : PqPublicKey → HashSignAdv (Option SmDtTcrSubmission),
-      smDtTcrWithinWin zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩ B = false := by
-    intro B
-    unfold smDtTcrWithinWin smDtTcrChallengerCheck
-    cases (runHashSignAdv zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩ []
-      (B (derivePublicKey zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩))).1 with
-    | none => rfl
-    | some sub =>
-      unfold prodTcrCheck zeroRejectToySuite
-      simp
+  have hRejTcrFalse : ∀ slot : Nat,
+      smDtTcrWithinWin zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩
+        (tcrExtractorAdv prodToyStatefulParams slot prodToyForgerAdv) = false := by
+    intro slot
+    unfold smDtTcrWithinWin tcrExtractorAdv advCollectTcrSubmissions HashSignAdv.map
+    rw [runHashSignAdv_bind, runHashSignAdv_advTrackSignLog zeroRejectToySuite
+      prodToyStatefulParams ⟨[], [], []⟩ [] [] _ rfl]
+    dsimp only [prodToyForgerAdv, runHashSignAdv, productionSigningLog]
+    rw [runHashSignAdv_bind]
+    dsimp only [HashSignAdv.bind]
+    rw [runHashSignAdv_bind]
+    dsimp only [advRawHash, runHashSignAdv]
+    rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+    dsimp only
+    rw [runHashSignAdv_bind, runHashSignAdv_advVerifyWithTcrCands]
+    dsimp only [runHashSignAdv]
+    rw [prodToyForgery_zeroSuite_cands_nil]
+    simp [smDtTcrChallengerCheck]
   have hTcrLt : smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams B_tcr <
       prodToyGameCoins.length := by
-    unfold smDtTcrWithinWins prodToyGameCoins prodToyAcceptCoin prodToyRejectCoin hitCount
-    rw [hRejTcrFalse B_tcr]
-    cases smDtTcrWithinWin crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ B_tcr <;> decide
+    have hB : smDtTcrWithinWin zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩ B_tcr =
+        false := by
+      unfold B_tcr bestTcrExtractorAdv
+      exact hRejTcrFalse _
+    cases hC : smDtTcrWithinWin crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ B_tcr
+    · simp only [smDtTcrWithinWins, prodToyGameCoins, prodToyAcceptCoin, prodToyRejectCoin,
+        hitCount, hB, hC, Bool.false_eq_true, ↓reduceIte, List.length_cons, List.length_nil]
+      omega
+    · simp only [smDtTcrWithinWins, prodToyGameCoins, prodToyAcceptCoin, prodToyRejectCoin,
+        hitCount, hB, hC, Bool.false_eq_true, ↓reduceIte, List.length_cons, List.length_nil]
+      omega
   rw [hRealCount]
   exact ⟨by decide, by decide, hTcrPos, hTcrLt⟩
 
 theorem witness_within_game_reduction :
-    ∃ (coins : List ProdExperimentCoin) (params : PqHashParams) (qh qs_max : Nat)
+    ∃ (_coins : List ProdExperimentCoin) (params : PqHashParams) (qh qs_max : Nat)
       (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig)),
       (params.w = 4 ∨ params.w = 16) ∧
       (∀ pk, (A pk).Within qh qs_max) :=
@@ -3684,20 +3742,34 @@ theorem witness_smDtTcr_discharges_break :
     ∃ (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
       (B : PqPublicKey → HashSignAdv (Option SmDtTcrSubmission)),
       smDtTcrWithinWin suite params sk B = true := by
+  have hToyTcrEv :
+      (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+        (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+      prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+        (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        true := by
+    have hEqEv :
+        (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+          (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+            (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix
+          ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime := rfl
+    rw [hEqEv]
+    unfold prodTcrEvent
+    cases hOut : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime with
+    | none =>
+      have hc := prodToyForgery_returns_collision
+      rw [hOut] at hc; cases hc
+    | some p =>
+      exact (prodTcrOutput_sound crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime p.1 p.2 hOut).2.2.2
   obtain ⟨slot, hSlotWin⟩ := prodTcrEvent_captured_by_slot crumbToySuite prodToyStatefulParams
     prodToyRadix (qh := 0) (qs_max := 0) ⟨[], [], []⟩ prodToyForgerAdv prodToyForgerAdv_within
-    (by
-      unfold prodTcrEvent prodToyForgerAdv runHashSignAdv
-      cases hOut : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
-          ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ _ with
-      | none =>
-        have hc := prodToyForgery_returns_collision
-        have hIrr : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
-            ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime = none := hOut
-        rw [hIrr] at hc; cases hc
-      | some p =>
-        exact (prodTcrOutput_sound crumbToySuite prodToyStatefulParams prodToyRadix
-          ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ _ p.1 p.2 hOut).2.2.2)
+    hToyTcrEv
   exact ⟨crumbToySuite, prodToyStatefulParams, ⟨[], [], []⟩,
     tcrExtractorAdv prodToyStatefulParams slot.val prodToyForgerAdv, hSlotWin⟩
 

@@ -60,7 +60,7 @@ namespace Gf2Pow128
 
 instance : Inhabited Gf2Pow128 := ⟨zero⟩
 
-@[expose] instance : CommRingOps Gf2Pow128 where
+instance : CommRingOps Gf2Pow128 where
   zero := zero
   one := one
   add := add
@@ -177,8 +177,7 @@ theorem towerInv_zero : ∀ k : Nat, Qsag.towerInv k (Qsag.towerZero k) = Qsag.t
   | k + 1 => by
     unfold Qsag.towerInv Qsag.towerZero
     dsimp only
-    rw [Qsag.towerMul_zero, Qsag.towerAdd_zero, Qsag.towerZero_mul, Qsag.towerZero_mul]
-    rfl
+    rw [Qsag.towerMul_zero, Qsag.towerAdd_zero, Qsag.towerZero_mul]
 
 theorem towerInv7_zero :
     LawfulField.inv (CommRingOps.zero : Qsag.Tower128) = CommRingOps.zero :=

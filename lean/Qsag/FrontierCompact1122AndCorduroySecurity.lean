@@ -2,8 +2,8 @@ module
 /-
 # Qsag.FrontierCompact1122AndCorduroySecurity — `Compact1122` (`FrontierSumFts`), Forward-Secure `RotatedEpochVote`, & `Corduroy` Stateless `Poseidon2` Threshold EUF-CMA
 
-Constructive Lean 4.35 security reductions and real-parameter certifications (`0 sorry`, `0` custom
-axioms, `0 Classical.choice`):
+Constructive Lean 4.35 security reductions and real-parameter certifications (zero custom
+axioms, purely constructive extractors):
 1. **`Compact1122` (`h = 8, w = 96, L = 34, S = 1615, n = 32`) & `Full256Bit` Rank Domain & 1-Time EUF-CMA**:
    - Certifies `compact1122_rank_domain_gt_2pow256` (`2^263 < M(8, 96, 34, 1615) < 2^264`, wire size
      `1122` B, `RotatedEpochVote` `1194` B, plus `Full256Bit` `2^256 < M(8, 5, 72, 144)` and `2338` B),
@@ -2011,44 +2011,68 @@ def prehashFaultSuite (base : FrontierHashSuite) (m₁ m₂ : List UInt8) : Fron
     prehashMsg := fun pkSeed pkRoot m =>
       if m = m₂ then base.prehashMsg pkSeed pkRoot m₁ else base.prehashMsg pkSeed pkRoot m }
 
-private theorem witness_forgery_of_suite (base : FrontierHashSuite) (p : FrontierFtsParams)
-    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
-    (hDom : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
-                      frontierDecCount p.winternitzW p.frontierLen p.targetSum) :
-    ∃ (H : FrontierHashSuite) (p' : FrontierFtsParams) (_ : 2 ≤ p'.frontierLen)
-      (sk : FrontierSecretKey) (hedge₁ : BitVec 256) (ctr₁ : UInt16)
-      (m₁ : List UInt8) (sig₁ : FrontierSignature),
-      signFrontierFts H p' sk hedge₁ ctr₁ m₁ = some sig₁ ∧
-      ∃ (m₂ : List UInt8) (sig₂ : FrontierSignature),
-        m₂ ≠ m₁ ∧ verifyFrontierFts H p' (deriveFrontierPk H p' sk) m₂ sig₂ = true := by
-  let H := prehashFaultSuite base [1] [2]
-  let sk : FrontierSecretKey := ⟨1#256, 2#256, 3#256⟩
-  let sig₁ : FrontierSignature := (signFrontierFts H p sk 0#256 0 [1]).getD ⟨0#256, 0, []⟩
-  have hSign₁ : signFrontierFts H p sk 0#256 0 [1] = some sig₁ := by
-    let pk := deriveFrontierPk H p sk
-    let d₁ := H.prehashMsg pk.pkSeed pk.root [1]
-    let rand := H.prfRand sk.skPrf pk.pkSeed pk.root 0#256 d₁
-    let rk := (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).toNat
-    have hLt := Nat.lt_trans (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).isLt hDom
-    obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _, _⟩ := unrankFrontierFts_bijective p rk hLt
-    have hCtr0 : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits) := by
-      have hPow : 0 < 2 ^ p.counterBits := Nat.pow_pos (by decide : 0 < 2)
-      change ¬ (0 >= 2 ^ p.counterBits); omega
-    have hSome : signFrontierFts H p sk 0#256 0 [1] =
-        some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs⟩ := by
-      unfold signFrontierFts
-      rw [ite_false_eq hCtr0]
-      simp [pk, d₁, rand, rk, hUnr]
-    dsimp only [sig₁]; rw [hSome]; rfl
-  have hVer₂ : verifyFrontierFts H p (deriveFrontierPk H p sk) [2] sig₁ = true := by
-    have hVer₁ := verifyFrontierFts_signFrontierFts H p hw hL sk 0#256 0 [1] sig₁ hSign₁
-    have hPreEq : H.prehashMsg (deriveFrontierPk H p sk).pkSeed (deriveFrontierPk H p sk).root [2] =
-        H.prehashMsg (deriveFrontierPk H p sk).pkSeed (deriveFrontierPk H p sk).root [1] := by
-      dsimp only [H, prehashFaultSuite]; simp
-    unfold verifyFrontierFts at hVer₁ ⊢; rw [hPreEq]; exact hVer₁
-  exact ⟨H, p, hL, sk, 0#256, 0, [1], sig₁, hSign₁, [2], sig₁, by decide, hVer₂⟩
+private theorem ite_self_eq {α : Type} {c : Prop} [Decidable c] (a : α) :
+    (if c then a else a) = a := by
+  cases ‹Decidable c› <;> rfl
 
 attribute [local irreducible] evalFtsCshake256_32 cshakeEpochVoteHasher
+
+private def witCompact1122H : FrontierHashSuite :=
+  prehashFaultSuite (cshakeFrontierHashSuite compact1122Params) [1] [2]
+
+private def witCompact1122Sk : FrontierSecretKey := ⟨1#256, 2#256, 3#256⟩
+
+private def witCompact1122Sig : FrontierSignature :=
+  (signFrontierFts witCompact1122H compact1122Params witCompact1122Sk 0#256 0 [1]).getD ⟨0#256, 0, []⟩
+
+private theorem witSignGetD_of_dom (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (sk : FrontierSecretKey) (m : List UInt8)
+    (hDom : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
+                      frontierDecCount p.winternitzW p.frontierLen p.targetSum) :
+    signFrontierFts H p sk 0#256 0 m = some ((signFrontierFts H p sk 0#256 0 m).getD ⟨0#256, 0, []⟩) := by
+  let pk := deriveFrontierPk H p sk
+  let d₁ := H.prehashMsg pk.pkSeed pk.root m
+  let rand := H.prfRand sk.skPrf pk.pkSeed pk.root 0#256 d₁
+  let rk := (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).toNat
+  have hLt := Nat.lt_trans (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).isLt hDom
+  obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _, _⟩ := unrankFrontierFts_bijective p rk hLt
+  have hCtr0 : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits) := by
+    have hPow : 0 < 2 ^ p.counterBits := Nat.pow_pos (by decide : 0 < 2)
+    change ¬ (0 >= 2 ^ p.counterBits); omega
+  have hSome : signFrontierFts H p sk 0#256 0 m =
+      some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs⟩ := by
+    unfold signFrontierFts
+    rw [ite_false_eq hCtr0]
+    simp [pk, d₁, rand, rk, hUnr]
+  rw [hSome]; rfl
+
+private theorem witCompact1122_hSign :
+    signFrontierFts witCompact1122H compact1122Params witCompact1122Sk 0#256 0 [1] = some witCompact1122Sig :=
+  witSignGetD_of_dom witCompact1122H compact1122Params witCompact1122Sk [1]
+    compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
+
+private theorem witVer2_of_fault (base : FrontierHashSuite) (p : FrontierFtsParams)
+    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
+    (sk : FrontierSecretKey) (m₁ m₂ : List UInt8) (sig : FrontierSignature)
+    (hSign : signFrontierFts (prehashFaultSuite base m₁ m₂) p sk 0#256 0 m₁ = some sig) :
+    verifyFrontierFts (prehashFaultSuite base m₁ m₂) p
+      (deriveFrontierPk (prehashFaultSuite base m₁ m₂) p sk) m₂ sig = true := by
+  let H := prehashFaultSuite base m₁ m₂
+  have hVer₁ := verifyFrontierFts_signFrontierFts H p hw hL sk 0#256 0 m₁ sig hSign
+  have hPreEq : H.prehashMsg (deriveFrontierPk H p sk).pkSeed (deriveFrontierPk H p sk).root m₂ =
+      H.prehashMsg (deriveFrontierPk H p sk).pkSeed (deriveFrontierPk H p sk).root m₁ := by
+    dsimp only [H, prehashFaultSuite]
+    rw [ite_true_eq rfl, ite_self_eq]
+  unfold verifyFrontierFts at hVer₁ ⊢; rw [hPreEq]; exact hVer₁
+
+private theorem witCompact1122_hVer :
+    verifyFrontierFts witCompact1122H compact1122Params
+      (deriveFrontierPk witCompact1122H compact1122Params witCompact1122Sk) [2] witCompact1122Sig = true :=
+  witVer2_of_fault (cshakeFrontierHashSuite compact1122Params) compact1122Params
+    (by decide) (by decide) witCompact1122Sk [1] [2] witCompact1122Sig witCompact1122_hSign
+
+private theorem witCompact1122_hL : 2 ≤ compact1122Params.frontierLen := by decide
+private theorem witCompact1122_hNe : ([2] : List UInt8) ≠ [1] := by decide
 
 theorem witness_compact1122_forgery :
     ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
@@ -2057,75 +2081,84 @@ theorem witness_compact1122_forgery :
       signFrontierFts H p sk hedge₁ ctr₁ m₁ = some sig₁ ∧
       ∃ (m₂ : List UInt8) (sig₂ : FrontierSignature),
         m₂ ≠ m₁ ∧ verifyFrontierFts H p (deriveFrontierPk H p sk) m₂ sig₂ = true :=
-  witness_forgery_of_suite (cshakeFrontierHashSuite compact1122Params) compact1122Params
-    (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
+  ⟨witCompact1122H, compact1122Params, witCompact1122_hL, witCompact1122Sk, 0#256, 0, [1], witCompact1122Sig,
+    witCompact1122_hSign, [2], witCompact1122Sig, witCompact1122_hNe, witCompact1122_hVer⟩
 
-private theorem witness_epoch_chain_of_suite (base : FrontierHashSuite) (p : FrontierFtsParams)
+private def witEpochM1 : List UInt8 := cshakeEpochVoteHasher 0#256 0 0#256 0#256
+private def witEpochM2 : List UInt8 := cshakeEpochVoteHasher 0#256 0 1#256 0#256
+
+private def witEpochH : FrontierHashSuite :=
+  prehashFaultSuite (cshakeFrontierHashSuite compact1122Params) witEpochM1 witEpochM2
+
+private def witEpochPk : FrontierPublicKey :=
+  deriveFrontierPk witEpochH compact1122Params witCompact1122Sk
+
+private def witEpochSig : FrontierSignature :=
+  (signFrontierFts witEpochH compact1122Params witCompact1122Sk 0#256 0 witEpochM1).getD ⟨0#256, 0, []⟩
+
+private def witEpochRec0 : HonestEpochRecord :=
+  ⟨witCompact1122Sk, 0#256, 0, 0#256, 0#256, ⟨⟨0, 0#256⟩, 0#256, witEpochSig⟩⟩
+
+private def witEpochAdvV : RotatedEpochVote := ⟨⟨0, 0#256⟩, 1#256, witEpochSig⟩
+
+private theorem witEpoch_hSign :
+    signFrontierFts witEpochH compact1122Params witCompact1122Sk 0#256 0 witEpochM1 = some witEpochSig :=
+  witSignGetD_of_dom witEpochH compact1122Params witCompact1122Sk witEpochM1
+    compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
+
+private theorem witEpoch_hVer2 :
+    verifyFrontierFts witEpochH compact1122Params witEpochPk witEpochM2 witEpochSig = true :=
+  witVer2_of_fault (cshakeFrontierHashSuite compact1122Params) compact1122Params
+    (by decide) (by decide) witCompact1122Sk witEpochM1 witEpochM2 witEpochSig witEpoch_hSign
+
+private theorem witEpoch_hVal :
+    ∀ idx : Fin [witEpochRec0].length,
+      ([witEpochRec0].get idx).ValidAt witEpochH compact1122Params cshakeEpochVoteHasher 0#256 3#256 (0 + idx.1) := by
+  rintro ⟨_ | k, hi⟩
+  · exact ⟨rfl, rfl, rfl, witEpoch_hSign⟩
+  · cases Nat.lt_of_succ_lt_succ hi
+
+private theorem witEpoch_hAnc :
+    ∀ r₀, [witEpochRec0].head? = some r₀ →
+      witEpochPk = deriveFrontierPk witEpochH compact1122Params r₀.sk := by
+  intro r₀ hr; injection hr with hE; rw [← hE]; rfl
+
+private theorem witEpoch_hLink :
+    ∀ i : Fin [witEpochRec0].length, ∀ rNext, [witEpochRec0][i.1 + 1]? = some rNext →
+      ([witEpochRec0].get i).nextPkRoot = (deriveFrontierPk witEpochH compact1122Params rNext.sk).root := by
+  rintro ⟨_ | k, hi⟩ _ hNxt
+  · cases hNxt
+  · cases Nat.lt_of_succ_lt_succ hi
+
+private theorem witEpochAcc_of_ver (H : FrontierHashSuite) (p : FrontierFtsParams)
     (hBytes : p.nodeBytes = 32) (hUses : p.maxSafeUses = 1)
-    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
-    (hDom : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
-                      frontierDecCount p.winternitzW p.frontierLen p.targetSum)
-    (voteHash : EpochVoteHasher) :
-    ∃ (H : FrontierHashSuite) (p' : FrontierFtsParams) (_ : 2 ≤ p'.frontierLen)
-      (vh : EpochVoteHasher) (chainId pkSeed : BitVec 256) (startEp : Nat)
-      (histRecords : List HonestEpochRecord) (advDigests : List (BitVec 256))
-      (advVotes : List RotatedEpochVote) (anchorPk finalPk : FrontierPublicKey)
-      (hLen1 : histRecords.length = advDigests.length) (hLen2 : advDigests.length = advVotes.length),
-      (∀ idx : Fin histRecords.length, (histRecords.get idx).ValidAt H p' vh chainId pkSeed (startEp + idx.1)) ∧
-      (∀ r₀, histRecords.head? = some r₀ → anchorPk = deriveFrontierPk H p' r₀.sk) ∧
-      (∀ i : Fin histRecords.length, ∀ rNext, histRecords[i.1 + 1]? = some rNext →
-        (histRecords.get i).nextPkRoot = (deriveFrontierPk H p' rNext.sk).root) ∧
-      verifyRotatedEpochChain H p' vh chainId anchorPk startEp advDigests advVotes = some finalPk ∧
-      (∃ i : Fin histRecords.length,
-        advDigests.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
-        (advVotes.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) := by
-  let m₁ := voteHash 0#256 0 0#256 0#256
-  let m₂ := voteHash 0#256 0 1#256 0#256
-  let H := prehashFaultSuite base m₁ m₂
-  let sk : FrontierSecretKey := ⟨1#256, 2#256, 3#256⟩
-  let pk := deriveFrontierPk H p sk
-  let sig : FrontierSignature := (signFrontierFts H p sk 0#256 0 m₁).getD ⟨0#256, 0, []⟩
-  have hSign : signFrontierFts H p sk 0#256 0 m₁ = some sig := by
-    let d₁ := H.prehashMsg pk.pkSeed pk.root m₁
-    let rand := H.prfRand sk.skPrf pk.pkSeed pk.root 0#256 d₁
-    let rk := (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).toNat
-    have hLt := Nat.lt_trans (H.squeezeRank pk.pkSeed pk.root rand d₁ 0).isLt hDom
-    obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _, _⟩ := unrankFrontierFts_bijective p rk hLt
-    have hCtr0 : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits) := by
-      have hPow : 0 < 2 ^ p.counterBits := Nat.pow_pos (by decide : 0 < 2)
-      change ¬ (0 >= 2 ^ p.counterBits); omega
-    have hSome : signFrontierFts H p sk 0#256 0 m₁ =
-        some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs⟩ := by
-      unfold signFrontierFts
-      rw [ite_false_eq hCtr0]
-      simp [pk, d₁, rand, rk, hUnr]
-    dsimp only [sig]; rw [hSome]; rfl
-  have hVer₂ : verifyFrontierFts H p pk m₂ sig = true := by
-    have hVer₁ := verifyFrontierFts_signFrontierFts H p hw hL sk 0#256 0 m₁ sig hSign
-    have hPreEq : H.prehashMsg pk.pkSeed pk.root m₂ = H.prehashMsg pk.pkSeed pk.root m₁ := by
-      dsimp only [H, prehashFaultSuite]
-      rw [ite_true_eq rfl]
-    unfold verifyFrontierFts at hVer₁ ⊢; rw [hPreEq]; exact hVer₁
-  let rec₀ : HonestEpochRecord := ⟨sk, 0#256, 0, 0#256, 0#256, ⟨⟨0, 0#256⟩, 0#256, sig⟩⟩
-  let advV : RotatedEpochVote := ⟨⟨0, 0#256⟩, 1#256, sig⟩
-  refine ⟨H, p, hL, voteHash, 0#256, 3#256, 0, [rec₀], [1#256], [advV], pk, ⟨3#256, 0#256⟩, rfl, rfl, ?_, ?_, ?_, ?_, ?_⟩
-  · rintro ⟨_ | k, hi⟩
-    · exact ⟨rfl, rfl, rfl, hSign⟩
-    · cases Nat.lt_of_succ_lt_succ hi
-  · intro r₀ hr; injection hr with hE; rw [← hE]
-  · rintro ⟨_ | k, hi⟩ _ hNxt
-    · cases hNxt
-    · cases Nat.lt_of_succ_lt_succ hi
-  · unfold verifyRotatedEpochChain verifyRotatedEpochVote
-    have hEp0 : ¬ (0 >= 2 ^ 64) := by decide +kernel
-    have hC1 : (p.nodeBytes != 32 || p.maxSafeUses != 1) = false := by rw [hBytes, hUses]; rfl
-    have hC2 : (advV.link.epoch != UInt64.ofNat 0 || decide ((UInt64.ofNat 0).toNat + 1 >= 2 ^ 64)) = false := rfl
-    have hC3 : (advV.voteDigest != 1#256) = false := rfl
-    simp only [hEp0, hC1, hC2, hC3, Bool.false_eq_true, ↓reduceIte]
-    have hMsgEq : voteHash 0#256 advV.link.epoch advV.voteDigest advV.link.nextEpochPkRoot = m₂ := rfl
-    have hSigEq : advV.signature = sig := rfl
-    rw [hMsgEq, hSigEq, hVer₂]; rfl
-  · exact ⟨⟨0, Nat.zero_lt_succ 0⟩, .inl (by show (1#256 : BitVec 256) ≠ 0#256; decide)⟩
+    (voteHash : EpochVoteHasher) (sk : FrontierSecretKey) (sig : FrontierSignature)
+    (hSeed : sk.pkSeed = 3#256)
+    (hVer2 : verifyFrontierFts H p (deriveFrontierPk H p sk) (voteHash 0#256 0 1#256 0#256) sig = true) :
+    verifyRotatedEpochChain H p voteHash 0#256 (deriveFrontierPk H p sk) 0 [1#256]
+      [⟨⟨0, 0#256⟩, 1#256, sig⟩] = some ⟨3#256, 0#256⟩ := by
+  unfold verifyRotatedEpochChain verifyRotatedEpochVote
+  have hEp0 : ¬ (0 >= 2 ^ 64) := by decide +kernel
+  have hC1 : (p.nodeBytes != 32 || p.maxSafeUses != 1) = false := by rw [hBytes, hUses]; rfl
+  have hC2 : ((0 : UInt64) != UInt64.ofNat 0 || decide ((UInt64.ofNat 0).toNat + 1 >= 2 ^ 64)) = false := rfl
+  have hC3 : ((1#256 : BitVec 256) != 1#256) = false := rfl
+  simp only [hEp0, hC1, hC2, hC3, Bool.false_eq_true, ↓reduceIte]
+  rw [hVer2]
+  simp only [↓reduceIte]
+  unfold verifyRotatedEpochChain deriveFrontierPk
+  rw [hSeed]
+
+private theorem witEpoch_hAcc :
+    verifyRotatedEpochChain witEpochH compact1122Params cshakeEpochVoteHasher 0#256
+      witEpochPk 0 [1#256] [witEpochAdvV] = some ⟨3#256, 0#256⟩ :=
+  witEpochAcc_of_ver witEpochH compact1122Params rfl rfl cshakeEpochVoteHasher
+    witCompact1122Sk witEpochSig rfl witEpoch_hVer2
+
+private theorem witEpoch_hDev :
+    ∃ i : Fin [witEpochRec0].length,
+      ([1#256] : List (BitVec 256)).get ⟨i.1, i.2⟩ ≠ ([witEpochRec0].get i).voteDigest ∨
+      ([witEpochAdvV].get ⟨i.1, i.2⟩).link.nextEpochPkRoot ≠ ([witEpochRec0].get i).nextPkRoot :=
+  ⟨⟨0, Nat.zero_lt_succ 0⟩, .inl (by show (1#256 : BitVec 256) ≠ 0#256; decide)⟩
 
 theorem witness_rotatedEpochVote_chain :
     ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
@@ -2141,9 +2174,9 @@ theorem witness_rotatedEpochVote_chain :
       (∃ i : Fin histRecords.length,
         advDigests.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
         (advVotes.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) :=
-  witness_epoch_chain_of_suite (cshakeFrontierHashSuite compact1122Params) compact1122Params
-    rfl rfl (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
-    cshakeEpochVoteHasher
+  ⟨witEpochH, compact1122Params, witCompact1122_hL, cshakeEpochVoteHasher, 0#256, 3#256, 0,
+    [witEpochRec0], [1#256], [witEpochAdvV], witEpochPk, ⟨3#256, 0#256⟩, rfl, rfl,
+    witEpoch_hVal, witEpoch_hAnc, witEpoch_hLink, witEpoch_hAcc, witEpoch_hDev⟩
 
 theorem witness_corduroy_real_params :
     ∃ params : PqHashParams,
@@ -2153,6 +2186,7 @@ theorem witness_corduroy_real_params :
 attribute [local irreducible]
   cshakeFrontierHashSuite prehashFaultSuite
   deriveFrontierPk signFrontierFts verifyFrontierFts verifyRotatedEpochChain
+  witCompact1122H witCompact1122Sig witEpochM1 witEpochM2 witEpochH witEpochPk witEpochSig
 
 set_option maxRecDepth 32768
 

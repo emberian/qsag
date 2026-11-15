@@ -16,8 +16,8 @@ use fips205::traits::{
     Verifier as Fips205Verifier,
 };
 use fips205::{
-    slh_dsa_shake_128f, slh_dsa_shake_128s, slh_dsa_shake_192f, slh_dsa_shake_256f,
-    slh_dsa_shake_256s,
+    slh_dsa_shake_128f, slh_dsa_shake_128s, slh_dsa_shake_192f, slh_dsa_shake_192s,
+    slh_dsa_shake_256f, slh_dsa_shake_256s,
 };
 use qsag_asm::{detect_backend, mldsa_inv_ntt, mldsa_ntt, mldsa_ntt_with_backend, SimdBackend};
 use qsag_core::fips205::{Fips205Params, slh_keygen_internal, slh_sign, slh_verify};
@@ -285,6 +285,15 @@ fn main() {
         5,
         3,
         100
+    );
+    bench_slh_dsa!(
+        "SLH-DSA-SHAKE-192s",
+        Fips205Params::SLH_DSA_SHAKE_192S,
+        slh_dsa_shake_192s,
+        24,
+        4,
+        2,
+        80
     );
     bench_slh_dsa!(
         "SLH-DSA-SHAKE-256s",

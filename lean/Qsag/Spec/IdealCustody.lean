@@ -191,7 +191,7 @@ theorem idealCustodyStep_preserves_safeInv {PK Sig : Type}
       rw [hLat] at hStep
       dsimp only at hStep
       cases hEpEq : (cmd.epoch == latEp)
-      · rw [ite_false Bool.false_ne_true] at hStep
+      · rw [hEpEq, ite_false Bool.false_ne_true] at hStep
         by_cases hLt : cmd.epoch < st.nextFreshEpoch
         · rw [ite_true hLt] at hStep
           cases hStep
@@ -199,7 +199,7 @@ theorem idealCustodyStep_preserves_safeInv {PK Sig : Type}
           cases hGate : (decide (cmd.sessionId ∈ st.usedSessions) ||
               !validCustodyQuorum st cmd.approvers ||
               !decide (st.spent + cmd.spend ≤ st.quorum.spendCap))
-          · rw [ite_false Bool.false_ne_true] at hStep
+          · rw [hGate, ite_false Bool.false_ne_true] at hStep
             have hCapOk : st.spent + cmd.spend ≤ st.quorum.spendCap := by
               rcases Bool.or_eq_false_iff.mp hGate with ⟨_, hR⟩
               cases hDec : decide (st.spent + cmd.spend ≤ st.quorum.spendCap)
@@ -227,13 +227,13 @@ theorem idealCustodyStep_preserves_safeInv {PK Sig : Type}
               dsimp only at hMem ⊢
               have hOld := hHist entry hMem
               omega
-          · rw [ite_true rfl] at hStep
+          · rw [hGate, ite_true rfl] at hStep
             cases hStep
-      · rw [ite_true rfl] at hStep
+      · rw [hEpEq, ite_true rfl] at hStep
         cases hPayEq : (cmd.payload == latPay)
-        · rw [ite_false Bool.false_ne_true] at hStep
+        · rw [hPayEq, ite_false Bool.false_ne_true] at hStep
           cases hStep
-        · rw [ite_true rfl] at hStep
+        · rw [hPayEq, ite_true rfl] at hStep
           injection hStep with hPair
           injection hPair with hSt _
           subst hSt
@@ -248,7 +248,7 @@ theorem idealCustodyStep_preserves_safeInv {PK Sig : Type}
         cases hGate : (decide (cmd.sessionId ∈ st.usedSessions) ||
             !validCustodyQuorum st cmd.approvers ||
             !decide (st.spent + cmd.spend ≤ st.quorum.spendCap))
-        · rw [ite_false Bool.false_ne_true] at hStep
+        · rw [hGate, ite_false Bool.false_ne_true] at hStep
           have hCapOk : st.spent + cmd.spend ≤ st.quorum.spendCap := by
             rcases Bool.or_eq_false_iff.mp hGate with ⟨_, hR⟩
             cases hDec : decide (st.spent + cmd.spend ≤ st.quorum.spendCap)
@@ -276,7 +276,7 @@ theorem idealCustodyStep_preserves_safeInv {PK Sig : Type}
             dsimp only at hMem ⊢
             have hOld := hHist entry hMem
             omega
-        · rw [ite_true rfl] at hStep
+        · rw [hGate, ite_true rfl] at hStep
           cases hStep
   · rw [hPois, ite_true rfl] at hStep
     cases hStep
