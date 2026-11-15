@@ -74,11 +74,17 @@ pub trait SpdzTripleSource {
 }
 
 /// [`SpdzTripleSource`] over the dealerless generator
-/// ([`run_dealerless_pcg_keccak_vaults_with_alpha`]) under an existing MAC key.
+/// ([`run_dealerless_pcg_keccak_vaults_with_alpha`]) under an existing MAC key. The
+/// generator runs among all the parties that hold the MAC key (`eval_points`, with their
+/// own preprocessing RNGs); the vaults of the signing quorum are handed to the engine and
+/// the others are dropped, which wipes them.
 pub struct DealerlessPcgTripleSource<'a> {
     pub session_id: [u8; 32],
     pub t: usize,
     pub eval_points: &'a [TowerGf256],
+    /// The signing quorum, as strictly increasing indices into `eval_points`, in the order
+    /// of the engine's key shares.
+    pub quorum: &'a [usize],
     pub tree_depth: usize,
     pub alpha_contribs: &'a [[Tower128; 2]],
     pub alpha_shamir: &'a [[Tower128; 2]],
@@ -101,7 +107,12 @@ impl SpdzTripleSource for DealerlessPcgTripleSource<'_> {
             .requests
             .checked_add(1)
             .ok_or(KeccakMpcError::InvalidParameters)?;
-        Ok(run_dealerless_pcg_keccak_vaults_with_alpha(
+        if self.quorum.windows(2).any(|w| w[0] >= w[1])
+            || self.quorum.last().is_none_or(|&p| p >= self.eval_points.len())
+        {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let all = run_dealerless_pcg_keccak_vaults_with_alpha(
             session,
             self.t,
             self.eval_points,
@@ -111,7 +122,13 @@ impl SpdzTripleSource for DealerlessPcgTripleSource<'_> {
             self.alpha_shamir,
             self.ot_mesh,
             self.party_rngs,
-        )?)
+        )?;
+        Ok(all
+            .into_iter()
+            .enumerate()
+            .filter(|(p, _)| self.quorum.contains(p))
+            .map(|(_, vault)| vault)
+            .collect())
     }
 }
 
@@ -141,8 +158,7 @@ pub struct SpdzSweepEngine<'a> {
     keys: &'a [SpdzAuthenticatedKeyShare],
     party_rngs: &'a mut [PartyPrivateRng],
     triples: &'a mut dyn SpdzTripleSource,
-    /// MAC key shares of the quorum, taken from the first vaults and required of all later
-    /// ones.
+    /// MAC key shares of the quorum, as the most recent vaults carried them.
     alpha: Option<SecretVec<[Tower128; 2]>>,
     perm_ctr: usize,
     poisoned: bool,
@@ -269,15 +285,9 @@ impl<'a> SpdzSweepEngine<'a> {
                 .map(|v| v.mac_alpha_lanes)
                 .collect::<Vec<[Tower128; 2]>>(),
         );
-        // One MAC key for the whole session: shares under another key would fail every
-        // later check anyway; refusing here keeps the failure at its cause.
-        match &self.alpha {
-            Some(first) if **first != *alpha => {
-                return self.fail(KeccakMpcError::InvalidParameters);
-            }
-            Some(_) => {}
-            None => self.alpha = Some(SecretVec::new(alpha.to_vec())),
-        }
+        // Any degree-`< t` sharing of the session MAC key checks any MAC under that key, so
+        // a source may re-share it between requests. Shares of another key fail the checks.
+        self.alpha = Some(SecretVec::new(alpha.to_vec()));
         let (mut sh, mut mac) = self.public_states(&alpha, frames);
         absorb(self, &mut sh, &mut mac);
 
@@ -611,18 +621,19 @@ impl BaggyEngine for SpdzSweepEngine<'_> {
 pub(crate) mod tests {
     use super::*;
     use crate::baggy::{
-        BaggyParams, MemoryFirstSigned, WaistbandCache, baggy_keygen_mpc, baggy_reference_keygen,
-        baggy_reference_sign, baggy_sign_mpc, baggy_verify,
+        BaggyFewTime, BaggyKeyBinding, BaggyParams, MemoryFirstSigned, WaistbandCache,
+        baggy_keygen_mpc, baggy_reference_keygen, baggy_reference_sign, baggy_sign_mpc,
+        baggy_verify,
     };
+    use crate::pors_fp::PorsFpParams;
     use crate::keccak_mpc::tests::SpdzTestDealer;
     use crate::tsw_baggy::PqSecretKey;
 
     /// Test-only source: a trusted dealer under one MAC key. It stands in for dealerless
-    /// preprocessing so these tests exercise the online protocol.
+    /// preprocessing so these tests exercise the online protocol. The dealer shares at the
+    /// quorum's evaluation points only; the polynomials have degree `< t` either way.
     pub(crate) struct DealerSource {
         pub(crate) dealer: SpdzTestDealer,
-        /// Parties of the quorum, as indices into the dealer's party list.
-        pub(crate) quorum: Vec<usize>,
         pub(crate) requests: usize,
         /// Flip one bit of one triple of this request (counted from zero).
         pub(crate) corrupt_request: Option<usize>,
@@ -633,22 +644,16 @@ pub(crate) mod tests {
             &mut self,
             words: usize,
         ) -> Result<Vec<PreprocessedKeccakPartyVault>, KeccakMpcError> {
-            let all = self.dealer.vaults(words);
-            let mut picked: Vec<PreprocessedKeccakPartyVault> = all
-                .into_iter()
-                .enumerate()
-                .filter(|(p, _)| self.quorum.contains(p))
-                .map(|(_, v)| v)
-                .collect();
+            let mut vaults = self.dealer.vaults(words);
             if self.corrupt_request == Some(self.requests) {
-                picked[0].triples[words / 2].c[0] ^= 1 << 7;
+                vaults[0].triples[words / 2].c[0] ^= 1 << 7;
             }
             self.requests += 1;
-            Ok(picked)
+            Ok(vaults)
         }
     }
 
-    fn sk() -> PqSecretKey {
+    pub(crate) fn sk() -> PqSecretKey {
         PqSecretKey {
             sk_seed: core::array::from_fn(|i| (i as u8).wrapping_mul(13) ^ 0x51),
             sk_prf: core::array::from_fn(|i| (i as u8).wrapping_mul(7) ^ 0xa4),
@@ -656,24 +661,20 @@ pub(crate) mod tests {
         }
     }
 
-    struct Setup {
-        keys: Vec<SpdzAuthenticatedKeyShare>,
-        rngs: Vec<PartyPrivateRng>,
-        source: DealerSource,
+    pub(crate) struct Setup {
+        pub(crate) keys: Vec<SpdzAuthenticatedKeyShare>,
+        pub(crate) rngs: Vec<PartyPrivateRng>,
+        pub(crate) source: DealerSource,
     }
 
-    /// `t`-of-`n` shares of [`sk`], restricted to the quorum `quorum` (indices into `1..=n`).
-    fn setup(t: usize, n: usize, quorum: &[usize], tag: u8) -> Setup {
-        let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+    /// `t`-of-`n` shares of [`sk`] for the quorum `quorum` (party indices in `0..n`; party
+    /// `p` evaluates at `p + 1`).
+    pub(crate) fn setup(t: usize, n: usize, quorum: &[usize], tag: u8) -> Setup {
+        assert!(quorum.iter().all(|&p| p < n));
+        let pts: Vec<TowerGf256> = quorum.iter().map(|&p| TowerGf256(p as u8 + 1)).collect();
         let mut dealer = SpdzTestDealer::new(&[tag, t as u8, n as u8], t, &pts);
         let sk = sk();
-        let keys: Vec<SpdzAuthenticatedKeyShare> = dealer
-            .key_shares(32, sk.pk_seed, &sk.sk_seed, &sk.sk_prf)
-            .into_iter()
-            .enumerate()
-            .filter(|(p, _)| quorum.contains(p))
-            .map(|(_, k)| k)
-            .collect();
+        let keys = dealer.key_shares(32, sk.pk_seed, &sk.sk_seed, &sk.sk_prf);
         let rngs = quorum
             .iter()
             .map(|&p| PartyPrivateRng::from_seed([tag ^ p as u8; 32], b"spdz-sweep-test"))
@@ -683,7 +684,6 @@ pub(crate) mod tests {
             rngs,
             source: DealerSource {
                 dealer,
-                quorum: quorum.to_vec(),
                 requests: 0,
                 corrupt_request: None,
             },
@@ -754,53 +754,185 @@ pub(crate) mod tests {
         assert!(!engine.is_poisoned());
     }
 
+    /// One layer of two leaves over a 16-leaf `PORS+FP` tree: a signature costs 20
+    /// permutations (18 for the sweep, 2 for the randomiser), each several seconds here.
+    const TINY_V2: BaggyParams = BaggyParams {
+        subtree_height: 1,
+        num_layers: 1,
+        few_time: BaggyFewTime::PorsFp(PorsFpParams {
+            tree_height: 4,
+            reveal: 4,
+            max_auth_nodes: 7,
+        }),
+        ..BaggyParams::TEST_SMALL_V2
+    };
+
+    /// The same hypertree over two `FORS+C` trees of four leaves (one of them signed).
+    const TINY_V1: BaggyParams = BaggyParams {
+        subtree_height: 1,
+        num_layers: 1,
+        fors_trees: 2,
+        fors_height: 2,
+        ..BaggyParams::TEST_SMALL
+    };
+
+    /// Sign under MPC with the quorum `quorum` of a `t`-of-`n` sharing and compare with the
+    /// single-party reference. The public key is the reference one and the shares are
+    /// bound to it directly; [`keygen_two_of_three_equals_the_reference`] covers key
+    /// generation.
     fn sign_and_compare(params: &BaggyParams, t: usize, n: usize, quorum: &[usize], tag: u8) {
         let mut s = setup(t, n, quorum, tag);
         let sk = sk();
         let pk = baggy_reference_keygen(params, &sk).unwrap();
+        let binding = BaggyKeyBinding::new(params, &pk);
         let mut engine =
             SpdzSweepEngine::new([tag; 32], t, &s.keys, &mut s.rngs, &mut s.source).unwrap();
-        let (got_pk, binding) =
-            baggy_keygen_mpc(&mut engine, params, &mut WaistbandCache::disabled()).unwrap();
-        assert_eq!(got_pk, pk);
+        let sign = |engine: &mut SpdzSweepEngine<'_>, msg: &[u8]| {
+            baggy_sign_mpc(
+                engine,
+                params,
+                &pk,
+                &binding,
+                &mut WaistbandCache::disabled(),
+                &mut MemoryFirstSigned::new(),
+                msg,
+            )
+        };
+        // Unbound shares sign nothing, and nothing is evaluated for them.
+        assert_eq!(
+            sign(&mut engine, b"unbound"),
+            Err(BaggyError::KeyBindingMismatch)
+        );
+        assert_eq!(engine.permutations(), 0);
+        engine.bind_key_identity(&binding.identity()).unwrap();
         let msg = b"threshold root certificate";
-        let sig = baggy_sign_mpc(
-            &mut engine,
-            params,
-            &pk,
-            &binding,
-            &mut WaistbandCache::disabled(),
-            &mut MemoryFirstSigned::new(),
-            msg,
-        )
-        .unwrap();
+        let sig = sign(&mut engine, msg).unwrap();
+        assert_eq!(engine.permutations(), 20);
+        assert_eq!(engine.threshold_and_quorum(), (t, quorum.len()));
         assert!(baggy_verify(params, &pk, msg, &sig));
         assert_eq!(Some(sig), baggy_reference_sign(params, &sk, &pk, msg));
     }
 
     #[test]
     fn baggy_v2_two_of_three_equals_the_reference() {
-        sign_and_compare(&BaggyParams::TEST_SMALL_V2, 2, 3, &[0, 2], 0x31);
+        sign_and_compare(&TINY_V2, 2, 3, &[0, 2], 0x31);
     }
 
     #[test]
     fn baggy_v2_three_of_five_equals_the_reference() {
-        sign_and_compare(&BaggyParams::TEST_SMALL_V2, 3, 5, &[0, 3, 4], 0x32);
+        sign_and_compare(&TINY_V2, 3, 5, &[0, 3, 4], 0x32);
     }
 
     #[test]
     fn baggy_v2_five_of_seven_equals_the_reference() {
-        sign_and_compare(&BaggyParams::TEST_SMALL_V2, 5, 7, &[0, 1, 3, 5, 6], 0x33);
+        sign_and_compare(&TINY_V2, 5, 7, &[0, 1, 3, 5, 6], 0x33);
     }
 
     #[test]
     fn baggy_v2_all_of_three_equals_the_reference() {
-        sign_and_compare(&BaggyParams::TEST_SMALL_V2, 3, 3, &[0, 1, 2], 0x34);
+        sign_and_compare(&TINY_V2, 3, 3, &[0, 1, 2], 0x34);
     }
 
     #[test]
-    fn baggy_v1_three_of_five_equals_the_reference() {
-        sign_and_compare(&BaggyParams::TEST_SMALL, 3, 5, &[1, 2, 3], 0x35);
+    fn baggy_v1_three_of_five_with_a_spare_party_equals_the_reference() {
+        // Four parties of a 3-of-5 sharing: more than the threshold take part.
+        sign_and_compare(&TINY_V1, 3, 5, &[1, 2, 3, 4], 0x35);
+    }
+
+    #[test]
+    fn keygen_two_of_three_equals_the_reference() {
+        let mut s = setup(2, 3, &[1, 2], 0x36);
+        let sk = sk();
+        let mut engine =
+            SpdzSweepEngine::new([0x36; 32], 2, &s.keys, &mut s.rngs, &mut s.source).unwrap();
+        let (pk, binding) =
+            baggy_keygen_mpc(&mut engine, &TINY_V2, &mut WaistbandCache::disabled()).unwrap();
+        assert_eq!(Some(pk), baggy_reference_keygen(&TINY_V2, &sk));
+        assert_eq!(engine.key_identity().unwrap(), Some(binding.identity()));
+        // The shares now belong to this key under these parameters only.
+        assert!(
+            baggy_keygen_mpc(&mut engine, &TINY_V1, &mut WaistbandCache::disabled()).is_err()
+        );
+    }
+
+    /// No dealer anywhere: dealerless key generation, MAC key, key-share authentication and
+    /// triples for a 3-of-4 sharing, then a sweep by the quorum `{0, 2, 3}` checked against
+    /// the hash of the key reconstructed from the same shares.
+    #[test]
+    fn dealerless_keys_and_triples_drive_a_three_of_four_sweep() {
+        use crate::dkg::run_dealerless_dkg_seed32_gf256;
+        use crate::field::tower::lagrange_weights_zero_gf256;
+        use crate::keccak_mpc::authenticate_dkg_seed_shares_for_spdz;
+        use crate::preprocessing::{PCG_DEFAULT_TREE_DEPTH, spdz_setup_alpha_gf256};
+        use crate::tsw_baggy::{Cshake256Suite, th_chain_f, th_secret_prf};
+
+        let (t, n) = (3usize, 4usize);
+        let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+        let mut rngs: Vec<PartyPrivateRng> = (0..n)
+            .map(|i| PartyPrivateRng::from_seed([0x50 + i as u8; 32], b"spdz-sweep-dealerless"))
+            .collect();
+        let mut mesh = OtMesh::try_establish([0xc0; 32], &mut rngs).unwrap();
+        let (seed_shares, pk_seed) =
+            run_dealerless_dkg_seed32_gf256([0xc1; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
+        let (prf_shares, _) =
+            run_dealerless_dkg_seed32_gf256([0xc2; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
+        let (alpha_c, alpha_sh) = spdz_setup_alpha_gf256(&[0xc3; 32], t, &pts, &mut rngs).unwrap();
+        let mut keys = authenticate_dkg_seed_shares_for_spdz(
+            &[0xc4; 32],
+            t,
+            &pts,
+            32,
+            pk_seed,
+            &seed_shares,
+            &prf_shares,
+            &alpha_c,
+            &alpha_sh,
+            &mut mesh,
+            &mut rngs,
+        )
+        .unwrap();
+
+        let quorum = [0usize, 2, 3];
+        let weights = lagrange_weights_zero_gf256(&[pts[0], pts[2], pts[3]]).unwrap();
+        let mut sk_seed = [0u8; 32];
+        for bit in 0..256 {
+            let mut value = TowerGf256::ZERO;
+            for (weight, &p) in weights.iter().zip(&quorum) {
+                value = value.add(weight.mul(seed_shares[p].bit_shares[bit]));
+            }
+            assert!(value.0 <= 1);
+            sk_seed[bit / 8] |= value.0 << (bit % 8);
+        }
+
+        keys.remove(1);
+        let mut session_rngs: Vec<PartyPrivateRng> = quorum
+            .iter()
+            .map(|&p| PartyPrivateRng::from_seed([0x60 + p as u8; 32], b"spdz-sweep-session"))
+            .collect();
+        let mut source = DealerlessPcgTripleSource {
+            session_id: [0xc5; 32],
+            t,
+            eval_points: &pts,
+            quorum: &quorum,
+            tree_depth: PCG_DEFAULT_TREE_DEPTH,
+            alpha_contribs: &alpha_c,
+            alpha_shamir: &alpha_sh,
+            ot_mesh: &mut mesh,
+            party_rngs: &mut rngs,
+            requests: 0,
+        };
+        let mut engine =
+            SpdzSweepEngine::new([0xc6; 32], t, &keys, &mut session_rngs, &mut source).unwrap();
+        let lane = LaneSpec::pors(9, 1, 5);
+        let sweep = engine.sweep(&pk_seed, vec![lane]).unwrap();
+        engine.barrier().unwrap();
+        let opened = engine.open_round(&sweep, &[(0, 1)]).unwrap();
+        let secret = th_secret_prf(Cshake256Suite, &pk_seed, &sk_seed, &lane.prf);
+        assert_eq!(
+            opened[0],
+            th_chain_f(Cshake256Suite, &pk_seed, &lane.f, &secret)
+        );
+        assert_eq!(engine.permutations(), 2);
     }
 
     #[test]
@@ -813,19 +945,19 @@ pub(crate) mod tests {
             Err(KeccakMpcError::InvalidParameters)
         ));
 
-        // A changed key share fails the MAC check of the first opening; nothing is output
-        // and the engine stays dead.
+        // A changed key share enters the first permutation's Beaver openings and fails
+        // their batched MAC check: no digest exists to open, and the engine stays dead.
         let mut s = setup(3, 5, &[0, 1, 2], 0x42);
         s.keys[1].sk_seed_words[0][0] ^= 1;
         let mut engine =
             SpdzSweepEngine::new([0x42; 32], 3, &s.keys, &mut s.rngs, &mut s.source).unwrap();
-        let lanes = vec![LaneSpec::pors(0, 0, 0)];
-        let sweep = engine.sweep(&sk.pk_seed, lanes).unwrap();
-        assert!(engine.open_round(&sweep, &[(0, 1)]).is_err());
+        assert!(engine.sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 0)]).is_err());
         assert!(engine.is_poisoned());
-        assert!(engine.open_round(&sweep, &[(0, 1)]).is_err());
+        assert_eq!(engine.permutations(), 1);
         assert!(engine.sweep(&sk.pk_seed, vec![LaneSpec::pors(0, 0, 1)]).is_err());
         assert!(engine.randomiser(&[0; 32]).is_err());
+        assert!(engine.barrier().is_err());
+        assert_eq!(engine.permutations(), 1);
 
         // A corrupted triple fails the batched check of its own permutation.
         let mut s = setup(2, 3, &[0, 1], 0x43);

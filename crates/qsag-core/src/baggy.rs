@@ -1,21 +1,29 @@
-//! `Baggy`: stateless 2-of-3 threshold hash-based signatures (`WOTS+C` `w = 4`, `v = 128`, `T = 192`,
-//! `FORS+C`, hypertree) on the 256-lane replicated engine, with the `Waistband` top-layer
-//! cache.
+//! `Baggy`: stateless threshold hash-based signatures (`WOTS+C` `w = 4`, `v = 128`, `T = 192`,
+//! hypertree, over `FORS+C` or `PORS+FP`), with the `Waistband` top-layer cache.
 //!
 //! ### Structure
 //! A hypertree of `d` layers of height-`h'` subtrees over `WOTS+C` leaves ([`crate::wots_c`]);
-//! the bottom leaf signs the public key of a `FORS+C` instance with `k - 1` trees of height
-//! `a`. `FORS+C` grinds a public counter until the index of the `k`-th tree is zero and omits
-//! that tree. All secret values derive from the shared `sk_seed`; only values that belong in
-//! a signature, or chain endpoints and leaf hashes that are public-key material, are opened.
+//! the bottom leaf signs a few-time public key ([`BaggyFewTime`]):
+//! * **Version 1, `FORS+C`:** `k - 1` trees of height `a`. A public counter is ground until
+//!   the index of the `k`-th tree is zero, and that tree is omitted.
+//! * **Version 2, `PORS+FP`** ([`crate::pors_fp`]): one tree; a public counter is ground
+//!   until the distinct sorted index subset has a multiproof within the pruning bound.
+//!
+//! All secret values derive from the shared `sk_seed`; only values that belong in a
+//! signature, or chain endpoints and leaf hashes that are public-key material, are opened.
+//!
+//! ### Engines
+//! The ceremonies are written against [`BaggyEngine`]. [`Rss256Engine`] is the 2-of-3
+//! replicated engine; [`crate::spdz_sweep::SpdzSweepEngine`] runs the same sweep for any
+//! `2 <= t <= n`. Both produce the signature of [`baggy_reference_sign`], byte for byte.
 //!
 //! ### Three phases ([`baggy_sign_mpc`])
 //! 1. **Randomiser.** `opt_rand = PRF(sk_prf, mu)` stays shared and keys
 //!    `R = PRF(opt_rand, mu)`; both are evaluated under MPC, verified at their own barrier,
 //!    and only `R` is opened. `R` therefore depends on the shared key and the message alone:
-//!    a signer that aborts after seeing `R` gets the same `R`, and the same leaf and FORS
-//!    indices, on every retry.
-//! 2. **All-layer sweep.** `R` fixes every address, so the FORS leaves and the chains of
+//!    a signer that aborts after seeing `R` gets the same `R`, and the same leaf and
+//!    few-time indices, on every retry.
+//! 2. **All-layer sweep.** `R` fixes every address, so the few-time leaves and the chains of
 //!    every subtree on the path are evaluated together, level by level: one `PRF` level and
 //!    three `F` levels in total, however many layers there are.
 //! 3. **Cut.** One barrier verifies every gate of phase 2. Then chain endpoints and FORS leaf
@@ -61,11 +69,18 @@
 //! every later call compares (see [`BaggyKeyBinding`]).
 //!
 //! ### Limits that are stated, not solved
-//! * The number of signatures per key is bounded by the few-time security of `FORS+C` at the
-//!   chosen `(k, a, h)`; [`BaggyParams::SHA3_128F`] reuses the tree geometry of
+//! * The number of signatures per key is bounded by the few-time security of the bottom
+//!   scheme at the chosen geometry; [`BaggyParams::SHA3_128F`] reuses the tree geometry of
 //!   [`crate::tsw_baggy::PqHashParams::BAGGY_TSW_128F`], which that preset sizes for `2^16`
-//!   signatures. The layer signatures use the 128-chain `WOTS+C` encoding of a full
+//!   signatures. For version 2 the per-tree bound is
+//!   [`crate::pors_fp::PorsFpParams::forgery_bits_milli`]; how often one hypertree leaf is
+//!   reused over `2^16` signatures of a height-32 hypertree is the same as for version 1.
+//!   The layer signatures use the 128-chain `WOTS+C` encoding of a full
 //!   256-bit digest ([`crate::wots_c::WotsCParams::V128`]).
+//! * The `t`-of-`n` engine costs one authenticated 64-instance permutation per 64 lanes per
+//!   level, 38,400 triple words each. A [`BaggyParams::SHA3_128F_V2`] signature without
+//!   `Waistband` is 578 such permutations (512 for the hypertree, 64 for the `PORS+FP`
+//!   tree, 2 for the randomiser); see [`crate::spdz_sweep`].
 //! * `BaggyPoseidon2` is the existing authenticated-share Poseidon2 engine under this suite's
 //!   name; it does not run on the 256-lane engine.
 
