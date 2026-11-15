@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::fips204_ntt::{ml_dsa_sign_deterministic, signing_key_from_secret_for_test};
-use crate::rss_mpc::test_support::{arm_additive_fault, deal};
+use crate::rss_mpc::test_support::{arm_additive_fault, arm_binary_fault, deal};
 use crate::rss_mpc::{MpcTransportError, RoundInbox, RoundInfo, RoundKind};
 use std::boxed::Box;
 use std::println;
@@ -545,9 +545,14 @@ fn rejection_verdict_is_the_exact_fips_predicate() {
 // Protocol
 // ---------------------------------------------------------------------------
 
-fn dkg(ids: &[u16], threshold: usize, session: u8) -> Vec<ThresholdMlDsaSignerShare> {
+fn dkg_level(
+    level: MlDsaLevel,
+    ids: &[u16],
+    threshold: usize,
+    session: u8,
+) -> Vec<ThresholdMlDsaSignerShare> {
     let config = ThresholdMlDsaDkgConfig {
-        level: MlDsaLevel::MlDsa44,
+        level,
         threshold,
         party_ids: ids.to_vec(),
         session_id: [session; 32],
@@ -561,6 +566,10 @@ fn dkg(ids: &[u16], threshold: usize, session: u8) -> Vec<ThresholdMlDsaSignerSh
         .into_iter()
         .map(|r| r.expect("honest key generation succeeds"))
         .collect()
+}
+
+fn dkg(ids: &[u16], threshold: usize, session: u8) -> Vec<ThresholdMlDsaSignerShare> {
+    dkg_level(MlDsaLevel::MlDsa44, ids, threshold, session)
 }
 
 type SignResults = Vec<Result<ThresholdSignOutput, ThresholdMlDsaError>>;
@@ -601,7 +610,7 @@ fn sign(
 
 /// Sums each distinct subset component once: the secret no party holds.
 fn reconstruct(shares: &[ThresholdMlDsaSignerShare]) -> (Vec<Poly256>, Vec<Poly256>) {
-    let params = MlDsaLevel::MlDsa44.params();
+    let params = shares[0].verification_pack().level.params();
     let mut seen: Vec<(u32, Vec<Poly256>, Vec<Poly256>)> = Vec::new();
     for share in shares {
         for (holders, s1, s2) in share.components_for_test() {
@@ -629,10 +638,13 @@ fn reconstruct(shares: &[ThresholdMlDsaSignerShare]) -> (Vec<Poly256>, Vec<Poly2
 
 fn assert_fips_key(shares: &[ThresholdMlDsaSignerShare]) {
     let pack = shares[0].verification_pack().clone();
+    let params = pack.level.params();
+    let eta = params.eta as i64;
+    let bins = (2 * params.eta + 1) as usize;
     assert!(shares.iter().all(|s| s.verification_pack() == &pack));
-    assert_eq!(pack.pk_bytes.len(), 1312);
+    assert_eq!(pack.pk_bytes.len(), params.pk_bytes);
     let (s1, s2) = reconstruct(shares);
-    let mut histogram = [0usize; 5];
+    let mut histogram = vec![0usize; bins];
     for poly in s1.iter().chain(&s2) {
         for &c in &poly.coeffs {
             let centred = if c > MLDSA_Q / 2 {
@@ -641,25 +653,28 @@ fn assert_fips_key(shares: &[ThresholdMlDsaSignerShare]) {
                 c as i64
             };
             assert!(
-                (-2..=2).contains(&centred),
+                (-eta..=eta).contains(&centred),
                 "coefficient {centred} outside [-eta, eta]"
             );
-            histogram[(centred + 2) as usize] += 1;
+            histogram[(centred + eta) as usize] += 1;
         }
     }
-    // 2048 uniform draws over five values: each count is 409.6 +- 18.1.
+    let total_draws = (params.ell + params.k) * MLDSA_N;
+    let mean = total_draws / bins;
     assert!(
-        histogram.iter().all(|&count| (300..=520).contains(&count)),
+        histogram
+            .iter()
+            .all(|&count| count >= mean * 6 / 10 && count <= mean * 14 / 10),
         "{histogram:?}"
     );
     // The public key is the standard key of this secret, and the standard
     // signer with this secret verifies under it.
     let (standard_pk, standard_sk) =
-        signing_key_from_secret_for_test(MlDsaLevel::MlDsa44, pack.rho, s1, s2);
+        signing_key_from_secret_for_test(pack.level, pack.rho, s1, s2);
     assert_eq!(standard_pk, pack.pk_bytes);
     let signature = ml_dsa_sign_deterministic(&standard_sk, b"standard signer", b"").unwrap();
     assert!(ml_dsa_verify(
-        MlDsaLevel::MlDsa44,
+        pack.level,
         &pack.pk_bytes,
         b"standard signer",
         b"",
@@ -837,8 +852,11 @@ fn unsupported_configurations_and_quorums_are_rejected() {
         }
     );
     assert_eq!(
-        attempt(config(MlDsaLevel::MlDsa65, 2, &[1, 2, 3]), &mut net),
-        ThresholdMlDsaError::UnsupportedLevel
+        attempt(config(MlDsaLevel::MlDsa87, 2, &[1, 2, 3, 4, 5, 6]), &mut net),
+        ThresholdMlDsaError::InvalidThresholdParameters {
+            threshold: 2,
+            num_parties: 6
+        }
     );
     assert_eq!(
         attempt(config(MlDsaLevel::MlDsa44, 2, &[1, 2, 2]), &mut net),
@@ -1139,6 +1157,23 @@ fn rejected_attempts_expose_only_masked_values() {
             }
         }
         assert_eq!(attempts.len(), output.attempts as usize);
+        for attempt in &attempts {
+            // PHASE_SIGN_HIGH_BITS must verify its circuit in place without opening w1:
+            // its only RoundKind::Open messages are verify() coins and the masked final check.
+            let hb_opens = attempt
+                .iter()
+                .filter(|r| r.phase == PHASE_SIGN_HIGH_BITS && r.kind == RoundKind::Open)
+                .count();
+            let hb_reshares = attempt
+                .iter()
+                .filter(|r| r.phase == PHASE_SIGN_HIGH_BITS && r.kind == RoundKind::VerifyReshare)
+                .count();
+            assert_eq!(
+                hb_opens,
+                hb_reshares + 1,
+                "w1 must remain sealed during PHASE_SIGN_HIGH_BITS"
+            );
+        }
         let (last, rejected) = attempts.split_last().unwrap();
         for attempt in rejected {
             assert!(attempt.iter().all(|r| r.phase != PHASE_SIGN_RELEASE));
@@ -1361,6 +1396,204 @@ fn verified_response_gate_enforces_every_barrier_and_context() {
             PendingResponse::new_sealed(response(), context, 9, &seal_entropy)
                 .release(checks)
                 .is_err()
+        );
+    }
+}
+
+#[test]
+fn high_bits_circuit_gamma2_q_minus_1_over_32_matches_fips_across_all_boundaries() {
+    let gamma2 = (MLDSA_Q - 1) / 32;
+    let alpha = 2 * gamma2;
+    let mut values: Vec<u32> = vec![
+        0,
+        1,
+        gamma2 - 1,
+        gamma2,
+        gamma2 + 1,
+        MLDSA_Q - gamma2 - 2,
+        MLDSA_Q - gamma2 - 1,
+        MLDSA_Q - gamma2,
+        MLDSA_Q - gamma2 + 1,
+        MLDSA_Q - 2,
+        MLDSA_Q - 1,
+    ];
+    for bin in 0..16u32 {
+        let edge = bin * alpha + gamma2;
+        for delta in [-2i64, -1, 0, 1, 2] {
+            let v = (edge as i64 + delta).rem_euclid(MLDSA_Q as i64) as u32;
+            values.push(v);
+        }
+    }
+    let mut rng = Rng(0x6587);
+    for _ in 0..128 {
+        values.push(rng.field());
+    }
+    let masks: Vec<u32> = (0..values.len()).map(|_| rng.field()).collect();
+    let opened: Vec<u32> = values
+        .iter()
+        .zip(&masks)
+        .map(|(&v, &r)| fq_add(fq_add(v, gamma2 - 1), r))
+        .collect();
+    let st = Structure::new(3, 2).unwrap();
+    let (results, _) = run(vec![(); 3], Vec::new(), |me, (), net| {
+        let mut engine = engine_for(net, &st, me);
+        let r = bit_planes(&st, me, &masks, 29);
+        let (hb, planes) = high_bits_circuit_with_bits(&mut engine, &opened, &r, gamma2)?;
+        assert_eq!(planes.len(), 4);
+        let mut refs: Vec<&Sh> = vec![&hb];
+        for p in &planes {
+            refs.push(p);
+        }
+        engine.open(&refs)
+    });
+    for result in results {
+        let out = result.unwrap();
+        for (idx, &v) in values.iter().enumerate() {
+            let expected = high_bits_ct(v, gamma2);
+            assert_eq!(out[0][idx], expected, "value {v}");
+            let mut composed = 0u32;
+            for b in 0..4 {
+                let bit = out[1 + b][idx];
+                assert!(bit <= 1);
+                composed |= bit << b;
+            }
+            assert_eq!(composed, expected, "bit planes for {v}");
+        }
+    }
+}
+
+#[test]
+fn sealed_mpc_challenge_derivation_matches_fips204_across_all_three_levels() {
+    for (level_idx, level) in [
+        MlDsaLevel::MlDsa44,
+        MlDsaLevel::MlDsa65,
+        MlDsaLevel::MlDsa87,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let params = level.params();
+        let w_len = params.k * MLDSA_N;
+        let b_width = if params.w1_poly_bytes == 192 { 6 } else { 4 };
+        let w1_bins = (MLDSA_Q - 1) / (2 * params.gamma2);
+        let mut rng = Rng(0xC0DE_0000 + level_idx as u64);
+        let w1_plain: Vec<u32> = (0..w_len).map(|_| rng.field() % w1_bins).collect();
+        let w1_polys = to_polys(&w1_plain);
+        let mu = [0x3Au8.wrapping_add(level_idx as u8 * 17); 64];
+
+        let mut c_tilde = vec![0u8; params.c_tilde_bytes];
+        let mut xof = Shake256::new();
+        xof.absorb(&mu);
+        xof.absorb(&w1_encode(&params, &w1_polys));
+        xof.finalize(0x1F);
+        xof.squeeze(&mut c_tilde);
+        let expected_c = sample_in_ball(&c_tilde, params.tau);
+
+        let st = Structure::new(3, 2).unwrap();
+        let (results, _) = run(vec![(); 3], Vec::new(), |me, (), net| {
+            let mut engine = engine_for(net, &st, me);
+            let planes: Vec<Sh> = (0..b_width)
+                .map(|d| {
+                    let bits: Vec<u32> = w1_plain.iter().map(|&v| (v >> d) & 1).collect();
+                    deal(&st, me, &bits, 41 + (d * 7) as u8)
+                })
+                .collect();
+            let (c_sh, sib_inc_sh) = mpc_derive_challenge(&mut engine, &params, &mu, &planes)?;
+            Ok::<_, ThresholdMlDsaError>(engine.open(&[&c_sh, &sib_inc_sh])?)
+        });
+        for result in results {
+            let opened = result.unwrap();
+            assert_eq!(opened[1], vec![0u32]);
+            assert_eq!(opened[0].as_slice(), expected_c.coeffs.as_slice());
+        }
+    }
+}
+
+#[test]
+fn binary_fault_in_sealed_keccak_or_sample_in_ball_aborts_before_key_multiply() {
+    for nth in [0usize, 10, 40] {
+        let mut shares = dkg(&[1, 2, 3], 2, 91 + nth as u8);
+        let request = ThresholdSignSession {
+            session_id: [0xA0 + nth as u8; 32],
+            quorum: vec![1, 2, 3],
+        };
+        let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+        let (results, log) = run(states, Vec::new(), |me, share, net| {
+            if me == 1 {
+                arm_binary_fault(PHASE_SIGN_REJECTION, nth);
+            }
+            threshold_sign_mldsa_party(
+                share,
+                &request,
+                b"binary fault check",
+                b"ctx",
+                &[(me as u8) ^ 0x55; 32],
+                &mut AllowBurn,
+                net,
+            )
+        });
+        for result in &results {
+            assert_eq!(
+                result,
+                &Err(ThresholdMlDsaError::Mpc(
+                    MpcError::MultiplicationCheckFailed
+                ))
+            );
+        }
+        assert!(
+            log.iter().all(|r| r.phase != PHASE_SIGN_RELEASE),
+            "neither w1 nor z may be released after a binary circuit fault"
+        );
+    }
+}
+
+#[test]
+fn mldsa65_and_mldsa87_pq128_threshold_keygen_signing_and_negative_forgery() {
+    for (level, expected_pk_len, expected_sig_len, seed) in [
+        (MlDsaLevel::MlDsa65, 1952usize, 3309usize, 0x65u8),
+        (MlDsaLevel::MlDsa87, 2592usize, 4627usize, 0x87u8),
+    ] {
+        let started_kg = Instant::now();
+        let mut shares = dkg_level(level, &[10, 20, 30], 2, seed);
+        let kg_ms = started_kg.elapsed().as_secs_f64() * 1e3;
+        assert_fips_key(&shares);
+        let pk = shares[0].verification_pack().pk_bytes.clone();
+        assert_eq!(pk.len(), expected_pk_len);
+
+        let msg = b"PQ128 threshold FIPS 204 ML-DSA credential root";
+        let started_sig = Instant::now();
+        let (results, log) = sign(
+            &mut shares,
+            &[10, 20, 30],
+            seed.wrapping_add(1),
+            msg,
+            Vec::new(),
+            None,
+        );
+        let sig_ms = started_sig.elapsed().as_secs_f64() * 1e3;
+        let outputs: Vec<ThresholdSignOutput> = results.into_iter().map(|r| r.unwrap()).collect();
+        assert!(outputs.iter().all(|o| o.signature == outputs[0].signature));
+        let sig = &outputs[0].signature;
+        assert_eq!(sig.len(), expected_sig_len);
+        assert!(ml_dsa_verify(level, &pk, msg, b"ctx", sig));
+
+        // Negative forgery checks: wrong message, wrong context, corrupted c_tilde / z / h.
+        assert!(!ml_dsa_verify(level, &pk, b"forged msg", b"ctx", sig));
+        assert!(!ml_dsa_verify(level, &pk, msg, b"wrong ctx", sig));
+        for flip_at in [0usize, expected_sig_len / 2, expected_sig_len - 1] {
+            let mut forged = sig.clone();
+            forged[flip_at] ^= 0x01;
+            assert!(!ml_dsa_verify(level, &pk, msg, b"ctx", &forged));
+        }
+
+        // Verify sealed-w1 invariant across all attempts of ML-DSA-65 / ML-DSA-87 too.
+        let releases: Vec<usize> = (0..log.len())
+            .filter(|&i| log[i].phase == PHASE_SIGN_RELEASE)
+            .collect();
+        assert_eq!(releases.len(), 1);
+        println!(
+            "MEASURE {:?} (2,3): keygen_ms={kg_ms:.1} attempts={} sign_ms={sig_ms:.1}",
+            level, outputs[0].attempts
         );
     }
 }

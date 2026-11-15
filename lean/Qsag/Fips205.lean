@@ -139,7 +139,7 @@ def Fips205Params.wellFormed (p : Fips205Params) : Bool :=
   decide (0 < p.n) && decide (p.n ≤ 32) &&
   decide (0 < p.d) && decide (p.h = p.d * p.hp) &&
   decide (0 < p.k) && decide (0 < p.a) &&
-  decide (p.mdBytes + p.treeBytes + p.leafBytes ≤ p.m)
+  decide (p.m = p.mdBytes + p.treeBytes + p.leafBytes)
 
 /-- Official NIST FIPS 205 `SLH-DSA-SHAKE-128f` (`PK = 32B, SK = 64B, SIG = 17,088B`). -/
 @[expose] def slhDsaShake128f : Fips205Params :=
@@ -181,6 +181,24 @@ theorem slhDsaShake192f_wellFormed : slhDsaShake192f.wellFormed = true := by unf
 theorem slhDsaShake192s_wellFormed : slhDsaShake192s.wellFormed = true := by unfold slhDsaShake192s; decide
 theorem slhDsaShake256f_wellFormed : slhDsaShake256f.wellFormed = true := by unfold slhDsaShake256f; decide
 theorem slhDsaShake256s_wellFormed : slhDsaShake256s.wellFormed = true := by unfold slhDsaShake256s; decide
+theorem slhDsaShakeCompactTest_wellFormed : slhDsaShakeCompactTest.wellFormed = true := by
+  unfold slhDsaShakeCompactTest; decide
+
+/-- Well-formed NIST FIPS 205 parameter sets enforce exact `H_msg` output byte length
+    `m = ⌈k·a/8⌉ + ⌈(h - h')/8⌉ + ⌈h'/8⌉` (Table 2), preventing extra XOF byte squeeze/discard. -/
+theorem fips205_wellFormed_exact_hMsg_bytes (p : Fips205Params) (hWf : p.wellFormed = true) :
+    p.m = p.mdBytes + p.treeBytes + p.leafBytes := by
+  unfold Fips205Params.wellFormed at hWf
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+  exact hWf.2
+
+theorem tooth_slhDsaShake128s_m34_rejected :
+    ({ slhDsaShake128s with m := 34 } : Fips205Params).wellFormed = false := by
+  decide
+
+theorem witness_slhDsaShake128s_m30_wellFormed :
+    ∃ p : Fips205Params, p.wellFormed = true :=
+  ⟨slhDsaShake128s, slhDsaShake128s_wellFormed⟩
 
 /-- §11.2.1 `PRF_msg(SK.prf, opt_rand, M') = SHAKE256(SK.prf || opt_rand || M', 8n)`. -/
 def fipsPrfMsg (n : Nat) (skPrf optRand msgPrime : List UInt8) : List UInt8 :=
@@ -1943,6 +1961,8 @@ theorem witness_sha3_384_category3 :
 
 #tooth_pair Qsag.accepted_preHash_category vs Qsag.tooth_sha3_256_category5_rejected
 #verify_inhabited Qsag.accepted_preHash_category Qsag.witness_sha3_384_category3
+#tooth_pair Qsag.fips205_wellFormed_exact_hMsg_bytes vs Qsag.tooth_slhDsaShake128s_m34_rejected
+#verify_inhabited Qsag.fips205_wellFormed_exact_hMsg_bytes Qsag.witness_slhDsaShake128s_m30_wellFormed
 
 end Qsag
 end

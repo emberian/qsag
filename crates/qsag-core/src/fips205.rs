@@ -2306,8 +2306,210 @@ pub fn slh_keygen_mpc<O: SlhMpcOracles>(
     SlhPublicKey::new(pk_seed, pk_root.as_slice())
 }
 
+/// Domain-separation prefix for Round-1 hedged randomizer coin-tossing commitments
+/// (`SHAKE256("QSAG.R_COMMIT/v1" || sid || party_id_le8 || r_len_le8 || R_i || open_i)`),
+/// binding every custodian's randomizer contribution `R_i` strictly prior to openings and
+/// prior to any Round-3 signature-share release.
+pub const R_COMMIT_DOMAIN_V1: &[u8] = b"QSAG.R_COMMIT/v1";
+
+/// Compute the 32-byte length-framed commitment digest
+/// `H("QSAG.R_COMMIT/v1" || sid || party_id_le8 || r_len_le8 || r_share || open_salt)`
+/// binding party `party_id`'s hedged randomizer contribution `r_share` within session `sid`.
+pub fn compute_hedged_r_commit_v1(
+    sid: &[u8; 32],
+    party_id: u64,
+    r_share: &[u8],
+    open_salt: &[u8; 32],
+) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(R_COMMIT_DOMAIN_V1.len() + 32 + 8 + 8 + r_share.len() + 32);
+    preimage.extend_from_slice(R_COMMIT_DOMAIN_V1);
+    preimage.extend_from_slice(sid);
+    preimage.extend_from_slice(&party_id.to_le_bytes());
+    preimage.extend_from_slice(&(r_share.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(r_share);
+    preimage.extend_from_slice(open_salt);
+    let raw = shake256_xof(32, &preimage);
+    wipe_slice(&mut preimage);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&raw[..32]);
+    out
+}
+
+/// Round-1 commitment published by `party_id` for hedged threshold randomness coin-tossing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HedgedRandomizerCommit {
+    pub party_id: u64,
+    pub commit: [u8; 32],
+}
+
+/// Round-2 opening published by `party_id` after all Round-1 commitments have been collected
+/// and strictly before Round-3 message-dependent signature shares are opened.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HedgedRandomizerOpen {
+    pub party_id: u64,
+    pub r_share: Vec<u8>,
+    pub open_salt: [u8; 32],
+}
+
+impl fmt::Debug for HedgedRandomizerOpen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HedgedRandomizerOpen")
+            .field("party_id", &self.party_id)
+            .field("r_share", &"[REDACTED]")
+            .field("open_salt", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for HedgedRandomizerOpen {
+    fn drop(&mut self) {
+        wipe_slice(&mut self.r_share);
+        wipe_bytes32(&mut self.open_salt);
+    }
+}
+
+impl HedgedRandomizerOpen {
+    /// Construct a matching `(HedgedRandomizerCommit, HedgedRandomizerOpen)` pair bound to `sid`.
+    pub fn commit_and_open(
+        sid: &[u8; 32],
+        party_id: u64,
+        r_share: Vec<u8>,
+        open_salt: [u8; 32],
+    ) -> (HedgedRandomizerCommit, Self) {
+        let commit = compute_hedged_r_commit_v1(sid, party_id, &r_share, &open_salt);
+        (
+            HedgedRandomizerCommit { party_id, commit },
+            Self {
+                party_id,
+                r_share,
+                open_salt,
+            },
+        )
+    }
+}
+
+/// Unforgeable witness that a hedged MPC randomizer `opt_rand = ⊕_i R_i` was derived from a
+/// complete, duplicate-free `QSAG.R_COMMIT/v1` commit-then-open coin-tossing transcript prior to
+/// Round-3 share release, eliminating post-Round-3 rushing selective-abort bias on `R`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CommittedHedgedRandomizer {
+    sid: [u8; 32],
+    opt_rand: Vec<u8>,
+}
+
+impl fmt::Debug for CommittedHedgedRandomizer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommittedHedgedRandomizer")
+            .field("sid", &self.sid)
+            .field("len", &self.opt_rand.len())
+            .finish()
+    }
+}
+
+impl Drop for CommittedHedgedRandomizer {
+    fn drop(&mut self) {
+        wipe_bytes32(&mut self.sid);
+        wipe_slice(&mut self.opt_rand);
+    }
+}
+
+impl CommittedHedgedRandomizer {
+    /// Verify every custodian's Round-1 `QSAG.R_COMMIT/v1` commitment against its Round-2 opening
+    /// in constant time across the duplicate-free `roster`, then XOR-combine `opt_rand = ⊕_i R_i`.
+    pub fn from_coin_toss(
+        sid: &[u8; 32],
+        roster: &[u64],
+        n_bytes: usize,
+        commits: &[HedgedRandomizerCommit],
+        opens: &[HedgedRandomizerOpen],
+    ) -> Result<Self, Fips205Error> {
+        if n_bytes != 16 && n_bytes != 24 && n_bytes != 32 {
+            return Err(Fips205Error::InvalidNodeBytes {
+                expected: 32,
+                actual: n_bytes,
+            });
+        }
+        if roster.is_empty() || commits.len() != roster.len() || opens.len() != roster.len() {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        for i in 0..roster.len() {
+            for j in (i + 1)..roster.len() {
+                if roster[i] == roster[j]
+                    || commits[i].party_id == commits[j].party_id
+                    || opens[i].party_id == opens[j].party_id
+                {
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+            }
+        }
+        let mut combined = vec![0u8; n_bytes];
+        for &pid in roster {
+            let commit_entry = match commits.iter().find(|c| c.party_id == pid) {
+                Some(c) => c,
+                None => {
+                    wipe_slice(&mut combined);
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+            };
+            let open_entry = match opens.iter().find(|o| o.party_id == pid) {
+                Some(o) => o,
+                None => {
+                    wipe_slice(&mut combined);
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+            };
+            if open_entry.r_share.len() != n_bytes {
+                wipe_slice(&mut combined);
+                return Err(Fips205Error::InvalidNodeBytes {
+                    expected: n_bytes,
+                    actual: open_entry.r_share.len(),
+                });
+            }
+            let expected = compute_hedged_r_commit_v1(
+                sid,
+                pid,
+                &open_entry.r_share,
+                &open_entry.open_salt,
+            );
+            if !ct_eq_bytes(&expected, &commit_entry.commit) {
+                wipe_slice(&mut combined);
+                return Err(Fips205Error::MpcActiveTamperDetected);
+            }
+            for b in 0..n_bytes {
+                combined[b] ^= open_entry.r_share[b];
+            }
+        }
+        Ok(Self {
+            sid: *sid,
+            opt_rand: combined,
+        })
+    }
+
+    #[inline]
+    pub fn sid(&self) -> &[u8; 32] {
+        &self.sid
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.opt_rand
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.opt_rand.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.opt_rand.is_empty()
+    }
+}
+
 /// Distributed MPC `SLH-DSA` internal signing (`slhSignMpc`):
 /// - Takes ONLY sealed `oracles: &mut O` and public `pk: &SlhPublicKey` (`0` `SlhSecretKey`!);
+/// - Gates hedged randomness behind [`CommittedHedgedRandomizer`] (`QSAG.R_COMMIT/v1` coin-tossing)
+///   so `R` is uniquely bound prior to Round-3 share openings;
 /// - Requires `CutBoundaryMacToken` barriers strictly before every cut opening;
 /// - Cross-checks `F(PK.seed, leaf_adrs_i, revealed_sks[i]) == fors_all_leaves[i][idx_i]` (`[P0-08]`);
 /// - Runs `slh_verify_internal(params, m_prime, &sig, pk)` before returning `Ok(sig)` (`[P0-08]`)!
@@ -2316,7 +2518,7 @@ pub fn slh_sign_internal_mpc<O: SlhMpcOracles>(
     oracles: &mut O,
     m_prime: &[u8],
     pk: &SlhPublicKey,
-    addrnd: Option<&[u8]>,
+    addrnd: Option<&CommittedHedgedRandomizer>,
 ) -> Result<Vec<u8>, Fips205Error> {
     if !params.is_valid() || pk.n != params.n {
         return Err(Fips205Error::InvalidParameterSet);
@@ -2332,7 +2534,7 @@ pub fn slh_sign_internal_mpc<O: SlhMpcOracles>(
                     actual: r.len(),
                 });
             }
-            r
+            r.as_slice()
         }
         None => pk.pk_seed_slice(),
     };
@@ -2480,19 +2682,23 @@ pub fn slh_sign_internal_mpc<O: SlhMpcOracles>(
 }
 
 /// Pure NIST FIPS 205 §9.2 distributed MPC `SLH-DSA` signing (`ctx` <= 255 bytes).
+/// Hedged randomness (`Some(...)`) requires a verified [`CommittedHedgedRandomizer`] from
+/// Round-1 `QSAG.R_COMMIT/v1` coin-tossing prior to Round-3 share release.
 pub fn slh_sign_mpc<O: SlhMpcOracles>(
     params: &Fips205Params,
     oracles: &mut O,
     msg: &[u8],
     ctx: &[u8],
     pk: &SlhPublicKey,
-    addrnd: Option<&[u8]>,
+    addrnd: Option<&CommittedHedgedRandomizer>,
 ) -> Result<Vec<u8>, Fips205Error> {
     let m_prime = format_pure_m_prime(msg, ctx)?;
     slh_sign_internal_mpc(params, oracles, &m_prime, pk, addrnd)
 }
 
 /// Pre-Hash NIST FIPS 205 §9.3 distributed MPC `HashSLH-DSA` signing (enforcing category strength).
+/// Hedged randomness (`Some(...)`) requires a verified [`CommittedHedgedRandomizer`] from
+/// Round-1 `QSAG.R_COMMIT/v1` coin-tossing prior to Round-3 share release.
 pub fn hash_slh_sign_mpc<O: SlhMpcOracles>(
     params: &Fips205Params,
     ph: SlhPreHash,
@@ -2500,7 +2706,7 @@ pub fn hash_slh_sign_mpc<O: SlhMpcOracles>(
     msg: &[u8],
     ctx: &[u8],
     pk: &SlhPublicKey,
-    addrnd: Option<&[u8]>,
+    addrnd: Option<&CommittedHedgedRandomizer>,
 ) -> Result<Vec<u8>, Fips205Error> {
     if !params.is_valid() {
         return Err(Fips205Error::InvalidParameterSet);
@@ -2668,5 +2874,132 @@ mod tests {
             + (overflow_fors.h - overflow_fors.hp).div_ceil(8)
             + overflow_fors.hp.div_ceil(8);
         assert!(!overflow_fors.is_valid());
+    }
+
+    #[test]
+    fn test_committed_hedged_randomizer_coin_toss_and_mpc_signing() {
+        use crate::keccak_mpc::{RssSlhMpcCluster, run_dealerless_rss_dkg_2of3};
+        use crate::preprocessing::PartyPrivateRng;
+
+        let sid = [0x93u8; 32];
+        let roster = [10u64, 20u64, 30u64];
+        let r0 = vec![0x11u8; 16];
+        let r1 = vec![0x22u8; 16];
+        let r2 = vec![0x77u8; 16];
+        let (c0, o0) = HedgedRandomizerOpen::commit_and_open(&sid, 10, r0.clone(), [0xA0; 32]);
+        let (c1, o1) = HedgedRandomizerOpen::commit_and_open(&sid, 20, r1.clone(), [0xA1; 32]);
+        let (c2, o2) = HedgedRandomizerOpen::commit_and_open(&sid, 30, r2.clone(), [0xA2; 32]);
+
+        let committed = CommittedHedgedRandomizer::from_coin_toss(
+            &sid,
+            &roster,
+            16,
+            &[c0, c1, c2],
+            &[o0.clone(), o1.clone(), o2.clone()],
+        )
+        .unwrap();
+        assert_eq!(committed.sid(), &sid);
+        assert_eq!(committed.as_slice(), &[0x44u8; 16]);
+
+        // Rushing party attempting to alter `r_share` after observing honest openings MUST fail:
+        let mut tampered_o2 = o2.clone();
+        tampered_o2.r_share[0] ^= 0x01;
+        assert_eq!(
+            CommittedHedgedRandomizer::from_coin_toss(
+                &sid,
+                &roster,
+                16,
+                &[c0, c1, c2],
+                &[o0.clone(), o1.clone(), tampered_o2],
+            ),
+            Err(Fips205Error::MpcActiveTamperDetected)
+        );
+
+        // Wrong session id, wrong salt, duplicate roster, or mismatched length MUST fail:
+        let wrong_sid = [0x94u8; 32];
+        assert_eq!(
+            CommittedHedgedRandomizer::from_coin_toss(
+                &wrong_sid,
+                &roster,
+                16,
+                &[c0, c1, c2],
+                &[o0.clone(), o1.clone(), o2.clone()],
+            ),
+            Err(Fips205Error::MpcActiveTamperDetected)
+        );
+        assert_eq!(
+            CommittedHedgedRandomizer::from_coin_toss(
+                &sid,
+                &[10, 20, 20],
+                16,
+                &[c0, c1, c2],
+                &[o0.clone(), o1.clone(), o2.clone()],
+            ),
+            Err(Fips205Error::MpcActiveTamperDetected)
+        );
+        assert_eq!(
+            CommittedHedgedRandomizer::from_coin_toss(
+                &sid,
+                &roster,
+                32,
+                &[c0, c1, c2],
+                &[o0, o1, o2],
+            ),
+            Err(Fips205Error::InvalidNodeBytes {
+                expected: 32,
+                actual: 16,
+            })
+        );
+
+        // Full 3-custodian MPC hedged signing roundtrip against `SLH_DSA_SHAKE_COMPACT_TEST`:
+        let params = Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST;
+        let mut rngs = [
+            PartyPrivateRng::from_seed([0x31; 32], b"hedged-r-p0"),
+            PartyPrivateRng::from_seed([0x32; 32], b"hedged-r-p1"),
+            PartyPrivateRng::from_seed([0x33; 32], b"hedged-r-p2"),
+        ];
+        let (keys, raw_pk_seed) = run_dealerless_rss_dkg_2of3(sid, 16, &mut rngs).unwrap();
+        let pk_seed = raw_pk_seed[..16].to_vec();
+
+        let mut cluster = RssSlhMpcCluster::new(sid, keys, rngs).unwrap();
+        let mpc_pk = slh_keygen_mpc(&params, &mut cluster, &pk_seed).unwrap();
+
+        let msg = b"hedged-coin-toss-threshold-slh-dsa";
+        let ctx = b"r-commit-v1";
+        let mpc_sig_hedged =
+            slh_sign_mpc(&params, &mut cluster, msg, ctx, &mpc_pk, Some(&committed)).unwrap();
+        let mpc_sig_hedged_repeat =
+            slh_sign_mpc(&params, &mut cluster, msg, ctx, &mpc_pk, Some(&committed)).unwrap();
+        let mpc_sig_det = slh_sign_mpc(&params, &mut cluster, msg, ctx, &mpc_pk, None).unwrap();
+
+        let (c0b, o0b) =
+            HedgedRandomizerOpen::commit_and_open(&sid, 10, vec![0x99u8; 16], [0xB0; 32]);
+        let (c1b, o1b) =
+            HedgedRandomizerOpen::commit_and_open(&sid, 20, vec![0x22u8; 16], [0xB1; 32]);
+        let (c2b, o2b) =
+            HedgedRandomizerOpen::commit_and_open(&sid, 30, vec![0x77u8; 16], [0xB2; 32]);
+        let committed_alt = CommittedHedgedRandomizer::from_coin_toss(
+            &sid,
+            &roster,
+            16,
+            &[c0b, c1b, c2b],
+            &[o0b, o1b, o2b],
+        )
+        .unwrap();
+        let mpc_sig_hedged_alt = slh_sign_mpc(
+            &params,
+            &mut cluster,
+            msg,
+            ctx,
+            &mpc_pk,
+            Some(&committed_alt),
+        )
+        .unwrap();
+
+        assert_eq!(mpc_sig_hedged, mpc_sig_hedged_repeat);
+        assert_ne!(mpc_sig_hedged, mpc_sig_det);
+        assert_ne!(mpc_sig_hedged, mpc_sig_hedged_alt);
+        assert!(slh_verify(&params, msg, &mpc_sig_hedged, ctx, &mpc_pk));
+        assert!(slh_verify(&params, msg, &mpc_sig_hedged_alt, ctx, &mpc_pk));
     }
 }
