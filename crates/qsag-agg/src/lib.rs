@@ -159,7 +159,7 @@ pub(crate) fn base_parallel_workers() -> usize {
         let available = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1)
-            .clamp(1, 64);
+            .max(1);
         std::env::var("QSAG_WORKERS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -168,7 +168,8 @@ pub(crate) fn base_parallel_workers() -> usize {
     })
 }
 
-/// Cached worker budget (`1..=64`), optionally restricted by `QSAG_WORKERS` or [`with_worker_limit`].
+/// Cached worker budget (`1..=available_parallelism`), optionally restricted by `QSAG_WORKERS` or
+/// [`with_worker_limit`].
 #[cfg(feature = "std")]
 #[inline]
 pub(crate) fn parallel_workers() -> usize {
@@ -187,7 +188,7 @@ pub fn with_worker_limit<R>(max_workers: usize, f: impl FnOnce() -> R) -> R {
             WORKER_LIMIT_OVERRIDE.store(self.0, std::sync::atomic::Ordering::Release);
         }
     }
-    let clamped = max_workers.clamp(1, 64);
+    let clamped = max_workers.clamp(1, base_parallel_workers());
     let prev = WORKER_LIMIT_OVERRIDE.swap(clamped, std::sync::atomic::Ordering::AcqRel);
     let _guard = ResetGuard(prev);
     f()
@@ -296,7 +297,8 @@ pub(crate) fn parallel_pow2_workers(max_units: usize) -> usize {
 }
 
 pub use arithmetize::{
-    ShardBatchProof, ShardRowProof, compute_signing_mode_digest, max_shard_signers,
+    DEFAULT_SHARD_PCS_NUM_VARS, ShardBatchProof, ShardRowProof, compute_signing_mode_digest,
+    default_shard_signers, max_shard_signers,
     prove_shard_batch, verify_shard_batch, verify_shard_batch_with_regime,
 };
 pub use field::{Goldilocks, GoldilocksExt2, GoldilocksExt4, RoundPolyExt4};
@@ -328,12 +330,14 @@ pub const AGG_WIRE_MAGIC: &[u8; 8] = b"QSAGAGG\x06";
 /// Hard upper bound on merge tree depth (`2^16 = 65,536` shard batches).
 pub const MAX_MERGE_TREE_DEPTH: usize = 16;
 
-/// Default (and maximum) active signers per `JortsPoseidon2` shard.
-pub const DEFAULT_MAX_SHARD_SIGNERS_JORTS: usize = max_shard_signers(AggSigProfile::JortsPoseidon2);
+/// Default active signers per `JortsPoseidon2` shard (a `DEFAULT_SHARD_PCS_NUM_VARS`-variable
+/// witness). [`max_shard_signers`] is the hard cap.
+pub const DEFAULT_MAX_SHARD_SIGNERS_JORTS: usize =
+    default_shard_signers(AggSigProfile::JortsPoseidon2);
 
-/// Default (and maximum) active signers per `CorduroyPoseidon2` shard.
+/// Default active signers per `CorduroyPoseidon2` shard. [`max_shard_signers`] is the hard cap.
 pub const DEFAULT_MAX_SHARD_SIGNERS_CORDUROY: usize =
-    max_shard_signers(AggSigProfile::CorduroyPoseidon2);
+    default_shard_signers(AggSigProfile::CorduroyPoseidon2);
 
 /// Default shards per batch.
 pub const DEFAULT_MAX_SHARDS_PER_BATCH: usize = 2;
@@ -358,7 +362,7 @@ impl HemAggConfig {
     pub fn default_for(profile: AggSigProfile, blinding_seed: [u8; 32]) -> Self {
         Self {
             regime: WhirSecurityRegime::default(),
-            max_signers_per_shard: max_shard_signers(profile),
+            max_signers_per_shard: default_shard_signers(profile),
             max_shards_per_batch: DEFAULT_MAX_SHARDS_PER_BATCH,
             blinding_seed,
         }

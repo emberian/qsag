@@ -210,6 +210,20 @@ pub const fn max_shard_signers(profile: AggSigProfile) -> usize {
         << (MAX_PCS_NUM_VARS - LOG_TRACE_COLS - rows_per_signer(profile).trailing_zeros() as usize)
 }
 
+/// Witness size (in variables) of a full shard under the default aggregation configuration.
+/// A `2^24`-entry witness commits in about 1 GiB; every extra variable doubles prover memory.
+pub const DEFAULT_SHARD_PCS_NUM_VARS: usize = 24;
+
+/// Signers per shard under the default configuration: the largest count whose witness has
+/// [`DEFAULT_SHARD_PCS_NUM_VARS`] variables. Configurations may raise it to
+/// [`max_shard_signers`].
+pub const fn default_shard_signers(profile: AggSigProfile) -> usize {
+    1usize
+        << (DEFAULT_SHARD_PCS_NUM_VARS
+            - LOG_TRACE_COLS
+            - rows_per_signer(profile).trailing_zeros() as usize)
+}
+
 /// Per-shard part of a [`ShardBatchProof`]: the degree-8 `GoldilocksExt4` row sumcheck
 /// (`c_1` reconstructed via $P(0) + P(1) = \text{claim}$) and the 256 trace column evaluations.
 #[derive(Clone, Debug, PartialEq, Eq)]
