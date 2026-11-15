@@ -1,5 +1,7 @@
 //! Transaction behaviour of the `hem-jorts-poseidon2` quorum vault commands: one command at
-//! a time per vault, and a failed signing attempt that spent a leaf is recorded on disk.
+//! a time per vault, a failed signing attempt that spent a leaf is recorded on disk, and
+//! vaults in the layout of earlier versions are converted. Crash boundaries are tested
+//! inside `src/quorum_hem.rs`, where a transaction can be stopped between two writes.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -326,14 +328,155 @@ fn reshare_refuses_an_occupied_target_before_touching_the_old_vault() {
     );
 }
 
+/// Turn a freshly created vault into the layout earlier versions wrote: meta format v1,
+/// shares named `custodian-<p>.share`, no lock file.
+fn downgrade_to_old_format(dir: &Workdir, vault: &str) {
+    let root = dir.0.join(vault);
+    for p in 0..3 {
+        std::fs::rename(
+            root.join(format!("custodian-{p}.g1.share")),
+            root.join(format!("custodian-{p}.share")),
+        )
+        .unwrap();
+    }
+    let meta = dir.read(&format!("{vault}/quorum-meta.json"));
+    assert!(meta.contains("qsag-hem-quorum-meta-v2"));
+    std::fs::write(
+        root.join("quorum-meta.json"),
+        meta.replace("qsag-hem-quorum-meta-v2", "qsag-hem-quorum-meta-v1"),
+    )
+    .unwrap();
+    std::fs::remove_file(root.join(LOCK)).unwrap();
+}
+
+fn names(dir: &Workdir, vault: &str) -> Vec<String> {
+    vault_files(dir, vault)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+#[test]
+fn damaged_share_is_refused_before_any_leaf_is_spent() {
+    let dir = Workdir::new("damaged");
+    keygen(&dir, "vault", "3");
+    let vault = dir.path("vault");
+
+    let share0 = dir.0.join("vault").join("custodian-0.g1.share");
+    let mut bytes = std::fs::read(&share0).unwrap();
+    bytes[60] ^= 1;
+    std::fs::write(&share0, &bytes).unwrap();
+    let before = vault_files(&dir, "vault");
+
+    let output = run(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &vault,
+            "--message",
+            &dir.msg("m"),
+            "--out",
+            &dir.path("sig"),
+        ],
+        4,
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("HemQuorumShareDigestMismatch"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(vault_files(&dir, "vault"), before);
+    assert_eq!(high_water(&dir, "vault"), 0);
+}
+
+#[test]
+fn old_format_vault_without_a_lock_is_converted_by_concurrent_commands_one_at_a_time() {
+    let dir = Workdir::new("old-format");
+    keygen(&dir, "vault", "8");
+    downgrade_to_old_format(&dir, "vault");
+    assert_eq!(
+        names(&dir, "vault"),
+        [
+            "custodian-0.share",
+            "custodian-1.share",
+            "custodian-2.share",
+            "directory.bin",
+            "quorum-meta.json"
+        ]
+    );
+
+    const WORKERS: usize = 4;
+    let children: Vec<_> = (0..WORKERS)
+        .map(|i| {
+            Command::new(env!("CARGO_BIN_EXE_qsag"))
+                .args([
+                    "quorum",
+                    "sign",
+                    "--vault-dir",
+                    &dir.path("vault"),
+                    "--message",
+                    &dir.msg(&format!("old {i}")),
+                    "--out",
+                    &dir.path(&format!("sig-{i}")),
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let mut epochs = Vec::new();
+    for (i, child) in children.into_iter().enumerate() {
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "worker {i}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        epochs.push(
+            json_member(&dir.read(&format!("sig-{i}")), "epoch")
+                .parse::<u64>()
+                .unwrap(),
+        );
+        run(
+            &[
+                "quorum",
+                "verify",
+                "--public",
+                &dir.path("pk"),
+                "--message",
+                &dir.msg(&format!("old {i}")),
+                "--sig",
+                &dir.path(&format!("sig-{i}")),
+            ],
+            0,
+        );
+    }
+    epochs.sort_unstable();
+    assert_eq!(epochs, [0, 1, 2, 3]);
+    assert_eq!(high_water(&dir, "vault"), 4);
+
+    // Converted: current meta format, a lock file, one generation of shares, no old names.
+    let meta = dir.read("vault/quorum-meta.json");
+    assert_eq!(json_member(&meta, "format"), "qsag-hem-quorum-meta-v2");
+    let generation = json_member(&meta, "generation");
+    let mut expected: Vec<String> = (0..3)
+        .map(|p| format!("custodian-{p}.g{generation}.share"))
+        .collect();
+    expected.extend(["directory.bin", "quorum-meta.json", LOCK].map(str::to_owned));
+    expected.sort();
+    assert_eq!(names(&dir, "vault"), expected);
+}
+
 #[test]
 fn failed_sign_that_spent_a_leaf_is_recorded_and_the_retry_uses_the_next_leaf() {
     let dir = Workdir::new("burn");
     keygen(&dir, "vault", "3");
     let vault = dir.path("vault");
 
-    // Rejected before the latch certifies (one signer of a 2-of-3): nothing changes.
-    let before = vault_files(&dir, "vault");
+    // Rejected before the latch certifies (one signer of a 2-of-3): no leaf is spent.
     run(
         &[
             "quorum",
@@ -349,15 +492,18 @@ fn failed_sign_that_spent_a_leaf_is_recorded_and_the_retry_uses_the_next_leaf() 
         ],
         4,
     );
-    assert_eq!(vault_files(&dir, "vault"), before);
+    assert_eq!(high_water(&dir, "vault"), 0);
 
-    // Damage custodian 0's share of leaf 0 (first scalar after the 60-byte header).
+    // An old-format vault has no share digests, so a damaged share is found only when the
+    // leaf's shares are combined. Damage custodian 0's share of leaf 0 (first scalar after
+    // the 60-byte header).
+    downgrade_to_old_format(&dir, "vault");
     let share0 = dir.0.join("vault").join("custodian-0.share");
     let mut bytes = std::fs::read(&share0).unwrap();
     bytes[60] ^= 1;
     std::fs::write(&share0, &bytes).unwrap();
 
-    // Signing certifies leaf 0 for this message and then fails. The leaf is spent on disk.
+    // Signing reserves leaf 0 for this message, records that, and then fails.
     let failed = qsag(&[
         "quorum",
         "sign",

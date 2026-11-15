@@ -1112,7 +1112,10 @@ impl HemShamirCustodianShare {
         }
     }
 
-    fn burn_leaves_below(&mut self, new_high_water: usize) {
+    /// Wipe every unspent leaf below `new_high_water` and move this share's high-water
+    /// mark up to it. Never moves the mark down. Used when a leaf is reserved, and to bring
+    /// shares that a crashed writer left behind up to the highest mark any share recorded.
+    pub fn burn_leaves_below(&mut self, new_high_water: usize) {
         let cap = new_high_water.min(self.active_leaves);
         while self.high_water_leaf < cap {
             let idx = self.high_water_leaf;
@@ -1300,6 +1303,31 @@ fn hash_subshare_packet_commitment(
     let digest = poseidon2_hash32(&buf);
     qsag_asm::volatile_fill(&mut buf, 0);
     digest
+}
+
+/// One leaf taken out of a [`HemDynamicShamirQuorum`] by
+/// [`HemDynamicShamirQuorum::reserve_leaf`]: the latch certificate that binds the leaf to its
+/// message, and the signers' shares of that leaf only. The quorum itself no longer holds the
+/// leaf. Not `Clone`; the leaf material is wiped on drop.
+pub struct HemReservedLeaf {
+    cert: HemEpochLatchCertificate,
+    signer_shares: Vec<HemShamirCustodianShare>,
+}
+
+impl fmt::Debug for HemReservedLeaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HemReservedLeaf")
+            .field("leaf_epoch", &self.cert.epoch())
+            .finish_non_exhaustive()
+    }
+}
+
+impl HemReservedLeaf {
+    /// The reserved leaf index.
+    #[inline]
+    pub const fn leaf_epoch(&self) -> u64 {
+        self.cert.epoch()
+    }
 }
 
 /// Mode `QS-B` Dynamic `(t, n)` Shamir Quorum for `Hem` `JortsPoseidon2` supporting:
@@ -1577,20 +1605,44 @@ impl HemDynamicShamirQuorum {
     /// Certify the next monotone leaf in the `QuorumEpochLatchCluster` and sign `msg` using
     /// `signer_indices` (`>= t` custodians), returning `(leaf_epoch, HemJortsSignature)`.
     ///
+    /// This is [`Self::reserve_leaf`] followed by [`Self::sign_reserved`] with nothing
+    /// persisted in between: the burn is in memory only. A caller that keeps the quorum on
+    /// disk should call the two halves itself and persist the quorum between them.
+    ///
     /// Errors returned before the latch certifies (bad signer or acker sets, exhausted key,
     /// too few ackers) change nothing. Once the latch has certified a leaf, that leaf is
     /// burned in every custodian share even if signing then fails; compare
-    /// [`Self::high_water_leaf`] before and after to see whether an error consumed one, and
-    /// persist the new state in that case too.
+    /// [`Self::high_water_leaf`] before and after to see whether an error consumed one.
     pub fn sign_quorum(
         &mut self,
         signer_indices: &[usize],
         latch_ackers: &[usize],
         msg: &[u8],
     ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
+        let reserved = self.reserve_leaf(signer_indices, latch_ackers, msg)?;
+        self.sign_reserved(reserved, msg)
+    }
+
+    /// First half of signing: certify the next leaf for `msg` and take it out of the quorum.
+    ///
+    /// On success the leaf is burned in every custodian share (so [`Self::custodian_shares`]
+    /// and their vault bytes no longer contain it) and the high-water mark is past it. The
+    /// signers' material for that one leaf lives only in the returned [`HemReservedLeaf`].
+    /// Persist the quorum now, then call [`Self::sign_reserved`]: a crash in between loses
+    /// the leaf but can never leave it available for a second message.
+    ///
+    /// Errors change nothing, except [`HemQuorumError::LeafExhausted`] after the latch has
+    /// certified a leaf beyond the active range, which burns the remaining leaves.
+    pub fn reserve_leaf(
+        &mut self,
+        signer_indices: &[usize],
+        latch_ackers: &[usize],
+        msg: &[u8],
+    ) -> Result<HemReservedLeaf, HemQuorumError> {
         validate_party_subset(signer_indices, self.t, self.n)?;
         validate_party_subset(latch_ackers, 1, self.n)?;
-        if self.high_water_leaf >= self.public_dir.active_leaves {
+        let active_leaves = self.public_dir.active_leaves;
+        if self.high_water_leaf >= active_leaves {
             return Err(HemQuorumError::LeafExhausted);
         }
         for &p in signer_indices {
@@ -1611,6 +1663,7 @@ impl HemDynamicShamirQuorum {
             .public_dir
             .pk
             .latch_pq_public_key(self.public_dir.dkg_pk_seed);
+        self.latch_cluster.raise_floor(self.high_water_leaf as u64);
         let cert = self
             .latch_cluster
             .certify_epoch(
@@ -1621,29 +1674,71 @@ impl HemDynamicShamirQuorum {
             )
             .map_err(|_| HemQuorumError::LatchRefused)?;
 
-        // The latch quorum has now bound this leaf to `msg`, and signing opens the
-        // leaf's shares. The leaf is spent whether or not a signature comes out: a
-        // failed attempt never leaves it available for another message.
-        let signed = {
-            let signer_refs: Vec<&HemShamirCustodianShare> =
-                signer_indices.iter().map(|&p| &self.shares[p]).collect();
-            sign_from_shamir_share_slice(
-                &self.public_dir,
-                self.latch_cluster.authority_public(),
-                self.quorum_epoch,
-                self.t,
-                self.n,
-                &cert,
-                msg,
-                &signer_refs,
-            )
+        // The latch quorum has now bound this leaf to `msg`. From here the leaf is spent
+        // whether or not a signature ever comes out.
+        let leaf = usize::try_from(cert.epoch())
+            .ok()
+            .filter(|&kp| kp < active_leaves);
+        let Some(kp) = leaf else {
+            self.high_water_leaf = active_leaves;
+            for sh in &mut self.shares {
+                sh.burn_leaves_below(active_leaves);
+            }
+            return Err(HemQuorumError::LeafExhausted);
         };
-        let used_leaf = usize::try_from(cert.epoch()).map_err(|_| HemQuorumError::LeafExhausted)?;
-        self.high_water_leaf = self.high_water_leaf.max(used_leaf.saturating_add(1));
+
+        let mut signer_shares = Vec::with_capacity(signer_indices.len());
+        for &p in signer_indices {
+            let sh = &mut self.shares[p];
+            let mut leaf_vals = vec![Vec::new(); active_leaves];
+            let mut leaf_macs = vec![Vec::new(); active_leaves];
+            leaf_vals[kp] = core::mem::take(&mut sh.leaf_vals[kp]);
+            leaf_macs[kp] = core::mem::take(&mut sh.leaf_macs[kp]);
+            signer_shares.push(HemShamirCustodianShare {
+                party_id: sh.party_id,
+                quorum_epoch: sh.quorum_epoch,
+                t: sh.t,
+                n: sh.n,
+                eval_point: sh.eval_point,
+                high_water_leaf: kp,
+                active_leaves,
+                invalidated: false,
+                alpha_share: GoldilocksExt2::ZERO,
+                leaf_vals,
+                leaf_macs,
+            });
+        }
+        self.high_water_leaf = kp + 1;
         for sh in &mut self.shares {
             sh.burn_leaves_below(self.high_water_leaf);
         }
-        signed.map(|sig| (cert.epoch(), sig))
+        Ok(HemReservedLeaf {
+            cert,
+            signer_shares,
+        })
+    }
+
+    /// Second half of signing: produce the signature for the leaf taken by
+    /// [`Self::reserve_leaf`]. `msg` must be the reserved message; the latch certificate binds
+    /// it, so any other message is refused with [`HemQuorumError::LatchRefused`]. The
+    /// reservation is consumed and wiped whether or not signing succeeds.
+    pub fn sign_reserved(
+        &self,
+        reserved: HemReservedLeaf,
+        msg: &[u8],
+    ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
+        let signer_refs: Vec<&HemShamirCustodianShare> = reserved.signer_shares.iter().collect();
+        let sig = sign_from_shamir_share_slice(
+            &self.public_dir,
+            self.latch_cluster.authority_public(),
+            self.quorum_epoch,
+            self.t,
+            self.n,
+            &reserved.cert,
+            msg,
+            &signer_refs,
+        )?;
+        Ok((reserved.cert.epoch(), sig))
     }
 
     /// Proactive share refresh (`Π_refresh`): adds fresh zero-constant degree-`< t` polynomials to
@@ -3336,6 +3431,63 @@ mod tests {
             reloaded.sign_quorum(&[1, 2], &[0, 1, 2], b"fourth"),
             Err(HemQuorumError::LeafExhausted)
         );
+    }
+
+    #[test]
+    fn shamir_reserved_leaf_is_gone_from_the_quorum_before_it_is_signed() {
+        let mut qsb = HemDynamicShamirQuorum::stage([0xd1; 32], 2, 3, 3).unwrap();
+        let pk = qsb.public_key();
+        let leaf0_p0 = qsb.shares[0].leaf_vals[0].clone();
+
+        let reserved = qsb.reserve_leaf(&[0, 2], &[0, 1, 2], b"one").unwrap();
+        assert_eq!(reserved.leaf_epoch(), 0);
+        // What a caller would persist now holds no trace of leaf 0.
+        assert_eq!(qsb.high_water_leaf(), 1);
+        let persisted = all_share_bytes(&qsb);
+        for (p, bytes) in persisted.iter().enumerate() {
+            let sh = HemShamirCustodianShare::from_vault_bytes(bytes).unwrap();
+            assert_eq!(sh.high_water_leaf, 1, "party {p}");
+            assert!(sh.leaf_vals[0].is_empty() && sh.leaf_macs[0].is_empty());
+        }
+        let needle: Vec<u8> = leaf0_p0[..4].iter().flat_map(|g| g.to_le_bytes()).collect();
+        assert!(!persisted[0].windows(needle.len()).any(|w| w == needle));
+
+        // A quorum restored from that state (a crash before signing) cannot reach leaf 0.
+        let dir =
+            HemQuorumPublicDirectory::from_bytes_canonical(&qsb.public_directory().to_bytes())
+                .unwrap();
+        let shares = persisted
+            .iter()
+            .map(|b| HemShamirCustodianShare::from_vault_bytes(b).unwrap())
+            .collect();
+        let mut restored =
+            HemDynamicShamirQuorum::from_persisted_shares(dir, shares, [0xd2; 32]).unwrap();
+        let (ep, sig) = restored.sign_quorum(&[0, 1], &[0, 1, 2], b"two").unwrap();
+        assert_eq!(ep, 1);
+        assert!(verify_hem_jorts_signature(&pk, b"two", &sig));
+
+        // The reservation signs only the message it was certified for, once.
+        let other = qsb.reserve_leaf(&[0, 1], &[0, 1, 2], b"three").unwrap();
+        assert_eq!(other.leaf_epoch(), 1);
+        assert_eq!(
+            qsb.sign_reserved(other, b"not three"),
+            Err(HemQuorumError::LatchRefused)
+        );
+        assert_eq!(qsb.high_water_leaf(), 2);
+        let (ep, sig) = qsb.sign_reserved(reserved, b"one").unwrap();
+        assert_eq!(ep, 0);
+        assert!(verify_hem_jorts_signature(&pk, b"one", &sig));
+
+        // Shares a crashed writer left at different marks are brought up to the highest.
+        let mut lagging: Vec<HemShamirCustodianShare> = persisted
+            .iter()
+            .map(|b| HemShamirCustodianShare::from_vault_bytes(b).unwrap())
+            .collect();
+        for sh in &mut lagging {
+            sh.burn_leaves_below(2);
+            sh.burn_leaves_below(1);
+            assert_eq!(sh.high_water_leaf, 2);
+        }
     }
 
     fn tweak_seed_share(share: &mut ShamirPoseidonSeedShare, undo: bool) {
