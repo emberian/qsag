@@ -17,15 +17,16 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::QsagAddress;
 use qsag_core::fips205::{Fips205Params, slh_keygen_from_seed};
 use qsag_hd::{
-    CommitteeConfig, CustodianSeeds, CustodianSet, SeedContributionCommit, SeedConfirmation, HdError, InventoryChildProof, InventoryMasterPublicKey,
-    InventoryPartyShareVault, MAX_CUSTODIANS, SeedCeremonyRound1, SeedPrivateDelivery,
-    WatchOnlyInventoryTable, commit_inventory_public_keys, derive_inventory_vault,
-    enroll_child_signing_seed_quorum, recover_child_signing_seed, verify_inventory_child_proof,
+    CommitteeConfig, CustodianSeeds, CustodianSet, HdError, InventoryChildProof,
+    InventoryMasterPublicKey, InventoryPartyShareVault, MAX_CUSTODIANS, SeedCeremonyRound1,
+    SeedConfirmation, SeedContributionCommit, SeedPrivateDelivery, WatchOnlyInventoryTable,
+    commit_inventory_public_keys, derive_inventory_vault, enroll_child_signing_seed_quorum,
+    recover_child_signing_seed, verify_inventory_child_proof,
 };
 
 use crate::cli::{
-    Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, os_random_32, private_dir,
-    read_bounded_file, write_new, ZeroizingBuf,
+    Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, ZeroizingBuf, os_random_32,
+    private_dir, read_bounded_file, write_new,
 };
 use crate::codec::{Json, from_hex_exact, to_hex, to_hex_zeroizing};
 use crate::keys::SECRET_FORMAT;
@@ -54,8 +55,8 @@ fn ensure_absent(path: &str) -> Result<(), CliError> {
 
 fn load_json_checked(path: &str, expected_format: &str, max_bytes: u64) -> Result<Json, CliError> {
     let bytes = read_bounded_file(path, max_bytes)?;
-    let text =
-        std::str::from_utf8(&bytes.0).map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
+    let text = std::str::from_utf8(&bytes.0)
+        .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
     let json = Json::parse(text)?;
     if json.field_str("format")? != expected_format {
         return Err(CliError::input(format!(
@@ -97,15 +98,17 @@ fn map_hd_err(err: HdError) -> CliError {
     }
 }
 
-fn build_committee(threshold: usize, parties: usize, label: [u8; 32]) -> Result<CommitteeConfig, CliError> {
+fn build_committee(
+    threshold: usize,
+    parties: usize,
+    label: [u8; 32],
+) -> Result<CommitteeConfig, CliError> {
     if parties == 0 || parties > MAX_CUSTODIANS {
         return Err(CliError::usage(format!(
             "--parties must be in 1..={MAX_CUSTODIANS}"
         )));
     }
-    let members: Vec<(u16, u32)> = (0..parties)
-        .map(|i| (i as u16, (i + 1) as u32))
-        .collect();
+    let members: Vec<(u16, u32)> = (0..parties).map(|i| (i as u16, (i + 1) as u32)).collect();
     CommitteeConfig::new(threshold as u16, &members, label).map_err(|_| {
         CliError::usage(format!(
             "unsupported committee ({threshold}, {parties}): honest-majority requires n >= 2t - 1 and 1 <= t <= n <= {MAX_CUSTODIANS}"
@@ -134,7 +137,8 @@ fn run_dealerless_seed_ceremony(
         all_deliveries.extend(deliveries);
     }
 
-    let mut inboxes: Vec<Vec<SeedPrivateDelivery>> = (0..members.len()).map(|_| Vec::new()).collect();
+    let mut inboxes: Vec<Vec<SeedPrivateDelivery>> =
+        (0..members.len()).map(|_| Vec::new()).collect();
     for delivery in all_deliveries {
         let pos = members
             .iter()
@@ -149,16 +153,23 @@ fn run_dealerless_seed_ceremony(
         bytes.0.extend_from_slice(&entropies[index].0);
         for commit in &commits {
             bytes.0.extend_from_slice(&commit.party_id.to_be_bytes());
-            bytes.0.extend_from_slice(&(commit.digests.len() as u32).to_be_bytes());
+            bytes
+                .0
+                .extend_from_slice(&(commit.digests.len() as u32).to_be_bytes());
             for (subset, digest) in &commit.digests {
-                bytes.0.extend_from_slice(&subset.to_be_bytes()); bytes.0.extend_from_slice(digest);
+                bytes.0.extend_from_slice(&subset.to_be_bytes());
+                bytes.0.extend_from_slice(digest);
             }
         }
-        bytes.0.extend_from_slice(&(inbox.len() as u32).to_be_bytes());
+        bytes
+            .0
+            .extend_from_slice(&(inbox.len() as u32).to_be_bytes());
         for delivery in inbox {
             bytes.0.extend_from_slice(&delivery.from.to_be_bytes());
             bytes.0.extend_from_slice(&delivery.to.to_be_bytes());
-            bytes.0.extend_from_slice(&(delivery.openings.len() as u32).to_be_bytes());
+            bytes
+                .0
+                .extend_from_slice(&(delivery.openings.len() as u32).to_be_bytes());
             for opening in &delivery.openings {
                 bytes.0.extend_from_slice(&opening.subset.to_be_bytes());
                 bytes.0.extend_from_slice(&opening.contribution);
@@ -177,73 +188,113 @@ fn run_dealerless_seed_ceremony(
 
     for bytes in &mut bundles {
         for confirmation in &confirmations {
-            bytes.0.extend_from_slice(&confirmation.party_id.to_be_bytes());
-            bytes.0.extend_from_slice(&(confirmation.tags.len() as u32).to_be_bytes());
+            bytes
+                .0
+                .extend_from_slice(&confirmation.party_id.to_be_bytes());
+            bytes
+                .0
+                .extend_from_slice(&(confirmation.tags.len() as u32).to_be_bytes());
             for (subset, tag) in &confirmation.tags {
-                bytes.0.extend_from_slice(&subset.to_be_bytes()); bytes.0.extend_from_slice(tag);
+                bytes.0.extend_from_slice(&subset.to_be_bytes());
+                bytes.0.extend_from_slice(tag);
             }
         }
     }
-    let seeds = round3_states.into_iter()
-        .map(|r3| r3.confirm(&confirmations).map_err(map_hd_err)).collect::<Result<_, _>>()?;
+    let seeds = round3_states
+        .into_iter()
+        .map(|r3| r3.confirm(&confirmations).map_err(map_hd_err))
+        .collect::<Result<_, _>>()?;
     Ok((seeds, bundles))
 }
 
 const HD_SHARE_FORMAT: &str = "qsag-hd-custodian-local-v1";
 fn hd_share_path(dir: &str, party: usize) -> String {
-    Path::new(dir).join(format!("hd-custodian-{party}.share")).to_string_lossy().into_owned()
+    Path::new(dir)
+        .join(format!("hd-custodian-{party}.share"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Rehydrate exactly one custodian by validating its own stored private deliveries and
 /// public ceremony transcript. No network round, peer entropy, or n-party DKG is run.
-fn restore_custodian(config: &CommitteeConfig, party: u16, bytes: &[u8]) -> Result<CustodianSeeds, CliError> {
+fn restore_custodian(
+    config: &CommitteeConfig,
+    party: u16,
+    bytes: &[u8],
+) -> Result<CustodianSeeds, CliError> {
     struct Reader<'a>(&'a [u8]);
     impl Reader<'_> {
         fn take<const N: usize>(&mut self) -> Result<[u8; N], CliError> {
-            let (head, rest) = self.0.split_at_checked(N)
+            let (head, rest) = self
+                .0
+                .split_at_checked(N)
                 .ok_or_else(|| CliError::input("truncated HD custody bundle"))?;
             self.0 = rest;
-            head.try_into().map_err(|_| CliError::input("invalid HD custody bundle"))
+            head.try_into()
+                .map_err(|_| CliError::input("invalid HD custody bundle"))
         }
         fn count(&mut self, width: usize) -> Result<usize, CliError> {
             let count = u32::from_be_bytes(self.take()?) as usize;
-            if count > self.0.len() / width { return Err(CliError::input("invalid HD custody count")); }
+            if count > self.0.len() / width {
+                return Err(CliError::input("invalid HD custody count"));
+            }
             Ok(count)
         }
         fn subset(&mut self) -> Result<CustodianSet, CliError> {
             let mut words = [0u64; 4];
-            for word in words.iter_mut().rev() { *word = u64::from_be_bytes(self.take()?); }
+            for word in words.iter_mut().rev() {
+                *word = u64::from_be_bytes(self.take()?);
+            }
             Ok(CustodianSet(words))
         }
         fn tags(&mut self) -> Result<Vec<(CustodianSet, [u8; 32])>, CliError> {
             let count = self.count(64)?;
-            (0..count).map(|_| Ok((self.subset()?, self.take()?))).collect()
+            (0..count)
+                .map(|_| Ok((self.subset()?, self.take()?)))
+                .collect()
         }
     }
     let mut r = Reader(bytes);
-    if &r.take::<8>()? != b"QSAGHDL1" { return Err(CliError::input("invalid HD custody magic")); }
+    if &r.take::<8>()? != b"QSAGHDL1" {
+        return Err(CliError::input("invalid HD custody magic"));
+    }
     let entropy = Secret32(r.take()?);
     let mut commits = Vec::with_capacity(config.members().len());
     for _ in config.members() {
-        commits.push(SeedContributionCommit { party_id: u16::from_be_bytes(r.take()?), digests: r.tags()? });
+        commits.push(SeedContributionCommit {
+            party_id: u16::from_be_bytes(r.take()?),
+            digests: r.tags()?,
+        });
     }
     let count = r.count(8)?;
-    if count + 1 != config.members().len() { return Err(CliError::input("invalid HD custody roster")); }
+    if count + 1 != config.members().len() {
+        return Err(CliError::input("invalid HD custody roster"));
+    }
     let mut deliveries = Vec::with_capacity(count);
     for _ in 0..count {
-        let from = u16::from_be_bytes(r.take()?); let to = u16::from_be_bytes(r.take()?);
+        let from = u16::from_be_bytes(r.take()?);
+        let to = u16::from_be_bytes(r.take()?);
         let count = r.count(96)?;
         let mut openings = Vec::with_capacity(count);
         for _ in 0..count {
-            openings.push(qsag_hd::seeds::SeedOpening { subset: r.subset()?, contribution: r.take()?, salt: r.take()? });
+            openings.push(qsag_hd::seeds::SeedOpening {
+                subset: r.subset()?,
+                contribution: r.take()?,
+                salt: r.take()?,
+            });
         }
         deliveries.push(SeedPrivateDelivery { from, to, openings });
     }
     let mut confirmations = Vec::with_capacity(config.members().len());
     for _ in config.members() {
-        confirmations.push(SeedConfirmation { party_id: u16::from_be_bytes(r.take()?), tags: r.tags()? });
+        confirmations.push(SeedConfirmation {
+            party_id: u16::from_be_bytes(r.take()?),
+            tags: r.tags()?,
+        });
     }
-    if !r.0.is_empty() { return Err(CliError::input("trailing HD custody data")); }
+    if !r.0.is_empty() {
+        return Err(CliError::input("trailing HD custody data"));
+    }
     let (r1, _) = SeedCeremonyRound1::begin(config, party, entropy.0).map_err(map_hd_err)?;
     let (r2, outgoing) = r1.freeze(&commits).map_err(map_hd_err)?;
     drop(outgoing);
@@ -300,7 +351,15 @@ fn load_watch_table(path: &str) -> Result<WatchOnlyInventoryTable, CliError> {
 fn keygen(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["threshold", "parties", "count", "vault-dir", "watch-out", "passphrase-env", "passphrase-file"],
+        &[
+            "threshold",
+            "parties",
+            "count",
+            "vault-dir",
+            "watch-out",
+            "passphrase-env",
+            "passphrase-file",
+        ],
         &["deterministic", "allow-unencrypted", "json", "help"],
     )?;
     if args.flag("help") {
@@ -318,13 +377,20 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             "--count must be a power of two representable as a u32",
         ));
     }
-    if (batch_size as u64).checked_mul(80).and_then(|n| n.checked_add(4096))
-        .is_none_or(|n| n > MAX_SIG_PROOF_BYTES) {
-        return Err(CliError::usage("inventory exceeds the bounded watch-file size budget"));
+    if (batch_size as u64)
+        .checked_mul(80)
+        .and_then(|n| n.checked_add(4096))
+        .is_none_or(|n| n > MAX_SIG_PROOF_BYTES)
+    {
+        return Err(CliError::usage(
+            "inventory exceeds the bounded watch-file size budget",
+        ));
     }
     let passphrase = crate::envelope::passphrase(&args)?;
     if passphrase.is_none() && !args.flag("allow-unencrypted") && !args.flag("deterministic") {
-        return Err(CliError::usage("HD custody requires --passphrase-env or --passphrase-file (or explicit --allow-unencrypted)"));
+        return Err(CliError::usage(
+            "HD custody requires --passphrase-env or --passphrase-file (or explicit --allow-unencrypted)",
+        ));
     }
     let vault_dir = args.require("vault-dir")?;
     let watch_out = args.require("watch-out")?;
@@ -336,7 +402,10 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let label = if deterministic {
         cshake256_framed_32(
             b"QSAG.CLI.HD.DET.LABEL.V1",
-            &[&[threshold as u8, parties as u8], &(batch_size as u64).to_le_bytes()],
+            &[
+                &[threshold as u8, parties as u8],
+                &(batch_size as u64).to_le_bytes(),
+            ],
         )
     } else {
         os_random_32()?
@@ -376,21 +445,22 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         child_pubkeys.push(child_pk);
     }
 
-    let table = commit_inventory_public_keys(
-        pk_seed,
-        child_pubkeys.clone(),
-        &CpuReferenceBackend::new(),
-    )
-    .map_err(map_hd_err)?;
+    let table =
+        commit_inventory_public_keys(pk_seed, child_pubkeys.clone(), &CpuReferenceBackend::new())
+            .map_err(map_hd_err)?;
 
     for (idx, bundle) in bundles.iter().enumerate() {
         let mut doc = Json::object(vec![
-            ("format", Json::str(HD_SHARE_FORMAT)), ("scheme", Json::str("hd-local-custody")),
-            ("party", Json::num(idx)), ("config_digest", Json::hex(&config.digest())),
+            ("format", Json::str(HD_SHARE_FORMAT)),
+            ("scheme", Json::str("hd-local-custody")),
+            ("party", Json::num(idx)),
+            ("config_digest", Json::hex(&config.digest())),
             ("master_root_pk", Json::hex(&table.master_pk.master_root_pk)),
             ("secret_key", Json::hex(bundle)),
         ]);
-        if let Some(pass) = &passphrase { crate::envelope::seal(&mut doc, pass)?; }
+        if let Some(pass) = &passphrase {
+            crate::envelope::seal(&mut doc, pass)?;
+        }
         let encoded = ZeroizingBuf(doc.to_pretty().into_bytes());
         write_new(&hd_share_path(vault_dir, idx), &encoded, true)?;
     }
@@ -415,7 +485,10 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         ("batch_size", Json::num(batch_size)),
         ("master_root_pk", Json::hex(&table.master_pk.master_root_pk)),
         ("pk_seed", Json::hex(&pk_seed)),
-        ("pk_seed_limbs", limbs4_to_json(&table.master_pk.pk_seed_limbs)),
+        (
+            "pk_seed_limbs",
+            limbs4_to_json(&table.master_pk.pk_seed_limbs),
+        ),
         (
             "poseidon2_root_limbs",
             limbs4_to_json(&table.master_pk.poseidon2_root_limbs),
@@ -448,11 +521,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
 }
 
 fn derive(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &["watch", "index", "hrp", "out"],
-        &["json", "help"],
-    )?;
+    let args = Args::parse(raw, &["watch", "index", "hrp", "out"], &["json", "help"])?;
     if args.flag("help") {
         println!(
             "qsag hd derive --watch <path> --index <child_idx> [--hrp <qsp>] --out <path> [--json]"
@@ -464,8 +533,7 @@ fn derive(raw: &[String]) -> Result<(), CliError> {
     let index = args
         .get_u64("index")?
         .ok_or_else(|| CliError::usage("missing required option --index <n>"))?;
-    let child_idx = u32::try_from(index)
-        .map_err(|_| CliError::usage("--index must fit in u32"))?;
+    let child_idx = u32::try_from(index).map_err(|_| CliError::usage("--index must fit in u32"))?;
     let hrp = args.get("hrp").unwrap_or("qsp");
     let out_path = args.require("out")?;
     ensure_absent(out_path)?;
@@ -584,7 +652,11 @@ fn verify_child(raw: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn parse_recover_signers(spec: Option<&str>, parties: usize, threshold: usize) -> Result<Vec<usize>, CliError> {
+fn parse_recover_signers(
+    spec: Option<&str>,
+    parties: usize,
+    threshold: usize,
+) -> Result<Vec<usize>, CliError> {
     let Some(spec) = spec else {
         return Ok((0..threshold.min(parties)).collect());
     };
@@ -616,7 +688,16 @@ fn parse_recover_signers(spec: Option<&str>, parties: usize, threshold: usize) -
 fn recover(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["vault-dir", "signers", "index", "proof", "secret-out", "public-out", "passphrase-env", "passphrase-file"],
+        &[
+            "vault-dir",
+            "signers",
+            "index",
+            "proof",
+            "secret-out",
+            "public-out",
+            "passphrase-env",
+            "passphrase-file",
+        ],
         &["json", "help"],
     )?;
     if args.flag("help") {
@@ -630,8 +711,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     let index = args
         .get_u64("index")?
         .ok_or_else(|| CliError::usage("missing required option --index <n>"))?;
-    let child_idx = u32::try_from(index)
-        .map_err(|_| CliError::usage("--index must fit in u32"))?;
+    let child_idx = u32::try_from(index).map_err(|_| CliError::usage("--index must fit in u32"))?;
     let proof_path = args.require("proof")?;
     let secret_out = args.require("secret-out")?;
     ensure_absent(secret_out)?;
@@ -650,7 +730,10 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     let pk_seed = from_hex_exact::<32>(meta.field_str("pk_seed")?, "pk_seed")?;
     let master_root = from_hex_exact::<32>(meta.field_str("master_root_pk")?, "master_root_pk")?;
 
-    let proof_root = from_hex_exact::<32>(proof_json.field_str("master_root_pk")?, "proof master_root_pk")?;
+    let proof_root = from_hex_exact::<32>(
+        proof_json.field_str("master_root_pk")?,
+        "proof master_root_pk",
+    )?;
     if master_root != proof_root {
         return Err(CliError::verify(
             "child proof master_root_pk does not match HD vault",
@@ -666,19 +749,37 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     let signers = parse_recover_signers(args.get("signers"), parties, threshold)?;
     let config = build_committee(threshold, parties, label)?;
 
-    if child_idx as usize >= batch_size { return Err(CliError::usage("child index out of bounds")); }
+    if child_idx as usize >= batch_size {
+        return Err(CliError::usage("child index out of bounds"));
+    }
     let passphrase = crate::envelope::passphrase(&args)?;
     let custodian_seeds = if meta.get("custody_format").is_some() {
-        if meta.field_str("custody_format")? != HD_SHARE_FORMAT { return Err(CliError::input("unknown HD custody format")); }
+        if meta.field_str("custody_format")? != HD_SHARE_FORMAT {
+            return Err(CliError::input("unknown HD custody format"));
+        }
         let mut selected = Vec::with_capacity(signers.len());
         for &idx in &signers {
-            let doc = load_json_checked(&hd_share_path(vault_dir, idx), HD_SHARE_FORMAT, MAX_SIG_PROOF_BYTES)?;
+            let doc = load_json_checked(
+                &hd_share_path(vault_dir, idx),
+                HD_SHARE_FORMAT,
+                MAX_SIG_PROOF_BYTES,
+            )?;
             if doc.field_u64("party")? != idx as u64
-                || from_hex_exact::<32>(doc.field_str("config_digest")?, "config_digest")? != config.digest()
-                || from_hex_exact::<32>(doc.field_str("master_root_pk")?, "master_root_pk")? != master_root
-            { return Err(CliError::verify("HD custody bundle does not match enrollment")); }
+                || from_hex_exact::<32>(doc.field_str("config_digest")?, "config_digest")?
+                    != config.digest()
+                || from_hex_exact::<32>(doc.field_str("master_root_pk")?, "master_root_pk")?
+                    != master_root
+            {
+                return Err(CliError::verify(
+                    "HD custody bundle does not match enrollment",
+                ));
+            }
             let opened = crate::envelope::open(&doc, passphrase.as_deref())?;
-            selected.push(restore_custodian(&config, idx as u16, opened.secret_key()?)?);
+            selected.push(restore_custodian(
+                &config,
+                idx as u16,
+                opened.secret_key()?,
+            )?);
         }
         selected
     } else {
@@ -686,12 +787,20 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
         let mut entropies = Vec::with_capacity(parties);
         for idx in 0..parties {
             let raw = read_bounded_file(&hd_seed_path(vault_dir, idx), 32)?;
-            entropies.push(Secret32(raw.0.as_slice().try_into().map_err(|_| CliError::input("corrupt HD seed"))?));
+            entropies.push(Secret32(
+                raw.0
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CliError::input("corrupt HD seed"))?,
+            ));
         }
         let (all, _) = run_dealerless_seed_ceremony(&config, &entropies)?;
-        all.into_iter().filter(|s| signers.contains(&(s.party_id() as usize))).collect()
+        all.into_iter()
+            .filter(|s| signers.contains(&(s.party_id() as usize)))
+            .collect()
     };
-    let selected_vaults = custodian_seeds.iter()
+    let selected_vaults = custodian_seeds
+        .iter()
         .map(|cs| derive_inventory_vault(cs, pk_seed, batch_size).map_err(map_hd_err))
         .collect::<Result<Vec<_>, _>>()?;
     let selected_refs: Vec<_> = selected_vaults.iter().collect();
@@ -699,11 +808,10 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     let recovered_seed =
         recover_child_signing_seed(&config, &selected_refs, child_idx, Some(&expected_child_pk))
             .map_err(map_hd_err)?;
-    let (sk, pk) = slh_keygen_from_seed(
-        &Fips205Params::SLH_DSA_SHAKE_128F,
-        recovered_seed.expose(),
-    )
-    .map_err(|_| CliError::verify("SLH-DSA-SHAKE-128f keygen from recovered seed failed"))?;
+    let (sk, pk) =
+        slh_keygen_from_seed(&Fips205Params::SLH_DSA_SHAKE_128F, recovered_seed.expose()).map_err(
+            |_| CliError::verify("SLH-DSA-SHAKE-128f keygen from recovered seed failed"),
+        )?;
     let sk_bytes = crate::cli::ZeroizingBuf(sk.to_bytes());
     let sk_hex = to_hex_zeroizing(&sk_bytes.0);
     let sk_hex_str = std::str::from_utf8(&sk_hex.0)
@@ -728,7 +836,9 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
         ("public_key", Json::hex(&pk_bytes)),
     ]);
     vault.set_key_material(&crate::envelope::open(&secret_doc, None)?);
-    if let Some(pass) = &passphrase { crate::envelope::seal(&mut secret_doc, pass)?; }
+    if let Some(pass) = &passphrase {
+        crate::envelope::seal(&mut secret_doc, pass)?;
+    }
     vault.bind(&mut secret_doc)?;
     vault.prepare(&mut secret_doc)?;
     let encoded_secret = crate::cli::ZeroizingBuf(secret_doc.to_pretty().into_bytes());
