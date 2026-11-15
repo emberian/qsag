@@ -21,11 +21,11 @@
 use std::time::Instant;
 
 use qsag_agg::{
-    AggSigProfile, EpochWalSink, HemAggConfig, HierarchicalHemAggregate, ShardHemPolicy,
-    ShardHemWitness, SigError, SignerBitmap, SigningMode, StatelessBudgetWalSink, ValidatorKeypair,
-    ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
+    AggSigProfile, EpochWalSink, HemAggConfig, HierarchicalHemAggregate, PreparedPolicyRegistry,
+    ShardHemPolicy, ShardHemWitness, SigError, SignerBitmap, SigningMode, StatelessBudgetWalSink,
+    ValidatorKeypair, ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
     compute_policy_registry_root, hierarchical_hem_message, prove_hierarchical_hem,
-    verify_hierarchical_hem, with_worker_limit,
+    verify_hierarchical_hem, verify_hierarchical_hem_prepared, with_worker_limit,
 };
 use qsag_core::belt_latch::{BeltLatchRecord, BeltLatchState, DurableWal, WalError};
 use qsag_quorum::party_node::IsolatedQuorumParty;
@@ -356,7 +356,10 @@ fn run_beam_hierarchy_bench(
     assert_eq!(decoded, agg);
 
     // 3. Measure block proposer / client verification: BOTH multi-core (`std::thread::scope`)
-    //    AND single-core (`with_worker_limit(1, ...)`).
+    //    AND single-core (`with_worker_limit(1, ...)`) against epoch-prepared committee roots
+    //    (`PreparedPolicyRegistry`), plus cold uncached committee-registry verification.
+    let prepared_registry =
+        PreparedPolicyRegistry::new(policies.clone()).expect("valid epoch policy registry");
     assert!(verify_hierarchical_hem(
         &policies,
         epoch_floor,
@@ -365,13 +368,30 @@ fn run_beam_hierarchy_bench(
         regime,
         &decoded,
     ));
+    assert!(verify_hierarchical_hem_prepared(
+        &prepared_registry,
+        epoch_floor,
+        beacon_root_msg,
+        min_global,
+        regime,
+        &decoded,
+    ));
 
-    let measure_verify = |max_w: Option<usize>| -> (f64, f64, f64) {
+    let measure_verify = |max_w: Option<usize>, prepared: bool| -> (f64, f64, f64) {
         let mut samples = Vec::with_capacity(verify_iters);
         for _ in 0..verify_iters {
             let t0 = Instant::now();
-            let ok = match max_w {
-                Some(w) => with_worker_limit(w, || {
+            let call = || {
+                if prepared {
+                    verify_hierarchical_hem_prepared(
+                        &prepared_registry,
+                        epoch_floor,
+                        beacon_root_msg,
+                        min_global,
+                        regime,
+                        &decoded,
+                    )
+                } else {
                     verify_hierarchical_hem(
                         &policies,
                         epoch_floor,
@@ -380,15 +400,11 @@ fn run_beam_hierarchy_bench(
                         regime,
                         &decoded,
                     )
-                }),
-                None => verify_hierarchical_hem(
-                    &policies,
-                    epoch_floor,
-                    beacon_root_msg,
-                    min_global,
-                    regime,
-                    &decoded,
-                ),
+                }
+            };
+            let ok = match max_w {
+                Some(w) => with_worker_limit(w, call),
+                None => call(),
             };
             assert!(ok);
             samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
@@ -400,8 +416,9 @@ fn run_beam_hierarchy_bench(
             percentile_sorted(&samples, 99, 100),
         )
     };
-    let (all_min_ms, all_p50_ms, all_p99_ms) = measure_verify(None);
-    let (c1_min_ms, c1_p50_ms, c1_p99_ms) = measure_verify(Some(1));
+    let (all_min_ms, all_p50_ms, all_p99_ms) = measure_verify(None, true);
+    let (_cold_min_ms, cold_p50_ms, _cold_p99_ms) = measure_verify(None, false);
+    let (c1_min_ms, c1_p50_ms, c1_p99_ms) = measure_verify(Some(1), true);
 
     // Bandwidth & EVM calldata gas metrics.
     let total_signers = decoded
@@ -441,7 +458,7 @@ fn run_beam_hierarchy_bench(
         BEAM_SLOT_BUDGET_MS / single_subnet_prove_ms.max(0.001),
     );
     println!(
-        "    Verify    : multi-core p50 = {all_p50_ms:.2} ms, p99 = {all_p99_ms:.2} ms, min = {all_min_ms:.2} ms (target < {BEAM_VERIFY_TARGET_MS:.1} ms: {}) | 1-core p50 = {c1_p50_ms:.2} ms, p99 = {c1_p99_ms:.2} ms, min = {c1_min_ms:.2} ms",
+        "    Verify    : multi-core p50 = {all_p50_ms:.2} ms, p99 = {all_p99_ms:.2} ms, min = {all_min_ms:.2} ms (cold_registry p50 = {cold_p50_ms:.2} ms | target < {BEAM_VERIFY_TARGET_MS:.1} ms: {}) | 1-core p50 = {c1_p50_ms:.2} ms, p99 = {c1_p99_ms:.2} ms, min = {c1_min_ms:.2} ms",
         if all_p50_ms < BEAM_VERIFY_TARGET_MS {
             "MET"
         } else {
