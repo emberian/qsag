@@ -2,139 +2,75 @@
 //! Shared reference-oracle helpers, basis isomorphisms, and algebraic inverse
 //! utilities for QSAG external differential validation and property-based testing.
 
-use qsag_core::field::goldilocks::{GOLDILOCKS_PRIME, Goldilocks};
-use qsag_core::sponge::poseidon2::{
-    POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INTERNAL_ROUNDS, Poseidon2State12,
-    poseidon2_apply_me, poseidon2_apply_mi, poseidon2_const_at,
-};
+use p3_field::extension::BinomialExtensionField;
+use p3_field::{AbstractExtensionField, AbstractField, Field, PrimeField64};
+use p3_goldilocks::Goldilocks as P3Goldilocks;
+use qsag_asm::SimdBackend;
 
-/// Exact inverse exponent $d_{\text{inv}} = \frac{4(p - 1) + 1}{7}$ for $x \mapsto x^7 \bmod p$
-/// over Goldilocks ($p = 2^{64} - 2^{32} + 1$).
-pub const POSEIDON2_SBOX7_INV_EXP: u64 = 10_540_996_611_094_048_183;
+pub mod poseidon2_ref;
 
-/// Compute $x^e \bmod p$ in `Goldilocks` via binary square-and-multiply.
+/// Goldilocks prime `p = 2^64 - 2^32 + 1`.
+pub const GOLDILOCKS_P: u64 = poseidon2_ref::P;
+
+/// Every `qsag-asm` dispatch tier; tiers the host lacks fall back inside `qsag-asm`.
+pub const ALL_SIMD_BACKENDS: [SimdBackend; 4] = [
+    SimdBackend::Portable,
+    SimdBackend::X86Avx2Pclmul,
+    SimdBackend::X86Avx2GfniVpclmul,
+    SimdBackend::X86Avx512GfniVpclmul,
+];
+
+type P3Ext2 = BinomialExtensionField<P3Goldilocks, 2>;
+
+/// Plonky3 Goldilocks element of `raw mod p`.
 #[inline]
-pub fn goldilocks_pow_u64(mut base: Goldilocks, mut exp: u64) -> Goldilocks {
-    let mut acc = Goldilocks::ONE;
+pub fn p3_gl(raw: u64) -> P3Goldilocks {
+    P3Goldilocks::from_canonical_u64(raw % GOLDILOCKS_P)
+}
+
+/// Limbs `[c00, c01, c10, c11]` of `(c00 + c01 u) + (c10 + c11 u) v` with `u^2 = 7`, `v^2 = u`,
+/// as the pair of Plonky3 quadratic-extension coefficients of `1` and `v`.
+fn p3_ext4_split(a: [u64; 4]) -> (P3Ext2, P3Ext2) {
+    (
+        P3Ext2::from_base_slice(&[p3_gl(a[0]), p3_gl(a[1])]),
+        P3Ext2::from_base_slice(&[p3_gl(a[2]), p3_gl(a[3])]),
+    )
+}
+
+fn p3_ext4_join(c0: P3Ext2, c1: P3Ext2) -> [u64; 4] {
+    let (c0, c1): (&[P3Goldilocks], &[P3Goldilocks]) = (c0.as_base_slice(), c1.as_base_slice());
+    [c0[0], c0[1], c1[0], c1[1]].map(|x| x.as_canonical_u64())
+}
+
+/// Reference `GoldilocksExt4` product over Plonky3's quadratic extension:
+/// `(a0 + a1 v)(b0 + b1 v) = (a0 b0 + u a1 b1) + (a0 b1 + a1 b0) v`.
+pub fn p3_ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
+    let ((a0, a1), (b0, b1)) = (p3_ext4_split(a), p3_ext4_split(b));
+    p3_ext4_join(a0 * b0 + u * a1 * b1, a0 * b1 + a1 * b0)
+}
+
+/// Reference `GoldilocksExt4` inverse through the norm to the quadratic extension (`0 -> 0`).
+pub fn p3_ext4_inv(a: [u64; 4]) -> [u64; 4] {
+    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
+    let (a0, a1) = p3_ext4_split(a);
+    match (a0 * a0 - u * a1 * a1).try_inverse() {
+        Some(norm_inv) => p3_ext4_join(a0 * norm_inv, -(a1 * norm_inv)),
+        None => [0; 4],
+    }
+}
+
+/// Reference `GoldilocksExt4` power by square-and-multiply; `exp = p` is the Frobenius map.
+pub fn p3_ext4_pow(mut base: [u64; 4], mut exp: u64) -> [u64; 4] {
+    let mut acc = [1, 0, 0, 0];
     while exp > 0 {
-        if (exp & 1) == 1 {
-            acc *= base;
+        if exp & 1 == 1 {
+            acc = p3_ext4_mul(acc, base);
         }
-        base = base.square();
+        base = p3_ext4_mul(base, base);
         exp >>= 1;
     }
     acc
-}
-
-/// Exact inverse S-box $y \mapsto y^{d_{\text{inv}}} \bmod p$ satisfying `sbox7_inv(sbox7(x)) == x`.
-#[inline]
-pub fn poseidon2_sbox7_inv(y: Goldilocks) -> Goldilocks {
-    if y == Goldilocks::ZERO {
-        Goldilocks::ZERO
-    } else {
-        goldilocks_pow_u64(y, POSEIDON2_SBOX7_INV_EXP)
-    }
-}
-
-/// Invert a $12 \times 12$ matrix over `Goldilocks` via Gauss-Jordan elimination,
-/// panicking if the matrix is singular ($\det = 0$).
-pub fn invert_matrix_12(mut a: [[Goldilocks; 12]; 12]) -> [[Goldilocks; 12]; 12] {
-    let mut inv = [[Goldilocks::ZERO; 12]; 12];
-    for (i, row) in inv.iter_mut().enumerate() {
-        row[i] = Goldilocks::ONE;
-    }
-    for col in 0..12 {
-        let pivot_row = (col..12)
-            .find(|&r| a[r][col] != Goldilocks::ZERO)
-            .expect("12x12 Poseidon2 diffusion matrix must be invertible over Goldilocks");
-        if pivot_row != col {
-            a.swap(col, pivot_row);
-            inv.swap(col, pivot_row);
-        }
-        let pivot_inv = a[col][col]
-            .checked_inv()
-            .expect("nonzero Goldilocks pivot has multiplicative inverse");
-        for j in 0..12 {
-            a[col][j] *= pivot_inv;
-            inv[col][j] *= pivot_inv;
-        }
-        for r in 0..12 {
-            if r == col {
-                continue;
-            }
-            let factor = a[r][col];
-            if factor != Goldilocks::ZERO {
-                for j in 0..12 {
-                    let sub_a = factor * a[col][j];
-                    let sub_i = factor * inv[col][j];
-                    a[r][j] -= sub_a;
-                    inv[r][j] -= sub_i;
-                }
-            }
-        }
-    }
-    inv
-}
-
-/// Reconstruct the exact $12 \times 12$ matrices $(M_E^{-1}, M_I^{-1})$ directly from the live
-/// `poseidon2_apply_me` and `poseidon2_apply_mi` operators in `qsag_core`.
-pub fn build_poseidon2_inverse_matrices() -> ([[Goldilocks; 12]; 12], [[Goldilocks; 12]; 12]) {
-    let mut me_cols = [[Goldilocks::ZERO; 12]; 12];
-    let mut mi_cols = [[Goldilocks::ZERO; 12]; 12];
-    for j in 0..12 {
-        let mut e_me = [Goldilocks::ZERO; 12];
-        e_me[j] = Goldilocks::ONE;
-        poseidon2_apply_me(&mut e_me);
-        for i in 0..12 {
-            me_cols[i][j] = e_me[i];
-        }
-
-        let mut e_mi = [Goldilocks::ZERO; 12];
-        e_mi[j] = Goldilocks::ONE;
-        poseidon2_apply_mi(&mut e_mi);
-        for i in 0..12 {
-            mi_cols[i][j] = e_mi[i];
-        }
-    }
-    (invert_matrix_12(me_cols), invert_matrix_12(mi_cols))
-}
-
-#[inline]
-pub fn apply_matrix_12(mat: &[[Goldilocks; 12]; 12], st: &mut Poseidon2State12) {
-    let inp = *st;
-    for (i, out_lane) in st.iter_mut().enumerate() {
-        let mut acc = Goldilocks::ZERO;
-        for j in 0..12 {
-            acc += mat[i][j] * inp[j];
-        }
-        *out_lane = acc;
-    }
-}
-
-/// Exact inverse of `qsag_core::sponge::poseidon2::poseidon2_perm12` using precomputed
-/// $(M_E^{-1}, M_I^{-1})$ and $x^{d_{\text{inv}}}$.
-pub fn poseidon2_perm12_inv_with_mats(
-    st: &mut Poseidon2State12,
-    me_inv: &[[Goldilocks; 12]; 12],
-    mi_inv: &[[Goldilocks; 12]; 12],
-) {
-    for r in (0..POSEIDON2_HALF_EXTERNAL_ROUNDS).rev() {
-        apply_matrix_12(me_inv, st);
-        for (lane, x) in st.iter_mut().enumerate() {
-            *x = poseidon2_sbox7_inv(*x) - poseidon2_const_at(2, r, lane as u64);
-        }
-    }
-    for r in (0..POSEIDON2_INTERNAL_ROUNDS).rev() {
-        apply_matrix_12(mi_inv, st);
-        st[0] = poseidon2_sbox7_inv(st[0]) - poseidon2_const_at(1, r, 0);
-    }
-    for r in (0..POSEIDON2_HALF_EXTERNAL_ROUNDS).rev() {
-        apply_matrix_12(me_inv, st);
-        for (lane, x) in st.iter_mut().enumerate() {
-            *x = poseidon2_sbox7_inv(*x) - poseidon2_const_at(0, r, lane as u64);
-        }
-    }
-    apply_matrix_12(me_inv, st);
 }
 
 /// Reference AES / Rijndael $\mathbb{F}_{2}[x]/(x^8 + x^4 + x^3 + x + 1)$ (`0x11B`) byte multiplication.
@@ -235,7 +171,7 @@ pub fn mldsa_poly_mul_negacyclic_ref(a: &[i32; 256], b: &[i32; 256]) -> [i32; 25
 /// Reference Goldilocks multiplication in `u128` -> canonical `[0, p)`.
 #[inline]
 pub const fn goldilocks_mul_u128_ref(a: u64, b: u64) -> u64 {
-    (((a as u128) * (b as u128)) % (GOLDILOCKS_PRIME as u128)) as u64
+    (((a as u128) * (b as u128)) % (GOLDILOCKS_P as u128)) as u64
 }
 
 /// NIST SP 800-185 §2.3.1 `left_encode(x)` integer encoding.

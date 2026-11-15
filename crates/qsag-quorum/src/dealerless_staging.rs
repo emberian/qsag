@@ -587,6 +587,28 @@ fn bit_mask128(bit: u64) -> u128 {
 }
 
 #[inline]
+/// The even-indexed and the odd-indexed elements of `values`, as owned secret vectors.
+fn split_even_odd(values: &[u128]) -> (SecretBuffer<Vec<u128>>, SecretBuffer<Vec<u128>>) {
+    let (pairs, _) = values.as_chunks::<2>();
+    (
+        SecretBuffer(pairs.iter().map(|p| p[0]).collect()),
+        SecretBuffer(pairs.iter().map(|p| p[1]).collect()),
+    )
+}
+
+/// Halve `values` in place over `GF(2^128)`: element `j` becomes `even_j ^ r * odd_j`, or
+/// `r * even_j ^ odd_j` when `scale_even`. One batched kernel call per vector; the vacated
+/// upper half is wiped.
+fn fold_pairs(values: &mut Vec<u128>, r: u128, scale_even: bool) {
+    let (even, odd) = split_even_odd(values);
+    let half = even.len();
+    let (keep, scaled) = if scale_even { (odd, even) } else { (even, odd) };
+    values[..half].copy_from_slice(&keep);
+    qsag_asm::bitslice::gf2_128_scale_xor(&mut values[..half], &scaled, r);
+    wipe_u128s(&mut values[half..]);
+    values.truncate(half);
+}
+
 fn gf128_mul(a: u128, b: u128) -> u128 {
     // Use the core polynomial-basis kernel, including its CPU feature checks and
     // portable fallback. The Wiedemann Tower128 encoding is a different field basis.
@@ -1496,23 +1518,21 @@ impl CommitteeBeaverReservoir {
                 mac_a_vec[u][k] = gf128_mul(chi_k, mac_a[u][k / 64][k % 64]);
                 mac_b_vec[u][k] = mac_b[u][k / 64][k % 64];
                 c_cur[u] ^= chi_k & bit_mask128(c_bit);
-                mac_c_cur[u] ^= gf128_mul(chi_k, mac_c[u][k / 64][k % 64]);
             }
+            mac_c_cur[u] = qsag_asm::gf2_128_dot(&chis, mac_c[u].as_flattened());
         }
 
         let mut tens_b = vec![1u128];
         for round in 0..HALVING_ROUNDS {
-            let cur_len = RAW_CHUNK_BITS >> round;
-            let half = cur_len / 2;
             let group = 1usize << round;
 
             // Compute cross-terms `h0 = <a_even, b_odd>` and `h1 = <a_odd, b_even>` via structured pads.
             let mut h_shares = SecretBuffer(vec![vec![0u128; 2]; m]);
             for u in 0..m {
-                for j in 0..half {
-                    h_shares[u][0] ^= gf128_mul(a_vec[u][2 * j], b_vec[u][2 * j + 1]);
-                    h_shares[u][1] ^= gf128_mul(a_vec[u][2 * j + 1], b_vec[u][2 * j]);
-                }
+                let (a_even, a_odd) = split_even_odd(&a_vec[u]);
+                let (b_even, b_odd) = split_even_odd(&b_vec[u]);
+                h_shares[u][0] = qsag_asm::gf2_128_dot(&a_even, &b_odd);
+                h_shares[u][1] = qsag_asm::gf2_128_dot(&a_odd, &b_even);
             }
 
             for ps in &mut pair_states {
@@ -1524,9 +1544,7 @@ impl CommitteeBeaverReservoir {
                     if round == 0 {
                         blk[0] ^= partner_a;
                     } else {
-                        for (dst, &tb) in blk.iter_mut().zip(&tens_b) {
-                            *dst ^= gf128_mul(partner_a, tb);
-                        }
+                        qsag_asm::bitslice::gf2_128_scale_xor(blk, &tens_b, partner_a);
                     }
                     let first = g * group;
                     let mut sum = 0u128;
@@ -1558,30 +1576,11 @@ impl CommitteeBeaverReservoir {
             let r_sq = gf128_mul(r_chal, r_chal);
 
             for u in 0..m {
-                for j in 0..half {
-                    let ae = a_vec[u][2 * j];
-                    let ao = a_vec[u][2 * j + 1];
-                    let be = b_vec[u][2 * j];
-                    let bo = b_vec[u][2 * j + 1];
-                    a_vec[u][j] = ae ^ gf128_mul(r_chal, ao);
-                    b_vec[u][j] = gf128_mul(r_chal, be) ^ bo;
-
-                    let mae = mac_a_vec[u][2 * j];
-                    let mao = mac_a_vec[u][2 * j + 1];
-                    let mbe = mac_b_vec[u][2 * j];
-                    let mbo = mac_b_vec[u][2 * j + 1];
-                    mac_a_vec[u][j] = mae ^ gf128_mul(r_chal, mao);
-                    mac_b_vec[u][j] = gf128_mul(r_chal, mbe) ^ mbo;
-                }
-                for values in [
-                    &mut a_vec[u],
-                    &mut b_vec[u],
-                    &mut mac_a_vec[u],
-                    &mut mac_b_vec[u],
-                ] {
-                    wipe_u128s(&mut values[half..]);
-                    values.truncate(half);
-                }
+                // `a` folds as `even ^ r * odd`, `b` as `r * even ^ odd`; MACs follow.
+                fold_pairs(&mut a_vec[u], r_chal, false);
+                fold_pairs(&mut b_vec[u], r_chal, true);
+                fold_pairs(&mut mac_a_vec[u], r_chal, false);
+                fold_pairs(&mut mac_b_vec[u], r_chal, true);
                 c_cur[u] =
                     h_shares[u][0] ^ gf128_mul(r_chal, c_cur[u]) ^ gf128_mul(r_sq, h_shares[u][1]);
                 mac_c_cur[u] =
@@ -1589,10 +1588,8 @@ impl CommitteeBeaverReservoir {
             }
 
             let prev = tens_b;
-            tens_b = Vec::with_capacity(prev.len() * 2);
-            for &x in &prev {
-                tens_b.push(gf128_mul(r_chal, x));
-            }
+            tens_b = vec![0u128; prev.len()];
+            qsag_asm::bitslice::gf2_128_scale_xor(&mut tens_b, &prev, r_chal);
             tens_b.extend_from_slice(&prev);
         }
 

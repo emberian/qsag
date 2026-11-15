@@ -42,7 +42,7 @@ commands:
   quorum            dealerless threshold signing & (t, n) -> (t', n') quorum-switching (sign/reshare/refresh)
   aggregate         untrusted public signature aggregation (--pubkeys + --sigs + --message) or proof merge
   verify-aggregate  verify an aggregate proof (alias: verify-agg)
-  cred              dealerless (2, 5) lattice TOPRF & threshold FIPS 204 ML-DSA ceremonies
+  cred              dealerless Poseidon2 TOPRF (replicated or Shamir-SPDZ) & threshold FIPS 204 ML-DSA ceremonies
   hd                dealerless post-quantum HD inventory & 0-round watch-only child derivation
   migrate           zero-knowledge classical-to-post-quantum ownership migration (438-rep ZKBoo)
   policy            persistent custody policy ledger: init, propose, approve, status;

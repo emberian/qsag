@@ -29,19 +29,14 @@ use qsag_core::sponge::keccak::{
     cshake256_32, cshake256_xof, encode_multi_frame, keccak_f1600 as core_keccak_f1600,
     shake256_32, shake256_xof,
 };
-use qsag_external_validation::{cshake256_nist_sp800_185_ref, cshake256_unpadded_prefix};
+use qsag_external_validation::{
+    ALL_SIMD_BACKENDS, cshake256_nist_sp800_185_ref, cshake256_unpadded_prefix,
+};
 use ripemd::Ripemd160;
 use sha2::{Digest as _, Sha256, Sha512};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Keccak256, Sha3_256, Sha3_384, Sha3_512, Shake256};
 use tiny_keccak::{CShake, Hasher as _, Keccak as TinyKeccak, Sha3 as TinySha3, Shake, Xof as _};
-
-const ALL_SIMD_BACKENDS: [SimdBackend; 4] = [
-    SimdBackend::Portable,
-    SimdBackend::X86Avx2Pclmul,
-    SimdBackend::X86Avx2GfniVpclmul,
-    SimdBackend::X86Avx512GfniVpclmul,
-];
 
 const RATE_BOUNDARY_LENGTHS: &[usize] = &[
     0, 1, 2, 31, 32, 33, 55, 56, 57, 63, 64, 65, 71, 72, 73, 119, 120, 127, 128, 129, 135, 136,

@@ -6,8 +6,6 @@
 //! one command, `session`, which mints a batch and then signs requests read from standard
 //! input until it ends. Only the root key and the finished signatures touch a disk.
 
-use crate::cli::CliError;
-
 const COUPON_HELP: &str = "\
 qsag quorum coupon <keygen|session|verify> [options]
 
@@ -22,7 +20,7 @@ subcommands:
 ";
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
-pub fn run(raw: &[String]) -> Result<(), CliError> {
+pub fn run(raw: &[String]) -> Result<(), crate::cli::CliError> {
     if matches!(
         raw.first().map(String::as_str),
         Some("--help" | "-h" | "help")
@@ -30,7 +28,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         print!("{COUPON_HELP}");
         return Ok(());
     }
-    Err(CliError::usage(
+    Err(crate::cli::CliError::usage(
         "quorum coupon requires 64-bit Linux (locked, fork-wiped memory for coupon shares)",
     ))
 }

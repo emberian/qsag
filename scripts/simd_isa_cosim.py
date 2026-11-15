@@ -2,7 +2,8 @@
 """Release ELF SIMD extraction and native differential tests.
 
 No assembler substitutes are used for kernel tests. --pin refreshes only the
-fixtures and coverage certificates in SimdBinaryEquiv.lean. Default mode checks those pinned bytes
+fixtures and coverage certificates in
+lean/Qsag/Machine/SimdBinaryEquiv.lean. Default mode checks those pinned bytes
 against a fresh release static library, then executes the extracted symbols.
 All feature probes run in children; unsupported instructions fail the run.
 The reference uses polynomial long division, independently of the kernels'
@@ -29,7 +30,7 @@ import tempfile
 from extract_rlib_elf import parse_ar_archive, parse_elf64_object
 
 ROOT = Path(__file__).resolve().parents[1]
-LEAN = ROOT / 'lean/Qsag/SimdBinaryEquiv.lean'
+LEAN = ROOT / 'lean/Qsag/Machine/SimdBinaryEquiv.lean'
 NAMES = ('gf2_128_mul_acc_pclmul', 'gf2_128_mul_acc_vpclmul', 'transpose64x256_avx2')
 EXTRA_NAMES = ('keccak_f1600_avx2_4x', 'keccak_chi_mpc_avx2',
                'gf256_shamir_mul_gfni', 'gf256_shamir_mac_gfni',

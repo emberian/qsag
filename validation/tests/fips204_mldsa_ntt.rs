@@ -18,14 +18,7 @@ use qsag_cred::{
     ThresholdSignSession, ml_dsa_keygen_from_seed, ml_dsa_sign_deterministic, ml_dsa_verify,
     threshold_mldsa_dkg_party, threshold_sign_mldsa_party,
 };
-use qsag_external_validation::mldsa_poly_mul_negacyclic_ref;
-
-const ALL_NTT_BACKENDS: [SimdBackend; 4] = [
-    SimdBackend::Portable,
-    SimdBackend::X86Avx2Pclmul,
-    SimdBackend::X86Avx2GfniVpclmul,
-    SimdBackend::X86Avx512GfniVpclmul,
-];
+use qsag_external_validation::{ALL_SIMD_BACKENDS, mldsa_poly_mul_negacyclic_ref};
 
 fn poly_u32_strategy() -> impl Strategy<Value = [u32; MLDSA_N]> {
     prop::collection::vec(
@@ -69,7 +62,7 @@ fn seiler_ntt_extremal_boundary_exhaustion_across_all_backends() {
             let expected_i32 = mldsa_poly_mul_negacyclic_ref(&a_i32, &b_i32);
             let expected: [u32; MLDSA_N] = core::array::from_fn(|i| expected_i32[i] as u32);
 
-            for backend in ALL_NTT_BACKENDS {
+            for backend in ALL_SIMD_BACKENDS {
                 let mut a_hat = *a;
                 let mut b_hat = *b;
                 mldsa_ntt_with_backend(&mut a_hat, backend);
