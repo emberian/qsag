@@ -6,11 +6,11 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
 use qsag_policy::{
     PolicyViolation, QuorumTierRule, SigningPayloadBinding, TransactionIntent, TransactionPolicy,
-    trusted_dealer_setup_for_testing,
 };
 
 use crate::cli::{Args, CliError, exit};
 use crate::codec::Json;
+use crate::dealerless_ceremony::provision_distributed_policy_guards;
 
 const POLICY_HELP: &str = "\
 qsag policy <init|propose|approve|status> --ledger-dir <dir> [options]
@@ -139,7 +139,8 @@ impl Request {
             policy,
         );
         Ok(bound.and_then(|(mut intent, _)| {
-            let guards = trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50]);
+            let guards =
+                provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])?;
             let initiator = guards
                 .iter()
                 .find(|g| g.party_id == intent.initiator_party)
@@ -219,7 +220,8 @@ fn mint_release_tokens(
             format!("policy barrier refused: {e:?}"),
         )
     };
-    let mut guards: Vec<_> = trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50])
+    let mut guards: Vec<_> = provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])
+        .map_err(barrier)?
         .into_iter()
         .filter(|g| intent.quorum_ids.contains(&g.party_id))
         .collect();
@@ -271,7 +273,8 @@ fn mint_release_tokens(
     // This evaluation is stateless: nothing is written. What a persistent ledger would store
     // is still exercised, by exporting each guard's checkpoint and restoring it into a freshly
     // provisioned share, which must come back with the intent nonce and the session burned.
-    let fresh = trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50]);
+    let fresh = provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])
+        .map_err(barrier)?;
     for (guard, mut restored) in guards.iter().zip(
         fresh
             .into_iter()

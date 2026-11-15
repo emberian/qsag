@@ -13,6 +13,10 @@
 //!    barrier among three approvers and checks that each release token is bound to exactly the
 //!    approved signing request.
 
+#[allow(dead_code)]
+#[path = "../src/dealerless_ceremony.rs"]
+mod dealerless_ceremony;
+
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{
     AddrError, AddressVersion, HybridComponent, HybridPinnedEnvelope, HybridSuiteSpec,
@@ -21,7 +25,6 @@ use qsag_addr::{
 use qsag_core::fips205::{Fips205Params, slh_keygen_from_seed};
 use qsag_policy::{
     PolicyViolation, QuorumTierRule, SigningPayloadBinding, TransactionIntent, TransactionPolicy,
-    trusted_dealer_setup_for_testing,
 };
 
 fn main() {
@@ -158,7 +161,9 @@ fn main() {
     );
     let quorum = [20u16, 30, 50];
     let (mut intent, _) = request(&quorum).expect("the policy approves this transfer");
-    let all_guards = trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50]);
+    let all_guards =
+        dealerless_ceremony::provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])
+            .expect("distributed policy guard ceremony");
     let signing_bytes = all_guards
         .iter()
         .find(|g| g.party_id == 10)
