@@ -2120,6 +2120,10 @@ pub struct HemWhirProverState {
     pub hypercube_evals: Vec<Vec<Goldilocks>>,
     /// Stage-0 Reed–Solomon codewords, one per committed polynomial.
     pub codewords_0: Vec<Vec<Goldilocks>>,
+    /// Monomial coefficients of each polynomial, kept from the commitment's encoding so the
+    /// opening does not repeat the Möbius transform. Empty when the commitment did not run on
+    /// the CPU; the opening then derives them from `hypercube_evals`.
+    pub monomial_coeffs: Vec<Vec<Goldilocks>>,
     pub salt_seed: [u8; 32],
     pub tree_0: MerkleCanopyTree,
     #[cfg(feature = "vulkan")]
@@ -2447,30 +2451,65 @@ impl HemWhirBatchOpeningProof {
 // 4. Möbius Basis Transforms, Fast Parallel Kernels & Fiber Folding
 // ============================================================================
 
-/// Convert boolean-hypercube evaluations `evals[0..2^\ell]` into multilinear monomial coefficients.
-pub fn hypercube_to_monomial_coeffs(evals: &[Goldilocks]) -> Vec<Goldilocks> {
-    assert!(evals.len().is_power_of_two() && evals.len() >= 2);
-    let ell = evals.len().trailing_zeros() as usize;
-    let mut coeffs = evals.to_vec();
+/// Blocks of `2^MOBIUS_CACHE_BLOCK_LOG` cells complete their low variables while cache-resident.
+const MOBIUS_CACHE_BLOCK_LOG: usize = 13;
 
+/// Möbius steps for variables `0..bits` of `a` (`a.len()` a multiple of `2^bits`): cache-resident
+/// blocks first, then the remaining variables two per pass. Each step is the exact subtraction
+/// `hi -= lo`, so the result does not depend on the blocking.
+fn mobius_steps_blocked<T>(a: &mut [T], bits: usize)
+where
+    T: Copy + core::ops::SubAssign,
+{
+    let step = |a: &mut [T], bit: usize| {
+        let stride = 1usize << bit;
+        for block in a.chunks_exact_mut(2 * stride) {
+            let (lo, hi) = block.split_at_mut(stride);
+            for (h, &l) in hi.iter_mut().zip(lo.iter()) {
+                *h -= l;
+            }
+        }
+    };
+    let low = bits.min(MOBIUS_CACHE_BLOCK_LOG);
+    for block in a.chunks_exact_mut(1usize << low) {
+        for bit in 0..low {
+            step(block, bit);
+        }
+    }
+    let mut bit = low;
+    while bit + 1 < bits {
+        let stride = 1usize << bit;
+        for block in a.chunks_exact_mut(4 * stride) {
+            let (lo, hi) = block.split_at_mut(2 * stride);
+            let (q0, q1) = lo.split_at_mut(stride);
+            let (q2, q3) = hi.split_at_mut(stride);
+            for k in 0..stride {
+                q1[k] -= q0[k];
+                q3[k] -= q2[k];
+                q2[k] -= q0[k];
+                q3[k] -= q1[k];
+            }
+        }
+        bit += 2;
+    }
+    if bit < bits {
+        step(a, bit);
+    }
+}
+
+fn hypercube_to_monomial_in_place<T>(coeffs: &mut [T], parallel_min_len: usize)
+where
+    T: Copy + Send + Sync + core::ops::SubAssign,
+{
+    let ell = coeffs.len().trailing_zeros() as usize;
     #[cfg(feature = "std")]
-    if coeffs.len() >= 32_768 {
+    if coeffs.len() >= parallel_min_len {
         let threads = crate::parallel_pow2_workers(coeffs.len() / 2);
         let chunk_n = coeffs.len() / threads;
         let chunk_bits = chunk_n.trailing_zeros() as usize;
         std::thread::scope(|scope| {
             for sub in coeffs.chunks_mut(chunk_n) {
-                crate::spawn_bounded(scope, move || {
-                    for bit in 0..chunk_bits {
-                        let stride = 1usize << bit;
-                        for base in (0..sub.len()).step_by(stride * 2) {
-                            for i in 0..stride {
-                                let v0 = sub[base + i];
-                                sub[base + stride + i] -= v0;
-                            }
-                        }
-                    }
-                });
+                crate::spawn_bounded(scope, move || mobius_steps_blocked(sub, chunk_bits));
             }
         });
         for bit in chunk_bits..ell {
@@ -2489,75 +2528,26 @@ pub fn hypercube_to_monomial_coeffs(evals: &[Goldilocks]) -> Vec<Goldilocks> {
                 });
             }
         }
-        return coeffs;
+        return;
     }
+    #[cfg(not(feature = "std"))]
+    let _ = parallel_min_len;
+    mobius_steps_blocked(coeffs, ell);
+}
 
-    for bit in 0..ell {
-        let stride = 1usize << bit;
-        for base in (0..coeffs.len()).step_by(stride * 2) {
-            for i in 0..stride {
-                let v0 = coeffs[base + i];
-                coeffs[base + stride + i] -= v0;
-            }
-        }
-    }
+/// Convert boolean-hypercube evaluations `evals[0..2^\ell]` into multilinear monomial coefficients.
+pub fn hypercube_to_monomial_coeffs(evals: &[Goldilocks]) -> Vec<Goldilocks> {
+    assert!(evals.len().is_power_of_two() && evals.len() >= 2);
+    let mut coeffs = evals.to_vec();
+    hypercube_to_monomial_in_place(&mut coeffs, 32_768);
     coeffs
 }
 
 /// Convert `GoldilocksExt4` boolean-hypercube evaluations into multilinear monomial coefficients.
 pub fn hypercube_to_monomial_coeffs_ext4(evals: &[GoldilocksExt4]) -> Vec<GoldilocksExt4> {
     assert!(evals.len().is_power_of_two() && evals.len() >= 2);
-    let ell = evals.len().trailing_zeros() as usize;
     let mut coeffs = evals.to_vec();
-
-    #[cfg(feature = "std")]
-    if coeffs.len() >= 8_192 {
-        let threads = crate::parallel_pow2_workers(coeffs.len() / 2);
-        let chunk_n = coeffs.len() / threads;
-        let chunk_bits = chunk_n.trailing_zeros() as usize;
-        std::thread::scope(|scope| {
-            for sub in coeffs.chunks_mut(chunk_n) {
-                crate::spawn_bounded(scope, move || {
-                    for bit in 0..chunk_bits {
-                        let stride = 1usize << bit;
-                        for base in (0..sub.len()).step_by(stride * 2) {
-                            for i in 0..stride {
-                                let v0 = sub[base + i];
-                                sub[base + stride + i] -= v0;
-                            }
-                        }
-                    }
-                });
-            }
-        });
-        for bit in chunk_bits..ell {
-            let stride = 1usize << bit;
-            for block in coeffs.chunks_mut(stride * 2) {
-                let (lo, hi) = block.split_at_mut(stride);
-                let sub_len = (stride / threads).max(1);
-                std::thread::scope(|scope| {
-                    for (lo_c, hi_c) in lo.chunks(sub_len).zip(hi.chunks_mut(sub_len)) {
-                        crate::spawn_bounded(scope, move || {
-                            for (h, &l) in hi_c.iter_mut().zip(lo_c.iter()) {
-                                *h -= l;
-                            }
-                        });
-                    }
-                });
-            }
-        }
-        return coeffs;
-    }
-
-    for bit in 0..ell {
-        let stride = 1usize << bit;
-        for base in (0..coeffs.len()).step_by(stride * 2) {
-            for i in 0..stride {
-                let v0 = coeffs[base + i];
-                coeffs[base + stride + i] -= v0;
-            }
-        }
-    }
+    hypercube_to_monomial_in_place(&mut coeffs, 8_192);
     coeffs
 }
 
@@ -3296,6 +3286,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
                         group_arity_0,
                         hypercube_evals: polys,
                         codewords_0: Vec::new(),
+                        monomial_coeffs: Vec::new(),
                         salt_seed: *salt_seed,
                         tree_0,
                         gpu_session: Some(session),
@@ -3309,7 +3300,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     #[cfg(not(feature = "vulkan"))]
     let _ = extra_witness_words;
 
-    let (codewords_0, tree_0) =
+    let (codewords_0, tree_0, monomial_coeffs) =
         build_cpu_round0(&polys, salt_seed, schedule.regime, st0.blowup, group_arity_0);
     let comm = tree_0.commitment();
     (
@@ -3320,6 +3311,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
             group_arity_0,
             hypercube_evals: polys,
             codewords_0,
+            monomial_coeffs,
             salt_seed: *salt_seed,
             tree_0,
             #[cfg(feature = "vulkan")]
@@ -3334,38 +3326,28 @@ fn build_cpu_round0(
     regime: WhirSecurityRegime,
     blowup: usize,
     group_arity_0: usize,
-) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
+) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree, Vec<Vec<Goldilocks>>) {
+    let encode = |evals: &Vec<Goldilocks>| {
+        let coeffs = hypercube_to_monomial_coeffs(evals);
+        let codeword = encode_rs_coset_goldilocks(&coeffs, blowup);
+        (codeword, coeffs)
+    };
     #[cfg(feature = "std")]
-    let codewords_0: Vec<Vec<Goldilocks>> = if polys.len() > 1 && crate::parallel_workers() > 1 {
+    let encoded: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> = if polys.len() > 1 && crate::parallel_workers() > 1 {
         std::thread::scope(|scope| {
             let handles: Vec<_> = polys
                 .iter()
-                .map(|evals| {
-                    crate::spawn_bounded(scope, move || {
-                        let coeffs = hypercube_to_monomial_coeffs(evals);
-                        encode_rs_coset_goldilocks(&coeffs, blowup)
-                    })
-                })
+                .map(|evals| crate::spawn_bounded(scope, move || encode(evals)))
                 .collect();
             handles.into_iter().map(crate::join_worker).collect()
         })
     } else {
-        polys
-            .iter()
-            .map(|evals| {
-                let coeffs = hypercube_to_monomial_coeffs(evals);
-                encode_rs_coset_goldilocks(&coeffs, blowup)
-            })
-            .collect()
+        polys.iter().map(encode).collect()
     };
     #[cfg(not(feature = "std"))]
-    let codewords_0: Vec<Vec<Goldilocks>> = polys
-        .iter()
-        .map(|evals| {
-            let coeffs = hypercube_to_monomial_coeffs(evals);
-            encode_rs_coset_goldilocks(&coeffs, blowup)
-        })
-        .collect();
+    let encoded: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> = polys.iter().map(encode).collect();
+    let (codewords_0, monomial_coeffs): (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>) =
+        encoded.into_iter().unzip();
     let domain_len = codewords_0[0].len();
     let num_groups = domain_len / group_arity_0;
 
@@ -3388,7 +3370,7 @@ fn build_cpu_round0(
             round0_leaf_hash_x4(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
         })
     };
-    (codewords_0, tree_0)
+    (codewords_0, tree_0, monomial_coeffs)
 }
 
 /// Produce a `[P0-01]`-hardened `Hem` WHIR opening proof over `GoldilocksExt4` for one evaluation
@@ -3560,7 +3542,7 @@ pub fn whir_open_batch(
 
     let kernel = monomial_table(&rho);
     #[cfg(feature = "std")]
-    let monomial_polys: Vec<Vec<Goldilocks>> =
+    let derive_monomial_polys = || -> Vec<Vec<Goldilocks>> {
         if state.hypercube_evals.len() > 1 && crate::parallel_workers() > 1 {
             std::thread::scope(|scope| {
                 let handles: Vec<_> = state
@@ -3576,13 +3558,23 @@ pub fn whir_open_batch(
                 .iter()
                 .map(|w| hypercube_to_monomial_coeffs(w))
                 .collect()
-        };
+        }
+    };
     #[cfg(not(feature = "std"))]
-    let monomial_polys: Vec<Vec<Goldilocks>> = state
-        .hypercube_evals
-        .iter()
-        .map(|w| hypercube_to_monomial_coeffs(w))
-        .collect();
+    let derive_monomial_polys = || -> Vec<Vec<Goldilocks>> {
+        state
+            .hypercube_evals
+            .iter()
+            .map(|w| hypercube_to_monomial_coeffs(w))
+            .collect()
+    };
+    let derived_monomial_polys;
+    let monomial_polys: &[Vec<Goldilocks>] = if state.monomial_coeffs.is_empty() {
+        derived_monomial_polys = derive_monomial_polys();
+        &derived_monomial_polys
+    } else {
+        &state.monomial_coeffs
+    };
     let shifted_evals: Vec<_> = monomial_polys
         .iter()
         .map(|c| dot_base_ext4_fast(c, &kernel[1..1 + c.len()]))
@@ -3596,7 +3588,7 @@ pub fn whir_open_batch(
     let combined_claim = combine_claims(&weights, &common_point_evals, &shifted_evals);
     let opening = whir_open_core(
         state,
-        Some(&monomial_polys),
+        Some(monomial_polys),
         &weights,
         kernel,
         combined_claim,
@@ -3674,7 +3666,7 @@ fn whir_open_core(
     mut cur_sum_claim: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> HemWhirOpeningProof {
-    let lazy_cpu_r0: Option<(Vec<Vec<Goldilocks>>, MerkleCanopyTree)> =
+    let lazy_cpu_r0: Option<(Vec<Vec<Goldilocks>>, MerkleCanopyTree, Vec<Vec<Goldilocks>>)> =
         state.codewords_0.is_empty().then(|| {
             build_cpu_round0(
                 &state.hypercube_evals,
@@ -3685,7 +3677,7 @@ fn whir_open_core(
             )
         });
     let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) = match &lazy_cpu_r0 {
-        Some((cws, tr)) => (cws.as_slice(), tr),
+        Some((cws, tr, _)) => (cws.as_slice(), tr),
         None => (state.codewords_0.as_slice(), &state.tree_0),
     };
 
@@ -3703,6 +3695,7 @@ fn whir_open_core(
         let owned_c;
         let c: &[Goldilocks] = match precomputed_monomial_polys {
             Some(pre) => &pre[poly_idx],
+            None if !state.monomial_coeffs.is_empty() => &state.monomial_coeffs[poly_idx],
             None => {
                 owned_c = hypercube_to_monomial_coeffs(table);
                 &owned_c
@@ -5979,6 +5972,57 @@ fn verify_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>, nonce: u64) 
 #[cfg(test)]
 mod pcs_unit_tests {
     use super::*;
+
+    /// The blocked transform against the one-variable-per-pass definition, on sizes below and
+    /// above the cache block and both sides of the parallel threshold.
+    #[test]
+    fn blocked_mobius_matches_one_variable_per_pass() {
+        for ell in [1usize, 2, 7, 13, 14, 15, 16, 18] {
+            let mut x = 0x9E37_79B9u64 + ell as u64;
+            let evals: Vec<Goldilocks> = (0..1usize << ell)
+                .map(|_| {
+                    x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    Goldilocks::from_u64_reduced(x ^ (x >> 31))
+                })
+                .collect();
+            let mut expected = evals.clone();
+            for bit in 0..ell {
+                let stride = 1usize << bit;
+                for base in (0..expected.len()).step_by(2 * stride) {
+                    for i in 0..stride {
+                        let lo = expected[base + i];
+                        expected[base + stride + i] -= lo;
+                    }
+                }
+            }
+            assert_eq!(hypercube_to_monomial_coeffs(&evals), expected, "ell {ell}");
+            let lift = |v: &[Goldilocks]| -> Vec<GoldilocksExt4> {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, &g)| {
+                        GoldilocksExt4::from_limbs([
+                            g,
+                            g + Goldilocks::ONE,
+                            Goldilocks::from_u64_reduced(i as u64),
+                            g.square(),
+                        ])
+                    })
+                    .collect()
+            };
+            let ext = lift(&evals);
+            let mut expected_ext = ext.clone();
+            for bit in 0..ell {
+                let stride = 1usize << bit;
+                for base in (0..expected_ext.len()).step_by(2 * stride) {
+                    for i in 0..stride {
+                        let lo = expected_ext[base + i];
+                        expected_ext[base + stride + i] -= lo;
+                    }
+                }
+            }
+            assert_eq!(hypercube_to_monomial_coeffs_ext4(&ext), expected_ext, "ext ell {ell}");
+        }
+    }
 
     #[test]
     fn extracted_affine_core_matches_tower_arithmetic() {

@@ -350,24 +350,78 @@ fn butterfly_block_goldilocks(
     }
 }
 
+/// Stages whose blocks fit in `2^NTT_CACHE_BLOCK_LOG` elements (128 KiB of base-field words)
+/// are completed block by block, so the low stages never leave the L2 cache.
+const NTT_CACHE_BLOCK_LOG: usize = 14;
+
+/// One pass applying Cooley–Tukey stages `stage` and `stage + 1` together. It performs exactly
+/// the butterflies of the two radix-2 stages, so the result is identical word for word.
+#[inline]
+fn radix4_stage_pair_goldilocks(a: &mut [Goldilocks], stage: usize, inverse: bool) {
+    let root = |s: usize| {
+        let g = Goldilocks::two_adic_generator(s);
+        if inverse { g.inv() } else { g }
+    };
+    let w_hi = root(stage + 1);
+    let quarter_turn = root(2);
+    let quarter = 1usize << (stage - 1);
+    for block in a.chunks_exact_mut(4 * quarter) {
+        let (lo, hi) = block.split_at_mut(2 * quarter);
+        let (a0, a1) = lo.split_at_mut(quarter);
+        let (a2, a3) = hi.split_at_mut(quarter);
+        let mut t = Goldilocks::ONE;
+        for j in 0..quarter {
+            let u = t.square();
+            let b1 = a1[j].const_mul(u);
+            let b3 = a3[j].const_mul(u);
+            let (x0, x1) = (a0[j] + b1, a0[j] - b1);
+            let (x2, x3) = (a2[j] + b3, a2[j] - b3);
+            let c2 = x2.const_mul(t);
+            let c3 = x3.const_mul(t.const_mul(quarter_turn));
+            a0[j] = x0 + c2;
+            a2[j] = x0 - c2;
+            a1[j] = x1 + c3;
+            a3[j] = x1 - c3;
+            t = t.const_mul(w_hi);
+        }
+    }
+}
+
+/// Cooley–Tukey stages `1..=stages` on bit-reversed input: cache-resident blocks first, then the
+/// remaining stages two per pass.
+fn ntt_goldilocks_stages_blocked(a: &mut [Goldilocks], stages: usize, inverse: bool) {
+    let radix2 = |a: &mut [Goldilocks], stage: usize| {
+        let g = Goldilocks::two_adic_generator(stage);
+        let w_len = if inverse { g.inv() } else { g };
+        let half = 1usize << (stage - 1);
+        for block in a.chunks_exact_mut(2 * half) {
+            let (lo, hi) = block.split_at_mut(half);
+            butterfly_block_goldilocks(lo, hi, Goldilocks::ONE, w_len);
+        }
+    };
+    let low = stages.min(NTT_CACHE_BLOCK_LOG);
+    for block in a.chunks_exact_mut(1usize << low) {
+        for stage in 1..=low {
+            radix2(block, stage);
+        }
+    }
+    let mut stage = low + 1;
+    while stage < stages {
+        radix4_stage_pair_goldilocks(a, stage, inverse);
+        stage += 2;
+    }
+    if stage == stages {
+        radix2(a, stage);
+    }
+}
+
 fn ntt_goldilocks_serial(a: &mut [Goldilocks]) {
     let n = a.len();
     if n <= 1 {
         return;
     }
     bit_reverse_permute(a);
-    let mut len = 2;
-    let mut stage = 1;
-    while len <= n {
-        let w_len = Goldilocks::two_adic_generator(stage);
-        let half = len / 2;
-        for block in a.chunks_exact_mut(len) {
-            let (lo, hi) = block.split_at_mut(half);
-            butterfly_block_goldilocks(lo, hi, Goldilocks::ONE, w_len);
-        }
-        len <<= 1;
-        stage += 1;
-    }
+    ntt_goldilocks_stages_blocked(a, n.trailing_zeros() as usize, false);
 }
 
 /// In-place Radix-2 Cooley–Tukey NTT over `Goldilocks` in natural evaluation order
@@ -406,19 +460,7 @@ fn ntt_goldilocks_parallel_stages(a: &mut [Goldilocks], threads: usize, inverse:
     std::thread::scope(|scope| {
         for sub in a.chunks_mut(chunk_n) {
             crate::spawn_bounded(scope, move || {
-                let mut len = 2;
-                let mut stage = 1;
-                while stage <= chunk_stages {
-                    let g = Goldilocks::two_adic_generator(stage);
-                    let w_len = if inverse { g.inv() } else { g };
-                    let half = len / 2;
-                    for block in sub.chunks_exact_mut(len) {
-                        let (lo, hi) = block.split_at_mut(half);
-                        butterfly_block_goldilocks(lo, hi, Goldilocks::ONE, w_len);
-                    }
-                    len <<= 1;
-                    stage += 1;
-                }
+                ntt_goldilocks_stages_blocked(sub, chunk_stages, inverse);
             });
         }
     });
@@ -536,18 +578,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
                                 row[dst] = c.const_mul(sp);
                                 sp = sp.const_mul(s_r);
                             }
-                            let mut len = 2;
-                            let mut stage = 1;
-                            while len <= n_c {
-                                let w_len = Goldilocks::two_adic_generator(stage);
-                                let half = len / 2;
-                                for block in row.chunks_exact_mut(len) {
-                                    let (lo, hi) = block.split_at_mut(half);
-                                    butterfly_block_goldilocks(lo, hi, Goldilocks::ONE, w_len);
-                                }
-                                len <<= 1;
-                                stage += 1;
-                            }
+                            ntt_goldilocks_stages_blocked(row, log_c, false);
                         }
                     });
                 }
@@ -588,18 +619,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
                         if inner_threads > 1 && n_c >= inner_threads * 2 {
                             ntt_goldilocks_parallel_stages(row, inner_threads, false);
                         } else {
-                            let mut len = 2;
-                            let mut stage = 1;
-                            while len <= n_c {
-                                let w_len = Goldilocks::two_adic_generator(stage);
-                                let half = len / 2;
-                                for block in row.chunks_exact_mut(len) {
-                                    let (lo, hi) = block.split_at_mut(half);
-                                    butterfly_block_goldilocks(lo, hi, Goldilocks::ONE, w_len);
-                                }
-                                len <<= 1;
-                                stage += 1;
-                            }
+                            ntt_goldilocks_stages_blocked(row, log_c, false);
                         }
                     });
                 }
@@ -769,8 +789,8 @@ impl GoldilocksExt4 {
     #[inline(always)]
     pub const fn mul_ext2(self, s: GoldilocksExt2) -> Self {
         Self {
-            c0: self.c0.const_mul(s),
-            c1: self.c1.const_mul(s),
+            c0: ext2_mul(self.c0, s),
+            c1: ext2_mul(self.c1, s),
         }
     }
 
@@ -809,12 +829,9 @@ impl GoldilocksExt4 {
     /// Karatsuba multiplication over $\mathbb{F}_{p^2}[v]/(v^2 - u)$ (`3` $\mathbb{F}_{p^2}$ muls = `9` base muls).
     #[inline(always)]
     pub const fn const_mul(self, rhs: Self) -> Self {
-        let v0 = self.c0.const_mul(rhs.c0);
-        let v1 = self.c1.const_mul(rhs.c1);
-        let mid = self
-            .c0
-            .const_add(self.c1)
-            .const_mul(rhs.c0.const_add(rhs.c1))
+        let v0 = ext2_mul(self.c0, rhs.c0);
+        let v1 = ext2_mul(self.c1, rhs.c1);
+        let mid = ext2_mul(self.c0.const_add(self.c1), rhs.c0.const_add(rhs.c1))
             .const_sub(v0)
             .const_sub(v1);
         Self {
@@ -827,12 +844,12 @@ impl GoldilocksExt4 {
     /// $(c_0 + c_1)(c_0 + u c_1) - c_0 c_1 - u(c_0 c_1) = c_0^2 + u c_1^2$.
     #[inline(always)]
     pub const fn square(self) -> Self {
-        let p0 = self.c0.const_mul(self.c1);
+        let p0 = ext2_mul(self.c0, self.c1);
         let up0 = ext2_mul_by_u(p0);
-        let t = self
-            .c0
-            .const_add(self.c1)
-            .const_mul(self.c0.const_add(ext2_mul_by_u(self.c1)));
+        let t = ext2_mul(
+            self.c0.const_add(self.c1),
+            self.c0.const_add(ext2_mul_by_u(self.c1)),
+        );
         Self {
             c0: t.const_sub(p0).const_sub(up0),
             c1: p0.const_add(p0),
@@ -1722,6 +1739,105 @@ mod ext4_tests {
             let mut actual = random_vec[..len].to_vec();
             Goldilocks::batch_inv(&mut actual);
             assert_eq!(actual, expected, "batch_inv mismatch at len={len}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod base_ntt_tests {
+    use super::*;
+
+    fn radix2_reference(a: &mut [Goldilocks], inverse: bool) {
+        bit_reverse_permute(a);
+        for stage in 1..=a.len().trailing_zeros() as usize {
+            let g = Goldilocks::two_adic_generator(stage);
+            let w_len = if inverse { g.inv() } else { g };
+            let half = 1usize << (stage - 1);
+            for block in a.chunks_exact_mut(2 * half) {
+                let mut w = Goldilocks::ONE;
+                for j in 0..half {
+                    let u = block[j];
+                    let v = block[j + half].const_mul(w);
+                    block[j] = u + v;
+                    block[j + half] = u - v;
+                    w = w.const_mul(w_len);
+                }
+            }
+        }
+    }
+
+    fn sample(n: usize, seed: u64) -> Vec<Goldilocks> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                Goldilocks::from_u64_reduced(x ^ (x >> 29))
+            })
+            .collect()
+    }
+
+    /// Sizes below, at and above the cache block, with both parities of remaining stages.
+    #[test]
+    fn blocked_stages_match_radix2_reference_forward_and_inverse() {
+        for log_n in [1usize, 2, 5, 13, 14, 15, 16, 17, 18] {
+            for inverse in [false, true] {
+                let input = sample(1 << log_n, 0x51ed_270b ^ log_n as u64);
+                let mut expected = input.clone();
+                radix2_reference(&mut expected, inverse);
+                let mut got = input;
+                bit_reverse_permute(&mut got);
+                ntt_goldilocks_stages_blocked(&mut got, log_n, inverse);
+                assert_eq!(got, expected, "log_n {log_n}, inverse {inverse}");
+            }
+        }
+    }
+
+    #[test]
+    fn inlined_ext2_product_equals_core_product() {
+        let v = sample(64, 0xE2);
+        for w in v.windows(4) {
+            let a = GoldilocksExt2::new(w[0], w[1]);
+            let b = GoldilocksExt2::new(w[2], w[3]);
+            assert_eq!(ext2_mul(a, b), a.const_mul(b));
+            assert_eq!(ext2_square(a), a.const_mul(a));
+        }
+        let top = Goldilocks::from_u64_reduced(GOLDILOCKS_PRIME - 1);
+        let e = GoldilocksExt2::new(top, top);
+        assert_eq!(ext2_mul(e, e), e.const_mul(e));
+    }
+
+    #[test]
+    fn public_ntt_roundtrips_and_matches_reference() {
+        for log_n in [10usize, 15, 17] {
+            let input = sample(1 << log_n, 7 + log_n as u64);
+            let mut expected = input.clone();
+            radix2_reference(&mut expected, false);
+            let mut got = input.clone();
+            ntt_goldilocks(&mut got);
+            assert_eq!(got, expected);
+            intt_goldilocks(&mut got);
+            assert_eq!(got, input);
+        }
+    }
+
+    #[test]
+    fn coset_encoding_matches_horner_at_sampled_points() {
+        for (log_c, blowup) in [(14usize, 4usize), (15, 4), (13, 32), (16, 8)] {
+            let coeffs = sample(1 << log_c, 99 + log_c as u64);
+            let code = encode_rs_coset_goldilocks(&coeffs, blowup);
+            let domain = coeffs.len() * blowup;
+            assert_eq!(code.len(), domain);
+            let omega = Goldilocks::two_adic_generator(domain.trailing_zeros() as usize);
+            for idx in [0usize, 1, 2, blowup, domain / 3, domain / 2 + 5, domain - 1] {
+                let x = Goldilocks::NON_RESIDUE.const_mul(omega.pow(idx as u64));
+                let mut acc = Goldilocks::ZERO;
+                for &c in coeffs.iter().rev() {
+                    acc = acc.const_mul(x) + c;
+                }
+                assert_eq!(code[idx], acc, "log_c {log_c}, blowup {blowup}, index {idx}");
+            }
         }
     }
 }
