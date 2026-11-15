@@ -20,12 +20,12 @@ verification is concrete; computational unforgeability remains a primitive secur
 assumption. No computational-security assumption is replaced by nonempty bytes.
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 
 import Qsag.Tactic.AssuranceKit

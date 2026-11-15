@@ -1,10 +1,10 @@
 module
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Poseidon2
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Machine.ElfBinaryVerify
 public import Qsag.Machine.McRefine
 public import Qsag.Protocol.Threshold.ThresholdApproval

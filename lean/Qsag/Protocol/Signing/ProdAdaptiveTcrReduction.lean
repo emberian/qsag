@@ -24,14 +24,14 @@ and the path-target budget `prodPathTargetCount` (`ProdCollisionAccounting`) ins
 -/
 
 public import Qsag.Protocol.Signing.ProdCollisionAccounting
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Signing.ProdCollisionAccounting
 import all Qsag.Protocol.Signing.ProdCollisionEvents
 import all Qsag.Protocol.Signing.ProdCollisionExtraction
 import all Qsag.Protocol.Signing.ProdCollisionWitness
 import all Qsag.Protocol.Signing.HypertreeEufCma
 import all Qsag.Protocol.Signing.HashSigs
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Tactic.AssuranceKit
 
 public section

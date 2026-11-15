@@ -1,6 +1,6 @@
 module
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 
 /-!
 # Qsag.Exec.SimulationSpine — Compositional Forward Simulation, Rushing-Network Lifter & Canonical Codecs
@@ -24,6 +24,7 @@ Shared `0 Classical.choice` architectural spine unifying protocol pillars and MI
      `concatFramed_injective`) and `DomainSeparatedTag` (`tag₁ ≠ tag₂ → domainFrame tag₁ x ≠ domainFrame tag₂ y`).
 -/
 
+public import Qsag.Spec.Encoding
 public section
 
 namespace Qsag
@@ -707,36 +708,6 @@ def FixedCodec.bytes (width : Nat) :
   decode_encode s := by
     rcases s with ⟨bs, h⟩
     simp only [h, ↓reduceDIte]
-
-/-- Recursive `w`-byte little-endian `Nat` encoder (`0 Classical.choice`). -/
-def encodeNatLeBytes : Nat → Nat → List UInt8
-  | 0, _ => []
-  | w + 1, n => UInt8.ofNat (n % 256) :: encodeNatLeBytes w (n / 256)
-
-/-- Recursive little-endian byte list `Nat` decoder. -/
-def decodeNatLeBytes : List UInt8 → Nat
-  | [] => 0
-  | b :: bs => b.toNat + 256 * decodeNatLeBytes bs
-
-theorem encodeNatLeBytes_length : ∀ (w n : Nat), (encodeNatLeBytes w n).length = w
-  | 0, _ => rfl
-  | w + 1, n => congrArg Nat.succ (encodeNatLeBytes_length w (n / 256))
-
-theorem decodeNatLeBytes_encodeNatLeBytes :
-    ∀ (w n : Nat), n < 256 ^ w → decodeNatLeBytes (encodeNatLeBytes w n) = n
-  | 0, n, h => by
-    simp only [Nat.pow_zero] at h
-    have hn : n = 0 := by omega
-    subst hn; rfl
-  | w + 1, n, h => by
-    simp only [encodeNatLeBytes, decodeNatLeBytes]
-    have hModLt : n % 256 < 256 := Nat.mod_lt n (by decide)
-    rw [uint8_toNat_ofNat_lt hModLt]
-    have hDivLt : n / 256 < 256 ^ w := by
-      rw [Nat.pow_succ] at h
-      omega
-    rw [decodeNatLeBytes_encodeNatLeBytes w (n / 256) hDivLt]
-    omega
 
 /-- Canonical 8-byte little-endian `FixedCodec UInt64 8`. -/
 def FixedCodec.u64le : FixedCodec UInt64 8 where

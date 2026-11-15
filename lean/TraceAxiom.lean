@@ -2,8 +2,8 @@ module
 /- Diagnostic dependency prefixes. A prefix may stop at an imported declaration
 whose axiom summary is available but whose proof body is not exposed. -/
 import all Qsag.Math.Goldilocks
-import all Qsag.Math.BinaryTower
-import all Qsag.Oracle.UcGames
+import all Qsag.Math.Gf2Pow128
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Oracle.Keccak
 import all Qsag.Protocol.Threshold.ThresholdMpc
 import all Qsag.Protocol.Threshold.Preprocessing

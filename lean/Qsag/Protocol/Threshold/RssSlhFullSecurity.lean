@@ -96,19 +96,19 @@ Model boundary.
   `uc_emulation_forgery_to_hypertree_hash_game` in `Qsag.InteractiveUcEngine`.
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
 public import Qsag.Protocol.Signing.Fips205
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.IdealTsig
 public import Qsag.Protocol.Threshold.ThresholdMpc
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 public import Qsag.Exec.InteractiveUcEngine
 
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Signing.Fips205
 import all Qsag.Protocol.Threshold.ThresholdMpc
 import all Qsag.Protocol.Threshold.MaliciousSecurity
@@ -321,33 +321,33 @@ def depProdFinEquiv {A B : Nat} (hB : 0 < B)
         (bijB (bijA.invFun (splitFinLeft hB y))).right_inv,
         bijA.right_inv, pairFin_splitFin hB]
 
-private theorem finSum_cast_eq {m n : Nat} (h : m = n) (f : Fin m → Nat) :
-    finSum m f = finSum n (fun k => f ⟨k.val, h ▸ k.isLt⟩) := by
+private theorem qsum_cast_eq {m n : Nat} (h : m = n) (f : Fin m → Nat) :
+    qsum m f = qsum n (fun k => f ⟨k.val, h ▸ k.isLt⟩) := by
   subst h
-  exact finSum_congr (fun _ => rfl)
+  exact qsum_congr (fun _ => rfl)
 
-private theorem finSum_add_split : ∀ (m n : Nat) (f : Fin (m + n) → Nat),
-    finSum (m + n) f =
-      finSum m (fun i => f ⟨i.val, by omega⟩) +
-      finSum n (fun j => f ⟨m + j.val, by omega⟩)
+private theorem qsum_add_split : ∀ (m n : Nat) (f : Fin (m + n) → Nat),
+    qsum (m + n) f =
+      qsum m (fun i => f ⟨i.val, by omega⟩) +
+      qsum n (fun j => f ⟨m + j.val, by omega⟩)
   | 0, n, f => by
-    rw [finSum_cast_eq (Nat.zero_add n) f]
-    simp only [finSum, Nat.zero_add]
+    rw [qsum_cast_eq (Nat.zero_add n) f]
+    simp only [qsum, Nat.zero_add]
   | m + 1, n, f => by
     have hAssoc : m + 1 + n = (m + n) + 1 := by omega
-    rw [finSum_cast_eq hAssoc f]
-    conv => lhs; rw [finSum]
-    conv => rhs; rw [finSum]
+    rw [qsum_cast_eq hAssoc f]
+    conv => lhs; rw [qsum]
+    conv => rhs; rw [qsum]
     dsimp only
-    have ih := finSum_add_split m n (fun k => f ⟨k.val + 1, by omega⟩)
+    have ih := qsum_add_split m n (fun k => f ⟨k.val + 1, by omega⟩)
     have hLeftEq :
-        finSum m (fun i => f ⟨i.val + 1, by omega⟩) =
-        finSum m (fun i => f ⟨(⟨i.val, by omega⟩ : Fin (m + n)).val + 1, by omega⟩) :=
-      finSum_congr (fun _ => rfl)
+        qsum m (fun i => f ⟨i.val + 1, by omega⟩) =
+        qsum m (fun i => f ⟨(⟨i.val, by omega⟩ : Fin (m + n)).val + 1, by omega⟩) :=
+      qsum_congr (fun _ => rfl)
     have hShift :
-        finSum n (fun j => f ⟨(m + j.val) + 1, by omega⟩) =
-        finSum n (fun j => f ⟨m + 1 + j.val, by omega⟩) := by
-      apply finSum_congr
+        qsum n (fun j => f ⟨(m + j.val) + 1, by omega⟩) =
+        qsum n (fun j => f ⟨m + 1 + j.val, by omega⟩) := by
+      apply qsum_congr
       intro j
       congr 1
       exact Fin.ext (by dsimp; omega)
@@ -355,31 +355,31 @@ private theorem finSum_add_split : ∀ (m n : Nat) (f : Fin (m + n) → Nat),
     rw [ih, hShift]
     omega
 
-/-- Fubini factorization of `finSum (A * B)` over `Fin A × Fin B` (`0 Classical.choice`). -/
-theorem finSum_prod_eq : ∀ (A B : Nat) (f : Fin (A * B) → Nat),
-    finSum (A * B) f = finSum A (fun a => finSum B (fun b => f (pairFin a b)))
+/-- Fubini factorization of `qsum (A * B)` over `Fin A × Fin B` (`0 Classical.choice`). -/
+theorem qsum_prod_eq : ∀ (A B : Nat) (f : Fin (A * B) → Nat),
+    qsum (A * B) f = qsum A (fun a => qsum B (fun b => f (pairFin a b)))
   | 0, B, f => by
-    rw [finSum_cast_eq (Nat.zero_mul B) f]
+    rw [qsum_cast_eq (Nat.zero_mul B) f]
     rfl
   | A + 1, B, f => by
     have hSplitEq : (A + 1) * B = B + A * B := by rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
-    rw [finSum_cast_eq hSplitEq f, finSum_add_split B (A * B)]
-    conv => rhs; rw [finSum]
+    rw [qsum_cast_eq hSplitEq f, qsum_add_split B (A * B)]
+    conv => rhs; rw [qsum]
     dsimp only
     have hHead :
-        finSum B (fun i => f ⟨i.val, by omega⟩) =
-        finSum B (fun b => f (pairFin ⟨0, Nat.zero_lt_succ A⟩ b)) := by
-      apply finSum_congr
+        qsum B (fun i => f ⟨i.val, by omega⟩) =
+        qsum B (fun b => f (pairFin ⟨0, Nat.zero_lt_succ A⟩ b)) := by
+      apply qsum_congr
       intro b
       congr 1
       exact Fin.ext (by simp [pairFin])
     have hTail :
-        finSum (A * B) (fun j => f ⟨B + j.val, by omega⟩) =
-        finSum A (fun a => finSum B (fun b => f (pairFin ⟨a.val + 1, Nat.succ_lt_succ a.isLt⟩ b))) := by
-      rw [finSum_prod_eq A B (fun j => f ⟨B + j.val, by omega⟩)]
-      apply finSum_congr
+        qsum (A * B) (fun j => f ⟨B + j.val, by omega⟩) =
+        qsum A (fun a => qsum B (fun b => f (pairFin ⟨a.val + 1, Nat.succ_lt_succ a.isLt⟩ b))) := by
+      rw [qsum_prod_eq A B (fun j => f ⟨B + j.val, by omega⟩)]
+      apply qsum_congr
       intro a
-      apply finSum_congr
+      apply qsum_congr
       intro b
       congr 1
       apply Fin.ext
@@ -388,12 +388,12 @@ theorem finSum_prod_eq : ∀ (A B : Nat) (f : Fin (A * B) → Nat),
       omega
     rw [hHead, hTail]
 
-private theorem finSum_indicator_le_card : ∀ (n : Nat) (p : Fin n → Bool),
-    finSum n (fun i => if p i then 1 else 0) ≤ n
+private theorem qsum_indicator_le_card : ∀ (n : Nat) (p : Fin n → Bool),
+    qsum n (fun i => if p i then 1 else 0) ≤ n
   | 0, _ => Nat.le_refl 0
   | n + 1, p => by
-    simp only [finSum]
-    have ih := finSum_indicator_le_card n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+    simp only [qsum]
+    have ih := qsum_indicator_le_card n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
     cases p ⟨0, Nat.zero_lt_succ n⟩ <;> simp <;> omega
 
 private def collectTrueFin : (n : Nat) → (Fin n → Bool) → List (Fin n)
@@ -403,12 +403,12 @@ private def collectTrueFin : (n : Nat) → (Fin n → Bool) → List (Fin n)
                   (fun i => (⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩ : Fin (n + 1)))
     if p ⟨0, Nat.zero_lt_succ n⟩ then ⟨0, Nat.zero_lt_succ n⟩ :: rest else rest
 
-private theorem finSum_eq_collectTrueFin_length : ∀ (n : Nat) (p : Fin n → Bool),
-    finSum n (fun i => if p i then 1 else 0) = (collectTrueFin n p).length
+private theorem qsum_eq_collectTrueFin_length : ∀ (n : Nat) (p : Fin n → Bool),
+    qsum n (fun i => if p i then 1 else 0) = (collectTrueFin n p).length
   | 0, _ => rfl
   | n + 1, p => by
-    simp only [finSum, collectTrueFin]
-    have ih := finSum_eq_collectTrueFin_length n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+    simp only [qsum, collectTrueFin]
+    have ih := qsum_eq_collectTrueFin_length n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
     cases p ⟨0, Nat.zero_lt_succ n⟩ <;> simp [ih] <;> omega
 
 private theorem nodup_map_injective {α β : Type} {f : α → β}
@@ -459,14 +459,14 @@ private theorem mem_collectTrueFin_true : ∀ (n : Nat) (p : Fin n → Bool) (x 
       · exact hp0
       · exact mem_collectTrueFin_true n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩) z hzMem
 
-/-- **Full-Field `Tower128` (`GF(2^128)`) Schwartz-Zippel Sum Bound (`tower128_roots_finSum_le`)**:
+/-- **Full-Field `Tower128` (`GF(2^128)`) Schwartz-Zippel Sum Bound (`tower128_roots_qsum_le`)**:
     Over the entire finite field `Fin (2 ^ 128) ≃ Tower128`, any batch `deltas` of `≤ deg`
     wire deviations with `∃ d ∈ deltas, d ≠ towerZero 7` vanishes on **at most `deg`** challenges
     out of `2 ^ 128` (`0 Classical.choice`, `0` enumeration blowup!). -/
-theorem tower128_roots_finSum_le (deg : Nat) (deltas : List Tower128)
+theorem tower128_roots_qsum_le (deg : Nat) (deltas : List Tower128)
     (hLen : deltas.length ≤ deg)
     (hNonzero : ∃ d ∈ deltas, d ≠ towerZero 7) :
-    finSum (2 ^ 128)
+    qsum (2 ^ 128)
       (fun r => if batchDeviationPoly deltas (unpackTower 7 (BitVec.ofFin r)) == towerZero 7 then 1 else 0) ≤ deg := by
   let isRoot : Fin (2 ^ 128) → Bool :=
     fun r => batchDeviationPoly deltas (unpackTower 7 (BitVec.ofFin r)) == towerZero 7
@@ -478,10 +478,10 @@ theorem tower128_roots_finSum_le (deg : Nat) (deltas : List Tower128)
     exact Fin.ext (congrArg BitVec.toNat hPack)
   let rawRoots := collectTrueFin (2 ^ 128) isRoot
   let fieldRoots := rawRoots.map toField
-  have hCountEq : finSum (2 ^ 128) (fun r => if isRoot r then 1 else 0) = fieldRoots.length := by
-    rw [finSum_eq_collectTrueFin_length]
+  have hCountEq : qsum (2 ^ 128) (fun r => if isRoot r then 1 else 0) = fieldRoots.length := by
+    rw [qsum_eq_collectTrueFin_length]
     simp [fieldRoots, rawRoots]
-  change finSum (2 ^ 128) (fun r => if isRoot r then 1 else 0) ≤ deg
+  change qsum (2 ^ 128) (fun r => if isRoot r then 1 else 0) ≤ deg
   rw [hCountEq]
   by_cases hGt : deg + 1 ≤ fieldRoots.length
   · exfalso
@@ -505,15 +505,15 @@ theorem tower128_roots_finSum_le (deg : Nat) (deltas : List Tower128)
 
 /-- The root count is invariant under translating the challenge by a fixed `k`: a uniform coin
     share XORed with any value fixed beforehand is still a uniform challenge. -/
-theorem tower128_shifted_roots_finSum_le (deg : Nat) (deltas : List Tower128) (k : BitVec 128)
+theorem tower128_shifted_roots_qsum_le (deg : Nat) (deltas : List Tower128) (k : BitVec 128)
     (hLen : deltas.length ≤ deg)
     (hNonzero : ∃ d ∈ deltas, d ≠ towerZero 7) :
-    finSum (2 ^ 128)
+    qsum (2 ^ 128)
       (fun r => if batchDeviationPoly deltas (unpackTower 7 (BitVec.ofFin r ^^^ k)) == towerZero 7
                 then 1 else 0) ≤ deg := by
-  refine Nat.le_trans (Nat.le_of_eq ?_) (tower128_roots_finSum_le deg deltas hLen hNonzero)
-  refine Eq.trans ?_ (finSum_equiv_eq (finBitVecXorEquiv 128 k) _)
-  exact finSum_congr (fun _ => rfl)
+  refine Nat.le_trans (Nat.le_of_eq ?_) (tower128_roots_qsum_le deg deltas hLen hNonzero)
+  refine Eq.trans ?_ (qsum_equiv_eq (finBitVecXorEquiv 128 k) _)
+  exact qsum_congr (fun _ => rfl)
 
 /-! ## 2. Exact `FIPS 205` Wire Codec & Concrete 3-Round Interactive RSS/SPDZ Protocol -/
 
@@ -2159,32 +2159,32 @@ def sessionBadHit {AdvState : Type} (commitCoins : Bool)
     `badCount_1 ≤ rssPadSessionCard p.sigBytes * deg`, hence `badCount_1 * 2^128 ≤ deg * rssFullSessionCard`.
     For every value of the rest of the tape the deviation and the corrupt coin share are fixed, and
     the first honest coin share ranges over all of `GF(2^128)`. -/
-private theorem sessionBadHit_finSum_le {AdvState : Type}
+private theorem sessionBadHit_qsum_le {AdvState : Type}
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState)
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
     (advSt : AdvState) :
-    finSum (rssFullSessionCard p.sigBytes)
+    qsum (rssFullSessionCard p.sigBytes)
       (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) ≤
     rssPadSessionCard p.sigBytes * deg := by
   unfold rssFullSessionCard
-  rw [finSum_prod_eq (rssPadSessionCard p.sigBytes) (2 ^ 128)]
-  rw [← finSum_const (rssPadSessionCard p.sigBytes) deg]
-  apply finSum_le_finSum
+  rw [qsum_prod_eq (rssPadSessionCard p.sigBytes) (2 ^ 128)]
+  rw [← qsum_const (rssPadSessionCard p.sigBytes) deg]
+  apply qsum_le_qsum
   intro padIdx
   obtain ⟨tape0, hT0⟩ : ∃ t, decodeRssSessionTape p.sigBytes padIdx ⟨0, Nat.two_pow_pos 128⟩ = t :=
     ⟨_, rfl⟩
   have hInner :
-      finSum (2 ^ 128) (fun gIdx =>
+      qsum (2 ^ 128) (fun gIdx =>
         if sessionBadHit false p cIdx deg A cl advSt (pairFin padIdx gIdx) then 1 else 0) =
-      finSum (2 ^ 128) (fun gIdx =>
+      qsum (2 ^ 128) (fun gIdx =>
         if (match extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape0 with
             | none => false
             | some (deltas, cCoin) =>
               batchDeviationPoly deltas
                 (unpackTower 7 (BitVec.ofFin gIdx ^^^ (tape0.coinB ^^^ cCoin))) == towerZero 7)
         then 1 else 0) := by
-    apply finSum_congr
+    apply qsum_congr
     intro gIdx
     have hB : sessionBadHit false p cIdx deg A cl advSt (pairFin padIdx gIdx) =
         (match extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape0 with
@@ -2209,15 +2209,15 @@ private theorem sessionBadHit_finSum_le {AdvState : Type}
   cases hExt : extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape0 with
   | none =>
     simp only [Bool.false_eq_true, ↓reduceIte]
-    have h0 : finSum (2 ^ 128) (fun _ => 0) = 0 := by rw [finSum_const, Nat.mul_zero]
+    have h0 : qsum (2 ^ 128) (fun _ => 0) = 0 := by rw [qsum_const, Nat.mul_zero]
     rw [h0]
     exact Nat.zero_le deg
   | some pr =>
     rcases pr with ⟨deltas, cCoin⟩
     obtain ⟨hLen, hNz⟩ := extractSessionNonzeroDeltas_props false p cIdx deg A cl advSt tape0 hExt
-    refine Nat.le_trans (Nat.le_of_eq ?_) (tower128_roots_finSum_le deg deltas hLen hNz)
-    refine Eq.trans ?_ (finSum_equiv_eq (finBitVecXorEquiv 128 (tape0.coinB ^^^ cCoin)) _)
-    exact finSum_congr (fun _ => rfl)
+    refine Nat.le_trans (Nat.le_of_eq ?_) (tower128_roots_qsum_le deg deltas hLen hNz)
+    refine Eq.trans ?_ (qsum_equiv_eq (finBitVecXorEquiv 128 (tape0.coinB ^^^ cCoin)) _)
+    exact qsum_congr (fun _ => rfl)
 
 /-- Per-session adaptive tape bijection conditioned on `(cl, advSt)`:
     uses `honestSessionShifts` on the scheduled `req` when `cl` and `advSt` run Round 2. -/
@@ -2572,12 +2572,12 @@ def multiSessionBadHit {AdvState : Type} (commitCoins : Bool)
     sessionBadHit commitCoins p cIdx deg A cl advSt cur ||
       multiSessionBadHit commitCoins p cIdx deg A s cl1 advSt1 rest
 
-private theorem finSum_le_add_finSum : ∀ (n : Nat) (f g h : Fin n → Nat),
-    (∀ i, f i ≤ g i + h i) → finSum n f ≤ finSum n g + finSum n h
+private theorem qsum_le_add_qsum : ∀ (n : Nat) (f g h : Fin n → Nat),
+    (∀ i, f i ≤ g i + h i) → qsum n f ≤ qsum n g + qsum n h
   | 0, _, _, _, _ => Nat.le_refl 0
   | n + 1, f, g, h, hLe => by
-    simp only [finSum]
-    have ih := finSum_le_add_finSum n
+    simp only [qsum]
+    have ih := qsum_le_add_qsum n
       (fun i => f ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
       (fun i => g ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
       (fun i => h ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
@@ -2585,10 +2585,10 @@ private theorem finSum_le_add_finSum : ∀ (n : Nat) (f g h : Fin n → Nat),
     have h0 := hLe ⟨0, Nat.zero_lt_succ n⟩
     omega
 
-private theorem finSum_mul_right_local : ∀ (n c : Nat) (f : Fin n → Nat),
-    finSum n (fun i => f i * c) = finSum n f * c
-  | 0, _, _ => by simp [finSum]
-  | n + 1, c, f => by simp only [finSum, finSum_mul_right_local n c, Nat.add_mul]
+private theorem qsum_mul_right_local : ∀ (n c : Nat) (f : Fin n → Nat),
+    qsum n (fun i => f i * c) = qsum n f * c
+  | 0, _, _ => by simp [qsum]
+  | n + 1, c, f => by simp only [qsum, qsum_mul_right_local n c, Nat.add_mul]
 
 private theorem multiSessionBadHit_pairFin {AdvState : Type} (commitCoins : Bool)
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
@@ -2604,38 +2604,38 @@ private theorem multiSessionBadHit_pairFin {AdvState : Type} (commitCoins : Bool
   simp only [multiSessionBadHit, splitFinLeft_pairFin, splitFinRight_pairFin]
 
 /-- **Multi-Session Schwartz-Zippel Root-Hit Bound, commitment-decoy game
-    (`multiSessionBadHit_finSum_bound`)**:
+    (`multiSessionBadHit_qsum_bound`)**:
     Across any `Q_s` adaptively scheduled rushing sessions of `rssSlhCoinProtocol false` (honest
     Round-1 commitments carry the zero coin), the total number of random tapes `ω`
     hitting `multiSessionBadHit false = true` satisfies:
     `badCount * (2 ^ 128) ≤ (Q_s * deg) * rssMultiSessionCard p.sigBytes Q_s`! -/
-theorem multiSessionBadHit_finSum_bound {AdvState : Type}
+theorem multiSessionBadHit_qsum_bound {AdvState : Type}
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState) :
     ∀ (s : Nat) (cl : RealClusterState SlhPublicKey RssPartyKeyShare) (advSt : AdvState),
-      finSum (rssMultiSessionCard p.sigBytes s)
+      qsum (rssMultiSessionCard p.sigBytes s)
         (fun ω => if multiSessionBadHit false p cIdx deg A s cl advSt ω then 1 else 0) * (2 ^ 128) ≤
       (s * deg) * rssMultiSessionCard p.sigBytes s
-  | 0, _, _ => by simp [multiSessionBadHit, rssMultiSessionCard, finSum]
+  | 0, _, _ => by simp [multiSessionBadHit, rssMultiSessionCard, qsum]
   | s + 1, cl, advSt => by
     let F := rssFullSessionCard p.sigBytes
     let M := rssMultiSessionCard p.sigBytes s
-    change finSum (F * M) (fun ω => if multiSessionBadHit false p cIdx deg A (s + 1) cl advSt ω then 1 else 0) * (2 ^ 128) ≤
+    change qsum (F * M) (fun ω => if multiSessionBadHit false p cIdx deg A (s + 1) cl advSt ω then 1 else 0) * (2 ^ 128) ≤
       ((s + 1) * deg) * (F * M)
-    rw [finSum_prod_eq F M]
+    rw [qsum_prod_eq F M]
     have hSplitOr :
-        finSum F (fun cur => finSum M (fun rest =>
+        qsum F (fun cur => qsum M (fun rest =>
           if multiSessionBadHit false p cIdx deg A (s + 1) cl advSt (pairFin cur rest) then 1 else 0)) ≤
-        finSum F (fun cur => finSum M (fun _ =>
+        qsum F (fun cur => qsum M (fun _ =>
           if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0)) +
-        finSum F (fun cur => finSum M (fun rest =>
+        qsum F (fun cur => qsum M (fun rest =>
           let (cl1, advSt1, _) :=
             execRealSession (rssSlhCoinProtocol false p cIdx deg) A cl advSt
               (decodeSingleFullTape p.sigBytes cur)
           if multiSessionBadHit false p cIdx deg A s cl1 advSt1 rest then 1 else 0)) := by
-      apply finSum_le_add_finSum
+      apply qsum_le_add_qsum
       intro cur
-      apply finSum_le_add_finSum
+      apply qsum_le_add_qsum
       intro rest
       rw [multiSessionBadHit_pairFin false p cIdx deg A s cl advSt cur rest]
       let b1 := sessionBadHit false p cIdx deg A cl advSt cur
@@ -2648,21 +2648,21 @@ theorem multiSessionBadHit_finSum_bound {AdvState : Type}
     have hMulSplit := Nat.mul_le_mul_right (2 ^ 128) hSplitOr
     rw [Nat.add_mul] at hMulSplit
     have hTerm1 :
-        finSum F (fun cur => finSum M (fun _ =>
+        qsum F (fun cur => qsum M (fun _ =>
           if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0)) * (2 ^ 128) ≤
         deg * (F * M) := by
       have hConstM :
-          finSum F (fun cur => finSum M (fun _ =>
+          qsum F (fun cur => qsum M (fun _ =>
             if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0)) =
-          finSum F (fun cur => (if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * M) := by
-        apply finSum_congr
+          qsum F (fun cur => (if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * M) := by
+        apply qsum_congr
         intro cur
-        rw [finSum_const, Nat.mul_comm]
-      rw [hConstM, finSum_mul_right_local]
-      have hB1 := sessionBadHit_finSum_le p cIdx deg A cl advSt
+        rw [qsum_const, Nat.mul_comm]
+      rw [hConstM, qsum_mul_right_local]
+      have hB1 := sessionBadHit_qsum_le p cIdx deg A cl advSt
       have hScaled := Nat.mul_le_mul_right (M * (2 ^ 128)) hB1
-      have hL : finSum F (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * M * (2 ^ 128) =
-          finSum F (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * (M * (2 ^ 128)) :=
+      have hL : qsum F (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * M * (2 ^ 128) =
+          qsum F (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * (M * (2 ^ 128)) :=
         Nat.mul_assoc _ _ _
       have hR : rssPadSessionCard p.sigBytes * deg * (M * (2 ^ 128)) = deg * (F * M) := by
         dsimp only [F, rssFullSessionCard]
@@ -2670,24 +2670,24 @@ theorem multiSessionBadHit_finSum_bound {AdvState : Type}
       rw [hL, ← hR]
       exact hScaled
     have hTerm2 :
-        finSum F (fun cur => finSum M (fun rest =>
+        qsum F (fun cur => qsum M (fun rest =>
           let (cl1, advSt1, _) :=
             execRealSession (rssSlhCoinProtocol false p cIdx deg) A cl advSt
               (decodeSingleFullTape p.sigBytes cur)
           if multiSessionBadHit false p cIdx deg A s cl1 advSt1 rest then 1 else 0)) * (2 ^ 128) ≤
         (s * deg) * (F * M) := by
-      rw [← finSum_mul_right_local]
-      have hCap : finSum F (fun _ => (s * deg) * M) = F * ((s * deg) * M) := finSum_const F _
+      rw [← qsum_mul_right_local]
+      have hCap : qsum F (fun _ => (s * deg) * M) = F * ((s * deg) * M) := qsum_const F _
       have hLeCap :
-          finSum F (fun cur => finSum M (fun rest =>
+          qsum F (fun cur => qsum M (fun rest =>
             let (cl1, advSt1, _) :=
               execRealSession (rssSlhCoinProtocol false p cIdx deg) A cl advSt
                 (decodeSingleFullTape p.sigBytes cur)
             if multiSessionBadHit false p cIdx deg A s cl1 advSt1 rest then 1 else 0) * (2 ^ 128)) ≤
-          finSum F (fun _ => (s * deg) * M) := by
-        apply finSum_le_finSum
+          qsum F (fun _ => (s * deg) * M) := by
+        apply qsum_le_qsum
         intro cur
-        exact multiSessionBadHit_finSum_bound p cIdx deg A s _ _
+        exact multiSessionBadHit_qsum_bound p cIdx deg A s _ _
       have hR : F * ((s * deg) * M) = (s * deg) * (F * M) := by ac_rfl
       exact Nat.le_trans hLeCap (hCap ▸ hR ▸ Nat.le_refl _)
     have hSum := Nat.add_le_add hTerm1 hTerm2
@@ -2857,9 +2857,9 @@ theorem rss_slh_real_ideal_view_indistinguishable {AdvState OuterView : Type}
     let idealSimView : Fin card → OuterView := fun ω =>
       ctx.postProcess (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_cuts
         (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2
-    let badReal := finSum card (fun ω =>
+    let badReal := qsum card (fun ω =>
       if multiSessionBadHit true p cIdx deg A Q_cuts cl advSt ω then 1 else 0)
-    let badDecoy := finSum card (fun ω =>
+    let badDecoy := qsum card (fun ω =>
       if multiSessionBadHit false p cIdx deg A Q_cuts cl advSt ω then 1 else 0)
     let advCoinHide : Nat × Nat := (natAbsDiff badReal badDecoy, card)
     let advPrf := rationalAcceptDiff prfCard realPrfView card hybridUniformView D
@@ -2880,7 +2880,7 @@ theorem rss_slh_real_ideal_view_indistinguishable {AdvState OuterView : Type}
       hSeedWf hPrfWf pkSeed A Q_cuts cl icl advSt hMatch hPkKey ω hBadF)
   have hFund : ratLe (rationalAcceptDiff card hybridUniformView card idealSimView D) (badReal, card) :=
     (bad_event_fundamental_lemma card hCardPos hybridUniformView idealSimView bij bad hAgree D).2.2
-  have hDecoyCount := multiSessionBadHit_finSum_bound p cIdx deg A Q_cuts cl advSt
+  have hDecoyCount := multiSessionBadHit_qsum_bound p cIdx deg A Q_cuts cl advSt
   have hDecoyLe : ratLe (badDecoy, card) (Q_cuts * deg, 2 ^ 128) :=
     ⟨hCardPos, Nat.two_pow_pos 128, hDecoyCount⟩
   have hRealLe : ratLe (badReal, card) (ratAdd (Q_cuts * deg, 2 ^ 128) advCoinHide) :=
@@ -3006,8 +3006,8 @@ theorem spdz_shamir_tower128_masked_view_stat_dist_zero
     rw [hDecEnc]
     exact (hSimBij.2.2 (decodeTower128PadPoly t idx)).symm
   have hFund := bad_event_fundamental_lemma N hNPos realView simView bijFin (fun _ => false) hAgree D
-  have hBad0 : finSum N (fun _ : Fin N => if (false : Bool) = true then 1 else 0) = 0 := by
-    have h := finSum_const N 0; rw [Nat.mul_zero] at h; exact h
+  have hBad0 : qsum N (fun _ : Fin N => if (false : Bool) = true then 1 else 0) = 0 := by
+    have h := qsum_const N 0; rw [Nat.mul_zero] at h; exact h
   rw [hBad0] at hFund
   have hZeroDiff : natAbsDiff (distAcceptCount N realView D) (distAcceptCount N simView D) = 0 :=
     Nat.eq_zero_of_le_zero hFund.1
@@ -4311,11 +4311,11 @@ theorem rss_slh_uc_forgery_to_hash_game {AdvState : Type}
       bad ω = true ∨
       (realView ω = idealView (bij.toFun ω) ∧
        Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView (bij.toFun ω))))) ∧
-    finSum card (fun ω => if badDecoy ω then 1 else 0) * (2 ^ 128) ≤ (Q_s * deg) * card ∧
+    qsum card (fun ω => if badDecoy ω then 1 else 0) * (2 ^ 128) ≤ (Q_s * deg) * card ∧
     distAcceptCount card realView win * (2 ^ 128) ≤
       distAcceptCount card idealView win * (2 ^ 128) + (Q_s * deg) * card +
-        natAbsDiff (finSum card (fun ω => if bad ω then 1 else 0))
-                   (finSum card (fun ω => if badDecoy ω then 1 else 0)) * (2 ^ 128) ∧
+        natAbsDiff (qsum card (fun ω => if bad ω then 1 else 0))
+                   (qsum card (fun ω => if badDecoy ω then 1 else 0)) * (2 ^ 128) ∧
     (∀ ω : Fin card, win (idealView ω) = true →
       Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView ω))) ∧
     (∀ (ω : Fin card) (O' : SessionScheduleReq → ByteArray),
@@ -4336,9 +4336,9 @@ theorem rss_slh_uc_forgery_to_hash_game {AdvState : Type}
     p hWf cIdx Q_s deg hSeedWf hPrfWf pkSeed A cl icl advSt hMatch hPkKey ⟨id⟩ win
     1 Nat.one_pos (fun _ _ => defaultRssSessionTape p.sigBytes)
   have hUc : ratLe (rationalAcceptDiff card realView card idealView win)
-      (finSum card (fun ω => if bad ω then 1 else 0), card) :=
+      (qsum card (fun ω => if bad ω then 1 else 0), card) :=
     hInd.1
-  have hDecoy := multiSessionBadHit_finSum_bound p cIdx deg A Q_s cl advSt
+  have hDecoy := multiSessionBadHit_qsum_bound p cIdx deg A Q_s cl advSt
   refine ⟨?_, hDecoy,
     count_transfer_with_coin_gap (rssMultiSessionCard_pos p.sigBytes Q_s)
       (forgery_count_transfer card realView idealView win _ hUc) hDecoy, hIdealWit, ?_⟩
@@ -4395,8 +4395,8 @@ theorem rss_slh_fresh_enrollment_euf_cma_bound {AdvState : Type}
     distAcceptCount card realView win * (2 ^ 128) ≤
       (Q_s * deg) * card +
         natAbsDiff
-          (finSum card (fun ω => if multiSessionBadHit true p cIdx deg A Q_s cl advSt ω then 1 else 0))
-          (finSum card (fun ω => if multiSessionBadHit false p cIdx deg A Q_s cl advSt ω then 1 else 0)) *
+          (qsum card (fun ω => if multiSessionBadHit true p cIdx deg A Q_s cl advSt ω then 1 else 0))
+          (qsum card (fun ω => if multiSessionBadHit false p cIdx deg A Q_s cl advSt ω then 1 else 0)) *
           (2 ^ 128) := by
   intro card sk cl icl win realView idealView hNoBreak
   have hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl :=
@@ -4413,9 +4413,9 @@ theorem rss_slh_fresh_enrollment_euf_cma_bound {AdvState : Type}
   have hT := hMain.2.2.1
   have hZero : distAcceptCount card idealView win = 0 := by
     unfold distAcceptCount
-    have hC : finSum card (fun ω => if win (idealView ω) then 1 else 0) = finSum card (fun _ => 0) :=
-      finSum_congr (fun ω => by rw [hNever ω]; rfl)
-    rw [hC, finSum_const, Nat.mul_zero]
+    have hC : qsum card (fun ω => if win (idealView ω) then 1 else 0) = qsum card (fun _ => 0) :=
+      qsum_congr (fun ω => by rw [hNever ω]; rfl)
+    rw [hC, qsum_const, Nat.mul_zero]
   rw [hZero, Nat.zero_mul, Nat.zero_add] at hT
   exact hT
 
@@ -4863,10 +4863,10 @@ theorem threshold_slh_output_perfect_quorum_privacy
       exact ⟨congrArg packWireBytes h1, congrArg packWireBytes h2⟩
     have hCnt1 : distAcceptCount N wire₁ D = distAcceptCount N single D := by
       unfold distAcceptCount
-      exact finSum_congr (fun i => by rw [(hPt i).1])
+      exact qsum_congr (fun i => by rw [(hPt i).1])
     have hCnt2 : distAcceptCount N wire₂ D = distAcceptCount N single D := by
       unfold distAcceptCount
-      exact finSum_congr (fun i => by rw [(hPt i).2])
+      exact qsum_congr (fun i => by rw [(hPt i).2])
     have hAbs0 : ∀ a : Nat, natAbsDiff a a = 0 := fun a => by unfold natAbsDiff; simp
     refine ⟨hPt, ?_, ?_, ?_⟩
     · rw [hCnt1]; exact hAbs0 _
@@ -5346,7 +5346,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
         rw [hH, hb1]
         exact beq_self_eq_true _
       rw [hD]; rfl
-    rw [finSum_congr hEach, finSum_const, Nat.mul_one]
+    rw [qsum_congr hEach, qsum_const, Nat.mul_one]
   have hMut0None : distAcceptCount card mutView₀ D_leakBit ≤ card * 0 := by
     unfold distAcceptCount
     have hEach : ∀ ω : Fin card, (if D_leakBit (mutView₀ ω) then 1 else 0) = 0 := by
@@ -5370,7 +5370,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
         dsimp only at hH ⊢
         rw [hH, hb0, hXorNe]
       rw [hD]; rfl
-    rw [finSum_congr hEach, finSum_const, Nat.mul_zero]
+    rw [qsum_congr hEach, qsum_const, Nat.mul_zero]
     exact Nat.le_refl 0
   have hLeak1 : ratLe (1, 1) (rationalAcceptDiff card mutView₁ card mutView₀ D_leakBit) :=
     ratLe_lower_bound_of_full_vs_bounded (rssMultiSessionCard_pos p.sigBytes 1) Nat.zero_lt_one
@@ -5392,7 +5392,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
         | nil => exact False.elim (hNe hL)
         | cons _ _ => rfl
       rw [hD]; rfl
-    rw [finSum_congr hEach, finSum_const, Nat.mul_one]
+    rw [qsum_congr hEach, qsum_const, Nat.mul_one]
   have hIdealR3WhenNonzero : ∀ tape : RssSlhSessionTape p.sigBytes,
       (batchDeviationPoly [towerOne 7]
         (unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0))) ==
@@ -5438,9 +5438,9 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
     exact Nat.mul_one _
   have hIdealBound : distAcceptCount card idealView D_hasR3 ≤ rssPadSessionCard p.sigBytes * 1 := by
     unfold distAcceptCount
-    rw [finSum_cast_eq hCardEq, finSum_prod_eq]
+    rw [qsum_cast_eq hCardEq, qsum_prod_eq]
     have hInnerLe : ∀ padIdx : Fin (rssPadSessionCard p.sigBytes),
-        finSum (2 ^ 128) (fun gIdx =>
+        qsum (2 ^ 128) (fun gIdx =>
           if D_hasR3 (idealView ⟨(pairFin padIdx gIdx).val,
             Nat.lt_of_lt_of_eq (pairFin padIdx gIdx).isLt hCardEq.symm⟩) then 1 else 0) ≤ 1 := by
       intro padIdx
@@ -5485,11 +5485,11 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
           rw [hDF]
           exact Nat.le_refl 0
         · cases D_hasR3 _ <;> decide
-      exact Nat.le_trans (finSum_le_finSum hPtLe)
-        (tower128_shifted_roots_finSum_le 1 [towerOne 7] _ (Nat.le_refl 1) ⟨towerOne 7, .head _, by decide⟩)
-    calc finSum (rssPadSessionCard p.sigBytes) (fun padIdx => _)
-        ≤ finSum (rssPadSessionCard p.sigBytes) (fun _ => 1) := finSum_le_finSum hInnerLe
-      _ = rssPadSessionCard p.sigBytes * 1 := finSum_const _ 1
+      exact Nat.le_trans (qsum_le_qsum hPtLe)
+        (tower128_shifted_roots_qsum_le 1 [towerOne 7] _ (Nat.le_refl 1) ⟨towerOne 7, .head _, by decide⟩)
+    calc qsum (rssPadSessionCard p.sigBytes) (fun padIdx => _)
+        ≤ qsum (rssPadSessionCard p.sigBytes) (fun _ => 1) := qsum_le_qsum hInnerLe
+      _ = rssPadSessionCard p.sigBytes * 1 := qsum_const _ 1
   have hBreakSim : ratLe (2 ^ 128 - 1, 2 ^ 128) (rationalAcceptDiff card mutView₀ card idealView D_hasR3) :=
     ratLe_lower_bound_of_full_vs_bounded (rssPadSessionCard_pos p.sigBytes) (Nat.two_pow_pos 128)
       hCardEq (Nat.one_le_two_pow) mutView₀ idealView D_hasR3 hMut0R3All hIdealBound
@@ -5505,11 +5505,11 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       multiSessionBadHit true p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω =
       multiSessionBadHit false p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω := fun _ => rfl
   have hCountSame :
-      finSum card (fun ω => if multiSessionBadHit true p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) =
-      finSum card (fun ω => if multiSessionBadHit false p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) :=
-    finSum_congr (fun ω => by rw [hBadSame ω])
+      qsum card (fun ω => if multiSessionBadHit true p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) =
+      qsum card (fun ω => if multiSessionBadHit false p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) :=
+    qsum_congr (fun ω => by rw [hBadSame ω])
   have hRealCount :
-      ratLe (finSum card (fun ω =>
+      ratLe (qsum card (fun ω =>
         if multiSessionBadHit true p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0), card)
         (1 * 1, 2 ^ 128) := by
     rw [hCountSame]
@@ -5700,9 +5700,9 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
     rw [hPrfSame] at hEq
     unfold distAcceptCount
     calc
-      _ = finSum card (fun ω => if reusedMaskWireDistinguisher (idealSimView (bij.toFun ω)) then 1 else 0) :=
-        finSum_congr (fun ω => congrArg (fun tr => if reusedMaskWireDistinguisher tr then 1 else 0) (hEq ω))
-      _ = _ := finSum_equiv_eq bij (fun ω => if reusedMaskWireDistinguisher (idealSimView ω) then 1 else 0)
+      _ = qsum card (fun ω => if reusedMaskWireDistinguisher (idealSimView (bij.toFun ω)) then 1 else 0) :=
+        qsum_congr (fun ω => congrArg (fun tr => if reusedMaskWireDistinguisher tr then 1 else 0) (hEq ω))
+      _ = _ := qsum_equiv_eq bij (fun ω => if reusedMaskWireDistinguisher (idealSimView ω) then 1 else 0)
   have hTwoSessionWords : ∀ (prfSh : RssByteShares) (hPWf : prfSh.WellFormed)
       (hSame : reconstructRssBytes prfSh = reconstructRssBytes prfSh_zero)
       (tapes : Nat → RssSlhSessionTape p.sigBytes),
@@ -5799,7 +5799,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       dsimp only [reqs]
       simp only [Nat.reduceBEq, Bool.false_eq_true, ↓reduceIte, hLeakW0, hLeakW1]
       decide
-    rw [finSum_congr hEach, finSum_const, Nat.mul_one]
+    rw [qsum_congr hEach, qsum_const, Nat.mul_one]
   have hReusedZeroNone : distAcceptCount card reusedZeroView reusedMaskWireDistinguisher ≤ card * 0 := by
     unfold distAcceptCount
     have hEach : ∀ ω : Fin card, (if reusedMaskWireDistinguisher (reusedZeroView ω) then 1 else 0) = 0 := by
@@ -5813,7 +5813,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       dsimp only [reqs]
       simp only [Nat.reduceBEq, Bool.false_eq_true, ↓reduceIte, hZeroW0, hZeroW1]
       decide
-    rw [finSum_congr hEach, finSum_const, Nat.mul_zero]
+    rw [qsum_congr hEach, qsum_const, Nat.mul_zero]
     exact Nat.le_refl 0
   have hLeak1 : ratLe (1, 1) (rationalAcceptDiff card reusedLeakView card reusedZeroView reusedMaskWireDistinguisher) :=
     ratLe_lower_bound_of_full_vs_bounded (rssMultiSessionCard_pos p.sigBytes 2) Nat.zero_lt_one
@@ -5837,13 +5837,13 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
     dsimp only [P_two, B4, rssFullSessionCard, rssPadSessionCard]
     simp only [Nat.mul_left_comm, Nat.mul_comm]
   have hXorHitSum : ∀ (cA0 : BitVec 64),
-      finSum (2 ^ 64) (fun cA1 => if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) = 1 := by
+      qsum (2 ^ 64) (fun cA1 => if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) = 1 := by
     intro cA0
-    rw [← finSum_equiv_eq (finBitVecXorEquiv 64 cA0)]
+    rw [← qsum_equiv_eq (finBitVecXorEquiv 64 cA0)]
     have hCongr :
-        finSum (2 ^ 64) (fun z => if (cA0 ^^^ BitVec.ofFin ((finBitVecXorEquiv 64 cA0).toFun z)) == 1#64 then 1 else 0) =
-        finSum (2 ^ 64) (fun z => if z = (1#64 : BitVec 64).toFin then 1 else 0) := by
-      apply finSum_congr
+        qsum (2 ^ 64) (fun z => if (cA0 ^^^ BitVec.ofFin ((finBitVecXorEquiv 64 cA0).toFun z)) == 1#64 then 1 else 0) =
+        qsum (2 ^ 64) (fun z => if z = (1#64 : BitVec 64).toFin then 1 else 0) := by
+      apply qsum_congr
       intro z
       have hOfFin : BitVec.ofFin ((finBitVecXorEquiv 64 cA0).toFun z) = BitVec.ofFin z ^^^ cA0 := rfl
       rw [hOfFin]
@@ -5858,12 +5858,12 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
           exact hz (Fin.ext (by simpa using congrArg BitVec.toNat hEq))
         rw [hNeBv, ite_eq_right hz]
         rfl
-    rw [hCongr, finSum_eq_indicator]
+    rw [hCongr, qsum_eq_indicator]
   have hFreshZeroCount : distAcceptCount card freshLeakView reusedMaskWireDistinguisher ≤ P_two * 1 := by
     unfold distAcceptCount
-    rw [finSum_cast_eq hF1, finSum_prod_eq]
+    rw [qsum_cast_eq hF1, qsum_prod_eq]
     have hEach0 : ∀ ω0 : Fin (rssFullSessionCard p.sigBytes),
-        finSum (rssFullSessionCard p.sigBytes) (fun ω1 =>
+        qsum (rssFullSessionCard p.sigBytes) (fun ω1 =>
           if reusedMaskWireDistinguisher (freshLeakView ⟨(pairFin ω0 ω1).val,
             Nat.lt_of_lt_of_eq (pairFin ω0 ω1).isLt hF1.symm⟩)
           then 1 else 0) =
@@ -5905,11 +5905,11 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
               Nat.mod_eq_of_lt ω1.isLt]
         dsimp only [freshLeakView]
         rw [hEq, hT0, hT1]
-      rw [finSum_congr (fun ω1 => by rw [hStep1 ω1])]
+      rw [qsum_congr (fun ω1 => by rw [hStep1 ω1])]
       unfold rssFullSessionCard
-      rw [finSum_prod_eq (rssPadSessionCard p.sigBytes) (2 ^ 128)]
+      rw [qsum_prod_eq (rssPadSessionCard p.sigBytes) (2 ^ 128)]
       have hCollapseG : ∀ pad1 : Fin (rssPadSessionCard p.sigBytes),
-          finSum (2 ^ 128) (fun g1 =>
+          qsum (2 ^ 128) (fun g1 =>
             if (cA0 ^^^ (decodeSingleFullTape p.sigBytes (pairFin pad1 g1)).chiMaskA) == 1#64 then 1 else 0) =
           (if (cA0 ^^^ (decodeRssSessionTape p.sigBytes pad1 ⟨0, Nat.two_pow_pos 128⟩).chiMaskA) == 1#64
            then 1 else 0) * (2 ^ 128) := by
@@ -5921,18 +5921,18 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
           unfold decodeSingleFullTape
           rw [splitFinLeft_pairFin, splitFinRight_pairFin]
           rfl
-        rw [finSum_congr (fun g1 => by rw [hC g1]), finSum_const, Nat.mul_comm]
-      rw [finSum_congr hCollapseG]
+        rw [qsum_congr (fun g1 => by rw [hC g1]), qsum_const, Nat.mul_comm]
+      rw [qsum_congr hCollapseG]
       unfold rssPadSessionCard
-      rw [finSum_prod_eq (2 ^ 128),
-          finSum_congr (fun kB1 => finSum_prod_eq (2 ^ 192) _ _),
-          finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_prod_eq (2 ^ 64) _ _)),
-          finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_congr (fun nA1 =>
-            finSum_prod_eq (2 ^ 64) _ _))),
-          finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_congr (fun nA1 =>
-            finSum_congr (fun nB1 => finSum_prod_eq (2 ^ 64) B4 _))))]
+      rw [qsum_prod_eq (2 ^ 128),
+          qsum_congr (fun kB1 => qsum_prod_eq (2 ^ 192) _ _),
+          qsum_congr (fun kB1 => qsum_congr (fun sd1 => qsum_prod_eq (2 ^ 64) _ _)),
+          qsum_congr (fun kB1 => qsum_congr (fun sd1 => qsum_congr (fun nA1 =>
+            qsum_prod_eq (2 ^ 64) _ _))),
+          qsum_congr (fun kB1 => qsum_congr (fun sd1 => qsum_congr (fun nA1 =>
+            qsum_congr (fun nB1 => qsum_prod_eq (2 ^ 64) B4 _))))]
       have hInnerCA : ∀ (kB1 : Fin (2 ^ 128)) (sd1 : Fin (2 ^ 192)) (nA1 nB1 : Fin (2 ^ 64)),
-          finSum (2 ^ 64) (fun cA1 => finSum B4 (fun r3 =>
+          qsum (2 ^ 64) (fun cA1 => qsum B4 (fun r3 =>
             (if (cA0 ^^^ (decodeRssSessionTape p.sigBytes
               (pairFin kB1 (pairFin sd1 (pairFin nA1 (pairFin nB1 (pairFin cA1 r3)))))
                 ⟨0, Nat.two_pow_pos 128⟩).chiMaskA) == 1#64
@@ -5950,33 +5950,33 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
           rw [splitFinRight_pairFin, splitFinRight_pairFin, splitFinRight_pairFin,
               splitFinRight_pairFin, splitFinLeft_pairFin]
         have hR3Const : ∀ cA1 : Fin (2 ^ 64),
-            finSum B4 (fun r3 =>
+            qsum B4 (fun r3 =>
               (if (cA0 ^^^ (decodeRssSessionTape p.sigBytes
                 (pairFin kB1 (pairFin sd1 (pairFin nA1 (pairFin nB1 (pairFin cA1 r3)))))
                   ⟨0, Nat.two_pow_pos 128⟩).chiMaskA) == 1#64
                then 1 else 0) * (2 ^ 128)) =
             (if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) * (B4 * (2 ^ 128)) := by
           intro cA1
-          rw [finSum_congr (fun r3 => by rw [hCA1 cA1 r3]), finSum_const]
+          rw [qsum_congr (fun r3 => by rw [hCA1 cA1 r3]), qsum_const]
           simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
-        rw [finSum_congr hR3Const]
+        rw [qsum_congr hR3Const]
         have hFactor :
-            finSum (2 ^ 64) (fun cA1 => (if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) * (B4 * (2 ^ 128))) =
-            finSum (2 ^ 64) (fun cA1 => if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) * (B4 * (2 ^ 128)) := by
-          have hGen : ∀ (n m : Nat) (f : Fin n → Nat), finSum n (fun i => f i * m) = finSum n f * m := by
+            qsum (2 ^ 64) (fun cA1 => (if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) * (B4 * (2 ^ 128))) =
+            qsum (2 ^ 64) (fun cA1 => if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) * (B4 * (2 ^ 128)) := by
+          have hGen : ∀ (n m : Nat) (f : Fin n → Nat), qsum n (fun i => f i * m) = qsum n f * m := by
             intro n; induction n with
-            | zero => intros; simp [finSum]
-            | succ n ih => intro m f; simp only [finSum, ih m, Nat.add_mul]
+            | zero => intros; simp [qsum]
+            | succ n ih => intro m f; simp only [qsum, ih m, Nat.add_mul]
           exact hGen _ _ _
         rw [hFactor, hXorHitSum cA0, Nat.one_mul]
-      rw [finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_congr (fun nA1 =>
-            finSum_congr (fun nB1 => hInnerCA kB1 sd1 nA1 nB1)))),
-          finSum_congr (fun _ => finSum_congr (fun _ => finSum_congr (fun _ =>
-            finSum_const (2 ^ 64) (B4 * (2 ^ 128))))),
-          finSum_congr (fun _ => finSum_congr (fun _ => finSum_const (2 ^ 64) _)),
-          finSum_congr (fun _ => finSum_const (2 ^ 192) _),
-          finSum_const]
-    rw [finSum_congr hEach0, finSum_const, Nat.mul_one]
+      rw [qsum_congr (fun kB1 => qsum_congr (fun sd1 => qsum_congr (fun nA1 =>
+            qsum_congr (fun nB1 => hInnerCA kB1 sd1 nA1 nB1)))),
+          qsum_congr (fun _ => qsum_congr (fun _ => qsum_congr (fun _ =>
+            qsum_const (2 ^ 64) (B4 * (2 ^ 128))))),
+          qsum_congr (fun _ => qsum_congr (fun _ => qsum_const (2 ^ 64) _)),
+          qsum_congr (fun _ => qsum_const (2 ^ 192) _),
+          qsum_const]
+    rw [qsum_congr hEach0, qsum_const, Nat.mul_one]
     exact Nat.le_refl _
   have hIdealCountLe : distAcceptCount card idealSimView reusedMaskWireDistinguisher ≤ P_two * 1 := by
     rw [← hCounts]; exact hFreshZeroCount
@@ -6275,10 +6275,10 @@ def hornerTagScheme : ConsistencyTagScheme (List Tower128) (2 ^ 128) where
 theorem rss_active_tag_forgery_count_le {width : Nat} (deg : Nat)
     (adv : ActiveSlhAdversary width (2 ^ 128) (List Tower128))
     (hDeg : ∀ h, (adv.deviation h).length ≤ deg) :
-    finSum (2 ^ width) (fun h => finSum (2 ^ 128) (fun c =>
+    qsum (2 ^ width) (fun h => qsum (2 ^ 128) (fun c =>
       if activeTagForgery hornerTagScheme adv h c then 1 else 0)) ≤ 2 ^ width * deg := by
-  rw [← finSum_const (2 ^ width) deg]
-  apply finSum_le_finSum
+  rw [← qsum_const (2 ^ width) deg]
+  apply qsum_le_qsum
   intro h
   cases hA : (adv.deviation (BitVec.ofFin h)).any (fun d => decide (d ≠ towerZero 7))
   · have hZ : ∀ c : Fin (2 ^ 128),
@@ -6293,11 +6293,11 @@ theorem rss_active_tag_forgery_count_le {width : Nat} (deg : Nat)
         exact Bool.and_false _
       rw [hF]
       rfl
-    rw [finSum_congr hZ, finSum_const, Nat.mul_zero]
+    rw [qsum_congr hZ, qsum_const, Nat.mul_zero]
     exact Nat.zero_le deg
   · obtain ⟨d, hdMem, hdDec⟩ := List.any_eq_true.mp hA
-    refine Nat.le_trans (finSum_le_finSum (fun c => ?_))
-      (tower128_roots_finSum_le deg (adv.deviation (BitVec.ofFin h)) (hDeg _)
+    refine Nat.le_trans (qsum_le_qsum (fun c => ?_))
+      (tower128_roots_qsum_le deg (adv.deviation (BitVec.ofFin h)) (hDeg _)
         ⟨d, hdMem, of_decide_eq_true hdDec⟩)
     unfold activeTagForgery
     change (if (!(adv.aborts (BitVec.ofFin h) c) &&
@@ -6327,11 +6327,11 @@ theorem rss_active_malicious_threshold_sig_hedged_bound
     (hDeg : ∀ h, (adv.deviation h).length ≤ deg)
     (encode : BitVec width → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
     natAbsDiff
-      (finSum (2 ^ width) (fun h => finSum (2 ^ 128) (fun c =>
+      (qsum (2 ^ width) (fun h => qsum (2 ^ 128) (fun c =>
         if (match activeMaliciousThresholdSign run hornerTagScheme adv encode msgPrime h c with
             | some s => D s
             | none => false) then 1 else 0)))
-      (finSum (2 ^ width) (fun h => finSum (2 ^ 128) (fun c =>
+      (qsum (2 ^ width) (fun h => qsum (2 ^ 128) (fun c =>
         if (activeReleased hornerTagScheme adv h c &&
             D (encodeSlhSig (slhSignInternal p msgPrime
               (slhKeygenInternal p skSeed skPrf pkSeed).1
@@ -6401,7 +6401,7 @@ corrupt frame are fixed before the challenge. -/
 theorem verifyPrivateChiWires_active_forgery_count (expected sent : List Tower128)
     (hlen : sent.length = expected.length)
     (hbad : ∃ d ∈ zipXorTower 7 sent expected, d ≠ towerZero 7) :
-    finSum (2 ^ 128) (fun c =>
+    qsum (2 ^ 128) (fun c =>
       if verifyPrivateChiWires expected sent (unpackTower 7 (BitVec.ofFin c)) then 1 else 0) ≤
       expected.length := by
   have hd : (zipXorTower 7 sent expected).length ≤ expected.length :=
@@ -6414,14 +6414,14 @@ theorem verifyPrivateChiWires_active_forgery_count (expected sent : List Tower12
     simp only [verifyPrivateChiWires, hlen, decide_true, Bool.true_and]
     exact bbcggiWireAccumulator_eq_iff_batchDeviationPoly hlen _
   simp only [hc]
-  exact tower128_roots_finSum_le expected.length _ hd hbad
+  exact tower128_roots_qsum_le expected.length _ hd hbad
 
 /-- Any altered gate, including deletion or insertion, is covered. A malformed length is
 rejected for every challenge; an equal-length modification supplies a constructively extracted
 nonzero coefficient to the polynomial root bound. -/
 theorem verifyPrivateChiWires_any_changed_gate_count (expected sent : List Tower128)
     (hne : sent ≠ expected) :
-    finSum (2 ^ 128) (fun c =>
+    qsum (2 ^ 128) (fun c =>
       if verifyPrivateChiWires expected sent (unpackTower 7 (BitVec.ofFin c)) then 1 else 0) ≤
       expected.length := by
   by_cases hl : sent.length = expected.length
@@ -6435,7 +6435,7 @@ theorem verifyPrivateChiWires_any_changed_gate_count (expected sent : List Tower
         (if verifyPrivateChiWires expected sent (unpackTower 7 (BitVec.ofFin c)) then 1 else 0) = 0 := by
       intro c
       simp only [verifyPrivateChiWires, hl, decide_false, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
-    rw [finSum_congr hz, finSum_const, Nat.mul_zero]
+    rw [qsum_congr hz, qsum_const, Nat.mul_zero]
     exact Nat.zero_le _
 
 theorem tooth_verifyPrivateChiWires_rejects_truncation

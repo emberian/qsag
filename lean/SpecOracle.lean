@@ -1,7 +1,7 @@
 import Qsag.Exec.SpecOracle
 import Qsag.Protocol.Signing.HashSigs
 import Qsag.Protocol.Signing.Fips205
-import Qsag.Math.BinaryTower
+import Qsag.Math.Gf2Pow128
 import Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 import Qsag.Custody.JortsBeltLatchAndQuorumSwitching

@@ -13,8 +13,8 @@ Constructive (`0 Classical.choice`, `0 sorry`) mechanization of `tau`-masked cro
 
 public import Qsag.Protocol.Threshold.Rss256TernaryRound
 
-import all Qsag.Math.BinaryTower
-import all Qsag.Oracle.UcGames
+import all Qsag.Math.Gf2Pow128
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Threshold.MaliciousSecurity
 import all Qsag.Protocol.Threshold.Rss256TernaryRound
 

@@ -21,14 +21,14 @@ Constructive (`0 Classical.choice`, `0 sorry`) mechanization of the core algebra
    `≤ 8` per folding round).
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
-public import Qsag.Oracle.UcGames
+public import Qsag.Math.Gf2Pow128
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 
-import all Qsag.Math.BinaryTower
-import all Qsag.Oracle.UcGames
+import all Qsag.Math.Gf2Pow128
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Threshold.MaliciousSecurity
 
 import Qsag.Tactic.AssuranceKit

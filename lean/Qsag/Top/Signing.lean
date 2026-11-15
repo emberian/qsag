@@ -1,4 +1,5 @@
 module
+public import Qsag.Machine.Gf128ClmulLoopAgreement
 /-
 # Qsag.Top.Signing — End-to-End Composed Post-Quantum Signing Reductions and Refinements
 
@@ -29,13 +30,9 @@ public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 public import Qsag.Protocol.Threshold.BaggyAndRss256Security
 public import Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity
 public import Qsag.Protocol.Threshold.ProductionCoinReduction
-public import Qsag.Oracle.SpongeFramingAndDomainSep
-public import Qsag.Oracle.ParallelSeededSpnPolyBasis
-public import Qsag.Oracle.ParallelSeededPublicPermutation
-public import Qsag.Oracle.ParallelSeededPublicPermutationGame
-public import Qsag.Oracle.QromPreprocessingGame
-public import Qsag.Oracle.SpnCommittedDifferential
-public import Qsag.Oracle.SpnWalshHull
+public import Qsag.Oracle.Sponge
+public import Qsag.Oracle.Spn
+public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Signing.SignatureOutputAndCacheLaws
 public import Qsag.Machine.ElfFunctionalEquiv
 public import Qsag.Machine.ConstantTimeIsa

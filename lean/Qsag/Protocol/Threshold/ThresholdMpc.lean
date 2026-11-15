@@ -44,18 +44,18 @@ DKG, resharing, and Simplex quorum safety live in `Qsag.MaliciousSecurity`):
 -/
 
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
 public import Qsag.Oracle.Poseidon2
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.Fips205
 public import Qsag.Protocol.Threshold.Preprocessing
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 import all Qsag.Math.Goldilocks
 import all Qsag.Oracle.Poseidon2
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Signing.HashSigs
 import all Qsag.Protocol.Threshold.Preprocessing
 
@@ -3747,10 +3747,10 @@ theorem threshold_sig_hedged_output_equality
     (N : Nat) (run : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
     (hedge : Fin N → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
     natAbsDiff
-      (finSum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
-      (finSum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
+      (qsum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
+      (qsum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
         (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))) then 1 else 0)) = 0 := by
-  have hLe := finSum_indicator_diff_le
+  have hLe := qsum_indicator_diff_le
     (fun i => D ((run i).signBytes msgPrime (hedge i)))
     (fun i => D (encodeSlhSig (slhSignInternal p msgPrime
       (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))))
@@ -3758,8 +3758,8 @@ theorem threshold_sig_hedged_output_equality
     (fun i _ => by
       rw [(threshold_sig_deterministic_and_matches_single_signer p hWf (run i) (run i)
         msgPrime (hedge i)).1])
-  have hZero : finSum N (fun _ : Fin N => if (false : Bool) = true then 1 else 0) = 0 := by
-    have h := finSum_const N 0
+  have hZero : qsum N (fun _ : Fin N => if (false : Bool) = true then 1 else 0) = 0 := by
+    have h := qsum_const N 0
     rw [Nat.mul_zero] at h
     exact h
   rw [hZero] at hLe
@@ -3773,8 +3773,8 @@ theorem threshold_sig_hedged_statistical_distance_zero
     (N : Nat) (run : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
     (hedge : Fin N → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
     natAbsDiff
-      (finSum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
-      (finSum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
+      (qsum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
+      (qsum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
         (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))) then 1 else 0)) = 0 :=
   threshold_sig_hedged_output_equality p hWf N run hedge msgPrime D
 
@@ -4105,9 +4105,9 @@ theorem threshold_joint_coin_output_law
     (p : Fips205Params) (sk : SlhSecretKey) (msg : List UInt8)
     (width : Nat) (encode : BitVec width → List UInt8) (corruptCoin : BitVec width)
     (D : List UInt8 → Bool) :
-    finSum (2 ^ width) (fun i => if D (encodeSlhSig
+    qsum (2 ^ width) (fun i => if D (encodeSlhSig
       (slhSignInternal p msg sk (encode (BitVec.ofFin i ^^^ corruptCoin)))) then 1 else 0) =
-    finSum (2 ^ width) (fun i => if D (encodeSlhSig
+    qsum (2 ^ width) (fun i => if D (encodeSlhSig
       (slhSignInternal p msg sk (encode (BitVec.ofFin i)))) then 1 else 0) := by
   let flip : Fin (2 ^ width) → Fin (2 ^ width) :=
     fun i => (BitVec.ofFin i ^^^ corruptCoin).toFin
@@ -4117,7 +4117,7 @@ theorem threshold_joint_coin_output_law
     have h : (BitVec.ofFin i ^^^ corruptCoin) ^^^ corruptCoin = BitVec.ofFin i := by
       rw [BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero]
     exact congrArg BitVec.toNat h
-  exact finSum_perm_invariant flip flip hInv hInv
+  exact qsum_perm_invariant flip flip hInv hInv
     (fun i => if D (encodeSlhSig (slhSignInternal p msg sk (encode (BitVec.ofFin i)))) then 1 else 0)
 
 /-- A corrupt party can commit to zero, observe the honest coin, and open only when the
@@ -4130,10 +4130,10 @@ theorem tooth_selective_abort_biases_committed_joint_coin :
     let honest : Fin 2 → Bool := fun i => i.val == 1
     let accepted : Fin 2 → Option Bool := fun i =>
       if honest i ^^ false then some (honest i ^^ false) else none
-    finSum 2 (fun i => if (accepted i).isSome then 1 else 0) = 1 ∧
-    finSum 2 (fun i => if accepted i == some true then 1 else 0) = 1 ∧
+    qsum 2 (fun i => if (accepted i).isSome then 1 else 0) = 1 ∧
+    qsum 2 (fun i => if accepted i == some true then 1 else 0) = 1 ∧
     (∀ i, accepted i ≠ some false) ∧
-    finSum 2 (fun i => if honest i then 1 else 0) = 1 := by
+    qsum 2 (fun i => if honest i then 1 else 0) = 1 := by
   decide +kernel
 
 /-! ### Active-malicious hedged signing: abort, exact single-signer output, or counted tag forgery
@@ -4201,13 +4201,13 @@ def activeReleased {width nChal : Nat} {Dev : Type}
   !(adv.aborts (BitVec.ofFin honestCoin) chal) &&
     tags.isHonest (adv.deviation (BitVec.ofFin honestCoin))
 
-private theorem finSum_natAbsDiff_le : ∀ (n : Nat) (f g b : Fin n → Nat),
+private theorem qsum_natAbsDiff_le : ∀ (n : Nat) (f g b : Fin n → Nat),
     (∀ i, natAbsDiff (f i) (g i) ≤ b i) →
-    natAbsDiff (finSum n f) (finSum n g) ≤ finSum n b
-  | 0, _, _, _, _ => by simp [finSum, natAbsDiff]
+    natAbsDiff (qsum n f) (qsum n g) ≤ qsum n b
+  | 0, _, _, _, _ => by simp [qsum, natAbsDiff]
   | n + 1, f, g, b, h => by
-    simp only [finSum]
-    have ih := finSum_natAbsDiff_le n
+    simp only [qsum]
+    have ih := qsum_natAbsDiff_le n
       (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
       (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
       (fun i => b ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
@@ -4283,16 +4283,16 @@ theorem active_malicious_threshold_sig_abort_or_exact_hedged_dist
       activeTagForgery tags adv honestCoin chal = true) ∧
     (∀ D : List UInt8 → Bool,
       natAbsDiff
-        (finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+        (qsum (2 ^ width) (fun h => qsum nChal (fun c =>
           if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
               | some s => D s
               | none => false) then 1 else 0)))
-        (finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+        (qsum (2 ^ width) (fun h => qsum nChal (fun c =>
           if (activeReleased tags adv h c &&
               D (encodeSlhSig (slhSignInternal p msgPrime
                 (slhKeygenInternal p skSeed skPrf pkSeed).1
                 (encode (BitVec.ofFin h ^^^ adv.corruptCoin))))) then 1 else 0))) ≤
-      finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+      qsum (2 ^ width) (fun h => qsum nChal (fun c =>
         if activeTagForgery tags adv h c then 1 else 0))) ∧
     (∀ {skSeed' skPrf' pkSeed' : List UInt8} (run' : SlhThresholdRun p skSeed' skPrf' pkSeed')
        (msgPrime' : List UInt8) (honestCoin : Fin (2 ^ width)) (chal : Fin nChal),
@@ -4308,9 +4308,9 @@ theorem active_malicious_threshold_sig_abort_or_exact_hedged_dist
       · rw [hR] at h; exact Or.inr (Or.inl h)
     · exact Or.inr (Or.inr rfl)
   · intro D
-    apply finSum_natAbsDiff_le
+    apply qsum_natAbsDiff_le
     intro h
-    apply finSum_indicator_diff_le
+    apply qsum_indicator_diff_le
       (fun c => match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
                 | some s => D s
                 | none => false)
@@ -4344,17 +4344,17 @@ theorem active_threshold_sig_no_abort_exact_single_signer_law
     (hNoAbort : ∀ h c, adv.aborts h c = false)
     (hNoDeviation : ∀ h, tags.isHonest (adv.deviation h) = true)
     (D : List UInt8 → Bool) :
-    finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+    qsum (2 ^ width) (fun h => qsum nChal (fun c =>
       if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
           | some s => D s
           | none => false) then 1 else 0)) =
-    nChal * finSum (2 ^ width) (fun u =>
+    nChal * qsum (2 ^ width) (fun u =>
       if D (encodeSlhSig (slhSignInternal p msgPrime
         (slhKeygenInternal p skSeed skPrf pkSeed).1 (encode (BitVec.ofFin u)))) then 1 else 0) := by
   rw [← threshold_joint_coin_output_law p (slhKeygenInternal p skSeed skPrf pkSeed).1 msgPrime
         width encode adv.corruptCoin D,
-      ← finSum_mul_left]
-  apply finSum_congr
+      ← qsum_mul_left]
+  apply qsum_congr
   intro h
   have hInner : ∀ c : Fin nChal,
       (if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
@@ -4374,7 +4374,7 @@ theorem active_threshold_sig_no_abort_exact_single_signer_law
       rfl
     rw [(activeMaliciousThresholdSign_cases p hWf run tags adv encode msgPrime h c).1 hF, hR]
     rfl
-  rw [finSum_congr hInner, finSum_const]
+  rw [qsum_congr hInner, qsum_const]
 
 /-- The forgery term of `active_malicious_threshold_sig_abort_or_exact_hedged_dist` cannot be
     dropped: with a tag check that accepts one modified execution, the honest parties release
@@ -4396,7 +4396,7 @@ theorem tooth_active_tag_forgery_releases_tampered_output
       ⟨0, by decide⟩ ⟨0, by decide⟩ = some bogus ∧
     activeMaliciousThresholdSign run tags adv encode msgPrime
       ⟨0, by decide⟩ ⟨1, by decide⟩ = none ∧
-    finSum (2 ^ 1) (fun h => finSum 2 (fun c =>
+    qsum (2 ^ 1) (fun h => qsum 2 (fun c =>
       if activeTagForgery tags adv h c then 1 else 0)) = 2 := by
   exact ⟨rfl, rfl, rfl⟩
 
@@ -6271,9 +6271,9 @@ def spdzGatePinsAlpha (alpha : GoldilocksExt2) (deltaD : Goldilocks)
 /-- For any fixed gate deviation `(deltaD, sigmaSum)`, at most `1` of the `p^2` global MAC keys
     in `GoldilocksExt2` satisfies `spdzGatePinsAlpha`. -/
 theorem spdzGatePinsAlpha_count_le_one (deltaD : Goldilocks) (sigmaSum : GoldilocksExt2) :
-    finSum goldilocksExt2Card
+    qsum goldilocksExt2Card
       (fun idx => if spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) deltaD sigmaSum then 1 else 0) ≤ 1 := by
-  apply finSum_indicator_le_one_of_unique
+  apply qsum_indicator_le_one_of_unique
   intro i j hi hj
   unfold spdzGatePinsAlpha at hi hj
   rcases of_decide_eq_true hi with ⟨_, hEqI⟩
@@ -6294,29 +6294,29 @@ theorem anyGatePinsAlpha_nil (alpha : GoldilocksExt2) : anyGatePinsAlpha alpha [
     global `GoldilocksExt2` MAC keys are pinned. -/
 theorem spdzGateStream_pin_count_le :
     ∀ (gates : List (Goldilocks × GoldilocksExt2)),
-      finSum goldilocksExt2Card
+      qsum goldilocksExt2Card
         (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gates then 1 else 0) ≤
         gates.length
   | [] => by
-    have hZ : finSum goldilocksExt2Card
+    have hZ : qsum goldilocksExt2Card
         (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) [] then 1 else 0) =
-        finSum goldilocksExt2Card (fun _ => 0) :=
-      finSum_congr (fun _ => rfl)
-    rw [hZ, finSum_const]
+        qsum goldilocksExt2Card (fun _ => 0) :=
+      qsum_congr (fun _ => rfl)
+    rw [hZ, qsum_const]
     omega
   | g :: gs => by
-    have hOr := finSum_indicator_or_le
+    have hOr := qsum_indicator_or_le
       (fun idx => spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) g.1 g.2)
       (fun idx => anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) gs)
     have hHead := spdzGatePinsAlpha_count_le_one g.1 g.2
     have hTail := spdzGateStream_pin_count_le gs
     have hStep :
-        finSum goldilocksExt2Card
+        qsum goldilocksExt2Card
           (fun idx => if anyGatePinsAlpha (enumGoldilocksExt2.toFun idx) (g :: gs) then 1 else 0) =
-        finSum goldilocksExt2Card
+        qsum goldilocksExt2Card
           (fun i => if (spdzGatePinsAlpha (enumGoldilocksExt2.toFun i) g.1 g.2 ||
                         anyGatePinsAlpha (enumGoldilocksExt2.toFun i) gs) then 1 else 0) :=
-      finSum_congr (fun _ => rfl)
+      qsum_congr (fun _ => rfl)
     rw [hStep]
     exact Nat.le_trans hOr
       (by rw [List.length_cons, Nat.add_comm gs.length 1]; exact Nat.add_le_add hHead hTail)

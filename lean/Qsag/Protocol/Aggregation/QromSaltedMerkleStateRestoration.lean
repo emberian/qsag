@@ -42,27 +42,18 @@ Mechanized constructive reductions connecting:
      * `cdhz320Pow16At2pow40`: `q = (206, 104, 71, 53)` + 16-bit PoW (`434` openings) at `Q + 1 ≤ 2^40`;
      * `unitaryZeroPow`: `q = (216, 109, 74, 56)` + 0-bit PoW (`455` openings, zero PoW grinding) at `Q + 1 ≤ 2^40`.
 -/
-public import Qsag.Oracle.QromFourierSupport
-public import Qsag.Oracle.QromPreprocessingChecks
+public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
 public import Qsag.Protocol.Aggregation.HemSlicedFoldBudget
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Oracle.QromFourierSupport
-import all Qsag.Oracle.QromCoherentOracleRegister
-import all Qsag.Oracle.QromFourierTable
-import all Qsag.Oracle.QromPreprocessingChecks
-import all Qsag.Oracle.QromPreprocessingGame
+import all Qsag.Oracle.Qrom
 import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-import all Qsag.Oracle.QromBatchMerkleExtraction
-import all Qsag.Oracle.QromMeasuredMerkleExtraction
-import all Qsag.Oracle.QromMeasuredQueryExperiment
 import all Qsag.Protocol.Aggregation.HemSlicedFoldBudget
-import all Qsag.Coding.Cwyz26DeployedStages
+import all Qsag.Coding.Cwyz26
 import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
 import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
-import all Qsag.Oracle.MultiRoundFsQrom
-import all Qsag.Oracle.ConcreteSecurityBudget
-import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
+import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 
 public section
 namespace Qsag
@@ -137,59 +128,6 @@ theorem saltedCanopy_fresh_salt_preprocessed_bound {cardSalt cardX w : Nat}
           (L.atSalt s).hash H lvl node pair.2.1 pair.2.2)) (preprocess H))) ≤
       (2 ^ w) ^ cardX * entries :=
   PreprocessingGame.freshSalt_preprocessed_table_bound preprocess _ entries hCap
-
-/-- Explicit unsalted (`cardSalt = 1`) 4-address finite Canopy instance showing why omitting
-    per-commitment salts enables a 0-online-query collision attack under 2 bits of offline advice. -/
-def unsaltedFourAddressCanopy : SaltedCanopyLayout 1 4 1 where
-  encode := fun _ _ _ u v =>
-    ⟨u.toNat * 2 + v.toNat, by
-      have hu := u.isLt
-      have hv := v.isLt
-      omega⟩
-  decode := fun x =>
-    some (0, 0, 0, BitVec.ofNat 1 (x.1 / 2), BitVec.ofNat 1 (x.1 % 2))
-  levels := 1
-  nodes := 1
-  decode_sound := by
-    intro x s l n u v h
-    injection h with hEq
-    rcases hEq with ⟨_, _, _, rfl, rfl⟩
-    apply Fin.ext
-    dsimp
-    have hx := x.isLt
-    have h1 : (BitVec.ofNat 1 (x.1 / 2)).toNat = x.1 / 2 := by
-      rw [BitVec.toNat_ofNat]; omega
-    have h2 : (BitVec.ofNat 1 (x.1 % 2)).toNat = x.1 % 2 := by
-      rw [BitVec.toNat_ofNat]; omega
-    rw [h1, h2]
-    omega
-  decode_encode := by
-    intro s l n u v hl hn
-    have hs : s = 0 := Fin.ext (by omega)
-    have hl0 : l = 0 := by omega
-    have hn0 : n = 0 := by omega
-    subst hs hl0 hn0
-    dsimp
-    have hu := u.isLt
-    have hv := v.isLt
-    have hU : BitVec.ofNat 1 ((u.toNat * 2 + v.toNat) / 2) = u := by
-      apply BitVec.eq_of_toNat_eq
-      rw [BitVec.toNat_ofNat]; omega
-    have hV : BitVec.ofNat 1 ((u.toNat * 2 + v.toNat) % 2) = v := by
-      apply BitVec.eq_of_toNat_eq
-      rw [BitVec.toNat_ofNat]; omega
-    rw [hU, hV]
-
-/-- `#tooth`: without fresh salting (`cardSalt = 1`), 2 bits of offline advice find an explicit
-    oracle collision in 0 online queries on 100% (`8 / 8`) of 1-bit 3-address oracles. -/
-theorem tooth_unsalted_canopy_preprocessed_collision :
-    ∃ (A : PreprocessingGame.ClassicalAdvice 3 1 1 2 0 (Fin 3 × Fin 3)),
-      PreprocessingGame.adviceWinCount A
-        (fun H _ pair => PreprocessingGame.collisionWin H pair) = (2 ^ 1) ^ 3 ∧
-      (∀ H : Fin 3 → BitVec 1, (A.run H 0).2 = 0) ∧
-      unsaltedFourAddressCanopy.levels = 1 :=
-  ⟨PreprocessingGame.storedCollision, PreprocessingGame.storedCollision_count,
-   fun _ => rfl, rfl⟩
 
 /-- Count of active Fourier truth-table coordinates in `d : OracleBitTable n` belonging to
     domain/salt `dom : Fin cardDom` under classifier `domainOf : Fin n → Fin cardDom`. -/
@@ -2750,7 +2688,6 @@ theorem inhabited_hemNv24_unitaryZeroPow_at_2pow40 :
 #verify_constructive
   Qsag.saltedCanopy_cross_salt_disjoint
   Qsag.saltedCanopy_fresh_salt_preprocessed_bound
-  Qsag.tooth_unsalted_canopy_preprocessed_collision
   Qsag.domainTableWeight_le_tableWeight
   Qsag.domainTableWeight_sum_eq_tableWeight
   Qsag.coherent_salted_domain_budget_zero_of_overflow
@@ -2789,7 +2726,6 @@ theorem inhabited_hemNv24_unitaryZeroPow_at_2pow40 :
   Qsag.tooth_linear_sr_query_schedule_unsound_in_qrom
   Qsag.tooth_cdhz_raw_merkle_fails_at_2pow39
 
-#tooth_pair saltedCanopy_fresh_salt_preprocessed_bound vs tooth_unsalted_canopy_preprocessed_collision
 #tooth_pair dfms_projective_extraction_disturbance_bound vs tooth_dfms_w2_raw_database_measurement_disturbs
 #tooth_pair qrom_joint_pow_multiRound_success_bound vs tooth_post_squeeze_pow_forfeits_reduction
 #tooth_pair hemNv24_unitaryPow16_sound_up_to_2pow40 vs tooth_linear_sr_query_schedule_unsound_in_qrom

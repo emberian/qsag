@@ -28,14 +28,14 @@ Constructive (`0 Classical.choice`, `0 sorry`) formalization of:
 -/
 
 public import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
-public import Qsag.Oracle.UcGames
-public import Qsag.Oracle.ConcreteSecurityBudget
+public import Qsag.Protocol.Aggregation.UcGames
+public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 public import Qsag.Protocol.Threshold.Preprocessing
 import all Qsag.Custody.JortsBeltLatchAndQuorumSwitching
-import all Qsag.Oracle.UcGames
-import all Qsag.Oracle.ConcreteSecurityBudget
+import all Qsag.Protocol.Aggregation.UcGames
+import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import Qsag.Tactic.AssuranceKit
-import Qsag.Tactic.ConstructiveRing
+import Qsag.Tactic.CommRing
 
 public section
 namespace Qsag
@@ -313,30 +313,30 @@ theorem prp_striped_qsa_committee_unlinkability
          (perms (permSwapIdx.toFun p)).toFun (rawCommitteeSlot hCap c1 s1) =
            (perms p).toFun (rawCommitteeSlot hCap c2 s2))
        (D : Fin (2 ^ h) → Bool),
-      finSum PermCard (fun p => if D (prpStripedLeafIndex hCap (perms p) c1 s1) then 1 else 0) =
-      finSum PermCard (fun p => if D (prpStripedLeafIndex hCap (perms p) c2 s2) then 1 else 0)) ∧
+      qsum PermCard (fun p => if D (prpStripedLeafIndex hCap (perms p) c1 s1) then 1 else 0) =
+      qsum PermCard (fun p => if D (prpStripedLeafIndex hCap (perms p) c2 s2) then 1 else 0)) ∧
     -- (2) Tight 2 * epsPrpNum keyed-PRP security reduction:
     (∀ {KeyCard : Nat} (prpFamily : Fin KeyCard → SimpleEquiv (Fin (2 ^ h)) (Fin (2 ^ h)))
        (epsPrpNum : Nat) (D : Fin (2 ^ h) → Bool),
       (∀ raw : Fin (2 ^ h),
         natAbsDiff
-          (2 ^ h * finSum KeyCard (fun k => if D ((prpFamily k).toFun raw) then 1 else 0))
-          (KeyCard * finSum (2 ^ h) (fun y => if D y then 1 else 0)) ≤ epsPrpNum) →
+          (2 ^ h * qsum KeyCard (fun k => if D ((prpFamily k).toFun raw) then 1 else 0))
+          (KeyCard * qsum (2 ^ h) (fun y => if D y then 1 else 0)) ≤ epsPrpNum) →
       natAbsDiff
-        (2 ^ h * finSum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c1 s1) then 1 else 0))
-        (2 ^ h * finSum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c2 s2) then 1 else 0)) ≤
+        (2 ^ h * qsum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c1 s1) then 1 else 0))
+        (2 ^ h * qsum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c2 s2) then 1 else 0)) ≤
       epsPrpNum + epsPrpNum) := by
   refine ⟨?_, ?_⟩
   · intro PermCard perms permSwapIdx hSwapSpec D
     have hBij :
-        finSum PermCard (fun p =>
+        qsum PermCard (fun p =>
           if D (prpStripedLeafIndex hCap (perms (permSwapIdx.toFun p)) c1 s1) then 1 else 0) =
-        finSum PermCard (fun p => if D (prpStripedLeafIndex hCap (perms p) c1 s1) then 1 else 0) :=
-      finSum_bijection_invariant
+        qsum PermCard (fun p => if D (prpStripedLeafIndex hCap (perms p) c1 s1) then 1 else 0) :=
+      qsum_bijection_invariant
         { toFun := id, invFun := id, left_inv := fun _ => rfl, right_inv := fun _ => rfl }
         permSwapIdx
         (fun p => if D (prpStripedLeafIndex hCap (perms p) c1 s1) then 1 else 0)
-    refine hBij.symm.trans (finSum_congr ?_)
+    refine hBij.symm.trans (qsum_congr ?_)
     intro p
     unfold prpStripedLeafIndex
     rw [hSwapSpec p]
@@ -344,15 +344,15 @@ theorem prp_striped_qsa_committee_unlinkability
     have h1 := hPrp (rawCommitteeSlot hCap c1 s1)
     have h2 := hPrp (rawCommitteeSlot hCap c2 s2)
     have h2Symm : natAbsDiff
-        (KeyCard * finSum (2 ^ h) (fun y => if D y then 1 else 0))
-        (2 ^ h * finSum KeyCard (fun k => if D ((prpFamily k).toFun (rawCommitteeSlot hCap c2 s2)) then 1 else 0)) ≤
+        (KeyCard * qsum (2 ^ h) (fun y => if D y then 1 else 0))
+        (2 ^ h * qsum KeyCard (fun k => if D ((prpFamily k).toFun (rawCommitteeSlot hCap c2 s2)) then 1 else 0)) ≤
         epsPrpNum := by
       unfold natAbsDiff at h2 ⊢
       split at h2 <;> split <;> omega
     have hTri := natAbsDiff_triangle
-      (2 ^ h * finSum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c1 s1) then 1 else 0))
-      (KeyCard * finSum (2 ^ h) (fun y => if D y then 1 else 0))
-      (2 ^ h * finSum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c2 s2) then 1 else 0))
+      (2 ^ h * qsum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c1 s1) then 1 else 0))
+      (KeyCard * qsum (2 ^ h) (fun y => if D y then 1 else 0))
+      (2 ^ h * qsum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c2 s2) then 1 else 0))
     unfold prpStripedLeafIndex at hTri ⊢
     exact Nat.le_trans hTri (Nat.add_le_add h1 h2Symm)
 
@@ -369,10 +369,10 @@ theorem tooth_contiguous_qsa_reveals_committee_id
     ∃ D_leak : Fin (2 ^ h) → Bool,
       (contiguousQsaLeaf hCap c1 s1).val / B = c1.val ∧
       (contiguousQsaLeaf hCap c1 s1).val % B = s1.val ∧
-      finSum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c1 s1) then 1 else 0) = KeyCard ∧
-      finSum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c2 s2) then 1 else 0) = 0 ∧
-      finSum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c1 s1) then 1 else 0) ≠
-      finSum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c2 s2) then 1 else 0) := by
+      qsum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c1 s1) then 1 else 0) = KeyCard ∧
+      qsum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c2 s2) then 1 else 0) = 0 ∧
+      qsum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c1 s1) then 1 else 0) ≠
+      qsum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c2 s2) then 1 else 0) := by
   have hDiv : ∀ (c : Fin C) (s : Fin B), (contiguousQsaLeaf hCap c s).val / B = c.val := by
     intro c s
     unfold contiguousQsaLeaf rawCommitteeSlot
@@ -390,14 +390,14 @@ theorem tooth_contiguous_qsa_reveals_committee_id
   have h2 : D_leak (contiguousQsaLeaf hCap c2 s2) = false := by
     dsimp only [D_leak]; rw [hDiv]
     exact decide_eq_false (fun hEq => hcNe (Fin.ext hEq.symm))
-  have hAll : finSum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c1 s1) then 1 else 0) =
+  have hAll : qsum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c1 s1) then 1 else 0) =
       KeyCard := by
     rw [h1]
-    simp only [↓reduceIte, finSum_const, Nat.mul_one]
-  have hNone : finSum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c2 s2) then 1 else 0) =
+    simp only [↓reduceIte, qsum_const, Nat.mul_one]
+  have hNone : qsum KeyCard (fun _ => if D_leak (contiguousQsaLeaf hCap c2 s2) then 1 else 0) =
       0 := by
     rw [h2]
-    simp only [Bool.false_eq_true, ↓reduceIte, finSum_const, Nat.mul_zero]
+    simp only [Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]
   rw [hAll, hNone]
   exact ⟨rfl, rfl, by omega⟩
 
@@ -1119,13 +1119,13 @@ theorem shamir_t_minus_1_shares_independent_of_sk (q t n : Nat) [FactPrime q]
         lagrangeToAdditiveShare S xc (RoundPoly.evalCoeffs (sk1 :: r.1) xc)) ∧
     (∀ (Card : Nat) (enum : SimpleEquiv (Fin Card) { l : List (ZMod q) // l.length = t - 1 })
        (D : List (ZMod q × ZMod q) → Bool),
-      finSum Card (fun k =>
+      qsum Card (fun k =>
         let r := (enum.toFun k).1
         let view := corruptPts.map (fun xc =>
           let s := RoundPoly.evalCoeffs (sk1 :: r) xc
           (s, lagrangeToAdditiveShare S xc s))
         if D view then 1 else 0) =
-      finSum Card (fun k =>
+      qsum Card (fun k =>
         let r := (enum.toFun k).1
         let view := corruptPts.map (fun xc =>
           let s := RoundPoly.evalCoeffs (sk2 :: r) xc
@@ -1139,12 +1139,12 @@ theorem shamir_t_minus_1_shares_independent_of_sk (q t n : Nat) [FactPrime q]
     fun r xc hxc => shamirTailEquiv_eval (t - 1) corruptPts sk1 sk2 hCard hNz r xc hxc
   refine ⟨hLtN, fun r xc hxc => ⟨hPt r xc hxc, by rw [hPt r xc hxc]⟩, ?_⟩
   intro Card enum D
-  have hInv := finSum_bijection_invariant enum (shamirTailEquiv (t - 1) corruptPts sk1 sk2 hCard)
+  have hInv := qsum_bijection_invariant enum (shamirTailEquiv (t - 1) corruptPts sk1 sk2 hCard)
     (fun r =>
       if D (corruptPts.map (fun xc =>
         (RoundPoly.evalCoeffs (sk2 :: r.1) xc,
           lagrangeToAdditiveShare S xc (RoundPoly.evalCoeffs (sk2 :: r.1) xc)))) then 1 else 0)
-  refine Eq.trans (finSum_congr (fun k => ?_)) hInv
+  refine Eq.trans (qsum_congr (fun k => ?_)) hInv
   have hMapEq :
       corruptPts.map (fun xc =>
         (RoundPoly.evalCoeffs (sk1 :: (enum.toFun k).1) xc,
@@ -1336,7 +1336,7 @@ theorem threshold_voprf_active_dzk_sound (q t n : Nat) [FactPrime q]
         let honestMacBase := CommRingOps.mul maskSum blindedInput
         -- Specifically, if the adversary shifts `macSum` from `alpha * (sk * x) + maskSum * x` by `deltaMac`
         -- (an alpha-independent additive forgery offset, as in standard BDOZ/SPDZ!), at most 1 `alpha` accepts:
-        finSum q (fun k =>
+        qsum q (fun k =>
           let alphaK : ZMod q := ⟨k.val, k.isLt⟩
           let forgedMacSum := CommRingOps.add
             (CommRingOps.add (CommRingOps.mul alphaK (CommRingOps.mul sk blindedInput)) honestMacBase)
@@ -1435,7 +1435,7 @@ theorem threshold_voprf_active_dzk_sound (q t n : Nat) [FactPrime q]
       else
         simp only [hEq, ↓reduceIte]
         exact Nat.zero_le _
-    exact Nat.le_trans (finSum_le_finSum hLeInd) (Nat.le_of_eq (finSum_eq_indicator q uniqueFin))
+    exact Nat.le_trans (qsum_le_qsum hLeInd) (Nat.le_of_eq (qsum_eq_indicator q uniqueFin))
 
 /-- **`#tooth` (`tooth_unauthenticated_partial_eval_corrupts_voprf`)**:
     Without active DZK MAC verification (`unauthenticatedVoprfCombine`), a single corrupted party at

@@ -1,20 +1,20 @@
 module
 
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
 public import Qsag.Machine.ElfBinaryVerify
 public import Qsag.Machine.ElfFixtureVerify
 public import Qsag.Machine.McRefine
 public import Qsag.Machine.SydTvTranslationValidation
 import all Qsag.Machine.SydTvTranslationValidation
-import Qsag.Math.Constructive
+import Qsag.Tactic.Prelude
 import all Qsag.Machine.ElfFixtureSlices
 import all Qsag.Machine.ElfParse
 import all Qsag.Machine.ElfInvCerts
 import all Qsag.Machine.ElfBinaryVerify
 import all Qsag.Machine.McRefine
-import all Qsag.Math.BinaryTower
+import all Qsag.Math.Gf2Pow128
 import all Qsag.Oracle.Keccak
 import Qsag.Tactic.AssuranceKit
 

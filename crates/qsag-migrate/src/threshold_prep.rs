@@ -6,9 +6,7 @@
 //! once, and is consumed in the same order by every member.
 use crate::{
     outer_mpc::Error,
-    threshold_mpc::{
-        AuthWord, BooleanTriple, DaBitWord, FieldShare, FieldTriple, ThresholdField,
-    },
+    threshold_mpc::{AuthWord, BooleanTriple, DaBitWord, FieldShare, FieldTriple, ThresholdField},
 };
 use alloc::{collections::VecDeque, vec::Vec};
 
@@ -75,7 +73,11 @@ impl PartyPreprocessing {
     ) {
         self.field_randoms[field.index()].extend(items);
     }
-    pub fn add_dabits(&mut self, field: ThresholdField, items: impl IntoIterator<Item = DaBitWord>) {
+    pub fn add_dabits(
+        &mut self,
+        field: ThresholdField,
+        items: impl IntoIterator<Item = DaBitWord>,
+    ) {
         self.dabits[field.index()].extend(items);
     }
     pub fn take_boolean_triples(&mut self, count: usize) -> Result<Vec<BooleanTriple>, Error> {
@@ -211,9 +213,9 @@ mod fixture {
         }
         fn field_key(&self, field: ThresholdField) -> Value {
             let d = field.domain();
-            self.field_keys
-                .iter()
-                .fold([0; 4], |a, k| crate::threshold_mpc::mac_add(d, a, k[field.index()]))
+            self.field_keys.iter().fold([0; 4], |a, k| {
+                crate::threshold_mpc::mac_add(d, a, k[field.index()])
+            })
         }
 
         fn share_word(&mut self, word: u64, key: u128) -> Vec<AuthWord> {
@@ -239,7 +241,12 @@ mod fixture {
             shares
         }
 
-        fn share_field(&mut self, value: Value, field: ThresholdField, key: Value) -> Vec<FieldShare> {
+        fn share_field(
+            &mut self,
+            value: Value,
+            field: ThresholdField,
+            key: Value,
+        ) -> Vec<FieldShare> {
             let d = field.domain();
             let mut rest = [value, mac_scale(d, key, value)];
             let mut shares = Vec::with_capacity(self.members);
@@ -253,7 +260,9 @@ mod fixture {
         }
 
         fn rows<V>(&self, count: usize) -> Vec<Vec<V>> {
-            (0..self.members).map(|_| Vec::with_capacity(count)).collect()
+            (0..self.members)
+                .map(|_| Vec::with_capacity(count))
+                .collect()
         }
         fn push<V>(rows: &mut [Vec<V>], shares: Vec<V>) {
             for (row, share) in rows.iter_mut().zip(shares) {
@@ -293,7 +302,11 @@ mod fixture {
             rows
         }
 
-        pub fn field_randoms(&mut self, field: ThresholdField, count: usize) -> Vec<Vec<FieldShare>> {
+        pub fn field_randoms(
+            &mut self,
+            field: ThresholdField,
+            count: usize,
+        ) -> Vec<Vec<FieldShare>> {
             let key = self.field_key(field);
             let mut rows = self.rows(count);
             for _ in 0..count {
@@ -303,7 +316,11 @@ mod fixture {
             rows
         }
 
-        pub fn field_triples(&mut self, field: ThresholdField, count: usize) -> Vec<Vec<FieldTriple>> {
+        pub fn field_triples(
+            &mut self,
+            field: ThresholdField,
+            count: usize,
+        ) -> Vec<Vec<FieldTriple>> {
             let d = field.domain();
             let key = self.field_key(field);
             let mut rows = self.rows(count);

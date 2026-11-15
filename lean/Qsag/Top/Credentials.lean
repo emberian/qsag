@@ -23,7 +23,7 @@ public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealCred
 public import Qsag.Protocol.Threshold.LatticePreprocessingFull
 public import Qsag.Protocol.Threshold.RlweExtractionBoundary
-public import Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
+public import Qsag.Math.Lattices
 public import Qsag.Protocol.Threshold.DensePcgProductionTaps
 public import Qsag.Protocol.Threshold.ThresholdMlDsaSecurity
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
@@ -98,7 +98,7 @@ theorem threshold_mldsa_hvzk_sacrifice_and_prss_chain
     (chis : List Qsag.Ext6Fq204) (hCheat : deltaZ ≠ Qsag.Fq204.zero)
     {O : Type} {N : Nat} (real ideal : Fin N → O) (m : Nat) (D : List O → Bool) (ε : Nat)
     (hPrf : Qsag.PrssSingleKeyBound real ideal D ε) :
-    Qsag.finSum (2 * gamma1 - 1) (fun idx =>
+    Qsag.qsum (2 * gamma1 - 1) (fun idx =>
       if Qsag.maskCoordAt gamma1 idx + cs1 = zStar then 1 else 0) = 1 ∧
     (Qsag.sacAcceptRepeated chis (Qsag.rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = true →
       ∀ chi ∈ chis, chi = Qsag.sacBadChallenge204 (Qsag.rss3ToSacGate x y r0 r1 deltaZ a b deltaC)) ∧

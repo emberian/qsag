@@ -1,6 +1,6 @@
 module
 public import Qsag.Protocol.Threshold.RssSlhFullSecurity
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Threshold.RssSlhFullSecurity
 
 /-! Executable primitive reduction for the production preprocessing coin *helper*.
@@ -185,14 +185,14 @@ appropriate ideal-primitive model or a separate computational admissibility
 condition. Query count alone does not prove concrete-hash pseudorandomness. -/
 def OracleIndistinguishable (N q eps : Nat) (left right : Fin N → HashOracle) : Prop :=
   ∀ A : OracleComp Query Digest Bool, QueryBounded q A →
-    natAbsDiff (finSum N (fun i => if evalOracleComp (left i) A then 1 else 0))
-      (finSum N (fun i => if evalOracleComp (right i) A then 1 else 0)) ≤ eps
+    natAbsDiff (qsum N (fun i => if evalOracleComp (left i) A then 1 else 0))
+      (qsum N (fun i => if evalOracleComp (right i) A then 1 else 0)) ≤ eps
 
 theorem helper_reduces_to_primitive (N eps : Nat) (left right : Fin N → HashOracle)
     (ctx : ProductionCoinContext) (es : List Entry) (D : Option Digest → Bool)
     (h : OracleIndistinguishable N (es.length + (es.length + 1)) eps left right) :
-    natAbsDiff (finSum N (fun i => if D (run (left i) ctx es) then 1 else 0))
-      (finSum N (fun i => if D (run (right i) ctx es) then 1 else 0)) ≤ eps := by
+    natAbsDiff (qsum N (fun i => if D (run (left i) ctx es) then 1 else 0))
+      (qsum N (fun i => if D (run (right i) ctx es) then 1 else 0)) ≤ eps := by
   have hb := h (reduction ctx es D) (reduction_bound ctx es D)
   simpa only [reduction_correct] using hb
 
@@ -201,10 +201,10 @@ theorem helper_hybrid_bound (N stages eps : Nat) (family : Nat → Fin N → Has
     (ctx : ProductionCoinContext) (es : List Entry) (D : Option Digest → Bool)
     (h : ∀ j, j < stages → OracleIndistinguishable N (es.length + (es.length + 1)) eps
       (family j) (family (j + 1))) :
-    natAbsDiff (finSum N (fun i => if D (run (family 0 i) ctx es) then 1 else 0))
-      (finSum N (fun i => if D (run (family stages i) ctx es) then 1 else 0)) ≤ stages * eps := by
+    natAbsDiff (qsum N (fun i => if D (run (family 0 i) ctx es) then 1 else 0))
+      (qsum N (fun i => if D (run (family stages i) ctx es) then 1 else 0)) ≤ stages * eps := by
   apply natAbsDiff_telescope stages eps (fun j =>
-    finSum N (fun i => if D (run (family j i) ctx es) then 1 else 0))
+    qsum N (fun i => if D (run (family j i) ctx es) then 1 else 0))
   intro j hj
   exact helper_reduces_to_primitive N eps _ _ ctx es D (h j hj)
 
@@ -305,13 +305,13 @@ theorem independent_auxiliary_reduction (T N n eps : Nat)
     (hlen : ∀ t, (entries t).length = n)
     (h : OracleIndistinguishable N (n + (n + 1)) eps left right) :
     natAbsDiff
-      (finSum T (fun t => finSum N (fun i =>
+      (qsum T (fun t => qsum N (fun i =>
         if tests t (run (left i) (contexts t) (entries t)) then 1 else 0)))
-      (finSum T (fun t => finSum N (fun i =>
+      (qsum T (fun t => qsum N (fun i =>
         if tests t (run (right i) (contexts t) (entries t)) then 1 else 0))) ≤ T * eps := by
-  apply Nat.le_trans (natAbsDiff_finSum_le _ _)
-  rw [← finSum_const T eps]
-  apply finSum_le_finSum
+  apply Nat.le_trans (natAbsDiff_qsum_le _ _)
+  rw [← qsum_const T eps]
+  apply qsum_le_qsum
   intro t
   apply helper_reduces_to_primitive
   simpa only [hlen t] using h

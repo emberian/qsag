@@ -32,7 +32,7 @@ Self-contained Lean 4.35 cryptanalytic output-distribution and cache-soundness f
 public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.HypertreeEufCma
 import all Init.Data.String.Defs
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Oracle.Keccak
 import all Qsag.Protocol.Signing.HashSigs
 import all Qsag.Protocol.Signing.HypertreeEufCma
@@ -275,7 +275,7 @@ theorem grindTswCounter_4_128_192_eq_firstValidCounter
 
 /-- Count of randomizer coins `c : Fin C` on which sampler `X` outputs `y`. -/
 @[expose] def coinMass {α : Type} [DecidableEq α] (C : Nat) (X : Fin C → α) (y : α) : Nat :=
-  finSum C (fun c => if X c = y then 1 else 0)
+  qsum C (fun c => if X c = y then 1 else 0)
 
 /-- Unnormalized $L_1$ / $2 \cdot C \cdot \mathrm{TVD}$ statistical distance over `support`. -/
 @[expose] def statisticalDistance {α : Type} [DecidableEq α] (C : Nat) (support : List α)
@@ -286,7 +286,7 @@ theorem statisticalDistance_eq_zero_of_pointwise_eq {α : Type} [DecidableEq α]
     (C : Nat) (support : List α) {X Y : Fin C → α} (hEq : ∀ c : Fin C, X c = Y c) :
     statisticalDistance C support X Y = 0 := by
   have hMass : ∀ y : α, coinMass C X y = coinMass C Y y := fun y =>
-    finSum_congr (fun c => by rw [hEq c])
+    qsum_congr (fun c => by rw [hEq c])
   induction support with
   | nil => rfl
   | cons y ys ih =>
@@ -326,8 +326,8 @@ theorem threshold_standalone_grinding_coupling {C : Nat} {Sig : Type} [Decidable
       (evalGrindCeremony w ell1 target maxTrials evalThresholdStep)
       (evalGrindCeremony w ell1 target maxTrials evalStandaloneStep) = 0 ∧
     natAbsDiff
-      (finSum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalThresholdStep c) then 1 else 0))
-      (finSum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalStandaloneStep c) then 1 else 0)) = 0 := by
+      (qsum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalThresholdStep c) then 1 else 0))
+      (qsum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalStandaloneStep c) then 1 else 0)) = 0 := by
   have hStop : ∀ c : Fin C,
       firstValidCounter (fun ctr => checkTargetSum w ell1 target (evalThresholdStep c ctr).1) maxTrials =
         firstValidCounter (fun ctr => checkTargetSum w ell1 target (evalStandaloneStep c ctr).1) maxTrials :=
@@ -346,9 +346,9 @@ theorem threshold_standalone_grinding_coupling {C : Nat} {Sig : Type} [Decidable
       rw [(hAgree c τ hLt).2 hChk]
   refine ⟨hStop, hOut, statisticalDistance_eq_zero_of_pointwise_eq C support hOut, ?_⟩
   have hSumEq :
-      finSum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalThresholdStep c) then 1 else 0) =
-        finSum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalStandaloneStep c) then 1 else 0) :=
-    finSum_congr (fun c => by rw [hOut c])
+      qsum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalThresholdStep c) then 1 else 0) =
+        qsum C (fun c => if D (evalGrindCeremony w ell1 target maxTrials evalStandaloneStep c) then 1 else 0) :=
+    qsum_congr (fun c => by rw [hOut c])
   rw [hSumEq]; simp [natAbsDiff]
 
 /-! ### Non-First-Hit Bias `#tooth` Theorem over Real `verifyPqHashSig` (`w=4, ell1=128, target=192`) -/
@@ -557,7 +557,7 @@ theorem tooth_non_first_hit_lsb_bias_positive_tvd :
         walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
         tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
     exact h c
-  · simp only [statisticalDistance, coinMass, natAbsDiff, finSum, maliciousSkipLsbZeroSampler,
+  · simp only [statisticalDistance, coinMass, natAbsDiff, qsum, maliciousSkipLsbZeroSampler,
       honestReferenceLsbSampler, coinTwoRand, evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
       firstValidCounter, firstValidCounterAux, sigChainLsb]
 
@@ -569,7 +569,7 @@ theorem tooth_non_first_hit_lsb_bias_positive_tvd :
         canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
         buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
         tagPrf, tagThF, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
-  · simp only [statisticalDistance, coinMass, natAbsDiff, finSum, maliciousSkipLsbZeroSampler,
+  · simp only [statisticalDistance, coinMass, natAbsDiff, qsum, maliciousSkipLsbZeroSampler,
       honestReferenceLsbSampler, coinTwoRand, evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
       firstValidCounter, firstValidCounterAux, sigChainLsb]
 

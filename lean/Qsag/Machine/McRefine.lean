@@ -10,7 +10,7 @@ with the `ElfBinaryVerify` decoders, and relates the final state of the bounded-
 public import Qsag.Machine.ElfBinaryVerify
 import all Qsag.Machine.ElfBinaryVerify
 import all Qsag.Machine.ElfParse
-import Qsag.Math.Constructive
+import Qsag.Tactic.Prelude
 import Qsag.Tactic.AssuranceKit
 
 public section

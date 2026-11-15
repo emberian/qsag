@@ -24,7 +24,7 @@ with structural and cryptographic quorum gates:
 
 public import Qsag.Oracle.Keccak
 public import Qsag.Tactic.AssuranceKit
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 
 public section
 namespace Qsag

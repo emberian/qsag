@@ -10,7 +10,7 @@ nor a refinement of the Rust Fiat–Shamir transcript parser.
 -/
 public import Qsag.Protocol.Aggregation.HemWhirRbrSoundness
 import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
-import all Qsag.Oracle.MultiRoundFsQrom
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 
 public section
 namespace Qsag

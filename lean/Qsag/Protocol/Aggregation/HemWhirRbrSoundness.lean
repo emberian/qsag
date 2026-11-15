@@ -13,18 +13,17 @@ Fiat–Shamir challenges from transcript bytes nor constructs quantum Merkle ext
 must not be read as deployed verifier soundness.
 -/
 
-public import Qsag.Oracle.MultiRoundFsQrom
-public import Qsag.Coding.Cwyz26AffineGap
-public import Qsag.Coding.TrivariateGsExplainer
-public import Qsag.Oracle.QromMerkleOnlineExtraction
-public import Qsag.Tactic.ConstructiveRing
+public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
+public import Qsag.Coding.Cwyz26
+public import Qsag.Coding.GuruswamiSudan
+public import Qsag.Oracle.Qrom
+public import Qsag.Tactic.CommRing
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Oracle.MultiRoundFsQrom
-import all Qsag.Coding.AffineProximityGaps
-import all Qsag.Coding.PolyMv3
-import all Qsag.Coding.TrivariateGsExplainer
-import all Qsag.Coding.AffineIncidenceBound
-import all Qsag.Coding.Cwyz26AffineGap
+import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
+import all Qsag.Coding.Cwyz26
+import all Qsag.Math.Algebra
+import all Qsag.Coding.GuruswamiSudan
+import all Qsag.Coding.AffineProximity
 
 public section
 namespace Qsag
@@ -103,39 +102,6 @@ theorem ringDot_shiftPoly_trimPoly_eq {F : Type} [LawfulCommRing F] [DecidableEq
   | cons k ks =>
     simp only [shiftPoly, ringDot, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
     exact ringDot_trimPoly_eq p ks
-
-/-- Two degree-`≤ d` coefficient lists agreeing on `≥ d + 1` points of a `Nodup` set `U`
-    have identical canonical trimmed polynomials (`0` classical choice). -/
-theorem trimPoly_eq_of_agree_on_nodup {F : Type} [LawfulField F] [DecidableEq F]
-    {d : Nat} {P Q : List F} {U : List F}
-    (hP : P.length ≤ d + 1) (hQ : Q.length ≤ d + 1)
-    (hU : U.Nodup) (hULen : d + 1 ≤ U.length)
-    (hAgree : ∀ x ∈ U, RoundPoly.evalCoeffs P x = RoundPoly.evalCoeffs Q x) :
-    trimPoly P = trimPoly Q := by
-  let pG : GsUniPoly F := GsUniPoly.ofCoeffs P
-  let qG : GsUniPoly F := GsUniPoly.ofCoeffs Q
-  if hEq : pG = qG then
-    exact congrArg Subtype.val hEq
-  else
-    have hpDeg : pG.val.length ≤ d + 1 := Nat.le_trans (trimPoly_length_le P) hP
-    have hqDeg : qG.val.length ≤ d + 1 := Nat.le_trans (trimPoly_length_le Q) hQ
-    rcases gsUniPoly_exists_diff_on_domain hEq hpDeg hqDeg hU hULen with ⟨x₀, hx₀U, hDiff⟩
-    exfalso
-    apply hDiff
-    change RoundPoly.evalCoeffs (trimPoly P) x₀ = RoundPoly.evalCoeffs (trimPoly Q) x₀
-    rw [evalCoeffs_trimPoly, evalCoeffs_trimPoly]
-    exact hAgree x₀ hx₀U
-
-private theorem filter_overlap_len {α : Type} (p q : α → Bool) :
-    ∀ (D : List α),
-      (D.filter p).length + (D.filter q).length ≤
-        D.length + (D.filter (fun z => p z && q z)).length
-  | [] => Nat.le_refl 0
-  | a :: ds => by
-    have ih := filter_overlap_len p q ds
-    cases hp : p a <;> cases hq : q a <;>
-      simp only [List.filter_cons, hp, hq, Bool.and_self, Bool.and_false, Bool.false_and,
-        Bool.false_eq_true, ↓reduceIte, List.length_cons] <;> omega
 
 private theorem filter_eq_nil_of_false {α : Type} (p : α → Bool) :
     ∀ (xs : List α), (∀ a ∈ xs, p a = false) → xs.filter p = []
@@ -687,216 +653,6 @@ theorem hemBridge_bad_quads_le_three_cube {F : Type} [LawfulField F] [DecidableE
       rw [Nat.mul_left_comm, hPow3]
     omega
   exact Nat.le_trans hAllPhi hFinal
-
-/-- Explicit correlated-agreement pair witness `(F_poly, G_poly)` for `(f, g)` at `(d, B)` on `D`. -/
-def HasCorrelatedPairAt {F : Type} [CommRingOps F] [DecidableEq F]
-    (d B : Nat) (f g : F → F) (D : List F) (F_poly G_poly : List F) : Prop :=
-  F_poly.length ≤ d + 1 ∧
-  G_poly.length ≤ d ∧
-  B ≤ (D.filter (fun z =>
-    decide (RoundPoly.evalCoeffs F_poly z = f z) &&
-    decide (RoundPoly.evalCoeffs G_poly z = g z))).length
-
-/-- `P` decomposes as `F_poly + (α + β X) G_poly` (up to trailing zeros) for a `(d, B)`
-    correlated-agreement pair `(F_poly, G_poly)` of `(f, g)` on `D`. -/
-def DecomposesViaCorrelatedPair {F : Type} [CommRingOps F] [DecidableEq F]
-    (d B : Nat) (f g : F → F) (D : List F) (α β : F) (P : List F) : Prop :=
-  ∃ F_poly G_poly : List F,
-    HasCorrelatedPairAt d B f g D F_poly G_poly ∧
-    trimPoly P = trimPoly
-      (polyAddVar F_poly
-        (polyAddVar (polyScaleVar α G_poly) (polyScaleVar β (shiftPoly G_poly))))
-
-/-- Selected-polynomial decomposition bound for one binary affine fold. This is a
-    component needed by the equal-degree three-challenge lift, not that full lift:
-    At most `bad` challenges `(α, β) ∈ prodPool S` admit a degree-`≤ d` polynomial `P` agreeing
-    with `f + (α + β X) g` on `≥ A` points of `D` that does NOT decompose as `F + (α + β X) G`
-    for a `(d, A - 1)` correlated-agreement pair `(F, G)` of `(f, g)`. -/
-@[expose] def AffineFoldDecompBound {F : Type} [LawfulField F] [DecidableEq F]
-    (D S : List F) (d A bad : Nat) : Prop :=
-  ∀ x : (F → F) × (F → F),
-    ∀ L : List (Fin (prodPool S).length), L.Nodup →
-      (∀ ch ∈ L, ¬¬ ∃ P : List F,
-        affineMcaAccepts D S d A x ch.1 P = true ∧
-        ¬ DecomposesViaCorrelatedPair d (A - 1) x.1 x.2 D
-            ((prodPool S).get ch).1 ((prodPool S).get ch).2 P) →
-      L.length ≤ bad
-
-/-- `AffineFoldDecompBound` implies `AffineMcaBound` at the identical parameters. -/
-theorem AffineFoldDecompBound.toAffineMcaBound {F : Type} [LawfulField F] [DecidableEq F]
-    {D S : List F} {d A bad : Nat}
-    (h : AffineFoldDecompBound D S d A bad) : AffineMcaBound D S d A bad := by
-  intro x hFar L hNd hEx
-  refine h x L hNd (fun ch hch hNo => hEx ch hch (fun ⟨P, hP⟩ => hNo ⟨P, hP, ?_⟩))
-  rintro ⟨F_poly, G_poly, ⟨hF, hG, hJ⟩, _⟩
-  exact hFar ⟨F_poly, G_poly, hF, hG, hJ⟩
-
-/-- **Constructive Lift from `AffineMcaBound` to `AffineFoldDecompBound`
-    (`affineFoldDecompBound_of_affineMcaBound`, `0` classical choice)**:
-    Whenever `D.Nodup` and `D.length + d + 1 < 2 * A`, ANY `AffineMcaBound D S d A bad`
-    (including both `affineMcaBound_welch_berlekamp` and `cwyz26_affineMcaBound_of_nonExcluded`)
-    lifts to `AffineFoldDecompBound D S d A bad` with the identical exceptional-challenge count `bad`. -/
-theorem affineFoldDecompBound_of_affineMcaBound {F : Type} [LawfulField F] [DecidableEq F]
-    {D S : List F} {d A bad : Nat}
-    (hMca : AffineMcaBound D S d A bad)
-    (hD : D.Nodup) (hOverlap : D.length + d + 1 < 2 * A) :
-    AffineFoldDecompBound D S d A bad := by
-  intro x L hNd hEx
-  cases L with
-  | nil => exact Nat.zero_le bad
-  | cons ch₀ rest =>
-    -- Intuitionistically deduce `¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D` from `ch₀`:
-    have hNotCA : ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D := by
-      rintro ⟨F₀, G₀, hF₀, hG₀, hJoint⟩
-      refine hEx ch₀ (.head rest) ?_
-      rintro ⟨P, hAcc, hNoDecomp⟩
-      apply hNoDecomp
-      unfold affineMcaAccepts at hAcc
-      simp only [Bool.and_eq_true, decide_eq_true_eq] at hAcc
-      rw [list_getD_eq_get (prodPool S) _ ch₀] at hAcc
-      rcases hAcc with ⟨⟨_, hPLen⟩, hPAg⟩
-      let α := ((prodPool S).get ch₀).1
-      let β := ((prodPool S).get ch₀).2
-      let Q := polyAddVar F₀ (polyAddVar (polyScaleVar α G₀) (polyScaleVar β (shiftPoly G₀)))
-      have hQLen : Q.length ≤ d + 1 := by
-        have h1 : (polyScaleVar α G₀).length ≤ d + 1 := by
-          simp only [polyScaleVar, List.length_map]; omega
-        have h2 : (polyScaleVar β (shiftPoly G₀)).length ≤ d + 1 := by
-          simp only [polyScaleVar, shiftPoly, List.length_map, List.length_cons]; omega
-        exact polyAddVar_length_le F₀ _ (d + 1) hF₀ (polyAddVar_length_le _ _ (d + 1) h1 h2)
-      let pJoint : F → Bool := fun z =>
-        decide (RoundPoly.evalCoeffs F₀ z = x.1 z) && decide (RoundPoly.evalCoeffs G₀ z = x.2 z)
-      let pFold : F → Bool := fun z =>
-        decide (RoundPoly.evalCoeffs P z =
-          CommRingOps.add (x.1 z) (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (x.2 z)))
-      let U := D.filter (fun z => pJoint z && pFold z)
-      have hULen : d + 1 ≤ U.length := by
-        have hOv := filter_overlap_len pJoint pFold D
-        change (D.filter pJoint).length + (D.filter pFold).length ≤ D.length + U.length at hOv
-        have hA1 : A - 1 ≤ (D.filter pJoint).length := hJoint
-        have hA2 : A ≤ (D.filter pFold).length := hPAg
-        omega
-      have hTrimEq : trimPoly P = trimPoly Q := by
-        refine trimPoly_eq_of_agree_on_nodup hPLen hQLen (List.Pairwise.filter _ hD) hULen ?_
-        intro z hz
-        rcases List.mem_filter.mp hz with ⟨_, hBoth⟩
-        rcases (Bool.and_eq_true _ _).mp hBoth with ⟨hJ, hFl⟩
-        have hFz : RoundPoly.evalCoeffs F₀ z = x.1 z :=
-          of_decide_eq_true ((Bool.and_eq_true _ _).mp hJ).1
-        have hGz : RoundPoly.evalCoeffs G₀ z = x.2 z :=
-          of_decide_eq_true ((Bool.and_eq_true _ _).mp hJ).2
-        have hPz : RoundPoly.evalCoeffs P z =
-            CommRingOps.add (x.1 z) (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (x.2 z)) :=
-          of_decide_eq_true hFl
-        rw [hPz]
-        dsimp only [Q]
-        rw [evalCoeffs_polyAddVar, evalCoeffs_polyAddVar, evalCoeffs_polyScaleVar,
-            evalCoeffs_polyScaleVar, evalCoeffs_shiftPoly, hFz, hGz,
-            ← LawfulCommRing.mul_assoc β z (x.2 z), ← LawfulCommRing.right_distrib]
-      exact ⟨F₀, G₀, ⟨hF₀, hG₀, hJoint⟩, hTrimEq⟩
-    exact hMca x hNotCA (ch₀ :: rest) hNd
-      (fun ch hch hNo => hEx ch hch (fun ⟨P, hP, _⟩ => hNo ⟨P, hP⟩))
-
-/-- The Welch–Berlekamp agreement inequality, together with `A ≤ D.length`, implies the
-    overlap condition needed for claim-preserving decomposition. No separate rate premise
-    is required. -/
-theorem affineFoldDecompBound_welch_berlekamp {F : Type} [LawfulField F] [DecidableEq F]
-    (D S : List F) (d A : Nat)
-    (hD : D.Nodup) (hS : S.Nodup) (hAD : A ≤ D.length)
-    (hWB : 2 * D.length + d + 1 < 3 * A) :
-    AffineFoldDecompBound D S d A (Nat.max S.length (D.length * (D.length - 1) / 2)) :=
-  affineFoldDecompBound_of_affineMcaBound
-    (affineMcaBound_welch_berlekamp D S d A hD hS hAD hWB)
-    hD (by omega)
-
-/-- **`[CWYZ26]` Lemma 4.1 + 4.2 Non-Excluded Decomposition Hypothesis (`NonExcludedDecompBound`)**:
-    At arbitrary Johnson list-decoding radius (`D_list ≥ 1`), bounds the number of non-excluded
-    challenges `(α, β) ∈ prodPool S` whose explainer `Q(X, α + β X, Z)` admits a degree-`≤ d`,
-    agreement-`≥ A` root `P` that does NOT arise from a `(d, A - 1)` correlated-agreement branch. -/
-def NonExcludedDecompBound {F : Type} [LawfulField F] [DecidableEq F]
-    (D S : List F) (d A m Wx Dy rest : Nat) : Prop :=
-  ∀ x : (F → F) × (F → F),
-    ∀ L : List (F × F), L.Nodup →
-      (∀ p ∈ L, p ∈ prodPool S ∧
-        Poly3.lineSpec (Poly3.explainer x.1 x.2 D m d Wx Dy) p.1 p.2 ≠ CommRingOps.zero ∧
-        ∃ P : List F, P.length ≤ d + 1 ∧
-          A ≤ (D.filter (foldAgree x p.1 p.2 (UPoly.ofList P))).length ∧
-          Poly3.evalAffineLine (Poly3.explainer x.1 x.2 D m d Wx Dy) p.1 p.2 (UPoly.ofList P) =
-            CommRingOps.zero ∧
-          ¬ DecomposesViaCorrelatedPair d (A - 1) x.1 x.2 D p.1 p.2 P) →
-      L.length ≤ rest
-
-/-- **Direct `[CWYZ26]` Johnson-Radius Assembly onto `AffineFoldDecompBound`
-    (`cwyz26_affineFoldDecompBound_of_nonExcluded`)**:
-    Under Equation (4.5) (`D.length * Poly3.triCount 1 m Dy m < Poly3.triCount d Wx Dy (Dy + 1)`) and
-    `Wx + Dy ≤ m * A`, every accepted post-fold witness vanishes in `Poly3.explainer` (Lemma 4.2) and
-    at most `Dy` challenges are excluded (`|E| ≤ Dy`), yielding `AffineFoldDecompBound D S d A (Dy + rest)`. -/
-theorem cwyz26_affineFoldDecompBound_of_nonExcluded {F : Type} [LawfulField F] [DecidableEq F]
-    (D S : List F) (d A m Wx Dy rest : Nat)
-    (hrest : NonExcludedDecompBound D S d A m Wx Dy rest)
-    (hD : D.Nodup) (hS : S.Nodup)
-    (hcount : D.length * Poly3.triCount 1 m Dy m < Poly3.triCount d Wx Dy (Dy + 1))
-    (hWA : Wx + Dy ≤ m * A) :
-    AffineFoldDecompBound D S d A (Dy + rest) := by
-  intro x L hNd hEx
-  apply Decidable.byContradiction
-  intro hGt
-  refine not_not_forall_mem _ L hEx (fun hAll => hGt ?_)
-  obtain ⟨hQne, hQdeg, _, _⟩ := Poly3.explainer_spec x.1 x.2 D m d Wx Dy hcount
-  have hr := hrest x
-  have hfact : ∀ p ∈ L.map (fun ch => (prodPool S).get ch), p ∈ prodPool S ∧
-      ∃ P : List F, P.length ≤ d + 1 ∧
-        A ≤ (D.filter (foldAgree x p.1 p.2 (UPoly.ofList P))).length ∧
-        Poly3.evalAffineLine (Poly3.explainer x.1 x.2 D m d Wx Dy) p.1 p.2 (UPoly.ofList P) =
-          CommRingOps.zero ∧
-        ¬ DecomposesViaCorrelatedPair d (A - 1) x.1 x.2 D p.1 p.2 P := by
-    intro p hp
-    obtain ⟨ch, hchL, rfl⟩ := List.mem_map.mp hp
-    obtain ⟨Pl, hPlAcc, hNoDecomp⟩ := hAll ch hchL
-    unfold affineMcaAccepts at hPlAcc
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hPlAcc
-    rw [list_getD_eq_get (prodPool S) _ ch] at hPlAcc
-    have hfilt : D.filter (foldAgree x ((prodPool S).get ch).1 ((prodPool S).get ch).2
-        (UPoly.ofList Pl)) = D.filter (fun z => decide (RoundPoly.evalCoeffs Pl z =
-          CommRingOps.add (x.1 z)
-            (CommRingOps.mul (CommRingOps.add ((prodPool S).get ch).1
-              (CommRingOps.mul ((prodPool S).get ch).2 z)) (x.2 z)))) :=
-      congrArg (fun q => List.filter q D) (funext fun z => by
-        show decide ((UPoly.ofList Pl).eval z = _) = _
-        rw [eval_ofList])
-    have hlen : A ≤ (D.filter (foldAgree x ((prodPool S).get ch).1 ((prodPool S).get ch).2
-        (UPoly.ofList Pl))).length := by rw [hfilt]; exact hPlAcc.2
-    have hdeg : (UPoly.ofList Pl).natDeg ≤ d := by
-      have h1 := natDeg_ofList_le Pl
-      have h2 := hPlAcc.1.2
-      omega
-    exact ⟨list_get_mem _ ch, Pl, hPlAcc.1.2, hlen,
-      Poly3.explainer_vanishes x.1 x.2 D m d Wx Dy hcount _ _ (UPoly.ofList Pl) _ hdeg
-        (nodup_filter _ D hD)
-        (fun z hz => (List.mem_filter.mp hz).1)
-        (fun z hz => of_decide_eq_true (List.mem_filter.mp hz).2)
-        (Nat.le_trans hWA (Nat.mul_le_mul_left m hlen)),
-      hNoDecomp⟩
-  have hpNd : (L.map (fun ch => (prodPool S).get ch)).Nodup :=
-    List.Pairwise.map _ (fun a b hab hEq => hab (nodup_get_inj (prodPool_nodup hS) hEq)) hNd
-  have hlenp : (L.map (fun ch => (prodPool S).get ch)).length = L.length := List.length_map _
-  generalize Poly3.explainer x.1 x.2 D m d Wx Dy = Q at hQne hQdeg hr hfact
-  generalize L.map (fun ch => (prodPool S).get ch) = pairs at hfact hpNd hlenp
-  have hexc : (pairs.filter (fun p => decide (Poly3.lineSpec Q p.1 p.2 = CommRingOps.zero))).length ≤
-      Q.degYZ :=
-    Poly3.lineSpec_zero_card_le Q hQne _ (nodup_filter _ _ hpNd)
-      (fun p hp => of_decide_eq_true (List.mem_filter.mp hp).2)
-  have hnon : (pairs.filter (fun p => !decide (Poly3.lineSpec Q p.1 p.2 = CommRingOps.zero))).length ≤
-      rest :=
-    hr _ (nodup_filter _ _ hpNd) (fun p hp => by
-      obtain ⟨hm, hb⟩ := List.mem_filter.mp hp
-      obtain ⟨h1, h2⟩ := hfact p hm
-      exact ⟨h1, fun e => by
-        rw [decide_eq_true e] at hb
-        exact absurd hb (by decide), h2⟩)
-  have hsum := length_filter_add_not
-    (fun p : F × F => decide (Poly3.lineSpec Q p.1 p.2 = CommRingOps.zero)) pairs
-  omega
 
 private theorem filter_any_length_le {α β : Type} (items : List α) (pred : α → β → Bool)
     (xs : List β) (B : Nat)

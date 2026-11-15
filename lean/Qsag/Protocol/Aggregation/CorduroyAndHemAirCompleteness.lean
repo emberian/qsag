@@ -27,7 +27,7 @@ inactive slots in `stepXmssSlotsRows_of_verify`); the corresponding constructor 
 aggregation geometry (16 layers, 32 FORS trees of height 8); the two must not be identified.
 -/
 
-public import Qsag.Math.Constructive
+public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
 import all Qsag.Math.Goldilocks
 public import Qsag.Oracle.Poseidon2

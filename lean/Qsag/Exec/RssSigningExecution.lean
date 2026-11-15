@@ -6,7 +6,7 @@ import all Qsag.Exec.RssSigningMachine
 import all Qsag.Exec.RssSigningControl
 import all Qsag.Exec.RssSigningProgram
 import all Qsag.Exec.RssProductionProfile
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-!

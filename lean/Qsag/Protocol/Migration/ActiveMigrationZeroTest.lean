@@ -40,1080 +40,20 @@ of Boolean `AND` gates into the first inner-product claims (`γ` combiner and
 degree-30 round 0, `BIT_CHECK_DEGREE = 54`) are proved in §11 below.
 -/
 
-public import Qsag.Math.Constructive
-public import Qsag.Math.BinaryTower
+public import Qsag.Tactic.Prelude
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Exec.SimulationSpine
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Tactic.AssuranceKit
+
+public import Qsag.Math.EllipticCurves
+
 
 public section
 
 namespace Qsag
 
 set_option autoImplicit false
-
-/-! ## 1. `SECP256K1_ORDER_N` & `ED25519_ORDER_L` Subgroup Semantics, Taproot Parity, Ed25519 Clamping & Shor Boundary -/
-
-/-- Full-width 256-bit spending scalar / witness carrier. -/
-abbrev MigrationKey256 := BitVec 256
-
-/-- Exact `secp256k1` prime subgroup order `SECP_N` (`secp256k1_ct.rs:19-24`). -/
-@[expose] def SECP256K1_ORDER_N : Nat :=
-  0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-
-/-- Exact `Ed25519` prime subgroup order `ED_ORDER` (`scalar.rs:8-13`). -/
-@[expose] def ED25519_ORDER_L : Nat :=
-  0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
-
-/-- Poseidon2 domain separator for canonical migration nullifiers (`scalar.rs:6`, `"MIG_NUL1"`). -/
-def NULLIFIER_DOMAIN : UInt64 := 0x4d49475f4e554c31
-
-/-- Little-endian 64-bit limb table for `SECP_N` matching `secp256k1_ct.rs:19-24`. -/
-def secp256k1OrderLimbsLe : Fin 4 → UInt64
-  | ⟨0, _⟩ => 0xBFD25E8CD0364141
-  | ⟨1, _⟩ => 0xBAAEDCE6AF48A03B
-  | ⟨2, _⟩ => 0xFFFFFFFFFFFFFFFE
-  | ⟨3, _⟩ => 0xFFFFFFFFFFFFFFFF
-
-/-- Little-endian 64-bit limb table for `ED_ORDER` matching `scalar.rs:8-13`. -/
-def ed25519OrderLimbsLe : Fin 4 → UInt64
-  | ⟨0, _⟩ => 0x5812631A5CF5D3ED
-  | ⟨1, _⟩ => 0x14DEF9DEA2F79CD6
-  | ⟨2, _⟩ => 0
-  | ⟨3, _⟩ => 0x1000000000000000
-
-/-- Reconstruct a 256-bit integer from 4 little-endian `UInt64` limbs (`scalar.rs:106-108`). -/
-def limbs4LeToNat (limbs : Fin 4 → UInt64) : Nat :=
-  (limbs ⟨0, by decide⟩).toNat +
-  (limbs ⟨1, by decide⟩).toNat * (2 ^ 64) +
-  (limbs ⟨2, by decide⟩).toNat * (2 ^ 128) +
-  (limbs ⟨3, by decide⟩).toNat * (2 ^ 192)
-
-/-- Legacy curve subgroup selector (`scalar.rs:22-33`). -/
-inductive ScalarGroup where
-  | Secp256k1
-  | Ed25519
-  deriving Repr, DecidableEq
-
-/-- Exact subgroup order `group.order()` (`scalar.rs:27-32`). -/
-@[expose] def ScalarGroup.orderNat : ScalarGroup → Nat
-  | .Secp256k1 => SECP256K1_ORDER_N
-  | .Ed25519   => ED25519_ORDER_L
-
-/-- Subgroup domain separator limb `input[0]` inside `compute_nullifier` (`scalar.rs:93-96`). -/
-def ScalarGroup.nullifierTag : ScalarGroup → Goldilocks
-  | .Secp256k1 => ⟨1, by decide⟩
-  | .Ed25519   => ⟨2, by decide⟩
-
-/-- Circuit canonical scalar range guard `0 < s < group.orderNat` (`ownership.rs:261`, `scalar.rs:55-62`). -/
-@[expose] def requireCanonicalScalar (group : ScalarGroup) (s : BitVec 256) : Bool :=
-  (s.toNat != 0) && decide (s.toNat < group.orderNat)
-
-theorem curve_orders_match_le_limbs_and_bounds :
-    limbs4LeToNat secp256k1OrderLimbsLe = SECP256K1_ORDER_N ∧
-    limbs4LeToNat ed25519OrderLimbsLe = ED25519_ORDER_L ∧
-    2 ^ 255 < SECP256K1_ORDER_N ∧ SECP256K1_ORDER_N < 2 ^ 256 ∧ SECP256K1_ORDER_N % 2 = 1 ∧
-    2 ^ 252 < ED25519_ORDER_L ∧ ED25519_ORDER_L < 2 ^ 253 ∧ ED25519_ORDER_L % 2 = 1 ∧
-    ED25519_ORDER_L % 8 = 5 := by
-  unfold limbs4LeToNat secp256k1OrderLimbsLe ed25519OrderLimbsLe SECP256K1_ORDER_N ED25519_ORDER_L
-  decide
-
-theorem scalarGroup_order_props (group : ScalarGroup) :
-    1 < group.orderNat ∧ group.orderNat < 2 ^ 256 ∧ group.orderNat % 2 = 1 := by
-  cases group <;> unfold ScalarGroup.orderNat SECP256K1_ORDER_N ED25519_ORDER_L <;> decide
-
-theorem requireCanonicalScalar_iff (group : ScalarGroup) (s : BitVec 256) :
-    requireCanonicalScalar group s = true ↔ (0 < s.toNat ∧ s.toNat < group.orderNat) := by
-  unfold requireCanonicalScalar
-  rw [Bool.and_eq_true, bne_iff_ne, decide_eq_true_eq]
-  constructor
-  · rintro ⟨hNe, hLt⟩
-    exact ⟨Nat.pos_of_ne_zero hNe, hLt⟩
-  · rintro ⟨hPos, hLt⟩
-    exact ⟨Nat.ne_of_gt hPos, hLt⟩
-
-/-- Exact subgroup boundary behavior matching `scalar.rs:165-175` (`canonical_boundaries_and_wrap`):
-    `0` and `group.orderNat` are rejected, whereas `group.orderNat - 1` is accepted. -/
-theorem canonical_scalar_boundaries_exact (group : ScalarGroup) :
-    requireCanonicalScalar group 0#256 = false ∧
-    requireCanonicalScalar group (BitVec.ofNat 256 group.orderNat) = false ∧
-    requireCanonicalScalar group (BitVec.ofNat 256 (group.orderNat - 1)) = true := by
-  cases group <;>
-    unfold requireCanonicalScalar ScalarGroup.orderNat SECP256K1_ORDER_N ED25519_ORDER_L <;>
-    decide
-
-/-- Negation `SECP_N - s` of a canonical `secp256k1` scalar (`legacy.rs:298, 318`). -/
-def secpNegScalar (s : BitVec 256) : BitVec 256 :=
-  if requireCanonicalScalar .Secp256k1 s then
-    BitVec.ofNat 256 (SECP256K1_ORDER_N - s.toNat)
-  else
-    0#256
-
-/-- Non-injective Bitcoin Taproot `x`-only equivalence (`legacy.rs:290-324`, `ownership.rs:281-284`):
-    canonical nonzero scalars `s` and `SECP_N - s` share the identical curve `x`-coordinate. -/
-@[expose] def taprootXOnlySameX (s1 s2 : BitVec 256) : Prop :=
-  requireCanonicalScalar .Secp256k1 s1 = true ∧
-  requireCanonicalScalar .Secp256k1 s2 = true ∧
-  (s1 = s2 ∨ s2.toNat = SECP256K1_ORDER_N - s1.toNat)
-
-private theorem cIte_pos {α : Type} {p : Prop} [inst : Decidable p] (hp : p) (a b : α) :
-    (if p then a else b) = a := by
-  cases inst with
-  | isTrue _ => rfl
-  | isFalse h => exact absurd hp h
-
-private theorem cIte_neg {α : Type} {p : Prop} [inst : Decidable p] (hnp : ¬ p) (a b : α) :
-    (if p then a else b) = b := by
-  cases inst with
-  | isTrue h => exact absurd h hnp
-  | isFalse _ => rfl
-
-private theorem cDIte_pos {α : Type} {p : Prop} [inst : Decidable p] (hp : p)
-    (a : p → α) (b : ¬ p → α) : (if h : p then a h else b h) = a hp := by
-  cases inst with
-  | isTrue _ => rfl
-  | isFalse h => exact absurd hp h
-
-theorem secpNegScalar_props {s : BitVec 256}
-    (hCanon : requireCanonicalScalar .Secp256k1 s = true) :
-    (secpNegScalar s).toNat = SECP256K1_ORDER_N - s.toNat ∧
-    requireCanonicalScalar .Secp256k1 (secpNegScalar s) = true ∧
-    secpNegScalar (secpNegScalar s) = s ∧
-    s ≠ secpNegScalar s ∧
-    taprootXOnlySameX s (secpNegScalar s) := by
-  have hb := curve_orders_match_le_limbs_and_bounds
-  obtain ⟨hPos, hLtN⟩ := (requireCanonicalScalar_iff .Secp256k1 s).mp hCanon
-  dsimp only [ScalarGroup.orderNat] at hLtN
-  have hDiffLt256 : SECP256K1_ORDER_N - s.toNat < 2 ^ 256 := by omega
-  have hNegToNat : (secpNegScalar s).toNat = SECP256K1_ORDER_N - s.toNat := by
-    unfold secpNegScalar
-    rw [hCanon]
-    simp only [↓reduceIte, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hDiffLt256]
-  have hNegCanon : requireCanonicalScalar .Secp256k1 (secpNegScalar s) = true := by
-    rw [requireCanonicalScalar_iff, hNegToNat]
-    dsimp only [ScalarGroup.orderNat]
-    exact ⟨by omega, by omega⟩
-  have hInv : secpNegScalar (secpNegScalar s) = s := by
-    have hOuter : secpNegScalar (secpNegScalar s) =
-        if requireCanonicalScalar .Secp256k1 (secpNegScalar s) then
-          BitVec.ofNat 256 (SECP256K1_ORDER_N - (secpNegScalar s).toNat)
-        else 0#256 := rfl
-    rw [hOuter, hNegCanon]
-    simp only [↓reduceIte, hNegToNat]
-    apply BitVec.eq_of_toNat_eq
-    have hsLt256 : s.toNat < 2 ^ 256 := s.isLt
-    have hSubSub : SECP256K1_ORDER_N - (SECP256K1_ORDER_N - s.toNat) = s.toNat := by omega
-    rw [BitVec.toNat_ofNat, hSubSub, Nat.mod_eq_of_lt hsLt256]
-  have hNe : s ≠ secpNegScalar s := by
-    intro hEq
-    have hv := congrArg BitVec.toNat hEq
-    rw [hNegToNat] at hv
-    have hOdd : SECP256K1_ORDER_N % 2 = 1 := hb.2.2.2.2.1
-    omega
-  exact ⟨hNegToNat, hNegCanon, hInv, hNe, ⟨hCanon, hNegCanon, Or.inr hNegToNat⟩⟩
-
-/-- `x`-only & `y`-parity projection of the multiples `[s]G`, `0 < s < n`, of a generator of
-    order `n` (BIP-340 x-only public keys; `ownership.rs:281-284`): `[s]G` and `[n - s]G` are
-    the only multiples sharing an `x`-coordinate (`sameX_iff`), and their `y` parities are
-    opposite (`yParity_neg`). The interface does not say where `xOf`/`yParity` come from.
-    `Weierstrass.Curve.PrimeOrderGroup.projection` builds it from the affine coordinates of
-    curve points; `scalarModelTaprootProjection` builds it from scalars alone. -/
-structure TaprootCurveProjection (n : Nat) (XCoord : Type) where
-  xOf         : Nat → XCoord
-  yParity     : Nat → Bool
-  sameX_iff   : ∀ s1 s2, 0 < s1 → s1 < n → 0 < s2 → s2 < n →
-    (xOf s1 = xOf s2 ↔ (s1 = s2 ∨ s2 = n - s1))
-  yParity_neg : ∀ s, 0 < s → s < n → yParity (n - s) = !(yParity s)
-
-/-- Scalar-level model of the interface at any odd order: `xOf s = min(s, n - s)` and
-    `yParity s = (n < 2s)`. It contains no curve. Its only use is to show that the two
-    interface laws are jointly consistent at every odd `n`, `SECP256K1_ORDER_N` included;
-    the curve-point instance is `Weierstrass.Curve.PrimeOrderGroup.projection`. -/
-def scalarModelTaprootProjection (n : Nat) (hOdd : n % 2 = 1) : TaprootCurveProjection n Nat where
-  xOf s := if s ≤ n - s then s else n - s
-  yParity s := decide (n < 2 * s)
-  sameX_iff s1 s2 _ l1 _ l2 := by
-    by_cases a : s1 ≤ n - s1 <;> by_cases c : s2 ≤ n - s2 <;>
-      simp only [a, c, ↓reduceIte] <;>
-      (constructor
-       · intro h
-         by_cases e : s1 = s2
-         · exact .inl e
-         · exact .inr (by omega)
-       · intro h
-         rcases h with h | h <;> omega)
-  yParity_neg s _ l := by
-    by_cases h : n < 2 * s
-    · rw [decide_eq_true h, decide_eq_false (by omega : ¬ n < 2 * (n - s))]
-      rfl
-    · rw [decide_eq_false h, decide_eq_true (by omega : n < 2 * (n - s))]
-      rfl
-
-/-- The compressed `(x, y-parity)` encoding is injective on `[1, n)` (SEC 1 §2.3.3 point
-    compression; `BitcoinHash160` at `ownership.rs:265-267`). -/
-theorem TaprootCurveProjection.compressed_injective {n : Nat} {XCoord : Type}
-    (proj : TaprootCurveProjection n XCoord) :
-    (∀ s1 s2, 0 < s1 → s1 < n → 0 < s2 → s2 < n →
-      proj.xOf s1 = proj.xOf s2 → proj.yParity s1 = proj.yParity s2 → s1 = s2) ∧
-    (∀ s, 0 < s → s < n → proj.xOf (n - s) = proj.xOf s) := by
-  refine ⟨?_, fun s p l => ((proj.sameX_iff s (n - s) p l (by omega) (by omega)).mpr (Or.inr rfl)).symm⟩
-  intro s1 s2 p1 l1 p2 l2 hX hY
-  rcases (proj.sameX_iff s1 s2 p1 l1 p2 l2).mp hX with h | h
-  · exact h
-  · subst h
-    rw [proj.yParity_neg s1 p1 l1] at hY
-    cases hb : proj.yParity s1 <;> rw [hb] at hY <;> cases hY
-
-/-- Dropping the parity bit loses injectivity at every order above two: `[1]G` and
-    `[n - 1]G` are distinct multiples with one `x`-coordinate. -/
-theorem TaprootCurveProjection.tooth_xonly_not_injective {n : Nat} {XCoord : Type}
-    (proj : TaprootCurveProjection n XCoord) (hn : 2 < n) :
-    ∃ s1 s2, 0 < s1 ∧ s1 < n ∧ 0 < s2 ∧ s2 < n ∧ s1 ≠ s2 ∧ proj.xOf s1 = proj.xOf s2 :=
-  ⟨1, n - 1, by omega, by omega, by omega, by omega, by omega,
-    (proj.sameX_iff 1 (n - 1) (by omega) (by omega) (by omega) (by omega)).mpr (Or.inr rfl)⟩
-
-#tooth_pair
-  Qsag.TaprootCurveProjection.compressed_injective
-  vs
-  Qsag.TaprootCurveProjection.tooth_xonly_not_injective
-
-private theorem TaprootCurveProjection.sameX_iff_canonical {XCoord : Type}
-    (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) (s1 s2 : BitVec 256)
-    (h1 : requireCanonicalScalar .Secp256k1 s1 = true)
-    (h2 : requireCanonicalScalar .Secp256k1 s2 = true) :
-    proj.xOf s1.toNat = proj.xOf s2.toNat ↔ taprootXOnlySameX s1 s2 := by
-  obtain ⟨p1, l1⟩ := (requireCanonicalScalar_iff .Secp256k1 s1).mp h1
-  obtain ⟨p2, l2⟩ := (requireCanonicalScalar_iff .Secp256k1 s2).mp h2
-  rw [proj.sameX_iff _ _ p1 l1 p2 l2]
-  constructor
-  · rintro (h | h)
-    · exact ⟨h1, h2, Or.inl (BitVec.eq_of_toNat_eq h)⟩
-    · exact ⟨h1, h2, Or.inr h⟩
-  · rintro ⟨_, _, h | h⟩
-    · exact Or.inl (congrArg BitVec.toNat h)
-    · exact Or.inr h
-
-private theorem TaprootCurveProjection.yParity_neg_canonical {XCoord : Type}
-    (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) (s : BitVec 256)
-    (h : requireCanonicalScalar .Secp256k1 s = true) :
-    proj.yParity (secpNegScalar s).toNat = !(proj.yParity s.toNat) := by
-  obtain ⟨p, l⟩ := (requireCanonicalScalar_iff .Secp256k1 s).mp h
-  rw [(secpNegScalar_props h).1]
-  exact proj.yParity_neg _ p l
-
-/-- **`#tooth` Taproot `x`-Only Non-Injectivity Without `y[0]` Parity**: without
-    `ownership.rs:282` (`c.output(y[0])`), `proj.xOf` is not injective on the canonical
-    `secp256k1` scalars `[1, SECP_N - 1]`: `1#256` and `secpNegScalar 1#256` are distinct
-    canonical scalars sharing one `x`-coordinate. -/
-theorem tooth_taproot_xonly_not_injective_without_y_parity
-    {XCoord : Type} (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) :
-    ∃ s1 s2 : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s1 = true ∧
-      requireCanonicalScalar .Secp256k1 s2 = true ∧
-      s1 ≠ s2 ∧
-      taprootXOnlySameX s1 s2 ∧
-      proj.xOf s1.toNat = proj.xOf s2.toNat := by
-  have h1Canon : requireCanonicalScalar .Secp256k1 1#256 = true := by
-    unfold requireCanonicalScalar ScalarGroup.orderNat SECP256K1_ORDER_N
-    decide
-  obtain ⟨_, h2Canon, _, hNe, hSameX⟩ := secpNegScalar_props h1Canon
-  exact ⟨1#256, secpNegScalar 1#256, h1Canon, h2Canon, hNe, hSameX,
-    (proj.sameX_iff_canonical 1#256 (secpNegScalar 1#256) h1Canon h2Canon).mpr hSameX⟩
-
-/-- Normalize any canonical `secp256k1` scalar to its even-`y` Taproot representative (`legacy.rs:299-301, 319-321`). -/
-def normalizeTaprootEvenY {XCoord : Type} (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord)
-    (s : BitVec 256) : BitVec 256 :=
-  if proj.yParity s.toNat then secpNegScalar s else s
-
-/-- **Taproot Even-`y` Parity Constraint Restores Canonical Injectivity**, for any projection
-    at the `secp256k1` order (in particular `secp256k1TaprootProjection`, whose `xOf` and
-    `yParity` are affine coordinates of `[s]G`):
-    1. Enforcing `proj.yParity s = false` (`c.output(y[0])` at `ownership.rs:282`) makes `proj.xOf`
-       injective across all canonical `secp256k1` scalars.
-    2. Compressed `(proj.xOf s, proj.yParity s)` (`BitcoinHash160` at `ownership.rs:265-267`) is
-       injective across all canonical scalars `1 ≤ s < SECP_N`.
-    3. `normalizeTaprootEvenY` produces a canonical scalar sharing the same `x`-coordinate with
-       even `y[0]` parity (`false`). -/
-theorem taproot_even_y_parity_restores_canonical_injectivity
-    {XCoord : Type} (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) :
-    (∀ s1 s2 : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s1 = true →
-      requireCanonicalScalar .Secp256k1 s2 = true →
-      proj.yParity s1.toNat = false →
-      proj.yParity s2.toNat = false →
-      proj.xOf s1.toNat = proj.xOf s2.toNat →
-      s1 = s2) ∧
-    (∀ s1 s2 : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s1 = true →
-      requireCanonicalScalar .Secp256k1 s2 = true →
-      proj.xOf s1.toNat = proj.xOf s2.toNat →
-      proj.yParity s1.toNat = proj.yParity s2.toNat →
-      s1 = s2) ∧
-    (∀ s : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s = true →
-      requireCanonicalScalar .Secp256k1 (normalizeTaprootEvenY proj s) = true ∧
-      proj.xOf (normalizeTaprootEvenY proj s).toNat = proj.xOf s.toNat ∧
-      proj.yParity (normalizeTaprootEvenY proj s).toNat = false) := by
-  have hPairInj : ∀ s1 s2 : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s1 = true →
-      requireCanonicalScalar .Secp256k1 s2 = true →
-      proj.xOf s1.toNat = proj.xOf s2.toNat →
-      proj.yParity s1.toNat = proj.yParity s2.toNat →
-      s1 = s2 := by
-    intro s1 s2 h1 h2 hX hY
-    obtain ⟨p1, l1⟩ := (requireCanonicalScalar_iff .Secp256k1 s1).mp h1
-    obtain ⟨p2, l2⟩ := (requireCanonicalScalar_iff .Secp256k1 s2).mp h2
-    exact BitVec.eq_of_toNat_eq (proj.compressed_injective.1 _ _ p1 l1 p2 l2 hX hY)
-  refine ⟨fun s1 s2 h1 h2 hy1 hy2 hX => hPairInj s1 s2 h1 h2 hX (hy1.trans hy2.symm), hPairInj, ?_⟩
-  intro s hCanon
-  unfold normalizeTaprootEvenY
-  cases hy : proj.yParity s.toNat
-  · change requireCanonicalScalar .Secp256k1 s = true ∧
-      proj.xOf s.toNat = proj.xOf s.toNat ∧ proj.yParity s.toNat = false
-    exact ⟨hCanon, rfl, hy⟩
-  · change requireCanonicalScalar .Secp256k1 (secpNegScalar s) = true ∧
-      proj.xOf (secpNegScalar s).toNat = proj.xOf s.toNat ∧
-      proj.yParity (secpNegScalar s).toNat = false
-    obtain ⟨_, hNegCanon, _, _, hSame⟩ := secpNegScalar_props hCanon
-    have hXEq : proj.xOf s.toNat = proj.xOf (secpNegScalar s).toNat :=
-      (proj.sameX_iff_canonical s (secpNegScalar s) hCanon hNegCanon).mpr hSame
-    have hNegPar := proj.yParity_neg_canonical s hCanon
-    rw [hy] at hNegPar
-    exact ⟨hNegCanon, hXEq.symm, hNegPar⟩
-
-#tooth_pair
-  Qsag.taproot_even_y_parity_restores_canonical_injectivity
-  vs
-  Qsag.tooth_taproot_xonly_not_injective_without_y_parity
-
-/-! ### Short-Weierstrass affine arithmetic over `ℤ/p` and the curve-point projection
-
-Affine chord-tangent arithmetic on `y² = x³ + a·x + b` over the residues mod `p`
-(Silverman, *The Arithmetic of Elliptic Curves*, III.2.3; SEC 1 v2.0 §2.2.1), with
-the point at infinity as `none`. What is proved for every curve and every odd prime
-`p`: negation stays on the curve and keeps `x`; `y` and `p - y` have opposite parity
-when `0 < y < p`; two curve points with one `x` are equal or negatives; and
-`P + Q = O` exactly when `Q = -P`. Associativity and closure of the addition are not
-proved in general. A generator's group facts are collected in `PrimeOrderGroup`,
-which is proved outright for `y² = x³ + 7` over `ℤ/43` (`secp7Mod43_group`) and is
-a named hypothesis for `secp256k1` (`Secp256k1GroupLaws`). -/
-
-namespace Weierstrass
-
-/-- Primality as a divisor statement (Euclid, *Elements* VII, Def. 11). -/
-def IsPrime (p : Nat) : Prop := 2 ≤ p ∧ ∀ d, d ∣ p → d = 1 ∨ d = p
-
-/-- Euclid's lemma (*Elements* VII.30). -/
-theorem IsPrime.dvd_mul {p a b : Nat} (hp : IsPrime p) (h : p ∣ a * b) : p ∣ a ∨ p ∣ b := by
-  rcases hp.2 (Nat.gcd p a) (Nat.gcd_dvd_left p a) with h1 | hpg
-  · exact Or.inr (Nat.Coprime.dvd_of_dvd_mul_left h1 h)
-  · have hd := Nat.gcd_dvd_right p a
-    rw [hpg] at hd
-    exact Or.inl hd
-
-private theorem mod_zero_cases {p z : Nat} (hz : z < 2 * p) (h : z % p = 0) : z = 0 ∨ z = p := by
-  by_cases hlt : z < p
-  · rw [Nat.mod_eq_of_lt hlt] at h
-    exact Or.inl h
-  · have hge : p ≤ z := Nat.le_of_not_lt hlt
-    rw [Nat.mod_eq_sub_mod hge, Nat.mod_eq_of_lt (by omega)] at h
-    exact Or.inr (by omega)
-
-/-- `(p - y)² ≡ y² (mod p)`. -/
-private theorem neg_sq_mod {p y : Nat} (hy : y < p) :
-    ((p - y) % p * ((p - y) % p)) % p = (y * y) % p := by
-  by_cases h0 : y = 0
-  · subst h0
-    rw [Nat.sub_zero, Nat.mod_self]
-  · obtain ⟨d, rfl⟩ : ∃ d, p = d + y := ⟨p - y, by omega⟩
-    rw [Nat.add_sub_cancel, Nat.mod_eq_of_lt (by omega : d < d + y)]
-    have hId : d * d + y * (d + y) = (d + y) * d + y * y := by
-      rw [Nat.mul_add, Nat.add_mul]
-      omega
-    calc (d * d) % (d + y) = (d * d + y * (d + y)) % (d + y) :=
-          (Nat.add_mul_mod_self_right _ _ _).symm
-      _ = ((d + y) * d + y * y) % (d + y) := by rw [hId]
-      _ = (y * y) % (d + y) := Nat.mul_add_mod_self_left _ _ _
-
-/-- In `ℤ/p` with `p` prime, `u² = v²` forces `v = u` or `v = -u`. -/
-private theorem sq_mod_eq_cases {p u v : Nat} (hp : IsPrime p) (huv : u ≤ v) (hv : v < p)
-    (h : (u * u) % p = (v * v) % p) : v = u ∨ u + v = p := by
-  have hDvd : p ∣ (v + u) * (v - u) := by
-    rw [← Nat.mul_self_sub_mul_self_eq]
-    exact Nat.dvd_of_mod_eq_zero (Nat.sub_mod_eq_zero_of_mod_eq h.symm)
-  rcases hp.dvd_mul hDvd with hs | hd
-  · rcases mod_zero_cases (by omega : v + u < 2 * p) (Nat.mod_eq_zero_of_dvd hs) with h0 | hpEq
-    · exact Or.inl (by omega)
-    · exact Or.inr (by omega)
-  · exact Or.inl (by
-      have := Nat.eq_zero_of_dvd_of_lt hd (by omega : v - u < p)
-      omega)
-
-/-- A short-Weierstrass curve `y² = x³ + a·x + b` over the residues mod `p`. -/
-structure Curve where
-  p : Nat
-  a : Nat
-  b : Nat
-
-/-- Affine points with reduced coordinates; `none` is the point at infinity. -/
-abbrev Point := Option (Nat × Nat)
-
-/-- The affine `x`-coordinate; the point at infinity has none. -/
-def Point.x : Point → Option Nat
-  | none => none
-  | some (x, _) => some x
-
-/-- The least significant bit of the affine `y`-coordinate (`y[0]` at `ownership.rs:282`). -/
-def Point.yOdd : Point → Bool
-  | none => false
-  | some (_, y) => y % 2 == 1
-
-/-- Reduced coordinates satisfying the curve equation. -/
-def Curve.OnCurve (C : Curve) : Point → Prop
-  | none => True
-  | some (x, y) => x < C.p ∧ y < C.p ∧ (y * y) % C.p = (x * x * x + C.a * x + C.b) % C.p
-
-private instance Curve.decOnCurve (C : Curve) : (P : Point) → Decidable (C.OnCurve P)
-  | none => isTrue trivial
-  | some (x, y) => inferInstanceAs (Decidable
-      (x < C.p ∧ y < C.p ∧ (y * y) % C.p = (x * x * x + C.a * x + C.b) % C.p))
-
-/-- `-(x, y) = (x, -y)`. -/
-def Curve.neg (C : Curve) : Point → Point
-  | none => none
-  | some (x, y) => some (x, (C.p - y) % C.p)
-
-/-- Field inverse by Fermat's little theorem, `z⁻¹ = z^(p-2)`. -/
-def Curve.inv (C : Curve) (z : Nat) : Nat := z ^ (C.p - 2) % C.p
-
-/-- Chord-tangent addition (Silverman III.2.3): `λ = (y₂ - y₁)/(x₂ - x₁)` on a chord,
-    `λ = (3x₁² + a)/(2y₁)` on a tangent, `x₃ = λ² - x₁ - x₂`, `y₃ = λ(x₁ - x₃) - y₁`. -/
-def Curve.add (C : Curve) : Point → Point → Point
-  | none, Q => Q
-  | some P, none => some P
-  | some (x1, y1), some (x2, y2) =>
-    if x1 = x2 ∧ (y1 + y2) % C.p = 0 then none
-    else
-      let lam :=
-        if x1 = x2 then ((3 * x1 * x1 + C.a) * C.inv (2 * y1)) % C.p
-        else (((y2 + C.p - y1) % C.p) * C.inv ((x2 + C.p - x1) % C.p)) % C.p
-      let x3 := (lam * lam + (C.p - x1) + (C.p - x2)) % C.p
-      some (x3, (lam * ((x1 + C.p - x3) % C.p) + (C.p - y1)) % C.p)
-
-/-- `[k]P` by repeated addition. -/
-def Curve.smul (C : Curve) : Nat → Point → Point
-  | 0, _ => none
-  | k + 1, P => C.add (C.smul k P) P
-
-theorem Curve.neg_x (C : Curve) (P : Point) : Point.x (C.neg P) = Point.x P := by
-  match P with
-  | none => rfl
-  | some (_, _) => rfl
-
-/-- Negation maps the curve to itself. -/
-theorem Curve.neg_onCurve (C : Curve) (P : Point) (h : C.OnCurve P) : C.OnCurve (C.neg P) := by
-  match P, h with
-  | none, _ => trivial
-  | some (x, y), ⟨hx, hy, hEq⟩ =>
-    exact ⟨hx, Nat.mod_lt _ (by omega), (neg_sq_mod hy).trans hEq⟩
-
-/-- Over an odd modulus a nonzero `y` and its negative `p - y` have opposite parity. -/
-theorem neg_y_parity {p y : Nat} (hp : p % 2 = 1) (h0 : 0 < y) (hy : y < p) :
-    ((p - y) % p % 2 == 1) = !(y % 2 == 1) := by
-  rw [Nat.mod_eq_of_lt (by omega : p - y < p)]
-  rcases Nat.mod_two_eq_zero_or_one y with h | h
-  · rw [h, (by omega : (p - y) % 2 = 1)]
-    rfl
-  · rw [h, (by omega : (p - y) % 2 = 0)]
-    rfl
-
-/-- Two affine curve points with one `x`-coordinate are equal or negatives of each other.
-    This is where primality of `p` enters. -/
-theorem Curve.eq_or_eq_neg_of_same_x (C : Curve) (hp : IsPrime C.p) {x y1 y2 : Nat}
-    (h1 : C.OnCurve (some (x, y1))) (h2 : C.OnCurve (some (x, y2))) :
-    (some (x, y2) : Point) = some (x, y1) ∨ (some (x, y2) : Point) = C.neg (some (x, y1)) := by
-  obtain ⟨_, hy1, e1⟩ := h1
-  obtain ⟨_, hy2, e2⟩ := h2
-  have hsq : (y1 * y1) % C.p = (y2 * y2) % C.p := e1.trans e2.symm
-  have hNeg : y1 + y2 = C.p → (some (x, y2) : Point) = C.neg (some (x, y1)) := by
-    intro hs
-    show (some (x, y2) : Point) = some (x, (C.p - y1) % C.p)
-    rw [Nat.mod_eq_of_lt (by omega : C.p - y1 < C.p), (by omega : C.p - y1 = y2)]
-  rcases Nat.le_total y1 y2 with hle | hle
-  · rcases sq_mod_eq_cases hp hle hy2 hsq with h | h
-    · exact Or.inl (by rw [h])
-    · exact Or.inr (hNeg h)
-  · rcases sq_mod_eq_cases hp hle hy1 hsq.symm with h | h
-    · exact Or.inl (by rw [h])
-    · exact Or.inr (hNeg (by omega))
-
-/-- `P + Q = O` exactly when `Q = -P`, for affine curve points. -/
-theorem Curve.add_eq_none_iff_neg (C : Curve) {P Q : Nat × Nat}
-    (hP : C.OnCurve (some P)) (hQ : C.OnCurve (some Q)) :
-    C.add (some P) (some Q) = none ↔ (some Q : Point) = C.neg (some P) := by
-  obtain ⟨x1, y1⟩ := P
-  obtain ⟨x2, y2⟩ := Q
-  obtain ⟨_, hy1, _⟩ := hP
-  obtain ⟨_, hy2, _⟩ := hQ
-  have hY : (y1 + y2) % C.p = 0 ↔ y2 = (C.p - y1) % C.p := by
-    constructor
-    · intro h
-      rcases mod_zero_cases (by omega : y1 + y2 < 2 * C.p) h with h0 | hpEq
-      · rw [(by omega : y1 = 0), (by omega : y2 = 0), Nat.sub_zero, Nat.mod_self]
-      · rw [Nat.mod_eq_of_lt (by omega : C.p - y1 < C.p)]
-        omega
-    · intro h
-      by_cases h0 : y1 = 0
-      · subst h0
-        rw [Nat.sub_zero, Nat.mod_self] at h
-        subst h
-        exact Nat.zero_mod _
-      · rw [Nat.mod_eq_of_lt (by omega : C.p - y1 < C.p)] at h
-        rw [(by omega : y1 + y2 = C.p), Nat.mod_self]
-  show (if x1 = x2 ∧ (y1 + y2) % C.p = 0 then none else _) = none ↔
-    (some (x2, y2) : Point) = some (x1, (C.p - y1) % C.p)
-  by_cases hc : x1 = x2 ∧ (y1 + y2) % C.p = 0
-  · rw [cIte_pos hc]
-    obtain ⟨hx, hy⟩ := hc
-    exact ⟨fun _ => by rw [hx, hY.mp hy], fun _ => rfl⟩
-  · rw [cIte_neg hc]
-    refine ⟨fun h => (by cases h), fun h => absurd ?_ hc⟩
-    have hx : x2 = x1 := congrArg Prod.fst (Option.some.inj h)
-    have hy : y2 = (C.p - y1) % C.p := congrArg Prod.snd (Option.some.inj h)
-    exact ⟨hx.symm, hY.mpr hy⟩
-
-/-- The facts about a generator `G` that make `s ↦ [s]G` a faithful copy of `ℤ/n` on the
-    curve, with `n` and `p` odd. `smul_add` is the homomorphism law of the cyclic subgroup;
-    with `order` and `exact` it gives `[n - s]G = -[s]G` and injectivity on `[0, n)`.
-    None of the five group fields is derived here from the addition formulas. -/
-structure Curve.PrimeOrderGroup (C : Curve) (G : Point) (n : Nat) : Prop where
-  p_prime  : IsPrime C.p
-  p_odd    : C.p % 2 = 1
-  n_odd    : n % 2 = 1
-  onCurve  : ∀ k, C.OnCurve (C.smul k G)
-  smul_add : ∀ a b, C.smul (a + b) G = C.add (C.smul a G) (C.smul b G)
-  order    : C.smul n G = none
-  exact    : ∀ k, 0 < k → k < n → C.smul k G ≠ none
-
-namespace Curve.PrimeOrderGroup
-
-variable {C : Curve} {G : Point} {n : Nat}
-
-/-- `[n - s]G = -[s]G`. -/
-theorem smul_neg (h : C.PrimeOrderGroup G n) {s : Nat} (h0 : 0 < s) (hs : s < n) :
-    C.smul (n - s) G = C.neg (C.smul s G) := by
-  have hSum : C.add (C.smul s G) (C.smul (n - s) G) = none := by
-    rw [← h.smul_add, (by omega : s + (n - s) = n), h.order]
-  have hP := h.onCurve s
-  have hQ := h.onCurve (n - s)
-  cases hPe : C.smul s G with
-  | none => exact absurd hPe (h.exact s h0 hs)
-  | some P =>
-    cases hQe : C.smul (n - s) G with
-    | none => exact absurd hQe (h.exact (n - s) (by omega) (by omega))
-    | some Q =>
-      rw [hPe] at hP hSum
-      rw [hQe] at hQ hSum
-      exact (C.add_eq_none_iff_neg hP hQ).mp hSum
-
-private theorem smul_ne_of_lt (h : C.PrimeOrderGroup G n) {a b : Nat} (hab : a < b) (hb : b < n) :
-    C.smul a G ≠ C.smul b G := by
-  intro hEq
-  have h1 : C.smul (n - a + b) G = none := by
-    rw [h.smul_add, ← hEq, ← h.smul_add, (by omega : n - a + a = n), h.order]
-  have h2 : C.smul (n - a + b) G = C.smul (b - a) G := by
-    rw [(by omega : n - a + b = n + (b - a)), h.smul_add, h.order]
-    rfl
-  exact h.exact (b - a) (by omega) (by omega) (h2.symm.trans h1)
-
-/-- `s ↦ [s]G` is injective on `[0, n)`. -/
-theorem smul_injective (h : C.PrimeOrderGroup G n) {a b : Nat} (ha : a < n) (hb : b < n)
-    (hEq : C.smul a G = C.smul b G) : a = b := by
-  rcases Nat.lt_trichotomy a b with hlt | heq | hgt
-  · exact absurd hEq (h.smul_ne_of_lt hlt hb)
-  · exact heq
-  · exact absurd hEq.symm (h.smul_ne_of_lt hgt ha)
-
-/-- No multiple `[s]G`, `0 < s < n`, has `y = 0`: such a point is its own negative, and
-    `[n - s]G = [s]G` contradicts injectivity because `n` is odd. -/
-theorem smul_y_ne_zero (h : C.PrimeOrderGroup G n) {s x y : Nat} (h0 : 0 < s) (hs : s < n)
-    (hP : C.smul s G = some (x, y)) : y ≠ 0 := by
-  intro hy
-  subst hy
-  have hNeg := h.smul_neg h0 hs
-  rw [hP] at hNeg
-  have hSelf : C.neg (some (x, 0)) = some (x, 0) := by
-    show (some (x, (C.p - 0) % C.p) : Point) = some (x, 0)
-    rw [Nat.sub_zero, Nat.mod_self]
-  rw [hSelf, ← hP] at hNeg
-  have := h.smul_injective (by omega) hs hNeg
-  have := h.n_odd
-  omega
-
-/-- **Curve-point x-only and parity laws.** For a generator `G` of odd order `n` on a
-    short-Weierstrass curve over an odd prime field:
-    1. `[s₁]G` and `[s₂]G` (`0 < sᵢ < n`) have one affine `x`-coordinate exactly when
-       `s₂ = s₁` or `s₂ = n - s₁`;
-    2. `[n - s]G = -[s]G`, and the least significant bits of the two affine
-       `y`-coordinates differ. -/
-theorem xonly_parity_laws (h : C.PrimeOrderGroup G n) :
-    (∀ s1 s2, 0 < s1 → s1 < n → 0 < s2 → s2 < n →
-      (Point.x (C.smul s1 G) = Point.x (C.smul s2 G) ↔ (s1 = s2 ∨ s2 = n - s1))) ∧
-    (∀ s, 0 < s → s < n →
-      C.smul (n - s) G = C.neg (C.smul s G) ∧
-      Point.yOdd (C.smul (n - s) G) = !(Point.yOdd (C.smul s G))) := by
-  constructor
-  · intro s1 s2 p1 l1 p2 l2
-    constructor
-    · intro hx
-      have hC1 := h.onCurve s1
-      have hC2 := h.onCurve s2
-      have hNeg := h.smul_neg p1 l1
-      cases hP : C.smul s1 G with
-      | none => exact absurd hP (h.exact s1 p1 l1)
-      | some P =>
-        cases hQ : C.smul s2 G with
-        | none => exact absurd hQ (h.exact s2 p2 l2)
-        | some Q =>
-          obtain ⟨x1, y1⟩ := P
-          obtain ⟨x2, y2⟩ := Q
-          rw [hP, hQ] at hx
-          have hxe : x1 = x2 := Option.some.inj hx
-          subst hxe
-          rw [hP] at hC1 hNeg
-          rw [hQ] at hC2
-          rcases C.eq_or_eq_neg_of_same_x h.p_prime hC1 hC2 with hEq | hEq
-          · exact Or.inl (h.smul_injective l1 l2 (hP.trans (hEq.symm.trans hQ.symm)))
-          · exact Or.inr (h.smul_injective l2 (by omega) (hQ.trans (hEq.trans hNeg.symm)))
-    · rintro (hEq | hEq)
-      · rw [hEq]
-      · rw [hEq, h.smul_neg p1 l1, C.neg_x]
-  · intro s p l
-    have hNeg := h.smul_neg p l
-    refine ⟨hNeg, ?_⟩
-    have hC := h.onCurve s
-    cases hP : C.smul s G with
-    | none => exact absurd hP (h.exact s p l)
-    | some P =>
-      obtain ⟨x, y⟩ := P
-      rw [hP] at hC
-      rw [hNeg, hP]
-      exact neg_y_parity h.p_odd (Nat.pos_of_ne_zero (h.smul_y_ne_zero p l hP)) hC.2.1
-
-/-- The projection whose `xOf` and `yParity` are the affine `x`-coordinate and the
-    `y`-coordinate's least significant bit of the curve point `[s]G`. -/
-def projection (h : C.PrimeOrderGroup G n) : TaprootCurveProjection n (Option Nat) where
-  xOf s := Point.x (C.smul s G)
-  yParity s := Point.yOdd (C.smul s G)
-  sameX_iff := h.xonly_parity_laws.1
-  yParity_neg s p l := (h.xonly_parity_laws.2 s p l).2
-
-end Curve.PrimeOrderGroup
-
-/-- A point of order two keeps its parity under negation: on `y² = x³ + 7` over `ℤ/7`
-    the point `(0, 0)` is its own negative. `PrimeOrderGroup.n_odd` excludes this. -/
-theorem tooth_two_torsion_point_is_its_own_negative :
-    ∃ (C : Curve) (P : Point), C.OnCurve P ∧ P ≠ none ∧ C.p % 2 = 1 ∧
-      Point.yOdd (C.neg P) = Point.yOdd P ∧ C.smul 2 P = none := by
-  refine ⟨⟨7, 0, 7⟩, some (0, 0), ?_, ?_, ?_, ?_, ?_⟩ <;> decide
-
-#tooth_pair
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
-  vs
-  Qsag.Weierstrass.tooth_two_torsion_point_is_its_own_negative
-
-/-! #### A complete instance: `y² = x³ + 7` over `ℤ/43`, generator `(2, 12)`, order `31`
-
-The same equation as `secp256k1` (`a = 0`, `b = 7`, `p ≡ 3 mod 4`, `p ≡ 1 mod 3`) over a
-field small enough for the kernel to check the whole group table. -/
-
-def secp7Mod43 : Curve := ⟨43, 0, 7⟩
-
-def secp7Mod43G : Point := some (2, 12)
-
-private theorem prime43 : IsPrime 43 := by
-  refine ⟨by decide, fun d hd => ?_⟩
-  have key : ∀ d, d < 44 → d ∣ 43 → d = 1 ∨ d = 43 := by decide
-  exact key d (Nat.lt_succ_of_le (Nat.le_of_dvd (by decide) hd)) hd
-
-private theorem secp7Mod43_table :
-    ∀ i, i < 31 → ∀ j, j < 31 →
-      secp7Mod43.add (secp7Mod43.smul i secp7Mod43G) (secp7Mod43.smul j secp7Mod43G) =
-        secp7Mod43.smul ((i + j) % 31) secp7Mod43G := by
-  decide +kernel
-
-private theorem secp7Mod43_periodic : ∀ k,
-    secp7Mod43.smul k secp7Mod43G = secp7Mod43.smul (k % 31) secp7Mod43G := by
-  intro k
-  induction k with
-  | zero => rfl
-  | succ k ih =>
-    have hStep := secp7Mod43_table (k % 31) (Nat.mod_lt _ (by decide)) 1 (by decide)
-    have hOne : secp7Mod43.smul 1 secp7Mod43G = secp7Mod43G := rfl
-    rw [hOne] at hStep
-    show secp7Mod43.add (secp7Mod43.smul k secp7Mod43G) secp7Mod43G = _
-    rw [ih, hStep, (by omega : (k % 31 + 1) % 31 = (k + 1) % 31)]
-
-/-- The generator `(2, 12)` of `y² = x³ + 7` over `ℤ/43` has exact order `31`, and
-    all seven `PrimeOrderGroup` facts hold; the group table is checked by the kernel. -/
-theorem secp7Mod43_group : secp7Mod43.PrimeOrderGroup secp7Mod43G 31 where
-  p_prime := prime43
-  p_odd := by decide
-  n_odd := by decide
-  onCurve k := by
-    have key : ∀ i, i < 31 → secp7Mod43.OnCurve (secp7Mod43.smul i secp7Mod43G) := by
-      decide +kernel
-    rw [secp7Mod43_periodic]
-    exact key _ (Nat.mod_lt _ (by decide))
-  smul_add a b := by
-    calc secp7Mod43.smul (a + b) secp7Mod43G
-        = secp7Mod43.smul ((a + b) % 31) secp7Mod43G := secp7Mod43_periodic _
-      _ = secp7Mod43.smul ((a % 31 + b % 31) % 31) secp7Mod43G := by
-          rw [(by omega : (a + b) % 31 = (a % 31 + b % 31) % 31)]
-      _ = secp7Mod43.add (secp7Mod43.smul (a % 31) secp7Mod43G)
-            (secp7Mod43.smul (b % 31) secp7Mod43G) :=
-          (secp7Mod43_table _ (Nat.mod_lt _ (by decide)) _ (Nat.mod_lt _ (by decide))).symm
-      _ = secp7Mod43.add (secp7Mod43.smul a secp7Mod43G) (secp7Mod43.smul b secp7Mod43G) := by
-          rw [← secp7Mod43_periodic a, ← secp7Mod43_periodic b]
-  order := by decide +kernel
-  exact k h0 hk := by
-    have key : ∀ i, i < 31 → 0 < i → secp7Mod43.smul i secp7Mod43G ≠ none := by
-      decide +kernel
-    exact key k hk h0
-
-theorem inhabited_prime_order_curve_group :
-    ∃ (C : Curve) (G : Point) (n : Nat), C.PrimeOrderGroup G n :=
-  ⟨secp7Mod43, secp7Mod43G, 31, secp7Mod43_group⟩
-
-#verify_inhabited
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
-  Qsag.Weierstrass.inhabited_prime_order_curve_group
-
-/-- The curve-point projection on `y² = x³ + 7` over `ℤ/43`. -/
-def secp7Mod43Projection : TaprootCurveProjection 31 (Option Nat) :=
-  secp7Mod43_group.projection
-
-/-- Concrete coordinates behind the projection: `[1]G = (2, 12)` and `[30]G = (2, 31)`
-    share `x = 2` with opposite parity, `[2]G = (7, 7)` has another `x`, and the
-    compressed encoding separates all thirty nonzero multiples. -/
-theorem secp7Mod43_projection_coordinates :
-    secp7Mod43.smul 1 secp7Mod43G = some (2, 12) ∧
-    secp7Mod43.smul 30 secp7Mod43G = some (2, 31) ∧
-    secp7Mod43.smul 2 secp7Mod43G = some (7, 7) ∧
-    secp7Mod43Projection.xOf 1 = secp7Mod43Projection.xOf 30 ∧
-    secp7Mod43Projection.yParity 1 = false ∧
-    secp7Mod43Projection.yParity 30 = true ∧
-    (∀ s1 s2, 0 < s1 → s1 < 31 → 0 < s2 → s2 < 31 →
-      secp7Mod43Projection.xOf s1 = secp7Mod43Projection.xOf s2 →
-      secp7Mod43Projection.yParity s1 = secp7Mod43Projection.yParity s2 → s1 = s2) :=
-  ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, by decide +kernel, secp7Mod43Projection.compressed_injective.1⟩
-
-/-! #### `secp256k1`
-
-Checked by the kernel: the field prime and generator limbs of `secp256k1_ct.rs:8-40`,
-`p` and `n` odd, `p ≡ 3 (mod 4)`, `a = 0`, `b = 7`, and `G` on the curve. Not checked:
-primality of `p` and the four group facts of `PrimeOrderGroup` for `G` (closure of its
-multiples, the homomorphism law, `[n]G = O`, exact order). They are the hypothesis
-`Secp256k1GroupLaws`; SEC 2 v2.0 §2.4.1 states them for these parameters. -/
-
-/-- `secp256k1` field prime `p = 2^256 - 2^32 - 977` (`secp256k1_ct.rs:8-13`). -/
-def SECP256K1_FIELD_P : Nat :=
-  0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-
-def secp256k1FieldLimbsLe : Fin 4 → UInt64
-  | ⟨0, _⟩ => 0xFFFFFFFEFFFFFC2F
-  | ⟨1, _⟩ => 0xFFFFFFFFFFFFFFFF
-  | ⟨2, _⟩ => 0xFFFFFFFFFFFFFFFF
-  | ⟨3, _⟩ => 0xFFFFFFFFFFFFFFFF
-
-/-- `SECP_GX` (`secp256k1_ct.rs:27-32`). -/
-def secp256k1GxLimbsLe : Fin 4 → UInt64
-  | ⟨0, _⟩ => 0x59F2815B16F81798
-  | ⟨1, _⟩ => 0x029BFCDB2DCE28D9
-  | ⟨2, _⟩ => 0x55A06295CE870B07
-  | ⟨3, _⟩ => 0x79BE667EF9DCBBAC
-
-/-- `SECP_GY` (`secp256k1_ct.rs:35-40`). -/
-def secp256k1GyLimbsLe : Fin 4 → UInt64
-  | ⟨0, _⟩ => 0x9C47D08FFB10D4B8
-  | ⟨1, _⟩ => 0xFD17B448A6855419
-  | ⟨2, _⟩ => 0x5DA4FBFC0E1108A8
-  | ⟨3, _⟩ => 0x483ADA7726A3C465
-
-/-- `y² = x³ + 7` over `ℤ/p` (`secp256k1_ct.rs:1-2`). -/
-def secp256k1Curve : Curve := ⟨SECP256K1_FIELD_P, 0, 7⟩
-
-/-- The standard generator (SEC 2 v2.0 §2.4.1). -/
-def secp256k1G : Point :=
-  some (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
-        0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
-
-theorem secp256k1_checked_parameters :
-    SECP256K1_FIELD_P = 2 ^ 256 - 2 ^ 32 - 977 ∧
-    limbs4LeToNat secp256k1FieldLimbsLe = SECP256K1_FIELD_P ∧
-    secp256k1G = some (limbs4LeToNat secp256k1GxLimbsLe, limbs4LeToNat secp256k1GyLimbsLe) ∧
-    secp256k1Curve.p % 2 = 1 ∧ secp256k1Curve.p % 4 = 3 ∧
-    secp256k1Curve.a = 0 ∧ secp256k1Curve.b = 7 ∧
-    SECP256K1_ORDER_N % 2 = 1 ∧ 2 < SECP256K1_ORDER_N ∧
-    secp256k1Curve.OnCurve secp256k1G ∧
-    secp256k1Curve.smul 1 secp256k1G = secp256k1G := by
-  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, rfl, rfl, by decide +kernel, by decide +kernel, by decide +kernel, rfl⟩
-
-/-- The unproved group facts for the `secp256k1` generator: `p` prime, every multiple
-    of `G` on the curve, `[a + b]G = [a]G + [b]G`, `[n]G = O`, and `[k]G ≠ O` for
-    `0 < k < n`. The two parity fields are proved in `secp256k1_checked_parameters`. -/
-abbrev Secp256k1GroupLaws : Prop :=
-  secp256k1Curve.PrimeOrderGroup secp256k1G SECP256K1_ORDER_N
-
-end Weierstrass
-
-/-- The `secp256k1` projection: `xOf s` and `yParity s` are the affine `x`-coordinate
-    and the parity of the affine `y`-coordinate of the curve point `[s]G`. It exists
-    under `Weierstrass.Secp256k1GroupLaws`, which this file does not prove. -/
-def secp256k1TaprootProjection (h : Weierstrass.Secp256k1GroupLaws) :
-    TaprootCurveProjection SECP256K1_ORDER_N (Option Nat) :=
-  h.projection
-
-/-- The Taproot statement about `secp256k1` curve points, conditional on
-    `Weierstrass.Secp256k1GroupLaws`: among canonical scalars, `[s₁]G` and `[s₂]G` have
-    one affine `x`-coordinate exactly when `s₂ = s₁` or `s₂ = n - s₁`, negating the
-    scalar flips the parity of the affine `y`-coordinate, and `x` together with that
-    parity determines the scalar. -/
-theorem secp256k1_xonly_parity_on_curve_points (h : Weierstrass.Secp256k1GroupLaws) :
-    (∀ s1 s2 : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s1 = true →
-      requireCanonicalScalar .Secp256k1 s2 = true →
-      (Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s1.toNat Weierstrass.secp256k1G) =
-        Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s2.toNat Weierstrass.secp256k1G) ↔
-        taprootXOnlySameX s1 s2)) ∧
-    (∀ s : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s = true →
-      Weierstrass.Point.yOdd
-          (Weierstrass.secp256k1Curve.smul (secpNegScalar s).toNat Weierstrass.secp256k1G) =
-        !(Weierstrass.Point.yOdd
-          (Weierstrass.secp256k1Curve.smul s.toNat Weierstrass.secp256k1G))) ∧
-    (∀ s1 s2 : BitVec 256,
-      requireCanonicalScalar .Secp256k1 s1 = true →
-      requireCanonicalScalar .Secp256k1 s2 = true →
-      Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s1.toNat Weierstrass.secp256k1G) =
-        Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s2.toNat Weierstrass.secp256k1G) →
-      Weierstrass.Point.yOdd (Weierstrass.secp256k1Curve.smul s1.toNat Weierstrass.secp256k1G) =
-        Weierstrass.Point.yOdd (Weierstrass.secp256k1Curve.smul s2.toNat Weierstrass.secp256k1G) →
-      s1 = s2) :=
-  ⟨(secp256k1TaprootProjection h).sameX_iff_canonical,
-    (secp256k1TaprootProjection h).yParity_neg_canonical,
-    (taproot_even_y_parity_restores_canonical_injectivity (secp256k1TaprootProjection h)).2.1⟩
-
-/-- RFC 8032 / SLIP-0010 Ed25519 scalar clamping on 32 little-endian digest bytes (`legacy.rs:260-262, 283-285`):
-    clears low 3 bits (`h[0] &= 248`), clears bit 255 (`h[31] &= 127`), and sets bit 254 (`h[31] |= 64`). -/
-def clampEd25519Nat (n : Nat) : Nat :=
-  2 ^ 254 + ((n % (2 ^ 254)) / 8) * 8
-
-theorem clampEd25519Nat_bounds (n : Nat) :
-    2 ^ 254 ≤ clampEd25519Nat n ∧
-    clampEd25519Nat n < 2 ^ 255 ∧
-    clampEd25519Nat n % 8 = 0 ∧
-    clampEd25519Nat n < 2 ^ 256 := by
-  unfold clampEd25519Nat
-  have hMod : n % (2 ^ 254) < 2 ^ 254 := Nat.mod_lt n (Nat.two_pow_pos 254)
-  have h254Div8 : (2 : Nat) ^ 254 = 8 * (2 ^ 251) := by decide
-  have h255 : (2 : Nat) ^ 255 = 2 ^ 254 + 2 ^ 254 := by decide
-  have h256 : (2 : Nat) ^ 255 < 2 ^ 256 := by decide
-  refine ⟨by omega, by omega, by omega, by omega⟩
-
-/-- Clamped 256-bit Ed25519 scalar (`2^254 ≤ clamped < 2^255` and `clamped % 8 = 0`). -/
-def clampEd25519Bytes32 (raw : BitVec 256) : BitVec 256 :=
-  BitVec.ofNatLT (clampEd25519Nat raw.toNat) (clampEd25519Nat_bounds raw.toNat).2.2.2
-
-/-- Modular reduction modulo `ED_ORDER` (`scalar.rs:150-159`, `legacy.rs:287`). -/
-def reduceEd25519Order (x : BitVec 256) : BitVec 256 :=
-  BitVec.ofNat 256 (x.toNat % ED25519_ORDER_L)
-
-/-- Complete SLIP-0010 Ed25519 scalar normalization from the lower 32 bytes of `SHA-512(seed)` (`legacy.rs:281-289`). -/
-def normalizeSlip0010Ed25519Scalar (sha512Lo32 : BitVec 256) : BitVec 256 :=
-  reduceEd25519Order (clampEd25519Bytes32 sha512Lo32)
-
-theorem clampEd25519Bytes32_bits_and_range (raw : BitVec 256) :
-    2 ^ 254 ≤ (clampEd25519Bytes32 raw).toNat ∧
-    (clampEd25519Bytes32 raw).toNat < 2 ^ 255 ∧
-    (clampEd25519Bytes32 raw).toNat % 8 = 0 ∧
-    (clampEd25519Bytes32 raw).getLsbD 0 = false ∧
-    (clampEd25519Bytes32 raw).getLsbD 1 = false ∧
-    (clampEd25519Bytes32 raw).getLsbD 2 = false ∧
-    (clampEd25519Bytes32 raw).getLsbD 254 = true ∧
-    (clampEd25519Bytes32 raw).getLsbD 255 = false := by
-  have hb := clampEd25519Nat_bounds raw.toNat
-  have hToNat : (clampEd25519Bytes32 raw).toNat = clampEd25519Nat raw.toNat := rfl
-  refine ⟨by rw [hToNat]; exact hb.1,
-          by rw [hToNat]; exact hb.2.1,
-          by rw [hToNat]; exact hb.2.2.1, ?_, ?_, ?_, ?_, ?_⟩
-  · change (clampEd25519Nat raw.toNat).testBit 0 = false
-    rw [Nat.testBit_zero]
-    have hMod8 := hb.2.2.1
-    have : clampEd25519Nat raw.toNat % 2 = 0 := by omega
-    rw [this]; decide
-  · change (clampEd25519Nat raw.toNat).testBit 1 = false
-    rw [Nat.testBit_succ, Nat.testBit_zero]
-    have hMod8 := hb.2.2.1
-    have : (clampEd25519Nat raw.toNat / 2) % 2 = 0 := by omega
-    rw [this]; decide
-  · change (clampEd25519Nat raw.toNat).testBit 2 = false
-    rw [Nat.testBit_succ, Nat.testBit_succ, Nat.testBit_zero]
-    have hMod8 := hb.2.2.1
-    have : ((clampEd25519Nat raw.toNat / 2) / 2) % 2 = 0 := by omega
-    rw [this]; decide
-  · change (clampEd25519Nat raw.toNat).testBit 254 = true
-    rw [Nat.testBit_eq_decide_div_mod_eq, decide_eq_true_eq]
-    have hGe := hb.1
-    have hLt := hb.2.1
-    have h255 : (2 : Nat) ^ 255 = 2 * (2 ^ 254) := by decide
-    have hDiv : clampEd25519Nat raw.toNat / (2 ^ 254) = 1 := by omega
-    rw [hDiv]
-  · change (clampEd25519Nat raw.toNat).testBit 255 = false
-    rw [Nat.testBit_eq_decide_div_mod_eq, decide_eq_false_iff_not]
-    have hLt := hb.2.1
-    have hDiv : clampEd25519Nat raw.toNat / (2 ^ 255) = 0 := Nat.div_eq_of_lt hLt
-    rw [hDiv]; omega
-
-/-- **SLIP-0010 Ed25519 Normalization Totality (`slip0010_ed25519_clamped_canonical_nonzero`)**:
-    For **every** 32-byte digest `raw : BitVec 256`, `normalizeSlip0010Ed25519Scalar raw` is
-    strictly nonzero and `< ED25519_ORDER_L` (`requireCanonicalScalar .Ed25519 = true`), because
-    `8 ∣ clamped`, `0 < clamped < 8 * ED25519_ORDER_L`, and `ED25519_ORDER_L % 8 = 5`. -/
-theorem slip0010_ed25519_clamped_canonical_nonzero (raw : BitVec 256) :
-    requireCanonicalScalar .Ed25519 (normalizeSlip0010Ed25519Scalar raw) = true := by
-  have hOrd := curve_orders_match_le_limbs_and_bounds
-  have hClamp := clampEd25519Nat_bounds raw.toNat
-  let c := clampEd25519Nat raw.toNat
-  have hcGe : 2 ^ 254 ≤ c := hClamp.1
-  have hcLt : c < 2 ^ 255 := hClamp.2.1
-  have hcMod8 : c % 8 = 0 := hClamp.2.2.1
-  have hOrdGt : 2 ^ 252 < ED25519_ORDER_L := hOrd.2.2.2.2.2.1
-  have hOrdLt256 : ED25519_ORDER_L < 2 ^ 256 :=
-    Nat.lt_trans hOrd.2.2.2.2.2.2.1 (by decide : 2 ^ 253 < 2 ^ 256)
-  have hOrdMod8 : ED25519_ORDER_L % 8 = 5 := hOrd.2.2.2.2.2.2.2.2
-  have hOrdPos : 0 < ED25519_ORDER_L := Nat.lt_trans (Nat.two_pow_pos 252) hOrdGt
-  have hRemLtOrd : c % ED25519_ORDER_L < ED25519_ORDER_L :=
-    Nat.mod_lt c hOrdPos
-  have hRemNeZero : c % ED25519_ORDER_L ≠ 0 := by
-    intro hZero
-    have hDivEq : ED25519_ORDER_L * (c / ED25519_ORDER_L) + c % ED25519_ORDER_L = c :=
-      Nat.div_add_mod c ED25519_ORDER_L
-    rw [hZero, Nat.add_zero] at hDivEq
-    let q := c / ED25519_ORDER_L
-    have hEqC : ED25519_ORDER_L * q = c := hDivEq
-    have h8L : 2 ^ 255 < ED25519_ORDER_L * 8 := by unfold ED25519_ORDER_L; decide
-    have hPos254 : 0 < 2 ^ 254 := Nat.two_pow_pos 254
-    have hqNot0 : q ≠ 0 := by
-      intro hq0
-      rw [hq0, Nat.mul_zero] at hEqC
-      omega
-    have hqLt8 : q < 8 := by
-      cases (inferInstance : Decidable (q < 8)) with
-      | isTrue h => exact h
-      | isFalse hGe =>
-        have hLe : ED25519_ORDER_L * 8 ≤ ED25519_ORDER_L * q :=
-          Nat.mul_le_mul_left ED25519_ORDER_L (by omega)
-        rw [hEqC] at hLe
-        have hContr : 2 ^ 255 < c := Nat.lt_of_lt_of_le h8L hLe
-        omega
-    have hMulMod : (ED25519_ORDER_L * q) % 8 = ((ED25519_ORDER_L % 8) * (q % 8)) % 8 :=
-      Nat.mul_mod ED25519_ORDER_L q 8
-    rw [hEqC, hcMod8, hOrdMod8] at hMulMod
-    match q with
-    | 0 => exact hqNot0 rfl
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 => simp at hMulMod
-    | _ + 8 => omega
-  rw [requireCanonicalScalar_iff]
-  unfold normalizeSlip0010Ed25519Scalar reduceEd25519Order clampEd25519Bytes32
-  have hToNat : (BitVec.ofNatLT c hClamp.2.2.2).toNat = c := rfl
-  rw [hToNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (Nat.lt_trans hRemLtOrd hOrdLt256)]
-  exact ⟨Nat.pos_of_ne_zero hRemNeZero, hRemLtOrd⟩
-
-/-- **`#tooth` Ed25519 Clamped Scalars Exceed `ED_ORDER` & Wrap Non-Injectively (`tooth_ed25519_clamped_wraps_mod_order_non_injective`)**:
-    1. Every clamped value `c = clampEd25519Bytes32 raw` satisfies `ED25519_ORDER_L < c.toNat`, so
-       feeding `c` directly into `requireCanonicalScalar .Ed25519` **always fails** (`= false`), and
-       `reduceEd25519Order c ≠ c`.
-    2. Distinct values `≥ ED_ORDER` (`x1 = BitVec.ofNat 256 (2^254)` and
-       `x2 = BitVec.ofNat 256 (2^254 - ED25519_ORDER_L)`, both `> ED25519_ORDER_L`) wrap to the
-       **same** canonical scalar modulo `ED_ORDER`, proving `reduceEd25519Order`,
-       `clampEd25519Bytes32`, and `normalizeSlip0010Ed25519Scalar` are all non-injective! -/
-theorem tooth_ed25519_clamped_wraps_mod_order_non_injective :
-    ∃ x1 x2 : BitVec 256,
-      (∀ raw : BitVec 256,
-        ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
-        requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
-        reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw) ∧
-      ED25519_ORDER_L ≤ x1.toNat ∧
-      ED25519_ORDER_L ≤ x2.toNat ∧
-      x1 ≠ x2 ∧
-      reduceEd25519Order x1 = reduceEd25519Order x2 ∧
-      ¬ Function.Injective clampEd25519Bytes32 ∧
-      ¬ Function.Injective reduceEd25519Order ∧
-      ¬ Function.Injective normalizeSlip0010Ed25519Scalar := by
-  have hOrd := curve_orders_match_le_limbs_and_bounds
-  have hOrdLt253 : ED25519_ORDER_L < 2 ^ 253 := hOrd.2.2.2.2.2.2.1
-  have h253_254 : (2 : Nat) ^ 254 = 2 * (2 ^ 253) := by decide
-  have h254Lt256 : (2 : Nat) ^ 254 < 2 ^ 256 := by decide
-  have hAllWrap : ∀ raw : BitVec 256,
-      ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
-      requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
-      reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw := by
-    intro raw
-    have hb := clampEd25519Bytes32_bits_and_range raw
-    have hGtOrd : ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat := by omega
-    have hNotCanon : requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false := by
-      unfold requireCanonicalScalar ScalarGroup.orderNat
-      have hNotLt : ¬ ((clampEd25519Bytes32 raw).toNat < ED25519_ORDER_L) := by omega
-      rw [decide_eq_false hNotLt, Bool.and_false]
-    have hRedNe : reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw := by
-      intro hEq
-      have hv := congrArg BitVec.toNat hEq
-      unfold reduceEd25519Order at hv
-      have hModLt : (clampEd25519Bytes32 raw).toNat % ED25519_ORDER_L < ED25519_ORDER_L :=
-        Nat.mod_lt _ (by omega)
-      rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)] at hv
-      omega
-    exact ⟨hGtOrd, hNotCanon, hRedNe⟩
-  let x1 : BitVec 256 := clampEd25519Bytes32 0#256
-  let x2 : BitVec 256 := BitVec.ofNat 256 (x1.toNat - ED25519_ORDER_L)
-  have hx1Val : x1.toNat = 2 ^ 254 := by
-    change clampEd25519Nat 0 = 2 ^ 254
-    unfold clampEd25519Nat
-    simp
-  have hx2Val : x2.toNat = 2 ^ 254 - ED25519_ORDER_L := by
-    dsimp [x2]
-    rw [hx1Val, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
-  have hx1Ge : ED25519_ORDER_L ≤ x1.toNat := by omega
-  have hx2Ge : ED25519_ORDER_L ≤ x2.toNat := by omega
-  have hx1NeX2 : x1 ≠ x2 := by
-    intro hEq
-    have hv := congrArg BitVec.toNat hEq
-    omega
-  have hRedEq : reduceEd25519Order x1 = reduceEd25519Order x2 := by
-    unfold reduceEd25519Order
-    apply congrArg (BitVec.ofNat 256)
-    rw [hx1Val, hx2Val]
-    have hSplit : 2 ^ 254 = (2 ^ 254 - ED25519_ORDER_L) + ED25519_ORDER_L * 1 := by omega
-    conv => lhs; rw [hSplit]
-    rw [Nat.add_mul_mod_self_left]
-  have hClamp01 : clampEd25519Bytes32 0#256 = clampEd25519Bytes32 1#256 := by
-    apply BitVec.eq_of_toNat_eq
-    change clampEd25519Nat 0 = clampEd25519Nat 1
-    unfold clampEd25519Nat
-    have h1Mod : 1 % (2 ^ 254) = 1 := Nat.mod_eq_of_lt (by decide)
-    rw [h1Mod]
-  have h0Ne1 : (0#256 : BitVec 256) ≠ 1#256 := by decide
-  exact ⟨x1, x2, hAllWrap, hx1Ge, hx2Ge, hx1NeX2, hRedEq,
-    fun hInj => h0Ne1 (hInj hClamp01),
-    fun hInj => hx1NeX2 (hInj hRedEq),
-    fun hInj => h0Ne1 (hInj (congrArg reduceEd25519Order hClamp01))⟩
-
-#tooth_pair
-  Qsag.slip0010_ed25519_clamped_canonical_nonzero
-  vs
-  Qsag.tooth_ed25519_clamped_wraps_mod_order_non_injective
 
 /-! ## 2. Canonical Subgroup `ScalarPointHom`, Shor Pre-Migration Boundary & Premature-Open `#tooth` -/
 
@@ -2456,15 +1396,15 @@ private theorem fixedBucketDoubleFaultSurvivesGf2128_eq_both_false
 private theorem fixedBucketDoubleFaultSurvivesGf2128_fin4_eq
     {chi u0L aL deltaL u0R aR deltaR : Tower128}
     (hChi : chi ≠ towerZero 7) (hDL : deltaL ≠ towerZero 7) (hDR : deltaR ≠ towerZero 7) :
-    finSum 4 (fun i =>
+    qsum 4 (fun i =>
       if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
       then 1 else 0) = 1 := by
   have hCongr :
-      finSum 4 (fun i =>
+      qsum 4 (fun i =>
         if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
         then 1 else 0) =
-      finSum 4 (fun i => if i = (⟨0, by decide⟩ : Fin 4) then 1 else 0) := by
-    apply finSum_congr
+      qsum 4 (fun i => if i = (⟨0, by decide⟩ : Fin 4) then 1 else 0) := by
+    apply qsum_congr
     intro i
     rw [fixedBucketDoubleFaultSurvivesGf2128_eq_both_false hChi hDL hDR]
     rcases i with ⟨v, hv⟩
@@ -2482,18 +1422,18 @@ private theorem fixedBucketDoubleFaultSurvivesGf2128_fin4_eq
       have h : (⟨3, hv⟩ : Fin 4) = ⟨3, by decide⟩ := by apply Fin.ext; rfl
       rw [h]; decide
     | _ + 4 => exact False.elim (by omega)
-  rw [hCongr, finSum_eq_indicator]
+  rw [hCongr, qsum_eq_indicator]
 
 /-- **`#tooth` Fixed-Bucket `k + 2N` Selective-Abort Wire-Bit Leak Over `Tower128` (`tooth_fixed_bucket_selective_abort_leaks_wire_bit`)**:
     Under deterministic `(k, k + 2N)` combine without post-lock coin permutation, injecting nonzero
     `Tower128` OT faults `deltaL, deltaR ≠ 0` passes both algebraic `GF(2^128)` sacrifice checks in
-    exact `1 / 4` of sessions (`finSum 4 = 1`) and reveals the honest online wire bit `y` with
+    exact `1 / 4` of sessions (`qsum 4 = 1`) and reveals the honest online wire bit `y` with
     probability `1`! -/
 theorem tooth_fixed_bucket_selective_abort_leaks_wire_bit
     {chi u0L aL deltaL u0R aR deltaR : Tower128}
     (hChi : chi ≠ towerZero 7) (hDL : deltaL ≠ towerZero 7) (hDR : deltaR ≠ towerZero 7) :
     ∃ survivalCount : Nat,
-      survivalCount = finSum 4 (fun i =>
+      survivalCount = qsum 4 (fun i =>
         if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
         then 1 else 0) ∧
       survivalCount = 1 ∧
@@ -2505,7 +1445,7 @@ theorem tooth_fixed_bucket_selective_abort_leaks_wire_bit
         fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR sample = true →
         onlineBeaverOpenBit false (combineBucketBit sample.1 sample.2) ≠
           onlineBeaverOpenBit true (combineBucketBit sample.1 sample.2)) := by
-  let survivalCount := finSum 4 (fun i =>
+  let survivalCount := qsum 4 (fun i =>
     if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
     then 1 else 0)
   have hCount : survivalCount = 1 := fixedBucketDoubleFaultSurvivesGf2128_fin4_eq hChi hDL hDR
@@ -2564,27 +1504,27 @@ private theorem finFind?_spec : ∀ (n : Nat) (p : Fin n → Bool),
     · simp only [↓reduceIte]
       exact hp0
 
-private theorem finSum_unique_bool_le_one (k : Nat) (p : Fin k → Bool)
+private theorem qsum_unique_bool_le_one (k : Nat) (p : Fin k → Bool)
     (hUnique : ∀ a b : Fin k, p a = true → p b = true → a = b) :
-    finSum k (fun c => if p c then 1 else 0) ≤ 1 := by
+    qsum k (fun c => if p c then 1 else 0) ≤ 1 := by
   have hSpec := finFind?_spec k p
   cases hFind : finFind? k p with
   | none =>
     rw [hFind] at hSpec
     dsimp only at hSpec
-    have hCongr : finSum k (fun c => if p c then 1 else 0) = finSum k (fun _ => 0) := by
-      apply finSum_congr
+    have hCongr : qsum k (fun c => if p c then 1 else 0) = qsum k (fun _ => 0) := by
+      apply qsum_congr
       intro c
       rw [hSpec c]
       rfl
-    rw [hCongr, finSum_const]
+    rw [hCongr, qsum_const]
     omega
   | some c₀ =>
     rw [hFind] at hSpec
     dsimp only at hSpec
-    have hCongr : finSum k (fun c => if p c then 1 else 0) =
-        finSum k (fun c => if c = c₀ then 1 else 0) := by
-      apply finSum_congr
+    have hCongr : qsum k (fun c => if p c then 1 else 0) =
+        qsum k (fun c => if c = c₀ then 1 else 0) := by
+      apply qsum_congr
       intro c
       cases hpc : p c
       · have hcNe : c ≠ c₀ := fun hEq => by subst hEq; rw [hpc] at hSpec; cases hSpec
@@ -2593,7 +1533,7 @@ private theorem finSum_unique_bool_le_one (k : Nat) (p : Fin k → Bool)
       · have hcEq : c = c₀ := hUnique c c₀ hpc hSpec
         rw [cIte_pos hcEq]
         rfl
-    rw [hCongr, finSum_eq_indicator]
+    rw [hCongr, qsum_eq_indicator]
     exact Nat.le_refl 1
 
 /-- **Coin-Permuted Triple Bucketing Security & Double-Fault Bound Over `Tower128` (`coin_permuted_bucketing_hides_wire_and_bounds_double_fault`)**:
@@ -2610,13 +1550,13 @@ theorem coin_permuted_bucketing_hides_wire_and_bounds_double_fault
     (partnerOfI0 : Fin (2 * N - 1) → Fin (2 * N))
     (hPartnerInj : Function.Injective partnerOfI0) :
     (∀ (y bLeft : Bool) (weight : Bool → Nat),
-      finSum 2 (fun idx =>
+      qsum 2 (fun idx =>
         weight (onlineBeaverOpenBit y (combineBucketBit bLeft (boolSampleEnum.toFun idx)))) =
-      finSum 2 (fun idx =>
+      qsum 2 (fun idx =>
         weight (boolSampleEnum.toFun idx))) ∧
-    (let partnerHitCount := finSum (2 * N - 1) (fun c => if partnerOfI0 c == i1 then 1 else 0)
-     let jointBadOutcomes := finSum 4 (fun s =>
-       finSum (2 * N - 1) (fun c =>
+    (let partnerHitCount := qsum (2 * N - 1) (fun c => if partnerOfI0 c == i1 then 1 else 0)
+     let jointBadOutcomes := qsum 4 (fun s =>
+       qsum (2 * N - 1) (fun c =>
          if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun s) &&
             (partnerOfI0 c == i1)
          then 1 else 0))
@@ -2633,7 +1573,7 @@ theorem coin_permuted_bucketing_hides_wire_and_bounds_double_fault
     mask_bijection_hop (boolXorEquiv (y != bLeft))
   · intro partnerHitCount jointBadOutcomes
     have hHitLe : partnerHitCount ≤ 1 :=
-      finSum_unique_bool_le_one (2 * N - 1) (fun c => partnerOfI0 c == i1)
+      qsum_unique_bool_le_one (2 * N - 1) (fun c => partnerOfI0 c == i1)
         (fun c1 c2 hc1 hc2 => hPartnerInj ((eq_of_beq hc1).trans (eq_of_beq hc2).symm))
     have hSurvFalseAt : ∀ idx : Fin 4, idx ≠ ⟨0, by decide⟩ →
         fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR
@@ -2653,8 +1593,8 @@ theorem coin_permuted_bucketing_hides_wire_and_bounds_double_fault
         rw [hs]; decide
       | _ + 4 => exact False.elim (by omega)
     have hJointLeInd :
-        jointBadOutcomes ≤ finSum 4 (fun s => if s = (⟨0, by decide⟩ : Fin 4) then 1 else 0) := by
-      apply finSum_le_finSum
+        jointBadOutcomes ≤ qsum 4 (fun s => if s = (⟨0, by decide⟩ : Fin 4) then 1 else 0) := by
+      apply qsum_le_qsum
       intro s
       if hs0 : s = ⟨0, by decide⟩ then
         subst hs0
@@ -2663,11 +1603,11 @@ theorem coin_permuted_bucketing_hides_wire_and_bounds_double_fault
           rw [@fixedBucketDoubleFaultSurvivesGf2128_eq_both_false chi u0L aL deltaL u0R aR deltaR hChi hDL hDR]
           decide
         rw [cIte_pos rfl]
-        have hEqHit : finSum (2 * N - 1) (fun c =>
+        have hEqHit : qsum (2 * N - 1) (fun c =>
             if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR
                 (boolPairSampleEnum.toFun ⟨0, by decide⟩) && (partnerOfI0 c == i1)
             then 1 else 0) = partnerHitCount := by
-          apply finSum_congr
+          apply qsum_congr
           intro c
           rw [hTrue, Bool.true_and]
         rw [hEqHit]
@@ -2675,17 +1615,17 @@ theorem coin_permuted_bucketing_hides_wire_and_bounds_double_fault
       else
         have hFalse := hSurvFalseAt s hs0
         rw [cIte_neg hs0]
-        have hZero : finSum (2 * N - 1) (fun c =>
+        have hZero : qsum (2 * N - 1) (fun c =>
             if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR
                 (boolPairSampleEnum.toFun s) && (partnerOfI0 c == i1)
-            then 1 else 0) = finSum (2 * N - 1) (fun _ => 0) := by
-          apply finSum_congr
+            then 1 else 0) = qsum (2 * N - 1) (fun _ => 0) := by
+          apply qsum_congr
           intro c
           rw [hFalse, Bool.false_and]
           rfl
-        rw [hZero, finSum_const]
+        rw [hZero, qsum_const]
         omega
-    rw [finSum_eq_indicator] at hJointLeInd
+    rw [qsum_eq_indicator] at hJointLeInd
     have hDenPos : 0 < 4 * (2 * N - 1) := by omega
     exact ⟨hHitLe, hJointLeInd, ⟨hDenPos, hDenPos, Nat.mul_le_mul_right _ hJointLeInd⟩⟩
 
@@ -2856,10 +1796,10 @@ theorem hardened_co_zk_mpc_zero_test_hides_secret_on_input_fault
     (aFin bFin rb : Tower128) (hRb : rb ≠ towerZero 7)
     (enum : SimpleEquiv (Fin C) (MigrationKey256 × (BitVec 128 × BitVec 128)))
     (weight : HardenedRssCeremonyView ZkView → Nat) :
-    finSum C (fun i =>
+    qsum C (fun i =>
       weight (realHardenedRssCeremonyView group drawValidPred zkCommit ks delta
         seed0 seed1 seed2 aFin bFin rb (enum.toFun i))) =
-    finSum C (fun i =>
+    qsum C (fun i =>
       weight (simHardenedAbortView ZkView (ks.s0 ^^^ delta)
         (evalUpfrontTapeValidity drawValidPred seed0 seed1 seed2) (enum.toFun i))) := by
   have hFreshCandidate : ∀ r : MigrationKey256,
@@ -2880,7 +1820,7 @@ theorem hardened_co_zk_mpc_zero_test_hides_secret_on_input_fault
       (SimpleEquiv.prodCongr
         (SimpleEquiv.symm (tower128BaseSacrificeEquiv aFin rb hRb))
         (SimpleEquiv.symm (tower128BaseSacrificeEquiv bFin rb hRb)))
-  apply finSum_bijection_hop_eq enum padEquiv
+  apply qsum_bijection_hop_eq enum padEquiv
     (fun p => weight (realHardenedRssCeremonyView group drawValidPred zkCommit ks delta
       seed0 seed1 seed2 aFin bFin rb p))
     (fun p => weight (simHardenedAbortView ZkView (ks.s0 ^^^ delta)
@@ -2905,11 +1845,11 @@ theorem hardened_co_zk_mpc_zero_test_hides_secret_on_input_fault
   vs
   Qsag.tooth_premature_residual_open_recovers_spending_key
 
-private theorem natAbsDiff_finSum_indicator_self {C : Nat} (p : Fin C → Bool) :
-    natAbsDiff (finSum C (fun i => if p i then 1 else 0))
-               (finSum C (fun i => if p i then 1 else 0)) = 0 := by
-  have hLe := finSum_indicator_diff_le p p (fun _ => false) (fun _ _ => rfl)
-  simp only [Bool.false_eq_true, ↓reduceIte, finSum_const, Nat.mul_zero] at hLe
+private theorem natAbsDiff_qsum_indicator_self {C : Nat} (p : Fin C → Bool) :
+    natAbsDiff (qsum C (fun i => if p i then 1 else 0))
+               (qsum C (fun i => if p i then 1 else 0)) = 0 := by
+  have hLe := qsum_indicator_diff_le p p (fun _ => false) (fun _ _ => rfl)
+  simp only [Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero] at hLe
   exact Nat.eq_zero_of_le_zero hLe
 
 /-- Zero distinguishing advantage (`natAbsDiff = 0`) between ANY two canonical spending keys
@@ -2928,11 +1868,11 @@ theorem hardened_co_zk_mpc_two_keys_zero_advantage_on_fault
     (enum : SimpleEquiv (Fin C) (MigrationKey256 × (BitVec 128 × BitVec 128)))
     (D : HardenedRssCeremonyView ZkView → Bool) :
     natAbsDiff
-      (finSum C (fun i =>
+      (qsum C (fun i =>
         if D (realHardenedRssCeremonyView group drawValidPred zkCommit ksA delta
           seed0 seed1 seed2 aFinA bFinA rb (enum.toFun i))
         then 1 else 0))
-      (finSum C (fun i =>
+      (qsum C (fun i =>
         if D (realHardenedRssCeremonyView group drawValidPred zkCommit ksB delta
           seed0 seed1 seed2 aFinB bFinB rb (enum.toFun i))
         then 1 else 0)) = 0 := by
@@ -2943,7 +1883,7 @@ theorem hardened_co_zk_mpc_two_keys_zero_advantage_on_fault
     group drawValidPred zkCommit ksB hCanonB delta hFault seed0 seed1 seed2 aFinB bFinB rb hRb enum wFn
   dsimp only [wFn] at hA hB
   rw [hA, hB, hSameS0]
-  exact natAbsDiff_finSum_indicator_self _
+  exact natAbsDiff_qsum_indicator_self _
 
 /-- **Upfront `Error::InvalidTape` Conditional-Privacy Theorem (`upfront_invalid_tape_independent_of_spending_key`)**:
     1. `evalUpfrontTapeValidity` (`co_zk_mpc.rs:743-750`) depends solely on `(seed0, seed1, seed2)`
@@ -2962,9 +1902,9 @@ theorem upfront_invalid_tape_independent_of_spending_key
     (enumSeed : SimpleEquiv (Fin Cs) MigrationKey256)
     (enumPads : SimpleEquiv (Fin C) (MigrationKey256 × (BitVec 128 × BitVec 128))) :
     (∀ weightBool : Bool → Nat,
-      finSum Cs (fun i =>
+      qsum Cs (fun i =>
         weightBool (evalUpfrontTapeValidity drawValidPred seed0' seed1 (enumSeed.toFun i))) =
-      finSum Cs (fun i =>
+      qsum Cs (fun i =>
         weightBool (drawValidPred (enumSeed.toFun i)))) ∧
     (∀ (ksA ksB : RssKeyShares3) (delta seed2 : MigrationKey256)
        (aFinA bFinA aFinB bFinB rb : Tower128)
@@ -2972,11 +1912,11 @@ theorem upfront_invalid_tape_independent_of_spending_key
       ksA.s0 = ksB.s0 →
       evalUpfrontTapeValidity drawValidPred seed0' seed1 seed2 = false →
       natAbsDiff
-        (finSum C (fun i =>
+        (qsum C (fun i =>
           if D (realHardenedRssCeremonyView group drawValidPred zkCommit ksA delta
             seed0' seed1 seed2 aFinA bFinA rb (enumPads.toFun i))
           then 1 else 0))
-        (finSum C (fun i =>
+        (qsum C (fun i =>
           if D (realHardenedRssCeremonyView group drawValidPred zkCommit ksB delta
             seed0' seed1 seed2 aFinB bFinB rb (enumPads.toFun i))
           then 1 else 0)) = 0) := by
@@ -2987,26 +1927,26 @@ theorem upfront_invalid_tape_independent_of_spending_key
   · intro ksA ksB delta seed2 aFinA bFinA aFinB bFinB rb D hSameS0 hInvalid
     let wFn : HardenedRssCeremonyView ZkView → Nat := fun v => if D v then 1 else 0
     have hSimA :
-        finSum C (fun i =>
+        qsum C (fun i =>
           wFn (realHardenedRssCeremonyView group drawValidPred zkCommit ksA delta
             seed0' seed1 seed2 aFinA bFinA rb (enumPads.toFun i))) =
-        finSum C (fun i =>
+        qsum C (fun i =>
           wFn (simHardenedAbortView ZkView (ksA.s0 ^^^ delta) false (enumPads.toFun i))) := by
       unfold realHardenedRssCeremonyView simHardenedAbortView
       simp only [hInvalid, Bool.not_false, ↓reduceIte]
       mask_bijection_hop (SimpleEquiv.prodCongr (bvXorEquiv ksA.s1) (SimpleEquiv.refl _))
     have hSimB :
-        finSum C (fun i =>
+        qsum C (fun i =>
           wFn (realHardenedRssCeremonyView group drawValidPred zkCommit ksB delta
             seed0' seed1 seed2 aFinB bFinB rb (enumPads.toFun i))) =
-        finSum C (fun i =>
+        qsum C (fun i =>
           wFn (simHardenedAbortView ZkView (ksB.s0 ^^^ delta) false (enumPads.toFun i))) := by
       unfold realHardenedRssCeremonyView simHardenedAbortView
       simp only [hInvalid, Bool.not_false, ↓reduceIte]
       mask_bijection_hop (SimpleEquiv.prodCongr (bvXorEquiv ksB.s1) (SimpleEquiv.refl _))
     dsimp only [wFn] at hSimA hSimB
     rw [hSimA, hSimB, hSameS0]
-    exact natAbsDiff_finSum_indicator_self _
+    exact natAbsDiff_qsum_indicator_self _
 
 /-- Buggy upfront check that prematurely folds `requireCanonicalScalar(witness)` into the upfront
     `Error::InvalidTape` open before `PRECOMMIT` / `all_outputs_zero`. -/
@@ -3496,561 +2436,6 @@ theorem inhabited_coin_permuted_bucketing_witness :
 /-! ## Executable refinement boundaries and persistent settlement -/
 
 namespace MigrationExecution
-
-/-- Rust's little-endian polynomial coefficients, not `packTower 7`. -/
-abbrev RustGf128 := BitVec 128
-
-/-- Multiplication by x modulo x^128 + x^7 + x^2 + x + 1. -/
-def rustGf128MulX (a : RustGf128) : RustGf128 :=
-  (a <<< 1) ^^^ (if a.getLsbD 127 then 0x87#128 else 0#128)
-
-/-- The 128 iterations of `qsag_asm::gf2_128_mul_portable`, with its accumulator
-    explicit. The branch denotes Rust's all-zero/all-one selection mask. -/
-def rustGf128MulLoop : Nat → RustGf128 → RustGf128 → RustGf128 → RustGf128
-  | 0, _, _, acc => acc
-  | n + 1, x, y, acc =>
-    rustGf128MulLoop n (rustGf128MulX x) (y >>> 1)
-      (acc ^^^ (if y.getLsbD 0 then x else 0#128))
-
-def rustGf128Mul (a b : RustGf128) : RustGf128 :=
-  rustGf128MulLoop 128 a b 0#128
-
-/-- `[low, high]` in Rust has exactly this coefficient order. -/
-def rustGf128OfLimbs (lo hi : UInt64) : RustGf128 :=
-  BitVec.ofNat 128 (lo.toNat + 2^64 * hi.toNat)
-
-set_option maxRecDepth 4096 in
-theorem rust_gf128_basis_kats :
-    rustGf128Mul 2#128 2#128 = 4#128 ∧
-    rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
-    rustGf128OfLimbs 0 1 = BitVec.ofNat 128 (2^64) := by
-  decide
-
-/-- Transparent Wiedemann coordinate bit-packing (`TowerElem k ≃ BitVec (2^k)`) free of `BitVec.cast`. -/
-def wiedemannToNat : (k : Nat) → TowerElem k → Nat
-  | 0, a => match a with | true => 1 | false => 0
-  | k + 1, a => wiedemannToNat k a.1 + ((wiedemannToNat k a.2) <<< (2 ^ k))
-
-def wiedemannOfNat : (k : Nat) → Nat → TowerElem k
-  | 0, n => n.testBit 0
-  | k + 1, n => (wiedemannOfNat k (n % (2 ^ (2 ^ k))), wiedemannOfNat k (n >>> (2 ^ k)))
-
-def wiedemannPack128 (a : Tower128) : BitVec 128 :=
-  BitVec.ofNat 128 (wiedemannToNat 7 a)
-
-def wiedemannUnpack128 (v : BitVec 128) : Tower128 :=
-  wiedemannOfNat 7 v.toNat
-
-/-- Fast 3-way Karatsuba evaluator for `TowerElem k`, proved equal to `towerMul k`. -/
-def wiedemannKaratsuba : (k : Nat) → TowerElem k → TowerElem k → TowerElem k
-  | 0, a, b => a && b
-  | k + 1, a, b =>
-    let p := wiedemannKaratsuba k a.1 b.1
-    let q := wiedemannKaratsuba k a.2 b.2
-    let r := wiedemannKaratsuba k (towerAdd k a.1 a.2) (towerAdd k b.1 b.2)
-    (towerAdd k p q, towerAdd k (towerAdd k r (towerAdd k p q)) (towerScaleX k q))
-
-theorem wiedemannKaratsuba_eq_towerMul (k : Nat) (a b : TowerElem k) :
-    wiedemannKaratsuba k a b = towerMul k a b := by
-  induction k with
-  | zero => rfl
-  | succ k ih =>
-    simp only [wiedemannKaratsuba, ih, towerMul, towerMul_add_distrib,
-      towerAdd_mul_distrib, towerScaleX_eq_mul]
-    congr 1
-    simp only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm,
-      towerAdd_self_zero, towerAdd_zero, towerAdd_cancel]
-
-/-- Regression against treating Wiedemann coordinate bit-packing as the Rust polynomial basis
-    (the verified conversion is `rustToTower` below):
-    under naive coordinate bit-packing, bit `1` (`x_0 ∈ Tower128`) squares to `x_0 + 1` (`3#128`),
-    whereas in `RustGf128` bit `1` (`x`) squares to `x^2` (`4#128`). -/
-theorem tooth_identity_basis_conversion_wrong :
-    ∃ x : RustGf128,
-      rustGf128Mul x x ≠
-        wiedemannPack128 (towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x)) ∧
-      wiedemannUnpack128 (rustGf128Mul x x) ≠
-        towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x) := by
-  refine ⟨2#128, ?_⟩
-  have hK : towerMul 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) =
-      wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) :=
-    (wiedemannKaratsuba_eq_towerMul 7 _ _).symm
-  have hW : wiedemannPack128 (wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128)) = 3#128 := by
-    decide
-  have hR : rustGf128Mul 2#128 2#128 = 4#128 := rust_gf128_basis_kats.1
-  rw [hK]
-  refine ⟨?_, ?_⟩
-  · rw [hR, hW]; decide
-  · intro hEq
-    have hp := congrArg wiedemannPack128 hEq
-    rw [hW] at hp
-    have h4 : wiedemannPack128 (wiedemannUnpack128 (rustGf128Mul 2#128 2#128)) = 4#128 := by
-      rw [hR]; decide
-    rw [h4] at hp
-    revert hp; decide
-
-#tooth_pair Qsag.MigrationExecution.rust_gf128_basis_kats vs
-  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
-
-/-! ### The Rust polynomial basis is a field isomorphic to `Tower128`
-
-Ring laws are proved directly on the shift-and-reduce loop: multiplication by
-`b` is the polynomial `b` evaluated at the linear operator `rustGf128MulX`, and
-polynomials in one operator commute. The seven Wiedemann generators are then
-located inside the Rust basis, which gives a ring homomorphism out of the tower
-field; its inverse is Horner evaluation at a root of
-`x^128 + x^7 + x^2 + x + 1` in the tower. -/
-
-/-- `Σ_{i<n, f i} X^i · x`: the bits `f` of one multiplicand act on the other. -/
-def rustPolyAct : Nat → (Nat → Bool) → RustGf128 → RustGf128
-  | 0, _, _ => 0#128
-  | n + 1, f, x =>
-    (if f 0 then x else 0#128) ^^^ rustPolyAct n (fun i => f (i + 1)) (rustGf128MulX x)
-
-private theorem bxor_left_comm (a b c : RustGf128) : a ^^^ (b ^^^ c) = b ^^^ (a ^^^ c) := by
-  rw [← BitVec.xor_assoc, BitVec.xor_comm a b, BitVec.xor_assoc]
-
-private theorem bxor_cancel (a b : RustGf128) : a ^^^ (a ^^^ b) = b := by
-  rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor]
-
-theorem rustGf128MulLoop_eq (n : Nat) : ∀ (x y acc : RustGf128),
-    rustGf128MulLoop n x y acc = acc ^^^ rustPolyAct n y.getLsbD x := by
-  induction n with
-  | zero =>
-    intro x y acc
-    show acc = acc ^^^ 0#128
-    rw [BitVec.xor_zero]
-  | succ n ih =>
-    intro x y acc
-    have hShift : (y >>> 1).getLsbD = fun i => y.getLsbD (i + 1) := by
-      funext i
-      rw [BitVec.getLsbD_ushiftRight, Nat.add_comm]
-    show rustGf128MulLoop n (rustGf128MulX x) (y >>> 1)
-        (acc ^^^ (if y.getLsbD 0 then x else 0#128)) =
-      acc ^^^ ((if y.getLsbD 0 then x else 0#128) ^^^
-        rustPolyAct n (fun i => y.getLsbD (i + 1)) (rustGf128MulX x))
-    rw [ih, hShift, BitVec.xor_assoc]
-
-theorem rustGf128Mul_eq_act (a b : RustGf128) :
-    rustGf128Mul a b = rustPolyAct 128 b.getLsbD a := by
-  unfold rustGf128Mul
-  rw [rustGf128MulLoop_eq, BitVec.zero_xor]
-
-private theorem rustGf128MulX_zero : rustGf128MulX 0#128 = 0#128 := by decide
-
-private theorem ite_xor_split (c d : Bool) (k p q : RustGf128) :
-    (p ^^^ q) ^^^ (if (c ^^ d) = true then k else 0#128) =
-      (p ^^^ (if c = true then k else 0#128)) ^^^ (q ^^^ (if d = true then k else 0#128)) := by
-  cases c <;> cases d
-  · show (p ^^^ q) ^^^ 0#128 = (p ^^^ 0#128) ^^^ (q ^^^ 0#128)
-    simp only [BitVec.xor_zero]
-  · show (p ^^^ q) ^^^ k = (p ^^^ 0#128) ^^^ (q ^^^ k)
-    simp only [BitVec.xor_zero, BitVec.xor_assoc]
-  · show (p ^^^ q) ^^^ k = (p ^^^ k) ^^^ (q ^^^ 0#128)
-    simp only [BitVec.xor_zero, BitVec.xor_comm, bxor_left_comm]
-  · show (p ^^^ q) ^^^ 0#128 = (p ^^^ k) ^^^ (q ^^^ k)
-    simp only [BitVec.xor_zero, BitVec.xor_assoc, BitVec.xor_comm, bxor_left_comm, bxor_cancel]
-
-private theorem rustGf128MulX_xor (a b : RustGf128) :
-    rustGf128MulX (a ^^^ b) = rustGf128MulX a ^^^ rustGf128MulX b := by
-  unfold rustGf128MulX
-  rw [BitVec.shiftLeft_xor_distrib, BitVec.getLsbD_xor]
-  exact ite_xor_split _ _ _ _ _
-
-private theorem rustGf128MulX_ite (c : Bool) (x : RustGf128) :
-    rustGf128MulX (if c then x else 0#128) = if c then rustGf128MulX x else 0#128 := by
-  cases c
-  · exact rustGf128MulX_zero
-  · rfl
-
-theorem rustPolyAct_zero (n : Nat) : ∀ f, rustPolyAct n f 0#128 = 0#128 := by
-  induction n with
-  | zero => intro f; rfl
-  | succ n ih =>
-    intro f
-    simp only [rustPolyAct]
-    rw [rustGf128MulX_zero, ih]
-    cases f 0 <;> decide
-
-theorem rustPolyAct_xor (n : Nat) : ∀ f x y,
-    rustPolyAct n f (x ^^^ y) = rustPolyAct n f x ^^^ rustPolyAct n f y := by
-  induction n with
-  | zero => intro f x y; simp only [rustPolyAct, BitVec.xor_zero]
-  | succ n ih =>
-    intro f x y
-    simp only [rustPolyAct]
-    rw [rustGf128MulX_xor, ih]
-    generalize rustPolyAct n (fun i => f (i + 1)) (rustGf128MulX x) = P
-    generalize rustPolyAct n (fun i => f (i + 1)) (rustGf128MulX y) = Q
-    cases f 0
-    · show 0#128 ^^^ (P ^^^ Q) = (0#128 ^^^ P) ^^^ (0#128 ^^^ Q)
-      simp only [BitVec.zero_xor]
-    · show (x ^^^ y) ^^^ (P ^^^ Q) = (x ^^^ P) ^^^ (y ^^^ Q)
-      simp only [BitVec.xor_assoc, bxor_left_comm]
-
-private theorem rustPolyAct_ite (n : Nat) (f : Nat → Bool) (c : Bool) (x : RustGf128) :
-    rustPolyAct n f (if c then x else 0#128) = if c then rustPolyAct n f x else 0#128 := by
-  cases c
-  · exact rustPolyAct_zero n f
-  · rfl
-
-theorem rustPolyAct_mulX (n : Nat) : ∀ f x,
-    rustPolyAct n f (rustGf128MulX x) = rustGf128MulX (rustPolyAct n f x) := by
-  induction n with
-  | zero => intro f x; exact rustGf128MulX_zero.symm
-  | succ n ih =>
-    intro f x
-    simp only [rustPolyAct]
-    rw [rustGf128MulX_xor, rustGf128MulX_ite, ih (fun i => f (i + 1)) (rustGf128MulX x)]
-
-/-- Polynomials in the single operator `rustGf128MulX` commute. -/
-theorem rustPolyAct_comm (n m : Nat) (h : Nat → Bool) : ∀ f x,
-    rustPolyAct n f (rustPolyAct m h x) = rustPolyAct m h (rustPolyAct n f x) := by
-  induction n with
-  | zero => intro f x; exact (rustPolyAct_zero m h).symm
-  | succ n ih =>
-    intro f x
-    simp only [rustPolyAct]
-    rw [rustPolyAct_xor, rustPolyAct_ite, ← rustPolyAct_mulX m h x,
-      ih (fun i => f (i + 1)) (rustGf128MulX x)]
-
-private theorem twoPow_bit (j i : Nat) (hj : j < 128) :
-    (BitVec.twoPow 128 j).getLsbD i = decide (j = i) := by
-  rw [BitVec.getLsbD_twoPow, decide_eq_true hj]
-  rfl
-
-private theorem ite_twoPow_bit (c : Bool) (j i : Nat) (hj : j < 128) :
-    (if c then BitVec.twoPow 128 j else 0#128).getLsbD i = (c && decide (j = i)) := by
-  cases c
-  · exact BitVec.getLsbD_zero
-  · exact twoPow_bit j i hj
-
-private theorem rustGf128MulX_twoPow (j : Nat) (hj : j < 127) :
-    rustGf128MulX (BitVec.twoPow 128 j) = BitVec.twoPow 128 (j + 1) := by
-  unfold rustGf128MulX
-  rw [twoPow_bit j 127 (by omega), decide_eq_false (by omega : ¬ j = 127)]
-  show (1#128 <<< j) <<< 1 ^^^ 0#128 = 1#128 <<< (j + 1)
-  rw [BitVec.xor_zero, BitVec.shiftLeft_add]
-
-/-- No reduction happens below degree 128: the action on `X^j` writes the bits
-    of `f` at positions `j, …, j+n-1`. -/
-theorem rustPolyAct_twoPow_bit (n : Nat) : ∀ (j : Nat) (f : Nat → Bool), j + n ≤ 128 → ∀ i,
-    (rustPolyAct n f (BitVec.twoPow 128 j)).getLsbD i =
-      (decide (j ≤ i) && decide (i < j + n) && f (i - j)) := by
-  induction n with
-  | zero =>
-    intro j f _ i
-    show (0#128).getLsbD i = _
-    rw [BitVec.getLsbD_zero]
-    by_cases h : j ≤ i
-    · rw [decide_eq_false (by omega : ¬ i < j + 0)]
-      simp only [Bool.and_false, Bool.false_and]
-    · rw [decide_eq_false h]
-      rfl
-  | succ n ih =>
-    intro j f hjn i
-    have hj : j < 128 := by omega
-    simp only [rustPolyAct]
-    rw [BitVec.getLsbD_xor, ite_twoPow_bit _ j i hj]
-    have hRest : (rustPolyAct n (fun i => f (i + 1))
-          (rustGf128MulX (BitVec.twoPow 128 j))).getLsbD i =
-        (decide (j + 1 ≤ i) && decide (i < j + (n + 1)) && f (i - (j + 1) + 1)) := by
-      by_cases hn : n = 0
-      · subst hn
-        show (0#128).getLsbD i = _
-        rw [BitVec.getLsbD_zero]
-        by_cases h : j + 1 ≤ i
-        · rw [decide_eq_false (by omega : ¬ i < j + (0 + 1))]
-          simp only [Bool.and_false, Bool.false_and]
-        · rw [decide_eq_false h]
-          rfl
-      · rw [rustGf128MulX_twoPow j (by omega), ih (j + 1) _ (by omega) i,
-          show j + 1 + n = j + (n + 1) from by omega]
-    rw [hRest]
-    rcases Nat.lt_trichotomy i j with h | h | h
-    · rw [decide_eq_false (by omega : ¬ j = i), decide_eq_false (by omega : ¬ j + 1 ≤ i),
-        decide_eq_false (by omega : ¬ j ≤ i)]
-      cases f 0 <;> rfl
-    · subst h
-      rw [decide_eq_true (Eq.refl i), decide_eq_false (by omega : ¬ i + 1 ≤ i),
-        decide_eq_true (Nat.le_refl i), decide_eq_true (by omega : i < i + (n + 1)),
-        Nat.sub_self]
-      cases f 0 <;> rfl
-    · rw [decide_eq_false (by omega : ¬ j = i), decide_eq_true (by omega : j + 1 ≤ i),
-        decide_eq_true (by omega : j ≤ i), show i - (j + 1) + 1 = i - j from by omega]
-      cases f 0 <;> cases decide (i < j + (n + 1)) <;> cases f (i - j) <;> rfl
-
-/-- Every element is its own bit polynomial applied to `1`. -/
-theorem rustPolyAct_bits_one (a : RustGf128) : rustPolyAct 128 a.getLsbD 1#128 = a := by
-  apply BitVec.eq_of_getLsbD_eq
-  intro i hi
-  have h := rustPolyAct_twoPow_bit 128 0 a.getLsbD (by omega) i
-  rw [show BitVec.twoPow 128 0 = 1#128 from by decide] at h
-  rw [h, decide_eq_true (Nat.zero_le i), decide_eq_true (by omega : i < 0 + 128), Nat.sub_zero]
-  rfl
-
-theorem rustGf128Mul_comm (a b : RustGf128) : rustGf128Mul a b = rustGf128Mul b a := by
-  rw [rustGf128Mul_eq_act, rustGf128Mul_eq_act]
-  calc rustPolyAct 128 b.getLsbD a
-      = rustPolyAct 128 b.getLsbD (rustPolyAct 128 a.getLsbD 1#128) := by
-        rw [rustPolyAct_bits_one]
-    _ = rustPolyAct 128 a.getLsbD (rustPolyAct 128 b.getLsbD 1#128) :=
-        rustPolyAct_comm 128 128 a.getLsbD b.getLsbD 1#128
-    _ = rustPolyAct 128 a.getLsbD b := by rw [rustPolyAct_bits_one]
-
-theorem rustGf128Mul_xor_left (a b c : RustGf128) :
-    rustGf128Mul (a ^^^ b) c = rustGf128Mul a c ^^^ rustGf128Mul b c := by
-  simp only [rustGf128Mul_eq_act, rustPolyAct_xor]
-
-theorem rustGf128Mul_xor_right (a b c : RustGf128) :
-    rustGf128Mul a (b ^^^ c) = rustGf128Mul a b ^^^ rustGf128Mul a c := by
-  rw [rustGf128Mul_comm a, rustGf128Mul_xor_left, rustGf128Mul_comm b a, rustGf128Mul_comm c a]
-
-theorem rustGf128Mul_assoc (a b c : RustGf128) :
-    rustGf128Mul (rustGf128Mul a b) c = rustGf128Mul a (rustGf128Mul b c) := by
-  rw [rustGf128Mul_comm a (rustGf128Mul b c), rustGf128Mul_comm a b]
-  simp only [rustGf128Mul_eq_act]
-  exact rustPolyAct_comm 128 128 a.getLsbD c.getLsbD b
-
-theorem rustGf128Mul_left_comm (a b c : RustGf128) :
-    rustGf128Mul a (rustGf128Mul b c) = rustGf128Mul b (rustGf128Mul a c) := by
-  rw [← rustGf128Mul_assoc, rustGf128Mul_comm a b, rustGf128Mul_assoc]
-
-theorem rustGf128Mul_one_left (a : RustGf128) : rustGf128Mul 1#128 a = a := by
-  rw [rustGf128Mul_eq_act, rustPolyAct_bits_one]
-
-theorem rustGf128Mul_one_right (a : RustGf128) : rustGf128Mul a 1#128 = a := by
-  rw [rustGf128Mul_comm, rustGf128Mul_one_left]
-
-theorem rustGf128Mul_zero_left (a : RustGf128) : rustGf128Mul 0#128 a = 0#128 := by
-  rw [rustGf128Mul_eq_act, rustPolyAct_zero]
-
-theorem rustGf128Mul_zero_right (a : RustGf128) : rustGf128Mul a 0#128 = 0#128 := by
-  rw [rustGf128Mul_comm, rustGf128Mul_zero_left]
-
-theorem rustGf128MulX_eq_mul (a : RustGf128) : rustGf128MulX a = rustGf128Mul 2#128 a := by
-  rw [rustGf128Mul_eq_act, show (2#128 : RustGf128) = rustGf128MulX 1#128 from by decide,
-    rustPolyAct_mulX, rustPolyAct_bits_one]
-
-/-- The Rust polynomial basis as a commutative ring: addition is XOR and
-    multiplication is the shift-and-reduce loop. Scoped so that no other
-    `BitVec 128` carrier silently inherits this multiplication. -/
-scoped instance rustGf128Ring : LawfulCommRing RustGf128 where
-  zero := 0#128
-  one := 1#128
-  add a b := a ^^^ b
-  mul := rustGf128Mul
-  neg a := a
-  sub a b := a ^^^ b
-  add_assoc := BitVec.xor_assoc
-  add_comm := BitVec.xor_comm
-  zero_add _ := BitVec.zero_xor
-  add_zero _ := BitVec.xor_zero
-  add_left_neg _ := BitVec.xor_self
-  sub_eq_add_neg _ _ := rfl
-  mul_assoc := rustGf128Mul_assoc
-  mul_comm := rustGf128Mul_comm
-  one_mul := rustGf128Mul_one_left
-  mul_one := rustGf128Mul_one_right
-  left_distrib := rustGf128Mul_xor_right
-  right_distrib := rustGf128Mul_xor_left
-
-/-- Images of the Wiedemann generators `t_k` (`t_0 = 1`,
-    `t_{k+1}^2 = t_{k+1} t_k + 1`) in the Rust basis. -/
-def towerGenRust : Nat → RustGf128
-  | 0 => 1#128
-  | 1 => 0x295ac0b1f4731af9676aac9fa4b20b08#128
-  | 2 => 0x500317bd159d73bb34d2f7fba603e341#128
-  | 3 => 0xd7272761ca8e287777eda49fad5950db#128
-  | 4 => 0xf7ee5366ad8dcdf077be5724c64eb1d2#128
-  | 5 => 0x218cc1384d3fe56b1428b68814f535be#128
-  | 6 => 0x2c2fcdaa2679817f994e36d0d1df3b3d#128
-  | 7 => 0xe4f21e8c8ec8031cb7b73094152f7631#128
-  | _ => 0#128
-
-theorem towerGenRust_sq (k : Nat) (hk : k < 7) :
-    rustGf128Mul (towerGenRust (k + 1)) (towerGenRust (k + 1)) =
-      rustGf128Mul (towerGenRust (k + 1)) (towerGenRust k) ^^^ 1#128 := by
-  have h : ∀ k : Fin 7,
-      rustGf128Mul (towerGenRust (k.val + 1)) (towerGenRust (k.val + 1)) =
-        rustGf128Mul (towerGenRust (k.val + 1)) (towerGenRust k.val) ^^^ 1#128 := by
-    decide +kernel
-  exact h ⟨k, hk⟩
-
-/-- The tower embedded in the Rust basis, one quadratic extension at a time. -/
-def towerToRust : (k : Nat) → TowerElem k → RustGf128
-  | 0, a => match a with | true => 1#128 | false => 0#128
-  | k + 1, a =>
-    towerToRust k a.1 ^^^ rustGf128Mul (towerToRust k a.2) (towerGenRust (k + 1))
-
-theorem towerToRust_zero (k : Nat) : towerToRust k (towerZero k) = 0#128 := by
-  induction k with
-  | zero => rfl
-  | succ k ih =>
-    show towerToRust k (towerZero k) ^^^
-      rustGf128Mul (towerToRust k (towerZero k)) (towerGenRust (k + 1)) = 0#128
-    rw [ih, rustGf128Mul_zero_left, BitVec.xor_zero]
-
-theorem towerToRust_one (k : Nat) : towerToRust k (towerOne k) = 1#128 := by
-  induction k with
-  | zero => rfl
-  | succ k ih =>
-    show towerToRust k (towerOne k) ^^^
-      rustGf128Mul (towerToRust k (towerZero k)) (towerGenRust (k + 1)) = 1#128
-    rw [ih, towerToRust_zero, rustGf128Mul_zero_left, BitVec.xor_zero]
-
-theorem towerToRust_add (k : Nat) (a b : TowerElem k) :
-    towerToRust k (towerAdd k a b) = towerToRust k a ^^^ towerToRust k b := by
-  induction k with
-  | zero => cases a <;> cases b <;> decide
-  | succ k ih =>
-    show towerToRust k (towerAdd k a.1 b.1) ^^^
-        rustGf128Mul (towerToRust k (towerAdd k a.2 b.2)) (towerGenRust (k + 1)) =
-      (towerToRust k a.1 ^^^ rustGf128Mul (towerToRust k a.2) (towerGenRust (k + 1))) ^^^
-      (towerToRust k b.1 ^^^ rustGf128Mul (towerToRust k b.2) (towerGenRust (k + 1)))
-    rw [ih, ih, rustGf128Mul_xor_left]
-    simp only [BitVec.xor_assoc, bxor_left_comm]
-
-theorem towerToRust_X (k : Nat) : towerToRust k (towerX k) = towerGenRust k := by
-  cases k with
-  | zero => rfl
-  | succ k =>
-    show towerToRust k (towerZero k) ^^^
-      rustGf128Mul (towerToRust k (towerOne k)) (towerGenRust (k + 1)) = towerGenRust (k + 1)
-    rw [towerToRust_zero, towerToRust_one, rustGf128Mul_one_left, BitVec.zero_xor]
-
-set_option linter.unusedSimpArgs false in
-private theorem rust_tower_step (A1 A2 B1 B2 T U : RustGf128)
-    (hT : rustGf128Mul T T = rustGf128Mul T U ^^^ 1#128) :
-    (rustGf128Mul A1 B1 ^^^ rustGf128Mul A2 B2) ^^^
-      rustGf128Mul ((rustGf128Mul A1 B2 ^^^ rustGf128Mul A2 B1) ^^^
-        rustGf128Mul U (rustGf128Mul A2 B2)) T =
-    rustGf128Mul (A1 ^^^ rustGf128Mul A2 T) (B1 ^^^ rustGf128Mul B2 T) := by
-  have hs : rustGf128Mul (rustGf128Mul A2 T) (rustGf128Mul B2 T) =
-      rustGf128Mul (rustGf128Mul A2 B2) (rustGf128Mul T T) := by
-    simp only [rustGf128Mul_comm, rustGf128Mul_left_comm]
-  have h4 : rustGf128Mul (rustGf128Mul A2 T) (rustGf128Mul B2 T) =
-      rustGf128Mul (rustGf128Mul A2 B2) (rustGf128Mul T U) ^^^ rustGf128Mul A2 B2 := by
-    rw [hs, hT, rustGf128Mul_xor_right, rustGf128Mul_one_right]
-  rw [rustGf128Mul_xor_left A1 (rustGf128Mul A2 T), rustGf128Mul_xor_right A1,
-    rustGf128Mul_xor_right (rustGf128Mul A2 T), h4]
-  simp only [rustGf128Mul_xor_right, rustGf128Mul_comm,
-    rustGf128Mul_left_comm, BitVec.xor_assoc, BitVec.xor_comm, bxor_left_comm]
-
-theorem towerToRust_mul : ∀ (k : Nat), k ≤ 7 → ∀ a b : TowerElem k,
-    towerToRust k (towerMul k a b) =
-      rustGf128Mul (towerToRust k a) (towerToRust k b) := by
-  intro k
-  induction k with
-  | zero => intro _ a b; cases a <;> cases b <;> decide +kernel
-  | succ k ih =>
-    intro hk a b
-    have ih' := ih (by omega)
-    show towerToRust k (towerAdd k (towerMul k a.1 b.1) (towerMul k a.2 b.2)) ^^^
-        rustGf128Mul (towerToRust k (towerAdd k
-          (towerAdd k (towerMul k a.1 b.2) (towerMul k a.2 b.1))
-          (towerMul k (towerX k) (towerMul k a.2 b.2)))) (towerGenRust (k + 1)) =
-      rustGf128Mul (towerToRust k a.1 ^^^ rustGf128Mul (towerToRust k a.2) (towerGenRust (k + 1)))
-        (towerToRust k b.1 ^^^ rustGf128Mul (towerToRust k b.2) (towerGenRust (k + 1)))
-    simp only [towerToRust_add, ih', towerToRust_X]
-    exact rust_tower_step _ _ _ _ _ _ (towerGenRust_sq k (by omega))
-
-/-- A ring homomorphism out of a field is injective. -/
-theorem towerToRust_injective (a b : Tower128)
-    (h : towerToRust 7 a = towerToRust 7 b) : a = b := by
-  have hsum : towerToRust 7 (towerAdd 7 a b) = 0#128 := by
-    rw [towerToRust_add, h, BitVec.xor_self]
-  by_cases hz : towerAdd 7 a b = towerZero 7
-  · have hc := towerAdd_cancel 7 a b
-    rw [hz, towerAdd_zero] at hc
-    exact hc
-  · exfalso
-    have h1 := congrArg (towerToRust 7) (towerMul_inv 7 _ hz)
-    rw [towerToRust_mul 7 (Nat.le_refl 7), hsum, rustGf128Mul_zero_left, towerToRust_one] at h1
-    exact absurd h1 (by decide)
-
-/-- A root of `x^128 + x^7 + x^2 + x + 1` in the Wiedemann tower: the image of
-    Rust's `x` (`2#128`). -/
-def rustGenTower : Tower128 :=
-  wiedemannOfNat 7 0xbfe0a17ee2b77754526b13e1fedaef3d
-
-theorem towerToRust_rustGenTower : towerToRust 7 rustGenTower = 2#128 := by
-  decide +kernel
-
-def rustToTowerAux : Nat → (Nat → Bool) → Tower128
-  | 0, _ => towerZero 7
-  | n + 1, f =>
-    towerAdd 7 (if f 0 then towerOne 7 else towerZero 7)
-      (towerMul 7 rustGenTower (rustToTowerAux n (fun i => f (i + 1))))
-
-/-- The basis conversion: Horner evaluation of the Rust coefficient bits at
-    `rustGenTower`. This, not coordinate repacking, relates the two carriers. -/
-def rustToTower (a : RustGf128) : Tower128 := rustToTowerAux 128 a.getLsbD
-
-private theorem towerToRust_bit (c : Bool) :
-    towerToRust 7 (if c then towerOne 7 else towerZero 7) = if c then 1#128 else 0#128 := by
-  cases c
-  · exact towerToRust_zero 7
-  · exact towerToRust_one 7
-
-theorem towerToRust_rustToTowerAux (n : Nat) : ∀ f,
-    towerToRust 7 (rustToTowerAux n f) = rustPolyAct n f 1#128 := by
-  induction n with
-  | zero => intro f; exact towerToRust_zero 7
-  | succ n ih =>
-    intro f
-    simp only [rustToTowerAux, rustPolyAct]
-    rw [towerToRust_add, towerToRust_mul 7 (Nat.le_refl 7), towerToRust_rustGenTower, ih,
-      towerToRust_bit, rustPolyAct_mulX, rustGf128MulX_eq_mul]
-
-theorem towerToRust_rustToTower (a : RustGf128) : towerToRust 7 (rustToTower a) = a := by
-  unfold rustToTower
-  rw [towerToRust_rustToTowerAux, rustPolyAct_bits_one]
-
-theorem rustToTower_towerToRust (t : Tower128) : rustToTower (towerToRust 7 t) = t :=
-  towerToRust_injective _ _ (towerToRust_rustToTower _)
-
-theorem rustToTower_injective (a b : RustGf128) (h : rustToTower a = rustToTower b) : a = b := by
-  have hc := congrArg (towerToRust 7) h
-  rw [towerToRust_rustToTower, towerToRust_rustToTower] at hc
-  exact hc
-
-theorem rustToTower_xor (a b : RustGf128) :
-    rustToTower (a ^^^ b) = towerAdd 7 (rustToTower a) (rustToTower b) := by
-  apply towerToRust_injective
-  rw [towerToRust_rustToTower, towerToRust_add, towerToRust_rustToTower, towerToRust_rustToTower]
-
-/-- The conversion carries Rust's multiplication to tower multiplication for
-    every pair of field elements. -/
-theorem rustToTower_mul (a b : RustGf128) :
-    rustToTower (rustGf128Mul a b) = towerMul 7 (rustToTower a) (rustToTower b) := by
-  apply towerToRust_injective
-  rw [towerToRust_rustToTower, towerToRust_mul 7 (Nat.le_refl 7), towerToRust_rustToTower,
-    towerToRust_rustToTower]
-
-theorem rustToTower_zero : rustToTower 0#128 = towerZero 7 := by
-  apply towerToRust_injective
-  rw [towerToRust_rustToTower, towerToRust_zero]
-
-theorem rustToTower_two : rustToTower 2#128 = rustGenTower := by
-  apply towerToRust_injective
-  rw [towerToRust_rustToTower, towerToRust_rustGenTower]
-
-/-- `x^128 + x^7 + x^2 + x + 1` has no proper factorisation: the quotient ring
-    Rust computes in has no zero divisors. -/
-theorem rustGf128Mul_eq_zero (a b : RustGf128) (h : rustGf128Mul a b = 0#128) :
-    a = 0#128 ∨ b = 0#128 := by
-  have ht : towerMul 7 (rustToTower a) (rustToTower b) = towerZero 7 := by
-    rw [← rustToTower_mul, h, rustToTower_zero]
-  rcases (towerMul_eq_zero_iff 7 _ _).mp ht with h1 | h1
-  · exact Or.inl (rustToTower_injective _ _ (h1.trans rustToTower_zero.symm))
-  · exact Or.inr (rustToTower_injective _ _ (h1.trans rustToTower_zero.symm))
-
-scoped instance rustGf128NoZeroDivisors : NoZeroDivisors RustGf128 where
-  eq_zero_or_eq_zero_of_mul_eq_zero h := rustGf128Mul_eq_zero _ _ h
-
-#tooth_pair Qsag.MigrationExecution.rustToTower_mul vs
-  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
 
 /-- One base-case opening. Gamma is a received claim, never assigned alpha*beta
     by the verifier. All 2 × 64 openings must pass. This is the final base-case
@@ -5501,7 +3886,6 @@ theorem tooth_replay_guard_removal :
   Qsag.MigrationExecution.tooth_replay_guard_removal
 
 #verify_constructive
-  Qsag.MigrationExecution.rust_gf128_basis_kats
   Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
   Qsag.MigrationExecution.rustGf128Mul_comm
   Qsag.MigrationExecution.rustGf128Mul_assoc

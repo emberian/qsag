@@ -3,7 +3,7 @@ public import Qsag.Machine.ElfBinaryVerify
 public import Qsag.Machine.McRefine
 public import Qsag.Machine.ElfParse
 import Qsag.Tactic.AssuranceKit
-import Qsag.Math.Constructive
+import Qsag.Tactic.Prelude
 import all Qsag.Machine.ElfBinaryVerify
 import all Qsag.Machine.McRefine
 import all Qsag.Machine.ElfFixtureSlices

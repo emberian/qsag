@@ -26,15 +26,15 @@ Constructive (`0 Classical.choice`, `0 sorry`) QROM soundness and recursive comp
 -/
 
 public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
-public import Qsag.Coding.Cwyz26EqualDegreeAndMultiFold
+public import Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import all Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
-import all Qsag.Coding.Cwyz26EqualDegreeAndMultiFold
+import all Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import Qsag.Tactic.AssuranceKit
-import Qsag.Tactic.ConstructiveRing
+import Qsag.Tactic.CommRing
 
 public section
 namespace Qsag

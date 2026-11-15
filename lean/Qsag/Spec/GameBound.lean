@@ -204,7 +204,7 @@ theorem GameBound.atLeastBits {b : Nat} {adv ε : RatBound}
     (hBound : GameBound adv ε) (hBits : ε.atLeastBits b) : adv.atLeastBits b :=
   RatBound.atLeastBits_of_le hBound hBits
 
-private theorem finSum_le_finSum :
+private theorem qsum_le_qsum :
     ∀ (n : Nat) (f g : Fin n → Nat),
       (∀ i : Fin n, f i ≤ g i) →
       sampleSum n f ≤ sampleSum n g
@@ -212,16 +212,16 @@ private theorem finSum_le_finSum :
   | n + 1, f, g, hLe => by
     unfold sampleSum
     exact Nat.add_le_add (hLe ⟨0, Nat.zero_lt_succ n⟩)
-      (finSum_le_finSum n _ _ (fun i => hLe ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
+      (qsum_le_qsum n _ _ (fun i => hLe ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
 
-private theorem finSum_add_eq :
+private theorem qsum_add_eq :
     ∀ (n : Nat) (f g : Fin n → Nat),
       sampleSum n (fun i => f i + g i) = sampleSum n f + sampleSum n g
   | 0, _, _ => rfl
   | n + 1, f, g => by
     unfold sampleSum
     dsimp only
-    rw [finSum_add_eq n]
+    rw [qsum_add_eq n]
     omega
 
 private theorem ite_true {α : Type} {p : Prop} [Decidable p] (hp : p) (a b : α) :
@@ -289,7 +289,7 @@ private theorem natAbsDiff_add_bad (b₁ b₂ : Bool) (sp sq sb : Nat)
       have h2 : ¬ (1 + sp ≤ 1 + sq) := by omega
       rw [ite_false h2]; omega
 
-private theorem natAbsDiff_finSum_le :
+private theorem natAbsDiff_qsum_le :
     ∀ (n : Nat) (p q bad : Fin n → Bool),
       (∀ i : Fin n, bad i = false → p i = q i) →
       natAbsDiff (sampleSum n (fun i => if p i then 1 else 0))
@@ -299,7 +299,7 @@ private theorem natAbsDiff_finSum_le :
   | n + 1, p, q, bad, hEq => by
     unfold sampleSum
     dsimp only
-    have ih := natAbsDiff_finSum_le n
+    have ih := natAbsDiff_qsum_le n
       (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
       (fun i => q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
       (fun i => bad ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
@@ -383,7 +383,7 @@ theorem adv_until_bad {n : Nat} (G₀ G₁ : FinGame n) (bad : Fin n → Bool)
     GameBound (AdvDist G₀ G₁) (FinGame.mk G₀.samplePos bad).winProb := by
   unfold GameBound RatBound.le AdvDist FinGame.winProb FinGame.winCount
   dsimp only
-  exact Nat.mul_le_mul_right n (natAbsDiff_finSum_le n G₀.win G₁.win bad hIdentical)
+  exact Nat.mul_le_mul_right n (natAbsDiff_qsum_le n G₀.win G₁.win bad hIdentical)
 
 /-- **Constructive Witness-Extraction Monotonicity (`event_le_reduction_win`)**:
     If every winning tape `ω` of `G₀` constructively implies a win in reduction `R`
@@ -394,7 +394,7 @@ theorem event_le_reduction_win {n : Nat} (G₀ R : FinGame n)
   unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
   dsimp only
   apply Nat.mul_le_mul_right n
-  apply finSum_le_finSum
+  apply qsum_le_qsum
   intro ω
   cases hg : G₀.win ω
   · exact Nat.zero_le _
@@ -413,8 +413,8 @@ theorem event_le_two_reductions {n : Nat} (G₀ R₁ R₂ : FinGame n)
       sampleSum n (fun ω => if G₀.win ω then 1 else 0) ≤
         sampleSum n (fun ω => if R₁.win ω then 1 else 0) +
           sampleSum n (fun ω => if R₂.win ω then 1 else 0) := by
-    rw [← finSum_add_eq]
-    apply finSum_le_finSum
+    rw [← qsum_add_eq]
+    apply qsum_le_qsum
     intro ω
     cases hg : G₀.win ω
     · exact Nat.zero_le _

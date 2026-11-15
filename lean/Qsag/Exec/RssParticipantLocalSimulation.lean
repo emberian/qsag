@@ -3,7 +3,7 @@ public import Qsag.Exec.RssParticipantMachine
 import all Qsag.Exec.RssParticipantMachine
 import all Qsag.Exec.RssParticipantKeccak
 import all Qsag.Protocol.Threshold.ThresholdMpc
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-!

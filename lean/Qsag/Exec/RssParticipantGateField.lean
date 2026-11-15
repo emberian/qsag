@@ -1,10 +1,9 @@
 module
 public import Qsag.Exec.RssParticipantGateChecks
-public import Qsag.Math.Tower128PolyBasisIso
+public import Qsag.Math.Gf2Pow128
 import all Qsag.Exec.RssParticipantGateChecks
-import all Qsag.Math.Tower128PolyBasisIso
+import all Qsag.Math.Gf2Pow128
 import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
-import all Qsag.Math.BinaryTower
 import all Qsag.Protocol.Threshold.Rss256TernaryRound
 import Qsag.Tactic.AssuranceKit
 

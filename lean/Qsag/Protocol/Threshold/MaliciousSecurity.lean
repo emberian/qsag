@@ -49,16 +49,16 @@ Lean 4.35 algebraic active-security models and explicit reduction boundaries
 -/
 
 public import Qsag.Math.Goldilocks
-public import Qsag.Math.BinaryTower
+public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
-public import Qsag.Oracle.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.Preprocessing
 public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.HypertreeEufCma
 public import Qsag.Protocol.Threshold.ThresholdMpc
 
 import all Qsag.Math.Goldilocks
-import all Qsag.Oracle.UcGames
+import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Threshold.Preprocessing
 import all Qsag.Protocol.Threshold.ThresholdMpc
 
@@ -913,9 +913,9 @@ theorem bdoz_tampered_opening_accepting_keys_le_one
     (hInj : ∀ i j, keyDec i = keyDec j → i = j)
     (hon : Nat → Tower128 × Tower128 × Tower128) (op : BdozPairOpening)
     (hNe : op.shareX ≠ (hon op.partyId).1) :
-    finSum CK (fun i =>
+    qsum CK (fun i =>
       if verifyBdozPairMac (bdozKeyFromView (keyDec i) hon) op then 1 else 0) ≤ 1 :=
-  finSum_indicator_le_one_of_unique CK
+  qsum_indicator_le_one_of_unique CK
     (fun i => verifyBdozPairMac (bdozKeyFromView (keyDec i) hon) op)
     (fun i j hi hj => hInj i j
       ((bdoz_forgery_pins_key (keyDec i) hon op hNe hi).trans
@@ -985,7 +985,7 @@ theorem bdozMacForgeryWitness_inhabited :
 
 /-- Inhabitedness of the counting bound: two distinct candidate keys, one tampered opening. -/
 theorem bdoz_key_counting_inhabited :
-    finSum 2 (fun i =>
+    qsum 2 (fun i =>
       if verifyBdozPairMac
           (bdozKeyFromView (if i.val = 0 then (towerOne 7, towerZero 7) else (towerZero 7, towerZero 7))
             (fun _ => (towerZero 7, towerOne 7, towerZero 7)))

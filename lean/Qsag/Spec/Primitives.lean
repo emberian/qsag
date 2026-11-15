@@ -13,10 +13,10 @@ in existing subsystem proofs:
 3. `Qsag.ExactRat` (`GaussianHvzkAndDualLpn`).
 -/
 
-public import Qsag.Math.Digest256
-public import Qsag.Oracle.UcGames
-public import Qsag.Oracle.ConcreteSecurityBudget
-public import Qsag.Protocol.Threshold.GaussianHvzkAndDualLpn
+public import Qsag.Spec.Encoding
+public import Qsag.Protocol.Aggregation.UcGames
+public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
+public import Qsag.Math.Lattices
 public import Qsag.Exec.SimulationSpine
 import Qsag.Tactic.AssuranceKit
 
@@ -37,7 +37,7 @@ abbrev Bytes32 : Type := { bs : List UInt8 // bs.length = 32 }
 abbrev Digest256 : Type := Qsag.Digest256
 
 /-- Exact finite sum `∑_{i < n} f i` re-exported at Layer 0. -/
-abbrev finSum (n : Nat) (f : Fin n → Nat) : Nat := Qsag.finSum n f
+abbrev qsum (n : Nat) (f : Fin n → Nat) : Nat := Qsag.qsum n f
 
 /-- Constructive absolute difference `|a - b|` over `Nat`. -/
 @[expose] def natAbsDiff (a b : Nat) : Nat :=
