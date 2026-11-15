@@ -1,7 +1,9 @@
 module
 public import Qsag.RssSigningExecution
+public import Qsag.RssSigningEnrollment
 public import Qsag.RssProductionProfileChecks
 import all Qsag.RssSigningExecution
+import all Qsag.RssSigningEnrollment
 import all Qsag.RssSigningBackend
 import all Qsag.RssSigningMachine
 import all Qsag.RssSigningControl
@@ -52,6 +54,30 @@ def fullSigningCheck : IO Unit := do
   require (execution.cuts.all fun cut => decide (cut.computation.evidence.length = queryHashCount cut.query))
     "hash trace contains missing or unsolicited subcalls"
   IO.println s!"Demand-driven participant signer: verified {wire.length}-byte signature; {execution.cuts.length} reached cuts, {hashCount} actual cSHAKE runs, {gateCount} pending gates at party0 retained"
+
+/-- The executable online entry takes public enrollment separately from local
+share material. Enrollment itself is constructed by the actual shared oracle;
+no referenceKey or reference-signing evaluator is used in this execution. -/
+def fullEnrolledSigningCheck : IO Unit := do
+  let enrollment := sharedEnrollment profile
+  let execution := enrolledExecution enrollment profile.material request tape
+  let some signature := execution.result
+    | throw (IO.userError "enrolled participant program failed signing")
+  let .ok wire := encodeProductionSigWire enrollment.params signature
+    | throw (IO.userError "enrolled participant signature failed serialization")
+  match verifyProductionWireBytes cshake256Suite enrollment.params
+      (encodePublicKeyWire enrollment.key) (publicPayload enrollment request) wire with
+  | .accept => pure ()
+  | _ => throw (IO.userError "enrolled participant signature failed verification")
+  require (decide (0 < wire.length ∧ execution.nextCut = execution.cuts.length))
+    "bad enrolled execution/counter"
+  match execution.cuts with
+  | [] => throw (IO.userError "enrolled signer performed no computation")
+  | first :: _ => match first.query with
+    | .prfMsg _ _ => pure ()
+    | _ => throw (IO.userError "online signer reran enrollment queries")
+  let hashCount := execution.cuts.foldl (fun count cut => count + cut.computation.evidence.length) 0
+  IO.println s!"Public-enrollment participant signer: verified {wire.length}-byte signature; {execution.cuts.length} reached cuts and {hashCount} cSHAKE runs retained; first cut PRF-msg; enrollment derived through actual shared oracle"
 
 def controllerAndFailureCheck : IO Unit := do
   let question := Query.prfMsg [7] [9]

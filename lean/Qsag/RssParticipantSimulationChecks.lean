@@ -33,9 +33,9 @@ def simulationCheck : IO Unit := do
     throw (IO.userError "passive local simulation mismatch")
   unless decide (forwardTape input plan realMasks = samples) do
     throw (IO.userError "forward/inverse coupling mismatch")
-  let prefix := samples.take 9
-  unless decide ((runPassiveReal nodes plan (inverseTape input plan prefix)).n0 =
-    runPassiveSimulator nodes.n0 plan prefix) do
+  let shortSamples := samples.take 9
+  unless decide ((runPassiveReal nodes plan (inverseTape input plan shortSamples)).n0 =
+    runPassiveSimulator nodes.n0 plan shortSamples) do
     throw (IO.userError "unfinished prefix simulation mismatch")
   IO.println "Participant simulator:24-round and9-round nonzero prefixes match complete local gate evidence; forward/inverse hidden-mask coupling passed"
 

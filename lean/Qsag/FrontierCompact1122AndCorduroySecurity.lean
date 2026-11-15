@@ -143,22 +143,24 @@ def addListNat : List Nat → List Nat → List Nat
 
 private theorem polyEvalB_addListNat (B : Nat) :
     ∀ (xs ys : List Nat), polyEvalB B (addListNat xs ys) = polyEvalB B xs + polyEvalB B ys
-  | [], ys => by simp [addListNat, polyEvalB]
-  | _ :: _, [] => by simp [addListNat, polyEvalB]
+  | [], ys => by unfold addListNat polyEvalB; rw [Nat.zero_add]
+  | _ :: _, [] => (Nat.add_zero _).symm
   | x :: xs, y :: ys => by
     simp only [addListNat, polyEvalB, polyEvalB_addListNat B xs ys, Nat.mul_add]; omega
 
 private theorem getD_addListNat :
     ∀ (xs ys : List Nat) (i : Nat), (addListNat xs ys).getD i 0 = xs.getD i 0 + ys.getD i 0
-  | [], ys, i => by simp [addListNat]
-  | _ :: _, [], i => by simp [addListNat]
-  | x :: xs, y :: ys, 0 => by simp [addListNat, List.getD]
-  | x :: xs, y :: ys, i + 1 => by simpa [addListNat, List.getD] using getD_addListNat xs ys i
+  | [], ys, i => by
+    have h0 : ([] : List Nat).getD i 0 = 0 := rfl
+    unfold addListNat; rw [h0, Nat.zero_add]
+  | _ :: _, [], _ => (Nat.add_zero _).symm
+  | x :: xs, y :: ys, 0 => rfl
+  | x :: xs, y :: ys, i + 1 => getD_addListNat xs ys i
 
 private theorem sum_addListNat :
     ∀ (xs ys : List Nat), (addListNat xs ys).sum = xs.sum + ys.sum
-  | [], ys => by simp [addListNat]
-  | _ :: _, [] => by simp [addListNat]
+  | [], ys => by unfold addListNat; exact (Nat.zero_add _).symm
+  | _ :: _, [] => (Nat.add_zero _).symm
   | x :: xs, y :: ys => by simp only [addListNat, List.sum_cons, sum_addListNat xs ys]; omega
 
 def mulOnesList : Nat → List Nat → List Nat
@@ -176,7 +178,7 @@ private theorem polyEvalB_mulOnesList (B : Nat) :
 
 private theorem onesPoly_geom (B : Nat) (hB1 : 1 ≤ B) :
     ∀ w : Nat, (B - 1) * polyEvalB B (List.replicate w 1) + 1 = B ^ w
-  | 0 => by simp [polyEvalB]
+  | 0 => by show (B - 1) * 0 + 1 = 1; rw [Nat.mul_zero, Nat.zero_add]
   | m + 1 => by
     have ih := onesPoly_geom B hB1 m
     simp only [List.replicate_succ, polyEvalB, Nat.mul_add, Nat.mul_one]
@@ -198,13 +200,12 @@ private theorem onesPoly_eq_div (B w : Nat) (hB2 : 2 ≤ B) :
 
 private theorem getD_mulOnesList (cs : List Nat) :
     ∀ (w u : Nat), (mulOnesList w cs).getD u 0 = windowConv (cs.getD · 0) w u
-  | 0, _ => by simp [mulOnesList, windowConv]
-  | m + 1, 0 => by rw [mulOnesList, getD_addListNat]; simp [windowConv, List.getD]
+  | 0, _ => rfl
+  | m + 1, 0 => by rw [mulOnesList, getD_addListNat]; exact Nat.add_zero _
   | m + 1, u + 1 => by
     rw [mulOnesList, getD_addListNat]
     simp only [windowConv, Nat.succ_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
-    have ih := getD_mulOnesList cs m u
-    simpa [List.getD] using congrArg (cs.getD (u + 1) 0 + ·) ih
+    exact congrArg (cs.getD (u + 1) 0 + ·) (getD_mulOnesList cs m u)
 
 private theorem windowConv_congr (f g : Nat → Nat) :
     (∀ x, f x = g x) → ∀ (w u : Nat), windowConv f w u = windowConv g w u
@@ -212,13 +213,14 @@ private theorem windowConv_congr (f g : Nat → Nat) :
   | hfg, m + 1, u => by
     unfold windowConv
     rw [hfg u]
-    by_cases hu : u = 0
-    · simp [hu]
-    · simp [hu, windowConv_congr f g hfg m (u - 1)]
+    if hu : u = 0 then
+      rw [hu]; rfl
+    else
+      simp only [hu, ↓reduceIte, windowConv_congr f g hfg m (u - 1)]
 
 private theorem sum_mulOnesList (cs : List Nat) :
     ∀ w : Nat, (mulOnesList w cs).sum = w * cs.sum
-  | 0 => by simp [mulOnesList]
+  | 0 => (Nat.zero_mul _).symm
   | m + 1 => by
     simp only [mulOnesList, sum_addListNat, List.sum_cons, Nat.zero_add, sum_mulOnesList cs m, Nat.succ_mul]
     omega
@@ -232,8 +234,7 @@ private theorem decList_spec (B w : Nat) (hB2 : 2 ≤ B) :
       polyEvalB B (decList w k) = ((B ^ w - 1) / (B - 1)) ^ k ∧
       (decList w k).sum = w ^ k ∧
       (∀ u, (decList w k).getD u 0 = frontierDecCount w k u)
-  | 0 => ⟨by simp [decList, polyEvalB], by simp [decList], fun u => by
-      cases u <;> simp [decList, frontierDecCount, List.getD]⟩
+  | 0 => ⟨by show 1 + B * 0 = 1; rw [Nat.mul_zero, Nat.add_zero], rfl, fun u => by cases u <;> rfl⟩
   | k + 1 => by
     obtain ⟨hEv, hSm, hGet⟩ := decList_spec B w hB2 k
     refine ⟨?_, ?_, ?_⟩
@@ -281,36 +282,39 @@ def fullConvAt : List Nat → (Nat → Nat) → Nat → Nat
 
 private theorem getD_map_mul (a : Nat) :
     ∀ (bs : List Nat) (n : Nat), (bs.map (a * ·)).getD n 0 = a * bs.getD n 0
-  | [], _ => by simp
-  | _ :: _, 0 => by simp [List.getD]
-  | _ :: bs, n + 1 => by simpa [List.getD] using getD_map_mul a bs n
+  | [], _ => (Nat.mul_zero a).symm
+  | _ :: _, 0 => rfl
+  | _ :: bs, n + 1 => getD_map_mul a bs n
 
 private theorem getD_convListNat :
     ∀ (xs ys : List Nat) (n : Nat), (convListNat xs ys).getD n 0 = fullConvAt xs (ys.getD · 0) n
-  | [], _, _ => by simp [convListNat, fullConvAt]
-  | a :: _, ys, 0 => by rw [convListNat, getD_addListNat, getD_map_mul]; simp [fullConvAt, List.getD]
+  | [], _, _ => rfl
+  | a :: _, ys, 0 => by rw [convListNat, getD_addListNat, getD_map_mul]; exact Nat.add_zero _
   | a :: as, ys, n + 1 => by
     rw [convListNat, getD_addListNat, getD_map_mul]
-    unfold fullConvAt
-    simpa [List.getD] using congrArg (a * ys.getD (n + 1) 0 + ·) (getD_convListNat as ys n)
+    exact congrArg (a * ys.getD (n + 1) 0 + ·) (getD_convListNat as ys n)
 
 private theorem fullConvAt_eq_splitConvFrom (f : Nat → Nat) (hf0 : f 0 = 0) (ell : Nat) :
     ∀ (rem : Nat) (zs : List Nat) (cur : Nat),
       cur + rem = ell → (∀ i, zs.getD i 0 = f (cur + i)) →
       fullConvAt zs f rem = splitConvFrom f ell cur rem
   | 0, zs, _, _, _ => by
-    cases zs <;> simp [fullConvAt, splitConvFrom, hf0]
+    cases zs with
+    | nil => rfl
+    | cons z _ => unfold fullConvAt splitConvFrom; rw [hf0, Nat.mul_zero]
   | r + 1, [], cur, hEq, hZ => by
     have hfCur : f cur = 0 := by simpa using (hZ 0).symm
     have ih := fullConvAt_eq_splitConvFrom f hf0 ell r [] (cur + 1) (by omega)
       (fun i => by simpa [Nat.add_assoc, Nat.add_comm 1 i] using hZ (i + 1))
-    simp [fullConvAt, splitConvFrom, hfCur, ← ih]
+    unfold fullConvAt splitConvFrom
+    rw [hfCur, Nat.zero_mul, Nat.zero_add, ← ih]; rfl
   | r + 1, z :: zs, cur, hEq, hZ => by
     have hz : z = f cur := by simpa [List.getD] using hZ 0
     have hSub : r + 1 = ell - cur := by omega
     have ih := fullConvAt_eq_splitConvFrom f hf0 ell r zs (cur + 1) (by omega)
       (fun i => by simpa [List.getD, Nat.add_assoc, Nat.add_comm 1 i] using hZ (i + 1))
-    simp [fullConvAt, splitConvFrom, hz, hSub, ih]
+    unfold fullConvAt splitConvFrom
+    rw [hz, hSub, ih]
 
 def subList : Nat → List Nat
   | 0 => [0, 1]
@@ -329,10 +333,11 @@ private theorem subList_spec (B : Nat) :
       polyEvalB B (subList t) = kronSubEval B t ∧
       (subList t).sum = subTotalSum t ∧
       (∀ ell, (subList t).getD ell 0 = frontierSubCount t ell)
-  | 0 => ⟨by simp [subList, kronSubEval, polyEvalB], by simp [subList, subTotalSum], fun ell => by
-      cases ell with
-      | zero => rfl
-      | succ m => cases m <;> simp [subList, frontierSubCount, List.getD]⟩
+  | 0 => ⟨by show 0 + B * (1 + B * 0) = B; rw [Nat.mul_zero, Nat.add_zero, Nat.mul_one, Nat.zero_add],
+      rfl, fun ell => by
+        cases ell with
+        | zero => rfl
+        | succ m => cases m <;> rfl⟩
   | t + 1 => by
     obtain ⟨hEv, hSm, hGet⟩ := subList_spec B t
     have hf0 : frontierSubCount t 0 = 0 := by cases t <;> rfl
@@ -366,7 +371,7 @@ private theorem subList_spec (B : Nat) :
       cases ell with
       | zero =>
         change 0 + 0 * frontierSubCount t 0 = 0
-        rw [Nat.zero_mul]; rfl
+        rw [Nat.zero_mul]
       | succ m =>
         cases m with
         | zero =>
@@ -393,25 +398,28 @@ private theorem subList_spec (B : Nat) :
   ((((B ^ p.winternitzW - 1) / (B - 1)) ^ p.frontierLen / B ^ p.targetSum) % B)
 
 theorem frontierTotalCardFast_eq_spec
-    (nodeB h w ell u idxB ctrB uses : Nat)
-    (hSubBnd : subTotalSum h < 2 ^ 256)
-    (hDecBnd : w ^ ell < 2 ^ 256) :
-    frontierTotalCardFast ⟨nodeB, h, w, ell, u, idxB, ctrB, uses⟩ =
-      frontierRootSubCount h ell * frontierDecCount w ell u := by
+    (p : FrontierFtsParams)
+    (hSubBnd : subTotalSum p.treeHeight < 2 ^ 256)
+    (hDecBnd : p.winternitzW ^ p.frontierLen < 2 ^ 256) :
+    frontierTotalCardFast p =
+      frontierRootSubCount p.treeHeight p.frontierLen *
+        frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
   let B := 2 ^ 256
   have hB0 : 0 < B := by decide +kernel
   have hB2 : 2 ≤ B := by decide +kernel
-  obtain ⟨hSubEv, hSubSm, hSubGet⟩ := subList_spec B h
-  obtain ⟨hDecEv, hDecSm, hDecGet⟩ := decList_spec B w hB2 ell
-  have hSubDig : (kronSubEval B h / B ^ ell) % B = frontierSubCount h ell := by
-    rw [← hSubEv, polyEvalB_div_mod B hB0 _ ell
+  obtain ⟨hSubEv, hSubSm, hSubGet⟩ := subList_spec B p.treeHeight
+  obtain ⟨hDecEv, hDecSm, hDecGet⟩ := decList_spec B p.winternitzW hB2 p.frontierLen
+  have hSubDig : (kronSubEval B p.treeHeight / B ^ p.frontierLen) % B = frontierSubCount p.treeHeight p.frontierLen := by
+    rw [← hSubEv, polyEvalB_div_mod B hB0 _ p.frontierLen
       (fun c hc => Nat.lt_of_le_of_lt (mem_le_sum hc) (hSubSm ▸ hSubBnd)), hSubGet]
-  have hDecDig : (((B ^ w - 1) / (B - 1)) ^ ell / B ^ u) % B = frontierDecCount w ell u := by
-    rw [← hDecEv, polyEvalB_div_mod B hB0 _ u
+  have hDecDig : (((B ^ p.winternitzW - 1) / (B - 1)) ^ p.frontierLen / B ^ p.targetSum) % B =
+      frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
+    rw [← hDecEv, polyEvalB_div_mod B hB0 _ p.targetSum
       (fun c hc => Nat.lt_of_le_of_lt (mem_le_sum hc) (hDecSm ▸ hDecBnd)), hDecGet]
-  change (if ell = 1 then 0 else (kronSubEval B h / B ^ ell) % B) *
-    ((((B ^ w - 1) / (B - 1)) ^ ell / B ^ u) % B) =
-    (if ell = 1 then 0 else frontierSubCount h ell) * frontierDecCount w ell u
+  change (if p.frontierLen = 1 then 0 else (kronSubEval B p.treeHeight / B ^ p.frontierLen) % B) *
+    ((((B ^ p.winternitzW - 1) / (B - 1)) ^ p.frontierLen / B ^ p.targetSum) % B) =
+    (if p.frontierLen = 1 then 0 else frontierSubCount p.treeHeight p.frontierLen) *
+      frontierDecCount p.winternitzW p.frontierLen p.targetSum
   rw [hSubDig, hDecDig]
 
 theorem compact1122_rank_domain_gt_2pow256 :
@@ -419,34 +427,32 @@ theorem compact1122_rank_domain_gt_2pow256 :
     compact1122Params.signatureBytes + 96 ≤ 1232 ∧
     compact1122Params.rotatedEpochVoteBytes = 1194 ∧
     full256BitParams.signatureBytes = 2338 ∧
-    2 ^ 263 < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 ∧
-    frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 < 2 ^ 264 ∧
-    2 ^ 256 < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 ∧
-    2 ^ 256 < frontierRootSubCount 8 72 * frontierDecCount 5 72 144 ∧
+    2 ^ 263 < frontierRootSubCount compact1122Params.treeHeight compact1122Params.frontierLen *
+                frontierDecCount compact1122Params.winternitzW compact1122Params.frontierLen compact1122Params.targetSum ∧
+    frontierRootSubCount compact1122Params.treeHeight compact1122Params.frontierLen *
+      frontierDecCount compact1122Params.winternitzW compact1122Params.frontierLen compact1122Params.targetSum < 2 ^ 264 ∧
+    2 ^ 256 < frontierRootSubCount compact1122Params.treeHeight compact1122Params.frontierLen *
+                frontierDecCount compact1122Params.winternitzW compact1122Params.frontierLen compact1122Params.targetSum ∧
+    2 ^ 256 < frontierRootSubCount full256BitParams.treeHeight full256BitParams.frontierLen *
+                frontierDecCount full256BitParams.winternitzW full256BitParams.frontierLen full256BitParams.targetSum ∧
     (∀ d₁ d₂ : BitVec 256,
-      d₁.toNat < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 ∧
+      d₁.toNat < frontierRootSubCount compact1122Params.treeHeight compact1122Params.frontierLen *
+                   frontierDecCount compact1122Params.winternitzW compact1122Params.frontierLen compact1122Params.targetSum ∧
       (d₁.toNat = d₂.toNat → d₁ = d₂)) := by
   have hBounds :
       2 ^ 263 < frontierTotalCardFast compact1122Params ∧
       frontierTotalCardFast compact1122Params < 2 ^ 264 ∧
       2 ^ 256 < frontierTotalCardFast full256BitParams := by decide +kernel
-  have hSub8 : subTotalSum 8 < 2 ^ 256 := by decide +kernel
-  have hDec96 : 96 ^ 34 < 2 ^ 256 := by decide +kernel
-  have hDec5 : 5 ^ 72 < 2 ^ 256 := by decide +kernel
-  have hEqC : frontierTotalCardFast compact1122Params =
-      frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 :=
-    frontierTotalCardFast_eq_spec 32 8 96 34 1615 256 16 1 hSub8 hDec96
-  have hEqF : frontierTotalCardFast full256BitParams =
-      frontierRootSubCount 8 72 * frontierDecCount 5 72 144 :=
-    frontierTotalCardFast_eq_spec 32 8 5 72 144 256 16 1 hSub8 hDec5
-  have hLoC : 2 ^ 263 < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 :=
-    Nat.lt_of_lt_of_eq hBounds.1 hEqC
-  have hHiC : frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 < 2 ^ 264 :=
-    hEqC ▸ hBounds.2.1
-  have hLoF : 2 ^ 256 < frontierRootSubCount 8 72 * frontierDecCount 5 72 144 :=
-    Nat.lt_of_lt_of_eq hBounds.2.2 hEqF
-  have h256 : 2 ^ 256 < frontierRootSubCount 8 34 * frontierDecCount 96 34 1615 :=
-    Nat.lt_trans (by decide +kernel : 2 ^ 256 < 2 ^ 263) hLoC
+  have hSubC : subTotalSum compact1122Params.treeHeight < 2 ^ 256 := by decide +kernel
+  have hDecC : compact1122Params.winternitzW ^ compact1122Params.frontierLen < 2 ^ 256 := by decide +kernel
+  have hSubF : subTotalSum full256BitParams.treeHeight < 2 ^ 256 := by decide +kernel
+  have hDecF : full256BitParams.winternitzW ^ full256BitParams.frontierLen < 2 ^ 256 := by decide +kernel
+  have hEqC := frontierTotalCardFast_eq_spec compact1122Params hSubC hDecC
+  have hEqF := frontierTotalCardFast_eq_spec full256BitParams hSubF hDecF
+  have hLoC := Nat.lt_of_lt_of_eq hBounds.1 hEqC
+  have hHiC := hEqC ▸ hBounds.2.1
+  have hLoF := Nat.lt_of_lt_of_eq hBounds.2.2 hEqF
+  have h256 := Nat.lt_trans (by decide +kernel : 2 ^ 256 < 2 ^ 263) hLoC
   exact ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
     hLoC, hHiC, h256, hLoF,
     fun d₁ _ => ⟨Nat.lt_trans d₁.isLt h256, BitVec.eq_of_toNat_eq⟩⟩
@@ -504,7 +510,7 @@ private theorem parseFrontierNodes_append :
     have hL : collapseTreeStack (2 * v) l st = (2 * v, l) :: st := by
       cases st with
       | nil => rfl
-      | cons hd _ => unfold collapseTreeStack; simp [show ¬ (hd.1 % 2 = 0 ∧ 2 * v = hd.1 + 1) by omega]
+      | cons hd _ => unfold collapseTreeStack; simp [show ¬ (hd.1 % 2 = 0 ∧ 2 * v = hd.1 + 1) by rintro ⟨_, _⟩; omega]
     have hR : collapseTreeStack (2 * v + 1) r ((2 * v, l) :: st) = collapseTreeStack v (.split l r) st := by
       conv => lhs; unfold collapseTreeStack
       simp [show (2 * v) % 2 = 0 ∧ 2 * v + 1 = 2 * v + 1 from ⟨by omega, rfl⟩, show (2 * v) / 2 = v by omega]
@@ -546,58 +552,79 @@ def rankSubtree : Nat → AntichainTree → Nat
     let ell := l.size + rt.size
     rankSplitPrefix t ell 1 l.size (ell - 1) + rankSubtree t l * frontierSubCount t rt.size + rankSubtree t rt
 
+private theorem ite_true_eq {α : Type} {c : Prop} [Decidable c] (h : c) (a b : α) :
+    (if c then a else b) = a := by
+  cases ‹Decidable c› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn h)
+
+private theorem ite_false_eq {α : Type} {c : Prop} [Decidable c] (h : ¬ c) (a b : α) :
+    (if c then a else b) = b := by
+  cases ‹Decidable c› with
+  | isTrue hp => exact False.elim (h hp)
+  | isFalse _ => rfl
+
 private theorem unrankSplitChoice_spec (t ell : Nat) :
     ∀ (cur rem r : Nat), r < splitConvFrom (frontierSubCount t) ell cur rem →
       ∃ leftSz rL rR, unrankSplitChoice t ell cur rem r = some (leftSz, rL, rR) ∧
         cur ≤ leftSz ∧ leftSz < cur + rem ∧ rL < frontierSubCount t leftSz ∧
         rR < frontierSubCount t (ell - leftSz) ∧
         rankSplitPrefix t ell cur leftSz rem + rL * frontierSubCount t (ell - leftSz) + rR = r
-  | _, 0, _, hLt => by simp [splitConvFrom] at hLt
+  | _, 0, _, hLt => nomatch hLt
   | cur, rem + 1, r, hLt => by
     unfold splitConvFrom at hLt
-    by_cases hB : r < frontierSubCount t cur * frontierSubCount t (ell - cur)
-    · have hrPos : 0 < frontierSubCount t (ell - cur) := by
+    if hB : r < frontierSubCount t cur * frontierSubCount t (ell - cur) then
+      have hrPos : 0 < frontierSubCount t (ell - cur) := by
         cases hRC : frontierSubCount t (ell - cur) with
-        | zero => rw [hRC, Nat.mul_zero] at hB; omega
+        | zero => rw [hRC, Nat.mul_zero] at hB; nomatch hB
         | succ m => exact Nat.zero_lt_succ m
       have hDM : (r / frontierSubCount t (ell - cur)) * frontierSubCount t (ell - cur) +
           r % frontierSubCount t (ell - cur) = r := by
         rw [Nat.mul_comm]; exact Nat.div_add_mod r _
       refine ⟨cur, r / frontierSubCount t (ell - cur), r % frontierSubCount t (ell - cur),
-        by unfold unrankSplitChoice; simp [hB], Nat.le_refl _, by omega,
+        by unfold unrankSplitChoice; dsimp only; rw [ite_true_eq hB], Nat.le_refl _, by omega,
         (Nat.div_lt_iff_lt_mul hrPos).mpr hB, Nat.mod_lt r hrPos, ?_⟩
       unfold rankSplitPrefix
-      simp only [Nat.lt_irrefl, ↓reduceIte, Nat.zero_add]
+      rw [ite_false_eq (Nat.lt_irrefl cur), Nat.zero_add]
       exact hDM
-    · obtain ⟨lsz, rL, rR, hRec, hGe, hUp, hrL, hrR, hRk⟩ :=
+    else
+      obtain ⟨lsz, rL, rR, hRec, hGe, hUp, hrL, hrR, hRk⟩ :=
         unrankSplitChoice_spec t ell (cur + 1) rem
           (r - frontierSubCount t cur * frontierSubCount t (ell - cur)) (by omega)
-      refine ⟨lsz, rL, rR, by unfold unrankSplitChoice; simp [hB, hRec], by omega, by omega, hrL, hrR, ?_⟩
+      refine ⟨lsz, rL, rR,
+        by unfold unrankSplitChoice; dsimp only; rw [ite_false_eq hB]; exact hRec,
+        by omega, by omega, hrL, hrR, ?_⟩
       unfold rankSplitPrefix
-      simp only [show cur < lsz by omega, ↓reduceIte]
+      rw [ite_true_eq (show cur < lsz by omega)]
       omega
 
 theorem rankSubtree_unrankSubtree :
     ∀ (t ell r : Nat), r < frontierSubCount t ell →
       ∃ tr : AntichainTree, unrankSubtree t ell r = some tr ∧ tr.Valid t = true ∧ tr.size = ell ∧ rankSubtree t tr = r
   | 0, ell, r, hLt => by
-    unfold frontierSubCount at hLt; by_cases h1 : ell = 1
-    · subst h1; simp only [↓reduceIte] at hLt; have hr0 : r = 0 := by omega
-      subst hr0; exact ⟨.leaf, by simp [unrankSubtree], rfl, rfl, rfl⟩
-    · simp [h1] at hLt
+    unfold frontierSubCount at hLt
+    if h1 : ell = 1 then
+      subst h1; rw [ite_true_eq rfl] at hLt; have hr0 : r = 0 := by omega
+      subst hr0; exact ⟨.leaf, rfl, rfl, rfl, rfl⟩
+    else
+      rw [ite_false_eq h1] at hLt; nomatch hLt
   | t + 1, ell, r, hLt => by
     unfold frontierSubCount at hLt
-    by_cases h0 : ell = 0; · simp [h0] at hLt
-    by_cases h1 : ell = 1
-    · subst h1; simp only [Nat.one_ne_zero, ↓reduceIte] at hLt; have hr0 : r = 0 := by omega
-      subst hr0; exact ⟨.leaf, by simp [unrankSubtree], rfl, rfl, rfl⟩
-    · simp only [h0, h1, ↓reduceIte] at hLt
+    if h0 : ell = 0 then
+      rw [ite_true_eq h0] at hLt; nomatch hLt
+    else if h1 : ell = 1 then
+      subst h1; rw [ite_false_eq h0, ite_true_eq rfl] at hLt; have hr0 : r = 0 := by omega
+      subst hr0; exact ⟨.leaf, rfl, rfl, rfl, rfl⟩
+    else
+      rw [ite_false_eq h0, ite_false_eq h1] at hLt
       obtain ⟨lsz, rL, rR, hSp, _, _, hrL, hrR, hRk⟩ := unrankSplitChoice_spec t ell 1 (ell - 1) r hLt
       obtain ⟨l, hUl, hVl, hSl, hRl⟩ := rankSubtree_unrankSubtree t lsz rL hrL
       obtain ⟨rt, hUr, hVr, hSr, hRr⟩ := rankSubtree_unrankSubtree t (ell - lsz) rR hrR
       have hEll : l.size + rt.size = ell := by rw [hSl, hSr]; omega
-      exact ⟨.split l rt, by unfold unrankSubtree; simp [h0, h1, hSp, hUl, hUr],
-        by simp [AntichainTree.Valid, hVl, hVr], hEll, by unfold rankSubtree; rw [hEll, hSl, hSr, hRl, hRr]; exact hRk⟩
+      refine ⟨.split l rt, ?_, ?_, hEll, ?_⟩
+      · unfold unrankSubtree; rw [ite_false_eq h0, ite_false_eq h1, hSp]; dsimp only; rw [hUl, hUr]
+      · unfold AntichainTree.Valid; rw [hVl, hVr]; rfl
+      · unfold rankSubtree; dsimp only; rw [hEll, hSl, hSr, hRl, hRr]; exact hRk
 
 def unrankWindowDigit (w k : Nat) : (remW u baseA r : Nat) → Option (Nat × Nat)
   | 0, _, _, _ => none
@@ -627,40 +654,50 @@ private theorem unrankWindowDigit_spec (w k : Nat) :
     ∀ (remW u baseA r : Nat), r < windowConv (frontierDecCount w k) remW u →
       ∃ aOff rSub, unrankWindowDigit w k remW u baseA r = some (baseA + aOff, rSub) ∧
         aOff < remW ∧ aOff ≤ u ∧ rSub < frontierDecCount w k (u - aOff) ∧ rankWindowPrefix w k remW u aOff + rSub = r
-  | 0, _, _, _, hLt => by simp [windowConv] at hLt
+  | 0, _, _, _, hLt => nomatch hLt
   | remW + 1, u, baseA, r, hLt => by
     unfold windowConv at hLt
-    by_cases hB : r < frontierDecCount w k u
-    · exact ⟨0, r, by unfold unrankWindowDigit; simp [hB], Nat.zero_lt_succ _, Nat.zero_le _, hB, by simp [rankWindowPrefix]⟩
-    · by_cases hu0 : u = 0
-      · rw [hu0] at hLt hB; simp only [↓reduceIte, Nat.add_zero] at hLt; omega
-      · simp only [hu0, ↓reduceIte] at hLt
-        obtain ⟨aOff, rSub, hRec, hLtW, hLeU, hrS, hRk⟩ :=
-          unrankWindowDigit_spec w k remW (u - 1) (baseA + 1) (r - frontierDecCount w k u) (by omega)
-        refine ⟨aOff + 1, rSub, ?_, Nat.succ_lt_succ hLtW, by omega,
-          (show u - 1 - aOff = u - (aOff + 1) by omega) ▸ hrS, ?_⟩
-        · unfold unrankWindowDigit
-          simp [hB, hu0, (show baseA + 1 + aOff = baseA + (aOff + 1) by omega) ▸ hRec]
-        · unfold rankWindowPrefix; simp only [hu0, ↓reduceIte]; omega
+    if hB : r < frontierDecCount w k u then
+      exact ⟨0, r,
+        by unfold unrankWindowDigit; dsimp only; rw [ite_true_eq hB, Nat.add_zero],
+        Nat.zero_lt_succ _, Nat.zero_le _, by rw [Nat.sub_zero]; exact hB,
+        by unfold rankWindowPrefix; exact Nat.zero_add r⟩
+    else if hu0 : u = 0 then
+      rw [ite_true_eq hu0, Nat.add_zero] at hLt; exact False.elim (hB hLt)
+    else
+      rw [ite_false_eq hu0] at hLt
+      obtain ⟨aOff, rSub, hRec, hLtW, hLeU, hrS, hRk⟩ :=
+        unrankWindowDigit_spec w k remW (u - 1) (baseA + 1) (r - frontierDecCount w k u) (by omega)
+      refine ⟨aOff + 1, rSub, ?_, Nat.succ_lt_succ hLtW, by omega,
+        (show u - 1 - aOff = u - (aOff + 1) by omega) ▸ hrS, ?_⟩
+      · unfold unrankWindowDigit; dsimp only; rw [ite_false_eq hB, ite_false_eq hu0]
+        exact (show baseA + 1 + aOff = baseA + (aOff + 1) by omega) ▸ hRec
+      · unfold rankWindowPrefix; rw [ite_false_eq hu0]; omega
 
 theorem rankDecorations_unrankDecorations (w : Nat) :
     ∀ (k u r : Nat), r < frontierDecCount w k u →
       ∃ offs : List Nat, unrankDecorations w k u r = some offs ∧
         offs.length = k ∧ offs.sum = u ∧ (∀ a ∈ offs, a < w) ∧ rankDecorations w offs u = r
   | 0, u, r, hLt => by
-    unfold frontierDecCount at hLt; by_cases hu0 : u = 0
-    · subst hu0; simp only [↓reduceIte] at hLt; have hr0 : r = 0 := by omega
+    unfold frontierDecCount at hLt
+    if hu0 : u = 0 then
+      subst hu0; rw [ite_true_eq rfl] at hLt; have hr0 : r = 0 := by omega
       subst hr0
-      refine ⟨[], by simp [unrankDecorations], rfl, rfl, ?_, rfl⟩
+      refine ⟨[], rfl, rfl, rfl, ?_, rfl⟩
       intro _ h; cases h
-    · simp [hu0] at hLt
+    else
+      rw [ite_false_eq hu0] at hLt; nomatch hLt
   | k + 1, u, r, hLt => by
     unfold frontierDecCount at hLt
     obtain ⟨a, rSub, hDig, haW, haU, hrSub, hRkW⟩ := unrankWindowDigit_spec w k w u 0 r hLt
-    simp only [Nat.zero_add] at hDig
+    rw [Nat.zero_add] at hDig
     obtain ⟨rest, hRest, hLen, hSum, hBnd, hRkRest⟩ := rankDecorations_unrankDecorations w k (u - a) rSub hrSub
-    refine ⟨a :: rest, by unfold unrankDecorations; simp [hDig, hRest], congrArg Nat.succ hLen,
-      by simp [List.sum_cons, hSum]; omega, ?_, by unfold rankDecorations; rw [hLen, hRkRest]; omega⟩
+    refine ⟨a :: rest,
+      by unfold unrankDecorations; rw [hDig]; dsimp only; rw [hRest]; rfl,
+      congrArg Nat.succ hLen,
+      by rw [List.sum_cons, hSum]; omega,
+      ?_,
+      by unfold rankDecorations; rw [hLen, hRkRest]; omega⟩
     intro x hx
     rcases List.mem_cons.mp hx with rfl | htl
     · exact haW
@@ -687,10 +724,11 @@ private theorem unrankFrontierFts_rank_lt {p : FrontierFtsParams} {r : Nat}
         frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
   unfold unrankFrontierFts at h
   dsimp only at h
-  by_cases hLt : r < frontierRootSubCount p.treeHeight p.frontierLen *
-      frontierDecCount p.winternitzW p.frontierLen p.targetSum
-  · exact hLt
-  · simp [hLt] at h
+  if hLt : r < frontierRootSubCount p.treeHeight p.frontierLen *
+      frontierDecCount p.winternitzW p.frontierLen p.targetSum then
+    exact hLt
+  else
+    rw [ite_false_eq hLt] at h; cases h
 
 theorem unrankFrontierFts_bijective (p : FrontierFtsParams) (rank : Nat)
     (hLt : rank < frontierRootSubCount p.treeHeight p.frontierLen *
@@ -702,20 +740,21 @@ theorem unrankFrontierFts_bijective (p : FrontierFtsParams) (rank : Nat)
       (∀ a ∈ offs, a < p.winternitzW) ∧ rankFrontierFts p tr offs = rank := by
   have hdPos : 0 < frontierDecCount p.winternitzW p.frontierLen p.targetSum := by
     cases hD : frontierDecCount p.winternitzW p.frontierLen p.targetSum with
-    | zero => rw [hD, Nat.mul_zero] at hLt; omega
+    | zero => rw [hD, Nat.mul_zero] at hLt; nomatch hLt
     | succ m => exact Nat.zero_lt_succ m
   have hfPos : 0 < frontierRootSubCount p.treeHeight p.frontierLen := by
     cases hF : frontierRootSubCount p.treeHeight p.frontierLen with
-    | zero => rw [hF, Nat.zero_mul] at hLt; omega
+    | zero => rw [hF, Nat.zero_mul] at hLt; nomatch hLt
     | succ m => exact Nat.zero_lt_succ m
   have hTwoLe : 2 ≤ p.frontierLen := by
     unfold frontierRootSubCount at hfPos
-    by_cases h1 : p.frontierLen = 1
-    · simp [h1] at hfPos
-    · by_cases h0 : p.frontierLen = 0
-      · rw [h0] at hfPos
-        cases hTH : p.treeHeight <;> rw [hTH] at hfPos <;> simp [frontierSubCount] at hfPos
-      · omega
+    if h1 : p.frontierLen = 1 then
+      rw [ite_true_eq h1] at hfPos; nomatch hfPos
+    else if h0 : p.frontierLen = 0 then
+      rw [ite_false_eq h1, h0] at hfPos
+      cases hTH : p.treeHeight <;> rw [hTH] at hfPos <;> nomatch hfPos
+    else
+      omega
   have hfSubLt : rank / frontierDecCount p.winternitzW p.frontierLen p.targetSum <
       frontierSubCount p.treeHeight p.frontierLen := by
     rw [← frontierRootSubCount_eq_of_two_le hTwoLe]
@@ -724,7 +763,7 @@ theorem unrankFrontierFts_bijective (p : FrontierFtsParams) (rank : Nat)
   obtain ⟨offs, hOffs, hLen, hSum, hBnd, hRkOff⟩ :=
     rankDecorations_unrankDecorations p.winternitzW p.frontierLen p.targetSum _ (Nat.mod_lt rank hdPos)
   exact ⟨tr, tr.frontierNodes 1, offs,
-    by unfold unrankFrontierFts; dsimp only; simp [hLt, hTr, hOffs],
+    by unfold unrankFrontierFts; dsimp only; rw [ite_true_eq hLt, hTr, hOffs],
     rfl, hVal, hSz, hTwoLe, hLen, hSum, hBnd,
     by unfold rankFrontierFts; rw [hRkTr, hRkOff, Nat.mul_comm (rank / _) _]; exact Nat.div_add_mod rank _⟩
 
@@ -925,7 +964,13 @@ theorem chainAdvance_add (H : FrontierHashSuite) (pkSeed : BitVec 256) (v : Nat)
       chainAdvance H pkSeed v s (k₁ + k₂) x = chainAdvance H pkSeed v (s + k₁) k₂ (chainAdvance H pkSeed v s k₁ x)
   | _, 0, _, _ => by rw [Nat.zero_add, Nat.add_zero]; rfl
   | s, k₁ + 1, k₂, x => by
-    simp only [Nat.succ_add, chainAdvance, chainAdvance_add H pkSeed v (s + 1) k₁ k₂]
+    have h1 : k₁ + 1 + k₂ = (k₁ + k₂) + 1 := by omega
+    have h2 : s + 1 + k₁ = s + (k₁ + 1) := by omega
+    have ih := chainAdvance_add H pkSeed v (s + 1) k₁ k₂ (H.chainStep pkSeed v s x)
+    rw [h1]
+    show chainAdvance H pkSeed v (s + 1) (k₁ + k₂) (H.chainStep pkSeed v s x) =
+      chainAdvance H pkSeed v (s + (k₁ + 1)) k₂ (chainAdvance H pkSeed v (s + 1) k₁ (H.chainStep pkSeed v s x))
+    rw [ih, h2]
 
 def honestNodeBase (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w : Nat) : Nat → Nat → BitVec 256
   | 0, v => H.leafStart pkSeed skSeed v
@@ -977,6 +1022,12 @@ def runFrontierStackLoop (H : FrontierHashSuite) (pkSeed : BitVec 256) (w : Nat)
     runFrontierStackLoop H pkSeed w vs offs.tail vals.tail
       (collapseFrontierStack H pkSeed w v (chainAdvance H pkSeed v a (w - 1 - a) (vals.headD 0#256)) st)
 
+private theorem length_take_eq {α : Type} :
+    ∀ (xs : List α) (n : Nat), n ≤ xs.length → (xs.take n).length = n
+  | _, 0, _ => rfl
+  | [], _ + 1, h => nomatch h
+  | _ :: xs, n + 1, h => congrArg Nat.succ (length_take_eq xs n (Nat.le_of_succ_le_succ h))
+
 private theorem runFrontierStackLoop_tree_eq (H : FrontierHashSuite) (pkSeed : BitVec 256) (w : Nat) :
     ∀ (tr : AntichainTree) (v : Nat) (offs : List Nat) (vals : List (BitVec 256))
       (restVs restOffs : List Nat) (restVals : List (BitVec 256)) (st : List (Nat × BitVec 256)),
@@ -991,23 +1042,31 @@ private theorem runFrontierStackLoop_tree_eq (H : FrontierHashSuite) (pkSeed : B
       cases vals with
       | nil => cases hVL
       | cons x xs =>
-        rw [List.eq_nil_of_length_eq_zero (Nat.succ.inj hOL), List.eq_nil_of_length_eq_zero (Nat.succ.inj hVL)]
-        rfl
+        cases os with
+        | nil =>
+          cases xs with
+          | nil => rfl
+          | cons _ _ => cases Nat.succ.inj hVL
+        | cons _ _ => cases Nat.succ.inj hOL
   | .split l r, v, offs, vals, restVs, restOffs, restVals, st, hv, hOL, hVL => by
     conv => lhs; rw [AntichainTree.frontierNodes, List.append_assoc,
       (List.take_append_drop l.size offs).symm, List.append_assoc,
       (List.take_append_drop l.size vals).symm, List.append_assoc]
     rw [runFrontierStackLoop_tree_eq H pkSeed w l (2 * v) (offs.take l.size) (vals.take l.size)
           (r.frontierNodes (2 * v + 1) ++ restVs) (offs.drop l.size ++ restOffs) (vals.drop l.size ++ restVals)
-          st (by omega) (by simp [hOL, AntichainTree.size]) (by simp [hVL, AntichainTree.size])]
+          st (by omega)
+          (length_take_eq offs l.size (by unfold AntichainTree.size at hOL; omega))
+          (length_take_eq vals l.size (by unfold AntichainTree.size at hVL; omega))]
     have hL : collapseFrontierStack H pkSeed w (2 * v)
         (evalAntichainTree H pkSeed w (2 * v) l (offs.take l.size) (vals.take l.size)) st =
         (2 * v, evalAntichainTree H pkSeed w (2 * v) l (offs.take l.size) (vals.take l.size)) :: st := by
       cases st with
       | nil => rfl
-      | cons hd _ => unfold collapseFrontierStack; simp [show ¬ (hd.1 % 2 = 0 ∧ 2 * v = hd.1 + 1) by omega]
+      | cons hd _ => unfold collapseFrontierStack; simp [show ¬ (hd.1 % 2 = 0 ∧ 2 * v = hd.1 + 1) by rintro ⟨_, _⟩; omega]
     rw [hL, runFrontierStackLoop_tree_eq H pkSeed w r (2 * v + 1) (offs.drop l.size) (vals.drop l.size)
-          restVs restOffs restVals _ (by omega) (by simp [hOL, AntichainTree.size]) (by simp [hVL, AntichainTree.size])]
+          restVs restOffs restVals _ (by omega)
+          (by rw [List.length_drop]; unfold AntichainTree.size at hOL; omega)
+          (by rw [List.length_drop]; unfold AntichainTree.size at hVL; omega)]
     congr 1
     conv => lhs; unfold collapseFrontierStack
     simp [show (2 * v) % 2 = 0 ∧ 2 * v + 1 = 2 * v + 1 from ⟨by omega, rfl⟩, show (2 * v) / 2 = v by omega, evalAntichainTree]
@@ -1051,6 +1110,20 @@ private theorem honestSignSubtree_length (H : FrontierHashSuite) (pkSeed skSeed 
       honestSignSubtree_length H pkSeed skSeed w t (2 * v + 1) r _ hr]
     rfl
 
+private theorem take_append_eq {α : Type} :
+    ∀ (xs ys : List α) (n : Nat), xs.length = n → (xs ++ ys).take n = xs
+  | [], _, 0, _ => rfl
+  | _ :: _, _, 0, h => nomatch h
+  | [], _, _ + 1, h => nomatch h
+  | x :: xs, ys, n + 1, h => congrArg (x :: ·) (take_append_eq xs ys n (Nat.succ.inj h))
+
+private theorem drop_append_eq {α : Type} :
+    ∀ (xs ys : List α) (n : Nat), xs.length = n → (xs ++ ys).drop n = ys
+  | [], _ys, 0, _ => rfl
+  | _ :: _, _, 0, h => nomatch h
+  | [], _, _ + 1, h => nomatch h
+  | _ :: xs, ys, n + 1, h => drop_append_eq xs ys n (Nat.succ.inj h)
+
 private theorem evalAntichainTree_honest (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w : Nat) (hw : 1 ≤ w) :
     ∀ (t v : Nat) (tr : AntichainTree) (offs : List Nat),
       0 < v → tr.Valid t = true → offs.length = tr.size → (∀ a ∈ offs, a < w) → (tr = .leaf → 1 < v) →
@@ -1071,17 +1144,38 @@ private theorem evalAntichainTree_honest (H : FrontierHashSuite) (pkSeed skSeed 
     obtain ⟨hl, hr⟩ := band_eq_true hV
     have hHSL := honestSignSubtree_length H pkSeed skSeed w t (2 * v) l (offs.take l.size) hl
     have hTkL : (offs.take l.size).length = l.size :=
-      List.length_take_of_le (by unfold AntichainTree.size at hOL; omega)
+      length_take_eq offs l.size (by unfold AntichainTree.size at hOL; omega)
     have hDpL : (offs.drop l.size).length = r.size := by
       rw [List.length_drop]; unfold AntichainTree.size at hOL; omega
+    have hTakeH :
+        ((honestSignSubtree H pkSeed skSeed w t (2 * v) l (offs.take l.size)) ++
+         (honestSignSubtree H pkSeed skSeed w t (2 * v + 1) r (offs.drop l.size))).take l.size =
+          honestSignSubtree H pkSeed skSeed w t (2 * v) l (offs.take l.size) :=
+      take_append_eq _ _ l.size hHSL
+    have hDropH :
+        ((honestSignSubtree H pkSeed skSeed w t (2 * v) l (offs.take l.size)) ++
+         (honestSignSubtree H pkSeed skSeed w t (2 * v + 1) r (offs.drop l.size))).drop l.size =
+          honestSignSubtree H pkSeed skSeed w t (2 * v + 1) r (offs.drop l.size) :=
+      drop_append_eq _ _ l.size hHSL
     unfold honestSignSubtree evalAntichainTree
     dsimp only
-    rw [← hHSL, List.take_left, List.drop_left,
+    rw [hTakeH, hDropH,
         evalAntichainTree_honest H pkSeed skSeed w hw t (2 * v) l (offs.take l.size) (by omega) hl
           hTkL (fun a ha => hBnd a (List.mem_of_mem_take ha)) (fun _ => by omega),
         evalAntichainTree_honest H pkSeed skSeed w hw t (2 * v + 1) r (offs.drop l.size) (by omega) hr
           hDpL (fun a ha => hBnd a (List.mem_of_mem_drop ha)) (fun _ => by omega)]
-    unfold honestNodeOut honestNodeBase; simp [show 2 * v > 1 by omega, show 2 * v + 1 > 1 by omega]
+    have hLOut : honestNodeOut H pkSeed skSeed w t (2 * v) =
+        chainAdvance H pkSeed (2 * v) 0 (w - 1) (honestNodeBase H pkSeed skSeed w t (2 * v)) := by
+      unfold honestNodeOut; simp [show 2 * v > 1 by omega]
+    have hROut : honestNodeOut H pkSeed skSeed w t (2 * v + 1) =
+        chainAdvance H pkSeed (2 * v + 1) 0 (w - 1) (honestNodeBase H pkSeed skSeed w t (2 * v + 1)) := by
+      unfold honestNodeOut; simp [show 2 * v + 1 > 1 by omega]
+    have hMergeEq : H.mergeNode pkSeed v
+        (honestNodeOut H pkSeed skSeed w t (2 * v))
+        (honestNodeOut H pkSeed skSeed w t (2 * v + 1)) =
+        honestNodeBase H pkSeed skSeed w (t + 1) v := by
+      rw [hLOut, hROut]; rfl
+    rw [hMergeEq]; rfl
 
 theorem verifyFrontierFts_signFrontierFts (H : FrontierHashSuite) (p : FrontierFtsParams)
     (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
@@ -1218,9 +1312,9 @@ def extractAntichainDiffBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 25
 def extractOffsetDiffBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w : Nat) :
     (t v : Nat) → (tr : AntichainTree) → (offs₁ offs₂ : List Nat) → (vals₂ : List (BitVec 256)) →
     0 < v → (tr = .leaf → 1 < v) → tr.Valid t = true →
-    offs₁.length = tr.size → offs₂.length = tr.size → vals₂.length = tr.size →
+    (hOL₁ : offs₁.length = tr.size) → (hOL₂ : offs₂.length = tr.size) → vals₂.length = tr.size →
     (∀ a ∈ offs₁, a < w) → (idx : Fin offs₂.length) →
-    offs₂.get idx < offs₁.get ⟨idx.1, Nat.lt_of_lt_of_eq idx.2 (‹offs₂.length = tr.size›.trans ‹offs₁.length = tr.size›.symm)⟩ →
+    offs₂.get idx < offs₁.get ⟨idx.1, Nat.lt_of_lt_of_eq idx.2 (hOL₂.trans hOL₁.symm)⟩ →
     evalAntichainTree H pkSeed w v tr offs₂ vals₂ = honestNodeOut H pkSeed skSeed w t v →
     FrontierForgeryBreak H pkSeed skSeed w
   | t, v, .leaf, offs₁, offs₂, vals₂, _, hvGt, _, hOL₁, hOL₂, hVL₂, hBnd₁, idx, hLtIdx, hEval =>
@@ -1242,8 +1336,8 @@ def extractOffsetDiffBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) 
           rw [show (d₁ - d₂) + (w - 1 - d₁) = w - 1 - d₂ by omega, show d₂ + (d₁ - d₂) = d₁ by omega, hyStep] at hAdd₂
           rw [show d₁ + (w - 1 - d₁) = w - 1 by omega, Nat.zero_add] at hAdd₁
           exact hAdd₂.symm.trans (hEv.trans hAdd₁))
-    | _ :: _, _ :: _, _, _, hOL₂, _, ⟨_ + 1, hk⟩, _, _ =>
-      False.elim (by unfold AntichainTree.size at hOL₂; simp at hOL₂; subst hOL₂; omega)
+    | _ :: _, _ :: os₂, _, _, hOL₂, _, ⟨_ + 1, hk⟩, _, _ =>
+      False.elim (by have h0 : os₂.length = 0 := Nat.succ.inj hOL₂; rw [List.length_cons, h0] at hk; omega)
   | 0, _, .split _ _, _, _, _, _, _, hV, _, _, _, _, _, _, _ => False.elim (by simp [AntichainTree.Valid] at hV)
   | t + 1, v, .split l r, offs₁, offs₂, vals₂, hv, _, hV, hOL₁, hOL₂, hVL₂, hBnd₁, idx, hLtIdx, hEv =>
     have hVSub := band_eq_true hV
@@ -1253,17 +1347,26 @@ def extractOffsetDiffBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) 
     | .inl brk => brk
     | .inr ⟨hLEq, hREq, _⟩ =>
       if hInL : idx.1 < l.size then
+        have hTk2 : (offs₂.take l.size).length = l.size :=
+          length_take_eq offs₂ l.size (by unfold AntichainTree.size at hOL₂; omega)
         extractOffsetDiffBreak H pkSeed skSeed w t (2 * v) l (offs₁.take l.size) (offs₂.take l.size) (vals₂.take l.size)
-          (by omega) (fun _ => by omega) hVSub.1 (by simp [hOL₁, AntichainTree.size])
-          (by simp [hOL₂, AntichainTree.size]) (by simp [hVL₂, AntichainTree.size])
-          (fun a ha => hBnd₁ a (List.mem_of_mem_take ha)) ⟨idx.1, by simp [hOL₂, AntichainTree.size, hInL]⟩
-          (by simp [List.get_eq_getElem, List.getElem_take]; exact hLtIdx) hLEq
+          (by omega) (fun _ => by omega) hVSub.1
+          (length_take_eq offs₁ l.size (by unfold AntichainTree.size at hOL₁; omega))
+          hTk2
+          (length_take_eq vals₂ l.size (by unfold AntichainTree.size at hVL₂; omega))
+          (fun a ha => hBnd₁ a (List.mem_of_mem_take ha))
+          ⟨idx.1, hTk2.symm ▸ hInL⟩
+          (by simp only [List.get_eq_getElem, List.getElem_take]; exact hLtIdx) hLEq
       else
+        have hDp2 : (offs₂.drop l.size).length = r.size := by
+          rw [List.length_drop]; unfold AntichainTree.size at hOL₂; omega
         extractOffsetDiffBreak H pkSeed skSeed w t (2 * v + 1) r (offs₁.drop l.size) (offs₂.drop l.size) (vals₂.drop l.size)
-          (by omega) (fun _ => by omega) hVSub.2 (by simp [hOL₁, AntichainTree.size])
-          (by simp [hOL₂, AntichainTree.size]) (by simp [hVL₂, AntichainTree.size])
+          (by omega) (fun _ => by omega) hVSub.2
+          (by rw [List.length_drop]; unfold AntichainTree.size at hOL₁; omega)
+          hDp2
+          (by rw [List.length_drop]; unfold AntichainTree.size at hVL₂; omega)
           (fun a ha => hBnd₁ a (List.mem_of_mem_drop ha))
-          ⟨idx.1 - l.size, by simp [hOL₂, AntichainTree.size]; unfold AntichainTree.size at hOL₂; omega⟩
+          ⟨idx.1 - l.size, by rw [hDp2]; unfold AntichainTree.size at hOL₂; omega⟩
           (by simp only [List.get_eq_getElem, List.getElem_drop]
               simpa [show l.size + (idx.1 - l.size) = idx.1 by omega] using hLtIdx) hREq
 
@@ -1283,20 +1386,26 @@ def extractCompact1122ForgeryBreak (H : FrontierHashSuite) (p : FrontierFtsParam
     else .targetIndexCollision pk.root sig₁.randomizer d₁ sig₁.grindCounter sig₂.randomizer d₂ sig₂.grindCounter (.inr (.inl hdEq)) hRkEq
   else
     have hUnr₁Some : ∃ tr₁ paths₁ offs₁, unrankFrontierFts p rk₁ = some (tr₁, paths₁, offs₁) := by
-      unfold signFrontierFts at hHonest; split at hHonest; · cases hHonest
-      dsimp only at hHonest
-      cases hU : unrankFrontierFts p (H.squeezeRank pk.pkSeed pk.root (H.prfRand sk.skPrf pk.pkSeed pk.root hedge₁ d₁) d₁ ctr₁).toNat with
-      | none => simp [pk, d₁, hU] at hHonest
-      | some tp => simp only [pk, d₁, hU, Option.some.injEq] at hHonest; subst hHonest; exact ⟨tp.1, tp.2.1, tp.2.2, hU⟩
+      unfold signFrontierFts at hHonest
+      if hC₁ : ctr₁.toNat >= 2 ^ p.counterBits then
+        simp [hC₁] at hHonest
+      else
+        simp only [hC₁, ↓reduceIte] at hHonest
+        cases hU : unrankFrontierFts p (H.squeezeRank pk.pkSeed pk.root (H.prfRand sk.skPrf pk.pkSeed pk.root hedge₁ d₁) d₁ ctr₁).toNat with
+        | none => simp [pk, d₁, hU] at hHonest
+        | some tp => simp only [pk, d₁, hU, Option.some.injEq] at hHonest; subst hHonest; exact ⟨tp.1, tp.2.1, tp.2.2, hU⟩
     match hU₁ : unrankFrontierFts p rk₁, hU₂ : unrankFrontierFts p rk₂ with
     | none, _ => False.elim (by obtain ⟨_, _, _, h⟩ := hUnr₁Some; rw [h] at hU₁; cases hU₁)
     | _, none => False.elim (by
         unfold verifyFrontierFts at hForged
-        split at hForged
-        · cases hForged
-        · split at hForged
-          · cases hForged
-          · simp [pk, d₂, rk₂, hU₂] at hForged)
+        if hCL : (sig₂.chainValues.length != p.frontierLen) = true then
+          simp [hCL] at hForged
+        else
+          have hCLF : (sig₂.chainValues.length != p.frontierLen) = false := Bool.eq_false_iff.mpr hCL
+          if hC₂ : sig₂.grindCounter.toNat >= 2 ^ p.counterBits then
+            simp [hCLF, hC₂] at hForged
+          else
+            simp [hCLF, hC₂, pk, d₂, rk₂, hU₂] at hForged)
     | some (tr₁, paths₁, offs₁), some (tr₂, paths₂, offs₂) =>
       have hLt₁ := unrankFrontierFts_rank_lt hU₁
       have hLt₂ := unrankFrontierFts_rank_lt hU₂
@@ -1379,16 +1488,16 @@ theorem tooth_drop_target_sum_allows_one_sig_forgery
   have hOLen₁ : offs₁.length = p.frontierLen := List.length_replicate
   have hOLen₂ : offs₂.length = p.frontierLen := by dsimp only [offs₂]; rw [List.length_cons, List.length_replicate]; omega
   cases hFN : tr.frontierNodes 1 with
-  | nil => rw [hFN] at hNLen; simp at hNLen; omega
+  | nil => rw [hFN] at hNLen; change 0 = p.frontierLen at hNLen; omega
   | cons u us =>
     cases hHV : honestVals with
-    | nil => rw [hHV] at hHLen; simp at hHLen; omega
+    | nil => rw [hHV] at hHLen; change 0 = p.frontierLen at hHLen; omega
     | cons x xs =>
-      have hFLS : p.frontierLen = us.length + 1 := by rw [hFN] at hNLen; simpa using hNLen.symm
+      have hFLS : p.frontierLen = us.length + 1 := by rw [hFN] at hNLen; exact hNLen.symm
       have hO₁ : offs₁ = 0 :: List.replicate us.length 0 := by dsimp only [offs₁]; rw [hFLS, List.replicate_succ]
-      have hO₂ : offs₂ = 1 :: List.replicate us.length 0 := by dsimp only [offs₂]; rw [hFLS]; simp
+      have hO₂ : offs₂ = 1 :: List.replicate us.length 0 := by dsimp only [offs₂]; rw [hFLS, Nat.add_sub_cancel]
       have hFLen : forgedVals.length = p.frontierLen := by
-        dsimp only [forgedVals]; rw [hHV]; rw [hHV] at hHLen; simpa using hHLen
+        dsimp only [forgedVals]; rw [hHV]; rw [hHV] at hHLen; exact hHLen
       have hNoBig : offs₂.any (fun a => decide (p.winternitzW ≤ a)) = false := by
         rw [hO₂, List.any_cons, decide_eq_false (by omega : ¬ p.winternitzW ≤ 1)]
         suffices (List.replicate us.length 0).any (fun a => decide (p.winternitzW ≤ a)) = false by rw [this]; rfl
@@ -1397,11 +1506,12 @@ theorem tooth_drop_target_sum_allows_one_sig_forgery
         rw [List.mem_replicate] at ha
         simp only [ha.2, decide_eq_true_eq]
         omega
+      change verifyFrontierFtsNoTargetSum H p pk (u :: us) offs₂ forgedVals = true
       unfold verifyFrontierFtsNoTargetSum
       have hLenChk : (forgedVals.length != p.frontierLen || offs₂.length != p.frontierLen) = false := by
         rw [hFLen, hOLen₂]; simp
-      rw [if_neg (by rw [hLenChk]; decide), if_neg (by rw [hNoBig]; decide)]
-      have hStepEq : runFrontierStackLoop H pk.pkSeed p.winternitzW (tr.frontierNodes 1) offs₂ forgedVals [] =
+      simp only [hLenChk, hNoBig, Bool.false_eq_true, ↓reduceIte]
+      have hStepEq : runFrontierStackLoop H pk.pkSeed p.winternitzW (u :: us) offs₂ forgedVals [] =
           runFrontierStackLoop H pk.pkSeed p.winternitzW (tr.frontierNodes 1) offs₁ honestVals [] := by
         dsimp only [forgedVals, v₀]; rw [hFN, hHV, hO₁, hO₂]; unfold runFrontierStackLoop
         simp only [List.headD_cons, List.tail_cons, Nat.sub_zero]
@@ -1515,23 +1625,50 @@ def HonestEpochRecord.ValidAt (H : FrontierHashSuite) (p : FrontierFtsParams)
   signFrontierFts H p rec_.sk rec_.hedge rec_.ctr
     (voteHash chainId (UInt64.ofNat ep) rec_.voteDigest rec_.nextPkRoot) = some rec_.vote.signature
 
+private theorem verifyRotatedEpochVote_eq_some
+    {H : FrontierHashSuite} {p : FrontierFtsParams} {voteHash : EpochVoteHasher}
+    {chainId : BitVec 256} {curPk npk : FrontierPublicKey}
+    {ep : UInt64} {d : BitVec 256} {v : RotatedEpochVote}
+    (hV : verifyRotatedEpochVote H p voteHash chainId curPk ep d v = some npk) :
+    v.link.epoch = ep ∧ v.voteDigest = d ∧
+    verifyFrontierFts H p curPk (voteHash chainId ep d v.link.nextEpochPkRoot) v.signature = true ∧
+    npk = ⟨curPk.pkSeed, v.link.nextEpochPkRoot⟩ := by
+  unfold verifyRotatedEpochVote at hV
+  cases c1 : (p.nodeBytes != 32 || p.maxSafeUses != 1)
+  · simp only [c1, Bool.false_eq_true, ↓reduceIte] at hV
+    cases c2 : (v.link.epoch != ep || decide (ep.toNat + 1 >= 2 ^ 64))
+    · simp only [c2, Bool.false_eq_true, ↓reduceIte] at hV
+      cases c3 : (v.voteDigest != d)
+      · simp only [c3, Bool.false_eq_true, ↓reduceIte] at hV
+        have hEp : v.link.epoch = ep := eq_of_bne_false (fun hT => by rw [hT] at c2; cases c2)
+        have hDig : v.voteDigest = d := eq_of_bne_false (fun hT => by rw [hT] at c3; cases c3)
+        cases c4 : verifyFrontierFts H p curPk (voteHash chainId v.link.epoch v.voteDigest v.link.nextEpochPkRoot) v.signature
+        · rw [c4] at hV; cases hV
+        · simp only [c4, ↓reduceIte] at hV
+          injection hV with hNpk
+          rw [hEp, hDig] at c4
+          exact ⟨hEp, hDig, c4, hNpk.symm⟩
+      · rw [c3] at hV; cases hV
+    · rw [c2] at hV; cases hV
+  · rw [c1] at hV; cases hV
+
 def extractRotatedEpochVoteChainBreak (H : FrontierHashSuite) (p : FrontierFtsParams)
     (hL : 2 ≤ p.frontierLen) (voteHash : EpochVoteHasher) (chainId pkSeed : BitVec 256) :
     (startEp : Nat) → (histRecords : List HonestEpochRecord) →
     (advDigests : List (BitVec 256)) → (advVotes : List RotatedEpochVote) →
     (anchorPk finalPk : FrontierPublicKey) →
-    histRecords.length = advDigests.length → advDigests.length = advVotes.length →
+    (hLen1 : histRecords.length = advDigests.length) → (hLen2 : advDigests.length = advVotes.length) →
     (∀ idx : Fin histRecords.length, (histRecords.get idx).ValidAt H p voteHash chainId pkSeed (startEp + idx.1)) →
     (∀ r₀, histRecords.head? = some r₀ → anchorPk = deriveFrontierPk H p r₀.sk) →
     (∀ i : Fin histRecords.length, ∀ rNext, histRecords[i.1 + 1]? = some rNext →
       (histRecords.get i).nextPkRoot = (deriveFrontierPk H p rNext.sk).root) →
     verifyRotatedEpochChain H p voteHash chainId anchorPk startEp advDigests advVotes = some finalPk →
     (∃ i : Fin histRecords.length,
-      advDigests.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 ‹histRecords.length = advDigests.length›⟩ ≠ (histRecords.get i).voteDigest ∨
-      (advVotes.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (‹histRecords.length = advDigests.length›.trans ‹advDigests.length = advVotes.length›)⟩).link.nextEpochPkRoot ≠
+      advDigests.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
+      (advVotes.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠
         (histRecords.get i).nextPkRoot) →
     EpochChainHistoricalBreak H voteHash pkSeed p.winternitzW
-  | _, [], _, _, _, _, _, _, _, _, _, _, hDev => False.elim (by obtain ⟨⟨_, hi⟩, _⟩ := hDev; omega)
+  | _, [], _, _, _, _, _, _, _, _, _, _, hDev => False.elim (by obtain ⟨⟨_, hi⟩, _⟩ := hDev; exact nomatch hi)
   | startEp, r₀ :: rs, dAdv :: dsAdv, vAdv :: vsAdv, anchorPk, finalPk,
     hLen1, hLen2, hVal, hAnchor, hLink, hChainAcc, hDev =>
     have hr₀Val : r₀.ValidAt H p voteHash chainId pkSeed startEp := by simpa using hVal ⟨0, Nat.zero_lt_succ _⟩
@@ -1539,26 +1676,19 @@ def extractRotatedEpochVoteChainBreak (H : FrontierHashSuite) (p : FrontierFtsPa
     have hStepAcc : ∃ npk, verifyRotatedEpochVote H p voteHash chainId anchorPk (UInt64.ofNat startEp) dAdv vAdv = some npk ∧
         verifyRotatedEpochChain H p voteHash chainId npk (startEp + 1) dsAdv vsAdv = some finalPk := by
       unfold verifyRotatedEpochChain at hChainAcc
-      by_cases hEpB : startEp >= 2 ^ 64; · simp [hEpB] at hChainAcc
-      simp only [hEpB, ↓reduceIte] at hChainAcc
-      cases hV : verifyRotatedEpochVote H p voteHash chainId anchorPk (UInt64.ofNat startEp) dAdv vAdv with
-      | none => simp [hV] at hChainAcc
-      | some npk => exact ⟨npk, hV, by simpa [hV] using hChainAcc⟩
+      if hEpB : startEp >= 2 ^ 64 then
+        simp [hEpB] at hChainAcc
+      else
+        simp only [hEpB, ↓reduceIte] at hChainAcc
+        match hV : verifyRotatedEpochVote H p voteHash chainId anchorPk (UInt64.ofNat startEp) dAdv vAdv with
+        | none => rw [hV] at hChainAcc; cases hChainAcc
+        | some npk => rw [hV] at hChainAcc; exact ⟨npk, rfl, hChainAcc⟩
     if hHeadDiff : dAdv ≠ r₀.voteDigest ∨ vAdv.link.nextEpochPkRoot ≠ r₀.nextPkRoot then
       have hVerStep : verifyFrontierFts H p (deriveFrontierPk H p r₀.sk)
           (voteHash chainId (UInt64.ofNat startEp) dAdv vAdv.link.nextEpochPkRoot) vAdv.signature = true := by
-        obtain ⟨_, hV, _⟩ := hStepAcc; rw [hAncEq] at hV; unfold verifyRotatedEpochVote at hV
-        by_cases c1 : p.nodeBytes != 32 || p.maxSafeUses != 1; · simp [c1] at hV
-        by_cases c2 : vAdv.link.epoch != UInt64.ofNat startEp || (UInt64.ofNat startEp).toNat + 1 >= 2 ^ 64; · simp [c1, c2] at hV
-        by_cases c3 : vAdv.voteDigest != dAdv; · simp [c1, c2, c3] at hV
-        simp only [c1, c2, c3, Bool.false_eq_true, ↓reduceIte] at hV
-        have hEpEq : vAdv.link.epoch = UInt64.ofNat startEp :=
-          eq_of_bne_false (fun hT => c2 (by rw [hT]; rfl))
-        have hDigEq : vAdv.voteDigest = dAdv := eq_of_bne_false c3
-        by_cases hOk : verifyFrontierFts H p (deriveFrontierPk H p r₀.sk)
-            (voteHash chainId vAdv.link.epoch vAdv.voteDigest vAdv.link.nextEpochPkRoot) vAdv.signature = true
-        · rw [hEpEq, hDigEq] at hOk; exact hOk
-        · simp [hOk] at hV
+        obtain ⟨_, hV, _⟩ := hStepAcc
+        rw [hAncEq] at hV
+        exact (verifyRotatedEpochVote_eq_some hV).2.2.1
       let m₁ := voteHash chainId (UInt64.ofNat startEp) r₀.voteDigest r₀.nextPkRoot
       let m₂ := voteHash chainId (UInt64.ofNat startEp) dAdv vAdv.link.nextEpochPkRoot
       if hMEq : m₂ = m₁ then
@@ -1571,26 +1701,25 @@ def extractRotatedEpochVoteChainBreak (H : FrontierHashSuite) (p : FrontierFtsPa
         ⟨Decidable.of_not_not (fun h1 => hHeadDiff (.inl h1)), Decidable.of_not_not (fun h2 => hHeadDiff (.inr h2))⟩
       have hNextPkEq : ∀ npk, verifyRotatedEpochVote H p voteHash chainId anchorPk (UInt64.ofNat startEp) dAdv vAdv = some npk →
           npk = ⟨pkSeed, r₀.nextPkRoot⟩ := by
-        intro npk hV; unfold verifyRotatedEpochVote at hV
-        by_cases c1 : p.nodeBytes != 32 || p.maxSafeUses != 1; · simp [c1] at hV
-        by_cases c2 : vAdv.link.epoch != UInt64.ofNat startEp || (UInt64.ofNat startEp).toNat + 1 >= 2 ^ 64; · simp [c1, c2] at hV
-        by_cases c3 : vAdv.voteDigest != dAdv; · simp [c1, c2, c3] at hV
-        simp only [c1, c2, c3, Bool.false_eq_true, ↓reduceIte] at hV; split at hV
-        · injection hV with hE; rw [← hE, hAncEq, hSame0.2]; simp [deriveFrontierPk, hr₀Val.1]
-        · cases hV
+        intro npk hV
+        have hEqNpk := (verifyRotatedEpochVote_eq_some hV).2.2.2
+        rw [hEqNpk, hAncEq, hSame0.2]
+        unfold deriveFrontierPk
+        rw [hr₀Val.1]
       extractRotatedEpochVoteChainBreak H p hL voteHash chainId pkSeed (startEp + 1) rs dsAdv vsAdv
         ⟨pkSeed, r₀.nextPkRoot⟩ finalPk (Nat.succ.inj hLen1) (Nat.succ.inj hLen2)
         (fun j => by simpa [Nat.add_assoc, Nat.add_comm 1 j.1] using hVal ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
         (fun r₁ hr₁ => by
-          have hL0 := hLink ⟨0, Nat.zero_lt_succ _⟩ r₁ (by simpa using hr₁)
-          have hV1 : r₁.ValidAt H p voteHash chainId pkSeed (startEp + 1) := by
-            cases rs with
-            | nil => cases hr₁
-            | cons hd _ =>
-              injection hr₁ with hE; subst hE; simpa using hVal ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ _)⟩
-          unfold deriveFrontierPk at hL0 ⊢
-          rw [FrontierPublicKey.mk.injEq]
-          exact ⟨hV1.1.symm, hL0⟩)
+          cases rs with
+          | nil => cases hr₁
+          | cons hd tl =>
+            injection hr₁ with hE; rw [← hE]
+            have hL0 := hLink ⟨0, Nat.zero_lt_succ _⟩ hd rfl
+            have hV1 : hd.ValidAt H p voteHash chainId pkSeed (startEp + 1) := by
+              simpa using hVal ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ _)⟩
+            unfold deriveFrontierPk at hL0 ⊢
+            rw [FrontierPublicKey.mk.injEq]
+            exact ⟨hV1.1.symm, hL0⟩)
         (fun j rNext hNxt => hLink ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩ rNext hNxt)
         (by obtain ⟨npk, hV, hRest⟩ := hStepAcc; rw [hNextPkEq npk hV] at hRest; exact hRest)
         (by obtain ⟨⟨idx, hIdx⟩, hD⟩ := hDev
@@ -1620,12 +1749,13 @@ theorem rotatedEpochVote_forward_secure_chain (H : FrontierHashSuite) (p : Front
     `voteFramingCollision` is an explicit `Keccak-f[1600]` `cSHAKE256` collision on two distinct
     104-byte vote payloads; otherwise a historical-epoch `FrontierForgeryBreak` is extracted. -/
 theorem rotatedEpochVote_cshake_chain_reduction (H : FrontierHashSuite) (p : FrontierFtsParams)
-    (hL : 2 ≤ p.frontierLen) (chainId pkSeed : BitVec 256)
+    (_chainId pkSeed : BitVec 256)
     (brk : EpochChainHistoricalBreak H cshakeEpochVoteHasher pkSeed p.winternitzW) :
     (∃ m₁ m₂ : List UInt8, m₂ ≠ m₁ ∧
       evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] ftsTagEpochVote m₂ 32 =
       evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] ftsTagEpochVote m₁ 32) ∨
-    (∃ histEpoch skSeedAtEpoch, Nonempty (FrontierForgeryBreak H pkSeed skSeedAtEpoch p.winternitzW)) := by
+    (∃ (_histEpoch : Nat) (skSeedAtEpoch : BitVec 256),
+      Nonempty (FrontierForgeryBreak H pkSeed skSeedAtEpoch p.winternitzW)) := by
   cases brk with
   | voteFramingCollision c ep d₁ r₁ d₂ r₂ hDiff hCol =>
     refine .inl ⟨encodeEpochVoteInput c ep d₁ r₁, encodeEpochVoteInput c ep d₂ r₂, ?_, hCol⟩
@@ -1640,7 +1770,7 @@ theorem rotatedEpochVote_cshake_chain_reduction (H : FrontierHashSuite) (p : Fro
 theorem tooth_static_key_compromise_forges_historical_epoch
     (H : FrontierHashSuite) (p : FrontierFtsParams)
     (hBytes : p.nodeBytes = 32) (hUses : p.maxSafeUses = 1)
-    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen) (hCtrBits : 1 ≤ p.counterBits)
+    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
     (hDom : 2 ^ 256 ≤ frontierRootSubCount p.treeHeight p.frontierLen *
                       frontierDecCount p.winternitzW p.frontierLen p.targetSum)
     (voteHash : EpochVoteHasher) (chainId : BitVec 256)
@@ -1662,7 +1792,9 @@ theorem tooth_static_key_compromise_forges_historical_epoch
     change ¬ (0 >= 2 ^ p.counterBits); omega
   let sig : FrontierSignature := ⟨rand, 0, honestSignSubtree H pk₀.pkSeed skStatic.skSeed p.winternitzW p.treeHeight 1 tr offs⟩
   have hSign : signFrontierFts H p skStatic hedge 0 msg = some sig := by
-    unfold signFrontierFts; simp [hCtr0, pk₀, msg, d, rand, rk, hUnr, sig]
+    unfold signFrontierFts
+    rw [ite_eq_right_iff.mpr (fun h => False.elim (hCtr0 h))]
+    simp [pk₀, msg, d, rand, rk, hUnr, sig]
   refine ⟨⟨⟨0, pk₀.root⟩, forgedDigest, sig⟩, rfl, hDiff, ?_⟩
   unfold verifyRotatedEpochVote
   have hC1 : (p.nodeBytes != 32 || p.maxSafeUses != 1) = false := by rw [hBytes, hUses]; rfl
@@ -1880,7 +2012,7 @@ def prehashFaultSuite (base : FrontierHashSuite) (m₁ m₂ : List UInt8) : Fron
       if m = m₂ then base.prehashMsg pkSeed pkRoot m₁ else base.prehashMsg pkSeed pkRoot m }
 
 private theorem witness_forgery_of_suite (base : FrontierHashSuite) (p : FrontierFtsParams)
-    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen) (hCtr : 1 ≤ p.counterBits)
+    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
     (hDom : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
                       frontierDecCount p.winternitzW p.frontierLen p.targetSum) :
     ∃ (H : FrontierHashSuite) (p' : FrontierFtsParams) (_ : 2 ≤ p'.frontierLen)
@@ -1904,7 +2036,9 @@ private theorem witness_forgery_of_suite (base : FrontierHashSuite) (p : Frontie
       change ¬ (0 >= 2 ^ p.counterBits); omega
     have hSome : signFrontierFts H p sk 0#256 0 [1] =
         some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs⟩ := by
-      unfold signFrontierFts; simp [hCtr0, pk, d₁, rand, rk, hUnr]
+      unfold signFrontierFts
+      rw [ite_false_eq hCtr0]
+      simp [pk, d₁, rand, rk, hUnr]
     dsimp only [sig₁]; rw [hSome]; rfl
   have hVer₂ : verifyFrontierFts H p (deriveFrontierPk H p sk) [2] sig₁ = true := by
     have hVer₁ := verifyFrontierFts_signFrontierFts H p hw hL sk 0#256 0 [1] sig₁ hSign₁
@@ -1924,11 +2058,11 @@ theorem witness_compact1122_forgery :
       ∃ (m₂ : List UInt8) (sig₂ : FrontierSignature),
         m₂ ≠ m₁ ∧ verifyFrontierFts H p (deriveFrontierPk H p sk) m₂ sig₂ = true :=
   witness_forgery_of_suite (cshakeFrontierHashSuite compact1122Params) compact1122Params
-    (by decide) (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
+    (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
 
 private theorem witness_epoch_chain_of_suite (base : FrontierHashSuite) (p : FrontierFtsParams)
     (hBytes : p.nodeBytes = 32) (hUses : p.maxSafeUses = 1)
-    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen) (hCtr : 1 ≤ p.counterBits)
+    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
     (hDom : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
                       frontierDecCount p.winternitzW p.frontierLen p.targetSum)
     (voteHash : EpochVoteHasher) :
@@ -1962,37 +2096,36 @@ private theorem witness_epoch_chain_of_suite (base : FrontierHashSuite) (p : Fro
       change ¬ (0 >= 2 ^ p.counterBits); omega
     have hSome : signFrontierFts H p sk 0#256 0 m₁ =
         some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs⟩ := by
-      unfold signFrontierFts; simp [hCtr0, pk, d₁, rand, rk, hUnr]
+      unfold signFrontierFts
+      rw [ite_false_eq hCtr0]
+      simp [pk, d₁, rand, rk, hUnr]
     dsimp only [sig]; rw [hSome]; rfl
   have hVer₂ : verifyFrontierFts H p pk m₂ sig = true := by
     have hVer₁ := verifyFrontierFts_signFrontierFts H p hw hL sk 0#256 0 m₁ sig hSign
     have hPreEq : H.prehashMsg pk.pkSeed pk.root m₂ = H.prehashMsg pk.pkSeed pk.root m₁ := by
-      dsimp only [H, prehashFaultSuite]; rw [if_pos rfl]
-      by_cases hEqM : m₁ = m₂
-      · rw [if_pos hEqM, hEqM]
-      · rw [if_neg hEqM]
+      dsimp only [H, prehashFaultSuite]
+      rw [ite_true_eq rfl]
     unfold verifyFrontierFts at hVer₁ ⊢; rw [hPreEq]; exact hVer₁
   let rec₀ : HonestEpochRecord := ⟨sk, 0#256, 0, 0#256, 0#256, ⟨⟨0, 0#256⟩, 0#256, sig⟩⟩
   let advV : RotatedEpochVote := ⟨⟨0, 0#256⟩, 1#256, sig⟩
   refine ⟨H, p, hL, voteHash, 0#256, 3#256, 0, [rec₀], [1#256], [advV], pk, ⟨3#256, 0#256⟩, rfl, rfl, ?_, ?_, ?_, ?_, ?_⟩
-  · intro ⟨i, hi⟩; have hi0 : i = 0 := by omega
-    subst hi0; exact ⟨rfl, rfl, rfl, hSign⟩
+  · rintro ⟨_ | k, hi⟩
+    · exact ⟨rfl, rfl, rfl, hSign⟩
+    · cases Nat.lt_of_succ_lt_succ hi
   · intro r₀ hr; injection hr with hE; rw [← hE]
-  · intro ⟨i, hi⟩ _ hNxt; have hi0 : i = 0 := by omega
-    subst hi0; cases hNxt
+  · rintro ⟨_ | k, hi⟩ _ hNxt
+    · cases hNxt
+    · cases Nat.lt_of_succ_lt_succ hi
   · unfold verifyRotatedEpochChain verifyRotatedEpochVote
-    have hC1 : (p.nodeBytes != 32 || p.maxSafeUses != 1) = false := by rw [hBytes, hUses]; rfl
-    have hC2 : (advV.link.epoch != UInt64.ofNat 0 || (UInt64.ofNat 0).toNat + 1 >= 2 ^ 64) = false := by decide +kernel
-    have hC3 : (advV.voteDigest != 1#256) = false := by decide +kernel
     have hEp0 : ¬ (0 >= 2 ^ 64) := by decide +kernel
+    have hC1 : (p.nodeBytes != 32 || p.maxSafeUses != 1) = false := by rw [hBytes, hUses]; rfl
+    have hC2 : (advV.link.epoch != UInt64.ofNat 0 || decide ((UInt64.ofNat 0).toNat + 1 >= 2 ^ 64)) = false := rfl
+    have hC3 : (advV.voteDigest != 1#256) = false := rfl
     simp only [hEp0, hC1, hC2, hC3, Bool.false_eq_true, ↓reduceIte]
-    change (if verifyFrontierFts H p pk m₂ sig then
-              verifyRotatedEpochChain H p voteHash 0#256 ⟨pk.pkSeed, 0#256⟩ 1 [] []
-            else none) = some ⟨3#256, 0#256⟩
-    rw [hVer₂]
-    have hPkSeed : pk.pkSeed = 3#256 := rfl
-    rw [hPkSeed]; rfl
-  · exact ⟨⟨0, by decide⟩, .inl (by decide)⟩
+    have hMsgEq : voteHash 0#256 advV.link.epoch advV.voteDigest advV.link.nextEpochPkRoot = m₂ := rfl
+    have hSigEq : advV.signature = sig := rfl
+    rw [hMsgEq, hSigEq, hVer₂]; rfl
+  · exact ⟨⟨0, Nat.zero_lt_succ 0⟩, .inl (by show (1#256 : BitVec 256) ≠ 0#256; decide)⟩
 
 theorem witness_rotatedEpochVote_chain :
     ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
@@ -2009,7 +2142,7 @@ theorem witness_rotatedEpochVote_chain :
         advDigests.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
         (advVotes.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) :=
   witness_epoch_chain_of_suite (cshakeFrontierHashSuite compact1122Params) compact1122Params
-    rfl rfl (by decide) (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
+    rfl rfl (by decide) (by decide) compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1
     cshakeEpochVoteHasher
 
 theorem witness_corduroy_real_params :
@@ -2018,8 +2151,10 @@ theorem witness_corduroy_real_params :
   ⟨corduroyPoseidon2AggParams, .inl rfl, rfl⟩
 
 attribute [local irreducible]
-  evalFtsCshake256_32 cshakeEpochVoteHasher cshakeFrontierHashSuite prehashFaultSuite
+  cshakeFrontierHashSuite prehashFaultSuite
   deriveFrontierPk signFrontierFts verifyFrontierFts verifyRotatedEpochChain
+
+set_option maxRecDepth 32768
 
 #tooth_pair Qsag.compact1122_one_time_euf_cma_reduction vs Qsag.tooth_drop_target_sum_allows_one_sig_forgery
 #tooth_pair Qsag.rotatedEpochVote_forward_secure_chain vs Qsag.tooth_static_key_compromise_forges_historical_epoch

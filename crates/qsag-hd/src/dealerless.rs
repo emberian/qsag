@@ -85,8 +85,11 @@ fn abort<T>(fault: RekeyFault) -> Result<T, HdError> {
     Err(HdError::RekeyAborted(fault))
 }
 
+/// Squeeze 192 bits (24 bytes) before constant-time wide reduction mod `q = 8_380_417`,
+/// matching `linear_module::sample_uniform_mod_q` and `threshold_eval` so single-draw
+/// total-variation and pointwise Rényi bias stay below `q / 2^192 < 2^-169`.
 fn field_from_stream(sponge: &mut Shake256) -> u32 {
-    let mut bytes = [0u8; 12];
+    let mut bytes = [0u8; 24];
     sponge.squeeze(&mut bytes);
     let value = reduce_wide_mod_q(&bytes);
     ct_zeroize_bytes(&mut bytes);
