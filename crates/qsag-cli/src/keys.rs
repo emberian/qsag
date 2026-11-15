@@ -1081,16 +1081,14 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                     1u32 << params.tree_height
                 )));
             }
+            let parties = secret.field_u64("parties")?;
+            if !(2..=16).contains(&parties) {
+                return Err(CliError::usage(
+                    "dealerless threshold setup requires 2 <= parties <= 16",
+                ));
+            }
             let cached_tree = load_cached_threshold_tree(&secret, params)?;
-            let mut setup =
-                threshold_setup(&seed, secret.field_u64("parties")?, params, cached_tree)?;
             let burn_mac = derive_secret(&seed, b"burn journal mac");
-            let mut journal = FsWalFtsEpochLatch::open(
-                burn_journal_path(secret_path),
-                setup.pk.pk_seed_bytes,
-                burn_mac.0,
-            )
-            .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
             let mut session = Secret32([0u8; 32]);
             match &fresh {
                 Some(entropy) => cshake256_framed_xof(
@@ -1105,44 +1103,100 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                     );
                 }
             }
-            let ceremony_id = cshake256_framed_32(
-                b"QSAG.CLI.THRESHOLD.CEREMONY.V1",
-                &[
+            let (mut setup, mut journal) = if let Some((cached_pk, cached_layers)) = cached_tree {
+                let pk_seed_bytes = cached_pk.pk_seed_bytes;
+                let journal = FsWalFtsEpochLatch::open(
+                    burn_journal_path(secret_path),
+                    pk_seed_bytes,
+                    burn_mac.0,
+                )
+                .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
+                let ceremony_id = cshake256_framed_32(
+                    b"QSAG.CLI.THRESHOLD.CEREMONY.V1",
+                    &[
+                        &seed.0,
+                        &pk_seed_bytes,
+                        &epoch.to_be_bytes(),
+                        &session.0,
+                        &message,
+                    ],
+                );
+                let epoch_seed_id = cshake256_framed_32(
+                    b"QSAG.CLI.THRESHOLD.EPOCH_SEED.V1",
+                    &[&seed.0, &pk_seed_bytes, &epoch.to_be_bytes()],
+                );
+                release(
+                    &threshold_public_bytes(&cached_pk),
+                    &[],
+                    Some(&mut base_context),
+                    &mut extra,
+                )?;
+                // Verify retained LedgerCheckpoint against durable_ledger, burn the epoch seed,
+                // and seal the ratcheted LedgerCheckpoint into the vault BEFORE DKG & signing.
+                let burned = burn_stateful_ceremony_with_checkpoint(
+                    secret_path,
+                    &mut secret,
+                    pk_seed_bytes,
                     &seed.0,
-                    &setup.pk.pk_seed_bytes,
-                    &epoch.to_be_bytes(),
-                    &session.0,
-                    &message,
-                ],
-            );
-            let epoch_seed_id = cshake256_framed_32(
-                b"QSAG.CLI.THRESHOLD.EPOCH_SEED.V1",
-                &[&seed.0, &setup.pk.pk_seed_bytes, &epoch.to_be_bytes()],
-            );
-            release(
-                &threshold_public_bytes(&setup.pk),
-                &[],
-                Some(&mut base_context),
-                &mut extra,
-            )?;
-            // Verify retained LedgerCheckpoint against durable_ledger, burn the epoch seed,
-            // and seal the ratcheted LedgerCheckpoint into the vault BEFORE threshold signing.
-            let burned = burn_stateful_ceremony_with_checkpoint(
-                secret_path,
-                &mut secret,
-                setup.pk.pk_seed_bytes,
-                &seed.0,
-                ceremony_id,
-                epoch_seed_id,
-                base_context,
-                anchor_cfg.as_ref(),
-                used_u64,
-            )?;
-            // Retain the recovered checkpoint even when this epoch cannot sign.
-            vault.reserve(secret_path, &mut secret)?;
-            if matches!(burned, SeedBurn::AlreadySpent) {
-                return Err(CliError::state(format!("epoch {epoch} was already spent")));
-            }
+                    ceremony_id,
+                    epoch_seed_id,
+                    base_context,
+                    anchor_cfg.as_ref(),
+                    used_u64,
+                )?;
+                // Retain the recovered checkpoint even when this epoch cannot sign.
+                vault.reserve(secret_path, &mut secret)?;
+                if matches!(burned, SeedBurn::AlreadySpent) {
+                    return Err(CliError::state(format!("epoch {epoch} was already spent")));
+                }
+                let setup =
+                    threshold_setup(&seed, parties, params, Some((cached_pk, cached_layers)))?;
+                (setup, journal)
+            } else {
+                let setup = threshold_setup(&seed, parties, params, None)?;
+                let journal = FsWalFtsEpochLatch::open(
+                    burn_journal_path(secret_path),
+                    setup.pk.pk_seed_bytes,
+                    burn_mac.0,
+                )
+                .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
+                let ceremony_id = cshake256_framed_32(
+                    b"QSAG.CLI.THRESHOLD.CEREMONY.V1",
+                    &[
+                        &seed.0,
+                        &setup.pk.pk_seed_bytes,
+                        &epoch.to_be_bytes(),
+                        &session.0,
+                        &message,
+                    ],
+                );
+                let epoch_seed_id = cshake256_framed_32(
+                    b"QSAG.CLI.THRESHOLD.EPOCH_SEED.V1",
+                    &[&seed.0, &setup.pk.pk_seed_bytes, &epoch.to_be_bytes()],
+                );
+                release(
+                    &threshold_public_bytes(&setup.pk),
+                    &[],
+                    Some(&mut base_context),
+                    &mut extra,
+                )?;
+                let burned = burn_stateful_ceremony_with_checkpoint(
+                    secret_path,
+                    &mut secret,
+                    setup.pk.pk_seed_bytes,
+                    &seed.0,
+                    ceremony_id,
+                    epoch_seed_id,
+                    base_context,
+                    anchor_cfg.as_ref(),
+                    used_u64,
+                )?;
+                vault.reserve(secret_path, &mut secret)?;
+                if matches!(burned, SeedBurn::AlreadySpent) {
+                    return Err(CliError::state(format!("epoch {epoch} was already spent")));
+                }
+                (setup, journal)
+            };
             let sig = setup
                 .threshold_sign(epoch as u32, &message, session.0, &mut journal)
                 .map_err(|e| match e {

@@ -1057,6 +1057,30 @@ const RLWE_ZKPOK_CHAL_MASK: u32 = (1u32 << RLWE_ZKPOK_CHAL_BITS) - 1;
 /// this modulus across `24` joint repetitions.
 const RLWE_ZKPOK_Z_BOUND: i16 = 3070;
 
+/// Per-branch squared Euclidean norm cap `‖z_s‖_2^2 + ‖z_e‖_2^2 <= 1_500_000_000`
+/// across the `2 * 1024 = 2048` coordinates of one `(z_s[rep], z_e[rep])` pair.
+///
+/// Under discrete Gaussian masks of parameter `2 * sigma^2 = 980_000` (`E[Z^2] = 489_887.2`,
+/// `E[‖z_s‖_2^2 + ‖z_e‖_2^2] = 1_003_288_988`), exact MGF Chernoff concentration gives per-pair
+/// tail `< 2^-138.02` (`< 2^-132.44 < 2^-128` union-bounded across all 48 branch pairs in 24
+/// repetitions). Forking two accepting transcripts under distinct signed monomials extracts a
+/// short Ring-SIS vector `(s_sis, e_sis)` with `‖s_sis‖_2^2 + ‖e_sis‖_2^2 <= 6_060_827_392`
+/// (`‖(s_sis, e_sis)‖_2 <= 77_851`, root Hermite factor `delta_0 = 1.003206`), refuting the
+/// `s = 1, e = centered(-A)` public-relation bypass (`E[‖centered(-A)‖_2^2] = 12_886_999_040`,
+/// tail `< 2^-310`).
+pub const RLWE_ZKPOK_PAIR_L2_SQ_BOUND: u64 = 1_500_000_000;
+
+#[inline]
+fn rlwe_pair_l2_sq(zs: &[i16; RLWE_N], ze: &[i16; RLWE_N]) -> u64 {
+    let mut acc = 0u64;
+    for i in 0..RLWE_N {
+        let vs = i64::from(zs[i]);
+        let ve = i64::from(ze[i]);
+        acc += (vs * vs) as u64 + (ve * ve) as u64;
+    }
+    acc
+}
+
 /// Constant-time HVZK OR-Sigma proof of short Ring-LWE witness knowledge for [`RlweOtReceiverMsg`]:
 /// proves knowledge of short `(s, e)` on EITHER `Y_0 = pk0` OR `Y_1 = pk0 + t_crs` under `a_crs`
 /// over the 11-bit pairwise-invertible signed-monomial challenge set $\pm X^k$ (`24` repetitions, `264` classical / `132` Grover bits).
@@ -1230,6 +1254,7 @@ fn gaussian_fraction_lt(a: [u64; 3], b: [u64; 3]) -> bool {
 // only for a high limb between the bounds: for an accepted proposal that has
 // probability below 49 / (2^64 * probability), under 2^-44 even at the edge of
 // the box, so the path taken is independent of the accepted value up to that.
+#[cfg(test)]
 fn sample_gaussian_box(rng: &mut PartyPrivateRng, response: bool) -> [i16; RLWE_N] {
     let half = if response {
         RLWE_ZKPOK_Z_BOUND
@@ -1287,6 +1312,7 @@ fn sample_gaussian_box(rng: &mut PartyPrivateRng, response: bool) -> [i16; RLWE_
 // loses <1 more. Adding 21 therefore gives a strict upper bound. Keep the sum
 // in u128 because it can exceed u64::MAX near probability one.
 // No table index, loop bound or branch depends on the proposal.
+#[cfg(test)]
 #[inline(always)]
 fn gaussian_exp_upper_bound(exponent: u64) -> u128 {
     let mut probability = u64::MAX;
@@ -1305,6 +1331,7 @@ fn gaussian_exp_upper_bound(exponent: u64) -> u128 {
 // the inequality. It falls short of that limb by fewer than 49 units (one per
 // truncated product, one per truncated factor). Fixed work, no table index or
 // branch on the proposal.
+#[cfg(test)]
 #[inline(always)]
 fn gaussian_exp_lower_bound(exponent: u64) -> u64 {
     let mut probability = u64::MAX;
@@ -1744,8 +1771,13 @@ impl RlweReceiverZkPok {
         let mut w_fakes = [RlwePoly::ZERO; RLWE_ZKPOK_REPS];
         for rep in 0..RLWE_ZKPOK_REPS {
             let u_fake = (rng.next_u64() as u32) & RLWE_ZKPOK_CHAL_MASK;
-            let zs_fake = g_sampler.sample_box(true);
-            let ze_fake = g_sampler.sample_box(true);
+            let (zs_fake, ze_fake) = loop {
+                let zs = g_sampler.sample_box(true);
+                let ze = g_sampler.sample_box(true);
+                if rlwe_pair_l2_sq(&zs, &ze) <= RLWE_ZKPOK_PAIR_L2_SQ_BOUND {
+                    break (zs, ze);
+                }
+            };
             let d_poly = poly_from_chal11(u_fake);
             let w_fake = signed_box_to_rlwe_poly(&zs_fake)
                 .mul_ntt(a_ntt)
@@ -1802,6 +1834,7 @@ impl RlweReceiverZkPok {
                 de = mul_chal11_signed_ct(&e_signed, u_real);
                 let ys = &mut ys_masks[rep];
                 let ye = &mut ye_masks[rep];
+                let mut pair_l2_sq = 0u64;
                 for i in 0..RLWE_N {
                     let dsi = i64::from(ds[i]);
                     let dei = i64::from(de[i]);
@@ -1809,9 +1842,13 @@ impl RlweReceiverZkPok {
                     log_ratio += 2 * i64::from(ye[i]) * dei + dei * dei;
                     ys[i] += ds[i];
                     ye[i] += de[i];
+                    let zsi = i64::from(ys[i]);
+                    let zei = i64::from(ye[i]);
+                    pair_l2_sq += (zsi * zsi) as u64 + (zei * zei) as u64;
                     in_bounds &= (((i32::from(ys[i]) + 3070) as u32) < 6140) as u32;
                     in_bounds &= (((i32::from(ye[i]) + 3070) as u32) < 6140) as u32;
                 }
+                in_bounds &= (pair_l2_sq <= RLWE_ZKPOK_PAIR_L2_SQ_BOUND) as u32;
             }
             let accept = gaussian_accept(log_ratio, rng);
             if black_box(in_bounds) == 1 && black_box(accept) {
@@ -1893,6 +1930,11 @@ impl RlweReceiverZkPok {
                         return false;
                     }
                 }
+            }
+            if rlwe_pair_l2_sq(&self.z_s0[rep], &self.z_e0[rep]) > RLWE_ZKPOK_PAIR_L2_SQ_BOUND
+                || rlwe_pair_l2_sq(&self.z_s1[rep], &self.z_e1[rep]) > RLWE_ZKPOK_PAIR_L2_SQ_BOUND
+            {
+                return false;
             }
             let zs0_p = signed_box_to_rlwe_poly(&self.z_s0[rep]);
             let ze0_p = signed_box_to_rlwe_poly(&self.z_e0[rep]);
@@ -14097,6 +14139,53 @@ mod hardening_regressions {
                     &mut sender
                 )
                 .is_err()
+            );
+            // Fiat-Shamir-consistent transcript for a large-L2 / small-Linf pair
+            // `s_bad = [1; 1024], e_bad = [-2000; 1024]`: every coordinate lies in `[-2000, 2000]`
+            // (`||z||_inf = 2000 < 3070`) and every ring + Fiat-Shamir equation holds with `w0 = w1 = 0`,
+            // yet `||z_s0||_2^2 + ||z_e0||_2^2 = 4_096_001_024 > RLWE_ZKPOK_PAIR_L2_SQ_BOUND` rejects it.
+            let a_ntt =
+                RlwePoly::from_crs_xof_with_coin(&secret.crs_coin, &sid, 0, 1, 0, 0).to_ntt();
+            let t_crs = RlwePoly::from_crs_xof_with_coin(&secret.crs_coin, &sid, 0, 1, index, 1);
+            let s_bad = [1i16; RLWE_N];
+            let e_bad = [-2000i16; RLWE_N];
+            let pk0_bad = signed_box_to_rlwe_poly(&s_bad)
+                .mul_ntt(&a_ntt)
+                .add(&signed_box_to_rlwe_poly(&e_bad));
+            let zero_coms = vec![(RlwePoly::ZERO, RlwePoly::ZERO); RLWE_ZKPOK_REPS];
+            let forged_chals = hash_rlwe_zkpok_joint_challenges(
+                &secret.crs_coin,
+                &sid,
+                0,
+                1,
+                index,
+                &pk0_bad,
+                &t_crs,
+                &zero_coms,
+            );
+            let mut l2_forged = RlweReceiverZkPok {
+                chal0: forged_chals,
+                chal1: [0u32; RLWE_ZKPOK_REPS],
+                z_s0: Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]),
+                z_e0: Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]),
+                z_s1: Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]),
+                z_e1: Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]),
+            };
+            for rep in 0..RLWE_ZKPOK_REPS {
+                l2_forged.z_s0[rep] = mul_chal11_signed_ct(&s_bad, forged_chals[rep]);
+                l2_forged.z_e0[rep] = mul_chal11_signed_ct(&e_bad, forged_chals[rep]);
+            }
+            assert!(
+                !l2_forged.verify(
+                    &secret.crs_coin,
+                    &sid,
+                    0,
+                    1,
+                    index,
+                    &a_ntt,
+                    &t_crs,
+                    &pk0_bad,
+                )
             );
             let response = try_rlwe_ot_transfer(
                 &sid,

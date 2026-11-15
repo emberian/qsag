@@ -70,18 +70,23 @@ impl fmt::Debug for HardenedChainStep {
 
 impl HardenedChainStep {
     pub fn new(
-        parent_key: [u8; 32],
-        parent_chain_code: [u8; 32],
+        mut parent_key: [u8; 32],
+        mut parent_chain_code: [u8; 32],
         hardened_child_index: u32,
     ) -> Option<Self> {
         if (hardened_child_index & 0x8000_0000) == 0 {
+            ct_zeroize_bytes(&mut parent_key);
+            ct_zeroize_bytes(&mut parent_chain_code);
             return None;
         }
-        Some(Self {
+        let step = Self {
             parent_key: RedactedSecret::new(parent_key),
             parent_chain_code: RedactedSecret::new(parent_chain_code),
             hardened_child_index,
-        })
+        };
+        ct_zeroize_bytes(&mut parent_key);
+        ct_zeroize_bytes(&mut parent_chain_code);
+        Some(step)
     }
 
     /// Perform standard BIP-32 hardened child derivation `HMAC-SHA512(c_par, 0x00 || k_par || BE32(idx))`.

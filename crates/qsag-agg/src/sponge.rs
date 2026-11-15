@@ -437,6 +437,79 @@ pub fn cshake256_from_midstate_16_x4(midstate: &[u64; 25], inputs: [&[u8]; 4]) -
     out
 }
 
+/// Evaluate 8 independent 32-byte `cSHAKE256` digests simultaneously from `midstate`
+/// using 8-way SIMD `qsag_asm::keccak_f1600_x8` (`AVX-512` ZMM / `2x AVX2` / `2x SHA3-NEON` / portable).
+#[inline]
+pub fn cshake256_from_midstate_32_x8(midstate: &[u64; 25], inputs: [&[u8]; 8]) -> [[u8; 32]; 8] {
+    let min_len = inputs.iter().map(|s| s.len()).min().unwrap_or(0);
+    let same_len = inputs.iter().all(|s| s.len() == min_len);
+
+    let mut st = qsag_asm::KeccakState8x([[0u64; 8]; 25]);
+    for (dst_lane, &ms_val) in st.0.iter_mut().zip(midstate.iter()) {
+        *dst_lane = [ms_val; 8];
+    }
+
+    let mut off = 0usize;
+    while off + SHAKE256_RATE <= min_len {
+        for (lane, st_lane) in st.0.iter_mut().enumerate().take(17) {
+            let b = off + 8 * lane;
+            for (dst, inp) in st_lane.iter_mut().zip(inputs.iter()) {
+                let s = &inp[b..b + 8];
+                *dst ^= u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+            }
+        }
+        qsag_asm::keccak_f1600_x8(&mut st);
+        off += SHAKE256_RATE;
+    }
+
+    if !same_len {
+        let mut out = [[0u8; 32]; 8];
+        for (k, inp) in inputs.iter().enumerate() {
+            let mut lane_state = [0u64; 25];
+            for (lane, st_lane) in st.0.iter().enumerate() {
+                lane_state[lane] = st_lane[k];
+            }
+            absorb_and_squeeze_from_state(lane_state, &inp[off..], 0x04, &mut out[k]);
+        }
+        return out;
+    }
+
+    let rem = min_len - off;
+    let mut blocks = [[0u8; SHAKE256_RATE]; 8];
+    for (blk, inp) in blocks.iter_mut().zip(inputs.iter()) {
+        blk[..rem].copy_from_slice(&inp[off..]);
+        blk[rem] ^= 0x04;
+        blk[SHAKE256_RATE - 1] ^= 0x80;
+    }
+    for (lane, st_lane) in st.0.iter_mut().enumerate().take(17) {
+        let b = 8 * lane;
+        for (dst, blk) in st_lane.iter_mut().zip(blocks.iter()) {
+            let s = &blk[b..b + 8];
+            *dst ^= u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+        }
+    }
+    qsag_asm::keccak_f1600_x8(&mut st);
+
+    let mut out = [[0u8; 32]; 8];
+    for (lane, st_lane) in st.0.iter().enumerate().take(4) {
+        for (dst, &word) in out.iter_mut().zip(st_lane.iter()) {
+            dst[8 * lane..8 * (lane + 1)].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Evaluate 8 independent 16-byte `cSHAKE256` digests simultaneously from `midstate`.
+#[inline]
+pub fn cshake256_from_midstate_16_x8(midstate: &[u64; 25], inputs: [&[u8]; 8]) -> [[u8; 16]; 8] {
+    let full = cshake256_from_midstate_32_x8(midstate, inputs);
+    let mut out = [[0u8; 16]; 8];
+    for (dst, src) in out.iter_mut().zip(full.iter()) {
+        dst.copy_from_slice(&src[..16]);
+    }
+    out
+}
+
 /// Register-only 4-way Proof-of-Work `cSHAKE256(POW_CUSTOM, chal || (base_nonce + k))` (`k in 0..4`),
 /// returning the low 64-bit little-endian output word of each of the 4 candidate nonces.
 #[inline]
@@ -465,6 +538,31 @@ pub fn cshake256_pow_u64_x4(midstate: &[u64; 25], chal: &[u8; 32], base_nonce: u
         st.0[16][k] ^= 0x8000_0000_0000_0000;
     }
     qsag_asm::keccak_f1600_x4(&mut st);
+    st.0[0]
+}
+
+/// Register-only 8-way Proof-of-Work `cSHAKE256(POW_CUSTOM, chal || (base_nonce + k))` (`k in 0..8`),
+/// returning the low 64-bit little-endian output word of each of the 8 candidate nonces.
+#[inline]
+pub fn cshake256_pow_u64_x8(midstate: &[u64; 25], chal: &[u8; 32], base_nonce: u64) -> [u64; 8] {
+    let mut st = qsag_asm::KeccakState8x([[0u64; 8]; 25]);
+    for (dst_lane, &ms_val) in st.0.iter_mut().zip(midstate.iter()) {
+        *dst_lane = [ms_val; 8];
+    }
+    for lane in 0..4 {
+        let s = &chal[8 * lane..8 * (lane + 1)];
+        let w = u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+        for k in 0..8 {
+            st.0[lane][k] ^= w;
+        }
+    }
+    for k in 0..8 {
+        st.0[4][k] ^= base_nonce.wrapping_add(k as u64);
+        // Byte 40 is byte 0 of lane 5 (`0x04`); byte 135 is byte 7 of lane 16 (`0x80`).
+        st.0[5][k] ^= 0x04;
+        st.0[16][k] ^= 0x8000_0000_0000_0000;
+    }
+    qsag_asm::keccak_f1600_x8(&mut st);
     st.0[0]
 }
 

@@ -3572,6 +3572,62 @@ def rssThresholdSignMachine
       (RssSignPublicAbortView × Option ThresholdSignSig) :=
   PartyMachine.ofOutcome (rssThresholdSignStep chalHash sampleInBall)
 
+/-- An attempt that passes the replay check, carries the exact products and satisfies the
+    rejection predicate is accepted: the machine burns the attempt and releases the signature.
+    Stated over arbitrary `st` and `inp`, so a concrete witness applies it instead of unfolding
+    the transition on concrete polynomials. -/
+theorem rssThresholdSignMachine_step_accept
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (hEpoch : inp.epoch = st.epoch) (hAttempt : inp.attempt = st.nextAttempt)
+    (hProducts : inp.products = rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets) :
+    let s1 := rssSumVec4List st.s1Subsets
+    let s2 := rssSumVec4List st.s2Subsets
+    let y := rssSumVec4List inp.ySubsets
+    let t0 := power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2)
+    let w := matVecMul4 st.A y
+    let w1 := highBitsVec4 w
+    let cTilde := chalHash inp.mu w1
+    let c := sampleInBall cTilde
+    let ct0 := mulPolyVec4 c t0
+    let z := addVec4 y (mulPolyVec4 c s1)
+    let u := subVec4 w (mulPolyVec4 c s2)
+    let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
+    (decide (infNormVec4 ct0 < mldsa44Gamma2) &&
+     decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
+     decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
+     decide (hintWeightVec4 h ≤ mldsa44Omega)) = true →
+    (rssThresholdSignMachine chalHash sampleInBall).step st inp =
+      some ({ st with nextAttempt := st.nextAttempt + 1 },
+        ({ openedMaskedW := addVec4 w inp.maskW,
+           openedW1 := w1,
+           openedMaskedZ := addVec4 z inp.maskZ,
+           openedMaskedLow := addVec4 u inp.maskLow,
+           rejectBit := false,
+           usedAttempt := inp.attempt },
+         some { cTilde := cTilde, z := z, h := h, usedAttempt := inp.attempt })) := by
+  intro s1 s2 y t0 w w1 cTilde c ct0 z u h hAccept
+  have hRun : rssThresholdSignStep chalHash sampleInBall st inp =
+      .ok { st with nextAttempt := st.nextAttempt + 1 }
+        ({ openedMaskedW := addVec4 w inp.maskW,
+           openedW1 := w1,
+           openedMaskedZ := addVec4 z inp.maskZ,
+           openedMaskedLow := addVec4 u inp.maskLow,
+           rejectBit := false,
+           usedAttempt := inp.attempt },
+         some { cTilde := cTilde, z := z, h := h, usedAttempt := inp.attempt }) := by
+    unfold rssThresholdSignStep rssSignCore
+    rw [decide_eq_true (⟨hEpoch, hAttempt⟩ : inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt)]
+    rw [(rssProductsValid_eq_true_iff chalHash sampleInBall st inp).mpr hProducts]
+    rw [hProducts]
+    dsimp only [rssComputeProducts]
+    exact mkRssSignAttemptOutcome_true
+      { st with nextAttempt := st.nextAttempt + 1 } inp.attempt
+      cTilde w z u inp.maskW inp.maskZ inp.maskLow w1 h hAccept
+  dsimp only [rssThresholdSignMachine, PartyMachine.ofOutcome]
+  rw [hRun]
+
 private theorem rssThresholdSignStep_ok_meta
     {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
     {sampleInBall : List UInt8 → Poly256}
@@ -3983,25 +4039,8 @@ theorem threshold_mldsa_rss_inhabited :
            some { cTilde := cTildeAcc,
                   z := zAcc,
                   h := hintAcc,
-                  usedAttempt := inpAcc.attempt })) := by
-    dsimp only [rssThresholdSignMachine, PartyMachine.ofOutcome]
-    have hRun : rssThresholdSignStep chalHash sampleInBall st inpAcc =
-        .ok { st with nextAttempt := st.nextAttempt + 1 }
-          ({ openedMaskedW := addVec4 wAcc inpAcc.maskW,
-             openedW1 := w1Acc,
-             openedMaskedZ := addVec4 zAcc inpAcc.maskZ,
-             openedMaskedLow := addVec4 uAcc inpAcc.maskLow,
-             rejectBit := false,
-             usedAttempt := inpAcc.attempt },
-           some { cTilde := cTildeAcc, z := zAcc, h := hintAcc, usedAttempt := inpAcc.attempt }) := by
-      unfold rssThresholdSignStep rssSignCore
-      rw [decide_eq_true (⟨rfl, rfl⟩ : inpAcc.epoch = st.epoch ∧ inpAcc.attempt = st.nextAttempt)]
-      rw [(rssProductsValid_eq_true_iff chalHash sampleInBall st inpAcc).mpr rfl]
-      dsimp only [inpAcc, rssComputeProducts]
-      exact mkRssSignAttemptOutcome_true
-        { st with nextAttempt := st.nextAttempt + 1 } inpAcc.attempt
-        cTildeAcc wAcc zAcc uAcc inpAcc.maskW inpAcc.maskZ inpAcc.maskLow w1Acc hintAcc hAccFull
-    rw [hRun]
+                  usedAttempt := inpAcc.attempt })) :=
+    rssThresholdSignMachine_step_accept chalHash sampleInBall st inpAcc rfl rfl rfl hAccFull
   obtain ⟨hRejFalse, hVer⟩ :=
     (threshold_mldsa_rss_abort_leakage_and_completeness chalHash sampleInBall).2.2 _ _ _ _ _ hStepAcc
   have hNz : rssSumVec4List st.s1Subsets ≠ rssZeroVec4 := by
@@ -11918,11 +11957,57 @@ theorem cosetLde204_ntt (d : CosetDomain204) (p : Poly256)
         evalPoly204 (PolyTree.toList p) (Fq204.mul d.shift (Fq204.pow d.root i)))) := by
   simp only [cosetLde204, h, ↓reduceIte, fips204InvNtt_ntt]
 
+/-- No power `ζ^d` with `0 < d < 512` has residue `1`: one modular power per exponent. -/
+private theorem mldsaZeta_pow_ne_one_check :
+    (List.range 512).all (fun d => d == 0 || 1753 ^ d % mldsaQ != 1) = true := by
+  decide +kernel
+
+/-- The first 512 powers of `ζ = 1753` are pairwise distinct: `ζ^i = ζ^j` with `i < j < 512`
+    gives `ζ^(j-i) = 1` after cancelling `ζ^i` against `ζ^(512-i)`. -/
+private theorem mldsaZeta_pow_ne_of_lt {i j : Nat} (hij : i < j) (hj : j < 512) :
+    Fq204.pow mldsaZeta i ≠ Fq204.pow mldsaZeta j := by
+  intro hEq
+  have hInv : Fq204.mul (Fq204.pow mldsaZeta (512 - i)) (Fq204.pow mldsaZeta i) = Fq204.one := by
+    rw [← Fq204.pow_add, Nat.sub_add_cancel (Nat.le_of_lt (Nat.lt_trans hij hj)),
+      mldsaZeta_pow512_eq_one]
+  have hOne : Fq204.pow mldsaZeta (j - i) = Fq204.one := by
+    rw [← Fq204.one_mul (Fq204.pow mldsaZeta (j - i)), ← hInv, Fq204.mul_assoc, ← Fq204.pow_add,
+      Nat.add_sub_of_le (Nat.le_of_lt hij), ← hEq, hInv]
+  have hVal : 1753 ^ (j - i) % mldsaQ = 1 := by
+    have h := congrArg Fq204.val hOne
+    rw [Fq204.pow_val] at h
+    exact h
+  have hChk : ((j - i) == 0 || 1753 ^ (j - i) % mldsaQ != 1) = true :=
+    List.all_eq_true.mp mldsaZeta_pow_ne_one_check (j - i)
+      (List.mem_range.mpr (Nat.lt_of_le_of_lt (Nat.sub_le j i) hj))
+  rcases Bool.or_eq_true_iff.mp hChk with h0 | hne
+  · exact Nat.sub_ne_zero_of_lt hij (beq_iff_eq.mp h0)
+  · exact bne_iff_ne.mp hne hVal
+
+private theorem mldsaZeta_pow_injOn {i j : Nat} (hi : i < 512) (hj : j < 512) (hne : i ≠ j) :
+    Fq204.pow mldsaZeta i ≠ Fq204.pow mldsaZeta j := by
+  rcases Nat.lt_or_gt_of_ne hne with h | h
+  · exact mldsaZeta_pow_ne_of_lt h hj
+  · exact fun hEq => mldsaZeta_pow_ne_of_lt h hi hEq.symm
+
+/-- The four validity conditions, stated as propositions about an arbitrary domain. -/
+theorem cosetDomain204Valid_of {d : CosetDomain204}
+    (hBlowup : 0 < d.blowup) (hShift : d.shift ≠ Fq204.zero)
+    (hRoot : Fq204.pow d.root (256 * d.blowup) = Fq204.one)
+    (hNodup : ((List.range (256 * d.blowup)).map (Fq204.pow d.root)).Nodup) :
+    cosetDomain204Valid d = true := by
+  unfold cosetDomain204Valid
+  rw [decide_eq_true hBlowup, decide_eq_true hShift, decide_eq_true hRoot, decide_eq_true hNodup]
+  rfl
+
 /-- A valid blowup-2 domain exists: the 512th root of unity `1753` with coset shift `7`.
     All 512 domain points are distinct. -/
 theorem cosetDomain204_inhabited :
-    cosetDomain204Valid ⟨2, Fq204.ofNat 7, mldsaZeta⟩ = true := by
-  decide +kernel
+    cosetDomain204Valid ⟨2, Fq204.ofNat 7, mldsaZeta⟩ = true :=
+  cosetDomain204Valid_of (by decide) (by decide) mldsaZeta_pow512_eq_one
+    (List.pairwise_map.mpr (List.Pairwise.imp_of_mem
+      (fun hi hj hne => mldsaZeta_pow_injOn (List.mem_range.mp hi) (List.mem_range.mp hj) hne)
+      (Constructive.nodup_range 512)))
 
 theorem tooth_cosetLde204_zero_shift (d : CosetDomain204) (p : Poly256)
     (h : d.shift = Fq204.zero) : cosetLde204 d p = none := by

@@ -707,8 +707,151 @@ theorem matrix_second_moment_toy :
 
 theorem witness_single_row_markov : ∃ k : Nat, k ≤ 960 := ⟨60, by decide⟩
 
+/-! ## 7. Depth-14 (`N = 16384`) Second-Moment Laws and Regular-Noise Entropy Boundary -/
+
+private theorem kernelPowSum_depth14_three_aux :
+    kernelPowSum (2 ^ 14) 3 = 236118330007544266752 := by
+  rw [kernelPowSum_pow2]; decide +kernel
+
+private theorem kernelPowSum_depth14_four_aux :
+    kernelPowSum (2 ^ 14) 4 = 3868562718843605266464768 := by
+  rw [kernelPowSum_pow2]; decide +kernel
+
+private theorem kernelPowSum_depth14_six_aux :
+    kernelPowSum (2 ^ 14) 6 = 741756732762029982447477945532416 := by
+  rw [kernelPowSum_pow2]; decide +kernel
+
+theorem kernelPowSum_depth14_three : kernelPowSum 16384 3 = 236118330007544266752 :=
+  kernelPowSum_depth14_three_aux
+
+theorem kernelPowSum_depth14_four : kernelPowSum 16384 4 = 3868562718843605266464768 :=
+  kernelPowSum_depth14_four_aux
+
+theorem kernelPowSum_depth14_six :
+    kernelPowSum 16384 6 = 741756732762029982447477945532416 :=
+  kernelPowSum_depth14_six_aux
+
+/-- At depth 14 (`N = 2^14 = 16384`, `T = 64`), mean squared single-row bias over uniform taps
+is below `2^-148`. -/
+theorem denseDepth14_single_row_second_moment :
+    matrixSum 16384 3 64 (fun gs => noiseSignedSum 16384 gs false * noiseSignedSum 16384 gs false) *
+        2 ^ 148 ≤ (((16384 ^ 3) ^ 64 : Nat) : Int) * (16384 ^ 64) ^ 2 := by
+  rw [matrix_second_moment, kernelPowSum_depth14_three]; decide +kernel
+
+/-- At depth 14 (`N = 16384`, `T = 64`), mean squared two-row XOR bias (`m = 6`) is below `2^-179`. -/
+theorem denseDepth14_two_row_second_moment :
+    matrixSum 16384 6 64 (fun gs => noiseSignedSum 16384 gs false * noiseSignedSum 16384 gs false) *
+        2 ^ 179 ≤ (((16384 ^ 6) ^ 64 : Nat) : Int) * (16384 ^ 64) ^ 2 := by
+  rw [matrix_second_moment, kernelPowSum_depth14_six]; decide +kernel
+
+/-- For every tap count `4 + k` per tree at depth 14 (`N = 16384`, `T = 64`), the mean squared
+bias over uniform taps is below `2^-148`. -/
+theorem denseDepth14_tap_count_ge_four_second_moment (k : Nat) :
+    matrixSum 16384 (4 + k) 64
+        (fun gs => noiseSignedSum 16384 gs false * noiseSignedSum 16384 gs false) * 2 ^ 148 ≤
+      ((16384 : Int) ^ k) ^ 64 * 2 ^ 5376 := by
+  rw [matrix_second_moment]
+  have hK := kernelPowSum_tail_le 16384 k
+  rw [kernelPowSum_depth14_four] at hK
+  have hPow := (int_pow_le_pow_left (kernelPowSum_nonneg 16384 (4 + k)) hK 64).1
+  have hNum : (3868562718843605266464768 : Int) ^ 64 * 2 ^ 148 ≤ 2 ^ 5376 := by decide +kernel
+  have hN : ((16384 : Nat) : Int) = 16384 := rfl
+  rw [hN, Int.mul_pow] at hPow
+  have hTwo : (0 : Int) ≤ 2 ^ 148 := Int.le_of_lt (Int.pow_pos (by decide : (0 : Int) < 2))
+  have hBase : (0 : Int) ≤ (16384 ^ k) ^ 64 :=
+    Int.le_of_lt (Int.pow_pos (Int.pow_pos (by decide : (0 : Int) < 16384)))
+  refine Int.le_trans (Int.mul_le_mul_of_nonneg_right hPow hTwo) ?_
+  rw [Int.mul_assoc]
+  exact Int.mul_le_mul_of_nonneg_left hNum hBase
+
+/-- At depth 14 (`2^2688` single-row tap choices, `2^896` regular-noise tuples), at most a
+`2^(2k-148)` fraction of tap choices has bias at least `2^-k`. -/
+theorem denseDepth14_single_row_markov (k : Nat) (hk : k ≤ 896) :
+    largeBiasCount 16384 3 64 (2 ^ (1792 - 2 * k)) * 2 ^ 148 ≤ 2 ^ (2 * k) * 2 ^ 2688 := by
+  have hM := largeBiasCount_markov 16384 3 64 (2 ^ (1792 - 2 * k))
+  rw [kernelPowSum_depth14_three] at hM
+  have hBound : (236118330007544266752 : Int) ^ 64 * 2 ^ 148 ≤ 2 ^ 4480 := by decide +kernel
+  have hPos : (0 : Int) < 2 ^ (1792 - 2 * k) := Int.pow_pos (by decide : (0 : Int) < 2)
+  have hSplit : (2 : Int) ^ 4480 = 2 ^ (1792 - 2 * k) * (2 ^ (2 * k) * 2 ^ 2688) := by
+    rw [← Int.pow_add, ← Int.pow_add]
+    exact congrArg (fun e : Nat => (2 : Int) ^ e) (by omega : 4480 = 1792 - 2 * k + (2 * k + 2688))
+  have hChain : 2 ^ (1792 - 2 * k) * (largeBiasCount 16384 3 64 (2 ^ (1792 - 2 * k)) * 2 ^ 148) ≤
+      2 ^ (1792 - 2 * k) * (2 ^ (2 * k) * 2 ^ 2688) := by
+    rw [← hSplit, ← Int.mul_assoc]
+    exact Int.le_trans (Int.mul_le_mul_of_nonneg_right hM (Int.le_of_lt (Int.pow_pos (by decide : (0 : Int) < 2)))) hBound
+  exact Int.le_of_mul_le_mul_left hChain hPos
+
+/-- Count of distinct elements in `u` hit by an expansion image `img`. -/
+def outputSupportHits {β : Type} [DecidableEq β] (img : List β) : List β → Nat
+  | [] => 0
+  | y :: rest => (if y ∈ img then 1 else 0) + outputSupportHits img rest
+
+private theorem outputSupportHits_zero {β : Type} [DecidableEq β] :
+    ∀ u : List β, outputSupportHits [] u = 0
+  | [] => rfl
+  | _ :: rest => by simp [outputSupportHits, outputSupportHits_zero rest]
+
+private theorem outputSupportHits_not_mem {β : Type} [DecidableEq β] (a : β) (r : List β) :
+    ∀ (u : List β), a ∉ u → outputSupportHits (a :: r) u = outputSupportHits r u
+  | [], _ => rfl
+  | y :: rest, hNot => by
+    have hya : y ≠ a := fun h => hNot (h ▸ List.Mem.head rest)
+    have hRest : a ∉ rest := fun h => hNot (List.Mem.tail y h)
+    unfold outputSupportHits
+    simp [List.mem_cons, hya, outputSupportHits_not_mem a r rest hRest]
+
+private theorem outputSupportHits_cons_le {β : Type} [DecidableEq β] (a : β) (r : List β) :
+    ∀ (u : List β), u.Nodup → outputSupportHits (a :: r) u ≤ 1 + outputSupportHits r u
+  | [], _ => by simp [outputSupportHits]
+  | y :: rest, hNd => by
+    rw [List.nodup_cons] at hNd
+    obtain ⟨hyNotIn, hRestNd⟩ := hNd
+    unfold outputSupportHits
+    if hya : y = a then
+      subst hya
+      rw [outputSupportHits_not_mem y r rest hyNotIn]
+      simp [List.mem_cons]
+    else
+      have ih := outputSupportHits_cons_le a r rest hRestNd
+      simp [List.mem_cons, hya]
+      omega
+
+/-- Any deterministic expansion `expand` of a regular-noise configuration list `configs` hits
+every image element on real inputs while covering at most `configs.length` elements of any
+duplicate-free output enumeration `u`. -/
+theorem regularNoise_support_hits_le_config_count {α β : Type} [DecidableEq β]
+    (expand : α → β) (configs : List α) (u : List β) (hNd : u.Nodup) :
+    (∀ cfg ∈ configs, expand cfg ∈ configs.map expand) ∧
+    outputSupportHits (configs.map expand) u ≤ configs.length := by
+  refine ⟨fun cfg hMem => List.mem_map_of_mem hMem, ?_⟩
+  induction configs with
+  | nil => simp [outputSupportHits_zero]
+  | cons c cs ih =>
+    simp only [List.map_cons, List.length_cons]
+    have hStep := outputSupportHits_cons_le (expand c) (cs.map expand) u hNd
+    omega
+
+/-- `#tooth` Regular noise over 64 trees of depth 15 has `2^960` configurations (`2^896` at depth 14),
+so for any output space larger than `2^960` (such as the `139,264`-bit expanded vector), no
+deterministic tap matrix can cover the full output space; security beyond `960` bits necessarily
+rests on computational Dual-LPN hardness rather than unbounded all-subset statistical small bias. -/
+theorem tooth_densePcg_regularNoise_entropy_deficit {α β : Type} [DecidableEq β]
+    (expand : α → β) (configs : List α) (u : List β)
+    (hCfg : configs.length ≤ (2 : Nat) ^ (15 * 64))
+    (hUniv : (2 : Nat) ^ (15 * 64) < u.length) (hNd : u.Nodup) :
+    outputSupportHits (configs.map expand) u ≠ u.length := by
+  have hLe := (regularNoise_support_hits_le_config_count expand configs u hNd).2
+  exact Nat.ne_of_lt (Nat.lt_of_le_of_lt (Nat.le_trans hLe hCfg) hUniv)
+
+theorem densePcg_regularNoise_entropy_exponents :
+    15 * 64 = 960 ∧ 14 * 64 = 896 ∧
+    960 + 138304 = 139264 ∧ 896 + 138368 = 139264 := by
+  decide
+
 end Qsag
 end
+
+#tooth_pair Qsag.regularNoise_support_hits_le_config_count vs Qsag.tooth_densePcg_regularNoise_entropy_deficit
 
 #verify_constructive Qsag.threeTap_weight Qsag.noiseSignedSum_eq Qsag.regularRates_parityBias_eq
   Qsag.row_signed_count_natAbs Qsag.prodRow0_bias_bracket Qsag.prodRow0_balanced_tree_count
@@ -718,3 +861,8 @@ end
   Qsag.denseDepth15_single_row_second_moment Qsag.denseDepth15_two_row_second_moment
   Qsag.denseDepth15_single_row_markov Qsag.kernelPowSum_tail_le Qsag.kernelPowSum_nonneg
   Qsag.denseDepth15_tap_count_ge_four_second_moment Qsag.threeTap_constant_tree Qsag.matrix_second_moment_toy
+  Qsag.kernelPowSum_depth14_three Qsag.kernelPowSum_depth14_four Qsag.kernelPowSum_depth14_six
+  Qsag.denseDepth14_single_row_second_moment Qsag.denseDepth14_two_row_second_moment
+  Qsag.denseDepth14_tap_count_ge_four_second_moment Qsag.denseDepth14_single_row_markov
+  Qsag.regularNoise_support_hits_le_config_count Qsag.tooth_densePcg_regularNoise_entropy_deficit
+  Qsag.densePcg_regularNoise_entropy_exponents

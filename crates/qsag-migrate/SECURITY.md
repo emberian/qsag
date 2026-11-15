@@ -220,19 +220,18 @@ is transmitted:
    transcript agreement and commitment openings in constant time, and derives
    public coins via `QSAG.OUTER.COIN.DERIVE.V1`. No single rushing custodian can
    bias challenges after sending multiplication shares.
-2. **64-lane Boolean `AND` verification (`< 2^-127.99` per flush):** Up to `32,768`
-   bitsliced 64-lane `AND` triples per flush are embedded into
-   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`16`-gate blocks, `128`
-   gates per super-block via constant-time butterfly transpose and
-   `VPCLMULQDQ`/`PCLMULQDQ` accumulation under a uniform `GF(2^128)` super-block
-   combiner, packed `64` gates per `Bs256` quad) and checked by **two independent
-   lockstep** Arity-2 BBCGGI19 inner-product instances plus PRSS-masked non-zero
-   base-case sacrifice (`r_b in GF(2^128)^*`). Per-flush false-acceptance
-   probability is `< 2^-128 + (54 / (2^128 - 1))^2 < 2^-127.99`: `2^-128` for
-   the super-block combiner, and `54 / (2^128 - 1)` for each of the two
-   instances. The degree budget is `30 + 2*11 + 2 = 54`: the initial polynomial,
-   eleven binary folds over at most `2,048` blocks, and base sacrifice
-   (`BIT_CHECK_DEGREE`, asserted at compile time).
+2. **64-lane Boolean `AND` verification (`< 2^-244` per flush):** Up to `262,144`
+   bitsliced 64-lane `AND` words (`4,096` groups of `64` words) per flush are
+   embedded into `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` via `6`
+   packed ternary sumcheck rounds (`729` combinations), `12` group + `6` lane
+   halving folds (`VPCLMULQDQ`/`PCLMULQDQ` / `PMULL`), and **two independent**
+   locked-pair BBCGGI19 inner-product passes with PRSS-masked non-zero base-case
+   sacrifices (`r_b in GF(2^128)^*`). Per-flush false-acceptance probability is
+   `< (63 / (2^128 - 1))^2 < 2^-244` (`> 122` bits generic Grover): the error
+   numerator per pass is `6 + 1 + 6*3 + 2*(12 + 6) + 2 = 63` (`6` word-offset
+   weights plus `1` unstructured group weight, `6` ternary sumcheck rounds,
+   `18` group/lane halving folds, and base sacrifice; `BIT_CHECK_NUMERATOR`,
+   asserted at compile time).
    Byte tables contain shares but are indexed only by public challenge masks;
    their storage is wiped with the rest of the verification scratch.
 3. **Prime-field multiplication verification (`< 2^-186` per flush):** Up to
@@ -388,13 +387,10 @@ not establish the open production privacy or FS/QROM refinements. The unified
 proof census and remaining boundaries are tracked in
 [the convergence record](../../docs/CONVERGENCE_STATUS.md).
 
-The subsequent gadget-storage update adds two zeroization tests. All 41 unit
-tests and the doctest pass in separately bounded Linux runs; the complete
-Bitcoin and Ed25519 ceremonies take 321.00 s and 234.75 s respectively with
-host-native release compilation. These individual results do not establish a
-single-command 600-second suite result. Exact commands, resource measurements,
-and the final aggregate outcome are recorded in
-[the gadget-storage verification record](WAVE4U_VERIFICATION.md).
+The subsequent gadget-storage update adds two zeroization tests. All unit
+tests and the compile-fail doctest pass in host-native release runs; summary
+verification status and remaining boundaries are tracked in
+[the convergence record](../../docs/CONVERGENCE_STATUS.md).
 
 Unit and adversarial integration tests verify:
 

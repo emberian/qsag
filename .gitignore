@@ -17,6 +17,8 @@
 **/perf.data*
 **/benchmarks/
 aeneas/lean/*-evidence/
+aeneas/lean-whir/*-evidence/
+**/*.llbc
 lean/fixtures/*-elf/
 lean/fixtures/*validation*.json
 lean/Qsag/_Repl_*.lean

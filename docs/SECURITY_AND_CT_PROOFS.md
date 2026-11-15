@@ -129,7 +129,8 @@ benchmarks do not certify this deployment boundary; MAC framing is not encryptio
 
 Migration now implements active pre-open Boolean and prime-field multiplication
 checks, including a cross-batch barrier, for three-custodian secp256k1/Taproot/
-Ed25519 ownership proofs. Its live ZKBoo default is 438 repetitions, giving interactive error `(2/3)^438 < 2^-256` and nominal generic Grover search exponent 128.1068. Per flush, the large-prime pre-open multiplication checks use `<=35/(p-1)<2^-249`; the cubic-Goldilocks checks use `<=35/(p^3-1)<2^-186`. These are separate field-check errors, not a classical/quantum pair. Full FS/QROM extraction remains a separate reduction.
+Ed25519 ownership proofs, alongside standalone 438-repetition ZKBoo modules for
+Pallas (Orchard/RedPallas) and BLS12-381 (G1). Its live ZKBoo default is 438 repetitions, giving interactive error `(2/3)^438 < 2^-256` and nominal generic Grover search exponent 128.1068. Per flush, the packed Boolean `AND` checks use `<(63/(2^128-1))^2<2^-244`, the large-prime pre-open multiplication checks use `<=35/(p-1)<2^-249`, and the cubic-Goldilocks checks use `<=35/(p^3-1)<2^-186`. Those two field-check numbers are separate prime-domain errors, not a classical/quantum pair. Full FS/QROM extraction remains a separate reduction.
 Threshold ML-DSA has a $2t-1$ active quorum and rejection-transcript assumptions;
 six-limb BlindVC's 438-repetition Quantum128 profile likewise needs its FS reduction.
 
@@ -185,7 +186,7 @@ Source inspection dated 2026-11-14. This map names statements and runtime consum
 | WHIR query ladder | Johnson classical `(129,65,44,33)`; default Johnson QROM `ceil(512/log₂ B)+2=(258,130,88,66)` at B=(4,16,64,256). Stage work is 16 bits under `QSAG.PCS.POW2/v1`; `maxQueryCap=512`. The 272/136 round bits are nominal query-plus-work search accounting. Runtime CWYZ witness tables cover the QROM regime; classical witness rows for nv=20/24 are Lean-only. | `pcs.rs`, `sponge.rs`; `Aggregation.lean` |
 | Multi-round budget | `multiRoundFsQromCompilerBound` is <2^-128 for Q+1≤2^40, five 256-bit Merkle roots and the deployed 24-variable geometry. Aggregated RBR numerators are `[4182,1644,824,489,792]/p⁴`, sum 7931/p⁴. The same expression fails at 2^41. Hem transcript flip bounds and quantum commitment extraction are premises still to instantiate. | `MultiRoundFsQrom.lean`: `multiRoundFsQrom_budget_bound`, `tooth_multiRoundFsQrom_budget_fails_at_2pow41` |
 | WOTS+C | 128 base-four digits sum to 192. The accepted language has `[x^192](1+x+x²+x³)^128` = 3647133497298879801227908259470154861817607767728241841601287895307331452700 elements (≈251.01137 bits); uniform first-success grinding averages ≈31.7488 trials. Encoding width alone does not give 256 bits of accepted-language entropy. | `tsw_baggy.rs`; `HashSigs.lean` |
-| Migration | `MIT_REPETITIONS=438`; `(2/3)^438≈2^-256.2136`. Active multiplication errors are <2^-249 over the large primes and <2^-186 over cubic Goldilocks. No one of these numbers is a complete FS/QROM acceptance theorem. | `zk_engine.rs`; `outer_mpc.rs` |
+| Migration | `MIT_REPETITIONS=438`; `(2/3)^438≈2^-256.2136`. Active multiplication errors per flush are `<(63/(2^128-1))^2<2^-244` for packed Boolean `AND` (`BIT_CHECK_NUMERATOR=63`), `<2^-249` over the large primes, and `<2^-186` over cubic Goldilocks. No one of these numbers is a complete FS/QROM acceptance theorem. | `zk_engine.rs`; `outer_mpc.rs`; `pallas.rs`; `bls12_381.rs` |
 
 `hem_johnson_qrom_witnesses_cover_every_canonical_stage` checks canonical nv=2…24 stage coverage and equality of the used-row/table counts. It establishes the stated numerical side conditions for the deployed QROM table; the underlying decomposition theorem remains the separate obligation below.
 
@@ -197,7 +198,7 @@ Constructive Guruswami–Sudan interpolation produces nonzero Hasse-vanishing wi
 
 | Production consumer | Executed extracted interface | Proof surface |
 | --- | --- | --- |
-| `qsag-core`, `qsag-quorum` | `VerifiedWotsC256Guard`, `ct_eq_bytes32`, `validate_belt_quorum_config` | `PantsAndQuorumGuards.lean`, `MultiTurnMediationAndReachability.lean` |
+| `qsag-core`, `qsag-quorum` | `VerifiedWotsC256Guard`, `VerifiedBeltQuorumGuard` (`record_custodian_ack`, `authorize_release`), `ct_eq_bytes32`, `validate_belt_quorum_config` | `PantsAndQuorumGuards.lean`, `MultiTurnMediationAndReachability.lean` |
 | `qsag-policy` | `checked_velocity_spend`, `StatefulVelocityGuard::authorize_spend` | `PolicyAndAddr.lean`, multi-turn reachability |
 | `qsag-agg` | `cwyz_duet_fold`, `verify_ood_pin_eq`, `verify_stage_pow_mask`, `verify_ext4_univariate_at_base_pin` | `aeneas/lean-whir/QsagWhirVerified/Proofs.lean` |
 

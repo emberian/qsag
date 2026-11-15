@@ -345,6 +345,42 @@ def main : IO Unit := do
   let pkWire  := slhPk.pkSeed ++ slhPk.pkRoot
   let skWire  := slhSk.skSeed ++ slhSk.skPrf ++ slhPk.pkSeed ++ slhPk.pkRoot
 
+  -- 7. NIST FIPS 205 SLH-DSA-SHAKE-128s (`m = 30 = 21 + 7 + 2`) `H_msg` + index-splitting
+  --    regression vector (`slhDsaShake128s_wellFormed`, `tooth_slhDsaShake128s_m34_rejected`)
+  let pkRoot128s := (List.range 16).map fun i => UInt8.ofNat (0xA5 + i * 3)
+  let msg128s := asciiBytes "lean-fips205-128s-m30-hmsg-oracle"
+  let ctx128s := asciiBytes "fips205-128s-ctx"
+  let mPrime128s ← match encodePureMsgPrime ctx128s msg128s with
+    | some mp => pure mp
+    | none => throw (IO.userError "encodePureMsgPrime returned none")
+  let rRand128s := fipsPrfMsg slhDsaShake128s.n skPrf optRand mPrime128s
+  let digest128s := fipsHMsg slhDsaShake128s.m rRand128s pkSeed pkRoot128s mPrime128s
+  if digest128s.length != 30 then
+    throw (IO.userError s!"expected 30-byte 128s H_msg, got {digest128s.length}")
+  let (md128s, idxTree128s, idxLeaf128s) := fipsSplitDigest slhDsaShake128s digest128s
+  let forsIndices128s := base2b md128s slhDsaShake128s.a slhDsaShake128s.k
+  let forsLeaf0_128s :=
+    fipsForsNode slhDsaShake128s skSeed pkSeed idxTree128s idxLeaf128s 0 (forsIndices128s.getD 0 0)
+
+  -- 8. Ed25519 RFC 8032 clamping & SLIP-0010 scalar normalization mod `ED25519_ORDER_L`
+  let edRawInputs : List Nat := [
+    0,
+    (2 ^ 256) - 1,
+    ED25519_ORDER_L,
+    ED25519_ORDER_L + 7,
+    0x7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7,
+    0x8000000000000000000000000000000000000000000000000000000000000007
+  ]
+  let edRows := edRawInputs.map fun rawNat =>
+    let rawBv : BitVec 256 := BitVec.ofNat 256 rawNat
+    let clampedNat := (clampEd25519Bytes32 rawBv).toNat
+    let normNat := (normalizeSlip0010Ed25519Scalar rawBv).toNat
+    "{" ++
+      s!"\"raw_le_hex\":\"{natToLeHexPad 32 rawNat}\"," ++
+      s!"\"clamped_le_hex\":\"{natToLeHexPad 32 clampedNat}\"," ++
+      s!"\"normalized_mod_l_le_hex\":\"{natToLeHexPad 32 normNat}\"" ++
+    "}"
+
   IO.println "{"
   IO.println "  \"generator\": \"lean-4.35.0-ExternalSpecOracle\","
   IO.println ("  \"goldilocks_edges\": [" ++ String.intercalate ", " glJsonRows ++ "],")
@@ -357,6 +393,27 @@ def main : IO Unit := do
   IO.println ("  \"secp256k1_smul\": [" ++ String.intercalate ", " secpRows ++ "],")
   IO.println ("  \"pallas_orchard_smul\": [" ++ String.intercalate ", " pallasRows ++ "],")
   IO.println ("  \"bls12_381_g1_smul\": [" ++ String.intercalate ", " blsRows ++ "],")
+  IO.println ("  \"ed25519_clamp_slip0010\": [" ++ String.intercalate ", " edRows ++ "],")
+  IO.println "  \"fips205_slh_dsa_shake_128s_hmsg\": {"
+  IO.println s!"    \"m_bytes\": {slhDsaShake128s.m},"
+  IO.println s!"    \"md_bytes\": {slhDsaShake128s.mdBytes},"
+  IO.println s!"    \"tree_bytes\": {slhDsaShake128s.treeBytes},"
+  IO.println s!"    \"leaf_bytes\": {slhDsaShake128s.leafBytes},"
+  IO.println s!"    \"sk_seed_hex\": \"{bytesToHex skSeed}\","
+  IO.println s!"    \"sk_prf_hex\": \"{bytesToHex skPrf}\","
+  IO.println s!"    \"pk_seed_hex\": \"{bytesToHex pkSeed}\","
+  IO.println s!"    \"pk_root_hex\": \"{bytesToHex pkRoot128s}\","
+  IO.println s!"    \"opt_rand_hex\": \"{bytesToHex optRand}\","
+  IO.println s!"    \"ctx_hex\": \"{bytesToHex ctx128s}\","
+  IO.println s!"    \"msg_hex\": \"{bytesToHex msg128s}\","
+  IO.println s!"    \"r_rand_hex\": \"{bytesToHex rRand128s}\","
+  IO.println s!"    \"h_msg_30_hex\": \"{bytesToHex digest128s}\","
+  IO.println s!"    \"md_21_hex\": \"{bytesToHex md128s}\","
+  IO.println s!"    \"idx_tree\": \"{idxTree128s}\","
+  IO.println s!"    \"idx_leaf\": {idxLeaf128s},"
+  IO.println ("    \"fors_indices\": " ++ jsonNatStrList forsIndices128s ++ ",")
+  IO.println s!"    \"fors_leaf0_hex\": \"{bytesToHex forsLeaf0_128s}\""
+  IO.println "  },"
   IO.println "  \"fips205_slh_dsa_shake_128f\": {"
   IO.println s!"    \"sk_seed_hex\": \"{bytesToHex skSeed}\","
   IO.println s!"    \"sk_prf_hex\": \"{bytesToHex skPrf}\","

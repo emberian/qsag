@@ -93,18 +93,20 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         Err(other) => panic!("unexpected Vulkan initialization error: {other}"),
     };
 
-    // 1. Hardware metadata & discrete GPU checks.
+    // 1. Hardware metadata & physical GPU (discrete or unified-memory APU) checks.
     let info = gpu.device_info();
     assert!(!gpu.device_name().is_empty());
-    assert_eq!(
-        info.device_type, 2,
-        "expected VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU"
+    assert!(
+        matches!(info.device_type, 1 | 2),
+        "expected VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU (1) or VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU (2), got {}",
+        info.device_type
     );
     assert!(gpu.vendor_id() != 0);
     assert!(gpu.driver_version() != 0);
     assert_eq!(gpu.target_arch(), KernelTargetArch::SpirV15);
     println!(
-        "Bound discrete Vulkan GPU: {} (vendor=0x{:04x}, device=0x{:04x}, driver=0x{:08x})",
+        "Bound hardware Vulkan GPU (type={}): {} (vendor=0x{:04x}, device=0x{:04x}, driver=0x{:08x})",
+        info.device_type,
         gpu.device_name(),
         gpu.vendor_id(),
         info.device_id,

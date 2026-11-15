@@ -3954,5 +3954,304 @@ theorem tooth_spirv_opcode_197_not_xor :
 
 #tooth_pair spirv_normative_bitwise_and_comparison_decode vs tooth_spirv_opcode_197_not_xor
 
+/-! ## §8. Decoded `SpirvModule` Header → `SpirvModuleEnv` Bridge (`OpExecutionMode` / `OpDecorate`) -/
+
+def findLocalSizeMode? : List SpirvExecutionMode → Option (UInt32 × UInt32 × UInt32)
+  | [] => none
+  | .localSize x y z :: _ => some (x, y, z)
+  | .subgroupSize _ :: rest => findLocalSizeMode? rest
+
+/-- Extract `OpExecutionMode LocalSize x y z` workgroup dimensions from a decoded `SpirvModule`. -/
+def SpirvModule.localSize? (m : SpirvModule) : Option (UInt32 × UInt32 × UInt32) :=
+  findLocalSizeMode? m.execModes
+
+def findSubgroupSizeMode? : List SpirvExecutionMode → Option UInt32
+  | [] => none
+  | .subgroupSize sz :: _ => some sz
+  | .localSize _ _ _ :: rest => findSubgroupSizeMode? rest
+
+/-- Extract `OpExecutionMode SubgroupSize sz` from a decoded `SpirvModule`. -/
+def SpirvModule.subgroupSize? (m : SpirvModule) : Option UInt32 :=
+  findSubgroupSizeMode? m.execModes
+
+/-- Look up the `GLCompute` entry-point `SpirvFunction` matching `m.entryFuncId`. -/
+def SpirvModule.entryFunction? (m : SpirvModule) : Option SpirvFunction :=
+  m.functions.find? (fun fn => fn.funcId == m.entryFuncId)
+
+def findAnnotBuiltIn? (id : Nat) : List SpirvAnnotation → Option SpirvBuiltIn
+  | [] => none
+  | .decorate ⟨targetId, .builtIn b⟩ :: rest =>
+    if targetId.toNat == id then some b else findAnnotBuiltIn? id rest
+  | _ :: rest => findAnnotBuiltIn? id rest
+
+def findAnnotBinding? (id : Nat) : List SpirvAnnotation → Option Nat
+  | [] => none
+  | .decorate ⟨targetId, .binding slot⟩ :: rest =>
+    if targetId.toNat == id then some slot.toNat else findAnnotBinding? id rest
+  | _ :: rest => findAnnotBinding? id rest
+
+def findAnnotDescriptorSet? (id : Nat) : List SpirvAnnotation → Option Nat
+  | [] => none
+  | .decorate ⟨targetId, .descriptorSet ds⟩ :: rest =>
+    if targetId.toNat == id then some ds.toNat else findAnnotDescriptorSet? id rest
+  | _ :: rest => findAnnotDescriptorSet? id rest
+
+def findDirectIntWidth? (id : Nat) : List SpirvTyGlobal → Option SpirvIntWidth
+  | [] => none
+  | .ty (.typeInt resId w _) :: rest =>
+    if resId.toNat == id then some w else findDirectIntWidth? id rest
+  | _ :: rest => findDirectIntWidth? id rest
+
+private def findTypeStepTarget? (id : Nat) : List SpirvTyGlobal → Option (SpirvIntWidth ⊕ Nat)
+  | [] => none
+  | .ty (.typeInt resId w _) :: rest =>
+    if resId.toNat == id then some (.inl w) else findTypeStepTarget? id rest
+  | .ty (.typeVector resId compTyId _) :: rest =>
+    if resId.toNat == id then some (.inr compTyId.toNat) else findTypeStepTarget? id rest
+  | .ty (.typeArray resId elemTyId _) :: rest =>
+    if resId.toNat == id then some (.inr elemTyId.toNat) else findTypeStepTarget? id rest
+  | .ty (.typeRuntimeArray resId elemTyId) :: rest =>
+    if resId.toNat == id then some (.inr elemTyId.toNat) else findTypeStepTarget? id rest
+  | .ty (.typeStruct resId (f0 :: _)) :: rest =>
+    if resId.toNat == id then some (.inr f0.toNat) else findTypeStepTarget? id rest
+  | .ty (.typePointer resId _ pointeeTyId) :: rest =>
+    if resId.toNat == id then some (.inr pointeeTyId.toNat) else findTypeStepTarget? id rest
+  | _ :: rest => findTypeStepTarget? id rest
+
+/-- Resolve the leaf scalar integer width (`w32` / `w64`) through nested `OpTypePointer`,
+    `OpTypeStruct`, `OpTypeRuntimeArray`, `OpTypeArray`, and `OpTypeVector` declarations. -/
+def resolveLeafIntWidth? (tyGlobals : List SpirvTyGlobal) : Nat → Nat → Option SpirvIntWidth
+  | 0, _ => none
+  | fuel + 1, id =>
+    match findTypeStepTarget? id tyGlobals with
+    | some (.inl w) => some w
+    | some (.inr nextId) => resolveLeafIntWidth? tyGlobals fuel nextId
+    | none => none
+
+def findInitConstVal (id : Nat) : List SpirvTyGlobal → SpirvVal
+  | [] => .vUndef
+  | .glob (.constTrue _ resId) :: rest =>
+    if resId.toNat == id then .vBool true else findInitConstVal id rest
+  | .glob (.constFalse _ resId) :: rest =>
+    if resId.toNat == id then .vBool false else findInitConstVal id rest
+  | .glob (.const32 _ resId val) :: rest =>
+    if resId.toNat == id then .vU32 val else findInitConstVal id rest
+  | .glob (.const64 _ resId val) :: rest =>
+    if resId.toNat == id then .vU64 val else findInitConstVal id rest
+  | _ :: rest => findInitConstVal id rest
+
+private def findFirstVarBindingForPtrTy? (ptrTyId : UInt32) (annots : List SpirvAnnotation) :
+    List SpirvTyGlobal → Option Nat
+  | [] => none
+  | .glob (.variable tyId varId _ _) :: rest =>
+    if tyId == ptrTyId then
+      match findAnnotBinding? varId.toNat annots with
+      | some slot => some slot
+      | none => findFirstVarBindingForPtrTy? ptrTyId annots rest
+    else findFirstVarBindingForPtrTy? ptrTyId annots rest
+  | _ :: rest => findFirstVarBindingForPtrTy? ptrTyId annots rest
+
+private def findDeclPtrInfoAux? (allTyGlobals : List SpirvTyGlobal) (annots : List SpirvAnnotation)
+    (id : Nat) : List SpirvTyGlobal → Option (SpirvStorageClass × Nat × SpirvIntWidth)
+  | [] => none
+  | .glob (.variable ptrTyId varId sc _) :: rest =>
+    if varId.toNat == id then
+      match findAnnotBuiltIn? id annots with
+      | some _ => none
+      | none =>
+        match resolveLeafIntWidth? allTyGlobals allTyGlobals.length ptrTyId.toNat with
+        | some w => some (sc, (findAnnotBinding? id annots).getD 0, w)
+        | none => none
+    else findDeclPtrInfoAux? allTyGlobals annots id rest
+  | .ty (.typePointer resId sc pointeeTyId) :: rest =>
+    if resId.toNat == id then
+      match resolveLeafIntWidth? allTyGlobals allTyGlobals.length pointeeTyId.toNat with
+      | some w => some (sc, (findFirstVarBindingForPtrTy? resId annots allTyGlobals).getD 0, w)
+      | none => none
+    else findDeclPtrInfoAux? allTyGlobals annots id rest
+  | _ :: rest => findDeclPtrInfoAux? allTyGlobals annots id rest
+
+private def findInstAccessChainPtrInfo? (m : SpirvModule) (id : Nat) :
+    List SpirvInst → Option (SpirvStorageClass × Nat × SpirvIntWidth)
+  | [] => none
+  | .opAccessChain tyId resId baseId _ :: rest =>
+    if resId.toNat == id then
+      match findDeclPtrInfoAux? m.tyGlobals m.annotations baseId.toNat m.tyGlobals with
+      | some (sc, slot, baseW) =>
+        let w := (resolveLeafIntWidth? m.tyGlobals m.tyGlobals.length tyId.toNat).getD baseW
+        some (sc, slot, w)
+      | none => none
+    else findInstAccessChainPtrInfo? m id rest
+  | _ :: rest => findInstAccessChainPtrInfo? m id rest
+
+private def findFnsAccessChainPtrInfo? (m : SpirvModule) (id : Nat) :
+    List SpirvFunction → Option (SpirvStorageClass × Nat × SpirvIntWidth)
+  | [] => none
+  | fn :: rest =>
+    match findInstAccessChainPtrInfo? m id fn.body with
+    | some info => some info
+    | none => findFnsAccessChainPtrInfo? m id rest
+
+/-- Construct the operational and SIMT-CT `SpirvModuleEnv` directly from a decoded `SpirvModule`'s
+    `OpDecorate`, `OpTypeInt`, `OpTypePointer` / aggregate types, `OpConstant*`, and `OpVariable`
+    sections, propagating base binding metadata to `OpAccessChain` SSA pointer results. -/
+def SpirvModule.toEnv (m : SpirvModule) : SpirvModuleEnv where
+  intWidths id := findDirectIntWidth? id m.tyGlobals
+  ptrInfo id :=
+    match findDeclPtrInfoAux? m.tyGlobals m.annotations id m.tyGlobals with
+    | some info => some info
+    | none => findFnsAccessChainPtrInfo? m id m.functions
+  initConst id := findInitConstVal id m.tyGlobals
+  builtIns id := findAnnotBuiltIn? id m.annotations
+
+private theorem findInitConstVal_not_ptr (id : Nat) :
+    ∀ (gs : List SpirvTyGlobal) (sc : SpirvStorageClass) (b off : Nat) (w : SpirvIntWidth),
+      findInitConstVal id gs ≠ .vPtr sc b off w
+  | [], _, _, _, _ => nofun
+  | hd :: rest, sc, b, off, w => by
+    cases hd with
+    | ty _ => exact findInitConstVal_not_ptr id rest sc b off w
+    | glob g =>
+      cases g with
+      | constTrue _ resId | constFalse _ resId | const32 _ resId _ | const64 _ resId _ =>
+        dsimp only [findInitConstVal]
+        split
+        · exact nofun
+        · exact findInitConstVal_not_ptr id rest sc b off w
+      | constComposite _ _ _ | «variable» _ _ _ _ =>
+        exact findInitConstVal_not_ptr id rest sc b off w
+
+/-- Every decoded `SpirvModule` satisfies `ScalarConstEnv` unconditionally: SPIR-V constant
+    declarations (`OpConstantTrue`, `OpConstantFalse`, `OpConstant`) never materialize raw pointers. -/
+theorem SpirvModule.scalarConstEnv (m : SpirvModule) : ScalarConstEnv m.toEnv :=
+  fun id sc b off w => findInitConstVal_not_ptr id m.tyGlobals sc b off w
+
+/-- Check SIMT-CT directly on a binary SPIR-V 1.5/1.6 word stream `words` under its decoded
+    `OpDecorate` / `OpType*` / `OpConstant*` / `OpVariable` module environment. -/
+def checkDecodedWordsSimtCt (words : List UInt32) (pol : SimtCtPolicy) (prog : List SpirvInst) :
+    Bool :=
+  match decodeSpirvModuleWords words with
+  | .ok m => checkProgSimtCt m.toEnv pol prog
+  | .error _ => false
+
+/-- Execute a Wave32 observation trace directly under the `SpirvModuleEnv` decoded from `words`. -/
+def runDecodedWordsWaveWithObs (words : List UInt32) (cfg : WorkgroupConfig) (w : Nat)
+    (prog : List SpirvInst) (fuel : Nat) (mem : GpuMemState) :
+    Except SpirvDecodeError (List SimtWaveObs) :=
+  match decodeSpirvModuleWords words with
+  | .ok m =>
+    let wSt : Wave32State :=
+      { pc := 0, execMask := allActive32, laneRegs := fun l => initLaneRegs m.toEnv cfg w l,
+        atBarrier := false }
+    .ok (runWaveWithObs m.toEnv prog fuel wSt mem)
+  | .error e => .error e
+
+/-- End-to-end binary-to-leakage bridge: any binary `SPIR-V 1.5/1.6` word stream `words` passing
+    `checkDecodedWordsSimtCt words pol prog = true` executes with identical hardware observation
+    traces (`PC`, `EXEC` mask, global addresses, LDS banks) across any `MemLowEq pol m₁ m₂`. -/
+theorem decoded_spirv_words_simt_ct_noninterference
+    {words : List UInt32} {pol : SimtCtPolicy} {prog : List SpirvInst}
+    (hCt : checkDecodedWordsSimtCt words pol prog = true)
+    (cfg : WorkgroupConfig) (w fuel : Nat)
+    {m₁ m₂ : GpuMemState} (hMem : MemLowEq pol m₁ m₂) :
+    runDecodedWordsWaveWithObs words cfg w prog fuel m₁ =
+      runDecodedWordsWaveWithObs words cfg w prog fuel m₂ := by
+  unfold checkDecodedWordsSimtCt at hCt
+  unfold runDecodedWordsWaveWithObs
+  cases hDec : decodeSpirvModuleWords words with
+  | error _ => rfl
+  | ok m =>
+    rw [hDec] at hCt
+    dsimp only
+    rw [simt_ct_noninterference hCt fuel (initWave_lowEq m.toEnv pol cfg m.scalarConstEnv w) hMem]
+
+/-- Canonical SPIR-V 1.5 compute module header and declarations for the 2-wave reduction kernel,
+    carrying `OpExecutionMode LocalSize 64 1 1` and `OpDecorate` `BuiltIn` / `Binding` metadata. -/
+def twoWaveReductionHeaderModule (annots : List SpirvAnnotation) : SpirvModule where
+  version := .v1_5
+  generator := 0
+  idBound := 32
+  capabilities := [.shader, .vulkanMemoryModel]
+  extInstImports := []
+  addrModel := .logical
+  memModel := .vulkan
+  entryFuncId := 20
+  interfaceIds := [1, 2, 3, 4]
+  execModes := [.localSize 64 1 1]
+  debug := []
+  annotations := annots
+  tyGlobals := [
+    .ty (.typeVoid 21),
+    .ty (.typeFunction 22 21 []),
+    .ty (.typeInt 8 .w32 false),
+    .ty (.typeRuntimeArray 23 8),
+    .ty (.typeStruct 24 [23]),
+    .ty (.typePointer 6 .workgroup 8),
+    .ty (.typePointer 7 .storageBuffer 24),
+    .ty (.typePointer 9 .storageBuffer 24),
+    .ty (.typePointer 25 .input 8),
+    .glob (.const32 8 5 32),
+    .glob (.variable 25 1 .input none),
+    .glob (.variable 6 2 .workgroup none),
+    .glob (.variable 7 3 .storageBuffer none),
+    .glob (.variable 9 4 .storageBuffer none)
+  ]
+  functions := [
+    { resultTyId := 21, funcId := 20, control := 0, funcTyId := 22, params := [],
+      body := [.opLabel 26] ++ twoWavePhase0WriteLds ++ [.opReturn] }
+  ]
+
+def twoWaveCanonicalAnnots : List SpirvAnnotation := [
+  .decorate ⟨1, .builtIn .localInvocationId⟩,
+  .decorate ⟨3, .descriptorSet 0⟩,
+  .decorate ⟨3, .binding 0⟩,
+  .decorate ⟨4, .descriptorSet 0⟩,
+  .decorate ⟨4, .binding 1⟩
+]
+
+theorem decoded_spirv_header_env_resolution :
+    let m := twoWaveReductionHeaderModule twoWaveCanonicalAnnots
+    m.localSize? = some (64, 1, 1) ∧
+    m.toEnv.builtIns 1 = some .localInvocationId ∧
+    m.toEnv.ptrInfo 1 = none ∧
+    m.toEnv.ptrInfo 2 = some (.workgroup, 0, .w32) ∧
+    m.toEnv.ptrInfo 3 = some (.storageBuffer, 0, .w32) ∧
+    m.toEnv.ptrInfo 4 = some (.storageBuffer, 1, .w32) ∧
+    m.toEnv.ptrInfo 10 = some (.storageBuffer, 0, .w32) ∧
+    m.toEnv.initConst 5 = .vU32 32 := by
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- `#tooth` Dropping `OpDecorate %4 Binding 1` from the SPIR-V annotation section collapses
+    output `StorageBuffer` `%4` onto descriptor binding `0` instead of binding `1`. -/
+theorem tooth_omitted_spirv_binding_decoration_aliases_slot :
+    (twoWaveReductionHeaderModule [
+      .decorate ⟨1, .builtIn .localInvocationId⟩,
+      .decorate ⟨3, .binding 0⟩
+    ]).toEnv.ptrInfo 4 ≠ some (.storageBuffer, 1, .w32) :=
+  nofun
+
+theorem decoded_spirv_words_inhabited :
+    ∃ (words : List UInt32) (pol : SimtCtPolicy) (prog : List SpirvInst)
+      (_cfg : WorkgroupConfig) (_w _fuel : Nat) (m₁ m₂ : GpuMemState),
+      checkDecodedWordsSimtCt words pol prog = true ∧
+      MemLowEq pol m₁ m₂ := by
+  let m := twoWaveReductionHeaderModule twoWaveCanonicalAnnots
+  let pol : SimtCtPolicy := {
+    regSec := fun _ => .pub
+    ldsSec := .pub
+    ssboSec := fun _ => .pub
+  }
+  let mem0 : GpuMemState := { lds := fun _ => 0, ssbo := fun _ _ => 0, pushConsts := fun _ => 0 }
+  exact ⟨encodeSpirvModuleWords m, pol, twoWavePhase0WriteLds, twoWaveCfg, 0, 4, mem0, mem0,
+    by decide, ⟨rfl, fun _ => rfl, fun _ _ => rfl⟩⟩
+
+#tooth_pair decoded_spirv_header_env_resolution vs tooth_omitted_spirv_binding_decoration_aliases_slot
+#verify_inhabited decoded_spirv_words_simt_ct_noninterference decoded_spirv_words_inhabited
+
 end Qsag
 end
+
+#verify_constructive
+  Qsag.SpirvModule.scalarConstEnv
+  Qsag.decoded_spirv_words_simt_ct_noninterference
+  Qsag.decoded_spirv_header_env_resolution

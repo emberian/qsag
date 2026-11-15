@@ -5,7 +5,7 @@
 //! challenge space costs `> 2^128` oracle iterations).
 //!
 //! The distributed outer prover (`co_zk_mpc`) enforces active 1-of-3 malicious
-//! multiplication verification (per-flush `< 2^-186` prime-field and `< 2^-127.99`
+//! multiplication verification (per-flush `< 2^-186` prime-field and `< 2^-244`
 //! Boolean `AND` soundness with two-round transcript-bound coin-flipping) and pre-open circuit
 //! output-zero verification (`all_outputs_zero`) over confidential authenticated
 //! pairwise channels, providing non-identifiable abort against one actively

@@ -716,7 +716,86 @@ theorem tooth_redpallas_zero_alpha_links_ak :
 
 #tooth_pair Qsag.orchard_redpallas_rk_perfect_unlinkability vs Qsag.tooth_redpallas_zero_alpha_links_ak
 
-/-! ## 5. Constructive Axiom Audit (`#verify_constructive`) -/
+/-! ## 5. Unified Active Field Checks (`35`), Shipped Bit-Check Numerator (`63`) & Canonical Scalar Guards -/
+
+def migrationSecp256k1P : Nat := 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f
+def migrationSecp256k1N : Nat := 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+def migrationEd25519P   : Nat := 2 ^ 255 - 19
+def migrationEd25519L   : Nat := 2 ^ 252 + 27742317777372353535851937790883648493
+def migrationGoldilocksP : Nat := 0xffffffff00000001
+
+def ActiveFieldCheckBound (num k modulus : Nat) : Prop :=
+  num * 2 ^ k < modulus - 1
+
+/-- Synchronized active field-check soundness across all five migration domains (`outer_mpc.rs:40`):
+`secp256k1` (`< 2^-250`), `Ed25519` and `BLS12-381` (`< 2^-249`), `Pallas` (`< 2^-248`), and
+Goldilocks `GF(p^3)` (`< 2^-186`). -/
+theorem migration_active_field_check_exact_bounds :
+    ActiveFieldCheckBound 35 250 migrationSecp256k1P ∧
+    ActiveFieldCheckBound 35 249 migrationEd25519P ∧
+    ActiveFieldCheckBound 35 249 p_bls381 ∧
+    ActiveFieldCheckBound 35 249 r_bls381 ∧
+    ActiveFieldCheckBound 35 248 p_pallas ∧
+    ActiveFieldCheckBound 35 248 q_pallas ∧
+    ActiveFieldCheckBound 35 186 (migrationGoldilocksP ^ 3) := by
+  unfold ActiveFieldCheckBound
+  exact ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide⟩
+
+/-- `#tooth` On `Pallas` (`p_pallas, q_pallas ≈ 2^254 + 2^125.1`), `35 / (p - 1) ≈ 2^-248.87`
+exceeds `2^-249`, refuting a uniform `< 2^-249` active field-check claim across all curves. -/
+theorem tooth_pallas_field_check_exceeds_two_neg_249 :
+    ¬ (ActiveFieldCheckBound 35 249 p_pallas ∨ ActiveFieldCheckBound 35 249 q_pallas) := by
+  unfold ActiveFieldCheckBound
+  decide
+
+#tooth_pair Qsag.migration_active_field_check_exact_bounds vs Qsag.tooth_pallas_field_check_exceeds_two_neg_249
+
+def BitCheckInstancesBound (num instances k fieldSize : Nat) : Prop :=
+  num ^ instances * 2 ^ k < (fieldSize - 1) ^ instances
+
+/-- Shipped `BIT_CHECK_NUMERATOR = 63` (`outer_mpc.rs:33-49`): `7` degree-7 combiner roots +
+`6 × 3` ternary sumcheck roots + `18 × 2` binary halving roots + `2` base check = `63`, with
+exact union numerator `61 * (n - 1) + 2 * n < 63 * n` and two-instance error `< 2^-244`. -/
+theorem migration_shipped_bit_check_numerator_63_sound (n : Nat) (hn : 2 ≤ n) :
+    7 + 3 * 6 + 2 * 18 + 2 = 63 ∧
+    61 * (n - 1) + 2 * n < 63 * n ∧
+    BitCheckInstancesBound 63 2 244 (2 ^ 128) := by
+  refine ⟨by decide, by omega, ?_⟩
+  unfold BitCheckInstancesBound
+  decide
+
+/-- `#tooth` A single `GF(2^128)` bit-check instance at numerator `63` fails the `< 2^-123` bound. -/
+theorem tooth_single_instance_bit_check_63_fails_pq128 :
+    ¬ BitCheckInstancesBound 63 1 123 (2 ^ 128) := by
+  unfold BitCheckInstancesBound
+  decide
+
+#tooth_pair Qsag.migration_shipped_bit_check_numerator_63_sound vs Qsag.tooth_single_instance_bit_check_63_fails_pq128
+
+/-- Canonical `< ord` check on 256-bit witness scalars guarantees unique curve preimages across
+all four legacy curves (`secp256k1`, `Ed25519`, `Pallas`, `BLS12-381`). -/
+theorem canonical_legacy_scalar_unique {C : SwCurve} {G : SwPoint} {ord s₁ s₂ : Nat}
+    (grp : PrimeSubgroup C G ord) (hs₁ : s₁ < ord) (hs₂ : s₂ < ord)
+    (hPk : grp.smul s₁ = grp.smul s₂) : s₁ = s₂ :=
+  grp.smul_injective hs₁ hs₂ hPk
+
+/-- `#tooth` Every supported curve order satisfies `1 + ord < 2^256`, so omitting the canonical
+`< ord` wire guard admits distinct 256-bit bit-vectors `1 ≠ 1 + ord` with identical curve point
+`[1] G = [(1 + ord) mod ord] G` and distinct 256-bit nullifier preimage. -/
+theorem tooth_unreduced_256bit_scalar_alias_all_four_curves
+    {C : SwCurve} {G : SwPoint} {ord : Nat} (grp : PrimeSubgroup C G ord) (hOrd : 0 < ord) :
+    ∃ s₁ s₂ : Nat,
+      s₁ ≠ s₂ ∧ grp.smul (s₁ % ord) = grp.smul (s₂ % ord) ∧
+      1 + migrationSecp256k1N < 2 ^ 256 ∧
+      1 + migrationEd25519L < 2 ^ 256 ∧
+      1 + q_pallas < 2 ^ 256 ∧
+      1 + r_bls381 < 2 ^ 256 := by
+  refine ⟨1, 1 + ord, by omega, ?_, by decide, by decide, by decide, by decide⟩
+  exact congrArg grp.smul (Nat.add_mod_right 1 ord).symm
+
+#tooth_pair Qsag.canonical_legacy_scalar_unique vs Qsag.tooth_unreduced_256bit_scalar_alias_all_four_curves
+
+/-! ## 6. Constructive Axiom Audit (`#verify_constructive`) -/
 
 #verify_constructive
   Qsag.pallas_and_bls381_limbs_and_bit_bounds Qsag.IsPrimeMod.dvd_mul Qsag.lucasPowMod_eq_pow_mod
@@ -730,5 +809,8 @@ theorem tooth_redpallas_zero_alpha_links_ak :
   Qsag.tooth_zkboo_single_challenge_information_theoretically_hides_witness
   Qsag.primeSubgroup_smul_add_mod Qsag.orchard_redpallas_rerandomized_extraction_sound
   Qsag.orchard_redpallas_rk_perfect_unlinkability Qsag.tooth_redpallas_zero_alpha_links_ak
+  Qsag.migration_active_field_check_exact_bounds Qsag.tooth_pallas_field_check_exceeds_two_neg_249
+  Qsag.migration_shipped_bit_check_numerator_63_sound Qsag.tooth_single_instance_bit_check_63_fails_pq128
+  Qsag.canonical_legacy_scalar_unique Qsag.tooth_unreduced_256bit_scalar_alias_all_four_curves
 
 end Qsag
