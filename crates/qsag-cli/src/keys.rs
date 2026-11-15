@@ -21,6 +21,7 @@ use crate::cli::{
     read_bounded_file, read_input, write_new,
 };
 use crate::codec::{Json, from_hex_exact};
+#[cfg(not(any(test, feature = "test-dealer")))]
 use crate::dealerless_ceremony::DealerlessThresholdFtsSetup;
 use crate::schemes::{Scheme, THRESHOLD_FTS_PARAMS};
 
@@ -68,12 +69,17 @@ fn frontier_key(profile: qsag_fts::FrontierFtsProfile, seed: &[u8; 32]) -> Front
     )
 }
 
+/// The provisioned committee an `fts-threshold` command signs with: the dealerless ceremony.
+#[cfg(not(any(test, feature = "test-dealer")))]
+type ThresholdSetup = DealerlessThresholdFtsSetup;
+
+#[cfg(not(any(test, feature = "test-dealer")))]
 fn threshold_setup(
     seed: &[u8; 32],
     parties: u64,
     params: qsag_fts::ParallelSeededParams,
     cached_tree: Option<(ParallelSeededPublicKey, ParallelSeededMerkleLayers)>,
-) -> Result<DealerlessThresholdFtsSetup, CliError> {
+) -> Result<ThresholdSetup, CliError> {
     DealerlessThresholdFtsSetup::run_ceremony(
         params,
         usize::try_from(parties).map_err(|_| CliError::usage("party count is not representable on this platform"))?,
@@ -85,6 +91,63 @@ fn threshold_setup(
             "dealerless threshold setup failed ({e:?}; pass --fast-demo for 8-leaf batch DKG or use `qsag quorum --scheme hem-jorts-poseidon2`)"
         ))
     })
+}
+
+/// Trusted-dealer provisioning, for unit tests and `test-dealer` builds only. The dealerless
+/// ceremony needs about 4.6 million OT-extension calls at eight epochs (hours); the dealer
+/// derives the same kind of shares from the key file's seed in seconds. Signing, the epoch
+/// burn journal, the vault and the anchors are the shipped code either way.
+#[cfg(any(test, feature = "test-dealer"))]
+struct ThresholdSetup(qsag_fts::ParallelSeededThresholdSetup);
+
+#[cfg(any(test, feature = "test-dealer"))]
+impl std::ops::Deref for ThresholdSetup {
+    type Target = qsag_fts::ParallelSeededThresholdSetup;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(any(test, feature = "test-dealer"))]
+impl ThresholdSetup {
+    fn threshold_sign(
+        &mut self,
+        epoch: u32,
+        msg: &[u8],
+        session_id: [u8; 32],
+        persistence: &mut impl qsag_fts::LeafBurnPersistence,
+    ) -> Result<ParallelSeededSignature, ParallelSeededError> {
+        self.0
+            .threshold_sign(epoch, msg, session_id, persistence, &CpuReferenceBackend)
+    }
+}
+
+#[cfg(any(test, feature = "test-dealer"))]
+fn threshold_setup(
+    seed: &[u8; 32],
+    parties: u64,
+    params: qsag_fts::ParallelSeededParams,
+    cached_tree: Option<(ParallelSeededPublicKey, ParallelSeededMerkleLayers)>,
+) -> Result<ThresholdSetup, CliError> {
+    let failed = |e: ParallelSeededError| {
+        CliError::usage(format!("trusted-dealer threshold setup failed ({e:?})"))
+    };
+    let setup = qsag_fts::ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+        params,
+        usize::try_from(parties)
+            .map_err(|_| CliError::usage("party count is not representable on this platform"))?,
+        derive(seed, b"threshold dealer entropy"),
+        derive(seed, b"threshold pk_seed"),
+        &CpuReferenceBackend,
+    )
+    .map_err(failed)?;
+    // The tree recorded in the key file must be the one this seed provisions.
+    if let Some((cached_pk, cached_layers)) = cached_tree
+        && (cached_pk != setup.pk || cached_layers != setup.public_tree_layers)
+    {
+        return Err(failed(ParallelSeededError::InvalidAuthenticationPath));
+    }
+    Ok(ThresholdSetup(setup))
 }
 
 fn encode_merkle_leaf_hex(digest: &[u64; 4]) -> Json {

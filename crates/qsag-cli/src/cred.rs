@@ -21,7 +21,9 @@ use qsag_accel::ct::ct_zeroize_bytes;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_core::wipe::SecretBuffer;
 use qsag_cred::voprf::{self, CounterStore, PublicKey as ToprfPublicKey, SERVERS as TOPRF_SERVERS};
-use qsag_cred::voprf_spdz::{SpdzConfig, SpdzPublic, SpdzServer, SpdzSession, spdz_blind, spdz_dkg};
+use qsag_cred::voprf_spdz::{
+    SpdzConfig, SpdzPublic, SpdzServer, SpdzSession, spdz_blind, spdz_dkg,
+};
 use qsag_cred::{
     FsNonceBurnStore, MlDsaLevel, MpcTransport, MpcTransportError, RoundInbox, RoundInfo,
     RoundKind, ThresholdMlDsaDkgConfig, ThresholdMlDsaError, ThresholdMlDsaSignerShare,
@@ -448,7 +450,9 @@ fn voprf_spdz_keygen(
     public_out: &str,
 ) -> Result<(), CliError> {
     let config = SpdzConfig::new(threshold as usize, parties as usize).map_err(|_| {
-        CliError::usage("the Shamir-SPDZ TOPRF backend supports 2 <= --threshold <= --parties <= 64")
+        CliError::usage(
+            "the Shamir-SPDZ TOPRF backend supports 2 <= --threshold <= --parties <= 64",
+        )
     })?;
     let deterministic = args.flag("deterministic");
     let session = toprf_seed(
@@ -465,7 +469,9 @@ fn voprf_spdz_keygen(
         )?);
     }
     let servers = spdz_dkg(config, session, &seeds).map_err(|e| {
-        CliError::verify(format!("dealerless Shamir-SPDZ TOPRF enrollment aborted: {e}"))
+        CliError::verify(format!(
+            "dealerless Shamir-SPDZ TOPRF enrollment aborted: {e}"
+        ))
     })?;
     let public = servers[0].public().clone();
     let commitment = public.public_key().commitment();
@@ -555,7 +561,9 @@ fn voprf_spdz_eval(
         || meta.field_u64("parties")? != parties as u64
         || meta.field_str("share_format")? != VOPRF_SPDZ_SHARE_FORMAT
     {
-        return Err(CliError::state("TOPRF vault metadata does not match its enrollment record"));
+        return Err(CliError::state(
+            "TOPRF vault metadata does not match its enrollment record",
+        ));
     }
     let selected: Vec<usize> = match args.get("signers") {
         Some(spec) => parse_party_indices(Some(spec), parties, parties)?,
@@ -606,7 +614,11 @@ fn voprf_spdz_eval(
         seeds.push(toprf_seed(
             deterministic,
             b"QSAG.CLI.TOPRF.DET.SERVER.V1",
-            &[&commitment, &counter.to_le_bytes(), &(party as u64).to_le_bytes()],
+            &[
+                &commitment,
+                &counter.to_le_bytes(),
+                &(party as u64).to_le_bytes(),
+            ],
         )?);
     }
     let refused = |e: voprf::Error| match e {
@@ -621,11 +633,24 @@ fn voprf_spdz_eval(
             .iter_mut()
             .map(|store| store as &mut dyn CounterStore)
             .collect();
-        SpdzSession::begin(&mut quorum, &mut store_refs, eval_session, counter, 1, &seeds)
-            .map_err(refused)?
+        SpdzSession::begin(
+            &mut quorum,
+            &mut store_refs,
+            eval_session,
+            counter,
+            1,
+            &seeds,
+        )
+        .map_err(refused)?
     };
-    let (client, request) = spdz_blind(&public, &[input.0.as_slice()], eval_session, counter, &grants)
-        .map_err(|e| CliError::verify(format!("TOPRF mask grants rejected by the client: {e}")))?;
+    let (client, request) = spdz_blind(
+        &public,
+        &[input.0.as_slice()],
+        eval_session,
+        counter,
+        &grants,
+    )
+    .map_err(|e| CliError::verify(format!("TOPRF mask grants rejected by the client: {e}")))?;
     let outputs = session_state.evaluate(&request).map_err(refused)?;
     let evaluation = client
         .finalize(&outputs)
@@ -791,7 +816,13 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
     };
     for (party, server) in servers.iter().enumerate() {
         let payload = ZeroizingBuf(server.to_secret_bytes());
-        write_voprf_bundle(vault_dir, party, &enrollment, &payload, passphrase.as_deref())?;
+        write_voprf_bundle(
+            vault_dir,
+            party,
+            &enrollment,
+            &payload,
+            passphrase.as_deref(),
+        )?;
     }
 
     let meta = Json::object(vec![
@@ -1432,8 +1463,12 @@ fn run_mldsa_shamir_ceremony(
     let hub = SharedMpcHub::new(n);
     let outputs: Vec<Result<_, ThresholdMlDsaError>> = std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(n);
-        for (pos, ((&party_id, ent), share)) in
-            config.party_ids.iter().zip(entropies).zip(states).enumerate()
+        for (pos, ((&party_id, ent), share)) in config
+            .party_ids
+            .iter()
+            .zip(entropies)
+            .zip(states)
+            .enumerate()
         {
             let hub_ref = Arc::clone(&hub);
             let seed = Secret32(cshake256_framed_32(
@@ -1566,9 +1601,9 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         run_mldsa_shamir_ceremony(&dkg_cfg, &entropies)?
             .into_iter()
             .map(|share| {
-                let encoded = share
-                    .to_shamir_bytes()
-                    .ok_or_else(|| CliError::state("Shamir ceremony returned a replicated share"))?;
+                let encoded = share.to_shamir_bytes().ok_or_else(|| {
+                    CliError::state("Shamir ceremony returned a replicated share")
+                })?;
                 Ok((share, ZeroizingBuf(encoded)))
             })
             .collect::<Result<_, CliError>>()?
@@ -1781,7 +1816,9 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
             || pack.pk_bytes != expected_pk.0
             || pack.policy_signing_key_id() != key_id
         {
-            return Err(CliError::state("ML-DSA vault metadata does not match its public key"));
+            return Err(CliError::state(
+                "ML-DSA vault metadata does not match its public key",
+            ));
         }
         Some(pack)
     } else {

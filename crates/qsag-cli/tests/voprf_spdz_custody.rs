@@ -62,7 +62,8 @@ fn corrupt_longest_hex_run(path: &str) {
 
 #[test]
 fn three_of_five_evaluates_from_three_remaining_share_files() {
-    let scratch = Scratch(std::env::temp_dir().join(format!("qsag-toprf-spdz-{}", std::process::id())));
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("qsag-toprf-spdz-{}", std::process::id())));
     std::fs::create_dir(&scratch.0).unwrap();
     let path = |name: &str| scratch.0.join(name).to_str().unwrap().to_owned();
     let (vault, public, input) = (path("vault"), path("public"), path("input"));
@@ -73,15 +74,36 @@ fn three_of_five_evaluates_from_three_remaining_share_files() {
     // The replicated backend refuses the shape; the default for it is Shamir-SPDZ.
     refused(
         &[
-            "cred", "voprf-keygen", "--vault-dir", &vault, "--public-out", &public,
-            "--threshold", "3", "--parties", "5", "--backend", "rss",
-            "--passphrase-env", "QSAG_TOPRF_PASS",
+            "cred",
+            "voprf-keygen",
+            "--vault-dir",
+            &vault,
+            "--public-out",
+            &public,
+            "--threshold",
+            "3",
+            "--parties",
+            "5",
+            "--backend",
+            "rss",
+            "--passphrase-env",
+            "QSAG_TOPRF_PASS",
         ],
         "shamir-spdz",
     );
     success(&[
-        "cred", "voprf-keygen", "--vault-dir", &vault, "--public-out", &public,
-        "--threshold", "3", "--parties", "5", "--passphrase-env", "QSAG_TOPRF_PASS",
+        "cred",
+        "voprf-keygen",
+        "--vault-dir",
+        &vault,
+        "--public-out",
+        &public,
+        "--threshold",
+        "3",
+        "--parties",
+        "5",
+        "--passphrase-env",
+        "QSAG_TOPRF_PASS",
     ]);
     for party in 0..5 {
         let bundle = std::fs::read_to_string(share(party)).unwrap();
@@ -91,8 +113,20 @@ fn three_of_five_evaluates_from_three_remaining_share_files() {
 
     let eval = |counter: &str, out: &str, signers: Option<&str>| {
         let mut args = vec![
-            "cred", "voprf-eval", "--vault-dir", &vault, "--public", &public, "--counter",
-            counter, "--in", &input, "--out", out, "--passphrase-env", "QSAG_TOPRF_PASS",
+            "cred",
+            "voprf-eval",
+            "--vault-dir",
+            &vault,
+            "--public",
+            &public,
+            "--counter",
+            counter,
+            "--in",
+            &input,
+            "--out",
+            out,
+            "--passphrase-env",
+            "QSAG_TOPRF_PASS",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -114,14 +148,21 @@ fn three_of_five_evaluates_from_three_remaining_share_files() {
     // Two servers are below the threshold, and nothing is spent on the attempt.
     let below = path("below");
     let before = std::fs::read(counter_file(0)).unwrap();
-    refused(&as_refs(&eval("1", &below, Some("0,3"))), "needs 3 online servers");
+    refused(
+        &as_refs(&eval("1", &below, Some("0,3"))),
+        "needs 3 online servers",
+    );
     assert_eq!(std::fs::read(counter_file(0)).unwrap(), before);
     assert!(!PathBuf::from(&below).exists());
 
     // The three remaining files evaluate, and a different quorum computes the same function.
     let second = path("second");
     success(&as_refs(&eval("1", &second, None)));
-    assert!(std::fs::read_to_string(&second).unwrap().contains("voprf-poseidon2-shamir-spdz"));
+    assert!(
+        std::fs::read_to_string(&second)
+            .unwrap()
+            .contains("voprf-poseidon2-shamir-spdz")
+    );
     assert_eq!(prf_output(&first), prf_output(&second));
 
     // Server 4 already spent counter 0 and server 0 spent counter 1.

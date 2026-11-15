@@ -9,6 +9,8 @@ mod anchor;
 mod cli;
 mod codec;
 mod cred;
+// Trusted-dealer builds provision `fts-threshold` without the dealerless FTS ceremony.
+#[cfg_attr(any(test, feature = "test-dealer"), allow(dead_code))]
 mod dealerless_ceremony;
 mod envelope;
 mod hd;
