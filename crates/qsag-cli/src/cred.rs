@@ -2,9 +2,10 @@
 //! ceremonies (`qsag cred`), backed by [`qsag_cred::voprf`] and [`qsag_cred::threshold_mldsa`].
 //!
 //! Subcommands:
-//! - `voprf-keygen` — Five-server dealerless Poseidon2 TOPRF setup with encrypted party bundles.
-//! - `voprf-eval` — Blinded client query + 5-server replicated evaluation with durable
-//!   monotone counter reservation.
+//! - `voprf-keygen` — Dealerless Poseidon2 TOPRF setup with encrypted party bundles: the
+//!   replicated five-server backend, or the Shamir-SPDZ backend for any `2 <= t <= n <= 64`.
+//! - `voprf-eval` — Blinded client query and evaluation with durable monotone counter
+//!   reservation: all five servers (replicated), or any `t` persisted shares (Shamir-SPDZ).
 //! - `mldsa-keygen` — Dealerless `(t, n)` threshold FIPS 204 ML-DSA (`44`/`65`/`87`) setup.
 //! - `mldsa-sign` — Sealed-`w1` abort-private `(2t - 1)`-of-`n` threshold FIPS 204 signing
 //!   with crash-atomic [`FsNonceBurnStore`] persistence.
@@ -17,7 +18,9 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use qsag_accel::ct::ct_zeroize_bytes;
 use qsag_accel::keccak::cshake256_framed_32;
+use qsag_core::wipe::SecretBuffer;
 use qsag_cred::voprf::{self, CounterStore, PublicKey as ToprfPublicKey, SERVERS as TOPRF_SERVERS};
+use qsag_cred::voprf_spdz::{SpdzConfig, SpdzPublic, SpdzServer, SpdzSession, spdz_blind, spdz_dkg};
 use qsag_cred::{
     FsNonceBurnStore, MlDsaLevel, MpcTransport, MpcTransportError, RoundInbox, RoundInfo,
     RoundKind, ThresholdMlDsaDkgConfig, ThresholdMlDsaError, ThresholdMlDsaSignerShare,
@@ -34,14 +37,18 @@ const CRED_HELP: &str = "\
 qsag cred <subcommand> [options]
 
 Post-quantum threshold credential & standard-verifier FIPS 204 threshold ML-DSA ceremonies:
-  voprf-keygen  run dealerless Poseidon2 TOPRF setup (five servers, privacy threshold two)
-  voprf-eval    evaluate from five persisted TOPRF party bundles (monotone counter)
+  voprf-keygen  run dealerless Poseidon2 TOPRF setup: replicated (2, 5), or Shamir-SPDZ (t, n <= 64)
+  voprf-eval    evaluate from persisted TOPRF party bundles: all five, or any t (Shamir-SPDZ)
   mldsa-keygen  run dealerless (t, n) threshold FIPS 204 ML-DSA key generation (44 / 65 / 87)
   mldsa-sign    co-sign a message with >= 2t - 1 threshold ML-DSA custodians (sealed-w1 ZK)
   mldsa-verify  verify a standard FIPS 204 ML-DSA signature against the threshold public key
 ";
 
 const VOPRF_SHARE_FORMAT: &str = "qsag-cred-voprf-share-v1";
+const VOPRF_SPDZ_SHARE_FORMAT: &str = "qsag-cred-voprf-spdz-share-v1";
+const VOPRF_RSS_SCHEME: &str = "voprf-poseidon2-2of5";
+const VOPRF_SPDZ_SCHEME: &str = "voprf-poseidon2-shamir-spdz";
+const VOPRF_SPDZ_BACKEND: &str = "shamir-spdz";
 const VOPRF_META_FORMAT: &str = "qsag-cred-voprf-meta-v1";
 const VOPRF_PUB_FORMAT: &str = "qsag-cred-voprf-public-v1";
 const VOPRF_EVAL_FORMAT: &str = "qsag-cred-voprf-eval-v1";
@@ -309,6 +316,314 @@ fn voprf_counter_path(vault_dir: &str, party: usize) -> String {
         .into_owned()
 }
 
+/// Enrollment facts every TOPRF party bundle is bound to.
+struct VoprfEnrollment<'a> {
+    share_format: &'a str,
+    scheme: &'a str,
+    threshold: usize,
+    parties: usize,
+    session: [u8; 32],
+    commitment: [u8; 32],
+}
+
+/// Write one party's encrypted, vault-bound share bundle and its empty counter file.
+fn write_voprf_bundle(
+    vault_dir: &str,
+    party: usize,
+    enrollment: &VoprfEnrollment<'_>,
+    payload: &ZeroizingBuf,
+    passphrase: Option<&[u8]>,
+) -> Result<(), CliError> {
+    let enrollment_nonce = Secret32(os_random_32()?);
+    let mut bundle = Json::object(vec![
+        ("format", Json::str(enrollment.share_format)),
+        ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
+        ("scheme", Json::str(enrollment.scheme)),
+        ("party", Json::num(party)),
+        ("threshold", Json::num(enrollment.threshold)),
+        ("parties", Json::num(enrollment.parties)),
+        ("session_id", Json::hex(&enrollment.session)),
+        ("commitment", Json::hex(&enrollment.commitment)),
+        ("secret_key", Json::hex(payload)),
+    ]);
+    if let Some(pass) = passphrase {
+        crate::envelope::seal(&mut bundle, pass)?;
+    }
+    let path = voprf_share_path(vault_dir, party);
+    let mut lock = crate::vault::Vault::acquire(&path, true)?;
+    let opened = crate::envelope::open(&bundle, passphrase)?;
+    lock.set_key_material(&opened);
+    lock.bind(&mut bundle)?;
+    lock.seal(&mut bundle)?;
+    let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
+    write_new(&path, &encoded, true)?;
+    let counter_doc = Json::object(vec![
+        ("format", Json::str(VOPRF_COUNTER_FORMAT)),
+        ("party", Json::num(party)),
+        ("key", Json::hex(&enrollment.commitment)),
+        ("high_water", Json::Null),
+    ]);
+    write_new(
+        &voprf_counter_path(vault_dir, party),
+        counter_doc.to_pretty().as_bytes(),
+        true,
+    )
+}
+
+/// Open and authenticate one party's share bundle against the enrollment it must belong to.
+fn load_voprf_bundle(
+    vault_dir: &str,
+    party: usize,
+    enrollment: &VoprfEnrollment<'_>,
+    passphrase: Option<&[u8]>,
+) -> Result<(crate::vault::Vault, crate::envelope::OpenedSecret), CliError> {
+    let path = voprf_share_path(vault_dir, party);
+    let mut lock = crate::vault::Vault::acquire(&path, false)?;
+    let bundle = load_json_checked(&path, enrollment.share_format, MAX_KEY_FILE_BYTES)?;
+    let opened = crate::envelope::open(&bundle, passphrase)?;
+    lock.set_key_material(&opened);
+    lock.authenticate(&bundle)?;
+    if bundle.field_u64("party")? != party as u64
+        || bundle.field_u64("threshold")? != enrollment.threshold as u64
+        || bundle.field_u64("parties")? != enrollment.parties as u64
+        || bundle.field_hex("session_id")?.0.as_slice() != enrollment.session
+        || bundle.field_hex("commitment")?.0.as_slice() != enrollment.commitment
+    {
+        return Err(CliError::state("TOPRF share enrollment mismatch"));
+    }
+    Ok((lock, opened))
+}
+
+fn toprf_seed(deterministic: bool, domain: &[u8], parts: &[&[u8]]) -> Result<[u8; 32], CliError> {
+    if deterministic {
+        Ok(cshake256_framed_32(domain, parts))
+    } else {
+        os_random_32()
+    }
+}
+
+/// Dealerless Shamir-SPDZ enrollment for any `2 <= threshold <= parties <= 64`.
+fn voprf_spdz_keygen(
+    args: &Args,
+    threshold: u64,
+    parties: u64,
+    passphrase: Option<&[u8]>,
+    vault_dir: &str,
+    public_out: &str,
+) -> Result<(), CliError> {
+    let config = SpdzConfig::new(threshold as usize, parties as usize).map_err(|_| {
+        CliError::usage("the Shamir-SPDZ TOPRF backend supports 2 <= --threshold <= --parties <= 64")
+    })?;
+    let deterministic = args.flag("deterministic");
+    let session = toprf_seed(
+        deterministic,
+        b"QSAG.CLI.TOPRF.DET.SESSION.V1",
+        &[b"voprf-keygen-shamir-spdz"],
+    )?;
+    let mut seeds = SecretBuffer(Vec::with_capacity(config.servers()));
+    for party in 0..config.servers() {
+        seeds.push(toprf_seed(
+            deterministic,
+            b"QSAG.CLI.TOPRF.DET.SEED.V1",
+            &[&(party as u64).to_le_bytes()],
+        )?);
+    }
+    let servers = spdz_dkg(config, session, &seeds).map_err(|e| {
+        CliError::verify(format!("dealerless Shamir-SPDZ TOPRF enrollment aborted: {e}"))
+    })?;
+    let public = servers[0].public().clone();
+    let commitment = public.public_key().commitment();
+    let enrollment = VoprfEnrollment {
+        share_format: VOPRF_SPDZ_SHARE_FORMAT,
+        scheme: VOPRF_SPDZ_SCHEME,
+        threshold: config.threshold(),
+        parties: config.servers(),
+        session,
+        commitment,
+    };
+    for (party, server) in servers.iter().enumerate() {
+        let payload = ZeroizingBuf(server.to_secret_bytes());
+        write_voprf_bundle(vault_dir, party, &enrollment, &payload, passphrase)?;
+    }
+    let record = public.to_bytes();
+    let meta = Json::object(vec![
+        ("format", Json::str(VOPRF_META_FORMAT)),
+        ("share_format", Json::str(VOPRF_SPDZ_SHARE_FORMAT)),
+        ("backend", Json::str(VOPRF_SPDZ_BACKEND)),
+        ("threshold", Json::num(config.threshold())),
+        ("parties", Json::num(config.servers())),
+        ("session_id", Json::hex(&session)),
+        ("commitment", Json::hex(&commitment)),
+        ("enrollment", Json::hex(&record)),
+    ]);
+    write_new(
+        &voprf_meta_path(vault_dir),
+        meta.to_pretty().as_bytes(),
+        true,
+    )?;
+    let pub_doc = Json::object(vec![
+        ("format", Json::str(VOPRF_PUB_FORMAT)),
+        ("scheme", Json::str(VOPRF_SPDZ_SCHEME)),
+        ("threshold", Json::num(config.threshold())),
+        ("parties", Json::num(config.servers())),
+        ("commitment", Json::hex(&commitment)),
+        ("enrollment", Json::hex(&record)),
+    ]);
+    write_new(public_out, pub_doc.to_pretty().as_bytes(), false)?;
+    if args.flag("json") {
+        let report = Json::object(vec![
+            ("operation", Json::str("cred-voprf-keygen")),
+            ("backend", Json::str(VOPRF_SPDZ_BACKEND)),
+            ("vault_dir", Json::str(vault_dir)),
+            ("public_file", Json::str(public_out)),
+            ("commitment", Json::hex(&commitment)),
+        ]);
+        print!("{}", report.to_pretty());
+    } else {
+        println!(
+            "initialized ({}, {}) dealerless Shamir-SPDZ TOPRF vault {vault_dir} (commitment {})",
+            config.threshold(),
+            config.servers(),
+            to_hex(&commitment)
+        );
+    }
+    Ok(())
+}
+
+/// Evaluate from any `threshold` persisted Shamir-SPDZ shares. Without `--signers`
+/// the first `threshold` share files present in the vault form the quorum.
+#[allow(clippy::too_many_arguments)]
+fn voprf_spdz_eval(
+    args: &Args,
+    meta: &Json,
+    pub_json: &Json,
+    vault_dir: &str,
+    out_path: &str,
+    counter: u64,
+    input: &ZeroizingBuf,
+    passphrase: Option<&[u8]>,
+) -> Result<(), CliError> {
+    let record = meta.field_hex("enrollment")?;
+    if pub_json.field_hex("enrollment")?.0 != record.0 {
+        return Err(CliError::verify(
+            "public file enrollment record does not match TOPRF vault",
+        ));
+    }
+    let public = SpdzPublic::from_bytes(&record.0)
+        .map_err(|e| CliError::input(format!("invalid TOPRF enrollment record: {e}")))?;
+    let session = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
+    let commitment = public.public_key().commitment();
+    let (threshold, parties) = (public.config().threshold(), public.config().servers());
+    if from_hex_exact::<32>(meta.field_str("commitment")?, "commitment")? != commitment
+        || meta.field_u64("threshold")? != threshold as u64
+        || meta.field_u64("parties")? != parties as u64
+        || meta.field_str("share_format")? != VOPRF_SPDZ_SHARE_FORMAT
+    {
+        return Err(CliError::state("TOPRF vault metadata does not match its enrollment record"));
+    }
+    let selected: Vec<usize> = match args.get("signers") {
+        Some(spec) => parse_party_indices(Some(spec), parties, parties)?,
+        None => (0..parties)
+            .filter(|&party| Path::new(&voprf_share_path(vault_dir, party)).exists())
+            .take(threshold)
+            .collect(),
+    };
+    if selected.len() < threshold {
+        return Err(CliError::state(format!(
+            "the ({threshold}, {parties}) Shamir-SPDZ TOPRF needs {threshold} online servers; only {} selected or present",
+            selected.len()
+        )));
+    }
+    let enrollment = VoprfEnrollment {
+        share_format: VOPRF_SPDZ_SHARE_FORMAT,
+        scheme: VOPRF_SPDZ_SCHEME,
+        threshold,
+        parties,
+        session,
+        commitment,
+    };
+    let mut locks = Vec::with_capacity(selected.len());
+    let mut servers = Vec::with_capacity(selected.len());
+    let mut stores = Vec::with_capacity(selected.len());
+    for &party in &selected {
+        let (lock, opened) = load_voprf_bundle(vault_dir, party, &enrollment, passphrase)?;
+        servers.push(
+            SpdzServer::from_secret_bytes(opened.secret_key()?, &public, party)
+                .map_err(|e| CliError::input(format!("invalid TOPRF share: {e}")))?,
+        );
+        locks.push(lock);
+        stores.push(FsToprfCounterStore {
+            path: voprf_counter_path(vault_dir, party),
+            expected_key: commitment,
+            expected_party: party,
+        });
+    }
+
+    let deterministic = args.flag("deterministic");
+    let eval_session = toprf_seed(
+        deterministic,
+        b"QSAG.CLI.TOPRF.DET.EVAL_SESSION.V1",
+        &[&commitment, &counter.to_le_bytes()],
+    )?;
+    let mut seeds = SecretBuffer(Vec::with_capacity(selected.len()));
+    for &party in &selected {
+        seeds.push(toprf_seed(
+            deterministic,
+            b"QSAG.CLI.TOPRF.DET.SERVER.V1",
+            &[&commitment, &counter.to_le_bytes(), &(party as u64).to_le_bytes()],
+        )?);
+    }
+    let refused = |e: voprf::Error| match e {
+        voprf::Error::Counter | voprf::Error::Quota => CliError::state(format!(
+            "TOPRF monotone counter {counter} refused (already spent or outside window)"
+        )),
+        other => CliError::verify(format!("TOPRF evaluation aborted: {other}")),
+    };
+    let (session_state, grants) = {
+        let mut quorum: Vec<&mut SpdzServer> = servers.iter_mut().collect();
+        let mut store_refs: Vec<&mut dyn CounterStore> = stores
+            .iter_mut()
+            .map(|store| store as &mut dyn CounterStore)
+            .collect();
+        SpdzSession::begin(&mut quorum, &mut store_refs, eval_session, counter, 1, &seeds)
+            .map_err(refused)?
+    };
+    let (client, request) = spdz_blind(&public, &[input.0.as_slice()], eval_session, counter, &grants)
+        .map_err(|e| CliError::verify(format!("TOPRF mask grants rejected by the client: {e}")))?;
+    let outputs = session_state.evaluate(&request).map_err(refused)?;
+    let evaluation = client
+        .finalize(&outputs)
+        .map_err(|e| CliError::verify(format!("TOPRF client finalize failed: {e}")))?;
+    let pk = public.public_key();
+    let prf_value = evaluation
+        .value_for(&pk, &input.0)
+        .ok_or_else(|| CliError::verify("TOPRF evaluation missing bound input output"))?;
+    drop(locks);
+
+    let eval_doc = Json::object(vec![
+        ("format", Json::str(VOPRF_EVAL_FORMAT)),
+        ("scheme", Json::str(VOPRF_SPDZ_SCHEME)),
+        ("commitment", Json::hex(&commitment)),
+        ("counter", Json::num(counter)),
+        ("session_id", Json::hex(&eval_session)),
+        ("prf_output", Json::hex(&prf_value)),
+        (
+            "servers",
+            Json::Array(selected.iter().map(|party| Json::num(*party)).collect()),
+        ),
+        ("faulty_servers", Json::Array(Vec::new())),
+    ]);
+    write_new(out_path, eval_doc.to_pretty().as_bytes(), true)?;
+    if args.flag("json") {
+        print!("{}", eval_doc.to_pretty());
+    } else {
+        println!(
+            "evaluated ({threshold}, {parties}) Shamir-SPDZ TOPRF at counter {counter} with servers {selected:?} -> {out_path}"
+        );
+    }
+    Ok(())
+}
+
 fn run_voprf_dkg_threads(
     session: [u8; 32],
     entropies: &[Secret32; TOPRF_SERVERS],
@@ -352,6 +667,7 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
             "public-out",
             "threshold",
             "parties",
+            "backend",
             "passphrase-env",
             "passphrase-file",
         ],
@@ -359,16 +675,27 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred voprf-keygen --vault-dir <dir> --public-out <path> [--threshold 2 --parties 5] [--passphrase-env <name> | --passphrase-file <path> | --allow-unencrypted] [--deterministic] [--json]"
+            "qsag cred voprf-keygen --vault-dir <dir> --public-out <path> [--threshold 2 --parties 5] [--backend rss|shamir-spdz] [--passphrase-env <name> | --passphrase-file <path> | --allow-unencrypted] [--deterministic] [--json]\n  rss: replicated (2, 5), all five servers evaluate. shamir-spdz: any 2 <= threshold <= parties <= 64, any `threshold` servers evaluate (default when the committee is not (2, 5))."
         );
         return Ok(());
     }
     args.no_positionals()?;
     let threshold = args.get_u64("threshold")?.unwrap_or(2);
     let parties = args.get_u64("parties")?.unwrap_or(TOPRF_SERVERS as u64);
-    if (threshold, parties) != (2, TOPRF_SERVERS as u64) {
+    let replicated_shape = (threshold, parties) == (2, TOPRF_SERVERS as u64);
+    let spdz = match args.get("backend") {
+        None => !replicated_shape,
+        Some("rss") => false,
+        Some(VOPRF_SPDZ_BACKEND) => true,
+        Some(other) => {
+            return Err(CliError::usage(format!(
+                "unknown TOPRF --backend '{other}' (expected rss or shamir-spdz)"
+            )));
+        }
+    };
+    if !spdz && !replicated_shape {
         return Err(CliError::usage(
-            "the current replicated TOPRF backend supports --threshold 2 --parties 5; arbitrary Shamir committees are not implemented",
+            "the replicated TOPRF backend supports only --threshold 2 --parties 5; use --backend shamir-spdz for other committees",
         ));
     }
     let passphrase = crate::envelope::passphrase(&args)?;
@@ -382,23 +709,30 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
     ensure_absent(&voprf_meta_path(vault_dir))?;
     ensure_absent(public_out)?;
     private_dir(vault_dir, true)?;
+    if spdz {
+        return voprf_spdz_keygen(
+            &args,
+            threshold,
+            parties,
+            passphrase.as_deref(),
+            vault_dir,
+            public_out,
+        );
+    }
 
     let deterministic = args.flag("deterministic");
-    let session = if deterministic {
-        cshake256_framed_32(b"QSAG.CLI.TOPRF.DET.SESSION.V1", &[b"voprf-keygen"])
-    } else {
-        os_random_32()?
-    };
+    let session = toprf_seed(
+        deterministic,
+        b"QSAG.CLI.TOPRF.DET.SESSION.V1",
+        &[b"voprf-keygen"],
+    )?;
     let mut entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|_| Secret32([0; 32]));
     for (party, entropy) in entropies.iter_mut().enumerate() {
-        entropy.0 = if deterministic {
-            cshake256_framed_32(
-                b"QSAG.CLI.TOPRF.DET.SEED.V1",
-                &[&(party as u64).to_le_bytes()],
-            )
-        } else {
-            os_random_32()?
-        };
+        entropy.0 = toprf_seed(
+            deterministic,
+            b"QSAG.CLI.TOPRF.DET.SEED.V1",
+            &[&(party as u64).to_le_bytes()],
+        )?;
     }
 
     let servers = run_voprf_dkg_threads(session, &entropies)?;
@@ -411,42 +745,17 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
         }
     }
 
+    let enrollment = VoprfEnrollment {
+        share_format: VOPRF_SHARE_FORMAT,
+        scheme: VOPRF_RSS_SCHEME,
+        threshold: 2,
+        parties: TOPRF_SERVERS,
+        session,
+        commitment,
+    };
     for (party, server) in servers.iter().enumerate() {
         let payload = ZeroizingBuf(server.to_secret_bytes());
-        let enrollment_nonce = Secret32(os_random_32()?);
-        let mut bundle = Json::object(vec![
-            ("format", Json::str(VOPRF_SHARE_FORMAT)),
-            ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
-            ("scheme", Json::str("voprf-poseidon2-2of5")),
-            ("party", Json::num(party)),
-            ("threshold", Json::num(2)),
-            ("parties", Json::num(TOPRF_SERVERS)),
-            ("session_id", Json::hex(&session)),
-            ("commitment", Json::hex(&commitment)),
-            ("secret_key", Json::hex(&payload)),
-        ]);
-        if let Some(pass) = &passphrase {
-            crate::envelope::seal(&mut bundle, pass)?;
-        }
-        let path = voprf_share_path(vault_dir, party);
-        let mut lock = crate::vault::Vault::acquire(&path, true)?;
-        let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
-        lock.set_key_material(&opened);
-        lock.bind(&mut bundle)?;
-        lock.seal(&mut bundle)?;
-        let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
-        write_new(&path, &encoded, true)?;
-        let counter_doc = Json::object(vec![
-            ("format", Json::str(VOPRF_COUNTER_FORMAT)),
-            ("party", Json::num(party)),
-            ("key", Json::hex(&commitment)),
-            ("high_water", Json::Null),
-        ]);
-        write_new(
-            &voprf_counter_path(vault_dir, party),
-            counter_doc.to_pretty().as_bytes(),
-            true,
-        )?;
+        write_voprf_bundle(vault_dir, party, &enrollment, &payload, passphrase.as_deref())?;
     }
 
     let meta = Json::object(vec![
@@ -465,7 +774,7 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
 
     let pub_doc = Json::object(vec![
         ("format", Json::str(VOPRF_PUB_FORMAT)),
-        ("scheme", Json::str("voprf-poseidon2-2of5")),
+        ("scheme", Json::str(VOPRF_RSS_SCHEME)),
         ("threshold", Json::num(2)),
         ("parties", Json::num(TOPRF_SERVERS)),
         ("commitment", Json::hex(&commitment)),
@@ -507,7 +816,7 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred voprf-eval --vault-dir <dir> --public <path> --counter <n> --in <path|-> --out <path> [--signers 0,1,2,3,4] [--passphrase-env <name> | --passphrase-file <path>] [--deterministic] [--json]"
+            "qsag cred voprf-eval --vault-dir <dir> --public <path> --counter <n> --in <path|-> --out <path> [--signers 0,1,2,3,4] [--passphrase-env <name> | --passphrase-file <path>] [--deterministic] [--json]\n  Replicated vaults need all five servers. Shamir-SPDZ vaults evaluate with any `threshold` servers: --signers, or by default the first `threshold` share files present."
         );
         return Ok(());
     }
@@ -529,6 +838,18 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
         MAX_KEY_FILE_BYTES,
     )?;
     let pub_json = load_json_checked(public_path, VOPRF_PUB_FORMAT, MAX_KEY_FILE_BYTES)?;
+    if meta.get("backend").and_then(Json::as_str) == Some(VOPRF_SPDZ_BACKEND) {
+        return voprf_spdz_eval(
+            &args,
+            &meta,
+            &pub_json,
+            vault_dir,
+            out_path,
+            counter,
+            &input,
+            passphrase.as_deref(),
+        );
+    }
     let session = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
     let commitment = from_hex_exact::<32>(meta.field_str("commitment")?, "commitment")?;
     let pub_commitment =
@@ -543,7 +864,7 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
     let selected = parse_party_indices(args.get("signers"), TOPRF_SERVERS, TOPRF_SERVERS)?;
     if selected != (0..TOPRF_SERVERS).collect::<Vec<_>>() {
         return Err(CliError::state(
-            "the current replicated TOPRF circuit requires all five servers; exact-threshold evaluation is not implemented",
+            "the replicated TOPRF circuit requires all five servers; enroll with --backend shamir-spdz for exact-threshold evaluation",
         ));
     }
     let mut locks = Vec::new();
@@ -551,22 +872,18 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
         if format.as_str() != Some(VOPRF_SHARE_FORMAT) {
             return Err(CliError::input("unsupported TOPRF share format"));
         }
+        let enrollment = VoprfEnrollment {
+            share_format: VOPRF_SHARE_FORMAT,
+            scheme: VOPRF_RSS_SCHEME,
+            threshold: 2,
+            parties: TOPRF_SERVERS,
+            session,
+            commitment,
+        };
         let mut servers = Vec::with_capacity(TOPRF_SERVERS);
         for party in selected {
-            let path = voprf_share_path(vault_dir, party);
-            let mut lock = crate::vault::Vault::acquire(&path, false)?;
-            let bundle = load_json_checked(&path, VOPRF_SHARE_FORMAT, MAX_KEY_FILE_BYTES)?;
-            let opened = crate::envelope::open(&bundle, passphrase.as_deref())?;
-            lock.set_key_material(&opened);
-            lock.authenticate(&bundle)?;
-            if bundle.field_u64("party")? != party as u64
-                || bundle.field_u64("threshold")? != 2
-                || bundle.field_u64("parties")? != TOPRF_SERVERS as u64
-                || bundle.field_hex("session_id")?.0.as_slice() != session
-                || bundle.field_hex("commitment")?.0.as_slice() != commitment
-            {
-                return Err(CliError::state("TOPRF share enrollment mismatch"));
-            }
+            let (lock, opened) =
+                load_voprf_bundle(vault_dir, party, &enrollment, passphrase.as_deref())?;
             servers.push(
                 voprf::Server::from_secret_bytes(opened.secret_key()?, &pk, party)
                     .map_err(|e| CliError::input(format!("invalid TOPRF share: {e}")))?,
@@ -689,7 +1006,7 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
 
     let eval_doc = Json::object(vec![
         ("format", Json::str(VOPRF_EVAL_FORMAT)),
-        ("scheme", Json::str("voprf-poseidon2-2of5")),
+        ("scheme", Json::str(VOPRF_RSS_SCHEME)),
         ("commitment", Json::hex(&commitment)),
         ("counter", Json::num(counter)),
         ("session_id", Json::hex(&eval_session)),
