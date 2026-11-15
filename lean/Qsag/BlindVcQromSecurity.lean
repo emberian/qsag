@@ -2,8 +2,13 @@ module
 /-
 # BlindVC 438-Repetition Multi-Round QROM Fiat-Shamir & Issuer-Binding Security
 
-Constructive Lean 4.35 composition closing `BlindVC` (`Quantum128`, `438` ZKBoo repetitions)
-against `Qsag.MultiRoundFsQrom` and `Qsag.ThresholdMlDsaAndToprf`:
+Constructive Lean 4.35 bounds for the collision-filtered, supplied-opening-table model
+of `BlindVC` (`Quantum128`, `438` ZKBoo repetitions). The language is actual credential
+witness validity. `VcRewoundCommitConflict` records an actual pair of conflicting committed
+views in the finite supplied table, and `blindVc_committed_acceptance_decomposition`
+accounts for the omitted event. Bounding that event computationally, constructing the
+three-opening table from a quantum prover, and linking measured-query mass to the output
+forgery event remain separate obligations. There is no global collision-freedom premise.
 1. **Interactive `438`-Repetition ZKBoo `PublicCoinIop` & `RbrStateFunction`
    (`blindVcParallelRbr`, `blindVc_quantum128_interactive_rbr_bound`)**:
    Ternary pigeonhole across `438` committed repetitions (`2^438 * 2^256 < 3^438`, `> 128` Grover
@@ -14,7 +19,8 @@ against `Qsag.MultiRoundFsQrom` and `Qsag.ThresholdMlDsaAndToprf`:
 3. **Merkle Path Bridge & Issuer `ML-DSA` Root-Attestation Unforgeability
    (`evalVcMerklePathBool_eq_merkleRootFromPath`, `blindVc_presentation_reduces_to_issuer_mldsa`)**:
    Bridges `evalVcMerklePathBool` to `merkleRootFromPath`, proves `vcMerkleTree_opening_sound`,
-   and reduces `verifyBlindVcWithIssuerAttestation` tightly to issuer `ML-DSA` forgery or collision.
+   and gives an issuer-attestation/collision/witness disjunction given three consistent
+   accepted openings. Fresh-message EUF-CMA and quantum extraction are separate games.
 -/
 
 public import Qsag.ThresholdMlDsaAndToprf
@@ -90,17 +96,44 @@ def verifyCommittedBlindVcRep
     stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
     stmt.disclosedAttrs repIdx e o
 
+/-- Excludes only a collision in this supplied three-opening table. The unfiltered
+verifier remains `verifyCommittedBlindVcRep`; the omitted event is accounted for below. -/
+def verifyCollisionFreeCommittedBlindVcRep
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement) (repIdx : Nat)
+    (r1 : Triple3 (List UInt8) × VcRepFinalOuts3)
+    (cand : Fin 3 → OpenedBlindVcRep) (e : Fin 3) : Bool :=
+  !decide (VcRewoundCommitConflict H stmt.presNonce repIdx (cand 0) (cand 1) (cand 2)) &&
+    verifyCommittedBlindVcRep H prgExpand stmt repIdx r1 e (cand e)
+
+/-- Exact event decomposition: any omitted acceptance supplies a concrete pair of
+conflicting committed views. No global collision-freedom premise is used. -/
+theorem blindVc_committed_acceptance_decomposition
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement) (repIdx : Nat)
+    (r1 : Triple3 (List UInt8) × VcRepFinalOuts3)
+    (cand : Fin 3 → OpenedBlindVcRep) (e : Fin 3)
+    (h : verifyCommittedBlindVcRep H prgExpand stmt repIdx r1 e (cand e) = true) :
+    VcRewoundCommitConflict H stmt.presNonce repIdx (cand 0) (cand 1) (cand 2) ∨
+    verifyCollisionFreeCommittedBlindVcRep H prgExpand stmt repIdx r1 cand e = true := by
+  by_cases hc : VcRewoundCommitConflict H stmt.presNonce repIdx (cand 0) (cand 1) (cand 2)
+  · exact Or.inl hc
+  · exact Or.inr (by simp only [verifyCollisionFreeCommittedBlindVcRep, hc, decide_false,
+      Bool.not_false, Bool.true_and, h])
+
 /-- **Per-Repetition 3-Challenge Pigeonhole Soundness (`blindVc_rep_pigeonhole_le_two`)**:
-    Without an `H`-collision or valid `BlindVcSecretWitness`, at most `2` of `3` challenges accept. -/
-theorem blindVc_rep_pigeonhole_le_two
-    {H : List UInt8 → List UInt8} (hHLen : ∀ m, (H m).length < 256 ^ 8)
-    (hNoColl : ¬ ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂)
+    On a false statement, at most `2` of `3` collision-filtered challenges accept. -/
+private theorem blindVc_rep_pigeonhole_core
+    {H : List UInt8 → List UInt8} (_hHLen : ∀ m, (H m).length < 256 ^ 8)
     {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
     {stmt : BlindVcPublicStatement}
     (hNoWit : ¬ ∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth,
       BlindVcWitnessValid stmt wit)
     (repIdx : Nat) (r1 : Triple3 (List UInt8) × VcRepFinalOuts3)
-    (cand : Fin 3 → OpenedBlindVcRep) :
+    (cand : Fin 3 → OpenedBlindVcRep)
+    (hNoColl : ¬ VcRewoundCommitConflict H stmt.presNonce repIdx (cand 0) (cand 1) (cand 2)) :
     qsum 3 (fun e =>
       if verifyCommittedBlindVcRep H prgExpand stmt repIdx r1 e (cand e) = true then 1 else 0) ≤ 2 := by
   apply fin3_not_all_count_le_two; unfold fin3AllTrue
@@ -112,7 +145,7 @@ theorem blindVc_rep_pigeonhole_le_two
   | true =>
     simp only [verifyCommittedBlindVcRep, Bool.and_eq_true, decide_eq_true_eq] at hAll
     rcases hAll with ⟨⟨⟨hR0, hV0⟩, ⟨hR1, hV1⟩⟩, ⟨hR2, hV2⟩⟩
-    rcases verifyOpenedBlindVcRep_extract3_from_rewound hHLen
+    rcases verifyOpenedBlindVcRep_extract3_finite_conflict
         (hR0.trans hR1.symm) (hR1.trans hR2.symm) hV0 hV1 hV2 with hColl | hExt
     · exact False.elim (hNoColl hColl)
     · obtain ⟨attrs, hb, pb, leaf, steps, _, hAr, hDisc, hLeaf, hSLen, hRoot, hPres, hScope⟩ := hExt
@@ -142,6 +175,24 @@ theorem blindVc_rep_pigeonhole_le_two
         · rw [vecOfListLen_toList steps hSLen]; exact hRoot
         · rw [vecOfListLen_toList attrs hAr]; exact hPres
       exact False.elim (hNoWit ⟨wit, hVal⟩)
+
+theorem blindVc_rep_pigeonhole_le_two
+    {H : List UInt8 → List UInt8} (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {stmt : BlindVcPublicStatement}
+    (hNoWit : ¬ ∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth,
+      BlindVcWitnessValid stmt wit)
+    (repIdx : Nat) (r1 : Triple3 (List UInt8) × VcRepFinalOuts3)
+    (cand : Fin 3 → OpenedBlindVcRep) :
+    qsum 3 (fun e =>
+      if verifyCollisionFreeCommittedBlindVcRep H prgExpand stmt repIdx r1 cand e = true then 1 else 0) ≤ 2 := by
+  by_cases hc : VcRewoundCommitConflict H stmt.presNonce repIdx (cand 0) (cand 1) (cand 2)
+  · simp only [verifyCollisionFreeCommittedBlindVcRep, hc, decide_true, Bool.not_true,
+      Bool.false_and, Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]
+    exact Nat.zero_le 2
+  · simp only [verifyCollisionFreeCommittedBlindVcRep, hc, decide_false, Bool.not_false,
+      Bool.true_and]
+    exact blindVc_rep_pigeonhole_core hHLen hNoWit repIdx r1 cand hc
 
 def decodeTernaryChallengeAt (ch idx : Nat) : Fin 3 :=
   ⟨(ch / (3 ^ idx)) % 3, Nat.mod_lt _ (by decide)⟩
@@ -259,8 +310,7 @@ def blindVcParallelIop
   challengeCard := fun _ => 3 ^ k
   h_chal_pos := fun _ => Nat.pow_pos (by decide)
   inLang := fun stmt =>
-    (∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂) ∨
-    (∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth, BlindVcWitnessValid stmt wit)
+    ∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth, BlindVcWitnessValid stmt wit
   verify := fun stmt tr =>
     match tr with
     | [(msg, ch)] =>
@@ -268,8 +318,8 @@ def blindVcParallelIop
         if hIdx : idx < k then
           let fi : Fin k := ⟨idx, hIdx⟩
           let e := decodeTernaryChallengeAt ch idx
-          verifyCommittedBlindVcRep H prgExpand stmt idx (Vec.get msg.allRound1 fi) e
-            ((Vec.get msg.openTable fi).get e)
+          verifyCollisionFreeCommittedBlindVcRep H prgExpand stmt idx (Vec.get msg.allRound1 fi)
+            (Vec.get msg.openTable fi).get e
         else true)
     | _ => false
 
@@ -290,13 +340,12 @@ def blindVcParallelRbr
     cases pref with
     | cons _ _ => rw [hr0] at hPrefLen; cases hPrefLen
     | nil =>
-      have hNoColl : ¬ ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := fun hc => hDoomed (.inl hc)
       have hNoWit : ¬ ∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth,
-          BlindVcWitnessValid stmt wit := fun hw => hDoomed (.inr hw)
+          BlindVcWitnessValid stmt wit := hDoomed
       let p : Nat → Fin 3 → Bool := fun idx e =>
         if hIdx : idx < k then
-          verifyCommittedBlindVcRep H prgExpand stmt idx (Vec.get msg.allRound1 ⟨idx, hIdx⟩) e
-            ((Vec.get msg.openTable ⟨idx, hIdx⟩).get e)
+          verifyCollisionFreeCommittedBlindVcRep H prgExpand stmt idx (Vec.get msg.allRound1 ⟨idx, hIdx⟩)
+            (Vec.get msg.openTable ⟨idx, hIdx⟩).get e
         else true
       let verFn : Fin (3 ^ k) → Bool :=
         fun c => (blindVcParallelIop H prgExpand k).verify stmt [(msg, c.1)]
@@ -313,10 +362,10 @@ def blindVcParallelRbr
       have hEach : ∀ idx < k, qsum 3 (fun e => if p idx e = true then 1 else 0) ≤ 2 := by
         intro idx hlt
         have hP : ∀ e : Fin 3, p idx e =
-            verifyCommittedBlindVcRep H prgExpand stmt idx (Vec.get msg.allRound1 ⟨idx, hlt⟩) e
-              ((Vec.get msg.openTable ⟨idx, hlt⟩).get e) := fun _ => dite_true hlt _ _
+            verifyCollisionFreeCommittedBlindVcRep H prgExpand stmt idx (Vec.get msg.allRound1 ⟨idx, hlt⟩)
+              (Vec.get msg.openTable ⟨idx, hlt⟩).get e := fun _ => dite_true hlt _ _
         rw [qsum_congr (fun e => by rw [hP e])]
-        exact blindVc_rep_pigeonhole_le_two hHLen hNoColl hNoWit idx
+        exact blindVc_rep_pigeonhole_le_two hHLen hNoWit idx
           (Vec.get msg.allRound1 ⟨idx, hlt⟩) ((Vec.get msg.openTable ⟨idx, hlt⟩).get)
       refine Nat.le_trans hLenLe ?_
       rw [qsum_congr (fun c => by rw [hEqRange c])]
@@ -383,9 +432,71 @@ def blindVcFsLiveAfter {cardX k : Nat}
     if hIdx : idx < k then
       let fi : Fin k := ⟨idx, hIdx⟩
       let e := squeeze64Mod3At (O' x) idx
+      verifyCollisionFreeCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
+        (Vec.get (msgAt x).allRound1 fi) (Vec.get (msgAt x).openTable fi).get e
+    else true)
+
+/-- The unfiltered verifier event on the supplied table. This is separate from the
+collision-filtered event bounded by the statistical QROM theorem. -/
+def blindVcFsUnfilteredLiveAfter {cardX k : Nat}
+    (H_hash : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmtAt : Fin cardX → BlindVcPublicStatement)
+    (msgAt : Fin cardX → BlindVcParallelMsg k)
+    (O' : Fin cardX → BitVec (64 * k)) (x : Fin cardX) : Bool :=
+  (List.range k).all (fun idx =>
+    if hIdx : idx < k then
+      let fi : Fin k := ⟨idx, hIdx⟩
+      let e := squeeze64Mod3At (O' x) idx
       verifyCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
         (Vec.get (msgAt x).allRound1 fi) e ((Vec.get (msgAt x).openTable fi).get e)
     else true)
+
+/-- A finite bad event in the actual supplied opening table, independent of any
+unrelated collisions elsewhere in the hash function's domain. -/
+def blindVcTableConflict {k : Nat} (H : List UInt8 → List UInt8)
+    (stmt : BlindVcPublicStatement) (msg : BlindVcParallelMsg k) : Bool :=
+  (List.range k).any (fun idx =>
+    if hIdx : idx < k then
+      let cand := (Vec.get msg.openTable ⟨idx, hIdx⟩).get
+      decide (VcRewoundCommitConflict H stmt.presNonce idx (cand 0) (cand 1) (cand 2))
+    else false)
+
+theorem blindVcTableConflict_extract {k : Nat}
+    {H : List UInt8 → List UInt8} {stmt : BlindVcPublicStatement}
+    {msg : BlindVcParallelMsg k} (h : blindVcTableConflict H stmt msg = true) :
+    ∃ idx : Fin k, let cand := (Vec.get msg.openTable idx).get
+      VcRewoundCommitConflict H stmt.presNonce idx.val (cand 0) (cand 1) (cand 2) := by
+  obtain ⟨idx, hMem, hHit⟩ := List.any_eq_true.mp h
+  have hlt : idx < k := List.mem_range.mp hMem
+  rw [dite_true hlt] at hHit
+  exact ⟨⟨idx, hlt⟩, of_decide_eq_true hHit⟩
+
+/-- The total acceptance event decomposes before assigning any numerical bound.
+A separate computational bound for `blindVcTableConflict` is required to turn the
+filtered QROM mass estimate into a total soundness estimate. -/
+theorem blindVc_fs_acceptance_decomposition {cardX k : Nat}
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmtAt : Fin cardX → BlindVcPublicStatement)
+    (msgAt : Fin cardX → BlindVcParallelMsg k)
+    (O : Fin cardX → BitVec (64 * k)) (x : Fin cardX)
+    (hAccept : blindVcFsUnfilteredLiveAfter H prgExpand stmtAt msgAt O x = true) :
+    blindVcTableConflict H (stmtAt x) (msgAt x) = true ∨
+    blindVcFsLiveAfter H prgExpand stmtAt msgAt O x = true := by
+  cases hc : blindVcTableConflict H (stmtAt x) (msgAt x) with
+  | true => exact Or.inl rfl
+  | false =>
+    right
+    apply List.all_eq_true.mpr
+    intro idx hMem
+    have hlt : idx < k := List.mem_range.mp hMem
+    have hRaw := List.all_eq_true.mp hAccept idx hMem
+    have hClean := List.any_eq_false.mp hc idx hMem
+    rw [dite_true hlt] at hRaw hClean ⊢
+    simp only [verifyCollisionFreeCommittedBlindVcRep, hClean, Bool.not_false,
+      Bool.true_and]
+    exact hRaw
 
 /-- Constructive `QromRbrRound` instantiation for `k`-repetition `BlindVC` Fiat-Shamir squeezing. -/
 def blindVcQromFsRound
@@ -405,23 +516,22 @@ def blindVcQromFsRound
   doomed_local := fun _ _ => rfl
   flip_bound := fun x hD => by
     have hNotIn := hDoomedSound x hD
-    have hNoColl : ¬ ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H_hash m₁ = H_hash m₂ := fun hc => hNotIn (.inl hc)
     have hNoWit : ¬ ∃ wit : BlindVcSecretWitness (stmtAt x).schema.arity (stmtAt x).treeDepth,
-        BlindVcWitnessValid (stmtAt x) wit := fun hw => hNotIn (.inr hw)
+        BlindVcWitnessValid (stmtAt x) wit := hNotIn
     let p : Nat → Fin (2 ^ 64) → Bool := fun idx u =>
       if hIdx : idx < k then
         let fi : Fin k := ⟨idx, hIdx⟩
         let e : Fin 3 := ⟨u.1 % 3, Nat.mod_lt _ (by decide)⟩
-        verifyCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
-          (Vec.get (msgAt x).allRound1 fi) e ((Vec.get (msgAt x).openTable fi).get e)
+        verifyCollisionFreeCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
+          (Vec.get (msgAt x).allRound1 fi) (Vec.get (msgAt x).openTable fi).get e
       else true
     have hEach : ∀ idx < k, qsum (2 ^ 64) (fun u => if p idx u = true then 1 else 0) ≤
         blindVcBadWord64 := by
       intro idx hlt
       let fi : Fin k := ⟨idx, hlt⟩
       let q3 : Fin 3 → Bool := fun e =>
-        verifyCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
-          (Vec.get (msgAt x).allRound1 fi) e ((Vec.get (msgAt x).openTable fi).get e)
+        verifyCollisionFreeCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
+          (Vec.get (msgAt x).allRound1 fi) (Vec.get (msgAt x).openTable fi).get e
       have hNotAll3 : fin3AllTrue q3 = false := by
         unfold fin3AllTrue
         cases hAll : (q3 0 && q3 1 && q3 2) with
@@ -433,7 +543,7 @@ def blindVcQromFsRound
             change (if q3 0 = true then 1 else 0) +
               ((if q3 1 = true then 1 else 0) + (if q3 2 = true then 1 else 0)) = 3
             rw [h0, h1, h2]; decide
-          have hLe2 := blindVc_rep_pigeonhole_le_two (prgExpand := prgExpand) hHLen hNoColl hNoWit idx
+          have hLe2 := blindVc_rep_pigeonhole_le_two (prgExpand := prgExpand) hHLen hNoWit idx
             (Vec.get (msgAt x).allRound1 fi) ((Vec.get (msgAt x).openTable fi).get)
           change qsum 3 (fun e => if q3 e = true then 1 else 0) ≤ 2 at hLe2; omega
       have hCong : ∀ u : Fin (2 ^ 64),
@@ -494,7 +604,7 @@ theorem blindVc_qrom_fs_round_bound
     (blindVcBadWord64 ^ k) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
 
 /-- **Flagship §2 Theorem — `438`-Repetition QROM Fiat-Shamir Soundness (`blindVc_quantum128_qrom_fs_soundness`)**:
-    Bounds unitary `Q`-query QROM forgery by `(2 * Q + 1)^2 * blindVcBadWord64^438 / 2^(64 * 438)`,
+    Bounds the defined collision-filtered doomed-to-live query mass by `(2 * Q + 1)^2 * blindVcBadWord64^438 / 2^(64 * 438)`,
     strictly `< 2^-128` for all `Q ≤ 2^60` quantum random-oracle queries. -/
 theorem blindVc_quantum128_qrom_fs_soundness
     {cardX cardAnc Q : Nat} (hQ : Q ≤ 2 ^ 60)
@@ -773,6 +883,80 @@ theorem vcMerkleTree_opening_witness :
   let z6 : Lane6 :=
     ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
   ⟨0, .leaf z6, 0, z6, [], rfl, rfl⟩
+
+/-- The repaired language has false instances even for a constant hash. The previous
+collision-in-language disjunct made every statement true for that hash. -/
+theorem blindVcParallelIop_false_statement_witness
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D) (k : Nat) :
+    ∃ stmt, ¬ (blindVcParallelIop H prgExpand k).inLang stmt := by
+  let z6 : Lane6 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero,
+    Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  let z4 : Lane4 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+  let stmt : BlindVcPublicStatement :=
+    { schema := ⟨0, 1, by decide, by decide⟩, treeDepth := 0,
+      presNonce := Vec.replicate 32 0, issuerEpoch := 0, accumulatorRoot := z6,
+      presCommit := z6, scopeTag := z6, verifierScopeLimbs := z4,
+      disclosedAttrs := [(0, Goldilocks.zero), (0, Goldilocks.zero)] }
+  refine ⟨stmt, ?_⟩
+  rintro ⟨wit, hw⟩
+  have h := hw.1
+  change false = true at h
+  cases h
+
+/-- Consistent copies never trigger the finite collision event, for any hash. -/
+theorem vcRewoundCommitConflict_consistent_table
+    (H : List UInt8 → List UInt8) (nonce : Vec UInt8 32) (idx : Nat) (o : OpenedBlindVcRep) :
+    let clean := { o with viewE1 := o.viewE }
+    ¬ VcRewoundCommitConflict H nonce idx clean clean clean := by
+  intro clean
+  simp only [VcRewoundCommitConflict, clean, ne_eq, not_true_eq_false, false_and, or_self,
+    not_false_eq_true]
+
+/-- The actual honest three-opening construction is never removed by the filter. -/
+theorem vcRewoundCommitConflict_honest_table
+    (H : List UInt8 → List UInt8) (nonce : Vec UInt8 32) (idx : Nat)
+    (tr : BlindVcRepTriple) :
+    ¬ VcRewoundCommitConflict H nonce idx
+      (openBlindVcRep H nonce idx tr 0)
+      (openBlindVcRep H nonce idx tr 1)
+      (openBlindVcRep H nonce idx tr 2) := by
+  simp only [VcRewoundCommitConflict, openBlindVcRep, vcNextParty3,
+    ne_eq, not_true_eq_false, false_and, or_self, not_false_eq_true]
+
+theorem blindVc_collision_filter_preserves_honest_openings
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
+    (stmt : BlindVcPublicStatement) (idx : Nat)
+    (r1 : Triple3 (List UInt8) × VcRepFinalOuts3) (tr : BlindVcRepTriple) (e : Fin 3) :
+    verifyCollisionFreeCommittedBlindVcRep H prgExpand stmt idx r1
+      (openBlindVcRep H stmt.presNonce idx tr) e =
+    verifyCommittedBlindVcRep H prgExpand stmt idx r1 e
+      (openBlindVcRep H stmt.presNonce idx tr e) := by
+  simp only [verifyCollisionFreeCommittedBlindVcRep,
+    vcRewoundCommitConflict_honest_table, decide_false, Bool.not_false, Bool.true_and]
+
+/-- A constant hash and two concretely different views do trigger the event. The
+candidate table is retained, rather than replacing it by an unrelated global collision. -/
+theorem vcRewoundCommitConflict_constant_hash
+    (nonce : Vec UInt8 32) (idx : Nat) (o : OpenedBlindVcRep) :
+    let bad := { o with
+      viewE := { o.viewE with attrShares := [] }
+      viewE1 := { o.viewE with attrShares := [Goldilocks.zero] } }
+    VcRewoundCommitConflict (fun _ => []) nonce idx bad bad bad := by
+  intro bad
+  apply Or.inl
+  refine ⟨?_, rfl⟩
+  intro he
+  have hh := congrArg PartyVcRepView.attrShares he
+  change [Goldilocks.zero] = [] at hh
+  cases hh
+
+#verify_constructive blindVcParallelIop_false_statement_witness
+  vcRewoundCommitConflict_consistent_table vcRewoundCommitConflict_constant_hash
+  blindVc_committed_acceptance_decomposition blindVcTableConflict_extract
+  blindVc_fs_acceptance_decomposition vcRewoundCommitConflict_honest_table
+  blindVc_collision_filter_preserves_honest_openings
 
 #verify_constructive blindVc_rep_pigeonhole_le_two blindVc_quantum128_interactive_rbr_bound
   word64_mod3_bad_count_le blindVc_qrom_fs_round_bound blindVc_quantum128_qrom_fs_soundness

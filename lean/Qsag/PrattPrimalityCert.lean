@@ -19,6 +19,8 @@ Given a topological chain of `PocklingtonStep` witnesses starting from base prim
 -/
 
 public import Qsag.Goldilocks
+public import Qsag.ActiveMigrationZeroTest
+import all Qsag.ActiveMigrationZeroTest
 public import Qsag.Tactic.AssuranceKit
 
 public section
@@ -29,8 +31,8 @@ set_option autoImplicit false
 
 namespace Weierstrass
 
-/-- Primality as a divisor statement (Euclid, *Elements* VII, Def. 11). -/
-@[expose] def IsPrime (p : Nat) : Prop := 2 ≤ p ∧ ∀ d, d ∣ p → d = 1 ∨ d = p
+/- `Weierstrass.IsPrime` and Euclid's lemma `IsPrime.dvd_mul` are the declarations of
+   `ActiveMigrationZeroTest.lean`; this module certifies primes for that same predicate. -/
 
 private theorem dvd_mul_not_left {q a b : Nat} (hq : IsPrime q)
     (hdvd : q ∣ a * b) (hna : ¬ (q ∣ a)) : q ∣ b := by
@@ -52,13 +54,6 @@ private theorem dvd_mul_not_left {q a b : Nat} (hq : IsPrime q)
     rw [Int.mul_right_comm (a : Int), hkInt, Int.mul_assoc]
   rw [hab, Int.mul_assoc (q : Int), ← Int.mul_add] at hmul
   exact Int.ofNat_dvd.1 ⟨(k : Int) * (extGcd a q).2.1 + (extGcd a q).2.2 * (b : Int), hmul.symm⟩
-
-/-- Euclid's lemma (*Elements* VII.30). -/
-theorem IsPrime.dvd_mul {p a b : Nat} (hp : IsPrime p) (h : p ∣ a * b) : p ∣ a ∨ p ∣ b := by
-  if hpa : p ∣ a then
-    exact .inl hpa
-  else
-    exact .inr (dvd_mul_not_left hp h hpa)
 
 /-! ### Constructive Proof of Fermat's Little Theorem for `Weierstrass.IsPrime` -/
 

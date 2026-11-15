@@ -8970,15 +8970,42 @@ private theorem vcPairScopeChunks_spec (e : Fin 3) (sid : UInt64)
       vcConstPair_spec Goldilocks.one e]
   rfl
 
-/-- **Constructive 3-Challenge Special Soundness + Round-1 Commitment Extraction (`0 Classical.choice`, fixing `C0-3`)**:
+/- **Constructive 3-Challenge Special Soundness + Round-1 Commitment Extraction (`0 Classical.choice`, fixing `C0-3`)**:
     Given 3 accepting openings `(o0, o1, o2)` at challenges `(0, 1, 2)` sharing the SAME Round-1
     `(commits, finalOuts)` transcript (with ZERO external `Nodup` assumption — derived directly from
     `verifyOpenedBlindVcRep`!), **either** an explicit `H`-collision is constructively exhibited,
     **or** a complete valid credential + boolean Merkle witness `(attrs, holderBlind, presBlind, leafCommit, boolSteps)`
     is extracted! -/
-theorem verifyOpenedBlindVcRep_extract3_from_rewound
+/-- A collision in one of the three concrete overlapping view pairs of a rewound table.
+This finite event says nothing about collisions at unrelated hash inputs. -/
+@[expose] def VcRewoundCommitConflict (H : List UInt8 → List UInt8)
+    (nonce : Vec UInt8 32) (repIdx : Nat) (o0 o1 o2 : OpenedBlindVcRep) : Prop :=
+  (o0.viewE1 ≠ o1.viewE ∧
+    vcCommitPartyView H nonce repIdx 1 o0.viewE1 (vcPartyFinalOutAt o1.finalOuts 1) =
+    vcCommitPartyView H nonce repIdx 1 o1.viewE (vcPartyFinalOutAt o1.finalOuts 1)) ∨
+  (o1.viewE1 ≠ o2.viewE ∧
+    vcCommitPartyView H nonce repIdx 2 o1.viewE1 (vcPartyFinalOutAt o2.finalOuts 2) =
+    vcCommitPartyView H nonce repIdx 2 o2.viewE (vcPartyFinalOutAt o2.finalOuts 2)) ∨
+  (o2.viewE1 ≠ o0.viewE ∧
+    vcCommitPartyView H nonce repIdx 0 o2.viewE1 (vcPartyFinalOutAt o0.finalOuts 0) =
+    vcCommitPartyView H nonce repIdx 0 o0.viewE (vcPartyFinalOutAt o0.finalOuts 0))
+
+instance (H : List UInt8 → List UInt8) (nonce : Vec UInt8 32)
+    (repIdx : Nat) (o0 o1 o2 : OpenedBlindVcRep) :
+    Decidable (VcRewoundCommitConflict H nonce repIdx o0 o1 o2) :=
+  by unfold VcRewoundCommitConflict; infer_instance
+
+/-- The finite event identifies which actual committed view pair breaks binding. -/
+theorem vcRewoundCommitConflict_hash_collision
+    {H : List UInt8 → List UInt8} (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {nonce : Vec UInt8 32} {repIdx : Nat} {o0 o1 o2 : OpenedBlindVcRep}
+    (h : VcRewoundCommitConflict H nonce repIdx o0 o1 o2) :
+    ∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂ := by
+  rcases h with h | h | h
+  all_goals exact vcCommitPartyView_binding hHLen (fun he => h.1 (congrArg Prod.fst he)) h.2
+
+theorem verifyOpenedBlindVcRep_extract3_finite_conflict
     {H : List UInt8 → List UInt8}
-    (hHLen : ∀ m, (H m).length < 256 ^ 8)
     {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
     {presNonce : Vec UInt8 32} {schema : VcSchema} {issuerEpoch : UInt64} {treeDepth : Nat}
     {accRoot presCommit scopeTag : Lane6} {verifierScopeLimbs : Lane4}
@@ -8992,7 +9019,7 @@ theorem verifyOpenedBlindVcRep_extract3_from_rewound
       accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 1 o1 = true)
     (hVer2 : verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth
       accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 2 o2 = true) :
-    (∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂) ∨
+    VcRewoundCommitConflict H presNonce repIdx o0 o1 o2 ∨
     ∃ (attrs : List Goldilocks) (holderBlind presBlind : Lane4)
       (leafCommit : Lane6) (boolSteps : List (Bool × Lane6)),
       (disclosed.map Prod.fst).Nodup ∧
@@ -9045,14 +9072,14 @@ theorem verifyOpenedBlindVcRep_extract3_from_rewound
     unfold reconstructRepCommits at hc1
     rw [he0, he1, hFo01, Triple3.get_ofFn, Triple3.get_ofFn] at hc1
     dsimp only [vcNextParty3, mkParty3At] at hc1
-    exact vcCommitPartyView_binding hHLen (fun h => hv1 (congrArg Prod.fst h)) hc1
+    exact Or.inl ⟨hv1, hc1⟩
   else if hv2 : o1.viewE1 ≠ o2.viewE then
     left
     have hc2 := congrArg (fun t => t.get 2) hCom12
     unfold reconstructRepCommits at hc2
     rw [he1, he2, hFo12, Triple3.get_ofFn, Triple3.get_ofFn] at hc2
     dsimp only [vcNextParty3, mkParty3At] at hc2
-    exact vcCommitPartyView_binding hHLen (fun h => hv2 (congrArg Prod.fst h)) hc2
+    exact Or.inr (Or.inl ⟨hv2, hc2⟩)
   else if hv0 : o2.viewE1 ≠ o0.viewE then
     left
     have hFo20 : o2.finalOuts = o0.finalOuts := (hFo01.trans hFo12).symm
@@ -9060,7 +9087,7 @@ theorem verifyOpenedBlindVcRep_extract3_from_rewound
     unfold reconstructRepCommits at hc0
     rw [he2, he0, hFo20, Triple3.get_ofFn, Triple3.get_ofFn] at hc0
     dsimp only [vcNextParty3, mkParty3At] at hc0
-    exact vcCommitPartyView_binding hHLen (fun h => hv0 (congrArg Prod.fst h)) hc0
+    exact Or.inr (Or.inr ⟨hv0, hc0⟩)
   else
     right
     have hv1Eq : o0.viewE1 = o1.viewE := Decidable.of_not_not hv1
@@ -9295,6 +9322,37 @@ theorem verifyOpenedBlindVcRep_extract3_from_rewound
       rw [← hSC]
       dsimp only
       rw [← hScopeSpongeSum, ← hScopeEq, hScSum]
+
+theorem verifyOpenedBlindVcRep_extract3_from_rewound
+    {H : List UInt8 → List UInt8}
+    (hHLen : ∀ m, (H m).length < 256 ^ 8)
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {presNonce : Vec UInt8 32} {schema : VcSchema} {issuerEpoch : UInt64} {treeDepth : Nat}
+    {accRoot presCommit scopeTag : Lane6} {verifierScopeLimbs : Lane4}
+    {disclosed : List (Nat × Goldilocks)} {repIdx : Nat}
+    {o0 o1 o2 : OpenedBlindVcRep}
+    (hR1_01 : reconstructRepRound1 H presNonce repIdx o0 = reconstructRepRound1 H presNonce repIdx o1)
+    (hR1_12 : reconstructRepRound1 H presNonce repIdx o1 = reconstructRepRound1 H presNonce repIdx o2)
+    (hVer0 : verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth
+      accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 0 o0 = true)
+    (hVer1 : verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth
+      accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 1 o1 = true)
+    (hVer2 : verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth
+      accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx 2 o2 = true) :
+    (∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂) ∨
+    ∃ (attrs : List Goldilocks) (holderBlind presBlind : Lane4)
+      (leafCommit : Lane6) (boolSteps : List (Bool × Lane6)),
+      (disclosed.map Prod.fst).Nodup ∧
+      attrs.length = schema.arity ∧
+      (∀ p ∈ disclosed, p.1 < schema.arity ∧ attrs[p.1]? = some p.2) ∧
+      computeVcPoseidon2Commit schema attrs holderBlind vcAttrCommitTag = some leafCommit ∧
+      boolSteps.length = treeDepth ∧
+      evalVcMerklePathBool issuerEpoch 0 leafCommit boolSteps = accRoot ∧
+      computeVcPoseidon2Commit schema attrs presBlind vcPresCommitTag = some presCommit ∧
+      computeVcScopeTag schema.schemaId holderBlind verifierScopeLimbs = scopeTag := by
+  rcases verifyOpenedBlindVcRep_extract3_finite_conflict hR1_01 hR1_12 hVer0 hVer1 hVer2 with h | h
+  · exact Or.inl (vcRewoundCommitConflict_hash_collision hHLen h)
+  · exact Or.inr h
 
 /-! ### §4.5 Full `OpenedBlindVcRep` Simulation (`zkMultiRepViewEquiv`), Flagship Soundness/Hiding & 2-Phase Prover -/
 

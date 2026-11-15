@@ -2,7 +2,11 @@ module
 /-
 # Threshold ML-DSA Abort-Transcript Zero-Knowledge, ML-DSA-65/87 Parameters & RSS Refinement
 
-Constructive security proofs accompanying `Qsag.ThresholdMlDsaAndToprf`:
+Constructive arithmetic and conditional view-simulation proofs accompanying
+`Qsag.ThresholdMlDsaAndToprf`. The trace theorem uses ML-DSA-44 four-lane types and
+receives the real secret-dependent outcome list. It proves pad hiding conditional on
+that list, not a simulator for its accept/reject or retry-count distribution. The 65/87
+parameter lemmas do not extend the trace theorem to their rectangular dimensions.
 1. **NIST FIPS 204 `ML-DSA-44`, `ML-DSA-65`, and `ML-DSA-87` (`PQ128`) Parameter Verification**:
    Algebraic and byte-wire consistency (`mlDsa_all_three_levels_wellFormed`), `η = 4` DKG nibble
    rejection (`eta4SampleNibble_bijective_on_range`), `γ₂ = 261888` mod-16 `HighBits` wrap
@@ -453,7 +457,10 @@ private theorem finSum_sim_eq_of_equiv {α β V : Type} {M : Nat}
 /-- **Abort-Transcript Zero-Knowledge Simulation Theorem (`threshold_mldsa_abort_transcript_zk`)**:
     Across any `R`-attempt signing trace where rejected attempts carry nonzero `failTag`, an
     explicit `0-Classical` pad bijection maps `realSealedSignTrace` to `thresholdMlDsaTraceSimulator`
-    using only public `(A, t1Scaled)` and `SimAttemptOutcome` (`none` on abort => zero `w₁` opened). -/
+    given public `(A, t1Scaled)` and the complete `SimAttemptOutcome` list (`none` on abort).
+    This is a conditional view theorem. `outs` below is computed from the real secrets and
+    masks; neither its distribution nor the number of attempts is simulated by this result.
+    All algebraic view types here are the four-lane ML-DSA-44 model. -/
 theorem threshold_mldsa_abort_transcript_zk
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
     (sampleInBall : List UInt8 → Poly256)
