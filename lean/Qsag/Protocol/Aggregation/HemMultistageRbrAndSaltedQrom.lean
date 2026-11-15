@@ -507,7 +507,7 @@ theorem equal_degree_three_challenge_bound
 
 /-- Specialization of `equal_degree_three_challenge_bound` to `slicedParamsOk` certificates at
     agreement thresholds `A` (for the `θ`-exception slice) and `A + 1` (for the `(α, β)` fold). -/
-theorem sliced_equal_degree_three_challenge_bound
+theorem sliced_equal_degree_theta_slice_challenge_bound
     (D S kernel : List QuarticGoldilocks)
     (d A B₀ m₀ Dy₀ B₁ m₁ Dy₁ maxMixList : Nat)
     (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g : QuarticGoldilocks)
@@ -1133,7 +1133,7 @@ theorem witness_cdhz_sliced_stage_clears_128bits_at_2pow50 :
 #verify_constructive
   Qsag.equal_degree_bad_theta_bound
   Qsag.equal_degree_three_challenge_bound
-  Qsag.sliced_equal_degree_three_challenge_bound
+  Qsag.sliced_equal_degree_theta_slice_challenge_bound
   Qsag.tooth_equal_degree_drop_theta_exception_unsound
   Qsag.arbitrary_batch_cascade_fiber_bound
   Qsag.tooth_verifyHemAffineWhir_unincremented_agree_accepts_all

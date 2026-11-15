@@ -15,7 +15,7 @@ private def honest : PolyCommitment :=
   ⟨x, y, rustGf128Mul x y, rx, ry, rustGf128Mul rx ry,
     rustGf128Mul rx y ^^^ rustGf128Mul x ry⟩
 
-def main : IO Unit := do
+def Qsag.RssParticipant.GateChecks.runWeightedGateChecks : IO Unit := do
   let challenges := [0#128, 1#128, 2#128, 0x123#128, 0xfedcba9876543210#128]
   if !(challenges.all (polyAccepts honest)) then
     throw (IO.userError "honest final product rejected")
@@ -38,3 +38,5 @@ def main : IO Unit := do
     throw (IO.userError "tampered gate weight-root control failed")
   IO.println "weighted gate and final product checks: honest accepted; fixed tampered claim rejected at four nonzero coins; tau=0 collision and late-commitment forgery controls confirmed"
 end
+
+#eval Qsag.RssParticipant.GateChecks.runWeightedGateChecks
