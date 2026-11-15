@@ -261,6 +261,35 @@ theorem AggregateExtractorSound.accepted_extracts_of_injective
     ValidAggregateWitness verifySingle (run ω).stmt (C.extract (run ω).view) :=
   (C.accepted_outcome ω hAcc hGood).witness_of_injective hInj
 
+/-- **Accepted aggregate, per signer.** On a coin where the verifier accepts outside the
+    soundness-error event, for every active signer `i` and every participation predicate:
+    the break finder returned a validated collision of `H`, or some signature verifies under
+    signer `i`'s key although `i` did not participate (a forgery against `i`), or `i`
+    participated. -/
+theorem AggregateExtractorSound.accepted_signer_trichotomy
+    {PK Sig Proof View : Type} {w n : Nat}
+    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes}
+    {verifyAgg : AggregateStatement PK w → Proof → Bool}
+    {run : Fin n → AggregateRun PK Proof View w}
+    (C : AggregateExtractorSound verifySingle H verifyAgg run)
+    (participated : Fin w → Bool) (ω : Fin n)
+    (hAcc : verifyAgg (run ω).stmt (run ω).proof = true) (hGood : C.bad ω = false)
+    (i : Fin w) (hActive : (run ω).stmt.bitmap.getLsbD i.val = true) :
+    (∃ b : AggregateBreak, C.findBreak (run ω).view = some b ∧ ValidBreak H b) ∨
+    (∃ sig : Sig, verifySingle ((run ω).stmt.roster i) (run ω).stmt.message sig = true ∧
+      participated i = false) ∨
+    participated i = true := by
+  rcases C.accepted_outcome ω hAcc hGood with hW | hB
+  · have hi := hW i hActive
+    cases hs : C.extract (run ω).view i with
+    | none => rw [hs] at hi; exact False.elim hi
+    | some sig =>
+      rw [hs] at hi
+      cases hp : participated i with
+      | false => exact .inr (.inl ⟨sig, hi, rfl⟩)
+      | true => exact .inr (.inr rfl)
+  · exact .inl hB
+
 /-- Executable check of `ValidAggregateWitness`. -/
 def aggregateWitnessCheck {PK Sig : Type} {w : Nat}
     (verifySingle : PK → Bytes → Sig → Bool)
@@ -325,6 +354,7 @@ theorem aggregateOutcome_rejects_unvalidated_break :
   Qsag.Spec.mergeSoundnessOutcome
   Qsag.Spec.AggregateExtractorSound.failure_bound
   Qsag.Spec.AggregateExtractorSound.accepted_extracts_of_injective
+  Qsag.Spec.AggregateExtractorSound.accepted_signer_trichotomy
   Qsag.Spec.aggregateWitnessCheck_sound
   Qsag.Spec.aggregateOutcome_rejects_unvalidated_break
 

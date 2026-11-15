@@ -8,7 +8,9 @@ from an execution of the verifier to explicit reduction events, not a tuple of l
 1. `whir_exec_closed_qrom_soundness`: for a statement outside the language and any `Q`-query
    Fiat–Shamir adversary, `Pr[execWhirVerify accepts] ≤ scheduleQromError sched Q +
    Pr[the collision finder outputs a Merkle-hash collision]`. `whirCollisionReduction` turns
-   the finder's output into a `Spec.HashCollision` of the underlying byte hash.
+   the finder's output into a `Spec.HashCollision` of the underlying byte hash, and
+   `whirCollisionReduction_validBreak` shows that output is a `Spec.ValidBreak`, the break
+   alternative of `Spec.AggregateSoundnessOutcome`.
    `deployed_whir_exec_closed_qrom_128` instantiates the `nv = 24` schedule at `Q ≤ 2^40`.
 2. `jorts_baggy_closed_euf_cma`: `Pr[ExecEufCmaGame wins] ≤ Pr[R_itsr] + (Pr[R_tcr] + Pr[R_pre])`
    for the adversary-driven experiment with the epoch latch.
@@ -25,6 +27,7 @@ Standing assumptions, stated where they enter:
 
 public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
+public import Qsag.Spec.IdealAggregate
 public import Qsag.Protocol.Aggregation.ClosedFsQromCompile
 public import Qsag.Protocol.Aggregation.ClosedWhirSchedule
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
@@ -128,6 +131,24 @@ def whirCollisionReduction {F : Type} [CommRingOps F] [DecidableEq F] {cardX w :
     (Qsag.ClosedFs.execFsCollisionWitness (Qsag.ClosedWhir.whirOracleIop env sched w)
       (Qsag.ClosedFs.framedSetup Hb nodeC leafC) c aux x H o h)
 
+/-- The collision reduction's output is a validated break of the byte hash `Hb`: it discharges
+    the break alternative of `Spec.AggregateSoundnessOutcome` for the commitment hash `Hb`. -/
+theorem whirCollisionReduction_validBreak {F : Type} [CommRingOps F] [DecidableEq F]
+    {cardX w : Nat}
+    (Hb : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (nodeC : Qsag.Spec.FramedCodec (Nat × Nat × Qsag.Spec.Bytes × Qsag.Spec.Bytes))
+    (leafC : Qsag.Spec.FramedCodec (Nat × Nat × F))
+    (env : Qsag.ClosedWhir.WhirEnv F) (sched : Qsag.ClosedWhir.WhirVerifierSchedule)
+    (c : Qsag.ClosedFs.FsCodec (Qsag.ClosedWhir.WhirMsg F) sched.numRounds cardX)
+    (aux : Fin cardX → List (F × List Qsag.Spec.Bytes)) (x : Qsag.ClosedWhir.WhirStmt F)
+    (H : Fin cardX → BitVec w) (o : Fin cardX)
+    (h : Qsag.ClosedFs.execFsCollisionEvent (Qsag.ClosedWhir.whirOracleIop env sched w)
+      (Qsag.ClosedFs.framedSetup Hb nodeC leafC) c aux x H o = true) :
+    Qsag.Spec.ValidBreak Hb
+      ⟨(whirCollisionReduction Hb nodeC leafC env sched c aux x H o h).m₁,
+       (whirCollisionReduction Hb nodeC leafC env sched c aux x H o h).m₂⟩ :=
+  (whirCollisionReduction Hb nodeC leafC env sched c aux x H o h).validBreak
+
 /-! ## 2. Closed adaptive EUF-CMA experiment with the epoch latch -/
 
 /-- **Closed EUF-CMA reduction.** The adversary-driven experiment `ExecEufCmaGame` (executable
@@ -147,6 +168,7 @@ theorem jorts_baggy_closed_euf_cma {n qHash qSign : Nat} (hPos : 0 < n)
 #verify_constructive
   Qsag.Top.whir_exec_closed_qrom_soundness
   Qsag.Top.deployed_whir_exec_closed_qrom_128
+  Qsag.Top.whirCollisionReduction_validBreak
   Qsag.Top.jorts_baggy_closed_euf_cma
 
 end Qsag.Top

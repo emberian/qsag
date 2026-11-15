@@ -11,6 +11,14 @@ and coherent Fourier QROM Merkle-opening extractors (`QromBatchMerkleExtraction`
 shard merge-tree and quorum reduction (`ComposedQsAgAndMergeSecurity`, `Spec/IdealAggregate`),
 the quartic-extension field isomorphism (`Math/QuarticExt4`), and SIMT GPU constant-time kernel
 execution (`SpirvSimtGpuEquiv`).
+
+Section 6 connects the ideal knowledge-soundness contract `Spec.AggregateExtractorSound` to the
+quorum layer: for the native aggregate-signature verifier `verifyAggNativeSig` and an enrolled
+custody roster, an accepted aggregate outside the soundness-error event gives, for every active
+validator, a validated collision of the commitment hash (`Spec.ValidBreak`), a signature that
+verifies without quorum participation, or quorum participation. The contract itself is a
+hypothesis of that theorem: no instance for the deployed `HEM`/`WHIR` verifier is constructed
+in this module.
 -/
 
 public import Qsag.Spec.Primitives
@@ -316,7 +324,74 @@ theorem multifold_salted_qrom_and_committee_boundary_chain
            Qsag.Composed.merged_quorum_reduction geom custody hemVerifyShard bad hBnd
              rootHdr tree hTree v hAct⟩
 
+/-! ## 6. `Spec.AggregateExtractorSound` for the Native Verifier and the Quorum Layer -/
+
+/-- The base prime of the production aggregation profile is the Goldilocks prime of
+    `Qsag.Math.Primality`. -/
+theorem hemGoldilocksExt4Profile_basePrime_eq_goldilocksPrime :
+    Qsag.Spec.hemGoldilocksExt4Profile.basePrime = Qsag.goldilocksPrime := by
+  rfl
+
+/-- **Accepted aggregate ⟹ validated break, quorum forgery, or quorum participation.**
+    Let `C` be a knowledge-soundness contract (`Spec.AggregateExtractorSound`) for an aggregate
+    verifier `verifyAgg` over individual signatures checked by `verifyAggNativeSig geom`, with
+    commitment hash `H`. On a coin `ω` whose statement lists the enrolled custody keys, where
+    `verifyAgg` accepts and the soundness-error event of `C` does not occur, every active
+    validator `v` satisfies one of:
+    1. the break finder of `C` returned a collision of `H` (`Spec.ValidBreak`),
+    2. some native signature verifies under `v`'s key on the statement's message although the
+       quorum of `v` did not participate (the content of `Composed.QuorumForgery`),
+    3. the quorum of `v` participated.
+
+    Open obligation: `C` for the deployed verifier. Its fields are the extractor, the break
+    finder, the soundness-error event and the bound `εSound` on that event. -/
+theorem aggregate_extractor_sound_quorum_reduction
+    {Proof View : Type} {nVal n : Nat}
+    (geom : Qsag.AggSigGeometry) (custody : Fin nVal → Qsag.Composed.Custody)
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (verifyAgg : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof → Bool)
+    (run : Fin n → Qsag.Spec.AggregateRun Qsag.AggValidatorPk Proof View nVal)
+    (C : Qsag.Spec.AggregateExtractorSound (Qsag.verifyAggNativeSig geom) H verifyAgg run)
+    (ω : Fin n)
+    (hRoster : ∀ v : Fin nVal, (run ω).stmt.roster v = (custody v).state.pk)
+    (hAcc : verifyAgg (run ω).stmt (run ω).proof = true) (hGood : C.bad ω = false)
+    (v : Fin nVal) (hActive : (run ω).stmt.bitmap.getLsbD v.val = true) :
+    (∃ b : Qsag.Spec.AggregateBreak,
+      C.findBreak (run ω).view = some b ∧ Qsag.Spec.ValidBreak H b) ∨
+    (∃ sig : Qsag.AggNativeSignature,
+      Qsag.verifyAggNativeSig geom (custody v).state.pk (run ω).stmt.message sig = true ∧
+      Qsag.Composed.quorumParticipated (custody v) (run ω).stmt.message = false) ∨
+    Qsag.Composed.quorumParticipated (custody v) (run ω).stmt.message = true := by
+  have h := C.accepted_signer_trichotomy
+    (fun u => Qsag.Composed.quorumParticipated (custody u) (run ω).stmt.message)
+    ω hAcc hGood v hActive
+  rcases h with hB | ⟨sig, hSig, hNo⟩ | hYes
+  · exact .inl hB
+  · refine .inr (.inl ⟨sig, ?_, hNo⟩)
+    rw [← hRoster v]
+    exact hSig
+  · exact .inr (.inr hYes)
+
+/-- With an injective commitment hash the first alternative is empty: an accepted aggregate
+    outside the soundness-error event extracts a valid individual signature for every active
+    validator. -/
+theorem aggregate_extractor_sound_valid_witness_of_injective
+    {Proof View : Type} {nVal n : Nat}
+    (geom : Qsag.AggSigGeometry)
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (verifyAgg : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal → Proof → Bool)
+    (run : Fin n → Qsag.Spec.AggregateRun Qsag.AggValidatorPk Proof View nVal)
+    (C : Qsag.Spec.AggregateExtractorSound (Qsag.verifyAggNativeSig geom) H verifyAgg run)
+    (hInj : ∀ a b : Qsag.Spec.Bytes, H a = H b → a = b) (ω : Fin n)
+    (hAcc : verifyAgg (run ω).stmt (run ω).proof = true) (hGood : C.bad ω = false) :
+    Qsag.Spec.ValidAggregateWitness (Qsag.verifyAggNativeSig geom) (run ω).stmt
+      (C.extract (run ω).view) :=
+  C.accepted_extracts_of_injective hInj ω hAcc hGood
+
 #verify_constructive
+  Qsag.Top.hemGoldilocksExt4Profile_basePrime_eq_goldilocksPrime
+  Qsag.Top.aggregate_extractor_sound_quorum_reduction
+  Qsag.Top.aggregate_extractor_sound_valid_witness_of_injective
   Qsag.Top.aggExt4_cwyz26_fold_and_point_reduction
   Qsag.Top.deployed_hem_stage_budget_and_aggExt4_transport
   Qsag.Top.qrom_hem_opening_and_invalid_coordinate_chain
