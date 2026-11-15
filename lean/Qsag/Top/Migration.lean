@@ -16,10 +16,14 @@ Top-level composition module (zero `import all`) connecting:
    and five-way `𝔽_{2^{128}}` multiplication equivalence (`ActiveMigrationZeroTest`, `Math.Gf2Pow128`),
 5. The discrete-log instance `dlogOwnershipScheme` of `Spec.LegacyOwnershipScheme` over a
    `PrimeSubgroup`, and acceptance by the ideal machine of the scalar extracted by `ZKBoo`,
-6. Refinement of the settlement ledger `MigrationExecution.settle` into `Spec.idealMigrateMachine`
-   (`migrationSettlement_refines_idealMigrate`), conditional on `LegacySettlementBinding`: the
-   settlement model has no enrolled snapshot, entitlement or key-derived nullifier, so the link
-   from an accepted settlement to `Spec.ValidLegacyOwnership` is a hypothesis of that structure.
+6. The settlement registry as a machine over RAW `MigrationExecution.Submission`s
+   (`rawSettlementMachine`: snapshot admission, then `MigrationExecution.settle`) and its trace
+   simulation by `Spec.idealMigrateMachine` through the partial decoder `SettlementWire.decode`
+   (`rawSettlement_trace_simulated`). Enrollment, entitlement, replay protection and the binding
+   of the receipt to every statement field are proved; what is assumed about the authorization
+   verifier and the compiled circuit is `SettlementCircuitSound`, instantiated over the executable
+   circuit run by `migrationToy_circuitSound`. Ownership soundness is relative to the scheme's
+   `ownsKey` (see `Spec.IdealMigrate`).
 -/
 
 public import Qsag.Spec.Primitives
@@ -172,7 +176,13 @@ theorem active_migration_ceremony_qrom_and_gf2pow128_chain
 
 /-- Discrete-log ownership over a prime-order subgroup: the witness of the legacy key `pk` is the
     canonical scalar `0 < sk < ord` with `grp.smul sk = pk`. The nullifier derivation and its
-    injectivity are parameters. -/
+    injectivity are parameters. `ownsKey` does not depend on the claim: the witness is the secret
+    scalar itself, and whoever holds it may claim to any destination. The destination is bound
+    only by the ideal input pairing that scalar with the claim; a proof of knowledge that must not
+    be replayable for another destination has to bind the destination in its statement, which is
+    the role of `verifyAuthorization` in `MigrationExecution.settle` and is outside this scheme.
+    `grp` is an abstract cyclic group of prime order (`PrimeSubgroup` does not tie `add`/`smul`
+    to the curve `C`). -/
 def dlogOwnershipScheme {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
     (grp : Qsag.PrimeSubgroup C G ord)
     (deriveNullifier : Qsag.SwPoint → Qsag.Spec.Digest256)
@@ -243,56 +253,96 @@ theorem zkboo_extracted_scalar_claims_enrolled_entitlement
     (Qsag.Spec.idealMigrateMachine_reachable_inv _ snapshot hReach)
     ⟨hEnrolled, rfl, hPos, hLt, hSmul⟩ hUnclaimed
 
-/-! ## 4. Settlement Ledger Refinement into `Spec.idealMigrateMachine` -/
+/-! ## 4. Raw Settlement Machine and its Simulation by `Spec.idealMigrateMachine` -/
 
-/-- Link between the settlement ledger `MigrationExecution.settle` and the ideal migration
-    functionality. `MigrationExecution.Statement` has no enrolled snapshot, no entitlement and no
-    derivation of its nullifier from a legacy key, so these facts are obligations on the
-    authorization verifier and circuit compiler:
-    * `encode` maps a claim and ownership witness to the submitted statement, authorization and
-      witness lanes, preserving the nullifier (`encode_nullifier`);
-    * `creditedAmount` is the amount the settlement layer credits for an accepted claim;
-    * `accepted_sound`: an accepted settlement is a claim with `Spec.ValidLegacyOwnership` for the
-      credited amount (enrolled key, derived nullifier, ownership witness);
-    * `owner_accepted`: a claim with `Spec.ValidLegacyOwnership` and an unspent nullifier is
-      accepted. -/
-structure LegacySettlementBinding {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
-    (scheme : Qsag.Spec.LegacyOwnershipScheme LegacyPk Witness)
-    (snapshot : Qsag.Spec.EnrolledSnapshot LegacyPk)
-    (verifyAuthorization : Qsag.MigrationExecution.Statement → Authorization → Bool)
-    (compile : Qsag.MigrationExecution.Statement → List Qsag.MigrationExecution.Gate) where
-  encode : Qsag.Spec.MigrationClaim LegacyPk × Witness →
-    Qsag.MigrationExecution.Submission Authorization
-  creditedAmount : Qsag.Spec.MigrationClaim LegacyPk → Nat
-  encode_nullifier : ∀ (inp : Qsag.Spec.MigrationClaim LegacyPk × Witness),
-    (encode inp).statement.nullifier = inp.1.nullifier
-  accepted_sound : ∀ (ledger : Qsag.MigrationExecution.Ledger)
-      (inp : Qsag.Spec.MigrationClaim LegacyPk × Witness),
-    (Qsag.MigrationExecution.settle verifyAuthorization compile ledger (encode inp)).2 =
-        .accepted →
-      Qsag.Spec.ValidLegacyOwnership scheme snapshot inp.1 inp.2 (creditedAmount inp.1)
-  owner_accepted : ∀ (ledger : Qsag.MigrationExecution.Ledger)
-      (inp : Qsag.Spec.MigrationClaim LegacyPk × Witness) (amount : Nat),
-    Qsag.Spec.ValidLegacyOwnership scheme snapshot inp.1 inp.2 amount →
-    inp.1.nullifier ∉ ledger.spent →
-      (Qsag.MigrationExecution.settle verifyAuthorization compile ledger (encode inp)).2 =
-        .accepted
+/-- Wire format of the settlement registry: how a raw `MigrationExecution.Statement` and witness
+    lanes are read as an ideal claim and witness.
+    * `legacyPkOf` parses the legacy commitment bytes (partial);
+    * `destinationBytes` serializes the 256-bit destination, injectively;
+    * `extractWitness` reads the ownership witness off the submitted witness lanes;
+    * `migrationDomain`, `epoch` identify the campaign. -/
+structure SettlementWire (LegacyPk Witness : Type) where
+  legacyPkOf : List UInt8 → Option LegacyPk
+  destinationBytes : BitVec 256 → Spec.Bytes
+  destinationBytes_injective : ∀ {d₁ d₂ : BitVec 256},
+    destinationBytes d₁ = destinationBytes d₂ → d₁ = d₂
+  extractWitness : RssWitnessLanes3 → Witness
+  migrationDomain : BitVec 256
+  epoch : UInt64
+
+/-- The claim a statement makes for the parsed key `pk`: its nullifier and serialized
+    destination. -/
+def SettlementWire.claimOf {LegacyPk Witness : Type} (D : SettlementWire LegacyPk Witness)
+    (pk : LegacyPk) (st : MigrationExecution.Statement) : Spec.MigrationClaim LegacyPk :=
+  ⟨pk, st.nullifier, D.destinationBytes st.destination⟩
+
+/-- Partial decoder from raw submissions to ideal inputs. -/
+def SettlementWire.decode {LegacyPk Witness Authorization : Type}
+    (D : SettlementWire LegacyPk Witness) (sub : MigrationExecution.Submission Authorization) :
+    Option (Spec.MigrationClaim LegacyPk × Witness) :=
+  match D.legacyPkOf sub.statement.legacyCommitment with
+  | none => none
+  | some pk => some (D.claimOf pk sub.statement, D.extractWitness sub.witness)
+
+/-- Registry admission of a raw statement: its commitment parses to a key enrolled in the
+    snapshot; returns the key and its entitlement. -/
+def rawSettlementAdmit {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (st : MigrationExecution.Statement) : Option (LegacyPk × Nat) :=
+  match D.legacyPkOf st.legacyCommitment with
+  | none => none
+  | some pk =>
+    match Spec.EnrolledSnapshot.entitlement snapshot pk with
+    | none => none
+    | some amount => some (pk, amount)
+
+private theorem rawSettlementAdmit_eq_some {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness} {snapshot : Spec.EnrolledSnapshot LegacyPk}
+    {st : MigrationExecution.Statement} {pk : LegacyPk} {amount : Nat}
+    (h : rawSettlementAdmit D snapshot st = some (pk, amount)) :
+    D.legacyPkOf st.legacyCommitment = some pk ∧
+      Spec.EnrolledSnapshot.entitlement snapshot pk = some amount := by
+  unfold rawSettlementAdmit at h
+  split at h
+  · cases h
+  · rename_i pk' hPk
+    split at h
+    · cases h
+    · rename_i amount' hEnt
+      injection h with h
+      injection h with h1 h2
+      subst h1
+      subst h2
+      exact ⟨hPk, hEnt⟩
+
+private theorem rawSettlementAdmit_eq_none {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness} {snapshot : Spec.EnrolledSnapshot LegacyPk}
+    {st : MigrationExecution.Statement} {pk : LegacyPk}
+    (hPk : D.legacyPkOf st.legacyCommitment = some pk)
+    (hEnt : Spec.EnrolledSnapshot.entitlement snapshot pk = none) :
+    rawSettlementAdmit D snapshot st = none := by
+  unfold rawSettlementAdmit
+  rw [hPk]
+  show (match Spec.EnrolledSnapshot.entitlement snapshot pk with
+    | none => none
+    | some amount => some (pk, amount)) = none
+  rw [hEnt]
 
 /-- Receipt emitted for a settlement verdict: only an accepted settlement emits
     `(ledger', receipt)`. -/
-def settlementReceipt {LegacyPk : Type} (ledger' : Qsag.MigrationExecution.Ledger)
-    (receipt : Qsag.Spec.MigrationReceipt LegacyPk) :
-    Qsag.MigrationExecution.SettlementResult →
-      Option (Qsag.MigrationExecution.Ledger × Qsag.Spec.MigrationReceipt LegacyPk)
+def settlementReceipt {LegacyPk : Type} (ledger' : MigrationExecution.Ledger)
+    (receipt : Spec.MigrationReceipt LegacyPk) :
+    MigrationExecution.SettlementResult →
+      Option (MigrationExecution.Ledger × Spec.MigrationReceipt LegacyPk)
   | .accepted => some (ledger', receipt)
   | .replay => none
   | .unauthorized => none
   | .executionRejected _ => none
 
 private theorem settlementReceipt_eq_some {LegacyPk : Type}
-    {ledger' c' : Qsag.MigrationExecution.Ledger}
-    {receipt out : Qsag.Spec.MigrationReceipt LegacyPk}
-    {res : Qsag.MigrationExecution.SettlementResult}
+    {ledger' c' : MigrationExecution.Ledger}
+    {receipt out : Spec.MigrationReceipt LegacyPk}
+    {res : MigrationExecution.SettlementResult}
     (h : settlementReceipt ledger' receipt res = some (c', out)) :
     res = .accepted ∧ c' = ledger' ∧ out = receipt := by
   cases res with
@@ -302,195 +352,540 @@ private theorem settlementReceipt_eq_some {LegacyPk : Type}
     injection h' with h1 h2
     exact ⟨rfl, h1.symm, h2.symm⟩
   | replay =>
-    exact nomatch (show (none : Option (Qsag.MigrationExecution.Ledger ×
-      Qsag.Spec.MigrationReceipt LegacyPk)) = some (c', out) from h)
+    exact nomatch (show (none : Option (MigrationExecution.Ledger ×
+      Spec.MigrationReceipt LegacyPk)) = some (c', out) from h)
   | unauthorized =>
-    exact nomatch (show (none : Option (Qsag.MigrationExecution.Ledger ×
-      Qsag.Spec.MigrationReceipt LegacyPk)) = some (c', out) from h)
+    exact nomatch (show (none : Option (MigrationExecution.Ledger ×
+      Spec.MigrationReceipt LegacyPk)) = some (c', out) from h)
   | executionRejected _ =>
-    exact nomatch (show (none : Option (Qsag.MigrationExecution.Ledger ×
-      Qsag.Spec.MigrationReceipt LegacyPk)) = some (c', out) from h)
+    exact nomatch (show (none : Option (MigrationExecution.Ledger ×
+      Spec.MigrationReceipt LegacyPk)) = some (c', out) from h)
 
 private theorem settlementReceipt_eq_none {LegacyPk : Type}
-    {ledger' : Qsag.MigrationExecution.Ledger}
-    {receipt : Qsag.Spec.MigrationReceipt LegacyPk}
-    {res : Qsag.MigrationExecution.SettlementResult}
+    {ledger' : MigrationExecution.Ledger}
+    {receipt : Spec.MigrationReceipt LegacyPk}
+    {res : MigrationExecution.SettlementResult}
     (h : settlementReceipt ledger' receipt res = none) : ¬ (res = .accepted) := by
   intro hAcc
   subst hAcc
-  exact nomatch (show some (ledger', receipt) = (none : Option (Qsag.MigrationExecution.Ledger ×
-    Qsag.Spec.MigrationReceipt LegacyPk)) from h)
+  exact nomatch (show some (ledger', receipt) = (none : Option (MigrationExecution.Ledger ×
+    Spec.MigrationReceipt LegacyPk)) from h)
 
-/-- Settlement machine over the ideal interface: a claim and witness are encoded by the binding and
-    settled by `MigrationExecution.settle` against the spent-nullifier ledger; an accepted
-    settlement emits the receipt with the credited amount. -/
-def migrationSettlementMachine {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
-    {scheme : Qsag.Spec.LegacyOwnershipScheme LegacyPk Witness}
-    {snapshot : Qsag.Spec.EnrolledSnapshot LegacyPk}
-    {verifyAuthorization : Qsag.MigrationExecution.Statement → Authorization → Bool}
-    {compile : Qsag.MigrationExecution.Statement → List Qsag.MigrationExecution.Gate}
-    (B : LegacySettlementBinding scheme snapshot verifyAuthorization compile) :
-    Qsag.Spec.Machine Qsag.MigrationExecution.Ledger
-      (Qsag.Spec.MigrationClaim LegacyPk × Witness) (Qsag.Spec.MigrationReceipt LegacyPk) where
+/-- One step of the settlement registry on a RAW submission: admit the statement against the
+    snapshot, then run `MigrationExecution.settle`; an accepted settlement emits the receipt for
+    the parsed key, the statement's nullifier and destination, and the looked-up entitlement. -/
+def rawSettlementStep {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
+    (ledger : MigrationExecution.Ledger) (sub : MigrationExecution.Submission Authorization) :
+    Option (MigrationExecution.Ledger × Spec.MigrationReceipt LegacyPk) :=
+  match rawSettlementAdmit D snapshot sub.statement with
+  | none => none
+  | some pa =>
+    settlementReceipt (MigrationExecution.settle verifyAuthorization compile ledger sub).1
+      ⟨D.claimOf pa.1 sub.statement, pa.2⟩
+      (MigrationExecution.settle verifyAuthorization compile ledger sub).2
+
+/-- Ledger after a rejected raw submission: unchanged if not admitted, else the ledger returned
+    by `settle`. -/
+def rawSettlementErr {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
+    (ledger : MigrationExecution.Ledger) (sub : MigrationExecution.Submission Authorization) :
+    MigrationExecution.Ledger :=
+  match rawSettlementAdmit D snapshot sub.statement with
+  | none => ledger
+  | some _ => (MigrationExecution.settle verifyAuthorization compile ledger sub).1
+
+/-- Settlement registry as a machine over raw `MigrationExecution.Submission`s: the input is the
+    adversary's interface to `settle`, with arbitrary statement, authorization and witness lanes. -/
+def rawSettlementMachine {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate) :
+    Spec.Machine MigrationExecution.Ledger (MigrationExecution.Submission Authorization)
+      (Spec.MigrationReceipt LegacyPk) where
   Init ledger := ledger = ⟨[]⟩
-  step ledger inp :=
-    settlementReceipt
-      (Qsag.MigrationExecution.settle verifyAuthorization compile ledger (B.encode inp)).1
-      ⟨inp.1, B.creditedAmount inp.1⟩
-      (Qsag.MigrationExecution.settle verifyAuthorization compile ledger (B.encode inp)).2
-  errStep ledger _ := ledger
+  step := rawSettlementStep D snapshot verifyAuthorization compile
+  errStep := rawSettlementErr D snapshot verifyAuthorization compile
 
-private theorem settle_accepted_fresh {Authorization : Type}
-    (verifyAuthorization : Qsag.MigrationExecution.Statement → Authorization → Bool)
-    (compile : Qsag.MigrationExecution.Statement → List Qsag.MigrationExecution.Gate)
-    (ledger : Qsag.MigrationExecution.Ledger)
-    (submission : Qsag.MigrationExecution.Submission Authorization)
-    (hAcc : (Qsag.MigrationExecution.settle verifyAuthorization compile ledger submission).2 =
-      .accepted) :
-    submission.statement.nullifier ∉ ledger.spent := by
-  intro hMem
-  rw [Qsag.MigrationExecution.settle_replay_rejected verifyAuthorization compile ledger
-    submission hMem] at hAcc
-  exact nomatch (show Qsag.MigrationExecution.SettlementResult.replay = .accepted from hAcc)
+/-- Every ACCEPTED raw submission decodes, and the receipt is determined by the statement and the
+    snapshot: the claim is the decoded one (parsed key, statement nullifier, serialized statement
+    destination), the amount is the enrolled entitlement of the parsed key, the authorization
+    verified, the compiled circuit run was accepted, and the nullifier was unspent and is inserted.
+    No hypothesis on the verifier or the circuit is used. -/
+theorem rawSettlement_accepted_decodes {LegacyPk Witness Authorization : Type}
+    [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
+    {ledger ledger' : MigrationExecution.Ledger}
+    {sub : MigrationExecution.Submission Authorization}
+    {out : Spec.MigrationReceipt LegacyPk}
+    (hStep : (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub =
+      some (ledger', out)) :
+    D.decode sub = some (out.claim, D.extractWitness sub.witness) ∧
+    D.legacyPkOf sub.statement.legacyCommitment = some out.claim.legacyPk ∧
+    out.claim = D.claimOf out.claim.legacyPk sub.statement ∧
+    Spec.EnrolledEntitlement snapshot out.claim.legacyPk out.amount ∧
+    verifyAuthorization sub.statement sub.authorization = true ∧
+    MigrationExecution.run sub.witness (compile sub.statement) = .accepted ∧
+    sub.statement.nullifier ∉ ledger.spent ∧
+    ledger'.spent = sub.statement.nullifier :: ledger.spent := by
+  have h : rawSettlementStep D snapshot verifyAuthorization compile ledger sub =
+      some (ledger', out) := hStep
+  unfold rawSettlementStep at h
+  split at h
+  · cases h
+  · rename_i pa hAd
+    obtain ⟨pk, amount⟩ := pa
+    obtain ⟨hPk, hEnt⟩ := rawSettlementAdmit_eq_some hAd
+    obtain ⟨hAcc, hL, hOut⟩ := settlementReceipt_eq_some h
+    obtain ⟨hFresh, hAuth, hRun⟩ :=
+      (MigrationExecution.settle_accepted_iff verifyAuthorization compile ledger sub).mp hAcc
+    have hIns := MigrationExecution.settle_accept_inserts verifyAuthorization compile ledger
+      sub hAcc
+    subst hOut
+    subst hL
+    refine ⟨?_, hPk, rfl, hEnt, hAuth, hRun, hFresh, hIns⟩
+    unfold SettlementWire.decode
+    rw [hPk]
 
-/-- Under `LegacySettlementBinding` the settlement ledger refines the ideal migration machine, with
-    the spent set of the ledger equal to the ideal spent-nullifier list. -/
-def migrationSettlement_refines_idealMigrate
+/-- A rejected raw submission leaves the ledger unchanged. -/
+theorem rawSettlement_rejected_ledger_unchanged {LegacyPk Witness Authorization : Type}
+    [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
+    {ledger : MigrationExecution.Ledger} {sub : MigrationExecution.Submission Authorization}
+    (hNone : (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub =
+      none) :
+    (rawSettlementMachine D snapshot verifyAuthorization compile).errStep ledger sub =
+      ledger := by
+  have h : rawSettlementStep D snapshot verifyAuthorization compile ledger sub = none := hNone
+  show rawSettlementErr D snapshot verifyAuthorization compile ledger sub = ledger
+  unfold rawSettlementStep at h
+  unfold rawSettlementErr
+  split at h
+  · rfl
+  · exact MigrationExecution.settle_reject_ledger_unchanged verifyAuthorization compile ledger
+      sub (settlementReceipt_eq_none h)
+
+/-- What is assumed about the authorization verifier and the compiled circuit. The settlement
+    model takes `verifyAuthorization` and `compile` as arbitrary parameters, so their soundness is
+    external to it; enrollment, the entitlement, replay protection and the binding of the receipt
+    to the statement are NOT assumed (`rawSettlement_accepted_decodes`).
+    * `authorization_campaign` (verifier only): a verified statement is in this campaign's
+      domain and epoch;
+    * `accepted_nullifier_derived`: for a verified statement with an accepted circuit run, the
+      statement nullifier is the one derived from the parsed legacy key;
+    * `accepted_witness_owns`: for a verified statement with an accepted circuit run, the witness
+      extracted from the submitted lanes satisfies `ownsKey` for the parsed key and for the claim
+      this statement makes (its nullifier and destination).
+    `migrationToy_circuitSound` is an instance over the executable `MigrationExecution.run` with a
+    one-key snapshot. Its ownership relation is lane well-formedness
+    (`MigrationExecution.run_checks_actual_lanes`), not a discrete logarithm: the tree contains no
+    proof that a compiled circuit enforces a curve ownership relation
+    (`MigrationExecution.CircuitSoundForRel` is a hypothesis wherever it is used), so no
+    production instance exists. -/
+structure SettlementCircuitSound {LegacyPk Witness Authorization : Type}
+    (D : SettlementWire LegacyPk Witness)
+    (scheme : Spec.LegacyOwnershipScheme LegacyPk Witness)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate) : Prop where
+  authorization_campaign : ∀ (st : MigrationExecution.Statement) (auth : Authorization),
+    verifyAuthorization st auth = true →
+      st.migrationDomain = D.migrationDomain ∧ st.epoch = D.epoch
+  accepted_nullifier_derived : ∀ (st : MigrationExecution.Statement) (auth : Authorization)
+      (w : RssWitnessLanes3) (pk : LegacyPk),
+    verifyAuthorization st auth = true →
+    MigrationExecution.run w (compile st) = .accepted →
+    D.legacyPkOf st.legacyCommitment = some pk →
+      st.nullifier = scheme.deriveNullifier pk
+  accepted_witness_owns : ∀ (st : MigrationExecution.Statement) (auth : Authorization)
+      (w : RssWitnessLanes3) (pk : LegacyPk),
+    verifyAuthorization st auth = true →
+    MigrationExecution.run w (compile st) = .accepted →
+    D.legacyPkOf st.legacyCommitment = some pk →
+      scheme.ownsKey pk (D.extractWitness w) (D.claimOf pk st)
+
+/-- Ownership soundness of one accepted raw submission, derived from `SettlementCircuitSound` and
+    the registry's own snapshot lookup: the decoded claim has `Spec.ValidLegacyOwnership` for the
+    receipt amount with the witness extracted from the submitted lanes, and the statement is in
+    the campaign's domain and epoch. -/
+theorem rawSettlement_accepted_ownership {LegacyPk Witness Authorization : Type}
+    [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness} {scheme : Spec.LegacyOwnershipScheme LegacyPk Witness}
+    {verifyAuthorization : MigrationExecution.Statement → Authorization → Bool}
+    {compile : MigrationExecution.Statement → List MigrationExecution.Gate}
+    (S : SettlementCircuitSound D scheme verifyAuthorization compile)
+    (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    {ledger ledger' : MigrationExecution.Ledger}
+    {sub : MigrationExecution.Submission Authorization}
+    {out : Spec.MigrationReceipt LegacyPk}
+    (hStep : (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub =
+      some (ledger', out)) :
+    Spec.ValidLegacyOwnership scheme snapshot out.claim (D.extractWitness sub.witness)
+      out.amount ∧
+    sub.statement.migrationDomain = D.migrationDomain ∧ sub.statement.epoch = D.epoch := by
+  obtain ⟨_, hPk, hClaim, hEnt, hAuth, hRun, _, _⟩ :=
+    rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hStep
+  have hNull := S.accepted_nullifier_derived sub.statement sub.authorization sub.witness
+    out.claim.legacyPk hAuth hRun hPk
+  have hOwn := S.accepted_witness_owns sub.statement sub.authorization sub.witness
+    out.claim.legacyPk hAuth hRun hPk
+  rw [← hClaim] at hOwn
+  have hClaimNull : out.claim.nullifier = sub.statement.nullifier := by
+    rw [hClaim]
+    rfl
+  exact ⟨⟨hEnt, hClaimNull.trans hNull, hOwn⟩,
+    S.authorization_campaign sub.statement sub.authorization hAuth⟩
+
+/-- Ideal view of an accepted raw step: the claim of the receipt with the witness extracted from
+    the submitted lanes, and the same receipt. -/
+def rawSettlementVis {LegacyPk Witness Authorization : Type}
+    (D : SettlementWire LegacyPk Witness)
+    (io : MigrationExecution.Submission Authorization × Spec.MigrationReceipt LegacyPk) :
+    (Spec.MigrationClaim LegacyPk × Witness) × Spec.MigrationReceipt LegacyPk :=
+  ((io.2.claim, D.extractWitness io.1.witness), io.2)
+
+/-- Forward simulation with an input map. `Spec.Refines` needs one input alphabet and equal
+    accept/reject verdicts; here the concrete input is a raw submission, the ideal input is its
+    decoding, and a raw submission may be rejected for a reason the ideal machine does not see
+    (authorization). So the simulation is stated on traces: every valid trace of the raw
+    settlement machine, from a ledger whose spent set is the ideal spent-nullifier list, maps
+    under `rawSettlementVis` to a valid trace of `Spec.idealMigrateMachine` with the same
+    receipts, and the spent sets agree at the end. Rejected raw submissions are ideal no-ops. -/
+theorem rawSettlement_trace_simulated {LegacyPk Witness Authorization : Type}
+    [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness} {scheme : Spec.LegacyOwnershipScheme LegacyPk Witness}
+    {verifyAuthorization : MigrationExecution.Statement → Authorization → Bool}
+    {compile : MigrationExecution.Statement → List MigrationExecution.Gate}
+    (S : SettlementCircuitSound D scheme verifyAuthorization compile)
+    (snapshot : Spec.EnrolledSnapshot LegacyPk) :
+    ∀ {ledger ledger' : MigrationExecution.Ledger} {a : Spec.IdealMigrateState LegacyPk}
+      {tr : List (MigrationExecution.Submission Authorization ×
+        Spec.MigrationReceipt LegacyPk)},
+      ledger.spent = a.spentNullifiers →
+      (rawSettlementMachine D snapshot verifyAuthorization compile).ValidTrace ledger tr
+        ledger' →
+      ∃ a' : Spec.IdealMigrateState LegacyPk,
+        (Spec.idealMigrateMachine scheme snapshot).ValidTrace a
+          (tr.map (rawSettlementVis D)) a' ∧
+        ledger'.spent = a'.spentNullifiers
+  | _, _, a, _, hRel, .nil _ => ⟨a, .nil a, hRel⟩
+  | ledger, _, a, _, hRel, .accept (inp := sub) (out := out) hStep hRest => by
+    obtain ⟨_, _, hClaim, _, _, _, hFresh, hIns⟩ :=
+      rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hStep
+    obtain ⟨hValid, _, _⟩ := rawSettlement_accepted_ownership S snapshot hStep
+    have hClaimNull : out.claim.nullifier = sub.statement.nullifier := by
+      rw [hClaim]
+      rfl
+    rw [← hClaimNull] at hFresh hIns
+    rw [hRel] at hFresh hIns
+    have hIdeal := (Spec.idealMigrateMachine_step_eq_some_iff scheme snapshot a _ out.claim
+      (D.extractWitness sub.witness) out).mpr ⟨hValid, hFresh, rfl, rfl⟩
+    obtain ⟨a', hTr, hRel'⟩ := rawSettlement_trace_simulated S snapshot
+      (a := { totalMigrated := a.totalMigrated + out.amount
+              spentNullifiers := out.claim.nullifier :: a.spentNullifiers
+              settledClaims := out :: a.settledClaims }) hIns hRest
+    exact ⟨a', .accept hIdeal hTr, hRel'⟩
+  | ledger, _, a, _, hRel, .reject sub hNone hRest => by
+    have hErr := rawSettlement_rejected_ledger_unchanged D snapshot verifyAuthorization compile
+      hNone
+    have hRel' : ((rawSettlementMachine D snapshot verifyAuthorization compile).errStep ledger
+        sub).spent = a.spentNullifiers := by
+      rw [hErr]
+      exact hRel
+    exact rawSettlement_trace_simulated S snapshot hRel' hRest
+
+/-- Safety of the raw settlement machine: along every trace of raw submissions from the empty
+    ledger, each accepted submission is a claim with `Spec.ValidLegacyOwnership` for the receipt
+    amount under the witness extracted from its lanes, the accepted legacy keys are pairwise
+    distinct, the amounts sum to at most the total enrolled entitlement, and the ledger has no
+    duplicate nullifier. -/
+theorem rawSettlement_trace_ownership_nodup_conservation
     {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
-    {scheme : Qsag.Spec.LegacyOwnershipScheme LegacyPk Witness}
-    {snapshot : Qsag.Spec.EnrolledSnapshot LegacyPk}
-    {verifyAuthorization : Qsag.MigrationExecution.Statement → Authorization → Bool}
-    {compile : Qsag.MigrationExecution.Statement → List Qsag.MigrationExecution.Gate}
-    (B : LegacySettlementBinding scheme snapshot verifyAuthorization compile) :
-    Qsag.Spec.Refines (migrationSettlementMachine B)
-      (Qsag.Spec.idealMigrateMachine scheme snapshot) where
-  Rel ledger st := ledger.spent = st.spentNullifiers
-  absInit _ := Qsag.Spec.IdealMigrateState.init
-  init_ok {c₀} hInit := by
-    have hInit' : c₀ = ⟨[]⟩ := hInit
-    subst hInit'
-    exact ⟨rfl, rfl⟩
-  sim_ok {c c' a inp out} hRel hStep := by
-    obtain ⟨claim, wit⟩ := inp
-    have hRel' : c.spent = a.spentNullifiers := hRel
-    have hEnc : (B.encode (claim, wit)).statement.nullifier = claim.nullifier :=
-      B.encode_nullifier (claim, wit)
-    obtain ⟨hAcc, hC', hOut⟩ := settlementReceipt_eq_some hStep
-    have hValid : Qsag.Spec.ValidLegacyOwnership scheme snapshot claim wit
-        (B.creditedAmount claim) := B.accepted_sound c (claim, wit) hAcc
-    have hFreshC := settle_accepted_fresh verifyAuthorization compile c _ hAcc
-    rw [hEnc, hRel'] at hFreshC
-    have hIdeal := (Qsag.Spec.idealMigrateMachine_step_eq_some_iff scheme snapshot a _ claim wit
-      ⟨claim, B.creditedAmount claim⟩).mpr ⟨hValid, hFreshC, rfl, rfl⟩
-    rw [hIdeal]
-    refine ⟨hOut.symm, ?_⟩
-    have hIns := Qsag.MigrationExecution.settle_accept_inserts verifyAuthorization compile c
-      (B.encode (claim, wit)) hAcc
-    rw [hEnc, hRel'] at hIns
-    rw [hC']
-    exact hIns
-  sim_err {c a inp} hRel hNone := by
-    obtain ⟨claim, wit⟩ := inp
-    have hRel' : c.spent = a.spentNullifiers := hRel
-    have hNotAcc := settlementReceipt_eq_none hNone
-    refine ⟨?_, hRel⟩
-    cases hIdeal : (Qsag.Spec.idealMigrateMachine scheme snapshot).step a (claim, wit) with
-    | none => rfl
-    | some pair =>
-      obtain ⟨a', out⟩ := pair
-      obtain ⟨hValid, hFresh, _, _⟩ :=
-        (Qsag.Spec.idealMigrateMachine_step_eq_some_iff scheme snapshot a a' claim wit out).mp
-          hIdeal
-      rw [← hRel'] at hFresh
-      exact absurd (B.owner_accepted c (claim, wit) out.amount hValid hFresh) hNotAcc
-
-/-- Safety of the settlement ledger inherited from the ideal machine through
-    `migrationSettlement_refines_idealMigrate`: along every trace from the empty ledger, each
-    accepted claim has `Spec.ValidLegacyOwnership` for the amount of its receipt, the accepted
-    legacy keys are pairwise distinct, the amounts sum to at most the total enrolled entitlement,
-    and the ledger has no duplicate nullifier. -/
-theorem migrationSettlement_trace_ownership_nodup_conservation
-    {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
-    {scheme : Qsag.Spec.LegacyOwnershipScheme LegacyPk Witness}
-    {snapshot : Qsag.Spec.EnrolledSnapshot LegacyPk}
-    {verifyAuthorization : Qsag.MigrationExecution.Statement → Authorization → Bool}
-    {compile : Qsag.MigrationExecution.Statement → List Qsag.MigrationExecution.Gate}
-    (B : LegacySettlementBinding scheme snapshot verifyAuthorization compile)
-    {ledger₀ ledger : Qsag.MigrationExecution.Ledger}
-    {tr : List ((Qsag.Spec.MigrationClaim LegacyPk × Witness) ×
-      Qsag.Spec.MigrationReceipt LegacyPk)}
-    (hInit : (migrationSettlementMachine B).Init ledger₀)
-    (hTrace : (migrationSettlementMachine B).ValidTrace ledger₀ tr ledger) :
-    (∀ io ∈ tr, Qsag.Spec.ValidLegacyOwnership scheme snapshot io.1.1 io.1.2 io.2.amount ∧
-      io.2.claim = io.1.1) ∧
-    (tr.map (fun io => io.1.1.legacyPk)).Nodup ∧
-    (tr.map (fun io => io.2.amount)).sum ≤ Qsag.Spec.EnrolledSnapshot.total snapshot ∧
+    {D : SettlementWire LegacyPk Witness} {scheme : Spec.LegacyOwnershipScheme LegacyPk Witness}
+    {verifyAuthorization : MigrationExecution.Statement → Authorization → Bool}
+    {compile : MigrationExecution.Statement → List MigrationExecution.Gate}
+    (S : SettlementCircuitSound D scheme verifyAuthorization compile)
+    (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    {ledger₀ ledger : MigrationExecution.Ledger}
+    {tr : List (MigrationExecution.Submission Authorization × Spec.MigrationReceipt LegacyPk)}
+    (hInit : (rawSettlementMachine D snapshot verifyAuthorization compile).Init ledger₀)
+    (hTrace : (rawSettlementMachine D snapshot verifyAuthorization compile).ValidTrace ledger₀ tr
+      ledger) :
+    (∀ io ∈ tr, Spec.ValidLegacyOwnership scheme snapshot io.2.claim
+      (D.extractWitness io.1.witness) io.2.amount) ∧
+    (tr.map (fun io => io.2.claim.legacyPk)).Nodup ∧
+    (tr.map (fun io => io.2.amount)).sum ≤ Spec.EnrolledSnapshot.total snapshot ∧
     ledger.spent.Nodup := by
-  obtain ⟨hInitA, hRel₀⟩ := (migrationSettlement_refines_idealMigrate B).init_ok hInit
-  obtain ⟨aFinal, hTraceA, hRelFinal⟩ :=
-    (migrationSettlement_refines_idealMigrate B).lift_validTrace hRel₀ hTrace
-  have hSpent : ledger.spent = aFinal.spentNullifiers := hRelFinal
-  have hInv := Qsag.Spec.idealMigrateMachine_reachable_inv scheme snapshot
-    ⟨_, tr, hInitA, hTraceA⟩
-  refine ⟨Qsag.Spec.idealMigrateMachine_trace_ownership_sound scheme snapshot hTraceA,
-    Qsag.Spec.idealMigrateMachine_trace_no_double_claim scheme snapshot hTraceA,
-    Qsag.Spec.idealMigrateMachine_trace_minted_le_enrolled scheme snapshot hInitA hTraceA, ?_⟩
-  rw [hSpent]
+  have hInit' : ledger₀ = ⟨[]⟩ := hInit
+  have hRel₀ : ledger₀.spent =
+      (Spec.IdealMigrateState.init : Spec.IdealMigrateState LegacyPk).spentNullifiers := by
+    rw [hInit']
+    rfl
+  obtain ⟨aFinal, hTraceA, hRelFinal⟩ := rawSettlement_trace_simulated S snapshot hRel₀ hTrace
+  have hInitA : (Spec.idealMigrateMachine scheme snapshot).Init Spec.IdealMigrateState.init := rfl
+  have hInv := Spec.idealMigrateMachine_reachable_inv scheme snapshot ⟨_, _, hInitA, hTraceA⟩
+  have hSound := Spec.idealMigrateMachine_trace_ownership_sound scheme snapshot hTraceA
+  have hNd := Spec.idealMigrateMachine_trace_no_double_claim scheme snapshot hTraceA
+  have hSum := Spec.idealMigrateMachine_trace_minted_le_enrolled scheme snapshot hInitA hTraceA
+  rw [List.map_map] at hNd hSum
+  refine ⟨fun io hio => (hSound _ (List.mem_map_of_mem (f := rawSettlementVis D) hio)).1,
+    hNd, hSum, ?_⟩
+  rw [hRelFinal]
   exact hInv.2.1
 
-/-- `#tooth` After the settlement ledger accepts a claim for a legacy key, a second claim for the
-    same key is rejected whatever nullifier, destination and witness it carries: a different
-    nullifier fails `accepted_sound`, the derived one is in the ledger. -/
-theorem tooth_migrationSettlement_second_claim_same_legacyPk_rejected
+/-- `#tooth` A raw submission whose legacy commitment does not parse is rejected, whatever its
+    authorization, witness lanes and nullifier. -/
+theorem tooth_rawSettlement_undecodable_submission_rejected
     {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
-    {scheme : Qsag.Spec.LegacyOwnershipScheme LegacyPk Witness}
-    {snapshot : Qsag.Spec.EnrolledSnapshot LegacyPk}
-    {verifyAuthorization : Qsag.MigrationExecution.Statement → Authorization → Bool}
-    {compile : Qsag.MigrationExecution.Statement → List Qsag.MigrationExecution.Gate}
-    (B : LegacySettlementBinding scheme snapshot verifyAuthorization compile)
-    {ledger ledger' : Qsag.MigrationExecution.Ledger}
-    {claim : Qsag.Spec.MigrationClaim LegacyPk} {wit : Witness}
-    {out : Qsag.Spec.MigrationReceipt LegacyPk}
-    (hStep : (migrationSettlementMachine B).step ledger (claim, wit) = some (ledger', out))
-    (claim' : Qsag.Spec.MigrationClaim LegacyPk) (wit' : Witness)
-    (hSame : claim'.legacyPk = claim.legacyPk) :
-    (migrationSettlementMachine B).step ledger' (claim', wit') = none := by
-  have hEnc : (B.encode (claim, wit)).statement.nullifier = claim.nullifier :=
-    B.encode_nullifier (claim, wit)
-  have hEnc' : (B.encode (claim', wit')).statement.nullifier = claim'.nullifier :=
-    B.encode_nullifier (claim', wit')
-  obtain ⟨hAcc, hL, _⟩ := settlementReceipt_eq_some hStep
-  have hValid : Qsag.Spec.ValidLegacyOwnership scheme snapshot claim wit
-      (B.creditedAmount claim) := B.accepted_sound ledger (claim, wit) hAcc
-  have hIns := Qsag.MigrationExecution.settle_accept_inserts verifyAuthorization compile ledger
-    (B.encode (claim, wit)) hAcc
-  rw [hEnc] at hIns
-  cases hSecond : (migrationSettlementMachine B).step ledger' (claim', wit') with
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
+    (ledger : MigrationExecution.Ledger) (sub : MigrationExecution.Submission Authorization)
+    (hUndecodable : D.decode sub = none) :
+    (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub = none := by
+  cases hS : (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub with
+  | none => rfl
+  | some pair =>
+    obtain ⟨ledger', out⟩ := pair
+    obtain ⟨hDec, _⟩ := rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hS
+    rw [hUndecodable] at hDec
+    cases hDec
+
+/-- `#tooth` A raw submission for a parsed key outside the snapshot is rejected, whatever its
+    authorization, witness lanes and nullifier: the fresh-nullifier drain on the raw interface. -/
+theorem tooth_rawSettlement_unenrolled_submission_rejected
+    {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
+    (ledger : MigrationExecution.Ledger) (sub : MigrationExecution.Submission Authorization)
+    {pk : LegacyPk} (hPk : D.legacyPkOf sub.statement.legacyCommitment = some pk)
+    (hUnenrolled : Spec.EnrolledSnapshot.entitlement snapshot pk = none) :
+    (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub = none := by
+  show rawSettlementStep D snapshot verifyAuthorization compile ledger sub = none
+  unfold rawSettlementStep
+  rw [rawSettlementAdmit_eq_none hPk hUnenrolled]
+
+/-- The destination of a receipt is the serialized destination of the accepted statement and of
+    no other: a settlement recorded for any `other` destination is not an accepted step. -/
+theorem tooth_rawSettlement_receipt_destination_not_substituted
+    {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
+    (D : SettlementWire LegacyPk Witness) (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    (verifyAuthorization : MigrationExecution.Statement → Authorization → Bool)
+    (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
+    {ledger ledger' : MigrationExecution.Ledger}
+    {sub : MigrationExecution.Submission Authorization}
+    {out : Spec.MigrationReceipt LegacyPk}
+    (hStep : (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub =
+      some (ledger', out))
+    (other : BitVec 256) (hOther : ¬ (other = sub.statement.destination)) :
+    ¬ (out.claim.pqDestinationPk = D.destinationBytes other) := by
+  obtain ⟨_, _, hClaim, _⟩ :=
+    rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hStep
+  intro hEq
+  have hDest : out.claim.pqDestinationPk = D.destinationBytes sub.statement.destination := by
+    rw [hClaim]
+    rfl
+  exact hOther (D.destinationBytes_injective (hEq.symm.trans hDest))
+
+/-- `#tooth` Destination substitution by resubmission: after a raw submission for a legacy
+    commitment is accepted, every further raw submission with the same commitment is rejected,
+    whatever destination, nullifier, authorization and witness lanes it carries. -/
+theorem tooth_rawSettlement_resubmission_other_destination_rejected
+    {LegacyPk Witness Authorization : Type} [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness} {scheme : Spec.LegacyOwnershipScheme LegacyPk Witness}
+    {verifyAuthorization : MigrationExecution.Statement → Authorization → Bool}
+    {compile : MigrationExecution.Statement → List MigrationExecution.Gate}
+    (S : SettlementCircuitSound D scheme verifyAuthorization compile)
+    (snapshot : Spec.EnrolledSnapshot LegacyPk)
+    {ledger ledger' : MigrationExecution.Ledger}
+    {sub : MigrationExecution.Submission Authorization}
+    {out : Spec.MigrationReceipt LegacyPk}
+    (hStep : (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger sub =
+      some (ledger', out))
+    (sub' : MigrationExecution.Submission Authorization)
+    (hSame : sub'.statement.legacyCommitment = sub.statement.legacyCommitment) :
+    (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger' sub' = none := by
+  obtain ⟨_, hPk, _, _, hAuth, hRun, _, hIns⟩ :=
+    rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hStep
+  have hNull := S.accepted_nullifier_derived sub.statement sub.authorization sub.witness
+    out.claim.legacyPk hAuth hRun hPk
+  cases hS : (rawSettlementMachine D snapshot verifyAuthorization compile).step ledger' sub' with
   | none => rfl
   | some pair =>
     obtain ⟨ledger'', out'⟩ := pair
-    obtain ⟨hAcc', _, _⟩ := settlementReceipt_eq_some hSecond
-    have hValid' : Qsag.Spec.ValidLegacyOwnership scheme snapshot claim' wit'
-        (B.creditedAmount claim') := B.accepted_sound ledger' (claim', wit') hAcc'
-    have hFresh' := settle_accepted_fresh verifyAuthorization compile ledger' _ hAcc'
-    rw [hEnc'] at hFresh'
-    have hNullEq : claim'.nullifier = claim.nullifier :=
-      hValid'.2.1.trans ((congrArg scheme.deriveNullifier hSame).trans hValid.2.1.symm)
-    have hMem : claim'.nullifier ∈ ledger'.spent := by
-      rw [hL, hIns, hNullEq]
+    obtain ⟨_, hPk', _, _, hAuth', hRun', hFresh', _⟩ :=
+      rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hS
+    rw [hSame, hPk] at hPk'
+    injection hPk' with hPkEq
+    have hNull' := S.accepted_nullifier_derived sub'.statement sub'.authorization sub'.witness
+      out.claim.legacyPk hAuth' hRun' (hSame ▸ hPk)
+    have hMem : sub'.statement.nullifier ∈ ledger'.spent := by
+      rw [hIns, hNull', ← hNull]
       exact .head _
     exact absurd hMem hFresh'
+
+/-! ## 5. An Instance of `SettlementCircuitSound` over the Executable Circuit Run -/
+
+/-- Toy wire format: the only commitment that parses is the one of
+    `MigrationExecution.honestSubmission`, to the key given by its nullifier; destinations are
+    serialized in unary; the witness is the lanes themselves. -/
+def migrationToyWire : SettlementWire Spec.Digest256 RssWitnessLanes3 where
+  legacyPkOf c :=
+    if c = MigrationExecution.honestSubmission.statement.legacyCommitment then
+      some MigrationExecution.honestSubmission.statement.nullifier
+    else none
+  destinationBytes d := List.replicate d.toNat 0
+  destinationBytes_injective h := by
+    have hLen := congrArg List.length h
+    rw [List.length_replicate, List.length_replicate] at hLen
+    exact BitVec.eq_of_toNat_eq hLen
+  extractWitness w := w
+  migrationDomain := MigrationExecution.honestSubmission.statement.migrationDomain
+  epoch := MigrationExecution.honestSubmission.statement.epoch
+
+/-- Toy ownership scheme: the nullifier of a key is the key; a witness owns a key when its lanes
+    pass `shareUniformLanesCheck`. -/
+def migrationToyScheme : Spec.LegacyOwnershipScheme Spec.Digest256 RssWitnessLanes3 where
+  ownsKey _ w _ := shareUniformLanesCheck w = true
+  checkOwnership _ w _ := shareUniformLanesCheck w
+  check_iff _ _ _ := Iff.rfl
+  deriveNullifier pk := pk
+  deriveNullifier_injective h := h
+
+/-- Toy authorization verifier: the statement carries the nullifier, domain and epoch of
+    `MigrationExecution.honestSubmission`. -/
+def migrationToyVerify (st : MigrationExecution.Statement) (_ : Unit) : Bool :=
+  decide (st.nullifier = MigrationExecution.honestSubmission.statement.nullifier ∧
+    st.migrationDomain = MigrationExecution.honestSubmission.statement.migrationDomain ∧
+    st.epoch = MigrationExecution.honestSubmission.statement.epoch)
+
+/-- Toy snapshot: the single parsed key with entitlement `100`. -/
+def migrationToySnapshot : Spec.EnrolledSnapshot Spec.Digest256 :=
+  [(MigrationExecution.honestSubmission.statement.nullifier, 100)]
+
+private theorem migrationToyWire_legacyPkOf_eq_some {c : List UInt8} {pk : Spec.Digest256}
+    (h : migrationToyWire.legacyPkOf c = some pk) :
+    pk = MigrationExecution.honestSubmission.statement.nullifier := by
+  have h' : (if c = MigrationExecution.honestSubmission.statement.legacyCommitment then
+      some MigrationExecution.honestSubmission.statement.nullifier else none) = some pk := h
+  split at h'
+  · injection h' with h'
+    exact h'.symm
+  · cases h'
+
+/-- `SettlementCircuitSound` holds for the toy wire, scheme and verifier with the executable
+    circuit `MigrationExecution.honestCircuit`. -/
+theorem migrationToy_circuitSound :
+    SettlementCircuitSound migrationToyWire migrationToyScheme migrationToyVerify
+      MigrationExecution.honestCircuit where
+  authorization_campaign _ _ hAuth := (of_decide_eq_true hAuth).2
+  accepted_nullifier_derived _ _ _ _ hAuth _ hPk :=
+    (of_decide_eq_true hAuth).1.trans (migrationToyWire_legacyPkOf_eq_some hPk).symm
+  accepted_witness_owns st _ w _ _ hRun _ :=
+    MigrationExecution.run_checks_actual_lanes w (MigrationExecution.honestCircuit st) hRun
+
+/-- The honest raw submission is accepted by the toy registry from the empty ledger and mints
+    the enrolled entitlement `100`. -/
+theorem migrationToy_honest_submission_accepted :
+    ∃ ledger' : MigrationExecution.Ledger,
+      (rawSettlementMachine migrationToyWire migrationToySnapshot migrationToyVerify
+        MigrationExecution.honestCircuit).step ⟨[]⟩ MigrationExecution.honestSubmission =
+      some (ledger', ⟨migrationToyWire.claimOf
+        MigrationExecution.honestSubmission.statement.nullifier
+        MigrationExecution.honestSubmission.statement, 100⟩) := by
+  have hRun := ((MigrationExecution.settle_accepted_iff (fun _ (_ : Unit) => true)
+    MigrationExecution.honestCircuit ⟨[]⟩ MigrationExecution.honestSubmission).mp
+    MigrationExecution.settlement_acceptance_witness).2.2
+  have hAcc : (MigrationExecution.settle migrationToyVerify MigrationExecution.honestCircuit
+      ⟨[]⟩ MigrationExecution.honestSubmission).2 = .accepted :=
+    (MigrationExecution.settle_accepted_iff migrationToyVerify MigrationExecution.honestCircuit
+      ⟨[]⟩ MigrationExecution.honestSubmission).mpr
+      ⟨(by intro h; cases h),
+       (by unfold migrationToyVerify; exact decide_eq_true ⟨rfl, rfl, rfl⟩), hRun⟩
+  have hPk : migrationToyWire.legacyPkOf
+      MigrationExecution.honestSubmission.statement.legacyCommitment =
+      some MigrationExecution.honestSubmission.statement.nullifier := by
+    show (if MigrationExecution.honestSubmission.statement.legacyCommitment =
+        MigrationExecution.honestSubmission.statement.legacyCommitment then
+      some MigrationExecution.honestSubmission.statement.nullifier else none) = _
+    simp only [↓reduceIte]
+  have hEnt : Spec.EnrolledSnapshot.entitlement migrationToySnapshot
+      MigrationExecution.honestSubmission.statement.nullifier = some 100 := by
+    simp only [migrationToySnapshot, Spec.EnrolledSnapshot.entitlement, ↓reduceIte]
+  have hAd : rawSettlementAdmit migrationToyWire migrationToySnapshot
+      MigrationExecution.honestSubmission.statement =
+      some (MigrationExecution.honestSubmission.statement.nullifier, 100) := by
+    unfold rawSettlementAdmit
+    rw [hPk]
+    show (match Spec.EnrolledSnapshot.entitlement migrationToySnapshot
+        MigrationExecution.honestSubmission.statement.nullifier with
+      | none => none
+      | some amount => some (MigrationExecution.honestSubmission.statement.nullifier, amount)) = _
+    rw [hEnt]
+  refine ⟨(MigrationExecution.settle migrationToyVerify MigrationExecution.honestCircuit ⟨[]⟩
+    MigrationExecution.honestSubmission).1, ?_⟩
+  show rawSettlementStep migrationToyWire migrationToySnapshot migrationToyVerify
+    MigrationExecution.honestCircuit ⟨[]⟩ MigrationExecution.honestSubmission = _
+  unfold rawSettlementStep
+  rw [hAd]
+  show settlementReceipt _ _ (MigrationExecution.settle migrationToyVerify
+    MigrationExecution.honestCircuit ⟨[]⟩ MigrationExecution.honestSubmission).2 = _
+  rw [hAcc]
+  rfl
+
+/-- `#tooth` A forged raw submission to the toy registry under any nullifier other than the
+    derived one is rejected in every ledger, whatever its commitment, destination and lanes. -/
+theorem tooth_migrationToy_forged_nullifier_rejected
+    (ledger : MigrationExecution.Ledger) (sub : MigrationExecution.Submission Unit)
+    (hForged : ¬ (sub.statement.nullifier =
+      MigrationExecution.honestSubmission.statement.nullifier)) :
+    (rawSettlementMachine migrationToyWire migrationToySnapshot migrationToyVerify
+      MigrationExecution.honestCircuit).step ledger sub = none := by
+  cases hS : (rawSettlementMachine migrationToyWire migrationToySnapshot migrationToyVerify
+      MigrationExecution.honestCircuit).step ledger sub with
+  | none => rfl
+  | some pair =>
+    obtain ⟨ledger', out⟩ := pair
+    obtain ⟨_, _, _, _, hAuth, _⟩ := rawSettlement_accepted_decodes migrationToyWire
+      migrationToySnapshot migrationToyVerify MigrationExecution.honestCircuit hS
+    exact absurd (of_decide_eq_true hAuth).1 hForged
 
 #verify_constructive
   Qsag.Top.legacy_curve_primality_extraction_and_ideal_migration_chain
   Qsag.Top.active_migration_ceremony_qrom_and_gf2pow128_chain
   Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
   Qsag.Top.zkboo_extracted_scalar_claims_enrolled_entitlement
-  Qsag.Top.migrationSettlement_trace_ownership_nodup_conservation
-  Qsag.Top.tooth_migrationSettlement_second_claim_same_legacyPk_rejected
+  Qsag.Top.rawSettlement_accepted_decodes
+  Qsag.Top.rawSettlement_rejected_ledger_unchanged
+  Qsag.Top.rawSettlement_accepted_ownership
+  Qsag.Top.rawSettlement_trace_simulated
+  Qsag.Top.rawSettlement_trace_ownership_nodup_conservation
+  Qsag.Top.tooth_rawSettlement_undecodable_submission_rejected
+  Qsag.Top.tooth_rawSettlement_unenrolled_submission_rejected
+  Qsag.Top.tooth_rawSettlement_receipt_destination_not_substituted
+  Qsag.Top.tooth_rawSettlement_resubmission_other_destination_rejected
+  Qsag.Top.migrationToy_circuitSound
+  Qsag.Top.migrationToy_honest_submission_accepted
+  Qsag.Top.tooth_migrationToy_forged_nullifier_rejected
 
-#tooth_pair Qsag.Top.migrationSettlement_trace_ownership_nodup_conservation vs
-  Qsag.Top.tooth_migrationSettlement_second_claim_same_legacyPk_rejected
+#tooth_pair Qsag.Top.rawSettlement_accepted_decodes vs
+  Qsag.Top.tooth_rawSettlement_undecodable_submission_rejected
+#tooth_pair Qsag.Top.rawSettlement_trace_simulated vs
+  Qsag.Top.tooth_rawSettlement_unenrolled_submission_rejected
+#tooth_pair Qsag.Top.rawSettlement_accepted_ownership vs
+  Qsag.Top.tooth_rawSettlement_receipt_destination_not_substituted
+#tooth_pair Qsag.Top.rawSettlement_trace_ownership_nodup_conservation vs
+  Qsag.Top.tooth_rawSettlement_resubmission_other_destination_rejected
+#tooth_pair Qsag.Top.migrationToy_honest_submission_accepted vs
+  Qsag.Top.tooth_migrationToy_forged_nullifier_rejected
 
 end Qsag.Top
 end
