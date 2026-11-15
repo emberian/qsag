@@ -3990,14 +3990,7 @@ pub(crate) mod tests {
         }
     }
     pub(crate) fn parallel_batches() -> usize {
-        if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1")
-            || std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24)
-        {
-            // Seven batches cover all 438 repetitions without a serial tail.
-            7
-        } else {
-            4
-        }
+        4
     }
 
     impl Transport for Network {

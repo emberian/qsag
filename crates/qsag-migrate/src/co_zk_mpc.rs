@@ -1368,10 +1368,11 @@ fn evaluate_inner<T: Transport>(
                 if d == Domain::Bit {
                     let w = wires[idx].as_ref().unwrap();
                     for head in 0..3 {
-                        outer_mpc::encode(&mut views[head].products, &[w[head].bit()]);
+                        views[head].products.push(w[head].bit());
                     }
                 } else {
                     for head in 0..3 {
+                        pad_byte(&mut views[head].products);
                         outer_mpc::encode(
                             &mut views[head].products,
                             encodings[idx][head].as_ref().unwrap(),
@@ -1388,10 +1389,11 @@ fn evaluate_inner<T: Transport>(
         if d == Domain::Bit {
             let w = wires[out].as_ref().unwrap();
             for head in 0..3 {
-                outer_mpc::encode(&mut views[head].outputs, &[w[head].bit()]);
+                views[head].outputs.push(w[head].bit());
             }
         } else {
             for head in 0..3 {
+                pad_byte(&mut views[head].outputs);
                 outer_mpc::encode(
                     &mut views[head].outputs,
                     encodings[out][head].as_ref().unwrap(),
@@ -1399,8 +1401,16 @@ fn evaluate_inner<T: Transport>(
             }
         }
     }
+    for view in &mut views {
+        pad_byte(&mut view.products);
+        pad_byte(&mut view.outputs);
+    }
 
     Ok(views)
+}
+
+fn pad_byte(bits: &mut Word) {
+    bits.resize(bits.len().div_ceil(8) * 8, Bit::default());
 }
 
 /// Compute the 256-bit `cSHAKE256("QSAG.MIGRATE.VIEW.V3")` view commitment shares
@@ -1706,7 +1716,10 @@ mod tests {
             let mut e = Engine::new(p, [51; 32], keys(p), n).unwrap();
             let c = Builder::default();
             let bit = c.input(1);
-            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for (d, count) in [(Domain::Gold, 1), (Domain::Secp, 8), (Domain::Ed, 9)] {
+                for _ in 0..count {
+                    c.output(c.mul(bit, bit));
+                }
                 let a = c.lift(bit, d);
                 let b = c.add(a, c.small(d, 27));
                 let z = c.mul(a, b);
@@ -1718,6 +1731,9 @@ mod tests {
                 for b in c.bits(z) {
                     c.output(b);
                 }
+            }
+            for _ in 0..9 {
+                c.output(c.mul(bit, bit));
             }
             let c = c.finish();
             let witness = e.share(&[if p == 0 { u64::MAX } else { 0 }]).unwrap();
@@ -1872,7 +1888,11 @@ mod tests {
         fn acquire(batches: usize) -> Self {
             let (active, ready) = &HEAVY_CEREMONIES;
             let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
-            let limit = 7;
+            let limit = if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
+                16
+            } else {
+                7
+            };
             while *count + batches > limit {
                 count = ready.wait(count).unwrap_or_else(|e| e.into_inner());
             }
@@ -2075,7 +2095,7 @@ mod tests {
     }
     impl Transport for ZkbooFaultSpy {
         fn max_parallel_batches(&self) -> usize {
-            3
+            outer_mpc::tests::parallel_batches()
         }
 
         fn test_fault_raw(&self) -> Option<[usize; 4]> {
@@ -2104,7 +2124,7 @@ mod tests {
     }
 
     fn assert_zkboo_fault_aborts_cleanly(ed: bool, fault: FaultInjection, session_tag: u8) {
-        let _ceremony_guard = CeremonySlot::acquire(3);
+        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x31 + seed_try; 32]);
             let kind = if ed {
@@ -2230,7 +2250,7 @@ mod tests {
     }
 
     fn assert_input_substitution_aborts(ed: bool, delta_64bit: bool, session_tag: u8) {
-        let _ceremony_guard = CeremonySlot::acquire(3);
+        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
         let mut verified = false;
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x41 + seed_try; 32]);

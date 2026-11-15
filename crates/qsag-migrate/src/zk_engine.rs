@@ -225,6 +225,64 @@ pub(crate) fn take(input: &mut &[u8], d: Domain) -> Result<Value, MigrateError> 
     }
     Ok(v)
 }
+
+// Products and outputs pack consecutive Boolean values LSB-first. A field value
+// or the end of the stream terminates a run with zero padding to a whole byte.
+fn put_packed(out: &mut Vec<u8>, bit: &mut u8, d: Domain, v: Value) {
+    if d == Domain::Bit {
+        if *bit == 0 {
+            out.push(0);
+        }
+        *out.last_mut().unwrap() |= (v[0] as u8 & 1) << *bit;
+        *bit = (*bit + 1) % 8;
+    } else {
+        *bit = 0;
+        put(out, d, v);
+    }
+}
+
+struct PackedReader<'a> {
+    input: &'a [u8],
+    bit: u8,
+}
+impl<'a> PackedReader<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, bit: 0 }
+    }
+    fn align(&mut self) -> Result<(), MigrateError> {
+        if self.bit != 0 {
+            if self.input[0] >> self.bit != 0 {
+                return Err(MigrateError::MalformedProofStructure);
+            }
+            self.input = &self.input[1..];
+            self.bit = 0;
+        }
+        Ok(())
+    }
+    fn take(&mut self, d: Domain) -> Result<Value, MigrateError> {
+        if d != Domain::Bit {
+            self.align()?;
+            return take(&mut self.input, d);
+        }
+        let byte = self
+            .input
+            .first()
+            .ok_or(MigrateError::MalformedProofStructure)?;
+        let v = [u64::from((byte >> self.bit) & 1), 0, 0, 0];
+        self.bit = (self.bit + 1) % 8;
+        if self.bit == 0 {
+            self.input = &self.input[1..];
+        }
+        Ok(v)
+    }
+    fn finish(&mut self) -> Result<(), MigrateError> {
+        self.align()?;
+        if !self.input.is_empty() {
+            return Err(MigrateError::MalformedProofStructure);
+        }
+        Ok(())
+    }
+}
 pub(crate) struct Wires(pub(crate) Vec<Value>);
 impl Drop for Wires {
     fn drop(&mut self) {
@@ -258,6 +316,7 @@ pub(crate) fn simulate(c: &Circuit, seeds: [[u8; 32]; 3]) -> [PartyView; 3] {
         outputs: Vec::new(),
     });
     let mut wires: [Wires; 3] = core::array::from_fn(|_| Wires(Vec::with_capacity(c.nodes.len())));
+    let mut product_bits = [0; 3];
     for node in &c.nodes {
         let d = node.domain;
         let value = match node.op {
@@ -281,8 +340,8 @@ pub(crate) fn simulate(c: &Circuit, seeds: [[u8; 32]; 3]) -> [PartyView; 3] {
                         [masks[p], masks[n]],
                     )
                 });
-                for (view, v) in views.iter_mut().zip(shares) {
-                    put(&mut view.products, d, v);
+                for ((view, bit), v) in views.iter_mut().zip(&mut product_bits).zip(shares) {
+                    put_packed(&mut view.products, bit, d, v);
                 }
                 shares
             }
@@ -293,8 +352,9 @@ pub(crate) fn simulate(c: &Circuit, seeds: [[u8; 32]; 3]) -> [PartyView; 3] {
         }
     }
     for (v, w) in views.iter_mut().zip(&wires) {
+        let mut bit = 0;
         for &i in &c.outputs {
-            put(&mut v.outputs, c.nodes[i].domain, w.0[i]);
+            put_packed(&mut v.outputs, &mut bit, c.nodes[i].domain, w.0[i]);
         }
     }
     views
@@ -492,7 +552,7 @@ fn replay(c: &Circuit, rep: usize, view: &OpenedRepetitionView) -> Result<(), Mi
     let e = view.opened_e as usize;
     let mut tapes = view.pair.each_ref().map(|v| Tape::new(&v.seed));
     let mut inputs = view.pair.each_ref().map(|v| v.inputs.as_slice());
-    let mut products = view.pair.each_ref().map(|v| v.products.as_slice());
+    let mut products = view.pair.each_ref().map(|v| PackedReader::new(&v.products));
     let mut wires: [Wires; 2] = core::array::from_fn(|_| Wires(Vec::with_capacity(c.nodes.len())));
     for (gate_index, node) in c.nodes.iter().enumerate() {
         let d = node.domain;
@@ -509,8 +569,8 @@ fn replay(c: &Circuit, rep: usize, view: &OpenedRepetitionView) -> Result<(), Mi
             }
             Op::Mul(a, b) => {
                 let masks = [tapes[0].sample(d), tapes[1].sample(d)];
-                let claimed = take(&mut products[0], d)?;
-                let next = take(&mut products[1], d)?;
+                let claimed = products[0].take(d)?;
+                let next = products[1].take(d)?;
                 let actual = gate(
                     d,
                     [wires[0].0[a], wires[1].0[a]],
@@ -531,22 +591,25 @@ fn replay(c: &Circuit, rep: usize, view: &OpenedRepetitionView) -> Result<(), Mi
             w.0.push(v);
         }
     }
-    if inputs.iter().chain(&products).any(|s| !s.is_empty()) {
+    for product in &mut products {
+        product.finish()?;
+    }
+    if inputs.iter().any(|s| !s.is_empty()) {
         return Err(MigrateError::MalformedProofStructure);
     }
-    let mut outputs = view.pair.each_ref().map(|v| v.outputs.as_slice());
-    let mut hidden = view.hidden_outputs.as_slice();
+    let mut outputs = view.pair.each_ref().map(|v| PackedReader::new(&v.outputs));
+    let mut hidden = PackedReader::new(&view.hidden_outputs);
     for &w in &c.outputs {
         let d = c.nodes[w].domain;
-        let a = take(&mut outputs[0], d)?;
-        let b = take(&mut outputs[1], d)?;
-        let h = take(&mut hidden, d)?;
+        let a = outputs[0].take(d)?;
+        let b = outputs[1].take(d)?;
+        let h = hidden.take(d)?;
         if a != wires[0].0[w] || b != wires[1].0[w] || d.add(d.add(a, b), h) != ZERO {
             return Err(MigrateError::PublicOutputShareMismatch);
         }
     }
-    if !hidden.is_empty() || outputs.iter().any(|s| !s.is_empty()) {
-        return Err(MigrateError::MalformedProofStructure);
+    for output in outputs.iter_mut().chain(core::iter::once(&mut hidden)) {
+        output.finish()?;
     }
     Ok(())
 }
@@ -698,6 +761,65 @@ pub(crate) mod tests {
             let bytes = crate::scalar::encode(d.modulus());
             let mut input = &bytes[..d.width().div_ceil(8)];
             assert!(take(&mut input, d).is_err());
+        }
+    }
+
+    #[test]
+    fn packed_boolean_streams_reject_padding_at_field_boundaries_and_end() {
+        let mut bytes = Vec::new();
+        let mut bit = 0;
+        for value in [1, 0, 1, 1, 0, 0, 1, 0, 1] {
+            put_packed(&mut bytes, &mut bit, Domain::Bit, [value, 0, 0, 0]);
+        }
+        assert_eq!(bytes, [0x4d, 0x01]);
+
+        for count in [0usize, 1, 7, 8, 9, 15, 16, 17] {
+            let c = Builder::default();
+            let a = c.input(1);
+            for _ in 0..count {
+                c.equal(c.mul(a, a), a);
+            }
+            let field = c.lift(a, Domain::Gold);
+            c.equal(c.mul(field, field), field);
+            for _ in 0..count {
+                c.equal(c.mul(a, a), a);
+            }
+            let c = c.finish();
+            let views = simulate(&c, [[1; 32], [2; 32], [3; 32]]);
+            assert_eq!(views[0].outputs.len(), 8 + 2 * count.div_ceil(8));
+            type Field = fn(&mut OpenedRepetitionView) -> &mut Vec<u8>;
+            let fields: [Field; 5] = [
+                |v| &mut v.pair[0].products,
+                |v| &mut v.pair[1].products,
+                |v| &mut v.pair[0].outputs,
+                |v| &mut v.pair[1].outputs,
+                |v| &mut v.hidden_outputs,
+            ];
+            for e in 0..3 {
+                let opening = OpenedRepetitionView {
+                    opened_e: e as u8,
+                    pair: [views[e].clone(), views[(e + 1) % 3].clone()],
+                    hidden_party_commit: [0; 32],
+                    hidden_outputs: views[(e + 2) % 3].outputs.clone(),
+                };
+                assert_eq!(replay(&c, 0, &opening), Ok(()));
+                if count % 8 == 0 {
+                    continue;
+                }
+                for field in fields {
+                    let len = field(&mut opening.clone()).len();
+                    for index in [count.div_ceil(8) - 1, len - 1] {
+                        for padding_bit in count % 8..8 {
+                            let mut changed = opening.clone();
+                            field(&mut changed)[index] |= 1 << padding_bit;
+                            assert_eq!(
+                                replay(&c, 0, &changed),
+                                Err(MigrateError::MalformedProofStructure)
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
