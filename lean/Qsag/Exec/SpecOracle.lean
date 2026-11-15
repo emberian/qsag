@@ -567,3 +567,575 @@ theorem applyMI16_applyMI16Inv (y : Poseidon2State16) : applyMI16 (applyMI16Inv 
 def externalRound16 (rc st : Poseidon2State16) : Poseidon2State16 :=
   applyME16 (sboxState16 (state16Add st rc))
 
+def externalRound16Inv (rc st : Poseidon2State16) : Poseidon2State16 :=
+  state16Sub (sboxState16Inv (applyME16Inv st)) rc
+
+private theorem externalRound16Inv_externalRound16 (rc st : Poseidon2State16) :
+    externalRound16Inv rc (externalRound16 rc st) = st := by
+  unfold externalRound16Inv externalRound16
+  rw [applyME16Inv_applyME16, sboxState16Inv_sboxState16, state16Sub_add_right]
+
+private theorem externalRound16_externalRound16Inv (rc st : Poseidon2State16) :
+    externalRound16 rc (externalRound16Inv rc st) = st := by
+  unfold externalRound16 externalRound16Inv
+  rw [state16Add_sub_right, sboxState16_sboxState16Inv, applyME16_applyME16Inv]
+
+def internalRound16 (rc : Goldilocks) (st : Poseidon2State16) : Poseidon2State16 :=
+  let x0' := sbox7 (Goldilocks.add st.b0.x0 rc)
+  applyMI16 ⟨⟨x0', st.b0.x1, st.b0.x2, st.b0.x3⟩, st.b1, st.b2, st.b3⟩
+
+def internalRound16Inv (rc : Goldilocks) (st : Poseidon2State16) : Poseidon2State16 :=
+  let u := applyMI16Inv st
+  let x0 := Goldilocks.sub (sbox7Inv u.b0.x0) rc
+  ⟨⟨x0, u.b0.x1, u.b0.x2, u.b0.x3⟩, u.b1, u.b2, u.b3⟩
+
+private theorem gold_add_sub_cancel16 (a b : Goldilocks) :
+    Goldilocks.sub (Goldilocks.add a b) b = a :=
+  ring_add_sub_cancel_right a b
+
+private theorem gold_sub_add_cancel16 (a b : Goldilocks) :
+    Goldilocks.add (Goldilocks.sub a b) b = a :=
+  ring_sub_add_cancel_right a b
+
+private theorem internalRound16Inv_internalRound16 (rc : Goldilocks) (st : Poseidon2State16) :
+    internalRound16Inv rc (internalRound16 rc st) = st := by
+  unfold internalRound16Inv internalRound16
+  rw [applyMI16Inv_applyMI16]
+  dsimp only
+  rw [sbox7Inv_sbox7, gold_add_sub_cancel16]
+
+private theorem internalRound16_internalRound16Inv (rc : Goldilocks) (st : Poseidon2State16) :
+    internalRound16 rc (internalRound16Inv rc st) = st := by
+  unfold internalRound16Inv
+  dsimp only
+  cases h : applyMI16Inv st with | mk b0 b1 b2 b3 =>
+    cases b0 with | mk x0 x1 x2 x3 =>
+      unfold internalRound16
+      dsimp only
+      rw [gold_sub_add_cancel16, sbox7_sbox7Inv, ← h, applyMI16_applyMI16Inv]
+
+def poseidon2ExtRoundConst16 (tag round : Nat) : Poseidon2State16 :=
+  ⟨⟨poseidon2ConstAt tag round 0, poseidon2ConstAt tag round 1,
+    poseidon2ConstAt tag round 2, poseidon2ConstAt tag round 3⟩,
+   ⟨poseidon2ConstAt tag round 4, poseidon2ConstAt tag round 5,
+    poseidon2ConstAt tag round 6, poseidon2ConstAt tag round 7⟩,
+   ⟨poseidon2ConstAt tag round 8, poseidon2ConstAt tag round 9,
+    poseidon2ConstAt tag round 10, poseidon2ConstAt tag round 11⟩,
+   ⟨poseidon2ConstAt tag round 12, poseidon2ConstAt tag round 13,
+    poseidon2ConstAt tag round 14, poseidon2ConstAt tag round 15⟩⟩
+
+def poseidon2InitialExtConsts16 : List Poseidon2State16 :=
+  (List.range 4).map (poseidon2ExtRoundConst16 0)
+
+def poseidon2InternalConsts16 : List Goldilocks :=
+  (List.range 22).map (fun r => poseidon2ConstAt 1 r 0)
+
+def poseidon2TerminalExtConsts16 : List Poseidon2State16 :=
+  (List.range 4).map (poseidon2ExtRoundConst16 2)
+
+/-- Full 30-round Width-16 Goldilocks `Poseidon2` permutation ($R_F = 8, R_P = 22$). -/
+def poseidon2Perm16 (st : Poseidon2State16) : Poseidon2State16 :=
+  let s0 := applyME16 st
+  let s1 := runRounds externalRound16 poseidon2InitialExtConsts16 s0
+  let s2 := runRounds internalRound16 poseidon2InternalConsts16 s1
+  runRounds externalRound16 poseidon2TerminalExtConsts16 s2
+
+/-- Exact two-sided inverse of `poseidon2Perm16`. -/
+def poseidon2Perm16Inv (st : Poseidon2State16) : Poseidon2State16 :=
+  let s2 := runRoundsInv externalRound16Inv poseidon2TerminalExtConsts16 st
+  let s1 := runRoundsInv internalRound16Inv poseidon2InternalConsts16 s2
+  let s0 := runRoundsInv externalRound16Inv poseidon2InitialExtConsts16 s1
+  applyME16Inv s0
+
+private theorem runRoundsInv_runRounds16 {α σ : Type} (step stepInv : α → σ → σ)
+    (hInv : ∀ c s, stepInv c (step c s) = s) (cs : List α) :
+    ∀ (s : σ), runRoundsInv stepInv cs (runRounds step cs s) = s := by
+  induction cs with
+  | nil => intro _; rfl
+  | cons c cs ih => intro s; simp only [runRounds, runRoundsInv, ih (step c s), hInv]
+
+private theorem runRounds_runRoundsInv16 {α σ : Type} (step stepInv : α → σ → σ)
+    (hInv : ∀ c s, step c (stepInv c s) = s) (cs : List α) :
+    ∀ (s : σ), runRounds step cs (runRoundsInv stepInv cs s) = s := by
+  induction cs with
+  | nil => intro _; rfl
+  | cons c cs ih => intro s; simp only [runRoundsInv, runRounds, hInv, ih s]
+
+theorem poseidon2Perm16Inv_left_inv (st : Poseidon2State16) :
+    poseidon2Perm16Inv (poseidon2Perm16 st) = st := by
+  unfold poseidon2Perm16Inv poseidon2Perm16
+  dsimp only
+  rw [runRoundsInv_runRounds16 externalRound16 externalRound16Inv externalRound16Inv_externalRound16,
+      runRoundsInv_runRounds16 internalRound16 internalRound16Inv internalRound16Inv_internalRound16,
+      runRoundsInv_runRounds16 externalRound16 externalRound16Inv externalRound16Inv_externalRound16,
+      applyME16Inv_applyME16]
+
+theorem poseidon2Perm16Inv_right_inv (st : Poseidon2State16) :
+    poseidon2Perm16 (poseidon2Perm16Inv st) = st := by
+  unfold poseidon2Perm16 poseidon2Perm16Inv
+  dsimp only
+  rw [applyME16_applyME16Inv,
+      runRounds_runRoundsInv16 externalRound16 externalRound16Inv externalRound16_externalRound16Inv,
+      runRounds_runRoundsInv16 internalRound16 internalRound16Inv internalRound16_internalRound16Inv,
+      runRounds_runRoundsInv16 externalRound16 externalRound16Inv externalRound16_externalRound16Inv]
+
+def Poseidon16Pair (inp out : Poseidon2State16) : Prop :=
+  poseidon2Perm16 inp = out
+
+theorem poseidon2Perm16_pair_invertible (inp out : Poseidon2State16)
+    (h : Poseidon16Pair inp out) :
+    poseidon2Perm16Inv out = inp ∧
+    (∀ alt : Poseidon2State16, poseidon2Perm16 alt = out → alt = inp) := by
+  unfold Poseidon16Pair at h
+  subst h
+  refine ⟨poseidon2Perm16Inv_left_inv inp, fun alt hAlt => ?_⟩
+  have hInv := congrArg poseidon2Perm16Inv hAlt
+  rwa [poseidon2Perm16Inv_left_inv, poseidon2Perm16Inv_left_inv] at hInv
+
+theorem witness_poseidon2Perm16_pair :
+    ∃ (inp out : Poseidon2State16), Poseidon16Pair inp out :=
+  ⟨state16Zero, poseidon2Perm16 state16Zero, rfl⟩
+
+/-- `#tooth`: Round constants make `poseidon2Perm16` non-fixing on `state16Zero`. -/
+theorem tooth_poseidon2Perm16_zero_not_fixed :
+    ¬ Poseidon16Pair state16Zero state16Zero := by
+  unfold Poseidon16Pair
+  decide +kernel
+
+/-! ## 4. `Hem` Affine Duet Fold & CWYZ Sumcheck Bridge (`aeneas/qsag-whir-verified/src/lib.rs`) -/
+
+/-- Extracted `qsag_whir_verified::duet_fold`: `odd + alpha * even`. -/
+def hemDuetFold (v0 v1 : GoldilocksExt4) (invTwoY0 invTwo : Goldilocks)
+    (alpha : GoldilocksExt4) : GoldilocksExt4 :=
+  let even := GoldilocksExt4.mul (GoldilocksExt4.add v0 v1) (GoldilocksExt4.embedBase invTwo)
+  let odd := GoldilocksExt4.mul (GoldilocksExt4.sub v0 v1) (GoldilocksExt4.embedBase invTwoY0)
+  GoldilocksExt4.add odd (GoldilocksExt4.mul alpha even)
+
+/-- Extracted `qsag_whir_verified::fold_duet_affine_ext4` (`cwyz_duet_fold`), defined directly
+    via `Qsag.Aggregation.foldDuetExt4` on the asymmetric `even + theta * odd` coset combination. -/
+def hemAffineDuetFold (v0 v1 : GoldilocksExt4) (x : Goldilocks)
+    (theta alpha beta : GoldilocksExt4) : GoldilocksExt4 :=
+  let half := Goldilocks.inv (Goldilocks.ofNat 2)
+  let invTwoX := Goldilocks.mul half (Goldilocks.inv x)
+  let odd := GoldilocksExt4.mul (GoldilocksExt4.sub v0 v1) (GoldilocksExt4.embedBase invTwoX)
+  let mixed := foldDuetExt4 v0 v1 invTwoX half theta
+  let chal := GoldilocksExt4.add alpha
+    (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase (Goldilocks.mul x x)))
+  GoldilocksExt4.add odd (GoldilocksExt4.mul chal mixed)
+
+/-- Extracted `qsag_whir_verified::cwyz_bridge_claim_step` dual linear-functional sumcheck bridge. -/
+def hemBridgeClaimStep
+    (eval0 eval1 eval2 eval3 eval4 claim phi theta alpha beta : GoldilocksExt4) : GoldilocksExt4 :=
+  let f := GoldilocksExt4.add eval0 (GoldilocksExt4.mul phi eval1)
+  let g := GoldilocksExt4.add eval2 (GoldilocksExt4.mul phi (GoldilocksExt4.sub claim eval0))
+  let core := GoldilocksExt4.add g (GoldilocksExt4.mul alpha
+    (GoldilocksExt4.add f (GoldilocksExt4.mul theta g)))
+  let shift := GoldilocksExt4.mul beta (GoldilocksExt4.add eval3 (GoldilocksExt4.mul theta eval4))
+  GoldilocksExt4.add core shift
+
+def HemFoldClaim (v0 v1 : GoldilocksExt4) (x : Goldilocks)
+    (theta alpha beta claimed : GoldilocksExt4) : Prop :=
+  x ≠ Goldilocks.zero ∧ hemAffineDuetFold v0 v1 x theta alpha beta = claimed
+
+private theorem ext4_sub_self (a : GoldilocksExt4) :
+    GoldilocksExt4.sub a a = GoldilocksExt4.zero :=
+  LawfulCommRing.sub_self a
+
+private theorem ext4_zero_mul (a : GoldilocksExt4) :
+    GoldilocksExt4.mul GoldilocksExt4.zero a = GoldilocksExt4.zero :=
+  LawfulCommRing.zero_mul a
+
+private theorem ext4_zero_add (a : GoldilocksExt4) :
+    GoldilocksExt4.add GoldilocksExt4.zero a = a :=
+  LawfulCommRing.zero_add a
+
+private theorem hemAffineDuetFold_aux (v : GoldilocksExt4) (invTwoX half xSq : Goldilocks)
+    (theta alpha beta : GoldilocksExt4) :
+    GoldilocksExt4.add
+      (GoldilocksExt4.mul (GoldilocksExt4.sub v v) (GoldilocksExt4.embedBase invTwoX))
+      (GoldilocksExt4.mul
+        (GoldilocksExt4.add alpha (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase xSq)))
+        (foldDuetExt4 v v invTwoX half theta)) =
+    GoldilocksExt4.mul
+      (GoldilocksExt4.add alpha (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase xSq)))
+      (foldDuetExt4 v v invTwoX half theta) := by
+  rw [ext4_sub_self, ext4_zero_mul, ext4_zero_add]
+
+/-- On any symmetric fiber `v0 = v1 = v`, the odd component vanishes and `hemAffineDuetFold`
+    equals `(alpha + beta * x^2) * foldDuetExt4 v v (2x)⁻¹ 2⁻¹ theta`. -/
+theorem hemAffineDuetFold_symmetric_sound (v : GoldilocksExt4) (x : Goldilocks)
+    (theta alpha beta claimed : GoldilocksExt4)
+    (hClaim : HemFoldClaim v v x theta alpha beta claimed) :
+    claimed = GoldilocksExt4.mul
+      (GoldilocksExt4.add alpha
+        (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase (Goldilocks.mul x x))))
+      (foldDuetExt4 v v (Goldilocks.mul (Goldilocks.inv (Goldilocks.ofNat 2)) (Goldilocks.inv x))
+        (Goldilocks.inv (Goldilocks.ofNat 2)) theta) := by
+  rcases hClaim with ⟨_, hEq⟩
+  rw [← hEq]
+  exact hemAffineDuetFold_aux v
+    (Goldilocks.mul (Goldilocks.inv (Goldilocks.ofNat 2)) (Goldilocks.inv x))
+    (Goldilocks.inv (Goldilocks.ofNat 2))
+    (Goldilocks.mul x x) theta alpha beta
+
+theorem witness_hemAffineDuetFold_claim :
+    ∃ (v : GoldilocksExt4) (x : Goldilocks) (theta alpha beta claimed : GoldilocksExt4),
+      HemFoldClaim v v x theta alpha beta claimed := by
+  refine ⟨GoldilocksExt4.one, Goldilocks.one, GoldilocksExt4.one,
+    GoldilocksExt4.one, GoldilocksExt4.zero,
+    hemAffineDuetFold GoldilocksExt4.one GoldilocksExt4.one Goldilocks.one
+      GoldilocksExt4.one GoldilocksExt4.one GoldilocksExt4.zero, ?_⟩
+  exact ⟨by decide, rfl⟩
+
+/-- `#tooth`: Dropping or zeroing the asymmetric `theta` challenge changes `hemAffineDuetFold`
+    on asymmetric fibers (`v0 ≠ v1`). -/
+theorem tooth_hemAffineDuetFold_theta_drop_rejected :
+    ¬ HemFoldClaim GoldilocksExt4.one GoldilocksExt4.zero Goldilocks.one
+      GoldilocksExt4.one GoldilocksExt4.one GoldilocksExt4.zero
+      (hemAffineDuetFold GoldilocksExt4.one GoldilocksExt4.zero Goldilocks.one
+        GoldilocksExt4.zero GoldilocksExt4.one GoldilocksExt4.zero) := by
+  unfold HemFoldClaim
+  intro h
+  have hEq := h.2
+  revert hEq
+  decide +kernel
+
+/-! ## 5. POSIX Crash WAL Schedules (`DurableBurnJournal` & `FsBeltWal`) -/
+
+/-- Events exercised against the byte-level `QSBURN03` `DurableBurnJournal` (`crates/qsag-fts/src/wal.rs`)
+    and `RustDurability.openBurnBytes` (`lean/Qsag/PosixCrashWal.lean`). -/
+inductive PosixBurnEvent where
+  | reserve (party epoch : Nat)
+  | retain
+  | reopen
+  | tear (len : Nat)
+  | trunc
+  | flip
+  | copy
+  deriving DecidableEq, Repr
+
+structure PosixBurnState where
+  diskBytes : List UInt8
+  inode : Nat
+  /-- `some (bodies, lastTag)` while an unfailed descriptor is open; `none` when closed/poisoned. -/
+  openState : Option (List (List UInt8) × List UInt8)
+  retained : Option ExternalMonotoneAnchor
+  deriving DecidableEq, Repr
+
+private def posixBurnMacKey : List UInt8 := List.replicate 32 (2 : UInt8)
+private def posixBurnKeyId : List UInt8 := List.replicate 32 (1 : UInt8)
+private def posixBurnGenesis : List UInt8 := List.replicate 32 (9 : UInt8)
+
+def PosixBurnState.init : PosixBurnState :=
+  let id0 := RustDurability.burnIdentity 1 100
+  let hdr := RustDurability.burnHeader posixBurnMacKey id0 posixBurnKeyId posixBurnGenesis
+  let tag0 := RustDurability.burnGenesisTag posixBurnMacKey id0 posixBurnKeyId posixBurnGenesis
+  { diskBytes := hdr
+    inode := 100
+    openState := some ([], tag0)
+    retained := none }
+
+private def reopenPosixBurnDisk (diskBytes : List UInt8) (inode : Nat)
+    (retained : Option ExternalMonotoneAnchor) : Option (List (List UInt8) × List UInt8) :=
+  let idBytes := RustDurability.burnIdentity 1 inode
+  match RustDurability.openBurnBytes posixBurnMacKey idBytes posixBurnKeyId diskBytes with
+  | none => none
+  | some (bodies, lastTag) =>
+    match retained with
+    | none => some (bodies, lastTag)
+    | some anchor =>
+      if verifyAgainstExternalAnchor anchor bodies.length lastTag then
+        some (bodies, lastTag)
+      else none
+
+inductive PosixBurnOutcome where
+  | ok
+  | okCount (count : Nat)
+  | err
+  deriving DecidableEq, Repr
+
+def PosixBurnOutcome.render : PosixBurnOutcome → String
+  | .ok => "ok"
+  | .okCount n => "ok:" ++ toString n
+  | .err => "err"
+
+def posixBurnStep (st : PosixBurnState) (ev : PosixBurnEvent) : PosixBurnState × PosixBurnOutcome :=
+  match ev with
+  | .reserve party epoch =>
+    match st.openState with
+    | none => (st, .err)
+    | some (bodies, lastTag) =>
+      let body := RustDurability.burnRecordBody party epoch
+      if bodies.contains body then
+        (st, .err)
+      else
+        let recBytes := RustDurability.burnRecord posixBurnMacKey posixBurnKeyId
+          posixBurnGenesis lastTag party epoch
+        let newTag := RustDurability.burnRecordTag posixBurnMacKey posixBurnKeyId
+          posixBurnGenesis lastTag body
+        let bodies' := bodies ++ [body]
+        let retained' := st.retained.map (fun _ => ⟨bodies'.length, newTag⟩)
+        ({ st with
+           diskBytes := st.diskBytes ++ recBytes
+           openState := some (bodies', newTag)
+           retained := retained' }, .ok)
+  | .retain =>
+    match st.openState with
+    | none => (st, .err)
+    | some (bodies, lastTag) =>
+      ({ st with retained := some ⟨bodies.length, lastTag⟩ }, .ok)
+  | .reopen =>
+    let opened := reopenPosixBurnDisk st.diskBytes st.inode st.retained
+    match opened with
+    | some (bodies, _) => ({ st with openState := opened }, .okCount bodies.length)
+    | none => ({ st with openState := none }, .err)
+  | .tear k =>
+    let len := if k == 0 then 1 else if k ≥ 42 then 41 else k
+    let disk' := st.diskBytes ++ List.replicate len (0xaa : UInt8)
+    let opened := reopenPosixBurnDisk disk' st.inode st.retained
+    match opened with
+    | some (bodies, _) => ({ st with diskBytes := disk', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk', openState := none }, .err)
+  | .trunc =>
+    let disk' := st.diskBytes.take 104
+    let opened := reopenPosixBurnDisk disk' st.inode st.retained
+    match opened with
+    | some (bodies, _) => ({ st with diskBytes := disk', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk', openState := none }, .err)
+  | .flip =>
+    let disk' := if st.diskBytes.isEmpty then []
+      else st.diskBytes.take (st.diskBytes.length - 1) ++ [st.diskBytes.getLastD 0 ^^^ 1]
+    let opened := reopenPosixBurnDisk disk' st.inode st.retained
+    match opened with
+    | some (bodies, _) => ({ st with diskBytes := disk', openState := opened }, .okCount bodies.length)
+    | none => ({ st with diskBytes := disk', openState := none }, .err)
+  | .copy =>
+    let inode' := st.inode + 1
+    let opened := reopenPosixBurnDisk st.diskBytes inode' st.retained
+    match opened with
+    | some (bodies, _) => ({ st with inode := inode', openState := opened }, .okCount bodies.length)
+    | none => ({ st with inode := inode', openState := none }, .err)
+
+def posixBurnTraceOutcomes (evs : List PosixBurnEvent) : List PosixBurnOutcome :=
+  (evs.foldl (fun (acc : PosixBurnState × List PosixBurnOutcome) ev =>
+    let (st', out) := posixBurnStep acc.1 ev
+    (st', acc.2 ++ [out])) (PosixBurnState.init, [])).2
+
+def posixBurnTrace (evs : List PosixBurnEvent) : List String :=
+  (posixBurnTraceOutcomes evs).map PosixBurnOutcome.render
+
+def PosixBurnTornDisk (st : PosixBurnState) (n k : Nat) : Prop :=
+  st.diskBytes.length = 104 + 42 * n ∧ 0 < k ∧ k < 42
+
+/-- Any partial record append (`0 < k < 42`) fails closed on reopen (`openState = none`, `.err`),
+    directly discharging `RustDurability.partial_append_refuses`. -/
+theorem posixBurnStep_tear_fails_closed (st : PosixBurnState) (n k : Nat)
+    (hTorn : PosixBurnTornDisk st n k) :
+    (posixBurnStep st (.tear k)).2 = .err ∧ (posixBurnStep st (.tear k)).1.openState = none := by
+  rcases hTorn with ⟨hLen, hk0, hk42⟩
+  have hkZero : (k == 0) = false := by cases k with | zero => omega | succ _ => rfl
+  have hkGe : ¬ (k ≥ 42) := by omega
+  have hClamp : (if k == 0 then 1 else if k ≥ 42 then 41 else k) = k := by
+    rw [hkZero]; simp [hkGe]
+  have hRefuse : RustDurability.openBurnBytes posixBurnMacKey
+      (RustDurability.burnIdentity 1 st.inode) posixBurnKeyId
+      (st.diskBytes ++ List.replicate k (0xaa : UInt8)) = none :=
+    RustDurability.partial_append_refuses posixBurnMacKey
+      (RustDurability.burnIdentity 1 st.inode) posixBurnKeyId
+      st.diskBytes (List.replicate k (0xaa : UInt8)) n hLen
+      (by simp [List.length_replicate, hk0, hk42])
+  unfold posixBurnStep reopenPosixBurnDisk
+  dsimp only
+  rw [hClamp, hRefuse]
+  exact ⟨rfl, rfl⟩
+
+theorem witness_posixBurnTornDisk :
+    ∃ (st : PosixBurnState) (n k : Nat), PosixBurnTornDisk st n k := by
+  refine ⟨PosixBurnState.init, 0, 7, ?_⟩
+  unfold PosixBurnTornDisk PosixBurnState.init
+  refine ⟨?_, by decide, by decide⟩
+  have hH : (RustDurability.burnHeader posixBurnMacKey (RustDurability.burnIdentity 1 100)
+      posixBurnKeyId posixBurnGenesis).length = 104 :=
+    RustDurability.burnHeader_length (by decide) (by decide)
+  omega
+
+/-- `#tooth`: Same-inode tail truncation to the 104-byte genesis header when `st.retained = some anchor`
+    has `0 < anchor.attestedEpoch` cannot recover as `.okCount 0`. -/
+theorem tooth_posixBurn_retained_rejects_truncation
+    (st : PosixBurnState) (anchor : ExternalMonotoneAnchor)
+    (hRet : st.retained = some anchor) (hAdv : 0 < anchor.attestedEpoch) :
+    (posixBurnStep st .trunc).2 ≠ .okCount 0 := by
+  unfold posixBurnStep reopenPosixBurnDisk
+  dsimp only
+  rw [hRet]
+  cases hOpen : RustDurability.openBurnBytes posixBurnMacKey
+      (RustDurability.burnIdentity 1 st.inode) posixBurnKeyId (st.diskBytes.take 104) with
+  | none => intro h; cases h
+  | some p =>
+    rcases p with ⟨bodies, lastTag⟩
+    dsimp only
+    cases hV : verifyAgainstExternalAnchor anchor bodies.length lastTag
+    · intro h; cases h
+    · intro hEq
+      injection hEq with hLenEq
+      have hRej : verifyAgainstExternalAnchor anchor bodies.length lastTag = false := by
+        rw [hLenEq]
+        exact externalAnchor_rejects_whole_disk_rollback lastTag hAdv
+      rw [hV] at hRej
+      cases hRej
+
+/-- Events exercised against POSIX `BeltLatch<FsBeltWal>` (`crates/qsag-core/src/belt_latch.rs`). -/
+inductive FsBeltWalEvent where
+  | bind (record : BeltLatchRecord)
+  | retain
+  | crash
+  | rollback
+  | corrupt
+  | rmlock
+  deriving DecidableEq, Repr
+
+inductive FsBeltWalOutcome where
+  | bindResult (accepted : Bool)
+  | ok
+  | closed
+  | recovered (nextEpoch generation : Nat)
+  | err
+  deriving DecidableEq, Repr
+
+def FsBeltWalOutcome.render : FsBeltWalOutcome → String
+  | .bindResult true => "true"
+  | .bindResult false => "false"
+  | .ok => "ok"
+  | .closed => "closed"
+  | .recovered ep gen => "ok:" ++ toString ep ++ ":" ++ toString gen
+  | .err => "err"
+
+structure FsBeltWalState where
+  node : BeltLatchNodeState
+  generation : Nat
+  retainedGen : Option Nat
+  snapshot : Option (BeltLatchNodeState × Nat)
+  diskCorrupted : Bool
+  lockPresent : Bool
+  live : Bool
+  deriving DecidableEq, Repr
+
+def FsBeltWalState.init : FsBeltWalState :=
+  let n0 := BeltLatchNodeState.init 12 64
+  { node := n0
+    generation := 1
+    retainedGen := none
+    snapshot := some (n0, 1)
+    diskCorrupted := false
+    lockPresent := true
+    live := true }
+
+private def reopenFsBeltWal (st : FsBeltWalState) : FsBeltWalState × FsBeltWalOutcome :=
+  if st.diskCorrupted || !st.lockPresent then
+    ({ st with live := false }, .err)
+  else
+    let okAnchor := match st.retainedGen with
+      | none => true
+      | some minGen => decide (minGen ≤ st.generation)
+    if !okAnchor then
+      ({ st with live := false }, .err)
+    else
+      let recovered := beltLatchCrashAndRecover st.node
+      ({ st with node := recovered, live := true },
+       .recovered recovered.nextEpoch st.generation)
+
+def fsBeltWalStep (st : FsBeltWalState) (ev : FsBeltWalEvent) : FsBeltWalState × FsBeltWalOutcome :=
+  match ev with
+  | .bind rec =>
+    if !st.live then (st, .closed)
+    else
+      match beltLatchBindStep st.node rec with
+      | .accepted next outcome =>
+        let gen' := match outcome with
+          | .replay => st.generation
+          | .fresh => st.generation + 1
+        let ret' := st.retainedGen.map (fun r => max r gen')
+        ({ st with node := next, generation := gen', retainedGen := ret' }, .bindResult true)
+      | .rejected next _ =>
+        ({ st with node := next }, .bindResult false)
+  | .retain =>
+    if !st.live then (st, .closed)
+    else
+      ({ st with retainedGen := some st.generation, snapshot := some (st.node, st.generation) }, .ok)
+  | .crash => reopenFsBeltWal st
+  | .rollback =>
+    match st.snapshot with
+    | none => reopenFsBeltWal st
+    | some (snapNode, snapGen) =>
+      reopenFsBeltWal { st with node := snapNode, generation := snapGen, diskCorrupted := false }
+  | .corrupt =>
+    reopenFsBeltWal { st with diskCorrupted := true }
+  | .rmlock =>
+    reopenFsBeltWal { st with lockPresent := false }
+
+def fsBeltWalTraceOutcomes (evs : List FsBeltWalEvent) : List FsBeltWalOutcome :=
+  (evs.foldl (fun (acc : FsBeltWalState × List FsBeltWalOutcome) ev =>
+    let (st', out) := fsBeltWalStep acc.1 ev
+    (st', acc.2 ++ [out])) (FsBeltWalState.init, [])).2
+
+def fsBeltWalTrace (evs : List FsBeltWalEvent) : List String :=
+  (fsBeltWalTraceOutcomes evs).map FsBeltWalOutcome.render
+
+def FsBeltWalRollbackArmed (st : FsBeltWalState) : Prop :=
+  ∃ snapNode snapGen minGen,
+    st.snapshot = some (snapNode, snapGen) ∧
+    st.retainedGen = some minGen ∧
+    snapGen < minGen ∧
+    st.lockPresent = true
+
+/-- Restoring an older authenticated `FsBeltWal` disk image below `retainedGen` is refused
+    closed (`live = false`, `.err`). -/
+theorem fsBeltWal_rollback_refused (st : FsBeltWalState)
+    (hArmed : FsBeltWalRollbackArmed st) :
+    (fsBeltWalStep st .rollback).2 = .err ∧ (fsBeltWalStep st .rollback).1.live = false := by
+  rcases hArmed with ⟨snapNode, snapGen, minGen, hSnap, hRet, hLt, hLock⟩
+  have hNotLe : decide (minGen ≤ snapGen) = false := by
+    simp [Nat.not_le.mpr hLt]
+  unfold fsBeltWalStep reopenFsBeltWal
+  simp [hSnap, hRet, hLock, hNotLe]
+
+theorem witness_fsBeltWalRollbackArmed :
+    ∃ st : FsBeltWalState, FsBeltWalRollbackArmed st := by
+  let n0 := BeltLatchNodeState.init 12 64
+  refine ⟨{ node := n0
+            generation := 2
+            retainedGen := some 2
+            snapshot := some (n0, 1)
+            diskCorrupted := false
+            lockPresent := true
+            live := true }, n0, 1, 2, rfl, rfl, by decide, rfl⟩
+
+/-- `#tooth`: Corrupting the MAC tag or removing the `.lock` sidecar refuses recovery (`live = false`). -/
+theorem tooth_fsBeltWal_corrupt_and_rmlock_refused
+    (st : FsBeltWalState) (ev : FsBeltWalEvent)
+    (hEv : ev = .corrupt ∨ ev = .rmlock) :
+    (fsBeltWalStep st ev).1.live = false := by
+  rcases hEv with rfl | rfl <;> simp [fsBeltWalStep, reopenFsBeltWal]
+
+end Qsag.SpecOracle
+
+#tooth_pair Qsag.SpecOracle.accepted_digest_has_target_sum vs Qsag.SpecOracle.tooth_zero_digest_invalid
+#verify_inhabited Qsag.SpecOracle.accepted_digest_has_target_sum Qsag.SpecOracle.witness_valid_digest
+
+#tooth_pair Qsag.SpecOracle.quorumConfig_withQuorum_sound vs Qsag.SpecOracle.tooth_quorumConfig_rejects_split_quorum
+#verify_inhabited Qsag.SpecOracle.quorumConfig_withQuorum_sound Qsag.SpecOracle.witness_quorumConfig_valid
+
+#tooth_pair Qsag.SpecOracle.sha3_256Matches_width_and_keccak_sep vs Qsag.SpecOracle.tooth_sha3_256_rejects_keccak256_pad
+#verify_inhabited Qsag.SpecOracle.sha3_256Matches_width_and_keccak_sep Qsag.SpecOracle.witness_sha3_256Matches_empty
+
+#tooth_pair Qsag.SpecOracle.poseidon2Perm16_pair_invertible vs Qsag.SpecOracle.tooth_poseidon2Perm16_zero_not_fixed
+#verify_inhabited Qsag.SpecOracle.poseidon2Perm16_pair_invertible Qsag.SpecOracle.witness_poseidon2Perm16_pair
+
+#tooth_pair Qsag.SpecOracle.hemAffineDuetFold_symmetric_sound vs Qsag.SpecOracle.tooth_hemAffineDuetFold_theta_drop_rejected
+#verify_inhabited Qsag.SpecOracle.hemAffineDuetFold_symmetric_sound Qsag.SpecOracle.witness_hemAffineDuetFold_claim
+
+#tooth_pair Qsag.SpecOracle.posixBurnStep_tear_fails_closed vs Qsag.SpecOracle.tooth_posixBurn_retained_rejects_truncation
+#verify_inhabited Qsag.SpecOracle.posixBurnStep_tear_fails_closed Qsag.SpecOracle.witness_posixBurnTornDisk
+
+#tooth_pair Qsag.SpecOracle.fsBeltWal_rollback_refused vs Qsag.SpecOracle.tooth_fsBeltWal_corrupt_and_rmlock_refused
+#verify_inhabited Qsag.SpecOracle.fsBeltWal_rollback_refused Qsag.SpecOracle.witness_fsBeltWalRollbackArmed

@@ -1,12 +1,12 @@
-import Qsag.SpecOracle
-import Qsag.HashSigs
-import Qsag.Fips205
-import Qsag.BinaryTower
-import Qsag.SuccinctAggregationIop
-import Qsag.ThresholdMlDsaAndToprf
-import Qsag.JortsBeltLatchAndQuorumSwitching
-import Qsag.PosixCrashWal
-import Qsag.Poseidon2AlgebraicAndRecursiveHem
+import Qsag.Exec.SpecOracle
+import Qsag.Protocol.Signing.HashSigs
+import Qsag.Protocol.Signing.Fips205
+import Qsag.Math.BinaryTower
+import Qsag.Protocol.Aggregation.SuccinctAggregationIop
+import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
+import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
+import Qsag.Exec.PosixCrashWal
+import Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 
 /- Streaming protocol: tab-separated operation and arguments; bytes are lowercase hex,
    integers decimal, lists comma-separated. One response per line; errors do not stop the stream.
