@@ -15,7 +15,7 @@
 //!
 //! Signers are packed into *shards* (at most [`max_shard_signers`] signers each, the largest
 //! trace the PCS accepts) and shards into *shard batches*. A [`HemAggregatedProof`] (aliased as
-//! [`QsagAggregateProof`]) is a binary [`MergeNode`] tree whose leaves are [`ShardBatchProof`]s.
+//! [`HemAggregatedProof`]) is a binary [`MergeNode`] tree whose leaves are [`ShardBatchProof`]s.
 //!
 //! - **Inside a shard batch the opening is accumulated.** One prover holding every shard's
 //!   witness commits them under one Merkle tree and reduces all shards' evaluation claims to a
@@ -27,8 +27,11 @@
 //!   carries one query schedule, one Round-0 Steiner Merkle multi-proof, and one chain of
 //!   escalated-rate WHIR layers.
 //! - **Across shard batches nothing is compressed.** [`HemAggregator::merge`] ([`merge_aggregates`])
-//!   takes two finished proofs. The merging party holds no witness, and this crate has no recursive
-//!   verifier circuit, so it cannot produce a new opening for the children's committed polynomials.
+//!   takes two finished proofs. The merging party holds no witness, and no relation in this crate
+//!   executes a shard batch's verifier (its row sumcheck, AIR check and Steiner-multiproof opening),
+//!   so it cannot produce a new opening for the children's committed polynomials. The recursive
+//!   relation that does exist ([`recursive::SuccinctShardWhirAggregate`]) verifies fixed-path WHIR
+//!   openings only and is not used here.
 //!   A [`MergeNode::Branch`] is therefore plain concatenation: it adds no proof content, the merged
 //!   proof contains both children in full, and [`HemAggregator::verify`] ([`verify_aggregate`])
 //!   verifies every leaf. What a `Branch` enforces is the statement-level structure: its children's
@@ -68,20 +71,19 @@ pub use recursive::{
     ShardHemBatch, ShardHemPolicy, ShardHemSummary, ShardHemWitness,
     SuccinctHierarchicalHemAggregate, VerifiedHierarchicalHemEvidence,
     check_hierarchical_hem_commitment, check_hierarchical_hem_commitment_with_regime,
-    checked_sum_usize, compact_summary_chain_digest, compress_verified_hierarchical_hem,
-    compress_hierarchical_hem_evidence, prove_hierarchical_hem_prepared,
-    compute_framed_message_digest,
-    compute_policy_registry_root, encode_policy_registry,
-    hierarchical_hem_message, prove_hierarchical_hem, prove_succinct_hierarchical_hem,
+    checked_sum_usize, compact_summary_chain_digest, compress_hierarchical_hem_evidence,
+    compress_verified_hierarchical_hem, compute_framed_message_digest,
+    compute_policy_registry_root, encode_policy_registry, hierarchical_hem_message,
+    prove_hierarchical_hem, prove_hierarchical_hem_prepared, prove_succinct_hierarchical_hem,
     verify_hierarchical_hem, verify_hierarchical_hem_evidence,
     verify_hierarchical_hem_evidence_prepared, verify_hierarchical_hem_prepared,
     verify_succinct_hierarchical_hem, verify_succinct_hierarchical_hem_prepared,
     verify_succinct_hierarchical_hem_with_regime,
 };
-pub mod recursion_census;
-pub mod recursive_fold;
 #[cfg(feature = "std")]
 mod prover_admission;
+pub mod recursion_census;
+pub mod recursive_fold;
 #[cfg(feature = "std")]
 use prover_admission::prover_parallel_jobs;
 pub mod sig;
@@ -125,15 +127,17 @@ where
     };
     let job = std::sync::Arc::new(std::sync::Mutex::new(Some(f)));
     let worker_job = std::sync::Arc::clone(&job);
-    match std::thread::Builder::new().stack_size(1024 * 1024).spawn_scoped(scope, move || {
-        let _permit = permit;
-        let f = worker_job
-            .lock()
-            .expect("worker job lock")
-            .take()
-            .expect("worker job");
-        f()
-    }) {
+    match std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn_scoped(scope, move || {
+            let _permit = permit;
+            let f = worker_job
+                .lock()
+                .expect("worker job lock")
+                .take()
+                .expect("worker job");
+            f()
+        }) {
         Ok(handle) => ScopedWorker::Spawned(handle),
         Err(_) => {
             let f = job
@@ -261,7 +265,7 @@ pub(crate) fn try_acquire_worker_permit() -> Option<WorkerPermit> {
 
 /// Partition `items` across at most `parallel_workers()` chunks, running chunk 0 on the caller
 /// thread and spawning remaining chunks under `WorkerPermit` + non-panicking `Builder::spawn_scoped`.
-#[cfg(all(feature = "std", any(test, feature = "vulkan")))]
+#[cfg(all(feature = "std", test))]
 pub(crate) fn map_chunks_bounded<'a, T, R, F>(items: &'a [T], f: F) -> Vec<R>
 where
     T: Sync,
@@ -272,8 +276,15 @@ where
 }
 
 #[cfg(feature = "std")]
-pub(crate) fn map_chunks_bounded_with_limit<'a, T, R, F>(items: &'a [T], max_jobs: usize, f: F) -> Vec<R>
-where T: Sync, R: Send, F: Fn(&'a [T]) -> R + Sync,
+pub(crate) fn map_chunks_bounded_with_limit<'a, T, R, F>(
+    items: &'a [T],
+    max_jobs: usize,
+    f: F,
+) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&'a [T]) -> R + Sync,
 {
     if items.is_empty() {
         return Vec::new();
@@ -307,31 +318,30 @@ pub(crate) fn parallel_pow2_workers(max_units: usize) -> usize {
 
 pub use arithmetize::{
     DEFAULT_SHARD_PCS_NUM_VARS, ShardBatchProof, ShardRowProof, compute_signing_mode_digest,
-    default_shard_signers, max_shard_signers,
-    prove_shard_batch, verify_shard_batch, verify_shard_batch_with_regime,
+    default_shard_signers, max_shard_signers, prove_shard_batch, verify_shard_batch,
+    verify_shard_batch_with_regime,
 };
 pub use field::{Goldilocks, GoldilocksExt2, GoldilocksExt4, RoundPolyExt4};
 pub use pcs::{
-    CanopyCommitment, CanopyMultiProof, EARLY_STOP_VARS, FoldedOracleProof,
-    HemWhirBatchOpeningProof, HemWhirOpeningProof, HemWhirProverState, MAX_BATCH_POLYS,
-    MAX_PCS_NUM_VARS, NUM_PCS_QUERIES, PCS_POW_BITS, RS_BLOWUP, WhirSchedule, WhirSecurityRegime,
-    WhirStageProof, WhirStageSpec, whir_commit, whir_commit_batch_owned, whir_commit_owned,
-    whir_open, whir_open_batch, whir_stage_schedule, whir_verify, whir_verify_batch,
+    CanopyCommitment, CanopyMultiProof, EARLY_STOP_VARS, HemWhirBatchOpeningProof,
+    HemWhirOpeningProof, HemWhirProverState, MAX_BATCH_POLYS, MAX_PCS_NUM_VARS, NUM_PCS_QUERIES,
+    PCS_POW_BITS, RS_BLOWUP, WhirSchedule, WhirSecurityRegime, WhirStageProof, WhirStageSpec,
+    whir_commit, whir_commit_batch_owned, whir_commit_owned, whir_open, whir_open_batch,
+    whir_stage_schedule, whir_verify, whir_verify_batch,
 };
 pub use pcs::{
     whir_commit_batch_owned_with_schedule, whir_commit_owned_with_schedule,
     whir_commit_with_schedule, whir_verify_batch_with_schedule, whir_verify_with_schedule,
 };
+pub use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch};
 pub use sig::{
     AggSigProfile, CORDUROY_MAX_STATELESS_SIGS_PER_KEY, Digest4, Digest5, EpochWalSink, SigError,
-    SignerBitmap, SigningMode, StatelessBudgetWalSink, ValidatorKeypair,
-    ValidatorPublicKey, ValidatorSignature, bytes32_to_limbs56, compute_committee_root,
-    limbs56_to_bytes32_canonical, validate_unique_active_committee, verify_individual_signature,
-    verify_signature_batch,
+    SignerBitmap, SigningMode, StatelessBudgetWalSink, ValidatorKeypair, ValidatorPublicKey,
+    ValidatorSignature, bytes32_to_limbs56, compute_committee_root, limbs56_to_bytes32_canonical,
+    validate_unique_active_committee, verify_individual_signature, verify_signature_batch,
 };
 #[cfg(feature = "std")]
 pub use sig::{FsStatelessBudgetWal, FsWalEpochSink};
-pub use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch};
 pub use sponge::{FiatShamirTranscript, InstanceBound, RelationBound, Unbound};
 
 /// Canonical 8-byte wire header for [`HemAggregatedProof`] (`v6`: affine monomial `GoldilocksExt4` WHIR).
@@ -365,9 +375,6 @@ pub struct HemAggConfig {
     pub blinding_seed: [u8; 32],
 }
 
-/// Compatibility alias for [`HemAggConfig`].
-pub type AggConfig = HemAggConfig;
-
 impl HemAggConfig {
     pub fn default_for(profile: AggSigProfile, blinding_seed: [u8; 32]) -> Self {
         Self {
@@ -397,9 +404,6 @@ pub enum HemAggError {
     InvalidChildProof,
     MalformedWireBytes,
 }
-
-/// Compatibility alias for [`HemAggError`].
-pub type AggError = HemAggError;
 
 /// Node of the binary tree inside a [`HemAggregatedProof`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -558,9 +562,6 @@ pub struct HemAggregatedProof {
     pub committee_root: [u8; 32],
     pub root: MergeNode,
 }
-
-/// Compatibility alias for [`HemAggregatedProof`].
-pub type QsagAggregateProof = HemAggregatedProof;
 
 impl HemAggregatedProof {
     #[inline]
@@ -761,10 +762,12 @@ impl AggStatement<'_> {
                 if let Some(permit) = try_acquire_worker_permit() {
                     let right_ref = right.as_ref();
                     let branched = std::thread::scope(|scope| {
-                        match std::thread::Builder::new().stack_size(1024 * 1024).spawn_scoped(scope, move || {
-                            let _permit = permit;
-                            self.verify_node(right_ref, rem_depth - 1)
-                        }) {
+                        match std::thread::Builder::new()
+                            .stack_size(1024 * 1024)
+                            .spawn_scoped(scope, move || {
+                                let _permit = permit;
+                                self.verify_node(right_ref, rem_depth - 1)
+                            }) {
                             Ok(right_h) => {
                                 let left_ok = self.verify_node(left, rem_depth - 1);
                                 let right_ok = join_worker(ScopedWorker::Spawned(right_h));
@@ -947,7 +950,9 @@ pub(crate) fn aggregate_signatures_with_committee_root(
     #[cfg(feature = "std")]
     let leaves: Vec<MergeNode> = if batch_jobs.len() > 1 && parallel_workers() > 1 {
         let groups: Vec<Result<Vec<MergeNode>, HemAggError>> =
-            map_chunks_bounded_with_limit(&batch_jobs, prover_parallel_jobs(), |sub| sub.iter().map(&prove_one).collect());
+            map_chunks_bounded_with_limit(&batch_jobs, prover_parallel_jobs(), |sub| {
+                sub.iter().map(&prove_one).collect()
+            });
         let mut flat_leaves = Vec::with_capacity(batch_jobs.len());
         for group in groups {
             flat_leaves.extend(group?);
@@ -1448,7 +1453,7 @@ mod tests {
         let (pks, sigs) = bench_keys_and_sigs(AggSigProfile::JortsPoseidon2, n, msg);
 
         // Build 8 disjoint 2-signer leaves and fold them into a balanced 3-level merge tree.
-        let mut level: Vec<QsagAggregateProof> = (0..8)
+        let mut level: Vec<HemAggregatedProof> = (0..8)
             .map(|leaf_idx| {
                 let idxs = [2 * leaf_idx, 2 * leaf_idx + 1];
                 let bm = SignerBitmap::from_active_indices(n as u32, &idxs).unwrap();
@@ -1591,15 +1596,15 @@ mod tests {
         assert!(verify_aggregate(&pks, &mode, &merged));
 
         let wire = merged.to_bytes();
-        let parsed = QsagAggregateProof::from_bytes_canonical(&wire).expect("canonical wire");
+        let parsed = HemAggregatedProof::from_bytes_canonical(&wire).expect("canonical wire");
         assert_eq!(parsed, merged);
         assert!(verify_aggregate(&pks, &mode, &parsed));
 
         let mut trailing = wire.clone();
         trailing.push(0x00);
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&trailing),
-            Err(AggError::MalformedWireBytes)
+            HemAggregatedProof::from_bytes_canonical(&trailing),
+            Err(HemAggError::MalformedWireBytes)
         );
 
         assert!(!verify_aggregate(
@@ -1614,19 +1619,19 @@ mod tests {
             aggregate_signatures(&pks, &bm_overlap, &mode, &sigs_ov, make_seed(9003)).unwrap();
         assert_eq!(
             merge_aggregates(&pks, &mode, &proof_a, &proof_ov),
-            Err(AggError::OverlappingSigners)
+            Err(HemAggError::OverlappingSigners)
         );
 
         let mut dup_pks = pks.clone();
         dup_pks[1] = dup_pks[0];
         assert_eq!(
             aggregate_signatures(&dup_pks, &bm_a, &mode, &sigs_a, make_seed(9004)),
-            Err(AggError::DuplicateValidatorOrProfileMismatch)
+            Err(HemAggError::DuplicateValidatorOrProfileMismatch)
         );
 
         if let MergeNode::Leaf(mut leaf_box) = proof_a.root.clone() {
             leaf_box.shards[0].col_evals[0] += GoldilocksExt4::ONE;
-            let tampered = QsagAggregateProof {
+            let tampered = HemAggregatedProof {
                 profile: proof_a.profile,
                 committee_root: proof_a.committee_root,
                 root: MergeNode::Leaf(leaf_box),
@@ -2213,41 +2218,41 @@ mod tests {
             .collect();
         let bm = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
         let mode = SigningMode::SharedMessage(msg);
-        let default_cfg = AggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(1));
+        let default_cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(1));
         for bad_cfg in [
-            AggConfig {
+            HemAggConfig {
                 max_signers_per_shard: 0,
                 ..default_cfg.clone()
             },
-            AggConfig {
+            HemAggConfig {
                 max_signers_per_shard: max_shard_signers(AggSigProfile::JortsPoseidon2) + 1,
                 ..default_cfg.clone()
             },
-            AggConfig {
+            HemAggConfig {
                 max_shards_per_batch: 0,
                 ..default_cfg.clone()
             },
-            AggConfig {
+            HemAggConfig {
                 max_shards_per_batch: MAX_BATCH_POLYS + 1,
                 ..default_cfg.clone()
             },
         ] {
             assert_eq!(
                 aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &bad_cfg),
-                Err(AggError::InvalidShardConfig)
+                Err(HemAggError::InvalidShardConfig)
             );
         }
     }
 
-    fn leaf_of(proof: &QsagAggregateProof) -> ShardBatchProof {
+    fn leaf_of(proof: &HemAggregatedProof) -> ShardBatchProof {
         match &proof.root {
             MergeNode::Leaf(leaf) => (**leaf).clone(),
             MergeNode::Branch { .. } => panic!("expected a single shard batch"),
         }
     }
 
-    fn with_leaf(proof: &QsagAggregateProof, leaf: ShardBatchProof) -> QsagAggregateProof {
-        QsagAggregateProof {
+    fn with_leaf(proof: &HemAggregatedProof, leaf: ShardBatchProof) -> HemAggregatedProof {
+        HemAggregatedProof {
             profile: proof.profile,
             committee_root: proof.committee_root,
             root: MergeNode::Leaf(Box::new(leaf)),
@@ -2266,7 +2271,7 @@ mod tests {
             .collect();
         let bm = SignerBitmap::from_active_indices(8, &signer_ids).unwrap();
         let mode = SigningMode::SharedMessage(msg);
-        let cfg = AggConfig {
+        let cfg = HemAggConfig {
             regime: WhirSecurityRegime::default(),
             max_signers_per_shard: 2,
             max_shards_per_batch: 4,
@@ -2281,7 +2286,7 @@ mod tests {
             &proof
         ));
 
-        let unbatched_cfg = AggConfig {
+        let unbatched_cfg = HemAggConfig {
             max_shards_per_batch: 1,
             ..cfg.clone()
         };
@@ -2330,11 +2335,11 @@ mod tests {
 
         let wire = proof.to_bytes();
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
             proof
         );
         let malformed = |bytes: &[u8]| {
-            QsagAggregateProof::from_bytes_canonical(bytes) == Err(AggError::MalformedWireBytes)
+            HemAggregatedProof::from_bytes_canonical(bytes) == Err(HemAggError::MalformedWireBytes)
         };
         let mut trailing = wire.clone();
         trailing.push(0x00);
@@ -2400,12 +2405,12 @@ mod tests {
         );
         let wire = merged.to_bytes();
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
             merged
         );
 
         let branch =
-            |bitmap: &SignerBitmap, left: &MergeNode, right: &MergeNode| QsagAggregateProof {
+            |bitmap: &SignerBitmap, left: &MergeNode, right: &MergeNode| HemAggregatedProof {
                 profile: merged.profile,
                 committee_root: merged.committee_root,
                 root: MergeNode::Branch {
@@ -2417,15 +2422,15 @@ mod tests {
         let swapped = branch(merged.bitmap(), &proof_b.root, &proof_a.root);
         assert!(!verify_aggregate(&pks, &mode, &swapped));
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&swapped.to_bytes()),
-            Err(AggError::MalformedWireBytes)
+            HemAggregatedProof::from_bytes_canonical(&swapped.to_bytes()),
+            Err(HemAggError::MalformedWireBytes)
         );
         let substituted = branch(merged.bitmap(), &proof_a.root, &proof_b_other.root);
         assert!(!verify_aggregate(&pks, &mode, &substituted));
         assert!(!verify_aggregate(&pks, &other_mode, &substituted));
         assert_eq!(
             merge_aggregates(&pks, &mode, &proof_a, &proof_b_other),
-            Err(AggError::InvalidChildProof)
+            Err(HemAggError::InvalidChildProof)
         );
         assert!(!verify_aggregate(
             &pks,
@@ -2439,7 +2444,7 @@ mod tests {
         ));
         assert_eq!(
             merge_aggregates(&pks, &mode, &proof_a, &proof_a),
-            Err(AggError::OverlappingSigners)
+            Err(HemAggError::OverlappingSigners)
         );
 
         let per_msgs: [&[u8]; 4] = [b"m0", b"m1", b"m2", b"m3"];
@@ -2497,7 +2502,7 @@ mod tests {
                     right: Box::new(node),
                 };
             }
-            QsagAggregateProof {
+            HemAggregatedProof {
                 profile: merged.profile,
                 committee_root: merged.committee_root,
                 root: node,
@@ -2506,13 +2511,13 @@ mod tests {
         let deepest = chain(MAX_MERGE_TREE_DEPTH + 1);
         assert_eq!(deepest.root.depth(), MAX_MERGE_TREE_DEPTH);
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&deepest.to_bytes()).unwrap(),
+            HemAggregatedProof::from_bytes_canonical(&deepest.to_bytes()).unwrap(),
             deepest
         );
         let too_deep = chain(MAX_MERGE_TREE_DEPTH + 2);
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&too_deep.to_bytes()),
-            Err(AggError::MalformedWireBytes)
+            HemAggregatedProof::from_bytes_canonical(&too_deep.to_bytes()),
+            Err(HemAggError::MalformedWireBytes)
         );
     }
 
@@ -2566,7 +2571,7 @@ mod tests {
         let bm_a = SignerBitmap::from_active_indices(8, &[0, 1, 2]).unwrap();
         let bm_b = SignerBitmap::from_active_indices(8, &[5, 7]).unwrap();
         let mode = SigningMode::SharedMessage(msg);
-        let cfg_a = AggConfig {
+        let cfg_a = HemAggConfig {
             regime: WhirSecurityRegime::default(),
             max_signers_per_shard: 2,
             max_shards_per_batch: 2,
@@ -2632,7 +2637,7 @@ mod tests {
     fn median_verify_ms(
         pks: &[ValidatorPublicKey],
         mode: &SigningMode<'_>,
-        proof: &QsagAggregateProof,
+        proof: &HemAggregatedProof,
     ) -> f64 {
         let mut times = Vec::with_capacity(3);
         for _ in 0..3 {
@@ -2672,13 +2677,13 @@ mod tests {
         k: usize,
         shard_cap: Option<usize>,
         shards_per_batch: Option<usize>,
-    ) -> QsagAggregateProof {
+    ) -> HemAggregatedProof {
         let msg = b"agg-bench-shared-message";
         let (pks, sigs) = bench_keys_and_sigs(profile, k, msg);
         let indices: Vec<usize> = (0..k).collect();
         let bm = SignerBitmap::from_active_indices(k as u32, &indices).unwrap();
         let mode = SigningMode::SharedMessage(msg);
-        let mut cfg = AggConfig::default_for(profile, make_seed(88_000 + k as u64));
+        let mut cfg = HemAggConfig::default_for(profile, make_seed(88_000 + k as u64));
         if let Some(cap) = shard_cap {
             cfg.max_signers_per_shard = cap;
         }
@@ -2691,7 +2696,7 @@ mod tests {
         let wire = proof.to_bytes();
         let verify_ms = median_verify_ms(&pks, &mode, &proof);
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
             proof
         );
         std::println!(
@@ -2748,10 +2753,14 @@ mod tests {
                     );
                 }
             }
-            assert!(!verify_aggregate_with_regime(&pks, &other_msg, &proof, regime));
+            assert!(!verify_aggregate_with_regime(
+                &pks, &other_msg, &proof, regime
+            ));
             let mut other_pks = pks.clone();
             other_pks[2] = gen_jorts_kp(813, 2).pk;
-            assert!(!verify_aggregate_with_regime(&other_pks, &mode, &proof, regime));
+            assert!(!verify_aggregate_with_regime(
+                &other_pks, &mode, &proof, regime
+            ));
 
             let leaf = leaf_of(&proof);
             let rejects = |bad: ShardBatchProof| {
@@ -2789,8 +2798,18 @@ mod tests {
             };
             let swapped = bad.schedule.regime;
             let swapped_proof = with_leaf(&proof, bad);
-            assert!(!verify_aggregate_with_regime(&pks, &mode, &swapped_proof, regime));
-            assert!(!verify_aggregate_with_regime(&pks, &mode, &swapped_proof, swapped));
+            assert!(!verify_aggregate_with_regime(
+                &pks,
+                &mode,
+                &swapped_proof,
+                regime
+            ));
+            assert!(!verify_aggregate_with_regime(
+                &pks,
+                &mode,
+                &swapped_proof,
+                swapped
+            ));
         }
     }
 
@@ -2846,8 +2865,7 @@ mod tests {
         let n = env_usize("QSAG_BENCH_N", 128);
         let shard = env_usize("QSAG_BENCH_SHARD", DEFAULT_MAX_SHARD_SIGNERS_JORTS);
         let per_batch = env_usize("QSAG_BENCH_BATCH", 1);
-        let regime =
-            WhirSecurityRegime::from_u8(env_usize("QSAG_BENCH_REGIME", 4) as u8).unwrap();
+        let regime = WhirSecurityRegime::from_u8(env_usize("QSAG_BENCH_REGIME", 4) as u8).unwrap();
         let msg: &'static [u8] = b"consensus-scale-benchmark";
         let t = std::time::Instant::now();
         let (pks, sigs) = scale_keys_and_sigs(n, msg);
@@ -2855,7 +2873,7 @@ mod tests {
         let indices: Vec<usize> = (0..n).collect();
         let bm = SignerBitmap::from_active_indices(n as u32, &indices).unwrap();
         let mode = SigningMode::SharedMessage(msg);
-        let mut cfg = AggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(91_000));
+        let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(91_000));
         cfg.regime = regime;
         cfg.max_signers_per_shard = shard;
         cfg.max_shards_per_batch = per_batch;
@@ -2864,7 +2882,7 @@ mod tests {
         let prove_s = t.elapsed().as_secs_f64();
         let wire = proof.to_bytes();
         assert_eq!(
-            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
             proof
         );
         let median3 = |f: &dyn Fn() -> bool| {
@@ -2885,8 +2903,12 @@ mod tests {
         });
         if regime.uses_poseidon2_canopy() {
             let census = recursion_census::poseidon2_aggregate_merkle_census(&proof).unwrap();
-            std::println!("CHILD_MERKLE N={n} permutations={} trees={} leaves={} (excludes transcript and arithmetic)",
-                census.permutations().unwrap(), census.merkle_trees, census.opened_leaves);
+            std::println!(
+                "CHILD_MERKLE N={n} permutations={} trees={} leaves={} (excludes transcript and arithmetic)",
+                census.permutations().unwrap(),
+                census.merkle_trees,
+                census.opened_leaves
+            );
         }
         std::println!(
             "SCALE regime={regime:?} N={n} shard_signers={shard} shards={} batches={} \
@@ -2919,7 +2941,7 @@ mod tests {
             let (pks, sigs) = bench_keys_and_sigs(profile, 8, msg);
             let bm = SignerBitmap::from_active_indices(8, &[0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
             let regime = WhirSecurityRegime::BciksJohnsonQrom128;
-            let mut cfg = AggConfig::default_for(profile, make_seed(909));
+            let mut cfg = HemAggConfig::default_for(profile, make_seed(909));
             cfg.regime = regime;
             let start = std::time::Instant::now();
             let proof = aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &cfg).unwrap();
@@ -2927,7 +2949,7 @@ mod tests {
             let wire = proof.to_bytes();
             let verify_ms = median_verify_ms(&pks, &mode, &proof);
             assert_eq!(
-                QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+                HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
                 proof
             );
             std::println!(

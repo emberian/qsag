@@ -9,8 +9,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
-pub use qsag_core::field::goldilocks::{GOLDILOCKS_PRIME, Goldilocks, GoldilocksExt2};
 use qsag_core::field::goldilocks::{GOLDILOCKS_EPSILON as EPSILON, GOLDILOCKS_ROOT_2_32};
+pub use qsag_core::field::goldilocks::{GOLDILOCKS_PRIME, Goldilocks, GoldilocksExt2};
 
 // The Aeneas-extracted WHIR verifier core and `qsag-core` must agree on the modulus.
 const _: () = assert!(GOLDILOCKS_PRIME == qsag_whir_verified::GOLDILOCKS_P);
@@ -433,10 +433,19 @@ pub fn ntt_goldilocks(a: &mut [Goldilocks]) {
     }
 
     #[cfg(feature = "vulkan")]
-    if crate::acceleration::ntt(a) {
+    if crate::acceleration::ntt(a, false) {
         return;
     }
 
+    ntt_goldilocks_cpu(a);
+}
+
+pub(crate) fn ntt_goldilocks_cpu(a: &mut [Goldilocks]) {
+    let n = a.len();
+    assert!(n.is_power_of_two());
+    if n <= 1 {
+        return;
+    }
     #[cfg(feature = "std")]
     if n >= 16_384 {
         let threads = crate::parallel_pow2_workers(n / 2);
@@ -492,6 +501,10 @@ pub fn intt_goldilocks(a: &mut [Goldilocks]) {
     let n = a.len();
     assert!(n.is_power_of_two());
     if n <= 1 {
+        return;
+    }
+    #[cfg(feature = "vulkan")]
+    if crate::acceleration::ntt(a, true) {
         return;
     }
     bit_reverse_permute(a);
@@ -890,7 +903,10 @@ impl GoldilocksExt4 {
     pub(crate) const fn const_mul_tower(self, rhs: Self) -> Self {
         let v0 = self.c0.const_mul(rhs.c0);
         let v1 = self.c1.const_mul(rhs.c1);
-        let mid = self.c0.const_add(self.c1).const_mul(rhs.c0.const_add(rhs.c1))
+        let mid = self
+            .c0
+            .const_add(self.c1)
+            .const_mul(rhs.c0.const_add(rhs.c1))
             .const_sub(v0)
             .const_sub(v1);
         Self {
@@ -1866,7 +1882,12 @@ mod base_ntt_tests {
             .map(|l| GoldilocksExt4::from_limbs(*l))
             .collect();
         elems.push(GoldilocksExt4::from_limbs([top; 4]));
-        elems.push(GoldilocksExt4::from_limbs([top, Goldilocks::ZERO, top, Goldilocks::ONE]));
+        elems.push(GoldilocksExt4::from_limbs([
+            top,
+            Goldilocks::ZERO,
+            top,
+            Goldilocks::ONE,
+        ]));
         elems.push(GoldilocksExt4::ZERO);
         elems.push(GoldilocksExt4::ONE);
         elems.push(GoldilocksExt4::V);
@@ -1876,7 +1897,10 @@ mod base_ntt_tests {
                     x.mul_base(y.c0.c0),
                     x.const_mul_tower(GoldilocksExt4::from_base(y.c0.c0))
                 );
-                assert_eq!(x.mul_ext2(y.c1), x.const_mul_tower(GoldilocksExt4::from_ext2(y.c1)));
+                assert_eq!(
+                    x.mul_ext2(y.c1),
+                    x.const_mul_tower(GoldilocksExt4::from_ext2(y.c1))
+                );
                 assert_eq!(x.const_mul(y), x.const_mul_tower(y));
                 assert_eq!(y.const_mul(x), x.const_mul_tower(y));
                 assert_eq!(x.mul_add(y, x), x.const_mul_tower(y).tower_add(x));
@@ -1914,7 +1938,11 @@ mod base_ntt_tests {
         for &a in &xs {
             for &b in &xs {
                 assert_eq!(
-                    WideAcc::ZERO.add_mul(a, b, 14).add_mul(b, b, 7).add_elem(a).reduce(),
+                    WideAcc::ZERO
+                        .add_mul(a, b, 14)
+                        .add_mul(b, b, 7)
+                        .add_elem(a)
+                        .reduce(),
                     a.const_mul(b).const_mul(Goldilocks::from_u64_reduced(14))
                         + b.const_mul(b).const_mul(Goldilocks::from_u64_reduced(7))
                         + a
@@ -1960,7 +1988,10 @@ mod base_ntt_tests {
             let t = std::time::Instant::now();
             ntt_goldilocks_stages_blocked(&mut data, log_n, false);
             let per = t.elapsed().as_nanos() as f64 / ((log_n << log_n) as f64 / 2.0);
-            std::println!("FIELD ntt_blocked log_n={log_n} ns_per_butterfly={per:.2} ({:?})", data[1]);
+            std::println!(
+                "FIELD ntt_blocked log_n={log_n} ns_per_butterfly={per:.2} ({:?})",
+                data[1]
+            );
         }
 
         let t = std::time::Instant::now();
@@ -1992,7 +2023,10 @@ mod base_ntt_tests {
             "FIELD ext4_mul_chain_ns={chain_ns:.1} ext4_mul_indep_ns={indep_ns:.1} \
              horner_ns_per_coeff={horner_ns:.1} base_mul_chain_ns={base_chain_ns:.2} \
              (checks {:?} {:?} {:?} {:?})",
-            acc.to_limbs()[0], sum.to_limbs()[0], h.to_limbs()[0], b
+            acc.to_limbs()[0],
+            sum.to_limbs()[0],
+            h.to_limbs()[0],
+            b
         );
     }
 
@@ -2024,7 +2058,10 @@ mod base_ntt_tests {
                 for &c in coeffs.iter().rev() {
                     acc = acc.const_mul(x) + c;
                 }
-                assert_eq!(code[idx], acc, "log_c {log_c}, blowup {blowup}, index {idx}");
+                assert_eq!(
+                    code[idx], acc,
+                    "log_c {log_c}, blowup {blowup}, index {idx}"
+                );
             }
         }
     }

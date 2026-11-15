@@ -4,19 +4,16 @@
 use crate::field::{Goldilocks, GoldilocksOps as _};
 use alloc::vec::Vec;
 use qsag_accel::{
-    AcceleratorBackend, BackendAttestationKey, BatchJobDescriptor, CertifiedBackend,
-    CertifiedProverKernelPin, ExecutionReceipt, KernelSlot, KernelTargetArch, ProverKernelSlot,
-    VerifiedKernelDigestRegistry, VulkanRdna2Backend, VulkanSpirvBackend,
+    CertifiedBackend, CertifiedProverKernelPin, KernelTargetArch, ProverKernelSlot,
+    VerifiedKernelDigestRegistry, VulkanSpirvBackend,
 };
 
 struct Device {
-    backend: CertifiedBackend<VulkanRdna2Backend>,
-    registry: VerifiedKernelDigestRegistry<4>,
+    backend: CertifiedBackend<VulkanSpirvBackend>,
     prover_pins: [CertifiedProverKernelPin; ProverKernelSlot::COUNT],
-    key: BackendAttestationKey,
     session_owner: std::sync::Mutex<Option<std::thread::ThreadId>>,
     session_cv: std::sync::Condvar,
-    receipts: core::sync::atomic::AtomicU64,
+    stages: core::sync::atomic::AtomicU64,
     fallbacks: core::sync::atomic::AtomicU64,
 }
 
@@ -28,9 +25,8 @@ fn device() -> Option<&'static Device> {
                 return None;
             }
             let init = || -> Result<Device, alloc::string::String> {
-                use std::io::Read;
                 let raw =
-                    VulkanRdna2Backend::try_new_audited().map_err(|e| alloc::format!("{e}"))?;
+                    VulkanSpirvBackend::try_new_audited().map_err(|e| alloc::format!("{e}"))?;
                 let pins = VulkanSpirvBackend::measure_embedded_spirv_pins();
                 let prover_pins = VulkanSpirvBackend::measure_embedded_prover_spirv_pins();
                 for slot in ProverKernelSlot::ALL {
@@ -38,30 +34,22 @@ fn device() -> Option<&'static Device> {
                         return Err(alloc::format!("prover kernel pin mismatch on {slot:?}"));
                     }
                 }
-                let mut registry = VerifiedKernelDigestRegistry::with_cpu_reference_pins();
+                let mut registry = VerifiedKernelDigestRegistry::<4>::with_cpu_reference_pins();
                 registry
                     .register_measured_profile(KernelTargetArch::SpirV15, pins)
                     .map_err(|e| alloc::format!("{e:?}"))?;
                 let backend = CertifiedBackend::try_new_measured(raw, &registry, &pins)
                     .map_err(|e| alloc::format!("{e:?}"))?;
-                let mut secret = [0u8; 32];
-                std::fs::File::open("/dev/urandom")
-                    .and_then(|mut f| f.read_exact(&mut secret))
-                    .map_err(|e| alloc::format!("{e}"))?;
-                let key = BackendAttestationKey::derive(&secret, b"qsag-agg/vulkan/ntt/v1");
-                qsag_accel::ct::ct_zeroize_bytes(&mut secret);
                 std::eprintln!(
                     "qsag_accel: audited {}",
                     backend.inner().device_info().device_name()
                 );
                 Ok(Device {
                     backend,
-                    registry,
                     prover_pins,
-                    key,
                     session_owner: std::sync::Mutex::new(None),
                     session_cv: std::sync::Condvar::new(),
-                    receipts: core::sync::atomic::AtomicU64::new(0),
+                    stages: core::sync::atomic::AtomicU64::new(0),
                     fallbacks: core::sync::atomic::AtomicU64::new(0),
                 })
             };
@@ -97,6 +85,14 @@ pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
     let cur_tid = std::thread::current().id();
     let mut owner = d.session_owner.lock().ok()?;
     if *owner == Some(cur_tid) {
+        // A fresh commit would overwrite the live owner's arena. Existing-state
+        // opens/row proofs borrow that state's session directly instead. A nested
+        // independent commitment must use CPU storage until there are multiple arenas.
+        d.fallbacks
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        std::eprintln!(
+            "qsag_accel: nested independent commitment uses CPU; live VRAM arena retained"
+        );
         return None;
     }
     while owner.is_some() {
@@ -112,82 +108,24 @@ pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
 
 impl GpuWhirSession {
     #[inline]
-    pub(crate) fn raw(&self) -> &VulkanRdna2Backend {
+    pub(crate) fn raw(&self) -> &VulkanSpirvBackend {
         self.device.backend.inner()
     }
 
-    /// Issue and verify a V5 MAC-bound `ExecutionReceipt` authenticating a VRAM-resident
-    /// prover stage (`slot`, `domain_tag`, and lightweight commitment/transcript digest `binding`).
-    pub(crate) fn certify_stage(
-        &self,
-        slot: ProverKernelSlot,
-        domain_tag: &[u8],
-        item_count: usize,
-        binding: &[u8],
-    ) -> bool {
-        let prover_pin = &self.device.prover_pins[slot as usize];
-        let input_digest = crate::sponge::cshake256_32(
-            b"QSAG.HEM.PROVER.STAGE.IN/v1",
-            &crate::sponge::encode_multi_frame(&[
-                domain_tag,
-                slot.algorithm_domain(),
-                &prover_pin.sha256_digest,
-                &(item_count as u64).to_le_bytes(),
-            ]),
-        );
-        let output_digest = crate::sponge::cshake256_32(
-            b"QSAG.HEM.PROVER.STAGE.OUT/v1",
-            &crate::sponge::encode_multi_frame(&[domain_tag, binding]),
-        );
-        let anchor_slot = match slot {
-            ProverKernelSlot::WhirLdeCommitment => KernelSlot::BatchKeccakF1600,
-            ProverKernelSlot::WhirFoldSumcheck => KernelSlot::GoldilocksNtt,
-            ProverKernelSlot::AirRowGroupA | ProverKernelSlot::AirRowGroupB => {
-                KernelSlot::BatchPoseidon2Perm12
-            }
-        };
-        let descriptor = match anchor_slot {
-            KernelSlot::BatchKeccakF1600 => BatchJobDescriptor::KeccakF1600 {
-                num_states: item_count.max(1),
-            },
-            KernelSlot::GoldilocksNtt => BatchJobDescriptor::GoldilocksNtt {
-                length: item_count.max(2),
-                inverse: false,
-            },
-            _ => BatchJobDescriptor::Poseidon2Perm12 {
-                num_states: item_count.max(1),
-            },
-        };
-        let receipt = ExecutionReceipt::compute_audited(
-            &self.device.key,
-            &self.device.backend.kernel_pin(anchor_slot),
-            descriptor,
-            self.device
-                .backend
-                .inner()
-                .device_info()
-                .audit_evidence_digest(),
-            input_digest,
-            output_digest,
-            self.device.backend.hardware_audit_digest(),
-        );
-        let valid = receipt.as_ref().is_ok_and(|r| {
-            self.device
-                .registry
-                .verify_keyed_receipt(r, &self.device.key)
-                .is_ok()
-        });
+    /// Record a completed stage against its actual embedded prover kernel pin.
+    /// This is trusted-host telemetry, not a cryptographic execution receipt.
+    pub(crate) fn record_stage(&self, slot: ProverKernelSlot) -> bool {
+        let valid = self.raw().prover_kernel_pin(slot) == self.device.prover_pins[slot as usize];
         if valid {
             self.device
-                .receipts
+                .stages
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            true
         } else {
             self.device
                 .fallbacks
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            false
         }
+        valid
     }
 
     pub(crate) fn record_fallback(&self, stage: &str, err: impl core::fmt::Display) {
@@ -198,128 +136,79 @@ impl GpuWhirSession {
     }
 }
 
-/// Physical submissions, accepted V5 receipts, and operation fallbacks for this process.
+/// Physical GPU submissions, completed pinned stages, and operation fallbacks.
+/// Stage counts are telemetry, not authenticated execution receipts.
 /// `None` means the optional device is disabled or failed initialization.
 pub fn vulkan_execution_counts() -> Option<(u64, u64, u64)> {
     let d = device()?;
     Some((
         d.backend.inner().gpu_submission_count(),
-        d.receipts.load(core::sync::atomic::Ordering::Relaxed),
+        d.stages.load(core::sync::atomic::Ordering::Relaxed),
         d.fallbacks.load(core::sync::atomic::Ordering::Relaxed),
     ))
 }
 
-fn words_commitment(domain: &[u8], words: &[u64]) -> [u8; 32] {
-    digest_words_with_domain(domain, words)
+// Measured RX 6750 XT windows, including both transfer directions: queueing
+// beats CPU parallel-launch overhead at 2^14..2^16, but CPU wins the middle
+// sizes. Large transfers first break even near 2^22. Smaller transforms stay CPU.
+const NTT_GPU_MIN: usize = 1 << 22;
+fn gpu_ntt_length(length: usize) -> bool {
+    (1 << 14..=1 << 16).contains(&length) || length >= NTT_GPU_MIN
 }
 
-/// Transactional adapter: never publish a partial GPU result after a driver/receipt failure.
-/// Receipts authenticate the trusted host report; they do not prove shader equivalence.
-pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
-    if values.len() < 16_384 || !values.len().is_power_of_two() {
+/// Transactional adapter: a failed GPU operation never publishes a partial result.
+/// No host hash of the buffers is presented as evidence of shader correctness.
+pub(crate) fn ntt(values: &mut [Goldilocks], inverse: bool) -> bool {
+    if !gpu_ntt_length(values.len()) || !values.len().is_power_of_two() {
         return false;
     }
     let Some(device) = device() else {
         return false;
     };
     let mut words: Vec<u64> = values.iter().map(|v| v.to_canonical_u64()).collect();
-    let _phase = crate::profile::span("gpu_ntt_with_receipt");
-    let input_digest = words_commitment(b"QSAG.HEM.NTT.INPUT/v2", &words);
-    let result = {
-        let _phase = crate::profile::span("gpu_ntt_kernel_and_queue");
-        device
-            .backend
-            .inner()
-            .goldilocks_ntt_canonical_inplace(&mut words, false)
-    };
-    let output_digest = words_commitment(b"QSAG.HEM.NTT.OUTPUT/v2", &words);
-    let receipt = result.and_then(|()| {
-        ExecutionReceipt::compute_audited(
-            &device.key,
-            &device.backend.kernel_pin(KernelSlot::GoldilocksNtt),
-            BatchJobDescriptor::GoldilocksNtt {
-                length: words.len(),
-                inverse: false,
-            },
-            device.backend.inner().device_info().audit_evidence_digest(),
-            input_digest,
-            output_digest,
-            device.backend.hardware_audit_digest(),
-        )
-    });
-    let valid = receipt
-        .as_ref()
-        .is_ok_and(|r| device.registry.verify_keyed_receipt(r, &device.key).is_ok());
-    if !valid
-        || words
+    let _phase = crate::profile::span("gpu_ntt_kernel_and_transfer");
+    let result = device
+        .backend
+        .inner()
+        .goldilocks_ntt_canonical_inplace(&mut words, inverse);
+    let valid = result.is_ok()
+        && words
             .iter()
-            .any(|&v| Goldilocks::from_canonical_u64(v).is_none())
-    {
+            .all(|&v| Goldilocks::from_canonical_u64(v).is_some());
+    if valid {
+        for (out, &word) in values.iter_mut().zip(&words) {
+            *out = Goldilocks::from_u64_reduced(word);
+        }
+    }
+    // Hiding callers transform witness tables: the host copy is erased either way.
+    qsag_asm::volatile_fill(&mut words, 0u64);
+    if !valid {
         device
             .fallbacks
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        std::eprintln!("qsag_accel: NTT/receipt failed; recomputing on CPU");
+        std::eprintln!("qsag_accel: NTT failed; recomputing on CPU");
         return false;
     }
-    for (out, &word) in values.iter_mut().zip(&words) {
-        *out = Goldilocks::from_u64_reduced(word);
-    }
     device
-        .receipts
+        .stages
         .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     true
 }
 
-/// Fixed-size leaves and an ordered, length-bound root; distinct from the accelerator's
-/// sequential NTT digest domains. Four independent leaf sponges use the existing SIMD kernel.
-fn digest_words_with_domain(root_domain: &[u8], words: &[u64]) -> [u8; 32] {
-    use crate::sponge::{cshake256_32, cshake256_from_midstate_32_x4, cshake256_static_midstate};
-    const WORDS: usize = 4096;
-    const MID: [u64; 25] = cshake256_static_midstate(b"QSAG.HEM.NTT.WORDS.LEAF/v1");
-    let batches: Vec<_> = words.chunks(4 * WORDS).collect();
-    let hashes = crate::map_chunks_bounded(&batches, |batches| {
-        let mut out = Vec::with_capacity(batches.len() * 128);
-        let mut bufs = alloc::vec![[0u8; WORDS * 8]; 4];
-        for batch in batches {
-            for (lane, buf) in bufs.iter_mut().enumerate() {
-                buf.fill(0);
-                let start = (lane * WORDS).min(batch.len());
-                let end = (start + WORDS).min(batch.len());
-                for (dst, word) in buf
-                    .as_chunks_mut::<8>()
-                    .0
-                    .iter_mut()
-                    .zip(&batch[start..end])
-                {
-                    *dst = word.to_le_bytes();
-                }
-            }
-            let digests =
-                cshake256_from_midstate_32_x4(&MID, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]]);
-            for digest in digests {
-                out.extend_from_slice(&digest);
-            }
-        }
-        for buf in &mut bufs {
-            qsag_accel::ct::ct_zeroize_bytes(buf);
-        }
-        out
-    });
-    let mut frame = Vec::with_capacity(8 + batches.len() * 128);
-    frame.extend_from_slice(&(words.len() as u64).to_le_bytes());
-    for part in hashes {
-        frame.extend_from_slice(&part);
+/// Report the missing Poseidon2 canopy pipeline once per process. GPU NTT may still run.
+pub(crate) fn report_cpu_poseidon_canopy() {
+    static REPORT: std::sync::Once = std::sync::Once::new();
+    if device().is_some() {
+        REPORT.call_once(|| {
+            std::eprintln!(
+                "qsag_accel: Poseidon2 WHIR canopy/open runs on CPU; eligible NTTs use Vulkan"
+            )
+        });
     }
-    cshake256_32(root_domain, &frame)
-}
-
-#[cfg(test)]
-fn digest_words(words: &[u64]) -> [u8; 32] {
-    digest_words_with_domain(b"QSAG.HEM.NTT.WORDS.ROOT/v1", words)
 }
 
 pub(crate) fn encode(coeffs: &[Goldilocks], domain_len: usize) -> Option<Vec<Goldilocks>> {
-    if domain_len < 16_384 || device().is_none() {
+    if !gpu_ntt_length(domain_len) || device().is_none() {
         return None;
     }
     let mut values = alloc::vec![Goldilocks::ZERO; domain_len];
@@ -328,7 +217,7 @@ pub(crate) fn encode(coeffs: &[Goldilocks], domain_len: usize) -> Option<Vec<Gol
         *out = c * shift;
         shift *= Goldilocks::NON_RESIDUE;
     }
-    ntt(&mut values).then_some(values)
+    ntt(&mut values, false).then_some(values)
 }
 
 #[cfg(test)]
@@ -336,16 +225,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digest_tree_binds_length_order_and_tail() {
-        let mut words: Vec<_> = (0..16_387).collect();
-        let original = digest_words(&words);
-        words[16_386] ^= 1;
-        assert_ne!(digest_words(&words), original);
-        words[16_386] ^= 1;
-        words.swap(0, 8192);
-        assert_ne!(digest_words(&words), original);
-        assert_ne!(digest_words(&[0]), digest_words(&[0, 0]));
-        assert_ne!(digest_words(&[]), digest_words(&[0]));
+    #[ignore = "RX 6750 XT crossover, run with QSAG_ACCEL=vulkan --ignored --nocapture"]
+    fn ntt_crossover() {
+        let device = device().expect("audited GPU required");
+        for log in [14, 16, 18, 20, 22] {
+            let input: Vec<_> = (0..1usize << log)
+                .map(|i| Goldilocks::from_u64_reduced(i as u64 * 7919 + 17))
+                .collect();
+            let mut cpu_ms = Vec::new();
+            let mut gpu_ms = Vec::new();
+            for _ in 0..4 {
+                let mut cpu = input.clone();
+                let t = std::time::Instant::now();
+                crate::field::ntt_goldilocks_cpu(&mut cpu);
+                cpu_ms.push(t.elapsed().as_secs_f64() * 1000.);
+                let t = std::time::Instant::now();
+                let mut words: Vec<_> = input.iter().map(|v| v.to_canonical_u64()).collect();
+                device
+                    .backend
+                    .inner()
+                    .goldilocks_ntt_canonical_inplace(&mut words, false)
+                    .unwrap();
+                let gpu: Vec<_> = words
+                    .iter()
+                    .map(|&v| Goldilocks::from_canonical_u64(v).unwrap())
+                    .collect();
+                gpu_ms.push(t.elapsed().as_secs_f64() * 1000.);
+                assert_eq!(cpu, gpu);
+                device
+                    .backend
+                    .inner()
+                    .goldilocks_ntt_canonical_inplace(&mut words, true)
+                    .unwrap();
+                assert!(
+                    words
+                        .iter()
+                        .zip(&input)
+                        .all(|(&a, b)| a == b.to_canonical_u64())
+                );
+            }
+            cpu_ms.remove(0);
+            gpu_ms.remove(0);
+            cpu_ms.sort_by(f64::total_cmp);
+            gpu_ms.sort_by(f64::total_cmp);
+            std::println!(
+                "NTT_CROSSOVER log={log} cpu_ms={:.3} gpu_ms={:.3}",
+                cpu_ms[1],
+                gpu_ms[1]
+            );
+        }
+    }
+
+    #[test]
+    fn nested_commit_preserves_the_live_session() {
+        if std::env::var("QSAG_ACCEL").ok().as_deref() != Some("vulkan") {
+            return;
+        }
+        let first = try_acquire_whir_session().expect("GPU session");
+        assert!(try_acquire_whir_session().is_none());
+        drop(first);
+        assert!(try_acquire_whir_session().is_some());
     }
 
     #[test]
@@ -353,17 +292,17 @@ mod tests {
         if std::env::var("QSAG_ACCEL").ok().as_deref() != Some("vulkan") {
             return;
         }
-        let n = 16_384;
+        let n = NTT_GPU_MIN;
         let coeffs: Vec<_> = (0..17)
             .map(|i| Goldilocks::from_u64_reduced(i * 7919 + 11))
             .collect();
         let mut values = alloc::vec![Goldilocks::ZERO; n];
         values[..coeffs.len()].copy_from_slice(&coeffs);
         assert!(
-            ntt(&mut values),
+            ntt(&mut values, false),
             "explicit GPU test must execute the audited device"
         );
-        let omega = Goldilocks::two_adic_generator(14);
+        let omega = Goldilocks::two_adic_generator(n.trailing_zeros() as usize);
         for i in [0, 1, 7, 511, 8191, 16383] {
             let x = omega.pow(i as u64);
             let expected = coeffs
@@ -372,6 +311,13 @@ mod tests {
                 .fold(Goldilocks::ZERO, |a, &c| a * x + c);
             assert_eq!(values[i], expected);
         }
+        assert!(ntt(&mut values, true));
+        assert_eq!(&values[..coeffs.len()], &coeffs);
+        assert!(
+            values[coeffs.len()..]
+                .iter()
+                .all(|v| *v == Goldilocks::ZERO)
+        );
         let shifted = encode(&coeffs, n).expect("GPU coset encoding");
         for i in [0, 1, 7, 511, 8191, 16383] {
             let x = Goldilocks::NON_RESIDUE * omega.pow(i as u64);
