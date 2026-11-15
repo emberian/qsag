@@ -32,10 +32,13 @@ use core::ffi::{c_char, c_void};
 use core::mem::{MaybeUninit, size_of};
 use core::ptr::{null, null_mut};
 
-use crate::KernelSlot;
-use crate::goldilocks::{gl_inv_or_zero, gl_neg, gl_reduce_u64, goldilocks_primitive_root};
-use crate::spirv_kernels::spirv_kernel_words;
+use crate::goldilocks::{
+    gl_add, gl_inv_or_zero, gl_mul, gl_neg, gl_pow_pub, gl_reduce_u64, gl_sub,
+    goldilocks_primitive_root,
+};
+use crate::spirv_kernels::{prover_spirv_kernel_words, spirv_kernel_words};
 use crate::vulkan::{VulkanDeviceInfo, VulkanError};
+use crate::{KernelSlot, ProverKernelSlot};
 
 const RTLD_NOW: i32 = 2;
 const RTLD_LOCAL: i32 = 0;
@@ -79,6 +82,7 @@ const VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO: u32 = 40;
 const VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO: u32 = 42;
 const VK_STRUCTURE_TYPE_MEMORY_BARRIER: u32 = 46;
 
+const VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: u32 = 1;
 const VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: u32 = 2;
 
 const VK_QUEUE_GRAPHICS_BIT: u32 = 1;
@@ -554,6 +558,102 @@ struct BdozDotPushConsts {
 }
 const _: () = assert!(size_of::<BdozDotPushConsts>() == 16);
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WhirLdePushConsts {
+    scalar0: u64,
+    scalar1: u64,
+    scalar2: u64,
+    scalar3: u64,
+    mode: u32,
+    len: u32,
+    aux0: u32,
+    aux1: u32,
+    aux2: u32,
+    aux3: u32,
+    aux4: u32,
+    aux5: u32,
+}
+const _: () = assert!(size_of::<WhirLdePushConsts>() == 64);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WhirFoldPushConsts {
+    c0: [u64; 4],
+    c1: [u64; 4],
+    c2: [u64; 4],
+    mode: u32,
+    len: u32,
+    aux0: u32,
+    aux1: u32,
+    aux2: u32,
+    aux3: u32,
+    aux4: u32,
+    aux5: u32,
+}
+const _: () = assert!(size_of::<WhirFoldPushConsts>() == 128);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AirGroupAPushConsts {
+    chal: [u64; 4],
+    mode: u32,
+    cur_m: u32,
+    cur_r: u32,
+    flags: u32,
+    col_src: u32,
+    col_dst: u32,
+    sh_src: u32,
+    steps_off: u32,
+    out_off: u32,
+    base_x: u32,
+    aux0: u32,
+    aux1: u32,
+    _pad_align: [u32; 4],
+}
+const _: () = assert!(size_of::<AirGroupAPushConsts>() == 96);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AirGroupBPushConsts {
+    is_base: u32,
+    cur_m: u32,
+    cur_r: u32,
+    cur_s: u32,
+    flags: u32,
+    col_src: u32,
+    sh_src: u32,
+    signers_off: u32,
+    steps_off: u32,
+    op_hdr_off: u32,
+    op_ent_off: u32,
+    sorted_u64_off: u32,
+    out_off: u32,
+    base_x: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+const _: () = assert!(size_of::<AirGroupBPushConsts>() == 64);
+
+#[repr(C)]
+struct VkDirectDriverLoadingInfoLUNARG {
+    s_type: u32,
+    p_next: *mut c_void,
+    flags: u32,
+    pfn_get_instance_proc_addr: PfnVkGetInstanceProcAddr,
+}
+const _: () = assert!(size_of::<VkDirectDriverLoadingInfoLUNARG>() == 32);
+
+#[repr(C)]
+struct VkDirectDriverLoadingListLUNARG {
+    s_type: u32,
+    p_next: *const c_void,
+    mode: u32,
+    driver_count: u32,
+    p_drivers: *const VkDirectDriverLoadingInfoLUNARG,
+}
+const _: () = assert!(size_of::<VkDirectDriverLoadingListLUNARG>() == 32);
+
 type PfnVoid = Option<unsafe extern "C" fn()>;
 type PfnVkGetInstanceProcAddr = unsafe extern "C" fn(VkInstance, *const c_char) -> PfnVoid;
 type PfnVkEnumerateInstanceVersion = unsafe extern "C" fn(*mut u32) -> i32;
@@ -838,8 +938,38 @@ enum EngineExecState {
     DeviceLostQuarantined,
 }
 
+#[derive(Default)]
+struct ProverArena {
+    initialized: bool,
+    twiddles_ready: bool,
+    desc_pool: VkDescriptorPool,
+    ds_lde_r0: VkDescriptorSet,
+    ds_gather_r0: VkDescriptorSet,
+    ds_lde_stage: VkDescriptorSet,
+    ds_gather_stage: VkDescriptorSet,
+    ds_fold_kronecker: VkDescriptorSet,
+    ds_fold_mono: VkDescriptorSet,
+    ds_fold_witness: VkDescriptorSet,
+    ds_air: VkDescriptorSet,
+    stage_cw_stride_ext4: u32,
+    stage_tree_stride_ext4: u32,
+    twiddles_24: GpuBuffer,
+    vram_witness: GpuBuffer,
+    vram_mono: GpuBuffer,
+    vram_cw0: GpuBuffer,
+    vram_tree0: GpuBuffer,
+    vram_work_a: GpuBuffer,
+    vram_work_b: GpuBuffer,
+    vram_cw_stage: GpuBuffer,
+    vram_tree_stage: GpuBuffer,
+    vram_aux_in: GpuBuffer,
+    vram_aux_b: GpuBuffer,
+    vram_partials: GpuBuffer,
+}
+
 pub(crate) struct RawVulkanEngine {
     lib_handle: *mut c_void,
+    radv_lib_handle: *mut c_void,
     destroy_instance: PfnVkDestroyInstance,
     instance: VkInstance,
     device: VkDevice,
@@ -849,6 +979,7 @@ pub(crate) struct RawVulkanEngine {
     wave32: bool,
     executable_fns: Option<(GetExecutables, GetStatistics)>,
     telemetry: [crate::vulkan::PipelineTelemetry; KernelSlot::COUNT],
+    prover_telemetry: [crate::vulkan::PipelineTelemetry; ProverKernelSlot::COUNT],
     max_wg_x: u32,
     max_storage_range: u64,
     exec_state: EngineExecState,
@@ -862,7 +993,9 @@ pub(crate) struct RawVulkanEngine {
     dsl_1buf: VkDescriptorSetLayout,
     dsl_2buf: VkDescriptorSetLayout,
     dsl_3buf: VkDescriptorSetLayout,
+    dsl_6buf: VkDescriptorSetLayout,
     pipelines: [KernelPipeline; KernelSlot::COUNT],
+    prover_pipelines: [KernelPipeline; ProverKernelSlot::COUNT],
     desc_pool: VkDescriptorPool,
     ds_1buf_a: VkDescriptorSet,
     ds_2buf_ab: VkDescriptorSet,
@@ -875,6 +1008,7 @@ pub(crate) struct RawVulkanEngine {
     vram_a: GpuBuffer,
     vram_b: GpuBuffer,
     vram_c: GpuBuffer,
+    prover: ProverArena,
 }
 
 // SAFETY: Every `RawVulkanEngine` instance owns an independent `VkDevice` / `VkCommandPool` /
@@ -950,11 +1084,30 @@ fn find_memory_type(
     }
     for (idx, mt) in mem_props.memory_types.iter().enumerate().take(count) {
         let bit = 1u32 << idx;
+        if (type_bits & bit) != 0
+            && (mt.property_flags & required) == required
+            && (mt.property_flags & VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD) == 0
+        {
+            return Some(idx as u32);
+        }
+    }
+    for (idx, mt) in mem_props.memory_types.iter().enumerate().take(count) {
+        let bit = 1u32 << idx;
         if (type_bits & bit) != 0 && (mt.property_flags & required) == required {
             return Some(idx as u32);
         }
     }
     None
+}
+
+fn contains_ascii_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    let end = haystack
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(haystack.len());
+    haystack[..end]
+        .windows(needle.len())
+        .any(|w| w == needle)
 }
 
 impl RawVulkanEngine {
@@ -1024,52 +1177,206 @@ impl RawVulkanEngine {
         };
         let mut instance: VkInstance = null_mut();
         let rc = unsafe { create_instance(&inst_info, null(), &mut instance) };
-        if rc != VK_SUCCESS {
-            unsafe {
-                let _ = dlclose(lib_handle);
+        let default_res = if rc == VK_SUCCESS {
+            match unsafe { load_inst_fn(gipa, instance, c"vkDestroyInstance", "vkDestroyInstance") }
+            {
+                Ok(destroy_instance) => {
+                    let mut lib_slot = null_mut();
+                    let mut radv_slot = null_mut();
+                    let res = unsafe {
+                        Self::init_with_instance(
+                            &mut lib_slot,
+                            &mut radv_slot,
+                            gipa,
+                            &mut instance,
+                            destroy_instance,
+                        )
+                    };
+                    if let Ok((mut eng, info)) = res {
+                        eng.lib_handle = lib_handle;
+                        return Ok((eng, info));
+                    }
+                    unsafe {
+                        if !instance.is_null() {
+                            destroy_instance(instance, null());
+                            instance = null_mut();
+                        }
+                    }
+                    res
+                }
+                Err(e) => Err(e),
             }
-            // VK_ERROR_INITIALIZATION_FAILED (-3) / VK_ERROR_INCOMPATIBLE_DRIVER (-9)
-            // occur on headless hosts where libvulkan.so.1 is present without any GPU ICD.
-            if rc == -3 || rc == -9 {
-                return Err(VulkanError::NoDiscreteGpuFound);
-            }
-            return Err(VulkanError::VkResult {
+        } else if rc == -3 || rc == -9 {
+            Err(VulkanError::NoDiscreteGpuFound)
+        } else {
+            Err(VulkanError::VkResult {
                 op: "vkCreateInstance",
                 code: rc,
-            });
+            })
+        };
+
+        // If default instance creation only surfaced a non-Wave32 ICD (e.g. AMDVLK's implicit
+        // switchable-graphics layer masking Mesa RADV on dual-ICD Linux hosts), retry once via
+        // `VK_LUNARG_direct_driver_loading` against `libvulkan_radeon.so` without requiring
+        // external environment variables.
+        let should_try_radv_ddl = matches!(
+            default_res,
+            Err(VulkanError::NoDiscreteGpuFound
+                | VulkanError::PipelineAuditFailed(_)
+                | VulkanError::UnexpectedSubgroupSize { .. }
+                | VulkanError::UnexpectedProverSubgroupSize { .. })
+        );
+        if should_try_radv_ddl
+            && let Some((eng, info)) =
+                unsafe { Self::try_new_with_radv_ddl(lib_handle, gipa, create_instance, &app_info) }
+        {
+            return Ok((eng, info));
         }
 
-        let destroy_instance: PfnVkDestroyInstance = match unsafe {
-            load_inst_fn(gipa, instance, c"vkDestroyInstance", "vkDestroyInstance")
-        } {
-            Ok(f) => f,
-            Err(e) => {
-                unsafe {
-                    let _ = dlclose(lib_handle);
-                }
-                return Err(e);
+        unsafe {
+            let _ = dlclose(lib_handle);
+        }
+        default_res
+    }
+
+    unsafe fn try_new_with_radv_ddl(
+        lib_handle: *mut c_void,
+        gipa: PfnVkGetInstanceProcAddr,
+        create_instance: PfnVkCreateInstance,
+        app_info: &VkApplicationInfo,
+    ) -> Option<(Self, VulkanDeviceInfo)> {
+        let enum_inst_exts: unsafe extern "C" fn(
+            *const c_char,
+            *mut u32,
+            *mut ExtensionProperties,
+        ) -> i32 = unsafe {
+            load_inst_fn(
+                gipa,
+                null_mut(),
+                c"vkEnumerateInstanceExtensionProperties",
+                "vkEnumerateInstanceExtensionProperties",
+            )
+            .ok()?
+        };
+        let mut ext_count = 0u32;
+        if unsafe { enum_inst_exts(null(), &mut ext_count, null_mut()) } != VK_SUCCESS
+            || ext_count == 0
+        {
+            return None;
+        }
+        let mut exts =
+            std::vec![ExtensionProperties { name: [0; 256], version: 0 }; ext_count as usize];
+        if unsafe { enum_inst_exts(null(), &mut ext_count, exts.as_mut_ptr()) } != VK_SUCCESS {
+            return None;
+        }
+        exts.truncate(ext_count as usize);
+        let ddl_ext = c"VK_LUNARG_direct_driver_loading";
+        if !exts
+            .iter()
+            .any(|e| e.name.starts_with(ddl_ext.to_bytes_with_nul()))
+        {
+            return None;
+        }
+
+        let radv_paths = [
+            c"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so",
+            c"/usr/lib64/libvulkan_radeon.so",
+            c"/usr/lib/libvulkan_radeon.so",
+            c"libvulkan_radeon.so",
+        ];
+        let mut radv_lib: *mut c_void = null_mut();
+        for path in radv_paths {
+            let h = unsafe { dlopen(path.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+            if !h.is_null() {
+                radv_lib = h;
+                break;
             }
+        }
+        if radv_lib.is_null() {
+            return None;
+        }
+
+        let mut icd_gipa_raw = unsafe { dlsym(radv_lib, c"vk_icdGetInstanceProcAddr".as_ptr()) };
+        if icd_gipa_raw.is_null() {
+            icd_gipa_raw = unsafe { dlsym(radv_lib, c"vkGetInstanceProcAddr".as_ptr()) };
+        }
+        if icd_gipa_raw.is_null() {
+            unsafe {
+                let _ = dlclose(radv_lib);
+            }
+            return None;
+        }
+        let icd_gipa: PfnVkGetInstanceProcAddr = unsafe { core::mem::transmute(icd_gipa_raw) };
+
+        let ddl_driver = VkDirectDriverLoadingInfoLUNARG {
+            s_type: 1000459000,
+            p_next: null_mut(),
+            flags: 0,
+            pfn_get_instance_proc_addr: icd_gipa,
+        };
+        let ddl_list = VkDirectDriverLoadingListLUNARG {
+            s_type: 1000459001,
+            p_next: null(),
+            mode: 0, // VK_DIRECT_DRIVER_LOADING_MODE_EXCLUSIVE_LUNARG
+            driver_count: 1,
+            p_drivers: &ddl_driver,
+        };
+        let ext_names = [ddl_ext.as_ptr()];
+        let inst_info = VkInstanceCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            p_next: (&ddl_list as *const VkDirectDriverLoadingListLUNARG).cast(),
+            flags: 0,
+            p_application_info: app_info,
+            enabled_layer_count: 0,
+            pp_enabled_layer_names: null(),
+            enabled_extension_count: 1,
+            pp_enabled_extension_names: ext_names.as_ptr(),
+        };
+        let mut instance: VkInstance = null_mut();
+        if unsafe { create_instance(&inst_info, null(), &mut instance) } != VK_SUCCESS {
+            unsafe {
+                let _ = dlclose(radv_lib);
+            }
+            return None;
+        }
+        let Ok(destroy_instance) =
+            (unsafe { load_inst_fn(gipa, instance, c"vkDestroyInstance", "vkDestroyInstance") })
+        else {
+            unsafe {
+                let _ = dlclose(radv_lib);
+            }
+            return None;
         };
 
         let mut lib_slot = lib_handle;
-        let init_res = unsafe {
-            Self::init_with_instance(&mut lib_slot, gipa, &mut instance, destroy_instance)
-        };
-        if init_res.is_err() {
-            unsafe {
-                if !instance.is_null() {
-                    destroy_instance(instance, null());
+        let mut radv_slot = radv_lib;
+        match unsafe {
+            Self::init_with_instance(
+                &mut lib_slot,
+                &mut radv_slot,
+                gipa,
+                &mut instance,
+                destroy_instance,
+            )
+        } {
+            Ok(ok) => Some(ok),
+            Err(_) => {
+                unsafe {
+                    if !instance.is_null() {
+                        destroy_instance(instance, null());
+                    }
+                    if !radv_slot.is_null() {
+                        let _ = dlclose(radv_slot);
+                    }
                 }
-                if !lib_slot.is_null() {
-                    let _ = dlclose(lib_slot);
-                }
+                None
             }
         }
-        init_res
     }
 
     unsafe fn init_with_instance(
         lib_handle: &mut *mut c_void,
+        radv_lib_handle: &mut *mut c_void,
         gipa: PfnVkGetInstanceProcAddr,
         instance_slot: &mut VkInstance,
         destroy_instance: PfnVkDestroyInstance,
@@ -1154,62 +1461,6 @@ impl RawVulkanEngine {
             return Err(VulkanError::NoDiscreteGpuFound);
         }
 
-        // Select discrete GPU (`VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU`), preferring AMD (`0x1002`).
-        let mut chosen: Option<(
-            VkPhysicalDevice,
-            VkPhysicalDevicePropertiesRaw,
-            VkPhysicalDeviceFeatures,
-        )> = None;
-        let mut saw_discrete_without_int64 = false;
-        for &pd in &phys_devs {
-            if pd.is_null() {
-                continue;
-            }
-            let mut props =
-                unsafe { MaybeUninit::<VkPhysicalDevicePropertiesRaw>::zeroed().assume_init() };
-            let mut feats =
-                unsafe { MaybeUninit::<VkPhysicalDeviceFeatures>::zeroed().assume_init() };
-            unsafe {
-                get_props(pd, &mut props);
-                get_feats(pd, &mut feats);
-            }
-            if props.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU {
-                if feats.flags[FEATURE_SHADER_INT64_INDEX] == 0 {
-                    saw_discrete_without_int64 = true;
-                    continue;
-                }
-                let replace = match &chosen {
-                    None => true,
-                    Some((_, prev_props, _)) => {
-                        (prev_props.vendor_id != 0x1002 && props.vendor_id == 0x1002)
-                            || (prev_props.vendor_id == props.vendor_id
-                                && props.read_limits_u32(512 - 296)
-                                    > prev_props.read_limits_u32(512 - 296))
-                    }
-                };
-                if replace {
-                    chosen = Some((pd, props, feats));
-                }
-            }
-        }
-
-        let (phys_dev, props, _) = match chosen {
-            Some(c) => c,
-            None if saw_discrete_without_int64 => return Err(VulkanError::MissingShaderInt64),
-            None => return Err(VulkanError::NoDiscreteGpuFound),
-        };
-
-        // SPIR-V modules target Vulkan 1.2. Check all fixed shader resource limits
-        // before creating any device objects (not merely before dispatch).
-        if props.api_version < VK_API_VERSION_1_2
-            || props.max_compute_work_group_invocations() < 256
-            || props.read_limits_u32(532 - 296) < 256
-            || props.max_push_constants_size() < 72
-            || props.read_limits_u32(512 - 296) < 8192
-            || props.max_compute_work_group_count_x() == 0
-        {
-            return Err(VulkanError::UnsupportedDeviceLimits);
-        }
         let enumerate_extensions: unsafe extern "C" fn(
             VkPhysicalDevice,
             *const c_char,
@@ -1223,6 +1474,162 @@ impl RawVulkanEngine {
                 "vkEnumerateDeviceExtensionProperties",
             )?
         };
+        let get_features2_opt: Option<unsafe extern "C" fn(VkPhysicalDevice, *mut Features2)> =
+            unsafe {
+                load_inst_fn(
+                    gipa,
+                    instance,
+                    c"vkGetPhysicalDeviceFeatures2",
+                    "vkGetPhysicalDeviceFeatures2",
+                )
+                .ok()
+            };
+        let get_properties2_opt: Option<unsafe extern "C" fn(VkPhysicalDevice, *mut Properties2)> =
+            unsafe {
+                load_inst_fn(
+                    gipa,
+                    instance,
+                    c"vkGetPhysicalDeviceProperties2",
+                    "vkGetPhysicalDeviceProperties2",
+                )
+                .ok()
+            };
+
+        // Select hardware GPU (`DISCRETE_GPU` preferred over `INTEGRATED_GPU`; software/CPU ICDs
+        // such as `llvmpipe` are strictly rejected), preferring Wave32 + executable-telemetry
+        // capable drivers (e.g. Mesa RADV over AMDVLK).
+        type DevRank = (bool, bool, bool, bool, u32);
+        let mut chosen: Option<(
+            VkPhysicalDevice,
+            VkPhysicalDevicePropertiesRaw,
+            VkPhysicalDeviceFeatures,
+            DevRank,
+        )> = None;
+        let mut saw_hw_gpu_without_int64 = false;
+        for &pd in &phys_devs {
+            if pd.is_null() {
+                continue;
+            }
+            let mut props =
+                unsafe { MaybeUninit::<VkPhysicalDevicePropertiesRaw>::zeroed().assume_init() };
+            let mut feats =
+                unsafe { MaybeUninit::<VkPhysicalDeviceFeatures>::zeroed().assume_init() };
+            unsafe {
+                get_props(pd, &mut props);
+                get_feats(pd, &mut feats);
+            }
+            let is_hw_gpu = props.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+                || props.device_type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+            if is_hw_gpu {
+                if feats.flags[FEATURE_SHADER_INT64_INDEX] == 0 {
+                    saw_hw_gpu_without_int64 = true;
+                    continue;
+                }
+                let mut can_audit = false;
+                if let (Some(gf2), Some(gp2)) = (get_features2_opt, get_properties2_opt) {
+                    let mut ec = 0u32;
+                    if unsafe { enumerate_extensions(pd, null(), &mut ec, null_mut()) }
+                        == VK_SUCCESS
+                        && ec > 0
+                    {
+                        let mut dev_exts = std::vec![
+                            ExtensionProperties { name: [0; 256], version: 0 };
+                            ec as usize
+                        ];
+                        if unsafe { enumerate_extensions(pd, null(), &mut ec, dev_exts.as_mut_ptr()) }
+                            == VK_SUCCESS
+                        {
+                            dev_exts.truncate(ec as usize);
+                            let has_e = dev_exts.iter().any(|e| {
+                                e.name.starts_with(
+                                    c"VK_KHR_pipeline_executable_properties".to_bytes_with_nul(),
+                                )
+                            });
+                            let has_s = dev_exts.iter().any(|e| {
+                                e.name
+                                    .starts_with(c"VK_EXT_subgroup_size_control".to_bytes_with_nul())
+                            });
+                            if has_e && has_s {
+                                let mut exec_f = FeatureChain {
+                                    s_type: 1000269000,
+                                    p_next: null_mut(),
+                                    enabled: 0,
+                                    extra: 0,
+                                };
+                                let mut sg_f = FeatureChain {
+                                    s_type: 1000225002,
+                                    p_next: (&mut exec_f as *mut FeatureChain).cast(),
+                                    enabled: 0,
+                                    extra: 0,
+                                };
+                                let mut f2 = Features2 {
+                                    s_type: 1000059000,
+                                    p_next: (&mut sg_f as *mut FeatureChain).cast(),
+                                    features: VkPhysicalDeviceFeatures { flags: [0; 55] },
+                                };
+                                unsafe {
+                                    gf2(pd, &mut f2);
+                                }
+                                let mut sgp = SubgroupProperties {
+                                    s_type: 1000225000,
+                                    p_next: null_mut(),
+                                    min: 0,
+                                    max: 0,
+                                    max_compute_subgroups: 0,
+                                    required_stages: 0,
+                                };
+                                let mut p2 = Properties2 {
+                                    s_type: 1000059001,
+                                    p_next: (&mut sgp as *mut SubgroupProperties).cast(),
+                                    properties: unsafe { core::mem::zeroed() },
+                                };
+                                unsafe {
+                                    gp2(pd, &mut p2);
+                                }
+                                can_audit = exec_f.enabled != 0
+                                    && sg_f.enabled != 0
+                                    && sgp.min <= 32
+                                    && sgp.max >= 32
+                                    && (sgp.required_stages & VK_SHADER_STAGE_COMPUTE_BIT) != 0
+                                    && sgp.max_compute_subgroups >= 8;
+                            }
+                        }
+                    }
+                }
+                let rank: DevRank = (
+                    can_audit,
+                    props.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+                    props.vendor_id == 0x1002,
+                    contains_ascii_subslice(&props.device_name, b"RADV"),
+                    props.read_limits_u32(512 - 296),
+                );
+                let replace = match &chosen {
+                    None => true,
+                    Some((_, _, _, prev_rank)) => rank > *prev_rank,
+                };
+                if replace {
+                    chosen = Some((pd, props, feats, rank));
+                }
+            }
+        }
+
+        let (phys_dev, props, _, _) = match chosen {
+            Some(c) => c,
+            None if saw_hw_gpu_without_int64 => return Err(VulkanError::MissingShaderInt64),
+            None => return Err(VulkanError::NoDiscreteGpuFound),
+        };
+
+        // SPIR-V modules target Vulkan 1.2. Check all fixed shader resource limits
+        // before creating any device objects (not merely before dispatch).
+        if props.api_version < VK_API_VERSION_1_2
+            || props.max_compute_work_group_invocations() < 256
+            || props.read_limits_u32(532 - 296) < 256
+            || props.max_push_constants_size() < 128
+            || props.read_limits_u32(512 - 296) < 16384
+            || props.max_compute_work_group_count_x() == 0
+        {
+            return Err(VulkanError::UnsupportedDeviceLimits);
+        }
         let mut count = 0;
         check_vk("vkEnumerateDeviceExtensionProperties", unsafe {
             enumerate_extensions(phys_dev, null(), &mut count, null_mut())
@@ -1438,6 +1845,8 @@ impl RawVulkanEngine {
             max_compute_shared_memory_size: props.read_limits_u32(512 - 296),
             wave32_required: wave32,
             pipelines: [crate::vulkan::PipelineTelemetry::default(); KernelSlot::COUNT],
+            prover_pipelines: [crate::vulkan::PipelineTelemetry::default();
+                ProverKernelSlot::COUNT],
             name_bytes,
             name_len: copy_len,
             vendor_id: props.vendor_id,
@@ -1452,6 +1861,7 @@ impl RawVulkanEngine {
 
         let mut engine = Self {
             lib_handle: core::mem::replace(lib_handle, null_mut()),
+            radv_lib_handle: core::mem::replace(radv_lib_handle, null_mut()),
             destroy_instance,
             instance: core::mem::replace(instance_slot, null_mut()),
             device,
@@ -1461,6 +1871,8 @@ impl RawVulkanEngine {
             wave32,
             executable_fns: None,
             telemetry: [crate::vulkan::PipelineTelemetry::default(); KernelSlot::COUNT],
+            prover_telemetry: [crate::vulkan::PipelineTelemetry::default();
+                ProverKernelSlot::COUNT],
             max_wg_x: props.max_compute_work_group_count_x(),
             max_storage_range: props.max_storage_buffer_range() as u64,
             exec_state: EngineExecState::Ready,
@@ -1472,11 +1884,17 @@ impl RawVulkanEngine {
             dsl_1buf: 0,
             dsl_2buf: 0,
             dsl_3buf: 0,
+            dsl_6buf: 0,
             pipelines: [KernelPipeline {
                 shader_module: 0,
                 pipeline_layout: 0,
                 pipeline: 0,
             }; KernelSlot::COUNT],
+            prover_pipelines: [KernelPipeline {
+                shader_module: 0,
+                pipeline_layout: 0,
+                pipeline: 0,
+            }; ProverKernelSlot::COUNT],
             desc_pool: 0,
             ds_1buf_a: 0,
             ds_2buf_ab: 0,
@@ -1489,6 +1907,7 @@ impl RawVulkanEngine {
             vram_a: GpuBuffer::default(),
             vram_b: GpuBuffer::default(),
             vram_c: GpuBuffer::default(),
+            prover: ProverArena::default(),
         };
 
         unsafe {
@@ -1512,6 +1931,7 @@ impl RawVulkanEngine {
         }
 
         dev_info.pipelines = engine.telemetry;
+        dev_info.prover_pipelines = engine.prover_telemetry;
         Ok((engine, dev_info))
     }
 
@@ -1701,11 +2121,10 @@ impl RawVulkanEngine {
         }
     }
 
-    unsafe fn collect_telemetry(
-        &mut self,
-        slot: KernelSlot,
+    unsafe fn query_pipeline_telemetry(
+        &self,
         pipeline: VkPipeline,
-    ) -> Result<(), VulkanError> {
+    ) -> Result<(u32, crate::vulkan::PipelineTelemetry), VulkanError> {
         let Some((get_properties, get_statistics)) = self.executable_fns else {
             return Err(VulkanError::PipelineAuditFailed(
                 "executable telemetry unavailable",
@@ -1725,21 +2144,12 @@ impl RawVulkanEngine {
             get_properties(self.device, &info, &mut count, properties.as_mut_ptr())
         })?;
         properties.truncate(count as usize);
-        // These are single-stage compute pipelines. Refuse ambiguous telemetry rather
-        // than silently reporting one executable's statistics as the whole pipeline.
         if properties.len() != 1 {
             return Err(VulkanError::PipelineAuditFailed(
                 "expected one compute executable",
             ));
         }
         let subgroup_size = properties[0].subgroup_size;
-        if !self.wave32 || subgroup_size != 32 {
-            return Err(VulkanError::UnexpectedSubgroupSize {
-                slot,
-                required: 32,
-                reported: subgroup_size,
-            });
-        }
         let info = ExecutableInfo {
             s_type: 1000269003,
             p_next: null(),
@@ -1764,7 +2174,6 @@ impl RawVulkanEngine {
         for stat in stats {
             let end = stat.name.iter().position(|b| *b == 0).unwrap_or(256);
             let name = core::str::from_utf8(&stat.name[..end]).unwrap_or("");
-            // UINT64 is the only accepted representation; absence is never zero.
             if stat.format != 2 {
                 continue;
             }
@@ -1778,7 +2187,7 @@ impl RawVulkanEngine {
                 _ => {}
             }
         }
-        self.telemetry[slot as usize] = crate::vulkan::PipelineTelemetry {
+        let tel = crate::vulkan::PipelineTelemetry {
             subgroup_size: Some(subgroup_size),
             scratch_bytes: scratch,
             vgprs,
@@ -1787,12 +2196,54 @@ impl RawVulkanEngine {
             spilled_vgprs,
             spilled_sgprs,
         };
-        if scratch != Some(0) {
+        Ok((subgroup_size, tel))
+    }
+
+    unsafe fn collect_telemetry(
+        &mut self,
+        slot: KernelSlot,
+        pipeline: VkPipeline,
+    ) -> Result<(), VulkanError> {
+        let (subgroup_size, tel) = unsafe { self.query_pipeline_telemetry(pipeline)? };
+        if !self.wave32 || subgroup_size != 32 {
+            return Err(VulkanError::UnexpectedSubgroupSize {
+                slot,
+                required: 32,
+                reported: subgroup_size,
+            });
+        }
+        self.telemetry[slot as usize] = tel;
+        if tel.scratch_bytes != Some(0) {
             return Err(VulkanError::PipelineAuditFailed(
                 "nonzero private scratch memory",
             ));
         }
-        if spilled_vgprs != Some(0) || spilled_sgprs != Some(0) {
+        if tel.spilled_vgprs != Some(0) || tel.spilled_sgprs != Some(0) {
+            return Err(VulkanError::PipelineAuditFailed("spilled registers"));
+        }
+        Ok(())
+    }
+
+    unsafe fn collect_prover_telemetry(
+        &mut self,
+        slot: ProverKernelSlot,
+        pipeline: VkPipeline,
+    ) -> Result<(), VulkanError> {
+        let (subgroup_size, tel) = unsafe { self.query_pipeline_telemetry(pipeline)? };
+        if !self.wave32 || subgroup_size != 32 {
+            return Err(VulkanError::UnexpectedProverSubgroupSize {
+                slot,
+                required: 32,
+                reported: subgroup_size,
+            });
+        }
+        self.prover_telemetry[slot as usize] = tel;
+        if tel.scratch_bytes != Some(0) {
+            return Err(VulkanError::PipelineAuditFailed(
+                "nonzero private scratch memory",
+            ));
+        }
+        if tel.spilled_vgprs != Some(0) || tel.spilled_sgprs != Some(0) {
             return Err(VulkanError::PipelineAuditFailed("spilled registers"));
         }
         Ok(())
@@ -1805,7 +2256,7 @@ impl RawVulkanEngine {
             descriptor_count: 1,
             stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
             p_immutable_samplers: null(),
-        }; 3];
+        }; 6];
         for (i, b) in bindings.iter_mut().enumerate().take(num_bindings as usize) {
             b.binding = i as u32;
         }
@@ -1823,10 +2274,97 @@ impl RawVulkanEngine {
         Ok(dsl)
     }
 
+    unsafe fn build_one_pipeline(
+        &self,
+        spv: &[u32],
+        dsl: VkDescriptorSetLayout,
+        pc_size: u32,
+    ) -> Result<(KernelPipeline, i32), VulkanError> {
+        let sm_info = VkShaderModuleCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+            code_size: spv.len() * 4,
+            p_code: spv.as_ptr(),
+        };
+        let mut sm: VkShaderModule = 0;
+        check_vk("vkCreateShaderModule", unsafe {
+            (self.fns.create_shader_module)(self.device, &sm_info, null(), &mut sm)
+        })?;
+
+        let pc_range = VkPushConstantRange {
+            stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+            offset: 0,
+            size: pc_size,
+        };
+        let pl_info = VkPipelineLayoutCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+            set_layout_count: 1,
+            p_set_layouts: &dsl,
+            push_constant_range_count: 1,
+            p_push_constant_ranges: &pc_range,
+        };
+        let mut pl: VkPipelineLayout = 0;
+        if let Err(e) = check_vk("vkCreatePipelineLayout", unsafe {
+            (self.fns.create_pipeline_layout)(self.device, &pl_info, null(), &mut pl)
+        }) {
+            unsafe {
+                (self.fns.destroy_shader_module)(self.device, sm, null());
+            }
+            return Err(e);
+        }
+
+        let required = RequiredSubgroup {
+            s_type: 1000225001,
+            p_next: null(),
+            size: 32,
+        };
+        let cp_info = VkComputePipelineCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            p_next: null(),
+            flags: if self.executable_fns.is_some() {
+                0x40
+            } else {
+                0
+            },
+            stage: VkPipelineShaderStageCreateInfo {
+                s_type: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                p_next: if self.wave32 {
+                    (&required as *const RequiredSubgroup).cast()
+                } else {
+                    null()
+                },
+                flags: 0,
+                stage: VK_SHADER_STAGE_COMPUTE_BIT,
+                module: sm,
+                p_name: c"main".as_ptr(),
+                p_specialization_info: null(),
+            },
+            layout: pl,
+            base_pipeline_handle: 0,
+            base_pipeline_index: -1,
+        };
+        let mut pipe: VkPipeline = 0;
+        let rc = unsafe {
+            (self.fns.create_compute_pipelines)(self.device, 0, 1, &cp_info, null(), &mut pipe)
+        };
+        Ok((
+            KernelPipeline {
+                shader_module: sm,
+                pipeline_layout: pl,
+                pipeline: pipe,
+            },
+            rc,
+        ))
+    }
+
     unsafe fn build_pipelines_and_pools(&mut self, qf_idx: u32) -> Result<(), VulkanError> {
         self.dsl_1buf = unsafe { self.create_dsl(1)? };
         self.dsl_2buf = unsafe { self.create_dsl(2)? };
         self.dsl_3buf = unsafe { self.create_dsl(3)? };
+        self.dsl_6buf = unsafe { self.create_dsl(6)? };
 
         let specs: [(KernelSlot, VkDescriptorSetLayout, u32); KernelSlot::COUNT] = [
             (
@@ -1863,78 +2401,40 @@ impl RawVulkanEngine {
 
         for (slot, dsl, pc_size) in specs {
             let spv = spirv_kernel_words(slot);
-            let sm_info = VkShaderModuleCreateInfo {
-                s_type: VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                p_next: null(),
-                flags: 0,
-                code_size: spv.len() * 4,
-                p_code: spv.as_ptr(),
-            };
-            let mut sm: VkShaderModule = 0;
-            check_vk("vkCreateShaderModule", unsafe {
-                (self.fns.create_shader_module)(self.device, &sm_info, null(), &mut sm)
-            })?;
-            self.pipelines[slot as usize].shader_module = sm;
-
-            let pc_range = VkPushConstantRange {
-                stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
-                offset: 0,
-                size: pc_size,
-            };
-            let pl_info = VkPipelineLayoutCreateInfo {
-                s_type: VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                p_next: null(),
-                flags: 0,
-                set_layout_count: 1,
-                p_set_layouts: &dsl,
-                push_constant_range_count: 1,
-                p_push_constant_ranges: &pc_range,
-            };
-            let mut pl: VkPipelineLayout = 0;
-            check_vk("vkCreatePipelineLayout", unsafe {
-                (self.fns.create_pipeline_layout)(self.device, &pl_info, null(), &mut pl)
-            })?;
-            self.pipelines[slot as usize].pipeline_layout = pl;
-
-            let required = RequiredSubgroup {
-                s_type: 1000225001,
-                p_next: null(),
-                size: 32,
-            };
-            let cp_info = VkComputePipelineCreateInfo {
-                s_type: VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-                p_next: null(),
-                flags: if self.executable_fns.is_some() {
-                    0x40
-                } else {
-                    0
-                },
-                stage: VkPipelineShaderStageCreateInfo {
-                    s_type: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    p_next: if self.wave32 {
-                        (&required as *const RequiredSubgroup).cast()
-                    } else {
-                        null()
-                    },
-                    flags: 0,
-                    stage: VK_SHADER_STAGE_COMPUTE_BIT,
-                    module: sm,
-                    p_name: c"main".as_ptr(),
-                    p_specialization_info: null(),
-                },
-                layout: pl,
-                base_pipeline_handle: 0,
-                base_pipeline_index: -1,
-            };
-            let mut pipe: VkPipeline = 0;
-            let rc = unsafe {
-                (self.fns.create_compute_pipelines)(self.device, 0, 1, &cp_info, null(), &mut pipe)
-            };
-            // Retain any returned handle even on failure so RAII owns its cleanup.
-            self.pipelines[slot as usize].pipeline = pipe;
+            let (kp, rc) = unsafe { self.build_one_pipeline(spv, dsl, pc_size)? };
+            self.pipelines[slot as usize] = kp;
             check_vk("vkCreateComputePipelines", rc)?;
             unsafe {
-                self.collect_telemetry(slot, pipe)?;
+                self.collect_telemetry(slot, kp.pipeline)?;
+            }
+        }
+
+        let prover_specs: [(ProverKernelSlot, u32); ProverKernelSlot::COUNT] = [
+            (
+                ProverKernelSlot::WhirLdeCommitment,
+                size_of::<WhirLdePushConsts>() as u32,
+            ),
+            (
+                ProverKernelSlot::WhirFoldSumcheck,
+                size_of::<WhirFoldPushConsts>() as u32,
+            ),
+            (
+                ProverKernelSlot::AirRowGroupA,
+                size_of::<AirGroupAPushConsts>() as u32,
+            ),
+            (
+                ProverKernelSlot::AirRowGroupB,
+                size_of::<AirGroupBPushConsts>() as u32,
+            ),
+        ];
+
+        for (slot, pc_size) in prover_specs {
+            let spv = prover_spirv_kernel_words(slot);
+            let (kp, rc) = unsafe { self.build_one_pipeline(spv, self.dsl_6buf, pc_size)? };
+            self.prover_pipelines[slot as usize] = kp;
+            check_vk("vkCreateComputePipelines(prover)", rc)?;
+            unsafe {
+                self.collect_prover_telemetry(slot, kp.pipeline)?;
             }
         }
 
@@ -2538,6 +3038,46 @@ impl RawVulkanEngine {
                 (self.vram_a.buffer, self.vram_a.capacity),
                 (self.vram_b.buffer, self.vram_b.capacity),
                 (self.vram_c.buffer, self.vram_c.capacity),
+                (self.prover.twiddles_24.buffer, self.prover.twiddles_24.capacity),
+                (self.prover.vram_witness.buffer, self.prover.vram_witness.capacity),
+                (self.prover.vram_mono.buffer, self.prover.vram_mono.capacity),
+                (self.prover.vram_cw0.buffer, self.prover.vram_cw0.capacity),
+                (self.prover.vram_tree0.buffer, self.prover.vram_tree0.capacity),
+                (self.prover.vram_work_a.buffer, self.prover.vram_work_a.capacity),
+                (self.prover.vram_work_b.buffer, self.prover.vram_work_b.capacity),
+                (self.prover.vram_cw_stage.buffer, self.prover.vram_cw_stage.capacity),
+                (self.prover.vram_tree_stage.buffer, self.prover.vram_tree_stage.capacity),
+                (self.prover.vram_aux_in.buffer, self.prover.vram_aux_in.capacity),
+                (self.prover.vram_aux_b.buffer, self.prover.vram_aux_b.capacity),
+                (self.prover.vram_partials.buffer, self.prover.vram_partials.capacity),
+            ]);
+            self.prover.twiddles_ready = false;
+            self.submit_and_wait()
+        }
+    }
+
+    /// Scrub all session-bearing buffers in `ProverArena` on session release while retaining
+    /// precomputed public `twiddles_24` and buffer allocations for zero-alloc reuse.
+    pub(crate) fn scrub_prover_session(&mut self) -> Result<(), VulkanError> {
+        unsafe {
+            self.settle_staging();
+            self.ensure_ready()?;
+            if self.cmd_buf.is_null() || !self.prover.initialized {
+                return Ok(());
+            }
+            self.begin_cmd()?;
+            self.cmd_scrub_vram(&[
+                (self.prover.vram_witness.buffer, self.prover.vram_witness.capacity),
+                (self.prover.vram_mono.buffer, self.prover.vram_mono.capacity),
+                (self.prover.vram_cw0.buffer, self.prover.vram_cw0.capacity),
+                (self.prover.vram_tree0.buffer, self.prover.vram_tree0.capacity),
+                (self.prover.vram_work_a.buffer, self.prover.vram_work_a.capacity),
+                (self.prover.vram_work_b.buffer, self.prover.vram_work_b.capacity),
+                (self.prover.vram_cw_stage.buffer, self.prover.vram_cw_stage.capacity),
+                (self.prover.vram_tree_stage.buffer, self.prover.vram_tree_stage.capacity),
+                (self.prover.vram_aux_in.buffer, self.prover.vram_aux_in.capacity),
+                (self.prover.vram_aux_b.buffer, self.prover.vram_aux_b.capacity),
+                (self.prover.vram_partials.buffer, self.prover.vram_partials.capacity),
             ]);
             self.submit_and_wait()
         }
@@ -2551,8 +3091,19 @@ impl RawVulkanEngine {
         }
         let len = bytes.min(self.staging.capacity) as usize;
         unsafe {
-            for offset in 0..len {
-                core::ptr::write_volatile(self.staging.mapped.add(offset), 0);
+            let base = self.staging.mapped;
+            let align_off = base.align_offset(8).min(len);
+            for offset in 0..align_off {
+                core::ptr::write_volatile(base.add(offset), 0);
+            }
+            let rem = len - align_off;
+            let words = rem / 8;
+            let ptr64 = base.add(align_off).cast::<u64>();
+            for i in 0..words {
+                core::ptr::write_volatile(ptr64.add(i), 0);
+            }
+            for offset in (align_off + words * 8)..len {
+                core::ptr::write_volatile(base.add(offset), 0);
             }
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
@@ -2941,6 +3492,190 @@ impl RawVulkanEngine {
                         wg_half,
                         NttPushConsts {
                             w_step: stage_root(s),
+                            n: n as u32,
+                            log2_n,
+                            stage: s,
+                            mode: 2,
+                            base_wg: 0,
+                            _pad: 0,
+                        },
+                    );
+                }
+
+                if inverse {
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_ntt_mode(
+                        kp.pipeline_layout,
+                        wg_full,
+                        NttPushConsts {
+                            w_step: gl_inv_or_zero(n as u64),
+                            n: n as u32,
+                            log2_n,
+                            stage: 0,
+                            mode: 3,
+                            base_wg: 0,
+                            _pad: 0,
+                        },
+                    );
+                }
+            }
+
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_a.buffer,
+                self.staging.buffer,
+                1,
+                &copy,
+            );
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, byte_len)]);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+            self.read_staging_u64s(0, buf);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exec_goldilocks_ntt_canonical(
+        &mut self,
+        buf: &mut [u64],
+        inverse: bool,
+    ) -> Result<(), VulkanError> {
+        self.run_job(|engine| engine.job_goldilocks_ntt_canonical(buf, inverse))
+    }
+
+    fn job_goldilocks_ntt_canonical(
+        &mut self,
+        buf: &mut [u64],
+        inverse: bool,
+    ) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
+        let n = buf.len();
+        if !n.is_power_of_two() {
+            return Err(VulkanError::Accel(crate::AccelError::NotPowerOfTwo {
+                what: "NTT input",
+                len: n,
+            }));
+        }
+        let log2_n = n.trailing_zeros();
+        self.check_storage_bytes(n, 8)?;
+        let byte_len = (n as u64) * 8;
+        let stage_root = |s: u32| -> Result<u64, VulkanError> {
+            let r = goldilocks_primitive_root(s).map_err(VulkanError::Accel)?;
+            Ok(if inverse { gl_inv_or_zero(r) } else { r })
+        };
+
+        unsafe {
+            self.reserve_job_staging(byte_len)?;
+            self.ensure_vram_buffers(byte_len, 0, 0)?;
+            self.write_staging_u64s(0, buf);
+
+            self.begin_cmd()?;
+            let copy = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: byte_len,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::GoldilocksNtt as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            (self.fns.cmd_bind_descriptor_sets)(
+                self.cmd_buf,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                kp.pipeline_layout,
+                0,
+                1,
+                &self.ds_1buf_a,
+                0,
+                null(),
+            );
+
+            let wg_full = (n as u64).div_ceil(256) as u32;
+            self.dispatch_ntt_mode(
+                kp.pipeline_layout,
+                wg_full,
+                NttPushConsts {
+                    w_step: 0,
+                    n: n as u32,
+                    log2_n,
+                    stage: 0,
+                    mode: 0,
+                    base_wg: 0,
+                    _pad: 0,
+                },
+            );
+
+            if n > 1 {
+                let start_stage = if log2_n >= 9 {
+                    let w9 = stage_root(9)?;
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_ntt_mode(
+                        kp.pipeline_layout,
+                        (n >> 9) as u32,
+                        NttPushConsts {
+                            w_step: w9,
+                            n: n as u32,
+                            log2_n,
+                            stage: 9,
+                            mode: 1,
+                            base_wg: 0,
+                            _pad: 0,
+                        },
+                    );
+                    10u32
+                } else {
+                    1u32
+                };
+
+                let wg_half = ((n >> 1) as u64).div_ceil(256) as u32;
+                for s in start_stage..=log2_n {
+                    let ws = stage_root(s)?;
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_ntt_mode(
+                        kp.pipeline_layout,
+                        wg_half,
+                        NttPushConsts {
+                            w_step: ws,
                             n: n as u32,
                             log2_n,
                             stage: s,
@@ -3742,6 +4477,3013 @@ impl RawVulkanEngine {
         }
     }
 
+    fn run_prover_job<T>(
+        &mut self,
+        job: impl FnOnce(&mut Self) -> Result<T, VulkanError>,
+    ) -> Result<T, VulkanError> {
+        struct SettleProverOnExit<'a>(&'a mut RawVulkanEngine, bool);
+        impl SettleProverOnExit<'_> {
+            fn engine(&mut self) -> &mut RawVulkanEngine {
+                self.0
+            }
+        }
+        impl Drop for SettleProverOnExit<'_> {
+            fn drop(&mut self) {
+                unsafe {
+                    self.0.settle_staging();
+                    if self.1 && self.0.exec_state == EngineExecState::Ready {
+                        let _ = self.0.scrub_prover_session();
+                    }
+                }
+            }
+        }
+        let mut guard = SettleProverOnExit(self, true);
+        let res = job(guard.engine());
+        guard.1 = res.is_err();
+        drop(guard);
+        res
+    }
+
+    unsafe fn ensure_one_prover_buf(
+        &mut self,
+        slot_offset: fn(&mut ProverArena) -> &mut GpuBuffer,
+        required: u64,
+    ) -> Result<bool, VulkanError> {
+        let req = required.max(MIN_BUFFER_ALLOC_BYTES);
+        let cur = slot_offset(&mut self.prover);
+        if let Some(tgt) = self.plan_vram_growth(cur, req)? {
+            let new_buf = unsafe { self.alloc_gpu_buffer(tgt, false)? };
+            let mut old = core::mem::replace(slot_offset(&mut self.prover), new_buf);
+            unsafe {
+                self.destroy_gpu_buffer(&mut old);
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn ensure_prover_arena(
+        &mut self,
+        req_witness: u64,
+        req_mono: u64,
+        req_cw0: u64,
+        req_tree0: u64,
+        req_work_a: u64,
+        req_work_b: u64,
+        req_cw_stage: u64,
+        req_tree_stage: u64,
+        req_aux_in: u64,
+        req_aux_b: u64,
+        req_partials: u64,
+    ) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
+        let mut first_init = false;
+        if !self.prover.initialized {
+            let pool_size = VkDescriptorPoolSize {
+                ty: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                descriptor_count: 48,
+            };
+            let dp_info = VkDescriptorPoolCreateInfo {
+                s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                p_next: null(),
+                flags: 0,
+                max_sets: 8,
+                pool_size_count: 1,
+                p_pool_sizes: &pool_size,
+            };
+            check_vk("vkCreateDescriptorPool(prover)", unsafe {
+                (self.fns.create_descriptor_pool)(
+                    self.device,
+                    &dp_info,
+                    null(),
+                    &mut self.prover.desc_pool,
+                )
+            })?;
+            let layouts = [self.dsl_6buf; 8];
+            let mut sets = [0u64; 8];
+            let dsa = VkDescriptorSetAllocateInfo {
+                s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                p_next: null(),
+                descriptor_pool: self.prover.desc_pool,
+                descriptor_set_count: 8,
+                p_set_layouts: layouts.as_ptr(),
+            };
+            if let Err(e) = check_vk("vkAllocateDescriptorSets(prover)", unsafe {
+                (self.fns.allocate_descriptor_sets)(self.device, &dsa, sets.as_mut_ptr())
+            }) {
+                unsafe {
+                    (self.fns.destroy_descriptor_pool)(self.device, self.prover.desc_pool, null());
+                }
+                self.prover.desc_pool = 0;
+                return Err(e);
+            }
+            self.prover.ds_lde_r0 = sets[0];
+            self.prover.ds_gather_r0 = sets[1];
+            self.prover.ds_lde_stage = sets[2];
+            self.prover.ds_gather_stage = sets[3];
+            self.prover.ds_fold_kronecker = sets[4];
+            self.prover.ds_fold_mono = sets[5];
+            self.prover.ds_fold_witness = sets[6];
+            self.prover.ds_air = sets[7];
+            self.prover.initialized = true;
+            first_init = true;
+        }
+
+        let tw_bytes = (1u64 << 23) * 8;
+        let mut changed = first_init;
+        unsafe {
+            if self.ensure_one_prover_buf(|p| &mut p.twiddles_24, tw_bytes)? {
+                self.prover.twiddles_ready = false;
+                changed = true;
+            }
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_witness, req_witness)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_mono, req_mono)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw0, req_cw0)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_tree0, req_tree0)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_work_a, req_work_a)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_work_b, req_work_b)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage, req_cw_stage)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage, req_tree_stage)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_aux_in, req_aux_in)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_aux_b, req_aux_b)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_partials, req_partials)?;
+        }
+
+        if changed {
+            unsafe {
+                self.refresh_prover_descriptor_sets();
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn refresh_prover_descriptor_sets(&self) {
+        let mk_info = |buf: &GpuBuffer| VkDescriptorBufferInfo {
+            buffer: buf.buffer,
+            offset: 0,
+            range: VK_WHOLE_SIZE,
+        };
+        let p = &self.prover;
+        let i_tw = mk_info(&p.twiddles_24);
+        let i_wit = mk_info(&p.vram_witness);
+        let i_mono = mk_info(&p.vram_mono);
+        let i_cw0 = mk_info(&p.vram_cw0);
+        let i_tr0 = mk_info(&p.vram_tree0);
+        let i_wa = mk_info(&p.vram_work_a);
+        let i_wb = mk_info(&p.vram_work_b);
+        let i_cws = mk_info(&p.vram_cw_stage);
+        let i_trs = mk_info(&p.vram_tree_stage);
+        let i_ain = mk_info(&p.vram_aux_in);
+        let i_ab = mk_info(&p.vram_aux_b);
+        let i_part = mk_info(&p.vram_partials);
+
+        let table: [(VkDescriptorSet, [*const VkDescriptorBufferInfo; 6]); 8] = [
+            (
+                p.ds_lde_r0,
+                [&i_mono, &i_wa, &i_cw0, &i_tw, &i_tr0, &i_part],
+            ),
+            (
+                p.ds_gather_r0,
+                [&i_mono, &i_wa, &i_cw0, &i_ain, &i_tr0, &i_part],
+            ),
+            (
+                p.ds_lde_stage,
+                [&i_wb, &i_cws, &i_wa, &i_tw, &i_trs, &i_part],
+            ),
+            (
+                p.ds_gather_stage,
+                [&i_wb, &i_cws, &i_wa, &i_ain, &i_trs, &i_part],
+            ),
+            (
+                p.ds_fold_kronecker,
+                [&i_ain, &i_wa, &i_wb, &i_ain, &i_ab, &i_part],
+            ),
+            (
+                p.ds_fold_mono,
+                [&i_mono, &i_wa, &i_wb, &i_ain, &i_ab, &i_part],
+            ),
+            (
+                p.ds_fold_witness,
+                [&i_wit, &i_wa, &i_wb, &i_ain, &i_ab, &i_part],
+            ),
+            (
+                p.ds_air,
+                [&i_wit, &i_wa, &i_ab, &i_ain, &i_wb, &i_part],
+            ),
+        ];
+
+        let mut writes = [VkWriteDescriptorSet {
+            s_type: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            p_next: null(),
+            dst_set: 0,
+            dst_binding: 0,
+            dst_array_element: 0,
+            descriptor_count: 1,
+            descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            p_image_info: null(),
+            p_buffer_info: null(),
+            p_texel_buffer_view: null(),
+        }; 48];
+        let mut cursor = 0usize;
+        for (ds, infos) in table {
+            for (binding, info_ptr) in infos.into_iter().enumerate() {
+                writes[cursor].dst_set = ds;
+                writes[cursor].dst_binding = binding as u32;
+                writes[cursor].p_buffer_info = info_ptr;
+                cursor += 1;
+            }
+        }
+        unsafe {
+            (self.fns.update_descriptor_sets)(self.device, 48, writes.as_ptr(), 0, null());
+        }
+    }
+
+    unsafe fn dispatch_whir_lde_1d(
+        &self,
+        pl: VkPipelineLayout,
+        total_wg_x: u32,
+        wg_y: u32,
+        units_per_wg: u32,
+        mut pc: WhirLdePushConsts,
+    ) {
+        let mut done = 0u32;
+        while done < total_wg_x {
+            let chunk = (total_wg_x - done).min(self.max_wg_x);
+            pc.aux3 = done * units_per_wg;
+            unsafe {
+                (self.fns.cmd_push_constants)(
+                    self.cmd_buf,
+                    pl,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<WhirLdePushConsts>() as u32,
+                    (&pc as *const WhirLdePushConsts).cast::<c_void>(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd_buf, chunk, wg_y, 1);
+            }
+            done += chunk;
+        }
+    }
+
+    unsafe fn dispatch_whir_fold_1d(
+        &self,
+        pl: VkPipelineLayout,
+        total_wg_x: u32,
+        wg_y: u32,
+        mut pc: WhirFoldPushConsts,
+    ) {
+        let mut done = 0u32;
+        while done < total_wg_x {
+            let chunk = (total_wg_x - done).min(self.max_wg_x);
+            pc.aux5 = done * 256;
+            unsafe {
+                (self.fns.cmd_push_constants)(
+                    self.cmd_buf,
+                    pl,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<WhirFoldPushConsts>() as u32,
+                    (&pc as *const WhirFoldPushConsts).cast::<c_void>(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd_buf, chunk, wg_y, 1);
+            }
+            done += chunk;
+        }
+    }
+
+    #[inline]
+    fn fp4_add_arr(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+        [
+            gl_add(a[0], b[0]),
+            gl_add(a[1], b[1]),
+            gl_add(a[2], b[2]),
+            gl_add(a[3], b[3]),
+        ]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_prover_whir_commit_round0(
+        &mut self,
+        polys: &[&[u64]],
+        num_vars: usize,
+        blowup: usize,
+        group_arity: usize,
+        max_stage1_domain_ext4: usize,
+        max_stage1_groups: usize,
+        extra_witness_words: usize,
+    ) -> Result<([u8; 32], u64), VulkanError> {
+        self.run_prover_job(|engine| {
+            engine.job_prover_whir_commit_round0(
+                polys,
+                num_vars,
+                blowup,
+                group_arity,
+                max_stage1_domain_ext4,
+                max_stage1_groups,
+                extra_witness_words,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn job_prover_whir_commit_round0(
+        &mut self,
+        polys: &[&[u64]],
+        num_vars: usize,
+        blowup: usize,
+        group_arity: usize,
+        max_stage1_domain_ext4: usize,
+        max_stage1_groups: usize,
+        extra_witness_words: usize,
+    ) -> Result<([u8; 32], u64), VulkanError> {
+        if polys.is_empty()
+            || !(2..=26).contains(&num_vars)
+            || !blowup.is_power_of_two()
+            || blowup < 4
+            || !group_arity.is_power_of_two()
+            || group_arity == 0
+        {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        let c_len = 1usize << num_vars;
+        for p in polys {
+            if p.len() != c_len {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+        }
+        let num_polys = polys.len();
+        let domain_len = c_len
+            .checked_mul(blowup)
+            .ok_or(crate::AccelError::LengthOverflow)?;
+        if domain_len % group_arity != 0 {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        let num_groups = domain_len / group_arity;
+        let log_d = domain_len.trailing_zeros();
+
+        let total_poly_words = num_polys
+            .checked_mul(c_len)
+            .ok_or(crate::AccelError::LengthOverflow)?;
+        let req_witness = ((total_poly_words + extra_witness_words) as u64) * 8;
+        let req_mono = (total_poly_words as u64) * 8;
+        let req_cw0 = ((num_polys * domain_len) as u64) * 8;
+        let req_tree0 = ((2 * num_groups) as u64) * 32;
+        let work_a_ext4 = ((c_len + 2) * 2).max(total_poly_words);
+        let req_work_a = ((work_a_ext4 as u64) * 32).max((4 * c_len as u64) * 8);
+        let max_shard_half = (extra_witness_words / 256 / 2).max(1);
+        let work_b_ext4 = ((c_len + 2) * 2)
+            .max(total_poly_words)
+            .max(8 * max_shard_half * 12);
+        let req_work_b = (work_b_ext4 as u64) * 32;
+
+        let stg_cw_stride = max_stage1_domain_ext4.max(1024);
+        let stg_tr_stride = 2 * max_stage1_groups.max(512);
+        let req_cw_stage = (2 * stg_cw_stride as u64) * 32;
+        let req_tree_stage = (2 * stg_tr_stride as u64) * 32;
+        let req_aux_in = 8 * 1024 * 1024;
+        let req_aux_b = ((6 * (extra_witness_words / 256).max(1024)) as u64 * 32).max(8 * 1024 * 1024);
+        let req_partials = 4 * 1024 * 1024;
+
+        unsafe {
+            self.ensure_prover_arena(
+                req_witness,
+                req_mono,
+                req_cw0,
+                req_tree0,
+                req_work_a,
+                req_work_b,
+                req_cw_stage,
+                req_tree_stage,
+                req_aux_in,
+                req_aux_b,
+                req_partials,
+            )?;
+        }
+        self.prover.stage_cw_stride_ext4 = stg_cw_stride as u32;
+        self.prover.stage_tree_stride_ext4 = stg_tr_stride as u32;
+
+        const CHUNK_WORDS: usize = 4 * 1024 * 1024; // 32 MiB staging slices
+        let staging_cap_words = total_poly_words.min(CHUNK_WORDS).max(4);
+        let mut subs = 0u64;
+
+        unsafe {
+            self.reserve_job_staging((staging_cap_words as u64) * 8)?;
+            let mut dst_word_off = 0usize;
+            for poly in polys {
+                let mut pos = 0usize;
+                while pos < poly.len() {
+                    let take = (poly.len() - pos).min(CHUNK_WORDS);
+                    self.write_staging_u64s(0, &poly[pos..pos + take]);
+                    self.begin_cmd()?;
+                    let copy = VkBufferCopy {
+                        src_offset: 0,
+                        dst_offset: (dst_word_off as u64) * 8,
+                        size: (take as u64) * 8,
+                    };
+                    (self.fns.cmd_copy_buffer)(
+                        self.cmd_buf,
+                        self.staging.buffer,
+                        self.prover.vram_witness.buffer,
+                        1,
+                        &copy,
+                    );
+                    self.submit_and_wait()?;
+                    subs += 1;
+                    pos += take;
+                    dst_word_off += take;
+                }
+            }
+
+            let kp = self.prover_pipelines[ProverKernelSlot::WhirLdeCommitment as usize];
+            let omega_24 = goldilocks_primitive_root(24).map_err(VulkanError::Accel)?;
+            let omega_d = goldilocks_primitive_root(log_d).map_err(VulkanError::Accel)?;
+
+            self.begin_cmd()?;
+            let copy_mono = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: req_mono,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.prover.vram_witness.buffer,
+                self.prover.vram_mono.buffer,
+                1,
+                &copy_mono,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            (self.fns.cmd_bind_descriptor_sets)(
+                self.cmd_buf,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                kp.pipeline_layout,
+                0,
+                1,
+                &self.prover.ds_lde_r0,
+                0,
+                null(),
+            );
+
+            if !self.prover.twiddles_ready {
+                let tw_len = 1u32 << 23;
+                self.dispatch_whir_lde_1d(
+                    kp.pipeline_layout,
+                    tw_len.div_ceil(256),
+                    1,
+                    256,
+                    WhirLdePushConsts {
+                        scalar0: omega_24,
+                        scalar1: 0,
+                        scalar2: 0,
+                        scalar3: 0,
+                        mode: 14,
+                        len: tw_len,
+                        aux0: 0,
+                        aux1: 0,
+                        aux2: 0,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+                self.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+            }
+
+            // 1. Fused <=9-bit Mobius basis conversion across all `num_polys`.
+            let wgs_per_poly = (c_len >> 9).max(1) as u32;
+            self.dispatch_whir_lde_1d(
+                kp.pipeline_layout,
+                wgs_per_poly * (num_polys as u32),
+                1,
+                1,
+                WhirLdePushConsts {
+                    scalar0: 0,
+                    scalar1: 0,
+                    scalar2: 0,
+                    scalar3: 0,
+                    mode: 0,
+                    len: c_len as u32,
+                    aux0: num_vars as u32,
+                    aux1: num_polys as u32,
+                    aux2: c_len as u32,
+                    aux3: 0,
+                    aux4: 0,
+                    aux5: 0,
+                },
+            );
+            let total_pairs = (c_len >> 1) * num_polys;
+            for bit in 9..(num_vars as u32) {
+                self.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                self.dispatch_whir_lde_1d(
+                    kp.pipeline_layout,
+                    total_pairs.div_ceil(256) as u32,
+                    1,
+                    256,
+                    WhirLdePushConsts {
+                        scalar0: 0,
+                        scalar1: 0,
+                        scalar2: 0,
+                        scalar3: 0,
+                        mode: 1,
+                        len: c_len as u32,
+                        aux0: bit,
+                        aux1: num_polys as u32,
+                        aux2: c_len as u32,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+            }
+
+            // 2. 4-way coset-decomposed base-field Reed-Solomon LDE into `vram_cw0`.
+            for poly_idx in 0..num_polys {
+                for r_base in (0..blowup).step_by(4) {
+                    let batch_c = (blowup - r_base).min(4) as u32;
+                    let s_coset = |off: usize| -> u64 {
+                        gl_mul(7, gl_pow_pub(omega_d, (r_base + off) as u64))
+                    };
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_whir_lde_1d(
+                        kp.pipeline_layout,
+                        c_len.div_ceil(256) as u32,
+                        batch_c,
+                        256,
+                        WhirLdePushConsts {
+                            scalar0: s_coset(0),
+                            scalar1: s_coset(1),
+                            scalar2: s_coset(2),
+                            scalar3: s_coset(3),
+                            mode: 2,
+                            len: c_len as u32,
+                            aux0: num_vars as u32,
+                            aux1: poly_idx as u32,
+                            aux2: c_len as u32,
+                            aux3: 0,
+                            aux4: batch_c,
+                            aux5: 0,
+                        },
+                    );
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_whir_lde_1d(
+                        kp.pipeline_layout,
+                        (c_len >> 9).max(1) as u32,
+                        batch_c,
+                        1,
+                        WhirLdePushConsts {
+                            scalar0: 0,
+                            scalar1: 0,
+                            scalar2: 0,
+                            scalar3: 0,
+                            mode: 3,
+                            len: c_len as u32,
+                            aux0: num_vars as u32,
+                            aux1: 0,
+                            aux2: 0,
+                            aux3: 0,
+                            aux4: batch_c,
+                            aux5: 0,
+                        },
+                    );
+                    for stage in 10..=(num_vars as u32) {
+                        let w_hi = if stage > 24 {
+                            goldilocks_primitive_root(stage).map_err(VulkanError::Accel)?
+                        } else {
+                            0
+                        };
+                        self.cmd_barrier(
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                        );
+                        self.dispatch_whir_lde_1d(
+                            kp.pipeline_layout,
+                            (c_len >> 1).div_ceil(256) as u32,
+                            batch_c,
+                            256,
+                            WhirLdePushConsts {
+                                scalar0: w_hi,
+                                scalar1: 0,
+                                scalar2: 0,
+                                scalar3: 0,
+                                mode: 4,
+                                len: c_len as u32,
+                                aux0: stage,
+                                aux1: 0,
+                                aux2: 0,
+                                aux3: 0,
+                                aux4: batch_c,
+                                aux5: 0,
+                            },
+                        );
+                    }
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_whir_lde_1d(
+                        kp.pipeline_layout,
+                        c_len.div_ceil(256) as u32,
+                        1,
+                        256,
+                        WhirLdePushConsts {
+                            scalar0: 0,
+                            scalar1: 0,
+                            scalar2: 0,
+                            scalar3: 0,
+                            mode: 5,
+                            len: c_len as u32,
+                            aux0: blowup as u32,
+                            aux1: poly_idx as u32,
+                            aux2: r_base as u32,
+                            aux3: 0,
+                            aux4: batch_c,
+                            aux5: 0,
+                        },
+                    );
+                }
+            }
+
+            // 3. Salted Round-0 Canopy leaves + full internal Merkle tree reduction.
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            self.dispatch_whir_lde_1d(
+                kp.pipeline_layout,
+                num_groups.div_ceil(256) as u32,
+                1,
+                256,
+                WhirLdePushConsts {
+                    scalar0: 0,
+                    scalar1: 0,
+                    scalar2: 0,
+                    scalar3: 0,
+                    mode: 9,
+                    len: num_groups as u32,
+                    aux0: group_arity as u32,
+                    aux1: num_polys as u32,
+                    aux2: 0,
+                    aux3: 0,
+                    aux4: 0,
+                    aux5: 0,
+                },
+            );
+            let mut half = num_groups >> 1;
+            while half > 256 {
+                self.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                self.dispatch_whir_lde_1d(
+                    kp.pipeline_layout,
+                    half.div_ceil(256) as u32,
+                    1,
+                    256,
+                    WhirLdePushConsts {
+                        scalar0: 0,
+                        scalar1: 0,
+                        scalar2: 0,
+                        scalar3: 0,
+                        mode: 11,
+                        len: half as u32,
+                        aux0: 0,
+                        aux1: 0,
+                        aux2: 0,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+                half >>= 1;
+            }
+            if half >= 1 {
+                self.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                self.dispatch_whir_lde_1d(
+                    kp.pipeline_layout,
+                    1,
+                    1,
+                    256,
+                    WhirLdePushConsts {
+                        scalar0: 0,
+                        scalar1: 0,
+                        scalar2: 0,
+                        scalar3: 0,
+                        mode: 12,
+                        len: half as u32,
+                        aux0: 0,
+                        aux1: 0,
+                        aux2: 0,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+            }
+
+            let copy_top = VkBufferCopy {
+                src_offset: 32,
+                dst_offset: 0,
+                size: 32,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.prover.vram_tree0.buffer,
+                self.staging.buffer,
+                1,
+                &copy_top,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+            subs += 1;
+            self.prover.twiddles_ready = true;
+
+            let mut top_words = [0u64; 4];
+            self.read_staging_u64s(0, &mut top_words);
+            let mut top_node = [0u8; 32];
+            for (i, w) in top_words.into_iter().enumerate() {
+                top_node[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
+            }
+            Ok((top_node, subs))
+        }
+    }
+
+    pub(crate) fn exec_prover_whir_batch_sumcheck_init(
+        &mut self,
+        eq_kronecker_768: &[[u64; 4]],
+        lambda_pows: &[[u64; 4]],
+        num_vars: usize,
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let num_polys = lambda_pows.len();
+            if num_polys == 0 || eq_kronecker_768.len() != 768 * num_polys {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            let c_len = 1usize << num_vars;
+            let need_work = ((2 * num_polys * c_len) as u64) * 32;
+            let eq_bytes = (eq_kronecker_768.len() as u64) * 32;
+            let lam_bytes = (num_polys as u64) * 32;
+            let stg_bytes = eq_bytes + lam_bytes;
+            unsafe {
+                engine.ensure_one_prover_buf(|p| &mut p.vram_work_a, need_work)?;
+                engine.ensure_one_prover_buf(|p| &mut p.vram_work_b, need_work)?;
+                engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, stg_bytes)?;
+                engine.refresh_prover_descriptor_sets();
+                engine.reserve_job_staging(stg_bytes)?;
+
+                let eq_flat = core::slice::from_raw_parts(
+                    eq_kronecker_768.as_ptr().cast::<u64>(),
+                    eq_kronecker_768.len() * 4,
+                );
+                let lam_flat = core::slice::from_raw_parts(
+                    lambda_pows.as_ptr().cast::<u64>(),
+                    lambda_pows.len() * 4,
+                );
+                engine.write_staging_u64s(0, eq_flat);
+                engine.write_staging_u64s(eq_bytes as usize, lam_flat);
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                let c_eq = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: eq_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_in.buffer,
+                    1,
+                    &c_eq,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                engine.dispatch_whir_fold_1d(
+                    kp.pipeline_layout,
+                    c_len.div_ceil(256) as u32,
+                    num_polys as u32,
+                    WhirFoldPushConsts {
+                        c0: [c_len as u64, 0, 0, 0],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 0,
+                        len: c_len as u32,
+                        aux0: 0,
+                        aux1: num_polys as u32,
+                        aux2: c_len as u32,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                );
+                let c_lam = VkBufferCopy {
+                    src_offset: eq_bytes,
+                    dst_offset: 0,
+                    size: lam_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_in.buffer,
+                    1,
+                    &c_lam,
+                );
+                engine.submit_and_wait()
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_batch_sumcheck_eval(
+        &mut self,
+        round: usize,
+        cur_len: usize,
+        num_polys: usize,
+        src_base: u32,
+    ) -> Result<([u64; 4], [u64; 4]), VulkanError> {
+        self.run_prover_job(|engine| {
+            let half = cur_len / 2;
+            let total_wg = half.div_ceil(256).max(1) as u32;
+            let part_bytes = (2 * total_wg as u64) * 32;
+            unsafe {
+                if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(part_bytes)?;
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_witness,
+                    0,
+                    null(),
+                );
+                let mut done = 0u32;
+                while done < total_wg {
+                    let chunk = (total_wg - done).min(engine.max_wg_x);
+                    let pc = WhirFoldPushConsts {
+                        c0: [0; 4],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 3,
+                        len: half as u32,
+                        aux0: u32::from(round > 0),
+                        aux1: num_polys as u32,
+                        aux2: cur_len as u32,
+                        aux3: src_base,
+                        aux4: 2 * done,
+                        aux5: done * 256,
+                    };
+                    (engine.fns.cmd_push_constants)(
+                        engine.cmd_buf,
+                        kp.pipeline_layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        size_of::<WhirFoldPushConsts>() as u32,
+                        (&pc as *const WhirFoldPushConsts).cast::<c_void>(),
+                    );
+                    (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, 1, 1);
+                    done += chunk;
+                }
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                let copy = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: part_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_partials.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &copy,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+
+                let mut raw = std::vec![0u64; (2 * total_wg as usize) * 4];
+                engine.read_staging_u64s(0, &mut raw);
+                let mut ev0 = [0u64; 4];
+                let mut ev2 = [0u64; 4];
+                for wg in 0..(total_wg as usize) {
+                    let b0 = wg * 8;
+                    let b2 = b0 + 4;
+                    ev0 = Self::fp4_add_arr(ev0, [raw[b0], raw[b0 + 1], raw[b0 + 2], raw[b0 + 3]]);
+                    ev2 = Self::fp4_add_arr(ev2, [raw[b2], raw[b2 + 1], raw[b2 + 2], raw[b2 + 3]]);
+                }
+                Ok((ev0, ev2))
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_batch_sumcheck_fold(
+        &mut self,
+        round: usize,
+        cur_len: usize,
+        num_polys: usize,
+        src_base: u32,
+        dst_base: u32,
+        chal: [u64; 4],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let half = cur_len / 2;
+            let total_wg = half.div_ceil(256).max(1) as u32;
+            unsafe {
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_witness,
+                    0,
+                    null(),
+                );
+                engine.dispatch_whir_fold_1d(
+                    kp.pipeline_layout,
+                    total_wg,
+                    1,
+                    WhirFoldPushConsts {
+                        c0: chal,
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 4,
+                        len: half as u32,
+                        aux0: u32::from(round > 0),
+                        aux1: num_polys as u32,
+                        aux2: cur_len as u32,
+                        aux3: src_base,
+                        aux4: dst_base,
+                        aux5: 0,
+                    },
+                );
+                engine.submit_and_wait()
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_batch_sumcheck_read_tail(
+        &mut self,
+        cur_len: usize,
+        num_polys: usize,
+        src_base: u32,
+        out_tables: &mut [[u64; 4]],
+        out_kernels: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let elems = cur_len
+                .checked_mul(num_polys)
+                .ok_or(crate::AccelError::LengthOverflow)?;
+            if out_tables.len() != elems || out_kernels.len() != elems {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            let slice_bytes = (elems as u64) * 32;
+            unsafe {
+                engine.reserve_job_staging(slice_bytes * 2)?;
+                engine.begin_cmd()?;
+                let src_off = (src_base as u64) * 32;
+                let ct = VkBufferCopy {
+                    src_offset: src_off,
+                    dst_offset: 0,
+                    size: slice_bytes,
+                };
+                let ck = VkBufferCopy {
+                    src_offset: src_off,
+                    dst_offset: slice_bytes,
+                    size: slice_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_work_b.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &ct,
+                );
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_work_a.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &ck,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+                let flat_t =
+                    core::slice::from_raw_parts_mut(out_tables.as_mut_ptr().cast::<u64>(), elems * 4);
+                let flat_k = core::slice::from_raw_parts_mut(
+                    out_kernels.as_mut_ptr().cast::<u64>(),
+                    elems * 4,
+                );
+                engine.read_staging_u64s(0, flat_t);
+                engine.read_staging_u64s(slice_bytes as usize, flat_k);
+                Ok(())
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_expand_monomial_and_dot(
+        &mut self,
+        mono_kronecker_768: &[[u64; 4]; 768],
+        num_vars: usize,
+        dot_k_offset: u32,
+        out_dots: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let core_len = 1usize << num_vars;
+            let k_len = core_len + 2;
+            let num_dots = out_dots.len();
+            let kron_bytes = 768u64 * 32;
+            let wg_k = k_len.div_ceil(256) as u32;
+            let wg_dot = core_len.div_ceil(256) as u32;
+            let part_bytes = ((num_dots as u64) * (wg_dot as u64) * 32).max(32);
+            unsafe {
+                if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(kron_bytes.max(part_bytes))?;
+                let flat_in =
+                    core::slice::from_raw_parts(mono_kronecker_768.as_ptr().cast::<u64>(), 768 * 4);
+                engine.write_staging_u64s(0, flat_in);
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                let c_in = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: kron_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_in.buffer,
+                    1,
+                    &c_in,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                engine.dispatch_whir_fold_1d(
+                    kp.pipeline_layout,
+                    wg_k,
+                    1,
+                    WhirFoldPushConsts {
+                        c0: [core_len as u64, 0, 0, 0],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 0,
+                        len: k_len as u32,
+                        aux0: 0,
+                        aux1: 1,
+                        aux2: k_len as u32,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+
+                if num_dots > 0 {
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                    (engine.fns.cmd_bind_descriptor_sets)(
+                        engine.cmd_buf,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        kp.pipeline_layout,
+                        0,
+                        1,
+                        &engine.prover.ds_fold_mono,
+                        0,
+                        null(),
+                    );
+                    let mut done = 0u32;
+                    let mut out_ext4 = 0u32;
+                    while done < wg_dot {
+                        let chunk = (wg_dot - done).min(engine.max_wg_x);
+                        let pc = WhirFoldPushConsts {
+                            c0: [0; 4],
+                            c1: [0; 4],
+                            c2: [0; 4],
+                            mode: 1,
+                            len: core_len as u32,
+                            aux0: 0,
+                            aux1: num_dots as u32,
+                            aux2: core_len as u32,
+                            aux3: dot_k_offset,
+                            aux4: out_ext4,
+                            aux5: done * 256,
+                        };
+                        (engine.fns.cmd_push_constants)(
+                            engine.cmd_buf,
+                            kp.pipeline_layout,
+                            VK_SHADER_STAGE_COMPUTE_BIT,
+                            0,
+                            size_of::<WhirFoldPushConsts>() as u32,
+                            (&pc as *const WhirFoldPushConsts).cast::<c_void>(),
+                        );
+                        (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, num_dots as u32, 1);
+                        done += chunk;
+                        out_ext4 += (num_dots as u32) * chunk;
+                    }
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                    );
+                    let c_out = VkBufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size: part_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.prover.vram_partials.buffer,
+                        engine.staging.buffer,
+                        1,
+                        &c_out,
+                    );
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_HOST_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_HOST_READ_BIT,
+                    );
+                }
+                engine.submit_and_wait()?;
+
+                if num_dots > 0 {
+                    let mut raw = std::vec![0u64; num_dots * (wg_dot as usize) * 4];
+                    engine.read_staging_u64s(0, &mut raw);
+                    for d in out_dots.iter_mut() {
+                        *d = [0u64; 4];
+                    }
+                    let mut done = 0u32;
+                    let mut base = 0usize;
+                    while done < wg_dot {
+                        let chunk = (wg_dot - done).min(engine.max_wg_x) as usize;
+                        for (p, acc) in out_dots.iter_mut().enumerate() {
+                            for w in 0..chunk {
+                                let o = (base + p * chunk + w) * 4;
+                                *acc = Self::fp4_add_arr(
+                                    *acc,
+                                    [raw[o], raw[o + 1], raw[o + 2], raw[o + 3]],
+                                );
+                            }
+                        }
+                        done += chunk as u32;
+                        base += num_dots * chunk;
+                    }
+                }
+                Ok(())
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_open_init(
+        &mut self,
+        num_vars: usize,
+        is_single: bool,
+        weights: &[[[u64; 4]; 2]],
+        z_ood_kronecker_2x768: &[[u64; 4]; 1536],
+    ) -> Result<[[u64; 4]; 2], VulkanError> {
+        self.run_prover_job(|engine| {
+            let core_len = 1usize << num_vars;
+            let coeff_len = core_len + 2;
+            let num_polys = weights.len();
+            let w_bytes = ((2 * num_polys.max(1)) as u64) * 32;
+            let z_bytes = 1536u64 * 32;
+            let wg_c = coeff_len.div_ceil(256) as u32;
+            let part_bytes = (2 * wg_c as u64) * 32;
+            unsafe {
+                if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging((w_bytes + z_bytes).max(part_bytes))?;
+                if !is_single && !weights.is_empty() {
+                    let flat_w = core::slice::from_raw_parts(
+                        weights.as_ptr().cast::<u64>(),
+                        weights.len() * 8,
+                    );
+                    engine.write_staging_u64s(0, flat_w);
+                }
+                let flat_z = core::slice::from_raw_parts(
+                    z_ood_kronecker_2x768.as_ptr().cast::<u64>(),
+                    1536 * 4,
+                );
+                engine.write_staging_u64s(w_bytes as usize, flat_z);
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                if !is_single && !weights.is_empty() {
+                    let cw = VkBufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size: w_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.staging.buffer,
+                        engine.prover.vram_aux_in.buffer,
+                        1,
+                        &cw,
+                    );
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                }
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_mono,
+                    0,
+                    null(),
+                );
+                engine.dispatch_whir_fold_1d(
+                    kp.pipeline_layout,
+                    wg_c,
+                    1,
+                    WhirFoldPushConsts {
+                        c0: [0; 4],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 2,
+                        len: core_len as u32,
+                        aux0: u32::from(is_single),
+                        aux1: num_polys as u32,
+                        aux2: core_len as u32,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+                );
+                let cz = VkBufferCopy {
+                    src_offset: w_bytes,
+                    dst_offset: 0,
+                    size: z_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_in.buffer,
+                    1,
+                    &cz,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                let mut done = 0u32;
+                let mut out_ext4 = 0u32;
+                while done < wg_c {
+                    let chunk = (wg_c - done).min(engine.max_wg_x);
+                    let pc = WhirFoldPushConsts {
+                        c0: [0; 4],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 0,
+                        len: coeff_len as u32,
+                        aux0: 2,
+                        aux1: 2,
+                        aux2: 0,
+                        aux3: 0,
+                        aux4: out_ext4,
+                        aux5: done * 256,
+                    };
+                    (engine.fns.cmd_push_constants)(
+                        engine.cmd_buf,
+                        kp.pipeline_layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        size_of::<WhirFoldPushConsts>() as u32,
+                        (&pc as *const WhirFoldPushConsts).cast::<c_void>(),
+                    );
+                    (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, 2, 1);
+                    done += chunk;
+                    out_ext4 += 2 * chunk;
+                }
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                let co = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: part_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_partials.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &co,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+
+                let mut raw = std::vec![0u64; 2 * (wg_c as usize) * 4];
+                engine.read_staging_u64s(0, &mut raw);
+                let mut evals = [[0u64; 4]; 2];
+                let mut done = 0u32;
+                let mut base = 0usize;
+                while done < wg_c {
+                    let chunk = (wg_c - done).min(engine.max_wg_x) as usize;
+                    for (t, dst) in evals.iter_mut().enumerate() {
+                        for w in 0..chunk {
+                            let o = (base + t * chunk + w) * 4;
+                            *dst = Self::fp4_add_arr(
+                                *dst,
+                                [raw[o], raw[o + 1], raw[o + 2], raw[o + 3]],
+                            );
+                        }
+                    }
+                    done += chunk as u32;
+                    base += 2 * chunk;
+                }
+                Ok(evals)
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_add_ood_claims(
+        &mut self,
+        k_len: usize,
+        k_base: u32,
+        xi_z_kronecker_2x768: &[[u64; 4]; 1536],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let one_bytes = 768u64 * 32;
+            let both_bytes = 1536u64 * 32;
+            let wg = k_len.div_ceil(256) as u32;
+            unsafe {
+                engine.reserve_job_staging(both_bytes)?;
+                let flat = core::slice::from_raw_parts(
+                    xi_z_kronecker_2x768.as_ptr().cast::<u64>(),
+                    1536 * 4,
+                );
+                engine.write_staging_u64s(0, flat);
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                for idx in 0..2u64 {
+                    if idx > 0 {
+                        engine.cmd_barrier(
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_ACCESS_TRANSFER_WRITE_BIT
+                                | VK_ACCESS_SHADER_READ_BIT
+                                | VK_ACCESS_SHADER_WRITE_BIT,
+                        );
+                    }
+                    let cp = VkBufferCopy {
+                        src_offset: idx * one_bytes,
+                        dst_offset: 0,
+                        size: one_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.staging.buffer,
+                        engine.prover.vram_aux_in.buffer,
+                        1,
+                        &cp,
+                    );
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    engine.dispatch_whir_fold_1d(
+                        kp.pipeline_layout,
+                        wg,
+                        1,
+                        WhirFoldPushConsts {
+                            c0: [0; 4],
+                            c1: [0; 4],
+                            c2: [0; 4],
+                            mode: 0,
+                            len: k_len as u32,
+                            aux0: 1,
+                            aux1: 1,
+                            aux2: 0,
+                            aux3: k_base,
+                            aux4: 0,
+                            aux5: 0,
+                        },
+                    );
+                }
+                engine.submit_and_wait()
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_fold_pass_a(
+        &mut self,
+        pairs_ck: usize,
+        c_base: u32,
+        k_base: u32,
+    ) -> Result<[[u64; 4]; 3], VulkanError> {
+        self.run_prover_job(|engine| {
+            let total_wg = pairs_ck.div_ceil(256).max(1) as u32;
+            let part_bytes = (3 * total_wg as u64) * 32;
+            unsafe {
+                if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(part_bytes)?;
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                let mut done = 0u32;
+                while done < total_wg {
+                    let chunk = (total_wg - done).min(engine.max_wg_x);
+                    let pc = WhirFoldPushConsts {
+                        c0: [0; 4],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 5,
+                        len: pairs_ck as u32,
+                        aux0: c_base,
+                        aux1: k_base,
+                        aux2: 0,
+                        aux3: 0,
+                        aux4: 3 * done,
+                        aux5: done * 256,
+                    };
+                    (engine.fns.cmd_push_constants)(
+                        engine.cmd_buf,
+                        kp.pipeline_layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        size_of::<WhirFoldPushConsts>() as u32,
+                        (&pc as *const WhirFoldPushConsts).cast::<c_void>(),
+                    );
+                    (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, 1, 1);
+                    done += chunk;
+                }
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                let co = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: part_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_partials.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &co,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+
+                let mut raw = std::vec![0u64; 3 * (total_wg as usize) * 4];
+                engine.read_staging_u64s(0, &mut raw);
+                let mut wires = [[0u64; 4]; 3];
+                for wg in 0..(total_wg as usize) {
+                    for (j, dst) in wires.iter_mut().enumerate() {
+                        let o = (wg * 3 + j) * 4;
+                        *dst =
+                            Self::fp4_add_arr(*dst, [raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+                    }
+                }
+                Ok(wires)
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_fold_pass_b(
+        &mut self,
+        pairs_c: usize,
+        c_base: u32,
+        k_src: u32,
+        k_half: u32,
+        k_dst: u32,
+        phi: [u64; 4],
+    ) -> Result<[[u64; 4]; 2], VulkanError> {
+        self.run_prover_job(|engine| {
+            let max_threads = pairs_c.max(k_half as usize + 1);
+            let total_wg = max_threads.div_ceil(256).max(1) as u32;
+            let part_bytes = (2 * total_wg as u64) * 32;
+            unsafe {
+                if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(part_bytes)?;
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                let mut done = 0u32;
+                while done < total_wg {
+                    let chunk = (total_wg - done).min(engine.max_wg_x);
+                    let pc = WhirFoldPushConsts {
+                        c0: phi,
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 6,
+                        len: pairs_c as u32,
+                        aux0: c_base,
+                        aux1: k_src,
+                        aux2: k_half,
+                        aux3: k_dst,
+                        aux4: 2 * done,
+                        aux5: done * 256,
+                    };
+                    (engine.fns.cmd_push_constants)(
+                        engine.cmd_buf,
+                        kp.pipeline_layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        size_of::<WhirFoldPushConsts>() as u32,
+                        (&pc as *const WhirFoldPushConsts).cast::<c_void>(),
+                    );
+                    (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, 1, 1);
+                    done += chunk;
+                }
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                let co = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: part_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_partials.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &co,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+
+                let mut raw = std::vec![0u64; 2 * (total_wg as usize) * 4];
+                engine.read_staging_u64s(0, &mut raw);
+                let mut wires = [[0u64; 4]; 2];
+                for wg in 0..(total_wg as usize) {
+                    for (j, dst) in wires.iter_mut().enumerate() {
+                        let o = (wg * 2 + j) * 4;
+                        *dst =
+                            Self::fp4_add_arr(*dst, [raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+                    }
+                }
+                Ok(wires)
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_prover_whir_fold_pass_c(
+        &mut self,
+        m: usize,
+        c_src: u32,
+        c_dst: u32,
+        theta: [u64; 4],
+        alpha: [u64; 4],
+        beta: [u64; 4],
+        normalize_to_zero: bool,
+        norm_len: usize,
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let total_wg = (m + 1).div_ceil(256).max(1) as u32;
+            unsafe {
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                engine.dispatch_whir_fold_1d(
+                    kp.pipeline_layout,
+                    total_wg,
+                    1,
+                    WhirFoldPushConsts {
+                        c0: theta,
+                        c1: alpha,
+                        c2: beta,
+                        mode: 7,
+                        len: m as u32,
+                        aux0: c_src,
+                        aux1: c_dst,
+                        aux2: 0,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+                if normalize_to_zero && c_dst != 0 && norm_len > 0 {
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT,
+                    );
+                    let cp = VkBufferCopy {
+                        src_offset: (c_dst as u64) * 32,
+                        dst_offset: 0,
+                        size: (norm_len as u64) * 32,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.prover.vram_work_b.buffer,
+                        engine.prover.vram_work_b.buffer,
+                        1,
+                        &cp,
+                    );
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.prover.vram_work_a.buffer,
+                        engine.prover.vram_work_a.buffer,
+                        1,
+                        &cp,
+                    );
+                }
+                engine.submit_and_wait()
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_commit_stage(
+        &mut self,
+        stage_idx: usize,
+        coeff_len: usize,
+        domain_len: usize,
+        group_arity: usize,
+    ) -> Result<[u8; 32], VulkanError> {
+        self.run_prover_job(|engine| {
+            if !domain_len.is_power_of_two()
+                || !group_arity.is_power_of_two()
+                || group_arity == 0
+                || domain_len % group_arity != 0
+            {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            let num_groups = domain_len / group_arity;
+            let log_d = domain_len.trailing_zeros();
+            let slot = (stage_idx & 1) as u32;
+            let cw_base = slot * engine.prover.stage_cw_stride_ext4;
+            let tree_base = slot * engine.prover.stage_tree_stride_ext4;
+
+            unsafe {
+                engine.reserve_job_staging(32)?;
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirLdeCommitment as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_lde_stage,
+                    0,
+                    null(),
+                );
+
+                // 1. Shifted bit-reverse copy (`cur_coeffs[0..coeff_len] -> vram_cw_stage[cw_base..]`).
+                engine.dispatch_whir_lde_1d(
+                    kp.pipeline_layout,
+                    domain_len.div_ceil(256) as u32,
+                    1,
+                    256,
+                    WhirLdePushConsts {
+                        scalar0: 0,
+                        scalar1: 0,
+                        scalar2: 0,
+                        scalar3: 0,
+                        mode: 6,
+                        len: domain_len as u32,
+                        aux0: log_d,
+                        aux1: coeff_len as u32,
+                        aux2: cw_base,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                // 2. Fused <=9-stage LDS `Ext4` NTT + remaining global stages.
+                engine.dispatch_whir_lde_1d(
+                    kp.pipeline_layout,
+                    (domain_len >> 9).max(1) as u32,
+                    1,
+                    1,
+                    WhirLdePushConsts {
+                        scalar0: 0,
+                        scalar1: 0,
+                        scalar2: 0,
+                        scalar3: 0,
+                        mode: 7,
+                        len: domain_len as u32,
+                        aux0: log_d,
+                        aux1: 0,
+                        aux2: cw_base,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+                for stage in 10..=log_d {
+                    let w_hi = if stage > 24 {
+                        goldilocks_primitive_root(stage).map_err(VulkanError::Accel)?
+                    } else {
+                        0
+                    };
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    engine.dispatch_whir_lde_1d(
+                        kp.pipeline_layout,
+                        (domain_len >> 1).div_ceil(256) as u32,
+                        1,
+                        256,
+                        WhirLdePushConsts {
+                            scalar0: w_hi,
+                            scalar1: 0,
+                            scalar2: 0,
+                            scalar3: 0,
+                            mode: 8,
+                            len: domain_len as u32,
+                            aux0: stage,
+                            aux1: 0,
+                            aux2: cw_base,
+                            aux3: 0,
+                            aux4: 0,
+                            aux5: 0,
+                        },
+                    );
+                }
+
+                // 3. Canopy `Ext4` leaf hashing + internal Merkle layers.
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                engine.dispatch_whir_lde_1d(
+                    kp.pipeline_layout,
+                    num_groups.div_ceil(256) as u32,
+                    1,
+                    256,
+                    WhirLdePushConsts {
+                        scalar0: 0,
+                        scalar1: 0,
+                        scalar2: 0,
+                        scalar3: 0,
+                        mode: 10,
+                        len: num_groups as u32,
+                        aux0: group_arity as u32,
+                        aux1: cw_base,
+                        aux2: stage_idx as u32,
+                        aux3: 0,
+                        aux4: tree_base,
+                        aux5: 0,
+                    },
+                );
+                let mut half = num_groups >> 1;
+                while half > 256 {
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    engine.dispatch_whir_lde_1d(
+                        kp.pipeline_layout,
+                        half.div_ceil(256) as u32,
+                        1,
+                        256,
+                        WhirLdePushConsts {
+                            scalar0: 0,
+                            scalar1: 0,
+                            scalar2: 0,
+                            scalar3: 0,
+                            mode: 11,
+                            len: half as u32,
+                            aux0: 0,
+                            aux1: 0,
+                            aux2: tree_base,
+                            aux3: 0,
+                            aux4: 0,
+                            aux5: 0,
+                        },
+                    );
+                    half >>= 1;
+                }
+                if half >= 1 {
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    engine.dispatch_whir_lde_1d(
+                        kp.pipeline_layout,
+                        1,
+                        1,
+                        256,
+                        WhirLdePushConsts {
+                            scalar0: 0,
+                            scalar1: 0,
+                            scalar2: 0,
+                            scalar3: 0,
+                            mode: 12,
+                            len: half as u32,
+                            aux0: 0,
+                            aux1: 0,
+                            aux2: tree_base,
+                            aux3: 0,
+                            aux4: 0,
+                            aux5: 0,
+                        },
+                    );
+                }
+
+                let copy_top = VkBufferCopy {
+                    src_offset: ((tree_base + 1) as u64) * 32,
+                    dst_offset: 0,
+                    size: 32,
+                };
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_tree_stage.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &copy_top,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+
+                let mut top_words = [0u64; 4];
+                engine.read_staging_u64s(0, &mut top_words);
+                let mut top_node = [0u8; 32];
+                for (i, w) in top_words.into_iter().enumerate() {
+                    top_node[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
+                }
+                Ok(top_node)
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_eval_univariate_2(
+        &mut self,
+        coeff_len: usize,
+        c_base: u32,
+        z_ood_kronecker_2x768: &[[u64; 4]; 1536],
+    ) -> Result<[[u64; 4]; 2], VulkanError> {
+        self.run_prover_job(|engine| {
+            let z_bytes = 1536u64 * 32;
+            let wg = coeff_len.div_ceil(256).max(1) as u32;
+            let part_bytes = (2 * wg as u64) * 32;
+            unsafe {
+                if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(z_bytes.max(part_bytes))?;
+                let flat_z = core::slice::from_raw_parts(
+                    z_ood_kronecker_2x768.as_ptr().cast::<u64>(),
+                    1536 * 4,
+                );
+                engine.write_staging_u64s(0, flat_z);
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                let cz = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: z_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_in.buffer,
+                    1,
+                    &cz,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                let mut done = 0u32;
+                let mut out_ext4 = 0u32;
+                while done < wg {
+                    let chunk = (wg - done).min(engine.max_wg_x);
+                    let pc = WhirFoldPushConsts {
+                        c0: [0; 4],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 0,
+                        len: coeff_len as u32,
+                        aux0: 2,
+                        aux1: 2,
+                        aux2: 0,
+                        aux3: c_base,
+                        aux4: out_ext4,
+                        aux5: done * 256,
+                    };
+                    (engine.fns.cmd_push_constants)(
+                        engine.cmd_buf,
+                        kp.pipeline_layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        size_of::<WhirFoldPushConsts>() as u32,
+                        (&pc as *const WhirFoldPushConsts).cast::<c_void>(),
+                    );
+                    (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, 2, 1);
+                    done += chunk;
+                    out_ext4 += 2 * chunk;
+                }
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                let co = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: part_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_partials.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &co,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+
+                let mut raw = std::vec![0u64; 2 * (wg as usize) * 4];
+                engine.read_staging_u64s(0, &mut raw);
+                let mut evals = [[0u64; 4]; 2];
+                let mut done = 0u32;
+                let mut base = 0usize;
+                while done < wg {
+                    let chunk = (wg - done).min(engine.max_wg_x) as usize;
+                    for (t, dst) in evals.iter_mut().enumerate() {
+                        for w in 0..chunk {
+                            let o = (base + t * chunk + w) * 4;
+                            *dst = Self::fp4_add_arr(
+                                *dst,
+                                [raw[o], raw[o + 1], raw[o + 2], raw[o + 3]],
+                            );
+                        }
+                    }
+                    done += chunk as u32;
+                    base += 2 * chunk;
+                }
+                Ok(evals)
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_prover_whir_gather_queries(
+        &mut self,
+        stage_idx: usize,
+        group_arity: usize,
+        num_polys: usize,
+        num_groups: usize,
+        q_indices: &[u64],
+        sib_indices: &[u64],
+        out_words: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let num_q = q_indices.len();
+            let num_s = sib_indices.len();
+            let is_ext4 = stage_idx > 0;
+            let salt_words = if is_ext4 { 0 } else { 2 * num_q };
+            let fiber_words = if is_ext4 {
+                4 * group_arity * num_q
+            } else {
+                num_polys * group_arity * num_q
+            };
+            let expected_out = salt_words + fiber_words + 4 * num_s;
+            if out_words.len() != expected_out {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            if expected_out == 0 {
+                return Ok(());
+            }
+
+            let in_words = num_q + num_s;
+            let in_bytes = (in_words.max(1) as u64) * 8;
+            let out_bytes = (expected_out as u64) * 8;
+            let slot = (stage_idx & 1) as u32;
+            let t_base = if is_ext4 {
+                (slot * engine.prover.stage_tree_stride_ext4) as u64
+            } else {
+                0
+            };
+            let c_base = if is_ext4 {
+                (slot * engine.prover.stage_cw_stride_ext4) as u64
+            } else {
+                0
+            };
+            let max_threads = num_q.max(num_s).max(1);
+
+            unsafe {
+                let mut regrew = false;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, in_bytes)?;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_partials, out_bytes)?;
+                if regrew {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(in_bytes.max(out_bytes))?;
+                engine.write_staging_u64s(0, q_indices);
+                engine.write_staging_u64s(num_q * 8, sib_indices);
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirLdeCommitment as usize];
+                let ds = if is_ext4 {
+                    engine.prover.ds_gather_stage
+                } else {
+                    engine.prover.ds_gather_r0
+                };
+                engine.begin_cmd()?;
+                if in_words > 0 {
+                    let ci = VkBufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size: in_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.staging.buffer,
+                        engine.prover.vram_aux_in.buffer,
+                        1,
+                        &ci,
+                    );
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                }
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &ds,
+                    0,
+                    null(),
+                );
+                let pc = WhirLdePushConsts {
+                    scalar0: t_base,
+                    scalar1: c_base,
+                    scalar2: 0,
+                    scalar3: 0,
+                    mode: 13,
+                    len: num_q as u32,
+                    aux0: group_arity as u32,
+                    aux1: num_polys as u32,
+                    aux2: num_s as u32,
+                    aux3: 0,
+                    aux4: u32::from(is_ext4),
+                    aux5: num_groups as u32,
+                };
+                (engine.fns.cmd_push_constants)(
+                    engine.cmd_buf,
+                    kp.pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<WhirLdePushConsts>() as u32,
+                    (&pc as *const WhirLdePushConsts).cast::<c_void>(),
+                );
+                (engine.fns.cmd_dispatch)(
+                    engine.cmd_buf,
+                    max_threads.div_ceil(256) as u32,
+                    1,
+                    1,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                let co = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: out_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_partials.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &co,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+                engine.read_staging_u64s(0, out_words);
+                Ok(())
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_accumulate_shift_claims(
+        &mut self,
+        k_len: usize,
+        k_base: u32,
+        z_pow_256: &[u64],
+        claims_meta: &[[u64; 8]],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let num_claims = claims_meta.len();
+            if num_claims == 0 {
+                return Ok(());
+            }
+            if z_pow_256.len() != num_claims * 256 {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            let z_bytes = (z_pow_256.len() as u64) * 8;
+            let m_bytes = (num_claims as u64) * 64;
+            let total_wg = k_len.div_ceil(256).max(1) as u32;
+            unsafe {
+                let mut regrew = false;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, z_bytes)?;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_b, m_bytes)?;
+                if regrew {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(z_bytes + m_bytes)?;
+                engine.write_staging_u64s(0, z_pow_256);
+                let flat_m =
+                    core::slice::from_raw_parts(claims_meta.as_ptr().cast::<u64>(), num_claims * 8);
+                engine.write_staging_u64s(z_bytes as usize, flat_m);
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
+                engine.begin_cmd()?;
+                let cz = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: z_bytes,
+                };
+                let cm = VkBufferCopy {
+                    src_offset: z_bytes,
+                    dst_offset: 0,
+                    size: m_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_in.buffer,
+                    1,
+                    &cz,
+                );
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_b.buffer,
+                    1,
+                    &cm,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_fold_kronecker,
+                    0,
+                    null(),
+                );
+                engine.dispatch_whir_fold_1d(
+                    kp.pipeline_layout,
+                    total_wg,
+                    1,
+                    WhirFoldPushConsts {
+                        c0: [0; 4],
+                        c1: [0; 4],
+                        c2: [0; 4],
+                        mode: 8,
+                        len: k_len as u32,
+                        aux0: k_base,
+                        aux1: num_claims as u32,
+                        aux2: 0,
+                        aux3: 0,
+                        aux4: 0,
+                        aux5: 0,
+                    },
+                );
+                engine.submit_and_wait()
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_whir_read_final_coeffs(
+        &mut self,
+        c_base: u32,
+        out_coeffs: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let bytes = (out_coeffs.len() as u64) * 32;
+            if bytes == 0 {
+                return Ok(());
+            }
+            unsafe {
+                engine.reserve_job_staging(bytes)?;
+                engine.begin_cmd()?;
+                let cp = VkBufferCopy {
+                    src_offset: (c_base as u64) * 32,
+                    dst_offset: 0,
+                    size: bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_work_b.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &cp,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+                let flat = core::slice::from_raw_parts_mut(
+                    out_coeffs.as_mut_ptr().cast::<u64>(),
+                    out_coeffs.len() * 4,
+                );
+                engine.read_staging_u64s(0, flat);
+                Ok(())
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_air_init_shard(
+        &mut self,
+        witness_word_offset: u32,
+        cols_base_word_offset: u32,
+        total_rows: usize,
+        shift_tables_3m: &[[u64; 4]],
+        static_gammas_ext4: &[[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            if shift_tables_3m.len() != 3 * total_rows {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+            let sh_bytes = (shift_tables_3m.len() as u64) * 32;
+            let gm_bytes = (static_gammas_ext4.len().max(1) as u64) * 32;
+            let half_m = (total_rows / 2).max(1);
+            let need_wit = ((cols_base_word_offset as u64) + (256 * total_rows as u64)) * 8;
+            let need_wa = (2 * 256 * half_m as u64) * 32;
+            let need_wb = (8 * half_m as u64 * 12) * 32;
+            let need_ab = sh_bytes * 2;
+            let need_ain = gm_bytes + 4 * 1024 * 1024;
+            unsafe {
+                let mut regrew = false;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_witness, need_wit)?;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_work_a, need_wa)?;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_work_b, need_wb)?;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_b, need_ab)?;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, need_ain)?;
+                if regrew {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(sh_bytes + gm_bytes)?;
+                let flat_sh = core::slice::from_raw_parts(
+                    shift_tables_3m.as_ptr().cast::<u64>(),
+                    shift_tables_3m.len() * 4,
+                );
+                engine.write_staging_u64s(0, flat_sh);
+                if !static_gammas_ext4.is_empty() {
+                    let flat_gm = core::slice::from_raw_parts(
+                        static_gammas_ext4.as_ptr().cast::<u64>(),
+                        static_gammas_ext4.len() * 4,
+                    );
+                    engine.write_staging_u64s(sh_bytes as usize, flat_gm);
+                }
+
+                let kp = engine.prover_pipelines[ProverKernelSlot::AirRowGroupA as usize];
+                engine.begin_cmd()?;
+                let c_sh = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: sh_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.staging.buffer,
+                    engine.prover.vram_aux_b.buffer,
+                    1,
+                    &c_sh,
+                );
+                if !static_gammas_ext4.is_empty() {
+                    let c_gm = VkBufferCopy {
+                        src_offset: sh_bytes,
+                        dst_offset: 0,
+                        size: gm_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.staging.buffer,
+                        engine.prover.vram_aux_in.buffer,
+                        1,
+                        &c_gm,
+                    );
+                }
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_air,
+                    0,
+                    null(),
+                );
+                let total_tiles_x = total_rows.div_ceil(8).max(1) as u32;
+                let mut done = 0u32;
+                while done < total_tiles_x {
+                    let chunk = (total_tiles_x - done).min(engine.max_wg_x);
+                    let pc = AirGroupAPushConsts {
+                        chal: [0; 4],
+                        mode: 0,
+                        cur_m: total_rows as u32,
+                        cur_r: 0,
+                        flags: 0,
+                        col_src: witness_word_offset,
+                        col_dst: cols_base_word_offset,
+                        sh_src: 0,
+                        steps_off: 0,
+                        out_off: 0,
+                        base_x: done,
+                        aux0: 0,
+                        aux1: 0,
+                        _pad_align: [0; 4],
+                    };
+                    (engine.fns.cmd_push_constants)(
+                        engine.cmd_buf,
+                        kp.pipeline_layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        size_of::<AirGroupAPushConsts>() as u32,
+                        (&pc as *const AirGroupAPushConsts).cast::<c_void>(),
+                    );
+                    (engine.fns.cmd_dispatch)(engine.cmd_buf, chunk, 32, 1);
+                    done += chunk;
+                }
+                engine.submit_and_wait()
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_prover_air_eval_round(
+        &mut self,
+        is_round0_base: bool,
+        cur_m: usize,
+        cur_r: usize,
+        cur_s: usize,
+        folding_signer: bool,
+        col_src: u32,
+        sh_src: u32,
+        dyn_ext4_off: u32,
+        dyn_words: &[u64],
+        signers_off: u32,
+        steps_off: u32,
+        op_hdr_off: u32,
+        op_ent_off: u32,
+        sorted_u64_off: u32,
+    ) -> Result<[[u64; 4]; 8], VulkanError> {
+        self.run_prover_job(|engine| {
+            let half_m = cur_m / 2;
+            let wgs_x = half_m.div_ceil(64).max(1) as u32;
+            if wgs_x > engine.max_wg_x {
+                return Err(VulkanError::UnsupportedDeviceLimits);
+            }
+            let dyn_bytes = (dyn_words.len().max(1) as u64) * 8;
+            let dyn_dst_off = (dyn_ext4_off as u64) * 32;
+            let part_bytes = (8 * wgs_x as u64) * 32;
+
+            unsafe {
+                let mut regrew = false;
+                regrew |=
+                    engine.ensure_one_prover_buf(|p| &mut p.vram_aux_in, dyn_dst_off + dyn_bytes)?;
+                regrew |= engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)?;
+                if regrew {
+                    engine.refresh_prover_descriptor_sets();
+                }
+                engine.reserve_job_staging(dyn_bytes.max(part_bytes))?;
+                if !dyn_words.is_empty() {
+                    engine.write_staging_u64s(0, dyn_words);
+                }
+
+                let kp_a = engine.prover_pipelines[ProverKernelSlot::AirRowGroupA as usize];
+                let kp_b = engine.prover_pipelines[ProverKernelSlot::AirRowGroupB as usize];
+                let flags = u32::from(folding_signer);
+
+                engine.begin_cmd()?;
+                if !dyn_words.is_empty() {
+                    let cd = VkBufferCopy {
+                        src_offset: 0,
+                        dst_offset: dyn_dst_off,
+                        size: dyn_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.staging.buffer,
+                        engine.prover.vram_aux_in.buffer,
+                        1,
+                        &cd,
+                    );
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                }
+
+                // 1. Group A (`mode = 1` base-field Round 0, `mode = 2` `Ext4` Rounds >= 1):
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp_a.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp_a.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_air,
+                    0,
+                    null(),
+                );
+                let pc_a = AirGroupAPushConsts {
+                    chal: [0; 4],
+                    mode: if is_round0_base { 1 } else { 2 },
+                    cur_m: cur_m as u32,
+                    cur_r: cur_r as u32,
+                    flags,
+                    col_src,
+                    col_dst: col_src,
+                    sh_src,
+                    steps_off,
+                    out_off: 0,
+                    base_x: 0,
+                    aux0: 0,
+                    aux1: 0,
+                    _pad_align: [0; 4],
+                };
+                (engine.fns.cmd_push_constants)(
+                    engine.cmd_buf,
+                    kp_a.pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<AirGroupAPushConsts>() as u32,
+                    (&pc_a as *const AirGroupAPushConsts).cast::<c_void>(),
+                );
+                (engine.fns.cmd_dispatch)(engine.cmd_buf, wgs_x, 8, 1);
+
+                // 2. Group B (consumes `perm_out` in `b4` and accumulates onto `b5`):
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp_b.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp_b.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_air,
+                    0,
+                    null(),
+                );
+                let pc_b = AirGroupBPushConsts {
+                    is_base: u32::from(is_round0_base),
+                    cur_m: cur_m as u32,
+                    cur_r: cur_r as u32,
+                    cur_s: cur_s as u32,
+                    flags,
+                    col_src,
+                    sh_src,
+                    signers_off,
+                    steps_off,
+                    op_hdr_off,
+                    op_ent_off,
+                    sorted_u64_off,
+                    out_off: 0,
+                    base_x: 0,
+                    _pad0: 0,
+                    _pad1: 0,
+                };
+                (engine.fns.cmd_push_constants)(
+                    engine.cmd_buf,
+                    kp_b.pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<AirGroupBPushConsts>() as u32,
+                    (&pc_b as *const AirGroupBPushConsts).cast::<c_void>(),
+                );
+                let wg_y_b = if is_round0_base { 7 } else { 8 };
+                (engine.fns.cmd_dispatch)(engine.cmd_buf, wgs_x, wg_y_b, 1);
+
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT,
+                );
+                let co = VkBufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: part_bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_partials.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &co,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+
+                let mut raw = std::vec![0u64; 8 * (wgs_x as usize) * 4];
+                engine.read_staging_u64s(0, &mut raw);
+                let mut evals = [[0u64; 4]; 8];
+                let wgs_usize = wgs_x as usize;
+                for (k_slot, dst) in evals.iter_mut().enumerate() {
+                    for wg in 0..wgs_usize {
+                        let o = (k_slot * wgs_usize + wg) * 4;
+                        *dst =
+                            Self::fp4_add_arr(*dst, [raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+                    }
+                }
+                Ok(evals)
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_prover_air_fold_round(
+        &mut self,
+        is_round0_base: bool,
+        cur_m: usize,
+        col_src: u32,
+        col_dst: u32,
+        sh_src: u32,
+        sh_dst: u32,
+        chal: [u64; 4],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let half_m = cur_m / 2;
+            let wgs_x = half_m.div_ceil(64).max(1) as u32;
+            unsafe {
+                let kp_a = engine.prover_pipelines[ProverKernelSlot::AirRowGroupA as usize];
+                engine.begin_cmd()?;
+                (engine.fns.cmd_bind_pipeline)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp_a.pipeline,
+                );
+                (engine.fns.cmd_bind_descriptor_sets)(
+                    engine.cmd_buf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    kp_a.pipeline_layout,
+                    0,
+                    1,
+                    &engine.prover.ds_air,
+                    0,
+                    null(),
+                );
+                let pc_cols = AirGroupAPushConsts {
+                    chal,
+                    mode: if is_round0_base { 3 } else { 4 },
+                    cur_m: cur_m as u32,
+                    cur_r: 0,
+                    flags: 0,
+                    col_src,
+                    col_dst,
+                    sh_src: 0,
+                    steps_off: 0,
+                    out_off: 0,
+                    base_x: 0,
+                    aux0: 0,
+                    aux1: 0,
+                    _pad_align: [0; 4],
+                };
+                (engine.fns.cmd_push_constants)(
+                    engine.cmd_buf,
+                    kp_a.pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<AirGroupAPushConsts>() as u32,
+                    (&pc_cols as *const AirGroupAPushConsts).cast::<c_void>(),
+                );
+                (engine.fns.cmd_dispatch)(engine.cmd_buf, wgs_x, 256, 1);
+
+                let pc_sh = AirGroupAPushConsts {
+                    chal,
+                    mode: 5,
+                    cur_m: cur_m as u32,
+                    cur_r: 0,
+                    flags: 0,
+                    col_src: 0,
+                    col_dst: 0,
+                    sh_src,
+                    steps_off: 0,
+                    out_off: sh_dst,
+                    base_x: 0,
+                    aux0: 0,
+                    aux1: 0,
+                    _pad_align: [0; 4],
+                };
+                (engine.fns.cmd_push_constants)(
+                    engine.cmd_buf,
+                    kp_a.pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<AirGroupAPushConsts>() as u32,
+                    (&pc_sh as *const AirGroupAPushConsts).cast::<c_void>(),
+                );
+                (engine.fns.cmd_dispatch)(engine.cmd_buf, wgs_x, 3, 1);
+                engine.submit_and_wait()
+            }
+        })
+    }
+
+    pub(crate) fn exec_prover_air_read_folded_cols(
+        &mut self,
+        col_src_ext4: u32,
+        out_cols: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        self.run_prover_job(|engine| {
+            let bytes = (out_cols.len() as u64) * 32;
+            if bytes == 0 {
+                return Ok(());
+            }
+            unsafe {
+                engine.reserve_job_staging(bytes)?;
+                engine.begin_cmd()?;
+                let cp = VkBufferCopy {
+                    src_offset: (col_src_ext4 as u64) * 32,
+                    dst_offset: 0,
+                    size: bytes,
+                };
+                (engine.fns.cmd_copy_buffer)(
+                    engine.cmd_buf,
+                    engine.prover.vram_work_a.buffer,
+                    engine.staging.buffer,
+                    1,
+                    &cp,
+                );
+                engine.cmd_barrier(
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_HOST_READ_BIT,
+                );
+                engine.submit_and_wait()?;
+                let flat = core::slice::from_raw_parts_mut(
+                    out_cols.as_mut_ptr().cast::<u64>(),
+                    out_cols.len() * 4,
+                );
+                engine.read_staging_u64s(0, flat);
+                Ok(())
+            }
+        })
+    }
+
     unsafe fn teardown_device_only(&mut self) {
         if !self.device.is_null() {
             unsafe {
@@ -3755,6 +7497,7 @@ impl RawVulkanEngine {
                     self.device = null_mut();
                     self.instance = null_mut();
                     self.lib_handle = null_mut();
+                    self.radv_lib_handle = null_mut();
                     return;
                 }
                 self.exec_state = EngineExecState::Ready;
@@ -3762,6 +7505,7 @@ impl RawVulkanEngine {
                     self.device = null_mut();
                     self.instance = null_mut();
                     self.lib_handle = null_mut();
+                    self.radv_lib_handle = null_mut();
                     return;
                 }
                 // Idle is established. Clear the whole mapping, not just recorded residue.
@@ -3776,6 +7520,38 @@ impl RawVulkanEngine {
                 self.destroy_gpu_buffer(&mut vb);
                 self.destroy_gpu_buffer(&mut vc);
 
+                let mut p_tw = core::mem::take(&mut self.prover.twiddles_24);
+                let mut p_wt = core::mem::take(&mut self.prover.vram_witness);
+                let mut p_mn = core::mem::take(&mut self.prover.vram_mono);
+                let mut p_c0 = core::mem::take(&mut self.prover.vram_cw0);
+                let mut p_t0 = core::mem::take(&mut self.prover.vram_tree0);
+                let mut p_wa = core::mem::take(&mut self.prover.vram_work_a);
+                let mut p_wb = core::mem::take(&mut self.prover.vram_work_b);
+                let mut p_cs = core::mem::take(&mut self.prover.vram_cw_stage);
+                let mut p_ts = core::mem::take(&mut self.prover.vram_tree_stage);
+                let mut p_ai = core::mem::take(&mut self.prover.vram_aux_in);
+                let mut p_ab = core::mem::take(&mut self.prover.vram_aux_b);
+                let mut p_pt = core::mem::take(&mut self.prover.vram_partials);
+                self.destroy_gpu_buffer(&mut p_tw);
+                self.destroy_gpu_buffer(&mut p_wt);
+                self.destroy_gpu_buffer(&mut p_mn);
+                self.destroy_gpu_buffer(&mut p_c0);
+                self.destroy_gpu_buffer(&mut p_t0);
+                self.destroy_gpu_buffer(&mut p_wa);
+                self.destroy_gpu_buffer(&mut p_wb);
+                self.destroy_gpu_buffer(&mut p_cs);
+                self.destroy_gpu_buffer(&mut p_ts);
+                self.destroy_gpu_buffer(&mut p_ai);
+                self.destroy_gpu_buffer(&mut p_ab);
+                self.destroy_gpu_buffer(&mut p_pt);
+
+                if self.prover.desc_pool != 0 {
+                    (self.fns.destroy_descriptor_pool)(self.device, self.prover.desc_pool, null());
+                    self.prover.desc_pool = 0;
+                }
+                self.prover.initialized = false;
+                self.prover.twiddles_ready = false;
+
                 if self.fence != 0 {
                     (self.fns.destroy_fence)(self.device, self.fence, null());
                     self.fence = 0;
@@ -3788,7 +7564,11 @@ impl RawVulkanEngine {
                     (self.fns.destroy_command_pool)(self.device, self.cmd_pool, null());
                     self.cmd_pool = 0;
                 }
-                for kp in &mut self.pipelines {
+                for kp in self
+                    .pipelines
+                    .iter_mut()
+                    .chain(self.prover_pipelines.iter_mut())
+                {
                     if kp.pipeline != 0 {
                         (self.fns.destroy_pipeline)(self.device, kp.pipeline, null());
                         kp.pipeline = 0;
@@ -3802,7 +7582,12 @@ impl RawVulkanEngine {
                         kp.shader_module = 0;
                     }
                 }
-                for dsl in [&mut self.dsl_1buf, &mut self.dsl_2buf, &mut self.dsl_3buf] {
+                for dsl in [
+                    &mut self.dsl_1buf,
+                    &mut self.dsl_2buf,
+                    &mut self.dsl_3buf,
+                    &mut self.dsl_6buf,
+                ] {
                     if *dsl != 0 {
                         (self.fns.destroy_descriptor_set_layout)(self.device, *dsl, null());
                         *dsl = 0;
@@ -3822,6 +7607,10 @@ impl Drop for RawVulkanEngine {
             if !self.instance.is_null() {
                 (self.destroy_instance)(self.instance, null());
                 self.instance = null_mut();
+            }
+            if !self.radv_lib_handle.is_null() {
+                let _ = dlclose(self.radv_lib_handle);
+                self.radv_lib_handle = null_mut();
             }
             if !self.lib_handle.is_null() {
                 let _ = dlclose(self.lib_handle);
@@ -4111,7 +7900,12 @@ mod tests {
         assert_eq!(staging_words(&engine, words), flat_input);
 
         // 3. Teardown that cannot establish idle detaches without wiping or freeing.
-        let (device, instance, lib_handle) = (engine.device, engine.instance, engine.lib_handle);
+        let (device, instance, lib_handle, radv_lib_handle) = (
+            engine.device,
+            engine.instance,
+            engine.lib_handle,
+            engine.radv_lib_handle,
+        );
         inject(&engine, FaultPoint::DeviceWaitIdle, VK_ERROR_DEVICE_LOST);
         unsafe {
             engine.teardown_device_only();
@@ -4124,6 +7918,7 @@ mod tests {
         engine.device = device;
         engine.instance = instance;
         engine.lib_handle = lib_handle;
+        engine.radv_lib_handle = radv_lib_handle;
         engine.exec_state = EngineExecState::Ready;
     }
 }
