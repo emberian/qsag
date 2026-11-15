@@ -7,6 +7,7 @@ public import Qsag.ConcreteSecurityBudget
 import all Qsag.ConcreteSecurityBudget
 public import Qsag.AffineProximityGaps
 import all Qsag.AffineProximityGaps
+public import Qsag.CodingTheory.Cwyz26AffineGap
 
 public import Qsag.Tactic.AssuranceKit
 
@@ -88,31 +89,6 @@ private theorem listHasElem_eq_true_iff {α : Type} [DecidableEq α] (x : α) :
     by_cases hxy : x = y
     · simp [hxy]
     · simp [hxy, listHasElem_eq_true_iff x ys]
-
-private theorem list_getD_eq_get {α : Type} :
-    ∀ (xs : List α) (d : α) (idx : Fin xs.length), xs.getD idx.1 d = xs.get idx
-  | [], _, idx => absurd idx.2 (Nat.not_lt_zero _)
-  | _ :: _, _, ⟨0, _⟩ => rfl
-  | _ :: xs, d, ⟨i + 1, hi⟩ => list_getD_eq_get xs d ⟨i, Nat.lt_of_succ_lt_succ hi⟩
-
-private theorem list_get_mem {α : Type} : ∀ (xs : List α) (k : Fin xs.length), xs.get k ∈ xs
-  | _ :: _, ⟨0, _⟩ => .head _
-  | _ :: xs, ⟨k + 1, hk⟩ => .tail _ (list_get_mem xs ⟨k, Nat.lt_of_succ_lt_succ hk⟩)
-
-private theorem nodup_get_inj {α : Type} :
-    ∀ {S : List α} (_ : S.Nodup) {i j : Fin S.length}, S.get i = S.get j → i = j
-  | [], _, ⟨_, hi⟩, _, _ => absurd hi (Nat.not_lt_zero _)
-  | _ :: _, _, ⟨0, _⟩, ⟨0, _⟩, _ => rfl
-  | _ :: xs, hNodup, ⟨0, _⟩, ⟨j + 1, hj⟩, hEq =>
-    absurd hEq ((List.pairwise_cons.mp hNodup).1 _
-      (list_get_mem xs ⟨j, Nat.lt_of_succ_lt_succ hj⟩))
-  | _ :: xs, hNodup, ⟨i + 1, hi⟩, ⟨0, _⟩, hEq =>
-    absurd hEq.symm ((List.pairwise_cons.mp hNodup).1 _
-      (list_get_mem xs ⟨i, Nat.lt_of_succ_lt_succ hi⟩))
-  | _ :: xs, hNodup, ⟨i + 1, hi⟩, ⟨j + 1, hj⟩, hEq => by
-    have hSub := nodup_get_inj (List.pairwise_cons.mp hNodup).2
-      (i := ⟨i, Nat.lt_of_succ_lt_succ hi⟩) (j := ⟨j, Nat.lt_of_succ_lt_succ hj⟩) hEq
-    exact Fin.ext (by simpa using congrArg Fin.val hSub)
 
 /-- Constructive enumeration of `{i : Fin n | e i = true}` in increasing order. -/
 def finFilterList : (n : Nat) → (Fin n → Bool) → List (Fin n)
@@ -526,96 +502,10 @@ private theorem length_filter_le_add_filter_and_not {α : Type} (p q : α → Bo
       simp only [List.filter_cons, hq, hp, Bool.not_false, Bool.not_true, Bool.and_true,
         Bool.and_false, Bool.false_eq_true, ↓reduceIte, List.length_cons] <;> omega
 
-private theorem not_not_forall_mem {α : Type} (Q : α → Prop) :
-    ∀ l : List α, (∀ a ∈ l, ¬¬ Q a) → ¬¬ (∀ a ∈ l, Q a)
-  | [], _ => fun h => h (fun _ hm => nomatch hm)
-  | a :: l, h => fun hn =>
-    h a (.head l) (fun hQa =>
-      not_not_forall_mem Q l (fun a' ha' => h a' (.tail a ha')) (fun hRest =>
-        hn (fun a' ha' => by
-          rcases List.mem_cons.mp ha' with hEq | h1
-          · rw [hEq]; exact hQa
-          · exact hRest a' h1)))
-
-private theorem list_finite_choice {α β : Type} [DecidableEq α] (Q : α → β → Prop) (dflt : β) :
-    ∀ l : List α, (∀ a ∈ l, ∃ b, Q a b) → ∃ f : α → β, ∀ a ∈ l, Q a (f a)
-  | [], _ => ⟨fun _ => dflt, fun _ hm => nomatch hm⟩
-  | a :: l, h => by
-    rcases h a (.head l) with ⟨b, hb⟩
-    rcases list_finite_choice Q dflt l (fun a' ha' => h a' (.tail a ha')) with ⟨f, hf⟩
-    refine ⟨fun a' => if a' = a then b else f a', ?_⟩
-    intro a' ha'
-    if hEq : a' = a then
-      rw [hEq]
-      simp only [↓reduceIte]
-      exact hb
-    else
-      simp only [hEq, ↓reduceIte]
-      rcases List.mem_cons.mp ha' with h1 | h1
-      · exact absurd h1 hEq
-      · exact hf a' h1
-
 section AffineWeld
 variable {F : Type} [LawfulField F] [DecidableEq F]
 
-/-- **Correlated agreement**: ONE polynomial pair `(F_poly, G_poly)` (`deg F_poly ≤ d`,
-    `deg G_poly ≤ d - 1`) simultaneously agrees with the received words `(f, g)` on at least `A`
-    coordinates of the evaluation domain `D`. -/
-def HasCorrelatedAgreement (d A : Nat) (f g : F → F) (D : List F) : Prop :=
-  ∃ F_poly G_poly : List F,
-    F_poly.length ≤ d + 1 ∧
-    G_poly.length ≤ d ∧
-    A ≤ (D.filter (fun z =>
-      decide (RoundPoly.evalCoeffs F_poly z = f z) &&
-      decide (RoundPoly.evalCoeffs G_poly z = g z))).length
-
-/-- An `s = 1` affine witness for a fold that is `A`-close forces correlated agreement `≥ A - 1`:
-    the decomposition `P = F + (α + β X) G` loses at most one coordinate of the agreement set. -/
-theorem hasCorrelatedAgreement_of_affineWitnessS1
-    {d A : Nat} {f g : F → F} {D : List F} {α β : F} {P : List F}
-    (hW : HasAffineWitnessS1 d f g D α β P)
-    (hAgree : A ≤ (D.filter (fun z =>
-      decide (RoundPoly.evalCoeffs P z =
-        CommRingOps.add (f z)
-          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z))))).length) :
-    HasCorrelatedAgreement d (A - 1) f g D := by
-  rcases hW with ⟨F_poly, G_poly, hF, hG, _, hLoss⟩
-  refine ⟨F_poly, G_poly, hF, hG, ?_⟩
-  have hSplit := length_filter_split
-    (fun z => decide (RoundPoly.evalCoeffs F_poly z = f z) &&
-      decide (RoundPoly.evalCoeffs G_poly z = g z))
-    (D.filter (fun z =>
-      decide (RoundPoly.evalCoeffs P z =
-        CommRingOps.add (f z)
-          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z)))))
-  have hLe := length_filter_filter_le
-    (fun z => decide (RoundPoly.evalCoeffs F_poly z = f z) &&
-      decide (RoundPoly.evalCoeffs G_poly z = g z))
-    (fun z =>
-      decide (RoundPoly.evalCoeffs P z =
-        CommRingOps.add (f z)
-          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z)))) D
-  apply Nat.sub_le_of_le_add
-  apply Nat.le_trans hAgree
-  rw [hSplit]
-  exact Nat.add_le_add hLe hLoss
-
-/-! #### Uncommitted fold: flip bound from `welch_berlekamp_affine_proximity_gap` -/
-
-/-- Verifier predicate of the affine-fold proximity IOP: challenge index `c` selects
-    `(α, β) = (prodPool S)[c]`, and the prover's response `P` has degree `≤ d` and agrees with the
-    fold word `f + (α + β X) g` on at least `A` points of `D`. -/
-def affineMcaAccepts (D S : List F) (d A : Nat) (x : (F → F) × (F → F)) (c : Nat)
-    (P : List F) : Bool :=
-  decide (c < (prodPool S).length) &&
-  decide (P.length ≤ d + 1) &&
-  decide (A ≤ (D.filter (fun z =>
-    decide (RoundPoly.evalCoeffs P z =
-      CommRingOps.add (x.1 z)
-        (CommRingOps.mul
-          (CommRingOps.add ((prodPool S).getD c (CommRingOps.zero, CommRingOps.zero)).1
-            (CommRingOps.mul ((prodPool S).getD c (CommRingOps.zero, CommRingOps.zero)).2 z))
-          (x.2 z))))).length)
+/-! #### Uncommitted fold: flip bound from `AffineMcaBound` -/
 
 /-- Two-round affine-fold proximity IOP for the received words `x = (f, g)`:
     round 0 draws `(α, β) ∈ S × S` (the prover's round-0 message is ignored: `f, g` are the
@@ -653,59 +543,6 @@ private theorem affineMca_accept_implies_live (D S : List F) (hSpos : 0 < S.leng
   · exact Bool.noConfusion hVer
   · exact Or.inr hVer
   · exact Bool.noConfusion hVer
-
-/-- **Mutual correlated agreement bound** for the affine fold of words on `D` with challenges
-    `(α, β) ∈ S × S`, degree bound `d` and agreement threshold `A`: for every pair of words
-    WITHOUT correlated agreement `≥ A - 1`, at most `bad` challenges admit a degree-`≤ d`
-    polynomial `A`-close to the fold word. This is the statement a proximity-gap theorem
-    supplies: `affineMcaBound_welch_berlekamp` proves it in the unique-decoding regime, and
-    `[CWYZ26]` Theorem 4.8 asserts it up to the Johnson radius. -/
-def AffineMcaBound (D S : List F) (d A bad : Nat) : Prop :=
-  ∀ x : (F → F) × (F → F), ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D →
-    ∀ L : List (Fin (prodPool S).length), L.Nodup →
-      (∀ ch ∈ L, ¬¬ ∃ P : List F, affineMcaAccepts D S d A x ch.1 P = true) →
-      L.length ≤ bad
-
-/-- The bound is monotone in the number of exceptional challenges. -/
-theorem AffineMcaBound.mono {D S : List F} {d A bad bad' : Nat}
-    (h : AffineMcaBound D S d A bad) (hLe : bad ≤ bad') : AffineMcaBound D S d A bad' :=
-  fun x hFar L hNd hEx => Nat.le_trans (h x hFar L hNd hEx) hLe
-
-/-- **Welch–Berlekamp instance of the mutual correlated agreement bound**, proved from
-    `welch_berlekamp_affine_proximity_gap` in the regime `2 |D| + d + 1 < 3 A`. -/
-theorem affineMcaBound_welch_berlekamp (D S : List F) (d A : Nat)
-    (hD : D.Nodup) (hS : S.Nodup) (hAD : A ≤ D.length) (hWB : 2 * D.length + d + 1 < 3 * A) :
-    AffineMcaBound D S d A (Nat.max S.length (D.length * (D.length - 1) / 2)) := by
-  intro x hFar L hNd hEx
-  apply Decidable.byContradiction
-  intro hGt
-  refine not_not_forall_mem _ L hEx (fun hAll => hGt ?_)
-  have hPairs : ∀ p ∈ L.map (fun ch => (prodPool S).get ch), ∃ P : List F,
-      P.length ≤ d + 1 ∧
-      A ≤ (D.filter (fun z =>
-        decide (RoundPoly.evalCoeffs P z =
-          CommRingOps.add (x.1 z)
-            (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (x.2 z))))).length := by
-    intro p hp
-    rcases List.mem_map.mp hp with ⟨ch, hch, rfl⟩
-    rcases hAll ch hch with ⟨P, hP⟩
-    unfold affineMcaAccepts at hP
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
-    rw [list_getD_eq_get (prodPool S) _ ch] at hP
-    exact ⟨P, hP.1.2, hP.2⟩
-  rcases list_finite_choice _ ([] : List F) _ hPairs with ⟨P_of, hP_of⟩
-  have hBound := welch_berlekamp_affine_proximity_gap x.1 x.2 D S d A
-    (L.map (fun ch => (prodPool S).get ch)) P_of hD hS hAD hWB
-    (List.Pairwise.map _
-      (fun a b hab hEq => hab (nodup_get_inj (prodPool_nodup hS) hEq)) hNd)
-    (fun p hp => by
-      rcases List.mem_map.mp hp with ⟨ch, _, rfl⟩
-      exact list_get_mem (prodPool S) ch)
-    (fun p hp => (hP_of p hp).1)
-    (fun p hp => (hP_of p hp).2)
-    (fun p hp hW => hFar (hasCorrelatedAgreement_of_affineWitnessS1 hW (hP_of p hp).2))
-  rw [List.length_map] at hBound
-  exact hBound
 
 private theorem affineMca_round_flip_bound (D S : List F) (d A bad : Nat)
     (hB : AffineMcaBound D S d A bad)
@@ -3183,34 +3020,22 @@ theorem hemV6FiveRoundRbrBounds_eq_deployed :
       [4182, 1644, 824, 489, 792].map (fun n => (n, goldilocksExt4Card)) := by
   decide +kernel
 
-/-- Pure 4-stage `Hem` v6 coset-query error bounds under the conjectural `Habr24Qrom128` regime
-    (`(1 / B_i)^{q_i}`, no proof-of-work density). -/
-def hemV6Habr24QueryBounds : List RatBound :=
-  (whirSchedule4Stage .habr24Qrom128).map (fun st => whirConjecturalHabr24StageBound st 0)
-
-/-- Pure 4-stage `Hem` v6 coset-query error bounds under `BciksJohnsonQrom128`, DERIVED from the
-    same deployed `whirAffineStageWitnesses 24 true` rows as the fold bounds: the exact
+/-- Pure 4-stage `Hem` v6 coset-query error bounds under default `BciksJohnsonQrom128`, DERIVED
+    from the same deployed `whirAffineStageWitnesses 24 true` rows as the fold bounds: the exact
     distinct-fiber bound `(A + s_i)_{q_i} / (n)_{q_i}` at each row's own agreement threshold
     (`whirAffine_deployed_pure_query_bounds`), with no proof-of-work density. -/
 def hemV6BciksJohnsonQueryBounds : List RatBound :=
   (whirAffineStageWitnesses 24 true).map whirAffinePureQueryBoundOrOne
 
 private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
-    (hHabrMax : strictlyMoreThanBits 128
-      (multiRoundFsQromCompilerBound QMax 5 digestBits
-        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds))
     (hBciksMax : strictlyMoreThanBits 128
       (multiRoundFsQromCompilerBound QMax 5 digestBits
         hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :
     ∀ Q : Nat, Q ≤ QMax →
-      (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
-        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
-       atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
-        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
-      (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+      strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
         hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
-       atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
-        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
+      atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
   have hMonoScale : ∀ {a b : Nat} (hab : a ≤ b) (r : RatBound),
       RatBound.le (RatBound.scale a r) (RatBound.scale b r) := by
     intro a b hab r
@@ -3310,16 +3135,14 @@ private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
           (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
     exact RatBound.add_le_add hRbrLe (RatBound.add_le_add hMerkleLe hQueryLe)
   intro Q hQ
-  have hh := hStrictOfLe (hCompilerMono hQ hemV6Habr24QueryBounds) hHabrMax
   have hb := hStrictOfLe (hCompilerMono hQ hemV6BciksJohnsonQueryBounds) hBciksMax
-  exact ⟨⟨hh, Nat.le_of_lt hh⟩, ⟨hb, Nat.le_of_lt hb⟩⟩
+  exact ⟨hb, Nat.le_of_lt hb⟩
 
 /-- **Multi-round Fiat–Shamir QROM numerical budget (`multiRoundFsQrom_budget_bound`)**.
     For every oracle budget `Q + 1 ≤ 2^40`, `multiRoundFsQromCompilerBound` at the deployed
     `num_vars = 24` parameters (five aggregated RBR entries derived from the deployed witness
     rows, five committed Merkle roots over `256`-bit digests, four query stages) is strictly
-    below `2^-128`, for both the conjectural `Habr24Qrom128` query bounds and the
-    witness-derived `BciksJohnsonQrom128` query bounds.
+    below `2^-128` for the witness-derived `BciksJohnsonQrom128` query bounds.
 
     The range is forced by the collision term of commitment extraction: at `Q + 1 = 2^41` the
     same expression exceeds `2^-128` (`tooth_multiRoundFsQrom_budget_fails_at_2pow41`).
@@ -3334,24 +3157,13 @@ theorem multiRoundFsQrom_budget_bound :
     (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
       strictlyMoreThanBits 128
         (multiRoundFsQromCompilerBound Q 5 256
-          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
-      atLeastBits 128
-        (multiRoundFsQromCompilerBound Q 5 256
-          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
-    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
-      strictlyMoreThanBits 128
-        (multiRoundFsQromCompilerBound Q 5 256
           hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
       atLeastBits 128
         (multiRoundFsQromCompilerBound Q 5 256
           hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
-  refine ⟨by decide +kernel, ?_, ?_⟩
-  · intro Q hQ
-    exact (hemCompiler_budget_up_to (2 ^ 40 - 1) 256
-      (by decide +kernel) (by decide +kernel) Q (by omega)).1
-  · intro Q hQ
-    exact (hemCompiler_budget_up_to (2 ^ 40 - 1) 256
-      (by decide +kernel) (by decide +kernel) Q (by omega)).2
+  refine ⟨by decide +kernel, ?_⟩
+  intro Q hQ
+  exact hemCompiler_budget_up_to (2 ^ 40 - 1) 256 (by decide +kernel) Q (by omega)
 
 
 /-- `#tooth`: the oracle-budget range of `multiRoundFsQrom_budget_bound` is not slack. One more
@@ -3597,8 +3409,6 @@ theorem tooth_unabsorbed_shifted_claim_breaks_rbr :
 theorem inhabited_multi_round_fs_qrom :
     0 < (multiRoundFsQromCompilerBound (2 ^ 39) 5 256
            hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds).num ∧
-    0 < (multiRoundFsQromCompilerBound (2 ^ 39) 5 256
-           hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds).num ∧
     (∃ (A : QuantumAdv 2 2 1 1) (H : Fin 2 → BitVec 2),
       0 < QVec.stateNormSq (runQuantumAdv A H) ∧
       RatBound.le
@@ -3610,7 +3420,7 @@ theorem inhabited_multi_round_fs_qrom :
          4 * QVec.stateNormSq (runQuantumAdv A H),
          Nat.mul_pos (by decide) (runQuantumAdv_normSq_pos A H)⟩
         ⟨(2 * 1 + 1) ^ 2 * 1, 4, by decide⟩) := by
-  refine ⟨by decide +kernel, by decide +kernel, ?_⟩
+  refine ⟨by decide +kernel, ?_⟩
   let initVec : QVec 2 2 1 := fun x y _ =>
     if x.1 == 0 && y.1 == 0 then GaussInt.one else GaussInt.zero
   have hInitPos : 0 < QVec.stateNormSq initVec := by
@@ -3634,15 +3444,11 @@ theorem inhabited_multi_round_fs_qrom :
     digests suffice with the same field and query schedule. This changes the commitment
     parameter; it is not a security claim for the deployed 256-bit Merkle implementation. -/
 theorem multiRoundFsQrom_budget_384_at_2pow56 (Q : Nat) (hQ : Q ≤ 2 ^ 56) :
-    (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
-      hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
-     atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
-      hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
-    (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
+    strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
       hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
-     atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
-      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :=
-  hemCompiler_budget_up_to (2 ^ 56) 384 (by decide +kernel) (by decide +kernel) Q hQ
+    atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
+  hemCompiler_budget_up_to (2 ^ 56) 384 (by decide +kernel) Q hQ
 
 /-- Keeping the deployed 256-bit commitment parameter fails the requested budget. -/
 theorem tooth_multiRoundFsQrom_256_at_2pow56 :
@@ -3656,7 +3462,7 @@ theorem inhabited_multiRoundFsQrom_384 :
       atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
         hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
   ⟨2 ^ 56, rfl, Nat.le_refl _,
-    (multiRoundFsQrom_budget_384_at_2pow56 (2 ^ 56) (Nat.le_refl _)).2.2⟩
+    (multiRoundFsQrom_budget_384_at_2pow56 (2 ^ 56) (Nat.le_refl _)).2⟩
 
 #tooth_pair multiRoundFsQrom_budget_384_at_2pow56 vs tooth_multiRoundFsQrom_256_at_2pow56
 #tooth_pair hemAffineWhir_rbr_completeness_and_doomed_init vs hemFalseClaimInstance_invalid

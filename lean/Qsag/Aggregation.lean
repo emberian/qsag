@@ -16,13 +16,13 @@ merge trees over the quartic Goldilocks extension field `Aggregation.GoldilocksE
    and Lagrange / Factor-Theorem root bounds (`ext4_poly_roots_le_degree`,
    `sumcheck_degree8_ext4_roots_le_eight`, `whir_coset_duet_ext4_roots_le_one`,
    `whir_ood_pin_roots_le_degree`).
-3. **5-Regime QROM Grover & `[BCIKS20]` Johnson WHIR Schedule Ladder (§5):**
+3. **2-Regime Unconditional `[BCIKS20]` Johnson WHIR Schedule Ladder (§5):**
    Exact `(4, 16, 64, 256)` rate-escalating schedules matching `crates/qsag-agg/src/pcs.rs` across
-   all five `WhirSecurityRegime` profiles (`habr24Classical128`, `habr24Interactive128`,
-   `bciksJohnsonClassical128`, default `habr24Qrom128`, and unconditional `bciksJohnsonQrom128`),
-   proving positive Johnson proximity slack (`+1` query at classical-128 -> `eta = 1/512`, `+2`
-   queries at QROM-128 -> `eta = 1/1024`, with explicit finite `[BCIKS20]` list bounds `L <= 256`
-   and `L <= 512`) and `ProductionAggParams`.
+   both unconditional `WhirSecurityRegime` profiles (`bciksJohnsonClassical128` wire tag `2` and
+   default `bciksJohnsonQrom128` wire tag `4`, with retired capacity-proximity wire tags `0, 1, 3`
+   rejected), proving positive Johnson proximity slack (`+1` query at classical-128 -> `eta = 1/512`,
+   `+2` queries at QROM-128 -> `eta = 1/1024`, with explicit finite `[BCIKS20]` list bounds
+   `L <= 256` and `L <= 512`) and `ProductionAggParams`.
 4. **Succinct Multi-Stage WHIR + OOD + PoW + Degree-8 Sumcheck Verifier (§6–§8):**
    Instance-bound Fiat–Shamir transcript, degree-8 row sumcheck over `GoldilocksExt4`, multi-stage
    WHIR verifier (`verifySuccinctAggregate`, `verifyAggregatedSignature`, `MergeNode`,
@@ -38,7 +38,8 @@ merge trees over the quartic Goldilocks extension field `Aggregation.GoldilocksE
    `qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog`.
 5. **Transcript-Bound Challenge & Query Soundness Counting (§9–§10):**
    Adaptive `challengeVectors` union bounds and `aggDistinctTuples` falling-factorial query bounds over
-   concrete `Nodup` `List Aggregation.GoldilocksExt4` domains across all 5 `WhirSecurityRegime`s.
+   concrete `Nodup` `List Aggregation.GoldilocksExt4` domains across both unconditional
+   `WhirSecurityRegime`s.
 6. **Genuine Reed–Solomon + Degree-7 S-Box Trace-Decoding `RowArithmetization.Lawful` (§11–§12):**
    Concrete blowup-4 -> blowup-16 2-stage WHIR arithmetization (`rsSbox7TraceArith_lawful`) where
    `isStageCodeword 0` checks real base-field Reed–Solomon evaluation constraints on 8th roots of
@@ -906,36 +907,60 @@ theorem terminal_check_ext4_omission_unsound (halfClaim : GoldilocksExt4) :
                     (RoundPoly.evalCoeffs fakePoly GoldilocksExt4.one) = forgedClaim := by
   simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
 
-/-! ## 5. 5-Regime QROM Grover & `[BCIKS20]` Johnson WHIR Schedule Ladder -/
+/-! ## 5. Unconditional `[BCIKS20]` Johnson WHIR Schedule Ladder -/
 
-/-- Exact 5-regime security ladder matching `WhirSecurityRegime` in `crates/qsag-agg/src/pcs.rs`
-    (`PCS_POW_BITS = 16` = `8` QROM Grover bits):
-    - `habr24Classical128`: `q = (56, 28, 19, 14)` (`2^-112` `[HABR24]` + `16`b PoW = `128`b classical FS)
-    - `habr24Interactive128`: `q = (64, 32, 22, 16)` (`2^-128` `[HABR24]`, `144`b classical FS)
-    - `bciksJohnsonClassical128`: `q = (129, 65, 44, 33)` (`+1` Johnson slack -> unconditional `< 2^-128`)
-    - `habr24Qrom128` (**DEFAULT**): `q = (128, 64, 43, 32)` (`2^-256` `[HABR24]` + `16`b PoW = `136` QROM bits)
-    - `bciksJohnsonQrom128`: `q = (258, 130, 88, 66)` (`⌈512 / log₂ B⌉ + 2`, as in `minimum_queries`;
-      `+2` Johnson slack -> unconditional `< 2^-256` + `16`b PoW = `136` QROM bits without `[HABR24]`). -/
+/-- Exact 2-regime unconditional Johnson-radius security ladder matching `WhirSecurityRegime` in
+    `crates/qsag-agg/src/pcs.rs` (`PCS_POW_BITS = 16` = `8` QROM Grover bits; retired capacity
+    wire tags `0, 1, 3` are rejected on deserialization per `Crites & Stewart 2025/2046` and
+    `Krachun-Kazanin-Habock 2026/782`):
+    - `bciksJohnsonClassical128` (wire tag `2`): `q = (129, 65, 44, 33)` (`⌈256 / log₂ B⌉ + 1`;
+      `+1` Johnson slack -> unconditional `< 2^-128` + `16`b PoW = `144` classical FS round bits)
+    - `bciksJohnsonQrom128` (**DEFAULT**, wire tag `4`): `q = (258, 130, 88, 66)`
+      (`⌈512 / log₂ B⌉ + 2`, as in `minimum_queries`; `+2` Johnson slack -> unconditional
+      `< 2^-256` + `16`b PoW = `136` QROM Grover round-search bits). -/
 inductive WhirSecurityRegime where
-  | habr24Classical128
-  | habr24Interactive128
   | bciksJohnsonClassical128
-  | habr24Qrom128
   | bciksJohnsonQrom128
   deriving DecidableEq, Repr
 
-def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .habr24Qrom128
+def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .bciksJohnsonQrom128
 
 def WhirSecurityRegime.tagByte : WhirSecurityRegime → UInt8
-  | .habr24Classical128 => 0x01
-  | .habr24Interactive128 => 0x02
-  | .bciksJohnsonClassical128 => 0x03
-  | .habr24Qrom128 => 0x04
-  | .bciksJohnsonQrom128 => 0x05
+  | .bciksJohnsonClassical128 => 2
+  | .bciksJohnsonQrom128 => 4
+
+/-- Wire-tag decoder matching `WhirSecurityRegime::from_u8` in `crates/qsag-agg/src/pcs.rs`:
+    accepts only wire tags `2` (`bciksJohnsonClassical128`) and `4` (`bciksJohnsonQrom128`),
+    rejecting retired capacity-proximity tags `0`, `1`, and `3`. -/
+def WhirSecurityRegime.decodeTag? : UInt8 → Option WhirSecurityRegime
+  | 2 => some .bciksJohnsonClassical128
+  | 4 => some .bciksJohnsonQrom128
+  | _ => none
+
+theorem WhirSecurityRegime.decodeTag?_tagByte (r : WhirSecurityRegime) :
+    WhirSecurityRegime.decodeTag? r.tagByte = some r := by
+  cases r <;> rfl
+
+theorem WhirSecurityRegime.tagByte_of_decodeTag? {tag : UInt8} {r : WhirSecurityRegime}
+    (h : WhirSecurityRegime.decodeTag? tag = some r) :
+    r.tagByte = tag := by
+  unfold WhirSecurityRegime.decodeTag? at h
+  split at h
+  · cases h; rfl
+  · cases h; rfl
+  · cases h
 
 theorem WhirSecurityRegime.tagByte_injective {r1 r2 : WhirSecurityRegime}
     (h : r1.tagByte = r2.tagByte) : r1 = r2 := by
   cases r1 <;> cases r2 <;> first | rfl | cases h
+
+/-- `#tooth`: retired capacity-proximity wire tags `0`, `1`, and `3` are rejected (`none`) by
+    `WhirSecurityRegime.decodeTag?`. -/
+theorem tooth_whirSecurityRegime_decodeTag_rejects_retired :
+    WhirSecurityRegime.decodeTag? 0 = none ∧
+    WhirSecurityRegime.decodeTag? 1 = none ∧
+    WhirSecurityRegime.decodeTag? 3 = none := by
+  decide
 
 /-- Per-stage WHIR rate-escalation specification (`B_s = (4, 16, 64, 256)`). -/
 structure WhirStageSpec where
@@ -948,14 +973,8 @@ structure WhirStageSpec where
 
 /-- Full 4-stage `(4, 16, 64, 256)` WHIR schedule for each `WhirSecurityRegime`. -/
 def whirSchedule4Stage : WhirSecurityRegime → List WhirStageSpec
-  | .habr24Classical128 =>
-    [ ⟨0, 4, 2, 56, 16⟩, ⟨1, 16, 4, 28, 16⟩, ⟨2, 64, 8, 19, 16⟩, ⟨3, 256, 16, 14, 16⟩ ]
-  | .habr24Interactive128 =>
-    [ ⟨0, 4, 2, 64, 16⟩, ⟨1, 16, 4, 32, 16⟩, ⟨2, 64, 8, 22, 16⟩, ⟨3, 256, 16, 16, 16⟩ ]
   | .bciksJohnsonClassical128 =>
     [ ⟨0, 4, 2, 129, 16⟩, ⟨1, 16, 4, 65, 16⟩, ⟨2, 64, 8, 44, 16⟩, ⟨3, 256, 16, 33, 16⟩ ]
-  | .habr24Qrom128 =>
-    [ ⟨0, 4, 2, 128, 16⟩, ⟨1, 16, 4, 64, 16⟩, ⟨2, 64, 8, 43, 16⟩, ⟨3, 256, 16, 32, 16⟩ ]
   | .bciksJohnsonQrom128 =>
     [ ⟨0, 4, 2, 258, 16⟩, ⟨1, 16, 4, 130, 16⟩, ⟨2, 64, 8, 88, 16⟩, ⟨3, 256, 16, 66, 16⟩ ]
 
@@ -968,22 +987,15 @@ theorem whirSchedule4Stage_sqrt_sq (r : WhirSecurityRegime) :
     ∀ s ∈ whirSchedule4Stage r, s.johnsonSqrtBlowup ^ 2 = s.blowup := by
   cases r <;> decide
 
-/-- `Habr24Classical128`: `B_s ^ q_s ≥ 2^112` (`+ 16`b classical PoW = `128`b classical FS). -/
-theorem habr24Classical128_stage_exponents :
-    ∀ s ∈ whirSchedule4Stage .habr24Classical128, 2 ^ 112 ≤ s.blowup ^ s.numQueries := by
-  decide
-
-/-- `Habr24Interactive128`: `B_s ^ q_s ≥ 2^128` across `(4, 16, 64, 256)`. -/
-theorem habr24Interactive128_stage_exponents :
-    ∀ s ∈ whirSchedule4Stage .habr24Interactive128, 2 ^ 128 ≤ s.blowup ^ s.numQueries := by
-  decide
-
-/-- `Habr24Qrom128` (**DEFAULT**): `B_s ^ q_s ≥ 2^256` across `(4, 16, 64, 256)` (`+ 16`b PoW =
-    `272` classical bits / `136` QROM Grover round-search bits, giving `≥ 128` QROM bits with
-    `8`-bit multi-round slack). -/
-theorem habr24Qrom128_stage_exponents :
-    ∀ s ∈ whirSchedule4Stage .habr24Qrom128, 2 ^ 256 ≤ s.blowup ^ s.numQueries := by
-  decide
+/-- `#tooth`: historical capacity-proximity query counts `[128, 64, 43, 32]` across blowups
+    `(4, 16, 64, 256)` (`√B = (2, 4, 8, 16)`) fail the unconditional `[BCIKS20]` Johnson 256-bit
+    bound at every stage (`(√B_s)^{q_s} < 2^256` and
+    `¬ ((1024 / √B_s + 1)^{q_s} * 2^256 < 1024^{q_s})`). -/
+theorem tooth_retired_capacity_queries_fail_johnson_qrom256 :
+    ∀ p ∈ ([(2, 128), (4, 64), (8, 43), (16, 32)] : List (Nat × Nat)),
+      p.1 ^ p.2 < 2 ^ 256 ∧
+      ¬ ((1024 / p.1 + 1) ^ p.2 * 2 ^ 256 < 1024 ^ p.2) := by
+  decide +kernel
 
 /-- **Unconditional `[BCIKS20]` Classical-128 Positive Johnson Proximity Slack
     (`bciksJohnsonClassical128_positive_slack`)**:
@@ -1000,8 +1012,7 @@ theorem bciksJohnsonClassical128_positive_slack :
     (`bciksJohnsonQrom128_positive_slack`)**:
     With `+2` queries (`q = (258, 130, 88, 66)`), EVERY stage satisfies `(1 / √B_s + η)^{q_s} < 2^-256`
     at concrete positive proximity slack `η = 1 / 1024 > 0` (yielding explicit finite `[BCIKS20]`
-    list-decoding bound `L ≤ 1 / (2η) = 512` and `136` QROM Grover round-search bits without
-    `[HABR24]`). -/
+    list-decoding bound `L ≤ 1 / (2η) = 512` and `136` QROM Grover round-search bits). -/
 theorem bciksJohnsonQrom128_positive_slack :
     ∀ s ∈ whirSchedule4Stage .bciksJohnsonQrom128,
       2 ^ 256 < s.johnsonSqrtBlowup ^ s.numQueries ∧
@@ -1036,6 +1047,7 @@ structure ProductionAggParams where
   /-- Wire/parser query cap (`NUM_PCS_QUERIES` in `pcs.rs`); active counts come from the schedule. -/
   maxQueryCap : Nat
   stageBlowups : List Nat
+  classicalJohnsonQueries : List Nat
   defaultQromQueries : List Nat
   johnsonQromQueries : List Nat
   earlyStopVars : Nat
@@ -1054,7 +1066,8 @@ def productionAggParams : ProductionAggParams where
   rsBlowup := 4
   maxQueryCap := 512
   stageBlowups := [4, 16, 64, 256]
-  defaultQromQueries := [128, 64, 43, 32]
+  classicalJohnsonQueries := [129, 65, 44, 33]
+  defaultQromQueries := [258, 130, 88, 66]
   johnsonQromQueries := [258, 130, 88, 66]
   earlyStopVars := 8
   maxFoldStepVars := 6
@@ -1078,16 +1091,19 @@ theorem productionAggParams_derived :
     2 ^ 255 < productionAggParams.fieldSize := by
   decide
 
-/-- The production query lists are the `habr24Qrom128` and `bciksJohnsonQrom128` schedules, and
-    every scheduled query count in every regime fits under the wire cap `maxQueryCap = 512`. -/
+/-- The production query lists are the unconditional `bciksJohnsonClassical128` and default
+    `bciksJohnsonQrom128` schedules, and every scheduled query count in every regime fits under
+    the wire cap `maxQueryCap = 512`. -/
 theorem productionAggParams_queries_match_schedule :
+    productionAggParams.classicalJohnsonQueries =
+      (Aggregation.whirSchedule4Stage .bciksJohnsonClassical128).map (·.numQueries) ∧
     productionAggParams.defaultQromQueries =
-      (Aggregation.whirSchedule4Stage .habr24Qrom128).map (·.numQueries) ∧
+      (Aggregation.whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) ∧
     productionAggParams.johnsonQromQueries =
       (Aggregation.whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) ∧
     (∀ r : Aggregation.WhirSecurityRegime, ∀ s ∈ Aggregation.whirSchedule4Stage r,
       s.numQueries ≤ productionAggParams.maxQueryCap) := by
-  refine ⟨by decide, by decide, ?_⟩
+  refine ⟨by decide, by decide, by decide, ?_⟩
   intro r
   cases r <;> decide
 
@@ -1160,7 +1176,7 @@ theorem shift_sumcheck_degree3_rejected (claim terminal : GoldilocksExt4)
 structure AggregatedSignature where
   suite : TweakableHashSuite
   params : PqHashParams
-  regime : WhirSecurityRegime := .habr24Qrom128
+  regime : WhirSecurityRegime := .bciksJohnsonQrom128
   bitmap : SignerBitmapSpec
   signerCount : Nat
   traceCommitment : List UInt8
@@ -1405,7 +1421,7 @@ def adaptivePolys {α β : Type} (poly : List α → β) (challenges : List α) 
 structure AggPublicInstance where
   suite : TweakableHashSuite
   params : PqHashParams
-  regime : WhirSecurityRegime := .habr24Qrom128
+  regime : WhirSecurityRegime := .bciksJohnsonQrom128
   message : List UInt8
   committee : List PqPublicKey
   signingModeDigest : List UInt8
@@ -4236,7 +4252,7 @@ theorem whir_bciksJohnsonClassical128_query_miss_lt {α : Type}
     For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonQrom128` (`q = (258, 130, 88, 66)`),
     whenever `bad` has relative density `≥ 1 - (1 / √B_s + 1 / 1024)` (positive proximity slack
     `η = 1 / 1024 > 0`, finite Johnson list size `L ≤ 512`), fewer than a `2^-256` fraction of
-    distinct query tuples miss `bad` (`+ 16`b PoW = `136` QROM Grover bits without `[HABR24]`). -/
+    distinct query tuples miss `bad` (`+ 16`b PoW = `136` QROM Grover bits). -/
 theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
     (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .bciksJohnsonQrom128)
     (bad : α → Bool) (dom : List α)
@@ -4249,23 +4265,6 @@ theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
       1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
   exact strict_query_miss_from_slack bad dom s.numQueries
     (1024 / s.johnsonSqrtBlowup + 1) 1024 256 hdom (hAllLe s hs) hfar hSlack
-
-/-- **Default `Habr24Qrom128` Per-Stage Query Bound (`whir_habr24Qrom128_query_miss_le`)**:
-    For EVERY stage `s ∈ whirSchedule4Stage .habr24Qrom128` (`q = (128, 64, 43, 32)`), under
-    `[HABR24]` proximity `(B_s - 1) / B_s`, `missCount * 2^256 ≤ totalTuples`. -/
-theorem whir_habr24Qrom128_query_miss_le {α : Type}
-    (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .habr24Qrom128)
-    (bad : α → Bool) (dom : List α)
-    (hfar : (s.blowup - 1) * dom.length ≤ s.blowup * countGood bad dom) :
-    ((aggDistinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
-      2 ^ 256 ≤ (aggDistinctTuples s.numQueries dom).length := by
-  have hb := whir_query_miss_bound bad dom s.numQueries (s.blowup - 1) s.blowup hfar
-  have hAllPos : ∀ st ∈ whirSchedule4Stage .habr24Qrom128, 1 ≤ st.blowup := by decide
-  have hPos : 1 ≤ s.blowup := hAllPos s hs
-  have hSub : s.blowup - (s.blowup - 1) = 1 := by omega
-  rw [hSub, Nat.one_pow, Nat.one_mul] at hb
-  exact Nat.le_trans
-    (Nat.mul_le_mul_left _ (habr24Qrom128_stage_exponents s hs)) hb
 
 private theorem length_flatMap_scaled_le {α β : Type} (b : α → Bool) (K U V : Nat)
     (f : α → List β) :
@@ -5197,7 +5196,7 @@ def rsSbox7WhirDomain : WhirDomain := { stages := [sbox7Stage0Dom, sbox7Stage1Do
 def rsSbox7Inst (seed root : Goldilocks) (msg : List UInt8) : AggPublicInstance where
   suite := sbox7FieldSuite
   params := sbox7Params
-  regime := .habr24Qrom128
+  regime := .bciksJohnsonQrom128
   message := msg
   committee := [mkSbox7Pk seed root]
   signingModeDigest := "QSAG.SBOX7.MODE/v2".toUTF8.toList
@@ -5974,7 +5973,7 @@ def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
   let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
   let pRow := honestSbox7RoundPoly seed root table0
   let aggStub : AggregatedSignature :=
-    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
+    { suite := sbox7FieldSuite, params := sbox7Params, regime := .bciksJohnsonQrom128,
       bitmap := [true], signerCount := 1, traceCommitment := root0,
       claimedSum := GoldilocksExt4.zero, roundPolys := [], challenges := [],
       terminalEval := GoldilocksExt4.zero, childrenCommitment := none }
@@ -5984,7 +5983,7 @@ def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
   let pr0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
     (CommRingOps.mul r0 (GoldilocksExt4.embedBase b1))
   let agg : AggregatedSignature :=
-    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
+    { suite := sbox7FieldSuite, params := sbox7Params, regime := .bciksJohnsonQrom128,
       bitmap := [true], signerCount := 1, traceCommitment := root0,
       claimedSum := GoldilocksExt4.zero, roundPolys := [pRow], challenges := rowChalls,
       terminalEval := RoundPoly.evalCoeffs pRow r0, childrenCommitment := none }
@@ -6020,7 +6019,7 @@ theorem honestSbox7WhirProof_accepts (seed x0 b1 : Goldilocks) (msg : List UInt8
   let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
   let pRow := honestSbox7RoundPoly seed root table0
   let aggStub : AggregatedSignature :=
-    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
+    { suite := sbox7FieldSuite, params := sbox7Params, regime := .bciksJohnsonQrom128,
       bitmap := [true], signerCount := 1, traceCommitment := root0,
       claimedSum := GoldilocksExt4.zero, roundPolys := [], challenges := [],
       terminalEval := GoldilocksExt4.zero, childrenCommitment := none }
@@ -6030,7 +6029,7 @@ theorem honestSbox7WhirProof_accepts (seed x0 b1 : Goldilocks) (msg : List UInt8
   let pr0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
     (CommRingOps.mul r0 (GoldilocksExt4.embedBase b1))
   let agg : AggregatedSignature :=
-    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
+    { suite := sbox7FieldSuite, params := sbox7Params, regime := .bciksJohnsonQrom128,
       bitmap := [true], signerCount := 1, traceCommitment := root0,
       claimedSum := GoldilocksExt4.zero, roundPolys := [pRow], challenges := rowChalls,
       terminalEval := RoundPoly.evalCoeffs pRow r0, childrenCommitment := none }
