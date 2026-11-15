@@ -1,5 +1,6 @@
 #version 460
 #extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_control_flow_attributes : require
 
 // Certified SPIR-V 1.5 compute kernel for `ProverKernelSlot::AirRowGroupA`.
 // VRAM-resident witness transpose (`row-major -> col-major`), Round-0 base-field & Rounds >= 1
@@ -74,6 +75,36 @@ const uint64_t RC_EXT_TERM[48] = uint64_t[48](
 );
 
 shared uint s_red[8][64];
+shared uint s_st[96][64];
+
+uint64_t st_base_load(uint lid, uint lane) {
+    uint b = lane * 2u;
+    return uint64_t(s_st[b][lid]) | (uint64_t(s_st[b + 1u][lid]) << 32u);
+}
+
+void st_base_store(uint lid, uint lane, uint64_t v) {
+    uint b = lane * 2u;
+    s_st[b][lid] = uint(v);
+    s_st[b + 1u][lid] = uint(v >> 32u);
+}
+
+u64vec4 st_ext4_load(uint lid, uint lane) {
+    uint b = lane * 8u;
+    return u64vec4(
+        uint64_t(s_st[b][lid]) | (uint64_t(s_st[b + 1u][lid]) << 32u),
+        uint64_t(s_st[b + 2u][lid]) | (uint64_t(s_st[b + 3u][lid]) << 32u),
+        uint64_t(s_st[b + 4u][lid]) | (uint64_t(s_st[b + 5u][lid]) << 32u),
+        uint64_t(s_st[b + 6u][lid]) | (uint64_t(s_st[b + 7u][lid]) << 32u)
+    );
+}
+
+void st_ext4_store(uint lid, uint lane, u64vec4 v) {
+    uint b = lane * 8u;
+    s_st[b][lid]      = uint(v.x); s_st[b + 1u][lid] = uint(v.x >> 32u);
+    s_st[b + 2u][lid] = uint(v.y); s_st[b + 3u][lid] = uint(v.y >> 32u);
+    s_st[b + 4u][lid] = uint(v.z); s_st[b + 5u][lid] = uint(v.z >> 32u);
+    s_st[b + 6u][lid] = uint(v.w); s_st[b + 7u][lid] = uint(v.w >> 32u);
+}
 
 u64vec4 red_load(uint i) {
     return u64vec4(
@@ -159,30 +190,39 @@ void apply_m4_base(inout uint64_t v0, inout uint64_t v1, inout uint64_t v2, inou
     v0 = r0; v1 = r1; v2 = r2; v3 = r3;
 }
 
-void apply_me_base(inout uint64_t st[12]) {
-    for (uint i = 0u; i < 12u; ++i) {
-        st[i] = fp_reduce_u64(st[i]);
+void apply_me_base(uint lid) {
+    [[dont_unroll]] for (uint g = 0u; g < 12u; g += 4u) {
+        uint64_t v0 = fp_reduce_u64(st_base_load(lid, g));
+        uint64_t v1 = fp_reduce_u64(st_base_load(lid, g + 1u));
+        uint64_t v2 = fp_reduce_u64(st_base_load(lid, g + 2u));
+        uint64_t v3 = fp_reduce_u64(st_base_load(lid, g + 3u));
+        apply_m4_base(v0, v1, v2, v3);
+        st_base_store(lid, g, v0);
+        st_base_store(lid, g + 1u, v1);
+        st_base_store(lid, g + 2u, v2);
+        st_base_store(lid, g + 3u, v3);
     }
-    apply_m4_base(st[0], st[1], st[2], st[3]);
-    apply_m4_base(st[4], st[5], st[6], st[7]);
-    apply_m4_base(st[8], st[9], st[10], st[11]);
-    for (uint i = 0u; i < 4u; ++i) {
-        uint64_t s = fp_add(fp_add(st[i], st[4u + i]), st[8u + i]);
-        st[i]      = fp_add(st[i], s);
-        st[4u + i] = fp_add(st[4u + i], s);
-        st[8u + i] = fp_add(st[8u + i], s);
+    [[dont_unroll]] for (uint i = 0u; i < 4u; ++i) {
+        uint64_t a0 = st_base_load(lid, i);
+        uint64_t a1 = st_base_load(lid, 4u + i);
+        uint64_t a2 = st_base_load(lid, 8u + i);
+        uint64_t s = fp_add(fp_add(a0, a1), a2);
+        st_base_store(lid, i, fp_add(a0, s));
+        st_base_store(lid, 4u + i, fp_add(a1, s));
+        st_base_store(lid, 8u + i, fp_add(a2, s));
     }
 }
 
-void apply_mi_base(inout uint64_t st[12]) {
+void apply_mi_base(uint lid) {
     uint64_t s = 0ul;
-    for (uint i = 0u; i < 12u; ++i) {
-        s = fp_add(s, st[i]);
+    [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
+        s = fp_add(s, st_base_load(lid, i));
     }
-    st[0] = fp_add(fp_neg(fp_add(st[0], st[0])), s);
-    st[1] = fp_add(st[1], s);
-    for (uint i = 2u; i < 12u; ++i) {
-        st[i] = fp_add(fp_shl_canonical(st[i], i - 1u), s);
+    uint64_t v0 = st_base_load(lid, 0u);
+    st_base_store(lid, 0u, fp_add(fp_neg(fp_add(v0, v0)), s));
+    st_base_store(lid, 1u, fp_add(st_base_load(lid, 1u), s));
+    [[dont_unroll]] for (uint i = 2u; i < 12u; ++i) {
+        st_base_store(lid, i, fp_add(fp_shl_canonical(st_base_load(lid, i), i - 1u), s));
     }
 }
 
@@ -252,33 +292,43 @@ void apply_m4_ext4(inout u64vec4 v0, inout u64vec4 v1, inout u64vec4 v2, inout u
     v0 = r0; v1 = r1; v2 = r2; v3 = r3;
 }
 
-void apply_me_ext4(inout u64vec4 st[12]) {
-    for (uint i = 0u; i < 12u; ++i) {
-        st[i] = u64vec4(
-            fp_reduce_u64(st[i].x), fp_reduce_u64(st[i].y),
-            fp_reduce_u64(st[i].z), fp_reduce_u64(st[i].w)
-        );
+void apply_me_ext4(uint lid) {
+    [[dont_unroll]] for (uint g = 0u; g < 12u; g += 4u) {
+        u64vec4 u0 = st_ext4_load(lid, g);
+        u64vec4 u1 = st_ext4_load(lid, g + 1u);
+        u64vec4 u2 = st_ext4_load(lid, g + 2u);
+        u64vec4 u3 = st_ext4_load(lid, g + 3u);
+        u64vec4 v0 = u64vec4(fp_reduce_u64(u0.x), fp_reduce_u64(u0.y), fp_reduce_u64(u0.z), fp_reduce_u64(u0.w));
+        u64vec4 v1 = u64vec4(fp_reduce_u64(u1.x), fp_reduce_u64(u1.y), fp_reduce_u64(u1.z), fp_reduce_u64(u1.w));
+        u64vec4 v2 = u64vec4(fp_reduce_u64(u2.x), fp_reduce_u64(u2.y), fp_reduce_u64(u2.z), fp_reduce_u64(u2.w));
+        u64vec4 v3 = u64vec4(fp_reduce_u64(u3.x), fp_reduce_u64(u3.y), fp_reduce_u64(u3.z), fp_reduce_u64(u3.w));
+        apply_m4_ext4(v0, v1, v2, v3);
+        st_ext4_store(lid, g, v0);
+        st_ext4_store(lid, g + 1u, v1);
+        st_ext4_store(lid, g + 2u, v2);
+        st_ext4_store(lid, g + 3u, v3);
     }
-    apply_m4_ext4(st[0], st[1], st[2], st[3]);
-    apply_m4_ext4(st[4], st[5], st[6], st[7]);
-    apply_m4_ext4(st[8], st[9], st[10], st[11]);
-    for (uint i = 0u; i < 4u; ++i) {
-        u64vec4 s = fp4_add(fp4_add(st[i], st[4u + i]), st[8u + i]);
-        st[i]      = fp4_add(st[i], s);
-        st[4u + i] = fp4_add(st[4u + i], s);
-        st[8u + i] = fp4_add(st[8u + i], s);
+    [[dont_unroll]] for (uint i = 0u; i < 4u; ++i) {
+        u64vec4 a0 = st_ext4_load(lid, i);
+        u64vec4 a1 = st_ext4_load(lid, 4u + i);
+        u64vec4 a2 = st_ext4_load(lid, 8u + i);
+        u64vec4 s = fp4_add(fp4_add(a0, a1), a2);
+        st_ext4_store(lid, i, fp4_add(a0, s));
+        st_ext4_store(lid, 4u + i, fp4_add(a1, s));
+        st_ext4_store(lid, 8u + i, fp4_add(a2, s));
     }
 }
 
-void apply_mi_ext4(inout u64vec4 st[12]) {
+void apply_mi_ext4(uint lid) {
     u64vec4 s = u64vec4(0ul);
-    for (uint i = 0u; i < 12u; ++i) {
-        s = fp4_add(s, st[i]);
+    [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
+        s = fp4_add(s, st_ext4_load(lid, i));
     }
-    st[0] = fp4_add(fp4_neg(fp4_add(st[0], st[0])), s);
-    st[1] = fp4_add(st[1], s);
-    for (uint i = 2u; i < 12u; ++i) {
-        st[i] = fp4_add(fp4_shl_canonical(st[i], i - 1u), s);
+    u64vec4 v0 = st_ext4_load(lid, 0u);
+    st_ext4_store(lid, 0u, fp4_add(fp4_neg(fp4_add(v0, v0)), s));
+    st_ext4_store(lid, 1u, fp4_add(st_ext4_load(lid, 1u), s));
+    [[dont_unroll]] for (uint i = 2u; i < 12u; ++i) {
+        st_ext4_store(lid, i, fp4_add(fp4_shl_canonical(st_ext4_load(lid, i), i - 1u), s));
     }
 }
 
@@ -318,7 +368,7 @@ void store4_b5(uint idx, u64vec4 v) {
 u64vec4 wg_reduce_64(uint lid, u64vec4 val) {
     red_store(lid, val);
     barrier();
-    for (uint s = 32u; s >= 1u; s >>= 1u) {
+    [[dont_unroll]] for (uint s = 32u; s >= 1u; s >>= 1u) {
         if (lid < s) {
             red_store(lid, fp4_add(red_load(lid), red_load(lid + s)));
         }
@@ -415,7 +465,7 @@ void main() {
             // Shift-bus dot product at `k_val` (`next = cols[174..218], prev = cols[130..174]`):
             u64vec4 cur_a = u64vec4(0ul);
             u64vec4 cur_b = u64vec4(0ul);
-            for (uint j = 0u; j < 44u; ++j) {
+            [[dont_unroll]] for (uint j = 0u; j < 44u; ++j) {
                 u64vec4 g_sh = load4_b3(206u + j);
                 uint64_t p_v = col_base_at_k(130u + j, idx, half_m, k_val);
                 uint64_t n_v = col_base_at_k(174u + j, idx, half_m, k_val);
@@ -447,62 +497,61 @@ void main() {
                     rl_k = fp_add(rl0, fp_mul(fp_sub(rl1, rl0), uint64_t(k_val)));
                 }
 
-                uint64_t st[12];
-                for (uint i = 0u; i < 12u; ++i) {
-                    st[i] = col_base_at_k(i, idx, half_m, k_val);
+                [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
+                    st_base_store(lid, i, col_base_at_k(i, idx, half_m, k_val));
                 }
-                apply_me_base(st);
+                apply_me_base(lid);
 
                 u64vec4 eq_acc = u64vec4(0ul);
                 uint c_idx = 0u;
                 uint sb_idx = 0u;
 
-                for (uint r = 0u; r < 4u; ++r) {
-                    for (uint lane = 0u; lane < 12u; ++lane) {
+                [[dont_unroll]] for (uint r = 0u; r < 4u; ++r) {
+                    [[dont_unroll]] for (uint lane = 0u; lane < 12u; ++lane) {
                         uint64_t sbox_val = col_base_at_k(12u + sb_idx, idx, half_m, k_val);
-                        uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st[lane], RC_EXT_INIT[r * 12u + lane])), sbox_val);
+                        uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st_base_load(lid, lane), RC_EXT_INIT[r * 12u + lane])), sbox_val);
                         if (res != 0ul) {
                             eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
                         }
-                        st[lane] = sbox_val;
+                        st_base_store(lid, lane, sbox_val);
                         c_idx += 1u;
                         sb_idx += 1u;
                     }
-                    apply_me_base(st);
+                    apply_me_base(lid);
                 }
-                for (uint r = 0u; r < 22u; ++r) {
+                [[dont_unroll]] for (uint r = 0u; r < 22u; ++r) {
                     uint64_t sbox_val = col_base_at_k(12u + sb_idx, idx, half_m, k_val);
-                    uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st[0], RC_INT[r])), sbox_val);
+                    uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st_base_load(lid, 0u), RC_INT[r])), sbox_val);
                     if (res != 0ul) {
                         eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
                     }
-                    st[0] = sbox_val;
+                    st_base_store(lid, 0u, sbox_val);
                     c_idx += 1u;
                     sb_idx += 1u;
-                    apply_mi_base(st);
+                    apply_mi_base(lid);
                 }
-                for (uint r = 0u; r < 4u; ++r) {
-                    for (uint lane = 0u; lane < 12u; ++lane) {
+                [[dont_unroll]] for (uint r = 0u; r < 4u; ++r) {
+                    [[dont_unroll]] for (uint lane = 0u; lane < 12u; ++lane) {
                         uint64_t sbox_val = col_base_at_k(12u + sb_idx, idx, half_m, k_val);
-                        uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st[lane], RC_EXT_TERM[r * 12u + lane])), sbox_val);
+                        uint64_t res = fp_sub(poseidon2_sbox7_base(fp_add(st_base_load(lid, lane), RC_EXT_TERM[r * 12u + lane])), sbox_val);
                         if (res != 0ul) {
                             eq_acc = fp4_add(eq_acc, fp4_mul_base(load4_b3(c_idx), res));
                         }
-                        st[lane] = sbox_val;
+                        st_base_store(lid, lane, sbox_val);
                         c_idx += 1u;
                         sb_idx += 1u;
                     }
-                    apply_me_base(st);
+                    apply_me_base(lid);
                 }
 
                 // Write 12 base-field `perm_out` words to `b4` for `k_slot - 1` (`0..7`):
                 uint perm_off = ((k_slot - 1u) * half_m + idx) * 12u;
-                for (uint i = 0u; i < 12u; ++i) {
-                    b4.words[perm_off + i] = st[i];
+                [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
+                    b4.words[perm_off + i] = st_base_load(lid, i);
                 }
 
                 if (rf_k != 0ul || rl_k != 0ul) {
-                    for (uint j = 0u; j < 44u; ++j) {
+                    [[dont_unroll]] for (uint j = 0u; j < 44u; ++j) {
                         if (rf_k != 0ul) {
                             uint64_t pv = col_base_at_k(130u + j, idx, half_m, k_val);
                             uint64_t res = fp_mul(rf_k, pv);
@@ -556,7 +605,7 @@ void main() {
 
             u64vec4 cur_a = u64vec4(0ul);
             u64vec4 cur_b = u64vec4(0ul);
-            for (uint j = 0u; j < 44u; ++j) {
+            [[dont_unroll]] for (uint j = 0u; j < 44u; ++j) {
                 u64vec4 g_sh = load4_b3(206u + j);
                 u64vec4 p_v = col_ext4_at_k(130u + j, idx, half_m, k_val);
                 u64vec4 n_v = col_ext4_at_k(174u + j, idx, half_m, k_val);
@@ -580,70 +629,69 @@ void main() {
                 rl_k = interp_ext4(load4_b3(so0 + 1u), load4_b3(so1 + 1u), k_val);
             }
 
-            u64vec4 st[12];
-            for (uint i = 0u; i < 12u; ++i) {
-                st[i] = col_ext4_at_k(i, idx, half_m, k_val);
+            [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
+                st_ext4_store(lid, i, col_ext4_at_k(i, idx, half_m, k_val));
             }
-            apply_me_ext4(st);
+            apply_me_ext4(lid);
 
             u64vec4 eq_acc = u64vec4(0ul);
             uint c_idx = 0u;
             uint sb_idx = 0u;
 
-            for (uint r = 0u; r < 4u; ++r) {
-                for (uint lane = 0u; lane < 12u; ++lane) {
+            [[dont_unroll]] for (uint r = 0u; r < 4u; ++r) {
+                [[dont_unroll]] for (uint lane = 0u; lane < 12u; ++lane) {
                     u64vec4 sbox_val = col_ext4_at_k(12u + sb_idx, idx, half_m, k_val);
-                    u64vec4 st_rc = st[lane];
+                    u64vec4 st_rc = st_ext4_load(lid, lane);
                     st_rc.x = fp_add(st_rc.x, RC_EXT_INIT[r * 12u + lane]);
                     u64vec4 res = fp4_sub(poseidon2_sbox7_ext4(st_rc), sbox_val);
                     if (!is_zero4(res)) {
                         eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
                     }
-                    st[lane] = sbox_val;
+                    st_ext4_store(lid, lane, sbox_val);
                     c_idx += 1u;
                     sb_idx += 1u;
                 }
-                apply_me_ext4(st);
+                apply_me_ext4(lid);
             }
-            for (uint r = 0u; r < 22u; ++r) {
+            [[dont_unroll]] for (uint r = 0u; r < 22u; ++r) {
                 u64vec4 sbox_val = col_ext4_at_k(12u + sb_idx, idx, half_m, k_val);
-                u64vec4 st_rc = st[0];
+                u64vec4 st_rc = st_ext4_load(lid, 0u);
                 st_rc.x = fp_add(st_rc.x, RC_INT[r]);
                 u64vec4 res = fp4_sub(poseidon2_sbox7_ext4(st_rc), sbox_val);
                 if (!is_zero4(res)) {
                     eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
                 }
-                st[0] = sbox_val;
+                st_ext4_store(lid, 0u, sbox_val);
                 c_idx += 1u;
                 sb_idx += 1u;
-                apply_mi_ext4(st);
+                apply_mi_ext4(lid);
             }
-            for (uint r = 0u; r < 4u; ++r) {
-                for (uint lane = 0u; lane < 12u; ++lane) {
+            [[dont_unroll]] for (uint r = 0u; r < 4u; ++r) {
+                [[dont_unroll]] for (uint lane = 0u; lane < 12u; ++lane) {
                     u64vec4 sbox_val = col_ext4_at_k(12u + sb_idx, idx, half_m, k_val);
-                    u64vec4 st_rc = st[lane];
+                    u64vec4 st_rc = st_ext4_load(lid, lane);
                     st_rc.x = fp_add(st_rc.x, RC_EXT_TERM[r * 12u + lane]);
                     u64vec4 res = fp4_sub(poseidon2_sbox7_ext4(st_rc), sbox_val);
                     if (!is_zero4(res)) {
                         eq_acc = fp4_add(eq_acc, fp4_mul(load4_b3(c_idx), res));
                     }
-                    st[lane] = sbox_val;
+                    st_ext4_store(lid, lane, sbox_val);
                     c_idx += 1u;
                     sb_idx += 1u;
                 }
-                apply_me_ext4(st);
+                apply_me_ext4(lid);
             }
 
             // Write 12 `Ext4` `perm_out` values to `b4` for `k_slot` (`0..8`):
             uint perm_off = (k_slot * half_m + idx) * 12u;
-            for (uint i = 0u; i < 12u; ++i) {
-                store4_b4(perm_off + i, st[i]);
+            [[dont_unroll]] for (uint i = 0u; i < 12u; ++i) {
+                store4_b4(perm_off + i, st_ext4_load(lid, i));
             }
 
             bool rf_nz = !is_zero4(rf_k);
             bool rl_nz = !is_zero4(rl_k);
             if (rf_nz || rl_nz) {
-                for (uint j = 0u; j < 44u; ++j) {
+                [[dont_unroll]] for (uint j = 0u; j < 44u; ++j) {
                     if (rf_nz) {
                         u64vec4 pv = col_ext4_at_k(130u + j, idx, half_m, k_val);
                         u64vec4 res = fp4_mul(rf_k, pv);

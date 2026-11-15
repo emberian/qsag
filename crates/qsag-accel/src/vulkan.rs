@@ -705,6 +705,7 @@ impl VulkanSpirvBackend {
     pub fn prover_whir_commit_round0(
         &self,
         polys: &[&[u64]],
+        salt_seed: &[u8; 32],
         num_vars: usize,
         blowup: usize,
         group_arity: usize,
@@ -721,6 +722,7 @@ impl VulkanSpirvBackend {
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
             let (top_node, subs) = guard.exec_prover_whir_commit_round0(
                 polys,
+                salt_seed,
                 num_vars,
                 blowup,
                 group_arity,
@@ -735,6 +737,7 @@ impl VulkanSpirvBackend {
         {
             let _ = (
                 polys,
+                salt_seed,
                 num_vars,
                 blowup,
                 group_arity,

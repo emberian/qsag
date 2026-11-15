@@ -33,8 +33,7 @@ use core::mem::{MaybeUninit, size_of};
 use core::ptr::{null, null_mut};
 
 use crate::goldilocks::{
-    gl_add, gl_inv_or_zero, gl_mul, gl_neg, gl_pow_pub, gl_reduce_u64, gl_sub,
-    goldilocks_primitive_root,
+    gl_add, gl_inv_or_zero, gl_mul, gl_neg, gl_pow_pub, gl_reduce_u64, goldilocks_primitive_root,
 };
 use crate::spirv_kernels::{prover_spirv_kernel_words, spirv_kernel_words};
 use crate::vulkan::{VulkanDeviceInfo, VulkanError};
@@ -635,24 +634,7 @@ struct AirGroupBPushConsts {
 }
 const _: () = assert!(size_of::<AirGroupBPushConsts>() == 64);
 
-#[repr(C)]
-struct VkDirectDriverLoadingInfoLUNARG {
-    s_type: u32,
-    p_next: *mut c_void,
-    flags: u32,
-    pfn_get_instance_proc_addr: PfnVkGetInstanceProcAddr,
-}
-const _: () = assert!(size_of::<VkDirectDriverLoadingInfoLUNARG>() == 32);
-
-#[repr(C)]
-struct VkDirectDriverLoadingListLUNARG {
-    s_type: u32,
-    p_next: *const c_void,
-    mode: u32,
-    driver_count: u32,
-    p_drivers: *const VkDirectDriverLoadingInfoLUNARG,
-}
-const _: () = assert!(size_of::<VkDirectDriverLoadingListLUNARG>() == 32);
+type PfnVkIcdNegotiateVersion = unsafe extern "C" fn(*mut u32) -> i32;
 
 type PfnVoid = Option<unsafe extern "C" fn()>;
 type PfnVkGetInstanceProcAddr = unsafe extern "C" fn(VkInstance, *const c_char) -> PfnVoid;
@@ -942,6 +924,7 @@ enum EngineExecState {
 struct ProverArena {
     initialized: bool,
     twiddles_ready: bool,
+    salt_seed_words: [u64; 4],
     desc_pool: VkDescriptorPool,
     ds_lde_r0: VkDescriptorSet,
     ds_gather_r0: VkDescriptorSet,
@@ -1115,6 +1098,28 @@ impl RawVulkanEngine {
         if cfg!(target_endian = "big") {
             return Err(VulkanError::UnsupportedPlatform);
         }
+
+        // Determine whether an explicit Vulkan ICD environment override is active.
+        // On dual-ICD Linux AMD hosts (`amdvlk64.so` + Mesa `libvulkan_radeon.so`), AMDVLK's
+        // `/etc/vulkan/implicit_layer.d/amd_icd64.json` (`VK_LAYER_AMD_switchable_graphics_64`)
+        // intercepts `libvulkan.so.1` and hides Mesa RADV Wave32 devices unless negotiated
+        // directly via the Khronos ICD v5 ABI (`vk_icdNegotiateLoaderICDInterfaceVersion`).
+        let icd_override = std::env::var_os("VK_ICD_FILENAMES")
+            .or_else(|| std::env::var_os("VK_DRIVER_FILES"))
+            .or_else(|| std::env::var_os("VK_ADD_DRIVER_FILES"));
+        let allow_direct_radv = match &icd_override {
+            None => true,
+            Some(v) => v.to_string_lossy().contains("radeon_icd"),
+        };
+        let mut radv_err: Option<VulkanError> = None;
+        if allow_direct_radv {
+            match unsafe { Self::try_new_with_radv_icd() } {
+                Some(Ok((eng, info))) => return Ok((eng, info)),
+                Some(Err(VulkanError::NoDiscreteGpuFound)) | None => {}
+                Some(Err(e)) => radv_err = Some(e),
+            }
+        }
+
         let lib_handle = unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
         if lib_handle.is_null() {
             return Err(VulkanError::LibraryLoadFailed);
@@ -1199,7 +1204,6 @@ impl RawVulkanEngine {
                     unsafe {
                         if !instance.is_null() {
                             destroy_instance(instance, null());
-                            instance = null_mut();
                         }
                     }
                     res
@@ -1215,69 +1219,16 @@ impl RawVulkanEngine {
             })
         };
 
-        // If default instance creation only surfaced a non-Wave32 ICD (e.g. AMDVLK's implicit
-        // switchable-graphics layer masking Mesa RADV on dual-ICD Linux hosts), retry once via
-        // `VK_LUNARG_direct_driver_loading` against `libvulkan_radeon.so` without requiring
-        // external environment variables.
-        let should_try_radv_ddl = matches!(
-            default_res,
-            Err(VulkanError::NoDiscreteGpuFound
-                | VulkanError::PipelineAuditFailed(_)
-                | VulkanError::UnexpectedSubgroupSize { .. }
-                | VulkanError::UnexpectedProverSubgroupSize { .. })
-        );
-        if should_try_radv_ddl
-            && let Some((eng, info)) =
-                unsafe { Self::try_new_with_radv_ddl(lib_handle, gipa, create_instance, &app_info) }
-        {
-            return Ok((eng, info));
-        }
-
         unsafe {
             let _ = dlclose(lib_handle);
+        }
+        if let Some(e) = radv_err {
+            return Err(e);
         }
         default_res
     }
 
-    unsafe fn try_new_with_radv_ddl(
-        lib_handle: *mut c_void,
-        gipa: PfnVkGetInstanceProcAddr,
-        create_instance: PfnVkCreateInstance,
-        app_info: &VkApplicationInfo,
-    ) -> Option<(Self, VulkanDeviceInfo)> {
-        let enum_inst_exts: unsafe extern "C" fn(
-            *const c_char,
-            *mut u32,
-            *mut ExtensionProperties,
-        ) -> i32 = unsafe {
-            load_inst_fn(
-                gipa,
-                null_mut(),
-                c"vkEnumerateInstanceExtensionProperties",
-                "vkEnumerateInstanceExtensionProperties",
-            )
-            .ok()?
-        };
-        let mut ext_count = 0u32;
-        if unsafe { enum_inst_exts(null(), &mut ext_count, null_mut()) } != VK_SUCCESS
-            || ext_count == 0
-        {
-            return None;
-        }
-        let mut exts =
-            std::vec![ExtensionProperties { name: [0; 256], version: 0 }; ext_count as usize];
-        if unsafe { enum_inst_exts(null(), &mut ext_count, exts.as_mut_ptr()) } != VK_SUCCESS {
-            return None;
-        }
-        exts.truncate(ext_count as usize);
-        let ddl_ext = c"VK_LUNARG_direct_driver_loading";
-        if !exts
-            .iter()
-            .any(|e| e.name.starts_with(ddl_ext.to_bytes_with_nul()))
-        {
-            return None;
-        }
-
+    unsafe fn try_new_with_radv_icd() -> Option<Result<(Self, VulkanDeviceInfo), VulkanError>> {
         let radv_paths = [
             c"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so",
             c"/usr/lib64/libvulkan_radeon.so",
@@ -1296,11 +1247,18 @@ impl RawVulkanEngine {
             return None;
         }
 
-        let mut icd_gipa_raw = unsafe { dlsym(radv_lib, c"vk_icdGetInstanceProcAddr".as_ptr()) };
-        if icd_gipa_raw.is_null() {
-            icd_gipa_raw = unsafe { dlsym(radv_lib, c"vkGetInstanceProcAddr".as_ptr()) };
+        let negotiate_raw =
+            unsafe { dlsym(radv_lib, c"vk_icdNegotiateLoaderICDInterfaceVersion".as_ptr()) };
+        let icd_gipa_raw = unsafe { dlsym(radv_lib, c"vk_icdGetInstanceProcAddr".as_ptr()) };
+        if negotiate_raw.is_null() || icd_gipa_raw.is_null() {
+            unsafe {
+                let _ = dlclose(radv_lib);
+            }
+            return None;
         }
-        if icd_gipa_raw.is_null() {
+        let negotiate: PfnVkIcdNegotiateVersion = unsafe { core::mem::transmute(negotiate_raw) };
+        let mut icd_ver = 5u32;
+        if unsafe { negotiate(&mut icd_ver) } != VK_SUCCESS || icd_ver < 5 {
             unsafe {
                 let _ = dlclose(radv_lib);
             }
@@ -1308,29 +1266,53 @@ impl RawVulkanEngine {
         }
         let icd_gipa: PfnVkGetInstanceProcAddr = unsafe { core::mem::transmute(icd_gipa_raw) };
 
-        let ddl_driver = VkDirectDriverLoadingInfoLUNARG {
-            s_type: 1000459000,
-            p_next: null_mut(),
-            flags: 0,
-            pfn_get_instance_proc_addr: icd_gipa,
+        let Ok(create_instance) = (unsafe {
+            load_inst_fn::<PfnVkCreateInstance>(
+                icd_gipa,
+                null_mut(),
+                c"vkCreateInstance",
+                "vkCreateInstance",
+            )
+        }) else {
+            unsafe {
+                let _ = dlclose(radv_lib);
+            }
+            return None;
         };
-        let ddl_list = VkDirectDriverLoadingListLUNARG {
-            s_type: 1000459001,
+
+        let mut icd_api = VK_API_VERSION_1_2;
+        if let Ok(enum_ver) = unsafe {
+            load_inst_fn::<PfnVkEnumerateInstanceVersion>(
+                icd_gipa,
+                null_mut(),
+                c"vkEnumerateInstanceVersion",
+                "vkEnumerateInstanceVersion",
+            )
+        } {
+            let mut v = 0u32;
+            if unsafe { enum_ver(&mut v) } == VK_SUCCESS && v >= VK_API_VERSION_1_3 {
+                icd_api = VK_API_VERSION_1_3;
+            }
+        }
+
+        let app_info = VkApplicationInfo {
+            s_type: VK_STRUCTURE_TYPE_APPLICATION_INFO,
             p_next: null(),
-            mode: 0, // VK_DIRECT_DRIVER_LOADING_MODE_EXCLUSIVE_LUNARG
-            driver_count: 1,
-            p_drivers: &ddl_driver,
+            p_application_name: c"qsag-accel".as_ptr(),
+            application_version: 1,
+            p_engine_name: c"qsag-spirv".as_ptr(),
+            engine_version: 1,
+            api_version: icd_api,
         };
-        let ext_names = [ddl_ext.as_ptr()];
         let inst_info = VkInstanceCreateInfo {
             s_type: VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            p_next: (&ddl_list as *const VkDirectDriverLoadingListLUNARG).cast(),
+            p_next: null(),
             flags: 0,
-            p_application_info: app_info,
+            p_application_info: &app_info,
             enabled_layer_count: 0,
             pp_enabled_layer_names: null(),
-            enabled_extension_count: 1,
-            pp_enabled_extension_names: ext_names.as_ptr(),
+            enabled_extension_count: 0,
+            pp_enabled_extension_names: null(),
         };
         let mut instance: VkInstance = null_mut();
         if unsafe { create_instance(&inst_info, null(), &mut instance) } != VK_SUCCESS {
@@ -1339,28 +1321,36 @@ impl RawVulkanEngine {
             }
             return None;
         }
-        let Ok(destroy_instance) =
-            (unsafe { load_inst_fn(gipa, instance, c"vkDestroyInstance", "vkDestroyInstance") })
-        else {
+        let Ok(destroy_instance) = (unsafe {
+            load_inst_fn::<PfnVkDestroyInstance>(
+                icd_gipa,
+                instance,
+                c"vkDestroyInstance",
+                "vkDestroyInstance",
+            )
+        }) else {
             unsafe {
                 let _ = dlclose(radv_lib);
             }
             return None;
         };
 
-        let mut lib_slot = lib_handle;
-        let mut radv_slot = radv_lib;
+        let mut lib_slot: *mut c_void = null_mut();
+        let mut radv_slot: *mut c_void = radv_lib;
         match unsafe {
             Self::init_with_instance(
                 &mut lib_slot,
                 &mut radv_slot,
-                gipa,
+                icd_gipa,
                 &mut instance,
                 destroy_instance,
             )
         } {
-            Ok(ok) => Some(ok),
-            Err(_) => {
+            Ok((mut eng, info)) => {
+                eng.radv_lib_handle = radv_lib;
+                Some(Ok((eng, info)))
+            }
+            Err(e) => {
                 unsafe {
                     if !instance.is_null() {
                         destroy_instance(instance, null());
@@ -1369,7 +1359,7 @@ impl RawVulkanEngine {
                         let _ = dlclose(radv_slot);
                     }
                 }
-                None
+                Some(Err(e))
             }
         }
     }
@@ -2816,12 +2806,22 @@ impl RawVulkanEngine {
         if required == 0 || (cur.capacity >= required && cur.buffer != 0) {
             return Ok(None);
         }
-        let target = required
-            .checked_next_power_of_two()
-            .unwrap_or(required)
-            .min(self.max_storage_range)
-            .max(required)
-            .max(MIN_BUFFER_ALLOC_BYTES);
+        let target = if required > (256 << 20) {
+            const ALIGN_16M: u64 = 16 << 20;
+            required
+                .saturating_add(ALIGN_16M - 1)
+                .checked_div(ALIGN_16M)
+                .map_or(required, |blocks| blocks.saturating_mul(ALIGN_16M))
+                .min(self.max_storage_range & !0xFFFF)
+                .max(required)
+        } else {
+            required
+                .checked_next_power_of_two()
+                .unwrap_or(required)
+                .min(self.max_storage_range)
+                .max(required)
+                .max(MIN_BUFFER_ALLOC_BYTES)
+        };
         Ok(Some(target))
     }
 
@@ -3059,6 +3059,7 @@ impl RawVulkanEngine {
     /// Scrub all session-bearing buffers in `ProverArena` on session release while retaining
     /// precomputed public `twiddles_24` and buffer allocations for zero-alloc reuse.
     pub(crate) fn scrub_prover_session(&mut self) -> Result<(), VulkanError> {
+        crate::ct::ct_zeroize_u64s(&mut self.prover.salt_seed_words);
         unsafe {
             self.settle_staging();
             self.ensure_ready()?;
@@ -4510,8 +4511,16 @@ impl RawVulkanEngine {
         required: u64,
     ) -> Result<bool, VulkanError> {
         let req = required.max(MIN_BUFFER_ALLOC_BYTES);
-        let cur = slot_offset(&mut self.prover);
-        if let Some(tgt) = self.plan_vram_growth(cur, req)? {
+        let cur_snap = {
+            let cur = slot_offset(&mut self.prover);
+            GpuBuffer {
+                buffer: cur.buffer,
+                memory: cur.memory,
+                capacity: cur.capacity,
+                mapped: cur.mapped,
+            }
+        };
+        if let Some(tgt) = self.plan_vram_growth(&cur_snap, req)? {
             let new_buf = unsafe { self.alloc_gpu_buffer(tgt, false)? };
             let mut old = core::mem::replace(slot_offset(&mut self.prover), new_buf);
             unsafe {
@@ -4765,10 +4774,28 @@ impl RawVulkanEngine {
         ]
     }
 
+    #[inline]
+    fn fp4_mul_arr(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+        let gl_sub = |x: u64, y: u64| gl_add(x, gl_neg(y));
+        let fp2_mul = |x: [u64; 2], y: [u64; 2]| -> [u64; 2] {
+            let v0 = gl_mul(x[0], y[0]);
+            let v1 = gl_mul(x[1], y[1]);
+            let mid = gl_sub(gl_sub(gl_mul(gl_add(x[0], x[1]), gl_add(y[0], y[1])), v0), v1);
+            [gl_add(v0, gl_mul(v1, 7)), mid]
+        };
+        let v0 = fp2_mul([a[0], a[1]], [b[0], b[1]]);
+        let v1 = fp2_mul([a[2], a[3]], [b[2], b[3]]);
+        let mid_raw = fp2_mul([gl_add(a[0], a[2]), gl_add(a[1], a[3])], [gl_add(b[0], b[2]), gl_add(b[1], b[3])]);
+        let mid0 = gl_sub(gl_sub(mid_raw[0], v0[0]), v1[0]);
+        let mid1 = gl_sub(gl_sub(mid_raw[1], v0[1]), v1[1]);
+        [gl_add(v0[0], gl_mul(v1[1], 7)), gl_add(v0[1], v1[0]), mid0, mid1]
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn exec_prover_whir_commit_round0(
         &mut self,
         polys: &[&[u64]],
+        salt_seed: &[u8; 32],
         num_vars: usize,
         blowup: usize,
         group_arity: usize,
@@ -4779,6 +4806,7 @@ impl RawVulkanEngine {
         self.run_prover_job(|engine| {
             engine.job_prover_whir_commit_round0(
                 polys,
+                salt_seed,
                 num_vars,
                 blowup,
                 group_arity,
@@ -4793,6 +4821,7 @@ impl RawVulkanEngine {
     fn job_prover_whir_commit_round0(
         &mut self,
         polys: &[&[u64]],
+        salt_seed: &[u8; 32],
         num_vars: usize,
         blowup: usize,
         group_arity: usize,
@@ -4832,11 +4861,16 @@ impl RawVulkanEngine {
         let req_mono = (total_poly_words as u64) * 8;
         let req_cw0 = ((num_polys * domain_len) as u64) * 8;
         let req_tree0 = ((2 * num_groups) as u64) * 32;
-        let work_a_ext4 = ((c_len + 2) * 2).max(total_poly_words);
+        let batch_sc_ext4 = if num_polys > 1 {
+            total_poly_words + num_polys * (c_len / 2)
+        } else {
+            total_poly_words
+        };
+        let work_a_ext4 = ((c_len + 2) * 2).max(batch_sc_ext4);
         let req_work_a = ((work_a_ext4 as u64) * 32).max((4 * c_len as u64) * 8);
         let max_shard_half = (extra_witness_words / 256 / 2).max(1);
         let work_b_ext4 = ((c_len + 2) * 2)
-            .max(total_poly_words)
+            .max(batch_sc_ext4)
             .max(8 * max_shard_half * 12);
         let req_work_b = (work_b_ext4 as u64) * 32;
 
@@ -4865,6 +4899,11 @@ impl RawVulkanEngine {
         }
         self.prover.stage_cw_stride_ext4 = stg_cw_stride as u32;
         self.prover.stage_tree_stride_ext4 = stg_tr_stride as u32;
+        for (i, slot) in self.prover.salt_seed_words.iter_mut().enumerate() {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&salt_seed[i * 8..(i + 1) * 8]);
+            *slot = u64::from_le_bytes(b);
+        }
 
         const CHUNK_WORDS: usize = 4 * 1024 * 1024; // 32 MiB staging slices
         let staging_cap_words = total_poly_words.min(CHUNK_WORDS).max(4);
@@ -5144,16 +5183,17 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
+            let salt_w = self.prover.salt_seed_words;
             self.dispatch_whir_lde_1d(
                 kp.pipeline_layout,
                 num_groups.div_ceil(256) as u32,
                 1,
                 256,
                 WhirLdePushConsts {
-                    scalar0: 0,
-                    scalar1: 0,
-                    scalar2: 0,
-                    scalar3: 0,
+                    scalar0: salt_w[0],
+                    scalar1: salt_w[1],
+                    scalar2: salt_w[2],
+                    scalar3: salt_w[3],
                     mode: 9,
                     len: num_groups as u32,
                     aux0: group_arity as u32,
@@ -5273,7 +5313,7 @@ impl RawVulkanEngine {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
             let c_len = 1usize << num_vars;
-            let need_work = ((2 * num_polys * c_len) as u64) * 32;
+            let need_work = ((num_polys * c_len + num_polys * (c_len / 2)) as u64) * 32;
             let eq_bytes = (eq_kronecker_768.len() as u64) * 32;
             let lam_bytes = (num_polys as u64) * 32;
             let stg_bytes = eq_bytes + lam_bytes;
@@ -5778,16 +5818,20 @@ impl RawVulkanEngine {
         self.run_prover_job(|engine| {
             let core_len = 1usize << num_vars;
             let coeff_len = core_len + 2;
+            let gpu_eval_len = coeff_len.min(1usize << 24);
+            let has_top_overflow = coeff_len > (1usize << 24) && !is_single;
             let num_polys = weights.len();
             let w_bytes = ((2 * num_polys.max(1)) as u64) * 32;
             let z_bytes = 1536u64 * 32;
-            let wg_c = coeff_len.div_ceil(256) as u32;
+            let wg_build = coeff_len.div_ceil(256) as u32;
+            let wg_c = gpu_eval_len.div_ceil(256) as u32;
             let part_bytes = (2 * wg_c as u64) * 32;
+            let read_bytes = part_bytes + if has_top_overflow { 32 } else { 0 };
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
                     engine.refresh_prover_descriptor_sets();
                 }
-                engine.reserve_job_staging((w_bytes + z_bytes).max(part_bytes))?;
+                engine.reserve_job_staging((w_bytes + z_bytes).max(read_bytes))?;
                 if !is_single && !weights.is_empty() {
                     let flat_w = core::slice::from_raw_parts(
                         weights.as_ptr().cast::<u64>(),
@@ -5840,7 +5884,7 @@ impl RawVulkanEngine {
                 );
                 engine.dispatch_whir_fold_1d(
                     kp.pipeline_layout,
-                    wg_c,
+                    wg_build,
                     1,
                     WhirFoldPushConsts {
                         c0: [0; 4],
@@ -5900,7 +5944,7 @@ impl RawVulkanEngine {
                         c1: [0; 4],
                         c2: [0; 4],
                         mode: 0,
-                        len: coeff_len as u32,
+                        len: gpu_eval_len as u32,
                         aux0: 2,
                         aux1: 2,
                         aux2: 0,
@@ -5938,6 +5982,20 @@ impl RawVulkanEngine {
                     1,
                     &co,
                 );
+                if has_top_overflow {
+                    let ctop = VkBufferCopy {
+                        src_offset: (core_len as u64) * 32,
+                        dst_offset: part_bytes,
+                        size: 32,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.prover.vram_work_b.buffer,
+                        engine.staging.buffer,
+                        1,
+                        &ctop,
+                    );
+                }
                 engine.cmd_barrier(
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_HOST_BIT,
@@ -5965,6 +6023,15 @@ impl RawVulkanEngine {
                     done += chunk as u32;
                     base += 2 * chunk;
                 }
+                if has_top_overflow {
+                    let mut c_top = [0u64; 4];
+                    engine.read_staging_u64s(part_bytes as usize, &mut c_top);
+                    for (t, dst) in evals.iter_mut().enumerate() {
+                        let z_23 = z_ood_kronecker_2x768[t * 768 + 512 + 128];
+                        let z_24 = Self::fp4_mul_arr(z_23, z_23);
+                        *dst = Self::fp4_add_arr(*dst, Self::fp4_mul_arr(c_top, z_24));
+                    }
+                }
                 Ok(evals)
             }
         })
@@ -5979,14 +6046,37 @@ impl RawVulkanEngine {
         self.run_prover_job(|engine| {
             let one_bytes = 768u64 * 32;
             let both_bytes = 1536u64 * 32;
-            let wg = k_len.div_ceil(256) as u32;
+            let gpu_k_len = k_len.min(1usize << 24);
+            let tail_count = k_len.saturating_sub(1usize << 24);
+            let tail_bytes = (tail_count as u64) * 32;
+            let wg = gpu_k_len.div_ceil(256) as u32;
             unsafe {
-                engine.reserve_job_staging(both_bytes)?;
+                engine.reserve_job_staging(both_bytes + tail_bytes)?;
                 let flat = core::slice::from_raw_parts(
                     xi_z_kronecker_2x768.as_ptr().cast::<u64>(),
                     1536 * 4,
                 );
                 engine.write_staging_u64s(0, flat);
+                if tail_count > 0 {
+                    let mut tail_words = std::vec![0u64; tail_count * 4];
+                    for idx in 0..2usize {
+                        let base_t = idx * 768;
+                        let z_23 = xi_z_kronecker_2x768[base_t + 512 + 128];
+                        let z_24 = Self::fp4_mul_arr(z_23, z_23);
+                        for j in 0..tail_count.min(256) {
+                            let term = Self::fp4_mul_arr(xi_z_kronecker_2x768[base_t + j], z_24);
+                            let cur = [
+                                tail_words[j * 4],
+                                tail_words[j * 4 + 1],
+                                tail_words[j * 4 + 2],
+                                tail_words[j * 4 + 3],
+                            ];
+                            let sum = Self::fp4_add_arr(cur, term);
+                            tail_words[j * 4..j * 4 + 4].copy_from_slice(&sum);
+                        }
+                    }
+                    engine.write_staging_u64s(both_bytes as usize, &tail_words);
+                }
 
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
                 engine.begin_cmd()?;
@@ -6043,7 +6133,7 @@ impl RawVulkanEngine {
                             c1: [0; 4],
                             c2: [0; 4],
                             mode: 0,
-                            len: k_len as u32,
+                            len: gpu_k_len as u32,
                             aux0: 1,
                             aux1: 1,
                             aux2: 0,
@@ -6051,6 +6141,20 @@ impl RawVulkanEngine {
                             aux4: 0,
                             aux5: 0,
                         },
+                    );
+                }
+                if tail_count > 0 {
+                    let ctail = VkBufferCopy {
+                        src_offset: both_bytes,
+                        dst_offset: ((k_base as u64) + (1u64 << 24)) * 32,
+                        size: tail_bytes,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        engine.staging.buffer,
+                        engine.prover.vram_work_a.buffer,
+                        1,
+                        &ctail,
                     );
                 }
                 engine.submit_and_wait()
@@ -6821,11 +6925,17 @@ impl RawVulkanEngine {
                     0,
                     null(),
                 );
+                let (sc0, sc1, sc2, sc3) = if is_ext4 {
+                    (t_base, c_base, 0, 0)
+                } else {
+                    let s = engine.prover.salt_seed_words;
+                    (s[0], s[1], s[2], s[3])
+                };
                 let pc = WhirLdePushConsts {
-                    scalar0: t_base,
-                    scalar1: c_base,
-                    scalar2: 0,
-                    scalar3: 0,
+                    scalar0: sc0,
+                    scalar1: sc1,
+                    scalar2: sc2,
+                    scalar3: sc3,
                     mode: 13,
                     len: num_q as u32,
                     aux0: group_arity as u32,
@@ -7551,6 +7661,7 @@ impl RawVulkanEngine {
                 }
                 self.prover.initialized = false;
                 self.prover.twiddles_ready = false;
+                crate::ct::ct_zeroize_u64s(&mut self.prover.salt_seed_words);
 
                 if self.fence != 0 {
                     (self.fns.destroy_fence)(self.device, self.fence, null());
