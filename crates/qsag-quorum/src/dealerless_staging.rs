@@ -59,7 +59,9 @@ use qsag_core::field::tower::{
 };
 use qsag_core::preprocessing::{OtMesh, PartyPrivateRng, PreprocessError};
 use qsag_core::sponge::keccak::{Cshake256Xof, KECCAK_ROUND_CONSTANTS};
-use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s};
+use qsag_core::wipe::{
+    SecretBuffer, SecretWipe, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
+};
 
 use crate::hash::{expand, h32};
 use crate::quorum_jorts::{
@@ -71,62 +73,6 @@ use crate::quorum_jorts::{
 
 #[cfg(doc)]
 use crate::quorum_jorts::{BftShamirJorts, CommitteePartitionedJorts};
-
-// Owned staging scratch is erased on success, rejection and unwinding. Keep this
-// implementation local: core's internal temporary-buffer type is not a public API.
-trait SecretWipe: Sized {
-    fn secret_wipe(&mut self);
-    fn wipe_slice(items: &mut [Self]) {
-        for item in items {
-            item.secret_wipe();
-        }
-    }
-}
-macro_rules! secret_word {
-    ($($t:ty),*) => { $(impl SecretWipe for $t {
-        fn secret_wipe(&mut self) {
-            qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-        }
-        fn wipe_slice(items: &mut [Self]) { qsag_asm::volatile_fill(items, 0); }
-    })* };
-}
-secret_word!(u8, u64, u128);
-impl SecretWipe for TowerGf256 {
-    fn secret_wipe(&mut self) {
-        self.0.secret_wipe();
-    }
-    fn wipe_slice(items: &mut [Self]) {
-        wipe_gf256(items);
-    }
-}
-impl<T: SecretWipe, const N: usize> SecretWipe for [T; N] {
-    fn secret_wipe(&mut self) {
-        T::wipe_slice(self);
-    }
-}
-impl<T: SecretWipe> SecretWipe for Vec<T> {
-    fn secret_wipe(&mut self) {
-        T::wipe_slice(self);
-    }
-}
-struct SecretBuffer<T: SecretWipe>(T);
-impl<T: SecretWipe> core::ops::Deref for SecretBuffer<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
-impl<T: SecretWipe> core::ops::DerefMut for SecretBuffer<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.0
-    }
-}
-impl<T: SecretWipe> Drop for SecretBuffer<T> {
-    fn drop(&mut self) {
-        self.0.secret_wipe();
-        black_box(&mut self.0);
-    }
-}
 
 const TAG_PK_SEED_FINAL: &[u8] = b"QSAG.QUORUM.STAGE.PKSEED.FINAL/v1";
 const TAG_COIN_COMMIT: &[u8] = b"QSAG.QUORUM.STAGE.COIN.COMMIT/v1";
