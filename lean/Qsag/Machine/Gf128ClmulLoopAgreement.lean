@@ -27,7 +27,6 @@ public import Qsag.Math.Gf2Pow128
 import all Qsag.Math.Gf2Pow128
 public import Qsag.Machine.SimdBinaryEquiv
 import all Qsag.Machine.SimdBinaryEquiv
-import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
 
 public section
 namespace Qsag

@@ -41,13 +41,10 @@ public import Qsag.Math.Goldilocks
 import all Qsag.Math.Goldilocks
 public import Qsag.Oracle.Poseidon2
 import all Qsag.Oracle.Poseidon2
-public import Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Protocol.Aggregation.Aggregation
 
 public section
 namespace Qsag
 
-open Aggregation
 
 attribute [-instance] UInt8.instLawfulEqOrd UInt32.instLawfulEqOrd UInt32.instLawfulOrderOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
 
