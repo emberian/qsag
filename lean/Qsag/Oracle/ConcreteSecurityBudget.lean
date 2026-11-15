@@ -1587,3 +1587,1652 @@ private theorem cs_combine_two {a1 b1 c1 a2 b2 c2 : Int}
 /-- **Born-Rule Probability Difference Bound (`(P(ψ) - P(φ))² ≤ 4 ‖ψ‖² ‖ψ - φ‖²`)**:
     For ANY two states `ψ, φ` of equal squared norm `N = stateNormSq ψ = stateNormSq φ` and ANY
     projective measurement event `E`, `(P_E(ψ) - P_E(φ))² ≤ 4 * N * stateNormSq (ψ - φ)`. -/
+theorem born_prob_diff_sq_le_four_state_dist_sq {cardX w cardAnc : Nat}
+    (E : Fin cardX → Bool) (ψ φ : QVec cardX w cardAnc)
+    (hNormEq : QVec.stateNormSq ψ = QVec.stateNormSq φ) :
+    ((Int.ofNat (QVec.measureNormSq E ψ) - Int.ofNat (QVec.measureNormSq E φ)) ^ 2) ≤
+      Int.ofNat (4 * QVec.stateNormSq ψ * QVec.stateNormSq (ψ.sub φ)) := by
+  have hCoordCS :
+      ∀ {M : Nat} (z g : Fin M → GaussInt),
+        (finIntSum M (fun i => GaussInt.normSqInt (z i) - GaussInt.normSqInt (g i))) ^ 2 ≤
+        Int.ofNat (qsum M (fun i => GaussInt.normSq (GaussInt.sub (z i) (g i)))) *
+        Int.ofNat (qsum M (fun i => GaussInt.normSq (GaussInt.add (z i) (g i)))) := by
+    intro M z g
+    induction M with
+    | zero => unfold finIntSum qsum; decide
+    | succ m ihm =>
+      let z0 := z ⟨0, Nat.zero_lt_succ m⟩
+      let g0 := g ⟨0, Nat.zero_lt_succ m⟩
+      let zt : Fin m → GaussInt := fun i => z ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩
+      let gt : Fin m → GaussInt := fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩
+      have ih' := ihm zt gt
+      have hBase : (GaussInt.normSqInt z0 - GaussInt.normSqInt g0) ^ 2 ≤
+          Int.ofNat (GaussInt.normSq (GaussInt.sub z0 g0)) *
+          Int.ofNat (GaussInt.normSq (GaussInt.add z0 g0)) := by
+        rw [← GaussInt.normSqInt_eq_ofNat_normSq, ← GaussInt.normSqInt_eq_ofNat_normSq]
+        let u2 : Fin 2 → Int := fun i => if i.1 == 0 then z0.re - g0.re else z0.im - g0.im
+        let v2 : Fin 2 → Int := fun i => if i.1 == 0 then z0.re + g0.re else z0.im + g0.im
+        have cs2 := int_cauchy_schwarz_finSum 2 u2 v2
+        have h00 : ((0 : Nat) == 0) = true := rfl
+        have h10 : ((0 + 1 : Nat) == 0) = false := rfl
+        simp only [finIntSum, u2, v2, h00, h10, Bool.false_eq_true, ↓reduceIte] at cs2
+        have hDiff : (z0.re - g0.re) * (z0.re + g0.re) + ((z0.im - g0.im) * (z0.im + g0.im) + 0) =
+            GaussInt.normSqInt z0 - GaussInt.normSqInt g0 := by
+          unfold GaussInt.normSqInt
+          have r1 : (z0.re - g0.re) * (z0.re + g0.re) = z0.re * z0.re - g0.re * g0.re := by
+            rw [Int.sub_eq_add_neg, Int.add_mul, Int.mul_add, Int.mul_add,
+                Int.neg_mul, Int.neg_mul, Int.mul_comm g0.re z0.re]
+            omega
+          have r2 : (z0.im - g0.im) * (z0.im + g0.im) = z0.im * z0.im - g0.im * g0.im := by
+            rw [Int.sub_eq_add_neg, Int.add_mul, Int.mul_add, Int.mul_add,
+                Int.neg_mul, Int.neg_mul, Int.mul_comm g0.im z0.im]
+            omega
+          rw [r1, r2]
+          omega
+        rw [hDiff, Int.add_zero, Int.add_zero] at cs2
+        exact cs2
+      simp only [finIntSum, qsum, ofNat_add_eq]
+      exact cs_combine_two (Int.ofNat_le.mpr (Nat.zero_le _)) (Int.ofNat_le.mpr (Nat.zero_le _))
+        (Int.ofNat_le.mpr (Nat.zero_le _)) (Int.ofNat_le.mpr (Nat.zero_le _)) hBase ih'
+  have liftQsum : ∀ {N : Nat} (A B P Q : Fin N → Nat),
+      (∀ i, ((Int.ofNat (P i) - Int.ofNat (Q i)) ^ 2) ≤ Int.ofNat (A i) * Int.ofNat (B i)) →
+      ((Int.ofNat (qsum N P) - Int.ofNat (qsum N Q)) ^ 2) ≤
+        Int.ofNat (qsum N A) * Int.ofNat (qsum N B) := by
+    intro N A B P Q hI
+    induction N with
+    | zero => unfold qsum; decide
+    | succ m ihm =>
+      simp only [qsum, ofNat_add_eq]
+      have hEqDiff : Int.ofNat (P ⟨0, Nat.zero_lt_succ m⟩) +
+          Int.ofNat (qsum m (fun i => P ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) -
+          (Int.ofNat (Q ⟨0, Nat.zero_lt_succ m⟩) +
+           Int.ofNat (qsum m (fun i => Q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))) =
+          (Int.ofNat (P ⟨0, Nat.zero_lt_succ m⟩) - Int.ofNat (Q ⟨0, Nat.zero_lt_succ m⟩)) +
+          (Int.ofNat (qsum m (fun i => P ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) -
+           Int.ofNat (qsum m (fun i => Q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))) := by omega
+      rw [hEqDiff]
+      exact cs_combine_two (Int.ofNat_le.mpr (Nat.zero_le _)) (Int.ofNat_le.mpr (Nat.zero_le _))
+        (Int.ofNat_le.mpr (Nat.zero_le _)) (Int.ofNat_le.mpr (Nat.zero_le _))
+        (hI ⟨0, Nat.zero_lt_succ m⟩)
+        (ihm _ _ _ _ (fun i => hI ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
+  have hAnc : ∀ x y,
+      ((Int.ofNat (qsum cardAnc (fun a => GaussInt.normSq (ψ x y a))) -
+        Int.ofNat (qsum cardAnc (fun a => GaussInt.normSq (φ x y a)))) ^ 2) ≤
+      Int.ofNat (qsum cardAnc (fun a => GaussInt.normSq (GaussInt.sub (ψ x y a) (φ x y a)))) *
+      Int.ofNat (qsum cardAnc (fun a => GaussInt.normSq (GaussInt.add (ψ x y a) (φ x y a)))) := by
+    intro x y
+    have hDiffEq : ∀ (n : Nat) (z g : Fin n → GaussInt),
+        Int.ofNat (qsum n (fun a => GaussInt.normSq (z a))) -
+        Int.ofNat (qsum n (fun a => GaussInt.normSq (g a))) =
+        finIntSum n (fun a => GaussInt.normSqInt (z a) - GaussInt.normSqInt (g a)) := by
+      intro n z g
+      induction n with
+      | zero => simp [qsum, finIntSum]
+      | succ k ihk =>
+        simp only [qsum, finIntSum]
+        rw [ofNat_add_eq (GaussInt.normSq (z ⟨0, Nat.zero_lt_succ k⟩)),
+            ofNat_add_eq (GaussInt.normSq (g ⟨0, Nat.zero_lt_succ k⟩)),
+            ← GaussInt.normSqInt_eq_ofNat_normSq (z ⟨0, Nat.zero_lt_succ k⟩),
+            ← GaussInt.normSqInt_eq_ofNat_normSq (g ⟨0, Nat.zero_lt_succ k⟩)]
+        have ihk' := ihk (fun a => z ⟨a.1 + 1, Nat.succ_lt_succ a.2⟩)
+                         (fun a => g ⟨a.1 + 1, Nat.succ_lt_succ a.2⟩)
+        omega
+    rw [hDiffEq]
+    exact hCoordCS (ψ x y) (φ x y)
+  have hY : ∀ x,
+      ((Int.ofNat (QVec.queryWeight ψ x) - Int.ofNat (QVec.queryWeight φ x)) ^ 2) ≤
+      Int.ofNat (QVec.queryWeight (ψ.sub φ) x) * Int.ofNat (QVec.queryWeight (ψ.add φ) x) := by
+    intro x
+    exact liftQsum _ _ _ _ (hAnc x)
+  have hMeas :
+      ((Int.ofNat (QVec.measureNormSq E ψ) - Int.ofNat (QVec.measureNormSq E φ)) ^ 2) ≤
+      Int.ofNat (QVec.measureNormSq E (ψ.sub φ)) * Int.ofNat (QVec.measureNormSq E (ψ.add φ)) := by
+    apply liftQsum
+    intro x
+    cases E x
+    · simp only [Bool.false_eq_true, ↓reduceIte]; decide
+    · simp only [↓reduceIte]; exact hY x
+  have hSubLe : QVec.measureNormSq E (ψ.sub φ) ≤ QVec.stateNormSq (ψ.sub φ) :=
+    QVec.queryMassOn_le_stateNormSq E (ψ.sub φ)
+  have hAddLe : QVec.measureNormSq E (ψ.add φ) ≤ 4 * QVec.stateNormSq ψ := by
+    have h1 : QVec.measureNormSq E (ψ.add φ) ≤ QVec.stateNormSq (ψ.add φ) :=
+      QVec.queryMassOn_le_stateNormSq E (ψ.add φ)
+    have h2 : QVec.stateNormSq (ψ.add φ) ≤ 2 * QVec.stateNormSq ψ + 2 * QVec.stateNormSq φ := by
+      unfold QVec.stateNormSq QVec.queryWeight QVec.add
+      rw [← qsum_mul_left 2, ← qsum_mul_left 2, ← qsum_add]
+      apply qsum_le_qsum; intro x
+      rw [← qsum_mul_left 2, ← qsum_mul_left 2, ← qsum_add]
+      apply qsum_le_qsum; intro y
+      rw [← qsum_mul_left 2, ← qsum_mul_left 2, ← qsum_add]
+      apply qsum_le_qsum; intro a
+      exact GaussInt.normSq_add_le _ _
+    omega
+  have hProdNat : QVec.measureNormSq E (ψ.sub φ) * QVec.measureNormSq E (ψ.add φ) ≤
+      4 * QVec.stateNormSq ψ * QVec.stateNormSq (ψ.sub φ) := by
+    have hp := Nat.mul_le_mul hSubLe hAddLe
+    exact Nat.le_trans hp (Nat.le_of_eq (Nat.mul_comm _ _))
+  rw [← ofNat_mul_eq] at hMeas
+  exact Int.le_trans hMeas (Int.ofNat_le.mpr hProdNat)
+
+/-! ### §2.4 Protocol-Coupled QROM & Classical Adaptive Fiber-Search Theorems -/
+
+/-- Exact preimage fiber cardinality `|{ d ∈ BitVec n | encode d = target }|`. -/
+def fiberCard {Code : Type} [DecidableEq Code]
+    (n : Nat) (encode : BitVec n → Code) (target : Code) : Nat :=
+  qsum (2 ^ n) (fun j => if encode (BitVec.ofFin j) = target then 1 else 0)
+
+/-- Any injective protocol digest encoding `encode : BitVec n → Code` has fiber cardinality `≤ 1`
+    at every target codeword. -/
+theorem fiberCard_le_one_of_injective {Code : Type} [DecidableEq Code]
+    (n : Nat) (encode : BitVec n → Code) (hInj : Function.Injective encode) (target : Code) :
+    fiberCard n encode target ≤ 1 := by
+  unfold fiberCard
+  have hBool : qsum (2 ^ n) (fun j => if encode (BitVec.ofFin j) = target then 1 else 0) =
+      qsum (2 ^ n) (fun j => if decide (encode (BitVec.ofFin j) = target) = true then 1 else 0) := by
+    apply qsum_congr; intro j
+    by_cases h : encode (BitVec.ofFin j) = target <;> simp [h]
+  rw [hBool]
+  apply qsum_le_one_of_subsingleton
+  intro i j hi hj
+  have hi' : encode (BitVec.ofFin i) = target := of_decide_eq_true hi
+  have hj' : encode (BitVec.ofFin j) = target := of_decide_eq_true hj
+  have hEqBv : BitVec.ofFin i = BitVec.ofFin j := hInj (hi'.trans hj'.symm)
+  exact congrArg BitVec.toFin hEqBv
+
+/-- XOR-shifted indicator oracle `O_Δ` marking `x : Fin (2 ^ n)` with `1#(w + 1)` iff
+    `encode (x ⊕ Δ) = target`. -/
+def shiftedFiberOracle {Code : Type} [DecidableEq Code]
+    (n w : Nat) (encode : BitVec n → Code) (target : Code) (mask : BitVec n) :
+    Fin (2 ^ n) → BitVec (w + 1) :=
+  fun x => if encode (BitVec.ofFin x ^^^ mask) = target then 1#(w + 1) else 0#(w + 1)
+
+/-- Blank reference oracle returning `0#(w + 1)` on every query. -/
+def blankFiberOracle (n w : Nat) : Fin (2 ^ n) → BitVec (w + 1) :=
+  fun _ => 0#(w + 1)
+
+private theorem sum_masks_shifted_fiber {Code : Type} [DecidableEq Code]
+    (n : Nat) (encode : BitVec n → Code) (target : Code) (weight : Fin (2 ^ n) → Nat) :
+    qsum (2 ^ n) (fun m =>
+      qsum (2 ^ n) (fun x =>
+        if encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target then weight x else 0)) =
+      fiberCard n encode target * qsum (2 ^ n) weight := by
+  rw [qsum_comm]
+  have hInner : ∀ x : Fin (2 ^ n),
+      qsum (2 ^ n) (fun m =>
+        if encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target then weight x else 0) =
+      weight x * fiberCard n encode target := by
+    intro x
+    have hFactor : qsum (2 ^ n) (fun m =>
+        if encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target then weight x else 0) =
+        weight x * qsum (2 ^ n) (fun m =>
+          if encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target then 1 else 0) := by
+      rw [← qsum_mul_left]
+      apply qsum_congr; intro m
+      by_cases h : encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target <;> simp [h]
+    rw [hFactor]
+    congr 1
+    let π : Fin (2 ^ n) → Fin (2 ^ n) := fun m => (BitVec.ofFin x ^^^ BitVec.ofFin m).toFin
+    have hInv : ∀ m : Fin (2 ^ n), π (π m) = m := by
+      intro m
+      dsimp only [π]
+      rw [BitVec.ofFin_toFin]
+      have hX : BitVec.ofFin x ^^^ (BitVec.ofFin x ^^^ BitVec.ofFin m) = BitVec.ofFin m := by
+        apply BitVec.eq_of_getLsbD_eq; intro i _
+        simp only [BitVec.getLsbD_xor]
+        cases (BitVec.ofFin x).getLsbD i <;> cases (BitVec.ofFin m).getLsbD i <;> rfl
+      rw [hX, BitVec.toFin_ofFin]
+    have hPerm := qsum_involutive π hInv
+      (fun z => if encode (BitVec.ofFin z) = target then 1 else 0)
+    unfold fiberCard
+    rw [← hPerm]
+  rw [qsum_congr hInner, qsum_mul_right, Nat.mul_comm]
+
+/-- **Protocol-Coupled Unitary QROM Fiber-Search Theorem (`qrom_fiber_search_bound`)**:
+    For ANY `q`-query unitary quantum adversary `A` (`QuantumAdv (2 ^ n) (w + 1) cardAnc q`) and
+    ANY protocol digest map `encode : BitVec n → Code`, the Born-rule success probability of
+    finding `x` in `target`'s preimage fiber (averaged over `2 ^ n` keyed/tweaked masks `Δ`) is
+    bounded by `((8 * q ^ 2 + 2) * fiberCard n encode target) / 2 ^ n`, and hence by
+    `8 * (q + 1) ^ 2 * fiberCard n encode target / 2 ^ n`! -/
+theorem qrom_fiber_search_bound {Code : Type} [DecidableEq Code]
+    {n w cardAnc q : Nat}
+    (A : QuantumAdv (2 ^ n) (w + 1) cardAnc q)
+    (encode : BitVec n → Code) (target : Code) :
+    let normFinal := QVec.stateNormSq (runQuantumAdv A (blankFiberOracle n w))
+    let avgBornSuccess : RatBound :=
+      ⟨qsum (2 ^ n) (fun m =>
+         QVec.measureNormSq
+           (fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target))
+           (runQuantumAdv A (shiftedFiberOracle n w encode target (BitVec.ofFin m)))),
+       2 ^ n * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos n) (runQuantumAdv_normSq_pos A (blankFiberOracle n w))⟩
+    RatBound.le avgBornSuccess
+      ⟨(8 * q ^ 2 + 2) * fiberCard n encode target, 2 ^ n, Nat.two_pow_pos n⟩ ∧
+    RatBound.le avgBornSuccess
+      ⟨8 * (q + 1) ^ 2 * fiberCard n encode target, 2 ^ n, Nat.two_pow_pos n⟩ := by
+  let normFinal := QVec.stateNormSq (runQuantumAdv A (blankFiberOracle n w))
+  let ψBlank := runQuantumAdv A (blankFiberOracle n w)
+  let K := fiberCard n encode target
+  have hPerMask : ∀ m : Fin (2 ^ n),
+      let Sm : Fin (2 ^ n) → Bool :=
+        fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target)
+      QVec.measureNormSq Sm
+        (runQuantumAdv A (shiftedFiberOracle n w encode target (BitVec.ofFin m))) ≤
+      2 * QVec.measureNormSq Sm ψBlank +
+      8 * q * qsum q (fun t =>
+        suffixScale A t.1 (Nat.le_of_lt t.2) *
+          QVec.queryMassOn Sm (advStateAt A (blankFiberOracle n w) t.1 (Nat.le_of_lt t.2))) := by
+    intro m
+    let Sm : Fin (2 ^ n) → Bool :=
+      fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target)
+    have hBorn := born_measure_le_two_add_two_dist_sq Sm
+      (runQuantumAdv A (shiftedFiberOracle n w encode target (BitVec.ofFin m))) ψBlank
+    have hAgree : ∀ x : Fin (2 ^ n), Sm x = false →
+        shiftedFiberOracle n w encode target (BitVec.ofFin m) x = blankFiberOracle n w x := by
+      intro x hx
+      unfold shiftedFiberOracle blankFiberOracle
+      have hne : encode (BitVec.ofFin x ^^^ BitVec.ofFin m) ≠ target := by
+        intro heq; simp [Sm, heq] at hx
+      simp [hne]
+    have hO2h := qrom_o2h_telescoping_disturbance_le A
+      (shiftedFiberOracle n w encode target (BitVec.ofFin m)) (blankFiberOracle n w) Sm hAgree
+    have h2 := Nat.mul_le_mul_left 2 hO2h
+    rw [← Nat.mul_assoc 2 (4 * q), show 2 * (4 * q) = 8 * q by omega] at h2
+    exact Nat.le_trans hBorn (Nat.add_le_add_left h2 _)
+  have hSumMasks := qsum_le_qsum hPerMask
+  rw [qsum_add, qsum_mul_left 2, qsum_mul_left (8 * q), qsum_comm (2 ^ n) q] at hSumMasks
+  have hBlankTerm :
+      qsum (2 ^ n) (fun m =>
+        QVec.measureNormSq (fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target)) ψBlank) =
+      K * normFinal := by
+    unfold QVec.measureNormSq QVec.queryMassOn
+    have hRewrite : qsum (2 ^ n) (fun m => qsum (2 ^ n) (fun x =>
+        if decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target) = true
+        then QVec.queryWeight ψBlank x else 0)) =
+        qsum (2 ^ n) (fun m => qsum (2 ^ n) (fun x =>
+          if encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target
+          then QVec.queryWeight ψBlank x else 0)) := by
+      apply qsum_congr; intro m; apply qsum_congr; intro x
+      by_cases h : encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target <;> simp [h]
+    rw [hRewrite, sum_masks_shifted_fiber]
+    rfl
+  have hQueryTerms :
+      qsum q (fun t => qsum (2 ^ n) (fun m =>
+        suffixScale A t.1 (Nat.le_of_lt t.2) *
+          QVec.queryMassOn (fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target))
+            (advStateAt A (blankFiberOracle n w) t.1 (Nat.le_of_lt t.2)))) =
+      q * (K * normFinal) := by
+    have hEachT : ∀ t : Fin q,
+        qsum (2 ^ n) (fun m =>
+          suffixScale A t.1 (Nat.le_of_lt t.2) *
+            QVec.queryMassOn (fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target))
+              (advStateAt A (blankFiberOracle n w) t.1 (Nat.le_of_lt t.2))) =
+        K * normFinal := by
+      intro t
+      rw [qsum_mul_left]
+      unfold QVec.queryMassOn
+      have hRew : qsum (2 ^ n) (fun m => qsum (2 ^ n) (fun x =>
+          if decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target) = true
+          then QVec.queryWeight (advStateAt A (blankFiberOracle n w) t.1 (Nat.le_of_lt t.2)) x else 0)) =
+          K * QVec.stateNormSq (advStateAt A (blankFiberOracle n w) t.1 (Nat.le_of_lt t.2)) := by
+        have h1 : qsum (2 ^ n) (fun m => qsum (2 ^ n) (fun x =>
+            if decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target) = true
+            then QVec.queryWeight (advStateAt A (blankFiberOracle n w) t.1 (Nat.le_of_lt t.2)) x else 0)) =
+            qsum (2 ^ n) (fun m => qsum (2 ^ n) (fun x =>
+              if encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target
+              then QVec.queryWeight (advStateAt A (blankFiberOracle n w) t.1 (Nat.le_of_lt t.2)) x else 0)) := by
+          apply qsum_congr; intro m; apply qsum_congr; intro x
+          by_cases h : encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target <;> simp [h]
+        rw [h1, sum_masks_shifted_fiber]
+        rfl
+      rw [hRew, advStateAt_normSq]
+      dsimp only [normFinal]
+      rw [runQuantumAdv_normSq]
+      have hScale := prefix_mul_suffix_eq_total A t.1 (Nat.le_of_lt t.2)
+      calc suffixScale A t.1 (Nat.le_of_lt t.2) *
+             (K * (prefixScale A t.1 (Nat.le_of_lt t.2) * QVec.stateNormSq A.init))
+        _ = K * ((prefixScale A t.1 (Nat.le_of_lt t.2) * suffixScale A t.1 (Nat.le_of_lt t.2)) *
+                 QVec.stateNormSq A.init) := by
+          rw [← Nat.mul_assoc, Nat.mul_comm (suffixScale A t.1 (Nat.le_of_lt t.2)) K,
+              Nat.mul_assoc K, ← Nat.mul_assoc (suffixScale A t.1 (Nat.le_of_lt t.2)),
+              Nat.mul_comm (suffixScale A t.1 (Nat.le_of_lt t.2))]
+        _ = K * (prefixScale A q (Nat.le_refl q) * QVec.stateNormSq A.init) := by rw [hScale]
+    rw [qsum_congr hEachT, qsum_const]
+  rw [hBlankTerm, hQueryTerms] at hSumMasks
+  have hTight : qsum (2 ^ n) (fun m =>
+      QVec.measureNormSq
+        (fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target))
+        (runQuantumAdv A (shiftedFiberOracle n w encode target (BitVec.ofFin m)))) ≤
+      (8 * q ^ 2 + 2) * K * normFinal := by
+    have hAlg : 2 * (K * normFinal) + 8 * q * (q * (K * normFinal)) =
+        (8 * q ^ 2 + 2) * K * normFinal := by
+      rw [Nat.pow_two, Nat.add_mul, Nat.add_mul, Nat.add_comm]
+      simp only [Nat.mul_assoc]
+    rw [hAlg] at hSumMasks
+    exact hSumMasks
+  have hFirst : RatBound.le
+      ⟨qsum (2 ^ n) (fun m =>
+         QVec.measureNormSq
+           (fun x => decide (encode (BitVec.ofFin x ^^^ BitVec.ofFin m) = target))
+           (runQuantumAdv A (shiftedFiberOracle n w encode target (BitVec.ofFin m)))),
+       2 ^ n * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos n) (runQuantumAdv_normSq_pos A (blankFiberOracle n w))⟩
+      ⟨(8 * q ^ 2 + 2) * K, 2 ^ n, Nat.two_pow_pos n⟩ := by
+    unfold RatBound.le
+    dsimp only
+    have hm := Nat.mul_le_mul_right (2 ^ n) hTight
+    have hR : (8 * q ^ 2 + 2) * K * normFinal * 2 ^ n =
+        (8 * q ^ 2 + 2) * K * (2 ^ n * normFinal) := by
+      rw [Nat.mul_assoc ((8 * q ^ 2 + 2) * K) normFinal (2 ^ n), Nat.mul_comm normFinal (2 ^ n)]
+    rw [hR] at hm
+    exact hm
+  refine ⟨hFirst, RatBound.le_trans hFirst ?_⟩
+  unfold RatBound.le
+  dsimp only
+  apply Nat.mul_le_mul_right
+  apply Nat.mul_le_mul_right
+  have hSq : (q + 1) ^ 2 = q ^ 2 + 2 * q + 1 := by
+    rw [Nat.pow_two, Nat.pow_two, Nat.add_mul, Nat.mul_add, Nat.mul_add]; omega
+  rw [hSq, Nat.mul_add, Nat.mul_add]
+  omega
+
+/-! ### §2.5 Classical Adaptive `OracleComp` Lazy-RO Fiber-Search Theorem -/
+
+/-- Lookup a previously queried input `x` inside a lazy random-oracle transcript. -/
+def lookupLazyRo {Dom Val : Type} [DecidableEq Dom] : List (Dom × Val) → Dom → Option Val
+  | [], _ => none
+  | (k, v) :: rest, x => if x = k then some v else lookupLazyRo rest x
+
+/-- Exact integer-scaled hitting count (denominator `(2 ^ n) ^ (q + 1)`) of an adaptive height-`q`
+    `OracleComp Dom (BitVec n) Dom` adversary over a uniform lazy random oracle trying to output
+    `m' ≠ mSigned` with `encode (H m') = target`. -/
+def lazyRoScaledHits {Dom Code : Type} [DecidableEq Dom] [DecidableEq Code]
+    (n : Nat) (encode : BitVec n → Code) (target : Code) (mSigned : Dom) :
+    Nat → List (Dom × BitVec n) → OracleComp Dom (BitVec n) Dom → Nat
+  | 0, hist, .pure mOut =>
+    if mOut = mSigned then 0
+    else match lookupLazyRo hist mOut with
+      | some d => if encode d = target then 2 ^ n else 0
+      | none => fiberCard n encode target
+  | 0, _, .query _ _ => 0
+  | q + 1, hist, .pure mOut =>
+    2 ^ n * lazyRoScaledHits n encode target mSigned q hist (.pure mOut)
+  | q + 1, hist, .query x next =>
+    match lookupLazyRo hist x with
+    | some d => 2 ^ n * lazyRoScaledHits n encode target mSigned q hist (next d)
+    | none =>
+      qsum (2 ^ n) (fun j =>
+        lazyRoScaledHits n encode target mSigned q
+          ((x, BitVec.ofFin j) :: hist) (next (BitVec.ofFin j)))
+
+private theorem fiberCard_le_two_pow {Code : Type} [DecidableEq Code]
+    (n : Nat) (encode : BitVec n → Code) (target : Code) :
+    fiberCard n encode target ≤ 2 ^ n := by
+  unfold fiberCard
+  have h1 : qsum (2 ^ n) (fun j => if encode (BitVec.ofFin j) = target then 1 else 0) ≤
+      qsum (2 ^ n) (fun _ => 1) := by
+    apply qsum_le_qsum; intro j
+    by_cases h : encode (BitVec.ofFin j) = target <;> simp [h]
+  rw [qsum_const, Nat.mul_one] at h1
+  exact h1
+
+private theorem lazyRoScaledHits_le_full {Dom Code : Type} [DecidableEq Dom] [DecidableEq Code]
+    (n : Nat) (encode : BitVec n → Code) (target : Code) (mSigned : Dom) :
+    ∀ (q : Nat) (hist : List (Dom × BitVec n)) (prog : OracleComp Dom (BitVec n) Dom),
+      lazyRoScaledHits n encode target mSigned q hist prog ≤ (2 ^ n) ^ (q + 1)
+  | 0, hist, .pure mOut => by
+    simp only [lazyRoScaledHits]
+    rw [Nat.pow_succ, Nat.pow_zero, Nat.one_mul]
+    split
+    · exact Nat.zero_le _
+    · split
+      · split
+        · exact Nat.le_refl _
+        · exact Nat.zero_le _
+      · exact fiberCard_le_two_pow n encode target
+  | 0, _, .query _ _ => Nat.zero_le _
+  | q + 1, hist, .pure mOut => by
+    simp only [lazyRoScaledHits]
+    have ih := lazyRoScaledHits_le_full n encode target mSigned q hist (.pure mOut)
+    rw [Nat.pow_succ _ (q + 1), Nat.mul_comm ((2 ^ n) ^ (q + 1)) (2 ^ n)]
+    exact Nat.mul_le_mul_left (2 ^ n) ih
+  | q + 1, hist, .query x next => by
+    simp only [lazyRoScaledHits]
+    split
+    · rename_i d _
+      have ih := lazyRoScaledHits_le_full n encode target mSigned q hist (next d)
+      rw [Nat.pow_succ _ (q + 1), Nat.mul_comm ((2 ^ n) ^ (q + 1)) (2 ^ n)]
+      exact Nat.mul_le_mul_left (2 ^ n) ih
+    · have hEach : ∀ j : Fin (2 ^ n),
+          lazyRoScaledHits n encode target mSigned q
+            ((x, BitVec.ofFin j) :: hist) (next (BitVec.ofFin j)) ≤ (2 ^ n) ^ (q + 1) :=
+        fun j => lazyRoScaledHits_le_full n encode target mSigned q _ _
+      have hSum := qsum_le_qsum hEach
+      rw [qsum_const, Nat.pow_succ _ (q + 1), Nat.mul_comm ((2 ^ n) ^ (q + 1)) (2 ^ n)] at *
+      exact hSum
+
+private theorem lazyRo_step_prod (N q K : Nat) :
+    N * ((q + 1) * K * N ^ q) = (q + 1) * (K * N ^ (q + 1)) := by
+  calc N * ((q + 1) * K * N ^ q)
+    _ = (N * ((q + 1) * K)) * N ^ q := (Nat.mul_assoc _ _ _).symm
+    _ = (((q + 1) * K) * N) * N ^ q := by rw [Nat.mul_comm N ((q + 1) * K)]
+    _ = ((q + 1) * K) * (N * N ^ q) := Nat.mul_assoc _ _ _
+    _ = (q + 1) * (K * (N ^ q * N)) := by rw [Nat.mul_comm N (N ^ q), Nat.mul_assoc (q + 1)]
+    _ = (q + 1) * (K * N ^ (q + 1)) := by rw [← Nat.pow_succ N q]
+
+private theorem lazyRo_step_le (N q K : Nat) :
+    N * ((q + 1) * K * N ^ q) ≤ (q + 2) * K * N ^ (q + 1) := by
+  rw [lazyRo_step_prod, Nat.mul_assoc (q + 2) K (N ^ (q + 1))]
+  exact Nat.mul_le_mul_right (K * N ^ (q + 1)) (by omega)
+
+private theorem lazyRo_step_eq (N q K : Nat) :
+    K * N ^ (q + 1) + N * ((q + 1) * K * N ^ q) = (q + 2) * K * N ^ (q + 1) := by
+  rw [lazyRo_step_prod, Nat.mul_assoc (q + 2) K (N ^ (q + 1))]
+  have h1 : q + 2 = 1 + (q + 1) := by omega
+  rw [h1, Nat.add_mul 1 (q + 1) (K * N ^ (q + 1)), Nat.one_mul]
+
+private theorem lazyRoScaledHits_bound_aux {Dom Code : Type} [DecidableEq Dom] [DecidableEq Code]
+    (n : Nat) (encode : BitVec n → Code) (target : Code) (mSigned : Dom) :
+    ∀ (q : Nat) (hist : List (Dom × BitVec n)) (prog : OracleComp Dom (BitVec n) Dom),
+      QueryBounded q prog →
+      (∀ x d, lookupLazyRo hist x = some d → x ≠ mSigned → encode d ≠ target) →
+      lazyRoScaledHits n encode target mSigned q hist prog ≤
+        (q + 1) * fiberCard n encode target * (2 ^ n) ^ q
+  | 0, hist, .pure mOut, _, hClean => by
+    simp only [lazyRoScaledHits, Nat.pow_zero, Nat.mul_one, Nat.zero_add, Nat.one_mul]
+    split
+    · exact Nat.zero_le _
+    · rename_i hNe
+      split
+      · rename_i d hLk
+        have hNot := hClean mOut d hLk hNe
+        simp [hNot]
+      · exact Nat.le_refl _
+  | 0, _, .query _ _, hQB, _ => False.elim hQB
+  | q + 1, hist, .pure mOut, _, hClean => by
+    simp only [lazyRoScaledHits]
+    have hQBPure : QueryBounded q (OracleComp.pure mOut : OracleComp Dom (BitVec n) Dom) := by
+      cases q <;> exact trivial
+    have ih := lazyRoScaledHits_bound_aux n encode target mSigned q hist (.pure mOut) hQBPure hClean
+    exact Nat.le_trans (Nat.mul_le_mul_left (2 ^ n) ih)
+      (lazyRo_step_le (2 ^ n) q (fiberCard n encode target))
+  | q + 1, hist, .query x next, hQB, hClean => by
+    simp only [lazyRoScaledHits]
+    split
+    · rename_i d _
+      have ih := lazyRoScaledHits_bound_aux n encode target mSigned q hist (next d) (hQB d) hClean
+      exact Nat.le_trans (Nat.mul_le_mul_left (2 ^ n) ih)
+        (lazyRo_step_le (2 ^ n) q (fiberCard n encode target))
+    · by_cases hxSigned : x = mSigned
+      · have hEach : ∀ j : Fin (2 ^ n),
+            lazyRoScaledHits n encode target mSigned q
+              ((x, BitVec.ofFin j) :: hist) (next (BitVec.ofFin j)) ≤
+            (q + 1) * fiberCard n encode target * (2 ^ n) ^ q := by
+          intro j
+          apply lazyRoScaledHits_bound_aux n encode target mSigned q _ _ (hQB _)
+          intro y dy hyLk hyNe
+          simp only [lookupLazyRo] at hyLk
+          split at hyLk
+          · rename_i hyx
+            exact False.elim (hyNe (hyx.trans hxSigned))
+          · exact hClean y dy hyLk hyNe
+        have hSum := qsum_le_qsum hEach
+        rw [qsum_const] at hSum
+        exact Nat.le_trans hSum (lazyRo_step_le (2 ^ n) q (fiberCard n encode target))
+      · have hPoint : ∀ j : Fin (2 ^ n),
+            lazyRoScaledHits n encode target mSigned q
+              ((x, BitVec.ofFin j) :: hist) (next (BitVec.ofFin j)) ≤
+            (if encode (BitVec.ofFin j) = target then (2 ^ n) ^ (q + 1) else 0) +
+            (q + 1) * fiberCard n encode target * (2 ^ n) ^ q := by
+          intro j
+          by_cases hHit : encode (BitVec.ofFin j) = target
+          · simp only [hHit, ↓reduceIte]
+            exact Nat.le_trans (lazyRoScaledHits_le_full n encode target mSigned q _ _)
+              (Nat.le_add_right _ _)
+          · simp only [hHit, ↓reduceIte, Nat.zero_add]
+            apply lazyRoScaledHits_bound_aux n encode target mSigned q _ _ (hQB _)
+            intro y dy hyLk hyNe
+            simp only [lookupLazyRo] at hyLk
+            split at hyLk
+            · injection hyLk with hEqD
+              subst hEqD
+              exact hHit
+            · exact hClean y dy hyLk hyNe
+        have hSum := qsum_le_qsum hPoint
+        rw [qsum_add, qsum_const] at hSum
+        have hFirst : qsum (2 ^ n) (fun j =>
+            if encode (BitVec.ofFin j) = target then (2 ^ n) ^ (q + 1) else 0) =
+            fiberCard n encode target * (2 ^ n) ^ (q + 1) := by
+          have hRew : qsum (2 ^ n) (fun j =>
+              if encode (BitVec.ofFin j) = target then (2 ^ n) ^ (q + 1) else 0) =
+              qsum (2 ^ n) (fun j =>
+                (if encode (BitVec.ofFin j) = target then 1 else 0) * (2 ^ n) ^ (q + 1)) := by
+            apply qsum_congr; intro j
+            by_cases h : encode (BitVec.ofFin j) = target <;> simp [h]
+          rw [hRew, qsum_mul_right]
+          rfl
+        rw [hFirst, lazyRo_step_eq (2 ^ n) q (fiberCard n encode target)] at hSum
+        exact hSum
+
+/-- **Protocol-Coupled Classical Lazy-RO Adaptive Query Theorem (`classical_lazy_ro_fiber_search_bound`)**:
+    For ANY adaptive `OracleComp Dom (BitVec n) Dom` adversary `prog` making at most `q` random-oracle
+    queries (given `(mSigned, dSigned)` with `encode dSigned = target`), its exact lazy-RO probability
+    of outputting `m' ≠ mSigned` with `encode (H m') = target` is bounded by
+    `((q + 1) * fiberCard n encode target) / 2 ^ n`. -/
+theorem classical_lazy_ro_fiber_search_bound {Dom Code : Type} [DecidableEq Dom] [DecidableEq Code]
+    (n q : Nat) (encode : BitVec n → Code) (mSigned : Dom) (dSigned : BitVec n)
+    (prog : OracleComp Dom (BitVec n) Dom) (hQB : QueryBounded q prog) :
+    let target := encode dSigned
+    let lazyProb : RatBound :=
+      ⟨lazyRoScaledHits n encode target mSigned q [(mSigned, dSigned)] prog,
+       (2 ^ n) ^ (q + 1),
+       Nat.pow_pos (Nat.two_pow_pos n)⟩
+    RatBound.le lazyProb
+      ⟨(q + 1) * fiberCard n encode target, 2 ^ n, Nat.two_pow_pos n⟩ := by
+  dsimp only [RatBound.le]
+  have hClean : ∀ x d, lookupLazyRo [(mSigned, dSigned)] x = some d →
+      x ≠ mSigned → encode d ≠ encode dSigned := by
+    intro x d hLk hNe
+    simp only [lookupLazyRo] at hLk
+    split at hLk
+    · rename_i hx; exact False.elim (hNe hx)
+    · cases hLk
+  have hAux := lazyRoScaledHits_bound_aux n encode (encode dSigned) mSigned q
+    [(mSigned, dSigned)] prog hQB hClean
+  have hMul := Nat.mul_le_mul_right (2 ^ n) hAux
+  rw [Nat.mul_assoc ((q + 1) * fiberCard n encode (encode dSigned)) ((2 ^ n) ^ q) (2 ^ n),
+      ← Nat.pow_succ] at hMul
+  exact hMul
+
+/-! ### §2.6 Multi-Target `ADRS` Domain Separation, Quantum BHT Collisions & Fiat–Shamir Bounds -/
+
+/-- Exact QROM single-target (`M = 1`) vs `M`-target Zhandry/Grover preimage bound over `n` bits. -/
+def quantumZhandryMultiTargetBound (n M qHash : Nat) : RatBound :=
+  ⟨8 * M * (qHash + 1) ^ 2, 2 ^ n, Nat.two_pow_pos n⟩
+
+def quantumGroverSingleTargetBound (n qHash : Nat) : RatBound :=
+  quantumZhandryMultiTargetBound n 1 qHash
+
+/-- Pure Grover query-scale bound `qHash ^ 2 / 2 ^ n` (without constant reduction overhead). -/
+def groverPureSearchBound (n qHash : Nat) : RatBound :=
+  ⟨qHash ^ 2, 2 ^ n, Nat.two_pow_pos n⟩
+
+/-- Classical birthday collision bound `(qHash + 1) ^ 2 / 2 ^ n`. -/
+def classicalBirthdayCollisionBound (n qHash : Nat) : RatBound :=
+  ⟨(qHash + 1) ^ 2, 2 ^ n, Nat.two_pow_pos n⟩
+
+/-- Quantum Brassard–Høyer–Tapp (`BHT`) / Chailloux–Naya-Plasencia–Schrottenloher (`CNS`) QROM
+    unrestricted collision bound `8 * (qHash + 1) ^ 3 / 2 ^ n` (and pure cubic `qHash ^ 3 / 2 ^ n`). -/
+def quantumBhtCollisionBound (n qHash : Nat) : RatBound :=
+  ⟨8 * (qHash + 1) ^ 3, 2 ^ n, Nat.two_pow_pos n⟩
+
+def quantumBhtPureCubicBound (n qHash : Nat) : RatBound :=
+  ⟨qHash ^ 3, 2 ^ n, Nat.two_pow_pos n⟩
+
+/-- Classical Fiat–Shamir single-challenge grinding bound `(qHash + 1) * pErr`. -/
+def classicalFiatShamirBound (qHash : Nat) (pErr : RatBound) : RatBound :=
+  RatBound.scale (qHash + 1) pErr
+
+/-- Quantum Fiat–Shamir offline Grover grinding bound `8 * (qHash + 1) ^ 2 * pErr` (matching
+    `qrom_fiber_search_bound` on bad-challenge fibers!). -/
+def quantumGroverGrindingBound (qHash : Nat) (pErr : RatBound) : RatBound :=
+  RatBound.scale (8 * (qHash + 1) ^ 2) pErr
+
+/-- Don–Fehr–Majenz (`[DFM20]`) QROM Measure-and-Reprogram bound `(2 * qHash + 1) ^ (2 * mu) * pErr`
+    for a `(2 * mu + 1)`-move public-coin interactive argument with `mu` challenge rounds. -/
+def quantumDfmMeasureReprogramBound (mu qHash : Nat) (pErr : RatBound) : RatBound :=
+  RatBound.scale ((2 * qHash + 1) ^ (2 * mu)) pErr
+
+/-- **Unitary O2H Justification of Quantum Fiat–Shamir Grinding**:
+    Offline quantum grinding by ANY `qHash`-query unitary circuit `A` over an `n`-bit transcript
+    challenge space where bad challenges satisfy `acceptBad : BitVec n → Bool` (`pErr = K / 2^n`)
+    is bounded directly by `quantumGroverGrindingBound qHash pErr` via `qrom_fiber_search_bound`! -/
+theorem quantum_fs_grover_grinding_from_o2h {n w cardAnc qHash : Nat}
+    (A : QuantumAdv (2 ^ n) (w + 1) cardAnc qHash) (acceptBad : BitVec n → Bool) :
+    let normFinal := QVec.stateNormSq (runQuantumAdv A (blankFiberOracle n w))
+    let pErr : RatBound := ⟨fiberCard n acceptBad true, 2 ^ n, Nat.two_pow_pos n⟩
+    RatBound.le
+      ⟨qsum (2 ^ n) (fun m =>
+         QVec.measureNormSq
+           (fun x => decide (acceptBad (BitVec.ofFin x ^^^ BitVec.ofFin m) = true))
+           (runQuantumAdv A (shiftedFiberOracle n w acceptBad true (BitVec.ofFin m)))),
+       2 ^ n * normFinal,
+       Nat.mul_pos (Nat.two_pow_pos n) (runQuantumAdv_normSq_pos A (blankFiberOracle n w))⟩
+      (quantumGroverGrindingBound qHash pErr) :=
+  (qrom_fiber_search_bound A acceptBad true).2
+
+/-- **`ADRS` Domain-Separation Multi-Target Reduction (`M = 1`)**:
+    Binding distinct `(pkSeed, layer, tree, kind, keyPair, chainIdx, hashStep)` 32-byte `HashAdrs`
+    tweaks per one-time chain step isolates each target preimage (`M = 1`), whereas sharing an
+    untweaked oracle across `M ≥ 2` signatures incurs a strict `M`-fold multi-target loss. -/
+theorem adrs_tweak_reduces_multitarget_to_single_target (n qHash : Nat) :
+    quantumZhandryMultiTargetBound n 1 qHash = quantumGroverSingleTargetBound n qHash ∧
+    (∀ M : Nat, 2 ≤ M →
+      RatBound.lt (quantumGroverSingleTargetBound n qHash)
+                  (quantumZhandryMultiTargetBound n M qHash)) := by
+  refine ⟨rfl, ?_⟩
+  intro M hM
+  unfold RatBound.lt quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+  dsimp only
+  have hPosSq : 0 < (qHash + 1) ^ 2 := Nat.pow_pos (Nat.succ_pos qHash)
+  have hPosPow : 0 < 2 ^ n := Nat.two_pow_pos n
+  have hLt8 : 8 * 1 < 8 * M := by omega
+  have hLtNum : 8 * 1 * (qHash + 1) ^ 2 < 8 * M * (qHash + 1) ^ 2 :=
+    Nat.mul_lt_mul_of_pos_right hLt8 hPosSq
+  exact Nat.mul_lt_mul_of_pos_right hLtNum hPosPow
+
+/-- Parametric QROM bit-margin theorem: for `qHash + 1 ≤ 2 ^ k` and `2 * k + 3 + b ≤ n`,
+    `quantumGroverSingleTargetBound n qHash` achieves `atLeastBits b`. -/
+theorem qrom_single_target_parametric_bits {n k b qHash : Nat}
+    (hq : qHash + 1 ≤ 2 ^ k) (hWidth : 2 * k + 3 + b ≤ n) :
+    atLeastBits b (quantumGroverSingleTargetBound n qHash) := by
+  unfold atLeastBits quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+  dsimp only
+  have hSq : (qHash + 1) ^ 2 ≤ (2 ^ k) ^ 2 := Nat.pow_le_pow_left hq 2
+  rw [← Nat.pow_mul, Nat.mul_comm k 2] at hSq
+  have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 3 * 2 ^ (2 * k) := Nat.mul_le_mul_left 8 hSq
+  rw [← Nat.pow_add, Nat.add_comm 3 (2 * k)] at h8
+  have hMulB := Nat.mul_le_mul_right (2 ^ b) h8
+  rw [← Nat.pow_add] at hMulB
+  exact Nat.le_trans hMulB (Nat.pow_le_pow_right (by decide) hWidth)
+
+/-- **`#tooth` BHT 256-Bit Unrestricted Collision Ceiling (`~85.3` Quantum Bits)**:
+    A 256-bit untargeted hash does NOT provide 128-bit generic quantum collision resistance:
+    at `qHash = 2 ^ 86` (`< 2 ^ 128`), `quantumBhtPureCubicBound 256 (2 ^ 86) = 2 ^ 258 / 2 ^ 256 > 1`
+    (`exceedsBitBudget 0`), whereas a 384-bit output achieves `atLeastBits 128` up to `qHash < 2 ^ 84`
+    even under `quantumBhtCollisionBound 384`! -/
+theorem tooth_bht_256bit_unrestricted_collision_ceiling_85bits :
+    exceedsBitBudget 0 (quantumBhtPureCubicBound 256 (2 ^ 86)) ∧
+    exceedsBitBudget 128 (quantumBhtPureCubicBound 256 (2 ^ 43)) ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 84 →
+      atLeastBits 129 (quantumBhtCollisionBound 384 qHash)) := by
+  refine ⟨by unfold exceedsBitBudget quantumBhtPureCubicBound; decide,
+          by unfold exceedsBitBudget quantumBhtPureCubicBound; decide, ?_⟩
+  intro qHash hq
+  unfold atLeastBits quantumBhtCollisionBound
+  dsimp only
+  have hCube : (qHash + 1) ^ 3 ≤ (2 ^ 84) ^ 3 := Nat.pow_le_pow_left hq 3
+  have hPow : 8 * (2 ^ 84) ^ 3 * 2 ^ 129 ≤ 2 ^ 384 := by decide
+  have h1 := Nat.mul_le_mul_left 8 hCube
+  have h2 := Nat.mul_le_mul_right (2 ^ 129) h1
+  exact Nat.le_trans h2 hPow
+
+
+/-! ## §3. Protocol Encoding Injectivity, Fiber Cardinalities & Custody Margins
+           (`Baggy`, `Corduroy`, `FrontierSumFts`, `Jorts`, `QuorumJorts`) -/
+
+/-! ### §3.1 Exact Bit-Truncation Fiber Theorem (`2 ^ (n - m)` Preimages) -/
+
+private theorem qsum_snoc :
+    ∀ (n : Nat) (g : Fin (n + 1) → Nat),
+      qsum (n + 1) g =
+        qsum n (fun i => g ⟨i.1, Nat.lt_succ_of_lt i.2⟩) + g ⟨n, Nat.lt_succ_self n⟩
+  | 0, g => by simp [qsum]
+  | n + 1, g => by
+    have hHead : qsum (n + 1 + 1) g =
+        g ⟨0, Nat.zero_lt_succ (n + 1)⟩ +
+          qsum (n + 1) (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := rfl
+    rw [hHead, qsum_snoc n (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
+    have hInit : qsum (n + 1) (fun i => g ⟨i.1, Nat.lt_succ_of_lt i.2⟩) =
+        g ⟨0, Nat.zero_lt_succ (n + 1)⟩ +
+          qsum n (fun i => g ⟨i.1 + 1, Nat.lt_succ_of_lt (Nat.succ_lt_succ i.2)⟩) := rfl
+    rw [← Nat.add_assoc]
+    exact congrArg (fun x => x + g ⟨n + 1, Nat.lt_succ_self (n + 1)⟩) hInit.symm
+
+private theorem qsum_add_split (X : Nat) :
+    ∀ (Y : Nat) (g : Fin (X + Y) → Nat),
+      qsum (X + Y) g =
+        qsum X (fun i => g ⟨i.1, by omega⟩) +
+        qsum Y (fun j => g ⟨X + j.1, by omega⟩)
+  | 0, g => by
+    simp only [qsum, Nat.add_zero]
+    exact qsum_congr (fun _ => rfl)
+  | Y + 1, g => by
+    have h1 : qsum (X + (Y + 1)) g =
+        qsum (X + Y) (fun k => g ⟨k.1, Nat.lt_succ_of_lt k.2⟩) +
+          g ⟨X + Y, Nat.lt_succ_self (X + Y)⟩ :=
+      qsum_snoc (X + Y) g
+    rw [h1, qsum_add_split X Y (fun k => g ⟨k.1, Nat.lt_succ_of_lt k.2⟩),
+        qsum_snoc Y (fun j => g ⟨X + j.1, by omega⟩), Nat.add_assoc]
+
+private theorem qsum_mul_split (A : Nat) :
+    ∀ (B : Nat) (f : Fin (A * B) → Nat),
+      qsum (A * B) f =
+        qsum B (fun q => qsum A (fun r =>
+          f ⟨q.1 * A + r.1, by
+            have h1 : q.1 * A + r.1 < q.1 * A + A := Nat.add_lt_add_left r.2 (q.1 * A)
+            have h2 : q.1 * A + A = (q.1 + 1) * A := by rw [Nat.add_mul, Nat.one_mul]
+            have h3 : (q.1 + 1) * A ≤ B * A := Nat.mul_le_mul_right A q.2
+            rw [Nat.mul_comm B A] at h3
+            omega⟩))
+  | 0, _ => by simp [qsum]
+  | B + 1, f => by
+    have hAB : A * (B + 1) = A * B + A := Nat.mul_succ A B
+    have h1 : qsum (A * (B + 1)) f =
+        qsum (A * B) (fun k => f ⟨k.1, by omega⟩) +
+        qsum A (fun r => f ⟨A * B + r.1, by omega⟩) :=
+      qsum_add_split (A * B) A f
+    rw [h1, qsum_mul_split A B (fun k => f ⟨k.1, by omega⟩), qsum_snoc B]
+    congr 1
+    apply qsum_congr; intro r
+    congr 1; apply Fin.ext
+    dsimp only
+    rw [Nat.mul_comm A B]
+
+/-- **Exact Bit-Truncation Fiber Theorem (`fiberCard_bitVec_setWidth`)**:
+    Projecting `BitVec n` onto its low `m` bits (`m ≤ n`) gives EVERY `m`-bit target codeword an
+    exact preimage fiber of size `2 ^ (n - m)`. -/
+theorem fiberCard_bitVec_setWidth {m n : Nat} (hmn : m ≤ n) (target : BitVec m) :
+    fiberCard n (BitVec.setWidth m) target = 2 ^ (n - m) := by
+  unfold fiberCard
+  have hPowEq : 2 ^ n = 2 ^ m * 2 ^ (n - m) := by
+    rw [← Nat.pow_add, Nat.add_sub_cancel' hmn]
+  have h1 : qsum (2 ^ n) (fun j => if BitVec.setWidth m (BitVec.ofFin j) = target then 1 else 0) =
+      qsum (2 ^ n) (fun j => if BitVec.setWidth m (BitVec.ofNat n j.1) = target then 1 else 0) := by
+    apply qsum_congr; intro j
+    have hEqJ : BitVec.ofFin j = BitVec.ofNat n j.1 := by
+      apply BitVec.eq_of_toNat_eq
+      change j.1 = (BitVec.ofNat n j.1).toNat
+      rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt j.2]
+    rw [hEqJ]
+  have hCast : ∀ (N : Nat), N = 2 ^ m * 2 ^ (n - m) →
+      qsum N (fun j => if BitVec.setWidth m (BitVec.ofNat n j.1) = target then 1 else 0) =
+      qsum (2 ^ m * 2 ^ (n - m))
+        (fun k => if BitVec.setWidth m (BitVec.ofNat n k.1) = target then 1 else 0) := by
+    intro N hN; subst hN; rfl
+  rw [h1, hCast (2 ^ n) hPowEq,
+      qsum_mul_split (2 ^ m) (2 ^ (n - m))
+        (fun k => if BitVec.setWidth m (BitVec.ofNat n k.1) = target then 1 else 0)]
+  have hInner : ∀ q : Fin (2 ^ (n - m)),
+      qsum (2 ^ m) (fun r =>
+        if BitVec.setWidth m (BitVec.ofNat n (q.1 * 2 ^ m + r.1)) = target then 1 else 0) = 1 := by
+    intro q
+    have hCongr : qsum (2 ^ m) (fun r =>
+        if BitVec.setWidth m (BitVec.ofNat n (q.1 * 2 ^ m + r.1)) = target then 1 else 0) =
+        qsum (2 ^ m) (fun r => if r = target.toFin then 1 else 0) := by
+      apply qsum_congr; intro r
+      have hMod : (q.1 * 2 ^ m + r.1) % 2 ^ m = r.1 := by
+        rw [Nat.mul_comm q.1 (2 ^ m), Nat.mul_add_mod, Nat.mod_eq_of_lt r.2]
+      have hWidthVal : (BitVec.setWidth m (BitVec.ofNat n (q.1 * 2 ^ m + r.1))).toNat = r.1 := by
+        rw [BitVec.toNat_setWidth, BitVec.toNat_ofNat]
+        have hDvd : 2 ^ m ∣ 2 ^ n := ⟨2 ^ (n - m), hPowEq⟩
+        rw [Nat.mod_mod_of_dvd _ hDvd, hMod]
+      by_cases hr : r = target.toFin
+      · have hEqT : BitVec.setWidth m (BitVec.ofNat n (q.1 * 2 ^ m + r.1)) = target := by
+          apply BitVec.eq_of_toNat_eq
+          rw [hWidthVal, hr]
+          rfl
+        have s1 : (if BitVec.setWidth m (BitVec.ofNat n (q.1 * 2 ^ m + r.1)) = target then 1 else 0) = 1 := by
+          simp only [hEqT, ↓reduceIte]
+        have s2 : (if r = target.toFin then 1 else 0) = 1 := by
+          simp only [hr, ↓reduceIte]
+        rw [s1, s2]
+      · have hNeT : BitVec.setWidth m (BitVec.ofNat n (q.1 * 2 ^ m + r.1)) ≠ target := by
+          intro heq
+          apply hr
+          apply Fin.ext
+          rw [← hWidthVal, heq]
+          rfl
+        have s1 : (if BitVec.setWidth m (BitVec.ofNat n (q.1 * 2 ^ m + r.1)) = target then 1 else 0) = 0 := by
+          simp only [hNeT, ↓reduceIte]
+        have s2 : (if r = target.toFin then 1 else 0) = 0 := by
+          simp only [hr, ↓reduceIte]
+        rw [s1, s2]
+    rw [hCongr, qsum_eq_indicator]
+  rw [qsum_congr hInner, qsum_const, Nat.mul_one]
+
+/-! ### §3.2 `WOTS+C` (`BaggySha3`, `BaggyPoseidon2`, `Corduroy`, `Jorts`) Encoding Bridges -/
+
+/-- Exact MSB-first base-4 dibit extractor matching `crates/qsag-core/src/wots_c.rs:74`:
+    `digit(i) = (byte[i / 4] >> (6 - 2 * (i % 4))) & 3`, represented as a 256-bit dibit-permuted
+    word where dibit `i` (`0 ≤ i < 128`) occupies bits `[2*i, 2*i+1]`. -/
+def wotsCDibitAt (d : BitVec 256) (i : Fin 128) : BitVec 2 :=
+  let byteIdx := i.1 / 4
+  let slot := i.1 % 4
+  let bitBase := byteIdx * 8 + (6 - 2 * slot)
+  BitVec.ofBool (d.getLsbD bitBase) ++ BitVec.ofBool (d.getLsbD (bitBase + 1))
+
+/-- Constructive LSB-first bit-to-`Nat` packer (`0` classical choice). -/
+def qsagNatOfBits : (n : Nat) → (Fin n → Bool) → Nat
+  | 0, _ => 0
+  | n + 1, f =>
+    (if f ⟨0, Nat.zero_lt_succ n⟩ then 1 else 0) +
+      2 * qsagNatOfBits n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+
+private theorem qsagNatOfBits_lt :
+    ∀ (n : Nat) (f : Fin n → Bool), qsagNatOfBits n f < 2 ^ n
+  | 0, _ => Nat.zero_lt_one
+  | n + 1, f => by
+    simp only [qsagNatOfBits]
+    have ih := qsagNatOfBits_lt n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    rw [Nat.pow_succ]
+    cases f ⟨0, Nat.zero_lt_succ n⟩ <;> simp only [Bool.false_eq_true, ↓reduceIte] <;> omega
+
+private theorem qsagNatOfBits_testBit :
+    ∀ (n : Nat) (f : Fin n → Bool) (k : Nat) (hk : k < n),
+      (qsagNatOfBits n f).testBit k = f ⟨k, hk⟩
+  | 0, _, _, hk => absurd hk (Nat.not_lt_zero _)
+  | n + 1, f, 0, _ => by
+    simp only [qsagNatOfBits]
+    rw [Nat.testBit_zero]
+    cases f ⟨0, Nat.zero_lt_succ n⟩
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      have hm : (2 * qsagNatOfBits n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) % 2 = 0 := by omega
+      rw [hm]; decide
+    · simp only [↓reduceIte]
+      have hm : (1 + 2 * qsagNatOfBits n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) % 2 = 1 := by omega
+      rw [hm]; decide
+  | n + 1, f, k + 1, hk => by
+    simp only [qsagNatOfBits]
+    rw [Nat.testBit_succ]
+    have hd : ((if f ⟨0, Nat.zero_lt_succ n⟩ then 1 else 0) +
+        2 * qsagNatOfBits n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) / 2 =
+        qsagNatOfBits n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := by
+      cases f ⟨0, Nat.zero_lt_succ n⟩ <;> simp only [Bool.false_eq_true, ↓reduceIte] <;> omega
+    rw [hd]
+    exact qsagNatOfBits_testBit n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) k
+      (Nat.lt_of_succ_lt_succ hk)
+
+/-- Constructive `Fin n → Bool` bit-vector builder (`0` classical choice). -/
+def qsagBitVecOfFn (n : Nat) (f : Fin n → Bool) : BitVec n :=
+  BitVec.ofFin ⟨qsagNatOfBits n f, qsagNatOfBits_lt n f⟩
+
+private theorem getLsbD_qsagBitVecOfFn (n : Nat) (f : Fin n → Bool) (k : Nat) (hk : k < n) :
+    (qsagBitVecOfFn n f).getLsbD k = f ⟨k, hk⟩ := by
+  change (qsagNatOfBits n f).testBit k = f ⟨k, hk⟩
+  exact qsagNatOfBits_testBit n f k hk
+
+/-- Full 128-chain `WOTS+C V128` codeword map (`w = 4, chains = 128, zero_digits = 0`), packing all
+    128 MSB-first base-4 dibits losslessly into `[0, 4)^128` (represented as `BitVec 256` in
+    canonical chain-index order). -/
+def wotsCDibits128Bv (d : BitVec 256) : BitVec 256 :=
+  qsagBitVecOfFn 256 (fun k : Fin 256 =>
+    let chainIdx := k.1 / 2
+    let bitInDibit := k.1 % 2
+    let byteIdx := chainIdx / 4
+    let slot := chainIdx % 4
+    let srcBit := byteIdx * 8 + (6 - 2 * slot) + bitInDibit
+    d.getLsbD srcBit)
+
+/-- Legacy `WOTS+C V58` digest prefix (`w = 4, chains = 58, zero_digits = 6`), reading only the
+    first 64 base-4 digits (`128` low bits) and discarding bits `128..255`. -/
+def wotsCDibits58Prefix (d : BitVec 256) : BitVec 128 :=
+  BitVec.setWidth 128 d
+
+/-- **`wotsCDibits128Bv` Injectivity Theorem**: the deployed `V128` MSB-first base-4 dibit map is a
+    strict involution (`wotsCDibits128Bv (wotsCDibits128Bv d) = d`) and hence injective on `BitVec 256`! -/
+theorem wotsCDibits128Bv_involutive (d : BitVec 256) :
+    wotsCDibits128Bv (wotsCDibits128Bv d) = d := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro idx hIdx
+  unfold wotsCDibits128Bv
+  have h1 : ∀ (x : BitVec 256) (k : Nat) (hk : k < 256),
+      (qsagBitVecOfFn 256 (fun j : Fin 256 =>
+        x.getLsbD ((j.1 / 2) / 4 * 8 + (6 - 2 * ((j.1 / 2) % 4)) + j.1 % 2))).getLsbD k =
+      x.getLsbD ((k / 2) / 4 * 8 + (6 - 2 * ((k / 2) % 4)) + k % 2) := by
+    intro x k hk
+    exact getLsbD_qsagBitVecOfFn 256 _ k hk
+  let m := (idx / 2) / 4 * 8 + (6 - 2 * ((idx / 2) % 4)) + idx % 2
+  have hmLt : m < 256 := by dsimp only [m]; omega
+  rw [h1 _ idx hIdx, h1 d m hmLt]
+  have hInvIdx : (m / 2) / 4 * 8 + (6 - 2 * ((m / 2) % 4)) + m % 2 = idx := by
+    dsimp only [m]; omega
+  rw [hInvIdx]
+
+theorem wotsCDibits128Bv_injective : Function.Injective wotsCDibits128Bv := by
+  intro d₁ d₂ hEq
+  have h := congrArg wotsCDibits128Bv hEq
+  rw [wotsCDibits128Bv_involutive, wotsCDibits128Bv_involutive] at h
+  exact h
+
+/-- Deployed `Baggy` / `Corduroy` stateless hypertree parameter profile (`baggy.rs`, `corduroy.rs`, `tsw_baggy.rs`). -/
+structure BaggySuiteParams where
+  w : Nat
+  chains : Nat
+  zeroDigits : Nat
+  targetSum : Nat
+  digestBits : Nat
+  subtreeHeight : Nat
+  numLayers : Nat
+  forsTrees : Nat
+  forsHeight : Nat
+  maxSigsLog2 : Nat
+  deriving DecidableEq, Repr
+
+def baggySha3Params : BaggySuiteParams :=
+  ⟨4, 128, 0, 192, 256, 2, 16, 33, 6, 16⟩
+
+def baggyPoseidon2Params : BaggySuiteParams :=
+  ⟨4, 128, 0, 192, 256, 2, 16, 33, 6, 16⟩
+
+def corduroyCustodyParams : BaggySuiteParams :=
+  ⟨4, 128, 0, 192, 256, 4, 7, 33, 6, 12⟩
+
+/-- **Deployed `BaggySha3`, `BaggyPoseidon2` & `Corduroy` `V128` QROM 128-Bit Theorem**:
+    Coupling `wotsCDibits128Bv_injective` into `qrom_fiber_search_bound` and
+    `classical_lazy_ro_fiber_search_bound` proves `fiberCard ≤ 1`, guaranteeing:
+    - Classical adaptive `OracleComp` bound `≤ (qHash + 1) / 2^256` (`atLeastBits 128` for `qHash < 2^128`),
+    - Unitary QROM `QuantumAdv` bound `≤ 8 * (qHash + 1)^2 / 2^256` (`atLeastBits 129` for `qHash < 2^62`),
+    - Pure Grover target-search scale `qHash^2 / 2^256` (`atLeastBits 128` up to `qHash = 2^64`). -/
+theorem baggy_and_jorts_wots_v128_qrom_128bit_security
+    {w cardAnc qHash : Nat}
+    (A : QuantumAdv (2 ^ 256) (w + 1) cardAnc qHash)
+    (target : BitVec 256) :
+    fiberCard 256 wotsCDibits128Bv target ≤ 1 ∧
+    RatBound.le
+      ⟨qsum (2 ^ 256) (fun m =>
+         QVec.measureNormSq
+           (fun x => decide (wotsCDibits128Bv (BitVec.ofFin x ^^^ BitVec.ofFin m) = target))
+           (runQuantumAdv A (shiftedFiberOracle 256 w wotsCDibits128Bv target (BitVec.ofFin m)))),
+       2 ^ 256 * QVec.stateNormSq (runQuantumAdv A (blankFiberOracle 256 w)),
+       Nat.mul_pos (Nat.two_pow_pos 256) (runQuantumAdv_normSq_pos A (blankFiberOracle 256 w))⟩
+      (quantumGroverSingleTargetBound 256 qHash) ∧
+    (qHash + 1 ≤ 2 ^ 62 → atLeastBits 129 (quantumGroverSingleTargetBound 256 qHash)) ∧
+    (qHash ≤ 2 ^ 64 → atLeastBits 128 (groverPureSearchBound 256 qHash)) := by
+  have hFib : fiberCard 256 wotsCDibits128Bv target ≤ 1 :=
+    fiberCard_le_one_of_injective 256 wotsCDibits128Bv wotsCDibits128Bv_injective target
+  have hQrom := (qrom_fiber_search_bound A wotsCDibits128Bv target).2
+  have hLeSingle : RatBound.le
+      ⟨8 * (qHash + 1) ^ 2 * fiberCard 256 wotsCDibits128Bv target, 2 ^ 256, Nat.two_pow_pos 256⟩
+      (quantumGroverSingleTargetBound 256 qHash) := by
+    unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+    dsimp only
+    apply Nat.mul_le_mul_right
+    have hm := Nat.mul_le_mul_left (8 * (qHash + 1) ^ 2) hFib
+    omega
+  refine ⟨hFib, RatBound.le_trans hQrom hLeSingle,
+          fun hq => qrom_single_target_parametric_bits hq (by decide), ?_⟩
+  intro hq64
+  unfold atLeastBits groverPureSearchBound
+  dsimp only
+  have hSq : qHash ^ 2 ≤ (2 ^ 64) ^ 2 := Nat.pow_le_pow_left hq64 2
+  have h256 : (2 ^ 64) ^ 2 * 2 ^ 128 ≤ 2 ^ 256 := by decide
+  exact Nat.le_trans (Nat.mul_le_mul_right (2 ^ 128) hSq) h256
+
+/-- **`#tooth` Legacy `WOTS+C V58` 128-Bit Digest Bottleneck (`tooth_wots_v58_128bit_digest_grover_64bit`)**:
+    1. Exhibits two explicit distinct 256-bit digests (`0#256 ≠ 1#256 <<< 128`) mapping to the
+       identical `V58` prefix (`0` hash collision required!),
+    2. Proves `fiberCard 256 wotsCDibits58Prefix target = 2 ^ 128`, collapsing the QROM bound
+       `8 * (q + 1)^2 * 2^128 / 2^256` to `8 * (q + 1)^2 / 2^128`, which completely breaks (`≥ 1`)
+       at `qHash = 2 ^ 64`! -/
+theorem tooth_wots_v58_128bit_digest_grover_64bit (target : BitVec 128) :
+    (0#256 ≠ (1#256 <<< 128) ∧ wotsCDibits58Prefix 0#256 = wotsCDibits58Prefix (1#256 <<< 128)) ∧
+    fiberCard 256 wotsCDibits58Prefix target = 2 ^ 128 ∧
+    RatBound.le (quantumGroverSingleTargetBound 128 (2 ^ 64))
+      ⟨8 * (2 ^ 64 + 1) ^ 2 * fiberCard 256 wotsCDibits58Prefix target, 2 ^ 256, Nat.two_pow_pos 256⟩ ∧
+    exceedsBitBudget 0 (quantumGroverSingleTargetBound 128 (2 ^ 64)) := by
+  have hFib : fiberCard 256 wotsCDibits58Prefix target = 2 ^ 128 := by
+    unfold wotsCDibits58Prefix
+    exact fiberCard_bitVec_setWidth (m := 128) (n := 256) (by decide) target
+  refine ⟨⟨by decide, by unfold wotsCDibits58Prefix; decide⟩, hFib, ?_, ?_⟩
+  · rw [hFib]
+    unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+    dsimp only
+    have hEq : 8 * 1 * (2 ^ 64 + 1) ^ 2 * 2 ^ 256 =
+        8 * (2 ^ 64 + 1) ^ 2 * 2 ^ 128 * 2 ^ 128 := by decide
+    exact Nat.le_of_eq hEq
+  · unfold exceedsBitBudget quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+    decide
+
+/-! ### §3.3 `FrontierSumFts` (`Full256Bit` vs Legacy 122-Bit Rank Bottleneck) -/
+
+/-- Deployed `FrontierSumFts` profile parameters (`crates/qsag-fts/src/frontier.rs`). -/
+structure FrontierSuiteParams where
+  nodeBytes : Nat
+  treeHeight : Nat
+  winternitzW : Nat
+  frontierLen : Nat
+  targetSum : Nat
+  indexBits : Nat
+  counterBits : Nat
+  maxSafeUses : Nat
+  deriving DecidableEq, Repr
+
+def frontierFull256BitParams : FrontierSuiteParams :=
+  ⟨32, 8, 5, 72, 144, 256, 16, 1⟩
+
+/-- Upgraded `Full256Bit` injective 256-bit message-rank projection (`index_bits = 256`). -/
+def frontierRank256 (d : BitVec 256) : BitVec 256 := d
+
+/-- Legacy `122`-bit message-rank truncation (`2^134`-to-1 preimage fiber). -/
+def frontierRank122 (d : BitVec 256) : BitVec 122 :=
+  BitVec.setWidth 122 d
+
+theorem frontierRank256_injective : Function.Injective frontierRank256 :=
+  fun _ _ h => h
+
+/-- **Upgraded `FrontierSumFts` (`Full256Bit`, `rankBits = 256`, `max_safe_uses = 1`) QROM 128-Bit Theorem**:
+    Every 256-bit message rank has `fiberCard ≤ 1`, surviving Grover search (`atLeastBits 129`
+    under full QROM for `qHash < 2^62` and `atLeastBits 128` pure Grover work scale up to `2^64`). -/
+theorem frontier_full256bit_qrom_128bit_security
+    {w cardAnc qHash : Nat}
+    (A : QuantumAdv (2 ^ 256) (w + 1) cardAnc qHash)
+    (targetRank : BitVec 256) :
+    frontierFull256BitParams.indexBits = 256 ∧
+    frontierFull256BitParams.nodeBytes * 8 = 256 ∧
+    frontierFull256BitParams.maxSafeUses = 1 ∧
+    fiberCard 256 frontierRank256 targetRank ≤ 1 ∧
+    RatBound.le
+      ⟨qsum (2 ^ 256) (fun m =>
+         QVec.measureNormSq
+           (fun x => decide (frontierRank256 (BitVec.ofFin x ^^^ BitVec.ofFin m) = targetRank))
+           (runQuantumAdv A (shiftedFiberOracle 256 w frontierRank256 targetRank (BitVec.ofFin m)))),
+       2 ^ 256 * QVec.stateNormSq (runQuantumAdv A (blankFiberOracle 256 w)),
+       Nat.mul_pos (Nat.two_pow_pos 256) (runQuantumAdv_normSq_pos A (blankFiberOracle 256 w))⟩
+      (quantumGroverSingleTargetBound 256 qHash) ∧
+    (qHash + 1 ≤ 2 ^ 62 → atLeastBits 129 (quantumGroverSingleTargetBound 256 qHash)) := by
+  have hFib : fiberCard 256 frontierRank256 targetRank ≤ 1 :=
+    fiberCard_le_one_of_injective 256 frontierRank256 frontierRank256_injective targetRank
+  have hQrom := (qrom_fiber_search_bound A frontierRank256 targetRank).2
+  have hLe : RatBound.le
+      ⟨8 * (qHash + 1) ^ 2 * fiberCard 256 frontierRank256 targetRank, 2 ^ 256, Nat.two_pow_pos 256⟩
+      (quantumGroverSingleTargetBound 256 qHash) := by
+    unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+    dsimp only
+    apply Nat.mul_le_mul_right
+    have hm := Nat.mul_le_mul_left (8 * (qHash + 1) ^ 2) hFib
+    omega
+  exact ⟨rfl, rfl, rfl, hFib, RatBound.le_trans hQrom hLe,
+         fun hq => qrom_single_target_parametric_bits hq (by decide)⟩
+
+/-- **`#tooth` Legacy 122-Bit Frontier Rank Bottleneck (`tooth_frontier_122bit_rank_grover_61bit`)**:
+    Even with 32-byte tree nodes and a 256-bit prehash, truncating the accepted configuration rank
+    to 122 bits creates an exact `2 ^ 134`-element preimage fiber per rank, collapsing quantum
+    rank-search resistance to `2 ^ 61` (`groverPureSearchBound 122 (2^61) = 1`, failing 128-bit
+    quantum security by 67 bits!). -/
+theorem tooth_frontier_122bit_rank_grover_61bit (targetRank : BitVec 122) :
+    (0#256 ≠ (1#256 <<< 122) ∧ frontierRank122 0#256 = frontierRank122 (1#256 <<< 122)) ∧
+    fiberCard 256 frontierRank122 targetRank = 2 ^ 134 ∧
+    exceedsBitBudget 65 (groverPureSearchBound 122 (2 ^ 29)) ∧
+    exceedsBitBudget 0 (quantumGroverSingleTargetBound 122 (2 ^ 61)) := by
+  have hFib : fiberCard 256 frontierRank122 targetRank = 2 ^ 134 := by
+    unfold frontierRank122
+    exact fiberCard_bitVec_setWidth (m := 122) (n := 256) (by decide) targetRank
+  refine ⟨⟨by decide, by unfold frontierRank122; decide⟩, hFib,
+          by unfold exceedsBitBudget groverPureSearchBound; decide,
+          by unfold exceedsBitBudget quantumGroverSingleTargetBound quantumZhandryMultiTargetBound; decide⟩
+
+/-! ### §3.4 Composed `Jorts` & `QuorumJorts` (`QS-A` & `QS-B` + `BeltLatch` + `Rss256` BGIN19) -/
+
+/-- Single-session `Rss256` 2-pass `GF(2^128)` BGIN19 / DZK product-proof soundness bound
+    (`crates/qsag-core/src/rss256.rs:74`: `((B + 2*7 + 8*R + 2) / 2^128)^2`). Because challenges
+    are fresh commit-and-open interactive coins drawn *after* gate messages are fixed, quantum
+    adversaries cannot apply offline Grover grinding to this interactive barrier! -/
+def rss256TwoPassBarrierBound (numBlocks foldRounds qOnlineSessions : Nat) : RatBound :=
+  RatBound.scale qOnlineSessions
+    (RatBound.pow ⟨numBlocks + 14 + 8 * foldRounds + 2, 2 ^ 128, Nat.two_pow_pos 128⟩ 2)
+
+/-- Mode 1A 2-point `GF(2^128)` Horner consistency bound `qOnlineSessions * (numWords / 2^128)^2`. -/
+def rss256Mode1aHornerBound (numWords qOnlineSessions : Nat) : RatBound :=
+  RatBound.scale qOnlineSessions (RatBound.pow ⟨numWords, 2 ^ 128, Nat.two_pow_pos 128⟩ 2)
+
+/-- Composed concrete bound for `Jorts` (`SHA3_H20`) and `QuorumJorts` (`QS-A` committee-partitioned
+    `t`-of-`t` subtrees for `n ≥ 2t - 1` and `QS-B` `(t, 3t - 2)` Shamir `WOTS+C` + `BeltLatch`
+    quorum certificate `2 * qLatch > n + f`), summing:
+    1. `256`-bit `WOTS+C V128` chain SM-TCR QROM bound (`ADRS`-tweaked `M = 1`),
+    2. `BeltLatch` pairwise-MAC forgery QROM bound (`256`-bit pairwise slot key),
+    3. `Rss256` 2-pass `GF(2^128)` active product-barrier soundness across `qOnlineSessions`. -/
+def jortsComposedQuantumBound (b : QueryBudget) : RatBound :=
+  RatBound.sumList
+    [ quantumGroverSingleTargetBound 256 b.qHash,
+      quantumGroverSingleTargetBound 256 b.qHash,
+      rss256TwoPassBarrierBound 614400 6 b.qOnlineSessions ]
+
+def jortsComposedClassicalBound (b : QueryBudget) : RatBound :=
+  RatBound.sumList
+    [ ⟨b.qHash + 1, 2 ^ 256, Nat.two_pow_pos 256⟩,
+      ⟨b.qHash + 1, 2 ^ 256, Nat.two_pow_pos 256⟩,
+      rss256TwoPassBarrierBound 614400 6 b.qOnlineSessions ]
+
+/-- **Composed `Jorts` & `QuorumJorts` (`QS-A` / `QS-B`) `PQ128` Theorem**:
+    1. Single-session 8-wave `Rss256` barrier (`B = 614,400, R = 6`) achieves `atLeastBits 217`
+       (1-wave online leaf sweep `B = 76,800, R = 5` achieves `atLeastBits 223`; Mode 1A `N = 256`
+       achieves `atLeastBits 240`),
+    2. Under any `QueryBudget` with `qHash + 1 ≤ 2 ^ 61` and `qOnlineSessions ≤ 2 ^ 20`, the exact
+       rational sum of WOTS+C, `BeltLatch` pairwise MAC, and `Rss256` BGIN19 barrier satisfies
+       `atLeastBits 128` BOTH classically and quantumly! -/
+theorem jorts_and_quorum_jorts_composed_pq128_soundness (b : QueryBudget)
+    (hqHash : b.qHash + 1 ≤ 2 ^ 61) (hqSess : b.qOnlineSessions ≤ 2 ^ 20) :
+    atLeastBits 217 (rss256TwoPassBarrierBound 614400 6 1) ∧
+    atLeastBits 223 (rss256TwoPassBarrierBound 76800 5 1) ∧
+    atLeastBits 240 (rss256Mode1aHornerBound 256 1) ∧
+    atLeastBits 128 (jortsComposedClassicalBound b) ∧
+    atLeastBits 128 (jortsComposedQuantumBound b) := by
+  have hBar8 : atLeastBits 217 (rss256TwoPassBarrierBound 614400 6 1) := by
+    unfold atLeastBits rss256TwoPassBarrierBound RatBound.scale RatBound.pow; decide
+  have hBar1 : atLeastBits 223 (rss256TwoPassBarrierBound 76800 5 1) := by
+    unfold atLeastBits rss256TwoPassBarrierBound RatBound.scale RatBound.pow; decide
+  have hMode1a : atLeastBits 240 (rss256Mode1aHornerBound 256 1) := by
+    unfold atLeastBits rss256Mode1aHornerBound RatBound.scale RatBound.pow; decide
+  have hBarSess : atLeastBits 130 (rss256TwoPassBarrierBound 614400 6 b.qOnlineSessions) := by
+    unfold atLeastBits rss256TwoPassBarrierBound RatBound.scale RatBound.pow
+    dsimp only
+    have hMul := Nat.mul_le_mul_right ((614400 + 14 + 8 * 6 + 2) ^ 2 * 2 ^ 130) hqSess
+    have hBase : 2 ^ 20 * ((614400 + 14 + 8 * 6 + 2) ^ 2 * 2 ^ 130) ≤ (2 ^ 128) ^ 2 := by decide
+    have hAssoc : b.qOnlineSessions * (614400 + 14 + 8 * 6 + 2) ^ 2 * 2 ^ 130 =
+        b.qOnlineSessions * ((614400 + 14 + 8 * 6 + 2) ^ 2 * 2 ^ 130) := by
+      simp only [Nat.mul_assoc]
+    rw [hAssoc]
+    exact Nat.le_trans hMul hBase
+  have hQrom130 : atLeastBits 130 (quantumGroverSingleTargetBound 256 b.qHash) :=
+    qrom_single_target_parametric_bits hqHash (by decide)
+  have hClass130 : atLeastBits 130 ⟨b.qHash + 1, 2 ^ 256, Nat.two_pow_pos 256⟩ := by
+    unfold atLeastBits
+    dsimp only
+    have hm := Nat.mul_le_mul_right (2 ^ 130) hqHash
+    have hp : 2 ^ 61 * 2 ^ 130 ≤ 2 ^ 256 := by decide
+    exact Nat.le_trans hm hp
+  have hComposedClass : atLeastBits 128 (jortsComposedClassicalBound b) := by
+    unfold jortsComposedClassicalBound
+    apply atLeastBits_sumList_union_loss (loss := 2) (by simp)
+    intro r hr
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hr
+    rcases hr with rfl | rfl | rfl
+    · exact hClass130
+    · exact hClass130
+    · exact hBarSess
+  have hComposedQuant : atLeastBits 128 (jortsComposedQuantumBound b) := by
+    unfold jortsComposedQuantumBound
+    apply atLeastBits_sumList_union_loss (loss := 2) (by simp)
+    intro r hr
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hr
+    rcases hr with rfl | rfl | rfl
+    · exact hQrom130
+    · exact hQrom130
+    · exact hBarSess
+  exact ⟨hBar8, hBar1, hMode1a, hComposedClass, hComposedQuant⟩
+
+
+/-! ## §4. `QuarticGoldilocks` Quartic Extension Field, Polynomial Root-Counting Schwartz–Zippel
+           & `Hem` WHIR Soundness Regimes (`crates/qsag-agg/src/field.rs`, `pcs.rs`) -/
+
+private theorem quadExtMulComm0 {R : Type} [LawfulCommRing R] (n x0 x1 y0 y1 : R) :
+    CommRingOps.add (CommRingOps.mul x0 y0) (CommRingOps.mul n (CommRingOps.mul x1 y1)) =
+      CommRingOps.add (CommRingOps.mul y0 x0) (CommRingOps.mul n (CommRingOps.mul y1 x1)) := by
+  rw [LawfulCommRing.mul_comm x0 y0, LawfulCommRing.mul_comm x1 y1]
+
+private theorem quadExtMulComm1 {R : Type} [LawfulCommRing R] (x0 x1 y0 y1 : R) :
+    CommRingOps.add (CommRingOps.mul x0 y1) (CommRingOps.mul x1 y0) =
+      CommRingOps.add (CommRingOps.mul y0 x1) (CommRingOps.mul y1 x0) := by
+  rw [LawfulCommRing.mul_comm x0 y1, LawfulCommRing.mul_comm x1 y0, LawfulCommRing.add_comm]
+
+private theorem quadExtOneMul0 {R : Type} [LawfulCommRing R] (n x0 x1 : R) :
+    CommRingOps.add (CommRingOps.mul CommRingOps.one x0)
+      (CommRingOps.mul n (CommRingOps.mul CommRingOps.zero x1)) = x0 := by
+  rw [LawfulCommRing.one_mul, LawfulCommRing.zero_mul, LawfulCommRing.mul_zero,
+      LawfulCommRing.add_zero]
+
+private theorem quadExtOneMul1 {R : Type} [LawfulCommRing R] (x0 x1 : R) :
+    CommRingOps.add (CommRingOps.mul CommRingOps.one x1)
+      (CommRingOps.mul CommRingOps.zero x0) = x1 := by
+  rw [LawfulCommRing.one_mul, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+
+private theorem quadExtMulOne0 {R : Type} [LawfulCommRing R] (n x0 x1 : R) :
+    CommRingOps.add (CommRingOps.mul x0 CommRingOps.one)
+      (CommRingOps.mul n (CommRingOps.mul x1 CommRingOps.zero)) = x0 := by
+  rw [LawfulCommRing.mul_one, LawfulCommRing.mul_zero, LawfulCommRing.mul_zero,
+      LawfulCommRing.add_zero]
+
+private theorem quadExtMulOne1 {R : Type} [LawfulCommRing R] (x0 x1 : R) :
+    CommRingOps.add (CommRingOps.mul x0 CommRingOps.zero)
+      (CommRingOps.mul x1 CommRingOps.one) = x1 := by
+  rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_one, LawfulCommRing.zero_add]
+
+private theorem quadExtLeftDistrib0 {R : Type} [LawfulCommRing R] (n x0 x1 y0 y1 z0 z1 : R) :
+    CommRingOps.add (CommRingOps.mul x0 (CommRingOps.add y0 z0))
+      (CommRingOps.mul n (CommRingOps.mul x1 (CommRingOps.add y1 z1))) =
+    CommRingOps.add
+      (CommRingOps.add (CommRingOps.mul x0 y0) (CommRingOps.mul n (CommRingOps.mul x1 y1)))
+      (CommRingOps.add (CommRingOps.mul x0 z0) (CommRingOps.mul n (CommRingOps.mul x1 z1))) := by
+  rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+  exact LawfulCommRing.add_add_add_comm _ _ _ _
+
+private theorem quadExtLeftDistrib1 {R : Type} [LawfulCommRing R] (x0 x1 y0 y1 z0 z1 : R) :
+    CommRingOps.add (CommRingOps.mul x0 (CommRingOps.add y1 z1))
+      (CommRingOps.mul x1 (CommRingOps.add y0 z0)) =
+    CommRingOps.add
+      (CommRingOps.add (CommRingOps.mul x0 y1) (CommRingOps.mul x1 y0))
+      (CommRingOps.add (CommRingOps.mul x0 z1) (CommRingOps.mul x1 z0)) := by
+  rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+  exact LawfulCommRing.add_add_add_comm _ _ _ _
+
+private theorem quadExtRightDistrib0 {R : Type} [LawfulCommRing R] (n x0 x1 y0 y1 z0 z1 : R) :
+    CommRingOps.add (CommRingOps.mul (CommRingOps.add x0 y0) z0)
+      (CommRingOps.mul n (CommRingOps.mul (CommRingOps.add x1 y1) z1)) =
+    CommRingOps.add
+      (CommRingOps.add (CommRingOps.mul x0 z0) (CommRingOps.mul n (CommRingOps.mul x1 z1)))
+      (CommRingOps.add (CommRingOps.mul y0 z0) (CommRingOps.mul n (CommRingOps.mul y1 z1))) := by
+  rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib, LawfulCommRing.left_distrib]
+  exact LawfulCommRing.add_add_add_comm _ _ _ _
+
+private theorem quadExtRightDistrib1 {R : Type} [LawfulCommRing R] (x0 x1 y0 y1 z0 z1 : R) :
+    CommRingOps.add (CommRingOps.mul (CommRingOps.add x0 y0) z1)
+      (CommRingOps.mul (CommRingOps.add x1 y1) z0) =
+    CommRingOps.add
+      (CommRingOps.add (CommRingOps.mul x0 z1) (CommRingOps.mul x1 z0))
+      (CommRingOps.add (CommRingOps.mul y0 z1) (CommRingOps.mul y1 z0)) := by
+  rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib]
+  exact LawfulCommRing.add_add_add_comm _ _ _ _
+
+private theorem quadExtMulAssoc0 {R : Type} [LawfulCommRing R] (n x0 x1 y0 y1 z0 z1 : R) :
+    CommRingOps.add
+      (CommRingOps.mul
+        (CommRingOps.add (CommRingOps.mul x0 y0) (CommRingOps.mul n (CommRingOps.mul x1 y1))) z0)
+      (CommRingOps.mul n
+        (CommRingOps.mul (CommRingOps.add (CommRingOps.mul x0 y1) (CommRingOps.mul x1 y0)) z1)) =
+    CommRingOps.add
+      (CommRingOps.mul x0
+        (CommRingOps.add (CommRingOps.mul y0 z0) (CommRingOps.mul n (CommRingOps.mul y1 z1))))
+      (CommRingOps.mul n
+        (CommRingOps.mul x1 (CommRingOps.add (CommRingOps.mul y0 z1) (CommRingOps.mul y1 z0)))) := by
+  rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
+      LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
+      LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+  have t1 : CommRingOps.mul (CommRingOps.mul x0 y0) z0 =
+      CommRingOps.mul x0 (CommRingOps.mul y0 z0) :=
+    LawfulCommRing.mul_assoc _ _ _
+  have t2 : CommRingOps.mul (CommRingOps.mul n (CommRingOps.mul x1 y1)) z0 =
+      CommRingOps.mul n (CommRingOps.mul x1 (CommRingOps.mul y1 z0)) := by
+    rw [LawfulCommRing.mul_assoc, LawfulCommRing.mul_assoc]
+  have t3 : CommRingOps.mul n (CommRingOps.mul (CommRingOps.mul x0 y1) z1) =
+      CommRingOps.mul x0 (CommRingOps.mul n (CommRingOps.mul y1 z1)) := by
+    rw [LawfulCommRing.mul_assoc x0 y1 z1,
+        ← LawfulCommRing.mul_assoc n x0 _,
+        LawfulCommRing.mul_comm n x0,
+        LawfulCommRing.mul_assoc]
+  have t4 : CommRingOps.mul n (CommRingOps.mul (CommRingOps.mul x1 y0) z1) =
+      CommRingOps.mul n (CommRingOps.mul x1 (CommRingOps.mul y0 z1)) := by
+    rw [LawfulCommRing.mul_assoc]
+  rw [t1, t2, t3, t4, LawfulCommRing.add_add_add_comm]
+  congr 1
+  exact LawfulCommRing.add_comm _ _
+
+private theorem quadExtMulAssoc1 {R : Type} [LawfulCommRing R] (n x0 x1 y0 y1 z0 z1 : R) :
+    CommRingOps.add
+      (CommRingOps.mul
+        (CommRingOps.add (CommRingOps.mul x0 y0) (CommRingOps.mul n (CommRingOps.mul x1 y1))) z1)
+      (CommRingOps.mul
+        (CommRingOps.add (CommRingOps.mul x0 y1) (CommRingOps.mul x1 y0)) z0) =
+    CommRingOps.add
+      (CommRingOps.mul x0
+        (CommRingOps.add (CommRingOps.mul y0 z1) (CommRingOps.mul y1 z0)))
+      (CommRingOps.mul x1
+        (CommRingOps.add (CommRingOps.mul y0 z0) (CommRingOps.mul n (CommRingOps.mul y1 z1)))) := by
+  rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
+      LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+  have s1 : CommRingOps.mul (CommRingOps.mul x0 y0) z1 =
+      CommRingOps.mul x0 (CommRingOps.mul y0 z1) :=
+    LawfulCommRing.mul_assoc _ _ _
+  have s2 : CommRingOps.mul (CommRingOps.mul n (CommRingOps.mul x1 y1)) z1 =
+      CommRingOps.mul x1 (CommRingOps.mul n (CommRingOps.mul y1 z1)) := by
+    rw [LawfulCommRing.mul_assoc n _ z1,
+        LawfulCommRing.mul_assoc x1 y1 z1,
+        ← LawfulCommRing.mul_assoc n x1 _,
+        LawfulCommRing.mul_comm n x1,
+        LawfulCommRing.mul_assoc]
+  have s3 : CommRingOps.mul (CommRingOps.mul x0 y1) z0 =
+      CommRingOps.mul x0 (CommRingOps.mul y1 z0) :=
+    LawfulCommRing.mul_assoc _ _ _
+  have s4 : CommRingOps.mul (CommRingOps.mul x1 y0) z0 =
+      CommRingOps.mul x1 (CommRingOps.mul y0 z0) :=
+    LawfulCommRing.mul_assoc _ _ _
+  rw [s1, s2, s3, s4, LawfulCommRing.add_add_add_comm]
+  congr 1
+  exact LawfulCommRing.add_comm _ _
+
+/-- Quartic extension field `QuarticGoldilocks = 𝔽_{p^2}[v] / (v^2 - u)` where `u = GoldilocksExt2.uBasis`
+    (`u^2 = 7`), matching `GoldilocksExt4` in `crates/qsag-agg/src/field.rs` (`|𝔽_{p^4}| = p^4 > 2^255`). -/
+structure QuarticGoldilocks where
+  c0 : GoldilocksExt2
+  c1 : GoldilocksExt2
+  deriving DecidableEq, Repr
+
+namespace QuarticGoldilocks
+
+@[ext] theorem ext {x y : QuarticGoldilocks} (h0 : x.c0 = y.c0) (h1 : x.c1 = y.c1) : x = y := by
+  cases x; cases y; subst h0; subst h1; rfl
+
+def zero : QuarticGoldilocks := ⟨CommRingOps.zero, CommRingOps.zero⟩
+def one : QuarticGoldilocks := ⟨CommRingOps.one, CommRingOps.zero⟩
+def vBasis : QuarticGoldilocks := ⟨CommRingOps.zero, CommRingOps.one⟩
+def ofExt2 (a : GoldilocksExt2) : QuarticGoldilocks := ⟨a, CommRingOps.zero⟩
+
+instance : Inhabited QuarticGoldilocks := ⟨zero⟩
+
+def add (x y : QuarticGoldilocks) : QuarticGoldilocks :=
+  ⟨CommRingOps.add x.c0 y.c0, CommRingOps.add x.c1 y.c1⟩
+
+def neg (x : QuarticGoldilocks) : QuarticGoldilocks :=
+  ⟨CommRingOps.neg x.c0, CommRingOps.neg x.c1⟩
+
+def sub (x y : QuarticGoldilocks) : QuarticGoldilocks :=
+  ⟨CommRingOps.sub x.c0 y.c0, CommRingOps.sub x.c1 y.c1⟩
+
+def mul (x y : QuarticGoldilocks) : QuarticGoldilocks :=
+  ⟨CommRingOps.add (CommRingOps.mul x.c0 y.c0)
+      (CommRingOps.mul GoldilocksExt2.uBasis (CommRingOps.mul x.c1 y.c1)),
+   CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0)⟩
+
+instance : CommRingOps QuarticGoldilocks where
+  zero := zero
+  one := one
+  add := add
+  mul := mul
+  neg := neg
+  sub := sub
+
+instance : LawfulCommRing QuarticGoldilocks where
+  add_assoc x y z := by
+    apply ext
+    · exact LawfulCommRing.add_assoc x.c0 y.c0 z.c0
+    · exact LawfulCommRing.add_assoc x.c1 y.c1 z.c1
+  add_comm x y := by
+    apply ext
+    · exact LawfulCommRing.add_comm x.c0 y.c0
+    · exact LawfulCommRing.add_comm x.c1 y.c1
+  zero_add x := by
+    apply ext
+    · exact LawfulCommRing.zero_add x.c0
+    · exact LawfulCommRing.zero_add x.c1
+  add_zero x := by
+    apply ext
+    · exact LawfulCommRing.add_zero x.c0
+    · exact LawfulCommRing.add_zero x.c1
+  add_left_neg x := by
+    apply ext
+    · exact LawfulCommRing.add_left_neg x.c0
+    · exact LawfulCommRing.add_left_neg x.c1
+  sub_eq_add_neg x y := by
+    apply ext
+    · exact LawfulCommRing.sub_eq_add_neg x.c0 y.c0
+    · exact LawfulCommRing.sub_eq_add_neg x.c1 y.c1
+  mul_comm x y := by
+    apply ext
+    · exact quadExtMulComm0 GoldilocksExt2.uBasis x.c0 x.c1 y.c0 y.c1
+    · exact quadExtMulComm1 x.c0 x.c1 y.c0 y.c1
+  one_mul x := by
+    apply ext
+    · exact quadExtOneMul0 GoldilocksExt2.uBasis x.c0 x.c1
+    · exact quadExtOneMul1 x.c0 x.c1
+  mul_one x := by
+    apply ext
+    · exact quadExtMulOne0 GoldilocksExt2.uBasis x.c0 x.c1
+    · exact quadExtMulOne1 x.c0 x.c1
+  left_distrib x y z := by
+    apply ext
+    · exact quadExtLeftDistrib0 GoldilocksExt2.uBasis x.c0 x.c1 y.c0 y.c1 z.c0 z.c1
+    · exact quadExtLeftDistrib1 x.c0 x.c1 y.c0 y.c1 z.c0 z.c1
+  right_distrib x y z := by
+    apply ext
+    · exact quadExtRightDistrib0 GoldilocksExt2.uBasis x.c0 x.c1 y.c0 y.c1 z.c0 z.c1
+    · exact quadExtRightDistrib1 x.c0 x.c1 y.c0 y.c1 z.c0 z.c1
+  mul_assoc x y z := by
+    apply ext
+    · exact quadExtMulAssoc0 GoldilocksExt2.uBasis x.c0 x.c1 y.c0 y.c1 z.c0 z.c1
+    · exact quadExtMulAssoc1 GoldilocksExt2.uBasis x.c0 x.c1 y.c0 y.c1 z.c0 z.c1
+
+/-- Square root of `-1` in `Goldilocks` (`2^48` since `(2^48)^2 = 2^96 ≡ -1 mod p`). -/
+def sqrtNegOneGoldilocks : Goldilocks := Goldilocks.ofNat 281474976710656
+
+private theorem sqrtNegOne_sq :
+    CommRingOps.mul sqrtNegOneGoldilocks sqrtNegOneGoldilocks =
+      CommRingOps.neg (CommRingOps.one : Goldilocks) := by
+  apply Goldilocks.ext
+  show (Goldilocks.mul sqrtNegOneGoldilocks sqrtNegOneGoldilocks).val = (Goldilocks.neg Goldilocks.one).val
+  rw [Goldilocks.mul_val, Goldilocks.neg_val]
+  decide
+
+/-- **Quartic Irreducibility Theorem (`uBasis_not_square`)**:
+    `u = ⟨0, 1⟩ ∈ GoldilocksExt2` has no square root in `GoldilocksExt2`, so `v^2 - u` is
+    irreducible over `𝔽_{p^2}` and `QuarticGoldilocks` is a genuine field! -/
+theorem uBasis_not_square (z : GoldilocksExt2) :
+    CommRingOps.mul z z ≠ GoldilocksExt2.uBasis := by
+  intro hSq
+  have hRe : CommRingOps.add (CommRingOps.mul z.c0 z.c0)
+      (CommRingOps.mul GoldilocksExt2.nonResidue (CommRingOps.mul z.c1 z.c1)) =
+      (CommRingOps.zero : Goldilocks) := congrArg GoldilocksExt2.c0 hSq
+  have hIm : CommRingOps.add (CommRingOps.mul z.c0 z.c1) (CommRingOps.mul z.c1 z.c0) =
+      (CommRingOps.one : Goldilocks) := congrArg GoldilocksExt2.c1 hSq
+  if hc1 : z.c1 = Goldilocks.zero then
+    rw [hc1] at hIm
+    change CommRingOps.add (CommRingOps.mul z.c0 CommRingOps.zero)
+        (CommRingOps.mul CommRingOps.zero z.c0) = CommRingOps.one at hIm
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_mul, LawfulCommRing.add_zero] at hIm
+    exact absurd (congrArg Goldilocks.val hIm) (by decide)
+  else
+    have hNegEq : CommRingOps.mul z.c0 z.c0 =
+        CommRingOps.neg (CommRingOps.mul GoldilocksExt2.nonResidue (CommRingOps.mul z.c1 z.c1)) := by
+      have hSub := congrArg (fun t =>
+        CommRingOps.add t (CommRingOps.neg (CommRingOps.mul GoldilocksExt2.nonResidue (CommRingOps.mul z.c1 z.c1)))) hRe
+      rw [LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg,
+          LawfulCommRing.add_zero, LawfulCommRing.zero_add] at hSub
+      exact hSub
+    let w : Goldilocks :=
+      CommRingOps.mul (CommRingOps.mul z.c0 (Goldilocks.inv z.c1)) sqrtNegOneGoldilocks
+    have hwSq : CommRingOps.mul w w = GoldilocksExt2.nonResidue := by
+      dsimp only [w]
+      let q := CommRingOps.mul z.c0 (Goldilocks.inv z.c1)
+      have h1 : CommRingOps.mul (CommRingOps.mul q sqrtNegOneGoldilocks)
+          (CommRingOps.mul q sqrtNegOneGoldilocks) =
+          CommRingOps.mul (CommRingOps.mul q q)
+            (CommRingOps.mul sqrtNegOneGoldilocks sqrtNegOneGoldilocks) := by
+        rw [LawfulCommRing.mul_assoc q sqrtNegOneGoldilocks _,
+            ← LawfulCommRing.mul_assoc sqrtNegOneGoldilocks q _,
+            LawfulCommRing.mul_comm sqrtNegOneGoldilocks q,
+            LawfulCommRing.mul_assoc q sqrtNegOneGoldilocks _,
+            ← LawfulCommRing.mul_assoc q q _]
+      have hqSq : CommRingOps.mul q q = CommRingOps.neg GoldilocksExt2.nonResidue := by
+        dsimp only [q]
+        have ha : CommRingOps.mul (CommRingOps.mul z.c0 (Goldilocks.inv z.c1))
+            (CommRingOps.mul z.c0 (Goldilocks.inv z.c1)) =
+            CommRingOps.mul (CommRingOps.mul z.c0 z.c0)
+              (CommRingOps.mul (Goldilocks.inv z.c1) (Goldilocks.inv z.c1)) := by
+          rw [LawfulCommRing.mul_assoc z.c0 (Goldilocks.inv z.c1) _,
+              ← LawfulCommRing.mul_assoc (Goldilocks.inv z.c1) z.c0 _,
+              LawfulCommRing.mul_comm (Goldilocks.inv z.c1) z.c0,
+              LawfulCommRing.mul_assoc z.c0 (Goldilocks.inv z.c1) _,
+              ← LawfulCommRing.mul_assoc z.c0 z.c0 _]
+        rw [ha, hNegEq, LawfulCommRing.neg_mul, LawfulCommRing.mul_assoc GoldilocksExt2.nonResidue]
+        have hCancel : CommRingOps.mul (CommRingOps.mul z.c1 z.c1)
+            (CommRingOps.mul (Goldilocks.inv z.c1) (Goldilocks.inv z.c1)) = CommRingOps.one := by
+          rw [LawfulCommRing.mul_assoc z.c1 z.c1 _,
+              ← LawfulCommRing.mul_assoc z.c1 (Goldilocks.inv z.c1) _,
+              Goldilocks.mul_inv_cancel hc1, LawfulCommRing.one_mul,
+              Goldilocks.mul_inv_cancel hc1]
+        rw [hCancel, LawfulCommRing.mul_one]
+      rw [h1, hqSq, sqrtNegOne_sq, LawfulCommRing.neg_mul, LawfulCommRing.mul_neg,
+          LawfulCommRing.mul_one, LawfulCommRing.neg_neg]
+    exact GoldilocksExt2.nonResidue_not_square w hwSq
+
+def norm (z : QuarticGoldilocks) : GoldilocksExt2 :=
+  CommRingOps.sub (CommRingOps.mul z.c0 z.c0)
+    (CommRingOps.mul GoldilocksExt2.uBasis (CommRingOps.mul z.c1 z.c1))
+
+theorem norm_ne_zero {z : QuarticGoldilocks} (hz : z ≠ zero) :
+    norm z ≠ GoldilocksExt2.zero := by
+  intro hNorm
+  have hEq : CommRingOps.mul z.c0 z.c0 =
+      CommRingOps.mul GoldilocksExt2.uBasis (CommRingOps.mul z.c1 z.c1) :=
+    LawfulCommRing.sub_eq_zero_iff.mp hNorm
+  if hc1 : z.c1 = GoldilocksExt2.zero then
+    have hrhs : CommRingOps.mul GoldilocksExt2.uBasis (CommRingOps.mul z.c1 z.c1) =
+        GoldilocksExt2.zero := by
+      rw [hc1]
+      change CommRingOps.mul GoldilocksExt2.uBasis
+        (CommRingOps.mul CommRingOps.zero CommRingOps.zero) = CommRingOps.zero
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero]
+    rw [hrhs] at hEq
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hEq with hc0 | hc0 <;>
+      exact hz (ext hc0 hc1)
+  else
+    let q := CommRingOps.mul z.c0 (GoldilocksExt2.inv z.c1)
+    have hqSq : CommRingOps.mul q q = GoldilocksExt2.uBasis := by
+      dsimp only [q]
+      have hassoc : CommRingOps.mul (CommRingOps.mul z.c0 (GoldilocksExt2.inv z.c1))
+          (CommRingOps.mul z.c0 (GoldilocksExt2.inv z.c1)) =
+          CommRingOps.mul (CommRingOps.mul z.c0 z.c0)
+            (CommRingOps.mul (GoldilocksExt2.inv z.c1) (GoldilocksExt2.inv z.c1)) := by
+        rw [LawfulCommRing.mul_assoc z.c0 (GoldilocksExt2.inv z.c1) _,
+            ← LawfulCommRing.mul_assoc (GoldilocksExt2.inv z.c1) z.c0 _,
+            LawfulCommRing.mul_comm (GoldilocksExt2.inv z.c1) z.c0,
+            LawfulCommRing.mul_assoc z.c0 (GoldilocksExt2.inv z.c1) _,
+            ← LawfulCommRing.mul_assoc z.c0 z.c0 _]
+      rw [hassoc, hEq, LawfulCommRing.mul_assoc GoldilocksExt2.uBasis]
+      have hCancel : CommRingOps.mul (CommRingOps.mul z.c1 z.c1)
+          (CommRingOps.mul (GoldilocksExt2.inv z.c1) (GoldilocksExt2.inv z.c1)) = CommRingOps.one := by
+        rw [LawfulCommRing.mul_assoc z.c1 z.c1 _,
+            ← LawfulCommRing.mul_assoc z.c1 (GoldilocksExt2.inv z.c1) _,
+            GoldilocksExt2.mul_inv_cancel hc1, LawfulCommRing.one_mul,
+            GoldilocksExt2.mul_inv_cancel hc1]
+      rw [hCancel, LawfulCommRing.mul_one]
+    exact uBasis_not_square q hqSq
+
+def inv (z : QuarticGoldilocks) : QuarticGoldilocks :=
+  let invN := GoldilocksExt2.inv (norm z)
+  ⟨CommRingOps.mul z.c0 invN, CommRingOps.neg (CommRingOps.mul z.c1 invN)⟩
+
+theorem mul_inv_cancel {z : QuarticGoldilocks} (hz : z ≠ zero) :
+    CommRingOps.mul z (inv z) = CommRingOps.one := by
+  have hnormNe := norm_ne_zero hz
+  let invN := GoldilocksExt2.inv (norm z)
+  apply ext
+  · change CommRingOps.add
+        (CommRingOps.mul z.c0 (CommRingOps.mul z.c0 invN))
+        (CommRingOps.mul GoldilocksExt2.uBasis
+          (CommRingOps.mul z.c1 (CommRingOps.neg (CommRingOps.mul z.c1 invN)))) =
+      CommRingOps.one
+    rw [← LawfulCommRing.mul_assoc z.c0 z.c0 invN,
+        LawfulCommRing.mul_neg z.c1, LawfulCommRing.mul_neg GoldilocksExt2.uBasis,
+        ← LawfulCommRing.mul_assoc z.c1 z.c1 invN,
+        ← LawfulCommRing.mul_assoc GoldilocksExt2.uBasis _ invN,
+        ← LawfulCommRing.sub_eq_add_neg,
+        ← LawfulCommRing.sub_mul]
+    exact GoldilocksExt2.mul_inv_cancel hnormNe
+  · change CommRingOps.add
+        (CommRingOps.mul z.c0 (CommRingOps.neg (CommRingOps.mul z.c1 invN)))
+        (CommRingOps.mul z.c1 (CommRingOps.mul z.c0 invN)) =
+      CommRingOps.zero
+    rw [LawfulCommRing.mul_neg,
+        ← LawfulCommRing.mul_assoc z.c0 z.c1 invN,
+        ← LawfulCommRing.mul_assoc z.c1 z.c0 invN,
+        LawfulCommRing.mul_comm z.c1 z.c0,
+        LawfulCommRing.add_left_neg]
+
+end QuarticGoldilocks
+
+instance : NoZeroDivisors QuarticGoldilocks where
+  eq_zero_or_eq_zero_of_mul_eq_zero {a b} h := by
+    if ha : a = QuarticGoldilocks.zero then
+      exact .inl ha
+    else
+      right
+      have hmul := congrArg (CommRingOps.mul (QuarticGoldilocks.inv a)) h
+      rw [LawfulCommRing.mul_zero, ← LawfulCommRing.mul_assoc,
+          LawfulCommRing.mul_comm (QuarticGoldilocks.inv a) a,
+          QuarticGoldilocks.mul_inv_cancel ha, LawfulCommRing.one_mul] at hmul
+      exact hmul
+
+/-- **Root-Counting Univariate Schwartz–Zippel Theorem (`schwartz_zippel_root_bound_of_nodup`)**:
+    Over ANY integral domain `F` (`Goldilocks`, `GoldilocksExt2`, `QuarticGoldilocks`), for ANY
+    duplicate-free challenge pool `S : List F` (`0 < S.length`) and ANY non-zero polynomial `cs`
+    of degree `≤ d`, the fraction of challenge points in `S` where `evalCoeffs cs r = 0` is
+    bounded by `d / S.length` — proved from `RoundPoly.roots_nodup_length_le`, NOT a formula literal! -/
+theorem schwartz_zippel_root_bound_of_nodup
+    {F : Type} [LawfulCommRing F] [DecidableEq F] [NoZeroDivisors F]
+    (d : Nat) (cs : List F) (S : List F)
+    (hPos : 0 < S.length) (hNodup : S.Nodup) (hDeg : cs.length ≤ d + 1)
+    (hNonzero : ∃ x₀ : F, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero) :
+    RatBound.le
+      ⟨(S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length,
+       S.length, hPos⟩
+      ⟨d, S.length, hPos⟩ := by
+  unfold RatBound.le
+  dsimp only
+  apply Nat.mul_le_mul_right
+  exact RoundPoly.roots_nodup_length_le d cs S hNodup hDeg hNonzero
+
+/-- Concrete specialization of `schwartz_zippel_root_bound_of_nodup` to `QuarticGoldilocks`! -/
+theorem goldilocksExt4_schwartz_zippel_root_bound
+    (d : Nat) (cs : List QuarticGoldilocks) (S : List QuarticGoldilocks)
+    (hPos : 0 < S.length) (hNodup : S.Nodup) (hDeg : cs.length ≤ d + 1)
+    (hNonzero : ∃ x₀ : QuarticGoldilocks, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero) :
+    (S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length ≤ d ∧
+    RatBound.le
+      ⟨(S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length,
+       S.length, hPos⟩
+      ⟨d, S.length, hPos⟩ :=
+  ⟨RoundPoly.roots_nodup_length_le d cs S hNodup hDeg hNonzero,
+   schwartz_zippel_root_bound_of_nodup d cs S hPos hNodup hDeg hNonzero⟩
+
+/-! ### §4.1 `Hem` `GoldilocksExt4` 5-Regime WHIR Ladder, Positive-`η` Slack & List/Commit Costs -/
+
+/-- Exact quartic extension cardinality `|𝔽_{p^4}| = p^4` (`> 2^255`). -/
+def goldilocksExt4Card : Nat := goldilocksPrime ^ 4
+/-- Quadratic extension cardinality `p^2` (`< 2^128`). Named apart from `Qsag.goldilocksExt2Card`
+    in `ThresholdMpc.lean` (`p * p`, the index type of its field enumeration): the library root and
+    `CorduroyAndHemAirCompleteness` import both modules. -/
+def goldilocksQuadraticExtCard : Nat := goldilocksPrime ^ 2
+
+theorem goldilocksExt4Card_pos : 0 < goldilocksExt4Card := by
+  unfold goldilocksExt4Card goldilocksPrime; decide
+
+theorem goldilocksQuadraticExtCard_pos : 0 < goldilocksQuadraticExtCard := by
+  unfold goldilocksQuadraticExtCard goldilocksPrime; decide
+
+/-- Canonical 2-regime unconditional WHIR Johnson security ladder mirroring
+    `crates/qsag-agg/src/pcs.rs` (`WhirSecurityRegime`, `#[repr(u8)]` tags `{2, 4}`,
+    `default = .bciksJohnsonQrom128` = `4`; retired capacity wire tags `0, 1, 3` are rejected per
+    `Crites & Stewart 2025/2046` and `Krachun-Kazanin-Habock 2026/782`):
+    1. `bciksJohnsonClassical128` (wire tag `2`): `(129, 65, 44, 33)` (`⌈256 / log₂ B_i⌉ + 1`,
+       `< 2⁻¹²⁸` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0`,
+       `~72` QROM round-search bits — classical regime, NOT `PQ128`),
+    2. `bciksJohnsonQrom128` (**DEFAULT**, wire tag `4`): `(258, 130, 88, 66)`
+       (`⌈512 / log₂ B_i⌉ + 2`, `pcs.rs::minimum_queries`, `< 2⁻²⁵⁶` unconditional `[BCIKS20]`
+       Johnson query error with positive slack `η_i > 0` + `16`b PoW = `> 272` classical FS bits /
+       `136` QROM Grover round-search bits). -/
+inductive WhirBudgetRegime where
+  | bciksJohnsonClassical128
+  | bciksJohnsonQrom128
+  deriving DecidableEq, Repr
+
+namespace WhirBudgetRegime
+
+def default : WhirBudgetRegime := .bciksJohnsonQrom128
+
+def toU8 : WhirBudgetRegime → UInt8
+  | .bciksJohnsonClassical128 => 2
+  | .bciksJohnsonQrom128 => 4
+
+def fromU8? (tag : UInt8) : Option WhirBudgetRegime :=
+  if tag == 2 then some .bciksJohnsonClassical128
+  else if tag == 4 then some .bciksJohnsonQrom128
+  else none
+
+def meetsQrom128Floor : WhirBudgetRegime → Bool
+  | .bciksJohnsonQrom128 => true
+  | .bciksJohnsonClassical128 => false
+
+end WhirBudgetRegime
+
+/-- `#tooth`: retired capacity-proximity wire tags `0`, `1`, and `3` are rejected (`none`) by
+    `WhirBudgetRegime.fromU8?`, matching `WhirSecurityRegime::from_u8` in `pcs.rs`. -/
+theorem tooth_whirBudgetRegime_fromU8_rejects_retired_tags :
+    WhirBudgetRegime.fromU8? 0 = none ∧
+    WhirBudgetRegime.fromU8? 1 = none ∧
+    WhirBudgetRegime.fromU8? 3 = none ∧
+    WhirBudgetRegime.default = .bciksJohnsonQrom128 := by
+  decide
+
+/-- One stage `(blowup B_i = sqrtBlowup^2, stepVars s_i, domainLog2, numQueries q_i)` of a WHIR schedule. -/
+structure WhirStageBudget where
+  sqrtBlowup : Nat
+  stepVars : Nat
+  domainLog2 : Nat
+  numQueries : Nat
+  h_sqrt_pos : 0 < sqrtBlowup
+  deriving DecidableEq, Repr
+
+/-- Canonical 4-stage `B = (4, 16, 64, 256)` (`sqrtBlowup = (2, 4, 8, 16)`) WHIR query schedules
+    for both unconditional `WhirBudgetRegime` profiles on the DEPLOYED `num_vars = 24` geometry of
+    `pcs.rs::stage_geometry`: `step_vars = (6, 4, 3, 3)` and committed-domain sizes
+    `|D_i| = 2^(26, 22, 20, 19)` (`= B_i * 2^(24, 18, 14, 11)`); see
+    `whirSchedule4Stage_matches_deployed_geometry`. -/
