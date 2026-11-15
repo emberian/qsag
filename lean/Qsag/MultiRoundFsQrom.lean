@@ -1590,7 +1590,8 @@ def hemPrefixState {F : Type} [CommRingOps F] [DecidableEq F]
   match tr with
   | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
     let okLengths :=
-      decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) &&
+      decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16 ∧
+      inst.batchClaims.length = inst.batchOracles.length) &&
       decide (absorbedShifts.length = inst.batchClaims.length) &&
       decide (weights.length = inst.batchClaims.length)
     if okLengths = true then
@@ -1646,7 +1647,8 @@ def verifyHemStages {F : Type} [CommRingOps F] [DecidableEq F]
     (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
   match tr with
   | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
-    decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) &&
+    decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16 ∧
+      inst.batchClaims.length = inst.batchOracles.length) &&
     decide (absorbedShifts.length = inst.batchClaims.length) &&
     decide (weights.length = inst.batchClaims.length) &&
     let combClaim := evalCascadeClaim inst.batchClaims absorbedShifts weights
