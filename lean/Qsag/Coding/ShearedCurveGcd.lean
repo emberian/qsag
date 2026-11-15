@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.ShearedCurveGcd — Dynamic Euclidean Curve Root Decomposition
+# Qsag.Coding.ShearedCurveGcd — Dynamic Euclidean Curve Root Decomposition
 
 Dynamic Euclidean `xgcd` and root extraction over bivariate curve factors (`0 Classical.choice`,
 `0` irreducible factorization):
@@ -12,19 +12,19 @@ Dynamic Euclidean `xgcd` and root extraction over bivariate curve factors (`0 Cl
   of which either `E_j ∣ g₁` or `(CoprimeZ E_j g₁ ∧ ∃ ζ ∈ R_{E_j}, C₁(ζ) = 0 ∧ P₀(ζ) = 0)`.
 -/
 
-public import Qsag.CodingTheory.BivariateFactorSplit
-public import Qsag.CodingTheory.ModMonicAlgebra
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.BivariateGauss
-import all Qsag.CodingTheory.BivariateFactorSplit
-import all Qsag.CodingTheory.MatrixDet
-import all Qsag.CodingTheory.SylvesterElimination
-import all Qsag.CodingTheory.SylvesterDeriv
-import all Qsag.CodingTheory.ModMonicAlgebra
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.BivariateFactorSplit
+public import Qsag.Coding.ModMonicAlgebra
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.BivariateGauss
+import all Qsag.Coding.BivariateFactorSplit
+import all Qsag.Coding.MatrixDet
+import all Qsag.Coding.SylvesterElimination
+import all Qsag.Coding.SylvesterDeriv
+import all Qsag.Coding.ModMonicAlgebra
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

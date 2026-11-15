@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.TrivariateGsExplainer — `[CWYZ26]` Lemma 4.2
+# Qsag.Coding.TrivariateGsExplainer — `[CWYZ26]` Lemma 4.2
 
 For received words `f, g` on a domain `Dm`, a nonzero `Q ∈ F[X][Y][Z]` is found by Gaussian
 elimination over `F` with the following property: for every challenge `(α, β)` and every `P`
@@ -21,14 +21,14 @@ Not proved here: `deg_Z Q ≥ 1`. It is not needed downstream, since a `Z`-free 
 the line `Y = α + βX` only for excluded pairs.
 -/
 
-public import Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.HenselNumerators
-import all Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.HenselNumerators
+import all Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.HenselNumerators — cleared numerators of a Hensel lift, without division
+# Qsag.Coding.HenselNumerators — cleared numerators of a Hensel lift, without division
 
 Let `G ∈ Λ[W][U]` with `S := [W⁰U¹] G` (the separant). A root series `E(W) = Σ_{j≥1} c_j W^j`
 of `G(W, E) = 0` has `c_j = N_j / S^(2j-1)` (`[CWYZ26]` Lemma 3.11). Substituting `W = S²·W'`
@@ -21,11 +21,11 @@ filtration (`phi_contract`), so the iterates `iter G k = Φ^k(0)` stabilize and
 The file also holds the small polynomial and ideal-power lemmas the Hensel files share.
 -/
 
-public import Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

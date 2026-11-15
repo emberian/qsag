@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.BivariateGauss — Total-Degree Additivity & Constructive Gauss's Lemma
+# Qsag.Coding.BivariateGauss — Total-Degree Additivity & Constructive Gauss's Lemma
 
 Constructive bivariate polynomial content and primitivity over any field `E`
 (`[LawfulField E] [DecidableEq E]`, `0 Classical.choice`, `0` irreducible factorization):
@@ -12,12 +12,12 @@ Constructive bivariate polynomial content and primitivity over any field `E`
   refinement against minimal non-divisible `Z`-coefficients.
 -/
 
-public import Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

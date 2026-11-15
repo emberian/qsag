@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.SimpleRootStratification — simple roots without factoring
+# Qsag.Coding.SimpleRootStratification — simple roots without factoring
 
 `[CWYZ26]` §4.2 factors the explainer `Q = C·Π Qᵢ^{aᵢ}` and excludes the challenges at which
 a factor has a repeated root. This file reaches the same conclusion — every root of `Q` on a
@@ -23,14 +23,14 @@ would be needed to recover the paper's sharper `Σ hᵢ ≤ D` and to treat char
 `p ≤ deg_Z Q`.
 -/
 
-public import Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.HenselNumerators
-import all Qsag.CodingTheory.UniversalHenselLift
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.HenselNumerators
+import all Qsag.Coding.UniversalHenselLift
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

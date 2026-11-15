@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.DynamicGcdSplit — fraction fields, squarefree factors, and `[CWYZ26]` Lemma 4.3
+# Qsag.Coding.DynamicGcdSplit — fraction fields, squarefree factors, and `[CWYZ26]` Lemma 4.3
 
 * `Frac D`: the fraction field of a decidable integral domain, as a quotient of pairs by
   cross-multiplication, with `DecidableEq` and `LawfulField`. `RatFunc F := Frac F[X]`.
@@ -13,10 +13,10 @@ module
   line `Y = α + βX` is a simple root of some factor.
 -/
 
-public import Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.AffineProximityGaps
+public import Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.AffineProximityGaps
 
 public section
 namespace Qsag

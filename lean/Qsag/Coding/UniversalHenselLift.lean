@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.UniversalHenselLift — uniqueness of Hensel lifts at simple roots
+# Qsag.Coding.UniversalHenselLift — uniqueness of Hensel lifts at simple roots
 
 The uniqueness half of `[CWYZ26]` Lemma 3.11, and the injectivity it gives in Claim 4.9.
 
@@ -21,12 +21,12 @@ The uniqueness half of `[CWYZ26]` Lemma 3.11, and the injectivity it gives in Cl
   the common denominator `s^(2d-1)`.
 -/
 
-public import Qsag.CodingTheory.HenselNumerators
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.HenselNumerators
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.HenselNumerators
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.HenselNumerators
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

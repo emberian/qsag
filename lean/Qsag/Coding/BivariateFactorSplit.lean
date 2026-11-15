@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.CodingTheory.BivariateFactorSplit — `Y`-Primitive D5 Splitting & Variable Swap
+# Qsag.Coding.BivariateFactorSplit — `Y`-Primitive D5 Splitting & Variable Swap
 
 Constructive bivariate polynomial factor splitting over any field `E`
 (`[LawfulField E] [DecidableEq E]`, `0 Classical.choice`, `0` irreducible factorization):
@@ -12,13 +12,13 @@ Constructive bivariate polynomial factor splitting over any field `E`
   and `CoprimeZ` certificate for `Z`-only polynomials from a single `V`-coefficient.
 -/
 
-public import Qsag.CodingTheory.BivariateGauss
-import all Qsag.CodingTheory.PolyMv3
-import all Qsag.CodingTheory.SylvesterResultant
-import all Qsag.CodingTheory.DynamicGcdSplit
-import all Qsag.CodingTheory.BivariateGauss
-import all Qsag.AffineProximityGaps
-import all Qsag.Goldilocks
+public import Qsag.Coding.BivariateGauss
+import all Qsag.Coding.PolyMv3
+import all Qsag.Coding.SylvesterResultant
+import all Qsag.Coding.DynamicGcdSplit
+import all Qsag.Coding.BivariateGauss
+import all Qsag.Coding.AffineProximityGaps
+import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag
