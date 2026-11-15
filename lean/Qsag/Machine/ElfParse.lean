@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.ElfParse — indexed-reader `GNU ar` + `ELF64` parser and fixture extraction certificates
+# Qsag.Machine.ElfParse — indexed-reader `GNU ar` + `ELF64` parser and fixture extraction certificates
 
 The parser reads its input through `Bytes`, a length plus an index function, so that a parse touches
 only the header, section-table, symbol-table, name and code bytes it needs. The compiled archives in
@@ -16,8 +16,8 @@ Contents:
    normalized slices of `Qsag.ElfFixtureSlices`.
 -/
 
-public import Qsag.CompiledRlibFixtures
-public import Qsag.ElfFixtureSlices
+public import Qsag.Machine.CompiledRlibFixtures
+public import Qsag.Machine.ElfFixtureSlices
 
 import Qsag.Tactic.AssuranceKit
 public section
