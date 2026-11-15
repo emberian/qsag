@@ -1,8 +1,10 @@
 //! Threshold oblivious PRF with replicated, actively checked arithmetic.
 //!
 //! # Construction and security boundary
-//! The supported configuration is exactly threshold t=2, n=5, with at most
-//! t'=1 statically corrupt server. Other configurations are rejected. Private,
+//! This backend supports exactly threshold t=2, n=5, with at most t'=1 statically
+//! corrupt server, and needs four of the five servers online; other shapes are
+//! rejected here. Any `2 <= t <= n <= 64` with exactly `t` servers online is the
+//! Shamir-SPDZ backend, [`crate::voprf_spdz`], which computes the same F. Private,
 //! authenticated point-to-point channels and a consistent authenticated
 //! broadcast are required; the transport must separate sessions and phases.
 //! This intentionally uses replicated additive sharing instead of Shamir:
