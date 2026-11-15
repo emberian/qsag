@@ -34,6 +34,26 @@ use crate::inventory::{HdError, RekeyFault};
 
 /// Largest supported committee. Subset counts grow as `binomial(n, t - 1)`.
 pub const MAX_CUSTODIANS: usize = 256;
+/// Largest number of subset seeds `binomial(n, t - 1)` a committee may need.
+/// Every custodian stores, hashes and broadcasts state linear in this count, so
+/// a committee beyond it is rejected at construction instead of exhausting
+/// memory inside a ceremony. The ceiling bounds resource use only: the work per
+/// rekey is still linear in the subset count.
+pub const MAX_SUBSET_SEEDS: usize = 1 << 16;
+
+/// Whether `binomial(n, k) <= limit`, without overflow for any `n <= MAX_CUSTODIANS`.
+fn binomial_at_most(n: usize, k: usize, limit: usize) -> bool {
+    let k = k.min(n - k);
+    let mut count = 1u128;
+    for i in 1..=k {
+        // `count` is `binomial(n - k + i, i)` after each step, an exact division.
+        count = count * (n - k + i) as u128 / i as u128;
+        if count > limit as u128 {
+            return false;
+        }
+    }
+    true
+}
 /// Public set of committee positions, with a canonical 32-byte big-endian codec.
 /// Ordering is numerical, so subset vectors can be searched by binary search.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -59,7 +79,8 @@ impl CustodianSet {
         }
         bytes
     }
-    pub fn trailing_zeros(self) -> u32 {
+    #[cfg(test)]
+    pub(crate) fn trailing_zeros(self) -> u32 {
         self.0
             .iter()
             .enumerate()
@@ -67,6 +88,7 @@ impl CustodianSet {
             .map_or(256, |(i, w)| i as u32 * 64 + w.trailing_zeros())
     }
 }
+#[cfg(test)]
 impl From<u16> for CustodianSet {
     fn from(value: u16) -> Self {
         Self([u64::from(value), 0, 0, 0])
@@ -99,12 +121,17 @@ pub struct CommitteeConfig {
 impl CommitteeConfig {
     /// Rejects every committee outside the proven model with
     /// [`HdError::UnsupportedCommittee`]: `t = 0`, `n < 2t - 1`, more than
-    /// [`MAX_CUSTODIANS`] members, unordered or duplicate identifiers, and zero,
-    /// duplicate or non-canonical evaluation points.
+    /// [`MAX_CUSTODIANS`] members, more than [`MAX_SUBSET_SEEDS`] subset seeds,
+    /// unordered or duplicate identifiers, and zero, duplicate or non-canonical
+    /// evaluation points.
     pub fn new(threshold: u16, members: &[(u16, u32)], label: [u8; 32]) -> Result<Self, HdError> {
         let n = members.len();
         let t = usize::from(threshold);
-        if t == 0 || n > MAX_CUSTODIANS || n < 2 * t - 1 {
+        if t == 0
+            || n > MAX_CUSTODIANS
+            || n < 2 * t - 1
+            || !binomial_at_most(n, t - 1, MAX_SUBSET_SEEDS)
+        {
             return Err(HdError::UnsupportedCommittee);
         }
         for (i, &(id, x)) in members.iter().enumerate() {
@@ -185,6 +212,22 @@ impl CommitteeConfig {
             .filter(|mask| mask.contains(position))
             .collect()
     }
+}
+
+/// Whether `entries` names exactly the members of `subsets` that contain
+/// `position`, in the same ascending order. `subsets` is the committee's full
+/// list, generated once by the caller for all positions.
+pub(crate) fn lists_subsets_of<T>(
+    subsets: &[CustodianSet],
+    position: usize,
+    entries: &[T],
+    subset_of: impl Fn(&T) -> CustodianSet,
+) -> bool {
+    let mut expected = subsets.iter().filter(|subset| subset.contains(position));
+    entries
+        .iter()
+        .all(|entry| expected.next() == Some(&subset_of(entry)))
+        && expected.next().is_none()
 }
 
 /// Round 1 broadcast: one hiding commitment for each subset the sender belongs to.
@@ -326,15 +369,10 @@ impl SeedCeremonyRound1 {
             return abort(RekeyFault::MalformedMessage);
         }
         let mut transcript = Vec::new();
+        let subsets = self.config.subsets();
         for (position, (commit, &(id, _))) in commits.iter().zip(members).enumerate() {
-            let expected = self.config.subsets_of(position);
             if commit.party_id != id
-                || commit.digests.len() != expected.len()
-                || commit
-                    .digests
-                    .iter()
-                    .zip(&expected)
-                    .any(|(entry, &subset)| entry.0 != subset)
+                || !lists_subsets_of(&subsets, position, &commit.digests, |entry| entry.0)
             {
                 return abort(RekeyFault::MalformedMessage);
             }
@@ -403,6 +441,24 @@ impl SeedCeremonyRound2 {
         if deliveries.len() + 1 != members.len() {
             return abort(RekeyFault::MalformedMessage);
         }
+        // One delivery from every other custodian, addressed to this one, with
+        // its openings in ascending subset order (so each subset occurs once).
+        let mut inbox: Vec<Option<&SeedPrivateDelivery>> = alloc::vec![None; members.len()];
+        for delivery in &deliveries {
+            let slot = match self.config.position(delivery.from) {
+                Some(from) if from != self.position && delivery.to == own_id => &mut inbox[from],
+                _ => return abort(RekeyFault::MalformedMessage),
+            };
+            if slot.is_some()
+                || delivery
+                    .openings
+                    .windows(2)
+                    .any(|pair| pair[0].subset >= pair[1].subset)
+            {
+                return abort(RekeyFault::MalformedMessage);
+            }
+            *slot = Some(delivery);
+        }
         let digest = self.config.digest();
         let mut seeds = Vec::with_capacity(self.contributions.len());
         for own in &self.contributions {
@@ -415,21 +471,18 @@ impl SeedCeremonyRound2 {
                     frames.push(RedactedSecret::new(own.contribution));
                     continue;
                 }
-                let mut from = deliveries.iter().filter(|d| d.from == id);
-                let delivery = match (from.next(), from.next()) {
-                    (Some(delivery), None) if delivery.to == own_id => delivery,
-                    _ => return abort(RekeyFault::MalformedMessage),
-                };
-                let mut matching = delivery.openings.iter().filter(|o| o.subset == own.subset);
-                let opening = match (matching.next(), matching.next()) {
-                    (Some(opening), None) => opening,
-                    _ => return abort(RekeyFault::MalformedMessage),
-                };
-                let committed = self.commits[position]
-                    .digests
-                    .iter()
-                    .find(|entry| entry.0 == own.subset)
-                    .ok_or(HdError::RekeyAborted(RekeyFault::MalformedMessage))?;
+                let malformed = HdError::RekeyAborted(RekeyFault::MalformedMessage);
+                let delivery = inbox[position].ok_or(malformed)?;
+                let opening = delivery
+                    .openings
+                    .binary_search_by_key(&own.subset, |opening| opening.subset)
+                    .map(|index| &delivery.openings[index])
+                    .map_err(|_| malformed)?;
+                let digests = &self.commits[position].digests;
+                let committed = digests
+                    .binary_search_by_key(&own.subset, |entry| entry.0)
+                    .map(|index| &digests[index])
+                    .map_err(|_| malformed)?;
                 let actual = commit_contribution(
                     &digest,
                     id,
@@ -479,21 +532,16 @@ impl SeedCeremonyRound3 {
         if confirmations.len() != members.len() {
             return abort(RekeyFault::MalformedMessage);
         }
+        let subsets = self.seeds.config.subsets();
         for (position, (confirmation, &(id, _))) in confirmations.iter().zip(members).enumerate() {
-            let expected = self.seeds.config.subsets_of(position);
             if confirmation.party_id != id
-                || confirmation.tags.len() != expected.len()
-                || confirmation
-                    .tags
-                    .iter()
-                    .zip(&expected)
-                    .any(|(entry, &subset)| entry.0 != subset)
+                || !lists_subsets_of(&subsets, position, &confirmation.tags, |entry| entry.0)
             {
                 return abort(RekeyFault::MalformedMessage);
             }
             for (subset, tag) in &confirmation.tags {
-                if let Some(own) = self.own.tags.iter().find(|entry| entry.0 == *subset)
-                    && !ct_eq_bytes(&own.1, tag)
+                if let Ok(index) = self.own.tags.binary_search_by_key(subset, |entry| entry.0)
+                    && !ct_eq_bytes(&self.own.tags[index].1, tag)
                 {
                     return abort(RekeyFault::SeedConfirmationMismatch);
                 }
@@ -741,6 +789,100 @@ mod tests {
                 Err(HdError::UnsupportedCommittee)
             );
         }
+    }
+
+    #[test]
+    fn oversized_subset_families_are_rejected_before_enumeration() {
+        let members =
+            |n: u16| -> Vec<(u16, u32)> { (0..n).map(|i| (i, u32::from(i) + 1)).collect() };
+        // binomial(256, 2) = 32,640 is within the ceiling; binomial(256, 3) and
+        // binomial(255, 127) are not, and must fail without being enumerated.
+        assert_eq!(config(3, 256).subsets().len(), 32_640);
+        for (t, n) in [(4, 256), (128, 255), (20, 40), (9, 20)] {
+            assert_eq!(
+                CommitteeConfig::new(t, &members(n), [0; 32]),
+                Err(HdError::UnsupportedCommittee),
+                "({t},{n})"
+            );
+        }
+        // binomial(19, 7) = 50,388 and binomial(20, 7) = 77,520 straddle the ceiling.
+        assert!(CommitteeConfig::new(8, &members(19), [0; 32]).is_ok());
+        assert_eq!(
+            CommitteeConfig::new(8, &members(20), [0; 32]),
+            Err(HdError::UnsupportedCommittee)
+        );
+        assert!(binomial_at_most(18, 8, 43_758));
+        assert!(!binomial_at_most(18, 8, 43_757));
+        assert!(binomial_at_most(18, 10, 43_758));
+        assert!(binomial_at_most(256, 0, 1));
+        assert!(binomial_at_most(256, 256, 1));
+        assert!(!binomial_at_most(256, 128, usize::MAX));
+    }
+
+    #[test]
+    fn ceremony_spans_a_committee_wider_than_one_mask_word() {
+        let cfg = config(2, 65);
+        let seeds = run_seed_ceremony(&cfg, 0x52);
+        for subset in cfg.subsets() {
+            let held: Vec<_> = seeds
+                .iter()
+                .filter_map(|s| s.prf32(subset, b"wide", &[]))
+                .collect();
+            assert_eq!(held.len(), 64);
+            assert!(held.windows(2).all(|w| w[0] == w[1]));
+        }
+        for (a, b) in [(0, 64), (63, 64), (1, 2)] {
+            let key = seeds[a].pairwise_key(b, b"wide-pair").unwrap();
+            assert_eq!(seeds[b].pairwise_key(a, b"wide-pair"), Some(key));
+            assert_ne!(seeds[a].pairwise_key((b + 1) % 65, b"wide-pair"), Some(key));
+        }
+    }
+
+    #[test]
+    fn unordered_duplicate_or_misrouted_deliveries_abort() {
+        let config = config(2, 4);
+        let run = |tamper: &dyn Fn(&mut Vec<SeedPrivateDelivery>)| {
+            let mut commits = Vec::new();
+            let mut states = Vec::new();
+            for (position, &(id, _)) in config.members().iter().enumerate() {
+                let (state, commit) =
+                    SeedCeremonyRound1::begin(&config, id, [position as u8 + 3; 32]).unwrap();
+                states.push(state);
+                commits.push(commit);
+            }
+            let mut inbox = Vec::new();
+            let mut receiver = None;
+            for (position, state) in states.into_iter().enumerate() {
+                let (state, deliveries) = state.freeze(&commits).unwrap();
+                inbox.extend(deliveries.into_iter().filter(|d| d.to == 10));
+                if position == 0 {
+                    receiver = Some(state);
+                }
+            }
+            tamper(&mut inbox);
+            receiver.unwrap().receive(inbox).err()
+        };
+        let malformed = Some(HdError::RekeyAborted(RekeyFault::MalformedMessage));
+        assert_eq!(run(&|_| {}), None);
+        // Two custodians of a (2,4) committee share two subsets.
+        assert_eq!(run(&|inbox| inbox[0].openings.reverse()), malformed);
+        assert_eq!(
+            run(&|inbox| {
+                let first = &inbox[0].openings[0];
+                let copy = SeedOpening {
+                    subset: first.subset,
+                    contribution: first.contribution,
+                    salt: first.salt,
+                };
+                inbox[0].openings.insert(0, copy);
+            }),
+            malformed
+        );
+        assert_eq!(run(&|inbox| inbox[1].from = inbox[0].from), malformed);
+        assert_eq!(run(&|inbox| inbox[1].from = 10), malformed);
+        assert_eq!(run(&|inbox| inbox[1].from = 99), malformed);
+        assert_eq!(run(&|inbox| inbox[1].to = 11), malformed);
+        assert_eq!(run(&|inbox| drop(inbox[2].openings.pop())), malformed);
     }
 
     #[test]

@@ -1281,14 +1281,14 @@ fn jive_weighted_ff_step(
     st_in[8..12].copy_from_slice(&row_in[4..8]);
     let mut sbox = [Goldilocks::ZERO; 118];
     let perm_out = record_poseidon2_perm12(st_in, &mut sbox);
-    // Weighted 3-block Jive feed-forward (`perm_out.b0 + st_in.b0 + 2*st_in.b1 + 3*st_in.b2`),
+    // Weighted 3-block Jive feed-forward (`perm_out.b0 + st_in.b0 + 2*st_in.b1 + 4*st_in.b2`),
     // matching `Qsag.jiveWeightedFeedForward` (`ePrint 2026/306` §6).
     let mut next_chain = [Goldilocks::ZERO; 4];
     for j in 0..4 {
         let b0 = st_in[j];
         let b1 = st_in[4 + j];
         let b2 = st_in[8 + j];
-        next_chain[j] = perm_out[j] + b0 + (b1 + b1) + (b2 + b2 + b2);
+        next_chain[j] = perm_out[j] + b0 + (b1 + b1) + (b2 + b2 + b2 + b2);
     }
     (st_in, sbox, next_chain)
 }
@@ -1459,7 +1459,7 @@ fn eval_outer_chain_row_constraints_ext4(
     }
 
     // 4. Active absorption rows (`t < 2*M`): `st_in = [prev_chain, row_in[0..4], row_in[4..8]]`
-    //    and weighted 3-block Jive feed-forward `next_chain = perm_out.b0 + b0 + 2*b1 + 3*b2`.
+    //    and weighted 3-block Jive feed-forward `next_chain = perm_out.b0 + b0 + 2*b1 + 4*b2`.
     for j in 0..4 {
         push_eq(is_active * (cols[COL_ST_IN + j] - cols[OUTER_COL_PREV_CHAIN + j]));
     }
@@ -1473,7 +1473,7 @@ fn eval_outer_chain_row_constraints_ext4(
         let b0 = cols[COL_ST_IN + j];
         let b1 = cols[COL_ST_IN + 4 + j];
         let b2 = cols[COL_ST_IN + 8 + j];
-        let jive_ff = st[j] + b0 + (b1 + b1) + (b2 + b2 + b2);
+        let jive_ff = st[j] + b0 + (b1 + b1) + (b2 + b2 + b2 + b2);
         push_eq(is_active * (cols[OUTER_COL_NEXT_CHAIN + j] - jive_ff));
     }
 
@@ -1569,7 +1569,7 @@ impl SuccinctHierarchicalHemAggregate {
             let mut lb = [0u8; 8];
             lb.copy_from_slice(&bytes[off..off + 8]);
             *dst =
-                Goldilocks::from_le_bytes_canonical(lb).ok_or(HemAggError::MalformedWireBytes)?;
+                Goldilocks::from_le_bytes_canonical(lb).map_err(|_| HemAggError::MalformedWireBytes)?;
         }
         let num_shards = u32::from_le_bytes(bytes[72..76].try_into().unwrap()) as usize;
         let (_, log_rows) =

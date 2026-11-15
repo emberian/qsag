@@ -4,7 +4,7 @@
 // Certified SPIR-V compute kernel for `KernelSlot::MerkleLayerPoseidon2`.
 // Evaluates position-tweaked Width-12 Goldilocks Poseidon2 Merkle compression binding all 4
 // limbs of `pk_seed`, `layer`, and global parent index `start_parent_idx + parent_idx` with
-// Hirose/Davies-Meyer feed-forward across `left`, `right`, and `pk_seed[0..4]`.
+// Weighted Jive feed-forward: left + 2*right + 4*full_tweak.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -149,18 +149,17 @@ void poseidon2_apply_m4(inout uint64_t b0, inout uint64_t b1, inout uint64_t b2,
     b3 = r3;
 }
 
+// M4 tensor P3 acts on four contiguous triples.
 void poseidon2_apply_me(inout uint64_t st[12]) {
-    for (uint i = 0u; i < 12u; ++i) {
-        st[i] = fp_reduce_u64(st[i]);
-    }
-    poseidon2_apply_m4(st[0], st[1], st[2], st[3]);
-    poseidon2_apply_m4(st[4], st[5], st[6], st[7]);
-    poseidon2_apply_m4(st[8], st[9], st[10], st[11]);
-    for (uint i = 0u; i < 4u; ++i) {
-        uint64_t s = fp_add(fp_add(st[i], st[4u + i]), st[8u + i]);
-        st[i]      = fp_add(st[i], s);
-        st[4u + i] = fp_add(st[4u + i], s);
-        st[8u + i] = fp_add(st[8u + i], s);
+    for (uint i = 0u; i < 12u; ++i) st[i] = fp_reduce_u64(st[i]);
+    poseidon2_apply_m4(st[0], st[3], st[6], st[9]);
+    poseidon2_apply_m4(st[1], st[4], st[7], st[10]);
+    poseidon2_apply_m4(st[2], st[5], st[8], st[11]);
+    for (uint i = 0u; i < 12u; i += 3u) {
+        uint64_t s = fp_add(fp_add(st[i], st[i + 1u]), st[i + 2u]);
+        st[i] = fp_add(st[i], s);
+        st[i + 1u] = fp_add(st[i + 1u], s);
+        st[i + 2u] = fp_add(st[i + 2u], s);
     }
 }
 
@@ -169,7 +168,7 @@ void poseidon2_apply_mi(inout uint64_t st[12]) {
     for (uint i = 0u; i < 12u; ++i) {
         s = fp_add(s, st[i]);
     }
-    st[0] = fp_add(fp_neg(fp_add(st[0], st[0])), s);
+    st[0] = fp_add(fp_neg(fp_shl_canonical(st[0], 6u)), s);
     st[1] = fp_add(st[1], s);
     for (uint i = 2u; i < 12u; ++i) {
         st[i] = fp_add(fp_shl_canonical(st[i], i - 1u), s);
@@ -237,11 +236,12 @@ void main() {
     st[10] = fp_add(s2, node_tweak);
     st[11] = fp_add(s3, POS2_CONST_IV);
 
+    uint64_t tweak4[4] = uint64_t[4](st[8], st[9], st[10], st[11]);
     poseidon2_perm12(st);
 
     uint p_base = uint(pc.out_offset_u64) + p_rel * 4u;
-    parents_buf.words[p_base + 0u] = fp_add(st[0], fp_add(l0, fp_add(r0, s0)));
-    parents_buf.words[p_base + 1u] = fp_add(st[1], fp_add(l1, fp_add(r1, s1)));
-    parents_buf.words[p_base + 2u] = fp_add(st[2], fp_add(l2, fp_add(r2, s2)));
-    parents_buf.words[p_base + 3u] = fp_add(st[3], fp_add(l3, fp_add(r3, s3)));
+    parents_buf.words[p_base + 0u] = fp_add(st[0], fp_add(l0, fp_add(fp_shl_canonical(r0, 1u), fp_shl_canonical(tweak4[0], 2u))));
+    parents_buf.words[p_base + 1u] = fp_add(st[1], fp_add(l1, fp_add(fp_shl_canonical(r1, 1u), fp_shl_canonical(tweak4[1], 2u))));
+    parents_buf.words[p_base + 2u] = fp_add(st[2], fp_add(l2, fp_add(fp_shl_canonical(r2, 1u), fp_shl_canonical(tweak4[2], 2u))));
+    parents_buf.words[p_base + 3u] = fp_add(st[3], fp_add(l3, fp_add(fp_shl_canonical(r3, 1u), fp_shl_canonical(tweak4[3], 2u))));
 }

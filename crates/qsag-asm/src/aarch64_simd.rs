@@ -1,4 +1,4 @@
-//! Apple Silicon / ARM64 (`aarch64`) Constant-Time `NEON` + `PMULL` + `FEAT_SHA256` + `FEAT_DIT`
+//! Apple Silicon / ARM64 (`aarch64`) Constant-Time `NEON` + `PMULL` + `FEAT_DIT`
 //! Microarchitectural Kernels (`core::arch::aarch64`).
 //!
 //! Provides native ARMv8-A / Apple M-series / Neoverse vector kernels for all operations that
@@ -15,8 +15,8 @@
 //! 3. **4-Lane `int32x4_t` Seiler Signed-Montgomery `ML-DSA` `NTT` / `InvNTT` / `PointwiseMul`:**
 //!    Bit-exact `[0, q)` canonical FIPS 204 Algorithms 41, 42, and 45 using `vmull_s32`,
 //!    `vmull_high_s32`, `vmlsl_s32`, `vmlsl_high_s32`, and `vshrn_n_s64` (`0` branches, `0` divs).
-//! 4. **ARMv8 `FEAT_SHA256` Intrinsics (`vsha256hq_u32` / `vsha256h2q_u32` / `vsha256su0q_u32` /
-//!    `vsha256su1q_u32`)** and scoped **`FEAT_DIT` (`PSTATE.DIT = 1`)** execution guards.
+//! 4. Scoped **`FEAT_DIT` (`PSTATE.DIT = 1`)** execution guards. (`FEAT_SHA256` compression
+//!    lives in [`crate::sha2_hw`].)
 
 #![allow(clippy::incompatible_msrv)]
 
@@ -28,7 +28,6 @@ use crate::portable::{
     GFNI_MAT_POLY_TO_T3, GFNI_MAT_T3_TO_POLY, KeccakRow256, gfni_poly_mul_u8, sim_gf2p8affineqb,
     wiedemann_mul_t3_u8,
 };
-use crate::sha2_hw::SHA256_HW_CONSTS;
 
 /// Acquire a scoped hardware Data-Independent Timing (`PSTATE.DIT = 1`) guard on `FEAT_DIT`
 /// processors (Apple M1–M4, Neoverse V1/V2/N2), restoring prior `PSTATE.DIT` on drop.
@@ -720,84 +719,6 @@ pub unsafe fn mldsa_pointwise_mul_neon(
     }
 }
 
-// ============================================================================
-// 4. ARMv8 `FEAT_SHA256` Intrinsics (`vsha256hq_u32` / `vsha256h2q_u32` / `vsha256su0q_u32` / `vsha256su1q_u32`)
-// ============================================================================
-
-/// Compress `blocks` (`64` bytes each) into FIPS 180-4 `SHA-256` `state` using ARMv8 `FEAT_SHA256`
-/// intrinsics (`vsha256hq_u32`, `vsha256h2q_u32`, `vsha256su0q_u32`, `vsha256su1q_u32`) under a
-/// scoped `FEAT_DIT` guard.
-///
-/// # Safety
-/// Caller must verify runtime `NEON` + `FEAT_SHA256` (`caps.aarch64_neon && caps.aarch64_sha2`).
-#[target_feature(enable = "neon,sha2")]
-pub unsafe fn sha256_compress_blocks_neon_sha2(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-    if blocks.is_empty() {
-        return;
-    }
-    let _dit_guard = enter_aarch64_dit_region();
-    let kp = SHA256_HW_CONSTS.k.as_ptr();
-
-    unsafe {
-        let mut abcd = vld1q_u32(state.as_ptr());
-        let mut efgh = vld1q_u32(state.as_ptr().add(4));
-
-        for block in blocks {
-            let abcd_saved = abcd;
-            let efgh_saved = efgh;
-            let bp = block.as_ptr();
-
-            let mut w0 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(bp)));
-            let mut w1 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(bp.add(16))));
-            let mut w2 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(bp.add(32))));
-            let mut w3 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(bp.add(48))));
-
-            macro_rules! sha256_quad_sched {
-                ($m0:ident, $m1:ident, $m2:ident, $m3:ident, $k_idx:literal) => {{
-                    let wk = vaddq_u32($m0, vld1q_u32(kp.add($k_idx)));
-                    let prev_abcd = abcd;
-                    abcd = vsha256hq_u32(abcd, efgh, wk);
-                    efgh = vsha256h2q_u32(efgh, prev_abcd, wk);
-                    $m0 = vsha256su1q_u32(vsha256su0q_u32($m0, $m1), $m2, $m3);
-                }};
-            }
-
-            macro_rules! sha256_quad_final {
-                ($m0:ident, $k_idx:literal) => {{
-                    let wk = vaddq_u32($m0, vld1q_u32(kp.add($k_idx)));
-                    let prev_abcd = abcd;
-                    abcd = vsha256hq_u32(abcd, efgh, wk);
-                    efgh = vsha256h2q_u32(efgh, prev_abcd, wk);
-                }};
-            }
-
-            sha256_quad_sched!(w0, w1, w2, w3, 0);
-            sha256_quad_sched!(w1, w2, w3, w0, 4);
-            sha256_quad_sched!(w2, w3, w0, w1, 8);
-            sha256_quad_sched!(w3, w0, w1, w2, 12);
-            sha256_quad_sched!(w0, w1, w2, w3, 16);
-            sha256_quad_sched!(w1, w2, w3, w0, 20);
-            sha256_quad_sched!(w2, w3, w0, w1, 24);
-            sha256_quad_sched!(w3, w0, w1, w2, 28);
-            sha256_quad_sched!(w0, w1, w2, w3, 32);
-            sha256_quad_sched!(w1, w2, w3, w0, 36);
-            sha256_quad_sched!(w2, w3, w0, w1, 40);
-            sha256_quad_sched!(w3, w0, w1, w2, 44);
-            sha256_quad_final!(w0, 48);
-            sha256_quad_final!(w1, 52);
-            sha256_quad_final!(w2, 56);
-            sha256_quad_final!(w3, 60);
-
-            abcd = vaddq_u32(abcd, abcd_saved);
-            efgh = vaddq_u32(efgh, efgh_saved);
-        }
-
-        vst1q_u32(state.as_mut_ptr(), abcd);
-        vst1q_u32(state.as_mut_ptr().add(4), efgh);
-        wipe_neon_scratch_regs();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,25 +752,5 @@ mod tests {
             crate::portable::gf256_shamir_mac_portable(&mut acc_exp, &b, x);
             assert_eq!(acc_got, acc_exp, "GF(256) PMULL mac mismatch at scalar={x}");
         }
-    }
-
-    #[test]
-    fn neon_sha256_intrinsics_matches_portable() {
-        let caps = crate::cpuid::probe_capabilities();
-        if !(caps.aarch64_neon && caps.aarch64_sha2) {
-            return;
-        }
-        let iv: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-            0x5be0cd19,
-        ];
-        let blocks = [[0x61u8; 64], [0x80u8; 64], [0xFFu8; 64]];
-        let mut s_hw = iv;
-        let mut s_sw = iv;
-        unsafe {
-            sha256_compress_blocks_neon_sha2(&mut s_hw, &blocks);
-        }
-        crate::sha2_hw::sha256_compress_blocks_portable(&mut s_sw, &blocks);
-        assert_eq!(s_hw, s_sw);
     }
 }

@@ -632,3 +632,56 @@ fn toprf_server_recovers_after_100_batches_restart() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn persisted_party_shares_restore_without_dkg_and_bind_custody() {
+    let (mut servers, mut endpoints, net) = setup();
+    let public = servers[0].public_key().clone();
+    let rounds = *net.rounds.lock().unwrap();
+    for (party, server) in servers.iter_mut().enumerate() {
+        let mut bytes = server.to_secret_bytes();
+        assert_eq!(bytes.len(), 370);
+        assert!(Server::from_secret_bytes(&bytes, &public, (party + 1) % 5).is_err());
+        assert!(
+            Server::from_secret_bytes(&bytes, &PublicKey::from_commitment([0; 32]), party).is_err()
+        );
+        assert!(Server::from_secret_bytes(&bytes[..369], &public, party).is_err());
+        bytes.push(0);
+        assert!(Server::from_secret_bytes(&bytes, &public, party).is_err());
+        bytes.pop();
+        bytes[41] = 2;
+        assert!(Server::from_secret_bytes(&bytes, &public, party).is_err());
+        bytes[41] = 0;
+        *server = Server::from_secret_bytes(&bytes, &public, party).unwrap();
+        assert_eq!(server.party(), party);
+        assert_eq!(server.to_secret_bytes(), bytes);
+        qsag_accel::ct::ct_zeroize_bytes(&mut bytes);
+    }
+    assert_eq!(*net.rounds.lock().unwrap(), rounds);
+    let (client, requests) = blind(&public, &[b"persisted"], [12; 32], 0, [13; 32]).unwrap();
+    let mut stores: [Store; 5] = std::array::from_fn(|_| Store::default());
+    let outputs = evaluate(&mut servers, &mut endpoints, requests, &mut stores);
+    assert_eq!(
+        client.finalize(outputs).unwrap().values()[0],
+        plaintext(&reference_key(&public), b"persisted")
+    );
+    for (party, server) in servers.iter_mut().enumerate() {
+        let mut bytes = server.to_secret_bytes();
+        *server = Server::from_secret_bytes(&bytes, &public, party).unwrap();
+        qsag_accel::ct::ct_zeroize_bytes(&mut bytes);
+    }
+    // Even a regressed external counter cannot unburn the serialized local counter.
+    let (_, requests) = blind(&public, &[b"persisted"], [14; 32], 0, [15; 32]).unwrap();
+    for (((server, endpoint), request), store) in servers
+        .iter_mut()
+        .zip(&mut endpoints)
+        .zip(requests)
+        .zip(&mut stores)
+    {
+        store.last = None;
+        assert_eq!(
+            server.evaluate(request, store, endpoint),
+            Err(Error::Counter)
+        );
+    }
+}

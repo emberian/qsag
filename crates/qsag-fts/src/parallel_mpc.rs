@@ -870,14 +870,8 @@ impl ParallelSeededThresholdSetup {
 
         let mut sk_seed_bytes = cshake256_framed_32(b"QSAG.PSFTS.KG.SK_SEED.V2", &[&ent]);
         let mut sk_prf_bytes = cshake256_framed_32(b"QSAG.PSFTS.KG.SK_PRF.V2", &[&ent]);
-        let mut sk_seed = [
-            bytes32_to_lanes(&sk_seed_bytes).0,
-            bytes32_to_lanes(&sk_seed_bytes).1,
-        ];
-        let mut sk_prf = [
-            bytes32_to_lanes(&sk_prf_bytes).0,
-            bytes32_to_lanes(&sk_prf_bytes).1,
-        ];
+        let mut sk_seed = <[u128; 2]>::from(bytes32_to_lanes(&sk_seed_bytes));
+        let mut sk_prf = <[u128; 2]>::from(bytes32_to_lanes(&sk_prf_bytes));
 
         // Sample party BDOZ MAC key shares `\alpha_i` (`\bigoplus \alpha_i = \alpha`, then erase `\alpha`!).
         let mut alphas = Vec::with_capacity(num_parties);
@@ -885,10 +879,7 @@ impl ParallelSeededThresholdSetup {
         for p_idx in 0..num_parties {
             let p_be = (p_idx as u16).to_be_bytes();
             let raw = cshake256_framed_32(b"QSAG.PSFTS.ALPHA.V2", &[&ent, &p_be]);
-            let ai = [
-                u128::from_le_bytes(core::array::from_fn(|i| raw[i])),
-                u128::from_le_bytes(core::array::from_fn(|i| raw[16 + i])),
-            ];
+            let ai = <[u128; 2]>::from(bytes32_to_lanes(&raw));
             alpha_global[0] ^= ai[0];
             alpha_global[1] ^= ai[1];
             alphas.push(ai);
@@ -909,9 +900,8 @@ impl ParallelSeededThresholdSetup {
                 if p + 1 < num_parties {
                     let mut rv = cshake256_framed_32(domain, &[&ent, &t_be, &p_be, &[0x01]]);
                     let mut rm = cshake256_framed_32(domain, &[&ent, &t_be, &p_be, &[0x02]]);
-                    let v = u128::from_le_bytes(core::array::from_fn(|i| rv[i]));
-                    let m0 = u128::from_le_bytes(core::array::from_fn(|i| rm[i]));
-                    let m1 = u128::from_le_bytes(core::array::from_fn(|i| rm[16 + i]));
+                    let v = bytes32_to_lanes(&rv).0;
+                    let (m0, m1) = bytes32_to_lanes(&rm);
                     val_acc ^= v;
                     mac_acc[0] ^= m0;
                     mac_acc[1] ^= m1;
@@ -950,7 +940,7 @@ impl ParallelSeededThresholdSetup {
         cshake256_framed_xof(b"QSAG.PSFTS.BEAVER_AB.V2", &[&ent], &mut raw_ab);
 
         for (tr_idx, chunk) in raw_ab.as_chunks::<32>().0.iter().enumerate() {
-            let mut a = u128::from_le_bytes(core::array::from_fn(|i| chunk[i]));
+            let mut a = bytes32_to_lanes(chunk).0;
             let mut power = a;
             let dealt: [Vec<AuthWire128>; 7] = core::array::from_fn(|index| {
                 let shares =
@@ -1468,9 +1458,7 @@ impl ParallelSeededThresholdSetup {
                 b"QSAG.PSFTS.MAC_W.V2",
                 &[session_id, &rt_be, &tilde_digest, &idx_be],
             );
-            let w0 = u128::from_le_bytes(core::array::from_fn(|i| wr[i]));
-            let w1 = u128::from_le_bytes(core::array::from_fn(|i| wr[16 + i]));
-            weights.push((w0, w1));
+            weights.push(bytes32_to_lanes(&wr));
         }
         let tilde_x = accel
             .bdoz_gf2_128_batch_dot(candidates.pairs(), &weights)
@@ -1500,16 +1488,15 @@ impl ParallelSeededThresholdSetup {
                     b"QSAG.PSFTS.PAIR_ZERO_PRF.V2",
                     &[pair_seed, session_id, &rt_be, &tilde_digest],
                 );
-                z0 ^= u128::from_le_bytes(core::array::from_fn(|i| prf[i]));
-                z1 ^= u128::from_le_bytes(core::array::from_fn(|i| prf[16 + i]));
+                let zero = bytes32_to_lanes(&prf);
+                z0 ^= zero.0;
+                z1 ^= zero.1;
             }
 
             let sigma0 = folded_gamma.0 ^ gf2_128_mul(tilde_x.0, sh.bdoz_alpha_share[0]) ^ z0;
             let sigma1 = folded_gamma.1 ^ gf2_128_mul(tilde_x.1, sh.bdoz_alpha_share[1]) ^ z1;
 
-            let mut payload = [0u8; 32];
-            payload[0..16].copy_from_slice(&sigma0.to_le_bytes());
-            payload[16..32].copy_from_slice(&sigma1.to_le_bytes());
+            let payload = lanes_to_bytes32(sigma0, sigma1);
             let salt = cshake256_framed_32(
                 b"QSAG.PSFTS.BAR_SALT.V2",
                 &[&sh.local_salt_seed, session_id, &rt_be, &tilde_digest],

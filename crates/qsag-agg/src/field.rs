@@ -1,201 +1,131 @@
-//! Canonical `Goldilocks` ($\mathbb{F}_p, p = 2^{64} - 2^{32} + 1$), quadratic extension
-//! `GoldilocksExt2` ($\mathbb{F}_p[u]/(u^2 - 7)$), quartic extension `GoldilocksExt4`
-//! ($\mathbb{F}_{p^2}[v]/(v^2 - u) \cong \mathbb{F}_p[v]/(v^4 - 7)$), 2-adic roots of unity,
-//! Radix-2 NTT/INTT, univariate round-polynomial interpolation, and multilinear folding/evaluation.
+//! Hem field layer. The base field `Goldilocks` ($\mathbb{F}_p, p = 2^{64} - 2^{32} + 1$) and the
+//! quadratic extension `GoldilocksExt2` ($\mathbb{F}_p[u]/(u^2 - 7)$) are the `qsag-core` types,
+//! re-exported here. This module adds what only the aggregation prover needs on top of them:
+//! shift/fold helpers, batch inversion, 2-adic roots of unity, the quartic extension
+//! `GoldilocksExt4` ($\mathbb{F}_{p^2}[v]/(v^2 - u) \cong \mathbb{F}_p[v]/(v^4 - 7)$), Radix-2
+//! NTT/INTT, univariate round-polynomial interpolation, and multilinear folding/evaluation.
 
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
-/// Goldilocks prime $p = 2^{64} - 2^{32} + 1$.
-pub const GOLDILOCKS_PRIME: u64 = qsag_whir_verified::GOLDILOCKS_P;
+pub use qsag_core::field::goldilocks::{GOLDILOCKS_PRIME, Goldilocks, GoldilocksExt2};
+use qsag_core::field::goldilocks::{GOLDILOCKS_EPSILON as EPSILON, GOLDILOCKS_ROOT_2_32};
 
-/// $\epsilon = 2^{32} - 1$ such that $2^{64} \equiv \epsilon \pmod p$.
-const EPSILON: u64 = 0xFFFF_FFFF;
+// The Aeneas-extracted WHIR verifier core and `qsag-core` must agree on the modulus.
+const _: () = assert!(GOLDILOCKS_PRIME == qsag_whir_verified::GOLDILOCKS_P);
 
 /// Primitive $2^{32}$-th root of unity $\omega_{2^{32}} = 7^{2^{32} - 1} \bmod p$.
-pub const TWO_ADIC_ROOT_OF_UNITY_32: u64 = 1_753_635_133_440_165_772;
+pub const TWO_ADIC_ROOT_OF_UNITY_32: u64 = GOLDILOCKS_ROOT_2_32;
 
-/// Canonical element of $\mathbb{F}_p$ ($0 \le \text{val} < p$).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Goldilocks(u64);
+/// Reduce `lo + 2^64 * hi` for `hi < 2^32` using $2^{64} \equiv 2^{32} - 1 \pmod p$.
+#[inline(always)]
+const fn fold_small_carry(lo: u64, hi: u64) -> Goldilocks {
+    let adj = (hi << 32).wrapping_sub(hi);
+    let (s, c) = lo.overflowing_add(adj);
+    let s2 = s.wrapping_add((0u64.wrapping_sub(c as u64)) & EPSILON);
+    Goldilocks::from_u64_reduced(s2)
+}
 
-impl Goldilocks {
-    pub const ZERO: Self = Self(0);
-    pub const ONE: Self = Self(1);
-    pub const TWO: Self = Self(2);
-    pub const NON_RESIDUE: Self = Self(7);
+/// `7 * x` without a 64x64 multiplication.
+#[inline(always)]
+pub(crate) const fn gl_mul_by_7(x: Goldilocks) -> Goldilocks {
+    let v = x.to_canonical_u64() as u128;
+    let prod = (v << 3) - v;
+    fold_small_carry(prod as u64, (prod >> 64) as u64)
+}
 
-    /// Strict canonical constructor: returns `None` if `v >= GOLDILOCKS_PRIME`.
-    #[inline]
-    pub const fn from_canonical_u64(v: u64) -> Option<Self> {
-        match qsag_whir_verified::decode_canonical_u64(v) {
-            Some(x) => Some(Self(x)),
-            None => None,
-        }
+/// `2^S * x` for `1 <= S <= 31` using shifts and one $\epsilon$ fold.
+#[inline(always)]
+pub(crate) const fn gl_shl_small<const S: u32>(x: Goldilocks) -> Goldilocks {
+    const { assert!(S >= 1 && S <= 31) };
+    let v = x.to_canonical_u64();
+    fold_small_carry(v << S, v >> (64 - S))
+}
+
+/// Primitive $2^k$-th root of unity for $k \le 32$.
+#[inline]
+pub(crate) const fn gl_two_adic_generator(log_n: usize) -> Goldilocks {
+    assert!(log_n <= 32, "Goldilocks 2-adicity is 32");
+    let mut w = Goldilocks::from_u64_reduced(TWO_ADIC_ROOT_OF_UNITY_32);
+    let mut steps = 32 - log_n;
+    while steps > 0 {
+        w = w.square();
+        steps -= 1;
     }
+    w
+}
 
-    /// Reduce an arbitrary `u64` into `[0, p)` in constant time (branchless borrow mask).
-    #[inline(always)]
-    pub const fn from_u64_reduced(v: u64) -> Self {
-        let (diff, borrow) = v.overflowing_sub(GOLDILOCKS_PRIME);
-        let mask = 0u64.wrapping_sub(borrow as u64);
-        Self((v & mask) | (diff & !mask))
-    }
+/// `(c_0 + c_1 u) * u = 7 c_1 + c_0 u`.
+#[inline(always)]
+pub(crate) const fn ext2_mul_by_u(x: GoldilocksExt2) -> GoldilocksExt2 {
+    GoldilocksExt2::new(gl_mul_by_7(x.c1), x.c0)
+}
 
-    /// Reduce an arbitrary `u128` modulo $p$ via $2^{96} \equiv -1, 2^{64} \equiv 2^{32} - 1 \pmod p$
-    /// in 10 branchless constant-time integer instructions (exact across all `0..=u128::MAX`).
-    #[inline(always)]
-    pub const fn reduce128(x: u128) -> Self {
-        let x_lo = x as u64;
-        let x_hi = (x >> 64) as u64;
-        let x_hi_hi = x_hi >> 32;
-        let x_hi_lo = x_hi & EPSILON;
+#[inline(always)]
+pub(crate) const fn ext2_shl_small<const S: u32>(x: GoldilocksExt2) -> GoldilocksExt2 {
+    GoldilocksExt2::new(gl_shl_small::<S>(x.c0), gl_shl_small::<S>(x.c1))
+}
 
-        let (t0_raw, brw0) = x_lo.overflowing_sub(x_hi_hi);
-        let t0 = t0_raw.wrapping_sub((0u64.wrapping_sub(brw0 as u64)) & EPSILON);
+/// `x^2 = (c_0^2 + 7 c_1^2) + 2 c_0 c_1 u` with two base squarings and one base product.
+#[inline(always)]
+pub(crate) const fn ext2_square(x: GoldilocksExt2) -> GoldilocksExt2 {
+    let ab = x.c0.const_mul(x.c1);
+    GoldilocksExt2::new(
+        x.c0.square().const_add(gl_mul_by_7(x.c1.square())),
+        ab.const_add(ab),
+    )
+}
 
-        let t1 = (x_hi_lo << 32).wrapping_sub(x_hi_lo);
-        let (res_raw, over1) = t0.overflowing_add(t1);
-        let res = res_raw.wrapping_add((0u64.wrapping_sub(over1 as u64)) & EPSILON);
+/// Fixed-work inverse `conj(x) / N(x)`, mapping zero to zero.
+#[inline]
+pub(crate) const fn ext2_inv_or_zero(x: GoldilocksExt2) -> GoldilocksExt2 {
+    x.conj().mul_base(x.norm().inv_or_zero())
+}
 
-        Self::from_u64_reduced(res)
-    }
+#[inline(always)]
+pub(crate) const fn ext2_is_zero(x: GoldilocksExt2) -> bool {
+    x.c0.to_canonical_u64() == 0 && x.c1.to_canonical_u64() == 0
+}
 
-    /// Canonical branchless modular addition for `a, b < GOLDILOCKS_PRIME`.
-    #[inline(always)]
-    const fn add_canonical(a: u64, b: u64) -> u64 {
-        let (s, c1) = a.overflowing_add(b);
-        let (d, brw) = s.overflowing_sub(GOLDILOCKS_PRIME);
-        let keep_s = (brw as u64) & ((!c1) as u64);
-        let mask = 0u64.wrapping_sub(keep_s);
-        (s & mask) | (d & !mask)
-    }
-
-    /// Canonical branchless modular subtraction for `a, b < GOLDILOCKS_PRIME`.
-    #[inline(always)]
-    const fn sub_canonical(a: u64, b: u64) -> u64 {
-        let (diff, brw) = a.overflowing_sub(b);
-        diff.wrapping_sub((0u64.wrapping_sub(brw as u64)) & EPSILON)
-    }
-
-    /// Multiply canonical `self` (`self.0 < p`) by `NON_RESIDUE = 7` without 64x64 `mulq`.
-    #[inline(always)]
-    pub const fn mul_by_7(self) -> Self {
-        let prod = ((self.0 as u128) << 3) - (self.0 as u128);
-        let lo = prod as u64;
-        let hi = (prod >> 64) as u64;
-        let adj = (hi << 32).wrapping_sub(hi);
-        let (s, c) = lo.overflowing_add(adj);
-        let s2 = s.wrapping_add((0u64.wrapping_sub(c as u64)) & EPSILON);
-        Self::from_u64_reduced(s2)
-    }
-
-    /// Multiply canonical `self` (`self.0 < p`) by $2^S$ (`1 <= S <= 31`) using pure 64-bit
-    /// shifts and Goldilocks $\epsilon = 2^{32} - 1$ folding (`0` multiplications).
-    #[inline(always)]
-    pub const fn shl_small<const S: u32>(self) -> Self {
-        const { assert!(S >= 1 && S <= 31) };
-        let lo = self.0 << S;
-        let hi = self.0 >> (64 - S);
-        let adj = (hi << 32).wrapping_sub(hi);
-        let (s, c) = lo.overflowing_add(adj);
-        let s2 = s.wrapping_add((0u64.wrapping_sub(c as u64)) & EPSILON);
-        Self::from_u64_reduced(s2)
-    }
-
-    #[inline(always)]
-    pub const fn to_canonical_u64(self) -> u64 {
-        self.0
-    }
-
-    #[inline(always)]
-    pub const fn to_le_bytes(self) -> [u8; 8] {
-        self.0.to_le_bytes()
-    }
-
-    #[inline]
-    pub const fn from_le_bytes_canonical(bytes: [u8; 8]) -> Option<Self> {
-        Self::from_canonical_u64(u64::from_le_bytes(bytes))
-    }
-
-    #[inline(always)]
-    pub const fn const_add(self, rhs: Self) -> Self {
-        Self(Self::add_canonical(self.0, rhs.0))
-    }
-
-    #[inline(always)]
-    pub const fn const_sub(self, rhs: Self) -> Self {
-        Self(Self::sub_canonical(self.0, rhs.0))
-    }
-
-    /// Branchless constant-time negation in $\mathbb{F}_p$.
-    #[inline(always)]
-    pub const fn const_neg(self) -> Self {
-        // nonzero_mask is 0xFFFF..FF when self.0 != 0, 0 when self.0 == 0.
-        let nz = (self.0 | self.0.wrapping_neg()) >> 63;
-        let mask = 0u64.wrapping_sub(nz);
-        Self(GOLDILOCKS_PRIME.wrapping_sub(self.0) & mask)
-    }
-
-    #[inline(always)]
-    pub const fn const_mul(self, rhs: Self) -> Self {
-        Self::reduce128((self.0 as u128) * (rhs.0 as u128))
-    }
-
-    #[inline(always)]
-    pub const fn is_zero(self) -> bool {
-        self.0 == 0
-    }
-
-    #[inline(always)]
-    pub const fn square(self) -> Self {
-        self.const_mul(self)
-    }
-
-    #[inline(always)]
-    const fn sq_n<const N: usize>(mut self) -> Self {
-        let mut i = 0;
-        while i < N {
-            self = self.square();
-            i += 1;
-        }
-        self
-    }
-
-    /// Binary exponentiation `self^exp mod p`.
-    #[inline]
-    pub const fn pow(self, mut exp: u64) -> Self {
-        let mut base = self;
-        let mut acc = Self::ONE;
-        while exp > 0 {
-            if (exp & 1) == 1 {
-                acc = acc.const_mul(base);
-            }
-            base = base.square();
-            exp >>= 1;
-        }
-        acc
-    }
-
-    /// Branchless constant-time multiplicative inverse $x^{p - 2} \bmod p$ (`0 -> 0`) via the
-    /// fixed addition chain for $p - 2 = 2^{64} - 2^{32} - 1 = \text{0xFFFF\_FFFE\_FFFF\_FFFF}$.
-    #[inline]
-    pub const fn inv(self) -> Self {
-        let x2 = self.square().const_mul(self); // x^(2^2 - 1)
-        let x3 = x2.square().const_mul(self); // x^(2^3 - 1)
-        let x6 = x3.sq_n::<3>().const_mul(x3); // x^(2^6 - 1)
-        let x12 = x6.sq_n::<6>().const_mul(x6); // x^(2^12 - 1)
-        let x24 = x12.sq_n::<12>().const_mul(x12); // x^(2^24 - 1)
-        let x30 = x24.sq_n::<6>().const_mul(x6); // x^(2^30 - 1)
-        let x31 = x30.square().const_mul(self); // x^(2^31 - 1)
-        let x63_gap = x31.sq_n::<32>().const_mul(x31); // x^((2^31 - 1) * 2^32 + (2^31 - 1))
-        x63_gap.square().const_mul(self) // x^(2^64 - 2^32 - 1)
-    }
-
+/// Prover-side helpers on the `qsag-core` base field.
+pub trait GoldilocksOps: Copy {
+    /// Strict canonical constructor: `None` if `v >= GOLDILOCKS_PRIME`.
+    fn from_canonical_u64(v: u64) -> Option<Self>;
+    fn is_zero(self) -> bool;
+    /// Multiply by the quadratic non-residue `7` without a 64x64 multiplication.
+    fn mul_by_7(self) -> Self;
+    /// Multiply by $2^S$ (`1 <= S <= 31`) without a multiplication.
+    fn shl_small<const S: u32>(self) -> Self;
     /// Montgomery prefix-product batch inversion in place (`1` inversion + $3(N - 1)$
-    /// multiplications), mapping `0 -> 0` cleanly without poisoning nonzero entries.
-    pub fn batch_inv(values: &mut [Self]) {
+    /// multiplications), mapping `0 -> 0` without poisoning nonzero entries.
+    fn batch_inv(values: &mut [Self]);
+    /// Primitive $2^k$-th root of unity for $k \le 32$.
+    fn two_adic_generator(log_n: usize) -> Self;
+}
+
+impl GoldilocksOps for Goldilocks {
+    #[inline]
+    fn from_canonical_u64(v: u64) -> Option<Self> {
+        qsag_whir_verified::decode_canonical_u64(v).map(Goldilocks::from_u64_reduced)
+    }
+
+    #[inline(always)]
+    fn is_zero(self) -> bool {
+        self.to_canonical_u64() == 0
+    }
+
+    #[inline(always)]
+    fn mul_by_7(self) -> Self {
+        gl_mul_by_7(self)
+    }
+
+    #[inline(always)]
+    fn shl_small<const S: u32>(self) -> Self {
+        gl_shl_small::<S>(self)
+    }
+
+    fn batch_inv(values: &mut [Self]) {
         const STACK_CAP: usize = 512;
         if values.len() <= 1 {
             if let [x] = values {
@@ -205,331 +135,125 @@ impl Goldilocks {
         }
         if values.len() <= STACK_CAP {
             let mut scratch = [Self::ONE; STACK_CAP];
-            Self::batch_inv_with_scratch(values, &mut scratch[..values.len()]);
+            batch_inv_with_scratch(values, &mut scratch[..values.len()]);
         } else {
             let mut scratch = vec![Self::ONE; values.len()];
-            Self::batch_inv_with_scratch(values, &mut scratch);
+            batch_inv_with_scratch(values, &mut scratch);
         }
     }
 
     #[inline]
-    fn batch_inv_with_scratch(values: &mut [Self], prefix: &mut [Self]) {
-        debug_assert_eq!(values.len(), prefix.len());
-        let mut acc = Self::ONE;
-        for (slot, &v) in prefix.iter_mut().zip(values.iter()) {
-            *slot = acc;
-            if !v.is_zero() {
-                acc = acc.const_mul(v);
-            }
-        }
-        let mut inv_acc = acc.inv();
-        for (v, &pref) in values.iter_mut().zip(prefix.iter()).rev() {
-            if !v.is_zero() {
-                let orig = *v;
-                *v = pref.const_mul(inv_acc);
-                inv_acc = inv_acc.const_mul(orig);
-            }
+    fn two_adic_generator(log_n: usize) -> Self {
+        gl_two_adic_generator(log_n)
+    }
+}
+
+#[inline]
+fn batch_inv_with_scratch(values: &mut [Goldilocks], prefix: &mut [Goldilocks]) {
+    debug_assert_eq!(values.len(), prefix.len());
+    let mut acc = Goldilocks::ONE;
+    for (slot, &v) in prefix.iter_mut().zip(values.iter()) {
+        *slot = acc;
+        if !v.is_zero() {
+            acc = acc.const_mul(v);
         }
     }
-
-    /// Primitive $2^k$-th root of unity for $k \le 32$.
-    #[inline]
-    pub const fn two_adic_generator(log_n: usize) -> Self {
-        assert!(log_n <= 32, "Goldilocks 2-adicity is 32");
-        let mut w = Self(TWO_ADIC_ROOT_OF_UNITY_32);
-        let mut steps = 32 - log_n;
-        while steps > 0 {
-            w = w.square();
-            steps -= 1;
+    let mut inv_acc = acc.inv();
+    for (v, &pref) in values.iter_mut().zip(prefix.iter()).rev() {
+        if !v.is_zero() {
+            let orig = *v;
+            *v = pref.const_mul(inv_acc);
+            inv_acc = inv_acc.const_mul(orig);
         }
-        w
     }
 }
 
-impl Add for Goldilocks {
-    type Output = Self;
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self.const_add(rhs)
-    }
+/// Prover-side helpers on the `qsag-core` quadratic extension.
+pub trait GoldilocksExt2Ops: Copy {
+    /// The adjoined root `u` (`u^2 = 7`).
+    const U: Self;
+    fn is_zero(self) -> bool;
+    fn from_u64(v: u64) -> Self;
+    fn to_le_bytes(self) -> [u8; 16];
+    fn from_le_bytes_canonical(bytes: [u8; 16]) -> Option<Self>;
+    /// Multiply by `u`.
+    fn mul_by_u(self) -> Self;
+    /// Frobenius endomorphism $x \mapsto x^p = c_0 - c_1 u$.
+    fn frobenius(self) -> Self;
+    /// Norm $c_0^2 - 7 c_1^2 \in \mathbb{F}_p$.
+    fn norm_to_base(self) -> Goldilocks;
+    /// Fixed-work inverse, mapping zero to zero.
+    fn inv_or_zero(self) -> Self;
+    fn pow(self, exp: u64) -> Self;
+    fn shl_small<const S: u32>(self) -> Self;
 }
 
-impl AddAssign for Goldilocks {
-    #[inline]
-    fn add_assign(&mut self, rhs: Self) {
-        *self = self.const_add(rhs);
-    }
-}
+impl GoldilocksExt2Ops for GoldilocksExt2 {
+    const U: Self = GoldilocksExt2::U_BASIS;
 
-impl Sub for Goldilocks {
-    type Output = Self;
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self.const_sub(rhs)
-    }
-}
-
-impl SubAssign for Goldilocks {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Self) {
-        *self = self.const_sub(rhs);
-    }
-}
-
-impl Neg for Goldilocks {
-    type Output = Self;
-    #[inline]
-    fn neg(self) -> Self {
-        self.const_neg()
-    }
-}
-
-impl Mul for Goldilocks {
-    type Output = Self;
     #[inline(always)]
-    fn mul(self, rhs: Self) -> Self {
-        self.const_mul(rhs)
-    }
-}
-
-impl MulAssign for Goldilocks {
-    #[inline(always)]
-    fn mul_assign(&mut self, rhs: Self) {
-        *self = self.const_mul(rhs);
-    }
-}
-
-/// Quadratic extension $\mathbb{F}_{p^2} = \mathbb{F}_p[u] / (u^2 - 7)$, $|\mathbb{F}_{p^2}| > 2^{127.99}$.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct GoldilocksExt2 {
-    pub c0: Goldilocks,
-    pub c1: Goldilocks,
-}
-
-impl GoldilocksExt2 {
-    pub const ZERO: Self = Self {
-        c0: Goldilocks::ZERO,
-        c1: Goldilocks::ZERO,
-    };
-    pub const ONE: Self = Self {
-        c0: Goldilocks::ONE,
-        c1: Goldilocks::ZERO,
-    };
-    pub const U: Self = Self {
-        c0: Goldilocks::ZERO,
-        c1: Goldilocks::ONE,
-    };
-
-    #[inline]
-    pub const fn new(c0: Goldilocks, c1: Goldilocks) -> Self {
-        Self { c0, c1 }
+    fn is_zero(self) -> bool {
+        ext2_is_zero(self)
     }
 
     #[inline]
-    pub const fn is_zero(self) -> bool {
-        self.c0.0 == 0 && self.c1.0 == 0
-    }
-
-    #[inline]
-    pub const fn from_base(c0: Goldilocks) -> Self {
-        Self {
-            c0,
-            c1: Goldilocks::ZERO,
-        }
-    }
-
-    #[inline]
-    pub const fn from_u64(v: u64) -> Self {
+    fn from_u64(v: u64) -> Self {
         Self::from_base(Goldilocks::from_u64_reduced(v))
     }
 
     #[inline]
-    pub const fn to_le_bytes(self) -> [u8; 16] {
-        let b0 = self.c0.to_le_bytes();
-        let b1 = self.c1.to_le_bytes();
-        [
-            b0[0], b0[1], b0[2], b0[3], b0[4], b0[5], b0[6], b0[7], b1[0], b1[1], b1[2], b1[3],
-            b1[4], b1[5], b1[6], b1[7],
-        ]
+    fn to_le_bytes(self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.c0.to_le_bytes());
+        out[8..].copy_from_slice(&self.c1.to_le_bytes());
+        out
     }
 
     #[inline]
-    pub fn from_le_bytes_canonical(bytes: [u8; 16]) -> Option<Self> {
-        let mut lo = [0u8; 8];
-        let mut hi = [0u8; 8];
-        lo.copy_from_slice(&bytes[0..8]);
-        hi.copy_from_slice(&bytes[8..16]);
-        let c0 = Goldilocks::from_le_bytes_canonical(lo)?;
-        let c1 = Goldilocks::from_le_bytes_canonical(hi)?;
-        Some(Self { c0, c1 })
+    fn from_le_bytes_canonical(bytes: [u8; 16]) -> Option<Self> {
+        let (lo, hi) = bytes.split_at(8);
+        let c0 = Goldilocks::from_canonical_u64(u64::from_le_bytes(lo.try_into().ok()?))?;
+        let c1 = Goldilocks::from_canonical_u64(u64::from_le_bytes(hi.try_into().ok()?))?;
+        Some(Self::new(c0, c1))
     }
 
     #[inline(always)]
-    pub const fn mul_base(self, s: Goldilocks) -> Self {
-        Self {
-            c0: self.c0.const_mul(s),
-            c1: self.c1.const_mul(s),
-        }
-    }
-
-    /// Multiply by quadratic non-residue root $u$ ($u^2 = 7$): $(c_0 + c_1 u) \cdot u = 7 c_1 + c_0 u$.
-    #[inline(always)]
-    pub const fn mul_by_u(self) -> Self {
-        Self {
-            c0: self.c1.mul_by_7(),
-            c1: self.c0,
-        }
-    }
-
-    /// Frobenius endomorphism $x \mapsto x^p = c_0 - c_1 u$ (since $7^{(p-1)/2} \equiv -1 \pmod p$).
-    #[inline(always)]
-    pub const fn frobenius(self) -> Self {
-        Self {
-            c0: self.c0,
-            c1: self.c1.const_neg(),
-        }
-    }
-
-    /// Norm $\mathrm{N}_{\mathbb{F}_{p^2}/\mathbb{F}_p}(c_0 + c_1 u) = c_0^2 - 7 c_1^2 \in \mathbb{F}_p$.
-    #[inline(always)]
-    pub const fn norm_to_base(self) -> Goldilocks {
-        self.c0.square().const_sub(self.c1.square().mul_by_7())
+    fn mul_by_u(self) -> Self {
+        ext2_mul_by_u(self)
     }
 
     #[inline(always)]
-    pub const fn square(self) -> Self {
-        let a = self.c0;
-        let b = self.c1;
-        let ab = a.const_mul(b);
-        Self {
-            c0: a.square().const_add(b.square().mul_by_7()),
-            c1: ab.const_add(ab),
-        }
+    fn frobenius(self) -> Self {
+        self.conj()
     }
 
-    /// Branchless constant-time multiplicative inverse $(c_0 - c_1 u) / (c_0^2 - 7 c_1^2)$ (`0 -> 0`).
-    #[inline]
-    pub const fn inv(self) -> Self {
-        let norm_inv = self.norm_to_base().inv();
-        Self {
-            c0: self.c0.const_mul(norm_inv),
-            c1: self.c1.const_neg().const_mul(norm_inv),
-        }
+    #[inline(always)]
+    fn norm_to_base(self) -> Goldilocks {
+        self.norm()
     }
 
     #[inline]
-    pub const fn pow(self, mut exp: u64) -> Self {
+    fn inv_or_zero(self) -> Self {
+        ext2_inv_or_zero(self)
+    }
+
+    #[inline]
+    fn pow(self, mut exp: u64) -> Self {
         let mut base = self;
         let mut acc = Self::ONE;
         while exp > 0 {
             if (exp & 1) == 1 {
                 acc = acc.const_mul(base);
             }
-            base = base.square();
+            base = ext2_square(base);
             exp >>= 1;
         }
         acc
     }
 
     #[inline(always)]
-    pub const fn const_add(self, rhs: Self) -> Self {
-        Self {
-            c0: self.c0.const_add(rhs.c0),
-            c1: self.c1.const_add(rhs.c1),
-        }
-    }
-
-    #[inline(always)]
-    pub const fn const_sub(self, rhs: Self) -> Self {
-        Self {
-            c0: self.c0.const_sub(rhs.c0),
-            c1: self.c1.const_sub(rhs.c1),
-        }
-    }
-
-    #[inline(always)]
-    pub const fn const_neg(self) -> Self {
-        Self {
-            c0: self.c0.const_neg(),
-            c1: self.c1.const_neg(),
-        }
-    }
-
-    #[inline(always)]
-    pub const fn shl_small<const S: u32>(self) -> Self {
-        Self {
-            c0: self.c0.shl_small::<S>(),
-            c1: self.c1.shl_small::<S>(),
-        }
-    }
-
-    #[inline(always)]
-    pub const fn const_mul(self, rhs: Self) -> Self {
-        let a0b0 = self.c0.const_mul(rhs.c0);
-        let a1b1 = self.c1.const_mul(rhs.c1);
-        let mid = self
-            .c0
-            .const_add(self.c1)
-            .const_mul(rhs.c0.const_add(rhs.c1))
-            .const_sub(a0b0)
-            .const_sub(a1b1);
-        Self {
-            c0: a0b0.const_add(a1b1.mul_by_7()),
-            c1: mid,
-        }
-    }
-}
-
-impl Add for GoldilocksExt2 {
-    type Output = Self;
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        self.const_add(rhs)
-    }
-}
-
-impl AddAssign for GoldilocksExt2 {
-    #[inline]
-    fn add_assign(&mut self, rhs: Self) {
-        *self = self.const_add(rhs);
-    }
-}
-
-impl Sub for GoldilocksExt2 {
-    type Output = Self;
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        self.const_sub(rhs)
-    }
-}
-
-impl SubAssign for GoldilocksExt2 {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Self) {
-        *self = self.const_sub(rhs);
-    }
-}
-
-impl Neg for GoldilocksExt2 {
-    type Output = Self;
-    #[inline]
-    fn neg(self) -> Self {
-        self.const_neg()
-    }
-}
-
-impl Mul for GoldilocksExt2 {
-    type Output = Self;
-    #[inline]
-    fn mul(self, rhs: Self) -> Self {
-        self.const_mul(rhs)
-    }
-}
-
-impl MulAssign for GoldilocksExt2 {
-    #[inline]
-    fn mul_assign(&mut self, rhs: Self) {
-        *self = self.const_mul(rhs)
+    fn shl_small<const S: u32>(self) -> Self {
+        ext2_shl_small::<S>(self)
     }
 }
 
@@ -561,22 +285,22 @@ fn butterfly_block_goldilocks(
     let m = lo.len();
     debug_assert_eq!(m, hi.len());
     if m >= 4 {
-        let w2 = w_len * w_len;
-        let fourth_power = w2 * w2;
+        let w2 = w_len.const_mul(w_len);
+        let fourth_power = w2.const_mul(w2);
         let mut wk0 = w_init;
-        let mut wk1 = wk0 * w_len;
-        let mut wk2 = wk0 * w2;
-        let mut wk3 = wk1 * w2;
+        let mut wk1 = wk0.const_mul(w_len);
+        let mut wk2 = wk0.const_mul(w2);
+        let mut wk3 = wk1.const_mul(w2);
         let mut j = 0usize;
         while j + 4 <= m {
             let u0 = lo[j];
-            let v0 = hi[j] * wk0;
+            let v0 = hi[j].const_mul(wk0);
             let u1 = lo[j + 1];
-            let v1 = hi[j + 1] * wk1;
+            let v1 = hi[j + 1].const_mul(wk1);
             let u2 = lo[j + 2];
-            let v2 = hi[j + 2] * wk2;
+            let v2 = hi[j + 2].const_mul(wk2);
             let u3 = lo[j + 3];
-            let v3 = hi[j + 3] * wk3;
+            let v3 = hi[j + 3].const_mul(wk3);
             lo[j] = u0 + v0;
             hi[j] = u0 - v0;
             lo[j + 1] = u1 + v1;
@@ -585,28 +309,28 @@ fn butterfly_block_goldilocks(
             hi[j + 2] = u2 - v2;
             lo[j + 3] = u3 + v3;
             hi[j + 3] = u3 - v3;
-            wk0 *= fourth_power;
-            wk1 *= fourth_power;
-            wk2 *= fourth_power;
-            wk3 *= fourth_power;
+            wk0 = wk0.const_mul(fourth_power);
+            wk1 = wk1.const_mul(fourth_power);
+            wk2 = wk2.const_mul(fourth_power);
+            wk3 = wk3.const_mul(fourth_power);
             j += 4;
         }
         while j < m {
             let u = lo[j];
-            let v = hi[j] * wk0;
+            let v = hi[j].const_mul(wk0);
             lo[j] = u + v;
             hi[j] = u - v;
-            wk0 *= w_len;
+            wk0 = wk0.const_mul(w_len);
             j += 1;
         }
     } else {
         let mut w = w_init;
         for j in 0..m {
             let u = lo[j];
-            let v = hi[j] * w;
+            let v = hi[j].const_mul(w);
             lo[j] = u + v;
             hi[j] = u - v;
-            w *= w_len;
+            w = w.const_mul(w_len);
         }
     }
 }
@@ -954,7 +678,7 @@ impl GoldilocksExt4 {
 
     #[inline(always)]
     pub const fn is_zero(self) -> bool {
-        self.c0.is_zero() && self.c1.is_zero()
+        ext2_is_zero(self.c0) && ext2_is_zero(self.c1)
     }
 
     #[inline(always)]
@@ -980,13 +704,19 @@ impl GoldilocksExt4 {
 
     #[inline]
     pub const fn to_le_bytes(self) -> [u8; 32] {
-        let b0 = self.c0.to_le_bytes();
-        let b1 = self.c1.to_le_bytes();
-        [
-            b0[0], b0[1], b0[2], b0[3], b0[4], b0[5], b0[6], b0[7], b0[8], b0[9], b0[10], b0[11],
-            b0[12], b0[13], b0[14], b0[15], b1[0], b1[1], b1[2], b1[3], b1[4], b1[5], b1[6], b1[7],
-            b1[8], b1[9], b1[10], b1[11], b1[12], b1[13], b1[14], b1[15],
-        ]
+        let limbs = [self.c0.c0, self.c0.c1, self.c1.c0, self.c1.c1];
+        let mut out = [0u8; 32];
+        let mut i = 0;
+        while i < 4 {
+            let w = limbs[i].to_le_bytes();
+            let mut k = 0;
+            while k < 8 {
+                out[8 * i + k] = w[k];
+                k += 1;
+            }
+            i += 1;
+        }
+        out
     }
 
     #[inline]
@@ -1006,10 +736,10 @@ impl GoldilocksExt4 {
             u64::from_le_bytes(b3),
         )?;
         Some(Self::from_limbs([
-            Goldilocks(ext.a),
-            Goldilocks(ext.c),
-            Goldilocks(ext.b),
-            Goldilocks(ext.d),
+            Goldilocks::from_u64_reduced(ext.a),
+            Goldilocks::from_u64_reduced(ext.c),
+            Goldilocks::from_u64_reduced(ext.b),
+            Goldilocks::from_u64_reduced(ext.d),
         ]))
     }
 
@@ -1056,8 +786,8 @@ impl GoldilocksExt4 {
     #[inline(always)]
     pub const fn shl_small<const S: u32>(self) -> Self {
         Self {
-            c0: self.c0.shl_small::<S>(),
-            c1: self.c1.shl_small::<S>(),
+            c0: ext2_shl_small::<S>(self.c0),
+            c1: ext2_shl_small::<S>(self.c1),
         }
     }
 
@@ -1073,7 +803,7 @@ impl GoldilocksExt4 {
             .const_sub(v0)
             .const_sub(v1);
         Self {
-            c0: v0.const_add(v1.mul_by_u()),
+            c0: v0.const_add(ext2_mul_by_u(v1)),
             c1: mid,
         }
     }
@@ -1083,11 +813,11 @@ impl GoldilocksExt4 {
     #[inline(always)]
     pub const fn square(self) -> Self {
         let p0 = self.c0.const_mul(self.c1);
-        let up0 = p0.mul_by_u();
+        let up0 = ext2_mul_by_u(p0);
         let t = self
             .c0
             .const_add(self.c1)
-            .const_mul(self.c0.const_add(self.c1.mul_by_u()));
+            .const_mul(self.c0.const_add(ext2_mul_by_u(self.c1)));
         Self {
             c0: t.const_sub(p0).const_sub(up0),
             c1: p0.const_add(p0),
@@ -1097,19 +827,19 @@ impl GoldilocksExt4 {
     /// Relative norm $\mathrm{N}_{\mathbb{F}_{p^4}/\mathbb{F}_{p^2}}(c_0 + c_1 v) = c_0^2 - u c_1^2 \in \mathbb{F}_{p^2}$.
     #[inline(always)]
     pub const fn norm_to_ext2(self) -> GoldilocksExt2 {
-        self.c0.square().const_sub(self.c1.square().mul_by_u())
+        ext2_square(self.c0).const_sub(ext2_mul_by_u(ext2_square(self.c1)))
     }
 
     /// Absolute norm $\mathrm{N}_{\mathbb{F}_{p^4}/\mathbb{F}_p}(x) \in \mathbb{F}_p$.
     #[inline(always)]
     pub const fn norm_to_base(self) -> Goldilocks {
-        self.norm_to_ext2().norm_to_base()
+        self.norm_to_ext2().norm()
     }
 
     /// Branchless constant-time multiplicative inverse $(c_0 - c_1 v) / (c_0^2 - u c_1^2)$ (`0 -> 0`).
     #[inline]
     pub const fn inv(self) -> Self {
-        let norm_inv = self.norm_to_ext2().inv();
+        let norm_inv = ext2_inv_or_zero(self.norm_to_ext2());
         Self {
             c0: self.c0.const_mul(norm_inv),
             c1: self.c1.const_neg().const_mul(norm_inv),
@@ -1134,8 +864,8 @@ impl GoldilocksExt4 {
     #[inline(always)]
     pub const fn frobenius(self) -> Self {
         Self {
-            c0: self.c0.frobenius(),
-            c1: self.c1.frobenius().mul_base(FROBENIUS_ZETA4),
+            c0: self.c0.conj(),
+            c1: self.c1.conj().mul_base(FROBENIUS_ZETA4),
         }
     }
 

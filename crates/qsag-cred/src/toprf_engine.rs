@@ -47,12 +47,15 @@ pub(crate) fn fields(seed: &[u8; 32], domain: &[u8], context: &[u8], n: usize) -
     xof.absorb(&key[..]);
     xof.finalize(0x1f);
     let mut out = Vec::with_capacity(n);
+    let mut bytes = SecretBuffer([0u8; 8 * 128]);
     while out.len() < n {
-        let mut b = SecretBuffer([0; 8]);
-        xof.squeeze(&mut b[..]);
-        let v = u64::from_le_bytes(*b);
-        if v < GOLDILOCKS_PRIME {
-            out.push(v);
+        let count = (n - out.len()).min(128);
+        xof.squeeze(&mut bytes[..count * 8]);
+        for chunk in bytes[..count * 8].as_chunks::<8>().0 {
+            let v = u64::from_le_bytes(*chunk);
+            if v < GOLDILOCKS_PRIME {
+                out.push(v);
+            }
         }
     }
     out

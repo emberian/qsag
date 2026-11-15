@@ -43,6 +43,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::field::GoldilocksOps as _;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
     encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4, eval_univariate_ext4_at_base,
@@ -2346,7 +2347,7 @@ impl HemWhirOpeningProof {
         let val_bytes = bytes.get(pos..pos.checked_add(8 * n_r0)?)?;
         let mut round0_vals = Vec::with_capacity(n_r0);
         for &lb in val_bytes.as_chunks::<8>().0 {
-            round0_vals.push(Goldilocks::from_le_bytes_canonical(lb)?);
+            round0_vals.push(Goldilocks::from_le_bytes_canonical(lb).ok()?);
         }
         pos += 8 * n_r0;
 
@@ -2713,12 +2714,12 @@ impl FiberLastDuet {
 
 const COSET_FOLD_ZETAS: [Goldilocks; MAX_FOLD_STEP_VARS + 1] = [
     Goldilocks::ONE,
-    Goldilocks::two_adic_generator(1),
-    Goldilocks::two_adic_generator(2),
-    Goldilocks::two_adic_generator(3),
-    Goldilocks::two_adic_generator(4),
-    Goldilocks::two_adic_generator(5),
-    Goldilocks::two_adic_generator(6),
+    crate::field::gl_two_adic_generator(1),
+    crate::field::gl_two_adic_generator(2),
+    crate::field::gl_two_adic_generator(3),
+    crate::field::gl_two_adic_generator(4),
+    crate::field::gl_two_adic_generator(5),
+    crate::field::gl_two_adic_generator(6),
 ];
 
 /// Fold a coset fiber `vals` of size $A = 2^s \in \{2, 4, 8, 16, 32, 64\}$ at points

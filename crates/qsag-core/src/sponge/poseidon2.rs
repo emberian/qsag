@@ -65,8 +65,10 @@ fn poseidon2_apply_m4(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
     ]
 }
 
-/// External MDS layer $M_E = \text{circ}(2 M_4, M_4, M_4)$.
+/// External diffusion layer $M_E = M_4 \otimes P_3$.
 pub fn poseidon2_apply_me(st: &mut Poseidon2State12) {
+    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
+    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
     let y0 = poseidon2_apply_m4([st[0], st[1], st[2], st[3]]);
     let y1 = poseidon2_apply_m4([st[4], st[5], st[6], st[7]]);
     let y2 = poseidon2_apply_m4([st[8], st[9], st[10], st[11]]);
@@ -76,15 +78,16 @@ pub fn poseidon2_apply_me(st: &mut Poseidon2State12) {
         st[4 + i] = y1[i] + s;
         st[8 + i] = y2[i] + s;
     }
+    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
 }
 
-/// Internal diffusion layer $M_I = \mathbf{1}\mathbf{1}^T + \text{diag}(-2, 1, 2, 4, \dots, 1024)$.
+/// Internal diffusion layer $M_I = \mathbf{1}\mathbf{1}^T + \text{diag}(-64, 1, 2, 4, \dots, 1024)$.
 pub fn poseidon2_apply_mi(st: &mut Poseidon2State12) {
     let mut s = Goldilocks::ZERO;
     for x in st.iter() {
         s += *x;
     }
-    st[0] = (Goldilocks::TWO * st[0]).const_neg() + s;
+    st[0] = (Goldilocks::from_u64_reduced(64) * st[0]).const_neg() + s;
     st[1] += s;
     let mut d = Goldilocks::TWO;
     for x in st.iter_mut().skip(2) {
@@ -226,5 +229,16 @@ mod tests {
         let d2 = poseidon2_hash32(b"abc");
         assert_ne!(d1, d2);
         assert_eq!(d2, poseidon2_hash32(b"abc"));
+    }
+}
+
+#[cfg(test)]
+mod canonical_kat {
+    use super::*;
+    #[test]
+    fn poseidon2_canonical_sequence_kat() {
+        let mut st = core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
+        poseidon2_perm12(&mut st);
+        assert_eq!(st.map(|x| u64::from_be_bytes(x.to_be_bytes())), [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415]);
     }
 }

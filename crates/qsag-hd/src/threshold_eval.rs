@@ -693,15 +693,7 @@ pub(crate) fn trusted_dealer_opening_masks(
     let masks = roster
         .iter()
         .map(|&(id, x)| {
-            let mut num = 1;
-            let mut den = 1;
-            for &other in &xs {
-                if other != x {
-                    num = mod_q_mul(num, mod_q_sub(0, other));
-                    den = mod_q_mul(den, mod_q_sub(x, other));
-                }
-            }
-            let lambda = mod_q_mul(num, mod_q_inv_or_zero(den));
+            let lambda = interpolation_weight(&xs, x);
             let z = coeffs
                 .iter()
                 .rev()

@@ -8,7 +8,9 @@ description = "Zero-dependency SIMD assembly kernels with scoped Lean ISA proofs
 
 [features]
 default = ["std"]
-std = []
+# Heap-backed secret guards in `wipe` (`Vec`/`Box` erasure, `SecretVec`).
+alloc = []
+std = ["alloc"]
 
 [[example]]
 name = "ct_dudect"

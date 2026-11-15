@@ -57,6 +57,9 @@ pub mod belt_latch;
 pub mod wots_c;
 
 #[forbid(unsafe_code)]
+pub mod pors_fp;
+
+#[forbid(unsafe_code)]
 pub mod baggy;
 
 #[forbid(unsafe_code)]

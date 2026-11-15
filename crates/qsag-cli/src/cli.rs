@@ -459,12 +459,7 @@ pub fn os_random_32() -> Result<[u8; 32], CliError> {
     let mut out = Secret32([0u8; 32]);
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut out.0))
-        .map_err(|e| {
-            CliError::io(
-                "reading /dev/urandom (pass --seed-file on platforms without it)",
-                e,
-            )
-        })?;
+        .map_err(|e| CliError::io("reading OS entropy from /dev/urandom", e))?;
     Ok(out.0)
 }
 

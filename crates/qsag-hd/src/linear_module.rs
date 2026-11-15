@@ -184,14 +184,13 @@ impl RingPoly {
         out
     }
 
-    /// Fixed-schedule twisted NTT multiplication modulo X^256+1.
+    /// Fixed-schedule NTT multiplication modulo X^256+1.
     pub fn mul_negacyclic(&self, rhs: &Self) -> Self {
-        let mut left = forward(self);
+        let left = forward(self);
         let right = forward(rhs);
-        for (a, &b) in left.coeffs.iter_mut().zip(&right.coeffs) {
-            *a = mod_q_mul(*a, b);
-        }
-        inverse(left)
+        let mut product = Self::zero();
+        qsag_asm::mldsa_pointwise_mul(&mut product.coeffs, &left.coeffs, &right.coeffs);
+        inverse(product)
     }
 
     /// Exact integer squared Euclidean norm $\sum_{m=0}^{255} c_m^2$ of centered representatives
@@ -280,11 +279,17 @@ impl Drop for SecretRingPoly {
     }
 }
 
-/// Byte-Horner reduction preserving the original big-endian 192-bit map.
+/// Reduction of a big-endian integer of any public length, one fixed Horner
+/// step per 32-bit word (per byte for a leading remainder). Each intermediate
+/// fits in u64 because the preceding remainder is below q.
 fn reduce_wide_mod_q(bytes: &[u8]) -> u32 {
+    let (head, words) = bytes.as_rchunks::<4>();
     let mut r = 0u32;
-    for &byte in bytes {
+    for &byte in head {
         r = ct_reduce_mod_q_u64((r as u64) * 256 + u64::from(byte));
+    }
+    for word in words {
+        r = ct_reduce_mod_q_u64(((r as u64) << 32) | u64::from(u32::from_be_bytes(*word)));
     }
     r
 }
@@ -872,16 +877,23 @@ pub(crate) fn setup_shamir_linear_module(
     ))
 }
 
-fn interpolation_weight(xs: &[u32], own_x: u32) -> u32 {
+/// Lagrange coefficient of the point `own_x` for evaluating at `target` a
+/// polynomial of degree below `xs.len()` from its values at the distinct points `xs`.
+fn lagrange_weight(xs: &[u32], own_x: u32, target: u32) -> u32 {
     let mut numerator = 1;
     let mut denominator = 1;
     for &x in xs {
         if x != own_x {
-            numerator = mod_q_mul(numerator, mod_q_sub(0, x));
+            numerator = mod_q_mul(numerator, mod_q_sub(target, x));
             denominator = mod_q_mul(denominator, mod_q_sub(own_x, x));
         }
     }
     mod_q_mul(numerator, mod_q_inv_or_zero(denominator))
+}
+
+/// Weight of the share at `own_x` in the reconstruction of the secret at zero.
+fn interpolation_weight(xs: &[u32], own_x: u32) -> u32 {
+    lagrange_weight(xs, own_x, 0)
 }
 
 #[cfg(test)]
@@ -938,21 +950,7 @@ fn quorum_weights(
         return Ok(alloc::vec![1; quorum.len()]);
     }
     validate_shamir_eval_points(&xs)?;
-    Ok(xs
-        .iter()
-        .enumerate()
-        .map(|(i, &xi)| {
-            let mut num = 1;
-            let mut den = 1;
-            for (j, &xj) in xs.iter().enumerate() {
-                if i != j {
-                    num = mod_q_mul(num, mod_q_sub(0, xj));
-                    den = mod_q_mul(den, mod_q_sub(xi, xj));
-                }
-            }
-            mod_q_mul(num, mod_q_inv_or_zero(den))
-        })
-        .collect())
+    Ok(xs.iter().map(|&x| interpolation_weight(&xs, x)).collect())
 }
 
 /// Test-only oracle: reconstructs complete secrets and authentication keys and
@@ -1000,63 +998,6 @@ pub(crate) fn reconstruct_for_recovery_or_test(
     Ok(secret)
 }
 
-// These public tables are evaluated by the compiler, including the inverses.
-const fn public_powers(root: u32) -> [u32; MODULE_N] {
-    let mut out = [1; MODULE_N];
-    let mut i = 1;
-    while i < MODULE_N {
-        out[i] = (out[i - 1] as u64 * root as u64 % MODULE_Q as u64) as u32;
-        i += 1;
-    }
-    out
-}
-const fn public_inverse(x: u32) -> u32 {
-    let mut acc = 1u64;
-    let mut b = x as u64;
-    let mut e = MODULE_Q - 2;
-    while e != 0 {
-        if e & 1 != 0 {
-            acc = acc * b % MODULE_Q as u64;
-        }
-        b = b * b % MODULE_Q as u64;
-        e >>= 1;
-    }
-    acc as u32
-}
-const TWIST: [u32; MODULE_N] = public_powers(1753);
-const UNTWIST: [u32; MODULE_N] = public_powers(public_inverse(1753));
-const OMEGA: u32 = (1753u64 * 1753 % MODULE_Q as u64) as u32;
-const NTT_FORWARD: [u32; MODULE_N] = public_powers(OMEGA);
-const NTT_INVERSE: [u32; MODULE_N] = public_powers(public_inverse(OMEGA));
-
-fn cyclic_ntt(values: &mut [u32; MODULE_N], inverse: bool) {
-    for i in 0..MODULE_N {
-        let j = (i as u8).reverse_bits() as usize;
-        if i < j {
-            values.swap(i, j);
-        }
-    }
-    let twiddles = if inverse { &NTT_INVERSE } else { &NTT_FORWARD };
-    let mut width = 2;
-    while width <= MODULE_N {
-        for block in values.chunks_exact_mut(width) {
-            for j in 0..width / 2 {
-                let a = block[j];
-                let b = mod_q_mul(block[j + width / 2], twiddles[j * (MODULE_N / width)]);
-                block[j] = mod_q_add(a, b);
-                block[j + width / 2] = mod_q_sub(a, b);
-            }
-        }
-        width *= 2;
-    }
-    if inverse {
-        let scale = public_inverse(MODULE_N as u32);
-        for value in values {
-            *value = mod_q_mul(*value, scale);
-        }
-    }
-}
-
 /// Test-only alias of the reconstruction oracle.
 #[cfg(test)]
 pub(crate) fn reconstruct_shamir_and_verify_key_relation(
@@ -1097,6 +1038,19 @@ mod ntt_tests {
             assert_eq!(a.mul_negacyclic(&b), expected);
         }
     }
+
+    #[test]
+    fn multiplication_reduces_noncanonical_public_coefficients() {
+        let a = RingPoly::sample_uniform_mod_q(b"test", &[7; 32], 0);
+        let b = RingPoly::sample_uniform_mod_q(b"test", &[7; 32], 1);
+        let mut lifted = a.clone();
+        for (i, c) in lifted.coeffs.iter_mut().enumerate() {
+            *c += MODULE_Q * (i as u32 % 500);
+        }
+        lifted.coeffs[255] = u32::MAX - (u32::MAX - a.coeffs[255]) % MODULE_Q;
+        assert_eq!(lifted.mul_negacyclic(&b), a.mul_negacyclic(&b));
+        assert_eq!(b.mul_negacyclic(&lifted), a.mul_negacyclic(&b));
+    }
 }
 
 #[cfg(test)]
@@ -1129,25 +1083,25 @@ mod mac_tests {
     }
 }
 
-/// Immutable public matrix cached in the twisted NTT domain.
+/// Immutable public matrix cached in the FIPS 204 NTT domain.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExpandedHdMatrix {
     seed: [u8; 32],
     ntt: [[RingPoly; MODULE_L]; MODULE_K],
 }
+/// FIPS 204 forward NTT through the audited `qsag-asm` kernel, which is
+/// constant time and requires canonical residues; inputs are reduced first
+/// because `RingPoly::coeffs` is a public field.
 fn forward(poly: &RingPoly) -> RingPoly {
     let mut out = poly.clone();
-    for (c, twist) in out.coeffs.iter_mut().zip(TWIST) {
-        *c = mod_q_mul(*c, twist);
+    for c in &mut out.coeffs {
+        *c = ct_reduce_mod_q_u64(u64::from(*c));
     }
-    cyclic_ntt(&mut out.coeffs, false);
+    qsag_asm::mldsa_ntt(&mut out.coeffs);
     out
 }
 fn inverse(mut poly: RingPoly) -> RingPoly {
-    cyclic_ntt(&mut poly.coeffs, true);
-    for (c, twist) in poly.coeffs.iter_mut().zip(UNTWIST) {
-        *c = mod_q_mul(*c, twist);
-    }
+    qsag_asm::mldsa_inv_ntt(&mut poly.coeffs);
     poly
 }
 impl ExpandedHdMatrix {
@@ -1428,6 +1382,13 @@ mod regression_tests {
                     }
                 }
                 assert_eq!(reduce_wide_mod_q(chunk), old);
+            }
+            // Lengths that are not a whole number of words keep the same map.
+            for len in [0usize, 1, 3, 5, 23, 25] {
+                let old = bytes[..len].iter().fold(0, |acc, &byte| {
+                    ct_reduce_mod_q_u64(u64::from(acc) * 256 + u64::from(byte))
+                });
+                assert_eq!(reduce_wide_mod_q(&bytes[..len]), old);
             }
         }
         let matrix = expand_matrix_a(&[1; 32]);

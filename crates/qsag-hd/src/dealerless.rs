@@ -86,15 +86,45 @@ fn abort<T>(fault: RekeyFault) -> Result<T, HdError> {
     Err(HdError::RekeyAborted(fault))
 }
 
-/// Squeeze 192 bits (24 bytes) before constant-time wide reduction mod `q = 8_380_417`,
-/// matching `linear_module::sample_uniform_mod_q` and `threshold_eval` so single-draw
+/// Three whole SHAKE256 blocks: exactly seventeen 192-bit draws.
+const FIELD_STREAM_BLOCK: usize = 3 * 136;
+
+/// Field elements from an XOF stream. Each draw consumes the next 192 bits (24
+/// bytes) and reduces them mod `q = 8_380_417` in constant time, matching
+/// `linear_module::sample_uniform_mod_q` and `threshold_eval`, so single-draw
 /// total-variation and pointwise Rényi bias stay below `q / 2^192 < 2^-169`.
-fn field_from_stream(sponge: &mut Shake256) -> u32 {
-    let mut bytes = [0u8; 24];
-    sponge.squeeze(&mut bytes);
-    let value = reduce_wide_mod_q(&bytes);
-    ct_zeroize_bytes(&mut bytes);
-    value
+/// The stream is read in whole-block chunks; the values are those of
+/// consecutive 24-byte squeezes.
+struct FieldStream {
+    sponge: Shake256,
+    block: [u8; FIELD_STREAM_BLOCK],
+    used: usize,
+}
+
+impl FieldStream {
+    fn new(sponge: Shake256) -> Self {
+        Self {
+            sponge,
+            block: [0; FIELD_STREAM_BLOCK],
+            used: FIELD_STREAM_BLOCK,
+        }
+    }
+
+    fn draw(&mut self) -> u32 {
+        if self.used == FIELD_STREAM_BLOCK {
+            self.sponge.squeeze(&mut self.block);
+            self.used = 0;
+        }
+        let value = reduce_wide_mod_q(&self.block[self.used..self.used + 24]);
+        self.used += 24;
+        value
+    }
+}
+
+impl Drop for FieldStream {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.block);
+    }
 }
 
 /// `f_A(x) = prod over positions j outside A of (x_j - x) / x_j`.
@@ -113,18 +143,7 @@ fn subset_poly_at(xs: &[u32], subset: CustodianSet, x: u32) -> u32 {
 /// Weights `w` with `p(target) = sum_i w_i * p(xs_i)` for `deg p < xs.len()`.
 fn lagrange_weights(xs: &[u32], target: u32) -> Vec<u32> {
     xs.iter()
-        .enumerate()
-        .map(|(i, &xi)| {
-            let mut numerator = 1;
-            let mut denominator = 1;
-            for (j, &xj) in xs.iter().enumerate() {
-                if i != j {
-                    numerator = mod_q_mul(numerator, mod_q_sub(target, xj));
-                    denominator = mod_q_mul(denominator, mod_q_sub(xi, xj));
-                }
-            }
-            mod_q_mul(numerator, mod_q_inv_or_zero(denominator))
-        })
+        .map(|&xi| lagrange_weight(xs, xi, target))
         .collect()
 }
 
@@ -831,25 +850,23 @@ impl<'a> RekeyRound1<'a> {
             // Every holder of a subset must publish the same image; the honest
             // holder computed it from the agreed seed.
             let mut child_t = core.parent_t.clone();
+            let subsets = config.subsets();
             for (position, hello) in hellos.iter().enumerate() {
-                let expected = config.subsets_of(position);
-                if hello.public_shares.len() != expected.len()
-                    || hello
-                        .public_shares
+                if !crate::seeds::lists_subsets_of(
+                    &subsets,
+                    position,
+                    &hello.public_shares,
+                    |entry| entry.0,
+                ) || hello.public_shares.iter().any(|entry| {
+                    entry
+                        .1
                         .iter()
-                        .zip(&expected)
-                        .any(|(entry, &subset)| {
-                            entry.0 != subset
-                                || entry
-                                    .1
-                                    .iter()
-                                    .any(|p| p.coeffs.iter().any(|&c| c >= MODULE_Q))
-                        })
-                {
+                        .any(|p| p.coeffs.iter().any(|&c| c >= MODULE_Q))
+                }) {
                     return abort(RekeyFault::MalformedMessage);
                 }
             }
-            for subset in config.subsets() {
+            for subset in subsets {
                 let mut images = hellos.iter().filter_map(|hello| {
                     hello
                         .public_shares
@@ -904,21 +921,22 @@ impl<'a> RekeyRound1<'a> {
             let stream = |domain: &[u8]| {
                 seeds
                     .prf_stream(subset, domain, &[&derivation, &core.session])
+                    .map(FieldStream::new)
                     .ok_or(HdError::InvalidThresholdParameters)
             };
             let mut keys = stream(b"QSAG.HD.REKEY.PRSS.KEYS.V1")?;
             for alpha in &mut core.alpha {
-                *alpha = mod_q_add(*alpha, mod_q_mul(field_from_stream(&mut keys), weight));
+                *alpha = mod_q_add(*alpha, mod_q_mul(keys.draw(), weight));
             }
             for b in core.b.iter_mut().chain(core.b_parent.iter_mut()) {
-                *b = mod_q_add(*b, mod_q_mul(field_from_stream(&mut keys), weight));
+                *b = mod_q_add(*b, mod_q_mul(keys.draw(), weight));
             }
             let mut masks = stream(b"QSAG.HD.REKEY.PRSS.MASKS.V1")?;
             for (narrow, wide) in core.mask_shares.iter_mut().zip(wide_masks.iter_mut()) {
-                let r = field_from_stream(&mut masks);
+                let r = masks.draw();
                 let mut high = r;
                 for &power in &powers {
-                    high = mod_q_add(high, mod_q_mul(field_from_stream(&mut masks), power));
+                    high = mod_q_add(high, mod_q_mul(masks.draw(), power));
                 }
                 *narrow = mod_q_add(*narrow, mod_q_mul(r, weight));
                 *wide = mod_q_add(*wide, mod_q_mul(high, weight));
@@ -1008,6 +1026,7 @@ impl RekeyRound3 {
             challenge.absorb(&coin.seed);
         }
         finalize_cshake256(&mut challenge, true);
+        let mut challenge = FieldStream::new(challenge);
 
         let lanes = SPDZ_LANES;
         let mut values = alloc::vec![0u32; core.opening_count()];
@@ -1016,7 +1035,7 @@ impl RekeyRound3 {
             alloc::vec![0; if core.parent.is_some() { lanes * REPS } else { 0 }];
         for k in 0..REPS {
             for c in 0..COEFFS {
-                let chi = field_from_stream(&mut challenge);
+                let chi = challenge.draw();
                 values[k] = mod_q_add(values[k], mod_q_mul(chi, core.s[c]));
                 for lane in 0..lanes {
                     let slot = &mut core.combined_macs[lane * REPS + k];
@@ -1578,6 +1597,136 @@ mod tests {
         assert!(reconstruct_for_recovery_or_test(&child[..2], &child_pk).is_err());
     }
 
+    /// Opens one public relation coefficient among `positions` with dealerless masks.
+    fn open_coefficient(
+        seeds: &[CustodianSeeds],
+        shares: &mut [LinearModulePartyShare],
+        pk: &LinearModuleXPub,
+        positions: &[usize],
+        session: [u8; 32],
+    ) -> Result<u32, HdError> {
+        let projection = AuthorizedHdProjection::PublicRelationCoefficient {
+            row: 1,
+            coefficient: 200,
+        };
+        let members = seeds[0].config().members();
+        let roster: Vec<(u16, u32)> = positions.iter().map(|&p| members[p]).collect();
+        let mut states = Vec::new();
+        for (p, share) in shares.iter_mut().enumerate() {
+            if positions.contains(&p) {
+                let mask = dealerless_opening_mask(&seeds[p], &roster, session, projection)?;
+                states.push(HdThresholdEvalRound1Commit::begin(
+                    share, pk, &roster, projection, session, mask, [p as u8; 32],
+                )?);
+            }
+        }
+        let commits: Vec<_> = states.iter().map(|s| s.commitment()).collect();
+        let mut states = states
+            .into_iter()
+            .map(|s| s.freeze(&commits))
+            .collect::<Result<Vec<_>, _>>()?;
+        let openings: Vec<_> = states.iter().map(|s| s.share_opening()).collect();
+        let commits = states
+            .iter_mut()
+            .map(|s| s.commit_mac(&openings))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut states = states
+            .into_iter()
+            .map(|s| s.freeze_mac(&commits))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mac_openings = states
+            .iter_mut()
+            .map(|s| s.mac_opening())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut opened = None;
+        for state in states {
+            let value = state.verify(&mac_openings)?;
+            assert!(opened.is_none_or(|prior| prior == value));
+            opened = Some(value);
+        }
+        opened.ok_or(HdError::InvalidThresholdParameters)
+    }
+
+    #[test]
+    fn committee_wider_than_one_mask_word_rekeys_converts_and_opens() {
+        let config = committee(2, 65);
+        let seeds = run_seed_ceremony(&config, 0x65);
+        let (root_pk, mut root) = honest(&seeds, None, 0, false, 1);
+        let expected = root_pk.t_vec[1].coeffs[200];
+        // Quorums on both sides of the 64-position word boundary agree.
+        let low = reconstruct_for_recovery_or_test(&root[..2], &root_pk).unwrap();
+        let high = reconstruct_for_recovery_or_test(&root[63..], &root_pk).unwrap();
+        assert_eq!(low, high);
+        assert_eq!(
+            open_coefficient(&seeds, &mut root, &root_pk, &[0, 64], [1; 32]),
+            Ok(expected)
+        );
+        assert_eq!(
+            open_coefficient(&seeds, &mut root, &root_pk, &[63, 64], [2; 32]),
+            Ok(expected)
+        );
+        let additive: Vec<_> = root
+            .into_iter()
+            .map(|s| s.into_additive().unwrap())
+            .collect();
+        let (child_pk, mut child) = honest(&seeds, Some((&additive, &root_pk)), 5, false, 2);
+        assert_eq!(child_pk, root_pk.derive_child(5).unwrap());
+        assert!(
+            child
+                .iter()
+                .all(|s| matches!(s.scheme, ShareScheme::Additive { num_parties: 65 }))
+        );
+        let everyone: Vec<usize> = (0..65).collect();
+        assert_eq!(
+            open_coefficient(&seeds, &mut child, &child_pk, &everyone, [3; 32]),
+            Ok(child_pk.t_vec[1].coeffs[200])
+        );
+        // A sum sharing has no partial quorum.
+        assert_eq!(
+            open_coefficient(&seeds, &mut child, &child_pk, &everyone[..64], [4; 32]),
+            Err(HdError::InvalidThresholdParameters)
+        );
+    }
+
+    #[test]
+    fn threshold_one_committees_rekey_convert_and_open() {
+        for n in [1u16, 3] {
+            let config = committee(1, n);
+            let seeds = run_seed_ceremony(&config, 0x71 + n as u8);
+            let (root_pk, mut root) = honest(&seeds, None, 0, false, 1);
+            let expected = root_pk.t_vec[1].coeffs[200];
+            // Every single custodian is a quorum, and so is the whole committee.
+            for position in 0..usize::from(n) {
+                assert_eq!(
+                    open_coefficient(&seeds, &mut root, &root_pk, &[position], [position as u8; 32]),
+                    Ok(expected)
+                );
+            }
+            let everyone: Vec<usize> = (0..usize::from(n)).collect();
+            assert_eq!(
+                open_coefficient(&seeds, &mut root, &root_pk, &everyone, [9; 32]),
+                Ok(expected)
+            );
+            assert_eq!(
+                open_coefficient(&seeds, &mut root, &root_pk, &[], [10; 32]).err(),
+                Some(HdError::InvalidThresholdParameters)
+            );
+            let (hard_pk, hard) = honest(&seeds, Some((&root, &root_pk)), 4, true, 2);
+            assert!(hard_pk.chain_code.is_none());
+            assert!(reconstruct_for_recovery_or_test(&hard[..1], &hard_pk).is_ok());
+            let additive: Vec<_> = root
+                .into_iter()
+                .map(|s| s.into_additive().unwrap())
+                .collect();
+            let (child_pk, mut child) = honest(&seeds, Some((&additive, &root_pk)), 6, false, 3);
+            assert_eq!(child_pk, root_pk.derive_child(6).unwrap());
+            assert_eq!(
+                open_coefficient(&seeds, &mut child, &child_pk, &everyone, [11; 32]),
+                Ok(child_pk.t_vec[1].coeffs[200])
+            );
+        }
+    }
+
     #[test]
     fn dealerless_root_and_children_authenticate_under_independent_keys() {
         for (t, n) in [(2u16, 3u16), (3, 5), (2, 5)] {
@@ -2137,6 +2286,24 @@ mod tests {
                 // seven tests are nonzero (each is zero with probability 1/q).
                 assert_eq!(nonzero, if fault { REPS } else { 0 });
             }
+        }
+    }
+
+    #[test]
+    fn buffered_field_stream_matches_consecutive_wide_draws() {
+        let sponge = || {
+            let mut sponge = init_cshake256(b"", b"QSAG.HD.TEST.FIELD_STREAM");
+            sponge.absorb(&[7; 32]);
+            finalize_cshake256(&mut sponge, true);
+            sponge
+        };
+        let mut reference = sponge();
+        let mut stream = FieldStream::new(sponge());
+        // More than three buffer refills, ending inside a block.
+        for _ in 0..60 {
+            let mut wide = [0u8; 24];
+            reference.squeeze(&mut wide);
+            assert_eq!(stream.draw(), reduce_wide_mod_q(&wide));
         }
     }
 

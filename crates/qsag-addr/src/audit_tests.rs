@@ -229,3 +229,28 @@ fn transcript_and_hash_framing_match_lean_bytes() {
         hash(b"QSAG.HYBRID.ID_COMMIT.V1", &[b"a"])
     );
 }
+
+/// Pinned encodings: an address is a long-lived identifier, so any change to its hash
+/// profile or framing must show up here. The `V2Poseidon2` line depends on the workspace
+/// Poseidon2 profile (matrices, round constants, sponge padding) through the single accel
+/// entry point `poseidon2_hash_framed_limbs4`, and has to be regenerated with it.
+#[test]
+fn pinned_address_encodings() {
+    let preimage = [0x5a; 48];
+    let v1 = QsagAddress::from_pubkey_cshake256(
+        "qsp",
+        WitnessSuiteTag::MlDsa65,
+        KeyIdentityKind::SingleOrThreshold,
+        &preimage,
+    )
+    .unwrap();
+    assert_eq!(v1.encode().unwrap(), "V1_PLACEHOLDER");
+    let v2 = QsagAddress::from_pubkey_poseidon2(
+        "qsp",
+        WitnessSuiteTag::PolicyPredicateScript,
+        KeyIdentityKind::ScriptPredicate,
+        &preimage,
+    )
+    .unwrap();
+    assert_eq!(v2.encode().unwrap(), "V2_PLACEHOLDER");
+}

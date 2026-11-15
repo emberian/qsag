@@ -143,64 +143,69 @@ pub fn ct_select_bytes32(choice: bool, if_true: &[u8; 32], if_false: &[u8; 32]) 
     out
 }
 
-/// Recursive wiping for owned temporary share buffers.
-pub(crate) trait SecretWipe {
+/// Recursive volatile wiping of an owned secret value.
+///
+/// This trait, [`SecretBuffer`] and its aliases [`SecretBytes`] and [`SecretVec`] are the one
+/// zeroizing-wrapper API of the workspace (`no_std` + `alloc`). Other crates import them from
+/// `qsag_core::wipe` instead of defining their own; a crate-local secret type implements
+/// [`SecretWipe`] and is then usable inside [`SecretBuffer`], arrays, tuples, `Box` and `Vec`.
+///
+/// Every implementation must overwrite through `qsag_asm::volatile_fill` (or delegate to
+/// implementations that do), so the stores survive dead-store elimination.
+pub trait SecretWipe {
     fn secret_wipe(&mut self);
-}
-impl SecretWipe for usize {
-    fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
+    /// Wipe a contiguous run. Word types override this with one bulk volatile fill.
+    fn wipe_slice(items: &mut [Self])
+    where
+        Self: Sized,
+    {
+        for item in items {
+            item.secret_wipe();
+        }
     }
 }
-impl SecretWipe for u8 {
-    fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-    }
+macro_rules! secret_word {
+    ($($t:ty),*) => { $(impl SecretWipe for $t {
+        fn secret_wipe(&mut self) {
+            qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
+        }
+        fn wipe_slice(items: &mut [Self]) {
+            qsag_asm::volatile_fill(items, 0);
+        }
+    })* };
 }
-impl SecretWipe for u16 {
-    fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-    }
-}
-impl SecretWipe for u32 {
-    fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-    }
-}
-impl SecretWipe for i16 {
-    fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-    }
-}
-impl SecretWipe for u128 {
-    fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-    }
-}
-impl SecretWipe for u64 {
-    fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
-    }
-}
+secret_word!(usize, u8, u16, u32, i16, u64, u128);
 impl SecretWipe for TowerGf256 {
     fn secret_wipe(&mut self) {
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
+    }
+    fn wipe_slice(items: &mut [Self]) {
+        volatile_zero_slice(items, TowerGf256::ZERO);
     }
 }
 impl SecretWipe for Tower128 {
     fn secret_wipe(&mut self) {
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
     }
+    fn wipe_slice(items: &mut [Self]) {
+        volatile_zero_slice(items, Tower128::ZERO);
+    }
 }
 impl SecretWipe for Goldilocks {
     fn secret_wipe(&mut self) {
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
+    }
+    fn wipe_slice(items: &mut [Self]) {
+        volatile_zero_slice(items, Goldilocks::ZERO);
     }
 }
 impl SecretWipe for GoldilocksExt2 {
     fn secret_wipe(&mut self) {
         self.c0.secret_wipe();
         self.c1.secret_wipe();
+    }
+    fn wipe_slice(items: &mut [Self]) {
+        volatile_zero_slice(items, GoldilocksExt2::ZERO);
     }
 }
 impl<A: SecretWipe, B: SecretWipe> SecretWipe for (A, B) {
@@ -218,9 +223,7 @@ impl<A: SecretWipe, B: SecretWipe, C: SecretWipe> SecretWipe for (A, B, C) {
 }
 impl<T: SecretWipe, const N: usize> SecretWipe for [T; N] {
     fn secret_wipe(&mut self) {
-        for x in self {
-            x.secret_wipe();
-        }
+        T::wipe_slice(self);
     }
 }
 impl<T: SecretWipe> SecretWipe for alloc::boxed::Box<T> {
@@ -230,18 +233,13 @@ impl<T: SecretWipe> SecretWipe for alloc::boxed::Box<T> {
 }
 impl<T: SecretWipe> SecretWipe for alloc::vec::Vec<T> {
     fn secret_wipe(&mut self) {
-        for x in self {
-            x.secret_wipe();
-        }
+        T::wipe_slice(self);
     }
 }
 /// Wipe-aware vector growth: if `v` lacks capacity for `additional` items, allocates replacement
 /// storage, copies live elements, volatile-wipes the old allocation's live elements, and replaces `v`.
 #[inline]
-pub(crate) fn secret_vec_reserve<T: Copy + SecretWipe>(
-    v: &mut alloc::vec::Vec<T>,
-    additional: usize,
-) {
+pub fn secret_vec_reserve<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, additional: usize) {
     let needed = v
         .len()
         .checked_add(additional)
@@ -257,21 +255,63 @@ pub(crate) fn secret_vec_reserve<T: Copy + SecretWipe>(
 }
 /// Wipe-aware `Vec::push` that never abandons an unwiped old secret buffer on reallocation.
 #[inline]
-pub(crate) fn secret_vec_push<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, item: T) {
+pub fn secret_vec_push<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, item: T) {
     secret_vec_reserve(v, 1);
     v.push(item);
 }
 /// Wipe-aware `Vec::extend_from_slice` that never abandons an unwiped old secret buffer on reallocation.
 #[inline]
-pub(crate) fn secret_vec_extend_from_slice<T: Copy + SecretWipe>(
-    v: &mut alloc::vec::Vec<T>,
-    slice: &[T],
-) {
+pub fn secret_vec_extend_from_slice<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, slice: &[T]) {
     secret_vec_reserve(v, slice.len());
     v.extend_from_slice(slice);
 }
-/// Wipes the owned buffer on normal and error exits, including unwinding.
-pub(crate) struct SecretBuffer<T: SecretWipe>(pub T);
+/// Owner of a secret value: wipes it on normal exit, on `?` and on unwinding.
+///
+/// The value is reachable through `Deref`/`DerefMut` or the public field. Moving the inner
+/// value out (`core::mem::take`, destructuring) leaves the caller responsible for it. `Vec`
+/// growth through `DerefMut` can reallocate and leave the old allocation unwiped; grow a
+/// [`SecretVec`] with [`SecretBuffer::push_wiping`] / [`SecretBuffer::extend_wiping`] or size it
+/// up front.
+pub struct SecretBuffer<T: SecretWipe>(pub T);
+/// Fixed-size zeroizing byte array, for keys, seeds and digests held on the stack.
+pub type SecretBytes<const N: usize> = SecretBuffer<[u8; N]>;
+/// Heap-allocated zeroizing vector.
+pub type SecretVec<T> = SecretBuffer<alloc::vec::Vec<T>>;
+impl<T: SecretWipe> SecretBuffer<T> {
+    /// Same as the tuple constructor; usable through the type aliases, which the tuple
+    /// constructor is not.
+    #[inline]
+    pub const fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+impl<const N: usize> SecretBuffer<[u8; N]> {
+    #[inline]
+    pub const fn zeroed() -> Self {
+        Self([0u8; N])
+    }
+}
+impl<T: Copy + SecretWipe> SecretBuffer<alloc::vec::Vec<T>> {
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(alloc::vec::Vec::with_capacity(capacity))
+    }
+    /// [`secret_vec_push`] on the owned vector.
+    #[inline]
+    pub fn push_wiping(&mut self, item: T) {
+        secret_vec_push(&mut self.0, item);
+    }
+    /// [`secret_vec_extend_from_slice`] on the owned vector.
+    #[inline]
+    pub fn extend_wiping(&mut self, slice: &[T]) {
+        secret_vec_extend_from_slice(&mut self.0, slice);
+    }
+}
+impl<T: SecretWipe> core::fmt::Debug for SecretBuffer<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SecretBuffer([REDACTED])")
+    }
+}
 impl<T: SecretWipe> core::ops::Deref for SecretBuffer<T> {
     type Target = T;
     fn deref(&self) -> &T {
@@ -323,5 +363,16 @@ mod raii_tests {
         );
         grow.secret_wipe();
         assert_eq!(grow, alloc::vec![0u64; 6]);
+
+        let mut key = SecretBytes::<32>::zeroed();
+        key[7] = 9;
+        let mut heap: SecretVec<u8> = SecretVec::with_capacity(1);
+        heap.push_wiping(1);
+        heap.extend_wiping(&key[..]);
+        assert_eq!((heap.len(), heap[8]), (33, 9));
+        assert_eq!(alloc::format!("{key:?}"), "SecretBuffer([REDACTED])");
+        let mut nested = [[TowerGf256(7); 4]; 2];
+        nested.secret_wipe();
+        assert_eq!(nested, [[TowerGf256::ZERO; 4]; 2]);
     }
 }

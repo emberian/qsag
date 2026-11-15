@@ -189,6 +189,7 @@ pub fn compute_vc_poseidon2_commit(
     // Keep the original six-slot padding for small credentials. Larger schemas
     // absorb every attribute into the same rate-six, capacity-six sponge.
     let mut st = padded[..attrs.len().max(6)].to_vec();
+    ct_zeroize_u64s(&mut padded);
     st.extend_from_slice(blind_limbs);
     st.extend_from_slice(&[
         schema_id & 0xffff_ffff,
@@ -788,7 +789,6 @@ pub fn holder_prepare_blind_issuance_with_profile(
     let mut secret_wires = ZeroizingU64Vec(attrs[..attr_slots].to_vec());
     secret_wires.0.extend_from_slice(&holder_blind);
 
-
     struct RepData {
         commits: [[u8; 32]; 3],
         salts: [[u8; 32]; 3],
@@ -876,13 +876,20 @@ pub fn holder_prepare_blind_issuance_with_profile(
         let mut st = wire_3;
         st.extend_from_slice(&[
             [schema_id & 0xffff_ffff, 0, 0],
-            [gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)), 0, 0],
+            [
+                gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
+                0,
+                0,
+            ],
             [issuer_attested_attrs.len() as u64, 0, 0],
         ]);
         prover.perm12(&mut st);
 
         let mut final_outs = [[0u64; 3]; VC_FINAL_OUTPUTS];
         final_outs[..6].copy_from_slice(&st[..6]);
+        for wire in &mut st {
+            ct_zeroize_u64s(wire);
+        }
 
         let in_shares = [in0, in1, in2];
         let commits: [[u8; 32]; 3] = core::array::from_fn(|m| {
@@ -1067,11 +1074,18 @@ pub fn verify_blind_issuance_request_with_profile(
             &o.gate_outs_e1,
             issuance_gates,
         );
-        let mut st: Vec<[u64; 2]> = o.in_shares_e.iter().zip(&o.in_shares_e1)
-            .map(|(&a, &b)| [a, b]).collect();
+        let mut st: Vec<[u64; 2]> = o
+            .in_shares_e
+            .iter()
+            .zip(&o.in_shares_e1)
+            .map(|(&a, &b)| [a, b])
+            .collect();
         st.extend_from_slice(&[
             verifier.add_const([0, 0], req.schema_id & 0xffff_ffff),
-            verifier.add_const([0, 0], gl_add(req.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG))),
+            verifier.add_const(
+                [0, 0],
+                gl_add(req.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
+            ),
             verifier.add_const([0, 0], issuer_attested_attrs.len() as u64),
         ]);
         verifier.perm12(&mut st);
@@ -1283,7 +1297,12 @@ impl IssuerCredentialAccumulator {
         ];
         let mut empty = vec![empty_leaf];
         for level in 0..VC_ACCUMULATOR_DEPTH {
-            empty.push(merkle_hash_pair(&empty[level], &empty[level], issuer_epoch, level as u32));
+            empty.push(merkle_hash_pair(
+                &empty[level],
+                &empty[level],
+                issuer_epoch,
+                level as u32,
+            ));
         }
         Self {
             oprf_key,
@@ -1677,7 +1696,8 @@ const fn attribute_commitment_gates(slots: usize) -> usize {
 const SD_NUM_PERMS: usize = 1 + VC_ACCUMULATOR_DEPTH; // Merkle path and scope.
 const SD_MERKLE_MUX_GATES: usize = VC_ACCUMULATOR_DEPTH * (1 + 6); // One Boolean check and six limb swaps per level.
 const SD_TOTAL_GATES: usize = SD_NUM_PERMS * GATES_PER_PERM12
-    + 2 * attribute_commitment_gates(MAX_VC_ATTRS) + SD_MERKLE_MUX_GATES;
+    + 2 * attribute_commitment_gates(MAX_VC_ATTRS)
+    + SD_MERKLE_MUX_GATES;
 const SD_CHECKED_GATES: usize = SD_TOTAL_GATES + VC_FINAL_OUTPUTS;
 const SD_GRID_B: usize = 192;
 const SD_GRID_L: usize = 192;
@@ -2202,7 +2222,11 @@ fn eval_sd_plaintext_circuit(
 
     let mut st_attr = attr_wires[..arity.max(6)].to_vec();
     st_attr.extend_from_slice(&hb_wires);
-    st_attr.extend_from_slice(&[schema_id & 0xffff_ffff, gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)), arity as u64]);
+    st_attr.extend_from_slice(&[
+        schema_id & 0xffff_ffff,
+        gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
+        arity as u64,
+    ]);
     rec.perm12(&mut st_attr);
     let mut cur_node: [u64; 6] = core::array::from_fn(|j| st_attr[j]);
     ct_zeroize_u64s(&mut st_attr);
@@ -2247,7 +2271,11 @@ fn eval_sd_plaintext_circuit(
 
     let mut st_pres = attr_wires[..arity.max(6)].to_vec();
     st_pres.extend_from_slice(&pb_wires);
-    st_pres.extend_from_slice(&[schema_id & 0xffff_ffff, gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)), arity as u64]);
+    st_pres.extend_from_slice(&[
+        schema_id & 0xffff_ffff,
+        gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)),
+        arity as u64,
+    ]);
     rec.perm12(&mut st_pres);
 
     let mut st_sc: [u64; 12] = [
@@ -2265,7 +2293,12 @@ fn eval_sd_plaintext_circuit(
         gl_add(schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM)),
     ];
     rec.perm12(&mut st_sc);
-    debug_assert_eq!(rec.x.len(), SD_TOTAL_GATES - 2 * (attribute_commitment_gates(MAX_VC_ATTRS) - attribute_commitment_gates(arity.max(6))));
+    debug_assert_eq!(
+        rec.x.len(),
+        SD_TOTAL_GATES
+            - 2 * (attribute_commitment_gates(MAX_VC_ATTRS)
+                - attribute_commitment_gates(arity.max(6)))
+    );
     rec.x.resize(SD_TOTAL_GATES, 0);
     rec.y.resize(SD_TOTAL_GATES, 0);
     rec.z.resize(SD_TOTAL_GATES, 0);
@@ -2460,7 +2493,11 @@ fn eval_sd_party_shares(
 
     let mut st_attr = attr_wires[..arity.max(6)].to_vec();
     st_attr.extend_from_slice(&hb_wires);
-    st_attr.extend_from_slice(&[ev.const_share(schema_id & 0xffff_ffff), ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG))), ev.const_share(arity as u64)]);
+    st_attr.extend_from_slice(&[
+        ev.const_share(schema_id & 0xffff_ffff),
+        ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG))),
+        ev.const_share(arity as u64),
+    ]);
     ev.perm12(&mut st_attr);
     let mut cur_node: [u64; 6] = core::array::from_fn(|j| st_attr[j]);
 
@@ -2507,7 +2544,11 @@ fn eval_sd_party_shares(
 
     let mut st_pres = attr_wires[..arity.max(6)].to_vec();
     st_pres.extend_from_slice(&pb_wires);
-    st_pres.extend_from_slice(&[ev.const_share(schema_id & 0xffff_ffff), ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG))), ev.const_share(arity as u64)]);
+    st_pres.extend_from_slice(&[
+        ev.const_share(schema_id & 0xffff_ffff),
+        ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG))),
+        ev.const_share(arity as u64),
+    ]);
     ev.perm12(&mut st_pres);
 
     let mut st_sc: [u64; 12] = [
@@ -2525,11 +2566,21 @@ fn eval_sd_party_shares(
         ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM))),
     ];
     ev.perm12(&mut st_sc);
-    debug_assert_eq!(ev.gate_cursor, SD_TOTAL_GATES - 2 * (attribute_commitment_gates(MAX_VC_ATTRS) - attribute_commitment_gates(arity.max(6))));
-    for g in ev.gate_cursor..SD_TOTAL_GATES {
+    debug_assert_eq!(
+        ev.gate_cursor,
+        SD_TOTAL_GATES
+            - 2 * (attribute_commitment_gates(MAX_VC_ATTRS)
+                - attribute_commitment_gates(arity.max(6)))
+    );
+    for (g, &z) in z_shares
+        .iter()
+        .enumerate()
+        .take(SD_TOTAL_GATES)
+        .skip(ev.gate_cursor)
+    {
         ev.x_out[g] = 0;
         ev.y_out[g] = 0;
-        ev.z_out[g] = z_shares[g];
+        ev.z_out[g] = z;
     }
 
     let mut final_outs = [0u64; VC_FINAL_OUTPUTS];
@@ -4447,13 +4498,79 @@ mod tests {
     }
 
     #[test]
+    fn accumulator_indexes_duplicates_and_updates_paths_incrementally() {
+        let mut accumulator = IssuerCredentialAccumulator::new(PublicKey::test_key(), 7);
+        for i in 0..65u64 {
+            let session = cshake256_framed_32(b"session", &[&i.to_le_bytes()]);
+            let token = cshake256_framed_32(b"token", &[&i.to_le_bytes()]);
+            let leaf = [i + 1; 6];
+            assert_eq!(
+                accumulator.enroll_issued(session, leaf, token).unwrap(),
+                i as usize
+            );
+            let before = accumulator.clone();
+            assert!(accumulator.enroll_issued(session, [0; 6], [9; 32]).is_err());
+            assert!(accumulator.enroll_issued([8; 32], leaf, token).is_err());
+            assert_eq!(accumulator, before);
+            // Independent full recomputation, including every incomplete right subtree.
+            let mut nodes = accumulator.leaves.clone();
+            let mut empty = accumulator.empty[0];
+            for level in 0..VC_ACCUMULATOR_DEPTH {
+                nodes = nodes
+                    .chunks(2)
+                    .map(|pair| {
+                        merkle_hash_pair(&pair[0], pair.get(1).unwrap_or(&empty), 7, level as u32)
+                    })
+                    .collect();
+                empty = merkle_hash_pair(&empty, &empty, 7, level as u32);
+            }
+            assert_eq!(accumulator.root(), nodes[0]);
+            for index in [0, i as usize / 2, i as usize] {
+                let witness = accumulator.membership_witness(index).unwrap();
+                let mut root = accumulator.leaves[index];
+                for (level, sibling) in witness.siblings.iter().enumerate() {
+                    root = if (index >> level) & 1 == 0 {
+                        merkle_hash_pair(&root, sibling, 7, level as u32)
+                    } else {
+                        merkle_hash_pair(sibling, &root, 7, level as u32)
+                    };
+                }
+                assert_eq!(root, accumulator.root());
+            }
+        }
+    }
+
+    #[test]
+    fn issuance_binds_all_32_attributes() {
+        let mut attrs: [u64; MAX_VC_ATTRS] = core::array::from_fn(|i| i as u64 + 1);
+        let (request, _) =
+            holder_prepare_blind_issuance(42, &attrs, [3; 32], 7, [4; 32], [5; 32]).unwrap();
+        assert!(verify_blind_issuance_request(&request, &attrs, 42));
+        let original =
+            compute_vc_poseidon2_commit(42, &attrs, &[17; 4], VC_ATTR_COMMIT_TAG).unwrap();
+        for index in 0..MAX_VC_ATTRS {
+            attrs[index] += 1;
+            assert!(!verify_blind_issuance_request(&request, &attrs, 42));
+            assert_ne!(
+                original,
+                compute_vc_poseidon2_commit(42, &attrs, &[17; 4], VC_ATTR_COMMIT_TAG).unwrap()
+            );
+            attrs[index] -= 1;
+        }
+        assert!(
+            compute_vc_poseidon2_commit(42, &[0; MAX_VC_ATTRS + 1], &[17; 4], VC_ATTR_COMMIT_TAG)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn arity_commitment_distinguishes_trailing_zero() {
         let blind = [17, 18, 19, 20];
         let one = compute_vc_poseidon2_commit(42, &[7], &blind, VC_ATTR_COMMIT_TAG).unwrap();
         let two = compute_vc_poseidon2_commit(42, &[7, 0], &blind, VC_ATTR_COMMIT_TAG).unwrap();
         assert_ne!(one, two);
         assert!(compute_vc_poseidon2_commit(42, &[], &blind, VC_ATTR_COMMIT_TAG).is_err());
-        assert!(compute_vc_poseidon2_commit(42, &[0; 7], &blind, VC_ATTR_COMMIT_TAG).is_err());
+        assert!(compute_vc_poseidon2_commit(42, &[0; MAX_VC_ATTRS + 1], &blind, VC_ATTR_COMMIT_TAG).is_err());
     }
 
     #[test]
@@ -4524,7 +4641,9 @@ mod tests {
         let holder = HolderCredentialSecret {
             schema_id: 42,
             arity: 5,
-            attrs: [840, 1994, 3, 9910, 2030, 0],
+            attrs: core::array::from_fn(|i| {
+                [840, 1994, 3, 9910, 2030, 0].get(i).copied().unwrap_or(0)
+            }),
             holder_blind: [17, 18, 19, 20],
             seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
@@ -4795,7 +4914,9 @@ mod tests {
         let holder = HolderCredentialSecret {
             schema_id: 42,
             arity: 6,
-            attrs: [840, 1994, 3, 9910, 2030, 777],
+            attrs: core::array::from_fn(|i| {
+                [840, 1994, 3, 9910, 2030, 777].get(i).copied().unwrap_or(0)
+            }),
             holder_blind: [17, 18, 19, 20],
             seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
@@ -4889,8 +5010,13 @@ mod tests {
     fn selective_disclosure_compact_wire_sub_15mib_and_roundtrips() {
         let holder = HolderCredentialSecret {
             schema_id: 42,
-            arity: 5,
-            attrs: [840, 1994, 3, 9910, 2030, 0],
+            arity: MAX_VC_ATTRS,
+            attrs: core::array::from_fn(|i| {
+                [840, 1994, 3, 9910, 2030, 0]
+                    .get(i)
+                    .copied()
+                    .unwrap_or(i as u64 + 100)
+            }),
             holder_blind: [17, 18, 19, 20],
             seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
@@ -4929,7 +5055,7 @@ mod tests {
                 &cred,
                 &holder,
                 &accumulator.membership_witness(index).unwrap(),
-                &[0, 2],
+                &[0, 2, MAX_VC_ATTRS - 1],
                 PresentationRequest {
                     verifier_scope: b"compact-wire",
                     verifier_challenge: &[challenge_byte; 32],

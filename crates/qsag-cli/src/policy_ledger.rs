@@ -249,7 +249,7 @@ fn policy_from_json(json: &Json) -> Result<(TransactionPolicy, Committee), CliEr
         .and_then(Json::as_array)
         .ok_or_else(|| CliError::input("\"quorum_tiers\" must be an array"))?;
     if tiers.is_empty() || tiers.len() > MAX_TIERS {
-        return Err(CliError::input("quorum_tiers must hold 1..=16 tiers"));
+        return Err(CliError::input("quorum_tiers must hold 1..=64 tiers"));
     }
     let mut quorum_tiers = Vec::with_capacity(tiers.len());
     for tier in tiers {
@@ -289,7 +289,7 @@ fn policy_from_json(json: &Json) -> Result<(TransactionPolicy, Committee), CliEr
     parties.dedup();
     if parties.len() != listed || !(2..=MAX_PARTIES).contains(&listed) {
         return Err(CliError::input(
-            "parties must hold 2..=65535 distinct party ids",
+            "parties must hold 2..=64 distinct party ids",
         ));
     }
     if hardware_guardian_party.is_some_and(|g| !parties.contains(&g)) {
@@ -2385,6 +2385,46 @@ mod tests {
             enforce_key_pin(&other, Some(&gate)).err().unwrap().code,
             exit::STATE_CONFLICT
         );
+    }
+
+    #[test]
+    fn policy_documents_support_64_parties_and_tiers() {
+        let mut document = Json::parse(&policy_document(0)).unwrap();
+        set(
+            &mut document,
+            "parties",
+            party_json(&(1..=64).collect::<Vec<_>>()),
+        );
+        let tiers = (1..=64)
+            .map(|i| {
+                Json::object(vec![
+                    ("max_amount_units", Json::num(i * 1000)),
+                    ("min_approvers", Json::num(2)),
+                    ("require_hardware_guardian", Json::Bool(true)),
+                ])
+            })
+            .collect();
+        set(&mut document, "quorum_tiers", Json::Array(tiers));
+        let (policy, committee) = policy_from_json(&document).unwrap();
+        assert_eq!(committee.parties.len(), 64);
+        assert_eq!(policy.quorum_tiers.len(), 64);
+        let mut too_many = document.clone();
+        set(
+            &mut too_many,
+            "parties",
+            party_json(&(1..=65).collect::<Vec<_>>()),
+        );
+        assert!(policy_from_json(&too_many).is_err());
+        if let Some(Json::Array(tiers)) = document.get("quorum_tiers") {
+            let mut too_many_tiers = tiers.clone();
+            too_many_tiers.push(Json::object(vec![
+                ("max_amount_units", Json::num(65_000)),
+                ("min_approvers", Json::num(2)),
+                ("require_hardware_guardian", Json::Bool(true)),
+            ]));
+            set(&mut document, "quorum_tiers", Json::Array(too_many_tiers));
+        }
+        assert!(policy_from_json(&document).is_err());
     }
 
     #[test]

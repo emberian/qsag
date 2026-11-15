@@ -137,18 +137,17 @@ void poseidon2_apply_m4(inout uint64_t b0, inout uint64_t b1, inout uint64_t b2,
     b3 = r3;
 }
 
+// M4 tensor P3 acts on four contiguous triples.
 void poseidon2_apply_me(inout uint64_t st[12]) {
-    for (uint i = 0u; i < 12u; ++i) {
-        st[i] = fp_reduce_u64(st[i]);
-    }
-    poseidon2_apply_m4(st[0], st[1], st[2], st[3]);
-    poseidon2_apply_m4(st[4], st[5], st[6], st[7]);
-    poseidon2_apply_m4(st[8], st[9], st[10], st[11]);
-    for (uint i = 0u; i < 4u; ++i) {
-        uint64_t s = fp_add(fp_add(st[i], st[4u + i]), st[8u + i]);
-        st[i]      = fp_add(st[i], s);
-        st[4u + i] = fp_add(st[4u + i], s);
-        st[8u + i] = fp_add(st[8u + i], s);
+    for (uint i = 0u; i < 12u; ++i) st[i] = fp_reduce_u64(st[i]);
+    poseidon2_apply_m4(st[0], st[3], st[6], st[9]);
+    poseidon2_apply_m4(st[1], st[4], st[7], st[10]);
+    poseidon2_apply_m4(st[2], st[5], st[8], st[11]);
+    for (uint i = 0u; i < 12u; i += 3u) {
+        uint64_t s = fp_add(fp_add(st[i], st[i + 1u]), st[i + 2u]);
+        st[i] = fp_add(st[i], s);
+        st[i + 1u] = fp_add(st[i + 1u], s);
+        st[i + 2u] = fp_add(st[i + 2u], s);
     }
 }
 
@@ -157,7 +156,7 @@ void poseidon2_apply_mi(inout uint64_t st[12]) {
     for (uint i = 0u; i < 12u; ++i) {
         s = fp_add(s, st[i]);
     }
-    st[0] = fp_add(fp_neg(fp_add(st[0], st[0])), s);
+    st[0] = fp_add(fp_neg(fp_shl_canonical(st[0], 6u)), s);
     st[1] = fp_add(st[1], s);
     for (uint i = 2u; i < 12u; ++i) {
         st[i] = fp_add(fp_shl_canonical(st[i], i - 1u), s);

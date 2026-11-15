@@ -528,6 +528,87 @@ impl Server {
     pub fn public_key(&self) -> &PublicKey {
         &self.key
     }
+    pub fn party(&self) -> usize {
+        self.party
+    }
+
+    /// Export only this server's ten held subset seeds and local counter.
+    /// The returned bytes are secret: encrypt/authenticate them for persistence
+    /// and wipe them after use. Restore with the same monotonic CounterStore.
+    pub fn to_secret_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(370);
+        bytes.extend_from_slice(b"QTOPRF01");
+        bytes.push(self.party as u8);
+        bytes.extend_from_slice(&self.key.commitment);
+        bytes.push(u8::from(self.last_counter.is_some()));
+        bytes.extend_from_slice(&self.last_counter.unwrap_or(0).to_le_bytes());
+        for i in 0..SERVERS {
+            for j in i..SERVERS {
+                if self.party != i && self.party != j {
+                    bytes.extend_from_slice(&self.seeds[subset(i, j)]);
+                }
+            }
+        }
+        bytes
+    }
+
+    /// Restore an authenticated per-party bundle against independently pinned
+    /// enrollment metadata. This codec does not authenticate its own input and
+    /// cannot replace an encrypted/authenticated storage envelope.
+    pub fn from_secret_bytes(
+        bytes: &[u8],
+        expected_key: &PublicKey,
+        expected_party: usize,
+    ) -> Result<Self, Error> {
+        if bytes.len() != 370 || &bytes[..8] != b"QTOPRF01" {
+            return Err(Error::Encoding);
+        }
+        let party = bytes[8] as usize;
+        if party >= SERVERS
+            || party != expected_party
+            || !qsag_accel::ct::ct_eq_bytes(&bytes[9..41], &expected_key.commitment)
+        {
+            return Err(Error::Context);
+        }
+        let counter = u64::from_le_bytes(bytes[42..50].try_into().map_err(|_| Error::Encoding)?);
+        let last_counter = match bytes[41] {
+            0 if counter == 0 => None,
+            1 if counter != u64::MAX => Some(counter),
+            _ => return Err(Error::Encoding),
+        };
+        let mut seeds = Zeroizing([[0; 32]; 25]);
+        let mut cursor = 50;
+        for i in 0..SERVERS {
+            for j in i..SERVERS {
+                if party != i && party != j {
+                    seeds[subset(i, j)].copy_from_slice(&bytes[cursor..cursor + 32]);
+                    cursor += 32;
+                }
+            }
+        }
+        let mut key_share = Zeroizing([[0; SERVERS]; 4]);
+        for i in 0..SERVERS {
+            if party != i {
+                let component = Zeroizing(fields(
+                    &seeds[subset(i, i)],
+                    b"QSAG.TOPRF.KEY.COMPONENT.V1",
+                    &expected_key.commitment,
+                    4,
+                ));
+                for lane in 0..4 {
+                    key_share[lane][i] = component[lane];
+                }
+            }
+        }
+        Ok(Self {
+            party,
+            key: expected_key.clone(),
+            seeds: *seeds,
+            key_share: *key_share,
+            last_counter,
+        })
+    }
+
     pub fn evaluate<T: Transport>(
         &mut self,
         request: Request,

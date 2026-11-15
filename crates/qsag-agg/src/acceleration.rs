@@ -1,7 +1,7 @@
 //! Optional trusted-host Vulkan execution. The WHIR wire format and hash domains are unchanged.
 //! Enable with `--features vulkan` and `QSAG_ACCEL=vulkan`; failures retain CPU semantics.
 
-use crate::field::Goldilocks;
+use crate::field::{Goldilocks, GoldilocksOps as _};
 use alloc::vec::Vec;
 use qsag_accel::{
     AcceleratorBackend, BackendAttestationKey, BatchJobDescriptor, CertifiedBackend,

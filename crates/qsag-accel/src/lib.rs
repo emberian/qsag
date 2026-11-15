@@ -31,7 +31,8 @@ pub mod vulkan;
 mod vulkan_ffi;
 
 pub use vulkan::{
-    PipelineTelemetry, VulkanDeviceInfo, VulkanError, VulkanRdna2Backend, VulkanSpirvBackend,
+    BatchExecution, CpuFallbackEvent, PipelineTelemetry, VulkanDeviceInfo, VulkanError,
+    VulkanRdna2Backend, VulkanSpirvBackend,
 };
 
 use ct::{RedactedSecret, ct_eq_bytes_mask, ct_eq_mask_u64};
@@ -42,21 +43,49 @@ use poseidon2::{merkle_layer_poseidon2_at_cpu, poseidon2_hash_framed_limbs4, pos
 use sha2::sha256;
 
 // Sizes and scheduling depend only on public lengths, never on field values.
+#[cfg(feature = "std")]
 fn cpu_workers(len: usize, min_chunk: usize) -> usize {
-    #[cfg(feature = "std")]
-    {
-        if len / min_chunk < 2 {
-            return 1;
+    if len / min_chunk < 2 {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(len / min_chunk)
+}
+
+/// Run every job on up to `workers` threads, the caller's included. A worker the OS refuses to
+/// start only lowers the parallelism: the threads that do exist still drain every job.
+#[cfg(feature = "std")]
+fn cpu_drain<J: Send>(
+    workers: usize,
+    jobs: impl Iterator<Item = J> + Send,
+    run: impl Fn(J) + Sync,
+) {
+    let jobs = std::sync::Mutex::new(jobs);
+    let drain = || {
+        loop {
+            // The guard is released before `run`, so a panicking job cannot poison the queue.
+            let job = jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .next();
+            match job {
+                Some(job) => run(job),
+                None => break,
+            }
         }
-        std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(len / min_chunk)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        let _ = (len, min_chunk);
-        1
-    }
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            if std::thread::Builder::new()
+                .spawn_scoped(scope, &drain)
+                .is_err()
+            {
+                break;
+            }
+        }
+        drain();
+    });
 }
 
 fn cpu_chunks_mut<T: Send>(
@@ -64,19 +93,20 @@ fn cpu_chunks_mut<T: Send>(
     min_chunk: usize,
     run: impl Fn(usize, &mut [T]) + Sync,
 ) {
-    let workers = cpu_workers(items.len(), min_chunk);
     #[cfg(feature = "std")]
-    if workers > 1 {
-        let chunk_len = items.len().div_ceil(workers);
-        std::thread::scope(|scope| {
-            for (i, chunk) in items.chunks_mut(chunk_len).enumerate() {
-                let run = &run;
-                scope.spawn(move || run(i * chunk_len, chunk));
-            }
-        });
-        return;
+    {
+        let workers = cpu_workers(items.len(), min_chunk);
+        if workers > 1 {
+            let chunk_len = items.len().div_ceil(workers);
+            cpu_drain(
+                workers,
+                items.chunks_mut(chunk_len).enumerate(),
+                |(i, chunk)| run(i * chunk_len, chunk),
+            );
+            return;
+        }
     }
-    let _ = workers;
+    let _ = min_chunk;
     run(0, items);
 }
 
@@ -720,7 +750,7 @@ impl CpuReferenceBackend {
 
     /// Evaluate a Poseidon2 Merkle layer on `backend` and issue a keyed receipt binding the
     /// backend's kernel pin, the job descriptor, `transcript_anchor`, and digests of `children`
-    /// and `out_parents`.
+    /// and `out_parents`. Same as [`vulkan::merkle_layer_poseidon2_with_receipt`].
     pub fn merkle_layer_poseidon2_with_receipt<B: AcceleratorBackend>(
         backend: &B,
         key: &BackendAttestationKey,
@@ -730,49 +760,44 @@ impl CpuReferenceBackend {
         transcript_anchor: [u8; 32],
         out_parents: &mut [[u64; 4]],
     ) -> Result<ExecutionReceipt, AccelError> {
-        let input_digest = hash_u64_quads(b"QSAG.ACCEL.MERKLE_IN.V1", children);
-        backend.try_merkle_layer_poseidon2(children, pk_seed, layer, out_parents)?;
-        let output_digest = hash_u64_quads(b"QSAG.ACCEL.MERKLE_OUT.V1", out_parents);
-        let pin = backend.kernel_pin(KernelSlot::MerkleLayerPoseidon2);
-        let desc = BatchJobDescriptor::MerkleLayerPoseidon2 {
-            num_parents: out_parents.len(),
-            pk_seed: *pk_seed,
-            layer,
-        };
-        ExecutionReceipt::compute_audited(
+        vulkan::merkle_layer_poseidon2_with_receipt(
+            backend,
             key,
-            &pin,
-            desc,
+            children,
+            pk_seed,
+            layer,
             transcript_anchor,
-            input_digest,
-            output_digest,
-            backend.hardware_audit_digest(),
+            out_parents,
         )
     }
 }
 
 /// Digest of a Merkle layer's children as bound into `ExecutionReceipt::input_digest`.
 pub fn merkle_layer_input_digest(children: &[[u64; 4]]) -> [u8; 32] {
-    hash_u64_quads(b"QSAG.ACCEL.MERKLE_IN.V1", children)
+    hash_u64_rows(b"QSAG.ACCEL.MERKLE_IN.V1", children)
 }
 
 /// Digest of a Merkle layer's parents as bound into `ExecutionReceipt::output_digest`.
 pub fn merkle_layer_output_digest(parents: &[[u64; 4]]) -> [u8; 32] {
-    hash_u64_quads(b"QSAG.ACCEL.MERKLE_OUT.V1", parents)
+    hash_u64_rows(b"QSAG.ACCEL.MERKLE_OUT.V1", parents)
 }
 
-fn hash_u64_quads(cust: &[u8], quads: &[[u64; 4]]) -> [u8; 32] {
+/// `cSHAKE256` under `cust` of `count` (little-endian `u64`) followed by `words` (little-endian).
+pub(crate) fn hash_counted_u64s(cust: &[u8], count: usize, words: &[u64]) -> [u8; 32] {
     let mut sp = keccak::init_cshake256(b"", cust);
-    sp.absorb(&(quads.len() as u64).to_le_bytes());
-    for q in quads {
-        for &limb in q {
-            sp.absorb(&limb.to_le_bytes());
-        }
+    sp.absorb(&(count as u64).to_le_bytes());
+    for &word in words {
+        sp.absorb(&word.to_le_bytes());
     }
     keccak::finalize_cshake256(&mut sp, true);
     let mut out = [0u8; 32];
     sp.squeeze(&mut out);
     out
+}
+
+/// Digest of fixed-width limb rows: the row count, then every limb in row order.
+pub(crate) fn hash_u64_rows<const W: usize>(cust: &[u8], rows: &[[u64; W]]) -> [u8; 32] {
+    hash_counted_u64s(cust, rows.len(), rows.as_flattened())
 }
 
 impl AcceleratorBackend for CpuReferenceBackend {
@@ -1746,6 +1771,30 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn cpu_drain_runs_every_job_exactly_once_at_any_worker_count() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        for (jobs, workers) in [(0usize, 4usize), (1, 4), (3, 16), (64, 1), (1000, 7)] {
+            let seen: std::vec::Vec<AtomicU32> = (0..jobs).map(|_| AtomicU32::new(0)).collect();
+            cpu_drain(workers, 0..jobs, |i| {
+                seen[i].fetch_add(1, Ordering::Relaxed);
+            });
+            assert!(
+                seen.iter().all(|n| n.load(Ordering::Relaxed) == 1),
+                "jobs={jobs} workers={workers}"
+            );
+        }
+        // Uneven tails keep their offsets.
+        let mut items = std::vec![0usize; 100_003];
+        cpu_chunks_mut(&mut items, 1000, |offset, chunk| {
+            for (i, x) in chunk.iter_mut().enumerate() {
+                *x = offset + i;
+            }
+        });
+        assert!(items.iter().enumerate().all(|(i, &x)| i == x));
+    }
+
     #[test]
     fn kernels_return_typed_errors_for_malformed_shapes() {
         let backend = CpuReferenceBackend::new();
@@ -1830,6 +1879,50 @@ mod tests {
                 what: "LDE evaluation domain",
                 len: 3,
             })
+        );
+        // Empty and zero-factor transforms are shape errors on every entry point; a refused LDE
+        // leaves `out` untouched.
+        assert_eq!(
+            backend.goldilocks_ntt_inplace(&mut [], &[], false),
+            Err(AccelError::NotPowerOfTwo {
+                what: "NTT buffer",
+                len: 0,
+            })
+        );
+        assert_eq!(
+            backend.coset_lde_ext2(&[], 2, 7, &mut []),
+            Err(AccelError::NotPowerOfTwo {
+                what: "LDE evaluation domain",
+                len: 0,
+            })
+        );
+        assert_eq!(
+            backend.coset_lde_ext2(&evals, 0, 7, &mut []),
+            Err(AccelError::NotPowerOfTwo {
+                what: "LDE blowup",
+                len: 0,
+            })
+        );
+        assert_eq!(out, [[0u64; 2]; 8]);
+        // One-point transforms only canonicalize.
+        let mut one = [u64::MAX];
+        assert_eq!(backend.goldilocks_ntt_inplace(&mut one, &[], true), Ok(()));
+        assert_eq!(one, [u64::MAX - GOLDILOCKS_PRIME]);
+        let mut one_out = [[0u64; 2]];
+        assert_eq!(
+            backend.coset_lde_ext2(&[[GOLDILOCKS_PRIME + 5, 9]], 1, 0, &mut one_out),
+            Ok(())
+        );
+        assert_eq!(one_out, [[5, 9]]);
+        assert_eq!(backend.bdoz_gf2_128_batch_dot(&[], &[]), Ok((0, 0)));
+        let mut no_parents: [[u64; 4]; 0] = [];
+        assert_eq!(
+            backend.try_merkle_layer_poseidon2_at(&[], &seed, 0, u32::MAX as u64, &mut no_parents),
+            Ok(())
+        );
+        assert_eq!(
+            backend.try_merkle_layer_poseidon2_at(&[], &seed, 0, 1 << 32, &mut no_parents),
+            Err(AccelError::LengthOverflow)
         );
         assert_eq!(
             backend.bdoz_gf2_128_batch_dot(&[(1, 2)], &[]),

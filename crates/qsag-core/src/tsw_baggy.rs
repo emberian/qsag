@@ -44,6 +44,10 @@ pub enum AdrsKind {
     ForsRoots = 4,
     WotsPrf = 5,
     ForsPrf = 6,
+    /// Leaf-secret derivation of a [`crate::pors_fp`] tree.
+    PorsPrf = 7,
+    /// Leaves and internal nodes of a [`crate::pors_fp`] tree.
+    PorsTree = 8,
 }
 
 impl AdrsKind {
@@ -62,6 +66,8 @@ impl AdrsKind {
             4 => Some(Self::ForsRoots),
             5 => Some(Self::WotsPrf),
             6 => Some(Self::ForsPrf),
+            7 => Some(Self::PorsPrf),
+            8 => Some(Self::PorsTree),
             _ => None,
         }
     }

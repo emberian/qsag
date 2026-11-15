@@ -3,7 +3,7 @@
 
 use crate::AccelError;
 use crate::ct::ct_zeroize_u64s;
-use crate::goldilocks::{gl_add, gl_mul, gl_neg, gl_reduce_u64, gl_sq};
+use crate::goldilocks::{gl_add, gl_mul, gl_neg, gl_reduce_u64};
 
 /// Domain IV `"POS2_GL1"` (`0x504F_5332_5F47_4C31`), matching `lean/Qsag/Poseidon2.lean`.
 pub const POSEIDON2_CONST_IV: u64 = 0x504F_5332_5F47_4C31;
@@ -12,24 +12,11 @@ pub const POSEIDON2_HALF_EXTERNAL_ROUNDS: u64 = 4;
 /// Internal partial rounds ($R_P = 22$).
 pub const POSEIDON2_INTERNAL_ROUNDS: u64 = 22;
 
-/// Diagonal $V$ of the internal diffusion matrix $M_I = J + \operatorname{diag}(V)$ ($J$ the
-/// all-ones matrix), i.e. $V = (-2, 1, 2, 4, \dots, 2^{10})$ as canonical Goldilocks elements.
-/// [`poseidon2_apply_mi`] computes exactly $y_i = V_i x_i + \sum_j x_j$.
-///
-/// What the unit tests in this module establish for this matrix over $p = 2^{64} - 2^{32} + 1$:
-///
-/// - **Invertible:** $\det M_I = \prod_i V_i \cdot (1 + \sum_i V_i^{-1})$ with
-///   $1 + \sum_i V_i^{-1} = 2559 / 1024 \ne 0$.
-/// - **No invariant-subspace trail through the partial rounds:** for every $k \in 1..=64$, the
-///   vectors $e_0^T M_I^{kj}$ ($j < 12$) span the whole space, so no nonzero $M_I^k$-invariant
-///   subspace lies inside $\{x_0 = 0\}$ (the S-box can not stay inactive forever), and the vectors
-///   $M_I^{kj} e_0$ span the whole space, so no proper $M_I^k$-invariant subspace contains $e_0$.
-/// - **Not met:** the stronger sufficient criterion that the minimal polynomial of $M_I^k$ be
-///   irreducible. The characteristic polynomial of $M_I$ has three roots in $\mathbb{F}_p$ and an
-///   irreducible degree-9 cofactor, so three one-dimensional invariant subspaces exist (each
-///   spanned by a vector with every coordinate nonzero).
+/// Diagonal of the canonical internal matrix J + diag(-64, 1, 2, ..., 1024).
+/// Its characteristic polynomial is Rabin-irreducible over Goldilocks; the tests below
+/// check this for the matrix and its first 32 powers, as well as invertibility.
 pub const POSEIDON2_INTERNAL_DIAG: [u64; 12] = [
-    crate::goldilocks::GOLDILOCKS_PRIME - 2,
+    crate::goldilocks::GOLDILOCKS_PRIME - 64,
     1,
     1 << 1,
     1 << 2,
@@ -65,10 +52,7 @@ pub const fn poseidon2_const_at(tag: u64, round: u64, lane: u64) -> u64 {
 
 #[inline]
 pub const fn poseidon2_sbox7(x: u64) -> u64 {
-    let x2 = gl_sq(x);
-    let x3 = gl_mul(x2, x);
-    let x4 = gl_sq(x2);
-    gl_mul(x3, x4)
+    qsag_asm::portable::goldilocks_pow7_ct_portable(x)
 }
 
 #[inline]
@@ -83,6 +67,10 @@ const fn poseidon2_apply_m4(b: [u64; 4]) -> [u64; 4] {
 }
 
 pub fn poseidon2_apply_me(st: &mut [u64; 12]) {
+    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
+    *st = [
+        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
+    ];
     for x in st.iter_mut() {
         *x = gl_reduce_u64(*x);
     }
@@ -95,6 +83,9 @@ pub fn poseidon2_apply_me(st: &mut [u64; 12]) {
         st[4 + i] = gl_add(y1[i], s);
         st[8 + i] = gl_add(y2[i], s);
     }
+    *st = [
+        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
+    ];
 }
 
 pub fn poseidon2_apply_mi(st: &mut [u64; 12]) {
@@ -102,7 +93,7 @@ pub fn poseidon2_apply_mi(st: &mut [u64; 12]) {
     for &x in st.iter() {
         s = gl_add(s, x);
     }
-    st[0] = gl_add(gl_neg(gl_add(st[0], st[0])), s);
+    st[0] = gl_add(gl_neg(gl_mul(64, st[0])), s);
     st[1] = gl_add(st[1], s);
     let mut d = 2u64;
     for x in st.iter_mut().skip(2) {
@@ -244,6 +235,30 @@ pub fn merkle_layer_poseidon2_cpu(
     merkle_layer_poseidon2_at_cpu(children, pk_seed, layer, 0, out_parents)
 }
 
+/// Shape contract of a Merkle layer job, shared by every backend: two children per parent and
+/// every global parent index `start_parent_idx + i` inside `0..=u32::MAX`.
+pub(crate) fn merkle_layer_shape(
+    children_len: usize,
+    parents_len: usize,
+    start_parent_idx: u64,
+) -> Result<(), AccelError> {
+    let expected_children = parents_len
+        .checked_mul(2)
+        .ok_or(AccelError::LengthOverflow)?;
+    if children_len != expected_children {
+        return Err(AccelError::LengthMismatch {
+            what: "Merkle layer children",
+            expected: expected_children,
+            actual: children_len,
+        });
+    }
+    let last_offset = parents_len.saturating_sub(1) as u64;
+    match start_parent_idx.checked_add(last_offset) {
+        Some(max_parent_idx) if max_parent_idx <= u32::MAX as u64 => Ok(()),
+        _ => Err(AccelError::LengthOverflow),
+    }
+}
+
 /// Position-tweaked batch Poseidon2 Merkle tree compression layer binding **all 4 limbs
 /// `pk_seed[0..4]`**, `layer`, and per-node global parent index `start_parent_idx + parent_idx`!
 ///
@@ -261,27 +276,7 @@ pub fn merkle_layer_poseidon2_at_cpu(
     start_parent_idx: u64,
     out_parents: &mut [[u64; 4]],
 ) -> Result<(), AccelError> {
-    let expected_children = out_parents
-        .len()
-        .checked_mul(2)
-        .ok_or(AccelError::LengthOverflow)?;
-    if children.len() != expected_children {
-        return Err(AccelError::LengthMismatch {
-            what: "Merkle layer children",
-            expected: expected_children,
-            actual: children.len(),
-        });
-    }
-    let max_parent_idx = if out_parents.is_empty() {
-        start_parent_idx
-    } else {
-        start_parent_idx
-            .checked_add((out_parents.len() - 1) as u64)
-            .ok_or(AccelError::LengthOverflow)?
-    };
-    if max_parent_idx > u32::MAX as u64 {
-        return Err(AccelError::LengthOverflow);
-    }
+    merkle_layer_shape(children.len(), out_parents.len(), start_parent_idx)?;
     let s0 = gl_reduce_u64(pk_seed[0]);
     let s1 = gl_reduce_u64(pk_seed[1]);
     let s2 = gl_reduce_u64(pk_seed[2]);
@@ -322,13 +317,26 @@ pub fn merkle_layer_poseidon2_at_cpu(
             gl_add(s2, node_tweak),
             gl_add(s3, POSEIDON2_CONST_IV),
         ];
+        let tweak4 = [st[8], st[9], st[10], st[11]];
         poseidon2_perm12(&mut st);
 
-        // Hirose/Davies-Meyer feed-forward across left, right, and all 4 pk_seed limbs.
-        parent_out[0] = gl_add(st[0], gl_add(l0, gl_add(r0, s0)));
-        parent_out[1] = gl_add(st[1], gl_add(l1, gl_add(r1, s1)));
-        parent_out[2] = gl_add(st[2], gl_add(l2, gl_add(r2, s2)));
-        parent_out[3] = gl_add(st[3], gl_add(l3, gl_add(r3, s3)));
+        // Weighted Jive binds both children and the full domain/position tweak.
+        parent_out[0] = gl_add(
+            st[0],
+            gl_add(l0, gl_add(gl_mul(2, r0), gl_mul(4, tweak4[0]))),
+        );
+        parent_out[1] = gl_add(
+            st[1],
+            gl_add(l1, gl_add(gl_mul(2, r1), gl_mul(4, tweak4[1]))),
+        );
+        parent_out[2] = gl_add(
+            st[2],
+            gl_add(l2, gl_add(gl_mul(2, r2), gl_mul(4, tweak4[2]))),
+        );
+        parent_out[3] = gl_add(
+            st[3],
+            gl_add(l3, gl_add(gl_mul(2, r3), gl_mul(4, tweak4[3]))),
+        );
         ct_zeroize_u64s(&mut st);
     }
     Ok(())
@@ -539,23 +547,6 @@ mod internal_matrix_tests {
         true
     }
 
-    /// Exact division of monic `f` by monic `g`.
-    fn poly_div_exact(f: &[u64], g: &[u64]) -> ([u64; T + 1], usize) {
-        let (df, dg) = (f.len() - 1, g.len() - 1);
-        let mut rem = [0u64; T + 1];
-        rem[..f.len()].copy_from_slice(f);
-        let mut quot = [0u64; T + 1];
-        for k in (0..=df - dg).rev() {
-            let c = rem[k + dg];
-            quot[k] = c;
-            for j in 0..=dg {
-                rem[k + j] = gl_sub(rem[k + j], gl_mul(c, g[j]));
-            }
-        }
-        assert!(degree(&rem).is_none(), "division must be exact");
-        (quot, df - dg)
-    }
-
     fn krylov_ranks(m: &Mat) -> (usize, usize) {
         let mut e0 = [0u64; T];
         e0[0] = 1;
@@ -597,7 +588,7 @@ mod internal_matrix_tests {
             inv_sum = gl_add(inv_sum, gl_inv_or_zero(v));
         }
         assert_ne!(inv_sum, 0);
-        assert_eq!(gl_mul(inv_sum, 1024), 2559);
+        assert_eq!(gl_mul(inv_sum, 1024), 3055);
         assert_eq!(det, gl_mul(prod, inv_sum));
         assert_ne!(det, 0);
     }
@@ -613,18 +604,13 @@ mod internal_matrix_tests {
     }
 
     #[test]
-    fn characteristic_polynomial_has_three_field_roots_and_degree_nine_factor() {
+    fn characteristic_polynomial_is_irreducible_for_first_32_powers() {
         let m = matrix_from_diag(&POSEIDON2_INTERNAL_DIAG);
-        let f = char_poly(&m);
-        assert!(!is_irreducible(&f));
-        // gcd(x^p - x, f) collects the linear factors.
-        let mut h = frobenius_orbit(&f)[0];
-        h[1] = gl_sub(h[1], 1);
-        let (linear_part, linear_degree) = poly_gcd(&f, &h);
-        assert_eq!(linear_degree, 3);
-        let (cofactor, cofactor_degree) = poly_div_exact(&f, &linear_part[..=linear_degree]);
-        assert_eq!(cofactor_degree, 9);
-        assert!(is_irreducible(&cofactor[..=cofactor_degree]));
+        let mut power = m;
+        for k in 1..=32 {
+            assert!(is_irreducible(&char_poly(&power)), "M_I^{k}");
+            power = mat_mul(&power, &m);
+        }
     }
 
     #[test]
@@ -632,5 +618,32 @@ mod internal_matrix_tests {
         // x^2 - 7 is irreducible (7 is a non-residue); x^2 - 4 = (x - 2)(x + 2) is not.
         assert!(is_irreducible(&[gl_neg(7), 0, 1]));
         assert!(!is_irreducible(&[gl_neg(4), 0, 1]));
+    }
+}
+
+#[cfg(test)]
+mod canonical_kat {
+    use super::*;
+    #[test]
+    fn poseidon2_canonical_sequence_kat() {
+        let mut st = core::array::from_fn(|i| i as u64);
+        poseidon2_perm12(&mut st);
+        assert_eq!(
+            st,
+            [
+                13782584570844608145,
+                13136387643152332171,
+                7171133015474200819,
+                7643370872200861694,
+                14144755201299840503,
+                16470027036684692562,
+                1748465969625202405,
+                1718729118078964347,
+                6141020819996733037,
+                16322330185628708898,
+                11650380702735067362,
+                2734959974607798415
+            ]
+        );
     }
 }

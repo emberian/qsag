@@ -5,40 +5,28 @@
 use crate::ct::{ct_zeroize_bytes, ct_zeroize_u64s};
 
 /// Standard 24-round `Keccak-f[1600]` iota round constants (FIPS 202).
-pub const KECCAK_RC: [u64; 24] = [
-    0x0000_0000_0000_0001,
-    0x0000_0000_0000_8082,
-    0x8000_0000_0000_808a,
-    0x8000_0000_8000_8000,
-    0x0000_0000_0000_808b,
-    0x0000_0000_8000_0001,
-    0x8000_0000_8000_8081,
-    0x8000_0000_0000_8009,
-    0x0000_0000_0000_008a,
-    0x0000_0000_0000_0088,
-    0x0000_0000_8000_8009,
-    0x0000_0000_8000_000a,
-    0x0000_0000_8000_808b,
-    0x8000_0000_0000_008b,
-    0x8000_0000_0000_8089,
-    0x8000_0000_0000_8003,
-    0x8000_0000_0000_8002,
-    0x8000_0000_0000_0080,
-    0x0000_0000_0000_800a,
-    0x8000_0000_8000_000a,
-    0x8000_0000_8000_8081,
-    0x8000_0000_0000_8080,
-    0x0000_0000_8000_0001,
-    0x8000_0000_8000_8008,
-];
+pub const KECCAK_RC: [u64; 24] = qsag_asm::KECCAK_ROUND_CONSTANTS;
 
-const KECCAK_RHO: [u32; 24] = [
-    1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,
-];
-
-const KECCAK_PI: [usize; 24] = [
-    10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
-];
+/// The $\rho$ rotations and $\pi$ destinations in the order of the single 24-lane cycle starting
+/// at lane 1, derived from the FIPS 202 offset table: the lane at `x + 5y` rotates by its offset
+/// and moves to `y + 5 * ((2x + 3y) mod 5)`.
+const KECCAK_RHO_PI: ([u32; 24], [usize; 24]) = {
+    let mut rho = [0u32; 24];
+    let mut pi = [0usize; 24];
+    let mut lane = 1usize;
+    let mut i = 0usize;
+    while i < 24 {
+        rho[i] = qsag_asm::KECCAK_ROTATION_OFFSETS[lane];
+        let (x, y) = (lane % 5, lane / 5);
+        lane = y + 5 * ((2 * x + 3 * y) % 5);
+        pi[i] = lane;
+        i += 1;
+    }
+    assert!(lane == 1);
+    (rho, pi)
+};
+const KECCAK_RHO: [u32; 24] = KECCAK_RHO_PI.0;
+const KECCAK_PI: [usize; 24] = KECCAK_RHO_PI.1;
 
 /// In-place 24-round `Keccak-f[1600]` permutation (100% branchless, LUT-free).
 pub fn keccak_f1600(state: &mut [u64; 25]) {

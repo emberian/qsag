@@ -7,7 +7,10 @@ use std::path::Path;
 use std::process::Command;
 
 use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_reduce_u64, precompute_goldilocks_twiddles};
-use qsag_accel::spirv_kernels::{shader_source_filename, spirv_kernel_bytes};
+use qsag_accel::spirv_kernels::{
+    prover_shader_source_filename, prover_spirv_kernel_bytes, shader_source_filename,
+    spirv_kernel_bytes,
+};
 use qsag_accel::vulkan::{
     batch_keccak_f1600_with_receipt, batch_poseidon2_perm12_with_receipt,
     bdoz_gf2_128_batch_dot_with_receipt, coset_lde_ext2_with_receipt, goldilocks_ntt_input_digest,
@@ -15,7 +18,7 @@ use qsag_accel::vulkan::{
 };
 use qsag_accel::{
     AccelError, AcceleratorBackend, BackendAttestationKey, CertifiedBackend, CertifiedKernelPin,
-    CpuReferenceBackend, KernelRegistryError, KernelSlot, KernelTargetArch,
+    CpuReferenceBackend, KernelRegistryError, KernelSlot, KernelTargetArch, ProverKernelSlot,
     VerifiedKernelDigestRegistry, VulkanError, VulkanRdna2Backend, VulkanSpirvBackend,
     spot_check_merkle_layer,
 };
@@ -32,22 +35,32 @@ fn splitmix64(state: &mut u64) -> u64 {
 fn test_spirv_shaders_reproducible_from_comp_sources() {
     let validator = Path::new("/usr/bin/glslangValidator");
     if !validator.exists() {
+        // The audit gate must not turn a missing compiler into a green skip.
+        assert!(
+            std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(),
+            "QSAG_REQUIRE_GPU_AUDIT is set but {} is missing",
+            validator.display()
+        );
         return;
     }
 
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let shaders_dir = manifest_dir.join("shaders");
+    let shaders_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
     let out_dir = std::env::temp_dir().join(format!("qsag_spv_repro_{}", std::process::id()));
     std::fs::create_dir_all(&out_dir).expect("create temp shader dir");
 
-    for slot in KernelSlot::ALL {
-        let comp_name = shader_source_filename(slot);
-        let comp_path = shaders_dir.join(comp_name);
+    let kernels =
+        KernelSlot::ALL.map(|slot| (shader_source_filename(slot), spirv_kernel_bytes(slot)));
+    let prover = ProverKernelSlot::ALL.map(|slot| {
+        (
+            prover_shader_source_filename(slot),
+            prover_spirv_kernel_bytes(slot),
+        )
+    });
+    for (comp_name, embedded) in kernels.into_iter().chain(prover) {
         let spv_path = out_dir.join(format!("{comp_name}.spv"));
-
         let output = Command::new(validator)
             .args(["-V", "--target-env", "vulkan1.2"])
-            .arg(&comp_path)
+            .arg(shaders_dir.join(comp_name))
             .arg("-o")
             .arg(&spv_path)
             .output()
@@ -58,17 +71,10 @@ fn test_spirv_shaders_reproducible_from_comp_sources() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-
         let compiled = std::fs::read(&spv_path).expect("read compiled .spv");
-        assert_eq!(
-            compiled.as_slice(),
-            spirv_kernel_bytes(slot),
+        assert!(
+            compiled == embedded,
             "embedded SPIR-V bytes drifted from shaders/{comp_name}"
-        );
-        assert_eq!(
-            CertifiedKernelPin::from_kernel_artifact(slot, KernelTargetArch::SpirV15, &compiled),
-            VulkanSpirvBackend::canonical_pin(slot),
-            "canonical CertifiedKernelPin mismatch for {slot:?}"
         );
     }
 
@@ -139,8 +145,10 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     registry
         .register_measured_profile(KernelTargetArch::SpirV15, measured_pins)
         .expect("register SpirV15 profile");
+    let canonical = VerifiedKernelDigestRegistry::<4>::with_cpu_and_canonical_gpu_pins();
+    assert_eq!(canonical.verify_backend(&gpu), Ok(()));
     assert_eq!(
-        VerifiedKernelDigestRegistry::<4>::with_cpu_and_spirv_pins().verify_backend(&gpu),
+        canonical.verify_loaded_profile(KernelTargetArch::SpirV15, &measured_pins),
         Ok(())
     );
 

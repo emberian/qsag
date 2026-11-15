@@ -25,7 +25,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::field::{Goldilocks, GoldilocksExt2, GoldilocksExt4};
+use crate::field::{
+    Goldilocks, GoldilocksExt2, GoldilocksExt2Ops as _, GoldilocksExt4, GoldilocksOps as _,
+};
 use crate::sponge::{FiatShamirTranscript, InstanceBound, cshake256_32};
 
 type E = GoldilocksExt4;
@@ -191,7 +193,7 @@ pub fn pad_inv(z: PrimitiveChallenge, v: E) -> Pad {
     let s = t * t - n;
     let w = t * n;
 
-    let beta = v.c1 * b.inv();
+    let beta = v.c1 * b.inv_or_zero();
     let alpha = v.c0 - beta * a;
 
     let m00 = -n.c1;

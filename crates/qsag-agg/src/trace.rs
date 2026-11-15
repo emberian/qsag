@@ -784,7 +784,7 @@ pub fn populate_active_signer_rows(
                 ];
                 let perm_out = fill_row_perm(row, st_in);
                 for i in 0..4 {
-                    next[ST_WORK + i] = perm_out[i] + sec[i];
+                    next[ST_WORK + i] = perm_out[i] + sec[i] + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i]);
                 }
                 next[ST_CURSOR_IDX] = Goldilocks::from_u64_reduced(idx_j);
             }
@@ -1024,7 +1024,7 @@ pub fn populate_active_signer_rows(
                 ];
                 let perm_out = fill_row_perm(row, st_in);
                 for i in 0..4 {
-                    let ff = perm_out[i] + wots_val[i];
+                    let ff = perm_out[i] + wots_val[i] + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i]);
                     next[ST_WORK + i] = if u0 == 1 { wots_val[i] } else { ff };
                 }
                 next[ST_ACC_OR_U1] = Goldilocks::from_u64_reduced(u1);
@@ -1052,7 +1052,7 @@ pub fn populate_active_signer_rows(
                 ];
                 let perm_out = fill_row_perm(row, st_in);
                 for i in 0..4 {
-                    let ff = perm_out[i] + cur[i];
+                    let ff = perm_out[i] + cur[i] + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i]);
                     next[ST_WORK + i] = if u1 == 1 { cur[i] } else { ff };
                 }
             }
@@ -1083,7 +1083,7 @@ pub fn populate_active_signer_rows(
                 let perm_out = fill_row_perm(row, st_in);
                 let mut ep = [Goldilocks::ZERO; 4];
                 for i in 0..4 {
-                    let ff = perm_out[i] + cur[i];
+                    let ff = perm_out[i] + cur[i] + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i]);
                     ep[i] = if u2 == 1 { cur[i] } else { ff };
                 }
                 // Verify endpoint matches standalone `wots_step_hash_injective`!
@@ -1684,7 +1684,7 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
             for i in 0..4 {
                 emit_op(st_in[i] - aux[i]);
                 emit_op(st_in[4 + i] - pk_seed[i]);
-                emit_op(next[ST_WORK + i] - (perm_out[i] + aux[i]));
+                emit_op(next[ST_WORK + i] - (perm_out[i] + aux[i] + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i])));
             }
             emit_op(st_in[8] - F::from_u64(DOMAIN_FORS_LEAF));
             emit_op(st_in[9] - tweak1);
@@ -1923,7 +1923,7 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
                 let sig_i = aux[i];
                 emit_op(st_in[i] - sig_i);
                 emit_op(st_in[4 + i] - pk_seed[i]);
-                let ff_i = perm_out[i] + sig_i;
+                let ff_i = perm_out[i] + sig_i + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i]);
                 emit_op(next[ST_WORK + i] - (u0 * sig_i + one_minus_u0 * ff_i));
             }
             emit_op(st_in[8] - F::from_u64(DOMAIN_WOTS_STEP));
@@ -1949,7 +1949,7 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
                 let cur_i = prev[ST_WORK + i];
                 emit_op(st_in[i] - cur_i);
                 emit_op(st_in[4 + i] - pk_seed[i]);
-                let ff_i = perm_out[i] + cur_i;
+                let ff_i = perm_out[i] + cur_i + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i]);
                 emit_op(next[ST_WORK + i] - (u1 * cur_i + one_minus_u1 * ff_i));
             }
             emit_op(st_in[8] - F::from_u64(DOMAIN_WOTS_STEP));
@@ -1971,7 +1971,7 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
                 let cur_i = prev[ST_WORK + i];
                 emit_op(st_in[i] - cur_i);
                 emit_op(st_in[4 + i] - pk_seed[i]);
-                let ff_i = perm_out[i] + cur_i;
+                let ff_i = perm_out[i] + cur_i + (st_in[4 + i] + st_in[4 + i]) + (st_in[8 + i] + st_in[8 + i] + st_in[8 + i] + st_in[8 + i]);
                 let ep_i = u2 * cur_i + one_minus_u2 * ff_i;
                 if !is_odd {
                     emit_op(next[ST_SUB_SPONGE + i] - ep_i);
@@ -2492,4 +2492,34 @@ pub fn eval_batched_row_constraints_base_row_ext4(
     let (next_dot, prev_dot) = dot_shift_state_base_ext4(sched, cols);
     total += pub_in.eq_not_last * next_dot - pub_in.shift_tau * prev_dot;
     total
+}
+
+#[cfg(test)]
+mod sponge_trace_tests {
+    use super::*;
+    use crate::sig::{ValidatorKeypair, compute_message_mu};
+
+    #[test]
+    fn canonical_sponge_signature_trace_satisfies_every_row_constraint() {
+        let mut kp = ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[42; 32], 0);
+        let msg = b"canonical poseidon2 trace parity";
+        let sig = kp.sign_stateful_for_unit_test(msg, 0).unwrap();
+        let mu = compute_message_mu(&kp.pk, msg).1;
+        let program = build_signer_program(kp.pk.profile);
+        let mut rows = alloc::vec![[Goldilocks::ZERO; NUM_TRACE_COLS]; program.len()];
+        populate_active_signer_rows(&program, &kp.pk, mu, &sig, &mut rows);
+        for (i, (row, op)) in rows.iter().zip(program).enumerate() {
+            let perm_out = eval_group_a_and_boundaries_generic(row,
+                if i == 0 { Goldilocks::ONE } else { Goldilocks::ZERO },
+                if i + 1 == rows.len() { Goldilocks::ONE } else { Goldilocks::ZERO },
+                |c, r| assert_eq!(r, Goldilocks::ZERO, "permutation row {i}, constraint {c}"));
+            let (kind, step_c0) = step_op_to_kind_and_c0(op);
+            eval_single_op_constraints_generic(kind, step_c0, OpRowInputs {
+                prev: &row[COL_PREV_STATE..COL_PREV_STATE + NUM_STATE_LIMBS],
+                next: &row[COL_NEXT_STATE..COL_NEXT_STATE + NUM_STATE_LIMBS],
+                aux: &row[COL_AUX..COL_AUX + 38], st_in: &row[COL_ST_IN..COL_ST_IN + 12],
+                perm_out: &perm_out, pk_seed: &kp.pk.pk_seed, pk_root: &kp.pk.pk_root, mu: &mu,
+            }, &mut |r| assert_eq!(r, Goldilocks::ZERO, "operation row {i}"));
+        }
+    }
 }

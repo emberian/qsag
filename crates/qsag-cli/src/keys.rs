@@ -76,7 +76,7 @@ fn threshold_setup(
 ) -> Result<DealerlessThresholdFtsSetup, CliError> {
     DealerlessThresholdFtsSetup::run_ceremony(
         params,
-        parties as usize,
+        usize::try_from(parties).map_err(|_| CliError::usage("party count is not representable on this platform"))?,
         derive(seed, b"threshold dkg ceremony"),
         cached_tree,
     )
@@ -437,8 +437,8 @@ The secret file is created with owner-only permissions.
   --force-overwrite     replace an authenticated stateless vault; stateful overwrite is refused
   --hrp <hrp>           address human-readable part (default: qsp)
   --fast-demo          fts-threshold only: use an eight-epoch demonstration tree
-  --parties <n>         fts-threshold: number of signing parties, 2..=16 (default: 3)
-  --validators <k>      agg-jorts-poseidon2: committee size, 1..=64 (default: 8)
+  --parties <n>         fts-threshold: number of signing parties, 2..=65535 (default: 3)
+  --validators <k>      agg-jorts-poseidon2: committee size (default: 8; bounded by public-key file size)
   --wal-dir <dir>       agg-jorts-poseidon2: directory in which each validator's epoch
                         write-ahead log is created (required for that scheme)
   --anchor-dir <dir>    stateful schemes: owner-only 0700 external monotone anchor directory
@@ -614,9 +614,6 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
                 Json::str("local-seed-ceremony-demo; single-host shares"),
             ));
             let parties = args.get_u64("parties")?.unwrap_or(3);
-            if !(2..=16).contains(&parties) {
-                return Err(CliError::usage("--parties must be between 2 and 16"));
-            }
             let params = qsag_fts::ParallelSeededParams {
                 tree_height: if args.flag("fast-demo") { 3 } else { 10 },
                 ..THRESHOLD_FTS_PARAMS
@@ -662,8 +659,18 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         }
         Scheme::AggCommittee => {
             let validators = args.get_u64("validators")?.unwrap_or(8);
-            if !(1..=64).contains(&validators) {
-                return Err(CliError::usage("--validators must be between 1 and 64"));
+            // A canonical validator key is 65 bytes, encoded as 130 hex digits.
+            // Reserve whitespace and metadata within the reader's own file limit.
+            if validators == 0
+                || validators > u32::MAX as u64
+                || validators
+                    .checked_mul(140)
+                    .and_then(|n| n.checked_add(4096))
+                    .is_none_or(|n| n > MAX_KEY_FILE_BYTES)
+            {
+                return Err(CliError::usage(
+                    "validator committee exceeds the bounded public-key file size",
+                ));
             }
             let wal_dir = args
                 .get("wal-dir")
@@ -1082,9 +1089,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 )));
             }
             let parties = secret.field_u64("parties")?;
-            if !(2..=16).contains(&parties) {
+            if !(2..=u16::MAX as u64).contains(&parties) {
                 return Err(CliError::usage(
-                    "dealerless threshold setup requires 2 <= parties <= 16",
+                    "dealerless threshold setup requires 2 <= parties <= 65535",
                 ));
             }
             let cached_tree = load_cached_threshold_tree(&secret, params)?;
