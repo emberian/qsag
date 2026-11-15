@@ -2,14 +2,14 @@
 -- Standalone Lean 4 executable specification oracle for external differential validation.
 -- Evaluates live definitions in `Qsag.*` without modifying any library module in `lean/`.
 
-import Qsag.Goldilocks
-import Qsag.Poseidon2
-import Qsag.Keccak
-import Qsag.Fips205
-import Qsag.BinaryTower
-import Qsag.SuccinctAggregationIop
-import Qsag.ActiveMigrationZeroTest
-import Qsag.ConstantTimeIsa
+import Qsag.Math.Goldilocks
+import Qsag.Oracle.Poseidon2
+import Qsag.Oracle.Keccak
+import Qsag.Protocol.Signing.Fips205
+import Qsag.Math.BinaryTower
+import Qsag.Protocol.Aggregation.SuccinctAggregationIop
+import Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import Qsag.Machine.ConstantTimeIsa
 
 namespace ExternalSpecOracle
 

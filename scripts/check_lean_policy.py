@@ -286,6 +286,14 @@ for path in files:
 qsag_modules = set(qsag_imports) | {"Qsag"}
 layer_counts = Counter()
 
+# Out-of-package consumers of the library (`lake env lean --run`) get the import check only.
+for path in sorted((root / "validation/lean").rglob("*.lean")):
+    source = code(path.read_text())
+    file_imports[str(path.relative_to(root))] = [
+        (source[: m.start()].count("\n") + 1, bool(m[1]), m[2])
+        for m in module_import_pattern.finditer(source)
+    ]
+
 for relative, imports in file_imports.items():
     for line, _, target in imports:
         if target.startswith("Qsag.") and target not in qsag_modules:
