@@ -35,24 +35,17 @@ set_option autoImplicit false
 
 /-! ## 1. Multi-Rate `pad10*1`, Multi-Block Absorption & Arbitrary-Length Squeezing -/
 
-/-- Canonical rate `r = 136` bytes for `SHAKE256`, `cSHAKE256`, `TurboSHAKE256`, and `SHA3-256`. -/
+/-- Canonical sponge byte rates (`r = 136` for `SHAKE256`/`cSHAKE256`/`TurboSHAKE256`/`SHA3-256`, `r = 64` for `Poseidon2`) and FIPS-202/SP 800-185 domain bytes. -/
 def shakeRateBytes : Nat := 136
-
-/-- Canonical rate `r = 64` bytes (8 Goldilocks 64-bit limbs) for byte-oriented `Poseidon2`. -/
 def poseidon2RateBytes : Nat := 64
-
-/-- FIPS 202 / SP 800-185 domain separation bytes (`SHAKE256`/`TurboSHAKE256`, `cSHAKE256`, `SHA3-256`). -/
 def domShake256 : UInt8 := 0x1F
 def domTurboShake256 : UInt8 := 0x1F
 def domCshake256 : UInt8 := 0x04
 def domSha3_256 : UInt8 := 0x06
 
 /-- Valid FIPS-202 / SP 800-185 domain byte: nonzero with high padding bit `0x80` clear. -/
-@[expose] def ValidDomByte (domByte : UInt8) : Prop :=
-  0 < domByte.toNat ∧ domByte.toNat < 128
-
-instance (d : UInt8) : Decidable (ValidDomByte d) := by
-  unfold ValidDomByte; exact inferInstance
+@[expose] def ValidDomByte (domByte : UInt8) : Prop := 0 < domByte.toNat ∧ domByte.toNat < 128
+instance (d : UInt8) : Decidable (ValidDomByte d) := by unfold ValidDomByte; exact inferInstance
 
 /-- Multi-rate `pad10*1(r, domByte, msg)` byte padding. -/
 @[expose] def pad10star1 (r : Nat) (domByte : UInt8) (msg : List UInt8) : List UInt8 :=
@@ -80,6 +73,7 @@ theorem pad10star1_length {r : Nat} (hr : 0 < r) (domByte : UInt8) (msg : List U
     split
     · rename_i h1; simp [h1]
     · simp only [List.length_append, List.length_singleton, List.length_replicate]; omega
+  have hModLe : msg.length % r ≤ msg.length := Nat.mod_le msg.length r
   refine ⟨hLen, ?_, by rw [hLen]; omega⟩
   rw [hLen]
   have hDiv := Nat.div_add_mod msg.length r
@@ -154,6 +148,13 @@ private theorem strip_zero_replicate_inj :
   | k₁ + 1, k₂ + 1, _, _, _, _, hd₁, hd₂, h =>
     strip_zero_replicate_inj k₁ k₂ hd₁ hd₂ (List.cons.inj h).2
 
+private theorem reverse_pad_long (m : List UInt8) (d : UInt8) (k : Nat) :
+    (m ++ [d] ++ List.replicate k 0 ++ [0x80]).reverse =
+      (0x80 : UInt8) :: (List.replicate k 0 ++ (d :: m.reverse)) := by
+  rw [List.reverse_append, List.reverse_append, List.reverse_append,
+      List.reverse_singleton, List.reverse_replicate, List.reverse_singleton]
+  simp only [List.singleton_append]
+
 /-- **Unified Multi-Rate `pad10*1` Joint Message & Domain Injectivity (`pad10star1_joint_injective`)**:
     For any rate `r > 0` and valid domain bytes `d₁, d₂`, `pad10star1 r d₁ m₁ = pad10star1 r d₂ m₂`
     implies BOTH `d₁ = d₂` AND `m₁ = m₂`! -/
@@ -168,14 +169,11 @@ theorem pad10star1_joint_injective {r : Nat} {d₁ d₂ : UInt8} {m₁ m₂ : Li
   split at hRev <;> split at hRev
   · simp only [List.reverse_append, List.reverse_singleton, List.singleton_append] at hRev
     exact ⟨uint8_xor_80_inj (List.cons.inj hRev).1, List.reverse_inj.mp (List.cons.inj hRev).2⟩
-  · simp only [List.reverse_append, List.reverse_singleton, List.reverse_replicate,
-      List.singleton_append, List.append_assoc] at hRev
+  · rw [List.reverse_append, List.reverse_singleton, List.singleton_append, reverse_pad_long] at hRev
     exact False.elim (uint8_xor_80_ne_80 hd₁.1 (List.cons.inj hRev).1)
-  · simp only [List.reverse_append, List.reverse_singleton, List.reverse_replicate,
-      List.singleton_append, List.append_assoc] at hRev
+  · rw [reverse_pad_long, List.reverse_append, List.reverse_singleton, List.singleton_append] at hRev
     exact False.elim (uint8_xor_80_ne_80 hd₂.1 (List.cons.inj hRev).1.symm)
-  · simp only [List.reverse_append, List.reverse_singleton, List.reverse_replicate,
-      List.singleton_append, List.append_assoc] at hRev
+  · rw [reverse_pad_long, reverse_pad_long] at hRev
     obtain ⟨hdEq, hmRev⟩ := strip_zero_replicate_inj _ _ hd₁.1 hd₂.1 (List.cons.inj hRev).2
     exact ⟨hdEq, List.reverse_inj.mp hmRev⟩
 
@@ -192,7 +190,7 @@ theorem pad10star1_injective {r : Nat} {domByte : UInt8} {m₁ m₂ : List UInt8
 /-- **Cross-Domain Sponge Block Separation (`absorbPayload_cross_domain_disjoint`)**:
     Distinct valid domain bytes (`d₁ ≠ d₂`) NEVER collide on `absorbPayload` for ANY `m₁, m₂`. -/
 theorem absorbPayload_cross_domain_disjoint {r : Nat} {d₁ d₂ : UInt8} (m₁ m₂ : List UInt8)
-    (hr : 0 < r) (hd₁ : ValidDomByte d₁) (hd₂ : ValidDomByte d₂) (hNe : d₁ ≠ d₂) :
+    (hr : 0 < r) (hNe : d₁ ≠ d₂) (hd₁ : ValidDomByte d₁) (hd₂ : ValidDomByte d₂) :
     absorbPayload r d₁ m₁ ≠ absorbPayload r d₂ m₂ := by
   intro hEq
   have hFlat : pad10star1 r d₁ m₁ = pad10star1 r d₂ m₂ := by
@@ -204,20 +202,15 @@ theorem fips202_shake_cshake_sha3_domains_disjoint (m₁ m₂ : List UInt8) :
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domCshake256 m₂ ∧
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ ∧
     absorbPayload 136 domCshake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ :=
-  ⟨absorbPayload_cross_domain_disjoint m₁ m₂ (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ (by decide),
-   absorbPayload_cross_domain_disjoint m₁ m₂ (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ (by decide),
-   absorbPayload_cross_domain_disjoint m₁ m₂ (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ (by decide)⟩
-
+  ⟨absorbPayload_cross_domain_disjoint m₁ m₂ (by decide) (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩,
+   absorbPayload_cross_domain_disjoint m₁ m₂ (by decide) (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩,
+   absorbPayload_cross_domain_disjoint m₁ m₂ (by decide) (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩⟩
 /-- Generic multi-block sponge absorption over arbitrary permutation `π : σ → σ`. -/
-@[expose] def spongeAbsorbBlocks {σ : Type} (π : σ → σ) (xorBlk : σ → List UInt8 → σ)
-    (s : σ) : List (List UInt8) → σ
+@[expose] def spongeAbsorbBlocks {σ : Type} (π : σ → σ) (xorBlk : σ → List UInt8 → σ) (s : σ) : List (List UInt8) → σ
   | [] => s
   | blk :: rest => spongeAbsorbBlocks π xorBlk (π (xorBlk s blk)) rest
-
-theorem spongeAbsorbBlocks_append {σ : Type} (π : σ → σ) (xorBlk : σ → List UInt8 → σ)
-    (s : σ) (xs ys : List (List UInt8)) :
-    spongeAbsorbBlocks π xorBlk s (xs ++ ys) =
-      spongeAbsorbBlocks π xorBlk (spongeAbsorbBlocks π xorBlk s xs) ys := by
+theorem spongeAbsorbBlocks_append {σ : Type} (π : σ → σ) (xorBlk : σ → List UInt8 → σ) (s : σ) (xs ys : List (List UInt8)) :
+    spongeAbsorbBlocks π xorBlk s (xs ++ ys) = spongeAbsorbBlocks π xorBlk (spongeAbsorbBlocks π xorBlk s xs) ys := by
   induction xs generalizing s with
   | nil => rfl
   | cons blk rest ih => exact ih (π (xorBlk s blk))
@@ -248,7 +241,9 @@ private theorem spongeSqueezeFuel_length {σ : Type} {r : Nat} (hr : 0 < r) (π 
     (extractRate : σ → List UInt8) (hRate : ∀ s, (extractRate s).length = r) :
     ∀ (fuel outLen : Nat) (s : σ), outLen ≤ r * fuel →
       (spongeSqueezeFuel r π extractRate fuel outLen s).length = outLen
-  | 0, outLen, _, h => by have h0 : outLen = 0 := by omega; subst h0
+  | 0, outLen, _, h => by
+    obtain rfl : outLen = 0 := by omega
+    rfl
   | _ + 1, 0, _, _ => rfl
   | fuel + 1, outLen + 1, s, h => by
     simp only [spongeSqueezeFuel]
@@ -322,22 +317,26 @@ private theorem append_left_cancel_local {α : Type} :
 
 private theorem ofBE_natBytesLEAux :
     ∀ (fuel x : Nat), x ≤ fuel → ofBE (natBytesLEAux fuel x).reverse = x
-  | 0, x, hx => by have h0 : x = 0 := by omega; subst h0
+  | 0, x, hx => by
+    obtain rfl : x = 0 := Nat.eq_zero_of_le_zero hx
+    rfl
   | fuel + 1, x, hx => by
     unfold natBytesLEAux
     if hx0 : x = 0 then subst hx0; rfl
     else
       simp only [hx0, ↓reduceIte, List.reverse_cons, ofBE_append_single, UInt8.toNat_ofNat']
-      rw [ofBE_natBytesLEAux fuel (x / 256) (by omega)]
+      have hDivLe : x / 256 ≤ fuel :=
+        Nat.le_of_lt_succ (Nat.lt_of_lt_of_le (Nat.div_lt_self (Nat.pos_of_ne_zero hx0) (by decide)) hx)
+      rw [ofBE_natBytesLEAux fuel (x / 256) hDivLe]
       have h8 : (2 : Nat) ^ 8 = 256 := rfl
-      rw [h8]; omega
+      rw [h8, Nat.mod_mod, Nat.mul_comm, Nat.div_add_mod]
 
 private theorem natBytesLEAux_last_nonzero :
     ∀ (fuel x : Nat), 0 < x → x ≤ fuel →
       ∃ b rest, (natBytesLEAux fuel x).reverse = b :: rest ∧ 0 < b.toNat
-  | 0, _, hxPos, hxLe => by omega
+  | 0, _, hxPos, hxLe => False.elim (Nat.not_lt_of_ge hxLe hxPos)
   | fuel + 1, x, hxPos, hxLe => by
-    have hxNe : x ≠ 0 := by omega
+    have hxNe : x ≠ 0 := Nat.ne_of_gt hxPos
     unfold natBytesLEAux
     simp only [hxNe, ↓reduceIte, List.reverse_cons]
     if hq : x / 256 = 0 then
@@ -347,9 +346,13 @@ private theorem natBytesLEAux_last_nonzero :
       refine ⟨UInt8.ofNat (x % 256), [], rfl, ?_⟩
       simp only [UInt8.toNat_ofNat']
       have h8 : (2 : Nat) ^ 8 = 256 := rfl
-      rw [h8]; omega
+      have hDiv := Nat.div_add_mod x 256
+      rw [hq, Nat.mul_zero, Nat.zero_add] at hDiv
+      rw [h8, Nat.mod_mod, hDiv]; exact hxPos
     else
-      obtain ⟨b, rest, hRev, hbPos⟩ := natBytesLEAux_last_nonzero fuel (x / 256) (by omega) (by omega)
+      have hDivLe : x / 256 ≤ fuel :=
+        Nat.le_of_lt_succ (Nat.lt_of_lt_of_le (Nat.div_lt_self hxPos (by decide)) hxLe)
+      obtain ⟨b, rest, hRev, hbPos⟩ := natBytesLEAux_last_nonzero fuel (x / 256) (Nat.pos_of_ne_zero hq) hDivLe
       exact ⟨b, rest ++ [UInt8.ofNat (x % 256)], by rw [hRev, List.cons_append], hbPos⟩
 
 private theorem ofBE_foldl_ge :
@@ -385,30 +388,57 @@ theorem ofBE_natBytesBE (x : Nat) : ofBE (natBytesBE x) = x := by
     simp only [hNil, ↓reduceIte]
     exact ofBE_natBytesLEAux x x (Nat.le_refl x)
 
+private theorem append_inj_local {α : Type} :
+    ∀ {xs₁ xs₂ ys₁ ys₂ : List α},
+      xs₁ ++ ys₁ = xs₂ ++ ys₂ → xs₁.length = xs₂.length → xs₁ = xs₂ ∧ ys₁ = ys₂
+  | [], [], _, _, hEq, _ => ⟨rfl, hEq⟩
+  | _ :: _, [], _, _, _, hLen => by cases hLen
+  | [], _ :: _, _, _, _, hLen => by cases hLen
+  | x₁ :: xs₁, x₂ :: xs₂, _, _, hEq, hLen => by
+    obtain ⟨hx, hTail⟩ := List.cons.inj hEq
+    obtain ⟨hxs, hys⟩ := append_inj_local hTail (Nat.succ.inj hLen)
+    exact ⟨hx ▸ congrArg (x₁ :: ·) hxs, hys⟩
+
+private theorem pow_le_pow_right_local {b : Nat} (hb : 0 < b) :
+    ∀ {m n : Nat}, m ≤ n → b ^ m ≤ b ^ n
+  | _, _, h => by
+    induction h with
+    | refl => exact Nat.le_refl _
+    | step _ ih =>
+      rw [Nat.pow_succ]
+      exact Nat.le_trans (by simpa [Nat.mul_one] using ih) (Nat.mul_le_mul_left _ hb)
+
+private theorem lt_of_pow_lt_pow_256 :
+    ∀ (m n : Nat), 256 ^ m < 256 ^ n → m < n
+  | m, 0, h => False.elim (Nat.not_lt_of_ge (Nat.one_le_pow m 256 (by decide)) (by rw [Nat.pow_zero] at h; exact h))
+  | 0, n + 1, _ => Nat.zero_lt_succ n
+  | m + 1, n + 1, h => by
+    rw [Nat.pow_succ, Nat.pow_succ] at h
+    have hlt : 256 ^ m < 256 ^ n :=
+      if hm : 256 ^ m < 256 ^ n then hm
+      else False.elim (Nat.not_lt_of_ge (Nat.mul_le_mul_right 256 (Nat.le_of_not_lt hm)) h)
+    exact Nat.succ_lt_succ (lt_of_pow_lt_pow_256 m n hlt)
+
 private theorem natBytesBE_length_le_255 {x : Nat} (hx : x < 256 ^ 255) :
     (natBytesBE x).length ≤ 255 := by
   if hx0 : x = 0 then
     subst hx0; decide
   else
-    obtain ⟨b, rest, hRev, hbPos⟩ := natBytesLEAux_last_nonzero x x (by omega) (Nat.le_refl x)
+    obtain ⟨b, rest, hRev, hbPos⟩ := natBytesLEAux_last_nonzero x x (Nat.pos_of_ne_zero hx0) (Nat.le_refl x)
     have hNonNil : natBytesLEAux x x ≠ [] := fun hNil => by rw [hNil] at hRev; cases hRev
     have hEq : natBytesBE x = b :: rest := by unfold natBytesBE; simp [hNonNil, hRev]
     have hPowLe : 256 ^ rest.length ≤ x := by
       rw [← ofBE_natBytesBE x, hEq]; exact ofBE_cons_ge hbPos rest
-    have hLtPow : 256 ^ rest.length < 256 ^ 255 := Nat.lt_of_le_of_lt hPowLe hx
-    have hRestLt : rest.length < 255 := by
-      if hLt : rest.length < 255 then exact hLt
-      else
-        have hGe : 255 ≤ rest.length := Nat.le_of_not_lt hLt
-        exact False.elim (Nat.not_le_of_gt hLtPow (Nat.pow_le_pow_right (by decide) hGe))
-    rw [hEq, List.length_cons]; omega
+    have hRestLt : rest.length < 255 := lt_of_pow_lt_pow_256 rest.length 255 (Nat.lt_of_le_of_lt hPowLe hx)
+    rw [hEq, List.length_cons]
+    exact hRestLt
 
 /-- Fast SP 800-185 bit-length bound witness avoiding kernel expansion of `256 ^ 255`. -/
 theorem bitlen_lt_sp800_bound {s : List UInt8} (h : s.length ≤ 65536) :
     8 * s.length < 256 ^ 255 := by
   have h1 : 8 * s.length ≤ 8 * 65536 := Nat.mul_le_mul_left 8 h
   have h2 : 8 * 65536 < 256 ^ 3 := by decide
-  have h3 : 256 ^ 3 ≤ 256 ^ 255 := Nat.pow_le_pow_right (by decide) (by decide)
+  have h3 : 256 ^ 3 ≤ 256 ^ 255 := pow_le_pow_right_local (by decide) (by decide)
   exact Nat.lt_of_le_of_lt h1 (Nat.lt_of_lt_of_le h2 h3)
 
 /-- **SP 800-185 `leftEncode` Prefix Injectivity (`leftEncode_prefix_inj`)**:
@@ -425,8 +455,12 @@ theorem leftEncode_prefix_inj {x₁ x₂ : Nat} {r₁ r₂ : List UInt8}
   simp only [UInt8.toNat_ofNat'] at hByte
   have h8 : (2 : Nat) ^ 8 = 256 := rfl
   rw [h8] at hByte
-  have hLenEq : (natBytesBE x₁).length = (natBytesBE x₂).length := by omega
-  obtain ⟨hBytes, hRest⟩ := List.append_inj hEq.2 hLenEq
+  have hMod₁ : (natBytesBE x₁).length % 256 = (natBytesBE x₁).length :=
+    Nat.mod_eq_of_lt (Nat.lt_succ_of_le hLen₁)
+  have hMod₂ : (natBytesBE x₂).length % 256 = (natBytesBE x₂).length :=
+    Nat.mod_eq_of_lt (Nat.lt_succ_of_le hLen₂)
+  rw [hMod₁, hMod₂] at hByte
+  obtain ⟨hBytes, hRest⟩ := append_inj_local hEq.2 hByte
   have hxEq : x₁ = x₂ := by rw [← ofBE_natBytesBE x₁, ← ofBE_natBytesBE x₂, hBytes]
   exact ⟨hxEq, hRest⟩
 
@@ -438,7 +472,7 @@ theorem encodeString_prefix_inj {s₁ s₂ r₁ r₂ : List UInt8}
   unfold encodeString at hEq
   rw [List.append_assoc, List.append_assoc] at hEq
   obtain ⟨hBitLen, hTail⟩ := leftEncode_prefix_inj hs₁ hs₂ hEq
-  exact List.append_inj hTail (by omega)
+  exact append_inj_local hTail (Nat.eq_of_mul_eq_mul_left (by decide) hBitLen)
 
 /-- Full NIST SP 800-185 customization prefix `bytepad(encodeString(N) || encodeString(S), 136)`. -/
 @[expose] def cshakePrefix (N S : List UInt8) : List UInt8 :=
@@ -447,36 +481,33 @@ theorem encodeString_prefix_inj {s₁ s₂ r₁ r₂ : List UInt8}
 theorem cshakePrefix_empty_name_eq (S : List UInt8) :
     cshakePrefix [] S = customizationPrefix S := by rfl
 
+private theorem pad_align_arith (L w : Nat) (hw : 0 < w) (hL : 1 ≤ L) :
+    (L + (w - L % w) % w) % w = 0 ∧ w ≤ L + (w - L % w) % w := by
+  have hDiv := Nat.div_add_mod L w
+  have hModLt : L % w < w := Nat.mod_lt L hw
+  if hRem0 : L % w = 0 then
+    rw [hRem0, Nat.sub_zero, Nat.mod_self, Nat.add_zero]
+    rw [hRem0, Nat.add_zero] at hDiv
+    cases hq : L / w with
+    | zero => rw [hq, Nat.mul_zero] at hDiv; exact False.elim (Nat.not_le_of_gt hL (Nat.le_of_eq hDiv.symm))
+    | succ k =>
+      rw [hq, Nat.mul_succ] at hDiv
+      exact ⟨hRem0, hDiv ▸ Nat.le_add_left w (w * k)⟩
+  else
+    rw [Nat.mod_eq_of_lt (Nat.sub_lt hw (Nat.pos_of_ne_zero hRem0))]
+    have hEq : L + (w - L % w) = w * (L / w) + w := by
+      conv => lhs; arg 1; rw [← hDiv]
+      rw [Nat.add_assoc, Nat.add_sub_of_le (Nat.le_of_lt hModLt)]
+    rw [hEq, ← Nat.mul_succ, Nat.mul_mod_right]
+    exact ⟨rfl, Nat.le_add_left w (w * (L / w))⟩
+
 theorem bytepad_length_mod (bytes : List UInt8) {w : Nat} (hw : 0 < w) :
     (bytepad bytes w).length % w = 0 ∧ w ≤ (bytepad bytes w).length := by
-  have hwNe : w ≠ 0 := by omega
+  have hwNe : w ≠ 0 := Nat.ne_of_gt hw
   unfold bytepad
   simp only [hwNe, ↓reduceIte, List.length_append, List.length_replicate]
-  let L := (leftEncode w).length + bytes.length
-  change (L + (w - L % w) % w) % w = 0 ∧ w ≤ L + (w - L % w) % w
-  have hModLt : L % w < w := Nat.mod_lt L hw
-  have hLPos : 2 ≤ L := by
-    dsimp only [L]; unfold leftEncode natBytesBE
-    simp only [List.length_cons, List.length_reverse]
-    split <;> simp
-    rename_i hne; cases h : natBytesLEAux w w with
-    | nil => exact False.elim (hne h)
-    | cons _ _ => simp
-  if hRem0 : L % w = 0 then
-    have hZero : (w - L % w) % w = 0 := by rw [hRem0, Nat.sub_zero, Nat.mod_self]
-    rw [hZero, Nat.add_zero]
-    have hDiv := Nat.div_add_mod L w
-    rw [hRem0, Nat.add_zero] at hDiv
-    have hQuoPos : 1 ≤ L / w := by
-      if hq0 : L / w = 0 then rw [hq0, Nat.mul_zero] at hDiv; omega else omega
-    exact ⟨hRem0, by have := Nat.mul_le_mul_left w hQuoPos; omega⟩
-  else
-    have hSubLt : w - L % w < w := by omega
-    rw [Nat.mod_eq_of_lt hSubLt]
-    have hDiv := Nat.div_add_mod L w
-    have hSum : L + (w - L % w) = w * (L / w) + w := by omega
-    rw [hSum, ← Nat.mul_succ, Nat.mul_mod_right]
-    exact ⟨rfl, by omega⟩
+  exact pad_align_arith ((leftEncode w).length + bytes.length) w hw
+    (by unfold leftEncode; simp only [List.length_cons, Nat.add_right_comm, Nat.add_assoc]; exact Nat.le_add_left 1 _)
 
 /-- **Prefix-Free `cshakePrefix` Theorem (`cshakePrefix_prefix_free`)**:
     Even across arbitrary message suffixes `m₁, m₂`, `cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂`
@@ -526,22 +557,18 @@ theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂
   split <;> split
   · rename_i hEmpty₁ hEmpty₂
     exact False.elim (hNe (Prod.ext (hEmpty₁.1.trans hEmpty₂.1.symm) (hEmpty₁.2.trans hEmpty₂.2.symm)))
-  · exact absorbPayload_cross_domain_disjoint _ _ (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ (by decide)
-  · exact fun h => absorbPayload_cross_domain_disjoint _ _ (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ (by decide) h.symm
+  · exact absorbPayload_cross_domain_disjoint _ _ (by decide) (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩
+  · exact fun h => absorbPayload_cross_domain_disjoint _ _ (by decide) (by decide) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ h.symm
   · intro hBlocks
     have hMsg := pad10star1_injective (by decide) ⟨by decide, by decide⟩ hBlocks
     obtain ⟨hNEq, hSEq, _⟩ := cshakePrefix_prefix_free hN₁ hS₁ hN₂ hS₂ hMsg
     exact hNe (Prod.ext hNEq hSEq)
 
-/-- Pure kernel-reducible ASCII byte encoder for protocol customization strings. -/
-@[expose] def asciiBytes (s : String) : List UInt8 :=
-  s.toList.map (fun c => UInt8.ofNat c.toNat)
-
-/-- Canonical `QSAG.*` customization tags sit in provably disjoint sponge input domains. -/
-def qsagTagCanopyLeaf : List UInt8 := asciiBytes "QSAG.WHIR.CANOPY.LEAF/v1"
-def qsagTagCanopyNode : List UInt8 := asciiBytes "QSAG.WHIR.CANOPY.NODE/v1"
-def qsagTagFiatShamir : List UInt8 := asciiBytes "QSAG.FS/v1"
-def qsagTagFtsOtPad   : List UInt8 := asciiBytes "QSAG.FTS.OT.PAD.V1"
+/-- Canonical `QSAG.*` customization tags (ASCII byte literals: `CANOPY.LEAF/v1`, `CANOPY.NODE/v1`, `FS/v1`, `FTS.OT.PAD.V1`). -/
+def qsagTagCanopyLeaf : List UInt8 := [81, 83, 65, 71, 46, 87, 72, 73, 82, 46, 67, 65, 78, 79, 80, 89, 46, 76, 69, 65, 70, 47, 118, 49]
+def qsagTagCanopyNode : List UInt8 := [81, 83, 65, 71, 46, 87, 72, 73, 82, 46, 67, 65, 78, 79, 80, 89, 46, 78, 79, 68, 69, 47, 118, 49]
+def qsagTagFiatShamir : List UInt8 := [81, 83, 65, 71, 46, 70, 83, 47, 118, 49]
+def qsagTagFtsOtPad   : List UInt8 := [81, 83, 65, 71, 46, 70, 84, 83, 46, 79, 84, 46, 80, 65, 68, 46, 86, 49]
 
 theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
     absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyLeaf ++ m₁) ≠
@@ -550,21 +577,14 @@ theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
       absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFiatShamir ++ m₂) ∧
     absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFiatShamir ++ m₁) ≠
       absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFtsOtPad ++ m₂) := by
-  have bEmpty : 8 * ([] : List UInt8).length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
-  have bLeaf  : 8 * qsagTagCanopyLeaf.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
-  have bNode  : 8 * qsagTagCanopyNode.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
-  have bFs    : 8 * qsagTagFiatShamir.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
-  have bPad   : 8 * qsagTagFtsOtPad.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
-  refine ⟨fun h => ?_, fun h => ?_, fun h => ?_⟩
-  · have hEq := (cshakePrefix_prefix_free bEmpty bLeaf bEmpty bNode
-      (pad10star1_injective (by decide) ⟨by decide, by decide⟩ h)).2.1
-    exact absurd hEq (by decide)
-  · have hEq := (cshakePrefix_prefix_free bEmpty bLeaf bEmpty bFs
-      (pad10star1_injective (by decide) ⟨by decide, by decide⟩ h)).2.1
-    exact absurd hEq (by decide)
-  · have hEq := (cshakePrefix_prefix_free bEmpty bFs bEmpty bPad
-      (pad10star1_injective (by decide) ⟨by decide, by decide⟩ h)).2.1
-    exact absurd hEq (by decide)
+  have b0 : 8 * ([] : List UInt8).length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
+  have b1 : 8 * qsagTagCanopyLeaf.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
+  have b2 : 8 * qsagTagCanopyNode.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
+  have b3 : 8 * qsagTagFiatShamir.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
+  have b4 : 8 * qsagTagFtsOtPad.length < 256 ^ 255 := bitlen_lt_sp800_bound (by decide)
+  exact ⟨fun h => absurd (cshakePrefix_prefix_free b0 b1 b0 b2 (pad10star1_injective (by decide) ⟨by decide, by decide⟩ h)).2.1 (by decide),
+         fun h => absurd (cshakePrefix_prefix_free b0 b1 b0 b3 (pad10star1_injective (by decide) ⟨by decide, by decide⟩ h)).2.1 (by decide),
+         fun h => absurd (cshakePrefix_prefix_free b0 b3 b0 b4 (pad10star1_injective (by decide) ⟨by decide, by decide⟩ h)).2.1 (by decide)⟩
 
 /-! ## 3. Precomputed-Midstate `cSHAKE256` Equivalence Theorem -/
 
@@ -582,20 +602,16 @@ theorem cshakePrefix_single_block_length {N S : List UInt8}
   let L := 2 + ((encodeString N).length + (encodeString S).length)
   change L + (136 - L % 136) % 136 = 136
   if hEq136 : L = 136 then
-    rw [hEq136]; decide
+    rw [hEq136]
   else
     have hMod : L % 136 = L := Nat.mod_eq_of_lt (by omega)
     rw [hMod, Nat.mod_eq_of_lt (by omega)]; omega
 
 theorem qsag_all_tags_single_block :
-    (cshakePrefix [] qsagTagCanopyLeaf).length = 136 ∧
-    (cshakePrefix [] qsagTagCanopyNode).length = 136 ∧
-    (cshakePrefix [] qsagTagFiatShamir).length = 136 ∧
-    (cshakePrefix [] qsagTagFtsOtPad).length = 136 :=
-  ⟨cshakePrefix_single_block_length (by decide),
-   cshakePrefix_single_block_length (by decide),
-   cshakePrefix_single_block_length (by decide),
-   cshakePrefix_single_block_length (by decide)⟩
+    (cshakePrefix [] qsagTagCanopyLeaf).length = 136 ∧ (cshakePrefix [] qsagTagCanopyNode).length = 136 ∧
+    (cshakePrefix [] qsagTagFiatShamir).length = 136 ∧ (cshakePrefix [] qsagTagFtsOtPad).length = 136 :=
+  ⟨cshakePrefix_single_block_length (by decide), cshakePrefix_single_block_length (by decide),
+   cshakePrefix_single_block_length (by decide), cshakePrefix_single_block_length (by decide)⟩
 
 private theorem pad10star1_block_aligned_prefix {r : Nat} (hr : 0 < r) (domByte : UInt8)
     (pfx msg : List UInt8) (hAligned : pfx.length % r = 0) :
@@ -672,10 +688,11 @@ theorem keccak_cshake256_precomputed_midstate_eq
     [] S msg outLen (fun h => hNonEmpty h.2) hFit
   dsimp only at hGen
   unfold evalCshake256FromMidstate evalCshake256Sponge at hGen
-  rw [if_neg (fun h : ([] : List UInt8) = [] ∧ S = [] => hNonEmpty h.2)] at hGen
+  rw [ite_eq_right_iff.mpr (fun h : ([] : List UInt8) = [] ∧ S = [] => False.elim (hNonEmpty h.2))] at hGen
   unfold evalSponge absorbPayload spongeSqueeze at hGen
   dsimp only [domCshake256] at hGen
-  rw [cshakePrefix_empty_name_eq, pad10star1_136_eq_padForRate, pad10star1_136_eq_padForRate,
+  have hCust : bytepad (encodeString [] ++ encodeString S) 136 = customizationPrefix S := rfl
+  rw [hCust, cshakePrefix_empty_name_eq, pad10star1_136_eq_padForRate, pad10star1_136_eq_padForRate,
       spongeAbsorb_keccak_eq_absorbBlocks, spongeAbsorb_keccak_eq_absorbBlocks,
       spongeSqueezeFuel_136_eq, spongeSqueezeFuel_136_eq,
       ← squeezeXofAux_eq, ← squeezeXofAux_eq] at hGen
@@ -703,10 +720,15 @@ theorem tooth_unframed_concat_collides :
 /-- **`#tooth` Zero Domain-Byte Padding Collision (`tooth_zero_domByte_pad10star1_collides`)**:
     Omitting `ValidDomByte` (`domByte = 0x00`) causes `[]` and `[0x00]` to collide identically! -/
 theorem tooth_zero_domByte_pad10star1_collides :
-    ∃ (m₁ m₂ : List UInt8),
-      ¬ ValidDomByte 0x00 ∧ m₁ ≠ m₂ ∧
-      absorbPayload 136 0x00 m₁ = absorbPayload 136 0x00 m₂ :=
-  ⟨[], [0x00], by decide, by decide, rfl⟩
+    ∃ (m₁ m₂ : List UInt8), ¬ ValidDomByte 0x00 ∧ m₁ ≠ m₂ ∧
+      absorbPayload 136 0x00 m₁ = absorbPayload 136 0x00 m₂ := by
+  refine ⟨[], [0x00], by decide, by decide, ?_⟩
+  have hPad : pad10star1 136 0x00 [] = pad10star1 136 0x00 [0x00] := by
+    unfold pad10star1
+    change ([] ++ [0] ++ List.replicate 134 0 ++ [0x80] : List UInt8) = ([0] ++ [0] ++ List.replicate 133 0 ++ [0x80] : List UInt8)
+    have hRep : (List.replicate 134 0 : List UInt8) = 0 :: List.replicate 133 0 := rfl
+    rw [hRep]; rfl
+  unfold absorbPayload; rw [hPad]
 
 /-- **`#tooth` Multi-Block Customization Overflow (`tooth_oversized_tag_midstate_single_block_fails`)**:
     When `(encodeString [] ++ encodeString S).length > 134` (`|S| = 131` bytes), `cshakePrefix [] S`
@@ -715,8 +737,18 @@ theorem tooth_oversized_tag_midstate_single_block_fails :
     ∃ S : List UInt8,
       S = List.replicate 131 0x41 ∧
       ¬ ((encodeString [] ++ encodeString S).length ≤ 134) ∧
-      (cshakePrefix [] S).length = 272 ∧ (cshakePrefix [] S).length ≠ 136 :=
-  ⟨List.replicate 131 0x41, rfl, by decide, rfl, by decide⟩
+      (cshakePrefix [] S).length = 272 ∧ (cshakePrefix [] S).length ≠ 136 := by
+  have hB0 : natBytesBE 0 = [0] := by decide
+  have hB136 : natBytesBE 136 = [136] := by decide
+  have hB1048 : natBytesBE 1048 = [4, 24] := by decide
+  have hEncLen : (encodeString [] ++ encodeString (List.replicate 131 0x41)).length = 136 := by
+    simp only [encodeString, leftEncode, List.length_append, List.length_replicate,
+      List.length_nil, Nat.mul_zero, hB0, hB1048, List.length_cons]
+  have hPfxLen : (cshakePrefix [] (List.replicate 131 0x41)).length = 272 := by
+    unfold cshakePrefix bytepad
+    simp only [show (136 : Nat) ≠ 0 from by decide, ↓reduceIte, List.length_append,
+      List.length_replicate, hEncLen, leftEncode, hB136, List.length_cons, List.length_nil]
+  exact ⟨List.replicate 131 0x41, rfl, by rw [hEncLen]; decide, hPfxLen, by rw [hPfxLen]; decide⟩
 
 theorem witness_pad10star1_valid_domain :
     ∃ (r : Nat) (d : UInt8) (m₁ m₂ : List UInt8),
@@ -724,9 +756,11 @@ theorem witness_pad10star1_valid_domain :
   ⟨136, domShake256, [0x61, 0x62], [0x61, 0x62], by decide, ⟨by decide, by decide⟩, rfl⟩
 
 theorem witness_cross_domain_pair :
-    ∃ (r : Nat) (d₁ d₂ : UInt8),
+    ∃ (r : Nat) (d₁ d₂ : UInt8) (m₁ m₂ : List UInt8),
+      m₁ = [0x01] ∧ m₂ = [0x02] ∧
       0 < r ∧ ValidDomByte d₁ ∧ ValidDomByte d₂ ∧ d₁ ≠ d₂ :=
-  ⟨136, domShake256, domCshake256, by decide, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩, by decide⟩
+  ⟨136, domShake256, domCshake256, [0x01], [0x02], rfl, rfl,
+   by decide, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩, by decide⟩
 
 theorem witness_cshakePrefix_canopy :
     ∃ (N₁ S₁ N₂ S₂ m₁ m₂ : List UInt8),

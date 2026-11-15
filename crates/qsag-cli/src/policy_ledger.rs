@@ -35,10 +35,10 @@ use qsag_policy::{
     AuthorizedSignReleaseToken, BDOZ_PREPROC_SLOTS, FsPolicyGenerationFence, InitiatorPeerMac,
     PolicySignerGuardShare, PolicyViolation, QuorumTierRule, SigningPayloadBinding,
     TransactionIntent, TransactionPolicy, WindowAdvanceAuthorization,
-    trusted_dealer_setup_for_testing,
 };
 
 use crate::anchor::{AnchorConfig, FsExternalMountAnchor};
+use crate::dealerless_ceremony::provision_distributed_policy_guards;
 use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, Secret32, ZeroizingBuf, exit, os_random_32, private_dir,
     read_bounded_file, read_input, read_text, replace_secret, write_new,
@@ -591,7 +591,8 @@ fn provision_guards(
 ) -> Result<Vec<PolicySignerGuardShare>, CliError> {
     let entropy = party_secret(seed, b"guard dealer entropy", 0);
     let authority = party_secret(seed, b"window authority", 0);
-    trusted_dealer_setup_for_testing(entropy.0, parties)
+    provision_distributed_policy_guards(entropy.0, parties)
+        .map_err(|e| CliError::state(format!("provisioning policy guard failed: {e:?}")))?
         .into_iter()
         .map(|guard| {
             guard

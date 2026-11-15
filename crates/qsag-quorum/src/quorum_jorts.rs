@@ -35,9 +35,13 @@
 //!   and exchange plain message values; `crate::party_node` runs them over a wire transport,
 //!   one party per thread. [`CommitteePartitionedJorts`] and [`BftShamirJorts`] drive all
 //!   custodians in one process and exist for tests and measurements.
-//! * Staging ([`stage_committee_partitioned`], [`stage_bft_shamir`]) is a dealer: it derives
-//!   every chain from one seed and hands out shares. In a deployment that role is a
-//!   multi-party computation; nothing here replaces it.
+//! * [`stage_committee_partitioned`] and [`stage_bft_shamir`] are deterministic single-seed
+//!   test and measurement helpers. Deployment dealerless distributed MPC staging and proactive
+//!   share refresh are provided in [`crate::dealerless_staging`]
+//!   ([`crate::dealerless_staging::stage_committee_partitioned_dealerless_mpc`],
+//!   [`crate::dealerless_staging::stage_bft_shamir_dealerless_mpc`],
+//!   [`crate::dealerless_staging::refresh_committee_shares`], and
+//!   [`crate::dealerless_staging::refresh_bft_shamir_shares`]).
 //! * A certificate is authenticated with one MAC per verifying custodian under pairwise keys.
 //!   It convinces any custodian and nobody else.
 
@@ -81,9 +85,9 @@ const TAG_DIGEST: &[u8] = b"QSAG.QUORUM.DIGEST/v1";
 const TAG_BINDING: &[u8] = b"QSAG.QUORUM.BINDING/v1";
 const TAG_ECHO_MAC: &[u8] = b"QSAG.QUORUM.ECHO.MAC/v1";
 const TAG_ACK_MAC: &[u8] = b"QSAG.QUORUM.ACK.MAC/v1";
-const TAG_PAIR_KEY: &[u8] = b"QSAG.QUORUM.PAIR.KEY/v1";
+pub(crate) const TAG_PAIR_KEY: &[u8] = b"QSAG.QUORUM.PAIR.KEY/v1";
 const TAG_STAGE_SK: &[u8] = b"QSAG.QUORUM.STAGE.SK/v1";
-const TAG_STAGE_PK_SEED: &[u8] = b"QSAG.QUORUM.STAGE.PKSEED/v1";
+pub(crate) const TAG_STAGE_PK_SEED: &[u8] = b"QSAG.QUORUM.STAGE.PKSEED/v1";
 
 /// Errors of the quorum-switching protocols.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -399,6 +403,9 @@ pub fn quorum_jorts_verify(pk: &QuorumPublicKey, msg: &[u8], sig: &QuorumJortsSi
     )
 }
 
+/// Alias of [`quorum_jorts_verify`] for callers verifying dealerless or dealer-staged signatures.
+pub use quorum_jorts_verify as verify_jorts_signature;
+
 /// The public part of a staged key: the tree and the chain ends of every assigned leaf.
 #[derive(Clone, Debug)]
 pub struct QuorumTree {
@@ -408,7 +415,7 @@ pub struct QuorumTree {
 }
 
 impl QuorumTree {
-    fn build(pk_seed: Node, height: u8, chain_ends: BTreeMap<u64, Vec<Node>>) -> Self {
+    pub(crate) fn build(pk_seed: Node, height: u8, chain_ends: BTreeMap<u64, Vec<Node>>) -> Self {
         let leaves: Vec<Node> = (0..1u64 << height)
             .map(|leaf| match chain_ends.get(&leaf) {
                 Some(ends) => leaf_hash(&pk_seed, leaf, ends),
@@ -647,7 +654,7 @@ pub const MAX_QUORUM_PARTIES: usize = 255;
 /// Maximum enumerated committees; use `BftShamirJorts` for larger configurations.
 pub const MAX_COMMITTEES: usize = 1024;
 const MAX_STAGED_SHARE_BYTES: usize = 256 * 1024 * 1024;
-fn check_staging_budget(height: u8, copies: usize) -> Result<(), QuorumError> {
+pub(crate) fn check_staging_budget(height: u8, copies: usize) -> Result<(), QuorumError> {
     if height == 0
         || height > 10
         || (1usize << height)
@@ -743,12 +750,45 @@ pub struct CommitteeShareStore {
     leaves: Vec<Vec<Node>>,
 }
 
+impl CommitteeShareStore {
+    pub(crate) fn from_parts(committee: usize, leaves: Vec<Vec<Node>>) -> Self {
+        Self { committee, leaves }
+    }
+
+    pub(crate) fn committee(&self) -> usize {
+        self.committee
+    }
+
+    pub(crate) fn leaves_mut(&mut self) -> &mut [Vec<Node>] {
+        &mut self.leaves
+    }
+}
+
 /// What staging hands to one custodian.
 pub struct CommitteePartyMaterial {
     pub party: usize,
     /// Pairwise MAC keys, indexed by peer.
     mac_keys: Vec<Node>,
     pub stores: Vec<CommitteeShareStore>,
+}
+
+impl CommitteePartyMaterial {
+    pub(crate) fn from_parts(
+        party: usize,
+        mac_keys: Vec<Node>,
+        stores: Vec<CommitteeShareStore>,
+    ) -> Self {
+        Self {
+            party,
+            mac_keys,
+            stores,
+        }
+    }
+
+    pub(crate) fn replace_mac_keys(&mut self, new_keys: Vec<Node>) {
+        wipe_nodes(&mut self.mac_keys);
+        self.mac_keys = new_keys;
+    }
 }
 
 /// Output of [`stage_committee_partitioned`].
@@ -964,6 +1004,24 @@ impl<W: DurableWal> CommitteeCustodian<W> {
             })
     }
 
+    pub(crate) fn slot_leaves_mut(&mut self, committee: usize) -> Result<&mut [Vec<Node>], QuorumError> {
+        let party = self.party;
+        self.slots
+            .get_mut(&committee)
+            .map(|s| s.leaves.0.as_mut_slice())
+            .ok_or(QuorumError::NotCommitteeMember { party, committee })
+    }
+
+    pub(crate) fn replace_mac_keys(&mut self, new_keys: Vec<Node>) -> Result<(), QuorumError> {
+        if new_keys.len() != self.layout.n {
+            return Err(QuorumError::InvalidConfig(
+                "one MAC key per custodian required",
+            ));
+        }
+        self.mac_keys = SecretMacKeys(new_keys);
+        Ok(())
+    }
+
     /// The custodian's high-water mark for `committee`.
     pub fn next_epoch(&self, committee: usize) -> Result<u64, QuorumError> {
         Ok(self.slot(committee)?.latch.next_epoch())
@@ -1149,18 +1207,24 @@ impl CommitteePartitionedJorts<MemoryWal> {
             vec![MemoryWal::new(); store_count]
         })
     }
+
+    /// Build from pre-staged (e.g. dealerless MPC) committee keys with volatile logs.
+    pub fn from_staged(staged: StagedCommitteeKeys) -> Result<Self, QuorumError> {
+        Self::from_staged_durable(staged, |_party, store_count| {
+            vec![MemoryWal::new(); store_count]
+        })
+    }
 }
 
 impl<W: DurableWal> CommitteePartitionedJorts<W> {
-    /// Stage a key with caller-provisioned durable logs (one per committee slot per party).
-    pub fn stage_durable(
-        t: usize,
-        n: usize,
-        height: u8,
-        seed: &Node,
+    /// Build from pre-staged (e.g. dealerless MPC) committee keys with caller-provisioned logs.
+    pub fn from_staged_durable(
+        staged: StagedCommitteeKeys,
         mut make_wals: impl FnMut(usize, usize) -> Vec<W>,
     ) -> Result<Self, QuorumError> {
-        let staged = stage_committee_partitioned(t, n, height, seed)?;
+        if staged.parties.len() != staged.layout.n {
+            return Err(QuorumError::InvalidConfig("party count mismatch"));
+        }
         let custodians = staged
             .parties
             .into_iter()
@@ -1175,6 +1239,18 @@ impl<W: DurableWal> CommitteePartitionedJorts<W> {
             custodians,
             ots_release_cache: BTreeMap::new(),
         })
+    }
+
+    /// Stage a key with caller-provisioned durable logs (one per committee slot per party).
+    pub fn stage_durable(
+        t: usize,
+        n: usize,
+        height: u8,
+        seed: &Node,
+        make_wals: impl FnMut(usize, usize) -> Vec<W>,
+    ) -> Result<Self, QuorumError> {
+        let staged = stage_committee_partitioned(t, n, height, seed)?;
+        Self::from_staged_durable(staged, make_wals)
     }
     pub fn public_key(&self) -> &QuorumPublicKey {
         self.tree.public_key()
@@ -1340,6 +1416,25 @@ pub struct ShamirPartyMaterial {
     leaves: Vec<Vec<Node>>,
 }
 
+impl ShamirPartyMaterial {
+    pub(crate) fn from_parts(party: usize, mac_keys: Vec<Node>, leaves: Vec<Vec<Node>>) -> Self {
+        Self {
+            party,
+            mac_keys,
+            leaves,
+        }
+    }
+
+    pub(crate) fn leaves_mut(&mut self) -> &mut [Vec<Node>] {
+        &mut self.leaves
+    }
+
+    pub(crate) fn replace_mac_keys(&mut self, new_keys: Vec<Node>) {
+        wipe_nodes(&mut self.mac_keys);
+        self.mac_keys = new_keys;
+    }
+}
+
 /// Output of [`stage_bft_shamir`].
 pub struct StagedShamirKeys {
     pub cfg: QuorumConfig,
@@ -1347,13 +1442,13 @@ pub struct StagedShamirKeys {
     pub parties: Vec<ShamirPartyMaterial>,
 }
 
-fn shamir_point(party: usize) -> TowerGf256 {
+pub(crate) fn shamir_point(party: usize) -> TowerGf256 {
     TowerGf256(party as u8 + 1)
 }
 
 /// Branchless, LUT-free multiplication in the protocol's Wiedemann tower basis.
 /// Using an AES-polynomial Russian-peasant multiplier here would change the field encoding.
-fn gf256_mul_ct(a: u8, b: u8) -> u8 {
+pub(crate) fn gf256_mul_ct(a: u8, b: u8) -> u8 {
     TowerGf256(a).mul(TowerGf256(b)).0
 }
 
@@ -1521,6 +1616,20 @@ impl<W: DurableWal> ShamirCustodian<W> {
 
     pub fn into_wal(self) -> W {
         self.latch.into_wal()
+    }
+
+    pub(crate) fn leaves_mut(&mut self) -> &mut [Vec<Node>] {
+        &mut self.leaves.0
+    }
+
+    pub(crate) fn replace_mac_keys(&mut self, new_keys: Vec<Node>) -> Result<(), QuorumError> {
+        if new_keys.len() != self.cfg.n {
+            return Err(QuorumError::InvalidConfig(
+                "one MAC key per custodian required",
+            ));
+        }
+        self.mac_keys = SecretMacKeys(new_keys);
+        Ok(())
     }
 
     fn derive(&self, leaf: u64, msg: &[u8]) -> Result<LeafRecord, QuorumError> {
@@ -1946,17 +2055,23 @@ impl BftShamirJorts<MemoryWal> {
     pub fn stage(cfg: QuorumConfig, height: u8, seed: &Node) -> Result<Self, QuorumError> {
         Self::stage_durable(cfg, height, seed, |_party| MemoryWal::new())
     }
+
+    /// Build from pre-staged (e.g. dealerless MPC) Shamir keys with volatile logs.
+    pub fn from_staged(staged: StagedShamirKeys) -> Result<Self, QuorumError> {
+        Self::from_staged_durable(staged, |_party| MemoryWal::new())
+    }
 }
 
 impl<W: DurableWal> BftShamirJorts<W> {
-    /// Stage a key with caller-provisioned durable logs (one per custodian).
-    pub fn stage_durable(
-        cfg: QuorumConfig,
-        height: u8,
-        seed: &Node,
+    /// Build from pre-staged (e.g. dealerless MPC) Shamir keys with caller-provisioned logs.
+    pub fn from_staged_durable(
+        staged: StagedShamirKeys,
         mut make_wal: impl FnMut(usize) -> W,
     ) -> Result<Self, QuorumError> {
-        let staged = stage_bft_shamir(cfg, height, seed)?;
+        if staged.parties.len() != staged.cfg.n {
+            return Err(QuorumError::InvalidConfig("party count mismatch"));
+        }
+        let cfg = staged.cfg;
         let custodians = staged
             .parties
             .into_iter()
@@ -1971,6 +2086,17 @@ impl<W: DurableWal> BftShamirJorts<W> {
             custodians,
             ots_release_cache: BTreeMap::new(),
         })
+    }
+
+    /// Stage a key with caller-provisioned durable logs (one per custodian).
+    pub fn stage_durable(
+        cfg: QuorumConfig,
+        height: u8,
+        seed: &Node,
+        make_wal: impl FnMut(usize) -> W,
+    ) -> Result<Self, QuorumError> {
+        let staged = stage_bft_shamir(cfg, height, seed)?;
+        Self::from_staged_durable(staged, make_wal)
     }
     pub fn public_key(&self) -> &QuorumPublicKey {
         self.tree.public_key()

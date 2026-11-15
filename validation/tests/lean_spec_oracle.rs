@@ -15,7 +15,7 @@ use blstrs::{G1Affine as BlsRefG1Affine, G1Projective as BlsRefG1Proj, Scalar as
 use fips205::slh_dsa_shake_128f;
 use fips205::traits::{KeyGen, SerDes, Verifier};
 use ghash::universal_hash::{KeyInit, UniversalHash};
-use group::GroupEncoding;
+use group::{Group, GroupEncoding};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::SecretKey as K256SecretKey;
 use p3_field::extension::BinomialExtensionField;
@@ -23,15 +23,16 @@ use p3_field::{AbstractExtensionField, AbstractField, Field as P3Field, PrimeFie
 use p3_goldilocks::Goldilocks as P3Goldilocks;
 use pasta_curves::arithmetic::CurveExt;
 use pasta_curves::pallas::{Point as PallasRefPoint, Scalar as PallasRefFq};
+use qsag_accel::keccak::{KeccakSponge, keccak256, sha3_256};
 use qsag_agg::field::{Goldilocks as AggGoldilocks, GoldilocksExt4};
-use qsag_asm::{GFNI_MAT_POLY11B_TO_TOWER, GFNI_MAT_TOWER_TO_POLY11B};
+use qsag_asm::{GFNI_MAT_POLY_TO_T3, GFNI_MAT_T3_TO_POLY};
 use qsag_core::field::goldilocks::{Goldilocks as CoreGoldilocks, GoldilocksExt2};
-use qsag_core::field::tower::{Tower128, tower_mul_bits, tower_mul_t3};
+use qsag_core::field::tower::{Tower128, TowerGf256, tower_mul_bits};
 use qsag_core::fips205::{
-    Fips205Adrs, Fips205AdrsType, SLH_DSA_SHAKE_128F, slh_keygen_internal, slh_sign, slh_verify,
+    Fips205Adrs, Fips205AdrsType, Fips205Params, slh_keygen_internal, slh_sign, slh_verify,
     try_wots_base16_digits_and_csum,
 };
-use qsag_core::sponge::keccak::{cshake256_xof, keccak_f1600, keccak256, sha3_256, sha3_512, shake256_xof};
+use qsag_core::sponge::keccak::{cshake256_xof, keccak_f1600, shake256_xof};
 use qsag_core::sponge::poseidon2::{poseidon2_hash32, poseidon2_perm12};
 use qsag_external_validation::{
     build_poseidon2_inverse_matrices, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul,
@@ -179,11 +180,25 @@ fn load_external_oracle() -> ExternalOracleRoot {
     serde_json::from_str(&raw).expect("parse ExternalSpecOracle JSON")
 }
 
+fn qsag_sha3_512(input: &[u8]) -> [u8; 64] {
+    let mut sp = KeccakSponge::<72>::new();
+    sp.absorb(input);
+    sp.finalize(0x06);
+    let mut out = [0u8; 64];
+    sp.squeeze(&mut out);
+    out
+}
+
+#[inline]
+fn p3_gl(raw: u64) -> P3Goldilocks {
+    P3Goldilocks::from_canonical_u64(raw % 0xFFFF_FFFF_0000_0001)
+}
+
 /// Convert `qsag_agg::GoldilocksExt4` (`[c00, c01, c10, c11]` where $v^2 = u$, $u^2 = 7$)
 /// into a pair of `p3_goldilocks` quadratic extension elements `(c0, c1)` representing $c_0 + c_1 v$,
 /// and multiply `(a0 + a1 v)(b0 + b1 v) = (a0*b0 + u*a1*b1) + (a0*b1 + a1*b0)v` using Plonky3!
 fn p3_ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    let u = P3Ext2::from_base_slice(&[P3Goldilocks::ZERO, P3Goldilocks::ONE]);
+    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
     let a0 = P3Ext2::from_base_slice(&[
         P3Goldilocks::from_canonical_u64(a[0]),
         P3Goldilocks::from_canonical_u64(a[1]),
@@ -202,8 +217,8 @@ fn p3_ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
     ]);
     let c0 = a0 * b0 + u * a1 * b1;
     let c1 = a0 * b1 + a1 * b0;
-    let c0s = c0.as_base_slice();
-    let c1s = c1.as_base_slice();
+    let c0s: &[P3Goldilocks] = c0.as_base_slice();
+    let c1s: &[P3Goldilocks] = c1.as_base_slice();
     [
         c0s[0].as_canonical_u64(),
         c0s[1].as_canonical_u64(),
@@ -213,7 +228,7 @@ fn p3_ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 }
 
 fn p3_ext4_inv(a: [u64; 4]) -> [u64; 4] {
-    let u = P3Ext2::from_base_slice(&[P3Goldilocks::ZERO, P3Goldilocks::ONE]);
+    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
     let a0 = P3Ext2::from_base_slice(&[
         P3Goldilocks::from_canonical_u64(a[0]),
         P3Goldilocks::from_canonical_u64(a[1]),
@@ -228,8 +243,8 @@ fn p3_ext4_inv(a: [u64; 4]) -> [u64; 4] {
     };
     let c0 = a0 * norm_inv;
     let c1 = -(a1 * norm_inv);
-    let c0s = c0.as_base_slice();
-    let c1s = c1.as_base_slice();
+    let c0s: &[P3Goldilocks] = c0.as_base_slice();
+    let c1s: &[P3Goldilocks] = c1.as_base_slice();
     [
         c0s[0].as_canonical_u64(),
         c0s[1].as_canonical_u64(),
@@ -265,8 +280,8 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         assert_eq!(qa.inv().to_canonical_u64(), lean_inv_a);
 
         // Plonky3 `p3-goldilocks` independent verification
-        let pa = P3Goldilocks::from_noncanonical_u64(a_raw);
-        let pb = P3Goldilocks::from_noncanonical_u64(b_raw);
+        let pa = p3_gl(a_raw);
+        let pb = p3_gl(b_raw);
         assert_eq!(pa.as_canonical_u64(), lean_a);
         assert_eq!(pb.as_canonical_u64(), lean_b);
         assert_eq!((pa + pb).as_canonical_u64(), lean_add);
@@ -344,13 +359,13 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         let lean_shake64 = hex::decode(&row.shake256_64_hex).unwrap();
         let lean_cshake64 = hex::decode(&row.cshake256_64_hex).unwrap();
 
-        // qsag-core
+        // qsag-core / qsag-accel
         assert_eq!(sha3_256(&msg).as_slice(), lean_sha3_256.as_slice());
-        assert_eq!(sha3_512(&msg).as_slice(), lean_sha3_512.as_slice());
+        assert_eq!(qsag_sha3_512(&msg).as_slice(), lean_sha3_512.as_slice());
         assert_eq!(keccak256(&msg).as_slice(), lean_keccak256.as_slice());
         assert_eq!(shake256_xof(64, &msg), lean_shake64);
         assert_eq!(
-            cshake256_xof(64, b"QSAG.EXTERNAL.ORACLE", &msg),
+            cshake256_xof(64, b"QSAG.EXTERNAL.SPEC", &msg),
             lean_cshake64
         );
 
@@ -385,7 +400,7 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         tk_shake.squeeze(&mut out64);
         assert_eq!(out64.as_slice(), lean_shake64.as_slice());
 
-        let mut tk_cshake = CShake::v256(b"", b"QSAG.EXTERNAL.ORACLE");
+        let mut tk_cshake = CShake::v256(b"", b"QSAG.EXTERNAL.SPEC");
         tk_cshake.update(&msg);
         let mut out_cshake64 = [0u8; 64];
         tk_cshake.squeeze(&mut out_cshake64);
@@ -394,23 +409,23 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
 
     // 5. Wiedemann Binary Tower `GF(2^8)` (`T_3`) <-> Intel `GFNI` AES `0x11B` isomorphism & `Tower128` (`T_7`):
     for row in &oracle.gf256_tower_gfni {
-        assert_eq!(tower_mul_t3(row.a, row.b), row.t3_mul);
+        assert_eq!(TowerGf256(row.a).mul(TowerGf256(row.b)).0, row.t3_mul);
         assert_eq!(
-            gfni_affine_byte(GFNI_MAT_TOWER_TO_POLY11B, row.a, 0),
+            gfni_affine_byte(GFNI_MAT_T3_TO_POLY, row.a, 0),
             row.phi_a
         );
         assert_eq!(
-            gfni_affine_byte(GFNI_MAT_TOWER_TO_POLY11B, row.b, 0),
+            gfni_affine_byte(GFNI_MAT_T3_TO_POLY, row.b, 0),
             row.phi_b
         );
         let poly_prod = gf256_poly11b_mul(row.phi_a, row.phi_b);
         assert_eq!(
-            gfni_affine_byte(GFNI_MAT_POLY11B_TO_TOWER, poly_prod, 0),
+            gfni_affine_byte(GFNI_MAT_POLY_TO_T3, poly_prod, 0),
             row.t3_mul
         );
         let poly_inv = gf256_poly11b_inv(row.phi_a);
         assert_eq!(
-            gfni_affine_byte(GFNI_MAT_POLY11B_TO_TOWER, poly_inv, 0),
+            gfni_affine_byte(GFNI_MAT_POLY_TO_T3, poly_inv, 0),
             row.t3_inv_a
         );
     }
@@ -482,8 +497,46 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
             .try_into()
             .unwrap();
 
+        // Reduce 256-bit integer scalar modulo prime curve order `PALLAS_Q` when `sk_le >= PALLAS_Q`
+        // (row 4 in `ExternalSpecOracle.lean` intentionally tests `[k] SpendAuthG` for a scalar `k`
+        // in `(q_pallas, r_bls381)`, exercising prime-order subgroup wrap `[q_pallas] G = O`!).
+        let mut limbs = [
+            u64::from_le_bytes(sk_le[0..8].try_into().unwrap()),
+            u64::from_le_bytes(sk_le[8..16].try_into().unwrap()),
+            u64::from_le_bytes(sk_le[16..24].try_into().unwrap()),
+            u64::from_le_bytes(sk_le[24..32].try_into().unwrap()),
+        ];
+        let q_mod = qsag_migrate::pallas::PALLAS_Q;
+        let ge_q = |a: &[u64; 4]| -> bool {
+            for i in (0..4).rev() {
+                if a[i] != q_mod[i] {
+                    return a[i] > q_mod[i];
+                }
+            }
+            true
+        };
+        if ge_q(&limbs) {
+            // Both `qsag-migrate` and upstream `pasta_curves` must reject non-canonical `sk_le >= q`.
+            assert!(FqPallas::from_nonzero_le_bytes(&sk_le).is_none());
+            assert!(Option::<PallasRefFq>::from(ff::PrimeField::from_repr(sk_le)).is_none());
+            while ge_q(&limbs) {
+                let mut borrow = 0u128;
+                for i in 0..4 {
+                    let diff = (limbs[i] as u128)
+                        .wrapping_sub(q_mod[i] as u128)
+                        .wrapping_sub(borrow);
+                    limbs[i] = diff as u64;
+                    borrow = (diff >> 127) & 1;
+                }
+            }
+        }
+        let mut sk_canon_le = [0u8; 32];
+        for (i, &w) in limbs.iter().enumerate() {
+            sk_canon_le[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
+        }
+
         // qsag-migrate
-        let qfq = FqPallas::from_nonzero_le_bytes(&sk_le).unwrap();
+        let qfq = FqPallas::from_nonzero_le_bytes(&sk_canon_le).unwrap();
         let qpt = PallasPoint::spend_auth_mul_ct(&qfq);
         let (qx, qy) = qpt.to_affine().unwrap();
         assert_eq!(qx.to_le_bytes(), x_le);
@@ -491,7 +544,7 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         assert_eq!(qpt.to_compressed_bytes(), comp);
 
         // Upstream `pasta_curves`
-        let ref_fq = Option::<PallasRefFq>::from(ff::PrimeField::from_repr(sk_le)).unwrap();
+        let ref_fq = Option::<PallasRefFq>::from(ff::PrimeField::from_repr(sk_canon_le)).unwrap();
         let ref_pt = ref_spend_auth_g * ref_fq;
         assert_eq!(ref_pt.to_bytes(), comp);
     }
@@ -529,32 +582,33 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
     let opt_rand: [u8; 16] = hex::decode(&f.opt_rand_hex).unwrap().try_into().unwrap();
     let ctx = hex::decode(&f.ctx_hex).unwrap();
     let msg = hex::decode(&f.msg_hex).unwrap();
-    let lean_pk = hex::decode(&f.pk_hex).unwrap();
-    let lean_sk = hex::decode(&f.sk_hex).unwrap();
-    let lean_sig = hex::decode(&f.sig_hex).unwrap();
-    assert_eq!(lean_sig.len(), slh_dsa_shake_128f::SIG_LEN);
+    let oracle_pk = hex::decode(&f.pk_hex).unwrap();
+    let oracle_sk = hex::decode(&f.sk_hex).unwrap();
+    let oracle_sig = hex::decode(&f.sig_hex).unwrap();
+    assert_eq!(oracle_sig.len(), slh_dsa_shake_128f::SIG_LEN);
 
+    let params_128f = &Fips205Params::SLH_DSA_SHAKE_128F;
     let (q_sk, q_pk) =
-        slh_keygen_internal(SLH_DSA_SHAKE_128F, &sk_seed, &sk_prf, &pk_seed).unwrap();
-    assert_eq!(q_pk.to_bytes(), lean_pk);
-    assert_eq!(q_sk.to_bytes(), lean_sk);
-    let q_sig = slh_sign(SLH_DSA_SHAKE_128F, &msg, &ctx, &q_sk, Some(&opt_rand)).unwrap();
+        slh_keygen_internal(params_128f, &sk_seed, &sk_prf, &pk_seed).unwrap();
+    assert_eq!(q_pk.to_bytes(), oracle_pk);
+    assert_eq!(q_sk.to_bytes(), oracle_sk);
+    let q_sig = slh_sign(params_128f, &msg, &ctx, &q_sk, Some(&opt_rand)).unwrap();
     assert_eq!(
-        q_sig.to_bytes(),
-        lean_sig,
+        q_sig,
+        oracle_sig,
         "Lean 4 Fips205.lean signature must match qsag_core::fips205 byte-for-byte"
     );
-    assert!(slh_verify(SLH_DSA_SHAKE_128F, &msg, &q_sig, &ctx, &q_pk));
+    assert!(slh_verify(params_128f, &msg, &q_sig, &ctx, &q_pk));
 
     // Upstream `fips205` crate verification of the Lean-4-generated 17,088-byte signature!
     let (up_pk, up_sk) = slh_dsa_shake_128f::KG::keygen_with_seeds(&sk_seed, &sk_prf, &pk_seed);
-    assert_eq!(up_pk.into_bytes().as_slice(), lean_pk.as_slice());
-    assert_eq!(up_sk.into_bytes().as_slice(), lean_sk.as_slice());
-    let lean_pk_arr: [u8; slh_dsa_shake_128f::PK_LEN] = lean_pk.try_into().unwrap();
-    let lean_sig_arr: [u8; slh_dsa_shake_128f::SIG_LEN] = lean_sig.try_into().unwrap();
-    let up_pk_decoded = slh_dsa_shake_128f::PublicKey::try_from_bytes(&lean_pk_arr).unwrap();
+    assert_eq!(up_pk.into_bytes().as_slice(), oracle_pk.as_slice());
+    assert_eq!(up_sk.into_bytes().as_slice(), oracle_sk.as_slice());
+    let oracle_pk_arr: [u8; slh_dsa_shake_128f::PK_LEN] = oracle_pk.try_into().unwrap();
+    let oracle_sig_arr: [u8; slh_dsa_shake_128f::SIG_LEN] = oracle_sig.try_into().unwrap();
+    let up_pk_decoded = slh_dsa_shake_128f::PublicKey::try_from_bytes(&oracle_pk_arr).unwrap();
     assert!(
-        up_pk_decoded.verify(&msg, &lean_sig_arr, &ctx),
+        up_pk_decoded.verify(&msg, &oracle_sig_arr, &ctx),
         "Upstream `fips205` crate must accept the 17,088-byte signature produced by Lean 4 spec!"
     );
 }
@@ -582,8 +636,8 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                 let b: u64 = parts[3].parse().unwrap();
                 let qa = CoreGoldilocks::from_u64_reduced(a);
                 let qb = CoreGoldilocks::from_u64_reduced(b);
-                let pa = P3Goldilocks::from_noncanonical_u64(a);
-                let pb = P3Goldilocks::from_noncanonical_u64(b);
+                let pa = p3_gl(a);
+                let pb = p3_gl(b);
                 let (qz, pz) = match parts[1] {
                     "add" => ((qa + qb).to_canonical_u64(), (pa + pb).as_canonical_u64()),
                     "sub" => ((qa - qb).to_canonical_u64(), (pa - pb).as_canonical_u64()),
@@ -609,12 +663,12 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                     CoreGoldilocks::from_u64_reduced(y_limbs[1]),
                 );
                 let px = P3Ext2::from_base_slice(&[
-                    P3Goldilocks::from_noncanonical_u64(x_limbs[0]),
-                    P3Goldilocks::from_noncanonical_u64(x_limbs[1]),
+                    p3_gl(x_limbs[0]),
+                    p3_gl(x_limbs[1]),
                 ]);
                 let py = P3Ext2::from_base_slice(&[
-                    P3Goldilocks::from_noncanonical_u64(y_limbs[0]),
-                    P3Goldilocks::from_noncanonical_u64(y_limbs[1]),
+                    p3_gl(y_limbs[0]),
+                    p3_gl(y_limbs[1]),
                 ]);
                 let (qz, pz) = match parts[1] {
                     "add" => (qx + qy, px + py),
@@ -622,12 +676,12 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                     "mul" => (qx * qy, px * py),
                     "inv" => (
                         qx.inv().unwrap_or(GoldilocksExt2::ZERO),
-                        px.try_inverse().unwrap_or(P3Ext2::ZERO),
+                        px.try_inverse().unwrap_or_else(P3Ext2::zero),
                     ),
                     other => panic!("unexpected ext2 op {other}"),
                 };
                 let q_str = format!("{},{}", qz.c0.to_canonical_u64(), qz.c1.to_canonical_u64());
-                let ps = pz.as_base_slice();
+                let ps: &[P3Goldilocks] = pz.as_base_slice();
                 let p_str = format!("{},{}", ps[0].as_canonical_u64(), ps[1].as_canonical_u64());
                 assert_eq!(q_str, *expected, "qsag ext2 mismatch on {req}");
                 assert_eq!(p_str, *expected, "p3 ext2 mismatch on {req}");
@@ -658,8 +712,8 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                 let q_str = q_limbs.map(|v| v.to_string()).join(",");
                 assert_eq!(q_str, *expected, "qsag ext4 mismatch on {req}");
 
-                let xl_red = xl.map(|v| P3Goldilocks::from_noncanonical_u64(v).as_canonical_u64());
-                let yl_red = yl.map(|v| P3Goldilocks::from_noncanonical_u64(v).as_canonical_u64());
+                let xl_red = xl.map(|v| p3_gl(v).as_canonical_u64());
+                let yl_red = yl.map(|v| p3_gl(v).as_canonical_u64());
                 if parts[1] == "mul" {
                     assert_eq!(p3_ext4_mul(xl_red, yl_red), q_limbs);
                 } else if parts[1] == "inv" {
@@ -825,14 +879,14 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
     let msg = f["msg_ascii"].as_str().unwrap().as_bytes();
     let (up_pk, up_sk) = slh_dsa_shake_128f::KG::keygen_with_seeds(&sk_seed, &sk_prf, &pk_seed);
     assert_eq!(
-        hex::encode(up_pk.into_bytes()),
+        hex::encode(up_pk.clone().into_bytes()),
         f["pk_hex"].as_str().unwrap()
     );
     // Deterministic pure signing in FIPS 205 uses `opt_rand = pk_seed`; verify `qsag_core` and
     // upstream `fips205` match the Lean snapshot's `sig_shake256_32`, `sig_head_64_hex`, and `sig_tail_64_hex`!
-    let (q_sk, _) = slh_keygen_internal(SLH_DSA_SHAKE_128F, &sk_seed, &sk_prf, &pk_seed).unwrap();
-    let q_sig = slh_sign(SLH_DSA_SHAKE_128F, msg, b"", &q_sk, Some(&pk_seed)).unwrap();
-    let q_sig_bytes = q_sig.to_bytes();
+    let params_128f = &Fips205Params::SLH_DSA_SHAKE_128F;
+    let (q_sk, _) = slh_keygen_internal(params_128f, &sk_seed, &sk_prf, &pk_seed).unwrap();
+    let q_sig_bytes = slh_sign(params_128f, msg, b"", &q_sk, Some(&pk_seed)).unwrap();
     assert_eq!(
         hex::encode(shake256_xof(32, &q_sig_bytes)),
         f["sig_shake256_32"].as_str().unwrap()

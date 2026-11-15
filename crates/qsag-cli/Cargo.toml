@@ -16,5 +16,13 @@ qsag-accel = { path = "../qsag-accel", features = ["std"] }
 qsag-addr = { path = "../qsag-addr", features = ["std"] }
 qsag-agg = { path = "../qsag-agg", features = ["std"] }
 qsag-core = { path = "../qsag-core", features = ["std"] }
-qsag-fts = { path = "../qsag-fts", features = ["std", "test-dealer"] }
-qsag-policy = { path = "../qsag-policy", features = ["std", "test-dealer"] }
+qsag-cred = { path = "../qsag-cred", features = ["std"] }
+qsag-fts = { path = "../qsag-fts", features = ["std"] }
+qsag-hd = { path = "../qsag-hd", features = ["std"] }
+qsag-migrate = { path = "../qsag-migrate", features = ["std"] }
+qsag-policy = { path = "../qsag-policy", features = ["std"] }
+qsag-quorum = { path = "../qsag-quorum", features = ["std"] }
+
+[features]
+default = []
+test-dealer = ["qsag-fts/test-dealer", "qsag-policy/test-dealer"]

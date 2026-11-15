@@ -8,12 +8,15 @@
 //! 2. `ParallelSeededFts`: three parties sign under one public key without reconstructing it,
 //!    with a durable burn journal that refuses to spend an epoch twice, even after a restart.
 
+#[allow(dead_code)]
+#[path = "../src/dealerless_ceremony.rs"]
+mod dealerless_ceremony;
+
 use qsag_accel::CpuReferenceBackend;
 use qsag_fts::{
     FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsSignature,
     FrontierFtsSigningKey, FsWalFtsEpochLatch, ParallelSeededError, ParallelSeededParams,
-    ParallelSeededSignature, ParallelSeededThresholdSetup, verify_frontier_fts,
-    verify_parallel_seeded_fts,
+    ParallelSeededSignature, verify_frontier_fts, verify_parallel_seeded_fts,
 };
 
 fn main() {
@@ -70,15 +73,11 @@ fn main() {
         num_chains: 68,
         target_sum: 136,
     };
-    let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
-        params,
-        3,
-        [0x21; 32],
-        [0x22; 32],
-        &CpuReferenceBackend,
-    )
-    .expect("valid parameters");
+    let mut setup =
+        dealerless_ceremony::DealerlessThresholdFtsSetup::run_ceremony(params, 3, [0x21; 32], None)
+            .expect("valid parameters");
     let public_key = setup.pk.clone();
+    let cached_layers = setup.public_tree_layers.clone();
 
     let journal_path =
         std::env::temp_dir().join(format!("qsag-example-burn-{}", std::process::id()));
@@ -87,13 +86,7 @@ fn main() {
         FsWalFtsEpochLatch::create(&journal_path, public_key.pk_seed_bytes, journal_key)
             .expect("fresh burn journal");
     let signature = setup
-        .threshold_sign(
-            1,
-            b"settle batch 41",
-            [0x24; 32],
-            &mut journal,
-            &CpuReferenceBackend,
-        )
+        .threshold_sign(1, b"settle batch 41", [0x24; 32], &mut journal)
         .expect("three parties sign at epoch 1");
     let wire = signature.to_bytes();
     let decoded =
@@ -119,12 +112,11 @@ fn main() {
 
     // Restart: a new process rebuilds its shares and reopens the journal. Epoch 1 stays spent.
     drop(journal);
-    let mut restarted = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+    let mut restarted = dealerless_ceremony::DealerlessThresholdFtsSetup::run_ceremony(
         params,
         3,
         [0x21; 32],
-        [0x22; 32],
-        &CpuReferenceBackend,
+        Some((public_key.clone(), cached_layers)),
     )
     .expect("valid parameters");
     let mut journal =
@@ -132,13 +124,7 @@ fn main() {
             .expect("authentic burn journal");
     assert_eq!(
         restarted
-            .threshold_sign(
-                1,
-                b"settle batch 42",
-                [0x25; 32],
-                &mut journal,
-                &CpuReferenceBackend
-            )
+            .threshold_sign(1, b"settle batch 42", [0x25; 32], &mut journal)
             .err(),
         Some(ParallelSeededError::PersistenceFailed)
     );

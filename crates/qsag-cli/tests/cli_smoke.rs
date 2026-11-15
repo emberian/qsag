@@ -201,6 +201,10 @@ fn help_info_and_usage_errors() {
         "quorum",
         "aggregate",
         "verify-agg",
+        "verify-aggregate",
+        "cred",
+        "hd",
+        "migrate",
         "policy-demo",
         "kat",
     ] {
@@ -2171,4 +2175,611 @@ fn policy_ledger_gates_quorum_signing_before_any_epoch_is_latched() {
         0,
     );
     assert_eq!(window_spend(&ledger), "1000");
+}
+
+#[test]
+fn e2e_hem_quorum_switch_2of3_to_3of5_and_untrusted_public_aggregate() {
+    let dir = Workdir::new("hem-quorum-agg");
+    let (msg, other, seed0, seed1) = (
+        dir.path("msg"),
+        dir.path("other"),
+        dir.path("seed"),
+        dir.path("seed1"),
+    );
+    std::fs::write(
+        &seed1,
+        "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+    )
+    .unwrap();
+
+    // Validator 0: (2, 3) Hem-compatible threshold quorum -> sign epoch 0 -> switch to (3, 5)
+    // under the EXACT same 65-byte validator public key -> proactive refresh -> sign epoch 1!
+    let v0_epoch0 = dir.path("v0-2of3");
+    let v0_epoch1 = dir.path("v0-3of5");
+    let pk0 = dir.path("v0.pk");
+    let pk0_after = dir.path("v0-after.pk");
+    let v0_sig_early = dir.path("v0-early.sig");
+    let v0_sig_consensus = dir.path("v0-consensus.sig");
+    let v0_sig_bad = dir.path("v0-bad.sig");
+
+    expect(
+        &[
+            "quorum",
+            "keygen",
+            "--scheme",
+            "hem-jorts-poseidon2",
+            "--threshold",
+            "2",
+            "--parties",
+            "3",
+            "--leaves",
+            "4",
+            "--seed-file",
+            &seed0,
+            "--vault-dir",
+            &v0_epoch0,
+            "--public-out",
+            &pk0,
+        ],
+        0,
+    );
+    let pk0_hex_before = json_member(&dir.read("v0.pk"), "validator_public_key");
+
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &v0_epoch0,
+            "--signers",
+            "0,2",
+            "--message",
+            &other,
+            "--out",
+            &v0_sig_early,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "quorum",
+            "verify",
+            "--public",
+            &pk0,
+            "--in",
+            &other,
+            "--sig",
+            &v0_sig_early,
+        ],
+        0,
+    );
+
+    // Dynamic (2, 3) -> (3, 5) reshare preserving the 65-byte validator public key!
+    expect(
+        &[
+            "quorum",
+            "reshare",
+            "--vault-dir",
+            &v0_epoch0,
+            "--signers",
+            "1,2",
+            "--new-threshold",
+            "3",
+            "--new-parties",
+            "5",
+            "--out-vault-dir",
+            &v0_epoch1,
+            "--public-out",
+            &pk0_after,
+            "--deterministic",
+        ],
+        0,
+    );
+    assert_eq!(
+        json_member(&dir.read("v0-after.pk"), "validator_public_key"),
+        pk0_hex_before,
+        "dynamic (2,3)->(3,5) quorum switch must preserve the exact 65-byte validator pubkey"
+    );
+
+    // Proactive security: retired (2, 3) vault is wiped & refused (exit 4), and < 3 signers
+    // on the new (3, 5) vault cannot sign (exit 4)!
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &v0_epoch0,
+            "--signers",
+            "0,1",
+            "--message",
+            &msg,
+            "--out",
+            &v0_sig_bad,
+        ],
+        4,
+    );
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &v0_epoch1,
+            "--signers",
+            "0,4",
+            "--message",
+            &msg,
+            "--out",
+            &v0_sig_bad,
+        ],
+        4,
+    );
+    assert!(!Path::new(&v0_sig_bad).exists());
+
+    // Proactive refresh on (3, 5) vault, then sign consensus message at monotone leaf 1
+    // using custodians {1, 3, 4}, verifiable against the ORIGINAL pk0 file!
+    expect(
+        &[
+            "quorum",
+            "refresh",
+            "--vault-dir",
+            &v0_epoch1,
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &v0_epoch1,
+            "--signers",
+            "1,3,4",
+            "--message",
+            &msg,
+            "--out",
+            &v0_sig_consensus,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "quorum",
+            "verify",
+            "--public",
+            &pk0,
+            "--in",
+            &msg,
+            "--sig",
+            &v0_sig_consensus,
+        ],
+        0,
+    );
+
+    // Validator 1: independent (2, 3) Hem quorum signs the same consensus message!
+    let v1_vault = dir.path("v1-2of3");
+    let pk1 = dir.path("v1.pk");
+    let v1_sig = dir.path("v1-consensus.sig");
+    expect(
+        &[
+            "quorum",
+            "keygen",
+            "--scheme",
+            "hem-jorts-poseidon2",
+            "--threshold",
+            "2",
+            "--parties",
+            "3",
+            "--leaves",
+            "4",
+            "--seed-file",
+            &seed1,
+            "--vault-dir",
+            &v1_vault,
+            "--public-out",
+            &pk1,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &v1_vault,
+            "--signers",
+            "0,2",
+            "--message",
+            &msg,
+            "--out",
+            &v1_sig,
+        ],
+        0,
+    );
+
+    // Untrusted public aggregator: ZERO --secret and ZERO --wal-dir!
+    let pubkeys_arg = format!("{pk0},{pk1}");
+    let sigs_arg = format!("{v0_sig_consensus},{v1_sig}");
+    let agg_proof = dir.path("quorum-committee.proof");
+    expect(
+        &[
+            "aggregate",
+            "--pubkeys",
+            &pubkeys_arg,
+            "--sigs",
+            &sigs_arg,
+            "--message",
+            &msg,
+            "--out",
+            &agg_proof,
+        ],
+        0,
+    );
+    let verify_out = expect(
+        &[
+            "verify-aggregate",
+            "--pubkeys",
+            &pubkeys_arg,
+            "--message",
+            &msg,
+            "--proof",
+            &agg_proof,
+            "--json",
+        ],
+        0,
+    );
+    assert!(verify_out.contains("\"valid\": true"));
+
+    // Wrong message fails verification with exit code 2.
+    expect(
+        &[
+            "verify-aggregate",
+            "--pubkeys",
+            &pubkeys_arg,
+            "--message",
+            &other,
+            "--proof",
+            &agg_proof,
+        ],
+        2,
+    );
+}
+
+#[test]
+fn e2e_cred_hd_and_migrate_subcommands() {
+    let dir = Workdir::new("cred-hd-migrate");
+    let (msg, other) = (dir.path("msg"), dir.path("other"));
+
+    // 1. `qsag cred`: (2, 5) TOPRF + dealerless (2, 3) FIPS 204 threshold ML-DSA-44
+    let voprf_vault = dir.path("voprf-vault");
+    let voprf_pk = dir.path("voprf.pk");
+    let voprf_eval0 = dir.path("voprf-0.json");
+    let voprf_replay = dir.path("voprf-replay.json");
+    expect(
+        &[
+            "cred",
+            "voprf-keygen",
+            "--vault-dir",
+            &voprf_vault,
+            "--public-out",
+            &voprf_pk,
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "cred",
+            "voprf-eval",
+            "--vault-dir",
+            &voprf_vault,
+            "--public",
+            &voprf_pk,
+            "--counter",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &voprf_eval0,
+            "--deterministic",
+        ],
+        0,
+    );
+    // Replaying counter 0 must fail closed with STATE_CONFLICT (exit 4).
+    expect(
+        &[
+            "cred",
+            "voprf-eval",
+            "--vault-dir",
+            &voprf_vault,
+            "--public",
+            &voprf_pk,
+            "--counter",
+            "0",
+            "--in",
+            &other,
+            "--out",
+            &voprf_replay,
+        ],
+        4,
+    );
+
+    let mldsa_vault = dir.path("mldsa-vault");
+    let mldsa_pk = dir.path("mldsa.pk");
+    let mldsa_sig = dir.path("mldsa.sig");
+    let mldsa_replay = dir.path("mldsa-replay.sig");
+    expect(
+        &[
+            "cred",
+            "mldsa-keygen",
+            "--threshold",
+            "2",
+            "--parties",
+            "3",
+            "--level",
+            "44",
+            "--vault-dir",
+            &mldsa_vault,
+            "--public-out",
+            &mldsa_pk,
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "cred",
+            "mldsa-sign",
+            "--vault-dir",
+            &mldsa_vault,
+            "--signers",
+            "0,1,2",
+            "--epoch",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &mldsa_sig,
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "cred",
+            "mldsa-verify",
+            "--public",
+            &mldsa_pk,
+            "--in",
+            &msg,
+            "--sig",
+            &mldsa_sig,
+        ],
+        0,
+    );
+    // Replaying epoch 0 or signing with < 2t - 1 (= 3) signers fails with exit 4.
+    expect(
+        &[
+            "cred",
+            "mldsa-sign",
+            "--vault-dir",
+            &mldsa_vault,
+            "--signers",
+            "0,1",
+            "--epoch",
+            "1",
+            "--in",
+            &msg,
+            "--out",
+            &mldsa_replay,
+        ],
+        4,
+    );
+    expect(
+        &[
+            "cred",
+            "mldsa-sign",
+            "--vault-dir",
+            &mldsa_vault,
+            "--signers",
+            "0,1,2",
+            "--epoch",
+            "0",
+            "--in",
+            &other,
+            "--out",
+            &mldsa_replay,
+        ],
+        4,
+    );
+    expect(
+        &[
+            "cred",
+            "mldsa-verify",
+            "--public",
+            &mldsa_pk,
+            "--in",
+            &other,
+            "--sig",
+            &mldsa_sig,
+        ],
+        2,
+    );
+
+    // 2. `qsag hd`: (2, 3) dealerless seed ceremony -> 0-round watch-only derive -> threshold recover -> sign
+    let hd_vault = dir.path("hd-vault");
+    let hd_watch = dir.path("hd-watch.json");
+    let hd_child3 = dir.path("hd-child3.json");
+    let hd_child3_sk = dir.path("hd-child3.sk");
+    let hd_child3_pk = dir.path("hd-child3.pk");
+    let hd_child3_sig = dir.path("hd-child3.sig");
+    let hd_bad_sk = dir.path("hd-bad.sk");
+    expect(
+        &[
+            "hd",
+            "keygen",
+            "--threshold",
+            "2",
+            "--parties",
+            "3",
+            "--count",
+            "8",
+            "--vault-dir",
+            &hd_vault,
+            "--watch-out",
+            &hd_watch,
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "hd",
+            "derive",
+            "--watch",
+            &hd_watch,
+            "--index",
+            "3",
+            "--out",
+            &hd_child3,
+        ],
+        0,
+    );
+    expect(
+        &["hd", "verify-child", "--watch", &hd_watch, "--proof", &hd_child3],
+        0,
+    );
+    let target_pq_addr = json_member(&dir.read("hd-child3.json"), "address");
+
+    // 1 custodian (< threshold 2) cannot recover the child signing key (exit 4).
+    expect(
+        &[
+            "hd",
+            "recover",
+            "--vault-dir",
+            &hd_vault,
+            "--signers",
+            "1",
+            "--index",
+            "3",
+            "--proof",
+            &hd_child3,
+            "--secret-out",
+            &hd_bad_sk,
+        ],
+        4,
+    );
+    // Custodians {1, 2} recover child #3 into a vault-enrolled SLH-DSA-SHAKE-128f key!
+    expect(
+        &[
+            "hd",
+            "recover",
+            "--vault-dir",
+            &hd_vault,
+            "--signers",
+            "1,2",
+            "--index",
+            "3",
+            "--proof",
+            &hd_child3,
+            "--secret-out",
+            &hd_child3_sk,
+            "--public-out",
+            &hd_child3_pk,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "sign",
+            "--secret",
+            &hd_child3_sk,
+            "--in",
+            &msg,
+            "--out",
+            &hd_child3_sig,
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "verify",
+            "--public",
+            &hd_child3_pk,
+            "--in",
+            &msg,
+            "--sig",
+            &hd_child3_sig,
+        ],
+        0,
+    );
+
+    // 3. `qsag migrate`: 438-rep ZKBoo classical-to-PQ migration proof to `target_pq_addr`
+    let legacy_key = dir.path("legacy-secp.hex");
+    std::fs::write(
+        &legacy_key,
+        "0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .unwrap();
+    let mig_claim = dir.path("mig-claim.json");
+    let mig_proof = dir.path("mig.proof");
+    expect(
+        &[
+            "migrate",
+            "commit",
+            "--kind",
+            "btc-taproot",
+            "--legacy-secret",
+            &legacy_key,
+            "--out",
+            &mig_claim,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "migrate",
+            "prove",
+            "--kind",
+            "btc-taproot",
+            "--legacy-secret",
+            &legacy_key,
+            "--target",
+            &target_pq_addr,
+            "--epoch",
+            "42",
+            "--out",
+            &mig_proof,
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "migrate",
+            "verify",
+            "--proof",
+            &mig_proof,
+            "--target",
+            &target_pq_addr,
+            "--epoch",
+            "42",
+        ],
+        0,
+    );
+    // Wrong epoch or tampered proof fails verification with exit code 2.
+    expect(
+        &[
+            "migrate",
+            "verify",
+            "--proof",
+            &mig_proof,
+            "--epoch",
+            "43",
+        ],
+        2,
+    );
+    flip_hex_digit(&mig_proof, "zk_proof");
+    expect(&["migrate", "verify", "--proof", &mig_proof], 2);
 }

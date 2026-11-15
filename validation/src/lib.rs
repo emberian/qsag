@@ -237,3 +237,98 @@ pub fn mldsa_poly_mul_negacyclic_ref(a: &[i32; 256], b: &[i32; 256]) -> [i32; 25
 pub const fn goldilocks_mul_u128_ref(a: u64, b: u64) -> u64 {
     (((a as u128) * (b as u128)) % (GOLDILOCKS_PRIME as u128)) as u64
 }
+
+/// NIST SP 800-185 §2.3.1 `left_encode(x)` integer encoding.
+pub fn nist_left_encode(x: usize) -> Vec<u8> {
+    if x == 0 {
+        return vec![1u8, 0u8];
+    }
+    let be = (x as u64).to_be_bytes();
+    let first_nz = be.iter().position(|&b| b != 0).unwrap_or(7);
+    let slice = &be[first_nz..];
+    let mut out = Vec::with_capacity(1 + slice.len());
+    out.push(slice.len() as u8);
+    out.extend_from_slice(slice);
+    out
+}
+
+/// Unpadded NIST SP 800-185 §2.3.3 `bytepad` prefix `left_encode(136) || encode_string(N) || encode_string(S)`.
+///
+/// Note: upstream `tiny-keccak 2.0.2` has a known `fill_block()` bug (`debris/tiny-keccak#48`)
+/// whenever this unpadded prefix is an exact multiple of `rate = 136` (e.g. `N = ""` and
+/// `S.len() == 129` -> `2 + 2 + 3 + 129 = 136`, or `S.len() == 265` -> `272`), absorbing an
+/// extraneous 136-byte zero block. Use [`cshake256_nist_sp800_185_ref`] for exact NIST SP 800-185
+/// reference evaluation across all customization lengths.
+pub fn cshake256_unpadded_prefix(name: &[u8], custom: &[u8]) -> Vec<u8> {
+    let mut z = nist_left_encode(136);
+    z.extend_from_slice(&nist_left_encode(name.len() * 8));
+    z.extend_from_slice(name);
+    z.extend_from_slice(&nist_left_encode(custom.len() * 8));
+    z.extend_from_slice(custom);
+    z
+}
+
+/// Exact NIST SP 800-185 §3.3 `cSHAKE256(X, L, N, S)` reference oracle built atop
+/// `sha3::Shake256` (when `N` and `S` are both empty) and `tiny_keccak::keccakf` with strict
+/// §2.3.3 `bytepad` (`while (len(z)/8) mod w != 0`).
+pub fn cshake256_nist_sp800_185_ref(
+    name: &[u8],
+    custom: &[u8],
+    input: &[u8],
+    out_len: usize,
+) -> Vec<u8> {
+    const RATE: usize = 136;
+    if name.is_empty() && custom.is_empty() {
+        use sha3::digest::{ExtendableOutput, Update, XofReader};
+        let mut s = sha3::Shake256::default();
+        s.update(input);
+        let mut out = vec![0u8; out_len];
+        s.finalize_xof().read(&mut out);
+        return out;
+    }
+
+    let mut stream = cshake256_unpadded_prefix(name, custom);
+    if !stream.len().is_multiple_of(RATE) {
+        let pad = RATE - (stream.len() % RATE);
+        stream.resize(stream.len() + pad, 0u8);
+    }
+    stream.extend_from_slice(input);
+
+    let mut state = [0u64; 25];
+    let full_blocks = stream.len() / RATE;
+    for blk in 0..full_blocks {
+        let chunk = &stream[blk * RATE..(blk + 1) * RATE];
+        for (lane, word_slot) in state.iter_mut().take(17).enumerate() {
+            let word = u64::from_le_bytes(chunk[lane * 8..(lane + 1) * 8].try_into().unwrap());
+            *word_slot ^= word;
+        }
+        tiny_keccak::keccakf(&mut state);
+    }
+
+    let rem = &stream[full_blocks * RATE..];
+    let mut last_block = [0u8; RATE];
+    last_block[..rem.len()].copy_from_slice(rem);
+    last_block[rem.len()] ^= 0x04;
+    last_block[RATE - 1] ^= 0x80;
+    for (lane, word_slot) in state.iter_mut().take(17).enumerate() {
+        let word = u64::from_le_bytes(last_block[lane * 8..(lane + 1) * 8].try_into().unwrap());
+        *word_slot ^= word;
+    }
+    tiny_keccak::keccakf(&mut state);
+
+    let mut out = Vec::with_capacity(out_len);
+    while out.len() < out_len {
+        for &lane_word in state.iter().take(17) {
+            let bytes = lane_word.to_le_bytes();
+            let take = (out_len - out.len()).min(8);
+            out.extend_from_slice(&bytes[..take]);
+            if out.len() == out_len {
+                break;
+            }
+        }
+        if out.len() < out_len {
+            tiny_keccak::keccakf(&mut state);
+        }
+    }
+    out
+}

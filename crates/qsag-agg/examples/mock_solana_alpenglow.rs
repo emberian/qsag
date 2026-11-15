@@ -21,11 +21,13 @@ use std::time::Instant;
 use qsag_accel::CpuReferenceBackend;
 use qsag_agg::{
     AggSigProfile, DEFAULT_MAX_SHARD_SIGNERS_JORTS, EpochWalSink, HemAggConfig,
-    HierarchicalHemAggregate, ShardHemPolicy, ShardHemWitness, SigError, SignerBitmap, SigningMode,
-    ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime,
-    aggregate_signatures_with_config, compute_policy_registry_root, hierarchical_hem_message,
+    HierarchicalHemAggregate, PreparedPolicyRegistry, ShardHemPolicy, ShardHemWitness, SigError,
+    SignerBitmap, SigningMode, SuccinctHierarchicalHemAggregate, ValidatorKeypair,
+    ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
+    compress_verified_hierarchical_hem, compute_policy_registry_root, hierarchical_hem_message,
     prove_hierarchical_hem, verify_aggregate_with_regime, verify_hierarchical_hem,
-    verify_individual_signature, with_worker_limit,
+    verify_hierarchical_hem_prepared, verify_individual_signature,
+    verify_succinct_hierarchical_hem, with_worker_limit,
 };
 use qsag_fts::{
     FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
@@ -881,6 +883,16 @@ fn bench_section2_hem_finality_compression(
     let hier_wire = hier_agg.to_bytes();
     let hier_decoded =
         HierarchicalHemAggregate::from_bytes_canonical(&hier_wire).expect("canonical decode");
+    let prepared_hier =
+        PreparedPolicyRegistry::new(policies.clone()).expect("valid Alpenglow policy registry");
+    assert!(verify_hierarchical_hem(
+        &policies,
+        hier_epoch,
+        hier_msg,
+        min_global,
+        regime,
+        &hier_decoded,
+    ));
 
     let measure_hier_verify = |max_w: Option<usize>| -> (f64, f64) {
         let mut samples = Vec::with_capacity(verify_iters);
@@ -888,8 +900,8 @@ fn bench_section2_hem_finality_compression(
             let t0 = Instant::now();
             let ok = match max_w {
                 Some(w) => with_worker_limit(w, || {
-                    verify_hierarchical_hem(
-                        &policies,
+                    verify_hierarchical_hem_prepared(
+                        &prepared_hier,
                         hier_epoch,
                         hier_msg,
                         min_global,
@@ -897,8 +909,8 @@ fn bench_section2_hem_finality_compression(
                         &hier_decoded,
                     )
                 }),
-                None => verify_hierarchical_hem(
-                    &policies,
+                None => verify_hierarchical_hem_prepared(
+                    &prepared_hier,
                     hier_epoch,
                     hier_msg,
                     min_global,
@@ -917,6 +929,57 @@ fn bench_section2_hem_finality_compression(
     };
     let (hier_all_p50, hier_all_p99) = measure_hier_verify(None);
     let (hier_1c_p50, hier_1c_p99) = measure_hier_verify(Some(1));
+
+    // 2D. Succinct Outer Commitment-Chain Compression (`SuccinctHierarchicalHemAggregate`):
+    //     compresses M regional shard proofs into 1 outer `BciksJohnsonQrom128` WHIR proof!
+    let t_prove_succ = Instant::now();
+    let succ_agg = compress_verified_hierarchical_hem(
+        &policies,
+        hier_epoch,
+        hier_msg,
+        min_global,
+        &hier_decoded,
+        hier_cfg.blinding_seed,
+    )
+    .expect("Alpenglow succinct outer Hem compression");
+    let succ_prove_ms = t_prove_succ.elapsed().as_secs_f64() * 1_000.0;
+    let succ_wire = succ_agg.to_bytes();
+    let succ_decoded = SuccinctHierarchicalHemAggregate::from_bytes_canonical(&succ_wire)
+        .expect("canonical succinct decode");
+
+    let measure_succ_verify = |max_w: Option<usize>| -> (f64, f64) {
+        let mut samples = Vec::with_capacity(verify_iters);
+        for _ in 0..verify_iters {
+            let t0 = Instant::now();
+            let ok = match max_w {
+                Some(w) => with_worker_limit(w, || {
+                    verify_succinct_hierarchical_hem(
+                        &policies,
+                        hier_epoch,
+                        hier_msg,
+                        min_global,
+                        &succ_decoded,
+                    )
+                }),
+                None => verify_succinct_hierarchical_hem(
+                    &policies,
+                    hier_epoch,
+                    hier_msg,
+                    min_global,
+                    &succ_decoded,
+                ),
+            };
+            assert!(ok, "Alpenglow succinct outer Hem must verify");
+            samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (
+            percentile_sorted(&samples, 50, 100),
+            percentile_sorted(&samples, 99, 100),
+        )
+    };
+    let (succ_all_p50, succ_all_p99) = measure_succ_verify(None);
+    let (succ_1c_p50, succ_1c_p99) = measure_succ_verify(Some(1));
     let rss_str = peak_rss_mib()
         .map(|m| format!("{m:.1} MiB"))
         .unwrap_or_else(|| "n/a".to_string());
@@ -969,6 +1032,16 @@ fn bench_section2_hem_finality_compression(
             hier_all_p99,
             hier_1c_p50,
             hier_1c_p99,
+        ),
+        (
+            "Succinct Outer Recursive Hem",
+            target_signers,
+            succ_wire.len(),
+            succ_prove_ms,
+            succ_all_p50,
+            succ_all_p99,
+            succ_1c_p50,
+            succ_1c_p99,
         ),
     ] {
         let raw_jorts = k * jorts_raw_b;

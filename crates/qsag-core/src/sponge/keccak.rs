@@ -194,6 +194,50 @@ fn cached_customization_midstate(tag: &[u8]) -> Option<[u64; 25]> {
         b"QSAG.RSS.DZK.ZPRG.POLY/v2",
         b"QSAG.TH.PRF/v1",
         b"QSAG.TH.TWEAK/v1",
+        b"QSAG.PARTY.RNG.INIT/v1",
+        b"QSAG.OT.RLWE.CRS/v1",
+        b"QSAG.OT.RLWE.CRS/v2",
+        b"QSAG.OT.RLWE.ZKPOK/v3",
+        b"QSAG.OT.RLWE.FO/v2",
+        b"QSAG.OT.CRS.COIN.COM/v1",
+        b"QSAG.OT.COMBINER.COIN.COM/v1",
+        b"QSAG.OT.COMBINER.EXT/v1",
+        b"QSAG.OT.EXT.COL/v2",
+        b"QSAG.OT.KOS.UCOLS/v2",
+        b"QSAG.OT.KOS.ICHAL/v2",
+        b"QSAG.PUBLIC.COIN.COM/v1",
+        b"QSAG.PUBLIC.COIN.OUT/v1",
+        b"QSAG.PUBLIC.PERM/v1",
+        b"QSAG.SPDZ.GF256.DEG.COM/v1",
+        b"QSAG.SPDZ.T128.DEG.COM/v1",
+        b"QSAG.SPDZ.BS64.DEG.COM/v1",
+        b"QSAG.SPDZ.BS64.LHL_H/v2",
+        b"QSAG.SPDZ.BS64.PIMAC_W/v1",
+        b"QSAG.SPDZ.BS64.PIMAC_W_BLK/v1",
+        b"QSAG.SPDZ.BS64.OPEN.COM/v1",
+        b"QSAG.SPDZ.BS64.BATCH.OPEN.COM/v1",
+        b"QSAG.SPDZ.BS64.BATCH.MAC.CHI/v1",
+        b"QSAG.TRIPLE.F2.LOCK.COMMIT/v1",
+        b"QSAG.TRIPLE.F2.SAC/v1",
+        b"QSAG.MASCOT.DCOT.DIAG/v1",
+        b"QSAG.MASCOT.COPE.PRG/v1",
+        b"QSAG.MASCOT.AUTH.CHI/v1",
+        b"QSAG.MASCOT.COMBINE/v1",
+        b"QSAG.MASCOT.SAC.THETA/v1",
+        b"QSAG.PCG.GGM.LEVEL/v1",
+        b"QSAG.PCG.LEAF.EXPAND/v1",
+        b"QSAG.PCG.SPCOT.BIND/v1",
+        b"QSAG.PCG.SPCOT.FS_CHAL/v1",
+        b"QSAG.PCG.SILENT.OT.PAD/v1",
+        b"QSAG.PCG.SILENT.CHOSEN.OT/v1",
+        b"QSAG.SPDZ.EXT2.DEG.COM/v1",
+        b"QSAG.SPDZ.GL.LHL_H/v2",
+        b"QSAG.SPDZ.GL.PIMAC_W/v1",
+        b"QSAG.SPDZ.GL.BATCH.OPEN.COM/v1",
+        b"QSAG.SPDZ.GL.BATCH.MAC.CHI/v1",
+        b"QSAG.GILBOA.GL.LHL_G/v1",
+        b"QSAG.DKG.FELDMAN.V2",
+        b"QSAG.DKG.SCHNORR.CHAL/v1",
     )
 }
 
@@ -280,6 +324,7 @@ fn xor_rate_block(state: &mut [u64; 25], block: &[u8; SHAKE256_RATE_BYTES]) {
 }
 
 /// Streaming SP 800-185 `cSHAKE256` / FIPS 202 `SHAKE256` XOF sponge (`Drop`-zeroized).
+#[derive(Clone)]
 pub struct Cshake256Xof {
     state: [u64; 25],
     buf: [u8; SHAKE256_RATE_BYTES],
@@ -334,7 +379,10 @@ impl Cshake256Xof {
             !self.squeezing,
             "cannot absorb into Cshake256Xof after squeezing began"
         );
-        while !data.is_empty() {
+        if data.is_empty() {
+            return;
+        }
+        if self.buf_len > 0 {
             let space = SHAKE256_RATE_BYTES - self.buf_len;
             let take = space.min(data.len());
             self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
@@ -345,6 +393,15 @@ impl Cshake256Xof {
                 keccak_f1600(&mut self.state);
                 self.buf_len = 0;
             }
+        }
+        let (blocks, tail) = data.as_chunks::<SHAKE256_RATE_BYTES>();
+        for block in blocks {
+            xor_rate_block(&mut self.state, block);
+            keccak_f1600(&mut self.state);
+        }
+        if !tail.is_empty() {
+            self.buf[..tail.len()].copy_from_slice(tail);
+            self.buf_len = tail.len();
         }
     }
 
@@ -372,14 +429,84 @@ impl Cshake256Xof {
                 keccak_f1600(&mut self.state);
                 self.squeeze_offset = 0;
             }
-            let lane_idx = self.squeeze_offset / 8;
             let byte_in_lane = self.squeeze_offset % 8;
-            let b = ((self.state[lane_idx] >> (8 * byte_in_lane)) & 0xFF) as u8;
-            out[written] = b;
-            written += 1;
-            self.squeeze_offset += 1;
+            if byte_in_lane != 0 {
+                let lane_bytes = self.state[self.squeeze_offset / 8].to_le_bytes();
+                let take = (8 - byte_in_lane).min(out.len() - written);
+                out[written..written + take]
+                    .copy_from_slice(&lane_bytes[byte_in_lane..byte_in_lane + take]);
+                written += take;
+                self.squeeze_offset += take;
+                continue;
+            }
+            let lanes_avail = SHAKE256_RATE_LANES - (self.squeeze_offset / 8);
+            let lanes_want = (out.len() - written) / 8;
+            let lanes_take = lanes_avail.min(lanes_want);
+            if lanes_take > 0 {
+                let start_lane = self.squeeze_offset / 8;
+                for l in 0..lanes_take {
+                    out[written + 8 * l..written + 8 * (l + 1)]
+                        .copy_from_slice(&self.state[start_lane + l].to_le_bytes());
+                }
+                written += 8 * lanes_take;
+                self.squeeze_offset += 8 * lanes_take;
+                continue;
+            }
+            let rem = out.len() - written;
+            let lane_bytes = self.state[self.squeeze_offset / 8].to_le_bytes();
+            out[written..].copy_from_slice(&lane_bytes[..rem]);
+            self.squeeze_offset += rem;
+            break;
         }
     }
+}
+
+/// Squeeze equal-length `u64` streams from eight independent single-block `cSHAKE256` inputs
+/// sharing `midstate` (`inputs[i].len() < SHAKE256_RATE_BYTES`).
+pub(crate) fn cshake256_8x_squeeze_u64s(
+    midstate: &[u64; 25],
+    inputs: [&[u8]; 8],
+    outs: &mut [&mut [u64]; 8],
+) {
+    let word_len = outs[0].len();
+    for out in outs.iter() {
+        assert_eq!(out.len(), word_len);
+    }
+    if word_len == 0 {
+        return;
+    }
+    let mut states = qsag_asm::KeccakState8x::default();
+    for (lane, row) in states.0.iter_mut().enumerate() {
+        *row = [midstate[lane]; 8];
+    }
+    for (i, input) in inputs.iter().enumerate() {
+        assert!(input.len() < SHAKE256_RATE_BYTES);
+        let (words, tail) = input.as_chunks::<8>();
+        for (w_idx, w_bytes) in words.iter().enumerate() {
+            states.0[w_idx][i] ^= u64::from_le_bytes(*w_bytes);
+        }
+        let base = words.len() * 8;
+        for (j, &byte) in tail.iter().enumerate() {
+            let pos = base + j;
+            states.0[pos / 8][i] ^= u64::from(byte) << (8 * (pos % 8));
+        }
+        let end = input.len();
+        states.0[end / 8][i] ^= 0x04u64 << (8 * (end % 8));
+        states.0[SHAKE256_RATE_LANES - 1][i] ^= 1u64 << 63;
+    }
+    let mut written = 0usize;
+    while written < word_len {
+        qsag_asm::keccak_f1600_x8(&mut states);
+        let take = SHAKE256_RATE_LANES.min(word_len - written);
+        for l in 0..take {
+            let row = states.0[l];
+            for (i, out) in outs.iter_mut().enumerate() {
+                out[written + l] = row[i];
+            }
+        }
+        written += take;
+    }
+    qsag_asm::volatile_fill(&mut states.0, [0; 8]);
 }
 
 /// Four independent single-block SHAKE256 hashes, returning the first 32 bytes.
@@ -451,6 +578,74 @@ impl Cshake256WordStream4 {
         }
         qsag_asm::keccak_f1600_x4(&mut states);
         Self { states, next: 0 }
+    }
+
+    /// Fill `out0` and `out1` simultaneously from two independent 4-way streams (`8` parallel
+    /// `Keccak-f[1600]` lanes via `keccak_f1600_x8`), bit-for-bit identical to running
+    /// `Cshake256WordStream4::new(midstate, seed0)` and `Cshake256WordStream4::new(midstate, seed1)`.
+    pub fn fill_words_pair(
+        midstate: &[u64; 25],
+        seed0: &[u8],
+        out0: &mut [u64],
+        seed1: &[u8],
+        out1: &mut [u64],
+    ) {
+        assert_eq!(out0.len(), out1.len());
+        assert!(seed0.len() + 2 <= SHAKE256_RATE_BYTES);
+        assert!(seed1.len() + 2 <= SHAKE256_RATE_BYTES);
+        if out0.is_empty() {
+            return;
+        }
+        let mut states = qsag_asm::KeccakState8x::default();
+        for (lane, row) in states.0.iter_mut().enumerate() {
+            *row = [midstate[lane]; 8];
+        }
+        for (pair_idx, seed) in [seed0, seed1].into_iter().enumerate() {
+            let lane_base = 4 * pair_idx;
+            let (words, tail) = seed.as_chunks::<8>();
+            for (w_idx, w_bytes) in words.iter().enumerate() {
+                let w = u64::from_le_bytes(*w_bytes);
+                for sub in 0..4 {
+                    states.0[w_idx][lane_base + sub] ^= w;
+                }
+            }
+            let base = words.len() * 8;
+            for (j, &byte) in tail.iter().enumerate() {
+                let pos = base + j;
+                let v = u64::from(byte) << (8 * (pos % 8));
+                for sub in 0..4 {
+                    states.0[pos / 8][lane_base + sub] ^= v;
+                }
+            }
+            let idx = seed.len();
+            let end = idx + 1;
+            let pad = 0x04u64 << (8 * (end % 8));
+            for sub in 0..4 {
+                states.0[idx / 8][lane_base + sub] ^= (sub as u64) << (8 * (idx % 8));
+                states.0[end / 8][lane_base + sub] ^= pad;
+                states.0[SHAKE256_RATE_LANES - 1][lane_base + sub] ^= 1u64 << 63;
+            }
+        }
+        let total = out0.len();
+        let mut written = 0usize;
+        let mut blk0 = [0u64; Self::WORDS_PER_BLOCK];
+        let mut blk1 = [0u64; Self::WORDS_PER_BLOCK];
+        while written < total {
+            qsag_asm::keccak_f1600_x8(&mut states);
+            let take = Self::WORDS_PER_BLOCK.min(total - written);
+            let lanes_needed = take.div_ceil(4);
+            for l in 0..lanes_needed {
+                let row = states.0[l];
+                blk0[4 * l..4 * (l + 1)].copy_from_slice(&row[0..4]);
+                blk1[4 * l..4 * (l + 1)].copy_from_slice(&row[4..8]);
+            }
+            out0[written..written + take].copy_from_slice(&blk0[..take]);
+            out1[written..written + take].copy_from_slice(&blk1[..take]);
+            written += take;
+        }
+        wipe_u64s(&mut blk0);
+        wipe_u64s(&mut blk1);
+        qsag_asm::volatile_fill(&mut states.0, [0; 8]);
     }
 
     /// Fill `out` with the next stream words.
@@ -982,6 +1177,64 @@ mod tests {
                 cshake256_xof_multi_frame(200, b"QSAG.TEST.STREAM", fields),
                 cshake256_xof(200, b"QSAG.TEST.STREAM", &framed)
             );
+        }
+    }
+
+    #[test]
+    fn test_cshake256_8x_and_wordstream_pair_and_chunked_absorb_squeeze_parity() {
+        let tag = b"QSAG.OT.EXT.COL/v2";
+        let mid = cshake256_static_midstate(tag);
+        for word_len in [0usize, 1, 16, 17, 18, 53] {
+            let inputs: [Vec<u8>; 8] = core::array::from_fn(|i| {
+                let len = (17 * i + 5) % 135;
+                (0..len).map(|j| ((i * 31 + j * 13 + 7) & 0xff) as u8).collect()
+            });
+            let input_refs = core::array::from_fn(|i| inputs[i].as_slice());
+            let mut bufs: [Vec<u64>; 8] = core::array::from_fn(|_| vec![0u64; word_len]);
+            {
+                let [b0, b1, b2, b3, b4, b5, b6, b7] = &mut bufs;
+                let mut out_refs: [&mut [u64]; 8] = [b0, b1, b2, b3, b4, b5, b6, b7];
+                cshake256_8x_squeeze_u64s(&mid, input_refs, &mut out_refs);
+            }
+            for i in 0..8 {
+                let ref_bytes = cshake256_xof(8 * word_len, tag, &inputs[i]);
+                for w in 0..word_len {
+                    let exp = u64::from_le_bytes(ref_bytes[8 * w..8 * w + 8].try_into().unwrap());
+                    assert_eq!(bufs[i][w], exp, "lane {i} word {w} len {word_len}");
+                }
+            }
+        }
+
+        let pair_tag = b"QSAG.MASCOT.COPE.PRG/v1";
+        let pair_mid = cshake256_static_midstate(pair_tag);
+        for len in [0usize, 1, 67, 68, 69, 205] {
+            let seed0 = [0x3Au8; 72];
+            let seed1 = [0xC5u8; 72];
+            let mut got0 = vec![0u64; len];
+            let mut got1 = vec![0u64; len];
+            Cshake256WordStream4::fill_words_pair(&pair_mid, &seed0, &mut got0, &seed1, &mut got1);
+            let mut exp0 = vec![0u64; len];
+            let mut exp1 = vec![0u64; len];
+            Cshake256WordStream4::new(&pair_mid, &seed0).fill_words(&mut exp0);
+            Cshake256WordStream4::new(&pair_mid, &seed1).fill_words(&mut exp1);
+            assert_eq!(got0, exp0, "pair stream 0 len={len}");
+            assert_eq!(got1, exp1, "pair stream 1 len={len}");
+        }
+
+        let full_msg: Vec<u8> = (0..555).map(|i| (i * 19 + 11) as u8).collect();
+        let expected_out = cshake256_xof(421, b"QSAG.OT.RLWE.ZKPOK/v3", &full_msg);
+        for in_step in [1usize, 3, 8, 135, 136, 137, 272] {
+            for out_step in [1usize, 5, 8, 16, 135, 136, 137] {
+                let mut xof = Cshake256Xof::new(b"QSAG.OT.RLWE.ZKPOK/v3");
+                for chunk in full_msg.chunks(in_step) {
+                    xof.absorb(chunk);
+                }
+                let mut actual_out = vec![0u8; expected_out.len()];
+                for chunk in actual_out.chunks_mut(out_step) {
+                    xof.squeeze(chunk);
+                }
+                assert_eq!(actual_out, expected_out, "in={in_step} out={out_step}");
+            }
         }
     }
 }

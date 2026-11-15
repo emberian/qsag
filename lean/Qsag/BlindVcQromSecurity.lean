@@ -69,9 +69,12 @@ private theorem vecOfListLen_toList {α : Type} : ∀ (xs : List α) {n : Nat} (
 
 /-! ## §1. `438`-Repetition `BlindVC` ZKBoo `PublicCoinIop` & `RbrStateFunction` -/
 
+def fin3AllTrue (p : Fin 3 → Bool) : Bool := p 0 && p 1 && p 2
+
 theorem fin3_not_all_count_le_two (p : Fin 3 → Bool)
-    (hNotAll : (p 0 && p 1 && p 2) = false) :
+    (hNotAll : fin3AllTrue p = false) :
     qsum 3 (fun e => if p e = true then 1 else 0) ≤ 2 := by
+  unfold fin3AllTrue at hNotAll
   simp only [qsum, Nat.add_zero]
   change (if p 0 = true then 1 else 0) +
     ((if p 1 = true then 1 else 0) + (if p 2 = true then 1 else 0)) ≤ 2
@@ -100,7 +103,7 @@ theorem blindVc_rep_pigeonhole_le_two
     (cand : Fin 3 → OpenedBlindVcRep) :
     qsum 3 (fun e =>
       if verifyCommittedBlindVcRep H prgExpand stmt repIdx r1 e (cand e) = true then 1 else 0) ≤ 2 := by
-  apply fin3_not_all_count_le_two
+  apply fin3_not_all_count_le_two; unfold fin3AllTrue
   cases hAll :
       (verifyCommittedBlindVcRep H prgExpand stmt repIdx r1 0 (cand 0) &&
        verifyCommittedBlindVcRep H prgExpand stmt repIdx r1 1 (cand 1) &&
@@ -149,7 +152,6 @@ private theorem qsum_add_split_local :
         qsum X (fun x => g ⟨x.1, by omega⟩) + qsum Y (fun y => g ⟨X + y.1, by omega⟩)
   | 0, Y, g => by
     rw [qsum_cast (Nat.zero_add Y) g]; simp only [qsum, Nat.zero_add]
-    exact qsum_congr (fun y => by congr 1; apply Fin.ext; simp)
   | X + 1, Y, g => by
     have hEq : X + 1 + Y = (X + Y) + 1 := by omega
     rw [qsum_cast hEq g]
@@ -158,7 +160,7 @@ private theorem qsum_add_split_local :
     have hTail : qsum Y (fun y => g ⟨X + y.1 + 1, by omega⟩) =
         qsum Y (fun y => g ⟨X + 1 + y.1, by omega⟩) :=
       qsum_congr (fun y => by congr 1; apply Fin.ext; dsimp only; omega)
-    rw [ih, hTail, Nat.add_assoc]
+    rw [ih, hTail]; exact (Nat.add_assoc _ _ _).symm
 
 private theorem qsum_mul_factor :
     ∀ (A B : Nat) (f : Fin (A * B) → Nat),
@@ -187,7 +189,7 @@ theorem product_bad_count_le_pow (M B : Nat) :
         if (List.range k).all
             (fun idx => if hM : 0 < M then p idx ⟨(ch.1 / (M ^ idx)) % M, Nat.mod_lt _ hM⟩ else false) = true
         then 1 else 0) ≤ B ^ k
-  | 0, _, _ => by simp [qsum, List.range]
+  | 0, _, _ => Nat.le_refl 1
   | k + 1, p, hEach => by
     if hM0 : M = 0 then
       subst hM0; rw [Nat.zero_pow (Nat.succ_pos k)]; exact Nat.zero_le _
@@ -306,9 +308,8 @@ def blindVcParallelRbr
       have hEqRange : ∀ c : Fin (3 ^ k),
           verFn c =
           (List.range k).all
-            (fun idx => if hM : 0 < 3 then p idx ⟨(c.1 / 3 ^ idx) % 3, Nat.mod_lt _ hM⟩ else false) := by
-        intro c; dsimp only [verFn, blindVcParallelIop, p, decodeTernaryChallengeAt]
-        congr 1; funext idx; rw [dite_true (by decide : 0 < 3)]
+            (fun idx => if hM : 0 < 3 then p idx ⟨(c.1 / 3 ^ idx) % 3, Nat.mod_lt _ hM⟩ else false) :=
+        fun _ => rfl
       have hEach : ∀ idx < k, qsum 3 (fun e => if p idx e = true then 1 else 0) ≤ 2 := by
         intro idx hlt
         have hP : ∀ e : Fin 3, p idx e =
@@ -340,7 +341,7 @@ theorem blindVc_quantum128_interactive_rbr_bound
 def blindVcQuot64 : Nat := 6148914691236517205
 def blindVcBadWord64 : Nat := 12297829382473034411
 
-theorem word64_mod3_bad_count_le (p : Fin 3 → Bool) (hNotAll : (p 0 && p 1 && p 2) = false) :
+theorem word64_mod3_bad_count_le (p : Fin 3 → Bool) (hNotAll : fin3AllTrue p = false) :
     qsum (2 ^ 64) (fun u => if p ⟨u.1 % 3, Nat.mod_lt _ (by decide)⟩ = true then 1 else 0) ≤
       blindVcBadWord64 := by
   have hDecomp : 2 ^ 64 = blindVcQuot64 * 3 + 1 := by decide
@@ -421,7 +422,8 @@ def blindVcQromFsRound
       let q3 : Fin 3 → Bool := fun e =>
         verifyCommittedBlindVcRep H_hash prgExpand (stmtAt x) idx
           (Vec.get (msgAt x).allRound1 fi) e ((Vec.get (msgAt x).openTable fi).get e)
-      have hNotAll3 : (q3 0 && q3 1 && q3 2) = false := by
+      have hNotAll3 : fin3AllTrue q3 = false := by
+        unfold fin3AllTrue
         cases hAll : (q3 0 && q3 1 && q3 2) with
         | false => rfl
         | true =>
@@ -431,7 +433,7 @@ def blindVcQromFsRound
             change (if q3 0 = true then 1 else 0) +
               ((if q3 1 = true then 1 else 0) + (if q3 2 = true then 1 else 0)) = 3
             rw [h0, h1, h2]; decide
-          have hLe2 := blindVc_rep_pigeonhole_le_two hHLen hNoColl hNoWit idx
+          have hLe2 := blindVc_rep_pigeonhole_le_two (prgExpand := prgExpand) hHLen hNoColl hNoWit idx
             (Vec.get (msgAt x).allRound1 fi) ((Vec.get (msgAt x).openTable fi).get)
           change qsum 3 (fun e => if q3 e = true then 1 else 0) ≤ 2 at hLe2; omega
       have hCong : ∀ u : Fin (2 ^ 64),
@@ -615,7 +617,7 @@ theorem vcMerkleTree_opening_sound (epoch : UInt64) :
     dsimp only at hSplit hIniLen
     have hd : ini.length = d := by simp only [List.length_cons] at hLen; omega
     rw [hSplit, evalVcMerklePathBool_append_singleton, hd] at hEq
-    dsimp only [vcMerkleTreeRoot] at hEq
+    simp only [vcMerkleTreeRoot] at hEq
     let subRoot := evalVcMerklePathBool epoch layer leaf ini
     let lRoot := vcMerkleTreeRoot epoch layer lTree
     let rRoot := vcMerkleTreeRoot epoch layer rTree
@@ -756,12 +758,12 @@ theorem tooth_blindVc_unsigned_issuer_root_rejected
   unfold verifyBlindVcWithIssuerAttestation; rw [hBadSig, Bool.false_and]
 
 theorem tooth_single_rep_two_of_three_tight :
-    ∃ p : Fin 3 → Bool, (p 0 && p 1 && p 2) = false ∧
+    ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
       qsum 3 (fun e => if p e = true then 1 else 0) = 2 ∧ ¬ (2 ^ 1 * 2 ^ 1 < 3 ^ 1) :=
   ⟨fun e => decide (e.1 < 2), by decide, by decide, by decide⟩
 
 theorem fin3_not_all_count_witness :
-    ∃ p : Fin 3 → Bool, (p 0 && p 1 && p 2) = false ∧
+    ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
       qsum 3 (fun e => if p e = true then 1 else 0) ≤ 2 :=
   ⟨fun e => decide (e.1 < 2), by decide, by decide⟩
 
