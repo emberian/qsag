@@ -67,16 +67,17 @@ theorem pcg_dual_lpn_bias_in_spec_ratBound
     Composes `LatticePreprocessingFull` (`checkWirePeer_sound`, `rlwe_pq24_grover_and_box_bridge`)
     with `RlweExtractionBoundary` (`rlweUnitSis_relation`, `rlweUnitSis_norm_le_half_modulus`). -/
 theorem rlwe_preprocessing_and_sis_boundary_chain
-    (fuel : Nat) (hdr : Qsag.SeedHeader) (peer : Qsag.PeerRecord hdr.treeDepth)
-    (hPeerOk : Qsag.checkWirePeer fuel hdr peer = true)
+    (fuel : Nat) (hdr : Qsag.DensePcgV3.SeedHeader)
+    (peer : Qsag.DensePcgV3.PeerRecord hdr.treeDepth)
+    (hPeerOk : Qsag.DensePcgV3.checkWirePeer fuel hdr peer = true)
     (A : Qsag.CycPolyZq 10 12289)
     (z : Qsag.PolyInt 1024) :
-    (∃ vals, Qsag.receiverCheckValues fuel hdr peer = some vals) ∧
+    (∃ vals, Qsag.DensePcgV3.receiverCheckValues fuel hdr peer = some vals) ∧
     2 ^ 128 ≤ Qsag.groverJointChallengeGrindCost Qsag.rlweZkpokPq256Reps 11 ∧
     Qsag.cycIntInfNorm (Qsag.rlweUnitSisError A) ≤ 6144 ∧
     Qsag.cycZqAdd (Qsag.cycZqMul A (Qsag.cycIntToZq 12289 (@Qsag.cycIntOne 1024)))
       (Qsag.cycIntToZq 12289 (Qsag.rlweUnitSisError A)) = Qsag.cycZqZero := by
-  obtain ⟨vals, hVals, _⟩ := Qsag.checkWirePeer_sound fuel hdr peer hPeerOk
+  obtain ⟨vals, hVals, _⟩ := Qsag.DensePcgV3.checkWirePeer_sound fuel hdr peer hPeerOk
   obtain ⟨_, _, hGrover, _⟩ := Qsag.rlwe_pq24_grover_and_box_bridge z
   obtain ⟨_, _, hSisRel⟩ := Qsag.rlweUnitSis_relation A
   exact ⟨⟨vals, hVals⟩, hGrover, Qsag.rlweUnitSis_norm_le_half_modulus A, hSisRel⟩

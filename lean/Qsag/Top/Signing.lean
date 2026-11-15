@@ -23,11 +23,22 @@ public import Qsag.Math.Gf2Pow128
 public import Qsag.ProdCollisionEvents
 public import Qsag.ProdCollisionAccounting
 public import Qsag.ProdCollisionExtraction
+public import Qsag.ProdAdaptiveTcrReduction
+public import Qsag.AdvancedMpcAndCreds
+public import Qsag.BaggyAndRss256Security
+public import Qsag.HybridAddrPolicyAndFullPresetSecurity
+public import Qsag.ProductionCoinReduction
 public import Qsag.SpongeFramingAndDomainSep
 public import Qsag.ParallelSeededSpnPolyBasis
+public import Qsag.ParallelSeededPublicPermutation
+public import Qsag.ParallelSeededPublicPermutationGame
+public import Qsag.QromPreprocessingGame
+public import Qsag.SpnCommittedDifferential
+public import Qsag.SpnWalshHull
 public import Qsag.SignatureOutputAndCacheLaws
 public import Qsag.ElfFunctionalEquiv
 public import Qsag.ConstantTimeIsa
+public import Qsag.IsaCosim
 public import Qsag.SydTvTranslationValidation
 public import Qsag.FaultAndSpeculativeSafety
 import Qsag.Tactic.AssuranceKit
@@ -139,10 +150,10 @@ def waistbandCache_refines_stateless
           (Qsag.derivePublicKey suite params sk).pkRoot maxGrind topL hTopL, trivial⟩
       step_eq := fun {cache} inp hSound => by
         dsimp only [waistbandCachedSignMachine, statelessReferenceSignMachine]
-        obtain ⟨hOutEq, hSound'⟩ :=
+        obtain ⟨hSound', hOutEq⟩ :=
           Qsag.evalWaistbandSignStep_eq_evalSingleSign suite params sk
             inp.msg inp.optRand inp.leafGlobalIdx maxGrind topL cache hSound
-        exact ⟨hSound', congrArg (fun o => some ((), o)) hOutEq⟩ }
+        exact ⟨hSound', congrArg (fun o => some ((), o)) hOutEq.symm⟩ }
 
 theorem waistbandCache_preserves_multiturn_traces
     (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
@@ -189,7 +200,7 @@ theorem sponge_and_spn_poly_basis_composition
     for x86-64 `ct_memzero` with matching leakage trace) with `ConstantTimeIsa.checkX86RetStackPop_sound`
     (public `rsp` stack-return leakage non-interference). -/
 theorem isa_zeroize_and_ret_ct_composition
-    (sLoop : Qsag.Gf128KernelEquivalence.X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
+    (sLoop : Qsag.X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
     (memPol : BitVec 64 → Qsag.ConstantTimeIsa.SecLabel)
     (τ τ' : Qsag.ConstantTimeIsa.X86TaintState) (pc : Nat)
     (hCheck : Qsag.ConstantTimeIsa.checkX86RetStackPop τ = some τ')
@@ -202,11 +213,105 @@ theorem isa_zeroize_and_ret_ct_composition
   ⟨Qsag.SydTv.ctMemzeroX86PosCert_flattened sLoop n hn hbound,
    (Qsag.ConstantTimeIsa.checkX86RetStackPop_sound memPol τ τ' pc hCheck s₁ s₂ hLow hRetPub).1⟩
 
+/-! ## 4. Adaptive Tree Query Budgets, Prefix-Free Frontier FTS, and Production Coin Toss -/
+
+/-- **Adaptive Tree Query Budgets, Prefix-Free Frontier FTS, and Coin-Toss Composition
+    (`adaptive_within_and_compact1122_signing_chain`)**:
+    Composes `ProdAdaptiveTcrReduction` (`evalProdAdaptiveTree_budgets`, `corduroyCustody128_target_pool_budget`),
+    `AdvancedMpcAndCreds.frontierAntichain_paths_prefixFree`,
+    `HybridSecurity.all_frontier_profiles`, and
+    `ProductionCoinReduction` (`program_bound`, `honest_concrete`). -/
+theorem adaptive_within_and_compact1122_signing_chain
+    {qh qs_max : Nat}
+    {α : Type} (rawHash : List UInt8 → List UInt8)
+    (signOracle : Qsag.ProdSigningQuery → Option Qsag.PqHashSig)
+    {prog : Qsag.ProdAdaptiveTree α} (hDual : Qsag.ProdDualBounded qh qs_max prog)
+    (antichain : Qsag.FrontierAntichain)
+    (fProf : Qsag.HybridSecurity.FrontierProfile)
+    (coinCtx : Qsag.ProductionCoinContext)
+    (coinEntries : List Qsag.ProductionCoinReduction.Entry)
+    (hCoinHonest : ∀ e ∈ coinEntries, e.opened = e.share) :
+    ((Qsag.evalProdAdaptiveTree rawHash signOracle prog).2.1.length ≤ qh ∧
+     (Qsag.evalProdAdaptiveTree rawHash signOracle prog).2.2.length ≤ qs_max ∧
+     Qsag.prodPathTargetCount Qsag.corduroyCustody128Params (2 ^ 12) = 35690) ∧
+    (Qsag.IsPrefixFreeAntichain antichain.paths ∧
+     ((Qsag.HybridSecurity.frontierParams fProf).len + 1) *
+       (Qsag.HybridSecurity.frontierParams fProf).nodeBytes +
+       ((Qsag.HybridSecurity.frontierParams fProf).counterBits + 7) / 8 =
+       Qsag.HybridSecurity.frontierWireBytes fProf) ∧
+    (Qsag.QueryBounded (coinEntries.length + (coinEntries.length + 1))
+       (Qsag.ProductionCoinReduction.program coinCtx coinEntries) ∧
+     Qsag.ProductionCoinReduction.run Qsag.ProductionCoinReduction.concrete coinCtx coinEntries =
+       some (Qsag.productionCoinDerive coinCtx
+         (Qsag.ProductionCoinReduction.combinedShares coinEntries 0))) := by
+  have hTree := Qsag.evalProdAdaptiveTree_budgets rawHash signOracle hDual
+  obtain ⟨hCordPool, _⟩ := Qsag.corduroyCustody128_target_pool_budget
+  have hPf := Qsag.frontierAntichain_paths_prefixFree antichain
+  obtain ⟨hWire, _⟩ := Qsag.HybridSecurity.all_frontier_profiles fProf
+  exact ⟨⟨hTree.1, hTree.2, hCordPool⟩,
+         ⟨hPf, hWire⟩,
+         ⟨Qsag.ProductionCoinReduction.program_bound coinCtx coinEntries,
+          Qsag.ProductionCoinReduction.honest_concrete coinCtx coinEntries hCoinHonest⟩⟩
+
+/-! ## 5. Public-Permutation QROM Game, Salted Preprocessing, SPN Cryptanalysis, and x86 Strict Cosim -/
+
+set_option exponentiation.threshold 512 in
+/-- **Public-Permutation QROM Isometry, Salted Preprocessing, 48-Round SPN Hull, and Strict x86 Cosim
+    (`public_spn_qrom_differential_walsh_and_isa_cosim`)**:
+    Composes `ParallelSeededPublicPermutation` + `ParallelSeededPublicPermutationGame`,
+    `QromPreprocessingGame.freshSalt_node_requests_bound`,
+    `SpnCommittedDifferential.spn48_davies_meyer_committed_pair_collision_atLeast_250_bits`,
+    `SpnWalshHull.walsh_trail_product_below_parseval_floor`, and
+    `IsaCosim.run_verified_code_is_strict`. -/
+theorem public_spn_qrom_differential_walsh_and_isa_cosim
+    {anc q kSalt : Nat}
+    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (addr : Qsag.PublicChainAddress) (cur : List UInt8)
+    (perm : Qsag.PublicPermutation Qsag.PublicSpnState)
+    (qState : Qsag.QVec (2 ^ 257) 256 anc)
+    (spnAdv : Qsag.PublicSpnPreimageAdversary anc q)
+    (challenge : Qsag.PublicSpnState)
+    (seeds : Fin kSalt → List UInt8) (suite : Qsag.TweakableHashSuite) (adrs : Qsag.HashAdrs)
+    (table : List (Fin kSalt × ((List UInt8 × List UInt8) × (List UInt8 × List UInt8))))
+    (mds : Qsag.ValidSpnMdsPair 7) (keys : List Qsag.Tower128) (hNd : keys.Nodup)
+    (s₁ s₂ : Qsag.Tower128 × Qsag.Tower128) (hNe : s₁ ≠ s₂)
+    (fuel : Nat) (code : List UInt8) (x86St : Qsag.X86State) (flags : IsaCosim.Flags)
+    (decodedProg : List (Qsag.DecodedInstr Qsag.X86Instr))
+    (hDec : Qsag.decodeX86Stream code = some decodedProg) :
+    (Qsag.rustParallelChainStep hash32 addr.pkSeed addr.epoch.val addr.chainIdx.val addr.step cur =
+      Qsag.rustLanesToBytes32
+        (Qsag.publicSpnFeedForward (Qsag.publicChainPermutation hash32 addr)
+          (Qsag.rustBytes32ToLanes cur)) ∧
+     Qsag.QVec.stateNormSq (Qsag.publicSpnCoherentQuery perm qState) = Qsag.QVec.stateNormSq qState ∧
+     (Qsag.Spec.RatBound.ofBudget
+       (Qsag.publicSpnPreimageProbability perm spnAdv challenge)).le
+       (Qsag.Spec.RatBound.ofBudget Qsag.RatBound.one)) ∧
+    (Qsag.qsum kSalt
+       (Qsag.PreprocessingGame.tableWin (fun salt pair => decide
+         (pair.1 ≠ pair.2 ∧
+           Qsag.thNodeH suite (seeds salt) adrs pair.1.1 pair.1.2 =
+           Qsag.thNodeH suite (seeds salt) adrs pair.2.1 pair.2.2)) table) ≤ table.length) ∧
+    (Qsag.spnDmCollisionCount keys mds.mdsA mds.mdsB s₁ s₂ ≤
+       36 * (keys.length * keys.length) * (keys.length * keys.length) ^ 46 ∧
+     36 ^ 72 * 2 ^ 256 < (2 ^ 128) ^ 72 ∧
+     IsaCosim.run fuel code x86St flags = IsaCosim.runWith false fuel code x86St flags) := by
+  have hFeed := Qsag.rustParallelChainStep_eq_publicFeedForward hash32 addr cur
+  have hIso := Qsag.publicSpnCoherentQuery_isometry perm qState
+  have hProbLe := (Qsag.Spec.RatBound.ofBudget_le_iff _ Qsag.RatBound.one).mpr
+    (Qsag.publicSpnPreimageProbability_le_one perm spnAdv challenge)
+  exact ⟨⟨hFeed, hIso, hProbLe⟩,
+         Qsag.PreprocessingGame.freshSalt_node_requests_bound seeds suite adrs table,
+         ⟨Qsag.spn48_davies_meyer_committed_pair_collision_count_le mds keys hNd s₁ s₂ hNe,
+          Qsag.walsh_trail_product_below_parseval_floor,
+          IsaCosim.run_verified_code_is_strict fuel code x86St flags decodedProg hDec⟩⟩
+
 #verify_constructive
   Qsag.Top.production_euf_cma_gameBound
   Qsag.Top.waistbandCache_preserves_multiturn_traces
   Qsag.Top.sponge_and_spn_poly_basis_composition
   Qsag.Top.isa_zeroize_and_ret_ct_composition
+  Qsag.Top.adaptive_within_and_compact1122_signing_chain
+  Qsag.Top.public_spn_qrom_differential_walsh_and_isa_cosim
 
 end Qsag.Top
 end
