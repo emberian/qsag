@@ -188,11 +188,10 @@ const _: () = {
     }
 };
 
-#[inline]
-#[target_feature(enable = "neon,aes")]
-unsafe fn gf256_mul16_pmull_vec(
-    va: uint8x16_t,
-    vb: uint8x16_t,
+/// The public split-nibble basis-change tables of [`A64_GF256_PMULL_CONSTS`], held in
+/// NEON registers for the duration of one kernel call.
+#[derive(Clone, Copy)]
+struct Gf256PmullTables {
     mask_0f: uint8x16_t,
     t3_lo: uint8x16_t,
     t3_hi: uint8x16_t,
@@ -200,7 +199,44 @@ unsafe fn gf256_mul16_pmull_vec(
     plo_hi: uint8x16_t,
     phi_lo: uint8x16_t,
     phi_hi: uint8x16_t,
+}
+
+impl Gf256PmullTables {
+    #[inline]
+    #[target_feature(enable = "neon")]
+    fn load() -> Self {
+        let c = &A64_GF256_PMULL_CONSTS;
+        // SAFETY: each table is a 16-byte array.
+        unsafe {
+            Self {
+                mask_0f: vdupq_n_u8(0x0F),
+                t3_lo: vld1q_u8(c.t3_to_poly_lo.as_ptr()),
+                t3_hi: vld1q_u8(c.t3_to_poly_hi.as_ptr()),
+                plo_lo: vld1q_u8(c.poly_lo_to_t3_lo.as_ptr()),
+                plo_hi: vld1q_u8(c.poly_lo_to_t3_hi.as_ptr()),
+                phi_lo: vld1q_u8(c.poly_hi_to_t3_lo.as_ptr()),
+                phi_hi: vld1q_u8(c.poly_hi_to_t3_hi.as_ptr()),
+            }
+        }
+    }
+}
+
+#[inline]
+#[target_feature(enable = "neon,aes")]
+unsafe fn gf256_mul16_pmull_vec(
+    va: uint8x16_t,
+    vb: uint8x16_t,
+    tables: Gf256PmullTables,
 ) -> uint8x16_t {
+    let Gf256PmullTables {
+        mask_0f,
+        t3_lo,
+        t3_hi,
+        plo_lo,
+        plo_hi,
+        phi_lo,
+        phi_hi,
+    } = tables;
     let a_lo = vandq_u8(va, mask_0f);
     let a_hi = vshrq_n_u8::<4>(va);
     let ap = veorq_u8(vqtbl1q_u8(t3_lo, a_lo), vqtbl1q_u8(t3_hi, a_hi));
@@ -239,16 +275,9 @@ pub unsafe fn gf256_shamir_mul_pmull_neon(dst: &mut [u8], a: &[u8], b: &[u8]) {
     debug_assert_eq!(dst.len(), a.len());
     debug_assert_eq!(dst.len(), b.len());
     let _dit_guard = enter_aarch64_dit_region();
-    let c = &A64_GF256_PMULL_CONSTS;
 
     unsafe {
-        let mask_0f = vdupq_n_u8(0x0F);
-        let t3_lo = vld1q_u8(c.t3_to_poly_lo.as_ptr());
-        let t3_hi = vld1q_u8(c.t3_to_poly_hi.as_ptr());
-        let plo_lo = vld1q_u8(c.poly_lo_to_t3_lo.as_ptr());
-        let plo_hi = vld1q_u8(c.poly_lo_to_t3_hi.as_ptr());
-        let phi_lo = vld1q_u8(c.poly_hi_to_t3_lo.as_ptr());
-        let phi_hi = vld1q_u8(c.poly_hi_to_t3_hi.as_ptr());
+        let tables = Gf256PmullTables::load();
 
         let len = dst.len();
         let blocks16 = len / 16;
@@ -262,9 +291,7 @@ pub unsafe fn gf256_shamir_mul_pmull_neon(dst: &mut [u8], a: &[u8], b: &[u8]) {
             let off = i * 16;
             let va = vld1q_u8(ap.add(off));
             let vb = vld1q_u8(bp.add(off));
-            let prod = gf256_mul16_pmull_vec(
-                va, vb, mask_0f, t3_lo, t3_hi, plo_lo, plo_hi, phi_lo, phi_hi,
-            );
+            let prod = gf256_mul16_pmull_vec(va, vb, tables);
             vst1q_u8(dp.add(off), prod);
             i += 1;
         }
@@ -278,9 +305,7 @@ pub unsafe fn gf256_shamir_mul_pmull_neon(dst: &mut [u8], a: &[u8], b: &[u8]) {
             tb[..rem].copy_from_slice(&b[off..]);
             let va = vld1q_u8(ta.as_ptr());
             let vb = vld1q_u8(tb.as_ptr());
-            let prod = gf256_mul16_pmull_vec(
-                va, vb, mask_0f, t3_lo, t3_hi, plo_lo, plo_hi, phi_lo, phi_hi,
-            );
+            let prod = gf256_mul16_pmull_vec(va, vb, tables);
             vst1q_u8(td.as_mut_ptr(), prod);
             dst[off..].copy_from_slice(&td[..rem]);
             crate::ct_memzero(&mut ta);
@@ -310,24 +335,15 @@ pub unsafe fn gf256_shamir_mac_pmull_neon(acc: &mut [u8], shares: &[u8], scalar:
     let c = &A64_GF256_PMULL_CONSTS;
 
     unsafe {
-        let mask_0f = vdupq_n_u8(0x0F);
-        let t3_lo = vld1q_u8(c.t3_to_poly_lo.as_ptr());
-        let t3_hi = vld1q_u8(c.t3_to_poly_hi.as_ptr());
-        let plo_lo = vld1q_u8(c.poly_lo_to_t3_lo.as_ptr());
-        let plo_hi = vld1q_u8(c.poly_lo_to_t3_hi.as_ptr());
-        let phi_lo = vld1q_u8(c.poly_hi_to_t3_lo.as_ptr());
-        let phi_hi = vld1q_u8(c.poly_hi_to_t3_hi.as_ptr());
+        let tables = Gf256PmullTables::load();
+        let mask_0f = tables.mask_0f;
 
         let vscalar = vdupq_n_u8(scalar);
         let basis_lo = vld1q_u8(c.mac_basis_lo.as_ptr());
         let basis_hi = vld1q_u8(c.mac_basis_hi.as_ptr());
 
-        let mac_lo = gf256_mul16_pmull_vec(
-            vscalar, basis_lo, mask_0f, t3_lo, t3_hi, plo_lo, plo_hi, phi_lo, phi_hi,
-        );
-        let mac_hi = gf256_mul16_pmull_vec(
-            vscalar, basis_hi, mask_0f, t3_lo, t3_hi, plo_lo, plo_hi, phi_lo, phi_hi,
-        );
+        let mac_lo = gf256_mul16_pmull_vec(vscalar, basis_lo, tables);
+        let mac_hi = gf256_mul16_pmull_vec(vscalar, basis_hi, tables);
 
         let len = acc.len();
         let blocks32 = len / 32;
@@ -733,8 +749,8 @@ mod tests {
         let mut b = [0u8; 256];
         let mut got = [0u8; 256];
         let mut exp = [0u8; 256];
-        for i in 0..256 {
-            b[i] = i as u8;
+        for (i, b) in b.iter_mut().enumerate() {
+            *b = i as u8;
         }
         for x in 0..=255u8 {
             a.fill(x);
