@@ -3,9 +3,9 @@ module
    Run scripts/cross_kat_runner.py --build on Linux; the canonical qsag-kat target builds this module.
    --cross-kat wire format: JSON Lines records [request, result], numeric values are decimal strings,
    byte strings are lowercase hex, field-extension limbs are c0.c0,c0.c1,c1.c0,c1.c1. -/
-public import Qsag.BinaryTower
-public import Qsag.Fips205
-public import Qsag.SuccinctAggregationIop
+public import Qsag.Math.BinaryTower
+public import Qsag.Protocol.Signing.Fips205
+public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
 public section
 open Qsag
 namespace CrossKat
