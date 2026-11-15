@@ -79,6 +79,7 @@ use prover_admission::prover_parallel_jobs;
 pub mod sig;
 pub mod sponge;
 pub mod trace;
+pub mod zk_hem;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -252,7 +253,7 @@ pub(crate) fn try_acquire_worker_permit() -> Option<WorkerPermit> {
 
 /// Partition `items` across at most `parallel_workers()` chunks, running chunk 0 on the caller
 /// thread and spawning remaining chunks under `WorkerPermit` + non-panicking `Builder::spawn_scoped`.
-#[cfg(all(feature = "std", test))]
+#[cfg(all(feature = "std", any(test, feature = "vulkan")))]
 pub(crate) fn map_chunks_bounded<'a, T, R, F>(items: &'a [T], f: F) -> Vec<R>
 where
     T: Sync,
@@ -1669,12 +1670,13 @@ mod tests {
         assert!(!verify_aggregate_with_regime(&pks, &mode, &proof, wrong));
 
         // Mutating the serialized schedule's regime tag to retired capacity tags (`0`, `1`, `3`),
-        // classical-only Johnson (`2`), or unknown (`5`) must fail closed during canonical decode.
+        // classical-only Johnson (`2`), another regime whose query table differs (`5`), or
+        // unknown (`9`) must fail closed during canonical decode.
         let leaf = leaf_of(&proof);
         let regime_offset =
             41 + 1 + leaf.bitmap.to_bytes().len() + 1 + 4 * leaf.shard_signer_counts.len();
         assert_eq!(wire[regime_offset], regime as u8);
-        for bad_tag in [0u8, 1, 2, 3, 5] {
+        for bad_tag in [0u8, 1, 2, 3, 5, 9] {
             let mut mutated = wire.clone();
             mutated[regime_offset] = bad_tag;
             assert_eq!(
@@ -2696,6 +2698,193 @@ mod tests {
             k * SLH_DSA_128F_BYTES
         );
         proof
+    }
+
+    #[test]
+    fn test_cdhz25_and_poseidon2_aggregates_end_to_end() {
+        let mut keys: Vec<_> = (0..3).map(|i| gen_jorts_kp(811, i)).collect();
+        let pks: Vec<_> = keys.iter().map(|k| k.pk).collect();
+        let msg = b"cdhz25 and poseidon2 regimes";
+        let sigs: Vec<_> = keys
+            .iter_mut()
+            .map(|k| k.sign_stateful_for_unit_test(msg, 0).unwrap())
+            .collect();
+        let bitmap = SignerBitmap::from_active_indices(3, &[0, 1, 2]).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        let other_msg = SigningMode::SharedMessage(b"another message");
+        for regime in [
+            WhirSecurityRegime::Cdhz25JohnsonQrom128,
+            WhirSecurityRegime::Cdhz25ZeroPowQrom128,
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+            WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+        ] {
+            // Two shards (2 + 1 signers) under one commitment and one batched opening.
+            let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(812));
+            cfg.regime = regime;
+            cfg.max_signers_per_shard = 2;
+            let proof =
+                HemAggregator::aggregate_with_config(&pks, &bitmap, &mode, &sigs, &cfg).unwrap();
+            assert_eq!(proof.num_leaf_shards(), 2);
+            let wire = proof.to_bytes();
+            assert_eq!(
+                HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
+                proof
+            );
+            assert!(verify_aggregate_with_regime(&pks, &mode, &proof, regime));
+            for other in WhirSecurityRegime::ALL {
+                if other != regime {
+                    assert!(
+                        !verify_aggregate_with_regime(&pks, &mode, &proof, other),
+                        "{regime:?} aggregate accepted as {other:?}"
+                    );
+                }
+            }
+            assert!(!verify_aggregate_with_regime(&pks, &other_msg, &proof, regime));
+            let mut other_pks = pks.clone();
+            other_pks[2] = gen_jorts_kp(813, 2).pk;
+            assert!(!verify_aggregate_with_regime(&other_pks, &mode, &proof, regime));
+
+            let leaf = leaf_of(&proof);
+            let rejects = |bad: ShardBatchProof| {
+                !verify_aggregate_with_regime(&pks, &mode, &with_leaf(&proof, bad), regime)
+            };
+            let mut bad = leaf.clone();
+            bad.pcs_opening.opening.round0_vals[0] += Goldilocks::ONE;
+            assert!(rejects(bad), "{regime:?} leaf value");
+            let mut bad = leaf.clone();
+            bad.pcs_opening.opening.round0_multiproof.auth_siblings[0][0] ^= 1;
+            assert!(rejects(bad), "{regime:?} sibling");
+            let mut bad = leaf.clone();
+            bad.pcs_opening.opening.folded_layers[0].opened_vals[0] += GoldilocksExt4::ONE;
+            assert!(rejects(bad), "{regime:?} stage leaf");
+            let mut bad = leaf.clone();
+            bad.pcs_opening.opening.fold_sumcheck_polys[0][0] += GoldilocksExt4::ONE;
+            assert!(rejects(bad), "{regime:?} fold sumcheck");
+            let mut bad = leaf.clone();
+            bad.witness_comm.root[0] ^= 1;
+            assert!(rejects(bad), "{regime:?} witness commitment");
+            // A regime tag swapped to the sibling backend with the same query table decodes
+            // (the schedule is canonical for it) and must fail verification.
+            let mut bad = leaf.clone();
+            bad.schedule.regime = match regime {
+                WhirSecurityRegime::Cdhz25JohnsonQrom128 => {
+                    WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128
+                }
+                WhirSecurityRegime::Cdhz25ZeroPowQrom128 => {
+                    WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128
+                }
+                WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128 => {
+                    WhirSecurityRegime::Cdhz25JohnsonQrom128
+                }
+                _ => WhirSecurityRegime::Cdhz25ZeroPowQrom128,
+            };
+            let swapped = bad.schedule.regime;
+            let swapped_proof = with_leaf(&proof, bad);
+            assert!(!verify_aggregate_with_regime(&pks, &mode, &swapped_proof, regime));
+            assert!(!verify_aggregate_with_regime(&pks, &mode, &swapped_proof, swapped));
+        }
+    }
+
+    /// Deterministic keys and shared-message signatures, generated on at most
+    /// `parallel_workers()` threads.
+    #[cfg(feature = "std")]
+    fn scale_keys_and_sigs(
+        k: usize,
+        msg: &'static [u8],
+    ) -> (Vec<ValidatorPublicKey>, Vec<ValidatorSignature>) {
+        let workers = parallel_workers().min(k).max(1);
+        let chunk = k.div_ceil(workers);
+        let mut pairs: Vec<(ValidatorPublicKey, ValidatorSignature)> = Vec::with_capacity(k);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..workers)
+                .map(|w| {
+                    s.spawn(move || {
+                        (w * chunk..((w + 1) * chunk).min(k))
+                            .map(|i| {
+                                let mut kp = ValidatorKeypair::keygen_deterministic(
+                                    AggSigProfile::JortsPoseidon2,
+                                    &make_seed(70_000),
+                                    i as u32,
+                                );
+                                let sig = kp.sign_stateful_for_unit_test(msg, 0).unwrap();
+                                (kp.pk, sig)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for h in handles {
+                pairs.extend(h.join().unwrap());
+            }
+        });
+        pairs.into_iter().unzip()
+    }
+
+    /// Flat aggregate of `QSAG_BENCH_N` `JortsPoseidon2` signers (all signing), with
+    /// `QSAG_BENCH_SHARD` signers per shard, `QSAG_BENCH_BATCH` shards per batch and regime wire
+    /// tag `QSAG_BENCH_REGIME`. Prints proof bytes, prover time, and verifier time on all
+    /// workers and on one worker.
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn bench_consensus_scale() {
+        let env_usize = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(default)
+        };
+        let n = env_usize("QSAG_BENCH_N", 128);
+        let shard = env_usize("QSAG_BENCH_SHARD", DEFAULT_MAX_SHARD_SIGNERS_JORTS);
+        let per_batch = env_usize("QSAG_BENCH_BATCH", 1);
+        let regime =
+            WhirSecurityRegime::from_u8(env_usize("QSAG_BENCH_REGIME", 4) as u8).unwrap();
+        let msg: &'static [u8] = b"consensus-scale-benchmark";
+        let t = std::time::Instant::now();
+        let (pks, sigs) = scale_keys_and_sigs(n, msg);
+        let keygen_s = t.elapsed().as_secs_f64();
+        let indices: Vec<usize> = (0..n).collect();
+        let bm = SignerBitmap::from_active_indices(n as u32, &indices).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        let mut cfg = AggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(91_000));
+        cfg.regime = regime;
+        cfg.max_signers_per_shard = shard;
+        cfg.max_shards_per_batch = per_batch;
+        let t = std::time::Instant::now();
+        let proof = aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &cfg).unwrap();
+        let prove_s = t.elapsed().as_secs_f64();
+        let wire = proof.to_bytes();
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            proof
+        );
+        let median3 = |f: &dyn Fn() -> bool| {
+            let mut times = [0f64; 3];
+            for slot in &mut times {
+                let t = std::time::Instant::now();
+                assert!(f());
+                *slot = t.elapsed().as_secs_f64() * 1000.0;
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            times[1]
+        };
+        let verify_all_ms = median3(&|| verify_aggregate_with_regime(&pks, &mode, &proof, regime));
+        let verify_one_ms = median3(&|| {
+            with_worker_limit(1, || {
+                verify_aggregate_with_regime(&pks, &mode, &proof, regime)
+            })
+        });
+        std::println!(
+            "SCALE regime={regime:?} N={n} shard_signers={shard} shards={} batches={} \
+             proof_bytes={} bytes_per_validator={:.1} keygen_sign_s={keygen_s:.1} \
+             prove_s={prove_s:.2} verify_ms_all_workers={verify_all_ms:.2} \
+             verify_ms_1_worker={verify_one_ms:.2} workers={}",
+            proof.num_leaf_shards(),
+            proof.num_shard_batches(),
+            wire.len(),
+            wire.len() as f64 / n as f64,
+            parallel_workers()
+        );
     }
 
     /// Release measurements include aggregation, serialization, and independent verification.
