@@ -26,10 +26,14 @@ impl Drop for SecretBytes {
 pub(crate) struct SecretWords(pub(crate) alloc::vec::Vec<u32>);
 impl core::ops::Deref for SecretWords {
     type Target = alloc::vec::Vec<u32>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl core::ops::DerefMut for SecretWords {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 impl Drop for SecretWords {
     fn drop(&mut self) {
@@ -60,6 +64,9 @@ mod tests {
         }
         WORD_WIPES.with(|events| *events.borrow_mut() = Some(alloc::vec::Vec::new()));
         assert!(fail().is_err());
-        assert_eq!(WORD_WIPES.with(|events| events.borrow_mut().take().unwrap()), alloc::vec![(3, true)]);
+        assert_eq!(
+            WORD_WIPES.with(|events| events.borrow_mut().take().unwrap()),
+            alloc::vec![(3, true)]
+        );
     }
 }

@@ -20,6 +20,17 @@ impl Wipe for u64 {
         qsag_accel::ct::ct_zeroize_u64s(core::slice::from_mut(self));
     }
 }
+impl Wipe for usize {
+    fn wipe(&mut self) {
+        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
+    }
+}
+impl<A: Wipe, B: Wipe> Wipe for (A, B) {
+    fn wipe(&mut self) {
+        self.0.wipe();
+        self.1.wipe();
+    }
+}
 impl<T: Wipe, const N: usize> Wipe for [T; N] {
     fn wipe(&mut self) {
         for value in self {
@@ -62,7 +73,9 @@ mod tests {
     use super::*;
     struct Borrowed<'a>(&'a mut [u8; 32]);
     impl Wipe for Borrowed<'_> {
-        fn wipe(&mut self) { self.0.wipe(); }
+        fn wipe(&mut self) {
+            self.0.wipe();
+        }
     }
     #[test]
     fn guard_wipes_before_error_returns_and_unwinding() {

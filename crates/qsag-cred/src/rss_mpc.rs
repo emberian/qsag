@@ -380,7 +380,9 @@ struct KAcc {
 }
 
 impl Drop for KAcc {
-    fn drop(&mut self) { qsag_accel::ct::ct_zeroize_u64s(&mut self.limbs); }
+    fn drop(&mut self) {
+        qsag_accel::ct::ct_zeroize_u64s(&mut self.limbs);
+    }
 }
 
 impl KAcc {
@@ -976,10 +978,16 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 }
                 mine.push(bytes);
             }
-            let private = (0..parties).map(|j| {
-                let count = self.comps.iter().filter(|&&s| self.st.lowest_holder(s) == self.me && !self.st.holds(s, j)).count();
-                Vec::with_capacity(count * total * 3)
-            }).collect::<Vec<_>>();
+            let private = (0..parties)
+                .map(|j| {
+                    let count = self
+                        .comps
+                        .iter()
+                        .filter(|&&s| self.st.lowest_holder(s) == self.me && !self.st.holds(s, j))
+                        .count();
+                    Vec::with_capacity(count * total * 3)
+                })
+                .collect::<Vec<_>>();
             let mut private = SecretBuffer(private);
             let mut broadcast = Vec::with_capacity(32 * self.comps.len());
             for (i, &s) in self.comps.iter().enumerate() {
@@ -1137,8 +1145,16 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             let lambda = self.coin()?;
 
             let mut dim = (gates + 1).div_ceil(FOLD) * FOLD;
-            let mut x = SecretBuffer((0..comps).map(|_| Vec::with_capacity(dim)).collect::<Vec<Vec<Kx>>>());
-            let mut y = SecretBuffer((0..comps).map(|_| Vec::with_capacity(dim)).collect::<Vec<Vec<Kx>>>());
+            let mut x = SecretBuffer(
+                (0..comps)
+                    .map(|_| Vec::with_capacity(dim))
+                    .collect::<Vec<Vec<Kx>>>(),
+            );
+            let mut y = SecretBuffer(
+                (0..comps)
+                    .map(|_| Vec::with_capacity(dim))
+                    .collect::<Vec<Vec<Kx>>>(),
+            );
             let mut z = SecretBuffer((0..comps).map(|i| mask_c[i][0]).collect::<Vec<Kx>>());
             for i in 0..comps {
                 x[i].push(mask_a[i][0]);
@@ -1171,14 +1187,16 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                     locals.push(self.ip_local(&x, &y, p, FOLD));
                 }
                 for row in &tables.extra {
-                    let xe = SecretBuffer(x
-                        .iter()
-                        .map(|comp| eval_groups(comp, row, groups))
-                        .collect::<Vec<Vec<Kx>>>());
-                    let ye = SecretBuffer(y
-                        .iter()
-                        .map(|comp| eval_groups(comp, row, groups))
-                        .collect::<Vec<Vec<Kx>>>());
+                    let xe = SecretBuffer(
+                        x.iter()
+                            .map(|comp| eval_groups(comp, row, groups))
+                            .collect::<Vec<Vec<Kx>>>(),
+                    );
+                    let ye = SecretBuffer(
+                        y.iter()
+                            .map(|comp| eval_groups(comp, row, groups))
+                            .collect::<Vec<Vec<Kx>>>(),
+                    );
                     locals.push(self.ip_local(&xe, &ye, 0, 1));
                 }
                 let shared = SecretBuffer(self.reshare_k(&locals)?);

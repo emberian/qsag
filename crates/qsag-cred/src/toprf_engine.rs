@@ -213,14 +213,20 @@ pub(crate) fn decode_group(
     }
     let agree = vectors.len() == 2
         && qsag_accel::ct::ct_eq_mask_u64(
-            vectors[0].1.iter().zip(&vectors[1].1).fold(0u64, |diff, (a, b)| diff | (a ^ b)), 0) != 0;
+            vectors[0]
+                .1
+                .iter()
+                .zip(&vectors[1].1)
+                .fold(0u64, |diff, (a, b)| diff | (a ^ b)),
+            0,
+        ) != 0;
     let chosen = if agree {
         Some(0)
     } else {
         digest.and_then(|d| {
-            vectors
-                .iter()
-                .position(|(_, v)| qsag_accel::ct::ct_eq_bytes(&group_digest(context, layer, recipient, j, v), d))
+            vectors.iter().position(|(_, v)| {
+                qsag_accel::ct::ct_eq_bytes(&group_digest(context, layer, recipient, j, v), d)
+            })
         })
     };
     let mut result = Err(Error::InconsistentShares);
@@ -268,7 +274,17 @@ impl<T: Transport> Engine<'_, T> {
                 }
             }
         }
-        let mut messages: [Vec<u8>; SERVERS] = core::array::from_fn(|_| Vec::new());
+        let mut messages = SecretBuffer(core::array::from_fn::<_, SERVERS, _>(|i| {
+            let capacity = if i == me {
+                0
+            } else {
+                (0..SERVERS)
+                    .filter(|&j| j != i && j != me)
+                    .map(|j| group_len(i, j, me, gates))
+                    .sum()
+            };
+            Vec::with_capacity(capacity)
+        }));
         for (i, message) in messages.iter_mut().enumerate() {
             if i == me {
                 continue;
@@ -310,7 +326,7 @@ impl<T: Transport> Engine<'_, T> {
         );
         let layer = self.layer;
         self.layer = self.layer.checked_add(1).ok_or(Error::Counter)?;
-        let incoming = SecretBuffer(self.transport.exchange(phase, messages)?);
+        let incoming = SecretBuffer(self.transport.exchange(phase, messages.into_inner())?);
         for j in 0..SERVERS {
             if j == me {
                 continue;
