@@ -433,8 +433,13 @@ impl ExecutionReceipt {
     fn mac_over_fields(&self, key: &BackendAttestationKey) -> [u8; 32] {
         let slot = self.descriptor.slot();
         let mut p2_bytes = [0u8; 32];
-        for (chunk, limb) in p2_bytes.chunks_exact_mut(8).zip(&self.kernel_poseidon2) {
-            chunk.copy_from_slice(&limb.to_le_bytes());
+        for (chunk, limb) in p2_bytes
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(&self.kernel_poseidon2)
+        {
+            *chunk = limb.to_le_bytes();
         }
         cshake256_framed_32(
             b"QSAG.ACCEL.KEYED_RECEIPT.V5",
@@ -1565,8 +1570,13 @@ mod tests {
         assert_eq!(reg.verify_keyed_receipt(&good, &key), Ok(()));
 
         let mut p2_bytes = [0u8; 32];
-        for (chunk, limb) in p2_bytes.chunks_exact_mut(8).zip(&good.kernel_poseidon2) {
-            chunk.copy_from_slice(&limb.to_le_bytes());
+        for (chunk, limb) in p2_bytes
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(&good.kernel_poseidon2)
+        {
+            *chunk = limb.to_le_bytes();
         }
         let mac_under = |domain: &[u8]| {
             cshake256_framed_32(

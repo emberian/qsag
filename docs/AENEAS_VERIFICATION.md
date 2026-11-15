@@ -29,8 +29,10 @@ checked by `scripts/check_extraction_provenance.py`:
   directly to the canonical `lean/Qsag` specifications (`Qsag.keccakF1600`,
   `Qsag.towerMul`), while `QsagCustodyWeld.lean` welds extracted
   `VerifiedBeltQuorumGuard` MIR transitions to canonical `Qsag.BeltCustody`
-  invariants (`RealSpecBeltWeld`, `RealSpecGuardBoundary`, and
-  `AuthenticatedBeltAndRealSpecWeld`).
+  invariants (`RealSpecBeltWeld`) and the extracted RSS cut session, velocity guard, ML-DSA
+  release gate and belt-latch kernel to their `Qsag.MirSpecBridge` machines by lockstep forward
+  simulation
+  (`AuthenticatedBeltAndRealSpecWeld`, `RealSpecGuardBoundary`).
 - **Hem WHIR verifier kernels (`aeneas/qsag-whir-verified` → `aeneas/lean-whir`):**
   Linked directly by `crates/qsag-agg`. Active production call sites in
   `crates/qsag-agg` invoke `decode_canonical_u64`, `decode_canonical_ext4`,
@@ -70,7 +72,7 @@ Both `aeneas/qsag-verified` and `aeneas/qsag-whir-verified` are zero-dependency
 | Package | Surface | Evidence and boundary |
 | --- | --- | --- |
 | `aeneas/qsag-verified` (differential-parity primitives) | Goldilocks and GoldilocksExt2; Wiedemann Gf16, Gf256, Tower128; Shamir evaluation and Lagrange reconstruction; Keccak-f[1600], SHAKE256, cSHAKE256; FIPS 205 ADRS, WOTS+, F, and TSW | `tests/parity_qsag_core.rs` compares executed cases bit-for-bit with `crates/qsag-core`. `tests/unit_kat.rs` includes NIST FIPS 202 and SP 800-185 known-answer tests. `QsagSpecWeld` proves universal equivalence of extracted Keccak-f[1600] and `Tower128` against `lean/Qsag`. |
-| `aeneas/qsag-verified` (protocol guards & custody weld) | `EpochLatch` with randomizer binding; `BdozVerifierSession2Lane` & `BdozOpeningGuard2Lane`; `VerifiedBeltQuorumGuard` (`authenticated_belt`); two-of-three `RssShare64` gates; `Tower256` | `QsagCustodyWeld` proves `RealSpecBeltWeld`, `RealSpecGuardBoundary`, and `AuthenticatedBeltAndRealSpecWeld` against `Qsag.BeltCustody`. Crash-safe `EpochLatch` durability requires the caller to persist its write-ahead log before releasing a grant. |
+| `aeneas/qsag-verified` (protocol guards & custody weld) | `EpochLatch` with randomizer binding; `BdozVerifierSession2Lane` & `BdozOpeningGuard2Lane`; `VerifiedBeltQuorumGuard` (`authenticated_belt`); two-of-three `RssShare64` gates; `Tower256` | `QsagCustodyWeld` proves `RealSpecBeltWeld` against `Qsag.BeltCustody`, and in `AuthenticatedBeltAndRealSpecWeld` and `RealSpecGuardBoundary` that the extracted RSS cut session, `StatefulVelocityGuard`, `MlDsaReleaseGate` and `BeltLatchKernel` forward-simulate `Qsag.mirRssCutMachine`, `Qsag.mirVelocityMachine`, `Qsag.mirMlDsaReleaseMachine` and `Qsag.mirBeltLatchKernelMachine`. Crash-safe `EpochLatch` durability requires the caller to persist its write-ahead log before releasing a grant. |
 | `aeneas/qsag-whir-verified` (WHIR verifier & quorum kernels) | Canonical Goldilocks/`Ext4` decoding; `duet_fold`, `cwyz_duet_fold`, `fold_duet_affine_ext4`, `cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`, `affine_cascade_claim_step`; arbitrary-slice Horner `eval_ext4_univariate_at_base` & `eval_univariate_ext4_at_base`; `verify_*` acceptance checks; `verify_ood_pin_eq`, `verify_stage_pow_mask`, `canonical_query_group_idx`, `step_merkle_pair_order`, `checked_quorum_sum` | Directly linked by `crates/qsag-agg` for canonical decoding, bridge/sumcheck/cascade steps, OOD equality, PoW mask, query reduction, Merkle sibling ordering, and overflow-free quorum summation; `fold_duet_affine_ext4`, `eval_univariate_ext4_at_base`, and the four `verify_*` wrappers are proved in `aeneas/lean-whir` and exercised in `tests/production_entrypoints.rs`. |
 
 Goldilocks inversion has an exact modular-exponent specification and canonical output

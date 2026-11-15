@@ -114,6 +114,33 @@ void lds_ext4_store(uint i, u64vec4 v) {
     s_lds[7][a] = uint(v.w >> 32u);
 }
 
+uint64_t fp_pow_u32(uint64_t base_val, uint exp);
+uint64_t fp_mul(uint64_t a, uint64_t b);
+
+void lds_kron4_init(uint lid, uint64_t base_val) {
+    lds_ext4_store(
+        lid,
+        u64vec4(
+            fp_pow_u32(base_val, lid),
+            fp_pow_u32(base_val, lid << 8u),
+            fp_pow_u32(base_val, lid << 16u),
+            fp_pow_u32(base_val, lid << 24u)
+        )
+    );
+}
+
+uint64_t lds_kron4_eval(uint exp) {
+    uint a0 = lds_index(exp & 0xFFu);
+    uint a1 = lds_index((exp >> 8u) & 0xFFu);
+    uint a2 = lds_index((exp >> 16u) & 0xFFu);
+    uint a3 = lds_index(exp >> 24u);
+    uint64_t k0 = uint64_t(s_lds[0][a0]) | (uint64_t(s_lds[1][a0]) << 32u);
+    uint64_t k1 = uint64_t(s_lds[2][a1]) | (uint64_t(s_lds[3][a1]) << 32u);
+    uint64_t k2 = uint64_t(s_lds[4][a2]) | (uint64_t(s_lds[5][a2]) << 32u);
+    uint64_t k3 = uint64_t(s_lds[6][a3]) | (uint64_t(s_lds[7][a3]) << 32u);
+    return fp_mul(fp_mul(k0, k1), fp_mul(k2, k3));
+}
+
 uint64_t fp_reduce_u64(uint64_t x) {
     return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
 }
@@ -402,11 +429,17 @@ void main() {
     }
 
     if (pc.mode == 2u) {
-        // 4-coset base-field shifted bit-reverse copy (`b0 -> b1`) with coalesced destination writes.
+        // 4-coset base-field shifted bit-reverse copy (`b0 -> b1`) with Kronecker LDS powers.
         uint coset_y = gl_WorkGroupID.y;
         if (coset_y >= pc.aux4) {
             return;
         }
+        uint64_t s_r = (coset_y == 0u) ? pc.scalar0
+                     : (coset_y == 1u) ? pc.scalar1
+                     : (coset_y == 2u) ? pc.scalar2
+                                       : pc.scalar3;
+        lds_kron4_init(lid, s_r);
+        barrier();
         uint dst_i = pc.aux3 + gl_GlobalInvocationID.x;
         if (dst_i >= pc.len) {
             return;
@@ -414,13 +447,9 @@ void main() {
         uint log_c = pc.aux0;
         uint poly_idx = pc.aux1;
         uint poly_stride = pc.aux2;
-        uint64_t s_r = (coset_y == 0u) ? pc.scalar0
-                     : (coset_y == 1u) ? pc.scalar1
-                     : (coset_y == 2u) ? pc.scalar2
-                                       : pc.scalar3;
         uint src_i = (log_c == 0u) ? 0u : (bitfieldReverse(dst_i) >> (32u - log_c));
         uint64_t c_val = b0.words[poly_idx * poly_stride + src_i];
-        b1.words[coset_y * pc.len + dst_i] = fp_mul(c_val, fp_pow_u32(s_r, src_i));
+        b1.words[coset_y * pc.len + dst_i] = fp_mul(c_val, lds_kron4_eval(src_i));
         return;
     }
 
@@ -511,6 +540,8 @@ void main() {
 
     if (pc.mode == 6u) {
         // Intermediate stage `Ext4` `encode_overflow` shifted bit-reverse copy (`b0 -> b1`).
+        lds_kron4_init(lid, 7ul);
+        barrier();
         uint i = pc.aux3 + gl_GlobalInvocationID.x;
         if (i >= pc.len) {
             return;
@@ -521,7 +552,7 @@ void main() {
         uint rev = (log_d == 0u) ? 0u : (bitfieldReverse(i) >> (32u - log_d));
         u64vec4 out_v = u64vec4(0ul);
         if (rev < coeff_len) {
-            out_v = fp4_mul_base(load_ext4_b0(rev), fp_pow_u32(7ul, rev));
+            out_v = fp4_mul_base(load_ext4_b0(rev), lds_kron4_eval(rev));
         }
         store_ext4_b1(dst_base + i, out_v);
         return;
@@ -852,6 +883,53 @@ void main() {
             store_ext4_b1(g_base + leg_lo * d_stride, lds_ext4_load((leg_lo << 6u) + col));
             store_ext4_b1(g_base + (leg_lo + 4u) * d_stride, lds_ext4_load(((leg_lo + 4u) << 6u) + col));
         }
+        return;
+    }
+
+    if (pc.mode == 17u) {
+        // 3-bit register-fused radix-8 Mobius pass (`bits b, b+1, b+2 >= 9`) across `num_polys = pc.aux1`.
+        uint octs_per_poly = pc.len >> 3u;
+        uint bit = pc.aux0;
+        uint num_polys = pc.aux1;
+        uint poly_stride = pc.aux2;
+        uint oct_id = pc.aux3 + gl_GlobalInvocationID.x;
+        if (oct_id >= octs_per_poly * num_polys) {
+            return;
+        }
+        uint p = oct_id / octs_per_poly;
+        uint t = oct_id - p * octs_per_poly;
+        uint lo_mask = (1u << bit) - 1u;
+        uint i0 = p * poly_stride + (((t >> bit) << (bit + 3u)) | (t & lo_mask));
+        uint s0 = 1u << bit;
+        uint s1 = s0 << 1u;
+        uint s2 = s0 << 2u;
+        uint64_t v0 = b0.words[i0];
+        uint64_t v1 = b0.words[i0 + s0];
+        uint64_t v2 = b0.words[i0 + s1];
+        uint64_t v3 = b0.words[i0 + s1 + s0];
+        uint64_t v4 = b0.words[i0 + s2];
+        uint64_t v5 = b0.words[i0 + s2 + s0];
+        uint64_t v6 = b0.words[i0 + s2 + s1];
+        uint64_t v7 = b0.words[i0 + s2 + s1 + s0];
+        v1 = fp_sub(v1, v0);
+        v3 = fp_sub(v3, v2);
+        v5 = fp_sub(v5, v4);
+        v7 = fp_sub(v7, v6);
+        v2 = fp_sub(v2, v0);
+        v3 = fp_sub(v3, v1);
+        v6 = fp_sub(v6, v4);
+        v7 = fp_sub(v7, v5);
+        v4 = fp_sub(v4, v0);
+        v5 = fp_sub(v5, v1);
+        v6 = fp_sub(v6, v2);
+        v7 = fp_sub(v7, v3);
+        b0.words[i0 + s0]           = v1;
+        b0.words[i0 + s1]           = v2;
+        b0.words[i0 + s1 + s0]      = v3;
+        b0.words[i0 + s2]           = v4;
+        b0.words[i0 + s2 + s0]      = v5;
+        b0.words[i0 + s2 + s1]      = v6;
+        b0.words[i0 + s2 + s1 + s0] = v7;
         return;
     }
 }

@@ -5,19 +5,26 @@
 //! though unlinking and recreating the budget journal on a new inode fails closed.
 use crate::HdError;
 use alloc::boxed::Box;
-use qsag_accel::ct::{RedactedSecret, ct_eq_bytes};
+use qsag_accel::ct::{RedactedSecret, ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::LockedRecord;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom};
+#[cfg(any(not(unix), test))]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const LIMIT: u64 = 128;
 const RECORD: usize = 40;
 const RECORD_MAGIC: &[u8; 8] = b"QSAGREC1";
-const PAYLOAD_HEADER_BYTES: usize = 16;
-const FILE_PREFIX_BYTES: usize = 16 + PAYLOAD_HEADER_BYTES;
+const DATA_SEAL_BYTES: usize = 16;
+const HWM_SLOT_BYTES: usize = 80;
+const HWM_SLOT_A_PAYLOAD_OFFSET: usize = DATA_SEAL_BYTES;
+const HWM_SLOT_B_PAYLOAD_OFFSET: usize = DATA_SEAL_BYTES + HWM_SLOT_BYTES;
+const PAYLOAD_HEADER_BYTES: usize = DATA_SEAL_BYTES + 2 * HWM_SLOT_BYTES; // 176 bytes
+const FILE_PREFIX_BYTES: usize = 16 + PAYLOAD_HEADER_BYTES; // 192 bytes
+const MAX_BUDGET_PAYLOAD_BYTES: usize = PAYLOAD_HEADER_BYTES + RECORD * (LIMIT as usize + 1);
 
 /// Append-only authenticated journal, held under an exclusive OS lock and pinned
 /// to the genesis regular-file `(dev, ino)` identity across both live `reserve()`
@@ -124,6 +131,98 @@ fn sync_parent_dir(path: &Path) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
+fn guard_key(mut raw: [u8; 32]) -> RedactedSecret<32> {
+    let guarded = RedactedSecret::new(raw);
+    ct_zeroize_bytes(&mut raw);
+    guarded
+}
+
+fn write_at_exact(file: &mut File, offset: u64, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.write_all_at(bytes, offset)
+    }
+    #[cfg(not(unix))]
+    {
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(bytes)
+    }
+}
+
+fn encode_hwm_slot(
+    key: &[u8; 32],
+    family: &[u8; 32],
+    lock_seal: &[u8; 8],
+    data_seal: &[u8; 16],
+    slot_idx: u8,
+    used_hwm: u64,
+    tip_mac: &[u8; 32],
+) -> [u8; HWM_SLOT_BYTES] {
+    let mut slot = [0u8; HWM_SLOT_BYTES];
+    let used_le = used_hwm.to_le_bytes();
+    let reserved = [0u8; 8];
+    slot[..8].copy_from_slice(&used_le);
+    slot[8..40].copy_from_slice(tip_mac);
+    let mac = cshake256_framed_32(
+        b"QSAG.HD.QUERY_BUDGET.HWM.V3",
+        &[
+            key,
+            family,
+            lock_seal,
+            data_seal,
+            &[slot_idx],
+            &LIMIT.to_le_bytes(),
+            &used_le,
+            tip_mac,
+            &reserved,
+        ],
+    );
+    slot[40..72].copy_from_slice(&mac);
+    slot
+}
+
+fn verify_hwm_slot(
+    key: &[u8; 32],
+    family: &[u8; 32],
+    lock_seal: &[u8; 8],
+    data_seal: &[u8; 16],
+    slot_idx: u8,
+    raw: &[u8],
+) -> Result<(u64, [u8; 32]), HdError> {
+    if raw.len() != HWM_SLOT_BYTES {
+        return Err(HdError::BudgetStorageFailed);
+    }
+    let used_le: [u8; 8] = raw[..8].try_into().map_err(|_| HdError::BudgetStorageFailed)?;
+    let used_hwm = u64::from_le_bytes(used_le);
+    let tip_mac: [u8; 32] = raw[8..40]
+        .try_into()
+        .map_err(|_| HdError::BudgetStorageFailed)?;
+    let stored_mac = &raw[40..72];
+    let reserved = &raw[72..80];
+    if used_hwm > LIMIT || !ct_eq_bytes(reserved, &[0u8; 8]) {
+        return Err(HdError::BudgetStorageFailed);
+    }
+    let expected_mac = cshake256_framed_32(
+        b"QSAG.HD.QUERY_BUDGET.HWM.V3",
+        &[
+            key,
+            family,
+            lock_seal,
+            data_seal,
+            &[slot_idx],
+            &LIMIT.to_le_bytes(),
+            &used_le,
+            &tip_mac,
+            reserved,
+        ],
+    );
+    if !ct_eq_bytes(&expected_mac, stored_mac) {
+        return Err(HdError::BudgetStorageFailed);
+    }
+    Ok((used_hwm, tip_mac))
+}
+
 fn compute_record_bytes(
     key: &[u8; 32],
     family: &[u8; 32],
@@ -163,10 +262,11 @@ impl DurableQueryBudget {
         key: [u8; 32],
         minimum: LedgerCheckpoint,
     ) -> Result<Self, HdError> {
-        let journal = Self::open(path, family, key)?;
+        let key_secret = guard_key(key);
+        let journal = Self::open_guarded(path.as_ref(), family, key_secret)?;
         let current = journal.checkpoint();
         if current.generation < minimum.generation
-            || (current.generation == minimum.generation && current.tag != minimum.tag)
+            || (current.generation == minimum.generation && !ct_eq_bytes(&current.tag, &minimum.tag))
         {
             return Err(HdError::BudgetStorageFailed);
         }
@@ -178,10 +278,11 @@ impl DurableQueryBudget {
         key: [u8; 32],
         anchor: Box<dyn ExternalMonotoneAnchor>,
     ) -> Result<Self, HdError> {
+        let key_secret = guard_key(key);
         if storage(anchor.load())?.is_some() {
             return Err(HdError::BudgetStorageFailed);
         }
-        let mut journal = Self::create(path, family, key)?;
+        let mut journal = Self::create_guarded(path.as_ref(), family, key_secret)?;
         storage(anchor.advance(journal.checkpoint()))?;
         journal.anchor = Some(anchor);
         Ok(journal)
@@ -192,9 +293,16 @@ impl DurableQueryBudget {
         key: [u8; 32],
         anchor: Box<dyn ExternalMonotoneAnchor>,
     ) -> Result<Self, HdError> {
+        let key_secret = guard_key(key);
         let minimum = storage(anchor.load())?.ok_or(HdError::BudgetStorageFailed)?;
-        let mut journal = Self::open_at_least(path, family, key, minimum)?;
-        storage(anchor.advance(journal.checkpoint()))?;
+        let mut journal = Self::open_guarded(path.as_ref(), family, key_secret)?;
+        let current = journal.checkpoint();
+        if current.generation < minimum.generation
+            || (current.generation == minimum.generation && !ct_eq_bytes(&current.tag, &minimum.tag))
+        {
+            return Err(HdError::BudgetStorageFailed);
+        }
+        storage(anchor.advance(current))?;
         journal.anchor = Some(anchor);
         Ok(journal)
     }
@@ -205,9 +313,17 @@ impl DurableQueryBudget {
         family: [u8; 32],
         key: [u8; 32],
     ) -> Result<Self, HdError> {
-        let path_buf = path.as_ref().to_path_buf();
+        let key_secret = guard_key(key);
+        Self::create_guarded(path.as_ref(), family, key_secret)
+    }
+
+    fn create_guarded(
+        path: &Path,
+        family: [u8; 32],
+        key_secret: RedactedSecret<32>,
+    ) -> Result<Self, HdError> {
+        let path_buf = path.to_path_buf();
         let record = storage(LockedRecord::create_new(&path_buf))?;
-        let key_secret = RedactedSecret::new(key);
         let mut file = storage(
             storage(no_follow_options())?
                 .read(true)
@@ -229,20 +345,49 @@ impl DurableQueryBudget {
             0,
             &[0u8; 32],
         );
+        let slot_a = encode_hwm_slot(
+            key_secret.expose(),
+            &family,
+            &lock_seal,
+            &data_seal,
+            0,
+            0,
+            &genesis_mac,
+        );
+        let slot_b = encode_hwm_slot(
+            key_secret.expose(),
+            &family,
+            &lock_seal,
+            &data_seal,
+            1,
+            0,
+            &genesis_mac,
+        );
 
         let mut init_buf = [0u8; FILE_PREFIX_BYTES + RECORD];
         init_buf[..8].copy_from_slice(RECORD_MAGIC);
         init_buf[8..16].copy_from_slice(&lock_seal);
         init_buf[16..32].copy_from_slice(&data_seal);
-        init_buf[32..].copy_from_slice(&genesis_rec);
-        storage(file.write_all(&init_buf))?;
+        init_buf[16 + HWM_SLOT_A_PAYLOAD_OFFSET..16 + HWM_SLOT_B_PAYLOAD_OFFSET]
+            .copy_from_slice(&slot_a);
+        init_buf[16 + HWM_SLOT_B_PAYLOAD_OFFSET..FILE_PREFIX_BYTES].copy_from_slice(&slot_b);
+        init_buf[FILE_PREFIX_BYTES..].copy_from_slice(&genesis_rec);
+        storage(write_at_exact(&mut file, 0, &init_buf))?;
         storage(file.sync_all())?;
         storage(sync_parent_dir(&path_buf))?;
 
-        let verified_payload = storage(record.read())?;
+        let verified_payload = storage(record.read_bounded(MAX_BUDGET_PAYLOAD_BYTES))?;
         if verified_payload.len() != PAYLOAD_HEADER_BYTES + RECORD
-            || !ct_eq_bytes(&verified_payload[..16], &data_seal)
-            || !ct_eq_bytes(&verified_payload[16..], &genesis_rec)
+            || !ct_eq_bytes(&verified_payload[..DATA_SEAL_BYTES], &data_seal)
+            || !ct_eq_bytes(
+                &verified_payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET],
+                &slot_a,
+            )
+            || !ct_eq_bytes(
+                &verified_payload[HWM_SLOT_B_PAYLOAD_OFFSET..PAYLOAD_HEADER_BYTES],
+                &slot_b,
+            )
+            || !ct_eq_bytes(&verified_payload[PAYLOAD_HEADER_BYTES..], &genesis_rec)
         {
             return Err(HdError::BudgetStorageFailed);
         }
@@ -262,11 +407,19 @@ impl DurableQueryBudget {
     }
 
     /// Recover strictly. Missing, torn, wrong-key, wrong-family, reordered, symlinked,
-    /// or unlinked-and-recreated (new inode) journals fail closed.
+    /// tail-truncated, or unlinked-and-recreated (new inode) journals fail closed.
     pub fn open(path: impl AsRef<Path>, family: [u8; 32], key: [u8; 32]) -> Result<Self, HdError> {
-        let path_buf = path.as_ref().to_path_buf();
+        let key_secret = guard_key(key);
+        Self::open_guarded(path.as_ref(), family, key_secret)
+    }
+
+    fn open_guarded(
+        path: &Path,
+        family: [u8; 32],
+        key_secret: RedactedSecret<32>,
+    ) -> Result<Self, HdError> {
+        let path_buf = path.to_path_buf();
         let record = storage(LockedRecord::open_existing(&path_buf))?;
-        let key_secret = RedactedSecret::new(key);
 
         let path_meta = storage(fs::symlink_metadata(&path_buf))?;
         if path_meta.file_type().is_symlink() || !path_meta.is_file() {
@@ -288,7 +441,7 @@ impl DurableQueryBudget {
             return Err(HdError::BudgetStorageFailed);
         }
 
-        let payload = storage(record.read())?;
+        let payload = storage(record.read_bounded(MAX_BUDGET_PAYLOAD_BYTES))?;
         if payload.len() < PAYLOAD_HEADER_BYTES + RECORD {
             return Err(HdError::BudgetStorageFailed);
         }
@@ -297,16 +450,38 @@ impl DurableQueryBudget {
             || records_slice.len() > RECORD * (LIMIT as usize + 1)
             || records_slice.len() % RECORD != 0
             || file_meta.len() != (16 + payload.len()) as u64
-            || !ct_eq_bytes(&payload[..PAYLOAD_HEADER_BYTES], &actual_data_seal)
+            || !ct_eq_bytes(&payload[..DATA_SEAL_BYTES], &actual_data_seal)
         {
             return Err(HdError::BudgetStorageFailed);
         }
 
         let lock_seal = record.lock_seal();
+        let (hwm_a, tip_a) = verify_hwm_slot(
+            key_secret.expose(),
+            &family,
+            &lock_seal,
+            &actual_data_seal,
+            0,
+            &payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET],
+        )?;
+        let (hwm_b, tip_b) = verify_hwm_slot(
+            key_secret.expose(),
+            &family,
+            &lock_seal,
+            &actual_data_seal,
+            1,
+            &payload[HWM_SLOT_B_PAYLOAD_OFFSET..PAYLOAD_HEADER_BYTES],
+        )?;
+        if hwm_a < hwm_b || hwm_a - hwm_b > 1 {
+            return Err(HdError::BudgetStorageFailed);
+        }
+
         let mut prev_mac = [0u8; 32];
+        let mut penultimate_mac = [0u8; 32];
         let mut used = 0u64;
         for (i, rec_bytes) in records_slice.as_chunks::<RECORD>().0.iter().enumerate() {
             let count = i as u64;
+            penultimate_mac = prev_mac;
             let (expected, mac) = compute_record_bytes(
                 key_secret.expose(),
                 &family,
@@ -321,6 +496,72 @@ impl DurableQueryBudget {
             prev_mac = mac;
             used = count;
         }
+
+        // Enforce anti-truncation high-water mark (`used >= hwm_a`) and heal interrupted HWM slot syncs.
+        if used < hwm_a || used > hwm_a + 1 {
+            return Err(HdError::BudgetStorageFailed);
+        }
+        if used == hwm_a {
+            if !ct_eq_bytes(&prev_mac, &tip_a) {
+                return Err(HdError::BudgetStorageFailed);
+            }
+            if hwm_b != hwm_a || !ct_eq_bytes(&tip_b, &tip_a) {
+                let slot_b = encode_hwm_slot(
+                    key_secret.expose(),
+                    &family,
+                    &lock_seal,
+                    &actual_data_seal,
+                    1,
+                    used,
+                    &prev_mac,
+                );
+                storage(write_at_exact(
+                    &mut file,
+                    (16 + HWM_SLOT_B_PAYLOAD_OFFSET) as u64,
+                    &slot_b,
+                ))?;
+                storage(file.sync_all())?;
+            }
+        } else {
+            // `used == hwm_a + 1`: crash occurred after full record write, before Slot A sync.
+            if !ct_eq_bytes(&penultimate_mac, &tip_a)
+                || hwm_a != hwm_b
+                || !ct_eq_bytes(&tip_a, &tip_b)
+            {
+                return Err(HdError::BudgetStorageFailed);
+            }
+            let slot_a = encode_hwm_slot(
+                key_secret.expose(),
+                &family,
+                &lock_seal,
+                &actual_data_seal,
+                0,
+                used,
+                &prev_mac,
+            );
+            let slot_b = encode_hwm_slot(
+                key_secret.expose(),
+                &family,
+                &lock_seal,
+                &actual_data_seal,
+                1,
+                used,
+                &prev_mac,
+            );
+            storage(write_at_exact(
+                &mut file,
+                (16 + HWM_SLOT_A_PAYLOAD_OFFSET) as u64,
+                &slot_a,
+            ))?;
+            storage(file.sync_all())?;
+            storage(write_at_exact(
+                &mut file,
+                (16 + HWM_SLOT_B_PAYLOAD_OFFSET) as u64,
+                &slot_b,
+            ))?;
+            storage(file.sync_all())?;
+        }
+
         storage(file.seek(SeekFrom::End(0)))?;
 
         Ok(Self {
@@ -363,9 +604,36 @@ impl DurableQueryBudget {
         {
             return storage(Err(invalid_io()));
         }
-        let payload = storage(self.record.read())?;
+        let lock_seal = self.record.lock_seal();
+        let expected_slot_a = encode_hwm_slot(
+            self.key.expose(),
+            &self.family,
+            &lock_seal,
+            &self.data_seal,
+            0,
+            self.used,
+            &self.last_mac,
+        );
+        let expected_slot_b = encode_hwm_slot(
+            self.key.expose(),
+            &self.family,
+            &lock_seal,
+            &self.data_seal,
+            1,
+            self.used,
+            &self.last_mac,
+        );
+        let payload = storage(self.record.read_bounded(MAX_BUDGET_PAYLOAD_BYTES))?;
         if payload.len() != PAYLOAD_HEADER_BYTES + expected_records_len
-            || !ct_eq_bytes(&payload[..PAYLOAD_HEADER_BYTES], &self.data_seal)
+            || !ct_eq_bytes(&payload[..DATA_SEAL_BYTES], &self.data_seal)
+            || !ct_eq_bytes(
+                &payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET],
+                &expected_slot_a,
+            )
+            || !ct_eq_bytes(
+                &payload[HWM_SLOT_B_PAYLOAD_OFFSET..PAYLOAD_HEADER_BYTES],
+                &expected_slot_b,
+            )
             || !ct_eq_bytes(&payload[payload.len() - 32..], &self.last_mac)
         {
             return storage(Err(invalid_io()));
@@ -398,8 +666,40 @@ impl DurableQueryBudget {
             next_count,
             &self.last_mac,
         );
-        storage(self.file.seek(SeekFrom::End(0)))?;
-        storage(self.file.write_all(&next_rec))?;
+        let append_offset = (FILE_PREFIX_BYTES + (next_count as usize) * RECORD) as u64;
+        storage(write_at_exact(&mut self.file, append_offset, &next_rec))?;
+        storage(self.file.sync_all())?;
+
+        let slot_a = encode_hwm_slot(
+            self.key.expose(),
+            &self.family,
+            &lock_seal,
+            &self.data_seal,
+            0,
+            next_count,
+            &next_mac,
+        );
+        storage(write_at_exact(
+            &mut self.file,
+            (16 + HWM_SLOT_A_PAYLOAD_OFFSET) as u64,
+            &slot_a,
+        ))?;
+        storage(self.file.sync_all())?;
+
+        let slot_b = encode_hwm_slot(
+            self.key.expose(),
+            &self.family,
+            &lock_seal,
+            &self.data_seal,
+            1,
+            next_count,
+            &next_mac,
+        );
+        storage(write_at_exact(
+            &mut self.file,
+            (16 + HWM_SLOT_B_PAYLOAD_OFFSET) as u64,
+            &slot_b,
+        ))?;
         storage(self.file.sync_all())?;
 
         self.last_mac = next_mac;
@@ -589,6 +889,41 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(DurableQueryBudget::open(&path, [1; 32], [2; 32]).is_err());
         assert!(DurableQueryBudget::create(&path, [1; 32], [2; 32]).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unanchored_open_rejects_same_inode_tail_truncation() {
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "hd-budget-unanchored-tail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("budget");
+        let mut budget = DurableQueryBudget::create(&path, [9; 32], [10; 32]).unwrap();
+        budget.reserve().unwrap();
+        budget.reserve().unwrap();
+        assert_eq!(budget.used(), 2);
+        drop(budget);
+
+        // Truncate the last 40-byte record on the same inode (attempting to rewind `used = 2 -> 1`).
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len((FILE_PREFIX_BYTES + 2 * RECORD) as u64)
+            .unwrap();
+
+        // Even `open()` WITHOUT an external anchor must fail closed due to in-file HWM slots!
+        assert_eq!(
+            DurableQueryBudget::open(&path, [9; 32], [10; 32]).err(),
+            Some(HdError::BudgetStorageFailed)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

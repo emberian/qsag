@@ -7499,6 +7499,112 @@ impl PreprocessedPoseidonPartyVault {
         }
     }
 
+    /// Degree-`< t` Shamir correlation fixture for large online-protocol tests across any
+    /// `(t, n)` quorum (`t >= 2`). Small preprocessing tests separately exercise full OT/sacrifice.
+    #[cfg(any(test, feature = "testing-ephemeral"))]
+    pub fn fill_quorum_online_fixture(
+        t: usize,
+        vaults: &mut [Self],
+        budget: (usize, usize, usize),
+        rng: &mut PartyPrivateRng,
+    ) {
+        let n = vaults.len();
+        assert!(t >= 2 && t <= n);
+        let pts: Vec<Goldilocks> = vaults.iter().map(|v| v.eval_point).collect();
+        let alphas: Vec<GoldilocksExt2> = vaults.iter().map(|v| v.mac_alpha_share).collect();
+        let alpha =
+            open_and_check_degree_ext2(t, &pts, &alphas, "online quorum fixture alpha").unwrap();
+
+        let share = |value: Goldilocks, rng: &mut PartyPrivateRng| -> Vec<(Goldilocks, GoldilocksExt2)> {
+            let mut val_coeffs = Vec::with_capacity(t - 1);
+            let mut mac_coeffs = Vec::with_capacity(t - 1);
+            for _ in 1..t {
+                val_coeffs.push(rng.next_goldilocks());
+                mac_coeffs.push(rng.next_ext2());
+            }
+            pts.iter()
+                .map(|&x| {
+                    let mut v_acc = value;
+                    let mut m_acc = alpha.mul_base(value);
+                    let mut x_pow = x;
+                    for deg in 0..(t - 1) {
+                        v_acc += val_coeffs[deg] * x_pow;
+                        m_acc += mac_coeffs[deg].mul_base(x_pow);
+                        x_pow *= x;
+                    }
+                    (v_acc, m_acc)
+                })
+                .collect()
+        };
+
+        for vault in vaults.iter_mut() {
+            assert_eq!(
+                (
+                    vault.remaining_pow7(),
+                    vault.remaining_beaver(),
+                    vault.remaining_a2b()
+                ),
+                (0, 0, 0)
+            );
+            vault.pow7_tuples.reserve(budget.0);
+            vault.beaver_triples.reserve(budget.1);
+            vault.a2b_masks.reserve(budget.2);
+        }
+        for _ in 0..budget.0 {
+            let r = rng.next_goldilocks();
+            let mut power = Goldilocks::ONE;
+            let shares: [Vec<(Goldilocks, GoldilocksExt2)>; 7] = core::array::from_fn(|_| {
+                power *= r;
+                share(power, rng)
+            });
+            for (p, vault) in vaults.iter_mut().enumerate() {
+                vault.pow7_tuples.push(AuthenticatedPower7Share {
+                    r_pows: core::array::from_fn(|k| shares[k][p].0),
+                    r_macs: core::array::from_fn(|k| shares[k][p].1),
+                    r1_mac: shares[0][p].1,
+                });
+            }
+        }
+        for _ in 0..budget.1 {
+            let a = rng.next_goldilocks();
+            let b = rng.next_goldilocks();
+            let shares = [a, b, a * b].map(|x| share(x, rng));
+            for (p, vault) in vaults.iter_mut().enumerate() {
+                vault.beaver_triples.push(GoldilocksBeaverShare {
+                    a: shares[0][p].0,
+                    b: shares[1][p].0,
+                    c: shares[2][p].0,
+                    a_mac: shares[0][p].1,
+                    b_mac: shares[1][p].1,
+                    c_mac: shares[2][p].1,
+                });
+            }
+        }
+        for _ in 0..budget.2 {
+            let r = rng.next_goldilocks().to_canonical_u64();
+            let shares: [Vec<(Goldilocks, GoldilocksExt2)>; 64] = core::array::from_fn(|bit| {
+                share(Goldilocks::from_u64_reduced((r >> bit) & 1), rng)
+            });
+            for (p, vault) in vaults.iter_mut().enumerate() {
+                let bit_shares = core::array::from_fn(|k| shares[k][p].0);
+                let bit_macs = core::array::from_fn(|k| shares[k][p].1);
+                let mut sum = Goldilocks::ZERO;
+                let mut mac = GoldilocksExt2::ZERO;
+                for k in 0..64 {
+                    let weight = Goldilocks::from_u64_reduced(1u64 << k);
+                    sum += weight * bit_shares[k];
+                    mac += bit_macs[k].mul_base(weight);
+                }
+                vault.a2b_masks.push(CanonicalBitMask64Share {
+                    bit_shares,
+                    bit_macs,
+                    field_sum_share: sum,
+                    field_sum_mac: mac,
+                });
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn empty_for_barrier_test(party_id: usize, eval_point: Goldilocks) -> Self {
         Self {

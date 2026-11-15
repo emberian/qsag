@@ -20,9 +20,9 @@ step function itself, viewed as a `Qsag.PartyMachine` by `extractedPartyMachine`
 Scope. This file welds the cut-session guard `rss_cut_session.RssCutGateSession.step` against
 `Qsag.mirRssCutMachine`. The primitive welds live beside it: Goldilocks in
 `RealSpecFieldWeld.lean`, the binary towers in `RealSpecTowerWeld.lean`, the Keccak permutation in
-`RealSpecKeccakWeld.lean` and the WOTS+C digit check in `RealSpecHashWeld.lean`. `EpochLatch` has
-no weld, and `StatefulVelocityGuard` differs from `Qsag.MirPolicyGuardState`
-(`RealSpecGuardBoundary.lean` proves the mismatch). Production crates link the verified crate and
+`RealSpecKeccakWeld.lean` and the WOTS+C digit check in `RealSpecHashWeld.lean`. The velocity
+guard and the ML-DSA release gate are welded in `RealSpecGuardBoundary.lean`, which also proves
+that `StatefulVelocityGuard` is not `Qsag.MirPolicyGuardState`. `EpochLatch` has no weld. Production crates link the verified crate and
 call some of its functions; a theorem here transfers to production only for a function production
 actually calls.
 
@@ -116,16 +116,10 @@ set_option linter.unusedSimpArgs false in
     `RssCutGateSession::step` returns normally (no panic, no divergence), and its result is the
     step of `Qsag.mirRssCutMachine` on the abstracted state and input: accepted with the abstracted
     successor and output, or rejected with successor `mirRssCutPoison`. -/
-theorem rssCut_extracted_step_refines (st : rss_cut_session.RssCutGateSession)
-    (i : rss_cut_session.RssCutStepInput) :
-    match rss_cut_session.RssCutGateSession.step st i with
-    | .ok (st', .Ok o) =>
-      Qsag.mirRssCutMachine.step (rssCutStateAbs st) (rssCutInputAbs i) =
-        some (rssCutStateAbs st', rssCutOutputAbs o)
-    | .ok (st', .Err _) =>
-      Qsag.mirRssCutMachine.step (rssCutStateAbs st) (rssCutInputAbs i) = none ∧
-      Qsag.mirRssCutMachine.errStep (rssCutStateAbs st) (rssCutInputAbs i) = rssCutStateAbs st'
-    | _ => False := by
+theorem rssCut_extracted_step_refines :
+    ExtractedStepRefines rss_cut_session.RssCutGateSession.step rssCutOutputAbs
+      Qsag.mirRssCutMachine rssCutStateAbs rssCutInputAbs := by
+  intro st i
   rcases st with ⟨sid, ph, mc, cand, cv, p⟩
   cases p
   · cases i with
@@ -189,8 +183,7 @@ def extractedRssCutMachine :
     function, so the simulation is lockstep. -/
 def extractedRssCut_forwardSim_mirRssCut :
     Qsag.ForwardSim extractedRssCutMachine (comapInputs Qsag.mirRssCutMachine rssCutInputAbs) :=
-  ExtractedStepRefines.forwardSim (A := Qsag.mirRssCutMachine) (absSt := rssCutStateAbs)
-    (absIn := rssCutInputAbs) rssCut_extracted_step_refines
+  rssCut_extracted_step_refines.forwardSim
 
 /-- Any trace predicate that holds on every valid trace of the spec machine
     `Qsag.mirRssCutMachine` (read through the input encoding) holds on every multi-turn trace of the

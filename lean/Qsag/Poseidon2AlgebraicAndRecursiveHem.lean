@@ -4571,8 +4571,7 @@ private theorem applyMEInv_single_b0 (z : Lane4) (hz : z ≠ lane4Zero) :
   let cn1 : Goldilocks := Goldilocks.sub Goldilocks.zero cinv4
   have hc3nz : c3 ≠ Goldilocks.zero := fun h => absurd (congrArg Goldilocks.val h) (by decide)
   have hcn1nz : cn1 ≠ Goldilocks.zero := fun h => absurd (congrArg Goldilocks.val h) (by decide)
-  have h4inv : Goldilocks.mul (Goldilocks.ofNat 4) cinv4 = Goldilocks.one :=
-    Goldilocks.ext (by rw [Goldilocks.mul_val]; rfl)
+  have h4inv : Goldilocks.mul (Goldilocks.ofNat 4) cinv4 = Goldilocks.one := by decide
   have hLinM4 : ∀ (c : Goldilocks) (v : Lane4), applyM4 (lane4Scale c v) = lane4Scale c (applyM4 v) :=
     fun c v => by
       unfold applyM4 lane4Scale lane4Sum
@@ -4958,9 +4957,13 @@ private theorem mi_lane_scaled_of_wt_le_one (v w : Int) (hvw : v * w = 1024)
     have hGoal : goldOfInt ((1024 : Int) * ↑x.val) =
         Goldilocks.add (goldOfInt (w * (v * ↑x.val + ↑s.val))) (goldOfInt ((-w) * ↑s.val)) := by
       rw [hId]
-      exact goldOfInt_add _ _
+      exact (goldOfInt_add _ _).symm
     rw [hGoal, hSub]
     exact LawfulCommRing.zero_add _
+
+private theorem zero_wt_congr {a b : Goldilocks} (h : a = b) :
+    (if a = Goldilocks.zero then 0 else 1) = (if b = Goldilocks.zero then 0 else 1) := by
+  subst h; rfl
 
 private theorem mi_lane1_scaled_of_wt_le_one (x s : Goldilocks)
     (h1 : (if x = Goldilocks.zero then 0 else 1) +
@@ -4971,15 +4974,52 @@ private theorem mi_lane1_scaled_of_wt_le_one (x s : Goldilocks)
     change CommRingOps.mul CommRingOps.one x = x
     exact LawfulCommRing.one_mul x
   apply mi_lane_scaled_of_wt_le_one 1 1024 rfl x s
-  simpa only [hMul1] using h1
+  rw [zero_wt_congr (show Goldilocks.add (Goldilocks.mul (goldOfInt 1) x) s =
+      Goldilocks.add x s by rw [hMul1])]
+  exact h1
 
-private theorem ite_nonneg_bounds (p : Prop) [Decidable p] (k : Int) (hk : 0 ≤ k) :
-    0 ≤ (if p then (0 : Int) else k) ∧ (if p then (0 : Int) else k) ≤ k := by
-  by_cases hp : p <;> simp [hp, hk]
+private theorem mi_u0_bounds (x : Goldilocks) :
+    0 ≤ (if x = Goldilocks.zero then (0 : Int) else -(-512)) ∧
+    (if x = Goldilocks.zero then (0 : Int) else -(-512)) ≤ 512 := by
+  if hx : x = Goldilocks.zero then
+    simp only [hx, ↓reduceIte]; exact ⟨Int.le_refl 0, by decide⟩
+  else
+    simp only [hx, ↓reduceIte]; exact ⟨by decide, Int.le_refl 512⟩
 
-private theorem ite_nonpos_bounds (p : Prop) [Decidable p] (k : Int) (hk : k ≤ 0) :
+private theorem sum12_pairs_le_one
+    (a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11
+     c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 : Nat)
+    (h12 : ((a0 + a1 + a2 + a3) + (a4 + a5 + a6 + a7) + (a8 + a9 + a10 + a11)) +
+           ((c0 + c1 + c2 + c3) + (c4 + c5 + c6 + c7) + (c8 + c9 + c10 + c11)) ≤ 12)
+    (g0 : 1 ≤ a0 + c0) (g1 : 1 ≤ a1 + c1) (g2 : 1 ≤ a2 + c2) (g3 : 1 ≤ a3 + c3)
+    (g4 : 1 ≤ a4 + c4) (g5 : 1 ≤ a5 + c5) (g6 : 1 ≤ a6 + c6) (g7 : 1 ≤ a7 + c7)
+    (g8 : 1 ≤ a8 + c8) (g9 : 1 ≤ a9 + c9) (g10 : 1 ≤ a10 + c10) (g11 : 1 ≤ a11 + c11) :
+    (a0 + c0 ≤ 1 ∧ a1 + c1 ≤ 1 ∧ a2 + c2 ≤ 1 ∧ a3 + c3 ≤ 1) ∧
+    (a4 + c4 ≤ 1 ∧ a5 + c5 ≤ 1 ∧ a6 + c6 ≤ 1 ∧ a7 + c7 ≤ 1) ∧
+    (a8 + c8 ≤ 1 ∧ a9 + c9 ≤ 1 ∧ a10 + c10 ≤ 1 ∧ a11 + c11 ≤ 1) := by
+  exact ⟨⟨by omega, by omega, by omega, by omega⟩,
+         ⟨by omega, by omega, by omega, by omega⟩,
+         ⟨by omega, by omega, by omega, by omega⟩⟩
+
+private theorem mi_u_bounds
+    (u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 : Int)
+    (b0 : 0 ≤ u0 ∧ u0 ≤ 512)
+    (b1 : -1024 ≤ u1 ∧ u1 ≤ 0) (b2 : -512 ≤ u2 ∧ u2 ≤ 0) (b3 : -256 ≤ u3 ∧ u3 ≤ 0)
+    (b4 : -128 ≤ u4 ∧ u4 ≤ 0) (b5 : -64 ≤ u5 ∧ u5 ≤ 0) (b6 : -32 ≤ u6 ∧ u6 ≤ 0)
+    (b7 : -16 ≤ u7 ∧ u7 ≤ 0) (b8 : -8 ≤ u8 ∧ u8 ≤ 0) (b9 : -4 ≤ u9 ∧ u9 ≤ 0)
+    (b10 : -2 ≤ u10 ∧ u10 ≤ 0) (b11 : -1 ≤ u11 ∧ u11 ≤ 0) :
+    let U := u0 + u1 + u2 + u3 + u4 + u5 + u6 + u7 + u8 + u9 + u10 + u11
+    512 ≤ 1024 - U ∧ 1024 - U < (goldilocksPrime : Int) := by
+  intro U
+  dsimp only [U]
+  simp only [goldilocksPrime]
+  exact ⟨by omega, by omega⟩
+
+private theorem ite_nonpos_bounds (p : Prop) [hDec : Decidable p] (k : Int) (hk : k ≤ 0) :
     k ≤ (if p then (0 : Int) else k) ∧ (if p then (0 : Int) else k) ≤ 0 := by
-  by_cases hp : p <;> simp [hp, hk]
+  cases hDec with
+  | isFalse _ => exact ⟨Int.le_refl k, hk⟩
+  | isTrue _ => exact ⟨hk, Int.le_refl 0⟩
 
 /-- **Exact Nonzero-Sum `M_I` Branch Number = 13 (`poseidon2_mi12_nonzero_sum_branch_eq_thirteen`)**:
     1. Whenever `state12Sum x ≠ 0`, `13 ≤ stateWeight12 x + stateWeight12 (applyMI x)`
@@ -5022,7 +5062,6 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
       have hLe12 : stateWeight12 x + stateWeight12 (applyMI x) ≤ 12 := by omega
       rw [hMIEq x s rfl] at hLe12
       unfold stateWeight12 laneWeight4 at hLe12
-      dsimp only at hLe12
       have g0 := mi_lane_wt_ge_one (-2) x.b0.x0 s hs
       have g1 := mi_lane1_wt_ge_one x.b0.x1 s hs
       have g2 := mi_lane_wt_ge_one 2 x.b0.x2 s hs
@@ -5035,18 +5074,20 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
       have g9 := mi_lane_wt_ge_one 256 x.b2.x1 s hs
       have g10 := mi_lane_wt_ge_one 512 x.b2.x2 s hs
       have g11 := mi_lane_wt_ge_one 1024 x.b2.x3 s hs
-      have e0 := mi_lane_scaled_of_wt_le_one (-2) (-512) rfl x.b0.x0 s (by omega)
-      have e1 := mi_lane1_scaled_of_wt_le_one x.b0.x1 s (by omega)
-      have e2 := mi_lane_scaled_of_wt_le_one 2 512 rfl x.b0.x2 s (by omega)
-      have e3 := mi_lane_scaled_of_wt_le_one 4 256 rfl x.b0.x3 s (by omega)
-      have e4 := mi_lane_scaled_of_wt_le_one 8 128 rfl x.b1.x0 s (by omega)
-      have e5 := mi_lane_scaled_of_wt_le_one 16 64 rfl x.b1.x1 s (by omega)
-      have e6 := mi_lane_scaled_of_wt_le_one 32 32 rfl x.b1.x2 s (by omega)
-      have e7 := mi_lane_scaled_of_wt_le_one 64 16 rfl x.b1.x3 s (by omega)
-      have e8 := mi_lane_scaled_of_wt_le_one 128 8 rfl x.b2.x0 s (by omega)
-      have e9 := mi_lane_scaled_of_wt_le_one 256 4 rfl x.b2.x1 s (by omega)
-      have e10 := mi_lane_scaled_of_wt_le_one 512 2 rfl x.b2.x2 s (by omega)
-      have e11 := mi_lane_scaled_of_wt_le_one 1024 1 rfl x.b2.x3 s (by omega)
+      have hPairs := sum12_pairs_le_one _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+        hLe12 g0 g1 g2 g3 g4 g5 g6 g7 g8 g9 g10 g11
+      have e0 := mi_lane_scaled_of_wt_le_one (-2) (-512) rfl x.b0.x0 s hPairs.1.1
+      have e1 := mi_lane1_scaled_of_wt_le_one x.b0.x1 s hPairs.1.2.1
+      have e2 := mi_lane_scaled_of_wt_le_one 2 512 rfl x.b0.x2 s hPairs.1.2.2.1
+      have e3 := mi_lane_scaled_of_wt_le_one 4 256 rfl x.b0.x3 s hPairs.1.2.2.2
+      have e4 := mi_lane_scaled_of_wt_le_one 8 128 rfl x.b1.x0 s hPairs.2.1.1
+      have e5 := mi_lane_scaled_of_wt_le_one 16 64 rfl x.b1.x1 s hPairs.2.1.2.1
+      have e6 := mi_lane_scaled_of_wt_le_one 32 32 rfl x.b1.x2 s hPairs.2.1.2.2.1
+      have e7 := mi_lane_scaled_of_wt_le_one 64 16 rfl x.b1.x3 s hPairs.2.1.2.2.2
+      have e8 := mi_lane_scaled_of_wt_le_one 128 8 rfl x.b2.x0 s hPairs.2.2.1
+      have e9 := mi_lane_scaled_of_wt_le_one 256 4 rfl x.b2.x1 s hPairs.2.2.2.1
+      have e10 := mi_lane_scaled_of_wt_le_one 512 2 rfl x.b2.x2 s hPairs.2.2.2.2.1
+      have e11 := mi_lane_scaled_of_wt_le_one 1024 1 rfl x.b2.x3 s hPairs.2.2.2.2.2
       let u0 : Int := if x.b0.x0 = Goldilocks.zero then 0 else -(-512)
       let u1 : Int := if x.b0.x1 = Goldilocks.zero then 0 else -1024
       let u2 : Int := if x.b0.x2 = Goldilocks.zero then 0 else -512
@@ -5078,14 +5119,27 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
           unfold s state12Sum lane4Sum
           gold_cring
         rw [hDist, e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11]
+        change Goldilocks.add (Goldilocks.add
+          (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt u0) s)
+                                          (Goldilocks.mul (goldOfInt u1) s))
+                          (Goldilocks.add (Goldilocks.mul (goldOfInt u2) s)
+                                          (Goldilocks.mul (goldOfInt u3) s)))
+          (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt u4) s)
+                                          (Goldilocks.mul (goldOfInt u5) s))
+                          (Goldilocks.add (Goldilocks.mul (goldOfInt u6) s)
+                                          (Goldilocks.mul (goldOfInt u7) s))))
+          (Goldilocks.add (Goldilocks.add (Goldilocks.mul (goldOfInt u8) s)
+                                          (Goldilocks.mul (goldOfInt u9) s))
+                          (Goldilocks.add (Goldilocks.mul (goldOfInt u10) s)
+                                          (Goldilocks.mul (goldOfInt u11) s))) =
+          Goldilocks.mul (goldOfInt U) s
         rw [← goldOfInt_nat s]
         simp only [goldOfInt_add, goldOfInt_mul]
         congr 1
         dsimp only [U]
-        omega
+        simp only [Int.add_mul, Int.add_assoc]
       have hDiffZero : Goldilocks.mul (goldOfInt (1024 - U)) s = Goldilocks.zero := by
         have hSub := congrArg (fun z => Goldilocks.sub z (Goldilocks.mul (goldOfInt U) s)) hSum1024
-        dsimp only at hSub
         rw [show Goldilocks.sub (Goldilocks.mul (goldOfInt U) s) (Goldilocks.mul (goldOfInt U) s) =
             Goldilocks.zero from LawfulCommRing.sub_self _] at hSub
         have hFactor : Goldilocks.sub (Goldilocks.mul (goldOfInt 1024) s)
@@ -5095,29 +5149,32 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
           congr 1
           exact (Int.sub_mul 1024 U _).symm
         rwa [hFactor] at hSub
-      have b0 := ite_nonneg_bounds (x.b0.x0 = Goldilocks.zero) 512 (by omega)
-      have b1 := ite_nonpos_bounds (x.b0.x1 = Goldilocks.zero) (-1024) (by omega)
-      have b2 := ite_nonpos_bounds (x.b0.x2 = Goldilocks.zero) (-512) (by omega)
-      have b3 := ite_nonpos_bounds (x.b0.x3 = Goldilocks.zero) (-256) (by omega)
-      have b4 := ite_nonpos_bounds (x.b1.x0 = Goldilocks.zero) (-128) (by omega)
-      have b5 := ite_nonpos_bounds (x.b1.x1 = Goldilocks.zero) (-64) (by omega)
-      have b6 := ite_nonpos_bounds (x.b1.x2 = Goldilocks.zero) (-32) (by omega)
-      have b7 := ite_nonpos_bounds (x.b1.x3 = Goldilocks.zero) (-16) (by omega)
-      have b8 := ite_nonpos_bounds (x.b2.x0 = Goldilocks.zero) (-8) (by omega)
-      have b9 := ite_nonpos_bounds (x.b2.x1 = Goldilocks.zero) (-4) (by omega)
-      have b10 := ite_nonpos_bounds (x.b2.x2 = Goldilocks.zero) (-2) (by omega)
-      have b11 := ite_nonpos_bounds (x.b2.x3 = Goldilocks.zero) (-1) (by omega)
-      have hBounds : 512 ≤ 1024 - U ∧ 1024 - U < (goldilocksPrime : Int) := by
-        dsimp only [U, u0, u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11]
-        simp only [goldilocksPrime]
-        omega
+      have b0 := mi_u0_bounds x.b0.x0
+      have b1 := ite_nonpos_bounds (x.b0.x1 = Goldilocks.zero) (-1024) (by decide)
+      have b2 := ite_nonpos_bounds (x.b0.x2 = Goldilocks.zero) (-512) (by decide)
+      have b3 := ite_nonpos_bounds (x.b0.x3 = Goldilocks.zero) (-256) (by decide)
+      have b4 := ite_nonpos_bounds (x.b1.x0 = Goldilocks.zero) (-128) (by decide)
+      have b5 := ite_nonpos_bounds (x.b1.x1 = Goldilocks.zero) (-64) (by decide)
+      have b6 := ite_nonpos_bounds (x.b1.x2 = Goldilocks.zero) (-32) (by decide)
+      have b7 := ite_nonpos_bounds (x.b1.x3 = Goldilocks.zero) (-16) (by decide)
+      have b8 := ite_nonpos_bounds (x.b2.x0 = Goldilocks.zero) (-8) (by decide)
+      have b9 := ite_nonpos_bounds (x.b2.x1 = Goldilocks.zero) (-4) (by decide)
+      have b10 := ite_nonpos_bounds (x.b2.x2 = Goldilocks.zero) (-2) (by decide)
+      have b11 := ite_nonpos_bounds (x.b2.x3 = Goldilocks.zero) (-1) (by decide)
+      have hBounds : 512 ≤ 1024 - U ∧ 1024 - U < (goldilocksPrime : Int) :=
+        mi_u_bounds u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11
+      have hNonneg : 0 ≤ 1024 - U := Int.le_trans (by decide : (0 : Int) ≤ 512) hBounds.1
+      have hPos : 1024 - U ≠ 0 := by
+        intro hEq0
+        have : (512 : Int) ≤ 0 := hEq0 ▸ hBounds.1
+        exact absurd this (by decide)
       have hCoeffNz : goldOfInt (1024 - U) ≠ Goldilocks.zero := by
         intro hz
         have hv := congrArg (fun g => (g.val : Int)) hz
         rw [goldOfInt_val] at hv
         change (1024 - U) % (goldilocksPrime : Int) = 0 at hv
-        rw [Int.emod_eq_of_lt (by omega) hBounds.2] at hv
-        omega
+        rw [Int.emod_eq_of_lt hNonneg hBounds.2] at hv
+        exact hPos hv
       rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hDiffZero with h1 | h2
       · exact hCoeffNz h1
       · exact hs h2
@@ -5131,14 +5188,15 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
       gold_cring
     have hxWt : stateWeight12 x = 1 := by
       unfold x stateWeight12 laneWeight4 lane4Zero
-      simp [hΔ]
+      dsimp only
+      simp only [hΔ, ↓reduceIte]
     have h13 := hBranch13 x (hSumEq.symm ▸ hΔ)
     have hMax : stateWeight12 (applyMI x) ≤ 12 := by
       have l0 := laneWeight4_le_four (applyMI x).b0
       have l1 := laneWeight4_le_four (applyMI x).b1
       have l2 := laneWeight4_le_four (applyMI x).b2
       unfold stateWeight12; omega
-    omega
+    exact ⟨by omega, by omega⟩
   · intro x hx
     by_cases hs : state12Sum x = Goldilocks.zero
     · have hAdd0 : ∀ a : Goldilocks, Goldilocks.add a Goldilocks.zero = a :=
@@ -5147,7 +5205,10 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
         unfold applyMI stateWeight12 laneWeight4
         rw [hs]
         dsimp only
-        simp only [hAdd0]
+        rw [zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _),
+            zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _),
+            zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _),
+            zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _), zero_wt_congr (hAdd0 _)]
         rw [coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide),
             coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide),
             coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide), coord_wt_mul_nz (by decide),
@@ -5200,7 +5261,8 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
             have : Goldilocks.add (Goldilocks.add Goldilocks.zero Goldilocks.zero) (lane4Sum x.b2) =
                 lane4Sum x.b2 := by gold_cring
             exact this ▸ hs
-          exact hb2 (hSingle x.b2.x0 x.b2.x1 x.b2.x2 x.b2.x3 (by unfold laneWeight4 at hw1; omega) hs')
+          exact hb2 (hSingle x.b2.x0 x.b2.x1 x.b2.x2 x.b2.x3
+            ((show ∀ n : Nat, ¬ 2 ≤ 0 + 0 + n → n ≤ 1 by omega) _ hw1) hs')
         · rw [hb0, hb2] at hw1 hs
           rw [show laneWeight4 lane4Zero = 0 from rfl] at hw1
           rw [show lane4Sum lane4Zero = Goldilocks.zero from rfl] at hs
@@ -5208,7 +5270,8 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
             have : Goldilocks.add (Goldilocks.add Goldilocks.zero (lane4Sum x.b1)) Goldilocks.zero =
                 lane4Sum x.b1 := by gold_cring
             exact this ▸ hs
-          exact hb1 (hSingle x.b1.x0 x.b1.x1 x.b1.x2 x.b1.x3 (by unfold laneWeight4 at hw1; omega) hs')
+          exact hb1 (hSingle x.b1.x0 x.b1.x1 x.b1.x2 x.b1.x3
+            ((show ∀ n : Nat, ¬ 2 ≤ 0 + n + 0 → n ≤ 1 by omega) _ hw1) hs')
         · have p1 := laneWeight4_pos_of_ne_zero hb1
           have p2 := laneWeight4_pos_of_ne_zero hb2
           omega
@@ -5219,7 +5282,8 @@ theorem poseidon2_mi12_nonzero_sum_branch_eq_thirteen :
             have : Goldilocks.add (Goldilocks.add (lane4Sum x.b0) Goldilocks.zero) Goldilocks.zero =
                 lane4Sum x.b0 := by gold_cring
             exact this ▸ hs
-          exact hb0 (hSingle x.b0.x0 x.b0.x1 x.b0.x2 x.b0.x3 (by unfold laneWeight4 at hw1; omega) hs')
+          exact hb0 (hSingle x.b0.x0 x.b0.x1 x.b0.x2 x.b0.x3
+            ((show ∀ n : Nat, ¬ 2 ≤ n + 0 + 0 → n ≤ 1 by omega) _ hw1) hs')
         · have p0 := laneWeight4_pos_of_ne_zero hb0
           have p2 := laneWeight4_pos_of_ne_zero hb2
           omega
@@ -5269,73 +5333,57 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
   · rw [hDecomp, applyME_add, hLinSub]
     unfold state12Add sboxState12 sboxLane4
     dsimp only
-    have hSumAnti : lane4Add (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b1 (lane4Neg (applyM4 X))) C.b1 =
-        lane4Neg (lane4Add (lane4Add (applyME ⟨U0, lane4Zero, U2⟩).b0 (applyM4 X)) C.b0) := by
-      have h0 := congrArg Lane4.x0 hAnti
-      have h1 := congrArg Lane4.x1 hAnti
-      have h2 := congrArg Lane4.x2 hAnti
-      have h3 := congrArg Lane4.x3 hAnti
+    have hHelper : ∀ (M0 M1 A C0 C1 : Lane4),
+        lane4Add M0 C0 = lane4Neg (lane4Add M1 C1) →
+        lane4Add (lane4Add M1 (lane4Neg A)) C1 = lane4Neg (lane4Add (lane4Add M0 A) C0) := by
+      intro M0 M1 A C0 C1 hEq
+      have h0 := congrArg Lane4.x0 hEq
+      have h1 := congrArg Lane4.x1 hEq
+      have h2 := congrArg Lane4.x2 hEq
+      have h3 := congrArg Lane4.x3 hEq
       unfold lane4Add lane4Neg lane4Sub lane4Zero at h0 h1 h2 h3 ⊢
       dsimp only at h0 h1 h2 h3 ⊢
       have hInv : ∀ a : Goldilocks, Goldilocks.sub Goldilocks.zero (Goldilocks.sub Goldilocks.zero a) = a :=
         fun _ => by gold_cring
       apply Lane4.ext
-      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x0
-            (Goldilocks.sub Goldilocks.zero (applyM4 X).x0)) C.b1.x0 =
-          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x0 C.b1.x0) (applyM4 X).x0 := by
-          gold_cring
-        have rhsEq : Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x0 (applyM4 X).x0) C.b0.x0) =
-          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x0 C.b0.x0)) (applyM4 X).x0 := by
-          gold_cring
-        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x0 C.b1.x0 =
-            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x0 C.b0.x0) := by
+      · have hL : Goldilocks.add (Goldilocks.add M1.x0 (Goldilocks.sub Goldilocks.zero A.x0)) C1.x0 =
+            Goldilocks.sub (Goldilocks.add M1.x0 C1.x0) A.x0 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x0 A.x0) C0.x0) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0)) A.x0 := by gold_cring
+        have hFlip : Goldilocks.add M1.x0 C1.x0 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h0
-          rwa [hInv] at this
+          rw [hInv] at this
+          exact this.symm
         rw [hL, rhsEq, hFlip]
-      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x1
-            (Goldilocks.sub Goldilocks.zero (applyM4 X).x1)) C.b1.x1 =
-          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x1 C.b1.x1) (applyM4 X).x1 := by
-          gold_cring
-        have rhsEq : Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x1 (applyM4 X).x1) C.b0.x1) =
-          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x1 C.b0.x1)) (applyM4 X).x1 := by
-          gold_cring
-        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x1 C.b1.x1 =
-            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x1 C.b0.x1) := by
+      · have hL : Goldilocks.add (Goldilocks.add M1.x1 (Goldilocks.sub Goldilocks.zero A.x1)) C1.x1 =
+            Goldilocks.sub (Goldilocks.add M1.x1 C1.x1) A.x1 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x1 A.x1) C0.x1) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1)) A.x1 := by gold_cring
+        have hFlip : Goldilocks.add M1.x1 C1.x1 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h1
-          rwa [hInv] at this
+          rw [hInv] at this
+          exact this.symm
         rw [hL, rhsEq, hFlip]
-      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x2
-            (Goldilocks.sub Goldilocks.zero (applyM4 X).x2)) C.b1.x2 =
-          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x2 C.b1.x2) (applyM4 X).x2 := by
-          gold_cring
-        have rhsEq : Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x2 (applyM4 X).x2) C.b0.x2) =
-          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x2 C.b0.x2)) (applyM4 X).x2 := by
-          gold_cring
-        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x2 C.b1.x2 =
-            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x2 C.b0.x2) := by
+      · have hL : Goldilocks.add (Goldilocks.add M1.x2 (Goldilocks.sub Goldilocks.zero A.x2)) C1.x2 =
+            Goldilocks.sub (Goldilocks.add M1.x2 C1.x2) A.x2 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x2 A.x2) C0.x2) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2)) A.x2 := by gold_cring
+        have hFlip : Goldilocks.add M1.x2 C1.x2 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h2
-          rwa [hInv] at this
+          rw [hInv] at this
+          exact this.symm
         rw [hL, rhsEq, hFlip]
-      · have hL : Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x3
-            (Goldilocks.sub Goldilocks.zero (applyM4 X).x3)) C.b1.x3 =
-          Goldilocks.sub (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x3 C.b1.x3) (applyM4 X).x3 := by
-          gold_cring
-        have rhsEq : Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x3 (applyM4 X).x3) C.b0.x3) =
-          Goldilocks.sub (Goldilocks.sub Goldilocks.zero
-            (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x3 C.b0.x3)) (applyM4 X).x3 := by
-          gold_cring
-        have hFlip : Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b1.x3 C.b1.x3 =
-            Goldilocks.sub Goldilocks.zero (Goldilocks.add (applyME ⟨U0, lane4Zero, U2⟩).b0.x3 C.b0.x3) := by
+      · have hL : Goldilocks.add (Goldilocks.add M1.x3 (Goldilocks.sub Goldilocks.zero A.x3)) C1.x3 =
+            Goldilocks.sub (Goldilocks.add M1.x3 C1.x3) A.x3 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x3 A.x3) C0.x3) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3)) A.x3 := by gold_cring
+        have hFlip : Goldilocks.add M1.x3 C1.x3 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h3
-          rwa [hInv] at this
+          rw [hInv] at this
+          exact this.symm
         rw [hL, rhsEq, hFlip]
+    have hSumAnti := hHelper (applyME ⟨U0, lane4Zero, U2⟩).b0 (applyME ⟨U0, lane4Zero, U2⟩).b1
+      (applyM4 X) C.b0 C.b1 hAnti
     rw [hSumAnti]
     unfold lane4Neg lane4Sub lane4Zero
     dsimp only
@@ -6069,9 +6117,9 @@ theorem poseidon2_width12_wide_trail_and_characteristic_bounds :
     have h57 : 256 ≤ 57 * active := by omega
     have h60 : 1680 ≤ 60 * active := by omega
     have h256Le : 2 ^ 256 ≤ 2 ^ (57 * active) :=
-      Nat.pow_le_pow_right (by decide) h57
+      @Nat.pow_le_pow_right 2 (Nat.zero_lt_succ 1) 256 (57 * active) h57
     have h1680Le : 2 ^ 1680 ≤ 2 ^ (60 * active) :=
-      Nat.pow_le_pow_right (by decide) h60
+      @Nat.pow_le_pow_right 2 (Nat.zero_lt_succ 1) 1680 (60 * active) h60
     have h36_256 : 36 ^ active * 2 ^ 256 < goldilocksPrime ^ active :=
       Nat.lt_of_le_of_lt (Nat.mul_le_mul_left _ h256Le) hPow36
     have h6_1680 : 6 ^ active * 2 ^ 1680 < goldilocksPrime ^ active :=
@@ -6237,10 +6285,30 @@ private theorem symbolicMI12WithSum_maxDeg_le (st : SymbolicState12) (s : Poseid
   have hb0 : st.b0.maxDeg ≤ k := le_of_max_le_left (le_of_max_le_left h)
   have hb1 : st.b1.maxDeg ≤ k := le_of_max_le_right (le_of_max_le_left h)
   have hb2 : st.b2.maxDeg ≤ k := le_of_max_le_right h
-  unfold SymbolicLane4.maxDeg at hb0 hb1 hb2
+  have hDegMul : ∀ (c : Goldilocks) (e : PoseidonExpr), e.degree ≤ k →
+      (PoseidonExpr.add (.mul (.constant c) e) s).degree ≤ k := fun _ _ he => by
+    dsimp only [PoseidonExpr.degree]; omega
+  have hDegAdd : ∀ (e : PoseidonExpr), e.degree ≤ k →
+      (PoseidonExpr.add e s).degree ≤ k := fun _ he => by
+    dsimp only [PoseidonExpr.degree]; omega
+  have h00 : st.b0.x0.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb0; omega
+  have h01 : st.b0.x1.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb0; omega
+  have h02 : st.b0.x2.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb0; omega
+  have h03 : st.b0.x3.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb0; omega
+  have h10 : st.b1.x0.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb1; omega
+  have h11 : st.b1.x1.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb1; omega
+  have h12 : st.b1.x2.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb1; omega
+  have h13 : st.b1.x3.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb1; omega
+  have h20 : st.b2.x0.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb2; omega
+  have h21 : st.b2.x1.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb2; omega
+  have h22 : st.b2.x2.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb2; omega
+  have h23 : st.b2.x3.degree ≤ k := by unfold SymbolicLane4.maxDeg at hb2; omega
   unfold symbolicMI12WithSum SymbolicState12.maxDeg SymbolicLane4.maxDeg
-  dsimp only [PoseidonExpr.degree]
-  omega
+  exact max_le_of_le
+    (max_le_of_le
+      (max_le_of_le (max_le_of_le (hDegMul _ _ h00) (hDegAdd _ h01)) (max_le_of_le (hDegMul _ _ h02) (hDegMul _ _ h03)))
+      (max_le_of_le (max_le_of_le (hDegMul _ _ h10) (hDegMul _ _ h11)) (max_le_of_le (hDegMul _ _ h12) (hDegMul _ _ h13))))
+    (max_le_of_le (max_le_of_le (hDegMul _ _ h20) (hDegMul _ _ h21)) (max_le_of_le (hDegMul _ _ h22) (hDegMul _ _ h23)))
 
 private theorem symbolicMI12_maxDeg_le (st : SymbolicState12) (k : Nat) (h : st.maxDeg ≤ k) :
     (symbolicMI12 st).maxDeg ≤ k := by
@@ -6712,13 +6780,18 @@ private theorem sumOver_const_le (m bound : Nat) (f : Nat → Nat)
     simp only [sumOver, Nat.succ_mul]
     omega
 
+private theorem or_ite_le (a b : Bool) :
+    (if (a || b) = true then 1 else 0) ≤ (if a = true then 1 else 0) + (if b = true then 1 else 0) := by
+  cases a <;> cases b <;> decide
+
 private theorem countTrue_or_le {α : Type} (f g : α → Bool) :
     ∀ xs : List α, countTrue (fun x => f x || g x) xs ≤ countTrue f xs + countTrue g xs
-  | [] => by decide
-  | x :: rest => by
+  | [] => Nat.zero_le 0
+  | hd :: rest => by
     have ih := countTrue_or_le f g rest
+    have hHd := or_ite_le (f hd) (g hd)
     simp only [countTrue]
-    cases f x <;> cases g x <;> simp <;> omega
+    omega
 
 /-- **Succinct Outer Recursive `Hem` Soundness Composition (`succinct_recursive_hem_soundness_composition`)**:
     Over any finite coin space `coins`, if `recBad ω` marks coins where `verifySuccinctRecursiveHem`
@@ -6790,55 +6863,105 @@ theorem succinct_recursive_hem_soundness_composition {Ω : Type} (coins : List �
   have hSum := sumOver_const_le m epsHem (fun j => countTrue (shardBad j) coins) hS
   omega
 
+def concreteSuccinctOuterHeaders : List ShardCompressedHeader :=
+  [concreteHemShard false, concreteHemShard true].map (shardToCompressedHeader (fun _ => [0x01]))
+
+def concreteOuterMsg : List UInt8 :=
+  succinctOuterBoundMessage concreteHemRegistryDigest [] []
+    (poseidon2Hash32 (encodeCompressedHeaderChain concreteSuccinctOuterHeaders))
+
+private def concreteOuterBundle :=
+  buildHonestSbox7WhirBundle Goldilocks.zero Goldilocks.zero Goldilocks.one concreteOuterMsg
+
 /-- Concrete accepting `SuccinctOuterHemCertificate` over the two `concreteHemShard` shards, using
     `poseidon2Hash32` and the honest `bciksJohnsonQrom128` WHIR prover. -/
 def concreteSuccinctOuterCert : SuccinctOuterHemCertificate :=
-  let headers := [concreteHemShard false, concreteHemShard true].map
-    (shardToCompressedHeader (fun _ => [0x01]))
-  let chainDig := poseidon2Hash32 (encodeCompressedHeaderChain headers)
-  let outerMsg := succinctOuterBoundMessage concreteHemRegistryDigest [] [] chainDig
-  let outerBundle := buildHonestSbox7WhirBundle Goldilocks.zero Goldilocks.zero Goldilocks.one outerMsg
-  { headers := headers
-    outerInst := rsSbox7Inst Goldilocks.zero Goldilocks.zero outerMsg
-    outerProof := outerBundle.1
-    outerFs := outerBundle.2.1 }
+  { headers := concreteSuccinctOuterHeaders
+    outerInst := rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg
+    outerProof := concreteOuterBundle.1
+    outerFs := concreteOuterBundle.2.1 }
 
 theorem inhabited_verifySuccinctRecursiveHem :
     verifySuccinctRecursiveHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
       concreteHemRegistryDigest [] [] concreteSuccinctOuterCert = true ∧
     concreteSuccinctOuterCert.outerProof.agg.regime = .bciksJohnsonQrom128 := by
-  have hIds : (concreteSuccinctOuterCert.headers.map (·.shardId)).Nodup := by decide
-  have hCom : (headerCommitteeFlat concreteSuccinctOuterCert.headers).Nodup := by decide
-  have hLen : 1 ≤ concreteSuccinctOuterCert.headers.length := by decide
-  have hQ : concreteSuccinctOuterCert.headers.all verifyHeaderQuorum = true := by decide
-  let chainDig := poseidon2Hash32 (encodeCompressedHeaderChain concreteSuccinctOuterCert.headers)
-  let outerMsg := succinctOuterBoundMessage concreteHemRegistryDigest [] [] chainDig
-  have hAcc := (honestSbox7WhirProof_accepts Goldilocks.zero Goldilocks.zero Goldilocks.one outerMsg).1
-  have hArithEq : rsSbox7TraceArith Goldilocks.zero
-      (CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero) = concreteHemArith := by
+  have hIds : (concreteSuccinctOuterHeaders.map (·.shardId)).Nodup := by
+    rw [concreteSuccinctOuterHeaders, map_sid_of_headers]
+    decide
+  have hCom : (headerCommitteeFlat concreteSuccinctOuterHeaders).Nodup := by
+    rw [concreteSuccinctOuterHeaders, flat_com_of_headers]
+    decide
+  have hLen : 1 ≤ concreteSuccinctOuterHeaders.length :=
+    Nat.le_succ 1
+  have hHdrQ : ∀ second : Bool,
+      verifyHeaderQuorum (shardToCompressedHeader (fun _ => [0x01]) (concreteHemShard second)) = true := by
+    intro second
+    have c1 : decide (1 ≤ (concreteHemShard second).threshold) = true := by
+      cases second <;> decide
+    have c2 : decide ((concreteHemShard second).threshold ≤
+        (concreteHemShard second).inst.committee.length) = true := by
+      cases second <;> decide
+    have c3 : decide ((concreteHemShard second).threshold ≤
+        bitmapPopcountSpec (concreteHemShard second).proof.agg.bitmap) = true := by
+      cases second <;> exact decide_eq_true (Nat.le_refl 1)
+    unfold verifyHeaderQuorum shardToCompressedHeader
+    dsimp only
+    rw [c1, c2, c3]
+    rfl
+  have hQ : concreteSuccinctOuterHeaders.all verifyHeaderQuorum = true := by
+    unfold concreteSuccinctOuterHeaders
+    simp only [List.map, List.all_cons, List.all_nil, hHdrQ, Bool.and_self]
+  have hAcc : verifySuccinctAggregate concreteHemArith rsSbox7WhirDomain
+      (rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg)
+      concreteOuterBundle.1 concreteOuterBundle.2.1 = true := by
+    have hRaw := (honestSbox7WhirProof_accepts Goldilocks.zero Goldilocks.zero Goldilocks.one concreteOuterMsg).1
     have hz : CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero = Goldilocks.zero := by decide
-    rw [hz]; rfl
-  have hRoot0 : CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero = Goldilocks.zero := by decide
-  rw [hArithEq, hRoot0] at hAcc
-  have hMapReg : concreteSuccinctOuterCert.headers.map ShardCompressedHeader.registration =
+    have hArithEq : rsSbox7TraceArith Goldilocks.zero
+        (CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero) = concreteHemArith := by
+      rw [hz]; rfl
+    rw [hArithEq, hz] at hRaw
+    exact hRaw
+  have hMapReg : concreteSuccinctOuterHeaders.map ShardCompressedHeader.registration =
       concreteHemRegistry :=
     map_reg_of_headers (fun _ => [0x01]) [concreteHemShard false, concreteHemShard true]
   have hDig : decide (poseidon2Hash32 (encodeRegistry
-      (concreteSuccinctOuterCert.headers.map ShardCompressedHeader.registration)) =
+      (concreteSuccinctOuterHeaders.map ShardCompressedHeader.registration)) =
       concreteHemRegistryDigest) = true := by
     rw [hMapReg]
     exact decide_eq_true rfl
-  have hInstReg : decide (concreteSuccinctOuterCert.outerInst.regime = .bciksJohnsonQrom128) = true :=
+  have hPrfReg : ∀ m : List UInt8,
+      (buildHonestSbox7WhirBundle Goldilocks.zero Goldilocks.zero Goldilocks.one m).1.agg.regime =
+        .bciksJohnsonQrom128 := fun _ => rfl
+  have hRegEq : concreteSuccinctOuterCert.outerProof.agg.regime = .bciksJohnsonQrom128 :=
+    hPrfReg concreteOuterMsg
+  have hInstReg : decide ((rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg).regime =
+      .bciksJohnsonQrom128) = true :=
     decide_eq_true rfl
-  have hPrfReg : decide (concreteSuccinctOuterCert.outerProof.agg.regime = .bciksJohnsonQrom128) = true :=
+  have hPrfRegDec : decide (concreteOuterBundle.1.agg.regime = .bciksJohnsonQrom128) = true :=
+    decide_eq_true (hPrfReg concreteOuterMsg)
+  have hMsgEq : decide ((rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg).message =
+      succinctOuterBoundMessage concreteHemRegistryDigest [] []
+        (poseidon2Hash32 (encodeCompressedHeaderChain concreteSuccinctOuterHeaders))) = true :=
     decide_eq_true rfl
-  have hMsgEq : decide (concreteSuccinctOuterCert.outerInst.message = outerMsg) = true :=
-    decide_eq_true rfl
-  refine ⟨?_, rfl⟩
+  refine ⟨?_, hRegEq⟩
   unfold verifySuccinctRecursiveHem
+  change (decide (1 ≤ concreteSuccinctOuterHeaders.length) &&
+    decide (poseidon2Hash32 (encodeRegistry (concreteSuccinctOuterHeaders.map ShardCompressedHeader.registration)) =
+      concreteHemRegistryDigest) &&
+    decide ((concreteSuccinctOuterHeaders.map (·.shardId)).Nodup) &&
+    decide ((headerCommitteeFlat concreteSuccinctOuterHeaders).Nodup) &&
+    concreteSuccinctOuterHeaders.all verifyHeaderQuorum &&
+    decide ((rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg).regime = .bciksJohnsonQrom128) &&
+    decide (concreteOuterBundle.1.agg.regime = .bciksJohnsonQrom128) &&
+    decide ((rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg).message =
+      succinctOuterBoundMessage concreteHemRegistryDigest [] []
+        (poseidon2Hash32 (encodeCompressedHeaderChain concreteSuccinctOuterHeaders))) &&
+    verifySuccinctAggregate concreteHemArith rsSbox7WhirDomain
+      (rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg)
+      concreteOuterBundle.1 concreteOuterBundle.2.1) = true
   rw [decide_eq_true hLen, hDig, decide_eq_true hIds, decide_eq_true hCom, hQ,
-      hInstReg, hPrfReg, hMsgEq]
-  exact hAcc
+      hInstReg, hPrfRegDec, hMsgEq, hAcc]
+  rfl
 
 /-- `#tooth` **Succinct Outer Recursive Regime Downgrade & Header-Chain Tamper Rejection**:
     1. Downgrading `outerInst.regime` to `.bciksJohnsonClassical128` causes `verifySuccinctRecursiveHem`
@@ -6863,11 +6986,11 @@ theorem tooth_succinctRecursiveHem_rejects_downgrade_and_tamper :
     verifySuccinctRecursiveHem (fun bs => bs) concreteHemArith rsSbox7WhirDomain
       (encodeRegistry concreteHemRegistry) [] []
       { concreteSuccinctOuterCert with
-        headers := concreteSuccinctOuterCert.headers.map
+        headers := concreteSuccinctOuterHeaders.map
           (fun h => { h with childProofDigest := [0xFF] })
         outerInst := rsSbox7Inst Goldilocks.zero Goldilocks.zero
           (succinctOuterBoundMessage (encodeRegistry concreteHemRegistry) [] []
-            (encodeCompressedHeaderChain concreteSuccinctOuterCert.headers)) } = false := by
+            (encodeCompressedHeaderChain concreteSuccinctOuterHeaders)) } = false := by
   refine ⟨?_, ?_, ?_⟩
   · intro H outerArith outerDom regDig ep msg cert hCl
     apply Bool.eq_false_iff.mpr
@@ -6894,12 +7017,12 @@ theorem tooth_succinctRecursiveHem_rejects_downgrade_and_tamper :
     dsimp only [rsSbox7Inst] at hMsg'
     have hEncEq := (succinctOuterBoundMessage_injective hMsg').2.2.2
     have hHdrEq := encodeCompressedHeaderChain_injective hEncEq
-    have hHead : (concreteSuccinctOuterCert.headers.headD
-        (shardToCompressedHeader (fun _ => [0x01]) (concreteHemShard false))).childProofDigest =
-      ((concreteSuccinctOuterCert.headers.map
-          (fun h => { h with childProofDigest := [0xFF] })).headD
-        (shardToCompressedHeader (fun _ => [0x01]) (concreteHemShard false))).childProofDigest := by
-      rw [hHdrEq]
+    have hDflt := shardToCompressedHeader (fun _ => [0x01]) (concreteHemShard false)
+    have hHead := congrArg (fun hs : List ShardCompressedHeader => (hs.headD hDflt).childProofDigest) hHdrEq
+    have hL : (concreteSuccinctOuterHeaders.headD hDflt).childProofDigest = [0x01] := rfl
+    have hR : ((concreteSuccinctOuterHeaders.map
+        (fun h => { h with childProofDigest := [0xFF] })).headD hDflt).childProofDigest = [0xFF] := rfl
+    rw [hL, hR] at hHead
     exact absurd hHead (by decide)
 
 end Qsag
@@ -6914,13 +7037,16 @@ run_cmd do
     throwError "Axiom audit negative control failed: Classical.choice was not rejected"
   let privEnv := (← getEnv).setExporting false
   let mut checked : Nat := 0
+  let mut bad : Array String := #[]
   for (name, _) in privEnv.constants.toList do
     if !privEnv.isImportedConst name then
       let roots ← withEnv privEnv <| Lean.collectAxioms name
       let rejected := roots.filter (!allow ·)
       unless rejected.isEmpty do
-        throwError "Rejected axioms in {name}: {rejected}"
+        bad := bad.push s!"{name}: {rejected}"
       checked := checked + 1
+  unless bad.isEmpty do
+    throwError "Rejected axioms in declarations: {bad}"
   if checked == 0 then throwError "Empty module axiom audit"
 
 #tooth_pair Qsag.poseidon2_interpolation_margin_needs_26 vs Qsag.tooth_poseidon2_margin_fails_at_rp17

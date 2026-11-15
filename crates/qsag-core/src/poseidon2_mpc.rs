@@ -2650,7 +2650,7 @@ pub fn hem_digest4_from_bytes_canonical(bytes: &[u8; 32]) -> Option<HemDigest4> 
     for i in 0..4 {
         let mut limb = [0u8; 8];
         limb.copy_from_slice(&bytes[8 * i..8 * (i + 1)]);
-        out[i] = Goldilocks::from_le_bytes_canonical(limb)?;
+        out[i] = Goldilocks::from_le_bytes_canonical(limb).ok()?;
     }
     Some(out)
 }
@@ -2830,29 +2830,39 @@ impl HemJortsSignature {
     }
 }
 
-/// Public cached height-6 XMSS leaf table and `SK.prf` check digest produced during distributed
-/// `HemJortsPoseidon2` key generation.
+/// Public cached height-6 XMSS leaf table, leaf-0 `WOTS+C` endpoints, and `SK.prf` check digest
+/// produced during distributed `HemJortsPoseidon2` key generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HemJortsCachedTree {
     pub dkg_pk_seed: [u8; 32],
     pub pk: HemJortsPublicKey,
     pub active_leaves: usize,
     pub leaves: Vec<HemDigest4>,
+    pub leaf0_endpoints: Vec<HemDigest4>,
     pub prf_check: HemDigest4,
 }
 
 impl HemJortsCachedTree {
     /// Verify public structural consistency: `active_leaves in 1..=64`, `leaves.len() == 64`,
-    /// `pk.pk_seed` matches `dkg_pk_seed`, any inactive leaves equal `hem_unassigned_leaf_digest`,
-    /// and the 64 leaves Merkle-hash to `pk.pk_root`.
+    /// `leaf0_endpoints` (`128` chains) sponges directly to `leaves[0]`, `pk.pk_seed` matches
+    /// `dkg_pk_seed`, any inactive leaves equal `hem_unassigned_leaf_digest`, and the 64 leaves
+    /// Merkle-hash to `pk.pk_root`.
     pub fn verify_consistency(&self) -> bool {
         if self.active_leaves == 0
             || self.active_leaves > HEM_JORTS_MAX_LEAVES
             || self.leaves.len() != HEM_JORTS_MAX_LEAVES
+            || self.leaf0_endpoints.len() != HEM_WOTS_CHAINS
         {
             return false;
         }
         if self.pk.pk_seed != hem_pk_seed_from_bytes32(&self.dkg_pk_seed) {
+            return false;
+        }
+        let endpoints0: [HemDigest4; HEM_WOTS_CHAINS] =
+            core::array::from_fn(|r| self.leaf0_endpoints[r]);
+        if hem_compress_wots_endpoints_sponge(self.pk.pk_seed, 0, 0, 0, &endpoints0)
+            != self.leaves[0]
+        {
             return false;
         }
         for kp in self.active_leaves..HEM_JORTS_MAX_LEAVES {
@@ -3293,10 +3303,10 @@ pub fn required_hem_jorts_keygen_preprocessing_budget(
 }
 
 /// Exact preprocessing budget `(num_pow7, 0, 0)` for `verify_reshared_hem_jorts_key_mpc`
-/// (`515` `poseidon2_perm12`s = `60,770` `pow7` tuples, `0` Beaver triples, `0` A2B masks).
+/// (`7` `poseidon2_perm12`s = `826` `pow7` tuples, `0` Beaver triples, `0` A2B masks).
 #[inline]
 pub const fn required_hem_jorts_reshare_verify_preprocessing_budget() -> (usize, usize, usize) {
-    let perms = 2 + 1 + HEM_WOTS_CHAINS * HEM_WOTS_BASE_W;
+    let perms = 2 + 1 + HEM_WOTS_BASE_W;
     (perms * POSEIDON2_SBOXES_PER_PERM, 0, 0)
 }
 
@@ -3625,6 +3635,7 @@ pub fn derive_hem_jorts_cached_tree_clear(
     let prf_check = hem_prf_check_digest_clear(sk_prf, pk_seed);
 
     let mut leaves = Vec::with_capacity(HEM_JORTS_MAX_LEAVES);
+    let mut leaf0_endpoints = Vec::with_capacity(HEM_WOTS_CHAINS);
     for kp in 0..active_leaves {
         let mut endpoints = [[Goldilocks::ZERO; 4]; HEM_WOTS_CHAINS];
         for (r, ep) in endpoints.iter_mut().enumerate().take(HEM_WOTS_CHAINS) {
@@ -3634,6 +3645,9 @@ pub fn derive_hem_jorts_cached_tree_clear(
             }
             *ep = cur;
             wipe_goldilocks(&mut cur);
+        }
+        if kp == 0 {
+            leaf0_endpoints.extend_from_slice(&endpoints);
         }
         leaves.push(hem_compress_wots_endpoints_sponge(
             pk_seed, 0, 0, kp as u32, &endpoints,
@@ -3652,6 +3666,7 @@ pub fn derive_hem_jorts_cached_tree_clear(
         pk: HemJortsPublicKey { pk_seed, pk_root },
         active_leaves,
         leaves,
+        leaf0_endpoints,
         prf_check,
     })
 }
@@ -3774,10 +3789,14 @@ pub fn build_distributed_hem_jorts_key_mpc_with_active_leaves(
 
     let prf_check = opened[active_leaves * HEM_WOTS_CHAINS];
     let mut leaves = Vec::with_capacity(HEM_JORTS_MAX_LEAVES);
+    let mut leaf0_endpoints = Vec::with_capacity(HEM_WOTS_CHAINS);
     for kp in 0..active_leaves {
         let base = kp * HEM_WOTS_CHAINS;
         let endpoints: [HemDigest4; HEM_WOTS_CHAINS] =
             core::array::from_fn(|r| opened[base + r]);
+        if kp == 0 {
+            leaf0_endpoints.extend_from_slice(&endpoints);
+        }
         leaves.push(hem_compress_wots_endpoints_sponge(
             pk_seed, 0, 0, kp as u32, &endpoints,
         ));
@@ -3798,14 +3817,16 @@ pub fn build_distributed_hem_jorts_key_mpc_with_active_leaves(
         pk,
         active_leaves,
         leaves,
+        leaf0_endpoints,
         prf_check,
     })
 }
 
 /// Authenticate reshared `(t', n')` SPDZ key shares against an existing [`HemJortsCachedTree`]
-/// without reconstructing `SK.seed` or `SK.prf`: recomputes `leaf[0]` and `prf_check` in SPDZ MPC
-/// (`515` permutations = `60,770` `pow7` tuples), verifies both match `cache` (which is Merkle-bound
-/// to `cache.pk.pk_root`), and enrolls `(cache.pk, cache.prf_check)` on every share.
+/// without reconstructing `SK.seed` or `SK.prf`: first checks `cache.verify_consistency()` (which
+/// Merkle-binds `cache.leaf0_endpoints[0]` to `cache.pk.pk_root`), then recomputes
+/// `leaf0_endpoints[0]` and `prf_check` in SPDZ MPC (`7` permutations = `798` `pow7` tuples),
+/// verifies both match `cache`, and enrolls `(cache.pk, cache.prf_check)` on every share.
 pub fn verify_reshared_hem_jorts_key_mpc(
     session_id: [u8; 32],
     cache: &HemJortsCachedTree,
@@ -3865,9 +3886,7 @@ pub fn verify_reshared_hem_jorts_key_mpc(
         },
     );
 
-    let targets: Vec<(u32, u32, usize)> = (0..HEM_WOTS_CHAINS)
-        .map(|r| (0u32, r as u32, HEM_WOTS_MAX_STEP))
-        .collect();
+    let targets = [(0u32, 0u32, HEM_WOTS_MAX_STEP)];
     let mut cut_states = SecretBuffer(
         match eval_hem_wots_chains_native_spdz(
             t,
@@ -3901,10 +3920,9 @@ pub fn verify_reshared_hem_jorts_key_mpc(
         party_rngs,
     )?;
 
-    let endpoints0: [HemDigest4; HEM_WOTS_CHAINS] = core::array::from_fn(|r| opened[r]);
-    let leaf0 = hem_compress_wots_endpoints_sponge(pk_seed, 0, 0, 0, &endpoints0);
-    let prf_check = opened[HEM_WOTS_CHAINS];
-    if leaf0 != cache.leaves[0] || prf_check != cache.prf_check {
+    let end0 = opened[0];
+    let prf_check = opened[1];
+    if end0 != cache.leaf0_endpoints[0] || prf_check != cache.prf_check {
         poison_all_on_abort(key_shares, vaults);
         return Err(Poseidon2MpcError::KeyProfileMismatch);
     }
@@ -4179,7 +4197,7 @@ pub fn sign_hem_jorts_poseidon2_mpc_cached<L: StatefulEpochLatch>(
     let latch_params = PqHashParams {
         w: HEM_WOTS_BASE_W,
         ell1: HEM_WOTS_CHAINS,
-        max_sigs_log2: HEM_JORTS_XMSS_HEIGHT as u32,
+        max_sigs_log2: HEM_JORTS_XMSS_HEIGHT,
         num_layers: 1,
         subtree_height: HEM_JORTS_XMSS_HEIGHT,
         fors_trees: 0,
@@ -6135,13 +6153,15 @@ mod tests {
         use crate::dkg::run_dealerless_reshare_seed32_goldilocks;
 
         let t = 2usize;
-        let n = 3usize;
+        let n = 2usize;
         let active_leaves = 1usize;
         let keygen_budget = required_hem_jorts_keygen_preprocessing_budget(active_leaves).unwrap();
         let sign_budget = required_hem_jorts_sign_preprocessing_budget_cached();
+        let verify_budget = required_hem_jorts_reshare_verify_preprocessing_budget();
         assert_eq!(keygen_budget.1, 0);
         assert_eq!(keygen_budget.2, 0);
         assert_eq!(sign_budget, (38_232, 0, 0));
+        assert_eq!(verify_budget, (826, 0, 0));
 
         let pts: Vec<Goldilocks> = (1..=n as u64).map(Goldilocks::from_u64_reduced).collect();
         let mut rngs = make_rngs(n, 0x91);
@@ -6155,7 +6175,6 @@ mod tests {
                 .unwrap();
         let pk_seed = dkg_seed.1;
 
-        let total_budget = (keygen_budget.0 + 2 * sign_budget.0, 0, 0);
         let (mut key_shares, mut vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
             [0x95; 32],
             t,
@@ -6163,13 +6182,19 @@ mod tests {
             pk_seed,
             &dkg_seed.0,
             &dkg_prf.0,
-            total_budget.0,
-            total_budget.1,
-            total_budget.2,
+            0,
+            0,
+            0,
             &mut mesh,
             &mut rngs,
         )
         .unwrap();
+        let total_budget = (keygen_budget.0 + 2 * sign_budget.0, 0, 0);
+        PreprocessedPoseidonPartyVault::fill_two_party_online_fixture(
+            &mut vaults,
+            total_budget,
+            &mut rngs[0],
+        );
 
         let ref_seed =
             shamir_reconstruct_seed32_goldilocks(&dkg_seed.0[..t].iter().collect::<Vec<_>>())
@@ -6182,10 +6207,8 @@ mod tests {
                 .unwrap();
 
         let cache = {
-            let (ks0, ks_rest) = key_shares.split_at_mut(1);
-            let (ks1, _) = ks_rest.split_at_mut(1);
-            let (v0, v_rest) = vaults.split_at_mut(1);
-            let (v1, _) = v_rest.split_at_mut(1);
+            let (ks0, ks1) = key_shares.split_at_mut(1);
+            let (v0, v1) = vaults.split_at_mut(1);
             build_distributed_hem_jorts_key_mpc_with_active_leaves(
                 [0x96; 32],
                 active_leaves,
@@ -6198,32 +6221,21 @@ mod tests {
         };
         assert_eq!(cache, clear_cache);
         assert!(cache.verify_consistency());
-        key_shares[2]
-            .enroll_hem_key_profile(cache.pk, cache.prf_check)
-            .unwrap();
 
-        let mut cluster = QuorumEpochLatchCluster::establish(n, t, 0, &mut rngs).unwrap();
+        let mut cluster = QuorumEpochLatchCluster::new(n, t - 1).unwrap();
         for ks in &mut key_shares {
-            ks.enroll_latch_authority(cluster.authority_public().clone())
+            ks.enroll_latch_authority(cluster.authority())
                 .unwrap();
         }
         let latch_pk = cache.pk.latch_pq_public_key(cache.dkg_pk_seed);
         let msg0 = b"hem native poseidon2 epoch 0";
         let (mu0_bytes, _) = hem_compute_message_mu(&cache.pk, msg0);
-        let cert0 = cluster
-            .certify_epoch(
-                &[0, 1, 2],
-                &latch_pk,
-                HEM_JORTS_XMSS_HEIGHT as u32,
-                &mu0_bytes,
-            )
-            .unwrap();
+        let bind0 = epoch_latch_binding(&latch_pk.pk_seed, &latch_pk.pk_root, 0, &mu0_bytes);
+        let cert0 = cluster.certify_epoch(&[0, 1], 0, bind0).unwrap();
 
         let (ep0, sig0) = {
-            let (ks0, ks_rest) = key_shares.split_at_mut(1);
-            let (ks1, _) = ks_rest.split_at_mut(1);
-            let (v0, v_rest) = vaults.split_at_mut(1);
-            let (v1, _) = v_rest.split_at_mut(1);
+            let (ks0, ks1) = key_shares.split_at_mut(1);
+            let (v0, v1) = vaults.split_at_mut(1);
             let before = remaining_budget(v0.first().unwrap());
             let mut l0 = MonotonicEpochLatch::new(0);
             let mut l1 = MonotonicEpochLatch::new(0);
@@ -6267,8 +6279,11 @@ mod tests {
             HemJortsSignature::from_bytes_canonical(&sig0.to_bytes()).as_ref(),
             Some(&sig0)
         );
+        drop(vaults);
+        drop(key_shares);
 
-        // Reshare (2, 3) -> (3, 4) and verify reshared shares in SPDZ MPC without reconstructing secrets!
+        // Reshare (2, 2) -> (3, 4) and verify reshared shares in 100% live Gilboa OLE SPDZ MPC
+        // (`798` pow7 tuples, `0` Beaver triples, `0` A2B masks) without reconstructing secrets!
         let new_t = 3usize;
         let new_n = 4usize;
         let new_pts: Vec<Goldilocks> = (1..=new_n as u64).map(Goldilocks::from_u64_reduced).collect();
@@ -6278,60 +6293,75 @@ mod tests {
         let mut new_rngs = make_rngs(new_n, 0xA2);
         let mut new_mesh = OtMesh::establish_ideal_for_test([0xA3; 32], &mut new_rngs);
 
-        let reshared_seed = run_dealerless_reshare_seed32_goldilocks(
+        let enrolled_root = hem_digest4_to_bytes(&cache.pk.pk_root);
+        let reshared_prf = run_dealerless_reshare_seed32_goldilocks(
             [0xA4; 32],
             t,
-            &mut [&mut old_seed[0], &mut old_seed[1]],
+            &[0, 1],
+            &mut old_prf,
             new_t,
             &new_pts,
             &mut new_mesh,
             &mut old_rngs,
             &mut new_rngs,
-            |_, _| Ok(()),
+            &enrolled_root,
+            |_| Ok(enrolled_root),
         )
         .unwrap();
-        let reshared_prf = run_dealerless_reshare_seed32_goldilocks(
+        let mut v_rngs = make_rngs(new_n, 0xA8);
+        let mut v_mesh = OtMesh::establish_ideal_for_test([0xA9; 32], &mut v_rngs);
+        let reshared_seed = run_dealerless_reshare_seed32_goldilocks(
             [0xA5; 32],
             t,
-            &mut [&mut old_prf[0], &mut old_prf[1]],
+            &[0, 1],
+            &mut old_seed,
             new_t,
             &new_pts,
             &mut new_mesh,
             &mut old_rngs,
             &mut new_rngs,
-            |_, _| Ok(()),
+            &enrolled_root,
+            |candidate_seed| {
+                let (mut new_ks, mut new_vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
+                    [0xA6; 32],
+                    new_t,
+                    &new_pts,
+                    pk_seed,
+                    candidate_seed,
+                    &reshared_prf,
+                    0,
+                    0,
+                    0,
+                    &mut v_mesh,
+                    &mut v_rngs,
+                )
+                .map_err(|_| crate::dkg::DkgError::PublicRootMismatch)?;
+                PreprocessedPoseidonPartyVault::fill_quorum_online_fixture(
+                    new_t,
+                    &mut new_vaults,
+                    verify_budget,
+                    &mut v_rngs[0],
+                );
+                let mut ks_refs: Vec<&mut Poseidon2SpdzAuthenticatedKeyShare> =
+                    new_ks[..new_t].iter_mut().collect();
+                let mut v_refs: Vec<&mut PreprocessedPoseidonPartyVault> =
+                    new_vaults[..new_t].iter_mut().collect();
+                let before = remaining_budget(v_refs[0]);
+                verify_reshared_hem_jorts_key_mpc(
+                    [0xA7; 32],
+                    &cache,
+                    new_t,
+                    &mut ks_refs,
+                    &mut v_refs,
+                    &mut v_rngs[..new_t],
+                )
+                .map_err(|_| crate::dkg::DkgError::PublicRootMismatch)?;
+                let after = remaining_budget(v_refs[0]);
+                assert_eq!(spent(before, after), verify_budget);
+                Ok(enrolled_root)
+            },
         )
         .unwrap();
-
-        let verify_budget = required_hem_jorts_reshare_verify_preprocessing_budget();
-        let (mut new_ks, mut new_vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
-            [0xA6; 32],
-            new_t,
-            &new_pts,
-            pk_seed,
-            &reshared_seed,
-            &reshared_prf,
-            verify_budget.0,
-            0,
-            0,
-            &mut new_mesh,
-            &mut new_rngs,
-        )
-        .unwrap();
-        {
-            let mut ks_refs: Vec<&mut Poseidon2SpdzAuthenticatedKeyShare> =
-                new_ks[..new_t].iter_mut().collect();
-            let mut v_refs: Vec<&mut PreprocessedPoseidonPartyVault> =
-                new_vaults[..new_t].iter_mut().collect();
-            verify_reshared_hem_jorts_key_mpc(
-                [0xA7; 32],
-                &cache,
-                new_t,
-                &mut ks_refs,
-                &mut v_refs,
-                &mut new_rngs[..new_t],
-            )
-            .unwrap();
-        }
+        assert_eq!(reshared_seed.len(), new_n);
     }
 }

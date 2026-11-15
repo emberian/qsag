@@ -10,7 +10,9 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom};
+#[cfg(not(unix))]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"QSBURN04";

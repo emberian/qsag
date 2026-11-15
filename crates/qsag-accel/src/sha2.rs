@@ -81,8 +81,8 @@ impl Sha256Hasher {
         sha256_compress(&mut self.state, &self.buf);
 
         let mut out = [0u8; 32];
-        for (chunk, word) in out.chunks_exact_mut(4).zip(&self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
+        for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(&self.state) {
+            *chunk = word.to_be_bytes();
         }
         out
     }
@@ -190,10 +190,8 @@ const SHA512_K: [u64; 80] = [
 
 fn sha512_compress(state: &mut [u64; 8], block: &[u8; 128]) {
     let mut w = [0u64; 80];
-    for (slot, chunk) in w.iter_mut().take(16).zip(block.chunks_exact(8)) {
-        *slot = u64::from_be_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-        ]);
+    for (slot, &chunk) in w.iter_mut().take(16).zip(block.as_chunks::<8>().0) {
+        *slot = u64::from_be_bytes(chunk);
     }
     for i in 16..80 {
         let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
@@ -317,8 +315,8 @@ impl Sha512Hasher {
         sha512_compress(&mut self.state, &self.buf);
 
         let mut out = [0u8; 64];
-        for (chunk, word) in out.chunks_exact_mut(8).zip(&self.state) {
-            chunk.copy_from_slice(&word.to_be_bytes());
+        for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(&self.state) {
+            *chunk = word.to_be_bytes();
         }
         out
     }
@@ -428,8 +426,8 @@ fn rmd_kr(round: usize) -> u32 {
 
 fn ripemd160_compress(state: &mut [u32; 5], block: &[u8; 64]) {
     let mut x = [0u32; 16];
-    for (slot, chunk) in x.iter_mut().zip(block.chunks_exact(4)) {
-        *slot = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (slot, &chunk) in x.iter_mut().zip(block.as_chunks::<4>().0) {
+        *slot = u32::from_le_bytes(chunk);
     }
 
     let (mut al, mut bl, mut cl, mut dl, mut el) =
@@ -494,8 +492,8 @@ pub fn ripemd160(mut data: &[u8]) -> [u8; 20] {
     ripemd160_compress(&mut state, &buf);
 
     let mut out = [0u8; 20];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(&state) {
-        chunk.copy_from_slice(&word.to_le_bytes());
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(&state) {
+        *chunk = word.to_le_bytes();
     }
     ct_zeroize_u32s(&mut state);
     ct_zeroize_bytes(&mut buf);

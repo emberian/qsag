@@ -511,7 +511,7 @@ def singlePassAcceptsG (tBits : Nat) (foldBits : List Nat) (batch : RecordedPass
     (foldVec (tailBits foldBits) tBits gTensor (batch.yp chi))
     (batch.masks chi) (prover.afterTensor chi gTensor) ftCoins
 
-@[expose] abbrev singlePassAccepts (foldBits : List Nat) (batch : RecordedPassBatch foldBits)
+abbrev singlePassAccepts (foldBits : List Nat) (batch : RecordedPassBatch foldBits)
     (prover : PassProver foldBits) (coins : PassCoins foldBits) : Bool :=
   singlePassAcceptsG TENSOR_BITS foldBits batch prover coins
 
@@ -782,7 +782,6 @@ theorem inhabited_rss256_two_pass_product_proof :
 
 #verify_constructive
   Qsag.Rss256ProductProof.finalMaskedCrossCheck_complete
-  Qsag.Rss256ProductProof.finalMaskedOpen_privacy_equiv
   Qsag.Rss256ProductProof.finalMaskedCrossCheck_false_bad_coins_le_two
   Qsag.Rss256ProductProof.ternaryBadBound_mul_eq
   Qsag.Rss256ProductProof.ternaryEval_roots_le

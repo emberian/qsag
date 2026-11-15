@@ -27,11 +27,13 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use qsag_core::dkg::{
-    DkgError, EpochLatchAuthorityPublic, EpochLatchCertificate, QuorumEpochLatchCluster,
-    ShamirPoseidonSeedShare, run_dealerless_dkg_seed32_goldilocks,
-    run_dealerless_refresh_seed32_goldilocks, run_dealerless_reshare_seed32_goldilocks,
+    DkgError, EpochLatchCertificate, ShamirPoseidonSeedShare, epoch_latch_binding,
+    run_dealerless_dkg_seed32_goldilocks, run_dealerless_refresh_seed32_goldilocks,
+    run_dealerless_reshare_seed32_goldilocks,
 };
-use qsag_core::field::goldilocks::{Goldilocks, GoldilocksExt2};
+use qsag_core::field::goldilocks::{
+    Goldilocks, GoldilocksExt2, lagrange_weights_zero_goldilocks,
+};
 pub use qsag_core::poseidon2_mpc::{
     HEM_JORTS_MAX_LEAVES, HEM_JORTS_PK_BYTES, HEM_JORTS_SIG_BYTES, HEM_JORTS_XMSS_HEIGHT,
     HEM_WOTS_BASE_W, HEM_WOTS_CHAINS, HEM_WOTS_MAX_STEP, HEM_WOTS_TARGET_SUM, HemDigest4,
@@ -54,8 +56,7 @@ use qsag_core::poseidon2_mpc::{
 };
 use qsag_core::preprocessing::{
     OtMesh, PartyPrivateRng, commit_and_open_spdz_goldilocks_batch_quorum,
-    lagrange_weights_at_zero_goldilocks, open_and_check_degree_ext2,
-    open_and_check_degree_goldilocks, shamir_share_ext2, shamir_share_goldilocks,
+    open_and_check_degree_ext2, open_and_check_degree_goldilocks,
     validate_all_eval_points_goldilocks,
 };
 use qsag_core::sponge::keccak::{cshake256_32, encode_multi_frame};
@@ -146,8 +147,274 @@ impl fmt::Display for HemQuorumError {
 
 impl core::error::Error for HemQuorumError {}
 
+const HEM_LATCH_ACK_TAG: &[u8] = b"QSAG.HEM.EPOCH.ACK/v1";
+
+/// Pinned BFT custodian MAC authority (`2 * q > n + (t - 1)`) for `Hem` quorum leaf latching.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HemEpochLatchAuthority {
+    mac_keys: Vec<[u8; 32]>,
+}
+
+impl fmt::Debug for HemEpochLatchAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HemEpochLatchAuthority([REDACTED])")
+    }
+}
+
+impl Drop for HemEpochLatchAuthority {
+    fn drop(&mut self) {
+        for key in &mut self.mac_keys {
+            wipe_bytes32(key);
+        }
+    }
+}
+
+impl HemEpochLatchAuthority {
+    fn tag(&self, party: usize, n: usize, t: usize, epoch: u64, binding: &[u8; 32]) -> [u8; 32] {
+        cshake256_32(
+            HEM_LATCH_ACK_TAG,
+            &encode_multi_frame(&[
+                &self.mac_keys[party],
+                &(party as u64).to_be_bytes(),
+                &(n as u64).to_be_bytes(),
+                &(t as u64).to_be_bytes(),
+                &epoch.to_be_bytes(),
+                binding,
+            ]),
+        )
+    }
+
+    /// Authenticate `cert` for `(n, t, epoch, binding)` under BFT quorum intersection `2 * q > n + (t - 1)`.
+    pub fn verify_certificate(
+        &self,
+        cert: &HemEpochLatchCertificate,
+        n: usize,
+        t: usize,
+        epoch: u64,
+        binding: &[u8; 32],
+    ) -> Result<(), HemQuorumError> {
+        if t < 1 || n < t || self.mac_keys.len() != n || cert.n != n || cert.t != t {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        if cert.epoch != epoch || !ct_eq_bytes32(&cert.binding, binding) {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        let required = ((n + (t - 1)) / 2) + 1;
+        if cert.acks.len() < required || cert.tags.len() != cert.acks.len() {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        let distinct_sorted =
+            cert.acks.windows(2).all(|w| w[0] < w[1]) && cert.acks.last().is_none_or(|&p| p < n);
+        if !distinct_sorted {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        let mut valid_acks = 0usize;
+        for (&party, tag) in cert.acks.iter().zip(&cert.tags) {
+            let expected = self.tag(party, n, t, epoch, binding);
+            valid_acks += usize::from(ct_eq_bytes32(tag, &expected));
+        }
+        if valid_acks != cert.acks.len() {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        Ok(())
+    }
+}
+
+/// BFT latch certificate (`2 * q > n + (t - 1)`) binding one XMSS leaf `epoch` to one message digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HemEpochLatchCertificate {
+    n: usize,
+    t: usize,
+    epoch: u64,
+    binding: [u8; 32],
+    acks: Vec<usize>,
+    tags: Vec<[u8; 32]>,
+}
+
+impl HemEpochLatchCertificate {
+    #[inline]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    #[inline]
+    pub fn verify_against(
+        &self,
+        authority: &HemEpochLatchAuthority,
+        n: usize,
+        t: usize,
+        epoch: u64,
+        binding: &[u8; 32],
+    ) -> Result<(), HemQuorumError> {
+        authority.verify_certificate(self, n, t, epoch, binding)
+    }
+}
+
+/// Monotone `no_std`-compatible BFT custodian latch cluster (`2 * q > n + (t - 1)`),
+/// preserving `initial_floor` across dynamic `(t, n) -> (t', n')` resharing.
+pub struct HemEpochLatchCluster {
+    n: usize,
+    t: usize,
+    latch_quorum: usize,
+    per_party_state: Vec<Option<(u64, [u8; 32])>>,
+    initial_floor: u64,
+    authority: HemEpochLatchAuthority,
+}
+
+impl HemEpochLatchCluster {
+    pub fn establish(
+        n: usize,
+        t: usize,
+        initial_floor: u64,
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<Self, HemQuorumError> {
+        if t < 1 || n < t || party_rngs.len() < n {
+            return Err(HemQuorumError::InvalidQuorum { t, n });
+        }
+        let latch_quorum = ((n + (t - 1)) / 2) + 1;
+        if latch_quorum > n {
+            return Err(HemQuorumError::InvalidQuorum { t, n });
+        }
+        let mut mac_keys = Vec::with_capacity(n);
+        for (p, rng) in party_rngs.iter_mut().enumerate().take(n) {
+            let mut key = cshake256_32(
+                b"QSAG.HEM.LATCH.KEY/v1",
+                &encode_multi_frame(&[&rng.next_bytes32(), &(p as u64).to_be_bytes()]),
+            );
+            if ct_eq_bytes32(&key, &[0u8; 32]) {
+                key[0] = 1;
+            }
+            mac_keys.push(key);
+        }
+        Ok(Self {
+            n,
+            t,
+            latch_quorum,
+            per_party_state: vec![None; n],
+            initial_floor,
+            authority: HemEpochLatchAuthority { mac_keys },
+        })
+    }
+
+    #[inline]
+    pub fn authority_public(&self) -> &HemEpochLatchAuthority {
+        &self.authority
+    }
+
+    fn next_unreserved_epoch(&self) -> u64 {
+        let mut next = self.initial_floor;
+        for slot in &self.per_party_state {
+            if let Some((ep, _)) = slot {
+                next = next.max(ep.saturating_add(1));
+            }
+        }
+        next
+    }
+
+    /// Certify the next monotone leaf epoch across `participating_ackers` (`>= latch_quorum`).
+    pub fn certify_epoch(
+        &mut self,
+        participating_ackers: &[usize],
+        latch_pk: &qsag_core::tsw_baggy::PqPublicKey,
+        max_sigs_log2: u32,
+        mu_bytes: &[u8; 32],
+    ) -> Result<HemEpochLatchCertificate, HemQuorumError> {
+        validate_party_subset(participating_ackers, self.latch_quorum, self.n)?;
+        let epoch = self.next_unreserved_epoch();
+        let max_epochs = 1u64.checked_shl(max_sigs_log2).unwrap_or(u64::MAX);
+        if epoch >= max_epochs {
+            return Err(HemQuorumError::LeafExhausted);
+        }
+        let binding = epoch_latch_binding(&latch_pk.pk_seed, &latch_pk.pk_root, epoch, mu_bytes);
+
+        let mut accepted = Vec::with_capacity(participating_ackers.len());
+        for &p in participating_ackers {
+            let ok = match self.per_party_state[p] {
+                None => epoch >= self.initial_floor,
+                Some((hw, prev_bind)) => {
+                    epoch > hw || (epoch == hw && ct_eq_bytes32(&prev_bind, &binding))
+                }
+            };
+            if ok {
+                accepted.push(p);
+            }
+        }
+        if accepted.len() < self.latch_quorum {
+            return Err(HemQuorumError::LatchRefused);
+        }
+        accepted.sort_unstable();
+        for &p in &accepted {
+            self.per_party_state[p] = Some((epoch, binding));
+        }
+        let tags = accepted
+            .iter()
+            .map(|&p| self.authority.tag(p, self.n, self.t, epoch, &binding))
+            .collect();
+        let cert = HemEpochLatchCertificate {
+            n: self.n,
+            t: self.t,
+            epoch,
+            binding,
+            acks: accepted,
+            tags,
+        };
+        cert.verify_against(&self.authority, self.n, self.t, epoch, &binding)?;
+        Ok(cert)
+    }
+}
+
 fn canonical_eval_points(n: usize) -> Vec<Goldilocks> {
     (1..=n as u64).map(Goldilocks::from_u64_reduced).collect()
+}
+
+fn shamir_share_goldilocks(
+    t: usize,
+    eval_points: &[Goldilocks],
+    secret: Goldilocks,
+    rng: &mut PartyPrivateRng,
+) -> Vec<Goldilocks> {
+    let mut coeffs = Vec::with_capacity(t);
+    coeffs.push(secret);
+    for _ in 1..t {
+        coeffs.push(rng.next_goldilocks());
+    }
+    let out = eval_points
+        .iter()
+        .map(|&x| {
+            let mut acc = Goldilocks::ZERO;
+            for &c in coeffs.iter().rev() {
+                acc = acc * x + c;
+            }
+            acc
+        })
+        .collect();
+    wipe_goldilocks(&mut coeffs);
+    out
+}
+
+fn shamir_share_ext2(
+    t: usize,
+    eval_points: &[Goldilocks],
+    secret: GoldilocksExt2,
+    rng: &mut PartyPrivateRng,
+) -> Vec<GoldilocksExt2> {
+    let mut coeffs = Vec::with_capacity(t);
+    coeffs.push(secret);
+    for _ in 1..t {
+        coeffs.push(rng.next_ext2());
+    }
+    let out = eval_points
+        .iter()
+        .map(|&x| {
+            let mut acc = GoldilocksExt2::ZERO;
+            for &c in coeffs.iter().rev() {
+                acc = acc.mul_base(x) + c;
+            }
+            acc
+        })
+        .collect();
+    wipe_ext2(&mut coeffs);
+    out
 }
 
 fn validate_party_subset(indices: &[usize], min_len: usize, n: usize) -> Result<(), HemQuorumError> {
@@ -472,9 +739,9 @@ impl HemCommitteePartitionedQuorum {
             for &to in &sorted {
                 if from != to {
                     let tag = mac32(
-                        HEM_QSA_ECHO_TAG,
                         &self.custodians[from].pair_keys[to],
-                        &binding,
+                        HEM_QSA_ECHO_TAG,
+                        &[&binding],
                     );
                     echoes.push((from, to, tag));
                 }
@@ -482,9 +749,9 @@ impl HemCommitteePartitionedQuorum {
         }
         for (from, to, tag) in &echoes {
             if !mac32_verify(
-                HEM_QSA_ECHO_TAG,
                 &self.custodians[*to].pair_keys[*from],
-                &binding,
+                HEM_QSA_ECHO_TAG,
+                &[&binding],
                 tag,
             ) {
                 return Err(HemQuorumError::EchoMacInvalid {
@@ -859,7 +1126,8 @@ impl HemShamirCustodianShare {
                 .and_then(|s| s.try_into().ok())
                 .ok_or(HemQuorumError::MalformedVaultBytes)?;
             *p += 8;
-            Goldilocks::from_le_bytes_canonical(raw).ok_or(HemQuorumError::MalformedVaultBytes)
+            Goldilocks::from_le_bytes_canonical(raw)
+                .map_err(|_| HemQuorumError::MalformedVaultBytes)
         };
 
         let party_id = read_u32(bytes, &mut pos)? as usize;
@@ -977,7 +1245,7 @@ pub struct HemDynamicShamirQuorum {
     n: usize,
     high_water_leaf: usize,
     public_dir: HemQuorumPublicDirectory,
-    latch_cluster: QuorumEpochLatchCluster,
+    latch_cluster: HemEpochLatchCluster,
     shares: Vec<HemShamirCustodianShare>,
 }
 
@@ -1099,7 +1367,7 @@ impl HemDynamicShamirQuorum {
         let mut latch_rngs: Vec<PartyPrivateRng> = (0..n)
             .map(|p| PartyPrivateRng::from_seed(rng.next_bytes32(), &(p as u32).to_le_bytes()))
             .collect();
-        let latch_cluster = QuorumEpochLatchCluster::establish(n, t, 0, &mut latch_rngs)?;
+        let latch_cluster = HemEpochLatchCluster::establish(n, t, 0, &mut latch_rngs)?;
 
         let shares = (0..n)
             .map(|p| HemShamirCustodianShare {
@@ -1168,7 +1436,7 @@ impl HemDynamicShamirQuorum {
     }
 
     #[inline]
-    pub fn latch_authority(&self) -> &EpochLatchAuthorityPublic {
+    pub fn latch_authority(&self) -> &HemEpochLatchAuthority {
         self.latch_cluster.authority_public()
     }
 
@@ -1227,7 +1495,7 @@ impl HemDynamicShamirQuorum {
             })
             .collect();
         let latch_cluster =
-            QuorumEpochLatchCluster::establish(n, t, high_water_leaf as u64, &mut latch_rngs)?;
+            HemEpochLatchCluster::establish(n, t, high_water_leaf as u64, &mut latch_rngs)?;
         Ok(Self {
             quorum_epoch,
             t,
@@ -1363,8 +1631,8 @@ impl HemDynamicShamirQuorum {
             .iter()
             .map(|&p| self.shares[p].eval_point)
             .collect();
-        let lambdas = lagrange_weights_at_zero_goldilocks(&old_pts)
-            .map_err(Poseidon2MpcError::Preprocess)?;
+        let lambdas = lagrange_weights_zero_goldilocks(&old_pts)
+            .ok_or(HemQuorumError::InvalidQuorum { t: self.t, n: self.n })?;
         let new_pts = canonical_eval_points(new_n);
         validate_all_eval_points_goldilocks(&new_pts).map_err(Poseidon2MpcError::Preprocess)?;
 
@@ -1548,8 +1816,8 @@ impl HemDynamicShamirQuorum {
 
             let check_quorum = new_t;
             let check_pts = &new_pts[..check_quorum];
-            let check_lambdas = lagrange_weights_at_zero_goldilocks(check_pts)
-                .map_err(Poseidon2MpcError::Preprocess)?;
+            let check_lambdas = lagrange_weights_zero_goldilocks(check_pts)
+                .ok_or(HemQuorumError::InvalidQuorum { t: new_t, n: new_n })?;
             let alpha_contribs: Vec<GoldilocksExt2> = (0..check_quorum)
                 .map(|j| new_alpha_shares[j].mul_base(check_lambdas[j]))
                 .collect();
@@ -1684,7 +1952,7 @@ impl HemDynamicShamirQuorum {
             })
             .collect();
         let new_cluster =
-            QuorumEpochLatchCluster::establish(new_n, new_t, hw as u64, &mut latch_rngs)?;
+            HemEpochLatchCluster::establish(new_n, new_t, hw as u64, &mut latch_rngs)?;
 
         self.quorum_epoch = next_quorum_epoch;
         self.t = new_t;
@@ -1703,11 +1971,11 @@ impl HemDynamicShamirQuorum {
 )]
 pub fn sign_from_shamir_share_slice(
     public_dir: &HemQuorumPublicDirectory,
-    latch_authority: &EpochLatchAuthorityPublic,
+    latch_authority: &HemEpochLatchAuthority,
     expected_quorum_epoch: u64,
     t: usize,
     n: usize,
-    latch_cert: &EpochLatchCertificate,
+    latch_cert: &HemEpochLatchCertificate,
     msg: &[u8],
     signer_shares: &[&HemShamirCustodianShare],
 ) -> Result<HemJortsSignature, HemQuorumError> {
@@ -1857,7 +2125,7 @@ pub struct HemSpdzSeedQuorum {
     n: usize,
     high_water_leaf: u64,
     cache: HemJortsCachedTree,
-    latch_cluster: QuorumEpochLatchCluster,
+    latch_cluster: HemEpochLatchCluster,
     sk_seed_shares: Vec<ShamirPoseidonSeedShare>,
     sk_prf_shares: Vec<ShamirPoseidonSeedShare>,
 }
@@ -1880,6 +2148,28 @@ impl HemSpdzSeedQuorum {
         t: usize,
         n: usize,
         active_leaves: usize,
+    ) -> Result<Self, HemQuorumError> {
+        Self::keygen_inner(session_id, t, n, active_leaves, false)
+    }
+
+    /// Online-protocol test constructor: runs real dealerless Goldilocks DKG, Gilboa byte-share
+    /// authentication, and SPDZ MPC keygen while filling `pow7` correlations from the test fixture.
+    #[cfg(any(test, feature = "testing-ephemeral"))]
+    pub fn keygen_dealerless_online_fixture(
+        session_id: [u8; 32],
+        t: usize,
+        n: usize,
+        active_leaves: usize,
+    ) -> Result<Self, HemQuorumError> {
+        Self::keygen_inner(session_id, t, n, active_leaves, true)
+    }
+
+    fn keygen_inner(
+        session_id: [u8; 32],
+        t: usize,
+        n: usize,
+        active_leaves: usize,
+        online_fixture: bool,
     ) -> Result<Self, HemQuorumError> {
         if t < 2 || t > n || n > 16 {
             return Err(HemQuorumError::InvalidQuorum { t, n });
@@ -1918,6 +2208,7 @@ impl HemSpdzSeedQuorum {
             &mut rngs,
         )?;
 
+        let prep_pow7 = if online_fixture { 0 } else { budget.0 };
         let (mut key_shares, mut vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
             cshake256_32(b"QSAG.HEM.SPDZ.KEYGEN.PREP/v1", &session_id),
             t,
@@ -1925,12 +2216,21 @@ impl HemSpdzSeedQuorum {
             pk_seed,
             &sk_seed_shares,
             &sk_prf_shares,
-            budget.0,
+            prep_pow7,
             0,
             0,
             &mut mesh,
             &mut rngs,
         )?;
+        #[cfg(any(test, feature = "testing-ephemeral"))]
+        if online_fixture {
+            qsag_core::preprocessing::PreprocessedPoseidonPartyVault::fill_quorum_online_fixture(
+                t,
+                &mut vaults,
+                budget,
+                &mut rngs[0],
+            );
+        }
         let cache = {
             let mut ks_refs: Vec<_> = key_shares[..t].iter_mut().collect();
             let mut v_refs: Vec<_> = vaults[..t].iter_mut().collect();
@@ -1943,7 +2243,7 @@ impl HemSpdzSeedQuorum {
                 &mut rngs[..t],
             )?
         };
-        let latch_cluster = QuorumEpochLatchCluster::establish(n, t, 0, &mut rngs)?;
+        let latch_cluster = HemEpochLatchCluster::establish(n, t, 0, &mut rngs)?;
 
         Ok(Self {
             quorum_epoch: 0,
@@ -1981,18 +2281,11 @@ impl HemSpdzSeedQuorum {
                 )
             })
             .collect();
-        let mut mesh = OtMesh::establish(
-            cshake256_32(b"QSAG.HEM.SPDZ.REF.OT/v1", &session_id),
-            &mut rngs,
-        )
-        .map_err(Poseidon2MpcError::Preprocess)?;
-
         run_dealerless_refresh_seed32_goldilocks(
             cshake256_32(b"QSAG.HEM.SPDZ.REF.SEED/v1", &session_id),
             self.t,
             &pts,
             &mut self.sk_seed_shares,
-            &mut mesh,
             &mut rngs,
         )?;
         run_dealerless_refresh_seed32_goldilocks(
@@ -2000,7 +2293,6 @@ impl HemSpdzSeedQuorum {
             self.t,
             &pts,
             &mut self.sk_prf_shares,
-            &mut mesh,
             &mut rngs,
         )?;
         self.quorum_epoch += 1;
@@ -2015,6 +2307,28 @@ impl HemSpdzSeedQuorum {
         old_quorum_indices: &[usize],
         new_t: usize,
         new_n: usize,
+    ) -> Result<(), HemQuorumError> {
+        self.reshare_quorum_inner(session_id, old_quorum_indices, new_t, new_n, false)
+    }
+
+    #[cfg(any(test, feature = "testing-ephemeral"))]
+    pub fn reshare_quorum_online_fixture(
+        &mut self,
+        session_id: [u8; 32],
+        old_quorum_indices: &[usize],
+        new_t: usize,
+        new_n: usize,
+    ) -> Result<(), HemQuorumError> {
+        self.reshare_quorum_inner(session_id, old_quorum_indices, new_t, new_n, true)
+    }
+
+    fn reshare_quorum_inner(
+        &mut self,
+        session_id: [u8; 32],
+        old_quorum_indices: &[usize],
+        new_t: usize,
+        new_n: usize,
+        online_fixture: bool,
     ) -> Result<(), HemQuorumError> {
         if new_t < 2 || new_t > new_n || new_n > 16 {
             return Err(HemQuorumError::InvalidQuorum { t: new_t, n: new_n });
@@ -2051,76 +2365,93 @@ impl HemSpdzSeedQuorum {
         )
         .map_err(Poseidon2MpcError::Preprocess)?;
 
-        let mut old_seed_vec: Vec<ShamirPoseidonSeedShare> = active_old
-            .iter()
-            .map(|&p| self.sk_seed_shares[p].clone())
-            .collect();
-        let mut old_prf_vec: Vec<ShamirPoseidonSeedShare> = active_old
-            .iter()
-            .map(|&p| self.sk_prf_shares[p].clone())
-            .collect();
-        let mut old_seed_refs: Vec<&mut ShamirPoseidonSeedShare> =
-            old_seed_vec.iter_mut().collect();
-        let mut old_prf_refs: Vec<&mut ShamirPoseidonSeedShare> = old_prf_vec.iter_mut().collect();
-
-        let new_seed_shares = run_dealerless_reshare_seed32_goldilocks(
-            cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.S/v1", &session_id),
-            self.t,
-            &mut old_seed_refs,
-            new_t,
-            &new_pts,
-            &mut new_mesh,
-            &mut old_rngs,
-            &mut new_rngs,
-            |_, _| Ok(()),
-        )?;
+        let enrolled_root = hem_digest4_to_bytes(&self.cache.pk.pk_root);
         let new_prf_shares = run_dealerless_reshare_seed32_goldilocks(
             cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.P/v1", &session_id),
             self.t,
-            &mut old_prf_refs,
+            active_old,
+            &mut self.sk_prf_shares,
             new_t,
             &new_pts,
             &mut new_mesh,
             &mut old_rngs,
             &mut new_rngs,
-            |_, _| Ok(()),
+            &enrolled_root,
+            |_| Ok(enrolled_root),
         )?;
 
         let verify_budget = required_hem_jorts_reshare_verify_preprocessing_budget();
-        let (mut new_ks, mut new_vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
-            cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.VPREP/v1", &session_id),
+        let mut v_rngs: Vec<PartyPrivateRng> = (0..new_n)
+            .map(|j| {
+                PartyPrivateRng::from_seed(
+                    cshake256_32(
+                        b"QSAG.HEM.SPDZ.RESHARE.VRNG/v1",
+                        &encode_multi_frame(&[&session_id, &(j as u32).to_le_bytes()]),
+                    ),
+                    b"QSAG.HEM.SPDZ.RESHARE.VRNG.STREAM/v1",
+                )
+            })
+            .collect();
+        let mut v_mesh = OtMesh::establish(
+            cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.VOT/v1", &session_id),
+            &mut v_rngs,
+        )
+        .map_err(Poseidon2MpcError::Preprocess)?;
+
+        let dkg_pk_seed = self.cache.dkg_pk_seed;
+        let cache_ref = &self.cache;
+        let prep_pow7 = if online_fixture { 0 } else { verify_budget.0 };
+        let new_seed_shares = run_dealerless_reshare_seed32_goldilocks(
+            cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.S/v1", &session_id),
+            self.t,
+            active_old,
+            &mut self.sk_seed_shares,
             new_t,
             &new_pts,
-            self.cache.dkg_pk_seed,
-            &new_seed_shares,
-            &new_prf_shares,
-            verify_budget.0,
-            0,
-            0,
             &mut new_mesh,
+            &mut old_rngs,
             &mut new_rngs,
+            &enrolled_root,
+            |candidate_seed| {
+                let (mut new_ks, mut new_vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
+                    cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.VPREP/v1", &session_id),
+                    new_t,
+                    &new_pts,
+                    dkg_pk_seed,
+                    candidate_seed,
+                    &new_prf_shares,
+                    prep_pow7,
+                    0,
+                    0,
+                    &mut v_mesh,
+                    &mut v_rngs,
+                )
+                .map_err(|_| DkgError::PublicRootMismatch)?;
+                #[cfg(any(test, feature = "testing-ephemeral"))]
+                if online_fixture {
+                    qsag_core::preprocessing::PreprocessedPoseidonPartyVault::fill_quorum_online_fixture(
+                        new_t,
+                        &mut new_vaults,
+                        verify_budget,
+                        &mut v_rngs[0],
+                    );
+                }
+                let mut ks_refs: Vec<_> = new_ks[..new_t].iter_mut().collect();
+                let mut v_refs: Vec<_> = new_vaults[..new_t].iter_mut().collect();
+                verify_reshared_hem_jorts_key_mpc(
+                    cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.VCHK/v1", &session_id),
+                    cache_ref,
+                    new_t,
+                    &mut ks_refs,
+                    &mut v_refs,
+                    &mut v_rngs[..new_t],
+                )
+                .map_err(|_| DkgError::PublicRootMismatch)?;
+                Ok(enrolled_root)
+            },
         )?;
-        {
-            let mut ks_refs: Vec<_> = new_ks[..new_t].iter_mut().collect();
-            let mut v_refs: Vec<_> = new_vaults[..new_t].iter_mut().collect();
-            verify_reshared_hem_jorts_key_mpc(
-                cshake256_32(b"QSAG.HEM.SPDZ.RESHARE.VCHK/v1", &session_id),
-                &self.cache,
-                new_t,
-                &mut ks_refs,
-                &mut v_refs,
-                &mut new_rngs[..new_t],
-            )?;
-        }
 
-        // Wipe all old shares before installing new `(new_t, new_n)` shares
-        for sh in &mut self.sk_seed_shares {
-            sh.poison_and_wipe();
-        }
-        for sh in &mut self.sk_prf_shares {
-            sh.poison_and_wipe();
-        }
-        let new_cluster = QuorumEpochLatchCluster::establish(
+        let new_cluster = HemEpochLatchCluster::establish(
             new_n,
             new_t,
             self.high_water_leaf,
@@ -2137,15 +2468,46 @@ impl HemSpdzSeedQuorum {
     }
 
     /// Sign `msg` in native `[Goldilocks; 4]` SPDZ MPC (`0` intermediate A2B!) across
-    /// `signer_indices` (`>= t` custodians).
+    /// `signer_indices` (`== n` when `durable_cert` is `None`, or `>= t` with a durable
+    /// [`EpochLatchCertificate`]).
     pub fn sign_quorum(
         &mut self,
         session_id: [u8; 32],
         signer_indices: &[usize],
         latch_ackers: &[usize],
+        durable_cert: Option<&EpochLatchCertificate>,
         msg: &[u8],
     ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
-        validate_party_subset(signer_indices, self.t, self.n)?;
+        self.sign_quorum_inner(session_id, signer_indices, latch_ackers, durable_cert, msg, false)
+    }
+
+    #[cfg(any(test, feature = "testing-ephemeral"))]
+    pub fn sign_quorum_online_fixture(
+        &mut self,
+        session_id: [u8; 32],
+        signer_indices: &[usize],
+        latch_ackers: &[usize],
+        durable_cert: Option<&EpochLatchCertificate>,
+        msg: &[u8],
+    ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
+        self.sign_quorum_inner(session_id, signer_indices, latch_ackers, durable_cert, msg, true)
+    }
+
+    fn sign_quorum_inner(
+        &mut self,
+        session_id: [u8; 32],
+        signer_indices: &[usize],
+        latch_ackers: &[usize],
+        durable_cert: Option<&EpochLatchCertificate>,
+        msg: &[u8],
+        online_fixture: bool,
+    ) -> Result<(u64, HemJortsSignature), HemQuorumError> {
+        let min_signers = if durable_cert.is_some() {
+            self.t
+        } else {
+            self.n
+        };
+        validate_party_subset(signer_indices, min_signers, self.n)?;
         validate_party_subset(latch_ackers, 1, self.n)?;
         let pts = canonical_eval_points(self.n);
         let sign_budget = required_hem_jorts_sign_preprocessing_budget_cached();
@@ -2167,6 +2529,7 @@ impl HemSpdzSeedQuorum {
         )
         .map_err(Poseidon2MpcError::Preprocess)?;
 
+        let prep_pow7 = if online_fixture { 0 } else { sign_budget.0 };
         let (mut key_shares, mut vaults) = authenticate_poseidon_dkg_shares_and_preprocess(
             cshake256_32(b"QSAG.HEM.SPDZ.SIGN.PREP/v1", &session_id),
             self.t,
@@ -2174,20 +2537,28 @@ impl HemSpdzSeedQuorum {
             self.cache.dkg_pk_seed,
             &self.sk_seed_shares,
             &self.sk_prf_shares,
-            sign_budget.0,
+            prep_pow7,
             0,
             0,
             &mut mesh,
             &mut rngs,
         )?;
+        #[cfg(any(test, feature = "testing-ephemeral"))]
+        if online_fixture {
+            qsag_core::preprocessing::PreprocessedPoseidonPartyVault::fill_quorum_online_fixture(
+                self.t,
+                &mut vaults,
+                sign_budget,
+                &mut rngs[0],
+            );
+        }
         for ks in &mut key_shares {
             ks.enroll_hem_key_profile(self.cache.pk, self.cache.prf_check)?;
-            ks.enroll_latch_authority(self.latch_cluster.authority_public().clone())?;
         }
 
         let (mu_bytes, _) = hem_compute_message_mu(&self.cache.pk, msg);
         let latch_pk = self.cache.pk.latch_pq_public_key(self.cache.dkg_pk_seed);
-        let cert = self
+        let _hem_cert = self
             .latch_cluster
             .certify_epoch(
                 latch_ackers,
@@ -2197,14 +2568,15 @@ impl HemSpdzSeedQuorum {
             )
             .map_err(|_| HemQuorumError::LatchRefused)?;
 
-        let active_signers = &signer_indices[..self.t];
+        let active_len = signer_indices.len();
+        let active_signers = &signer_indices[..active_len];
         let mut sel_ks: Vec<Option<_>> = key_shares.into_iter().map(Some).collect();
         let mut sel_vs: Vec<Option<_>> = vaults.into_iter().map(Some).collect();
         let mut sel_rngs: Vec<Option<_>> = rngs.into_iter().map(Some).collect();
 
-        let mut ks_vec = Vec::with_capacity(self.t);
-        let mut v_vec = Vec::with_capacity(self.t);
-        let mut r_vec = Vec::with_capacity(self.t);
+        let mut ks_vec = Vec::with_capacity(active_len);
+        let mut v_vec = Vec::with_capacity(active_len);
+        let mut r_vec = Vec::with_capacity(active_len);
         for &idx in active_signers {
             ks_vec.push(
                 sel_ks[idx]
@@ -2222,7 +2594,7 @@ impl HemSpdzSeedQuorum {
                     .ok_or(HemQuorumError::DuplicateParty { party: idx })?,
             );
         }
-        let mut latches: Vec<MonotonicEpochLatch> = (0..self.t)
+        let mut latches: Vec<MonotonicEpochLatch> = (0..active_len)
             .map(|_| MonotonicEpochLatch::new(self.high_water_leaf))
             .collect();
 
@@ -2233,7 +2605,7 @@ impl HemSpdzSeedQuorum {
             cshake256_32(b"QSAG.HEM.SPDZ.SIGN.ONLINE/v1", &session_id),
             &self.cache,
             self.t,
-            Some(&cert),
+            durable_cert,
             &mut l_refs,
             msg,
             100_000,
@@ -2358,10 +2730,7 @@ mod tests {
 
         // 4. Untrusted public `Hem` aggregator proves & verifies under `BciksJohnsonQrom128`!
         let committee_pks = vec![agg_pk0, agg_pk1, agg_pk2];
-        let mut bitmap = SignerBitmap::new(3);
-        bitmap.set(0);
-        bitmap.set(1);
-        bitmap.set(2);
+        let bitmap = SignerBitmap::from_active_indices(3, &[0, 1, 2]).unwrap();
         let mode = SigningMode::SharedMessage(block_msg);
         let cfg = HemAggConfig {
             regime: WhirSecurityRegime::BciksJohnsonQrom128,
@@ -2538,6 +2907,65 @@ mod tests {
             ),
             Err(HemQuorumError::PrfCommitmentMismatch)
                 | Err(HemQuorumError::EndpointVerificationFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn e2e_dealerless_spdz_seed_quorum_sign_reshare_and_hem_aggregate() {
+        // 100% dealerless Goldilocks DKG -> Gilboa byte auth -> SPDZ MPC leaf keygen (`active_leaves = 2`)
+        let mut spdz =
+            HemSpdzSeedQuorum::keygen_dealerless_online_fixture([0x91; 32], 2, 2, 2).unwrap();
+        let pk_initial = spdz.public_key();
+        let agg_pk = ValidatorPublicKey::from_bytes_canonical(&pk_initial.to_bytes()).unwrap();
+
+        let (ep0, sig0) = spdz
+            .sign_quorum_online_fixture([0x92; 32], &[0, 1], &[0, 1], None, b"spdz epoch 0")
+            .unwrap();
+        assert_eq!(ep0, 0);
+        let agg_sig0 = ValidatorSignature::from_bytes_canonical(
+            AggSigProfile::JortsPoseidon2,
+            &sig0.to_bytes(),
+        )
+        .unwrap();
+        assert!(verify_individual_signature(&agg_pk, b"spdz epoch 0", &agg_sig0));
+
+        // Dynamic `(2, 2) -> (2, 3)` seed reshare verified in SPDZ MPC without reconstructing secrets!
+        spdz.reshare_quorum_online_fixture([0x93; 32], &[0, 1], 2, 3)
+            .unwrap();
+        assert_eq!(spdz.public_key(), pk_initial);
+        assert_eq!(spdz.quorum_epoch(), 1);
+
+        let msg1 = b"spdz epoch 1 after (2,2)->(2,3) reshare";
+        let (ep1, sig1) = spdz
+            .sign_quorum_online_fixture([0x94; 32], &[0, 1, 2], &[0, 1, 2], None, msg1)
+            .unwrap();
+        assert_eq!(ep1, 1);
+        let agg_sig1 = ValidatorSignature::from_bytes_canonical(
+            AggSigProfile::JortsPoseidon2,
+            &sig1.to_bytes(),
+        )
+        .unwrap();
+        assert!(verify_individual_signature(&agg_pk, msg1, &agg_sig1));
+
+        let bitmap = SignerBitmap::from_active_indices(1, &[0]).unwrap();
+        let mode = SigningMode::SharedMessage(msg1);
+        let cfg = HemAggConfig {
+            regime: WhirSecurityRegime::BciksJohnsonQrom128,
+            ..HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x95; 32])
+        };
+        let proof = HemAggregator::aggregate_with_config(
+            core::slice::from_ref(&agg_pk),
+            &bitmap,
+            &mode,
+            &[agg_sig1],
+            &cfg,
+        )
+        .unwrap();
+        assert!(HemAggregator::verify_with_regime(
+            core::slice::from_ref(&agg_pk),
+            &mode,
+            &proof,
+            WhirSecurityRegime::BciksJohnsonQrom128,
         ));
     }
 }

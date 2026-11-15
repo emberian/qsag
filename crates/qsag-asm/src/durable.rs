@@ -127,14 +127,20 @@ fn options() -> io::Result<OpenOptions> {
 }
 
 fn identity(meta: &fs::Metadata) -> [u8; 16] {
-    let mut id = [0; 16];
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let mut id = [0; 16];
         id[..8].copy_from_slice(&meta.dev().to_le_bytes());
         id[8..].copy_from_slice(&meta.ino().to_le_bytes());
+        id
     }
-    id
+    // No `(dev, ino)` identity off unix: every caller's identity comparison is vacuous there.
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        [0; 16]
+    }
 }
 
 // Compare fstat(fd) with lstat(path), never just two pathname observations.
@@ -351,25 +357,27 @@ impl LockedRecord {
         // Read from the locked descriptor itself: reopening the pathname can
         // select a different inode between lstat and open. Positional I/O also
         // leaves the descriptor offset unchanged across successive operations.
-        let mut header = [0u8; 32];
+        #[cfg(not(unix))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "positional lock reads unavailable",
+            ))
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
+            let mut header = [0u8; 32];
             self._lock.read_exact_at(&mut header, 0)?;
+            if verify_path(&self._lock, &name)?.len() != 32
+                || &header[..8] != LOCK_MAGIC
+                || header[8..16] != self.seal
+                || header[16..] != self.inode
+            {
+                return Err(invalid());
+            }
+            Ok(())
         }
-        #[cfg(not(unix))]
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "positional lock reads unavailable",
-        ));
-        if verify_path(&self._lock, &name)?.len() != 32
-            || &header[..8] != LOCK_MAGIC
-            || header[8..16] != self.seal
-            || header[16..] != self.inode
-        {
-            return Err(invalid());
-        }
-        Ok(())
     }
 
     /// Default upper bound (`64 MiB`) enforced by [`LockedRecord::read`] before allocating a

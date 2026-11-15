@@ -16,7 +16,7 @@ Updated 2026-11-14. Statements delivered, how they were checked, and what is sti
   `Qsag.MirSpecBridge` and `Qsag.JortsBeltLatchAndQuorumSwitching` to build.
 - `AuditMirAxioms`: axiom census (`propext`, `Quot.sound` only) over every declaration of the
   extraction, the proofs and `QsagSpecWeld`, with required-theorem anchors and a negative
-  control. `QsagCustodyWeld` runs the same census over its three modules.
+  control. `QsagCustodyWeld` runs the same census over its four modules.
 
 ## Delivered
 
@@ -63,6 +63,16 @@ Guards (multi-turn, arbitrary request sequences including refusals).
   `bdoz_verify_arbitrary_batch` give exact acceptance of the BDOZ verifier for batches of any
   length; `bdoz_successful_trace_checks_every_batch` lifts it to traces.
 - `PolicyAndAddr.lean`: `checked_velocity_spend_spec`, the helper production admission calls.
+- `RealSpecGuardBoundary.lean`: `StatefulVelocityGuard::authorize_spend`,
+  `MlDsaReleaseGate::try_release_z_share` and `BeltLatchKernel::bind` are total and compute
+  exactly `Qsag.mirVelocityMachine`, `Qsag.mirMlDsaReleaseMachine` and
+  `Qsag.mirBeltLatchKernelMachine` (`MirSpecBridgeCore` §6A-§6C) through field-for-field
+  abstractions (`velocity_extracted_step_refines`, `mlDsa_extracted_step_refines`,
+  `beltLatch_extracted_step_refines`, each a lockstep `ForwardSim`).
+  `extractedVelocity_multiTurn_cap_and_monotonic_nonce`, `extractedMlDsa_at_most_one_release`
+  and `extractedBeltLatch_equivocation_free` are the `Qsag` multi-turn theorems restated on
+  extracted traces. The velocity guard does not refine the burned-nonce policy model as a whole
+  machine (`tooth_velocity_used_nonce_model_is_not_monotone_nonce`).
 - `CallerContracts.lean`: what unextracted callers must establish for ML-DSA, FTS and RSS
   releases, and a concrete RSS execution showing those contracts are not derivable from the
   guard alone.

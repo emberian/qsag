@@ -3948,7 +3948,11 @@ theorem tooth_swapped_spirv_or_xor_corrupts_word_and_alu :
       evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseXor 8 2 3 4) := by
   refine ⟨nofun, nofun, rfl, rfl, nofun⟩
 
-#tooth_pair spirv_normative_bitwise_and_comparison_decode vs tooth_swapped_spirv_or_xor_corrupts_word_and_alu
+theorem tooth_spirv_opcode_197_not_xor :
+    decodeInstRaw ⟨197, [1, 2, 3, 4]⟩ ≠ .ok (.opBitwiseXor 1 2 3 4) :=
+  nofun
+
+#tooth_pair spirv_normative_bitwise_and_comparison_decode vs tooth_spirv_opcode_197_not_xor
 
 end Qsag
 end

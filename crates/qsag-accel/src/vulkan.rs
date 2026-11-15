@@ -243,7 +243,9 @@ impl VulkanDeviceInfo {
         body[12..16].copy_from_slice(&self.api_version.to_le_bytes());
         body[16] = self.wave32_required as u8;
         for (chunk, stats) in body[17..]
-            .chunks_exact_mut(PER_PIPELINE)
+            .as_chunks_mut::<PER_PIPELINE>()
+            .0
+            .iter_mut()
             .zip(self.pipelines.iter().chain(self.prover_pipelines.iter()))
         {
             let fields = [
@@ -255,7 +257,7 @@ impl VulkanDeviceInfo {
                 stats.spilled_vgprs,
                 stats.spilled_sgprs,
             ];
-            for (slot, field) in chunk.chunks_exact_mut(9).zip(fields) {
+            for (slot, field) in chunk.as_chunks_mut::<9>().0.iter_mut().zip(fields) {
                 slot[0] = field.is_some() as u8;
                 slot[1..].copy_from_slice(&field.unwrap_or(0).to_le_bytes());
             }
@@ -702,6 +704,61 @@ impl VulkanSpirvBackend {
     /// Goldilocks Reed-Solomon LDE + salted Canopy leaf hashing + internal Merkle tree layers
     /// inside VRAM, and return `top_node` (`nodes[1]`).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn prover_whir_commit_round0_with<F>(
+        &self,
+        num_polys: usize,
+        salt_seed: &[u8; 32],
+        num_vars: usize,
+        blowup: usize,
+        group_arity: usize,
+        max_stage1_domain_ext4: usize,
+        max_stage1_groups: usize,
+        extra_witness_words: usize,
+        fill_chunk: F,
+    ) -> Result<[u8; 32], VulkanError>
+    where
+        F: FnMut(usize, usize, &mut [u64]),
+    {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.check_prover_session_active()?;
+            let mut guard = self
+                .engine
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let (top_node, subs) = guard.exec_prover_whir_commit_round0_with(
+                num_polys,
+                salt_seed,
+                num_vars,
+                blowup,
+                group_arity,
+                max_stage1_domain_ext4,
+                max_stage1_groups,
+                extra_witness_words,
+                fill_chunk,
+            )?;
+            self.gpu_submissions.fetch_add(subs, Ordering::Relaxed);
+            Ok(top_node)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = (
+                num_polys,
+                salt_seed,
+                num_vars,
+                blowup,
+                group_arity,
+                max_stage1_domain_ext4,
+                max_stage1_groups,
+                extra_witness_words,
+                fill_chunk,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn prover_whir_commit_round0(
         &self,
         polys: &[&[u64]],
@@ -713,40 +770,23 @@ impl VulkanSpirvBackend {
         max_stage1_groups: usize,
         extra_witness_words: usize,
     ) -> Result<[u8; 32], VulkanError> {
-        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
-        {
-            self.check_prover_session_active()?;
-            let mut guard = self
-                .engine
-                .lock()
-                .map_err(|_| VulkanError::WorkspacePoisoned)?;
-            let (top_node, subs) = guard.exec_prover_whir_commit_round0(
-                polys,
-                salt_seed,
-                num_vars,
-                blowup,
-                group_arity,
-                max_stage1_domain_ext4,
-                max_stage1_groups,
-                extra_witness_words,
-            )?;
-            self.gpu_submissions.fetch_add(subs, Ordering::Relaxed);
-            Ok(top_node)
+        let c_len = 1usize.checked_shl(num_vars as u32).unwrap_or(0);
+        if polys.is_empty() || polys.iter().any(|p| p.len() != c_len) {
+            return Err(crate::AccelError::LengthOverflow.into());
         }
-        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
-        {
-            let _ = (
-                polys,
-                salt_seed,
-                num_vars,
-                blowup,
-                group_arity,
-                max_stage1_domain_ext4,
-                max_stage1_groups,
-                extra_witness_words,
-            );
-            match self._uninhabited {}
-        }
+        self.prover_whir_commit_round0_with(
+            polys.len(),
+            salt_seed,
+            num_vars,
+            blowup,
+            group_arity,
+            max_stage1_domain_ext4,
+            max_stage1_groups,
+            extra_witness_words,
+            |poly_idx, pos, dst| {
+                dst.copy_from_slice(&polys[poly_idx][pos..pos + dst.len()]);
+            },
+        )
     }
 
     /// Expand `eq_table` Kronecker byte tables (`768 * num_polys` `Ext4`s) into `vram_work_a`
@@ -1181,7 +1221,12 @@ impl VulkanSpirvBackend {
                 .engine
                 .lock()
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
-            guard.exec_prover_whir_accumulate_shift_claims(k_len, k_base, z_pow_256, claims_meta)?;
+            guard.exec_prover_whir_accumulate_shift_claims(
+                k_len,
+                k_base,
+                z_pow_256,
+                claims_meta,
+            )?;
             self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -1357,7 +1402,15 @@ impl VulkanSpirvBackend {
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
         {
-            let _ = (is_round0_base, cur_m, col_src, col_dst, sh_src, sh_dst, chal);
+            let _ = (
+                is_round0_base,
+                cur_m,
+                col_src,
+                col_dst,
+                sh_src,
+                sh_dst,
+                chal,
+            );
             match self._uninhabited {}
         }
     }

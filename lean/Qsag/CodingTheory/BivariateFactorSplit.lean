@@ -411,10 +411,15 @@ private theorem split_single_against_list :
         · exact hTl F hF G' hGtl
       · have hDegSum : P.natDeg = P₁.natDeg + P₂.natDeg := by
           rw [hMul]; exact UPoly.natDeg_mul hP₁.1 hP₂.1
-        obtain ⟨Ps₁, hProd₁, hSum₁, hValid₁, hAll₁⟩ :=
-          ihFuel (G :: tl) P₁ (by omega) hP₁ hDeg₁
-        obtain ⟨Ps₂, hProd₂, hSum₂, hValid₂, hAll₂⟩ :=
-          ihFuel (G :: tl) P₂ (by omega) hP₂ hDeg₂
+        have hLe₁ : P₁.natDeg ≤ fuel :=
+          Nat.le_of_succ_le_succ
+            (Nat.le_trans (Nat.add_le_add_left hDeg₂ P₁.natDeg) (hDegSum ▸ hFuel))
+        have hLe₂ : P₂.natDeg ≤ fuel :=
+          Nat.le_of_succ_le_succ
+            (Nat.le_trans (Nat.add_comm 1 P₂.natDeg ▸ Nat.add_le_add_right hDeg₁ P₂.natDeg)
+              (hDegSum ▸ hFuel))
+        obtain ⟨Ps₁, hProd₁, hSum₁, hValid₁, hAll₁⟩ := ihFuel (G :: tl) P₁ hLe₁ hP₁ hDeg₁
+        obtain ⟨Ps₂, hProd₂, hSum₂, hValid₂, hAll₂⟩ := ihFuel (G :: tl) P₂ hLe₂ hP₂ hDeg₂
         refine ⟨Ps₁ ++ Ps₂, by rw [hMul, hProd₁, hProd₂, ← prodList_append],
           by rw [List.map_append, nat_sum_append, hSum₁, hSum₂, hTdeg],
           fun F hF => (mem_append_or hF).elim (hValid₁ F) (hValid₂ F),

@@ -14,15 +14,17 @@ import all QsagVerified.Proofs.CustodyMediation
 # Protocol-level weld library and its axiom census
 
 Root of the `QsagCustodyWeld` library: the welds whose statements mention the protocol
-specifications `Qsag.MirSpecBridge` and `Qsag.JortsBeltLatchAndQuorumSwitching` (RSS cut-session
-forward simulation, the velocity-guard boundary witness, and belt grants as custodian masks),
-and the mediation statements of the two production opening rounds (`CustodyMediation`).
+specifications `Qsag.MirSpecBridge` and `Qsag.JortsBeltLatchAndQuorumSwitching`: lockstep forward
+simulations of the extracted RSS cut session, velocity guard, ML-DSA release gate and belt-latch
+kernel into their `Qsag` machines, the witness that the velocity guard is not the burned-nonce policy model, belt
+grants as custodian masks, and the mediation statements of the two production opening rounds
+(`CustodyMediation`).
 It builds exactly when those `Qsag` modules and their imports do; the primitive welds in
 `QsagSpecWeld` do not depend on it.
 
 Building this root runs the same axiom policy (`propext` and `Quot.sound` only) over every
 declaration these modules own, with a negative control, and checks that the belt and RSS weld
-theorems are present as theorems and the RSS simulation is a typed `ForwardSim` value.
+theorems are present as theorems and the four guard simulations are typed `ForwardSim` values.
 -/
 
 namespace QsagMirProofs
@@ -46,6 +48,27 @@ export qsag_verified.proofs (
   extractedRssCut_inherits_spec_trace_safety
   tooth_extractedRssCut_nonzero_residual_rejected
   tooth_velocity_used_nonce_model_is_not_monotone_nonce
+  velocityGuardAbs
+  velocityReqAbs
+  velocity_extracted_step_refines
+  extractedVelocityMachine
+  extractedVelocity_forwardSim_mirVelocity
+  extractedVelocity_multiTurn_cap_and_monotonic_nonce
+  tooth_extractedVelocity_replayed_nonce_never_approved
+  mlDsaGateAbs
+  mlDsaChecksAbs
+  mlDsa_extracted_step_refines
+  extractedMlDsaMachine
+  extractedMlDsa_forwardSim_mirMlDsa
+  extractedMlDsa_at_most_one_release
+  tooth_extractedMlDsa_failed_barrier_never_released
+  beltKernelAbs
+  beltReqAbs
+  beltLatch_extracted_step_refines
+  extractedBeltLatchMachine
+  extractedBeltLatch_forwardSim_mirBeltLatchKernel
+  extractedBeltLatch_equivocation_free
+  tooth_extractedBeltLatch_poisoned_accepts_nothing
   sigma_release_iff
   sigma_release_permit
   plane_open_release_iff
@@ -71,6 +94,12 @@ run_cmd do
     ``qsag_verified.proofs.belt_validated_grant_refines_qsag_mask,
     ``qsag_verified.proofs.extractedRssCut_inherits_spec_trace_safety,
     ``qsag_verified.proofs.tooth_velocity_used_nonce_model_is_not_monotone_nonce,
+    ``qsag_verified.proofs.velocity_extracted_step_refines,
+    ``qsag_verified.proofs.extractedVelocity_multiTurn_cap_and_monotonic_nonce,
+    ``qsag_verified.proofs.mlDsa_extracted_step_refines,
+    ``qsag_verified.proofs.extractedMlDsa_at_most_one_release,
+    ``qsag_verified.proofs.beltLatch_extracted_step_refines,
+    ``qsag_verified.proofs.extractedBeltLatch_equivocation_free,
     ``qsag_verified.proofs.sigma_release_iff,
     ``qsag_verified.proofs.plane_open_release_iff,
     ``qsag_verified.proofs.tooth_opening_wrong_context_refused]
@@ -78,12 +107,17 @@ run_cmd do
     match env.find? name with
     | some (.thmInfo _) => pure ()
     | _ => throwError "custody weld axiom audit missing theorem target: {name}"
-  let simulationName := ``qsag_verified.proofs.extractedRssCut_forwardSim_mirRssCut
-  match env.find? simulationName with
-  | some (.defnInfo info) =>
-    unless info.type.getAppFn.constName? == some ``Qsag.ForwardSim do
-      throwError "custody weld target is not a ForwardSim value: {simulationName}"
-  | _ => throwError "custody weld axiom audit missing simulation definition: {simulationName}"
+  let simulationNames : List Name := [
+    ``qsag_verified.proofs.extractedRssCut_forwardSim_mirRssCut,
+    ``qsag_verified.proofs.extractedVelocity_forwardSim_mirVelocity,
+    ``qsag_verified.proofs.extractedMlDsa_forwardSim_mirMlDsa,
+    ``qsag_verified.proofs.extractedBeltLatch_forwardSim_mirBeltLatchKernel]
+  for simulationName in simulationNames do
+    match env.find? simulationName with
+    | some (.defnInfo info) =>
+      unless info.type.getAppFn.constName? == some ``Qsag.ForwardSim do
+        throwError "custody weld target is not a ForwardSim value: {simulationName}"
+    | _ => throwError "custody weld axiom audit missing simulation definition: {simulationName}"
   let mut coveredModules : List String := []
   let mut checked : Nat := 0
   let mut rejected : Nat := 0

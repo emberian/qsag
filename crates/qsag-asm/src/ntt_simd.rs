@@ -17,9 +17,9 @@ const MLDSA_ZETA: u32 = 1753;
 /// $256^{-1} \bmod q = 8\_347\_681$.
 const MLDSA_INV_256: u32 = 8_347_681;
 /// $q^{-1} \bmod^\pm 2^{32} = 58\_728\_449$ (`8380417 * 58728449 == 1 mod 2^32`).
-const MLDSA_QINV: i32 = 58_728_449;
+pub(crate) const MLDSA_QINV: i32 = 58_728_449;
 /// $2^{64} \bmod q = 2\_365\_951$.
-const MLDSA_R2_MOD_Q: i32 = 2_365_951;
+pub(crate) const MLDSA_R2_MOD_Q: i32 = 2_365_951;
 
 const fn bitrev8(mut x: u8) -> u8 {
     let mut out = 0u8;
@@ -74,15 +74,15 @@ const fn to_mont_centered(x: u32) -> i32 {
 }
 
 #[repr(C, align(64))]
-struct NttMontTables {
+pub(crate) struct NttMontTables {
     /// `ZETAS_MONT[i] = (1753^{BitRev_8(i)} * 2^32) mod^+- q`.
-    zetas_mont: [i32; MLDSA_N],
+    pub(crate) zetas_mont: [i32; MLDSA_N],
     /// `NEG_ZETAS_MONT[i] = (-1753^{BitRev_8(i)} * 2^32) mod^+- q`.
-    neg_zetas_mont: [i32; MLDSA_N],
+    pub(crate) neg_zetas_mont: [i32; MLDSA_N],
     /// `(256^{-1} * 2^32) mod^+- q` for fused final `InvNTT` stage (`len = 128`).
-    inv256_mont: i32,
+    pub(crate) inv256_mont: i32,
     /// `(-ZETAS[1] * 256^{-1} * 2^32) mod^+- q` for fused final `InvNTT` stage (`len = 128`).
-    neg_zeta1_inv256_mont: i32,
+    pub(crate) neg_zeta1_inv256_mont: i32,
 }
 
 const fn build_ntt_mont_tables() -> NttMontTables {
@@ -109,7 +109,7 @@ const fn build_ntt_mont_tables() -> NttMontTables {
     }
 }
 
-static NTT_TABLES: NttMontTables = build_ntt_mont_tables();
+pub(crate) static NTT_TABLES: NttMontTables = build_ntt_mont_tables();
 
 // Compile-time verification of Seiler signed Montgomery identity on edge values.
 const _: () = {
@@ -284,6 +284,19 @@ pub fn mldsa_ntt_with_backend(coeffs: &mut [u32; MLDSA_N], backend: SimdBackend)
         }
     }
     #[cfg(target_arch = "aarch64")]
+    {
+        if backend == SimdBackend::Aarch64NeonSha3Pmull
+            && (cpuid::probe_capabilities_bits() & cpuid::CAP_A64_NEON) != 0
+        {
+            // SAFETY: `CAP_A64_NEON` verified runtime NEON; `mldsa_ntt_neon` acquires a scoped
+            // `FEAT_DIT` guard and wipes volatile NEON scratch registers before `ret`.
+            unsafe {
+                crate::aarch64_simd::mldsa_ntt_neon(coeffs);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
     let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     let _ = backend;
     mldsa_ntt_portable(coeffs);
@@ -315,6 +328,19 @@ pub fn mldsa_inv_ntt_with_backend(coeffs: &mut [u32; MLDSA_N], backend: SimdBack
         {
             unsafe {
                 x86_simd::mldsa_inv_ntt_avx2(coeffs);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if backend == SimdBackend::Aarch64NeonSha3Pmull
+            && (cpuid::probe_capabilities_bits() & cpuid::CAP_A64_NEON) != 0
+        {
+            // SAFETY: `CAP_A64_NEON` verified runtime NEON; `mldsa_inv_ntt_neon` acquires a scoped
+            // `FEAT_DIT` guard and wipes volatile NEON scratch registers before `ret`.
+            unsafe {
+                crate::aarch64_simd::mldsa_inv_ntt_neon(coeffs);
             }
             return;
         }
@@ -356,6 +382,19 @@ pub fn mldsa_pointwise_mul_with_backend(
         {
             unsafe {
                 x86_simd::mldsa_pointwise_mul_avx2(out, lhs, rhs);
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if backend == SimdBackend::Aarch64NeonSha3Pmull
+            && (cpuid::probe_capabilities_bits() & cpuid::CAP_A64_NEON) != 0
+        {
+            // SAFETY: `CAP_A64_NEON` verified runtime NEON; `mldsa_pointwise_mul_neon` acquires a
+            // scoped `FEAT_DIT` guard and wipes volatile NEON scratch registers before `ret`.
+            unsafe {
+                crate::aarch64_simd::mldsa_pointwise_mul_neon(out, lhs, rhs);
             }
             return;
         }
@@ -1122,7 +1161,7 @@ mod tests {
     /// every `InvNTT` sum path reach `64 (q - 1)` before the `len = 32` reduction.
     fn extreme_inputs() -> [[u32; MLDSA_N]; 9] {
         let qm1 = MLDSA_Q - 1;
-        let mut state = 0x2018_0039_8380_417u64;
+        let mut state = 0x2018_0039_0838_0417_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;
@@ -1161,8 +1200,15 @@ mod tests {
             for backend in backends() {
                 let mut time = *input;
                 mldsa_inv_ntt_with_backend(&mut time, backend);
-                assert!(time.iter().all(|&c| c < MLDSA_Q), "non-canonical #{n} {backend:?}");
-                assert_eq!(ntt_by_definition(&time), *input, "input #{n} backend={backend:?}");
+                assert!(
+                    time.iter().all(|&c| c < MLDSA_Q),
+                    "non-canonical #{n} {backend:?}"
+                );
+                assert_eq!(
+                    ntt_by_definition(&time),
+                    *input,
+                    "input #{n} backend={backend:?}"
+                );
             }
         }
     }

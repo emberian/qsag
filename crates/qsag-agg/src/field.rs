@@ -1949,7 +1949,7 @@ mod ext4_tests {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            let x = if idx % 29 == 0 {
+            let x = if idx.is_multiple_of(29) {
                 Goldilocks::ZERO
             } else {
                 Goldilocks::from_u64_reduced(state)

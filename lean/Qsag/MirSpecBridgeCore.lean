@@ -39,13 +39,17 @@ here mentions `QsagVerified.Funs` directly, and cross-package extraction welds l
 | Model here | Relationship to `aeneas/lean/QsagVerified/Types.lean` (`qsag_verified`) |
 |---|---|
 | `MirRssCutSession` / `mirRssCutMachine` (§3) | Exact 5-phase field layout of `rss_cut_session.RssCutGateSession` (`Types.lean:592-635`); linked in `qsag_aeneas` by `extractedRssCut_forwardSim_mirRssCut`. |
-| `MirPolicyGuardState` (§2) & `MirStatefulVelocityGuard` (§6A) | `MirPolicyGuardState` is the `UInt64` burned-nonce model used in §5; `MirStatefulVelocityGuard` (§6A) mirrors `policy_and_addr.StatefulVelocityGuard` (`Types.lean:519-526`, `u128` spend/cap + monotonic `u64` `last_nonce`) field-for-field and refines `mirPolicyGuardMachine` via `mirVelocityAdapted_step_refines_mirPolicyGuard`. |
-| `MirRssMlDsaKeyState` (§3) & `MirMlDsaReleaseGate` (§6B) | `MirRssMlDsaKeyState` computes FIPS 204 norms directly; `MirMlDsaReleaseGate` / `MirMlDsaBarrierChecks` (§6B) mirror `cred_and_hd_guards.MlDsaReleaseGate` (`Types.lean:233-250`) field-for-field, proving share zeroization on every step and at-most-one release. |
-| `MirBeltLatchState` (§4), `MirBeltLatchKernel` & `MirBeltQuorumCore` (§6C) | `MirBeltLatchState` mirrors `WalLatchState`; `MirBeltLatchKernel` (`Types.lean:156-214`) and `MirBeltQuorumCore` / `mirValidateBeltQuorumConfig` (`Types.lean:128-142`) mirror the `qsag_verified` belt-latch and quorum-config carriers field-for-field with proved equivocation-freedom, poison absorption, and `2 * q > n + f` quorum intersection. |
+| `MirPolicyGuardState` (§2) & `MirStatefulVelocityGuard` (§6A) | `MirPolicyGuardState` is the `UInt64` burned-nonce model used in §5; the extracted guard does not refine it as a whole machine (`tooth_velocity_used_nonce_model_is_not_monotone_nonce`). `mirVelocityMachine` (§6A) is what `policy_and_addr.StatefulVelocityGuard::authorize_spend` computes (`velocity_extracted_step_refines`), and relates to `mirPolicyGuardMachine` on accepted steps (`mirVelocityAdapted_step_refines_mirPolicyGuard`). |
+| `MirRssMlDsaKeyState` (§3) & `MirMlDsaReleaseGate` (§6B) | `MirRssMlDsaKeyState` computes FIPS 204 norms directly; `mirMlDsaReleaseMachine` (§6B) is what `cred_and_hd_guards.MlDsaReleaseGate::try_release_z_share` computes (`mlDsa_extracted_step_refines`). |
+| `MirBeltLatchState` (§4), `MirBeltLatchKernel` & `MirBeltQuorumCore` (§6C) | `MirBeltLatchState` mirrors `WalLatchState`; `mirBeltLatchKernelMachine` (§6C) is what `belt_latch_kernel.BeltLatchKernel::bind` computes (`beltLatch_extracted_step_refines`). `MirBeltQuorumCore` / `mirValidateBeltQuorumConfig` have the field layout of `pants_and_quorum_guards.BeltQuorumCore` (`Types.lean:128-142`) and no extraction weld. |
 | `Layer1ElfState`, `Layer2MirState` and the four-layer chain (§5) | Layer 1 runs decoded machine code through `McRefine`. Layer 2 evaluates the pre-cut transcript predicate directly and composes via `ForwardSim.trans` with generalized `ShamirThresholdSubset` reconstruction (`shamirSubset_four_layer_sim`). |
 
 Names keep their `Mir` prefix because downstream modules refer to them; read it as
-"model at MIR granularity", not "derived from MIR".
+"model at MIR granularity", not "derived from MIR". The extraction welds named above live in
+`aeneas/lean/QsagVerified/Proofs/RealSpecGuardBoundary.lean` and
+`AuthenticatedBeltAndRealSpecWeld.lean`; each is a lockstep forward simulation from the extracted
+step function to the machine here, so every trace theorem below about that machine also holds of
+the extracted code.
 
 ## Contents
 
@@ -87,12 +91,11 @@ Names keep their `Mir` prefix because downstream modules refer to them; read it 
    `shamirSubset_four_layer_sim`, paired with multi-subset completeness witnesses and sub-threshold
    ambiguity `#tooth` refutations.
 
-6. **§6. Exact `QsagVerified` carrier-aligned guard models & spec bridges.**
-   Field-for-field and transition-for-transition models of `StatefulVelocityGuard` (`u128` spend/cap
-   + monotonic `u64` `last_nonce`), `MlDsaReleaseGate` (4-predicate release barrier + unconditional
-   share wipe), `BeltLatchKernel` (capacity + jump window `≤ 64` + exact replay + poison), and
-   `BeltQuorumCore` / `validate_belt_quorum_config`, with multi-turn trace invariants and forward
-   simulations into the `Qsag` protocol specifications.
+6. **§6. Guard machines with the extracted carriers' field layout.**
+   `StatefulVelocityGuard` (`u128` spend/cap, strictly increasing `u64` nonce), `MlDsaReleaseGate`
+   (four-flag release barrier, share wiped on every refusal), `BeltLatchKernel` (capacity, jump
+   window `≤ 64`, exact replay, poison) and `BeltQuorumCore` / `validate_belt_quorum_config`, each
+   with its multi-turn trace invariant. The first three are welded to the extraction (above).
 
 Constructive throughout: no proof gaps, no custom axioms, no `Classical.choice`.
 -/
@@ -5991,14 +5994,13 @@ private theorem mirMlDsa_terminal_rejects
   | @reject sCur _ chk _ _ _ ih =>
     exact ih (mirMlDsa_errStep_aborted_and_zeroed sCur chk).1
 
-/-- **Unconditional Share Zeroization & At-Most-One-Release Theorem
-    (`mirMlDsa_every_step_wipes_share_and_at_most_one_release`)**:
-    1. Across any multi-turn `ValidTrace` of `mirMlDsaReleaseMachine`, at most one partial share
-       is ever released (`tr.length ≤ 1`).
-    2. Every released item `(chk, out) ∈ tr` required all four ML-DSA barrier flags
-       (`z_norm_ok`, `r0_norm_ok`, `w1_match`, `u_com_bound`) and exact `(session_id, attempt)` match.
-    3. Every single step (whether accepted or rejected) overwrites `z_share_masked` with 32 zero bytes. -/
-theorem mirMlDsa_every_step_wipes_share_and_at_most_one_release
+/-- **At most one release, and only through the barrier.** For every trace of
+    `mirMlDsaReleaseMachine` from `g₀`:
+    1. at most one partial share is released (`tr.length ≤ 1`);
+    2. a released item `(chk, out) ∈ tr` matched `g₀`'s session id and attempt and had all four
+       barrier flags (`z_norm_ok`, `r0_norm_ok`, `w1_match`, `u_com_bound`) set;
+    3. refusing any check record from `g₀` leaves `z_share_masked` as 32 zero bytes. -/
+theorem mirMlDsa_at_most_one_release_through_barrier
     {g₀ gF : MirMlDsaReleaseGate}
     {tr : List (MirMlDsaBarrierChecks × List UInt8)}
     (hTr : mirMlDsaReleaseMachine.ValidTrace g₀ tr gF) :
@@ -6054,7 +6056,7 @@ theorem mirMlDsa_every_step_wipes_share_and_at_most_one_release
       subst hRestNil
       intro _ hm; cases hm
 
-/-- Unconditional inhabitedness witness for `mirMlDsa_every_step_wipes_share_and_at_most_one_release`. -/
+/-- Unconditional inhabitedness witness for `mirMlDsa_at_most_one_release_through_barrier`. -/
 theorem inhabited_mirMlDsa_honest_release :
     ∃ (g₀ gF : MirMlDsaReleaseGate) (tr : List (MirMlDsaBarrierChecks × List UInt8)),
       mirMlDsaReleaseMachine.ValidTrace g₀ tr gF ∧ tr.length = 1 := by
@@ -6101,11 +6103,8 @@ theorem mirMlDsa_failed_barrier_aborts_and_zeros_share_full
     rw [hTrue] at hFail
     cases hFail
 
-/-- **`#tooth` Failed ML-DSA Barrier Refuses Share Release
-    (`tooth_mirMlDsa_failed_barrier_aborts_and_zeros_share`)**:
-    Clearing ANY of the four barrier predicates (`z_norm_ok`, `r0_norm_ok`, `w1_match`, `u_com_bound`)
-    unconditionally refuses partial-share release (`step = none`). -/
-theorem tooth_mirMlDsa_failed_barrier_aborts_and_zeros_share
+/-- `#tooth`: clearing any of the four barrier flags refuses the release from every state. -/
+theorem tooth_mirMlDsa_failed_barrier_withholds_share
     (g : MirMlDsaReleaseGate) (chk : MirMlDsaBarrierChecks)
     (hFail : (chk.z_norm_ok && chk.r0_norm_ok && chk.w1_match && chk.u_com_bound) = false) :
     mirMlDsaReleaseMachine.step g chk = none :=
@@ -6226,14 +6225,14 @@ private theorem mirBeltLatchKernel_err_preserves_wf
       · injection hOut with hEq; subst hEq; exact ⟨hWf, rfl, rfl, rfl, rfl⟩
       · cases hOut
 
-/-- **Multi-Turn `BeltLatchKernel` Equivocation-Freedom & Jump-Window Invariant
-    (`mirBeltLatchKernel_equivocation_free_and_poison_absorbing`)**:
+/-- **Multi-Turn `BeltLatchKernel` Equivocation-Freedom & Well-Formedness
+    (`mirBeltLatchKernel_equivocation_free`)**:
     Across any `ValidTrace` of `mirBeltLatchKernelMachine` from `k₀` satisfying `k₀.WellFormed`:
     1. every accepted request has `req.epoch < k₀.capacity_limit`,
     2. any two accepted requests at the **same** epoch carry identical `(msg_digest, retry_salt, digits)`
        (zero equivocation across arbitrary replay/fresh/poison interleavings),
     3. final state `kF` preserves `MirBeltLatchKernel.WellFormed`. -/
-theorem mirBeltLatchKernel_equivocation_free_and_poison_absorbing
+theorem mirBeltLatchKernel_equivocation_free
     {k₀ kF : MirBeltLatchKernel}
     {tr : List (MirBeltLatchBindRequest × MirBeltLatchBindOutcome)}
     (hWf₀ : k₀.WellFormed)
@@ -6372,7 +6371,7 @@ theorem mirBeltLatchKernel_equivocation_free_and_poison_absorbing
   obtain ⟨hWfF, hCap, _, hPair⟩ := hMain hWf₀ hTr
   exact ⟨hWfF, hCap, hPair⟩
 
-/-- Unconditional inhabitedness witness for `mirBeltLatchKernel_equivocation_free_and_poison_absorbing`
+/-- Unconditional inhabitedness witness for `mirBeltLatchKernel_equivocation_free`
     (exercising both `.Fresh` and `.Replay` transitions in a 2-step trace). -/
 theorem inhabited_mirBeltLatchKernel_fresh_and_replay :
     ∃ (k₀ kF : MirBeltLatchKernel)
@@ -6517,7 +6516,7 @@ end Qsag
 #tooth_pair Qsag.shamirSubset_all_four_3of4_subsets_agree vs Qsag.tooth_checkedShamirThresholdSubset_rejects_duplicate_parties
 #verify_inhabited Qsag.mirVelocity_multiTurn_cap_and_monotonic_nonce Qsag.inhabited_mirVelocity_two_turn_trace
 #tooth_pair Qsag.mirVelocity_multiTurn_cap_and_monotonic_nonce vs Qsag.tooth_mirVelocity_nonMonotonic_nonce_rejected
-#verify_inhabited Qsag.mirMlDsa_every_step_wipes_share_and_at_most_one_release Qsag.inhabited_mirMlDsa_honest_release
-#tooth_pair Qsag.mirMlDsa_every_step_wipes_share_and_at_most_one_release vs Qsag.tooth_mirMlDsa_failed_barrier_aborts_and_zeros_share
-#verify_inhabited Qsag.mirBeltLatchKernel_equivocation_free_and_poison_absorbing Qsag.inhabited_mirBeltLatchKernel_fresh_and_replay
-#tooth_pair Qsag.mirBeltLatchKernel_equivocation_free_and_poison_absorbing vs Qsag.tooth_mirBeltLatchKernel_conflicting_binding_rejected
+#verify_inhabited Qsag.mirMlDsa_at_most_one_release_through_barrier Qsag.inhabited_mirMlDsa_honest_release
+#tooth_pair Qsag.mirMlDsa_at_most_one_release_through_barrier vs Qsag.tooth_mirMlDsa_failed_barrier_withholds_share
+#verify_inhabited Qsag.mirBeltLatchKernel_equivocation_free Qsag.inhabited_mirBeltLatchKernel_fresh_and_replay
+#tooth_pair Qsag.mirBeltLatchKernel_equivocation_free vs Qsag.tooth_mirBeltLatchKernel_conflicting_binding_rejected

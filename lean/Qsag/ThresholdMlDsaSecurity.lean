@@ -20,6 +20,10 @@ Constructive security proofs accompanying `Qsag.ThresholdMlDsaAndToprf`:
 
 public import Qsag.ThresholdMlDsaAndToprf
 public import Qsag.Tactic.AssuranceKit
+import all Qsag.ThresholdMlDsaAndToprf
+import all Qsag.UcGames
+import all Qsag.AdvancedMpcAndCreds
+import all Qsag.Goldilocks
 
 public section
 namespace Qsag
@@ -27,9 +31,25 @@ namespace Qsag
 set_option autoImplicit false
 set_option exponentiation.threshold 2048
 
+private theorem nat_lt_of_mul_lt_mul_right {a b c : Nat} (h : a * c < b * c) : a < b :=
+  if hab : a < b then hab
+  else False.elim (Nat.lt_irrefl (b * c)
+    (Nat.lt_of_le_of_lt (Nat.mul_le_mul_right c (Nat.le_of_not_lt hab)) h))
+
+private theorem ite_true {α : Sort _} {P : Prop} [Decidable P] (h : P) (a b : α) :
+    (if P then a else b) = a := by
+  cases ‹Decidable P› with
+  | isTrue _ => rfl
+  | isFalse hnp => exact absurd h hnp
+
+private theorem ite_false {α : Sort _} {P : Prop} [Decidable P] (h : ¬ P) (a b : α) :
+    (if P then a else b) = b := by
+  cases ‹Decidable P› with
+  | isTrue hp => exact absurd hp h
+  | isFalse _ => rfl
+
 /-! ## §1. NIST FIPS 204 `ML-DSA-44`, `ML-DSA-65` (Category 3) & `ML-DSA-87` (`PQ128`) Parameters -/
 
-/-- Parameter bundle for a NIST FIPS 204 `ML-DSA` security level. -/
 structure MlDsaLevelSpec where
   k : Nat
   ell : Nat
@@ -61,7 +81,6 @@ def mlDsa87Spec : MlDsaLevelSpec :=
     beta := 120, omega := 75, highMod := 16, cTildeBytes := 64, zPolyBytes := 640,
     pkBytes := 2592, sigBytes := 4627 }
 
-/-- Algebraic and wire-format consistency check for a FIPS 204 `ML-DSA` parameter set. -/
 def mlDsaLevelWellFormed (p : MlDsaLevelSpec) : Bool :=
   decide (p.beta = p.tau * p.eta) &&
   decide (mldsaQ - 1 = p.highMod * (2 * p.gamma2)) &&
@@ -76,7 +95,8 @@ theorem mlDsa_all_three_levels_wellFormed :
     mlDsaLevelWellFormed mlDsa87Spec = true := by decide
 
 theorem tooth_mlDsaLevelWellFormed_bad_beta :
-    mlDsaLevelWellFormed { mlDsa87Spec with beta := 119 } = false := by decide
+    ∃ p : MlDsaLevelSpec, p.beta ≠ p.tau * p.eta ∧ mlDsaLevelWellFormed p = false :=
+  ⟨{ mlDsa87Spec with beta := 119 }, by decide, by decide⟩
 
 /-- FIPS 204 `η = 4` DKG nibble rejection (`threshold_mldsa.rs`: `b < 9 => 4 - b`). -/
 def eta4SampleNibble (b : Fin 16) : Option Int :=
@@ -94,23 +114,26 @@ theorem eta4SampleNibble_bijective_on_range :
 
 /-- FIPS 204 `HighBits(r, 2 γ₂)` at `γ₂ = (q - 1) / 32 = 261888` (`α = 523776 = 512 * 1023`). -/
 def fips204HighBits32 (r : Fq204) : Nat :=
-  if mldsaQ - 1 - 261888 < r.val then 0 else (r.val + 261888) / 523776
+  if mldsaQ - 1 - 261888 < r.val then 0 else (r.val + 261887) / 523776
 
 theorem mlDsa65_87_highBits_bounds (r : Fq204) :
     fips204HighBits32 r < 16 ∧
-    fips204HighBits32 r = ((r.val + 261888) / 523776) % 16 := by
+    fips204HighBits32 r = ((r.val + 261887) / 523776) % 16 ∧
+    fips204HighBits32 r = (((r.val + 261887) / 512) / 1023) % 16 := by
   unfold fips204HighBits32
   have hr := r.isLt; unfold mldsaQ at hr ⊢
+  have hDiv512 : ((r.val + 261887) / 512) / 1023 = (r.val + 261887) / 523776 := by
+    rw [Nat.div_div_eq_div_mul]; rfl
+  rw [hDiv512]
   if hWrap : 8380417 - 1 - 261888 < r.val then
-    rw [ite_true_of hWrap]
-    have hQuot : (r.val + 261888) / 523776 = 16 := by omega
+    rw [ite_true hWrap]
+    have hQuot : (r.val + 261887) / 523776 = 16 := by omega
     rw [hQuot]; decide
   else
-    rw [ite_false_of hWrap]
-    have hLt16 : (r.val + 261888) / 523776 < 16 := by omega
-    exact ⟨hLt16, (Nat.mod_eq_of_lt hLt16).symm⟩
+    rw [ite_false hWrap]
+    have hLt16 : (r.val + 261887) / 523776 < 16 := by omega
+    exact ⟨hLt16, (Nat.mod_eq_of_lt hLt16).symm, (Nat.mod_eq_of_lt hLt16).symm⟩
 
-/-- Pascal binomial coefficient `C(n, k)`, factorial, and falling factorial. -/
 def binomRec : Nat → Nat → Nat
   | _, 0 => 1
   | 0, _ + 1 => 0
@@ -129,21 +152,15 @@ private theorem descFact_step_right :
     ∀ n k : Nat, descFact n (k + 1) + (k + 1) * descFact n k = (n + 1) * descFact n k
   | 0, 0 => rfl
   | 0, _ + 1 => rfl
-  | n + 1, k => by
+  | n + 1, 0 => by simp [descFact, Nat.mul_one, Nat.succ_mul]
+  | n + 1, k + 1 => by
     have ih := descFact_step_right n k
-    show (n + 1) * descFact n (k + 1) + (k + 2) * ((n + 1) * descFact n k) =
-      (n + 2) * ((n + 1) * descFact n k)
-    have hMul : (n + 1) * descFact n (k + 1) + (n + 1) * ((k + 1) * descFact n k) =
-        (n + 1) * ((n + 1) * descFact n k) := by rw [← Nat.left_distrib, ih]
-    have hL : (k + 2) * ((n + 1) * descFact n k) =
-        (n + 1) * ((k + 1) * descFact n k) + (n + 1) * descFact n k := by
-      rw [Nat.succ_mul, Nat.mul_left_comm (k + 1) (n + 1)]
-    have hR : (n + 2) * ((n + 1) * descFact n k) =
-        (n + 1) * ((n + 1) * descFact n k) + (n + 1) * descFact n k := by rw [Nat.succ_mul]
-    rw [hL, ← Nat.add_assoc, hMul, hR]
+    dsimp only [descFact]
+    rw [Nat.succ_mul (k + 1), Nat.succ_mul (n + 1), ← Nat.add_assoc,
+        Nat.mul_left_comm (k + 1) (n + 1), ← Nat.left_distrib (n + 1), ih]
 
 theorem binomRec_mul_fact : ∀ n k : Nat, binomRec n k * factRec k = descFact n k
-  | _, 0 => rfl
+  | _, 0 => by simp [binomRec, factRec, descFact]
   | 0, _ + 1 => Nat.zero_mul _
   | n + 1, k + 1 => by
     simp only [binomRec, factRec, descFact]; rw [Nat.right_distrib]
@@ -153,13 +170,12 @@ theorem binomRec_mul_fact : ∀ n k : Nat, binomRec n k * factRec k = descFact n
     rw [h1, h2, binomRec_mul_fact n k, binomRec_mul_fact n (k + 1), Nat.add_comm]
     exact descFact_step_right n k
 
-/-- Exact `SampleInBall` challenge-space cardinality `2^τ · C(256, τ)`. -/
 def challengeSpaceCard (tau : Nat) : Nat := 2 ^ tau * binomRec 256 tau
 
 private theorem challengeSpaceCard_gt_pow2 (tau bits : Nat)
     (h : 2 ^ bits * factRec tau < 2 ^ tau * descFact 256 tau) :
     2 ^ bits < challengeSpaceCard tau := by
-  apply Nat.lt_of_mul_lt_mul_right (a := factRec tau)
+  apply nat_lt_of_mul_lt_mul_right (c := factRec tau)
   unfold challengeSpaceCard; rw [Nat.mul_assoc, binomRec_mul_fact]; exact h
 
 /-- **FIPS 204 Challenge Entropy Bounds (`mlDsa_challenge_entropy_bounds`)**:
@@ -192,7 +208,6 @@ def bv256XorEquiv (target : BitVec 256) : SimpleEquiv (BitVec 256) (BitVec 256) 
   left_inv m := bv_xor_cancel_left target m
   right_inv v := bv_xor_cancel_left target v
 
-/-- Per-attempt PRSS / `daBit` / `Ext6` blinding coins for the hardened sealed-`w₁` signer. -/
 structure SealedAttemptPads where
   maskW : PolyVec4
   maskZ : PolyVec4
@@ -200,7 +215,6 @@ structure SealedAttemptPads where
   maskBin : BitVec 256
   verdictBlind : Ext6Fq204
 
-/-- Public/adversarial view of a hardened signing attempt (`released = none` on abort => zero `w₁`). -/
 structure SealedSignAttemptView where
   openedW : PolyVec4
   openedZ : PolyVec4
@@ -208,6 +222,24 @@ structure SealedSignAttemptView where
   openedBin : BitVec 256
   openedVerdict : Ext6Fq204
   released : Option ((Fin 4 → NatTree 8) × ThresholdSignSig)
+
+def sealedAcceptBool
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyMat4) (s1 s2 y : PolyVec4) (mu : List UInt8) : Bool :=
+  let t := addVec4 (matVecMul4 A s1) s2
+  let t0 := power2RoundLowVec4 t
+  let w := matVecMul4 A y
+  let w1 := highBitsVec4 w
+  let c := sampleInBall (chalHash mu w1)
+  let z := addVec4 y (mulPolyVec4 c s1)
+  let u := subVec4 w (mulPolyVec4 c s2)
+  let ct0 := mulPolyVec4 c t0
+  let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
+  decide (infNormVec4 ct0 < mldsa44Gamma2) &&
+  decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
+  decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
+  decide (hintWeightVec4 h ≤ mldsa44Omega)
 
 def realSealedAttemptView
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -221,17 +253,11 @@ def realSealedAttemptView
   let w1 := highBitsVec4 w
   let cTilde := chalHash mu w1
   let c := sampleInBall cTilde
-  let cs1 := mulPolyVec4 c s1
-  let cs2 := mulPolyVec4 c s2
+  let z := addVec4 y (mulPolyVec4 c s1)
+  let u := subVec4 w (mulPolyVec4 c s2)
   let ct0 := mulPolyVec4 c t0
-  let z := addVec4 y cs1
-  let u := subVec4 w cs2
   let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
-  let accept : Bool :=
-    decide (infNormVec4 ct0 < mldsa44Gamma2) &&
-    decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
-    decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
-    decide (hintWeightVec4 h ≤ mldsa44Omega)
+  let accept := sealedAcceptBool chalHash sampleInBall A s1 s2 y mu
   { openedW := addVec4 w pads.maskW, openedZ := addVec4 z pads.maskZ,
     openedLow := addVec4 u pads.maskLow, openedBin := keccakTraceBits ^^^ pads.maskBin,
     openedVerdict := if accept then ext6Zero else ext6Scale pads.verdictBlind failTag,
@@ -240,8 +266,6 @@ def realSealedAttemptView
 
 abbrev SimAttemptOutcome := Option ThresholdSignSig
 
-/-- **Secret-Free Attempt Simulator (`thresholdMlDsaAttemptSimulator`)**:
-    Uses only `(A, t1Scaled)` and `SimAttemptOutcome` (`none` on abort, `some sig` on accept). -/
 def thresholdMlDsaAttemptSimulator
     (sampleInBall : List UInt8 → Poly256) (A : PolyMat4) (t1Scaled : PolyVec4)
     (out : SimAttemptOutcome) (pads : SealedAttemptPads) : SealedSignAttemptView :=
@@ -265,10 +289,10 @@ def sealedPadsTupleEquiv :
 
 def sealedAttemptPadEquiv
     (w z u : PolyVec4) (keccakTraceBits : BitVec 256)
-    (accept : Bool) (failTag : Fq204) (hFail : accept = false → failTag ≠ Fq204.zero) :
+    (accept : Bool) (failTag : Fq204) (hFail : failTag ≠ Fq204.zero) :
     SimpleEquiv SealedAttemptPads SealedAttemptPads :=
   let verdictEquiv : SimpleEquiv Ext6Fq204 Ext6Fq204 :=
-    if hAcc : accept = false then ext6ScaleEquiv failTag (hFail hAcc) else SimpleEquiv.refl _
+    if accept then SimpleEquiv.refl _ else ext6ScaleEquiv failTag hFail
   SimpleEquiv.trans sealedPadsTupleEquiv
     (SimpleEquiv.trans
       (SimpleEquiv.prodCongr (rssMaskAddEquiv w)
@@ -276,6 +300,17 @@ def sealedAttemptPadEquiv
           (SimpleEquiv.prodCongr (rssMaskAddEquiv u)
             (SimpleEquiv.prodCongr (bv256XorEquiv keccakTraceBits) verdictEquiv))))
       (SimpleEquiv.symm sealedPadsTupleEquiv))
+
+def sealedStepPadEquiv
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (A : PolyMat4) (s1 s2 y : PolyVec4) (mu : List UInt8)
+    (keccakTraceBits : BitVec 256) (failTag : Fq204) (hFail : failTag ≠ Fq204.zero) :
+    SimpleEquiv SealedAttemptPads SealedAttemptPads :=
+  let w := matVecMul4 A y
+  let c := sampleInBall (chalHash mu (highBitsVec4 w))
+  sealedAttemptPadEquiv w (addVec4 y (mulPolyVec4 c s1)) (subVec4 w (mulPolyVec4 c s2))
+    keccakTraceBits (sealedAcceptBool chalHash sampleInBall A s1 s2 y mu) failTag hFail
 
 def sealedAttemptPublicOutcome
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -291,12 +326,9 @@ def sealedAttemptPublicOutcome
   let u := subVec4 w (mulPolyVec4 c s2)
   let ct0 := mulPolyVec4 c t0
   let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
-  let accept : Bool :=
-    decide (infNormVec4 ct0 < mldsa44Gamma2) &&
-    decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
-    decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
-    decide (hintWeightVec4 h ≤ mldsa44Omega)
-  if accept then some { cTilde := cTilde, z := z, h := h, usedAttempt := attempt } else none
+  if sealedAcceptBool chalHash sampleInBall A s1 s2 y mu then
+    some { cTilde := cTilde, z := z, h := h, usedAttempt := attempt }
+  else none
 
 theorem sealedAttempt_sim_eq_real
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -304,47 +336,34 @@ theorem sealedAttempt_sim_eq_real
     (A : PolyMat4) (s1 s2 y : PolyVec4) (mu : List UInt8) (attempt : Nat)
     (keccakTraceBits : BitVec 256) (failTag : Fq204)
     (hFail : failTag ≠ Fq204.zero) (pads : SealedAttemptPads) :
-    let t1Scaled := power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2)
-    let w := matVecMul4 A y
-    let w1 := highBitsVec4 w
-    let c := sampleInBall (chalHash mu w1)
-    let z := addVec4 y (mulPolyVec4 c s1)
-    let u := subVec4 w (mulPolyVec4 c s2)
-    let ct0 := mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 A s1) s2))
-    let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
-    let accept : Bool :=
-      decide (infNormVec4 ct0 < mldsa44Gamma2) &&
-      decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
-      decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
-      decide (hintWeightVec4 h ≤ mldsa44Omega)
-    let e := sealedAttemptPadEquiv w z u keccakTraceBits accept failTag (fun _ => hFail)
-    thresholdMlDsaAttemptSimulator sampleInBall A t1Scaled
-      (sealedAttemptPublicOutcome chalHash sampleInBall A s1 s2 y mu attempt) (e.toFun pads) =
+    thresholdMlDsaAttemptSimulator sampleInBall A
+      (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
+      (sealedAttemptPublicOutcome chalHash sampleInBall A s1 s2 y mu attempt)
+      ((sealedStepPadEquiv chalHash sampleInBall A s1 s2 y mu keccakTraceBits failTag hFail).toFun pads) =
     realSealedAttemptView chalHash sampleInBall A s1 s2 y mu attempt keccakTraceBits failTag pads := by
-  intro t1Scaled w w1 c z u ct0 h accept e
-  unfold realSealedAttemptView sealedAttemptPublicOutcome thresholdMlDsaAttemptSimulator
-  dsimp only [w, w1, c, z, u, ct0, h, accept, e]
-  cases hAcc :
-      (decide (infNormVec4 ct0 < mldsa44Gamma2) &&
-       decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
-       decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
-       decide (hintWeightVec4 h ≤ mldsa44Omega)) with
+  unfold realSealedAttemptView sealedAttemptPublicOutcome thresholdMlDsaAttemptSimulator sealedStepPadEquiv
+  dsimp only
+  cases hAcc : sealedAcceptBool chalHash sampleInBall A s1 s2 y mu with
   | false =>
-    dsimp only [sealedAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
+    simp only [sealedAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
       SimpleEquiv.symm, sealedPadsTupleEquiv, rssMaskAddEquiv, bv256XorEquiv,
-      ext6ScaleEquiv, ↓reduceDIte, ↓reduceIte, Bool.false_eq_true]
+      ext6ScaleEquiv, Bool.false_eq_true, ↓reduceIte]
   | true =>
+    unfold sealedAcceptBool at hAcc
     simp only [Bool.and_eq_true, decide_eq_true_eq] at hAcc
     rcases hAcc with ⟨⟨⟨hCt0, _⟩, hDiff⟩, _⟩
     have hB : mldsa44Gamma2 - mldsa44Beta ≤ 95232 := by decide
+    let w := matVecMul4 A y
+    let c := sampleInBall (chalHash mu (highBitsVec4 w))
+    let u := subVec4 w (mulPolyVec4 c s2)
     obtain ⟨hLow, hHighEq⟩ := (centeredDiffNormVec4_lt_iff u w hB).mp hDiff
     have hUseHint := highBits_az_sub_ct_eq_w1 A s1 s2 y c mldsa44Beta hLow hCt0
     dsimp only at hUseHint
-    have hW1Eq : useHintVec4 h (subVec4 (matVecMul4 A z) (mulPolyVec4 c t1Scaled)) = w1 :=
-      hUseHint.trans hHighEq
-    dsimp only [sealedAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
+    have hW1Eq := hUseHint.trans hHighEq
+    simp only [sealedAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
       SimpleEquiv.symm, SimpleEquiv.refl, sealedPadsTupleEquiv, rssMaskAddEquiv, bv256XorEquiv,
-      Bool.true_eq_false, ↓reduceDIte, ↓reduceIte]
+      ↓reduceIte]
+    dsimp only [w, c] at hW1Eq
     rw [hW1Eq]
 
 structure SealedAttemptStepSpec where
@@ -383,6 +402,55 @@ def sealedTraceOutcomes
     (steps : List SealedAttemptStepSpec) : List SimAttemptOutcome :=
   steps.map (fun stp => sealedAttemptPublicOutcome chalHash sampleInBall A s1 s2 stp.y mu stp.attempt)
 
+private def splitPadsEquiv (n : Nat) :
+    SimpleEquiv (Fin (n + 1) → SealedAttemptPads)
+      (SealedAttemptPads × (Fin n → SealedAttemptPads)) where
+  toFun f := (f ⟨0, Nat.zero_lt_succ _⟩, fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+  invFun p := Fin.cases p.1 p.2
+  left_inv f := by funext j; refine Fin.cases ?_ (fun _ => ?_) j <;> rfl
+  right_inv := fun ⟨_, _⟩ => rfl
+
+private def consPadEquiv {n m : Nat}
+    (bijHead : SimpleEquiv SealedAttemptPads SealedAttemptPads)
+    (bijRest : SimpleEquiv (Fin n → SealedAttemptPads) (Fin m → SealedAttemptPads)) :
+    SimpleEquiv (Fin (n + 1) → SealedAttemptPads) (Fin (m + 1) → SealedAttemptPads) :=
+  SimpleEquiv.trans (splitPadsEquiv n)
+    (SimpleEquiv.trans (SimpleEquiv.prodCongr bijHead bijRest)
+      (SimpleEquiv.symm (splitPadsEquiv m)))
+
+private theorem consPadEquiv_zero {n m : Nat}
+    (bijHead : SimpleEquiv SealedAttemptPads SealedAttemptPads)
+    (bijRest : SimpleEquiv (Fin n → SealedAttemptPads) (Fin m → SealedAttemptPads))
+    (padFn : Fin (n + 1) → SealedAttemptPads) :
+    (consPadEquiv bijHead bijRest).toFun padFn ⟨0, Nat.zero_lt_succ m⟩ =
+      bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ n⟩) := rfl
+
+private theorem consPadEquiv_succ {n m : Nat}
+    (bijHead : SimpleEquiv SealedAttemptPads SealedAttemptPads)
+    (bijRest : SimpleEquiv (Fin n → SealedAttemptPads) (Fin m → SealedAttemptPads))
+    (padFn : Fin (n + 1) → SealedAttemptPads) :
+    (fun i : Fin m => (consPadEquiv bijHead bijRest).toFun padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) =
+      bijRest.toFun (fun i : Fin n => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := rfl
+
+private theorem finSum_sim_eq_of_equiv {α β V : Type} {M : Nat}
+    (bij : SimpleEquiv α β) (realFn : α → V) (simFn : β → V)
+    (hSim : ∀ x, simFn (bij.toFun x) = realFn x)
+    (enumA : SimpleEquiv (Fin M) α) (enumB : SimpleEquiv (Fin M) β)
+    (D : V → Bool) :
+    finSum M (fun m => (D (realFn (enumA.toFun m))).toNat) =
+    finSum M (fun m => (D (simFn (enumB.toFun m))).toNat) := by
+  let perm : Fin M → Fin M := fun m => enumB.invFun (bij.toFun (enumA.toFun m))
+  let permInv : Fin M → Fin M := fun m => enumA.invFun (bij.invFun (enumB.toFun m))
+  have hL : ∀ m, permInv (perm m) = m := fun m => by
+    dsimp only [perm, permInv]; rw [enumB.right_inv, bij.left_inv, enumA.left_inv]
+  have hR : ∀ m, perm (permInv m) = m := fun m => by
+    dsimp only [perm, permInv]; rw [enumA.right_inv, bij.right_inv, enumB.left_inv]
+  have hCong : ∀ m : Fin M,
+      (D (realFn (enumA.toFun m))).toNat = (D (simFn (enumB.toFun (perm m)))).toNat := by
+    intro m; dsimp only [perm]; rw [enumB.right_inv, hSim]
+  rw [finSum_congr hCong]
+  exact finSum_perm_invariant perm permInv hL hR (fun m => (D (simFn (enumB.toFun m))).toNat)
+
 /-- **Abort-Transcript Zero-Knowledge Simulation Theorem (`threshold_mldsa_abort_transcript_zk`)**:
     Across any `R`-attempt signing trace where rejected attempts carry nonzero `failTag`, an
     explicit `0-Classical` pad bijection maps `realSealedSignTrace` to `thresholdMlDsaTraceSimulator`
@@ -413,114 +481,74 @@ theorem threshold_mldsa_abort_transcript_zk
   | cons stp rest ih =>
     have hHeadFail : stp.failTag ≠ Fq204.zero := hFail stp (.head rest)
     obtain ⟨_, bijRest, hEqRest, _⟩ := ih (fun s hs => hFail s (.tail stp hs))
-    let w := matVecMul4 A stp.y
-    let w1 := highBitsVec4 w
-    let c := sampleInBall (chalHash mu w1)
-    let z := addVec4 stp.y (mulPolyVec4 c s1)
-    let u := subVec4 w (mulPolyVec4 c s2)
-    let ct0 := mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 A s1) s2))
-    let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
-    let accept : Bool :=
-      decide (infNormVec4 ct0 < mldsa44Gamma2) &&
-      decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
-      decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
-      decide (hintWeightVec4 h ≤ mldsa44Omega)
-    let bijHead := sealedAttemptPadEquiv w z u stp.keccakTraceBits accept stp.failTag
-      (fun _ => hHeadFail)
     have hLenCons : (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest)).length =
-        (stp :: rest).length := by simp [sealedTraceOutcomes]
-    let splitEquiv (n : Nat) : SimpleEquiv (Fin (n + 1) → SealedAttemptPads)
-        (SealedAttemptPads × (Fin n → SealedAttemptPads)) :=
-      { toFun := fun f => (f ⟨0, Nat.zero_lt_succ _⟩, fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
-        invFun := fun p => Fin.cases p.1 p.2
-        left_inv := fun f => by funext j; refine Fin.cases ?_ (fun _ => ?_) j <;> rfl
-        right_inv := fun ⟨_, _⟩ => rfl }
-    let outsRest := sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu rest
-    let bijCons : SimpleEquiv (Fin (rest.length + 1) → SealedAttemptPads)
-        (Fin (outsRest.length + 1) → SealedAttemptPads) :=
-      SimpleEquiv.trans (splitEquiv rest.length)
-        (SimpleEquiv.trans (SimpleEquiv.prodCongr bijHead bijRest)
-          (SimpleEquiv.symm (splitEquiv outsRest.length)))
+        (stp :: rest).length := List.length_map _
     have hPointwise : ∀ padFn : Fin (rest.length + 1) → SealedAttemptPads,
         thresholdMlDsaTraceSimulator sampleInBall A
           (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
           (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest))
-          (bijCons.toFun padFn) =
+          ((consPadEquiv (sealedStepPadEquiv chalHash sampleInBall A s1 s2 stp.y mu
+              stp.keccakTraceBits stp.failTag hHeadFail) bijRest).toFun padFn) =
         realSealedSignTrace chalHash sampleInBall A s1 s2 mu (stp :: rest) padFn := by
       intro padFn
       have hHd := sealedAttempt_sim_eq_real chalHash sampleInBall A s1 s2 stp.y mu stp.attempt
         stp.keccakTraceBits stp.failTag hHeadFail (padFn ⟨0, Nat.zero_lt_succ _⟩)
       have hTl := hEqRest (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
-      dsimp only [sealedTraceOutcomes, List.map, thresholdMlDsaTraceSimulator, realSealedSignTrace,
-        bijCons, SimpleEquiv.trans, SimpleEquiv.prodCongr, SimpleEquiv.symm, splitEquiv]
-      have hZero : (Fin.cases (bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ _⟩))
-          (bijRest.toFun (fun i => padFn ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) :
-          Fin (outsRest.length + 1) → SealedAttemptPads) ⟨0, Nat.zero_lt_succ _⟩ =
-          bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ _⟩) := rfl
-      have hSucc : (fun i : Fin outsRest.length =>
-          (Fin.cases (bijHead.toFun (padFn ⟨0, Nat.zero_lt_succ _⟩))
-            (bijRest.toFun (fun k => padFn ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩)) :
-            Fin (outsRest.length + 1) → SealedAttemptPads) ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) =
-          bijRest.toFun (fun k => padFn ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩) := rfl
-      rw [hZero, hSucc, hHd, hTl]
-    refine ⟨hLenCons, bijCons, hPointwise, ?_⟩
-    intro M enum enumOut D
-    let perm : Fin M → Fin M := fun m => enumOut.invFun (bijCons.toFun (enum.toFun m))
-    let permInv : Fin M → Fin M := fun m => enum.invFun (bijCons.invFun (enumOut.toFun m))
-    have hL : ∀ m, permInv (perm m) = m := fun m => by
-      dsimp only [perm, permInv]; rw [enumOut.right_inv, bijCons.left_inv, enum.left_inv]
-    have hR : ∀ m, perm (permInv m) = m := fun m => by
-      dsimp only [perm, permInv]; rw [enum.right_inv, bijCons.right_inv, enumOut.left_inv]
-    have hCong : ∀ m : Fin M,
-        (D (realSealedSignTrace chalHash sampleInBall A s1 s2 mu (stp :: rest) (enum.toFun m))).toNat =
-        (D (thresholdMlDsaTraceSimulator sampleInBall A
-          (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
-          (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest))
-          (enumOut.toFun (perm m)))).toNat := by
-      intro m; dsimp only [perm]; rw [enumOut.right_inv, hPointwise]
-    rw [finSum_congr hCong]
-    exact finSum_perm_invariant perm permInv hL hR
-      (fun m => (D (thresholdMlDsaTraceSimulator sampleInBall A
-        (power2RoundHighVec4 (addVec4 (matVecMul4 A s1) s2))
-        (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu (stp :: rest))
-        (enumOut.toFun m))).toNat)
+      simp only [sealedTraceOutcomes, List.map_cons, thresholdMlDsaTraceSimulator,
+        realSealedSignTrace, consPadEquiv_zero, consPadEquiv_succ]
+      rw [hHd]
+      exact congrArg (_ :: ·) hTl
+    exact ⟨hLenCons,
+      consPadEquiv (sealedStepPadEquiv chalHash sampleInBall A s1 s2 stp.y mu
+        stp.keccakTraceBits stp.failTag hHeadFail) bijRest,
+      hPointwise,
+      fun enum enumOut D => finSum_sim_eq_of_equiv _ _ _ hPointwise enum enumOut D⟩
 
-/-- Coordinate-level FIPS 204 plateau mask box `[-(γ₁ - 1), γ₁ - 1]` and open box `|z| < B`. -/
 def maskCoordAt (gamma1 : Nat) (idx : Fin (2 * gamma1 - 1)) : Int :=
-  Int.ofNat idx.val - (Int.ofNat gamma1 - 1)
+  (idx.val : Int) - ((gamma1 : Int) - 1)
 
 def inOpenNormBox (B : Nat) (z : Int) : Bool :=
-  decide (-(Int.ofNat B) < z ∧ z < Int.ofNat B)
+  decide (-((B : Int)) < z ∧ z < (B : Int))
 
 /-- **Plateau Shift-Invariance (`fips204_z_plateau_shift_invariant`)**:
     Over `y ∈ [-(γ₁ - 1), γ₁ - 1]`, for every `cs1 ∈ [-β, β]` and `|zStar| < γ₁ - β`, exactly
     `1` mask index satisfies `y + cs1 = zStar`, independent of `cs1`. -/
 theorem fips204_z_plateau_shift_invariant
     (gamma1 beta : Nat) (hLt : beta < gamma1) (cs1 zStar : Int)
-    (hCs1 : -(Int.ofNat beta) ≤ cs1 ∧ cs1 ≤ Int.ofNat beta)
+    (hCs1 : -((beta : Int)) ≤ cs1 ∧ cs1 ≤ (beta : Int))
     (hBox : inOpenNormBox (gamma1 - beta) zStar = true) :
     finSum (2 * gamma1 - 1) (fun idx =>
       if maskCoordAt gamma1 idx + cs1 = zStar then 1 else 0) = 1 := by
   unfold inOpenNormBox at hBox
   have hZ := of_decide_eq_true hBox
-  let kNat : Nat := (zStar - cs1 + (Int.ofNat gamma1 - 1)).toNat
+  have hSub : ((gamma1 - beta : Nat) : Int) = (gamma1 : Int) - (beta : Int) :=
+    Int.ofNat_sub (Nat.le_of_lt hLt)
+  rw [hSub] at hZ
+  let xInt : Int := zStar - cs1 + ((gamma1 : Int) - 1)
+  have hx0 : 0 ≤ xInt := by dsimp only [xInt]; omega
+  have hxHi : xInt < 2 * (gamma1 : Int) - 1 := by dsimp only [xInt]; omega
+  let kNat : Nat := xInt.toNat
+  have hkCast : (kNat : Int) = xInt := Int.toNat_of_nonneg hx0
   have hkLt : kNat < 2 * gamma1 - 1 := by omega
   let targetIdx : Fin (2 * gamma1 - 1) := ⟨kNat, hkLt⟩
   have hiff : ∀ idx : Fin (2 * gamma1 - 1),
       (if maskCoordAt gamma1 idx + cs1 = zStar then 1 else 0) =
       (if idx = targetIdx then 1 else 0) := by
-    intro idx; unfold maskCoordAt; have hi := idx.isLt
+    intro idx; unfold maskCoordAt
     if hEq : idx = targetIdx then
-      rw [ite_true_of hEq, hEq]
-      have hMatch : Int.ofNat targetIdx.val - (Int.ofNat gamma1 - 1) + cs1 = zStar := by
-        dsimp only [targetIdx, kNat]; omega
-      rw [ite_true_of hMatch]
+      rw [ite_true hEq, hEq]
+      have hMatch : (targetIdx.val : Int) - ((gamma1 : Int) - 1) + cs1 = zStar := by
+        dsimp only [targetIdx]; rw [hkCast]; dsimp only [xInt]; omega
+      rw [ite_true hMatch]
     else
-      rw [ite_false_of hEq]
+      rw [ite_false hEq]
       have hValNe : idx.val ≠ kNat := fun hv => hEq (Fin.ext hv)
-      have hNeZ : Int.ofNat idx.val - (Int.ofNat gamma1 - 1) + cs1 ≠ zStar := by
-        intro hz; apply hValNe; dsimp only [kNat]; omega
-      rw [ite_false_of hNeZ]
+      have hNeZ : (idx.val : Int) - ((gamma1 : Int) - 1) + cs1 ≠ zStar := by
+        intro hz; apply hValNe
+        have hCastEq : (idx.val : Int) = (kNat : Int) := by
+          rw [hkCast]; dsimp only [xInt]; omega
+        exact Int.ofNat.inj hCastEq
+      rw [ite_false hNeZ]
   rw [finSum_congr hiff]
   exact finSum_eq_indicator (2 * gamma1 - 1) targetIdx
 
@@ -530,7 +558,7 @@ def unsealedEarlyW1AbortHit (cs1 : Int) (idx : Fin 9) : Bool :=
 
 def irwinHall2HitCount (cs1 zTarget : Int) : Nat :=
   finSum 5 (fun i => finSum 5 (fun j =>
-    if (Int.ofNat i.val - 2) + (Int.ofNat j.val - 2) + cs1 = zTarget then 1 else 0))
+    if ((i.val : Int) - 2) + ((j.val : Int) - 2) + cs1 = zTarget then 1 else 0))
 
 /-- **`#tooth` (`tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret`)**:
     Early `(w₁, reject)` opening (`unsealedEarlyW1AbortHit`) and unflooded 2-party Irwin-Hall
@@ -548,7 +576,7 @@ theorem tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret :
 theorem fips204_z_plateau_witness :
     ∃ (gamma1 beta : Nat) (cs1 zStar : Int),
       beta < gamma1 ∧
-      (-(Int.ofNat beta) ≤ cs1 ∧ cs1 ≤ Int.ofNat beta) ∧
+      (-((beta : Int)) ≤ cs1 ∧ cs1 ≤ (beta : Int)) ∧
       inOpenNormBox (gamma1 - beta) zStar = true :=
   ⟨5, 2, 1, 0, by decide, ⟨by decide, by decide⟩, by decide⟩
 
@@ -560,7 +588,8 @@ theorem threshold_mldsa_abort_zk_witness :
       (∀ stp ∈ steps, stp.failTag ≠ Fq204.zero) ∧
       (sealedTraceOutcomes chalHash sampleInBall A s1 s2 mu steps).length = steps.length := by
   refine ⟨(fun _ _ => []), (fun _ => PolyTree.zero 8), idMat4, rssZeroVec4, rssZeroVec4, [],
-    [{ y := rssZeroVec4, attempt := 0, keccakTraceBits := 0#256, failTag := Fq204.one }], ?_, rfl⟩
+    [{ y := rssZeroVec4, attempt := 0, keccakTraceBits := 0#256, failTag := Fq204.one }],
+    ?_, List.length_map _⟩
   intro s hs
   rcases List.mem_cons.mp hs with rfl | hNil
   · decide
@@ -649,7 +678,6 @@ def runRssSacrificedTrace
     let tail := runRssSacrificedTrace chalHash sampleInBall stNext rest
     (tail.1, out :: tail.2)
 
-/-- **Multi-Turn Distributed RSS Sacrifice Refinement (`rss_distributed_trace_refines_sacrificedSignStep`)**. -/
 theorem rss_distributed_trace_refines_sacrificedSignStep
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
     (sampleInBall : List UInt8 → Poly256) :
@@ -673,7 +701,7 @@ theorem rss_distributed_trace_refines_sacrificedSignStep
       | true =>
         cases rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
         | false => dsimp only; omega
-        | true => unfold rssSignCore mkRssSignAttemptOutcome; dsimp only; split <;> dsimp only <;> omega
+        | true => unfold rssSignCore mkRssSignAttemptOutcome; dsimp only; split <;> omega
     obtain ⟨hTailMono, hTailRef⟩ :=
       rss_distributed_trace_refines_sacrificedSignStep chalHash sampleInBall stNext rest
     refine ⟨Nat.le_trans hStepMono hTailMono, ?_⟩
@@ -692,7 +720,6 @@ theorem rss_distributed_trace_refines_sacrificedSignStep
         | true => right; left; rw [hv]; exact ⟨{ stCur with nextAttempt := stCur.nextAttempt + 1 }, rfl⟩
     · exact hTailRef turn hInRest stCur
 
-/-- **`(t, n)` Custodian Subset-Key PRSS -> PRF Hybrid Reduction (`rss_prss_choose_hybrid`)**. -/
 theorem rss_prss_choose_hybrid {O : Type} {N : Nat} (real ideal : Fin N → O)
     (n t : Nat) (D : List O → Bool) (ε : Nat) (hPRF : PrssSingleKeyBound real ideal D ε) :
     let numKeys := binomRec n (t - 1)

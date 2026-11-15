@@ -527,8 +527,9 @@ def PqHashParams.productionLeafIdxInRange (p : PqHashParams) (leafGlobalIdx : Na
   let capBits := if p.statefulJorts && decide (p.maxSigsLog2 < totalBits) then p.maxSigsLog2 else totalBits
   decide (leafGlobalIdx < 2 ^ capBits)
 
-/-- Exact canonical wire byte length of a `PqHashSig` (`PQ_WIRE_MAGIC` + body), matching
-    `PqHashParams::wire_sig_bytes` in `tsw_baggy.rs`. -/
+/-- Canonical wire byte length of a `PqHashSig` (`PQ_WIRE_MAGIC` + body): the value of
+    `PqHashParams::wire_sig_bytes_checked` in `tsw_baggy.rs` whenever that does not overflow
+    `usize` (where Rust's `wire_sig_bytes` returns `0`). -/
 def PqHashParams.wireSigBytes (p : PqHashParams) : Nat :=
   let forsBytes := if p.statefulJorts then 0 else p.forsTrees * (32 + p.forsHeight * 32)
   49 + forsBytes + p.numLayers * (4 + p.ell1 * 32 + p.subtreeHeight * 32)

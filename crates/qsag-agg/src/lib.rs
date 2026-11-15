@@ -49,10 +49,14 @@ pub mod pcs;
 mod pool;
 pub mod recursive;
 pub use recursive::{
-    HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, MAX_HIERARCHY_SHARDS, ShardHemBatch,
-    ShardHemPolicy, ShardHemWitness, checked_sum_usize, compute_framed_message_digest,
-    compute_policy_registry_root, encode_policy_registry, hierarchical_hem_message,
-    prove_hierarchical_hem, verify_hierarchical_hem,
+    HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, MAX_HIERARCHY_SHARDS,
+    OuterHemChainProof, PreparedPolicyRegistry, SUCCINCT_HIERARCHICAL_HEM_WIRE_MAGIC,
+    ShardHemBatch, ShardHemPolicy, ShardHemSummary, ShardHemWitness,
+    SuccinctHierarchicalHemAggregate, checked_sum_usize, compress_verified_hierarchical_hem,
+    compute_framed_message_digest, compute_policy_registry_root, encode_policy_registry,
+    hierarchical_hem_message, prove_hierarchical_hem, prove_succinct_hierarchical_hem,
+    verify_hierarchical_hem, verify_hierarchical_hem_prepared, verify_succinct_hierarchical_hem,
+    verify_succinct_hierarchical_hem_with_regime,
 };
 pub mod sig;
 pub mod sponge;
@@ -2546,8 +2550,8 @@ mod tests {
         assert_eq!(
             (hex32(&pcs_digest_1).as_str(), hex32(&agg_digest_1).as_str()),
             (
-                "8b28be2a1480275c9c05403f3a37d0291e1d51c3c1e610877ab981a348cf0ace",
-                "c5e42a034c3a0429f564465a8616fad933741e81f2cf6d30eb1a300a1106fc25"
+                "250a1144b28c462516b6c5adb1125a47137c538f299642842a9f9e204e2c616e",
+                "d5998ade6ef44dab60f96de623462562ee69d250c4a05f615ee94f85e405e0cf"
             )
         );
     }

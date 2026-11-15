@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """qsag-lean-repl: Zero-trust sub-250ms incremental Lean 4.35 server daemon."""
-import argparse, json, os, resource, socket, subprocess, sys, time
+import argparse, json, os, socket, subprocess, sys, time
 
 DEFAULT_LEAN = os.path.expanduser("~/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean")
 
@@ -13,12 +13,9 @@ class QsagLeanSession:
         env = os.environ.copy()
         bdir = os.path.join(self.repo, ".lake", "build", "lib", "lean")
         env["LEAN_PATH"] = bdir + (":" + env["LEAN_PATH"] if env.get("LEAN_PATH") else "")
-        limit_bytes = rss_gb * 1024 * 1024 * 1024
-        def _preexec():
-            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
         self.proc = subprocess.Popen(
-            [lean_bin, "-Dexperimental.module=true", "-DautoImplicit=false", "--server"],
-            cwd=self.repo, env=env, preexec_fn=_preexec,
+            [lean_bin, "-M", str(rss_gb * 1024), "-Dexperimental.module=true", "-DautoImplicit=false", "--server"],
+            cwd=self.repo, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         self.seq = 0
@@ -130,13 +127,17 @@ def serve(sock_path: str, repo: str) -> None:
     sess = QsagLeanSession(repo)
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
-    srv.listen(8)
+    os.chmod(sock_path, 0o660)
+    srv.listen(16)
     while True:
         conn, _ = srv.accept()
         with conn:
-            req = json.loads(conn.makefile("r", encoding="utf-8").readline())
-            cmd = req["cmd"]
-            out = sess.mount(**req["args"]) if cmd == "mount" else sess.eval_snippet(**req["args"])
+            try:
+                req = json.loads(conn.makefile("r", encoding="utf-8").readline())
+                cmd = req["cmd"]
+                out = sess.mount(**req["args"]) if cmd == "mount" else sess.eval_snippet(**req["args"])
+            except Exception as exc:
+                out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             conn.sendall((json.dumps(out) + "\n").encode("utf-8"))
 
 if __name__ == "__main__":

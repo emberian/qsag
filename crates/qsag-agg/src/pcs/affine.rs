@@ -159,10 +159,39 @@ pub(super) fn bridge_finish(
     claim: E,
     phi: E,
     tr: &mut FiatShamirTranscript<InstanceBound>,
-) -> (E, [E; 3]) {
+) -> (u64, E, [E; 3]) {
     for &v in &wire[3..] {
         tr.absorb_ext4(b"WHIR_AFFINE_SHIFT", v);
     }
+    let fold_pow_nonce = super::grind_pcs_pow(tr);
+    tr.absorb(b"WHIR_FOLD_POW", &fold_pow_nonce.to_le_bytes());
+    let (next, chals) = bridge_squeeze_challenges(wire, claim, phi, tr);
+    (fold_pow_nonce, next, chals)
+}
+
+pub(super) fn bridge_verify_finish(
+    wire: &[E; 5],
+    fold_pow_nonce: u64,
+    claim: E,
+    phi: E,
+    tr: &mut FiatShamirTranscript<InstanceBound>,
+) -> Option<(E, [E; 3])> {
+    for &v in &wire[3..] {
+        tr.absorb_ext4(b"WHIR_AFFINE_SHIFT", v);
+    }
+    if !super::verify_pcs_pow(tr, fold_pow_nonce) {
+        return None;
+    }
+    tr.absorb(b"WHIR_FOLD_POW", &fold_pow_nonce.to_le_bytes());
+    Some(bridge_squeeze_challenges(wire, claim, phi, tr))
+}
+
+fn bridge_squeeze_challenges(
+    wire: &[E; 5],
+    claim: E,
+    phi: E,
+    tr: &mut FiatShamirTranscript<InstanceBound>,
+) -> (E, [E; 3]) {
     let theta = tr.squeeze_ext4(b"WHIR_AFFINE_THETA");
     let alpha = tr.squeeze_ext4(b"WHIR_AFFINE_ALPHA");
     let beta = tr.squeeze_ext4(b"WHIR_AFFINE_BETA");
@@ -188,7 +217,7 @@ pub(super) fn prove_fold_in_place(
     k_scratch: &mut Vec<E>,
     claim: &mut E,
     tr: &mut FiatShamirTranscript<InstanceBound>,
-) -> ([E; 5], [E; 3]) {
+) -> ([E; 5], u64, [E; 3]) {
     let _phase = crate::profile::span("prove_affine_fold");
     let mut wire = [E::ZERO; 5];
     let pairs_ck = (c.len() / 2).min(k.len() / 2);
@@ -292,12 +321,12 @@ pub(super) fn prove_fold_in_place(
         wire[4] = p[1];
     }
 
-    let (next, chals) = bridge_finish(&wire, *claim, phi, tr);
+    let (fold_pow_nonce, next, chals) = bridge_finish(&wire, *claim, phi, tr);
     *claim = next;
     fold_coeffs_into(c, chals, c_scratch);
     core::mem::swap(c, c_scratch);
     debug_assert_eq!(dot_ext4_fast(c, k), next);
-    (wire, chals)
+    (wire, fold_pow_nonce, chals)
 }
 
 #[cfg(test)]
@@ -306,7 +335,7 @@ pub(super) fn prove_fold(
     k: &mut Vec<E>,
     claim: &mut E,
     tr: &mut FiatShamirTranscript<InstanceBound>,
-) -> ([E; 5], [E; 3]) {
+) -> ([E; 5], u64, [E; 3]) {
     let mut c_scratch = Vec::new();
     let mut k_scratch = Vec::new();
     prove_fold_in_place(c, k, &mut c_scratch, &mut k_scratch, claim, tr)
@@ -381,40 +410,96 @@ pub(super) fn combine_claims(weights: &[[E; 2]], evals: &[E], shifts: &[E]) -> E
 }
 
 /// Deferred tensor kernel, including the two explicit overflow weights.
+///
+/// Base-field geometric shift claims (`z in F_p`, `vars >= 1`) are stored compactly in 48 bytes
+/// without allocating a `Vec<E>`, eliminating ~1,000 heap allocations per `whir_verify_batch`.
 #[derive(Clone)]
-pub(super) struct KernelClaim {
-    pub offset: usize,
-    pub weight: E,
-    pub point: Vec<E>,
-    pub overflow: [E; 2],
+pub(super) enum KernelClaim {
+    BaseGeometric {
+        offset: u16,
+        vars: u16,
+        weight: E,
+        z: Goldilocks,
+    },
+    Point {
+        offset: usize,
+        weight: E,
+        point: Vec<E>,
+        overflow: [E; 2],
+    },
 }
+
 impl KernelClaim {
+    #[inline]
+    pub fn initial(point: Vec<E>) -> Self {
+        Self::Point {
+            offset: 0,
+            weight: E::ONE,
+            point,
+            overflow: [E::ZERO; 2],
+        }
+    }
+
+    #[inline]
     pub fn evaluation(offset: usize, weight: E, z: E, vars: usize) -> Self {
+        if vars >= 1
+            && offset <= u16::MAX as usize
+            && vars <= u16::MAX as usize
+            && z.c0.c1 == Goldilocks::ZERO
+            && z.c1 == crate::field::GoldilocksExt2::ZERO
+        {
+            return Self::BaseGeometric {
+                offset: offset as u16,
+                vars: vars as u16,
+                weight,
+                z: z.c0.c0,
+            };
+        }
         let point = pow2_point_ext4(z, vars);
         let zn = point.last().copied().unwrap_or(z).square();
-        Self {
+        Self::Point {
             offset,
             weight,
             point,
             overflow: [zn, zn * z],
         }
     }
+
+    #[cfg(test)]
+    fn expand_for_test(&self) -> (usize, E, Vec<E>, [E; 2]) {
+        match self {
+            &Self::BaseGeometric {
+                offset,
+                vars,
+                weight,
+                z,
+            } => {
+                let z_ext = E::from_base(z);
+                let point = pow2_point_ext4(z_ext, vars as usize);
+                let zn = point.last().copied().unwrap_or(z_ext).square();
+                (offset as usize, weight, point, [zn, zn * z_ext])
+            }
+            Self::Point {
+                offset,
+                weight,
+                point,
+                overflow,
+            } => (*offset, *weight, point.clone(), *overflow),
+        }
+    }
 }
 
-/// Claims contracted per pool work item in [`terminal_sum`] when very large claim sets arise.
+/// Claims contracted per pool work item in [`terminal_sum`] / [`terminal_sum_owned`].
 #[cfg(feature = "std")]
-const TERMINAL_CLAIM_CHUNK: usize = 128;
+const TERMINAL_CLAIM_CHUNK: usize = 64;
 
-pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
+pub(super) fn terminal_sum_owned(phis: &[E], early: usize, claims: Vec<KernelClaim>, c: &[E]) -> E {
     let _phase = crate::profile::span("verify_terminal_sum");
     #[cfg(feature = "std")]
-    if claims.len() >= 16 * TERMINAL_CLAIM_CHUNK
-        && crate::active_scoped_workers() == 0
-        && crate::parallel_workers() > 1
-    {
-        // The contraction is linear in the claims, so chunks are summed independently.
+    if claims.len() >= 3 * TERMINAL_CLAIM_CHUNK && crate::parallel_workers() > 1 {
+        // Move `claims` into an `Arc` without cloning any inner `Vec<E>`.
         let phis: alloc::sync::Arc<[E]> = phis.into();
-        let claims: alloc::sync::Arc<[KernelClaim]> = claims.into();
+        let claims = alloc::sync::Arc::new(claims);
         let c: alloc::sync::Arc<[E]> = c.into();
         let chunks = claims.len().div_ceil(TERMINAL_CLAIM_CHUNK);
         return crate::pool::map_indices(chunks, 1, move |i| {
@@ -425,7 +510,12 @@ pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: 
         .into_iter()
         .fold(E::ZERO, |a, b| a + b);
     }
-    terminal_sum_serial(phis, early, claims, c)
+    terminal_sum_serial(phis, early, &claims, c)
+}
+
+#[cfg(test)]
+pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
+    terminal_sum_owned(phis, early, claims.to_vec(), c)
 }
 
 #[inline]
@@ -465,84 +555,130 @@ fn terminal_sum_serial(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]
     let mut total = E::ZERO;
 
     for claim in claims {
-        let prefix = phis.len() - claim.offset;
-        assert!(claim.point.len() == prefix + early);
-        let (head, tail) = claim.point.split_at(prefix);
-        let mut scale = claim.weight;
-        let base_point = claim
-            .point
-            .iter()
-            .all(|r| r.c0.c1 == Goldilocks::ZERO && r.c1 == crate::field::GoldilocksExt2::ZERO);
+        match claim {
+            &KernelClaim::BaseGeometric {
+                offset,
+                vars,
+                weight,
+                z,
+            } => {
+                let offset = offset as usize;
+                let prefix = phis.len() - offset;
+                assert!(vars as usize == prefix + early);
+                let mut cur = z;
+                let mut scale = weight;
+                for &phi in &phis[offset..offset + prefix] {
+                    scale *= E::ONE + phi.mul_base(cur);
+                    cur = cur.square();
+                }
+                let tail0 = cur;
+                for _ in 0..early {
+                    cur = cur.square();
+                }
+                let zn = cur;
+                let zn_z = zn * z;
+                if prefix == 0 {
+                    total += weight * (c[n].mul_base(zn) + c[n + 1].mul_base(zn_z));
+                } else {
+                    total += weight * (E::from_base(zn) + phis[offset].mul_base(zn_z)) * c[n];
+                }
+                if early == 0 {
+                    total += scale * c[0];
+                } else {
+                    horner_batch[horner_len] = (scale, tail0);
+                    horner_len += 1;
+                    if horner_len == 4 {
+                        total += flush_horner_batch_4(c_core, &horner_batch);
+                        horner_len = 0;
+                    }
+                }
+            }
+            KernelClaim::Point {
+                offset,
+                weight,
+                point,
+                overflow,
+            } => {
+                let offset = *offset;
+                let weight = *weight;
+                let prefix = phis.len() - offset;
+                assert!(point.len() == prefix + early);
+                let (head, tail) = point.split_at(prefix);
+                let mut scale = weight;
+                let base_point = point.iter().all(|r| {
+                    r.c0.c1 == Goldilocks::ZERO && r.c1 == crate::field::GoldilocksExt2::ZERO
+                });
 
-        if prefix == 0 {
-            total += claim.weight * (claim.overflow[0] * c[n] + claim.overflow[1] * c[n + 1]);
-        } else {
-            total +=
-                claim.weight * (claim.overflow[0] + phis[claim.offset] * claim.overflow[1]) * c[n];
-        }
+                if prefix == 0 {
+                    total += weight * (overflow[0] * c[n] + overflow[1] * c[n + 1]);
+                } else {
+                    total += weight * (overflow[0] + phis[offset] * overflow[1]) * c[n];
+                }
 
-        if base_point {
-            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
-                scale *= E::ONE + phi.mul_base(r.c0.c0);
-            }
-            if early == 0 {
-                total += scale * c[0];
-                continue;
-            }
-            if tail.windows(2).all(|w| w[0].c0.c0.square() == w[1].c0.c0) {
-                horner_batch[horner_len] = (scale, tail[0].c0.c0);
-                horner_len += 1;
-                if horner_len == 4 {
-                    total += flush_horner_batch_4(c_core, &horner_batch);
-                    horner_len = 0;
+                if base_point {
+                    for (&r, &phi) in head.iter().zip(&phis[offset..]) {
+                        scale *= E::ONE + phi.mul_base(r.c0.c0);
+                    }
+                    if early == 0 {
+                        total += scale * c[0];
+                        continue;
+                    }
+                    if tail.windows(2).all(|w| w[0].c0.c0.square() == w[1].c0.c0) {
+                        horner_batch[horner_len] = (scale, tail[0].c0.c0);
+                        horner_len += 1;
+                        if horner_len == 4 {
+                            total += flush_horner_batch_4(c_core, &horner_batch);
+                            horner_len = 0;
+                        }
+                        continue;
+                    }
+                    let buf: &mut [E] = if half_n <= stack_buf.len() {
+                        &mut stack_buf[..half_n]
+                    } else {
+                        &mut heap_buf[..half_n]
+                    };
+                    let top = tail[early - 1].c0.c0;
+                    for (i, slot) in buf.iter_mut().enumerate() {
+                        *slot = c[i] + c[i + half_n].mul_base(top);
+                    }
+                    let mut width = half_n;
+                    for r in tail[..early - 1].iter().rev() {
+                        width /= 2;
+                        let r = r.c0.c0;
+                        let (lo, hi) = buf[..2 * width].split_at_mut(width);
+                        for (l, &h) in lo.iter_mut().zip(hi.iter()) {
+                            *l += h.mul_base(r);
+                        }
+                    }
+                    total += scale * buf[0];
+                } else {
+                    for (&r, &phi) in head.iter().zip(&phis[offset..]) {
+                        scale *= E::ONE + phi * r;
+                    }
+                    if early == 0 {
+                        total += scale * c[0];
+                        continue;
+                    }
+                    let buf: &mut [E] = if half_n <= stack_buf.len() {
+                        &mut stack_buf[..half_n]
+                    } else {
+                        &mut heap_buf[..half_n]
+                    };
+                    let top = tail[early - 1];
+                    for (i, slot) in buf.iter_mut().enumerate() {
+                        *slot = c[i] + c[i + half_n] * top;
+                    }
+                    let mut width = half_n;
+                    for &r in tail[..early - 1].iter().rev() {
+                        width /= 2;
+                        let (lo, hi) = buf[..2 * width].split_at_mut(width);
+                        for (l, &h) in lo.iter_mut().zip(hi.iter()) {
+                            *l += h * r;
+                        }
+                    }
+                    total += scale * buf[0];
                 }
-                continue;
             }
-            let buf: &mut [E] = if half_n <= stack_buf.len() {
-                &mut stack_buf[..half_n]
-            } else {
-                &mut heap_buf[..half_n]
-            };
-            let top = tail[early - 1].c0.c0;
-            for (i, slot) in buf.iter_mut().enumerate() {
-                *slot = c[i] + c[i + half_n].mul_base(top);
-            }
-            let mut width = half_n;
-            for r in tail[..early - 1].iter().rev() {
-                width /= 2;
-                let r = r.c0.c0;
-                let (lo, hi) = buf[..2 * width].split_at_mut(width);
-                for (l, &h) in lo.iter_mut().zip(hi.iter()) {
-                    *l += h.mul_base(r);
-                }
-            }
-            total += scale * buf[0];
-        } else {
-            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
-                scale *= E::ONE + phi * r;
-            }
-            if early == 0 {
-                total += scale * c[0];
-                continue;
-            }
-            let buf: &mut [E] = if half_n <= stack_buf.len() {
-                &mut stack_buf[..half_n]
-            } else {
-                &mut heap_buf[..half_n]
-            };
-            let top = tail[early - 1];
-            for (i, slot) in buf.iter_mut().enumerate() {
-                *slot = c[i] + c[i + half_n] * top;
-            }
-            let mut width = half_n;
-            for &r in tail[..early - 1].iter().rev() {
-                width /= 2;
-                let (lo, hi) = buf[..2 * width].split_at_mut(width);
-                for (l, &h) in lo.iter_mut().zip(hi.iter()) {
-                    *l += h * r;
-                }
-            }
-            total += scale * buf[0];
         }
     }
 
@@ -609,20 +745,21 @@ mod tests {
         }
         let mut k = vec![E::ZERO; n + 2];
         for claim in &claims {
-            let prefix = phis.len() - claim.offset;
-            let mut scale = claim.weight;
-            for (&r, &phi) in claim.point.iter().zip(&phis[claim.offset..]) {
+            let (offset, weight, point, overflow) = claim.expand_for_test();
+            let prefix = phis.len() - offset;
+            let mut scale = weight;
+            for (&r, &phi) in point.iter().zip(&phis[offset..]) {
                 scale *= E::ONE + phi * r;
             }
-            let suffix = monomial_table(&claim.point[prefix..]);
+            let suffix = monomial_table(&point[prefix..]);
             for (v, &w) in k[..n].iter_mut().zip(&suffix) {
                 *v += scale * w;
             }
             if prefix == 0 {
-                k[n] += claim.weight * claim.overflow[0];
-                k[n + 1] += claim.weight * claim.overflow[1];
+                k[n] += weight * overflow[0];
+                k[n + 1] += weight * overflow[1];
             } else {
-                k[n] += claim.weight * (claim.overflow[0] + phis[claim.offset] * claim.overflow[1]);
+                k[n] += weight * (overflow[0] + phis[offset] * overflow[1]);
             }
         }
         assert_eq!(
@@ -705,12 +842,7 @@ mod tests {
         let mut k = monomial_table(&point);
         let mut c: Vec<_> = (0..k.len()).map(|i| sample(i + 10)).collect();
         let mut claim = dot_ext4_fast(&c, &k);
-        let mut claims = vec![KernelClaim {
-            offset: 0,
-            weight: E::ONE,
-            point,
-            overflow: [E::ZERO; 2],
-        }];
+        let mut claims = vec![KernelClaim::initial(point)];
         let mut phis = Vec::new();
         let mut tr = transcript();
         let mut replay = transcript();
@@ -723,9 +855,11 @@ mod tests {
                 claims.push(KernelClaim::evaluation(offset, weight, z, nv - offset));
             }
             let previous_claim = claim;
-            let (wire, _) = prove_fold(&mut c, &mut k, &mut claim, &mut tr);
+            let (wire, fold_pow_nonce, _) = prove_fold(&mut c, &mut k, &mut claim, &mut tr);
             let phi = bridge_prefix(&wire, &mut replay);
-            let (replayed, _) = bridge_finish(&wire, previous_claim, phi, &mut replay);
+            let (replayed, _) =
+                bridge_verify_finish(&wire, fold_pow_nonce, previous_claim, phi, &mut replay)
+                    .unwrap();
             assert_eq!(replayed, claim);
             phis.push(phi);
             assert_eq!(claim, terminal_sum(&phis, nv - offset - 1, &claims, &c));
@@ -782,6 +916,14 @@ mod tests {
                     bad.opening.fold_sumcheck_polys[round][i] += E::V;
                     assert!(!check(&bad));
                 }
+                let mut bad = proof.clone();
+                bad.opening.fold_pow_nonces[round] ^= 1;
+                assert!(!check(&bad));
+            }
+            {
+                let mut bad = proof.clone();
+                bad.batch_pow_nonce ^= 1;
+                assert!(!check(&bad));
             }
             for i in 0..2 {
                 let mut bad = proof.clone();

@@ -174,9 +174,7 @@ impl PolicySignerGuardShare {
             }
             None
         };
-        if nonce_floor.is_some()
-            || session_floor.is_some()
-            || nonce_cursor != 0
+        if nonce_cursor != 0
             || session_cursor != 0
             || nonces.windows(2).any(|w| w[0] >= w[1])
             || sessions.windows(2).any(|w| w[0] >= w[1])
@@ -358,7 +356,11 @@ impl FsPolicyDurableLedger {
         ct_zeroize_bytes(&mut key);
         let key = qsag_accel::ct::RedactedSecret::new(derived);
         let generation = guard
-            .restore_from_durable_checkpoint(&record.read()?, key.expose(), min_generation)
+            .restore_from_durable_checkpoint(
+                &record.read_bounded(64 * 1024)?,
+                key.expose(),
+                min_generation,
+            )
             .map_err(|_| std::io::Error::other("invalid policy checkpoint"))?;
         Ok(Self {
             path,
@@ -447,7 +449,7 @@ impl FsPolicyGenerationFence {
         let derived = cshake256_framed_32(Self::DOMAIN, &[&key, &lock_id, &record.lock_seal()]);
         ct_zeroize_bytes(&mut key);
         let key = qsag_accel::ct::RedactedSecret::new(derived);
-        let raw = record.read()?;
+        let raw = record.read_bounded(40)?;
         let generation = Self::decode(key.expose(), &lock_id, &record.lock_seal(), &raw)?;
         Ok(Self {
             path,
@@ -489,7 +491,7 @@ impl FsPolicyGenerationFence {
             self.key.expose(),
             &self.lock_id,
             &self.record.lock_seal(),
-            &self.record.read()?,
+            &self.record.read_bounded(40)?,
         )?;
         if disk_gen != self.generation || next_generation < self.generation {
             return Err(std::io::Error::other("policy generation fence rollback"));
@@ -626,8 +628,7 @@ impl SharedWindowSpendLedger {
                 return Err(PolicyGuardError::InvalidCheckpoint);
             }
             let floor = present.then_some(raw);
-            if floor.is_some()
-                || values.windows(2).any(|w| w[0] >= w[1])
+            if values.windows(2).any(|w| w[0] >= w[1])
                 || values.iter().any(|v| floor.is_some_and(|f| *v <= f))
             {
                 return Err(PolicyGuardError::InvalidCheckpoint);
