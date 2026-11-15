@@ -124,7 +124,7 @@ def relocation_overlaps(location, width, start, size):
 
 def fixtures(generation='current'):
     """Extract symbol bytes from the selected compiled archive literal."""
-    text = (ROOT/'lean/Qsag/CompiledRlibFixtures.lean').read_text()
+    text = (ROOT/'lean/Qsag/Machine/CompiledRlibFixtures.lean').read_text()
     result = {}
     for arch in ('x86', 'aarch64'):
         if generation == 'current':
@@ -358,11 +358,11 @@ def emit_lean(machine, code, generation="current"):
         require(fixtures('current').get(symbol) == (machine, code),
                 'no proved fresh certificate template for these bytes')
         theorem = 'current_ct_memzero_' + arch + '_mc_refines'
-        source = (ROOT/'lean/Qsag/McRefine.lean').read_text()
+        source = (ROOT/'lean/Qsag/Machine/McRefine.lean').read_text()
         statement = source.split('theorem ' + theorem, 1)[1].split(' := by', 1)[0]
         collection = 'currentX86ExtractedSlices' if machine == 62 else 'currentAarch64ExtractedSlices'
         literal = literal_brackets(', '.join(f'0x{x:02x}' for x in code))
-        return ('module\npublic import Qsag.McRefine\npublic section\nopen Qsag\n'
+        return ('module\npublic import Qsag.Machine.McRefine\npublic section\nopen Qsag\n'
                 'namespace Qsag.SydTv.Generated\n'
                 f'theorem extracted_bytes : ({collection}[{index}]).code = '
                 f'({literal} : List UInt8) := by decide +kernel\n'
@@ -372,7 +372,7 @@ def emit_lean(machine, code, generation="current"):
             'no proved certificate template for these bytes')
     literal = ', '.join(f'0x{x:02x}' for x in code)
     header = f'''module
-public import Qsag.SydTvTranslationValidation
+public import Qsag.Machine.SydTvTranslationValidation
 public section
 namespace Qsag.SydTv.Generated
 -- Proposed by untrusted Python; every proof is checked by the Lean kernel.

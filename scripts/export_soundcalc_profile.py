@@ -2,7 +2,7 @@
 """Export the Hem WHIR PCS soundness profile in `ethereum/soundcalc` style.
 
 Covers both aggregate signature profiles (`JortsPoseidon2`, `CorduroyPoseidon2`) under the
-default `BciksJohnsonQrom128` schedule for `num_vars = 14..24`, over Goldilocks^4.
+default `BciksJohnsonQrom128` schedule for `num_vars = 14..28`, over Goldilocks^4.
 
 Two accountings are reported side by side, both in exact rational arithmetic (every blowup is
 a power of four, so sqrt(rho) is rational; no floating point enters any bit count):
@@ -48,10 +48,11 @@ PCS_POW_BITS = 16
 PCS_FOLD_POW_BITS = 16
 OOD_SAMPLES = 2
 MAX_BATCH_POLYS = 16
-MAX_PCS_NUM_VARS = 24
+MAX_PCS_NUM_VARS = 28
+LEAN_CERTIFIED_MAX_NUM_VARS = 24  # `hemJohnsonQromWitnessTable` stops here
 LOG_TRACE_COLS = 8
 HASH_SIZE_BITS = 256  # cSHAKE256 Merkle digests
-NUM_VARS_RANGE = range(14, 25)
+NUM_VARS_RANGE = range(14, MAX_PCS_NUM_VARS + 1)
 ROWS_PER_SIGNER = {"JortsPoseidon2": 512, "CorduroyPoseidon2": 8192}
 
 # Verbatim copy of `crates/qsag-agg/src/pcs/affine_schedule.rs::WITNESSES`:
@@ -74,6 +75,18 @@ WITNESSES = [
     (24, 2, 17484, 16, 5228), (24, 3, 4482, 16, 2067),
 ]
 
+# Verbatim copy of `affine_schedule.rs::HIGH_CAPACITY_WITNESSES` (`num_vars = 25..28`). `--verify`
+# checks it against the Rust source. These rows have no Lean certificate; every circuit reports
+# `lean_witness_table` so the two populations are never merged silently.
+HIGH_CAPACITY_WITNESSES = [
+    (25, 0, 1054283, 128, 6353), (25, 1, 133941, 32, 1732), (25, 2, 17483, 16, 586),
+    (25, 3, 4482, 16, 1049), (26, 0, 2108508, 128, 6359), (26, 1, 133940, 32, 1734),
+    (26, 2, 17483, 16, 586), (26, 3, 4482, 16, 1049), (27, 0, 4216959, 128, 6361),
+    (27, 1, 267837, 32, 1724), (27, 2, 34932, 16, 581), (27, 3, 4481, 16, 1056),
+    (28, 0, 8433861, 128, 6362), (28, 1, 267836, 32, 1724), (28, 2, 34932, 16, 581),
+    (28, 3, 4481, 16, 1056),
+]
+
 INF = None  # an error of exactly zero (exhaustively queried stage)
 
 
@@ -86,7 +99,7 @@ def qrom_min_queries(log_b: int) -> int:
 
 
 def stage_geometry(nv: int) -> tuple[int, list[tuple[int, int]]]:
-    """(early_stop_vars, [(blowup, step_vars), ...]) for `2 <= nv <= 24`."""
+    """(early_stop_vars, [(blowup, step_vars), ...]) for `2 <= nv <= 28`."""
     if not 2 <= nv <= MAX_PCS_NUM_VARS:
         raise ValueError(f"unsupported num_vars={nv}")
     if nv <= 6:
@@ -110,6 +123,10 @@ def stage_geometry(nv: int) -> tuple[int, list[tuple[int, int]]]:
         22: (8, [(4, 6), (16, 4), (64, 4)]),
         23: (7, [(4, 6), (16, 4), (64, 3), (256, 3)]),
         24: (8, [(4, 6), (16, 4), (64, 3), (256, 3)]),
+        25: (8, [(4, 6), (16, 4), (64, 4), (256, 3)]),
+        26: (8, [(4, 6), (16, 5), (64, 4), (256, 3)]),
+        27: (8, [(4, 6), (16, 5), (64, 4), (256, 4)]),
+        28: (8, [(4, 6), (16, 6), (64, 4), (256, 4)]),
     }[nv]
 
 
@@ -199,7 +216,8 @@ def exact_witness_stage(nv: int, st: dict) -> dict:
     """Exact re-derivation of the deployed `finite_johnson_witnesses_cover_every_canonical_stage`."""
     if st["exhaustive"]:
         return {"witness": None, "checks": {}, "errors": {"query": None, "combiner": None}}
-    row = next((w for w in WITNESSES if w[0] == nv and w[1] == st["stage"]), None)
+    row = next((w for w in WITNESSES + HIGH_CAPACITY_WITNESSES
+                if w[0] == nv and w[1] == st["stage"]), None)
     if row is None:
         raise AssertionError(f"missing finite affine witness nv={nv} stage={st['stage']}")
     _, _, a, m, big_d = row
@@ -314,6 +332,7 @@ def circuit(profile: str, nv: int, m_choice: str, batch: int) -> dict:
         "batch_polys": batch,
         "jbr": jbr_rows,
         "exact_witness": {"stages": exact_stages, **summarize(exact_rounds),
+                          "lean_witness_table": nv <= LEAN_CERTIFIED_MAX_NUM_VARS,
                           "all_checks_pass": all(all(s["checks"].values()) for s in exact_stages)},
     }
 
@@ -434,9 +453,13 @@ def verify(root: Path) -> None:
             keys.add((nv, st["stage"]))
             ex = exact_witness_stage(nv, st)
             check(all(ex["checks"].values()), f"exact witness nv={nv} stage={st['stage']}")
-    check(geometry_ok, "stage geometry invariants for num_vars 2..24")
-    check(seen == len(WITNESSES) == 46 and keys == {(w[0], w[1]) for w in WITNESSES},
-          "every non-exhaustive canonical stage has exactly one witness (46)")
+    check(geometry_ok, "stage geometry invariants for num_vars 2..28")
+    every = WITNESSES + HIGH_CAPACITY_WITNESSES
+    check(len(WITNESSES) == 46 and len(HIGH_CAPACITY_WITNESSES) == 16
+          and all(w[0] <= LEAN_CERTIFIED_MAX_NUM_VARS for w in WITNESSES)
+          and all(w[0] > LEAN_CERTIFIED_MAX_NUM_VARS for w in HIGH_CAPACITY_WITNESSES)
+          and seen == len(every) and keys == {(w[0], w[1]) for w in every},
+          "every non-exhaustive canonical stage has exactly one witness (46 Lean-backed + 16 Rust-only)")
     check(FIELD_SIZE > 127**2 * 2**242 and FIELD_SIZE > 2000 * 2**245,
           "p^4 > 2000 * 2^245 (combiner bits > 245)")
 
@@ -447,24 +470,32 @@ def verify(root: Path) -> None:
         rust = rust_path.read_text().split("const WITNESSES:", 1)[1].split("];", 1)[0]
         rows = [tuple(int(x) for x in r) for r in re.findall(pattern, rust)]
         check(rows == table, "embedded witness table matches affine_schedule.rs")
+        rust = rust_path.read_text().split("const HIGH_CAPACITY_WITNESSES:", 1)[1].split("];", 1)[0]
+        rows = [tuple(int(x) for x in r) for r in re.findall(pattern, rust)]
+        check(rows == [tuple(w) for w in HIGH_CAPACITY_WITNESSES],
+              "embedded high-capacity witness table matches affine_schedule.rs")
     else:
         check(False, f"missing {rust_path}")
-    lean_path = root / "lean/Qsag/AffineProximityGaps.lean"
+    lean_path = root / "lean/Qsag/Coding/AffineProximityGaps.lean"
     if lean_path.exists():
         lean = lean_path.read_text().split("def hemJohnsonQromWitnessTable :", 1)[1]
         lean = lean.split("def hemJohnsonQromTableRow", 1)[0]
         rows = [tuple(int(x) for x in r) for r in re.findall(pattern, lean)]
         check(rows == table, "embedded witness table matches hemJohnsonQromWitnessTable")
+    else:
+        check(False, f"missing {lean_path}")
     pcs_path = root / "crates/qsag-agg/src/pcs.rs"
     affine_path = root / "crates/qsag-agg/src/pcs/affine.rs"
+    trace_path = root / "crates/qsag-agg/src/trace.rs"
+    for required in (pcs_path, affine_path, trace_path):
+        check(required.exists(), f"source cross-check input exists: {required.relative_to(root)}")
     if pcs_path.exists() and affine_path.exists():
         pcs = pcs_path.read_text()
         affine = affine_path.read_text()
         check("512usize.div_ceil(log_b) + 2" in pcs and "PCS_POW_BITS: u32 = 16" in pcs
-              and "MAX_PCS_NUM_VARS: usize = 24" in pcs
+              and f"MAX_PCS_NUM_VARS: usize = {MAX_PCS_NUM_VARS}" in pcs
               and "PCS_BATCH_POW" in pcs and "WHIR_FOLD_POW" in affine,
               "pcs.rs + pcs/affine.rs query budget, fold/batch/query PoW and num_vars cap match")
-    trace_path = root / "crates/qsag-agg/src/trace.rs"
     if trace_path.exists():
         trace = trace_path.read_text()
         check("JortsPoseidon2 => 512" in trace and "CorduroyPoseidon2 => 8192" in trace
@@ -475,8 +506,8 @@ def verify(root: Path) -> None:
     check(to_json(doc) == to_json(build("best", MAX_BATCH_POLYS)), "deterministic JSON output")
     reach = {p: [c["num_vars"] for c in doc["circuits"]
                  if c["profile"] == p and c["reachable_by_profile"]] for p in ROWS_PER_SIGNER}
-    check(reach == {"JortsPoseidon2": list(range(18, 25)), "CorduroyPoseidon2": [22, 23, 24]},
-          "profile reachability (Jorts 18..24, Corduroy 22..24)")
+    check(reach == {"JortsPoseidon2": list(range(18, 29)), "CorduroyPoseidon2": list(range(22, 29))},
+          "profile reachability (Jorts 18..28, Corduroy 22..28)")
     ex_stages = [s for c in doc["circuits"] for s in c["exact_witness"]["stages"]
                  if s["witness"] is not None]
     check(all(s["query_bits"] >= 256 + PCS_POW_BITS for s in ex_stages),

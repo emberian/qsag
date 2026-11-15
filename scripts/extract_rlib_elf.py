@@ -7,9 +7,9 @@ Usage:
   1. Standalone CLI inspection & constant-time verification on any compiled `.rlib`:
        python3 scripts/extract_rlib_elf.py --verify path/to/libqsag_asm.rlib
 
-  2. Deterministic generation of `lean/Qsag/CompiledRlibFixtures.lean`:
+  2. Deterministic generation of `lean/Qsag/Machine/CompiledRlibFixtures.lean`:
        python3 scripts/extract_rlib_elf.py \
-         --generate-lean lean/Qsag/CompiledRlibFixtures.lean \
+         --generate-lean lean/Qsag/Machine/CompiledRlibFixtures.lean \
          --x86-rlib path/to/x86_64/libqsag_asm.rlib \
          --aarch64-rlib path/to/aarch64/libqsag_asm.rlib
 """
@@ -612,7 +612,7 @@ def generate_lean_fixtures(out_path: Path, x86_rlib: Path, aarch64_rlib: Path) -
 
     lean_src = f"""module
 /-
-# Qsag.CompiledRlibFixtures — Real `rustc --release` `.rlib` / `ELF64` Machine-Code Fixtures
+# Qsag.Machine.CompiledRlibFixtures — Real `rustc --release` `.rlib` / `ELF64` Machine-Code Fixtures
 
 Auto-generated deterministically by `scripts/extract_rlib_elf.py` from real `cargo build -p qsag-asm --release`
 artifacts (workspace release profile with LTO disabled, `--target x86_64-unknown-linux-gnu` and
