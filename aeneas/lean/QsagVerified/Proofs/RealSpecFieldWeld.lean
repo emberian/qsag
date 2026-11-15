@@ -15,14 +15,16 @@ Imports `QsagVerified.Funs` (through the proof modules) and the `Qsag` specifica
 the `qsag` Lake package (`aeneas/lean/lakefile.toml`); nothing in `qsag` imports the extraction.
 
 Contents: `extractedPartyMachine`, which views an extracted step function as a
-`Qsag.PartyMachine` with no intermediate model, and refinement theorems from the extracted
+`Qsag.PartyMachine` with no intermediate model; `ExtractedStepRefines`, the exact-step statement
+every guard weld proves, with its lockstep `ForwardSim`; and refinement theorems from the extracted
 `goldilocks_add`, `goldilocks_sub` and `goldilocks_mul` to `Qsag.Goldilocks.add`, `.sub`, `.mul`.
 These statements concern the extracted verified-crate functions. Production's distinct
 wrapping/overflowing arithmetic is not extracted here; a Cargo dependency alone does not
 transfer these theorems to that implementation. KoalaBear has no declaration in the current
 `QsagVerified.Funs` extraction. Inversion below additionally uses the canonical prime-field law.
 This module depends on none of the large protocol modules, so it builds whenever
-`Qsag.Goldilocks` does. The guard welds are in `AuthenticatedBeltAndRealSpecWeld.lean`.
+`Qsag.Goldilocks` does. The guard welds are in `AuthenticatedBeltAndRealSpecWeld.lean` and
+`RealSpecGuardBoundary.lean`.
 -/
 
 public section
@@ -94,26 +96,44 @@ def ExtractedStepRefines.forwardSim {M I O E S I' O' : Type}
     subst hRel
     have hc := h c inp
     dsimp only [extractedPartyMachine, comapInputs] at hStepC ⊢
-    revert hc hStepC
-    generalize f c inp = r
-    rcases r with ⟨m1, o | e⟩ | _ | _
-    · intro hc hStepC
-      dsimp only at hc hStepC
-      simp only [Option.some.injEq, Prod.mk.injEq] at hStepC
-      obtain ⟨rfl, rfl⟩ := hStepC
-      rw [hc]
-      exact ⟨rfl, rfl⟩
-    all_goals intro _ hStepC; simp at hStepC
+    cases hf : f c inp with
+    | ok p =>
+      rcases p with ⟨m1, o | e⟩ <;> rw [hf] at hc hStepC <;> dsimp only at hc hStepC
+      · simp only [Option.some.injEq, Prod.mk.injEq] at hStepC
+        obtain ⟨rfl, rfl⟩ := hStepC
+        rw [hc]
+        exact ⟨rfl, rfl⟩
+      · cases hStepC
+    | fail _ => rw [hf] at hStepC; cases hStepC
+    | div => rw [hf] at hStepC; cases hStepC
   sim_err {c a inp} hRel hNoneC := by
     subst hRel
     have hc := h c inp
     dsimp only [extractedPartyMachine, comapInputs] at hNoneC ⊢
-    revert hc hNoneC
-    generalize f c inp = r
-    rcases r with ⟨m1, o | e⟩ | _ | _
-    · intro _ hNoneC; simp at hNoneC
-    · intro hc _; exact hc
-    all_goals intro hc _; exact False.elim hc
+    cases hf : f c inp with
+    | ok p =>
+      rcases p with ⟨m1, o | e⟩ <;> rw [hf] at hc hNoneC <;> dsimp only at hc hNoneC ⊢
+      · cases hNoneC
+      · exact hc
+    | fail _ => rw [hf] at hc; exact False.elim hc
+    | div => rw [hf] at hc; exact False.elim hc
+
+/-- Under exact step refinement, a spec rejection is an extracted rejection. -/
+theorem ExtractedStepRefines.step_none {M I O E S I' O' : Type}
+    {f : M → I → Result (M × core.result.Result O E)} {encOut : O → O'}
+    {A : Qsag.PartyMachine S I' O'} {absSt : M → S} {absIn : I → I'}
+    (h : ExtractedStepRefines f encOut A absSt absIn) {c : M} {i : I}
+    (hA : A.step (absSt c) (absIn i) = none) :
+    (extractedPartyMachine f encOut).step c i = none := by
+  have hc := h c i
+  dsimp only [extractedPartyMachine]
+  cases hf : f c i with
+  | ok p =>
+    rcases p with ⟨m1, o | e⟩
+    · rw [hf] at hc; dsimp only at hc; rw [hA] at hc; cases hc
+    · rfl
+  | fail _ => rfl
+  | div => rfl
 
 /-! ## 2. Goldilocks field kernels against `Qsag.Goldilocks` -/
 

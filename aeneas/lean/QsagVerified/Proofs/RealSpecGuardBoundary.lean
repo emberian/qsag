@@ -5,26 +5,34 @@ import all QsagVerified.Proofs.PolicyAndAddr
 public import QsagVerified.Proofs.CredAndHdGuards
 import all QsagVerified.Proofs.CredAndHdGuards
 public import QsagVerified.Proofs.RealSpecFieldWeld
+public import QsagVerified.Proofs.BeltLatchKernel
+import all QsagVerified.Proofs.BeltLatchKernel
 public import Qsag.MirSpecBridge
 import all Qsag.MirSpecBridgeCore
+import Qsag.Tactic.AssuranceKit
 
 /-!
-# Guard welds for the velocity guard and the ML-DSA release gate
+# Guard welds for the velocity guard, the ML-DSA release gate and the belt-latch kernel
 
-`Qsag.MirSpecBridgeCore` §6A and §6B state the velocity guard (`MirStatefulVelocityGuard`) and the
-threshold ML-DSA release gate (`MirMlDsaReleaseGate`) over `UInt64`, `BitVec 128` and byte lists.
-This module proves that the Aeneas extraction of `policy_and_addr.rs` and `cred_and_hd_guards.rs`
-computes exactly those machines:
+`Qsag.MirSpecBridgeCore` §6A-§6C state the velocity guard (`MirStatefulVelocityGuard`), the
+threshold ML-DSA release gate (`MirMlDsaReleaseGate`) and the belt-latch kernel
+(`MirBeltLatchKernel`) over `UInt64`, `BitVec 128` and byte lists. This module proves that the
+Aeneas extraction of `policy_and_addr.rs`, `cred_and_hd_guards.rs` and `belt_latch_kernel.rs`
+computes exactly those machines. Each weld is an `ExtractedStepRefines` statement (the extracted
+function never panics, and its accept/reject decision, output and post-state are the spec's on
+the field-for-field abstraction), hence a lockstep `ForwardSim`:
 
-* `velocity_extracted_step_refines` / `extractedVelocity_forwardSim_mirVelocity`:
-  `StatefulVelocityGuard::authorize_spend` never panics, and accepts, rejects and updates its
-  state exactly as `Qsag.mirVelocityMachine` does on the abstracted state and request. The
-  `u128` overflow test `amount > MAX - spent` and the spec's `spent + amount < 2^128` agree.
-* `mlDsa_extracted_step_refines` / `extractedMlDsa_forwardSim_mirMlDsa`: the same for
-  `MlDsaReleaseGate::try_release_z_share` against `Qsag.mirMlDsaReleaseMachine`.
-* `extractedVelocity_multiTurn_cap_and_monotonic_nonce` and
-  `extractedMlDsa_at_most_one_release` carry the multi-turn `Qsag` theorems onto every trace of
-  the extracted code.
+* `velocity_extracted_step_refines`: `StatefulVelocityGuard::authorize_spend` against
+  `Qsag.mirVelocityMachine`. The `u128` overflow test `amount > MAX - spent` and the spec's
+  `spent + amount < 2^128` agree.
+* `mlDsa_extracted_step_refines`: `MlDsaReleaseGate::try_release_z_share` against
+  `Qsag.mirMlDsaReleaseMachine`, including the wiped, aborted post-state of every refusal.
+* `beltLatch_extracted_step_refines`: `BeltLatchKernel::bind` against
+  `Qsag.mirBeltLatchKernelMachine`, including the poisoned post-state of a failed persist.
+
+`extractedVelocity_multiTurn_cap_and_monotonic_nonce`, `extractedMlDsa_at_most_one_release` and
+`extractedBeltLatch_equivocation_free` are the multi-turn `Qsag` theorems restated on every trace
+of the extracted code; each is paired with a trace-level `#tooth` and an inhabitedness witness.
 
 The velocity guard does **not** refine the burned-nonce policy model `Qsag.MirPolicyGuardState`
 as a whole machine: `tooth_velocity_used_nonce_model_is_not_monotone_nonce` exhibits a lower,
@@ -44,16 +52,9 @@ attribute [local simp] UScalar.val
 
 /-! ## Scalar and byte abstractions -/
 
-private theorem arrayU8ToBytes_inj {n : Std.Usize} (a b : Std.Array Std.U8 n) :
-    arrayU8ToBytes a = arrayU8ToBytes b ↔ a = b :=
-  ⟨arrayU8ToBytes_injective, congrArg arrayU8ToBytes⟩
-
 private theorem arrayU8ToBytes_length32 (a : Std.Array Std.U8 32#usize) :
     (arrayU8ToBytes a).length = 32 := by
   rw [arrayU8ToBytes_length]; rfl
-
-private theorem arrayU8ToBytes_zero32 :
-    arrayU8ToBytes (Array.repeat 32#usize 0#u8) = List.replicate 32 0 := rfl
 
 private theorem u64Abs_inj (a b : Std.U64) :
     UInt64.ofBitVec a.bv = UInt64.ofBitVec b.bv ↔ a = b :=
@@ -62,6 +63,10 @@ private theorem u64Abs_inj (a b : Std.U64) :
 private theorem u32Abs_inj (a b : Std.U32) :
     UInt32.ofBitVec a.bv = UInt32.ofBitVec b.bv ↔ a = b :=
   ⟨fun h => UScalar.ext (congrArg UInt32.toBitVec h), fun h => by rw [h]⟩
+
+private theorem u8Abs_inj (a b : Std.U8) :
+    UInt8.ofBitVec a.bv = UInt8.ofBitVec b.bv ↔ a = b :=
+  ⟨fun h => UScalar.ext (congrArg UInt8.toBitVec h), fun h => by rw [h]⟩
 
 /-! ## §6A. `StatefulVelocityGuard::authorize_spend` against `Qsag.mirVelocityMachine` -/
 
@@ -92,14 +97,14 @@ private theorem velocity_authorize_spend_exact (g : policy_and_addr.StatefulVelo
   unfold policy_and_addr.StatefulVelocityGuard.authorize_spend velocitySpendStep
   rw [ct_eq_bytes32_spec, ct_eq_bytes32_spec]
   by_cases hp : g.policy_pin = r.policy_pin
-  swap
-  · simp [hp, bind_eq_result_bind, result_bind_ok]
+  case neg =>
+    simp [hp, bind_eq_result_bind, result_bind_ok]
   by_cases ha : g.authority_pin = r.authority_pin
-  swap
-  · simp [hp, ha, bind_eq_result_bind, result_bind_ok]
+  case neg =>
+    simp [hp, ha, bind_eq_result_bind, result_bind_ok]
   by_cases hw : r.window_id = g.window_id
-  swap
-  · have hne : (r.window_id != g.window_id) = true := bne_iff_ne.mpr hw
+  case neg =>
+    have hne : (r.window_id != g.window_id) = true := bne_iff_ne.mpr hw
     simp [hp, ha, hw, hne, bind_eq_result_bind, result_bind_ok]
   by_cases hle_n : r.nonce <= g.last_nonce
   · have hnlt : ¬ g.last_nonce.val < r.nonce.val :=
@@ -111,7 +116,7 @@ private theorem velocity_authorize_spend_exact (g : policy_and_addr.StatefulVelo
   obtain ⟨rem, hrem, hrem_val⟩ := max_velocity_sub_spec g.spent_units
   have hmax := u128_val_le_max g.spent_units
   have hcapmax := u128_val_le_max g.cap_units
-  simp only [decide_eq_true hp, decide_eq_true ha, decide_eq_true hw, decide_eq_true hlt_n,
+  simp only [decide_eq_true hp, decide_eq_true ha, decide_eq_true hlt_n,
     hw, bne_self_eq_false, Bool.false_eq_true, hle_n, ↓reduceIte, Bool.true_and,
     bind_eq_result_bind, result_bind_ok]
   rw [hrem, result_bind_ok]
@@ -155,26 +160,26 @@ private theorem velocitySpendStep_abs (g : policy_and_addr.StatefulVelocityGuard
   simp only [UScalar.val] at hcapmax
   unfold Qsag.mirVelocityAuthorizeSpend velocitySpendStep
   by_cases hp : g.policy_pin = r.policy_pin
-  swap
-  · have : arrayU8ToBytes r.policy_pin ≠ arrayU8ToBytes g.policy_pin :=
+  case neg =>
+    have : arrayU8ToBytes r.policy_pin ≠ arrayU8ToBytes g.policy_pin :=
       fun h => hp (arrayU8ToBytes_injective h).symm
     simp [velocityGuardAbs, velocityReqAbs, hp, this]
   by_cases ha : g.authority_pin = r.authority_pin
-  swap
-  · have : arrayU8ToBytes r.authority_pin ≠ arrayU8ToBytes g.authority_pin :=
+  case neg =>
+    have : arrayU8ToBytes r.authority_pin ≠ arrayU8ToBytes g.authority_pin :=
       fun h => ha (arrayU8ToBytes_injective h).symm
     simp [velocityGuardAbs, velocityReqAbs, hp, ha, this]
   by_cases hw : r.window_id = g.window_id
-  swap
-  · have : UInt64.ofBitVec r.window_id.bv ≠ UInt64.ofBitVec g.window_id.bv :=
+  case neg =>
+    have : UInt64.ofBitVec r.window_id.bv ≠ UInt64.ofBitVec g.window_id.bv :=
       fun h => hw ((u64Abs_inj _ _).mp h)
     simp [velocityGuardAbs, velocityReqAbs, arrayU8ToBytes_length32, hp, ha, hw, this]
   by_cases hn : g.last_nonce.bv.toNat < r.nonce.bv.toNat
-  swap
-  · simp [velocityGuardAbs, velocityReqAbs, arrayU8ToBytes_length32, hp, ha, hw, hn]
+  case neg =>
+    simp [velocityGuardAbs, velocityReqAbs, arrayU8ToBytes_length32, hp, ha, hw, hn]
   by_cases hc : g.spent_units.bv.toNat + r.amount_units.bv.toNat ≤ g.cap_units.bv.toNat
-  swap
-  · simp [velocityGuardAbs, velocityReqAbs, arrayU8ToBytes_length32, hp, ha, hw, hn, hc]
+  case neg =>
+    simp [velocityGuardAbs, velocityReqAbs, arrayU8ToBytes_length32, hp, ha, hw, hn, hc]
   have hov : g.spent_units.bv.toNat + r.amount_units.bv.toNat < 2 ^ 128 := by
     have : (2 : Nat) ^ 128 = 340282366920938463463374607431768211455 + 1 := rfl
     omega
@@ -243,7 +248,7 @@ theorem extractedVelocity_multiTurn_cap_and_monotonic_nonce
   refine ⟨hSum, hLe, fun p hp => ?_, ?_⟩
   · obtain ⟨hn, hw, hpp, hap⟩ := hAll _ (List.mem_map_of_mem (f := fun p => (velocityReqAbs p.1, p.2)) hp)
     exact ⟨hn, (u64Abs_inj _ _).mp hw, arrayU8ToBytes_injective hpp, arrayU8ToBytes_injective hap⟩
-  · exact List.pairwise_map.mp hPair
+  · exact (List.pairwise_map.mp hPair).imp fun h => by simpa [velocityReqAbs] using h
 
 /-! ## §6B. `MlDsaReleaseGate::try_release_z_share` against `Qsag.mirMlDsaReleaseMachine` -/
 
@@ -273,23 +278,27 @@ private theorem mlDsaGate_abs (g : cred_and_hd_guards.MlDsaReleaseGate)
         .ok (mlDsaGateAbs { g with z_share_masked := Array.repeat 32#usize 0#u8, released := true })
           (arrayU8ToBytes g.z_share_masked)
       else .err (mlDsaGateAbs (mlDsaGateMealy.errStep g c)) () := by
+  rcases g with ⟨sid, att, z, rel, ab⟩
+  rcases c with ⟨csid, catt, zn, r0, w1, uc⟩
   unfold Qsag.mirMlDsaTryReleaseZShare mlDsaBarrierPassBool
-  simp only [mlDsaGateMealy, mlDsaGateAbs, mlDsaChecksAbs, Qsag.abortMirMlDsaGate,
-    arrayU8ToBytes_zero32]
-  cases ha : g.aborted <;> cases hr : g.released <;> simp only [Bool.or_true, Bool.or_false,
+  simp only [mlDsaGateMealy, mlDsaGateAbs, mlDsaChecksAbs, Qsag.abortMirMlDsaGate]
+  cases ab <;> cases rel <;> simp only [Bool.or_true, Bool.or_false,
     Bool.not_true, Bool.not_false, Bool.false_and, Bool.true_and, ↓reduceIte, Bool.false_eq_true]
-  by_cases hs : g.session_id = c.req_session_id
-  swap
-  · have : arrayU8ToBytes c.req_session_id ≠ arrayU8ToBytes g.session_id :=
+  all_goals try rfl
+  by_cases hs : sid = csid
+  case neg =>
+    have : arrayU8ToBytes csid ≠ arrayU8ToBytes sid :=
       fun h => hs (arrayU8ToBytes_injective h).symm
     simp [hs, this]
-  by_cases hat : g.attempt = c.req_attempt
-  swap
-  · have : UInt32.ofBitVec g.attempt.bv ≠ UInt32.ofBitVec c.req_attempt.bv :=
+    rfl
+  by_cases hat : att = catt
+  case neg =>
+    have : UInt32.ofBitVec att.bv ≠ UInt32.ofBitVec catt.bv :=
       fun h => hat ((u32Abs_inj _ _).mp h)
     simp [arrayU8ToBytes_length32, hs, hat, this]
-  cases c.z_norm_ok <;> cases c.r0_norm_ok <;> cases c.w1_match <;> cases c.u_com_bound <;>
-    simp [arrayU8ToBytes_length32, hs, hat]
+    rfl
+  subst hs hat
+  cases zn <;> cases r0 <;> cases w1 <;> cases uc <;> simp [arrayU8ToBytes_length32] <;> rfl
 
 /-- **Exact step characterisation.** For every gate state and barrier-check record the extracted
     `try_release_z_share` returns normally and its result is the step of
@@ -328,7 +337,7 @@ def extractedMlDsa_forwardSim_mirMlDsa :
 
 /-- From any gate state, every trace of the extracted release gate releases at most one share,
     and only on checks naming the gate's own session and attempt with all four barrier flags set
-    (`Qsag.mirMlDsa_every_step_wipes_share_and_at_most_one_release`). -/
+    (`Qsag.mirMlDsa_at_most_one_release_through_barrier`). -/
 theorem extractedMlDsa_at_most_one_release
     {g₀ gF : cred_and_hd_guards.MlDsaReleaseGate}
     {tr : List (cred_and_hd_guards.MlDsaBarrierChecks × List UInt8)}
@@ -340,11 +349,240 @@ theorem extractedMlDsa_at_most_one_release
   obtain ⟨aF, hA, _⟩ := extractedMlDsa_forwardSim_mirMlDsa.lift_validTrace
     (a₀ := mlDsaGateAbs g₀) rfl hTr
   obtain ⟨hLen, hAll, _⟩ :=
-    Qsag.mirMlDsa_every_step_wipes_share_and_at_most_one_release (comapInputs_validTrace hA)
+    Qsag.mirMlDsa_at_most_one_release_through_barrier (comapInputs_validTrace hA)
   refine ⟨by simpa using hLen, fun p hp => ?_⟩
   obtain ⟨hs, hat, hz, hr0, hw1, hu⟩ :=
     hAll _ (List.mem_map_of_mem (f := fun p => (mlDsaChecksAbs p.1, p.2)) hp)
   exact ⟨arrayU8ToBytes_injective hs, (u32Abs_inj _ _).mp hat, hz, hr0, hw1, hu⟩
+
+/-! ## §6C. `BeltLatchKernel::bind` against `Qsag.mirBeltLatchKernelMachine` -/
+
+section BeltLatch
+open belt_latch_kernel
+
+/-- Digit-vector abstraction, field for field. -/
+def beltDigitsAbs (d : BeltLatchDigits) : Qsag.MirBeltLatchDigits :=
+  { len := UInt8.ofBitVec d.len.bv
+    row0 := arrayU8ToBytes d.row0
+    row1 := arrayU8ToBytes d.row1
+    row2 := arrayU8ToBytes d.row2
+    row3 := arrayU8ToBytes d.row3 }
+
+/-- Record abstraction, field for field. -/
+def beltRecordAbs (r : BeltLatchKernelRecord) : Qsag.MirBeltLatchKernelRecord :=
+  { epoch := UInt64.ofBitVec r.epoch.bv
+    msg_digest := arrayU8ToBytes r.msg_digest
+    retry_salt := arrayU8ToBytes r.retry_salt
+    digits := beltDigitsAbs r.digits }
+
+/-- Kernel-state abstraction, field for field. -/
+def beltKernelAbs (k : BeltLatchKernel) : Qsag.MirBeltLatchKernel :=
+  { capacity_limit := UInt64.ofBitVec k.capacity_limit.bv
+    next_epoch := UInt64.ofBitVec k.next_epoch.bv
+    has_in_flight := k.has_in_flight
+    in_flight := beltRecordAbs k.in_flight
+    wal_poisoned := k.wal_poisoned }
+
+/-- Request abstraction, field for field. -/
+def beltReqAbs (r : BeltLatchBindRequest) : Qsag.MirBeltLatchBindRequest :=
+  { epoch := UInt64.ofBitVec r.epoch.bv
+    msg_digest := arrayU8ToBytes r.msg_digest
+    retry_salt := arrayU8ToBytes r.retry_salt
+    digits := beltDigitsAbs r.digits
+    persist_ok := r.persist_ok }
+
+/-- Outcome abstraction, constructor for constructor. -/
+def beltOutcomeAbs : BeltLatchBindOutcome → Qsag.MirBeltLatchBindOutcome
+  | .Fresh => .Fresh
+  | .Replay => .Replay
+
+private theorem beltDigitsAbs_inj (a b : BeltLatchDigits) :
+    beltDigitsAbs a = beltDigitsAbs b ↔ a = b := by
+  refine ⟨fun h => ?_, fun h => by rw [h]⟩
+  rcases a with ⟨l, r0, r1, r2, r3⟩
+  rcases b with ⟨l', r0', r1', r2', r3'⟩
+  simp only [beltDigitsAbs, Qsag.MirBeltLatchDigits.mk.injEq] at h
+  obtain ⟨hl, h0, h1, h2, h3⟩ := h
+  rw [(u8Abs_inj _ _).mp hl, arrayU8ToBytes_injective h0, arrayU8ToBytes_injective h1,
+    arrayU8ToBytes_injective h2, arrayU8ToBytes_injective h3]
+
+private theorem u64_succ_abs (a : Std.U64) :
+    UInt64.ofBitVec (a.bv + (1#u64).bv) = UInt64.ofNat (a.bv.toNat + 1) := by
+  rw [BitVec.add_def]; rfl
+
+/-- `beltLatchBindPure` (`BeltLatchKernel.lean`) and `Qsag.mirBeltLatchKernelBind` agree
+    through the abstraction, including the poisoned post-state of a failed persist. -/
+private theorem beltLatchBindPure_abs (s : BeltLatchKernel) (r : BeltLatchBindRequest) :
+    Qsag.mirBeltLatchKernelBind (beltKernelAbs s) (beltReqAbs r) =
+      match beltLatchBindPure s r with
+      | (s', .Ok o) => .ok (beltKernelAbs s') (beltOutcomeAbs o)
+      | (s', .Err _) => .err (beltKernelAbs s') () := by
+  have hepoch : (beltRecordAbs s.in_flight).epoch = (beltReqAbs r).epoch ↔
+      s.in_flight.epoch = r.epoch := u64Abs_inj _ _
+  have hdig : (beltRecordAbs s.in_flight).digits = (beltReqAbs r).digits ↔
+      s.in_flight.digits = r.digits := beltDigitsAbs_inj _ _
+  have hmsg : (beltRecordAbs s.in_flight).msg_digest = (beltReqAbs r).msg_digest ↔
+      s.in_flight.msg_digest = r.msg_digest :=
+    ⟨arrayU8ToBytes_injective, fun h => congrArg arrayU8ToBytes h⟩
+  have hsalt : (beltRecordAbs s.in_flight).retry_salt = (beltReqAbs r).retry_salt ↔
+      s.in_flight.retry_salt = r.retry_salt :=
+    ⟨arrayU8ToBytes_injective, fun h => congrArg arrayU8ToBytes h⟩
+  unfold Qsag.mirBeltLatchKernelBind beltLatchBindPure
+  cases hp : s.wal_poisoned
+  case true => simp [beltKernelAbs, hp]
+  have hp' : (beltKernelAbs s).wal_poisoned = false := hp
+  simp only [hp', Bool.false_eq_true, ↓reduceIte]
+  by_cases hin : s.has_in_flight = true ∧ s.in_flight.epoch = r.epoch
+  · obtain ⟨hh, he⟩ := hin
+    have hhit : ((beltKernelAbs s).has_in_flight &&
+        decide ((beltKernelAbs s).in_flight.epoch = (beltReqAbs r).epoch)) = true := by
+      simp only [beltKernelAbs, hh, Bool.true_and, decide_eq_true_eq]; exact hepoch.mpr he
+    simp only [hhit, ↓reduceIte, hh, he, and_self]
+    simp only [beltKernelAbs] at hmsg hsalt ⊢
+    have hdM : decide ((beltRecordAbs s.in_flight).digits = (beltReqAbs r).digits) =
+        beltLatchDigitsEqB s.in_flight.digits r.digits := by
+      cases hB : beltLatchDigitsEqB s.in_flight.digits r.digits
+      · exact decide_eq_false fun h => by
+          rw [(beltLatchDigitsEqB_iff _ _).mpr (hdig.mp h)] at hB; cases hB
+      · exact decide_eq_true (hdig.mpr ((beltLatchDigitsEqB_iff _ _).mp hB))
+    by_cases hm : s.in_flight.msg_digest = r.msg_digest
+    case neg => simp [hm, hmsg]
+    by_cases hs : s.in_flight.retry_salt = r.retry_salt
+    case neg => simp [hm, hs, hmsg, hsalt]
+    cases hdB : beltLatchDigitsEqB s.in_flight.digits r.digits
+    · simp [hm, hs, hmsg, hsalt]
+      exact hdM.trans hdB
+    · simp [hm, hs, hmsg, hsalt, beltOutcomeAbs]
+      exact hdM.trans hdB
+  · have hmiss : ((beltKernelAbs s).has_in_flight &&
+        decide ((beltKernelAbs s).in_flight.epoch = (beltReqAbs r).epoch)) = false := by
+      cases hh : s.has_in_flight
+      · simp [beltKernelAbs, hh]
+      · have he : ¬ s.in_flight.epoch = r.epoch := fun he => hin ⟨hh, he⟩
+        simp only [beltKernelAbs, hh, Bool.true_and, decide_eq_false_iff_not]
+        exact fun h => he (hepoch.mp h)
+    simp only [hmiss, Bool.false_eq_true, ↓reduceIte, hin]
+    unfold beltLatchFreshPure
+    have hjump : Qsag.mirBeltMaxEpochJump = 64 := rfl
+    simp only [beltKernelAbs, beltReqAbs, UInt64.toNat_ofBitVec, hjump]
+    by_cases h1 : r.epoch.bv.toNat < s.next_epoch.bv.toNat
+    · simp [h1]
+    by_cases h2 : s.capacity_limit.bv.toNat ≤ r.epoch.bv.toNat
+    · simp [h1, h2]
+    by_cases h3 : 64 < r.epoch.bv.toNat - s.next_epoch.bv.toNat
+    · simp [h1, h2, h3]
+    cases r.persist_ok
+    · simp [h1, h2, h3]
+    · simp [h1, h2, h3, beltOutcomeAbs, beltRecordAbs, beltLatchRecordOf, hp]
+
+/-- **Exact step characterisation.** For every kernel state and request the extracted
+    `BeltLatchKernel::bind` returns normally and its result is the step of
+    `Qsag.mirBeltLatchKernelMachine` on the abstracted state and request. -/
+theorem beltLatch_extracted_step_refines :
+    ExtractedStepRefines BeltLatchKernel.bind beltOutcomeAbs Qsag.mirBeltLatchKernelMachine
+      beltKernelAbs beltReqAbs := by
+  intro s r
+  have hab := beltLatchBindPure_abs s r
+  rw [belt_latch_bind_eq]
+  dsimp only [Qsag.mirBeltLatchKernelMachine, Qsag.PartyMachine.ofOutcome]
+  revert hab
+  rcases beltLatchBindPure s r with ⟨s', o | e⟩
+  · intro hab; dsimp only at hab ⊢; rw [hab]
+  · intro hab; dsimp only at hab ⊢; rw [hab]; exact ⟨rfl, rfl⟩
+
+/-- The extracted belt-latch kernel as a `Qsag.PartyMachine`. -/
+def extractedBeltLatchMachine :
+    Qsag.PartyMachine BeltLatchKernel BeltLatchBindRequest Qsag.MirBeltLatchBindOutcome :=
+  extractedPartyMachine BeltLatchKernel.bind beltOutcomeAbs
+
+/-- **Weld.** The extracted `BeltLatchKernel::bind` forward-simulates
+    `Qsag.mirBeltLatchKernelMachine` in lockstep through `beltKernelAbs`. -/
+def extractedBeltLatch_forwardSim_mirBeltLatchKernel :
+    Qsag.ForwardSim extractedBeltLatchMachine
+      (comapInputs Qsag.mirBeltLatchKernelMachine beltReqAbs) :=
+  beltLatch_extracted_step_refines.forwardSim
+
+/-- Every trace of the extracted kernel from a well-formed state stays well formed, binds only
+    epochs below the capacity limit, and never accepts two different records for one epoch
+    (`Qsag.mirBeltLatchKernel_equivocation_free`). -/
+theorem extractedBeltLatch_equivocation_free
+    {k₀ kF : BeltLatchKernel}
+    {tr : List (BeltLatchBindRequest × Qsag.MirBeltLatchBindOutcome)}
+    (hWf₀ : k₀.next_epoch.val ≤ k₀.capacity_limit.val ∧
+      (k₀.has_in_flight = true → k₀.in_flight.epoch.val < k₀.next_epoch.val))
+    (hTr : extractedBeltLatchMachine.ValidTrace k₀ tr kF) :
+    (kF.next_epoch.val ≤ kF.capacity_limit.val ∧
+      (kF.has_in_flight = true → kF.in_flight.epoch.val < kF.next_epoch.val)) ∧
+    (∀ p ∈ tr, p.1.epoch.val < k₀.capacity_limit.val) ∧
+    tr.Pairwise (fun a b => a.1.epoch = b.1.epoch →
+      a.1.msg_digest = b.1.msg_digest ∧ a.1.retry_salt = b.1.retry_salt ∧
+        a.1.digits = b.1.digits) := by
+  obtain ⟨aF, hA, hRel⟩ := extractedBeltLatch_forwardSim_mirBeltLatchKernel.lift_validTrace
+    (a₀ := beltKernelAbs k₀) rfl hTr
+  change aF = beltKernelAbs kF at hRel
+  subst hRel
+  obtain ⟨hWfF, hCap, hPair⟩ :=
+    Qsag.mirBeltLatchKernel_equivocation_free (by exact hWf₀)
+      (comapInputs_validTrace hA)
+  refine ⟨hWfF, fun p hp => hCap (beltReqAbs p.1, p.2)
+      (List.mem_map_of_mem (f := fun p => (beltReqAbs p.1, p.2)) hp),
+    (List.pairwise_map.mp hPair).imp fun h he => ?_⟩
+  obtain ⟨hm, hs, hd⟩ := h (congrArg (fun e : Std.U64 => UInt64.ofBitVec e.bv) he)
+  exact ⟨arrayU8ToBytes_injective hm, arrayU8ToBytes_injective hs, (beltDigitsAbs_inj _ _).mp hd⟩
+
+/-- `#tooth` for the belt-latch weld: a poisoned kernel accepts nothing, on any trace. -/
+theorem tooth_extractedBeltLatch_poisoned_accepts_nothing
+    {k kF : BeltLatchKernel} {r : BeltLatchBindRequest} {o : Qsag.MirBeltLatchBindOutcome}
+    {rest : List (BeltLatchBindRequest × Qsag.MirBeltLatchBindOutcome)}
+    (hP : k.wal_poisoned = true) :
+    ¬ extractedBeltLatchMachine.ValidTrace k ((r, o) :: rest) kF := by
+  suffices ∀ {s sF tr}, extractedBeltLatchMachine.ValidTrace s tr sF → s.wal_poisoned = true →
+      tr ≠ [] → False from fun h => this h hP (List.cons_ne_nil _ _)
+  intro s sF tr hT
+  induction hT with
+  | nil => intro _ h; exact h rfl
+  | @accept s' _ _ inp _ _ hStep _ _ =>
+    intro hs _
+    have h := belt_latch_poisoned_step s' inp hs
+    simp only [extractedBeltLatchMachine, extractedPartyMachine, h] at hStep
+    cases hStep
+  | @reject s' _ inp _ _ _ ih =>
+    intro hs hne
+    have h := belt_latch_poisoned_step s' inp hs
+    refine ih ?_ hne
+    simp only [extractedBeltLatchMachine, extractedPartyMachine, h]
+    exact hs
+
+/-- A fresh bind followed by its replay, from a well-formed empty kernel. -/
+theorem inhabited_extractedBeltLatch_fresh_and_replay :
+    ∃ (k₀ kF : BeltLatchKernel) (tr : List (BeltLatchBindRequest × Qsag.MirBeltLatchBindOutcome)),
+      (k₀.next_epoch.val ≤ k₀.capacity_limit.val ∧
+        (k₀.has_in_flight = true → k₀.in_flight.epoch.val < k₀.next_epoch.val)) ∧
+      extractedBeltLatchMachine.ValidTrace k₀ tr kF ∧
+      tr.map Prod.snd = [.Fresh, .Replay] := by
+  let z := Array.repeat 32#usize 0#u8
+  let d : BeltLatchDigits := ⟨0#u8, z, z, z, z⟩
+  let k₀ : BeltLatchKernel := ⟨8#u64, 0#u64, false, ⟨0#u64, z, z, d⟩, false⟩
+  let r : BeltLatchBindRequest := ⟨0#u64, Array.repeat 32#usize 0xA5#u8, z, d, true⟩
+  let k₁ : BeltLatchKernel :=
+    { k₀ with next_epoch := ⟨r.epoch.bv + (1#u64).bv⟩, has_in_flight := true,
+              in_flight := beltLatchRecordOf r }
+  have hb1 := belt_latch_fresh_accepts k₀ r rfl (fun h => Bool.false_ne_true h.1)
+    (by decide) (by decide) (by decide) rfl
+  have hb2 := belt_latch_replay_accepts k₁ r rfl rfl rfl
+  have h1 : extractedBeltLatchMachine.step k₀ r = some (k₁, .Fresh) := by
+    dsimp only [extractedBeltLatchMachine, extractedPartyMachine]; rw [hb1]; rfl
+  have h2 : extractedBeltLatchMachine.step k₁ r = some (k₁, .Replay) := by
+    dsimp only [extractedBeltLatchMachine, extractedPartyMachine]; rw [hb2]; rfl
+  exact ⟨k₀, k₁, [(r, .Fresh), (r, .Replay)], ⟨by decide, fun h => by cases h⟩,
+    .accept h1 (.accept h2 (.nil k₁)), rfl⟩
+
+end BeltLatch
+
+#tooth_pair qsag_verified.proofs.extractedBeltLatch_equivocation_free vs
+  qsag_verified.proofs.tooth_extractedBeltLatch_poisoned_accepts_nothing
+#verify_inhabited qsag_verified.proofs.extractedBeltLatch_equivocation_free
+  qsag_verified.proofs.inhabited_extractedBeltLatch_fresh_and_replay
 
 /-! ## The burned-nonce policy model is not the extracted guard -/
 
@@ -372,28 +610,137 @@ theorem tooth_velocity_used_nonce_model_is_not_monotone_nonce :
   constructor
   · simp [policy_and_addr.StatefulVelocityGuard.authorize_spend, ct_eq_bytes32_spec,
       bind_eq_result_bind, result_bind_ok]
-    intro h
-    exact False.elim ((by decide : ¬ ((2#u64).val < (1#u64).val)) h)
   · rw [Qsag.mirPolicyStep.eq_def]
     simp [Qsag.u64MemBool.eq_def]
 
-/-- `#tooth` for the velocity weld: a replayed nonce is refused by the extracted guard and by the
-    spec machine on the abstracted request. -/
-theorem tooth_extractedVelocity_replayed_nonce_rejected
+private theorem extractedVelocity_replay_step_none
     (g : policy_and_addr.StatefulVelocityGuard) (r : policy_and_addr.VelocitySpendRequest)
     (hReplay : r.nonce.val ≤ g.last_nonce.val) :
-    extractedVelocityMachine.step g r = none ∧
-    Qsag.mirVelocityMachine.step (velocityGuardAbs g) (velocityReqAbs r) = none :=
-  have hSpec : Qsag.mirVelocityMachine.step (velocityGuardAbs g) (velocityReqAbs r) = none :=
-    Qsag.tooth_mirVelocity_nonMonotonic_nonce_rejected _ _ (.inl (by simpa [velocityGuardAbs,
-      velocityReqAbs] using hReplay))
-  ⟨by
-    have h := velocity_extracted_step_refines g r
+    extractedVelocityMachine.step g r = none :=
+  velocity_extracted_step_refines.step_none
+    (Qsag.tooth_mirVelocity_nonMonotonic_nonce_rejected _ _
+      (.inl (by simpa [velocityGuardAbs, velocityReqAbs] using hReplay)))
+
+/-- A rejected spend leaves the extracted guard unchanged. -/
+private theorem extractedVelocity_errStep_eq {g : policy_and_addr.StatefulVelocityGuard}
+    {r : policy_and_addr.VelocitySpendRequest} (h : extractedVelocityMachine.step g r = none) :
+    extractedVelocityMachine.errStep g r = g := by
+  have hx := velocity_authorize_spend_exact g r
+  dsimp only [extractedVelocityMachine, extractedPartyMachine] at h ⊢
+  revert hx
+  cases velocitySpendStep g r with
+  | none => rintro ⟨e, he⟩; rw [he]
+  | some p => rcases p with ⟨g', o⟩; intro hx; rw [hx] at h; cases h
+
+/-- `#tooth` for the velocity weld: no trace of the extracted guard from `g` records, as its first
+    approved spend, a request whose nonce does not exceed `g.last_nonce`. -/
+theorem tooth_extractedVelocity_replayed_nonce_never_approved
+    {g gF : policy_and_addr.StatefulVelocityGuard} {r : policy_and_addr.VelocitySpendRequest}
+    {out : BitVec 128} {rest : List (policy_and_addr.VelocitySpendRequest × BitVec 128)}
+    (hReplay : r.nonce.val ≤ g.last_nonce.val) :
+    ¬ extractedVelocityMachine.ValidTrace g ((r, out) :: rest) gF := by
+  suffices ∀ {s sF tr}, extractedVelocityMachine.ValidTrace s tr sF → s = g →
+      tr = (r, out) :: rest → False from fun h => this h rfl rfl
+  intro s sF tr hT
+  induction hT with
+  | nil => intro _ h; cases h
+  | accept hStep _ _ =>
+    intro hs ht
+    subst hs
+    simp only [List.cons.injEq, Prod.mk.injEq] at ht
+    obtain ⟨⟨rfl, rfl⟩, rfl⟩ := ht
+    rw [extractedVelocity_replay_step_none _ _ hReplay] at hStep
+    cases hStep
+  | reject _ hNone _ ih =>
+    intro hs ht
+    subst hs
+    exact ih (extractedVelocity_errStep_eq hNone) ht
+
+/-- Two accepted spends of the extracted guard in one window. -/
+theorem inhabited_extractedVelocity_two_turn_trace :
+    ∃ (g₀ gF : policy_and_addr.StatefulVelocityGuard)
+      (tr : List (policy_and_addr.VelocitySpendRequest × BitVec 128)),
+      g₀.spent_units.val ≤ g₀.cap_units.val ∧
+      extractedVelocityMachine.ValidTrace g₀ tr gF ∧
+      tr.length = 2 := by
+  let pin := Array.repeat 32#usize 0#u8
+  let g₀ : policy_and_addr.StatefulVelocityGuard := ⟨7#u64, 0#u128, 100#u128, pin, pin, 0#u64⟩
+  let r₁ : policy_and_addr.VelocitySpendRequest := ⟨7#u64, 1#u64, 40#u128, pin, pin⟩
+  let r₂ : policy_and_addr.VelocitySpendRequest := ⟨7#u64, 2#u64, 55#u128, pin, pin⟩
+  let g₁ : policy_and_addr.StatefulVelocityGuard :=
+    { g₀ with spent_units := ⟨g₀.spent_units.bv + r₁.amount_units.bv⟩, last_nonce := r₁.nonce }
+  let g₂ : policy_and_addr.StatefulVelocityGuard :=
+    { g₁ with spent_units := ⟨g₁.spent_units.bv + r₂.amount_units.bv⟩, last_nonce := r₂.nonce }
+  have step (g g' : policy_and_addr.StatefulVelocityGuard) (r : policy_and_addr.VelocitySpendRequest)
+      (o : Std.U128) (hs : velocitySpendStep g r = some (g', o)) :
+      extractedVelocityMachine.step g r = some (g', o.bv) := by
+    have hx := velocity_authorize_spend_exact g r
+    rw [hs] at hx
     dsimp only [extractedVelocityMachine, extractedPartyMachine]
-    revert h
-    generalize policy_and_addr.StatefulVelocityGuard.authorize_spend g r = res
-    rcases res with ⟨g', o | e⟩ | _ | _
-    · intro h; dsimp only at h; rw [hSpec] at h; cases h
-    all_goals intro _; rfl, hSpec⟩
+    rw [hx]
+  have h1 := step g₀ g₁ r₁ 40#u128 (by
+    unfold velocitySpendStep; split
+    · rfl
+    · rename_i h; exact absurd (by decide) h)
+  have h2 := step g₁ g₂ r₂ 55#u128 (by
+    unfold velocitySpendStep; split
+    · rfl
+    · rename_i h; exact absurd (by decide) h)
+  exact ⟨g₀, g₂, [(r₁, (40#u128).bv), (r₂, (55#u128).bv)], by decide,
+    .accept h1 (.accept h2 (.nil g₂)), rfl⟩
+
+#tooth_pair qsag_verified.proofs.extractedVelocity_multiTurn_cap_and_monotonic_nonce vs
+  qsag_verified.proofs.tooth_extractedVelocity_replayed_nonce_never_approved
+#verify_inhabited qsag_verified.proofs.extractedVelocity_multiTurn_cap_and_monotonic_nonce
+  qsag_verified.proofs.inhabited_extractedVelocity_two_turn_trace
+
+private theorem extractedMlDsa_failed_barrier_step_none
+    (g : cred_and_hd_guards.MlDsaReleaseGate) (c : cred_and_hd_guards.MlDsaBarrierChecks)
+    (hFail : (c.z_norm_ok && c.r0_norm_ok && c.w1_match && c.u_com_bound) = false) :
+    extractedMlDsaMachine.step g c = none :=
+  mlDsa_extracted_step_refines.step_none
+    (Qsag.mirMlDsa_failed_barrier_aborts_and_zeros_share_full _ _ hFail).1
+
+/-- `#tooth` for the ML-DSA weld: from any state, no trace of the extracted gate records a
+    release whose barrier checks have a flag clear. -/
+theorem tooth_extractedMlDsa_failed_barrier_never_released
+    {g gF : cred_and_hd_guards.MlDsaReleaseGate} {c : cred_and_hd_guards.MlDsaBarrierChecks}
+    {out : List UInt8} {rest : List (cred_and_hd_guards.MlDsaBarrierChecks × List UInt8)}
+    (hFail : (c.z_norm_ok && c.r0_norm_ok && c.w1_match && c.u_com_bound) = false) :
+    ¬ extractedMlDsaMachine.ValidTrace g ((c, out) :: rest) gF := by
+  suffices ∀ {s sF tr}, extractedMlDsaMachine.ValidTrace s tr sF →
+      tr = (c, out) :: rest → False from fun h => this h rfl
+  intro s sF tr hT
+  induction hT with
+  | nil => intro h; cases h
+  | @accept s' _ _ _ _ _ hStep _ _ =>
+    intro ht
+    simp only [List.cons.injEq, Prod.mk.injEq] at ht
+    obtain ⟨⟨rfl, rfl⟩, rfl⟩ := ht
+    rw [extractedMlDsa_failed_barrier_step_none _ _ hFail] at hStep
+    cases hStep
+  | reject _ _ _ ih => exact ih
+
+/-- One honest release of the extracted gate. -/
+theorem inhabited_extractedMlDsa_honest_release :
+    ∃ (g₀ gF : cred_and_hd_guards.MlDsaReleaseGate)
+      (tr : List (cred_and_hd_guards.MlDsaBarrierChecks × List UInt8)),
+      extractedMlDsaMachine.ValidTrace g₀ tr gF ∧ tr.length = 1 := by
+  let sid := Array.repeat 32#usize 0xA5#u8
+  let z := Array.repeat 32#usize 0x5A#u8
+  let g₀ : cred_and_hd_guards.MlDsaReleaseGate := ⟨sid, 3#u32, z, false, false⟩
+  let c : cred_and_hd_guards.MlDsaBarrierChecks := ⟨sid, 3#u32, true, true, true, true⟩
+  let g₁ : cred_and_hd_guards.MlDsaReleaseGate :=
+    { g₀ with z_share_masked := Array.repeat 32#usize 0#u8, released := true }
+  have h1 : extractedMlDsaMachine.step g₀ c = some (g₁, arrayU8ToBytes z) := by
+    have hx := (mldsa_gate_try_release_exact g₀ c).1 (by decide)
+    dsimp only [extractedMlDsaMachine, extractedPartyMachine]
+    rw [hx]
+  exact ⟨g₀, g₁, [(c, arrayU8ToBytes z)], .accept h1 (.nil g₁), rfl⟩
+
+#tooth_pair qsag_verified.proofs.extractedMlDsa_at_most_one_release vs
+  qsag_verified.proofs.tooth_extractedMlDsa_failed_barrier_never_released
+#verify_inhabited qsag_verified.proofs.extractedMlDsa_at_most_one_release
+  qsag_verified.proofs.inhabited_extractedMlDsa_honest_release
 
 end qsag_verified.proofs
