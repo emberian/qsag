@@ -3495,3 +3495,1871 @@ structure CanopyNodeCollision {D : Type} (nodeHash : Nat → D → D → D) wher
   eq : nodeHash idx l r = nodeHash idx l' r'
 
 /-- An explicit `rootHash` collision on two distinct top nodes. -/
+structure CanopyRootCollision {D : Type} (rootHash : Nat → D → D) (logLeaves : Nat) where
+  top₁ : D
+  top₂ : D
+  ne : top₁ ≠ top₂
+  eq : rootHash logLeaves top₁ = rootHash logLeaves top₂
+
+private def canopyNodeExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {i : Nat} {l r l' r' : D} (h : nodeHash i l r = nodeHash i l' r') :
+    PSum (CanopyNodeCollision nodeHash) (l = l' ∧ r = r') :=
+  if he : (l, r) = (l', r') then .inr (Prod.mk.inj he) else .inl ⟨i, l, r, l', r', he, h⟩
+
+private def canopyParentExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D)
+    {u : Nat} {hu s hu' s' : D}
+    (h : canopyParentHash nodeHash u hu s = canopyParentHash nodeHash u hu' s') :
+    PSum (CanopyNodeCollision nodeHash) (hu = hu' ∧ s = s') :=
+  if hp : u &&& 1 = 0 then
+    canopyNodeExtract nodeHash (i := u >>> 1) (l := hu) (r := s) (l' := hu') (r' := s')
+      (by unfold canopyParentHash at h; simp only [hp, ↓reduceIte] at h; exact h)
+  else
+    match canopyNodeExtract nodeHash (i := u >>> 1) (l := s) (r := hu) (l' := s') (r' := hu')
+        (by unfold canopyParentHash at h; simp only [hp, ↓reduceIte] at h; exact h) with
+    | .inl c => .inl c
+    | .inr e => .inr ⟨e.2, e.1⟩
+
+/-- One level of the lockstep walk over two transcripts: either both level inputs agree, or the
+    first differing position is returned as a `nodeHash` collision. -/
+private def canopyLevelStepExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    (n : Nat) → (a1 a2 : List (Nat × D)) → (s1 s2 : List D) → (b : List (Nat × D)) →
+      (t : List D) → a1.length < n → a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevelStep nodeHash a1 s1 = some (b, t) →
+      canopyLevelStep nodeHash a2 s2 = some (b, t) →
+      PSum (CanopyNodeCollision nodeHash) (a1 = a2 ∧ s1 = s2)
+  | 0, _, _, _, _, _, _, hLen, _, _, _ => absurd hLen (Nat.not_lt_zero _)
+  | _ + 1, [], [], _, _, _, _, _, _, h1, h2 =>
+    .inr ⟨rfl, (canopyLevelStep_nil nodeHash h1).2.symm.trans (canopyLevelStep_nil nodeHash h2).2⟩
+  | _ + 1, [], _ :: _, _, _, _, _, _, hIdx, _, _ => by cases hIdx
+  | _ + 1, _ :: _, [], _, _, _, _, _, hIdx, _, _ => by cases hIdx
+  | _ + 1, [_], _ :: _ :: _, _, _, _, _, _, hIdx, _, _ => by cases (List.cons.inj hIdx).2
+  | _ + 1, _ :: _ :: _, [_], _, _, _, _, _, hIdx, _, _ => by cases (List.cons.inj hIdx).2
+  | _ + 1, [(u, hu)], [(u2, hu2)], s1, s2, b, t, _, hIdx, h1, h2 => by
+    have hu_eq : u = u2 := (List.cons.inj hIdx).1
+    subst hu_eq
+    match s1, s2, h1, h2 with
+    | [], _, h1, _ => exact False.elim (by cases h1)
+    | _ :: _, [], _, h2 => exact False.elim (by cases h2)
+    | c1 :: r1, c2 :: r2, h1, h2 =>
+      have f1 : r1 = t ∧ b = [(u >>> 1, canopyParentHash nodeHash u hu c1)] := by
+        obtain ⟨c, hs, hb⟩ := canopyLevelStep_single nodeHash h1
+        obtain ⟨hc, hr⟩ := List.cons.inj hs
+        rw [hc]
+        exact ⟨hr, hb⟩
+      have f2 : r2 = t ∧ b = [(u >>> 1, canopyParentHash nodeHash u hu2 c2)] := by
+        obtain ⟨c, hs, hb⟩ := canopyLevelStep_single nodeHash h2
+        obtain ⟨hc, hr⟩ := List.cons.inj hs
+        rw [hc]
+        exact ⟨hr, hb⟩
+      have hH : canopyParentHash nodeHash u hu c1 = canopyParentHash nodeHash u hu2 c2 :=
+        (Prod.mk.inj (List.cons.inj (f1.2.symm.trans f2.2)).1).2
+      match canopyParentExtract nodeHash hH with
+      | .inl c => exact .inl c
+      | .inr e => exact .inr ⟨by rw [e.1], by rw [e.2, f1.1, f2.1]⟩
+  | n + 1, (u, hu) :: (v, hv) :: tl1, (u2, hu2) :: (v2, hv2) :: tl2, s1, s2, b, t,
+      hLen, hIdx, h1, h2 => by
+    have hu_eq : u = u2 := (List.cons.inj hIdx).1
+    have hv_eq : v = v2 := (List.cons.inj (List.cons.inj hIdx).2).1
+    have hTl : tl1.map Prod.fst = tl2.map Prod.fst := (List.cons.inj (List.cons.inj hIdx).2).2
+    subst hu_eq; subst hv_eq
+    have hLen1 : ((v, hv) :: tl1).length < n := Nat.lt_of_succ_lt_succ hLen
+    have hLen2 : tl1.length < n := Nat.lt_of_succ_lt hLen1
+    refine if hv' : v = u ^^^ 1 then ?_ else ?_
+    · have f1 : canopyLevelStep nodeHash tl1 s1 = some (b.tail, t) ∧
+          b = (u >>> 1, nodeHash (u >>> 1) hu hv) :: b.tail := by
+        obtain ⟨act, hr, hb⟩ := canopyLevelStep_pair nodeHash hv' h1
+        rw [hb]
+        exact ⟨hr, rfl⟩
+      have f2 : canopyLevelStep nodeHash tl2 s2 = some (b.tail, t) ∧
+          b = (u >>> 1, nodeHash (u >>> 1) hu2 hv2) :: b.tail := by
+        obtain ⟨act, hr, hb⟩ := canopyLevelStep_pair nodeHash hv' h2
+        rw [hb]
+        exact ⟨hr, rfl⟩
+      have hHead : nodeHash (u >>> 1) hu hv = nodeHash (u >>> 1) hu2 hv2 :=
+        (Prod.mk.inj (List.cons.inj (f1.2.symm.trans f2.2)).1).2
+      match canopyNodeExtract nodeHash hHead with
+      | .inl c => exact .inl c
+      | .inr e =>
+        match canopyLevelStepExtract nodeHash n tl1 tl2 s1 s2 b.tail t hLen2 hTl f1.1 f2.1 with
+        | .inl c => exact .inl c
+        | .inr e' => exact .inr ⟨by rw [e.1, e.2, e'.1], e'.2⟩
+    · match s1, s2, h1, h2 with
+      | [], _, h1, _ =>
+        exact False.elim (by
+          obtain ⟨_, _, _, hs, _, _⟩ := canopyLevelStep_solo nodeHash hv' h1
+          cases hs)
+      | _ :: _, [], _, h2 =>
+        exact False.elim (by
+          obtain ⟨_, _, _, hs, _, _⟩ := canopyLevelStep_solo nodeHash hv' h2
+          cases hs)
+      | c1 :: r1, c2 :: r2, h1, h2 =>
+        have f1 : canopyLevelStep nodeHash ((v, hv) :: tl1) r1 = some (b.tail, t) ∧
+            b = (u >>> 1, canopyParentHash nodeHash u hu c1) :: b.tail := by
+          obtain ⟨c, rest, act, hs, hr, hb⟩ := canopyLevelStep_solo nodeHash hv' h1
+          obtain ⟨hc, hrest⟩ := List.cons.inj hs
+          rw [hb, hc, hrest]
+          exact ⟨hr, rfl⟩
+        have f2 : canopyLevelStep nodeHash ((v, hv2) :: tl2) r2 = some (b.tail, t) ∧
+            b = (u >>> 1, canopyParentHash nodeHash u hu2 c2) :: b.tail := by
+          obtain ⟨c, rest, act, hs, hr, hb⟩ := canopyLevelStep_solo nodeHash hv' h2
+          obtain ⟨hc, hrest⟩ := List.cons.inj hs
+          rw [hb, hc, hrest]
+          exact ⟨hr, rfl⟩
+        have hHead : canopyParentHash nodeHash u hu c1 = canopyParentHash nodeHash u hu2 c2 :=
+          (Prod.mk.inj (List.cons.inj (f1.2.symm.trans f2.2)).1).2
+        match canopyParentExtract nodeHash hHead with
+        | .inl c => exact .inl c
+        | .inr e =>
+          match canopyLevelStepExtract nodeHash n ((v, hv) :: tl1) ((v, hv2) :: tl2) r1 r2
+              b.tail t hLen1 (congrArg (List.cons v) hTl) f1.1 f2.1 with
+          | .inl c => exact .inl c
+          | .inr e' => exact .inr ⟨by rw [e.1, e'.1], by rw [e.2, e'.2]⟩
+
+/-- The lockstep walk over all `d` levels, from the common final state back to the leaves. -/
+private def canopyLevelsExtract {D : Type} [DecidableEq D] (nodeHash : Nat → D → D → D) :
+    (d : Nat) → (a1 a2 : List (Nat × D)) → (s1 s2 : List D) → (b : List (Nat × D)) →
+      (t : List D) → a1.map Prod.fst = a2.map Prod.fst →
+      canopyLevels nodeHash d a1 s1 = some (b, t) →
+      canopyLevels nodeHash d a2 s2 = some (b, t) →
+      PSum (CanopyNodeCollision nodeHash) (a1 = a2 ∧ s1 = s2)
+  | 0, _, _, _, _, _, _, _, h1, h2 => .inr (by
+      rw [canopyLevels] at h1 h2
+      exact Prod.mk.inj (Option.some.inj (h1.trans h2.symm)))
+  | d + 1, a1, a2, s1, s2, b, t, hIdx, h1, h2 => by
+    match hs1 : canopyLevelStep nodeHash a1 s1, hs2 : canopyLevelStep nodeHash a2 s2 with
+    | none, _ =>
+      exact False.elim (by
+        obtain ⟨_, _, hStep, _⟩ := canopyLevels_succ nodeHash h1
+        rw [hs1] at hStep
+        cases hStep)
+    | some _, none =>
+      exact False.elim (by
+        obtain ⟨_, _, hStep, _⟩ := canopyLevels_succ nodeHash h2
+        rw [hs2] at hStep
+        cases hStep)
+    | some (m1, r1), some (m2, r2) =>
+      have hRest1 : canopyLevels nodeHash d m1 r1 = some (b, t) := by
+        obtain ⟨m, r, hStep, hRest⟩ := canopyLevels_succ nodeHash h1
+        rw [hs1] at hStep
+        obtain ⟨hm, hr⟩ := Prod.mk.inj (Option.some.inj hStep)
+        rw [hm, hr]
+        exact hRest
+      have hRest2 : canopyLevels nodeHash d m2 r2 = some (b, t) := by
+        obtain ⟨m, r, hStep, hRest⟩ := canopyLevels_succ nodeHash h2
+        rw [hs2] at hStep
+        obtain ⟨hm, hr⟩ := Prod.mk.inj (Option.some.inj hStep)
+        rw [hm, hr]
+        exact hRest
+      have hm1 := (canopyLevelStep_shape nodeHash _ a1 s1 m1 r1 (Nat.lt_succ_self _) hs1).1
+      have hm2 := (canopyLevelStep_shape nodeHash _ a2 s2 m2 r2 (Nat.lt_succ_self _) hs2).1
+      rw [hIdx] at hm1
+      match canopyLevelsExtract nodeHash d m1 m2 r1 r2 b t (hm1.trans hm2.symm) hRest1 hRest2 with
+      | .inl c => exact .inl c
+      | .inr e =>
+        have hs2' : canopyLevelStep nodeHash a2 s2 = some (m1, r1) := by
+          rw [hs2, e.1, e.2]
+        exact canopyLevelStepExtract nodeHash _ a1 a2 s1 s2 m1 r1 (Nat.lt_succ_self _) hIdx
+          hs1 hs2'
+
+private def canopyTopOf {D : Type} (r : Option (List (Nat × D) × List D)) : Option D :=
+  match r with
+  | some ([(_, top)], []) => some top
+  | _ => none
+
+/-- **Constructive collision extractor over `CanopyMultiProof` transcripts.** Given two accepted
+    openings of one index set against one commitment that differ in a leaf digest or a sibling,
+    the function walks both transcripts level by level and returns an explicit collision: of
+    `rootHash` on the two top nodes, or of `nodeHash` at the first node where the two
+    transcripts hash different children to the same parent. The result is data in `Type`, built
+    with `DecidableEq D` only. -/
+def extractCanopyCollision {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (leaves₁ leaves₂ : List (Nat × D)) (proof₁ proof₂ : List D)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (hAcc₁ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₁ proof₁ = true)
+    (hAcc₂ : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves₂ proof₂ = true)
+    (hNe : (leaves₁, proof₁) ≠ (leaves₂, proof₂)) :
+    PSum (CanopyRootCollision rootHash logLeaves) (CanopyNodeCollision nodeHash) := by
+  match hT1 : canopyTopOf (canopyLevels nodeHash logLeaves
+        (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₁),
+      hT2 : canopyTopOf (canopyLevels nodeHash logLeaves
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₂) with
+  | none, _ =>
+    exact False.elim (by
+      obtain ⟨top, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₁ proof₁ hAcc₁
+      rw [hL] at hT1
+      cases hT1)
+  | some _, none =>
+    exact False.elim (by
+      obtain ⟨top, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₂ proof₂ hAcc₂
+      rw [hL] at hT2
+      cases hT2)
+  | some top1, some top2 =>
+    have hL1 : canopyLevels nodeHash logLeaves
+          (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₁ = some ([(1, top1)], []) ∧
+        rootHash logLeaves top1 = commitment := by
+      obtain ⟨top, hL, hR⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₁ proof₁ hAcc₁
+      rw [hL] at hT1
+      have hEq : some top = some top1 := hT1
+      rw [← Option.some.inj hEq]
+      exact ⟨hL, hR⟩
+    have hL2 : canopyLevels nodeHash logLeaves
+          (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₂ = some ([(1, top2)], []) ∧
+        rootHash logLeaves top2 = commitment := by
+      obtain ⟨top, hL, hR⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves₂ proof₂ hAcc₂
+      rw [hL] at hT2
+      have hEq : some top = some top2 := hT2
+      rw [← Option.some.inj hEq]
+      exact ⟨hL, hR⟩
+    refine if hTop : top1 = top2 then ?_ else .inl ⟨top1, top2, hTop, hL1.2.trans hL2.2.symm⟩
+    have hL2' : canopyLevels nodeHash logLeaves
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof₂ = some ([(1, top1)], []) := by
+      rw [hTop]; exact hL2.1
+    have hIdx' : (leaves₁.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst =
+        (leaves₂.map (fun p => (2 ^ logLeaves + p.1, p.2))).map Prod.fst := by
+      rw [canopy_map_fst, canopy_map_fst, hIdx]
+    match canopyLevelsExtract nodeHash logLeaves _ _ proof₁ proof₂ _ _ hIdx' hL1.1 hL2' with
+    | .inl c => exact .inr c
+    | .inr e =>
+      exact False.elim (hNe (by
+        rw [canopy_lift_inj (2 ^ logLeaves) leaves₁ leaves₂ e.1, e.2]))
+
+
+end Qsag
+
+
+namespace Qsag
+
+set_option autoImplicit false
+set_option exponentiation.threshold 2048
+
+/-! ## §1. Pre-Challenge Online Extraction for Position-Tweaked `merkleRootFromPath` -/
+
+/-- Constructive first-match lookup avoiding opaque library lemma dependencies. -/
+def findFirst {α : Type} (p : α → Bool) : List α → Option α
+  | [] => none
+  | x :: xs => if p x = true then some x else findFirst p xs
+
+theorem findFirst_some_spec {α : Type} (p : α → Bool) :
+    ∀ {xs : List α} {x : α}, findFirst p xs = some x → x ∈ xs ∧ p x = true
+  | [], _, h => by cases h
+  | y :: ys, x, h => by
+    unfold findFirst at h
+    cases hp : p y
+    · rw [hp] at h; simp only [Bool.false_eq_true, ↓reduceIte] at h
+      rcases findFirst_some_spec p h with ⟨hm, hpx⟩
+      exact ⟨.tail y hm, hpx⟩
+    · rw [hp] at h; simp only [↓reduceIte, Option.some.injEq] at h
+      subst h; exact ⟨.head ys, hp⟩
+
+theorem findFirst_none_spec {α : Type} (p : α → Bool) :
+    ∀ {xs : List α}, findFirst p xs = none → ∀ x ∈ xs, p x = false
+  | [], _, _, hx => nomatch hx
+  | y :: ys, h, x, hx => by
+    unfold findFirst at h
+    cases hp : p y
+    · rw [hp] at h; simp only [Bool.false_eq_true, ↓reduceIte] at h
+      rcases List.mem_cons.mp hx with rfl | htl
+      · exact hp
+      · exact findFirst_none_spec p h x htl
+    · rw [hp] at h; simp only [↓reduceIte] at h; cases h
+
+/-- One recorded compression query `(lvl, node, left, right) ↦ out` in a classical
+    pre-challenge query table. Coherent QROM access does not itself provide such a record. -/
+structure RecordedMerkleQuery (D : Type) where
+  lvl : Nat
+  node : Nat
+  left : D
+  right : D
+  out : D
+  deriving DecidableEq, Repr
+
+/-- Consistency of a recorded query entry with compression oracle `H`. -/
+@[expose] def merkleQueryConsistent {D : Type} (H : Nat → Nat → D → D → D)
+    (q : RecordedMerkleQuery D) : Prop :=
+  H q.lvl q.node q.left q.right = q.out
+
+/-- Child digests `{q.left, q.right | q ∈ queries}` appearing in a recorded `Q`-query table. -/
+def merkleChildTargets {D : Type} : List (RecordedMerkleQuery D) → List D
+  | [] => []
+  | q :: qs => q.left :: q.right :: merkleChildTargets qs
+
+/-- Full pre-challenge target set `rt :: merkleChildTargets queries` (length `2 * Q + 1`). -/
+def merklePreChallengeTargets {D : Type} (rt : D) (queries : List (RecordedMerkleQuery D)) :
+    List D :=
+  rt :: merkleChildTargets queries
+
+theorem merkleChildTargets_length {D : Type} :
+    ∀ (qs : List (RecordedMerkleQuery D)), (merkleChildTargets qs).length = 2 * qs.length
+  | [] => rfl
+  | _ :: qs => by
+    simp only [merkleChildTargets, List.length_cons, merkleChildTargets_length qs]; omega
+
+theorem merklePreChallengeTargets_length {D : Type} (rt : D)
+    (qs : List (RecordedMerkleQuery D)) :
+    (merklePreChallengeTargets rt qs).length = 2 * qs.length + 1 := by
+  simp only [merklePreChallengeTargets, List.length_cons, merkleChildTargets_length]
+
+private theorem mem_merkleChildTargets_of_mem {D : Type}
+    {q : RecordedMerkleQuery D} {qs : List (RecordedMerkleQuery D)} (hq : q ∈ qs) :
+    q.left ∈ merkleChildTargets qs ∧ q.right ∈ merkleChildTargets qs := by
+  induction qs with
+  | nil => nomatch hq
+  | cons hd tl ih =>
+    rcases List.mem_cons.mp hq with rfl | htl
+    · exact ⟨.head _, .tail _ (.head _)⟩
+    · rcases ih htl with ⟨hl, hr⟩
+      exact ⟨.tail _ (.tail _ hl), .tail _ (.tail _ hr)⟩
+
+/-- **Pre-challenge online opening extractor** for `merkleRootFromPath`: reconstructs `(leaf, path)`
+    solely from `(rt, queries)` and `(lvl, depth, idx)` BEFORE any challenge is squeezed. -/
+@[expose] def extractOnlineMerkleOpening {D : Type} [DecidableEq D]
+    (rt : D) (queries : List (RecordedMerkleQuery D)) :
+    Nat → Nat → Nat → Option (D × List D)
+  | _, 0, _ => some (rt, [])
+  | lvl, depth + 1, idx =>
+    match extractOnlineMerkleOpening rt queries (lvl + 1) depth (idx / 2) with
+    | none => none
+    | some (parent, restPath) =>
+      match findFirst (fun q =>
+          decide (q.lvl = lvl) && decide (q.node = idx / 2) && decide (q.out = parent)) queries with
+      | none => none
+      | some q =>
+        if idx % 2 = 0 then some (q.left, q.right :: restPath)
+        else some (q.right, q.left :: restPath)
+
+private theorem extractOnlineMerkleOpening_succ_child {D : Type} [DecidableEq D]
+    (rt : D) (queries : List (RecordedMerkleQuery D))
+    (lvl depth idx : Nat) (val : D) (pth : List D)
+    (h : extractOnlineMerkleOpening rt queries lvl (depth + 1) idx = some (val, pth)) :
+    val ∈ merkleChildTargets queries := by
+  unfold extractOnlineMerkleOpening at h
+  cases hUp : extractOnlineMerkleOpening rt queries (lvl + 1) depth (idx / 2) with
+  | none => rw [hUp] at h; cases h
+  | some pr =>
+    rw [hUp] at h; dsimp only at h
+    cases hFind : findFirst (fun q =>
+        decide (q.lvl = lvl) && decide (q.node = idx / 2) && decide (q.out = pr.1)) queries with
+    | none => rw [hFind] at h; cases h
+    | some q =>
+      rw [hFind] at h; dsimp only at h
+      rcases mem_merkleChildTargets_of_mem (findFirst_some_spec _ hFind).1 with ⟨hL, hR⟩
+      by_cases hPar : idx % 2 = 0
+      · simp only [hPar, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+        rw [← h.1]; exact hL
+      · simp only [hPar, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+        rw [← h.1]; exact hR
+
+/-- `Type`-valued 4-way constructive online-extraction outcome for `merkleRootFromPath`. -/
+inductive OnlineMerkleOutcome {D : Type} [DecidableEq D]
+    (H : Nat → Nat → D → D → D) (rt : D) (queries : List (RecordedMerkleQuery D))
+    (lvl depth idx : Nat) (leaf : D) (path : List D) : Type where
+  | extractedEq
+      (hExt : extractOnlineMerkleOpening rt queries lvl depth idx = some (leaf, path))
+  | queryCollision
+      (lvlC nodeC : Nat) (a b a' b' : D)
+      (hNe : (a, b) ≠ (a', b'))
+      (hEq : H lvlC nodeC a b = H lvlC nodeC a' b')
+  | unqueriedRootPreimage
+      (lvlU nodeU : Nat) (lU rU : D)
+      (hOut : H lvlU nodeU lU rU = rt)
+      (hUnq : ∀ q ∈ queries, ¬(q.lvl = lvlU ∧ q.node = nodeU ∧ q.left = lU ∧ q.right = rU))
+  | unqueriedChildPreimage
+      (lvlU nodeU : Nat) (lU rU outU : D)
+      (hOut : H lvlU nodeU lU rU = outU)
+      (hMem : outU ∈ merkleChildTargets queries)
+      (hUnq : ∀ q ∈ queries, ¬(q.lvl = lvlU ∧ q.node = nodeU ∧ q.left = lU ∧ q.right = rU))
+
+/-- Every `.queryCollision` branch immediately witnesses `MerkleTweakCollision H`. -/
+theorem onlineMerkleOutcome_collision_sound {D : Type} [DecidableEq D]
+    {H : Nat → Nat → D → D → D} {lvlC nodeC : Nat} {a b a' b' : D}
+    (hNe : (a, b) ≠ (a', b')) (hEq : H lvlC nodeC a b = H lvlC nodeC a' b') :
+    MerkleTweakCollision H :=
+  ⟨lvlC, nodeC, a, b, a', b',
+    if ha : a = a' then .inr (fun hb => hNe (Prod.ext ha hb)) else .inl ha, hEq⟩
+
+/-- **Constructive `Type`-valued online Merkle query-table classifier** (`0 Classical.choice`). -/
+def classifyOnlineMerkleOpening {D : Type} [DecidableEq D]
+    (H : Nat → Nat → D → D → D) (rt : D) (queries : List (RecordedMerkleQuery D))
+    (hCons : ∀ q ∈ queries, merkleQueryConsistent H q) :
+    (lvl idx : Nat) → (leaf : D) → (path : List D) →
+      merkleRootFromPath H lvl idx leaf path = rt →
+      OnlineMerkleOutcome H rt queries lvl path.length idx leaf path
+  | lvl, idx, leaf, [], hRoot =>
+    .extractedEq (by have hEq : leaf = rt := hRoot; subst hEq; rfl)
+  | lvl, idx, leaf, sib :: rest, hRoot => by
+    let lCh := if idx % 2 = 0 then leaf else sib
+    let rCh := if idx % 2 = 0 then sib else leaf
+    let parent := H lvl (idx / 2) lCh rCh
+    have hStepEq : (if idx % 2 = 0 then H lvl (idx / 2) leaf sib else H lvl (idx / 2) sib leaf) =
+        parent := by
+      dsimp only [parent, lCh, rCh]; by_cases hp : idx % 2 = 0 <;> simp [hp]
+    have hRestRoot : merkleRootFromPath H (lvl + 1) (idx / 2) parent rest = rt := by
+      unfold merkleRootFromPath at hRoot; rwa [hStepEq] at hRoot
+    match classifyOnlineMerkleOpening H rt queries hCons (lvl + 1) (idx / 2) parent rest hRestRoot with
+    | .queryCollision lc nc a b a' b' hNe hEq =>
+      exact .queryCollision lc nc a b a' b' hNe hEq
+    | .unqueriedRootPreimage lu nu lU rU hOut hUnq =>
+      exact .unqueriedRootPreimage lu nu lU rU hOut hUnq
+    | .unqueriedChildPreimage lu nu lU rU outU hOut hMem hUnq =>
+      exact .unqueriedChildPreimage lu nu lU rU outU hOut hMem hUnq
+    | .extractedEq hExtUp =>
+      let pred := fun q : RecordedMerkleQuery D =>
+        decide (q.lvl = lvl) && decide (q.node = idx / 2) && decide (q.out = parent)
+      match hFind : findFirst pred queries with
+      | none =>
+        have hUnq : ∀ q ∈ queries, ¬(q.lvl = lvl ∧ q.node = idx / 2 ∧ q.left = lCh ∧ q.right = rCh) := by
+          intro q hq ⟨hL, hN, hLc, hRc⟩
+          have hFalse := findFirst_none_spec pred hFind q hq
+          have hOutEq : q.out = parent := by
+            have hc := hCons q hq; unfold merkleQueryConsistent at hc
+            rw [← hc, hL, hN, hLc, hRc]
+          dsimp only [pred] at hFalse
+          simp only [hL, hN, hOutEq, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+        match rest, hExtUp with
+        | [], hUp0 =>
+          have hParRt : parent = rt := by
+            simp only [List.length_nil, extractOnlineMerkleOpening,
+              Option.some.injEq, Prod.mk.injEq] at hUp0
+            exact hUp0.1.symm
+          exact .unqueriedRootPreimage lvl (idx / 2) lCh rCh hParRt hUnq
+        | _ :: tlRest, hUpS =>
+          exact .unqueriedChildPreimage lvl (idx / 2) lCh rCh parent rfl
+            (extractOnlineMerkleOpening_succ_child rt queries (lvl + 1) tlRest.length
+              (idx / 2) parent _ hUpS) hUnq
+      | some q =>
+        rcases findFirst_some_spec pred hFind with ⟨hqMem, hqPred⟩
+        dsimp only [pred] at hqPred
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hqPred
+        rcases hqPred with ⟨⟨hqLvl, hqNode⟩, hqOut⟩
+        if hPairEq : (q.left, q.right) = (lCh, rCh) then
+          exact .extractedEq (by
+            have hqL : q.left = lCh := (Prod.mk.inj hPairEq).1
+            have hqR : q.right = rCh := (Prod.mk.inj hPairEq).2
+            show extractOnlineMerkleOpening rt queries lvl (rest.length + 1) idx =
+              some (leaf, sib :: rest)
+            unfold extractOnlineMerkleOpening
+            rw [hExtUp]; dsimp only; rw [hFind]; dsimp only
+            by_cases hp : idx % 2 = 0 <;>
+              (dsimp only [lCh, rCh] at hqL hqR; simp only [hp, ↓reduceIte] at hqL hqR ⊢; rw [hqL, hqR]))
+        else
+          have hColl : H lvl (idx / 2) q.left q.right = H lvl (idx / 2) lCh rCh := by
+            have hc := hCons q hqMem; unfold merkleQueryConsistent at hc
+            rw [← hqLvl, ← hqNode, hc, hqOut]; dsimp only [parent]; rw [hqLvl, hqNode]
+          exact .queryCollision lvl (idx / 2) q.left q.right lCh rCh hPairEq hColl
+
+/-- **Pre-challenge binding of online extraction**: any two openings `(leaf₁, path₁)` and
+    `(leaf₂, path₂)` at `(lvl, depth, idx)` landing in `.extractedEq` coincide identically. -/
+theorem onlineMerkle_preChallenge_unique {D : Type} [DecidableEq D]
+    (rt : D) (queries : List (RecordedMerkleQuery D))
+    (lvl depth idx : Nat) (leaf₁ leaf₂ : D) (path₁ path₂ : List D)
+    (h₁ : extractOnlineMerkleOpening rt queries lvl depth idx = some (leaf₁, path₁))
+    (h₂ : extractOnlineMerkleOpening rt queries lvl depth idx = some (leaf₂, path₂)) :
+    leaf₁ = leaf₂ ∧ path₁ = path₂ :=
+  Prod.mk.inj (Option.some.inj (h₁.symm.trans h₂))
+
+/-! ## §2. Pre-Challenge Online Extraction for `verifyCanopyMultiproof` (`pcs.rs`) -/
+
+/-- Recorded `rootHash(logLeaves, top) ↦ out` query for `CanopyMultiProof`. -/
+structure RecordedCanopyRootQuery (D : Type) where
+  logLeaves : Nat
+  top : D
+  out : D
+  deriving DecidableEq, Repr
+
+/-- Recorded `nodeHash(idx, left, right) ↦ out` query for `CanopyMultiProof`. -/
+structure RecordedCanopyNodeQuery (D : Type) where
+  idx : Nat
+  left : D
+  right : D
+  out : D
+  deriving DecidableEq, Repr
+
+def canopyNodeChildTargets {D : Type} : List (RecordedCanopyNodeQuery D) → List D
+  | [] => []
+  | q :: qs => q.left :: q.right :: canopyNodeChildTargets qs
+
+theorem canopyNodeChildTargets_length {D : Type} :
+    ∀ (qs : List (RecordedCanopyNodeQuery D)), (canopyNodeChildTargets qs).length = 2 * qs.length
+  | [] => rfl
+  | _ :: qs => by
+    simp only [canopyNodeChildTargets, List.length_cons, canopyNodeChildTargets_length qs]; omega
+
+private theorem mem_canopyNodeChildTargets_of_mem {D : Type}
+    {q : RecordedCanopyNodeQuery D} {qs : List (RecordedCanopyNodeQuery D)} (hq : q ∈ qs) :
+    q.left ∈ canopyNodeChildTargets qs ∧ q.right ∈ canopyNodeChildTargets qs := by
+  induction qs with
+  | nil => nomatch hq
+  | cons hd tl ih =>
+    rcases List.mem_cons.mp hq with rfl | htl
+    · exact ⟨.head _, .tail _ (.head _)⟩
+    · rcases ih htl with ⟨hl, hr⟩
+      exact ⟨.tail _ (.tail _ hl), .tail _ (.tail _ hr)⟩
+
+/-- Structural single-level top-down online extractor inverting `canopyLevelStep` using ONLY
+    `(nodeQueries, activeIdxs, parents, remSibs)` (fuel = `activeIdxs.length`). -/
+def extractOnlineCanopyStep {D : Type} [DecidableEq D]
+    (nodeQueries : List (RecordedCanopyNodeQuery D)) :
+    Nat → List Nat → List (Nat × D) → List D → Option (List (Nat × D) × List D)
+  | 0, [], [], remSibs => some ([], remSibs)
+  | _ + 1, [], [], remSibs => some ([], remSibs)
+  | _ + 1, [u], [(pIdx, pDig)], remSibs =>
+    if pIdx = u >>> 1 then
+      match findFirst (fun q => decide (q.idx = u >>> 1) && decide (q.out = pDig)) nodeQueries with
+      | none => none
+      | some q =>
+        if u &&& 1 = 0 then some ([(u, q.left)], q.right :: remSibs)
+        else some ([(u, q.right)], q.left :: remSibs)
+    else none
+  | fuel + 1, u :: v :: tl, (pIdx, pDig) :: restParents, remSibs =>
+    if pIdx = u >>> 1 then
+      if v = u ^^^ 1 then
+        match findFirst (fun q => decide (q.idx = u >>> 1) && decide (q.out = pDig)) nodeQueries,
+              extractOnlineCanopyStep nodeQueries fuel tl restParents remSibs with
+        | some q, some (tlAct, fullSibs) =>
+          some ((u, q.left) :: (v, q.right) :: tlAct, fullSibs)
+        | _, _ => none
+      else
+        match findFirst (fun q => decide (q.idx = u >>> 1) && decide (q.out = pDig)) nodeQueries,
+              extractOnlineCanopyStep nodeQueries fuel (v :: tl) restParents remSibs with
+        | some q, some (vTlAct, afterUSibs) =>
+          if u &&& 1 = 0 then some ((u, q.left) :: vTlAct, q.right :: afterUSibs)
+          else some ((u, q.right) :: vTlAct, q.left :: afterUSibs)
+        | _, _ => none
+    else none
+  | _, _, _, _ => none
+
+/-- Multi-level top-down online extractor inverting `canopyLevels` from `[(1, top₀)]`. -/
+def extractOnlineCanopyLevels {D : Type} [DecidableEq D]
+    (nodeQueries : List (RecordedCanopyNodeQuery D)) :
+    Nat → List Nat → List (Nat × D) → List D → Option (List (Nat × D) × List D)
+  | 0, activeIdxs, topParents, topSibs =>
+    if activeIdxs = topParents.map Prod.fst then some (topParents, topSibs) else none
+  | d + 1, activeIdxs, topParents, topSibs =>
+    let nextIdxs := (steinerLevelStep activeIdxs).1
+    match extractOnlineCanopyLevels nodeQueries d nextIdxs topParents topSibs with
+    | none => none
+    | some (parents, remSibs) =>
+      extractOnlineCanopyStep nodeQueries activeIdxs.length activeIdxs parents remSibs
+
+/-- **Pre-challenge online `CanopyMultiProof` extractor**: given `(commitment, rootQueries,
+    nodeQueries, logLeaves, indices)`, reconstructs `(leaves, proof)` without seeing the prover's
+    post-challenge leaf digests or sibling list. -/
+@[expose] def extractOnlineCanopyOpening {D : Type} [DecidableEq D]
+    (commitment : D)
+    (rootQueries : List (RecordedCanopyRootQuery D))
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (logLeaves : Nat) (indices : List Nat) : Option (List (Nat × D) × List D) :=
+  match findFirst (fun q => decide (q.logLeaves = logLeaves) && decide (q.out = commitment))
+      rootQueries with
+  | none => none
+  | some rq =>
+    match extractOnlineCanopyLevels nodeQueries logLeaves
+        (indices.map (fun i => 2 ^ logLeaves + i)) [(1, rq.top)] [] with
+    | none => none
+    | some (shiftedLeaves, proof) =>
+      some (List.zip indices (shiftedLeaves.map Prod.snd), proof)
+
+private theorem zip_fst_snd_eq {α β : Type} :
+    ∀ (xs : List (α × β)), List.zip (xs.map Prod.fst) (xs.map Prod.snd) = xs
+  | [] => rfl
+  | (_, _) :: tl => congrArg (List.cons _) (zip_fst_snd_eq tl)
+
+private theorem map_snd_shift_eq {D : Type} (off : Nat) :
+    ∀ (xs : List (Nat × D)), (xs.map (fun p => (off + p.1, p.2))).map Prod.snd = xs.map Prod.snd
+  | [] => rfl
+  | (_, _) :: tl => congrArg (List.cons _) (map_snd_shift_eq off tl)
+
+private theorem map_fst_shift_eq {D : Type} (off : Nat) :
+    ∀ (xs : List (Nat × D)),
+      (xs.map (fun p => (off + p.1, p.2))).map Prod.fst = (xs.map Prod.fst).map (fun i => off + i)
+  | [] => rfl
+  | (_, _) :: tl => congrArg (List.cons _) (map_fst_shift_eq off tl)
+
+private theorem extractOnlineCanopyStep_targets {D : Type} [DecidableEq D]
+    (nodeQueries : List (RecordedCanopyNodeQuery D)) (top₀ : D) :
+    ∀ (fuel : Nat) (idxs : List Nat) (parents : List (Nat × D)) (remSibs : List D)
+      (act : List (Nat × D)) (sibs : List D),
+      extractOnlineCanopyStep nodeQueries fuel idxs parents remSibs = some (act, sibs) →
+      ∀ p ∈ act, p.2 ∈ top₀ :: canopyNodeChildTargets nodeQueries
+  | 0, [], [], _, act, _, h, p, hp => by
+    simp only [extractOnlineCanopyStep, Option.some.injEq, Prod.mk.injEq] at h
+    rcases h with ⟨rfl, _⟩; nomatch hp
+  | 0, _ :: _, _, _, _, _, h, _, _ => by cases h
+  | 0, [], _ :: _, _, _, _, h, _, _ => by cases h
+  | _ + 1, [], [], _, act, _, h, p, hp => by
+    simp only [extractOnlineCanopyStep, Option.some.injEq, Prod.mk.injEq] at h
+    rcases h with ⟨rfl, _⟩; nomatch hp
+  | _ + 1, [], _ :: _, _, _, _, h, _, _ => by cases h
+  | _ + 1, [_], [], _, _, _, h, _, _ => by cases h
+  | _ + 1, [_], _ :: _ :: _, _, _, _, h, _, _ => by cases h
+  | _ + 1, [u], [(pIdx, pDig)], remSibs, act, sibs, h, p, hp => by
+    unfold extractOnlineCanopyStep at h
+    by_cases hIdx : pIdx = u >>> 1
+    · simp only [hIdx, ↓reduceIte] at h
+      cases hF : findFirst (fun q => decide (q.idx = u >>> 1) && decide (q.out = pDig)) nodeQueries with
+      | none => rw [hF] at h; cases h
+      | some q =>
+        rw [hF] at h; dsimp only at h
+        rcases mem_canopyNodeChildTargets_of_mem (findFirst_some_spec _ hF).1 with ⟨hL, hR⟩
+        by_cases hp0 : u &&& 1 = 0
+        · simp only [hp0, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+          rw [← h.1] at hp; rcases List.mem_singleton.mp hp with rfl; exact .tail _ hL
+        · simp only [hp0, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+          rw [← h.1] at hp; rcases List.mem_singleton.mp hp with rfl; exact .tail _ hR
+    · simp only [hIdx, ↓reduceIte] at h; cases h
+  | _ + 1, _ :: _ :: _, [], _, _, _, h, _, _ => by cases h
+  | fuel + 1, u :: v :: tl, (pIdx, pDig) :: restP, remSibs, act, sibs, h, p, hp => by
+    unfold extractOnlineCanopyStep at h
+    by_cases hIdx : pIdx = u >>> 1
+    · simp only [hIdx, ↓reduceIte] at h
+      by_cases hv : v = u ^^^ 1
+      · simp only [hv, ↓reduceIte] at h
+        cases hF : findFirst (fun q => decide (q.idx = u >>> 1) && decide (q.out = pDig)) nodeQueries with
+        | none => rw [hF] at h; cases h
+        | some q =>
+          rw [hF] at h
+          cases hSub : extractOnlineCanopyStep nodeQueries fuel tl restP remSibs with
+          | none => rw [hSub] at h; cases h
+          | some sub =>
+            rw [hSub] at h; simp only [Option.some.injEq, Prod.mk.injEq] at h
+            rcases mem_canopyNodeChildTargets_of_mem (findFirst_some_spec _ hF).1 with ⟨hL, hR⟩
+            rw [← h.1] at hp
+            rcases List.mem_cons.mp hp with rfl | hp1
+            · exact .tail _ hL
+            · rcases List.mem_cons.mp hp1 with rfl | hp2
+              · exact .tail _ hR
+              · exact extractOnlineCanopyStep_targets nodeQueries top₀ fuel tl restP remSibs
+                  sub.1 sub.2 hSub p hp2
+      · simp only [hv, ↓reduceIte] at h
+        cases hF : findFirst (fun q => decide (q.idx = u >>> 1) && decide (q.out = pDig)) nodeQueries with
+        | none => rw [hF] at h; cases h
+        | some q =>
+          rw [hF] at h
+          cases hSub : extractOnlineCanopyStep nodeQueries fuel (v :: tl) restP remSibs with
+          | none => rw [hSub] at h; cases h
+          | some sub =>
+            rw [hSub] at h; dsimp only at h
+            rcases mem_canopyNodeChildTargets_of_mem (findFirst_some_spec _ hF).1 with ⟨hL, hR⟩
+            by_cases hp0 : u &&& 1 = 0
+            · simp only [hp0, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+              rw [← h.1] at hp
+              rcases List.mem_cons.mp hp with rfl | hp1
+              · exact .tail _ hL
+              · exact extractOnlineCanopyStep_targets nodeQueries top₀ fuel (v :: tl) restP
+                  remSibs sub.1 sub.2 hSub p hp1
+            · simp only [hp0, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+              rw [← h.1] at hp
+              rcases List.mem_cons.mp hp with rfl | hp1
+              · exact .tail _ hR
+              · exact extractOnlineCanopyStep_targets nodeQueries top₀ fuel (v :: tl) restP
+                  remSibs sub.1 sub.2 hSub p hp1
+    · simp only [hIdx, ↓reduceIte] at h; cases h
+
+private theorem extractOnlineCanopyLevels_targets {D : Type} [DecidableEq D]
+    (nodeQueries : List (RecordedCanopyNodeQuery D)) (top₀ : D) :
+    ∀ (d : Nat) (idxs : List Nat) (act : List (Nat × D)) (sibs : List D),
+      extractOnlineCanopyLevels nodeQueries d idxs [(1, top₀)] [] = some (act, sibs) →
+      ∀ p ∈ act, p.2 ∈ top₀ :: canopyNodeChildTargets nodeQueries
+  | 0, idxs, act, sibs, h, p, hp => by
+    unfold extractOnlineCanopyLevels at h
+    by_cases hEq : idxs = [(1, top₀)].map Prod.fst
+    · simp only [hEq, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+      rw [← h.1] at hp; rcases List.mem_singleton.mp hp with rfl; exact .head _
+    · simp only [hEq, ↓reduceIte] at h; cases h
+  | d + 1, idxs, act, sibs, h, p, hp => by
+    unfold extractOnlineCanopyLevels at h; dsimp only at h
+    cases hUp : extractOnlineCanopyLevels nodeQueries d (steinerLevelStep idxs).1 [(1, top₀)] [] with
+    | none => rw [hUp] at h; cases h
+    | some up =>
+      rw [hUp] at h; dsimp only at h
+      exact extractOnlineCanopyStep_targets nodeQueries top₀ idxs.length idxs up.1 up.2 act sibs h p hp
+
+/-- `Type`-valued 5-way constructive online extraction outcome for `verifyCanopyMultiproof`. -/
+inductive OnlineCanopyOutcome {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (rootQueries : List (RecordedCanopyRootQuery D))
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (leaves : List (Nat × D)) (proof : List D) : Type where
+  | extractedEq
+      (hExt : extractOnlineCanopyOpening commitment rootQueries nodeQueries logLeaves
+        (leaves.map Prod.fst) = some (leaves, proof))
+  | rootCollision (c : CanopyRootCollision rootHash logLeaves)
+  | nodeCollision (c : CanopyNodeCollision nodeHash)
+  | unqueriedRootPreimage
+      (topU : D)
+      (hOut : rootHash logLeaves topU = commitment)
+      (hUnq : ∀ q ∈ rootQueries, ¬(q.logLeaves = logLeaves ∧ q.top = topU))
+  | unqueriedNodePreimage
+      (top₀ : D) (idxU : Nat) (lU rU outU : D)
+      (hRootMem : ∃ rq ∈ rootQueries, rq.logLeaves = logLeaves ∧ rq.top = top₀ ∧ rq.out = commitment)
+      (hOut : nodeHash idxU lU rU = outU)
+      (hMem : outU ∈ top₀ :: canopyNodeChildTargets nodeQueries)
+      (hUnq : ∀ q ∈ nodeQueries, ¬(q.idx = idxU ∧ q.left = lU ∧ q.right = rU))
+
+private inductive StepClassify {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (fuel : Nat) (active : List (Nat × D)) (sibs : List D)
+    (parents : List (Nat × D)) (remSibs : List D) : Type where
+  | ok (hExt : extractOnlineCanopyStep nodeQueries fuel (active.map Prod.fst) parents remSibs =
+      some (active, sibs))
+  | coll (c : CanopyNodeCollision nodeHash)
+  | unq (idxU : Nat) (lU rU outU : D)
+      (hOut : nodeHash idxU lU rU = outU)
+      (hMem : outU ∈ top₀ :: canopyNodeChildTargets nodeQueries)
+      (hUnq : ∀ q ∈ nodeQueries, ¬(q.idx = idxU ∧ q.left = lU ∧ q.right = rU))
+
+private def classifyCanopyStep {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (hNodeCons : ∀ q ∈ nodeQueries, nodeHash q.idx q.left q.right = q.out) :
+    (fuel : Nat) → (active : List (Nat × D)) → (sibs : List D) →
+    (parents : List (Nat × D)) → (remSibs : List D) →
+    active.length ≤ fuel →
+    canopyLevelStep nodeHash active sibs = some (parents, remSibs) →
+    (∀ p ∈ parents, p.2 ∈ top₀ :: canopyNodeChildTargets nodeQueries) →
+    StepClassify nodeHash top₀ nodeQueries fuel active sibs parents remSibs
+  | 0, active, sibs, parents, remSibs, hFuel, hStep, _ => by
+    cases active with
+    | nil =>
+      exact .ok (by
+        obtain ⟨hb, ht⟩ := canopyLevelStep_nil nodeHash hStep
+        subst hb; subst ht; rfl)
+    | cons _ _ => exact absurd hFuel (by simp)
+  | fuel + 1, [], sibs, parents, remSibs, _, hStep, _ =>
+    .ok (by
+      obtain ⟨hb, ht⟩ := canopyLevelStep_nil nodeHash hStep
+      subst hb; subst ht; rfl)
+  | fuel + 1, [(u, hu)], [], _, _, _, hStep, _ => False.elim (by cases hStep)
+  | fuel + 1, [(u, hu)], s :: afterS, parents, remSibs, _, hStep, hParTargets => by
+    have hEqStep : parents = [(u >>> 1, canopyParentHash nodeHash u hu s)] ∧ afterS = remSibs := by
+      simp only [canopyLevelStep, Option.some.injEq, Prod.mk.injEq] at hStep
+      exact ⟨hStep.1.symm, hStep.2⟩
+    let pDig := canopyParentHash nodeHash u hu s
+    let lCh := if u &&& 1 = 0 then hu else s
+    let rCh := if u &&& 1 = 0 then s else hu
+    have hHashEq : nodeHash (u >>> 1) lCh rCh = pDig := by
+      dsimp only [pDig, canopyParentHash, lCh, rCh]
+      by_cases hp : u &&& 1 = 0 <;> simp only [hp, ↓reduceIte]
+    have hMemT : pDig ∈ top₀ :: canopyNodeChildTargets nodeQueries :=
+      hParTargets (u >>> 1, pDig) (by rw [hEqStep.1]; exact .head _)
+    let pred := fun q : RecordedCanopyNodeQuery D =>
+      decide (q.idx = u >>> 1) && decide (q.out = pDig)
+    match hF : findFirst pred nodeQueries with
+    | none =>
+      refine .unq (u >>> 1) lCh rCh pDig hHashEq hMemT (fun q hq ⟨hI, hL, hR⟩ => ?_)
+      have hFalse := findFirst_none_spec pred hF q hq
+      have hOut : q.out = pDig := by rw [← hNodeCons q hq, hI, hL, hR, hHashEq]
+      dsimp only [pred] at hFalse
+      simp only [hI, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+    | some q =>
+      rcases findFirst_some_spec pred hF with ⟨hqMem, hqP⟩
+      dsimp only [pred] at hqP
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hqP
+      if hEq : (q.left, q.right) = (lCh, rCh) then
+        exact .ok (by
+          have hL : q.left = lCh := (Prod.mk.inj hEq).1
+          have hR : q.right = rCh := (Prod.mk.inj hEq).2
+          rw [hEqStep.1, hEqStep.2]
+          show extractOnlineCanopyStep nodeQueries (fuel + 1) [u] [(u >>> 1, pDig)] remSibs =
+            some ([(u, hu)], s :: remSibs)
+          unfold extractOnlineCanopyStep
+          dsimp only [pred] at hF
+          simp only [↓reduceIte, hF]
+          by_cases hp : u &&& 1 = 0 <;>
+            (dsimp only [lCh, rCh] at hL hR; simp only [hp, ↓reduceIte] at hL hR ⊢; rw [hL, hR]))
+      else
+        exact .coll ⟨u >>> 1, q.left, q.right, lCh, rCh, hEq, by
+          rw [← hqP.1, hNodeCons q hqMem, hqP.2, ← hHashEq, hqP.1]⟩
+  | fuel + 1, (u, hu) :: (v, hv) :: tl, sibs, parents, remSibs, hFuel, hStep, hParTargets => by
+    by_cases hv' : v = u ^^^ 1
+    · match hSubOpt : canopyLevelStep nodeHash tl sibs with
+      | none =>
+        exact False.elim (by
+          obtain ⟨_, hSub, _⟩ := canopyLevelStep_pair nodeHash hv' hStep
+          rw [hSubOpt] at hSub; cases hSub)
+      | some (subAct, subRem) =>
+        have hShapePair : subRem = remSibs ∧
+            parents = (u >>> 1, nodeHash (u >>> 1) hu hv) :: subAct := by
+          obtain ⟨act', hSub, hb⟩ := canopyLevelStep_pair nodeHash hv' hStep
+          rw [hSubOpt] at hSub
+          injection hSub with hPr; injection hPr with hA hR
+          subst hA; exact ⟨hR, hb⟩
+        let pDig := nodeHash (u >>> 1) hu hv
+        have hMemT : pDig ∈ top₀ :: canopyNodeChildTargets nodeQueries :=
+          hParTargets (u >>> 1, pDig) (by rw [hShapePair.2]; exact .head _)
+        have hTlFuel : tl.length ≤ fuel := by simp only [List.length_cons] at hFuel; omega
+        let pred := fun q : RecordedCanopyNodeQuery D =>
+          decide (q.idx = u >>> 1) && decide (q.out = pDig)
+        match hF : findFirst pred nodeQueries with
+        | none =>
+          refine .unq (u >>> 1) hu hv pDig rfl hMemT (fun q hq ⟨hI, hL, hR⟩ => ?_)
+          have hFalse := findFirst_none_spec pred hF q hq
+          have hOut : q.out = pDig := by rw [← hNodeCons q hq, hI, hL, hR]
+          dsimp only [pred] at hFalse
+          simp only [hI, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+        | some q =>
+          rcases findFirst_some_spec pred hF with ⟨hqMem, hqP⟩
+          dsimp only [pred] at hqP
+          simp only [Bool.and_eq_true, decide_eq_true_eq] at hqP
+          if hEq : (q.left, q.right) = (hu, hv) then
+            have hSubStep : canopyLevelStep nodeHash tl sibs = some (subAct, remSibs) := by
+              rw [← hShapePair.1]; exact hSubOpt
+            match classifyCanopyStep nodeHash top₀ nodeQueries hNodeCons fuel tl sibs subAct remSibs
+                hTlFuel hSubStep (fun p hp => hParTargets p (by rw [hShapePair.2]; exact .tail _ hp)) with
+            | .coll c => exact .coll c
+            | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+            | .ok hSubExt =>
+              exact .ok (by
+                have hL : q.left = hu := (Prod.mk.inj hEq).1
+                have hR : q.right = hv := (Prod.mk.inj hEq).2
+                rw [hShapePair.2]
+                show extractOnlineCanopyStep nodeQueries (fuel + 1) (u :: v :: tl.map Prod.fst)
+                    ((u >>> 1, pDig) :: subAct) remSibs =
+                  some ((u, hu) :: (v, hv) :: tl, sibs)
+                unfold extractOnlineCanopyStep
+                dsimp only [pred] at hF
+                simp only [↓reduceIte, hv', hF, hSubExt]
+                rw [hL, hR])
+          else
+            exact .coll ⟨u >>> 1, q.left, q.right, hu, hv, hEq, by
+              rw [← hqP.1, hNodeCons q hqMem, hqP.2]; dsimp only [pDig]; rw [hqP.1]⟩
+    · match sibs, hStep with
+      | [], hStepNil =>
+        exact False.elim (by
+          obtain ⟨_, _, _, hs, _, _⟩ := canopyLevelStep_solo nodeHash hv' hStepNil; cases hs)
+      | s :: afterSibs, hStepCons =>
+        match hSubOpt : canopyLevelStep nodeHash ((v, hv) :: tl) afterSibs with
+        | none =>
+          exact False.elim (by
+            obtain ⟨_, _, _, hs, hSub, _⟩ := canopyLevelStep_solo nodeHash hv' hStepCons
+            injection hs with _ hRestEq; subst hRestEq
+            rw [hSubOpt] at hSub; cases hSub)
+        | some (subAct, subRem) =>
+          have hShapeSolo : subRem = remSibs ∧
+              parents = (u >>> 1, canopyParentHash nodeHash u hu s) :: subAct := by
+            obtain ⟨c, rest, act', hs, hSub, hb⟩ := canopyLevelStep_solo nodeHash hv' hStepCons
+            injection hs with hcEq hRestEq; subst hcEq; subst hRestEq
+            rw [hSubOpt] at hSub
+            injection hSub with hPr; injection hPr with hA hR
+            subst hA; exact ⟨hR, hb⟩
+          let pDig := canopyParentHash nodeHash u hu s
+          let lCh := if u &&& 1 = 0 then hu else s
+          let rCh := if u &&& 1 = 0 then s else hu
+          have hHashEq : nodeHash (u >>> 1) lCh rCh = pDig := by
+            dsimp only [pDig, canopyParentHash, lCh, rCh]
+            by_cases hp : u &&& 1 = 0 <;> simp only [hp, ↓reduceIte]
+          have hMemT : pDig ∈ top₀ :: canopyNodeChildTargets nodeQueries :=
+            hParTargets (u >>> 1, pDig) (by rw [hShapeSolo.2]; exact .head _)
+          have hVTlFuel : ((v, hv) :: tl).length ≤ fuel := Nat.le_of_succ_le_succ hFuel
+          let pred := fun q : RecordedCanopyNodeQuery D =>
+            decide (q.idx = u >>> 1) && decide (q.out = pDig)
+          match hF : findFirst pred nodeQueries with
+          | none =>
+            refine .unq (u >>> 1) lCh rCh pDig hHashEq hMemT (fun q hq ⟨hI, hL, hR⟩ => ?_)
+            have hFalse := findFirst_none_spec pred hF q hq
+            have hOut : q.out = pDig := by rw [← hNodeCons q hq, hI, hL, hR, hHashEq]
+            dsimp only [pred] at hFalse
+            simp only [hI, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+          | some q =>
+            rcases findFirst_some_spec pred hF with ⟨hqMem, hqP⟩
+            dsimp only [pred] at hqP
+            simp only [Bool.and_eq_true, decide_eq_true_eq] at hqP
+            if hEq : (q.left, q.right) = (lCh, rCh) then
+              have hSubStep : canopyLevelStep nodeHash ((v, hv) :: tl) afterSibs =
+                  some (subAct, remSibs) := by rw [← hShapeSolo.1]; exact hSubOpt
+              match classifyCanopyStep nodeHash top₀ nodeQueries hNodeCons fuel ((v, hv) :: tl)
+                  afterSibs subAct remSibs hVTlFuel hSubStep
+                  (fun p hp => hParTargets p (by rw [hShapeSolo.2]; exact .tail _ hp)) with
+              | .coll c => exact .coll c
+              | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+              | .ok hSubExt =>
+                exact .ok (by
+                  have hL : q.left = lCh := (Prod.mk.inj hEq).1
+                  have hR : q.right = rCh := (Prod.mk.inj hEq).2
+                  rw [hShapeSolo.2]
+                  show extractOnlineCanopyStep nodeQueries (fuel + 1) (u :: v :: tl.map Prod.fst)
+                      ((u >>> 1, pDig) :: subAct) remSibs =
+                    some ((u, hu) :: (v, hv) :: tl, s :: afterSibs)
+                  unfold extractOnlineCanopyStep
+                  dsimp only [pred] at hF
+                  dsimp only [List.map] at hSubExt
+                  simp only [↓reduceIte, hv', hF, hSubExt]
+                  by_cases hp : u &&& 1 = 0 <;>
+                    (dsimp only [lCh, rCh] at hL hR; simp only [hp, ↓reduceIte] at hL hR ⊢; rw [hL, hR]))
+            else
+              exact .coll ⟨u >>> 1, q.left, q.right, lCh, rCh, hEq, by
+                rw [← hqP.1, hNodeCons q hqMem, hqP.2, ← hHashEq, hqP.1]⟩
+
+private inductive LevelsClassify {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (d : Nat) (active : List (Nat × D)) (sibs : List D) : Type where
+  | ok (hExt : extractOnlineCanopyLevels nodeQueries d (active.map Prod.fst) [(1, top₀)] [] =
+      some (active, sibs))
+  | coll (c : CanopyNodeCollision nodeHash)
+  | unq (idxU : Nat) (lU rU outU : D)
+      (hOut : nodeHash idxU lU rU = outU)
+      (hMem : outU ∈ top₀ :: canopyNodeChildTargets nodeQueries)
+      (hUnq : ∀ q ∈ nodeQueries, ¬(q.idx = idxU ∧ q.left = lU ∧ q.right = rU))
+
+private def classifyCanopyLevels {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (top₀ : D)
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (hNodeCons : ∀ q ∈ nodeQueries, nodeHash q.idx q.left q.right = q.out) :
+    (d : Nat) → (active : List (Nat × D)) → (sibs : List D) →
+    canopyLevels nodeHash d active sibs = some ([(1, top₀)], []) →
+    LevelsClassify nodeHash top₀ nodeQueries d active sibs
+  | 0, active, sibs, hLvls =>
+    .ok (by
+      simp only [canopyLevels, Option.some.injEq, Prod.mk.injEq] at hLvls
+      rcases hLvls with ⟨rfl, rfl⟩; rfl)
+  | d + 1, active, sibs, hLvls => by
+    match hStep : canopyLevelStep nodeHash active sibs with
+    | none =>
+      exact False.elim (by
+        obtain ⟨_, _, hs, _⟩ := canopyLevels_succ nodeHash hLvls
+        rw [hStep] at hs; cases hs)
+    | some (midAct, midSibs) =>
+      have hRest : canopyLevels nodeHash d midAct midSibs = some ([(1, top₀)], []) := by
+        obtain ⟨m, r, hs, hr⟩ := canopyLevels_succ nodeHash hLvls
+        rw [hStep] at hs; injection hs with hPr; injection hPr with hm hr'
+        subst hm; subst hr'; exact hr
+      have hShape := (canopyLevelStep_shape nodeHash _ active sibs midAct midSibs
+        (Nat.lt_succ_self _) hStep).1
+      match classifyCanopyLevels nodeHash top₀ nodeQueries hNodeCons d midAct midSibs hRest with
+      | .coll c => exact .coll c
+      | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+      | .ok hUpExt =>
+        have hUpTargets := extractOnlineCanopyLevels_targets nodeQueries top₀ d
+          (midAct.map Prod.fst) midAct midSibs hUpExt
+        match classifyCanopyStep nodeHash top₀ nodeQueries hNodeCons active.length active sibs
+            midAct midSibs (Nat.le_refl _) hStep hUpTargets with
+        | .coll c => exact .coll c
+        | .unq idxU lU rU outU hO hM hU => exact .unq idxU lU rU outU hO hM hU
+        | .ok hStepExt =>
+          exact .ok (by
+            show extractOnlineCanopyLevels nodeQueries (d + 1) (active.map Prod.fst) [(1, top₀)] [] =
+              some (active, sibs)
+            unfold extractOnlineCanopyLevels; dsimp only
+            rw [← hShape, hUpExt]; dsimp only
+            rw [List.length_map]; exact hStepExt)
+
+/-- **Constructive `Type`-valued online `CanopyMultiProof` query-table classifier**
+    (`0 Classical.choice`). -/
+def classifyOnlineCanopyOpening {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D)
+    (logLeaves : Nat) (commitment : D)
+    (rootQueries : List (RecordedCanopyRootQuery D))
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (hRootCons : ∀ q ∈ rootQueries, rootHash q.logLeaves q.top = q.out)
+    (hNodeCons : ∀ q ∈ nodeQueries, nodeHash q.idx q.left q.right = q.out)
+    (leaves : List (Nat × D)) (proof : List D)
+    (hAcc : verifyCanopyMultiproof nodeHash rootHash logLeaves commitment leaves proof = true) :
+    OnlineCanopyOutcome nodeHash rootHash logLeaves commitment rootQueries nodeQueries
+      leaves proof := by
+  match hLvlsOpt : canopyLevels nodeHash logLeaves
+      (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof with
+  | some ([(uTop, top)], []) =>
+    have hTopSpec : uTop = 1 ∧ rootHash logLeaves top = commitment := by
+      obtain ⟨top', hL, hR⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hLvlsOpt] at hL
+      injection hL with hPr; injection hPr with hList _
+      injection hList with hHead _; injection hHead with hu ht
+      subst ht; exact ⟨hu, hR⟩
+    let rPred := fun q : RecordedCanopyRootQuery D =>
+      decide (q.logLeaves = logLeaves) && decide (q.out = commitment)
+    match hRF : findFirst rPred rootQueries with
+    | none =>
+      refine .unqueriedRootPreimage top hTopSpec.2 (fun q hq ⟨hLL, hTop⟩ => ?_)
+      have hFalse := findFirst_none_spec rPred hRF q hq
+      have hOut : q.out = commitment := by rw [← hRootCons q hq, hLL, hTop, hTopSpec.2]
+      dsimp only [rPred] at hFalse
+      simp only [hLL, hOut, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+    | some rq =>
+      rcases findFirst_some_spec rPred hRF with ⟨hrqMem, hrqP⟩
+      dsimp only [rPred] at hrqP
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hrqP
+      if hTopEq : rq.top = top then
+        have hLvlsRq : canopyLevels nodeHash logLeaves
+            (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof = some ([(1, rq.top)], []) := by
+          rw [hTopEq, ← hTopSpec.1]; exact hLvlsOpt
+        match classifyCanopyLevels nodeHash rq.top nodeQueries hNodeCons logLeaves
+            (leaves.map (fun p => (2 ^ logLeaves + p.1, p.2))) proof hLvlsRq with
+        | .coll c => exact .nodeCollision c
+        | .unq idxU lU rU outU hO hM hU =>
+          exact .unqueriedNodePreimage rq.top idxU lU rU outU
+            ⟨rq, hrqMem, hrqP.1, rfl, hrqP.2⟩ hO hM hU
+        | .ok hExtLvls =>
+          exact .extractedEq (by
+            unfold extractOnlineCanopyOpening
+            rw [hRF]; dsimp only
+            rw [map_fst_shift_eq (2 ^ logLeaves) leaves] at hExtLvls
+            rw [hExtLvls]; dsimp only
+            rw [map_snd_shift_eq (2 ^ logLeaves) leaves, zip_fst_snd_eq leaves])
+      else
+        exact .rootCollision ⟨rq.top, top, hTopEq, by
+          have h1 := hRootCons rq hrqMem
+          rw [hrqP.1, hrqP.2] at h1
+          exact h1.trans hTopSpec.2.symm⟩
+  | none =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; cases hLvlsOpt)
+  | some ([], _) =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; injection hLvlsOpt with hp; injection hp with hl _; cases hl)
+  | some (_ :: _ :: _, _) =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; injection hLvlsOpt with hp; injection hp with hl _
+      injection hl with _ htl; cases htl)
+  | some ([_], _ :: _) =>
+    exact False.elim (by
+      obtain ⟨_, hL, _⟩ :=
+        canopy_accept_unpack nodeHash rootHash logLeaves commitment leaves proof hAcc
+      rw [hL] at hLvlsOpt; injection hLvlsOpt with hp; injection hp with _ hr; cases hr)
+
+/-- **Pre-challenge binding of `CanopyMultiProof` online extraction**. -/
+theorem onlineCanopy_preChallenge_unique {D : Type} [DecidableEq D]
+    (commitment : D)
+    (rootQueries : List (RecordedCanopyRootQuery D))
+    (nodeQueries : List (RecordedCanopyNodeQuery D))
+    (logLeaves : Nat) (leaves₁ leaves₂ : List (Nat × D)) (proof₁ proof₂ : List D)
+    (hIdx : leaves₁.map Prod.fst = leaves₂.map Prod.fst)
+    (h₁ : extractOnlineCanopyOpening commitment rootQueries nodeQueries logLeaves
+      (leaves₁.map Prod.fst) = some (leaves₁, proof₁))
+    (h₂ : extractOnlineCanopyOpening commitment rootQueries nodeQueries logLeaves
+      (leaves₂.map Prod.fst) = some (leaves₂, proof₂)) :
+    leaves₁ = leaves₂ ∧ proof₁ = proof₂ := by
+  rw [hIdx] at h₁
+  exact Prod.mk.inj (Option.some.inj (h₁.symm.trans h₂))
+
+
+/-! ## §3. Unitary `QVec` / `GaussInt` Quantum Online-Extraction Reduction (`qromMerkleOnlineExtractBound`) -/
+
+private theorem qsum_ofFin_eq_single (w : Nat) (y : BitVec w) :
+    qsum (2 ^ w) (fun j => if BitVec.ofFin j = y then 1 else 0) = 1 := by
+  have hCongr : qsum (2 ^ w) (fun j => if BitVec.ofFin j = y then 1 else 0) =
+      qsum (2 ^ w) (fun j => if j = y.toFin then 1 else 0) := by
+    apply qsum_congr; intro j
+    by_cases hj : j = y.toFin
+    · subst hj; simp
+    · have hne : BitVec.ofFin j ≠ y := fun he => hj (by rw [← he])
+      simp [hj, hne]
+  rw [hCongr, qsum_eq_indicator]
+
+/-- At most `ts.length` values `j : Fin (2 ^ w)` land inside any target list `ts : List (BitVec w)`. -/
+theorem qsum_ofFin_listHasElem_le_length (w : Nat) :
+    ∀ (ts : List (BitVec w)),
+      qsum (2 ^ w) (fun j => if listHasElem (BitVec.ofFin j) ts = true then 1 else 0) ≤ ts.length
+  | [] => by simp only [listHasElem_nil, Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]; omega
+  | t :: rest => by
+    have ih := qsum_ofFin_listHasElem_le_length w rest
+    have hSplit :
+        qsum (2 ^ w) (fun j => if listHasElem (BitVec.ofFin j) (t :: rest) = true then 1 else 0) ≤
+        qsum (2 ^ w) (fun j =>
+          (if BitVec.ofFin j = t then 1 else 0) +
+          (if listHasElem (BitVec.ofFin j) rest = true then 1 else 0)) := by
+      apply qsum_le_qsum; intro j
+      rw [listHasElem_cons]
+      by_cases hjt : BitVec.ofFin j = t
+      · simp [hjt]
+      · simp [hjt]
+    rw [qsum_add, qsum_ofFin_eq_single w t] at hSplit
+    simp only [List.length_cons]
+    omega
+
+/-- `QromRbrRound` for a coordinate `x = proj z` hashing into a target list of size `≤ T`
+    that is invariant under reprogramming `x`. The definition does not assert that `x` was
+    unqueried, or that the targets were extracted before a protocol challenge. -/
+def qromTargetSetRound {cardX w : Nat} (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (targetSet : (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (T : Nat)
+    (hLocal : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX) (ch : BitVec w),
+      targetSet (reprogramOracle O x ch) x = targetSet O x)
+    (hCard : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX), (targetSet O x).length ≤ T) :
+    QromRbrRound cardX w H where
+  proj := proj
+  isDoomedAt := fun _ _ => true
+  isLiveAfter := fun O x => listHasElem (O x) (targetSet O x)
+  badCard := T
+  doomed_local := fun _ _ => rfl
+  flip_bound := fun x _ => by
+    have hEq : ∀ j : Fin (2 ^ w),
+        listHasElem ((reprogramOracle H x (BitVec.ofFin j)) x)
+          (targetSet (reprogramOracle H x (BitVec.ofFin j)) x) =
+        listHasElem (BitVec.ofFin j) (targetSet H x) := by
+      intro j
+      rw [hLocal H x (BitVec.ofFin j)]
+      simp [reprogramOracle]
+    rw [qsum_congr (fun j => by rw [hEq j])]
+    exact Nat.le_trans (qsum_ofFin_listHasElem_le_length w (targetSet H x)) (hCard H x)
+
+/-- **Unitary `QVec` / `GaussInt` Target-Set Preimage Bound (`qrom_unitary_target_hit_bound`)**. -/
+theorem qrom_unitary_target_hit_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (proj : Fin cardX → Fin cardX)
+    (targetSet : (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (T : Nat)
+    (hLocal : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX) (ch : BitVec w),
+      targetSet (reprogramOracle O x ch) x = targetSet O x)
+    (hCard : ∀ (O : Fin cardX → BitVec w) (x : Fin cardX), (targetSet O x).length ≤ T) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    let live := fun (O : Fin cardX → BitVec w) (x : Fin cardX) => listHasElem (O x) (targetSet O x)
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H =>
+          qromOrdinaryFlipMass A H proj (fun _ _ => true) live),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * T, 2 ^ w, Nat.two_pow_pos w⟩ :=
+  qrom_uniform_oracle_round_bound A
+    (fun H => qromTargetSetRound H proj targetSet T hLocal hCard)
+    proj (fun _ _ => true) (fun O x => listHasElem (O x) (targetSet O x)) T
+    (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl)
+
+private theorem twoQ_plus_one_sq_le_eight_Q_succ_sq (Q : Nat) :
+    (2 * Q + 1) ^ 2 ≤ 8 * (Q + 1) ^ 2 := by
+  have h1 : 2 * Q + 1 ≤ 2 * (Q + 1) := by omega
+  have h2 : (2 * Q + 1) ^ 2 ≤ (2 * (Q + 1)) ^ 2 := Nat.pow_le_pow_left h1 2
+  have h3 : (2 * (Q + 1)) ^ 2 = 4 * (Q + 1) ^ 2 := by rw [Nat.mul_pow]
+  rw [h3] at h2
+  exact Nat.le_trans h2 (Nat.mul_le_mul_right ((Q + 1) ^ 2) (by decide : 4 ≤ 8))
+
+private theorem twoQ_plus_one_cube_le_eight_Q_succ_cube (Q : Nat) :
+    (2 * Q + 1) ^ 2 * (2 * Q + 1) ≤ 8 * (Q + 1) ^ 3 := by
+  have hPow : (2 * Q + 1) ^ 2 * (2 * Q + 1) = (2 * Q + 1) ^ 3 := (Nat.pow_succ (2 * Q + 1) 2).symm
+  have h1 : 2 * Q + 1 ≤ 2 * (Q + 1) := by omega
+  have h2 : (2 * Q + 1) ^ 3 ≤ (2 * (Q + 1)) ^ 3 := Nat.pow_le_pow_left h1 3
+  have h3 : (2 * (Q + 1)) ^ 3 = 8 * (Q + 1) ^ 3 := by rw [Nat.mul_pow]
+  rw [hPow, ← h3]; exact h2
+
+/-- Exact algebraic dominance of `qromMerkleOnlineExtractBound numRoots w Q` over the unitary
+    Measure-and-Reprogram bound `(2Q + 1)^2 * (numRoots * (1 + (2Q + 1))) / 2^w`. -/
+theorem unitary_merkle_raw_le_qromMerkleOnlineExtractBound (numRoots w Q : Nat) :
+    RatBound.le
+      ⟨(2 * Q + 1) ^ 2 * (numRoots * (1 + (2 * Q + 1))), 2 ^ w, Nat.two_pow_pos w⟩
+      (qromMerkleOnlineExtractBound numRoots w Q) := by
+  unfold qromMerkleOnlineExtractBound RatBound.scale RatBound.add
+    quantumGroverSingleTargetBound quantumZhandryMultiTargetBound quantumBhtCollisionBound
+    RatBound.le
+  dsimp only
+  have hPerRoot :
+      (2 * Q + 1) ^ 2 * (1 + (2 * Q + 1)) ≤
+        8 * 1 * (Q + 1) ^ 2 + 8 * (Q + 1) ^ 3 := by
+    rw [Nat.mul_add, Nat.mul_one, show 8 * 1 = 8 from rfl]
+    exact Nat.add_le_add (twoQ_plus_one_sq_le_eight_Q_succ_sq Q)
+      (twoQ_plus_one_cube_le_eight_Q_succ_cube Q)
+  have hScaled :
+      (2 * Q + 1) ^ 2 * (numRoots * (1 + (2 * Q + 1))) ≤
+        numRoots * (8 * 1 * (Q + 1) ^ 2 + 8 * (Q + 1) ^ 3) := by
+    rw [← Nat.mul_assoc, Nat.mul_comm ((2 * Q + 1) ^ 2) numRoots, Nat.mul_assoc]
+    exact Nat.mul_le_mul_left numRoots hPerRoot
+  let S := 8 * 1 * (Q + 1) ^ 2 + 8 * (Q + 1) ^ 3
+  let W := 2 ^ w
+  have hRhsEq :
+      numRoots * (8 * 1 * (Q + 1) ^ 2 * W + 8 * (Q + 1) ^ 3 * W) * W =
+      numRoots * S * (W * W) := by
+    dsimp only [S]
+    rw [← Nat.add_mul (8 * 1 * (Q + 1) ^ 2) (8 * (Q + 1) ^ 3) W,
+        ← Nat.mul_assoc numRoots _ W,
+        Nat.mul_assoc (numRoots * _) W W]
+  change (2 * Q + 1) ^ 2 * (numRoots * (1 + (2 * Q + 1))) * (W * W) ≤
+    numRoots * (8 * 1 * (Q + 1) ^ 2 * W + 8 * (Q + 1) ^ 3 * W) * W
+  rw [hRhsEq]
+  exact Nat.mul_le_mul_right (W * W) hScaled
+
+/-- Conditional target-hit union bound with the arithmetic Merkle extraction budget.
+    `failExtract` is an arbitrary event. A protocol reduction must supply `hCover`, `hLocal`,
+    and `hCard`; this theorem neither constructs a query table nor relates that event to
+    `classifyOnlineMerkleOpening` or `classifyOnlineCanopyOpening`. -/
+theorem qrom_unitary_multiRoot_merkle_extract_bound {cardX w cardAnc Q : Nat}
+    (numRoots : Nat)
+    (A : QuantumAdv cardX w cardAnc Q)
+    (failExtract : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (proj : Fin (2 * numRoots) → Fin cardX → Fin cardX)
+    (targetSet : Fin (2 * numRoots) → (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (hLocal : ∀ r O x ch, targetSet r (reprogramOracle O x ch) x = targetSet r O x)
+    (hCard : ∀ r O x,
+      (targetSet r O x).length ≤ (if r.1 % 2 = 0 then 1 else 2 * Q + 1))
+    (hCover : ∀ H, QVec.queryMassOn (failExtract H) (runQuantumAdv A H) ≤
+      qsum (2 * numRoots) (fun r =>
+        qromOrdinaryFlipMass A H (proj r) (fun _ _ => true)
+          (fun O x => listHasElem (O x) (targetSet r O x)))) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (failExtract H) (runQuantumAdv A H)),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (qromMerkleOnlineExtractBound numRoots w Q) := by
+  let bad : Fin (2 * numRoots) → Nat := fun r => if r.1 % 2 = 0 then 1 else 2 * Q + 1
+  have hUnion := qrom_uniform_oracle_success_bound A failExtract
+    (fun r H => qromTargetSetRound H (proj r) (targetSet r) (bad r) (hLocal r) (hCard r))
+    proj (fun _ _ _ => true) (fun r O x => listHasElem (O x) (targetSet r O x)) bad
+    (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) hCover
+  have hSumBad : ∀ m : Nat,
+      qsum (2 * m) (fun r : Fin (2 * m) => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+        m * (1 + (2 * Q + 1)) := by
+    intro m
+    induction m with
+    | zero => simp [qsum_zero]
+    | succ k ih =>
+      let C := 1 + (2 * Q + 1)
+      have hStep2 : ∀ (n : Nat), n = 2 * k →
+          qsum (n + 2) (fun r : Fin (n + 2) => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+            C + qsum n (fun r : Fin n => if r.1 % 2 = 0 then 1 else 2 * Q + 1) := by
+        intro n _
+        change qsum ((n + 1) + 1) _ = _
+        simp only [qsum_succ]
+        have h1 : (0 + 1 : Nat) % 2 = 1 := rfl
+        have hMod : ∀ (i : Fin n), (i.1 + 1 + 1) % 2 = i.1 % 2 := fun _ => by omega
+        rw [qsum_congr (fun i => by rw [hMod i])]
+        simp only [h1, Nat.one_ne_zero, ↓reduceIte]
+        dsimp only [C]
+        omega
+      have hEq2 : 2 * (k + 1) = 2 * k + 2 := by omega
+      have hGen : ∀ (N : Nat), N = 2 * k + 2 →
+          qsum N (fun r : Fin N => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+            (k + 1) * C := by
+        intro N hN; subst hN
+        rw [hStep2 (2 * k) rfl, Nat.succ_mul k C]
+        change C + qsum (2 * k) (fun r : Fin (2 * k) => if r.1 % 2 = 0 then 1 else 2 * Q + 1) =
+          k * C + C
+        rw [ih]
+        exact Nat.add_comm C (k * C)
+      exact hGen (2 * (k + 1)) hEq2
+  have hBadEq : qsum (2 * numRoots) bad = numRoots * (1 + (2 * Q + 1)) := hSumBad numRoots
+  rw [hBadEq] at hUnion
+  exact RatBound.le_trans hUnion (unitary_merkle_raw_le_qromMerkleOnlineExtractBound numRoots w Q)
+
+/-- Single-root specialization (`numRoots = 1`) of `qrom_unitary_multiRoot_merkle_extract_bound`. -/
+theorem qrom_unitary_single_root_merkle_extract_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (failExtract : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (proj : Fin 2 → Fin cardX → Fin cardX)
+    (targetSet : Fin 2 → (Fin cardX → BitVec w) → Fin cardX → List (BitVec w))
+    (hLocal : ∀ r O x ch, targetSet r (reprogramOracle O x ch) x = targetSet r O x)
+    (hCard : ∀ r O x, (targetSet r O x).length ≤ (if r.1 % 2 = 0 then 1 else 2 * Q + 1))
+    (hCover : ∀ H, QVec.queryMassOn (failExtract H) (runQuantumAdv A H) ≤
+      qsum 2 (fun r =>
+        qromOrdinaryFlipMass A H (proj r) (fun _ _ => true)
+          (fun O x => listHasElem (O x) (targetSet r O x)))) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (failExtract H) (runQuantumAdv A H)),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (qromMerkleOnlineExtractBound 1 w Q) :=
+  qrom_unitary_multiRoot_merkle_extract_bound 1 A failExtract proj targetSet hLocal hCard hCover
+
+end Qsag
+
+
+namespace Qsag
+
+set_option autoImplicit false
+
+/-- A genuine measured-query interface: branch `x` is obtained by projecting the actual
+    post-oracle state onto the observed query address. It is not an unobserved query log. -/
+def measuredOracleQueryBranch {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (ψ : QVec cardX w cardAnc) (x : Fin cardX) :
+    QVec cardX w cardAnc := projSingle x (oracleXor H ψ)
+
+/-- The measured branches have exactly the input query weights and conserve total mass.
+    This supplies probabilities for an explicit measurement instrument; it does not identify
+    the instrument with the original coherent execution. -/
+theorem measuredOracleQueryBranch_mass {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (ψ : QVec cardX w cardAnc) :
+    (∀ x, QVec.stateNormSq (measuredOracleQueryBranch H ψ x) = QVec.queryWeight ψ x) ∧
+    qsum cardX (fun x => QVec.stateNormSq (measuredOracleQueryBranch H ψ x)) =
+      QVec.stateNormSq ψ := by
+  have h : ∀ x, QVec.stateNormSq (measuredOracleQueryBranch H ψ x) =
+      QVec.queryWeight ψ x := fun x => by
+    rw [measuredOracleQueryBranch, projSingle_normSq, oracleXor_queryWeight]
+  exact ⟨h, qsum_congr h⟩
+
+/-- When a query's response register starts at zero, measuring its address and answer
+    produces an oracle-consistent classical record. This is a positive bridge to classical
+    query-table consistency for explicitly measured executions, not for arbitrary QROM runs. -/
+theorem measuredOracleQueryBranch_consistent {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (ψ : QVec cardX w cardAnc)
+    (hZero : ∀ x y a, y.val ≠ 0 → ψ x y a = GaussInt.zero)
+    (recorded x : Fin cardX) (y : Fin (2 ^ w)) (a : Fin cardAnc)
+    (hMass : measuredOracleQueryBranch H ψ recorded x y a ≠ GaussInt.zero) :
+    x = recorded ∧ BitVec.ofFin y = H recorded := by
+  have hx : x = recorded := by
+    by_cases heq : x = recorded
+    · exact heq
+    · exact False.elim (hMass (by simp [measuredOracleQueryBranch, projSingle, heq]))
+  subst hx
+  have hAnsZero : (xorFin y (H x)).val = 0 := by
+    by_cases heq : (xorFin y (H x)).val = 0
+    · exact heq
+    · exact False.elim (hMass (by
+        simp only [measuredOracleQueryBranch, projSingle, ↓reduceIte, oracleXor]
+        exact hZero x (xorFin y (H x)) a heq))
+  have hFinZero : xorFin y (H x) = (0 : Fin (2 ^ w)) := Fin.ext hAnsZero
+  have hInv := congrArg (fun z => xorFin z (H x)) hFinZero
+  rw [xorFin_involutive] at hInv
+  have hZeroXor : (0#w ^^^ H x) = H x := by
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [BitVec.getLsbD_xor, BitVec.getLsbD_zero, Bool.false_xor]
+  have hOutput : y = (H x).toFin := by
+    change y = (0#w ^^^ H x).toFin at hInv
+    rw [hZeroXor] at hInv
+    exact hInv
+  exact ⟨rfl, by rw [hOutput, BitVec.ofFin_toFin]⟩
+
+/-- An observed zero-response oracle query supplies the classical classifier's actual
+    `merkleQueryConsistent` premise for a chosen compression-input encoding. This lemma
+    only establishes record consistency: injective domain encoding, sequential recording,
+    pre-challenge timing, and disturbance bounds remain separate obligations. -/
+theorem measuredOracleQuery_merkle_record_consistent {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w)
+    (encode : Nat → Nat → BitVec w → BitVec w → Fin cardX)
+    (ψ : QVec cardX w cardAnc)
+    (hZero : ∀ x y a, y.val ≠ 0 → ψ x y a = GaussInt.zero)
+    (lvl node : Nat) (left right : BitVec w)
+    (y : Fin (2 ^ w)) (a : Fin cardAnc)
+    (hMass : measuredOracleQueryBranch H ψ (encode lvl node left right)
+      (encode lvl node left right) y a ≠ GaussInt.zero) :
+    merkleQueryConsistent (fun l n u v => H (encode l n u v))
+      ⟨lvl, node, left, right, BitVec.ofFin y⟩ :=
+  (measuredOracleQueryBranch_consistent H ψ hZero
+    (encode lvl node left right) (encode lvl node left right) y a hMass).2.symm
+
+
+end Qsag
+
+
+namespace Qsag
+
+set_option autoImplicit false
+
+/-! ## Sums over query logs -/
+
+/-- Sum over every query log of length `t`, each occurring once; the head is the most
+    recent address. -/
+def sumLogs (cardX : Nat) : (t : Nat) → (List (Fin cardX) → Nat) → Nat
+  | 0, f => f []
+  | t + 1, f => qsum cardX (fun x => sumLogs cardX t (fun xs => f (x :: xs)))
+
+theorem sumLogs_le_of_length (cardX : Nat) : ∀ (t : Nat) (f g : List (Fin cardX) → Nat),
+    (∀ xs, xs.length = t → f xs ≤ g xs) → sumLogs cardX t f ≤ sumLogs cardX t g
+  | 0, _, _, h => h [] rfl
+  | t + 1, _, _, h => qsum_le_qsum (fun x => sumLogs_le_of_length cardX t _ _
+      (fun xs hx => h (x :: xs) (congrArg Nat.succ hx)))
+
+theorem sumLogs_congr (cardX : Nat) : ∀ (t : Nat) (f g : List (Fin cardX) → Nat),
+    (∀ xs, f xs = g xs) → sumLogs cardX t f = sumLogs cardX t g
+  | 0, _, _, h => h []
+  | t + 1, _, _, h => qsum_congr (fun x => sumLogs_congr cardX t _ _ (fun xs => h (x :: xs)))
+
+theorem sumLogs_add (cardX : Nat) : ∀ (t : Nat) (f g : List (Fin cardX) → Nat),
+    sumLogs cardX t (fun xs => f xs + g xs) = sumLogs cardX t f + sumLogs cardX t g
+  | 0, _, _ => rfl
+  | t + 1, f, g =>
+    (qsum_congr (fun x => sumLogs_add cardX t (fun xs => f (x :: xs))
+      (fun xs => g (x :: xs)))).trans (qsum_add _ _)
+
+theorem sumLogs_mul (cardX : Nat) : ∀ (t c : Nat) (f : List (Fin cardX) → Nat),
+    sumLogs cardX t (fun xs => c * f xs) = c * sumLogs cardX t f
+  | 0, _, _ => rfl
+  | t + 1, c, f =>
+    (qsum_congr (fun x => sumLogs_mul cardX t c (fun xs => f (x :: xs)))).trans
+      (qsum_mul_left c _)
+
+theorem sumLogs_qsum (cardX : Nat) : ∀ (t k : Nat) (f : List (Fin cardX) → Fin k → Nat),
+    sumLogs cardX t (fun xs => qsum k (fun j => f xs j)) =
+      qsum k (fun j => sumLogs cardX t (fun xs => f xs j))
+  | 0, _, _ => rfl
+  | t + 1, k, f =>
+    (qsum_congr (fun x => sumLogs_qsum cardX t k (fun xs j => f (x :: xs) j))).trans
+      (qsum_comm cardX k (fun x j => sumLogs cardX t (fun xs => f (x :: xs) j)))
+
+theorem uniformOracleSum_sumLogs (w n cardX : Nat) : ∀ (t : Nat)
+    (f : (Fin n → BitVec w) → List (Fin cardX) → Nat),
+    uniformOracleSum w n (fun H => sumLogs cardX t (f H)) =
+      sumLogs cardX t (fun xs => uniformOracleSum w n (fun H => f H xs))
+  | 0, _ => rfl
+  | t + 1, f =>
+    (uniformOracleSum_qsum w n cardX
+      (fun H x => sumLogs cardX t (fun xs => f H (x :: xs)))).trans
+      (qsum_congr (fun x => uniformOracleSum_sumLogs w n cardX t (fun H xs => f H (x :: xs))))
+
+theorem uniformOracleSum_add (w : Nat) : ∀ (n : Nat) (f g : (Fin n → BitVec w) → Nat),
+    uniformOracleSum w n (fun H => f H + g H) =
+      uniformOracleSum w n f + uniformOracleSum w n g
+  | 0, _, _ => rfl
+  | n + 1, f, g => by
+    show qsum (2 ^ w) (fun j => uniformOracleSum w n (fun H =>
+        f (Fin.cases (BitVec.ofFin j) H) + g (Fin.cases (BitVec.ofFin j) H))) =
+      qsum (2 ^ w) (fun j => uniformOracleSum w n (fun H => f (Fin.cases (BitVec.ofFin j) H))) +
+      qsum (2 ^ w) (fun j => uniformOracleSum w n (fun H => g (Fin.cases (BitVec.ofFin j) H)))
+    rw [← qsum_add]
+    exact qsum_congr (fun j => uniformOracleSum_add w n _ _)
+
+/-! ## Point reprogramming -/
+
+theorem reprogramOracle_self {n w : Nat} (H : Fin n → BitVec w) (x : Fin n) (ch : BitVec w) :
+    reprogramOracle H x ch x = ch := ite_eq_left rfl
+
+theorem reprogramOracle_of_ne {n w : Nat} (H : Fin n → BitVec w) (x : Fin n) (ch : BitVec w)
+    (y : Fin n) (h : y ≠ x) : reprogramOracle H x ch y = H y := ite_eq_right h
+
+theorem reprogramOracle_undo {n w : Nat} (H : Fin n → BitVec w) (x : Fin n) (ch : BitVec w) :
+    reprogramOracle (reprogramOracle H x ch) x (H x) = H := by
+  funext y
+  by_cases hy : y = x
+  · rw [hy]; exact reprogramOracle_self _ _ _
+  · rw [reprogramOracle_of_ne _ _ _ _ hy, reprogramOracle_of_ne _ _ _ _ hy]
+
+theorem bool_not_eq_true {b : Bool} (h : (!b) = true) : b = false := by
+  cases b
+  · rfl
+  · cases h
+
+theorem map_reprogram_of_fresh {n w : Nat} (H : Fin n → BitVec w) (x : Fin n)
+    (ch : BitVec w) : ∀ (xs : List (Fin n)), listHasElem x xs = false →
+      xs.map (reprogramOracle H x ch) = xs.map H
+  | [], _ => rfl
+  | y :: ys, h => by
+    have hyx : y ≠ x := fun he =>
+      Bool.noConfusion (h.symm.trans ((listHasElem_eq_true_iff x (y :: ys)).mpr (he ▸ .head ys)))
+    have hTail : listHasElem x ys = false := by
+      cases hc : listHasElem x ys
+      · rfl
+      · exact Bool.noConfusion (h.symm.trans ((listHasElem_eq_true_iff x (y :: ys)).mpr
+          (.tail y ((listHasElem_eq_true_iff x ys).mp hc))))
+    show reprogramOracle H x ch y :: ys.map (reprogramOracle H x ch) = H y :: ys.map H
+    rw [reprogramOracle_of_ne _ _ _ _ hyx, map_reprogram_of_fresh H x ch ys hTail]
+
+/-- Lazy sampling at a single oracle-dependent address. The address `p H`, the flag `ok H`,
+    the target list `T H` and the weight `W H` must not read the oracle at `p H`. Then the
+    answer at `p H` lands in `T H` with weight at most `K / 2^w` of the total weight. -/
+theorem uniform_fresh_point_bound (w n : Nat)
+    (p : (Fin n → BitVec w) → Fin n) (ok : (Fin n → BitVec w) → Bool)
+    (T : (Fin n → BitVec w) → List (BitVec w)) (W : (Fin n → BitVec w) → Nat) (K : Nat)
+    (hp : ∀ H ch, p (reprogramOracle H (p H) ch) = p H)
+    (hok : ∀ H ch, ok (reprogramOracle H (p H) ch) = ok H)
+    (hT : ∀ H ch, ok H = true → T (reprogramOracle H (p H) ch) = T H)
+    (hW : ∀ H ch, ok H = true → W (reprogramOracle H (p H) ch) = W H)
+    (hK : ∀ H, ok H = true → (T H).length ≤ K) :
+    2 ^ w * uniformOracleSum w n (fun H =>
+      if (ok H && listHasElem (H (p H)) (T H)) = true then W H else 0) ≤
+      K * uniformOracleSum w n W := by
+  let g : (Fin n → BitVec w) → Nat := fun H =>
+    if (ok H && listHasElem (H (p H)) (T H)) = true then W H else 0
+  let f : Fin n → (Fin n → BitVec w) → Nat := fun x H => if x = p H then g H else 0
+  have hDecomp : ∀ H, g H = qsum n (fun x => f x H) :=
+    fun H => (qsum_ite_eq n (p H) (g H)).symm
+  have hIff : ∀ H x ch, x = p (reprogramOracle H x ch) → x = p H := by
+    intro H x ch hx
+    have h := hp (reprogramOracle H x ch) (H x)
+    rw [← hx, reprogramOracle_undo] at h
+    exact h.symm
+  have hPt : ∀ x H, qsum (2 ^ w) (fun j => f x (reprogramOracle H x (BitVec.ofFin j))) ≤
+      (if x = p H then K * W H else 0) := by
+    intro x H
+    by_cases hx : x = p H
+    · subst hx
+      rw [ite_eq_left rfl]
+      cases hOk : ok H with
+      | false =>
+        have hz : ∀ j : Fin (2 ^ w),
+            f (p H) (reprogramOracle H (p H) (BitVec.ofFin j)) = 0 := by
+          intro j
+          simp only [f, g, hp H _, hok H _, hOk, Bool.false_and, Bool.false_eq_true,
+            ↓reduceIte]
+        rw [qsum_congr hz, qsum_const, Nat.mul_zero]
+        exact Nat.zero_le _
+      | true =>
+        have hEq : ∀ j : Fin (2 ^ w),
+            f (p H) (reprogramOracle H (p H) (BitVec.ofFin j)) =
+              (if listHasElem (BitVec.ofFin j) (T H) = true then 1 else 0) * W H := by
+          intro j
+          simp only [f, g, hp H _, hok H _, hOk, hT H _ hOk, hW H _ hOk,
+            reprogramOracle_self, Bool.true_and, ↓reduceIte]
+          cases listHasElem (BitVec.ofFin j) (T H)
+          · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul]
+          · simp only [↓reduceIte, Nat.one_mul]
+        rw [qsum_congr hEq, qsum_mul_right]
+        exact Nat.mul_le_mul_right _
+          (Nat.le_trans (qsum_ofFin_listHasElem_le_length w (T H)) (hK H hOk))
+    · rw [ite_eq_right hx]
+      have hz : ∀ j : Fin (2 ^ w), f x (reprogramOracle H x (BitVec.ofFin j)) = 0 :=
+        fun j => ite_eq_right (fun h => hx (hIff H x _ h))
+      rw [qsum_congr hz, qsum_const, Nat.mul_zero]
+      exact Nat.le_refl 0
+  have h1 : 2 ^ w * uniformOracleSum w n g =
+      qsum n (fun x => uniformOracleSum w n (fun H =>
+        qsum (2 ^ w) (fun j => f x (reprogramOracle H x (BitVec.ofFin j))))) := by
+    rw [uniformOracleSum_congr w n g _ hDecomp, uniformOracleSum_qsum w n n (fun H x => f x H),
+      ← qsum_mul_left]
+    exact qsum_congr (fun x => (uniformOracleSum_resample w n x (f x)).symm)
+  have h2 : qsum n (fun x => uniformOracleSum w n (fun H =>
+        qsum (2 ^ w) (fun j => f x (reprogramOracle H x (BitVec.ofFin j))))) ≤
+      qsum n (fun x => uniformOracleSum w n (fun H => if x = p H then K * W H else 0)) :=
+    qsum_le_qsum (fun x => uniformOracleSum_le w n _ _ (hPt x))
+  have h3 : qsum n (fun x => uniformOracleSum w n (fun H =>
+        if x = p H then K * W H else 0)) = K * uniformOracleSum w n W := by
+    rw [← uniformOracleSum_qsum w n n (fun H x => if x = p H then K * W H else 0),
+      uniformOracleSum_congr w n _ _ (fun H => qsum_ite_eq n (p H) (K * W H)),
+      uniformOracleSum_mul]
+  show 2 ^ w * uniformOracleSum w n g ≤ K * uniformOracleSum w n W
+  rw [h1, ← h3]
+  exact h2
+
+/-! ## The measured-query experiment -/
+
+/-- Unnormalized branch state after `t` oracle calls whose query addresses were measured
+    right after the oracle acted, with outcomes `xs` (most recent first). A log of the wrong
+    length is the zero branch (length 0 ignores the log). -/
+def measuredStateAt {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) : (t : Nat) → t ≤ q → List (Fin cardX) → QVec cardX w cardAnc
+  | 0, _, _ => A.init
+  | _ + 1, _, [] => QVec.zero cardX w cardAnc
+  | t + 1, ht, x :: xs =>
+    (A.steps ⟨t, ht⟩).apply
+      (measuredOracleQueryBranch H (measuredStateAt A H t (Nat.le_of_succ_le ht) xs) x)
+
+/-- A measured branch reads the oracle only at its measured addresses. -/
+theorem measuredStateAt_congr {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H H' : Fin cardX → BitVec w) : ∀ (t : Nat) (ht : t ≤ q) (xs : List (Fin cardX)),
+    (∀ x ∈ xs, H x = H' x) → measuredStateAt A H t ht xs = measuredStateAt A H' t ht xs
+  | 0, _, _, _ => rfl
+  | _ + 1, _, [], _ => rfl
+  | t + 1, ht, x :: xs, h => by
+    have ih := measuredStateAt_congr A H H' t (Nat.le_of_succ_le ht) xs
+      (fun y hy => h y (.tail x hy))
+    have hx : H x = H' x := h x (.head xs)
+    show (A.steps ⟨t, ht⟩).apply (measuredOracleQueryBranch H
+        (measuredStateAt A H t (Nat.le_of_succ_le ht) xs) x) =
+      (A.steps ⟨t, ht⟩).apply (measuredOracleQueryBranch H'
+        (measuredStateAt A H' t (Nat.le_of_succ_le ht) xs) x)
+    rw [ih]
+    refine congrArg (A.steps ⟨t, ht⟩).apply ?_
+    funext x' y a
+    simp only [measuredOracleQueryBranch, projSingle, oracleXor]
+    by_cases hxx : x' = x
+    · rw [ite_eq_left hxx, ite_eq_left hxx, hxx, hx]
+    · rw [ite_eq_right hxx, ite_eq_right hxx]
+
+/-- Born mass of one further measured query: the branch for outcome `x` carries the step
+    scale times the pre-query weight of `x`. The oracle answer does not enter. -/
+theorem measuredStateAt_succ_normSq {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    (t : Nat) (ht : t + 1 ≤ q) (x : Fin cardX) (xs : List (Fin cardX)) :
+    QVec.stateNormSq (measuredStateAt A H (t + 1) ht (x :: xs)) =
+      (A.steps ⟨t, ht⟩).scaleSq *
+        QVec.queryWeight (measuredStateAt A H t (Nat.le_of_succ_le ht) xs) x := by
+  show QVec.stateNormSq ((A.steps ⟨t, ht⟩).apply (measuredOracleQueryBranch H
+    (measuredStateAt A H t (Nat.le_of_succ_le ht) xs) x)) = _
+  rw [(A.steps ⟨t, ht⟩).normSq_eq, (measuredOracleQueryBranch_mass H _).1 x]
+
+theorem measuredStateAt_step_mass {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w)
+    (t : Nat) (ht : t + 1 ≤ q) (xs : List (Fin cardX)) :
+    qsum cardX (fun x => QVec.stateNormSq (measuredStateAt A H (t + 1) ht (x :: xs))) =
+      (A.steps ⟨t, ht⟩).scaleSq *
+        QVec.stateNormSq (measuredStateAt A H t (Nat.le_of_succ_le ht) xs) := by
+  rw [qsum_congr (fun x => measuredStateAt_succ_normSq A H t ht x xs), qsum_mul_left]
+  rfl
+
+/-- The measured branches conserve the adversary's oracle-independent total mass, the same
+    value as `runQuantumAdv_normSq` gives for the coherent execution. -/
+theorem measuredStateAt_total_mass {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w) :
+    ∀ (t : Nat) (ht : t ≤ q),
+      sumLogs cardX t (fun xs => QVec.stateNormSq (measuredStateAt A H t ht xs)) =
+        prefixScale A t ht * QVec.stateNormSq A.init
+  | 0, _ => (Nat.one_mul _).symm
+  | t + 1, ht => by
+    have hSwap := sumLogs_qsum cardX t cardX
+      (fun xs x => QVec.stateNormSq (measuredStateAt A H (t + 1) ht (x :: xs)))
+    show qsum cardX (fun x => sumLogs cardX t (fun xs =>
+      QVec.stateNormSq (measuredStateAt A H (t + 1) ht (x :: xs)))) = _
+    rw [← hSwap, sumLogs_congr cardX t _ _ (fun xs => measuredStateAt_step_mass A H t ht xs),
+      sumLogs_mul, measuredStateAt_total_mass A H t (Nat.le_of_succ_le ht)]
+    exact (Nat.mul_assoc _ _ _).symm
+
+/-- Output-register mass summed over all outputs of one branch is the branch mass. -/
+private theorem qsum_queryWeight_eq {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) :
+    qsum cardX (fun o => QVec.queryWeight ψ o) = QVec.stateNormSq ψ := rfl
+
+/-- **Fresh-address target bound for the measured experiment.** The tested address
+    `point H xs o` is computed from the query log `xs` and the final measured output `o`,
+    possibly reading the oracle elsewhere. If that address is not in the log, its answer
+    lies in the reprogramming-local list `targets H xs o` (at most `K` entries) with total
+    mass at most `K / 2^w` of the oracle-averaged total mass. -/
+theorem measured_fresh_target_hit_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (point : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Fin cardX)
+    (targets : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → List (BitVec w))
+    (K : Nat)
+    (hPoint : ∀ H xs o ch,
+      point (reprogramOracle H (point H xs o) ch) xs o = point H xs o)
+    (hTargets : ∀ H xs o ch, listHasElem (point H xs o) xs = false →
+      targets (reprogramOracle H (point H xs o) ch) xs o = targets H xs o)
+    (hCard : ∀ H xs o, xs.length = Q → (targets H xs o).length ≤ K) :
+    2 ^ w * uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (fun o => !listHasElem (point H xs o) xs &&
+            listHasElem (H (point H xs o)) (targets H xs o))
+          (measuredStateAt A H Q (Nat.le_refl Q) xs))) ≤
+      K * ((2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init)) := by
+  let Wt : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Nat := fun H xs o =>
+    QVec.queryWeight (measuredStateAt A H Q (Nat.le_refl Q) xs) o
+  let G : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Nat := fun H xs o =>
+    if (!listHasElem (point H xs o) xs &&
+      listHasElem (H (point H xs o)) (targets H xs o)) = true then Wt H xs o else 0
+  have hCell : ∀ xs o, xs.length = Q →
+      2 ^ w * uniformOracleSum w cardX (fun H => G H xs o) ≤
+        K * uniformOracleSum w cardX (fun H => Wt H xs o) := by
+    intro xs o hLen
+    refine uniform_fresh_point_bound w cardX (fun H => point H xs o)
+      (fun H => !listHasElem (point H xs o) xs) (fun H => targets H xs o)
+      (fun H => Wt H xs o) K (fun H ch => hPoint H xs o ch) ?_ ?_ ?_ ?_
+    · intro H ch
+      show (!listHasElem (point (reprogramOracle H (point H xs o) ch) xs o) xs) = _
+      rw [hPoint]
+    · intro H ch hOk
+      exact hTargets H xs o ch (bool_not_eq_true hOk)
+    · intro H ch hOk
+      have hFresh := bool_not_eq_true hOk
+      refine congrArg (fun ψ => QVec.queryWeight ψ o)
+        (measuredStateAt_congr A _ H Q (Nat.le_refl Q) xs (fun y hy => ?_))
+      refine reprogramOracle_of_ne _ _ _ _ (fun he => ?_)
+      exact Bool.noConfusion (hFresh.symm.trans
+        ((listHasElem_eq_true_iff (point H xs o) xs).mpr (he ▸ hy)))
+    · intro H _
+      exact hCard H xs o hLen
+  have hL : uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        qsum cardX (fun o => G H xs o))) =
+      sumLogs cardX Q (fun xs => qsum cardX (fun o =>
+        uniformOracleSum w cardX (fun H => G H xs o))) :=
+    (uniformOracleSum_sumLogs w cardX cardX Q (fun H xs => qsum cardX (fun o => G H xs o))).trans
+      (sumLogs_congr cardX Q _ _ (fun xs =>
+        uniformOracleSum_qsum w cardX cardX (fun H o => G H xs o)))
+  have hTot : ∀ H, sumLogs cardX Q (fun xs => qsum cardX (fun o => Wt H xs o)) =
+      prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init :=
+    fun H => measuredStateAt_total_mass A H Q (Nat.le_refl Q)
+  have hR : sumLogs cardX Q (fun xs => qsum cardX (fun o =>
+        uniformOracleSum w cardX (fun H => Wt H xs o))) =
+      (2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init) := by
+    rw [← sumLogs_congr cardX Q _ _ (fun xs =>
+        uniformOracleSum_qsum w cardX cardX (fun H o => Wt H xs o)),
+      ← uniformOracleSum_sumLogs w cardX cardX Q (fun H xs => qsum cardX (fun o => Wt H xs o)),
+      uniformOracleSum_congr w cardX _ _ hTot, uniformOracleSum_const]
+  show 2 ^ w * uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+    qsum cardX (fun o => G H xs o))) ≤ _
+  rw [hL, ← hR, ← sumLogs_mul, ← sumLogs_mul]
+  refine sumLogs_le_of_length cardX Q _ _ (fun xs hLen => ?_)
+  rw [← qsum_mul_left, ← qsum_mul_left]
+  exact qsum_le_qsum (fun o => hCell xs o hLen)
+
+/-! ## Collisions among measured queries -/
+
+/-- Some measured address was new when asked and received an answer already given to an
+    earlier measured address. -/
+def freshCollision {cardX w : Nat} (H : Fin cardX → BitVec w) : List (Fin cardX) → Bool
+  | [] => false
+  | x :: xs => (!listHasElem x xs && listHasElem (H x) (xs.map H)) || freshCollision H xs
+
+/-- Two distinct logged addresses with equal answers force a `freshCollision`. -/
+theorem freshCollision_of_distinct_equal {cardX w : Nat} (H : Fin cardX → BitVec w) :
+    ∀ (xs : List (Fin cardX)) (a b : Fin cardX), a ∈ xs → b ∈ xs → a ≠ b → H a = H b →
+      freshCollision H xs = true
+  | [], _, _, ha, _, _, _ => nomatch ha
+  | x :: xs, a, b, ha, hb, hne, hEq => by
+    show ((!listHasElem x xs && listHasElem (H x) (xs.map H)) || freshCollision H xs) = true
+    cases hIn : listHasElem x xs with
+    | true =>
+      have hxMem : x ∈ xs := (listHasElem_eq_true_iff x xs).mp hIn
+      have ha' : a ∈ xs := by
+        rcases List.mem_cons.mp ha with rfl | h
+        · exact hxMem
+        · exact h
+      have hb' : b ∈ xs := by
+        rcases List.mem_cons.mp hb with rfl | h
+        · exact hxMem
+        · exact h
+      rw [freshCollision_of_distinct_equal H xs a b ha' hb' hne hEq, Bool.or_true]
+    | false =>
+      have hxNot : ∀ y, y ∈ xs → y ≠ x := fun y hy he =>
+        Bool.noConfusion (hIn.symm.trans ((listHasElem_eq_true_iff x xs).mpr (he ▸ hy)))
+      have hHit : ∀ y, y ∈ xs → H x = H y → listHasElem (H x) (xs.map H) = true :=
+        fun y hy he => (listHasElem_eq_true_iff (H x) (xs.map H)).mpr
+          (he ▸ List.mem_map_of_mem hy)
+      rcases List.mem_cons.mp ha with rfl | haT
+      · rcases List.mem_cons.mp hb with rfl | hbT
+        · exact absurd rfl hne
+        · rw [hHit b hbT hEq]; rfl
+      · rcases List.mem_cons.mp hb with rfl | hbT
+        · rw [hHit a haT hEq.symm]; rfl
+        · rw [freshCollision_of_distinct_equal H xs a b haT hbT hne hEq, Bool.or_true]
+
+/-- `0 + 1 + ... + (t - 1)`. -/
+def triangleSum : Nat → Nat
+  | 0 => 0
+  | t + 1 => triangleSum t + t
+
+private theorem collision_step_arith (s tri t P M : Nat) :
+    s * (tri * (P * M)) + t * (P * (s * M)) = (tri + t) * (P * (s * M)) := by
+  rw [Nat.add_mul, Nat.mul_left_comm s tri (P * M), Nat.mul_left_comm s P M]
+
+/-- **Birthday bound for the measured experiment.** Over a uniformly random oracle, the
+    total mass of logs containing two distinct measured addresses with equal answers is at
+    most `triangleSum t / 2^w` of the total mass. Adaptivity is handled by resampling the
+    answer at the later address, whose branch weight was fixed before that answer existed. -/
+theorem measured_record_collision_bound {cardX w cardAnc q : Nat}
+    (A : QuantumAdv cardX w cardAnc q) : ∀ (t : Nat) (ht : t ≤ q),
+    2 ^ w * uniformOracleSum w cardX (fun H => sumLogs cardX t (fun xs =>
+        if freshCollision H xs = true then
+          QVec.stateNormSq (measuredStateAt A H t ht xs) else 0)) ≤
+      triangleSum t * ((2 ^ w) ^ cardX * (prefixScale A t ht * QVec.stateNormSq A.init))
+  | 0, _ => by
+    have hz : ∀ H : Fin cardX → BitVec w, sumLogs cardX 0 (fun xs =>
+        if freshCollision H xs = true then
+          QVec.stateNormSq (measuredStateAt A H 0 (Nat.zero_le q) xs) else 0) = 0 :=
+      fun _ => rfl
+    rw [uniformOracleSum_congr w cardX _ _ hz, uniformOracleSum_const]
+    simp only [Nat.mul_zero, triangleSum, Nat.zero_mul, Nat.le_refl]
+  | t + 1, ht => by
+    have ht' : t ≤ q := Nat.le_of_succ_le ht
+    let s := (A.steps ⟨t, ht⟩).scaleSq
+    let Wq : (Fin cardX → BitVec w) → Fin cardX → List (Fin cardX) → Nat := fun H x xs =>
+      s * QVec.queryWeight (measuredStateAt A H t ht' xs) x
+    let a : (Fin cardX → BitVec w) → Fin cardX → List (Fin cardX) → Nat := fun H x xs =>
+      if (!listHasElem x xs && listHasElem (H x) (xs.map H)) = true then Wq H x xs else 0
+    let b : (Fin cardX → BitVec w) → Fin cardX → List (Fin cardX) → Nat := fun H x xs =>
+      if freshCollision H xs = true then Wq H x xs else 0
+    let Gt : (Fin cardX → BitVec w) → List (Fin cardX) → Nat := fun H xs =>
+      if freshCollision H xs = true then
+        QVec.stateNormSq (measuredStateAt A H t ht' xs) else 0
+    let Tot := (2 ^ w) ^ cardX * (prefixScale A t ht' * QVec.stateNormSq A.init)
+    -- pointwise split of the event at the most recent query
+    have hSplit : ∀ H x xs,
+        (if freshCollision H (x :: xs) = true then
+          QVec.stateNormSq (measuredStateAt A H (t + 1) ht (x :: xs)) else 0) ≤
+          a H x xs + b H x xs := by
+      intro H x xs
+      rw [measuredStateAt_succ_normSq A H t ht x xs]
+      show (if ((!listHasElem x xs && listHasElem (H x) (xs.map H)) ||
+          freshCollision H xs) = true then Wq H x xs else 0) ≤
+        (if (!listHasElem x xs && listHasElem (H x) (xs.map H)) = true then Wq H x xs else 0) +
+        (if freshCollision H xs = true then Wq H x xs else 0)
+      cases (!listHasElem x xs && listHasElem (H x) (xs.map H)) <;>
+        cases freshCollision H xs <;>
+        simp only [Bool.or_false, Bool.or_true, Bool.false_eq_true, ↓reduceIte,
+          Nat.zero_add, Nat.add_zero, Nat.le_refl, Nat.le_add_right]
+    have hUpper : uniformOracleSum w cardX (fun H => sumLogs cardX (t + 1) (fun xs =>
+          if freshCollision H xs = true then
+            QVec.stateNormSq (measuredStateAt A H (t + 1) ht xs) else 0)) ≤
+        uniformOracleSum w cardX (fun H => qsum cardX (fun x => sumLogs cardX t (a H x))) +
+        uniformOracleSum w cardX (fun H => qsum cardX (fun x => sumLogs cardX t (b H x))) := by
+      rw [← uniformOracleSum_add]
+      refine uniformOracleSum_le w cardX _ _ (fun H => ?_)
+      rw [← qsum_add]
+      refine qsum_le_qsum (fun x => ?_)
+      rw [← sumLogs_add]
+      exact sumLogs_le_of_length cardX t _ _ (fun xs _ => hSplit H x xs)
+    -- part B: marginalize the most recent query, then the induction hypothesis
+    have hBeq : ∀ H, qsum cardX (fun x => sumLogs cardX t (b H x)) =
+        s * sumLogs cardX t (Gt H) := by
+      intro H
+      rw [← sumLogs_qsum cardX t cardX (fun xs x => b H x xs), ← sumLogs_mul]
+      refine sumLogs_congr cardX t _ _ (fun xs => ?_)
+      show qsum cardX (fun x => if freshCollision H xs = true then
+          s * QVec.queryWeight (measuredStateAt A H t ht' xs) x else 0) =
+        s * (if freshCollision H xs = true then
+          QVec.stateNormSq (measuredStateAt A H t ht' xs) else 0)
+      cases freshCollision H xs
+      · simp only [Bool.false_eq_true, ↓reduceIte, qsum_const, Nat.mul_zero]
+      · simp only [↓reduceIte, qsum_mul_left]
+        rfl
+    have hB : 2 ^ w * uniformOracleSum w cardX (fun H =>
+          qsum cardX (fun x => sumLogs cardX t (b H x))) ≤ s * (triangleSum t * Tot) := by
+      rw [uniformOracleSum_congr w cardX _ _ hBeq, uniformOracleSum_mul, Nat.mul_left_comm]
+      exact Nat.mul_le_mul_left s (measured_record_collision_bound A t ht')
+    -- part A: lazy sampling of the answer at a new address
+    have hCell : ∀ x xs, xs.length = t →
+        2 ^ w * uniformOracleSum w cardX (fun H => a H x xs) ≤
+          t * uniformOracleSum w cardX (fun H => Wq H x xs) := by
+      intro x xs hLen
+      refine uniform_fresh_point_bound w cardX (fun _ => x) (fun _ => !listHasElem x xs)
+        (fun H => xs.map H) (fun H => Wq H x xs) t (fun _ _ => rfl) (fun _ _ => rfl) ?_ ?_ ?_
+      · intro H ch hOk
+        exact map_reprogram_of_fresh H x ch xs (bool_not_eq_true hOk)
+      · intro H ch hOk
+        have hFresh := bool_not_eq_true hOk
+        refine congrArg (fun ψ => s * QVec.queryWeight ψ x)
+          (measuredStateAt_congr A _ H t ht' xs (fun y hy => ?_))
+        refine reprogramOracle_of_ne _ _ _ _ (fun he => ?_)
+        exact Bool.noConfusion (hFresh.symm.trans
+          ((listHasElem_eq_true_iff x xs).mpr (he ▸ hy)))
+      · intro H _
+        rw [List.length_map, hLen]
+        exact Nat.le_refl t
+    have hWsum : ∀ H, qsum cardX (fun x => sumLogs cardX t (Wq H x)) =
+        s * (prefixScale A t ht' * QVec.stateNormSq A.init) := by
+      intro H
+      rw [← sumLogs_qsum cardX t cardX (fun xs x => Wq H x xs),
+        ← measuredStateAt_total_mass A H t ht', ← sumLogs_mul]
+      refine sumLogs_congr cardX t _ _ (fun xs => ?_)
+      show qsum cardX (fun x => s * QVec.queryWeight (measuredStateAt A H t ht' xs) x) = _
+      rw [qsum_mul_left]
+      rfl
+    have hA : 2 ^ w * uniformOracleSum w cardX (fun H =>
+          qsum cardX (fun x => sumLogs cardX t (a H x))) ≤
+        t * ((2 ^ w) ^ cardX * (s * (prefixScale A t ht' * QVec.stateNormSq A.init))) := by
+      have hAL : uniformOracleSum w cardX (fun H =>
+            qsum cardX (fun x => sumLogs cardX t (a H x))) =
+          qsum cardX (fun x => sumLogs cardX t (fun xs =>
+            uniformOracleSum w cardX (fun H => a H x xs))) :=
+        (uniformOracleSum_qsum w cardX cardX (fun H x => sumLogs cardX t (a H x))).trans
+          (qsum_congr (fun x => uniformOracleSum_sumLogs w cardX cardX t (fun H => a H x)))
+      have hAR : qsum cardX (fun x => sumLogs cardX t (fun xs =>
+            uniformOracleSum w cardX (fun H => Wq H x xs))) =
+          (2 ^ w) ^ cardX * (s * (prefixScale A t ht' * QVec.stateNormSq A.init)) := by
+        rw [← qsum_congr (fun x => uniformOracleSum_sumLogs w cardX cardX t (fun H => Wq H x)),
+          ← uniformOracleSum_qsum w cardX cardX (fun H x => sumLogs cardX t (Wq H x)),
+          uniformOracleSum_congr w cardX _ _ hWsum, uniformOracleSum_const]
+      rw [hAL, ← hAR, ← qsum_mul_left, ← qsum_mul_left]
+      refine qsum_le_qsum (fun x => ?_)
+      rw [← sumLogs_mul, ← sumLogs_mul]
+      exact sumLogs_le_of_length cardX t _ _ (fun xs hLen => hCell x xs hLen)
+    have hTotal := Nat.le_trans (Nat.mul_le_mul_left (2 ^ w) hUpper)
+      (by rw [Nat.mul_add]; exact Nat.add_le_add hA hB)
+    refine Nat.le_trans hTotal (Nat.le_of_eq ?_)
+    show t * ((2 ^ w) ^ cardX * (s * (prefixScale A t ht' * QVec.stateNormSq A.init))) +
+        s * (triangleSum t * ((2 ^ w) ^ cardX *
+          (prefixScale A t ht' * QVec.stateNormSq A.init))) =
+      (triangleSum t + t) * ((2 ^ w) ^ cardX *
+        (s * prefixScale A t ht' * QVec.stateNormSq A.init))
+    rw [Nat.mul_assoc s, Nat.add_comm]
+    exact collision_step_arith s (triangleSum t) t _ _
+
+end Qsag
+
+
+namespace Qsag
+
+set_option autoImplicit false
+
