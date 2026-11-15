@@ -7,7 +7,10 @@
 //! application-authorized threshold quorum keys; threshold key generation and custodian
 //! membership remain registry obligations.
 
-use crate::sponge::{cshake256_32, encode_multi_frame, poseidon2_hash32};
+use crate::sponge::{
+    cshake256_from_midstate_32, cshake256_from_midstate_32_x4, cshake256_static_midstate,
+    encode_multi_frame, poseidon2_hash32, push_leb128,
+};
 use crate::{
     AggSigProfile, HemAggConfig, HemAggError, HemAggregatedProof, SignerBitmap, SigningMode,
     ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime,
@@ -70,7 +73,7 @@ impl HierarchicalHemAggregate {
 
     /// Serialize to canonical length-prefixed wire bytes (`HIERARCHICAL_HEM_WIRE_MAGIC`).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(76 + self.shards.len().saturating_mul(65_664));
         out.extend_from_slice(HIERARCHICAL_HEM_WIRE_MAGIC);
         out.extend_from_slice(&self.policy_registry_root);
         out.extend_from_slice(&self.root_commitment);
@@ -82,9 +85,11 @@ impl HierarchicalHemAggregate {
             out.extend_from_slice(&s.minimum_quorums.to_le_bytes());
             out.extend_from_slice(&s.epoch_floor.to_le_bytes());
             out.extend_from_slice(&s.message_digest);
-            let proof_bytes = s.proof.to_bytes();
-            out.extend_from_slice(&(proof_bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(&proof_bytes);
+            let len_pos = out.len();
+            out.extend_from_slice(&0u32.to_le_bytes());
+            s.proof.push_wire_bytes(&mut out);
+            let proof_len = (out.len() - (len_pos + 4)) as u32;
+            out[len_pos..len_pos + 4].copy_from_slice(&proof_len.to_le_bytes());
         }
         out
     }
@@ -101,7 +106,13 @@ impl HierarchicalHemAggregate {
         let mut cnt_bytes = [0u8; 4];
         cnt_bytes.copy_from_slice(&bytes[72..76]);
         let num_shards = u32::from_le_bytes(cnt_bytes) as usize;
-        if num_shards == 0 || num_shards > MAX_HIERARCHY_SHARDS {
+        let min_body = num_shards
+            .checked_mul(124)
+            .ok_or(HemAggError::MalformedWireBytes)?;
+        if num_shards == 0
+            || num_shards > MAX_HIERARCHY_SHARDS
+            || bytes.len().saturating_sub(76) < min_body
+        {
             return Err(HemAggError::MalformedWireBytes);
         }
         let mut pos = 76usize;
@@ -165,7 +176,9 @@ pub fn checked_sum_usize<I: IntoIterator<Item = usize>>(iter: I) -> Option<usize
 
 fn compute_committee_roots(policies: &[ShardHemPolicy]) -> Vec<[u8; 32]> {
     #[cfg(feature = "std")]
-    if policies.len() > 1 && crate::parallel_workers() > 1 {
+    let total_keys: usize = policies.iter().map(|p| p.quorum_keys.len()).sum();
+    #[cfg(feature = "std")]
+    if policies.len() > 1 && total_keys > 64 && crate::parallel_workers() > 1 {
         let workers = crate::available_worker_budget().min(policies.len());
         if workers > 1 {
             let chunk = policies.len().div_ceil(workers);
@@ -211,16 +224,20 @@ fn encode_policy_registration_with_root(
     policy: &ShardHemPolicy,
     committee_root: &[u8; 32],
 ) -> Vec<u8> {
-    let key_frames: Vec<Vec<u8>> = policy
-        .quorum_keys
-        .iter()
-        .map(|pk| {
-            let raw = pk.to_bytes();
-            encode_multi_frame(&[&raw[0..1], &raw[1..33], &raw[33..65]])
-        })
-        .collect();
-    let key_refs: Vec<&[u8]> = key_frames.iter().map(Vec::as_slice).collect();
-    let committee_frame = encode_multi_frame(&key_refs);
+    let mut committee_frame = Vec::with_capacity(8 + policy.quorum_keys.len() * 70);
+    push_leb128(&mut committee_frame, policy.quorum_keys.len());
+    for pk in &policy.quorum_keys {
+        let raw = pk.to_bytes();
+        // Exact `encode_multi_frame(&[&raw[0..1], &raw[1..33], &raw[33..65]])` (`69` bytes):
+        committee_frame.push(69);
+        committee_frame.push(3);
+        committee_frame.push(1);
+        committee_frame.push(raw[0]);
+        committee_frame.push(32);
+        committee_frame.extend_from_slice(&raw[1..33]);
+        committee_frame.push(32);
+        committee_frame.extend_from_slice(&raw[33..65]);
+    }
     let profile_tag = [policy.profile().map_or(0u8, |p| p as u8)];
     let shard_id_bytes = policy.shard_id.to_le_bytes();
     let min_q_bytes = (policy.minimum_quorums as u64).to_le_bytes();
@@ -373,22 +390,84 @@ fn valid_policies(policies: &[ShardHemPolicy]) -> bool {
     usize::try_from(total_cap).is_ok()
 }
 
+const HIERARCHY_SHARD_CUSTOM: &[u8] = b"QSAG.HEM.HIERARCHY.SHARD/v3";
+const HIERARCHY_SHARD_MIDSTATE: [u64; 25] = cshake256_static_midstate(HIERARCHY_SHARD_CUSTOM);
+const HIERARCHY_ROOT_CUSTOM: &[u8] = b"QSAG.HEM.HIERARCHY.ROOT/v3";
+const HIERARCHY_ROOT_MIDSTATE: [u64; 25] = cshake256_static_midstate(HIERARCHY_ROOT_CUSTOM);
+
+struct FramedShardBuf {
+    buf: Vec<u8>,
+    start: usize,
+}
+
+impl FramedShardBuf {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
+}
+
+fn build_shard_commitment_frame(s: &ShardHemBatch) -> FramedShardBuf {
+    let shard_id_le = s.shard_id.to_le_bytes();
+    let min_q_le = s.minimum_quorums.to_le_bytes();
+    let epoch_le = s.epoch_floor.to_le_bytes();
+    let mut header = Vec::with_capacity(168);
+    push_leb128(&mut header, 8);
+    for field in [
+        HIERARCHY_SHARD_CUSTOM,
+        &shard_id_le[..],
+        &s.custodian_cluster[..],
+        &s.shard_quorum_set_root[..],
+        &min_q_le[..],
+        &epoch_le[..],
+        &s.message_digest[..],
+    ] {
+        push_leb128(&mut header, field.len());
+        header.extend_from_slice(field);
+    }
+    let reserve = header.len() + 10;
+    let mut buf = Vec::with_capacity(reserve + 524_288);
+    buf.resize(reserve, 0u8);
+    s.proof.push_wire_bytes(&mut buf);
+    let proof_len = buf.len() - reserve;
+    push_leb128(&mut header, proof_len);
+    let start = reserve - header.len();
+    buf[start..reserve].copy_from_slice(&header);
+    FramedShardBuf { buf, start }
+}
+
 /// Digest of one child of the hierarchy byte-hash tree. A byte-hash tree avoids a serial
 /// algebraic sponge over the entire aggregate; each child binds every field of its shard,
 /// including the full canonical proof bytes.
 fn shard_commitment_digest(s: &ShardHemBatch) -> [u8; 32] {
     let _phase = crate::profile::span("hierarchy_shard_digest");
-    let frame = encode_multi_frame(&[
-        b"QSAG.HEM.HIERARCHY.SHARD/v3",
-        &s.shard_id.to_le_bytes(),
-        &s.custodian_cluster,
-        &s.shard_quorum_set_root,
-        &s.minimum_quorums.to_le_bytes(),
-        &s.epoch_floor.to_le_bytes(),
-        &s.message_digest,
-        &s.proof.to_bytes(),
-    ]);
-    cshake256_32(b"QSAG.HEM.HIERARCHY.SHARD/v3", &frame)
+    let frame = build_shard_commitment_frame(s);
+    cshake256_from_midstate_32(&HIERARCHY_SHARD_MIDSTATE, frame.as_slice())
+}
+
+fn shard_commitment_digests_seq(shards: &[ShardHemBatch]) -> Vec<[u8; 32]> {
+    let _phase = crate::profile::span("hierarchy_shard_digest");
+    let mut out = Vec::with_capacity(shards.len());
+    let mut chunks = shards.chunks_exact(4);
+    for quad in &mut chunks {
+        let f0 = build_shard_commitment_frame(&quad[0]);
+        let f1 = build_shard_commitment_frame(&quad[1]);
+        let f2 = build_shard_commitment_frame(&quad[2]);
+        let f3 = build_shard_commitment_frame(&quad[3]);
+        let d4 = cshake256_from_midstate_32_x4(
+            &HIERARCHY_SHARD_MIDSTATE,
+            [f0.as_slice(), f1.as_slice(), f2.as_slice(), f3.as_slice()],
+        );
+        out.extend_from_slice(&d4);
+    }
+    for s in chunks.remainder() {
+        let f = build_shard_commitment_frame(s);
+        out.push(cshake256_from_midstate_32(
+            &HIERARCHY_SHARD_MIDSTATE,
+            f.as_slice(),
+        ));
+    }
+    out
 }
 
 /// A proven shard with its child digest of the hierarchy commitment.
@@ -397,10 +476,10 @@ type CommittedShard = (ShardHemBatch, [u8; 32]);
 /// Root of the hierarchy byte-hash tree over the ordered child digests.
 fn root_commitment_from_digests(policy_registry_root: &[u8; 32], digests: &[[u8; 32]]) -> [u8; 32] {
     let mut fields: Vec<&[u8]> = Vec::with_capacity(2 + digests.len());
-    fields.push(b"QSAG.HEM.HIERARCHY.ROOT/v3");
+    fields.push(HIERARCHY_ROOT_CUSTOM);
     fields.push(policy_registry_root);
     fields.extend(digests.iter().map(|d| d.as_slice()));
-    cshake256_32(b"QSAG.HEM.HIERARCHY.ROOT/v3", &encode_multi_frame(&fields))
+    cshake256_from_midstate_32(&HIERARCHY_ROOT_MIDSTATE, &encode_multi_frame(&fields))
 }
 
 fn prove_hierarchical_hem_inner(
@@ -601,11 +680,11 @@ fn verify_hierarchical_hem_inner(
         return false;
     }
 
-    let verify_shard =
-        |((p, s), c_root): ((&ShardHemPolicy, &ShardHemBatch), &[u8; 32])| -> Option<[u8; 32]> {
+    let verify_shard_only =
+        |((p, s), c_root): ((&ShardHemPolicy, &ShardHemBatch), &[u8; 32])| -> bool {
             // Reject unsafe framing/depth before hashing a directly constructed proof.
             if s.proof.root.homogeneous_regime(crate::MAX_MERGE_TREE_DEPTH) != Some(regime) {
-                return None;
+                return false;
             }
             let region_msg = hierarchical_hem_message_with_root(
                 &expected_registry_root,
@@ -621,7 +700,12 @@ fn verify_hierarchical_hem_inner(
                 &s.proof,
                 regime,
             )
-            .then(|| shard_commitment_digest(s))
+        };
+
+    #[cfg(feature = "std")]
+    let verify_shard =
+        |triple: ((&ShardHemPolicy, &ShardHemBatch), &[u8; 32])| -> Option<[u8; 32]> {
+            verify_shard_only(triple).then(|| shard_commitment_digest(triple.0.1))
         };
 
     #[cfg(feature = "std")]
@@ -664,15 +748,18 @@ fn verify_hierarchical_hem_inner(
                     Some(out)
                 })
             } else {
-                triples.into_iter().map(verify_shard).collect()
+                triples
+                    .into_iter()
+                    .all(verify_shard_only)
+                    .then(|| shard_commitment_digests_seq(&aggregate.shards))
             }
         } else {
             policies
                 .iter()
                 .zip(&aggregate.shards)
                 .zip(committee_roots.iter())
-                .map(verify_shard)
-                .collect()
+                .all(verify_shard_only)
+                .then(|| shard_commitment_digests_seq(&aggregate.shards))
         };
 
     #[cfg(not(feature = "std"))]
@@ -680,8 +767,8 @@ fn verify_hierarchical_hem_inner(
         .iter()
         .zip(&aggregate.shards)
         .zip(committee_roots.iter())
-        .map(verify_shard)
-        .collect();
+        .all(verify_shard_only)
+        .then(|| shard_commitment_digests_seq(&aggregate.shards));
 
     let Some(digests) = digests else {
         return false;
@@ -814,6 +901,54 @@ mod tests {
             HierarchicalHemAggregate::from_bytes_canonical(&wire[..wire.len() - 1]),
             Err(HemAggError::MalformedWireBytes)
         );
+        // `[AGG-04]`: Truncated 76-byte wire headers claiming huge `num_shards` must fail closed
+        // BEFORE `Vec::with_capacity(num_shards)` over-allocation, and frame helpers must match
+        // reference `encode_multi_frame` byte-for-byte.
+        for claimed_shards in [1u32, 64, MAX_HIERARCHY_SHARDS as u32, u32::MAX] {
+            let mut trunc_hdr = wire[..76].to_vec();
+            trunc_hdr[72..76].copy_from_slice(&claimed_shards.to_le_bytes());
+            assert_eq!(
+                HierarchicalHemAggregate::from_bytes_canonical(&trunc_hdr),
+                Err(HemAggError::MalformedWireBytes)
+            );
+        }
+        let s0 = &proof.shards[0];
+        let ref_shard_frame = encode_multi_frame(&[
+            b"QSAG.HEM.HIERARCHY.SHARD/v3",
+            &s0.shard_id.to_le_bytes(),
+            &s0.custodian_cluster,
+            &s0.shard_quorum_set_root,
+            &s0.minimum_quorums.to_le_bytes(),
+            &s0.epoch_floor.to_le_bytes(),
+            &s0.message_digest,
+            &s0.proof.to_bytes(),
+        ]);
+        assert_eq!(
+            build_shard_commitment_frame(s0).as_slice(),
+            ref_shard_frame.as_slice()
+        );
+        let p0 = &policies[0];
+        let c0 = compute_committee_root(&p0.quorum_keys);
+        let ref_key_frames: Vec<Vec<u8>> = p0
+            .quorum_keys
+            .iter()
+            .map(|pk| {
+                let raw = pk.to_bytes();
+                encode_multi_frame(&[&raw[0..1], &raw[1..33], &raw[33..65]])
+            })
+            .collect();
+        let ref_key_slices: Vec<&[u8]> = ref_key_frames.iter().map(Vec::as_slice).collect();
+        let ref_committee_frame = encode_multi_frame(&ref_key_slices);
+        let ref_row = encode_multi_frame(&[
+            b"QSAG.HEM.POLICY.ROW/v2",
+            &p0.shard_id.to_le_bytes(),
+            &p0.custodian_cluster,
+            &[p0.profile().unwrap() as u8],
+            &(p0.minimum_quorums as u64).to_le_bytes(),
+            &c0,
+            &ref_committee_frame,
+        ]);
+        assert_eq!(encode_policy_registration_with_root(p0, &c0), ref_row);
 
         assert!(!verify_hierarchical_hem(
             &policies,

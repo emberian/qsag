@@ -71,27 +71,44 @@ const KECCAK_RC: [u64; 24] = [
     0x8000_0000_8000_8008,
 ];
 
-const KECCAK_ROT: [u32; 25] = [
-    0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
-];
-
-const KECCAK_PI: [usize; 25] = [
-    0, 6, 12, 18, 24, 3, 9, 10, 16, 22, 1, 7, 13, 19, 20, 4, 5, 11, 17, 23, 2, 8, 14, 15, 21,
-];
-
 const SHAKE256_RATE: usize = 136;
 
 /// Full 24-round `Keccak-f[1600]` permutation (usable in both `const` evaluation and runtime).
 #[inline(always)]
 pub const fn keccak_f1600(state: &mut [u64; 25]) {
+    let mut s0 = state[0];
+    let mut s1 = state[1];
+    let mut s2 = state[2];
+    let mut s3 = state[3];
+    let mut s4 = state[4];
+    let mut s5 = state[5];
+    let mut s6 = state[6];
+    let mut s7 = state[7];
+    let mut s8 = state[8];
+    let mut s9 = state[9];
+    let mut s10 = state[10];
+    let mut s11 = state[11];
+    let mut s12 = state[12];
+    let mut s13 = state[13];
+    let mut s14 = state[14];
+    let mut s15 = state[15];
+    let mut s16 = state[16];
+    let mut s17 = state[17];
+    let mut s18 = state[18];
+    let mut s19 = state[19];
+    let mut s20 = state[20];
+    let mut s21 = state[21];
+    let mut s22 = state[22];
+    let mut s23 = state[23];
+    let mut s24 = state[24];
+
     let mut r = 0usize;
     while r < 24 {
-        let rc = KECCAK_RC[r];
-        let c0 = state[0] ^ state[5] ^ state[10] ^ state[15] ^ state[20];
-        let c1 = state[1] ^ state[6] ^ state[11] ^ state[16] ^ state[21];
-        let c2 = state[2] ^ state[7] ^ state[12] ^ state[17] ^ state[22];
-        let c3 = state[3] ^ state[8] ^ state[13] ^ state[18] ^ state[23];
-        let c4 = state[4] ^ state[9] ^ state[14] ^ state[19] ^ state[24];
+        let c0 = s0 ^ s5 ^ s10 ^ s15 ^ s20;
+        let c1 = s1 ^ s6 ^ s11 ^ s16 ^ s21;
+        let c2 = s2 ^ s7 ^ s12 ^ s17 ^ s22;
+        let c3 = s3 ^ s8 ^ s13 ^ s18 ^ s23;
+        let c4 = s4 ^ s9 ^ s14 ^ s19 ^ s24;
 
         let d0 = c4 ^ c1.rotate_left(1);
         let d1 = c0 ^ c2.rotate_left(1);
@@ -99,36 +116,120 @@ pub const fn keccak_f1600(state: &mut [u64; 25]) {
         let d3 = c2 ^ c4.rotate_left(1);
         let d4 = c3 ^ c0.rotate_left(1);
 
-        let mut y_step = 0usize;
-        while y_step < 25 {
-            state[y_step] ^= d0;
-            state[y_step + 1] ^= d1;
-            state[y_step + 2] ^= d2;
-            state[y_step + 3] ^= d3;
-            state[y_step + 4] ^= d4;
-            y_step += 5;
-        }
+        s0 ^= d0;
+        s5 ^= d0;
+        s10 ^= d0;
+        s15 ^= d0;
+        s20 ^= d0;
+        s1 ^= d1;
+        s6 ^= d1;
+        s11 ^= d1;
+        s16 ^= d1;
+        s21 ^= d1;
+        s2 ^= d2;
+        s7 ^= d2;
+        s12 ^= d2;
+        s17 ^= d2;
+        s22 ^= d2;
+        s3 ^= d3;
+        s8 ^= d3;
+        s13 ^= d3;
+        s18 ^= d3;
+        s23 ^= d3;
+        s4 ^= d4;
+        s9 ^= d4;
+        s14 ^= d4;
+        s19 ^= d4;
+        s24 ^= d4;
 
-        let mut b = [0u64; 25];
-        let mut i = 0usize;
-        while i < 25 {
-            let src = KECCAK_PI[i];
-            b[i] = state[src].rotate_left(KECCAK_ROT[src]);
-            i += 1;
-        }
+        let b0 = s0;
+        let b1 = s6.rotate_left(44);
+        let b2 = s12.rotate_left(43);
+        let b3 = s18.rotate_left(21);
+        let b4 = s24.rotate_left(14);
 
-        y_step = 0;
-        while y_step < 25 {
-            state[y_step] = b[y_step] ^ ((!b[y_step + 1]) & b[y_step + 2]);
-            state[y_step + 1] = b[y_step + 1] ^ ((!b[y_step + 2]) & b[y_step + 3]);
-            state[y_step + 2] = b[y_step + 2] ^ ((!b[y_step + 3]) & b[y_step + 4]);
-            state[y_step + 3] = b[y_step + 3] ^ ((!b[y_step + 4]) & b[y_step]);
-            state[y_step + 4] = b[y_step + 4] ^ ((!b[y_step]) & b[y_step + 1]);
-            y_step += 5;
-        }
-        state[0] ^= rc;
+        let b5 = s3.rotate_left(28);
+        let b6 = s9.rotate_left(20);
+        let b7 = s10.rotate_left(3);
+        let b8 = s16.rotate_left(45);
+        let b9 = s22.rotate_left(61);
+
+        let b10 = s1.rotate_left(1);
+        let b11 = s7.rotate_left(6);
+        let b12 = s13.rotate_left(25);
+        let b13 = s19.rotate_left(8);
+        let b14 = s20.rotate_left(18);
+
+        let b15 = s4.rotate_left(27);
+        let b16 = s5.rotate_left(36);
+        let b17 = s11.rotate_left(10);
+        let b18 = s17.rotate_left(15);
+        let b19 = s23.rotate_left(56);
+
+        let b20 = s2.rotate_left(62);
+        let b21 = s8.rotate_left(55);
+        let b22 = s14.rotate_left(39);
+        let b23 = s15.rotate_left(41);
+        let b24 = s21.rotate_left(2);
+
+        s0 = (b0 ^ ((!b1) & b2)) ^ KECCAK_RC[r];
+        s1 = b1 ^ ((!b2) & b3);
+        s2 = b2 ^ ((!b3) & b4);
+        s3 = b3 ^ ((!b4) & b0);
+        s4 = b4 ^ ((!b0) & b1);
+
+        s5 = b5 ^ ((!b6) & b7);
+        s6 = b6 ^ ((!b7) & b8);
+        s7 = b7 ^ ((!b8) & b9);
+        s8 = b8 ^ ((!b9) & b5);
+        s9 = b9 ^ ((!b5) & b6);
+
+        s10 = b10 ^ ((!b11) & b12);
+        s11 = b11 ^ ((!b12) & b13);
+        s12 = b12 ^ ((!b13) & b14);
+        s13 = b13 ^ ((!b14) & b10);
+        s14 = b14 ^ ((!b10) & b11);
+
+        s15 = b15 ^ ((!b16) & b17);
+        s16 = b16 ^ ((!b17) & b18);
+        s17 = b17 ^ ((!b18) & b19);
+        s18 = b18 ^ ((!b19) & b15);
+        s19 = b19 ^ ((!b15) & b16);
+
+        s20 = b20 ^ ((!b21) & b22);
+        s21 = b21 ^ ((!b22) & b23);
+        s22 = b22 ^ ((!b23) & b24);
+        s23 = b23 ^ ((!b24) & b20);
+        s24 = b24 ^ ((!b20) & b21);
+
         r += 1;
     }
+
+    state[0] = s0;
+    state[1] = s1;
+    state[2] = s2;
+    state[3] = s3;
+    state[4] = s4;
+    state[5] = s5;
+    state[6] = s6;
+    state[7] = s7;
+    state[8] = s8;
+    state[9] = s9;
+    state[10] = s10;
+    state[11] = s11;
+    state[12] = s12;
+    state[13] = s13;
+    state[14] = s14;
+    state[15] = s15;
+    state[16] = s16;
+    state[17] = s17;
+    state[18] = s18;
+    state[19] = s19;
+    state[20] = s20;
+    state[21] = s21;
+    state[22] = s22;
+    state[23] = s23;
+    state[24] = s24;
 }
 
 /// Precompute the post-prefix 1600-bit sponge state for NIST SP 800-185
@@ -268,10 +369,8 @@ pub fn cshake256_from_midstate_32(midstate: &[u64; 25], input: &[u8]) -> [u8; 32
 /// using 4-way SIMD `qsag_asm::keccak_f1600_x4` (`AVX2` / `SHA3-NEON` / portable).
 #[inline]
 pub fn cshake256_from_midstate_32_x4(midstate: &[u64; 25], inputs: [&[u8]; 4]) -> [[u8; 32]; 4] {
-    let len = inputs[0].len();
-    if inputs.iter().any(|input| input.len() != len) {
-        return inputs.map(|input| cshake256_from_midstate_32(midstate, input));
-    }
+    let min_len = inputs.iter().map(|s| s.len()).min().unwrap_or(0);
+    let same_len = inputs.iter().all(|s| s.len() == min_len);
 
     let mut st = qsag_asm::KeccakState4x([[0u64; 4]; 25]);
     for (dst_lane, &ms_val) in st.0.iter_mut().zip(midstate.iter()) {
@@ -279,7 +378,7 @@ pub fn cshake256_from_midstate_32_x4(midstate: &[u64; 25], inputs: [&[u8]; 4]) -
     }
 
     let mut off = 0usize;
-    while off + SHAKE256_RATE <= len {
+    while off + SHAKE256_RATE <= min_len {
         for (lane, st_lane) in st.0.iter_mut().enumerate().take(17) {
             let b = off + 8 * lane;
             for (dst, inp) in st_lane.iter_mut().zip(inputs.iter()) {
@@ -291,7 +390,19 @@ pub fn cshake256_from_midstate_32_x4(midstate: &[u64; 25], inputs: [&[u8]; 4]) -
         off += SHAKE256_RATE;
     }
 
-    let rem = len - off;
+    if !same_len {
+        let mut out = [[0u8; 32]; 4];
+        for (k, inp) in inputs.iter().enumerate() {
+            let mut lane_state = [0u64; 25];
+            for (lane, st_lane) in st.0.iter().enumerate() {
+                lane_state[lane] = st_lane[k];
+            }
+            absorb_and_squeeze_from_state(lane_state, &inp[off..], 0x04, &mut out[k]);
+        }
+        return out;
+    }
+
+    let rem = min_len - off;
     let mut blocks = [[0u8; SHAKE256_RATE]; 4];
     for (blk, inp) in blocks.iter_mut().zip(inputs.iter()) {
         blk[..rem].copy_from_slice(&inp[off..]);
@@ -811,11 +922,21 @@ pub struct InstanceBound;
 /// Follows Fenzi et al. (`IACR 2025`): challenges cannot be squeezed at compile time until
 /// BOTH `.bind_relation(...)` AND `.bind_instance(...)` have been executed on self-delimiting
 /// multi-field frames, eliminating weak-Fiat–Shamir last-round grinding attacks.
-#[derive(Clone)]
 pub struct FiatShamirTranscript<P> {
     chain_digest: [u8; 32],
     counter: u64,
     _phase: PhantomData<P>,
+}
+
+impl<P> Clone for FiatShamirTranscript<P> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            chain_digest: self.chain_digest,
+            counter: self.counter,
+            _phase: PhantomData,
+        }
+    }
 }
 
 const FS_CUSTOM: &[u8] = b"QSAG.AGG.FS_TRANSCRIPT/v1";
