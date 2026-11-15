@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Keccak — Injective Framing, Keccak-f[1600], SHAKE256 XOF & SP 800-185 cSHAKE256
+# Qsag.Oracle.Keccak — Injective Framing, Keccak-f[1600], SHAKE256 XOF & SP 800-185 cSHAKE256
 
 Self-contained Lean 4.35 sponge and byte-framing foundation (`Init` only, 0 Mathlib, 0 sorry):
 1. Big-endian byte codec (`be`, `ofBE`, `be_injective`, `ofBE_be`, `ofBE_lt`).
@@ -14,7 +14,7 @@ Self-contained Lean 4.35 sponge and byte-framing foundation (`Init` only, 0 Math
    and NIST SP 800-185 `cshake256Bytes`, verified against official NIST FIPS 202 test vectors.
 -/
 
-public import Qsag.Constructive
+public import Qsag.Math.Constructive
 
 public section
 namespace Qsag

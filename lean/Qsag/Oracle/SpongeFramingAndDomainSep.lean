@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.SpongeFramingAndDomainSep — Multi-Block Sponge Padding, SP 800-185 Framing & Midstate Laws
+# Qsag.Oracle.SpongeFramingAndDomainSep — Multi-Block Sponge Padding, SP 800-185 Framing & Midstate Laws
 
 Self-contained Lean 4.35 cryptographic sponge and domain-separation foundation over `Qsag.Keccak`
 (`0 sorry`, `0 Classical.choice`, `0 native_decide`, `0 bv_decide`, `0 grind`):
@@ -24,8 +24,8 @@ Self-contained Lean 4.35 cryptographic sponge and domain-separation foundation o
    for all `m` and all `outLen` as full from-scratch `cSHAKE256`.
 -/
 
-public import Qsag.Keccak
-import all Qsag.Keccak
+public import Qsag.Oracle.Keccak
+import all Qsag.Oracle.Keccak
 import Qsag.Tactic.AssuranceKit
 
 public section

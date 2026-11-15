@@ -7,8 +7,8 @@ active gate receives a fresh independent field input. This is not the input
 experiment of a fixed permutation, whose gates share a single initial state.
 The second result exhibits that obstruction without a cryptographic assumption.
 -/
-public import Qsag.ParallelSeededSpnSecurity
-import all Qsag.ParallelSeededSpnSecurity
+public import Qsag.Oracle.ParallelSeededSpnSecurity
+import all Qsag.Oracle.ParallelSeededSpnSecurity
 
 public section
 namespace Qsag
