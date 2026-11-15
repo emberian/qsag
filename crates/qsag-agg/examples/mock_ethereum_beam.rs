@@ -23,9 +23,11 @@ use std::time::Instant;
 use qsag_agg::{
     AggSigProfile, EpochWalSink, HemAggConfig, HierarchicalHemAggregate, PreparedPolicyRegistry,
     ShardHemPolicy, ShardHemWitness, SigError, SignerBitmap, SigningMode, StatelessBudgetWalSink,
-    ValidatorKeypair, ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
+    SuccinctHierarchicalHemAggregate, ValidatorKeypair, ValidatorSignature, WhirSecurityRegime,
+    aggregate_signatures_with_config, compress_verified_hierarchical_hem,
     compute_policy_registry_root, hierarchical_hem_message, prove_hierarchical_hem,
-    verify_hierarchical_hem, verify_hierarchical_hem_prepared, with_worker_limit,
+    verify_hierarchical_hem, verify_hierarchical_hem_prepared, verify_succinct_hierarchical_hem,
+    with_worker_limit,
 };
 use qsag_core::belt_latch::{BeltLatchRecord, BeltLatchState, DurableWal, WalError};
 use qsag_quorum::party_node::IsolatedQuorumParty;
@@ -420,6 +422,39 @@ fn run_beam_hierarchy_bench(
     let (_cold_min_ms, cold_p50_ms, _cold_p99_ms) = measure_verify(None, false);
     let (c1_min_ms, c1_p50_ms, c1_p99_ms) = measure_verify(Some(1), true);
 
+    // 4. Measure outer commitment-chain compression (`SuccinctHierarchicalHemAggregate`, 1 outer WHIR proof).
+    let t_succ_prove = Instant::now();
+    let succinct = compress_verified_hierarchical_hem(
+        &policies,
+        epoch_floor,
+        beacon_root_msg,
+        min_global,
+        &decoded,
+        cfg.blinding_seed,
+    )
+    .expect("outer succinct Beam Chain compression");
+    let succinct_compress_ms = t_succ_prove.elapsed().as_secs_f64() * 1_000.0;
+    let succinct_wire = succinct.to_bytes();
+    let succinct_decoded = SuccinctHierarchicalHemAggregate::from_bytes_canonical(&succinct_wire)
+        .expect("canonical succinct wire roundtrip");
+    assert_eq!(succinct_decoded, succinct);
+    let mut succ_samples = Vec::with_capacity(verify_iters);
+    for _ in 0..verify_iters {
+        let t0 = Instant::now();
+        assert!(verify_succinct_hierarchical_hem(
+            &policies,
+            epoch_floor,
+            beacon_root_msg,
+            min_global,
+            &succinct_decoded,
+        ));
+        succ_samples.push(t0.elapsed().as_secs_f64() * 1_000.0);
+    }
+    succ_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let succ_p50_ms = percentile_sorted(&succ_samples, 50, 100);
+    let succ_min_ms = succ_samples[0];
+    let (succ_gas_eip2028, succ_gas_eip7623_floor) = evm_calldata_gas(&succinct_wire);
+
     // Bandwidth & EVM calldata gas metrics.
     let total_signers = decoded
         .checked_total_quorums()
@@ -452,6 +487,15 @@ fn run_beam_hierarchy_bench(
         total_raw_mldsa_bytes as f64 / wire.len() as f64,
         gas_eip2028,
         gas_eip7623_floor,
+    );
+    println!(
+        "    Succinct  : {} B ({:.1} KiB) | compression = {:.2}x vs raw PQ, {:.2}x vs ML-DSA-44 | EVM calldata = {} gas (EIP-2028) / {} gas (EIP-7623) | outer_compress = {succinct_compress_ms:.1} ms | verify p50 = {succ_p50_ms:.2} ms (min = {succ_min_ms:.2} ms)",
+        succinct_wire.len(),
+        succinct_wire.len() as f64 / 1024.0,
+        total_raw_pq_bytes as f64 / succinct_wire.len() as f64,
+        total_raw_mldsa_bytes as f64 / succinct_wire.len() as f64,
+        succ_gas_eip2028,
+        succ_gas_eip7623_floor,
     );
     println!(
         "    Prover    : subnet_aggregator = {single_subnet_prove_ms:.2} ms ({:.1}x under 4000 ms slot) | 4-subnet_joint_host = {joint_prove_ms:.2} ms | setup = {setup_ms:.1} ms",
