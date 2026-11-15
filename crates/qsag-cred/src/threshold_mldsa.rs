@@ -3,7 +3,8 @@
 //!
 //! # Model (read this before deploying)
 //!
-//! custodians identified by distinct `u16` IDs, a privacy threshold `t >= 2`, and `n >= 2t - 1`.
+//! A key has `n` custodians identified by distinct `u16` IDs, a privacy threshold
+//! `t >= 2`, and `n >= 2t - 1`.
 //! At most `t - 1` custodians are statically and maliciously corrupt. Key
 //! generation needs all `n`; **signing needs a quorum of at least `2t - 1`
 //! custodians** (three for `t = 2`, five for `t = 3`), so that the corrupt
@@ -1415,9 +1416,7 @@ fn sealed_rejection_verdict<T: MpcTransport>(
     widths.push((omega + 1) as u32);
 
     let inside = masked_range_test(engine, &range_opened, &widths, range_planes)?;
-    let outside = engine
-        .public_const(1, z_len + 2 * w_len + 1)?
-        .sub(&inside);
+    let outside = engine.public_const(1, z_len + 2 * w_len + 1)?.sub(&inside);
     let z_failures = outside.slice(0, z_len).sum();
     let low_failures = outside.slice(z_len, w_len).sum();
     let ct0_failures = outside.slice(z_len + w_len, w_len).sum();
@@ -1427,10 +1426,7 @@ fn sealed_rejection_verdict<T: MpcTransport>(
         .iter()
         .map(|&v| fq_add(v, gamma2 - low_bound))
         .collect();
-    let high_planes: Vec<Sh> = range_planes
-        .iter()
-        .map(|p| p.slice(z_len, w_len))
-        .collect();
+    let high_planes: Vec<Sh> = range_planes.iter().map(|p| p.slice(z_len, w_len)).collect();
     let high_inside = masked_range_test(
         engine,
         &high_opened,
@@ -1879,7 +1875,10 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
             .chain(hw_idx)
             .copied()
             .collect();
-        let range_planes: Vec<Sh> = planes.iter().map(|plane| plane.gather(&range_idx)).collect();
+        let range_planes: Vec<Sh> = planes
+            .iter()
+            .map(|plane| plane.gather(&range_idx))
+            .collect();
         let hint_r_planes: Vec<Sh> = planes
             .iter()
             .map(|plane| plane.gather(hint_r_idx))

@@ -851,8 +851,11 @@ impl<'a> RekeyRound1<'a> {
             }
             for subset in config.subsets() {
                 let mut images = hellos.iter().filter_map(|hello| {
-                    hello.public_shares.binary_search_by_key(&subset, |entry| entry.0)
-                        .ok().map(|i| &hello.public_shares[i].1)
+                    hello
+                        .public_shares
+                        .binary_search_by_key(&subset, |entry| entry.0)
+                        .ok()
+                        .map(|i| &hello.public_shares[i].1)
                 });
                 let first = images
                     .next()
@@ -1970,7 +1973,9 @@ mod tests {
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Hello(hellos) = stage {
                 let image = core::array::from_fn(|_| RingPoly::zero());
-                hellos[1].public_shares.push((CustodianSet::from(0b011), image));
+                hellos[1]
+                    .public_shares
+                    .push((CustodianSet::from(0b011), image));
             }
         });
         all_fail(outcome, None, RekeyFault::MalformedMessage);

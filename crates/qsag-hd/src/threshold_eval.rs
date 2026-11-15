@@ -805,8 +805,11 @@ mod tests {
             .iter()
             .map(|s| match s.scheme {
                 ShareScheme::Shamir { eval_point, .. } => (s.party_id, eval_point),
-                ShareScheme::Additive { .. } => *s.committee.iter()
-                    .find(|entry| entry.0 == s.party_id).unwrap(),
+                ShareScheme::Additive { .. } => *s
+                    .committee
+                    .iter()
+                    .find(|entry| entry.0 == s.party_id)
+                    .unwrap(),
             })
             .collect();
         let masks = trusted_dealer_opening_masks(&roster, [1; 32], [31; 32]).unwrap();
@@ -1030,15 +1033,39 @@ mod tests {
         let (pk, shares) = setup_shamir_linear_module([18; 32], 3, &[1, 2, 3], 3).unwrap();
         let secret = reconstruct_for_recovery_or_test(&shares, &pk).unwrap();
         let expected = form().iter().zip(&secret).fold(0, |sum, (l, s)| {
-            l.coeffs.iter().zip(&s.coeffs).fold(sum, |acc, (&a, &b)| mod_q_add(acc, mod_q_mul(a, b)))
+            l.coeffs
+                .iter()
+                .zip(&s.coeffs)
+                .fold(sum, |acc, (&a, &b)| mod_q_add(acc, mod_q_mul(a, b)))
         });
-        let mut shares: Vec<_> = shares.into_iter().map(|s| s.into_additive().unwrap()).collect();
+        let mut shares: Vec<_> = shares
+            .into_iter()
+            .map(|s| s.into_additive().unwrap())
+            .collect();
         let short = [(0, 1), (1, 2)];
-        let mask = trusted_dealer_opening_masks(&short, [7; 32], [31; 32]).unwrap().remove(0);
-        assert!(HdThresholdEvalRound1Commit::begin_inner(&mut shares[0], &pk, &short,
-            &form(), [7; 32], mask, [2; 32]).is_err());
-        assert_eq!(verify_all(states(&mut shares, &pk, false)).unwrap(), [expected; 3]);
-        assert_eq!(verify_all(states(&mut shares, &pk, true)), Err(HdError::MacCheckFailed));
+        let mask = trusted_dealer_opening_masks(&short, [7; 32], [31; 32])
+            .unwrap()
+            .remove(0);
+        assert!(
+            HdThresholdEvalRound1Commit::begin_inner(
+                &mut shares[0],
+                &pk,
+                &short,
+                &form(),
+                [7; 32],
+                mask,
+                [2; 32]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            verify_all(states(&mut shares, &pk, false)).unwrap(),
+            [expected; 3]
+        );
+        assert_eq!(
+            verify_all(states(&mut shares, &pk, true)),
+            Err(HdError::MacCheckFailed)
+        );
     }
 
     #[test]
