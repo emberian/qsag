@@ -1432,7 +1432,508 @@ pub fn fips205_chain(
     x
 }
 
+// ============================================================================
+// 8-Way (`AVX-512`) & 4-Way (`AVX2` / `AArch64 FEAT_SHA3`) Batch SHAKE256 Helpers
+// ============================================================================
+
+#[inline]
+fn ct_eq_u32_mask64(a: u32, b: u32) -> u64 {
+    let diff = core::hint::black_box((a ^ b) as u64);
+    let nz = (diff | diff.wrapping_neg()) >> 63;
+    nz.wrapping_sub(1)
+}
+
+#[inline]
+fn ct_ge_u32_mask64(a: u32, b: u32) -> u64 {
+    let borrow = core::hint::black_box(((a as u64).wrapping_sub(b as u64)) >> 63);
+    borrow.wrapping_sub(1)
+}
+
+#[inline]
+fn adrs_to_le_words(adrs: &Fips205Adrs) -> [u64; 4] {
+    let b = adrs.to_bytes();
+    [
+        u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+        u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),
+        u64::from_le_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]),
+        u64::from_le_bytes([b[24], b[25], b[26], b[27], b[28], b[29], b[30], b[31]]),
+    ]
+}
+
+#[inline]
+fn with_f6_in_w3(w3_f5_only: u64, f6: u32) -> u64 {
+    (w3_f5_only & 0xFFFF_FFFF) | ((u32::from_le_bytes(f6.to_be_bytes()) as u64) << 32)
+}
+
+#[inline]
+fn pack_seed_words(seed: &[u8], n_words: usize) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    for (w, slot) in out.iter_mut().enumerate().take(n_words) {
+        let off = 8 * w;
+        *slot = u64::from_le_bytes([
+            seed[off],
+            seed[off + 1],
+            seed[off + 2],
+            seed[off + 3],
+            seed[off + 4],
+            seed[off + 5],
+            seed[off + 6],
+            seed[off + 7],
+        ]);
+    }
+    out
+}
+
+#[inline]
+fn pack_block_words(blk: &SlhBlock, n_words: usize) -> [u64; 4] {
+    pack_seed_words(&blk.bytes, n_words)
+}
+
+#[inline]
+fn unpack_words_to_block(words: &[u64; 4], n: usize) -> SlhBlock {
+    let n_words = n / 8;
+    let mut bytes = [0u8; 32];
+    for (w, &word) in words.iter().enumerate().take(n_words) {
+        bytes[8 * w..8 * (w + 1)].copy_from_slice(&word.to_le_bytes());
+    }
+    SlhBlock {
+        bytes,
+        len: n as u8,
+    }
+}
+
+/// 8-lane single-block `PRF(PK.seed, SK.seed, ADRS_i)` (`SHAKE256`, `2n + 32 <= 96 < 136` bytes).
+pub fn shake256_prf_x8(
+    n: usize,
+    pk_seed: &[u8],
+    sk_seed: &[u8],
+    adrs: &[Fips205Adrs; 8],
+) -> [SlhBlock; 8] {
+    let n_words = n / 8;
+    let pk_w = pack_seed_words(pk_seed, n_words);
+    let mut sk_w = pack_seed_words(sk_seed, n_words);
+    let mut state = qsag_asm::KeccakState8x::default();
+    for w in 0..n_words {
+        state.0[w] = [pk_w[w]; 8];
+        state.0[n_words + 4 + w] = [sk_w[w]; 8];
+    }
+    let end_word = 2 * n_words + 4;
+    state.0[end_word] = [0x1F; 8];
+    state.0[16] = [1u64 << 63; 8];
+    for (lane, a) in adrs.iter().enumerate() {
+        let aw = adrs_to_le_words(a);
+        state.0[n_words][lane] = aw[0];
+        state.0[n_words + 1][lane] = aw[1];
+        state.0[n_words + 2][lane] = aw[2];
+        state.0[n_words + 3][lane] = aw[3];
+    }
+    qsag_asm::keccak_f1600_x8(&mut state);
+    let out = core::array::from_fn(|lane| {
+        let mut words = [0u64; 4];
+        for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+            *slot = state.0[w][lane];
+        }
+        unpack_words_to_block(&words, n)
+    });
+    qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+    qsag_asm::volatile_fill(&mut sk_w, 0);
+    out
+}
+
+/// 8-lane single-block `F(PK.seed, ADRS_i, M1_i)` (`SHAKE256`, `2n + 32 <= 96 < 136` bytes).
+#[allow(clippy::needless_range_loop)]
+pub fn shake256_f_x8(
+    n: usize,
+    pk_seed: &[u8],
+    adrs: &[Fips205Adrs; 8],
+    m1: &[SlhBlock; 8],
+) -> [SlhBlock; 8] {
+    let n_words = n / 8;
+    let pk_w = pack_seed_words(pk_seed, n_words);
+    let mut state = qsag_asm::KeccakState8x::default();
+    for w in 0..n_words {
+        state.0[w] = [pk_w[w]; 8];
+    }
+    let end_word = 2 * n_words + 4;
+    state.0[end_word] = [0x1F; 8];
+    state.0[16] = [1u64 << 63; 8];
+    for lane in 0..8 {
+        let aw = adrs_to_le_words(&adrs[lane]);
+        let mw = pack_block_words(&m1[lane], n_words);
+        state.0[n_words][lane] = aw[0];
+        state.0[n_words + 1][lane] = aw[1];
+        state.0[n_words + 2][lane] = aw[2];
+        state.0[n_words + 3][lane] = aw[3];
+        for w in 0..n_words {
+            state.0[n_words + 4 + w][lane] = mw[w];
+        }
+    }
+    qsag_asm::keccak_f1600_x8(&mut state);
+    let out = core::array::from_fn(|lane| {
+        let mut words = [0u64; 4];
+        for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+            *slot = state.0[w][lane];
+        }
+        unpack_words_to_block(&words, n)
+    });
+    qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+    out
+}
+
+/// 8-lane single-block `H(PK.seed, ADRS_i, M1_i || M2_i)` (`SHAKE256`, `3n + 32 <= 128 < 136` bytes).
+#[allow(clippy::needless_range_loop)]
+pub fn shake256_h_x8(
+    n: usize,
+    pk_seed: &[u8],
+    adrs: &[Fips205Adrs; 8],
+    m1: &[SlhBlock; 8],
+    m2: &[SlhBlock; 8],
+) -> [SlhBlock; 8] {
+    let n_words = n / 8;
+    let pk_w = pack_seed_words(pk_seed, n_words);
+    let mut state = qsag_asm::KeccakState8x::default();
+    for w in 0..n_words {
+        state.0[w] = [pk_w[w]; 8];
+    }
+    let end_word = 3 * n_words + 4;
+    for lane in 0..8 {
+        let aw = adrs_to_le_words(&adrs[lane]);
+        let m1w = pack_block_words(&m1[lane], n_words);
+        let m2w = pack_block_words(&m2[lane], n_words);
+        state.0[n_words][lane] = aw[0];
+        state.0[n_words + 1][lane] = aw[1];
+        state.0[n_words + 2][lane] = aw[2];
+        state.0[n_words + 3][lane] = aw[3];
+        for w in 0..n_words {
+            state.0[n_words + 4 + w][lane] = m1w[w];
+            state.0[2 * n_words + 4 + w][lane] = m2w[w];
+        }
+        state.0[end_word][lane] ^= 0x1F;
+        state.0[16][lane] ^= 1u64 << 63;
+    }
+    qsag_asm::keccak_f1600_x8(&mut state);
+    let out = core::array::from_fn(|lane| {
+        let mut words = [0u64; 4];
+        for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+            *slot = state.0[w][lane];
+        }
+        unpack_words_to_block(&words, n)
+    });
+    qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+    out
+}
+
+/// Evaluate `wots_pkGen` across 8 consecutive key pairs (`start_kp..start_kp + 8`) in lockstep,
+/// keeping all `ell` chain states and the final `T_ell` compression in 8-lane `[u64; 8]` ZMM layout.
+#[allow(clippy::needless_range_loop)]
+fn wots_pk_gen_8_leaves(
+    params: &Fips205Params,
+    sk_seed: &[u8],
+    pk_seed: &[u8],
+    base_adrs: Fips205Adrs,
+    start_kp: u32,
+    out_leaves: &mut Vec<SlhBlock>,
+) {
+    let n = params.n;
+    let n_words = n / 8;
+    let ell = params.ell();
+    let pk_w = pack_seed_words(pk_seed, n_words);
+    let mut sk_w = pack_seed_words(sk_seed, n_words);
+
+    let mut prf_adrs_w2 = [0u64; 8];
+    let mut hash_adrs_w2 = [0u64; 8];
+    let mut wotspk_adrs_words = [[0u64; 8]; 4];
+
+    let prf_proto = base_adrs.with_type_and_clear(Fips205AdrsType::WotsPrf);
+    let hash_proto = base_adrs.with_type_and_clear(Fips205AdrsType::WotsHash);
+    let pk_proto = base_adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
+    let common_aw = adrs_to_le_words(&hash_proto);
+
+    for lane in 0..8 {
+        let kp = start_kp + (lane as u32);
+        let mut pa = prf_proto;
+        pa.key_pair = kp;
+        prf_adrs_w2[lane] = adrs_to_le_words(&pa)[2];
+
+        let mut ha = hash_proto;
+        ha.key_pair = kp;
+        hash_adrs_w2[lane] = adrs_to_le_words(&ha)[2];
+
+        let mut ka = pk_proto;
+        ka.key_pair = kp;
+        let kaw = adrs_to_le_words(&ka);
+        for w in 0..4 {
+            wotspk_adrs_words[w][lane] = kaw[w];
+        }
+    }
+
+    let end_word = 2 * n_words + 4;
+    let mut prf_base = qsag_asm::KeccakState8x::default();
+    let mut hash_base = qsag_asm::KeccakState8x::default();
+    for w in 0..n_words {
+        prf_base.0[w] = [pk_w[w]; 8];
+        prf_base.0[n_words + 4 + w] = [sk_w[w]; 8];
+        hash_base.0[w] = [pk_w[w]; 8];
+    }
+    prf_base.0[n_words] = [common_aw[0]; 8];
+    prf_base.0[n_words + 1] = [common_aw[1]; 8];
+    prf_base.0[n_words + 2] = prf_adrs_w2;
+    prf_base.0[end_word] = [0x1F; 8];
+    prf_base.0[16] = [1u64 << 63; 8];
+
+    hash_base.0[n_words] = [common_aw[0]; 8];
+    hash_base.0[n_words + 1] = [common_aw[1]; 8];
+    hash_base.0[n_words + 2] = hash_adrs_w2;
+    hash_base.0[end_word] = [0x1F; 8];
+    hash_base.0[16] = [1u64 << 63; 8];
+
+    let mut endpoints = [[[0u64; 8]; 4]; 67];
+    let mut state = qsag_asm::KeccakState8x::default();
+
+    for (ch, ep_slot) in endpoints.iter_mut().enumerate().take(ell) {
+        let f5_le = u32::from_le_bytes((ch as u32).to_be_bytes()) as u64;
+        state = prf_base;
+        state.0[n_words + 3] = [f5_le; 8];
+        qsag_asm::keccak_f1600_x8(&mut state);
+
+        for step in 0..15u32 {
+            let mut cur_rows = [[0u64; 8]; 4];
+            for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                *row = state.0[w];
+            }
+            state = hash_base;
+            state.0[n_words + 3] = [with_f6_in_w3(f5_le, step); 8];
+            for (w, row) in cur_rows.iter().enumerate().take(n_words) {
+                state.0[n_words + 4 + w] = *row;
+            }
+            qsag_asm::keccak_f1600_x8(&mut state);
+            qsag_asm::volatile_fill(&mut cur_rows, [0; 8]);
+        }
+
+        for (w, slot) in ep_slot.iter_mut().enumerate().take(n_words) {
+            *slot = state.0[w];
+        }
+    }
+
+    qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+    qsag_asm::volatile_fill(&mut prf_base.0, [0; 8]);
+    qsag_asm::volatile_fill(&mut sk_w, 0);
+
+    // Stream `PK.seed || wotspk_adrs || endpoints[0..ell]` directly in 8-way `[u64; 8]` rows.
+    let mut th_state = qsag_asm::KeccakState8x::default();
+    let mut slot = 0usize;
+    let push_row = |row: &[u64; 8], st: &mut qsag_asm::KeccakState8x, s: &mut usize| {
+        for lane in 0..8 {
+            st.0[*s][lane] ^= row[lane];
+        }
+        *s += 1;
+        if *s == 17 {
+            qsag_asm::keccak_f1600_x8(st);
+            *s = 0;
+        }
+    };
+
+    for &pw in pk_w.iter().take(n_words) {
+        push_row(&[pw; 8], &mut th_state, &mut slot);
+    }
+    for aw_row in &wotspk_adrs_words {
+        push_row(aw_row, &mut th_state, &mut slot);
+    }
+    for ep in endpoints.iter().take(ell) {
+        for row in ep.iter().take(n_words) {
+            push_row(row, &mut th_state, &mut slot);
+        }
+    }
+    for lane in 0..8 {
+        th_state.0[slot][lane] ^= 0x1F;
+        th_state.0[16][lane] ^= 1u64 << 63;
+    }
+    qsag_asm::keccak_f1600_x8(&mut th_state);
+
+    for lane in 0..8 {
+        let mut words = [0u64; 4];
+        for (w, out_w) in words.iter_mut().enumerate().take(n_words) {
+            *out_w = th_state.0[w][lane];
+        }
+        out_leaves.push(unpack_words_to_block(&words, n));
+    }
+    qsag_asm::volatile_fill(&mut th_state.0, [0; 8]);
+}
+
+/// Evaluate `wots_pkGen` across 4 consecutive key pairs (`start_kp..start_kp + 4`) in lockstep.
+#[allow(clippy::needless_range_loop)]
+fn wots_pk_gen_4_leaves(
+    params: &Fips205Params,
+    sk_seed: &[u8],
+    pk_seed: &[u8],
+    base_adrs: Fips205Adrs,
+    start_kp: u32,
+    out_leaves: &mut Vec<SlhBlock>,
+) {
+    let n = params.n;
+    let n_words = n / 8;
+    let ell = params.ell();
+    let pk_w = pack_seed_words(pk_seed, n_words);
+    let mut sk_w = pack_seed_words(sk_seed, n_words);
+
+    let mut prf_adrs_w2 = [0u64; 4];
+    let mut hash_adrs_w2 = [0u64; 4];
+    let mut wotspk_adrs_words = [[0u64; 4]; 4];
+
+    let prf_proto = base_adrs.with_type_and_clear(Fips205AdrsType::WotsPrf);
+    let hash_proto = base_adrs.with_type_and_clear(Fips205AdrsType::WotsHash);
+    let pk_proto = base_adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
+    let common_aw = adrs_to_le_words(&hash_proto);
+
+    for lane in 0..4 {
+        let kp = start_kp + (lane as u32);
+        let mut pa = prf_proto;
+        pa.key_pair = kp;
+        prf_adrs_w2[lane] = adrs_to_le_words(&pa)[2];
+
+        let mut ha = hash_proto;
+        ha.key_pair = kp;
+        hash_adrs_w2[lane] = adrs_to_le_words(&ha)[2];
+
+        let mut ka = pk_proto;
+        ka.key_pair = kp;
+        let kaw = adrs_to_le_words(&ka);
+        for w in 0..4 {
+            wotspk_adrs_words[w][lane] = kaw[w];
+        }
+    }
+
+    let end_word = 2 * n_words + 4;
+    let mut prf_base = qsag_asm::KeccakState4x::default();
+    let mut hash_base = qsag_asm::KeccakState4x::default();
+    for w in 0..n_words {
+        prf_base.0[w] = [pk_w[w]; 4];
+        prf_base.0[n_words + 4 + w] = [sk_w[w]; 4];
+        hash_base.0[w] = [pk_w[w]; 4];
+    }
+    prf_base.0[n_words] = [common_aw[0]; 4];
+    prf_base.0[n_words + 1] = [common_aw[1]; 4];
+    prf_base.0[n_words + 2] = prf_adrs_w2;
+    prf_base.0[end_word] = [0x1F; 4];
+    prf_base.0[16] = [1u64 << 63; 4];
+
+    hash_base.0[n_words] = [common_aw[0]; 4];
+    hash_base.0[n_words + 1] = [common_aw[1]; 4];
+    hash_base.0[n_words + 2] = hash_adrs_w2;
+    hash_base.0[end_word] = [0x1F; 4];
+    hash_base.0[16] = [1u64 << 63; 4];
+
+    let mut endpoints = [[[0u64; 4]; 4]; 67];
+    let mut state = qsag_asm::KeccakState4x::default();
+
+    for (ch, ep_slot) in endpoints.iter_mut().enumerate().take(ell) {
+        let f5_le = u32::from_le_bytes((ch as u32).to_be_bytes()) as u64;
+        state = prf_base;
+        state.0[n_words + 3] = [f5_le; 4];
+        qsag_asm::keccak_f1600_x4(&mut state);
+
+        for step in 0..15u32 {
+            let mut cur_rows = [[0u64; 4]; 4];
+            for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                *row = state.0[w];
+            }
+            state = hash_base;
+            state.0[n_words + 3] = [with_f6_in_w3(f5_le, step); 4];
+            for (w, row) in cur_rows.iter().enumerate().take(n_words) {
+                state.0[n_words + 4 + w] = *row;
+            }
+            qsag_asm::keccak_f1600_x4(&mut state);
+            qsag_asm::volatile_fill(&mut cur_rows, [0; 4]);
+        }
+
+        for (w, slot) in ep_slot.iter_mut().enumerate().take(n_words) {
+            *slot = state.0[w];
+        }
+    }
+
+    qsag_asm::volatile_fill(&mut state.0, [0; 4]);
+    qsag_asm::volatile_fill(&mut prf_base.0, [0; 4]);
+    qsag_asm::volatile_fill(&mut sk_w, 0);
+
+    let mut th_state = qsag_asm::KeccakState4x::default();
+    let mut slot = 0usize;
+    let push_row = |row: &[u64; 4], st: &mut qsag_asm::KeccakState4x, s: &mut usize| {
+        for lane in 0..4 {
+            st.0[*s][lane] ^= row[lane];
+        }
+        *s += 1;
+        if *s == 17 {
+            qsag_asm::keccak_f1600_x4(st);
+            *s = 0;
+        }
+    };
+
+    for &pw in pk_w.iter().take(n_words) {
+        push_row(&[pw; 4], &mut th_state, &mut slot);
+    }
+    for aw_row in &wotspk_adrs_words {
+        push_row(aw_row, &mut th_state, &mut slot);
+    }
+    for ep in endpoints.iter().take(ell) {
+        for row in ep.iter().take(n_words) {
+            push_row(row, &mut th_state, &mut slot);
+        }
+    }
+    for lane in 0..4 {
+        th_state.0[slot][lane] ^= 0x1F;
+        th_state.0[16][lane] ^= 1u64 << 63;
+    }
+    qsag_asm::keccak_f1600_x4(&mut th_state);
+
+    for lane in 0..4 {
+        let mut words = [0u64; 4];
+        for (w, out_w) in words.iter_mut().enumerate().take(n_words) {
+            *out_w = th_state.0[w][lane];
+        }
+        out_leaves.push(unpack_words_to_block(&words, n));
+    }
+    qsag_asm::volatile_fill(&mut th_state.0, [0; 4]);
+}
+
+fn compute_xmss_subtree_leaves(
+    params: &Fips205Params,
+    sk_seed: &[u8],
+    pk_seed: &[u8],
+    base_adrs: Fips205Adrs,
+) -> Vec<SlhBlock> {
+    let n_leaves = 1usize << params.hp;
+    let mut leaves = Vec::with_capacity(n_leaves);
+    if matches!(params.n, 16 | 24 | 32)
+        && sk_seed.len() == params.n
+        && pk_seed.len() == params.n
+    {
+        if n_leaves >= 8 {
+            for kp_base in (0..n_leaves).step_by(8) {
+                wots_pk_gen_8_leaves(
+                    params,
+                    sk_seed,
+                    pk_seed,
+                    base_adrs,
+                    kp_base as u32,
+                    &mut leaves,
+                );
+            }
+            return leaves;
+        } else if n_leaves == 4 {
+            wots_pk_gen_4_leaves(params, sk_seed, pk_seed, base_adrs, 0, &mut leaves);
+            return leaves;
+        }
+    }
+    for kp in 0..n_leaves {
+        let mut leaf_adrs = base_adrs;
+        leaf_adrs.key_pair = kp as u32;
+        leaves.push(wots_pk_gen(params, sk_seed, pk_seed, leaf_adrs));
+    }
+    leaves
+}
+
 /// NIST FIPS 205 Algorithm 6 `wots_pkGen(SK.seed, PK.seed, ADRS)`.
+#[allow(clippy::needless_range_loop)]
 pub fn wots_pk_gen(
     params: &Fips205Params,
     sk_seed: &[u8],
@@ -1448,14 +1949,137 @@ pub fn wots_pk_gen(
     chain_adrs.key_pair = adrs.key_pair;
 
     let mut tmp = [SlhBlock::zero(32); 67];
-    let mut i = 0;
-    while i < ell {
-        sk_adrs.f5 = i as u32;
-        let mut sk_i = fips205_prf(n, pk_seed, sk_seed, &sk_adrs);
-        chain_adrs.f5 = i as u32;
-        tmp[i] = fips205_chain(sk_i, 0, 15, pk_seed, chain_adrs);
-        sk_i.wipe();
-        i += 1;
+    if matches!(n, 16 | 24 | 32) && sk_seed.len() == n && pk_seed.len() == n {
+        let n_words = n / 8;
+        let pk_w = pack_seed_words(pk_seed, n_words);
+        let mut sk_w = pack_seed_words(sk_seed, n_words);
+        let sk_aw = adrs_to_le_words(&sk_adrs);
+        let ch_aw = adrs_to_le_words(&chain_adrs);
+        let end_word = 2 * n_words + 4;
+
+        for base in (0..ell).step_by(8) {
+            let count = (ell - base).min(8);
+            if count > 4 {
+                let mut f5_w = [0u64; 8];
+                for (lane, slot) in f5_w.iter_mut().enumerate().take(count) {
+                    *slot = u32::from_le_bytes(((base + lane) as u32).to_be_bytes()) as u64;
+                }
+                let mut state = qsag_asm::KeccakState8x::default();
+                for w in 0..n_words {
+                    state.0[w] = [pk_w[w]; 8];
+                }
+                for lane in 0..count {
+                    state.0[n_words][lane] = sk_aw[0];
+                    state.0[n_words + 1][lane] = sk_aw[1];
+                    state.0[n_words + 2][lane] = sk_aw[2];
+                    state.0[n_words + 3][lane] = f5_w[lane];
+                    for w in 0..n_words {
+                        state.0[n_words + 4 + w][lane] = sk_w[w];
+                    }
+                    state.0[end_word][lane] = 0x1F;
+                    state.0[16][lane] = 1u64 << 63;
+                }
+                qsag_asm::keccak_f1600_x8(&mut state);
+
+                for step in 0..15u32 {
+                    let mut cur_rows = [[0u64; 8]; 4];
+                    for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                    state = qsag_asm::KeccakState8x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 8];
+                    }
+                    for lane in 0..count {
+                        state.0[n_words][lane] = ch_aw[0];
+                        state.0[n_words + 1][lane] = ch_aw[1];
+                        state.0[n_words + 2][lane] = ch_aw[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(f5_w[lane], step);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = cur_rows[w][lane];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x8(&mut state);
+                    qsag_asm::volatile_fill(&mut cur_rows, [0; 8]);
+                }
+
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = state.0[w][lane];
+                    }
+                    tmp[base + lane] = unpack_words_to_block(&words, n);
+                }
+                qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+            } else {
+                let mut f5_w = [0u64; 4];
+                for (lane, slot) in f5_w.iter_mut().enumerate().take(count) {
+                    *slot = u32::from_le_bytes(((base + lane) as u32).to_be_bytes()) as u64;
+                }
+                let mut state = qsag_asm::KeccakState4x::default();
+                for w in 0..n_words {
+                    state.0[w] = [pk_w[w]; 4];
+                }
+                for lane in 0..count {
+                    state.0[n_words][lane] = sk_aw[0];
+                    state.0[n_words + 1][lane] = sk_aw[1];
+                    state.0[n_words + 2][lane] = sk_aw[2];
+                    state.0[n_words + 3][lane] = f5_w[lane];
+                    for w in 0..n_words {
+                        state.0[n_words + 4 + w][lane] = sk_w[w];
+                    }
+                    state.0[end_word][lane] = 0x1F;
+                    state.0[16][lane] = 1u64 << 63;
+                }
+                qsag_asm::keccak_f1600_x4(&mut state);
+
+                for step in 0..15u32 {
+                    let mut cur_rows = [[0u64; 4]; 4];
+                    for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                    state = qsag_asm::KeccakState4x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 4];
+                    }
+                    for lane in 0..count {
+                        state.0[n_words][lane] = ch_aw[0];
+                        state.0[n_words + 1][lane] = ch_aw[1];
+                        state.0[n_words + 2][lane] = ch_aw[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(f5_w[lane], step);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = cur_rows[w][lane];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x4(&mut state);
+                    qsag_asm::volatile_fill(&mut cur_rows, [0; 4]);
+                }
+
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = state.0[w][lane];
+                    }
+                    tmp[base + lane] = unpack_words_to_block(&words, n);
+                }
+                qsag_asm::volatile_fill(&mut state.0, [0; 4]);
+            }
+        }
+        qsag_asm::volatile_fill(&mut sk_w, 0);
+    } else {
+        let mut i = 0;
+        while i < ell {
+            sk_adrs.f5 = i as u32;
+            let mut sk_i = fips205_prf(n, pk_seed, sk_seed, &sk_adrs);
+            chain_adrs.f5 = i as u32;
+            tmp[i] = fips205_chain(sk_i, 0, 15, pk_seed, chain_adrs);
+            sk_i.wipe();
+            i += 1;
+        }
     }
     let mut wotspk_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
     wotspk_adrs.key_pair = adrs.key_pair;
@@ -1463,6 +2087,7 @@ pub fn wots_pk_gen(
 }
 
 /// NIST FIPS 205 Algorithm 7 `wots_sign(M, SK.seed, PK.seed, ADRS)`.
+#[allow(clippy::needless_range_loop)]
 pub fn wots_sign(
     params: &Fips205Params,
     msg_n: &SlhBlock,
@@ -1480,6 +2105,165 @@ pub fn wots_sign(
     chain_adrs.key_pair = adrs.key_pair;
 
     let mut sig = Vec::with_capacity(ell);
+    if matches!(n, 16 | 24 | 32) && sk_seed.len() == n && pk_seed.len() == n {
+        let n_words = n / 8;
+        let pk_w = pack_seed_words(pk_seed, n_words);
+        let mut sk_w = pack_seed_words(sk_seed, n_words);
+        let sk_aw = adrs_to_le_words(&sk_adrs);
+        let ch_aw = adrs_to_le_words(&chain_adrs);
+        let end_word = 2 * n_words + 4;
+
+        for base in (0..ell).step_by(8) {
+            let count = (ell - base).min(8);
+            if count > 4 {
+                let mut f5_w = [0u64; 8];
+                let mut targets = [0u32; 8];
+                for lane in 0..count {
+                    f5_w[lane] = u32::from_le_bytes(((base + lane) as u32).to_be_bytes()) as u64;
+                    targets[lane] = digits[base + lane] as u32;
+                }
+                let mut state = qsag_asm::KeccakState8x::default();
+                for w in 0..n_words {
+                    state.0[w] = [pk_w[w]; 8];
+                }
+                for lane in 0..count {
+                    state.0[n_words][lane] = sk_aw[0];
+                    state.0[n_words + 1][lane] = sk_aw[1];
+                    state.0[n_words + 2][lane] = sk_aw[2];
+                    state.0[n_words + 3][lane] = f5_w[lane];
+                    for w in 0..n_words {
+                        state.0[n_words + 4 + w][lane] = sk_w[w];
+                    }
+                    state.0[end_word][lane] = 0x1F;
+                    state.0[16][lane] = 1u64 << 63;
+                }
+                qsag_asm::keccak_f1600_x8(&mut state);
+
+                let mut acc_rows = [[0u64; 8]; 4];
+                for (w, row) in acc_rows.iter_mut().enumerate().take(n_words) {
+                    *row = state.0[w];
+                }
+
+                // Constant-trip 15-step lockstep chain with constant-time mask selection.
+                for step in 0..15u32 {
+                    let mut cur_rows = [[0u64; 8]; 4];
+                    for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                    state = qsag_asm::KeccakState8x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 8];
+                    }
+                    for lane in 0..count {
+                        state.0[n_words][lane] = ch_aw[0];
+                        state.0[n_words + 1][lane] = ch_aw[1];
+                        state.0[n_words + 2][lane] = ch_aw[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(f5_w[lane], step);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = cur_rows[w][lane];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x8(&mut state);
+                    qsag_asm::volatile_fill(&mut cur_rows, [0; 8]);
+
+                    let done_step = step + 1;
+                    for lane in 0..count {
+                        let mask = ct_eq_u32_mask64(done_step, targets[lane]);
+                        for (w, acc_row) in acc_rows.iter_mut().enumerate().take(n_words) {
+                            acc_row[lane] = (acc_row[lane] & !mask) | (state.0[w][lane] & mask);
+                        }
+                    }
+                }
+
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = acc_rows[w][lane];
+                    }
+                    sig.push(unpack_words_to_block(&words, n));
+                    qsag_asm::volatile_fill(&mut words, 0);
+                }
+                qsag_asm::volatile_fill(&mut acc_rows, [0; 8]);
+                qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+            } else {
+                let mut f5_w = [0u64; 4];
+                let mut targets = [0u32; 4];
+                for lane in 0..count {
+                    f5_w[lane] = u32::from_le_bytes(((base + lane) as u32).to_be_bytes()) as u64;
+                    targets[lane] = digits[base + lane] as u32;
+                }
+                let mut state = qsag_asm::KeccakState4x::default();
+                for w in 0..n_words {
+                    state.0[w] = [pk_w[w]; 4];
+                }
+                for lane in 0..count {
+                    state.0[n_words][lane] = sk_aw[0];
+                    state.0[n_words + 1][lane] = sk_aw[1];
+                    state.0[n_words + 2][lane] = sk_aw[2];
+                    state.0[n_words + 3][lane] = f5_w[lane];
+                    for w in 0..n_words {
+                        state.0[n_words + 4 + w][lane] = sk_w[w];
+                    }
+                    state.0[end_word][lane] = 0x1F;
+                    state.0[16][lane] = 1u64 << 63;
+                }
+                qsag_asm::keccak_f1600_x4(&mut state);
+
+                let mut acc_rows = [[0u64; 4]; 4];
+                for (w, row) in acc_rows.iter_mut().enumerate().take(n_words) {
+                    *row = state.0[w];
+                }
+
+                for step in 0..15u32 {
+                    let mut cur_rows = [[0u64; 4]; 4];
+                    for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                    state = qsag_asm::KeccakState4x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 4];
+                    }
+                    for lane in 0..count {
+                        state.0[n_words][lane] = ch_aw[0];
+                        state.0[n_words + 1][lane] = ch_aw[1];
+                        state.0[n_words + 2][lane] = ch_aw[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(f5_w[lane], step);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = cur_rows[w][lane];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x4(&mut state);
+                    qsag_asm::volatile_fill(&mut cur_rows, [0; 4]);
+
+                    let done_step = step + 1;
+                    for lane in 0..count {
+                        let mask = ct_eq_u32_mask64(done_step, targets[lane]);
+                        for (w, acc_row) in acc_rows.iter_mut().enumerate().take(n_words) {
+                            acc_row[lane] = (acc_row[lane] & !mask) | (state.0[w][lane] & mask);
+                        }
+                    }
+                }
+
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = acc_rows[w][lane];
+                    }
+                    sig.push(unpack_words_to_block(&words, n));
+                    qsag_asm::volatile_fill(&mut words, 0);
+                }
+                qsag_asm::volatile_fill(&mut acc_rows, [0; 4]);
+                qsag_asm::volatile_fill(&mut state.0, [0; 4]);
+            }
+        }
+        qsag_asm::volatile_fill(&mut sk_w, 0);
+        return sig;
+    }
+
     let mut i = 0;
     while i < ell {
         sk_adrs.f5 = i as u32;
@@ -1499,6 +2283,7 @@ pub fn wots_sign(
 }
 
 /// NIST FIPS 205 Algorithm 8 `wots_pkFromSig(sig, M, PK.seed, ADRS)`.
+#[allow(clippy::needless_range_loop)]
 pub fn wots_pk_from_sig(
     params: &Fips205Params,
     sig: &[SlhBlock],
@@ -1513,10 +2298,114 @@ pub fn wots_pk_from_sig(
     chain_adrs.key_pair = adrs.key_pair;
 
     let mut tmp = [SlhBlock::zero(32); 67];
-    for i in 0..ell {
-        let di = digits[i] as u32;
-        chain_adrs.f5 = i as u32;
-        tmp[i] = fips205_chain(sig[i], di, 15 - di, pk_seed, chain_adrs);
+    if matches!(n, 16 | 24 | 32) && pk_seed.len() == n && sig.len() >= ell {
+        let n_words = n / 8;
+        let pk_w = pack_seed_words(pk_seed, n_words);
+        let ch_aw = adrs_to_le_words(&chain_adrs);
+        let end_word = 2 * n_words + 4;
+
+        for base in (0..ell).step_by(8) {
+            let count = (ell - base).min(8);
+            let min_d = digits[base..base + count]
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(15) as u32;
+
+            if count > 4 {
+                let mut f5_w = [0u64; 8];
+                let mut starts = [15u32; 8];
+                let mut cur_rows = [[0u64; 8]; 4];
+                for lane in 0..count {
+                    f5_w[lane] = u32::from_le_bytes(((base + lane) as u32).to_be_bytes()) as u64;
+                    starts[lane] = digits[base + lane] as u32;
+                    let sw = pack_block_words(&sig[base + lane], n_words);
+                    for w in 0..n_words {
+                        cur_rows[w][lane] = sw[w];
+                    }
+                }
+                for step in min_d..15u32 {
+                    let mut state = qsag_asm::KeccakState8x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 8];
+                    }
+                    for lane in 0..count {
+                        state.0[n_words][lane] = ch_aw[0];
+                        state.0[n_words + 1][lane] = ch_aw[1];
+                        state.0[n_words + 2][lane] = ch_aw[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(f5_w[lane], step);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = cur_rows[w][lane];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x8(&mut state);
+                    for lane in 0..count {
+                        let active = ct_ge_u32_mask64(step, starts[lane]);
+                        for (w, cur_row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                            cur_row[lane] = (cur_row[lane] & !active) | (state.0[w][lane] & active);
+                        }
+                    }
+                }
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = cur_rows[w][lane];
+                    }
+                    tmp[base + lane] = unpack_words_to_block(&words, n);
+                }
+            } else {
+                let mut f5_w = [0u64; 4];
+                let mut starts = [15u32; 4];
+                let mut cur_rows = [[0u64; 4]; 4];
+                for lane in 0..count {
+                    f5_w[lane] = u32::from_le_bytes(((base + lane) as u32).to_be_bytes()) as u64;
+                    starts[lane] = digits[base + lane] as u32;
+                    let sw = pack_block_words(&sig[base + lane], n_words);
+                    for w in 0..n_words {
+                        cur_rows[w][lane] = sw[w];
+                    }
+                }
+                for step in min_d..15u32 {
+                    let mut state = qsag_asm::KeccakState4x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 4];
+                    }
+                    for lane in 0..count {
+                        state.0[n_words][lane] = ch_aw[0];
+                        state.0[n_words + 1][lane] = ch_aw[1];
+                        state.0[n_words + 2][lane] = ch_aw[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(f5_w[lane], step);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = cur_rows[w][lane];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x4(&mut state);
+                    for lane in 0..count {
+                        let active = ct_ge_u32_mask64(step, starts[lane]);
+                        for (w, cur_row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                            cur_row[lane] = (cur_row[lane] & !active) | (state.0[w][lane] & active);
+                        }
+                    }
+                }
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = cur_rows[w][lane];
+                    }
+                    tmp[base + lane] = unpack_words_to_block(&words, n);
+                }
+            }
+        }
+    } else {
+        for i in 0..ell {
+            let di = digits[i] as u32;
+            chain_adrs.f5 = i as u32;
+            tmp[i] = fips205_chain(sig[i], di, 15 - di, pk_seed, chain_adrs);
+        }
     }
     let mut wotspk_adrs = adrs.with_type_and_clear(Fips205AdrsType::WotsPk);
     wotspk_adrs.key_pair = adrs.key_pair;
@@ -1533,6 +2422,7 @@ pub fn wots_pk_from_sig(
     clippy::too_many_arguments,
     reason = "Preserve the existing explicit protocol interface for callers"
 )]
+#[allow(clippy::needless_range_loop)]
 pub fn build_fips205_merkle_from_leaves(
     n: usize,
     pk_seed: &[u8],
@@ -1548,6 +2438,90 @@ pub fn build_fips205_merkle_from_leaves(
     let mut cur = leaves.to_vec();
     let mut auth = Vec::with_capacity(height);
     let mut idx = local_idx;
+
+    if matches!(n, 16 | 24 | 32) && pk_seed.len() == n {
+        let n_words = n / 8;
+        let pk_w = pack_seed_words(pk_seed, n_words);
+        let mut proto = base_adrs.with_type_and_clear(node_adrs_type);
+        if preserve_key_pair {
+            proto.key_pair = base_adrs.key_pair;
+        }
+        let aw_base = adrs_to_le_words(&proto);
+        let end_word = 3 * n_words + 4;
+
+        for z in 1..=height {
+            auth.push(cur[idx ^ 1]);
+            let next_len = cur.len() / 2;
+            let base_off = tree_index_offset >> z;
+            let z_w3 = u32::from_le_bytes((z as u32).to_be_bytes()) as u64;
+            let mut next = Vec::with_capacity(next_len);
+
+            for base in (0..next_len).step_by(8) {
+                let count = (next_len - base).min(8);
+                if count > 4 {
+                    let mut state = qsag_asm::KeccakState8x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 8];
+                    }
+                    for lane in 0..count {
+                        let p = base + lane;
+                        let left_w = pack_block_words(&cur[2 * p], n_words);
+                        let right_w = pack_block_words(&cur[2 * p + 1], n_words);
+                        state.0[n_words][lane] = aw_base[0];
+                        state.0[n_words + 1][lane] = aw_base[1];
+                        state.0[n_words + 2][lane] = aw_base[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(z_w3, base_off + p as u32);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = left_w[w];
+                            state.0[2 * n_words + 4 + w][lane] = right_w[w];
+                        }
+                        state.0[end_word][lane] ^= 0x1F;
+                        state.0[16][lane] ^= 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x8(&mut state);
+                    for lane in 0..count {
+                        let mut words = [0u64; 4];
+                        for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                            *slot = state.0[w][lane];
+                        }
+                        next.push(unpack_words_to_block(&words, n));
+                    }
+                } else {
+                    let mut state = qsag_asm::KeccakState4x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 4];
+                    }
+                    for lane in 0..count {
+                        let p = base + lane;
+                        let left_w = pack_block_words(&cur[2 * p], n_words);
+                        let right_w = pack_block_words(&cur[2 * p + 1], n_words);
+                        state.0[n_words][lane] = aw_base[0];
+                        state.0[n_words + 1][lane] = aw_base[1];
+                        state.0[n_words + 2][lane] = aw_base[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(z_w3, base_off + p as u32);
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = left_w[w];
+                            state.0[2 * n_words + 4 + w][lane] = right_w[w];
+                        }
+                        state.0[end_word][lane] ^= 0x1F;
+                        state.0[16][lane] ^= 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x4(&mut state);
+                    for lane in 0..count {
+                        let mut words = [0u64; 4];
+                        for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                            *slot = state.0[w][lane];
+                        }
+                        next.push(unpack_words_to_block(&words, n));
+                    }
+                }
+            }
+            cur = next;
+            idx >>= 1;
+        }
+        return (cur[0], auth);
+    }
+
     for z in 1..=height {
         auth.push(cur[idx ^ 1]);
         let next_len = cur.len() / 2;
@@ -1625,13 +2599,7 @@ pub fn xmss_subtree_root(
     pk_seed: &[u8],
     base_adrs: Fips205Adrs,
 ) -> SlhBlock {
-    let n_leaves = 1usize << params.hp;
-    let mut leaves = Vec::with_capacity(n_leaves);
-    for kp in 0..n_leaves {
-        let mut leaf_adrs = base_adrs;
-        leaf_adrs.key_pair = kp as u32;
-        leaves.push(wots_pk_gen(params, sk_seed, pk_seed, leaf_adrs));
-    }
+    let leaves = compute_xmss_subtree_leaves(params, sk_seed, pk_seed, base_adrs);
     let (root, _) = build_fips205_merkle_from_leaves(
         params.n,
         pk_seed,
@@ -1697,6 +2665,7 @@ pub fn split_digest_indices(params: &Fips205Params, digest: &[u8]) -> (Vec<u32>,
 }
 
 /// NIST FIPS 205 Algorithm 16 `fors_sign` + Algorithm 17 `fors_pkFromSig` root computation.
+#[allow(clippy::needless_range_loop)]
 pub fn fors_sign_and_pk(
     params: &Fips205Params,
     fors_indices: &[u32],
@@ -1714,6 +2683,168 @@ pub fn fors_sign_and_pk(
 
     let mut leaf_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsTree);
     leaf_adrs.key_pair = adrs.key_pair;
+
+    if matches!(n, 16 | 24 | 32) && sk_seed.len() == n && pk_seed.len() == n {
+        let n_words = n / 8;
+        let pk_w = pack_seed_words(pk_seed, n_words);
+        let mut sk_w = pack_seed_words(sk_seed, n_words);
+        let sk_aw = adrs_to_le_words(&sk_adrs);
+        let lf_aw = adrs_to_le_words(&leaf_adrs);
+        let end_word = 2 * n_words + 4;
+
+        for (i, &target_idx_u32) in fors_indices.iter().enumerate().take(params.k) {
+            let idx_i = target_idx_u32 as usize;
+            let tree_off = (i * t_leaves) as u32;
+            let mut leaves = Vec::with_capacity(t_leaves);
+            let mut rev_words = [0u64; 4];
+
+            if t_leaves >= 8 {
+                let mut prf_base = qsag_asm::KeccakState8x::default();
+                let mut lf_base = qsag_asm::KeccakState8x::default();
+                for w in 0..n_words {
+                    prf_base.0[w] = [pk_w[w]; 8];
+                    prf_base.0[n_words + 4 + w] = [sk_w[w]; 8];
+                    lf_base.0[w] = [pk_w[w]; 8];
+                }
+                prf_base.0[n_words] = [sk_aw[0]; 8];
+                prf_base.0[n_words + 1] = [sk_aw[1]; 8];
+                prf_base.0[n_words + 2] = [sk_aw[2]; 8];
+                prf_base.0[end_word] = [0x1F; 8];
+                prf_base.0[16] = [1u64 << 63; 8];
+
+                lf_base.0[n_words] = [lf_aw[0]; 8];
+                lf_base.0[n_words + 1] = [lf_aw[1]; 8];
+                lf_base.0[n_words + 2] = [lf_aw[2]; 8];
+                lf_base.0[end_word] = [0x1F; 8];
+                lf_base.0[16] = [1u64 << 63; 8];
+
+                let mut state = qsag_asm::KeccakState8x::default();
+                for u_base in (0..t_leaves).step_by(8) {
+                    let mut g_w3 = [0u64; 8];
+                    for (lane, slot) in g_w3.iter_mut().enumerate() {
+                        let g_idx = tree_off + ((u_base + lane) as u32);
+                        *slot = with_f6_in_w3(0, g_idx);
+                    }
+                    state = prf_base;
+                    state.0[n_words + 3] = g_w3;
+                    qsag_asm::keccak_f1600_x8(&mut state);
+
+                    let mut sk_rows = [[0u64; 8]; 4];
+                    for (w, row) in sk_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                    for lane in 0..8 {
+                        let sel = ct_eq_u32_mask64((u_base + lane) as u32, target_idx_u32);
+                        for (w, slot) in rev_words.iter_mut().enumerate().take(n_words) {
+                            *slot |= sk_rows[w][lane] & sel;
+                        }
+                    }
+
+                    state = lf_base;
+                    state.0[n_words + 3] = g_w3;
+                    for (w, row) in sk_rows.iter().enumerate().take(n_words) {
+                        state.0[n_words + 4 + w] = *row;
+                    }
+                    qsag_asm::keccak_f1600_x8(&mut state);
+                    qsag_asm::volatile_fill(&mut sk_rows, [0; 8]);
+
+                    for lane in 0..8 {
+                        let mut words = [0u64; 4];
+                        for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                            *slot = state.0[w][lane];
+                        }
+                        leaves.push(unpack_words_to_block(&words, n));
+                    }
+                }
+                qsag_asm::volatile_fill(&mut state.0, [0; 8]);
+                qsag_asm::volatile_fill(&mut prf_base.0, [0; 8]);
+            } else {
+                for u_base in (0..t_leaves).step_by(4) {
+                    let count = (t_leaves - u_base).min(4);
+                    let mut g_w3 = [0u64; 4];
+                    let mut state = qsag_asm::KeccakState4x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 4];
+                    }
+                    for lane in 0..count {
+                        let g_idx = tree_off + ((u_base + lane) as u32);
+                        g_w3[lane] = with_f6_in_w3(0, g_idx);
+                        state.0[n_words][lane] = sk_aw[0];
+                        state.0[n_words + 1][lane] = sk_aw[1];
+                        state.0[n_words + 2][lane] = sk_aw[2];
+                        state.0[n_words + 3][lane] = g_w3[lane];
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = sk_w[w];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x4(&mut state);
+
+                    let mut sk_rows = [[0u64; 4]; 4];
+                    for (w, row) in sk_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                    for lane in 0..count {
+                        let sel = ct_eq_u32_mask64((u_base + lane) as u32, target_idx_u32);
+                        for (w, slot) in rev_words.iter_mut().enumerate().take(n_words) {
+                            *slot |= sk_rows[w][lane] & sel;
+                        }
+                    }
+
+                    state = qsag_asm::KeccakState4x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 4];
+                    }
+                    for lane in 0..count {
+                        state.0[n_words][lane] = lf_aw[0];
+                        state.0[n_words + 1][lane] = lf_aw[1];
+                        state.0[n_words + 2][lane] = lf_aw[2];
+                        state.0[n_words + 3][lane] = g_w3[lane];
+                        for w in 0..n_words {
+                            state.0[n_words + 4 + w][lane] = sk_rows[w][lane];
+                        }
+                        state.0[end_word][lane] = 0x1F;
+                        state.0[16][lane] = 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x4(&mut state);
+                    qsag_asm::volatile_fill(&mut sk_rows, [0; 4]);
+
+                    for lane in 0..count {
+                        let mut words = [0u64; 4];
+                        for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                            *slot = state.0[w][lane];
+                        }
+                        leaves.push(unpack_words_to_block(&words, n));
+                    }
+                    qsag_asm::volatile_fill(&mut state.0, [0; 4]);
+                }
+            }
+
+            let revealed_sk = unpack_words_to_block(&rev_words, n);
+            qsag_asm::volatile_fill(&mut rev_words, 0);
+
+            let (root_i, auth_i) = build_fips205_merkle_from_leaves(
+                n,
+                pk_seed,
+                adrs,
+                Fips205AdrsType::ForsTree,
+                true,
+                &leaves,
+                params.a,
+                tree_off,
+                idx_i,
+            );
+            roots.push(root_i);
+            fors_trees.push((revealed_sk, auth_i));
+        }
+        qsag_asm::volatile_fill(&mut sk_w, 0);
+
+        let mut pk_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsRoots);
+        pk_adrs.key_pair = adrs.key_pair;
+        let fors_pk = fips205_th(n, pk_seed, &pk_adrs, &roots);
+        return (fors_trees, fors_pk);
+    }
 
     let mut i = 0;
     while i < params.k {
@@ -1757,6 +2888,7 @@ pub fn fors_sign_and_pk(
 }
 
 /// NIST FIPS 205 Algorithm 17 `fors_pkFromSig(SIG_FORS, md, PK.seed, ADRS)`.
+#[allow(clippy::needless_range_loop)]
 pub fn fors_pk_from_sig(
     params: &Fips205Params,
     fors_trees: &[(SlhBlock, Vec<SlhBlock>)],
@@ -1770,23 +2902,183 @@ pub fn fors_pk_from_sig(
     leaf_adrs.key_pair = adrs.key_pair;
 
     let mut roots = Vec::with_capacity(params.k);
-    for i in 0..params.k {
-        let (ref sk_val, ref auth_i) = fors_trees[i];
-        let g_idx = (i as u32) * t_leaves + fors_indices[i];
-        leaf_adrs.f5 = 0;
-        leaf_adrs.f6 = g_idx;
-        let leaf_node = fips205_f(n, pk_seed, &leaf_adrs, sk_val);
-        let root_i = walk_fips205_auth_path(
-            n,
-            pk_seed,
-            adrs,
-            Fips205AdrsType::ForsTree,
-            true,
-            leaf_node,
-            g_idx,
-            auth_i,
-        );
-        roots.push(root_i);
+    if matches!(n, 16 | 24 | 32)
+        && pk_seed.len() == n
+        && fors_trees.len() >= params.k
+        && fors_indices.len() >= params.k
+        && fors_trees[..params.k]
+            .iter()
+            .all(|(_, auth)| auth.len() == params.a)
+    {
+        let n_words = n / 8;
+        let pk_w = pack_seed_words(pk_seed, n_words);
+        let aw_base = adrs_to_le_words(&leaf_adrs);
+        let f_end_word = 2 * n_words + 4;
+        let h_end_word = 3 * n_words + 4;
+
+        for base in (0..params.k).step_by(8) {
+            let count = (params.k - base).min(8);
+            if count > 4 {
+                let mut cur_idx = [0u32; 8];
+                let mut state = qsag_asm::KeccakState8x::default();
+                for w in 0..n_words {
+                    state.0[w] = [pk_w[w]; 8];
+                }
+                for lane in 0..count {
+                    let t_idx = base + lane;
+                    let g_idx = (t_idx as u32) * t_leaves + fors_indices[t_idx];
+                    cur_idx[lane] = g_idx;
+                    let sk_w = pack_block_words(&fors_trees[t_idx].0, n_words);
+                    state.0[n_words][lane] = aw_base[0];
+                    state.0[n_words + 1][lane] = aw_base[1];
+                    state.0[n_words + 2][lane] = aw_base[2];
+                    state.0[n_words + 3][lane] = with_f6_in_w3(0, g_idx);
+                    for w in 0..n_words {
+                        state.0[n_words + 4 + w][lane] = sk_w[w];
+                    }
+                    state.0[f_end_word][lane] = 0x1F;
+                    state.0[16][lane] = 1u64 << 63;
+                }
+                qsag_asm::keccak_f1600_x8(&mut state);
+
+                let mut cur_rows = [[0u64; 8]; 4];
+                for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                    *row = state.0[w];
+                }
+
+                for level in 0..params.a {
+                    let z_w3 = u32::from_le_bytes(((level + 1) as u32).to_be_bytes()) as u64;
+                    state = qsag_asm::KeccakState8x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 8];
+                    }
+                    for lane in 0..count {
+                        let t_idx = base + lane;
+                        let sib_w = pack_block_words(&fors_trees[t_idx].1[level], n_words);
+                        let parent_idx = cur_idx[lane] >> 1;
+                        let is_right = (cur_idx[lane] & 1) == 1;
+                        cur_idx[lane] = parent_idx;
+
+                        state.0[n_words][lane] = aw_base[0];
+                        state.0[n_words + 1][lane] = aw_base[1];
+                        state.0[n_words + 2][lane] = aw_base[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(z_w3, parent_idx);
+                        for w in 0..n_words {
+                            let (lw, rw) = if is_right {
+                                (sib_w[w], cur_rows[w][lane])
+                            } else {
+                                (cur_rows[w][lane], sib_w[w])
+                            };
+                            state.0[n_words + 4 + w][lane] = lw;
+                            state.0[2 * n_words + 4 + w][lane] = rw;
+                        }
+                        state.0[h_end_word][lane] ^= 0x1F;
+                        state.0[16][lane] ^= 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x8(&mut state);
+                    for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                }
+
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = cur_rows[w][lane];
+                    }
+                    roots.push(unpack_words_to_block(&words, n));
+                }
+            } else {
+                let mut cur_idx = [0u32; 4];
+                let mut state = qsag_asm::KeccakState4x::default();
+                for w in 0..n_words {
+                    state.0[w] = [pk_w[w]; 4];
+                }
+                for lane in 0..count {
+                    let t_idx = base + lane;
+                    let g_idx = (t_idx as u32) * t_leaves + fors_indices[t_idx];
+                    cur_idx[lane] = g_idx;
+                    let sk_w = pack_block_words(&fors_trees[t_idx].0, n_words);
+                    state.0[n_words][lane] = aw_base[0];
+                    state.0[n_words + 1][lane] = aw_base[1];
+                    state.0[n_words + 2][lane] = aw_base[2];
+                    state.0[n_words + 3][lane] = with_f6_in_w3(0, g_idx);
+                    for w in 0..n_words {
+                        state.0[n_words + 4 + w][lane] = sk_w[w];
+                    }
+                    state.0[f_end_word][lane] = 0x1F;
+                    state.0[16][lane] = 1u64 << 63;
+                }
+                qsag_asm::keccak_f1600_x4(&mut state);
+
+                let mut cur_rows = [[0u64; 4]; 4];
+                for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                    *row = state.0[w];
+                }
+
+                for level in 0..params.a {
+                    let z_w3 = u32::from_le_bytes(((level + 1) as u32).to_be_bytes()) as u64;
+                    state = qsag_asm::KeccakState4x::default();
+                    for w in 0..n_words {
+                        state.0[w] = [pk_w[w]; 4];
+                    }
+                    for lane in 0..count {
+                        let t_idx = base + lane;
+                        let sib_w = pack_block_words(&fors_trees[t_idx].1[level], n_words);
+                        let parent_idx = cur_idx[lane] >> 1;
+                        let is_right = (cur_idx[lane] & 1) == 1;
+                        cur_idx[lane] = parent_idx;
+
+                        state.0[n_words][lane] = aw_base[0];
+                        state.0[n_words + 1][lane] = aw_base[1];
+                        state.0[n_words + 2][lane] = aw_base[2];
+                        state.0[n_words + 3][lane] = with_f6_in_w3(z_w3, parent_idx);
+                        for w in 0..n_words {
+                            let (lw, rw) = if is_right {
+                                (sib_w[w], cur_rows[w][lane])
+                            } else {
+                                (cur_rows[w][lane], sib_w[w])
+                            };
+                            state.0[n_words + 4 + w][lane] = lw;
+                            state.0[2 * n_words + 4 + w][lane] = rw;
+                        }
+                        state.0[h_end_word][lane] ^= 0x1F;
+                        state.0[16][lane] ^= 1u64 << 63;
+                    }
+                    qsag_asm::keccak_f1600_x4(&mut state);
+                    for (w, row) in cur_rows.iter_mut().enumerate().take(n_words) {
+                        *row = state.0[w];
+                    }
+                }
+
+                for lane in 0..count {
+                    let mut words = [0u64; 4];
+                    for (w, slot) in words.iter_mut().enumerate().take(n_words) {
+                        *slot = cur_rows[w][lane];
+                    }
+                    roots.push(unpack_words_to_block(&words, n));
+                }
+            }
+        }
+    } else {
+        for i in 0..params.k {
+            let (ref sk_val, ref auth_i) = fors_trees[i];
+            let g_idx = (i as u32) * t_leaves + fors_indices[i];
+            leaf_adrs.f5 = 0;
+            leaf_adrs.f6 = g_idx;
+            let leaf_node = fips205_f(n, pk_seed, &leaf_adrs, sk_val);
+            let root_i = walk_fips205_auth_path(
+                n,
+                pk_seed,
+                adrs,
+                Fips205AdrsType::ForsTree,
+                true,
+                leaf_node,
+                g_idx,
+                auth_i,
+            );
+            roots.push(root_i);
+        }
     }
 
     let mut pk_adrs = adrs.with_type_and_clear(Fips205AdrsType::ForsRoots);
@@ -1978,27 +3270,12 @@ pub fn slh_sign_internal(
             layer_adrs,
         );
 
-        let mut leaves = Vec::with_capacity(n_leaves);
-        for kp in 0..n_leaves {
-            let mut leaf_adrs = layer_adrs;
-            leaf_adrs.key_pair = kp as u32;
-            if kp as u32 == idx_leaf {
-                leaves.push(wots_pk_from_sig(
-                    params,
-                    &wots_sig,
-                    &cur_msg,
-                    sk.pk_seed_slice(),
-                    leaf_adrs,
-                ));
-            } else {
-                leaves.push(wots_pk_gen(
-                    params,
-                    sk.sk_seed_slice(),
-                    sk.pk_seed_slice(),
-                    leaf_adrs,
-                ));
-            }
-        }
+        let leaves = compute_xmss_subtree_leaves(
+            params,
+            sk.sk_seed_slice(),
+            sk.pk_seed_slice(),
+            layer_adrs,
+        );
         let (root_l, auth_l) = build_fips205_merkle_from_leaves(
             n,
             sk.pk_seed_slice(),
@@ -3001,5 +4278,54 @@ mod tests {
         assert_ne!(mpc_sig_hedged, mpc_sig_hedged_alt);
         assert!(slh_verify(&params, msg, &mpc_sig_hedged, ctx, &mpc_pk));
         assert!(slh_verify(&params, msg, &mpc_sig_hedged_alt, ctx, &mpc_pk));
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn batch_x8_prf_f_h_match_scalar_across_all_security_widths() {
+        for n in [16usize, 24, 32] {
+            let pk_seed: Vec<u8> = (0..n).map(|i| (0x31u8).wrapping_add((i as u8) * 7)).collect();
+            let sk_seed: Vec<u8> = (0..n).map(|i| (0xA5u8).wrapping_add((i as u8) * 13)).collect();
+
+            let adrs_prf: [Fips205Adrs; 8] = core::array::from_fn(|lane| {
+                let mut a = Fips205Adrs::ZERO;
+                a.layer = (lane as u32) % 7;
+                a.set_tree_address(0x0123_4567_89AB_CDEFu128 + (lane as u128) * 19);
+                a.adrs_type = Fips205AdrsType::WotsPrf;
+                a.key_pair = 100 + lane as u32;
+                a.f5 = lane as u32;
+                a
+            });
+            let got_prf = shake256_prf_x8(n, &pk_seed, &sk_seed, &adrs_prf);
+            for lane in 0..8 {
+                let exp = fips205_prf(n, &pk_seed, &sk_seed, &adrs_prf[lane]);
+                assert_eq!(got_prf[lane], exp, "PRF mismatch at n={n}, lane={lane}");
+            }
+
+            let adrs_f: [Fips205Adrs; 8] = core::array::from_fn(|lane| {
+                let mut a = adrs_prf[lane].with_type_and_clear(Fips205AdrsType::WotsHash);
+                a.key_pair = 100 + lane as u32;
+                a.f5 = lane as u32;
+                a.f6 = (lane as u32) * 2;
+                a
+            });
+            let got_f = shake256_f_x8(n, &pk_seed, &adrs_f, &got_prf);
+            for lane in 0..8 {
+                let exp = fips205_f(n, &pk_seed, &adrs_f[lane], &got_prf[lane]);
+                assert_eq!(got_f[lane], exp, "F mismatch at n={n}, lane={lane}");
+            }
+
+            let adrs_h: [Fips205Adrs; 8] = core::array::from_fn(|lane| {
+                let mut a = adrs_prf[lane].with_type_and_clear(Fips205AdrsType::Tree);
+                a.f5 = 1 + (lane as u32);
+                a.f6 = 42 + (lane as u32);
+                a
+            });
+            let got_h = shake256_h_x8(n, &pk_seed, &adrs_h, &got_prf, &got_f);
+            for lane in 0..8 {
+                let exp = fips205_h(n, &pk_seed, &adrs_h[lane], &got_prf[lane], &got_f[lane]);
+                assert_eq!(got_h[lane], exp, "H mismatch at n={n}, lane={lane}");
+            }
+        }
     }
 }
