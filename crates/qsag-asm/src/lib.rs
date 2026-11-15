@@ -78,9 +78,7 @@ pub use portable::{
     POLY_TO_T7_BASIS, T7_TO_POLY_BASIS, TOWER128_POLY_GENERATORS, poly128_to_tower128_ct,
     tower128_to_poly128_ct,
 };
-pub use sha2_hw::{
-    sha256_compress_blocks, sha256_compress_blocks_portable, sha256_compress_bytes,
-};
+pub use sha2_hw::{sha256_compress_blocks, sha256_compress_blocks_portable, sha256_compress_bytes};
 
 // ============================================================================
 // Safe Runtime-Dispatched & Explicit-Backend Entrypoints
@@ -1611,12 +1609,10 @@ mod tests {
                 for j in 0..256 {
                     let prod = ((a[i] as u64) * (b[j] as u64)) % Q;
                     if i + j < 256 {
-                        expected_conv[i + j] =
-                            (((expected_conv[i + j] as u64) + prod) % Q) as u32;
+                        expected_conv[i + j] = (((expected_conv[i + j] as u64) + prod) % Q) as u32;
                     } else {
                         let k = i + j - 256;
-                        expected_conv[k] =
-                            (((expected_conv[k] as u64) + Q - prod) % Q) as u32;
+                        expected_conv[k] = (((expected_conv[k] as u64) + Q - prod) % Q) as u32;
                     }
                 }
             }

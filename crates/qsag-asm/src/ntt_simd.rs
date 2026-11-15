@@ -327,11 +327,7 @@ pub fn mldsa_inv_ntt_with_backend(coeffs: &mut [u32; MLDSA_N], backend: SimdBack
 
 /// Runtime-dispatched constant-time FIPS 204 pointwise NTT multiplication (`Algorithm 45`).
 #[inline]
-pub fn mldsa_pointwise_mul(
-    out: &mut [u32; MLDSA_N],
-    lhs: &[u32; MLDSA_N],
-    rhs: &[u32; MLDSA_N],
-) {
+pub fn mldsa_pointwise_mul(out: &mut [u32; MLDSA_N], lhs: &[u32; MLDSA_N], rhs: &[u32; MLDSA_N]) {
     mldsa_pointwise_mul_with_backend(out, lhs, rhs, cpuid::detect_backend());
 }
 
@@ -401,12 +397,7 @@ mod x86_simd {
     /// Broadcast-twiddle fast path (saves `vpsrlq` on `b_mont`).
     #[inline]
     #[target_feature(enable = "avx2")]
-    unsafe fn fqmul_bcast_avx2(
-        a: __m256i,
-        z_bcast: __m256i,
-        qinv: __m256i,
-        q: __m256i,
-    ) -> __m256i {
+    unsafe fn fqmul_bcast_avx2(a: __m256i, z_bcast: __m256i, qinv: __m256i, q: __m256i) -> __m256i {
         let prod_ev = _mm256_mul_epi32(a, z_bcast);
         let a_od = _mm256_srli_epi64::<32>(a);
         let prod_od = _mm256_mul_epi32(a_od, z_bcast);
@@ -852,10 +843,7 @@ mod x86_simd {
                             let lo = _mm512_loadu_si512(p512.add(base + v).cast());
                             let hi = _mm512_loadu_si512(p512.add(base + $vecs_per_half + v).cast());
                             let t = fqmul_bcast_avx512(hi, z, qinv512, q512);
-                            _mm512_storeu_si512(
-                                p512.add(base + v).cast(),
-                                _mm512_add_epi32(lo, t),
-                            );
+                            _mm512_storeu_si512(p512.add(base + v).cast(), _mm512_add_epi32(lo, t));
                             _mm512_storeu_si512(
                                 p512.add(base + $vecs_per_half + v).cast(),
                                 _mm512_sub_epi32(lo, t),

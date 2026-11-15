@@ -248,17 +248,75 @@ pub(crate) struct Engine<'a, T> {
     pub transport: &'a mut T,
 }
 impl<T: Transport> Engine<'_, T> {
-    /// Mask vector for the ordered pair (i, j); requires `self.party != i`.
+    /// Generate all sixteen locally known ordered-pair streams, eight at a time.
+    /// Both hash framing and SHAKE rejection sampling match `fields` exactly.
+    fn mask_vectors(&self, gates: usize) -> [Vec<u64>; 25] {
+        fn midstate() -> [u64; 25] {
+            qsag_verified::keccak::Shake256Sponge::new_cshake256(b"QSAG.TOPRF.RESHARE.V2").state
+        }
+        #[cfg(feature = "std")]
+        let initial = *{
+            static INITIAL: std::sync::OnceLock<[u64; 25]> = std::sync::OnceLock::new();
+            INITIAL.get_or_init(midstate)
+        };
+        #[cfg(not(feature = "std"))]
+        let initial = midstate();
+        let mut pairs = [(0, 0); 16];
+        let mut next = 0;
+        for i in 0..SERVERS {
+            if i != self.party {
+                for j in 0..SERVERS {
+                    if i != j {
+                        pairs[next] = (i, j);
+                        next += 1;
+                    }
+                }
+            }
+        }
+        let mut output: [Vec<u64>; 25] = core::array::from_fn(|_| Vec::new());
+        for batch in pairs.chunks_exact(8) {
+            let mut states = SecretBuffer([initial; 8]);
+            for (state, &(i, j)) in states.iter_mut().zip(batch) {
+                let mut block = SecretBuffer([0u8; 136]);
+                block[..8].copy_from_slice(&2u64.to_le_bytes());
+                block[8..16].copy_from_slice(&32u64.to_le_bytes());
+                block[16..48].copy_from_slice(&self.seeds[subset(i, i)]);
+                block[48..56].copy_from_slice(&42u64.to_le_bytes());
+                block[56..88].copy_from_slice(&self.context);
+                block[88..96].copy_from_slice(&self.layer.to_le_bytes());
+                block[96..98].copy_from_slice(&[i as u8, j as u8]);
+                block[98] = 0x04;
+                block[135] = 0x80;
+                for (word, bytes) in state.iter_mut().zip(block.chunks_exact(8)) {
+                    *word ^= u64::from_le_bytes(core::array::from_fn(|b| bytes[b]));
+                }
+                output[i * SERVERS + j] = Vec::with_capacity(gates);
+            }
+            qsag_asm::keccak_f1600_batch(&mut states[..]);
+            // SHAKE256 absorbs the 32-byte framed-hash key, with the original 0x1f suffix.
+            for state in states.iter_mut() {
+                state[4..].fill(0);
+                state[4] = 0x1f;
+                state[16] = 0x8000_0000_0000_0000;
+            }
+            while batch.iter().any(|&(i, j)| output[i * SERVERS + j].len() < gates) {
+                qsag_asm::keccak_f1600_batch(&mut states[..]);
+                for (state, &(i, j)) in states.iter().zip(batch) {
+                    let values = &mut output[i * SERVERS + j];
+                    for &v in &state[..17] {
+                        if values.len() < gates && v < GOLDILOCKS_PRIME {
+                            values.push(v);
+                        }
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    #[cfg(test)]
     fn masks(&self, i: usize, j: usize, gates: usize) -> Vec<u64> {
-        let mut context = Vec::from(self.context);
-        context.extend_from_slice(&self.layer.to_le_bytes());
-        context.extend_from_slice(&[i as u8, j as u8]);
-        fields(
-            &self.seeds[subset(i, i)],
-            b"QSAG.TOPRF.RESHARE.V2",
-            &context,
-            gates,
-        )
+        core::mem::take(&mut self.mask_vectors(gates)[i * SERVERS + j])
     }
     fn multiply(&mut self, xs: &[Wire], ys: &[Wire]) -> Result<Vec<Wire>, Error> {
         if xs.len() != ys.len() {
@@ -285,6 +343,7 @@ impl<T: Transport> Engine<'_, T> {
             };
             Vec::with_capacity(capacity)
         }));
+        let mut masks = SecretBuffer(self.mask_vectors(gates));
         for (i, message) in messages.iter_mut().enumerate() {
             if i == me {
                 continue;
@@ -293,7 +352,7 @@ impl<T: Transport> Engine<'_, T> {
                 if j == i {
                     continue;
                 }
-                let mut mask = SecretBuffer(self.masks(i, j, gates));
+                let mut mask = SecretBuffer(core::mem::take(&mut masks[i * SERVERS + j]));
                 for (z, &r) in out.iter_mut().zip(mask.iter()) {
                     z[i] = gl_add(z[i], r);
                 }

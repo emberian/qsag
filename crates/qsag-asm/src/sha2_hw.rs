@@ -134,8 +134,12 @@ pub fn sha256_compress_blocks_portable(state: &mut [u32; 8], blocks: &[[u8; 64]]
 macro_rules! shani_rnds4_only {
     ($msg:literal, $k_off:literal) => {
         concat!(
-            "movdqa xmm0, ", $msg, "\n",
-            "paddd xmm0, xmmword ptr [{k} + ", $k_off, "]\n",
+            "movdqa xmm0, ",
+            $msg,
+            "\n",
+            "paddd xmm0, xmmword ptr [{k} + ",
+            $k_off,
+            "]\n",
             "sha256rnds2 xmm2, xmm1, xmm0\n",
             "pshufd xmm0, xmm0, 0x0e\n",
             "sha256rnds2 xmm1, xmm2, xmm0\n",
@@ -323,8 +327,12 @@ pub(crate) unsafe fn sha256_compress_blocks_shani(state: &mut [u32; 8], blocks: 
 macro_rules! a64_sha256_rnds4_only {
     ($msg:literal, $k_off:literal) => {
         concat!(
-            "ldr q2, [{k}, #", $k_off, "]\n",
-            "add v2.4s, v2.4s, ", $msg, ".4s\n",
+            "ldr q2, [{k}, #",
+            $k_off,
+            "]\n",
+            "add v2.4s, v2.4s, ",
+            $msg,
+            ".4s\n",
             "mov v3.16b, v0.16b\n",
             "sha256h q0, q1, v2.4s\n",
             "sha256h2 q1, q3, v2.4s\n",
@@ -337,8 +345,18 @@ macro_rules! a64_sha256_rnds4_sched {
     ($m0:literal, $m1:literal, $m2:literal, $m3:literal, $k_off:literal) => {
         concat!(
             a64_sha256_rnds4_only!($m0, $k_off),
-            "sha256su0 ", $m0, ".4s, ", $m1, ".4s\n",
-            "sha256su1 ", $m0, ".4s, ", $m2, ".4s, ", $m3, ".4s\n",
+            "sha256su0 ",
+            $m0,
+            ".4s, ",
+            $m1,
+            ".4s\n",
+            "sha256su1 ",
+            $m0,
+            ".4s, ",
+            $m2,
+            ".4s, ",
+            $m3,
+            ".4s\n",
         )
     };
 }

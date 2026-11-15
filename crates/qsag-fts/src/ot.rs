@@ -10,20 +10,20 @@ use qsag_core::preprocessing::{
     PartyPrivateRng,
 };
 
-/// Four pads with the existing six-frame, fixed-width cSHAKE encoding.
+/// Eight pads with the existing six-frame, fixed-width cSHAKE encoding.
 fn pad_batch(
     context: &[u8; 32],
     sender: u16,
     receiver: u16,
-    indices: [usize; 4],
+    indices: [usize; 8],
     count: usize,
-    raw: [&[u8; 48]; 4],
-) -> [u128; 4] {
+    raw: [&[u8; 48]; 8],
+) -> [u128; 8] {
     const MIDSTATE: [u64; 25] =
         qsag_core::sponge::keccak::cshake256_static_midstate(b"QSAG.CUSTODY.OT.PAD.V1");
-    let mut states = [MIDSTATE; 4];
-    let mut blocks = [[0u8; 272]; 4];
-    for lane in 0..4 {
+    let mut states = [MIDSTATE; 8];
+    let mut blocks = [[0u8; 272]; 8];
+    for lane in 0..8 {
         let sender = sender.to_be_bytes();
         let receiver = receiver.to_be_bytes();
         let index = (indices[lane] as u64).to_be_bytes();
@@ -41,7 +41,7 @@ fn pad_batch(
         blocks[lane][271] = 0x80;
     }
     for block in 0..2 {
-        for lane in 0..4 {
+        for lane in 0..8 {
             for (word, state_word) in states[lane].iter_mut().take(17).enumerate() {
                 let offset = block * 136 + word * 8;
                 *state_word ^=
@@ -183,24 +183,24 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                 .round4_verify_and_finish(pending, &proof)
                 .map_err(|_| invalid())?;
             let mut ciphertexts = Vec::with_capacity(alternatives.len());
-            for base in (0..alternatives.len()).step_by(2) {
-                let other = (base + 1).min(alternatives.len() - 1);
+            for base in (0..alternatives.len()).step_by(4) {
+                let indices = core::array::from_fn(|lane| {
+                    (base + lane / 2).min(alternatives.len() - 1)
+                });
                 let mut batch = pad_batch(
                     &context,
                     self.party,
                     peer,
-                    [base, base, other, other],
+                    indices,
                     alternatives.len(),
-                    [&pads[base].0, &pads[base].1, &pads[other].0, &pads[other].1],
+                    core::array::from_fn(|lane| {
+                        if lane % 2 == 0 { &pads[indices[lane]].0 } else { &pads[indices[lane]].1 }
+                    }),
                 );
-                ciphertexts.push([
-                    alternatives[base][0] ^ batch[0],
-                    alternatives[base][1] ^ batch[1],
-                ]);
-                if other != base {
+                for lane in 0..(alternatives.len() - base).min(4) {
                     ciphertexts.push([
-                        alternatives[other][0] ^ batch[2],
-                        alternatives[other][1] ^ batch[3],
+                        alternatives[base + lane][0] ^ batch[2 * lane],
+                        alternatives[base + lane][1] ^ batch[2 * lane + 1],
                     ]);
                 }
                 qsag_core::wipe::wipe_u128s(&mut batch);
@@ -252,7 +252,7 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                     return Err(invalid());
                 }
                 let mut output = Vec::with_capacity(choices.len());
-                for base in (0..choices.len()).step_by(4) {
+                for base in (0..choices.len()).step_by(8) {
                     let indices = core::array::from_fn(|lane| (base + lane).min(choices.len() - 1));
                     let mut batch = pad_batch(
                         &context,
@@ -262,7 +262,7 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
                         choices.len(),
                         core::array::from_fn(|lane| &pads[indices[lane]]),
                     );
-                    for (lane, pad) in batch.iter().enumerate().take((choices.len() - base).min(4))
+                    for (lane, pad) in batch.iter().enumerate().take((choices.len() - base).min(8))
                     {
                         let i = base + lane;
                         let mask = 0u128.wrapping_sub(u128::from(choices[i]));
@@ -435,11 +435,11 @@ mod pad_tests {
     use super::*;
     #[test]
     fn batched_pad_matches_framed_reference() {
-        for count in [1usize, 3, 4, 127, 65536] {
+        for count in [1usize, 3, 4, 7, 8, 9, 127, 65536, MAX_OTS] {
             let context = [0xa7; 32];
-            let raw: [[u8; 48]; 4] =
+            let raw: [[u8; 48]; 8] =
                 core::array::from_fn(|i| core::array::from_fn(|j| (i * 53 + j) as u8));
-            let indices = [0, 1, count - 1, usize::MAX];
+            let indices = [0, 1, count - 1, usize::MAX, 255, 256, 65535, 65536];
             let batch = pad_batch(
                 &context,
                 0x1234,
@@ -448,7 +448,7 @@ mod pad_tests {
                 count,
                 core::array::from_fn(|i| &raw[i]),
             );
-            for lane in 0..4 {
+            for lane in 0..8 {
                 let reference = cshake256_framed_32(
                     b"QSAG.CUSTODY.OT.PAD.V1",
                     &[
