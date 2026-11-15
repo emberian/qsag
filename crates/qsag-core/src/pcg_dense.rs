@@ -71,11 +71,12 @@ pub const DENSE_PCG_NUM_BOOL_TRIPLES: usize = DENSE_PCG_NUM_WORDS * 64;
 pub const DENSE_PCG_NUM_VOLE128: usize = 64;
 
 /// Canonical wire seed upper bound for a 2-party (`1`-peer) seed (`36 KiB = 36,864` bytes).
-/// For general `N`-party committees (`2 <= N <= 256`), use [`max_wire_seed_bytes`].
+/// For general `N`-party committees (within the wire and frame limits), use [`max_wire_seed_bytes`].
 pub const DENSE_PCG_MAX_SEED_BYTES: usize = 36 * 1024;
 
-/// Maximum party count accepted for canonical dense PCG wire seeds (`256`).
-pub const DENSE_PCG_MAX_PARTIES: usize = 256;
+/// Largest party count representable by the canonical u16 wire count.
+/// The per-seed frame budget imposes a tighter depth-dependent resource limit.
+pub const DENSE_PCG_MAX_PARTIES: usize = u16::MAX as usize;
 
 /// Exact canonical wire byte length of a [`DensePcgPartySeed`] for `(num_parties, tree_depth)`,
 /// returning `None` if `num_parties` is outside `2..=DENSE_PCG_MAX_PARTIES` or exceeds `MAX_FRAME_BUDGET`.
@@ -1721,7 +1722,7 @@ impl DensePcgPartySeed {
 
     /// Validate structural, peer-ID, uniqueness, and punctured-index invariants (`P1-06`).
     pub fn validate_invariants(&self) -> Result<(), PreprocessError> {
-        if self.num_parties < 2
+        if max_wire_seed_bytes(self.num_parties, self.tree_depth).is_none()
             || self.party_id >= self.num_parties
             || (self.mac_alpha.0 & 1) == 0
             || self.peers.len() != self.num_parties - 1
@@ -2485,7 +2486,7 @@ fn setup_dense_pcg_seeds_inner(
     fault: Option<SpcotFaultTarget>,
 ) -> Result<Vec<DensePcgPartySeed>, PreprocessError> {
     let n = party_rngs.len();
-    if n < 2 || ot_mesh.n != n {
+    if max_wire_seed_bytes(n, tree_depth).is_none() || ot_mesh.n != n {
         return Err(PreprocessError::InvalidThreshold { t: 2, n });
     }
 
@@ -3453,7 +3454,9 @@ mod tests {
         over_3p[45] = 1;
         over_3p[61..63].copy_from_slice(&2u16.to_le_bytes());
         assert!(DensePcgPartySeed::from_wire_bytes(&over_3p).is_err());
-        assert!(max_wire_seed_bytes(257, PcgTreeDepth::Depth14).is_none());
+        assert!(max_wire_seed_bytes(257, PcgTreeDepth::Depth14).is_some());
+        assert!(max_wire_seed_bytes(usize::MAX, PcgTreeDepth::Depth14).is_none());
+        assert!(max_wire_seed_bytes(u16::MAX as usize, PcgTreeDepth::Depth14).is_none());
     }
 
     #[test]

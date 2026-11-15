@@ -3221,7 +3221,6 @@ impl BaseOtExtSenderRound1 {
         }
         (
             Self {
-                crs_coin,
                 session_id,
                 ext_sender_id,
                 ext_receiver_id,
