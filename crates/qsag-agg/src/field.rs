@@ -144,8 +144,23 @@ impl Goldilocks {
     }
 
     #[inline(always)]
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline(always)]
     pub const fn square(self) -> Self {
         self.const_mul(self)
+    }
+
+    #[inline(always)]
+    const fn sq_n<const N: usize>(mut self) -> Self {
+        let mut i = 0;
+        while i < N {
+            self = self.square();
+            i += 1;
+        }
+        self
     }
 
     /// Binary exponentiation `self^exp mod p`.
@@ -163,10 +178,58 @@ impl Goldilocks {
         acc
     }
 
-    /// Branchless constant-time multiplicative inverse $x^{p - 2} \bmod p$ (`0 -> 0`).
+    /// Branchless constant-time multiplicative inverse $x^{p - 2} \bmod p$ (`0 -> 0`) via the
+    /// fixed addition chain for $p - 2 = 2^{64} - 2^{32} - 1 = \text{0xFFFF\_FFFE\_FFFF\_FFFF}$.
     #[inline]
     pub const fn inv(self) -> Self {
-        self.pow(GOLDILOCKS_PRIME - 2)
+        let x2 = self.square().const_mul(self); // x^(2^2 - 1)
+        let x3 = x2.square().const_mul(self); // x^(2^3 - 1)
+        let x6 = x3.sq_n::<3>().const_mul(x3); // x^(2^6 - 1)
+        let x12 = x6.sq_n::<6>().const_mul(x6); // x^(2^12 - 1)
+        let x24 = x12.sq_n::<12>().const_mul(x12); // x^(2^24 - 1)
+        let x30 = x24.sq_n::<6>().const_mul(x6); // x^(2^30 - 1)
+        let x31 = x30.square().const_mul(self); // x^(2^31 - 1)
+        let x63_gap = x31.sq_n::<32>().const_mul(x31); // x^((2^31 - 1) * 2^32 + (2^31 - 1))
+        x63_gap.square().const_mul(self) // x^(2^64 - 2^32 - 1)
+    }
+
+    /// Montgomery prefix-product batch inversion in place (`1` inversion + $3(N - 1)$
+    /// multiplications), mapping `0 -> 0` cleanly without poisoning nonzero entries.
+    pub fn batch_inv(values: &mut [Self]) {
+        const STACK_CAP: usize = 512;
+        if values.len() <= 1 {
+            if let [x] = values {
+                *x = x.inv();
+            }
+            return;
+        }
+        if values.len() <= STACK_CAP {
+            let mut scratch = [Self::ONE; STACK_CAP];
+            Self::batch_inv_with_scratch(values, &mut scratch[..values.len()]);
+        } else {
+            let mut scratch = vec![Self::ONE; values.len()];
+            Self::batch_inv_with_scratch(values, &mut scratch);
+        }
+    }
+
+    #[inline]
+    fn batch_inv_with_scratch(values: &mut [Self], prefix: &mut [Self]) {
+        debug_assert_eq!(values.len(), prefix.len());
+        let mut acc = Self::ONE;
+        for (slot, &v) in prefix.iter_mut().zip(values.iter()) {
+            *slot = acc;
+            if !v.is_zero() {
+                acc = acc.const_mul(v);
+            }
+        }
+        let mut inv_acc = acc.inv();
+        for (v, &pref) in values.iter_mut().zip(prefix.iter()).rev() {
+            if !v.is_zero() {
+                let orig = *v;
+                *v = pref.const_mul(inv_acc);
+                inv_acc = inv_acc.const_mul(orig);
+            }
+        }
     }
 
     /// Primitive $2^k$-th root of unity for $k \le 32$.
@@ -1850,5 +1913,70 @@ mod ext4_tests {
     #[should_panic(expected = "RS domain exceeds Goldilocks two-adicity")]
     fn encode_rs_coset_ext4_rejects_excessive_two_adicity() {
         let _ = encode_rs_coset_ext4(&[GoldilocksExt4::ONE; 4], 1usize << 31);
+    }
+
+    #[test]
+    fn goldilocks_addition_chain_inv_and_batch_inv_match_pow() {
+        let edge_cases = [
+            0u64,
+            1,
+            2,
+            3,
+            7,
+            (1u64 << 32) - 1,
+            1u64 << 32,
+            (1u64 << 32) + 1,
+            GOLDILOCKS_PRIME - 3,
+            GOLDILOCKS_PRIME - 2,
+            GOLDILOCKS_PRIME - 1,
+            TWO_ADIC_ROOT_OF_UNITY_32,
+        ];
+        for &raw in &edge_cases {
+            let x = Goldilocks::from_canonical_u64(raw).unwrap();
+            let got = x.inv();
+            let want = x.pow(GOLDILOCKS_PRIME - 2);
+            assert_eq!(got, want, "inv mismatch on edge limb {raw:#x}");
+            if !x.is_zero() {
+                assert_eq!(x * got, Goldilocks::ONE);
+            } else {
+                assert_eq!(got, Goldilocks::ZERO);
+            }
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut random_vec = Vec::with_capacity(600);
+        for idx in 0..600usize {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let x = if idx % 29 == 0 {
+                Goldilocks::ZERO
+            } else {
+                Goldilocks::from_u64_reduced(state)
+            };
+            assert_eq!(x.inv(), x.pow(GOLDILOCKS_PRIME - 2));
+            random_vec.push(x);
+        }
+
+        // Empty, singleton, zero-only, stack-path (<= 512), and heap-path (> 512) batch_inv.
+        let mut empty: [Goldilocks; 0] = [];
+        Goldilocks::batch_inv(&mut empty);
+
+        for mut single in [[Goldilocks::ZERO], [Goldilocks::NON_RESIDUE]] {
+            let expected = single[0].inv();
+            Goldilocks::batch_inv(&mut single);
+            assert_eq!(single[0], expected);
+        }
+
+        let mut all_zeros = [Goldilocks::ZERO; 17];
+        Goldilocks::batch_inv(&mut all_zeros);
+        assert_eq!(all_zeros, [Goldilocks::ZERO; 17]);
+
+        for len in [2usize, 7, 64, 258, 512, 600] {
+            let expected: Vec<Goldilocks> = random_vec[..len].iter().map(|x| x.inv()).collect();
+            let mut actual = random_vec[..len].to_vec();
+            Goldilocks::batch_inv(&mut actual);
+            assert_eq!(actual, expected, "batch_inv mismatch at len={len}");
+        }
     }
 }

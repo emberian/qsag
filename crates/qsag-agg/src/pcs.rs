@@ -10,8 +10,7 @@
 //!    re-encodes the folded monomial witness at an **escalating Reed–Solomon blowup**
 //!    (e.g. $B = (4, 16, 64)$, i.e. $\rho_0 = 1/4 \to \rho_1 = 1/16 \to \rho_2 = 1/64$ at
 //!    $\ell = 20$), keeping intermediate evaluation domains bounded ($D_1 = 2^{19}, D_2 = 2^{18} \le 2^{20}$)
-//!    with default Johnson-radius QROM query counts $q = (258, 130, 88)$ (the conjectural
-//!    HABR24 budget $q = (128, 64, 43)$ is opt-in),
+//!    with unconditional Johnson-radius QROM query counts $q = (258, 130, 88)$,
 //! 3. **Out-of-Domain (OOD) List-Pinning & Shift-Query Accumulation:** every committed oracle
 //!    $f^{(k)}$ is pinned at two independent $\mathbb{F}_{p^4}$ Kronecker point $\text{pow2}(z_{\text{ood},k})$
 //!    before affine fold challenges are squeezed, and stage-$k$ fiber openings fold into shift claims
@@ -113,18 +112,17 @@ pub struct WhirStageSpec {
     pub num_queries: usize,
 }
 
-/// Query-accounting regime. HABR24 uses conjectural agreement rho; BCIKS20
-/// uses Johnson agreement sqrt(rho) + eta. These are per-stage query bounds,
-/// not a proof of total Fiat–Shamir/QROM security (which also needs reduction,
-/// list-size, field-error, and union-bound accounting).
+/// Unconditional Johnson-radius query-accounting regimes (`BCIKS20`, agreement $\sqrt{\rho} + \eta$).
+///
+/// Capacity proximity-gap wire tags (`0`, `1`, `3`) are permanently retired and rejected on
+/// deserialization (`Crites & Stewart 2025/2046`, `Krachun-Kazanin-Habock 2026/782`). These are
+/// per-stage query bounds, not a proof of total Fiat–Shamir/QROM security (which also needs
+/// reduction, list-size, field-error, and union-bound accounting).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WhirSecurityRegime {
-    Habr24Classical128 = 0,
-    Habr24Interactive128 = 1,
     BciksJohnsonClassical128 = 2,
-    Habr24Qrom128 = 3,
-    /// Default: the Johnson-radius QROM budget needs no proximity-gap conjecture.
+    /// Default: unconditional Johnson-radius QROM budget (`ceil(512/log2(B)) + 2`).
     #[default]
     BciksJohnsonQrom128 = 4,
 }
@@ -132,25 +130,21 @@ pub enum WhirSecurityRegime {
 impl WhirSecurityRegime {
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
-            0 => Some(Self::Habr24Classical128),
-            1 => Some(Self::Habr24Interactive128),
             2 => Some(Self::BciksJohnsonClassical128),
-            3 => Some(Self::Habr24Qrom128),
             4 => Some(Self::BciksJohnsonQrom128),
             _ => None,
         }
     }
 
     pub fn meets_qrom_128_floor(self) -> bool {
-        matches!(self, Self::Habr24Qrom128 | Self::BciksJohnsonQrom128)
+        matches!(self, Self::BciksJohnsonQrom128)
     }
 
     /// Conservative per-round query plus PoW budget, before other protocol errors.
     pub fn classical_fs_round_bits(self) -> u32 {
         match self {
-            Self::Habr24Classical128 => 128,
-            Self::Habr24Interactive128 | Self::BciksJohnsonClassical128 => 144,
-            Self::Habr24Qrom128 | Self::BciksJohnsonQrom128 => 272,
+            Self::BciksJohnsonClassical128 => 144,
+            Self::BciksJohnsonQrom128 => 272,
         }
     }
 
@@ -161,10 +155,7 @@ impl WhirSecurityRegime {
 
     fn minimum_queries(self, log_b: usize) -> usize {
         match self {
-            Self::Habr24Classical128 => 112usize.div_ceil(log_b),
-            Self::Habr24Interactive128 => 128usize.div_ceil(log_b),
             Self::BciksJohnsonClassical128 => 256usize.div_ceil(log_b) + 1,
-            Self::Habr24Qrom128 => 256usize.div_ceil(log_b),
             Self::BciksJohnsonQrom128 => 512usize.div_ceil(log_b) + 2,
         }
     }
@@ -179,12 +170,10 @@ impl WhirSecurityRegime {
     }
 }
 
-/// Default schedule: Johnson QROM (`BciksJohnsonQrom128`), ceil(512/log2(B)) + 2 queries plus
-/// 16-bit PoW, i.e. `(258, 130, 88, 66)` at blowups `(4, 16, 64, 256)`. That is unconditional
-/// Johnson proximity below 2^-256 with positive proximity slack, without the HABR24
-/// conjecture. The HABR24 QROM regime (ceil(256/log2(B)) queries, 272 classical or 136 Grover
-/// round-search bits) stays selectable but its agreement bound is conjectural.
-/// Neither per-round budget alone proves total PCS/QROM security.
+/// Default schedule: Johnson QROM (`BciksJohnsonQrom128`), `ceil(512/log2(B)) + 2` queries plus
+/// 16-bit PoW, i.e. `(258, 130, 88, 66)` at blowups `(4, 16, 64, 256)`. That gives unconditional
+/// Johnson proximity below $2^{-256}$ with positive proximity slack. Per-round query budgets
+/// alone do not prove total PCS/QROM security.
 pub fn whir_stage_schedule(num_vars: usize) -> WhirSchedule {
     WhirSecurityRegime::default().schedule(num_vars)
 }
@@ -1896,13 +1885,59 @@ fn fold_coset_group_to_last_duet(
 #[inline]
 fn fold_coset_group_ext4(
     vals: &[GoldilocksExt4],
+    y0: Goldilocks,
     inv_y0: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
     chals: &[[GoldilocksExt4; 3]],
 ) -> GoldilocksExt4 {
-    fold_coset_group_to_last_duet(vals, inv_y0.inv(), inv_y0, inv_two, inv_zetas, chals)
-        .fold(inv_two)
+    fold_coset_group_to_last_duet(vals, y0, inv_y0, inv_two, inv_zetas, chals).fold(inv_two)
+}
+
+/// Precompute shifted coset points `y0[i] = NON_RESIDUE * omega^{q_indices[i]}` via a 4-bit
+/// stack nibble table and invert the entire stage query batch in one `Goldilocks::batch_inv`.
+fn batch_coset_points_and_inverses(
+    omega: Goldilocks,
+    q_indices: &[usize],
+) -> (Vec<Goldilocks>, Vec<Goldilocks>) {
+    let max_g = q_indices.iter().copied().max().unwrap_or(0);
+    let active_nibbles = if max_g == 0 {
+        1
+    } else {
+        (usize::BITS as usize - max_g.leading_zeros() as usize).div_ceil(4)
+    }
+    .min(8);
+
+    let mut nibbles = [[Goldilocks::ONE; 16]; 8];
+    nibbles[0][0] = Goldilocks::NON_RESIDUE;
+    for d in 1..16 {
+        nibbles[0][d] = nibbles[0][d - 1] * omega;
+    }
+    let mut base = omega.pow(16);
+    for row in nibbles.iter_mut().take(active_nibbles).skip(1) {
+        for d in 1..16 {
+            row[d] = row[d - 1] * base;
+        }
+        if active_nibbles > 2 {
+            let b2 = base.square();
+            let b4 = b2.square();
+            let b8 = b4.square();
+            base = b8.square();
+        }
+    }
+
+    let mut y0s = Vec::with_capacity(q_indices.len());
+    for &g in q_indices {
+        debug_assert!((g >> 32) == 0);
+        let mut acc = nibbles[0][g & 0xF];
+        for (nib, row) in nibbles.iter().enumerate().take(active_nibbles).skip(1) {
+            acc *= row[(g >> (4 * nib)) & 0xF];
+        }
+        y0s.push(acc);
+    }
+    let mut inv_y0s = y0s.clone();
+    Goldilocks::batch_inv(&mut inv_y0s);
+    (y0s, inv_y0s)
 }
 
 /// Does the fiber at `y0` fold exactly onto `final_coeffs(y0^{2^s})`? The last fold step is
@@ -2580,7 +2615,6 @@ fn whir_open_core(
     }
 
     let inv_two = Goldilocks::TWO.inv();
-    let inv_shift = Goldilocks::NON_RESIDUE.inv();
     let inv_zetas = build_inv_zetas();
 
     let mut rem_vars = state.num_vars;
@@ -2654,13 +2688,16 @@ fn whir_open_core(
                 let domain_0 = state.codewords_0[0].len();
                 let log_d0 = domain_0.trailing_zeros() as usize;
                 let omega_0 = Goldilocks::two_adic_generator(log_d0);
-                let inv_omega_0 = omega_0.inv();
+                let zeta_0 = omega_0.pow(num_groups_0 as u64);
                 let q_indices = sample_stage_queries(transcript, 0, num_groups_0, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega_0, &q_indices);
 
                 round0_salts.reserve(q_indices.len());
                 round0_vals.reserve(q_indices.len() * num_polys * arity);
                 let mut claims = Vec::with_capacity(q_indices.len());
-                for &g in &q_indices {
+                for (q_pos, &g) in q_indices.iter().enumerate() {
+                    let y0 = y0s[q_pos];
+                    let inv_y0 = inv_y0s[q_pos];
                     round0_salts.push(derive_round0_salt(&state.salt_seed, g as u32));
                     let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
                     if single {
@@ -2672,19 +2709,18 @@ fn whir_open_core(
                         }
                     } else {
                         for (w, cw) in weights.iter().zip(&state.codewords_0) {
+                            let mut x = y0;
                             for k in 0..arity {
                                 let v = cw[g + k * num_groups_0];
                                 round0_vals.push(v);
-                                let x = Goldilocks::NON_RESIDUE
-                                    * omega_0.pow((g + k * num_groups_0) as u64);
                                 fiber[k] += (w[0] + w[1].mul_base(x)).mul_base(v);
+                                x *= zeta_0;
                             }
                         }
                     }
-                    let y0 = Goldilocks::NON_RESIDUE * omega_0.pow(g as u64);
-                    let inv_y0 = inv_shift * inv_omega_0.pow(g as u64);
                     let v_shift = fold_coset_group_ext4(
                         &fiber[..arity],
+                        y0,
                         inv_y0,
                         inv_two,
                         &inv_zetas,
@@ -2706,19 +2742,20 @@ fn whir_open_core(
                 let num_groups_cur = domain_cur / arity;
                 let log_d = domain_cur.trailing_zeros() as usize;
                 let omega = Goldilocks::two_adic_generator(log_d);
-                let inv_omega = omega.inv();
                 let q_indices =
                     sample_stage_queries(transcript, stage_idx, num_groups_cur, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega, &q_indices);
 
                 let mut opened_vals = Vec::with_capacity(q_indices.len() * arity);
                 let mut claims = Vec::with_capacity(q_indices.len());
-                for &g in &q_indices {
+                for (q_pos, &g) in q_indices.iter().enumerate() {
+                    let y0 = y0s[q_pos];
+                    let inv_y0 = inv_y0s[q_pos];
                     let fiber = collect_coset_group_ext4(&prev_cw, g, num_groups_cur, arity);
                     opened_vals.extend_from_slice(&fiber[..arity]);
-                    let y0 = Goldilocks::NON_RESIDUE * omega.pow(g as u64);
-                    let inv_y0 = inv_shift * inv_omega.pow(g as u64);
                     let v_shift = fold_coset_group_ext4(
                         &fiber[..arity],
+                        y0,
                         inv_y0,
                         inv_two,
                         &inv_zetas,
@@ -2789,11 +2826,14 @@ fn whir_open_core(
                 let domain_0 = state.codewords_0[0].len();
                 let log_d0 = domain_0.trailing_zeros() as usize;
                 let omega_0 = Goldilocks::two_adic_generator(log_d0);
-                let inv_omega_0 = omega_0.inv();
+                let zeta_0 = omega_0.pow(num_groups_0 as u64);
                 let q_indices = sample_stage_queries(transcript, 0, num_groups_0, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega_0, &q_indices);
                 round0_salts.reserve(q_indices.len());
                 round0_vals.reserve(q_indices.len() * num_polys * arity);
-                for &g in &q_indices {
+                for (q_pos, &g) in q_indices.iter().enumerate() {
+                    let y0 = y0s[q_pos];
+                    let inv_y0 = inv_y0s[q_pos];
                     round0_salts.push(derive_round0_salt(&state.salt_seed, g as u32));
                     let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
                     if single {
@@ -2805,20 +2845,20 @@ fn whir_open_core(
                         }
                     } else {
                         for (w, cw) in weights.iter().zip(&state.codewords_0) {
+                            let mut x = y0;
                             for k in 0..arity {
                                 let v = cw[g + k * num_groups_0];
                                 round0_vals.push(v);
-                                let x = Goldilocks::NON_RESIDUE
-                                    * omega_0.pow((g + k * num_groups_0) as u64);
                                 fiber[k] += (w[0] + w[1].mul_base(x)).mul_base(v);
+                                x *= zeta_0;
                             }
                         }
                     }
                     assert!(
                         final_fiber_matches_terminal_poly(
                             &fiber[..arity],
-                            Goldilocks::NON_RESIDUE * omega_0.pow(g as u64),
-                            inv_shift * inv_omega_0.pow(g as u64),
+                            y0,
+                            inv_y0,
                             inv_two,
                             &inv_zetas,
                             chals_slice,
@@ -2839,18 +2879,18 @@ fn whir_open_core(
                 let num_groups_cur = domain_cur / arity;
                 let log_d = domain_cur.trailing_zeros() as usize;
                 let omega = Goldilocks::two_adic_generator(log_d);
-                let inv_omega = omega.inv();
                 let q_indices =
                     sample_stage_queries(transcript, stage_idx, num_groups_cur, st.num_queries);
+                let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega, &q_indices);
                 let mut opened_vals = Vec::with_capacity(q_indices.len() * arity);
-                for &g in &q_indices {
+                for (q_pos, &g) in q_indices.iter().enumerate() {
                     let fiber = collect_coset_group_ext4(&prev_cw, g, num_groups_cur, arity);
                     opened_vals.extend_from_slice(&fiber[..arity]);
                     assert!(
                         final_fiber_matches_terminal_poly(
                             &fiber[..arity],
-                            Goldilocks::NON_RESIDUE * omega.pow(g as u64),
-                            inv_shift * inv_omega.pow(g as u64),
+                            y0s[q_pos],
+                            inv_y0s[q_pos],
                             inv_two,
                             &inv_zetas,
                             chals_slice,
@@ -3187,7 +3227,6 @@ fn whir_verify_core(
     }
 
     let inv_two = Goldilocks::TWO.inv();
-    let inv_shift = Goldilocks::NON_RESIDUE.inv();
     let inv_zetas = build_inv_zetas();
 
     let mut alphas = Vec::with_capacity(fold_vars);
@@ -3260,7 +3299,6 @@ fn whir_verify_core(
                     arity_0,
                     st.num_queries,
                     stage_chals,
-                    inv_shift,
                     inv_two,
                     &inv_zetas,
                     proof,
@@ -3277,7 +3315,6 @@ fn whir_verify_core(
                     arity,
                     st.num_queries,
                     stage_chals,
-                    inv_shift,
                     inv_two,
                     &inv_zetas,
                     None,
@@ -3368,7 +3405,6 @@ fn whir_verify_core(
                     arity_0,
                     st.num_queries,
                     stage_chals,
-                    inv_shift,
                     inv_two,
                     &inv_zetas,
                     proof,
@@ -3385,7 +3421,6 @@ fn whir_verify_core(
                     arity,
                     st.num_queries,
                     stage_chals,
-                    inv_shift,
                     inv_two,
                     &inv_zetas,
                     Some(&terminal_coeffs),
@@ -3471,7 +3506,6 @@ fn verify_and_fold_stage0_fibers(
     arity_0: usize,
     num_queries: usize,
     stage_chals: &[[GoldilocksExt4; 3]],
-    inv_shift: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
     proof: &HemWhirOpeningProof,
@@ -3490,54 +3524,26 @@ fn verify_and_fold_stage0_fibers(
 
     let log_d0 = domain_0.trailing_zeros() as usize;
     let omega_0 = Goldilocks::two_adic_generator(log_d0);
-    let inv_omega_0 = omega_0.inv();
     // Fiber points are `x_k = y_0 * zeta^k` with `zeta = omega_0^{num_groups_0}`.
     let zeta_0 = omega_0.pow(num_groups_0 as u64);
+    let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega_0, &q_indices);
 
-    let fold = {
-        let q_indices: alloc::sync::Arc<[usize]> = q_indices.as_slice().into();
-        let vals: alloc::sync::Arc<[Goldilocks]> = proof.round0_vals.as_slice().into();
-        let weights = weights.to_vec();
-        let stage_chals = stage_chals.to_vec();
-        let inv_zetas = *inv_zetas;
-        let terminal = terminal.cloned();
-        move |i: usize| {
-            let g = q_indices[i];
-            let vals = &vals[i * per_query..(i + 1) * per_query];
-            let y0 = Goldilocks::NON_RESIDUE * omega_0.pow(g as u64);
-            let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
-            if num_polys == 1 {
-                for (slot, &v) in ext_vals.iter_mut().zip(vals) {
-                    *slot = GoldilocksExt4::from_base(v);
-                }
-            } else {
-                for (w, poly_vals) in weights.iter().zip(vals.chunks_exact(arity_0)) {
-                    let mut x = y0;
-                    for (slot, &v) in ext_vals.iter_mut().zip(poly_vals) {
-                        *slot += (w[0] + w[1].mul_base(x)).mul_base(v);
-                        x *= zeta_0;
-                    }
-                }
-            }
-            fold_and_pin_fiber(
-                &ext_vals[..arity_0],
-                y0,
-                inv_shift * inv_omega_0.pow(g as u64),
-                inv_two,
-                &inv_zetas,
-                &stage_chals,
-                terminal.as_ref().map(|coeffs| coeffs.as_slice()),
-            )
-        }
-    };
+    let q_len = q_indices.len();
+    let q_indices: alloc::sync::Arc<[usize]> = q_indices.into();
+    let vals: alloc::sync::Arc<[Goldilocks]> = proof.round0_vals.as_slice().into();
+    let salts: alloc::sync::Arc<[[u8; 16]]> = proof.round0_salts.as_slice().into();
+    let y0s: alloc::sync::Arc<[Goldilocks]> = y0s.into();
+    let inv_y0s: alloc::sync::Arc<[Goldilocks]> = inv_y0s.into();
+    let weights: alloc::sync::Arc<[[GoldilocksExt4; 2]]> = weights.into();
+    let stage_chals: alloc::sync::Arc<[[GoldilocksExt4; 3]]> = stage_chals.into();
+    let inv_zetas = *inv_zetas;
+    let terminal = terminal.cloned();
 
-    let hash_vals = proof.round0_vals.clone();
-    let salts = proof.round0_salts.clone();
-    let batches = q_indices.len().div_ceil(4);
+    let batches = q_len.div_ceil(4);
     // Each pool item hashes four leaves with SIMD and folds their public values.
     let results = map_query_indices(batches, 4, move |batch| {
         let start = batch * 4;
-        let end = (start + 4).min(q_indices.len());
+        let end = (start + 4).min(q_len);
         let indices = &q_indices[start..end];
         let mut leaves = [(0usize, [0u8; 32]); 4];
         if indices.len() == 4 {
@@ -3545,7 +3551,7 @@ fn verify_and_fold_stage0_fibers(
                 indices,
                 &salts[start..],
                 num_polys,
-                &hash_vals[start * per_query..],
+                &vals[start * per_query..],
                 per_query,
             );
             for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
@@ -3560,19 +3566,43 @@ fn verify_and_fold_stage0_fibers(
                         g as u32,
                         &salts[i],
                         num_polys,
-                        &hash_vals[i * per_query..(i + 1) * per_query],
+                        &vals[i * per_query..(i + 1) * per_query],
                     ),
                 );
             }
         }
         let mut folded = [(Goldilocks::ZERO, GoldilocksExt4::ZERO, false); 4];
         for (slot, i) in folded.iter_mut().zip(start..end) {
-            *slot = fold(i);
+            let q_vals = &vals[i * per_query..(i + 1) * per_query];
+            let y0 = y0s[i];
+            let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
+            if num_polys == 1 {
+                for (dst, &v) in ext_vals.iter_mut().zip(q_vals) {
+                    *dst = GoldilocksExt4::from_base(v);
+                }
+            } else {
+                for (w, poly_vals) in weights.iter().zip(q_vals.chunks_exact(arity_0)) {
+                    let mut x = y0;
+                    for (dst, &v) in ext_vals.iter_mut().zip(poly_vals) {
+                        *dst += (w[0] + w[1].mul_base(x)).mul_base(v);
+                        x *= zeta_0;
+                    }
+                }
+            }
+            *slot = fold_and_pin_fiber(
+                &ext_vals[..arity_0],
+                y0,
+                inv_y0s[i],
+                inv_two,
+                &inv_zetas,
+                &stage_chals,
+                terminal.as_ref().map(|coeffs| coeffs.as_slice()),
+            );
         }
         (leaves, folded, end - start)
     });
-    let mut sorted_leaves = Vec::new();
-    let mut folded = Vec::new();
+    let mut sorted_leaves = Vec::with_capacity(q_len);
+    let mut folded = Vec::with_capacity(q_len);
     for (leaves, values, len) in results {
         sorted_leaves.extend_from_slice(&leaves[..len]);
         folded.extend_from_slice(&values[..len]);
@@ -3593,7 +3623,6 @@ fn verify_and_fold_ext4_stage_fibers(
     arity: usize,
     num_queries: usize,
     stage_chals: &[[GoldilocksExt4; 3]],
-    inv_shift: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
     terminal: Option<&alloc::sync::Arc<Vec<qsag_whir_verified::Ext4>>>,
@@ -3613,40 +3642,27 @@ fn verify_and_fold_ext4_stage_fibers(
 
     let log_d = domain_cur.trailing_zeros() as usize;
     let omega = Goldilocks::two_adic_generator(log_d);
-    let inv_omega = omega.inv();
+    let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega, &q_indices);
     let stage_u8 = stage_idx as u8;
 
-    let fold = {
-        let q_indices: alloc::sync::Arc<[usize]> = q_indices.as_slice().into();
-        let vals: alloc::sync::Arc<[GoldilocksExt4]> = layer.opened_vals.as_slice().into();
-        let stage_chals = stage_chals.to_vec();
-        let inv_zetas = *inv_zetas;
-        let terminal = terminal.cloned();
-        move |i: usize| {
-            let g = q_indices[i];
-            fold_and_pin_fiber(
-                &vals[i * arity..(i + 1) * arity],
-                Goldilocks::NON_RESIDUE * omega.pow(g as u64),
-                inv_shift * inv_omega.pow(g as u64),
-                inv_two,
-                &inv_zetas,
-                &stage_chals,
-                terminal.as_ref().map(|coeffs| coeffs.as_slice()),
-            )
-        }
-    };
+    let q_len = q_indices.len();
+    let q_indices: alloc::sync::Arc<[usize]> = q_indices.into();
+    let vals: alloc::sync::Arc<[GoldilocksExt4]> = layer.opened_vals.as_slice().into();
+    let y0s: alloc::sync::Arc<[Goldilocks]> = y0s.into();
+    let inv_y0s: alloc::sync::Arc<[Goldilocks]> = inv_y0s.into();
+    let stage_chals: alloc::sync::Arc<[[GoldilocksExt4; 3]]> = stage_chals.into();
+    let inv_zetas = *inv_zetas;
+    let terminal = terminal.cloned();
 
-    let hash_vals = layer.opened_vals.clone();
-    let batches = q_indices.len().div_ceil(4);
+    let batches = q_len.div_ceil(4);
     // Each pool item hashes four leaves with SIMD and folds their public values.
     let results = map_query_indices(batches, 4, move |batch| {
         let start = batch * 4;
-        let end = (start + 4).min(q_indices.len());
+        let end = (start + 4).min(q_len);
         let indices = &q_indices[start..end];
         let mut leaves = [(0usize, [0u8; 32]); 4];
         if indices.len() == 4 {
-            let hashes =
-                queried_ext4_hash_x4(stage_u8, indices, &hash_vals[start * arity..], arity);
+            let hashes = queried_ext4_hash_x4(stage_u8, indices, &vals[start * arity..], arity);
             for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
                 *slot = (index, hash);
             }
@@ -3655,18 +3671,26 @@ fn verify_and_fold_ext4_stage_fibers(
                 let i = start + lane;
                 leaves[lane] = (
                     g,
-                    hash_ext4_group(stage_u8, g as u32, &hash_vals[i * arity..(i + 1) * arity]),
+                    hash_ext4_group(stage_u8, g as u32, &vals[i * arity..(i + 1) * arity]),
                 );
             }
         }
         let mut folded = [(Goldilocks::ZERO, GoldilocksExt4::ZERO, false); 4];
         for (slot, i) in folded.iter_mut().zip(start..end) {
-            *slot = fold(i);
+            *slot = fold_and_pin_fiber(
+                &vals[i * arity..(i + 1) * arity],
+                y0s[i],
+                inv_y0s[i],
+                inv_two,
+                &inv_zetas,
+                &stage_chals,
+                terminal.as_ref().map(|coeffs| coeffs.as_slice()),
+            );
         }
         (leaves, folded, end - start)
     });
-    let mut sorted_leaves = Vec::new();
-    let mut folded = Vec::new();
+    let mut sorted_leaves = Vec::with_capacity(q_len);
+    let mut folded = Vec::with_capacity(q_len);
     for (leaves, values, len) in results {
         sorted_leaves.extend_from_slice(&leaves[..len]);
         folded.extend_from_slice(&values[..len]);
@@ -3884,18 +3908,17 @@ mod pcs_unit_tests {
             WhirSecurityRegime::default(),
             WhirSecurityRegime::BciksJohnsonQrom128
         );
-        for (tag, counts, bits) in [
-            (0, [56, 28, 19, 14], 128),
-            (1, [64, 32, 22, 16], 144),
-            (2, [129, 65, 44, 33], 144),
-            (3, [128, 64, 43, 32], 272),
-            (4, [258, 130, 88, 66], 272),
-        ] {
+        // Retired capacity-proximity wire tags (`0`, `1`, `3`) MUST fail closed on decode.
+        assert_eq!(WhirSecurityRegime::from_u8(0), None);
+        assert_eq!(WhirSecurityRegime::from_u8(1), None);
+        assert_eq!(WhirSecurityRegime::from_u8(3), None);
+
+        for (tag, counts, bits) in [(2, [129, 65, 44, 33], 144), (4, [258, 130, 88, 66], 272)] {
             let regime = WhirSecurityRegime::from_u8(tag).unwrap();
             assert_eq!(regime as u8, tag);
             assert_eq!(regime.classical_fs_round_bits(), bits);
             assert_eq!(regime.qrom_grover_round_bits(), bits / 2);
-            assert_eq!(regime.meets_qrom_128_floor(), tag >= 3);
+            assert_eq!(regime.meets_qrom_128_floor(), tag == 4);
             assert_eq!(
                 regime
                     .schedule(24)
@@ -3910,7 +3933,7 @@ mod pcs_unit_tests {
             assert!(!excessive.validate(24));
             assert!(WhirSchedule::from_bytes_canonical(&excessive.to_bytes(), 24).is_none());
         }
-        for tag in 5..=255 {
+        for tag in (0..=255u8).filter(|&t| t != 2 && t != 4) {
             assert_eq!(WhirSecurityRegime::from_u8(tag), None);
         }
     }
@@ -3918,10 +3941,7 @@ mod pcs_unit_tests {
     #[test]
     fn security_regimes_roundtrip_and_query_budgets() {
         for regime in [
-            WhirSecurityRegime::Habr24Classical128,
-            WhirSecurityRegime::Habr24Interactive128,
             WhirSecurityRegime::BciksJohnsonClassical128,
-            WhirSecurityRegime::Habr24Qrom128,
             WhirSecurityRegime::BciksJohnsonQrom128,
         ] {
             for nv in 2..=MAX_PCS_NUM_VARS {
@@ -3940,15 +3960,6 @@ mod pcs_unit_tests {
                 for stage in &schedule.stages {
                     let log_b = stage.blowup.trailing_zeros() as usize;
                     match regime {
-                        WhirSecurityRegime::Habr24Classical128 => {
-                            assert!(stage.num_queries * log_b + 16 >= 128)
-                        }
-                        WhirSecurityRegime::Habr24Interactive128 => {
-                            assert!(stage.num_queries * log_b >= 128)
-                        }
-                        WhirSecurityRegime::Habr24Qrom128 => {
-                            assert!(stage.num_queries * log_b >= 256)
-                        }
                         WhirSecurityRegime::BciksJohnsonQrom128 => {
                             assert!(stage.num_queries * log_b > 512)
                         }
@@ -3957,9 +3968,11 @@ mod pcs_unit_tests {
                         }
                     }
                 }
-                let mut unknown_regime = wire.clone();
-                unknown_regime[0] = 5;
-                assert!(WhirSchedule::from_bytes_canonical(&unknown_regime, nv).is_none());
+                for retired_or_unknown_tag in [0u8, 1, 2, 3, 5] {
+                    let mut mutated = wire.clone();
+                    mutated[0] = retired_or_unknown_tag;
+                    assert!(WhirSchedule::from_bytes_canonical(&mutated, nv).is_none());
+                }
                 assert!(WhirSchedule::from_bytes_canonical(&wire[..wire.len() - 1], nv).is_none());
                 let mut custom = schedule.clone();
                 custom.stages[0].num_queries += 1;
@@ -3978,61 +3991,61 @@ mod pcs_unit_tests {
         let values: Vec<_> = (0..1u64 << nv).map(Goldilocks::from_u64_reduced).collect();
         let point = vec![GoldilocksExt4::from_base(Goldilocks::TWO); nv];
         let value = crate::field::mle_eval_base_at_ext4(&values, &point);
-        for regime in [
-            WhirSecurityRegime::Habr24Qrom128,
-            WhirSecurityRegime::BciksJohnsonQrom128,
-        ] {
-            let schedule = regime.schedule(nv);
-            let transcript = || {
-                FiatShamirTranscript::new()
-                    .bind_relation(b"REGIME_TEST", b"", &schedule)
-                    .bind_instance(&[b"instance"])
-            };
-            let start = std::time::Instant::now();
-            let (comm, state) =
-                whir_commit_batch_owned_with_schedule(vec![values.clone()], &[7; 32], &schedule);
-            let proof = whir_open(&state, &point, value, &mut transcript());
-            let elapsed = start.elapsed();
-            let start = std::time::Instant::now();
-            assert!(whir_verify_with_schedule(
-                &comm,
-                nv,
-                &point,
-                value,
-                &proof,
-                &mut transcript(),
-                &schedule
-            ));
-            let mut proof_bytes = Vec::new();
-            proof.push_bytes(&mut proof_bytes);
-            std::eprintln!(
-                "{regime:?}: nv={nv}, bytes={}, prove={elapsed:?}, verify={:?}",
-                proof_bytes.len(),
-                start.elapsed()
-            );
-            let mut wrong = schedule.clone();
-            wrong.regime = WhirSecurityRegime::Habr24Classical128;
-            assert!(!whir_verify_with_schedule(
-                &comm,
-                nv,
-                &point,
-                value,
-                &proof,
-                &mut transcript(),
-                &wrong
-            ));
-            let mut forged = proof.clone();
-            forged.final_coeffs[0] += GoldilocksExt4::ONE;
-            assert!(!whir_verify_with_schedule(
-                &comm,
-                nv,
-                &point,
-                value,
-                &forged,
-                &mut transcript(),
-                &schedule
-            ));
-        }
+
+        let classical_sched = WhirSecurityRegime::BciksJohnsonClassical128.schedule(nv);
+        assert!(!classical_sched.validate(nv));
+
+        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let schedule = regime.schedule(nv);
+        let transcript = || {
+            FiatShamirTranscript::new()
+                .bind_relation(b"REGIME_TEST", b"", &schedule)
+                .bind_instance(&[b"instance"])
+        };
+        let start = std::time::Instant::now();
+        let (comm, state) =
+            whir_commit_batch_owned_with_schedule(vec![values], &[7; 32], &schedule);
+        let proof = whir_open(&state, &point, value, &mut transcript());
+        let elapsed = start.elapsed();
+        let start = std::time::Instant::now();
+        assert!(whir_verify_with_schedule(
+            &comm,
+            nv,
+            &point,
+            value,
+            &proof,
+            &mut transcript(),
+            &schedule
+        ));
+        let mut proof_bytes = Vec::new();
+        proof.push_bytes(&mut proof_bytes);
+        std::eprintln!(
+            "{regime:?}: nv={nv}, bytes={}, prove={elapsed:?}, verify={:?}",
+            proof_bytes.len(),
+            start.elapsed()
+        );
+        let mut wrong = schedule.clone();
+        wrong.regime = WhirSecurityRegime::BciksJohnsonClassical128;
+        assert!(!whir_verify_with_schedule(
+            &comm,
+            nv,
+            &point,
+            value,
+            &proof,
+            &mut transcript(),
+            &wrong
+        ));
+        let mut forged = proof;
+        forged.final_coeffs[0] += GoldilocksExt4::ONE;
+        assert!(!whir_verify_with_schedule(
+            &comm,
+            nv,
+            &point,
+            value,
+            &forged,
+            &mut transcript(),
+            &schedule
+        ));
     }
 
     #[test]
@@ -4149,31 +4162,56 @@ mod pcs_unit_tests {
     fn whir_schedule_validate_rejects_32bit_domain_overflow() {
         // Reproducer from Focus-03 #2: 2^24 * 256 = 2^32 overflows 32-bit/wasm32 `usize`.
         let bad_sched = WhirSchedule {
-            regime: WhirSecurityRegime::Habr24Qrom128,
+            regime: WhirSecurityRegime::BciksJohnsonQrom128,
             early_stop_vars: 8,
             stages: vec![
                 WhirStageSpec {
                     blowup: 256,
                     step_vars: 6,
-                    num_queries: 32,
+                    num_queries: 66,
                 },
                 WhirStageSpec {
                     blowup: 4,
                     step_vars: 6,
-                    num_queries: 128,
+                    num_queries: 258,
                 },
                 WhirStageSpec {
                     blowup: 4,
                     step_vars: 3,
-                    num_queries: 128,
+                    num_queries: 258,
                 },
                 WhirStageSpec {
                     blowup: 4,
                     step_vars: 1,
-                    num_queries: 128,
+                    num_queries: 258,
                 },
             ],
         };
         assert!(!bad_sched.validate(24));
+    }
+
+    #[test]
+    fn batch_coset_points_and_inverses_match_scalar_pow() {
+        let omega = Goldilocks::two_adic_generator(22);
+        let inv_omega = omega.inv();
+        let inv_shift = Goldilocks::NON_RESIDUE.inv();
+        let queries = [
+            0usize,
+            1,
+            7,
+            15,
+            16,
+            255,
+            256,
+            4095,
+            65_535,
+            (1 << 20) - 1,
+            (1 << 22) - 3,
+        ];
+        let (y0s, inv_y0s) = batch_coset_points_and_inverses(omega, &queries);
+        for (i, &g) in queries.iter().enumerate() {
+            assert_eq!(y0s[i], Goldilocks::NON_RESIDUE * omega.pow(g as u64));
+            assert_eq!(inv_y0s[i], inv_shift * inv_omega.pow(g as u64));
+        }
     }
 }
