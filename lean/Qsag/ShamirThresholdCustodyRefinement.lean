@@ -1501,8 +1501,8 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
                 Bool.not_eq_true _ |>.mp hNP
               injection hOut with hOpEq
               rw [← hOpEq]
-              simp only [hNPF, Bool.false_eq_true, ↓reduceIte, hAct, computeShamirCustodianOpening]
-              exact ⟨hAct, trivial, trivial, trivial, trivial⟩
+              simp only [hNPF, Bool.false_eq_true, ↓reduceIte, hAct, computeShamirCustodianOpening,
+                and_self]
             · cases hOut
         refine ⟨hInv.beltSync, ?_, ?_, ?_, ?_, hInv.combinedVerified⟩
         · intro i
@@ -1631,11 +1631,10 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
       dsimp only
       by_cases hip : i = p
       · subst hip
-        have hDecT : decide (i = i) = true := decide_eq_true rfl
         cases hC : dep.Corrupt.mem i
-        · simp only [hDecT, Bool.not_false, Bool.and_self, ↓reduceIte]
+        · simp only [Bool.not_false]
           exact Custody.forget_safe _ _ _ (hInv.vaultSafe i)
-        · simp only [hDecT, Bool.not_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte]
+        · simp only [Bool.not_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte]
           exact hInv.vaultSafe i
       · have hDecF : decide (i = p) = false := decide_eq_false hip
         simp only [hDecF, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
@@ -1644,8 +1643,7 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
       dsimp only at hb'
       by_cases hip : i = p
       · subst hip
-        have hDecT : decide (i = i) = true := decide_eq_true rfl
-        simp only [hDecT, hiHon, Bool.not_false, Bool.and_self, ↓reduceIte, Custody.forget] at hb'
+        simp only [hiHon, Bool.not_false, Custody.forget] at hb'
         exact hInv.burnedCertified i hiHon b' hb'
       · have hDecF : decide (i = p) = false := decide_eq_false hip
         simp only [hDecF, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hb'
@@ -1656,8 +1654,7 @@ theorem stepShamirCustody_preserves_inv {n L d : Nat}
       refine ⟨hOpHon, ?_, hEp⟩
       by_cases hopp : op.party = p
       · rw [hopp] at hOpHon hAtt ⊢
-        have hDecT : decide (p = p) = true := decide_eq_true rfl
-        simp only [hDecT, hOpHon, Bool.not_false, Bool.and_self, ↓reduceIte, Custody.forget]
+        simp only [hOpHon, Bool.not_false, Custody.forget]
         exact hAtt
       · have hDecF : decide (op.party = p) = false := decide_eq_false hopp
         simp only [hDecF, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
@@ -1675,7 +1672,7 @@ theorem runShamirCustodyTrace_inv {n L d : Nat}
       vaultSafe := fun p => Custody.initial_safe (dep.policies p) (dep.caps p)
       burnedCertified := fun _ _ _ h => by cases h
       shareReleaseProvenance := fun _ h => by cases h
-      shareReleasesNodupPartyIntent := by simp
+      shareReleasesNodupPartyIntent := List.nodup_nil
       combinedVerified := fun _ h => by cases h }
   generalize ShamirCustodyNetworkState.init n L dep.height dep.maxWindow = st₀ at hInit
   induction trace generalizing st₀ with
@@ -2304,6 +2301,155 @@ private theorem checkLatchCertifiedBurn_finRange {n : Nat}
   have hEpEq : rec.epoch = UInt64.ofNat b.intent.leaf := by rw [hRecEp, hLeaf0]; rfl
   simp [BeltLatchNodeState.init, h2_64, hEpEq, hRecMd, hVerQ]
 
+/-! ### Single-turn transition lemmas (used to execute concrete multi-turn witnesses) -/
+
+private theorem beltLatchEmitEcho_keeps_state {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (k : Digest256) (s r : Fin n) (nodeSt : BeltLatchNodeState) :
+    (∃ e, beltLatchEmitEcho H MAC k s r nodeSt = .accepted nodeSt e) ∨
+      (∃ err, beltLatchEmitEcho H MAC k s r nodeSt = .rejected nodeSt err) := by
+  unfold beltLatchEmitEcho
+  split
+  · exact .inr ⟨_, rfl⟩
+  · split
+    · exact .inr ⟨_, rfl⟩
+    · exact .inl ⟨_, rfl⟩
+
+private theorem stepBeltNetwork_honestEmitEcho_nodes {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n) (q : Nat)
+    (net : BeltLatchNetworkState n) (s r j : Fin n) :
+    (stepBeltNetwork H MAC macKeys Corrupt q net (.honestEmitEcho s r)).nodes j = net.nodes j := by
+  unfold stepBeltNetwork
+  dsimp only
+  split
+  · rfl
+  · have hIte : (if j = s then net.nodes s else net.nodes j) = net.nodes j := by
+      by_cases hj : j = s
+      · rw [hj]; exact ite_self _
+      · simp only [hj, ↓reduceIte]
+    rcases beltLatchEmitEcho_keeps_state H MAC (macKeys s r) s r (net.nodes s) with ⟨e, he⟩ | ⟨err, he⟩
+    · rw [he]; exact hIte
+    · rw [he]; exact hIte
+
+private theorem stepBeltNetwork_honestBind_nodes_ne {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n) (q : Nat)
+    (net : BeltLatchNetworkState n) (p : Fin n) (rec : BeltLatchRecord)
+    (j : Fin n) (hj : j ≠ p) :
+    (stepBeltNetwork H MAC macKeys Corrupt q net (.honestBind p rec)).nodes j = net.nodes j := by
+  unfold stepBeltNetwork
+  dsimp only
+  split
+  · rfl
+  · split <;> exact ite_eq_right_of_eq_false _ _ (eq_false hj)
+
+private theorem stepBeltNetwork_honestBind_fresh_node {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n) (q : Nat)
+    (net : BeltLatchNetworkState n) (p : Fin n) (rec : BeltLatchRecord)
+    (nodeSt' : BeltLatchNodeState)
+    (hC : Corrupt.mem p = false)
+    (hB : beltLatchBindStep (net.nodes p) rec = .accepted nodeSt' .fresh) :
+    (stepBeltNetwork H MAC macKeys Corrupt q net (.honestBind p rec)).nodes p = nodeSt' := by
+  unfold stepBeltNetwork
+  dsimp only
+  rw [hB, hC]
+  exact ite_eq_left_of_eq_true _ _ (eq_self p)
+
+/-- A certified mint by an honest custodian whose latch check passes only changes that
+    custodian's vault, to `Custody.mint` of its previous vault. -/
+private theorem stepShamirCustody_certifiedMint_ok {n L d : Nat}
+    (dep : ShamirValidatorDeployment n L d) (st : ShamirCustodyNetworkState n L)
+    (p : Fin n) (anchor : Nat) (Q : CustodiansMask n) (rec : BeltLatchRecord)
+    (echoes : List (AuthenticatedBeltEcho n)) (b : Custody.Burn)
+    (hC : dep.Corrupt.mem p = false)
+    (hChk : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p
+      (st.beltNet.nodes p) Q rec echoes b = true) :
+    (stepShamirCustody dep st (.certifiedMint p anchor Q rec echoes b)).beltNet = st.beltNet ∧
+    (stepShamirCustody dep st (.certifiedMint p anchor Q rec echoes b)).honestShareReleases =
+      st.honestShareReleases ∧
+    (stepShamirCustody dep st (.certifiedMint p anchor Q rec echoes b)).combinedSignatures =
+      st.combinedSignatures ∧
+    (stepShamirCustody dep st (.certifiedMint p anchor Q rec echoes b)).vaults p =
+      Custody.mint (dep.policies p) (dep.caps p) anchor (st.vaults p) b ∧
+    ∀ j, j ≠ p →
+      (stepShamirCustody dep st (.certifiedMint p anchor Q rec echoes b)).vaults j = st.vaults j := by
+  unfold stepShamirCustody
+  dsimp only
+  rw [hC, hChk]
+  simp only [Bool.false_eq_true, ↓reduceIte]
+  split
+  · exact ⟨rfl, rfl, rfl, ite_eq_left_of_eq_true _ _ (eq_self p),
+      fun j hj => ite_eq_right_of_eq_false _ _ (eq_false hj)⟩
+  · exact ⟨rfl, rfl, rfl, ite_eq_left_of_eq_true _ _ (eq_self p),
+      fun j hj => ite_eq_right_of_eq_false _ _ (eq_false hj)⟩
+
+/-- A share release by an honest custodian whose vault is unpoisoned, at the presented anchor,
+    and holds `r` as its active permit records exactly one opening for `(p, r)`. -/
+private theorem stepShamirCustody_releaseShare_ok {n L d : Nat}
+    (dep : ShamirValidatorDeployment n L d) (st : ShamirCustodyNetworkState n L)
+    (p : Fin n) (anchor : Nat) (r : Custody.Intent) (counter : UInt32)
+    (hC : dep.Corrupt.mem p = false)
+    (hP : (st.vaults p).poisoned = false)
+    (hA : (st.vaults p).durable.anchor = anchor)
+    (hAct : (st.vaults p).active = some r) :
+    (stepShamirCustody dep st (.releaseShare p anchor r counter)).beltNet = st.beltNet ∧
+    (stepShamirCustody dep st (.releaseShare p anchor r counter)).combinedSignatures =
+      st.combinedSignatures ∧
+    (stepShamirCustody dep st (.releaseShare p anchor r counter)).honestShareReleases.map
+        (fun op => (op.party, op.intent)) =
+      (p, r) :: st.honestShareReleases.map (fun op => (op.party, op.intent)) ∧
+    ∀ j, j ≠ p →
+      (stepShamirCustody dep st (.releaseShare p anchor r counter)).vaults j = st.vaults j := by
+  have hCond : ((st.vaults p).poisoned || decide ((st.vaults p).durable.anchor ≠ anchor)) = false := by
+    rw [hP, hA, Bool.false_or]
+    exact decide_eq_false (fun h => h rfl)
+  unfold stepShamirCustody
+  dsimp only
+  rw [hC]
+  unfold releaseShamirShareFromVault
+  rw [hCond]
+  simp only [Bool.false_eq_true, ↓reduceIte, hAct]
+  exact ⟨trivial, trivial, rfl, fun j hj => ite_eq_right_of_eq_false _ _ (eq_false hj)⟩
+
+private theorem stepShamirCustody_combineSig_some {n L d : Nat}
+    (dep : ShamirValidatorDeployment n L d) (st : ShamirCustodyNetworkState n L)
+    (leafChainPk : Fin L → Digest256) (lambdas : List (TowerElem 7))
+    (r : Custody.Intent) (counter : UInt32)
+    (submitted : SubmittedDigest256ShamirShares L) (authPath : List Digest256)
+    (sig : QuorumJortsSig)
+    (hSig : combinePreSteppedShamirValidatorSig L dep.targetSum dep.H dep.validatorPk
+      dep.digitsOf leafChainPk lambdas r counter submitted authPath = some sig) :
+    (stepShamirCustody dep st
+        (.combineSig leafChainPk lambdas r counter submitted authPath)).combinedSignatures =
+      (r, sig) :: st.combinedSignatures ∧
+    (stepShamirCustody dep st
+        (.combineSig leafChainPk lambdas r counter submitted authPath)).honestShareReleases =
+      st.honestShareReleases := by
+  unfold stepShamirCustody
+  dsimp only
+  rw [hSig]
+  exact ⟨rfl, rfl⟩
+
+/-- Minting into the initial vault at anchor `0` under a passing `mintGuard` leaves an
+    unpoisoned vault at anchor `1` whose active permit is the burned intent. -/
+private theorem custody_mint_initial_ok (pol : Custody.RoundPolicy) (cap : Nat) (b : Custody.Burn)
+    (hMG : Custody.mintGuard pol cap Custody.initial b = true) :
+    (Custody.mint pol cap 0 Custody.initial b).poisoned = false ∧
+    (Custody.mint pol cap 0 Custody.initial b).durable.anchor = 1 ∧
+    (Custody.mint pol cap 0 Custody.initial b).active = some b.intent := by
+  unfold Custody.mint
+  rw [hMG]
+  exact ⟨rfl, rfl, rfl⟩
+
 def toyShamirIntent : Custody.Intent :=
   { session := 1, round := 0, leaf := 0, spend := 10, message := [0x42] }
 
@@ -2365,15 +2511,40 @@ theorem witness_shamir_custody_nonvacuous :
         binding := beltRecordBinding dep.H rec₀
         macTag := computeBeltEchoMac dep.MAC (dep.macKeys s v) s v rec₀ })
   let pk := dep.validatorPk
+  let gLeaf := UInt64.ofNat toyShamirIntent.leaf
+  let digits := dep.digitsOf (quorumCounterDigest dep.H
+    (quorumMessageHash dep.H pk gLeaf (intentCanonicalPayload toyShamirIntent)) 0)
+  let digitsFn : Fin 1 → Fin 4 := fun i => digits.getD i.1 ⟨0, by decide⟩
   let leafChainPk : Fin 1 → Digest256 := fun i =>
-    wotsChainIter (quorumChainStep dep.H pk.pkSeed 0) i.1 0 3
-      (quorumStageChainSk dep.H dep.masterSeed 0 (UInt32.ofNat i.1))
+    wotsChainIter (quorumChainStep dep.H pk.pkSeed gLeaf) i.1 0 3
+      (quorumStageChainSk dep.H dep.masterSeed gLeaf (UInt32.ofNat i.1))
   let authPath := quorumAuthPath dep.H pk.pkSeed
-    (quorumHonestLeafDigest 1 dep.H dep.masterSeed) dep.height 0 0
+    (quorumHonestLeafDigest 1 dep.H dep.masterSeed) dep.height 0 gLeaf.toNat
   let lambdas := lagrange2WeightsTower 7 (shamirPts4 p0) (shamirPts4 p1)
   let ops := [p0, p1].map (fun p =>
     computeShamirCustodianOpening dep.H dep.masterSeed dep.polyTape (dep.evalPts p)
-      p toyShamirIntent 0 (fun _ => ⟨2, by decide⟩))
+      p toyShamirIntent 0 digitsFn)
+  let sig := quorumJortsReferenceSign dep.H dep.masterSeed gLeaf 0 digits authPath
+  let bound : BeltLatchNodeState :=
+    { BeltLatchNodeState.init 2 2 with
+      nextEpoch := 1, inFlight := some rec₀,
+      disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } }
+  let s0 := ShamirCustodyNetworkState.init 4 1 dep.height dep.maxWindow
+  let s1 := stepShamirCustody dep s0 (.belt (.honestBind p0 rec₀))
+  let s2 := stepShamirCustody dep s1 (.belt (.honestBind p1 rec₀))
+  let s3 := stepShamirCustody dep s2 (.belt (.honestBind p2 rec₀))
+  let s4 := stepShamirCustody dep s3 (.belt (.honestEmitEcho p0 p0))
+  let s5 := stepShamirCustody dep s4 (.belt (.honestEmitEcho p1 p0))
+  let s6 := stepShamirCustody dep s5 (.belt (.honestEmitEcho p2 p0))
+  let s7 := stepShamirCustody dep s6 (.belt (.honestEmitEcho p0 p1))
+  let s8 := stepShamirCustody dep s7 (.belt (.honestEmitEcho p1 p1))
+  let s9 := stepShamirCustody dep s8 (.belt (.honestEmitEcho p2 p1))
+  let s10 := stepShamirCustody dep s9 (.certifiedMint p0 0 Q3 rec₀ (echoesFor p0) burn₀)
+  let s11 := stepShamirCustody dep s10 (.certifiedMint p1 0 Q3 rec₀ (echoesFor p1) burn₀)
+  let s12 := stepShamirCustody dep s11 (.releaseShare p0 1 toyShamirIntent 0)
+  let s13 := stepShamirCustody dep s12 (.releaseShare p1 1 toyShamirIntent 0)
+  let s14 := stepShamirCustody dep s13 (.combineSig leafChainPk lambdas toyShamirIntent 0
+    (assembleSubmittedSharesFromOpenings ops) authPath)
   let trace : List (ShamirCustodyTurn 4 1) :=
     [ .belt (.honestBind p0 rec₀),
       .belt (.honestBind p1 rec₀),
@@ -2392,19 +2563,16 @@ theorem witness_shamir_custody_nonvacuous :
         (assembleSubmittedSharesFromOpenings ops) authPath ]
   refine ⟨dep, trace, S2, by decide +kernel, by decide +kernel, by decide +kernel,
     by decide +kernel, ?_⟩
-  dsimp only
-  let st := runShamirCustodyTrace dep (ShamirCustodyNetworkState.init 4 1 dep.height dep.maxWindow) trace
-  have hCert0 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p0
-      { BeltLatchNodeState.init 2 2 with
-        nextEpoch := 1, inFlight := some rec₀,
-        disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } }
+  show HonestQuorumReleasedIntent dep.Corrupt s14 S2 toyShamirIntent ∧
+    s14.combinedSignatures.length = 1 ∧
+    ∀ entry ∈ s14.combinedSignatures,
+      verifyQuorumJortsSigAt 1 dep.targetSum dep.H dep.validatorPk dep.digitsOf
+        (intentCanonicalPayload entry.1) entry.2 = true
+  have hCert0 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p0 bound
       Q3 rec₀ (echoesFor p0) burn₀ = true :=
     checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p0 Q3 rec₀ burn₀
       (by decide +kernel) rfl rfl rfl
-  have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1
-      { BeltLatchNodeState.init 2 2 with
-        nextEpoch := 1, inFlight := some rec₀,
-        disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } }
+  have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1 bound
       Q3 rec₀ (echoesFor p1) burn₀ = true :=
     checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p1 Q3 rec₀ burn₀
       (by decide +kernel) rfl rfl rfl
@@ -2418,25 +2586,83 @@ theorem witness_shamir_custody_nonvacuous :
     (Nat.lt_trans (by decide : 32 * 1 < 64) pow256_8_gt_64_local)).1
     [p0, p1] lambdas toyShamirIntent 0 shamirPts4_lagrange01
     (by decide) two_pow_64_pos_local h2_16 rfl rfl
-  have hBind0 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₀ =
-      .accepted { BeltLatchNodeState.init 2 2 with
-        nextEpoch := 1, inFlight := some rec₀,
-        disk := .persisted { nextEpoch := 1, inFlight := some rec₀ } } .fresh :=
+  have hBind0 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₀ = .accepted bound .fresh :=
     beltLatchBindStep_init22_epoch0 rec₀ rfl
   have hC0 : dep.Corrupt.mem p0 = false := rfl
   have hC1 : dep.Corrupt.mem p1 = false := rfl
-  have hC2 : dep.Corrupt.mem p2 = false := rfl
-  have hSt :
-      st.honestShareReleases.map (fun op => (op.party, op.intent)) =
-        [(p1, toyShamirIntent), (p0, toyShamirIntent)] ∧
-      st.combinedSignatures =
-        [(toyShamirIntent,
-          quorumJortsReferenceSign dep.H dep.masterSeed 0 0 [⟨2, by decide⟩] authPath)] := by
-    dsimp only [st, trace, runShamirCustodyTrace, stepShamirCustody,
-      ShamirCustodyNetworkState.init, stepBeltNetwork, BeltLatchNetworkState.init]
-    simp [p0, p1, p2, hC0, hC1, hC2, hBind0, beltLatchEmitEcho, hCert0, hCert1,
-      Custody.initial, Custody.mint, hMG, releaseShamirShareFromVault, hComb.1]
-  obtain ⟨hRelLen, hCombEq⟩ := hSt
+  -- Latch nodes of `p0` and `p1` after the three binds and six echo emissions.
+  have n1_0 : s1.beltNet.nodes p0 = bound :=
+    stepBeltNetwork_honestBind_fresh_node dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s0.beltNet p0 rec₀ bound hC0 hBind0
+  have n1_1 : s1.beltNet.nodes p1 = BeltLatchNodeState.init 2 2 :=
+    stepBeltNetwork_honestBind_nodes_ne dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s0.beltNet p0 rec₀ p1 (by decide)
+  have n2_1 : s2.beltNet.nodes p1 = bound :=
+    stepBeltNetwork_honestBind_fresh_node dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s1.beltNet p1 rec₀ bound hC1 (by rw [n1_1]; exact hBind0)
+  have n2_0 : s2.beltNet.nodes p0 = bound :=
+    (stepBeltNetwork_honestBind_nodes_ne dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s1.beltNet p1 rec₀ p0 (by decide)).trans n1_0
+  have n3 (j : Fin 4) (hj : j ≠ p2) : s3.beltNet.nodes j = s2.beltNet.nodes j :=
+    stepBeltNetwork_honestBind_nodes_ne dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s2.beltNet p2 rec₀ j hj
+  have e4 (j : Fin 4) : s4.beltNet.nodes j = s3.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s3.beltNet p0 p0 j
+  have e5 (j : Fin 4) : s5.beltNet.nodes j = s4.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s4.beltNet p1 p0 j
+  have e6 (j : Fin 4) : s6.beltNet.nodes j = s5.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s5.beltNet p2 p0 j
+  have e7 (j : Fin 4) : s7.beltNet.nodes j = s6.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s6.beltNet p0 p1 j
+  have e8 (j : Fin 4) : s8.beltNet.nodes j = s7.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s7.beltNet p1 p1 j
+  have e9 (j : Fin 4) : s9.beltNet.nodes j = s8.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s8.beltNet p2 p1 j
+  have n9_0 : s9.beltNet.nodes p0 = bound := by
+    rw [e9, e8, e7, e6, e5, e4, n3 p0 (by decide)]; exact n2_0
+  have n9_1 : s9.beltNet.nodes p1 = bound := by
+    rw [e9, e8, e7, e6, e5, e4, n3 p1 (by decide)]; exact n2_1
+  -- Two certified mints into the initial vaults.
+  obtain ⟨m10_net, m10_rel, m10_comb, m10_v, m10_frame⟩ :=
+    stepShamirCustody_certifiedMint_ok dep s9 p0 0 Q3 rec₀ (echoesFor p0) burn₀ hC0
+      (by rw [n9_0]; exact hCert0)
+  have n10_1 : s10.beltNet.nodes p1 = bound := by
+    show (stepShamirCustody dep s9 (.certifiedMint p0 0 Q3 rec₀ (echoesFor p0) burn₀)).beltNet.nodes p1 = bound
+    rw [m10_net]; exact n9_1
+  obtain ⟨_, m11_rel, m11_comb, m11_v, m11_frame⟩ :=
+    stepShamirCustody_certifiedMint_ok dep s10 p1 0 Q3 rec₀ (echoesFor p1) burn₀ hC1
+      (by rw [n10_1]; exact hCert1)
+  obtain ⟨hPois, hAnch, hActive⟩ :=
+    custody_mint_initial_ok (toyShamirPolicy toyShamirIntent) 100 burn₀ hMG
+  have v11_0 : s11.vaults p0 = Custody.mint (toyShamirPolicy toyShamirIntent) 100 0 Custody.initial burn₀ :=
+    (m11_frame p0 (by decide)).trans m10_v
+  have v11_1 : s11.vaults p1 = Custody.mint (toyShamirPolicy toyShamirIntent) 100 0 Custody.initial burn₀ :=
+    m11_v.trans (congrArg (fun v => Custody.mint (toyShamirPolicy toyShamirIntent) 100 0 v burn₀)
+      (m10_frame p1 (by decide)))
+  -- Two share releases and the combination.
+  obtain ⟨_, r12_comb, r12_rel, r12_frame⟩ :=
+    stepShamirCustody_releaseShare_ok dep s11 p0 1 toyShamirIntent 0 hC0
+      (by rw [v11_0]; exact hPois) (by rw [v11_0]; exact hAnch) (by rw [v11_0]; exact hActive)
+  have v12_1 : s12.vaults p1 = Custody.mint (toyShamirPolicy toyShamirIntent) 100 0 Custody.initial burn₀ :=
+    (r12_frame p1 (by decide)).trans v11_1
+  obtain ⟨_, r13_comb, r13_rel, _⟩ :=
+    stepShamirCustody_releaseShare_ok dep s12 p1 1 toyShamirIntent 0 hC1
+      (by rw [v12_1]; exact hPois) (by rw [v12_1]; exact hAnch) (by rw [v12_1]; exact hActive)
+  obtain ⟨c14_comb, c14_rel⟩ :=
+    stepShamirCustody_combineSig_some dep s13 leafChainPk lambdas toyShamirIntent 0
+      (assembleSubmittedSharesFromOpenings ops) authPath sig hComb.1
+  have hRelLen : s14.honestShareReleases.map (fun op => (op.party, op.intent)) =
+      [(p1, toyShamirIntent), (p0, toyShamirIntent)] := by
+    show (stepShamirCustody dep s13 (.combineSig leafChainPk lambdas toyShamirIntent 0
+      (assembleSubmittedSharesFromOpenings ops) authPath)).honestShareReleases.map
+        (fun op => (op.party, op.intent)) = _
+    rw [c14_rel, r13_rel, r12_rel, m11_rel, m10_rel]
+    rfl
+  have hCombEq : s14.combinedSignatures = [(toyShamirIntent, sig)] := by
+    show (stepShamirCustody dep s13 (.combineSig leafChainPk lambdas toyShamirIntent 0
+      (assembleSubmittedSharesFromOpenings ops) authPath)).combinedSignatures = _
+    rw [c14_comb, r13_comb, r12_comb, m11_comb, m10_comb]
+    rfl
   refine ⟨?_, ?_, ?_⟩
   · intro p hpS hpHon
     have hp01 : p = p0 ∨ p = p1 := by
@@ -2446,7 +2672,7 @@ theorem witness_shamir_custody_nonvacuous :
       rcases hCases with rfl | rfl
       · exact .inl rfl
       · exact .inr rfl
-    have hMemMap : (p, toyShamirIntent) ∈ st.honestShareReleases.map (fun op => (op.party, op.intent)) := by
+    have hMemMap : (p, toyShamirIntent) ∈ s14.honestShareReleases.map (fun op => (op.party, op.intent)) := by
       rw [hRelLen]
       rcases hp01 with rfl | rfl
       · exact .tail _ (.head _)
@@ -2543,17 +2769,19 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
     intro hEq
     have hNat := congrArg BitVec.toNat hEq
     simp at hNat
-  have hCert0 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p0
-      { BeltLatchNodeState.init 2 2 with
-        nextEpoch := 1, inFlight := some rec₁,
-        disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } }
+  let bound₁ : BeltLatchNodeState :=
+    { BeltLatchNodeState.init 2 2 with
+      nextEpoch := 1, inFlight := some rec₁,
+      disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } }
+  let bound₂ : BeltLatchNodeState :=
+    { BeltLatchNodeState.init 2 2 with
+      nextEpoch := 1, inFlight := some rec₂,
+      disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } }
+  have hCert0 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p0 bound₁
       S₁ rec₁ echoes₁ burn₁ = true :=
     checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p0 S₁ rec₁ burn₁
       (by decide +kernel) rfl rfl rfl
-  have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1
-      { BeltLatchNodeState.init 2 2 with
-        nextEpoch := 1, inFlight := some rec₂,
-        disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } }
+  have hCert1 : checkLatchCertifiedBurn dep.H dep.MAC dep.macKeys dep.q p1 bound₂
       S₂ rec₂ echoes₂ burn₂ = true :=
     checkLatchCertifiedBurn_finRange dep.H dep.MAC dep.macKeys dep.q p1 S₂ rec₂ burn₂
       (by decide +kernel) rfl rfl rfl
@@ -2563,25 +2791,72 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
   have hMG2 : Custody.mintGuard (toyShamirPolicy r₂) 100 Custody.initial burn₂ = true := by
     unfold Custody.mintGuard
     rw [toyShamirPolicy_checkRound, Bool.and_true]; decide +kernel
-  let st := runShamirCustodyTrace dep (ShamirCustodyNetworkState.init 4 1 dep.height dep.maxWindow) trace
-  have hB1 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₁ =
-      .accepted { BeltLatchNodeState.init 2 2 with
-        nextEpoch := 1, inFlight := some rec₁,
-        disk := .persisted { nextEpoch := 1, inFlight := some rec₁ } } .fresh :=
+  have hB1 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₁ = .accepted bound₁ .fresh :=
     beltLatchBindStep_init22_epoch0 rec₁ rfl
-  have hB2 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₂ =
-      .accepted { BeltLatchNodeState.init 2 2 with
-        nextEpoch := 1, inFlight := some rec₂,
-        disk := .persisted { nextEpoch := 1, inFlight := some rec₂ } } .fresh :=
+  have hB2 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₂ = .accepted bound₂ .fresh :=
     beltLatchBindStep_init22_epoch0 rec₂ rfl
   have hC0 : dep.Corrupt.mem p0 = false := rfl
   have hC1 : dep.Corrupt.mem p1 = false := rfl
-  have hRelPairs : st.honestShareReleases.map (fun op => (op.party, op.intent)) =
+  let s0 := ShamirCustodyNetworkState.init 4 1 dep.height dep.maxWindow
+  let s1 := stepShamirCustody dep s0 (.belt (.honestBind p0 rec₁))
+  let s2 := stepShamirCustody dep s1 (.belt (.honestEmitEcho p0 p0))
+  let s3 := stepShamirCustody dep s2 (.certifiedMint p0 0 S₁ rec₁ echoes₁ burn₁)
+  let s4 := stepShamirCustody dep s3 (.releaseShare p0 1 r₁ 0)
+  let s5 := stepShamirCustody dep s4 (.belt (.honestBind p1 rec₂))
+  let s6 := stepShamirCustody dep s5 (.belt (.honestEmitEcho p1 p1))
+  let s7 := stepShamirCustody dep s6 (.certifiedMint p1 0 S₂ rec₂ echoes₂ burn₂)
+  let s8 := stepShamirCustody dep s7 (.releaseShare p1 1 r₂ 0)
+  show dep.H (intentCanonicalPayload r₁) ≠ dep.H (intentCanonicalPayload r₂) ∧
+    HonestQuorumReleasedIntent dep.Corrupt s8 S₁ r₁ ∧
+    HonestQuorumReleasedIntent dep.Corrupt s8 S₂ r₂
+  -- Custodian `p0`: bind, echo, certified mint under `S₁`, release for `r₁`.
+  have n1_0 : s1.beltNet.nodes p0 = bound₁ :=
+    stepBeltNetwork_honestBind_fresh_node dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s0.beltNet p0 rec₁ bound₁ hC0 hB1
+  have n1_1 : s1.beltNet.nodes p1 = BeltLatchNodeState.init 2 2 :=
+    stepBeltNetwork_honestBind_nodes_ne dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s0.beltNet p0 rec₁ p1 (by decide)
+  have e2 (j : Fin 4) : s2.beltNet.nodes j = s1.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s1.beltNet p0 p0 j
+  obtain ⟨m3_net, m3_rel, _, m3_v, m3_frame⟩ :=
+    stepShamirCustody_certifiedMint_ok dep s2 p0 0 S₁ rec₁ echoes₁ burn₁ hC0
+      (by rw [e2, n1_0]; exact hCert0)
+  obtain ⟨hPois1, hAnch1, hActive1⟩ := custody_mint_initial_ok (toyShamirPolicy r₁) 100 burn₁ hMG1
+  have v3_0 : s3.vaults p0 = Custody.mint (toyShamirPolicy r₁) 100 0 Custody.initial burn₁ := m3_v
+  obtain ⟨r4_net, _, r4_rel, r4_frame⟩ :=
+    stepShamirCustody_releaseShare_ok dep s3 p0 1 r₁ 0 hC0
+      (by rw [v3_0]; exact hPois1) (by rw [v3_0]; exact hAnch1) (by rw [v3_0]; exact hActive1)
+  -- Custodian `p1`: bind, echo, certified mint under `S₂`, release for `r₂`.
+  have n4_1 : s4.beltNet.nodes p1 = BeltLatchNodeState.init 2 2 := by
+    show (stepShamirCustody dep s3 (.releaseShare p0 1 r₁ 0)).beltNet.nodes p1 = _
+    rw [r4_net]
+    show (stepShamirCustody dep s2 (.certifiedMint p0 0 S₁ rec₁ echoes₁ burn₁)).beltNet.nodes p1 = _
+    rw [m3_net, e2]; exact n1_1
+  have n5_1 : s5.beltNet.nodes p1 = bound₂ :=
+    stepBeltNetwork_honestBind_fresh_node dep.H dep.MAC dep.macKeys dep.Corrupt dep.q
+      s4.beltNet p1 rec₂ bound₂ hC1 (by rw [n4_1]; exact hB2)
+  have e6 (j : Fin 4) : s6.beltNet.nodes j = s5.beltNet.nodes j :=
+    stepBeltNetwork_honestEmitEcho_nodes dep.H dep.MAC dep.macKeys dep.Corrupt dep.q s5.beltNet p1 p1 j
+  obtain ⟨_, m7_rel, _, m7_v, _⟩ :=
+    stepShamirCustody_certifiedMint_ok dep s6 p1 0 S₂ rec₂ echoes₂ burn₂ hC1
+      (by rw [e6, n5_1]; exact hCert1)
+  obtain ⟨hPois2, hAnch2, hActive2⟩ := custody_mint_initial_ok (toyShamirPolicy r₂) 100 burn₂ hMG2
+  have v6_1 : s6.vaults p1 = Custody.initial :=
+    (r4_frame p1 (by decide)).trans (m3_frame p1 (by decide))
+  have v7_1 : s7.vaults p1 = Custody.mint (toyShamirPolicy r₂) 100 0 Custody.initial burn₂ :=
+    m7_v.trans (congrArg (fun v => Custody.mint (toyShamirPolicy r₂) 100 0 v burn₂) v6_1)
+  obtain ⟨_, _, r8_rel, _⟩ :=
+    stepShamirCustody_releaseShare_ok dep s7 p1 1 r₂ 0 hC1
+      (by rw [v7_1]; exact hPois2) (by rw [v7_1]; exact hAnch2) (by rw [v7_1]; exact hActive2)
+  have hRelPairs : s8.honestShareReleases.map (fun op => (op.party, op.intent)) =
       [(p1, r₂), (p0, r₁)] := by
-    dsimp only [st, trace, runShamirCustodyTrace, stepShamirCustody,
-      ShamirCustodyNetworkState.init, stepBeltNetwork, BeltLatchNetworkState.init]
-    simp [p0, p1, hC0, hC1, hB1, hB2, beltLatchEmitEcho, hCert0, hCert1,
-      dep, polByParty, Custody.initial, Custody.mint, hMG1, hMG2, releaseShamirShareFromVault]
+    show (stepShamirCustody dep s7 (.releaseShare p1 1 r₂ 0)).honestShareReleases.map
+      (fun op => (op.party, op.intent)) = _
+    rw [r8_rel, m7_rel]
+    show (p1, r₂) :: (stepShamirCustody dep s3 (.releaseShare p0 1 r₁ 0)).honestShareReleases.map
+      (fun op => (op.party, op.intent)) = _
+    rw [r4_rel, m3_rel]
+    rfl
   refine ⟨hDigNe, ?_, ?_⟩
   · intro p hpS₁ hpHon
     have hpEq0 : p = p0 := by
@@ -2590,7 +2865,7 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
       · rfl
       · cases hpHon
     subst hpEq0
-    have hMemMap : (p0, r₁) ∈ st.honestShareReleases.map (fun op => (op.party, op.intent)) := by
+    have hMemMap : (p0, r₁) ∈ s8.honestShareReleases.map (fun op => (op.party, op.intent)) := by
       rw [hRelPairs]; exact .tail _ (.head _)
     obtain ⟨op, hOpMem, hPair⟩ := List.mem_map.mp hMemMap
     exact ⟨op, hOpMem, (Prod.mk.inj hPair).1, (Prod.mk.inj hPair).2⟩
@@ -2601,7 +2876,7 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
       · rfl
       · cases hpHon
     subst hpEq1
-    have hMemMap : (p1, r₂) ∈ st.honestShareReleases.map (fun op => (op.party, op.intent)) := by
+    have hMemMap : (p1, r₂) ∈ s8.honestShareReleases.map (fun op => (op.party, op.intent)) := by
       rw [hRelPairs]; exact .head _
     obtain ⟨op, hOpMem, hPair⟩ := List.mem_map.mp hMemMap
     exact ⟨op, hOpMem, (Prod.mk.inj hPair).1, (Prod.mk.inj hPair).2⟩
