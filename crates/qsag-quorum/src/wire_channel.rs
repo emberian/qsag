@@ -1436,4 +1436,83 @@ mod authenticated_tests {
             Err(TransportError::Closed { peer: 1 })
         );
     }
+
+    #[test]
+    fn sealed_open_rejects_every_truncation_and_extension_without_advancing_state() {
+        for encrypted in [false, true] {
+            let (mut endpoints, _) = InMemoryWireMesh::connect(2, [1; 32]);
+            let bob = endpoints.pop().unwrap();
+            let alice = endpoints.pop().unwrap();
+            let keys = vec![[3; 32]; 2];
+            let (mut alice, mut bob) = if encrypted {
+                (
+                    MacSealedWireChannel::new_encrypted(alice, [2; 32], keys.clone()).unwrap(),
+                    MacSealedWireChannel::new_encrypted(bob, [2; 32], keys).unwrap(),
+                )
+            } else {
+                (
+                    MacSealedWireChannel::new(alice, [2; 32], keys.clone()).unwrap(),
+                    MacSealedWireChannel::new(bob, [2; 32], keys).unwrap(),
+                )
+            };
+            let raw = alice.seal(1, 7, b"abc").unwrap();
+            for len in 0..raw.len() {
+                assert!(bob.open(0, 7, &raw[..len]).is_err(), "prefix {len} enc={encrypted}");
+            }
+            for extra in 1..=33 {
+                let mut longer = raw.clone();
+                longer.resize(raw.len() + extra, 0);
+                assert!(bob.open(0, 7, &longer).is_err(), "extended {extra} enc={encrypted}");
+            }
+            assert_eq!(bob.sequencer.recv_seq[0], 0);
+            assert_eq!(bob.open(0, 7, &raw).unwrap(), b"abc");
+        }
+    }
+
+    /// A peer holding the link key can MAC any bytes: the strict decode after the MAC must
+    /// still refuse lying length fields and an empty body without panicking or advancing.
+    #[test]
+    fn authenticated_but_malformed_inner_frames_are_refused_after_the_mac() {
+        let (mut endpoints, _) = InMemoryWireMesh::connect(2, [1; 32]);
+        let bob = endpoints.pop().unwrap();
+        let alice = endpoints.pop().unwrap();
+        let mut alice = MacSealedWireChannel::new(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut bob = MacSealedWireChannel::new(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let honest = alice.seal(1, 7, b"abc").unwrap();
+        let frame = &honest[..honest.len() - 32];
+        let remac = |inner: &[u8]| {
+            let mut mac_key = derive_mac_subkey(&alice.keys[1]);
+            let mut out = inner.to_vec();
+            out.extend_from_slice(&wire_mac(&mac_key, inner));
+            qsag_core::wipe::wipe_bytes32(&mut mac_key);
+            out
+        };
+        for lie in [0u32, 1, 3, 5, u32::MAX, MAX_FRAME_PAYLOAD as u32 + 1] {
+            let mut inner = frame.to_vec();
+            inner[52..56].copy_from_slice(&lie.to_be_bytes());
+            assert_eq!(bob.open(0, 7, &remac(&inner)), Err(TransportError::Malformed));
+        }
+        let header = decode_frame(frame).unwrap().0;
+        let empty_body = encode_frame(&header, &[]).unwrap();
+        assert!(bob.open(0, 7, &remac(&empty_body)).is_err());
+        assert_eq!(bob.sequencer.recv_seq[0], 0);
+        assert_eq!(bob.open(0, 7, &honest).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn header_decoders_never_panic_on_arbitrary_prefixes() {
+        let mut x = 0x9E37_79B9u32;
+        let mut garbage = [0u8; FRAME_HEADER_BYTES + 40];
+        for b in garbage.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *b = x as u8;
+        }
+        garbage[..4].copy_from_slice(&FRAME_MAGIC);
+        for len in 0..=garbage.len() {
+            let _ = decode_header(&garbage[..len]);
+            assert!(decode_frame(&garbage[..len]).is_err(), "len={len}");
+        }
+    }
 }

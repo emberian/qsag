@@ -18,9 +18,16 @@ extern crate alloc;
 
 pub mod dzk;
 pub mod hash;
+pub mod hem_quorum;
 pub mod party_node;
 pub mod quorum_jorts;
 pub mod wire_channel;
+
+pub use hem_quorum::{
+    HemCommitteePartitionedQuorum, HemDynamicShamirQuorum, HemJortsPublicKey, HemJortsSignature,
+    HemQuorumError, HemQuorumPublicDirectory, HemShamirCustodianShare, HemSpdzSeedQuorum,
+    sign_from_shamir_share_slice,
+};
 
 #[cfg(feature = "std")]
 pub mod durable_custody;
