@@ -111,6 +111,61 @@ theorem modPoly2Hom_C_ne_zero (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 �
     ModMonic.modInl_inj (monicFY E hPrim hDeg) h0
   exact hc (Frac.of_injective (h1.trans (Frac.of (D := UPoly E_fld)).map_zero.symm))
 
+/-- The kernel of the curve projection is exactly the primitive principal ideal. -/
+theorem modPoly2Hom_eq_zero_iff (E : Poly2 E_fld) (hPrim : IsPrimY E)
+    (hDeg : 1 ≤ E.natDeg) (P : Poly2 E_fld) :
+    (modPoly2Hom E hPrim hDeg).toFun P = zero ↔ ∃ Q, P = mul E Q := by
+  constructor
+  · intro h
+    let M := monicFY E hPrim hDeg
+    have hrem : remM M (liftFY.toFun P) = zero := congrArg ModMonic.rep h
+    have hspec := (quotM_remM_spec M (liftFY.toFun P)).1
+    rw [hrem, LawfulCommRing.add_zero] at hspec
+    apply primY_dvd_of_dvd_FY hPrim
+    refine ⟨mul (quotM M (liftFY.toFun P)) (C (LawfulField.inv (liftFY.toFun E).lead)), ?_⟩
+    conv => lhs; rw [hspec]
+    change mul (quotM M (liftFY.toFun P))
+        (mul (C (LawfulField.inv (liftFY.toFun E).lead)) (liftFY.toFun E)) = _
+    constructive_ring
+  · rintro ⟨Q, hQ⟩
+    rw [hQ, RingHom.map_mul, modPoly2Hom_self, LawfulCommRing.zero_mul]
+
+/-- A cleared Bezout identity supplies an actual inverse in the curve quotient. -/
+theorem modPoly2Hom_unit_of_coprimeZ (E : Poly2 E_fld) (hPrim : IsPrimY E)
+    (hDeg : 1 ≤ E.natDeg) {P : Poly2 E_fld} (hCop : CoprimeZ E P) :
+    ∃ x_inv, mul x_inv ((modPoly2Hom E hPrim hDeg).toFun P) = one := by
+  obtain ⟨u, v, c, hc, hBez⟩ := hCop
+  let M := monicFY E hPrim hDeg
+  let φ := modPoly2Hom E hPrim hDeg
+  let cF := (Frac.of (D := UPoly E_fld)).toFun c
+  have hcF : cF ≠ zero := fun e =>
+    hc (Frac.of_injective (e.trans (Frac.of (D := UPoly E_fld)).map_zero.symm))
+  have hApp := congrArg φ.toFun hBez
+  rw [RingHom.map_add, RingHom.map_mul, RingHom.map_mul, modPoly2Hom_self,
+    LawfulCommRing.mul_zero, LawfulCommRing.zero_add] at hApp
+  have hcInl : φ.toFun (C c) = (ModMonic.modInl M).toFun cF := by
+    show (ModMonic.modQuotHom M).toFun (liftFY.toFun (C c)) = _
+    rw [mapHom_C]
+    rfl
+  refine ⟨mul ((ModMonic.modInl M).toFun (LawfulField.inv cF)) (φ.toFun v), ?_⟩
+  rw [LawfulCommRing.mul_assoc, hApp, hcInl, ← RingHom.map_mul,
+    LawfulCommRing.mul_comm (LawfulField.inv cF) cF,
+    LawfulField.mul_inv_cancel hcF, RingHom.map_one]
+
+/-- A polynomial constraint at a quotient root is equivalent to divisibility of its
+cleared polynomial pullback, whenever its denominator is coprime to the curve. -/
+theorem curve_pullback_dvd_iff (E : Poly2 E_fld) (hPrim : IsPrimY E)
+    (hDeg : 1 ≤ E.natDeg) (a b : Poly2 E_fld)
+    (z : ModMonic (monicFY E hPrim hDeg))
+    (hcoord : (modPoly2Hom E hPrim hDeg).toFun a =
+      mul z ((modPoly2Hom E hPrim hDeg).toFun b))
+    (hCop : CoprimeZ E b) (P : UPoly (Poly2 E_fld)) :
+    (∃ Q, homEvalCoeffs a b P.coeffs = mul E Q) ↔
+      eval₂ (modPoly2Hom E hPrim hDeg) z P = zero := by
+  obtain ⟨b_inv, hunit⟩ := modPoly2Hom_unit_of_coprimeZ E hPrim hDeg hCop
+  rw [← modPoly2Hom_eq_zero_iff E hPrim hDeg]
+  exact homEvalCoeffs_map_zero_iff (modPoly2Hom E hPrim hDeg) a b z b_inv hcoord hunit P
+
 /-- Dynamic unit-or-split oracle on `ModMonic (monicFY E ...)`: every element `x` is `0`, a unit,
     or yields a proper `Y`-primitive factorization `E = mul E₁ E₂`. -/
 theorem modUnitOrSplit (E : Poly2 E_fld) (hPrim : IsPrimY E) (hDeg : 1 ≤ E.natDeg)
@@ -296,7 +351,7 @@ def embedUZ : RingHom (Poly2 E_fld) (UPoly (Poly2 E_fld)) :=
     `g₁ := sylResDeriv h_C H₀ (embedUZ C₁) P₀ 1`, OR `CoprimeZ E_j g₁` AND `(C₁, P₀)` has an
     explicit common root `ζ : ModMonic (monicFY E_j ...)`! -/
 theorem curve_leaf_root_decomp {h_C H₀ : Nat} {C₁ : Poly2 E_fld} {P₀ : UPoly (Poly2 E_fld)}
-    (_hhC : 1 ≤ h_C) (hC₁deg : C₁.natDeg ≤ h_C) (hC₁mon : coeffAt C₁.coeffs h_C = one)
+    (hC₁deg : C₁.natDeg ≤ h_C) (hC₁mon : coeffAt C₁.coeffs h_C = one)
     (hP₀deg : P₀.natDeg ≤ H₀) :
     let R_res := sylRes h_C H₀ (embedUZ.toFun C₁) P₀
     let g₁ := sylResDeriv h_C H₀ (embedUZ.toFun C₁) P₀ one
@@ -503,10 +558,84 @@ theorem tooth_natDeg_pos_needs_primY :
     ∃ E : Poly2 Goldilocks, E ≠ zero ∧ 1 ≤ tdeg E ∧ ¬ (1 ≤ E.natDeg) :=
   ⟨C X, by decide +kernel, by decide +kernel, by decide +kernel⟩
 
+/-- The curve `W = 0` divides `Res_Z(Z, W) = W`, while its derivative resultant is `1`.
+This exercises the common-root branch with a nonzero resultant and a nonempty curve. -/
+theorem inhabited_curve_leaf_root_decomp :
+    ∃ (C₁ E : Poly2 Goldilocks) (P₀ : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ 1 ∧ coeffAt C₁.coeffs 1 = one ∧ P₀.natDeg ≤ 0 ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      (∃ Q_res, sylRes 1 0 (embedUZ.toFun C₁) P₀ = mul E Q_res) ∧
+      sylRes 1 0 (embedUZ.toFun C₁) P₀ ≠ zero ∧
+      sylResDeriv 1 0 (embedUZ.toFun C₁) P₀ one = one := by
+  refine ⟨X, X, C X, by decide +kernel, by decide +kernel, by decide +kernel,
+    isPrimY_monic_deg1_loc zero, by decide +kernel, ⟨one, by decide +kernel⟩,
+    by decide +kernel, by decide +kernel⟩
+
+/-- Applying the decomposition to `Res_Z(Z,W)` produces an actual common-root leaf. -/
+theorem inhabited_curve_common_root :
+    ∃ (E : Poly2 Goldilocks) (hP : IsPrimY E) (hD : 1 ≤ E.natDeg)
+      (ζ : ModMonic (monicFY E hP hD)),
+      ((mapHom (modPoly2Hom E hP hD)).toFun (embedUZ.toFun (X : Poly2 Goldilocks))).eval ζ = zero ∧
+      ((mapHom (modPoly2Hom E hP hD)).toFun (C (X : Poly2 Goldilocks))).eval ζ = zero := by
+  obtain ⟨Es, _, hCover, hLeaves⟩ :=
+    curve_leaf_root_decomp (h_C := 1) (H₀ := 0) (C₁ := (X : Poly2 Goldilocks))
+      (P₀ := C X) (by decide +kernel) (by decide +kernel) (by decide +kernel)
+      X (isPrimY_monic_deg1_loc zero) (by decide +kernel) ⟨one, by decide +kernel⟩
+  obtain ⟨E, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hP, hD, hDiv | hRoot⟩ := hLeaves E hMem
+  · obtain ⟨Q, hQ⟩ := hDiv
+    have hDeriv : sylResDeriv 1 0 (embedUZ.toFun (X : Poly2 Goldilocks)) (C X) one = one :=
+      by decide +kernel
+    rw [hDeriv] at hQ
+    have hQne : Q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQ, e, LawfulCommRing.mul_zero])
+    have hDegree := UPoly.natDeg_mul hP.1 hQne
+    rw [← hQ, natDeg_one] at hDegree
+    exfalso
+    omega
+  · obtain ⟨ζ, hC, hP₀⟩ := hRoot.2
+    exact ⟨E, hP, hD, ζ, hC, hP₀⟩
+
+/-- Without resultant divisibility, `C₁=Z`, `P₀=1`, and the curve `W=0` cannot
+have the asserted decomposition: neither a derivative-divisor leaf nor a common root exists. -/
+theorem tooth_curve_leaf_root_decomp_needs_divisibility :
+    ∃ (C₁ E : Poly2 Goldilocks) (P₀ : UPoly (Poly2 Goldilocks)),
+      C₁.natDeg ≤ 1 ∧ coeffAt C₁.coeffs 1 = one ∧ P₀.natDeg ≤ 0 ∧
+      IsPrimY E ∧ 1 ≤ tdeg E ∧
+      ¬ ∃ Es : List (Poly2 Goldilocks),
+        (Es.map tdeg).sum = tdeg E ∧
+        (∀ u w, E.eval2 u w = zero → ∃ Ej ∈ Es, Ej.eval2 u w = zero) ∧
+        ∀ Ej ∈ Es, ∃ (hPj : IsPrimY Ej) (hDj : 1 ≤ Ej.natDeg),
+          (∃ Qg, sylResDeriv 1 0 (embedUZ.toFun C₁) P₀ one = mul Ej Qg) ∨
+          (CoprimeZ Ej (sylResDeriv 1 0 (embedUZ.toFun C₁) P₀ one) ∧
+            ∃ ζ : ModMonic (monicFY Ej hPj hDj),
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun (embedUZ.toFun C₁)).eval ζ = zero ∧
+              ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀).eval ζ = zero) := by
+  refine ⟨X, X, one, by decide +kernel, by decide +kernel, by decide +kernel,
+    isPrimY_monic_deg1_loc zero, by decide +kernel, ?_⟩
+  rintro ⟨Es, _, hCover, hLeaves⟩
+  obtain ⟨E, hMem, _⟩ := hCover zero zero (by decide +kernel)
+  obtain ⟨hP, hD, hDiv | hRoot⟩ := hLeaves E hMem
+  · obtain ⟨Q, hQ⟩ := hDiv
+    have hDeriv : sylResDeriv 1 0 (embedUZ.toFun (X : Poly2 Goldilocks)) one one = one :=
+      by decide +kernel
+    rw [hDeriv] at hQ
+    have hQne : Q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQ, e, LawfulCommRing.mul_zero])
+    have hDegree := UPoly.natDeg_mul hP.1 hQne
+    rw [← hQ, natDeg_one] at hDegree
+    omega
+  · obtain ⟨ζ, _, hP₀⟩ := hRoot.2
+    rw [RingHom.map_one, one_eq_C, eval_C] at hP₀
+    exact NontrivialRing.one_ne_zero hP₀
+
+#verify_constructive SylElim.modPoly2Hom_eq_zero_iff SylElim.modPoly2Hom_unit_of_coprimeZ SylElim.curve_pullback_dvd_iff
 #verify_constructive SylElim.primY_natDeg_pos SylElim.modUnitOrSplit SylElim.d5_xgcd_mod SylElim.curve_leaf_root_decomp
 #verify_constructive inhabited_primY_natDeg_pos tooth_natDeg_pos_needs_primY
 #tooth_pair SylElim.primY_natDeg_pos vs tooth_natDeg_pos_needs_primY
 #verify_inhabited SylElim.primY_natDeg_pos inhabited_primY_natDeg_pos
+#verify_constructive inhabited_curve_leaf_root_decomp inhabited_curve_common_root
+#verify_inhabited SylElim.curve_leaf_root_decomp inhabited_curve_leaf_root_decomp
+#verify_constructive tooth_curve_leaf_root_decomp_needs_divisibility
+#tooth_pair SylElim.curve_leaf_root_decomp vs tooth_curve_leaf_root_decomp_needs_divisibility
 
 end ShearedCurveGcdTests
 end Qsag
