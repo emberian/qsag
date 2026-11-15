@@ -484,6 +484,7 @@ dependencies = [
  "qsag-core",
  "qsag-cred",
  "qsag-fts",
+ "qsag-quorum",
  "sha2",
  "sha3",
  "tiny-keccak",
@@ -496,6 +497,16 @@ dependencies = [
  "qsag-accel",
  "qsag-addr",
  "qsag-asm",
+ "qsag-fts",
+ "qsag-verified",
+]
+
+[[package]]
+name = "qsag-quorum"
+version = "0.1.0"
+dependencies = [
+ "qsag-asm",
+ "qsag-core",
  "qsag-fts",
  "qsag-verified",
 ]

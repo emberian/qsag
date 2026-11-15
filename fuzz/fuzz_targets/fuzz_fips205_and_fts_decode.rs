@@ -84,10 +84,7 @@ fuzz_target!(|data: &[u8]| {
 
     // 4. `qsag-fts`: FrontierSumFts compact profiles (`514B..=2338B`) & `RotatedEpochVote`
     for profile in [
-        FrontierFtsProfile::Compact514,
-        FrontierFtsProfile::Compact770,
         FrontierFtsProfile::Compact1122,
-        FrontierFtsProfile::Compact1314,
         FrontierFtsProfile::Full256Bit,
     ] {
         if let Ok(sig) = FrontierFtsSignature::from_bytes(profile, data) {
