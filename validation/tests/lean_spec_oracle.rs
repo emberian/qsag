@@ -36,10 +36,11 @@ use qsag_core::fips205::{
     split_digest_indices, try_wots_base16_digits_and_csum,
 };
 use qsag_core::sponge::keccak::{cshake256_xof, keccak_f1600, shake256_xof};
+use qsag_core::poseidon2_mpc::hem_poseidon2_compress12_ff;
 use qsag_core::sponge::poseidon2::{poseidon2_hash32, poseidon2_perm12};
 use qsag_external_validation::{
-    build_poseidon2_inverse_matrices, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul,
-    gfni_affine_byte, goldilocks_mul_u128_ref, poseidon2_perm12_inv_with_mats,
+    GOLDILOCKS_P, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul, gfni_affine_byte,
+    goldilocks_mul_u128_ref, p3_ext4_inv, p3_ext4_mul, p3_ext4_pow, p3_gl, poseidon2_ref,
 };
 use qsag_migrate::{
     BlsG1Point, FqPallas, FrBls381, PallasPoint, ScalarGroup, SpendingScalar,
@@ -56,6 +57,7 @@ const EMBEDDED_EXTERNAL_ORACLE_JSON: &str =
     include_str!("fixtures/lean_external_oracle_vectors.json");
 const EMBEDDED_CROSS_KAT_JSONL: &str = include_str!("fixtures/lean_cross_kat.jsonl");
 const EMBEDDED_KAT_SNAPSHOT_JSON: &str = include_str!("fixtures/lean_kat_snapshot.json");
+const WORKSPACE_KAT_VECTORS_JSON: &str = include_str!("../../tests/kat_vectors.json");
 
 #[derive(Deserialize)]
 struct ExternalOracleRoot {
@@ -224,70 +226,6 @@ fn qsag_sha3_512(input: &[u8]) -> [u8; 64] {
     out
 }
 
-#[inline]
-fn p3_gl(raw: u64) -> P3Goldilocks {
-    P3Goldilocks::from_canonical_u64(raw % 0xFFFF_FFFF_0000_0001)
-}
-
-/// Convert `qsag_agg::GoldilocksExt4` (`[c00, c01, c10, c11]` where $v^2 = u$, $u^2 = 7$)
-/// into a pair of `p3_goldilocks` quadratic extension elements `(c0, c1)` representing $c_0 + c_1 v$,
-/// and multiply `(a0 + a1 v)(b0 + b1 v) = (a0*b0 + u*a1*b1) + (a0*b1 + a1*b0)v` using Plonky3!
-fn p3_ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
-    let a0 = P3Ext2::from_base_slice(&[
-        P3Goldilocks::from_canonical_u64(a[0]),
-        P3Goldilocks::from_canonical_u64(a[1]),
-    ]);
-    let a1 = P3Ext2::from_base_slice(&[
-        P3Goldilocks::from_canonical_u64(a[2]),
-        P3Goldilocks::from_canonical_u64(a[3]),
-    ]);
-    let b0 = P3Ext2::from_base_slice(&[
-        P3Goldilocks::from_canonical_u64(b[0]),
-        P3Goldilocks::from_canonical_u64(b[1]),
-    ]);
-    let b1 = P3Ext2::from_base_slice(&[
-        P3Goldilocks::from_canonical_u64(b[2]),
-        P3Goldilocks::from_canonical_u64(b[3]),
-    ]);
-    let c0 = a0 * b0 + u * a1 * b1;
-    let c1 = a0 * b1 + a1 * b0;
-    let c0s: &[P3Goldilocks] = c0.as_base_slice();
-    let c1s: &[P3Goldilocks] = c1.as_base_slice();
-    [
-        c0s[0].as_canonical_u64(),
-        c0s[1].as_canonical_u64(),
-        c1s[0].as_canonical_u64(),
-        c1s[1].as_canonical_u64(),
-    ]
-}
-
-fn p3_ext4_inv(a: [u64; 4]) -> [u64; 4] {
-    let u = P3Ext2::from_base_slice(&[P3Goldilocks::zero(), P3Goldilocks::one()]);
-    let a0 = P3Ext2::from_base_slice(&[
-        P3Goldilocks::from_canonical_u64(a[0]),
-        P3Goldilocks::from_canonical_u64(a[1]),
-    ]);
-    let a1 = P3Ext2::from_base_slice(&[
-        P3Goldilocks::from_canonical_u64(a[2]),
-        P3Goldilocks::from_canonical_u64(a[3]),
-    ]);
-    let norm = a0 * a0 - u * a1 * a1;
-    let Some(norm_inv) = norm.try_inverse() else {
-        return [0; 4];
-    };
-    let c0 = a0 * norm_inv;
-    let c1 = -(a1 * norm_inv);
-    let c0s: &[P3Goldilocks] = c0.as_base_slice();
-    let c1s: &[P3Goldilocks] = c1.as_base_slice();
-    [
-        c0s[0].as_canonical_u64(),
-        c0s[1].as_canonical_u64(),
-        c1s[0].as_canonical_u64(),
-        c1s[1].as_canonical_u64(),
-    ]
-}
-
 #[test]
 fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
     let oracle = load_external_oracle();
@@ -347,40 +285,36 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
             lean_frob
         );
 
-        // Plonky3 independent check (including verifying Frobenius == x^p in F_{p^4}!)
+        // Plonky3 independent check, with Frobenius as `x^p` in `F_{p^4}`.
         assert_eq!(p3_ext4_mul(x, y), lean_mul);
         assert_eq!(p3_ext4_inv(x), lean_inv);
+        assert_eq!(p3_ext4_pow(x, GOLDILOCKS_P), lean_frob);
     }
 
-    // 3. Poseidon2 Width-12 forward + inverse permutation + sponge hash32:
-    //    Lean <-> qsag-core <-> Gauss-Jordan independent matrix inverse!
-    let (me_inv, mi_inv) = build_poseidon2_inverse_matrices();
+    // 3. Canonical Poseidon2 width-12 permutation, its inverse, and the `hash32` sponge:
+    //    Lean <-> qsag-core <-> the dense-matrix reference.
+    assert!(!oracle.poseidon2_12.is_empty() && !oracle.poseidon2_hash32.is_empty());
     for row in &oracle.poseidon2_12 {
         let inp: [u64; 12] = core::array::from_fn(|i| row.input[i].parse().unwrap());
         let lean_perm: [u64; 12] = core::array::from_fn(|i| row.perm[i].parse().unwrap());
         let lean_inv: [u64; 12] = core::array::from_fn(|i| row.inv[i].parse().unwrap());
+        let canon_in = inp.map(|v| v % GOLDILOCKS_P);
+
+        assert_eq!(poseidon2_ref::perm12(&inp), lean_perm);
+        assert_eq!(poseidon2_ref::perm12_inv(&inp), lean_inv);
 
         let mut st = inp.map(CoreGoldilocks::from_u64_reduced);
         poseidon2_perm12(&mut st);
         assert_eq!(st.map(|x| x.to_canonical_u64()), lean_perm);
 
-        // Verify Lean's `poseidon2Perm12Inv(inp)` matches our Gauss-Jordan matrix inverse AND
-        // satisfies `poseidon2_perm12(lean_inv) == inp`!
-        let mut st_inv = inp.map(CoreGoldilocks::from_u64_reduced);
-        poseidon2_perm12_inv_with_mats(&mut st_inv, &me_inv, &mi_inv);
-        assert_eq!(st_inv.map(|x| x.to_canonical_u64()), lean_inv);
-
         let mut roundtrip = lean_inv.map(CoreGoldilocks::from_u64_reduced);
         poseidon2_perm12(&mut roundtrip);
-        assert_eq!(
-            roundtrip.map(|x| x.to_canonical_u64()),
-            inp.map(|v| CoreGoldilocks::from_u64_reduced(v).to_canonical_u64())
-        );
+        assert_eq!(roundtrip.map(|x| x.to_canonical_u64()), canon_in);
     }
     for row in &oracle.poseidon2_hash32 {
         let msg = hex::decode(&row.msg_hex).unwrap();
-        let expected = hex::decode(&row.poseidon2_hash32_hex).unwrap();
-        assert_eq!(poseidon2_hash32(&msg).as_slice(), expected.as_slice());
+        assert_eq!(hex::encode(poseidon2_ref::hash32(&msg)), row.poseidon2_hash32_hex);
+        assert_eq!(hex::encode(poseidon2_hash32(&msg)), row.poseidon2_hash32_hex);
     }
 
     // 4. Sponges (`SHA3-256`, `SHA3-512`, `Keccak-256`, `SHAKE256`, `cSHAKE256`):
@@ -922,6 +856,9 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                 poseidon2_perm12(&mut st);
                 let got = st.map(|x| x.to_canonical_u64().to_string()).join(",");
                 assert_eq!(got, *expected);
+                let seq: [u64; 12] = core::array::from_fn(|i| n + i as u64);
+                let reference = poseidon2_ref::perm12(&seq).map(|x| x.to_string()).join(",");
+                assert_eq!(reference, *expected);
             }
             "compress" | "tree" => {
                 let n: u64 = parts[1].parse().unwrap();
@@ -932,6 +869,16 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                 let t: [AggGoldilocks; 4] =
                     core::array::from_fn(|i| AggGoldilocks::from_u64_reduced(n + 8 + i as u64));
                 let z = if parts[0] == "compress" {
+                    let [rl, rr, rt]: [[u64; 4]; 3] =
+                        core::array::from_fn(|b| core::array::from_fn(|i| n + (4 * b + i) as u64));
+                    let reference = poseidon2_ref::compress(rl, rr, rt);
+                    assert_eq!(reference.map(|x| x.to_string()).join(","), *expected);
+                    let core_z = hem_poseidon2_compress12_ff(
+                        rl.map(CoreGoldilocks::from_u64_reduced),
+                        rr.map(CoreGoldilocks::from_u64_reduced),
+                        rt.map(CoreGoldilocks::from_u64_reduced),
+                    );
+                    assert_eq!(core_z.map(|x| x.to_canonical_u64()), reference);
                     qsag_agg::sponge::poseidon2_compress12_ff(l, r, t)
                 } else {
                     qsag_agg::sig::merkle_node_hash(
@@ -1007,9 +954,39 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
     }
     assert_eq!(count, 277, "expected all 277 Lean CrossKat records");
 
-    // Also verify the canonical `qsag-kat` snapshot (`lean_kat_snapshot.json`) against upstream `fips205`!
+    // The `qsag-kat` snapshot is the same artifact as the workspace `tests/kat_vectors.json`.
+    assert_eq!(
+        EMBEDDED_KAT_SNAPSHOT_JSON, WORKSPACE_KAT_VECTORS_JSON,
+        "tests/kat_vectors.json drifted from validation/tests/fixtures/lean_kat_snapshot.json"
+    );
     let snap: serde_json::Value =
         serde_json::from_str(EMBEDDED_KAT_SNAPSHOT_JSON).expect("parse lean_kat_snapshot.json");
+
+    // Its Poseidon2 section, against the dense-matrix reference and `qsag-core`.
+    let p2 = &snap["poseidon2_goldilocks_12"];
+    let lanes = |key: &str| -> [u64; 12] {
+        let arr = p2[key].as_array().unwrap();
+        core::array::from_fn(|i| arr[i].as_str().unwrap().parse().unwrap())
+    };
+    let seq: [u64; 12] = core::array::from_fn(|i| i as u64);
+    for (key, input) in [("perm_zero", [0u64; 12]), ("perm_seq_0_11", seq)] {
+        assert_eq!(poseidon2_ref::perm12(&input), lanes(key), "{key}");
+        let mut st = input.map(CoreGoldilocks::from_u64_reduced);
+        poseidon2_perm12(&mut st);
+        assert_eq!(st.map(|x| x.to_canonical_u64()), lanes(key), "{key}");
+    }
+    for (key, msg) in [
+        ("hash32_empty", &b""[..]),
+        ("hash32_00", &[0x00]),
+        ("hash32_010203", &[0x01, 0x02, 0x03]),
+        ("hash32_label", b"qsag-poseidon2-kat"),
+    ] {
+        let expected = p2[key].as_str().unwrap();
+        assert_eq!(hex::encode(poseidon2_ref::hash32(msg)), expected, "{key}");
+        assert_eq!(hex::encode(poseidon2_hash32(msg)), expected, "{key}");
+    }
+
+    // And its FIPS 205 section, against upstream `fips205`.
     let f = &snap["fips205_slh_dsa_shake_128f"];
     let sk_seed: [u8; 16] = hex::decode(f["sk_seed_hex"].as_str().unwrap())
         .unwrap()

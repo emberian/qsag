@@ -11,8 +11,8 @@ use p3_goldilocks::Goldilocks as P3Goldilocks;
 use polyval::Polyval;
 use proptest::prelude::*;
 use qsag_agg::field::{
-    GOLDILOCKS_PRIME, Goldilocks as AggGl, GoldilocksExt2, GoldilocksExt4, TWO_ADIC_ROOT_OF_UNITY_32,
-    intt_goldilocks, ntt_goldilocks,
+    GOLDILOCKS_PRIME, Goldilocks as AggGl, GoldilocksExt2, GoldilocksExt2Ops, GoldilocksExt4,
+    TWO_ADIC_ROOT_OF_UNITY_32, intt_goldilocks, ntt_goldilocks,
 };
 use qsag_asm::{
     GFNI_MAT_POLY_TO_T3, GFNI_MAT_T3_TO_POLY, SimdBackend, detect_backend, gf2_128_dot_with_backend,
@@ -25,18 +25,14 @@ use qsag_asm::{
 };
 use qsag_core::field::goldilocks::Goldilocks as CoreGl;
 use qsag_core::field::tower::{Tower128, TowerGf256, eval_poly_gf256, lagrange_weights_zero_gf256};
-use qsag_core::sponge::poseidon2::poseidon2_perm12;
-use qsag_external_validation::{
-    build_poseidon2_inverse_matrices, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul,
-    gfni_affine_byte, goldilocks_mul_u128_ref, poseidon2_perm12_inv_with_mats,
+use qsag_core::sponge::poseidon2::{
+    poseidon2_apply_me, poseidon2_apply_mi, poseidon2_const_at, poseidon2_perm12,
 };
-
-const ALL_BACKENDS: [SimdBackend; 4] = [
-    SimdBackend::Portable,
-    SimdBackend::X86Avx2Pclmul,
-    SimdBackend::X86Avx2GfniVpclmul,
-    SimdBackend::X86Avx512GfniVpclmul,
-];
+use qsag_external_validation::{
+    ALL_SIMD_BACKENDS, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul,
+    gfni_affine_byte, goldilocks_mul_u128_ref, p3_ext4_inv, p3_ext4_mul, p3_ext4_pow,
+    poseidon2_ref,
+};
 
 const ODD_SIMD_LENGTHS: &[usize] = &[0, 1, 2, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 511, 513];
 
@@ -80,7 +76,7 @@ fn gf256_wiedemann_t3_to_aes_poly11b_isomorphism_exhaustive_65536() {
         }
     }
 
-    for backend in ALL_BACKENDS {
+    for backend in ALL_SIMD_BACKENDS {
         let mut dst = vec![0u8; 65536];
         gf256_shamir_mul_with_backend(&mut dst, &lhs, &rhs, backend);
         assert_eq!(dst, expected, "65,536 exhaustive GF(256) mul mismatch on {backend:?}");
@@ -117,7 +113,7 @@ fn gf256_simd_odd_tail_lengths_sweep() {
             })
             .collect();
 
-        for backend in ALL_BACKENDS {
+        for backend in ALL_SIMD_BACKENDS {
             let mut got_mul = vec![0xFFu8; len];
             gf256_shamir_mul_with_backend(&mut got_mul, &a, &b, backend);
             assert_eq!(got_mul, exp_mul, "gf256 mul len={len} backend={backend:?}");
@@ -309,7 +305,7 @@ proptest! {
             exp_t7_1 ^= Tower128(l[1]).mul(Tower128(r[1])).0;
         }
 
-        for backend in ALL_BACKENDS {
+        for backend in ALL_SIMD_BACKENDS {
             let got_poly = tower128_bdoz_2lane_poly_mac_with_backend(&lhs_pairs, &rhs_pairs, backend);
             prop_assert_eq!(got_poly, [exp_poly0, exp_poly1]);
 
@@ -324,7 +320,7 @@ proptest! {
         let vec_b_limbs: Vec<[u64; 2]> = vec_b.iter().map(|&x| [x as u64, (x >> 64) as u64]).collect();
         let init_acc = 0x1234_5678_9ABC_DEF0_FEDC_BA98_7654_3210u128;
         let exp_acc = init_acc ^ exp_poly0;
-        for backend in ALL_BACKENDS {
+        for backend in ALL_SIMD_BACKENDS {
             prop_assert_eq!(gf2_128_dot_with_backend(&vec_a, &vec_b, backend), exp_poly0);
             let mut acc_limbs = [init_acc as u64, (init_acc >> 64) as u64];
             gf2_128_mul_acc_batch_with_backend(&mut acc_limbs, &vec_a_limbs, &vec_b_limbs, backend);
@@ -389,7 +385,7 @@ fn goldilocks_edge_grid_and_ntt_against_plonky3() {
             assert_eq!((core_a * core_b).to_canonical_u64(), exp_mul);
             assert_eq!(agg_a.inv().to_canonical_u64(), exp_inv);
 
-            for backend in ALL_BACKENDS {
+            for backend in ALL_SIMD_BACKENDS {
                 assert_eq!(goldilocks_mul_ct_with_backend(ca, cb, backend), exp_mul);
                 assert_eq!(goldilocks_pow7_ct_with_backend(ca, backend), exp_pow7);
             }
@@ -426,54 +422,6 @@ fn goldilocks_edge_grid_and_ntt_against_plonky3() {
         let qsag_back_u64: Vec<u64> = qsag_vec.iter().map(|x| x.to_canonical_u64()).collect();
         assert_eq!(qsag_back_u64, coeffs_u64, "Radix-2 INTT roundtrip mismatch at log_n={log_n}");
     }
-}
-
-/// Reference multiplication in $\mathbb{F}_p[X]/(X^4 - 7)$ over Plonky3 `P3Goldilocks`.
-fn p3_quartic_mul(a: [P3Goldilocks; 4], b: [P3Goldilocks; 4]) -> [P3Goldilocks; 4] {
-    let w = P3Goldilocks::from_canonical_u64(7);
-    let mut out = [P3Goldilocks::zero(); 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            let term = a[i] * b[j];
-            if i + j < 4 {
-                out[i + j] += term;
-            } else {
-                out[i + j - 4] += term * w;
-            }
-        }
-    }
-    out
-}
-
-fn p3_quartic_pow(mut base: [P3Goldilocks; 4], mut exp: u64) -> [P3Goldilocks; 4] {
-    let mut acc = [
-        P3Goldilocks::one(),
-        P3Goldilocks::zero(),
-        P3Goldilocks::zero(),
-        P3Goldilocks::zero(),
-    ];
-    while exp > 0 {
-        if (exp & 1) == 1 {
-            acc = p3_quartic_mul(acc, base);
-        }
-        base = p3_quartic_mul(base, base);
-        exp >>= 1;
-    }
-    acc
-}
-
-/// Isomorphism $\iota : \text{GoldilocksExt4} = \mathbb{F}_{p^2}[v]/(v^2 - u) \xrightarrow{\sim} \mathbb{F}_p[X]/(X^4 - 7)$:
-/// $(c_{00} + c_{01} u) + (c_{10} + c_{11} u) v \mapsto c_{00} + c_{10} X + c_{01} X^2 + c_{11} X^3$
-/// since $v \mapsto X$ and $u = v^2 \mapsto X^2$ with $X^4 = u^2 = 7$.
-#[inline]
-fn ext4_to_p3_quartic(x: GoldilocksExt4) -> [P3Goldilocks; 4] {
-    let [c00, c01, c10, c11] = x.to_limbs();
-    [
-        P3Goldilocks::from_canonical_u64(c00.to_canonical_u64()),
-        P3Goldilocks::from_canonical_u64(c10.to_canonical_u64()),
-        P3Goldilocks::from_canonical_u64(c01.to_canonical_u64()),
-        P3Goldilocks::from_canonical_u64(c11.to_canonical_u64()),
-    ]
 }
 
 proptest! {
@@ -520,84 +468,90 @@ proptest! {
         prop_assert_eq!(q_e2_prod.c0.to_canonical_u64(), p3_e2_prod[0].as_canonical_u64());
         prop_assert_eq!(q_e2_prod.c1.to_canonical_u64(), p3_e2_prod[1].as_canonical_u64());
 
-        if !q_e2_x.is_zero() {
-            let q_e2_inv = q_e2_x.inv();
-            let p3_e2_inv_val = p3_e2_x.inverse();
-            let p3_e2_inv: &[P3Goldilocks] = p3_e2_inv_val.as_base_slice();
-            prop_assert_eq!(q_e2_inv.c0.to_canonical_u64(), p3_e2_inv[0].as_canonical_u64());
-            prop_assert_eq!(q_e2_inv.c1.to_canonical_u64(), p3_e2_inv[1].as_canonical_u64());
-        }
+        // `inv` is `None` exactly at zero; `inv_or_zero` maps zero to zero.
+        let e2_limbs = |z: GoldilocksExt2| [z.c0.to_canonical_u64(), z.c1.to_canonical_u64()];
+        let p3_e2_inv = p3_e2_x.try_inverse().map(|z| {
+            let limbs: &[P3Goldilocks] = z.as_base_slice();
+            [limbs[0].as_canonical_u64(), limbs[1].as_canonical_u64()]
+        });
+        prop_assert_eq!(q_e2_x.inv().map(e2_limbs), p3_e2_inv);
+        prop_assert_eq!(e2_limbs(q_e2_x.inv_or_zero()), p3_e2_inv.unwrap_or([0, 0]));
 
-        // 3. Quartic extension `GoldilocksExt4` (`X^4 - 7`) mul, square, inverse, and Frobenius `x^p`!
+        // 3. Quartic extension `GoldilocksExt4`: mul, square, inverse, and Frobenius `x^p`.
         let q_x = GoldilocksExt4::from_limbs(x_raw.map(AggGl::from_u64_reduced));
         let q_y = GoldilocksExt4::from_limbs(y_raw.map(AggGl::from_u64_reduced));
-        let p3_qx = ext4_to_p3_quartic(q_x);
-        let p3_qy = ext4_to_p3_quartic(q_y);
+        let limbs = |z: GoldilocksExt4| z.to_limbs().map(|l| l.to_canonical_u64());
+        let (xl, yl) = (limbs(q_x), limbs(q_y));
 
-        prop_assert_eq!(ext4_to_p3_quartic(q_x * q_y), p3_quartic_mul(p3_qx, p3_qy));
-        prop_assert_eq!(ext4_to_p3_quartic(q_x.square()), p3_quartic_mul(p3_qx, p3_qx));
-
+        prop_assert_eq!(limbs(q_x * q_y), p3_ext4_mul(xl, yl));
+        prop_assert_eq!(limbs(q_x.square()), p3_ext4_mul(xl, xl));
+        prop_assert_eq!(limbs(q_x.frobenius()), p3_ext4_pow(xl, GOLDILOCKS_PRIME));
         if !q_x.is_zero() {
-            let inv = q_x.inv();
-            prop_assert_eq!(q_x * inv, GoldilocksExt4::ONE);
-            let p3_inv = ext4_to_p3_quartic(inv);
-            prop_assert_eq!(
-                p3_quartic_mul(p3_qx, p3_inv),
-                [
-                    P3Goldilocks::one(),
-                    P3Goldilocks::zero(),
-                    P3Goldilocks::zero(),
-                    P3Goldilocks::zero(),
-                ]
-            );
+            prop_assert_eq!(limbs(q_x.inv()), p3_ext4_inv(xl));
+            prop_assert_eq!(q_x * q_x.inv(), GoldilocksExt4::ONE);
         }
+    }
+}
 
-        // Frobenius endomorphism: `(x + y)^p == x^p + y^p` and `(x * y)^p == x^p * y^p` in `F_p[X]/(X^4 - 7)`
-        let frob_x = p3_quartic_pow(p3_qx, GOLDILOCKS_PRIME);
-        let frob_y = p3_quartic_pow(p3_qy, GOLDILOCKS_PRIME);
-        let frob_prod = p3_quartic_pow(ext4_to_p3_quartic(q_x * q_y), GOLDILOCKS_PRIME);
-        prop_assert_eq!(frob_prod, p3_quartic_mul(frob_x, frob_y));
+/// The live `qsag-core` diffusion operators and round constants are exactly the canonical
+/// `M_E = M_4 ⊗ P_3`, `M_I = J + diag(-64, 1, 2, ..., 1024)` and Stafford-13 schedule.
+#[test]
+fn poseidon2_core_layers_equal_the_canonical_dense_matrices() {
+    for j in 0..12 {
+        let unit: [CoreGl; 12] =
+            core::array::from_fn(|i| if i == j { CoreGl::ONE } else { CoreGl::ZERO });
+        let (mut me_col, mut mi_col) = (unit, unit);
+        poseidon2_apply_me(&mut me_col);
+        poseidon2_apply_mi(&mut mi_col);
+        for i in 0..12 {
+            assert_eq!(me_col[i].to_canonical_u64(), poseidon2_ref::M_E[i][j], "M_E[{i}][{j}]");
+            assert_eq!(mi_col[i].to_canonical_u64(), poseidon2_ref::M_I[i][j], "M_I[{i}][{j}]");
+        }
+    }
+    for (tag, rounds) in [
+        (0, poseidon2_ref::HALF_FULL_ROUNDS),
+        (1, poseidon2_ref::PARTIAL_ROUNDS),
+        (2, poseidon2_ref::HALF_FULL_ROUNDS),
+    ] {
+        for round in 0..rounds {
+            for lane in 0..12 {
+                assert_eq!(
+                    poseidon2_const_at(tag, round, lane).to_canonical_u64(),
+                    poseidon2_ref::round_constant(tag, round, lane)
+                );
+            }
+        }
     }
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(1_200))]
 
-    /// 1,200-state property-based test verifying algebraic bijectivity
-    /// (`poseidon2_perm12_inv(poseidon2_perm12(x)) == x` AND `poseidon2_perm12(poseidon2_perm12_inv(x)) == x`)
-    /// plus exact Width-12 permutation parity across `qsag_core`, `qsag_agg`, and `qsag_accel`!
+    /// Width-12 permutation parity of `qsag_core`, `qsag_agg`, and `qsag_accel` with the canonical
+    /// dense-matrix reference, and both inverse laws against the reference inverse.
     #[test]
-    fn poseidon2_width12_bijectivity_and_three_crate_parity(
+    fn poseidon2_width12_three_crate_parity_and_bijectivity(
         raw_state in any::<[u64; 12]>(),
     ) {
-        let (me_inv, mi_inv) = build_poseidon2_inverse_matrices();
+        let expected = poseidon2_ref::perm12(&raw_state);
 
-        let core_in: [CoreGl; 12] = raw_state.map(CoreGl::from_u64_reduced);
-        let agg_in: [AggGl; 12] = raw_state.map(AggGl::from_u64_reduced);
-        let mut accel_in: [u64; 12] = core_in.map(|x| x.to_canonical_u64());
-
-        let mut core_st = core_in;
+        let mut core_st = raw_state.map(CoreGl::from_u64_reduced);
+        let canon_in = core_st.map(|x| x.to_canonical_u64());
         poseidon2_perm12(&mut core_st);
+        prop_assert_eq!(core_st.map(|x| x.to_canonical_u64()), expected);
 
-        let mut agg_st = agg_in;
+        let mut agg_st = raw_state.map(AggGl::from_u64_reduced);
         qsag_agg::sponge::poseidon2_perm12(&mut agg_st);
+        prop_assert_eq!(agg_st.map(|x| x.to_canonical_u64()), expected);
 
-        qsag_accel::poseidon2::poseidon2_perm12(&mut accel_in);
+        let mut accel_st = canon_in;
+        qsag_accel::poseidon2::poseidon2_perm12(&mut accel_st);
+        prop_assert_eq!(accel_st, expected);
 
-        let core_out_u64 = core_st.map(|x| x.to_canonical_u64());
-        let agg_out_u64 = agg_st.map(|x| x.to_canonical_u64());
-        prop_assert_eq!(core_out_u64, agg_out_u64);
-        prop_assert_eq!(core_out_u64, accel_in);
-
-        // Left inverse: `perm_inv(perm(x)) == x`
-        let mut back = core_st;
-        poseidon2_perm12_inv_with_mats(&mut back, &me_inv, &mi_inv);
-        prop_assert_eq!(back, core_in);
-
-        // Right inverse: `perm(perm_inv(y)) == y`
-        let mut preimage = core_in;
-        poseidon2_perm12_inv_with_mats(&mut preimage, &me_inv, &mi_inv);
+        // Left inverse on the production output, right inverse through the production permutation.
+        prop_assert_eq!(poseidon2_ref::perm12_inv(&expected), canon_in);
+        let mut preimage = poseidon2_ref::perm12_inv(&canon_in).map(CoreGl::from_u64_reduced);
         poseidon2_perm12(&mut preimage);
-        prop_assert_eq!(preimage, core_in);
+        prop_assert_eq!(preimage.map(|x| x.to_canonical_u64()), canon_in);
     }
 }

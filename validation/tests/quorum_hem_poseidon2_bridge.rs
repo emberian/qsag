@@ -9,26 +9,22 @@
 //!    (`ValidatorPublicKey`, `ValidatorSignature`, `verify_individual_signature`, and untrusted
 //!    `HemAggregator` WHIR aggregation under `BciksJohnsonQrom128`), plus negative adversarial
 //!    tamper/bitmap/message rejection checks.
-//! 2. Four-way bit-for-bit `poseidon2_perm12` consistency across `qsag-core`, `qsag-agg`,
-//!    `qsag-accel` CPU, live `VulkanRdna2Backend` GPU (when available on Linux), and independent
-//!    Gauss-Jordan inverse matrices `poseidon2_perm12_inv_with_mats`.
-//! 3. Exact consistency of the `QS <-> AG` `Hem` Merkle/compression bridge
-//!    (`hem_poseidon2_compress12_ff == poseidon2_compress12_ff` and
-//!    `hem_merkle_node_hash == merkle_node_hash`), alongside explicit characterization of
-//!    `qsag_accel::poseidon2::merkle_layer_poseidon2_at_cpu`'s distinct 1-permutation compression
-//!    domain and its pre-feed-forward capacity-sum collision `(s2 + 1, parent_idx - 1)` under
-//!    adversarially chosen `pk_seed`.
+//! 2. Exact consistency of the `QS <-> AG` `Hem` Merkle/compression bridge: the canonical weighted
+//!    compression `perm(in0 ‖ in1 ‖ tweak)[0..4] + in0 + 2·in1 + 4·tweak` agrees between
+//!    `hem_poseidon2_compress12_ff`, `poseidon2_compress12_ff` and the dense-matrix reference, and
+//!    `hem_merkle_node_hash == merkle_node_hash`.
+//! 3. `qsag_accel::poseidon2::merkle_layer_poseidon2_at_cpu` is that same weighted compression
+//!    under an additive `pk_seed + position` tweak, a primitive distinct from the two-permutation
+//!    `merkle_node_hash`; the additive tweak makes `(pk_seed, position)` pairs with equal sums
+//!    collide, which is pinned here as a property of the construction.
+//! 4. The live `VulkanRdna2Backend` permutation (when a GPU is present on Linux) against the
+//!    reference. CPU permutation parity of the three crates lives in `simd_fields_goldilocks.rs`.
 
 use proptest::prelude::*;
-use qsag_accel::goldilocks::{gl_add, gl_sub};
-use qsag_accel::poseidon2::{
-    merkle_layer_poseidon2_at_cpu, poseidon2_perm12 as accel_poseidon2_perm12,
-};
+use qsag_accel::poseidon2::merkle_layer_poseidon2_at_cpu;
 use qsag_agg::field::Goldilocks as AggGoldilocks;
 use qsag_agg::sig::{DOMAIN_MERKLE_NODE, MerkleNodeAddr, merkle_node_hash};
-use qsag_agg::sponge::{
-    poseidon2_compress12_ff, poseidon2_perm12 as agg_poseidon2_perm12,
-};
+use qsag_agg::sponge::poseidon2_compress12_ff;
 use qsag_agg::{
     AggSigProfile, HemAggConfig, HemAggregator, SignerBitmap, SigningMode, ValidatorPublicKey,
     ValidatorSignature, WhirSecurityRegime, verify_individual_signature,
@@ -38,8 +34,7 @@ use qsag_core::poseidon2_mpc::{
     hem_merkle_node_hash, hem_poseidon2_compress12_ff, verify_hem_jorts_signature,
 };
 use qsag_core::preprocessing::PartyPrivateRng;
-use qsag_core::sponge::poseidon2::poseidon2_perm12 as core_poseidon2_perm12;
-use qsag_external_validation::{build_poseidon2_inverse_matrices, poseidon2_perm12_inv_with_mats};
+use qsag_external_validation::{GOLDILOCKS_P, poseidon2_ref};
 use qsag_quorum::{
     HemCommitteePartitionedQuorum, HemDynamicShamirQuorum, HemSpdzSeedQuorum,
 };
@@ -168,49 +163,28 @@ fn e2e_quorum_qsa_qsb_spdz_to_hem_whir_aggregation_and_adversarial_rejection() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Verifies bit-identity of `poseidon2_perm12` across `qsag-core`, `qsag-agg`, `qsag-accel` CPU,
-    /// and independent Gauss-Jordan inverse `poseidon2_perm12_inv_with_mats`, plus bit-identity of
-    /// `hem_poseidon2_compress12_ff` and `hem_merkle_node_hash` between `qsag-core` and `qsag-agg`.
+    /// The weighted compression agrees between `qsag-core`, `qsag-agg` and the dense-matrix
+    /// reference, and the two-permutation Merkle node hash agrees between `qsag-core` and `qsag-agg`.
     #[test]
-    fn poseidon2_cpu_mpc_agg_and_merkle_bridge_equivalence(
+    fn poseidon2_compression_and_merkle_bridge_equivalence(
         raw_state in any::<[u64; 12]>(),
         layer in 0u32..0xFFFEu32,
         tree_idx in any::<u64>(),
         level in 0u32..32u32,
         node_idx in 0u32..65536u32,
     ) {
-        let (me_inv, mi_inv) = build_poseidon2_inverse_matrices();
+        let [left, right, seed]: [[u64; 4]; 3] =
+            core::array::from_fn(|b| core::array::from_fn(|i| raw_state[4 * b + i]));
+        let [c_left, c_right, c_seed] =
+            [left, right, seed].map(|b| b.map(CoreGoldilocks::from_u64_reduced));
+        let [a_left, a_right, a_seed] =
+            [left, right, seed].map(|b| b.map(AggGoldilocks::from_u64_reduced));
 
-        let mut core_st = raw_state.map(CoreGoldilocks::from_u64_reduced);
-        let mut agg_st = raw_state.map(AggGoldilocks::from_u64_reduced);
-        let mut accel_st = core_st.map(|x| x.to_canonical_u64());
-        let canon_in = accel_st;
-
-        core_poseidon2_perm12(&mut core_st);
-        agg_poseidon2_perm12(&mut agg_st);
-        accel_poseidon2_perm12(&mut accel_st);
-
-        let core_u64 = core_st.map(|x| x.to_canonical_u64());
-        let agg_u64 = agg_st.map(|x| x.to_canonical_u64());
-        prop_assert_eq!(core_u64, agg_u64);
-        prop_assert_eq!(core_u64, accel_st);
-
-        let mut back = core_st;
-        poseidon2_perm12_inv_with_mats(&mut back, &me_inv, &mi_inv);
-        prop_assert_eq!(back.map(|x| x.to_canonical_u64()), canon_in);
-
-        // Compare `Hem` compression & 2-permutation sponge Merkle node hash (`qsag-core` vs `qsag-agg`)
-        let c_left: [CoreGoldilocks; 4] = core::array::from_fn(|i| CoreGoldilocks::from_u64_reduced(raw_state[i]));
-        let c_right: [CoreGoldilocks; 4] = core::array::from_fn(|i| CoreGoldilocks::from_u64_reduced(raw_state[4 + i]));
-        let c_seed: [CoreGoldilocks; 4] = core::array::from_fn(|i| CoreGoldilocks::from_u64_reduced(raw_state[8 + i]));
-
-        let a_left = c_left.map(|x| AggGoldilocks::from_u64_reduced(x.to_canonical_u64()));
-        let a_right = c_right.map(|x| AggGoldilocks::from_u64_reduced(x.to_canonical_u64()));
-        let a_seed = c_seed.map(|x| AggGoldilocks::from_u64_reduced(x.to_canonical_u64()));
-
+        let expected = poseidon2_ref::compress(left, right, seed);
         let hem_comp = hem_poseidon2_compress12_ff(c_left, c_right, c_seed).map(|x| x.to_canonical_u64());
         let agg_comp = poseidon2_compress12_ff(a_left, a_right, a_seed).map(|x| x.to_canonical_u64());
-        prop_assert_eq!(hem_comp, agg_comp);
+        prop_assert_eq!(hem_comp, expected);
+        prop_assert_eq!(agg_comp, expected);
 
         let hem_node = hem_merkle_node_hash(
             c_seed,
@@ -233,82 +207,93 @@ proptest! {
 }
 
 #[test]
-fn accel_poseidon2_gpu_perm12_and_merkle_layer_domain_characterization() {
-    // 1. Characterize `qsag_accel::merkle_layer_poseidon2_at_cpu` vs `qsag_agg::sig::merkle_node_hash`:
-    //    `merkle_layer_poseidon2_at_cpu` uses a 1-permutation Hirose/Davies-Meyer construction
-    //    (`st = [left, right, s0 + tweak, s1 + layer, s2 + node_tweak, s3 + IV]`,
-    //     `out = perm12(st)[0..4] + left + right + pk_seed`), distinct from `merkle_node_hash`'s
-    //    2-permutation rate-8 sponge.
+fn accel_merkle_layer_is_the_weighted_compression_and_gpu_matches_reference() {
+    const MERKLE_DOMAIN_IV: u64 = 0x4D52_4B4C_5F50_3231;
+    const NODE_TWEAK_IV: u64 = 0x4C52_5F4E_4F44_4531;
+    let add = |a: u64, b: u64| ((a as u128 + b as u128) % GOLDILOCKS_P as u128) as u64;
+
+    // 1. One accelerator Merkle parent is the weighted compression of its children under the
+    //    additive tweak `pk_seed + (domain + layer·2^32, layer, node IV + parent index, "POS2_GL1")`.
     let left = [11u64, 22, 33, 44];
     let right = [55u64, 66, 77, 88];
     let pk_seed = [100u64, 200, 300, 400];
+    let (layer, parent_idx) = (3u32, 7u64);
+    let tweak = |seed: [u64; 4], idx: u64| {
+        [
+            add(seed[0], MERKLE_DOMAIN_IV + ((layer as u64) << 32)),
+            add(seed[1], layer as u64),
+            add(seed[2], NODE_TWEAK_IV + idx),
+            add(seed[3], poseidon2_ref::CONST_IV),
+        ]
+    };
     let mut accel_parent = [[0u64; 4]; 1];
-    merkle_layer_poseidon2_at_cpu(&[left, right], &pk_seed, 3, 7, &mut accel_parent).unwrap();
+    merkle_layer_poseidon2_at_cpu(&[left, right], &pk_seed, layer, parent_idx, &mut accel_parent)
+        .unwrap();
+    assert_eq!(
+        accel_parent[0],
+        poseidon2_ref::compress(left, right, tweak(pk_seed, parent_idx))
+    );
 
+    // A batch layer numbers its parents from `start_parent_idx`.
+    let children = [left, right, right, left, [1, 2, 3, 4], [5, 6, 7, 8]];
+    let mut batch = [[0u64; 4]; 3];
+    merkle_layer_poseidon2_at_cpu(&children, &pk_seed, layer, parent_idx, &mut batch).unwrap();
+    for (k, parent) in batch.iter().enumerate() {
+        assert_eq!(
+            *parent,
+            poseidon2_ref::compress(
+                children[2 * k],
+                children[2 * k + 1],
+                tweak(pk_seed, parent_idx + k as u64)
+            )
+        );
+    }
+
+    // 2. It is a different primitive from the two-permutation sponge `merkle_node_hash`.
     let agg_parent = merkle_node_hash(
-        0x4D52_4B4C_5F50_3231,
+        MERKLE_DOMAIN_IV,
         pk_seed.map(AggGoldilocks::from_u64_reduced),
         MerkleNodeAddr {
             layer: 0,
             tree_idx: 0,
-            level: 3,
-            node_idx: 7,
+            level: layer,
+            node_idx: parent_idx as u32,
         },
         left.map(AggGoldilocks::from_u64_reduced),
         right.map(AggGoldilocks::from_u64_reduced),
     )
     .map(|x| x.to_canonical_u64());
-    assert_ne!(
-        accel_parent[0], agg_parent,
-        "qsag-accel 1-perm MerkleLayerPoseidon2 and qsag-agg 2-perm merkle_node_hash are distinct primitives"
-    );
+    assert_ne!(accel_parent[0], agg_parent);
 
-    // 2. Document the exact multi-key / chosen-`pk_seed` additive capacity invariance in
-    //    `merkle_layer_poseidon2_at_cpu`: shifting `pk_seed[2]' = pk_seed[2] + 1` and
-    //    `start_parent_idx' = start_parent_idx - 1` keeps `s2 + node_tweak` (and all other 11
-    //    `poseidon2_perm12` input lanes!) 100% identical, so `parent'` differs from `parent`
-    //    purely by `+1` in lane 2 from the outer `s2` feed-forward (`parent'[2] - parent[2] == 1`)!
-    let pk_seed_shifted = [pk_seed[0], pk_seed[1], gl_add(pk_seed[2], 1), pk_seed[3]];
-    let mut accel_parent_shifted = [[0u64; 4]; 1];
+    // 3. The tweak is a sum, so `(pk_seed[2] + 1, parent_idx - 1)` has the same tweak as
+    //    `(pk_seed[2], parent_idx)` and the two parents are equal. Positions are separated only
+    //    under one fixed `pk_seed`.
+    let shifted_seed = [pk_seed[0], pk_seed[1], pk_seed[2] + 1, pk_seed[3]];
+    assert_eq!(tweak(shifted_seed, parent_idx - 1), tweak(pk_seed, parent_idx));
+    let mut shifted_parent = [[0u64; 4]; 1];
     merkle_layer_poseidon2_at_cpu(
         &[left, right],
-        &pk_seed_shifted,
-        3,
-        6,
-        &mut accel_parent_shifted,
+        &shifted_seed,
+        layer,
+        parent_idx - 1,
+        &mut shifted_parent,
     )
     .unwrap();
-    assert_eq!(accel_parent_shifted[0][0], accel_parent[0][0]);
-    assert_eq!(accel_parent_shifted[0][1], accel_parent[0][1]);
-    assert_eq!(
-        gl_sub(accel_parent_shifted[0][2], accel_parent[0][2]),
-        1,
-        "pre-feed-forward perm12 input collided identically across distinct (pk_seed, parent_idx)"
-    );
-    assert_eq!(accel_parent_shifted[0][3], accel_parent[0][3]);
+    assert_eq!(shifted_parent, accel_parent);
 
-    // 3. When running on a Linux host with a Vulkan GPU (e.g. RDNA2 / RDNA3.5), also verify
-    //    `VulkanRdna2Backend` hardware `batch_poseidon2_perm12` matches `qsag-core` & `qsag-agg`!
+    // 4. With a Vulkan GPU on a Linux host, the hardware permutation matches the reference.
     #[cfg(target_os = "linux")]
     if let Ok(gpu) = qsag_accel::VulkanRdna2Backend::try_new() {
         use qsag_accel::AcceleratorBackend;
         let mut states: Vec<[u64; 12]> = (0..64)
             .map(|i| {
                 core::array::from_fn(|lane| {
-                    ((i as u64) * 0x9E37_79B9_7F4A_7C15 + (lane as u64) * 17)
-                        % 0xFFFF_FFFF_0000_0001
+                    ((i as u64) * 0x9E37_79B9_7F4A_7C15 + (lane as u64) * 17) % GOLDILOCKS_P
                 })
             })
             .collect();
-        let expected: Vec<[u64; 12]> = states
-            .iter()
-            .map(|s| {
-                let mut c = s.map(CoreGoldilocks::from_u64_reduced);
-                core_poseidon2_perm12(&mut c);
-                c.map(|x| x.to_canonical_u64())
-            })
-            .collect();
+        let expected: Vec<[u64; 12]> = states.iter().map(poseidon2_ref::perm12).collect();
         gpu.batch_poseidon2_perm12(&mut states);
-        assert_eq!(states, expected, "Vulkan GPU Poseidon2 != qsag-core CPU");
+        assert_eq!(states, expected, "Vulkan GPU Poseidon2 != canonical reference");
     }
 }
