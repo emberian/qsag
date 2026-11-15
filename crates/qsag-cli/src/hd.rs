@@ -2,13 +2,13 @@
 //! (`qsag hd`), backed by [`qsag_hd`].
 //!
 //! Subcommands:
-//! - `keygen`       — 3-round dealerless subset-seed ceremony (`SeedCeremonyRound1..3`) +
-//!                    corroborated `SLH-DSA-SHAKE-128f` batch inventory commitment.
-//! - `derive`       — `0`-round watch-only Bech32m deposit address + Poseidon2 Merkle proof
-//!                    derivation (`0` secret keys touched).
+//! - `keygen` — 3-round dealerless subset-seed ceremony (`SeedCeremonyRound1..3`) +
+//!   corroborated `SLH-DSA-SHAKE-128f` batch inventory commitment.
+//! - `derive` — `0`-round watch-only Bech32m deposit address + Poseidon2 Merkle proof
+//!   derivation (`0` secret keys touched).
 //! - `verify-child` — Verify an [`InventoryChildProof`] against the watch-only master root.
-//! - `recover`      — Threshold `t`-of-`n` custodian child seed recovery verified against the
-//!                    enrolled child public key, outputting a `qsag sign`-ready secret key file.
+//! - `recover` — Threshold `t`-of-`n` custodian child seed recovery verified against the
+//!   enrolled child public key, outputting a `qsag sign`-ready secret key file.
 
 use std::path::Path;
 
@@ -219,7 +219,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let threshold = args.get_u64("threshold")?.unwrap_or(2) as usize;
     let parties = args.get_u64("parties")?.unwrap_or(3) as usize;
     let batch_size = args.get_u64("count")?.unwrap_or(16) as usize;
-    if !batch_size.is_power_of_two() || batch_size < 2 || batch_size > 1024 {
+    if !batch_size.is_power_of_two() || !(2..=1024).contains(&batch_size) {
         return Err(CliError::usage(
             "--count must be a power of two in 2..=1024",
         ));

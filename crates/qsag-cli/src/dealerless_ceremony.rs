@@ -144,7 +144,7 @@ pub fn provision_distributed_policy_guards(
 
     let mut round1_states = Vec::with_capacity(parties.len());
     let mut commits = Vec::new();
-    for (&id, entropy) in parties.iter().zip(entropies.into_iter()) {
+    for (&id, entropy) in parties.iter().zip(entropies) {
         let (st, msgs) = PolicyGuardDkgRound1::new(id, parties, setup_id, entropy)?;
         round1_states.push((id, st));
         commits.extend(msgs);
@@ -334,7 +334,7 @@ impl ParallelSeededDkgProducts for PairwiseBeaverProductChannel {
             let take = remaining.min(TRIPLE_CHUNK);
             let slice = &mut chunk_buf[..take * 48];
             sp.squeeze(slice);
-            for chunk in slice.chunks_exact(48) {
+            for chunk in slice.as_chunks::<48>().0 {
                 let mut a_bytes = [0u8; 16];
                 let mut b_bytes = [0u8; 16];
                 let mut r_bytes = [0u8; 16];
@@ -377,13 +377,15 @@ impl ParallelSeededDkgProducts for PairwiseBeaverProductChannel {
         };
 
         let mut out = Vec::with_capacity(count);
-        for i in 0..count {
-            let factor = if self.party_id == sender {
-                operand[i]
-            } else {
-                my_mask.0[i]
-            };
-            out.push(my_pad.0[i] ^ gf2_128_mul(factor, masked_remote.0[i]));
+        for (((&op_i, &mask_i), &pad_i), &rem_i) in operand
+            .iter()
+            .zip(my_mask.0.iter())
+            .zip(my_pad.0.iter())
+            .zip(masked_remote.0.iter())
+            .take(count)
+        {
+            let factor = if self.party_id == sender { op_i } else { mask_i };
+            out.push(pad_i ^ gf2_128_mul(factor, rem_i));
         }
         Ok(out)
     }

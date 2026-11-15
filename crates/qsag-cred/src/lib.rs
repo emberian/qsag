@@ -1,5 +1,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 //! Post-Quantum Threshold Credentials, 2-Round Verifiable Lattice OPRF (`PiVoprf`),
 //! Blind Threshold Verifiable Credentials + Unlinkable Selective Disclosure (`PiBlindVc`),
 //! and Dealerless Standard-Verifier `FIPS 204` Threshold `ML-DSA` (`ThresholdMlDsa`).

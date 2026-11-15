@@ -14,6 +14,7 @@ commit/open protocol must consume its evidence before resuming public control.
 public section
 namespace Qsag.RssSigning
 set_option autoImplicit false
+set_option maxHeartbeats 800000
 
 structure UnverifiedAnswer where
   evidence : List HashEvidence
@@ -129,7 +130,6 @@ theorem prfFrame_reconstructs (prf : RssByteShares) (rand mu : Bytes) (hw : prf.
 
 /-- The concrete participant handler computes every production cut operation
 correctly. The equality is about unverified shares; it grants no release right. -/
-set_option maxHeartbeats 800000 in
 theorem queryRun_correct (profile : RssProduction.Profile) (request : SessionScheduleReq)
     (cut : Nat) (query : Query) (tape : ParticipantTape) :
     (queryRun (preparePublic profile request) profile.material cut query tape).shares.WellFormed ∧
@@ -181,5 +181,48 @@ theorem queryRun_correct (profile : RssProduction.Profile) (request : SessionSch
     rw [hr.2, hf2.2, hb.2, hf.2, hm.2.2]
     rfl
 
-#verify_constructive chain_correct preparedHash_correct prfFrame_wf prfFrame_reconstructs queryRun_correct
+def HashesFrom (cut : Nat) (query : Query) : Nat → List HashEvidence → Prop
+  | _, [] => True
+  | subcall, e :: es => e.cut = cut ∧ e.query = query ∧ e.subcall = subcall ∧
+      HashesFrom cut query (subcall + 1) es
+
+theorem chain_numbered (prepared : Prepared) (pkSeed : Bytes) (cut : Nat) (query : Query)
+    (layer : UInt32) (tree : UInt64) (kp chainIndex subcall step remaining : Nat)
+    (current : RssByteShares) (tape : ParticipantTape) :
+    HashesFrom cut query subcall
+      (chain prepared pkSeed cut query layer tree kp chainIndex subcall step remaining current tape).evidence ∧
+    (chain prepared pkSeed cut query layer tree kp chainIndex subcall step remaining current tape).evidence.length =
+      remaining := by
+  induction remaining generalizing subcall step current with
+  | zero => exact ⟨trivial, rfl⟩
+  | succ remaining ih =>
+      have h := ih (subcall + 1) (step + 1)
+        (hashRunPrepared prepared cut subcall query
+          (rssFrameSingleSecretCall tagThF pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat chainIndex, UInt32.ofNat step⟩ current) tape).2
+      exact ⟨⟨rfl, rfl, rfl, h.1⟩, congrArg Nat.succ h.2⟩
+
+def queryHashCount : Query → Nat
+  | .prfMsg _ _ => 1
+  | .wotsChain _ _ _ _ steps => steps + 1
+  | .forsReveal _ _ _ _ => 1
+  | .forsLeaf _ _ _ _ => 2
+
+theorem queryRun_numbered (prepared : Prepared) (material : RssProduction.Material)
+    (cut : Nat) (query : Query) (tape : ParticipantTape) :
+    HashesFrom cut query 0 (queryRun prepared material cut query tape).evidence ∧
+    (queryRun prepared material cut query tape).evidence.length = queryHashCount query := by
+  cases query with
+  | prfMsg rand mu => exact ⟨⟨rfl, rfl, rfl, trivial⟩, rfl⟩
+  | wotsChain layer tree kp r steps =>
+      have h := chain_numbered prepared material.pkSeed cut (.wotsChain layer tree kp r steps)
+        layer tree kp r 1 0 steps
+        (hashRunPrepared prepared cut 0 (.wotsChain layer tree kp r steps)
+          (rssFrameSingleSecretCall tagPrf material.pkSeed
+            ⟨layer, tree, .wotsPrf, UInt32.ofNat kp, UInt32.ofNat r, 0⟩ material.seed) tape).2 tape
+      exact ⟨⟨rfl, rfl, rfl, h.1⟩, congrArg Nat.succ h.2⟩
+  | forsReveal tree kp j u => exact ⟨⟨rfl, rfl, rfl, trivial⟩, rfl⟩
+  | forsLeaf tree kp j u => exact ⟨⟨rfl, rfl, rfl, rfl, rfl, rfl, trivial⟩, rfl⟩
+
+#verify_constructive chain_correct preparedHash_correct prfFrame_wf prfFrame_reconstructs queryRun_correct chain_numbered queryRun_numbered
 end Qsag.RssSigning

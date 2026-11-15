@@ -988,7 +988,9 @@ pub(crate) struct RawVulkanEngine {
     ds_3buf_abc: VkDescriptorSet,
     cmd_pool: VkCommandPool,
     cmd_buf: VkCommandBuffer,
+    upload_cmd_buf: VkCommandBuffer,
     fence: VkFence,
+    upload_fence: VkFence,
     staging: GpuBuffer,
     vram_a: GpuBuffer,
     vram_b: GpuBuffer,
@@ -1896,7 +1898,9 @@ impl RawVulkanEngine {
             ds_3buf_abc: 0,
             cmd_pool: 0,
             cmd_buf: null_mut(),
+            upload_cmd_buf: null_mut(),
             fence: 0,
+            upload_fence: 0,
             staging: GpuBuffer::default(),
             vram_a: GpuBuffer::default(),
             vram_b: GpuBuffer::default(),
@@ -2481,11 +2485,14 @@ impl RawVulkanEngine {
             p_next: null(),
             command_pool: self.cmd_pool,
             level: VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            command_buffer_count: 1,
+            command_buffer_count: 2,
         };
+        let mut cmd_bufs = [null_mut(); 2];
         check_vk("vkAllocateCommandBuffers", unsafe {
-            (self.fns.allocate_command_buffers)(self.device, &cba_info, &mut self.cmd_buf)
+            (self.fns.allocate_command_buffers)(self.device, &cba_info, cmd_bufs.as_mut_ptr())
         })?;
+        self.cmd_buf = cmd_bufs[0];
+        self.upload_cmd_buf = cmd_bufs[1];
 
         let fence_info = VkFenceCreateInfo {
             s_type: VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
@@ -2494,6 +2501,9 @@ impl RawVulkanEngine {
         };
         check_vk("vkCreateFence", unsafe {
             (self.fns.create_fence)(self.device, &fence_info, null(), &mut self.fence)
+        })?;
+        check_vk("vkCreateFence", unsafe {
+            (self.fns.create_fence)(self.device, &fence_info, null(), &mut self.upload_fence)
         })?;
 
         // Pre-allocate initial workspace buffers and bind descriptor sets.
@@ -4975,42 +4985,175 @@ impl RawVulkanEngine {
             *slot = u64::from_le_bytes(b);
         }
 
-        const CHUNK_WORDS: usize = 4 * 1024 * 1024; // 32 MiB staging slices
+        const CHUNK_WORDS: usize = 4 * 1024 * 1024; // 32 MiB total staging budget
+        const HALF_WORDS: usize = CHUNK_WORDS / 2; // 16 MiB per ping-pong DMA slot
         let staging_cap_words = total_poly_words.clamp(4, CHUNK_WORDS);
         let mut subs = 0u64;
 
         unsafe {
             self.reserve_job_staging((staging_cap_words as u64) * 8)?;
-            let mut dst_word_off = 0usize;
-            for poly_idx in 0..num_polys {
-                let mut pos = 0usize;
-                while pos < c_len {
-                    let take = (c_len - pos).min(CHUNK_WORDS);
-                    {
-                        let dst = core::slice::from_raw_parts_mut(
-                            self.staging.mapped.cast::<u64>(),
-                            take,
+            if total_poly_words <= HALF_WORDS
+                || self.upload_cmd_buf.is_null()
+                || self.upload_fence == 0
+            {
+                let mut dst_word_off = 0usize;
+                for poly_idx in 0..num_polys {
+                    let mut pos = 0usize;
+                    while pos < c_len {
+                        let take = (c_len - pos).min(CHUNK_WORDS);
+                        {
+                            let dst = core::slice::from_raw_parts_mut(
+                                self.staging.mapped.cast::<u64>(),
+                                take,
+                            );
+                            fill_chunk(poly_idx, pos, dst);
+                        }
+                        self.begin_cmd()?;
+                        let copy = VkBufferCopy {
+                            src_offset: 0,
+                            dst_offset: (dst_word_off as u64) * 8,
+                            size: (take as u64) * 8,
+                        };
+                        (self.fns.cmd_copy_buffer)(
+                            self.cmd_buf,
+                            self.staging.buffer,
+                            self.prover.vram_witness.buffer,
+                            1,
+                            &copy,
                         );
-                        fill_chunk(poly_idx, pos, dst);
+                        self.submit_and_wait()?;
+                        subs += 1;
+                        pos += take;
+                        dst_word_off += take;
                     }
-                    self.begin_cmd()?;
-                    let copy = VkBufferCopy {
-                        src_offset: 0,
-                        dst_offset: (dst_word_off as u64) * 8,
-                        size: (take as u64) * 8,
-                    };
-                    (self.fns.cmd_copy_buffer)(
-                        self.cmd_buf,
-                        self.staging.buffer,
-                        self.prover.vram_witness.buffer,
-                        1,
-                        &copy,
-                    );
-                    self.submit_and_wait()?;
-                    subs += 1;
-                    pos += take;
-                    dst_word_off += take;
                 }
+            } else {
+                const VK_ERROR_DEVICE_LOST: i32 = -4;
+                if let Some(code) = self.injected_rc(FaultPoint::BeginCmd) {
+                    return Err(VulkanError::VkResult {
+                        op: "vkResetCommandPool",
+                        code,
+                    });
+                }
+                check_vk(
+                    "vkResetCommandPool",
+                    (self.fns.reset_command_pool)(self.device, self.cmd_pool, 0),
+                )?;
+                let cbs = [self.cmd_buf, self.upload_cmd_buf];
+                let fences = [self.fence, self.upload_fence];
+                let mut in_flight = [false, false];
+                let mut chunk_idx = 0usize;
+                let mut dst_word_off = 0usize;
+
+                let wait_slot = |eng: &mut Self,
+                                 in_flight: &mut [bool; 2],
+                                 slot: usize|
+                 -> Result<(), VulkanError> {
+                    if !in_flight[slot] {
+                        return Ok(());
+                    }
+                    let wait_rc = match eng.injected_rc(FaultPoint::FenceWait) {
+                        Some(rc) => rc,
+                        None => (eng.fns.wait_for_fences)(
+                            eng.device,
+                            1,
+                            &fences[slot],
+                            VK_TRUE,
+                            5_000_000_000,
+                        ),
+                    };
+                    if wait_rc != VK_SUCCESS {
+                        if wait_rc == VK_ERROR_DEVICE_LOST {
+                            eng.exec_state = EngineExecState::DeviceLostQuarantined;
+                        }
+                        return Err(VulkanError::VkResult {
+                            op: "vkWaitForFences",
+                            code: wait_rc,
+                        });
+                    }
+                    in_flight[slot] = false;
+                    if !in_flight[0] && !in_flight[1] {
+                        eng.exec_state = EngineExecState::Ready;
+                    }
+                    Ok(())
+                };
+
+                for poly_idx in 0..num_polys {
+                    let mut pos = 0usize;
+                    while pos < c_len {
+                        let slot = chunk_idx & 1;
+                        wait_slot(self, &mut in_flight, slot)?;
+                        let take = (c_len - pos).min(HALF_WORDS);
+                        let src_word_off = slot * HALF_WORDS;
+                        {
+                            let dst = core::slice::from_raw_parts_mut(
+                                self.staging.mapped.cast::<u64>().add(src_word_off),
+                                take,
+                            );
+                            fill_chunk(poly_idx, pos, dst);
+                        }
+                        let begin_info = VkCommandBufferBeginInfo {
+                            s_type: VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                            p_next: null(),
+                            flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+                            p_inheritance_info: null(),
+                        };
+                        check_vk(
+                            "vkBeginCommandBuffer",
+                            (self.fns.begin_command_buffer)(cbs[slot], &begin_info),
+                        )?;
+                        let copy = VkBufferCopy {
+                            src_offset: (src_word_off as u64) * 8,
+                            dst_offset: (dst_word_off as u64) * 8,
+                            size: (take as u64) * 8,
+                        };
+                        (self.fns.cmd_copy_buffer)(
+                            cbs[slot],
+                            self.staging.buffer,
+                            self.prover.vram_witness.buffer,
+                            1,
+                            &copy,
+                        );
+                        check_vk("vkEndCommandBuffer", (self.fns.end_command_buffer)(cbs[slot]))?;
+                        check_vk(
+                            "vkResetFences",
+                            (self.fns.reset_fences)(self.device, 1, &fences[slot]),
+                        )?;
+                        let submit = VkSubmitInfo {
+                            s_type: VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                            p_next: null(),
+                            wait_semaphore_count: 0,
+                            p_wait_semaphores: null(),
+                            p_wait_dst_stage_mask: null(),
+                            command_buffer_count: 1,
+                            p_command_buffers: &cbs[slot],
+                            signal_semaphore_count: 0,
+                            p_signal_semaphores: null(),
+                        };
+                        self.exec_state = EngineExecState::InFlightQuarantined;
+                        let submit_rc = match self.injected_rc(FaultPoint::QueueSubmit) {
+                            Some(rc) => rc,
+                            None => (self.fns.queue_submit)(self.queue, 1, &submit, fences[slot]),
+                        };
+                        if submit_rc != VK_SUCCESS {
+                            if submit_rc == VK_ERROR_DEVICE_LOST {
+                                self.exec_state = EngineExecState::DeviceLostQuarantined;
+                            }
+                            return Err(VulkanError::VkResult {
+                                op: "vkQueueSubmit",
+                                code: submit_rc,
+                            });
+                        }
+                        in_flight[slot] = true;
+                        subs += 1;
+                        chunk_idx += 1;
+                        pos += take;
+                        dst_word_off += take;
+                    }
+                }
+                let first = chunk_idx & 1;
+                wait_slot(self, &mut in_flight, first)?;
+                wait_slot(self, &mut in_flight, first ^ 1)?;
             }
 
             let kp = self.prover_pipelines[ProverKernelSlot::WhirLdeCommitment as usize];
@@ -7861,6 +8004,10 @@ impl RawVulkanEngine {
                 self.prover.twiddles_ready = false;
                 crate::ct::ct_zeroize_u64s(&mut self.prover.salt_seed_words);
 
+                if self.upload_fence != 0 {
+                    (self.fns.destroy_fence)(self.device, self.upload_fence, null());
+                    self.upload_fence = 0;
+                }
                 if self.fence != 0 {
                     (self.fns.destroy_fence)(self.device, self.fence, null());
                     self.fence = 0;
@@ -7872,6 +8019,8 @@ impl RawVulkanEngine {
                 if self.cmd_pool != 0 {
                     (self.fns.destroy_command_pool)(self.device, self.cmd_pool, null());
                     self.cmd_pool = 0;
+                    self.cmd_buf = null_mut();
+                    self.upload_cmd_buf = null_mut();
                 }
                 for kp in self
                     .pipelines

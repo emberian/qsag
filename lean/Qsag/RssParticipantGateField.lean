@@ -58,11 +58,50 @@ theorem poly_false_final_challenges_le_two (c : PolyCommitment)
     apply polyToTower128_injective
     simpa only [polyToTower128_mul_rust, PolyCommitment.toTower] using h
   have hmap : (S.map polyToTower128).Nodup :=
-    hS.map (fun a b h => polyToTower128_injective a b h)
+    hS.map polyToTower128 (fun a b hab h => hab (polyToTower128_injective a b h))
   have hc := false_final_accepting_challenges_le_two c.toTower ht (S.map polyToTower128) hmap
   rw [filter_map_len] at hc
-  simpa only [polyAccepts_eq] using hc
+  have hp : polyAccepts c = fun t => accepts c.toTower (polyToTower128 t) :=
+    funext (polyAccepts_eq c)
+  rw [hp]
+  exact hc
+
+/-- A 64-bit Boolean relation word embeds below degree64 in the actual degree128
+polynomial field; no coefficient can disappear in this embedding. -/
+def wordToField (w : UInt64) : Tower128 :=
+  polyToTower128 (w.toBitVec.setWidth 128)
+
+theorem wordToField_eq_zero_iff (w : UInt64) :
+    wordToField w = towerZero 7 ↔ w = 0 := by
+  constructor
+  · intro h
+    have hb := (polyToTower128_eq_zero_iff _).mp h
+    apply UInt64.eq_of_toBitVec_eq
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    have he := congrArg (fun v : BitVec 128 => v.getLsbD i) hb
+    simpa [BitVec.getLsbD_setWidth, show i < 128 by omega] using he
+  · intro h
+    subst w
+    exact polyToTower128_zero
+
+theorem wordToField_xor (a b : UInt64) :
+    wordToField (a ^^^ b) = towerAdd 7 (wordToField a) (wordToField b) := by
+  unfold wordToField
+  rw [UInt64.toBitVec_xor, BitVec.setWidth_xor, polyToTower128_xor]
+
+def gateError (g0 g1 g2 : GateRecord) : Tower128 :=
+  wordToField ((g0.product ^^^ g1.product ^^^ g2.product) ^^^
+    ((g0.lhsOwn ^^^ g1.lhsOwn ^^^ g2.lhsOwn) &&&
+      (g0.rhsOwn ^^^ g1.rhsOwn ^^^ g2.rhsOwn)))
+
+theorem gateError_zero_iff (g0 g1 g2 : GateRecord) :
+    gateError g0 g1 g2 = towerZero 7 ↔ relation g0 g1 g2 := by
+  unfold gateError
+  rw [wordToField_eq_zero_iff, UInt64.xor_eq_zero_iff]
+  rfl
 
 #verify_constructive polyAccepts_eq poly_false_final_challenges_le_two
+  wordToField_eq_zero_iff gateError_zero_iff wordToField_xor
 end Qsag.RssParticipant.GateChecks
 end

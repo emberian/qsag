@@ -1844,9 +1844,6 @@ fn prove_outer_summary_chain(
     let mut cur_sum_claim = GoldilocksExt4::ZERO;
     let mut cur_m = num_rows;
 
-    let eval_k_points: [Goldilocks; ROW_SUMCHECK_COEFFS] =
-        core::array::from_fn(|k| Goldilocks::from_u64_reduced(k as u64));
-
     for _round in 0..log_rows {
         let half = cur_m / 2;
         let mut sum_evals = [GoldilocksExt4::ZERO; ROW_SUMCHECK_COEFFS];
@@ -1855,6 +1852,7 @@ fn prove_outer_summary_chain(
             let c0 = &cols_tbl[idx];
             let c1 = &cols_tbl[idx + half];
             let mut dc = [GoldilocksExt4::ZERO; NUM_TRACE_COLS];
+            let mut ck = *c1;
             for col in 0..NUM_TRACE_COLS {
                 dc[col] = c1[col] - c0[col];
             }
@@ -1862,22 +1860,29 @@ fn prove_outer_summary_chain(
             let p0 = &pub_in_tbl[idx];
             let p1 = &pub_in_tbl[idx + half];
             let mut dp = [GoldilocksExt4::ZERO; 8];
+            let mut pk = *p1;
             for k in 0..8 {
                 dp[k] = p1[k] - p0[k];
             }
 
             let act0 = is_active_tbl[idx];
-            let d_act = is_active_tbl[idx + half] - act0;
+            let act1 = is_active_tbl[idx + half];
+            let d_act = act1 - act0;
             let fst0 = is_first_tbl[idx];
-            let d_fst = is_first_tbl[idx + half] - fst0;
+            let fst1 = is_first_tbl[idx + half];
+            let d_fst = fst1 - fst0;
             let lst0 = is_last_tbl[idx];
-            let d_lst = is_last_tbl[idx + half] - lst0;
+            let lst1 = is_last_tbl[idx + half];
+            let d_lst = lst1 - lst0;
             let eq0 = eq_tbl[idx];
-            let d_eq = eq_tbl[idx + half] - eq0;
+            let eq1 = eq_tbl[idx + half];
+            let d_eq = eq1 - eq0;
             let nl0 = not_last_tbl[idx];
-            let d_nl = not_last_tbl[idx + half] - nl0;
+            let nl1 = not_last_tbl[idx + half];
+            let d_nl = nl1 - nl0;
             let sh0 = shift_tbl[idx];
-            let d_sh = shift_tbl[idx + half] - sh0;
+            let sh1 = shift_tbl[idx + half];
+            let d_sh = sh1 - sh0;
 
             sum_evals[0] += eval_outer_chain_row_constraints_ext4(
                 c0,
@@ -1891,44 +1896,41 @@ fn prove_outer_summary_chain(
                 sh0,
                 gamma,
             );
-            sum_evals[1] += eval_outer_chain_row_constraints_ext4(
-                c1,
-                p1,
-                &terminal_chain_ext4,
-                is_active_tbl[idx + half],
-                is_first_tbl[idx + half],
-                is_last_tbl[idx + half],
-                eq_tbl[idx + half],
-                not_last_tbl[idx + half],
-                shift_tbl[idx + half],
-                gamma,
-            );
 
-            for k_idx in 2..ROW_SUMCHECK_COEFFS {
-                let kv = eval_k_points[k_idx];
-                let mut ck = [GoldilocksExt4::ZERO; NUM_TRACE_COLS];
+            let mut act_k = act1;
+            let mut fst_k = fst1;
+            let mut lst_k = lst1;
+            let mut eq_k = eq1;
+            let mut nl_k = nl1;
+            let mut sh_k = sh1;
+            for dst_eval in sum_evals.iter_mut().take(ROW_SUMCHECK_COEFFS).skip(2) {
                 for col in 0..NUM_TRACE_COLS {
-                    ck[col] = c0[col] + dc[col].mul_base(kv);
+                    ck[col] += dc[col];
                 }
-                let mut pk = [GoldilocksExt4::ZERO; 8];
                 for j in 0..8 {
-                    pk[j] = p0[j] + dp[j].mul_base(kv);
+                    pk[j] += dp[j];
                 }
-                sum_evals[k_idx] += eval_outer_chain_row_constraints_ext4(
+                act_k += d_act;
+                fst_k += d_fst;
+                lst_k += d_lst;
+                eq_k += d_eq;
+                nl_k += d_nl;
+                sh_k += d_sh;
+                *dst_eval += eval_outer_chain_row_constraints_ext4(
                     &ck,
                     &pk,
                     &terminal_chain_ext4,
-                    act0 + d_act.mul_base(kv),
-                    fst0 + d_fst.mul_base(kv),
-                    lst0 + d_lst.mul_base(kv),
-                    eq0 + d_eq.mul_base(kv),
-                    nl0 + d_nl.mul_base(kv),
-                    sh0 + d_sh.mul_base(kv),
+                    act_k,
+                    fst_k,
+                    lst_k,
+                    eq_k,
+                    nl_k,
+                    sh_k,
                     gamma,
                 );
             }
         }
-        debug_assert_eq!(sum_evals[0] + sum_evals[1], cur_sum_claim);
+        sum_evals[1] = cur_sum_claim - sum_evals[0];
 
         let poly_coeffs = interpolate_deg8_from_evals_ext4(&sum_evals);
         let wire_poly = pack_outer_deg8_wire(&poly_coeffs);
