@@ -3704,3 +3704,1839 @@ theorem rustPolyAct_mulX (n : Nat) : ∀ f x,
     rw [rustGf128MulX_xor, rustGf128MulX_ite, ih (fun i => f (i + 1)) (rustGf128MulX x)]
 
 /-- Polynomials in the single operator `rustGf128MulX` commute. -/
+theorem rustPolyAct_comm (n m : Nat) (h : Nat → Bool) : ∀ f x,
+    rustPolyAct n f (rustPolyAct m h x) = rustPolyAct m h (rustPolyAct n f x) := by
+  induction n with
+  | zero => intro f x; exact (rustPolyAct_zero m h).symm
+  | succ n ih =>
+    intro f x
+    simp only [rustPolyAct]
+    rw [rustPolyAct_xor, rustPolyAct_ite, ← rustPolyAct_mulX m h x,
+      ih (fun i => f (i + 1)) (rustGf128MulX x)]
+
+private theorem twoPow_bit (j i : Nat) (hj : j < 128) :
+    (BitVec.twoPow 128 j).getLsbD i = decide (j = i) := by
+  rw [BitVec.getLsbD_twoPow, decide_eq_true hj]
+  rfl
+
+private theorem ite_twoPow_bit (c : Bool) (j i : Nat) (hj : j < 128) :
+    (if c then BitVec.twoPow 128 j else 0#128).getLsbD i = (c && decide (j = i)) := by
+  cases c
+  · exact BitVec.getLsbD_zero
+  · exact twoPow_bit j i hj
+
+private theorem rustGf128MulX_twoPow (j : Nat) (hj : j < 127) :
+    rustGf128MulX (BitVec.twoPow 128 j) = BitVec.twoPow 128 (j + 1) := by
+  unfold rustGf128MulX
+  rw [twoPow_bit j 127 (by omega), decide_eq_false (by omega : ¬ j = 127)]
+  show (1#128 <<< j) <<< 1 ^^^ 0#128 = 1#128 <<< (j + 1)
+  rw [BitVec.xor_zero, BitVec.shiftLeft_add]
+
+/-- No reduction happens below degree 128: the action on `X^j` writes the bits
+    of `f` at positions `j, …, j+n-1`. -/
+theorem rustPolyAct_twoPow_bit (n : Nat) : ∀ (j : Nat) (f : Nat → Bool), j + n ≤ 128 → ∀ i,
+    (rustPolyAct n f (BitVec.twoPow 128 j)).getLsbD i =
+      (decide (j ≤ i) && decide (i < j + n) && f (i - j)) := by
+  induction n with
+  | zero =>
+    intro j f _ i
+    show (0#128).getLsbD i = _
+    rw [BitVec.getLsbD_zero]
+    by_cases h : j ≤ i
+    · rw [decide_eq_false (by omega : ¬ i < j + 0)]
+      simp only [Bool.and_false, Bool.false_and]
+    · rw [decide_eq_false h]
+      rfl
+  | succ n ih =>
+    intro j f hjn i
+    have hj : j < 128 := by omega
+    simp only [rustPolyAct]
+    rw [BitVec.getLsbD_xor, ite_twoPow_bit _ j i hj]
+    have hRest : (rustPolyAct n (fun i => f (i + 1))
+          (rustGf128MulX (BitVec.twoPow 128 j))).getLsbD i =
+        (decide (j + 1 ≤ i) && decide (i < j + (n + 1)) && f (i - (j + 1) + 1)) := by
+      by_cases hn : n = 0
+      · subst hn
+        show (0#128).getLsbD i = _
+        rw [BitVec.getLsbD_zero]
+        by_cases h : j + 1 ≤ i
+        · rw [decide_eq_false (by omega : ¬ i < j + (0 + 1))]
+          simp only [Bool.and_false, Bool.false_and]
+        · rw [decide_eq_false h]
+          rfl
+      · rw [rustGf128MulX_twoPow j (by omega), ih (j + 1) _ (by omega) i,
+          show j + 1 + n = j + (n + 1) from by omega]
+    rw [hRest]
+    rcases Nat.lt_trichotomy i j with h | h | h
+    · rw [decide_eq_false (by omega : ¬ j = i), decide_eq_false (by omega : ¬ j + 1 ≤ i),
+        decide_eq_false (by omega : ¬ j ≤ i)]
+      cases f 0 <;> rfl
+    · subst h
+      rw [decide_eq_true (Eq.refl i), decide_eq_false (by omega : ¬ i + 1 ≤ i),
+        decide_eq_true (Nat.le_refl i), decide_eq_true (by omega : i < i + (n + 1)),
+        Nat.sub_self]
+      cases f 0 <;> rfl
+    · rw [decide_eq_false (by omega : ¬ j = i), decide_eq_true (by omega : j + 1 ≤ i),
+        decide_eq_true (by omega : j ≤ i), show i - (j + 1) + 1 = i - j from by omega]
+      cases f 0 <;> cases decide (i < j + (n + 1)) <;> cases f (i - j) <;> rfl
+
+/-- Every element is its own bit polynomial applied to `1`. -/
+theorem rustPolyAct_bits_one (a : RustGf128) : rustPolyAct 128 a.getLsbD 1#128 = a := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have h := rustPolyAct_twoPow_bit 128 0 a.getLsbD (by omega) i
+  rw [show BitVec.twoPow 128 0 = 1#128 from by decide] at h
+  rw [h, decide_eq_true (Nat.zero_le i), decide_eq_true (by omega : i < 0 + 128), Nat.sub_zero]
+  rfl
+
+theorem rustGf128Mul_comm (a b : RustGf128) : rustGf128Mul a b = rustGf128Mul b a := by
+  rw [rustGf128Mul_eq_act, rustGf128Mul_eq_act]
+  calc rustPolyAct 128 b.getLsbD a
+      = rustPolyAct 128 b.getLsbD (rustPolyAct 128 a.getLsbD 1#128) := by
+        rw [rustPolyAct_bits_one]
+    _ = rustPolyAct 128 a.getLsbD (rustPolyAct 128 b.getLsbD 1#128) :=
+        rustPolyAct_comm 128 128 a.getLsbD b.getLsbD 1#128
+    _ = rustPolyAct 128 a.getLsbD b := by rw [rustPolyAct_bits_one]
+
+theorem rustGf128Mul_xor_left (a b c : RustGf128) :
+    rustGf128Mul (a ^^^ b) c = rustGf128Mul a c ^^^ rustGf128Mul b c := by
+  simp only [rustGf128Mul_eq_act, rustPolyAct_xor]
+
+theorem rustGf128Mul_xor_right (a b c : RustGf128) :
+    rustGf128Mul a (b ^^^ c) = rustGf128Mul a b ^^^ rustGf128Mul a c := by
+  rw [rustGf128Mul_comm a, rustGf128Mul_xor_left, rustGf128Mul_comm b a, rustGf128Mul_comm c a]
+
+theorem rustGf128Mul_assoc (a b c : RustGf128) :
+    rustGf128Mul (rustGf128Mul a b) c = rustGf128Mul a (rustGf128Mul b c) := by
+  rw [rustGf128Mul_comm a (rustGf128Mul b c), rustGf128Mul_comm a b]
+  simp only [rustGf128Mul_eq_act]
+  exact rustPolyAct_comm 128 128 a.getLsbD c.getLsbD b
+
+theorem rustGf128Mul_left_comm (a b c : RustGf128) :
+    rustGf128Mul a (rustGf128Mul b c) = rustGf128Mul b (rustGf128Mul a c) := by
+  rw [← rustGf128Mul_assoc, rustGf128Mul_comm a b, rustGf128Mul_assoc]
+
+theorem rustGf128Mul_one_left (a : RustGf128) : rustGf128Mul 1#128 a = a := by
+  rw [rustGf128Mul_eq_act, rustPolyAct_bits_one]
+
+theorem rustGf128Mul_one_right (a : RustGf128) : rustGf128Mul a 1#128 = a := by
+  rw [rustGf128Mul_comm, rustGf128Mul_one_left]
+
+theorem rustGf128Mul_zero_left (a : RustGf128) : rustGf128Mul 0#128 a = 0#128 := by
+  rw [rustGf128Mul_eq_act, rustPolyAct_zero]
+
+theorem rustGf128Mul_zero_right (a : RustGf128) : rustGf128Mul a 0#128 = 0#128 := by
+  rw [rustGf128Mul_comm, rustGf128Mul_zero_left]
+
+theorem rustGf128MulX_eq_mul (a : RustGf128) : rustGf128MulX a = rustGf128Mul 2#128 a := by
+  rw [rustGf128Mul_eq_act, show (2#128 : RustGf128) = rustGf128MulX 1#128 from by decide,
+    rustPolyAct_mulX, rustPolyAct_bits_one]
+
+/-- The Rust polynomial basis as a commutative ring: addition is XOR and
+    multiplication is the shift-and-reduce loop. Scoped so that no other
+    `BitVec 128` carrier silently inherits this multiplication. -/
+scoped instance rustGf128Ring : LawfulCommRing RustGf128 where
+  zero := 0#128
+  one := 1#128
+  add a b := a ^^^ b
+  mul := rustGf128Mul
+  neg a := a
+  sub a b := a ^^^ b
+  add_assoc := BitVec.xor_assoc
+  add_comm := BitVec.xor_comm
+  zero_add _ := BitVec.zero_xor
+  add_zero _ := BitVec.xor_zero
+  add_left_neg _ := BitVec.xor_self
+  sub_eq_add_neg _ _ := rfl
+  mul_assoc := rustGf128Mul_assoc
+  mul_comm := rustGf128Mul_comm
+  one_mul := rustGf128Mul_one_left
+  mul_one := rustGf128Mul_one_right
+  left_distrib := rustGf128Mul_xor_right
+  right_distrib := rustGf128Mul_xor_left
+
+/-- Images of the Wiedemann generators `t_k` (`t_0 = 1`,
+    `t_{k+1}^2 = t_{k+1} t_k + 1`) in the Rust basis. -/
+def towerGenRust : Nat → RustGf128
+  | 0 => 1#128
+  | 1 => 0x295ac0b1f4731af9676aac9fa4b20b08#128
+  | 2 => 0x500317bd159d73bb34d2f7fba603e341#128
+  | 3 => 0xd7272761ca8e287777eda49fad5950db#128
+  | 4 => 0xf7ee5366ad8dcdf077be5724c64eb1d2#128
+  | 5 => 0x218cc1384d3fe56b1428b68814f535be#128
+  | 6 => 0x2c2fcdaa2679817f994e36d0d1df3b3d#128
+  | 7 => 0xe4f21e8c8ec8031cb7b73094152f7631#128
+  | _ => 0#128
+
+theorem towerGenRust_sq (k : Nat) (hk : k < 7) :
+    rustGf128Mul (towerGenRust (k + 1)) (towerGenRust (k + 1)) =
+      rustGf128Mul (towerGenRust (k + 1)) (towerGenRust k) ^^^ 1#128 := by
+  have h : ∀ k : Fin 7,
+      rustGf128Mul (towerGenRust (k.val + 1)) (towerGenRust (k.val + 1)) =
+        rustGf128Mul (towerGenRust (k.val + 1)) (towerGenRust k.val) ^^^ 1#128 := by
+    decide +kernel
+  exact h ⟨k, hk⟩
+
+/-- The tower embedded in the Rust basis, one quadratic extension at a time. -/
+def towerToRust : (k : Nat) → TowerElem k → RustGf128
+  | 0, a => match a with | true => 1#128 | false => 0#128
+  | k + 1, a =>
+    towerToRust k a.1 ^^^ rustGf128Mul (towerToRust k a.2) (towerGenRust (k + 1))
+
+theorem towerToRust_zero (k : Nat) : towerToRust k (towerZero k) = 0#128 := by
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+    show towerToRust k (towerZero k) ^^^
+      rustGf128Mul (towerToRust k (towerZero k)) (towerGenRust (k + 1)) = 0#128
+    rw [ih, rustGf128Mul_zero_left, BitVec.xor_zero]
+
+theorem towerToRust_one (k : Nat) : towerToRust k (towerOne k) = 1#128 := by
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+    show towerToRust k (towerOne k) ^^^
+      rustGf128Mul (towerToRust k (towerZero k)) (towerGenRust (k + 1)) = 1#128
+    rw [ih, towerToRust_zero, rustGf128Mul_zero_left, BitVec.xor_zero]
+
+theorem towerToRust_add (k : Nat) (a b : TowerElem k) :
+    towerToRust k (towerAdd k a b) = towerToRust k a ^^^ towerToRust k b := by
+  induction k with
+  | zero => cases a <;> cases b <;> decide
+  | succ k ih =>
+    show towerToRust k (towerAdd k a.1 b.1) ^^^
+        rustGf128Mul (towerToRust k (towerAdd k a.2 b.2)) (towerGenRust (k + 1)) =
+      (towerToRust k a.1 ^^^ rustGf128Mul (towerToRust k a.2) (towerGenRust (k + 1))) ^^^
+      (towerToRust k b.1 ^^^ rustGf128Mul (towerToRust k b.2) (towerGenRust (k + 1)))
+    rw [ih, ih, rustGf128Mul_xor_left]
+    simp only [BitVec.xor_assoc, bxor_left_comm]
+
+theorem towerToRust_X (k : Nat) : towerToRust k (towerX k) = towerGenRust k := by
+  cases k with
+  | zero => rfl
+  | succ k =>
+    show towerToRust k (towerZero k) ^^^
+      rustGf128Mul (towerToRust k (towerOne k)) (towerGenRust (k + 1)) = towerGenRust (k + 1)
+    rw [towerToRust_zero, towerToRust_one, rustGf128Mul_one_left, BitVec.zero_xor]
+
+set_option linter.unusedSimpArgs false in
+private theorem rust_tower_step (A1 A2 B1 B2 T U : RustGf128)
+    (hT : rustGf128Mul T T = rustGf128Mul T U ^^^ 1#128) :
+    (rustGf128Mul A1 B1 ^^^ rustGf128Mul A2 B2) ^^^
+      rustGf128Mul ((rustGf128Mul A1 B2 ^^^ rustGf128Mul A2 B1) ^^^
+        rustGf128Mul U (rustGf128Mul A2 B2)) T =
+    rustGf128Mul (A1 ^^^ rustGf128Mul A2 T) (B1 ^^^ rustGf128Mul B2 T) := by
+  have hs : rustGf128Mul (rustGf128Mul A2 T) (rustGf128Mul B2 T) =
+      rustGf128Mul (rustGf128Mul A2 B2) (rustGf128Mul T T) := by
+    simp only [rustGf128Mul_comm, rustGf128Mul_left_comm]
+  have h4 : rustGf128Mul (rustGf128Mul A2 T) (rustGf128Mul B2 T) =
+      rustGf128Mul (rustGf128Mul A2 B2) (rustGf128Mul T U) ^^^ rustGf128Mul A2 B2 := by
+    rw [hs, hT, rustGf128Mul_xor_right, rustGf128Mul_one_right]
+  rw [rustGf128Mul_xor_left A1 (rustGf128Mul A2 T), rustGf128Mul_xor_right A1,
+    rustGf128Mul_xor_right (rustGf128Mul A2 T), h4]
+  simp only [rustGf128Mul_xor_right, rustGf128Mul_comm,
+    rustGf128Mul_left_comm, BitVec.xor_assoc, BitVec.xor_comm, bxor_left_comm]
+
+theorem towerToRust_mul : ∀ (k : Nat), k ≤ 7 → ∀ a b : TowerElem k,
+    towerToRust k (towerMul k a b) =
+      rustGf128Mul (towerToRust k a) (towerToRust k b) := by
+  intro k
+  induction k with
+  | zero => intro _ a b; cases a <;> cases b <;> decide +kernel
+  | succ k ih =>
+    intro hk a b
+    have ih' := ih (by omega)
+    show towerToRust k (towerAdd k (towerMul k a.1 b.1) (towerMul k a.2 b.2)) ^^^
+        rustGf128Mul (towerToRust k (towerAdd k
+          (towerAdd k (towerMul k a.1 b.2) (towerMul k a.2 b.1))
+          (towerMul k (towerX k) (towerMul k a.2 b.2)))) (towerGenRust (k + 1)) =
+      rustGf128Mul (towerToRust k a.1 ^^^ rustGf128Mul (towerToRust k a.2) (towerGenRust (k + 1)))
+        (towerToRust k b.1 ^^^ rustGf128Mul (towerToRust k b.2) (towerGenRust (k + 1)))
+    simp only [towerToRust_add, ih', towerToRust_X]
+    exact rust_tower_step _ _ _ _ _ _ (towerGenRust_sq k (by omega))
+
+/-- A ring homomorphism out of a field is injective. -/
+theorem towerToRust_injective (a b : Tower128)
+    (h : towerToRust 7 a = towerToRust 7 b) : a = b := by
+  have hsum : towerToRust 7 (towerAdd 7 a b) = 0#128 := by
+    rw [towerToRust_add, h, BitVec.xor_self]
+  by_cases hz : towerAdd 7 a b = towerZero 7
+  · have hc := towerAdd_cancel 7 a b
+    rw [hz, towerAdd_zero] at hc
+    exact hc
+  · exfalso
+    have h1 := congrArg (towerToRust 7) (towerMul_inv 7 _ hz)
+    rw [towerToRust_mul 7 (Nat.le_refl 7), hsum, rustGf128Mul_zero_left, towerToRust_one] at h1
+    exact absurd h1 (by decide)
+
+/-- A root of `x^128 + x^7 + x^2 + x + 1` in the Wiedemann tower: the image of
+    Rust's `x` (`2#128`). -/
+def rustGenTower : Tower128 :=
+  wiedemannOfNat 7 0xbfe0a17ee2b77754526b13e1fedaef3d
+
+theorem towerToRust_rustGenTower : towerToRust 7 rustGenTower = 2#128 := by
+  decide +kernel
+
+def rustToTowerAux : Nat → (Nat → Bool) → Tower128
+  | 0, _ => towerZero 7
+  | n + 1, f =>
+    towerAdd 7 (if f 0 then towerOne 7 else towerZero 7)
+      (towerMul 7 rustGenTower (rustToTowerAux n (fun i => f (i + 1))))
+
+/-- The basis conversion: Horner evaluation of the Rust coefficient bits at
+    `rustGenTower`. This, not coordinate repacking, relates the two carriers. -/
+def rustToTower (a : RustGf128) : Tower128 := rustToTowerAux 128 a.getLsbD
+
+private theorem towerToRust_bit (c : Bool) :
+    towerToRust 7 (if c then towerOne 7 else towerZero 7) = if c then 1#128 else 0#128 := by
+  cases c
+  · exact towerToRust_zero 7
+  · exact towerToRust_one 7
+
+theorem towerToRust_rustToTowerAux (n : Nat) : ∀ f,
+    towerToRust 7 (rustToTowerAux n f) = rustPolyAct n f 1#128 := by
+  induction n with
+  | zero => intro f; exact towerToRust_zero 7
+  | succ n ih =>
+    intro f
+    simp only [rustToTowerAux, rustPolyAct]
+    rw [towerToRust_add, towerToRust_mul 7 (Nat.le_refl 7), towerToRust_rustGenTower, ih,
+      towerToRust_bit, rustPolyAct_mulX, rustGf128MulX_eq_mul]
+
+theorem towerToRust_rustToTower (a : RustGf128) : towerToRust 7 (rustToTower a) = a := by
+  unfold rustToTower
+  rw [towerToRust_rustToTowerAux, rustPolyAct_bits_one]
+
+theorem rustToTower_towerToRust (t : Tower128) : rustToTower (towerToRust 7 t) = t :=
+  towerToRust_injective _ _ (towerToRust_rustToTower _)
+
+theorem rustToTower_injective (a b : RustGf128) (h : rustToTower a = rustToTower b) : a = b := by
+  have hc := congrArg (towerToRust 7) h
+  rw [towerToRust_rustToTower, towerToRust_rustToTower] at hc
+  exact hc
+
+theorem rustToTower_xor (a b : RustGf128) :
+    rustToTower (a ^^^ b) = towerAdd 7 (rustToTower a) (rustToTower b) := by
+  apply towerToRust_injective
+  rw [towerToRust_rustToTower, towerToRust_add, towerToRust_rustToTower, towerToRust_rustToTower]
+
+/-- The conversion carries Rust's multiplication to tower multiplication for
+    every pair of field elements. -/
+theorem rustToTower_mul (a b : RustGf128) :
+    rustToTower (rustGf128Mul a b) = towerMul 7 (rustToTower a) (rustToTower b) := by
+  apply towerToRust_injective
+  rw [towerToRust_rustToTower, towerToRust_mul 7 (Nat.le_refl 7), towerToRust_rustToTower,
+    towerToRust_rustToTower]
+
+theorem rustToTower_zero : rustToTower 0#128 = towerZero 7 := by
+  apply towerToRust_injective
+  rw [towerToRust_rustToTower, towerToRust_zero]
+
+theorem rustToTower_two : rustToTower 2#128 = rustGenTower := by
+  apply towerToRust_injective
+  rw [towerToRust_rustToTower, towerToRust_rustGenTower]
+
+/-- `x^128 + x^7 + x^2 + x + 1` has no proper factorisation: the quotient ring
+    Rust computes in has no zero divisors. -/
+theorem rustGf128Mul_eq_zero (a b : RustGf128) (h : rustGf128Mul a b = 0#128) :
+    a = 0#128 ∨ b = 0#128 := by
+  have ht : towerMul 7 (rustToTower a) (rustToTower b) = towerZero 7 := by
+    rw [← rustToTower_mul, h, rustToTower_zero]
+  rcases (towerMul_eq_zero_iff 7 _ _).mp ht with h1 | h1
+  · exact Or.inl (rustToTower_injective _ _ (h1.trans rustToTower_zero.symm))
+  · exact Or.inr (rustToTower_injective _ _ (h1.trans rustToTower_zero.symm))
+
+scoped instance rustGf128NoZeroDivisors : NoZeroDivisors RustGf128 where
+  eq_zero_or_eq_zero_of_mul_eq_zero h := rustGf128Mul_eq_zero _ _ h
+
+#tooth_pair Qsag.MigrationExecution.rustToTower_mul vs
+  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
+
+/-- One base-case opening. Gamma is a received claim, never assigned alpha*beta
+    by the verifier. All 2 × 64 openings must pass. This is the final base-case
+    check only; the recursive folding-to-gates refinement remains separate. -/
+structure BaseOpening where
+  alpha : RustGf128
+  beta : RustGf128
+  gamma : RustGf128
+  deriving DecidableEq
+
+def BaseOpening.check (o : BaseOpening) : Bool :=
+  o.gamma == rustGf128Mul o.alpha o.beta
+
+def checkBaseOpenings (openings : Fin 2 → Fin 64 → BaseOpening) : Bool :=
+  finAll 2 (fun t => finAll 64 (fun lane => (openings t lane).check))
+
+theorem checkBaseOpenings_sound (openings : Fin 2 → Fin 64 → BaseOpening)
+    (h : checkBaseOpenings openings = true) :
+    ∀ t lane, (openings t lane).gamma =
+      rustGf128Mul (openings t lane).alpha (openings t lane).beta := by
+  intro t lane
+  exact eq_of_beq ((finAll_eq_true_iff 64 _).mp
+    ((finAll_eq_true_iff 2 _).mp h t) lane)
+
+/-- The base-case polynomial evaluated by Rust from the folded claim and
+    reshared d1/d2, including the actual received gamma. No correctness of the
+    supplied d1/d2 or randomness of rb is assumed by this definition. -/
+def baseOpening (a b c u v d1 d2 rb : RustGf128) : BaseOpening where
+  alpha := a ^^^ rustGf128Mul u rb
+  beta := b ^^^ rustGf128Mul v rb
+  gamma := c ^^^ rustGf128Mul d1 rb ^^^ rustGf128Mul d2 (rustGf128Mul rb rb)
+
+/-! ### Recursive inner-product sacrifice in the Rust basis: fresh-coin soundness
+
+This models `verify_pending_bits_slice` from the inner-product claim onward: the
+arity-2 folds (`h0`, `h1` reshared, then the coin `rk`) and the masked base case
+(`u`, `v`, `d1`, `d2` fixed, then the coin `rb`). A prover is a strategy tree, so
+each message may depend on every earlier coin and on nothing later. The batching
+of AND gates into the first inner-product claim, and the PRSS/reshare transport
+of these values, are outside this model. -/
+
+/-- `Σ_{i<n} a i · b i`. -/
+def rustDot : Nat → (Nat → RustGf128) → (Nat → RustGf128) → RustGf128
+  | 0, _, _ => 0#128
+  | n + 1, a, b => rustDot n a b ^^^ rustGf128Mul (a n) (b n)
+
+theorem rustDot_congr (n : Nat) (a a' b b' : Nat → RustGf128)
+    (ha : ∀ i, i < n → a i = a' i) (hb : ∀ i, i < n → b i = b' i) :
+    rustDot n a b = rustDot n a' b' := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    show rustDot n a b ^^^ rustGf128Mul (a n) (b n) =
+      rustDot n a' b' ^^^ rustGf128Mul (a' n) (b' n)
+    rw [ih (fun i hi => ha i (by omega)) (fun i hi => hb i (by omega)),
+      ha n (by omega), hb n (by omega)]
+
+theorem rustDot_add (n : Nat) (a b : Nat → RustGf128) : ∀ m,
+    rustDot (n + m) a b =
+      rustDot n a b ^^^ rustDot m (fun i => a (n + i)) (fun i => b (n + i)) := by
+  intro m
+  induction m with
+  | zero =>
+    show rustDot n a b = rustDot n a b ^^^ 0#128
+    rw [BitVec.xor_zero]
+  | succ m ih =>
+    show rustDot (n + m) a b ^^^ rustGf128Mul (a (n + m)) (b (n + m)) =
+      rustDot n a b ^^^ (rustDot m (fun i => a (n + i)) (fun i => b (n + i)) ^^^
+        rustGf128Mul (a (n + m)) (b (n + m)))
+    rw [ih, BitVec.xor_assoc]
+
+/-- Zero padding past the live length, as Rust pushes zero quads on odd counts. -/
+def padded (len : Nat) (v : Nat → RustGf128) : Nat → RustGf128 :=
+  fun i => if i < len then v i else 0#128
+
+private theorem padded_lt (len : Nat) (v : Nat → RustGf128) (i : Nat) (h : i < len) :
+    padded len v i = v i := by
+  simp only [padded, h, ↓reduceIte]
+
+private theorem padded_ge (len : Nat) (v : Nat → RustGf128) (i : Nat) (h : len ≤ i) :
+    padded len v i = 0#128 := by
+  simp only [padded, show ¬ i < len from by omega, ↓reduceIte]
+
+theorem rustDot_padded (len : Nat) (a b : Nat → RustGf128) : ∀ d,
+    rustDot (len + d) (padded len a) (padded len b) = rustDot len a b := by
+  intro d
+  induction d with
+  | zero =>
+    exact rustDot_congr len _ _ _ _ (fun i hi => padded_lt len a i hi)
+      (fun i hi => padded_lt len b i hi)
+  | succ d ih =>
+    show rustDot (len + d) (padded len a) (padded len b) ^^^
+      rustGf128Mul (padded len a (len + d)) (padded len b (len + d)) = _
+    rw [ih, padded_ge len a (len + d) (by omega), rustGf128Mul_zero_left, BitVec.xor_zero]
+
+/-- An inner-product claim `⟨a, b⟩ = c` over `len` field elements. -/
+structure IpClaim where
+  len : Nat
+  a : Nat → RustGf128
+  b : Nat → RustGf128
+  c : RustGf128
+
+/-- The claim's defect; it is zero exactly when the claim is true. -/
+def IpClaim.err (s : IpClaim) : RustGf128 := rustDot s.len s.a s.b ^^^ s.c
+
+def IpClaim.half (s : IpClaim) : Nat := (s.len + 1) / 2
+
+def IpClaim.crossLoHi (s : IpClaim) : RustGf128 :=
+  rustDot s.half (padded s.len s.a) (fun i => padded s.len s.b (s.half + i))
+
+def IpClaim.crossHiLo (s : IpClaim) : RustGf128 :=
+  rustDot s.half (fun i => padded s.len s.a (s.half + i)) (padded s.len s.b)
+
+/-- The two reshared cross terms of one fold round, fixed before its coin. -/
+structure FoldMessage where
+  h0 : RustGf128
+  h1 : RustGf128
+
+/-- One arity-2 fold: `a' = a_lo + rk·a_hi`, `b' = rk·b_lo + b_hi`,
+    `c' = h0 + rk·c + rk²·h1`. -/
+def foldRound (s : IpClaim) (m : FoldMessage) (rk : RustGf128) : IpClaim where
+  len := s.half
+  a := fun i => padded s.len s.a i ^^^ rustGf128Mul (padded s.len s.a (s.half + i)) rk
+  b := fun i => rustGf128Mul (padded s.len s.b i) rk ^^^ padded s.len s.b (s.half + i)
+  c := m.h0 ^^^ rustGf128Mul s.c rk ^^^ rustGf128Mul m.h1 (rustGf128Mul rk rk)
+
+set_option linter.unusedSimpArgs false in
+private theorem rustDot_fold (rk : RustGf128) (aLo aHi bLo bHi : Nat → RustGf128) : ∀ n,
+    rustDot n (fun i => aLo i ^^^ rustGf128Mul (aHi i) rk)
+        (fun i => rustGf128Mul (bLo i) rk ^^^ bHi i) =
+      rustDot n aLo bHi ^^^
+        rustGf128Mul (rustDot n aLo bLo ^^^ rustDot n aHi bHi) rk ^^^
+        rustGf128Mul (rustDot n aHi bLo) (rustGf128Mul rk rk) := by
+  intro n
+  induction n with
+  | zero =>
+    show (0#128 : RustGf128) = 0#128 ^^^ rustGf128Mul (0#128 ^^^ 0#128) rk ^^^
+      rustGf128Mul 0#128 (rustGf128Mul rk rk)
+    simp only [BitVec.xor_zero, rustGf128Mul_zero_left]
+  | succ n ih =>
+    show rustDot n (fun i => aLo i ^^^ rustGf128Mul (aHi i) rk)
+          (fun i => rustGf128Mul (bLo i) rk ^^^ bHi i) ^^^
+        rustGf128Mul (aLo n ^^^ rustGf128Mul (aHi n) rk) (rustGf128Mul (bLo n) rk ^^^ bHi n) =
+      (rustDot n aLo bHi ^^^ rustGf128Mul (aLo n) (bHi n)) ^^^
+        rustGf128Mul ((rustDot n aLo bLo ^^^ rustGf128Mul (aLo n) (bLo n)) ^^^
+          (rustDot n aHi bHi ^^^ rustGf128Mul (aHi n) (bHi n))) rk ^^^
+        rustGf128Mul (rustDot n aHi bLo ^^^ rustGf128Mul (aHi n) (bLo n)) (rustGf128Mul rk rk)
+    rw [ih]
+    simp only [rustGf128Mul_xor_left, rustGf128Mul_xor_right, rustGf128Mul_assoc,
+      rustGf128Mul_comm, rustGf128Mul_left_comm, BitVec.xor_assoc, BitVec.xor_comm,
+      bxor_left_comm]
+
+theorem rustDot_split_half (s : IpClaim) :
+    rustDot s.len s.a s.b =
+      rustDot s.half (padded s.len s.a) (padded s.len s.b) ^^^
+      rustDot s.half (fun i => padded s.len s.a (s.half + i))
+        (fun i => padded s.len s.b (s.half + i)) := by
+  have hd : s.half + s.half = s.len + (s.half + s.half - s.len) := by
+    unfold IpClaim.half
+    omega
+  rw [← rustDot_add, hd, rustDot_padded]
+
+set_option linter.unusedSimpArgs false in
+/-- The folded defect is a quadratic in the coin whose middle coefficient is
+    the incoming defect; the outer coefficients are the cross-term errors. -/
+theorem foldRound_err (s : IpClaim) (m : FoldMessage) (rk : RustGf128) :
+    (foldRound s m rk).err =
+      RoundPoly.evalCoeffs [s.crossLoHi ^^^ m.h0, s.err, s.crossHiLo ^^^ m.h1] rk := by
+  show rustDot s.half
+        (fun i => padded s.len s.a i ^^^ rustGf128Mul (padded s.len s.a (s.half + i)) rk)
+        (fun i => rustGf128Mul (padded s.len s.b i) rk ^^^ padded s.len s.b (s.half + i)) ^^^
+      (m.h0 ^^^ rustGf128Mul s.c rk ^^^ rustGf128Mul m.h1 (rustGf128Mul rk rk)) =
+    (s.crossLoHi ^^^ m.h0) ^^^ rustGf128Mul rk
+      ((rustDot s.len s.a s.b ^^^ s.c) ^^^ rustGf128Mul rk
+        ((s.crossHiLo ^^^ m.h1) ^^^ rustGf128Mul rk 0#128))
+  rw [rustDot_fold, rustDot_split_half s, rustGf128Mul_zero_right, BitVec.xor_zero]
+  unfold IpClaim.crossLoHi IpClaim.crossHiLo
+  simp only [rustGf128Mul_xor_left, rustGf128Mul_xor_right, rustGf128Mul_assoc,
+    rustGf128Mul_comm, rustGf128Mul_left_comm, BitVec.xor_assoc, BitVec.xor_comm,
+    bxor_left_comm]
+
+private theorem two_ne_zero : (2#128 : RustGf128) ≠ 0#128 := by decide
+private theorem three_ne_zero : (3#128 : RustGf128) ≠ 0#128 := by decide
+
+/-- A quadratic with a nonzero constant or linear coefficient is not the zero
+    function; the witness point is explicit. -/
+theorem quadratic_nonzero_point (e0 e1 e2 : RustGf128) (h : e0 ≠ 0#128 ∨ e1 ≠ 0#128) :
+    ∃ x : RustGf128, RoundPoly.evalCoeffs [e0, e1, e2] x ≠ CommRingOps.zero := by
+  have hEval : ∀ x : RustGf128, RoundPoly.evalCoeffs [e0, e1, e2] x =
+      e0 ^^^ rustGf128Mul x (e1 ^^^ rustGf128Mul x e2) := by
+    intro x
+    show e0 ^^^ rustGf128Mul x (e1 ^^^ rustGf128Mul x (e2 ^^^ rustGf128Mul x 0#128)) = _
+    rw [rustGf128Mul_zero_right, BitVec.xor_zero]
+  by_cases h0 : e0 = 0#128
+  · have h1 : e1 ≠ 0#128 := by
+      rcases h with h | h
+      · exact absurd h0 h
+      · exact h
+    subst h0
+    by_cases h12 : e1 = e2
+    · subst h12
+      refine ⟨2#128, ?_⟩
+      rw [hEval]
+      show 0#128 ^^^ rustGf128Mul 2#128 (e1 ^^^ rustGf128Mul 2#128 e1) ≠ 0#128
+      have hThree : e1 ^^^ rustGf128Mul 2#128 e1 = rustGf128Mul 3#128 e1 := by
+        rw [show (3#128 : RustGf128) = 1#128 ^^^ 2#128 from by decide, rustGf128Mul_xor_left,
+          rustGf128Mul_one_left]
+      rw [BitVec.zero_xor, hThree]
+      intro hz
+      rcases rustGf128Mul_eq_zero _ _ hz with hz | hz
+      · exact two_ne_zero hz
+      · rcases rustGf128Mul_eq_zero _ _ hz with hz | hz
+        · exact three_ne_zero hz
+        · exact h1 hz
+    · refine ⟨1#128, ?_⟩
+      rw [hEval]
+      show 0#128 ^^^ rustGf128Mul 1#128 (e1 ^^^ rustGf128Mul 1#128 e2) ≠ 0#128
+      rw [BitVec.zero_xor, rustGf128Mul_one_left, rustGf128Mul_one_left]
+      intro hz
+      apply h12
+      have hc := bxor_cancel e1 e2
+      rw [hz, BitVec.xor_zero] at hc
+      exact hc
+  · refine ⟨0#128, ?_⟩
+    rw [hEval]
+    show e0 ^^^ rustGf128Mul 0#128 (e1 ^^^ rustGf128Mul 0#128 e2) ≠ 0#128
+    rw [rustGf128Mul_zero_left, BitVec.xor_zero]
+    exact h0
+
+/-- **Fold-round soundness.** With the claim and both cross terms fixed, a
+    false claim folds to a true one for at most two coins of any duplicate-free
+    sample space. -/
+theorem foldRound_false_claim_survives_at_most_two_coins
+    (s : IpClaim) (m : FoldMessage) (hErr : s.err ≠ 0#128)
+    (S : List RustGf128) (hS : S.Nodup) :
+    (S.filter (fun rk => decide ((foldRound s m rk).err = 0#128))).length ≤ 2 := by
+  have hCount := RoundPoly.roots_nodup_length_le 2
+    [s.crossLoHi ^^^ m.h0, s.err, s.crossHiLo ^^^ m.h1] S hS (Nat.le_refl 3)
+    (quadratic_nonzero_point _ _ _ (Or.inr hErr))
+  have hPred : (fun rk => decide ((foldRound s m rk).err = 0#128)) =
+      (fun r => decide (RoundPoly.evalCoeffs
+        [s.crossLoHi ^^^ m.h0, s.err, s.crossHiLo ^^^ m.h1] r = CommRingOps.zero)) := by
+    funext rk
+    rw [foldRound_err]
+    rfl
+  rw [hPred]
+  exact hCount
+
+/-- A prover that sees the coin first cancels the defect with one cross term. -/
+theorem fold_message_after_coin_cancels_defect (s : IpClaim) (rk : RustGf128) :
+    (foldRound s ⟨s.crossLoHi ^^^ rustGf128Mul rk s.err, s.crossHiLo⟩ rk).err = 0#128 := by
+  rw [foldRound_err]
+  show (s.crossLoHi ^^^ (s.crossLoHi ^^^ rustGf128Mul rk s.err)) ^^^ rustGf128Mul rk
+    (s.err ^^^ rustGf128Mul rk ((s.crossHiLo ^^^ s.crossHiLo) ^^^ rustGf128Mul rk 0#128)) = 0#128
+  rw [bxor_cancel, BitVec.xor_self, rustGf128Mul_zero_right, BitVec.xor_zero,
+    rustGf128Mul_zero_right, BitVec.xor_zero, BitVec.xor_self]
+
+/-- Commit order matters: for a false claim, every coin has a forging message
+    when the message may be chosen after the coin. -/
+theorem tooth_fold_message_after_coin_forges :
+    ∃ s : IpClaim, s.err ≠ 0#128 ∧
+      ∀ rk : RustGf128, ∃ m : FoldMessage, (foldRound s m rk).err = 0#128 := by
+  refine ⟨⟨1, fun _ => 1#128, fun _ => 1#128, 0#128⟩, by decide +kernel, fun rk => ?_⟩
+  exact ⟨_, fold_message_after_coin_cancels_defect _ rk⟩
+
+#tooth_pair Qsag.MigrationExecution.foldRound_false_claim_survives_at_most_two_coins vs
+  Qsag.MigrationExecution.tooth_fold_message_after_coin_forges
+
+theorem honest_fold_preserves_true_claim (s : IpClaim) (rk : RustGf128)
+    (h : s.err = 0#128) :
+    (foldRound s ⟨s.crossLoHi, s.crossHiLo⟩ rk).err = 0#128 := by
+  rw [foldRound_err, h]
+  show (s.crossLoHi ^^^ s.crossLoHi) ^^^ rustGf128Mul rk
+    (0#128 ^^^ rustGf128Mul rk ((s.crossHiLo ^^^ s.crossHiLo) ^^^ rustGf128Mul rk 0#128)) = 0#128
+  rw [BitVec.xor_self, BitVec.xor_self, rustGf128Mul_zero_right, BitVec.xor_zero,
+    rustGf128Mul_zero_right, BitVec.xor_zero, rustGf128Mul_zero_right, BitVec.xor_zero]
+
+/-- Base-case masks and reshared products, fixed before the base coin. -/
+structure BaseMessage where
+  u : RustGf128
+  v : RustGf128
+  d1 : RustGf128
+  d2 : RustGf128
+
+/-- The opened `gamma = alpha · beta` test on the single remaining pair. -/
+def baseAccepts (s : IpClaim) (m : BaseMessage) (rb : RustGf128) : Bool :=
+  (baseOpening (s.a 0) (s.b 0) s.c m.u m.v m.d1 m.d2 rb).check
+
+private theorem bxor_eq_zero_iff (x y : RustGf128) : x ^^^ y = 0#128 ↔ x = y := by
+  constructor
+  · intro h
+    have hc := bxor_cancel x y
+    rw [h, BitVec.xor_zero] at hc
+    exact hc
+  · intro h
+    rw [h, BitVec.xor_self]
+
+set_option linter.unusedSimpArgs false in
+theorem baseAccepts_iff (s : IpClaim) (m : BaseMessage) (rb : RustGf128) (hLen : s.len = 1) :
+    baseAccepts s m rb = true ↔
+      RoundPoly.evalCoeffs
+        [s.err,
+         (rustGf128Mul (s.a 0) m.v ^^^ rustGf128Mul m.u (s.b 0)) ^^^ m.d1,
+         rustGf128Mul m.u m.v ^^^ m.d2] rb = CommRingOps.zero := by
+  have hErr : s.err = rustGf128Mul (s.a 0) (s.b 0) ^^^ s.c := by
+    unfold IpClaim.err
+    rw [hLen]
+    show (0#128 ^^^ rustGf128Mul (s.a 0) (s.b 0)) ^^^ s.c = _
+    rw [BitVec.zero_xor]
+  have hCheck : baseAccepts s m rb = true ↔
+      (s.c ^^^ rustGf128Mul m.d1 rb ^^^ rustGf128Mul m.d2 (rustGf128Mul rb rb)) =
+        rustGf128Mul (s.a 0 ^^^ rustGf128Mul m.u rb) (s.b 0 ^^^ rustGf128Mul m.v rb) := by
+    unfold baseAccepts BaseOpening.check baseOpening
+    exact beq_iff_eq
+  rw [hCheck, ← bxor_eq_zero_iff, hErr]
+  show _ ↔ (rustGf128Mul (s.a 0) (s.b 0) ^^^ s.c) ^^^ rustGf128Mul rb
+      (((rustGf128Mul (s.a 0) m.v ^^^ rustGf128Mul m.u (s.b 0)) ^^^ m.d1) ^^^ rustGf128Mul rb
+        ((rustGf128Mul m.u m.v ^^^ m.d2) ^^^ rustGf128Mul rb 0#128)) = 0#128
+  rw [rustGf128Mul_zero_right, BitVec.xor_zero]
+  simp only [rustGf128Mul_xor_left, rustGf128Mul_xor_right, rustGf128Mul_assoc,
+    rustGf128Mul_comm, rustGf128Mul_left_comm, BitVec.xor_assoc, BitVec.xor_comm,
+    bxor_left_comm]
+
+/-- **Base-case soundness.** With the masks and reshared products fixed, a
+    false single-pair claim passes for at most two base coins. -/
+theorem baseAccepts_false_claim_at_most_two_coins
+    (s : IpClaim) (m : BaseMessage) (hErr : s.err ≠ 0#128)
+    (Sb : List RustGf128) (hSb : Sb.Nodup) :
+    (Sb.filter (fun rb => decide (s.len = 1) && baseAccepts s m rb)).length ≤ 2 := by
+  by_cases hLen : s.len = 1
+  · have hCount := RoundPoly.roots_nodup_length_le 2
+      [s.err, (rustGf128Mul (s.a 0) m.v ^^^ rustGf128Mul m.u (s.b 0)) ^^^ m.d1,
+        rustGf128Mul m.u m.v ^^^ m.d2] Sb hSb (Nat.le_refl 3)
+      (quadratic_nonzero_point _ _ _ (Or.inl hErr))
+    have hPred : (fun rb => decide (s.len = 1) && baseAccepts s m rb) =
+        (fun r => decide (RoundPoly.evalCoeffs
+          [s.err, (rustGf128Mul (s.a 0) m.v ^^^ rustGf128Mul m.u (s.b 0)) ^^^ m.d1,
+            rustGf128Mul m.u m.v ^^^ m.d2] r = CommRingOps.zero)) := by
+      funext rb
+      rw [decide_eq_true hLen]
+      show baseAccepts s m rb = _
+      cases hb : baseAccepts s m rb
+      · exact (decide_eq_false (fun hz => by
+          rw [(baseAccepts_iff s m rb hLen).mpr hz] at hb
+          cases hb)).symm
+      · exact (decide_eq_true ((baseAccepts_iff s m rb hLen).mp hb)).symm
+    rw [hPred]
+    exact hCount
+  · have hPred : (fun rb => decide (s.len = 1) && baseAccepts s m rb) = (fun _ => false) := by
+      funext rb
+      rw [decide_eq_false hLen]
+      rfl
+    rw [hPred]
+    have hNil : ∀ L : List RustGf128, (L.filter (fun _ => false)).length = 0 := by
+      intro L
+      induction L with
+      | nil => rfl
+      | cons x xs ih => simpa only [List.filter] using ih
+    rw [hNil]
+    omega
+
+theorem honest_base_accepts (s : IpClaim) (u v rb : RustGf128)
+    (hLen : s.len = 1) (h : s.err = 0#128) :
+    baseAccepts s
+      ⟨u, v, rustGf128Mul (s.a 0) v ^^^ rustGf128Mul u (s.b 0), rustGf128Mul u v⟩ rb = true := by
+  rw [baseAccepts_iff s _ rb hLen, h]
+  show 0#128 ^^^ rustGf128Mul rb
+    (((rustGf128Mul (s.a 0) v ^^^ rustGf128Mul u (s.b 0)) ^^^
+        (rustGf128Mul (s.a 0) v ^^^ rustGf128Mul u (s.b 0))) ^^^ rustGf128Mul rb
+      ((rustGf128Mul u v ^^^ rustGf128Mul u v) ^^^ rustGf128Mul rb 0#128)) = 0#128
+  rw [BitVec.xor_self, BitVec.xor_self, rustGf128Mul_zero_right, BitVec.xor_zero,
+    rustGf128Mul_zero_right, BitVec.xor_zero, rustGf128Mul_zero_right, BitVec.xor_zero]
+
+/-- An adaptive prover for `r` folds followed by the base case: each message is
+    chosen after all earlier coins and before the next one. -/
+@[expose] def FoldProver : Nat → Type
+  | 0 => BaseMessage
+  | r + 1 => FoldMessage × (RustGf128 → FoldProver r)
+
+/-- The verifier's decision on one coin vector (`r` fold coins, then the base
+    coin). Wrong-length coin vectors reject. -/
+def sacrificeAccepts : (r : Nat) → FoldProver r → IpClaim → List RustGf128 → Bool
+  | 0, bm, s, [rb] => decide (s.len = 1) && baseAccepts s bm rb
+  | 0, _, _, _ => false
+  | _ + 1, _, _, [] => false
+  | r + 1, p, s, rk :: rest => sacrificeAccepts r (p.2 rk) (foldRound s p.1 rk) rest
+
+/-- All coin vectors: fold coins from `S`, base coin from `Sb`. -/
+def coinVectors (S Sb : List RustGf128) : Nat → List (List RustGf128)
+  | 0 => Sb.map (fun rb => [rb])
+  | r + 1 => S.flatMap (fun rk => (coinVectors S Sb r).map (fun rest => rk :: rest))
+
+/-- Number of accepting coin vectors, computed along the strategy tree. -/
+def acceptingCoins (S Sb : List RustGf128) : (r : Nat) → FoldProver r → IpClaim → Nat
+  | 0, bm, s => (Sb.filter (fun rb => decide (s.len = 1) && baseAccepts s bm rb)).length
+  | r + 1, p, s =>
+    (S.map (fun rk => acceptingCoins S Sb r (p.2 rk) (foldRound s p.1 rk))).sum
+
+private theorem filter_map_length {α β : Type} (f : α → β) (p : β → Bool) : ∀ L : List α,
+    ((L.map f).filter p).length = (L.filter (fun x => p (f x))).length
+  | [] => rfl
+  | x :: xs => by
+    have ih := filter_map_length f p xs
+    cases hp : p (f x)
+    · simpa only [List.map_cons, List.filter, hp] using ih
+    · simpa only [List.map_cons, List.filter, hp, List.length_cons, Nat.succ.injEq] using ih
+
+private theorem filter_flatMap_length {α β : Type} (f : α → List β) (p : β → Bool) :
+    ∀ L : List α,
+      ((L.flatMap f).filter p).length = (L.map (fun x => ((f x).filter p).length)).sum
+  | [] => rfl
+  | x :: xs => by
+    rw [List.flatMap_cons, List.filter_append, List.length_append, List.map_cons, List.sum_cons,
+      filter_flatMap_length f p xs]
+
+/-- `acceptingCoins` counts exactly the coin vectors the verifier accepts. -/
+theorem acceptingCoins_eq_filter (S Sb : List RustGf128) : ∀ (r : Nat) (p : FoldProver r)
+    (s : IpClaim),
+    acceptingCoins S Sb r p s =
+      ((coinVectors S Sb r).filter (sacrificeAccepts r p s)).length := by
+  intro r
+  induction r with
+  | zero =>
+    intro p s
+    show (Sb.filter (fun rb => decide (s.len = 1) && baseAccepts s p rb)).length =
+      ((Sb.map (fun rb => [rb])).filter (sacrificeAccepts 0 p s)).length
+    rw [filter_map_length]
+    rfl
+  | succ r ih =>
+    intro p s
+    show (S.map (fun rk => acceptingCoins S Sb r (p.2 rk) (foldRound s p.1 rk))).sum =
+      ((S.flatMap (fun rk => (coinVectors S Sb r).map (fun rest => rk :: rest))).filter
+        (sacrificeAccepts (r + 1) p s)).length
+    rw [filter_flatMap_length]
+    congr 1
+    apply List.map_congr_left
+    intro rk _
+    rw [filter_map_length, ih]
+    rfl
+
+theorem coinVectors_length (S Sb : List RustGf128) : ∀ r,
+    (coinVectors S Sb r).length = S.length ^ r * Sb.length := by
+  intro r
+  induction r with
+  | zero =>
+    show (Sb.map (fun rb => [rb])).length = S.length ^ 0 * Sb.length
+    rw [List.length_map, Nat.pow_zero, Nat.one_mul]
+  | succ r ih =>
+    have hSum : ∀ L : List RustGf128,
+        (L.flatMap (fun rk => (coinVectors S Sb r).map (fun rest => rk :: rest))).length =
+          L.length * (S.length ^ r * Sb.length) := by
+      intro L
+      induction L with
+      | nil => simp only [List.flatMap_nil, List.length_nil, Nat.zero_mul]
+      | cons x xs ihL =>
+        rw [List.flatMap_cons, List.length_append, List.length_map, ih, ihL, List.length_cons,
+          Nat.succ_mul, Nat.add_comm]
+    show (S.flatMap (fun rk => (coinVectors S Sb r).map (fun rest => rk :: rest))).length = _
+    rw [hSum, Nat.pow_succ, Nat.mul_comm (S.length ^ r) S.length, Nat.mul_assoc]
+
+private theorem sum_map_le_split {α : Type} (bad : α → Bool) (X : α → Nat) (T B : Nat)
+    (hT : ∀ x, X x ≤ T) (hB : ∀ x, bad x = false → X x ≤ B) : ∀ L : List α,
+    (L.map X).sum ≤ (L.filter bad).length * T + L.length * B
+  | [] => by
+    show (0 : Nat) ≤ 0 * T + 0 * B
+    omega
+  | x :: xs => by
+    have ih := sum_map_le_split bad X T B hT hB xs
+    cases hb : bad x
+    · have hx := hB x hb
+      simp only [List.map_cons, List.sum_cons, List.filter, hb, List.length_cons, Nat.succ_mul]
+      omega
+    · have hx := hT x
+      simp only [List.map_cons, List.sum_cons, List.filter, hb, List.length_cons, Nat.succ_mul]
+      omega
+
+/-- Bad-coin budget for `r` folds: two coin vectors at the base, and per fold
+    two bad coins times everything that can follow them. -/
+def sacrificeBadCoinBound (n nb : Nat) : Nat → Nat
+  | 0 => 2
+  | r + 1 => 2 * (n ^ r * nb) + n * sacrificeBadCoinBound n nb r
+
+/-- Closed form, cross-multiplied by one fold-coin count:
+    `bound / (n^r · nb) = 2r / n + 2 / nb`. -/
+theorem sacrificeBadCoinBound_closed (n nb : Nat) : ∀ r,
+    sacrificeBadCoinBound n nb r * n = 2 * r * (n ^ r * nb) + 2 * n ^ (r + 1) := by
+  intro r
+  induction r with
+  | zero =>
+    show 2 * n = 2 * 0 * (n ^ 0 * nb) + 2 * n ^ (0 + 1)
+    rw [Nat.mul_zero, Nat.zero_mul, Nat.zero_add, Nat.zero_add, Nat.pow_one]
+  | succ r ih =>
+    show (2 * (n ^ r * nb) + n * sacrificeBadCoinBound n nb r) * n =
+      2 * (r + 1) * (n ^ (r + 1) * nb) + 2 * n ^ (r + 1 + 1)
+    have hQ : n ^ (r + 1) * nb = n ^ r * nb * n := by
+      rw [Nat.pow_succ, Nat.mul_assoc, Nat.mul_assoc, Nat.mul_comm n nb]
+    have hW : n ^ (r + 1 + 1) = n * n ^ (r + 1) :=
+      (Nat.pow_succ (n := n) (m := r + 1)).trans (Nat.mul_comm _ _)
+    rw [hQ, hW]
+    generalize n ^ r * nb = P at ih ⊢
+    generalize n ^ (r + 1) = W at ih ⊢
+    generalize sacrificeBadCoinBound n nb r = B at ih ⊢
+    have e1 : (2 * P + n * B) * n = 2 * (P * n) + n * (B * n) := by
+      rw [Nat.add_mul, Nat.mul_assoc 2 P n, Nat.mul_assoc n B n]
+    have e2 : n * (2 * r * P) = 2 * r * (P * n) := by
+      rw [Nat.mul_comm n (2 * r * P), Nat.mul_assoc (2 * r) P n]
+    have e3 : n * (2 * W) = 2 * (n * W) := Nat.mul_left_comm n 2 W
+    rw [e1, ih, Nat.mul_add n, e2, e3, Nat.mul_add 2 r 1, Nat.add_mul (2 * r) (2 * 1)]
+    omega
+
+theorem acceptingCoins_le_total (S Sb : List RustGf128) : ∀ (r : Nat) (p : FoldProver r)
+    (s : IpClaim), acceptingCoins S Sb r p s ≤ S.length ^ r * Sb.length := by
+  intro r p s
+  rw [acceptingCoins_eq_filter, ← coinVectors_length]
+  exact List.length_filter_le _ _
+
+/-- **Recursive sacrifice soundness, fresh coins, adaptive prover.** For a
+    false inner-product claim and any strategy tree, the accepting coin vectors
+    number at most `sacrificeBadCoinBound`: out of `|S|^r · |Sb|` vectors, a
+    fraction of at most `2r/|S| + 2/|Sb|`. -/
+theorem recursive_sacrifice_false_claim_accepting_coins_bound
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) :
+    ∀ (r : Nat) (p : FoldProver r) (s : IpClaim), s.err ≠ 0#128 →
+      acceptingCoins S Sb r p s ≤ sacrificeBadCoinBound S.length Sb.length r := by
+  intro r
+  induction r with
+  | zero =>
+    intro p s hErr
+    exact baseAccepts_false_claim_at_most_two_coins s p hErr Sb hSb
+  | succ r ih =>
+    intro p s hErr
+    have hSplit := sum_map_le_split
+      (fun rk => decide ((foldRound s p.1 rk).err = 0#128))
+      (fun rk => acceptingCoins S Sb r (p.2 rk) (foldRound s p.1 rk))
+      (S.length ^ r * Sb.length) (sacrificeBadCoinBound S.length Sb.length r)
+      (fun rk => acceptingCoins_le_total S Sb r _ _)
+      (fun rk hGood => ih (p.2 rk) (foldRound s p.1 rk) (of_decide_eq_false hGood)) S
+    have hBad := foldRound_false_claim_survives_at_most_two_coins s p.1 hErr S hS
+    have hMul := Nat.mul_le_mul_right (S.length ^ r * Sb.length) hBad
+    show (S.map (fun rk => acceptingCoins S Sb r (p.2 rk) (foldRound s p.1 rk))).sum ≤
+      2 * (S.length ^ r * Sb.length) + S.length * sacrificeBadCoinBound S.length Sb.length r
+    omega
+
+/-- The mutant base case that keeps the length test and drops the opened
+    product test. -/
+def baseAcceptsWithoutProductTest (s : IpClaim) (_m : BaseMessage) (_rb : RustGf128) : Bool :=
+  decide (s.len = 1)
+
+/-- Without the product test a false claim is accepted on every coin, while
+    the real base case rejects it. -/
+theorem tooth_sacrifice_without_product_test_accepts_false_claim :
+    ∃ (s : IpClaim) (m : BaseMessage),
+      s.err ≠ 0#128 ∧
+      (∀ rb : RustGf128, baseAcceptsWithoutProductTest s m rb = true) ∧
+      sacrificeAccepts 0 m s [1#128] = false := by
+  refine ⟨⟨1, fun _ => 1#128, fun _ => 1#128, 0#128⟩, ⟨0#128, 0#128, 0#128, 0#128⟩,
+    by decide +kernel, fun _ => rfl, by decide +kernel⟩
+
+#tooth_pair Qsag.MigrationExecution.recursive_sacrifice_false_claim_accepting_coins_bound vs
+  Qsag.MigrationExecution.tooth_sacrifice_without_product_test_accepts_false_claim
+
+/-- Named acceptance premise for nonvacuity registration. -/
+def SacrificeAccepted (r : Nat) (p : FoldProver r) (s : IpClaim)
+    (coins : List RustGf128) : Prop :=
+  sacrificeAccepts r p s coins = true
+
+theorem sacrifice_accepted_coins_have_round_count (r : Nat) (p : FoldProver r) (s : IpClaim)
+    (coins : List RustGf128) (h : SacrificeAccepted r p s coins) : coins.length = r + 1 := by
+  induction r generalizing s coins with
+  | zero =>
+    match coins, h with
+    | [_], _ => rfl
+    | [], h => cases h
+    | _ :: _ :: _, h => cases h
+  | succ r ih =>
+    match coins, h with
+    | [], h => cases h
+    | rk :: rest, h =>
+      have hr := ih (p.2 rk) (foldRound s p.1 rk) rest h
+      rw [List.length_cons, hr]
+
+/-- A true two-element claim is accepted through one honest fold and the
+    honest base case. -/
+theorem inhabited_sacrifice_accepted :
+    ∃ (p : FoldProver 1) (s : IpClaim) (coins : List RustGf128),
+      SacrificeAccepted 1 p s coins := by
+  refine ⟨(⟨0#128, 0#128⟩, fun _ => ⟨0#128, 0#128, 0#128, 0#128⟩),
+    ⟨2, fun _ => 1#128, fun _ => 1#128, 0#128⟩, [1#128, 1#128], ?_⟩
+  show sacrificeAccepts 1 _ _ _ = true
+  decide +kernel
+
+#verify_inhabited Qsag.MigrationExecution.sacrifice_accepted_coins_have_round_count
+  Qsag.MigrationExecution.inhabited_sacrifice_accepted
+
+/-! ### The production flush: two lockstep instances over 64 lanes
+
+`verify_pending_bits_slice` (`outer_mpc.rs:1461-2108`) runs two instances `t ∈ {0, 1}`
+of the recursive sacrifice in lockstep on each of the 64 bitsliced lanes. One coin
+flip per round yields a coin pair `(r[0], r[1])`; instance `t` of every lane uses
+`r[t]` (`outer_mpc.rs:1818-1823`, `2039-2044`). Every reshared message of a round,
+for both instances and all lanes, precedes that round's coin flip, and the flush
+accepts only if all `2 × 64` base openings pass (`outer_mpc.rs:2091-2105`). The
+prover below is one strategy tree for the whole flush, so a message of either
+instance may depend on the earlier coins of both. -/
+
+/-- The coins `(r[0], r[1])` drawn by one coin flip. -/
+abbrev CoinPair := RustGf128 × RustGf128
+
+def coinAt (rk : CoinPair) (t : Fin 2) : RustGf128 := if t.val = 0 then rk.1 else rk.2
+
+/-- One inner-product claim per instance and lane. -/
+abbrev FlushClaims := Fin 2 → Fin 64 → IpClaim
+
+/-- An adaptive prover for the whole flush: all `2 × 64` messages of a round are
+    fixed before that round's coin pair. -/
+@[expose] def FlushProver : Nat → Type
+  | 0 => Fin 2 → Fin 64 → BaseMessage
+  | r + 1 => (Fin 2 → Fin 64 → FoldMessage) × (CoinPair → FlushProver r)
+
+def flushFold (cl : FlushClaims) (m : Fin 2 → Fin 64 → FoldMessage) (rk : CoinPair) :
+    FlushClaims :=
+  fun t lane => foldRound (cl t lane) (m t lane) (coinAt rk t)
+
+/-- All `2 × 64` base cases must pass (`diff_acc`, `outer_mpc.rs:2091-2105`). -/
+def flushBaseAccepts (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage) (rb : CoinPair) :
+    Bool :=
+  finAll 2 (fun t => finAll 64 (fun lane =>
+    decide ((cl t lane).len = 1) && baseAccepts (cl t lane) (bm t lane) (coinAt rb t)))
+
+/-- The flush base case is the `2 × 64` opening check `checkBaseOpenings`. -/
+theorem flushBaseAccepts_checks_all_openings (cl : FlushClaims)
+    (bm : Fin 2 → Fin 64 → BaseMessage) (rb : CoinPair)
+    (h : flushBaseAccepts cl bm rb = true) :
+    checkBaseOpenings (fun t lane =>
+      baseOpening ((cl t lane).a 0) ((cl t lane).b 0) (cl t lane).c
+        (bm t lane).u (bm t lane).v (bm t lane).d1 (bm t lane).d2 (coinAt rb t)) = true := by
+  unfold checkBaseOpenings
+  apply (finAll_eq_true_iff 2 _).mpr
+  intro t
+  apply (finAll_eq_true_iff 64 _).mpr
+  intro lane
+  have hl : (decide ((cl t lane).len = 1) &&
+      baseAccepts (cl t lane) (bm t lane) (coinAt rb t)) = true :=
+    (finAll_eq_true_iff 64 _).mp ((finAll_eq_true_iff 2 _).mp h t) lane
+  rw [Bool.and_eq_true] at hl
+  exact hl.2
+
+private theorem flushBaseAccepts_lane (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage)
+    (a b : RustGf128) (lane : Fin 64) (h : flushBaseAccepts cl bm (a, b) = true) :
+    (decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (bm 0 lane) a) = true ∧
+    (decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (bm 1 lane) b) = true :=
+  ⟨(finAll_eq_true_iff 64 _).mp ((finAll_eq_true_iff 2 _).mp h 0) lane,
+    (finAll_eq_true_iff 64 _).mp ((finAll_eq_true_iff 2 _).mp h 1) lane⟩
+
+/-- The flush verifier's decision on one vector of coin pairs. -/
+def flushAccepts : (r : Nat) → FlushProver r → FlushClaims → List CoinPair → Bool
+  | 0, bm, cl, [rb] => flushBaseAccepts cl bm rb
+  | 0, _, _, _ => false
+  | _ + 1, _, _, [] => false
+  | r + 1, p, cl, rk :: rest => flushAccepts r (p.2 rk) (flushFold cl p.1 rk) rest
+
+def coinPairs (L : List RustGf128) : List CoinPair :=
+  L.flatMap (fun a => L.map (fun b => (a, b)))
+
+/-- All coin-pair vectors: fold pairs from `S × S`, the base pair from `Sb × Sb`. -/
+def flushCoinVectors (S Sb : List RustGf128) : Nat → List (List CoinPair)
+  | 0 => (coinPairs Sb).map (fun rb => [rb])
+  | r + 1 => (coinPairs S).flatMap (fun rk => (flushCoinVectors S Sb r).map (fun rest => rk :: rest))
+
+/-- Number of accepting coin-pair vectors, computed along the strategy tree. -/
+def flushAccepting (S Sb : List RustGf128) : (r : Nat) → FlushProver r → FlushClaims → Nat
+  | 0, bm, cl => ((coinPairs Sb).filter (fun rb => flushBaseAccepts cl bm rb)).length
+  | r + 1, p, cl =>
+    ((coinPairs S).map (fun rk => flushAccepting S Sb r (p.2 rk) (flushFold cl p.1 rk))).sum
+
+/-- `flushAccepting` counts exactly the coin-pair vectors the flush verifier accepts. -/
+theorem flushAccepting_eq_filter (S Sb : List RustGf128) : ∀ (r : Nat) (p : FlushProver r)
+    (cl : FlushClaims),
+    flushAccepting S Sb r p cl =
+      ((flushCoinVectors S Sb r).filter (flushAccepts r p cl)).length := by
+  intro r
+  induction r with
+  | zero =>
+    intro p cl
+    show ((coinPairs Sb).filter (fun rb => flushBaseAccepts cl p rb)).length =
+      (((coinPairs Sb).map (fun rb => [rb])).filter (flushAccepts 0 p cl)).length
+    rw [filter_map_length]
+    rfl
+  | succ r ih =>
+    intro p cl
+    show ((coinPairs S).map (fun rk => flushAccepting S Sb r (p.2 rk) (flushFold cl p.1 rk))).sum =
+      (((coinPairs S).flatMap (fun rk => (flushCoinVectors S Sb r).map (fun rest => rk :: rest))).filter
+        (flushAccepts (r + 1) p cl)).length
+    rw [filter_flatMap_length]
+    congr 1
+    apply List.map_congr_left
+    intro rk _
+    rw [filter_map_length, ih]
+    rfl
+
+private theorem flatMap_map_length {α β γ : Type} (V : List β) (f : α → β → γ) : ∀ L : List α,
+    (L.flatMap (fun x => V.map (f x))).length = L.length * V.length
+  | [] => by
+    show (0 : Nat) = 0 * V.length
+    rw [Nat.zero_mul]
+  | x :: xs => by
+    rw [List.flatMap_cons, List.length_append, List.length_map, flatMap_map_length V f xs,
+      List.length_cons, Nat.succ_mul, Nat.add_comm]
+
+theorem coinPairs_length (L : List RustGf128) : (coinPairs L).length = L.length * L.length :=
+  flatMap_map_length L (fun a b => (a, b)) L
+
+/-- The coin space of one flush has `(|S|^r · |Sb|)²` points. -/
+theorem flushCoinVectors_length (S Sb : List RustGf128) : ∀ r,
+    (flushCoinVectors S Sb r).length =
+      (S.length ^ r * Sb.length) * (S.length ^ r * Sb.length) := by
+  intro r
+  induction r with
+  | zero =>
+    show ((coinPairs Sb).map (fun rb => [rb])).length = _
+    rw [List.length_map, coinPairs_length, Nat.pow_zero, Nat.one_mul]
+  | succ r ih =>
+    show ((coinPairs S).flatMap
+      (fun rk => (flushCoinVectors S Sb r).map (fun rest => rk :: rest))).length = _
+    rw [flatMap_map_length (flushCoinVectors S Sb r) (fun rk rest => rk :: rest), coinPairs_length,
+      ih, Nat.pow_succ]
+    generalize S.length ^ r = q
+    generalize S.length = n
+    generalize Sb.length = nb
+    simp only [Nat.mul_comm, Nat.mul_left_comm]
+
+private theorem filter_length_le_of_imp {α : Type} (p q : α → Bool)
+    (h : ∀ x, p x = true → q x = true) : ∀ L : List α,
+    (L.filter p).length ≤ (L.filter q).length
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := filter_length_le_of_imp p q h xs
+    cases hp : p x
+    · cases hq : q x
+      · simpa only [List.filter, hp, hq] using ih
+      · simp only [List.filter, hp, hq, List.length_cons]
+        omega
+    · simp only [List.filter, hp, h x hp, List.length_cons]
+      omega
+
+private theorem filter_false_length {α : Type} : ∀ L : List α,
+    (L.filter (fun _ => false)).length = 0
+  | [] => rfl
+  | _ :: xs => by simpa only [List.filter] using filter_false_length xs
+
+private theorem sum_map_le_sum_map {α : Type} (f g : α → Nat) (h : ∀ x, f x ≤ g x) :
+    ∀ L : List α, (L.map f).sum ≤ (L.map g).sum
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := sum_map_le_sum_map f g h xs
+    have hx := h x
+    show f x + (xs.map f).sum ≤ g x + (xs.map g).sum
+    omega
+
+private theorem sum_map_le_cases {α : Type} (bad : α → Bool) (X : α → Nat) (T B : Nat)
+    (hT : ∀ x, bad x = true → X x ≤ T) (hB : ∀ x, bad x = false → X x ≤ B) : ∀ L : List α,
+    (L.map X).sum ≤ (L.filter bad).length * T + L.length * B
+  | [] => by
+    show (0 : Nat) ≤ 0 * T + 0 * B
+    omega
+  | x :: xs => by
+    have ih := sum_map_le_cases bad X T B hT hB xs
+    cases hb : bad x
+    · have hx := hB x hb
+      simp only [List.map_cons, List.sum_cons, List.filter, hb, List.length_cons, Nat.succ_mul]
+      omega
+    · have hx := hT x hb
+      simp only [List.map_cons, List.sum_cons, List.filter, hb, List.length_cons, Nat.succ_mul]
+      omega
+
+private theorem sum_map_const_mul {β : Type} (c : Nat) (g : β → Nat) : ∀ M : List β,
+    (M.map (fun b => c * g b)).sum = c * (M.map g).sum
+  | [] => by
+    show (0 : Nat) = c * 0
+    rw [Nat.mul_zero]
+  | y :: ys => by
+    show c * g y + (ys.map (fun b => c * g b)).sum = c * (g y + (ys.map g).sum)
+    rw [sum_map_const_mul c g ys, Nat.mul_add]
+
+private theorem sum_sum_mul {α β : Type} (f : α → Nat) (g : β → Nat) (M : List β) :
+    ∀ L : List α,
+      (L.map (fun a => (M.map (fun b => f a * g b)).sum)).sum = (L.map f).sum * (M.map g).sum
+  | [] => by
+    show (0 : Nat) = 0 * (M.map g).sum
+    rw [Nat.zero_mul]
+  | x :: xs => by
+    show (M.map (fun b => f x * g b)).sum +
+        (xs.map (fun a => (M.map (fun b => f a * g b)).sum)).sum =
+      (f x + (xs.map f).sum) * (M.map g).sum
+    rw [sum_sum_mul f g M xs, sum_map_const_mul (f x) g M, Nat.add_mul]
+
+private theorem sum_map_append {α : Type} (f : α → Nat) : ∀ A B : List α,
+    ((A ++ B).map f).sum = (A.map f).sum + (B.map f).sum
+  | [], B => by
+    show (B.map f).sum = 0 + (B.map f).sum
+    rw [Nat.zero_add]
+  | x :: xs, B => by
+    show f x + ((xs ++ B).map f).sum = f x + (xs.map f).sum + (B.map f).sum
+    rw [sum_map_append f xs B, Nat.add_assoc]
+
+private theorem sum_map_pairs (f : CoinPair → Nat) (M : List RustGf128) :
+    ∀ L : List RustGf128,
+      ((L.flatMap (fun a => M.map (fun b => (a, b)))).map f).sum =
+        (L.map (fun a => (M.map (fun b => f (a, b))).sum)).sum
+  | [] => rfl
+  | a :: as => by
+    rw [List.flatMap_cons, sum_map_append, sum_map_pairs f M as, List.map_map]
+    rfl
+
+private theorem filter_pairs_length (q : CoinPair → Bool) (M : List RustGf128) :
+    ∀ L : List RustGf128,
+      ((L.flatMap (fun a => M.map (fun b => (a, b)))).filter q).length =
+        (L.map (fun a => (M.filter (fun b => q (a, b))).length)).sum := by
+  intro L
+  rw [filter_flatMap_length]
+  congr 1
+  apply List.map_congr_left
+  intro a _
+  exact filter_map_length _ q M
+
+/-- Per-instance budget: the single-instance bad-coin bound when the claim is known
+    false, the whole coin space otherwise. -/
+private def laneWeight (n nb : Nat) (known : Bool) (r : Nat) : Nat :=
+  cond known (sacrificeBadCoinBound n nb r) (n ^ r * nb)
+
+private def foldedWeight (S Sb : List RustGf128) (s : IpClaim) (m : FoldMessage) (k : Bool)
+    (r : Nat) (rk : RustGf128) : Nat :=
+  laneWeight S.length Sb.length (k && decide ((foldRound s m rk).err ≠ 0#128)) r
+
+private theorem foldedWeight_sum_le (S Sb : List RustGf128) (hS : S.Nodup) (s : IpClaim)
+    (m : FoldMessage) (k : Bool) (hk : k = true → s.err ≠ 0#128) (r : Nat) :
+    (S.map (foldedWeight S Sb s m k r)).sum ≤ laneWeight S.length Sb.length k (r + 1) := by
+  cases k with
+  | true =>
+    have hErr := hk rfl
+    have hT : ∀ rk, decide ((foldRound s m rk).err = 0#128) = true →
+        foldedWeight S Sb s m true r rk ≤ S.length ^ r * Sb.length := by
+      intro rk hb
+      have hd : decide ((foldRound s m rk).err ≠ 0#128) = false :=
+        decide_eq_false (fun hne => hne (of_decide_eq_true hb))
+      show laneWeight S.length Sb.length (true && decide ((foldRound s m rk).err ≠ 0#128)) r ≤ _
+      rw [hd]
+      exact Nat.le_refl _
+    have hB : ∀ rk, decide ((foldRound s m rk).err = 0#128) = false →
+        foldedWeight S Sb s m true r rk ≤ sacrificeBadCoinBound S.length Sb.length r := by
+      intro rk hg
+      have hd : decide ((foldRound s m rk).err ≠ 0#128) = true :=
+        decide_eq_true (of_decide_eq_false hg)
+      show laneWeight S.length Sb.length (true && decide ((foldRound s m rk).err ≠ 0#128)) r ≤ _
+      rw [hd]
+      exact Nat.le_refl _
+    have hSplit := sum_map_le_cases (fun rk => decide ((foldRound s m rk).err = 0#128))
+      (foldedWeight S Sb s m true r) (S.length ^ r * Sb.length)
+      (sacrificeBadCoinBound S.length Sb.length r) hT hB S
+    have hBad := foldRound_false_claim_survives_at_most_two_coins s m hErr S hS
+    have hMul := Nat.mul_le_mul_right (S.length ^ r * Sb.length) hBad
+    show (S.map (foldedWeight S Sb s m true r)).sum ≤
+      2 * (S.length ^ r * Sb.length) + S.length * sacrificeBadCoinBound S.length Sb.length r
+    omega
+  | false =>
+    have hSplit := sum_map_le_cases (fun _ : RustGf128 => false)
+      (foldedWeight S Sb s m false r) 0 (S.length ^ r * Sb.length)
+      (fun _ hb => nomatch hb) (fun _ _ => Nat.le_refl _) S
+    show (S.map (foldedWeight S Sb s m false r)).sum ≤ S.length ^ (r + 1) * Sb.length
+    rw [Nat.pow_succ, Nat.mul_comm (S.length ^ r) S.length, Nat.mul_assoc]
+    omega
+
+private theorem flushAccepting_le_weights (S Sb : List RustGf128) (hS : S.Nodup)
+    (hSb : Sb.Nodup) (lane : Fin 64) :
+    ∀ (r : Nat) (p : FlushProver r) (cl : FlushClaims) (k0 k1 : Bool),
+      (k0 = true → (cl 0 lane).err ≠ 0#128) → (k1 = true → (cl 1 lane).err ≠ 0#128) →
+      flushAccepting S Sb r p cl ≤
+        laneWeight S.length Sb.length k0 r * laneWeight S.length Sb.length k1 r := by
+  intro r
+  induction r with
+  | zero =>
+    intro p cl k0 k1 h0 h1
+    have hCount : flushAccepting S Sb 0 p cl =
+        (Sb.map (fun a => (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length)).sum :=
+      filter_pairs_length (fun rb => flushBaseAccepts cl p rb) Sb Sb
+    have hInner : ∀ a, (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length ≤
+        (Sb.filter (fun b =>
+          decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (p 1 lane) b)).length :=
+      fun a => filter_length_le_of_imp _ _
+        (fun b hb => (flushBaseAccepts_lane cl p a b lane hb).2) Sb
+    have hZero : ∀ a,
+        (decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (p 0 lane) a) = false →
+        (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length ≤ 0 := by
+      intro a ha
+      have hle := filter_length_le_of_imp (fun b => flushBaseAccepts cl p (a, b))
+        (fun _ => false)
+        (fun b hb => nomatch (flushBaseAccepts_lane cl p a b lane hb).1.symm.trans ha) Sb
+      rw [filter_false_length] at hle
+      exact hle
+    have hSplit := sum_map_le_cases
+      (fun a => decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (p 0 lane) a)
+      (fun a => (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length)
+      (Sb.filter (fun b =>
+        decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (p 1 lane) b)).length 0
+      (fun a _ => hInner a) hZero Sb
+    have hC0 : (Sb.filter (fun a =>
+        decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (p 0 lane) a)).length ≤
+        laneWeight S.length Sb.length k0 0 := by
+      cases k0 with
+      | true => exact baseAccepts_false_claim_at_most_two_coins (cl 0 lane) (p 0 lane) (h0 rfl) Sb hSb
+      | false =>
+        show _ ≤ S.length ^ 0 * Sb.length
+        rw [Nat.pow_zero, Nat.one_mul]
+        exact List.length_filter_le _ _
+    have hC1 : (Sb.filter (fun b =>
+        decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (p 1 lane) b)).length ≤
+        laneWeight S.length Sb.length k1 0 := by
+      cases k1 with
+      | true => exact baseAccepts_false_claim_at_most_two_coins (cl 1 lane) (p 1 lane) (h1 rfl) Sb hSb
+      | false =>
+        show _ ≤ S.length ^ 0 * Sb.length
+        rw [Nat.pow_zero, Nat.one_mul]
+        exact List.length_filter_le _ _
+    rw [hCount]
+    exact Nat.le_trans hSplit (by
+      rw [Nat.mul_zero, Nat.add_zero]
+      exact Nat.mul_le_mul hC0 hC1)
+  | succ r ih =>
+    intro p cl k0 k1 h0 h1
+    have hCount : flushAccepting S Sb (r + 1) p cl =
+        (S.map (fun a => (S.map (fun b =>
+          flushAccepting S Sb r (p.2 (a, b)) (flushFold cl p.1 (a, b)))).sum)).sum :=
+      sum_map_pairs (fun rk => flushAccepting S Sb r (p.2 rk) (flushFold cl p.1 rk)) S S
+    have hIH : ∀ a b, flushAccepting S Sb r (p.2 (a, b)) (flushFold cl p.1 (a, b)) ≤
+        foldedWeight S Sb (cl 0 lane) (p.1 0 lane) k0 r a *
+          foldedWeight S Sb (cl 1 lane) (p.1 1 lane) k1 r b := by
+      intro a b
+      refine ih (p.2 (a, b)) (flushFold cl p.1 (a, b))
+        (k0 && decide ((foldRound (cl 0 lane) (p.1 0 lane) a).err ≠ 0#128))
+        (k1 && decide ((foldRound (cl 1 lane) (p.1 1 lane) b).err ≠ 0#128)) ?_ ?_
+      · intro hk
+        rw [Bool.and_eq_true] at hk
+        exact of_decide_eq_true hk.2
+      · intro hk
+        rw [Bool.and_eq_true] at hk
+        exact of_decide_eq_true hk.2
+    rw [hCount]
+    calc (S.map (fun a => (S.map (fun b =>
+            flushAccepting S Sb r (p.2 (a, b)) (flushFold cl p.1 (a, b)))).sum)).sum
+        ≤ (S.map (fun a => (S.map (fun b =>
+            foldedWeight S Sb (cl 0 lane) (p.1 0 lane) k0 r a *
+              foldedWeight S Sb (cl 1 lane) (p.1 1 lane) k1 r b)).sum)).sum :=
+          sum_map_le_sum_map _ _ (fun a => sum_map_le_sum_map _ _ (fun b => hIH a b) S) S
+      _ = (S.map (foldedWeight S Sb (cl 0 lane) (p.1 0 lane) k0 r)).sum *
+            (S.map (foldedWeight S Sb (cl 1 lane) (p.1 1 lane) k1 r)).sum :=
+          sum_sum_mul _ _ S S
+      _ ≤ laneWeight S.length Sb.length k0 (r + 1) * laneWeight S.length Sb.length k1 (r + 1) :=
+          Nat.mul_le_mul (foldedWeight_sum_le S Sb hS _ _ k0 h0 r)
+            (foldedWeight_sum_le S Sb hS _ _ k1 h1 r)
+
+/-- **Two-instance, 64-lane flush soundness, fresh coin pairs, adaptive prover.** If
+    both instances' inner-product claims of one lane are false, then for any flush
+    strategy tree the accepting coin-pair vectors number at most
+    `sacrificeBadCoinBound²`: out of `(|S|^r · |Sb|)²` vectors, a fraction of at most
+    `(2r/|S| + 2/|Sb|)²`. The other 63 lanes and the cross-instance adaptivity do not
+    help the prover. -/
+theorem flush_false_lane_accepting_coins_bound
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat) (p : FlushProver r)
+    (cl : FlushClaims) (lane : Fin 64)
+    (h0 : (cl 0 lane).err ≠ 0#128) (h1 : (cl 1 lane).err ≠ 0#128) :
+    flushAccepting S Sb r p cl ≤
+      sacrificeBadCoinBound S.length Sb.length r * sacrificeBadCoinBound S.length Sb.length r :=
+  flushAccepting_le_weights S Sb hS hSb lane r p cl true true (fun _ => h0) (fun _ => h1)
+
+/-- With only instance `0` of the lane false, the bound is the single-instance one
+    times the whole coin space of the other instance. -/
+theorem flush_one_false_instance_accepting_coins_bound
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat) (p : FlushProver r)
+    (cl : FlushClaims) (lane : Fin 64) (h0 : (cl 0 lane).err ≠ 0#128) :
+    flushAccepting S Sb r p cl ≤
+      sacrificeBadCoinBound S.length Sb.length r * (S.length ^ r * Sb.length) :=
+  flushAccepting_le_weights S Sb hS hSb lane r p cl true false (fun _ => h0) (fun h => nomatch h)
+
+/-- The mutant base case that checks lane `0` only. -/
+def flushBaseAcceptsLaneZeroOnly (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage)
+    (rb : CoinPair) : Bool :=
+  finAll 2 (fun t => decide ((cl t 0).len = 1) && baseAccepts (cl t 0) (bm t 0) (coinAt rb t))
+
+/-- Checking one lane lets a false claim in another lane through; the real base
+    case rejects it. -/
+theorem tooth_flush_single_lane_check_accepts_false_lane :
+    ∃ (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage) (lane : Fin 64) (rb : CoinPair),
+      (cl 0 lane).err ≠ 0#128 ∧ (cl 1 lane).err ≠ 0#128 ∧
+      flushBaseAcceptsLaneZeroOnly cl bm rb = true ∧
+      flushBaseAccepts cl bm rb = false := by
+  refine ⟨fun _ lane => ⟨1, fun _ => 1#128, fun _ => 1#128, if lane.val = 0 then 1#128 else 0#128⟩,
+    fun _ _ => ⟨0#128, 0#128, 0#128, 0#128⟩, 1, (1#128, 1#128),
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+#tooth_pair Qsag.MigrationExecution.flush_false_lane_accepting_coins_bound vs
+  Qsag.MigrationExecution.tooth_flush_single_lane_check_accepts_false_lane
+
+/-- Public statement fields stay separate; epoch is bounded rather than an
+    unbounded natural silently truncated by a serializer. Authorization must bind
+    this entire statement, including the destination. -/
+structure Statement where
+  legacyCommitment : List UInt8
+  migrationDomain : BitVec 256
+  nullifier : BitVec 256
+  destination : BitVec 256
+  epoch : UInt64
+  deriving DecidableEq
+
+/-- Collision-aware ownership relation. `derivePoint` must be instantiated with
+    a verified curve implementation, and `address` with the selected legacy
+    commitment (HASH160, Keccak20, or parity-checked x-only encoding).
+    Unlike the transparent scalar zero test, this relation includes BOTH the
+    address commitment and the campaign nullifier. -/
+def Ownership {Point Address : Type}
+    (derivePoint : MigrationKey256 → Point) (address : Point → Address)
+    (nullifier : MigrationKey256 → BitVec 256 → BitVec 256)
+    (group : ScalarGroup) (expected : Address) (statement : Statement)
+    (secret : MigrationKey256) : Prop :=
+  requireCanonicalScalar group secret = true ∧
+  address (derivePoint secret) = expected ∧
+  nullifier secret statement.migrationDomain = statement.nullifier
+
+/-- Hash-address acceptance cannot imply unconditional zero fault. This theorem
+    retains the collision alternative for the *joint* address/nullifier map,
+    without asserting that an address collision alone is a migration forgery. -/
+theorem ownership_same_witness_or_joint_collision {Point Address : Type}
+    (derivePoint : MigrationKey256 → Point) (address : Point → Address)
+    (nullifier : MigrationKey256 → BitVec 256 → BitVec 256)
+    (group : ScalarGroup) (expected : Address) (statement : Statement)
+    (s t : MigrationKey256)
+    (hs : Ownership derivePoint address nullifier group expected statement s)
+    (ht : Ownership derivePoint address nullifier group expected statement t) :
+    s = t ∨ (s ≠ t ∧
+      (address (derivePoint s), nullifier s statement.migrationDomain) =
+      (address (derivePoint t), nullifier t statement.migrationDomain)) := by
+  by_cases h : s = t
+  · exact Or.inl h
+  · exact Or.inr ⟨h, Prod.ext (hs.2.1.trans ht.2.1.symm)
+      (hs.2.2.trans ht.2.2.symm)⟩
+
+/-- A small-range hash counterexample. The two witnesses are canonical but
+    neither address nor nullifier binding follows for arbitrary hash functions. -/
+theorem tooth_constant_hashes_do_not_bind_witness :
+    ∃ statement : Statement,
+      Ownership id (fun _ : MigrationKey256 => false) (fun _ _ => 0#256)
+        .Secp256k1 false statement 1#256 ∧
+      Ownership id (fun _ : MigrationKey256 => false) (fun _ _ => 0#256)
+        .Secp256k1 false statement 2#256 ∧
+      (1#256 : MigrationKey256) ≠ 2#256 := by
+  refine ⟨⟨[], 0#256, 0#256, 1#256, 0⟩, ?_, ?_, by decide⟩ <;>
+    constructor
+  · decide
+  · exact ⟨rfl, rfl⟩
+  · decide
+  · exact ⟨rfl, rfl⟩
+
+#tooth_pair Qsag.MigrationExecution.ownership_same_witness_or_joint_collision vs
+  Qsag.MigrationExecution.tooth_constant_hashes_do_not_bind_witness
+
+/-- A pending multiplication contains the same shares consumed and emitted by
+    the gate evaluator. There is no independently supplied triple list. -/
+structure PendingAnd where
+  lhs : RssWord64Shares3
+  rhs : RssWord64Shares3
+  output : RssWord64Shares3
+  deriving DecidableEq
+
+/-- Exact reference check, over all 64 Boolean lanes. This is intentionally NOT
+    advertised as the private or batched BBCGGI19 implementation. -/
+def PendingAnd.check (t : PendingAnd) : Bool :=
+  t.output.reconstruct == (t.lhs.reconstruct &&& t.rhs.reconstruct)
+
+/-- Indices refer to existing wires; outputs are prepended. An AND consumes the
+    adversarially supplied result, so corrupting it affects all following gates. -/
+inductive Gate where
+  | xor (lhs rhs : Nat)
+  | and (lhs rhs : Nat) (output : RssWord64Shares3)
+  deriving DecidableEq
+
+structure GateState where
+  wires : List RssWord64Shares3
+  pending : List PendingAnd
+  deriving DecidableEq
+
+def xorShares (a b : RssWord64Shares3) : RssWord64Shares3 :=
+  ⟨a.w0 ^^^ b.w0, a.w1 ^^^ b.w1, a.w2 ^^^ b.w2⟩
+
+def evalGate (st : GateState) (gate : Gate) : Option GateState := do
+  match gate with
+  | .xor l r =>
+    let a ← st.wires[l]?
+    let b ← st.wires[r]?
+    return { st with wires := xorShares a b :: st.wires }
+  | .and l r output =>
+    let a ← st.wires[l]?
+    let b ← st.wires[r]?
+    return { wires := output :: st.wires
+             pending := ⟨a, b, output⟩ :: st.pending }
+
+def evalGates : GateState → List Gate → Option GateState
+  | st, [] => some st
+  | st, g :: gs => (evalGate st g).bind (fun next => evalGates next gs)
+
+def witnessWires (witness : RssWitnessLanes3) : List RssWord64Shares3 :=
+  List.ofFn (fun i : Fin 256 => ⟨witness.w0 i, witness.w1 i, witness.w2 i⟩)
+
+inductive ExecutionResult where
+  | invalidLanes
+  | invalidWire
+  | multiplicationCheck
+  | invalidProof
+  | accepted
+  deriving Repr, DecidableEq
+
+/-- Open the evaluated final gate only AFTER checking every pending AND. -/
+def finish (st : GateState) : ExecutionResult :=
+  if st.pending.all PendingAnd.check then
+    match st.wires with
+    | [] => .invalidWire
+    | out :: _ => if out.reconstruct == 0xFFFFFFFFFFFFFFFF then .accepted else .invalidProof
+  else .multiplicationCheck
+
+/-- This trace evaluator is the executable reference boundary. It checks all
+    256 × 3 input lane words and uses those exact words as circuit inputs. The
+    trusted circuit compiler must supply the ownership/zero-test circuit; an
+    arbitrary circuit alone does not establish ownership. -/
+def run (witness : RssWitnessLanes3) (gates : List Gate) : ExecutionResult :=
+  if shareUniformLanesCheck witness then
+    match evalGates ⟨witnessWires witness, []⟩ gates with
+    | none => .invalidWire
+    | some st => finish st
+  else .invalidLanes
+
+theorem finish_checks_consumed_outputs (st : GateState)
+    (h : finish st = .accepted) :
+    ∀ t ∈ st.pending,
+      t.output.reconstruct = (t.lhs.reconstruct &&& t.rhs.reconstruct) := by
+  unfold finish at h
+  cases hp : st.pending.all PendingAnd.check
+  · rw [hp] at h
+    cases h
+  · intro t ht
+    exact eq_of_beq (List.all_eq_true.mp hp t ht)
+
+/-- Every accepted run checked the ACTUAL witness lane words, not a free mask. -/
+theorem run_checks_actual_lanes (witness : RssWitnessLanes3) (gates : List Gate)
+    (h : run witness gates = .accepted) : shareUniformLanesCheck witness = true := by
+  cases hl : shareUniformLanesCheck witness
+  · simp only [run, hl, Bool.false_eq_true, ↓reduceIte] at h
+    cases h
+  · rfl
+
+/-- Acceptance connects lane validation, the concrete evaluator result, and
+    every pending multiplication to one execution. -/
+theorem run_has_checked_execution (witness : RssWitnessLanes3) (gates : List Gate)
+    (h : run witness gates = .accepted) :
+    shareUniformLanesCheck witness = true ∧
+    ∃ st : GateState,
+      evalGates ⟨witnessWires witness, []⟩ gates = some st ∧
+      finish st = .accepted ∧
+      ∀ t ∈ st.pending,
+        t.output.reconstruct = (t.lhs.reconstruct &&& t.rhs.reconstruct) := by
+  have hl := run_checks_actual_lanes witness gates h
+  refine ⟨hl, ?_⟩
+  unfold run at h
+  rw [hl] at h
+  cases he : evalGates ⟨witnessWires witness, []⟩ gates with
+  | none =>
+    rw [he] at h
+    cases h
+  | some st =>
+    rw [he] at h
+    exact ⟨st, rfl, h, finish_checks_consumed_outputs st h⟩
+
+theorem accepted_execution_same_witness_in_every_lane
+    (witness : RssWitnessLanes3) (gates : List Gate)
+    (h : run witness gates = .accepted) (a b : Fin 64) :
+    extractRepetitionWitness witness a.val = extractRepetitionWitness witness b.val :=
+  shareUniformLanesCheck_implies_uniform_witness_across_lanes.1 witness
+    (run_checks_actual_lanes witness gates h) a.val b.val a.isLt b.isLt
+
+/-- Removing precisely the linked multiplication barrier accepts the corrupted
+    final AND output. This is a whole evaluator path, not an unrelated triple. -/
+def finishWithoutCheck (st : GateState) : ExecutionResult :=
+  match st.wires with
+  | [] => .invalidWire
+  | out :: _ => if out.reconstruct == 0xFFFFFFFFFFFFFFFF then .accepted else .invalidProof
+
+theorem tooth_corrupt_final_and_guard_removal :
+    ∃ initial : GateState, ∃ gates : List Gate, ∃ evaluated : GateState,
+      evalGates initial gates = some evaluated ∧
+      finish evaluated = .multiplicationCheck ∧
+      finishWithoutCheck evaluated = .accepted ∧
+      ∃ t ∈ evaluated.pending,
+        t.output.reconstruct ≠ (t.lhs.reconstruct &&& t.rhs.reconstruct) := by
+  let zero : RssWord64Shares3 := ⟨0, 0, 0⟩
+  let forged : RssWord64Shares3 := ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩
+  refine ⟨⟨[zero], []⟩, [.and 0 0 forged],
+    ⟨[forged, zero], [⟨zero, zero, forged⟩]⟩, rfl, ?_, ?_,
+    ⟨zero, zero, forged⟩, .head _, ?_⟩ <;> decide
+
+#tooth_pair Qsag.MigrationExecution.finish_checks_consumed_outputs vs
+  Qsag.MigrationExecution.tooth_corrupt_final_and_guard_removal
+
+/-- Persistent spent set (represented as a duplicate-free list when started
+    empty). Settlement never removes an entry, including on rejection. -/
+structure Ledger where
+  spent : List (BitVec 256)
+  deriving DecidableEq
+
+structure Submission (Authorization : Type) where
+  statement : Statement
+  authorization : Authorization
+  witness : RssWitnessLanes3
+
+inductive SettlementResult where
+  | accepted
+  | replay
+  | unauthorized
+  | executionRejected (reason : ExecutionResult)
+  deriving Repr, DecidableEq
+
+/-- The circuit comes from the verifier's compiler, not the submission. The
+    authorization verifier receives every statement field. Replay checking and
+    insertion are one transition; invalid authorization/execution burns nothing.
+    This models logical persistence, not a filesystem crash-consistency proof. -/
+def settle {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization) : Ledger × SettlementResult :=
+  if submission.statement.nullifier ∈ ledger.spent then (ledger, .replay)
+  else if verifyAuthorization submission.statement submission.authorization then
+    match run submission.witness (compile submission.statement) with
+    | .accepted => (⟨submission.statement.nullifier :: ledger.spent⟩, .accepted)
+    | reason => (ledger, .executionRejected reason)
+  else (ledger, .unauthorized)
+
+/-- Replay rejects deterministically, independent of the new destination,
+    authorization, circuit, witness, or errors it would have produced. -/
+theorem settle_replay_rejected {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization)
+    (h : submission.statement.nullifier ∈ ledger.spent) :
+    settle verifyAuthorization compile ledger submission = (ledger, .replay) := by
+  unfold settle
+  rw [cIte_pos h]
+
+/-- An accepted transition inserts exactly the checked nullifier. -/
+theorem settle_accept_inserts {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization)
+    (h : (settle verifyAuthorization compile ledger submission).2 = .accepted) :
+    (settle verifyAuthorization compile ledger submission).1.spent =
+      submission.statement.nullifier :: ledger.spent := by
+  unfold settle at h ⊢
+  cases (inferInstance : Decidable (submission.statement.nullifier ∈ ledger.spent)) with
+  | isTrue hMem =>
+    rw [cIte_pos hMem] at h
+    cases h
+  | isFalse hMem =>
+    rw [cIte_neg hMem] at h ⊢
+    cases hAuth : verifyAuthorization submission.statement submission.authorization
+    · simp only [hAuth, Bool.false_eq_true, ↓reduceIte] at h
+      cases h
+    · simp only [hAuth, ↓reduceIte] at h ⊢
+      cases hr : run submission.witness (compile submission.statement) <;>
+        simp only [hr] at h ⊢ <;> first | rfl | cases h
+
+theorem settle_spent_monotone {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization)
+    (n : BitVec 256) (hn : n ∈ ledger.spent) :
+    n ∈ (settle verifyAuthorization compile ledger submission).1.spent := by
+  unfold settle
+  split
+  · exact hn
+  · split
+    · cases run submission.witness (compile submission.statement) <;>
+        first | exact hn | exact List.mem_cons_of_mem _ hn
+    · exact hn
+
+/-- The complete settlement history, including rejection outcomes. Unlike a
+    successful-turn-only trace this retains repeated and aborted submissions. -/
+def settleMany {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate) :
+    Ledger → List (Submission Authorization) → Ledger × List SettlementResult
+  | ledger, [] => (ledger, [])
+  | ledger, submission :: rest =>
+    let next := settle verifyAuthorization compile ledger submission
+    let tail := settleMany verifyAuthorization compile next.1 rest
+    (tail.1, next.2 :: tail.2)
+
+theorem settleMany_spent_monotone {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (submissions : List (Submission Authorization))
+    (ledger : Ledger) (n : BitVec 256) (hn : n ∈ ledger.spent) :
+    n ∈ (settleMany verifyAuthorization compile ledger submissions).1.spent := by
+  induction submissions generalizing ledger with
+  | nil => exact hn
+  | cons submission rest ih =>
+    exact ih _ (settle_spent_monotone verifyAuthorization compile ledger submission n hn)
+
+/-- Acceptance followed by any number of successful or rejected turns still
+    rejects the same nullifier. Destination changes do not evade the spent set. -/
+theorem accepted_nullifier_rejected_after_any_history {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (first again : Submission Authorization)
+    (rest : List (Submission Authorization))
+    (hAccepted : (settle verifyAuthorization compile ledger first).2 = .accepted)
+    (hSame : again.statement.nullifier = first.statement.nullifier) :
+    let afterFirst := (settle verifyAuthorization compile ledger first).1
+    let afterRest := (settleMany verifyAuthorization compile afterFirst rest).1
+    settle verifyAuthorization compile afterRest again = (afterRest, .replay) := by
+  intro afterFirst afterRest
+  apply settle_replay_rejected
+  rw [hSame]
+  apply settleMany_spent_monotone
+  have hInserted := settle_accept_inserts verifyAuthorization compile ledger first hAccepted
+  change first.statement.nullifier ∈ (settle verifyAuthorization compile ledger first).1.spent
+  rw [hInserted]
+  exact .head _
+
+/-- Guard-removal mutant: clearing the ledger before each attempt. -/
+def settleWithoutReplayGuard {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (_ledger : Ledger) (submission : Submission Authorization) : Ledger × SettlementResult :=
+  settle verifyAuthorization compile ⟨[]⟩ submission
+
+/-- Nonvacuity: a four-gate linked AND/XOR execution settles once. -/
+def honestSubmission : Submission Unit where
+  statement := ⟨[], 0#256, 7#256, 11#256, 0⟩
+  authorization := ()
+  witness := ⟨fun _ => 0xFFFFFFFFFFFFFFFF, fun _ => 0, fun _ => 0⟩
+
+def honestCircuit (_ : Statement) : List Gate :=
+  [.and 0 0 ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩,
+   .xor 0 0,
+   .and 0 0 ⟨0, 0, 0⟩,
+   .xor 0 2]
+
+private theorem honestSubmission_lanes_ok :
+    shareUniformLanesCheck honestSubmission.witness = true := by
+  unfold shareUniformLanesCheck honestSubmission
+  apply (finAll_eq_true_iff 256 _).mpr
+  intro _
+  change (isUniformLaneWord 0xFFFFFFFFFFFFFFFF && isUniformLaneWord 0 && isUniformLaneWord 0) = true
+  decide
+
+private theorem honestSubmission_wires_zero :
+    (witnessWires honestSubmission.witness)[0]? =
+      some ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩ := by
+  unfold witnessWires honestSubmission
+  rw [List.getElem?_ofFn]
+  simp only [Nat.zero_lt_succ, ↓reduceDIte]
+
+private theorem honestSubmission_settle_eq :
+    settle (fun (_ : Statement) (_ : Unit) => true) honestCircuit ⟨[]⟩ honestSubmission =
+      (⟨[7#256]⟩, .accepted) := by
+  let allOnes : RssWord64Shares3 := ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩
+  have hNotMem : honestSubmission.statement.nullifier ∉ ([] : List (BitVec 256)) := by simp
+  unfold settle
+  rw [cIte_neg hNotMem]
+  simp only [↓reduceIte]
+  unfold run honestCircuit
+  rw [honestSubmission_lanes_ok]
+  simp only [↓reduceIte, evalGates, evalGate, honestSubmission_wires_zero]
+  dsimp only [Bind.bind, Pure.pure, Option.bind]
+  simp only [List.getElem?_cons_zero, List.getElem?_cons_succ]
+  have hFin : finish ⟨allOnes :: ⟨0, 0, 0⟩ :: ⟨0, 0, 0⟩ :: allOnes :: witnessWires honestSubmission.witness,
+      [⟨⟨0, 0, 0⟩, ⟨0, 0, 0⟩, ⟨0, 0, 0⟩⟩, ⟨allOnes, allOnes, allOnes⟩]⟩ = .accepted := by
+    unfold finish PendingAnd.check RssWord64Shares3.reconstruct
+    decide
+  have hX1 : xorShares allOnes allOnes = ⟨0, 0, 0⟩ := by decide
+  have hX2 : xorShares ⟨0, 0, 0⟩ allOnes = allOnes := by decide
+  rw [hX1, hX2, hFin]
+  rfl
+
+theorem settlement_acceptance_witness :
+    (settle (fun (_ : Statement) (_ : Unit) => true) honestCircuit ⟨[]⟩ honestSubmission).2 =
+      .accepted := by
+  rw [honestSubmission_settle_eq]
+
+/-- Named reachability premise for structural nonvacuity registration. -/
+def AcceptedSettlement {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate) (ledger : Ledger)
+    (submission : Submission Authorization) : Prop :=
+  (settle verifyAuthorization compile ledger submission).2 = .accepted
+
+theorem accepted_settlement_spends {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate) (ledger : Ledger)
+    (submission : Submission Authorization)
+    (h : AcceptedSettlement verifyAuthorization compile ledger submission) :
+    submission.statement.nullifier ∈
+      (settle verifyAuthorization compile ledger submission).1.spent := by
+  rw [settle_accept_inserts verifyAuthorization compile ledger submission h]
+  exact .head _
+
+theorem inhabited_accepted_settlement :
+    ∃ ledger : Ledger, ∃ submission : Submission Unit,
+      AcceptedSettlement (fun (_ : Statement) (_ : Unit) => true)
+        honestCircuit ledger submission :=
+  ⟨⟨[]⟩, honestSubmission, settlement_acceptance_witness⟩
+
+set_option maxRecDepth 8192 in
+/-- A statement-bound authorization witness, including destination and epoch.
+    This models an authenticated statement token, not a cryptographic signature scheme. -/
+theorem inhabited_statement_bound_settlement :
+    ∃ ledger : Ledger, ∃ submission : Submission Statement,
+      AcceptedSettlement (fun st authorization => decide (st = authorization))
+        honestCircuit ledger submission := by
+  refine ⟨⟨[]⟩, ⟨honestSubmission.statement, honestSubmission.statement, honestSubmission.witness⟩, ?_⟩
+  simpa only [AcceptedSettlement, settle, decide_true, ↓reduceIte] using settlement_acceptance_witness
+
+#verify_inhabited Qsag.MigrationExecution.accepted_settlement_spends
+  Qsag.MigrationExecution.inhabited_statement_bound_settlement
+
+/-- The same request is accepted twice only in the replay-guard mutant. -/
+theorem tooth_replay_guard_removal :
+    ∃ s : Submission Unit,
+      let afterFirst := (settle (fun _ _ => true) honestCircuit ⟨[]⟩ s).1
+      (settle (fun _ _ => true) honestCircuit afterFirst s).2 ≠
+        (settleWithoutReplayGuard (fun _ _ => true) honestCircuit afterFirst s).2 := by
+  refine ⟨honestSubmission, ?_⟩
+  dsimp only
+  have h1 : (settle (fun _ _ => true) honestCircuit ⟨[]⟩ honestSubmission).1 = ⟨[7#256]⟩ := by
+    rw [honestSubmission_settle_eq]
+  rw [h1,
+      settle_replay_rejected (fun _ _ => true) honestCircuit ⟨[7#256]⟩ honestSubmission (.head _)]
+  unfold settleWithoutReplayGuard
+  rw [honestSubmission_settle_eq]
+  decide
+
+#tooth_pair Qsag.MigrationExecution.settle_replay_rejected vs
+  Qsag.MigrationExecution.tooth_replay_guard_removal
+
+#verify_constructive
+  Qsag.MigrationExecution.rust_gf128_basis_kats
+  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
+  Qsag.MigrationExecution.rustGf128Mul_comm
+  Qsag.MigrationExecution.rustGf128Mul_assoc
+  Qsag.MigrationExecution.towerToRust_mul
+  Qsag.MigrationExecution.towerToRust_injective
+  Qsag.MigrationExecution.towerToRust_rustToTower
+  Qsag.MigrationExecution.rustToTower_towerToRust
+  Qsag.MigrationExecution.rustToTower_mul
+  Qsag.MigrationExecution.rustGf128Mul_eq_zero
+  Qsag.MigrationExecution.foldRound_err
+  Qsag.MigrationExecution.foldRound_false_claim_survives_at_most_two_coins
+  Qsag.MigrationExecution.tooth_fold_message_after_coin_forges
+  Qsag.MigrationExecution.baseAccepts_false_claim_at_most_two_coins
+  Qsag.MigrationExecution.honest_fold_preserves_true_claim
+  Qsag.MigrationExecution.honest_base_accepts
+  Qsag.MigrationExecution.acceptingCoins_eq_filter
+  Qsag.MigrationExecution.coinVectors_length
+  Qsag.MigrationExecution.sacrificeBadCoinBound_closed
+  Qsag.MigrationExecution.recursive_sacrifice_false_claim_accepting_coins_bound
+  Qsag.MigrationExecution.tooth_sacrifice_without_product_test_accepts_false_claim
+  Qsag.MigrationExecution.inhabited_sacrifice_accepted
+  Qsag.MigrationExecution.checkBaseOpenings_sound
+  Qsag.MigrationExecution.ownership_same_witness_or_joint_collision
+  Qsag.MigrationExecution.finish_checks_consumed_outputs
+  Qsag.MigrationExecution.run_checks_actual_lanes
+  Qsag.MigrationExecution.run_has_checked_execution
+  Qsag.MigrationExecution.accepted_execution_same_witness_in_every_lane
+  Qsag.MigrationExecution.tooth_corrupt_final_and_guard_removal
+  Qsag.MigrationExecution.settle_replay_rejected
+  Qsag.MigrationExecution.settle_accept_inserts
+  Qsag.MigrationExecution.settle_spent_monotone
+  Qsag.MigrationExecution.settleMany_spent_monotone
+  Qsag.MigrationExecution.accepted_nullifier_rejected_after_any_history
+  Qsag.MigrationExecution.settlement_acceptance_witness
+  Qsag.MigrationExecution.tooth_replay_guard_removal
+
+end MigrationExecution
+
