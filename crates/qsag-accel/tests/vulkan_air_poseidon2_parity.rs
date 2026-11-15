@@ -542,3 +542,548 @@ fn honest_row(
     }
 
     let mut row = [0u64; NUM_COLS];
+    row[COL_ST_IN..COL_ST_IN + 12].copy_from_slice(&st_in);
+    row[COL_SBOX_OUT..COL_SBOX_OUT + NUM_SBOX].copy_from_slice(&sbox);
+    row[COL_PREV..COL_PREV + NUM_STATE].copy_from_slice(&prev);
+    row[COL_NEXT..COL_NEXT + NUM_STATE].copy_from_slice(&next);
+    row[COL_AUX..].copy_from_slice(&aux);
+    row
+}
+
+/// Everything one sumcheck round's evaluation reads, in host form.
+#[derive(Clone)]
+struct RoundState {
+    /// `cur_m` rows of 256 columns.
+    cols: Vec<[E; NUM_COLS]>,
+    eq_tau: Vec<E>,
+    eq_not_last: Vec<E>,
+    shift_tau: Vec<E>,
+    is_first: Vec<E>,
+    is_last: Vec<E>,
+    step_c0: Vec<E>,
+    /// Per local step: `(uid, selector)` of every opcode with a nonzero selector.
+    ops: Vec<Vec<(usize, E)>>,
+}
+
+struct Fixture {
+    witness_row_major: Vec<u64>,
+    pk_seed: [u64; 4],
+    pk_root: [u64; 4],
+    mu: [u64; 5],
+    group_a_gammas: Vec<E>,
+    shift_gammas: Vec<E>,
+    op_gammas: Vec<Vec<E>>,
+    round0: RoundState,
+}
+
+fn step_uid(row: usize) -> usize {
+    let half = ROWS / 2;
+    if row == 0 {
+        UID_STEP1
+    } else if row == ROWS - 1 {
+        UID_IDLE
+    } else if row >= half && row.is_multiple_of(4) {
+        // Same opcode as the row it is paired with in round 0.
+        (row - half) % UNIQUE_OPS.len()
+    } else {
+        row % UNIQUE_OPS.len()
+    }
+}
+
+fn fixture() -> Fixture {
+    let mut rng = Rng(0x5153_4147_4149_5221);
+    let pk_seed: [u64; 4] = core::array::from_fn(|_| rng.fe());
+    let pk_root: [u64; 4] = core::array::from_fn(|_| rng.fe());
+    let mu: [u64; 5] = core::array::from_fn(|_| rng.fe());
+    let step_c0: Vec<u64> = (0..ROWS).map(|_| rng.word() >> 40).collect();
+
+    let mut witness_row_major = Vec::with_capacity(ROWS * NUM_COLS);
+    let mut cols = Vec::with_capacity(ROWS);
+    for (row, &c0) in step_c0.iter().enumerate() {
+        let uid = step_uid(row);
+        let base_row = honest_row(&mut rng, UNIQUE_OPS[uid], c0, &pk_seed, row == 0);
+        witness_row_major.extend_from_slice(&base_row);
+        cols.push(base_row.map(E::base));
+    }
+
+    let unit = |at: usize| -> Vec<E> {
+        (0..ROWS)
+            .map(|i| if i == at { E::ONE } else { E::ZERO })
+            .collect()
+    };
+    let round0 = RoundState {
+        cols,
+        eq_tau: (0..ROWS).map(|_| rng.ext()).collect(),
+        eq_not_last: (0..ROWS).map(|_| rng.ext()).collect(),
+        shift_tau: (0..ROWS).map(|_| rng.ext()).collect(),
+        is_first: unit(0),
+        is_last: unit(ROWS - 1),
+        step_c0: step_c0.iter().map(|&c| E::base(c)).collect(),
+        ops: (0..ROWS).map(|row| vec![(step_uid(row), E::ONE)]).collect(),
+    };
+    Fixture {
+        witness_row_major,
+        pk_seed,
+        pk_root,
+        mu,
+        group_a_gammas: (0..NUM_GROUP_A).map(|_| rng.ext()).collect(),
+        shift_gammas: (0..NUM_STATE).map(|_| rng.ext()).collect(),
+        op_gammas: UNIQUE_OPS
+            .iter()
+            .map(|&op| (0..op_constraint_count(op)).map(|_| rng.ext()).collect())
+            .collect(),
+        round0,
+    }
+}
+
+/// `(uid, selector at the low row, selector difference high - low)` over both rows of a pair.
+fn union_ops(lo: &[(usize, E)], hi: &[(usize, E)]) -> Vec<(usize, E, E)> {
+    let selector = |list: &[(usize, E)], uid: usize| {
+        list.iter()
+            .find(|&&(u, _)| u == uid)
+            .map_or(E::ZERO, |&(_, v)| v)
+    };
+    let mut uids: Vec<usize> = lo.iter().chain(hi).map(|&(uid, _)| uid).collect();
+    uids.sort_unstable();
+    uids.dedup();
+    uids.into_iter()
+        .map(|uid| {
+            let v0 = selector(lo, uid);
+            (uid, v0, selector(hi, uid) - v0)
+        })
+        .collect()
+}
+
+impl Fixture {
+    /// The batched constraint value of one (possibly interpolated) row: Group A and
+    /// boundaries, plus every selected opcode, each weighted by its gamma.
+    fn batched_row(
+        &self,
+        profile: Profile,
+        cols: &[E; NUM_COLS],
+        is_first: E,
+        is_last: E,
+        step_c0: E,
+        ops: &[(usize, E)],
+    ) -> E {
+        let mut acc = E::ZERO;
+        let mut c_idx = 0usize;
+        let perm_out = group_a_and_boundaries(profile, cols, is_first, is_last, &mut |v| {
+            acc = acc + self.group_a_gammas[c_idx] * v;
+            c_idx += 1;
+        });
+        assert_eq!(c_idx, NUM_GROUP_A);
+        let pk_seed = self.pk_seed.map(E::base);
+        for &(uid, selector) in ops {
+            let mut op_acc = E::ZERO;
+            let mut g_idx = 0usize;
+            op_constraints(
+                profile,
+                UNIQUE_OPS[uid],
+                step_c0,
+                cols,
+                &perm_out,
+                &pk_seed,
+                &mut |v| {
+                    op_acc = op_acc + self.op_gammas[uid][g_idx] * v;
+                    g_idx += 1;
+                },
+            );
+            assert_eq!(g_idx, self.op_gammas[uid].len());
+            // The single signer of this trace is active (`act = 1`).
+            acc = acc + selector * op_acc;
+        }
+        acc
+    }
+
+    /// The eight evaluations `[ev(0), ev(2), ..., ev(8)]` of the round polynomial
+    /// `sum_idx eq(X) * batched_row(X) + eq_not_last(X) * <g, next(X)> - shift(X) * <g, prev(X)>`.
+    ///
+    /// `skip_eq_at_zero` mirrors the Round-0 base-field path, which evaluates only the shift
+    /// bus at `X = 0` because every committed row satisfies its constraints there.
+    fn round_evals(&self, profile: Profile, st: &RoundState, skip_eq_at_zero: bool) -> [E; 8] {
+        let half = st.cols.len() / 2;
+        let half_r = st.is_first.len() / 2;
+        assert_eq!(half, half_r, "single signer: one local step per row");
+        let mut evals = [E::ZERO; 8];
+        for (slot, eval) in evals.iter_mut().enumerate() {
+            let k = if slot == 0 { 0 } else { slot as u64 + 1 };
+            for idx in 0..half {
+                let hi = idx + half;
+                let cols: [E; NUM_COLS] =
+                    core::array::from_fn(|c| interp(st.cols[idx][c], st.cols[hi][c], k));
+                let mut bus_next = E::ZERO;
+                let mut bus_prev = E::ZERO;
+                for j in 0..NUM_STATE {
+                    bus_next = bus_next + self.shift_gammas[j] * cols[COL_NEXT + j];
+                    bus_prev = bus_prev + self.shift_gammas[j] * cols[COL_PREV + j];
+                }
+                let mut total = interp(st.eq_not_last[idx], st.eq_not_last[hi], k) * bus_next
+                    - interp(st.shift_tau[idx], st.shift_tau[hi], k) * bus_prev;
+                if !(skip_eq_at_zero && k == 0) {
+                    let ops: Vec<(usize, E)> = union_ops(&st.ops[idx], &st.ops[hi])
+                        .into_iter()
+                        .map(|(uid, v0, dv)| (uid, v0 + dv.scale(k)))
+                        .collect();
+                    let batched = self.batched_row(
+                        profile,
+                        &cols,
+                        interp(st.is_first[idx], st.is_first[hi], k),
+                        interp(st.is_last[idx], st.is_last[hi], k),
+                        interp(st.step_c0[idx], st.step_c0[hi], k),
+                        &ops,
+                    );
+                    total = total + interp(st.eq_tau[idx], st.eq_tau[hi], k) * batched;
+                }
+                *eval = *eval + total;
+            }
+        }
+        evals
+    }
+}
+
+/// Fold every table of a round at the challenge, as the prover does between rounds.
+fn fold(st: &RoundState, chal: E) -> RoundState {
+    let half = st.cols.len() / 2;
+    let at = |v0: E, v1: E| v0 + chal * (v1 - v0);
+    let fold_vec = |v: &[E]| -> Vec<E> { (0..half).map(|i| at(v[i], v[i + half])).collect() };
+    RoundState {
+        cols: (0..half)
+            .map(|i| core::array::from_fn(|c| at(st.cols[i][c], st.cols[i + half][c])))
+            .collect(),
+        eq_tau: fold_vec(&st.eq_tau),
+        eq_not_last: fold_vec(&st.eq_not_last),
+        shift_tau: fold_vec(&st.shift_tau),
+        is_first: fold_vec(&st.is_first),
+        is_last: fold_vec(&st.is_last),
+        step_c0: fold_vec(&st.step_c0),
+        ops: (0..half)
+            .map(|i| {
+                union_ops(&st.ops[i], &st.ops[i + half])
+                    .into_iter()
+                    .map(|(uid, v0, dv)| (uid, v0 + chal * dv))
+                    .filter(|(_, v)| !v.is_zero())
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
+// ---- host-only checks ------------------------------------------------------------------------------
+
+/// Every row of the trace satisfies every constraint of the canonical AIR at its own point,
+/// and the retired profile rejects the same rows: the fixture is a canonical Poseidon2-12 +
+/// weighted-WOTS trace, and the two references are distinguishable on it.
+#[test]
+fn fixture_rows_satisfy_the_canonical_air_and_violate_the_retired_one() {
+    let fx = fixture();
+    let st = &fx.round0;
+    let pk_seed = fx.pk_seed.map(E::base);
+    let mut kinds_seen = [0usize; UNIQUE_OPS.len()];
+    let mut feed_forward_rows = 0usize;
+    for row in 0..ROWS {
+        let uid = step_uid(row);
+        kinds_seen[uid] += 1;
+        let residuals = |profile: Profile| -> (usize, usize, usize) {
+            let mut group_a_bad = 0usize;
+            let mut emitted = 0usize;
+            let perm_out = group_a_and_boundaries(
+                profile,
+                &st.cols[row],
+                st.is_first[row],
+                st.is_last[row],
+                &mut |v| {
+                    emitted += 1;
+                    group_a_bad += usize::from(!v.is_zero());
+                },
+            );
+            let mut op_bad = 0usize;
+            op_constraints(
+                profile,
+                UNIQUE_OPS[uid],
+                st.step_c0[row],
+                &st.cols[row],
+                &perm_out,
+                &pk_seed,
+                &mut |v| op_bad += usize::from(!v.is_zero()),
+            );
+            (emitted, group_a_bad, op_bad)
+        };
+        assert_eq!(residuals(CANONICAL), (NUM_GROUP_A, 0, 0), "row {row} uid {uid}");
+        let (_, legacy_group_a_bad, legacy_op_bad) = residuals(LEGACY);
+        assert!(legacy_group_a_bad > 0, "row {row}: retired matrices accepted");
+        // The feed-forward is live unless the row is idle or a first chain step that skips
+        // the hash (`u0 = 1` keeps the signature limb).
+        let kind = UNIQUE_OPS[uid].0;
+        let skips_hash = kind == KIND_WOTS_CHAIN_STEP0 && st.cols[row][COL_AUX + 4] == E::ONE;
+        if kind != KIND_IDLE && !skips_hash {
+            feed_forward_rows += 1;
+            assert!(legacy_op_bad > 0, "row {row}: retired feed-forward accepted");
+        }
+    }
+    assert!(kinds_seen.iter().all(|&n| n >= 8), "{kinds_seen:?}");
+    assert!(feed_forward_rows >= ROWS / 2, "{feed_forward_rows}");
+    // Round 0 pairs both equal and different opcodes.
+    let half = ROWS / 2;
+    let same = (0..half)
+        .filter(|&i| step_uid(i) == step_uid(i + half))
+        .count();
+    assert!(same >= 8 && half - same >= 8, "{same}");
+    assert_ne!(
+        fx.round_evals(CANONICAL, st, true),
+        fx.round_evals(LEGACY, st, true)
+    );
+}
+
+// ---- the device ----------------------------------------------------------------------------------------
+
+fn push_ext(dst: &mut Vec<u64>, e: E) {
+    dst.extend_from_slice(&e.0);
+}
+
+fn to_e(raw: [[u64; 4]; 8]) -> [E; 8] {
+    raw.map(E)
+}
+
+struct StaticTables {
+    words: Vec<[u64; 4]>,
+    /// Ext4 offset of each opcode's gamma block.
+    op_gamma_base: Vec<u64>,
+    id_sorted_u64_off: u32,
+    dyn_ext4_off: u32,
+}
+
+/// The static part of the `sched + pub` buffer, laid out as the prover lays it out:
+/// 206 Group-A gammas, 44 shift gammas, the per-opcode gammas, then the identity row order.
+fn static_tables(fx: &Fixture) -> StaticTables {
+    let mut words: Vec<[u64; 4]> = Vec::new();
+    words.extend(fx.group_a_gammas.iter().map(|g| g.0));
+    words.extend(fx.shift_gammas.iter().map(|g| g.0));
+    assert_eq!(words.len(), 250);
+    let mut op_gamma_base = Vec::new();
+    for gammas in &fx.op_gammas {
+        op_gamma_base.push(words.len() as u64);
+        words.extend(gammas.iter().map(|g| g.0));
+    }
+    let id_sorted_u64_off = (words.len() * 4) as u32;
+    let half_r = ROWS / 2;
+    for base in (0..half_r).step_by(4) {
+        words.push(core::array::from_fn(|i| (base + i).min(half_r - 1) as u64));
+    }
+    let dyn_ext4_off = words.len() as u32;
+    StaticTables {
+        words,
+        op_gamma_base,
+        id_sorted_u64_off,
+        dyn_ext4_off,
+    }
+}
+
+struct DynTables {
+    words: Vec<u64>,
+    signers_off: u32,
+    steps_off: u32,
+    op_hdr_off: u32,
+    op_ent_off: u32,
+}
+
+/// The per-round part of the `sched + pub` buffer for a single signer whose step dimension
+/// is being folded: signer fields, step publics, opcode headers and opcode entries.
+fn dyn_tables(fx: &Fixture, tables: &StaticTables, st: &RoundState) -> DynTables {
+    let cur_r = st.is_first.len();
+    let half_r = cur_r / 2;
+    let mut words = Vec::new();
+    let signers_off = tables.dyn_ext4_off;
+    push_ext(&mut words, E::ONE);
+    for v in fx.pk_seed.iter().chain(&fx.pk_root).chain(&fx.mu) {
+        push_ext(&mut words, E::base(*v));
+    }
+    let steps_off = signers_off + 14;
+    for loc in 0..cur_r {
+        push_ext(&mut words, st.is_first[loc]);
+        push_ext(&mut words, st.is_last[loc]);
+        push_ext(&mut words, st.step_c0[loc]);
+    }
+    let op_hdr_off = steps_off + 3 * cur_r as u32;
+    let mut entries: Vec<[u64; 4]> = Vec::new();
+    for idx in 0..half_r {
+        let pairs = union_ops(&st.ops[idx], &st.ops[idx + half_r]);
+        words.extend_from_slice(&[(entries.len() / 3) as u64, pairs.len() as u64, 0, 0]);
+        for (uid, v0, dv) in pairs {
+            let (kind, arg) = UNIQUE_OPS[uid];
+            entries.push([u64::from(kind), u64::from(arg), tables.op_gamma_base[uid], 0]);
+            entries.push(v0.0);
+            entries.push(dv.0);
+        }
+    }
+    let op_ent_off = op_hdr_off + half_r as u32;
+    for entry in &entries {
+        words.extend_from_slice(entry);
+    }
+    DynTables {
+        words,
+        signers_off,
+        steps_off,
+        op_hdr_off,
+        op_ent_off,
+    }
+}
+
+fn audit_required() -> bool {
+    std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_some()
+}
+
+#[test]
+fn air_row_group_kernels_match_the_canonical_poseidon2_and_weighted_wots_reference() {
+    let gpu = match VulkanSpirvBackend::try_new_audited() {
+        Ok(gpu) => gpu,
+        Err(
+            err @ (VulkanError::UnsupportedPlatform
+            | VulkanError::LibraryLoadFailed
+            | VulkanError::NoDiscreteGpuFound
+            | VulkanError::PipelineAuditFailed(_)),
+        ) => {
+            // The audit gate must not turn missing hardware or telemetry into a green skip.
+            assert!(
+                !audit_required(),
+                "QSAG_REQUIRE_GPU_AUDIT is set but no audited Vulkan device: {err}"
+            );
+            return;
+        }
+        Err(other) => panic!("unexpected Vulkan initialization error: {other}"),
+    };
+    let fx = fixture();
+    let tables = static_tables(&fx);
+
+    gpu.try_acquire_prover_session().expect("prover session");
+    // The witness enters VRAM through the Round-0 commitment, row-major, with room behind it
+    // for the column-major transpose.
+    let witness_words = ROWS * NUM_COLS;
+    let num_vars = witness_words.trailing_zeros() as usize;
+    gpu.prover_whir_commit_round0(
+        &[fx.witness_row_major.as_slice()],
+        &[0x5a; 32],
+        num_vars,
+        4,
+        16,
+        0,
+        0,
+        witness_words,
+    )
+    .expect("commit the witness");
+    let cols_base_word_offset = witness_words as u32;
+
+    let st0 = &fx.round0;
+    let mut shift_tables: Vec<[u64; 4]> = Vec::with_capacity(3 * ROWS);
+    for table in [&st0.eq_tau, &st0.eq_not_last, &st0.shift_tau] {
+        shift_tables.extend(table.iter().map(|e| e.0));
+    }
+    gpu.prover_air_init_shard(0, cols_base_word_offset, ROWS, &shift_tables, &tables.words)
+        .expect("init shard");
+
+    // Round 0: base-field columns, opcode pairs `(row, row + ROWS / 2)`.
+    let dyn0 = dyn_tables(&fx, &tables, st0);
+    let gpu_round0 = to_e(
+        gpu.prover_air_eval_round(
+            true,
+            ROWS,
+            ROWS,
+            1,
+            false,
+            cols_base_word_offset,
+            0,
+            tables.dyn_ext4_off,
+            &dyn0.words,
+            dyn0.signers_off,
+            dyn0.steps_off,
+            dyn0.op_hdr_off,
+            dyn0.op_ent_off,
+            tables.id_sorted_u64_off,
+        )
+        .expect("round 0 evaluation"),
+    );
+    let host_round0 = fx.round_evals(CANONICAL, st0, true);
+    assert_eq!(
+        gpu_round0, host_round0,
+        "Round-0 base-field AIR evaluations differ from the canonical reference"
+    );
+    // The skipped `X = 0` constraint part is zero on this trace, so the device's slot 0 is
+    // also the full evaluation.
+    assert_eq!(host_round0, fx.round_evals(CANONICAL, st0, false));
+    let legacy_round0 = fx.round_evals(LEGACY, st0, true);
+    for (slot, (device, retired)) in gpu_round0.iter().zip(&legacy_round0).enumerate().skip(1) {
+        assert_ne!(
+            device, retired,
+            "slot {slot}: the device still evaluates the retired Poseidon2 profile"
+        );
+    }
+
+    // Fold at a challenge and compare the folded columns and shift tables word for word.
+    let chal = E([
+        0x0123_4567_89ab_cdef,
+        0x0fed_cba9_8765_4321,
+        0x1111_2222_3333_4444,
+        0x5555_6666_7777_8888,
+    ]);
+    let col_dst = 0u32;
+    let sh_dst = (3 * ROWS) as u32;
+    gpu.prover_air_fold_round(true, ROWS, cols_base_word_offset, col_dst, 0, sh_dst, chal.0)
+        .expect("round 0 fold");
+    let st1 = fold(st0, chal);
+    let half = ROWS / 2;
+    let mut gpu_cols = vec![[0u64; 4]; NUM_COLS * half];
+    let mut gpu_shifts = vec![[0u64; 4]; 3 * half];
+    gpu.prover_air_read_tail(col_dst, sh_dst, &mut gpu_cols, &mut gpu_shifts)
+        .expect("read folded tables");
+    for c in 0..NUM_COLS {
+        for row in 0..half {
+            assert_eq!(E(gpu_cols[c * half + row]), st1.cols[row][c], "col {c} row {row}");
+        }
+    }
+    for (t, table) in [&st1.eq_tau, &st1.eq_not_last, &st1.shift_tau]
+        .into_iter()
+        .enumerate()
+    {
+        for (row, want) in table.iter().enumerate() {
+            assert_eq!(E(gpu_shifts[t * half + row]), *want, "table {t} row {row}");
+        }
+    }
+
+    // Round 1: extension-field columns, blended opcode selectors, all eight points.
+    let dyn1 = dyn_tables(&fx, &tables, &st1);
+    let gpu_round1 = to_e(
+        gpu.prover_air_eval_round(
+            false,
+            half,
+            half,
+            1,
+            false,
+            col_dst,
+            sh_dst,
+            tables.dyn_ext4_off,
+            &dyn1.words,
+            dyn1.signers_off,
+            dyn1.steps_off,
+            dyn1.op_hdr_off,
+            dyn1.op_ent_off,
+            tables.id_sorted_u64_off,
+        )
+        .expect("round 1 evaluation"),
+    );
+    let host_round1 = fx.round_evals(CANONICAL, &st1, false);
+    assert_eq!(
+        gpu_round1, host_round1,
+        "Round-1 Ext4 AIR evaluations differ from the canonical reference"
+    );
+    let legacy_round1 = fx.round_evals(LEGACY, &st1, false);
+    for (slot, (device, retired)) in gpu_round1.iter().zip(&legacy_round1).enumerate() {
+        assert_ne!(
+            device, retired,
+            "slot {slot}: the device still evaluates the retired Poseidon2 profile"
+        );
+    }
+    // The folded rows are no longer honest rows: the constraint part is live at every point.
+    assert_ne!(host_round1[0], fx.round_evals(CANONICAL, &st1, true)[0]);
+
+    gpu.release_prover_session();
+}
