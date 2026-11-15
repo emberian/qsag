@@ -550,6 +550,8 @@ fn apply_m4_auth(b: [AuthGlWire; 4]) -> [AuthGlWire; 4] {
 }
 
 fn apply_me_auth(st: &mut [AuthGlWire; 12]) {
+    // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
+    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
     let y0 = apply_m4_auth([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_auth([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_auth([st[8], st[9], st[10], st[11]]);
@@ -559,6 +561,7 @@ fn apply_me_auth(st: &mut [AuthGlWire; 12]) {
         st[4 + i] = y1[i].add(s);
         st[8 + i] = y2[i].add(s);
     }
+    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
 }
 
 fn apply_mi_auth(st: &mut [AuthGlWire; 12]) {
@@ -566,7 +569,7 @@ fn apply_mi_auth(st: &mut [AuthGlWire; 12]) {
     for lane in st.iter() {
         s = s.add(*lane);
     }
-    st[0] = st[0].scale(Goldilocks::TWO).neg().add(s);
+    st[0] = st[0].scale(Goldilocks::from_u64_reduced(64)).neg().add(s);
     st[1] = st[1].add(s);
     let mut d = Goldilocks::TWO;
     for lane in st.iter_mut().skip(2) {
@@ -2888,10 +2891,10 @@ pub fn hem_poseidon2_compress12_ff(
     ];
     poseidon2_perm12(&mut st);
     let out = [
-        st[0] + in0[0],
-        st[1] + in0[1],
-        st[2] + in0[2],
-        st[3] + in0[3],
+        st[0] + in0[0] + in1[0] * Goldilocks::TWO + tweak[0] * Goldilocks::from_u64_reduced(4),
+        st[1] + in0[1] + in1[1] * Goldilocks::TWO + tweak[1] * Goldilocks::from_u64_reduced(4),
+        st[2] + in0[2] + in1[2] * Goldilocks::TWO + tweak[2] * Goldilocks::from_u64_reduced(4),
+        st[3] + in0[3] + in1[3] * Goldilocks::TWO + tweak[3] * Goldilocks::from_u64_reduced(4),
     ];
     wipe_goldilocks(&mut st);
     wipe_goldilocks(&mut in0);
@@ -3445,10 +3448,22 @@ fn eval_spdz_hem_compress12_ff_batch(
         for k in 0..batch {
             let x = in0_per_party[p][k];
             out[p].push([
-                states[p][k][0].add(x[0]),
-                states[p][k][1].add(x[1]),
-                states[p][k][2].add(x[2]),
-                states[p][k][3].add(x[3]),
+                states[p][k][0].add(x[0]).add(AuthGlWire::public_const(
+                    pk_seed[0] * Goldilocks::TWO + tweaks[k][0] * Goldilocks::from_u64_reduced(4),
+                    vaults[p].mac_alpha_share,
+                )),
+                states[p][k][1].add(x[1]).add(AuthGlWire::public_const(
+                    pk_seed[1] * Goldilocks::TWO + tweaks[k][1] * Goldilocks::from_u64_reduced(4),
+                    vaults[p].mac_alpha_share,
+                )),
+                states[p][k][2].add(x[2]).add(AuthGlWire::public_const(
+                    pk_seed[2] * Goldilocks::TWO + tweaks[k][2] * Goldilocks::from_u64_reduced(4),
+                    vaults[p].mac_alpha_share,
+                )),
+                states[p][k][3].add(x[3]).add(AuthGlWire::public_const(
+                    pk_seed[3] * Goldilocks::TWO + tweaks[k][3] * Goldilocks::from_u64_reduced(4),
+                    vaults[p].mac_alpha_share,
+                )),
             ]);
         }
     }
