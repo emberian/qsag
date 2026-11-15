@@ -55,6 +55,7 @@ pub use recursive::{
     SuccinctHierarchicalHemAggregate, VerifiedHierarchicalHemEvidence,
     check_hierarchical_hem_commitment, check_hierarchical_hem_commitment_with_regime,
     checked_sum_usize, compact_summary_chain_digest, compress_verified_hierarchical_hem,
+    compress_hierarchical_hem_evidence, prove_hierarchical_hem_prepared,
     compute_framed_message_digest,
     compute_policy_registry_root, encode_policy_registry,
     hierarchical_hem_message, prove_hierarchical_hem, prove_succinct_hierarchical_hem,
@@ -64,6 +65,11 @@ pub use recursive::{
     verify_succinct_hierarchical_hem_with_regime,
 };
 pub mod recursion_census;
+pub mod recursive_fold;
+#[cfg(feature = "std")]
+mod prover_admission;
+#[cfg(feature = "std")]
+use prover_admission::prover_parallel_jobs;
 pub mod sig;
 pub mod sponge;
 pub mod trace;
@@ -246,10 +252,17 @@ where
     R: Send,
     F: Fn(&'a [T]) -> R + Sync,
 {
+    map_chunks_bounded_with_limit(items, parallel_workers(), f)
+}
+
+#[cfg(feature = "std")]
+pub(crate) fn map_chunks_bounded_with_limit<'a, T, R, F>(items: &'a [T], max_jobs: usize, f: F) -> Vec<R>
+where T: Sync, R: Send, F: Fn(&'a [T]) -> R + Sync,
+{
     if items.is_empty() {
         return Vec::new();
     }
-    let workers = parallel_workers().min(items.len());
+    let workers = parallel_workers().min(max_jobs.max(1)).min(items.len());
     if workers <= 1 {
         return alloc::vec![f(items)];
     }
@@ -914,7 +927,7 @@ pub(crate) fn aggregate_signatures_with_committee_root(
     #[cfg(feature = "std")]
     let leaves: Vec<MergeNode> = if batch_jobs.len() > 1 && parallel_workers() > 1 {
         let groups: Vec<Result<Vec<MergeNode>, HemAggError>> =
-            map_chunks_bounded(&batch_jobs, |sub| sub.iter().map(&prove_one).collect());
+            map_chunks_bounded_with_limit(&batch_jobs, prover_parallel_jobs(), |sub| sub.iter().map(&prove_one).collect());
         let mut flat_leaves = Vec::with_capacity(batch_jobs.len());
         for group in groups {
             flat_leaves.extend(group?);

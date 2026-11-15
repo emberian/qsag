@@ -27,7 +27,32 @@ to the deployed code. [ASSURANCE.md](../ASSURANCE.md) defines the full TCB and
 The constructive discipline is **0 sorry / 0 Classical.choice**, with permitted
 axioms `{propext, Quot.sound}`. Axiom audits must cover loaded/generated modules
 and private declarations; CI challenge exports need an explicit production roster.
-The current documentation update does not claim a fresh all-module proof run.
+Which modules a check covered, and whether those bytes are still the current ones, is
+recorded in [CURRENT_SCOPED_CHECKS.json](CURRENT_SCOPED_CHECKS.json) and reported by
+`scripts/check_evidence_freshness.py`; see
+[current integration checks](CONVERGENCE_STATUS.md#current-integration-checks).
+
+### Boundary, bridge and test modules
+
+These modules state what a neighbouring result does and does not cover, usually with a
+proved counterexample or an executed instance. They are registered in the library root and
+the axiom audit.
+
+| Module | Statement | Scope |
+| --- | --- | --- |
+| `HemVerifierAcceptance.lean` | Facts read off `verifyHemAffineWhir` itself: the oracle/claim arity check is necessary (`tooth_missing_batch_claim_erases_oracle`); for a zero-oracle false statement, acceptance forces a linear challenge collision (`verifyHemZeroOracle_implies_linear_collision`, `verifyHemZeroOracle_accepted_pairs_le`); the packaged core agreement is stronger than the checker (`tooth_core_agreement_is_stronger_than_checker`). | One false-statement family, not arbitrary Hem statements; no refinement of the Rust transcript parser. |
+| `HemPointReductionSoundness.lean` | The point-reduction wire decoder reconstructs `c1 = claim - 2*c0 - c2`, so the sum equation holds by construction (`hemPointReductionWire_sum`); a wrong hypercube sum agrees on at most two challenges and the bound is attained. | Local algebra; no adaptive composition. |
+| `HemFoldDecompositionBridge.lean` | The `UPoly` and coefficient-list forms of the claim-preserving fold relation are equivalent (`hasPolynomialExplanation_iff_decomposes`), with the same selected post-fold polynomial and no uniqueness-radius premise. | Representation bridge between the coding and transcript developments. |
+| `CodingTheory/PlaneBezoutResultant.lean`, `NonpersistentIncidenceBound.lean`, `PersistentPairsBound.lean`, `PersistentPairsBoundTests.lean` | Primitive plane-curve common-root bound; dimension-one nonpersistent cover; candidate-specific persistent-pair count under `|D|·(d+1) < B²`; inhabited instances and `tooth_persistent_needs_far`. | The two-dimensional step of CWYZ Claim 4.8 remains open (multi-sheet branch); see the tracker. |
+| `QromExtractionBoundary.lean` | Measured-query branch masses, observed-response consistency, bridge to `merkleQueryConsistent`; target cardinality does not give locality; recording a query changes Born probability. | Measured-query interface. Coherent extraction is separate. |
+| `QromMeasuredQueryExperiment.lean`, `QromMeasuredMerkleExtraction.lean`, `QromClassicalQueryTransfer.lean`, `QromMeasuredMerkleExtractionTests.lean` | A measured-query experiment with lazy sampling; Merkle extraction-failure mass at most `(d·(3Q+1) + (0+…+(Q-1))) / 2^w` with the consistency premise derived from the log; the same bound on the coherent run for adversaries whose queries sit on one address. | Not coherent-query QROM security: the parity circuit gives 8/8 coherently and 4/8 when measured. |
+| `RlweExtractionBoundary.lean` | The short-SIS branch of the fork-extraction dichotomy has the public solution `s=1, e=centered(-A)` (norm ≤6144 always, ≤6142 outside four residues per coefficient). | A statement about the reduction target, not a forged transcript. |
+| `HashTrailSampling.lean` | `≤ 6^k` of `N^k` assignments succeed in the fresh-independent-input S-box experiment; a realised trail of the fixed SPN cannot have probability `(6/2^128)^48`. | Separates component arithmetic from a fixed-permutation trail bound. |
+| `CompleteMediationBoundary.lean`, `SeparatedCustodyCore.lean`, `SeparatedCustodySpine.lean`, `SeparatedCustodyChecks.lean`, `SeparatedCustodyPolicy.lean`, `SeparatedCustodyHistory.lean`, `SeparatedCustodyHistoryChecks.lean` | One-custodian vault transitions with durable change before release (`release_durable`, `release_replay_rejected`, `forget_burns`, `trace_burned_spend_le_cap`); independently keyed approvals composed into a quorum certificate with structural extraction to the production hash-signature break events; executed cSHAKE256/Jorts construction checks. | Specification level: no fsync, key-isolation, anchor or ELF/MIR refinement; separate keys, not threshold reconstruction of one key. |
+| `SpongeFramingAndDomainSep.lean`, `CompositionInstances.lean` and the three composition modules | pad10*1 and cSHAKE prefix injectivity and cross-domain separation; generic composition reductions, with fixtures in which bad and forgery events are false and wrong-context constituents are rejected. | The fixtures use public checksums and a non-succinct reference aggregator; none instantiates a cryptographic assumption. |
+| `IdealOutputBoundary.lean` | Fresh successful ideal release equals the functionality's signature; injective request and key encodings; exact-retry versus changed-intent. | The engine's callbacks are cluster-level; party-local custody and a partial production oracle are separate. |
+| `CodingTheory/SlicedJetIncidence.lean`, `Cwyz26JohnsonCertificate.lean`, `GoldilocksCharacteristic.lean` | The non-excluded count one challenge slope at a time; `NonExcludedDecompBound` with an explicit `rest`; `1..k` invertible in `Goldilocks` and `QuarticGoldilocks` for `k < p`. | The nonpersistent term is linear in `|S|`, weaker than the paper's constant. |
+| `DensePcgTapLinearTests.lean`, `DensePcgProductionTaps.lean` | Exact bias of a linear test as a product over trees; the production tap generator on the Keccak specification; row 0 of one generated matrix has bias between `2^-118` and `2^-117`. | Taps modelled as uniform for the second-moment law; no bound over all row subsets. |
 
 ## Signature output laws and Pants state
 

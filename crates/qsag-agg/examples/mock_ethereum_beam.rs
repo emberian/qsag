@@ -27,7 +27,7 @@
 //!      prove of all `M` shards, the hierarchy's wire bytes and calldata gas, and multi-core /
 //!      1-core verification of all `M` child proofs (the proposer's check and a first-time
 //!      client's check alike).
-//!    - The compact commitment (`compress_verified_hierarchical_hem`) is built and checked against
+//!    - The compact commitment (`compress_hierarchical_hem_evidence`) is built and checked against
 //!      `VerifiedHierarchicalHemEvidence`, off the authorization path: its outer proof certifies
 //!      the summary hash chain, not the child proofs, so it does not replace the hierarchy for a
 //!      verifier without evidence.
@@ -48,9 +48,9 @@ use qsag_agg::{
     PreparedPolicyRegistry, ShardHemPolicy, ShardHemWitness, SigError, SignerBitmap, SigningMode,
     StatelessBudgetWalSink, SuccinctHierarchicalHemAggregate, ValidatorKeypair, ValidatorSignature,
     WhirSecurityRegime, aggregate_signatures_with_config, check_hierarchical_hem_commitment,
-    compress_verified_hierarchical_hem, compute_policy_registry_root, hierarchical_hem_message,
-    prove_hierarchical_hem, verify_hierarchical_hem, verify_hierarchical_hem_evidence,
-    verify_hierarchical_hem_prepared, verify_succinct_hierarchical_hem, with_worker_limit,
+    compress_hierarchical_hem_evidence, compute_policy_registry_root, hierarchical_hem_message,
+    prove_hierarchical_hem_prepared, verify_hierarchical_hem, verify_hierarchical_hem_evidence_prepared,
+    verify_hierarchical_hem_prepared, verify_succinct_hierarchical_hem_prepared, with_worker_limit,
 };
 use qsag_core::belt_latch::{BeltLatchRecord, BeltLatchState, DurableWal, WalError};
 use qsag_quorum::party_node::IsolatedQuorumParty;
@@ -366,9 +366,11 @@ fn run_beam_hierarchy_bench(
     let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0x73, 99));
     cfg.regime = regime;
 
+    let prepared_registry =
+        PreparedPolicyRegistry::new(policies.clone()).expect("valid epoch policy registry");
     let t_prove = Instant::now();
-    let agg = prove_hierarchical_hem(
-        &policies,
+    let agg = prove_hierarchical_hem_prepared(
+        &prepared_registry,
         &witnesses,
         epoch_floor,
         beacon_root_msg,
@@ -386,8 +388,6 @@ fn run_beam_hierarchy_bench(
     // 3. Measure block proposer / client verification: BOTH multi-core (`std::thread::scope`)
     //    AND single-core (`with_worker_limit(1, ...)`) against epoch-prepared committee roots
     //    (`PreparedPolicyRegistry`), plus cold uncached committee-registry verification.
-    let prepared_registry =
-        PreparedPolicyRegistry::new(policies.clone()).expect("valid epoch policy registry");
     assert!(verify_hierarchical_hem(
         &policies,
         epoch_floor,
@@ -451,8 +451,8 @@ fn run_beam_hierarchy_bench(
     // 4. Measure the compact hierarchy commitment (`SuccinctHierarchicalHemAggregate`). Its outer
     //    proof covers the summary hash chain only; authorizing the quorum still needs evidence
     //    from a full child verification, so the compact object is checked against that evidence.
-    let evidence = verify_hierarchical_hem_evidence(
-        &policies,
+    let evidence = verify_hierarchical_hem_evidence_prepared(
+        &prepared_registry,
         epoch_floor,
         beacon_root_msg,
         min_global,
@@ -461,14 +461,7 @@ fn run_beam_hierarchy_bench(
     )
     .expect("child proofs verify into evidence");
     let t_succ_prove = Instant::now();
-    let succinct = compress_verified_hierarchical_hem(
-        &policies,
-        epoch_floor,
-        beacon_root_msg,
-        min_global,
-        &decoded,
-        cfg.blinding_seed,
-    )
+    let succinct = compress_hierarchical_hem_evidence(&evidence, cfg.blinding_seed)
     .expect("outer succinct Beam Chain compression");
     let succinct_compress_ms = t_succ_prove.elapsed().as_secs_f64() * 1_000.0;
     let succinct_wire = succinct.to_bytes();
@@ -478,11 +471,12 @@ fn run_beam_hierarchy_bench(
     let mut succ_samples = Vec::with_capacity(verify_iters);
     for _ in 0..verify_iters {
         let t0 = Instant::now();
-        assert!(verify_succinct_hierarchical_hem(
-            &policies,
+        assert!(verify_succinct_hierarchical_hem_prepared(
+            &prepared_registry,
             epoch_floor,
             beacon_root_msg,
             min_global,
+            regime,
             &succinct_decoded,
             &evidence,
         ));
@@ -876,18 +870,19 @@ fn run_network_slot(
     let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0x74, epoch));
     cfg.regime = WhirSecurityRegime::BciksJohnsonQrom128;
 
-    // The joint prove runs about one shard per worker at once, and on the CPU backend each
-    // in-flight shard holds its own prover state; `QSAG_BEAM_JOINT_WORKERS` bounds that for
-    // memory-capped hosts. The per-subnet aggregator measurement is not affected.
+    // Arithmetic workers and concurrent trace allocations are separate budgets:
+    // QSAG_BEAM_JOINT_WORKERS bounds CPU workers; QSAG_PROVER_JOBS (default1)
+    // bounds active heavy batches before allocation, retaining intra-proof parallelism.
     let joint_workers = std::env::var("QSAG_BEAM_JOINT_WORKERS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(workers);
+    let prepared = PreparedPolicyRegistry::new(policies.clone()).expect("valid registry");
     let t_joint = Instant::now();
     let agg = with_worker_limit(joint_workers, || {
-        prove_hierarchical_hem(
-            &policies,
+        prove_hierarchical_hem_prepared(
+            &prepared,
             &witnesses,
             epoch,
             beacon_root_msg,
@@ -907,7 +902,6 @@ fn run_network_slot(
 
     // Full verification of every child proof against the epoch-prepared registry: this is the
     // work a proposer does before including the hierarchy and a client does on first receipt.
-    let prepared = PreparedPolicyRegistry::new(policies.clone()).expect("valid registry");
     let measure_full = |max_w: Option<usize>| -> (f64, f64) {
         let mut samples = Vec::with_capacity(verify_iters + 1);
         for _ in 0..=verify_iters {
@@ -940,10 +934,10 @@ fn run_network_slot(
     let (verify_all_p50_ms, verify_all_p99_ms) = measure_full(None);
     let (verify_1c_p50_ms, verify_1c_p99_ms) = measure_full(Some(1));
 
-    // Evidence for the compact commitment, from a cold-registry full verification.
+    // Fresh evidence for the compact commitment using cached registry roots.
     let t_ev = Instant::now();
-    let evidence = verify_hierarchical_hem_evidence(
-        &policies,
+    let evidence = verify_hierarchical_hem_evidence_prepared(
+        &prepared,
         epoch,
         beacon_root_msg,
         min_global,
@@ -954,14 +948,7 @@ fn run_network_slot(
     let evidence_ms = t_ev.elapsed().as_secs_f64() * 1_000.0;
 
     let t_comp = Instant::now();
-    let compact = compress_verified_hierarchical_hem(
-        &policies,
-        epoch,
-        beacon_root_msg,
-        min_global,
-        &decoded,
-        cfg.blinding_seed,
-    )
+    let compact = compress_hierarchical_hem_evidence(&evidence, cfg.blinding_seed)
     .expect("full-network compact commitment");
     let compact_build_ms = t_comp.elapsed().as_secs_f64() * 1_000.0;
     let compact_wire = compact.to_bytes();
@@ -983,11 +970,12 @@ fn run_network_slot(
         percentile_sorted(&samples, 50, 100)
     };
     let compact_check_p50_ms = median_ms(&|| {
-        verify_succinct_hierarchical_hem(
-            &policies,
+        verify_succinct_hierarchical_hem_prepared(
+            &prepared,
             epoch,
             beacon_root_msg,
             min_global,
+            cfg.regime,
             &compact_decoded,
             &evidence,
         )

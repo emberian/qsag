@@ -1824,6 +1824,27 @@ impl FiberLastDuet {
     #[inline]
     fn accepts(&self, inv_two: Goldilocks, claimed: qsag_whir_verified::Ext4) -> bool {
         let [theta, alpha, beta] = self.chal;
+        let algebraic_gate = crate::recursive_fold::DuetFoldStatement {
+            v0: self.v0,
+            v1: self.v1,
+            theta,
+            alpha,
+            beta,
+            inv_two,
+            inv_two_x: self.inv_two_x,
+            x_sq: self.x_sq,
+            claimed: from_verified_ext4(qsag_whir_verified::Ext4 {
+                a: claimed.a,
+                b: claimed.b,
+                c: claimed.c,
+                d: claimed.d,
+            }),
+        };
+        if !algebraic_gate.accepts() {
+            return false;
+        }
+        #[cfg(all(test, feature = "std"))]
+        crate::recursive_fold::capture_gate(&algebraic_gate);
         let odd = (self.v0 - self.v1).mul_base(self.inv_two_x);
         let gamma = alpha + beta.mul_base(self.x_sq);
         let affine_claim = from_verified_ext4(qsag_whir_verified::Ext4 {

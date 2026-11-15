@@ -1501,6 +1501,9 @@ pub fn prove_shard_batch_with_config(
     sigs: &[ValidatorSignature],
     cfg: &crate::HemAggConfig,
 ) -> Option<ShardBatchProof> {
+    // Admission precedes statement/trace allocation, including direct public API callers.
+    #[cfg(feature = "std")]
+    let _admission = crate::prover_admission::acquire();
     let blinding_seed = &cfg.blinding_seed;
     let first_active = bitmap.first_active()?;
     let profile = pks.get(first_active)?.profile;

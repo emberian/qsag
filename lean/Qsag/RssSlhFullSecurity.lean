@@ -1,10 +1,10 @@
 module
 /-
-# Qsag.RssSlhFullSecurity — Whole-Protocol Multi-Session UC Security of 2-of-3 RSS & `t`-of-`n` SPDZ `FIPS 205 SLH-DSA`
+# Qsag.RssSlhFullSecurity — Multi-Session Simulation of the RSS SLH-DSA Cluster Shell
 
-Self-contained Lean 4.35 end-to-end active threshold security proof for NIST `FIPS 205 SLH-DSA`
-over the multi-round rushing-adversary execution engine `Qsag.InteractiveUcEngine`
-(`0` proof gaps, `0` custom axioms, `0 Classical.choice`, `0` cheat hypotheses):
+Constructive Lean 4.35 simulation and forgery-transfer results for a three-round SLH-DSA
+cluster shell over `Qsag.InteractiveUcEngine`. The model boundary below specifies which
+transcripts, resources, and implementation refinements these theorems cover:
 
 1. **Three-Round Protocol (`rssSlhInteractiveProtocol`) & `sk`-Free UC Simulator (`Sim_RssSlh`)**:
    - **Round 1 (coin commitments)**: every party commits with `SHAKE256` to a 128-bit coin share
@@ -32,7 +32,7 @@ over the multi-round rushing-adversary execution engine `Qsag.InteractiveUcEngin
      `t`-quorum approval in `IdealTsig`, raw `idealSigBytes : ByteArray` (`0` access to `sk` or
      secret shares). It runs the coin toss as the honest parties do and simulates the masked
      messages from uniform pads.
-2. **Whole-Protocol Theorems**:
+2. **Cluster-Shell Theorems**:
    - `rss_slh_real_ideal_view_indistinguishable`: whole-transcript multi-round, multi-session
      distance (wire `ByteArray`s and `Abort(reason)` included) at most the root-hit probability
      of the joint coin; that probability is at most `Q_cuts * deg / 2^128` in the game where the
@@ -49,7 +49,7 @@ over the multi-round rushing-adversary execution engine `Qsag.InteractiveUcEngin
      `tooth_wal_rollback_enables_stateful_double_sign`,
      `tooth_corrupt_coin_opening_must_match_commitment`,
      `tooth_known_challenge_admits_nonzero_deviation`.
-3. **End-to-End Weld (`rss_slh_uc_forgery_to_hash_game`, `rss_slh_fresh_enrollment_euf_cma_bound`)**:
+3. **Shell-to-Hash-Game Transfer (`rss_slh_uc_forgery_to_hash_game`, `rss_slh_fresh_enrollment_euf_cma_bound`)**:
    composes the theorems above without an abstract unforgeability premise. On every uniform
    multi-session tape on which a forger wins against `RealProtocolExec`, either the tape is a
    root hit of the joint coin (`multiSessionBadHit true`) or the real transcript equals the ideal

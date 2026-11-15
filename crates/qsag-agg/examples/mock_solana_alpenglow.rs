@@ -38,10 +38,10 @@ use qsag_agg::{
     HierarchicalHemAggregate, PreparedPolicyRegistry, ShardHemPolicy, ShardHemWitness, SigError,
     SignerBitmap, SigningMode, SuccinctHierarchicalHemAggregate, ValidatorKeypair,
     ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
-    compress_verified_hierarchical_hem, compute_policy_registry_root, hierarchical_hem_message,
-    prove_hierarchical_hem, verify_aggregate_with_regime, verify_hierarchical_hem,
-    verify_hierarchical_hem_evidence, verify_hierarchical_hem_prepared,
-    verify_individual_signature, verify_succinct_hierarchical_hem, with_worker_limit,
+    compress_hierarchical_hem_evidence, compute_policy_registry_root, hierarchical_hem_message,
+    prove_hierarchical_hem_prepared, verify_aggregate_with_regime, verify_hierarchical_hem,
+    verify_hierarchical_hem_evidence_prepared, verify_hierarchical_hem_prepared,
+    verify_individual_signature, verify_succinct_hierarchical_hem_prepared, with_worker_limit,
 };
 use qsag_fts::{
     EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
@@ -1032,10 +1032,14 @@ fn bench_section2_hem_finality_compression(
     let mut joint_cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0xBB, 11));
     joint_cfg.regime = regime;
     joint_cfg.max_signers_per_shard = shard_cap;
-    joint_cfg.max_shards_per_batch = 16; // Jointly witness full 128-signer shards under one WHIR opening!
+    // Bound a single batch's trace footprint as well as concurrent batch admission.
+    // Every signer remains covered by the existing transcript-bound batch proofs and MergeNode.
+    // More batches trade larger certificate bytes for bounded live witness memory.
+    joint_cfg.max_shards_per_batch = env_usize("QSAG_ALPENGLOW_SHARDS_PER_BATCH", 2);
+    println!("    joint batch partition: <= {} shards/opening; QSAG_PROVER_JOBS={} (arithmetic workers remain independent)",
+        joint_cfg.max_shards_per_batch, env_usize("QSAG_PROVER_JOBS", 1));
 
-    // Single-host proves over the whole committee hold per-shard prover state for every shard in
-    // flight; `QSAG_ALPENGLOW_JOINT_WORKERS` bounds that concurrency on memory-capped hosts.
+    // CPU worker budget is independent of the QSAG_PROVER_JOBS active-witness limit.
     let joint_workers = env_usize("QSAG_ALPENGLOW_JOINT_WORKERS", workers);
     let t_prove_joint = Instant::now();
     let joint_proof = with_worker_limit(joint_workers, || {
@@ -1132,10 +1136,12 @@ fn bench_section2_hem_finality_compression(
     let mut hier_cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0xCC, 19));
     hier_cfg.regime = regime;
 
+    let prepared_hier =
+        PreparedPolicyRegistry::new(policies.clone()).expect("valid Alpenglow policy registry");
     let t_prove_hier = Instant::now();
     let hier_agg = with_worker_limit(joint_workers, || {
-        prove_hierarchical_hem(
-            &policies,
+        prove_hierarchical_hem_prepared(
+            &prepared_hier,
             &hier_witnesses,
             hier_epoch,
             hier_msg,
@@ -1148,8 +1154,6 @@ fn bench_section2_hem_finality_compression(
     let hier_wire = hier_agg.to_bytes();
     let hier_decoded =
         HierarchicalHemAggregate::from_bytes_canonical(&hier_wire).expect("canonical decode");
-    let prepared_hier =
-        PreparedPolicyRegistry::new(policies.clone()).expect("valid Alpenglow policy registry");
     assert!(verify_hierarchical_hem(
         &policies,
         hier_epoch,
@@ -1198,8 +1202,9 @@ fn bench_section2_hem_finality_compression(
     // 2D. Compact hierarchy commitment (`SuccinctHierarchicalHemAggregate`). Its outer proof
     //     certifies the summary hash chain, not the child proofs, so it is checked against
     //     `VerifiedHierarchicalHemEvidence` produced by a full child verification.
-    let evidence = verify_hierarchical_hem_evidence(
-        &policies,
+    let evidence_start = Instant::now();
+    let evidence = verify_hierarchical_hem_evidence_prepared(
+        &prepared_hier,
         hier_epoch,
         hier_msg,
         min_global,
@@ -1207,17 +1212,12 @@ fn bench_section2_hem_finality_compression(
         &hier_decoded,
     )
     .expect("Alpenglow child proofs verify into evidence");
+    let evidence_ms = evidence_start.elapsed().as_secs_f64() * 1000.0;
     let t_prove_succ = Instant::now();
-    let succ_agg = compress_verified_hierarchical_hem(
-        &policies,
-        hier_epoch,
-        hier_msg,
-        min_global,
-        &hier_decoded,
-        hier_cfg.blinding_seed,
-    )
+    let succ_agg = compress_hierarchical_hem_evidence(&evidence, hier_cfg.blinding_seed)
     .expect("Alpenglow succinct outer Hem compression");
     let succ_prove_ms = t_prove_succ.elapsed().as_secs_f64() * 1_000.0;
+    println!("    compact pipeline: fresh evidence {:.2} ms + reuse-only outer build {:.2} ms = {:.2} ms", evidence_ms, succ_prove_ms, evidence_ms + succ_prove_ms);
     let succ_wire = succ_agg.to_bytes();
     let succ_decoded = SuccinctHierarchicalHemAggregate::from_bytes_canonical(&succ_wire)
         .expect("canonical succinct decode");
@@ -1228,20 +1228,22 @@ fn bench_section2_hem_finality_compression(
             let t0 = Instant::now();
             let ok = match max_w {
                 Some(w) => with_worker_limit(w, || {
-                    verify_succinct_hierarchical_hem(
-                        &policies,
+                    verify_succinct_hierarchical_hem_prepared(
+                        &prepared_hier,
                         hier_epoch,
                         hier_msg,
                         min_global,
+                        regime,
                         &succ_decoded,
                         &evidence,
                     )
                 }),
-                None => verify_succinct_hierarchical_hem(
-                    &policies,
+                None => verify_succinct_hierarchical_hem_prepared(
+                    &prepared_hier,
                     hier_epoch,
                     hier_msg,
                     min_global,
+                    regime,
                     &succ_decoded,
                     &evidence,
                 ),

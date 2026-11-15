@@ -2,13 +2,14 @@ module
 /-
 # Qsag.InteractiveUcEngine — Multi-Round, Multi-Session Rushing-Adversary UC Execution Engine
 
-Self-contained Lean 4.35 interactive Universal Composability execution engine (`0` proof gaps,
-`0` custom axioms, `0 Classical.choice`, `≤ 12` `@[expose]`):
-1. **Persistent Cross-Session `WalLatchState` & Non-Cloneable Custody (`HonestCustodyVault`)**:
+Lean 4.35 cluster-callback execution model with constructive finite-game simulations.
+The callbacks receive the complete honest-share map; party-network refinement is separate:
+1. **Persistent Cross-Session `WalLatchState` & Modeled Custody (`HonestCustodyVault`)**:
    Models crash-idempotent monotonic epoch latching, enrolled public-key digest pinning, sticky
-   active-fault quarantine (`walPoisonVault` irreversibly sets `poisoned = true` and wipes the
-   in-memory secret key share), and strictly monotonic per-session mask-tape cursors.
-2. **True Multi-Round, Multi-Session Rushing-Adversary Network Execution
+   active-fault quarantine (`walPoisonVault` sets `poisoned = true` and clears the modeled
+   share field), and strictly monotonic per-session mask-tape cursors. Physical erasure and
+   exclusion of copies of earlier pure states require an implementation refinement.
+2. **Multi-Round, Multi-Session Rushing-Adversary Cluster Execution
    (`RealProtocolExec` vs `IdealFunctionalityExec`)**:
    In every round `k ∈ {1, 2, 3}` across `Q_s` adaptively scheduled signing sessions, an arbitrary
    stateful rushing adversary `A : UcRushingAdversary AdvState` inspects **all honest round-`k` wire
@@ -2724,6 +2725,13 @@ private theorem execConcurrentSteps_map_eq
       by_cases hj : j = slot
       · subst hj; rw [updateConcurrentSlot_same, updateConcurrentSlot_same]
       · rw [updateConcurrentSlot_ne _ _ j _ hj, updateConcurrentSlot_ne _ _ j _ hj]
+    have hMapAfterR1 : ∀ ep md req h1 c1 (r2 : A2),
+        mapSlotPhase f2 f3 (.afterR1 ep md req h1 c1 r2) = .afterR1 ep md req h1 c1 (f2 r2) :=
+      fun _ _ _ _ _ _ => rfl
+    have hMapAfterR2 : ∀ ep md req h1 c1 h2 c2 (r3 : A3),
+        mapSlotPhase f2 f3 (.afterR2 ep md req h1 c1 h2 c2 r3) =
+          .afterR2 ep md req h1 c1 h2 c2 (f3 r3) :=
+      fun _ _ _ _ _ _ _ _ => rfl
     have hStep :
         (execConcurrentStep engB A (mapConcurrentState f2 f3 st) advSt =
           let (st1, adv1) := execConcurrentStep engA A st advSt
@@ -2734,32 +2742,37 @@ private theorem execConcurrentSteps_map_eq
       cases (A.chooseNextStep advSt).1 with
       | startRound1 req =>
         dsimp only
-        split
-        · exact ⟨rfl, hPk⟩
-        · split
-          · next hSlot =>
-            cases validThresholdApproval st.tsig req.honestApprovers
-            · exact ⟨rfl, hPk⟩
-            · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        by_cases hSeen : req.sessionId ∈ st.seenSids
+        · simp only [hSeen, decide_true, ↓reduceIte]
+          exact ⟨trivial, hPk⟩
+        · simp only [hSeen, decide_false, Bool.false_eq_true, ↓reduceIte]
+          by_cases hSlot : st.allocatedSlots < Q_s
+          · simp only [hSlot, ↓reduceDIte]
+            by_cases hAppr : validThresholdApproval st.tsig req.honestApprovers = true
+            · simp only [hAppr, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
               rw [hPk, ← hPkDig, ← hMsgDig]
               cases walPreSignStep st.honestWal _ _ _ with
-              | err _ _ => exact ⟨rfl, rfl⟩
+              | err _ _ => exact ⟨rfl, hPk⟩
               | ok wal' auth =>
                 cases auth with
-                | replayCached _ => exact ⟨rfl, rfl⟩
+                | replayCached _ => exact ⟨rfl, hPk⟩
                 | authorizedFresh ep =>
                   dsimp only
-                  rw [hR1]
-                  dsimp only
-                  rw [hV1]
+                  simp only [hR1]
+                  simp only [hV1]
                   cases engA.slotVerify1 _ _ _ _ _ _ with
-                  | inl _ => exact ⟨rfl, rfl⟩
+                  | inl _ => exact ⟨rfl, hPk⟩
                   | inr a2 =>
-                    refine ⟨?_, rfl⟩
+                    refine ⟨?_, hPk⟩
                     dsimp only [mapConcurrentState]
-                    rw [hMapUpd st.slots ⟨st.allocatedSlots, hSlot⟩ (.afterR1 ep _ req _ _ a2)]
+                    rw [← hMapUpd st.slots ⟨st.allocatedSlots, hSlot⟩ (.afterR1 ep _ req _ _ a2)]
                     rfl
-          · exact ⟨rfl, hPk⟩
+            · have hApprF : validThresholdApproval st.tsig req.honestApprovers = false :=
+                Bool.eq_false_iff.mpr hAppr
+              simp only [hApprF, Bool.not_false, ↓reduceIte]
+              exact ⟨trivial, hPk⟩
+          · simp only [hSlot, ↓reduceDIte]
+            exact ⟨trivial, hPk⟩
       | stepRound2 sid =>
         dsimp only
         cases lookupSidSlot sid st.sidMap with
@@ -2771,28 +2784,26 @@ private theorem execConcurrentSteps_map_eq
           | afterR2 _ _ _ _ _ _ _ _ => dsimp only [mapSlotPhase]; exact ⟨rfl, hPk⟩
           | closed => dsimp only [mapSlotPhase]; exact ⟨rfl, hPk⟩
           | afterR1 ep md req h1 c1 a2 =>
-            dsimp only [mapSlotPhase]
-            cases st.honestWal.poisoned
-            · simp only [Bool.false_eq_true, ↓reduceIte]
-              rw [hPk, hR2]
-              dsimp only
-              rw [hPC]
+            simp only [hMapAfterR1]
+            by_cases hPois : st.honestWal.poisoned = true
+            · simp only [hPois, ↓reduceIte]
+              refine ⟨?_, hPk⟩
+              rw [← hMapUpd st.slots slot .closed]
+              rfl
+            · have hPoisF : st.honestWal.poisoned = false := Bool.eq_false_iff.mpr hPois
+              simp only [hPoisF, Bool.false_eq_true, ↓reduceIte]
+              rw [hPk]
+              simp only [hR2]
+              simp only [hPC]
               cases engA.slotPreCut _ _ _ _ _ _ with
               | inl _ =>
-                refine ⟨?_, rfl⟩
-                dsimp only [mapConcurrentState]
-                rw [hMapUpd st.slots slot .closed]
+                refine ⟨?_, hPk⟩
+                rw [← hMapUpd st.slots slot .closed]
                 rfl
               | inr a3 =>
                 refine ⟨?_, rfl⟩
-                dsimp only [mapConcurrentState]
-                rw [hMapUpd st.slots slot (.afterR2 ep md req h1 c1 _ _ a3)]
+                rw [← hMapUpd st.slots slot (.afterR2 ep md req h1 c1 _ _ a3)]
                 rfl
-            · simp only [↓reduceIte]
-              refine ⟨?_, hPk⟩
-              dsimp only [mapConcurrentState]
-              rw [hMapUpd st.slots slot .closed]
-              rfl
       | stepRound3 sid =>
         dsimp only
         cases lookupSidSlot sid st.sidMap with
@@ -2804,19 +2815,19 @@ private theorem execConcurrentSteps_map_eq
           | afterR1 _ _ _ _ _ _ => dsimp only [mapSlotPhase]; exact ⟨rfl, hPk⟩
           | closed => dsimp only [mapSlotPhase]; exact ⟨rfl, hPk⟩
           | afterR2 ep md req h1 c1 h2 c2 a3 =>
-            dsimp only [mapSlotPhase]
-            cases st.honestWal.poisoned
-            · simp only [Bool.false_eq_true, ↓reduceIte]
-              rw [hPk, hR3]
-              dsimp only
-              rw [hFin]
-              cases engA.slotFinalize _ _ _ _ _ _ <;>
-                (refine ⟨?_, rfl⟩; dsimp only [mapConcurrentState]; rw [hMapUpd st.slots slot .closed]; rfl)
-            · simp only [↓reduceIte]
+            simp only [hMapAfterR2]
+            by_cases hPois : st.honestWal.poisoned = true
+            · simp only [hPois, ↓reduceIte]
               refine ⟨?_, hPk⟩
-              dsimp only [mapConcurrentState]
-              rw [hMapUpd st.slots slot .closed]
+              rw [← hMapUpd st.slots slot .closed]
               rfl
+            · have hPoisF : st.honestWal.poisoned = false := Bool.eq_false_iff.mpr hPois
+              simp only [hPoisF, Bool.false_eq_true, ↓reduceIte]
+              rw [hPk]
+              simp only [hR3]
+              simp only [hFin]
+              cases engA.slotFinalize _ _ _ _ _ _ <;>
+                (refine ⟨?_, hPk⟩; rw [← hMapUpd st.slots slot .closed]; rfl)
     obtain ⟨hStEq, hPk1⟩ := hStep
     simp only [execConcurrentSteps]
     rw [hStEq]
@@ -3113,7 +3124,8 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
         (eng0.slotRound3 j = engR.slotRound3 j ∧ engR.slotRound3 j = engS.slotRound3 j) := by
       intro j hjNe
       have hjValNe : j.val ≠ idx.val := fun he => hjNe (Fin.ext he)
-      have hLtSame : (j.val < idx.val) ↔ (j.val < idx.val + 1) := by omega
+      have hLtSame : (j.val < idx.val) ↔ (j.val < idx.val + 1) :=
+        ⟨fun h => Nat.lt_succ_of_lt h, fun h => Nat.lt_of_le_of_ne (Nat.le_of_lt_succ h) hjValNe⟩
       have hV0j : v0 j = v j := updateFinVec_other v idx j _ hjNe
       have hV1j : v1 j = v j := updateFinVec_other v idx j _ hjNe
       have hMR0 : mkReal v0 j = mkReal v j := by dsimp only [mkReal]; rw [hV0j]
@@ -3194,9 +3206,8 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                       have hv := congrArg Fin.val he
                       dsimp only [newSlot] at hv
                       omega
-                    have hR1Eq := (hOtherEng newSlot hNewNeIdx).1.2
-                    rw [hR1Eq]
-                    dsimp only
+                    have hR1Eq := (hOtherEng ⟨st.allocatedSlots, hSlot⟩ hNewNeIdx).1.2
+                    simp only [hR1Eq]
                     have hV1Same : ∀ x h1 c1, engR.slotVerify1 newSlot st.tsig.pk req x h1 c1 =
                         engS.slotVerify1 newSlot st.tsig.pk req x h1 c1 := fun _ _ _ => rfl
                     rw [hV1Same]
@@ -3204,8 +3215,9 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                     | inl _ =>
                       exact ih _ slotsS _ hPkE hCorrE (by dsimp only; omega) hSlotsNe hSlotIdx
                     | inr r2Init =>
-                      apply ih _ (updateConcurrentSlot slotsS newSlot _) _ hPkE hCorrE (by dsimp only; omega)
+                      refine ih _ (updateConcurrentSlot slotsS newSlot _) _ hPkE hCorrE (by dsimp only; omega) ?_ ?_
                       · intro j hjNe
+                        dsimp only
                         by_cases hJNew : j = newSlot
                         · subst hJNew; rw [updateConcurrentSlot_same, updateConcurrentSlot_same]
                         · rw [updateConcurrentSlot_ne _ _ j _ hJNew, updateConcurrentSlot_ne _ _ j _ hJNew]
@@ -3245,26 +3257,25 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                     exact hSlotsNe j hjNe
                 cases st.honestWal.poisoned
                 · simp only [Bool.false_eq_true, ↓reduceIte]
-                  rw [(hOtherEng slot hSlIdx).2.1.2]
-                  dsimp only
+                  simp only [(hOtherEng slot hSlIdx).2.1.2]
                   have hPCSame : ∀ x h2 c2, engR.slotPreCut slot st.tsig.pk rq x h2 c2 =
                       engS.slotPreCut slot st.tsig.pk rq x h2 c2 := fun _ _ _ => rfl
                   rw [hPCSame]
                   cases engS.slotPreCut slot st.tsig.pk rq _ _ _ with
                   | inl _ =>
-                    apply ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc (hUpdOther .closed)
+                    refine ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc (hUpdOther .closed) ?_
                     dsimp only
                     rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
                         updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
                     exact hSlotIdx
                   | inr r3New =>
-                    apply ih _ (updateConcurrentSlot slotsS slot _) _ hPkE hCorrE hIdxAlloc (hUpdOther _)
+                    refine ih _ (updateConcurrentSlot slotsS slot _) _ hPkE hCorrE hIdxAlloc (hUpdOther _) ?_
                     dsimp only
                     rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
                         updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
                     exact hSlotIdx
                 · simp only [↓reduceIte]
-                  apply ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc (hUpdOther .closed)
+                  refine ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc (hUpdOther .closed) ?_
                   dsimp only
                   rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
                       updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
@@ -3301,9 +3312,9 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                   rw [hR3R, hR3S] at hR3Spec
                   obtain ⟨hW3Eq, hRel3'⟩ := hR3Spec
                   subst hW3Eq
-                  dsimp only
-                  have hFinEq := spec.hFinalize p c rq r3' s3' wR3 _ hRel3'
-                  rw [hFinEq]
+                  simp only [hR3R, hR3S]
+                  have hFinEq := fun c3 => spec.hFinalize p c rq r3' s3' wR3 c3 hRel3'
+                  simp only [hFinEq]
                   cases sim.finalizeIdealCut cl.tsig.pk rq s3' (idealSignOracle rq) wR3 _ <;>
                     exact ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc hClosedOther (.inl hClosedIdx)
                 · simp only [↓reduceIte]
@@ -3324,19 +3335,18 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                     exact hSlotsNe j hjNe
                 cases st.honestWal.poisoned
                 · simp only [Bool.false_eq_true, ↓reduceIte]
-                  rw [(hOtherEng slot hSlIdx).2.2.2]
-                  dsimp only
+                  simp only [(hOtherEng slot hSlIdx).2.2.2]
                   have hFinSame : ∀ x h3 c3, engR.slotFinalize slot st.tsig.pk rq x h3 c3 =
                       engS.slotFinalize slot st.tsig.pk rq x h3 c3 := fun _ _ _ => rfl
                   rw [hFinSame]
                   cases engS.slotFinalize slot st.tsig.pk rq _ _ _ <;>
-                    (apply ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc hClosedOther;
+                    (refine ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc hClosedOther ?_;
                      dsimp only;
                      rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
                          updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)];
                      exact hSlotIdx)
                 · simp only [↓reduceIte]
-                  apply ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc hClosedOther
+                  refine ih _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxAlloc hClosedOther ?_
                   dsimp only
                   rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
                       updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
@@ -3400,8 +3410,10 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                 rw [hEDig.2.1, hEDig.2.2.1, hEDig.2.2.2.2.1, hEDig.2.2.2.2.2]
                 cases hWalStep : walPreSignStep st.honestWal (proto.pkDigestOf st.tsig.pk) req.reqEpoch (proto.msgDigestOf req) with
                 | err _ _ =>
+                  rw [hWalStep] at hObsFalse
                   exact ih _ slots0 slotsS _ hPkE hCorrE hSlNe hUnalloc hIdxSt hObsFalse
                 | ok wal' auth =>
+                  rw [hWalStep] at hObsFalse
                   dsimp only at hObsFalse ⊢
                   cases auth with
                   | replayCached _ =>
@@ -3429,7 +3441,7 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                       dsimp only [eng0, engR, engS, hybridConcurrentEngine] at hObsFalse ⊢
                       have hNotLt0 : ¬ (idx.val < idx.val) := Nat.lt_irrefl _
                       have hLt1 : idx.val < idx.val + 1 := Nat.lt_succ_self _
-                      simp only [hNotLt0, hLt1, Bool.false_eq_true, ↓reduceIte,
+                      simp only [hNotLt0, hLt1, ↓reduceIte,
                         hPkE, hCorrE, hMkReal0Idx, hMkRealIdx, hMkSim1Idx] at hObsFalse ⊢
                       rcases hPR0 : proto.honestRound1 cl.tsig.pk cl.tsig.corruptParties req st.maskSessionCursor cl.honestShares (spec.realTapeOf p c0) with ⟨w0, r1_0⟩
                       rcases hPRc : proto.honestRound1 cl.tsig.pk cl.tsig.corruptParties req st.maskSessionCursor cl.honestShares (spec.realTapeOf p c) with ⟨wc, r1_c⟩
@@ -3438,36 +3450,42 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                       rw [hPRc, hPS] at hR1_c
                       obtain ⟨hW0Eq, hRel1_0⟩ := hR1_0
                       obtain ⟨hWcEq, hRel1_c⟩ := hR1_c
-                      subst hW0Eq hWcEq
-                      dsimp only at hObsFalse ⊢
-                      rcases spec.hVerify1 p c0 req r1_0 s1 w0 _ hRel1_0 with
+                      subst hW0Eq
+                      subst wc
+                      simp only [hPR0, hPRc, hPS] at hObsFalse ⊢
+                      rcases spec.hVerify1 p c0 req r1_0 s1 w0
+                          (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.chooseNextStep a).2 req.sessionId w0).1 c'))) hRel1_0 with
                         ⟨err0, hV1_0, hVS_0⟩ | ⟨r2_0, s2_0, hV1_0, hVS_0, hRel2_0⟩
-                      · rcases spec.hVerify1 p c req r1_c s1 w0 _ hRel1_c with
+                      · rcases spec.hVerify1 p c req r1_c s1 w0
+                            (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.chooseNextStep a).2 req.sessionId w0).1 c'))) hRel1_c with
                           ⟨errc, hV1_c, hVS_c⟩ | ⟨_, _, _, hVS_c, _⟩
-                        · have hErrEq : errc = err0 := by rw [hVS_0] at hVS_c; injection hVS_c; exact ‹_›.symm
-                          subst hErrEq
-                          rw [hV1_0] at hObsFalse
-                          rw [hV1_c, hVS_0]
-                          dsimp only at hObsFalse ⊢
+                        · have hErrEq : errc = err0 := by rw [hVS_0] at hVS_c; exact (PSum.inl.inj hVS_c).symm
+                          subst errc
+                          simp only [hV1_0] at hObsFalse
+                          simp only [hV1_c, hVS_0]
                           exact hPostPreCut m _ slotsS _ hPkE hCorrE
                             (by dsimp only; omega) (fun j hj => (hSlNe j hj).2)
                             (.inr (.inl ⟨by
                               rcases hIdxSt with ⟨_, hU, _⟩ | ⟨hLtC, _⟩
                               · exact hU
-                              · omega, by
+                              · exact absurd hLtC (by omega), by
                               rcases hIdxSt with ⟨_, _, hU⟩ | ⟨hLtC, _⟩
                               · exact hU
-                              · omega⟩))
+                              · exact absurd hLtC (by omega)⟩))
                         · rw [hVS_0] at hVS_c; cases hVS_c
-                      · rcases spec.hVerify1 p c req r1_c s1 w0 _ hRel1_c with
+                      · rcases spec.hVerify1 p c req r1_c s1 w0
+                            (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.chooseNextStep a).2 req.sessionId w0).1 c'))) hRel1_c with
                           ⟨_, _, hVS_c⟩ | ⟨r2_c, s2_c, hV1_c, hVS_c, hRel2_c⟩
                         · rw [hVS_0] at hVS_c; cases hVS_c
-                        · have hS2Eq : s2_c = s2_0 := by rw [hVS_0] at hVS_c; injection hVS_c; exact ‹_›.symm
-                          subst hS2Eq
-                          rw [hV1_0] at hObsFalse
-                          rw [hV1_c, hVS_0]
-                          dsimp only at hObsFalse ⊢
-                          apply ih _ (updateConcurrentSlot slots0 idx _) (updateConcurrentSlot slotsS idx _) _ hPkE hCorrE
+                        · have hS2Eq : s2_c = s2_0 := by rw [hVS_0] at hVS_c; exact (PSum.inr.inj hVS_c).symm
+                          subst s2_c
+                          simp only [hV1_0] at hObsFalse
+                          simp only [hV1_c, hVS_0]
+                          refine ih _
+                            (updateConcurrentSlot slots0 idx (.afterR1 ep (proto.msgDigestOf req) req w0
+                              (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.chooseNextStep a).2 req.sessionId w0).1 c')))
+                              (.inl r2_0)))
+                            (updateConcurrentSlot slotsS idx _) _ hPkE hCorrE ?_ ?_ ?_ ?_
                           · intro j hjNe
                             dsimp only
                             rw [updateConcurrentSlot_ne _ _ j _ hjNe,
@@ -3488,29 +3506,31 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                               hRel2_0, hRel2_c⟩
                           · exact hObsFalse
                     · -- Allocating some other slot `newSlot ≠ idx`
-                      obtain ⟨⟨hR1_0R, hR1_RS⟩, _, _⟩ := hOtherEng newSlot hNewIdx
-                      change (let (honR1, r1St) := eng0.slotRound1 newSlot st.tsig.pk st.tsig.corruptParties req st.maskSessionCursor; _) = false at hObsFalse
-                      change (let (honR1, r1St) := engR.slotRound1 newSlot st.tsig.pk st.tsig.corruptParties req st.maskSessionCursor; _) = _
-                      rw [hR1_0R, hR1_RS] at hObsFalse
-                      rw [hR1_RS]
-                      dsimp only at hObsFalse ⊢
-                      have hV1Eq0 : ∀ x h1 c1, eng0.slotVerify1 newSlot st.tsig.pk req x h1 c1 =
-                          engS.slotVerify1 newSlot st.tsig.pk req x h1 c1 := fun _ _ _ => rfl
-                      have hV1EqR : ∀ x h1 c1, engR.slotVerify1 newSlot st.tsig.pk req x h1 c1 =
-                          engS.slotVerify1 newSlot st.tsig.pk req x h1 c1 := fun _ _ _ => rfl
-                      rw [hV1Eq0] at hObsFalse
-                      rw [hV1EqR]
-                      cases engS.slotVerify1 newSlot st.tsig.pk req _ _ _ with
+                      obtain ⟨⟨hR1_0R, hR1_RS⟩, _, _⟩ := hOtherEng ⟨st.allocatedSlots, hSlot⟩ hNewIdx
+                      simp only [hR1_0R, hR1_RS] at hObsFalse
+                      simp only [hR1_RS]
+                      have hV1Eq0 : ∀ x h1 c1,
+                          eng0.slotVerify1 ⟨st.allocatedSlots, hSlot⟩ st.tsig.pk req x h1 c1 =
+                          engS.slotVerify1 ⟨st.allocatedSlots, hSlot⟩ st.tsig.pk req x h1 c1 := fun _ _ _ => rfl
+                      have hV1EqR : ∀ x h1 c1,
+                          engR.slotVerify1 ⟨st.allocatedSlots, hSlot⟩ st.tsig.pk req x h1 c1 =
+                          engS.slotVerify1 ⟨st.allocatedSlots, hSlot⟩ st.tsig.pk req x h1 c1 := fun _ _ _ => rfl
+                      simp only [hV1Eq0] at hObsFalse
+                      simp only [hV1EqR]
+                      generalize engS.slotVerify1 ⟨st.allocatedSlots, hSlot⟩ st.tsig.pk req _ _ _ = ver
+                        at hObsFalse ⊢
+                      cases ver with
                       | inl _ =>
-                        apply ih _ slots0 slotsS _ hPkE hCorrE hSlNe
-                          (fun j hj => hUnalloc j (Nat.le_of_succ_le hj))
-                        · dsimp only
-                          rcases hIdxSt with hU | ⟨hLt, hEx⟩
-                          · exact .inl hU
-                          · exact .inr ⟨Nat.lt_succ_of_lt hLt, hEx⟩
-                        · exact hObsFalse
+                        dsimp only at hObsFalse ⊢
+                        refine ih _ slots0 slotsS _ hPkE hCorrE hSlNe
+                          (fun j hj => hUnalloc j (Nat.le_of_succ_le hj)) ?_ hObsFalse
+                        rcases hIdxSt with hU | ⟨hLt, hEx⟩
+                        · exact .inl hU
+                        · exact .inr ⟨Nat.lt_succ_of_lt hLt, hEx⟩
                       | inr r2New =>
-                        apply ih _ (updateConcurrentSlot slots0 newSlot _) (updateConcurrentSlot slotsS newSlot _) _ hPkE hCorrE
+                        dsimp only at hObsFalse ⊢
+                        refine ih _ (updateConcurrentSlot slots0 newSlot _) (updateConcurrentSlot slotsS newSlot _) _
+                          hPkE hCorrE ?_ ?_ ?_ hObsFalse
                         · intro j hjNe
                           dsimp only
                           by_cases hJ : j = newSlot
@@ -3529,7 +3549,6 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                           rcases hIdxSt with hU | ⟨hLt, hEx⟩
                           · exact .inl hU
                           · exact .inr ⟨Nat.lt_succ_of_lt hLt, hEx⟩
-                        · exact hObsFalse
             · next hNoSlot =>
               simp only [hNoSlot, ↓reduceDIte] at hObsFalse
               exact ih _ slots0 slotsS _ hPkE hCorrE hSlNe hUnalloc hIdxSt hObsFalse
@@ -3547,6 +3566,7 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
           | some slot =>
             dsimp only
             rw [hLook] at hObsFalse
+            dsimp only at hObsFalse
             by_cases hSlIdx : slot = idx
             · subst hSlIdx
               rw [ite_eq_left rfl] at hObsFalse
@@ -3578,21 +3598,20 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                   rw [hPRc, hPS] at hR2Specc
                   obtain ⟨hW2_0, _⟩ := hR2Spec0
                   obtain ⟨hW2_c, hRel2'_c⟩ := hR2Specc
-                  subst hW2_0 hW2_c
-                  dsimp only at hObsFalse ⊢
+                  subst hW2_0
+                  subst w2_c
+                  simp only [hPR0, hPRc, hPS] at hObsFalse ⊢
                   rcases spec.hPreCut p c rq r2'_c s2' w2_0 _ hRel2'_c hObsFalse with
                     ⟨errB, hPCR, hPCS⟩ | ⟨r3Init, s3Init, hPCR, hPCS, hRel3⟩
-                  · rw [hPCR, hPCS]
-                    dsimp only
+                  · simp only [hPCR, hPCS]
                     exact hPostPreCut m _ (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE hIdxLt
                       (fun j hj => by
                         dsimp only
                         rw [updateConcurrentSlot_ne _ _ j _ hj, updateConcurrentSlot_ne _ _ j _ hj]
                         exact (hSlNe j hj).2)
                       (.inl ⟨updateConcurrentSlot_same _ _ _, updateConcurrentSlot_same _ _ _⟩)
-                  · rw [hPCR, hPCS]
-                    dsimp only
-                    exact hPostPreCut m _ (updateConcurrentSlot slotsS slot _) _ hPkE hCorrE hIdxLt
+                  · simp only [hPCR, hPCS]
+                    exact hPostPreCut m _ (updateConcurrentSlot slotsS slot _) _ rfl rfl hIdxLt
                       (fun j hj => by
                         dsimp only
                         rw [updateConcurrentSlot_ne _ _ j _ hj, updateConcurrentSlot_ne _ _ j _ hj]
@@ -3649,43 +3668,42 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                 cases hPois : st.honestWal.poisoned
                 · simp only [hPois, Bool.false_eq_true, ↓reduceIte] at hObsFalse ⊢
                   obtain ⟨_, ⟨hR2_0R, hR2_RS⟩, _⟩ := hOtherEng slot hSlIdx
-                  rw [hR2_0R, hR2_RS] at hObsFalse
-                  rw [hR2_RS]
-                  dsimp only at hObsFalse ⊢
+                  simp only [hR2_0R, hR2_RS] at hObsFalse
+                  simp only [hR2_RS]
                   have hPC0 : ∀ x h2 c2, eng0.slotPreCut slot st.tsig.pk rq x h2 c2 =
                       engS.slotPreCut slot st.tsig.pk rq x h2 c2 := fun _ _ _ => rfl
                   have hPCR : ∀ x h2 c2, engR.slotPreCut slot st.tsig.pk rq x h2 c2 =
                       engS.slotPreCut slot st.tsig.pk rq x h2 c2 := fun _ _ _ => rfl
-                  rw [hPC0] at hObsFalse
-                  rw [hPCR]
-                  cases engS.slotPreCut slot st.tsig.pk rq _ _ _ with
+                  simp only [hPC0] at hObsFalse
+                  simp only [hPCR]
+                  generalize engS.slotPreCut slot st.tsig.pk rq _ _ _ = pc at hObsFalse ⊢
+                  cases pc with
                   | inl _ =>
-                    apply ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
-                      (hUpdOther .closed) (hUnallocUpd .closed)
-                    · dsimp only
-                      rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                          updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                          updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
-                      exact hIdxSt
-                    · exact hObsFalse
-                  | inr r3New =>
-                    apply ih _ (updateConcurrentSlot slots0 slot _) (updateConcurrentSlot slotsS slot _) _ hPkE hCorrE
-                      (hUpdOther _) (hUnallocUpd _)
-                    · dsimp only
-                      rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                          updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                          updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
-                      exact hIdxSt
-                    · exact hObsFalse
-                · simp only [hPois, ↓reduceIte] at hObsFalse ⊢
-                  apply ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
-                    (hUpdOther .closed) (hUnallocUpd .closed)
-                  · dsimp only
+                    dsimp only at hObsFalse ⊢
+                    refine ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
+                      (hUpdOther .closed) (hUnallocUpd .closed) ?_ hObsFalse
+                    dsimp only
                     rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
                         updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
                         updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
                     exact hIdxSt
-                  · exact hObsFalse
+                  | inr r3New =>
+                    dsimp only at hObsFalse ⊢
+                    refine ih _ (updateConcurrentSlot slots0 slot _) (updateConcurrentSlot slotsS slot _) _ hPkE hCorrE
+                      (hUpdOther _) (hUnallocUpd _) ?_ hObsFalse
+                    dsimp only
+                    rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                        updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                        updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
+                    exact hIdxSt
+                · simp only [hPois, ↓reduceIte] at hObsFalse ⊢
+                  refine ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
+                    (hUpdOther .closed) (hUnallocUpd .closed) ?_ hObsFalse
+                  dsimp only
+                  rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                      updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                      updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
+                  exact hIdxSt
         | stepRound3 sid =>
           have hObsStep : obsConcurrentSlotPreCut eng0 A idx (m + 1) { st with slots := slots0 } a =
               let (st0', a') := execConcurrentStep eng0 A { st with slots := slots0 } a
@@ -3751,33 +3769,32 @@ theorem concurrent_hybrid_simulation_reduces_to_per_session
                 cases hPois : st.honestWal.poisoned
                 · simp only [hPois, Bool.false_eq_true, ↓reduceIte] at hObsFalse ⊢
                   obtain ⟨_, _, ⟨hR3_0R, hR3_RS⟩⟩ := hOtherEng slot hSlIdx
-                  rw [hR3_0R, hR3_RS] at hObsFalse
-                  rw [hR3_RS]
-                  dsimp only at hObsFalse ⊢
+                  simp only [hR3_0R, hR3_RS] at hObsFalse
+                  simp only [hR3_RS]
                   have hF0 : ∀ x h3 c3, eng0.slotFinalize slot st.tsig.pk rq x h3 c3 =
                       engS.slotFinalize slot st.tsig.pk rq x h3 c3 := fun _ _ _ => rfl
                   have hFR : ∀ x h3 c3, engR.slotFinalize slot st.tsig.pk rq x h3 c3 =
                       engS.slotFinalize slot st.tsig.pk rq x h3 c3 := fun _ _ _ => rfl
-                  rw [hF0] at hObsFalse
-                  rw [hFR]
-                  cases engS.slotFinalize slot st.tsig.pk rq _ _ _ <;>
-                    (apply ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
-                      hClosedOther hUnallocClosed;
-                     · dsimp only
-                       rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                           updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                           updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
-                       exact hIdxSt
-                     · exact hObsFalse)
+                  simp only [hF0] at hObsFalse
+                  simp only [hFR]
+                  generalize engS.slotFinalize slot st.tsig.pk rq _ _ _ = fin at hObsFalse ⊢
+                  cases fin <;>
+                    (dsimp only at hObsFalse ⊢
+                     refine ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
+                       hClosedOther hUnallocClosed ?_ hObsFalse
+                     dsimp only
+                     rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                         updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                         updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
+                     exact hIdxSt)
                 · simp only [hPois, ↓reduceIte] at hObsFalse ⊢
-                  apply ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
-                    hClosedOther hUnallocClosed
-                  · dsimp only
-                    rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                        updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
-                        updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
-                    exact hIdxSt
-                  · exact hObsFalse
+                  refine ih _ (updateConcurrentSlot slots0 slot .closed) (updateConcurrentSlot slotsS slot .closed) _ hPkE hCorrE
+                    hClosedOther hUnallocClosed ?_ hObsFalse
+                  dsimp only
+                  rw [updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                      updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx),
+                      updateConcurrentSlot_ne _ _ idx _ (Ne.symm hSlIdx)]
+                  exact hIdxSt
     let stInit := initConcurrentExecState Q_s (PSum R2St SimR2) (PSum R3St (SimR3 × ByteArray))
       cl.tsig cl.honestWal cl.maskSessionCursor
     exact hPrePreCut numSteps stInit stInit.slots stInit.slots advSt
@@ -3895,7 +3912,57 @@ theorem witness_concurrent_hybrid_inhabited :
       hFinalize := fun _ _ _ _ _ _ _ _ => rfl
       hBadCheckBound := fun _ _ _ => by simp [finSum] }
 
-#tooth_pair Qsag.concurrent_hybrid_simulation_reduces_to_per_session vs Qsag.tooth_concurrent_reused_session_id_breaks_isolation
+/-- Small pre-cut observer used to test the concurrent theorem's independent
+    per-slot tape construction. Both sessions have distinct IDs and valid epochs. -/
+def concurrentTapeProbeProtocol :
+    InteractiveThresholdProtocol Unit Unit (Fin 2) Unit Unit Unit where
+  pkDigestOf := fun _ => List.replicate 32 0
+  msgDigestOf := encodeUcSigningRequest
+  honestRound1 := fun _ _ _ _ _ tape => ([(0, packWire [UInt8.ofNat tape.val])], ())
+  verifyRound1 := fun _ _ _ _ _ => .inr ()
+  honestRound2 := fun _ _ _ _ _ _ => ([], ())
+  preCutBarrier := fun _ _ _ _ _ => .inr ()
+  honestRound3 := fun _ _ _ _ _ _ => ([], ())
+  finalizeCutOpen := fun _ _ _ _ _ => .inr (packWire [1])
+
+def concurrentTapeProbeAdversary : ConcurrentUcAdversary (Nat × List ByteArray) where
+  chooseNextStep := fun st =>
+    (.startRound1 ⟨st.1, st.1, [1], [], [0]⟩, (st.1 + 1, st.2))
+  rushRound1 := fun st _ wires => (fun _ => packWire [], (st.1, st.2 ++ wires.map Prod.snd))
+  rushRound2 := fun st _ _ => (fun _ => packWire [], st)
+  rushRound3 := fun st _ _ => (fun _ => packWire [], st)
+  observeOutcome := fun st _ _ => st
+
+def concurrentTapeProbeInitial : RealClusterState Unit Unit :=
+  ⟨⟨(), 1, 1, [], [], []⟩, initWalLatchState (List.replicate 32 0), 0, fun _ => some ()⟩
+
+def concurrentTapeProbeEqual (tr : ExecTranscript (Nat × List ByteArray)) : Bool :=
+  decide (tr.finalAdvState.2 = [packWire [0], packWire [0]] ∨
+    tr.finalAdvState.2 = [packWire [1], packWire [1]])
+
+/-- Replacing the theorem's independent tape vector by one reused coordinate
+    changes an actual concurrent pre-cut view: equality occurs on 2/2 reused
+    tapes and 2/4 independent tapes. Unique session IDs alone do not make tapes
+    independent. Both starts allocate successfully; this is not an all-abort test. -/
+theorem concurrentTapeProbe_two_live_sessions :
+    (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
+      2 2 (fun _ => (0 : Fin 2)) concurrentTapeProbeInitial (0, [])).1.maskSessionCursor = 2 := by rfl
+
+theorem tooth_concurrent_shared_tapes_change_view :
+    finSum 2 (fun m => if concurrentTapeProbeEqual
+      (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
+        2 2 (fun _ => m) concurrentTapeProbeInitial (0, [])).2 then 1 else 0) * 4 ≠
+    finSum 4 (fun mm => if concurrentTapeProbeEqual
+      (ConcurrentProtocolExec concurrentTapeProbeProtocol concurrentTapeProbeAdversary
+        2 2 (fun j => if j.val = 0 then ⟨mm.val / 2, by omega⟩
+          else ⟨mm.val % 2, Nat.mod_lt _ (by decide)⟩)
+        concurrentTapeProbeInitial (0, [])).2 then 1 else 0) * 2 := by
+  decide +kernel
+
+#tooth_pair Qsag.concurrent_hybrid_simulation_reduces_to_per_session vs Qsag.tooth_concurrent_shared_tapes_change_view
+#verify_constructive tooth_concurrent_reused_session_id_breaks_isolation
+  concurrentTapeProbe_two_live_sessions
+
 #verify_inhabited Qsag.concurrent_hybrid_simulation_reduces_to_per_session Qsag.witness_concurrent_hybrid_inhabited
 
 /-! ## 8. Active Shamir Threshold-to-Ideal `ε`-Emulation & Unconditional Production Forgery Transfer -/
@@ -4611,24 +4678,31 @@ theorem perSessionRoundSim_sequential_bound
             (∀ st' r, walPreSignStep stW pkD epW mdW = .err st' r → st' = stW) ∧
             (∀ st' a, walPreSignStep stW pkD epW mdW = .ok st' a → st' = stW) := by
           intro stW pkD epW mdW
-          unfold walPreSignStep
-          split
-          · exact ⟨fun _ _ h => by injection h with h1 _; exact h1.symm, fun _ _ h => by cases h⟩
-          · split
-            · exact ⟨fun _ _ h => by injection h with h1 _; exact h1.symm, fun _ _ h => by cases h⟩
-            · cases stW.latchedRecord with
-              | none =>
-                split
-                · exact ⟨fun _ _ h => by cases h, fun _ _ h => by injection h with h1 _; exact h1.symm⟩
-                · exact ⟨fun _ _ h => by injection h with h1 _; exact h1.symm, fun _ _ h => by cases h⟩
-              | some recW =>
-                rcases recW with ⟨_, _, _⟩
-                dsimp only
-                split
-                · exact ⟨fun _ _ h => by cases h, fun _ _ h => by injection h with h1 _; exact h1.symm⟩
-                · split
-                  · exact ⟨fun _ _ h => by cases h, fun _ _ h => by injection h with h1 _; exact h1.symm⟩
-                  · exact ⟨fun _ _ h => by injection h with h1 _; exact h1.symm, fun _ _ h => by cases h⟩
+          generalize hO : walPreSignStep stW pkD epW mdW = o
+          have hErr : ∀ r, o = .err stW r →
+              ((∀ st' r', o = .err st' r' → st' = stW) ∧ (∀ st' a, o = .ok st' a → st' = stW)) := by
+            intro r hE
+            subst hE
+            exact ⟨fun _ _ h => by injection h with h1 _; exact h1.symm, fun _ _ h => by cases h⟩
+          have hOk : ∀ a, o = .ok stW a →
+              ((∀ st' r', o = .err st' r' → st' = stW) ∧ (∀ st' a', o = .ok st' a' → st' = stW)) := by
+            intro a hE
+            subst hE
+            exact ⟨fun _ _ h => (by cases h), fun _ _ h => by injection h with h1 _; exact h1.symm⟩
+          unfold walPreSignStep at hO
+          split at hO
+          · exact hErr _ hO.symm
+          · split at hO
+            · exact hErr _ hO.symm
+            · split at hO
+              · split at hO
+                · exact hOk _ hO.symm
+                · split at hO
+                  · exact hOk _ hO.symm
+                  · exact hErr _ hO.symm
+              · split at hO
+                · exact hOk _ hO.symm
+                · exact hErr _ hO.symm
         have hOneSession :
             execRealSession proto A clIn aIn (spec.realTapeOf p c) =
               let (icl1, adv1, rec1) :=
@@ -4640,7 +4714,8 @@ theorem perSessionRoundSim_sequential_bound
           unfold execRealSession execIdealSession
           dsimp only at hObsF ⊢
           cases hQuo : validThresholdApproval clIn.tsig (A.scheduleSession aIn).1.honestApprovers
-          · cases clIn.honestWal.poisoned <;> rfl
+          · simp only [Bool.not_false, ↓reduceIte]
+            cases clIn.honestWal.poisoned <;> rfl
           · simp only [hQuo, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hObsF ⊢
             have hPkDigE : proto.pkDigestOf clIn.tsig.pk = sim.pkDigestOf clIn.tsig.pk := by
               rw [hPk]; exact spec.hPkDigest
@@ -4667,7 +4742,7 @@ theorem perSessionRoundSim_sequential_bound
               | authorizedFresh ep =>
                 dsimp only at hObsF ⊢
                 rw [hPk, hCorr, hSharesEq] at hObsF ⊢
-                let req := (A.scheduleSession aIn).1
+                generalize (A.scheduleSession aIn).1 = req at hObsF ⊢
                 have hSimC0Eq : spec.simTapeOf (spec.padBij.toFun p) c0 =
                     spec.simTapeOf (spec.padBij.toFun p) c := spec.hSimTapeIndep _ _ _
                 have hR1_0 := spec.hRound1 req clIn.maskSessionCursor p c0
@@ -4680,30 +4755,33 @@ theorem perSessionRoundSim_sequential_bound
                 rw [hPRc, hPS] at hR1_c
                 obtain ⟨hW0Eq, hRel1_0⟩ := hR1_0
                 obtain ⟨hWcEq, hRel1_c⟩ := hR1_c
-                subst hW0Eq hWcEq
-                dsimp only at hObsF ⊢
-                rcases spec.hVerify1 p c0 req r1_0 s1 w0 _ hRel1_0 with
+                subst hW0Eq
+                subst wc
+                simp only [hPR0, hPRc, hPS] at hObsF ⊢
+                rcases spec.hVerify1 p c0 req r1_0 s1 w0
+                    (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.scheduleSession aIn).2 w0).1 c'))) hRel1_0 with
                   ⟨err0, hV1_0, hVS_0⟩ | ⟨r2_0, s2_0, hV1_0, hVS_0, hRel2_0⟩
-                · rcases spec.hVerify1 p c req r1_c s1 w0 _ hRel1_c with
+                · rcases spec.hVerify1 p c req r1_c s1 w0
+                      (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.scheduleSession aIn).2 w0).1 c'))) hRel1_c with
                     ⟨errc, hV1_c, hVS_c⟩ | ⟨_, _, _, hVS_c, _⟩
-                  · have hErrEq : errc = err0 := by rw [hVS_0] at hVS_c; injection hVS_c; exact ‹_›.symm
-                    subst hErrEq
-                    rw [hV1_c, hVS_0]
+                  · have hErrEq : errc = err0 := by rw [hVS_0] at hVS_c; exact (PSum.inl.inj hVS_c).symm
+                    subst errc
+                    simp only [hV1_c, hVS_0]
                     rcases err0 with ⟨r1Err, doPoison⟩
                     cases doPoison
                     · dsimp only [poisonIdealCluster]
-                      simp [hNotPois, hSharesEq]
+                      simp [hNotPois]
                     · dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
                       simp [hNotPois]
                   · rw [hVS_0] at hVS_c; cases hVS_c
-                · rcases spec.hVerify1 p c req r1_c s1 w0 _ hRel1_c with
+                · rcases spec.hVerify1 p c req r1_c s1 w0
+                      (cl.tsig.corruptParties.map (fun c' => (c', (A.rushRound1 (A.scheduleSession aIn).2 w0).1 c'))) hRel1_c with
                     ⟨_, _, hVS_c⟩ | ⟨r2_c, s2_c, hV1_c, hVS_c, hRel2_c⟩
                   · rw [hVS_0] at hVS_c; cases hVS_c
-                  · have hS2Eq : s2_c = s2_0 := by rw [hVS_0] at hVS_c; injection hVS_c; exact ‹_›.symm
-                    subst hS2Eq
-                    rw [hV1_0] at hObsF
-                    rw [hV1_c, hVS_0]
-                    dsimp only at hObsF ⊢
+                  · have hS2Eq : s2_c = s2_0 := by rw [hVS_0] at hVS_c; exact (PSum.inr.inj hVS_c).symm
+                    subst s2_c
+                    simp only [hV1_0] at hObsF
+                    simp only [hV1_c, hVS_0]
                     have hR2_0 := spec.hRound2 p c0 req r2_0 s2_0 hRel2_0
                     have hR2_c := spec.hRound2 p c req r2_c s2_0 hRel2_c
                     rw [hSimC0Eq] at hR2_0
@@ -4714,30 +4792,31 @@ theorem perSessionRoundSim_sequential_bound
                     rw [hPR2_c, hPS2] at hR2_c
                     obtain ⟨hW2_0, _⟩ := hR2_0
                     obtain ⟨hW2_c, hRel2'_c⟩ := hR2_c
-                    subst hW2_0 hW2_c
-                    dsimp only at hObsF ⊢
+                    subst hW2_0
+                    subst w2_c
+                    simp only [hPR2_0, hPR2_c, hPS2] at hObsF ⊢
                     rcases spec.hPreCut p c req r2'_c s2' w2_0 _ hRel2'_c hObsF with
                       ⟨errB, hPCR, hPCS⟩ | ⟨r3Init, s3Init, hPCR, hPCS, hRel3⟩
-                    · rw [hPCR, hPCS]
+                    · simp only [hPCR, hPCS]
                       dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
                       simp [hNotPois]
-                    · rw [hPCR, hPCS]
-                      dsimp only
+                    · simp only [hPCR, hPCS]
                       have hR3Spec := spec.hRound3 p c req r3Init s3Init hRel3
                       rcases hPR3 : proto.honestRound3 cl.tsig.pk cl.tsig.corruptParties req r3Init cl.honestShares (spec.realTapeOf p c) with ⟨w3_R, r3'⟩
                       rcases hPS3 : sim.simRound3 cl.tsig.pk cl.tsig.corruptParties req s3Init (idealSignOracle req) (spec.simTapeOf (spec.padBij.toFun p) c) with ⟨w3_S, s3'⟩
                       rw [hPR3, hPS3] at hR3Spec
                       obtain ⟨hW3Eq, hRel3'⟩ := hR3Spec
                       subst hW3Eq
-                      dsimp only
-                      rw [spec.hFinalize p c req r3' s3' w3_R _ hRel3']
+                      simp only [hPR3, hPS3]
+                      have hFinEq := fun c3 => spec.hFinalize p c req r3' s3' w3_R c3 hRel3'
+                      simp only [hFinEq]
                       cases sim.finalizeIdealCut cl.tsig.pk req s3' (idealSignOracle req) w3_R _ with
                       | inl cutErr =>
                         dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
                         simp [hNotPois]
                       | inr outSig =>
                         dsimp only [walCommitAuthorized]
-                        simp [hNotPois, hSharesEq]
+                        simp [hNotPois]
         rw [hRtRk, hStSk, hOneSession]
         rcases execIdealSession idealSignOracle sim A ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩ aIn (spec.simTapeOf (spec.padBij.toFun p) c) with ⟨icl1, adv1, rec1⟩
         dsimp only
@@ -4757,7 +4836,7 @@ theorem perSessionRoundSim_sequential_bound
         have hPres := hIdealPres (stS 0) clIn aIn hPk hCorr hSh
         dsimp only at hPres hObsF ⊢
         rcases hStepI : execIdealSession idealSignOracle sim A ⟨clIn.tsig, clIn.honestWal, clIn.maskSessionCursor⟩ aIn (stS 0) with ⟨icl1, adv1, rec1⟩
-        rw [hStepI] at hObsF hPres ⊢
+        simp only [hStepI] at hObsF hPres
         obtain ⟨hPk1, hCorr1, hSh1⟩ := hPres
         dsimp only at hObsF ⊢
         rw [ih r (base + 1) (fun i => rtR (i + 1)) (fun i => rtS (i + 1))
@@ -4771,17 +4850,19 @@ theorem perSessionRoundSim_sequential_bound
       have hiQ : i < Q_s := Nat.lt_trans hi idx.isLt
       have hNe : (⟨i, hiQ⟩ : Fin Q_s) ≠ idx := fun he => by
         have hv := congrArg Fin.val he; dsimp only at hv; omega
-      dsimp only [mkSimSeq]
+      dsimp only [mkSimSeq, v0, v1]
       simp only [hiQ, ↓reduceDIte]
       rw [updateFinVec_other v idx ⟨i, hiQ⟩ _ hNe, updateFinVec_other v idx ⟨i, hiQ⟩ _ hNe]
       exact ⟨rfl, rfl⟩
     · dsimp only [mkRealSeq]
       simp only [idx.isLt, ↓reduceDIte]
+      rfl
     · dsimp only [mkSimSeq, v1, bijCoord, liftPadCheckEquiv]
       simp only [idx.isLt, ↓reduceDIte, updateFinVec_same,
         ucSplitLeft_pair spec.hCheckPos, ucSplitRight_pair spec.hCheckPos]
+      rfl
     · intro i hi
-      dsimp only [mkRealSeq]
+      dsimp only [mkRealSeq, v1]
       by_cases hiQ : i < Q_s
       · have hNe : (⟨i, hiQ⟩ : Fin Q_s) ≠ idx := fun he => by
           have hv := congrArg Fin.val he; dsimp only at hv; omega
@@ -4880,16 +4961,72 @@ theorem uc_active_shamir_production_forgery_transfer
     uc_production_threshold_forgery_transfer suite params sk o hm grindLimit ser
       hw hStateless proto sim A Q_s cardAll realTapes simTapes cl icl advSt forgeOut eps hUc⟩
 
-theorem witness_active_shamir_emulation_inhabited :
-    ∃ (t : Nat) (corruptPts : List Goldilocks),
+theorem witness_active_shamir_emulation_inhabited
+    (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) (pk : PqPublicKey) :
+    ∃ (_A : ConcurrentUcAdversary (Nat × List ByteArray))
+      (suite : TweakableHashSuite) (t : Nat) (corruptPts : List Goldilocks)
+      (cl : RealClusterState PqPublicKey Goldilocks) (icl : IdealClusterState PqPublicKey),
       corruptPts.length + 1 ≤ t ∧
-      (∀ c ∈ corruptPts, c ≠ Goldilocks.zero) := by
-  refine ⟨2, [Goldilocks.one], by decide, ?_⟩
-  intro c hc
-  rw [List.mem_singleton.mp hc]
-  decide +kernel
+      (∀ c ∈ corruptPts, c ≠ Goldilocks.zero) ∧
+      cl.tsig = icl.tsig ∧ cl.honestWal = icl.honestWal ∧
+      cl.maskSessionCursor = icl.maskSessionCursor ∧
+      Nonempty (PerSessionRoundSimSpec
+        (activeShamirThresholdProtocol t corruptPts [] 0 suite params o pkSeed grindLimit ser)
+        (productionThresholdSignOracle suite params o pkSeed grindLimit ser)
+        (activeShamirBlackBoxSimulator t corruptPts [] 0)
+        cl.tsig.pk cl.tsig.corruptParties cl.honestShares
+        (ucPow goldilocksPrime t) goldilocksExt2Card 0) := by
+  have hn : ∀ c ∈ [Goldilocks.one], c ≠ Goldilocks.zero := by
+    intro c hc
+    rw [List.mem_singleton.mp hc]
+    decide +kernel
+  let tsig : IdealTsigState PqPublicKey (List UInt8) := ⟨pk, 3, 2, [1], [], []⟩
+  let wal := initWalLatchState (ucPqPublicKeyDigest pk)
+  refine ⟨concurrentTapeProbeAdversary, cshake256Suite, 2, [Goldilocks.one], ⟨tsig, wal, 0, fun _ => some Goldilocks.one⟩,
+    ⟨tsig, wal, 0⟩, by decide, hn, rfl, rfl, rfl, ⟨?_⟩⟩
+  exact activeShamir_perSessionRoundSimSpec 2 [Goldilocks.one] [] 0 (by decide) hn
+    cshake256Suite params o pkSeed grindLimit ser pk [1] (fun _ => some Goldilocks.one)
 
-#tooth_pair Qsag.active_shamir_concurrent_uc_emulation vs Qsag.tooth_shamir_unbounded_degree_forges_secret_at_zero
+/-- At a corrupt evaluation point zero, the actual round-1 pad opening and
+    round-2 masked opening reveal a nonzero secret. For the zero-secret simulator
+    those two wires coincide for every simulator pad. This directly tests the
+    emulation theorem's `hNonZero` premise while retaining its cardinality bound. -/
+def activeShamirZeroPad : ShamirPadPoly Goldilocks 2 :=
+  ⟨[Goldilocks.zero, Goldilocks.zero], rfl⟩
+
+theorem tooth_active_shamir_zero_point_breaks_simulation
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (pk : PqPublicKey) (req : SessionScheduleReq) :
+    ¬ ∃ q : ShamirPadPoly Goldilocks 2,
+      ((activeShamirThresholdProtocol 2 [Goldilocks.zero] [] 0
+        suite params o pkSeed grindLimit ser).honestRound1 pk [0] req 0
+        (fun _ => some Goldilocks.one) (activeShamirZeroPad, GoldilocksExt2.zero)).1 =
+        ((activeShamirBlackBoxSimulator 2 [Goldilocks.zero] [] 0).simRound1 pk [0] req 0 q).1 ∧
+      ((activeShamirThresholdProtocol 2 [Goldilocks.zero] [] 0
+        suite params o pkSeed grindLimit ser).honestRound2 pk [0] req
+        (activeShamirZeroPad, GoldilocksExt2.zero) (fun _ => some Goldilocks.one)
+        (activeShamirZeroPad, GoldilocksExt2.zero)).1 =
+        ((activeShamirBlackBoxSimulator 2 [Goldilocks.zero] [] 0).simRound2 pk [0] req q q).1 := by
+  rintro ⟨q, h1, h2⟩
+  dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator,
+    List.zip, List.map, Option.getD] at h1 h2
+  have hz : CommRingOps.add Goldilocks.zero (RoundPoly.evalCoeffs q.1 Goldilocks.zero) =
+      RoundPoly.evalCoeffs q.1 Goldilocks.zero := LawfulCommRing.zero_add _
+  rw [hz] at h2
+  have hSame := h2.trans h1.symm
+  have hDifferent :
+      ([(0, packGoldilocksWire (CommRingOps.add Goldilocks.one
+        (RoundPoly.evalCoeffs activeShamirZeroPad.1 Goldilocks.zero)))] : List (Nat × ByteArray)) ≠
+      [(0, packGoldilocksWire (RoundPoly.evalCoeffs activeShamirZeroPad.1 Goldilocks.zero))] := by
+    decide +kernel
+  exact hDifferent hSame
+
+#tooth_pair Qsag.active_shamir_concurrent_uc_emulation vs Qsag.tooth_active_shamir_zero_point_breaks_simulation
+
 #verify_inhabited Qsag.active_shamir_concurrent_uc_emulation Qsag.witness_active_shamir_emulation_inhabited
 
 end Qsag

@@ -553,6 +553,19 @@ fn prove_hierarchical_hem_inner(
     minimum_global_quorums: usize,
     config: &HemAggConfig,
 ) -> Result<HierarchicalHemAggregate, HemAggError> {
+    if !valid_policies(policies) { return Err(HemAggError::InvalidShardConfig); }
+    let committee_roots = compute_committee_roots(policies);
+    let policy_registry_root = compute_policy_registry_root_with_roots(policies, &committee_roots);
+    prove_hierarchical_hem_with_roots(policies, &committee_roots, policy_registry_root,
+        witnesses, epoch_floor, message, minimum_global_quorums, config)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_hierarchical_hem_with_roots(
+    policies: &[ShardHemPolicy], committee_roots: &[[u8;32]], policy_registry_root: [u8;32],
+    witnesses: &[ShardHemWitness<'_>], epoch_floor: u64, message: &[u8],
+    minimum_global_quorums: usize, config: &HemAggConfig,
+) -> Result<HierarchicalHemAggregate, HemAggError> {
     if !valid_policies(policies) || witnesses.len() != policies.len() || minimum_global_quorums == 0
     {
         return Err(HemAggError::InvalidShardConfig);
@@ -586,8 +599,6 @@ fn prove_hierarchical_hem_inner(
     };
     usize::try_from(total_u64).map_err(|_| HemAggError::InvalidShardConfig)?;
 
-    let committee_roots = compute_committee_roots(policies);
-    let policy_registry_root = compute_policy_registry_root_with_roots(policies, &committee_roots);
     let message_digest = compute_framed_message_digest(message);
     if config.max_signers_per_shard == 0 {
         return Err(HemAggError::InvalidShardConfig);
@@ -644,7 +655,7 @@ fn prove_hierarchical_hem_inner(
             .zip(committee_roots.iter())
             .collect();
         let groups: Vec<Result<Vec<CommittedShard>, HemAggError>> =
-            crate::map_chunks_bounded(&triples, |sub| {
+            crate::map_chunks_bounded_with_limit(&triples, crate::prover_parallel_jobs(), |sub| {
                 sub.iter().copied().map(&prove_shard).collect()
             });
         let mut out = Vec::with_capacity(policies.len());
@@ -928,6 +939,18 @@ pub fn prove_hierarchical_hem(
         minimum_global_quorums,
         config,
     )
+}
+
+/// Prove using the registry's validated policies and cached committee roots.
+/// Shares the exact statement and transcript of [`prove_hierarchical_hem`].
+pub fn prove_hierarchical_hem_prepared(
+    registry: &PreparedPolicyRegistry,
+    witnesses: &[ShardHemWitness<'_>], epoch_floor: u64, message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize, config: &HemAggConfig,
+) -> Result<HierarchicalHemAggregate, HemAggError> {
+    prove_hierarchical_hem_with_roots(&registry.policies, &registry.committee_roots,
+        registry.policy_registry_root, witnesses, epoch_floor, message.as_ref(),
+        minimum_global_quorums, config)
 }
 
 /// Verify a two-layer hierarchical `Hem` aggregate against `policies`, exact `epoch_floor` and
@@ -1667,26 +1690,30 @@ pub fn compress_verified_hierarchical_hem(
     aggregate: &HierarchicalHemAggregate,
     blinding_seed: [u8; 32],
 ) -> Result<SuccinctHierarchicalHemAggregate, HemAggError> {
-    let msg_bytes = message.as_ref();
-    if !verify_hierarchical_hem_inner(
-        policies,
-        epoch_floor,
-        msg_bytes,
-        minimum_global_quorums,
-        WhirSecurityRegime::BciksJohnsonQrom128,
-        aggregate,
-    ) {
+    let evidence = verify_hierarchical_hem_evidence(
+        policies, epoch_floor, message, minimum_global_quorums,
+        WhirSecurityRegime::BciksJohnsonQrom128, aggregate,
+    ).ok_or(HemAggError::InvalidShardConfig)?;
+    compress_hierarchical_hem_evidence(&evidence, blinding_seed)
+}
+
+/// Build the compact commitment directly from an immutable, fully verified child snapshot.
+/// No child proof is reverified or rehashed. Every context field and exact child digest comes
+/// from `evidence`; callers cannot substitute an unchecked hierarchy or relabel its context.
+/// This avoids a second child verification after evidence creation. Recipients still need
+/// their own evidence. The outer format currently supports only the default Johnson regime.
+pub fn compress_hierarchical_hem_evidence(
+    evidence: &VerifiedHierarchicalHemEvidence,
+    blinding_seed: [u8; 32],
+) -> Result<SuccinctHierarchicalHemAggregate, HemAggError> {
+    if evidence.regime != WhirSecurityRegime::BciksJohnsonQrom128 {
         return Err(HemAggError::InvalidShardConfig);
     }
-    let min_global_u64 =
-        u64::try_from(minimum_global_quorums).map_err(|_| HemAggError::InvalidShardConfig)?;
+    let minimum = u64::try_from(evidence.minimum_global_quorums)
+        .map_err(|_| HemAggError::InvalidShardConfig)?;
     prove_outer_summary_chain(
-        aggregate.policy_registry_root,
-        hierarchy_summaries(aggregate),
-        epoch_floor,
-        compute_framed_message_digest(msg_bytes),
-        min_global_u64,
-        blinding_seed,
+        evidence.policy_registry_root, evidence.shards.clone(), evidence.epoch_floor,
+        evidence.message_digest, minimum, blinding_seed,
     )
 }
 

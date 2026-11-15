@@ -10,7 +10,7 @@ with `¬ HasPolynomialExplanation` for the selected polynomial, which is the hyp
 
 * `nonExcludedDecompBound_sliced`: `NonExcludedDecompBound D S d A m Wx Dy rest` over any
   constructive field in which `1, …, Dy` are invertible, with
-  `rest = ℓ·max{|S|, n(n-1)/2} + |S|·Dy·Dy·(n·Dy·2dDy/(A-B) + 1)`.
+  `rest = ℓ·max{|S|, n(n-1)/2} + |S|·z·Dy·(n·z·2dDy/(A-B) + 1)`, `z = min{Dy, (Wx+Dy-1)/d}`.
 * `hemCwyz26JohnsonCert_sliced`: the cascade certificate `HemCascadeRbrCert` at the deployed
   field `QuarticGoldilocks` beyond the Welch–Berlekamp regime, with no residual hypothesis.
   The characteristic condition is `Dy < p`.
@@ -44,7 +44,7 @@ open CommRingOps RoundPoly UPoly Poly3
 
 /-- **`NonExcludedDecompBound`, proved.** For `d + 1 ≤ B < A`, `|D|·(d + 1) < B²`, the
     interpolation count (4.5) and `1, …, Dy` invertible, at most
-    `ℓ·max{|S|, n(n-1)/2} + |S|·Dy·Dy·(n·Dy·2dDy/(A-B) + 1)` non-excluded challenges carry an
+    `ℓ·max{|S|, n(n-1)/2} + |S|·z·Dy·(n·z·2dDy/(A-B) + 1)` non-excluded challenges carry an
     accepted root of the explainer that does not decompose through a correlated pair. -/
 theorem nonExcludedDecompBound_sliced {F : Type} [LawfulField F] [DecidableEq F]
     (D S : List F) (d A B m Wx Dy : Nat) (hD : D.Nodup) (hS : S.Nodup)
@@ -54,13 +54,15 @@ theorem nonExcludedDecompBound_sliced {F : Type} [LawfulField F] [DecidableEq F]
     NonExcludedDecompBound D S d A m Wx Dy
       (((D.length * (B - (d + 1))) / (B * B - D.length * (d + 1))) *
           Nat.max S.length (D.length * (D.length - 1) / 2) +
-        S.length * (Dy * (Dy * (D.length * (Dy * (2 * d * Dy)) / (A - B) + 1)))) := by
+        S.length * ((Nat.min Dy ((Wx + Dy - 1) / d)) *
+          (Dy * (D.length * ((Nat.min Dy ((Wx + Dy - 1) / d)) * (2 * d * Dy)) / (A - B) + 1)))) := by
   intro x L hNd hL
-  obtain ⟨_, hQdeg, _, _⟩ := explainer_spec x.1 x.2 D m d Wx Dy hcount
+  obtain ⟨_, hQdeg, hQw, _⟩ := explainer_spec x.1 x.2 D m d Wx Dy hcount
   have hZ : (explainer x.1 x.2 D m d Wx Dy).degZ ≤ Dy :=
     Nat.le_trans (degZ_le_degYZ _) hQdeg
   have h := nonExcluded_pairs_card_le x D S hD hS d A B Dy hd hDy hAB hB hDen
-    (explainer x.1 x.2 D m d Wx Dy) hQdeg (fun k h1 h2 => hchar k h1 (Nat.le_trans h2 hZ))
+    (explainer x.1 x.2 D m d Wx Dy) hQdeg (Wx + Dy - 1) hQw
+    (fun k h1 h2 => hchar k h1 (Nat.le_trans h2 hZ))
     L hNd (fun p hp => by
       obtain ⟨h1, h2, P, hPlen, hPa, hroot, hNoDec⟩ := hL p hp
       have hdeg : (ofList P).natDeg ≤ d := by
@@ -68,8 +70,7 @@ theorem nonExcludedDecompBound_sliced {F : Type} [LawfulField F] [DecidableEq F]
         omega
       exact ⟨h1, h2, ofList P, hdeg, hPa, hroot, fun hE =>
         hNoDec ((hasPolynomialExplanation_iff_decomposes x D d (A - 1) p.1 p.2 P).mp hE)⟩)
-  exact Nat.le_trans h (Nat.add_le_add_left
-    (Nat.mul_le_mul_left _ (Nat.mul_le_mul_right _ hZ)) _)
+  exact h
 
 /-- **The cascade certificate beyond unique decoding, without a residual hypothesis.**
     At `QuarticGoldilocks`, for `d₀ + 2 ≤ B < A₀ + 1` with `|D|·(d₀ + 2) < B²`, the
@@ -86,7 +87,8 @@ theorem hemCwyz26JohnsonCert_sliced (S domPts : List QuarticGoldilocks)
     HemCascadeRbrCert S domPts d₀ A₀
       (Dy + (((domPts.length * (B - (d₀ + 1 + 1))) / (B * B - domPts.length * (d₀ + 1 + 1))) *
           Nat.max S.length (domPts.length * (domPts.length - 1) / 2) +
-        S.length * (Dy * (Dy * (domPts.length * (Dy * (2 * (d₀ + 1) * Dy)) / (A₀ + 1 - B) + 1)))))
+        S.length * ((Nat.min Dy ((Wx + Dy - 1) / (d₀ + 1))) * (Dy * (domPts.length *
+          ((Nat.min Dy ((Wx + Dy - 1) / (d₀ + 1))) * (2 * (d₀ + 1) * Dy)) / (A₀ + 1 - B) + 1)))))
       listG :=
   hemCwyz26JohnsonCert S domPts d₀ A₀ m Wx Dy _ m_gs listG hDom hS hdA hAgDom hCount hWA
     (nonExcludedDecompBound_sliced domPts S (d₀ + 1) (A₀ + 1) B m Wx Dy hDom hS hCount

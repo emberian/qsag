@@ -163,13 +163,14 @@ theorem stepWords_unexplained :
 theorem inhabited_slice :
     ∃ (x : (Goldilocks → Goldilocks) × (Goldilocks → Goldilocks)) (D : List Goldilocks)
       (d A B h : Nat) (R : Poly3 Goldilocks) (β : Goldilocks) (as : List Goldilocks),
-      D.Nodup ∧ 1 ≤ d ∧ 1 ≤ h ∧ B < A ∧ d + 1 ≤ B ∧ R.degYZ ≤ h ∧
+      D.Nodup ∧ 1 ≤ d ∧ 1 ≤ h ∧ B < A ∧ d + 1 ≤ B ∧ R.degYZ ≤ h ∧ R.degZ ≤ 1 ∧
       (∀ a ∈ as, ∃ P : UPoly Goldilocks, P.natDeg ≤ d ∧
         A ≤ (D.filter (foldAgreePt x a β P)).length ∧ evalAffineLine R a β P = zero ∧
         evalAffineLine (hasseZ 1 R) a β P ≠ zero ∧ ¬ IsPersistent x D d B a β P) ∧
       as.Nodup ∧ as.length = 1 := by
   refine ⟨stepWords, dom, 1, 4, 3, 1, zSurface, zero, [zero], by decide +kernel, by decide,
-    by decide, by decide, by decide, by decide +kernel, ?_, by decide +kernel, rfl⟩
+    by decide, by decide, by decide, by decide +kernel, by decide +kernel, ?_,
+    by decide +kernel, rfl⟩
   intro a ha
   rw [List.mem_singleton.mp ha]
   exact ⟨zero, by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
@@ -180,17 +181,17 @@ theorem inhabited_slice :
 theorem tooth_slice_needs_nonpersistent :
     ∃ (x : (Goldilocks → Goldilocks) × (Goldilocks → Goldilocks)) (D : List Goldilocks)
       (d A B h : Nat) (R : Poly3 Goldilocks) (β : Goldilocks) (as : List Goldilocks),
-      D.Nodup ∧ 1 ≤ d ∧ 1 ≤ h ∧ B < A ∧ d + 1 ≤ B ∧ R.degYZ ≤ h ∧
+      D.Nodup ∧ 1 ≤ d ∧ 1 ≤ h ∧ B < A ∧ d + 1 ≤ B ∧ R.degYZ ≤ h ∧ R.degZ ≤ 1 ∧
       (∀ a ∈ as, ∃ P : UPoly Goldilocks, P.natDeg ≤ d ∧
         A ≤ (D.filter (foldAgreePt x a β P)).length ∧ evalAffineLine R a β P = zero ∧
         evalAffineLine (hasseZ 1 R) a β P ≠ zero) ∧
-      as.Nodup ∧ ¬ as.length ≤ h * (D.length * (h * (2 * d * h)) / (A - B) + 1) := by
+      as.Nodup ∧ ¬ as.length ≤ h * (D.length * (1 * (2 * d * h)) / (A - B) + 1) := by
   have key : ∀ a ∈ tenPts, (zero : UPoly Goldilocks).natDeg ≤ 1 ∧
       4 ≤ (dom.filter (foldAgreePt zeroWords a zero zero)).length ∧
       evalAffineLine zSurface a zero zero = zero ∧
       evalAffineLine (hasseZ 1 zSurface) a zero zero ≠ zero := by decide +kernel
   exact ⟨zeroWords, dom, 1, 4, 3, 1, zSurface, zero, tenPts, by decide +kernel, by decide,
-    by decide, by decide, by decide, by decide +kernel,
+    by decide, by decide, by decide, by decide +kernel, by decide +kernel,
     fun a ha => ⟨zero, key a ha⟩, by decide +kernel, by decide⟩
 
 /-- The hypotheses of `nonExcluded_pairs_card_le` hold together with a counted challenge. -/
@@ -198,7 +199,7 @@ theorem inhabited_nonExcluded_pairs :
     ∃ (x : (Goldilocks → Goldilocks) × (Goldilocks → Goldilocks)) (D S : List Goldilocks)
       (d A B h : Nat) (Q : Poly3 Goldilocks) (L : List (Goldilocks × Goldilocks)),
       D.Nodup ∧ S.Nodup ∧ 1 ≤ d ∧ 1 ≤ h ∧ B < A ∧ d + 1 ≤ B ∧
-      D.length * (d + 1) < B * B ∧ Q.degYZ ≤ h ∧
+      D.length * (d + 1) < B * B ∧ Q.degYZ ≤ h ∧ Q.deg11d d ≤ 1 ∧
       (∀ k, 1 ≤ k → k ≤ Q.degZ → (CRing.natCast k : Goldilocks) ≠ zero) ∧ L.Nodup ∧
       (∀ p ∈ L, p ∈ prodPool S ∧ lineSpec Q p.1 p.2 ≠ zero ∧
         ∃ P : UPoly Goldilocks, P.natDeg ≤ d ∧
@@ -209,7 +210,7 @@ theorem inhabited_nonExcluded_pairs :
   have hdz : zSurface.degZ = 1 := by decide +kernel
   refine ⟨stepWords, dom, dom, 1, 4, 3, 1, zSurface, [(zero, zero)], by decide +kernel,
     by decide +kernel, by decide, by decide, by decide, by decide, by decide +kernel,
-    by decide +kernel, ?_, by decide +kernel, ?_, rfl⟩
+    by decide +kernel, by decide +kernel, ?_, by decide +kernel, ?_, rfl⟩
   · intro k h1 h2
     rw [hdz] at h2
     rw [Nat.le_antisymm h2 h1]

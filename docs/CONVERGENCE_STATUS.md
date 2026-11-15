@@ -10,9 +10,30 @@ The compact Hem authorization API now requires locally verified child evidence b
 
 The [construction proof ledger](../PROJECT.md#construction-proof-obligations) governs current open work: actual ideal-functionality refinement, CWYZ decomposition, arbitrary-batch/multistage RBR soundness, coherent-query extraction, actual hash attack reductions, production sampler hypotheses and retry/abort privacy. A passing axiom census cannot discharge those semantic premises.
 
-The scoped Lean 4.35 check of `QromExtractionBoundary.lean` passed, including five constructively audited theorems about measured-query branch masses, response/Merkle consistency, locality and recording disturbance. This is a measured-query interface, with coherent-execution extraction still a separate instantiation task.
+`QromExtractionBoundary.lean` and the measured-query modules built on it give a measured-query interface and an extraction-failure bound for measured or classical-address queries; extraction from coherent superposition queries is still a separate task. Their compilation and axiom status is in the integration check below.
 
 The later named-kernel freshness run passed 19/19 x86-64 and 9/9 AArch64 kernels and certificate checks; it supersedes the historical ELF failure below. Linked-program coverage remains separate.
+
+## Current integration checks
+
+The recorded gates in [CONVERGENCE_EVIDENCE.json](CONVERGENCE_EVIDENCE.json) describe the 350 files pinned in [CONVERGENCE_SOURCE.json](CONVERGENCE_SOURCE.json). On the evening of 2026-11-14, 241 of those files differed from the working tree and no commit matched more than 137 of them, so every one of the 25 recorded gates has changed or never-pinned files in its source scope. They remain a record of that snapshot. Nothing in this section re-labels them.
+
+Later checks are recorded in [CURRENT_SCOPED_CHECKS.json](CURRENT_SCOPED_CHECKS.json), each with the SHA-256 of every input it read. `python3 scripts/check_evidence_freshness.py` compares those hashes, and the pinned snapshot, with the working tree and reports three things: which recorded gates still have an unchanged source scope, which scoped checks still have unchanged inputs, and, for each Lean module, whether its own bytes and its whole import closure are the ones a check read. `--json FILE` writes the full report; `--strict` exits 1 if anything is stale. The tool executes nothing and never rewrites a recorded hash; its built-in controls confirm that a changed byte, a new file and a changed import each read as stale.
+
+**Main library build and axiom audit.** Two runs are recorded, both on a private Linux copy under a 12 GiB memory cap and a 600-second limit per invocation.
+
+1. `main-lean-integrated-cold-20261115T0528Z`: the build cache was deleted first, because the warm cache inherited from another lane carried a current trace beside an older compiled `AxiomAuditSupport`; with that stale artifact the audit misclassified four tactic-implementation declarations and reported them as rejected. From a cold start, `lake build Qsag AuditAxioms` exited 0 for the 109 modules that compiled at that source: 69,487 declarations audited, 0 rejected.
+2. `main-lean-integrated-20261115T0538Z`: forty minutes later, after two owners had repaired their modules and peers had added more, the same command on that cache exited 0 for the registered library root: 140 modules (138 proof modules and two tactic-infrastructure modules), **79,940 declarations audited, 0 rejected**; 496 pure infrastructure declarations audited and 146 compile-time tactic declarations excluded by design. `lean/Qsag.lean` and `lean/AuditAxioms.lean` in that run are byte-identical to the shared files whose hashes the record lists.
+
+These runs establish that the listed modules compile from the listed bytes, with their `#verify_constructive`, `#verify_inhabited` and `#tooth_pair` commands, and that their declarations depend only on `propext` and `Quot.sound`. They are not a review of what the theorems state, not the `--wfail` CI target set (`SignatureOutputAndCacheLaws` has two unused-simp-argument warnings), and they cover no comparator replay, no MIR or WHIR workspace and no Rust. The tree is being edited continuously: the freshness report, not this paragraph, says which modules still have the checked bytes.
+
+Two on-disk modules are not registered because they do not compile: `FrontierCompact1122AndCorduroySecurity` (over 100 errors, and it exhausts the memory cap) and `Gf128ClmulLoopAgreement` (kernel timeout at line 50, under edit). They were absent from the build copy; while they are on disk the audit's inventory check rejects, and `scripts/check_lean_policy.py` lists them.
+
+Three defects that had kept the root from building at commit `ebe8b51` were repaired on the way: duplicate declarations of `Qsag.goldilocksExt2Card` (`ConcreteSecurityBudget`, `ThresholdMpc`), of the generated instances `Qsag.instDecidableLe` / `instDecidableLt` (`ConcreteSecurityBudget`, `GaussianHvzkAndDualLpn`) and of `Qsag.Weierstrass.IsPrime` with `IsPrime.dvd_mul` (`PrattPrimalityCert`, `ActiveMigrationZeroTest`). An inhabitedness audit in `SpongeFramingAndDomainSep` that the positional matcher could not discharge was replaced by the theorem applied to its witness.
+
+**Source policy.** `scripts/check_lean_policy.py` reports no forbidden token, executable substitution or ghost citation. Its remaining output is the list of on-disk modules not yet in both rosters; the tracker names them.
+
+**Extraction provenance.** `scripts/check_extraction_provenance.py` passes for `qsag-whir-verified` (9 files) and fails for `qsag-verified`: `src/fts_spn_guard.rs`, `src/opening_guard.rs`, `src/pants_and_quorum_guards.rs` and `src/threshold.rs` differ from the recorded extraction, whose last matching commit is `d415130`. The later changes add private marker fields, `compile_fail` doctests and formatting. The checked-in `Funs.lean` and `Types.lean` are the recorded output, so they describe the earlier Rust. This needs an extraction run; the record was not rewritten.
 
 ## Recorded earlier integration snapshot
 

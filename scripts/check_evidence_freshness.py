@@ -109,9 +109,10 @@ def evaluate(root, pinned, evidence, scoped):
     for check in scoped.get("checks", []):
         inputs = check.get("inputs", {})
         changed = sorted(p for p, h in inputs.items() if current_hash(p) != h)
+        excluded = {e["path"] for e in check.get("excluded_modules", [])}
         unlisted = sorted(
             p for p in existing
-            if in_scope(p, check.get("input_scope", [])) and p not in inputs
+            if in_scope(p, check.get("input_scope", [])) and p not in inputs and p not in excluded
         )
         checks[check["id"]] = {
             "status": "stale" if changed or unlisted or not inputs else "fresh",
@@ -120,7 +121,7 @@ def evaluate(root, pinned, evidence, scoped):
             "inputs": len(inputs),
             "changed": changed,
             "unlisted_in_scope": unlisted,
-            "excluded_modules": check.get("excluded_modules", []),
+            "excluded_modules": [e["module"] for e in check.get("excluded_modules", [])],
         }
     report["scoped_checks"] = checks
 
