@@ -953,6 +953,7 @@ dependencies = [
  "qsag-accel",
  "qsag-addr",
  "qsag-asm",
+ "qsag-core",
  "qsag-policy",
  "qsag-verified",
 ]
@@ -985,10 +986,7 @@ dependencies = [
  "qsag-asm",
  "qsag-core",
  "qsag-cred",
- "qsag-fts",
- "qsag-hd",
  "qsag-migrate",
- "qsag-policy",
  "qsag-quorum",
  "ripemd",
  "serde",
@@ -1003,16 +1001,6 @@ name = "qsag-fts"
 version = "0.1.0"
 dependencies = [
  "qsag-accel",
- "qsag-core",
- "qsag-verified",
-]
-
-[[package]]
-name = "qsag-hd"
-version = "0.1.0"
-dependencies = [
- "qsag-accel",
- "qsag-addr",
  "qsag-asm",
  "qsag-core",
  "qsag-verified",
@@ -1025,6 +1013,7 @@ dependencies = [
  "qsag-accel",
  "qsag-addr",
  "qsag-asm",
+ "qsag-core",
 ]
 
 [[package]]
@@ -1044,6 +1033,7 @@ version = "0.1.0"
 dependencies = [
  "qsag-asm",
  "qsag-core",
+ "qsag-fts",
  "qsag-verified",
 ]
 

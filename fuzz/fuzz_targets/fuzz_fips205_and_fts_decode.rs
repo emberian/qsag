@@ -49,7 +49,13 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(arr32) = <[u8; 32]>::try_from(data) {
         let _ = decode_adrs(&arr32);
     }
-    let _ = SlhPublicKey::from_bytes(data);
+    if let Ok(pk) = SlhPublicKey::from_bytes(data) {
+        assert_eq!(pk.to_bytes(), data);
+    }
+    if let Ok((params, pk)) = SlhPublicKey::from_spki_der(data) {
+        let der = pk.to_spki_der(&params).expect("decoded SPKI key must re-encode");
+        assert_eq!(der, data);
+    }
     for params in [
         Fips205Params::SLH_DSA_SHAKE_128S,
         Fips205Params::SLH_DSA_SHAKE_128F,
@@ -57,19 +63,15 @@ fuzz_target!(|data: &[u8]| {
         Fips205Params::SLH_DSA_SHAKE_256S,
     ] {
         let _ = SlhPublicKey::from_bytes_for_params(&params, data);
-        let _ = SlhPublicKey::from_spki_der(&params, data);
         let _ = decode_slh_sig(&params, data);
-        let dummy_pk = SlhPublicKey {
-            params,
-            pk_seed: vec![0x42; params.n],
-            pk_root: vec![0x24; params.n],
-        };
+        let dummy_pk = SlhPublicKey::new(&[0x42; 32][..params.n], &[0x24; 32][..params.n])
+            .expect("n-byte seed and root form a public key");
         let _ = slh_verify(&params, b"fuzz-slh-msg", data, b"ctx", &dummy_pk);
     }
 
     // 3. `qsag-cred`: FIPS 204 ML-DSA-44 / 65 / 87 untrusted `pk_decode`, `sig_decode`, `ml_dsa_verify`
     for level in [MlDsaLevel::MlDsa44, MlDsaLevel::MlDsa65, MlDsaLevel::MlDsa87] {
-        let p = level.params();
+        let p = &level.params();
         if let Some((rho, t1)) = pk_decode(p, data) {
             assert_eq!(pk_encode(p, &rho, &t1), data);
         }

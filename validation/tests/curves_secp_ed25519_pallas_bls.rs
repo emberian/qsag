@@ -417,7 +417,7 @@ proptest! {
 fn e2e_zkboo_migration_ceremonies_from_upstream_crates_and_adversarial_rejection() {
     let accel = CpuReferenceBackend::new();
     let domain = [0x5Au8; 32];
-    let epoch = 2026_05_01u64;
+    let epoch = 20_260_501_u64;
 
     // 1. Upstream `k256` key -> Bitcoin HASH160, BIP-341 Taproot, Ethereum Keccak20 ceremonies
     let sk_bytes = [0x42u8; 32];
