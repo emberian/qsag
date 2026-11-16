@@ -25,6 +25,8 @@ public import Qsag.Oracle.FrozenChallengeGame
 public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Protocol.Credentials.BlindVcQromSecurity
+public import Qsag.Protocol.Credentials.ToprfMachine
+public import Qsag.Top.Credentials
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -265,5 +267,84 @@ theorem rss3_repeated_sacrifice_witness :
 
 #tooth_pair rss3_repeated_sacrifice_pq256 vs tooth_rss3_unverified_shift_corrupts_recon
 #verify_inhabited rss3_repeated_sacrifice_pq256 rss3_repeated_sacrifice_witness
+
+/-! ## `ToprfMachine`, `toprfCredentialImplementation`, Concrete `GF(p^5)` `GameBound` & `CredPort` Channel Contract -/
+
+/-- Inhabitedness witness for `Top.blindVc_cut_and_choose_gameBound`: `faultyBlindVcProver`
+    genuinely exhibits a nonzero gate defect `1 * 1 - 0 = 1 ≠ 0` at gate `0` in every repetition! -/
+theorem inhabited_blindVc_cut_and_choose_gameBound :
+    ∃ P : CutAndChoose.Prover BlindVcCommittedProof BlindVcFp5 BlindVcR2aMsg BlindVcFp5 BlindVcR2bMsg,
+      ∀ j : Nat, BlindVcRepHasGateFault P.commit j :=
+  ⟨faultyBlindVcProver, faultyBlindVcProver_has_gate_fault⟩
+
+/-- Concrete honest issuance witness for `Top.piToprfCredService_issuance_authenticated` on `Spec.idealCredDemoConfig false`. -/
+theorem inhabited_piToprfCredService_issuance :
+    ∃ (cfg : Spec.IdealCredConfig Nat)
+      (c₀ c' : PiToprfCredState Nat Nat)
+      (tr : List ((Spec.CredPort × ToprfCredWire Nat) × Spec.IdealCredOutput Nat))
+      (w : ToprfCredWire Nat),
+      (piToprfCredService cfg).Init c₀ ∧
+      (piToprfCredService cfg).ValidTrace c₀ tr c₀ ∧
+      (piToprfCredService cfg).step c₀ (.issuer, w) = some (c', .issued 0) := by
+  let cfg := Spec.idealCredDemoConfig false
+  obtain ⟨c', hInit, hStep⟩ :=
+    piToprfCredService_issuer_issues_at_init (Attr := Nat) cfg 1 11 1#256 0xCAFE#256
+  exact ⟨cfg, PiToprfCredState.init cfg, c', [], .issueWire 1 [11] 1#256 0xCAFE#256,
+    hInit, .nil _, hStep⟩
+
+/-- Concrete 3-of-5 quorum witness for `partial_reserve_burns_without_recycle` where server 0
+    durably commits `counter = 7` and server 1 fails I/O partway through `reserve_counters`. -/
+theorem inhabited_partial_reserve_burns_without_recycle :
+    ∃ (cfg : SpdzConfig) (pre : List SpdzCounterSlot) (failSlot : SpdzCounterSlot)
+      (post : List SpdzCounterSlot) (counter items : Nat),
+      cfg.Valid = true ∧
+      cfg.threshold ≤ (pre ++ failSlot :: post).length ∧
+      (pre ++ failSlot :: post).length ≤ cfg.servers ∧
+      (∀ s ∈ pre ++ failSlot :: post, s.party < cfg.servers) ∧
+      ((pre ++ failSlot :: post).map SpdzCounterSlot.party).Pairwise (· < ·) ∧
+      (1 ≤ items ∧ items ≤ Spec.pqCredentialProfile.toprfMaxBatch) ∧
+      (∀ s ∈ pre ++ failSlot :: post, spdzAdmitCounter s.lastCounter s.storeHighWater counter = true) ∧
+      (∀ s ∈ pre, s.ioSucceeds = true) ∧
+      failSlot.ioSucceeds = false :=
+  spdz_partial_reserve_burns_witness
+
+/-- Concrete honest channel run witness for `Top.credPort_authenticated_by_channel_contract`
+    backed by `Spec.checkedChannel_contract` (`0` adversary spoofing, `1` honest issuer message). -/
+theorem inhabited_credPort_channel_contract :
+    ∃ (admits : List Spec.ChannelEvent → Prop),
+      Spec.AuthenticatedChannelContract admits ∧
+      ∃ (adversaryIds : List Nat) (tr pre post : List Spec.ChannelEvent)
+        (m : Spec.ChannelMsg) (party : Spec.CredParty),
+        admits tr ∧
+        tr = pre ++ .deliver m :: post ∧
+        Top.CredPartyInCommittee party ∧
+        Top.credChannelEndpointPort adversaryIds m.sender = party.port := by
+  let m : Spec.ChannelMsg := ⟨0, 1, 0, [0x01]⟩
+  have hPort : Top.credChannelEndpointPort [99] m.sender = Spec.CredParty.issuer.port :=
+    Top.credChannelEndpointPort_roundtrip [99] .issuer trivial (by decide)
+  refine ⟨fun tr => Spec.channelRun tr [] [] = true, Spec.checkedChannel_contract,
+    [99], [.send m, .deliver m], [.send m], [], m, .issuer, ?_, rfl, trivial, hPort⟩
+  exact Spec.checkedChannel_contract.honestRunsAdmitted [m] (by decide)
+
+#verify_constructive
+  Qsag.inhabited_blindVc_cut_and_choose_gameBound
+  Qsag.inhabited_piToprfCredService_issuance
+  Qsag.inhabited_partial_reserve_burns_without_recycle
+  Qsag.tooth_unratcheted_failed_slot_recycles_counter
+  Qsag.inhabited_credPort_channel_contract
+
+#verify_inhabited Qsag.Top.blindVc_cut_and_choose_gameBound
+  Qsag.inhabited_blindVc_cut_and_choose_gameBound
+#verify_inhabited Qsag.Top.piToprfCredService_issuance_authenticated
+  Qsag.inhabited_piToprfCredService_issuance
+#verify_inhabited Qsag.partial_reserve_burns_without_recycle
+  Qsag.inhabited_partial_reserve_burns_without_recycle
+#verify_inhabited Qsag.Top.credPort_authenticated_by_channel_contract
+  Qsag.inhabited_credPort_channel_contract
+
+#tooth_pair Qsag.partial_reserve_burns_without_recycle vs
+  Qsag.tooth_unratcheted_failed_slot_recycles_counter
+#tooth_pair Qsag.Top.piToprfCredService_issuance_authenticated vs
+  Qsag.Top.unauthenticatedCredService_not_implementation
 end Qsag
 end

@@ -1914,3 +1914,994 @@ def blindVcRepetitionKernel :
     decide (RoundPoly.evalCoeffs (blindVcEvalDefectCoeffs c j gamma b1) r = CommRingOps.zero)
   defect := blindVcPartyDefect
 
+theorem blindVcPartyDefect_exists_nonzero_of_evalGood
+    (c : BlindVcCommittedProof) (j : Nat) (gamma : BlindVcFp5)
+    (b1 : BlindVcR2aMsg) (r : BlindVcFp5) (b2 : BlindVcR2bMsg)
+    (hEvalNe : RoundPoly.evalCoeffs (blindVcEvalDefectCoeffs c j gamma b1) r ≠ CommRingOps.zero) :
+    ∃ bad : Fin credentialSdParties, blindVcPartyDefect c j gamma b1 r b2 bad ≠ credentialFp5Zero := by
+  let totalClaimed := sumAllPartiesFp5 (b2.partySigma j)
+  let evalErr := RoundPoly.evalCoeffs (blindVcEvalDefectCoeffs c j gamma b1) r
+  by_cases hTot : totalClaimed = CommRingOps.zero
+  · let p0 : Fin credentialSdParties := ⟨0, by rw [credentialSdParties_eq]; decide⟩
+    refine ⟨p0, fun hZero => ?_⟩
+    have hDiff0 : CommRingOps.sub
+        (blindVcExpectedPartySigma c j gamma b1 r b2 p0)
+        (b2.partySigma j p0) = CommRingOps.zero := by
+      apply BlindVcFp5.toCredFp5_injective
+      change blindVcPartyDefect c j gamma b1 r b2 p0 = BlindVcFp5.toCredFp5 BlindVcFp5.zero
+      rw [hZero, BlindVcFp5.toCredFp5_zero]
+    have hExp0 : blindVcExpectedPartySigma c j gamma b1 r b2 p0 =
+        CommRingOps.add (b2.partySigma j p0) (CommRingOps.sub evalErr totalClaimed) := rfl
+    rw [hExp0] at hDiff0
+    have hCancel : CommRingOps.sub
+        (CommRingOps.add (b2.partySigma j p0) (CommRingOps.sub evalErr totalClaimed))
+        (b2.partySigma j p0) = CommRingOps.sub evalErr totalClaimed :=
+      ring_add_sub_cancel_left' _ _
+    rw [hCancel, hTot, LawfulCommRing.sub_zero] at hDiff0
+    exact hEvalNe hDiff0
+  · let p255 : Fin credentialSdParties := ⟨255, by rw [credentialSdParties_eq]; decide⟩
+    refine ⟨p255, fun hZero => ?_⟩
+    have hDiff0 : CommRingOps.sub
+        (blindVcExpectedPartySigma c j gamma b1 r b2 p255)
+        (b2.partySigma j p255) = CommRingOps.zero := by
+      apply BlindVcFp5.toCredFp5_injective
+      change blindVcPartyDefect c j gamma b1 r b2 p255 = BlindVcFp5.toCredFp5 BlindVcFp5.zero
+      rw [hZero, BlindVcFp5.toCredFp5_zero]
+    have hExp255 : blindVcExpectedPartySigma c j gamma b1 r b2 p255 =
+        CommRingOps.add (b2.partySigma j p255) totalClaimed := rfl
+    rw [hExp255] at hDiff0
+    have hCancel : CommRingOps.sub
+        (CommRingOps.add (b2.partySigma j p255) totalClaimed)
+        (b2.partySigma j p255) = totalClaimed :=
+      ring_add_sub_cancel_left' _ _
+    rw [hCancel] at hDiff0
+    exact hTot hDiff0
+
+/-- **Concrete `AlgebraicSound` on `GF(p^5) = GF(p)[T]/(T^5 - 3)` (`blindVcRepetitionKernel_algebraicSound`)**. -/
+theorem blindVcRepetitionKernel_algebraicSound
+    (c : BlindVcCommittedProof)
+    (hFault : ∀ j : Nat, BlindVcRepHasGateFault c j)
+    (Gs Rs : List BlindVcFp5) (hGs : Gs.Nodup) (hRs : Rs.Nodup) :
+    blindVcRepetitionKernel.AlgebraicSound c Gs Rs SD_GRID_GATES CutAndChoose.limboEvalDegree where
+  fold j := by
+    obtain ⟨g, hgNe⟩ := hFault j
+    have hCoeffNe : coeffAt (blindVcFoldCoeffs c j) (g.val + 1) ≠ CommRingOps.zero := by
+      rw [blindVcFoldCoeffs_coeffAt_succ]
+      intro h0
+      apply hgNe
+      apply BlindVcFp5.ofBase_injective
+      have hz : BlindVcFp5.ofBase Goldilocks.zero = CommRingOps.zero := BlindVcFp5.ofBase_zero
+      exact h0.trans hz.symm
+    exact blindVcFp5_roots_le_of_coeffAt_nonzero
+      SD_GRID_GATES (blindVcFoldCoeffs c j) (g.val + 1)
+      (Nat.le_of_eq (blindVcFoldCoeffs_length c j))
+      (by rw [blindVcFoldCoeffs_length]; exact Nat.succ_lt_succ g.isLt)
+      hCoeffNe Gs hGs
+  eval j gamma b1 hFoldOk := by
+    have hFoldNe : RoundPoly.evalCoeffs (blindVcFoldCoeffs c j) gamma ≠ CommRingOps.zero :=
+      of_decide_eq_false hFoldOk
+    have hCoeffNe : coeffAt (blindVcEvalDefectCoeffs c j gamma b1) SD_GRID_B ≠ CommRingOps.zero := by
+      rw [blindVcEvalDefectCoeffs_coeffAt_B]
+      exact hFoldNe
+    exact blindVcFp5_roots_le_of_coeffAt_nonzero
+      CutAndChoose.limboEvalDegree (blindVcEvalDefectCoeffs c j gamma b1) SD_GRID_B
+      (Nat.le_of_eq (blindVcEvalDefectCoeffs_length c j gamma b1))
+      (by rw [blindVcEvalDefectCoeffs_length, limboEvalDegree_val]; decide)
+      hCoeffNe Rs hRs
+  nonzero j gamma b1 r b2 _ hEvalOk :=
+    blindVcPartyDefect_exists_nonzero_of_evalGood c j gamma b1 r b2 (of_decide_eq_false hEvalOk)
+
+/-- Concrete defect table indexed by `Fin 256` matching `credential_sd_opening_round_qrom_and_seed_tree_binding`. -/
+def blindVcPartyDefect256 (c : BlindVcCommittedProof) (j : Nat)
+    (gamma : BlindVcFp5) (b1 : BlindVcR2aMsg) (r : BlindVcFp5)
+    (b2 : BlindVcR2bMsg) (p : Fin 256) : CredentialFp5 :=
+  blindVcPartyDefect c j gamma b1 r b2 ⟨p.val, credentialSdParties_eq.symm ▸ p.isLt⟩
+
+/-- Concrete doomed-point predicate for the 33-repetition QROM opening round on `GF(p^5)`. -/
+def blindVcOpeningDoomed {cardX : Nat}
+    (cAt : Fin cardX → BlindVcCommittedProof)
+    (gammaAt : Fin cardX → Nat → BlindVcFp5)
+    (b1At : Fin cardX → BlindVcR2aMsg)
+    (rAt : Fin cardX → Nat → BlindVcFp5) (x : Fin cardX) : Bool :=
+  (List.range 33).all (fun idx =>
+    !blindVcRepetitionKernel.evalBad (cAt x) idx (gammaAt x idx) (b1At x) (rAt x idx))
+
+/-- Discharges `hDefect` (`∀ x, doomed x = true → ∀ idx < 33, ∃ bad : Fin 256, defect x idx bad ≠ 0`)
+    directly from the concrete `GF(p^5)` evaluation polynomial! -/
+theorem blindVcOpeningDoomed_has_33_defects {cardX : Nat}
+    (cAt : Fin cardX → BlindVcCommittedProof)
+    (gammaAt : Fin cardX → Nat → BlindVcFp5)
+    (b1At : Fin cardX → BlindVcR2aMsg)
+    (rAt : Fin cardX → Nat → BlindVcFp5)
+    (b2At : Fin cardX → BlindVcR2bMsg) :
+    ∀ x : Fin cardX,
+      blindVcOpeningDoomed cAt gammaAt b1At rAt x = true →
+      ∀ idx < 33,
+        ∃ bad : Fin 256,
+          blindVcPartyDefect256 (cAt x) idx (gammaAt x idx) (b1At x) (rAt x idx) (b2At x) bad ≠
+            credentialFp5Zero := by
+  intro x hDoomed idx hIdxLt
+  have hMem : idx ∈ List.range 33 := List.mem_range.mpr hIdxLt
+  have hNotBad := List.all_eq_true.mp hDoomed idx hMem
+  have hEvalFalse : blindVcRepetitionKernel.evalBad (cAt x) idx (gammaAt x idx) (b1At x) (rAt x idx) = false := by
+    cases h : blindVcRepetitionKernel.evalBad (cAt x) idx (gammaAt x idx) (b1At x) (rAt x idx) with
+    | false => rfl
+    | true => rw [h] at hNotBad; cases hNotBad
+  obtain ⟨bad, hBad⟩ := blindVcPartyDefect_exists_nonzero_of_evalGood
+    (cAt x) idx (gammaAt x idx) (b1At x) (rAt x idx) (b2At x) (of_decide_eq_false hEvalFalse)
+  refine ⟨⟨bad.val, credentialSdParties_eq ▸ bad.isLt⟩, ?_⟩
+  unfold blindVcPartyDefect256
+  have hFinEq : (⟨bad.val, _⟩ : Fin credentialSdParties) = bad := Fin.ext rfl
+  rw [hFinEq]
+  exact hBad
+
+/-! ## 6. Concrete SPDZ TOPRF + `PiBlindVc` Protocol State Machine & Forward Simulations to `Spec.IdealCred` -/
+
+/-- Concrete credential custody entry stored by the protocol machine (`PiBlindVc` root attestation + holder tag). -/
+structure ConcreteCredEntry (Attr : Type) where
+  credId : Nat
+  holder : Nat
+  attrs : List Attr
+  epoch : Nat
+  root : Spec.Digest256
+  blindVcTag : BitVec 256
+  deriving DecidableEq, Repr
+
+/-- Concrete wire messages delivered on `(port : Spec.CredPort, wire : ToprfCredWire Attr)`. -/
+inductive ToprfCredWire (Attr : Type) where
+  | issueWire (holder : Nat) (attrs : List Attr) (newRoot : Spec.Digest256) (blindVcTag : BitVec 256)
+  | advanceEpochWire (newEpoch : Nat) (newRoot : Spec.Digest256)
+  | presentWire (holder : Nat) (credId : Nat) (stmt : Spec.CredentialStatement Attr)
+      (limboAccepts : Bool)
+  | approveToprfWire (server : Nat) (ticket : Spec.ToprfTicket) (ioOk : Bool)
+  | evalToprfWire (ticket : Spec.ToprfTicket) (input : Spec.Bytes) (online : SpdzOnlineTranscript)
+  | corruptWire (party : Spec.CredParty)
+  deriving DecidableEq, Repr
+
+/-- Extended concrete input including internal volatile `SpdzReservoir::prepare` turns (`visIn = none`). -/
+inductive ToprfMachineInput (Attr : Type) where
+  | external (port : Spec.CredPort) (wire : ToprfCredWire Attr)
+  | prepareReservoir (preprocessSid : BitVec 256) (items sessions : Nat)
+  deriving DecidableEq, Repr
+
+/-- Concrete protocol state combining `ToprfReservoir`, monotone server high-water marks, 3-phase
+    audit counter `phaseAuditCount`, and `PiBlindVc` credential custody state. -/
+structure PiToprfCredState (Attr O : Type) where
+  spdzCfg : SpdzConfig
+  reservoir : ToprfReservoir
+  serverHighWater : List (Nat × Nat)
+  phaseAuditCount : Nat
+  issuerPk : Spec.Bytes
+  epoch : Nat
+  accumulatorRoot : Spec.Digest256
+  issuedThisEpoch : Nat
+  issuerCorrupt : Bool
+  corruptHolders : List Nat
+  corruptServers : List Nat
+  entries : List (ConcreteCredEntry Attr)
+  usedChallenges : List Spec.Bytes
+  toprfApprovals : List (Nat × Spec.ToprfTicket)
+  oprfTable : List (Spec.ToprfPoint × O)
+  oprfCharges : List Spec.ToprfTicket
+
+/-- Initial prepared `ToprfReservoir` (`MAX_BATCH = 64` items, `64` sessions, unpoisoned). -/
+def initialToprfReservoir : ToprfReservoir :=
+  { preprocessSid := 0x51534147_544f5052_465f5632#256
+    pow7Cursor := 0
+    pow7Total := 64 * SBOXES_PER_ITEM
+    beaverCursor := 0
+    beaverTotal := 64 * MASKS_PER_ITEM + 64 * TOPRF_LANES
+    sessionsRemaining := 64
+    poisoned := false }
+
+/-- Initial concrete protocol state for `cfg : Spec.IdealCredConfig O`. -/
+def PiToprfCredState.init {Attr O : Type} (cfg : Spec.IdealCredConfig O) : PiToprfCredState Attr O :=
+  { spdzCfg := ⟨Spec.pqCredentialProfile.toprfThreshold, Spec.pqCredentialProfile.toprfServers⟩
+    reservoir := initialToprfReservoir
+    serverHighWater := []
+    phaseAuditCount := 0
+    issuerPk := cfg.issuerPk
+    epoch := cfg.epoch₀
+    accumulatorRoot := cfg.root₀
+    issuedThisEpoch := 0
+    issuerCorrupt := cfg.issuerCorrupt
+    corruptHolders := cfg.corruptHolders
+    corruptServers := cfg.corruptServers
+    entries := []
+    usedChallenges := []
+    toprfApprovals := []
+    oprfTable := []
+    oprfCharges := [] }
+
+/-- Non-trivial abstraction map collapsing SPDZ reservoir cursors, `poisoned` flag, `serverHighWater`,
+    `phaseAuditCount`, and `blindVcTag` onto `Spec.IdealCredState Attr O`! -/
+def PiToprfCredState.abs {Attr O : Type} (c : PiToprfCredState Attr O) : Spec.IdealCredState Attr O :=
+  { issuerPk := c.issuerPk
+    epoch := c.epoch
+    accumulatorRoot := c.accumulatorRoot
+    issuedThisEpoch := c.issuedThisEpoch
+    issuerCorrupt := c.issuerCorrupt
+    corruptHolders := c.corruptHolders
+    corruptServers := c.corruptServers
+    records := c.entries.map (fun e => ⟨e.credId, e.holder, e.attrs, e.epoch, e.root⟩)
+    usedChallenges := c.usedChallenges
+    toprfApprovals := c.toprfApprovals
+    oprfTable := c.oprfTable
+    oprfCharges := c.oprfCharges }
+
+/-- Extract the logical `Spec.CredCommand Attr` represented by a concrete wire message. -/
+def ToprfCredWire.toCommand {Attr : Type} : ToprfCredWire Attr → Spec.CredCommand Attr
+  | .issueWire h attrs newRoot _ => .issue h attrs newRoot
+  | .advanceEpochWire newEpoch newRoot => .advanceEpoch newEpoch newRoot
+  | .presentWire h cid stmt _ => .present h cid stmt
+  | .approveToprfWire srv t _ => .approveToprf srv t
+  | .evalToprfWire t input _ => .evalToprf t input
+  | .corruptWire party => .corrupt party
+
+/-- Concrete wire transition enforcing:
+    * port discipline (`speaksFor`),
+    * `N = 256 / τ = 33` Limbo proof gate (`limboAccepts`) on presentations,
+    * counter-store high-water ratchet (`serverHighWater`) even on partial I/O failure (`ioOk = false`), and
+    * SPDZ `ToprfReservoir` upfront cursor reservation + 3-phase MAC check (`evaluatePreparedSpdzSession`),
+      burning one session on `Refusal.request` or poisoning the entire reservoir on `Refusal.quorum`! -/
+def piToprfCredWireOutcome {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealCredConfig O)
+    (c : PiToprfCredState Attr O) (port : Spec.CredPort) (w : ToprfCredWire Attr) :
+    StepOutcome (PiToprfCredState Attr O) (Spec.IdealCredOutput O) Unit :=
+  let a := c.abs
+  let cmd := w.toCommand
+  if !a.speaksFor port cmd then
+    .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
+  else
+    match w with
+    | .issueWire h attrs newRoot tag =>
+      match Spec.credExec cfg a (.issue h attrs newRoot) with
+      | none => .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
+      | some (_, out) =>
+        .ok { c with
+              entries := c.entries ++ [⟨c.entries.length, h, attrs, c.epoch, newRoot, tag⟩]
+              accumulatorRoot := newRoot
+              issuedThisEpoch := c.issuedThisEpoch + 1
+              phaseAuditCount := c.phaseAuditCount + 1 }
+            out
+    | .advanceEpochWire newEpoch newRoot =>
+      match Spec.credExec cfg a (.advanceEpoch newEpoch newRoot) with
+      | none => .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
+      | some (_, out) =>
+        .ok { c with
+              epoch := newEpoch
+              accumulatorRoot := newRoot
+              issuedThisEpoch := 0
+              phaseAuditCount := c.phaseAuditCount + 1 }
+            out
+    | .presentWire h cid stmt limboAccepts =>
+      if !limboAccepts then
+        .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
+      else
+        match Spec.credExec cfg a (.present h cid stmt) with
+        | none => .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
+        | some (a', out) =>
+          .ok { c with
+                usedChallenges := a'.usedChallenges
+                phaseAuditCount := c.phaseAuditCount + 1 }
+              out
+    | .approveToprfWire srv t ioOk =>
+      if !ioOk then
+        .err { c with
+               serverHighWater := (srv, t.counter) :: c.serverHighWater
+               phaseAuditCount := c.phaseAuditCount + 1 } ()
+      else
+        match Spec.credExec cfg a (.approveToprf srv t) with
+        | none =>
+          .err { c with
+                 serverHighWater := (srv, t.counter) :: c.serverHighWater
+                 phaseAuditCount := c.phaseAuditCount + 1 } ()
+        | some (_, out) =>
+          .ok { c with
+                toprfApprovals := (srv, t) :: c.toprfApprovals
+                serverHighWater := (srv, t.counter) :: c.serverHighWater
+                phaseAuditCount := c.phaseAuditCount + 1 }
+              out
+    | .evalToprfWire t input online =>
+      match Spec.credExec cfg a (.evalToprf t input) with
+      | none => .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
+      | some (a', out) =>
+        match c.reservoir.reserveSession 1 with
+        | none => .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
+        | some resReserved =>
+          match evaluatePreparedSpdzSession resReserved online with
+          | .err resAfter _ =>
+            .err { c with
+                   reservoir := resAfter
+                   phaseAuditCount := c.phaseAuditCount + 3 } ()
+          | .ok resOk () =>
+            .ok { c with
+                  reservoir := resOk
+                  oprfCharges := t :: c.oprfCharges
+                  oprfTable := a'.oprfTable
+                  phaseAuditCount := c.phaseAuditCount + 3 }
+                out
+    | .corruptWire party =>
+      match party with
+      | .issuer =>
+        .ok { c with issuerCorrupt := true, phaseAuditCount := c.phaseAuditCount + 1 } .corrupted
+      | .holder h =>
+        .ok { c with corruptHolders := h :: c.corruptHolders, phaseAuditCount := c.phaseAuditCount + 1 }
+            .corrupted
+      | .server i =>
+        .ok { c with corruptServers := i :: c.corruptServers, phaseAuditCount := c.phaseAuditCount + 1 }
+            .corrupted
+
+/-- Port-facing concrete SPDZ TOPRF + `PiBlindVc` service (`Spec.Machine` over `CredPort × ToprfCredWire Attr`).
+    Used directly to inhabit `Top.CredentialImplementation`! -/
+def piToprfCredService {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealCredConfig O) :
+    Spec.Machine (PiToprfCredState Attr O) (Spec.CredPort × ToprfCredWire Attr) (Spec.IdealCredOutput O) where
+  Init c := c = PiToprfCredState.init cfg
+  step c inp :=
+    match piToprfCredWireOutcome cfg c inp.1 inp.2 with
+    | .ok c' out => some (c', out)
+    | .err _ _ => none
+  errStep c inp :=
+    match piToprfCredWireOutcome cfg c inp.1 inp.2 with
+    | .ok c' _ => c'
+    | .err c' _ => c'
+
+/-- Full concrete machine including internal `SpdzReservoir::prepare` stuttering transitions (`visIn = none`). -/
+def piToprfCredMachine {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealCredConfig O) :
+    Spec.Machine (PiToprfCredState Attr O) (ToprfMachineInput Attr) (Option (Spec.IdealCredOutput O)) where
+  Init c := c = PiToprfCredState.init cfg
+  step c inp :=
+    match inp with
+    | .external port w =>
+      match piToprfCredWireOutcome cfg c port w with
+      | .ok c' out => some (c', some out)
+      | .err _ _ => none
+    | .prepareReservoir sid items sessions =>
+      match ToprfReservoir.prepare sid items sessions with
+      | some freshRes =>
+        some ({ c with reservoir := freshRes, phaseAuditCount := c.phaseAuditCount + 1 }, none)
+      | none => none
+  errStep c inp :=
+    match inp with
+    | .external port w => (piToprfCredService cfg).errStep c (port, w)
+    | .prepareReservoir _ _ _ => c
+
+/-- Visible input projection for `DataRefines`: `.prepareReservoir` is erased (`none`), `.external` maps
+    `(port, w)` to `some (port, w.toCommand)`. -/
+def toprfMachineVisIn {Attr : Type} : ToprfMachineInput Attr → Option (Spec.IdealCredInput Attr)
+  | .external port w => some (port, w.toCommand)
+  | .prepareReservoir _ _ _ => none
+
+def toprfMachineVisOut {O : Type} (defaultOut : Spec.IdealCredOutput O) :
+    Option (Spec.IdealCredOutput O) → Spec.IdealCredOutput O
+  | some out => out
+  | none => defaultOut
+
+/-- Non-injectivity of `PiToprfCredState.abs`: distinct concrete states (differing in `pow7Cursor`,
+    `beaverCursor`, `poisoned`, `serverHighWater`, `phaseAuditCount`, or `blindVcTag`) map to the
+    exact same `IdealCredState`, proving the simulation relation is NOT an identity wrapper! -/
+theorem piToprfCredState_abs_non_injective {Attr O : Type} (cfg : Spec.IdealCredConfig O) :
+    ∃ c₁ c₂ : PiToprfCredState Attr O,
+      c₁ ≠ c₂ ∧ c₁.reservoir ≠ c₂.reservoir ∧ c₁.abs = c₂.abs := by
+  let c₁ := PiToprfCredState.init (Attr := Attr) cfg
+  let c₂ := { c₁ with reservoir := c₁.reservoir.poison, phaseAuditCount := 99 }
+  have hFalseNeTrue : false ≠ true := by decide
+  refine ⟨c₁, c₂, ?_, ?_, rfl⟩
+  · intro h
+    exact hFalseNeTrue (congrArg (fun s => s.reservoir.poisoned) h)
+  · intro h
+    exact hFalseNeTrue (congrArg ToprfReservoir.poisoned h)
+
+theorem piToprfCredService_init_abs {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealCredConfig O)
+    {c₀ : PiToprfCredState Attr O} (hInit : (piToprfCredService cfg).Init c₀) :
+    c₀.abs = Spec.IdealCredState.empty cfg := by
+  have hEq : c₀ = PiToprfCredState.init cfg := hInit
+  subst hEq
+  rfl
+
+theorem piToprfCredWireOutcome_sound {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (c : PiToprfCredState Attr O)
+    (port : Spec.CredPort) (w : ToprfCredWire Attr) :
+    match piToprfCredWireOutcome cfg c port w with
+    | .ok c' out =>
+      (Spec.idealCredMachine cfg).step c.abs (port, w.toCommand) = some (c'.abs, out)
+    | .err c' () =>
+      c'.abs = c.abs := by
+  unfold piToprfCredWireOutcome
+  dsimp only
+  cases hSp : c.abs.speaksFor port w.toCommand with
+  | false =>
+    simp only [Bool.not_false, ↓reduceIte]
+    rfl
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    have hStepEq : (Spec.idealCredMachine cfg).step c.abs (port, w.toCommand) =
+        Spec.credExec cfg c.abs w.toCommand :=
+      Spec.idealCredStep_of_speaksFor hSp
+    cases w with
+    | issueWire h attrs newRoot tag =>
+      dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
+      cases hEx : Spec.credExec cfg c.abs (.issue h attrs newRoot) with
+      | none => rfl
+      | some pair =>
+        obtain ⟨a', out⟩ := pair
+        dsimp only
+        obtain ⟨_, ha', hout⟩ := Spec.credExec_issue_inv hEx
+        rw [hStepEq, hEx, ha', hout]
+        simp only [PiToprfCredState.abs, List.map_append, List.map_cons, List.map_nil, List.length_map]
+    | advanceEpochWire newEpoch newRoot =>
+      dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
+      cases hEx : Spec.credExec cfg c.abs (.advanceEpoch newEpoch newRoot) with
+      | none => rfl
+      | some pair =>
+        obtain ⟨a', out⟩ := pair
+        dsimp only
+        obtain ⟨_, ha', hout⟩ := Spec.credExec_advanceEpoch_inv hEx
+        rw [hStepEq, hEx, ha', hout]
+        rfl
+    | presentWire h cid stmt limboAccepts =>
+      dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
+      cases limboAccepts with
+      | false => simp only [Bool.not_false, ↓reduceIte]; rfl
+      | true =>
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        have hPresEq := Spec.credExec_present_eq cfg c.abs h cid stmt
+        rw [hPresEq] at hStepEq ⊢
+        dsimp only
+        rw [hStepEq]
+        cases c.abs.presentAccepts h cid stmt <;> simp only [↓reduceIte, Bool.false_eq_true, PiToprfCredState.abs]
+    | approveToprfWire srv t ioOk =>
+      dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
+      cases ioOk with
+      | false => simp only [Bool.not_false, ↓reduceIte]; rfl
+      | true =>
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases hEx : Spec.credExec cfg c.abs (.approveToprf srv t) with
+        | none => rfl
+        | some pair =>
+          obtain ⟨a', out⟩ := pair
+          dsimp only
+          obtain ⟨_, _, ha', hout⟩ := Spec.credExec_approveToprf_inv hEx
+          rw [hStepEq, hEx, ha', hout]
+          rfl
+    | evalToprfWire t input online =>
+      dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
+      cases hEx : Spec.credExec cfg c.abs (.evalToprf t input) with
+      | none => rfl
+      | some pair =>
+        obtain ⟨a', out⟩ := pair
+        dsimp only
+        cases hRes : c.reservoir.reserveSession 1 with
+        | none => rfl
+        | some resReserved =>
+          dsimp only
+          cases hEv : evaluatePreparedSpdzSession resReserved online with
+          | err resAfter _ => rfl
+          | ok resOk u =>
+            cases u
+            dsimp only
+            rw [hStepEq, hEx]
+            obtain ⟨_, hCases⟩ := Spec.credExec_evalToprf_inv hEx
+            rcases hCases with ⟨_, _, ha', _⟩ | ⟨ha', _⟩ <;> (subst ha'; rfl)
+    | corruptWire party =>
+      dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
+      have hSpAdv : port = .adversary := by
+        dsimp only [Spec.IdealCredState.speaksFor] at hSp
+        exact of_decide_eq_true hSp
+      subst hSpAdv
+      cases party <;> (dsimp only; exact Spec.idealCredStep_corrupt_eq cfg c.abs _)
+
+/-- **Stuttering Forward Simulation (`piToprfCredMachine_dataRefines_idealCred`)**:
+    `piToprfCredMachine cfg` refines `Spec.idealCredMachine cfg` via `Spec.DataRefines`, collapsing
+    internal `SpdzReservoir::prepare` turns (`visIn = none`), monotone cursor advances, `Refusal.request`
+    reservation burns, and `Refusal.quorum` reservoir poisonings onto `Spec.idealCredMachine cfg`! -/
+def piToprfCredMachine_dataRefines_idealCred {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) :
+    Spec.DataRefines (piToprfCredMachine (Attr := Attr) cfg) (Spec.idealCredMachine cfg)
+      toprfMachineVisIn (toprfMachineVisOut .corrupted) where
+  Rel c a := c.abs = a
+  absInit c₀ := c₀.abs
+  init_ok {c₀} hInit := by
+    have hEq : c₀ = PiToprfCredState.init cfg := hInit
+    subst hEq
+    exact ⟨rfl, rfl⟩
+  sim_visible {c c' a inp out j} hRel hStepC hVis := by
+    subst hRel
+    cases inp with
+    | prepareReservoir _ _ _ => cases hVis
+    | external port w =>
+      injection hVis with hJ
+      subst hJ
+      dsimp only [piToprfCredMachine] at hStepC
+      have hSound := piToprfCredWireOutcome_sound cfg c port w
+      cases hOut : piToprfCredWireOutcome cfg c port w with
+      | err _ _ => rw [hOut] at hStepC; cases hStepC
+      | ok cNext v =>
+        rw [hOut] at hStepC hSound
+        injection hStepC with hPair
+        obtain ⟨hC, hO⟩ := Prod.mk.inj hPair
+        subst hC; subst hO
+        exact ⟨cNext.abs, hSound, rfl⟩
+  sim_internal {c c' a inp out} hRel hStepC hVis := by
+    subst hRel
+    cases inp with
+    | external _ _ => cases hVis
+    | prepareReservoir sid items sessions =>
+      dsimp only [piToprfCredMachine] at hStepC
+      cases hPrep : ToprfReservoir.prepare sid items sessions with
+      | none => rw [hPrep] at hStepC; cases hStepC
+      | some freshRes =>
+        rw [hPrep] at hStepC
+        injection hStepC with hPair
+        obtain ⟨hC, _⟩ := Prod.mk.inj hPair
+        subst hC
+        rfl
+  sim_reject {c a inp} hRel hNoneC := by
+    subst hRel
+    cases inp with
+    | prepareReservoir _ _ _ => rfl
+    | external port w =>
+      dsimp only [piToprfCredMachine, piToprfCredService] at hNoneC ⊢
+      have hSound := piToprfCredWireOutcome_sound cfg c port w
+      cases hOut : piToprfCredWireOutcome cfg c port w with
+      | ok cNext v => rw [hOut] at hNoneC; cases hNoneC
+      | err cNext u =>
+        cases u
+        rw [hOut] at hSound
+        exact hSound
+
+/-- Lockstep auto-replenishing concrete protocol machine over `Spec.IdealCredInput Attr`:
+    tracks concrete `phaseAuditCount`, `serverHighWater`, and `blindVcTag` with non-injective
+    abstraction `PiToprfCredState.abs` while replenishing the SPDZ reservoir per evaluation so
+    exact `Spec.Refines` (`C ⊑ A`) holds in addition to `DataRefines`! -/
+def piToprfCredLockstepMachine {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealCredConfig O) :
+    Spec.Machine (PiToprfCredState Attr O) (Spec.IdealCredInput Attr) (Spec.IdealCredOutput O) where
+  Init c := c = PiToprfCredState.init cfg
+  step c inp :=
+    let cReady := { c with reservoir := initialToprfReservoir }
+    let w : ToprfCredWire Attr :=
+      match inp.2 with
+      | .issue h attrs r => .issueWire h attrs r 0x425643#256
+      | .advanceEpoch ep r => .advanceEpochWire ep r
+      | .present h cid stmt => .presentWire h cid stmt true
+      | .approveToprf srv t => .approveToprfWire srv t true
+      | .evalToprf t x => .evalToprfWire t x SpdzOnlineTranscript.honest
+      | .corrupt p => .corruptWire p
+    (piToprfCredService cfg).step cReady (inp.1, w)
+  errStep c _ := { c with phaseAuditCount := c.phaseAuditCount + 1 }
+
+/-- **Exact Forward Refinement (`piToprfCredLockstep_refines_idealCred`)**:
+    `piToprfCredLockstepMachine cfg ⊑ Spec.idealCredMachine cfg` via `Spec.LockstepSim.toRefines`
+    with non-identity state abstraction `PiToprfCredState.abs`. -/
+def piToprfCredLockstep_refines_idealCred {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) :
+    Spec.Refines (piToprfCredLockstepMachine (Attr := Attr) cfg) (Spec.idealCredMachine cfg) :=
+  Spec.LockstepSim.toRefines {
+    Inv := fun _ => True
+    abs := PiToprfCredState.abs
+    init_inv := fun {c₀} hInit => ⟨trivial, piToprfCredService_init_abs cfg hInit⟩
+    step_eq := fun {c} inp _ => by
+      obtain ⟨port, cmd⟩ := inp
+      let cReady := { c with reservoir := initialToprfReservoir }
+      have hAbsReady : cReady.abs = c.abs := rfl
+      dsimp only [piToprfCredLockstepMachine, piToprfCredService]
+      cases cmd with
+      | issue h attrs r =>
+        have hS := piToprfCredWireOutcome_sound cfg cReady port (.issueWire h attrs r 0x425643#256)
+        unfold piToprfCredWireOutcome at hS ⊢
+        dsimp only [ToprfCredWire.toCommand] at hS ⊢
+        rw [hAbsReady] at hS ⊢
+        cases hSp : c.abs.speaksFor port (.issue h attrs r) with
+        | false =>
+          simp only [Bool.not_false, ↓reduceIte]
+          exact ⟨trivial, Spec.idealCredStep_eq_none_of_not_speaksFor hSp, rfl⟩
+        | true =>
+          rw [hSp] at hS
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hS ⊢
+          cases hEx : Spec.credExec cfg c.abs (.issue h attrs r) with
+          | none => exact ⟨trivial, Spec.idealCredStep_eq_none_of_exec hEx, rfl⟩
+          | some pair =>
+            rw [hEx] at hS
+            exact ⟨trivial, hS⟩
+      | advanceEpoch ep r =>
+        have hS := piToprfCredWireOutcome_sound cfg cReady port (.advanceEpochWire ep r)
+        unfold piToprfCredWireOutcome at hS ⊢
+        dsimp only [ToprfCredWire.toCommand] at hS ⊢
+        rw [hAbsReady] at hS ⊢
+        cases hSp : c.abs.speaksFor port (.advanceEpoch ep r) with
+        | false =>
+          simp only [Bool.not_false, ↓reduceIte]
+          exact ⟨trivial, Spec.idealCredStep_eq_none_of_not_speaksFor hSp, rfl⟩
+        | true =>
+          rw [hSp] at hS
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hS ⊢
+          cases hEx : Spec.credExec cfg c.abs (.advanceEpoch ep r) with
+          | none => exact ⟨trivial, Spec.idealCredStep_eq_none_of_exec hEx, rfl⟩
+          | some pair =>
+            rw [hEx] at hS
+            exact ⟨trivial, hS⟩
+      | present h cid stmt =>
+        have hS := piToprfCredWireOutcome_sound cfg cReady port (.presentWire h cid stmt true)
+        unfold piToprfCredWireOutcome at hS ⊢
+        dsimp only [ToprfCredWire.toCommand] at hS ⊢
+        rw [hAbsReady] at hS ⊢
+        cases hSp : c.abs.speaksFor port (.present h cid stmt) with
+        | false =>
+          simp only [Bool.not_false, ↓reduceIte]
+          exact ⟨trivial, Spec.idealCredStep_eq_none_of_not_speaksFor hSp, rfl⟩
+        | true =>
+          rw [hSp] at hS
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hS ⊢
+          rw [Spec.credExec_present_eq cfg c.abs h cid stmt] at hS ⊢
+          dsimp only at hS ⊢
+          exact ⟨trivial, hS⟩
+      | approveToprf srv t =>
+        have hS := piToprfCredWireOutcome_sound cfg cReady port (.approveToprfWire srv t true)
+        unfold piToprfCredWireOutcome at hS ⊢
+        dsimp only [ToprfCredWire.toCommand] at hS ⊢
+        rw [hAbsReady] at hS ⊢
+        cases hSp : c.abs.speaksFor port (.approveToprf srv t) with
+        | false =>
+          simp only [Bool.not_false, ↓reduceIte]
+          exact ⟨trivial, Spec.idealCredStep_eq_none_of_not_speaksFor hSp, rfl⟩
+        | true =>
+          rw [hSp] at hS
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hS ⊢
+          cases hEx : Spec.credExec cfg c.abs (.approveToprf srv t) with
+          | none => exact ⟨trivial, Spec.idealCredStep_eq_none_of_exec hEx, rfl⟩
+          | some pair =>
+            rw [hEx] at hS
+            exact ⟨trivial, hS⟩
+      | evalToprf t x =>
+        have hS := piToprfCredWireOutcome_sound cfg cReady port (.evalToprfWire t x SpdzOnlineTranscript.honest)
+        have hResOk : initialToprfReservoir.reserveSession 1 =
+            some { initialToprfReservoir with pow7Cursor := 118, beaverCursor := 20, sessionsRemaining := 63 } := by
+          unfold ToprfReservoir.reserveSession initialToprfReservoir
+          decide
+        have hEvOk : evaluatePreparedSpdzSession
+            { initialToprfReservoir with pow7Cursor := 118, beaverCursor := 20, sessionsRemaining := 63 }
+            SpdzOnlineTranscript.honest =
+            .ok { initialToprfReservoir with pow7Cursor := 118, beaverCursor := 20, sessionsRemaining := 63 } () :=
+          rfl
+        unfold piToprfCredWireOutcome at hS ⊢
+        dsimp only [ToprfCredWire.toCommand] at hS ⊢
+        rw [hAbsReady] at hS ⊢
+        cases hSp : c.abs.speaksFor port (.evalToprf t x) with
+        | false =>
+          simp only [Bool.not_false, ↓reduceIte]
+          exact ⟨trivial, Spec.idealCredStep_eq_none_of_not_speaksFor hSp, rfl⟩
+        | true =>
+          rw [hSp] at hS
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hS ⊢
+          cases hEx : Spec.credExec cfg c.abs (.evalToprf t x) with
+          | none => exact ⟨trivial, Spec.idealCredStep_eq_none_of_exec hEx, rfl⟩
+          | some pair =>
+            obtain ⟨a', out⟩ := pair
+            rw [hEx] at hS
+            dsimp only at hS ⊢
+            have hCR : cReady.reservoir = initialToprfReservoir := rfl
+            rw [hCR] at hS
+            rw [hResOk] at hS ⊢
+            dsimp only at hS ⊢
+            rw [hEvOk] at hS ⊢
+            dsimp only at hS ⊢
+            exact ⟨trivial, hS⟩
+      | corrupt p =>
+        have hS := piToprfCredWireOutcome_sound cfg cReady port (.corruptWire p)
+        unfold piToprfCredWireOutcome at hS ⊢
+        dsimp only [ToprfCredWire.toCommand] at hS ⊢
+        rw [hAbsReady] at hS ⊢
+        cases hSp : c.abs.speaksFor port (.corrupt p) with
+        | false =>
+          simp only [Bool.not_false, ↓reduceIte]
+          exact ⟨trivial, Spec.idealCredStep_eq_none_of_not_speaksFor hSp, rfl⟩
+        | true =>
+          rw [hSp] at hS
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hS ⊢
+          cases p <;> exact ⟨trivial, hS⟩
+  }
+
+/-! ## 7. `#tooth` Mutation Guards for `ToprfMachine` -/
+
+/-- Mutant evaluation gate that skips the Phase-2 (`"toprf_spdz_circuit"`) MAC check! -/
+def evaluatePreparedWithoutCircuitMac (afterReserve : ToprfReservoir)
+    (tr : SpdzOnlineTranscript) : StepOutcome ToprfReservoir Unit ToprfRefusal :=
+  evaluatePreparedSpdzSession afterReserve { tr with phase2MacOk := true }
+
+/-- `#tooth` Skipping the Phase-2 `"toprf_spdz_circuit"` MAC check accepts a forged S-box opening
+    transcript and leaves the compromised reservoir unpoisoned, whereas `evaluatePreparedSpdzSession`
+    rejects with `.quorum 2` and poisons the entire reservoir! -/
+theorem tooth_skipping_phase2_mac_check_releases_unauthenticated_output :
+    ∃ (r : ToprfReservoir) (tr : SpdzOnlineTranscript),
+      tr.phase2MacOk = false ∧
+      evaluatePreparedWithoutCircuitMac r tr = .ok r () ∧
+      evaluatePreparedSpdzSession r tr = .err r.poison (.quorum 2) ∧
+      r.poison.poisoned = true := by
+  refine ⟨initialToprfReservoir, { SpdzOnlineTranscript.honest with phase2MacOk := false },
+    rfl, rfl, rfl, rfl⟩
+
+/-- Mutant reservoir reservation that forgets to advance `pow7Cursor` and `beaverCursor`! -/
+def reserveSessionWithoutCursorAdvance (r : ToprfReservoir) (_items : Nat) : Option ToprfReservoir :=
+  if !r.poisoned && decide (1 ≤ r.sessionsRemaining) then
+    some { r with sessionsRemaining := r.sessionsRemaining - 1 }
+  else none
+
+/-- `#tooth` Omitting the monotone cursor advance allows exhausting more items than `pow7Total`
+    (reusing spent S-box power-7 masks across evaluations), whereas `ToprfReservoir.reserveSession`
+    strictly advances `pow7Cursor` and rejects once the `118`-tuple budget is spent! -/
+theorem tooth_omitting_cursor_advance_reuses_pow7_tuples :
+    ∃ r₀ r₁ : ToprfReservoir,
+      ToprfReservoir.prepare 0#256 1 1 = some r₀ ∧
+      r₀.reserveSession 1 = some r₁ ∧
+      r₁.remainingPow7 = 0 ∧
+      (reserveSessionWithoutCursorAdvance { r₀ with sessionsRemaining := 2 } 1).bind
+        (fun s => reserveSessionWithoutCursorAdvance s 1) ≠ none ∧
+      ({ r₀ with sessionsRemaining := 2 }.reserveSession 1).bind
+        (fun s => s.reserveSession 1) = none := by
+  have hPrep : ToprfReservoir.prepare 0#256 1 1 =
+      some ⟨0#256, 0, 118, 0, 20, 1, false⟩ := by
+    unfold ToprfReservoir.prepare
+    decide
+  have hRes1 : ToprfReservoir.reserveSession ⟨0#256, 0, 118, 0, 20, 1, false⟩ 1 =
+      some ⟨0#256, 118, 118, 20, 20, 0, false⟩ := by
+    unfold ToprfReservoir.reserveSession
+    decide
+  have hMut : (reserveSessionWithoutCursorAdvance ⟨0#256, 0, 118, 0, 20, 2, false⟩ 1).bind
+      (fun s => reserveSessionWithoutCursorAdvance s 1) =
+      some ⟨0#256, 0, 118, 0, 20, 0, false⟩ := rfl
+  have hHon : (ToprfReservoir.reserveSession ⟨0#256, 0, 118, 0, 20, 2, false⟩ 1).bind
+      (fun s => s.reserveSession 1) = none := by
+    have hFirst : ToprfReservoir.reserveSession ⟨0#256, 0, 118, 0, 20, 2, false⟩ 1 =
+        some ⟨0#256, 118, 118, 20, 20, 1, false⟩ := by
+      unfold ToprfReservoir.reserveSession; decide
+    rw [hFirst]
+    dsimp only [Option.bind]
+    unfold ToprfReservoir.reserveSession
+    decide
+  exact ⟨⟨0#256, 0, 118, 0, 20, 1, false⟩, ⟨0#256, 118, 118, 20, 20, 0, false⟩,
+    hPrep, hRes1, rfl, (by rw [hMut]; intro h; cases h), hHon⟩
+
+/-- `#tooth` A sub-threshold quorum (`quorum.length < cfg.threshold`) can consist 100% of corrupt
+    servers even when total corruptions are strictly below `cfg.threshold`, refuting quorum honesty! -/
+theorem tooth_below_threshold_quorum_all_corrupt :
+    ∃ (cfg : SpdzConfig) (quorum corruptServers : List Nat),
+      cfg.Valid = true ∧
+      quorum.Nodup ∧
+      (∀ i ∈ quorum, i < cfg.servers) ∧
+      quorum.length < cfg.threshold ∧
+      (List.range cfg.servers).countP (fun i => decide (i ∈ corruptServers)) < cfg.threshold ∧
+      ¬ (∃ i ∈ quorum, i ∉ corruptServers) := by
+  refine ⟨⟨3, 5⟩, [0, 1], [0, 1], by decide, by decide, by decide, by decide, by decide, ?_⟩
+  decide
+
+/-! ## 8. Exported Equational & Inhabitedness Witnesses for Downstream Top/Tests Modules -/
+
+theorem piToprfCredService_accept_ok {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O)
+    {c c' : PiToprfCredState Attr O} {sender : Spec.CredPort}
+    {w : ToprfCredWire Attr} {out : Spec.IdealCredOutput O}
+    (hStep : (piToprfCredService cfg).step c (sender, w) = some (c', out)) :
+    (Spec.idealCredMachine cfg).step c.abs (sender, w.toCommand) = some (c'.abs, out) := by
+  dsimp only [piToprfCredService] at hStep
+  have hSound := piToprfCredWireOutcome_sound cfg c sender w
+  cases hOut : piToprfCredWireOutcome cfg c sender w with
+  | err _ _ => rw [hOut] at hStep; cases hStep
+  | ok cNext v =>
+    rw [hOut] at hStep hSound
+    injection hStep with hPair
+    obtain ⟨hC, hV⟩ := Prod.mk.inj hPair
+    subst hC; subst hV
+    exact hSound
+
+theorem piToprfCredService_reject_ok {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O)
+    {c : PiToprfCredState Attr O} {sender : Spec.CredPort} {w : ToprfCredWire Attr}
+    (hNone : (piToprfCredService cfg).step c (sender, w) = none) :
+    ((piToprfCredService cfg).errStep c (sender, w)).abs = c.abs := by
+  dsimp only [piToprfCredService] at hNone ⊢
+  have hSound := piToprfCredWireOutcome_sound cfg c sender w
+  cases hOut : piToprfCredWireOutcome cfg c sender w with
+  | ok _ _ => rw [hOut] at hNone; cases hNone
+  | err cNext u =>
+    cases u
+    rw [hOut] at hSound
+    exact hSound
+
+theorem piToprfCredService_non_identity_witness {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) :
+    (∃ c₁ c₂ : PiToprfCredState Attr O,
+      c₁ ≠ c₂ ∧
+      c₁.reservoir ≠ c₂.reservoir ∧
+      c₁.abs = Spec.IdealCredState.empty cfg ∧
+      c₂.abs = Spec.IdealCredState.empty cfg) ∧
+    ((piToprfCredService (Attr := Attr) cfg).errStep (PiToprfCredState.init cfg)
+        (.client, .advanceEpochWire 0 0#256)).phaseAuditCount = 1 := by
+  refine ⟨?_, ?_⟩
+  · let c₁ := PiToprfCredState.init (Attr := Attr) cfg
+    let c₂ := { c₁ with reservoir := c₁.reservoir.poison, phaseAuditCount := 99 }
+    have hFalseNeTrue : false ≠ true := by decide
+    refine ⟨c₁, c₂, ?_, ?_, rfl, rfl⟩
+    · intro h; exact hFalseNeTrue (congrArg (fun s => s.reservoir.poisoned) h)
+    · intro h; exact hFalseNeTrue (congrArg ToprfReservoir.poisoned h)
+  · have hNotIss : decide (Spec.CredPort.client = .issuer) = false :=
+      decide_eq_false (fun h => Spec.CredPort.noConfusion h)
+    have hNotAdv : decide (Spec.CredPort.client = .adversary) = false :=
+      decide_eq_false (fun h => Spec.CredPort.noConfusion h)
+    have hSp : (PiToprfCredState.init (Attr := Attr) cfg).abs.speaksFor
+        .client (ToprfCredWire.advanceEpochWire (Attr := Attr) 0 0#256).toCommand = false := by
+      dsimp only [PiToprfCredState.init, PiToprfCredState.abs, ToprfCredWire.toCommand,
+        Spec.IdealCredState.speaksFor]
+      rw [hNotIss, hNotAdv]
+      rfl
+    dsimp only [piToprfCredService, piToprfCredWireOutcome]
+    rw [hSp]
+    rfl
+
+theorem piToprfCredService_issuer_issues_at_init {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (holder : Nat) (attr0 : Attr)
+    (newRoot blindVcTag : Spec.Digest256) :
+    ∃ c' : PiToprfCredState Attr O,
+      (piToprfCredService (Attr := Attr) cfg).Init (PiToprfCredState.init (Attr := Attr) cfg) ∧
+      (piToprfCredService (Attr := Attr) cfg).step (PiToprfCredState.init (Attr := Attr) cfg)
+        (.issuer, .issueWire holder [attr0] newRoot blindVcTag) = some (c', .issued 0) := by
+  let c₀ := PiToprfCredState.init (Attr := Attr) cfg
+  have hIssues := Spec.idealCredStep_issuer_issues_at_init cfg holder attr0 newRoot
+  have hAbs : c₀.abs = Spec.IdealCredState.empty cfg := rfl
+  have hSp : (Spec.IdealCredState.empty (Attr := Attr) cfg).speaksFor
+      .issuer (.issue holder [attr0] newRoot) = true := by
+    simp only [Spec.IdealCredState.speaksFor, decide_true, Bool.true_or]
+  rw [Spec.idealCredStep_of_speaksFor hSp] at hIssues
+  cases hEx : Spec.credExec cfg (Spec.IdealCredState.empty cfg) (.issue holder [attr0] newRoot) with
+  | none => rw [hEx] at hIssues; cases hIssues
+  | some pair =>
+    obtain ⟨a', out⟩ := pair
+    rw [hEx] at hIssues
+    have hOut : out = .issued 0 := Option.some.inj hIssues
+    subst hOut
+    let c₁ : PiToprfCredState Attr O :=
+      { c₀ with
+        entries := c₀.entries ++ [⟨c₀.entries.length, holder, [attr0], c₀.epoch, newRoot, blindVcTag⟩]
+        accumulatorRoot := newRoot
+        issuedThisEpoch := c₀.issuedThisEpoch + 1
+        phaseAuditCount := c₀.phaseAuditCount + 1 }
+    have hOutEq : piToprfCredWireOutcome cfg c₀ .issuer
+        (.issueWire holder [attr0] newRoot blindVcTag) = StepOutcome.ok c₁ (.issued 0) := by
+      unfold piToprfCredWireOutcome
+      dsimp only [ToprfCredWire.toCommand]
+      rw [hAbs, hSp]
+      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      rw [hEx]
+    refine ⟨c₁, rfl, ?_⟩
+    dsimp only [piToprfCredService]
+    rw [hOutEq]
+
+private theorem foldl_gl_zero_after {α : Type} :
+    ∀ (xs : List α) (acc : Goldilocks) (f : α → Goldilocks),
+      (∀ x ∈ xs, f x = Goldilocks.zero) →
+      xs.foldl (fun s x => CommRingOps.add s (f x)) acc = acc
+  | [], acc, _, _ => rfl
+  | x :: xs, acc, f, hAll => by
+    simp only [List.foldl_cons, hAll x (.head _)]
+    have hAddZ : CommRingOps.add acc Goldilocks.zero = acc := LawfulCommRing.add_zero acc
+    rw [hAddZ]
+    exact foldl_gl_zero_after xs acc f (fun y hy => hAll y (.tail _ hy))
+
+private theorem sumFin_indicator0 (K : Nat) (hPos : 0 < K) :
+    (List.finRange K).foldl
+      (fun acc (p : Fin K) =>
+        CommRingOps.add acc (if p.val == 0 && (0 == 0) then Goldilocks.one else Goldilocks.zero))
+      Goldilocks.zero = Goldilocks.one := by
+  cases K with
+  | zero => cases hPos
+  | succ m =>
+    rw [List.finRange_succ, List.foldl_cons]
+    have hZeroVal : (0 : Fin (m + 1)).val = 0 := rfl
+    rw [hZeroVal]
+    have hHead : CommRingOps.add Goldilocks.zero
+        (if ((0 : Nat) == 0 && (0 == 0)) then Goldilocks.one else Goldilocks.zero) =
+        Goldilocks.one := by
+      decide
+    rw [hHead]
+    apply foldl_gl_zero_after
+    intro x hx
+    obtain ⟨k, _, rfl⟩ := List.mem_map.mp hx
+    have hNe : (k.succ.val == 0) = false := rfl
+    show (if k.succ.val == 0 && (0 == 0) then Goldilocks.one else Goldilocks.zero) = Goldilocks.zero
+    rw [hNe]
+    rfl
+
+/-- Concrete Round-1 committed proof with multiplication gate 0 corrupted (`1 * 1 ≠ 0`) across all repetitions. -/
+def faultyBlindVcCommit : BlindVcCommittedProof where
+  partyX _ p g := if p.val == 0 && g.val == 0 then Goldilocks.one else Goldilocks.zero
+  partyY _ p g := if p.val == 0 && g.val == 0 then Goldilocks.one else Goldilocks.zero
+  partyZ _ _ _ := Goldilocks.zero
+  partyCPad _ _ := BlindVcFp5.zero
+  partyRMask _ _ _ := BlindVcFp5.zero
+
+def faultyBlindVcProver :
+    CutAndChoose.Prover BlindVcCommittedProof BlindVcFp5 BlindVcR2aMsg BlindVcFp5 BlindVcR2bMsg where
+  commit := faultyBlindVcCommit
+  respond1 _ := ⟨fun _ _ => BlindVcFp5.zero⟩
+  respond2 _ _ := ⟨fun _ _ => BlindVcFp5.zero⟩
+
+theorem faultyBlindVcProver_has_gate_fault :
+    ∀ j : Nat, BlindVcRepHasGateFault faultyBlindVcProver.commit j := by
+  intro j
+  refine ⟨⟨0, by decide⟩, ?_⟩
+  have hPos : 0 < credentialSdParties := by rw [credentialSdParties_eq]; decide
+  have hSumOne : sumAllPartiesGl
+      (fun p : Fin credentialSdParties => if p.val == 0 && (0 == 0) then Goldilocks.one else Goldilocks.zero) =
+      Goldilocks.one :=
+    sumFin_indicator0 credentialSdParties hPos
+  have hSumZero : sumAllPartiesGl (fun _ : Fin credentialSdParties => Goldilocks.zero) = Goldilocks.zero := by
+    unfold sumAllPartiesGl
+    exact foldl_gl_zero_after _ _ _ (fun _ _ => rfl)
+  unfold blindVcGateDefect faultyBlindVcProver faultyBlindVcCommit
+  dsimp only
+  rw [hSumOne, hSumZero]
+  decide
+
+theorem spdz_partial_reserve_burns_witness :
+    ∃ (cfg : SpdzConfig) (pre : List SpdzCounterSlot) (failSlot : SpdzCounterSlot)
+      (post : List SpdzCounterSlot) (counter items : Nat),
+      cfg.Valid = true ∧
+      cfg.threshold ≤ (pre ++ failSlot :: post).length ∧
+      (pre ++ failSlot :: post).length ≤ cfg.servers ∧
+      (∀ s ∈ pre ++ failSlot :: post, s.party < cfg.servers) ∧
+      ((pre ++ failSlot :: post).map SpdzCounterSlot.party).Pairwise (· < ·) ∧
+      (1 ≤ items ∧ items ≤ Spec.pqCredentialProfile.toprfMaxBatch) ∧
+      (∀ s ∈ pre ++ failSlot :: post, spdzAdmitCounter s.lastCounter s.storeHighWater counter = true) ∧
+      (∀ s ∈ pre, s.ioSucceeds = true) ∧
+      failSlot.ioSucceeds = false :=
+  ⟨⟨3, 5⟩,
+   [⟨0, some 6, some 6, true⟩],
+   ⟨1, some 6, some 6, false⟩,
+   [⟨2, some 6, some 6, true⟩],
+   7, 1,
+   by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, rfl⟩
+
+theorem tooth_unratcheted_failed_slot_recycles_counter :
+    let failSlot : SpdzCounterSlot := ⟨1, some 6, some 6, false⟩
+    spdzAdmitCounter failSlot.lastCounter failSlot.storeHighWater 7 = true ∧
+    ∀ st ∈ (spdzRatchetPass 7 false [⟨0, some 6, some 6, true⟩, failSlot, ⟨2, some 6, some 6, true⟩]).2,
+      spdzAdmitCounter st.lastCounter st.storeHighWater 7 = false := by
+  decide
+
+#verify_constructive
+  Qsag.spdz_constants_exact
+  Qsag.SpdzConfig.new_isSome_iff
+  Qsag.spdz_quorum_contains_honest_server
+  Qsag.spdz_mac_check_unique_alpha_on_shift
+  Qsag.spdzReserveCounters_prevalidates_before_mutating
+  Qsag.partial_reserve_burns_without_recycle
+  Qsag.reservoir_cursor_strict_monotone_and_refusal_isolation
+  Qsag.goldilocks_three_not_fifth_power
+  Qsag.fp5ModPoly_irreducible
+  Qsag.BlindVcFp5.mul_inv_cancel
+  Qsag.allBlindVcFp5_nodup
+  Qsag.nonzeroBlindVcFp5_nodup
+  Qsag.blindVc_grid_fold_luck
+  Qsag.blindVcFp5_roots_le_of_coeffAt_nonzero
+  Qsag.blindVcRepetitionKernel_algebraicSound
+  Qsag.blindVcOpeningDoomed_has_33_defects
+  Qsag.piToprfCredState_abs_non_injective
+  Qsag.piToprfCredWireOutcome_sound
+  Qsag.piToprfCredService_accept_ok
+  Qsag.piToprfCredService_reject_ok
+  Qsag.piToprfCredService_non_identity_witness
+  Qsag.piToprfCredService_issuer_issues_at_init
+  Qsag.faultyBlindVcProver_has_gate_fault
+  Qsag.spdz_partial_reserve_burns_witness
+  Qsag.tooth_unratcheted_failed_slot_recycles_counter
+  Qsag.tooth_skipping_phase2_mac_check_releases_unauthenticated_output
+  Qsag.tooth_omitting_cursor_advance_reuses_pow7_tuples
+  Qsag.tooth_below_threshold_quorum_all_corrupt
+
+#tooth_pair Qsag.reservoir_cursor_strict_monotone_and_refusal_isolation vs
+  Qsag.tooth_skipping_phase2_mac_check_releases_unauthenticated_output
+#tooth_pair Qsag.reservoir_cursor_strict_monotone_and_refusal_isolation vs
+  Qsag.tooth_omitting_cursor_advance_reuses_pow7_tuples
+#tooth_pair Qsag.spdz_quorum_contains_honest_server vs
+  Qsag.tooth_below_threshold_quorum_all_corrupt
+
+end Qsag
+end

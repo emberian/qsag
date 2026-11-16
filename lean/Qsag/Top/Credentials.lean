@@ -14,16 +14,15 @@ Top-level composition module (zero `import all`) connecting:
 4. `PiBlindVc` Fiat–Shamir rewound-transcript collision extraction (`BlindVcCollisionFinder`) paired
    with the authenticated-possession soundness of the ideal credential functionality
    (`Spec.IdealCred`, `Spec.pqCredentialProfile`: `N = 256`, `33` repetitions over `GF(p^5)`),
-   and the interactive cut-and-choose count for that presentation profile
-   (`credential_sd_limbo256_tau33_interactive_soundness`, conditional on the algebraic
-   soundness of the per-repetition check), and
-5. The refinement obligation `CredentialImplementation`: a concrete service takes
-   `(sender, wire message)` with the sender supplied by the environment, and an extractor names
-   only the command. Under it a service inherits issuance, possession and TOPRF provenance about
-   the real sender, with corruption read off the ideal state matching the run
-   (`CredentialImplementation.AbstractAt`; corruption is adaptive in `Spec.IdealCred`); a
-   service that authenticates nobody is refuted. The tree has no `PiBlindVc` / TOPRF state
-   machine: the only inhabitant is the ideal machine itself.
+   the interactive cut-and-choose count discharged unconditionally over the concrete quintic field
+   `GF(p)[T]/(T^5 - 3)` and `192 × 192` multiplication grid (`blindVc_cut_and_choose_gameBound`),
+   and the QROM opening-round bound with `hDefect` discharged on `GF(p^5)`
+   (`blindVc_concrete_fp5_qrom_opening_soundness`), and
+5. The refinement obligation `CredentialImplementation` inhabited by the concrete SPDZ TOPRF +
+   `PiBlindVc` protocol machine (`toprfCredentialImplementation` over `piToprfCredService`, paired
+   with `piToprfCredMachine_dataRefines_idealCred`), plus the network-contract bridge
+   `credPort_authenticated_by_channel_contract` tying `Spec.CredPort` caller labels to
+   `Spec.AuthenticatedChannelContract`.
 -/
 
 public import Qsag.Spec.Primitives
@@ -42,6 +41,7 @@ public import Qsag.Protocol.Threshold.ThresholdMlDsaSecurity
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Protocol.Credentials.BlindVcCollisionFinder
 public import Qsag.Protocol.Credentials.RepetitionCutAndChoose
+public import Qsag.Protocol.Credentials.ToprfMachine
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -281,9 +281,10 @@ theorem credential_sd_opening_round_qrom_and_seed_tree_binding
     A service that ignores who delivered a message is not an instance
     (`unauthenticatedCredService_not_implementation`).
 
-    Inhabitants in the tree: `CredentialImplementation.ideal` only. No model of the `PiBlindVc`
-    or `voprf.rs` protocol as a state machine exists in `lean/Qsag/Protocol`, so no protocol
-    instance is constructed; every theorem below is conditional on one. -/
+    Inhabitants in the tree: the concrete SPDZ TOPRF + `PiBlindVc` protocol service
+    `toprfCredentialImplementation` (with non-identity state abstraction collapsing SPDZ reservoir
+    cursors, quorum poisoning state, high-water marks, and `blindVcTag`) as well as the baseline
+    reference `CredentialImplementation.ideal`. -/
 structure CredentialImplementation {O S W : Type} (Attr : Type) [DecidableEq Attr]
     (cfg : Qsag.Spec.IdealCredConfig O)
     (M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)) : Type where
@@ -629,6 +630,403 @@ theorem toprf_digest_correct_on_observed_inputs
       some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)) :=
   _root_.Qsag.toprfDigestClient204_correct_of_collision_free H ctx layer hCtx bad fault faultDigest
     masks keys inputs forgedFinal hFree
+
+/-! ## 6. Concrete `GF(p^5)` (`T^5 - 3`, `192 × 192` Grid, `33 × 256`) Cut-and-Choose `GameBound` & QROM Soundness -/
+
+private theorem blindVc_challengeCount_pos :
+    0 < Qsag.CutAndChoose.challengeCount Qsag.credentialSdRepetitions
+          Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5 Qsag.CutAndChoose.limboParties := by
+  rw [Qsag.CutAndChoose.challengeCount_eq, Qsag.allBlindVcFp5_length,
+      Qsag.nonzeroBlindVcFp5_length, Qsag.CutAndChoose.limboParties_length,
+      Qsag.credentialSdRepetitions_eq]
+  have hG : 0 < Qsag.goldilocksPrime ^ 5 :=
+    Nat.pow_pos (by decide : 0 < Qsag.goldilocksPrime)
+  have hR : 0 < Qsag.CutAndChoose.fp5NonzeroCount := by
+    rw [Qsag.CutAndChoose.fp5NonzeroCount_eq]
+    decide
+  exact Nat.pow_pos (Nat.mul_pos (Nat.mul_pos hG hR) (by decide))
+
+/-- Canonical `Spec.RatBound` winning probability of `P` in the concrete `33 × 256` `GF(p^5)`
+    BlindVC cut-and-choose presentation game. -/
+def blindVcCutAndChooseWinRat
+    (P : Qsag.CutAndChoose.Prover Qsag.BlindVcCommittedProof Qsag.BlindVcFp5
+      Qsag.BlindVcR2aMsg Qsag.BlindVcFp5 Qsag.BlindVcR2bMsg) : Qsag.Spec.RatBound :=
+  ⟨Qsag.CutAndChoose.winCount Qsag.blindVcRepetitionKernel.toChecker
+      Qsag.credentialSdRepetitions P Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5
+      Qsag.CutAndChoose.limboParties,
+   Qsag.CutAndChoose.challengeCount Qsag.credentialSdRepetitions
+      Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5 Qsag.CutAndChoose.limboParties,
+   blindVc_challengeCount_pos⟩
+
+/-- **Concrete `GF(p^5)` (`T^5 - 3`, `33 × 256`, `192 × 192` Grid) Cut-and-Choose `GameBound`
+    (`blindVc_cut_and_choose_gameBound`)**:
+    Discharges `AlgebraicSound`, `dG = 36864` folding luck (`36864 * 2^300 ≤ p^5`), `dR = 384`
+    evaluation degree, and `|GF(p^5)^×| = fp5NonzeroCount` unconditionally on the concrete quintic
+    extension `BlindVcFp5 = GF(p)[T]/(T^5 - 3)`:
+    for EVERY adaptive 3-round prover `P` whose Round-1 commitment has at least one multiplication
+    gate fault per repetition (`∀ j, BlindVcRepHasGateFault P.commit j`),
+    1. `blindVcRepetitionKernel.AlgebraicSound` holds over `allBlindVcFp5` and `nonzeroBlindVcFp5`,
+    2. `winCount * 2^263 < challengeCount` (`strictlyMoreThanBits 263`), and
+    3. `Spec.GameBound (blindVcCutAndChooseWinRat P) (Spec.RatBound.invPow2 263)` and
+       `(blindVcCutAndChooseWinRat P).atLeastBits 263`! -/
+theorem blindVc_cut_and_choose_gameBound
+    (P : Qsag.CutAndChoose.Prover Qsag.BlindVcCommittedProof Qsag.BlindVcFp5
+      Qsag.BlindVcR2aMsg Qsag.BlindVcFp5 Qsag.BlindVcR2bMsg)
+    (hFault : ∀ j : Nat, Qsag.BlindVcRepHasGateFault P.commit j) :
+    Qsag.blindVcRepetitionKernel.AlgebraicSound P.commit Qsag.allBlindVcFp5
+      Qsag.nonzeroBlindVcFp5 Qsag.SD_GRID_GATES Qsag.CutAndChoose.limboEvalDegree ∧
+    Qsag.CutAndChoose.winCount Qsag.blindVcRepetitionKernel.toChecker
+        Qsag.credentialSdRepetitions P Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5
+        Qsag.CutAndChoose.limboParties * 2 ^ 263 <
+      Qsag.CutAndChoose.challengeCount Qsag.credentialSdRepetitions
+        Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5 Qsag.CutAndChoose.limboParties ∧
+    Qsag.Spec.GameBound (blindVcCutAndChooseWinRat P) (Qsag.Spec.RatBound.invPow2 263) ∧
+    (blindVcCutAndChooseWinRat P).atLeastBits 263 := by
+  have hAlg := Qsag.blindVcRepetitionKernel_algebraicSound P.commit hFault
+    Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5 Qsag.allBlindVcFp5_nodup Qsag.nonzeroBlindVcFp5_nodup
+  have hG : Qsag.SD_GRID_GATES * 2 ^ 300 ≤ Qsag.allBlindVcFp5.length := by
+    rw [Qsag.allBlindVcFp5_length]
+    exact Qsag.blindVc_grid_fold_luck
+  have hGpos : 0 < Qsag.allBlindVcFp5.length := by
+    rw [Qsag.allBlindVcFp5_length]
+    exact Nat.pow_pos (by decide : 0 < Qsag.goldilocksPrime)
+  obtain ⟨_, hWinLt⟩ := credential_sd_limbo256_tau33_interactive_soundness
+    Qsag.blindVcRepetitionKernel P Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5
+    Qsag.SD_GRID_GATES hAlg Qsag.nonzeroBlindVcFp5_length hG hGpos
+  have hAtLeast : (blindVcCutAndChooseWinRat P).atLeastBits 263 := by
+    change Qsag.CutAndChoose.winCount Qsag.blindVcRepetitionKernel.toChecker
+        Qsag.credentialSdRepetitions P Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5
+        Qsag.CutAndChoose.limboParties * 2 ^ 263 ≤
+      Qsag.CutAndChoose.challengeCount Qsag.credentialSdRepetitions
+        Qsag.allBlindVcFp5 Qsag.nonzeroBlindVcFp5 Qsag.CutAndChoose.limboParties
+    exact Nat.le_of_lt hWinLt
+  have hGb : Qsag.Spec.GameBound (blindVcCutAndChooseWinRat P) (Qsag.Spec.RatBound.invPow2 263) :=
+    (Qsag.Spec.RatBound.atLeastBits_iff_le_invPow2 263 (blindVcCutAndChooseWinRat P)).mp hAtLeast
+  exact ⟨hAlg, hWinLt, hGb, hAtLeast⟩
+
+/-- **Concrete `GF(p^5)` Opening-Round QROM Soundness & Seed-Tree Binding
+    (`blindVc_concrete_fp5_qrom_opening_soundness`)**:
+    Instantiates `credential_sd_opening_round_qrom_and_seed_tree_binding` on the concrete
+    `GF(p)[T]/(T^5 - 3)` per-party defect table `blindVcPartyDefect256` and `blindVcOpeningDoomed`,
+    discharging `hDefect` (`∀ idx < 33, ∃ bad, defect x idx bad ≠ 0`) unconditionally via
+    `blindVcOpeningDoomed_has_33_defects`! -/
+theorem blindVc_concrete_fp5_qrom_opening_soundness
+    {cardX cardAnc Q : Nat} (hQ : Q ≤ 2 ^ 60)
+    (A : Qsag.QuantumAdv cardX (8 * 33) cardAnc Q)
+    (cAt : Fin cardX → Qsag.BlindVcCommittedProof)
+    (gammaAt : Fin cardX → Nat → Qsag.BlindVcFp5)
+    (b1At : Fin cardX → Qsag.BlindVcR2aMsg)
+    (rAt : Fin cardX → Nat → Qsag.BlindVcFp5)
+    (b2At : Fin cardX → Qsag.BlindVcR2bMsg)
+    (prg : Qsag.CredentialGgmPrg) (H : List UInt8 → List UInt8)
+    (encode : Fin Qsag.credentialSdParties → Qsag.CredentialGgmSeed → List UInt8)
+    (commitments : Fin Qsag.credentialSdParties → List UInt8) (a b : Qsag.CredentialGgmOpening)
+    (ha : Qsag.verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments a = true)
+    (hb : Qsag.verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments b = true)
+    (party : Fin Qsag.credentialSdParties) (hpa : party ≠ a.hidden) (hpb : party ≠ b.hidden) :
+    (Qsag.RatBound.le
+      ⟨Qsag.uniformOracleSum (8 * 33) cardX
+         (fun O => Qsag.qromOrdinaryFlipMass A O id
+           (fun _ x => Qsag.blindVcOpeningDoomed cAt gammaAt b1At rAt x)
+           (Qsag.credentialSdOpeningLiveAfter
+             (fun x idx p => Qsag.blindVcPartyDefect256 (cAt x) idx (gammaAt x idx) (b1At x) (rAt x idx) (b2At x) p))),
+       (2 ^ (8 * 33)) ^ cardX *
+         (Qsag.prefixScale A Q (Nat.le_refl Q) * Qsag.QVec.stateNormSq A.init),
+       Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos _))
+         (Nat.mul_pos (Qsag.prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * 1, 2 ^ (8 * 33), Nat.two_pow_pos _⟩ ∧
+      (2 * Q + 1) ^ 2 * 2 ^ 128 < (256 : Nat) ^ 33) ∧
+    H (Qsag.credentialGgmOpenedPreimage prg encode a party) =
+      H (Qsag.credentialGgmOpenedPreimage prg encode b party) ∧
+    (Qsag.credentialGgmOpenedPreimage prg encode a party ≠
+        Qsag.credentialGgmOpenedPreimage prg encode b party →
+      (Qsag.credentialGgmCollisionFinder H prg encode a b).isSome = true) :=
+  credential_sd_opening_round_qrom_and_seed_tree_binding hQ A
+    (fun x idx p => Qsag.blindVcPartyDefect256 (cAt x) idx (gammaAt x idx) (b1At x) (rAt x idx) (b2At x) p)
+    (Qsag.blindVcOpeningDoomed cAt gammaAt b1At rAt)
+    (Qsag.blindVcOpeningDoomed_has_33_defects cAt gammaAt b1At rAt b2At)
+    prg H encode commitments a b ha hb party hpa hpb
+
+/-! ## 7. Concrete Protocol Inhabitant `toprfCredentialImplementation` (`L-Ex-9`) -/
+
+/-- **Real Protocol Inhabitant of `CredentialImplementation` (`toprfCredentialImplementation`)**:
+    Instantiates `CredentialImplementation` on the concrete SPDZ TOPRF + `PiBlindVc` protocol
+    machine `Qsag.piToprfCredService cfg` over `ToprfCredWire Attr` with non-identity state
+    abstraction `Rel c a := c.abs = a` (collapsing `ToprfReservoir` cursors, quorum poisoning,
+    server counter high-water marks, 3-phase audit logs, and `blindVcTag` onto `IdealCredState`). -/
+def toprfCredentialImplementation {O : Type} (Attr : Type) [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O) :
+    CredentialImplementation Attr cfg (Qsag.piToprfCredService (Attr := Attr) cfg) where
+  Rel c a := c.abs = a
+  extract _ _ w := some w.toCommand
+  init_ok hInit := Qsag.piToprfCredService_init_abs cfg hInit
+  accept_ok {c c' a sender w out} hRel hStep := by
+    subst hRel
+    exact ⟨w.toCommand, c'.abs, rfl, Qsag.piToprfCredService_accept_ok cfg hStep, rfl⟩
+  reject_ok {c a x} hRel hNone := by
+    subst hRel
+    exact Qsag.piToprfCredService_reject_ok cfg hNone
+
+/-- **Non-Triviality Witness for `toprfCredentialImplementation`**:
+    1. Distinct concrete protocol states `c₁ ≠ c₂` with distinct SPDZ reservoirs (`c₁.reservoir ≠ c₂.reservoir`,
+       `c₁.reservoir.poisoned = false`, `c₂.reservoir.poisoned = true`) map via `Rel` to the exact same
+       `IdealCredState.empty cfg` (impossible under `Rel := Eq` in `CredentialImplementation.ideal`).
+    2. A rejected wire step mutates concrete `errStep` state (`phaseAuditCount` increments from `0` to `1`)
+       while preserving `Rel`! -/
+theorem toprfCredentialImplementation_non_identity_state {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O) :
+    (∃ c₁ c₂ : Qsag.PiToprfCredState Attr O,
+      c₁ ≠ c₂ ∧
+      c₁.reservoir ≠ c₂.reservoir ∧
+      (toprfCredentialImplementation Attr cfg).Rel c₁ (Qsag.Spec.IdealCredState.empty cfg) ∧
+      (toprfCredentialImplementation Attr cfg).Rel c₂ (Qsag.Spec.IdealCredState.empty cfg)) ∧
+    ((Qsag.piToprfCredService (Attr := Attr) cfg).errStep (Qsag.PiToprfCredState.init cfg)
+        (.client, .advanceEpochWire 0 0#256)).phaseAuditCount = 1 :=
+  Qsag.piToprfCredService_non_identity_witness cfg
+
+/-- Concrete issuance authentication for `piToprfCredService`. -/
+theorem piToprfCredService_issuance_authenticated {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O)
+    {c₀ c c' : Qsag.PiToprfCredState Attr O}
+    {tr : List ((Qsag.Spec.CredPort × Qsag.ToprfCredWire Attr) × Qsag.Spec.IdealCredOutput O)}
+    {sender : Qsag.Spec.CredPort} {w : Qsag.ToprfCredWire Attr} {credId : Nat}
+    (hInit : (Qsag.piToprfCredService cfg).Init c₀)
+    (hTrace : (Qsag.piToprfCredService cfg).ValidTrace c₀ tr c)
+    (hAccepted : (Qsag.piToprfCredService cfg).step c (sender, w) = some (c', .issued credId)) :
+    ∃ a : Qsag.Spec.IdealCredState Attr O,
+      (toprfCredentialImplementation Attr cfg).AbstractAt tr c a ∧
+      (sender = Qsag.Spec.CredPort.issuer ∨
+        (sender = Qsag.Spec.CredPort.adversary ∧ a.issuerCorrupt = true)) ∧
+      ∃ (holder : Nat) (attrs : List Attr) (newRoot : Qsag.Spec.Digest256),
+        w.toCommand = .issue holder attrs newRoot ∧
+        0 < attrs.length ∧ attrs.length ≤ Qsag.Spec.pqCredentialProfile.maxAttrs := by
+  obtain ⟨a, hAt, hPort, holder, attrs, newRoot, hExt, hPos, hMax⟩ :=
+    credentialImplementation_issuance_authenticated (toprfCredentialImplementation Attr cfg)
+      hInit hTrace hAccepted
+  exact ⟨a, hAt, hPort, holder, attrs, newRoot, Option.some.inj hExt, hPos, hMax⟩
+
+/-- Concrete selective-disclosure presentation provenance for `piToprfCredService`. -/
+theorem piToprfCredService_presentation_provenance {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O)
+    {c₀ c c' : Qsag.PiToprfCredState Attr O}
+    {tr : List ((Qsag.Spec.CredPort × Qsag.ToprfCredWire Attr) × Qsag.Spec.IdealCredOutput O)}
+    {sender : Qsag.Spec.CredPort} {w : Qsag.ToprfCredWire Attr}
+    (hInit : (Qsag.piToprfCredService cfg).Init c₀)
+    (hTrace : (Qsag.piToprfCredService cfg).ValidTrace c₀ tr c)
+    (hAccepted : (Qsag.piToprfCredService cfg).step c (sender, w) = some (c', .presentationVerdict true)) :
+    ∃ a : Qsag.Spec.IdealCredState Attr O,
+      (toprfCredentialImplementation Attr cfg).AbstractAt tr c a ∧
+      ∃ (holder credId : Nat) (stmt : Qsag.Spec.CredentialStatement Attr),
+        w.toCommand = .present holder credId stmt ∧
+        (sender = Qsag.Spec.CredPort.holder holder ∨
+          (sender = Qsag.Spec.CredPort.adversary ∧ holder ∈ a.corruptHolders)) ∧
+        stmt.issuerPk = cfg.issuerPk ∧
+        ∃ (issuePort : Qsag.Spec.CredPort) (w₀ : Qsag.ToprfCredWire Attr),
+          ((issuePort, w₀), Qsag.Spec.IdealCredOutput.issued credId) ∈ tr ∧
+          (issuePort = Qsag.Spec.CredPort.issuer ∨
+            (issuePort = Qsag.Spec.CredPort.adversary ∧ a.issuerCorrupt = true)) := by
+  obtain ⟨a, hAt, holder, credId, stmt, hExt, hPort, hPk, issuePort, w₀, hw₀, hIssuePort⟩ :=
+    credentialImplementation_presentation_provenance (toprfCredentialImplementation Attr cfg)
+      hInit hTrace hAccepted
+  exact ⟨a, hAt, holder, credId, stmt, Option.some.inj hExt, hPort, hPk,
+    issuePort, w₀, hw₀, hIssuePort⟩
+
+/-- Concrete SPDZ TOPRF evaluation provenance for `piToprfCredService`. -/
+theorem piToprfCredService_toprf_provenance {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O)
+    {c₀ c c' : Qsag.PiToprfCredState Attr O}
+    {tr : List ((Qsag.Spec.CredPort × Qsag.ToprfCredWire Attr) × Qsag.Spec.IdealCredOutput O)}
+    {sender : Qsag.Spec.CredPort} {w : Qsag.ToprfCredWire Attr} {v : O}
+    (hInit : (Qsag.piToprfCredService cfg).Init c₀)
+    (hTrace : (Qsag.piToprfCredService cfg).ValidTrace c₀ tr c)
+    (hCorrupt : ∀ a : Qsag.Spec.IdealCredState Attr O,
+      (toprfCredentialImplementation Attr cfg).AbstractAt tr c a →
+      a.corruptServerCount ≤ Qsag.Spec.pqCredentialProfile.toprfMaxCorrupt)
+    (hAccepted : (Qsag.piToprfCredService cfg).step c (sender, w) = some (c', .toprfEvaluated v)) :
+    ∃ a : Qsag.Spec.IdealCredState Attr O,
+      (toprfCredentialImplementation Attr cfg).AbstractAt tr c a ∧
+      ∃ (t : Qsag.Spec.ToprfTicket) (input : Qsag.Spec.Bytes),
+        w.toCommand = .evalToprf t input ∧
+        v = cfg.oprf ⟨t.keyId, t.epoch, input⟩ ∧
+        ∃ (i : Nat) (w₀ : Qsag.ToprfCredWire Attr),
+          i < Qsag.Spec.pqCredentialProfile.toprfServers ∧ i ∉ a.corruptServers ∧
+          ((Qsag.Spec.CredPort.server i, w₀), Qsag.Spec.IdealCredOutput.toprfApproved) ∈ tr := by
+  obtain ⟨a, hAt, t, input, hExt, hv, i, w₀, hi, hHonest, hw₀⟩ :=
+    credentialImplementation_toprf_provenance (toprfCredentialImplementation Attr cfg)
+      hInit hTrace hCorrupt hAccepted
+  exact ⟨a, hAt, t, input, Option.some.inj hExt, hv, i, w₀, hi, hHonest, hw₀⟩
+
+/-! ## 8. Connecting `Spec.CredPort` Caller Labels to `Spec.AuthenticatedChannelContract` -/
+
+/-- Canonical peer-channel endpoint identifier (`Spec.ChannelMsg.sender`) for each `Spec.CredParty`:
+    * `0`: `.issuer`
+    * `1`: reserved `.client` endpoint
+    * `2 + i` (`i < toprfServers`): committee `.server i`
+    * `2 + toprfServers + h`: `.holder h` -/
+def credPartyEndpointId : Qsag.Spec.CredParty → Nat
+  | .issuer => 0
+  | .server i => 2 + i
+  | .holder h => 2 + Qsag.Spec.pqCredentialProfile.toprfServers + h
+
+/-- Map an authenticated channel sender ID (`Spec.ChannelMsg.sender`) onto `Spec.CredPort`,
+    routing any sender in `adversaryIds` onto `.adversary`. -/
+def credChannelEndpointPort (adversaryIds : List Nat) (senderId : Nat) : Qsag.Spec.CredPort :=
+  if decide (senderId ∈ adversaryIds) then
+    .adversary
+  else if senderId = 0 then
+    .issuer
+  else if senderId = 1 then
+    .client
+  else if senderId < 2 + Qsag.Spec.pqCredentialProfile.toprfServers then
+    .server (senderId - 2)
+  else
+    .holder (senderId - (2 + Qsag.Spec.pqCredentialProfile.toprfServers))
+
+/-- Valid party bound on `CredParty` (committee servers satisfy `i < toprfServers`). -/
+def CredPartyInCommittee : Qsag.Spec.CredParty → Prop
+  | .issuer => True
+  | .holder _ => True
+  | .server i => i < Qsag.Spec.pqCredentialProfile.toprfServers
+
+theorem credChannelEndpointPort_roundtrip
+    (adversaryIds : List Nat) (party : Qsag.Spec.CredParty)
+    (hBound : CredPartyInCommittee party)
+    (hHonestEndpoint : credPartyEndpointId party ∉ adversaryIds) :
+    credChannelEndpointPort adversaryIds (credPartyEndpointId party) = party.port := by
+  cases party with
+  | issuer =>
+    unfold credPartyEndpointId at hHonestEndpoint ⊢
+    unfold credChannelEndpointPort Qsag.Spec.CredParty.port
+    rw [decide_eq_false hHonestEndpoint]
+    rfl
+  | server i =>
+    have hi : i < Qsag.Spec.pqCredentialProfile.toprfServers := hBound
+    unfold credPartyEndpointId at hHonestEndpoint ⊢
+    unfold credChannelEndpointPort Qsag.Spec.CredParty.port
+    rw [decide_eq_false hHonestEndpoint]
+    have hNe0 : ¬ (2 + i = 0) := by omega
+    have hNe1 : ¬ (2 + i = 1) := by omega
+    have hLt : 2 + i < 2 + Qsag.Spec.pqCredentialProfile.toprfServers := by omega
+    have hSub : 2 + i - 2 = i := by omega
+    simp only [Bool.false_eq_true, ↓reduceIte, hNe0, hNe1, hLt, hSub]
+  | holder h =>
+    unfold credPartyEndpointId at hHonestEndpoint ⊢
+    unfold credChannelEndpointPort Qsag.Spec.CredParty.port
+    rw [decide_eq_false hHonestEndpoint]
+    have hSrvPos : 0 < Qsag.Spec.pqCredentialProfile.toprfServers := by decide
+    have hNe0 : ¬ (2 + Qsag.Spec.pqCredentialProfile.toprfServers + h = 0) := by omega
+    have hNe1 : ¬ (2 + Qsag.Spec.pqCredentialProfile.toprfServers + h = 1) := by omega
+    have hNotLt : ¬ (2 + Qsag.Spec.pqCredentialProfile.toprfServers + h <
+        2 + Qsag.Spec.pqCredentialProfile.toprfServers) := by omega
+    have hSub : 2 + Qsag.Spec.pqCredentialProfile.toprfServers + h -
+        (2 + Qsag.Spec.pqCredentialProfile.toprfServers) = h := by omega
+    simp only [Bool.false_eq_true, ↓reduceIte, hNe0, hNe1, hNotLt, hSub]
+
+theorem credChannelEndpointPort_unique_sender
+    (adversaryIds : List Nat) (senderId : Nat) (party : Qsag.Spec.CredParty)
+    (_hBound : CredPartyInCommittee party)
+    (hPortEq : credChannelEndpointPort adversaryIds senderId = party.port) :
+    senderId ∉ adversaryIds ∧ senderId = credPartyEndpointId party := by
+  unfold credChannelEndpointPort at hPortEq
+  cases hAdv : decide (senderId ∈ adversaryIds) with
+  | true =>
+    rw [hAdv] at hPortEq
+    simp only [↓reduceIte] at hPortEq
+    cases party <;> cases hPortEq
+  | false =>
+    have hNotAdv : senderId ∉ adversaryIds := of_decide_eq_false hAdv
+    rw [hAdv] at hPortEq
+    simp only [Bool.false_eq_true, ↓reduceIte] at hPortEq
+    refine ⟨hNotAdv, ?_⟩
+    by_cases h0 : senderId = 0
+    · rw [h0] at hPortEq ⊢
+      simp only [↓reduceIte] at hPortEq
+      cases party with
+      | issuer => rfl
+      | server _ => cases hPortEq
+      | holder _ => cases hPortEq
+    · simp only [h0, ↓reduceIte] at hPortEq
+      by_cases h1 : senderId = 1
+      · rw [h1] at hPortEq
+        simp only [↓reduceIte] at hPortEq
+        cases party <;> cases hPortEq
+      · simp only [h1, ↓reduceIte] at hPortEq
+        by_cases hLt : senderId < 2 + Qsag.Spec.pqCredentialProfile.toprfServers
+        · simp only [hLt, ↓reduceIte] at hPortEq
+          cases party with
+          | issuer => cases hPortEq
+          | holder _ => cases hPortEq
+          | server i =>
+            dsimp only [credPartyEndpointId]
+            injection hPortEq with hiEq
+            omega
+        · simp only [hLt, ↓reduceIte] at hPortEq
+          cases party with
+          | issuer => cases hPortEq
+          | server _ => cases hPortEq
+          | holder h =>
+            dsimp only [credPartyEndpointId]
+            have hSrvPos : 0 < Qsag.Spec.pqCredentialProfile.toprfServers := by decide
+            injection hPortEq with hhEq
+            omega
+
+/-- **`CredPort` Authenticated by `Spec.AuthenticatedChannelContract`
+    (`credPort_authenticated_by_channel_contract`)**:
+    Discharges the authenticated-port assumption of `CredentialImplementation` from
+    `Spec.AuthenticatedChannelContract admits` (inhabited by `Spec.checkedChannel_contract`):
+    whenever a network event `tr = pre ++ .deliver m :: post` admitted by `admits` maps onto an
+    authenticated party port `credChannelEndpointPort adversaryIds m.sender = party.port`:
+    1. `m.sender` is uniquely that honest party's endpoint `credPartyEndpointId party` and
+       `m.sender ∉ adversaryIds`,
+    2. `party` genuinely transmitted `.send m ∈ pre` earlier in the trace, and
+    3. `.deliver m ∉ post` (strict replay protection — `m` is never re-delivered)! -/
+theorem credPort_authenticated_by_channel_contract
+    {admits : List Qsag.Spec.ChannelEvent → Prop}
+    (hContract : Qsag.Spec.AuthenticatedChannelContract admits)
+    (adversaryIds : List Nat)
+    {tr pre post : List Qsag.Spec.ChannelEvent} {m : Qsag.Spec.ChannelMsg}
+    (hAdmits : admits tr)
+    (hSplit : tr = pre ++ .deliver m :: post)
+    (party : Qsag.Spec.CredParty) (hBound : CredPartyInCommittee party)
+    (hPort : credChannelEndpointPort adversaryIds m.sender = party.port) :
+    m.sender ∉ adversaryIds ∧
+    m.sender = credPartyEndpointId party ∧
+    Qsag.Spec.ChannelEvent.send m ∈ pre ∧
+    Qsag.Spec.ChannelEvent.deliver m ∉ post := by
+  obtain ⟨hNotAdv, hSenderEq⟩ :=
+    credChannelEndpointPort_unique_sender adversaryIds m.sender party hBound hPort
+  exact ⟨hNotAdv, hSenderEq,
+    hContract.peerAuthenticated tr hAdmits pre post m hSplit,
+    hContract.replayProtected tr hAdmits pre post m hSplit⟩
+
+/-- `#tooth` Without `AuthenticatedChannelContract` (on an open relay `admits := fun _ => True`),
+    an unauthenticated delivery forged with `m.sender = 0` arrives on `.issuer` with `.send m ∉ pre`
+    and can even be replayed twice in `post`! -/
+theorem tooth_open_relay_spoofs_issuer_credPort :
+    ∃ (tr : List Qsag.Spec.ChannelEvent) (m : Qsag.Spec.ChannelMsg),
+      ¬ Qsag.Spec.AuthenticatedChannelContract (fun _ => True) ∧
+      tr = [] ++ .deliver m :: [.deliver m] ∧
+      credChannelEndpointPort [99] m.sender = Qsag.Spec.CredPort.issuer ∧
+      Qsag.Spec.ChannelEvent.deliver m ∈ [.deliver m] ∧
+      Qsag.Spec.ChannelEvent.send m ∉ ([] : List Qsag.Spec.ChannelEvent) := by
+  let m : Qsag.Spec.ChannelMsg := ⟨0, 1, 0, [0x42]⟩
+  have hPort : credChannelEndpointPort [99] m.sender = Qsag.Spec.CredPort.issuer :=
+    credChannelEndpointPort_roundtrip [99] .issuer trivial (by decide)
+  exact ⟨[.deliver m, .deliver m], m, Qsag.Spec.open_relay_has_no_channel_contract,
+    rfl, hPort, List.Mem.head _, fun h => nomatch h⟩
+
+#verify_constructive
+  Qsag.Top.blindVc_cut_and_choose_gameBound
+  Qsag.Top.blindVc_concrete_fp5_qrom_opening_soundness
+  Qsag.Top.toprfCredentialImplementation_non_identity_state
+  Qsag.Top.piToprfCredService_issuance_authenticated
+  Qsag.Top.piToprfCredService_presentation_provenance
+  Qsag.Top.piToprfCredService_toprf_provenance
+  Qsag.Top.credPort_authenticated_by_channel_contract
+  Qsag.Top.tooth_open_relay_spoofs_issuer_credPort
+
+#tooth_pair Qsag.Top.credPort_authenticated_by_channel_contract vs
+  Qsag.Top.tooth_open_relay_spoofs_issuer_credPort
 
 end Qsag.Top
 end

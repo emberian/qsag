@@ -4052,8 +4052,11 @@ theorem toprf_input_root_blocks_relabeling_and_equivocation
 
 /-! ### §4.1 6-Limb `Lane6` Digests, `ZkSoundnessProfile` (ROM vs QROM) & Arity-Framed `absorbRate6Sponge3` Binding -/
 
-/-- Maximum canonical Goldilocks attributes per `BlindVC` credential (`MAX_VC_ATTRS = 6`, `blind_vc.rs:43`). -/
-def vcMaxAttrs : Nat := 6
+/-- Maximum canonical Goldilocks attributes per `BlindVC` credential (`MAX_VC_ATTRS = 32`, `blind_vc.rs:43`). -/
+def vcMaxAttrs : Nat := 32
+
+/-- Small-credential 3-block ZKBoo rate-6 attribute slot ceiling (`6` slots in `absorbRate6Sponge3`). -/
+def vcSmallMaxAttrs : Nat := 6
 
 /-- Deployed Poseidon2 Merkle accumulator depth (`VC_ACCUMULATOR_DEPTH = 20`, `blind_vc.rs:45`). -/
 def vcAccumulatorDepth : Nat := 20
@@ -4254,12 +4257,13 @@ theorem absorbRate6Sponge3_collision_reduction
   else
     exact ⟨s3₁, s3₂, h3, Or.inl hDig⟩
 
-/-- Fixed-arity credential schema (`1 ≤ arity ≤ 6`, matching `VcSchema::new` in `blind_vc.rs:79-85`). -/
+/-- Fixed-arity 3-block ZKBoo credential schema (`1 ≤ arity ≤ 6`; full `1 ≤ arity ≤ 32` is
+    formalized by `computeVcPoseidon2CommitFull` below, matching `MAX_VC_ATTRS = 32` in `blind_vc.rs:43`). -/
 structure VcSchema where
   schemaId : UInt64
   arity : Nat
   hArityPos : 1 ≤ arity
-  hArityLe : arity ≤ vcMaxAttrs
+  hArityLe : arity ≤ vcSmallMaxAttrs
   deriving DecidableEq, Repr
 
 theorem VcSchema.ext {s₁ s₂ : VcSchema}
@@ -4340,11 +4344,11 @@ private theorem vcCommitChunks_injective
   have hp6 : 6 < goldilocksPrime := by decide
   have hArLt₁ : schema₁.arity < goldilocksPrime := by
     have hLe := schema₁.hArityLe
-    unfold vcMaxAttrs at hLe
+    unfold vcSmallMaxAttrs at hLe
     omega
   have hArLt₂ : schema₂.arity < goldilocksPrime := by
     have hLe := schema₂.hArityLe
-    unfold vcMaxAttrs at hLe
+    unfold vcSmallMaxAttrs at hLe
     omega
   simp only [Goldilocks.ofNat_val, Nat.mod_eq_of_lt hArLt₁, Nat.mod_eq_of_lt hArLt₂] at hArVal
   have hSid : schema₁.schemaId = schema₂.schemaId :=
@@ -4397,7 +4401,7 @@ set_option exponentiation.threshold 1024 in
 theorem blind_vc_commit_binding_reduces_to_sponge12_collision :
     (∀ (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) (c : Lane6),
       computeVcPoseidon2Commit schema attrs blind tag = some c →
-      1 ≤ attrs.length ∧ attrs.length = schema.arity ∧ attrs.length ≤ vcMaxAttrs) ∧
+      1 ≤ attrs.length ∧ attrs.length = schema.arity ∧ attrs.length ≤ vcSmallMaxAttrs) ∧
     (∀ (schema₁ schema₂ : VcSchema) (attrs₁ attrs₂ : List Goldilocks)
        (blind₁ blind₂ : Lane4) (tag : UInt64) (c : Lane6),
       computeVcPoseidon2Commit schema₁ attrs₁ blind₁ tag = some c →
@@ -6817,10 +6821,24 @@ def vcViewCommitTag : List UInt8 :=
 def vcMpcCommitTag : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x43, 0x4F, 0x4D, 0x4D, 0x49, 0x54, 0x2E, 0x56, 0x31]
 
-/-- Domain tag `"QSAG.BLIND_VC.SD_ZK.V1"` (`blind_vc.rs:1751, 2168`, 22 bytes). -/
+/-- Domain tag `"QSAG.BLIND_VC.SD_LIMBO.V1"` (`blind_vc.rs:3224, 3822`, 25 bytes). -/
 def vcSdZkDomainTag : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x4C, 0x49, 0x4E, 0x44, 0x5F,
-   0x56, 0x43, 0x2E, 0x53, 0x44, 0x5F, 0x5A, 0x4B, 0x2E, 0x56, 0x31]
+   0x56, 0x43, 0x2E, 0x53, 0x44, 0x5F, 0x4C, 0x49, 0x4D, 0x42, 0x4F,
+   0x2E, 0x56, 0x31]
+
+/-- Alias for `"QSAG.BLIND_VC.SD_LIMBO.V1"` (`blind_vc.rs:3224, 3822`). -/
+abbrev vcSdLimboDomainTag : List UInt8 := vcSdZkDomainTag
+
+/-- Domain tag `"QSAG.MLDSA.NONCE_BURN.V2"` (`threshold_mldsa.rs:419`, 24 bytes) for durable
+    nonce-burn MAC records (superseding retired `"QSAG.MLDSA.MASK_NONCE.V1"`). -/
+def mldsaNonceBurnDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x4D, 0x4C, 0x44, 0x53, 0x41, 0x2E, 0x4E,
+   0x4F, 0x4E, 0x43, 0x45, 0x5F, 0x42, 0x55, 0x52, 0x4E, 0x2E, 0x56, 0x32]
+
+/-- Length-framed `cshake256_framed_32` preimage under `"QSAG.MLDSA.NONCE_BURN.V2"`. -/
+def mldsaNonceBurnPreimage (macKey lockId body : List UInt8) : List UInt8 :=
+  cshake256FramedPreimage mldsaNonceBurnDomainTag [macKey, lockId, body]
 
 /-- Profile tag `"QSAG.VC.PROFILE.Quantum128:438"` (`blind_vc.rs:1746, 2166`, 30 bytes). -/
 def vcProfileQuantumTag : List UInt8 :=
@@ -14905,9 +14923,10 @@ theorem mldsaVerifyBytes204_accepts_core {budget : Nat} {pk msg ctx sig : List U
 
 set_option exponentiation.threshold 1024 in
 /-- **Rate-6 / Capacity-6 Width-12 `sponge12` 6-Limb Coherence (`blindVc_sponge12_rate6_cap6_six_limb_coherence`)**:
-    Locks `BlindVcCollisionFinder` directly to `crates/qsag-cred/src/blind_vc.rs:149-268`:
-    1. `computeVcPoseidon2Commit` accepts iff `1 ≤ attrs.length = schema.arity ≤ 6`, absorbs `schema.arity`
-       at `c2.x0` and `10*` pad `1` at `c2.x1` into the 3-block rate-6 / capacity-6 `absorbRate6Sponge3`
+    Locks `BlindVcCollisionFinder` directly to `crates/qsag-cred/src/blind_vc.rs:43, 137-268`:
+    1. `vcMaxAttrs = 32` (`MAX_VC_ATTRS = 32`); on the 3-block ZKBoo circuit (`schema : VcSchema`,
+       `1 ≤ schema.arity ≤ 6`), `computeVcPoseidon2Commit` accepts iff `attrs.length = schema.arity`,
+       absorbs `schema.arity` at `c2.x0` and `10*` pad `1` at `c2.x1` into `absorbRate6Sponge3`
        (with 6 zero-initialized capacity lanes), and squeezes 6 limbs (`Lane6`, `> 2^383` states);
     2. `computeVcScopeTag` absorbs two 6-limb blocks plus the full-block `10*` pad `⟨1, 0, 0, 0, 0, 0⟩`
        (`N = 12` multiple of rate `6`) into `absorbRate6Sponge3` and squeezes 6 limbs (`Lane6`);
@@ -14944,6 +14963,1229 @@ theorem blindVc_sponge12_rate6_cap6_six_limb_coherence
   refine ⟨⟨fun hEq => ⟨rfl, ?_⟩, fun hNe => ?_⟩, ⟨rfl, rfl⟩, ⟨rfl, rfl, rfl⟩, rfl, by decide⟩
   · unfold computeVcPoseidon2Commit; simp only [hEq, ↓reduceIte]
   · unfold computeVcPoseidon2Commit; simp only [hNe, ↓reduceIte]
+
+/-! ## Multi-Block `MAX_VC_ATTRS = 32` `sponge12` Commitment & `"QSAG.MLDSA.NONCE_BURN.V2"` Parity (`C5 #5, #6`) -/
+
+/-- Structural 6-limb rate-block chunker for `sponge12` (`blind_vc.rs:137-154`). -/
+def limbsToLane6Blocks : List Goldilocks → List Lane6
+  | [] => []
+  | [x0] => [⟨x0, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1] => [⟨x0, x1, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1, x2] => [⟨x0, x1, x2, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1, x2, x3] => [⟨x0, x1, x2, x3, Goldilocks.zero, Goldilocks.zero⟩]
+  | [x0, x1, x2, x3, x4] => [⟨x0, x1, x2, x3, x4, Goldilocks.zero⟩]
+  | x0 :: x1 :: x2 :: x3 :: x4 :: x5 :: rest =>
+    ⟨x0, x1, x2, x3, x4, x5⟩ :: limbsToLane6Blocks rest
+
+private def stripLastLane6 : Lane6 → List Goldilocks
+  | ⟨x0, x1, x2, x3, x4, x5⟩ =>
+    if x5 ≠ Goldilocks.zero then [x0, x1, x2, x3, x4]
+    else if x4 ≠ Goldilocks.zero then [x0, x1, x2, x3]
+    else if x3 ≠ Goldilocks.zero then [x0, x1, x2]
+    else if x2 ≠ Goldilocks.zero then [x0, x1]
+    else if x1 ≠ Goldilocks.zero then [x0]
+    else []
+
+private def decodePad1Blocks : List Lane6 → List Goldilocks
+  | [] => []
+  | [last] => stripLastLane6 last
+  | c :: b :: rest => [c.x0, c.x1, c.x2, c.x3, c.x4, c.x5] ++ decodePad1Blocks (b :: rest)
+
+private theorem limbsToLane6Blocks_pad1_nonempty :
+    ∀ xs : List Goldilocks, limbsToLane6Blocks (xs ++ [Goldilocks.one]) ≠ []
+  | [] | [_] | [_, _] | [_, _, _] | [_, _, _, _] | [_, _, _, _, _] => by simp [limbsToLane6Blocks]
+  | _ :: _ :: _ :: _ :: _ :: _ :: _ => by simp [limbsToLane6Blocks]
+
+private theorem decodePad1Blocks_limbsToLane6Blocks :
+    ∀ xs : List Goldilocks, decodePad1Blocks (limbsToLane6Blocks (xs ++ [Goldilocks.one])) = xs
+  | [] => by decide
+  | [x0] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1, x2] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1, x2, x3] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | [x0, x1, x2, x3, x4] => by
+    have h1 : Goldilocks.one ≠ Goldilocks.zero := by decide
+    simp [limbsToLane6Blocks, decodePad1Blocks, stripLastLane6, h1]
+  | x0 :: x1 :: x2 :: x3 :: x4 :: x5 :: rest => by
+    have hNe := limbsToLane6Blocks_pad1_nonempty rest
+    have ih := decodePad1Blocks_limbsToLane6Blocks rest
+    simp only [List.cons_append, limbsToLane6Blocks]
+    cases hBlk : limbsToLane6Blocks (rest ++ [Goldilocks.one]) with
+    | nil => exact absurd hBlk hNe
+    | cons b bs =>
+      rw [hBlk] at ih
+      simp only [decodePad1Blocks, ih]
+      rfl
+
+theorem limbsToLane6Blocks_pad1_injective {xs ys : List Goldilocks}
+    (hEq : limbsToLane6Blocks (xs ++ [Goldilocks.one]) = limbsToLane6Blocks (ys ++ [Goldilocks.one])) :
+    xs = ys := by
+  have hDec := congrArg decodePad1Blocks hEq
+  rwa [decodePad1Blocks_limbsToLane6Blocks, decodePad1Blocks_limbsToLane6Blocks] at hDec
+
+/-- Multi-block Width-12 (`rate = 6, capacity = 6`) `sponge12` absorption from state `st`. -/
+def sponge12AbsorbFrom (st : Poseidon2State12) : List Lane6 → Poseidon2State12
+  | [] => st
+  | c :: cs =>
+    let stNext := poseidon2Perm12 (mkState12Of6 (lane6Add (state12Rate6 st) c) (state12Cap6 st))
+    sponge12AbsorbFrom stNext cs
+
+/-- Multi-block `sponge12` starting from the all-zero 12-limb state (`blind_vc.rs:137-154`). -/
+def absorbRate6SpongeBlocks (blocks : List Lane6) : Poseidon2State12 :=
+  sponge12AbsorbFrom (mkState12Of6 lane6Zero lane6Zero) blocks
+
+private def sponge12Rev : List Lane6 → Poseidon2State12
+  | [] => mkState12Of6 lane6Zero lane6Zero
+  | c :: prevRev =>
+    let prev := sponge12Rev prevRev
+    poseidon2Perm12 (mkState12Of6 (lane6Add (state12Rate6 prev) c) (state12Cap6 prev))
+
+private theorem sponge12AbsorbFrom_append (st : Poseidon2State12) :
+    ∀ (as bs : List Lane6),
+      sponge12AbsorbFrom st (as ++ bs) = sponge12AbsorbFrom (sponge12AbsorbFrom st as) bs
+  | [], _ => rfl
+  | _ :: as, bs => sponge12AbsorbFrom_append _ as bs
+
+private theorem absorbRate6SpongeBlocks_eq_rev :
+    ∀ bs : List Lane6, absorbRate6SpongeBlocks bs = sponge12Rev bs.reverse
+  | [] => rfl
+  | c :: cs => by
+    unfold absorbRate6SpongeBlocks at *
+    have hRev : (c :: cs).reverse = cs.reverse ++ [c] := List.reverse_cons
+    rw [hRev]
+    have hInd : ∀ r : List Lane6,
+        sponge12Rev r = sponge12AbsorbFrom (mkState12Of6 lane6Zero lane6Zero) r.reverse := by
+      intro r
+      induction r with
+      | nil => rfl
+      | cons d ds ih =>
+        simp only [List.reverse_cons, sponge12AbsorbFrom_append, ← ih]
+        rfl
+    rw [hInd (cs.reverse ++ [c]), List.reverse_append, List.reverse_singleton,
+        List.reverse_reverse, List.singleton_append]
+
+private theorem lane6Add_zero_left (c : Lane6) : lane6Add lane6Zero c = c := by
+  rcases c with ⟨x0, x1, x2, x3, x4, x5⟩
+  simp only [lane6Add, lane6Zero, Goldilocks.zero_add]
+
+theorem absorbRate6SpongeBlocks_three_eq (c0 c1 c2 : Lane6) :
+    absorbRate6SpongeBlocks [c0, c1, c2] = absorbRate6Sponge3 c0 c1 c2 := by
+  unfold absorbRate6SpongeBlocks sponge12AbsorbFrom absorbRate6Sponge3
+  simp only [state12Rate6_mk, state12Cap6_mk, lane6Add_zero_left]
+
+/-- Non-initial sponge permutation input whose output capacity vanishes (`6` Goldilocks zeros, `< 2^-383`). -/
+def Poseidon2Perm12ZeroCapRoot (st : Poseidon2State12) : Prop :=
+  state12Cap6 (poseidon2Perm12 st) = lane6Zero
+
+private theorem sponge12Rev_cap_collision_or_zero_root :
+    ∀ {r₁ r₂ : List Lane6},
+      r₁ ≠ r₂ →
+      state12Cap6 (sponge12Rev r₁) = state12Cap6 (sponge12Rev r₂) →
+      (∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB) ∨
+      (∃ st : Poseidon2State12, Poseidon2Perm12ZeroCapRoot st)
+  | [], [], hNe, _ => False.elim (hNe rfl)
+  | [], c₂ :: t₂, _, hCap => by
+    dsimp only [sponge12Rev, state12Cap6_mk] at hCap
+    exact Or.inr ⟨_, hCap.symm⟩
+  | c₁ :: t₁, [], _, hCap => by
+    dsimp only [sponge12Rev, state12Cap6_mk] at hCap
+    exact Or.inr ⟨_, hCap⟩
+  | c₁ :: t₁, c₂ :: t₂, hNe, hCap => by
+    let p₁ := sponge12Rev t₁
+    let p₂ := sponge12Rev t₂
+    let s₁ := mkState12Of6 (lane6Add (state12Rate6 p₁) c₁) (state12Cap6 p₁)
+    let s₂ := mkState12Of6 (lane6Add (state12Rate6 p₂) c₂) (state12Cap6 p₂)
+    if hs : s₁ = s₂ then
+      have hCapPrev : state12Cap6 p₁ = state12Cap6 p₂ := by
+        have hc := congrArg state12Cap6 hs
+        rwa [state12Cap6_mk, state12Cap6_mk] at hc
+      if ht : t₁ = t₂ then
+        subst ht
+        have hRate : lane6Add (state12Rate6 p₁) c₁ = lane6Add (state12Rate6 p₁) c₂ := by
+          have hr := congrArg state12Rate6 hs
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        exact False.elim (hNe (congrArg (· :: t₁) (lane6Add_left_cancel hRate)))
+      else
+        exact sponge12Rev_cap_collision_or_zero_root ht hCapPrev
+    else
+      exact Or.inl ⟨s₁, s₂, hs, Or.inr hCap⟩
+
+theorem absorbRate6SpongeBlocks_collision_reduction {bs₁ bs₂ : List Lane6}
+    (hNe₁ : bs₁ ≠ []) (hNe₂ : bs₂ ≠ []) (hDiff : bs₁ ≠ bs₂)
+    (hDig : state12Rate6 (absorbRate6SpongeBlocks bs₁) =
+            state12Rate6 (absorbRate6SpongeBlocks bs₂)) :
+    (∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB) ∨
+    (∃ st : Poseidon2State12, Poseidon2Perm12ZeroCapRoot st) := by
+  rw [absorbRate6SpongeBlocks_eq_rev, absorbRate6SpongeBlocks_eq_rev] at hDig
+  have hrNe₁ : bs₁.reverse ≠ [] := fun h => hNe₁ (by simpa using congrArg List.reverse h)
+  have hrNe₂ : bs₂.reverse ≠ [] := fun h => hNe₂ (by simpa using congrArg List.reverse h)
+  have hrDiff : bs₁.reverse ≠ bs₂.reverse :=
+    fun h => hDiff (by simpa using congrArg List.reverse h)
+  match hR1 : bs₁.reverse, hR2 : bs₂.reverse with
+  | [], _ => exact False.elim (hrNe₁ hR1)
+  | _, [] => exact False.elim (hrNe₂ hR2)
+  | c₁ :: t₁, c₂ :: t₂ =>
+    rw [hR1, hR2] at hDig hrDiff
+    let p₁ := sponge12Rev t₁
+    let p₂ := sponge12Rev t₂
+    let s₁ := mkState12Of6 (lane6Add (state12Rate6 p₁) c₁) (state12Cap6 p₁)
+    let s₂ := mkState12Of6 (lane6Add (state12Rate6 p₂) c₂) (state12Cap6 p₂)
+    if hs : s₁ = s₂ then
+      have hCapPrev : state12Cap6 p₁ = state12Cap6 p₂ := by
+        have hc := congrArg state12Cap6 hs
+        rwa [state12Cap6_mk, state12Cap6_mk] at hc
+      if ht : t₁ = t₂ then
+        subst ht
+        have hRate : lane6Add (state12Rate6 p₁) c₁ = lane6Add (state12Rate6 p₁) c₂ := by
+          have hr := congrArg state12Rate6 hs
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        exact False.elim (hrDiff (congrArg (· :: t₁) (lane6Add_left_cancel hRate)))
+      else
+        exact sponge12Rev_cap_collision_or_zero_root ht hCapPrev
+    else
+      exact Or.inl ⟨s₁, s₂, hs, Or.inl hDig⟩
+
+/-- Zero-pad attribute limbs to `max attrs.length 6` slots (`padded[..attrs.len().max(6)]`, `blind_vc.rs:178-179`). -/
+def vcPadAttrs (attrs : List Goldilocks) : List Goldilocks :=
+  attrs ++ List.replicate (6 - attrs.length) Goldilocks.zero
+
+/-- 7-limb metadata & blind trailer `[blind[0..4], schema_lo, schema_hi + tag, arity]` (`blind_vc.rs:180-185`). -/
+def vcCommitTrailerLimbs (schemaId : UInt64) (arity : Nat) (blind : Lane4) (tag : UInt64) :
+    List Goldilocks :=
+  [blind.x0, blind.x1, blind.x2, blind.x3,
+   vcSchemaLo schemaId, vcSchemaHiWithTag schemaId tag, Goldilocks.ofNat arity]
+
+/-- Rate-6 `Lane6` block sequence absorbed by `compute_vc_poseidon2_commit` (`blind_vc.rs:159-190`). -/
+def vcCommitFullBlocks (schemaId : UInt64) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) :
+    List Lane6 :=
+  limbsToLane6Blocks
+    (vcPadAttrs attrs ++ vcCommitTrailerLimbs schemaId attrs.length blind tag ++ [Goldilocks.one])
+
+/-- **Full `MAX_VC_ATTRS = 32` `Poseidon2` Credential Commitment (`computeVcPoseidon2CommitFull`, `C5 #5`)**:
+    Matches `blind_vc.rs:159-190`: accepts iff `1 ≤ attrs.length ≤ vcMaxAttrs` (`= 32`), pads small
+    attribute vectors to 6 slots while absorbing all `7..32` attributes into rate-6 / capacity-6
+    `absorbRate6SpongeBlocks`, and squeezes the 6-limb digest `Lane6`. -/
+def computeVcPoseidon2CommitFull
+    (schemaId : UInt64) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) : Option Lane6 :=
+  if decide (1 ≤ attrs.length ∧ attrs.length ≤ vcMaxAttrs) then
+    some (state12Rate6 (absorbRate6SpongeBlocks (vcCommitFullBlocks schemaId attrs blind tag)))
+  else
+    none
+
+/-- Exact equivalence between `computeVcPoseidon2CommitFull` (`1 ≤ arity ≤ 32`) and the 3-block
+    ZKBoo `computeVcPoseidon2Commit` whenever `schema : VcSchema` (`1 ≤ schema.arity ≤ 6`) and
+    `attrs.length = schema.arity`. -/
+theorem computeVcPoseidon2CommitFull_eq_small
+    (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64)
+    (hLen : attrs.length = schema.arity) :
+    computeVcPoseidon2CommitFull schema.schemaId attrs blind tag =
+      computeVcPoseidon2Commit schema attrs blind tag := by
+  have hPos : 1 ≤ attrs.length := hLen ▸ schema.hArityPos
+  have hLe6 : attrs.length ≤ 6 := hLen ▸ schema.hArityLe
+  have hLe32 : attrs.length ≤ vcMaxAttrs := Nat.le_trans hLe6 (by decide)
+  have hRange : decide (1 ≤ attrs.length ∧ attrs.length ≤ vcMaxAttrs) = true :=
+    decide_eq_true ⟨hPos, hLe32⟩
+  unfold computeVcPoseidon2CommitFull computeVcPoseidon2Commit
+  rw [hRange]
+  simp only [hLen, ↓reduceIte]
+  congr 1
+  have hBlks : vcCommitFullBlocks schema.schemaId attrs blind tag =
+      [(vcCommitChunks schema attrs blind tag).1,
+       (vcCommitChunks schema attrs blind tag).2.1,
+       (vcCommitChunks schema attrs blind tag).2.2] := by
+    unfold vcCommitFullBlocks vcPadAttrs vcCommitTrailerLimbs vcCommitChunks
+    rw [← hLen]
+    match attrs, hPos, hLe6 with
+    | [a0], _, _ => rfl
+    | [a0, a1], _, _ => rfl
+    | [a0, a1, a2], _, _ => rfl
+    | [a0, a1, a2, a3], _, _ => rfl
+    | [a0, a1, a2, a3, a4], _, _ => rfl
+    | [a0, a1, a2, a3, a4, a5], _, _ => rfl
+    | _ :: _ :: _ :: _ :: _ :: _ :: _ :: _, _, h6 => simp at h6
+  rw [hBlks, absorbRate6SpongeBlocks_three_eq]
+
+private theorem vcCommitFullBlocks_injective
+    {sid₁ sid₂ : UInt64} {attrs₁ attrs₂ : List Goldilocks} {blind₁ blind₂ : Lane4} {tag : UInt64}
+    (hLe₁ : attrs₁.length ≤ vcMaxAttrs) (hLe₂ : attrs₂.length ≤ vcMaxAttrs)
+    (hEq : vcCommitFullBlocks sid₁ attrs₁ blind₁ tag = vcCommitFullBlocks sid₂ attrs₂ blind₂ tag) :
+    sid₁ = sid₂ ∧ attrs₁ = attrs₂ ∧ blind₁ = blind₂ := by
+  unfold vcCommitFullBlocks at hEq
+  have hMsgEq := limbsToLane6Blocks_pad1_injective hEq
+  have hRevEq := congrArg List.reverse hMsgEq
+  simp only [vcCommitTrailerLimbs, List.reverse_append, List.reverse_cons, List.reverse_nil,
+    List.nil_append, List.cons_append] at hRevEq
+  injection hRevEq with hAr t1
+  injection t1 with hHi t2
+  injection t2 with hLo t3
+  injection t3 with hb3 t4
+  injection t4 with hb2 t5
+  injection t5 with hb1 t6
+  injection t6 with hb0 hPadRevEq
+  have hp32 : vcMaxAttrs < goldilocksPrime := by decide
+  have hLt₁ : attrs₁.length < goldilocksPrime := Nat.lt_of_le_of_lt hLe₁ hp32
+  have hLt₂ : attrs₂.length < goldilocksPrime := Nat.lt_of_le_of_lt hLe₂ hp32
+  have hLenEq : attrs₁.length = attrs₂.length := by
+    have hv := congrArg Goldilocks.val hAr
+    simp only [Goldilocks.ofNat_val, Nat.mod_eq_of_lt hLt₁, Nat.mod_eq_of_lt hLt₂] at hv
+    exact hv
+  have hSid : sid₁ = sid₂ := vcSchema_limbs_injective hLo hHi
+  have hBlind : blind₁ = blind₂ := Lane4.ext hb0 hb1 hb2 hb3
+  have hPadEq : vcPadAttrs attrs₁ = vcPadAttrs attrs₂ := by
+    simpa only [List.reverse_reverse] using congrArg List.reverse hPadRevEq
+  unfold vcPadAttrs at hPadEq
+  have hAttrs : attrs₁ = attrs₂ := (List.append_inj hPadEq hLenEq).1
+  exact ⟨hSid, hAttrs, hBlind⟩
+
+/-- **Full `1 ≤ arity ≤ 32` `BlindVC` Commitment Acceptance & Sponge Binding
+    (`computeVcPoseidon2CommitFull_arity32_binding`, `C5 #5`)**:
+    1. `vcMaxAttrs = 32` (`MAX_VC_ATTRS = 32`); `computeVcPoseidon2CommitFull` accepts iff
+       `1 ≤ attrs.length ∧ attrs.length ≤ 32` (including full 32-attribute credentials);
+    2. Any two distinct openings `(sid₁, attrs₁, blind₁) ≠ (sid₂, attrs₂, blind₂)` yielding `some c`
+       constructively exhibit either `Poseidon2Perm12Sponge6Collision` or `Poseidon2Perm12ZeroCapRoot`. -/
+theorem computeVcPoseidon2CommitFull_arity32_binding :
+    vcMaxAttrs = 32 ∧
+    (∀ (sid : UInt64) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64),
+      (computeVcPoseidon2CommitFull sid attrs blind tag).isSome = true ↔
+        1 ≤ attrs.length ∧ attrs.length ≤ 32) ∧
+    (∀ (sid₁ sid₂ : UInt64) (attrs₁ attrs₂ : List Goldilocks)
+       (blind₁ blind₂ : Lane4) (tag : UInt64) (c : Lane6),
+      computeVcPoseidon2CommitFull sid₁ attrs₁ blind₁ tag = some c →
+      computeVcPoseidon2CommitFull sid₂ attrs₂ blind₂ tag = some c →
+      (sid₁, attrs₁, blind₁) ≠ (sid₂, attrs₂, blind₂) →
+      (∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB) ∨
+      (∃ st : Poseidon2State12, Poseidon2Perm12ZeroCapRoot st)) := by
+  refine ⟨rfl, ?_, ?_⟩
+  · intro sid attrs blind tag
+    unfold computeVcPoseidon2CommitFull vcMaxAttrs
+    if h : 1 ≤ attrs.length ∧ attrs.length ≤ 32 then
+      simp [h]
+    else
+      simp [h]
+  · intro sid₁ sid₂ attrs₁ attrs₂ blind₁ blind₂ tag c h1 h2 hNe
+    unfold computeVcPoseidon2CommitFull at h1 h2
+    cases hOk1 : decide (1 ≤ attrs₁.length ∧ attrs₁.length ≤ vcMaxAttrs) with
+    | false => rw [hOk1] at h1; cases h1
+    | true =>
+      cases hOk2 : decide (1 ≤ attrs₂.length ∧ attrs₂.length ≤ vcMaxAttrs) with
+      | false => rw [hOk2] at h2; cases h2
+      | true =>
+        rw [hOk1] at h1
+        rw [hOk2] at h2
+        simp only [↓reduceIte, Option.some.injEq] at h1 h2
+        have hb1 := (of_decide_eq_true hOk1).2
+        have hb2 := (of_decide_eq_true hOk2).2
+        have hBlkDiff : vcCommitFullBlocks sid₁ attrs₁ blind₁ tag ≠
+            vcCommitFullBlocks sid₂ attrs₂ blind₂ tag := by
+          intro hEq
+          obtain ⟨hs, ha, hbl⟩ := vcCommitFullBlocks_injective hb1 hb2 hEq
+          exact hNe (by rw [hs, ha, hbl])
+        exact absorbRate6SpongeBlocks_collision_reduction
+          (limbsToLane6Blocks_pad1_nonempty _)
+          (limbsToLane6Blocks_pad1_nonempty _)
+          hBlkDiff (h1.trans h2.symm)
+
+/-- **`#tooth` (`tooth_computeVcPoseidon2CommitFull_rejects_arity33`)**:
+    `computeVcPoseidon2CommitFull` accepts 32-attribute credentials (`MAX_VC_ATTRS = 32`) and
+    rejects empty (`0`) or oversized (`33`) attribute lists. -/
+theorem tooth_computeVcPoseidon2CommitFull_rejects_arity33 :
+    ∃ (sid : UInt64) (blind : Lane4),
+      (computeVcPoseidon2CommitFull sid (List.replicate 32 Goldilocks.one) blind vcAttrCommitTag).isSome = true ∧
+      computeVcPoseidon2CommitFull sid [] blind vcAttrCommitTag = none ∧
+      computeVcPoseidon2CommitFull sid (List.replicate 33 Goldilocks.one) blind vcAttrCommitTag = none := by
+  refine ⟨0, ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, ?_, rfl, rfl⟩
+  unfold computeVcPoseidon2CommitFull vcMaxAttrs
+  simp [List.length_replicate]
+
+/-- Framed preimage injectivity and domain-tag parity for `"QSAG.MLDSA.NONCE_BURN.V2"` and
+    `"QSAG.BLIND_VC.SD_LIMBO.V1"` (`C5 #6`). -/
+theorem mldsaNonceBurnPreimage_injective
+    {k₁ k₂ l₁ l₂ b₁ b₂ : List UInt8}
+    (hk₁ : k₁.length < 256 ^ 8) (hk₂ : k₂.length < 256 ^ 8)
+    (hl₁ : l₁.length < 256 ^ 8) (hl₂ : l₂.length < 256 ^ 8)
+    (hb₁ : b₁.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8)
+    (hEq : mldsaNonceBurnPreimage k₁ l₁ b₁ = mldsaNonceBurnPreimage k₂ l₂ b₂) :
+    k₁ = k₂ ∧ l₁ = l₂ ∧ b₁ = b₂ ∧
+    mldsaNonceBurnDomainTag = "QSAG.MLDSA.NONCE_BURN.V2".toUTF8.toList ∧
+    vcSdLimboDomainTag = "QSAG.BLIND_VC.SD_LIMBO.V1".toUTF8.toList := by
+  unfold mldsaNonceBurnPreimage at hEq
+  have hAll1 : ∀ f ∈ [k₁, l₁, b₁], f.length < 256 ^ 8 := by
+    intro f hf
+    rcases List.mem_cons.mp hf with rfl | h1
+    · exact hk₁
+    · rcases List.mem_cons.mp h1 with rfl | h2
+      · exact hl₁
+      · rcases List.mem_cons.mp h2 with rfl | h3
+        · exact hb₁
+        · cases h3
+  have hAll2 : ∀ g ∈ [k₂, l₂, b₂], g.length < 256 ^ 8 := by
+    intro g hg
+    rcases List.mem_cons.mp hg with rfl | h1
+    · exact hk₂
+    · rcases List.mem_cons.mp h1 with rfl | h2
+      · exact hl₂
+      · rcases List.mem_cons.mp h2 with rfl | h3
+        · exact hb₂
+        · cases h3
+  have hFrEq := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll1 hAll2 hEq
+  injection hFrEq with ek t1
+  injection t1 with el t2
+  injection t2 with eb _
+  exact ⟨ek, el, eb, by decide, by decide⟩
+
+/-! ## Shamir Threshold ML-DSA (`n ≤ 64`, `2t - 1 ≤ m ≤ 16`) Conversion & Byzantine Soundness (`C5 #6`) -/
+
+/-- Maximum custodian count for Shamir threshold ML-DSA (`MAX_THRESHOLD_MLDSA_PARTIES = 64`). -/
+def shamirMldsaMaxCustodians : Nat := 64
+
+/-- Maximum RSS signing-engine quorum size (`MAX_MPC_PARTIES = 16`). -/
+def shamirMldsaMaxQuorum : Nat := 16
+
+/-- Parameter validation matching `ThresholdMlDsaDkgConfig::validate_shamir` and
+    `threshold_sign_mldsa_party` (`threshold_mldsa_shamir.rs:77-88`, `threshold_mldsa.rs:2117-2125`):
+    `2 ≤ t`, `n ≤ 64`, `2t - 1 ≤ n`, and `2t - 1 ≤ m ≤ 16` (hence `t ≤ 8`). -/
+def shamirMldsaParamsValid (t n m : Nat) : Bool :=
+  decide (2 ≤ t) &&
+  decide (n ≤ shamirMldsaMaxCustodians) &&
+  decide (2 * t - 1 ≤ n) &&
+  decide (2 * t - 1 ≤ m) &&
+  decide (m ≤ shamirMldsaMaxQuorum)
+
+theorem shamirMldsaParamsValid_bounds {t n m : Nat}
+    (h : shamirMldsaParamsValid t n m = true) :
+    2 ≤ t ∧ t ≤ 8 ∧ n ≤ 64 ∧ 2 * t - 1 ≤ n ∧ 2 * t - 1 ≤ m ∧ m ≤ 16 := by
+  unfold shamirMldsaParamsValid shamirMldsaMaxCustodians shamirMldsaMaxQuorum at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+  refine ⟨h.1.1.1.1, by omega, h.1.1.1.2, h.1.1.2, h.1.2, h.2⟩
+
+private def polyAddCoeffs204 : List Fq204 → List Fq204 → List Fq204
+  | [], ds => ds
+  | cs, [] => cs
+  | c :: cs, d :: ds => Fq204.add c d :: polyAddCoeffs204 cs ds
+
+private theorem polyAddCoeffs204_length :
+    ∀ (cs ds : List Fq204), (polyAddCoeffs204 cs ds).length = Nat.max cs.length ds.length
+  | [], ds => by simp [polyAddCoeffs204]
+  | c :: cs, [] => by simp [polyAddCoeffs204]
+  | c :: cs, d :: ds => by
+    simp [polyAddCoeffs204, polyAddCoeffs204_length cs ds, Nat.succ_max_succ]
+
+private theorem evalCoeffs_polyAddCoeffs204 :
+    ∀ (cs ds : List Fq204) (x : Fq204),
+      RoundPoly.evalCoeffs (polyAddCoeffs204 cs ds) x =
+        Fq204.add (RoundPoly.evalCoeffs cs x) (RoundPoly.evalCoeffs ds x)
+  | [], ds, x => by
+    change RoundPoly.evalCoeffs ds x = Fq204.add Fq204.zero (RoundPoly.evalCoeffs ds x)
+    exact (Fq204.zero_add _).symm
+  | c :: cs, [], x => by
+    change RoundPoly.evalCoeffs (c :: cs) x = Fq204.add (RoundPoly.evalCoeffs (c :: cs) x) Fq204.zero
+    exact (Fq204.add_zero _).symm
+  | c :: cs, d :: ds, x => by
+    simp only [polyAddCoeffs204, RoundPoly.evalCoeffs_cons, evalCoeffs_polyAddCoeffs204 cs ds x]
+    change Fq204.add (Fq204.add c d)
+        (Fq204.mul x (Fq204.add (RoundPoly.evalCoeffs cs x) (RoundPoly.evalCoeffs ds x))) =
+      Fq204.add (Fq204.add c (Fq204.mul x (RoundPoly.evalCoeffs cs x)))
+        (Fq204.add d (Fq204.mul x (RoundPoly.evalCoeffs ds x)))
+    rw [Fq204.left_distrib, LawfulCommRing.add_add_add_comm]
+
+/-- Lagrange basis polynomial `L_{pt}(X) = (∏_{o ∈ nodes \ {pt}} (X - o)) · (∏_{o ∈ nodes \ {pt}} (pt - o))⁻¹`
+    over `Fq204` (`lagrange_weights`, `threshold_mldsa.rs:2027-2042`). -/
+def lagrangeBasisCoeffs204 (nodes : List Fq204) (pt : Fq204) : List Fq204 :=
+  let others := eraseFirst pt nodes
+  let denom := RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs others) pt
+  (RoundPoly.vanishingCoeffs others).map (Fq204.mul (Fq204.inv denom))
+
+def lagrangeWeightAt204 (nodes : List Fq204) (pt target : Fq204) : Fq204 :=
+  RoundPoly.evalCoeffs (lagrangeBasisCoeffs204 nodes pt) target
+
+/-- Lagrange weights mapping degree-`< nodes.length` evaluations at `nodes` to the evaluation at `target`
+    (`threshold_mldsa.rs:2027-2042`). -/
+def lagrangeWeightsFq204 (nodes : List Fq204) (target : Fq204) : List Fq204 :=
+  nodes.map (fun pt => lagrangeWeightAt204 nodes pt target)
+
+private theorem not_mem_eraseFirst_of_nodup {α : Type} [DecidableEq α] {x : α} :
+    ∀ {xs : List α}, xs.Nodup → x ∉ eraseFirst x xs
+  | [], _ => by simp [eraseFirst]
+  | y :: ys, .cons hnot hnd => by
+    unfold eraseFirst
+    if hxy : x = y then
+      subst hxy
+      simp only [↓reduceIte]
+      exact fun hm => hnot x hm rfl
+    else
+      simp only [hxy, ↓reduceIte, List.mem_cons]
+      rintro (rfl | hm)
+      · exact hxy rfl
+      · exact not_mem_eraseFirst_of_nodup hnd hm
+
+private theorem lagrangeWeightAt204_kron {nodes : List Fq204} (hNd : nodes.Nodup)
+    {pt y : Fq204} (hPt : pt ∈ nodes) (hY : y ∈ nodes) :
+    lagrangeWeightAt204 nodes pt y = if y = pt then Fq204.one else Fq204.zero := by
+  unfold lagrangeWeightAt204 lagrangeBasisCoeffs204
+  dsimp only
+  have hMap : ∀ (s : Fq204) (cs : List Fq204) (z : Fq204),
+      RoundPoly.evalCoeffs (cs.map (Fq204.mul s)) z = Fq204.mul s (RoundPoly.evalCoeffs cs z) :=
+    fun s cs z => RoundPoly.evalCoeffs_map_mul s cs z
+  rw [hMap]
+  if hyEq : y = pt then
+    subst hyEq
+    simp only [↓reduceIte]
+    have hNotMem : y ∉ eraseFirst y nodes := not_mem_eraseFirst_of_nodup hNd
+    have hDenNz : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirst y nodes)) y ≠
+        CommRingOps.zero :=
+      RoundPoly.evalCoeffs_vanishingCoeffs_ne_zero (by decide) _ y hNotMem
+    rw [Fq204.mul_comm, Fq204.mul_inv_cancel hDenNz]
+  else
+    simp only [hyEq, ↓reduceIte]
+    have hIn : y ∈ eraseFirst pt nodes := mem_eraseFirst_of_ne hyEq hY
+    have hVan : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirst pt nodes)) y =
+        CommRingOps.zero :=
+      RoundPoly.evalCoeffs_vanishingCoeffs_of_mem _ y hIn
+    rw [hVan]
+    exact Fq204.mul_zero _
+
+private def lagrangeInterpLoop204 (allNodes : List Fq204) : List Fq204 → List Fq204 → List Fq204
+  | [], _ => []
+  | _, [] => []
+  | pt :: ptsRest, sh :: shRest =>
+    polyAddCoeffs204 ((lagrangeBasisCoeffs204 allNodes pt).map (Fq204.mul sh))
+      (lagrangeInterpLoop204 allNodes ptsRest shRest)
+
+/-- Explicit degree-`< nodes.length` Lagrange interpolant over `Fq204`. -/
+def lagrangeInterpCoeffs204 (nodes shares : List Fq204) : List Fq204 :=
+  lagrangeInterpLoop204 nodes nodes shares
+
+private theorem lagrangeInterpLoop204_length_le (allNodes : List Fq204) :
+    ∀ (curNodes curShares : List Fq204),
+      (∀ pt ∈ curNodes, pt ∈ allNodes) →
+      (lagrangeInterpLoop204 allNodes curNodes curShares).length ≤ allNodes.length
+  | [], _, _ => Nat.zero_le _
+  | _ :: _, [], _ => Nat.zero_le _
+  | pt :: ptsRest, sh :: shRest, hSub => by
+    simp only [lagrangeInterpLoop204, polyAddCoeffs204_length, List.length_map]
+    have hBasisLen : (lagrangeBasisCoeffs204 allNodes pt).length = allNodes.length := by
+      unfold lagrangeBasisCoeffs204
+      simp only [List.length_map, RoundPoly.vanishingCoeffs_length]
+      exact eraseFirst_length_of_mem (hSub pt (.head _))
+    have ih := lagrangeInterpLoop204_length_le allNodes ptsRest shRest
+      (fun z hz => hSub z (.tail _ hz))
+    rw [hBasisLen]
+    exact Nat.max_le.mpr ⟨Nat.le_refl _, ih⟩
+
+private theorem lagrangeInterpLoop204_eval_eq_dot (allNodes : List Fq204) (target : Fq204) :
+    ∀ (curNodes curShares : List Fq204),
+      RoundPoly.evalCoeffs (lagrangeInterpLoop204 allNodes curNodes curShares) target =
+        ringDot (curNodes.map (fun pt => lagrangeWeightAt204 allNodes pt target)) curShares
+  | [], _ => by simp [lagrangeInterpLoop204, ringDot, dotVec]
+  | _ :: _, [] => by simp [lagrangeInterpLoop204, ringDot, dotVec]
+  | pt :: ptsRest, sh :: shRest => by
+    simp only [lagrangeInterpLoop204, List.map_cons, evalCoeffs_polyAddCoeffs204,
+      lagrangeInterpLoop204_eval_eq_dot allNodes target ptsRest shRest]
+    have hTerm : RoundPoly.evalCoeffs ((lagrangeBasisCoeffs204 allNodes pt).map (Fq204.mul sh)) target =
+        Fq204.mul (lagrangeWeightAt204 allNodes pt target) sh := by
+      have hMap := RoundPoly.evalCoeffs_map_mul sh (lagrangeBasisCoeffs204 allNodes pt) target
+      exact hMap.trans (Fq204.mul_comm sh _)
+    rw [hTerm]
+    rfl
+
+private theorem ringDot_kron_mem {allNodes : List Fq204} (hNd : allNodes.Nodup) :
+    ∀ {curNodes curShares : List Fq204},
+      curNodes.Nodup →
+      (∀ pt ∈ curNodes, pt ∈ allNodes) →
+      ∀ {p : Fq204 × Fq204},
+        p ∈ List.zip curNodes curShares →
+        ringDot (curNodes.map (fun pt => lagrangeWeightAt204 allNodes pt p.1)) curShares = p.2
+  | [], _, _, _, _, hp => nomatch hp
+  | _ :: _, [], _, _, _, hp => nomatch hp
+  | pt :: ptsRest, sh :: shRest, .cons hnot hndRest, hSub, ⟨x, y⟩, hp => by
+    have hZeroNotIn : ∀ {ns ss : List Fq204} {z : Fq204},
+        z ∈ allNodes →
+        (∀ q ∈ ns, q ∈ allNodes) →
+        (∀ q ∈ ns, z ≠ q) →
+        ringDot (ns.map (fun q => lagrangeWeightAt204 allNodes q z)) ss = Fq204.zero := by
+      intro ns
+      induction ns with
+      | nil => intro _ _ _ _ _; rfl
+      | cons q qs ihq =>
+        intro ss z hzIn hSubQ hNeQ
+        cases ss with
+        | nil => rfl
+        | cons s ss' =>
+          simp only [List.map_cons, ringDot, dotVec]
+          have hw0 : lagrangeWeightAt204 allNodes q z = Fq204.zero := by
+            rw [lagrangeWeightAt204_kron hNd (hSubQ q (.head _)) hzIn]
+            have hne : z ≠ q := hNeQ q (.head _)
+            simp [hne]
+          rw [hw0]
+          change Fq204.add (Fq204.mul Fq204.zero s)
+              (ringDot (qs.map (fun q' => lagrangeWeightAt204 allNodes q' z)) ss') = Fq204.zero
+          rw [Fq204.zero_mul, Fq204.zero_add]
+          exact ihq hzIn (fun q' hq' => hSubQ q' (.tail _ hq'))
+            (fun q' hq' => hNeQ q' (.tail _ hq'))
+    rcases List.mem_cons.mp hp with hHead | hTail
+    · cases hHead
+      dsimp only
+      simp only [List.map_cons, ringDot, dotVec]
+      have hw1 : lagrangeWeightAt204 allNodes pt pt = Fq204.one := by
+        rw [lagrangeWeightAt204_kron hNd (hSub pt (.head _)) (hSub pt (.head _))]
+        simp
+      rw [hw1]
+      change Fq204.add (Fq204.mul Fq204.one sh)
+          (ringDot (ptsRest.map (fun q => lagrangeWeightAt204 allNodes q pt)) shRest) = sh
+      rw [Fq204.one_mul,
+          hZeroNotIn (hSub pt (.head _)) (fun q hq => hSub q (.tail _ hq))
+            (fun q hq heq => hnot q hq heq),
+          Fq204.add_zero]
+    · dsimp only
+      simp only [List.map_cons, ringDot, dotVec]
+      have hxInRest : x ∈ ptsRest := by
+        have hFst := List.of_mem_zip hTail
+        exact hFst.1
+      have hxNePt : x ≠ pt := fun heq => hnot x hxInRest heq.symm
+      have hw0 : lagrangeWeightAt204 allNodes pt x = Fq204.zero := by
+        rw [lagrangeWeightAt204_kron hNd (hSub pt (.head _)) (hSub x (.tail _ hxInRest))]
+        simp [hxNePt]
+      rw [hw0]
+      change Fq204.add (Fq204.mul Fq204.zero sh)
+          (ringDot (ptsRest.map (fun q => lagrangeWeightAt204 allNodes q x)) shRest) = y
+      rw [Fq204.zero_mul, Fq204.zero_add]
+      exact ringDot_kron_mem hNd hndRest (fun q hq => hSub q (.tail _ hq)) hTail
+
+private theorem poly204_eq_of_agree_ge_t {t : Nat} (ht : 1 ≤ t)
+    {Q P S : List Fq204}
+    (hQLen : Q.length ≤ t) (hPLen : P.length ≤ t)
+    (hSNd : S.Nodup) (hSCard : t ≤ S.length)
+    (hAgree : ∀ x ∈ S, RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs P x)
+    (target : Fq204) :
+    RoundPoly.evalCoeffs Q target = RoundPoly.evalCoeffs P target := by
+  if hEq : RoundPoly.evalCoeffs Q target = RoundPoly.evalCoeffs P target then
+    exact hEq
+  else
+    exfalso
+    let diff := RoundPoly.subCoeffs Q P
+    have hDiffLen : diff.length ≤ (t - 1) + 1 := by
+      dsimp only [diff]
+      rw [RoundPoly.subCoeffs_length]
+      have hMax : Nat.max Q.length P.length ≤ t := Nat.max_le.mpr ⟨hQLen, hPLen⟩
+      omega
+    have hDiffTargetNz : RoundPoly.evalCoeffs diff target ≠ CommRingOps.zero := by
+      dsimp only [diff]
+      rw [RoundPoly.evalCoeffs_sub]
+      exact fun hz => hEq (LawfulCommRing.sub_eq_zero_iff.mp hz)
+    have hFiltEq : S.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)) = S := by
+      induction S with
+      | nil => rfl
+      | cons x xs ih =>
+        have hx0 : RoundPoly.evalCoeffs diff x = CommRingOps.zero := by
+          dsimp only [diff]
+          rw [RoundPoly.evalCoeffs_sub, hAgree x (.head _), LawfulCommRing.sub_self]
+        have hTlNd : xs.Nodup := (List.nodup_cons.mp hSNd).2
+        simp only [List.filter_cons, decide_eq_true hx0, ↓reduceIte]
+        exact congrArg (x :: ·) (ih hTlNd (by intro; omega) (fun y hy => hAgree y (.tail _ hy)))
+    have hRootsLe := RoundPoly.roots_nodup_length_le (t - 1) diff S hSNd hDiffLen ⟨target, hDiffTargetNz⟩
+    rw [hFiltEq] at hRootsLe
+    omega
+
+/-- Exact Shamir-to-additive signing session key conversion (`shamir_session_key`,
+    `threshold_mldsa.rs:2055-2085`): uses the first `t` quorum shares to define the degree-`< t`
+    interpolant, checks that all remaining `m - t` quorum shares vanish against their Lagrange
+    predictions (`KeyShareInconsistent` otherwise), and returns the `t` additive shares
+    `λ_i(0) · share_i` summing to `P(0)`. -/
+def shamirSessionKeyConvert (t : Nat) (pts shares : List Fq204) : Option (List Fq204) :=
+  if decide (1 ≤ t ∧ t ≤ pts.length ∧ pts.length = shares.length) then
+    let ptsBase := pts.take t
+    let sharesBase := shares.take t
+    let extraPairs := (List.zip pts shares).drop t
+    let checksOk := extraPairs.all (fun ps =>
+      decide (Fq204.sub ps.2 (ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase) = Fq204.zero))
+    if checksOk then
+      some (List.zipWith Fq204.mul (lagrangeWeightsFq204 ptsBase Fq204.zero) sharesBase)
+    else
+      none
+  else
+    none
+
+private theorem sum_zipWith_mul_eq_ringDot :
+    ∀ (ws ss : List Fq204),
+      (List.zipWith Fq204.mul ws ss).foldr Fq204.add Fq204.zero = ringDot ws ss
+  | [], _ => rfl
+  | _ :: _, [] => rfl
+  | w :: ws, s :: ss => by
+    simp only [List.zipWith_cons_cons, List.foldr_cons, ringDot, dotVec]
+    exact congrArg (Fq204.add (Fq204.mul w s)) (sum_zipWith_mul_eq_ringDot ws ss)
+
+private theorem nodup_take_of_nodup {α : Type} :
+    ∀ (k : Nat) {xs : List α}, xs.Nodup → (xs.take k).Nodup
+  | 0, _, _ => .nil
+  | _ + 1, [], _ => .nil
+  | k + 1, _ :: xs, .cons hnot hnd =>
+    .cons (fun z hz => hnot z (List.mem_of_mem_take hz)) (nodup_take_of_nodup k hnd)
+
+/-- **Shamir Threshold ML-DSA Conversion Completeness (`shamirSessionKey_complete`, `C5 #6`)**:
+    For any valid parameter tuple `(t, n, m)` (`n ≤ 64`, `2t - 1 ≤ m ≤ 16`), distinct quorum
+    evaluation points `pts` of size `m`, and degree-`< t` secret polynomial `coeffs`,
+    honest Shamir shares `pts.map (RoundPoly.evalCoeffs coeffs)` pass all `m - t` syndrome checks
+    and convert into additive shares whose sum equals the exact secret `RoundPoly.evalCoeffs coeffs 0`. -/
+theorem shamirSessionKey_complete {t n m : Nat}
+    (hParams : shamirMldsaParamsValid t n m = true)
+    (pts coeffs : List Fq204)
+    (hPtsNd : pts.Nodup) (hPtsLen : pts.length = m)
+    (hDeg : coeffs.length ≤ t) :
+    let shares := pts.map (RoundPoly.evalCoeffs coeffs)
+    ∃ additiveShares : List Fq204,
+      shamirSessionKeyConvert t pts shares = some additiveShares ∧
+      additiveShares.length = t ∧
+      additiveShares.foldr Fq204.add Fq204.zero = RoundPoly.evalCoeffs coeffs Fq204.zero := by
+  obtain ⟨ht2, _, _, _, hmLo, _⟩ := shamirMldsaParamsValid_bounds hParams
+  have ht1 : 1 ≤ t := by omega
+  have htLe : t ≤ pts.length := by omega
+  let shares := pts.map (RoundPoly.evalCoeffs coeffs)
+  have hShLen : pts.length = shares.length := (List.length_map _).symm
+  let ptsBase := pts.take t
+  let sharesBase := shares.take t
+  have hBaseNd : ptsBase.Nodup := nodup_take_of_nodup t hPtsNd
+  have hBaseLen : ptsBase.length = t := List.length_take_of_le htLe
+  have hShBaseEq : sharesBase = ptsBase.map (RoundPoly.evalCoeffs coeffs) := by
+    dsimp only [sharesBase, shares, ptsBase]
+    exact List.take_map
+  let Q := lagrangeInterpCoeffs204 ptsBase sharesBase
+  have hQLen : Q.length ≤ t := by
+    have hL := lagrangeInterpLoop204_length_le ptsBase ptsBase sharesBase (fun _ h => h)
+    rwa [hBaseLen] at hL
+  have hQAgreeBase : ∀ x ∈ ptsBase, RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs coeffs x := by
+    intro x hx
+    have hPairMem : (x, RoundPoly.evalCoeffs coeffs x) ∈ List.zip ptsBase sharesBase := by
+      rw [hShBaseEq]
+      induction ptsBase with
+      | nil => nomatch hx
+      | cons p ps ih =>
+        rcases List.mem_cons.mp hx with rfl | hTl
+        · exact .head _
+        · exact .tail _ (ih hTl)
+    have hEvalDot := lagrangeInterpLoop204_eval_eq_dot ptsBase x ptsBase sharesBase
+    have hKron := ringDot_kron_mem hBaseNd hBaseNd (fun _ h => h) hPairMem
+    exact hEvalDot.trans hKron
+  have hQEqAll : ∀ target : Fq204, RoundPoly.evalCoeffs Q target = RoundPoly.evalCoeffs coeffs target :=
+    poly204_eq_of_agree_ge_t ht1 hQLen hDeg hBaseNd (Nat.le_of_eq hBaseLen.symm) hQAgreeBase
+  have hChecksOk : ((List.zip pts shares).drop t).all (fun ps =>
+      decide (Fq204.sub ps.2 (ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase) = Fq204.zero)) = true := by
+    apply List.all_eq_true.mpr
+    intro ps hps
+    have hInZip : ps ∈ List.zip pts shares := List.mem_of_mem_drop hps
+    have hPs2 : ps.2 = RoundPoly.evalCoeffs coeffs ps.1 := by
+      dsimp only [shares] at hInZip
+      have hZipMap : ∀ xs : List Fq204, ∀ p ∈ List.zip xs (xs.map (RoundPoly.evalCoeffs coeffs)),
+          p.2 = RoundPoly.evalCoeffs coeffs p.1 := by
+        intro xs
+        induction xs with
+        | nil => intro _ hp; nomatch hp
+        | cons a as iha =>
+          intro p hp
+          rcases List.mem_cons.mp hp with rfl | hTl
+          · rfl
+          · exact iha p hTl
+      exact hZipMap pts ps hInZip
+    apply decide_eq_true
+    have hDot : ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase = RoundPoly.evalCoeffs Q ps.1 :=
+      (lagrangeInterpLoop204_eval_eq_dot ptsBase ps.1 ptsBase sharesBase).symm
+    rw [hDot, hQEqAll ps.1, hPs2, fq204_sub_self]
+  let out := List.zipWith Fq204.mul (lagrangeWeightsFq204 ptsBase Fq204.zero) sharesBase
+  refine ⟨out, ?_, ?_, ?_⟩
+  · unfold shamirSessionKeyConvert
+    have hGuard : decide (1 ≤ t ∧ t ≤ pts.length ∧ pts.length = shares.length) = true :=
+      decide_eq_true ⟨ht1, htLe, hShLen⟩
+    rw [hGuard]
+    dsimp only
+    rw [hChecksOk]
+    rfl
+  · dsimp only [out, lagrangeWeightsFq204, sharesBase]
+    rw [List.length_zipWith, List.length_map, hBaseLen, List.length_take_of_le (by omega), Nat.min_self]
+  · dsimp only [out]
+    rw [sum_zipWith_mul_eq_ringDot]
+    have hDot0 : ringDot (lagrangeWeightsFq204 ptsBase Fq204.zero) sharesBase =
+        RoundPoly.evalCoeffs Q Fq204.zero :=
+      (lagrangeInterpLoop204_eval_eq_dot ptsBase Fq204.zero ptsBase sharesBase).symm
+    rw [hDot0, hQEqAll Fq204.zero]
+
+private theorem filter_partition_length {α : Type} (p : α → Bool) :
+    ∀ xs : List α, (xs.filter p).length + (xs.filter (fun x => !p x)).length = xs.length
+  | [] => rfl
+  | x :: xs => by
+    have ih := filter_partition_length p xs
+    cases hpx : p x <;> simp [List.filter_cons, hpx] <;> omega
+
+private theorem zip_take_eq {α β : Type} :
+    ∀ (k : Nat) (xs : List α) (ys : List β),
+      (List.zip xs ys).take k = List.zip (xs.take k) (ys.take k)
+  | 0, _, _ => rfl
+  | _ + 1, [], _ => rfl
+  | _ + 1, _ :: _, [] => rfl
+  | k + 1, x :: xs, y :: ys => congrArg ((x, y) :: ·) (zip_take_eq k xs ys)
+
+private theorem nodup_map_fst_of_sublist {α β : Type} (p : α × β → Bool) :
+    ∀ {xs : List α} {ys : List β},
+      xs.Nodup → (((List.zip xs ys).filter p).map Prod.fst).Nodup
+  | [], _, _ => .nil
+  | _ :: _, [], _ => .nil
+  | x :: xs, y :: ys, .cons hnot hnd => by
+    simp only [List.zip_cons_cons, List.filter_cons]
+    cases p (x, y) with
+    | false => exact nodup_map_fst_of_sublist p hnd
+    | true =>
+      simp only [↓reduceIte, List.map_cons]
+      refine .cons ?_ (nodup_map_fst_of_sublist p hnd)
+      intro z hz
+      obtain ⟨pair, hMemFilt, rfl⟩ := List.mem_map.mp hz
+      have hInZip := (List.mem_filter.mp hMemFilt).1
+      exact hnot pair.1 (List.of_mem_zip hInZip).1
+
+/-- **Shamir Threshold ML-DSA Byzantine Conversion Soundness (`shamirSessionKey_byzantine_sound`, `C5 #6`)**:
+    For any valid `(t, n, m)` (`n ≤ 64`, `2t - 1 ≤ m ≤ 16`), distinct quorum points `pts` of size `m`,
+    degree-`< t` secret polynomial `coeffs`, and submitted quorum shares `shares` with **at most `t - 1`
+    corrupt shares**, if `shamirSessionKeyConvert t pts shares = some additiveShares`, then the
+    converted additive shares sum to the **exact** secret `RoundPoly.evalCoeffs coeffs 0`! -/
+theorem shamirSessionKey_byzantine_sound {t n m : Nat}
+    (hParams : shamirMldsaParamsValid t n m = true)
+    {pts coeffs shares additiveShares : List Fq204}
+    (hPtsNd : pts.Nodup) (hPtsLen : pts.length = m) (hShLen : shares.length = m)
+    (hDeg : coeffs.length ≤ t)
+    (hCorruptLe :
+      ((List.zip pts shares).filter
+        (fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1))).length ≤ t - 1)
+    (hConv : shamirSessionKeyConvert t pts shares = some additiveShares) :
+    additiveShares.foldr Fq204.add Fq204.zero = RoundPoly.evalCoeffs coeffs Fq204.zero := by
+  obtain ⟨ht2, _, _, _, hmLo, _⟩ := shamirMldsaParamsValid_bounds hParams
+  have ht1 : 1 ≤ t := by omega
+  have htLe : t ≤ pts.length := by omega
+  unfold shamirSessionKeyConvert at hConv
+  have hGuard : decide (1 ≤ t ∧ t ≤ pts.length ∧ pts.length = shares.length) = true :=
+    decide_eq_true ⟨ht1, htLe, hPtsLen.trans hShLen.symm⟩
+  rw [hGuard] at hConv
+  dsimp only at hConv
+  let ptsBase := pts.take t
+  let sharesBase := shares.take t
+  let extraPairs := (List.zip pts shares).drop t
+  cases hChecks : extraPairs.all (fun ps =>
+      decide (Fq204.sub ps.2 (ringDot (lagrangeWeightsFq204 ptsBase ps.1) sharesBase) = Fq204.zero)) with
+  | false => rw [hChecks] at hConv; cases hConv
+  | true =>
+    rw [hChecks] at hConv
+    simp only [↓reduceIte, Option.some.injEq] at hConv
+    subst hConv
+    have hBaseNd : ptsBase.Nodup := nodup_take_of_nodup t hPtsNd
+    have hBaseLen : ptsBase.length = t := List.length_take_of_le htLe
+    let Q := lagrangeInterpCoeffs204 ptsBase sharesBase
+    have hQLen : Q.length ≤ t := by
+      have hL := lagrangeInterpLoop204_length_le ptsBase ptsBase sharesBase (fun _ h => h)
+      rwa [hBaseLen] at hL
+    have hPairOnQ : ∀ ps ∈ List.zip pts shares, RoundPoly.evalCoeffs Q ps.1 = ps.2 := by
+      intro ps hMem
+      rw [← List.take_append_drop t (List.zip pts shares)] at hMem
+      rcases List.mem_append.mp hMem with hInTake | hInDrop
+      · rw [zip_take_eq t pts shares] at hInTake
+        have hEval := lagrangeInterpLoop204_eval_eq_dot ptsBase ps.1 ptsBase sharesBase
+        have hKron := ringDot_kron_mem hBaseNd hBaseNd (fun _ h => h) hInTake
+        exact hEval.trans hKron
+      · have hChk := of_decide_eq_true (List.all_eq_true.mp hChecks ps hInDrop)
+        have hEqDot := fq204_eq_of_sub_eq_zero hChk
+        have hEval := lagrangeInterpLoop204_eval_eq_dot ptsBase ps.1 ptsBase sharesBase
+        exact hEval.trans hEqDot.symm
+    let isBad : Fq204 × Fq204 → Bool := fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1)
+    let honestPairs := (List.zip pts shares).filter (fun ps => !isBad ps)
+    have hZipLen : (List.zip pts shares).length = m := by
+      rw [List.length_zip, hPtsLen, hShLen, Nat.min_self]
+    have hPart := filter_partition_length isBad (List.zip pts shares)
+    have hHonestLen : t ≤ honestPairs.length := by
+      dsimp only [honestPairs, isBad] at hPart ⊢
+      omega
+    let honestPts := honestPairs.map Prod.fst
+    have hHonestPtsNd : honestPts.Nodup := nodup_map_fst_of_sublist (fun ps => !isBad ps) hPtsNd
+    have hHonestPtsLen : t ≤ honestPts.length := by
+      dsimp only [honestPts]; rwa [List.length_map]
+    have hAgreeHonest : ∀ x ∈ honestPts,
+        RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs coeffs x := by
+      intro x hx
+      obtain ⟨ps, hpsMem, rfl⟩ := List.mem_map.mp hx
+      obtain ⟨hInZip, hNotBad⟩ := List.mem_filter.mp hpsMem
+      have hGood : ps.2 = RoundPoly.evalCoeffs coeffs ps.1 := by
+        dsimp only [isBad] at hNotBad
+        if hEq : ps.2 = RoundPoly.evalCoeffs coeffs ps.1 then
+          exact hEq
+        else
+          simp [hEq] at hNotBad
+      exact (hPairOnQ ps hInZip).trans hGood
+    have hAt0 := poly204_eq_of_agree_ge_t ht1 hQLen hDeg hHonestPtsNd hHonestPtsLen hAgreeHonest Fq204.zero
+    rw [sum_zipWith_mul_eq_ringDot]
+    exact (lagrangeInterpLoop204_eval_eq_dot ptsBase Fq204.zero ptsBase sharesBase).symm.trans hAt0
+
+/-- **`#tooth` (`tooth_shamirSessionKey_corrupt_threshold_forges`)**:
+    When `t` custodians are corrupt (violating `≤ t - 1`, or when `m = t` omits the `m - t`
+    syndrome checks), a forged degree-`< t` share vector passes `shamirSessionKeyConvert` while
+    reconstructing a forged secret `≠ RoundPoly.evalCoeffs coeffs 0`! -/
+theorem tooth_shamirSessionKey_corrupt_threshold_forges :
+    ∃ (pts coeffs forgedShares out : List Fq204),
+      shamirMldsaParamsValid 2 64 3 = true ∧
+      pts.Nodup ∧ pts.length = 3 ∧ forgedShares.length = 3 ∧ coeffs.length ≤ 2 ∧
+      shamirSessionKeyConvert 2 pts forgedShares = some out ∧
+      out.foldr Fq204.add Fq204.zero ≠ RoundPoly.evalCoeffs coeffs Fq204.zero := by
+  let pts : List Fq204 := [Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3]
+  let coeffs : List Fq204 := [Fq204.zero, Fq204.zero]
+  -- Forged linear polynomial `f(X) = 3 - X` agrees with `coeffs = 0` at `X = 3` (`1` honest party,
+  -- `2 = t` corrupt parties at `X = 1, 2`) and reconstructs `f(0) = 3 ≠ 0`!
+  let forgedPoly : List Fq204 := [Fq204.ofNat 3, Fq204.neg Fq204.one]
+  let forgedShares : List Fq204 := pts.map (RoundPoly.evalCoeffs forgedPoly)
+  obtain ⟨out, hConv, _, hSum⟩ :=
+    shamirSessionKey_complete (t := 2) (n := 64) (m := 3) (by decide) pts forgedPoly
+      (.cons (fun x hx heq => by subst heq; revert hx; decide)
+        (.cons (fun x hx heq => by subst heq; revert hx; decide)
+          (.cons (fun _ h => nomatch h) .nil)))
+      rfl (by decide)
+  refine ⟨pts, coeffs, forgedShares, out, by decide,
+    .cons (fun x hx heq => by subst heq; revert hx; decide)
+      (.cons (fun x hx heq => by subst heq; revert hx; decide)
+        (.cons (fun _ h => nomatch h) .nil)),
+    rfl, rfl, by decide, hConv, ?_⟩
+  rw [hSum]
+  decide
+
+theorem inhabited_shamirSessionKey_byzantine_sound :
+    ∃ (t n m : Nat) (pts coeffs shares additiveShares : List Fq204),
+      shamirMldsaParamsValid t n m = true ∧
+      pts.Nodup ∧ pts.length = m ∧ shares.length = m ∧ coeffs.length ≤ t ∧
+      ((List.zip pts shares).filter
+        (fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1))).length ≤ t - 1 ∧
+      shamirSessionKeyConvert t pts shares = some additiveShares := by
+  let pts : List Fq204 := [Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3]
+  let coeffs : List Fq204 := [Fq204.ofNat 42, Fq204.ofNat 7]
+  let shares : List Fq204 := pts.map (RoundPoly.evalCoeffs coeffs)
+  have hNd : pts.Nodup :=
+    .cons (fun x hx heq => by subst heq; revert hx; decide)
+      (.cons (fun x hx heq => by subst heq; revert hx; decide)
+        (.cons (fun _ h => nomatch h) .nil))
+  obtain ⟨out, hConv, _, _⟩ :=
+    shamirSessionKey_complete (t := 2) (n := 64) (m := 3) (by decide) pts coeffs hNd rfl (by decide)
+  exact ⟨2, 64, 3, pts, coeffs, shares, out, by decide, hNd, rfl, rfl, by decide, by decide, hConv⟩
+
+#verify_constructive
+  computeVcPoseidon2CommitFull_eq_small
+  computeVcPoseidon2CommitFull_arity32_binding
+  mldsaNonceBurnPreimage_injective
+  shamirSessionKey_complete
+  shamirSessionKey_byzantine_sound
+
+#tooth_pair computeVcPoseidon2CommitFull_arity32_binding vs tooth_computeVcPoseidon2CommitFull_rejects_arity33
+#tooth_pair shamirSessionKey_byzantine_sound vs tooth_shamirSessionKey_corrupt_threshold_forges
+#verify_inhabited shamirSessionKey_byzantine_sound inhabited_shamirSessionKey_byzantine_sound
+
+/-! ## Exports for `SacrificeFreezeSample` ↔ `rssSacrificedSignStep` Bridge (`L-Ex-15`) -/
+
+/-- All multiplication sacrifice gates in one `RssSacrificeTranscript204`. -/
+def rssTranscriptAllGates204 (T : RssSacrificeTranscript204) : List SacGate204 :=
+  (List.finRange 4).flatMap (fun i => T.cs1 i ++ T.cs2 i ++ T.ct0 i)
+
+theorem ext6Zero_eq : ext6Zero =
+    ⟨Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero⟩ := rfl
+
+theorem ext6Sub_eq (x y : Ext6Fq204) : ext6Sub x y =
+    ⟨Fq204.sub x.a0 y.a0, Fq204.sub x.a1 y.a1, Fq204.sub x.a2 y.a2,
+     Fq204.sub x.a3 y.a3, Fq204.sub x.a4 y.a4, Fq204.sub x.a5 y.a5⟩ := rfl
+
+theorem ext6Scale_eq (x : Ext6Fq204) (s : Fq204) : ext6Scale x s =
+    ⟨Fq204.mul x.a0 s, Fq204.mul x.a1 s, Fq204.mul x.a2 s,
+     Fq204.mul x.a3 s, Fq204.mul x.a4 s, Fq204.mul x.a5 s⟩ := rfl
+
+theorem sacTripleError204_eq (g : SacGate204) :
+    sacTripleError204 g = ext6Sub g.c (ext6Scale g.a g.b) := rfl
+
+theorem sacAccept204_iff_tau_eq (chi : Ext6Fq204) (g : SacGate204) :
+    sacAccept204 chi g = true ↔
+      ext6Sub (ext6Scale chi (sacGateError204 g)) (sacTripleError204 g) = ext6Zero := by
+  unfold sacAccept204 sacVerdict204
+  rw [sacOpen204_tau, decide_eq_true_eq]
+
+private theorem exists_bad_gate_of_binds_and_poly_ne
+    {gs : List SacGate204} {x y z : Poly256}
+    (hBinds : sacBinds204 gs x y z = true)
+    (hPolyNe : z ≠ negacyclicMul x y) :
+    ∃ g ∈ gs, sacGateError204 g ≠ Fq204.zero := by
+  have hNotAll : ¬ (∀ g ∈ gs, sacGateError204 g = Fq204.zero) := by
+    intro hAllZero
+    apply hPolyNe
+    have hSlots : gs.map sacGateOperands204 = nttSlots204 x y z := of_decide_eq_true hBinds
+    apply fips204Ntt_injective
+    rw [fips204Ntt_negacyclicMul]
+    refine (pointwiseMul_of_slots204 _ _ _ ?_).symm
+    intro m hm
+    have hm' : m ∈ gs.map sacGateOperands204 := by rw [hSlots]; exact hm
+    obtain ⟨g, hg, rfl⟩ := List.mem_map.mp hm'
+    exact fq204_eq_of_sub_eq_zero (hAllZero g hg)
+  have hFind : ∀ (xs : List SacGate204),
+      ¬ (∀ g ∈ xs, sacGateError204 g = Fq204.zero) →
+      ∃ g ∈ xs, sacGateError204 g ≠ Fq204.zero := by
+    intro xs
+    induction xs with
+    | nil => intro h; exact False.elim (h (fun _ hm => nomatch hm))
+    | cons g rest ih =>
+      intro h
+      if hg0 : sacGateError204 g = Fq204.zero then
+        have hRest : ¬ (∀ g' ∈ rest, sacGateError204 g' = Fq204.zero) := by
+          intro hAllR
+          apply h
+          intro g' hm
+          rcases List.mem_cons.mp hm with rfl | hIn
+          · exact hg0
+          · exact hAllR g' hIn
+        obtain ⟨g', hg'In, hg'Nz⟩ := ih hRest
+        exact ⟨g', .tail _ hg'In, hg'Nz⟩
+      else
+        exact ⟨g, .head _, hg0⟩
+  exact hFind gs hNotAll
+
+private theorem find_diff_fin4 {p q : PolyVec4} (hNe : p ≠ q) :
+    ∃ i : Fin 4, p i ≠ q i := by
+  if h0 : p ⟨0, by decide⟩ = q ⟨0, by decide⟩ then
+    if h1 : p ⟨1, by decide⟩ = q ⟨1, by decide⟩ then
+      if h2 : p ⟨2, by decide⟩ = q ⟨2, by decide⟩ then
+        if h3 : p ⟨3, by decide⟩ = q ⟨3, by decide⟩ then
+          exfalso
+          apply hNe
+          funext ⟨idx, hidx⟩
+          have hCases : idx = 0 ∨ idx = 1 ∨ idx = 2 ∨ idx = 3 := by omega
+          rcases hCases with rfl | rfl | rfl | rfl
+          · exact h0
+          · exact h1
+          · exact h2
+          · exact h3
+        else exact ⟨⟨3, by decide⟩, h3⟩
+      else exact ⟨⟨2, by decide⟩, h2⟩
+    else exact ⟨⟨1, by decide⟩, h1⟩
+  else exact ⟨⟨0, by decide⟩, h0⟩
+
+/-- **Challenge-Independent Forged-Gate Extraction (`rssSacrificedProductsValid_forged_exists_bad_gate`, `L-Ex-15`)**:
+    Whenever `inp.products ≠ rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets`,
+    EITHER `rssSacrificedProductsValid` rejects **every** challenge `chi : Ext6Fq204` (`= false`),
+    OR there exists a **fixed** gate `g ∈ rssTranscriptAllGates204 T` (independent of `chi`!) with
+    `sacGateError204 g ≠ 0` such that every accepted challenge `chi` satisfies BOTH
+    `sacAccept204 chi g = true` AND `chi = sacBadChallenge204 g`! -/
+theorem rssSacrificedProductsValid_forged_exists_bad_gate
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (T : RssSacrificeTranscript204)
+    (hForged : inp.products ≠ rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets) :
+    (∀ chi : Ext6Fq204, rssSacrificedProductsValid chalHash sampleInBall st inp chi T = false) ∨
+    ∃ g ∈ rssTranscriptAllGates204 T,
+      sacGateError204 g ≠ Fq204.zero ∧
+      (∀ chi : Ext6Fq204,
+        rssSacrificedProductsValid chalHash sampleInBall st inp chi T = true →
+        sacAccept204 chi g = true ∧ chi = sacBadChallenge204 g) ∧
+      (∀ chi : Ext6Fq204,
+        rssSacrificedProductsValid chalHash sampleInBall st inp chi T = true →
+        ∀ g' ∈ rssTranscriptAllGates204 T, sacAccept204 chi g' = true) := by
+  let wExp := matVecMul4 st.A (rssSumVec4List inp.ySubsets)
+  let cPoly := sampleInBall (chalHash inp.mu (highBitsVec4 wExp))
+  let s1 := rssSumVec4List st.s1Subsets
+  let s2 := rssSumVec4List st.s2Subsets
+  let t0 := power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2)
+  have hAllGatesAcc : ∀ chi : Ext6Fq204,
+      rssSacrificedProductsValid chalHash sampleInBall st inp chi T = true →
+      ∀ g' ∈ rssTranscriptAllGates204 T, sacAccept204 chi g' = true := by
+    intro chi hVal g' hg'
+    unfold rssSacrificedProductsValid at hVal
+    simp only [Bool.and_eq_true] at hVal
+    obtain ⟨⟨⟨_, hc1⟩, hc2⟩, hc3⟩ := hVal
+    obtain ⟨i, _, hInI⟩ := List.mem_flatMap.mp hg'
+    rcases List.mem_append.mp hInI with hIn12 | hIn3
+    · rcases List.mem_append.mp hIn12 with hIn1 | hIn2
+      · have hOk := fin4All204_true hc1 i
+        unfold sacProductOk204 sacAcceptAll204 at hOk
+        simp only [Bool.and_eq_true] at hOk
+        exact List.all_eq_true.mp hOk.2 g' hIn1
+      · have hOk := fin4All204_true hc2 i
+        unfold sacProductOk204 sacAcceptAll204 at hOk
+        simp only [Bool.and_eq_true] at hOk
+        exact List.all_eq_true.mp hOk.2 g' hIn2
+    · have hOk := fin4All204_true hc3 i
+      unfold sacProductOk204 sacAcceptAll204 at hOk
+      simp only [Bool.and_eq_true] at hOk
+      exact List.all_eq_true.mp hOk.2 g' hIn3
+  if hw : polyVec4EqBool inp.products.w wExp = true then
+    if hb1 : fin4All204 (fun i => sacBinds204 (T.cs1 i) cPoly (s1 i) (inp.products.cs1 i)) = true then
+      if hb2 : fin4All204 (fun i => sacBinds204 (T.cs2 i) cPoly (s2 i) (inp.products.cs2 i)) = true then
+        if hb3 : fin4All204 (fun i => sacBinds204 (T.ct0 i) cPoly (t0 i) (inp.products.ct0 i)) = true then
+          have hDiff : inp.products.cs1 ≠ mulPolyVec4 cPoly s1 ∨
+              inp.products.cs2 ≠ mulPolyVec4 cPoly s2 ∨
+              inp.products.ct0 ≠ mulPolyVec4 cPoly t0 := by
+            if he1 : polyVec4EqBool inp.products.cs1 (mulPolyVec4 cPoly s1) = true then
+              if he2 : polyVec4EqBool inp.products.cs2 (mulPolyVec4 cPoly s2) = true then
+                if he3 : polyVec4EqBool inp.products.ct0 (mulPolyVec4 cPoly t0) = true then
+                  exfalso
+                  apply hForged
+                  apply (rssProductsValid_eq_true_iff chalHash sampleInBall st inp).mp
+                  unfold rssProductsValid
+                  simp only [Bool.and_eq_true]
+                  exact ⟨⟨⟨hw, he1⟩, he2⟩, he3⟩
+                else
+                  exact Or.inr (Or.inr (fun h => by
+                    rw [(polyVec4EqBool_eq_true_iff _ _).mpr h] at he3; exact he3 rfl))
+              else
+                exact Or.inr (Or.inl (fun h => by
+                  rw [(polyVec4EqBool_eq_true_iff _ _).mpr h] at he2; exact he2 rfl))
+            else
+              exact Or.inl (fun h => by
+                rw [(polyVec4EqBool_eq_true_iff _ _).mpr h] at he1; exact he1 rfl)
+          have hBadGate : ∃ g ∈ rssTranscriptAllGates204 T, sacGateError204 g ≠ Fq204.zero := by
+            rcases hDiff with hNe1 | hNe2 | hNe3
+            · obtain ⟨i, hiNe⟩ := find_diff_fin4 hNe1
+              obtain ⟨g, hgIn, hgNz⟩ :=
+                exists_bad_gate_of_binds_and_poly_ne (fin4All204_true hb1 i) hiNe
+              exact ⟨g, List.mem_flatMap.mpr ⟨i, List.mem_finRange i,
+                List.mem_append_left _ (List.mem_append_left _ hgIn)⟩, hgNz⟩
+            · obtain ⟨i, hiNe⟩ := find_diff_fin4 hNe2
+              obtain ⟨g, hgIn, hgNz⟩ :=
+                exists_bad_gate_of_binds_and_poly_ne (fin4All204_true hb2 i) hiNe
+              exact ⟨g, List.mem_flatMap.mpr ⟨i, List.mem_finRange i,
+                List.mem_append_left _ (List.mem_append_right _ hgIn)⟩, hgNz⟩
+            · obtain ⟨i, hiNe⟩ := find_diff_fin4 hNe3
+              obtain ⟨g, hgIn, hgNz⟩ :=
+                exists_bad_gate_of_binds_and_poly_ne (fin4All204_true hb3 i) hiNe
+              exact ⟨g, List.mem_flatMap.mpr ⟨i, List.mem_finRange i,
+                List.mem_append_right _ hgIn⟩, hgNz⟩
+          obtain ⟨g, hgMem, hgNz⟩ := hBadGate
+          refine Or.inr ⟨g, hgMem, hgNz, ?_, hAllGatesAcc⟩
+          intro chi hVal
+          have hAccG := hAllGatesAcc chi hVal g hgMem
+          rcases sacAccept204_sound hAccG with hMulEq | hChiBad
+          · exfalso
+            apply hgNz
+            unfold sacGateError204
+            rw [hMulEq, fq204_sub_self]
+          · exact ⟨hAccG, hChiBad⟩
+        else
+          refine Or.inl (fun chi => ?_)
+          cases hv : rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
+          | false => rfl
+          | true =>
+            exfalso; apply hb3
+            unfold rssSacrificedProductsValid at hv
+            simp only [Bool.and_eq_true] at hv
+            apply fin4All204_of_forall; intro i
+            have hOk := fin4All204_true hv.2 i
+            unfold sacProductOk204 at hOk
+            exact (Bool.and_eq_true _ _).mp hOk |>.1
+      else
+        refine Or.inl (fun chi => ?_)
+        cases hv : rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
+        | false => rfl
+        | true =>
+          exfalso; apply hb2
+          unfold rssSacrificedProductsValid at hv
+          simp only [Bool.and_eq_true] at hv
+          apply fin4All204_of_forall; intro i
+          have hOk := fin4All204_true hv.1.2 i
+          unfold sacProductOk204 at hOk
+          exact (Bool.and_eq_true _ _).mp hOk |>.1
+    else
+      refine Or.inl (fun chi => ?_)
+      cases hv : rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
+      | false => rfl
+      | true =>
+        exfalso; apply hb1
+        unfold rssSacrificedProductsValid at hv
+        simp only [Bool.and_eq_true] at hv
+        apply fin4All204_of_forall; intro i
+        have hOk := fin4All204_true hv.1.1.2 i
+        unfold sacProductOk204 at hOk
+        exact (Bool.and_eq_true _ _).mp hOk |>.1
+  else
+    refine Or.inl (fun chi => ?_)
+    cases hv : rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
+    | false => rfl
+    | true =>
+      exfalso; apply hw
+      unfold rssSacrificedProductsValid at hv
+      simp only [Bool.and_eq_true] at hv
+      exact hv.1.1.1
+
+/-- Fitted gate list for an arbitrary claimed polynomial `z` when the sacrifice challenge `chi`
+    is revealed before freezing the transcript (`L-Ex-15` swapped-order `#tooth` support). -/
+def sacFittedGates204 (chi : Ext6Fq204) (x y z : Poly256) : List SacGate204 :=
+  (nttSlots204 x y z).map (fun m =>
+    { x := m.1
+      y := m.2.1
+      z := m.2.2
+      a := ext6Zero
+      b := Fq204.zero
+      c := ext6Scale chi (Fq204.sub m.2.2 (Fq204.mul m.1 m.2.1)) })
+
+private theorem map_operands_fitted204 (chi : Ext6Fq204) :
+    ∀ ms : List (Fq204 × Fq204 × Fq204),
+      (ms.map (fun m =>
+        ({ x := m.1, y := m.2.1, z := m.2.2, a := ext6Zero, b := Fq204.zero,
+           c := ext6Scale chi (Fq204.sub m.2.2 (Fq204.mul m.1 m.2.1)) } : SacGate204))).map
+        sacGateOperands204 = ms
+  | [] => rfl
+  | m :: ms => by
+    rw [List.map_cons, List.map_cons, map_operands_fitted204 chi ms]
+    rfl
+
+private theorem sacFittedGates204_ok (chi : Ext6Fq204) (x y z : Poly256) :
+    sacProductOk204 chi (sacFittedGates204 chi x y z) x y z = true := by
+  unfold sacProductOk204
+  rw [Bool.and_eq_true]
+  refine ⟨decide_eq_true (map_operands_fitted204 chi _), ?_⟩
+  unfold sacAcceptAll204 sacFittedGates204
+  rw [List.all_eq_true]
+  intro g hg
+  obtain ⟨m, _, rfl⟩ := List.mem_map.mp hg
+  rw [sacAccept204_iff_tau_eq, sacGateError204, sacTripleError204]
+  dsimp only
+  rw [ext6_sub_sub_self]
+  decide
+
+/-- Swapped-order fitted sacrifice transcript for any claimed `inp.products` when `chi` is
+    sampled before freezing `T` (`L-Ex-15`). -/
+def rssFittedSacrifice204
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (chi : Ext6Fq204) : RssSacrificeTranscript204 :=
+  let cPoly := sampleInBall (chalHash inp.mu
+    (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inp.ySubsets))))
+  let s1 := rssSumVec4List st.s1Subsets
+  let s2 := rssSumVec4List st.s2Subsets
+  let t0 := power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2)
+  { cs1 := fun i => sacFittedGates204 chi cPoly (s1 i) (inp.products.cs1 i)
+    cs2 := fun i => sacFittedGates204 chi cPoly (s2 i) (inp.products.cs2 i)
+    ct0 := fun i => sacFittedGates204 chi cPoly (t0 i) (inp.products.ct0 i) }
+
+theorem rssSacrificedProductsValid_fitted_accepts
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (chi : Ext6Fq204)
+    (hw : inp.products.w = matVecMul4 st.A (rssSumVec4List inp.ySubsets)) :
+    rssSacrificedProductsValid chalHash sampleInBall st inp chi
+      (rssFittedSacrifice204 chalHash sampleInBall st inp chi) = true := by
+  unfold rssSacrificedProductsValid rssFittedSacrifice204
+  dsimp only
+  simp only [Bool.and_eq_true, polyVec4EqBool_eq_true_iff]
+  exact ⟨⟨⟨hw,
+    fin4All204_of_forall (fun i => sacFittedGates204_ok chi _ _ _)⟩,
+    fin4All204_of_forall (fun i => sacFittedGates204_ok chi _ _ _)⟩,
+    fin4All204_of_forall (fun i => sacFittedGates204_ok chi _ _ _)⟩
+
+#verify_constructive
+  rssSacrificedProductsValid_forged_exists_bad_gate
+  rssSacrificedProductsValid_fitted_accepts
 
 -- (end exports for lane cred-mig)
 
