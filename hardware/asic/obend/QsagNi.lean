@@ -1,18 +1,18 @@
 /-
 QSAG-NI Formal Hardware & Algebraic Specifications in Obend (`Obend.Hardware.HDL` + `Obend.Hardware.YosysLec`).
 
-1. Proves (`0 sorry`, `0 axiom`, `0 Classical.choice`, verified via `#print axioms`) the core algebraic
+1. Proves (`0 sorry`, `0 sorryAx`, `0 custom axiom`, verified via `#print axioms`) the core algebraic
    and hardware-evaluation (`evalModuleOutputs`) theorems of the QSAG-NI silicon datapath:
    - Goldilocks (`p = 2^64 - 2^32 + 1`) epsilon & 96-bit carry-save folding congruences
-     (`2^64 ≡ 2^32 - 1 (mod p)`, `2^96 ≡ -1 (mod p)`), 1-bit complement negation identity,
-     and `mulSpec_sound` (`evalModuleOutputs mulSpec` computes canonical `(a * b) mod p`).
+     (`2^64 ≡ 2^32 - 1 (mod p)`, `2^96 ≡ -1 (mod p)` via `(2^32 + 1) · p = 2^96 + 1`),
+     1-bit complement negation identity, and `mulSpec_sound` (`evalModuleOutputs mulSpec`).
    - Poseidon2 `M_4` 7-addition butterfly expansion to `circ(2, 3, 1, 1)` AND constructive
-     integer/modular invertibility (`M_4 · adj(M_4) = 28 · I_4`, `gcd(28, p) = 1`, injectivity mod `p`).
+     integer/modular invertibility (`M_4_inv · M_4 = 35 · I_4`, `35 * inv35 ≡ 1 (mod p)`).
    - Poseidon2 `M_E` 12×12 Kronecker circulant factorization `(I_3 + J_3) ⊗ M_4` AND constructive
-     12-lane invertibility (`M_E · adj(M_E) = 112 · I_12`, `gcd(112, p) = 1`).
+     12-lane invertibility (`(4 I_3 - J_3)(I_3 + J_3) = 4 · I_3`, `140 * inv140 ≡ 1 (mod p)`).
    - Poseidon2 `M_I = J_12 + diag(-64, 1, 2, 4, ..., 1024)` hardware partial-round split identity
      (decoupling `s_tail = ∑_{j=1..11} x_j` from lane-0 `x_0^7`) AND Sherman–Morrison determinant
-     non-vanishing (`det_num = 3055`, `gcd(3055, p) = 1`).
+     non-vanishing (`det_num = 3055`, `3055 * inv3055 ≡ 1 (mod p)`).
    - 9-product Tower Karatsuba `GoldilocksExt4` equivalence to 16-product schoolbook multiplication
      over `𝔽_p[v]/(v^4 - 7)` in limb order `[1, u, v, u·v]` (`u = v^2`, `u^2 = 7`), over both `ℤ`
      and `ℤ/pℤ`.
@@ -49,16 +49,16 @@ theorem goldilocks_pow64_fold_int (k : Int) :
     rw [h64, Int.mul_add]
   rw [h, Int.add_mul_emod_self_right]
 
-/-- Fundamental Goldilocks 96-bit fold congruence: `2^96 + 1 = 2^32 · p`, hence `2^96 ≡ -1 (mod p)`. -/
+/-- Fundamental Goldilocks 96-bit fold congruence: `2^96 + 1 = (2^32 + 1) · p`, hence `2^96 ≡ -1 (mod p)`. -/
 theorem goldilocks_pow96_fold_int (k : Int) :
     (k * (2 ^ 96 : Int)) % glPrimeInt = (-k) % glPrimeInt := by
-  have h96 : (2 ^ 96 : Int) = -1 + (2 ^ 32 : Int) * glPrimeInt := by decide
-  have h : k * (2 ^ 96 : Int) = -k + (k * (2 ^ 32 : Int)) * glPrimeInt := by
+  have h96 : (2 ^ 96 : Int) = -1 + ((2 ^ 32 : Int) + 1) * glPrimeInt := by decide
+  have h : k * (2 ^ 96 : Int) = -k + (k * ((2 ^ 32 : Int) + 1)) * glPrimeInt := by
     rw [h96, Int.mul_add, Int.mul_neg, Int.mul_one, Int.mul_assoc]
   rw [h, Int.add_mul_emod_self_right]
 
 /-- 1-bit complement identity used by `csagen.py` for negative terms:
-`-(b · 2^w) = (1 - b) · 2^w - 2^w` for every bit `b ∈ {0, 1}` and weight `W = 2^w`. -/
+`-(b · W) = (1 - b) · W - W` for every bit `b` and weight `W = 2^w`. -/
 theorem csa_neg_bit_complement_id (b W : Int) :
     -(b * W) = (1 - b) * W - W := by
   rw [Int.sub_mul, Int.one_mul]
@@ -68,7 +68,7 @@ theorem csa_neg_bit_complement_id (b W : Int) :
 theorem tooth_pow96_sign_flip_refuted :
     ((1 : Int) * (2 ^ 96 : Int)) % glPrimeInt ≠ (1 : Int) % glPrimeInt := by decide
 
-/-! ### Poseidon2 `M_4` Butterfly & Constructive Invertibility -/
+/-! ### Poseidon2 `M_4` Butterfly & Constructive Invertibility (`det(M_4) = -35`) -/
 
 /-- The 7-addition `M_4` butterfly structure implemented in `m4` and `qsag_p2_m4`. -/
 def m4ButterflyInt (b0 b1 b2 b3 : Int) : Int × Int × Int × Int :=
@@ -90,34 +90,36 @@ def m4MatrixInt (b0 b1 b2 b3 : Int) : Int × Int × Int × Int :=
 /-- The 7-addition `M_4` butterfly equals `circ(2, 3, 1, 1)` identically over `ℤ`. -/
 theorem m4_butterfly_eq_circulant (b0 b1 b2 b3 : Int) :
     m4ButterflyInt b0 b1 b2 b3 = m4MatrixInt b0 b1 b2 b3 := by
-  unfold m4ButterflyInt m4MatrixInt
-  ext <;> omega
+  dsimp only [m4ButterflyInt, m4MatrixInt]
+  simp only [Prod.mk.injEq]
+  exact ⟨by omega, by omega, by omega, by omega⟩
 
-/-- Explicit integer adjugate `adj(M_4) = circ(5, -7, 1, 5)` such that `adj(M_4) · M_4 = 28 · I_4`. -/
-def m4AdjugateInt (y0 y1 y2 y3 : Int) : Int × Int × Int × Int :=
-  ( 5 * y0 - 7 * y1 +     y2 + 5 * y3,
-    5 * y0 + 5 * y1 - 7 * y2 +     y3,
-        y0 + 5 * y1 + 5 * y2 - 7 * y3,
-   -7 * y0 +     y1 + 5 * y2 + 5 * y3)
+/-- Explicit integer scaled inverse `circ(-4, 3, -11, 17)` such that `M4_inv35 · M_4 = 35 · I_4`. -/
+def m4ScaledInv35Int (y0 y1 y2 y3 : Int) : Int × Int × Int × Int :=
+  (-4 * y0 +  3 * y1 - 11 * y2 + 17 * y3,
+   17 * y0 -  4 * y1 +  3 * y2 - 11 * y3,
+  -11 * y0 + 17 * y1 -  4 * y2 +  3 * y3,
+    3 * y0 - 11 * y1 + 17 * y2 -  4 * y3)
 
-/-- Exact integer invertibility certificate: `adj(M_4) (M_4 (b)) = 28 · b` for all `b ∈ ℤ^4`. -/
+/-- Exact integer invertibility certificate: `m4ScaledInv35Int (M_4 (b)) = 35 · b` for all `b ∈ ℤ^4`. -/
 theorem m4_adjugate_left_inv (b0 b1 b2 b3 : Int) :
     let (y0, y1, y2, y3) := m4ButterflyInt b0 b1 b2 b3
-    m4AdjugateInt y0 y1 y2 y3 = (28 * b0, 28 * b1, 28 * b2, 28 * b3) := by
-  unfold m4ButterflyInt m4AdjugateInt
-  ext <;> omega
+    m4ScaledInv35Int y0 y1 y2 y3 = (35 * b0, 35 * b1, 35 * b2, 35 * b3) := by
+  dsimp only [m4ButterflyInt, m4ScaledInv35Int]
+  simp only [Prod.mk.injEq]
+  exact ⟨by omega, by omega, by omega, by omega⟩
 
-/-- `28` is coprime to the Goldilocks prime (`28 * inv28 ≡ 1 (mod p)`). -/
-def inv28ModP : Int := 17787931781221206310
+/-- `35` is coprime to the Goldilocks prime (`35 * inv35ModP ≡ 1 (mod p)`). -/
+def inv35ModP : Int := 15284445086086369866
 
-theorem inv28_mul_mod_p : (28 * inv28ModP) % glPrimeInt = 1 := by decide
+theorem inv35_mul_mod_p : (35 * inv35ModP) % glPrimeInt = 1 := by decide
 
 /-- `#tooth` mutation witness: swapping `2` and `3` on `b1` breaks `m4_butterfly_eq_circulant`. -/
 theorem tooth_m4_weight_swap_refuted :
     let (y0, _, _, _) := m4ButterflyInt 0 1 0 0
     y0 ≠ 2 * 0 + 2 * 1 + 0 + 0 := by decide
 
-/-! ### Poseidon2 `M_E` 12×12 Kronecker Circulant & `112 · I_12` Invertibility -/
+/-! ### Poseidon2 `M_E` 12×12 Kronecker Circulant & `140 · I_12` Invertibility -/
 
 /-- Outer 3-block circulant `circ(2, 1, 1) = I_3 + J_3` applied per column `i`. -/
 def meOuterColInt (y0 y1 y2 : Int) : Int × Int × Int :=
@@ -132,18 +134,18 @@ def meOuterColAdjInt (z0 z1 z2 : Int) : Int × Int × Int :=
 theorem me_outer_col_adj_inv (y0 y1 y2 : Int) :
     let (z0, z1, z2) := meOuterColInt y0 y1 y2
     meOuterColAdjInt z0 z1 z2 = (4 * y0, 4 * y1, 4 * y2) := by
-  unfold meOuterColInt meOuterColAdjInt
-  ext <;> omega
+  dsimp only [meOuterColInt, meOuterColAdjInt]
+  simp only [Prod.mk.injEq]
+  exact ⟨by omega, by omega, by omega⟩
 
-/-- Full 12-lane `M_E` Kronecker composition has exact determinant factor `4 * 28 = 112`,
-and `112` has an explicit modular inverse modulo `goldilocksPrime`. -/
-def inv112ModP : Int := 4446982945305301578
+/-- Full 12-lane `M_E` Kronecker composition has exact scale factor `4 * 35 = 140`,
+and `140` has an explicit modular inverse modulo `goldilocksPrime`. -/
+def inv140ModP : Int := 13044483306228884627
 
-theorem inv112_mul_mod_p : (112 * inv112ModP) % glPrimeInt = 1 := by decide
+theorem inv140_mul_mod_p : (140 * inv140ModP) % glPrimeInt = 1 := by decide
 
 /-! ### Poseidon2 `M_I` Partial-Round Split Identity & Sherman–Morrison Non-Singularity -/
 
-/-- Full `M_I + rc` specification on lane `0` and lanes `1..11`. -/
 def miFullLane0Int (x0 sTail rc0 : Int) : Int :=
   (x0 + sTail) - 64 * x0 + rc0
 
@@ -156,8 +158,6 @@ def miFullLanePosInt (x0 xl diagL sTail rcl : Int) : Int :=
 def miSplitLanePosInt (x0 xl diagL sTail rcl : Int) : Int :=
   sTail + rcl + x0 + diagL * xl
 
-/-- Proves that pre-accumulating `sTail = ∑_{j=1..11} x_j` during partial-round cycles `P1..P3`
-and applying `qsag_p2_mi_lane0..11` in `PM` is algebraically identical to full `M_I + rc`. -/
 theorem mi_partial_split_lane0_eq (x0 sTail rc0 : Int) :
     miSplitLane0Int x0 sTail rc0 = miFullLane0Int x0 sTail rc0 := by
   unfold miSplitLane0Int miFullLane0Int
@@ -168,13 +168,12 @@ theorem mi_partial_split_lanePos_eq (x0 xl diagL sTail rcl : Int) :
   unfold miSplitLanePosInt miFullLanePosInt
   omega
 
-/-- Sherman–Morrison determinant factor of `M_I = J_12 + diag(-64, 1, 2, 4, ..., 1024)`:
-scaled by `1024`, `1024 · (1 - 1/64 + ∑_{k=0..10} 2^{-k}) = 1024 - 16 + 2047 = 3055`,
-which is invertible modulo `goldilocksPrime` (`gcd(3055, p) = 1`). -/
-def inv3055ModP : Int := 16085432844577954051
+/-- Sherman–Morrison determinant numerator of `M_I = J_12 + diag(-64, 1, 2, 4, ..., 1024)`:
+`1024 · (1 - 1/64 + ∑_{k=0..10} 2^{-k}) = 1024 - 16 + 2047 = 3055`, invertible mod `p`. -/
+def inv3055ModP : Int := 10802365021336396514
 
 theorem mi_sherman_morrison_unit :
-    (1024 - 16 + (1024 + 512 + 256 + 128 + 64 + 32 + 16 + 8 + 4 + 2 + 1) = 3055) ∧
+    ((1024 : Int) - 16 + (1024 + 512 + 256 + 128 + 64 + 32 + 16 + 8 + 4 + 2 + 1) = 3055) ∧
     (3055 * inv3055ModP) % glPrimeInt = 1 := by decide
 
 /-! ### 9-Product Tower Karatsuba `GoldilocksExt4` Equivalence Theorem -/
@@ -216,7 +215,7 @@ schoolbook `Ext4` multiply-add identically over `ℤ` (and hence modulo `goldilo
 theorem ext4_karatsuba_eq_schoolbook (a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 : Int) :
     ext4KaratsubaInt a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 =
     ext4SchoolbookInt a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 := by
-  unfold ext4KaratsubaInt ext4SchoolbookInt
+  dsimp only [ext4KaratsubaInt, ext4SchoolbookInt]
   have h2 := bilin2 a0 a1 b0 b1
   have h5 := bilin2 a2 a3 b2 b3
   have h6 := bilin2 a0 a2 b0 b2
@@ -228,7 +227,8 @@ theorem ext4_karatsuba_eq_schoolbook (a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 : Int)
     rw [bilin2 (a0 + a1) (a2 + a3) (b0 + b1) (b2 + b3),
         bilin2 a0 a1 b2 b3, bilin2 a2 a3 b0 b1]
     omega
-  ext <;> omega
+  simp only [Prod.mk.injEq]
+  exact ⟨by omega, by omega, by omega, by omega⟩
 
 /-- Modular corollary over `𝔽_p^4`: every limb of 9-product Karatsuba mod `p` equals schoolbook mod `p`. -/
 theorem ext4_karatsuba_mod_p_eq (a0 a1 a2 a3 b0 b1 b2 b3 z0 z1 z2 z3 : Int) :
@@ -379,21 +379,18 @@ def miSpec : RtlModule := mkModule "qsag_ni_p2_mi_spec" (names "x" 12 ++ names "
 
 /-- Karatsuba 9-product linear reconstruction combiner (specification for `qsag_ext4_kara_combine`). -/
 def karaCombineWires (p : Array RtlExpr) (z : Array RtlExpr) : WireM (Array RtlExpr) := do
-  -- r0 = p0 + 7*(p1 + p5 - p3 - p4) + z0
   let p15 ← glAdd "k_p15" p[1]! p[5]!
   let p34 ← glAdd "k_p34" p[3]! p[4]!
   let d0  ← glSub "k_d0"  p15 p34
   let d07 ← glMul7 "k_d07" d0
   let r0a ← glAdd "k_r0a" p[0]! d07
   let r0  ← glAdd "k_r0"  r0a z[0]!
-  -- r1 = (p2 - p0) + (p3 - p1) + 7*p4 + z1
   let d1a ← glSub "k_d1a" p[2]! p[0]!
   let d1b ← glSub "k_d1b" p[3]! p[1]!
   let p47 ← glMul7 "k_p47" p[4]!
   let r1a ← glAdd "k_r1a" d1a d1b
   let r1b ← glAdd "k_r1b" r1a p47
   let r1  ← glAdd "k_r1"  r1b z[1]!
-  -- r2 = (p6 - p0 - p3) + 7*(p7 - p1 - p4) + z2
   let d2a ← glSub "k_d2a" p[6]! p[0]!
   let d2b ← glSub "k_d2b" d2a p[3]!
   let p14 ← glAdd "k_p14" p[1]! p[4]!
@@ -401,7 +398,6 @@ def karaCombineWires (p : Array RtlExpr) (z : Array RtlExpr) : WireM (Array RtlE
   let d27 ← glMul7 "k_d27" d2c
   let r2a ← glAdd "k_r2a" d2b d27
   let r2  ← glAdd "k_r2"  r2a z[2]!
-  -- r3 = (p0 + p1 - p2) + (p3 + p4 - p5) + (p8 - p6 - p7) + z3
   let p01 ← glAdd "k_p01" p[0]! p[1]!
   let t3a ← glSub "k_t3a" p01 p[2]!
   let t3b ← glSub "k_t3b" p34 p[5]!
@@ -448,7 +444,7 @@ def all : List RtlModule := [
 
 end QsagNi
 
--- Kernel axiom hygiene verification (must print ONLY standard Prop axioms, 0 sorryAx, 0 Classical.choice):
+-- Kernel axiom hygiene verification (`0 sorryAx` everywhere; algebraic theorems depend ONLY on propext/Quot.sound):
 #print axioms QsagNi.goldilocks_pow64_fold_int
 #print axioms QsagNi.goldilocks_pow96_fold_int
 #print axioms QsagNi.m4_butterfly_eq_circulant
