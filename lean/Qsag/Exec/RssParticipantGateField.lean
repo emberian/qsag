@@ -1,10 +1,8 @@
 module
 public import Qsag.Exec.RssParticipantGateChecks
 public import Qsag.Math.Gf2Pow128
-import all Qsag.Exec.RssParticipantGateChecks
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
-import all Qsag.Protocol.Threshold.Rss256TernaryRound
+public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
+public import Qsag.Protocol.Threshold.Rss256TernaryRound
 import Qsag.Tactic.AssuranceKit
 
 /-! Polynomial-basis adapter for the actual `keccak_mpc.rs` final product check.

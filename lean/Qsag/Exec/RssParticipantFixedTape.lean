@@ -1,7 +1,6 @@
 module
 public import Qsag.Exec.RssParticipantPassiveSimulation
-import all Qsag.Exec.RssParticipantPassiveSimulation
-import all Qsag.Protocol.Aggregation.UcGames
+public import Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 /-! The passive coupling preserves the finite tape length. This restricts the
