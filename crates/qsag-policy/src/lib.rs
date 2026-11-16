@@ -1053,6 +1053,8 @@ pub struct AuthorizedSignReleaseToken {
     policy_digest: [u8; 32],
     intent_digest: [u8; 32],
     intent: TransactionIntent,
+    // A per-party token must never fan out again.
+    quorum_split: bool,
 }
 
 /// Run one committed sigma opening round through the extracted single-use guard. Each item
@@ -1085,7 +1087,10 @@ impl AuthorizedSignReleaseToken {
         intent_digest: [u8; 32],
         intent: TransactionIntent,
     ) -> Result<Self, PolicyViolation> {
-        if !ct_eq_bytes(&permit.session_id(), &session_id) {
+        if intent.quorum_ids.is_empty()
+            || !intent.quorum_ids.windows(2).all(|w| w[0] < w[1])
+            || !ct_eq_bytes(&permit.session_id(), &session_id)
+        {
             return Err(PolicyViolation::BarrierBdozMacFailed);
         }
         Ok(Self {
@@ -1093,6 +1098,7 @@ impl AuthorizedSignReleaseToken {
             policy_digest,
             intent_digest,
             intent,
+            quorum_split: false,
         })
     }
 
@@ -1129,16 +1135,21 @@ impl AuthorizedSignReleaseToken {
     }
     /// Split one in-process quorum release token into exactly one linear per-signer token
     /// for each approved party in `self.intent.quorum_ids`, consuming `self`.
+    /// Calling this on an already split token returns only that token.
     pub fn into_quorum_party_tokens(self) -> Vec<Self> {
         let count = self.intent.quorum_ids.len();
-        if count == 0 {
+        if count == 0 || !self.intent.quorum_ids.windows(2).all(|w| w[0] < w[1]) {
             return Vec::new();
+        }
+        if self.quorum_split {
+            return alloc::vec![self];
         }
         let Self {
             session_id,
             policy_digest,
             intent_digest,
             intent,
+            quorum_split: _,
         } = self;
         let mut out = Vec::with_capacity(count);
         for _ in 1..count {
@@ -1147,6 +1158,7 @@ impl AuthorizedSignReleaseToken {
                 policy_digest,
                 intent_digest,
                 intent: intent.clone(),
+                quorum_split: true,
             });
         }
         out.push(Self {
@@ -1154,6 +1166,7 @@ impl AuthorizedSignReleaseToken {
             policy_digest,
             intent_digest,
             intent,
+            quorum_split: true,
         });
         out
     }
@@ -5509,6 +5522,23 @@ mod tests {
 mod cleanup_tests {
     use super::*;
     #[test]
+    fn malformed_quorums_never_fan_out() {
+        let (policy, intent) = super::tests::phase_fixture(&[1, 2]);
+        for ids in [alloc::vec![], alloc::vec![1, 1], alloc::vec![2, 1]] {
+            let mut intent = intent.clone();
+            intent.quorum_ids = ids;
+            let token = AuthorizedSignReleaseToken {
+                session_id: intent.session_id,
+                policy_digest: policy.canonical_digest(),
+                intent_digest: [0; 32],
+                intent,
+                quorum_split: false,
+            };
+            assert!(token.into_quorum_party_tokens().is_empty());
+        }
+    }
+
+    #[test]
     fn cust06_staging_pool_isolates_unauthenticated_spam_and_enforces_self_mac() {
         let recipient = QsagAddress::from_pubkey_cshake256(
             "qsp",
@@ -5749,6 +5779,12 @@ mod cleanup_tests {
             .unwrap();
         let party_tokens = release.into_quorum_party_tokens();
         assert_eq!(party_tokens.len(), 2);
+        // Splitting a child again cannot multiply a successful barrier's releases.
+        for token in party_tokens {
+            let mut tokens = token.into_quorum_party_tokens();
+            assert_eq!(tokens.len(), 1);
+            assert_eq!(tokens.pop().unwrap().into_quorum_party_tokens().len(), 1);
+        }
 
         // 2. Ephemeral Compact1122 PqBiscuit 2-hop delegation chain + PoP seal gates BDOZ barrier!
         let dp = qsag_fts::FrontierDpTable::build(qsag_fts::FrontierFtsProfile::Compact1122);

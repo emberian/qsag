@@ -385,7 +385,6 @@ impl SpongeMacaroon {
         let identifier = bytes[11..43].try_into().map_err(|_| bad)?;
         let audience = bytes[43..75].try_into().map_err(|_| bad)?;
         let end = bytes.len() - 32;
-        let tag = bytes[end..].try_into().map_err(|_| bad)?;
         let mut pos = 75;
         let mut caveats = Vec::with_capacity(count);
         for _ in 0..count {
@@ -424,7 +423,7 @@ impl SpongeMacaroon {
             identifier,
             audience,
             caveats,
-            tag,
+            tag: bytes[end..].try_into().map_err(|_| bad)?,
         })
     }
 }
