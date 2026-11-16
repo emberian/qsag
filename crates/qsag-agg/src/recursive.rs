@@ -2705,7 +2705,7 @@ impl SuccinctFullShardAggregate {
             }
             signer_counts.push(c);
         }
-        let proof = FullShardMergeProof::from_bytes(relation, regime, bytes.get(counts_end..)?)?;
+        let proof = FullShardMergeProof::from_bytes(bytes.get(counts_end..)?, relation, regime)?;
         Some(Self {
             signer_counts,
             proof,

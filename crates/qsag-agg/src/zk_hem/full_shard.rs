@@ -1052,7 +1052,7 @@ impl RecursiveShardProof {
         for _ in 0..NUM_TRACE_COLS {
             col_evals.push(take_e()?);
         }
-        let opening = FixedPathWhirProof::from_bytes(&params.whir, bytes.get(pos..)?)?;
+        let opening = FixedPathWhirProof::from_bytes(bytes.get(pos..)?, &params.whir)?;
         let out = Self {
             commitment,
             row_sumcheck_polys,
