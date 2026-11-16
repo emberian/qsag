@@ -108,6 +108,69 @@ impl Backend for Native {
         v
     }
 }
+/// Row census of a gadget: counts what [`ConstraintSystem`] would emit, without storing it.
+/// `rows` are multiplication rows; each permutation adds one 128-row aligned block.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counter {
+    pub(crate) perms: usize,
+    pub(crate) rows: usize,
+    pub(crate) vars: usize,
+    /// `(permutations, multiplication rows)` by the section named by [`census`].
+    pub(crate) sections: alloc::collections::BTreeMap<&'static str, (usize, usize)>,
+}
+#[cfg(test)]
+std::thread_local! {
+    static CENSUS_SECTION: core::cell::Cell<&'static str> = const { core::cell::Cell::new("") };
+}
+/// Name the verifier section the following rows belong to (a census label, test builds only).
+#[inline(always)]
+pub(crate) fn census(_section: &'static str) {
+    #[cfg(test)]
+    CENSUS_SECTION.with(|s| s.set(_section));
+}
+#[cfg(test)]
+impl Counter {
+    pub(crate) fn total_rows(&self) -> usize {
+        128 * self.perms + self.rows
+    }
+    fn tally(&mut self, perms: usize, rows: usize) {
+        self.perms += perms;
+        self.rows += rows;
+        let entry = self
+            .sections
+            .entry(CENSUS_SECTION.with(core::cell::Cell::get))
+            .or_default();
+        entry.0 += perms;
+        entry.1 += rows;
+    }
+}
+#[cfg(test)]
+impl Backend for Counter {
+    type W = F;
+    fn alloc(&mut self, v: F) -> F {
+        self.vars += 1;
+        v
+    }
+    fn value(&self, v: &F) -> F {
+        *v
+    }
+    fn mul(&mut self, a: &F, b: &F) -> F {
+        self.tally(0, 1);
+        self.vars += 1;
+        a.const_mul(*b)
+    }
+    fn equal(&mut self, _a: &F, _b: &F) {
+        self.tally(0, 1);
+    }
+    fn product(&mut self, _a: &F, _b: &F, _c: &F) {
+        self.tally(0, 1);
+    }
+    fn perm(&mut self, s: &mut [F; 12]) {
+        self.tally(1, 0);
+        poseidon2_perm12(s);
+    }
+}
 /// Execute the same gadget in field arithmetic, recording every allocated wire
 /// in synthesis order. In particular `pin` allocates and each permutation records
 /// all 118 S-box outputs. The compiled Shape still checks the whole assignment.
@@ -2250,6 +2313,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
     expected_claims: &[[Option<Ext<B::W>>; 3]; 3],
     proof: &Correlated3WhirProof,
 ) {
+    census("open.head");
     let nv = params.num_vars().expect("validated parameters");
     let geos = params.geometries();
     let cross_w: [[Ext<B::W>; 3]; 3] =
@@ -2326,6 +2390,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
     let mut phis = Vec::new();
     for (stage, spec) in params.schedule.stages.iter().enumerate() {
         let mut chals = Vec::with_capacity(spec.step_vars);
+        census("open.fold_rounds");
         for _ in 0..spec.step_vars {
             let wire = proof.fold_polys[cursor].map(|v| Ext::alloc(b, v));
             tr.absorb_exts(b, 10, &wire[..3]);
@@ -2353,7 +2418,9 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
                 .map(|&v| Ext::alloc(b, v))
                 .collect();
             tr.absorb_exts(b, 21, &values);
+            census("open.terminal");
             let expected = terminal(b, &values, &phis, &kernels);
+            census("open.fold_rounds");
             claim.equal(b, &expected);
             values
         } else {
@@ -2374,6 +2441,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
         let path_depth = groups.trailing_zeros() as usize;
         let domain_log2 = (groups * arity).trailing_zeros() as usize;
         let mut shifted = Vec::with_capacity(count);
+        census("open.sampler");
         let sampled = sample_queries(b, tr, groups, count);
         if stage == 0 {
             let mut canopies: [Canopy<B::W>; 3] = core::array::from_fn(|_| Canopy::new(path_depth));
@@ -2386,9 +2454,11 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
                         .map(|&v| Ext::alloc_base(b, v))
                         .collect()
                 });
+                census("open.stage0.paths");
                 for m in 0..3 {
                     canopies[m].path(b, 0, &index, &binary, &tree_vals[m], &triple[m].siblings);
                 }
+                census("open.stage0.combine");
                 let combined: Vec<Ext<B::W>> = (0..arity)
                     .map(|k| {
                         let t1 = mu.mul_base(b, &tree_vals[1][k].0[0]);
@@ -2396,6 +2466,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
                         tree_vals[0][k].add(&t1).add(&t2)
                     })
                     .collect();
+                census("open.stage0.fold");
                 let x = coset_point(b, &binary, domain_log2);
                 let (z, e) = fold_fiber(b, &combined, x, &chals, false);
                 if last {
@@ -2404,6 +2475,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
                 }
                 shifted.push((z, e));
             }
+            census("open.canopy");
             let [c0, c1, c2] = canopies;
             c0.finish(b, 0, &proof.stage0_canopy_leaves[0], &roots0[0]);
             c1.finish(b, 0, &proof.stage0_canopy_leaves[1], &roots0[1]);
@@ -2411,9 +2483,11 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
         } else {
             let mut canopy = Canopy::new(path_depth);
             for (q, (index, binary)) in sampled.into_iter().enumerate() {
+                census("open.later.paths");
                 let query = &proof.later_queries[stage - 1][q];
                 let values: Vec<_> = query.values.iter().map(|&v| Ext::alloc(b, v)).collect();
                 canopy.path(b, stage, &index, &binary, &values, &query.siblings);
+                census("open.later.fold");
                 let x = coset_point(b, &binary, domain_log2);
                 let (z, e) = fold_fiber(b, &values, x, &chals, false);
                 if last {
@@ -2422,6 +2496,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
                 }
                 shifted.push((z, e));
             }
+            census("open.canopy");
             canopy.finish(
                 b,
                 stage,
@@ -2429,6 +2504,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
                 &later_roots[stage - 1],
             );
         }
+        census("open.kernels");
         if !last {
             let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
             tr.absorb_exts(b, 22, &values);
