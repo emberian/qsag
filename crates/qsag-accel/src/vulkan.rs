@@ -1069,11 +1069,14 @@ impl VulkanSpirvBackend {
     pub fn build_merkle_tree_poseidon2_2block(
         &self,
         leaves: &[[u64; 4]],
-        addr: &Poseidon2Merkle2BlockAddr,
+        domain_tag: u64,
+        pk_seed: &[u64; 4],
+        layer: u32,
+        tree_idx: u64,
         base_level: u32,
     ) -> Result<[u64; 4], VulkanError> {
         ntt_log2_len("Merkle tree leaves", leaves.len())?;
-        if addr.layer > 0xFFFE {
+        if layer > 0xFFFE {
             return Err(AccelError::LengthOverflow.into());
         }
         let h = leaves.len().trailing_zeros();
@@ -1103,10 +1106,10 @@ impl VulkanSpirvBackend {
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
             let root = guard.exec_merkle_full_tree_2block(
                 leaves,
-                addr.domain_tag,
-                &addr.pk_seed,
-                addr.layer,
-                addr.tree_idx,
+                domain_tag,
+                pk_seed,
+                layer,
+                tree_idx,
                 base_level,
             )?;
             if leaves.len() > 1 {
@@ -1120,7 +1123,7 @@ impl VulkanSpirvBackend {
             target_pointer_width = "64"
         )))]
         {
-            let _ = (addr, base_level);
+            let _ = (domain_tag, pk_seed, layer, tree_idx, base_level);
             match self._uninhabited {}
         }
     }
@@ -1128,15 +1131,15 @@ impl VulkanSpirvBackend {
     /// Build a complete 1-indexed Poseidon2 WHIR Canopy Merkle tree (`out_nodes.len() == 2 * leaves.len()`,
     /// matching `qsag_agg::pcs::MerkleCanopyTree::build_poseidon2` in WHIR regimes 7 & 8) completely
     /// inside GPU VRAM within a single `VkCommandBuffer` submission, returning the domain-separated
-    /// Canopy commitment root `poseidon2_canopy_root_cpu(stage_idx, tree_salt, out_nodes[1])`.
+    /// Canopy commitment root `poseidon2_canopy_root_cpu(stage_idx, log_leaves, tree_salt, out_nodes[1])`.
     pub fn build_canopy_tree_poseidon2(
         &self,
         leaves: &[[u64; 4]],
-        stage_idx: u64,
-        tree_salt: &[u8; 32],
+        stage_idx: u8,
+        tree_salt: [u64; 4],
         out_nodes: &mut [[u64; 4]],
     ) -> Result<[u64; 4], VulkanError> {
-        ntt_log2_len("Canopy tree leaves", leaves.len())?;
+        let log_leaves = ntt_log2_len("Canopy tree leaves", leaves.len())? as u8;
         let total_nodes = leaves.len().checked_mul(2).ok_or(AccelError::LengthOverflow)?;
         if out_nodes.len() != total_nodes {
             return Err(AccelError::LengthMismatch {
@@ -1158,7 +1161,7 @@ impl VulkanSpirvBackend {
                 KernelSlot::MerkleLayerPoseidon2,
             )
             .map_err(VulkanError::from)?;
-            let tree_key = poseidon2_canopy_tree_key_cpu(stage_idx, tree_salt);
+            let tree_key = poseidon2_canopy_tree_key_cpu(stage_idx, log_leaves, tree_salt);
             let mut guard = self
                 .engine
                 .lock()
@@ -1169,7 +1172,9 @@ impl VulkanSpirvBackend {
             if leaves.len() > 1 {
                 self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             }
-            Ok(poseidon2_canopy_root_cpu(stage_idx, tree_salt, &top_node))
+            Ok(poseidon2_canopy_root_cpu(
+                stage_idx, log_leaves, tree_salt, top_node,
+            ))
         }
         #[cfg(not(all(
             feature = "std",
@@ -1177,7 +1182,7 @@ impl VulkanSpirvBackend {
             target_pointer_width = "64"
         )))]
         {
-            let _ = (stage_idx, tree_salt);
+            let _ = (stage_idx, log_leaves, tree_salt);
             match self._uninhabited {}
         }
     }
@@ -1187,7 +1192,10 @@ impl VulkanSpirvBackend {
     pub fn build_canopy_tree_poseidon2_2block(
         &self,
         leaves: &[[u64; 4]],
-        addr: &Poseidon2Merkle2BlockAddr,
+        domain_tag: u64,
+        pk_seed: &[u64; 4],
+        layer: u32,
+        tree_idx: u64,
         out_nodes: &mut [[u64; 4]],
     ) -> Result<[u64; 4], VulkanError> {
         ntt_log2_len("Canopy tree leaves", leaves.len())?;
@@ -1200,7 +1208,7 @@ impl VulkanSpirvBackend {
             }
             .into());
         }
-        if addr.layer > 0xFFFE || leaves.len().trailing_zeros() > 0x10000 {
+        if layer > 0xFFFE || leaves.len().trailing_zeros() > 0x10000 {
             return Err(AccelError::LengthOverflow.into());
         }
         #[cfg(all(
@@ -1221,10 +1229,10 @@ impl VulkanSpirvBackend {
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
             let top_node = guard.exec_canopy_tree_poseidon2(
                 leaves,
-                &addr.pk_seed,
-                addr.layer,
-                addr.domain_tag,
-                addr.tree_idx,
+                pk_seed,
+                layer,
+                domain_tag,
+                tree_idx,
                 1,
                 out_nodes,
             )?;
@@ -1239,7 +1247,7 @@ impl VulkanSpirvBackend {
             target_pointer_width = "64"
         )))]
         {
-            let _ = addr;
+            let _ = (domain_tag, pk_seed, layer, tree_idx);
             match self._uninhabited {}
         }
     }
@@ -1321,6 +1329,53 @@ impl VulkanSpirvBackend {
             return Err(VulkanError::WorkspacePoisoned);
         }
         Ok(())
+    }
+
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    fn hash_u64_slice_for_prover(slot: ProverKernelSlot, words: &[u64]) -> [u8; 32] {
+        let mut sp = init_cshake256(b"", slot.algorithm_domain());
+        sp.absorb(&(words.len() as u64).to_le_bytes());
+        for chunk in words.chunks(256) {
+            let mut buf = [0u8; 2048];
+            let used = chunk.len() * 8;
+            for (dst, &w) in buf[..used].as_chunks_mut::<8>().0.iter_mut().zip(chunk) {
+                *dst = w.to_le_bytes();
+            }
+            sp.absorb(&buf[..used]);
+        }
+        finalize_cshake256(&mut sp, true);
+        let mut out = [0u8; 32];
+        sp.squeeze(&mut out);
+        out
+    }
+
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    fn hash_ext4_slice_for_prover(slot: ProverKernelSlot, ext4s: &[[u64; 4]]) -> [u8; 32] {
+        let mut sp = init_cshake256(b"", slot.algorithm_domain());
+        sp.absorb(&(ext4s.len() as u64).to_le_bytes());
+        for chunk in ext4s.chunks(64) {
+            let mut buf = [0u8; 2048];
+            let used = chunk.len() * 32;
+            for (dst, elem) in buf[..used].as_chunks_mut::<32>().0.iter_mut().zip(chunk) {
+                dst[0..8].copy_from_slice(&elem[0].to_le_bytes());
+                dst[8..16].copy_from_slice(&elem[1].to_le_bytes());
+                dst[16..24].copy_from_slice(&elem[2].to_le_bytes());
+                dst[24..32].copy_from_slice(&elem[3].to_le_bytes());
+            }
+            sp.absorb(&buf[..used]);
+        }
+        finalize_cshake256(&mut sp, true);
+        let mut out = [0u8; 32];
+        sp.squeeze(&mut out);
+        out
     }
 
     #[cfg(all(
@@ -1500,10 +1555,14 @@ impl VulkanSpirvBackend {
                     witness_sp.absorb(&(poly_idx as u64).to_le_bytes());
                     witness_sp.absorb(&(pos as u64).to_le_bytes());
                     witness_sp.absorb(&(dst.len() as u64).to_le_bytes());
-                    let chunk_bytes = unsafe {
-                        core::slice::from_raw_parts(dst.as_ptr().cast::<u8>(), dst.len() * 8)
-                    };
-                    witness_sp.absorb(chunk_bytes);
+                    for sub in dst.chunks(256) {
+                        let mut buf = [0u8; 2048];
+                        let used = sub.len() * 8;
+                        for (b_dst, &w) in buf[..used].as_chunks_mut::<8>().0.iter_mut().zip(sub) {
+                            *b_dst = w.to_le_bytes();
+                        }
+                        witness_sp.absorb(&buf[..used]);
+                    }
                 },
             )?;
             finalize_cshake256(&mut witness_sp, true);
@@ -1892,19 +1951,23 @@ impl VulkanSpirvBackend {
             };
             self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             let slot = ProverKernelSlot::WhirFoldSumcheck;
-            let w_bytes = unsafe {
-                core::slice::from_raw_parts(weights.as_ptr().cast::<u8>(), weights.len() * 64)
-            };
-            let z_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    z_ood_kronecker.as_ptr().cast::<u8>(),
-                    z_ood_kronecker.len() * 32,
-                )
-            };
-            let out_bytes = unsafe { core::slice::from_raw_parts(evals.as_ptr().cast::<u8>(), 64) };
+            let mut w_sp = init_cshake256(b"", slot.algorithm_domain());
+            w_sp.absorb(&(weights.len() as u64).to_le_bytes());
+            for pair in weights {
+                for ext in pair {
+                    for limb in ext {
+                        w_sp.absorb(&limb.to_le_bytes());
+                    }
+                }
+            }
+            finalize_cshake256(&mut w_sp, true);
+            let mut w_digest = [0u8; 32];
+            w_sp.squeeze(&mut w_digest);
+            let z_digest = Self::hash_ext4_slice_for_prover(slot, z_ood_kronecker);
+            let out_digest = Self::hash_ext4_slice_for_prover(slot, &evals);
             let input_digest =
-                prover_stage_io_digest(slot, 0x01, 2, &[&[is_single as u8], w_bytes, z_bytes]);
-            let output_digest = prover_stage_io_digest(slot, 0x02, 2, &[out_bytes]);
+                prover_stage_io_digest(slot, 0x01, 2, &[&[is_single as u8], &w_digest, &z_digest]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 2, &[&out_digest]);
             let receipt = self.issue_prover_receipt(
                 key,
                 ProverJobDescriptor::WhirFoldSumcheck {
@@ -2061,8 +2124,8 @@ impl VulkanSpirvBackend {
             let slot = ProverKernelSlot::WhirFoldSumcheck;
             let aux = (u64::from(c_base) << 32) | u64::from(k_base);
             let input_digest = prover_stage_io_digest(slot, 0x01, 5, &[&aux.to_le_bytes()]);
-            let out_bytes = unsafe { core::slice::from_raw_parts(wires.as_ptr().cast::<u8>(), 96) };
-            let output_digest = prover_stage_io_digest(slot, 0x02, 5, &[out_bytes]);
+            let out_d = Self::hash_ext4_slice_for_prover(slot, &wires);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 5, &[&out_d]);
             let receipt = self.issue_prover_receipt(
                 key,
                 ProverJobDescriptor::WhirFoldSumcheck {
@@ -2152,15 +2215,15 @@ impl VulkanSpirvBackend {
             let wires =
                 self.prover_whir_fold_pass_b(pairs_c, c_base, k_src, k_half, k_dst, phi)?;
             let slot = ProverKernelSlot::WhirFoldSumcheck;
-            let phi_bytes = unsafe { core::slice::from_raw_parts(phi.as_ptr().cast::<u8>(), 32) };
+            let phi_d = Self::hash_ext4_slice_for_prover(slot, &[phi]);
             let mut offsets = [0u8; 16];
             offsets[0..4].copy_from_slice(&c_base.to_le_bytes());
             offsets[4..8].copy_from_slice(&k_src.to_le_bytes());
             offsets[8..12].copy_from_slice(&k_half.to_le_bytes());
             offsets[12..16].copy_from_slice(&k_dst.to_le_bytes());
-            let input_digest = prover_stage_io_digest(slot, 0x01, 6, &[&offsets, phi_bytes]);
-            let out_bytes = unsafe { core::slice::from_raw_parts(wires.as_ptr().cast::<u8>(), 64) };
-            let output_digest = prover_stage_io_digest(slot, 0x02, 6, &[out_bytes]);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 6, &[&offsets, &phi_d]);
+            let out_d = Self::hash_ext4_slice_for_prover(slot, &wires);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 6, &[&out_d]);
             let receipt = self.issue_prover_receipt(
                 key,
                 ProverJobDescriptor::WhirFoldSumcheck {
@@ -2291,14 +2354,13 @@ impl VulkanSpirvBackend {
             )?;
             let slot = ProverKernelSlot::WhirFoldSumcheck;
             let chals = [theta, alpha, beta];
-            let chal_bytes =
-                unsafe { core::slice::from_raw_parts(chals.as_ptr().cast::<u8>(), 96) };
+            let chal_d = Self::hash_ext4_slice_for_prover(slot, &chals);
             let mut meta = [0u8; 17];
             meta[0..4].copy_from_slice(&c_src.to_le_bytes());
             meta[4..8].copy_from_slice(&c_dst.to_le_bytes());
             meta[8] = normalize_to_zero as u8;
             meta[9..17].copy_from_slice(&(norm_len as u64).to_le_bytes());
-            let input_digest = prover_stage_io_digest(slot, 0x01, 7, &[&meta, chal_bytes]);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 7, &[&meta, &chal_d]);
             let output_digest = prover_stage_io_digest(slot, 0x02, 7, &[&meta]);
             self.issue_prover_receipt(
                 key,
@@ -2605,20 +2667,11 @@ impl VulkanSpirvBackend {
                 out_words,
             )?;
             let slot = ProverKernelSlot::WhirLdeCommitment;
-            let q_bytes = unsafe {
-                core::slice::from_raw_parts(q_indices.as_ptr().cast::<u8>(), q_indices.len() * 8)
-            };
-            let s_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    sib_indices.as_ptr().cast::<u8>(),
-                    sib_indices.len() * 8,
-                )
-            };
-            let out_bytes = unsafe {
-                core::slice::from_raw_parts(out_words.as_ptr().cast::<u8>(), out_words.len() * 8)
-            };
-            let input_digest = prover_stage_io_digest(slot, 0x01, 2, &[q_bytes, s_bytes]);
-            let output_digest = prover_stage_io_digest(slot, 0x02, 2, &[out_bytes]);
+            let q_d = Self::hash_u64_slice_for_prover(slot, q_indices);
+            let s_d = Self::hash_u64_slice_for_prover(slot, sib_indices);
+            let out_d = Self::hash_u64_slice_for_prover(slot, out_words);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 2, &[&q_d, &s_d]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 2, &[&out_d]);
             self.issue_prover_receipt(
                 key,
                 ProverJobDescriptor::WhirGatherQueries {
@@ -2807,22 +2860,12 @@ impl VulkanSpirvBackend {
                 static_gammas_ext4,
             )?;
             let slot = ProverKernelSlot::AirRowGroupA;
-            let sh_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    shift_tables_3m.as_ptr().cast::<u8>(),
-                    shift_tables_3m.len() * 32,
-                )
-            };
-            let gm_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    static_gammas_ext4.as_ptr().cast::<u8>(),
-                    static_gammas_ext4.len() * 32,
-                )
-            };
+            let sh_d = Self::hash_ext4_slice_for_prover(slot, shift_tables_3m);
+            let gm_d = Self::hash_ext4_slice_for_prover(slot, static_gammas_ext4);
             let mut offs = [0u8; 8];
             offs[0..4].copy_from_slice(&witness_word_offset.to_le_bytes());
             offs[4..8].copy_from_slice(&cols_base_word_offset.to_le_bytes());
-            let input_digest = prover_stage_io_digest(slot, 0x01, 0, &[&offs, sh_bytes, gm_bytes]);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 0, &[&offs, &sh_d, &gm_d]);
             let output_digest = prover_stage_io_digest(slot, 0x02, 0, &[&offs]);
             self.issue_prover_receipt(
                 key,
@@ -2993,13 +3036,12 @@ impl VulkanSpirvBackend {
             meta[22..26].copy_from_slice(&op_hdr_off.to_le_bytes());
             meta[26..30].copy_from_slice(&op_ent_off.to_le_bytes());
             meta[30..34].copy_from_slice(&sorted_u64_off.to_le_bytes());
-            let dyn_bytes = unsafe {
-                core::slice::from_raw_parts(dyn_words.as_ptr().cast::<u8>(), dyn_words.len() * 8)
-            };
-            let out_bytes =
-                unsafe { core::slice::from_raw_parts(evals.as_ptr().cast::<u8>(), 8 * 32) };
             let slot_a = ProverKernelSlot::AirRowGroupA;
             let slot_b = ProverKernelSlot::AirRowGroupB;
+            let dyn_da = Self::hash_u64_slice_for_prover(slot_a, dyn_words);
+            let out_da = Self::hash_ext4_slice_for_prover(slot_a, &evals);
+            let dyn_db = Self::hash_u64_slice_for_prover(slot_b, dyn_words);
+            let out_db = Self::hash_ext4_slice_for_prover(slot_b, &evals);
             let rec_a = self.issue_prover_receipt(
                 key,
                 ProverJobDescriptor::AirRowGroupA {
@@ -3008,8 +3050,8 @@ impl VulkanSpirvBackend {
                     cur_r,
                 },
                 transcript_anchor,
-                prover_stage_io_digest(slot_a, 0x01, 1, &[&meta, dyn_bytes]),
-                prover_stage_io_digest(slot_a, 0x02, 1, &[out_bytes]),
+                prover_stage_io_digest(slot_a, 0x01, 1, &[&meta, &dyn_da]),
+                prover_stage_io_digest(slot_a, 0x02, 1, &[&out_da]),
             )?;
             let rec_b = self.issue_prover_receipt(
                 key,
@@ -3020,8 +3062,8 @@ impl VulkanSpirvBackend {
                     cur_s,
                 },
                 transcript_anchor,
-                prover_stage_io_digest(slot_b, 0x01, 1, &[&meta, dyn_bytes]),
-                prover_stage_io_digest(slot_b, 0x02, 1, &[out_bytes]),
+                prover_stage_io_digest(slot_b, 0x01, 1, &[&meta, &dyn_db]),
+                prover_stage_io_digest(slot_b, 0x02, 1, &[&out_db]),
             )?;
             Ok((evals, [rec_a, rec_b]))
         }
@@ -3150,8 +3192,8 @@ impl VulkanSpirvBackend {
             meta[5..9].copy_from_slice(&col_dst.to_le_bytes());
             meta[9..13].copy_from_slice(&sh_src.to_le_bytes());
             meta[13..17].copy_from_slice(&sh_dst.to_le_bytes());
-            let chal_bytes = unsafe { core::slice::from_raw_parts(chal.as_ptr().cast::<u8>(), 32) };
-            let input_digest = prover_stage_io_digest(slot, 0x01, 2, &[&meta, chal_bytes]);
+            let chal_d = Self::hash_ext4_slice_for_prover(slot, &[chal]);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 2, &[&meta, &chal_d]);
             let output_digest = prover_stage_io_digest(slot, 0x02, 2, &[&meta]);
             self.issue_prover_receipt(
                 key,
@@ -3483,17 +3525,12 @@ impl AcceleratorBackend for VulkanSpirvBackend {
     fn try_merkle_layer_poseidon2_2block_at(
         &self,
         children: &[[u64; 4]],
-        addr: &Poseidon2Merkle2BlockAddr,
-        start_parent_idx: u64,
+        domain_tag: u64,
+        pk_seed: &[u64; 4],
+        addr: Poseidon2Merkle2BlockAddr,
         out_parents: &mut [[u64; 4]],
     ) -> Result<(), AccelError> {
-        merkle_layer_2block_shape(
-            children.len(),
-            out_parents.len(),
-            start_parent_idx,
-            addr.layer,
-            addr.level,
-        )?;
+        merkle_layer_2block_shape(children.len(), out_parents.len(), addr)?;
         #[cfg(all(
             feature = "std",
             any(target_os = "linux", target_os = "macos"),
@@ -3512,13 +3549,13 @@ impl AcceleratorBackend for VulkanSpirvBackend {
             guard
                 .exec_merkle_layer_mode(
                     children,
-                    &addr.pk_seed,
+                    pk_seed,
                     addr.layer,
                     addr.level,
-                    addr.domain_tag,
+                    domain_tag,
                     addr.tree_idx,
                     1,
-                    start_parent_idx,
+                    addr.start_node_idx,
                     out_parents,
                 )
                 .map_err(accel_error)?;
@@ -3531,7 +3568,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
             target_pointer_width = "64"
         )))]
         {
-            let _ = (addr, start_parent_idx);
+            let _ = (domain_tag, pk_seed, addr);
             match self._uninhabited {}
         }
     }
@@ -4485,22 +4522,22 @@ mod tests {
                 &key, &pin, desc, anchor, in_d, out_d, hw_digest,
             )
             .expect("audited prover receipt");
-            assert_eq!(reg.verify_prover_keyed_receipt(&key, &rec, hw_digest), Ok(()));
+            assert_eq!(reg.verify_prover_keyed_receipt(&rec, &key), Ok(()));
             assert_eq!(
-                reg.verify_prover_keyed_receipt(&wrong_key, &rec, hw_digest),
-                Err(KernelRegistryError::ReceiptMacInvalid)
+                reg.verify_prover_keyed_receipt(&rec, &wrong_key),
+                Err(KernelRegistryError::ReceiptAuthenticationFailed)
             );
-            let mut bad_hw = hw_digest;
-            bad_hw[0] ^= 1;
+            let mut bad_hw = rec;
+            bad_hw.hardware_audit_digest[0] ^= 1;
             assert_eq!(
-                reg.verify_prover_keyed_receipt(&key, &rec, bad_hw),
-                Err(KernelRegistryError::ProverHardwareAuditMismatch { slot })
+                reg.verify_prover_keyed_receipt(&bad_hw, &key),
+                Err(KernelRegistryError::ReceiptAuthenticationFailed)
             );
             let mut bad_mac = rec;
             bad_mac.output_digest[0] ^= 1;
             assert_eq!(
-                reg.verify_prover_keyed_receipt(&key, &bad_mac, hw_digest),
-                Err(KernelRegistryError::ReceiptMacInvalid)
+                reg.verify_prover_keyed_receipt(&bad_mac, &key),
+                Err(KernelRegistryError::ReceiptAuthenticationFailed)
             );
         }
     }

@@ -47,12 +47,13 @@ pub const ST_CURSOR_IDX: usize = 41; // 41 (Merkle walk index cursor)
 pub const ST_ACC_OR_U1: usize = 42; // 42 (running digit sum in H_msg, or `u1` in WOTS)
 pub const ST_WOTS_U2: usize = 43; // 43 (`u2` in WOTS)
 
-/// Fixed row count per signer (`512` for `JortsPoseidon2`, `8,192` for `CorduroyPoseidon2`).
+/// Fixed row count per signer (`512` for all `JortsPoseidon2` heights `6..=20`, `8,192` for `CorduroyPoseidon2`).
 #[inline]
 pub const fn rows_per_signer(profile: AggSigProfile) -> usize {
-    match profile {
-        AggSigProfile::JortsPoseidon2 => 512,
-        AggSigProfile::CorduroyPoseidon2 => 8192,
+    if profile.is_jorts() {
+        512
+    } else {
+        8192
     }
 }
 
@@ -63,6 +64,11 @@ pub enum StepOp {
 
     // --- Stateful `JortsPoseidon2` H_msg ---
     StatefulHmsgBlock0,
+    /// Variable-height `JortsPoseidon2` (`height in 7..=20`): `aux[0..height]` Boolean bits of `kp_idx`
+    /// + `aux[20..36]` 16 base-4 digits of 32-bit `tsw_ctr` (`<= 36 <= 38` aux columns).
+    StatefulHmsgBlock0Var {
+        height: u8,
+    },
     StatefulHmsgBlock1,
     StatefulHmsgSqueeze,
 
@@ -144,17 +150,23 @@ pub fn build_signer_program(profile: AggSigProfile) -> Vec<StepOp> {
     let total_rows = rows_per_signer(profile);
     let mut prog = Vec::with_capacity(total_rows);
 
-    match profile {
-        AggSigProfile::JortsPoseidon2 => {
-            prog.push(StepOp::StatefulHmsgBlock0);
+    match profile.jorts_xmss_height() {
+        Some(jorts_height) => {
+            if jorts_height == JORTS_XMSS_HEIGHT {
+                prog.push(StepOp::StatefulHmsgBlock0);
+            } else {
+                prog.push(StepOp::StatefulHmsgBlock0Var {
+                    height: jorts_height as u8,
+                });
+            }
             prog.push(StepOp::StatefulHmsgBlock1);
             prog.push(StepOp::StatefulHmsgSqueeze);
             for l in 0..5 {
                 prog.push(StepOp::HmsgDecompLimb { limb_idx: l });
             }
-            push_layer_wots_and_merkle(&mut prog, 0, JORTS_XMSS_HEIGHT, true);
+            push_layer_wots_and_merkle(&mut prog, 0, jorts_height, true);
         }
-        AggSigProfile::CorduroyPoseidon2 => {
+        None => {
             prog.push(StepOp::StatelessDeriveBlock0);
             prog.push(StepOp::StatelessDeriveBlock1);
             for l in 0..7 {
@@ -275,6 +287,9 @@ fn push_layer_wots_and_merkle(
 pub enum ConstraintKind {
     Idle,
     StatefulHmsgBlock0,
+    StatefulHmsgBlock0Var {
+        height: u8,
+    },
     StatefulHmsgBlock1,
     StatefulHmsgSqueeze,
     StatelessDeriveBlock0,
@@ -324,6 +339,10 @@ pub fn step_op_to_kind_and_c0(op: StepOp) -> (ConstraintKind, Goldilocks) {
     match op {
         StepOp::Idle => (ConstraintKind::Idle, Goldilocks::ZERO),
         StepOp::StatefulHmsgBlock0 => (ConstraintKind::StatefulHmsgBlock0, Goldilocks::ZERO),
+        StepOp::StatefulHmsgBlock0Var { height } => (
+            ConstraintKind::StatefulHmsgBlock0Var { height },
+            Goldilocks::ZERO,
+        ),
         StepOp::StatefulHmsgBlock1 => (ConstraintKind::StatefulHmsgBlock1, Goldilocks::ZERO),
         StepOp::StatefulHmsgSqueeze => (ConstraintKind::StatefulHmsgSqueeze, Goldilocks::ZERO),
         StepOp::StatelessDeriveBlock0 => (ConstraintKind::StatelessDeriveBlock0, Goldilocks::ZERO),
@@ -453,6 +472,7 @@ pub(crate) fn encode_constraint_kind(kind: ConstraintKind) -> (u32, u32) {
     match kind {
         ConstraintKind::Idle => (0, 0),
         ConstraintKind::StatefulHmsgBlock0 => (1, 0),
+        ConstraintKind::StatefulHmsgBlock0Var { height } => (24, u32::from(height)),
         ConstraintKind::StatefulHmsgBlock1 => (2, 0),
         ConstraintKind::StatefulHmsgSqueeze => (3, 0),
         ConstraintKind::StatelessDeriveBlock0 => (4, 0),
@@ -603,6 +623,39 @@ pub fn populate_active_signer_rows(
                 for i in 0..32 {
                     row[COL_AUX + 6 + i] =
                         Goldilocks::from_u64_reduced(((tsw_ctr >> i) & 1) as u64);
+                }
+                let kp_ctr = ((kp_idx as u64) << 32) | (tsw_ctr as u64);
+                let st_in = [
+                    pk.pk_seed[0],
+                    pk.pk_seed[1],
+                    pk.pk_seed[2],
+                    pk.pk_seed[3],
+                    pk.pk_root[0],
+                    pk.pk_root[1],
+                    pk.pk_root[2],
+                    pk.pk_root[3],
+                    Goldilocks::from_u64_reduced(DOMAIN_H_MSG_STATEFUL),
+                    Goldilocks::from_u64_reduced(kp_ctr),
+                    mu[4],
+                    Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+                ];
+                let perm_out = fill_row_perm(row, st_in);
+                next[ST_CUR_ROOT..ST_CUR_ROOT + 4].copy_from_slice(&pk.pk_root);
+                next[ST_KP_IDX] = Goldilocks::from_u64_reduced(kp_idx as u64);
+                next[ST_MAIN_SPONGE..ST_MAIN_SPONGE + 12].copy_from_slice(&perm_out);
+            }
+            StepOp::StatefulHmsgBlock0Var { height } => {
+                next = [Goldilocks::ZERO; NUM_STATE_LIMBS];
+                let h = height as usize;
+                debug_assert!((7..=20).contains(&h));
+                let kp_idx = sig.stateful_leaf_idx;
+                let tsw_ctr = sig.layers[0].tsw_ctr;
+                for i in 0..h {
+                    row[COL_AUX + i] = Goldilocks::from_u64_reduced(((kp_idx >> i) & 1) as u64);
+                }
+                for j in 0..16 {
+                    row[COL_AUX + 20 + j] =
+                        Goldilocks::from_u64_reduced(((tsw_ctr >> (2 * j)) & 3) as u64);
                 }
                 let kp_ctr = ((kp_idx as u64) << 32) | (tsw_ctr as u64);
                 let st_in = [
@@ -1676,6 +1729,39 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
             for i in 0..32 {
                 emit_op(bool_check_generic(aux[6 + i]));
                 ctr_val += aux[6 + i].mul_base_f(Goldilocks::from_u64_reduced(1u64 << i));
+            }
+            let kp_ctr = kp_val.mul_base_f(Goldilocks::from_u64_reduced(1u64 << 32)) + ctr_val;
+            for i in 0..4 {
+                emit_op(st_in[i] - pk_seed[i]);
+                emit_op(st_in[4 + i] - pk_root[i]);
+                emit_op(next[ST_CUR_ROOT + i] - pk_root[i]);
+            }
+            emit_op(st_in[8] - F::from_u64(DOMAIN_H_MSG_STATEFUL));
+            emit_op(st_in[9] - kp_ctr);
+            emit_op(st_in[10] - mu[4]);
+            emit_op(st_in[11] - F::from_u64(POSEIDON2_CONST_IV));
+            emit_op(next[ST_KP_IDX] - kp_val);
+            for i in 0..12 {
+                emit_op(next[ST_MAIN_SPONGE + i] - perm_out[i]);
+            }
+            let mut zero_mask = [true; NUM_STATE_LIMBS];
+            zero_mask[ST_CUR_ROOT..ST_CUR_ROOT + 4].fill(false);
+            zero_mask[ST_KP_IDX] = false;
+            zero_mask[ST_MAIN_SPONGE..ST_MAIN_SPONGE + 12].fill(false);
+            check_zero_elsewhere(&zero_mask, emit_op);
+        }
+        ConstraintKind::StatefulHmsgBlock0Var { height } => {
+            let h = height as usize;
+            let mut kp_val = F::ZERO;
+            for (i, &aux_i) in aux.iter().enumerate().take(h) {
+                emit_op(bool_check_generic(aux_i));
+                kp_val += aux_i.mul_base_f(Goldilocks::from_u64_reduced(1u64 << i));
+            }
+            let mut ctr_val = F::ZERO;
+            for j in 0..16 {
+                let d = aux[20 + j];
+                emit_op(quartic_base4_generic(d));
+                ctr_val += d.mul_base_f(Goldilocks::from_u64_reduced(1u64 << (2 * j)));
             }
             let kp_ctr = kp_val.mul_base_f(Goldilocks::from_u64_reduced(1u64 << 32)) + ctr_val;
             for i in 0..4 {

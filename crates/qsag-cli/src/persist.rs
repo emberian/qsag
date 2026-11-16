@@ -58,9 +58,25 @@ pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
 /// Open options that never follow a final symlink and never block on a FIFO.
 pub fn no_follow() -> io::Result<OpenOptions> {
     let mut options = OpenOptions::new();
-    crate::cli::set_nofollow_nonblocking(&mut options)
-        .map_err(|e| io::Error::new(io::ErrorKind::Unsupported, e.message))?;
-    Ok(options)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = qsag_asm::durable::open_nofollow_nonblock_flags(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unsupported no-follow file flags"))?;
+        options.custom_flags(flags);
+        Ok(options)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = &mut options;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no-follow file access requires Unix",
+        ))
+    }
 }
 
 fn owner_only_mode(options: &mut OpenOptions) {

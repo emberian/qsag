@@ -1029,28 +1029,33 @@ impl RecursiveShardProof {
             return None;
         }
         let mut pos = 8usize;
-        let mut take_f = || -> Option<F> {
-            let chunk: [u8; 8] = bytes.get(pos..pos + 8)?.try_into().ok()?;
-            pos += 8;
+        fn take_f(bytes: &[u8], pos: &mut usize) -> Option<F> {
+            let chunk: [u8; 8] = bytes.get(*pos..*pos + 8)?.try_into().ok()?;
+            *pos += 8;
             F::from_le_bytes_canonical(chunk).ok()
-        };
-        let mut take_e = || -> Option<E> {
-            let chunk: [u8; 32] = bytes.get(pos..pos + 32)?.try_into().ok()?;
-            pos += 32;
+        }
+        fn take_e(bytes: &[u8], pos: &mut usize) -> Option<E> {
+            let chunk: [u8; 32] = bytes.get(*pos..*pos + 32)?.try_into().ok()?;
+            *pos += 32;
             E::from_le_bytes_canonical(chunk)
-        };
-        let commitment = [take_f()?, take_f()?, take_f()?, take_f()?];
+        }
+        let commitment = [
+            take_f(bytes, &mut pos)?,
+            take_f(bytes, &mut pos)?,
+            take_f(bytes, &mut pos)?,
+            take_f(bytes, &mut pos)?,
+        ];
         let mut row_sumcheck_polys = Vec::with_capacity(params.circuit.log_rows());
         for _ in 0..params.circuit.log_rows() {
             let mut poly = [E::ZERO; ROW_SUMCHECK_WIRE_COEFFS];
             for slot in &mut poly {
-                *slot = take_e()?;
+                *slot = take_e(bytes, &mut pos)?;
             }
             row_sumcheck_polys.push(poly);
         }
         let mut col_evals = Vec::with_capacity(NUM_TRACE_COLS);
         for _ in 0..NUM_TRACE_COLS {
-            col_evals.push(take_e()?);
+            col_evals.push(take_e(bytes, &mut pos)?);
         }
         let opening = FixedPathWhirProof::from_bytes(bytes.get(pos..)?, &params.whir)?;
         let out = Self {
@@ -1288,11 +1293,17 @@ impl FullShardMergeRelation {
                 })
                 .collect::<Vec<_>>()
         };
-        let assignments = crate::map_chunks_bounded_with_limit(&inputs, self.children, build);
+        #[cfg(feature = "std")]
+        let assignments = crate::map_chunks_bounded_with_limit(&inputs, self.children, build)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        #[cfg(not(feature = "std"))]
+        let assignments = build(&inputs);
         let mut z = Vec::with_capacity(self.shape.num_vars);
         z.push(F::ONE);
         z.extend(publics.iter().flatten());
-        for assignment in assignments.into_iter().flatten() {
+        for assignment in assignments {
             z.extend(assignment);
         }
         if z.len() != self.shape.mask_var_base {
@@ -1325,8 +1336,14 @@ fn populate(
             })
             .collect::<Vec<_>>()
     };
-    let circuits = crate::map_chunks_bounded_with_limit(&inputs, inputs.len(), build);
-    for circuit in circuits.into_iter().flatten() {
+    #[cfg(feature = "std")]
+    let circuits = crate::map_chunks_bounded_with_limit(&inputs, inputs.len(), build)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    #[cfg(not(feature = "std"))]
+    let circuits = build(&inputs);
+    for circuit in circuits {
         cs.append(circuit);
     }
 }

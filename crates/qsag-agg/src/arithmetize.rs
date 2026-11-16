@@ -1739,7 +1739,11 @@ fn prove_shard_rows_with_gpu(
     shard_idx: usize,
     num_shards: usize,
 ) -> (ShardRowProof, Vec<GoldilocksExt4>, GoldilocksExt4) {
-    if let Some(session) = gpu_session {
+    let gpu_supports_ops = !circuit
+        .unique_ops
+        .iter()
+        .any(|op| matches!(op, ConstraintKind::StatefulHmsgBlock0Var { .. }));
+    if gpu_supports_ops && let Some(session) = gpu_session {
         let mut gpu_tr = transcript.clone();
         match prove_shard_rows_gpu(
             &mut gpu_tr,

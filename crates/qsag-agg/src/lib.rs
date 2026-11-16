@@ -340,9 +340,10 @@ pub use pcs::{
 };
 pub use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch};
 pub use sig::{
-    AggSigProfile, CORDUROY_MAX_STATELESS_SIGS_PER_KEY, Digest4, Digest5, EpochWalSink, SigError,
-    SignerBitmap, SigningMode, StatelessBudgetWalSink, ValidatorKeypair, ValidatorPublicKey,
-    ValidatorSignature, bytes32_to_limbs56, compute_committee_root, limbs56_to_bytes32_canonical,
+    AggSigProfile, CORDUROY_MAX_STATELESS_SIGS_PER_KEY, Digest4, Digest5, EpochWalSink,
+    JORTS_MAX_XMSS_HEIGHT, JORTS_MIN_XMSS_HEIGHT, JORTS_XMSS_HEIGHT, SigError, SignerBitmap,
+    SigningMode, StatelessBudgetWalSink, ValidatorKeypair, ValidatorPublicKey, ValidatorSignature,
+    bytes32_to_limbs56, compute_committee_root, limbs56_to_bytes32_canonical,
     validate_unique_active_committee, verify_individual_signature, verify_signature_batch,
 };
 #[cfg(feature = "std")]
@@ -2638,13 +2639,11 @@ mod tests {
                             &make_seed(60_000 + k as u64),
                             i as u32,
                         );
-                        let sig = match profile {
-                            AggSigProfile::JortsPoseidon2 => kp
-                                .sign_stateful_for_unit_test(msg, (i % 64) as u32)
+                        let sig = match profile.jorts_xmss_height() {
+                            Some(h) => kp
+                                .sign_stateful_for_unit_test(msg, (i % (1usize << h)) as u32)
                                 .unwrap(),
-                            AggSigProfile::CorduroyPoseidon2 => {
-                                kp.sign_stateless_for_unit_test(msg).unwrap()
-                            }
+                            None => kp.sign_stateless_for_unit_test(msg).unwrap(),
                         };
                         (kp.pk, sig)
                     })
@@ -3078,6 +3077,78 @@ mod tests {
             pb.to_bytes().len(),
             pm.to_bytes().len()
         );
+    }
+
+    #[test]
+    fn test_jorts_configurable_heights_7_and_20_shard_aggregation() {
+        let msg = b"jorts-configurable-height-shard-proof";
+
+        // 1. Odd height 7 (128 leaves, exercising exact `< 2^7` Boolean range check & boundary epoch 127).
+        let h7 = AggSigProfile::jorts_with_height(7).unwrap();
+        assert_eq!(h7, AggSigProfile::JortsPoseidon2H7);
+        assert_eq!(crate::trace::rows_per_signer(h7), 512);
+        let mut kp7_a = ValidatorKeypair::keygen_deterministic(h7, &make_seed(9501), 0);
+        let mut kp7_b = ValidatorKeypair::keygen_deterministic(h7, &make_seed(9501), 1);
+        let sig7_a = kp7_a.sign_stateful_for_unit_test(msg, 64).unwrap();
+        let sig7_b = kp7_b.sign_stateful_for_unit_test(msg, 127).unwrap();
+        assert_eq!(
+            kp7_b.sign_stateful_for_unit_test(msg, 128),
+            Err(SigError::EpochOutOfBounds)
+        );
+        let pks7 = alloc::vec![kp7_a.pk, kp7_b.pk];
+        let bm7 = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        let proof7 =
+            HemAggregator::aggregate(&pks7, &bm7, &mode, &[sig7_a, sig7_b], make_seed(9502))
+                .unwrap();
+        let wire7 = proof7.to_bytes();
+        let decoded7 = HemAggregatedProof::from_bytes_canonical(&wire7).unwrap();
+        assert_eq!(decoded7, proof7);
+        assert!(HemAggregator::verify(&pks7, &mode, &decoded7));
+        assert!(!HemAggregator::verify(
+            &pks7,
+            &SigningMode::SharedMessage(b"wrong-msg"),
+            &decoded7
+        ));
+
+        // 2. Full height 20 (`2^20 = 1,048,576` signatures per validator inside the exact same `512` trace rows!).
+        let h20 = AggSigProfile::jorts_with_height(20).unwrap();
+        assert_eq!(h20, AggSigProfile::JortsPoseidon2H20);
+        assert_eq!(crate::trace::rows_per_signer(h20), 512);
+        assert_eq!(
+            max_shard_signers(h20),
+            max_shard_signers(AggSigProfile::JortsPoseidon2)
+        );
+        let mut kp20_a = ValidatorKeypair::keygen_deterministic(h20, &make_seed(9601), 0);
+        let mut kp20_b = ValidatorKeypair::keygen_deterministic(h20, &make_seed(9601), 1);
+        // Exercise high epochs well past 2^6, including the exact top leaf `2^20 - 1 = 1_048_575`!
+        let sig20_a = kp20_a.sign_stateful_for_unit_test(msg, 777_777).unwrap();
+        let sig20_b = kp20_b
+            .sign_stateful_for_unit_test(msg, (1u32 << 20) - 1)
+            .unwrap();
+        assert_eq!(
+            kp20_b.sign_stateful_for_unit_test(msg, 1u32 << 20),
+            Err(SigError::EpochOutOfBounds)
+        );
+        let pks20 = alloc::vec![kp20_a.pk, kp20_b.pk];
+        let bm20 = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
+        let proof20 =
+            HemAggregator::aggregate(&pks20, &bm20, &mode, &[sig20_a, sig20_b], make_seed(9602))
+                .unwrap();
+        let wire20 = proof20.to_bytes();
+        let decoded20 = HemAggregatedProof::from_bytes_canonical(&wire20).unwrap();
+        assert_eq!(decoded20, proof20);
+        assert!(HemAggregator::verify(&pks20, &mode, &decoded20));
+        // Cross-profile verification against height-6 keys with identical seeds/roots must fail!
+        let fake_h6_pks: Vec<ValidatorPublicKey> = pks20
+            .iter()
+            .map(|pk| ValidatorPublicKey {
+                profile: AggSigProfile::JortsPoseidon2,
+                pk_seed: pk.pk_seed,
+                pk_root: pk.pk_root,
+            })
+            .collect();
+        assert!(!HemAggregator::verify(&fake_h6_pks, &mode, &decoded20));
     }
 
     #[test]

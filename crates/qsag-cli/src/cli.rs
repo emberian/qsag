@@ -162,6 +162,15 @@ impl Args {
             })
             .transpose()
     }
+    pub fn get_u128(&self, name: &str) -> Result<Option<u128>, CliError> {
+        self.get(name)
+            .map(|v| {
+                v.parse().map_err(|_| {
+                    CliError::usage(format!("--{name} must be a non-negative u128 integer"))
+                })
+            })
+            .transpose()
+    }
     pub fn no_positionals(&self) -> Result<(), CliError> {
         match self.positional.first() {
             Some(extra) => Err(CliError::usage(format!("unexpected argument '{extra}'"))),
@@ -220,27 +229,14 @@ fn read_limited(reader: impl Read, max: u64) -> Result<ZeroizingBuf, CliError> {
     read_limited_with_hint(reader, max, 256)
 }
 
-// Linux UAPI values differ by architecture. Keep the table testable on any host.
-fn linux_open_flags(arch: &str) -> Option<i32> {
-    let nofollow = match arch {
-        "aarch64" | "arm" => 0x8000,
-        "powerpc" | "powerpc64" => 0x10000,
-        "m68k" => 0x4000,
-        "x86_64" | "x86" | "riscv64" | "riscv32" | "s390x" | "loongarch64" => 0x20000,
-        _ => return None,
-    };
-    Some(nofollow | 0x800)
-}
-
 pub fn set_nofollow_nonblocking(opts: &mut std::fs::OpenOptions) -> Result<(), CliError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let flags = match std::env::consts::OS {
-            "linux" => linux_open_flags(std::env::consts::ARCH),
-            "macos" => Some(0x100 | 0x4),
-            _ => None,
-        }
+        let flags = qsag_asm::durable::open_nofollow_nonblock_flags(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
         .ok_or_else(|| CliError::state("unsupported no-follow file flags"))?;
         opts.custom_flags(flags);
         Ok(())
@@ -514,13 +510,11 @@ mod custody_buffer_tests {
 
     #[test]
     fn linux_nofollow_architecture_constants() {
-        for arch in ["arm", "aarch64"] {
-            assert_eq!(linux_open_flags(arch), Some(0x8800));
+        use qsag_asm::durable::open_nofollow_nonblock_flags;
+        for arch in ["arm", "aarch64", "powerpc", "powerpc64"] {
+            assert_eq!(open_nofollow_nonblock_flags("linux", arch), Some(0x8800));
         }
-        for arch in ["powerpc", "powerpc64"] {
-            assert_eq!(linux_open_flags(arch), Some(0x10800));
-        }
-        assert_eq!(linux_open_flags("m68k"), Some(0x4800));
+        assert_eq!(open_nofollow_nonblock_flags("linux", "m68k"), Some(0x4800));
         for arch in [
             "x86",
             "x86_64",
@@ -529,9 +523,10 @@ mod custody_buffer_tests {
             "s390x",
             "loongarch64",
         ] {
-            assert_eq!(linux_open_flags(arch), Some(0x20800));
+            assert_eq!(open_nofollow_nonblock_flags("linux", arch), Some(0x20800));
         }
-        assert_eq!(linux_open_flags("unknown"), None);
+        assert_eq!(open_nofollow_nonblock_flags("macos", "aarch64"), Some(0x104));
+        assert_eq!(open_nofollow_nonblock_flags("linux", "unknown"), None);
     }
 
     #[test]

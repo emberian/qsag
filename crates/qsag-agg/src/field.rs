@@ -587,7 +587,7 @@ pub(crate) fn encode_rs_coset_goldilocks_cpu(
 fn encode_rs_coset_goldilocks_cpu_inner(
     coeffs: &[Goldilocks],
     blowup: usize,
-    secret: bool,
+    #[cfg_attr(not(feature = "std"), allow(unused_variables))] secret: bool,
 ) -> Vec<Goldilocks> {
     let n_c = coeffs.len();
     let domain_len = n_c * blowup;
