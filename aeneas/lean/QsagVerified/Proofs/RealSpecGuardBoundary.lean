@@ -25,8 +25,11 @@ the field-for-field abstraction), hence a lockstep `ForwardSim`:
 * `velocity_extracted_step_refines`: `StatefulVelocityGuard::authorize_spend` against
   `Qsag.mirVelocityMachine`. The `u128` overflow test `amount > MAX - spent` and the spec's
   `spent + amount < 2^128` agree.
-* `mlDsa_extracted_step_refines`: `MlDsaReleaseGate::try_release_z_share` against
-  `Qsag.mirMlDsaReleaseMachine`, including the wiped, aborted post-state of every refusal.
+* `mlDsa_extracted_step_refines` and `mlDsaInto_extracted_step_refines`:
+  `MlDsaReleaseGate::try_release_z_share` and `MlDsaReleaseGate::try_release_z_share_into`
+  (plus `mlDsa_abort_in_place_spec` for `MlDsaReleaseGate::abort_in_place`) against
+  `Qsag.mirMlDsaReleaseMachine`, including the wiped, aborted post-state of every refusal and
+  the zeroing of caller output buffers.
 * `beltLatch_extracted_step_refines`: `BeltLatchKernel::bind` against
   `Qsag.mirBeltLatchKernelMachine`, including the poisoned post-state of a failed persist.
 
@@ -347,6 +350,240 @@ theorem extractedMlDsa_at_most_one_release
       p.1.z_norm_ok = true ∧ p.1.r0_norm_ok = true ∧
       p.1.w1_match = true ∧ p.1.u_com_bound = true := by
   obtain ⟨aF, hA, _⟩ := extractedMlDsa_forwardSim_mirMlDsa.lift_validTrace
+    (a₀ := mlDsaGateAbs g₀) rfl hTr
+  obtain ⟨hLen, hAll, _⟩ :=
+    Qsag.mirMlDsa_at_most_one_release_through_barrier (comapInputs_validTrace hA)
+  refine ⟨by simpa using hLen, fun p hp => ?_⟩
+  obtain ⟨hs, hat, hz, hr0, hw1, hu⟩ :=
+    hAll _ (List.mem_map_of_mem (f := fun p => (mlDsaChecksAbs p.1, p.2)) hp)
+  exact ⟨arrayU8ToBytes_injective hs, (u32Abs_inj _ _).mp hat, hz, hr0, hw1, hu⟩
+
+/-- **In-place abort postcondition & spec weld (`MlDsaReleaseGate::abort_in_place`).**
+    From every gate state `g`, `abort_in_place` returns normally, unconditionally wipes
+    `z_share_masked` to 32 zero bytes, clears `released = false`, sets `aborted = true`,
+    preserves `(session_id, attempt)`, and maps under `mlDsaGateAbs` to `Qsag.abortMirMlDsaGate`. -/
+theorem mlDsa_abort_in_place_spec (g : cred_and_hd_guards.MlDsaReleaseGate) :
+    ∃ g' : cred_and_hd_guards.MlDsaReleaseGate,
+      cred_and_hd_guards.MlDsaReleaseGate.abort_in_place g = .ok g' ∧
+      g' = { g with z_share_masked := Array.repeat 32#usize 0#u8,
+                    released := false, aborted := true } ∧
+      g'.z_share_masked = Array.repeat 32#usize 0#u8 ∧
+      g'.released = false ∧
+      g'.aborted = true ∧
+      g'.session_id = g.session_id ∧
+      g'.attempt = g.attempt ∧
+      mlDsaGateAbs g' =
+        Qsag.abortMirMlDsaGate (arrayU8ToBytes g.session_id) (UInt32.ofBitVec g.attempt.bv) := by
+  refine ⟨{ g with z_share_masked := Array.repeat 32#usize 0#u8,
+                   released := false, aborted := true },
+    rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
+  rcases g with ⟨sid, att, z, rel, ab⟩
+  rfl
+
+/-- **Exact correspondence between `&mut` `try_release_z_share_into` and consuming `try_release_z_share`.**
+    For every gate state `g`, barrier-check record `c`, and initial caller output buffer `out₀`,
+    `try_release_z_share_into` produces the exact same post-state `g'` and `Ok`/`Err` decision
+    (with identical `CredHdGuardError` code) as `try_release_z_share`, writing the unmasked
+    `z_share_masked` into `out` on `.Ok` and wiping `out` to 32 zero bytes on every `.Err`. -/
+theorem mlDsa_try_release_into_eq_by_value
+    (g : cred_and_hd_guards.MlDsaReleaseGate)
+    (c : cred_and_hd_guards.MlDsaBarrierChecks)
+    (out₀ : Array Std.U8 32#usize) :
+    cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g c out₀ =
+      Result.bind (cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share g c)
+        fun (g', res) =>
+          match res with
+          | .Ok z_out => .ok (.Ok (), g', z_out)
+          | .Err err => .ok (.Err err, g', Array.repeat 32#usize 0#u8) := by
+  rcases g with ⟨sid, att, z, rel, ab⟩
+  rcases c with ⟨csid, catt, zn, r0, w1, uc⟩
+  unfold cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into
+    cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share
+    cred_and_hd_guards.MlDsaReleaseGate.abort_in_place
+    cred_and_hd_guards.abort_mldsa_gate
+  simp only [ct_eq_bytes32_spec]
+  cases ab <;> cases rel
+  · by_cases hsid : sid = csid
+    · by_cases hatt : att = catt
+      · cases zn <;> cases r0 <;> cases w1 <;> cases uc <;>
+          simp [hsid, hatt, bind_eq_result_bind, result_bind_ok]
+      · have hne : (att != catt) = true := bne_iff_ne.mpr hatt
+        simp [hsid, hne, bind_eq_result_bind, result_bind_ok]
+    · simp [hsid, bind_eq_result_bind, result_bind_ok]
+  · simp [bind_eq_result_bind, result_bind_ok]
+  · simp [bind_eq_result_bind, result_bind_ok]
+  · simp [bind_eq_result_bind, result_bind_ok]
+
+private theorem mlDsaBarrierPassBool_iff
+    (g : cred_and_hd_guards.MlDsaReleaseGate)
+    (c : cred_and_hd_guards.MlDsaBarrierChecks) :
+    mlDsaBarrierPassBool g c = true ↔
+      (g.aborted = false ∧ g.released = false ∧
+       g.session_id = c.req_session_id ∧ g.attempt = c.req_attempt ∧
+       c.z_norm_ok = true ∧ c.r0_norm_ok = true ∧
+       c.w1_match = true ∧ c.u_com_bound = true) := by
+  unfold mlDsaBarrierPassBool
+  cases g.aborted <;> cases g.released <;>
+    simp [Bool.and_eq_true, decide_eq_true_eq, and_assoc]
+
+/-- **Complete constructive postcondition for `MlDsaReleaseGate::try_release_z_share_into`.**
+    For every gate `g`, check record `c`, and caller buffer `out₀`:
+    1. Execution terminates without panic (`∃ res g' out', ... = .ok (res, g', out')`).
+    2. `res = .Ok ()` holds **if and only if** the gate was unconsumed (`aborted = false ∧ released = false`),
+       `(session_id, attempt)` match, and all four barrier flags (`z_norm_ok`, `r0_norm_ok`,
+       `w1_match`, `u_com_bound`) hold; on acceptance `out' = g.z_share_masked` (and whenever the
+       sealed share is non-zero, `out' = g.z_share_masked` holds iff all gate checks pass), while
+       `g'.z_share_masked` is zeroed and `g'.released = true, g'.aborted = false`.
+    3. On every refusal (`res = .Err err`), both `out'` and `g'.z_share_masked` are wiped to
+       `Array.repeat 32#usize 0#u8` and `g'` transitions to `released = false, aborted = true`. -/
+theorem mlDsa_try_release_into_postcondition
+    (g : cred_and_hd_guards.MlDsaReleaseGate)
+    (c : cred_and_hd_guards.MlDsaBarrierChecks)
+    (out₀ : Array Std.U8 32#usize) :
+    (∃ res g' out',
+      cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g c out₀ =
+        .ok (res, g', out')) ∧
+    ∀ res g' out',
+      cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g c out₀ =
+        .ok (res, g', out') →
+      ((res = .Ok () ↔
+          (g.aborted = false ∧ g.released = false ∧
+           g.session_id = c.req_session_id ∧ g.attempt = c.req_attempt ∧
+           c.z_norm_ok = true ∧ c.r0_norm_ok = true ∧
+           c.w1_match = true ∧ c.u_com_bound = true)) ∧
+       (res = .Ok () →
+          out' = g.z_share_masked ∧
+          g' = { g with z_share_masked := Array.repeat 32#usize 0#u8,
+                        released := true, aborted := false }) ∧
+       (∀ err, res = .Err err →
+          mlDsaBarrierPassBool g c = false ∧
+          out' = Array.repeat 32#usize 0#u8 ∧
+          g' = { g with z_share_masked := Array.repeat 32#usize 0#u8,
+                        released := false, aborted := true }) ∧
+       (g.z_share_masked ≠ Array.repeat 32#usize 0#u8 →
+          (out' = g.z_share_masked ↔
+            (g.aborted = false ∧ g.released = false ∧
+             g.session_id = c.req_session_id ∧ g.attempt = c.req_attempt ∧
+             c.z_norm_ok = true ∧ c.r0_norm_ok = true ∧
+             c.w1_match = true ∧ c.u_com_bound = true))) ∧
+       g'.z_share_masked = Array.repeat 32#usize 0#u8 ∧
+       (g'.released = true ∨ g'.aborted = true)) := by
+  have hEq := mlDsa_try_release_into_eq_by_value g c out₀
+  obtain ⟨hPass, hFail⟩ := mldsa_gate_try_release_exact g c
+  have hIff := mlDsaBarrierPassBool_iff g c
+  cases hb : mlDsaBarrierPassBool g c
+  · obtain ⟨err, herr⟩ := hFail hb
+    rw [herr, result_bind_ok] at hEq
+    refine ⟨⟨.Err err, _, _, hEq⟩, fun res g' out' hRun => ?_⟩
+    rw [hEq] at hRun
+    injection hRun with hTuple
+    rcases hTuple with ⟨rfl, rfl, rfl⟩
+    have hNotCond :
+        ¬ (g.aborted = false ∧ g.released = false ∧
+           g.session_id = c.req_session_id ∧ g.attempt = c.req_attempt ∧
+           c.z_norm_ok = true ∧ c.r0_norm_ok = true ∧
+           c.w1_match = true ∧ c.u_com_bound = true) := by
+      intro hC
+      have := hIff.mpr hC
+      rw [hb] at this
+      cases this
+    refine ⟨⟨(fun h => by cases h), fun hC => False.elim (hNotCond hC)⟩,
+      (fun h => by cases h),
+      fun _ _ => ⟨rfl, rfl, by rcases g with ⟨_, _, _, _, _⟩; rfl⟩,
+      fun hNe => ⟨fun hOut => False.elim (hNe hOut.symm), fun hC => False.elim (hNotCond hC)⟩,
+      rfl, Or.inr rfl⟩
+  · have hok := hPass hb
+    rw [hok, result_bind_ok] at hEq
+    have hCond := hIff.mp hb
+    have hAbFalse : g.aborted = false := hCond.1
+    have hGateEq :
+        { g with z_share_masked := Array.repeat 32#usize 0#u8, released := true } =
+        { g with z_share_masked := Array.repeat 32#usize 0#u8,
+                 released := true, aborted := false } := by
+      rcases g with ⟨sid, att, z, rel, ab⟩
+      dsimp only at hAbFalse
+      subst hAbFalse
+      rfl
+    refine ⟨⟨.Ok (), _, _, hEq⟩, fun res g' out' hRun => ?_⟩
+    rw [hEq] at hRun
+    injection hRun with hTuple
+    rcases hTuple with ⟨rfl, rfl, rfl⟩
+    refine ⟨⟨fun _ => hCond, fun _ => rfl⟩,
+      fun _ => ⟨rfl, hGateEq⟩,
+      (fun _ h => by cases h),
+      fun _ => ⟨fun _ => hCond, fun _ => rfl⟩,
+      rfl, Or.inl rfl⟩
+
+/-- Step wrapper viewing `MlDsaReleaseGate::try_release_z_share_into` (for any initial caller
+    buffer `out₀`, e.g. `SecretBytes::<32>::zeroed()` in `PendingResponse::release`) as a
+    `(Self, Result<[u8; 32], CredHdGuardError>)` transition. -/
+def mlDsaTryReleaseIntoStep (out₀ : Array Std.U8 32#usize)
+    (g : cred_and_hd_guards.MlDsaReleaseGate)
+    (c : cred_and_hd_guards.MlDsaBarrierChecks) :
+    Result (cred_and_hd_guards.MlDsaReleaseGate ×
+      core.result.Result (Array Std.U8 32#usize) cred_and_hd_guards.CredHdGuardError) :=
+  Result.bind (cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g c out₀)
+    fun (res, g', out') =>
+      match res with
+      | .Ok () => .ok (g', .Ok out')
+      | .Err e => .ok (g', .Err e)
+
+/-- For every caller buffer `out₀`, `mlDsaTryReleaseIntoStep out₀` computes the exact same
+    state-and-result transition as `MlDsaReleaseGate::try_release_z_share`. -/
+theorem mlDsaTryReleaseIntoStep_eq_by_value
+    (out₀ : Array Std.U8 32#usize)
+    (g : cred_and_hd_guards.MlDsaReleaseGate)
+    (c : cred_and_hd_guards.MlDsaBarrierChecks) :
+    mlDsaTryReleaseIntoStep out₀ g c =
+      cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share g c := by
+  unfold mlDsaTryReleaseIntoStep
+  rw [mlDsa_try_release_into_eq_by_value]
+  obtain ⟨hPass, hFail⟩ := mldsa_gate_try_release_exact g c
+  cases hb : mlDsaBarrierPassBool g c
+  · obtain ⟨err, herr⟩ := hFail hb
+    rw [herr]
+    rfl
+  · rw [hPass hb]
+    rfl
+
+/-- **Exact step characterisation (`try_release_z_share_into`).** For every initial caller buffer
+    `out₀`, gate state `g`, and barrier-check record `c`, the extracted in-place release method
+    refines `Qsag.mirMlDsaReleaseMachine` in lockstep under `mlDsaGateAbs` and `mlDsaChecksAbs`. -/
+theorem mlDsaInto_extracted_step_refines (out₀ : Array Std.U8 32#usize) :
+    ExtractedStepRefines (mlDsaTryReleaseIntoStep out₀)
+      (fun z : Array Std.U8 32#usize => arrayU8ToBytes z) Qsag.mirMlDsaReleaseMachine
+      mlDsaGateAbs mlDsaChecksAbs := by
+  intro g c
+  rw [mlDsaTryReleaseIntoStep_eq_by_value]
+  exact mlDsa_extracted_step_refines g c
+
+/-- Production in-place ML-DSA release gate (`out₀ = [0u8; 32]`, matching
+    `SecretBytes::<32>::zeroed()` in `PendingResponse::release`) as a `Qsag.PartyMachine`. -/
+def extractedMlDsaIntoMachine :
+    Qsag.PartyMachine cred_and_hd_guards.MlDsaReleaseGate cred_and_hd_guards.MlDsaBarrierChecks
+      (List UInt8) :=
+  extractedPartyMachine (mlDsaTryReleaseIntoStep (Array.repeat 32#usize 0#u8))
+    (fun z => arrayU8ToBytes z)
+
+/-- **Weld (`try_release_z_share_into`).** The production `&mut` release gate forward-simulates
+    `Qsag.mirMlDsaReleaseMachine` in lockstep through `mlDsaGateAbs`. -/
+def extractedMlDsaInto_forwardSim_mirMlDsa :
+    Qsag.ForwardSim extractedMlDsaIntoMachine
+      (comapInputs Qsag.mirMlDsaReleaseMachine mlDsaChecksAbs) :=
+  (mlDsaInto_extracted_step_refines (Array.repeat 32#usize 0#u8)).forwardSim
+
+/-- Multi-turn safety of the production in-place ML-DSA release gate: across any trace of
+    `extractedMlDsaIntoMachine`, at most one partial share is released, and only when the request
+    matches `(g₀.session_id, g₀.attempt)` with all four barrier flags set. -/
+theorem extractedMlDsaInto_at_most_one_release
+    {g₀ gF : cred_and_hd_guards.MlDsaReleaseGate}
+    {tr : List (cred_and_hd_guards.MlDsaBarrierChecks × List UInt8)}
+    (hTr : extractedMlDsaIntoMachine.ValidTrace g₀ tr gF) :
+    tr.length ≤ 1 ∧
+    ∀ p ∈ tr, p.1.req_session_id = g₀.session_id ∧ p.1.req_attempt = g₀.attempt ∧
+      p.1.z_norm_ok = true ∧ p.1.r0_norm_ok = true ∧
+      p.1.w1_match = true ∧ p.1.u_com_bound = true := by
+  obtain ⟨aF, hA, _⟩ := extractedMlDsaInto_forwardSim_mirMlDsa.lift_validTrace
     (a₀ := mlDsaGateAbs g₀) rfl hTr
   obtain ⟨hLen, hAll, _⟩ :=
     Qsag.mirMlDsa_at_most_one_release_through_barrier (comapInputs_validTrace hA)
@@ -742,5 +979,148 @@ theorem inhabited_extractedMlDsa_honest_release :
   qsag_verified.proofs.tooth_extractedMlDsa_failed_barrier_never_released
 #verify_inhabited qsag_verified.proofs.extractedMlDsa_at_most_one_release
   qsag_verified.proofs.inhabited_extractedMlDsa_honest_release
+
+/-- Once `abort_in_place` has run on `g`, even a barrier-check record matching
+    `(g.session_id, g.attempt)` with all four barrier flags `true` is refused by
+    `try_release_z_share_into` with `GateAbortedOrReleased` and zeroed `out`. -/
+theorem mlDsa_abort_in_place_refuses_valid_checks
+    (g : cred_and_hd_guards.MlDsaReleaseGate) (out₀ : Array Std.U8 32#usize) :
+    let cOk : cred_and_hd_guards.MlDsaBarrierChecks :=
+      ⟨g.session_id, g.attempt, true, true, true, true⟩
+    ∃ g' : cred_and_hd_guards.MlDsaReleaseGate,
+      cred_and_hd_guards.MlDsaReleaseGate.abort_in_place g = .ok g' ∧
+      cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g' cOk out₀ =
+        .ok (.Err .GateAbortedOrReleased, g', Array.repeat 32#usize 0#u8) := by
+  dsimp only
+  refine ⟨{ g with z_share_masked := Array.repeat 32#usize 0#u8, released := false, aborted := true },
+    rfl, ?_⟩
+  rcases g with ⟨sid, att, z, rel, ab⟩
+  rfl
+
+/-- `#tooth` for `abort_in_place`: after `abort_in_place g = .ok g'`, no trace of
+    `extractedMlDsaIntoMachine` from `g'` ever accepts any release request `c`. -/
+theorem tooth_mlDsa_abort_in_place_blocks_valid_checks
+    {g g' gF : cred_and_hd_guards.MlDsaReleaseGate}
+    {c : cred_and_hd_guards.MlDsaBarrierChecks}
+    {out : List UInt8}
+    {rest : List (cred_and_hd_guards.MlDsaBarrierChecks × List UInt8)}
+    (hAb : cred_and_hd_guards.MlDsaReleaseGate.abort_in_place g = .ok g') :
+    ¬ extractedMlDsaIntoMachine.ValidTrace g' ((c, out) :: rest) gF := by
+  have hg' : g' = { g with z_share_masked := Array.repeat 32#usize 0#u8,
+                           released := false, aborted := true } := by
+    unfold cred_and_hd_guards.MlDsaReleaseGate.abort_in_place at hAb
+    exact (Result.ok.inj hAb).symm
+  suffices ∀ {s sF tr}, extractedMlDsaIntoMachine.ValidTrace s tr sF →
+      s.aborted = true → tr = (c, out) :: rest → False from
+    fun hT => this hT (by rw [hg']) rfl
+  intro s sF tr hT
+  induction hT with
+  | nil => intro _ h; cases h
+  | @accept sCur _ _ inp _ _ hStep _ _ =>
+    intro hAbCur _
+    dsimp only [extractedMlDsaIntoMachine, extractedPartyMachine] at hStep
+    rw [mlDsaTryReleaseIntoStep_eq_by_value] at hStep
+    have hb : mlDsaBarrierPassBool sCur inp = false := by
+      unfold mlDsaBarrierPassBool
+      simp [hAbCur]
+    obtain ⟨err, herr⟩ := (mldsa_gate_try_release_exact sCur inp).2 hb
+    rw [herr] at hStep
+    cases hStep
+  | @reject sCur _ inp _ hNone _ ih =>
+    intro _ ht
+    apply ih _ ht
+    dsimp only [extractedMlDsaIntoMachine, extractedPartyMachine]
+    rw [mlDsaTryReleaseIntoStep_eq_by_value]
+    cases hb : mlDsaBarrierPassBool sCur inp
+    · obtain ⟨err, herr⟩ := (mldsa_gate_try_release_exact sCur inp).2 hb
+      rw [herr]
+      rfl
+    · exfalso
+      dsimp only [extractedMlDsaIntoMachine, extractedPartyMachine] at hNone
+      rw [mlDsaTryReleaseIntoStep_eq_by_value, (mldsa_gate_try_release_exact sCur inp).1 hb] at hNone
+      cases hNone
+
+private theorem extractedMlDsaInto_failed_barrier_step_none
+    (g : cred_and_hd_guards.MlDsaReleaseGate) (c : cred_and_hd_guards.MlDsaBarrierChecks)
+    (hFail : (c.z_norm_ok && c.r0_norm_ok && c.w1_match && c.u_com_bound) = false) :
+    extractedMlDsaIntoMachine.step g c = none :=
+  (mlDsaInto_extracted_step_refines (Array.repeat 32#usize 0#u8)).step_none
+    (Qsag.mirMlDsa_failed_barrier_aborts_and_zeros_share_full _ _ hFail).1
+
+/-- Clearing any barrier flag causes `try_release_z_share_into` to zero both the caller buffer
+    (even when pre-filled with non-zero bytes) and `z_share_masked` and to abort the gate. -/
+theorem mlDsa_try_release_into_failed_barrier_wipes_out_and_aborts
+    (g : cred_and_hd_guards.MlDsaReleaseGate) (c : cred_and_hd_guards.MlDsaBarrierChecks)
+    (out₀ : Array Std.U8 32#usize)
+    (hFail : (c.z_norm_ok && c.r0_norm_ok && c.w1_match && c.u_com_bound) = false) :
+    ∃ err,
+      cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into g c out₀ =
+        .ok (.Err err,
+          { g with z_share_masked := Array.repeat 32#usize 0#u8,
+                   released := false, aborted := true },
+          Array.repeat 32#usize 0#u8) := by
+  have hb : mlDsaBarrierPassBool g c = false := by
+    unfold mlDsaBarrierPassBool
+    rcases c with ⟨csid, catt, zn, r0, w1, uc⟩
+    dsimp only at hFail ⊢
+    cases zn <;> cases r0 <;> cases w1 <;> cases uc <;> simp at hFail ⊢
+  obtain ⟨_, hFailExact⟩ := mldsa_gate_try_release_exact g c
+  obtain ⟨err, herr⟩ := hFailExact hb
+  refine ⟨err, ?_⟩
+  rw [mlDsa_try_release_into_eq_by_value, herr, result_bind_ok]
+  rcases g with ⟨_, _, _, _, _⟩
+  rfl
+
+/-- `#tooth` for the in-place ML-DSA weld: from any state, no trace of
+    `extractedMlDsaIntoMachine` records a release whose barrier checks have any flag clear. -/
+theorem tooth_extractedMlDsaInto_failed_barrier_wipes_out_and_withholds
+    {g gF : cred_and_hd_guards.MlDsaReleaseGate} {c : cred_and_hd_guards.MlDsaBarrierChecks}
+    {out : List UInt8} {rest : List (cred_and_hd_guards.MlDsaBarrierChecks × List UInt8)}
+    (hFail : (c.z_norm_ok && c.r0_norm_ok && c.w1_match && c.u_com_bound) = false) :
+    ¬ extractedMlDsaIntoMachine.ValidTrace g ((c, out) :: rest) gF := by
+  suffices ∀ {s sF tr}, extractedMlDsaIntoMachine.ValidTrace s tr sF →
+      tr = (c, out) :: rest → False from fun h => this h rfl
+  intro s sF tr hT
+  induction hT with
+  | nil => intro h; cases h
+  | @accept s' _ _ _ _ _ hStep _ _ =>
+    intro ht
+    simp only [List.cons.injEq, Prod.mk.injEq] at ht
+    obtain ⟨⟨rfl, rfl⟩, rfl⟩ := ht
+    rw [extractedMlDsaInto_failed_barrier_step_none _ _ hFail] at hStep
+    cases hStep
+  | reject _ _ _ ih => exact ih
+
+/-- One honest in-place release of `extractedMlDsaIntoMachine`. -/
+theorem inhabited_extractedMlDsaInto_honest_release :
+    ∃ (g₀ gF : cred_and_hd_guards.MlDsaReleaseGate)
+      (tr : List (cred_and_hd_guards.MlDsaBarrierChecks × List UInt8)),
+      extractedMlDsaIntoMachine.ValidTrace g₀ tr gF ∧ tr.length = 1 := by
+  let sid := Array.repeat 32#usize 0xA5#u8
+  let z := Array.repeat 32#usize 0x5A#u8
+  let g₀ : cred_and_hd_guards.MlDsaReleaseGate := ⟨sid, 3#u32, z, false, false⟩
+  let c : cred_and_hd_guards.MlDsaBarrierChecks := ⟨sid, 3#u32, true, true, true, true⟩
+  let g₁ : cred_and_hd_guards.MlDsaReleaseGate :=
+    { g₀ with z_share_masked := Array.repeat 32#usize 0#u8, released := true }
+  have h1 : extractedMlDsaIntoMachine.step g₀ c = some (g₁, arrayU8ToBytes z) := by
+    have hx := (mldsa_gate_try_release_exact g₀ c).1 (by decide)
+    dsimp only [extractedMlDsaIntoMachine, extractedPartyMachine]
+    rw [mlDsaTryReleaseIntoStep_eq_by_value, hx]
+  exact ⟨g₀, g₁, [(c, arrayU8ToBytes z)], .accept h1 (.nil g₁), rfl⟩
+
+#verify_constructive
+  qsag_verified.proofs.mlDsa_abort_in_place_spec
+  qsag_verified.proofs.mlDsa_abort_in_place_refuses_valid_checks
+  qsag_verified.proofs.mlDsa_try_release_into_eq_by_value
+  qsag_verified.proofs.mlDsa_try_release_into_postcondition
+  qsag_verified.proofs.mlDsaTryReleaseIntoStep_eq_by_value
+  qsag_verified.proofs.mlDsaInto_extracted_step_refines
+  qsag_verified.proofs.mlDsa_try_release_into_failed_barrier_wipes_out_and_aborts
+#tooth_pair qsag_verified.proofs.extractedMlDsaInto_at_most_one_release vs
+  qsag_verified.proofs.tooth_extractedMlDsaInto_failed_barrier_wipes_out_and_withholds
+#tooth_pair qsag_verified.proofs.extractedMlDsaInto_at_most_one_release vs
+  qsag_verified.proofs.tooth_mlDsa_abort_in_place_blocks_valid_checks
+#verify_inhabited qsag_verified.proofs.extractedMlDsaInto_at_most_one_release
+  qsag_verified.proofs.inhabited_extractedMlDsaInto_honest_release
 
 end qsag_verified.proofs

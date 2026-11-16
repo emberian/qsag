@@ -215,7 +215,7 @@ structure belt_latch_kernel.BeltLatchKernel where
   wal_poisoned : Bool
 
 /-- [qsag_verified::cred_and_hd_guards::CredHdGuardError]
-    Source: 'src/cred_and_hd_guards.rs', lines 32:0-42:1
+    Source: 'src/cred_and_hd_guards.rs', lines 34:0-44:1
     Visibility: public -/
 @[discriminant isize]
 inductive cred_and_hd_guards.CredHdGuardError where
@@ -230,7 +230,7 @@ inductive cred_and_hd_guards.CredHdGuardError where
 | HdZeroTestMismatchQuarantined : cred_and_hd_guards.CredHdGuardError
 
 /-- [qsag_verified::cred_and_hd_guards::MlDsaBarrierChecks]
-    Source: 'src/cred_and_hd_guards.rs', lines 94:0-101:1
+    Source: 'src/cred_and_hd_guards.rs', lines 96:0-103:1
     Visibility: public -/
 structure cred_and_hd_guards.MlDsaBarrierChecks where
   req_session_id : Array Std.U8 32#usize
@@ -241,7 +241,7 @@ structure cred_and_hd_guards.MlDsaBarrierChecks where
   u_com_bound : Bool
 
 /-- [qsag_verified::cred_and_hd_guards::MlDsaReleaseGate]
-    Source: 'src/cred_and_hd_guards.rs', lines 112:0-118:1
+    Source: 'src/cred_and_hd_guards.rs', lines 114:0-120:1
     Visibility: public -/
 structure cred_and_hd_guards.MlDsaReleaseGate where
   session_id : Array Std.U8 32#usize
@@ -251,7 +251,7 @@ structure cred_and_hd_guards.MlDsaReleaseGate where
   aborted : Bool
 
 /-- [qsag_verified::cred_and_hd_guards::HdZeroTestPhase]
-    Source: 'src/cred_and_hd_guards.rs', lines 256:0-262:1
+    Source: 'src/cred_and_hd_guards.rs', lines 305:0-311:1
     Visibility: public -/
 @[discriminant isize]
 inductive cred_and_hd_guards.HdZeroTestPhase where
@@ -262,7 +262,7 @@ inductive cred_and_hd_guards.HdZeroTestPhase where
 | FamilyQuarantined : cred_and_hd_guards.HdZeroTestPhase
 
 /-- [qsag_verified::cred_and_hd_guards::HdCommittedZeroTest]
-    Source: 'src/cred_and_hd_guards.rs', lines 267:0-274:1
+    Source: 'src/cred_and_hd_guards.rs', lines 316:0-323:1
     Visibility: public -/
 structure cred_and_hd_guards.HdCommittedZeroTest where
   session_id : Array Std.U8 32#usize

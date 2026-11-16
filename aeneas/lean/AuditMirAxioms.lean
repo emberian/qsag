@@ -136,7 +136,14 @@ run_cmd do
     ``qsag_verified.proofs.opening_verify_once_eq,
     ``qsag_verified.proofs.opening_verify_once_single_consumption,
     ``qsag_verified.proofs.opening_round_permit_sound,
-    ``qsag_verified.proofs.opening_round_permit_complete]
+    ``qsag_verified.proofs.opening_round_permit_complete,
+    ``qsag_verified.proofs.mlDsa_abort_in_place_spec,
+    ``qsag_verified.proofs.mlDsa_abort_in_place_refuses_valid_checks,
+    ``qsag_verified.proofs.mlDsa_try_release_into_eq_by_value,
+    ``qsag_verified.proofs.mlDsa_try_release_into_postcondition,
+    ``qsag_verified.proofs.mlDsaInto_extracted_step_refines,
+    ``qsag_verified.proofs.extractedMlDsaInto_at_most_one_release,
+    ``qsag_verified.proofs.mlDsa_try_release_into_failed_barrier_wipes_out_and_aborts]
   for name in requiredTheorems do
     match env.find? name with
     | some (.thmInfo _) => pure ()
