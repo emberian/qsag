@@ -2623,14 +2623,16 @@ pub fn check_succinct_shard_whir_merge(
 // ============================================================================
 
 /// The full-shard relation and its proofs: see [`crate::zk_hem::full_shard`].
-#[cfg(feature = "std")]
 pub use crate::zk_hem::full_shard::{
     FullShardError, FullShardMergeProof, FullShardMergeRelation, FullShardParams,
-    FullShardRelationStats, MAX_FULL_SHARD_CHILDREN, RecursiveShardProof,
-    RecursiveShardStatement, SHARD_MESSAGE_BYTES, ShardPublic, committee_digest,
-    prove_full_shard_merge, prove_recursive_shard, verify_full_shard_merge,
+    FullShardRelationStats, MAX_FULL_SHARD_CHILDREN, RECURSIVE_SHARD_WIRE_MAGIC,
+    RecursiveShardProof, RecursiveShardStatement, SHARD_MESSAGE_BYTES, ShardPublic,
+    committee_digest, prove_full_shard_merge, prove_recursive_shard, verify_full_shard_merge,
     verify_recursive_shard,
 };
+
+/// Canonical 8-byte wire header for [`SuccinctFullShardAggregate`].
+pub const SUCCINCT_FULL_SHARD_WIRE_MAGIC: &[u8; 8] = b"QSAGFSA1";
 
 /// The 32-byte statement a quorum key of `policy` signs in full-shard mode: a digest of
 /// [`hierarchical_hem_message`], so it binds the registry root, the shard's identity,
@@ -2649,7 +2651,6 @@ pub fn full_shard_signing_message(
 
 /// What a [`SuccinctFullShardAggregate`] is verified against. Nothing here comes from a
 /// prover.
-#[cfg(feature = "std")]
 #[derive(Clone, Copy, Debug)]
 pub struct FullShardAggregateStatement<'a> {
     pub policies: &'a [ShardHemPolicy],
@@ -2661,14 +2662,57 @@ pub struct FullShardAggregateStatement<'a> {
 /// One parent proof that, in every shard of a registry, `signer_counts[i]` distinct quorum
 /// keys signed the shard's [`full_shard_signing_message`]. It carries no child proof, no
 /// signer bitmap and no summary; which keys signed stays hidden.
-#[cfg(feature = "std")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuccinctFullShardAggregate {
     pub signer_counts: Vec<u32>,
     pub proof: FullShardMergeProof,
 }
 
-#[cfg(feature = "std")]
+impl SuccinctFullShardAggregate {
+    /// Serialize to canonical self-delimiting wire bytes (`QSAGFSA1` header).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let proof_bytes = self.proof.to_bytes();
+        let mut out = Vec::with_capacity(12 + 4 * self.signer_counts.len() + proof_bytes.len());
+        out.extend_from_slice(SUCCINCT_FULL_SHARD_WIRE_MAGIC);
+        out.extend_from_slice(&(self.signer_counts.len() as u32).to_le_bytes());
+        for &count in &self.signer_counts {
+            out.extend_from_slice(&count.to_le_bytes());
+        }
+        out.extend_from_slice(&proof_bytes);
+        out
+    }
+
+    /// Decode canonical wire bytes for `(relation, regime)`, rejecting non-canonical counts and trailing bytes.
+    pub fn from_bytes_canonical(
+        relation: &FullShardMergeRelation,
+        regime: WhirSecurityRegime,
+        bytes: &[u8],
+    ) -> Option<Self> {
+        if bytes.get(..8)? != SUCCINCT_FULL_SHARD_WIRE_MAGIC {
+            return None;
+        }
+        let n = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?) as usize;
+        if n != relation.num_children() {
+            return None;
+        }
+        let counts_end = 12usize.checked_add(4usize.checked_mul(n)?)?;
+        let count_bytes = bytes.get(12..counts_end)?;
+        let mut signer_counts = Vec::with_capacity(n);
+        for chunk in count_bytes.as_chunks::<4>().0 {
+            let c = u32::from_le_bytes(*chunk);
+            if c == 0 || c as usize > relation.params().slots() {
+                return None;
+            }
+            signer_counts.push(c);
+        }
+        let proof = FullShardMergeProof::from_bytes(relation, regime, bytes.get(counts_end..)?)?;
+        Some(Self {
+            signer_counts,
+            proof,
+        })
+    }
+}
+
 fn full_shard_statements(
     relation: &FullShardMergeRelation,
     statement: &FullShardAggregateStatement<'_>,
@@ -2705,14 +2749,12 @@ fn full_shard_statements(
         .collect()
 }
 
-#[cfg(feature = "std")]
 type Digest4Limbs = [Goldilocks; 4];
 
 /// Prove a full-shard aggregate. `witnesses[i]` holds shard `i`'s signer bitmap over its
 /// policy's quorum keys and the signatures of those signers, in ascending index order, over
 /// [`full_shard_signing_message`]. Both the children and the parent use the relation's
 /// regime.
-#[cfg(feature = "std")]
 pub fn prove_succinct_full_shard_aggregate(
     relation: &FullShardMergeRelation,
     statement: &FullShardAggregateStatement<'_>,
@@ -2723,41 +2765,62 @@ pub fn prove_succinct_full_shard_aggregate(
         .filter(|shards| shards.len() == witnesses.len())
         .ok_or(FullShardError::InvalidStatement)?;
     let mut statements = Vec::with_capacity(shards.len());
-    let mut proofs = Vec::with_capacity(shards.len());
     let mut counts = Vec::with_capacity(shards.len());
     let mut minimums = Vec::with_capacity(shards.len());
-    for (index, ((policy, witness), (_, message))) in statement
+    for ((policy, witness), (_, message)) in statement
         .policies
         .iter()
         .zip(witnesses)
         .zip(&shards)
-        .enumerate()
     {
-        let child = RecursiveShardStatement {
+        statements.push(RecursiveShardStatement {
             keys: policy.quorum_keys.clone(),
             bitmap: witness.bitmap.clone(),
             message: *message,
-        };
-        let mut blinding = [0u8; 40];
-        blinding[..32].copy_from_slice(seed);
-        blinding[32..].copy_from_slice(&(index as u64).to_le_bytes());
-        let blinding =
-            crate::sponge::cshake256_32(b"QSAG.HEM.FULL.SHARD.BLIND/v1", &blinding);
-        proofs.push(prove_recursive_shard(
-            relation.params(),
-            &child,
-            witness.signatures,
-            &blinding,
-        )?);
+        });
         counts.push(witness.bitmap.count_ones() as u64);
         minimums.push(policy.minimum_quorums as u64);
-        statements.push(child);
     }
     let minimum_global = u64::try_from(statement.minimum_global_quorums)
         .map_err(|_| FullShardError::InvalidStatement)?;
     if qsag_whir_verified::checked_quorum_sum(&counts, &minimums, minimum_global).is_none() {
         return Err(FullShardError::InvalidStatement);
     }
+    let prove_one = |index: usize| -> Result<RecursiveShardProof, FullShardError> {
+        let mut blinding = [0u8; 40];
+        blinding[..32].copy_from_slice(seed);
+        blinding[32..].copy_from_slice(&(index as u64).to_le_bytes());
+        let blinding = crate::sponge::cshake256_32(b"QSAG.HEM.FULL.SHARD.BLIND/v1", &blinding);
+        prove_recursive_shard(
+            relation.params(),
+            &statements[index],
+            witnesses[index].signatures,
+            &blinding,
+        )
+    };
+    #[cfg(feature = "std")]
+    let proofs: Vec<RecursiveShardProof> =
+        if statements.len() > 1 && crate::parallel_workers() > 1 {
+            let results: Vec<Result<RecursiveShardProof, FullShardError>> =
+                std::thread::scope(|scope| {
+                    let prove_ref = &prove_one;
+                    let tails: Vec<_> = (1..statements.len())
+                        .map(|index| crate::spawn_bounded(scope, move || prove_ref(index)))
+                        .collect();
+                    let mut out = Vec::with_capacity(statements.len());
+                    out.push(prove_ref(0));
+                    out.extend(tails.into_iter().map(crate::join_worker));
+                    out
+                });
+            results.into_iter().collect::<Result<Vec<_>, _>>()?
+        } else {
+            (0..statements.len()).map(prove_one).collect::<Result<Vec<_>, _>>()?
+        };
+    #[cfg(not(feature = "std"))]
+    let proofs: Vec<RecursiveShardProof> = (0..statements.len())
+        .map(prove_one)
+        .collect::<Result<Vec<_>, _>>()?;
+
     let proof = prove_full_shard_merge(
         relation,
         &statements,
@@ -2775,7 +2838,6 @@ pub fn prove_succinct_full_shard_aggregate(
 /// count meets its policy minimum, the counts reach `minimum_global_quorums`, and the
 /// parent proof certifies each count for that shard's committee and signed statement. No
 /// child proof and no locally verified evidence is needed.
-#[cfg(feature = "std")]
 pub fn verify_succinct_full_shard_aggregate(
     relation: &FullShardMergeRelation,
     statement: &FullShardAggregateStatement<'_>,

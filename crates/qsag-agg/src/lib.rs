@@ -69,24 +69,26 @@ pub mod pcs;
 mod pool;
 pub mod recursive;
 pub use recursive::{
-    HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, MAX_HIERARCHY_SHARDS,
-    OuterHemChainProof, PreparedPolicyRegistry, SUCCINCT_HIERARCHICAL_HEM_WIRE_MAGIC,
-    ShardHemBatch, ShardHemPolicy, ShardHemSummary, ShardHemWitness,
+    FullShardAggregateStatement, HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate,
+    MAX_HIERARCHY_SHARDS, OuterHemChainProof, PreparedPolicyRegistry,
+    SUCCINCT_FULL_SHARD_WIRE_MAGIC, SUCCINCT_HIERARCHICAL_HEM_WIRE_MAGIC, ShardHemBatch,
+    ShardHemPolicy, ShardHemSummary, ShardHemWitness, SuccinctFullShardAggregate,
     SuccinctHierarchicalHemAggregate, VerifiedHierarchicalHemEvidence,
     check_hierarchical_hem_commitment, check_hierarchical_hem_commitment_with_regime,
     checked_sum_usize, compact_summary_chain_digest, compress_hierarchical_hem_evidence,
     compress_verified_hierarchical_hem, compute_framed_message_digest,
-    compute_policy_registry_root, encode_policy_registry, hierarchical_hem_message,
-    prove_hierarchical_hem, prove_hierarchical_hem_prepared, prove_succinct_hierarchical_hem,
+    compute_policy_registry_root, encode_policy_registry, full_shard_signing_message,
+    hierarchical_hem_message, prove_hierarchical_hem, prove_hierarchical_hem_prepared,
+    prove_succinct_full_shard_aggregate, prove_succinct_hierarchical_hem,
     verify_hierarchical_hem, verify_hierarchical_hem_evidence,
     verify_hierarchical_hem_evidence_prepared, verify_hierarchical_hem_prepared,
-    verify_succinct_hierarchical_hem, verify_succinct_hierarchical_hem_prepared,
-    verify_succinct_hierarchical_hem_with_regime,
+    verify_succinct_full_shard_aggregate, verify_succinct_hierarchical_hem,
+    verify_succinct_hierarchical_hem_prepared, verify_succinct_hierarchical_hem_with_regime,
 };
 #[cfg(feature = "std")]
 mod prover_admission;
 pub mod recursion_census;
-pub mod recursive_fold;
+pub(crate) mod recursive_fold;
 #[cfg(feature = "std")]
 use prover_admission::prover_parallel_jobs;
 pub mod sig;
@@ -1688,12 +1690,13 @@ mod tests {
 
         // Mutating the serialized schedule's regime tag to retired capacity tags (`0`, `1`, `3`),
         // classical-only Johnson (`2`), another regime whose query table differs (`5`), or
-        // unknown (`9`) must fail closed during canonical decode.
+        // unknown (`11`) must fail closed during canonical decode; mutating to `9` (which shares
+        // tag `4`'s query table) decodes structurally and is rejected by verification.
         let leaf = leaf_of(&proof);
         let regime_offset =
             41 + 1 + leaf.bitmap.to_bytes().len() + 1 + 4 * leaf.shard_signer_counts.len();
         assert_eq!(wire[regime_offset], regime as u8);
-        for bad_tag in [0u8, 1, 2, 3, 5, 9] {
+        for bad_tag in [0u8, 1, 2, 3, 5, 11] {
             let mut mutated = wire.clone();
             mutated[regime_offset] = bad_tag;
             assert_eq!(
@@ -1701,6 +1704,21 @@ mod tests {
                 Err(HemAggError::MalformedWireBytes)
             );
         }
+        let mut swapped_turbo = wire.clone();
+        swapped_turbo[regime_offset] = WhirSecurityRegime::TurboShakeBciksJohnsonQrom128 as u8;
+        let swapped_proof = HemAggregatedProof::from_bytes_canonical(&swapped_turbo).unwrap();
+        assert!(!verify_aggregate_with_regime(
+            &pks,
+            &mode,
+            &swapped_proof,
+            regime
+        ));
+        assert!(!verify_aggregate_with_regime(
+            &pks,
+            &mode,
+            &swapped_proof,
+            WhirSecurityRegime::TurboShakeBciksJohnsonQrom128
+        ));
 
         // Both prover (`aggregate_with_config`) and verifier/wire-decoder must refuse
         // classical-only Johnson (`BciksJohnsonClassical128`, fails QROM-128 floor).
@@ -2555,6 +2573,7 @@ mod tests {
         let val = mle_eval_base_at_ext4(&evals, &point);
         let mut tr = fresh_test_transcript();
         let pcs_proof = whir_open(&state, &point, val, &mut tr);
+        drop(state);
         let mut pcs_bytes = Vec::new();
         pcs_proof.push_bytes(&mut pcs_bytes);
         let pcs_digest = crate::sponge::cshake256_32(b"TEST.FIXED.PCS", &pcs_bytes);
@@ -2734,6 +2753,8 @@ mod tests {
             WhirSecurityRegime::Cdhz25ZeroPowQrom128,
             WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
             WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+            WhirSecurityRegime::TurboShakeBciksJohnsonQrom128,
+            WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
         ] {
             // Two shards (2 + 1 signers) under one commitment and one batched opening.
             let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(812));
@@ -2795,6 +2816,12 @@ mod tests {
                     WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128
                 }
                 WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128 => {
+                    WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128
+                }
+                WhirSecurityRegime::TurboShakeBciksJohnsonQrom128 => {
+                    WhirSecurityRegime::BciksJohnsonQrom128
+                }
+                WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128 => {
                     WhirSecurityRegime::Cdhz25JohnsonQrom128
                 }
                 _ => WhirSecurityRegime::Cdhz25ZeroPowQrom128,

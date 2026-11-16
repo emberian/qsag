@@ -65,9 +65,10 @@ fn device() -> Option<&'static Device> {
 }
 
 /// Exclusive lease on the persistent VRAM prover arena (`ProverArena`) of the audited Vulkan
-/// device. Releases the lease back to the engine on `Drop`.
+/// device. Releases the lease back to the engine on `Drop`, then drops the admission permit.
 pub(crate) struct GpuWhirSession {
     device: &'static Device,
+    _admission: crate::prover_admission::Permit,
 }
 
 impl Drop for GpuWhirSession {
@@ -75,7 +76,7 @@ impl Drop for GpuWhirSession {
         self.device.backend.inner().release_prover_session();
         if let Ok(mut owner) = self.device.session_owner.lock() {
             *owner = None;
-            self.device.session_cv.notify_one();
+            self.device.session_cv.notify_all();
         }
     }
 }
@@ -83,25 +84,35 @@ impl Drop for GpuWhirSession {
 pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
     let d = device()?;
     let cur_tid = std::thread::current().id();
-    let mut owner = d.session_owner.lock().ok()?;
-    if *owner == Some(cur_tid) {
-        // A fresh commit would overwrite the live owner's arena. Existing-state
-        // opens/row proofs borrow that state's session directly instead. A nested
-        // independent commitment must use CPU storage until there are multiple arenas.
-        d.fallbacks
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        std::eprintln!(
-            "qsag_accel: nested independent commitment uses CPU; live VRAM arena retained"
-        );
-        return None;
+    {
+        let owner = d.session_owner.lock().ok()?;
+        if *owner == Some(cur_tid) {
+            // A fresh commit would overwrite the live owner's arena. Existing-state
+            // opens/row proofs borrow that state's session directly instead. A nested
+            // independent commitment must use CPU storage until there are multiple arenas.
+            d.fallbacks
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            std::eprintln!(
+                "qsag_accel: nested independent commitment uses CPU; live VRAM arena retained"
+            );
+            return None;
+        }
     }
+    // Enforce global lock order `prover_admission -> session_owner` across all callers
+    // (`whir_commit*` as well as `prove_shard_batch*`), preventing AB-BA deadlocks.
+    let admission = crate::prover_admission::acquire();
+    let mut owner = d.session_owner.lock().ok()?;
     while owner.is_some() {
         owner = d.session_cv.wait(owner).ok()?;
     }
     if d.backend.inner().try_acquire_prover_session().is_ok() {
         *owner = Some(cur_tid);
-        Some(GpuWhirSession { device: d })
+        Some(GpuWhirSession {
+            device: d,
+            _admission: admission,
+        })
     } else {
+        d.session_cv.notify_all();
         None
     }
 }
@@ -216,22 +227,33 @@ fn gpu_encode_length(domain_len: usize) -> bool {
     (1 << 14..=1 << 16).contains(&domain_len)
 }
 
-pub(crate) fn encode(coeffs: &[Goldilocks], domain_len: usize) -> Option<Vec<Goldilocks>> {
+pub(crate) fn encode(
+    coeffs: &[Goldilocks],
+    domain_len: usize,
+    secret: bool,
+) -> Option<Vec<Goldilocks>> {
     if !gpu_encode_length(domain_len) || device().is_none() {
         return None;
     }
-    gpu_encode(coeffs, domain_len)
+    gpu_encode(coeffs, domain_len, secret)
 }
 
 /// One coset encoding as a single GPU transform of the shifted coefficients.
-fn gpu_encode(coeffs: &[Goldilocks], domain_len: usize) -> Option<Vec<Goldilocks>> {
+fn gpu_encode(coeffs: &[Goldilocks], domain_len: usize, secret: bool) -> Option<Vec<Goldilocks>> {
     let mut values = alloc::vec![Goldilocks::ZERO; domain_len];
     let mut shift = Goldilocks::ONE;
     for (out, &c) in values.iter_mut().zip(coeffs) {
         *out = c * shift;
         shift *= Goldilocks::NON_RESIDUE;
     }
-    ntt(&mut values, false).then_some(values)
+    if ntt(&mut values, false) {
+        Some(values)
+    } else {
+        if secret {
+            qsag_asm::volatile_fill(&mut values, Goldilocks::ZERO);
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -307,7 +329,7 @@ mod tests {
                 let cpu = crate::field::encode_rs_coset_goldilocks_cpu(&coeffs, 4);
                 cpu_ms.push(t.elapsed().as_secs_f64() * 1000.);
                 let t = std::time::Instant::now();
-                let gpu = gpu_encode(&coeffs, 4 << log).expect("GPU encode");
+                let gpu = gpu_encode(&coeffs, 4 << log, false).expect("GPU encode");
                 gpu_ms.push(t.elapsed().as_secs_f64() * 1000.);
                 assert_eq!(cpu, gpu);
             }
@@ -366,8 +388,8 @@ mod tests {
                 .all(|v| *v == Goldilocks::ZERO)
         );
         // The device computes the coset encoding; the host encoder is preferred at this size.
-        assert!(encode(&coeffs, n).is_none());
-        let shifted = gpu_encode(&coeffs, n).expect("GPU coset encoding");
+        assert!(encode(&coeffs, n, false).is_none());
+        let shifted = gpu_encode(&coeffs, n, false).expect("GPU coset encoding");
         for i in [0, 1, 7, 511, 8191, 16383] {
             let x = Goldilocks::NON_RESIDUE * omega.pow(i as u64);
             let expected = coeffs

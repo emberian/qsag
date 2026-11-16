@@ -374,6 +374,267 @@ pub fn merkle_layer_poseidon2_at_cpu(
     Ok(())
 }
 
+/// Canonical 64-bit domain constant for `qsag-agg` two-block binary Merkle nodes (`0x5153_4147_4D52_4B4C`).
+pub const POSEIDON2_MERKLE_NODE_DOMAIN: u64 = 0x5153_4147_4D52_4B4C;
+/// Canonical 64-bit domain constant for `qsag-agg` FORS binary Merkle nodes (`0x5153_4147_464E_4F44`).
+pub const POSEIDON2_FORS_NODE_DOMAIN: u64 = 0x5153_4147_464E_4F44;
+/// Canonical domain constant for `Poseidon2` WHIR Canopy per-tree key derivation (`0x5032_434E_534C_5401`).
+pub const POSEIDON2_CANOPY_SALT_DOMAIN: u64 = 0x5032_434E_534C_5401;
+/// High 32-bit prefix OR-ed with `node_idx: u32` in `Poseidon2` WHIR Canopy internal nodes (`0x5032_4E44_0000_0000`).
+pub const POSEIDON2_CANOPY_NODE_HI: u64 = 0x5032_4E44_0000_0000;
+/// Canonical domain constant for `Poseidon2` WHIR Canopy root commitment binding (`0x5032_434E_524F_4F54`).
+pub const POSEIDON2_CANOPY_ROOT_DOMAIN: u64 = 0x5032_434E_524F_4F54;
+
+/// Tree coordinates for the 2-block full-`pk_seed[0..4]` `Poseidon2` binary Merkle node sponge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Poseidon2Merkle2BlockAddr {
+    /// Hypertree layer (`<= 0xFFFE` so `(layer << 48) | (level << 32) | node_idx < p`).
+    pub layer: u32,
+    /// 64-bit hypertree / subtree index, split into two injective 32-bit canonical limbs.
+    pub tree_idx: u64,
+    /// Height level above the leaves (`<= 0xFFFF`).
+    pub level: u32,
+    /// Starting `node_idx` within `level` (`start_node_idx + out_parents.len() - 1 <= u32::MAX`).
+    pub start_node_idx: u64,
+}
+
+/// Domain-separated, length-framed Width-12 Rate-8 `Poseidon2` sponge over `Goldilocks` limbs,
+/// matching `qsag_agg::sponge::poseidon2_sponge_hash_limbs` bit-for-bit.
+pub fn poseidon2_sponge_hash_limbs_with_cap(
+    domain_tag: u64,
+    init_cap: [u64; 4],
+    limbs: &[u64],
+) -> [u64; 4] {
+    let mut st = [0u64; 12];
+    for (dst, &cap) in st[8..].iter_mut().zip(&init_cap) {
+        *dst = gl_reduce_u64(cap);
+    }
+    let absorb = |st: &mut [u64; 12], block: &[u64; 8]| {
+        for (lane, &val) in st[..8].iter_mut().zip(block) {
+            *lane = crate::goldilocks::gl_reduce128(*lane as u128 + val as u128);
+        }
+        poseidon2_perm12(st);
+    };
+    let mut block = [0u64; 8];
+    block[0] = gl_reduce_u64(domain_tag);
+    block[1] = gl_reduce_u64(limbs.len() as u64);
+    let head = limbs.len().min(6);
+    for (dst, &limb) in block[2..2 + head].iter_mut().zip(limbs) {
+        *dst = gl_reduce_u64(limb);
+    }
+    absorb(&mut st, &block);
+
+    let mut pos = head;
+    while pos + 8 <= limbs.len() {
+        let mut full = [0u64; 8];
+        for i in 0..8 {
+            full[i] = gl_reduce_u64(limbs[pos + i]);
+        }
+        absorb(&mut st, &full);
+        pos += 8;
+    }
+    if pos < limbs.len() {
+        let mut tail_blk = [0u64; 8];
+        for (dst, &limb) in tail_blk.iter_mut().zip(&limbs[pos..]) {
+            *dst = gl_reduce_u64(limb);
+        }
+        absorb(&mut st, &tail_blk);
+    }
+    let out = [
+        gl_reduce_u64(st[0]),
+        gl_reduce_u64(st[1]),
+        gl_reduce_u64(st[2]),
+        gl_reduce_u64(st[3]),
+    ];
+    ct_zeroize_u64s(&mut st);
+    out
+}
+
+/// Derive the per-tree capacity key `tree_key` for a `Poseidon2` WHIR Canopy tree, matching
+/// `qsag_agg::sponge::poseidon2_canopy_tree_key`.
+#[inline]
+pub fn poseidon2_canopy_tree_key_cpu(
+    stage_idx: u8,
+    log_leaves: u8,
+    tree_salt: [u64; 4],
+) -> [u64; 4] {
+    poseidon2_sponge_hash_limbs_with_cap(
+        POSEIDON2_CANOPY_SALT_DOMAIN,
+        tree_salt,
+        &[stage_idx as u64, log_leaves as u64],
+    )
+}
+
+/// Bind a `Poseidon2` WHIR Canopy tree's top node `nodes[1]` to `(stage_idx, log_leaves, tree_salt)`,
+/// matching `qsag_agg::sponge::poseidon2_canopy_root`.
+#[inline]
+pub fn poseidon2_canopy_root_cpu(
+    stage_idx: u8,
+    log_leaves: u8,
+    tree_salt: [u64; 4],
+    top_node: [u64; 4],
+) -> [u64; 4] {
+    poseidon2_sponge_hash_limbs_with_cap(
+        POSEIDON2_CANOPY_ROOT_DOMAIN,
+        tree_salt,
+        &[
+            stage_idx as u64,
+            log_leaves as u64,
+            gl_reduce_u64(top_node[0]),
+            gl_reduce_u64(top_node[1]),
+            gl_reduce_u64(top_node[2]),
+            gl_reduce_u64(top_node[3]),
+        ],
+    )
+}
+
+/// Validate shape and canonical Goldilocks framing range (`layer <= 0xFFFE`, `level <= 0xFFFF`,
+/// `start_node_idx + parents_len - 1 <= u32::MAX`) for a 2-block `Poseidon2` Merkle layer.
+pub(crate) fn merkle_layer_2block_shape(
+    children_len: usize,
+    parents_len: usize,
+    addr: Poseidon2Merkle2BlockAddr,
+) -> Result<(), AccelError> {
+    merkle_layer_shape(children_len, parents_len, addr.start_node_idx)?;
+    if addr.layer > 0xFFFE || addr.level > 0xFFFF {
+        return Err(AccelError::LengthOverflow);
+    }
+    Ok(())
+}
+
+/// CPU reference for the 2-block full-`pk_seed[0..4]` `Poseidon2` binary Merkle node sponge
+/// (`merkle_node_hash` in `qsag-agg`), matching `merkle_layer_poseidon2.comp` (`pc.mode == 1`)
+/// bit-for-bit.
+pub fn merkle_layer_poseidon2_2block_at_cpu(
+    children: &[[u64; 4]],
+    domain_tag: u64,
+    pk_seed: &[u64; 4],
+    addr: Poseidon2Merkle2BlockAddr,
+    out_parents: &mut [[u64; 4]],
+) -> Result<(), AccelError> {
+    merkle_layer_2block_shape(children.len(), out_parents.len(), addr)?;
+    let s0 = gl_reduce_u64(pk_seed[0]);
+    let s1 = gl_reduce_u64(pk_seed[1]);
+    let s2 = gl_reduce_u64(pk_seed[2]);
+    let s3 = gl_reduce_u64(pk_seed[3]);
+    let dom = gl_reduce_u64(domain_tag);
+    let tree_lo = gl_reduce_u64(addr.tree_idx & 0xFFFF_FFFF);
+    let tree_hi = gl_reduce_u64(addr.tree_idx >> 32);
+    let const_iv = gl_reduce_u64(POSEIDON2_CONST_IV);
+
+    for (parent_idx, parent_out) in out_parents.iter_mut().enumerate() {
+        let left = &children[2 * parent_idx];
+        let right = &children[2 * parent_idx + 1];
+        let node_idx = addr.start_node_idx + (parent_idx as u64);
+        let meta0 = ((addr.layer as u64) << 48) | ((addr.level as u64) << 32) | node_idx;
+
+        let mut st: [u64; 12] = [
+            s0,
+            s1,
+            s2,
+            s3,
+            gl_reduce_u64(left[0]),
+            gl_reduce_u64(left[1]),
+            gl_reduce_u64(left[2]),
+            gl_reduce_u64(left[3]),
+            dom,
+            gl_reduce_u64(meta0),
+            tree_lo,
+            tree_hi,
+        ];
+        poseidon2_perm12(&mut st);
+
+        st[0] = gl_add(st[0], right[0]);
+        st[1] = gl_add(st[1], right[1]);
+        st[2] = gl_add(st[2], right[2]);
+        st[3] = gl_add(st[3], right[3]);
+        st[4] = gl_add(st[4], 1);
+        st[5] = gl_add(st[5], const_iv);
+        poseidon2_perm12(&mut st);
+
+        *parent_out = [st[0], st[1], st[2], st[3]];
+        ct_zeroize_u64s(&mut st);
+    }
+    Ok(())
+}
+
+/// CPU reference for `Poseidon2` WHIR Canopy internal node compression (`1` permutation Weighted Jive),
+/// binding 1-indexed binary heap `node_idx = start_node_idx + parent_idx` and `tree_key[0..3]`,
+/// matching `qsag_agg::sponge::poseidon2_canopy_internal` and `merkle_layer_poseidon2.comp` (`pc.mode == 2`).
+pub fn merkle_layer_poseidon2_canopy_at_cpu(
+    children: &[[u64; 4]],
+    tree_key: &[u64; 4],
+    start_node_idx: u64,
+    out_parents: &mut [[u64; 4]],
+) -> Result<(), AccelError> {
+    merkle_layer_shape(children.len(), out_parents.len(), start_node_idx)?;
+    let k0 = gl_reduce_u64(tree_key[0]);
+    let k1 = gl_reduce_u64(tree_key[1]);
+    let k2 = gl_reduce_u64(tree_key[2]);
+
+    for (parent_idx, parent_out) in out_parents.iter_mut().enumerate() {
+        let left = &children[2 * parent_idx];
+        let right = &children[2 * parent_idx + 1];
+        let l0 = gl_reduce_u64(left[0]);
+        let l1 = gl_reduce_u64(left[1]);
+        let l2 = gl_reduce_u64(left[2]);
+        let l3 = gl_reduce_u64(left[3]);
+        let r0 = gl_reduce_u64(right[0]);
+        let r1 = gl_reduce_u64(right[1]);
+        let r2 = gl_reduce_u64(right[2]);
+        let r3 = gl_reduce_u64(right[3]);
+        let node_idx = (start_node_idx + parent_idx as u64) & 0xFFFF_FFFF;
+        let t0 = gl_reduce_u64(POSEIDON2_CANOPY_NODE_HI | node_idx);
+
+        let mut st: [u64; 12] = [l0, l1, l2, l3, r0, r1, r2, r3, t0, k0, k1, k2];
+        poseidon2_perm12(&mut st);
+
+        parent_out[0] = gl_add(st[0], gl_add(l0, gl_add(gl_mul(2, r0), gl_mul(4, t0))));
+        parent_out[1] = gl_add(st[1], gl_add(l1, gl_add(gl_mul(2, r1), gl_mul(4, k0))));
+        parent_out[2] = gl_add(st[2], gl_add(l2, gl_add(gl_mul(2, r2), gl_mul(4, k1))));
+        parent_out[3] = gl_add(st[3], gl_add(l3, gl_add(gl_mul(2, r3), gl_mul(4, k2))));
+        ct_zeroize_u64s(&mut st);
+    }
+    Ok(())
+}
+
+/// CPU reference for fixed-tweak `Poseidon2` Weighted Jive Merkle compression (`pc.mode == 3`),
+/// matching `qsag_agg::zk_hem::recursive_whir::compress` bit-for-bit.
+pub fn merkle_layer_poseidon2_fixed_tweak_cpu(
+    children: &[[u64; 4]],
+    tweak: &[u64; 4],
+    out_parents: &mut [[u64; 4]],
+) -> Result<(), AccelError> {
+    merkle_layer_shape(children.len(), out_parents.len(), 0)?;
+    let t0 = gl_reduce_u64(tweak[0]);
+    let t1 = gl_reduce_u64(tweak[1]);
+    let t2 = gl_reduce_u64(tweak[2]);
+    let t3 = gl_reduce_u64(tweak[3]);
+
+    for (parent_idx, parent_out) in out_parents.iter_mut().enumerate() {
+        let left = &children[2 * parent_idx];
+        let right = &children[2 * parent_idx + 1];
+        let l0 = gl_reduce_u64(left[0]);
+        let l1 = gl_reduce_u64(left[1]);
+        let l2 = gl_reduce_u64(left[2]);
+        let l3 = gl_reduce_u64(left[3]);
+        let r0 = gl_reduce_u64(right[0]);
+        let r1 = gl_reduce_u64(right[1]);
+        let r2 = gl_reduce_u64(right[2]);
+        let r3 = gl_reduce_u64(right[3]);
+
+        let mut st: [u64; 12] = [l0, l1, l2, l3, r0, r1, r2, r3, t0, t1, t2, t3];
+        poseidon2_perm12(&mut st);
+
+        parent_out[0] = gl_add(st[0], gl_add(l0, gl_add(gl_mul(2, r0), gl_mul(4, t0))));
+        parent_out[1] = gl_add(st[1], gl_add(l1, gl_add(gl_mul(2, r1), gl_mul(4, t1))));
+        parent_out[2] = gl_add(st[2], gl_add(l2, gl_add(gl_mul(2, r2), gl_mul(4, t2))));
+        parent_out[3] = gl_add(st[3], gl_add(l3, gl_add(gl_mul(2, r3), gl_mul(4, t3))));
+        ct_zeroize_u64s(&mut st);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod merkle_tweak_tests {
     use super::*;

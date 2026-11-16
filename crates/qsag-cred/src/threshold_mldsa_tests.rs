@@ -1662,3 +1662,47 @@ fn parametric_two_of_six_keygen_and_nonprefix_session_sign() {
         &outputs[0].signature
     ));
 }
+
+#[cfg(feature = "std")]
+#[test]
+fn compact_fs_nonce_burn_store_updates_rejection_attempts_in_place() {
+    let dir = std::env::temp_dir().join(std::format!(
+        "qsag-cred-nonce-compact-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("burns");
+    let key_id = [0x42; 32];
+    let mac_key = [0x99; 32];
+    let mut store = FsNonceBurnStore::create(&path, key_id, mac_key).unwrap();
+
+    // 100 rejection-sampling attempts within the SAME session must incur ZERO file-size growth!
+    let sess = [0xAA; 32];
+    assert!(store.reserve(1, 0, &sess, 0));
+    let len_after_first = std::fs::metadata(&path).unwrap().len();
+    for att in 1..100u32 {
+        assert!(store.reserve(1, u64::from(att), &sess, att));
+        assert!(!store.reserve(1, u64::from(att) + 1, &sess, att));
+    }
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), len_after_first);
+
+    // 200 distinct sessions remain strictly bounded by `MAX_RETAINED_SESSIONS_PER_PARTY` (`64`).
+    for idx in 0..200u32 {
+        let mut s = [0u8; 32];
+        s[..4].copy_from_slice(&idx.to_be_bytes());
+        assert!(store.reserve(1, 100 + u64::from(idx), &s, 0));
+    }
+    let bounded_len = std::fs::metadata(&path).unwrap().len();
+    assert!(bounded_len <= 4096, "bounded_len={bounded_len}");
+    assert_eq!(store.next_epoch(&key_id, 1).unwrap(), 300);
+    drop(store);
+
+    let reopened = FsNonceBurnStore::open_at_least(&path, key_id, mac_key, 300).unwrap();
+    assert_eq!(reopened.next_epoch(&key_id, 1).unwrap(), 300);
+    drop(reopened);
+    std::fs::remove_dir_all(dir).unwrap();
+}

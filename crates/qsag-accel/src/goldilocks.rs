@@ -642,3 +642,174 @@ pub fn coset_lde_ext2_cpu(
     // 3. Forward NTT of length M = N * blowup across all of `out`.
     ntt_alloc_free(out, false)
 }
+
+// ============================================================================
+// Quartic Extension Field F_{p^4} = F_{p^2}[w] / (w^2 - u) & 4-Byte Kronecker
+// ============================================================================
+
+/// Canonical `GoldilocksExt4` identity element `[1, 0, 0, 0]`.
+pub const EXT4_ONE: [u64; 4] = [1, 0, 0, 0];
+/// Canonical `GoldilocksExt4` zero element `[0, 0, 0, 0]`.
+pub const EXT4_ZERO: [u64; 4] = [0, 0, 0, 0];
+
+#[inline]
+pub const fn ext4_add(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    [
+        gl_add(a[0], b[0]),
+        gl_add(a[1], b[1]),
+        gl_add(a[2], b[2]),
+        gl_add(a[3], b[3]),
+    ]
+}
+
+#[inline]
+pub const fn ext4_sub(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    [
+        gl_sub(a[0], b[0]),
+        gl_sub(a[1], b[1]),
+        gl_sub(a[2], b[2]),
+        gl_sub(a[3], b[3]),
+    ]
+}
+
+#[inline]
+pub const fn ext4_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    let v0 = ext2_mul([a[0], a[1]], [b[0], b[1]]);
+    let v1 = ext2_mul([a[2], a[3]], [b[2], b[3]]);
+    let mid_raw = ext2_mul(
+        ext2_add([a[0], a[1]], [a[2], a[3]]),
+        ext2_add([b[0], b[1]], [b[2], b[3]]),
+    );
+    let mid = ext2_sub(ext2_sub(mid_raw, v0), v1);
+    [
+        gl_add(v0[0], gl_mul(v1[1], GOLDILOCKS_GENERATOR)),
+        gl_add(v0[1], v1[0]),
+        mid[0],
+        mid[1],
+    ]
+}
+
+#[inline]
+pub const fn ext4_pow_pub(mut base: [u64; 4], mut exp: u64) -> [u64; 4] {
+    base = [
+        gl_reduce_u64(base[0]),
+        gl_reduce_u64(base[1]),
+        gl_reduce_u64(base[2]),
+        gl_reduce_u64(base[3]),
+    ];
+    let mut acc = EXT4_ONE;
+    while exp > 0 {
+        if (exp & 1) == 1 {
+            acc = ext4_mul(acc, base);
+        }
+        base = ext4_mul(base, base);
+        exp >>= 1;
+    }
+    acc
+}
+
+/// Build a 4-byte (`1,024`-entry = `32 KiB`) multilinear equality Kronecker table over
+/// $\mathbb{F}_{p^4}$ supporting up to `32` variables (`num_vars <= 26` in VRAM WHIR).
+pub fn eq_kronecker_1024(point: &[[u64; 4]]) -> [[u64; 4]; 1024] {
+    let mut out = [EXT4_ZERO; 1024];
+    for byte_idx in 0..4usize {
+        for k in 0..256usize {
+            let mut prod = EXT4_ONE;
+            let mut zeroed = false;
+            for j in 0..8usize {
+                let b = 8 * byte_idx + j;
+                let bit = (k >> j) & 1 == 1;
+                if b < point.len() {
+                    let p = point[b];
+                    let term = if bit { p } else { ext4_sub(EXT4_ONE, p) };
+                    prod = ext4_mul(prod, term);
+                } else if bit {
+                    zeroed = true;
+                    break;
+                }
+            }
+            out[256 * byte_idx + k] = if zeroed { EXT4_ZERO } else { prod };
+        }
+    }
+    out
+}
+
+/// Build a 4-byte (`1,024`-entry = `32 KiB`) multilinear monomial Kronecker table over
+/// $\mathbb{F}_{p^4}$ supporting up to `32` variables (`num_vars <= 26` in VRAM WHIR).
+pub fn mono_kronecker_1024(point: &[[u64; 4]]) -> [[u64; 4]; 1024] {
+    let mut out = [EXT4_ZERO; 1024];
+    for byte_idx in 0..4usize {
+        for k in 0..256usize {
+            let mut prod = EXT4_ONE;
+            let mut zeroed = false;
+            for j in 0..8usize {
+                let b = 8 * byte_idx + j;
+                let bit = (k >> j) & 1 == 1;
+                if b < point.len() {
+                    if bit {
+                        prod = ext4_mul(prod, point[b]);
+                    }
+                } else if bit {
+                    zeroed = true;
+                    break;
+                }
+            }
+            out[256 * byte_idx + k] = if zeroed { EXT4_ZERO } else { prod };
+        }
+    }
+    out
+}
+
+/// Build a 4-byte (`1,024`-entry = `32 KiB`) geometric Kronecker table for `scale * z^i`
+/// over $0 \le i < 2^{32}$.
+pub fn geometric_kronecker_1024(scale: [u64; 4], z: [u64; 4]) -> [[u64; 4]; 1024] {
+    let mut out = [EXT4_ZERO; 1024];
+    let z_c = [
+        gl_reduce_u64(z[0]),
+        gl_reduce_u64(z[1]),
+        gl_reduce_u64(z[2]),
+        gl_reduce_u64(z[3]),
+    ];
+    let mut cur = [
+        gl_reduce_u64(scale[0]),
+        gl_reduce_u64(scale[1]),
+        gl_reduce_u64(scale[2]),
+        gl_reduce_u64(scale[3]),
+    ];
+    for slot in &mut out[0..256] {
+        *slot = cur;
+        cur = ext4_mul(cur, z_c);
+    }
+    let z_8 = ext4_pow_pub(z_c, 256);
+    cur = EXT4_ONE;
+    for slot in &mut out[256..512] {
+        *slot = cur;
+        cur = ext4_mul(cur, z_8);
+    }
+    let z_16 = ext4_pow_pub(z_8, 256);
+    cur = EXT4_ONE;
+    for slot in &mut out[512..768] {
+        *slot = cur;
+        cur = ext4_mul(cur, z_16);
+    }
+    let z_24 = ext4_pow_pub(z_16, 256);
+    cur = EXT4_ONE;
+    for slot in &mut out[768..1024] {
+        *slot = cur;
+        cur = ext4_mul(cur, z_24);
+    }
+    out
+}
+
+/// Build a paired `2 x 1,024` (`2,048`-entry = `64 KiB`) geometric Kronecker table for two OOD points.
+pub fn pair_geometric_kronecker_2048(
+    s0: [u64; 4],
+    z0: [u64; 4],
+    s1: [u64; 4],
+    z1: [u64; 4],
+) -> [[u64; 4]; 2048] {
+    let mut out = [EXT4_ZERO; 2048];
+    out[0..1024].copy_from_slice(&geometric_kronecker_1024(s0, z0));
+    out[1024..2048].copy_from_slice(&geometric_kronecker_1024(s1, z1));
+    out
+}

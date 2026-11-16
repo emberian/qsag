@@ -30,9 +30,11 @@ pub use inventory::recover_child_signing_seed_unchecked;
 pub use inventory::{
     HdError, InventoryChildProof, InventoryMasterPublicKey, InventoryPartyShareVault, RekeyFault,
     WatchOnlyInventoryTable, commit_inventory_public_keys, derive_inventory_vault,
-    enroll_child_signing_seed_quorum, inventory_child_public_key, recover_child_signing_seed,
-    verify_inventory_child_proof,
+    derive_rss_child_share_2of3, enroll_child_signing_seed_quorum, inventory_child_public_key,
+    recover_child_signing_seed, verify_inventory_child_proof,
 };
+#[cfg(feature = "std")]
+pub use inventory::{derive_rss_child_share_2of3_budgeted, recover_child_signing_seed_budgeted};
 pub use linear_module::{
     AuthorizedHdProjection, DEFAULT_MAX_DERIVATION_DEPTH, LinearModulePartyShare, LinearModuleXPub,
     MAX_NON_HARDENED_DERIVATION_DEPTH, MODULE_K, MODULE_L, MODULE_MAC_LANES, MODULE_N, MODULE_Q,

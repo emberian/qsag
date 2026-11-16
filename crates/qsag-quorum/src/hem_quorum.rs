@@ -60,7 +60,9 @@ use qsag_core::preprocessing::{
 use qsag_core::sponge::keccak::{cshake256_32, encode_multi_frame};
 use qsag_core::sponge::poseidon2::{POSEIDON2_CONST_IV, poseidon2_hash32};
 use qsag_core::tsw_baggy::MonotonicEpochLatch;
-use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_ext2, wipe_goldilocks};
+use qsag_core::wipe::{
+    SecretBuffer, SecretWipe, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_ext2, wipe_goldilocks,
+};
 
 use crate::hash::{mac32, mac32_verify};
 
@@ -680,15 +682,16 @@ impl HemCommitteePartitionedQuorum {
                 prf_commits.push(hem_prf_check_digest_clear(prf_secret, pk_seed));
 
                 // Split `prf_secret` into `t` additive `Goldilocks` shares
-                let mut prf_rem = prf_secret;
+                let mut prf_rem = SecretBuffer(prf_secret);
                 for &member in &comm.members[..t - 1] {
-                    let sh: HemDigest4 = core::array::from_fn(|_| rng.next_goldilocks());
+                    let sh = SecretBuffer(core::array::from_fn(|_| rng.next_goldilocks()));
                     for l in 0..4 {
                         prf_rem[l] -= sh[l];
                     }
-                    custodians[member].leaf_prf_shares[kp] = Some(sh);
+                    custodians[member].leaf_prf_shares[kp] = Some(*sh);
                 }
-                custodians[comm.members[t - 1]].leaf_prf_shares[kp] = Some(prf_rem);
+                custodians[comm.members[t - 1]].leaf_prf_shares[kp] = Some(*prf_rem);
+                drop(prf_rem);
                 wipe_goldilocks(&mut prf_secret);
 
                 let mut kp_endpoints = [[Goldilocks::ZERO; 4]; HEM_WOTS_CHAINS];
@@ -697,28 +700,33 @@ impl HemCommitteePartitionedQuorum {
                     .collect();
 
                 for (r, ep_slot) in kp_endpoints.iter_mut().enumerate().take(HEM_WOTS_CHAINS) {
-                    let y0 =
-                        hem_wots_base_secret_clear(sk_seed, pk_seed, 0, 0, kp as u32, r as u32);
-                    let y1 =
-                        hem_wots_step_hash_injective(pk_seed, y0, 0, 0, kp as u32, r as u32, 0);
-                    let y2 =
-                        hem_wots_step_hash_injective(pk_seed, y1, 0, 0, kp as u32, r as u32, 1);
+                    let y0 = SecretBuffer(hem_wots_base_secret_clear(
+                        sk_seed, pk_seed, 0, 0, kp as u32, r as u32,
+                    ));
+                    let y1 = SecretBuffer(hem_wots_step_hash_injective(
+                        pk_seed, *y0, 0, 0, kp as u32, r as u32, 0,
+                    ));
+                    let y2 = SecretBuffer(hem_wots_step_hash_injective(
+                        pk_seed, *y1, 0, 0, kp as u32, r as u32, 1,
+                    ));
                     let y3 =
-                        hem_wots_step_hash_injective(pk_seed, y2, 0, 0, kp as u32, r as u32, 2);
+                        hem_wots_step_hash_injective(pk_seed, *y2, 0, 0, kp as u32, r as u32, 2);
                     *ep_slot = y3;
-                    let secret_states = [y0, y1, y2];
+                    let secret_states = SecretBuffer([*y0, *y1, *y2]);
+                    drop((y0, y1, y2));
 
-                    let mut member_steps = vec![[[Goldilocks::ZERO; 4]; HEM_WOTS_MAX_STEP]; t];
+                    let mut member_steps =
+                        SecretBuffer(vec![[[Goldilocks::ZERO; 4]; HEM_WOTS_MAX_STEP]; t]);
                     for step in 0..HEM_WOTS_MAX_STEP {
-                        let mut rem = secret_states[step];
+                        let mut rem = SecretBuffer(secret_states[step]);
                         for m_slot in member_steps.iter_mut().take(t - 1) {
-                            let sh: HemDigest4 = core::array::from_fn(|_| rng.next_goldilocks());
+                            let sh = SecretBuffer(core::array::from_fn(|_| rng.next_goldilocks()));
                             for l in 0..4 {
                                 rem[l] -= sh[l];
                             }
-                            m_slot[step] = sh;
+                            m_slot[step] = *sh;
                         }
-                        member_steps[t - 1][step] = rem;
+                        member_steps[t - 1][step] = *rem;
                     }
                     for m_idx in 0..t {
                         per_member_chains[m_idx].push(member_steps[m_idx]);
@@ -1815,7 +1823,7 @@ impl HemDynamicShamirQuorum {
         new_party_rngs: &mut [PartyPrivateRng],
         fault: ReshareFaultInjection,
     ) -> Result<(), HemQuorumError> {
-        if new_t < 2 || new_t > new_n || new_n > 64 {
+        if new_t < 2 || new_t > new_n || new_n > MAX_HEM_QUORUM_PARTIES {
             return Err(HemQuorumError::InvalidQuorum { t: new_t, n: new_n });
         }
         check_randomness_count(old_party_rngs, self.n)?;
@@ -1855,10 +1863,14 @@ impl HemDynamicShamirQuorum {
 
         // Round 1: Each old custodian `d_slot` deals weighted degree-`< new_t` sub-shares + HVZK
         // blinding evaluations `mask_eval` to `0..new_n` and broadcasts Poseidon2 commitments.
-        let mut sub_alpha = vec![vec![GoldilocksExt2::ZERO; new_n]; self.t];
-        let mut sub_mask = vec![vec![GoldilocksExt2::ZERO; new_n]; self.t];
-        let mut sub_vals = vec![vec![vec![Goldilocks::ZERO; total_scalars]; new_n]; self.t];
-        let mut sub_macs = vec![vec![vec![GoldilocksExt2::ZERO; total_scalars]; new_n]; self.t];
+        let mut sub_alpha = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; new_n]; self.t]);
+        let mut sub_mask = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; new_n]; self.t]);
+        let mut sub_vals =
+            SecretBuffer(vec![vec![vec![Goldilocks::ZERO; total_scalars]; new_n]; self.t]);
+        let mut sub_macs = SecretBuffer(vec![
+            vec![vec![GoldilocksExt2::ZERO; total_scalars]; new_n];
+            self.t
+        ]);
         let mut round1_commits = vec![vec![[0u8; 32]; new_n]; self.t];
 
         for (d_slot, &old_p) in active_old.iter().enumerate() {
@@ -1871,24 +1883,26 @@ impl HemDynamicShamirQuorum {
             );
 
             // Preserve `alpha` across reshare (`sum_i lam_i * alpha_share_i == alpha`) with fresh polynomial
-            let weighted_alpha = self.shares[old_p].alpha_share.mul_base(lam);
-            sub_alpha[d_slot] = shamir_share_ext2(new_t, &new_pts, weighted_alpha, &mut d_rng);
+            let weighted_alpha = SecretBuffer(self.shares[old_p].alpha_share.mul_base(lam));
+            sub_alpha[d_slot] = shamir_share_ext2(new_t, &new_pts, *weighted_alpha, &mut d_rng);
 
-            let mask_secret = d_rng.next_ext2();
-            sub_mask[d_slot] = shamir_share_ext2(new_t, &new_pts, mask_secret, &mut d_rng);
+            let mask_secret = SecretBuffer(d_rng.next_ext2());
+            sub_mask[d_slot] = shamir_share_ext2(new_t, &new_pts, *mask_secret, &mut d_rng);
 
             let mut flat_idx = 0usize;
             for kp in self.high_water_leaf..self.public_dir.active_leaves {
                 for s_idx in 0..HEM_LEAF_SCALARS {
-                    let mut w_val = lam * self.shares[old_p].leaf_vals[kp][s_idx];
+                    let mut w_val = SecretBuffer(lam * self.shares[old_p].leaf_vals[kp][s_idx]);
                     if matches!(fault, ReshareFaultInjection::ShiftConstantTerm { dealer } if dealer == d_slot)
                         && flat_idx == 0
                     {
-                        w_val += Goldilocks::ONE;
+                        *w_val += Goldilocks::ONE;
                     }
-                    let w_mac = self.shares[old_p].leaf_macs[kp][s_idx].mul_base(lam);
-                    let v_poly = shamir_share_goldilocks(new_t, &new_pts, w_val, &mut d_rng);
-                    let m_poly = shamir_share_ext2(new_t, &new_pts, w_mac, &mut d_rng);
+                    let w_mac = SecretBuffer(self.shares[old_p].leaf_macs[kp][s_idx].mul_base(lam));
+                    let v_poly =
+                        SecretBuffer(shamir_share_goldilocks(new_t, &new_pts, *w_val, &mut d_rng));
+                    let m_poly =
+                        SecretBuffer(shamir_share_ext2(new_t, &new_pts, *w_mac, &mut d_rng));
                     for j in 0..new_n {
                         sub_vals[d_slot][j][flat_idx] = v_poly[j];
                         sub_macs[d_slot][j][flat_idx] = m_poly[j];
@@ -1961,7 +1975,7 @@ impl HemDynamicShamirQuorum {
         }
 
         for (d_slot, &old_p) in active_old.iter().enumerate() {
-            let mut z_evals = Vec::with_capacity(new_n);
+            let mut z_evals = SecretBuffer(Vec::with_capacity(new_n));
             for j in 0..new_n {
                 let mut acc = sub_mask[d_slot][j] + chi_alpha * sub_alpha[d_slot][j];
                 for k in 0..total_scalars {
@@ -1977,9 +1991,10 @@ impl HemDynamicShamirQuorum {
         }
 
         // Assemble candidate `(new_t, new_n)` shares across `0..new_n`
-        let mut new_alpha_shares = vec![GoldilocksExt2::ZERO; new_n];
-        let mut new_flat_vals = vec![vec![Goldilocks::ZERO; total_scalars]; new_n];
-        let mut new_flat_macs = vec![vec![GoldilocksExt2::ZERO; total_scalars]; new_n];
+        let mut new_alpha_shares = SecretBuffer(vec![GoldilocksExt2::ZERO; new_n]);
+        let mut new_flat_vals = SecretBuffer(vec![vec![Goldilocks::ZERO; total_scalars]; new_n]);
+        let mut new_flat_macs =
+            SecretBuffer(vec![vec![GoldilocksExt2::ZERO; total_scalars]; new_n]);
         for d_slot in 0..self.t {
             for j in 0..new_n {
                 new_alpha_shares[j] += sub_alpha[d_slot][j];
@@ -1990,28 +2005,31 @@ impl HemDynamicShamirQuorum {
                 wipe_goldilocks(&mut sub_vals[d_slot][j]);
                 wipe_ext2(&mut sub_macs[d_slot][j]);
             }
+            wipe_ext2(&mut sub_alpha[d_slot]);
+            wipe_ext2(&mut sub_mask[d_slot]);
         }
 
         // Round 2C: SPDZ Constant-Term Preservation `MacCheck` over `GoldilocksExt2`!
-        // Checks `\sum_k gamma_k * (alpha * val'_k - mac'_k) == 0` via zero-masked Shamir opening
-        // AND checks `leaf[high_water_leaf]` / `prf_commits[high_water_leaf]` if unspent leaves remain!
+        // Checks `\sum_k gamma_k * (alpha * val'_k - mac'_k) == 0` via zero-masked Shamir opening.
+        // Round 2B already proved all `0..new_n` shares lie on unique degree-`< new_t` polynomials,
+        // so `check_quorum = (2 * new_t).min(new_n)` contains at least one honest custodian under any
+        // `< new_t` corruption while keeping Ring-LWE Base-OT setup `O(new_t^2)` up to `new_n = 256`.
         if total_scalars > 0 {
-            // Authenticate a fresh private random mask, then open only the masked
-            // linear combination. Public transcript challenges select the combination;
-            // they must never determine the mask or its authentication randomness.
-            let check_quorum = new_n;
-            let check_pts = &new_pts[..];
+            let check_quorum = (2 * new_t).min(new_n);
+            let check_pts = &new_pts[..check_quorum];
             let check_lambdas = lagrange_weights_zero_goldilocks(&check_pts[..new_t])
                 .ok_or(HemQuorumError::InvalidQuorum { t: new_t, n: new_n })?;
-            let alpha_contribs: Vec<GoldilocksExt2> = (0..check_quorum)
-                .map(|j| {
-                    if j < new_t {
-                        new_alpha_shares[j].mul_base(check_lambdas[j])
-                    } else {
-                        GoldilocksExt2::ZERO
-                    }
-                })
-                .collect();
+            let alpha_contribs = SecretBuffer(
+                (0..check_quorum)
+                    .map(|j| {
+                        if j < new_t {
+                            new_alpha_shares[j].mul_base(check_lambdas[j])
+                        } else {
+                            GoldilocksExt2::ZERO
+                        }
+                    })
+                    .collect::<Vec<GoldilocksExt2>>(),
+            );
 
             let mut check_rngs = private_operation_rngs(
                 &session_id,
@@ -2024,30 +2042,34 @@ impl HemDynamicShamirQuorum {
             )
             .map_err(Poseidon2MpcError::Preprocess)?;
             // Generate 1 random scalar `r = sum_j r_j` and authenticate it under `alpha` via Gilboa OLE!
-            let r_inputs: Vec<Vec<Goldilocks>> = (0..check_quorum)
-                .map(|j| {
-                    let rj = check_rngs[j].next_goldilocks();
-                    shamir_share_goldilocks(new_t, check_pts, rj, &mut check_rngs[j])
-                })
-                .collect();
-            let mut r_sh = vec![Goldilocks::ZERO; check_quorum];
-            for r_row in &r_inputs {
+            let r_inputs = SecretBuffer(
+                (0..check_quorum)
+                    .map(|j| {
+                        let rj = check_rngs[j].next_goldilocks();
+                        shamir_share_goldilocks(new_t, check_pts, rj, &mut check_rngs[j])
+                    })
+                    .collect::<Vec<Vec<Goldilocks>>>(),
+            );
+            let mut r_sh = SecretBuffer(vec![Goldilocks::ZERO; check_quorum]);
+            for r_row in r_inputs.iter() {
                 for j in 0..check_quorum {
                     r_sh[j] += r_row[j];
                 }
             }
-            let r_batch: Vec<Vec<Goldilocks>> = r_sh.iter().map(|&x| vec![x]).collect();
-            let r_macs = qsag_core::preprocessing::spdz_authenticate_goldilocks_batch_ext2(
-                &cshake256_32(b"QSAG.HEM.QSB.MACCHK.AUTH/v1", &session_id),
-                new_t,
-                check_pts,
-                &mut mesh,
-                &alpha_contribs,
-                &new_alpha_shares[..check_quorum],
-                &r_batch,
-                &mut check_rngs,
-            )
-            .map_err(|_| HemQuorumError::ReshareMacCheckFailed)?;
+            let r_batch = SecretBuffer(r_sh.iter().map(|&x| vec![x]).collect::<Vec<Vec<_>>>());
+            let r_macs = SecretBuffer(
+                qsag_core::preprocessing::spdz_authenticate_goldilocks_batch_ext2(
+                    &cshake256_32(b"QSAG.HEM.QSB.MACCHK.AUTH/v1", &session_id),
+                    new_t,
+                    check_pts,
+                    &mut mesh,
+                    &alpha_contribs,
+                    &new_alpha_shares[..check_quorum],
+                    &r_batch,
+                    &mut check_rngs,
+                )
+                .map_err(|_| HemQuorumError::ReshareMacCheckFailed)?,
+            );
 
             // Squeeze `total_scalars` base-field weights `beta_k` and open ONLY the single masked
             // scalar `U = r + sum_k beta_k * val'_k` behind `commit_and_open_spdz_goldilocks_batch_quorum`!
@@ -2055,8 +2077,8 @@ impl HemDynamicShamirQuorum {
             for _ in 0..total_scalars {
                 betas.push(chal_rng.next_goldilocks());
             }
-            let mut masked_sh = vec![vec![Goldilocks::ZERO; 1]; check_quorum];
-            let mut masked_mac = vec![vec![GoldilocksExt2::ZERO; 1]; check_quorum];
+            let mut masked_sh = SecretBuffer(vec![vec![Goldilocks::ZERO; 1]; check_quorum]);
+            let mut masked_mac = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; 1]; check_quorum]);
             for j in 0..check_quorum {
                 let mut v_acc = r_sh[j];
                 let mut m_acc = r_macs[j][0];
@@ -3872,5 +3894,42 @@ mod tests {
         assert!(verify_individual_signature(&agg_pk, msg0, &agg_sig0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hem_qsb_reshare_and_proactive_refresh_above_64_custodians() {
+        let mut qsb = HemDynamicShamirQuorum::stage([0x61; 32], 2, 3, 2).expect("stage 2-of-3");
+        let pk_initial = qsb.public_key();
+        let agg_pk = ValidatorPublicKey::from_bytes_canonical(&pk_initial.to_bytes()).unwrap();
+
+        // Reshare (2, 3) -> (3, 100) (`new_n = 100 > 64`, up to `MAX_HEM_QUORUM_PARTIES = 256`).
+        qsb.reshare_quorum(
+            [0x62; 32],
+            &[0, 2],
+            3,
+            100,
+            &mut test_party_rngs(200, 3),
+            &mut test_party_rngs(210, 100),
+        )
+        .expect("reshare to 3-of-100");
+        assert_eq!(qsb.public_key(), pk_initial);
+        assert_eq!(qsb.threshold_and_size(), (3, 100));
+
+        // Proactive refresh across all 100 custodians.
+        qsb.proactive_refresh([0x63; 32], &mut test_party_rngs(320, 100))
+            .expect("proactive refresh on 3-of-100");
+        assert_eq!(qsb.public_key(), pk_initial);
+
+        // Sign using high-indexed custodians `[5, 67, 99]` (`> 64`) and `q = 52` latch ackers (`2*52 = 104 > 100 + 2`).
+        let ackers: Vec<usize> = (0..52).collect();
+        let msg = b"3-of-100 dynamic shamir sign after >64 reshare and refresh";
+        let (ep, sig) = qsb
+            .sign_quorum(&[5, 67, 99], &ackers, msg)
+            .expect("sign on 3-of-100");
+        assert_eq!(ep, 0);
+        let agg_sig =
+            ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &sig.to_bytes())
+                .unwrap();
+        assert!(verify_individual_signature(&agg_pk, msg, &agg_sig));
     }
 }

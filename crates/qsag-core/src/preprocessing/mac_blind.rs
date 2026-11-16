@@ -269,6 +269,43 @@ fn ole_blind_ext2(
     Ok(w.into_inner())
 }
 
+fn commit_and_open_additive_tower128(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    shares: &[Tower128],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Tower128, PreprocessError> {
+    let n = shares.len();
+    if n == 0 || party_rngs.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t: n, n });
+    }
+    let mut salts = SecretBuffer(vec![[0u8; 32]; n]);
+    let mut coms = Vec::with_capacity(n);
+    for p in 0..n {
+        salts[p] = party_rngs[p].next_bytes32();
+        let pid = (p as u64).to_be_bytes();
+        let vb = shares[p].0.to_le_bytes();
+        coms.push(cshake256_32_multi_frame(
+            b"QSAG.SPDZ.T128.OPEN.COM/v1",
+            &[session_id, phase.as_bytes(), &pid, &vb, &salts[p]],
+        ));
+    }
+    let mut sum = Tower128::ZERO;
+    for p in 0..n {
+        let pid = (p as u64).to_be_bytes();
+        let vb = shares[p].0.to_le_bytes();
+        let exp = cshake256_32_multi_frame(
+            b"QSAG.SPDZ.T128.OPEN.COM/v1",
+            &[session_id, phase.as_bytes(), &pid, &vb, &salts[p]],
+        );
+        if !ct_eq_bytes32(&exp, &coms[p]) {
+            return Err(PreprocessError::ShareCommitMismatch { phase, party_id: p });
+        }
+        sum = sum.add(shares[p]);
+    }
+    Ok(sum)
+}
+
 pub(super) fn blind_open_tower128(
     session_id: &[u8; 32],
     phase: &'static str,
@@ -285,14 +322,13 @@ pub(super) fn blind_open_tower128(
         }
     };
     let sender = SecretBuffer(residual.iter().map(|&d| vec![d]).collect::<Vec<_>>());
-    let points = (1..=residual.len())
-        .map(|p| TowerGf256(p as u8))
-        .collect::<Vec<_>>();
-    let lambdas =
-        lagrange_weights_zero_gf256(&points).ok_or(PreprocessError::DuplicateOrZeroEvalPoint)?;
     // Repeat independently so even a fault confined to ONE MAC lane retains
     // 2^-256 rejection soundness, rather than accepting when one randomizer is zero.
-    for _ in 0..2 {
+    for round in 0u64..2 {
+        let round_sid = cshake256_32_multi_frame(
+            b"QSAG.SPDZ.BLIND.T128.ROUND/v1",
+            &[session_id, phase.as_bytes(), &round.to_be_bytes()],
+        );
         let receiver = SecretBuffer(
             party_rngs
                 .iter_mut()
@@ -301,28 +337,38 @@ pub(super) fn blind_open_tower128(
         );
         // Tower OLE's FIRST input is the sender, its SECOND input is the receiver.
         let products = SecretBuffer(pairwise_ole_tower128(
-            session_id, mesh, &sender, &receiver, party_rngs,
+            &round_sid, mesh, &sender, &receiver, party_rngs,
         )?);
-        let shares = SecretBuffer(
-            products
-                .iter()
-                .zip(&lambdas)
-                .map(|(w, l)| w[0].mul_gf256(l.inv().expect("nonzero public interpolation weight")))
-                .collect::<Vec<_>>(),
-        );
-        let opened = commit_and_open_degree_tower128(
-            session_id,
-            phase,
-            points.len(),
-            &points,
-            &shares,
-            party_rngs,
-        )?;
+        let shares = SecretBuffer(products.iter().map(|w| w[0]).collect::<Vec<_>>());
+        let opened = commit_and_open_additive_tower128(&round_sid, phase, &shares, party_rngs)?;
         if !opened.ct_eq(Tower128::ZERO) {
             return Ok(opened);
         }
     }
     Ok(Tower128::ZERO)
+}
+
+/// Multiplicatively blind and open additive `GF(2)[X]/(X^128 + X^7 + X^2 + X + 1)` MAC residuals
+/// by mapping into `Tower128` via the exact field isomorphism `poly128_to_tower128_ct` and running
+/// two independent `pairwise_ole_tower128` rounds (`2^-256` rejection soundness, `0` key-bit leakage).
+pub fn blind_open_additive_gf128_poly(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    poly_residuals: &[u128],
+    mesh: Option<&mut OtMesh>,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<u128, PreprocessError> {
+    let tower_residuals = SecretBuffer(
+        poly_residuals
+            .iter()
+            .map(|&r| Tower128(qsag_asm::poly128_to_tower128_ct(r)))
+            .collect::<Vec<_>>(),
+    );
+    let opened = blind_open_tower128(session_id, phase, &tower_residuals, mesh, party_rngs)?;
+    let mut flat = SecretBuffer([0u128; 64]);
+    flat.0[0] = opened.0;
+    qsag_asm::tower128_to_poly128_x64_ct(&mut flat.0);
+    Ok(flat.0[0])
 }
 
 // Keep the large portable field circuit out of the basis-table loop's
@@ -346,15 +392,17 @@ pub(super) fn pairwise_ole_tower128(
 ) -> Result<Vec<Vec<Tower128>>, PreprocessError> {
     let n = ot_mesh.n;
     let count = u_per_party[0].len();
-    let mut w_per_party: Vec<Vec<Tower128>> = (0..n)
-        .map(|i| {
-            (0..count)
-                .map(|k| u_per_party[i][k].mul(v_per_party[i][k]))
-                .collect()
-        })
-        .collect();
+    let mut w_per_party = SecretBuffer(
+        (0..n)
+            .map(|i| {
+                (0..count)
+                    .map(|k| u_per_party[i][k].mul(v_per_party[i][k]))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+    );
     if count == 0 {
-        return Ok(w_per_party);
+        return Ok(core::mem::take(&mut w_per_party.0));
     }
 
     // Each sender payload is multiplied by the same public basis elements in
@@ -486,7 +534,7 @@ pub(super) fn pairwise_ole_tower128(
             }
         }
     }
-    Ok(w_per_party)
+    Ok(w_per_party.into_inner())
 }
 
 #[cfg(test)]

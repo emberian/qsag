@@ -999,8 +999,8 @@ impl<T: ParallelSeededDkgProducts> Products<'_, T> {
 /// }
 /// ```
 pub struct ParallelSeededDkgBeaverShare {
-    values: [u128; 3],
-    macs: [[u128; 2]; 3],
+    pub(super) values: [u128; 3],
+    pub(super) macs: [[u128; 2]; 3],
 }
 impl fmt::Debug for ParallelSeededDkgBeaverShare {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

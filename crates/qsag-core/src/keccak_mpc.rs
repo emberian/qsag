@@ -271,6 +271,184 @@ impl RssKeyShare256 {
             &self.sk_prf_secondary[..self.key_len],
         )
     }
+
+    /// Construct replicated 200-byte (`[u64; 25]`) `Keccak-f[1600]` state shares `(mine, next)`
+    /// for a bound scheme identity by folding `public_template` onto slot `0` and embedding this
+    /// custodian's `(primary, secondary)` key shares at `secret_byte_offset..secret_byte_offset + key_len`.
+    pub fn replicated_keccak_state_shares(
+        &self,
+        expected_scheme_identity: &[u8; 32],
+        use_prf: bool,
+        public_template: &[u64; 25],
+        secret_byte_offset: usize,
+    ) -> Result<SecretBuffer<([u64; 25], [u64; 25])>, KeccakMpcError> {
+        if self.party_id >= 3 || !matches!(self.key_len, 16 | 24 | 32) {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        match &self.scheme_identity {
+            Some(bound) if ct_eq_bytes32(bound, expected_scheme_identity) => {}
+            _ => return Err(KeccakMpcError::KeyBindingMismatch),
+        }
+        let end = secret_byte_offset
+            .checked_add(self.key_len)
+            .ok_or(KeccakMpcError::InvalidParameters)?;
+        if end > 200 {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let (prim, sec) = if use_prf {
+            self.sk_prf_shares()
+        } else {
+            self.sk_seed_shares()
+        };
+        let mut mine_bytes = SecretBuffer([0u8; 200]);
+        let mut next_bytes = SecretBuffer([0u8; 200]);
+        if self.party_id == 0 {
+            for (i, &w) in public_template.iter().enumerate() {
+                mine_bytes[8 * i..8 * i + 8].copy_from_slice(&w.to_le_bytes());
+            }
+        } else if self.party_id == 2 {
+            for (i, &w) in public_template.iter().enumerate() {
+                next_bytes[8 * i..8 * i + 8].copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        for k in 0..self.key_len {
+            mine_bytes[secret_byte_offset + k] ^= prim[k];
+            next_bytes[secret_byte_offset + k] ^= sec[k];
+        }
+        let mut pair = SecretBuffer(([0u64; 25], [0u64; 25]));
+        for i in 0..25 {
+            let mut m8 = [0u8; 8];
+            let mut n8 = [0u8; 8];
+            m8.copy_from_slice(&mine_bytes[8 * i..8 * i + 8]);
+            n8.copy_from_slice(&next_bytes[8 * i..8 * i + 8]);
+            pair.0[i] = u64::from_le_bytes(m8);
+            pair.1[i] = u64::from_le_bytes(n8);
+        }
+        Ok(pair)
+    }
+
+    /// Canonical 268-byte secret serialization of one custodian's 2-of-3 RSS share (`QSRSSK01`).
+    pub fn to_secret_bytes(&self) -> crate::wipe::SecretVec<u8> {
+        let mut out = SecretBuffer(Vec::with_capacity(268));
+        out.0.extend_from_slice(b"QSRSSK01");
+        out.0.push(self.party_id as u8);
+        out.0.push(self.key_len as u8);
+        let (has_scheme_id, scheme_id_bytes) = match &self.scheme_identity {
+            Some(id) => (1u8, *id),
+            None => (0u8, [0u8; 32]),
+        };
+        out.0.push(has_scheme_id);
+        out.0.push(0u8);
+        out.0.extend_from_slice(&self.pk_seed);
+        out.0.extend_from_slice(&self.sk_seed_primary);
+        out.0.extend_from_slice(&self.sk_seed_secondary);
+        out.0.extend_from_slice(&self.sk_prf_primary);
+        out.0.extend_from_slice(&self.sk_prf_secondary);
+        out.0.extend_from_slice(&self.prg_seed_primary);
+        out.0.extend_from_slice(&self.prg_seed_secondary);
+        out.0.extend_from_slice(&scheme_id_bytes);
+        debug_assert_eq!(out.0.len(), 268);
+        out
+    }
+
+    /// Decode a canonical 268-byte `QSRSSK01` 2-of-3 RSS custodian share, rejecting malformed headers
+    /// or non-zero trailing `scheme_identity` bytes when `has_scheme_id == 0`.
+    pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, KeccakMpcError> {
+        if bytes.len() != 268 || &bytes[0..8] != b"QSRSSK01" {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let party_id = usize::from(bytes[8]);
+        let key_len = usize::from(bytes[9]);
+        let has_scheme_id = bytes[10];
+        let reserved = bytes[11];
+        if party_id >= 3 || !matches!(key_len, 16 | 24 | 32) || has_scheme_id > 1 || reserved != 0 {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let read32 = |off: usize| -> [u8; 32] {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes[off..off + 32]);
+            arr
+        };
+        let pk_seed = read32(12);
+        let sk_seed_primary = read32(44);
+        let sk_seed_secondary = read32(76);
+        let sk_prf_primary = read32(108);
+        let sk_prf_secondary = read32(140);
+        let prg_seed_primary = read32(172);
+        let prg_seed_secondary = read32(204);
+        let scheme_id_bytes = read32(236);
+        let scheme_identity = if has_scheme_id == 1 {
+            Some(scheme_id_bytes)
+        } else {
+            if !ct_eq_bytes32(&scheme_id_bytes, &[0u8; 32]) {
+                return Err(KeccakMpcError::InvalidParameters);
+            }
+            None
+        };
+        if key_len < 32
+            && (!ct_eq_bytes(&pk_seed[key_len..], &[0u8; 32][key_len..])
+                || !ct_eq_bytes(&sk_seed_primary[key_len..], &[0u8; 32][key_len..])
+                || !ct_eq_bytes(&sk_seed_secondary[key_len..], &[0u8; 32][key_len..])
+                || !ct_eq_bytes(&sk_prf_primary[key_len..], &[0u8; 32][key_len..])
+                || !ct_eq_bytes(&sk_prf_secondary[key_len..], &[0u8; 32][key_len..]))
+        {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        Ok(Self {
+            party_id,
+            key_len,
+            pk_seed,
+            sk_seed_primary,
+            sk_seed_secondary,
+            sk_prf_primary,
+            sk_prf_secondary,
+            prg_seed_primary,
+            prg_seed_secondary,
+            tsw_binding: None,
+            scheme_identity,
+            slh_params: None,
+        })
+    }
+
+    /// Construct a 2-of-3 RSS custodian share directly from replicated share pairs without
+    /// assembling any combined secret.
+    pub fn from_replicated_shares(
+        party_id: usize,
+        key_len: usize,
+        pk_seed: [u8; 32],
+        sk_seed: ([u8; 32], [u8; 32]),
+        sk_prf: ([u8; 32], [u8; 32]),
+        prg_seed: ([u8; 32], [u8; 32]),
+    ) -> Result<Self, KeccakMpcError> {
+        let mut sk_seed = SecretBuffer([sk_seed.0, sk_seed.1]);
+        let mut sk_prf = SecretBuffer([sk_prf.0, sk_prf.1]);
+        let prg_seed = SecretBuffer([prg_seed.0, prg_seed.1]);
+        if party_id >= 3 || !matches!(key_len, 16 | 24 | 32) {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let mut pk_norm = pk_seed;
+        for b in key_len..32 {
+            pk_norm[b] = 0;
+            sk_seed.0[0][b] = 0;
+            sk_seed.0[1][b] = 0;
+            sk_prf.0[0][b] = 0;
+            sk_prf.0[1][b] = 0;
+        }
+        Ok(Self {
+            party_id,
+            key_len,
+            pk_seed: pk_norm,
+            sk_seed_primary: sk_seed.0[0],
+            sk_seed_secondary: sk_seed.0[1],
+            sk_prf_primary: sk_prf.0[0],
+            sk_prf_secondary: sk_prf.0[1],
+            prg_seed_primary: prg_seed.0[0],
+            prg_seed_secondary: prg_seed.0[1],
+            tsw_binding: None,
+            scheme_identity: None,
+            slh_params: None,
+        })
+    }
 }
 
 /// Dealerless 2-of-3 RSS key ceremony (`0` central dealer):
@@ -7532,5 +7710,74 @@ pub(crate) mod tests {
             Err(Fips205Error::InvalidParameterSet)
         );
         cluster2.bind_key_params(&p_128s, &pk_seed[..16]).unwrap();
+    }
+
+    #[test]
+    fn rss_key_share_256_secret_bytes_roundtrip_and_canonicality() {
+        let mut rngs = [
+            PartyPrivateRng::from_seed([0x11; 32], b"rss-ser-0"),
+            PartyPrivateRng::from_seed([0x22; 32], b"rss-ser-1"),
+            PartyPrivateRng::from_seed([0x33; 32], b"rss-ser-2"),
+        ];
+        let (mut shares, pk_seed) = run_dealerless_rss_dkg_2of3([0x44; 32], 32, &mut rngs).unwrap();
+        let scheme_id = [0xab; 32];
+        shares[0].bind_scheme_identity(&scheme_id).unwrap();
+
+        let encoded0 = shares[0].to_secret_bytes();
+        assert_eq!(encoded0.0.len(), 268);
+        assert_eq!(&encoded0.0[..8], b"QSRSSK01");
+        let decoded0 = RssKeyShare256::from_secret_bytes(&encoded0.0).unwrap();
+        assert_eq!(decoded0.party_id, 0);
+        assert_eq!(decoded0.key_len, 32);
+        assert_eq!(decoded0.pk_seed, pk_seed);
+        assert_eq!(decoded0.scheme_identity(), Some(&scheme_id));
+
+        let encoded1 = shares[1].to_secret_bytes();
+        let decoded1 = RssKeyShare256::from_secret_bytes(&encoded1.0).unwrap();
+        assert_eq!(decoded1.scheme_identity(), None);
+
+        // Non-zero trailing scheme_identity bytes when has_scheme_id == 0 must be rejected.
+        let mut bad = encoded1.0.clone();
+        bad[236] = 1;
+        assert_eq!(
+            RssKeyShare256::from_secret_bytes(&bad).unwrap_err(),
+            KeccakMpcError::InvalidParameters
+        );
+
+        // Bad reserved byte or out-of-range party_id must be rejected.
+        let mut bad_res = encoded1.0.clone();
+        bad_res[11] = 1;
+        assert!(RssKeyShare256::from_secret_bytes(&bad_res).is_err());
+        let mut bad_party = encoded1.0.clone();
+        bad_party[8] = 3;
+        assert!(RssKeyShare256::from_secret_bytes(&bad_party).is_err());
+
+        // Direct construction from replicated shares validates party_id and key_len.
+        let constructed = RssKeyShare256::from_replicated_shares(
+            2,
+            16,
+            [0x55; 32],
+            ([0x01; 32], [0x02; 32]),
+            ([0x03; 32], [0x04; 32]),
+            ([0x05; 32], [0x06; 32]),
+        )
+        .unwrap();
+        assert_eq!(constructed.party_id, 2);
+        assert_eq!(constructed.key_len, 16);
+        assert_eq!(constructed.pk_seed[16..], [0u8; 16]);
+        let rt = RssKeyShare256::from_secret_bytes(&constructed.to_secret_bytes().0).unwrap();
+        assert_eq!(rt.party_id, 2);
+        assert_eq!(rt.key_len, 16);
+        assert!(
+            RssKeyShare256::from_replicated_shares(
+                3,
+                32,
+                [0; 32],
+                ([0; 32], [0; 32]),
+                ([0; 32], [0; 32]),
+                ([0; 32], [0; 32]),
+            )
+            .is_err()
+        );
     }
 }

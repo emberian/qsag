@@ -35,6 +35,7 @@ const MAX_BUDGET_PAYLOAD_BYTES: usize = PAYLOAD_HEADER_BYTES + RECORD * (LIMIT a
 pub struct DurableQueryBudget {
     path: PathBuf,
     record: LockedRecord,
+    lock_identity: [u8; 24],
     file: File,
     data_seal: [u8; 16],
     last_mac: [u8; 32],
@@ -110,14 +111,25 @@ impl Binding<'_> {
     }
 }
 
-/// True when every slot that authenticates marks exactly `used`.
-fn slots_mark_exactly(hwm: &TwoSlotHwm<'_>, raw_a: &[u8], raw_b: &[u8], used: u64) -> bool {
-    [(0, raw_a), (1, raw_b)]
-        .into_iter()
-        .all(|(slot, raw)| match hwm.classify(slot, raw) {
-            HwmSlotState::Valid { counter, .. } => counter == used,
-            _ => true,
-        })
+/// True when at least one HWM slot authenticates and every valid slot lies within
+/// `hwm_counter <= used <= hwm_counter + 1` (permitting torn-tail recovery when
+/// Slot A = `c` and Slot B = `c - 1`, or when `used = c + 1` reached disk before HWM).
+fn slots_permit_tail_truncation(
+    hwm: &TwoSlotHwm<'_>,
+    raw_a: &[u8],
+    raw_b: &[u8],
+    used: u64,
+) -> bool {
+    let mut any_valid = false;
+    for (slot, raw) in [(0, raw_a), (1, raw_b)] {
+        if let HwmSlotState::Valid { counter, .. } = hwm.classify(slot, raw) {
+            any_valid = true;
+            if !(counter <= used && used <= counter.saturating_add(1)) {
+                return false;
+            }
+        }
+    }
+    any_valid
 }
 
 fn checkpoint_at_least(current: LedgerCheckpoint, minimum: LedgerCheckpoint) -> bool {
@@ -241,9 +253,11 @@ impl DurableQueryBudget {
         }
 
         let data_seal = binding.data_seal;
+        let lock_identity = record.lock_identity_seal();
         Ok(Self {
             path: path_buf,
             record,
+            lock_identity,
             file,
             data_seal,
             last_mac: genesis_mac,
@@ -354,7 +368,7 @@ impl DurableQueryBudget {
         // Rejects tail truncation and unexplained gaps; heals the crash states (record
         // synced before slot A, slot A synced before slot B, one slot torn mid-write).
         storage(binding.with_hwm(|hwm| {
-            if tail_len != 0 && !slots_mark_exactly(hwm, slot_a, slot_b, used) {
+            if tail_len != 0 && !slots_permit_tail_truncation(hwm, slot_a, slot_b, used) {
                 return Err(io::Error::other("unexplained journal tail"));
             }
             hwm.recover(
@@ -369,16 +383,18 @@ impl DurableQueryBudget {
             )
         }))?;
         if tail_len != 0 {
-            // The slots hold `used` and the chain up to it verified, so the tail was
-            // never acknowledged: drop it.
+            // Truncate the unauthenticated tail after prefix authentication and converge
+            // both HWM slots onto `used`.
             storage(file.set_len((FILE_PREFIX_BYTES + verified * RECORD) as u64))?;
             storage(file.sync_all())?;
-            storage(sync_parent_dir(&path_buf))?;
+            storage(binding.with_hwm(|hwm| hwm.commit(&file, used, &prev_mac)))?;
         }
 
+        let lock_identity = record.lock_identity_seal();
         Ok(Self {
             path: path_buf,
             record,
+            lock_identity,
             file,
             data_seal,
             last_mac: prev_mac,
@@ -408,37 +424,31 @@ impl DurableQueryBudget {
     }
 
     fn verify_live_journal_integrity(&self) -> Result<(), HdError> {
+        storage(self.record.verify_lock_identity(&self.lock_identity))?;
         let path_meta = storage(fs::symlink_metadata(&self.path))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if path_meta.permissions().mode() & 0o077 != 0 {
+                return Err(HdError::BudgetStorageFailed);
+            }
+        }
         if !path_meta.is_file() || !ct_eq_bytes(&file_identity(&path_meta), &self.data_seal) {
             return Err(HdError::BudgetStorageFailed);
         }
-        let expected_records_len = ((self.used as usize) + 1) * RECORD;
+        let expected_len = (FILE_PREFIX_BYTES + ((self.used as usize) + 1) * RECORD) as u64;
         let fd_meta = storage(self.file.metadata())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if fd_meta.permissions().mode() & 0o077 != 0 {
+                return Err(HdError::BudgetStorageFailed);
+            }
+        }
         if !fd_meta.is_file()
             || !ct_eq_bytes(&file_identity(&fd_meta), &self.data_seal)
-            || fd_meta.len() != (FILE_PREFIX_BYTES + expected_records_len) as u64
-        {
-            return Err(HdError::BudgetStorageFailed);
-        }
-        let (slot_a, slot_b) = self.binding().with_hwm(|hwm| {
-            (
-                hwm.encode(0, self.used, &self.last_mac),
-                hwm.encode(1, self.used, &self.last_mac),
-            )
-        });
-        let payload = storage(self.record.read_bounded(MAX_BUDGET_PAYLOAD_BYTES))?;
-        if payload.len() != PAYLOAD_HEADER_BYTES + expected_records_len
-            || &payload[DATA_SEAL_BYTES..DATA_SEAL_BYTES + FORMAT_MAGIC.len()] != FORMAT_MAGIC
-            || !ct_eq_bytes(&payload[..DATA_SEAL_BYTES], &self.data_seal)
-            || !ct_eq_bytes(
-                &payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_A_PAYLOAD_OFFSET + HWM_SLOT_BYTES],
-                &slot_a,
-            )
-            || !ct_eq_bytes(
-                &payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES],
-                &slot_b,
-            )
-            || !ct_eq_bytes(&payload[payload.len() - 32..], &self.last_mac)
+            || path_meta.len() != expected_len
+            || fd_meta.len() != expected_len
         {
             return Err(HdError::BudgetStorageFailed);
         }
@@ -918,9 +928,9 @@ mod tests {
             let bytes = budget.with_tail(&junk(len, len as u64));
             budget.assert_fails_closed(&bytes);
         }
-        // A synced record the slots have not reached, then more bytes: two appends past
-        // the mark, which one interrupted reserve cannot produce.
-        for extra in [1, 17, RECORD] {
+        // A synced record the slots have not reached, followed by more than one record's
+        // worth of unauthenticated bytes, still fails closed.
+        for extra in [RECORD + 1, 2 * RECORD] {
             let mut tail = budget.next.to_vec();
             tail.extend_from_slice(&junk(extra, 3));
             let bytes = budget.with_tail(&tail);
@@ -931,6 +941,36 @@ mod tests {
         tail.extend_from_slice(&budget.next);
         let bytes = budget.with_tail(&tail);
         budget.assert_fails_closed(&bytes);
+    }
+
+    #[test]
+    fn lagging_slots_with_torn_tail_recover_and_converge_hwm() {
+        let budget = TwoUses::new("tail-lagging-slots");
+        // Case 1: `used = c + 1` (`3` uses synced, both HWM slots still at `c = 2`)
+        // alongside `1..=RECORD` stray trailing bytes.
+        for extra in [1, 17, RECORD] {
+            let mut tail = budget.next.to_vec();
+            tail.extend_from_slice(&junk(extra, 3));
+            budget.with_tail(&tail);
+            let reopened = budget.open().unwrap();
+            assert_eq!(reopened.used(), 3);
+            drop(reopened);
+            assert_eq!(std::fs::read(&budget.path).unwrap(), budget.advanced);
+        }
+
+        // Case 2: `Slot A = c` (`3`) and `Slot B = c - 1` (`2`) with `used = c` (`3`)
+        // alongside `1..=RECORD` torn trailing bytes of a fourth attempt.
+        let slot_b = 2 * HWM_PAGE_BYTES as usize..2 * HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES;
+        for extra in [1, 17, RECORD] {
+            let mut mixed = budget.advanced.clone();
+            mixed[slot_b.clone()].copy_from_slice(&budget.committed[slot_b.clone()]);
+            mixed.extend_from_slice(&junk(extra, 19));
+            std::fs::write(&budget.path, &mixed).unwrap();
+            let reopened = budget.open().unwrap();
+            assert_eq!(reopened.used(), 3);
+            drop(reopened);
+            assert_eq!(std::fs::read(&budget.path).unwrap(), budget.advanced);
+        }
     }
 
     #[cfg(unix)]

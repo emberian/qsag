@@ -2,9 +2,11 @@
 #extension GL_ARB_gpu_shader_int64 : require
 
 // Certified SPIR-V compute kernel for `KernelSlot::MerkleLayerPoseidon2`.
-// Evaluates position-tweaked Width-12 Goldilocks Poseidon2 Merkle compression binding all 4
-// limbs of `pk_seed`, `layer`, and global parent index `start_parent_idx + parent_idx` with
-// Weighted Jive feed-forward: left + 2*right + 4*full_tweak.
+// Evaluates Width-12 Goldilocks Poseidon2 binary Merkle compression across four domain-separated modes:
+//   `pc.mode == 0`: 1-perm keyed XMSS Weighted Jive (`left + 2*right + 4*full_tweak`)
+//   `pc.mode == 1`: 2-block full-`pk_seed` node sponge (`qsag-agg` `merkle_node_hash`)
+//   `pc.mode == 2`: 1-perm Poseidon2 WHIR Canopy node (`0x50324E4400000000 | node_idx`, `tree_key[0..3]`)
+//   `pc.mode == 3`: 1-perm fixed-tweak Weighted Jive (`qsag-agg` recursive WHIR `compress`)
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -25,8 +27,12 @@ layout(push_constant) uniform PushConsts {
     uint64_t num_parents;
     uint64_t in_offset_u64;
     uint64_t out_offset_u64;
+    uint64_t domain_tag;
+    uint64_t tree_idx;
     uint     layer;
     uint     base_parent;
+    uint     level;
+    uint     mode;
 } pc;
 
 const uint64_t GL_P             = 0xFFFFFFFF00000001ul;
@@ -34,6 +40,7 @@ const uint64_t GL_EPS           = 0xFFFFFFFFul;
 const uint64_t POS2_CONST_IV    = 0x504F53325F474C31ul;
 const uint64_t MERKLE_DOMAIN_IV = 0x4D524B4C5F503231ul;
 const uint64_t NODE_DOMAIN_IV   = 0x4C525F4E4F444531ul;
+const uint64_t CANOPY_NODE_HI   = 0x50324E4400000000ul;
 
 const uint64_t RC_EXT_INIT[48] = uint64_t[48](
     0xFDA3872AFF6CE05Dul, 0xED0FC745B9C6495Bul, 0x9D4A1D75CA56751Ful, 0x21478BBCDAD17885ul,
@@ -219,10 +226,63 @@ void main() {
     uint64_t r2 = fp_reduce_u64(children_buf.words[c_base + 6u]);
     uint64_t r3 = fp_reduce_u64(children_buf.words[c_base + 7u]);
 
-    uint64_t tweak = fp_reduce_u64(MERKLE_DOMAIN_IV + (uint64_t(pc.layer) << 32));
-    uint64_t node_tweak = fp_reduce_u64(NODE_DOMAIN_IV + (pc.start_parent_idx + parent_idx));
-
+    uint64_t node_idx = pc.start_parent_idx + parent_idx;
+    uint p_base = uint(pc.out_offset_u64) + p_rel * 4u;
     uint64_t st[12];
+
+    if (pc.mode == 1u) {
+        uint64_t meta0 = (uint64_t(pc.layer) << 48u)
+                       | (uint64_t(pc.level) << 32u)
+                       | (node_idx & 0xFFFFFFFFul);
+        st[0]  = s0;
+        st[1]  = s1;
+        st[2]  = s2;
+        st[3]  = s3;
+        st[4]  = l0;
+        st[5]  = l1;
+        st[6]  = l2;
+        st[7]  = l3;
+        st[8]  = fp_reduce_u64(pc.domain_tag);
+        st[9]  = fp_reduce_u64(meta0);
+        st[10] = fp_reduce_u64(pc.tree_idx & 0xFFFFFFFFul);
+        st[11] = fp_reduce_u64(pc.tree_idx >> 32u);
+        poseidon2_perm12(st);
+
+        st[0] = fp_add(st[0], r0);
+        st[1] = fp_add(st[1], r1);
+        st[2] = fp_add(st[2], r2);
+        st[3] = fp_add(st[3], r3);
+        st[4] = fp_add(st[4], 1ul);
+        st[5] = fp_add(st[5], POS2_CONST_IV);
+        poseidon2_perm12(st);
+
+        parents_buf.words[p_base + 0u] = st[0];
+        parents_buf.words[p_base + 1u] = st[1];
+        parents_buf.words[p_base + 2u] = st[2];
+        parents_buf.words[p_base + 3u] = st[3];
+        return;
+    }
+
+    uint64_t tweak4[4];
+    if (pc.mode == 2u) {
+        tweak4[0] = fp_reduce_u64(CANOPY_NODE_HI | (node_idx & 0xFFFFFFFFul));
+        tweak4[1] = s0;
+        tweak4[2] = s1;
+        tweak4[3] = s2;
+    } else if (pc.mode == 3u) {
+        tweak4[0] = s0;
+        tweak4[1] = s1;
+        tweak4[2] = s2;
+        tweak4[3] = s3;
+    } else {
+        uint64_t tweak = fp_reduce_u64(MERKLE_DOMAIN_IV + (uint64_t(pc.layer) << 32u));
+        uint64_t node_tweak = fp_reduce_u64(NODE_DOMAIN_IV + node_idx);
+        tweak4[0] = fp_add(s0, tweak);
+        tweak4[1] = fp_add(s1, uint64_t(pc.layer));
+        tweak4[2] = fp_add(s2, node_tweak);
+        tweak4[3] = fp_add(s3, POS2_CONST_IV);
+    }
+
     st[0]  = l0;
     st[1]  = l1;
     st[2]  = l2;
@@ -231,15 +291,12 @@ void main() {
     st[5]  = r1;
     st[6]  = r2;
     st[7]  = r3;
-    st[8]  = fp_add(s0, tweak);
-    st[9]  = fp_add(s1, uint64_t(pc.layer));
-    st[10] = fp_add(s2, node_tweak);
-    st[11] = fp_add(s3, POS2_CONST_IV);
-
-    uint64_t tweak4[4] = uint64_t[4](st[8], st[9], st[10], st[11]);
+    st[8]  = tweak4[0];
+    st[9]  = tweak4[1];
+    st[10] = tweak4[2];
+    st[11] = tweak4[3];
     poseidon2_perm12(st);
 
-    uint p_base = uint(pc.out_offset_u64) + p_rel * 4u;
     parents_buf.words[p_base + 0u] = fp_add(st[0], fp_add(l0, fp_add(fp_shl_canonical(r0, 1u), fp_shl_canonical(tweak4[0], 2u))));
     parents_buf.words[p_base + 1u] = fp_add(st[1], fp_add(l1, fp_add(fp_shl_canonical(r1, 1u), fp_shl_canonical(tweak4[1], 2u))));
     parents_buf.words[p_base + 2u] = fp_add(st[2], fp_add(l2, fp_add(fp_shl_canonical(r2, 1u), fp_shl_canonical(tweak4[2], 2u))));

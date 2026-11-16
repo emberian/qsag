@@ -548,6 +548,16 @@ pub fn intt_goldilocks(a: &mut [Goldilocks]) {
 /// Coset Reed–Solomon encoding of polynomial coefficients `coeffs` (length $N = 2^k$) onto
 /// shifted multiplicative subgroup $g \cdot H$ of size $|H| = N \cdot \text{blowup}$ (`g = 7`).
 pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<Goldilocks> {
+    encode_rs_coset_goldilocks_with_secret(coeffs, blowup, false)
+}
+
+/// [`encode_rs_coset_goldilocks`] with optional zeroization of intermediate coset buffers for
+/// hiding commitments (`secret == true`); `secret == false` incurs zero overhead.
+pub(crate) fn encode_rs_coset_goldilocks_with_secret(
+    coeffs: &[Goldilocks],
+    blowup: usize,
+    secret: bool,
+) -> Vec<Goldilocks> {
     let _phase = crate::profile::span("encode_rs_coset_goldilocks");
     let n_c = coeffs.len();
     assert!(n_c.is_power_of_two());
@@ -559,14 +569,26 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
     );
 
     #[cfg(feature = "vulkan")]
-    if let Some(values) = crate::acceleration::encode(coeffs, domain_len) {
+    if let Some(values) = crate::acceleration::encode(coeffs, domain_len, secret) {
         return values;
     }
-    encode_rs_coset_goldilocks_cpu(coeffs, blowup)
+    encode_rs_coset_goldilocks_cpu_inner(coeffs, blowup, secret)
 }
 
 /// [`encode_rs_coset_goldilocks`] on the host only.
-pub(crate) fn encode_rs_coset_goldilocks_cpu(coeffs: &[Goldilocks], blowup: usize) -> Vec<Goldilocks> {
+#[cfg(test)]
+pub(crate) fn encode_rs_coset_goldilocks_cpu(
+    coeffs: &[Goldilocks],
+    blowup: usize,
+) -> Vec<Goldilocks> {
+    encode_rs_coset_goldilocks_cpu_inner(coeffs, blowup, false)
+}
+
+fn encode_rs_coset_goldilocks_cpu_inner(
+    coeffs: &[Goldilocks],
+    blowup: usize,
+    secret: bool,
+) -> Vec<Goldilocks> {
     let n_c = coeffs.len();
     let domain_len = n_c * blowup;
 
@@ -608,33 +630,41 @@ pub(crate) fn encode_rs_coset_goldilocks_cpu(coeffs: &[Goldilocks], blowup: usiz
                 for (r, row) in cosets.chunks_exact_mut(n_c).enumerate() {
                     let s_r = Goldilocks::NON_RESIDUE * omega_d.pow(r as u64);
                     crate::spawn_bounded(scope, move || {
+                        // Precompute a 24 KiB L1-resident 3x1024 Kronecker power table for `s_r^k`
+                        // (`k < 2^30`), writing `row[j] = coeffs[rev(j)] * s_r^{rev(j)}` directly
+                        // in ONE contiguous pass with ZERO auxiliary `shifted` heap allocation!
+                        let mut t0 = [Goldilocks::ONE; 1024];
+                        let mut t1 = [Goldilocks::ONE; 1024];
+                        let mut t2 = [Goldilocks::ONE; 1024];
+                        for i in 1..1024 {
+                            t0[i] = t0[i - 1].const_mul(s_r);
+                        }
+                        let s_10 = t0[1023].const_mul(s_r);
+                        for i in 1..1024 {
+                            t1[i] = t1[i - 1].const_mul(s_10);
+                        }
+                        let s_20 = t1[1023].const_mul(s_10);
+                        for i in 1..1024 {
+                            t2[i] = t2[i - 1].const_mul(s_20);
+                        }
                         let sub_c = n_c / inner_threads;
-                        let mut shifted = vec![Goldilocks::ZERO; n_c];
-                        std::thread::scope(|inner| {
-                            for (ti, dst_s) in shifted.chunks_mut(sub_c).enumerate() {
-                                let src_s = &coeffs[ti * sub_c..(ti + 1) * sub_c];
-                                let mut sp = s_r.pow((ti * sub_c) as u64);
-                                crate::spawn_bounded(inner, move || {
-                                    for (d, &c) in dst_s.iter_mut().zip(src_s.iter()) {
-                                        *d = c.const_mul(sp);
-                                        sp = sp.const_mul(s_r);
-                                    }
-                                });
-                            }
-                        });
-                        let shifted_ref = &shifted;
+                        let t0_ref = &t0;
+                        let t1_ref = &t1;
+                        let t2_ref = &t2;
                         std::thread::scope(|inner| {
                             for (ti, dst_s) in row.chunks_mut(sub_c).enumerate() {
-                                let base_i = ti * sub_c;
+                                let base_j = ti * sub_c;
                                 crate::spawn_bounded(inner, move || {
                                     for (off, slot) in dst_s.iter_mut().enumerate() {
-                                        let rev = (base_i + off).reverse_bits() >> rev_shift_c;
-                                        *slot = shifted_ref[rev];
+                                        let rev = (base_j + off).reverse_bits() >> rev_shift_c;
+                                        let sp = t0_ref[rev & 0x3FF]
+                                            .const_mul(t1_ref[(rev >> 10) & 0x3FF])
+                                            .const_mul(t2_ref[(rev >> 20) & 0x3FF]);
+                                        *slot = coeffs[rev].const_mul(sp);
                                     }
                                 });
                             }
                         });
-                        drop(shifted);
                         if inner_threads > 1 && n_c >= inner_threads * 2 {
                             ntt_goldilocks_parallel_stages(row, inner_threads, false);
                         } else {
@@ -653,8 +683,22 @@ pub(crate) fn encode_rs_coset_goldilocks_cpu(coeffs: &[Goldilocks], blowup: usiz
             for (ti, out_sub) in out.chunks_mut(q_chunk * blowup).enumerate() {
                 let base_q = ti * q_chunk;
                 crate::spawn_bounded(scope, move || {
-                    for (off_q, dst_row) in out_sub.chunks_exact_mut(blowup).enumerate() {
-                        let q = base_q + off_q;
+                    const TILE_Q: usize = 64;
+                    let mut off_q = 0usize;
+                    while off_q + TILE_Q <= q_chunk {
+                        let q0 = base_q + off_q;
+                        let dst_tile = &mut out_sub[off_q * blowup..(off_q + TILE_Q) * blowup];
+                        for r in 0..blowup {
+                            let src = &cosets_ref[r * n_c + q0..r * n_c + q0 + TILE_Q];
+                            for (dq, &val) in src.iter().enumerate() {
+                                dst_tile[dq * blowup + r] = val;
+                            }
+                        }
+                        off_q += TILE_Q;
+                    }
+                    for dq in off_q..q_chunk {
+                        let q = base_q + dq;
+                        let dst_row = &mut out_sub[dq * blowup..(dq + 1) * blowup];
                         for (r, slot) in dst_row.iter_mut().enumerate() {
                             *slot = cosets_ref[r * n_c + q];
                         }
@@ -662,6 +706,9 @@ pub(crate) fn encode_rs_coset_goldilocks_cpu(coeffs: &[Goldilocks], blowup: usiz
                 });
             }
         });
+        if secret {
+            qsag_asm::volatile_fill(&mut cosets, Goldilocks::ZERO);
+        }
         return out;
     }
 
@@ -1362,7 +1409,7 @@ fn horner_ext4_interleaved(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> Gold
 pub fn eval_univariate_ext4(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> GoldilocksExt4 {
     #[cfg(feature = "std")]
     if coeffs.len() >= 16_384 {
-        let workers = crate::parallel_workers().min(8);
+        let workers = crate::parallel_workers().min(coeffs.len().div_ceil(4_096));
         let chunk = coeffs.len().div_ceil(workers);
         return std::thread::scope(|scope| {
             let parts: Vec<_> = coeffs
@@ -1381,6 +1428,77 @@ pub fn eval_univariate_ext4(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> Gol
         });
     }
     horner_ext4_interleaved(coeffs, z)
+}
+
+#[inline]
+fn horner_base_at_ext4_pair_chunk(
+    coeffs: &[Goldilocks],
+    z0: GoldilocksExt4,
+    z1: GoldilocksExt4,
+) -> [GoldilocksExt4; 2] {
+    if coeffs.len() < 32 {
+        let mut a0 = GoldilocksExt4::ZERO;
+        let mut a1 = GoldilocksExt4::ZERO;
+        for &c in coeffs.iter().rev() {
+            let cb = GoldilocksExt4::from_base(c);
+            a0 = a0 * z0 + cb;
+            a1 = a1 * z1 + cb;
+        }
+        return [a0, a1];
+    }
+    let (blocks, rem) = coeffs.as_chunks::<4>();
+    let mut l0 = [GoldilocksExt4::ZERO; 4];
+    let mut l1 = [GoldilocksExt4::ZERO; 4];
+    for (j, &c) in rem.iter().enumerate() {
+        let cb = GoldilocksExt4::from_base(c);
+        l0[j] = cb;
+        l1[j] = cb;
+    }
+    let z0_4 = z0.square().square();
+    let z1_4 = z1.square().square();
+    for block in blocks.iter().rev() {
+        for lane in 0..4 {
+            let cb = GoldilocksExt4::from_base(block[lane]);
+            l0[lane] = l0[lane].mul_add(z0_4, cb);
+            l1[lane] = l1[lane].mul_add(z1_4, cb);
+        }
+    }
+    [
+        ((l0[3] * z0 + l0[2]) * z0 + l0[1]) * z0 + l0[0],
+        ((l1[3] * z1 + l1[2]) * z1 + l1[1]) * z1 + l1[0],
+    ]
+}
+
+/// Simultaneously evaluate a base-field monomial polynomial `coeffs` at two `GoldilocksExt4` OOD
+/// points `[z0, z1]` in a single streaming pass over `coeffs` (`4x` lower DRAM bandwidth than
+/// promoting `coeffs` to `GoldilocksExt4`).
+pub fn eval_univariate_base_at_ext4_pair(
+    coeffs: &[Goldilocks],
+    [z0, z1]: [GoldilocksExt4; 2],
+) -> [GoldilocksExt4; 2] {
+    #[cfg(feature = "std")]
+    if coeffs.len() >= 16_384 {
+        let workers = crate::parallel_workers().min(coeffs.len().div_ceil(4_096));
+        let chunk = coeffs.len().div_ceil(workers);
+        return std::thread::scope(|scope| {
+            let parts: Vec<_> = coeffs
+                .chunks(chunk)
+                .enumerate()
+                .map(|(i, sub)| {
+                    let exp = (i * chunk) as u64;
+                    crate::spawn_bounded(scope, move || {
+                        let [p0, p1] = horner_base_at_ext4_pair_chunk(sub, z0, z1);
+                        [p0 * z0.pow(exp), p1 * z1.pow(exp)]
+                    })
+                })
+                .collect();
+            parts
+                .into_iter()
+                .map(crate::join_worker)
+                .fold([GoldilocksExt4::ZERO; 2], |a, b| [a[0] + b[0], a[1] + b[1]])
+        });
+    }
+    horner_base_at_ext4_pair_chunk(coeffs, z0, z1)
 }
 
 /// Univariate polynomial over `GoldilocksExt4` in monomial basis $c_0 + c_1 X + \dots + c_d X^d$.

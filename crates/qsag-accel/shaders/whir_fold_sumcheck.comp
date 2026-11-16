@@ -213,7 +213,7 @@ void main() {
     uint gid = pc.aux5 + gl_GlobalInvocationID.x;
 
     if (pc.mode == 0u) {
-        // 3-Byte Kronecker table expansion (`b0` = `768 * num_tables` `Ext4`s):
+        // 4-Byte Kronecker table expansion (`b0` = `1024 * num_tables` `Ext4`s):
         //   `pc.aux0 == 0`: write `b1[dst_base + t * dst_stride + gid] = val` (zeros at `len..len+pad`)
         //   `pc.aux0 == 1`: accumulate `b1[dst_base + gid] += val` (`add_geometric_scaled_in_place`)
         //   `pc.aux0 == 2`: OOD univariate eval `sum_i b2[src_base + i] * val` -> `b5[out_base + wg_x]`
@@ -226,14 +226,16 @@ void main() {
 
         u64vec4 prod = u64vec4(0ul);
         if (t < num_tables && gid < pc.len) {
-            uint t_off = t * 768u;
+            uint t_off = t * 1024u;
             uint k0 = gid & 255u;
             uint k1 = (gid >> 8u) & 255u;
             uint k2 = (gid >> 16u) & 255u;
+            uint k3 = (gid >> 24u) & 255u;
             u64vec4 v0 = load4_b0(t_off + k0);
             u64vec4 v1 = load4_b0(t_off + 256u + k1);
             u64vec4 v2 = load4_b0(t_off + 512u + k2);
-            u64vec4 val = fp4_mul(fp4_mul(v0, v1), v2);
+            u64vec4 v3 = load4_b0(t_off + 768u + k3);
+            u64vec4 val = fp4_mul(fp4_mul(v0, v1), fp4_mul(v2, v3));
 
             if (sub_op == 0u) {
                 // `c0.x` carries optional `core_len` when padding `+ 2` trailing zeros (`monomial_table`).

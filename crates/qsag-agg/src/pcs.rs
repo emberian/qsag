@@ -46,14 +46,19 @@ use alloc::vec::Vec;
 use crate::field::GoldilocksOps as _;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
-    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4, eval_univariate_ext4_at_base,
-    fold_first_var_in_place_ext4, pow2_point_ext4,
+    encode_rs_coset_goldilocks_with_secret, eq_poly_ext4, eval_univariate_base_at_ext4_pair,
+    eval_univariate_ext4, eval_univariate_ext4_at_base, fold_first_var_in_place_ext4,
+    pow2_point_ext4,
 };
 use crate::sponge::{
-    CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE,
-    cshake256_from_midstate_16_x4, cshake256_from_midstate_16_x8, cshake256_from_midstate_32,
-    cshake256_from_midstate_32_x4, cshake256_from_midstate_32_x8, cshake256_from_midstate_into,
-    cshake256_pow_u64_single, cshake256_pow_u64_x8, poseidon2_pow_word,
+    CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE, TURBOSHAKE_CANOPY_MIDSTATE,
+    TURBOSHAKE_POW_MIDSTATE, cshake256_from_midstate_16_x4, cshake256_from_midstate_16_x8,
+    cshake256_from_midstate_32, cshake256_from_midstate_32_x4, cshake256_from_midstate_32_x8,
+    cshake256_from_midstate_into, cshake256_pow_u64_single, cshake256_pow_u64_x8,
+    poseidon2_pow_word, turboshake256_from_midstate_16_x4, turboshake256_from_midstate_16_x8,
+    turboshake256_from_midstate_32, turboshake256_from_midstate_32_x4,
+    turboshake256_from_midstate_32_x8, turboshake256_from_midstate_into,
+    turboshake256_pow_u64_single, turboshake256_pow_u64_x8,
 };
 
 /// Default Stage-0 Reed–Solomon blowup factor ($1/\rho_0 = 4$ at $K = 8, 16, 32$).
@@ -146,17 +151,25 @@ pub enum WhirSecurityRegime {
     Poseidon2Cdhz25JohnsonQrom128 = 7,
     /// [`Self::Cdhz25ZeroPowQrom128`] query table over the Poseidon2 canopy and transcript.
     Poseidon2Cdhz25ZeroPowQrom128 = 8,
+    /// Unconditional Johnson-radius QROM budget (`(258, 130, 88, 66)` + 16-bit PoW) over
+    /// Role-1 12-round `TurboSHAKE256` Merkle-Canopy & PoW.
+    TurboShakeBciksJohnsonQrom128 = 9,
+    /// [`Self::Cdhz25JohnsonQrom128`] query table (`(202, 102, 70, 52)` + 16-bit PoW) over
+    /// Role-1 12-round `TurboSHAKE256` Merkle-Canopy & PoW.
+    TurboShakeCdhz25JohnsonQrom128 = 10,
 }
 
 impl WhirSecurityRegime {
     /// Every wire-decodable regime.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::BciksJohnsonClassical128,
         Self::BciksJohnsonQrom128,
         Self::Cdhz25JohnsonQrom128,
         Self::Cdhz25ZeroPowQrom128,
         Self::Poseidon2Cdhz25JohnsonQrom128,
         Self::Poseidon2Cdhz25ZeroPowQrom128,
+        Self::TurboShakeBciksJohnsonQrom128,
+        Self::TurboShakeCdhz25JohnsonQrom128,
     ];
 
     pub fn from_u8(value: u8) -> Option<Self> {
@@ -167,13 +180,15 @@ impl WhirSecurityRegime {
             6 => Some(Self::Cdhz25ZeroPowQrom128),
             7 => Some(Self::Poseidon2Cdhz25JohnsonQrom128),
             8 => Some(Self::Poseidon2Cdhz25ZeroPowQrom128),
+            9 => Some(Self::TurboShakeBciksJohnsonQrom128),
+            10 => Some(Self::TurboShakeCdhz25JohnsonQrom128),
             _ => None,
         }
     }
 
     /// Nominal single-round Grover search work is at least 128 bits.
     /// This is a per-round work estimate, not a composed QROM security theorem.
-    /// Tag 2 has 72 bits, tag 4 has 136; tags 5/7 have 108 and 6/8 have 107.
+    /// Tag 2 has 72 bits, tags 4/9 have 136; tags 5/7/10 have 108 and 6/8 have 107.
     pub fn meets_unconditional_grover_128_floor(self) -> bool {
         self.qrom_grover_round_bits() >= 128
     }
@@ -188,6 +203,7 @@ impl WhirSecurityRegime {
                 | Self::Cdhz25ZeroPowQrom128
                 | Self::Poseidon2Cdhz25JohnsonQrom128
                 | Self::Poseidon2Cdhz25ZeroPowQrom128
+                | Self::TurboShakeCdhz25JohnsonQrom128
         )
     }
 
@@ -207,13 +223,23 @@ impl WhirSecurityRegime {
         )
     }
 
+    /// Role-1 outer WHIR Merkle-Canopy trees and PoW use 12-round `TurboSHAKE256` (RFC 9861).
+    pub fn uses_turboshake_canopy(self) -> bool {
+        matches!(
+            self,
+            Self::TurboShakeBciksJohnsonQrom128 | Self::TurboShakeCdhz25JohnsonQrom128
+        )
+    }
+
     /// Proof-of-Work grinding bits before every fold, stage and batch challenge squeeze.
     pub fn pow_bits(self) -> u32 {
         match self {
             Self::BciksJohnsonClassical128
             | Self::BciksJohnsonQrom128
             | Self::Cdhz25JohnsonQrom128
-            | Self::Poseidon2Cdhz25JohnsonQrom128 => PCS_POW_BITS,
+            | Self::Poseidon2Cdhz25JohnsonQrom128
+            | Self::TurboShakeBciksJohnsonQrom128
+            | Self::TurboShakeCdhz25JohnsonQrom128 => PCS_POW_BITS,
             Self::Cdhz25ZeroPowQrom128 | Self::Poseidon2Cdhz25ZeroPowQrom128 => 0,
         }
     }
@@ -223,8 +249,10 @@ impl WhirSecurityRegime {
     pub fn pure_query_target_bits(self) -> u32 {
         match self {
             Self::BciksJohnsonClassical128 => 128,
-            Self::BciksJohnsonQrom128 => 256,
-            Self::Cdhz25JohnsonQrom128 | Self::Poseidon2Cdhz25JohnsonQrom128 => 200,
+            Self::BciksJohnsonQrom128 | Self::TurboShakeBciksJohnsonQrom128 => 256,
+            Self::Cdhz25JohnsonQrom128
+            | Self::Poseidon2Cdhz25JohnsonQrom128
+            | Self::TurboShakeCdhz25JohnsonQrom128 => 200,
             Self::Cdhz25ZeroPowQrom128 | Self::Poseidon2Cdhz25ZeroPowQrom128 => 214,
         }
     }
@@ -233,7 +261,7 @@ impl WhirSecurityRegime {
     pub fn classical_fs_round_bits(self) -> u32 {
         match self {
             Self::BciksJohnsonClassical128 => 144,
-            Self::BciksJohnsonQrom128 => 272,
+            Self::BciksJohnsonQrom128 | Self::TurboShakeBciksJohnsonQrom128 => 272,
             _ => self.pure_query_target_bits() + self.pow_bits(),
         }
     }
@@ -252,10 +280,12 @@ impl WhirSecurityRegime {
         };
         match self {
             Self::BciksJohnsonClassical128 => 256usize.div_ceil(log_b) + 1,
-            Self::BciksJohnsonQrom128 => 512usize.div_ceil(log_b) + 2,
-            Self::Cdhz25JohnsonQrom128 | Self::Poseidon2Cdhz25JohnsonQrom128 => {
-                by_blowup([202, 102, 70, 52])
+            Self::BciksJohnsonQrom128 | Self::TurboShakeBciksJohnsonQrom128 => {
+                512usize.div_ceil(log_b) + 2
             }
+            Self::Cdhz25JohnsonQrom128
+            | Self::Poseidon2Cdhz25JohnsonQrom128
+            | Self::TurboShakeCdhz25JohnsonQrom128 => by_blowup([202, 102, 70, 52]),
             Self::Cdhz25ZeroPowQrom128 | Self::Poseidon2Cdhz25ZeroPowQrom128 => {
                 by_blowup([216, 109, 74, 56])
             }
@@ -593,8 +623,63 @@ impl CanopyMultiProof {
 pub struct MerkleCanopyTree {
     pub log_leaves: usize,
     pub is_compact: bool,
+    pub is_turboshake: bool,
     pub nodes: Vec<[u8; 32]>,
     pub root: [u8; 32],
+}
+
+#[inline]
+fn byte_canopy_into(turbo: bool, input: &[u8], out: &mut [u8]) {
+    if turbo {
+        turboshake256_from_midstate_into(&TURBOSHAKE_CANOPY_MIDSTATE, input, out);
+    } else {
+        cshake256_from_midstate_into(&CANOPY_MIDSTATE, input, out);
+    }
+}
+
+#[inline]
+fn byte_canopy_32(turbo: bool, input: &[u8]) -> [u8; 32] {
+    if turbo {
+        turboshake256_from_midstate_32(&TURBOSHAKE_CANOPY_MIDSTATE, input)
+    } else {
+        cshake256_from_midstate_32(&CANOPY_MIDSTATE, input)
+    }
+}
+
+#[inline]
+fn byte_canopy_32_x4(turbo: bool, inputs: [&[u8]; 4]) -> [[u8; 32]; 4] {
+    if turbo {
+        turboshake256_from_midstate_32_x4(&TURBOSHAKE_CANOPY_MIDSTATE, inputs)
+    } else {
+        cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, inputs)
+    }
+}
+
+#[inline]
+fn byte_canopy_32_x8(turbo: bool, inputs: [&[u8]; 8]) -> [[u8; 32]; 8] {
+    if turbo {
+        turboshake256_from_midstate_32_x8(&TURBOSHAKE_CANOPY_MIDSTATE, inputs)
+    } else {
+        cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, inputs)
+    }
+}
+
+#[inline]
+fn byte_canopy_16_x4(turbo: bool, inputs: [&[u8]; 4]) -> [[u8; 16]; 4] {
+    if turbo {
+        turboshake256_from_midstate_16_x4(&TURBOSHAKE_CANOPY_MIDSTATE, inputs)
+    } else {
+        cshake256_from_midstate_16_x4(&CANOPY_MIDSTATE, inputs)
+    }
+}
+
+#[inline]
+fn byte_canopy_16_x8(turbo: bool, inputs: [&[u8]; 8]) -> [[u8; 16]; 8] {
+    if turbo {
+        turboshake256_from_midstate_16_x8(&TURBOSHAKE_CANOPY_MIDSTATE, inputs)
+    } else {
+        cshake256_from_midstate_16_x8(&CANOPY_MIDSTATE, inputs)
+    }
 }
 
 impl MerkleCanopyTree {
@@ -632,6 +717,7 @@ impl MerkleCanopyTree {
         Self {
             log_leaves,
             is_compact: false,
+            is_turboshake: false,
             nodes,
             root,
         }
@@ -641,6 +727,13 @@ impl MerkleCanopyTree {
     /// hashes `base_leaf .. base_leaf + 4`) AND 4-way SIMD internal node hashing
     /// (`hash_merkle_internal_x4`), folding 16-leaf micro-subtrees in L1 registers.
     pub fn build_from_fn_x4<F4>(num_leaves: usize, leaf_fn_x4: F4) -> Self
+    where
+        F4: Fn(usize) -> [[u8; 32]; 4] + Sync,
+    {
+        Self::build_from_fn_x4_mode(false, num_leaves, leaf_fn_x4)
+    }
+
+    pub fn build_from_fn_x4_mode<F4>(turbo: bool, num_leaves: usize, leaf_fn_x4: F4) -> Self
     where
         F4: Fn(usize) -> [[u8; 32]; 4] + Sync,
     {
@@ -657,7 +750,8 @@ impl MerkleCanopyTree {
             for depth in (2..log_leaves).rev() {
                 let half = 1usize << depth;
                 for idx in (half..2 * half).step_by(4) {
-                    let p4 = hash_merkle_internal_x4(
+                    let p4 = hash_merkle_internal_x4_mode(
+                        turbo,
                         idx as u32,
                         [
                             &nodes[2 * idx],
@@ -676,12 +770,14 @@ impl MerkleCanopyTree {
                 }
             }
             for idx in (1..4.min(n)).rev() {
-                nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                nodes[idx] =
+                    hash_merkle_internal_mode(turbo, idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
             }
-            let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+            let root = hash_tree_root_mode(turbo, log_leaves as u8, &nodes[1]);
             return Self {
                 log_leaves,
                 is_compact: false,
+                is_turboshake: turbo,
                 nodes,
                 root,
             };
@@ -699,17 +795,20 @@ impl MerkleCanopyTree {
             let l1 = leaf_fn_x4(bl + 4);
             let l2 = leaf_fn_x4(bl + 8);
             let l3 = leaf_fn_x4(bl + 12);
-            let p_lo = hash_merkle_internal_x4(
+            let p_lo = hash_merkle_internal_x4_mode(
+                turbo,
                 2 * k_base,
                 [&l0[0], &l0[2], &l1[0], &l1[2]],
                 [&l0[1], &l0[3], &l1[1], &l1[3]],
             );
-            let p_hi = hash_merkle_internal_x4(
+            let p_hi = hash_merkle_internal_x4_mode(
+                turbo,
                 2 * k_base + 4,
                 [&l2[0], &l2[2], &l3[0], &l3[2]],
                 [&l2[1], &l2[3], &l3[1], &l3[3]],
             );
-            hash_merkle_internal_x4(
+            hash_merkle_internal_x4_mode(
+                turbo,
                 k_base,
                 [&p_lo[0], &p_lo[2], &p_hi[0], &p_hi[2]],
                 [&p_lo[1], &p_lo[3], &p_hi[1], &p_hi[3]],
@@ -755,7 +854,8 @@ impl MerkleCanopyTree {
                                         p_sub.as_chunks_mut::<4>().0.iter_mut().enumerate()
                                     {
                                         let c = 8 * g;
-                                        let out4 = hash_merkle_internal_x4(
+                                        let out4 = hash_merkle_internal_x4_mode(
+                                            turbo,
                                             (base_node + 4 * g) as u32,
                                             [
                                                 &c_sub[c],
@@ -777,7 +877,8 @@ impl MerkleCanopyTree {
                         });
                     } else {
                         for idx in (half..2 * half).step_by(4) {
-                            let out4 = hash_merkle_internal_x4(
+                            let out4 = hash_merkle_internal_x4_mode(
+                                turbo,
                                 idx as u32,
                                 [
                                     &nodes[2 * idx],
@@ -797,13 +898,18 @@ impl MerkleCanopyTree {
                     }
                 }
                 for idx in [3usize, 2, 1] {
-                    nodes[idx] =
-                        hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                    nodes[idx] = hash_merkle_internal_mode(
+                        turbo,
+                        idx as u32,
+                        &nodes[2 * idx],
+                        &nodes[2 * idx + 1],
+                    );
                 }
-                let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+                let root = hash_tree_root_mode(turbo, log_leaves as u8, &nodes[1]);
                 return Self {
                     log_leaves,
                     is_compact: true,
+                    is_turboshake: turbo,
                     nodes,
                     root,
                 };
@@ -817,7 +923,8 @@ impl MerkleCanopyTree {
         for depth in (2..=(log_leaves - 3)).rev() {
             let half = 1usize << depth;
             for idx in (half..2 * half).step_by(4) {
-                let out4 = hash_merkle_internal_x4(
+                let out4 = hash_merkle_internal_x4_mode(
+                    turbo,
                     idx as u32,
                     [
                         &nodes[2 * idx],
@@ -836,12 +943,14 @@ impl MerkleCanopyTree {
             }
         }
         for idx in [3usize, 2, 1] {
-            nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+            nodes[idx] =
+                hash_merkle_internal_mode(turbo, idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
         }
-        let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+        let root = hash_tree_root_mode(turbo, log_leaves as u8, &nodes[1]);
         Self {
             log_leaves,
             is_compact: true,
+            is_turboshake: turbo,
             nodes,
             root,
         }
@@ -851,6 +960,13 @@ impl MerkleCanopyTree {
     /// hashes `base_leaf .. base_leaf + 8`) and 8-way SIMD internal node hashing
     /// (`hash_merkle_internal_x8`), folding 16-leaf micro-subtrees in `3 × x8 + 1 × x4` vector calls.
     pub fn build_from_fn_x8<F8>(num_leaves: usize, leaf_fn_x8: F8) -> Self
+    where
+        F8: Fn(usize) -> [[u8; 32]; 8] + Sync,
+    {
+        Self::build_from_fn_x8_mode(false, num_leaves, leaf_fn_x8)
+    }
+
+    pub fn build_from_fn_x8_mode<F8>(turbo: bool, num_leaves: usize, leaf_fn_x8: F8) -> Self
     where
         F8: Fn(usize) -> [[u8; 32]; 8] + Sync,
     {
@@ -867,7 +983,8 @@ impl MerkleCanopyTree {
             for depth in (3..log_leaves).rev() {
                 let half = 1usize << depth;
                 for idx in (half..2 * half).step_by(8) {
-                    let p8 = hash_merkle_internal_x8(
+                    let p8 = hash_merkle_internal_x8_mode(
+                        turbo,
                         idx as u32,
                         [
                             &nodes[2 * idx],
@@ -894,7 +1011,8 @@ impl MerkleCanopyTree {
                 }
             }
             if n >= 8 {
-                let p4 = hash_merkle_internal_x4(
+                let p4 = hash_merkle_internal_x4_mode(
+                    turbo,
                     4,
                     [&nodes[8], &nodes[10], &nodes[12], &nodes[14]],
                     [&nodes[9], &nodes[11], &nodes[13], &nodes[15]],
@@ -902,12 +1020,18 @@ impl MerkleCanopyTree {
                 nodes[4..8].copy_from_slice(&p4);
             }
             for idx in [3usize, 2, 1] {
-                nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                nodes[idx] = hash_merkle_internal_mode(
+                    turbo,
+                    idx as u32,
+                    &nodes[2 * idx],
+                    &nodes[2 * idx + 1],
+                );
             }
-            let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+            let root = hash_tree_root_mode(turbo, log_leaves as u8, &nodes[1]);
             return Self {
                 log_leaves,
                 is_compact: false,
+                is_turboshake: turbo,
                 nodes,
                 root,
             };
@@ -922,7 +1046,8 @@ impl MerkleCanopyTree {
             let k_base = (q + 4 * m) as u32;
             let l0 = leaf_fn_x8(bl);
             let l1 = leaf_fn_x8(bl + 8);
-            let p8 = hash_merkle_internal_x8(
+            let p8 = hash_merkle_internal_x8_mode(
+                turbo,
                 2 * k_base,
                 [
                     &l0[0], &l0[2], &l0[4], &l0[6], &l1[0], &l1[2], &l1[4], &l1[6],
@@ -931,7 +1056,8 @@ impl MerkleCanopyTree {
                     &l0[1], &l0[3], &l0[5], &l0[7], &l1[1], &l1[3], &l1[5], &l1[7],
                 ],
             );
-            hash_merkle_internal_x4(
+            hash_merkle_internal_x4_mode(
+                turbo,
                 k_base,
                 [&p8[0], &p8[2], &p8[4], &p8[6]],
                 [&p8[1], &p8[3], &p8[5], &p8[7]],
@@ -977,7 +1103,8 @@ impl MerkleCanopyTree {
                                         p_sub.as_chunks_mut::<8>().0.iter_mut().enumerate()
                                     {
                                         let c = 16 * g;
-                                        let out8 = hash_merkle_internal_x8(
+                                        let out8 = hash_merkle_internal_x8_mode(
+                                            turbo,
                                             (base_node + 8 * g) as u32,
                                             [
                                                 &c_sub[c],
@@ -1007,7 +1134,8 @@ impl MerkleCanopyTree {
                         });
                     } else {
                         for idx in (half..2 * half).step_by(8) {
-                            let out8 = hash_merkle_internal_x8(
+                            let out8 = hash_merkle_internal_x8_mode(
+                                turbo,
                                 idx as u32,
                                 [
                                     &nodes[2 * idx],
@@ -1034,20 +1162,26 @@ impl MerkleCanopyTree {
                         }
                     }
                 }
-                let out4 = hash_merkle_internal_x4(
+                let out4 = hash_merkle_internal_x4_mode(
+                    turbo,
                     4,
                     [&nodes[8], &nodes[10], &nodes[12], &nodes[14]],
                     [&nodes[9], &nodes[11], &nodes[13], &nodes[15]],
                 );
                 nodes[4..8].copy_from_slice(&out4);
                 for idx in [3usize, 2, 1] {
-                    nodes[idx] =
-                        hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                    nodes[idx] = hash_merkle_internal_mode(
+                        turbo,
+                        idx as u32,
+                        &nodes[2 * idx],
+                        &nodes[2 * idx + 1],
+                    );
                 }
-                let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+                let root = hash_tree_root_mode(turbo, log_leaves as u8, &nodes[1]);
                 return Self {
                     log_leaves,
                     is_compact: true,
+                    is_turboshake: turbo,
                     nodes,
                     root,
                 };
@@ -1061,7 +1195,8 @@ impl MerkleCanopyTree {
         for depth in (3..=(log_leaves - 3)).rev() {
             let half = 1usize << depth;
             for idx in (half..2 * half).step_by(8) {
-                let out8 = hash_merkle_internal_x8(
+                let out8 = hash_merkle_internal_x8_mode(
+                    turbo,
                     idx as u32,
                     [
                         &nodes[2 * idx],
@@ -1087,19 +1222,22 @@ impl MerkleCanopyTree {
                 nodes[idx..idx + 8].copy_from_slice(&out8);
             }
         }
-        let out4 = hash_merkle_internal_x4(
+        let out4 = hash_merkle_internal_x4_mode(
+            turbo,
             4,
             [&nodes[8], &nodes[10], &nodes[12], &nodes[14]],
             [&nodes[9], &nodes[11], &nodes[13], &nodes[15]],
         );
         nodes[4..8].copy_from_slice(&out4);
         for idx in [3usize, 2, 1] {
-            nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+            nodes[idx] =
+                hash_merkle_internal_mode(turbo, idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
         }
-        let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+        let root = hash_tree_root_mode(turbo, log_leaves as u8, &nodes[1]);
         Self {
             log_leaves,
             is_compact: true,
+            is_turboshake: turbo,
             nodes,
             root,
         }
@@ -1122,6 +1260,7 @@ impl MerkleCanopyTree {
         F: Fn(usize) -> [u8; 32],
     {
         let n = 1usize << self.log_leaves;
+        let turbo = self.is_turboshake;
 
         let get_node = |node_idx: usize| -> [u8; 32] {
             if !self.is_compact || node_idx < n / 2 {
@@ -1130,7 +1269,7 @@ impl MerkleCanopyTree {
                 let b = 2 * (node_idx - n / 2);
                 let l0 = leaf_fn(b);
                 let l1 = leaf_fn(b + 1);
-                hash_merkle_internal(node_idx as u32, &l0, &l1)
+                hash_merkle_internal_mode(turbo, node_idx as u32, &l0, &l1)
             } else {
                 leaf_fn(node_idx - n)
             }
@@ -1164,6 +1303,15 @@ impl MerkleCanopyTree {
 /// Verify a canonical Steiner-deduplicated `CanopyMultiProof` against `commitment` and
 /// strictly ascending `(index, leaf_hash)` pairs.
 pub fn verify_canopy_multiproof(
+    commitment: &CanopyCommitment,
+    sorted_leaves: &[(usize, [u8; 32])],
+    proof: &CanopyMultiProof,
+) -> bool {
+    verify_canopy_multiproof_byte(false, commitment, sorted_leaves, proof)
+}
+
+fn verify_canopy_multiproof_byte(
+    turbo: bool,
     commitment: &CanopyCommitment,
     sorted_leaves: &[(usize, [u8; 32])],
     proof: &CanopyMultiProof,
@@ -1224,7 +1372,8 @@ pub fn verify_canopy_multiproof(
                 lanes += 1;
             }
             if lanes == 8 {
-                let hashes = hash_merkle_nodes_x8(parents, lefts.each_ref(), rights.each_ref());
+                let hashes =
+                    hash_merkle_nodes_x8_mode(turbo, parents, lefts.each_ref(), rights.each_ref());
                 for lane in 0..8 {
                     active[write + lane] = (parents[lane] as usize, hashes[lane]);
                 }
@@ -1234,7 +1383,7 @@ pub fn verify_canopy_multiproof(
                     let p4 = [parents[0], parents[1], parents[2], parents[3]];
                     let l4 = [&lefts[0], &lefts[1], &lefts[2], &lefts[3]];
                     let r4 = [&rights[0], &rights[1], &rights[2], &rights[3]];
-                    let hashes = hash_merkle_nodes_x4(p4, l4, r4);
+                    let hashes = hash_merkle_nodes_x4_mode(turbo, p4, l4, r4);
                     for lane in 0..4 {
                         active[write + lane] = (parents[lane] as usize, hashes[lane]);
                     }
@@ -1243,7 +1392,12 @@ pub fn verify_canopy_multiproof(
                 for lane in done..lanes {
                     active[write + lane] = (
                         parents[lane] as usize,
-                        hash_merkle_internal(parents[lane], &lefts[lane], &rights[lane]),
+                        hash_merkle_internal_mode(
+                            turbo,
+                            parents[lane],
+                            &lefts[lane],
+                            &rights[lane],
+                        ),
                     );
                 }
             }
@@ -1255,13 +1409,13 @@ pub fn verify_canopy_multiproof(
     if sib_cursor != proof.auth_siblings.len() {
         return false;
     }
-    matches!(active.as_slice(), [(1, top)] if hash_tree_root(commitment.log_leaves, top) == commitment.root)
+    matches!(active.as_slice(), [(1, top)] if hash_tree_root_mode(turbo, commitment.log_leaves, top) == commitment.root)
 }
 
-/// Zero-alloc fixed-frame internal node hash (`[0x00] || node_idx(4B) || left(32B) || right(32B)` = `69` bytes,
-/// `1` Keccak permutation from [`CANOPY_MIDSTATE`]).
+/// Zero-alloc fixed-frame internal node hash (`[0x00] || node_idx(4B) || left(32B) || right(32B)` = `69` bytes).
 #[inline]
-fn hash_merkle_internal_tagged(
+fn hash_merkle_internal_tagged_mode(
+    turbo: bool,
     tag: u8,
     node_idx: u32,
     left: &[u8; 32],
@@ -1272,32 +1426,54 @@ fn hash_merkle_internal_tagged(
     buf[1..5].copy_from_slice(&node_idx.to_le_bytes());
     buf[5..37].copy_from_slice(left);
     buf[37..69].copy_from_slice(right);
-    cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf)
+    byte_canopy_32(turbo, &buf)
+}
+
+#[inline]
+fn hash_merkle_internal_mode(
+    turbo: bool,
+    node_idx: u32,
+    left: &[u8; 32],
+    right: &[u8; 32],
+) -> [u8; 32] {
+    hash_merkle_internal_tagged_mode(turbo, TAG_MERKLE_INTERNAL, node_idx, left, right)
 }
 
 #[inline]
 fn hash_merkle_internal(node_idx: u32, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    hash_merkle_internal_tagged(TAG_MERKLE_INTERNAL, node_idx, left, right)
+    hash_merkle_internal_mode(false, node_idx, left, right)
 }
 
-/// 4-way SIMD internal node hash (`4` consecutive parent indices `base_node_idx .. base_node_idx + 4`
-/// in ONE `keccak_f1600_x4` permutation from [`CANOPY_MIDSTATE`]).
+/// 4-way SIMD internal node hash (`4` consecutive parent indices `base_node_idx .. base_node_idx + 4`).
 #[inline]
-fn hash_merkle_internal_x4(
+fn hash_merkle_internal_x4_mode(
+    turbo: bool,
     base_node_idx: u32,
     lefts: [&[u8; 32]; 4],
     rights: [&[u8; 32]; 4],
 ) -> [[u8; 32]; 4] {
-    hash_merkle_nodes_x4(
+    hash_merkle_nodes_x4_mode(
+        turbo,
         core::array::from_fn(|k| base_node_idx + k as u32),
         lefts,
         rights,
     )
 }
 
+#[cfg(test)]
+#[inline]
+fn hash_merkle_internal_x4(
+    base_node_idx: u32,
+    lefts: [&[u8; 32]; 4],
+    rights: [&[u8; 32]; 4],
+) -> [[u8; 32]; 4] {
+    hash_merkle_internal_x4_mode(false, base_node_idx, lefts, rights)
+}
+
 /// Hash four arbitrary frontier positions, preserving the node-index domain binding.
 #[inline]
-fn hash_merkle_nodes_x4(
+fn hash_merkle_nodes_x4_mode(
+    turbo: bool,
     indices: [u32; 4],
     lefts: [&[u8; 32]; 4],
     rights: [&[u8; 32]; 4],
@@ -1309,27 +1485,39 @@ fn hash_merkle_nodes_x4(
         bufs[k][5..37].copy_from_slice(lefts[k]);
         bufs[k][37..69].copy_from_slice(rights[k]);
     }
-    cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
+    byte_canopy_32_x4(turbo, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
 }
 
-/// 8-way SIMD internal node hash (`8` consecutive parent indices `base_node_idx .. base_node_idx + 8`
-/// in ONE `keccak_f1600_x8` permutation from [`CANOPY_MIDSTATE`]).
+/// 8-way SIMD internal node hash (`8` consecutive parent indices `base_node_idx .. base_node_idx + 8`).
 #[inline]
-fn hash_merkle_internal_x8(
+fn hash_merkle_internal_x8_mode(
+    turbo: bool,
     base_node_idx: u32,
     lefts: [&[u8; 32]; 8],
     rights: [&[u8; 32]; 8],
 ) -> [[u8; 32]; 8] {
-    hash_merkle_nodes_x8(
+    hash_merkle_nodes_x8_mode(
+        turbo,
         core::array::from_fn(|k| base_node_idx + k as u32),
         lefts,
         rights,
     )
 }
 
-/// Hash eight arbitrary frontier positions simultaneously from [`CANOPY_MIDSTATE`].
+#[cfg(test)]
 #[inline]
-fn hash_merkle_nodes_x8(
+fn hash_merkle_internal_x8(
+    base_node_idx: u32,
+    lefts: [&[u8; 32]; 8],
+    rights: [&[u8; 32]; 8],
+) -> [[u8; 32]; 8] {
+    hash_merkle_internal_x8_mode(false, base_node_idx, lefts, rights)
+}
+
+/// Hash eight arbitrary frontier positions simultaneously.
+#[inline]
+fn hash_merkle_nodes_x8_mode(
+    turbo: bool,
     indices: [u32; 8],
     lefts: [&[u8; 32]; 8],
     rights: [&[u8; 32]; 8],
@@ -1341,58 +1529,81 @@ fn hash_merkle_nodes_x8(
         bufs[k][5..37].copy_from_slice(lefts[k]);
         bufs[k][37..69].copy_from_slice(rights[k]);
     }
-    cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| b.as_slice()))
+    byte_canopy_32_x8(turbo, bufs.each_ref().map(|b| b.as_slice()))
 }
 
 /// Commitment digest of a tree: its top node bound to `log_leaves` (`34` bytes, `1` Keccak block).
 #[inline]
-fn hash_tree_root(log_leaves: u8, top_node: &[u8; 32]) -> [u8; 32] {
+fn hash_tree_root_mode(turbo: bool, log_leaves: u8, top_node: &[u8; 32]) -> [u8; 32] {
     let mut buf = [0u8; 34];
     buf[0] = TAG_MERKLE_ROOT;
     buf[1] = log_leaves;
     buf[2..34].copy_from_slice(top_node);
-    cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf)
+    byte_canopy_32(turbo, &buf)
+}
+
+#[inline]
+fn hash_tree_root(log_leaves: u8, top_node: &[u8; 32]) -> [u8; 32] {
+    hash_tree_root_mode(false, log_leaves, top_node)
 }
 
 /// Deterministic Round-0 per-fiber 16-byte blinding salt (`37` bytes, `1` Keccak block).
 #[inline]
-fn derive_round0_salt(salt_seed: &[u8; 32], group_idx: u32) -> [u8; 16] {
+fn derive_round0_salt_mode(turbo: bool, salt_seed: &[u8; 32], group_idx: u32) -> [u8; 16] {
     let mut buf = [0u8; 37];
     buf[0] = TAG_ROUND0_SALT;
     buf[1..33].copy_from_slice(salt_seed);
     buf[33..37].copy_from_slice(&group_idx.to_le_bytes());
     let mut out = [0u8; 16];
-    cshake256_from_midstate_into(&CANOPY_MIDSTATE, &buf, &mut out);
+    byte_canopy_into(turbo, &buf, &mut out);
     out
+}
+
+#[inline]
+fn derive_round0_salt(salt_seed: &[u8; 32], group_idx: u32) -> [u8; 16] {
+    derive_round0_salt_mode(false, salt_seed, group_idx)
 }
 
 /// 4-way SIMD Round-0 salt derivation for fibers `base_group .. base_group + 4`.
 #[inline]
-fn derive_round0_salt_x4(salt_seed: &[u8; 32], base_group: u32) -> [[u8; 16]; 4] {
+fn derive_round0_salt_x4_mode(
+    turbo: bool,
+    salt_seed: &[u8; 32],
+    base_group: u32,
+) -> [[u8; 16]; 4] {
     let mut bufs = [[0u8; 37]; 4];
     for (k, buf) in bufs.iter_mut().enumerate() {
         buf[0] = TAG_ROUND0_SALT;
         buf[1..33].copy_from_slice(salt_seed);
         buf[33..37].copy_from_slice(&(base_group + k as u32).to_le_bytes());
     }
-    cshake256_from_midstate_16_x4(&CANOPY_MIDSTATE, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
+    byte_canopy_16_x4(turbo, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
 }
 
 /// 8-way SIMD Round-0 salt derivation for fibers `base_group .. base_group + 8`.
 #[inline]
-fn derive_round0_salt_x8(salt_seed: &[u8; 32], base_group: u32) -> [[u8; 16]; 8] {
+fn derive_round0_salt_x8_mode(
+    turbo: bool,
+    salt_seed: &[u8; 32],
+    base_group: u32,
+) -> [[u8; 16]; 8] {
     let mut bufs = [[0u8; 37]; 8];
     for (k, buf) in bufs.iter_mut().enumerate() {
         buf[0] = TAG_ROUND0_SALT;
         buf[1..33].copy_from_slice(salt_seed);
         buf[33..37].copy_from_slice(&(base_group + k as u32).to_le_bytes());
     }
-    cshake256_from_midstate_16_x8(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| b.as_slice()))
+    byte_canopy_16_x8(turbo, bufs.each_ref().map(|b| b.as_slice()))
 }
 
 /// Zero-alloc single-polynomial Round-0 salted leaf hash (`arity` in `{2, 4, 8, 16, 32, 64}`).
 #[inline]
-fn hash_salted_base_group(leaf_idx: u32, salt: &[u8; 16], vals: &[Goldilocks]) -> [u8; 32] {
+fn hash_salted_base_group_mode(
+    turbo: bool,
+    leaf_idx: u32,
+    salt: &[u8; 16],
+    vals: &[Goldilocks],
+) -> [u8; 32] {
     let arity = vals.len();
     debug_assert!(arity.is_power_of_two() && (2..=MAX_FIBER_ARITY).contains(&arity));
     let mut buf = [0u8; 22 + 8 * MAX_FIBER_ARITY];
@@ -1404,18 +1615,19 @@ fn hash_salted_base_group(leaf_idx: u32, salt: &[u8; 16], vals: &[Goldilocks]) -
         buf[22 + 8 * i..22 + 8 * (i + 1)].copy_from_slice(&v.to_le_bytes());
     }
     let used = 22 + 8 * arity;
-    cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf[..used])
+    byte_canopy_32(turbo, &buf[..used])
 }
 
 /// Round-0 salted leaf hash across `num_polys` codewords.
-fn hash_round0_leaf(
+fn hash_round0_leaf_mode(
+    turbo: bool,
     leaf_idx: u32,
     salt: &[u8; 16],
     num_polys: usize,
     vals: &[Goldilocks],
 ) -> [u8; 32] {
     if num_polys == 1 {
-        return hash_salted_base_group(leaf_idx, salt, vals);
+        return hash_salted_base_group_mode(turbo, leaf_idx, salt, vals);
     }
     debug_assert!(num_polys <= MAX_BATCH_POLYS && vals.len() <= MAX_ROUND0_LEAF_VALS);
     let arity = vals.len() / num_polys;
@@ -1435,7 +1647,7 @@ fn hash_round0_leaf(
         {
             *dst = v.to_le_bytes();
         }
-        return cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf[..used_bytes]);
+        return byte_canopy_32(turbo, &buf[..used_bytes]);
     }
     let mut buf = [0u8; 23 + 8 * MAX_ROUND0_LEAF_VALS];
     buf[0] = TAG_ROUND0_BATCH;
@@ -1451,11 +1663,12 @@ fn hash_round0_leaf(
     {
         *dst = v.to_le_bytes();
     }
-    cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf[..used_bytes])
+    byte_canopy_32(turbo, &buf[..used_bytes])
 }
 
 /// Four arbitrary queried leaves, with exactly the scalar wire framing in every lane.
-fn queried_round0_hash_x4(
+fn queried_round0_hash_x4_mode(
+    turbo: bool,
     indices: &[usize],
     salts: &[[u8; 16]],
     num_polys: usize,
@@ -1479,10 +1692,7 @@ fn queried_round0_hash_x4(
                 *dst = v.to_le_bytes();
             }
         }
-        return cshake256_from_midstate_32_x4(
-            &CANOPY_MIDSTATE,
-            bufs.each_ref().map(|b| &b[..used]),
-        );
+        return byte_canopy_32_x4(turbo, bufs.each_ref().map(|b| &b[..used]));
     }
     let mut bufs = [[0u8; 23 + 8 * MAX_ROUND0_LEAF_VALS]; 4];
     let header = 23;
@@ -1502,10 +1712,11 @@ fn queried_round0_hash_x4(
             *dst = v.to_le_bytes();
         }
     }
-    cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
+    byte_canopy_32_x4(turbo, bufs.each_ref().map(|b| &b[..used]))
 }
 
-fn queried_ext4_hash_x4(
+fn queried_ext4_hash_x4_mode(
+    turbo: bool,
     stage: u8,
     indices: &[usize],
     vals: &[GoldilocksExt4],
@@ -1527,18 +1738,19 @@ fn queried_ext4_hash_x4(
             *dst = v.to_le_bytes();
         }
     }
-    cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
+    byte_canopy_32_x4(turbo, bufs.each_ref().map(|b| &b[..used]))
 }
 
 /// 4-way SIMD Round-0 salted leaf hash for 4 consecutive fibers `base_g .. base_g + 4`.
-fn round0_leaf_hash_x4(
+fn round0_leaf_hash_x4_mode(
+    turbo: bool,
     codewords: &[Vec<Goldilocks>],
     salt_seed: &[u8; 32],
     base_g: usize,
     num_groups: usize,
     arity: usize,
 ) -> [[u8; 32]; 4] {
-    let salts = derive_round0_salt_x4(salt_seed, base_g as u32);
+    let salts = derive_round0_salt_x4_mode(turbo, salt_seed, base_g as u32);
     if let [codeword] = codewords {
         let used = 22 + 8 * arity;
         let mut bufs = [[0u8; 22 + 8 * MAX_FIBER_ARITY]; 4];
@@ -1553,8 +1765,8 @@ fn round0_leaf_hash_x4(
                 bufs[lane][22 + 8 * k..22 + 8 * (k + 1)].copy_from_slice(&v.to_le_bytes());
             }
         }
-        return cshake256_from_midstate_32_x4(
-            &CANOPY_MIDSTATE,
+        return byte_canopy_32_x4(
+            turbo,
             [
                 &bufs[0][..used],
                 &bufs[1][..used],
@@ -1584,8 +1796,8 @@ fn round0_leaf_hash_x4(
                 }
             }
         }
-        return cshake256_from_midstate_32_x4(
-            &CANOPY_MIDSTATE,
+        return byte_canopy_32_x4(
+            turbo,
             [
                 &bufs[0][..used],
                 &bufs[1][..used],
@@ -1611,21 +1823,22 @@ fn round0_leaf_hash_x4(
             }
         }
     }
-    cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
+    byte_canopy_32_x4(turbo, [&bufs[0], &bufs[1], &bufs[2], &bufs[3]])
 }
 
 /// Scalar Round-0 leaf hash of fiber `g` (used during `open_multi_with_leaf_fn`).
-fn round0_leaf_hash(
+fn round0_leaf_hash_mode(
+    turbo: bool,
     codewords: &[Vec<Goldilocks>],
     salt_seed: &[u8; 32],
     g: usize,
     num_groups: usize,
     arity: usize,
 ) -> [u8; 32] {
-    let salt = derive_round0_salt(salt_seed, g as u32);
+    let salt = derive_round0_salt_mode(turbo, salt_seed, g as u32);
     if let [codeword] = codewords {
         let vals = collect_coset_group_base(codeword, g, num_groups, arity);
-        return hash_salted_base_group(g as u32, &salt, &vals[..arity]);
+        return hash_salted_base_group_mode(turbo, g as u32, &salt, &vals[..arity]);
     }
     let used = codewords.len() * arity;
     let mut vals = [Goldilocks::ZERO; MAX_ROUND0_LEAF_VALS];
@@ -1634,12 +1847,17 @@ fn round0_leaf_hash(
             *slot = codeword[g + k * num_groups];
         }
     }
-    hash_round0_leaf(g as u32, &salt, codewords.len(), &vals[..used])
+    hash_round0_leaf_mode(turbo, g as u32, &salt, codewords.len(), &vals[..used])
 }
 
 /// Zero-alloc Stage `>= 1` `GoldilocksExt4` coset fiber leaf hash (`arity` in `{2, 4, 8, 16, 32, 64}`).
 #[inline]
-fn hash_ext4_group(stage_idx: u8, leaf_idx: u32, vals: &[GoldilocksExt4]) -> [u8; 32] {
+fn hash_ext4_group_mode(
+    turbo: bool,
+    stage_idx: u8,
+    leaf_idx: u32,
+    vals: &[GoldilocksExt4],
+) -> [u8; 32] {
     let arity = vals.len();
     debug_assert!(arity.is_power_of_two() && (2..=MAX_FIBER_ARITY).contains(&arity));
     let mut buf = [0u8; 7 + 32 * MAX_FIBER_ARITY];
@@ -1651,11 +1869,12 @@ fn hash_ext4_group(stage_idx: u8, leaf_idx: u32, vals: &[GoldilocksExt4]) -> [u8
         buf[7 + 32 * i..7 + 32 * (i + 1)].copy_from_slice(&v.to_le_bytes());
     }
     let used = 7 + 32 * arity;
-    cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf[..used])
+    byte_canopy_32(turbo, &buf[..used])
 }
 
 /// 4-way SIMD Stage `>= 1` `GoldilocksExt4` coset fiber leaf hash for `base_g .. base_g + 4`.
-fn hash_ext4_group_x4(
+fn hash_ext4_group_x4_mode(
+    turbo: bool,
     stage_idx: u8,
     codeword: &[GoldilocksExt4],
     base_g: usize,
@@ -1676,8 +1895,8 @@ fn hash_ext4_group_x4(
                 buf[7 + 32 * k..7 + 32 * (k + 1)].copy_from_slice(&b);
             }
         }
-        return cshake256_from_midstate_32_x4(
-            &CANOPY_MIDSTATE,
+        return byte_canopy_32_x4(
+            turbo,
             [
                 &bufs[0][..used],
                 &bufs[1][..used],
@@ -1698,8 +1917,8 @@ fn hash_ext4_group_x4(
             buf[7 + 32 * k..7 + 32 * (k + 1)].copy_from_slice(&b);
         }
     }
-    cshake256_from_midstate_32_x4(
-        &CANOPY_MIDSTATE,
+    byte_canopy_32_x4(
+        turbo,
         [
             &bufs[0][..used],
             &bufs[1][..used],
@@ -1710,14 +1929,15 @@ fn hash_ext4_group_x4(
 }
 
 /// 8-way SIMD Round-0 salted leaf hash for 8 consecutive fibers `base_g .. base_g + 8`.
-fn round0_leaf_hash_x8(
+fn round0_leaf_hash_x8_mode(
+    turbo: bool,
     codewords: &[Vec<Goldilocks>],
     salt_seed: &[u8; 32],
     base_g: usize,
     num_groups: usize,
     arity: usize,
 ) -> [[u8; 32]; 8] {
-    let salts = derive_round0_salt_x8(salt_seed, base_g as u32);
+    let salts = derive_round0_salt_x8_mode(turbo, salt_seed, base_g as u32);
     if let [codeword] = codewords {
         let used = 22 + 8 * arity;
         let mut bufs = [[0u8; 22 + 8 * MAX_FIBER_ARITY]; 8];
@@ -1732,10 +1952,7 @@ fn round0_leaf_hash_x8(
                 bufs[lane][22 + 8 * k..22 + 8 * (k + 1)].copy_from_slice(&v.to_le_bytes());
             }
         }
-        return cshake256_from_midstate_32_x8(
-            &CANOPY_MIDSTATE,
-            bufs.each_ref().map(|b| &b[..used]),
-        );
+        return byte_canopy_32_x8(turbo, bufs.each_ref().map(|b| &b[..used]));
     }
 
     let num_polys = codewords.len();
@@ -1758,10 +1975,7 @@ fn round0_leaf_hash_x8(
                 }
             }
         }
-        return cshake256_from_midstate_32_x8(
-            &CANOPY_MIDSTATE,
-            bufs.each_ref().map(|b| &b[..used]),
-        );
+        return byte_canopy_32_x8(turbo, bufs.each_ref().map(|b| &b[..used]));
     }
 
     let mut bufs: Vec<Vec<u8>> = (0..8).map(|_| vec![0u8; used]).collect();
@@ -1780,8 +1994,8 @@ fn round0_leaf_hash_x8(
             }
         }
     }
-    cshake256_from_midstate_32_x8(
-        &CANOPY_MIDSTATE,
+    byte_canopy_32_x8(
+        turbo,
         [
             &bufs[0], &bufs[1], &bufs[2], &bufs[3], &bufs[4], &bufs[5], &bufs[6], &bufs[7],
         ],
@@ -1789,7 +2003,8 @@ fn round0_leaf_hash_x8(
 }
 
 /// 8-way SIMD Stage `>= 1` `GoldilocksExt4` coset fiber leaf hash for `base_g .. base_g + 8`.
-fn hash_ext4_group_x8(
+fn hash_ext4_group_x8_mode(
+    turbo: bool,
     stage_idx: u8,
     codeword: &[GoldilocksExt4],
     base_g: usize,
@@ -1810,10 +2025,7 @@ fn hash_ext4_group_x8(
                 buf[7 + 32 * k..7 + 32 * (k + 1)].copy_from_slice(&b);
             }
         }
-        return cshake256_from_midstate_32_x8(
-            &CANOPY_MIDSTATE,
-            bufs.each_ref().map(|b| &b[..used]),
-        );
+        return byte_canopy_32_x8(turbo, bufs.each_ref().map(|b| &b[..used]));
     }
     let mut bufs = [[0u8; 7 + 32 * MAX_FIBER_ARITY]; 8];
     for (lane, buf) in bufs.iter_mut().enumerate() {
@@ -1827,18 +2039,20 @@ fn hash_ext4_group_x8(
             buf[7 + 32 * k..7 + 32 * (k + 1)].copy_from_slice(&b);
         }
     }
-    cshake256_from_midstate_32_x8(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
+    byte_canopy_32_x8(turbo, bufs.each_ref().map(|b| &b[..used]))
 }
 
 // ============================================================================
-// 2B. Poseidon2 Merkle-Canopy (`WhirSecurityRegime::uses_poseidon2_canopy`)
+// 2B. Poseidon2 & TurboSHAKE256 Merkle-Canopy
 // ============================================================================
 
 /// Merkle-Canopy hash backend of one committed oracle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanopyHash {
-    /// `CANOPY_MIDSTATE` `cSHAKE256` digests.
+    /// `CANOPY_MIDSTATE` 24-round `cSHAKE256` digests.
     Cshake256,
+    /// `TURBOSHAKE_CANOPY_MIDSTATE` 12-round `TurboSHAKE256` digests.
+    TurboShake256,
     /// Width-12 Poseidon2 digests (four canonical `Goldilocks` limbs, little-endian) for the
     /// oracle of WHIR stage `stage_idx`.
     Poseidon2 { stage_idx: u8 },
@@ -1851,8 +2065,19 @@ impl CanopyHash {
             Self::Poseidon2 {
                 stage_idx: stage_idx as u8,
             }
+        } else if regime.uses_turboshake_canopy() {
+            Self::TurboShake256
         } else {
             Self::Cshake256
+        }
+    }
+
+    #[inline]
+    fn byte_turbo_mode(self) -> Option<bool> {
+        match self {
+            Self::Cshake256 => Some(false),
+            Self::TurboShake256 => Some(true),
+            Self::Poseidon2 { .. } => None,
         }
     }
 }
@@ -1987,6 +2212,7 @@ impl MerkleCanopyTree {
         Self {
             log_leaves,
             is_compact: false,
+            is_turboshake: false,
             nodes,
             root,
         }
@@ -2003,7 +2229,10 @@ pub fn verify_canopy_multiproof_with(
 ) -> bool {
     let stage_idx = match hash {
         CanopyHash::Cshake256 => {
-            return verify_canopy_multiproof(commitment, sorted_leaves, proof);
+            return verify_canopy_multiproof_byte(false, commitment, sorted_leaves, proof);
+        }
+        CanopyHash::TurboShake256 => {
+            return verify_canopy_multiproof_byte(true, commitment, sorted_leaves, proof);
         }
         CanopyHash::Poseidon2 { stage_idx } => stage_idx,
     };
@@ -2073,7 +2302,8 @@ fn round0_leaf_digest(
     vals: &[Goldilocks],
 ) -> [u8; 32] {
     match hash {
-        CanopyHash::Cshake256 => hash_round0_leaf(leaf_idx, salt, num_polys, vals),
+        CanopyHash::Cshake256 => hash_round0_leaf_mode(false, leaf_idx, salt, num_polys, vals),
+        CanopyHash::TurboShake256 => hash_round0_leaf_mode(true, leaf_idx, salt, num_polys, vals),
         CanopyHash::Poseidon2 { .. } => poseidon2_round0_leaf(leaf_idx, salt, num_polys, vals),
     }
 }
@@ -2113,13 +2343,14 @@ fn build_ext4_stage_tree(
             poseidon2_ext4_leaf(stage_idx, g as u32, &fiber[..arity])
         });
     }
+    let turbo = regime.uses_turboshake_canopy();
     if num_groups >= 8 {
-        MerkleCanopyTree::build_from_fn_x8(num_groups, |base_g| {
-            hash_ext4_group_x8(stage_idx, codeword, base_g, num_groups, arity)
+        MerkleCanopyTree::build_from_fn_x8_mode(turbo, num_groups, |base_g| {
+            hash_ext4_group_x8_mode(turbo, stage_idx, codeword, base_g, num_groups, arity)
         })
     } else {
-        MerkleCanopyTree::build_from_fn_x4(num_groups, |base_g| {
-            hash_ext4_group_x4(stage_idx, codeword, base_g, num_groups, arity)
+        MerkleCanopyTree::build_from_fn_x4_mode(turbo, num_groups, |base_g| {
+            hash_ext4_group_x4_mode(turbo, stage_idx, codeword, base_g, num_groups, arity)
         })
     }
 }
@@ -2133,7 +2364,8 @@ fn ext4_leaf_digest(
     vals: &[GoldilocksExt4],
 ) -> [u8; 32] {
     match hash {
-        CanopyHash::Cshake256 => hash_ext4_group(stage_idx, leaf_idx, vals),
+        CanopyHash::Cshake256 => hash_ext4_group_mode(false, stage_idx, leaf_idx, vals),
+        CanopyHash::TurboShake256 => hash_ext4_group_mode(true, stage_idx, leaf_idx, vals),
         CanopyHash::Poseidon2 { .. } => poseidon2_ext4_leaf(stage_idx, leaf_idx, vals),
     }
 }
@@ -2152,6 +2384,10 @@ pub struct HemWhirProverState {
     pub hypercube_evals: Vec<Vec<Goldilocks>>,
     /// Stage-0 Reed–Solomon codewords, one per committed polynomial.
     pub codewords_0: Vec<Vec<Goldilocks>>,
+    /// Cached Stage-0 monomial coefficients for public CPU commits (empty in hiding/GPU mode).
+    pub(crate) monomial_coeffs_0: Vec<Vec<Goldilocks>>,
+    /// Whether the committed polynomials hold secret witness data requiring volatile zeroization.
+    pub(crate) secret: bool,
     pub salt_seed: [u8; 32],
     pub tree_0: MerkleCanopyTree,
     #[cfg(feature = "vulkan")]
@@ -3216,7 +3452,15 @@ pub fn whir_commit_batch_owned_with_schedule(
     salt_seed: &[u8; 32],
     schedule: &WhirSchedule,
 ) -> (CanopyCommitment, HemWhirProverState) {
-    whir_commit_batch_owned_with_schedule_and_extra_vram(polys, salt_seed, schedule, 0)
+    whir_commit_batch_owned_with_schedule_inner(polys, salt_seed, schedule, 0, false)
+}
+
+pub(crate) fn whir_commit_batch_secret_with_schedule(
+    polys: Vec<Vec<Goldilocks>>,
+    salt_seed: &[u8; 32],
+    schedule: &WhirSchedule,
+) -> (CanopyCommitment, HemWhirProverState) {
+    whir_commit_batch_owned_with_schedule_inner(polys, salt_seed, schedule, 0, true)
 }
 
 pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
@@ -3224,6 +3468,22 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     salt_seed: &[u8; 32],
     schedule: &WhirSchedule,
     extra_witness_words: usize,
+) -> (CanopyCommitment, HemWhirProverState) {
+    whir_commit_batch_owned_with_schedule_inner(
+        polys,
+        salt_seed,
+        schedule,
+        extra_witness_words,
+        false,
+    )
+}
+
+fn whir_commit_batch_owned_with_schedule_inner(
+    polys: Vec<Vec<Goldilocks>>,
+    salt_seed: &[u8; 32],
+    schedule: &WhirSchedule,
+    extra_witness_words: usize,
+    secret: bool,
 ) -> (CanopyCommitment, HemWhirProverState) {
     let _phase = crate::profile::span("whir_commit_batch_owned_with_schedule");
     assert!(!polys.is_empty() && polys.len() <= MAX_BATCH_POLYS);
@@ -3246,6 +3506,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     if table_len >= 4_096
         && num_vars <= MAX_GPU_PCS_NUM_VARS
         && !schedule.regime.uses_poseidon2_canopy()
+        && !schedule.regime.uses_turboshake_canopy()
         && let Some(session) = crate::acceleration::try_acquire_whir_session()
     {
         const PAR_CHUNK: usize = 262_144;
@@ -3255,7 +3516,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
         let domain_len = table_len * st0.blowup;
         let num_groups = domain_len / group_arity_0;
 
-        match session.raw().prover_whir_commit_round0_with(
+        let gpu_res = session.raw().prover_whir_commit_round0_with(
             polys.len(),
             salt_seed,
             num_vars,
@@ -3289,7 +3550,11 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
                 }
                 dst.copy_from_slice(wb);
             },
-        ) {
+        );
+        if secret {
+            qsag_asm::volatile_fill(&mut wb_chunk, 0u64);
+        }
+        match gpu_res {
             Ok(top_node)
                 if session.record_stage(qsag_accel::ProverKernelSlot::WhirLdeCommitment) =>
             {
@@ -3298,6 +3563,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
                 let tree_0 = MerkleCanopyTree {
                     log_leaves,
                     is_compact: false,
+                    is_turboshake: false,
                     nodes: vec![[0u8; 32], top_node],
                     root,
                 };
@@ -3310,6 +3576,8 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
                         group_arity_0,
                         hypercube_evals: polys,
                         codewords_0: Vec::new(),
+                        monomial_coeffs_0: Vec::new(),
+                        secret,
                         salt_seed: *salt_seed,
                         tree_0,
                         gpu_session: Some(session),
@@ -3323,12 +3591,13 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     #[cfg(not(feature = "vulkan"))]
     let _ = extra_witness_words;
 
-    let (codewords_0, tree_0) = build_cpu_round0(
+    let (monomial_coeffs_0, codewords_0, tree_0) = build_cpu_round0(
         &polys,
         salt_seed,
         schedule.regime,
         st0.blowup,
         group_arity_0,
+        secret,
     );
     let comm = tree_0.commitment();
     (
@@ -3339,6 +3608,8 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
             group_arity_0,
             hypercube_evals: polys,
             codewords_0,
+            monomial_coeffs_0,
+            secret,
             salt_seed: *salt_seed,
             tree_0,
             #[cfg(feature = "vulkan")]
@@ -3353,30 +3624,48 @@ fn build_cpu_round0(
     regime: WhirSecurityRegime,
     blowup: usize,
     group_arity_0: usize,
-) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
+    secret: bool,
+) -> (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
     let encode = |evals: &Vec<Goldilocks>| {
         let mut coeffs = hypercube_to_monomial_coeffs(evals);
-        let codeword = encode_rs_coset_goldilocks(&coeffs, blowup);
-        // The coefficients determine the table, which hiding callers keep secret.
-        qsag_asm::volatile_fill(&mut coeffs, Goldilocks::ZERO);
-        codeword
+        let codeword = encode_rs_coset_goldilocks_with_secret(&coeffs, blowup, secret);
+        if secret {
+            qsag_asm::volatile_fill(&mut coeffs, Goldilocks::ZERO);
+            (Vec::new(), codeword)
+        } else {
+            (coeffs, codeword)
+        }
     };
     #[cfg(feature = "std")]
-    let codewords_0: Vec<Vec<Goldilocks>> = if polys.len() > 1 && crate::parallel_workers() > 1 {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = polys
-                .iter()
-                .map(|evals| crate::spawn_bounded(scope, move || encode(evals)))
-                .collect();
-            handles.into_iter().map(crate::join_worker).collect()
-        })
-    } else {
-        polys.iter().map(encode).collect()
-    };
+    let pairs: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> =
+        if polys.len() > 1 && crate::parallel_workers() > 1 {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = polys
+                    .iter()
+                    .map(|evals| crate::spawn_bounded(scope, move || encode(evals)))
+                    .collect();
+                handles.into_iter().map(crate::join_worker).collect()
+            })
+        } else {
+            polys.iter().map(encode).collect()
+        };
     #[cfg(not(feature = "std"))]
-    let codewords_0: Vec<Vec<Goldilocks>> = polys.iter().map(encode).collect();
+    let pairs: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> = polys.iter().map(encode).collect();
+    let mut monomial_coeffs_0 = if secret {
+        Vec::new()
+    } else {
+        Vec::with_capacity(pairs.len())
+    };
+    let mut codewords_0 = Vec::with_capacity(pairs.len());
+    for (coeffs, cw) in pairs {
+        if !secret {
+            monomial_coeffs_0.push(coeffs);
+        }
+        codewords_0.push(cw);
+    }
     let domain_len = codewords_0[0].len();
     let num_groups = domain_len / group_arity_0;
+    let turbo = regime.uses_turboshake_canopy();
 
     let _phase = crate::profile::span("round0_merkle_tree");
     let tree_0 = if regime.uses_poseidon2_canopy() {
@@ -3390,15 +3679,29 @@ fn build_cpu_round0(
             )
         })
     } else if num_groups >= 8 {
-        MerkleCanopyTree::build_from_fn_x8(num_groups, |base_g| {
-            round0_leaf_hash_x8(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
+        MerkleCanopyTree::build_from_fn_x8_mode(turbo, num_groups, |base_g| {
+            round0_leaf_hash_x8_mode(
+                turbo,
+                &codewords_0,
+                salt_seed,
+                base_g,
+                num_groups,
+                group_arity_0,
+            )
         })
     } else {
-        MerkleCanopyTree::build_from_fn_x4(num_groups, |base_g| {
-            round0_leaf_hash_x4(&codewords_0, salt_seed, base_g, num_groups, group_arity_0)
+        MerkleCanopyTree::build_from_fn_x4_mode(turbo, num_groups, |base_g| {
+            round0_leaf_hash_x4_mode(
+                turbo,
+                &codewords_0,
+                salt_seed,
+                base_g,
+                num_groups,
+                group_arity_0,
+            )
         })
     };
-    (codewords_0, tree_0)
+    (monomial_coeffs_0, codewords_0, tree_0)
 }
 
 /// Produce a `[P0-01]`-hardened `Hem` WHIR opening proof over `GoldilocksExt4` for one evaluation
@@ -3569,9 +3872,12 @@ pub fn whir_open_batch(
     }
 
     let kernel = monomial_table(&rho);
-    #[cfg(feature = "std")]
-    let derive_monomial_polys = || -> Vec<Vec<Goldilocks>> {
-        if state.hypercube_evals.len() > 1 && crate::parallel_workers() > 1 {
+    let computed_monomial_polys: Vec<Vec<Goldilocks>>;
+    let monomial_polys: &[Vec<Goldilocks>] = if state.monomial_coeffs_0.len() == num_polys {
+        &state.monomial_coeffs_0
+    } else {
+        #[cfg(feature = "std")]
+        let derived = if state.hypercube_evals.len() > 1 && crate::parallel_workers() > 1 {
             std::thread::scope(|scope| {
                 let handles: Vec<_> = state
                     .hypercube_evals
@@ -3586,17 +3892,16 @@ pub fn whir_open_batch(
                 .iter()
                 .map(|w| hypercube_to_monomial_coeffs(w))
                 .collect()
-        }
-    };
-    #[cfg(not(feature = "std"))]
-    let derive_monomial_polys = || -> Vec<Vec<Goldilocks>> {
-        state
+        };
+        #[cfg(not(feature = "std"))]
+        let derived = state
             .hypercube_evals
             .iter()
             .map(|w| hypercube_to_monomial_coeffs(w))
-            .collect()
+            .collect();
+        computed_monomial_polys = derived;
+        &computed_monomial_polys
     };
-    let monomial_polys = derive_monomial_polys();
     let shifted_evals: Vec<_> = monomial_polys
         .iter()
         .map(|c| dot_base_ext4_fast(c, &kernel[1..1 + c.len()]))
@@ -3610,7 +3915,7 @@ pub fn whir_open_batch(
     let combined_claim = combine_claims(&weights, &common_point_evals, &shifted_evals);
     let opening = whir_open_core(
         state,
-        Some(&monomial_polys),
+        Some(monomial_polys),
         &weights,
         kernel,
         combined_claim,
@@ -3682,6 +3987,8 @@ where
 type ActiveStageOracle = (Vec<GoldilocksExt4>, MerkleCanopyTree, [GoldilocksExt4; 2]);
 
 /// Core multi-stage `Hem` WHIR rate-escalated opening over `GoldilocksExt4`.
+type CpuRound0Artifacts = (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>, MerkleCanopyTree);
+
 fn whir_open_core(
     state: &HemWhirProverState,
     precomputed_monomial_polys: Option<&[Vec<Goldilocks>]>,
@@ -3690,7 +3997,7 @@ fn whir_open_core(
     mut cur_sum_claim: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> HemWhirOpeningProof {
-    let lazy_cpu_r0: Option<(Vec<Vec<Goldilocks>>, MerkleCanopyTree)> =
+    let lazy_cpu_r0: Option<CpuRound0Artifacts> =
         state.codewords_0.is_empty().then(|| {
             build_cpu_round0(
                 &state.hypercube_evals,
@@ -3698,67 +4005,105 @@ fn whir_open_core(
                 state.schedule.regime,
                 state.schedule.stages[0].blowup,
                 state.group_arity_0,
+                state.secret,
             )
         });
-    let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) = match &lazy_cpu_r0 {
-        Some((cws, tr)) => (cws.as_slice(), tr),
-        None => (state.codewords_0.as_slice(), &state.tree_0),
+    let (lazy_monos, codewords_0, tree_0): (
+        &[Vec<Goldilocks>],
+        &[Vec<Goldilocks>],
+        &MerkleCanopyTree,
+    ) = match &lazy_cpu_r0 {
+        Some((monos, cws, tr)) => (monos.as_slice(), cws.as_slice(), tr),
+        None => (
+            state.monomial_coeffs_0.as_slice(),
+            state.codewords_0.as_slice(),
+            &state.tree_0,
+        ),
     };
 
     let num_polys = state.num_polys();
     assert_eq!(weights.len(), num_polys);
     let single = num_polys == 1;
     let sched = &state.schedule;
+    let turbo = sched.regime.uses_turboshake_canopy();
     let num_stages = sched.stages.len();
     let early_stop = sched.early_stop_vars;
     let fold_vars = state.num_vars - early_stop;
     absorb_whir_schedule(transcript, sched);
     let core_len = 1usize << state.num_vars;
-    let combine_phase = crate::profile::span("whir_open_combine_coeffs");
-    let mut cur_coeffs = vec![GoldilocksExt4::ZERO; core_len + 2];
-    for (poly_idx, (w, table)) in weights.iter().zip(&state.hypercube_evals).enumerate() {
-        let owned_c;
-        let c: &[Goldilocks] = match precomputed_monomial_polys {
-            Some(pre) => &pre[poly_idx],
-            None => {
-                owned_c = hypercube_to_monomial_coeffs(table);
-                &owned_c
-            }
-        };
-        cur_coeffs[0] += w[0].mul_base(c[0]);
-        #[cfg(feature = "std")]
-        if core_len >= 16_384 {
-            let workers = crate::parallel_workers();
-            let chunk = (core_len - 1).div_ceil(workers);
-            let c_ref = c;
-            let w0 = w[0];
-            let w1 = w[1];
-            std::thread::scope(|scope| {
-                for (t_idx, sub) in cur_coeffs[1..core_len].chunks_mut(chunk).enumerate() {
-                    let base_i = 1 + t_idx * chunk;
-                    crate::spawn_bounded(scope, move || {
-                        for (off, dst) in sub.iter_mut().enumerate() {
-                            let i = base_i + off;
-                            *dst = (*dst + w1.mul_base(c_ref[i - 1])) + w0.mul_base(c_ref[i]);
-                        }
-                    });
-                }
-            });
+    let pre_monos = precomputed_monomial_polys.or((lazy_monos.len() == num_polys).then_some(lazy_monos));
+
+    let direct_unit_base = !state.secret
+        && single
+        && weights[0] == [GoldilocksExt4::ONE, GoldilocksExt4::ZERO];
+    let owned_unit_c: Vec<Goldilocks>;
+    let unit_c0: Option<&[Goldilocks]> = if direct_unit_base {
+        if let Some(pre) = pre_monos {
+            Some(pre[0].as_slice())
         } else {
+            owned_unit_c = hypercube_to_monomial_coeffs(&state.hypercube_evals[0]);
+            Some(owned_unit_c.as_slice())
+        }
+    } else {
+        None
+    };
+
+    let mut cur_coeffs = if unit_c0.is_some() {
+        Vec::with_capacity(core_len / 2 + 2)
+    } else {
+        let _combine_phase = crate::profile::span("whir_open_combine_coeffs");
+        let mut coeffs = vec![GoldilocksExt4::ZERO; core_len + 2];
+        for (poly_idx, (w, table)) in weights.iter().zip(&state.hypercube_evals).enumerate() {
+            let mut owned_c = Vec::new();
+            let c: &[Goldilocks] = match pre_monos {
+                Some(pre) => &pre[poly_idx],
+                None => {
+                    owned_c = hypercube_to_monomial_coeffs(table);
+                    &owned_c
+                }
+            };
+            coeffs[0] += w[0].mul_base(c[0]);
+            #[cfg(feature = "std")]
+            if core_len >= 16_384 {
+                let workers = crate::parallel_workers();
+                let chunk = (core_len - 1).div_ceil(workers);
+                let c_ref = c;
+                let w0 = w[0];
+                let w1 = w[1];
+                std::thread::scope(|scope| {
+                    for (t_idx, sub) in coeffs[1..core_len].chunks_mut(chunk).enumerate() {
+                        let base_i = 1 + t_idx * chunk;
+                        crate::spawn_bounded(scope, move || {
+                            for (off, dst) in sub.iter_mut().enumerate() {
+                                let i = base_i + off;
+                                *dst = (*dst + w1.mul_base(c_ref[i - 1])) + w0.mul_base(c_ref[i]);
+                            }
+                        });
+                    }
+                });
+            } else {
+                for i in 1..core_len {
+                    coeffs[i] = (coeffs[i] + w[1].mul_base(c[i - 1])) + w[0].mul_base(c[i]);
+                }
+            }
+            #[cfg(not(feature = "std"))]
             for i in 1..core_len {
-                cur_coeffs[i] = (cur_coeffs[i] + w[1].mul_base(c[i - 1])) + w[0].mul_base(c[i]);
+                coeffs[i] = (coeffs[i] + w[1].mul_base(c[i - 1])) + w[0].mul_base(c[i]);
+            }
+            coeffs[core_len] += w[1].mul_base(c[core_len - 1]);
+            if state.secret && !owned_c.is_empty() {
+                qsag_asm::volatile_fill(&mut owned_c, Goldilocks::ZERO);
             }
         }
-        #[cfg(not(feature = "std"))]
-        for i in 1..core_len {
-            cur_coeffs[i] = (cur_coeffs[i] + w[1].mul_base(c[i - 1])) + w[0].mul_base(c[i]);
-        }
-        cur_coeffs[core_len] += w[1].mul_base(c[core_len - 1]);
-    }
-    drop(combine_phase);
+        coeffs
+    };
+
     let ood_phase = crate::profile::span("whir_open_stage0_ood");
     let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
-    let stage0_ood_evals = z_ood_0.map(|z| eval_univariate_ext4(&cur_coeffs, z));
+    let stage0_ood_evals = match unit_c0 {
+        Some(c0) => eval_univariate_base_at_ext4_pair(c0, z_ood_0),
+        None => z_ood_0.map(|z| eval_univariate_ext4(&cur_coeffs, z)),
+    };
     for e in stage0_ood_evals {
         transcript.absorb_ext4(b"WHIR_OOD_EVAL", e);
     }
@@ -3781,7 +4126,7 @@ fn whir_open_core(
     let mut round0_multiproof = CanopyMultiProof {
         auth_siblings: Vec::new(),
     };
-    let mut c_scratch = Vec::with_capacity(cur_coeffs.len() / 2 + 2);
+    let mut c_scratch = Vec::with_capacity(core_len / 4 + 4);
     let mut k_scratch = Vec::with_capacity(cur_k.len() / 2 + 2);
 
     // Staged `Ext4` oracle currently active for `stage_idx >= 1`: `(cw, tree, ood_eval)`.
@@ -3792,15 +4137,29 @@ fn whir_open_core(
         let arity = 1usize << st.step_vars;
 
         let mut stage_chals = [[GoldilocksExt4::ZERO; 3]; MAX_FOLD_STEP_VARS];
-        for slot in stage_chals.iter_mut().take(st.step_vars) {
-            let (wire, fold_pow_nonce, chals) = prove_fold_in_place(
-                &mut cur_coeffs,
-                &mut cur_k,
-                &mut c_scratch,
-                &mut k_scratch,
-                &mut cur_sum_claim,
-                transcript,
-            );
+        for (fold_in_stage, slot) in stage_chals.iter_mut().take(st.step_vars).enumerate() {
+            let (wire, fold_pow_nonce, chals) = if stage_idx == 0
+                && fold_in_stage == 0
+                && let Some(c0) = unit_c0
+            {
+                prove_fold_from_base(
+                    c0,
+                    &mut cur_coeffs,
+                    &mut cur_k,
+                    &mut k_scratch,
+                    &mut cur_sum_claim,
+                    transcript,
+                )
+            } else {
+                prove_fold_in_place(
+                    &mut cur_coeffs,
+                    &mut cur_k,
+                    &mut c_scratch,
+                    &mut k_scratch,
+                    &mut cur_sum_claim,
+                    transcript,
+                )
+            };
             fold_sumcheck_polys.push(wire);
             fold_pow_nonces.push(fold_pow_nonce);
             *slot = chals;
@@ -3856,7 +4215,7 @@ fn whir_open_core(
                 for (q_pos, &g) in q_indices.iter().enumerate() {
                     let y0 = y0s[q_pos];
                     let inv_y0 = inv_y0s[q_pos];
-                    round0_salts.push(derive_round0_salt(&state.salt_seed, g as u32));
+                    round0_salts.push(derive_round0_salt_mode(turbo, &state.salt_seed, g as u32));
                     let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
                     if single {
                         let cw0 = &codewords_0[0];
@@ -3888,7 +4247,7 @@ fn whir_open_core(
                     claims.push((z_u, v_shift));
                 }
                 round0_multiproof = tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
-                    round0_leaf_hash(codewords_0, &state.salt_seed, g, num_groups_0, arity)
+                    round0_leaf_hash_mode(turbo, codewords_0, &state.salt_seed, g, num_groups_0, arity)
                 });
                 claims
             } else {
@@ -3925,7 +4284,7 @@ fn whir_open_core(
                 let stage_u8 = stage_idx as u8;
                 let multiproof = prev_tree.open_multi_with_leaf_fn(&q_indices, |g| {
                     let fiber = collect_coset_group_ext4(&prev_cw, g, num_groups_cur, arity);
-                    hash_ext4_group(stage_u8, g as u32, &fiber[..arity])
+                    hash_ext4_group_mode(turbo, stage_u8, g as u32, &fiber[..arity])
                 });
                 folded_layers.push(WhirStageProof {
                     commitment: prev_tree.commitment(),
@@ -3992,7 +4351,7 @@ fn whir_open_core(
                 for (q_pos, &g) in q_indices.iter().enumerate() {
                     let y0 = y0s[q_pos];
                     let inv_y0 = inv_y0s[q_pos];
-                    round0_salts.push(derive_round0_salt(&state.salt_seed, g as u32));
+                    round0_salts.push(derive_round0_salt_mode(turbo, &state.salt_seed, g as u32));
                     let mut fiber = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
                     if single {
                         let cw0 = &codewords_0[0];
@@ -4026,7 +4385,7 @@ fn whir_open_core(
                     );
                 }
                 round0_multiproof = tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
-                    round0_leaf_hash(codewords_0, &state.salt_seed, g, num_groups_0, arity)
+                    round0_leaf_hash_mode(turbo, codewords_0, &state.salt_seed, g, num_groups_0, arity)
                 });
             } else {
                 let (prev_cw, prev_tree, prev_ood) = match active_stage_oracle.take() {
@@ -4060,7 +4419,7 @@ fn whir_open_core(
                 let stage_u8 = stage_idx as u8;
                 let multiproof = prev_tree.open_multi_with_leaf_fn(&q_indices, |g| {
                     let fiber = collect_coset_group_ext4(&prev_cw, g, num_groups_cur, arity);
-                    hash_ext4_group(stage_u8, g as u32, &fiber[..arity])
+                    hash_ext4_group_mode(turbo, stage_u8, g as u32, &fiber[..arity])
                 });
                 folded_layers.push(WhirStageProof {
                     commitment: prev_tree.commitment(),
@@ -4069,6 +4428,15 @@ fn whir_open_core(
                     opened_vals,
                     multiproof,
                 });
+            }
+        }
+    }
+
+    if state.secret {
+        qsag_asm::volatile_fill(&mut c_scratch, GoldilocksExt4::ZERO);
+        if let Some((mut monos, mut cws, _)) = lazy_cpu_r0 {
+            for secret_vec in monos.iter_mut().chain(cws.iter_mut()) {
+                qsag_asm::volatile_fill(secret_vec, Goldilocks::ZERO);
             }
         }
     }
@@ -5700,8 +6068,11 @@ fn verify_and_fold_stage0_fibers(
         let page = &val_pages[batch / batches_per_page];
         let page_off = (batch % batches_per_page) * 4 * per_query;
         let mut leaves = [(0usize, [0u8; 32]); 4];
-        if indices.len() == 4 && hash == CanopyHash::Cshake256 {
-            let hashes = queried_round0_hash_x4(
+        if indices.len() == 4
+            && let Some(turbo) = hash.byte_turbo_mode()
+        {
+            let hashes = queried_round0_hash_x4_mode(
+                turbo,
                 indices,
                 &salts[start..],
                 num_polys,
@@ -5843,8 +6214,10 @@ fn verify_and_fold_ext4_stage_fibers(
         let page = &val_pages[batch / batches_per_page];
         let page_off = (batch % batches_per_page) * 4 * arity;
         let mut leaves = [(0usize, [0u8; 32]); 4];
-        if indices.len() == 4 && hash == CanopyHash::Cshake256 {
-            let hashes = queried_ext4_hash_x4(stage_u8, indices, &page[page_off..], arity);
+        if indices.len() == 4
+            && let Some(turbo) = hash.byte_turbo_mode()
+        {
+            let hashes = queried_ext4_hash_x4_mode(turbo, stage_u8, indices, &page[page_off..], arity);
             for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
                 *slot = (index, hash);
             }
@@ -5908,8 +6281,13 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
         });
     }
     let chal = transcript.transcript_digest();
+    let turbo = transcript.uses_turboshake_pow();
     grind_min_nonce(|n| {
-        let words = cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, n);
+        let words = if turbo {
+            turboshake256_pow_u64_x8(&TURBOSHAKE_POW_MIDSTATE, &chal, n)
+        } else {
+            cshake256_pow_u64_x8(&POW_MIDSTATE, &chal, n)
+        };
         words
             .iter()
             .position(|&w| (w & mask) == 0)
@@ -5988,6 +6366,11 @@ fn verify_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>, nonce: u64) 
     }
     let word = match transcript.poseidon2_chain() {
         Some(chain) => poseidon2_pow_word(chain, nonce),
+        None if transcript.uses_turboshake_pow() => turboshake256_pow_u64_single(
+            &TURBOSHAKE_POW_MIDSTATE,
+            &transcript.transcript_digest(),
+            nonce,
+        ),
         None => cshake256_pow_u64_single(&POW_MIDSTATE, &transcript.transcript_digest(), nonce),
     };
     qsag_whir_verified::verify_stage_pow_mask(word, pow_bits)
@@ -6174,23 +6557,32 @@ mod pcs_unit_tests {
         assert_eq!(WhirSecurityRegime::from_u8(1), None);
         assert_eq!(WhirSecurityRegime::from_u8(3), None);
 
-        for (tag, counts, bits, pow_bits, poseidon2) in [
-            (2, [129, 65, 44, 33], 144, 16, false),
-            (4, [258, 130, 88, 66], 272, 16, false),
-            (5, [202, 102, 70, 52], 216, 16, false),
-            (6, [216, 109, 74, 56], 214, 0, false),
-            (7, [202, 102, 70, 52], 216, 16, true),
-            (8, [216, 109, 74, 56], 214, 0, true),
+        for (tag, counts, bits, pow_bits, poseidon2, turboshake) in [
+            (2, [129, 65, 44, 33], 144, 16, false, false),
+            (4, [258, 130, 88, 66], 272, 16, false, false),
+            (5, [202, 102, 70, 52], 216, 16, false, false),
+            (6, [216, 109, 74, 56], 214, 0, false, false),
+            (7, [202, 102, 70, 52], 216, 16, true, false),
+            (8, [216, 109, 74, 56], 214, 0, true, false),
+            (9, [258, 130, 88, 66], 272, 16, false, true),
+            (10, [202, 102, 70, 52], 216, 16, false, true),
         ] {
             let regime = WhirSecurityRegime::from_u8(tag).unwrap();
             assert_eq!(regime as u8, tag);
             assert_eq!(regime.classical_fs_round_bits(), bits);
             assert_eq!(regime.qrom_grover_round_bits(), bits / 2);
             assert_eq!(regime.meets_qrom_128_floor(), tag != 2);
-            assert_eq!(regime.meets_unconditional_grover_128_floor(), tag == 4);
-            assert_eq!(regime.meets_bounded_qrom_128_profile(), tag >= 5);
+            assert_eq!(
+                regime.meets_unconditional_grover_128_floor(),
+                matches!(tag, 4 | 9)
+            );
+            assert_eq!(
+                regime.meets_bounded_qrom_128_profile(),
+                matches!(tag, 5..=8 | 10)
+            );
             assert_eq!(regime.pow_bits(), pow_bits);
             assert_eq!(regime.uses_poseidon2_canopy(), poseidon2);
+            assert_eq!(regime.uses_turboshake_canopy(), turboshake);
             assert_eq!(
                 regime
                     .schedule(24)
@@ -6205,12 +6597,12 @@ mod pcs_unit_tests {
             assert!(!excessive.validate(24));
             assert!(WhirSchedule::from_bytes_canonical(&excessive.to_bytes(), 24).is_none());
         }
-        for tag in (0..=255u8).filter(|t| !matches!(t, 2 | 4..=8)) {
+        for tag in (0..=255u8).filter(|t| !matches!(t, 2 | 4..=10)) {
             assert_eq!(WhirSecurityRegime::from_u8(tag), None);
         }
         assert_eq!(
             WhirSecurityRegime::ALL.map(|r| r as u8),
-            [2u8, 4, 5, 6, 7, 8]
+            [2u8, 4, 5, 6, 7, 8, 9, 10]
         );
     }
 
@@ -6238,7 +6630,7 @@ mod pcs_unit_tests {
                         stage.num_queries * log_b > 2 * regime.pure_query_target_bits() as usize
                     );
                 }
-                for retired_or_unknown_tag in [0u8, 1, 2, 3, 9] {
+                for retired_or_unknown_tag in [0u8, 1, 2, 3, 11] {
                     let mut mutated = wire.clone();
                     mutated[0] = retired_or_unknown_tag;
                     assert!(WhirSchedule::from_bytes_canonical(&mutated, nv).is_none());
@@ -6649,6 +7041,8 @@ mod pcs_unit_tests {
             WhirSecurityRegime::Cdhz25ZeroPowQrom128,
             WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
             WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+            WhirSecurityRegime::TurboShakeBciksJohnsonQrom128,
+            WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
         ] {
             let (schedule, comm, points, evals, proof) = regime_batch_proof(regime, nv);
             let accepts = |p: &HemWhirBatchOpeningProof| {

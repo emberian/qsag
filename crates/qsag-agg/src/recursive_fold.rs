@@ -8,20 +8,23 @@
 //! makes the batched row sumcheck degree three. This small relation is composable
 //! with future authenticated-input/transcript relations, not a recursive verifier.
 
-use crate::field::{
-    Goldilocks as F, GoldilocksExt4 as E, build_eq_table_ext4, eq_poly_ext4, eval_univariate_ext4,
-    mle_eval_ext4,
-};
+use crate::field::{Goldilocks as F, GoldilocksExt4 as E};
+#[cfg(test)]
+use crate::field::{build_eq_table_ext4, eq_poly_ext4, eval_univariate_ext4, mle_eval_ext4};
+#[cfg(test)]
 use crate::pcs::{
     CanopyCommitment, HemWhirOpeningProof, WhirSchedule, WhirSecurityRegime,
     whir_commit_owned_with_schedule, whir_open, whir_verify_with_schedule,
 };
+#[cfg(test)]
 use crate::sponge::{FiatShamirTranscript, InstanceBound};
+#[cfg(test)]
 use alloc::{vec, vec::Vec};
 
 pub const FOLD_COLUMNS: usize = 64;
 pub const FOLD_RESIDUALS: usize = 55;
 /// Maximum rows in one `DuetFoldProof` (`64 * MAX_FOLD_ROWS <= 2^MAX_PCS_NUM_VARS` cells).
+#[cfg(test)]
 pub const MAX_FOLD_ROWS: usize = 1usize << (crate::pcs::MAX_PCS_NUM_VARS - 6);
 
 /// Inputs must be authenticated by a surrounding verifier. This type is not evidence.
@@ -113,6 +116,7 @@ fn tower_mul<T: Limb>(a: &[T], b: &[T]) -> [T; 4] {
 }
 /// Polynomial evaluator valid also at non-Boolean extension-field row points.
 /// Padding columns are unused; they carry no semantic state.
+#[cfg(test)]
 pub fn fold_residuals(r: &[E; FOLD_COLUMNS], public: &[E; 27]) -> [E; FOLD_RESIDUALS] {
     residuals(r, public)
 }
@@ -134,6 +138,7 @@ fn residuals<T: Limb>(r: &[T; FOLD_COLUMNS], public: &[T; 27]) -> [T; FOLD_RESID
     }
     out
 }
+#[cfg(test)]
 fn relation(r: &[E; 64], public: &[E; 27], eq: E, gamma: E) -> E {
     let mut acc = E::ZERO;
     for v in fold_residuals(r, public).iter().rev() {
@@ -143,6 +148,7 @@ fn relation(r: &[E; 64], public: &[E; 27], eq: E, gamma: E) -> E {
 }
 
 /// Proof of the explicit arithmetic statements only. No evidence-token conversion exists.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct DuetFoldProof {
     pub commitment: CanopyCommitment,
@@ -150,6 +156,7 @@ pub struct DuetFoldProof {
     pub column_evaluations: [E; 64],
     pub opening: HemWhirOpeningProof,
 }
+#[cfg(test)]
 fn shape(n: usize) -> Option<(usize, usize)> {
     if n == 0 || n > MAX_FOLD_ROWS {
         return None;
@@ -157,6 +164,7 @@ fn shape(n: usize) -> Option<(usize, usize)> {
     let rows = n.next_power_of_two().max(2);
     Some((rows, rows.trailing_zeros() as usize))
 }
+#[cfg(test)]
 fn init(
     context: &[u8; 32],
     statements: &[DuetFoldStatement],
@@ -176,6 +184,7 @@ fn init(
         )
         .bind_instance(&[context, &bytes])
 }
+#[cfg(test)]
 fn absorb(t: &mut FiatShamirTranscript<InstanceBound>, label: &[u8], xs: &[E]) {
     let mut bytes = Vec::with_capacity(xs.len() * 32);
     for x in xs {
@@ -183,6 +192,7 @@ fn absorb(t: &mut FiatShamirTranscript<InstanceBound>, label: &[u8], xs: &[E]) {
     }
     t.absorb(label, &bytes);
 }
+#[cfg(test)]
 fn fold<const N: usize>(table: &mut Vec<[E; N]>, r: E) {
     let h = table.len() / 2;
     let (lo, hi) = table.split_at_mut(h);
@@ -194,6 +204,7 @@ fn fold<const N: usize>(table: &mut Vec<[E; N]>, r: E) {
     }
     table.truncate(h);
 }
+#[cfg(test)]
 fn cubic(y: [E; 4]) -> [E; 4] {
     let two = F::from_u64_reduced(2);
     let three = F::from_u64_reduced(3);
@@ -204,6 +215,7 @@ fn cubic(y: [E; 4]) -> [E; 4] {
 }
 /// Prove one or more valid duet gates under a caller-provided context digest.
 /// The caller must link that context and the statements to a child verifier separately.
+#[cfg(test)]
 pub fn prove_duet_folds(
     context: &[u8; 32],
     statements: &[DuetFoldStatement],
@@ -269,6 +281,7 @@ pub fn prove_duet_folds(
     })
 }
 /// Verify only the arithmetic gate relation described at module scope.
+#[cfg(test)]
 pub fn verify_duet_folds(
     context: &[u8; 32],
     statements: &[DuetFoldStatement],

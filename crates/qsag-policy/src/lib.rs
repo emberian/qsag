@@ -9,12 +9,21 @@ extern crate alloc;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 
+pub mod biscuit;
 pub mod durable;
 pub mod macaroon;
+pub use biscuit::{
+    MAX_AUTHORITY_TREE_HEIGHT, MAX_BISCUIT_HOPS, PQ_BISCUIT_HOP_CRYPTO_BYTES, PqBiscuit,
+    PqBiscuitAuthorityKey, PqBiscuitAuthorityPublicKey, PqBiscuitHopBlock, PqBiscuitSeal,
+    PqBiscuitStepKey, capability_request_digest,
+};
 pub use durable::PolicyGuardError;
 #[cfg(feature = "std")]
 pub use durable::{FsPolicyDurableLedger, FsPolicyGenerationFence};
-pub use macaroon::SpongeMacaroon;
+pub use macaroon::{
+    CapabilityError, CapabilityRequest, Caveat, Discharge, MacaroonVerifier, SpongeMacaroon,
+};
+pub use qsag_addr::policy_signing_key_id;
 
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -135,6 +144,7 @@ pub enum PolicyViolation {
         party_id: u16,
     },
     BarrierBdozMacFailed,
+    CapabilityDenied(CapabilityError),
 }
 
 impl TransactionPolicy {
@@ -1113,6 +1123,39 @@ impl AuthorizedSignReleaseToken {
     }
     pub const fn intent_digest(&self) -> &[u8; 32] {
         &self.intent_digest
+    }
+    pub fn quorum_ids(&self) -> &[u16] {
+        &self.intent.quorum_ids
+    }
+    /// Split one in-process quorum release token into exactly one linear per-signer token
+    /// for each approved party in `self.intent.quorum_ids`, consuming `self`.
+    pub fn into_quorum_party_tokens(self) -> Vec<Self> {
+        let count = self.intent.quorum_ids.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        let Self {
+            session_id,
+            policy_digest,
+            intent_digest,
+            intent,
+        } = self;
+        let mut out = Vec::with_capacity(count);
+        for _ in 1..count {
+            out.push(Self {
+                session_id,
+                policy_digest,
+                intent_digest,
+                intent: intent.clone(),
+            });
+        }
+        out.push(Self {
+            session_id,
+            policy_digest,
+            intent_digest,
+            intent,
+        });
+        out
     }
 }
 
@@ -3357,6 +3400,123 @@ impl AuthorizedSignReleaseToken {
     }
 }
 
+/// Capability credential (`SpongeMacaroon` + 3P discharges or ephemeral `Compact1122` `PqBiscuit`)
+/// verified by [`PolicyEngine`] against trusted [`TransactionIntent`] facts *before* latching any
+/// BDOZ preprocessing slot.
+pub enum CapabilityGate<'a> {
+    Macaroon {
+        verifier: &'a MacaroonVerifier,
+        token: &'a SpongeMacaroon,
+        discharges: &'a [Discharge<'a>],
+    },
+    MacaroonRootKey {
+        root_key: &'a [u8; 32],
+        token: &'a SpongeMacaroon,
+        discharges: &'a [Discharge<'a>],
+    },
+    Biscuit {
+        authority_pk: &'a PqBiscuitAuthorityPublicKey,
+        dp: &'a qsag_fts::FrontierDpTable,
+        token: &'a PqBiscuit,
+    },
+}
+
+impl CapabilityRequest {
+    /// Derive trusted [`CapabilityRequest`] facts directly from `(policy, intent, now, actions)`:
+    /// - `audience = policy.canonical_digest()`
+    /// - `resource = intent.recipient.commitment_256`
+    /// - `amount = intent.amount_units`
+    /// - `now = current_timestamp`
+    pub fn from_policy_intent(
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+        actions: u64,
+        current_timestamp: u64,
+    ) -> Self {
+        Self {
+            audience: policy.canonical_digest(),
+            resource: intent.recipient.commitment_256,
+            actions,
+            amount: intent.amount_units,
+            now: current_timestamp,
+        }
+    }
+}
+
+/// Unified custody policy engine combining [`TransactionPolicy`], optional attenuated capability
+/// verification ([`SpongeMacaroon`] / [`PqBiscuit`]), and the 4-round Eurocrypt-2011 BDOZ barrier.
+pub struct PolicyEngine<'a> {
+    pub policy: &'a TransactionPolicy,
+    pub required_actions: u64,
+}
+
+impl<'a> PolicyEngine<'a> {
+    pub const fn new(policy: &'a TransactionPolicy, required_actions: u64) -> Self {
+        Self {
+            policy,
+            required_actions,
+        }
+    }
+
+    /// Verify `capability` against the trusted `(policy, intent, current_timestamp)` facts.
+    pub fn verify_capability(
+        &self,
+        intent: &TransactionIntent,
+        current_timestamp: u64,
+        capability: &CapabilityGate<'_>,
+    ) -> Result<(), PolicyViolation> {
+        let req = CapabilityRequest::from_policy_intent(
+            self.policy,
+            intent,
+            self.required_actions,
+            current_timestamp,
+        );
+        let res = match capability {
+            CapabilityGate::Macaroon {
+                verifier,
+                token,
+                discharges,
+            } => verifier.verify(token, &req, discharges),
+            CapabilityGate::MacaroonRootKey {
+                root_key,
+                token,
+                discharges,
+            } => token.verify(root_key, &req, discharges),
+            CapabilityGate::Biscuit {
+                authority_pk,
+                dp,
+                token,
+            } => token.verify(authority_pk, dp, &req),
+        };
+        res.map_err(PolicyViolation::CapabilityDenied)
+    }
+
+    /// Verify `capability` (if required/present) and then evaluate `policy` across `quorum_guards`
+    /// inside the committed 2-lane BDOZ GF($2^{128}$) MAC barrier. Capability refusals occur
+    /// strictly *before* latching any BDOZ preprocessing slot.
+    pub fn authorize_committed_barrier<B: AcceleratorBackend>(
+        &self,
+        intent: &TransactionIntent,
+        session_id: [u8; 32],
+        current_timestamp: u64,
+        capability: Option<&CapabilityGate<'_>>,
+        quorum_guards: &mut [PolicySignerGuardShare],
+        accel: &B,
+    ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
+        if let Some(gate) = capability {
+            self.verify_capability(intent, current_timestamp, gate)?;
+        }
+        evaluate_policy_committed_barrier(
+            self.policy,
+            intent,
+            session_id,
+            current_timestamp,
+            quorum_guards,
+            accel,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3393,7 +3553,7 @@ mod tests {
         assert!(!restored.is_session_burned(&[2; 32]));
     }
 
-    fn raw_test_guards(entropy: [u8; 32], ids: &[u16]) -> Vec<PolicySignerGuardShare> {
+    pub(super) fn raw_test_guards(entropy: [u8; 32], ids: &[u16]) -> Vec<PolicySignerGuardShare> {
         let mut guards: Vec<_> = super::trusted_dealer_setup_for_testing(entropy, ids)
             .into_iter()
             .map(|g| g.with_window_authority([42; 32], [43; 32]).unwrap())
@@ -3750,7 +3910,7 @@ mod tests {
 
     use super::*;
 
-    fn phase_fixture(ids: &[u16]) -> (TransactionPolicy, TransactionIntent) {
+    pub(super) fn phase_fixture(ids: &[u16]) -> (TransactionPolicy, TransactionIntent) {
         let recipient = QsagAddress::from_pubkey_cshake256(
             "qsp",
             WitnessSuiteTag::MlDsa65,
@@ -5515,5 +5675,138 @@ mod cleanup_tests {
         assert!(fresh_guards[0].is_nonce_burned(&n1));
         assert!(fresh_guards[0].is_nonce_burned(&floor200));
         assert!(fresh_guards[0].is_nonce_burned(&[0xFF; 32]));
+    }
+
+    #[test]
+    fn policy_engine_integrates_macaroon_discharges_and_pq_biscuits_before_bdoz_barrier() {
+        let accel = qsag_accel::CpuReferenceBackend::new();
+        let (policy, mut intent) = crate::tests::phase_fixture(&[1, 2]);
+        intent.session_id = [0x71; 32];
+        intent.nonce = [0x72; 32];
+        let policy_digest = policy.canonical_digest();
+        let signing_bytes = intent.to_canonical_signing_bytes(&policy_digest);
+        intent.message_digest = cshake256_framed_32(b"QSAG.POLICY.MSG.V1", &[&signing_bytes]);
+
+        let mut guards = crate::tests::raw_test_guards([0x44; 32], &[1, 2]);
+        let engine = PolicyEngine::new(&policy, 0b0001);
+
+        // 1. Attenuated SpongeMacaroon with 3P discharge: narrower MaxAmount(1) refuses BEFORE
+        // consuming any BDOZ preprocessing slot!
+        let root_key = [0xA1; 32];
+        let third_key = [0xB2; 32];
+        let mut denied_mac = SpongeMacaroon::issue(&root_key, [0x01; 32], policy_digest);
+        denied_mac
+            .attenuate(Caveat::MaxAmount(intent.amount_units.saturating_sub(1)))
+            .unwrap();
+        let verifier = MacaroonVerifier::new(&root_key, [0x01; 32], policy_digest);
+        assert_eq!(
+            engine
+                .authorize_committed_barrier(
+                    &intent,
+                    intent.session_id,
+                    intent.timestamp_secs,
+                    Some(&CapabilityGate::Macaroon {
+                        verifier: &verifier,
+                        token: &denied_mac,
+                        discharges: &[],
+                    }),
+                    &mut guards,
+                    &accel,
+                )
+                .err(),
+            Some(PolicyViolation::CapabilityDenied(CapabilityError::Denied))
+        );
+        assert_eq!(guards[0].next_slot.get(), 0);
+
+        let mut ok_mac = SpongeMacaroon::issue(&root_key, [0x01; 32], policy_digest);
+        ok_mac
+            .attenuate(Caveat::Resource(intent.recipient.commitment_256))
+            .unwrap();
+        ok_mac.attenuate(Caveat::Actions(0b0011)).unwrap();
+        ok_mac
+            .attenuate(Caveat::MaxAmount(intent.amount_units))
+            .unwrap();
+        ok_mac.attenuate(Caveat::ThirdParty([0xCC; 32])).unwrap();
+        let mut discharge = SpongeMacaroon::issue_discharge(&third_key, [0xCC; 32], policy_digest);
+        ok_mac.bind_discharge(&mut discharge).unwrap();
+        let discharges = [Discharge {
+            token: &discharge,
+            root_key: &third_key,
+        }];
+        let release = engine
+            .authorize_committed_barrier(
+                &intent,
+                intent.session_id,
+                intent.timestamp_secs,
+                Some(&CapabilityGate::Macaroon {
+                    verifier: &verifier,
+                    token: &ok_mac,
+                    discharges: &discharges,
+                }),
+                &mut guards,
+                &accel,
+            )
+            .unwrap();
+        let party_tokens = release.into_quorum_party_tokens();
+        assert_eq!(party_tokens.len(), 2);
+
+        // 2. Ephemeral Compact1122 PqBiscuit 2-hop delegation chain + PoP seal gates BDOZ barrier!
+        let dp = qsag_fts::FrontierDpTable::build(qsag_fts::FrontierFtsProfile::Compact1122);
+        let mut auth =
+            PqBiscuitAuthorityKey::keygen([0xD1; 32], [0xD2; 32], 1, &accel).unwrap();
+        let auth_pk = *auth.public_key();
+        let mut intent2 = intent.clone();
+        intent2.session_id = [0x81; 32];
+        intent2.nonce = [0x82; 32];
+        intent2.rolling_window_spent = intent.amount_units;
+        let sb2 = intent2.to_canonical_signing_bytes(&policy_digest);
+        intent2.message_digest = cshake256_framed_32(b"QSAG.POLICY.MSG.V1", &[&sb2]);
+
+        let (b0, s1) = auth
+            .mint(
+                &dp,
+                [0x91; 32],
+                policy_digest,
+                &[Caveat::Resource(intent2.recipient.commitment_256)],
+                [0x92; 32],
+                &[0x93; 32],
+                &accel,
+            )
+            .unwrap();
+        let (b1, s2) = s1
+            .attenuate(
+                &b0,
+                &dp,
+                &[
+                    Caveat::Actions(0b0001),
+                    Caveat::MaxAmount(intent2.amount_units),
+                ],
+                [0x94; 32],
+                &[0x95; 32],
+                &accel,
+            )
+            .unwrap();
+        let req2 = CapabilityRequest::from_policy_intent(
+            &policy,
+            &intent2,
+            0b0001,
+            intent2.timestamp_secs,
+        );
+        let b_sealed = s2.seal(&b1, &dp, Some(&req2), &[0x96; 32], &accel).unwrap();
+        let release2 = engine
+            .authorize_committed_barrier(
+                &intent2,
+                intent2.session_id,
+                intent2.timestamp_secs,
+                Some(&CapabilityGate::Biscuit {
+                    authority_pk: &auth_pk,
+                    dp: &dp,
+                    token: &b_sealed,
+                }),
+                &mut guards,
+                &accel,
+            )
+            .unwrap();
+        assert_eq!(release2.quorum_ids(), &[1, 2]);
     }
 }

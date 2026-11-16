@@ -30,7 +30,7 @@ use std::{io, path::PathBuf};
 
 const JOURNAL_MAGIC: &[u8; 8] = b"QSAGCRJ4";
 const HEADER_LEN: usize = 8 + 32 + 8 + 32 + 32;
-const ENTRY_LEN: usize = 32 + 32 + 8 + 8 + 1 + 8 + 32 + 8 + 8;
+const ENTRY_LEN: usize = 32 + 32 + 8 + 8 + 1 + 8 + 32 + 16 + 8;
 const TAG_LEN: usize = 32;
 
 const FLAG_HAS_EPOCH: u8 = 0x01;
@@ -42,8 +42,24 @@ const FLAG_IS_RETRY: u8 = 0x02;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CeremonyContext {
     pub policy_id: [u8; 32],
-    pub spend_amount: u64,
+    pub spend_amount: u128,
     pub mpc_nonce_epoch: u64,
+}
+
+impl CeremonyContext {
+    /// Construct a `CeremonyContext` from a 64-bit spend amount.
+    #[inline]
+    pub const fn with_spend_u64(
+        policy_id: [u8; 32],
+        spend_amount: u64,
+        mpc_nonce_epoch: u64,
+    ) -> Self {
+        Self {
+            policy_id,
+            spend_amount: spend_amount as u128,
+            mpc_nonce_epoch,
+        }
+    }
 }
 
 /// All resources committed together before release authority is issued.
@@ -349,11 +365,11 @@ impl FsCeremonyJournal {
             };
             let context = CeremonyContext {
                 policy_id: chunk[89..121].try_into().map_err(|_| invalid())?,
-                spend_amount: u64::from_be_bytes(
-                    chunk[121..129].try_into().map_err(|_| invalid())?,
+                spend_amount: u128::from_be_bytes(
+                    chunk[121..137].try_into().map_err(|_| invalid())?,
                 ),
                 mpc_nonce_epoch: u64::from_be_bytes(
-                    chunk[129..137].try_into().map_err(|_| invalid())?,
+                    chunk[137..145].try_into().map_err(|_| invalid())?,
                 ),
             };
             this.validate(&reservation, bound_epoch, is_retry, context)?;
@@ -1644,6 +1660,64 @@ mod tests {
         belt.authorize_open(&rec_a).unwrap();
 
         drop((journal, belt));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ceremony_context_persists_full_u128_spend_amount() {
+        let dir = temp_dir("ceremony_u128_spend");
+        let path = dir.join("ceremony.jrn");
+        let key_id = [0x42; 32];
+        let mac_key = [0x99; 32];
+        let mut journal = FsCeremonyJournal::provision_genesis(&path, key_id, mac_key).unwrap();
+        let high_spend: u128 = (1u128 << 105) | 0xdead_beef_cafe_babe_1234_5678u128;
+        let ctx = CeremonyContext {
+            policy_id: [0x77; 32],
+            spend_amount: high_spend,
+            mpc_nonce_epoch: 19,
+        };
+        let res = CeremonyReservation {
+            ceremony_id: [0x11; 32],
+            key_id,
+            epoch_or_codeword: [0x22; 32],
+            seed_burn_cursor: 5,
+            hedge_generation: 5,
+        };
+        let permit = journal
+            .persist_epoch_with_context(3, res, ctx)
+            .expect("persist u128 spend");
+        let ckpt = journal.checkpoint();
+        drop(journal);
+
+        let reopened = FsCeremonyJournal::open_existing_at_least(&path, key_id, mac_key, ckpt)
+            .expect("reopen u128 ceremony journal");
+        let mut wrong_ctx = ctx;
+        wrong_ctx.spend_amount ^= 1;
+        assert!(
+            reopened
+                .consume_release_with_context(
+                    FsCeremonyJournal::provision_genesis(dir.join("dummy.jrn"), key_id, mac_key)
+                        .unwrap()
+                        .persist_epoch_with_context(
+                            3,
+                            CeremonyReservation {
+                                ceremony_id: [0x11; 32],
+                                key_id,
+                                epoch_or_codeword: [0x22; 32],
+                                seed_burn_cursor: 5,
+                                hedge_generation: 5,
+                            },
+                            wrong_ctx,
+                        )
+                        .unwrap(),
+                    ctx,
+                )
+                .is_err()
+        );
+        let released = reopened
+            .consume_release_with_context(permit, ctx)
+            .expect("exact u128 spend context matches");
+        assert_eq!(released.ceremony_id, [0x11; 32]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

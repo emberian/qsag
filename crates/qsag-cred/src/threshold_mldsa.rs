@@ -190,7 +190,30 @@ pub trait NonceBurnPersistence {
     }
 }
 
+#[cfg(feature = "std")]
+const MAX_RETAINED_SESSIONS_PER_PARTY: usize = 64;
+#[cfg(feature = "std")]
+const MAX_HIGH_ATTEMPTS_PER_SESSION: usize = 32;
+
+#[cfg(feature = "std")]
+struct SessionBurnEntry {
+    session_id: [u8; 32],
+    low_mask: u128,
+    high_attempts: Vec<u32>,
+}
+
+#[cfg(feature = "std")]
+struct PartyBurnState {
+    party_id: u16,
+    max_epoch: u64,
+    sessions: Vec<SessionBurnEntry>,
+}
+
 /// Key-bound, MAC-authenticated, exclusively locked, crash-atomic attempt ledger.
+///
+/// Compact `QSCBURN3` layout stores bounded $O(1)$ per-party state (`max_epoch` +
+/// a fixed-capacity ring of recent per-session attempt bitmasks), updating rejection-sampling
+/// retries in place with zero file growth while seamlessly reading legacy `QSCBURN2` files.
 /// Provision once with [`Self::create`]; after restart use [`Self::open`] or
 /// [`Self::open_at_least`] (supplying an externally retained monotonic generation floor)
 /// and recover the signer's epoch.
@@ -201,7 +224,7 @@ pub struct FsNonceBurnStore {
     key_id: [u8; 32],
     mac_key: qsag_accel::ct::RedactedSecret<32>,
     generation: u64,
-    burns: Vec<(u16, u64, [u8; 32], u32)>,
+    parties: Vec<PartyBurnState>,
     poisoned: bool,
 }
 
@@ -223,7 +246,7 @@ impl FsNonceBurnStore {
             key_id,
             mac_key,
             generation: 0,
-            burns: Vec::new(),
+            parties: Vec::new(),
             poisoned: false,
         };
         store.record.replace(&store.encode())?;
@@ -256,48 +279,138 @@ impl FsNonceBurnStore {
             return Err(invalid());
         }
         let (body, tag) = bytes.split_at(bytes.len() - 32);
-        let expected_tag = cshake256_framed_32(
-            b"QSAG.MLDSA.NONCE_BURN.V2",
-            &[mac_key.expose(), &lock_id, body],
-        );
-        if !qsag_accel::ct::ct_eq_bytes(&expected_tag, tag) {
-            return Err(invalid());
-        }
-        if &body[..8] != b"QSCBURN2"
-            || body[8..16] != record.lock_seal()
-            || !qsag_accel::ct::ct_eq_bytes(&body[16..48], &key_id)
-        {
-            return Err(invalid());
-        }
-        let generation = u64::from_le_bytes(body[48..56].try_into().map_err(|_| invalid())?);
-        let count = u64::from_le_bytes(body[56..64].try_into().map_err(|_| invalid())?);
-        if generation < min_expected_generation
-            || !(body.len() - 64).is_multiple_of(46)
-            || count != ((body.len() - 64) / 46) as u64
-            || generation < count
-        {
-            return Err(invalid());
-        }
-        let mut store = Self {
-            lock_id,
-            record,
-            key_id,
-            mac_key,
-            generation,
-            burns: Vec::new(),
-            poisoned: false,
-        };
-        for row in body[64..].as_chunks::<46>().0 {
-            let party = u16::from_le_bytes(row[..2].try_into().map_err(|_| invalid())?);
-            let epoch = u64::from_le_bytes(row[2..10].try_into().map_err(|_| invalid())?);
-            let session = row[10..42].try_into().map_err(|_| invalid())?;
-            let attempt = u32::from_le_bytes(row[42..].try_into().map_err(|_| invalid())?);
-            if !store.available(party, epoch, &session, attempt) {
+        if &body[..8] == b"QSCBURN3" {
+            let expected_tag = cshake256_framed_32(
+                b"QSAG.MLDSA.NONCE_BURN.V3",
+                &[mac_key.expose(), &lock_id, body],
+            );
+            if !qsag_accel::ct::ct_eq_bytes(&expected_tag, tag)
+                || body[8..16] != record.lock_seal()
+                || !qsag_accel::ct::ct_eq_bytes(&body[16..48], &key_id)
+            {
                 return Err(invalid());
             }
-            store.burns.push((party, epoch, session, attempt));
+            let generation = u64::from_le_bytes(body[48..56].try_into().map_err(|_| invalid())?);
+            let party_count = u64::from_le_bytes(body[56..64].try_into().map_err(|_| invalid())?);
+            if generation < min_expected_generation
+                || party_count > MAX_THRESHOLD_MLDSA_PARTIES as u64
+                || (generation == 0 && party_count != 0)
+                || (generation > 0 && party_count == 0)
+                || generation < party_count
+            {
+                return Err(invalid());
+            }
+            let mut cursor = 64usize;
+            let mut parties: Vec<PartyBurnState> = Vec::with_capacity(party_count as usize);
+            for _ in 0..party_count {
+                let hdr = body.get(cursor..cursor + 12).ok_or_else(invalid)?;
+                cursor += 12;
+                let party_id = u16::from_le_bytes([hdr[0], hdr[1]]);
+                let max_epoch =
+                    u64::from_le_bytes(hdr[2..10].try_into().map_err(|_| invalid())?);
+                let sess_count = u16::from_le_bytes([hdr[10], hdr[11]]) as usize;
+                if max_epoch == u64::MAX
+                    || sess_count == 0
+                    || sess_count > MAX_RETAINED_SESSIONS_PER_PARTY
+                    || parties.last().is_some_and(|prev| prev.party_id >= party_id)
+                {
+                    return Err(invalid());
+                }
+                let mut sessions: Vec<SessionBurnEntry> = Vec::with_capacity(sess_count);
+                for _ in 0..sess_count {
+                    let shdr = body.get(cursor..cursor + 50).ok_or_else(invalid)?;
+                    cursor += 50;
+                    let session_id: [u8; 32] = shdr[..32].try_into().map_err(|_| invalid())?;
+                    let low_mask =
+                        u128::from_le_bytes(shdr[32..48].try_into().map_err(|_| invalid())?);
+                    let high_len = u16::from_le_bytes([shdr[48], shdr[49]]) as usize;
+                    if (low_mask == 0 && high_len == 0)
+                        || high_len > MAX_HIGH_ATTEMPTS_PER_SESSION
+                        || sessions.iter().any(|s| s.session_id == session_id)
+                    {
+                        return Err(invalid());
+                    }
+                    let high_bytes = body
+                        .get(cursor..cursor + high_len * 4)
+                        .ok_or_else(invalid)?;
+                    cursor += high_len * 4;
+                    let mut high_attempts = Vec::with_capacity(high_len);
+                    for chunk in high_bytes.as_chunks::<4>().0 {
+                        let att = u32::from_le_bytes(*chunk);
+                        if att < 128
+                            || high_attempts.last().is_some_and(|&prev| prev >= att)
+                        {
+                            return Err(invalid());
+                        }
+                        high_attempts.push(att);
+                    }
+                    sessions.push(SessionBurnEntry {
+                        session_id,
+                        low_mask,
+                        high_attempts,
+                    });
+                }
+                parties.push(PartyBurnState {
+                    party_id,
+                    max_epoch,
+                    sessions,
+                });
+            }
+            if cursor != body.len() {
+                return Err(invalid());
+            }
+            Ok(Self {
+                lock_id,
+                record,
+                key_id,
+                mac_key,
+                generation,
+                parties,
+                poisoned: false,
+            })
+        } else if &body[..8] == b"QSCBURN2" {
+            let expected_tag = cshake256_framed_32(
+                b"QSAG.MLDSA.NONCE_BURN.V2",
+                &[mac_key.expose(), &lock_id, body],
+            );
+            if !qsag_accel::ct::ct_eq_bytes(&expected_tag, tag)
+                || body[8..16] != record.lock_seal()
+                || !qsag_accel::ct::ct_eq_bytes(&body[16..48], &key_id)
+            {
+                return Err(invalid());
+            }
+            let generation = u64::from_le_bytes(body[48..56].try_into().map_err(|_| invalid())?);
+            let count = u64::from_le_bytes(body[56..64].try_into().map_err(|_| invalid())?);
+            if generation < min_expected_generation
+                || !(body.len() - 64).is_multiple_of(46)
+                || count != ((body.len() - 64) / 46) as u64
+                || generation < count
+            {
+                return Err(invalid());
+            }
+            let mut store = Self {
+                lock_id,
+                record,
+                key_id,
+                mac_key,
+                generation,
+                parties: Vec::new(),
+                poisoned: false,
+            };
+            for row in body[64..].as_chunks::<46>().0 {
+                let party = u16::from_le_bytes(row[..2].try_into().map_err(|_| invalid())?);
+                let epoch = u64::from_le_bytes(row[2..10].try_into().map_err(|_| invalid())?);
+                let session = row[10..42].try_into().map_err(|_| invalid())?;
+                let attempt = u32::from_le_bytes(row[42..].try_into().map_err(|_| invalid())?);
+                if !store.available(party, epoch, &session, attempt) {
+                    return Err(invalid());
+                }
+                store.apply_burn_in_memory(party, epoch, session, attempt);
+            }
+            Ok(store)
+        } else {
+            Err(invalid())
         }
-        Ok(store)
     }
 
     pub const fn generation(&self) -> u64 {
@@ -305,20 +418,27 @@ impl FsNonceBurnStore {
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(96 + self.burns.len() * 46);
-        bytes.extend_from_slice(b"QSCBURN2");
+        let mut bytes = Vec::with_capacity(96 + self.parties.len() * 64);
+        bytes.extend_from_slice(b"QSCBURN3");
         bytes.extend_from_slice(&self.record.lock_seal());
         bytes.extend_from_slice(&self.key_id);
         bytes.extend_from_slice(&self.generation.to_le_bytes());
-        bytes.extend_from_slice(&(self.burns.len() as u64).to_le_bytes());
-        for (party, epoch, session, attempt) in &self.burns {
-            bytes.extend_from_slice(&party.to_le_bytes());
-            bytes.extend_from_slice(&epoch.to_le_bytes());
-            bytes.extend_from_slice(session);
-            bytes.extend_from_slice(&attempt.to_le_bytes());
+        bytes.extend_from_slice(&(self.parties.len() as u64).to_le_bytes());
+        for p in &self.parties {
+            bytes.extend_from_slice(&p.party_id.to_le_bytes());
+            bytes.extend_from_slice(&p.max_epoch.to_le_bytes());
+            bytes.extend_from_slice(&(p.sessions.len() as u16).to_le_bytes());
+            for s in &p.sessions {
+                bytes.extend_from_slice(&s.session_id);
+                bytes.extend_from_slice(&s.low_mask.to_le_bytes());
+                bytes.extend_from_slice(&(s.high_attempts.len() as u16).to_le_bytes());
+                for &att in &s.high_attempts {
+                    bytes.extend_from_slice(&att.to_le_bytes());
+                }
+            }
         }
         let tag = cshake256_framed_32(
-            b"QSAG.MLDSA.NONCE_BURN.V2",
+            b"QSAG.MLDSA.NONCE_BURN.V3",
             &[self.mac_key.expose(), &self.lock_id, &bytes],
         );
         bytes.extend_from_slice(&tag);
@@ -326,11 +446,78 @@ impl FsNonceBurnStore {
     }
 
     fn available(&self, party: u16, epoch: u64, session: &[u8; 32], attempt: u32) -> bool {
-        !self.poisoned
-            && epoch != u64::MAX
-            && !self.burns.iter().any(|(p, e, s, a)| {
-                *p == party && (*e >= epoch || (*s == *session && *a == attempt))
-            })
+        if self.poisoned || epoch == u64::MAX {
+            return false;
+        }
+        match self.parties.binary_search_by_key(&party, |p| p.party_id) {
+            Ok(idx) => {
+                let state = &self.parties[idx];
+                if epoch <= state.max_epoch {
+                    return false;
+                }
+                if let Some(entry) = state.sessions.iter().find(|s| &s.session_id == session) {
+                    if attempt < 128 {
+                        ((entry.low_mask >> attempt) & 1) == 0
+                    } else {
+                        entry.high_attempts.len() < MAX_HIGH_ATTEMPTS_PER_SESSION
+                            && entry.high_attempts.binary_search(&attempt).is_err()
+                    }
+                } else {
+                    true
+                }
+            }
+            Err(_) => self.parties.len() < MAX_THRESHOLD_MLDSA_PARTIES,
+        }
+    }
+
+    fn apply_burn_in_memory(
+        &mut self,
+        party: u16,
+        epoch: u64,
+        session: [u8; 32],
+        attempt: u32,
+    ) {
+        let p_idx = match self.parties.binary_search_by_key(&party, |p| p.party_id) {
+            Ok(idx) => {
+                self.parties[idx].max_epoch = epoch;
+                idx
+            }
+            Err(insert_at) => {
+                self.parties.insert(
+                    insert_at,
+                    PartyBurnState {
+                        party_id: party,
+                        max_epoch: epoch,
+                        sessions: Vec::new(),
+                    },
+                );
+                insert_at
+            }
+        };
+        let state = &mut self.parties[p_idx];
+        if let Some(entry) = state.sessions.iter_mut().find(|s| s.session_id == session) {
+            if attempt < 128 {
+                entry.low_mask |= 1u128 << attempt;
+            } else if let Err(pos) = entry.high_attempts.binary_search(&attempt) {
+                entry.high_attempts.insert(pos, attempt);
+            }
+        } else {
+            if state.sessions.len() >= MAX_RETAINED_SESSIONS_PER_PARTY {
+                state.sessions.remove(0);
+            }
+            let mut low_mask = 0u128;
+            let mut high_attempts = Vec::new();
+            if attempt < 128 {
+                low_mask = 1u128 << attempt;
+            } else {
+                high_attempts.push(attempt);
+            }
+            state.sessions.push(SessionBurnEntry {
+                session_id: session,
+                low_mask,
+                high_attempts,
+            });
+        }
     }
 }
 
@@ -345,7 +532,7 @@ impl NonceBurnPersistence for FsNonceBurnStore {
             return false;
         };
         self.generation = next_gen;
-        self.burns.push((party_id, epoch, *session_id, attempt));
+        self.apply_burn_in_memory(party_id, epoch, *session_id, attempt);
         if self.record.replace(&self.encode()).is_err() {
             self.poisoned = true;
             return false;
@@ -354,22 +541,38 @@ impl NonceBurnPersistence for FsNonceBurnStore {
     }
 
     fn next_epoch(&self, key_id: &[u8; 32], party_id: u16) -> Result<u64, ThresholdMlDsaError> {
-        let expected = self.encode();
-        if self.poisoned
-            || !qsag_accel::ct::ct_eq_bytes(key_id, &self.key_id)
-            || self.record.read().map_or(true, |bytes| {
-                !qsag_accel::ct::ct_eq_bytes(&bytes, &expected)
-            })
-        {
+        if self.poisoned || !qsag_accel::ct::ct_eq_bytes(key_id, &self.key_id) {
             return Err(ThresholdMlDsaError::NoncePersistenceFailed);
         }
+        let expected = self.encode();
+        let matches_disk = self
+            .record
+            .read()
+            .is_ok_and(|bytes| qsag_accel::ct::ct_eq_bytes(&bytes, &expected));
+        if !matches_disk {
+            // Also accept an untouched legacy `QSCBURN2` file before its first `reserve()` upgrade!
+            let reopened = self.record.read().map_err(|_| {
+                ThresholdMlDsaError::NoncePersistenceFailed
+            })?;
+            if reopened.len() < 96 || &reopened[..8] != b"QSCBURN2" {
+                return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+            }
+            let (body, tag) = reopened.split_at(reopened.len() - 32);
+            let expected_v2 = cshake256_framed_32(
+                b"QSAG.MLDSA.NONCE_BURN.V2",
+                &[self.mac_key.expose(), &self.lock_id, body],
+            );
+            if !qsag_accel::ct::ct_eq_bytes(&expected_v2, tag)
+                || body[8..16] != self.record.lock_seal()
+                || !qsag_accel::ct::ct_eq_bytes(&body[16..48], &self.key_id)
+            {
+                return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+            }
+        }
         Ok(self
-            .burns
-            .iter()
-            .filter(|(p, _, _, _)| *p == party_id)
-            .map(|(_, epoch, _, _)| epoch + 1)
-            .max()
-            .unwrap_or(0))
+            .parties
+            .binary_search_by_key(&party_id, |p| p.party_id)
+            .map_or(0, |idx| self.parties[idx].max_epoch + 1))
     }
 }
 
@@ -461,7 +664,12 @@ impl ThresholdVerificationPack {
     }
 
     pub fn policy_signing_key_id(&self) -> [u8; 32] {
-        cshake256_framed_32(b"QSAG.POLICY.KEY.V1", &[&self.pk_bytes])
+        let suite = match self.level {
+            MlDsaLevel::MlDsa44 => qsag_addr::WitnessSuiteTag::MlDsa44,
+            MlDsaLevel::MlDsa65 => qsag_addr::WitnessSuiteTag::MlDsa65,
+            MlDsaLevel::MlDsa87 => qsag_addr::WitnessSuiteTag::MlDsa87,
+        };
+        qsag_policy::policy_signing_key_id(suite, &self.pk_bytes)
     }
 
     /// Custodians required in a signing session.

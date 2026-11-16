@@ -48,7 +48,7 @@ use crate::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
 use crate::pcs::{
     CanopyCommitment, HemWhirOpeningProof, MAX_PCS_NUM_VARS, WeightedPoint, WhirSchedule,
     WhirSecurityRegime, add_point_kernel, hypercube_to_monomial_coeffs,
-    whir_commit_batch_owned_with_schedule, whir_open_blend, whir_verify_blend,
+    whir_commit_batch_secret_with_schedule, whir_open_blend, whir_verify_blend,
 };
 use crate::sponge::{FiatShamirTranscript, InstanceBound, cshake256_32};
 
@@ -1196,7 +1196,7 @@ fn prove_with_claimed_publics(
         chunk.copy_from_slice(&stream.next_base().to_le_bytes());
     }
     let (commitment, mut state) =
-        whir_commit_batch_owned_with_schedule(polys, &salt_seed, &layout.schedule);
+        whir_commit_batch_secret_with_schedule(polys, &salt_seed, &layout.schedule);
     qsag_asm::volatile_fill(&mut salt_seed, 0u8);
 
     let mut tr = start_transcript(shape, &layout, statement, &public_inputs, &commitment);

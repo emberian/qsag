@@ -302,19 +302,27 @@ fn rss_bench_with_journal<T: WireTransport + Send, J: PoisonJournal + Send>(
             core::array::from_fn(|i| (s as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ i as u64)
         })
         .collect();
-    let shares: Vec<_> = secrets
-        .iter()
-        .map(|s| deal_keccak_shares(s, &mut rng))
-        .collect();
+    let mut per_party_shares = [
+        Vec::with_capacity(states),
+        Vec::with_capacity(states),
+        Vec::with_capacity(states),
+    ];
+    for s in &secrets {
+        let [s0, s1, s2] = deal_keccak_shares(s, &mut rng);
+        per_party_shares[0].push(s0);
+        per_party_shares[1].push(s1);
+        per_party_shares[2].push(s2);
+    }
     let parties: Vec<_> = endpoints
         .into_iter()
         .zip(keys)
-        .map(|(endpoint, keys)| {
+        .zip(per_party_shares)
+        .map(|((endpoint, keys), party_shares)| {
             let p = keys.party;
             let mut party =
                 IsolatedRss256Party::new(SESSION, keys, endpoint, make_journal(p)).expect("party");
-            for share in &shares {
-                party.load_shares(share[p].clone()).expect("load shares");
+            for share in party_shares {
+                party.load_shares(share).expect("load shares");
             }
             party
         })

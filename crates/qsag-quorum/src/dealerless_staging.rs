@@ -59,7 +59,8 @@ use qsag_core::field::tower::{
 };
 use qsag_core::field::tower::{Tower128, wipe_tower128};
 use qsag_core::preprocessing::{
-    OtMesh, PartyPrivateRng, PreprocessError, run_dealerless_pi_triple_f2_additive_with_fault,
+    OtMesh, PartyPrivateRng, PreprocessError, blind_open_additive_gf128_poly,
+    run_dealerless_pi_triple_f2_additive_with_fault,
 };
 use qsag_core::sponge::keccak::{Cshake256Xof, KECCAK_ROUND_CONSTANTS};
 use qsag_core::wipe::{
@@ -82,7 +83,6 @@ const TAG_COIN_COMMIT: &[u8] = b"QSAG.QUORUM.STAGE.COIN.COMMIT/v1";
 const TAG_COIN_FINAL: &[u8] = b"QSAG.QUORUM.STAGE.COIN.FINAL/v1";
 const TAG_PAIR_COMMIT: &[u8] = b"QSAG.QUORUM.STAGE.PAIR.COMMIT/v1";
 const TAG_ROOT_CONFIRM: &[u8] = b"QSAG.QUORUM.STAGE.ROOT.CONFIRM/v1";
-const TAG_MAC_COMMIT: &[u8] = b"QSAG.QUORUM.STAGE.MAC.COMMIT/v1";
 const TAG_ABIT_COL: &[u8] = b"QSAG.QUORUM.STAGE.ABIT.COL/v1";
 const TAG_ABIT_CHI: &[u8] = b"QSAG.QUORUM.STAGE.ABIT.CHI/v1";
 const TAG_SAC_CHI: &[u8] = b"QSAG.QUORUM.STAGE.SAC.CHI/v1";
@@ -282,21 +282,18 @@ fn coin_toss_pk_seed(
         contribs[party][0] ^= 0x01;
     }
 
-    // Round 2: Every custodian verifies all peer commitments before deriving `pk_seed`.
-    for verifier in 0..n {
-        let _ = verifier;
-        for p in 0..n {
-            let p_be = (p as u64).to_be_bytes();
-            let expected = h32(
-                TAG_STAGE_PK_SEED,
-                &[session_id, &p_be, &salts[p], &contribs[p]],
-            );
-            if !ct_eq_bytes32(&expected, &commits[p]) {
-                return Err(DealerlessStagingError::CommitmentMismatch {
-                    phase: "pk_seed",
-                    party: p,
-                });
-            }
+    // Round 2: Verify all peer commitments before deriving `pk_seed`.
+    for p in 0..n {
+        let p_be = (p as u64).to_be_bytes();
+        let expected = h32(
+            TAG_STAGE_PK_SEED,
+            &[session_id, &p_be, &salts[p], &contribs[p]],
+        );
+        if !ct_eq_bytes32(&expected, &commits[p]) {
+            return Err(DealerlessStagingError::CommitmentMismatch {
+                phase: "pk_seed",
+                party: p,
+            });
         }
     }
 
@@ -389,14 +386,14 @@ fn coin_toss_public_seed(
     Ok(coin)
 }
 
-/// Dealerless 2-round pairwise commit-then-open symmetric MAC key agreement over private
-/// pairwise channels (`a < b`), plus purely local self-keys `keys[p][p]`.
+/// Dealerless pairwise symmetric MAC key derivation over private pairwise channels (`a < b`),
+/// plus purely local self-keys `keys[p][p]`, guarded against early-return leakage via [`SecretBuffer`].
 fn establish_dealerless_pairwise_mac_keys(
     session_id: &[u8; 32],
     party_rngs: &mut [PartyPrivateRng],
-) -> Result<Vec<Vec<Node>>, DealerlessStagingError> {
+) -> Result<SecretBuffer<Vec<Vec<Node>>>, DealerlessStagingError> {
     let n = party_rngs.len();
-    let mut keys = vec![vec![[0u8; 32]; n]; n];
+    let mut keys = SecretBuffer(vec![vec![[0u8; 32]; n]; n]);
     for p in 0..n {
         keys[p][p] = party_rngs[p].next_bytes32();
     }
@@ -404,64 +401,28 @@ fn establish_dealerless_pairwise_mac_keys(
         for b in (a + 1)..n {
             let a_be = (a as u64).to_be_bytes();
             let b_be = (b as u64).to_be_bytes();
-            let mut salt_a = party_rngs[a].next_bytes32();
-            let mut contrib_a = party_rngs[a].next_bytes32();
-            let mut salt_b = party_rngs[b].next_bytes32();
-            let mut contrib_b = party_rngs[b].next_bytes32();
+            let salt_a = SecretBuffer(party_rngs[a].next_bytes32());
+            let contrib_a = SecretBuffer(party_rngs[a].next_bytes32());
+            let salt_b = SecretBuffer(party_rngs[b].next_bytes32());
+            let contrib_b = SecretBuffer(party_rngs[b].next_bytes32());
 
             let com_a = h32(
                 TAG_PAIR_COMMIT,
-                &[session_id, &a_be, &b_be, &salt_a, &contrib_a],
+                &[session_id, &a_be, &b_be, &*salt_a, &*contrib_a],
             );
             let com_b = h32(
                 TAG_PAIR_COMMIT,
-                &[session_id, &b_be, &a_be, &salt_b, &contrib_b],
+                &[session_id, &b_be, &a_be, &*salt_b, &*contrib_b],
             );
 
-            // Verify commitments on both endpoints before deriving the shared MAC key.
-            let check_a = h32(
-                TAG_PAIR_COMMIT,
-                &[session_id, &a_be, &b_be, &salt_a, &contrib_a],
-            );
-            let check_b = h32(
-                TAG_PAIR_COMMIT,
-                &[session_id, &b_be, &a_be, &salt_b, &contrib_b],
-            );
-            if !ct_eq_bytes32(&com_a, &check_a) || !ct_eq_bytes32(&com_b, &check_b) {
-                wipe_bytes32(&mut salt_a);
-                wipe_bytes32(&mut contrib_a);
-                wipe_bytes32(&mut salt_b);
-                wipe_bytes32(&mut contrib_b);
-                return Err(DealerlessStagingError::PairwiseKeyMismatch {
-                    party_a: a,
-                    party_b: b,
-                });
-            }
-
-            let key_ab = h32(
+            let shared_key = h32(
                 TAG_PAIR_KEY,
                 &[
-                    session_id, &a_be, &b_be, &com_a, &com_b, &contrib_a, &contrib_b,
+                    session_id, &a_be, &b_be, &com_a, &com_b, &*contrib_a, &*contrib_b,
                 ],
             );
-            let key_ba = h32(
-                TAG_PAIR_KEY,
-                &[
-                    session_id, &a_be, &b_be, &com_a, &com_b, &contrib_a, &contrib_b,
-                ],
-            );
-            wipe_bytes32(&mut salt_a);
-            wipe_bytes32(&mut contrib_a);
-            wipe_bytes32(&mut salt_b);
-            wipe_bytes32(&mut contrib_b);
-            if !ct_eq_bytes32(&key_ab, &key_ba) {
-                return Err(DealerlessStagingError::PairwiseKeyMismatch {
-                    party_a: a,
-                    party_b: b,
-                });
-            }
-            keys[a][b] = key_ab;
-            keys[b][a] = key_ba;
+            keys[a][b] = shared_key;
+            keys[b][a] = shared_key;
         }
     }
     Ok(keys)
@@ -774,14 +735,15 @@ fn run_pairs<T: Send>(
                 .iter_mut()
                 .map(|(pv, owner, holder)| scope.spawn(move || job(pv, owner, holder)))
                 .collect();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                })
-                .collect()
+            let raw_joins: Vec<_> = handles.into_iter().map(|handle| handle.join()).collect();
+            let mut out = Vec::with_capacity(raw_joins.len());
+            for joined in raw_joins {
+                match joined {
+                    Ok(res) => out.push(res?),
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            }
+            Ok(out)
         });
     }
     work.iter_mut()
@@ -918,8 +880,13 @@ impl PairwiseSubfieldVole {
     }
 }
 
-/// Committed SPDZ `GF(2^128)` batch `MacCheck` on opened `u64` words `(opened_words, party_word_macs)`.
-/// Every member commits to its `sigma_u` share in Round 1 before any peer opens in Round 2.
+/// Multiplicatively blinded SPDZ `GF(2^128)` batch `MacCheck` on opened `u64` words
+/// `(opened_words, party_word_macs)` routed through `qsag_core`'s sender-residual OLE
+/// (`w = (Σ r_i) · (Σ sigma_u)` over `ot_mesh`), never opening raw `sigmas[u]` (`C1-P0-1`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Committee context, MAC key shares, opened words, per-party MAC shares, OT mesh, and private RNGs are distinct protocol inputs"
+)]
 fn run_committed_spdz_mac_check_words(
     committee: usize,
     step_id: usize,
@@ -927,6 +894,7 @@ fn run_committed_spdz_mac_check_words(
     deltas: &[u128],
     opened_words: &[u64],
     party_macs: &[Vec<[u128; 64]>],
+    ot_mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<(), DealerlessStagingError> {
     if opened_words.is_empty() {
@@ -963,54 +931,33 @@ fn run_committed_spdz_mac_check_words(
         }
     }
 
-    let mut salts = SecretBuffer(vec![[0u8; 32]; m]);
     let mut sigmas = SecretBuffer(vec![0u128; m]);
-    let mut commits = Vec::with_capacity(m);
     for u in 0..m {
         let flat_macs: &[u128] = party_macs[u].as_flattened();
         let mac_comb = qsag_asm::gf2_128_dot(flat_macs, &chis);
         sigmas[u] = mac_comb ^ gf128_mul(val_comb, deltas[u]);
-        salts[u] = party_rngs[u].next_bytes32();
-        let u_be = (u as u64).to_be_bytes();
-        commits.push(h32(
-            TAG_MAC_COMMIT,
-            &[
-                session_id,
-                &transcript_digest,
-                &u_be,
-                &salts[u],
-                &sigmas[u].to_le_bytes(),
-            ],
-        ));
     }
 
-    let mut sigma_xor = 0u128;
-    for u in 0..m {
-        let u_be = (u as u64).to_be_bytes();
-        let expected = h32(
-            TAG_MAC_COMMIT,
-            &[
-                session_id,
-                &transcript_digest,
-                &u_be,
-                &salts[u],
-                &sigmas[u].to_le_bytes(),
-            ],
-        );
-        if !ct_eq_bytes32(&expected, &commits[u]) {
-            return Err(DealerlessStagingError::CommitmentMismatch {
-                phase: "spdz_mac_check",
-                party: u,
-            });
-        }
-        sigma_xor ^= sigmas[u];
-    }
-    for s in salts.iter_mut() {
-        wipe_bytes32(s);
-    }
+    let check_sid = h32(
+        b"QSAG.QUORUM.QSA.BLIND_MAC/v1",
+        &[
+            session_id,
+            &(committee as u64).to_be_bytes(),
+            &(step_id as u64).to_be_bytes(),
+            &transcript_digest,
+            &chal_seed,
+        ],
+    );
+    let blinded_residual = blind_open_additive_gf128_poly(
+        &check_sid,
+        "qsa_mac_check",
+        &sigmas,
+        Some(ot_mesh),
+        party_rngs,
+    )?;
     wipe_u128s(&mut sigmas);
 
-    if black_box(sigma_xor) != 0 {
+    if black_box(blinded_residual) != 0 {
         return Err(DealerlessStagingError::MacCheckFailed {
             committee,
             step: step_id,
@@ -1266,7 +1213,7 @@ impl CommitteeBeaverReservoir {
                     for z in 0..64 {
                         let prev = ((x + 4) % 5) * 64 + z;
                         let next = ((x + 1) % 5) * 64 + ((z + 63) & 63);
-                        d_theta_sh[x * 64 + z] = col_sh[prev] ^ col_mac_noop_u64(col_sh[next]);
+                        d_theta_sh[x * 64 + z] = col_sh[prev] ^ col_sh[next];
                         for bit in 0..64 {
                             d_theta_mac[x * 64 + z][bit] = col_mac[prev][bit] ^ col_mac[next][bit];
                         }
@@ -1375,14 +1322,10 @@ impl CommitteeBeaverReservoir {
             &self.deltas,
             &opened_de,
             &opened_de_macs,
+            &mut self.ot_mesh,
             party_rngs,
         )
     }
-}
-
-#[inline(always)]
-const fn col_mac_noop_u64(x: u64) -> u64 {
-    x
 }
 
 type StagedCommitteeSubtreeOutcome =
@@ -1585,6 +1528,7 @@ fn stage_single_committee_into(
             &reservoir.deltas,
             &y3_opened_planes,
             &y3_macs_vec,
+            &mut reservoir.ot_mesh,
             committee_rngs,
         )?;
 
@@ -1705,14 +1649,13 @@ fn stage_volatile_subset_into_inner(
                 )
             }));
         }
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| DealerlessStagingError::OutputRejected)?
-            })
-            .collect::<Result<Vec<_>, _>>()
+        let raw_joins: Vec<_> = handles.into_iter().map(|handle| handle.join()).collect();
+        let mut out = Vec::with_capacity(raw_joins.len());
+        for joined in raw_joins {
+            let part = joined.map_err(|_| DealerlessStagingError::OutputRejected)??;
+            out.push(part);
+        }
+        Ok::<Vec<_>, DealerlessStagingError>(out)
     })?;
     let mut ends: Vec<_> = leaves
         .iter()
@@ -1892,7 +1835,7 @@ fn stage_committee_partitioned_inner(
 
     let parties = stores_by_party
         .into_iter()
-        .zip(mac_keys)
+        .zip(mac_keys.into_inner())
         .enumerate()
         .map(|(party, (stores, p_mac_keys))| {
             CommitteePartyMaterial::from_parts(party, p_mac_keys, stores)
@@ -2685,7 +2628,7 @@ fn stage_bft_shamir_inner(
     )?;
 
     let mut parties = Vec::with_capacity(n);
-    for (p, p_mac_keys) in mac_keys.into_iter().enumerate() {
+    for (p, p_mac_keys) in mac_keys.into_inner().into_iter().enumerate() {
         let mut final_leaves = vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; num_leaves];
         for (b_idx, (dst, src)) in final_leaves
             .iter_mut()
@@ -2981,7 +2924,7 @@ fn refresh_committee_shares_inner<W: DurableWal>(
             apply_and_wipe_leaf_mask_in_place(leaves, &mut masks[pos]);
         }
     }
-    for (custodian, keys) in custodians.iter_mut().zip(new_mac_keys) {
+    for (custodian, keys) in custodians.iter_mut().zip(new_mac_keys.into_inner()) {
         custodian.replace_mac_keys(keys)?;
     }
     Ok(())
@@ -3067,7 +3010,7 @@ pub fn refresh_staged_committee_keys(
             }
         }
     }
-    for (mat, keys) in staged.parties.iter_mut().zip(new_mac_keys) {
+    for (mat, keys) in staged.parties.iter_mut().zip(new_mac_keys.into_inner()) {
         mat.replace_mac_keys(keys);
     }
     Ok(())
@@ -3136,7 +3079,7 @@ fn refresh_bft_shamir_shares_inner<W: DurableWal>(
     for (p, custodian) in custodians.iter_mut().enumerate() {
         apply_and_wipe_leaf_mask_in_place(custodian.leaves_mut(), &mut zero_masks[p]);
     }
-    for (custodian, keys) in custodians.iter_mut().zip(new_mac_keys) {
+    for (custodian, keys) in custodians.iter_mut().zip(new_mac_keys.into_inner()) {
         custodian.replace_mac_keys(keys)?;
     }
     Ok(())
@@ -3174,7 +3117,12 @@ pub fn refresh_staged_bft_shamir_keys(
     )?;
     let new_mac_keys = establish_dealerless_pairwise_mac_keys(&session_id, party_rngs)?;
 
-    for (p, (mat, keys)) in staged.parties.iter_mut().zip(new_mac_keys).enumerate() {
+    for (p, (mat, keys)) in staged
+        .parties
+        .iter_mut()
+        .zip(new_mac_keys.into_inner())
+        .enumerate()
+    {
         apply_and_wipe_leaf_mask_in_place(mat.leaves_mut(), &mut zero_masks[p]);
         mat.replace_mac_keys(keys);
     }
@@ -3936,5 +3884,70 @@ mod tests {
             b"wire after refresh",
         );
         assert!(verify_jorts_signature(&pk, b"wire after refresh", &sig));
+    }
+
+    #[test]
+    fn qsa_mac_check_blinds_nonzero_residual_against_delta_leakage() {
+        let m = 3usize;
+        let sid = [0x91; 32];
+        let mut rngs_a = make_party_rngs(m, 0xa1);
+        let mut mesh_a = OtMesh::try_establish(sid, &mut rngs_a).expect("establish mesh a");
+        let deltas_a = [0x1111_2222_3333_4444_5555_6666_7777_8888u128, 0x99, 0xaa];
+        let delta_sum_a = deltas_a.iter().fold(0u128, |acc, &d| acc ^ d);
+
+        // Honest zero residual passes cleanly without revealing raw `sigmas[u]`.
+        let opened = [0xdead_beef_cafe_babeu64];
+        let mut honest_macs = vec![vec![[0u128; 64]; 1]; m];
+        for bit in 0..64 {
+            if ((opened[0] >> bit) & 1) == 1 {
+                for u in 0..m {
+                    honest_macs[u][0][bit] = deltas_a[u];
+                }
+            }
+        }
+        run_committed_spdz_mac_check_words(
+            0,
+            1,
+            &sid,
+            &deltas_a,
+            &opened,
+            &honest_macs,
+            &mut mesh_a,
+            &mut rngs_a,
+        )
+        .expect("honest blinded QS-A MAC check must pass");
+
+        // Corrupting bit 0 of `opened` induces a non-zero residual `d = chi_0 * Δ != 0`:
+        // the blinded check rejects AND two independent randomizer tapes produce uniform,
+        // distinct non-zero `w = R · d` openings independent of `Δ`.
+        let bad_opened = [opened[0] ^ 1];
+        assert_eq!(
+            run_committed_spdz_mac_check_words(
+                0,
+                2,
+                &sid,
+                &deltas_a,
+                &bad_opened,
+                &honest_macs,
+                &mut mesh_a,
+                &mut rngs_a,
+            ),
+            Err(DealerlessStagingError::MacCheckFailed {
+                committee: 0,
+                step: 2,
+            })
+        );
+
+        let residual_shares = SecretBuffer(vec![delta_sum_a ^ 0x55, 0x55, 0]);
+        let mut rngs_1 = make_party_rngs(m, 0xb1);
+        let mut rngs_2 = make_party_rngs(m, 0xb2);
+        let w1 = blind_open_additive_gf128_poly(&sid, "test_blind", &residual_shares, None, &mut rngs_1)
+            .expect("blind open 1");
+        let w2 = blind_open_additive_gf128_poly(&sid, "test_blind", &residual_shares, None, &mut rngs_2)
+            .expect("blind open 2");
+        assert_ne!(w1, 0);
+        assert_ne!(w2, 0);
+        assert_ne!(w1, w2);
+        assert_ne!(w1, delta_sum_a);
     }
 }

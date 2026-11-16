@@ -330,6 +330,164 @@ pub(super) fn prove_fold_in_place(
     (wire, fold_pow_nonce, chals)
 }
 
+/// Fold a Round-0 base-field monomial table `[c[0], .., c[N-1], 0, 0]` (`N = c.len()` even, `>= 2`)
+/// directly into `out` (`N / 2 + 2` `Ext4` slots) without allocating an `N + 2` `Ext4` copy.
+pub(super) fn fold_coeffs_from_base(
+    c: &[Goldilocks],
+    [theta, alpha, beta]: [E; 3],
+    out: &mut Vec<E>,
+) {
+    debug_assert!(c.len() >= 2 && c.len().is_multiple_of(2));
+    let half = c.len() / 2;
+    out.resize(half + 2, E::ZERO);
+    let at1 = E::ONE + alpha * theta;
+    let bt = beta * theta;
+    out[0] = alpha.mul_base(c[0]) + at1.mul_base(c[1]);
+    let fill = |start: usize, dst: &mut [E]| {
+        for (offset, slot) in dst.iter_mut().enumerate() {
+            let i = start + offset;
+            *slot = (beta.mul_base(c[2 * i - 2]) + bt.mul_base(c[2 * i - 1]))
+                + (alpha.mul_base(c[2 * i]) + at1.mul_base(c[2 * i + 1]));
+        }
+    };
+    #[cfg(feature = "std")]
+    if half >= 8_192 {
+        let workers = crate::parallel_workers().min(half.div_ceil(2_048));
+        let chunk = (half - 1).div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (index, dst) in out[1..half].chunks_mut(chunk).enumerate() {
+                let fill = &fill;
+                crate::spawn_bounded(scope, move || fill(1 + index * chunk, dst));
+            }
+        });
+    } else {
+        fill(1, &mut out[1..half]);
+    }
+    #[cfg(not(feature = "std"))]
+    fill(1, &mut out[1..half]);
+    out[half] = beta.mul_base(c[2 * half - 2]) + bt.mul_base(c[2 * half - 1]);
+    out[half + 1] = E::ZERO;
+}
+
+/// Round-0 counterpart to [`prove_fold_in_place`] when `c` is a single base-field monomial table
+/// with weight `[1, 0]` (`[c[0], .., c[N-1], 0, 0]`).
+pub(super) fn prove_fold_from_base(
+    c_base: &[Goldilocks],
+    c_out: &mut Vec<E>,
+    k: &mut Vec<E>,
+    k_scratch: &mut Vec<E>,
+    claim: &mut E,
+    tr: &mut FiatShamirTranscript<InstanceBound>,
+) -> ([E; 5], u64, [E; 3]) {
+    let _phase = crate::profile::span("prove_affine_fold_base");
+    let mut wire = [E::ZERO; 5];
+    let half = c_base.len() / 2;
+    let pairs_ck = half.min(k.len() / 2);
+    let cross_range = |k_ref: &[E], i0: usize, i1: usize| -> [E; 3] {
+        let mut acc = [E::ZERO; 3];
+        for i in i0..i1 {
+            let a0 = c_base[2 * i];
+            let a1 = c_base[2 * i + 1];
+            let b0 = k_ref[2 * i];
+            let b1 = k_ref[2 * i + 1];
+            acc[0] += b0.mul_base(a0);
+            acc[1] += b1.mul_base(a0);
+            acc[2] += b0.mul_base(a1);
+        }
+        acc
+    };
+    #[cfg(feature = "std")]
+    if pairs_ck >= 4_096 {
+        let workers = crate::parallel_workers().min(pairs_ck);
+        let chunk = pairs_ck.div_ceil(workers);
+        let k_ref = k.as_slice();
+        let cross_fn = &cross_range;
+        let parts: Vec<[E; 3]> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .filter_map(|t_idx| {
+                    let i0 = t_idx * chunk;
+                    (i0 < pairs_ck).then(|| {
+                        let i1 = (i0 + chunk).min(pairs_ck);
+                        crate::spawn_bounded(scope, move || cross_fn(k_ref, i0, i1))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(crate::join_worker).collect()
+        });
+        for p in parts {
+            wire[0] += p[0];
+            wire[1] += p[1];
+            wire[2] += p[2];
+        }
+    } else {
+        let p = cross_range(k, 0, pairs_ck);
+        wire[0] = p[0];
+        wire[1] = p[1];
+        wire[2] = p[2];
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let p = cross_range(k, 0, pairs_ck);
+        wire[0] = p[0];
+        wire[1] = p[1];
+        wire[2] = p[2];
+    }
+
+    let phi = bridge_prefix(&wire, tr);
+    fold_kernel_into(k, phi, k_scratch);
+    core::mem::swap(k, k_scratch);
+
+    let pairs_shift = half.min(k.len().saturating_sub(1));
+    let shift_range = |k_ref: &[E], i0: usize, i1: usize| -> [E; 2] {
+        let mut acc = [E::ZERO; 2];
+        for i in i0..i1 {
+            let ki1 = k_ref[i + 1];
+            acc[0] += ki1.mul_base(c_base[2 * i]);
+            acc[1] += ki1.mul_base(c_base[2 * i + 1]);
+        }
+        acc
+    };
+    #[cfg(feature = "std")]
+    if pairs_shift >= 4_096 {
+        let workers = crate::parallel_workers().min(pairs_shift);
+        let chunk = pairs_shift.div_ceil(workers);
+        let k_ref = k.as_slice();
+        let shift_fn = &shift_range;
+        let parts: Vec<[E; 2]> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .filter_map(|t_idx| {
+                    let i0 = t_idx * chunk;
+                    (i0 < pairs_shift).then(|| {
+                        let i1 = (i0 + chunk).min(pairs_shift);
+                        crate::spawn_bounded(scope, move || shift_fn(k_ref, i0, i1))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(crate::join_worker).collect()
+        });
+        for p in parts {
+            wire[3] += p[0];
+            wire[4] += p[1];
+        }
+    } else {
+        let p = shift_range(k, 0, pairs_shift);
+        wire[3] = p[0];
+        wire[4] = p[1];
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let p = shift_range(k, 0, pairs_shift);
+        wire[3] = p[0];
+        wire[4] = p[1];
+    }
+
+    let (fold_pow_nonce, next, chals) = bridge_finish(&wire, *claim, phi, tr);
+    *claim = next;
+    fold_coeffs_from_base(c_base, chals, c_out);
+    debug_assert_eq!(dot_ext4_fast(c_out, k), next);
+    (wire, fold_pow_nonce, chals)
+}
+
 #[cfg(test)]
 pub(super) fn prove_fold(
     c: &mut Vec<E>,

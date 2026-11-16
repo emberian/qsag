@@ -129,10 +129,11 @@ impl DealerlessPcgTripleSource<'_> {
         &mut self,
         words: usize,
     ) -> Result<Vec<PreprocessedKeccakPartyVault>, KeccakMpcError> {
-        let mut session = self.session_id;
-        for (byte, ctr) in session.iter_mut().zip(self.requests.to_le_bytes()) {
-            *byte ^= ctr;
-        }
+        let req_bytes = self.requests.to_le_bytes();
+        let session = crate::sponge::keccak::cshake256_32_multi_frame(
+            b"QSAG.SPDZ_SWEEP.PCG_REQ.V1",
+            &[&self.session_id, &req_bytes],
+        );
         self.requests = self
             .requests
             .checked_add(1)
@@ -277,6 +278,8 @@ pub struct SpdzSweepEngine<'a> {
     /// MAC key shares of the quorum, as the most recent vaults carried them.
     alpha: Option<SecretVec<[Tower128; 2]>>,
     perm_ctr: usize,
+    flush_ctr: u64,
+    open_ctr: u64,
     pending_opened: Vec<BitslicedGf256x64>,
     pending_macs: SecretVec<Vec<SpdzMacWord>>,
     #[cfg(test)]
@@ -318,6 +321,8 @@ impl<'a> SpdzSweepEngine<'a> {
             triples,
             alpha: None,
             perm_ctr: 0,
+            flush_ctr: 0,
+            open_ctr: 0,
             pending_opened: Vec::new(),
             pending_macs: secret_vecs_with_capacity(m, 0),
             #[cfg(test)]
@@ -348,12 +353,21 @@ impl<'a> SpdzSweepEngine<'a> {
         if self.pending_opened.is_empty() {
             return Ok(());
         }
+        let flush_idx = self.flush_ctr;
+        self.flush_ctr = match self.flush_ctr.checked_add(1) {
+            Some(next) => next,
+            None => return self.fail(KeccakMpcError::InvalidParameters),
+        };
+        let verify_sid = crate::sponge::keccak::cshake256_32_multi_frame(
+            b"QSAG.SPDZ_SWEEP.VERIFY.V1",
+            &[&self.session_id, &flush_idx.to_le_bytes()],
+        );
         let alpha = self
             .alpha
             .as_ref()
             .ok_or_else(|| mpc(KeccakMpcError::InvalidParameters))?;
         let checked = verify_pending_spdz_mac_batch(
-            &self.session_id,
+            &verify_sid,
             "baggy_spdz_chi",
             self.t,
             &self.quorum_pts,
@@ -647,8 +661,17 @@ impl<'a> SpdzSweepEngine<'a> {
             cut_sh.iter().all(|v| v.capacity() == cut_words)
                 && cut_mac.iter().all(|v| v.capacity() == cut_words)
         );
+        let open_idx = self.open_ctr;
+        self.open_ctr = match self.open_ctr.checked_add(1) {
+            Some(next) => next,
+            None => return self.fail(KeccakMpcError::InvalidParameters),
+        };
+        let open_sid = crate::sponge::keccak::cshake256_32_multi_frame(
+            b"QSAG.SPDZ_SWEEP.OPEN.V1",
+            &[&self.session_id, &open_idx.to_le_bytes()],
+        );
         let opened = match commit_and_open_spdz_bs_gf256_batch_quorum(
-            &self.session_id,
+            &open_sid,
             "baggy_spdz_open",
             self.t,
             &self.quorum_pts,
