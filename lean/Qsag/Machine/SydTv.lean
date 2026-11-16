@@ -1953,3 +1953,959 @@ def gfniShamirMacPosCert (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 
     intro a m ⟨cf, o, zf, y0, y1, y2, ha, _, _, _, hmr⟩
     exact ⟨cf, o, zf, y0, y1, y2, by simpa using ha, by omega⟩
 
+theorem gfni_replay_loop (fetch : Nat → Option (DecodedInstr X86Instr))
+    (hf : ∀ d ∈ gfniShamirMacProg, fetch d.offset = some d)
+    (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) (rem : Nat) :
+    ∀ v a m fuel, v + rem = n → GfniMacRel s₀ n v a m →
+      runX86Fetch fetch (11 * rem + fuel) a =
+        let loop := runCuts gfniBodyStep rem a
+        let u := runX86Fetch fetch fuel loop.1
+        (u.1, loop.2 ++ u.2) := by
+  induction rem with
+  | zero => intro v a m fuel _ _; simp [runCuts]
+  | succ k ih =>
+    intro v a m fuel hv hrel
+    have hvn : v < n := by omega
+    rcases hrel with ⟨cf, o, zf, y0, y1, y2, ha, hpS, hpA, hcoeff, hmr⟩
+    have hrel' : GfniMacRel s₀ n v a m := ⟨cf, o, zf, y0, y1, y2, ha, hpS, hpA, hcoeff, hmr⟩
+    have hbody := (gfniShamirMacPosCert s₀ n hn hbound).body v a m hvn hrel'
+    obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨oy0, oy1, oy2, oy3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, oy14, oy15⟩,
+      _, _, _, _, _, _⟩ := s₀
+    have ha55 : a = ⟨55, ⟨0xa1e4f8e072a2700c, UInt64.ofNat (n - v), r2, r3, r4, r5,
+        ptrStride r6 32 v, ptrStride r7 32 v, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0, y1, y2, gfniScaledCoeff r2, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, t3MatVec, t3InvMatVec⟩,
+        cf, o, zf, true, false, m.mem⟩ := by
+      simpa [Nat.ne_of_lt hvn, b16get_2, b16get_6, b16get_7,
+        b16set_0, b16set_1, b16set_2, b16set_3, b16set_6, b16set_7, b16set_14, b16set_15] using ha
+    rw [show 11 * (k + 1) + fuel = 11 + (11 * k + fuel) from by omega, ha55]
+    rw [gfni_body_full fetch hf]
+    rw [← ha55]
+    rw [ih (v + 1) (gfniBodyStep a).1 (asmFfiGfniBodyStep m).1 fuel (by omega) hbody.1]
+    simp [runCuts, List.append_assoc]
+
+/-- Complete `UnrestrictedLoopCert` for `qsag_asm_gf256_shamir_mac_gfni` over **all `n : BitVec 64`**. -/
+def gfniShamirMacUnrestrictedCert (fetch : Nat → Option (DecodedInstr X86Instr))
+    (hf : ∀ d ∈ gfniShamirMacProg, fetch d.offset = some d)
+    (s₀ : X86State) (fuel : Nat) (hpc : s₀.pc = 0) (hh : s₀.halted = false)
+    (n : Word) (hcount : s₀.gpr.get 1 = UInt64.ofBitVec n)
+    (hfuel : 11 * n.toNat + 29 ≤ fuel) :
+    UnrestrictedLoopCert X86State AsmFfiShamirMac n
+      (gfniShamirMacGuardedRun fetch fuel)
+      (fun m => asmFfiGfniRun n m.sharesPtr m.accPtr (s₀.gpr.get 2) m.mem)
+      gfniBodyStep asmFfiGfniBodyStep
+      s₀ ⟨s₀.gpr.get 6, s₀.gpr.get 7, gfniScaledCoeff (s₀.gpr.get 2), n.toNat, s₀.mem⟩
+      ⟨55, (s₀.gpr.set 0 0xa1e4f8e072a2700c |>.set 1 (UInt64.ofNat n.toNat)),
+        (s₀.ymm.set 3 (gfniScaledCoeff (s₀.gpr.get 2)) |>.set 14 t3MatVec |>.set 15 t3InvMatVec),
+        s₀.cf, s₀.ofFlag, s₀.zf, true, false, s₀.mem⟩
+      ⟨s₀.gpr.get 6, s₀.gpr.get 7, gfniScaledCoeff (s₀.gpr.get 2), n.toNat, s₀.mem⟩
+      (GfniMacLoopPost s₀ n.toNat)
+      (GfniMacPost s₀ n) where
+  zeroSchedule := [⟨0, [], true⟩]
+  entrySchedule := gfniEntryObs
+  bodySchedule := fun v => gfniBodyObs (ptrStride (s₀.gpr.get 6) 32 v) (ptrStride (s₀.gpr.get 7) 32 v)
+  exitSchedule := gfniExitObs
+  zero_cut := by
+    intro hz; subst hz
+    have hg0 : (s₀.gpr.get 1 == 0) = true := by simp [hcount]
+    dsimp only [gfniShamirMacGuardedRun, asmFfiGfniRun]
+    rw [ite_eq_left hg0, ite_eq_left rfl]
+    obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, _, _, _, _, _, _, _⟩ := s₀
+    have hr1 : r1 = 0 := hcount
+    refine ⟨⟨rfl, rfl, rfl, rfl, hr1, rfl, rfl, fun h => absurd rfl h, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+      fun h => absurd rfl h⟩, rfl, rfl⟩
+  pos_cert := fun hn =>
+    gfniShamirMacPosCert s₀ n.toNat (bv64_pos_of_ne_zero n hn) n.isLt
+  pos_sched := fun _ => rfl
+  pos_replay := by
+    intro hn hlp hal hml
+    have hg0 : ¬ ((s₀.gpr.get 1 == 0) = true) := by
+      rw [beq_false_of_ne (hcount ▸ (bv64_ne_zero_iff_u64_ne_zero n).mp hn)]; decide
+    dsimp only [gfniShamirMacGuardedRun, asmFfiGfniRun]
+    rw [ite_eq_right hg0, ite_eq_right hn]
+    obtain ⟨extra, hextra⟩ : ∃ extra, fuel = 9 + (11 * n.toNat + (20 + extra)) :=
+      ⟨fuel - (11 * n.toNat + 29), by omega⟩
+    rw [hextra]
+    obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+      cf, o, zf, dy, hlt, m⟩ := s₀
+    cases hpc; cases hh
+    have hr1 : r1 = UInt64.ofNat n.toNat := by
+      apply u64_eq_of_toNat_eq
+      have : r1 = UInt64.ofBitVec n := hcount
+      rw [this, UInt64.toNat_ofNat', Nat.mod_eq_of_lt n.isLt]; rfl
+    rw [gfni_entry_full fetch hf]
+    have headEq : (⟨55, ⟨0xa1e4f8e072a2700c, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0, y1, y2, gfniScaledCoeff r2, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, t3MatVec, t3InvMatVec⟩,
+        cf, o, zf, true, false, m⟩ : X86State) =
+      ⟨55, ((Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15).set 0 0xa1e4f8e072a2700c
+            |>.set 1 (UInt64.ofNat n.toNat)),
+        ((Bank16.mk y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15).set 3 (gfniScaledCoeff r2)
+          |>.set 14 t3MatVec |>.set 15 t3InvMatVec),
+        cf, o, zf, true, false, m⟩ := by
+      simp [hr1, b16set_0, b16set_1, b16set_3, b16set_14, b16set_15]
+    rw [headEq]
+    have hpos := bv64_pos_of_ne_zero n hn
+    have hrep := gfni_replay_loop fetch hf
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩, cf, o, zf, dy, false, m⟩
+      n.toNat hpos n.isLt n.toNat 0 _ ⟨r6, r7, gfniScaledCoeff r2, n.toNat, m⟩ (20 + extra) (by omega)
+      (gfniShamirMacPosCert _ n.toNat hpos n.isLt).entry
+    dsimp only at hrep ⊢
+    simp only [b16get_2] at hrep
+    rw [hrep]
+    rcases hlp with ⟨cfL, oL, zfL, y0L, y1L, y2L, haL, _⟩
+    have ha101 : (runCuts gfniBodyStep n.toNat
+        ⟨55, ((Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15).set 0 0xa1e4f8e072a2700c
+              |>.set 1 (UInt64.ofNat n.toNat)),
+          ((Bank16.mk y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15).set 3 (gfniScaledCoeff r2)
+            |>.set 14 t3MatVec |>.set 15 t3InvMatVec),
+          cf, o, zf, true, false, m⟩).1 =
+      ⟨101, ⟨0xa1e4f8e072a2700c, 0, r2, r3, r4, r5, ptrStride r6 32 n.toNat, ptrStride r7 32 n.toNat,
+        r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0L, y1L, y2L, gfniScaledCoeff r2, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, t3MatVec, t3InvMatVec⟩,
+        cfL, oL, zfL, true, false,
+        (runCuts asmFfiGfniBodyStep n.toNat ⟨r6, r7, gfniScaledCoeff r2, n.toNat, m⟩).1.mem⟩ := by
+      simpa [b16get_2, b16get_6, b16get_7,
+        b16set_0, b16set_1, b16set_2, b16set_3, b16set_6, b16set_7, b16set_14, b16set_15] using haL
+    rw [ha101, gfni_exit_full fetch hf]
+    have hmr := asmFfiGfni_cuts_mem n.toNat r6 r7 (gfniScaledCoeff r2) n.toNat m
+    refine ⟨?_, by simp [List.append_assoc, b16get_2], rfl⟩
+    refine ⟨rfl, rfl, hmr, rfl, rfl, rfl, rfl, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
+    · intro _
+      exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+    · intro _
+      exact ⟨fun i hi => match i, hi with
+        | 0, _ => rfl | 1, _ => rfl | 2, _ => rfl | 3, _ => rfl | 4, _ => rfl | 5, _ => rfl
+        | 6, _ => rfl | 7, _ => rfl | 8, _ => rfl | 9, _ => rfl | 10, _ => rfl | 11, _ => rfl
+        | 12, _ => rfl | 13, _ => rfl | 14, _ => rfl | 15, _ => rfl
+        | i + 16, h => absurd h (by omega), rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Refinement and `StepObs` noninterference for the guarded runner of `qsag_asm_gf256_shamir_mac_gfni` at every
+`n : BitVec 64`. For `n ≠ 0` the runner is byte-decoded execution of the symbol
+(`gf256_shamir_mac_gfni_sydtv_refines_pos`); for `n = 0` it is the modelled wrapper early return. -/
+theorem gf256_shamir_mac_gfni_sydtv_refines_all_n (s₁ s₂ : X86State) (fuel : Nat) (n : Word)
+    (hpc₁ : s₁.pc = 0) (hh₁ : s₁.halted = false) (hc₁ : s₁.gpr.get 1 = UInt64.ofBitVec n)
+    (hpc₂ : s₂.pc = 0) (hh₂ : s₂.halted = false) (hc₂ : s₂.gpr.get 1 = UInt64.ofBitVec n)
+    (hpS : s₁.gpr.get 6 = s₂.gpr.get 6) (hpA : s₁.gpr.get 7 = s₂.gpr.get 7)
+    (hfuel : 11 * n.toNat + 29 ≤ fuel) :
+    let out₁ := gfniShamirMacGuardedRun (decodeX86One gfniShamirMacCode) fuel s₁
+    let out₂ := gfniShamirMacGuardedRun (decodeX86One gfniShamirMacCode) fuel s₂
+    let ffi₁ := asmFfiGfniRun n (s₁.gpr.get 6) (s₁.gpr.get 7) (s₁.gpr.get 2) s₁.mem
+    GfniMacPost s₁ n out₁.1 ffi₁.1 ∧ out₁.2 = out₂.2 ∧ out₁.2 = ffi₁.2 := by
+  dsimp only
+  let c₁ := gfniShamirMacUnrestrictedCert (decodeX86One gfniShamirMacCode) gfniShamirMac_fetch_decodeOne
+    s₁ fuel hpc₁ hh₁ n hc₁ hfuel
+  let c₂ := gfniShamirMacUnrestrictedCert (decodeX86One gfniShamirMacCode) gfniShamirMac_fetch_decodeOne
+    s₂ fuel hpc₂ hh₂ n hc₂ hfuel
+  obtain ⟨hp, _, _⟩ := unrestricted_loop_refinement_sound c₁
+  have hsched : c₁.bodySchedule = c₂.bodySchedule := by
+    funext v; simp [c₁, c₂, gfniShamirMacUnrestrictedCert, hpS, hpA]
+  have hz : c₁.zeroSchedule = c₂.zeroSchedule := by
+    simp [c₁, c₂, gfniShamirMacUnrestrictedCert]
+  have he : c₁.entrySchedule = c₂.entrySchedule := by
+    simp [c₁, c₂, gfniShamirMacUnrestrictedCert]
+  have hx : c₁.exitSchedule = c₂.exitSchedule := by
+    simp [c₁, c₂, gfniShamirMacUnrestrictedCert]
+  obtain ⟨hni1, hni2⟩ := unrestricted_three_way_noninterference c₁ c₂ hz he hsched hx
+  exact ⟨hp, hni1, hni2⟩
+
+theorem gfniShamirMacGuardedRun_pos (fetch : Nat → Option (DecodedInstr X86Instr)) (fuel : Nat)
+    (s : X86State) (n : Word) (hn : n ≠ 0) (hc : s.gpr.get 1 = UInt64.ofBitVec n) :
+    gfniShamirMacGuardedRun fetch fuel s = runX86Fetch fetch fuel s := by
+  have hg0 : ¬ ((s.gpr.get 1 == 0) = true) := by
+    rw [beq_false_of_ne (hc ▸ (bv64_ne_zero_iff_u64_ne_zero n).mp hn)]; decide
+  unfold gfniShamirMacGuardedRun
+  rw [ite_eq_right hg0]
+
+/-- `qsag_asm_gf256_shamir_mac_gfni`, raw symbol bytes, nonzero block count. The scalar in `rdx`
+may differ between the two runs. -/
+theorem gf256_shamir_mac_gfni_sydtv_refines_pos (s₁ s₂ : X86State) (fuel : Nat) (n : Word) (hn : n ≠ 0)
+    (hpc₁ : s₁.pc = 0) (hh₁ : s₁.halted = false) (hc₁ : s₁.gpr.get 1 = UInt64.ofBitVec n)
+    (hpc₂ : s₂.pc = 0) (hh₂ : s₂.halted = false) (hc₂ : s₂.gpr.get 1 = UInt64.ofBitVec n)
+    (hpS : s₁.gpr.get 6 = s₂.gpr.get 6) (hpA : s₁.gpr.get 7 = s₂.gpr.get 7)
+    (hfuel : 11 * n.toNat + 29 ≤ fuel) :
+    GfniMacPost s₁ n (runX86One gfniShamirMacCode fuel s₁).1
+      (asmFfiGfniRun n (s₁.gpr.get 6) (s₁.gpr.get 7) (s₁.gpr.get 2) s₁.mem).1 ∧
+    (runX86One gfniShamirMacCode fuel s₁).2 = (runX86One gfniShamirMacCode fuel s₂).2 ∧
+    (runX86One gfniShamirMacCode fuel s₁).2 =
+      (asmFfiGfniRun n (s₁.gpr.get 6) (s₁.gpr.get 7) (s₁.gpr.get 2) s₁.mem).2 := by
+  have h := gf256_shamir_mac_gfni_sydtv_refines_all_n s₁ s₂ fuel n hpc₁ hh₁ hc₁ hpc₂ hh₂ hc₂ hpS hpA hfuel
+  dsimp only at h
+  rw [gfniShamirMacGuardedRun_pos _ fuel s₁ n hn hc₁, gfniShamirMacGuardedRun_pos _ fuel s₂ n hn hc₂] at h
+  simpa only [runX86One_eq, runArm64One_eq] using h
+
+/-! ## §8. Kernel 5 — `qsag_asm_tower128_bdoz_mac_vpclmul` (2-Pointer 32B Affine + Dual-256b Karatsuba XOR Accumulators, `∀ n : Word`) -/
+
+theorem vpclmulBdozMac_fetch_decodeOne :
+    ∀ d ∈ vpclmulBdozMacProg, decodeX86One vpclmulBdozMacCode d.offset = some d := by
+  intro d hd
+  have hall := vpclmulBdozMac_decodeOne_all.2
+  rw [List.all_eq_true] at hall
+  have h := hall d hd
+  simp only [Bool.and_eq_true, beq_iff_eq] at h
+  exact h.1
+
+def karatsubaStepLo (accLo a b : Vec256) : Vec256 :=
+  let mid := evalVecBin256 .vpxor (clmul256 a b 0x01) (clmul256 a b 0x10)
+  let prodLo := evalVecBin256 .vpxor (clmul256 a b 0x00) (evalVecShift256 .vpslldq mid 8)
+  evalVecBin256 .vpxor accLo prodLo
+
+def karatsubaStepHi (accHi a b : Vec256) : Vec256 :=
+  let mid := evalVecBin256 .vpxor (clmul256 a b 0x01) (clmul256 a b 0x10)
+  let prodHi := evalVecBin256 .vpxor (clmul256 a b 0x11) (evalVecShift256 .vpsrldq mid 8)
+  evalVecBin256 .vpxor accHi prodHi
+
+def poly87Reduce256 (accLo accHi : Vec256) : Vec256 :=
+  let c87 := bcastQword256 0x87
+  let r1 := clmul256 accHi c87 0x01
+  let lo1 := evalVecBin256 .vpxor accLo (evalVecShift256 .vpslldq r1 8)
+  let hi1 := evalVecBin256 .vpxor accHi (evalVecShift256 .vpsrldq r1 8)
+  let r0 := clmul256 hi1 c87 0x00
+  evalVecBin256 .vpxor lo1 r0
+
+def bdozMacAccum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Vec256 → Vec256 → Vec256 × Vec256
+  | 0, _, _, _, lo, hi => (lo, hi)
+  | k + 1, mem, pL, pR, lo, hi =>
+    let a := readMem256 mem pL
+    let b := readMem256 mem pR
+    bdozMacAccum k mem (pL + 32) (pR + 32) (karatsubaStepLo lo a b) (karatsubaStepHi hi a b)
+
+section Gf128MacAlgebra
+-- clmul64 is opaque across the public ISA interface.
+attribute [-instance] UInt8.instLawfulEqOrd BitVec.instLawfulEqOrd
+
+/-- Select either independent 128-bit SIMD lane in polynomial bit order. -/
+def gf128Lane (v : Vec256) (lane : Fin 2) : BitVec 128 :=
+  if lane.val = 0 then gf128Words v.w0 v.w1 else gf128Words v.w2 v.w3
+
+/-- Interpret the pair of unreduced SIMD accumulators as a polynomial. -/
+def gf128AccumLane (lo hi : Vec256) (lane : Fin 2) : BitVec 256 :=
+  gf128Lane hi lane ++ gf128Lane lo lane
+
+/-- XOR of unreduced polynomial products in the selected lane of n blocks.
+Pointer arithmetic is the machine's UInt64 arithmetic, including wrapping. -/
+def gf128BdozPolySum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Fin 2 → BitVec 256
+  | 0, _, _, _, _ => 0
+  | n+1, mem, pL, pR, lane =>
+      gf128PolyMul ((gf128Lane (readMem256 mem pL) lane).setWidth 256)
+        (gf128Lane (readMem256 mem pR) lane) ^^^
+      gf128BdozPolySum n mem (pL+32) (pR+32) lane
+
+/-- XOR of the mathematical GF(2^128) products in the selected lane of n blocks. -/
+def gf128BdozFieldSum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Fin 2 → BitVec 128
+  | 0, _, _, _, _ => 0
+  | n+1, mem, pL, pR, lane =>
+      gf128FieldMul (gf128Lane (readMem256 mem pL) lane)
+        (gf128Lane (readMem256 mem pR) lane) ^^^
+      gf128BdozFieldSum n mem (pL+32) (pR+32) lane
+
+theorem gf128BdozPolySum_reduce (n : Nat) (mem : UInt64 → UInt8)
+    (pL pR : UInt64) (lane : Fin 2) :
+    gf128Reduce (gf128BdozPolySum n mem pL pR lane) =
+      gf128BdozFieldSum n mem pL pR lane := by
+  induction n generalizing pL pR with
+  | zero => exact gf128Reduce_zero_eq
+  | succ n ih =>
+    simp only [gf128BdozPolySum, gf128BdozFieldSum, gf128Reduce_xor, ih, gf128FieldMul_eq]
+
+private theorem gf128AccWords_product (l0 l1 h0 h1 : UInt64) (p00 p01 p10 p11 : Vec128) :
+    gf128Words (h0 ^^^ (p11.w0 ^^^ ((p10.w1 ^^^ p01.w1) >>> 0)))
+      (h1 ^^^ (p11.w1 ^^^ 0)) ++
+      gf128Words (l0 ^^^ (p00.w0 ^^^ 0))
+        (l1 ^^^ (p00.w1 ^^^ ((p10.w0 ^^^ p01.w0) <<< 0))) =
+    (gf128Words h0 h1 ++ gf128Words l0 l1) ^^^
+      (gf128Words (p11.w0 ^^^ p01.w1 ^^^ p10.w1) p11.w1 ++
+        gf128Words p00.w0 (p00.w1 ^^^ p01.w0 ^^^ p10.w0)) := by
+  simp only [UInt64.shiftLeft_zero, UInt64.shiftRight_zero, UInt64.xor_zero]
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hbound
+  simp only [gf128Words_eq, BitVec.getLsbD_append, UInt64.toBitVec_xor, BitVec.getLsbD_xor]
+  by_cases h0 : i < 128 <;> by_cases h1 : i < 64 <;> by_cases h2 : i - 128 < 64 <;>
+    simp_all only [↓reduceIte, Bool.xor_assoc, Bool.xor_comm, Bool.xor_left_comm]
+
+private theorem gf128KaratsubaStep_lane (lo hi a b : Vec256) (lane : Fin 2) :
+    gf128AccumLane (karatsubaStepLo lo a b) (karatsubaStepHi hi a b) lane =
+      gf128AccumLane lo hi lane ^^^
+        gf128PolyMul ((gf128Lane a lane).setWidth 256) (gf128Lane b lane) := by
+  by_cases hl : lane.val = 0
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128_clmul_four_words]
+    simp only [karatsubaStepLo, karatsubaStepHi, evalVecBin256_xor_eq, evalVecShift256_left8, evalVecShift256_right8, clmul256_eq_0, clmul256_eq_1, clmul256_eq_16, clmul256_eq_17]
+    exact gf128AccWords_product lo.w0 lo.w1 hi.w0 hi.w1
+      (clmul64 a.w0 b.w0) (clmul64 a.w0 b.w1) (clmul64 a.w1 b.w0) (clmul64 a.w1 b.w1)
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128_clmul_four_words]
+    simp only [karatsubaStepLo, karatsubaStepHi, evalVecBin256_xor_eq, evalVecShift256_left8, evalVecShift256_right8, clmul256_eq_0, clmul256_eq_1, clmul256_eq_16, clmul256_eq_17]
+    exact gf128AccWords_product lo.w2 lo.w3 hi.w2 hi.w3
+      (clmul64 a.w2 b.w2) (clmul64 a.w2 b.w3) (clmul64 a.w3 b.w2) (clmul64 a.w3 b.w3)
+
+theorem gf128BdozAccum_polynomial (n : Nat) (mem : UInt64 → UInt8)
+    (pL pR : UInt64) (lo hi : Vec256) (lane : Fin 2) :
+    gf128AccumLane (bdozMacAccum n mem pL pR lo hi).1
+      (bdozMacAccum n mem pL pR lo hi).2 lane =
+      gf128AccumLane lo hi lane ^^^ gf128BdozPolySum n mem pL pR lane := by
+  induction n generalizing pL pR lo hi with
+  | zero => simp [bdozMacAccum, gf128BdozPolySum]
+  | succ n ih =>
+    simp only [bdozMacAccum, ih, gf128KaratsubaStep_lane, gf128BdozPolySum,
+      BitVec.xor_assoc]
+
+private theorem gf128ReduceWords (lo0 lo1 hi0 hi1 : UInt64) :
+    gf128Words
+      ((lo0 ^^^ (0 : UInt64)) ^^^ (clmul64 (hi0 ^^^ ((clmul64 hi1 0x87).w1 >>> (0 : UInt64))) 0x87).w0)
+      ((lo1 ^^^ ((clmul64 hi1 0x87).w0 <<< (0 : UInt64))) ^^^
+        (clmul64 (hi0 ^^^ ((clmul64 hi1 0x87).w1 >>> (0 : UInt64))) 0x87).w1) =
+      gf128WordReduce lo0 lo1 hi0 hi1 := by
+  simp only [UInt64.xor_zero, UInt64.shiftLeft_zero, UInt64.shiftRight_zero, gf128WordReduce_eq]
+
+private theorem gf128Poly87Reduce_lane (lo hi : Vec256) (lane : Fin 2) :
+    gf128Lane (poly87Reduce256 lo hi) lane = gf128Reduce (gf128AccumLane lo hi lane) := by
+  by_cases hl : lane.val = 0
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128WordReduce_eq_reduce]
+    simp only [poly87Reduce256, bcastQword256_eq, evalVecBin256_xor_eq, evalVecShift256_left8, evalVecShift256_right8, clmul256_eq_0, clmul256_eq_1]
+    exact gf128ReduceWords lo.w0 lo.w1 hi.w0 hi.w1
+  · simp only [gf128AccumLane, gf128Lane, hl, ↓reduceIte]
+    rw [← gf128WordReduce_eq_reduce]
+    simp only [poly87Reduce256, bcastQword256_eq, evalVecBin256_xor_eq, evalVecShift256_left8, evalVecShift256_right8, clmul256_eq_0, clmul256_eq_1]
+    exact gf128ReduceWords lo.w2 lo.w3 hi.w2 hi.w3
+
+/-- Each valid 128-bit lane of the reduced machine accumulator is the XOR
+of the n mathematical field products read from the corresponding input lane.
+The count-zero case is an algebraic identity, not execution of a zero-trip ABI call. -/
+theorem gf128_bdozMacAccum_field (n : Nat) (mem : UInt64 → UInt8)
+    (pL pR : UInt64) (lane : Nat) (hLane : lane < 2) :
+    gf128Lane
+      (poly87Reduce256 (bdozMacAccum n mem pL pR Vec256.zero Vec256.zero).1
+        (bdozMacAccum n mem pL pR Vec256.zero Vec256.zero).2) ⟨lane, hLane⟩ =
+      gf128BdozFieldSum n mem pL pR ⟨lane, hLane⟩ := by
+  rw [gf128Poly87Reduce_lane, gf128BdozAccum_polynomial]
+  have hz : gf128AccumLane Vec256.zero Vec256.zero ⟨lane, hLane⟩ = 0 := by
+    simp [gf128AccumLane, gf128Lane, Vec256.zero, gf128Words_eq]
+  rw [hz]
+  simpa only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor] using
+    gf128BdozPolySum_reduce n mem pL pR ⟨lane, hLane⟩
+
+
+end Gf128MacAlgebra
+
+structure AsmFfiBdozMac where
+  lhsPtr : UInt64
+  rhsPtr : UInt64
+  outPtr : UInt64
+  accLo : Vec256
+  accHi : Vec256
+  remaining : Nat
+  mem : UInt64 → UInt8
+
+def vpclmulEntryObs : List StepObs := [⟨0, [], true⟩, ⟨4, [], true⟩]
+
+def vpclmulBodyObs (pL pR : UInt64) : List StepObs :=
+  [⟨8, [(pL, 32)], true⟩, ⟨12, [(pR, 32)], true⟩, ⟨16, [], true⟩, ⟨22, [], true⟩,
+   ⟨28, [], true⟩, ⟨34, [], true⟩, ⟨40, [], true⟩, ⟨44, [], true⟩, ⟨49, [], true⟩,
+   ⟨54, [], true⟩, ⟨58, [], true⟩, ⟨62, [], true⟩, ⟨66, [], true⟩, ⟨70, [], true⟩,
+   ⟨74, [], true⟩, ⟨78, [], true⟩, ⟨81, [], true⟩]
+
+def vpclmulExitObs (outPtr : UInt64) : List StepObs :=
+  [⟨83, [], true⟩, ⟨88, [], true⟩, ⟨93, [], true⟩, ⟨98, [], true⟩, ⟨104, [], true⟩,
+   ⟨109, [], true⟩, ⟨114, [], true⟩, ⟨118, [], true⟩, ⟨122, [], true⟩, ⟨128, [], true⟩,
+   ⟨132, [(outPtr, 32)], true⟩, ⟨136, [], true⟩, ⟨140, [], true⟩, ⟨144, [], true⟩,
+   ⟨148, [], true⟩, ⟨152, [], true⟩, ⟨156, [], true⟩, ⟨160, [], true⟩, ⟨164, [], true⟩,
+   ⟨168, [], true⟩, ⟨173, [], true⟩, ⟨175, [], true⟩, ⟨178, [], true⟩, ⟨181, [], true⟩,
+   ⟨183, [], true⟩, ⟨185, [], true⟩, ⟨187, [], true⟩, ⟨189, [], true⟩, ⟨192, [], true⟩,
+   ⟨195, [], true⟩, ⟨198, [], true⟩, ⟨201, [], true⟩, ⟨203, [], true⟩]
+
+def vpclmulBodyStep (s : X86State) : X86State × List StepObs :=
+  let pL := s.gpr.get 6
+  let pR := s.gpr.get 2
+  let c := s.gpr.get 1
+  let a := readMem256 s.mem pL
+  let b := readMem256 s.mem pR
+  let mid := evalVecBin256 .vpxor (clmul256 a b 0x01) (clmul256 a b 0x10)
+  let shL := evalVecShift256 .vpslldq mid 8
+  let shH := evalVecShift256 .vpsrldq mid 8
+  let pLo := evalVecBin256 .vpxor (clmul256 a b 0x00) shL
+  let pHi := evalVecBin256 .vpxor (clmul256 a b 0x11) shH
+  let lo' := evalVecBin256 .vpxor (s.ymm.get 0) pLo
+  let hi' := evalVecBin256 .vpxor (s.ymm.get 1) pHi
+  let cf1 := (evalX86Alu .add true pL 32 s.cf).2.1
+  let cf2 := (evalX86Alu .add true pR 32 cf1).2.1
+  ({ s with
+      pc := jccPc (!(c - 1 == 0)) 8 83
+      gpr := (s.gpr.set 6 (pL + 32) |>.set 2 (pR + 32) |>.set 1 (c - 1))
+      ymm := (s.ymm.set 2 a |>.set 3 b |>.set 4 pLo |>.set 5 pHi |>.set 6 shH |>.set 7 shL |>.set 0 lo' |>.set 1 hi')
+      cf := cf2
+      ofFlag := evalX86IncDecOf false true c
+      zf := c - 1 == 0
+      ymmDirty := true },
+   vpclmulBodyObs pL pR)
+
+def asmFfiVpclmulBodyStep (m : AsmFfiBdozMac) : AsmFfiBdozMac × List StepObs :=
+  let a := readMem256 m.mem m.lhsPtr
+  let b := readMem256 m.mem m.rhsPtr
+  (⟨m.lhsPtr + 32, m.rhsPtr + 32, m.outPtr,
+    karatsubaStepLo m.accLo a b, karatsubaStepHi m.accHi a b, m.remaining - 1, m.mem⟩,
+   vpclmulBodyObs m.lhsPtr m.rhsPtr)
+
+theorem asmFfiVpclmul_cuts_accum (k : Nat) (pL pR outP : UInt64) (lo hi : Vec256) (rem : Nat) (mem : UInt64 → UInt8) :
+    let final := (runCuts asmFfiVpclmulBodyStep k ⟨pL, pR, outP, lo, hi, rem, mem⟩).1
+    (final.accLo, final.accHi) = bdozMacAccum k mem pL pR lo hi ∧ final.mem = mem ∧ final.outPtr = outP := by
+  induction k generalizing pL pR lo hi rem with
+  | zero => exact ⟨rfl, rfl, rfl⟩
+  | succ k ih =>
+    simpa [runCuts, asmFfiVpclmulBodyStep, bdozMacAccum] using
+      ih (pL + 32) (pR + 32) (karatsubaStepLo lo (readMem256 mem pL) (readMem256 mem pR))
+        (karatsubaStepHi hi (readMem256 mem pL) (readMem256 mem pR)) (rem - 1)
+
+/-- Symbol execution behind a zero-count guard on `rcx`. The guard branch is a hand-written
+model of the Rust wrapper's early return on empty input, not decoded machine code. -/
+def vpclmulGuardedRun (fetch : Nat → Option (DecodedInstr X86Instr))
+    (fuel : Nat) (s : X86State) : X86State × List StepObs :=
+  if s.gpr.get 1 == 0 then
+    ({ s with
+        pc := 203
+        gpr := s.gpr.set 0 0
+        ymmDirty := false
+        halted := true },
+     [⟨0, [], true⟩])
+  else runX86Fetch fetch fuel s
+
+def asmFfiVpclmulRun (n : Word) (baseL baseR outP : UInt64) (mem : UInt64 → UInt8) :
+    AsmFfiBdozMac × List StepObs :=
+  if n = 0 then
+    (⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, 0, mem⟩,
+     [⟨0, [], true⟩])
+  else
+    let loop := runCuts asmFfiVpclmulBodyStep n.toNat ⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, n.toNat, mem⟩
+    let red := poly87Reduce256 loop.1.accLo loop.1.accHi
+    ({ loop.1 with mem := writeMem256 mem outP red },
+     vpclmulEntryObs ++ loop.2 ++ vpclmulExitObs outP)
+
+theorem vpclmul_entry_full (fetch : Nat → Option (DecodedInstr X86Instr))
+    (hf : ∀ d ∈ vpclmulBdozMacProg, fetch d.offset = some d)
+    (g : Bank16 UInt64) (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 : Vec256)
+    (cf o zf dy : Bool) (m : UInt64 → UInt8) (fuel : Nat) :
+    runX86Fetch fetch (2 + fuel)
+      ⟨0, g, ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+        cf, o, zf, dy, false, m⟩ =
+      let u := runX86Fetch fetch fuel
+        ⟨8, g, ⟨Vec256.zero, Vec256.zero, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+          cf, o, zf, true, false, m⟩
+      (u.1, vpclmulEntryObs ++ u.2) := by
+  rw [show 2 + fuel = (fuel + 1) + 1 from by omega]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_0, vpxor_self, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_1, vpxor_self, b16set_1, vpclmulEntryObs]
+  rfl
+
+theorem vpclmul_body_full (fetch : Nat → Option (DecodedInstr X86Instr))
+    (hf : ∀ d ∈ vpclmulBdozMacProg, fetch d.offset = some d)
+    (r0 c pR r3 r4 r5 pL r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (lo hi y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 : Vec256)
+    (cf o zf dy : Bool) (m : UInt64 → UInt8) (fuel : Nat) :
+    let s : X86State := ⟨8, ⟨r0, c, pR, r3, r4, r5, pL, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨lo, hi, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+      cf, o, zf, dy, false, m⟩
+    runX86Fetch fetch (17 + fuel) s =
+      ((runX86Fetch fetch fuel (vpclmulBodyStep s).1).1,
+       (vpclmulBodyStep s).2 ++ (runX86Fetch fetch fuel (vpclmulBodyStep s).1).2) := by
+  dsimp only
+  rw [show 17 + fuel = ((((((((((((((((fuel + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1 from by omega]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vload256, b16get_6, b16set_2]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vload256, b16get_2, b16set_3]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vpclmul256, b16get_2, b16get_3, b16set_4]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vpclmul256, b16get_2, b16get_3, b16set_5]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vpclmul256, b16get_2, b16get_3, b16set_6]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vpclmul256, b16get_2, b16get_3, b16set_7]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_6, b16get_7, b16set_6]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vshift256, b16get_6, b16set_7]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vshift256, b16get_6, b16set_6]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_4, b16get_7, b16set_4]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_5, b16get_6, b16set_5]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_0, b16get_4, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_1, b16get_5, b16set_1]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_addImm64, b16get_6, b16set_6]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_addImm64, b16get_2, b16set_2]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_dec64, b16get_1, b16set_1]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]
+  simp only [stepX86Full_jnz, vpclmulBodyStep, vpclmulBodyObs,
+    b16get_0, b16get_1, b16get_2, b16get_6,
+    b16set_0, b16set_1, b16set_2, b16set_3, b16set_4, b16set_5, b16set_6, b16set_7]
+  rfl
+
+theorem vpclmul_exit_full (fetch : Nat → Option (DecodedInstr X86Instr))
+    (hf : ∀ d ∈ vpclmulBdozMacProg, fetch d.offset = some d)
+    (r0 r1 r2 r3 r4 r5 r6 outP r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (lo hi y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 : Vec256)
+    (cf o zf dy : Bool) (m : UInt64 → UInt8) (extra : Nat) :
+    runX86Fetch fetch (33 + extra)
+      ⟨83, ⟨r0, r1, r2, r3, r4, r5, r6, outP, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨lo, hi, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+        cf, o, zf, dy, false, m⟩ =
+      (⟨203, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+        ⟨Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero,
+          Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero⟩,
+        false, false, true, false, true, writeMem256 m outP (poly87Reduce256 lo hi)⟩,
+       vpclmulExitObs outP) := by
+  have h87 : maskGprWidth false 0x87 = 0x87 := rfl
+  rw [show 33 + extra = ((((((((((((((((((((((((((((((((extra + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1 from by omega]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_movImm, h87, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vmovGprToXmm, maskGprWidth_true, b16get_0, b16set_8]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vpbroadcastQ, b16get_8, b16set_8]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vpclmul256, b16get_1, b16get_8, b16set_4]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vshift256, b16get_4, b16set_5]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vshift256, b16get_4, b16set_6]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_0, b16get_5, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_1, b16get_6, b16set_1]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vpclmul256, b16get_1, b16get_8, b16set_4]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_0, b16get_4, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vstore256, b16get_7, b16get_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_0, vpxor_self, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_1, vpxor_self, b16set_1]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_2, vpxor_self, b16set_2]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_3, vpxor_self, b16set_3]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_4, vpxor_self, b16set_4]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_5, vpxor_self, b16set_5]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_6, vpxor_self, b16set_6]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_7, vpxor_self, b16set_7]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vbinOp256, b16get_8, vpxor_self, b16set_8]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_0, mask32_xor_self_eq, u64_zero_beq_true, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vzeroall]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_vzeroupper, vzeroupper_bank16, zeroUpperVec256_zero]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_7, mask32_xor_self_eq, u64_zero_beq_true, b16set_7]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_6, mask32_xor_self_eq, u64_zero_beq_true, b16set_6]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_2, mask32_xor_self_eq, u64_zero_beq_true, b16set_2]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_1, mask32_xor_self_eq, u64_zero_beq_true, b16set_1]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_8, mask32_xor_self_eq, u64_zero_beq_true, b16set_8]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_9, mask32_xor_self_eq, u64_zero_beq_true, b16set_9]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_10, mask32_xor_self_eq, u64_zero_beq_true, b16set_10]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_11, mask32_xor_self_eq, u64_zero_beq_true, b16set_11]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]; simp only [stepX86Full_xorRR, b16get_0, mask32_xor_self_eq, u64_zero_beq_true, b16set_0]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl (by simp only [vpclmulBdozMacProg_eq]; rfl)]
+  simp only [stepX86Full_ret, poly87Reduce256, vpclmulExitObs]
+  rw [runX86Fetch_halted _ _ _ rfl]
+
+def VpclmulRel (s₀ : X86State) (n v : Nat) (a : X86State) (m : AsmFfiBdozMac) : Prop :=
+  let baseL := s₀.gpr.get 6
+  let baseR := s₀.gpr.get 2
+  ∃ cf o zf : Bool, ∃ y2 y3 y4 y5 y6 y7 : Vec256,
+    a = ⟨if v = n then 83 else 8,
+          (s₀.gpr.set 6 (ptrStride baseL 32 v) |>.set 2 (ptrStride baseR 32 v)
+            |>.set 1 (UInt64.ofNat (n - v))),
+          (s₀.ymm.set 2 y2 |>.set 3 y3 |>.set 4 y4 |>.set 5 y5 |>.set 6 y6 |>.set 7 y7
+            |>.set 0 m.accLo |>.set 1 m.accHi),
+          cf, o, zf, true, false, s₀.mem⟩ ∧
+    m.lhsPtr = ptrStride baseL 32 v ∧
+    m.rhsPtr = ptrStride baseR 32 v ∧
+    m.outPtr = s₀.gpr.get 7 ∧
+    m.remaining = n - v ∧
+    m.mem = s₀.mem
+
+def VpclmulLoopPost (s₀ : X86State) (n : Nat) (a : X86State) (m : AsmFfiBdozMac) : Prop :=
+  let baseL := s₀.gpr.get 6
+  let baseR := s₀.gpr.get 2
+  ∃ cf o zf : Bool, ∃ y2 y3 y4 y5 y6 y7 : Vec256,
+    a = ⟨83,
+          (s₀.gpr.set 6 (ptrStride baseL 32 n) |>.set 2 (ptrStride baseR 32 n) |>.set 1 0),
+          (s₀.ymm.set 2 y2 |>.set 3 y3 |>.set 4 y4 |>.set 5 y5 |>.set 6 y6 |>.set 7 y7
+            |>.set 0 m.accLo |>.set 1 m.accHi),
+          cf, o, zf, true, false, s₀.mem⟩ ∧
+    m.outPtr = s₀.gpr.get 7 ∧
+    m.remaining = 0 ∧
+    m.mem = s₀.mem
+
+/-- Both zero and positive expected results use the polynomial-field specification. -/
+theorem vpclmulExpected_field (n : Word) (mem : UInt64 → UInt8) (pL pR : UInt64)
+    (lane : Nat) (hl : lane < 2) :
+    let acc := bdozMacAccum n.toNat mem pL pR Vec256.zero Vec256.zero
+    gf128Lane (if n = 0 then Vec256.zero else poly87Reduce256 acc.1 acc.2) ⟨lane, hl⟩ =
+      gf128BdozFieldSum n.toNat mem pL pR ⟨lane, hl⟩ := by
+  by_cases hn : n = 0
+  · subst n
+    simp [gf128Lane, gf128Words_eq, gf128BdozFieldSum, Vec256.zero]
+  · simp only [hn, ↓reduceIte]
+    exact gf128_bdozMacAccum_field n.toNat mem pL pR lane hl
+
+def VpclmulPost (s₀ : X86State) (n : Word) (out : X86State) (m : AsmFfiBdozMac) : Prop :=
+  let acc := bdozMacAccum n.toNat s₀.mem (s₀.gpr.get 6) (s₀.gpr.get 2) Vec256.zero Vec256.zero
+  let expected := if n = 0 then Vec256.zero else poly87Reduce256 acc.1 acc.2
+  out.halted = true ∧
+  out.mem = m.mem ∧
+  out.mem = (if n = 0 then s₀.mem else writeMem256 s₀.mem (s₀.gpr.get 7) expected) ∧
+  out.gpr.get 0 = 0 ∧ out.gpr.get 1 = 0 ∧
+  out.ymmDirty = false ∧
+  (n ≠ 0 → out.ymm.get 0 = Vec256.zero ∧ out.ymm.get 1 = Vec256.zero ∧
+    out.ymm.get 2 = Vec256.zero ∧ out.ymm.get 3 = Vec256.zero ∧
+    out.ymm.get 4 = Vec256.zero ∧ out.ymm.get 5 = Vec256.zero ∧
+    out.ymm.get 6 = Vec256.zero ∧ out.ymm.get 7 = Vec256.zero ∧
+    out.ymm.get 8 = Vec256.zero) ∧
+  out.gpr.get 4 = s₀.gpr.get 4 ∧ out.gpr.get 3 = s₀.gpr.get 3 ∧ out.gpr.get 5 = s₀.gpr.get 5 ∧
+  out.gpr.get 12 = s₀.gpr.get 12 ∧ out.gpr.get 13 = s₀.gpr.get 13 ∧
+  out.gpr.get 14 = s₀.gpr.get 14 ∧ out.gpr.get 15 = s₀.gpr.get 15 ∧
+  ∀ lane : Nat, ∀ hl : lane < 2, gf128Lane expected ⟨lane, hl⟩ =
+    gf128BdozFieldSum n.toNat s₀.mem (s₀.gpr.get 6) (s₀.gpr.get 2) ⟨lane, hl⟩
+
+/-- What the production epilogue leaves in the vector bank and the caller-saved scratch
+registers after a nonempty call: `vzeroall` clears every `ymm`, and `rdx`, `rsi`, `rdi`,
+`r8`–`r11` are zeroed (`rax` and `rcx` are covered by `VpclmulPost`). -/
+def VpclmulScratchWiped (n : Word) (out : X86State) : Prop :=
+  n ≠ 0 → (∀ i, i < 16 → out.ymm.get i = Vec256.zero) ∧
+    out.gpr.get 2 = 0 ∧ out.gpr.get 6 = 0 ∧ out.gpr.get 7 = 0 ∧ out.gpr.get 8 = 0 ∧
+    out.gpr.get 9 = 0 ∧ out.gpr.get 10 = 0 ∧ out.gpr.get 11 = 0
+
+/-- Postcondition of `qsag_asm_tower128_bdoz_mac_vpclmul`: the MAC result (`VpclmulPost`) together
+with the scratch wipe. -/
+def VpclmulMacPost (s₀ : X86State) (n : Word) (out : X86State) (m : AsmFfiBdozMac) : Prop :=
+  VpclmulPost s₀ n out m ∧ VpclmulScratchWiped n out
+
+def vpclmulPosCert (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    LoopRelationCert X86State AsmFfiBdozMac n vpclmulBodyStep asmFfiVpclmulBodyStep
+      ⟨8, s₀.gpr.set 1 (UInt64.ofNat n), (s₀.ymm.set 0 Vec256.zero |>.set 1 Vec256.zero),
+        s₀.cf, s₀.ofFlag, s₀.zf, true, false, s₀.mem⟩
+      ⟨s₀.gpr.get 6, s₀.gpr.get 2, s₀.gpr.get 7, Vec256.zero, Vec256.zero, n, s₀.mem⟩
+      (VpclmulLoopPost s₀ n) where
+  LoopRel := VpclmulRel s₀ n
+  schedule := fun v => vpclmulBodyObs (ptrStride (s₀.gpr.get 6) 32 v) (ptrStride (s₀.gpr.get 2) 32 v)
+  entry := by
+    obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+      cf, o, zf, dy, _, m⟩ := s₀
+    refine ⟨cf, o, zf, y2, y3, y4, y5, y6, y7, ?_, rfl, rfl, rfl, by dsimp only; omega, rfl⟩
+    simp [ptrStride, Nat.ne_of_lt hn, b16get_2, b16get_6,
+      b16set_0, b16set_1, b16set_2, b16set_3, b16set_4, b16set_5, b16set_6, b16set_7]
+  body := by
+    intro v a m hv ⟨cf, o, zf, y2, y3, y4, y5, y6, y7, ha, hpL, hpR, hout, hmr, hmem⟩
+    subst ha
+    obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨oy0, oy1, oy2, oy3, oy4, oy5, oy6, oy7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+      _, _, _, _, _, mem⟩ := s₀
+    have hpos : 0 < n - v := by omega
+    have hlt : n - v < 2 ^ 64 := by omega
+    have hdec := u64_ofNat_sub_one hpos hlt
+    have hsub : n - v - 1 = n - (v + 1) := by omega
+    have hzf : (UInt64.ofNat (n - (v + 1)) == 0) = decide (v + 1 = n) := by
+      rw [u64_ofNat_eq_zero_iff (by omega)]
+      by_cases heq : v + 1 = n <;> simp [heq] <;> omega
+    have hjcc : jccPc (!(UInt64.ofNat (n - (v + 1)) == 0)) 8 83 = (if v + 1 = n then 83 else 8) := by
+      rw [hzf]
+      by_cases heq : v + 1 = n <;> simp [heq, jccPc]
+    let pL := ptrStride r6 32 v
+    let pR := ptrStride r2 32 v
+    let va := readMem256 mem pL
+    let vb := readMem256 mem pR
+    let mid := evalVecBin256 .vpxor (clmul256 va vb 0x01) (clmul256 va vb 0x10)
+    let shL := evalVecShift256 .vpslldq mid 8
+    let shH := evalVecShift256 .vpsrldq mid 8
+    let pLo := evalVecBin256 .vpxor (clmul256 va vb 0x00) shL
+    let pHi := evalVecBin256 .vpxor (clmul256 va vb 0x11) shH
+    let cf1 := (evalX86Alu .add true pL 32 cf).2.1
+    let cf2 := (evalX86Alu .add true pR 32 cf1).2.1
+    refine ⟨⟨cf2, evalX86IncDecOf false true (UInt64.ofNat (n - v)), UInt64.ofNat (n - (v + 1)) == 0,
+      va, vb, pLo, pHi, shH, shL,
+      ?_, ?_, ?_, hout, ?_, hmem⟩, ?_, ?_⟩
+    · simp only [vpclmulBodyStep, asmFfiVpclmulBodyStep, karatsubaStepLo, karatsubaStepHi,
+        b16get_0, b16get_1, b16get_2, b16get_6,
+        b16set_0, b16set_1, b16set_2, b16set_3, b16set_4, b16set_5, b16set_6, b16set_7,
+        hdec, hsub, hjcc, ptrStride, hpL, hpR, hmem]
+      rfl
+    · simp [asmFfiVpclmulBodyStep, hpL, ptrStride, b16get_6]
+    · simp [asmFfiVpclmulBodyStep, hpR, ptrStride, b16get_2]
+    · simp [asmFfiVpclmulBodyStep, hmr]; omega
+    · simp [vpclmulBodyStep, b16get_2, b16get_6, b16set_1, b16set_2, b16set_6]
+    · simp [asmFfiVpclmulBodyStep, hpL, hpR, b16get_2, b16get_6]
+  exit := by
+    intro a m ⟨cf, o, zf, y2, y3, y4, y5, y6, y7, ha, _, _, hout, hmr, hmem⟩
+    exact ⟨cf, o, zf, y2, y3, y4, y5, y6, y7, by simpa using ha, hout, by omega, hmem⟩
+
+theorem vpclmul_replay_loop (fetch : Nat → Option (DecodedInstr X86Instr))
+    (hf : ∀ d ∈ vpclmulBdozMacProg, fetch d.offset = some d)
+    (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) (rem : Nat) :
+    ∀ v a m fuel, v + rem = n → VpclmulRel s₀ n v a m →
+      runX86Fetch fetch (17 * rem + fuel) a =
+        let loop := runCuts vpclmulBodyStep rem a
+        let u := runX86Fetch fetch fuel loop.1
+        (u.1, loop.2 ++ u.2) := by
+  induction rem with
+  | zero => intro v a m fuel _ _; simp [runCuts]
+  | succ k ih =>
+    intro v a m fuel hv hrel
+    have hvn : v < n := by omega
+    rcases hrel with ⟨cf, o, zf, y2, y3, y4, y5, y6, y7, ha, hpL, hpR, hout, hmr, hmem⟩
+    have hrel' : VpclmulRel s₀ n v a m := ⟨cf, o, zf, y2, y3, y4, y5, y6, y7, ha, hpL, hpR, hout, hmr, hmem⟩
+    have hbody := (vpclmulPosCert s₀ n hn hbound).body v a m hvn hrel'
+    obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨oy0, oy1, oy2, oy3, oy4, oy5, oy6, oy7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+      _, _, _, _, _, mem⟩ := s₀
+    have ha8 : a = ⟨8, ⟨r0, UInt64.ofNat (n - v), ptrStride r2 32 v, r3, r4, r5, ptrStride r6 32 v,
+        r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨m.accLo, m.accHi, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+        cf, o, zf, true, false, mem⟩ := by
+      simpa [Nat.ne_of_lt hvn, b16get_2, b16get_6,
+        b16set_0, b16set_1, b16set_2, b16set_3, b16set_4, b16set_5, b16set_6, b16set_7] using ha
+    rw [show 17 * (k + 1) + fuel = 17 + (17 * k + fuel) from by omega, ha8]
+    rw [vpclmul_body_full fetch hf]
+    rw [← ha8]
+    rw [ih (v + 1) (vpclmulBodyStep a).1 (asmFfiVpclmulBodyStep m).1 fuel (by omega) hbody.1]
+    simp [runCuts, List.append_assoc]
+
+/-- Complete `UnrestrictedLoopCert` for `qsag_asm_tower128_bdoz_mac_vpclmul` over **all `n : BitVec 64`**. -/
+def vpclmulBdozMacUnrestrictedCert (fetch : Nat → Option (DecodedInstr X86Instr))
+    (hf : ∀ d ∈ vpclmulBdozMacProg, fetch d.offset = some d)
+    (s₀ : X86State) (fuel : Nat) (hpc : s₀.pc = 0) (hh : s₀.halted = false)
+    (n : Word) (hcount : s₀.gpr.get 1 = UInt64.ofBitVec n)
+    (hfuel : 17 * n.toNat + 35 ≤ fuel) :
+    UnrestrictedLoopCert X86State AsmFfiBdozMac n
+      (vpclmulGuardedRun fetch fuel)
+      (fun m => asmFfiVpclmulRun n m.lhsPtr m.rhsPtr m.outPtr m.mem)
+      vpclmulBodyStep asmFfiVpclmulBodyStep
+      s₀ ⟨s₀.gpr.get 6, s₀.gpr.get 2, s₀.gpr.get 7, Vec256.zero, Vec256.zero, n.toNat, s₀.mem⟩
+      ⟨8, s₀.gpr.set 1 (UInt64.ofNat n.toNat), (s₀.ymm.set 0 Vec256.zero |>.set 1 Vec256.zero),
+        s₀.cf, s₀.ofFlag, s₀.zf, true, false, s₀.mem⟩
+      ⟨s₀.gpr.get 6, s₀.gpr.get 2, s₀.gpr.get 7, Vec256.zero, Vec256.zero, n.toNat, s₀.mem⟩
+      (VpclmulLoopPost s₀ n.toNat)
+      (VpclmulMacPost s₀ n) where
+  zeroSchedule := [⟨0, [], true⟩]
+  entrySchedule := vpclmulEntryObs
+  bodySchedule := fun v => vpclmulBodyObs (ptrStride (s₀.gpr.get 6) 32 v) (ptrStride (s₀.gpr.get 2) 32 v)
+  exitSchedule := vpclmulExitObs (s₀.gpr.get 7)
+  zero_cut := by
+    intro hz; subst hz
+    have hg0 : (s₀.gpr.get 1 == 0) = true := by simp [hcount]
+    dsimp only [vpclmulGuardedRun, asmFfiVpclmulRun]
+    rw [ite_eq_left hg0, ite_eq_left rfl]
+    obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, _, _, _, _, _, _, _⟩ := s₀
+    have hr1 : r1 = 0 := hcount
+    refine ⟨⟨⟨rfl, rfl, rfl, rfl, hr1, rfl, fun h => absurd rfl h, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+      vpclmulExpected_field 0 (fun _ => 0) 0 0⟩, fun h => absurd rfl h⟩, rfl, rfl⟩
+  pos_cert := fun hn =>
+    vpclmulPosCert s₀ n.toNat (bv64_pos_of_ne_zero n hn) n.isLt
+  pos_sched := fun _ => rfl
+  pos_replay := by
+    intro hn hlp hal hml
+    have hg0 : ¬ ((s₀.gpr.get 1 == 0) = true) := by
+      rw [beq_false_of_ne (hcount ▸ (bv64_ne_zero_iff_u64_ne_zero n).mp hn)]; decide
+    dsimp only [vpclmulGuardedRun, asmFfiVpclmulRun]
+    rw [ite_eq_right hg0, ite_eq_right hn]
+    obtain ⟨extra, hextra⟩ : ∃ extra, fuel = 2 + (17 * n.toNat + (33 + extra)) :=
+      ⟨fuel - (17 * n.toNat + 35), by omega⟩
+    rw [hextra]
+    obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+      cf, o, zf, dy, hlt, m⟩ := s₀
+    cases hpc; cases hh
+    have hr1 : r1 = UInt64.ofNat n.toNat := by
+      apply u64_eq_of_toNat_eq
+      have : r1 = UInt64.ofBitVec n := hcount
+      rw [this, UInt64.toNat_ofNat', Nat.mod_eq_of_lt n.isLt]; rfl
+    rw [vpclmul_entry_full fetch hf]
+    have headEq : (⟨8, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨Vec256.zero, Vec256.zero, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+        cf, o, zf, true, false, m⟩ : X86State) =
+      ⟨8, (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15).set 1 (UInt64.ofNat n.toNat),
+        ((Bank16.mk y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15).set 0 Vec256.zero |>.set 1 Vec256.zero),
+        cf, o, zf, true, false, m⟩ := by
+      simp [hr1, b16set_0, b16set_1]
+    rw [headEq]
+    have hpos := bv64_pos_of_ne_zero n hn
+    have hrep := vpclmul_replay_loop fetch hf
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩, cf, o, zf, dy, false, m⟩
+      n.toNat hpos n.isLt n.toNat 0 _ ⟨r6, r2, r7, Vec256.zero, Vec256.zero, n.toNat, m⟩ (33 + extra) (by omega)
+      (vpclmulPosCert _ n.toNat hpos n.isLt).entry
+    dsimp only at hrep ⊢
+    rw [hrep]
+    rcases hlp with ⟨cfL, oL, zfL, y2L, y3L, y4L, y5L, y6L, y7L, haL, _, _, _⟩
+    let mFinal := (runCuts asmFfiVpclmulBodyStep n.toNat ⟨r6, r2, r7, Vec256.zero, Vec256.zero, n.toNat, m⟩).1
+    have ha83 : (runCuts vpclmulBodyStep n.toNat
+        ⟨8, (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15).set 1 (UInt64.ofNat n.toNat),
+          ((Bank16.mk y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15).set 0 Vec256.zero
+            |>.set 1 Vec256.zero),
+          cf, o, zf, true, false, m⟩).1 =
+      ⟨83, ⟨r0, 0, ptrStride r2 32 n.toNat, r3, r4, r5, ptrStride r6 32 n.toNat,
+        r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨mFinal.accLo, mFinal.accHi, y2L, y3L, y4L, y5L, y6L, y7L, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+        cfL, oL, zfL, true, false, m⟩ := by
+      simpa [mFinal, b16get_2, b16get_6, b16get_7,
+        b16set_0, b16set_1, b16set_2, b16set_3, b16set_4, b16set_5, b16set_6, b16set_7] using haL
+    rw [ha83, vpclmul_exit_full fetch hf]
+    obtain ⟨hacc, _, _⟩ := asmFfiVpclmul_cuts_accum n.toNat r6 r2 r7 Vec256.zero Vec256.zero n.toNat m
+    have hred : poly87Reduce256 mFinal.accLo mFinal.accHi =
+        poly87Reduce256 (bdozMacAccum n.toNat m r6 r2 Vec256.zero Vec256.zero).1
+          (bdozMacAccum n.toNat m r6 r2 Vec256.zero Vec256.zero).2 := by
+      have h1 := congrArg Prod.fst hacc
+      have h2 := congrArg Prod.snd hacc
+      dsimp only at h1 h2
+      rw [h1, h2]
+    refine ⟨?_, by simp [List.append_assoc, b16get_7], rfl⟩
+    refine ⟨⟨rfl, rfl, ?_, rfl, rfl, rfl, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, vpclmulExpected_field n m r6 r2⟩, ?_⟩
+    · simp only [b16get_2, b16get_6, b16get_7, ite_eq_right hn, hred]
+    · intro _
+      exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+    · intro _
+      exact ⟨fun i hi => match i, hi with
+        | 0, _ => rfl | 1, _ => rfl | 2, _ => rfl | 3, _ => rfl | 4, _ => rfl | 5, _ => rfl
+        | 6, _ => rfl | 7, _ => rfl | 8, _ => rfl | 9, _ => rfl | 10, _ => rfl | 11, _ => rfl
+        | 12, _ => rfl | 13, _ => rfl | 14, _ => rfl | 15, _ => rfl
+        | i + 16, h => absurd h (by omega), rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Refinement and `StepObs` noninterference for the guarded runner of `qsag_asm_tower128_bdoz_mac_vpclmul` at every
+`n : BitVec 64`. For `n ≠ 0` the runner is byte-decoded execution of the symbol
+(`tower128_bdoz_mac_vpclmul_sydtv_refines_pos`); for `n = 0` it is the modelled wrapper early return. -/
+theorem tower128_bdoz_mac_vpclmul_sydtv_refines_all_n (s₁ s₂ : X86State) (fuel : Nat) (n : Word)
+    (hpc₁ : s₁.pc = 0) (hh₁ : s₁.halted = false) (hc₁ : s₁.gpr.get 1 = UInt64.ofBitVec n)
+    (hpc₂ : s₂.pc = 0) (hh₂ : s₂.halted = false) (hc₂ : s₂.gpr.get 1 = UInt64.ofBitVec n)
+    (hpL : s₁.gpr.get 6 = s₂.gpr.get 6) (hpR : s₁.gpr.get 2 = s₂.gpr.get 2)
+    (hout : s₁.gpr.get 7 = s₂.gpr.get 7)
+    (hfuel : 17 * n.toNat + 35 ≤ fuel) :
+    let out₁ := vpclmulGuardedRun (decodeX86One vpclmulBdozMacCode) fuel s₁
+    let out₂ := vpclmulGuardedRun (decodeX86One vpclmulBdozMacCode) fuel s₂
+    let ffi₁ := asmFfiVpclmulRun n (s₁.gpr.get 6) (s₁.gpr.get 2) (s₁.gpr.get 7) s₁.mem
+    VpclmulMacPost s₁ n out₁.1 ffi₁.1 ∧ out₁.2 = out₂.2 ∧ out₁.2 = ffi₁.2 := by
+  dsimp only
+  let c₁ := vpclmulBdozMacUnrestrictedCert (decodeX86One vpclmulBdozMacCode) vpclmulBdozMac_fetch_decodeOne
+    s₁ fuel hpc₁ hh₁ n hc₁ hfuel
+  let c₂ := vpclmulBdozMacUnrestrictedCert (decodeX86One vpclmulBdozMacCode) vpclmulBdozMac_fetch_decodeOne
+    s₂ fuel hpc₂ hh₂ n hc₂ hfuel
+  obtain ⟨hp, _, _⟩ := unrestricted_loop_refinement_sound c₁
+  have hz : c₁.zeroSchedule = c₂.zeroSchedule := by
+    simp [c₁, c₂, vpclmulBdozMacUnrestrictedCert, hout]
+  have hsched : c₁.bodySchedule = c₂.bodySchedule := by
+    funext v; simp [c₁, c₂, vpclmulBdozMacUnrestrictedCert, hpL, hpR]
+  have hex : c₁.exitSchedule = c₂.exitSchedule := by
+    simp [c₁, c₂, vpclmulBdozMacUnrestrictedCert, hout]
+  obtain ⟨hni1, hni2⟩ := unrestricted_three_way_noninterference c₁ c₂ hz rfl hsched hex
+  exact ⟨hp, hni1, hni2⟩
+
+theorem vpclmulGuardedRun_pos (fetch : Nat → Option (DecodedInstr X86Instr)) (fuel : Nat)
+    (s : X86State) (n : Word) (hn : n ≠ 0) (hc : s.gpr.get 1 = UInt64.ofBitVec n) :
+    vpclmulGuardedRun fetch fuel s = runX86Fetch fetch fuel s := by
+  have hg0 : ¬ ((s.gpr.get 1 == 0) = true) := by
+    rw [beq_false_of_ne (hc ▸ (bv64_ne_zero_iff_u64_ne_zero n).mp hn)]; decide
+  unfold vpclmulGuardedRun
+  rw [ite_eq_right hg0]
+
+/-- `qsag_asm_tower128_bdoz_mac_vpclmul`, raw symbol bytes, nonzero block count. -/
+theorem tower128_bdoz_mac_vpclmul_sydtv_refines_pos (s₁ s₂ : X86State) (fuel : Nat) (n : Word)
+    (hn : n ≠ 0)
+    (hpc₁ : s₁.pc = 0) (hh₁ : s₁.halted = false) (hc₁ : s₁.gpr.get 1 = UInt64.ofBitVec n)
+    (hpc₂ : s₂.pc = 0) (hh₂ : s₂.halted = false) (hc₂ : s₂.gpr.get 1 = UInt64.ofBitVec n)
+    (hpL : s₁.gpr.get 6 = s₂.gpr.get 6) (hpR : s₁.gpr.get 2 = s₂.gpr.get 2)
+    (hout : s₁.gpr.get 7 = s₂.gpr.get 7)
+    (hfuel : 17 * n.toNat + 35 ≤ fuel) :
+    VpclmulMacPost s₁ n (runX86One vpclmulBdozMacCode fuel s₁).1
+      (asmFfiVpclmulRun n (s₁.gpr.get 6) (s₁.gpr.get 2) (s₁.gpr.get 7) s₁.mem).1 ∧
+    (runX86One vpclmulBdozMacCode fuel s₁).2 = (runX86One vpclmulBdozMacCode fuel s₂).2 ∧
+    (runX86One vpclmulBdozMacCode fuel s₁).2 =
+      (asmFfiVpclmulRun n (s₁.gpr.get 6) (s₁.gpr.get 2) (s₁.gpr.get 7) s₁.mem).2 := by
+  have h := tower128_bdoz_mac_vpclmul_sydtv_refines_all_n s₁ s₂ fuel n hpc₁ hh₁ hc₁ hpc₂ hh₂ hc₂
+    hpL hpR hout hfuel
+  dsimp only at h
+  rw [vpclmulGuardedRun_pos _ fuel s₁ n hn hc₁, vpclmulGuardedRun_pos _ fuel s₂ n hn hc₂] at h
+  simpa only [runX86One_eq, runArm64One_eq] using h
+
+/-! ## §9. `#tooth` Mutation-Sensitivity & Non-Vacuity / Inhabitedness Witnesses -/
+
+/-- `#tooth`: mutating `ct_eq_bytes`'s monotone `or eax, r8d` accumulator into an overwrite
+`mov eax, r8d` (`acc' := byteDiff x y`) falsely reports equality (`acc = 0`) on `[1, 0]` vs `[0, 0]`! -/
+def brokenOverwriteEqAcc : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → UInt64 → UInt64
+  | 0, _, _, _, acc => acc
+  | k + 1, m, pA, pB, _ => brokenOverwriteEqAcc k m (pA + 1) (pB + 1) (byteDiff (m pA) (m pB))
+
+/-- `#tooth`: an early-exit equality loop that stops on the first mismatch leaks the secret mismatch
+index through `List StepObs` trace length (`1` load-pair on mismatch at byte 0 vs `2` load-pairs on
+agreement at byte 0), violating 3-way `StepObs` noninterference. -/
+def brokenEarlyExitEqTrace : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → List StepObs
+  | 0, _, _, _ => []
+  | k + 1, m, pA, pB =>
+    let obs := [⟨5, [(pA, 1)], true⟩, ⟨9, [(pB, 1)], true⟩]
+    if m pA != m pB then obs
+    else obs ++ brokenEarlyExitEqTrace k m (pA + 1) (pB + 1)
+
+/-- Empty input follows the wrapper return: no output-buffer write or memory observation. -/
+theorem vpclmul_zero_preserves_memory (fetch : Nat → Option (DecodedInstr X86Instr))
+    (fuel : Nat) (s : X86State) (hz : s.gpr.get 1 = 0) :
+    (vpclmulGuardedRun fetch fuel s).1.mem = s.mem ∧
+    (vpclmulGuardedRun fetch fuel s).2 = [⟨0, [], true⟩] := by
+  simp [vpclmulGuardedRun, hz]
+
+/-- The certified postcondition entails the independent field specification,
+with both packed lanes and every positive block count. -/
+theorem VpclmulPost_field (s out : X86State) (n : Word) (m : AsmFfiBdozMac)
+    (hn : n ≠ 0) (h : VpclmulPost s n out m) :
+    ∃ v : Vec256, out.mem = writeMem256 s.mem (s.gpr.get 7) v ∧
+      ∀ lane : Nat, ∀ hl : lane < 2,
+        gf128Lane v ⟨lane, hl⟩ =
+          gf128BdozFieldSum n.toNat s.mem (s.gpr.get 6) (s.gpr.get 2) ⟨lane, hl⟩ := by
+  refine ⟨_, ?_, gf128_bdozMacAccum_field n.toNat s.mem (s.gpr.get 6) (s.gpr.get 2)⟩
+  simpa only [VpclmulPost, hn, ↓reduceIte] using h.2.2.1
+
+/-- A finite graph of certified loop cuts. Each node performs one actual cut step;
+the loop certificate's replay lemmas connect these steps to decoded instructions. -/
+def cutsGraph {S : Type} (step : S → S × List StepObs) (n : Nat) : TvGraph S where
+  node := fun pc => if pc < n then .Assign (fun s => (step s).1) (pc + 1) else .Ret (fun _ => 0)
+  entry := 0
+  loopHeads := []
+  fuel := n + 1
+
+private theorem cutsGraph_remaining {S : Type} (step : S → S × List StepObs)
+    (n k pc : Nat) (h : pc + k = n) (s : S) :
+    execFrom (cutsGraph step n) (fun _ => id) (k + 1) pc s =
+      .ret 0 (runCuts step k s).1 := by
+  induction k generalizing pc s with
+  | zero =>
+    have hp : pc = n := by omega
+    subst pc
+    simp [execFrom, cutsGraph, runCuts]
+  | succ k ih =>
+    have hp : pc < n := by omega
+    simpa only [execFrom, cutsGraph, List.not_mem_nil, ↓reduceIte, hp, runCuts] using
+      ih (pc + 1) (by omega) (step s).1
+
+theorem flatten_cutsGraph {S : Type} (step : S → S × List StepObs) (n : Nat) (s : S) :
+    evalFlattened (flattenDag (cutsGraph step n) (fun _ => id)) s =
+      .ret 0 (runCuts step n s).1 := by
+  rw [flattenDag_sound]
+  exact cutsGraph_remaining step n n 0 (Nat.zero_add n) s
+
+def FlattenedLoopRefines {A M : Type} {n : Nat}
+    {as : A → A × List StepObs} {ms : M → M × List StepObs}
+    {a : A} {m : M} {P : A → M → Prop}
+    (_cert : LoopRelationCert A M n as ms a m P) : Prop :=
+    ∃ af mf,
+      evalFlattened (flattenDag (cutsGraph as n) (fun _ => id)) a = .ret 0 af ∧
+      evalFlattened (flattenDag (cutsGraph ms n) (fun _ => id)) m = .ret 0 mf ∧
+      P af mf ∧ (runCuts as n a).2 = (runCuts ms n m).2
+
+/-- Flattened assembly and FFI-wrapper cut graphs inherit the certificate's postcondition
+and equal leakage traces. This consumes the same certificate as byte replay. -/
+theorem LoopRelationCert.flattened_refinement {A M : Type} {n : Nat}
+    {as : A → A × List StepObs} {ms : M → M × List StepObs}
+    {a : A} {m : M} {P : A → M → Prop}
+    (c : LoopRelationCert A M n as ms a m P) :
+    FlattenedLoopRefines c := by
+  obtain ⟨hp, ha, hm⟩ := sewell_loop_relation_refinement_sound c
+  exact ⟨_, _, flatten_cutsGraph as n a, flatten_cutsGraph ms n m, hp, ha.trans hm.symm⟩
+
+theorem ctMemzeroX86PosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (ctMemzeroX86PosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (ctMemzeroX86PosCert s₀ n hn hbound)
+
+theorem ctMemzeroArmPosCert_flattened (s₀ : Arm64State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
+    (h1 : armGet s₀.gpr 1 = UInt64.ofNat n) (hpc : s₀.pc = 0) (hh : s₀.halted = false) :
+    FlattenedLoopRefines (ctMemzeroArmPosCert s₀ n hn hbound h1 hpc hh) :=
+  LoopRelationCert.flattened_refinement (ctMemzeroArmPosCert s₀ n hn hbound h1 hpc hh)
+
+theorem ctEqBytesPosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (ctEqBytesPosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (ctEqBytesPosCert s₀ n hn hbound)
+
+theorem gfniShamirMacPosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (gfniShamirMacPosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (gfniShamirMacPosCert s₀ n hn hbound)
+
+theorem vpclmulPosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+    FlattenedLoopRefines (vpclmulPosCert s₀ n hn hbound) :=
+  LoopRelationCert.flattened_refinement (vpclmulPosCert s₀ n hn hbound)
+
+
+end Qsag.SydTv

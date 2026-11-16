@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Machine.Gf128ClmulLoopAgreement — Symbolic Field-Loop Agreement and SIMD Carry-Less Multiply Bridge
+# Qsag.Gf128ClmulLoopAgreement — Symbolic Field-Loop Agreement and SIMD Carry-Less Multiply Bridge
 
 Three representations of multiplication in `GF(2^128)` appear across specifications,
 Rust share/SPN arithmetic, and SIMD assembly kernels:
@@ -21,12 +21,9 @@ carry-less dot-product accumulation under the explicit basis isomorphism `psiTow
 `polyToTower128`.
 -/
 
-public import Qsag.Machine.McRefine
-import all Qsag.Machine.McRefine
 public import Qsag.Math.Gf2Pow128
-import all Qsag.Math.Gf2Pow128
-public import Qsag.Machine.SimdBinaryEquiv
-import all Qsag.Machine.SimdBinaryEquiv
+public import Qsag.Machine.McRefine
+public import Qsag.Machine.ClmulSimd
 
 public section
 namespace Qsag
@@ -447,7 +444,13 @@ end
 
 public section
 namespace Qsag.Math
-/-- Machine multiplication implementations agree with the canonical polynomial-basis field. -/
+/-- **Five-Way `𝔽_{2^{128}}` Multiplication Agreement (`gf2Pow128_five_way_mul_agreement`)**:
+    Certifies that canonical `Gf2Pow128.mul` agrees identically on all 128-bit inputs with:
+    1. Wiedemann `towerMul 7` transported via `psiTower128ToPoly` / `polyToTower128`,
+    2. `MigrationExecution.rustGf128Mul` (128-step Rust shift-and-reduce),
+    3. `gf2_128_mul_bv` (`ParallelSeededSpnSecurity` bit-vector multiplication),
+    4. `SimdBinaryEquiv.fastRemainder ∘ pclmulqdqFourProduct256` (x86-64 `PCLMULQDQ`), and
+    5. `SimdBinaryEquiv.fastRemainder ∘ pmullFourProduct256` (AArch64 `PMULL` / `PMULL2`). -/
 theorem gf2Pow128_five_way_mul_agreement (a b : BitVec 128) :
     let prod := (Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits
     prod = Qsag.psiTower128ToPoly (Qsag.towerMul 7 (Qsag.polyToTower128 a) (Qsag.polyToTower128 b)) ∧
@@ -455,13 +458,11 @@ theorem gf2Pow128_five_way_mul_agreement (a b : BitVec 128) :
     prod = Qsag.gf2_128_mul_bv a b ∧
     prod = Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pclmulqdqFourProduct256 a b) ∧
     prod = Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pmullFourProduct256 a b) := by
-  dsimp only
   rw [Gf2Pow128.mul_bits]
   have h := (Qsag.gf128FieldMul_eq_gf2_128_mul_bv a b).symm
   refine ⟨?_, h.trans (Qsag.gf128FieldMul_eq_rustGf128Mul a b), rfl,
     h.trans (Qsag.pclmulqdqFourProduct_reduce_eq_gf128FieldMul a b).symm,
     h.trans (Qsag.pmullFourProduct_reduce_eq_gf128FieldMul a b).symm⟩
-  apply h.trans
-  rw [← Qsag.polyToTower128_gf128FieldMul a b, Qsag.psiTower128ToPoly_polyToTower128]
+  rw [h, ← Qsag.polyToTower128_gf128FieldMul a b, Qsag.psiTower128ToPoly_polyToTower128]
+
 end Qsag.Math
-end
