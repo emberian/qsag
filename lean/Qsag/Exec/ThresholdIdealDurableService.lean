@@ -1,7 +1,6 @@
 module
 public import Qsag.Exec.ThresholdIdealService
-import all Qsag.Exec.ThresholdIdealService
-import all Qsag.Exec.RssProductionProfile
+public import Qsag.Exec.RssProductionProfile
 
 public section
 namespace Qsag.ThresholdIdealDurableService

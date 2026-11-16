@@ -1,9 +1,9 @@
 module
-import all Qsag.Spec.Sessions
+public import Qsag.Spec.Sessions
 
 public import Qsag.Exec.InteractiveServiceContext
 public import Qsag.Exec.RssProductionProfile
-import all Qsag.Exec.InteractiveUcEngine
+public import Qsag.Exec.InteractiveUcEngine
 
 public section
 namespace Qsag.ThresholdIdealService
