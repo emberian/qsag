@@ -376,14 +376,22 @@ jobs:
       - name: Strict audit of compiled SIMD kernels on both architectures
         run: |
           set -euo pipefail
+          # Both runs also require every registered SIMD kernel by name, and that each one,
+          # with everything in `bitslice` and `linear_map`, leaves no vector register dirty.
           python3 scripts/audit_elf_ct.py --strict-rust-branches --require-simd \
             --rlib target/ct-audit/release/libqsag_asm.rlib \
             --require-namespace qsag_asm::avx512:: \
             --require-namespace qsag_asm::ntt_simd:: \
             --require-namespace qsag_asm::gf256_simd:: \
+            --require-namespace qsag_asm::linear_map:: \
+            --require-namespace qsag_asm::bitslice:: \
             --require-namespace qsag_asm::sha2_hw::
           python3 scripts/audit_elf_ct.py --strict-rust-branches --require-simd \
+            --cross-aarch64-bitslice \
             --rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib \
+            --require-namespace qsag_asm::aarch64_simd:: \
+            --require-namespace qsag_asm::linear_map:: \
+            --require-namespace qsag_asm::bitslice:: \
             --require-namespace qsag_asm::ntt_simd:: \
             --require-namespace qsag_asm::sha2_hw::
 
@@ -411,7 +419,7 @@ jobs:
           set -euo pipefail
           python3 scripts/audit_elf_ct.py \
             --fixture-generation current --fixture-binding kernel-bytes \
-            --check-fixtures lean/Qsag/Machine/CompiledRlibFixtures.lean \
+            --check-fixtures lean/Qsag/Machine/ElfFixtures.lean \
             --fixture-x86-rlib target/ct-audit/release/libqsag_asm.rlib \
             --fixture-aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib
 
