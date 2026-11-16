@@ -1,10 +1,11 @@
 module
+import Qsag.Tactic.AssuranceKit
 public import QsagWhirVerified.Funs
-import all QsagWhirVerified.Types
-import all QsagWhirVerified.Funs
-import all Aeneas
-import all Aeneas.Std.Types
-import all Aeneas.Std.Containers
+public import QsagWhirVerified.Types
+public import QsagWhirVerified.Funs
+public import Aeneas
+public import Aeneas.Std.Types
+public import Aeneas.Std.Containers
 public section
 open Aeneas Aeneas.Std
 set_option linter.unusedSimpArgs false
@@ -53,16 +54,15 @@ namespace qsag_whir_verified.proofs
 abbrev goldilocksMod : Nat := 18446744069414584321
 
 theorem goldilocks_p_val : GOLDILOCKS_P.val = 18446744069414584321 := by
-  unfold GOLDILOCKS_P
+  simp only [GOLDILOCKS_P.public_eqs]
   rfl
 
 theorem max_u64_word_val : MAX_U64_WORD.val = 18446744073709551615 := by
-  unfold MAX_U64_WORD
+  simp only [MAX_U64_WORD.public_eqs]
   rfl
 
 theorem tag_canopy_merkle_internal_eq : TAG_CANOPY_MERKLE_INTERNAL = 0#u8 := by
-  unfold TAG_CANOPY_MERKLE_INTERNAL
-  rfl
+  simp only [TAG_CANOPY_MERKLE_INTERNAL.public_eqs]
 
 abbrev IsCanonical (x : U64) : Prop := x.val < 18446744069414584321
 
@@ -75,13 +75,13 @@ theorem u64_cast_u128_val (x : Std.U64) :
     (UScalar.cast .U128 x).val = x.val := by
   have hx : x.val < 2 ^ 64 := x.bv.isLt
   have hx128 : x.val < 2 ^ 128 := Nat.lt_of_lt_of_le hx (by decide)
-  change (x.bv.setWidth 128).toNat = x.bv.toNat
-  rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt hx128]
+  rw [UScalar.cast_val]
+  exact Nat.mod_eq_of_lt hx128
 
 theorem u128_cast_u64_val_of_lt (x : Std.U128) (h : x.val < 2 ^ 64) :
     (UScalar.cast .U64 x).val = x.val := by
-  change (x.bv.setWidth 64).toNat = x.bv.toNat
-  rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt h]
+  rw [UScalar.cast_val]
+  exact Nat.mod_eq_of_lt h
 
 theorem u128_add_ok {a b : Std.U128} (h : a.val + b.val < 2 ^ 128) :
     (a + b : Result Std.U128) = .ok ⟨a.bv + b.bv⟩ ∧
@@ -114,7 +114,7 @@ private theorem reduce_wide (x : U128) :
     ∃ r : U128, (x % UScalar.cast .U128 GOLDILOCKS_P : Result U128) = .ok r ∧
       (UScalar.cast .U64 r).val = x.val % 18446744069414584321 := by
   have hp : (UScalar.cast .U128 GOLDILOCKS_P).val = 18446744069414584321 := by
-    unfold GOLDILOCKS_P
+    rw [UScalar.cast_val, goldilocks_p_val]
     rfl
   let r : U128 := ⟨x.bv % (UScalar.cast .U128 GOLDILOCKS_P).bv⟩
   have hr : r.val = x.val % 18446744069414584321 := by
@@ -134,7 +134,7 @@ theorem add_modular_spec (a b : U64) :
     (by rw [ha, hb]; have ha64 : a.val < 2^64 := a.bv.isLt; have hb64 : b.val < 2^64 := b.bv.isLt; omega)
   obtain ⟨r, hr, hrv⟩ := reduce_wide ⟨(UScalar.cast .U128 a).bv + (UScalar.cast .U128 b).bv⟩
   refine ⟨UScalar.cast .U64 r, ?_, ?_⟩
-  · simp only [add, lift_eq_ok, bind_eq_result_bind, Result.bind, hs, hr]
+  · simp only [add.public_eqs, lift_eq_ok, bind_eq_result_bind, Result.bind, hs, hr]
   · rw [hrv, hv, ha, hb]
 
 theorem mul_modular_spec (a b : U64) :
@@ -148,7 +148,7 @@ theorem mul_modular_spec (a b : U64) :
       exact hh)
   obtain ⟨r, hr, hrv⟩ := reduce_wide ⟨(UScalar.cast .U128 a).bv * (UScalar.cast .U128 b).bv⟩
   refine ⟨UScalar.cast .U64 r, ?_, ?_⟩
-  · simp only [mul, lift_eq_ok, bind_eq_result_bind, Result.bind, hs, hr]
+  · simp only [mul.public_eqs, lift_eq_ok, bind_eq_result_bind, Result.bind, hs, hr]
   · rw [hrv, hv, ha, hb]
 
 private theorem reduce_limb (b : U64) :
@@ -177,7 +177,7 @@ theorem sub_modular_spec (a b : U64) :
     exact Nat.le_of_lt (Nat.mod_lt _ (by decide)))
   obtain ⟨r, ha, hav⟩ := add_modular_spec a neg
   refine ⟨r, ?_, ?_⟩
-  · simp only [sub, hr, bind_eq_result_bind, result_bind_ok, hn, ha]
+  · simp only [sub.public_eqs, hr, bind_eq_result_bind, result_bind_ok, hn, ha]
   · have hnval : neg.val = 18446744069414584321 - b.val % 18446744069414584321 :=
       hnv.trans ((congrArg (fun t => t - bm.val) hp).trans (congrArg (fun t => 18446744069414584321 - t) hbm))
     exact hav.trans (congrArg (fun t => (a.val + t) % 18446744069414584321) hnval)
@@ -757,20 +757,20 @@ def extSeven : Ext4 := ⟨7#u64, 0#u64, 0#u64, 0#u64⟩
    fieldAdd (fieldAdd (fieldMul x.a y.d) (fieldMul x.b y.c)) (fieldAdd (fieldMul x.c y.b) (fieldMul x.d y.a))⟩
 
 theorem ext_add_refines (x y : Ext4) : ext_add x y = .ok (extAdd x y) := by
-  simp [ext_add, extAdd, add_refines, Result.bind]
+  simp [ext_add.public_eqs, extAdd, add_refines, Result.bind]
 
 theorem ext_sub_refines (x y : Ext4) : ext_sub x y = .ok (extSub x y) := by
-  simp [ext_sub, extSub, sub_refines, Result.bind]
+  simp [ext_sub.public_eqs, extSub, sub_refines, Result.bind]
 
 theorem ext_scale_refines (x : Ext4) (y : U64) : ext_scale x y = .ok (extScale x y) := by
-  simp [ext_scale, extScale, mul_refines, Result.bind]
+  simp [ext_scale.public_eqs, extScale, mul_refines, Result.bind]
 
 theorem ext_mul_refines (x y : Ext4) : ext_mul x y = .ok (extMul x y) := by
-  simp [ext_mul, extMul, mul_refines, add_refines, Result.bind]
+  simp [ext_mul.public_eqs, extMul, mul_refines, add_refines, Result.bind]
 
 theorem affine_combine_refines (even odd alpha : Ext4) :
     affine_combine even odd alpha = .ok (extAdd odd (extMul alpha even)) := by
-  simp [affine_combine, ext_mul_refines, ext_add_refines, Result.bind]
+  simp [affine_combine.public_eqs, ext_mul_refines, ext_add_refines, Result.bind]
 
 theorem extAdd_canonical (x y : Ext4) : IsCanonicalExt4 (extAdd x y) :=
   ⟨fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _, fieldAdd_canonical _ _⟩
@@ -1043,7 +1043,7 @@ def duetValue (v0 v1 : Ext4) (iy it : U64) (alpha : Ext4) : Ext4 :=
 
 theorem duet_refines (v0 v1 : Ext4) (iy it : U64) (alpha : Ext4) :
     duet_fold v0 v1 iy it alpha = .ok (duetValue v0 v1 iy it alpha) := by
-  simp only [duet_fold, duetValue, affine_combine_refines,
+  simp only [duet_fold.public_eqs, duetValue, affine_combine_refines,
     ext_sub_refines, ext_scale_refines, ext_mul_refines, ext_add_refines, bind_eq_result_bind, Result.bind]
 
 def cwyzValue (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) : Ext4 :=
@@ -1053,7 +1053,7 @@ def cwyzValue (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) : Ext4 :
 
 theorem cwyz_duet_refines (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) :
     cwyz_duet_fold v0 v1 iy it yy theta alpha beta = .ok (cwyzValue v0 v1 iy it yy theta alpha beta) := by
-  simp only [cwyz_duet_fold, cwyzValue, affine_combine_refines,
+  simp only [cwyz_duet_fold.public_eqs, cwyzValue, affine_combine_refines,
     ext_sub_refines, ext_scale_refines, ext_mul_refines, ext_add_refines, bind_eq_result_bind, Result.bind]
 
 private theorem scale_add_sub_even {even odd : Ext4} {y0 it : U64}
@@ -1128,7 +1128,7 @@ theorem cwyz_bridge_claim_step_refines
     (w0 w1 w2 w3 w4 claim phi theta alpha beta : Ext4) :
     cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta =
       .ok (cwyzBridgeValue w0 w1 w2 w3 w4 claim phi theta alpha beta) := by
-  simp only [cwyz_bridge_claim_step, cwyzBridgeValue,
+  simp only [cwyz_bridge_claim_step.public_eqs, cwyzBridgeValue,
     ext_mul_refines, ext_add_refines, ext_sub_refines, bind_eq_result_bind, Result.bind]
 
 /-- Dual-functional soundness of `cwyz_bridge_claim_step`: on honest cross-terms
@@ -1173,7 +1173,7 @@ def quadraticWireValue (c0 c2 sum_claim r : Ext4) : Ext4 :=
 theorem eval_quadratic_sumcheck_wire_refines (c0 c2 sum_claim r : Ext4) :
     eval_quadratic_sumcheck_wire c0 c2 sum_claim r =
       .ok (quadraticWireValue c0 c2 sum_claim r) := by
-  simp only [eval_quadratic_sumcheck_wire, quadraticWireValue,
+  simp only [eval_quadratic_sumcheck_wire.public_eqs, quadraticWireValue,
     ext_add_refines, ext_sub_refines, ext_mul_refines, bind_eq_result_bind, Result.bind]
 
 private theorem extMul_extOne_eq_scale_one (x : Ext4) :
@@ -1221,7 +1221,7 @@ theorem affine_cascade_claim_step_refines
     (acc w0 w1 eval_at_point shifted_eval : Ext4) :
     affine_cascade_claim_step acc w0 w1 eval_at_point shifted_eval =
       .ok (affineCascadeStepValue acc w0 w1 eval_at_point shifted_eval) := by
-  simp only [affine_cascade_claim_step, affineCascadeStepValue,
+  simp only [affine_cascade_claim_step.public_eqs, affineCascadeStepValue,
     ext_mul_refines, ext_add_refines, bind_eq_result_bind, Result.bind]
 
 attribute [irreducible] extAdd extSub extScale extMul
@@ -1262,3 +1262,9 @@ theorem hornerSpec_eq_evalPolyAscending (coeffs : List Ext4) (z : U64)
     simp only [hornerSpec_cons, evalPolyAscending, ih hrest, extAdd_comm]
 
 end qsag_whir_verified.proofs
+
+public section
+namespace qsag_whir_verified.proofs
+#export_eqns duetValue cwyzValue cwyzBridgeValue quadraticWireValue affineCascadeStepValue
+end qsag_whir_verified.proofs
+end

@@ -519,3 +519,19 @@ theorem bind_ok_step {α β : Type} {r : Result α} {f : α → Result β}
 end Std
 
 end Aeneas
+
+public section
+namespace Aeneas.Std
+/-- Public value equation for a scalar width cast. -/
+theorem UScalar.cast_val (dst : UScalarTy) {src : UScalarTy} (x : UScalar src) :
+    (UScalar.cast dst x).val = x.val % 2 ^ dst.numBits := by
+  simp only [UScalar.cast, UScalar.val, BitVec.toNat_setWidth]
+end Aeneas.Std
+end
+
+public section
+namespace Aeneas.Std.core.slice
+theorem Slice.is_empty_eq {T : Type} (s : Aeneas.Std.Slice T) :
+    Slice.is_empty s = .ok s.val.isEmpty := by rfl
+end Aeneas.Std.core.slice
+end
