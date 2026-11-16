@@ -95,7 +95,7 @@ module qsag_p2_chain_engine #(
     assign {p_ns, p_step, p_heap} = meta_pick;
 
     logic rd_busy, rd_q, do_start, do_read, do_pick;
-    assign do_start    = en && start_valid && !res_valid;
+    assign do_start    = !rst && en && start_valid && !res_valid && !busy_map[start_slot];
     assign do_read     = en && !start_valid && rd_valid && !rd_busy;
     assign do_pick     = en && !start_valid && !do_read && (|pend);
     assign start_ready = do_start;
