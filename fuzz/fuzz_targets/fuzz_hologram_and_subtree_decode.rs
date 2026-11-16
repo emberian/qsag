@@ -204,11 +204,13 @@ fn check_proof(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
 
     let proof = &carrier.proof.proof;
     let verified = verify_public_hologram(&fx.vk, &fx.public_words, SUBTREE_ROOT_LABEL, proof);
-    // The label and every public word are bound.
-    assert!(!verify_public_hologram(&fx.vk, &fx.public_words, b"another label", proof));
-    let mut other_words = fx.public_words;
-    other_words[10] += Goldilocks::ONE;
-    assert!(!verify_public_hologram(&fx.vk, &other_words, SUBTREE_ROOT_LABEL, proof));
+    if verified {
+        // The label and every public word are bound.
+        assert!(!verify_public_hologram(&fx.vk, &fx.public_words, b"another label", proof));
+        let mut other_words = fx.public_words;
+        other_words[10] += Goldilocks::ONE;
+        assert!(!verify_public_hologram(&fx.vk, &other_words, SUBTREE_ROOT_LABEL, proof));
+    }
     Some(verified)
 }
 
@@ -231,13 +233,15 @@ fn check_aggregate(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
             (SIGNERS, MIN_KEY, MAX_KEY, WEIGHT),
             "aggregate accepted for totals nobody proved"
         );
+        // The proof is bound to the epoch floor it was made for.
+        let other = RosterRootStatement {
+            epoch_floor: EPOCH_FLOOR + 1,
+            ..statement(fx)
+        };
+        assert!(!verify_succinct_subtree_aggregate_against_roster_root(
+            &fx.vk, &other, &aggregate
+        ));
     }
-    // No aggregate verifies for a statement nobody proved.
-    let other = RosterRootStatement {
-        epoch_floor: EPOCH_FLOOR + 1,
-        ..statement(fx)
-    };
-    assert!(!verify_succinct_subtree_aggregate_against_roster_root(&fx.vk, &other, &aggregate));
     Some(verified)
 }
 

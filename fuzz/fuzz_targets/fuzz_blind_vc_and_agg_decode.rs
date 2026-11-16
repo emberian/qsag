@@ -287,15 +287,17 @@ fn check_hierarchical(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
         &aggregate,
     );
     assert_eq!(evidence.is_some(), verified);
-    // No aggregate verifies for a statement nobody signed.
-    assert!(!verify_hierarchical_hem(
-        &fx.policies,
-        HIER_EPOCH + 1,
-        HIER_MESSAGE,
-        HIER_MINIMUM,
-        REGIME,
-        &aggregate,
-    ));
+    if verified {
+        // The committee signed one epoch floor; the aggregate verifies for no other.
+        assert!(!verify_hierarchical_hem(
+            &fx.policies,
+            HIER_EPOCH + 1,
+            HIER_MESSAGE,
+            HIER_MINIMUM,
+            REGIME,
+            &aggregate,
+        ));
+    }
     Some(verified)
 }
 

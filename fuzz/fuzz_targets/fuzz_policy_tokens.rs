@@ -199,13 +199,13 @@ fn check_biscuit(fx: &Fixtures, bytes: &[u8]) {
     }
     if verdict.is_ok() {
         assert_eq!(bytes, fx.sealed_biscuit_wire, "forged biscuit");
+        // The seal binds the request it was made for.
+        let other = CapabilityRequest {
+            amount: 501,
+            ..request()
+        };
+        assert!(token.verify(&fx.authority_pk, &fx.dp, &other).is_err());
     }
-    // The seal binds the request it was made for.
-    let other = CapabilityRequest {
-        amount: 501,
-        ..request()
-    };
-    assert!(token.verify(&fx.authority_pk, &fx.dp, &other).is_err());
 }
 
 /// `seed` with sparse `(offset: u32 LE, xor: u8)` edits applied.

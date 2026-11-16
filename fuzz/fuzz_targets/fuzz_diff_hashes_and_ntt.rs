@@ -80,16 +80,24 @@ impl GlWord {
 
 #[derive(Arbitrary, Debug)]
 struct DiffFuzzInput {
-    poly_a: [u32; 256],
-    poly_b: [u32; 256],
     unalign_pad: u8,
     shake_out_len: u16,
     gf_scalar: u8,
     custom_len_class: u8,
+    /// Coefficients of the two NTT operands, one input word each; absent ones are zero.
+    /// Variable length keeps the smallest accepted input a few bytes, so the mutator
+    /// reaches the target before it has grown 2 KiB of coefficients.
+    poly_a: Vec<u32>,
+    poly_b: Vec<u32>,
     gl_words: Vec<[GlWord; 4]>,
     gf128_pairs: Vec<([u8; 16], [u8; 16])>,
     custom: Vec<u8>,
     payload: Vec<u8>,
+}
+
+/// The first 256 words reduced below `q`, zero-extended.
+fn ntt_operand(words: &[u32]) -> [u32; 256] {
+    core::array::from_fn(|i| words.get(i).map_or(0, |&w| w % MLDSA_Q))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -499,11 +507,11 @@ fuzz_target!(|input: DiffFuzzInput| {
         exp_dot
     );
 
-    // 6. `AVX-512` Seiler `ML-DSA` NTT: all 256 coefficients of both operands come from the
-    //    input. Backends agree with each other, the transform inverts, and the transform-domain
+    // 6. `AVX-512` Seiler `ML-DSA` NTT: each of the 256 coefficients of both operands is its
+    //    own input word. Backends agree with each other, the transform inverts, and the transform-domain
     //    product is the schoolbook product in `Z_q[X]/(X^256 + 1)`.
-    let mut pa = input.poly_a.map(|c| c % MLDSA_Q);
-    let mut pb = input.poly_b.map(|c| c % MLDSA_Q);
+    let mut pa = ntt_operand(&input.poly_a);
+    let mut pb = ntt_operand(&input.poly_b);
     let (orig_a, orig_b) = (pa, pb);
     let mut pa_port = pa;
     let mut pb_port = pb;
