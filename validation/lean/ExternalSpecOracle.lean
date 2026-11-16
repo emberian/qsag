@@ -6,8 +6,13 @@ import Qsag.Math.Goldilocks
 import Qsag.Oracle.Poseidon2
 import Qsag.Oracle.Keccak
 import Qsag.Protocol.Signing.Fips205
-import Qsag.Math.Gf2Pow128
+import Qsag.Protocol.Signing.PorsFpSecurity
+import Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity
+import Qsag.Coding.WhirProfiles
+import Qsag.Protocol.Aggregation.Aggregation
 import Qsag.Protocol.Aggregation.SuccinctAggregationIop
+import Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness
+import Qsag.Math.Gf2Pow128
 import Qsag.Protocol.Migration.ActiveMigrationZeroTest
 import Qsag.Machine.ConstantTimeIsa
 
@@ -35,13 +40,17 @@ def hexDigit (n : Nat) : Char :=
 def bytesToHex (bs : List UInt8) : String :=
   String.ofList (bs.flatMap fun b => [hexDigit (b.toNat / 16), hexDigit (b.toNat % 16)])
 
+def natToBeBytes (widthBytes : Nat) (n : Nat) : List UInt8 :=
+  (List.range widthBytes).reverse.map fun i => UInt8.ofNat ((n / (256 ^ i)) % 256)
+
+def natToLeBytes (widthBytes : Nat) (n : Nat) : List UInt8 :=
+  (List.range widthBytes).map fun i => UInt8.ofNat ((n / (256 ^ i)) % 256)
+
 def natToHexPad (widthBytes : Nat) (n : Nat) : String :=
-  let bs := (List.range widthBytes).reverse.map fun i => UInt8.ofNat ((n / (256 ^ i)) % 256)
-  bytesToHex bs
+  bytesToHex (natToBeBytes widthBytes n)
 
 def natToLeHexPad (widthBytes : Nat) (n : Nat) : String :=
-  let bs := (List.range widthBytes).map fun i => UInt8.ofNat ((n / (256 ^ i)) % 256)
-  bytesToHex bs
+  bytesToHex (natToLeBytes widthBytes n)
 
 def asciiBytes (s : String) : List UInt8 :=
   s.toUTF8.toList
@@ -51,6 +60,9 @@ def jsonStrList (xs : List String) : String :=
 
 def jsonNatStrList (xs : List Nat) : String :=
   jsonStrList (xs.map toString)
+
+def jsonNatNumList (xs : List Nat) : String :=
+  "[" ++ String.intercalate ", " (xs.map toString) ++ "]"
 
 def powMod (fuel base exp modulus : Nat) : Nat :=
   match fuel with
@@ -147,6 +159,29 @@ def absorbBlocks72 : Nat → KState → List UInt8 → KState
 
 def sha3_512Bytes (input : List UInt8) : List UInt8 :=
   squeezeXofAux 64 (absorbBlocks72 ((padRate72 input 0x06).length / 72) zeroKState (padRate72 input 0x06))
+
+/-- Canonical 32-byte tweakable hash address (`ADRS`, `tsw_baggy.rs:78-110`):
+    `[0..4) layer || [4..8) 0 || [8..16) tree || [16..20) kind || [20..24) key_pair || [24..28) chain_idx || [28..32) hash_step`. -/
+def encodeHashAdrs32 (layer : Nat) (tree : Nat) (kindCode : Nat)
+    (keyPair chainIdx hashStep : Nat) : List UInt8 :=
+  natToBeBytes 4 layer ++ natToBeBytes 4 0 ++ natToBeBytes 8 tree ++
+  natToBeBytes 4 kindCode ++ natToBeBytes 4 keyPair ++
+  natToBeBytes 4 chainIdx ++ natToBeBytes 4 hashStep
+
+/-- Multi-frame `u64_le` length-framed `cSHAKE256` matching `cshake256_framed_xof` (`keccak.rs:274`). -/
+def cshake256Framed32 (tag : List UInt8) (frames : List (List UInt8)) : List UInt8 :=
+  let payload := natToLeBytes 8 frames.length ++
+    frames.flatMap (fun f => natToLeBytes 8 f.length ++ f)
+  cshake256Xof 32 tag payload
+
+/-- Big-endian 32-bit words extracted from a byte slice (`u32::from_be_bytes`). -/
+def bytesToBeU32Words (nWords : Nat) (bs : List UInt8) : List Nat :=
+  (List.range nWords).map fun i =>
+    let b0 := (bs.getD (4 * i) 0).toNat
+    let b1 := (bs.getD (4 * i + 1) 0).toNat
+    let b2 := (bs.getD (4 * i + 2) 0).toNat
+    let b3 := (bs.getD (4 * i + 3) 0).toNat
+    b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
 
 def main : IO Unit := do
   -- 1. Goldilocks base field & quartic extension edge vectors
@@ -346,7 +381,6 @@ def main : IO Unit := do
   let skWire  := slhSk.skSeed ++ slhSk.skPrf ++ slhPk.pkSeed ++ slhPk.pkRoot
 
   -- 7. NIST FIPS 205 SLH-DSA-SHAKE-128s (`m = 30 = 21 + 7 + 2`) `H_msg` + index-splitting
-  --    regression vector (`slhDsaShake128s_wellFormed`, `tooth_slhDsaShake128s_m34_rejected`)
   let pkRoot128s := (List.range 16).map fun i => UInt8.ofNat (0xA5 + i * 3)
   let msg128s := asciiBytes "lean-fips205-128s-m30-hmsg-oracle"
   let ctx128s := asciiBytes "fips205-128s-ctx"
@@ -379,6 +413,219 @@ def main : IO Unit := do
       s!"\"raw_le_hex\":\"{natToLeHexPad 32 rawNat}\"," ++
       s!"\"clamped_le_hex\":\"{natToLeHexPad 32 clampedNat}\"," ++
       s!"\"normalized_mod_l_le_hex\":\"{natToLeHexPad 32 normNat}\"" ++
+    "}"
+
+  -- 9. PORS+FP (`SHA3_128F`), `AdrsKind` `7, 8`, `octopusPositions`, `pors_fp_select`, & `Baggy` (`<= 71,654 B`)
+  let porsP := PorsFpSecurity.sha3_128f
+  let baggySigBytesMax := 32 + 4 + porsP.openingBytesMax + 16 * (4 + 128 * 32 + 2 * 32)
+  if baggySigBytesMax != 71654 then
+    throw (IO.userError s!"Baggy max signature bytes mismatch: {baggySigBytesMax}")
+  let fb1 ← match PorsFpSecurity.forgeryBitsMilli porsP 1 with
+    | some v => pure v | none => throw (IO.userError "forgeryBitsMilli r=1 failed")
+  let fb2 ← match PorsFpSecurity.forgeryBitsMilli porsP 2 with
+    | some v => pure v | none => throw (IO.userError "forgeryBitsMilli r=2 failed")
+  let fb3 ← match PorsFpSecurity.forgeryBitsMilli porsP 3 with
+    | some v => pure v | none => throw (IO.userError "forgeryBitsMilli r=3 failed")
+  let fb4 ← match PorsFpSecurity.forgeryBitsMilli porsP 4 with
+    | some v => pure v | none => throw (IO.userError "forgeryBitsMilli r=4 failed")
+
+  let porsAdrsCases : List (String × Nat × Nat × Nat × Nat × Nat × Nat) := [
+    ("pors_prf",  7, 0, 0x0123456789ABCDEF, 3, 0, 27),
+    ("pors_prf",  7, 0, 0xFEDCBA9876543210, 1, 0, 2047),
+    ("pors_tree", 8, 0, 0x0123456789ABCDEF, 3, 0, 27),
+    ("pors_tree", 8, 0, 0x0123456789ABCDEF, 3, 5, 63)
+  ]
+  let porsAdrsRows := porsAdrsCases.map fun (kName, kCode, lay, tr, kp, chIdx, hStep) =>
+    let raw32 := encodeHashAdrs32 lay tr kCode kp chIdx hStep
+    "{" ++
+      s!"\"kind_name\":\"{kName}\"," ++
+      s!"\"kind_code\":{kCode}," ++
+      s!"\"layer\":{lay}," ++
+      s!"\"tree\":\"{tr}\"," ++
+      s!"\"key_pair\":{kp}," ++
+      s!"\"chain_idx\":{chIdx}," ++
+      s!"\"hash_step\":{hStep}," ++
+      s!"\"adrs_32_hex\":\"{bytesToHex raw32}\"" ++
+    "}"
+
+  let octoCases : List (Nat × List Nat) := [
+    (3, [0, 1, 6]),
+    (3, [0, 1, 2, 3, 4, 5, 6, 7]),
+    (3, [5]),
+    (11, (List.range 28).map fun i => i * 73)
+  ]
+  let octoRows ← octoCases.mapM fun (th, idxs) => do
+    let pos ← match PorsFpSecurity.octopusPositions th idxs with
+      | some ps => pure ps
+      | none => throw (IO.userError s!"octopusPositions failed on h={th}")
+    let posJson := "[" ++ String.intercalate ", "
+      (pos.map fun (lv, si) => s!"[{lv}, {si}]") ++ "]"
+    pure ("{" ++
+      s!"\"tree_height\":{th}," ++
+      s!"\"indices\":{jsonNatNumList idxs}," ++
+      s!"\"positions\":{posJson}" ++
+    "}")
+
+  let selectSeeds : List (String × List UInt8) := [
+    ("QSAG.BAGGY.HMSG/v2", (List.range 48).map fun i => UInt8.ofNat ((i * 17 + 3) % 256)),
+    ("QSAG.BAGGY.HMSG/v2", (List.range 48).map fun i => UInt8.ofNat ((i * 53 + 91) % 256)),
+    ("QSAG.PORS.SELECT.TEST", (List.range 32).map fun i => UInt8.ofNat ((i * 11 + 7) % 256))
+  ]
+  let selectRows ← selectSeeds.mapM fun (custStr, seedBs) => do
+    let xofBytes := cshake256Xof (4 * porsP.drawBudget) (asciiBytes custStr) seedBs
+    let words := bytesToBeU32Words porsP.drawBudget xofBytes
+    match PorsFpSecurity.select porsP words with
+    | some sel => do
+      let authPos ← match PorsFpSecurity.octopusPositions porsP.treeHeight sel with
+        | some ps => pure ps
+        | none => throw (IO.userError "octopusPositions failed on selected subset")
+      pure ("{" ++
+        s!"\"custom_ascii\":\"{custStr}\"," ++
+        s!"\"seed_hex\":\"{bytesToHex seedBs}\"," ++
+        s!"\"selected_indices\":{jsonNatNumList sel}," ++
+        s!"\"auth_len\":{authPos.length}" ++
+      "}")
+    | none =>
+      pure ("{" ++
+        s!"\"custom_ascii\":\"{custStr}\"," ++
+        s!"\"seed_hex\":\"{bytesToHex seedBs}\"," ++
+        "\"selected_indices\":null," ++
+        "\"auth_len\":null" ++
+      "}")
+
+  let porsJson :=
+    let adrsArr := String.intercalate ", " porsAdrsRows
+    let octoArr := String.intercalate ", " octoRows
+    let selArr  := String.intercalate ", " selectRows
+    "{" ++
+      s!"\"tree_height\":{porsP.treeHeight}," ++
+      s!"\"reveal\":{porsP.reveal}," ++
+      s!"\"max_auth_nodes\":{porsP.maxAuthNodes}," ++
+      s!"\"draw_budget\":{porsP.drawBudget}," ++
+      s!"\"opening_bytes_max\":{porsP.openingBytesMax}," ++
+      s!"\"baggy_sig_bytes_max\":{baggySigBytesMax}," ++
+      s!"\"forgery_bits_milli\":[{fb1}, {fb2}, {fb3}, {fb4}]," ++
+      s!"\"adrs_vectors\":[{adrsArr}]," ++
+      s!"\"octopus_vectors\":[{octoArr}]," ++
+      s!"\"select_vectors\":[{selArr}]" ++
+    "}"
+
+  -- 10. `FrontierSumFts` (`Compact1122` & `Full256Bit` — exact `u64_le`-framed `cSHAKE256` & `U384` DP counts)
+  let ftsPkSeed := (List.range 32).map fun i => UInt8.ofNat (0x11 + i * 3)
+  let ftsPkRoot := (List.range 32).map fun i => UInt8.ofNat (0x31 + i * 5)
+  let ftsSkSeed := (List.range 32).map fun i => UInt8.ofNat (0x51 + i * 7)
+  let ftsSkPrf  := (List.range 32).map fun i => UInt8.ofNat (0x71 + i * 9)
+  let ftsHedge  := (List.range 32).map fun i => UInt8.ofNat (0x91 + i * 11)
+  let ftsMsg    := asciiBytes "lean-frontier-sum-fts-kat-message"
+  let ftsCtr : Nat := 7
+
+  let ftsProfiles : List (String × FrontierFtsParams) := [
+    ("Compact1122", compact1122Params),
+    ("Full256Bit", full256BitParams)
+  ]
+  let ftsRows := ftsProfiles.map fun (profName, p) =>
+    let pid := encodeFrontierPid p
+    let nCard := (subList p.treeHeight).getD p.frontierLen 0
+    let dCard := (decList p.winternitzW p.frontierLen).getD p.targetSum 0
+    let mCard := nCard * dCard
+    let dMsg  := cshake256Framed32 ftsTagMsgPre [pid, ftsPkSeed, ftsPkRoot, ftsMsg]
+    let rand  := cshake256Framed32 ftsTagRand [pid, ftsSkPrf, ftsPkSeed, ftsPkRoot, ftsHedge, [0], dMsg]
+    let sqRank := cshake256Framed32 ftsTagHmsg [pid, natToBeBytes 2 ftsCtr, ftsPkSeed, ftsPkRoot, rand, dMsg]
+    let leaf0 := cshake256Framed32 ftsTagLeaf [pid, ftsPkSeed, natToBeBytes 8 256, ftsSkSeed]
+    let step1 := cshake256Framed32 ftsTagChain [pid, ftsPkSeed, natToBeBytes 8 256, natToBeBytes 8 0, leaf0]
+    let mergeR := cshake256Framed32 ftsTagMerge [pid, ftsPkSeed, natToBeBytes 8 1, ftsPkSeed, ftsPkRoot]
+    "{" ++
+      s!"\"profile\":\"{profName}\"," ++
+      s!"\"node_bytes\":{p.nodeBytes}," ++
+      s!"\"tree_height\":{p.treeHeight}," ++
+      s!"\"winternitz_w\":{p.winternitzW}," ++
+      s!"\"frontier_len\":{p.frontierLen}," ++
+      s!"\"target_sum\":{p.targetSum}," ++
+      s!"\"index_bits\":{p.indexBits}," ++
+      s!"\"counter_bits\":{p.counterBits}," ++
+      s!"\"signature_bytes\":{p.signatureBytes}," ++
+      s!"\"rotated_epoch_vote_bytes\":{p.rotatedEpochVoteBytes}," ++
+      s!"\"pid_56_hex\":\"{bytesToHex pid}\"," ++
+      s!"\"frontier_cardinality_dec\":\"{nCard}\"," ++
+      s!"\"decoration_cardinality_dec\":\"{dCard}\"," ++
+      s!"\"total_cardinality_dec\":\"{mCard}\"," ++
+      s!"\"pk_seed_hex\":\"{bytesToHex ftsPkSeed}\"," ++
+      s!"\"pk_root_hex\":\"{bytesToHex ftsPkRoot}\"," ++
+      s!"\"sk_seed_hex\":\"{bytesToHex ftsSkSeed}\"," ++
+      s!"\"sk_prf_hex\":\"{bytesToHex ftsSkPrf}\"," ++
+      s!"\"hedge_hex\":\"{bytesToHex ftsHedge}\"," ++
+      s!"\"msg_hex\":\"{bytesToHex ftsMsg}\"," ++
+      s!"\"grind_counter\":{ftsCtr}," ++
+      s!"\"prehash_msg_hex\":\"{bytesToHex dMsg}\"," ++
+      s!"\"prf_rand_hex\":\"{bytesToHex rand}\"," ++
+      s!"\"squeeze_rank_hex\":\"{bytesToHex sqRank}\"," ++
+      s!"\"leaf0_start_hex\":\"{bytesToHex leaf0}\"," ++
+      s!"\"leaf0_step1_hex\":\"{bytesToHex step1}\"," ++
+      s!"\"merge_root_hex\":\"{bytesToHex mergeR}\"" ++
+    "}"
+
+  -- 11. WHIR high-capacity stage geometries (`nv = 6..28` via live `hemStageGeometry`) & 6 wire regimes
+  let whirNvs : List Nat := [6, 12, 16, 20, 22, 24, 25, 26, 27, 28]
+  let whirGeomRows := whirNvs.map fun nv =>
+    let stgs := hemStageGeometry nv
+    let foldSum := (stgs.map Prod.snd).foldl (· + ·) 0
+    let stgJson := "[" ++ String.intercalate ", "
+      (stgs.map fun (lb, sv) => s!"[{lb}, {sv}]") ++ "]"
+    "{" ++
+      s!"\"nv\":{nv}," ++
+      s!"\"stages\":{stgJson}," ++
+      s!"\"folding_sum\":{foldSum}" ++
+    "}"
+
+  let whirRegimes := Aggregation.WhirSecurityRegime.all.map fun r =>
+    let qCounts := (Aggregation.whirSchedule4Stage r).map (·.numQueries)
+    "{" ++
+      s!"\"wire_tag\":{r.tagByte}," ++
+      s!"\"pow_bits\":{r.powBits}," ++
+      s!"\"query_counts\":{jsonNatNumList qCounts}" ++
+    "}"
+
+  let whirJson :=
+    let stgArr := String.intercalate ", " whirGeomRows
+    let regArr := String.intercalate ", " whirRegimes
+    "{" ++
+      "\"max_pcs_num_vars\":28," ++
+      "\"max_batch_polys\":16," ++
+      "\"ood_samples\":2," ++
+      "\"retired_wire_tags\":[0, 1, 3]," ++
+      s!"\"stage_geometries\":[{stgArr}]," ++
+      s!"\"regimes\":[{regArr}]" ++
+    "}"
+
+  -- 12. Aggregate signature profiles (`JortsPoseidon2` `4,328 B` & `CorduroyPoseidon2` `76,896 B`, `maxSigsLog2 = 20`)
+  let jortsGeom := xmssPoseidon2Geom
+  let cordGeom := corduroyPoseidon2Geom
+  let cordMaxSigsLog2 := aggregationCorduroyParams.maxSigsLog2
+  if cordMaxSigsLog2 != 20 then
+    throw (IO.userError s!"expected aggregationCorduroyParams.maxSigsLog2 = 20, got {cordMaxSigsLog2}")
+  let jortsRawBytes := 32 + 4 + 4 + jortsGeom.wotsChains * 32 + jortsGeom.subtreeHeight * 32
+  let cordRawBytes :=
+    32 + cordGeom.forsTrees * (1 + cordGeom.forsHeight) * 32 +
+    cordGeom.numLayers * (4 + cordGeom.wotsChains * 32 + cordGeom.subtreeHeight * 32)
+  if jortsRawBytes != 4328 || cordRawBytes != 76896 then
+    throw (IO.userError s!"agg sig raw byte mismatch: jorts={jortsRawBytes}, corduroy={cordRawBytes}")
+  let domainPrfMsgU64 : Nat := 0x515341475052464d
+  let aggSigJson :=
+    "{" ++
+      "\"jorts_poseidon2\":{" ++
+        s!"\"wire_tag\":1,\"wots_chains\":{jortsGeom.wotsChains},\"target_sum\":{jortsGeom.targetSum}," ++
+        s!"\"num_layers\":{jortsGeom.numLayers},\"subtree_height\":{jortsGeom.subtreeHeight}," ++
+        s!"\"fors_trees\":{jortsGeom.forsTrees},\"fors_height\":{jortsGeom.forsHeight}," ++
+        s!"\"max_sigs_log2\":{jortsGeom.subtreeHeight},\"raw_signature_bytes\":{jortsRawBytes}," ++
+        s!"\"domain_prf_msg_u64\":\"{domainPrfMsgU64}\"" ++
+      "}," ++
+      "\"corduroy_poseidon2\":{" ++
+        s!"\"wire_tag\":2,\"wots_chains\":{cordGeom.wotsChains},\"target_sum\":{cordGeom.targetSum}," ++
+        s!"\"num_layers\":{cordGeom.numLayers},\"subtree_height\":{cordGeom.subtreeHeight}," ++
+        s!"\"fors_trees\":{cordGeom.forsTrees},\"fors_height\":{cordGeom.forsHeight}," ++
+        s!"\"max_sigs_log2\":{cordMaxSigsLog2},\"raw_signature_bytes\":{cordRawBytes}," ++
+        s!"\"domain_prf_msg_u64\":\"{domainPrfMsgU64}\"" ++
+      "}" ++
     "}"
 
   IO.println "{"
@@ -424,7 +671,11 @@ def main : IO Unit := do
   IO.println s!"    \"pk_hex\": \"{bytesToHex pkWire}\","
   IO.println s!"    \"sk_hex\": \"{bytesToHex skWire}\","
   IO.println s!"    \"sig_hex\": \"{bytesToHex sigWire}\""
-  IO.println "  }"
+  IO.println "  },"
+  IO.println ("  \"pors_fp_and_baggy\": " ++ porsJson ++ ",")
+  IO.println ("  \"frontier_sum_fts\": [" ++ String.intercalate ", " ftsRows ++ "],")
+  IO.println ("  \"whir_high_cap_and_regimes\": " ++ whirJson ++ ",")
+  IO.println ("  \"agg_sig_profiles\": " ++ aggSigJson)
   IO.println "}"
 
 end ExternalSpecOracle

@@ -813,3 +813,160 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
         ));
     }
 }
+
+#[test]
+fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity() {
+    use qsag_agg::zk_hem::capability::{
+        BearerCapability, CAPABILITY_WIRE_MAGIC, CapCaveat, CapabilityBatchStatement,
+        CapabilityIssuerDirectory, CapabilityParams, CapabilityPresentationInput,
+        CapabilityRelation, CapabilityRequest, CapabilityZkError, SENTINEL_MAX_ID,
+        SENTINEL_MIN_ID, SortedRevocationTree, ZkCapabilityBatchProof,
+    };
+    use qsag_core::poseidon2_mpc::HemJortsPublicKey;
+
+    // 1. Configurable `JortsPoseidon2` height `6..=20` (`C6 #4`) & zero-copy `HemJortsPublicKey`
+    //    cross-crate bridge (`C4-F5`).
+    assert_eq!(AggSigProfile::from_u8(6), None);
+    for h in 7u8..=20 {
+        let prof = AggSigProfile::from_u8(h).expect("JortsPoseidon2H7..=H20");
+        assert!(prof.is_jorts());
+        assert_eq!(prof.jorts_xmss_height(), Some(usize::from(h)));
+        assert_eq!(prof.raw_signature_bytes(), 4_328 + 32 * (usize::from(h) - 6));
+    }
+    assert_eq!(AggSigProfile::JortsPoseidon2H20.raw_signature_bytes(), 4_776);
+
+    let mut kp6 = ValidatorKeypair::keygen_deterministic(
+        AggSigProfile::JortsPoseidon2,
+        &[0x91; 32],
+        0,
+    );
+    let core_pk: HemJortsPublicKey = kp6.pk.into();
+    assert_eq!(ValidatorPublicKey::from(core_pk), kp6.pk);
+    assert_eq!(kp6.pk.to_hem_jorts().unwrap(), core_pk);
+    let pk_h12 = ValidatorPublicKey::from_hem_jorts_with_height(core_pk, 12).unwrap();
+    assert_eq!(pk_h12.profile, AggSigProfile::JortsPoseidon2H12);
+
+    // Height-8 (`256` epochs) stateful sign at boundary epoch `255` + wire roundtrip!
+    let mut kp8 = ValidatorKeypair::keygen_deterministic(
+        AggSigProfile::JortsPoseidon2H8,
+        &[0x92; 32],
+        0,
+    );
+    let mut wal8 = InMemEpochWal::default();
+    let msg8 = b"jorts-poseidon2-h8-configurable-xmss-validation";
+    let sig8 = kp8
+        .sign_stateful(msg8, 255, &mut wal8)
+        .expect("JortsPoseidon2H8 sign");
+    let wire8 = sig8.to_bytes();
+    assert_eq!(wire8.len(), 4_328 + 64);
+    assert_eq!(
+        ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2H8, &wire8).unwrap(),
+        sig8
+    );
+    assert!(verify_individual_signature(&kp8.pk, msg8, &sig8));
+
+    let _ = kp6
+        .sign_stateful(msg8, 0, &mut InMemEpochWal::default())
+        .unwrap();
+
+    // 2. `zk-Hem` Batched Bearer Capabilities + `SortedRevocationTree` interval non-membership (`QSAGCAP1`).
+    let params = CapabilityParams {
+        batch_size: 2,
+        max_hops: 4,
+        issuer_depth: 4,
+        revocation_depth: 5,
+    };
+    let cap_rel = CapabilityRelation::new(params).expect("CapabilityRelation::new");
+    let gl = Goldilocks::from_u64_reduced;
+    let issuer_key = [gl(0x0A11_CE01), gl(0x0A11_CE02), gl(0x0A11_CE03), gl(0x0A11_CE04)];
+    let audience = [gl(0x000A_0D01), gl(0x000A_0D02), gl(0x000A_0D03), gl(0x000A_0D04)];
+    let resource = [gl(0x00BE_EF01), gl(0x00BE_EF02), gl(0x00BE_EF03), gl(0x00BE_EF04)];
+
+    assert_eq!(
+        BearerCapability::issue(&issuer_key, SENTINEL_MIN_ID, audience).err(),
+        Some(CapabilityZkError::SentinelTokenIdReserved)
+    );
+    assert_eq!(
+        BearerCapability::issue(&issuer_key, SENTINEL_MAX_ID, audience).err(),
+        Some(CapabilityZkError::SentinelTokenIdReserved)
+    );
+
+    let tok_a = [gl(0), gl(0), gl(0), gl(120)];
+    let tok_revoked = [gl(0), gl(0), gl(0), gl(200)];
+    let tok_b = [gl(0), gl(0), gl(0), gl(350)];
+
+    let mut cap_a = BearerCapability::issue(&issuer_key, tok_a, audience).unwrap();
+    cap_a.attenuate(CapCaveat::NotBefore(1_000)).unwrap();
+    cap_a.attenuate(CapCaveat::ExpiresAt(5_000)).unwrap();
+    cap_a.attenuate(CapCaveat::Resource(resource)).unwrap();
+
+    let mut cap_b = BearerCapability::issue(&issuer_key, tok_b, audience).unwrap();
+    cap_b.attenuate(CapCaveat::Actions(0b0111)).unwrap();
+    cap_b.attenuate(CapCaveat::MaxAmount(10_000)).unwrap();
+
+    let dir = CapabilityIssuerDirectory::new(4, &[cap_a.mint_leaf(), cap_b.mint_leaf()]).unwrap();
+    let rev_tree = SortedRevocationTree::new(
+        5,
+        7,
+        &[[gl(0), gl(0), gl(0), gl(50)], tok_revoked, [gl(0), gl(0), gl(0), gl(500)]],
+    )
+    .unwrap();
+    assert_eq!(
+        rev_tree.prove_non_membership(&tok_revoked).err(),
+        Some(CapabilityZkError::TokenRevoked)
+    );
+
+    let nm_a = rev_tree.prove_non_membership(&tok_a).unwrap();
+    let nm_b = rev_tree.prove_non_membership(&tok_b).unwrap();
+    let mut inputs = vec![
+        CapabilityPresentationInput {
+            capability: cap_b,
+            issuer_index: 1,
+            issuer_siblings: dir.opening(1).unwrap(),
+            non_membership: nm_b,
+        },
+        CapabilityPresentationInput {
+            capability: cap_a,
+            issuer_index: 0,
+            issuer_siblings: dir.opening(0).unwrap(),
+            non_membership: nm_a,
+        },
+    ];
+    let req = CapabilityRequest {
+        audience,
+        resource,
+        actions: 0b0011,
+        amount: 2_500,
+        now: 2_000,
+    };
+    let ctx = b"qsag-validation-zk-capability-batch-v1";
+    // `prepare_sorted` sorts `inputs` into strictly ascending `token_id` order (`tok_a < tok_b`).
+    let stmt = CapabilityBatchStatement::prepare_sorted(
+        dir.root(),
+        rev_tree.root(),
+        rev_tree.epoch(),
+        req,
+        &mut inputs,
+        ctx,
+    )
+    .expect("prepare_sorted");
+
+    let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+    let proof = cap_rel
+        .prove(&stmt, &inputs, ctx, regime, &[0xCC; 32])
+        .expect("CapabilityRelation::prove");
+    let wire = proof.to_bytes();
+    assert_eq!(&wire[..8], CAPABILITY_WIRE_MAGIC);
+    let decoded = ZkCapabilityBatchProof::from_bytes(&wire, &cap_rel, regime)
+        .expect("ZkCapabilityBatchProof::from_bytes");
+    assert_eq!(decoded.to_bytes(), wire);
+    assert!(cap_rel.verify(&stmt, ctx, regime, &decoded));
+    assert!(!cap_rel.verify(&stmt, b"wrong-context", regime, &decoded));
+
+    let mut bad_wire = wire;
+    let mid = bad_wire.len() / 2;
+    bad_wire[mid] ^= 0x01;
+    if let Some(bad_dec) = ZkCapabilityBatchProof::from_bytes(&bad_wire, &cap_rel, regime) {
+        assert!(!cap_rel.verify(&stmt, ctx, regime, &bad_dec));
+    }
+}
