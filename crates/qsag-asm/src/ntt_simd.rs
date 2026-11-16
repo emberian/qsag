@@ -181,6 +181,7 @@ pub fn mldsa_ntt_portable(coeffs: &mut [u32; MLDSA_N]) {
         *dst = canon_0_q_scalar(val);
     }
     crate::volatile_fill(&mut s, 0);
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Portable constant-time FIPS 204 inverse `InvNTT` (`Algorithm 42`).
@@ -236,6 +237,7 @@ pub fn mldsa_inv_ntt_portable(coeffs: &mut [u32; MLDSA_N]) {
         j += 1;
     }
     crate::volatile_fill(&mut s, 0);
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Portable constant-time FIPS 204 pointwise NTT multiplication (`Algorithm 45`).
@@ -249,6 +251,7 @@ pub fn mldsa_pointwise_mul_portable(
         let r = mont_mul_scalar(lhs[i] as i32, b_mont);
         out[i] = (r + ((r >> 31) & (MLDSA_Q as i32))) as u32;
     }
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Runtime-dispatched constant-time FIPS 204 forward `NTT` (`Algorithm 41`).

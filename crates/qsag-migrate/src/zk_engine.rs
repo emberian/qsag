@@ -161,6 +161,7 @@ impl Tape {
                 let mut raw = [0; 8];
                 self.sponge.squeeze(&mut raw);
                 self.bit_buf = u64::from_le_bytes(raw);
+                ct_zeroize_bytes(&mut raw);
                 self.bit_rem = 64;
             }
             let bit = self.bit_buf & 1;

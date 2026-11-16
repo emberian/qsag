@@ -958,6 +958,7 @@ pub fn keccak_f1600_4x_portable(state: &mut KeccakState4x) {
         }
     }
     compiler_fence(Ordering::SeqCst);
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Portable 8-way (`512`-bit per lane) `Keccak-f[1600]` 24-round permutation.
@@ -993,6 +994,7 @@ pub fn keccak_f1600_8x_portable(state: &mut KeccakState8x) {
         }
     }
     compiler_fence(Ordering::SeqCst);
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Portable 256-way bitsliced symmetric 3-party RSS MPC $\chi$-row gate:
@@ -1021,6 +1023,7 @@ pub fn keccak_chi_mpc_4x_portable(
             out.0[x][lane] = u_x ^ u_x2 ^ and_term ^ r_mask.0[x][lane];
         }
     }
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Portable constant-time elementwise Wiedemann $\mathcal{T}_3$ (`TowerGf256`) slice multiply:
@@ -1031,6 +1034,7 @@ pub fn gf256_shamir_mul_portable(dst: &mut [u8], a: &[u8], b: &[u8]) {
     for i in 0..dst.len() {
         dst[i] = wiedemann_mul_t3_u8(black_box(a[i]), black_box(b[i]));
     }
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Portable constant-time Wiedemann $\mathcal{T}_3$ (`TowerGf256`) Shamir multiply-accumulate:
@@ -1041,6 +1045,7 @@ pub fn gf256_shamir_mac_portable(acc: &mut [u8], shares: &[u8], scalar: u8) {
     for i in 0..acc.len() {
         acc[i] ^= wiedemann_mul_t3_u8(s, black_box(shares[i]));
     }
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Portable 2-lane polynomial-basis BDOZ MAC inner product over $\mathbb{F}_2[z]/(z^{128}+z^7+z^2+z+1)$:
@@ -1073,6 +1078,7 @@ pub fn tower128_bdoz_2lane_poly_mac_portable(
         core::ptr::write_volatile(&mut lo1, 0);
         core::ptr::write_volatile(&mut hi1, 0);
     }
+    crate::wipe::wipe_vector_scratch();
     out
 }
 
@@ -1094,6 +1100,7 @@ pub fn tower128_bdoz_2lane_mac_portable(
         core::ptr::write_volatile(&mut acc0, 0);
         core::ptr::write_volatile(&mut acc1, 0);
     }
+    crate::wipe::wipe_vector_scratch();
     out
 }
 
