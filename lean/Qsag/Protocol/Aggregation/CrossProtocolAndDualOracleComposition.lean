@@ -1545,6 +1545,16 @@ theorem auditedLabelCodes_eq :
       l.toByteArray.data.toList.foldl (fun acc b => acc * 256 + b.toNat) 1)) =
       auditedLabelCodes := by
     decide +kernel
+  have hCode : ∀ l : String, labelCode l =
+      l.toByteArray.data.toList.foldl (fun acc b => acc * 256 + b.toNat) 1 := by
+    intro l
+    unfold labelCode bytesCode bytes
+    rw [String.toUTF8_eq_toByteArray]
+  have hFun : (fun c : String × List String => c.2.map labelCode) =
+      (fun c => c.2.map (fun l =>
+        l.toByteArray.data.toList.foldl (fun acc b => acc * 256 + b.toNat) 1)) :=
+    funext fun c => congrArg (fun f => c.2.map f) (funext hCode)
+  rw [hFun]
   exact h
 
 /-- Within each crate the codes are pairwise distinct. -/
