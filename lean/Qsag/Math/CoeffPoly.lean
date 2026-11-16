@@ -2592,22 +2592,3 @@ theorem filter_overlap_len {α : Type} (p q : α → Bool) :
 
 
 end Qsag
-
-/-! ### Exports for lane math -/
-public section
-
-#verify_constructive Qsag.UPoly.natDeg_mul
-
-namespace Qsag
-
-/- Defining equations of the trimmed list kernels whose bodies are not exposed. -/
-
-theorem pNeg_eq {F : Type} [CommRingOps F] [DecidableEq F] (a : List F) :
-    pNeg a = trimPoly (a.map CommRingOps.neg) := by rfl
-
-theorem pSub_eq {F : Type} [CommRingOps F] [DecidableEq F] (a b : List F) :
-    pSub a b = trimPoly (RoundPoly.subCoeffs a b) := by rfl
-
-end Qsag
-
-end

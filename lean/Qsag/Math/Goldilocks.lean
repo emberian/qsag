@@ -640,15 +640,3 @@ end GoldilocksExt2
 
 
 end Qsag
-
-/-! ### Exports for lane math -/
-public section
-
-#verify_constructive Qsag.goldilocks_universal_mul_inv_cancel
-#verify_constructive Qsag.goldilocks_invBezout_eq_inv
-#verify_constructive Qsag.v_pow4_sub_seven_irreducible
-#verify_constructive Qsag.goldilocks_mul_invBezout_cancel
-#verify_constructive Qsag.goldilocks_quadExtMulMod_no_zero_divisors
-#verify_constructive Qsag.Goldilocks.natCast_ne_zero
-
-end
