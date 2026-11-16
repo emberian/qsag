@@ -30,6 +30,68 @@ structure PrimeSubgroup (C : SwCurve) (G : SwPoint) (ord : Nat) where
   smul_ord : smul ord = none
   exact_ord : ∀ k, 0 < k → k < ord → smul k ≠ none
 
+/-- **Bridge from `Weierstrass.Curve.PrimeOrderGroup` to `PrimeSubgroup` (`PrimeSubgroup.ofPrimeOrderGroup`)**:
+    Ties `PrimeSubgroup`'s `add` and `smul` directly to short-Weierstrass chord-tangent curve
+    arithmetic `C.add` and `C.smul · G` on `SwCurve`, discharging `p_prime`, `ord_prime`,
+    `gen_onCurve`, `add_none_left`, `smul_add`, `smul_ord`, and `exact_ord`. -/
+def PrimeSubgroup.ofPrimeOrderGroup {C : SwCurve} {G : SwPoint} {ord : Nat}
+    (h : C.PrimeOrderGroup G ord) : PrimeSubgroup C G ord where
+  add := C.add
+  smul k := C.smul k G
+  p_prime := h.p_prime
+  ord_prime := h.n_prime
+  gen_onCurve := by
+    have h1 : C.OnCurve (C.smul 1 G) := h.onCurve 1
+    rw [Weierstrass.Curve.smul_one] at h1
+    exact SwCurve.onCurve_of_OnCurve h1
+  add_none_left := Weierstrass.Curve.add_none_left C
+  smul_add := h.smul_add
+  smul_ord := h.order
+  exact_ord := h.exact
+
+/-- **Unconditional Concrete `SwCurve` Inhabitant (`secp7Mod43_primeSubgroup`)**:
+    Instantiates `PrimeSubgroup` with actual affine chord-tangent curve arithmetic on
+    `y² = x³ + 7` over `ℤ/43` (`G = (2, 12)` of prime order `31`). -/
+def secp7Mod43_primeSubgroup :
+    PrimeSubgroup Weierstrass.secp7Mod43 Weierstrass.secp7Mod43G 31 :=
+  PrimeSubgroup.ofPrimeOrderGroup Weierstrass.secp7Mod43_group
+
+theorem secp7Mod43_primeSubgroup_smul_eq (k : Nat) :
+    secp7Mod43_primeSubgroup.smul k = Weierstrass.secp7Mod43.smul k Weierstrass.secp7Mod43G := by
+  rfl
+
+/-- **`secp256k1` `PrimeSubgroup` on `SwCurve` (`secp256k1_primeSubgroup`)**:
+    Instantiates `PrimeSubgroup` at `SECP256K1_ORDER_N` from `Weierstrass.Secp256k1GroupLaws`
+    (whose field and order primality are discharged by Pocklington certificates). -/
+def secp256k1_primeSubgroup (h : Weierstrass.Secp256k1GroupLaws) :
+    PrimeSubgroup Weierstrass.secp256k1Curve Weierstrass.secp256k1G SECP256K1_ORDER_N :=
+  PrimeSubgroup.ofPrimeOrderGroup h
+
+/-- **`Pallas` (`Orchard SpendAuthG`) `PrimeOrderGroup` Constructor (`pallasGroupLaws_of_group_facts`)**:
+    Discharges `p_pallas` and `q_pallas` primality via Lucas–Pratt certificates (`p_pallas_isPrime`,
+    `q_pallas_isPrime`) and oddness via `pallas_and_bls381_limbs_and_bit_bounds`, leaving only the
+    four affine chord-tangent subgroup closure laws. -/
+theorem pallasGroupLaws_of_group_facts
+    (onCurve : ∀ k, pallasCurve.OnCurve (pallasCurve.smul k orchardSpendAuthG))
+    (smul_add : ∀ a b, pallasCurve.smul (a + b) orchardSpendAuthG =
+      pallasCurve.add (pallasCurve.smul a orchardSpendAuthG) (pallasCurve.smul b orchardSpendAuthG))
+    (order : pallasCurve.smul q_pallas orchardSpendAuthG = none)
+    (exact : ∀ k, 0 < k → k < q_pallas → pallasCurve.smul k orchardSpendAuthG ≠ none) :
+    pallasCurve.PrimeOrderGroup orchardSpendAuthG q_pallas where
+  p_prime := by rw [pallasCurve_p]; exact p_pallas_isPrime
+  p_odd := by rw [pallasCurve_p]; exact pallas_and_bls381_limbs_and_bit_bounds.2.2.2.2.2.2.1
+  n_prime := q_pallas_isPrime
+  n_odd := pallas_and_bls381_limbs_and_bit_bounds.2.2.2.2.2.2.2.2.2.1
+  onCurve := onCurve
+  smul_add := smul_add
+  order := order
+  exact := exact
+
+/-- **`Pallas` `PrimeSubgroup` on `SwCurve` (`pallas_primeSubgroup`)**. -/
+def pallas_primeSubgroup (h : pallasCurve.PrimeOrderGroup orchardSpendAuthG q_pallas) :
+    PrimeSubgroup pallasCurve orchardSpendAuthG q_pallas :=
+  PrimeSubgroup.ofPrimeOrderGroup h
+
 theorem PrimeSubgroup.smul_injective {C : SwCurve} {G : SwPoint} {ord : Nat}
     (grp : PrimeSubgroup C G ord) {a b : Nat} (ha : a < ord) (hb : b < ord) (hEq : grp.smul a = grp.smul b) :
     a = b := by
@@ -45,6 +107,10 @@ theorem PrimeSubgroup.smul_injective {C : SwCurve} {G : SwPoint} {ord : Nat}
   · exact False.elim (hNeLt hgt ha hEq.symm)
 
 def zkbooReconstructScalar (ord s0 s1 s2 : Nat) : Nat := (s0 + s1 + s2) % ord
+
+theorem zkbooReconstructScalar_eq (ord s0 s1 s2 : Nat) :
+    zkbooReconstructScalar ord s0 s1 s2 = (s0 + s1 + s2) % ord := by
+  rfl
 def zkbooOpenedPair (shares : Fin 3 → Nat) (e : Fin 3) : Nat × Nat :=
   (shares e, shares ⟨(e.val + 1) % 3, Nat.mod_lt _ (by decide)⟩)
 
@@ -53,6 +119,10 @@ def extractThreeShares (e1 e2 : Fin 3) (p1 p2 : Nat × Nat) : Nat × Nat × Nat 
   | 0, 1 => (p1.1, p1.2, p2.2) | 0, _ => (p1.1, p1.2, p2.1)
   | 1, 0 => (p2.1, p1.1, p1.2) | 1, _ => (p2.2, p1.1, p1.2)
   | _, 0 => (p1.2, p2.2, p1.1) | _, _ => (p1.2, p2.1, p1.1)
+
+theorem extractThreeShares_zero_one (p1 p2 : Nat × Nat) :
+    extractThreeShares 0 1 p1 p2 = (p1.1, p1.2, p2.2) := by
+  rfl
 
 theorem extractThreeShares_complete (shares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2) :
     extractThreeShares e1 e2 (zkbooOpenedPair shares e1) (zkbooOpenedPair shares e2) =

@@ -39,9 +39,10 @@ adversarial execution. The circuit-to-`PendingAnd` fault link and the batching
 of Boolean `AND` gates into the first inner-product claims (`γ` combiner and
 degree-30 round 0 of the `D0_BITS = 16` packing, numerator `54`) are proved in §11 below.
 The packing of the current `outer_mpc.rs` (`BIT_CHECK_NUMERATOR = 63`: seven weight
-challenges, six ternary sumcheck rounds, eighteen halving rounds) is counted in §11 by
+challenges, six ternary sumcheck rounds, eighteen halving rounds) is counted in §11A by
 `staged_sacrifice_false_claim_accepting_coins_bound` and `rust_bit_check_numerator_63_bound`,
-with the soundness of the thirteen stages ahead of the halving rounds as a hypothesis.
+and the thirteen stages ahead of the halving rounds are discharged unconditionally in §11B
+by `rustBitCheckStages_sound` and `rust_bit_check_63_concrete_accepting_coins_bound`.
 -/
 
 public import Qsag.Tactic.Prelude

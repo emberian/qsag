@@ -222,7 +222,7 @@ theorem TaprootCurveProjection.compressed_injective {n : Nat} {XCoord : Type}
     rw [proj.yParity_neg s1 p1 l1] at hY
     cases hb : proj.yParity s1 <;> rw [hb] at hY <;> cases hY
 
-private theorem TaprootCurveProjection.sameX_iff_canonical {XCoord : Type}
+theorem TaprootCurveProjection.sameX_iff_canonical {XCoord : Type}
     (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) (s1 s2 : BitVec 256)
     (h1 : requireCanonicalScalar .Secp256k1 s1 = true)
     (h2 : requireCanonicalScalar .Secp256k1 s2 = true) :
@@ -1477,7 +1477,34 @@ theorem projEqAffine_zk_constraint_sound {p ax ay : Nat} {P : RcbProjPoint} {zIn
   exact ⟨hZNe, hCoord hAx hX, hCoord hAy hY⟩
 
 
-/-! ### Exports for lane cred-mig -/
+/-! ### Curve Group Projections, Nullifier Domain Equations & Constructive Audit Certificates -/
+
+theorem Weierstrass.Curve.add_none_left (C : Weierstrass.Curve) (P : Weierstrass.Point) :
+    C.add none P = P := by
+  rfl
+
+theorem Weierstrass.Curve.smul_one (C : Weierstrass.Curve) (G : Weierstrass.Point) :
+    C.smul 1 G = G := by
+  cases G <;> rfl
+
+theorem Weierstrass.secp7Mod43_eq : Weierstrass.secp7Mod43 = ⟨43, 0, 7⟩ := by
+  rfl
+
+theorem Weierstrass.secp7Mod43G_eq : Weierstrass.secp7Mod43G = some (2, 12) := by
+  rfl
+
+theorem SwCurve.onCurve_of_OnCurve {C : SwCurve} {P : SwPoint}
+    (h : C.OnCurve P) : C.onCurve P = true := by
+  rcases P with _ | ⟨x, y⟩
+  · rfl
+  · obtain ⟨hx, hy, hEq⟩ := h
+    dsimp only [SwCurve.onCurve]
+    rw [decide_eq_true hx, decide_eq_true hy, Bool.true_and, Bool.true_and]
+    exact beq_iff_eq.mpr hEq
+
+theorem pallasCurve_p : pallasCurve.p = p_pallas := by rfl
+
+theorem bls381Curve_p : bls381Curve.p = p_bls381 := by rfl
 
 theorem NULLIFIER_DOMAIN_eq : NULLIFIER_DOMAIN = 0x4d49475f4e554c31 := by rfl
 
@@ -1485,60 +1512,23 @@ theorem ScalarGroup.nullifierTag_injective {g₁ g₂ : ScalarGroup}
     (h : g₁.nullifierTag = g₂.nullifierTag) : g₁ = g₂ := by
   cases g₁ <;> cases g₂ <;> first | rfl | (exact absurd (congrArg Goldilocks.val h) (by decide))
 
-end Qsag
-
-/-! ### Exports for lane math -/
-public section
-
-#verify_constructive Qsag.TaprootCurveProjection.compressed_injective
-#verify_constructive Qsag.taproot_even_y_parity_restores_canonical_injectivity
-#verify_constructive Qsag.slip0010_ed25519_clamped_canonical_nonzero
-#verify_constructive Qsag.checkPrattStep_sound
-#verify_constructive Qsag.bls381G1_onCurve_and_prime_subgroup_order
-
-namespace Qsag
-
-/-- Public form of the canonical-scalar `x`-only characterization. -/
-theorem TaprootCurveProjection.sameX_iff_canonical_export {XCoord : Type}
-    (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) (s1 s2 : BitVec 256)
-    (h1 : requireCanonicalScalar .Secp256k1 s1 = true)
-    (h2 : requireCanonicalScalar .Secp256k1 s2 = true) :
-    proj.xOf s1.toNat = proj.xOf s2.toNat ↔ taprootXOnlySameX s1 s2 :=
-  proj.sameX_iff_canonical s1 s2 h1 h2
-
-theorem clampEd25519Nat_eq (n : Nat) : clampEd25519Nat n = 2 ^ 254 + ((n % (2 ^ 254)) / 8) * 8 := by rfl
-
-theorem clampEd25519Bytes32_toNat (raw : BitVec 256) :
-    (clampEd25519Bytes32 raw).toNat = clampEd25519Nat raw.toNat := by rfl
-
-theorem reduceEd25519Order_eq (x : BitVec 256) :
-    reduceEd25519Order x = BitVec.ofNat 256 (x.toNat % ED25519_ORDER_L) := by rfl
-
-theorem normalizeSlip0010Ed25519Scalar_eq (sha512Lo32 : BitVec 256) :
-    normalizeSlip0010Ed25519Scalar sha512Lo32 =
-      reduceEd25519Order (clampEd25519Bytes32 sha512Lo32) := by rfl
-
-/-- On `y² = x³ + 7` over `ℤ/7` the point `(0, 0)` is on the curve, keeps its parity under
-    negation and has order two. -/
-theorem Weierstrass.two_torsion_mod7_kat :
-    (⟨7, 0, 7⟩ : Weierstrass.Curve).OnCurve (some (0, 0)) ∧
-    Weierstrass.Point.yOdd ((⟨7, 0, 7⟩ : Weierstrass.Curve).neg (some (0, 0))) =
-      Weierstrass.Point.yOdd (some (0, 0)) ∧
-    (⟨7, 0, 7⟩ : Weierstrass.Curve).smul 2 (some (0, 0)) = none := by decide
-
-/-- The Carmichael number `561` passes the base-2 Fermat test and fails the Pratt step. -/
-theorem prattStep_carmichael_561_kat :
-    lucasPowMod 384 2 560 561 = 1 ∧
-    checkPrattStep [2, 3, 5, 7] ⟨561, 2, [(2, 4), (5, 1), (7, 1)]⟩ = false := by
-  constructor <;> decide +kernel
-
-/-- The 3-torsion point `(0, 2)` of `y² = x³ + 4` over the BLS12-381 base field. -/
-theorem bls381_torsion3_kat :
-    bls381Curve.onCurve (some (0, 2)) = true ∧
-    isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj (some (0, 2))) 3) = true ∧
-    isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj (some (0, 2))) r_bls381) = false := by
-  refine ⟨?_, ?_, ?_⟩ <;> decide +kernel
+#verify_constructive
+  Qsag.curve_orders_match_le_limbs_and_bounds
+  Qsag.TaprootCurveProjection.compressed_injective
+  Qsag.TaprootCurveProjection.sameX_iff_canonical
+  Qsag.taproot_even_y_parity_restores_canonical_injectivity
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  Qsag.Weierstrass.secp7Mod43_group
+  Qsag.slip0010_ed25519_clamped_canonical_nonzero
+  Qsag.pallas_and_bls381_limbs_and_bit_bounds
+  Qsag.checkPrattStep_sound
+  Qsag.checkPrattDAG_sound
+  Qsag.p_pallas_isPrime
+  Qsag.q_pallas_isPrime
+  Qsag.r_bls381_isPrime
+  Qsag.p_bls381_isPrime
+  Qsag.orchardSpendAuthG_onCurve_and_prime_subgroup_order
+  Qsag.bls381G1_onCurve_and_prime_subgroup_order
+  Qsag.SwCurve.onCurve_of_OnCurve
 
 end Qsag
-
-end
