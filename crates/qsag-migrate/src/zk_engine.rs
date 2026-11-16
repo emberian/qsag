@@ -646,13 +646,13 @@ pub(crate) const COZK_REP_MAGIC_V4: [u8; 8] = *b"COZKRP04";
 pub(crate) const MAX_COZK_CUSTODIANS: usize = 64;
 
 /// Fast public-seed SHAKE256 tape reader used only on publicly opened verifier sub-seeds.
-struct PublicTape {
+pub(crate) struct PublicTape {
     sponge: Shake256,
     bit_buf: u64,
     bit_rem: u8,
 }
 impl PublicTape {
-    fn new(seed: &[u8; 32]) -> Self {
+    pub(crate) fn new(seed: &[u8; 32]) -> Self {
         let mut sponge = Shake256::new();
         sponge.absorb(b"QSAG.MIGRATE.TAPE.V3");
         sponge.absorb(seed);
@@ -664,7 +664,7 @@ impl PublicTape {
         }
     }
     #[inline]
-    fn sample(&mut self, d: Domain) -> Value {
+    pub(crate) fn sample(&mut self, d: Domain) -> Value {
         if d == Domain::Bit {
             if self.bit_rem == 0 {
                 let mut raw = [0u8; 8];
@@ -940,10 +940,10 @@ impl<'a> BitPackedReader<'a> {
 }
 
 pub(crate) fn is_cozk_proof(proof: &MigrationZkProof) -> bool {
-    proof
-        .repetitions
-        .first()
-        .is_some_and(|r| r.pair[0].inputs.starts_with(&COZK_VIEW_MAGIC_V4) || r.pair[0].inputs.starts_with(&COZK_VIEW_MAGIC_V5))
+    proof.repetitions.first().is_some_and(|r| {
+        r.pair[0].inputs.starts_with(&COZK_VIEW_MAGIC_V4)
+            || r.pair[0].inputs.starts_with(&COZK_VIEW_MAGIC_V5)
+    })
 }
 
 pub(crate) fn encode_cozk_v4_inputs(
@@ -961,7 +961,10 @@ pub(crate) fn encode_cozk_v4_inputs(
     (subseeds[0], inputs)
 }
 
-pub(crate) fn encode_cozk_v5_inputs(subseeds: &[[u8; 32]], head_inputs: &[u8]) -> ([u8; 32], Vec<u8>) {
+pub(crate) fn encode_cozk_v5_inputs(
+    subseeds: &[[u8; 32]],
+    head_inputs: &[u8],
+) -> ([u8; 32], Vec<u8>) {
     let (seed, mut input) = encode_cozk_v4_inputs(subseeds, head_inputs);
     input[..8].copy_from_slice(&COZK_VIEW_MAGIC_V5);
     (seed, input)
@@ -970,7 +973,9 @@ pub(crate) fn encode_cozk_v5_inputs(subseeds: &[[u8; 32]], head_inputs: &[u8]) -
 pub(crate) fn parse_cozk_v4_inputs(
     view: &PartyView,
 ) -> Result<(Vec<[u8; 32]>, &[u8]), MigrateError> {
-    if view.inputs.len() < 9 || (view.inputs[..8] != COZK_VIEW_MAGIC_V4 && view.inputs[..8] != COZK_VIEW_MAGIC_V5) {
+    if view.inputs.len() < 9
+        || (view.inputs[..8] != COZK_VIEW_MAGIC_V4 && view.inputs[..8] != COZK_VIEW_MAGIC_V5)
+    {
         return Err(MigrateError::MalformedProofStructure);
     }
     let m = usize::from(view.inputs[8]);
@@ -999,11 +1004,20 @@ pub(crate) fn rep_root_cozk_v4(
     rep_root_cozk(&COZK_REP_MAGIC_V4, rep, commits, outputs)
 }
 
-pub(crate) fn rep_root_cozk_v5(rep: usize, commits: &[[u8; 32]; 3], outputs: [&[u8]; 3]) -> [u8; 32] {
+pub(crate) fn rep_root_cozk_v5(
+    rep: usize,
+    commits: &[[u8; 32]; 3],
+    outputs: [&[u8]; 3],
+) -> [u8; 32] {
     rep_root_cozk(&COZK_REP_MAGIC_V5, rep, commits, outputs)
 }
 
-fn rep_root_cozk(magic: &[u8; 8], rep: usize, commits: &[[u8; 32]; 3], outputs: [&[u8]; 3]) -> [u8; 32] {
+fn rep_root_cozk(
+    magic: &[u8; 8],
+    rep: usize,
+    commits: &[[u8; 32]; 3],
+    outputs: [&[u8]; 3],
+) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.MIGRATE.REPETITION.V3",
         &[
@@ -1200,9 +1214,19 @@ pub(crate) fn verify_cozk_v4_proof_body(
     circuit: &Circuit,
     proof: &MigrationZkProof,
 ) -> Result<(), MigrateError> {
-    let v5 = proof.repetitions[0].pair[0].inputs.starts_with(&COZK_VIEW_MAGIC_V5);
-    let magic = if v5 { &COZK_VIEW_MAGIC_V5 } else { &COZK_VIEW_MAGIC_V4 };
-    if proof.repetitions.iter().any(|r| r.pair.iter().any(|v| !v.inputs.starts_with(magic))) {
+    let v5 = proof.repetitions[0].pair[0]
+        .inputs
+        .starts_with(&COZK_VIEW_MAGIC_V5);
+    let magic = if v5 {
+        &COZK_VIEW_MAGIC_V5
+    } else {
+        &COZK_VIEW_MAGIC_V4
+    };
+    if proof
+        .repetitions
+        .iter()
+        .any(|r| r.pair.iter().any(|v| !v.inputs.starts_with(magic)))
+    {
         return Err(MigrateError::MalformedProofStructure);
     }
     let (first_subseeds, _) = parse_cozk_v4_inputs(&proof.repetitions[0].pair[0])?;
@@ -1267,7 +1291,11 @@ pub(crate) fn verify_cozk_v4_proof_body(
             outputs: &view.pair[1].outputs,
         });
     }
-    let opened_commits = if v5 { crate::batch_hash::commit_cozk_v5_indexed(&indexed) } else { crate::batch_hash::commit_cozk_v4_indexed(&indexed) };
+    let opened_commits = if v5 {
+        crate::batch_hash::commit_cozk_v5_indexed(&indexed, &crate::batch_hash::CozkViewLayout::new(circuit))?
+    } else {
+        crate::batch_hash::commit_cozk_v4_indexed(&indexed)
+    };
     drop(indexed);
     for (mut s0, mut s1, mut rp0, _) in replayed {
         for s in &mut s0 {
@@ -1290,7 +1318,11 @@ pub(crate) fn verify_cozk_v4_proof_body(
         outs[e] = &view.pair[0].outputs;
         outs[(e + 1) % 3] = &view.pair[1].outputs;
         outs[(e + 2) % 3] = &view.hidden_outputs;
-        if v5 { rep_root_cozk_v5(rep, &commits, outs) } else { rep_root_cozk_v4(rep, &commits, outs) }
+        if v5 {
+            rep_root_cozk_v5(rep, &commits, outs)
+        } else {
+            rep_root_cozk_v4(rep, &commits, outs)
+        }
     })
     .into_iter()
     .flatten()
@@ -1658,76 +1690,95 @@ pub(crate) mod tests {
     #[test]
     fn cozk_v4_full_profile_replay_rejects_tampered_bindings_and_padding() {
         for v5 in [false, true] {
-        let builder = crate::circuit::Builder::default();
-        let bit = builder.input(1);
-        for d in Domain::ALL_FIELDS {
-            let x = builder.lift(bit, d);
-            let product = builder.mul(x, builder.small(d, 27));
-            builder.output(builder.sub(product, builder.small(d, 27)));
-        }
-        let circuit = builder.finish();
-        let mut roots = Vec::with_capacity(32 * MIT_REPETITIONS);
-        let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
-        for rep in 0..MIT_REPETITIONS {
-            let seeds = core::array::from_fn(|h| {
-                (0..3)
-                    .map(|p| {
-                        cshake256_framed_32(
-                            b"QSAG.TEST.COZK.V4",
-                            &[&(rep as u64).to_le_bytes(), &[h as u8, p]],
-                        )
-                    })
-                    .collect()
-            });
-            let mut views = simulate_cozk_v4(&circuit, &seeds);
-            if v5 { for v in &mut views { v.inputs[..8].copy_from_slice(&COZK_VIEW_MAGIC_V5); } }
-            let commits = core::array::from_fn(|h| {
-                if v5 {
-                    let (subseeds, input) = parse_cozk_v4_inputs(&views[h]).unwrap();
-                    crate::batch_hash::commit_cozk_v5_indexed(&[crate::batch_hash::CozkIndexedView { rep, head: h, subseeds, head_inputs: input, products: &views[h].products, outputs: &views[h].outputs }])[0]
-                } else { commit_cozk_v4(rep, h, &views[h]) }
-            });
-            roots.extend_from_slice(&rep_root_cozk(
-                if v5 { &COZK_REP_MAGIC_V5 } else { &COZK_REP_MAGIC_V4 },
-                rep,
-                &commits,
-                views.each_ref().map(|v| v.outputs.as_slice()),
-            ));
-            let e = rep % 3;
-            let mut pair = [views[e].clone(), views[(e + 1) % 3].clone()];
-            pair[0].products.clear();
-            repetitions.push(OpenedRepetitionView {
-                opened_e: e as u8,
-                pair,
-                hidden_party_commit: commits[(e + 2) % 3],
-                hidden_outputs: views[(e + 2) % 3].outputs.clone(),
-            });
-        }
-        let proof = MigrationZkProof {
-            views_merkle_root: cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]),
-            repetitions,
-        };
-        assert_eq!(verify_cozk_v4_proof_body(&circuit, &proof), Ok(()));
-        for mutation in 0..10 {
-            let mut changed = proof.clone();
-            let r = &mut changed.repetitions[1]; // opens virtual heads 1 and 2
-            match mutation {
-                0 => r.pair[0].seed[0] ^= 1,
-                1 => r.pair[0].inputs[9] ^= 1, // another custodian's sub-seed
-                2 => *r.pair[1].inputs.last_mut().unwrap() ^= 0x80, // nonzero input padding
-                3 => r.pair[1].products[0] ^= 1,
-                4 => r.pair[0].outputs[0] ^= 1,
-                5 => r.hidden_party_commit[0] ^= 1,
-                6 => r.hidden_outputs[0] ^= 1,
-                7 => r.pair[0].inputs[8] = 0, // invalid quorum framing
-                8 => r.pair[0].products.push(0),
-                _ => r.pair[0].inputs[7] = if v5 { b'4' } else { b'5' }, // first products must be reconstructed
+            let builder = crate::circuit::Builder::default();
+            let bit = builder.input(1);
+            for d in Domain::ALL_FIELDS {
+                let x = builder.lift(bit, d);
+                let product = builder.mul(x, builder.small(d, 27));
+                builder.output(builder.sub(product, builder.small(d, 27)));
             }
-            assert!(
-                verify_cozk_v4_proof_body(&circuit, &changed).is_err(),
-                "mutation {mutation}"
-            );
-        }
+            let circuit = builder.finish();
+            let mut roots = Vec::with_capacity(32 * MIT_REPETITIONS);
+            let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
+            for rep in 0..MIT_REPETITIONS {
+                let seeds = core::array::from_fn(|h| {
+                    (0..3)
+                        .map(|p| {
+                            cshake256_framed_32(
+                                b"QSAG.TEST.COZK.V4",
+                                &[&(rep as u64).to_le_bytes(), &[h as u8, p]],
+                            )
+                        })
+                        .collect()
+                });
+                let mut views = simulate_cozk_v4(&circuit, &seeds);
+                if v5 {
+                    for v in &mut views {
+                        v.inputs[..8].copy_from_slice(&COZK_VIEW_MAGIC_V5);
+                    }
+                }
+                let commits = core::array::from_fn(|h| {
+                    if v5 {
+                        let (subseeds, input) = parse_cozk_v4_inputs(&views[h]).unwrap();
+                        crate::batch_hash::commit_cozk_v5_indexed(&[
+                            crate::batch_hash::CozkIndexedView {
+                                rep,
+                                head: h,
+                                subseeds,
+                                head_inputs: input,
+                                products: &views[h].products,
+                                outputs: &views[h].outputs,
+                            },
+                        ], &crate::batch_hash::CozkViewLayout::new(&circuit)).unwrap()[0]
+                    } else {
+                        commit_cozk_v4(rep, h, &views[h])
+                    }
+                });
+                roots.extend_from_slice(&rep_root_cozk(
+                    if v5 {
+                        &COZK_REP_MAGIC_V5
+                    } else {
+                        &COZK_REP_MAGIC_V4
+                    },
+                    rep,
+                    &commits,
+                    views.each_ref().map(|v| v.outputs.as_slice()),
+                ));
+                let e = rep % 3;
+                let mut pair = [views[e].clone(), views[(e + 1) % 3].clone()];
+                pair[0].products.clear();
+                repetitions.push(OpenedRepetitionView {
+                    opened_e: e as u8,
+                    pair,
+                    hidden_party_commit: commits[(e + 2) % 3],
+                    hidden_outputs: views[(e + 2) % 3].outputs.clone(),
+                });
+            }
+            let proof = MigrationZkProof {
+                views_merkle_root: cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]),
+                repetitions,
+            };
+            assert_eq!(verify_cozk_v4_proof_body(&circuit, &proof), Ok(()));
+            for mutation in 0..10 {
+                let mut changed = proof.clone();
+                let r = &mut changed.repetitions[1]; // opens virtual heads 1 and 2
+                match mutation {
+                    0 => r.pair[0].seed[0] ^= 1,
+                    1 => r.pair[0].inputs[9] ^= 1, // another custodian's sub-seed
+                    2 => *r.pair[1].inputs.last_mut().unwrap() ^= 0x80, // nonzero input padding
+                    3 => r.pair[1].products[0] ^= 1,
+                    4 => r.pair[0].outputs[0] ^= 1,
+                    5 => r.hidden_party_commit[0] ^= 1,
+                    6 => r.hidden_outputs[0] ^= 1,
+                    7 => r.pair[0].inputs[8] = 0, // invalid quorum framing
+                    8 => r.pair[0].products.push(0),
+                    _ => r.pair[0].inputs[7] = if v5 { b'4' } else { b'5' }, // first products must be reconstructed
+                }
+                assert!(
+                    verify_cozk_v4_proof_body(&circuit, &changed).is_err(),
+                    "mutation {mutation}"
+                );
+            }
         }
     }
 
