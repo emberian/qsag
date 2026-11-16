@@ -1,0 +1,46 @@
+# QSAG-NI-180 overrides for the wafer.space gf180mcu project template (loaded after
+# slots/slot_0p5x0p5.yaml, macros/macros_qsag.yaml and config.yaml). The padring, the die and
+# core areas and the ID macros are the template's and are not changed here.
+
+VERILOG_FILES:
+- dir::../src/chip_top.sv
+- dir::../src/chip_core.sv
+- dir::../rtl/qsag_cells.sv
+- dir::../rtl/qsag_gl64_karatsuba_csa.sv
+- dir::../rtl/qsag_p2_rc.sv
+- dir::../rtl/qsag_sponge.sv
+- dir::../rtl/qsag_keccak_serial.sv
+- dir::../rtl/qsag_gf128_clmul.sv
+- dir::../rtl/qsag_field_engine.sv
+- dir::../rtl/qsag_wire_engine.sv
+- dir::../rtl/qsag_async_fifo_gray.sv
+- dir::../rtl/qsag_muller_c.sv
+- dir::../rtl/qsag_anchor_spi.sv
+- dir::../rtl/qsag_trng.sv
+- dir::../rtl/qsag_gals_clk_rst.sv
+- dir::../rtl/qsag_io_shell.sv
+
+# technology view of the cell wrappers (explicit delay / clock / C-element cells, clock gates)
+VERILOG_DEFINES: ["SLOT_0P5X0P5", "QSAG_GF180_CELLS", "QSAG_ICG"]
+
+# Synthesis
+SYNTH_STRATEGY: AREA 0
+SYNTH_MUL_BOOTH: True
+# ring oscillators and the C-element are intentional combinational loops
+ERROR_ON_SYNTH_CHECKS: False
+
+# Timing: core clock (clk_pad in bypass, DCRO otherwise); the other clocks are in the SDC
+CLOCK_PERIOD: 20
+PNR_SDC_FILE: dir::chip_top_qsag.sdc
+SIGNOFF_SDC_FILE: dir::chip_top_qsag.sdc
+FALLBACK_SDC: dir::chip_top_qsag.sdc
+
+# Placement
+PL_TARGET_DENSITY_PCT: 62
+
+# The delay lines, replica path, oscillators, clock multiplexers and the C-element stage are
+# sized by hand: the resizer must not buffer, resize or clone them.
+RSZ_DONT_TOUCH_RX: "u_dcro\\.(u_nand|g_stage|g_and|g_or|u_f)|u_trcp\\.g_st|u_(fast|slow)\\.g_st|u_mp\\.(u_c|u_d|u_b|u_cn|u_nt)|u_clk\\.u_mux\\.u_(ga|gb|o|ia|ib)"
+
+# PDN without macro grids
+PDN_CFG: dir::pdn/pdn_cfg_qsag.tcl

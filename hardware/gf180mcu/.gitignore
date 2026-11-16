@@ -7,3 +7,11 @@ final/
 img/
 *.lyrdb
 generated_defines.svh
+build/
+
+# Routed artifacts stay on the build host; retain concise text reports only.
+*.gds
+*.gds.gz
+*.odb
+*.spef
+*.spef.gz

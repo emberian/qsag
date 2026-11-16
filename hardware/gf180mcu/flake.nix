@@ -55,6 +55,12 @@
               gnumake
               gnugrep
               gawk
+              gnused
+              coreutils
+              findutils
+              ripgrep
+              gcc
+              z3
 
               # Simulation
               iverilog
