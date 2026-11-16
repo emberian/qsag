@@ -27,13 +27,40 @@ Layer-0 ideal specification for standalone and one-time-epoch-stateful digital s
    `Protocol.Signing.ExecEufCmaClosedGame` bounds the forgery probability by the probabilities
    of three extractor events on the same run; those event probabilities are not bounded by
    anything proved in this library.
-7. Corruption scope: one signer, honest for the whole run. There is no corruption or
-   key-exposure input, so nothing here speaks about behaviour after a key compromise. The ideal
-   state `IdealSignState PK Sig` has no secret-key component, and the only values the interface
-   returns are of type `Sig`. In the refinement the secret key is a parameter of
-   `latchedSignerMachine`, and every value that machine returns is the output of `S.sign sk` on
-   the admitted request (`latchedSigner_output_is_sign`); what `S.sign` itself reveals about
-   `sk` is a property of the scheme, not of this functionality.
+7. Corruption. `idealSignMachine` has one signer and no corruption or key-exposure input.
+   `idealSignCorruptibleMachine` is the functionality with adaptive key exposure: the same
+   state plus a `corrupted` flag and an injected log, with inputs `.sign` (the transition of
+   `idealSignMachine` on the inner state, in every state), `.corrupt` (always accepted, sets
+   the flag, which nothing clears) and `.inject req sig` (accepted exactly when the flag is
+   set and `S.verify enrolledPk req.message sig` holds; the epoch latch is not consulted).
+   - `idealSignMachine` is its corruption-free fragment: a run that ends uncorrupted accepted
+     only `.sign` events and is, event for event, a run of `idealSignMachine`
+     (`idealSignCorruptibleMachine_uncorrupted_trace_is_ideal`), every run of
+     `idealSignMachine` is such a run (`idealSignMachine_trace_lifts_corruptible`), and the
+     two machines admit the same honest traces (`idealSignCorruptibleMachine_admits_honest_iff`).
+   - In every run the inner state follows `idealSignMachine` on the `.sign` events
+     (`idealSignCorruptibleMachine_trace_inner`), the flag is monotone
+     (`idealSignCorruptibleMachine_trace_corrupted_mono`), the key and mode are fixed, and
+     every emitted signature, signed or injected, verifies under the enrolled key
+     (`idealSignCorruptibleMachine_trace_emitted_verified`).
+   - A run that ends uncorrupted has the guarantees of item 4 and a signed log equal to its
+     outputs (`idealSignCorruptibleMachine_uncorrupted_trace_safe`). A corrupted run does
+     not: an injected signature may reuse a consumed epoch
+     (`idealSignCorruptible_corrupted_run_reuses_epoch`).
+   - Forgery is measured against both logs (`CorruptibleEufCmaForgery`,
+     `CorruptibleSufCmaForgery`): a forgery is a verifying pair never emitted, signed or
+     injected (`idealSignCorruptibleMachine_eufCmaForgery_iff`). After corruption every
+     verifying pair can be emitted by one `.inject`
+     (`idealSignCorruptibleMachine_corrupted_absorbs_forgery`), so the functionality promises
+     nothing about unforgeability from that point on.
+   Neither ideal state has a secret-key component and no output carries key material. In the
+   refinement the secret key is a parameter of `latchedSignerMachine`, and every value that
+   machine returns is the output of `S.sign sk` on the admitted request
+   (`latchedSigner_output_is_sign`); what `S.sign` itself reveals about `sk` is a property of
+   the scheme. Gap: only the corruption-free fragment is refined by a real machine
+   (`latchedSigner_refines_ideal`). No machine with a key-reveal output is shown to refine the
+   behaviour after `.corrupt`; `Refines` demands equal outputs on equal inputs and cannot
+   express a simulator that turns a revealed key into `.inject` inputs.
 -/
 
 public import Qsag.Spec.Primitives
@@ -829,6 +856,869 @@ theorem idealSign_unsigned_message_is_forgery :
   refine ⟨?_, rfl⟩
   decide
 
+/-! ## Adaptive corruption
+
+`idealSignCorruptibleMachine` extends `idealSignMachine` with a corruption input and an
+adversarial injection input. Its state is the ideal state, a `corrupted` flag and the log of
+injected signatures. -/
+
+/-- Inputs of the corruptible signing functionality: an honest signing request, the corruption
+    of the signer, and a signature supplied by the adversary for a request of its choice. -/
+inductive SignCommand (Sig : Type) where
+  | sign (req : SignRequest)
+  | corrupt
+  | inject (req : SignRequest) (sig : Sig)
+
+/-- Outputs of the corruptible signing functionality: an emitted signature (signed or
+    injected), or the acknowledgement of a corruption. No output carries key material. -/
+inductive SignReply (Sig : Type) where
+  | signature (sig : Sig)
+  | corrupted
+
+/-- State of the corruptible functionality: the state of `idealSignMachine`, the corruption
+    flag, and the injected `(epoch, message, signature)` triples, newest first, kept apart from
+    `inner.signedLog`. -/
+structure CorruptibleSignState (PK Sig : Type) where
+  inner : IdealSignState PK Sig
+  corrupted : Bool
+  injectedLog : List (Nat × Bytes × Sig)
+
+/-- Initial state: the empty ideal state, uncorrupted, nothing injected. -/
+@[expose] def CorruptibleSignState.empty {PK Sig : Type} (pk : PK) (stateful : Bool) :
+    CorruptibleSignState PK Sig :=
+  { inner := IdealSignState.empty pk stateful, corrupted := false, injectedLog := [] }
+
+/-- **Ideal signing functionality with adaptive key exposure.**
+
+    `.sign req` runs `idealSignMachine` on `inner` in every state, corrupted or not: same
+    acceptance, same output, same `errStep` (an admissible epoch whose signing failed is
+    consumed). `.corrupt` is always accepted and sets `corrupted`; nothing clears the flag.
+    `.inject req sig` is accepted exactly when `corrupted = true` and
+    `S.verify inner.enrolledPk req.message sig = true`; it does not consult the epoch latch and
+    does not move it, and it appends the triple to `injectedLog`. A rejected `.inject` leaves
+    the state unchanged.
+
+    This is the ideal view of a key exposure: after `.corrupt` the adversary may have the
+    interface emit any signature the verifier accepts, at any epoch. The state has no secret
+    key and no output carries key material. No machine with a key-reveal output is shown to
+    refine the behaviour after `.corrupt`: `Refines` demands equal outputs on equal inputs and
+    cannot express a simulator that turns a revealed key into `.inject` inputs. -/
+@[expose] def idealSignCorruptibleMachine {PK SK Sig : Type} (S : SigScheme PK SK Sig)
+    (pk₀ : PK) (stateful₀ : Bool) (maxWindow : Nat) (oracleSign : SignRequest → Option Sig) :
+    Machine (CorruptibleSignState PK Sig) (SignCommand Sig) (SignReply Sig) where
+  Init st := st = CorruptibleSignState.empty pk₀ stateful₀
+  step st cmd :=
+    match cmd with
+    | .sign req =>
+      ((idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req).map
+        (fun p => ({ st with inner := p.1 }, SignReply.signature p.2))
+    | .corrupt => some ({ st with corrupted := true }, SignReply.corrupted)
+    | .inject req sig =>
+      if (st.corrupted && S.verify st.inner.enrolledPk req.message sig) = true then
+        some ({ st with injectedLog := (req.epoch, req.message, sig) :: st.injectedLog },
+          SignReply.signature sig)
+      else none
+  errStep st cmd :=
+    match cmd with
+    | .sign req =>
+      { st with
+        inner := (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st.inner req }
+    | .corrupt => st
+    | .inject _ _ => st
+
+/-- The event of the corruptible machine in which the honest interface emits `p.2` on `p.1`. -/
+@[expose] def honestSignEvent {Sig : Type} (p : SignRequest × Sig) :
+    SignCommand Sig × SignReply Sig :=
+  (SignCommand.sign p.1, SignReply.signature p.2)
+
+/-- The accepted `.sign` events of a trace, in order. -/
+@[expose] def signedEvents {Sig : Type} :
+    List (SignCommand Sig × SignReply Sig) → List (SignRequest × Sig)
+  | [] => []
+  | (.sign req, .signature sig) :: rest => (req, sig) :: signedEvents rest
+  | (.sign _, .corrupted) :: rest => signedEvents rest
+  | (.corrupt, _) :: rest => signedEvents rest
+  | (.inject _ _, _) :: rest => signedEvents rest
+
+/-- The accepted `.inject` events of a trace, in order. -/
+def injectedEvents {Sig : Type} :
+    List (SignCommand Sig × SignReply Sig) → List (SignRequest × Sig)
+  | [] => []
+  | (.inject req _, .signature sig) :: rest => (req, sig) :: injectedEvents rest
+  | (.inject _ _, .corrupted) :: rest => injectedEvents rest
+  | (.corrupt, _) :: rest => injectedEvents rest
+  | (.sign _, _) :: rest => injectedEvents rest
+
+/-- Every signature a trace emitted, signed or injected, with its request, in order. -/
+@[expose] def emittedEvents {Sig : Type} :
+    List (SignCommand Sig × SignReply Sig) → List (SignRequest × Sig)
+  | [] => []
+  | (.sign req, .signature sig) :: rest => (req, sig) :: emittedEvents rest
+  | (.inject req _, .signature sig) :: rest => (req, sig) :: emittedEvents rest
+  | (.sign _, .corrupted) :: rest => emittedEvents rest
+  | (.inject _ _, .corrupted) :: rest => emittedEvents rest
+  | (.corrupt, _) :: rest => emittedEvents rest
+
+theorem signedEvents_map_honest {Sig : Type} (l : List (SignRequest × Sig)) :
+    signedEvents (l.map honestSignEvent) = l := by
+  induction l with
+  | nil => rfl
+  | cons p l ih =>
+    show p :: signedEvents (l.map honestSignEvent) = p :: l
+    rw [ih]
+
+theorem emittedEvents_map_honest {Sig : Type} (l : List (SignRequest × Sig)) :
+    emittedEvents (l.map honestSignEvent) = l := by
+  induction l with
+  | nil => rfl
+  | cons p l ih =>
+    show p :: emittedEvents (l.map honestSignEvent) = p :: l
+    rw [ih]
+
+theorem injectedEvents_map_honest {Sig : Type} (l : List (SignRequest × Sig)) :
+    injectedEvents (l.map honestSignEvent) = [] := by
+  induction l with
+  | nil => rfl
+  | cons p l ih => exact ih
+
+/-- An accepted `.inject` at the head of a trace is the first injected event. -/
+theorem injectedEvents_cons_inject {Sig : Type} (req : SignRequest) (sig sig' : Sig)
+    (rest : List (SignCommand Sig × SignReply Sig)) :
+    injectedEvents ((SignCommand.inject req sig', SignReply.signature sig) :: rest) =
+      (req, sig) :: injectedEvents rest := by
+  rfl
+
+/-- The emitted signatures of a trace are its signed ones and its injected ones. -/
+theorem mem_emittedEvents {Sig : Type} {p : SignRequest × Sig} :
+    ∀ {tr : List (SignCommand Sig × SignReply Sig)},
+      p ∈ emittedEvents tr ↔ (p ∈ signedEvents tr ∨ p ∈ injectedEvents tr)
+  | [] => ⟨fun h => .inl h, fun h => h.elim id id⟩
+  | (.sign req, .signature sig) :: rest => by
+    have ih := mem_emittedEvents (p := p) (tr := rest)
+    show p ∈ (req, sig) :: emittedEvents rest ↔
+      (p ∈ (req, sig) :: signedEvents rest ∨ p ∈ injectedEvents rest)
+    constructor
+    · intro h
+      rcases List.mem_cons.mp h with hH | hT
+      · exact .inl (List.mem_cons.mpr (.inl hH))
+      · rcases ih.mp hT with h1 | h1
+        · exact .inl (List.mem_cons_of_mem _ h1)
+        · exact .inr h1
+    · intro h
+      rcases h with h1 | h1
+      · rcases List.mem_cons.mp h1 with hH | hT
+        · exact List.mem_cons.mpr (.inl hH)
+        · exact List.mem_cons_of_mem _ (ih.mpr (.inl hT))
+      · exact List.mem_cons_of_mem _ (ih.mpr (.inr h1))
+  | (.inject req _, .signature sig) :: rest => by
+    have ih := mem_emittedEvents (p := p) (tr := rest)
+    show p ∈ (req, sig) :: emittedEvents rest ↔
+      (p ∈ signedEvents rest ∨ p ∈ (req, sig) :: injectedEvents rest)
+    constructor
+    · intro h
+      rcases List.mem_cons.mp h with hH | hT
+      · exact .inr (List.mem_cons.mpr (.inl hH))
+      · rcases ih.mp hT with h1 | h1
+        · exact .inl h1
+        · exact .inr (List.mem_cons_of_mem _ h1)
+    · intro h
+      rcases h with h1 | h1
+      · exact List.mem_cons_of_mem _ (ih.mpr (.inl h1))
+      · rcases List.mem_cons.mp h1 with hH | hT
+        · exact List.mem_cons.mpr (.inl hH)
+        · exact List.mem_cons_of_mem _ (ih.mpr (.inr hT))
+  | (.sign _, .corrupted) :: rest => mem_emittedEvents (p := p) (tr := rest)
+  | (.inject _ _, .corrupted) :: rest => mem_emittedEvents (p := p) (tr := rest)
+  | (.corrupt, _) :: rest => mem_emittedEvents (p := p) (tr := rest)
+
+private theorem validTrace_snoc {St In Out : Type} {M : Machine St In Out} :
+    ∀ {s s' s'' : St} {tr : List (In × Out)} {inp : In} {out : Out},
+      M.ValidTrace s tr s' → M.step s' inp = some (s'', out) →
+      M.ValidTrace s (tr ++ [(inp, out)]) s''
+  | _, _, _, _, _, _, .nil _, hStep => .accept hStep (.nil _)
+  | _, _, _, _, _, _, .accept h hRest, hStep => .accept h (validTrace_snoc hRest hStep)
+  | _, _, _, _, _, _, .reject i h hRest, hStep => .reject i h (validTrace_snoc hRest hStep)
+
+section Corruptible
+variable {PK SK Sig : Type} {S : SigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool}
+  {maxWindow : Nat} {oracleSign : SignRequest → Option Sig}
+
+/-! ### One step -/
+
+/-- An accepted `.sign` is an accepted request of `idealSignMachine` on the inner state, with
+    the same output; the flag and the injected log are untouched. -/
+theorem idealSignCorruptibleMachine_sign_step_some {st st' : CorruptibleSignState PK Sig}
+    {req : SignRequest} {out : SignReply Sig}
+    (h : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st
+      (.sign req) = some (st', out)) :
+    ∃ (inner' : IdealSignState PK Sig) (sig : Sig),
+      (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req =
+        some (inner', sig) ∧
+      st' = { st with inner := inner' } ∧ out = SignReply.signature sig := by
+  have h' : ((idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req).map
+      (fun p => (({ st with inner := p.1 } : CorruptibleSignState PK Sig),
+        SignReply.signature p.2)) = some (st', out) := h
+  obtain ⟨p, hP, hPair⟩ := signMapSome h'
+  exact ⟨p.1, p.2, hP, (congrArg Prod.fst hPair).symm, (congrArg Prod.snd hPair).symm⟩
+
+/-- A request `idealSignMachine` accepts on the inner state is accepted as `.sign`, in every
+    state. -/
+theorem idealSignCorruptibleMachine_sign_step_of_ideal {st : CorruptibleSignState PK Sig}
+    {req : SignRequest} {inner' : IdealSignState PK Sig} {sig : Sig}
+    (h : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req =
+      some (inner', sig)) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st (.sign req) =
+      some ({ st with inner := inner' }, SignReply.signature sig) := by
+  show ((idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req).map
+      (fun p => (({ st with inner := p.1 } : CorruptibleSignState PK Sig),
+        SignReply.signature p.2)) = some ({ st with inner := inner' }, SignReply.signature sig)
+  rw [h]
+  rfl
+
+/-- `.sign` is rejected exactly when `idealSignMachine` rejects the request on the inner
+    state. -/
+theorem idealSignCorruptibleMachine_sign_step_none_iff {st : CorruptibleSignState PK Sig}
+    {req : SignRequest} :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st (.sign req) =
+      none ↔
+    (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req = none := by
+  constructor
+  · intro h
+    cases hI : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req with
+    | none => rfl
+    | some p =>
+      obtain ⟨inner', sig⟩ := p
+      rw [idealSignCorruptibleMachine_sign_step_of_ideal hI] at h
+      cases h
+  · intro h
+    show ((idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st.inner req).map
+      (fun p => (({ st with inner := p.1 } : CorruptibleSignState PK Sig),
+        SignReply.signature p.2)) = none
+    rw [h]
+    rfl
+
+/-- A rejected `.sign` updates the inner state as `idealSignMachine` does on a rejection. -/
+theorem idealSignCorruptibleMachine_sign_errStep (st : CorruptibleSignState PK Sig)
+    (req : SignRequest) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st (.sign req) =
+      { st with
+        inner := (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st.inner req } :=
+  by
+  rfl
+
+/-- `.corrupt` is accepted in every state and sets the flag. -/
+theorem idealSignCorruptibleMachine_corrupt_step (st : CorruptibleSignState PK Sig) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st .corrupt =
+      some ({ st with corrupted := true }, SignReply.corrupted) := by
+  rfl
+
+theorem idealSignCorruptibleMachine_corrupt_step_some {st st' : CorruptibleSignState PK Sig}
+    {out : SignReply Sig}
+    (h : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st .corrupt =
+      some (st', out)) :
+    st' = { st with corrupted := true } ∧ out = SignReply.corrupted := by
+  rw [idealSignCorruptibleMachine_corrupt_step] at h
+  have hPair := Option.some.inj h
+  exact ⟨(congrArg Prod.fst hPair).symm, (congrArg Prod.snd hPair).symm⟩
+
+/-- **An accepted `.inject` happens in a corrupted state and carries a signature the verifier
+    accepts under the enrolled key.** It changes only the injected log. -/
+theorem idealSignCorruptibleMachine_inject_step_some {st st' : CorruptibleSignState PK Sig}
+    {req : SignRequest} {sig : Sig} {out : SignReply Sig}
+    (h : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st
+      (.inject req sig) = some (st', out)) :
+    st.corrupted = true ∧ S.verify st.inner.enrolledPk req.message sig = true ∧
+    st' = { st with injectedLog := (req.epoch, req.message, sig) :: st.injectedLog } ∧
+    out = SignReply.signature sig := by
+  have h' : (if (st.corrupted && S.verify st.inner.enrolledPk req.message sig) = true then
+      some (({ st with injectedLog := (req.epoch, req.message, sig) :: st.injectedLog } :
+        CorruptibleSignState PK Sig), SignReply.signature sig)
+      else none) = some (st', out) := h
+  obtain ⟨hC, hEq⟩ := signIteSome h'
+  obtain ⟨hc, hv⟩ := signAndSplit hC
+  have hPair := Option.some.inj hEq
+  exact ⟨hc, hv, (congrArg Prod.fst hPair).symm, (congrArg Prod.snd hPair).symm⟩
+
+/-- **After corruption every verifying signature can be emitted**, for any request: the epoch
+    latch is not consulted. -/
+theorem idealSignCorruptibleMachine_inject_step_of_corrupted
+    {st : CorruptibleSignState PK Sig} {req : SignRequest} {sig : Sig}
+    (hC : st.corrupted = true) (hV : S.verify st.inner.enrolledPk req.message sig = true) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st
+      (.inject req sig) =
+      some ({ st with injectedLog := (req.epoch, req.message, sig) :: st.injectedLog },
+        SignReply.signature sig) := by
+  show (if (st.corrupted && S.verify st.inner.enrolledPk req.message sig) = true then
+      some (({ st with injectedLog := (req.epoch, req.message, sig) :: st.injectedLog } :
+        CorruptibleSignState PK Sig), SignReply.signature sig)
+      else none) = _
+  rw [hC, hV]
+  rfl
+
+/-- Before corruption `.inject` is rejected. -/
+theorem idealSignCorruptibleMachine_inject_step_of_uncorrupted
+    {st : CorruptibleSignState PK Sig} (req : SignRequest) (sig : Sig)
+    (hC : st.corrupted = false) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st
+      (.inject req sig) = none := by
+  show (if (st.corrupted && S.verify st.inner.enrolledPk req.message sig) = true then
+      some (({ st with injectedLog := (req.epoch, req.message, sig) :: st.injectedLog } :
+        CorruptibleSignState PK Sig), SignReply.signature sig)
+      else none) = none
+  rw [hC]
+  rfl
+
+/-- A signature the verifier rejects is not injected, corrupted or not. -/
+theorem idealSignCorruptibleMachine_inject_step_of_unverified
+    {st : CorruptibleSignState PK Sig} {req : SignRequest} {sig : Sig}
+    (hV : S.verify st.inner.enrolledPk req.message sig = false) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st
+      (.inject req sig) = none := by
+  show (if (st.corrupted && S.verify st.inner.enrolledPk req.message sig) = true then
+      some (({ st with injectedLog := (req.epoch, req.message, sig) :: st.injectedLog } :
+        CorruptibleSignState PK Sig), SignReply.signature sig)
+      else none) = none
+  rw [hV]
+  cases st.corrupted <;> rfl
+
+/-- A rejected `.inject` leaves the state unchanged. -/
+theorem idealSignCorruptibleMachine_inject_errStep (st : CorruptibleSignState PK Sig)
+    (req : SignRequest) (sig : Sig) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st
+      (.inject req sig) = st := by
+  rfl
+
+/-! ### Runs -/
+
+/-- **The inner state of every run is a run of `idealSignMachine`** on the accepted `.sign`
+    events, whatever corruptions and injections the run contains. -/
+theorem idealSignCorruptibleMachine_trace_inner :
+    ∀ {s₀ s_final : CorruptibleSignState PK Sig}
+      {tr : List (SignCommand Sig × SignReply Sig)},
+      (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr
+        s_final →
+      (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀.inner
+        (signedEvents tr) s_final.inner
+  | _, _, _, .nil _ => .nil _
+  | _, _, _, .accept (inp := inp) hStep hRest => by
+    have ih := idealSignCorruptibleMachine_trace_inner hRest
+    cases inp with
+    | sign req =>
+      obtain ⟨inner', sig, hI, hSt, hOut⟩ := idealSignCorruptibleMachine_sign_step_some hStep
+      subst hSt hOut
+      exact .accept hI ih
+    | corrupt =>
+      obtain ⟨hSt, hOut⟩ := idealSignCorruptibleMachine_corrupt_step_some hStep
+      subst hSt hOut
+      exact ih
+    | inject req sig =>
+      obtain ⟨_, _, hSt, hOut⟩ := idealSignCorruptibleMachine_inject_step_some hStep
+      subst hSt hOut
+      exact ih
+  | _, _, _, .reject inp hNone hRest => by
+    have ih := idealSignCorruptibleMachine_trace_inner hRest
+    cases inp with
+    | sign req =>
+      exact .reject req (idealSignCorruptibleMachine_sign_step_none_iff.mp hNone) ih
+    | corrupt => exact ih
+    | inject req sig => exact ih
+
+/-- **A run that ends uncorrupted started uncorrupted, accepted only `.sign` events, and left
+    the injected log as it was.** -/
+theorem idealSignCorruptibleMachine_trace_uncorrupted :
+    ∀ {s₀ s_final : CorruptibleSignState PK Sig}
+      {tr : List (SignCommand Sig × SignReply Sig)},
+      (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr
+        s_final →
+      s_final.corrupted = false →
+      s₀.corrupted = false ∧ tr = (signedEvents tr).map honestSignEvent ∧
+        s_final.injectedLog = s₀.injectedLog
+  | _, _, _, .nil _, hU => ⟨hU, rfl, rfl⟩
+  | _, _, _, .accept (inp := inp) (rest := rest) hStep hRest, hU => by
+    obtain ⟨ihC, ihTr, ihLog⟩ := idealSignCorruptibleMachine_trace_uncorrupted hRest hU
+    cases inp with
+    | sign req =>
+      obtain ⟨inner', sig, _, hSt, hOut⟩ := idealSignCorruptibleMachine_sign_step_some hStep
+      subst hSt hOut
+      refine ⟨ihC, ?_, ihLog⟩
+      show (SignCommand.sign req, SignReply.signature sig) :: rest =
+        honestSignEvent (req, sig) :: (signedEvents rest).map honestSignEvent
+      exact congrArg (List.cons _) ihTr
+    | corrupt =>
+      obtain ⟨hSt, _⟩ := idealSignCorruptibleMachine_corrupt_step_some hStep
+      subst hSt
+      exact Bool.noConfusion (ihC : true = false)
+    | inject req sig =>
+      obtain ⟨hc, _, hSt, _⟩ := idealSignCorruptibleMachine_inject_step_some hStep
+      subst hSt
+      exact Bool.noConfusion (hc.symm.trans ihC)
+  | _, _, _, .reject inp _ hRest, hU => by
+    obtain ⟨ihC, ihTr, ihLog⟩ := idealSignCorruptibleMachine_trace_uncorrupted hRest hU
+    cases inp <;> exact ⟨ihC, ihTr, ihLog⟩
+
+/-- **Corruption is monotone**: a run that starts corrupted ends corrupted. -/
+theorem idealSignCorruptibleMachine_trace_corrupted_mono
+    {s₀ s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀
+      tr s_final)
+    (hC : s₀.corrupted = true) : s_final.corrupted = true := by
+  cases hF : s_final.corrupted with
+  | true => rfl
+  | false =>
+    exact Bool.noConfusion
+      (hC.symm.trans (idealSignCorruptibleMachine_trace_uncorrupted hTrace hF).1)
+
+/-- **A run that ends uncorrupted accepted no `.corrupt` and no `.inject`**: each of its events
+    is an honest signature. -/
+theorem idealSignCorruptibleMachine_uncorrupted_trace_only_signs
+    {s₀ s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀
+      tr s_final)
+    (hU : s_final.corrupted = false) :
+    ∀ ev ∈ tr, ∃ (req : SignRequest) (sig : Sig),
+      ev = (SignCommand.sign req, SignReply.signature sig) := by
+  intro ev hev
+  rw [(idealSignCorruptibleMachine_trace_uncorrupted hTrace hU).2.1] at hev
+  obtain ⟨p, _, hp⟩ := List.mem_map.mp hev
+  exact ⟨p.1, p.2, hp.symm⟩
+
+/-- **Every run of `idealSignMachine` is a run of the corruptible machine** on the same
+    requests with the same outputs, from any flag and injected log, which it leaves alone. -/
+theorem idealSignMachine_trace_lifts_corruptible :
+    ∀ {a₀ a_final : IdealSignState PK Sig} {tr : List (SignRequest × Sig)},
+      (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace a₀ tr a_final →
+      ∀ (c : Bool) (il : List (Nat × Bytes × Sig)),
+        (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+          ⟨a₀, c, il⟩ (tr.map honestSignEvent) ⟨a_final, c, il⟩
+  | _, _, _, .nil _ => fun _ _ => .nil _
+  | _, _, _, .accept hStep hRest => fun c il =>
+    .accept (idealSignCorruptibleMachine_sign_step_of_ideal hStep)
+      (idealSignMachine_trace_lifts_corruptible hRest c il)
+  | _, _, _, .reject inp hNone hRest => fun c il =>
+    Machine.ValidTrace.reject (SignCommand.sign inp)
+      (idealSignCorruptibleMachine_sign_step_none_iff.mpr hNone)
+      (idealSignMachine_trace_lifts_corruptible hRest c il)
+
+/-- **`idealSignMachine` is the corruption-free fragment.** A run of the corruptible machine
+    that ends uncorrupted is, event for event, a run of `idealSignMachine` between the inner
+    states. -/
+theorem idealSignCorruptibleMachine_uncorrupted_trace_is_ideal
+    {s₀ s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀
+      tr s_final)
+    (hU : s_final.corrupted = false) :
+    ∃ tr' : List (SignRequest × Sig), tr = tr'.map honestSignEvent ∧
+      (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀.inner tr'
+        s_final.inner :=
+  ⟨signedEvents tr, (idealSignCorruptibleMachine_trace_uncorrupted hTrace hU).2.1,
+    idealSignCorruptibleMachine_trace_inner hTrace⟩
+
+/-- **Conservative extension on initialized traces.** The corruptible machine admits a trace
+    of honest signature events exactly when `idealSignMachine` admits the underlying trace. -/
+theorem idealSignCorruptibleMachine_admits_honest_iff (tr : List (SignRequest × Sig)) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).AdmitsTrace
+      (tr.map honestSignEvent) ↔
+    (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).AdmitsTrace tr := by
+  constructor
+  · rintro ⟨s₀, s_final, hInit, hTrace⟩
+    have hInit' : s₀ = CorruptibleSignState.empty pk₀ stateful₀ := hInit
+    subst hInit'
+    have hInner := idealSignCorruptibleMachine_trace_inner hTrace
+    rw [signedEvents_map_honest] at hInner
+    exact ⟨_, s_final.inner, rfl, hInner⟩
+  · rintro ⟨a₀, a_final, hInit, hTrace⟩
+    have hInit' : a₀ = IdealSignState.empty pk₀ stateful₀ := hInit
+    subst hInit'
+    exact ⟨_, _, rfl, idealSignMachine_trace_lifts_corruptible hTrace false []⟩
+
+/-- The enrolled key and the mode never change along a run, corrupted or not. -/
+theorem idealSignCorruptibleMachine_trace_key_mode
+    {s₀ s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀
+      tr s_final) :
+    s_final.inner.enrolledPk = s₀.inner.enrolledPk ∧
+    s_final.inner.statefulEpochs = s₀.inner.statefulEpochs :=
+  idealSignMachine_trace_key_mode (idealSignCorruptibleMachine_trace_inner hTrace)
+
+/-- The injected log of a run is what it held at the start plus the accepted `.inject`
+    events. -/
+theorem idealSignCorruptibleMachine_trace_injectedLog :
+    ∀ {s₀ s_final : CorruptibleSignState PK Sig}
+      {tr : List (SignCommand Sig × SignReply Sig)},
+      (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr
+        s_final →
+      ∀ e, e ∈ s_final.injectedLog ↔
+        (e ∈ s₀.injectedLog ∨ ∃ p ∈ injectedEvents tr, e = (p.1.epoch, p.1.message, p.2))
+  | _, _, _, .nil _ => fun e => by
+    constructor
+    · exact fun h => .inl h
+    · intro h
+      rcases h with h | ⟨p, hp, _⟩
+      · exact h
+      · exact absurd (hp : p ∈ ([] : List (SignRequest × Sig))) List.not_mem_nil
+  | s₀, _, _, .accept (inp := inp) (rest := rest) hStep hRest => fun e => by
+    have ih := idealSignCorruptibleMachine_trace_injectedLog hRest e
+    cases inp with
+    | sign req =>
+      obtain ⟨inner', sig, _, hSt, hOut⟩ := idealSignCorruptibleMachine_sign_step_some hStep
+      subst hSt hOut
+      exact ih
+    | corrupt =>
+      obtain ⟨hSt, hOut⟩ := idealSignCorruptibleMachine_corrupt_step_some hStep
+      subst hSt hOut
+      exact ih
+    | inject req sig =>
+      obtain ⟨_, _, hSt, hOut⟩ := idealSignCorruptibleMachine_inject_step_some hStep
+      subst hSt hOut
+      rw [injectedEvents_cons_inject]
+      have ih' : e ∈ _ ↔ (e ∈ (req.epoch, req.message, sig) :: s₀.injectedLog ∨
+          ∃ p ∈ injectedEvents rest, e = (p.1.epoch, p.1.message, p.2)) := ih
+      constructor
+      · intro h
+        rcases ih'.mp h with h1 | ⟨p, hp, hpe⟩
+        · rcases List.mem_cons.mp h1 with hH | hT
+          · exact .inr ⟨(req, sig), List.mem_cons.mpr (.inl rfl), hH⟩
+          · exact .inl hT
+        · exact .inr ⟨p, List.mem_cons_of_mem _ hp, hpe⟩
+      · intro h
+        apply ih'.mpr
+        rcases h with h1 | ⟨p, hp, hpe⟩
+        · exact .inl (List.mem_cons_of_mem _ h1)
+        · rcases List.mem_cons.mp hp with hH | hT
+          · refine .inl (List.mem_cons.mpr (.inl ?_))
+            rw [hpe, hH]
+          · exact .inr ⟨p, hT, hpe⟩
+  | _, _, _, .reject inp _ hRest => fun e => by
+    have ih := idealSignCorruptibleMachine_trace_injectedLog hRest e
+    cases inp <;> exact ih
+
+/-- Every injected signature of a run verifies under the key of its starting state. -/
+theorem idealSignCorruptibleMachine_trace_injected_verified :
+    ∀ {s₀ s_final : CorruptibleSignState PK Sig}
+      {tr : List (SignCommand Sig × SignReply Sig)},
+      (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr
+        s_final →
+      ∀ p ∈ injectedEvents tr, S.verify s₀.inner.enrolledPk p.1.message p.2 = true
+  | _, _, _, .nil _ => fun p hp =>
+    absurd (hp : p ∈ ([] : List (SignRequest × Sig))) List.not_mem_nil
+  | s₀, _, _, .accept (inp := inp) (rest := rest) hStep hRest => fun p hp => by
+    have ih := idealSignCorruptibleMachine_trace_injected_verified hRest p
+    cases inp with
+    | sign req =>
+      obtain ⟨inner', sig, hI, hSt, hOut⟩ := idealSignCorruptibleMachine_sign_step_some hStep
+      have hRec := (idealSignMachine_step_some hI).2.2.2
+      subst hRec hSt hOut
+      exact ih hp
+    | corrupt =>
+      obtain ⟨hSt, hOut⟩ := idealSignCorruptibleMachine_corrupt_step_some hStep
+      subst hSt hOut
+      exact ih hp
+    | inject req sig =>
+      obtain ⟨_, hV, hSt, hOut⟩ := idealSignCorruptibleMachine_inject_step_some hStep
+      subst hSt hOut
+      rw [injectedEvents_cons_inject] at hp
+      rcases List.mem_cons.mp hp with hH | hT
+      · rw [hH]
+        exact hV
+      · exact ih hT
+  | s₀, _, _, .reject inp _ hRest => fun p hp => by
+    have ih := idealSignCorruptibleMachine_trace_injected_verified hRest p hp
+    cases inp with
+    | sign req =>
+      have ih' : S.verify ((idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).errStep
+          s₀.inner req).enrolledPk p.1.message p.2 = true := ih
+      rw [(idealSignMachine_errStep_facts (S := S) (pk₀ := pk₀) (stateful₀ := stateful₀)
+        (maxWindow := maxWindow) (oracleSign := oracleSign) s₀.inner req).1] at ih'
+      exact ih'
+    | corrupt => exact ih
+    | inject req sig => exact ih
+
+/-- **Every emitted signature of a run, signed or injected, before or after corruption,
+    verifies under the key of its starting state.** -/
+theorem idealSignCorruptibleMachine_trace_emitted_verified
+    {s₀ s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀
+      tr s_final) :
+    ∀ p ∈ emittedEvents tr, S.verify s₀.inner.enrolledPk p.1.message p.2 = true := by
+  intro p hp
+  rcases mem_emittedEvents.mp hp with h | h
+  · exact idealSignMachine_trace_outputs_verified
+      (idealSignCorruptibleMachine_trace_inner hTrace) p h
+  · exact idealSignCorruptibleMachine_trace_injected_verified hTrace p h
+
+/-- **Honest-prefix safety.** If an initialized run ends uncorrupted, then each of its events
+    is an honest signature, every emitted signature verifies under `pk₀`, in stateful mode
+    the epochs of the emitted signatures strictly increase (no epoch signs twice), the signed
+    log is exactly the emitted signatures, and nothing was injected. The verification clause
+    holds without the hypothesis
+    (`idealSignCorruptibleMachine_trace_emitted_verified`); the epoch clause does not
+    (`idealSignCorruptible_corrupted_run_reuses_epoch`). -/
+theorem idealSignCorruptibleMachine_uncorrupted_trace_safe
+    {s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀) tr s_final)
+    (hU : s_final.corrupted = false) :
+    tr = (emittedEvents tr).map honestSignEvent ∧
+    (∀ p ∈ emittedEvents tr, S.verify pk₀ p.1.message p.2 = true) ∧
+    (stateful₀ = true → (emittedEvents tr).Pairwise (fun a b => a.1.epoch < b.1.epoch)) ∧
+    (∀ e, e ∈ s_final.inner.signedLog ↔
+      ∃ p ∈ emittedEvents tr, e = (p.1.epoch, p.1.message, p.2)) ∧
+    s_final.injectedLog = [] := by
+  obtain ⟨_, hTr, hLog⟩ := idealSignCorruptibleMachine_trace_uncorrupted hTrace hU
+  have hInner : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (IdealSignState.empty pk₀ stateful₀) (signedEvents tr) s_final.inner :=
+    idealSignCorruptibleMachine_trace_inner hTrace
+  have hE : emittedEvents tr = signedEvents tr := by
+    rw [hTr, emittedEvents_map_honest, signedEvents_map_honest]
+  rw [hE]
+  refine ⟨hTr, idealSignMachine_trace_outputs_verified hInner,
+    fun hS => (idealSignMachine_trace_epochs_increasing hS hInner).2, fun e => ⟨fun he => ?_,
+      fun h => ?_⟩, hLog⟩
+  · rcases idealSignMachine_trace_log_sound hInner e he with hOld | hNew
+    · exact absurd hOld List.not_mem_nil
+    · exact hNew
+  · obtain ⟨p, hp, hpe⟩ := h
+    rw [hpe]
+    exact (idealSignMachine_trace_log_complete hInner).2 p hp
+
+end Corruptible
+
+/-! ## Forgery events under corruption -/
+
+/-- `EUF-CMA` forgery against the corruptible functionality: `msgStar` is fresh against the
+    signed log and against the injected log, and `sigStar` verifies on it. -/
+def CorruptibleEufCmaForgery {PK SK Sig : Type}
+    (S : SigScheme PK SK Sig) (st : CorruptibleSignState PK Sig)
+    (msgStar : Bytes) (sigStar : Sig) : Prop :=
+  EufCmaForgery S st.inner msgStar sigStar ∧ ∀ entry ∈ st.injectedLog, entry.2.1 ≠ msgStar
+
+/-- `SUF-CMA` forgery against the corruptible functionality: the pair is fresh against both
+    logs and verifies. -/
+def CorruptibleSufCmaForgery {PK SK Sig : Type} [DecidableEq Sig]
+    (S : SigScheme PK SK Sig) (st : CorruptibleSignState PK Sig)
+    (msgStar : Bytes) (sigStar : Sig) : Prop :=
+  SufCmaForgery S st.inner msgStar sigStar ∧
+    ∀ entry ∈ st.injectedLog, (entry.2.1, entry.2.2) ≠ (msgStar, sigStar)
+
+theorem CorruptibleEufCmaForgery.toSufCma {PK SK Sig : Type} [DecidableEq Sig]
+    {S : SigScheme PK SK Sig} {st : CorruptibleSignState PK Sig} {msgStar : Bytes}
+    {sigStar : Sig} (h : CorruptibleEufCmaForgery S st msgStar sigStar) :
+    CorruptibleSufCmaForgery S st msgStar sigStar := by
+  refine ⟨h.1.toSufCma, fun entry hMem hEq => ?_⟩
+  injection hEq with hMsg _
+  exact h.2 entry hMem hMsg
+
+section CorruptibleForgery
+variable {PK SK Sig : Type} {S : SigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool}
+  {maxWindow : Nat} {oracleSign : SignRequest → Option Sig}
+
+/-- **`EUF-CMA` forgery against a run with corruption.** After any initialized run, a pair is
+    a `CorruptibleEufCmaForgery` against the final state exactly when it verifies under `pk₀`
+    and its message was never the message of an emitted signature, signed or injected. -/
+theorem idealSignCorruptibleMachine_eufCmaForgery_iff
+    {s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀) tr s_final) (msg : Bytes) (sig : Sig) :
+    CorruptibleEufCmaForgery S s_final msg sig ↔
+      (S.verify pk₀ msg sig = true ∧ ∀ p ∈ emittedEvents tr, p.1.message ≠ msg) := by
+  have hInner : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (IdealSignState.empty pk₀ stateful₀) (signedEvents tr) s_final.inner :=
+    idealSignCorruptibleMachine_trace_inner hTrace
+  have hI := idealSignMachine_eufCmaForgery_iff hInner msg sig
+  have hLog := idealSignCorruptibleMachine_trace_injectedLog hTrace
+  unfold CorruptibleEufCmaForgery
+  constructor
+  · rintro ⟨hE, hInj⟩
+    obtain ⟨hV, hFresh⟩ := hI.mp hE
+    refine ⟨hV, fun p hp => ?_⟩
+    rcases mem_emittedEvents.mp hp with h | h
+    · exact hFresh p h
+    · exact hInj _ ((hLog _).mpr (.inr ⟨p, h, rfl⟩))
+  · rintro ⟨hV, hFresh⟩
+    refine ⟨hI.mpr ⟨hV, fun p hp => hFresh p (mem_emittedEvents.mpr (.inl hp))⟩,
+      fun e he => ?_⟩
+    rcases (hLog e).mp he with h | ⟨p, hp, hpe⟩
+    · exact absurd h List.not_mem_nil
+    · rw [hpe]
+      exact hFresh p (mem_emittedEvents.mpr (.inr hp))
+
+/-- **`SUF-CMA` forgery against a run with corruption.** A pair is a
+    `CorruptibleSufCmaForgery` against the final state exactly when it verifies under `pk₀` and
+    was never emitted, signed or injected. -/
+theorem idealSignCorruptibleMachine_sufCmaForgery_iff [DecidableEq Sig]
+    {s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀) tr s_final) (msg : Bytes) (sig : Sig) :
+    CorruptibleSufCmaForgery S s_final msg sig ↔
+      (S.verify pk₀ msg sig = true ∧
+        ∀ p ∈ emittedEvents tr, (p.1.message, p.2) ≠ (msg, sig)) := by
+  have hInner : (idealSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (IdealSignState.empty pk₀ stateful₀) (signedEvents tr) s_final.inner :=
+    idealSignCorruptibleMachine_trace_inner hTrace
+  have hI := idealSignMachine_sufCmaForgery_iff hInner msg sig
+  have hLog := idealSignCorruptibleMachine_trace_injectedLog hTrace
+  unfold CorruptibleSufCmaForgery
+  constructor
+  · rintro ⟨hE, hInj⟩
+    obtain ⟨hV, hFresh⟩ := hI.mp hE
+    refine ⟨hV, fun p hp => ?_⟩
+    rcases mem_emittedEvents.mp hp with h | h
+    · exact hFresh p h
+    · exact hInj _ ((hLog _).mpr (.inr ⟨p, h, rfl⟩))
+  · rintro ⟨hV, hFresh⟩
+    refine ⟨hI.mpr ⟨hV, fun p hp => hFresh p (mem_emittedEvents.mpr (.inl hp))⟩,
+      fun e he => ?_⟩
+    rcases (hLog e).mp he with h | ⟨p, hp, hpe⟩
+    · exact absurd h List.not_mem_nil
+    · rw [hpe]
+      exact hFresh p (mem_emittedEvents.mpr (.inr hp))
+
+/-- **Forgery against an uncorrupted run is forgery against `idealSignMachine`.** If an
+    initialized run ends uncorrupted, a `CorruptibleEufCmaForgery` against its final state is
+    the same event as an `EufCmaForgery` against the inner state, which
+    `idealSignMachine_eufCmaForgery_iff` characterises on the projected run. -/
+theorem idealSignCorruptibleMachine_uncorrupted_eufCmaForgery_iff
+    {s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀) tr s_final)
+    (hU : s_final.corrupted = false) (msg : Bytes) (sig : Sig) :
+    CorruptibleEufCmaForgery S s_final msg sig ↔ EufCmaForgery S s_final.inner msg sig := by
+  have hLog : s_final.injectedLog = [] :=
+    (idealSignCorruptibleMachine_trace_uncorrupted hTrace hU).2.2
+  unfold CorruptibleEufCmaForgery
+  rw [hLog]
+  exact ⟨fun h => h.1, fun h => ⟨h, fun _ hMem => absurd hMem List.not_mem_nil⟩⟩
+
+/-- **No emitted signature, signed or injected, is a forgery** against the state the run ends
+    in. -/
+theorem idealSignCorruptibleMachine_trace_emitted_not_forgeries [DecidableEq Sig]
+    {s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀) tr s_final) :
+    ∀ p ∈ emittedEvents tr, ¬ CorruptibleEufCmaForgery S s_final p.1.message p.2 ∧
+      ¬ CorruptibleSufCmaForgery S s_final p.1.message p.2 := by
+  intro p hp
+  have hSuf : ¬ CorruptibleSufCmaForgery S s_final p.1.message p.2 := fun h =>
+    ((idealSignCorruptibleMachine_sufCmaForgery_iff hTrace _ _).mp h).2 p hp rfl
+  exact ⟨fun h => hSuf h.toSufCma, hSuf⟩
+
+/-- **No unforgeability statement survives corruption.** In a corrupted state every pair the
+    verifier accepts is emitted by one `.inject`, at any epoch; afterwards its message is not
+    fresh, so no signature on it is a `CorruptibleEufCmaForgery` and the pair is not a
+    `CorruptibleSufCmaForgery`. -/
+theorem idealSignCorruptibleMachine_corrupted_absorbs_forgery [DecidableEq Sig]
+    {st : CorruptibleSignState PK Sig} (hC : st.corrupted = true)
+    (ep : Nat) (msg : Bytes) (sig : Sig)
+    (hV : S.verify st.inner.enrolledPk msg sig = true) :
+    ∃ st' : CorruptibleSignState PK Sig,
+      (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step st
+        (.inject ⟨ep, msg⟩ sig) = some (st', SignReply.signature sig) ∧
+      st'.corrupted = true ∧
+      (∀ sig' : Sig, ¬ CorruptibleEufCmaForgery S st' msg sig') ∧
+      ¬ CorruptibleSufCmaForgery S st' msg sig :=
+  ⟨{ st with injectedLog := (ep, msg, sig) :: st.injectedLog },
+    idealSignCorruptibleMachine_inject_step_of_corrupted (req := ⟨ep, msg⟩) hC hV, hC,
+    fun _ h => h.2 (ep, msg, sig) (List.mem_cons.mpr (.inl rfl)) rfl,
+    fun h => h.2 (ep, msg, sig) (List.mem_cons.mpr (.inl rfl)) rfl⟩
+
+/-- **Every corrupted run extends by one accepted `.inject` that emits a given verifying
+    pair**, at any epoch; no signature on its message is a forgery against the extended run. -/
+theorem idealSignCorruptibleMachine_corrupted_run_absorbs_forgery [DecidableEq Sig]
+    {s_final : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀) tr s_final)
+    (hC : s_final.corrupted = true) (ep : Nat) (msg : Bytes) (sig : Sig)
+    (hV : S.verify pk₀ msg sig = true) :
+    ∃ s' : CorruptibleSignState PK Sig,
+      (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+        (CorruptibleSignState.empty pk₀ stateful₀)
+        (tr ++ [(SignCommand.inject ⟨ep, msg⟩ sig, SignReply.signature sig)]) s' ∧
+      (∀ sig' : Sig, ¬ CorruptibleEufCmaForgery S s' msg sig') ∧
+      ¬ CorruptibleSufCmaForgery S s' msg sig := by
+  have hPk : s_final.inner.enrolledPk = pk₀ :=
+    (idealSignCorruptibleMachine_trace_key_mode hTrace).1
+  have hV' : S.verify s_final.inner.enrolledPk msg sig = true := by
+    rw [hPk]
+    exact hV
+  obtain ⟨s', hStep, _, hEuf, hSuf⟩ := idealSignCorruptibleMachine_corrupted_absorbs_forgery
+    (S := S) (pk₀ := pk₀) (stateful₀ := stateful₀) (maxWindow := maxWindow)
+    (oracleSign := oracleSign) hC ep msg sig hV'
+  exact ⟨s', validTrace_snoc hTrace hStep, hEuf, hSuf⟩
+
+end CorruptibleForgery
+
+/-! ## Rejected behaviours of the corruptible machine -/
+
+/-- `.inject` before `.corrupt` is rejected, although the verifier accepts the signature. -/
+theorem idealSignCorruptible_rejects_inject_before_corrupt :
+    ¬ (((idealSignCorruptibleMachine acceptAllSigScheme () true 8 (fun _ => some ())).step
+      (CorruptibleSignState.empty () true) (.inject ⟨0, []⟩ ())).isSome = true) := by
+  decide
+
+/-- After `.corrupt`, a signature the verifier rejects is still not injected. -/
+theorem idealSignCorruptible_rejects_unverified_inject_after_corrupt :
+    ¬ (((idealSignCorruptibleMachine rejectAllSigScheme () false 0 (fun _ => some ())).step
+      ((idealSignCorruptibleMachine rejectAllSigScheme () false 0 (fun _ => some ())).runStep
+        (CorruptibleSignState.empty () false) .corrupt).1 (.inject ⟨0, []⟩ ())).isSome =
+          true) := by
+  decide
+
+/-- The run `sign` at epoch `0`, `corrupt`, `inject` at epoch `0` of the stateful accept-all
+    machine. -/
+theorem idealSignCorruptible_epoch_reuse_run :
+    ∃ s_final : CorruptibleSignState Unit Unit,
+      (idealSignCorruptibleMachine acceptAllSigScheme () true 8 (fun _ => some ())).ValidTrace
+        (CorruptibleSignState.empty () true)
+        [(SignCommand.sign ⟨0, []⟩, SignReply.signature ()),
+         (SignCommand.corrupt, SignReply.corrupted),
+         (SignCommand.inject ⟨0, [1]⟩ (), SignReply.signature ())] s_final ∧
+      s_final.corrupted = true :=
+  ⟨_, .accept (idealSignCorruptibleMachine_sign_step_of_ideal
+      (idealSignMachine_step_of_valid (by decide) rfl rfl))
+    (.accept (idealSignCorruptibleMachine_corrupt_step _)
+      (.accept (idealSignCorruptibleMachine_inject_step_of_corrupted rfl rfl) (.nil _))), rfl⟩
+
+/-- **The one-time-epoch property fails for corrupted runs.** Without the hypothesis that the
+    run ends uncorrupted, the epoch clause of
+    `idealSignCorruptibleMachine_uncorrupted_trace_safe` is false: after `sign` at epoch `0`
+    and `corrupt`, an `inject` at epoch `0` is accepted, so two emitted signatures share an
+    epoch. -/
+theorem idealSignCorruptible_corrupted_run_reuses_epoch :
+    ¬ (∀ (tr : List (SignCommand Unit × SignReply Unit))
+        (s_final : CorruptibleSignState Unit Unit),
+        (idealSignCorruptibleMachine acceptAllSigScheme () true 8
+          (fun _ => some ())).ValidTrace (CorruptibleSignState.empty () true) tr s_final →
+        (emittedEvents tr).Pairwise (fun a b => a.1.epoch < b.1.epoch)) := by
+  intro h
+  obtain ⟨s_final, hTr, _⟩ := idealSignCorruptible_epoch_reuse_run
+  have hPw : List.Pairwise (fun a b : SignRequest × Unit => a.1.epoch < b.1.epoch)
+      [((⟨0, []⟩ : SignRequest), ()), ((⟨0, [1]⟩ : SignRequest), ())] := h _ _ hTr
+  exact Nat.lt_irrefl 0 ((List.pairwise_cons.mp hPw).1 _ (List.mem_cons.mpr (.inl rfl)))
+
+/-- An honest two-signature run of the stateful accept-all machine ends uncorrupted, so
+    `idealSignCorruptibleMachine_uncorrupted_trace_safe` applies to it: its hypotheses are
+    jointly satisfiable. -/
+theorem idealSignCorruptible_honest_run_epochs_increase :
+    (emittedEvents
+      [(SignCommand.sign ⟨0, []⟩, SignReply.signature ()),
+       (SignCommand.sign ⟨2, [1]⟩, SignReply.signature ())]).Pairwise
+      (fun a b : SignRequest × Unit => a.1.epoch < b.1.epoch) :=
+  (idealSignCorruptibleMachine_uncorrupted_trace_safe (S := acceptAllSigScheme) (pk₀ := ())
+    (stateful₀ := true) (maxWindow := 8) (oracleSign := fun _ => some ())
+    (s_final := ⟨((IdealSignState.empty () true).record ⟨0, []⟩ ()).record ⟨2, [1]⟩ (),
+      false, []⟩)
+    (.accept (idealSignCorruptibleMachine_sign_step_of_ideal
+        (idealSignMachine_step_of_valid (by decide) rfl rfl))
+      (.accept (idealSignCorruptibleMachine_sign_step_of_ideal
+        (idealSignMachine_step_of_valid (by decide) rfl rfl)) (.nil _))) rfl).2.2.1 rfl
+
+#tooth_pair idealSignCorruptibleMachine_inject_step_some vs
+  idealSignCorruptible_rejects_inject_before_corrupt
+#tooth_pair idealSignCorruptibleMachine_trace_emitted_verified vs
+  idealSignCorruptible_rejects_unverified_inject_after_corrupt
+#tooth_pair idealSignCorruptibleMachine_uncorrupted_trace_safe vs
+  idealSignCorruptible_corrupted_run_reuses_epoch
+
 #verify_constructive
   Qsag.Spec.epochAdmissible_stateful
   Qsag.Spec.epochAdmissible_consumed
@@ -865,6 +1755,46 @@ theorem idealSign_unsigned_message_is_forgery :
   Qsag.Spec.idealSignMachine_trace_outputs_not_forgeries
   Qsag.Spec.latchedSigner_output_is_sign
   Qsag.Spec.idealSign_unsigned_message_is_forgery
+  Qsag.Spec.signedEvents_map_honest
+  Qsag.Spec.emittedEvents_map_honest
+  Qsag.Spec.injectedEvents_map_honest
+  Qsag.Spec.injectedEvents_cons_inject
+  Qsag.Spec.mem_emittedEvents
+  Qsag.Spec.idealSignCorruptibleMachine_sign_step_some
+  Qsag.Spec.idealSignCorruptibleMachine_sign_step_of_ideal
+  Qsag.Spec.idealSignCorruptibleMachine_sign_step_none_iff
+  Qsag.Spec.idealSignCorruptibleMachine_sign_errStep
+  Qsag.Spec.idealSignCorruptibleMachine_corrupt_step
+  Qsag.Spec.idealSignCorruptibleMachine_corrupt_step_some
+  Qsag.Spec.idealSignCorruptibleMachine_inject_step_some
+  Qsag.Spec.idealSignCorruptibleMachine_inject_step_of_corrupted
+  Qsag.Spec.idealSignCorruptibleMachine_inject_step_of_uncorrupted
+  Qsag.Spec.idealSignCorruptibleMachine_inject_step_of_unverified
+  Qsag.Spec.idealSignCorruptibleMachine_inject_errStep
+  Qsag.Spec.idealSignCorruptibleMachine_trace_inner
+  Qsag.Spec.idealSignCorruptibleMachine_trace_uncorrupted
+  Qsag.Spec.idealSignCorruptibleMachine_trace_corrupted_mono
+  Qsag.Spec.idealSignCorruptibleMachine_uncorrupted_trace_only_signs
+  Qsag.Spec.idealSignMachine_trace_lifts_corruptible
+  Qsag.Spec.idealSignCorruptibleMachine_uncorrupted_trace_is_ideal
+  Qsag.Spec.idealSignCorruptibleMachine_admits_honest_iff
+  Qsag.Spec.idealSignCorruptibleMachine_trace_key_mode
+  Qsag.Spec.idealSignCorruptibleMachine_trace_injectedLog
+  Qsag.Spec.idealSignCorruptibleMachine_trace_injected_verified
+  Qsag.Spec.idealSignCorruptibleMachine_trace_emitted_verified
+  Qsag.Spec.idealSignCorruptibleMachine_uncorrupted_trace_safe
+  Qsag.Spec.CorruptibleEufCmaForgery.toSufCma
+  Qsag.Spec.idealSignCorruptibleMachine_eufCmaForgery_iff
+  Qsag.Spec.idealSignCorruptibleMachine_sufCmaForgery_iff
+  Qsag.Spec.idealSignCorruptibleMachine_uncorrupted_eufCmaForgery_iff
+  Qsag.Spec.idealSignCorruptibleMachine_trace_emitted_not_forgeries
+  Qsag.Spec.idealSignCorruptibleMachine_corrupted_absorbs_forgery
+  Qsag.Spec.idealSignCorruptibleMachine_corrupted_run_absorbs_forgery
+  Qsag.Spec.idealSignCorruptible_rejects_inject_before_corrupt
+  Qsag.Spec.idealSignCorruptible_rejects_unverified_inject_after_corrupt
+  Qsag.Spec.idealSignCorruptible_epoch_reuse_run
+  Qsag.Spec.idealSignCorruptible_corrupted_run_reuses_epoch
+  Qsag.Spec.idealSignCorruptible_honest_run_epochs_increase
 
 end Qsag.Spec
 end

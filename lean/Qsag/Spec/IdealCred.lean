@@ -8,30 +8,47 @@ accumulator, selective-disclosure presentations) and the replicated threshold OP
 
 Authentication is an ideal-world event, not a checkable token. Every input is a pair
 `(port, command)`. The ports are the issuer, each holder `h`, each TOPRF server `i`, the TOPRF
-client and the adversary. The corruption set (issuer flag, corrupt holders, corrupt servers) is
-part of the state, fixed by the configuration and never changed by a transition: corruption is
-static. `IdealCredState.speaksFor` lets a command through only on the port of the party it is
-attributed to, or on the adversary port when that party is corrupt.
+client and the adversary. `IdealCredState.speaksFor` lets a command through only on the port of
+the party it is attributed to, or on the adversary port when that party is corrupt in the current
+state.
+
+**Adaptive corruption.** The corruption set (issuer flag, corrupt holders, corrupt servers) is
+part of the state. It starts as the set named by the configuration and grows by the command
+`.corrupt party`, admitted on the adversary port only, always answered `.corrupted`, at any point
+of a run. Corruption is never undone (`idealCredStep_provenance`, `idealCred_trace_provenance`:
+the corruption set only grows). The functionality enforces no corruption budget: a bound on the
+number of corrupt servers is a hypothesis of the theorem that needs it, about the state in which
+the event happens. Guarantees come in two forms: about the state in which an input was processed
+(`CredEventAt`), and, by monotonicity, about the final state of the run. The second gives:
+a party that is not corrupt at the end of a run sent every command attributed to it in that run
+on its own port (`idealCredMachine_honest_issuer_port`, `idealCredMachine_honest_holder_port`,
+`idealCredMachine_honest_server_port`).
 
 * **Issuance** creates a record owned by the holder it names; the credential identifier in the
-  output is the possession capability. Every record of a run was created by an issuer-port event
-  of that run, unless the issuer is corrupt (`idealCredMachine_record_provenance`).
+  output is the possession capability. Every record of a run was created by an issuance event of
+  that run, on the issuer port, or on the adversary port in a state where the issuer was corrupt
+  (`idealCredMachine_record_provenance`, `idealCredMachine_record_provenance_at`).
 * **Presentation** of credential `cid` by holder `h` is accepted only for a record with that
   identifier owned by `h`, of the current epoch, whose attributes satisfy the statement, for the
   current issuer key, epoch and accumulator root and a fresh challenge. It was made on the port of
-  `h` unless `h` is corrupt (`idealCredMachine_presentation_provenance`). Which eligible credential
-  was shown is invisible in outputs and successor state
-  (`idealCredMachine_presentation_trace_unlinkable`).
+  `h`, or on the adversary port in a state where `h` was corrupt
+  (`idealCredMachine_presentation_provenance`). Which eligible credential was shown is invisible
+  in outputs and successor state (`idealCredMachine_presentation_trace_unlinkable`).
 * **TOPRF.** Servers approve tickets `(keyId, epoch, counter)` on their own ports. An evaluation is
   answered when `toprfOnlineServers` (four of five, `voprf.rs:4`–`5`) distinct servers approved
   its ticket, the per-key quota is not exhausted and the counter passes `admit_counter`
-  (`voprf.rs:310`). It returns the keyed-table value of `(keyId, epoch, input)`. With at most
-  `toprfMaxCorrupt` corrupt servers at least one approval came from an honest server port
-  (`idealCredMachine_toprf_provenance`).
+  (`voprf.rs:310`). It returns the keyed-table value of `(keyId, epoch, input)`. If at most
+  `toprfMaxCorrupt` servers are corrupt in the state that answers, at least one approval came from
+  the port of a server not corrupt in that state (`idealCredMachine_toprf_provenance`). An approval
+  stays recorded when its server is corrupted later, and the adversary can reach the quorum alone
+  once it has corrupted enough servers (`idealCredDemo_adaptive_quorum_without_server_port`).
 
-With a corrupt issuer the adversary can issue anything (`idealCredDemo_corrupt_issuer_issues`): the
-guarantees are exactly relative to the corruption set. One ticket covers one item; batches and
-per-credential revocation (other than epoch rotation) are not modelled.
+Not modelled: corrupting a holder hands the adversary that holder's port (it can then present the
+holder's credentials), but there is no separate leakage output for the holder's attribute values,
+and likewise none for issuer or server key material; record identifiers are already public
+outputs of issuance. With a corrupt issuer the adversary can issue anything
+(`idealCredDemo_corrupt_issuer_issues`). One ticket covers one item; batches and per-credential
+revocation (other than epoch rotation) are not modelled.
 -/
 
 public import Qsag.Spec.Primitives
@@ -98,6 +115,13 @@ inductive CredPort where
   | adversary
   deriving DecidableEq, Repr
 
+/-- The parties that can be corrupted. The TOPRF client has no authenticated commands. -/
+inductive CredParty where
+  | issuer
+  | holder (id : Nat)
+  | server (index : Nat)
+  deriving DecidableEq, Repr
+
 /-- Commands, each attributed to the party it names. -/
 inductive CredCommand (Attr : Type) where
   /-- The issuer issues a credential with `attrs` to `holder`, moving the accumulator to `newRoot`. -/
@@ -110,6 +134,24 @@ inductive CredCommand (Attr : Type) where
   | approveToprf (server : Nat) (ticket : ToprfTicket)
   /-- Evaluation request for `input` under `ticket`. -/
   | evalToprf (ticket : ToprfTicket) (input : Bytes)
+  /-- The adversary corrupts `party`. -/
+  | corrupt (party : CredParty)
+
+/-- The port on which an honest `party` speaks. -/
+@[expose] def CredParty.port : CredParty → CredPort
+  | .issuer => .issuer
+  | .holder h => .holder h
+  | .server i => .server i
+
+/-- The party a command is attributed to; evaluation and corruption requests are attributed to
+    no party. -/
+@[expose] def CredCommand.party {Attr : Type} : CredCommand Attr → Option CredParty
+  | .issue _ _ _ => some .issuer
+  | .advanceEpoch _ _ => some .issuer
+  | .present h _ _ => some (.holder h)
+  | .approveToprf i _ => some (.server i)
+  | .evalToprf _ _ => none
+  | .corrupt _ => none
 
 /-- An input is a command together with the port it arrived on. -/
 abbrev IdealCredInput (Attr : Type) : Type := CredPort × CredCommand Attr
@@ -121,10 +163,13 @@ inductive IdealCredOutput (O : Type) where
   | presentationVerdict (ok : Bool)
   | toprfApproved
   | toprfEvaluated (out : O)
+  | corrupted
   deriving DecidableEq, Repr
 
-/-- Configuration: initial public parameters, the static corruption set, the keyed ideal function
-    `oprf` and the enrolled per-key evaluation quota (`CounterStore::reserve`, `voprf.rs:132`). -/
+/-- Configuration: initial public parameters, the initial corruption set (`issuerCorrupt`,
+    `corruptHolders`, `corruptServers`: the parties corrupt before the run starts), the keyed
+    ideal function `oprf` and the enrolled per-key evaluation quota (`CounterStore::reserve`,
+    `voprf.rs:132`). -/
 structure IdealCredConfig (O : Type) where
   issuerPk : Bytes
   epoch₀ : Nat
@@ -135,7 +180,7 @@ structure IdealCredConfig (O : Type) where
   oprf : ToprfPoint → O
   oprfQuota : Nat
 
-/-- Number of corrupt TOPRF servers among the committee indices. -/
+/-- Number of initially corrupt TOPRF servers among the committee indices. -/
 def IdealCredConfig.corruptServerCount {O : Type} (cfg : IdealCredConfig O) : Nat :=
   (List.range pqCredentialProfile.toprfServers).countP (fun i => decide (i ∈ cfg.corruptServers))
 
@@ -150,7 +195,7 @@ structure CredentialRecord (Attr : Type) where
 
 /-! ## 2. State and transition -/
 
-/-- Ideal credential state: public parameters, the corruption set, the issued records, consumed
+/-- Ideal credential state: public parameters, the current corruption set, the issued records, consumed
     verifier challenges, recorded server approvals, the revealed part of the TOPRF graph and the
     charged tickets (newest first). -/
 structure IdealCredState (Attr O : Type) where
@@ -182,8 +227,66 @@ structure IdealCredState (Attr O : Type) where
     oprfTable := []
     oprfCharges := [] }
 
+/-- Number of TOPRF servers among the committee indices that are corrupt in `st`. -/
+def IdealCredState.corruptServerCount {Attr O : Type} (st : IdealCredState Attr O) : Nat :=
+  (List.range pqCredentialProfile.toprfServers).countP (fun i => decide (i ∈ st.corruptServers))
+
+/-- The initial state has the configured corruption set, so its corrupt-server count is the
+    configured one. -/
+theorem IdealCredState.empty_corruptServerCount {Attr O : Type} (cfg : IdealCredConfig O) :
+    (IdealCredState.empty (Attr := Attr) cfg).corruptServerCount = cfg.corruptServerCount := by
+  rfl
+
+/-- `party` is in the corruption set of `st`. -/
+@[expose] def IdealCredState.isCorrupt {Attr O : Type} (st : IdealCredState Attr O) :
+    CredParty → Prop
+  | .issuer => st.issuerCorrupt = true
+  | .holder h => h ∈ st.corruptHolders
+  | .server i => i ∈ st.corruptServers
+
+/-- `st` with `party` added to the corruption set; nothing else changes. -/
+@[expose] def IdealCredState.withCorrupt {Attr O : Type} (st : IdealCredState Attr O) :
+    CredParty → IdealCredState Attr O
+  | .issuer => { st with issuerCorrupt := true }
+  | .holder h => { st with corruptHolders := h :: st.corruptHolders }
+  | .server i => { st with corruptServers := i :: st.corruptServers }
+
+/-- Every party corrupt in `st` is corrupt in `st'`. -/
+structure CredCorruptionLe {Attr O : Type} (st st' : IdealCredState Attr O) : Prop where
+  issuer : st.issuerCorrupt = true → st'.issuerCorrupt = true
+  holders : ∀ h ∈ st.corruptHolders, h ∈ st'.corruptHolders
+  servers : ∀ i ∈ st.corruptServers, i ∈ st'.corruptServers
+
+theorem CredCorruptionLe.refl {Attr O : Type} (st : IdealCredState Attr O) :
+    CredCorruptionLe st st :=
+  ⟨fun h => h, fun _ h => h, fun _ h => h⟩
+
+theorem CredCorruptionLe.trans {Attr O : Type} {s₁ s₂ s₃ : IdealCredState Attr O}
+    (h₁ : CredCorruptionLe s₁ s₂) (h₂ : CredCorruptionLe s₂ s₃) : CredCorruptionLe s₁ s₃ :=
+  ⟨fun h => h₂.issuer (h₁.issuer h), fun x h => h₂.holders x (h₁.holders x h),
+    fun x h => h₂.servers x (h₁.servers x h)⟩
+
+/-- `CredCorruptionLe` in terms of `IdealCredState.isCorrupt`. -/
+theorem CredCorruptionLe.isCorrupt {Attr O : Type} {st st' : IdealCredState Attr O}
+    (hLe : CredCorruptionLe st st') (party : CredParty) (h : st.isCorrupt party) :
+    st'.isCorrupt party := by
+  cases party with
+  | issuer => exact hLe.issuer h
+  | holder x => exact hLe.holders x h
+  | server x => exact hLe.servers x h
+
+/-- Corrupting a party makes it corrupt and keeps every corrupt party corrupt. -/
+theorem IdealCredState.withCorrupt_le {Attr O : Type} (st : IdealCredState Attr O)
+    (party : CredParty) :
+    (st.withCorrupt party).isCorrupt party ∧ CredCorruptionLe st (st.withCorrupt party) := by
+  cases party with
+  | issuer => exact ⟨rfl, fun _ => rfl, fun _ h => h, fun _ h => h⟩
+  | holder x => exact ⟨List.Mem.head _, fun h => h, fun _ h => List.Mem.tail _ h, fun _ h => h⟩
+  | server x => exact ⟨List.Mem.head _, fun h => h, fun _ h => h, fun _ h => List.Mem.tail _ h⟩
+
 /-- Port discipline: a command is admitted on the port of the party it is attributed to, or on the
-    adversary port when that party is corrupt. Evaluation requests may come from anyone. -/
+    adversary port when that party is corrupt in `st`. Evaluation requests may come from anyone;
+    corruption requests only from the adversary. -/
 @[expose] def IdealCredState.speaksFor {Attr O : Type} (st : IdealCredState Attr O)
     (port : CredPort) : CredCommand Attr → Bool
   | .issue _ _ _ => decide (port = .issuer) || (decide (port = .adversary) && st.issuerCorrupt)
@@ -194,6 +297,7 @@ structure IdealCredState (Attr O : Type) where
   | .approveToprf i _ =>
     decide (port = .server i) || (decide (port = .adversary) && decide (i ∈ st.corruptServers))
   | .evalToprf _ _ => true
+  | .corrupt _ => decide (port = .adversary)
 
 /-- Issuance gate: positive arity at most `maxAttrs`, accumulator capacity per epoch. -/
 def IdealCredState.issueAccepts {Attr O : Type} (st : IdealCredState Attr O)
@@ -283,6 +387,7 @@ def credExec {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
                   st.oprfTable },
               .toprfEvaluated (cfg.oprf ⟨t.keyId, t.epoch, input⟩))
     else none
+  | .corrupt party => some (st.withCorrupt party, .corrupted)
 
 /-- Transition function: inputs violating the port discipline are rejected. -/
 @[expose] def idealCredStep {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
@@ -447,6 +552,24 @@ theorem credExec_evalToprf_inv {t : ToprfTicket} {input : Bytes}
       obtain ⟨hSt, hOut⟩ := Prod.mk.inj (Option.some.inj hExec)
       exact Or.inr ⟨hSt.symm, hOut.symm⟩
 
+theorem credExec_corrupt_inv {party : CredParty}
+    (hExec : credExec cfg st (.corrupt party) = some (st', out)) :
+    st' = st.withCorrupt party ∧ out = .corrupted := by
+  have h : some (st.withCorrupt party, IdealCredOutput.corrupted) = some (st', out) := hExec
+  obtain ⟨hSt, hOut⟩ := Prod.mk.inj (Option.some.inj h)
+  exact ⟨hSt.symm, hOut.symm⟩
+
+/-- A corruption request on the adversary port is always answered, with the party added to the
+    corruption set. -/
+theorem idealCredStep_corrupt_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr O)
+    (party : CredParty) :
+    idealCredStep cfg st (.adversary, .corrupt party) =
+      some (st.withCorrupt party, .corrupted) := by
+  have hS : st.speaksFor .adversary (CredCommand.corrupt (Attr := Attr) party) = true := by
+    simp only [IdealCredState.speaksFor, decide_true]
+  rw [idealCredStep_of_speaksFor hS]
+  rfl
+
 /-- The output of an accepted input determines the kind of command that produced it. -/
 theorem idealCredStep_output_command {port : CredPort} {cmd : CredCommand Attr}
     (hStep : idealCredStep cfg st (port, cmd) = some (st', out)) :
@@ -455,7 +578,8 @@ theorem idealCredStep_output_command {port : CredPort} {cmd : CredCommand Attr}
     | .epochAdvanced _ => ∃ newEpoch newRoot, cmd = .advanceEpoch newEpoch newRoot
     | .presentationVerdict _ => ∃ h cid stmt, cmd = .present h cid stmt
     | .toprfApproved => ∃ i t, cmd = .approveToprf i t
-    | .toprfEvaluated _ => ∃ t input, cmd = .evalToprf t input := by
+    | .toprfEvaluated _ => ∃ t input, cmd = .evalToprf t input
+    | .corrupted => ∃ party, cmd = .corrupt party := by
   have hExec := (idealCredStep_inv hStep).2
   cases cmd with
   | issue h attrs newRoot =>
@@ -490,6 +614,10 @@ theorem idealCredStep_output_command {port : CredPort} {cmd : CredCommand Attr}
       exact ⟨t, input, rfl⟩
     · subst hOut
       exact ⟨t, input, rfl⟩
+  | corrupt party =>
+    obtain ⟨_, hOut⟩ := credExec_corrupt_inv hExec
+    subst hOut
+    exact ⟨party, rfl⟩
 
 /-- In the initial state an issuer-port issuance of a one-attribute credential is answered with
     identifier `0`. -/
@@ -509,17 +637,17 @@ end Inversion
 
 /-! ## 4. Reachable-state invariant -/
 
-/-- Invariant of every reachable state: the issuer key and the corruption set are those of the
-    configuration; every record has between `1` and `maxAttrs` attributes and an epoch not after
-    the current one; every revealed TOPRF value is the value of `oprf`; per key, no more points
+/-- Invariant of every reachable state: the issuer key is that of the configuration; every party
+    of the configured initial corruption set is corrupt; every record has between `1` and
+    `maxAttrs` attributes and an epoch not after the current one; every revealed TOPRF value is the value of `oprf`; per key, no more points
     are revealed than tickets charged, no more tickets charged than the quota, and charged
     counters strictly increase. -/
 structure IdealCredInv {Attr O : Type} (cfg : IdealCredConfig O)
     (st : IdealCredState Attr O) : Prop where
   issuerPk_eq : st.issuerPk = cfg.issuerPk
-  issuerCorrupt_eq : st.issuerCorrupt = cfg.issuerCorrupt
-  corruptHolders_eq : st.corruptHolders = cfg.corruptHolders
-  corruptServers_eq : st.corruptServers = cfg.corruptServers
+  issuerCorrupt_of_cfg : cfg.issuerCorrupt = true → st.issuerCorrupt = true
+  corruptHolders_of_cfg : ∀ h ∈ cfg.corruptHolders, h ∈ st.corruptHolders
+  corruptServers_of_cfg : ∀ i ∈ cfg.corruptServers, i ∈ st.corruptServers
   records_wf : ∀ r ∈ st.records,
     0 < r.attrs.length ∧ r.attrs.length ≤ pqCredentialProfile.maxAttrs ∧ r.epoch ≤ st.epoch
   table_graph : ∀ e ∈ st.oprfTable, e.2 = cfg.oprf e.1
@@ -618,8 +746,8 @@ theorem idealCredInv_exec {Attr O : Type} [DecidableEq Attr] {cfg : IdealCredCon
     simp only [IdealCredState.issueAccepts, Bool.and_eq_true, decide_eq_true_eq] at hAcc
     obtain ⟨⟨hPos, hMax⟩, _⟩ := hAcc
     subst hSt
-    refine ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_eq, hInv.corruptHolders_eq,
-      hInv.corruptServers_eq, fun r hr => ?_, hInv.table_graph, hInv.table_charged,
+    refine ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+      hInv.corruptServers_of_cfg, fun r hr => ?_, hInv.table_graph, hInv.table_charged,
       hInv.charges_budget, hInv.charges_fresh⟩
     rcases List.mem_append.mp hr with hOld | hNew
     · exact hInv.records_wf r hOld
@@ -628,8 +756,8 @@ theorem idealCredInv_exec {Attr O : Type} [DecidableEq Attr] {cfg : IdealCredCon
   | advanceEpoch newEpoch newRoot =>
     obtain ⟨hLt, hSt, _⟩ := credExec_advanceEpoch_inv hExec
     subst hSt
-    refine ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_eq, hInv.corruptHolders_eq,
-      hInv.corruptServers_eq, fun r hr => ?_, hInv.table_graph, hInv.table_charged,
+    refine ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+      hInv.corruptServers_of_cfg, fun r hr => ?_, hInv.table_graph, hInv.table_charged,
       hInv.charges_budget, hInv.charges_fresh⟩
     obtain ⟨hPos, hMax, hEp⟩ := hInv.records_wf r hr
     exact ⟨hPos, hMax, Nat.le_trans hEp (Nat.le_of_lt hLt)⟩
@@ -645,30 +773,47 @@ theorem idealCredInv_exec {Attr O : Type} [DecidableEq Attr] {cfg : IdealCredCon
       simp only [hC, ↓reduceIte] at hExec
       obtain ⟨hSt, _⟩ := Prod.mk.inj (Option.some.inj hExec)
       rw [← hSt]
-      exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_eq, hInv.corruptHolders_eq,
-        hInv.corruptServers_eq, hInv.records_wf, hInv.table_graph, hInv.table_charged,
+      exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+        hInv.corruptServers_of_cfg, hInv.records_wf, hInv.table_graph, hInv.table_charged,
         hInv.charges_budget, hInv.charges_fresh⟩
   | approveToprf i t =>
     obtain ⟨_, _, hSt, _⟩ := credExec_approveToprf_inv hExec
     subst hSt
-    exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_eq, hInv.corruptHolders_eq,
-      hInv.corruptServers_eq, hInv.records_wf, hInv.table_graph, hInv.table_charged,
+    exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+      hInv.corruptServers_of_cfg, hInv.records_wf, hInv.table_graph, hInv.table_charged,
       hInv.charges_budget, hInv.charges_fresh⟩
   | evalToprf t input =>
     obtain ⟨hAcc, hCase⟩ := credExec_evalToprf_inv hExec
     obtain ⟨hBudget, hFresh⟩ := idealCredInv_toprf_charge hInv hAcc
     rcases hCase with ⟨o, _, hSt, _⟩ | ⟨hSt, _⟩
     · subst hSt
-      exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_eq, hInv.corruptHolders_eq,
-        hInv.corruptServers_eq, hInv.records_wf, hInv.table_graph,
+      exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+        hInv.corruptServers_of_cfg, hInv.records_wf, hInv.table_graph,
         fun k => credCountP_le_cons _ t _ _ (hInv.table_charged k), hBudget, hFresh⟩
     · subst hSt
-      refine ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_eq, hInv.corruptHolders_eq,
-        hInv.corruptServers_eq, hInv.records_wf, fun e he => ?_,
+      refine ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+        hInv.corruptServers_of_cfg, hInv.records_wf, fun e he => ?_,
         fun k => credCountP_cons_congr _ _ _ t _ _ rfl (hInv.table_charged k), hBudget, hFresh⟩
       rcases List.mem_cons.mp he with hNew | hOld
       · rw [hNew]
       · exact hInv.table_graph e hOld
+  | corrupt party =>
+    obtain ⟨hSt, _⟩ := credExec_corrupt_inv hExec
+    subst hSt
+    cases party with
+    | issuer =>
+      exact ⟨hInv.issuerPk_eq, fun _ => rfl, hInv.corruptHolders_of_cfg,
+        hInv.corruptServers_of_cfg, hInv.records_wf, hInv.table_graph, hInv.table_charged,
+        hInv.charges_budget, hInv.charges_fresh⟩
+    | holder x =>
+      exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg,
+        fun h hh => List.Mem.tail _ (hInv.corruptHolders_of_cfg h hh),
+        hInv.corruptServers_of_cfg, hInv.records_wf, hInv.table_graph, hInv.table_charged,
+        hInv.charges_budget, hInv.charges_fresh⟩
+    | server x =>
+      exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+        fun i hi => List.Mem.tail _ (hInv.corruptServers_of_cfg i hi), hInv.records_wf,
+        hInv.table_graph, hInv.table_charged, hInv.charges_budget, hInv.charges_fresh⟩
 
 /-- `IdealCredInv` holds in every reachable state. -/
 theorem idealCredInv_reachable {Attr O : Type} [DecidableEq Attr] {cfg : IdealCredConfig O}
@@ -678,7 +823,7 @@ theorem idealCredInv_reachable {Attr O : Type} [DecidableEq Attr] {cfg : IdealCr
   have h₀ : IdealCredInv cfg s₀ := by
     have hEq : s₀ = IdealCredState.empty cfg := hInit
     rw [hEq]
-    exact ⟨rfl, rfl, rfl, rfl, (fun _ hr => nomatch hr), (fun _ he => nomatch he),
+    exact ⟨rfl, (fun h => h), (fun _ h => h), (fun _ h => h), (fun _ hr => nomatch hr), (fun _ he => nomatch he),
       (fun _ => Nat.le_refl _), (fun _ => Nat.zero_le _), List.Pairwise.nil⟩
   clear hInit
   induction hTr with
@@ -690,20 +835,71 @@ theorem idealCredInv_reachable {Attr O : Type} [DecidableEq Attr] {cfg : IdealCr
 
 /-! ## 5. Provenance over traces -/
 
-/-- One accepted input: the corruption set is unchanged; a new record comes from this very input
-    being an issuer-port issuance, unless the issuer is corrupt; a new approval comes from this
-    very input being an approval on that server's port, unless the server is corrupt. -/
+private theorem credCorruptionLe_of_eq {Attr O : Type} {st st' : IdealCredState Attr O}
+    (hI : st'.issuerCorrupt = st.issuerCorrupt) (hH : st'.corruptHolders = st.corruptHolders)
+    (hS : st'.corruptServers = st.corruptServers) : CredCorruptionLe st st' :=
+  ⟨fun h => hI.trans h, fun _ h => by rw [hH]; exact h, fun _ h => by rw [hS]; exact h⟩
+
+/-- **Port discipline of one accepted input.** A command attributed to `party` arrived on the
+    port of `party`, or on the adversary port in a state where `party` is corrupt. -/
+theorem idealCredStep_attributed {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
+    {st st' : IdealCredState Attr O} {port : CredPort} {cmd : CredCommand Attr}
+    {out : IdealCredOutput O} {party : CredParty}
+    (hStep : idealCredStep cfg st (port, cmd) = some (st', out))
+    (hParty : cmd.party = some party) :
+    port = party.port ∨ (port = CredPort.adversary ∧ st.isCorrupt party) := by
+  have hSpeak := (idealCredStep_inv hStep).1
+  cases cmd with
+  | issue h attrs newRoot =>
+    have hP : CredParty.issuer = party := Option.some.inj hParty
+    subst hP
+    simp only [IdealCredState.speaksFor, Bool.or_eq_true, Bool.and_eq_true,
+      decide_eq_true_eq] at hSpeak
+    exact hSpeak
+  | advanceEpoch newEpoch newRoot =>
+    have hP : CredParty.issuer = party := Option.some.inj hParty
+    subst hP
+    simp only [IdealCredState.speaksFor, Bool.or_eq_true, Bool.and_eq_true,
+      decide_eq_true_eq] at hSpeak
+    exact hSpeak
+  | present h cid stmt =>
+    have hP : CredParty.holder h = party := Option.some.inj hParty
+    subst hP
+    simp only [IdealCredState.speaksFor, Bool.or_eq_true, Bool.and_eq_true,
+      decide_eq_true_eq] at hSpeak
+    exact hSpeak
+  | approveToprf i t =>
+    have hP : CredParty.server i = party := Option.some.inj hParty
+    subst hP
+    simp only [IdealCredState.speaksFor, Bool.or_eq_true, Bool.and_eq_true,
+      decide_eq_true_eq] at hSpeak
+    exact hSpeak
+  | evalToprf t input =>
+    have hP : (none : Option CredParty) = some party := hParty
+    exact nomatch hP
+  | corrupt p =>
+    have hP : (none : Option CredParty) = some party := hParty
+    exact nomatch hP
+
+/-- One accepted input: the corruption set only grows; a new record comes from this very input
+    being an issuance, on the issuer port or on the adversary port with the issuer corrupt in
+    `st`; a new approval comes from this very input being an approval, on that server's port or on
+    the adversary port with the server corrupt in `st`. -/
 theorem idealCredStep_provenance {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
     {st st' : IdealCredState Attr O} {inp : IdealCredInput Attr} {out : IdealCredOutput O}
     (hStep : idealCredStep cfg st inp = some (st', out)) :
-    (st'.issuerCorrupt = st.issuerCorrupt ∧ st'.corruptHolders = st.corruptHolders ∧
-      st'.corruptServers = st.corruptServers) ∧
-    (∀ r ∈ st'.records, r ∈ st.records ∨ st.issuerCorrupt = true ∨
-      (inp, out) = ((CredPort.issuer, CredCommand.issue r.holder r.attrs r.root),
-        IdealCredOutput.issued r.credId)) ∧
-    (∀ a ∈ st'.toprfApprovals, a ∈ st.toprfApprovals ∨ a.1 ∈ st.corruptServers ∨
-      (inp, out) = ((CredPort.server a.1, CredCommand.approveToprf a.1 a.2),
-        IdealCredOutput.toprfApproved)) := by
+    CredCorruptionLe st st' ∧
+    (∀ r ∈ st'.records, r ∈ st.records ∨
+      ∃ port : CredPort,
+        (inp, out) = ((port, CredCommand.issue r.holder r.attrs r.root),
+          IdealCredOutput.issued r.credId) ∧
+        (port = CredPort.issuer ∨ (port = CredPort.adversary ∧ st.issuerCorrupt = true))) ∧
+    (∀ a ∈ st'.toprfApprovals, a ∈ st.toprfApprovals ∨
+      ∃ port : CredPort,
+        (inp, out) = ((port, CredCommand.approveToprf a.1 a.2),
+          IdealCredOutput.toprfApproved) ∧
+        (port = CredPort.server a.1 ∨
+          (port = CredPort.adversary ∧ a.1 ∈ st.corruptServers))) := by
   obtain ⟨port, cmd⟩ := inp
   obtain ⟨hSpeak, hExec⟩ := idealCredStep_inv hStep
   cases cmd with
@@ -713,17 +909,16 @@ theorem idealCredStep_provenance {Attr O : Type} [DecidableEq Attr] (cfg : Ideal
       decide_eq_true_eq] at hSpeak
     subst hSt
     subst hOut
-    refine ⟨⟨rfl, rfl, rfl⟩, fun r hr => ?_, fun a ha => Or.inl ha⟩
+    refine ⟨credCorruptionLe_of_eq rfl rfl rfl, fun r hr => ?_, fun a ha => Or.inl ha⟩
     rcases List.mem_append.mp hr with hOld | hNew
     · exact Or.inl hOld
-    · rcases hSpeak with hP | ⟨_, hC⟩
-      · rw [List.mem_singleton.mp hNew, hP]
-        exact Or.inr (Or.inr rfl)
-      · exact Or.inr (Or.inl hC)
+    · have hR := List.mem_singleton.mp hNew
+      subst hR
+      exact Or.inr ⟨port, rfl, hSpeak⟩
   | advanceEpoch newEpoch newRoot =>
     obtain ⟨_, hSt, _⟩ := credExec_advanceEpoch_inv hExec
     subst hSt
-    exact ⟨⟨rfl, rfl, rfl⟩, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
+    exact ⟨credCorruptionLe_of_eq rfl rfl rfl, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
   | present h cid stmt =>
     rw [credExec_present_eq] at hExec
     cases hC : st.presentAccepts h cid stmt with
@@ -731,103 +926,339 @@ theorem idealCredStep_provenance {Attr O : Type} [DecidableEq Attr] (cfg : Ideal
       simp only [hC, Bool.false_eq_true, ↓reduceIte] at hExec
       obtain ⟨hSt, _⟩ := Prod.mk.inj (Option.some.inj hExec)
       subst hSt
-      exact ⟨⟨rfl, rfl, rfl⟩, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
+      exact ⟨CredCorruptionLe.refl _, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
     | true =>
       simp only [hC, ↓reduceIte] at hExec
       obtain ⟨hSt, _⟩ := Prod.mk.inj (Option.some.inj hExec)
       subst hSt
-      exact ⟨⟨rfl, rfl, rfl⟩, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
+      exact ⟨credCorruptionLe_of_eq rfl rfl rfl, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
   | approveToprf i t =>
     obtain ⟨_, _, hSt, hOut⟩ := credExec_approveToprf_inv hExec
     simp only [IdealCredState.speaksFor, Bool.or_eq_true, Bool.and_eq_true,
       decide_eq_true_eq] at hSpeak
     subst hSt
     subst hOut
-    refine ⟨⟨rfl, rfl, rfl⟩, fun r hr => Or.inl hr, fun a ha => ?_⟩
+    refine ⟨credCorruptionLe_of_eq rfl rfl rfl, fun r hr => Or.inl hr, fun a ha => ?_⟩
     rcases List.mem_cons.mp ha with hNew | hOld
-    · rcases hSpeak with hP | ⟨_, hC⟩
-      · rw [hNew, hP]
-        exact Or.inr (Or.inr rfl)
-      · rw [hNew]
-        exact Or.inr (Or.inl hC)
+    · subst hNew
+      exact Or.inr ⟨port, rfl, hSpeak⟩
     · exact Or.inl hOld
   | evalToprf t input =>
     obtain ⟨_, hCase⟩ := credExec_evalToprf_inv hExec
     rcases hCase with ⟨o, _, hSt, _⟩ | ⟨hSt, _⟩
     · subst hSt
-      exact ⟨⟨rfl, rfl, rfl⟩, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
+      exact ⟨credCorruptionLe_of_eq rfl rfl rfl, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
     · subst hSt
-      exact ⟨⟨rfl, rfl, rfl⟩, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
+      exact ⟨credCorruptionLe_of_eq rfl rfl rfl, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
+  | corrupt party =>
+    obtain ⟨hSt, _⟩ := credExec_corrupt_inv hExec
+    subst hSt
+    refine ⟨(st.withCorrupt_le party).2, fun r hr => Or.inl ?_, fun a ha => Or.inl ?_⟩
+    · cases party <;> exact hr
+    · cases party <;> exact ha
 
-/-- Along any run: corruption is static; every record of the final state was already present,
-    or the issuer is corrupt, or the run contains its issuer-port issuance; every approval was
-    already present, or its server is corrupt, or the run contains it on that server's port. -/
+/-- **Corruption is monotone along a run**: every party corrupt at the start is corrupt at the
+    end. -/
+theorem idealCred_trace_corruption_monotone {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)}
+    (hTr : (idealCredMachine cfg).ValidTrace s tr st) : CredCorruptionLe s st := by
+  induction hTr with
+  | nil _ => exact CredCorruptionLe.refl _
+  | @accept s s' sf inp out rest hStep _ ih =>
+    exact (idealCredStep_provenance cfg hStep).1.trans ih
+  | reject _ _ _ ih => exact ih
+
+/-- The run `tr` from `s` to `st` processed the accepted event `ev` in state `sAt`: the run splits
+    as a run from `s` to `sAt`, the step answering `ev`, and a run to `st`. -/
+inductive CredEventAt {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
+    (s : IdealCredState Attr O) (tr : List (IdealCredInput Attr × IdealCredOutput O))
+    (st sAt : IdealCredState Attr O) (ev : IdealCredInput Attr × IdealCredOutput O) : Prop where
+  | intro (pre post : List (IdealCredInput Attr × IdealCredOutput O))
+      (sNext : IdealCredState Attr O)
+      (hSplit : tr = pre ++ ev :: post)
+      (hPre : (idealCredMachine cfg).ValidTrace s pre sAt)
+      (hStep : (idealCredMachine cfg).step sAt ev.1 = some (sNext, ev.2))
+      (hPost : (idealCredMachine cfg).ValidTrace sNext post st) :
+      CredEventAt cfg s tr st sAt ev
+
+section EventAt
+variable {Attr O : Type} [DecidableEq Attr] {cfg : IdealCredConfig O}
+  {s st sAt : IdealCredState Attr O} {tr : List (IdealCredInput Attr × IdealCredOutput O)}
+  {ev : IdealCredInput Attr × IdealCredOutput O}
+
+theorem CredEventAt.mem (h : CredEventAt cfg s tr st sAt ev) : ev ∈ tr := by
+  obtain ⟨pre, post, _, hSplit, _, _, _⟩ := h
+  rw [hSplit]
+  exact List.mem_append_right _ (List.Mem.head _)
+
+theorem CredEventAt.step (h : CredEventAt cfg s tr st sAt ev) :
+    ∃ sNext : IdealCredState Attr O, idealCredStep cfg sAt ev.1 = some (sNext, ev.2) := by
+  obtain ⟨_, _, sNext, _, _, hStep, _⟩ := h
+  exact ⟨sNext, hStep⟩
+
+/-- The state in which an event of a run from an initial state was processed is reachable. -/
+theorem CredEventAt.reachable (h : CredEventAt cfg s tr st sAt ev)
+    (hInit : (idealCredMachine cfg).Init s) : (idealCredMachine cfg).Reachable sAt := by
+  obtain ⟨pre, _, _, _, hPre, _, _⟩ := h
+  exact ⟨s, pre, hInit, hPre⟩
+
+/-- Whoever is corrupt at the start is corrupt when the event is processed, and whoever is
+    corrupt then is corrupt at the end. -/
+theorem CredEventAt.corruption_le (h : CredEventAt cfg s tr st sAt ev) :
+    CredCorruptionLe s sAt ∧ CredCorruptionLe sAt st := by
+  obtain ⟨pre, post, sNext, _, hPre, hStep, hPost⟩ := h
+  exact ⟨idealCred_trace_corruption_monotone cfg hPre,
+    (idealCredStep_provenance cfg hStep).1.trans (idealCred_trace_corruption_monotone cfg hPost)⟩
+
+theorem CredEventAt.head {s' : IdealCredState Attr O} {inp : IdealCredInput Attr}
+    {out : IdealCredOutput O} {rest : List (IdealCredInput Attr × IdealCredOutput O)}
+    (hStep : (idealCredMachine cfg).step s inp = some (s', out))
+    (hRest : (idealCredMachine cfg).ValidTrace s' rest st) (hEq : (inp, out) = ev) :
+    CredEventAt cfg s ((inp, out) :: rest) st s ev := by
+  subst hEq
+  exact .intro [] rest s' rfl (.nil s) hStep hRest
+
+theorem CredEventAt.tail_accept {s₀ : IdealCredState Attr O} {inp : IdealCredInput Attr}
+    {out : IdealCredOutput O}
+    (h : CredEventAt cfg s tr st sAt ev)
+    (hStep : (idealCredMachine cfg).step s₀ inp = some (s, out)) :
+    CredEventAt cfg s₀ ((inp, out) :: tr) st sAt ev := by
+  obtain ⟨pre, post, sNext, hSplit, hPre, hStepAt, hPost⟩ := h
+  refine .intro ((inp, out) :: pre) post sNext ?_ (.accept hStep hPre) hStepAt hPost
+  rw [hSplit]
+  rfl
+
+theorem CredEventAt.tail_reject {s₀ : IdealCredState Attr O} (inp : IdealCredInput Attr)
+    (h : CredEventAt cfg ((idealCredMachine cfg).errStep s₀ inp) tr st sAt ev)
+    (hNone : (idealCredMachine cfg).step s₀ inp = none) :
+    CredEventAt cfg s₀ tr st sAt ev := by
+  obtain ⟨pre, post, sNext, hSplit, hPre, hStepAt, hPost⟩ := h
+  exact .intro pre post sNext hSplit (.reject inp hNone hPre) hStepAt hPost
+
+end EventAt
+
+/-- Every event of a run was processed in some state of that run. -/
+theorem idealCred_trace_event_at {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
+    {s st : IdealCredState Attr O} {tr : List (IdealCredInput Attr × IdealCredOutput O)}
+    (hTr : (idealCredMachine cfg).ValidTrace s tr st)
+    (ev : IdealCredInput Attr × IdealCredOutput O) (hEv : ev ∈ tr) :
+    ∃ sAt : IdealCredState Attr O, CredEventAt cfg s tr st sAt ev := by
+  induction hTr with
+  | nil _ => exact nomatch hEv
+  | @accept s s' sf inp out rest hStep hRest ih =>
+    rcases List.mem_cons.mp hEv with hHead | hTail
+    · exact ⟨s, CredEventAt.head hStep hRest hHead.symm⟩
+    · obtain ⟨sAt, hAt⟩ := ih hTail
+      exact ⟨sAt, hAt.tail_accept hStep⟩
+  | @reject s sf inp rest hNone _ ih =>
+    obtain ⟨sAt, hAt⟩ := ih hEv
+    exact ⟨sAt, CredEventAt.tail_reject inp hAt hNone⟩
+
+/-- Along any run: the corruption set only grows; every record of the final state was already
+    present, or the run contains its issuance, processed on the issuer port or on the adversary
+    port in a state where the issuer was corrupt; every approval was already present, or the run
+    contains it, processed on that server's port or on the adversary port in a state where the
+    server was corrupt. -/
 theorem idealCred_trace_provenance {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
     {s st : IdealCredState Attr O} {tr : List (IdealCredInput Attr × IdealCredOutput O)}
     (hTr : (idealCredMachine cfg).ValidTrace s tr st) :
-    (st.issuerCorrupt = s.issuerCorrupt ∧ st.corruptHolders = s.corruptHolders ∧
-      st.corruptServers = s.corruptServers) ∧
-    (∀ r ∈ st.records, r ∈ s.records ∨ s.issuerCorrupt = true ∨
-      ((CredPort.issuer, CredCommand.issue r.holder r.attrs r.root),
-        IdealCredOutput.issued r.credId) ∈ tr) ∧
-    (∀ a ∈ st.toprfApprovals, a ∈ s.toprfApprovals ∨ a.1 ∈ s.corruptServers ∨
-      ((CredPort.server a.1, CredCommand.approveToprf a.1 a.2),
-        IdealCredOutput.toprfApproved) ∈ tr) := by
+    CredCorruptionLe s st ∧
+    (∀ r ∈ st.records, r ∈ s.records ∨
+      ∃ (port : CredPort) (sAt : IdealCredState Attr O),
+        CredEventAt cfg s tr st sAt
+          ((port, CredCommand.issue r.holder r.attrs r.root), IdealCredOutput.issued r.credId) ∧
+        (port = CredPort.issuer ∨ (port = CredPort.adversary ∧ sAt.issuerCorrupt = true))) ∧
+    (∀ a ∈ st.toprfApprovals, a ∈ s.toprfApprovals ∨
+      ∃ (port : CredPort) (sAt : IdealCredState Attr O),
+        CredEventAt cfg s tr st sAt
+          ((port, CredCommand.approveToprf a.1 a.2), IdealCredOutput.toprfApproved) ∧
+        (port = CredPort.server a.1 ∨
+          (port = CredPort.adversary ∧ a.1 ∈ sAt.corruptServers))) := by
   induction hTr with
-  | nil _ => exact ⟨⟨rfl, rfl, rfl⟩, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
-  | @accept s s' sf inp out rest hStep _ ih =>
-    obtain ⟨⟨hI, hH, hS⟩, hRec, hApp⟩ := ih
-    obtain ⟨⟨hI', hH', hS'⟩, hRec', hApp'⟩ := idealCredStep_provenance cfg hStep
-    refine ⟨⟨hI.trans hI', hH.trans hH', hS.trans hS'⟩, fun r hr => ?_, fun a ha => ?_⟩
-    · rcases hRec r hr with h1 | h2 | h3
-      · rcases hRec' r h1 with g1 | g2 | g3
+  | nil _ => exact ⟨CredCorruptionLe.refl _, fun r hr => Or.inl hr, fun a ha => Or.inl ha⟩
+  | @accept s s' sf inp out rest hStep hRest ih =>
+    obtain ⟨hLe, hRec, hApp⟩ := ih
+    obtain ⟨hLe', hRec', hApp'⟩ := idealCredStep_provenance cfg hStep
+    refine ⟨hLe'.trans hLe, fun r hr => ?_, fun a ha => ?_⟩
+    · rcases hRec r hr with h1 | ⟨port, sAt, hAt, hPort⟩
+      · rcases hRec' r h1 with g1 | ⟨port, hEq, hPort⟩
         · exact Or.inl g1
-        · exact Or.inr (Or.inl g2)
-        · exact Or.inr (Or.inr (g3 ▸ List.Mem.head _))
-      · exact Or.inr (Or.inl (hI' ▸ h2))
-      · exact Or.inr (Or.inr (List.Mem.tail _ h3))
-    · rcases hApp a ha with h1 | h2 | h3
-      · rcases hApp' a h1 with g1 | g2 | g3
+        · exact Or.inr ⟨port, s, CredEventAt.head hStep hRest hEq, hPort⟩
+      · exact Or.inr ⟨port, sAt, hAt.tail_accept hStep, hPort⟩
+    · rcases hApp a ha with h1 | ⟨port, sAt, hAt, hPort⟩
+      · rcases hApp' a h1 with g1 | ⟨port, hEq, hPort⟩
         · exact Or.inl g1
-        · exact Or.inr (Or.inl g2)
-        · exact Or.inr (Or.inr (g3 ▸ List.Mem.head _))
-      · exact Or.inr (Or.inl (hS' ▸ h2))
-      · exact Or.inr (Or.inr (List.Mem.tail _ h3))
-  | reject _ _ _ ih => exact ih
+        · exact Or.inr ⟨port, s, CredEventAt.head hStep hRest hEq, hPort⟩
+      · exact Or.inr ⟨port, sAt, hAt.tail_accept hStep, hPort⟩
+  | @reject s sf inp rest hNone _ ih =>
+    obtain ⟨hLe, hRec, hApp⟩ := ih
+    refine ⟨hLe, fun r hr => ?_, fun a ha => ?_⟩
+    · rcases hRec r hr with h1 | ⟨port, sAt, hAt, hPort⟩
+      · exact Or.inl h1
+      · exact Or.inr ⟨port, sAt, CredEventAt.tail_reject inp hAt hNone, hPort⟩
+    · rcases hApp a ha with h1 | ⟨port, sAt, hAt, hPort⟩
+      · exact Or.inl h1
+      · exact Or.inr ⟨port, sAt, CredEventAt.tail_reject inp hAt hNone, hPort⟩
 
-/-- **Issuance provenance.** Every record of a run from the initial state was created by an
-    issuer-port issuance event of that run, naming its holder, attributes and root and answered
-    with its identifier — unless the issuer is corrupt. -/
+/-! ### Port discipline along a run, relative to the corruption set at the event and at the end -/
+
+/-- Event-time form: an event of a run whose command is attributed to `party` arrived on the port
+    of `party`, or on the adversary port while `party` was corrupt in the state that processed
+    it. -/
+theorem idealCredMachine_attributed_port_at {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s st sAt : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort}
+    {cmd : CredCommand Attr} {out : IdealCredOutput O} {party : CredParty}
+    (hAt : CredEventAt cfg s tr st sAt ((port, cmd), out))
+    (hParty : cmd.party = some party) :
+    port = party.port ∨ (port = CredPort.adversary ∧ sAt.isCorrupt party) := by
+  obtain ⟨sNext, hStep⟩ := hAt.step
+  exact idealCredStep_attributed cfg hStep hParty
+
+/-- End-of-run form: an event of a run whose command is attributed to `party` arrived on the port
+    of `party`, or on the adversary port and `party` is corrupt in the final state. -/
+theorem idealCredMachine_attributed_port {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort}
+    {cmd : CredCommand Attr} {out : IdealCredOutput O} {party : CredParty}
+    (hTr : (idealCredMachine cfg).ValidTrace s tr st)
+    (hEv : ((port, cmd), out) ∈ tr) (hParty : cmd.party = some party) :
+    port = party.port ∨ (port = CredPort.adversary ∧ st.isCorrupt party) := by
+  obtain ⟨sAt, hAt⟩ := idealCred_trace_event_at cfg hTr _ hEv
+  rcases idealCredMachine_attributed_port_at cfg hAt hParty with h | ⟨h, hC⟩
+  · exact Or.inl h
+  · exact Or.inr ⟨h, hAt.corruption_le.2.isCorrupt party hC⟩
+
+/-- **A party honest at the end of a run spoke only for itself.** If `party` is not corrupt in the
+    final state of a run, every event of the run whose command is attributed to `party` arrived
+    on the port of `party`. -/
+theorem idealCredMachine_honest_party_port {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort}
+    {cmd : CredCommand Attr} {out : IdealCredOutput O} {party : CredParty}
+    (hTr : (idealCredMachine cfg).ValidTrace s tr st) (hHonest : ¬ st.isCorrupt party)
+    (hEv : ((port, cmd), out) ∈ tr) (hParty : cmd.party = some party) :
+    port = party.port := by
+  rcases idealCredMachine_attributed_port cfg hTr hEv hParty with h | ⟨_, hC⟩
+  · exact h
+  · exact absurd hC hHonest
+
+/-- **Issuer honest at the end.** If the issuer is not corrupt in the final state of a run, every
+    issuance and every epoch update of the run arrived on the issuer port. -/
+theorem idealCredMachine_honest_issuer_port {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort}
+    {cmd : CredCommand Attr} {out : IdealCredOutput O}
+    (hTr : (idealCredMachine cfg).ValidTrace s tr st) (hHonest : st.issuerCorrupt = false)
+    (hEv : ((port, cmd), out) ∈ tr)
+    (hCmd : (∃ h attrs newRoot, cmd = CredCommand.issue h attrs newRoot) ∨
+      (∃ newEpoch newRoot, cmd = CredCommand.advanceEpoch newEpoch newRoot)) :
+    port = CredPort.issuer := by
+  have hH : ¬ st.isCorrupt CredParty.issuer := by
+    intro hC
+    have hC' : st.issuerCorrupt = true := hC
+    rw [hHonest] at hC'
+    cases hC'
+  have hParty : cmd.party = some CredParty.issuer := by
+    rcases hCmd with ⟨h, attrs, newRoot, hC⟩ | ⟨newEpoch, newRoot, hC⟩
+    · rw [hC]
+      rfl
+    · rw [hC]
+      rfl
+  exact idealCredMachine_honest_party_port cfg hTr hH hEv hParty
+
+/-- **Holder honest at the end.** If holder `h` is not corrupt in the final state of a run, every
+    presentation in the name of `h` that the run processed (accepted or answered with the verdict
+    `false`) arrived on the port of `h`. -/
+theorem idealCredMachine_honest_holder_port {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort} {h cid : Nat}
+    {stmt : CredentialStatement Attr} {out : IdealCredOutput O}
+    (hTr : (idealCredMachine cfg).ValidTrace s tr st) (hHonest : h ∉ st.corruptHolders)
+    (hEv : ((port, CredCommand.present h cid stmt), out) ∈ tr) :
+    port = CredPort.holder h :=
+  idealCredMachine_honest_party_port cfg (party := CredParty.holder h) hTr hHonest hEv rfl
+
+/-- **Server honest at the end.** If TOPRF server `i` is not corrupt in the final state of a run,
+    every approval in the name of `i` in the run arrived on the port of `i`. -/
+theorem idealCredMachine_honest_server_port {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort} {i : Nat}
+    {t : ToprfTicket} {out : IdealCredOutput O}
+    (hTr : (idealCredMachine cfg).ValidTrace s tr st) (hHonest : i ∉ st.corruptServers)
+    (hEv : ((port, CredCommand.approveToprf (Attr := Attr) i t), out) ∈ tr) :
+    port = CredPort.server i :=
+  idealCredMachine_honest_party_port cfg (party := CredParty.server i) hTr hHonest hEv rfl
+
+/-! ### Issuance and possession provenance -/
+
+/-- **Issuance provenance, event-time form.** Every record of a run from the initial state was
+    created by an issuance event of that run, naming its holder, attributes and root and answered
+    with its identifier; that event was processed on the issuer port, or on the adversary port in
+    a state where the issuer was corrupt. -/
+theorem idealCredMachine_record_provenance_at {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s₀ st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)}
+    (hInit : (idealCredMachine cfg).Init s₀) (hTr : (idealCredMachine cfg).ValidTrace s₀ tr st)
+    (r : CredentialRecord Attr) (hr : r ∈ st.records) :
+    ∃ (port : CredPort) (sAt : IdealCredState Attr O),
+      CredEventAt cfg s₀ tr st sAt
+        ((port, CredCommand.issue r.holder r.attrs r.root), IdealCredOutput.issued r.credId) ∧
+      (port = CredPort.issuer ∨ (port = CredPort.adversary ∧ sAt.issuerCorrupt = true)) := by
+  have hEq : s₀ = IdealCredState.empty cfg := hInit
+  subst hEq
+  rcases (idealCred_trace_provenance cfg hTr).2.1 r hr with h | h
+  · exact nomatch h
+  · exact h
+
+/-- **Issuance provenance, end-of-run form.** Every record of a run from the initial state was
+    created by an issuance event of that run, on the issuer port, or on the adversary port and
+    the issuer is corrupt in the final state. -/
 theorem idealCredMachine_record_provenance {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {s₀ st : IdealCredState Attr O}
     {tr : List (IdealCredInput Attr × IdealCredOutput O)}
     (hInit : (idealCredMachine cfg).Init s₀) (hTr : (idealCredMachine cfg).ValidTrace s₀ tr st)
     (r : CredentialRecord Attr) (hr : r ∈ st.records) :
-    cfg.issuerCorrupt = true ∨
+    ∃ port : CredPort,
+      ((port, CredCommand.issue r.holder r.attrs r.root), IdealCredOutput.issued r.credId) ∈ tr ∧
+      (port = CredPort.issuer ∨ (port = CredPort.adversary ∧ st.issuerCorrupt = true)) := by
+  obtain ⟨port, sAt, hAt, hPort⟩ := idealCredMachine_record_provenance_at cfg hInit hTr r hr
+  refine ⟨port, hAt.mem, ?_⟩
+  rcases hPort with h | ⟨h, hC⟩
+  · exact Or.inl h
+  · exact Or.inr ⟨h, hAt.corruption_le.2.issuer hC⟩
+
+/-- With the issuer not corrupt at the end of a run from the initial state, every record was
+    created by an issuer-port issuance event of that run. -/
+theorem idealCredMachine_record_provenance_honest_issuer {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s₀ st : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)}
+    (hInit : (idealCredMachine cfg).Init s₀) (hTr : (idealCredMachine cfg).ValidTrace s₀ tr st)
+    (hHonest : st.issuerCorrupt = false)
+    (r : CredentialRecord Attr) (hr : r ∈ st.records) :
     ((CredPort.issuer, CredCommand.issue r.holder r.attrs r.root),
       IdealCredOutput.issued r.credId) ∈ tr := by
-  have hEq : s₀ = IdealCredState.empty cfg := hInit
-  subst hEq
-  rcases (idealCred_trace_provenance cfg hTr).2.1 r hr with h | h | h
-  · exact nomatch h
-  · exact Or.inl h
-  · exact Or.inr h
+  obtain ⟨port, hMem, hPort⟩ := idealCredMachine_record_provenance cfg hInit hTr r hr
+  rcases hPort with h | ⟨_, hC⟩
+  · rw [h] at hMem
+    exact hMem
+  · rw [hHonest] at hC
+    cases hC
 
-/-- An accepted issuance arrived on the issuer port, or on the adversary port with a corrupt
-    issuer, and the credential has between `1` and `maxAttrs` attributes. -/
+/-- An accepted issuance arrived on the issuer port, or on the adversary port in a state where the
+    issuer is corrupt, and the credential has between `1` and `maxAttrs` attributes. -/
 theorem idealCredMachine_issuance_authenticated {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {st st' : IdealCredState Attr O} {port : CredPort} {h : Nat}
     {attrs : List Attr} {newRoot : Digest256} {out : IdealCredOutput O}
-    (hReach : (idealCredMachine cfg).Reachable st)
     (hStep : (idealCredMachine cfg).step st (port, .issue h attrs newRoot) = some (st', out)) :
-    (port = CredPort.issuer ∨ (port = CredPort.adversary ∧ cfg.issuerCorrupt = true)) ∧
+    (port = CredPort.issuer ∨ (port = CredPort.adversary ∧ st.issuerCorrupt = true)) ∧
     0 < attrs.length ∧ attrs.length ≤ pqCredentialProfile.maxAttrs := by
   obtain ⟨hSpeak, hExec⟩ := idealCredStep_inv hStep
   obtain ⟨hAcc, _, _⟩ := credExec_issue_inv hExec
   simp only [IdealCredState.speaksFor, Bool.or_eq_true, Bool.and_eq_true,
     decide_eq_true_eq] at hSpeak
   simp only [IdealCredState.issueAccepts, Bool.and_eq_true, decide_eq_true_eq] at hAcc
-  rw [(idealCredInv_reachable hReach).issuerCorrupt_eq] at hSpeak
   exact ⟨hSpeak, hAcc.1.1, hAcc.1.2⟩
 
 /-- Presentation soundness of a single step: an accepted presentation was admitted for holder `h`
@@ -863,9 +1294,10 @@ theorem idealCredMachine_presentation_sound {Attr O : Type} [DecidableEq Attr]
   exact ⟨hSpeak, hPk, hEp, hRoot, hFresh, List.Mem.head _, hIdx, r, hr, hId, hH, hREp, hMatch⟩
 
 /-- **Possession provenance.** If, after a run from the initial state, a presentation of
-    credential `cid` by holder `h` is accepted, then it arrived on the port of `h` (or `h` is
-    corrupt), and `h` owns a record with that identifier, of the statement's epoch, satisfying the
-    statement, which an issuer-port event of the run issued to `h` (or the issuer is corrupt). -/
+    credential `cid` by holder `h` is accepted in state `st`, then it arrived on the port of `h`,
+    or on the adversary port with `h` corrupt in `st`; and `h` owns a record with that identifier,
+    of the statement's epoch, satisfying the statement, which an issuance event of the run issued
+    to `h`, on the issuer port, or on the adversary port and the issuer is corrupt in `st`. -/
 theorem idealCredMachine_presentation_provenance {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {s₀ st st' : IdealCredState Attr O}
     {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort} {h cid : Nat}
@@ -873,47 +1305,97 @@ theorem idealCredMachine_presentation_provenance {Attr O : Type} [DecidableEq At
     (hInit : (idealCredMachine cfg).Init s₀) (hTr : (idealCredMachine cfg).ValidTrace s₀ tr st)
     (hStep : (idealCredMachine cfg).step st (port, .present h cid stmt) =
       some (st', .presentationVerdict true)) :
-    (port = CredPort.holder h ∨ (port = CredPort.adversary ∧ h ∈ cfg.corruptHolders)) ∧
+    (port = CredPort.holder h ∨ (port = CredPort.adversary ∧ h ∈ st.corruptHolders)) ∧
     stmt.issuerPk = cfg.issuerPk ∧
     ∃ r ∈ st.records, r.credId = cid ∧ r.holder = h ∧ r.epoch = stmt.epoch ∧
       CredentialMatchesAttributes stmt r.attrs = true ∧
-      (cfg.issuerCorrupt = true ∨
-        ((CredPort.issuer, CredCommand.issue h r.attrs r.root),
-          IdealCredOutput.issued cid) ∈ tr) := by
+      ∃ issuePort : CredPort,
+        ((issuePort, CredCommand.issue h r.attrs r.root), IdealCredOutput.issued cid) ∈ tr ∧
+        (issuePort = CredPort.issuer ∨
+          (issuePort = CredPort.adversary ∧ st.issuerCorrupt = true)) := by
   have hInv := idealCredInv_reachable ⟨s₀, tr, hInit, hTr⟩
   obtain ⟨hPort, hPk, hEp, _, _, _, _, r, hr, hId, hH, hREp, hMatch⟩ :=
     idealCredMachine_presentation_sound cfg hStep
-  have hProv := idealCredMachine_record_provenance cfg hInit hTr r hr
-  rw [hInv.corruptHolders_eq] at hPort
-  rw [hId, hH] at hProv
-  exact ⟨hPort, hPk.trans hInv.issuerPk_eq, r, hr, hId, hH, hREp.trans hEp.symm, hMatch, hProv⟩
+  obtain ⟨issuePort, hMem, hIssuePort⟩ := idealCredMachine_record_provenance cfg hInit hTr r hr
+  rw [hId, hH] at hMem
+  exact ⟨hPort, hPk.trans hInv.issuerPk_eq, r, hr, hId, hH, hREp.trans hEp.symm, hMatch,
+    issuePort, hMem, hIssuePort⟩
+
+/-- **Possession provenance with honest parties.** If, after a run from the initial state, a
+    presentation of credential `cid` by holder `h` is accepted in a state where neither `h` nor
+    the issuer is corrupt, then it arrived on the port of `h` and the run contains the issuer-port
+    issuance of `cid` to `h`. -/
+theorem idealCredMachine_presentation_provenance_honest {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {s₀ st st' : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort} {h cid : Nat}
+    {stmt : CredentialStatement Attr}
+    (hInit : (idealCredMachine cfg).Init s₀) (hTr : (idealCredMachine cfg).ValidTrace s₀ tr st)
+    (hHolder : h ∉ st.corruptHolders) (hIssuer : st.issuerCorrupt = false)
+    (hStep : (idealCredMachine cfg).step st (port, .present h cid stmt) =
+      some (st', .presentationVerdict true)) :
+    port = CredPort.holder h ∧
+    ∃ r ∈ st.records, r.credId = cid ∧ r.holder = h ∧
+      ((CredPort.issuer, CredCommand.issue h r.attrs r.root), IdealCredOutput.issued cid) ∈ tr := by
+  obtain ⟨hPort, _, r, hr, hId, hH, _, _, issuePort, hMem, hIssuePort⟩ :=
+    idealCredMachine_presentation_provenance cfg hInit hTr hStep
+  refine ⟨?_, r, hr, hId, hH, ?_⟩
+  · rcases hPort with hP | ⟨_, hC⟩
+    · exact hP
+    · exact absurd hC hHolder
+  · rcases hIssuePort with hP | ⟨_, hC⟩
+    · rw [hP] at hMem
+      exact hMem
+    · rw [hIssuer] at hC
+      cases hC
 
 /-! ### Rejection of unauthenticated behaviour -/
 
-/-- Tooth (audit #2): with an honest issuer, an issuance arriving on any port other than the
-    issuer's — in particular the adversary's — is rejected in every reachable state, whatever
-    holder, attributes and root it names. -/
+/-- Tooth (audit #2): in a state where the issuer is not corrupt, an issuance arriving on any port
+    other than the issuer's — in particular the adversary's — is rejected, whatever holder,
+    attributes and root it names. -/
 theorem idealCredMachine_rejects_foreign_issue {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {st : IdealCredState Attr O} (port : CredPort) (h : Nat)
     (attrs : List Attr) (newRoot : Digest256)
-    (hReach : (idealCredMachine cfg).Reachable st)
-    (hHonest : cfg.issuerCorrupt = false) (hPort : ¬ (port = CredPort.issuer)) :
+    (hHonest : st.issuerCorrupt = false) (hPort : ¬ (port = CredPort.issuer)) :
     (idealCredMachine cfg).step st (port, .issue h attrs newRoot) = none := by
   apply idealCredStep_eq_none_of_not_speaksFor
-  simp only [IdealCredState.speaksFor, (idealCredInv_reachable hReach).issuerCorrupt_eq, hHonest,
-    decide_eq_false hPort, Bool.and_false, Bool.or_false]
+  simp only [IdealCredState.speaksFor, hHonest, decide_eq_false hPort, Bool.and_false,
+    Bool.or_false]
 
-/-- Tooth (audit #2): with an honest issuer, an epoch / accumulator-root update arriving on any
-    other port is rejected in every reachable state. -/
+/-- Tooth (audit #2): in a state where the issuer is not corrupt, an epoch / accumulator-root
+    update arriving on any other port is rejected. -/
 theorem idealCredMachine_rejects_foreign_epoch_advance {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {st : IdealCredState Attr O} (port : CredPort) (newEpoch : Nat)
     (newRoot : Digest256)
-    (hReach : (idealCredMachine (Attr := Attr) cfg).Reachable st)
-    (hHonest : cfg.issuerCorrupt = false) (hPort : ¬ (port = CredPort.issuer)) :
+    (hHonest : st.issuerCorrupt = false) (hPort : ¬ (port = CredPort.issuer)) :
     (idealCredMachine cfg).step st (port, .advanceEpoch newEpoch newRoot) = none := by
   apply idealCredStep_eq_none_of_not_speaksFor
-  simp only [IdealCredState.speaksFor, (idealCredInv_reachable hReach).issuerCorrupt_eq, hHonest,
-    decide_eq_false hPort, Bool.and_false, Bool.or_false]
+  simp only [IdealCredState.speaksFor, hHonest, decide_eq_false hPort, Bool.and_false,
+    Bool.or_false]
+
+/-- Tooth: a corruption request arriving on any port other than the adversary's is rejected. -/
+theorem idealCredMachine_rejects_foreign_corrupt {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) (st : IdealCredState Attr O) (port : CredPort) (party : CredParty)
+    (hPort : ¬ (port = CredPort.adversary)) :
+    (idealCredMachine (Attr := Attr) cfg).step st (port, .corrupt party) = none := by
+  apply idealCredStep_eq_none_of_not_speaksFor
+  simp only [IdealCredState.speaksFor, decide_eq_false hPort]
+
+/-- A corruption request on the adversary port is answered in every state; afterwards the party is
+    corrupt, every earlier corrupt party still is, and records, approvals, charges, epoch and
+    used challenges are unchanged. -/
+theorem idealCredMachine_corrupt_accepted {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) (st : IdealCredState Attr O) (party : CredParty) :
+    ∃ st' : IdealCredState Attr O,
+      (idealCredMachine cfg).step st (.adversary, .corrupt party) = some (st', .corrupted) ∧
+      st'.isCorrupt party ∧ CredCorruptionLe st st' ∧
+      st'.records = st.records ∧ st'.toprfApprovals = st.toprfApprovals ∧
+      st'.oprfCharges = st.oprfCharges ∧ st'.oprfTable = st.oprfTable ∧
+      st'.epoch = st.epoch ∧ st'.accumulatorRoot = st.accumulatorRoot ∧
+      st'.usedChallenges = st.usedChallenges := by
+  refine ⟨st.withCorrupt party, idealCredStep_corrupt_eq cfg st party,
+    (st.withCorrupt_le party).1, (st.withCorrupt_le party).2, ?_⟩
+  cases party <;> exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 /-- Tooth (audit #10): a credential with zero attributes is never issued, on any port. -/
 theorem idealCredMachine_rejects_empty_credential {Attr O : Type} [DecidableEq Attr]
@@ -925,17 +1407,16 @@ theorem idealCredMachine_rejects_empty_credential {Attr O : Type} [DecidableEq A
     simp only [IdealCredState.issueAccepts, hEmpty, Nat.lt_irrefl, decide_false, Bool.false_and]
   simp only [credExec, hAcc, Bool.false_eq_true, ↓reduceIte]
 
-/-- Tooth (audit #2): a presentation in the name of an honest holder arriving on any port other
-    than that holder's is rejected in every reachable state, whatever credential it names. -/
+/-- Tooth (audit #2): a presentation in the name of a holder not corrupt in the current state,
+    arriving on any port other than that holder's, is rejected, whatever credential it names. -/
 theorem idealCredMachine_rejects_foreign_presentation {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {st : IdealCredState Attr O} (port : CredPort) (h cid : Nat)
     (stmt : CredentialStatement Attr)
-    (hReach : (idealCredMachine cfg).Reachable st)
-    (hHonest : h ∉ cfg.corruptHolders) (hPort : ¬ (port = CredPort.holder h)) :
+    (hHonest : h ∉ st.corruptHolders) (hPort : ¬ (port = CredPort.holder h)) :
     (idealCredMachine cfg).step st (port, .present h cid stmt) = none := by
   apply idealCredStep_eq_none_of_not_speaksFor
-  simp only [IdealCredState.speaksFor, (idealCredInv_reachable hReach).corruptHolders_eq,
-    decide_eq_false hHonest, decide_eq_false hPort, Bool.and_false, Bool.or_false]
+  simp only [IdealCredState.speaksFor, decide_eq_false hHonest, decide_eq_false hPort,
+    Bool.and_false, Bool.or_false]
 
 /-- Tooth (audit #2): a party presenting on its own port a credential identifier none of whose
     records it owns is never accepted, even for an empty disclosure. -/
@@ -1114,22 +1595,28 @@ theorem idealCredMachine_ineligible_presentation_distinguishable {Attr O : Type}
 
 /-! ## 7. Ideal threshold OPRF -/
 
-/-- **TOPRF evaluation provenance.** If, after a run from the initial state with at most
-    `toprfMaxCorrupt` corrupt servers, an evaluation is answered, then the answer is the value of
-    the keyed function at `(keyId, epoch, input)`, at least `toprfOnlineServers` distinct servers
-    approved the ticket, and the run contains an approval of that ticket on the port of an honest
-    committee server. -/
+/-- **TOPRF evaluation provenance.** If, after a run from the initial state, an evaluation is
+    answered in a state `st` with at most `toprfMaxCorrupt` corrupt servers, then the answer is
+    the value of the keyed function at `(keyId, epoch, input)`, at least `toprfOnlineServers`
+    distinct servers approved the ticket, and the run contains an approval of that ticket on the
+    port of a committee server that is not corrupt in `st`, processed in a state `sAt` in which
+    that server was not corrupt either. Approvals recorded for servers corrupted between their
+    approval and the evaluation count towards the quorum; the bound on `st` still leaves one
+    approver outside the corruption set. -/
 theorem idealCredMachine_toprf_provenance {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {s₀ st st' : IdealCredState Attr O}
     {tr : List (IdealCredInput Attr × IdealCredOutput O)} {port : CredPort} {t : ToprfTicket}
     {input : Bytes} {out : IdealCredOutput O}
     (hInit : (idealCredMachine cfg).Init s₀) (hTr : (idealCredMachine cfg).ValidTrace s₀ tr st)
-    (hCorrupt : cfg.corruptServerCount ≤ pqCredentialProfile.toprfMaxCorrupt)
+    (hCorrupt : st.corruptServerCount ≤ pqCredentialProfile.toprfMaxCorrupt)
     (hStep : (idealCredMachine cfg).step st (port, .evalToprf t input) = some (st', out)) :
     out = .toprfEvaluated (cfg.oprf ⟨t.keyId, t.epoch, input⟩) ∧
     pqCredentialProfile.toprfOnlineServers ≤ st.approvalCount t ∧
-    ∃ i : Nat, i < pqCredentialProfile.toprfServers ∧ i ∉ cfg.corruptServers ∧
-      ((CredPort.server i, CredCommand.approveToprf i t), IdealCredOutput.toprfApproved) ∈ tr := by
+    ∃ i : Nat, i < pqCredentialProfile.toprfServers ∧ i ∉ st.corruptServers ∧
+      ((CredPort.server i, CredCommand.approveToprf i t), IdealCredOutput.toprfApproved) ∈ tr ∧
+      ∃ sAt : IdealCredState Attr O, i ∉ sAt.corruptServers ∧
+        CredEventAt cfg s₀ tr st sAt
+          ((CredPort.server i, CredCommand.approveToprf i t), IdealCredOutput.toprfApproved) := by
   have hInv := idealCredInv_reachable ⟨s₀, tr, hInit, hTr⟩
   have hStep' : idealCredStep cfg st (port, .evalToprf t input) = some (st', out) := hStep
   obtain ⟨hAcc, hCase⟩ := credExec_evalToprf_inv (idealCredStep_inv hStep').2
@@ -1143,20 +1630,23 @@ theorem idealCredMachine_toprf_provenance {Attr O : Type} [DecidableEq Attr]
   have hGap : pqCredentialProfile.toprfMaxCorrupt < pqCredentialProfile.toprfOnlineServers := by
     decide
   have hLt : (List.range pqCredentialProfile.toprfServers).countP
-        (fun i => decide (i ∈ cfg.corruptServers)) <
+        (fun i => decide (i ∈ st.corruptServers)) <
       (List.range pqCredentialProfile.toprfServers).countP
         (fun i => decide ((i, t) ∈ st.toprfApprovals)) :=
     Nat.lt_of_le_of_lt hCorrupt (Nat.lt_of_lt_of_le hGap hQuorum)
   obtain ⟨i, hi, hApproved, hHonest⟩ := credExists_of_countP_lt _ _ _ hLt
   have hMem : (i, t) ∈ st.toprfApprovals := of_decide_eq_true hApproved
-  have hNotCorrupt : i ∉ cfg.corruptServers := of_decide_eq_false hHonest
+  have hNotCorrupt : i ∉ st.corruptServers := of_decide_eq_false hHonest
   have hEq : s₀ = IdealCredState.empty cfg := hInit
   subst hEq
   refine ⟨hOut, hQuorum, i, List.mem_range.mp hi, hNotCorrupt, ?_⟩
-  rcases (idealCred_trace_provenance cfg hTr).2.2 (i, t) hMem with h | h | h
+  rcases (idealCred_trace_provenance cfg hTr).2.2 (i, t) hMem with h | ⟨p, sAt, hAt, hPort⟩
   · exact nomatch h
-  · exact absurd h hNotCorrupt
-  · exact h
+  · have hNotAt : i ∉ sAt.corruptServers := fun hC => hNotCorrupt (hAt.corruption_le.2.servers i hC)
+    rcases hPort with hP | ⟨_, hC⟩
+    · subst hP
+      exact ⟨hAt.mem, sAt, hNotAt, hAt⟩
+    · exact absurd hC hNotAt
 
 /-- **TOPRF rate budget.** In a reachable state, for every key: the number of points of the keyed
     function revealed so far is at most the number of tickets charged to the key, which is at most
@@ -1215,17 +1705,16 @@ theorem idealCredMachine_toprf_rejects_below_quorum {Attr O : Type} [DecidableEq
     simp only [IdealCredState.toprfAccepts, decide_eq_false hNot, Bool.false_and]
   simp only [credExec, hAcc, Bool.false_eq_true, ↓reduceIte]
 
-/-- Tooth: an approval in the name of an honest server arriving on any other port is rejected in
-    every reachable state, so the adversary cannot manufacture a quorum. -/
+/-- Tooth: an approval in the name of a server not corrupt in the current state, arriving on any
+    other port, is rejected: the adversary can add approvals only for servers it has corrupted. -/
 theorem idealCredMachine_rejects_foreign_approval {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {st : IdealCredState Attr O} (port : CredPort) (i : Nat)
     (t : ToprfTicket)
-    (hReach : (idealCredMachine (Attr := Attr) cfg).Reachable st)
-    (hHonest : i ∉ cfg.corruptServers) (hPort : ¬ (port = CredPort.server i)) :
+    (hHonest : i ∉ st.corruptServers) (hPort : ¬ (port = CredPort.server i)) :
     (idealCredMachine cfg).step st (port, .approveToprf i t) = none := by
   apply idealCredStep_eq_none_of_not_speaksFor
-  simp only [IdealCredState.speaksFor, (idealCredInv_reachable hReach).corruptServers_eq,
-    decide_eq_false hHonest, decide_eq_false hPort, Bool.and_false, Bool.or_false]
+  simp only [IdealCredState.speaksFor, decide_eq_false hHonest, decide_eq_false hPort,
+    Bool.and_false, Bool.or_false]
 
 /-- Tooth (audit #9): a key whose quota is exhausted releases no further TOPRF value. -/
 theorem idealCredMachine_toprf_rejects_over_budget {Attr O : Type} [DecidableEq Attr]
@@ -1271,8 +1760,9 @@ theorem idealCredMachine_toprf_rejects_max_counter {Attr O : Type} [DecidableEq 
 
 /-! ## 8. A concrete run: the audit counterexamples on the machine itself -/
 
-/-- Demo configuration over `Nat` attributes and outputs: holder `9` and server `4` are corrupt,
-    the issuer is corrupt iff `issuerCorrupt`, and each key has a quota of two. -/
+/-- Demo configuration over `Nat` attributes and outputs: holder `9` and server `4` are corrupt
+    from the start, the issuer is corrupt from the start iff `issuerCorrupt`, and each key has a
+    quota of two. -/
 def idealCredDemoConfig (issuerCorrupt : Bool) : IdealCredConfig Nat where
   issuerPk := [1]
   epoch₀ := 0
@@ -1331,8 +1821,8 @@ theorem idealCredDemo_rejects :
         some (.presentationVerdict true)) := by
   decide +kernel
 
-/-- Caveat: the guarantees are relative to the corruption set. With a corrupt issuer the very
-    adversary-port issuance of invented attributes rejected above is accepted. -/
+/-- Caveat: the guarantees are relative to the corruption set. With an initially corrupt issuer
+    the very adversary-port issuance of invented attributes rejected above is accepted. -/
 theorem idealCredDemo_corrupt_issuer_issues :
     ((idealCredMachine (idealCredDemoConfig true)).step (IdealCredState.empty (idealCredDemoConfig true))
         (.adversary, .issue 9 [99] 2#256)).map Prod.snd = some (.issued 0) := by
@@ -1368,14 +1858,154 @@ theorem idealCredDemo_toprf_rejects :
           (.client, .evalToprf ⟨[3], 0, 64⟩ [8, 8])).isSome = true) := by
   decide +kernel
 
+/-! ### Adaptive corruption on the demo run -/
+
+/-- The accepted `(input, output)` pairs of `credRun`, in order. -/
+def credRunTrace {S In Out : Type} (M : Machine S In Out) : S → List In → List (In × Out)
+  | _, [] => []
+  | s, inp :: rest =>
+    match (M.runStep s inp).2 with
+    | some out => (inp, out) :: credRunTrace M (M.runStep s inp).1 rest
+    | none => credRunTrace M (M.runStep s inp).1 rest
+
+/-- `credRun` on an input sequence is a valid run with trace `credRunTrace`. -/
+theorem credRun_validTrace {S In Out : Type} (M : Machine S In Out) (xs : List In) :
+    ∀ s : S, M.ValidTrace s (credRunTrace M s xs) (credRun M s xs).1 := by
+  induction xs with
+  | nil => exact fun s => .nil s
+  | cons inp rest ih =>
+    intro s
+    cases hS : M.step s inp with
+    | none =>
+      have hR : M.runStep s inp = (M.errStep s inp, none) := by
+        simp only [Machine.runStep, hS]
+      simp only [credRunTrace, credRun, hR]
+      exact .reject inp hS (ih _)
+    | some p =>
+      obtain ⟨s', out⟩ := p
+      have hR : M.runStep s inp = (s', some out) := by
+        simp only [Machine.runStep, hS]
+      simp only [credRunTrace, credRun, hR]
+      exact .accept hS (ih _)
+
+/-- Adaptive corruption of a holder, on the demo state (holder `1` owns credential `0` and is not
+    corrupt): once the adversary has corrupted holder `1`, the adversary-port presentation in the
+    name of holder `1` — rejected before, `idealCredDemo_adaptive_rejects` — is accepted. -/
+theorem idealCredDemo_adaptive_holder_corruption_accepts :
+    (credRun (idealCredMachine (idealCredDemoConfig false)) idealCredDemoState
+        [(.adversary, .corrupt (.holder 1)),
+         (.adversary, .present 1 0 (idealCredDemoStatement []))]).2 =
+      [some .corrupted, some (.presentationVerdict true)] := by
+  decide +kernel
+
+/-- Tooth: on the demo state,
+    (a) the adversary-port presentation in the name of holder `1`, not yet corrupt, is rejected;
+    (b) it is still rejected after the adversary corrupted a different holder (`2`);
+    (c) a corruption request is rejected on the holder's own port, (d) on the issuer port and
+    (e) on the client port. -/
+theorem idealCredDemo_adaptive_rejects :
+    ¬ (((idealCredMachine (idealCredDemoConfig false)).step idealCredDemoState
+          (.adversary, .present 1 0 (idealCredDemoStatement []))).isSome = true ∨
+      (credRun (idealCredMachine (idealCredDemoConfig false)) idealCredDemoState
+          [(.adversary, .corrupt (.holder 2)),
+           (.adversary, .present 1 0 (idealCredDemoStatement []))]).2 =
+        [some .corrupted, some (.presentationVerdict true)] ∨
+      ((idealCredMachine (idealCredDemoConfig false)).step idealCredDemoState
+          (.holder 1, .corrupt (.holder 1))).isSome = true ∨
+      ((idealCredMachine (idealCredDemoConfig false)).step idealCredDemoState
+          (.issuer, .corrupt .issuer)).isSome = true ∨
+      ((idealCredMachine (idealCredDemoConfig false)).step idealCredDemoState
+          (.client, .corrupt (.server 0))).isSome = true) := by
+  decide +kernel
+
+/-- Inputs of the adaptive TOPRF demo: the adversary corrupts servers `0`, `1`, `2` (server `4` is
+    corrupt from the start) and approves the demo ticket in the name of all four, on its own
+    port. -/
+def idealCredDemoAdaptiveQuorumInputs : List (IdealCredInput Nat) :=
+  [(.adversary, .corrupt (.server 0)), (.adversary, .corrupt (.server 1)),
+   (.adversary, .corrupt (.server 2)),
+   (.adversary, .approveToprf 0 idealCredDemoTicket),
+   (.adversary, .approveToprf 1 idealCredDemoTicket),
+   (.adversary, .approveToprf 2 idealCredDemoTicket),
+   (.adversary, .approveToprf 4 idealCredDemoTicket)]
+
+/-- After the adaptive TOPRF demo inputs, every one of which is answered, the evaluation is
+    answered although every input of the run arrived on the adversary port; four committee
+    servers are then corrupt. -/
+theorem idealCredDemo_adaptive_quorum_without_server_port :
+    (credRun (idealCredMachine (idealCredDemoConfig false))
+        (IdealCredState.empty (idealCredDemoConfig false))
+        (idealCredDemoAdaptiveQuorumInputs ++
+          [(.adversary, .evalToprf idealCredDemoTicket [8, 8])])).2 =
+      [some .corrupted, some .corrupted, some .corrupted, some .toprfApproved,
+       some .toprfApproved, some .toprfApproved, some .toprfApproved,
+       some (.toprfEvaluated 2)] ∧
+    idealCredDemoAdaptiveQuorumInputs.all (fun inp => decide (inp.1 = CredPort.adversary)) = true ∧
+    (credRun (idealCredMachine (idealCredDemoConfig false))
+        (IdealCredState.empty (idealCredDemoConfig false))
+        idealCredDemoAdaptiveQuorumInputs).1.corruptServerCount = 4 := by
+  decide +kernel
+
+/-- Tooth: `idealCredMachine_toprf_provenance` is false without its bound on the number of corrupt
+    servers in the answering state. In the adaptive TOPRF demo run an evaluation is answered and
+    the run contains no approval on any server port. -/
+theorem idealCredDemo_toprf_provenance_needs_corruption_bound :
+    ¬ (∀ (st st' : IdealCredState Nat Nat)
+        (tr : List (IdealCredInput Nat × IdealCredOutput Nat)) (port : CredPort)
+        (t : ToprfTicket) (input : Bytes) (out : IdealCredOutput Nat),
+        (idealCredMachine (idealCredDemoConfig false)).ValidTrace
+          (IdealCredState.empty (idealCredDemoConfig false)) tr st →
+        (idealCredMachine (idealCredDemoConfig false)).step st (port, .evalToprf t input) =
+          some (st', out) →
+        ∃ i : Nat, ((CredPort.server i, CredCommand.approveToprf i t),
+          IdealCredOutput.toprfApproved) ∈ tr) := by
+  intro hAll
+  have hNoServer : (credRunTrace (idealCredMachine (idealCredDemoConfig false))
+      (IdealCredState.empty (idealCredDemoConfig false)) idealCredDemoAdaptiveQuorumInputs).all
+        (fun ev => decide (ev.1.1 = CredPort.adversary)) = true := by
+    decide +kernel
+  have hSome : ((idealCredMachine (idealCredDemoConfig false)).step
+      (credRun (idealCredMachine (idealCredDemoConfig false))
+        (IdealCredState.empty (idealCredDemoConfig false)) idealCredDemoAdaptiveQuorumInputs).1
+      (.adversary, .evalToprf idealCredDemoTicket [8, 8])).isSome = true := by
+    decide +kernel
+  cases hS : (idealCredMachine (idealCredDemoConfig false)).step
+      (credRun (idealCredMachine (idealCredDemoConfig false))
+        (IdealCredState.empty (idealCredDemoConfig false)) idealCredDemoAdaptiveQuorumInputs).1
+      (.adversary, .evalToprf idealCredDemoTicket [8, 8]) with
+  | none =>
+    rw [hS] at hSome
+    cases hSome
+  | some p =>
+    obtain ⟨i, hi⟩ := hAll _ p.1 _ _ _ _ p.2 (credRun_validTrace _ _ _) hS
+    have hAdv := List.all_eq_true.mp hNoServer _ hi
+    exact nomatch of_decide_eq_true hAdv
+
 #verify_constructive
   Qsag.Spec.idealCredInv_exec
   Qsag.Spec.idealCredInv_reachable
   Qsag.Spec.idealCredStep_provenance
+  Qsag.Spec.idealCredStep_attributed
+  Qsag.Spec.idealCredStep_corrupt_eq
   Qsag.Spec.idealCredStep_output_command
   Qsag.Spec.idealCredStep_issuer_issues_at_init
   Qsag.Spec.idealCred_trace_provenance
+  Qsag.Spec.idealCred_trace_corruption_monotone
+  Qsag.Spec.idealCred_trace_event_at
+  Qsag.Spec.idealCredMachine_attributed_port_at
+  Qsag.Spec.idealCredMachine_attributed_port
+  Qsag.Spec.idealCredMachine_honest_party_port
+  Qsag.Spec.idealCredMachine_honest_issuer_port
+  Qsag.Spec.idealCredMachine_honest_holder_port
+  Qsag.Spec.idealCredMachine_honest_server_port
+  Qsag.Spec.idealCredMachine_record_provenance_at
   Qsag.Spec.idealCredMachine_record_provenance
+  Qsag.Spec.idealCredMachine_record_provenance_honest_issuer
+  Qsag.Spec.idealCredMachine_presentation_provenance_honest
+  Qsag.Spec.idealCredMachine_corrupt_accepted
+  Qsag.Spec.credRun_validTrace
+  Qsag.Spec.idealCredDemo_adaptive_holder_corruption_accepts
+  Qsag.Spec.idealCredDemo_adaptive_quorum_without_server_port
   Qsag.Spec.idealCredMachine_issuance_authenticated
   Qsag.Spec.idealCredMachine_presentation_sound
   Qsag.Spec.idealCredMachine_presentation_provenance
@@ -1421,6 +2051,14 @@ theorem idealCredDemo_toprf_rejects :
   Qsag.Spec.idealCredDemo_rejects
 #tooth_pair Qsag.Spec.idealCredDemo_toprf_accepts vs
   Qsag.Spec.idealCredDemo_toprf_rejects
+#tooth_pair Qsag.Spec.idealCredMachine_corrupt_accepted vs
+  Qsag.Spec.idealCredMachine_rejects_foreign_corrupt
+#tooth_pair Qsag.Spec.idealCredDemo_adaptive_holder_corruption_accepts vs
+  Qsag.Spec.idealCredDemo_adaptive_rejects
+#tooth_pair Qsag.Spec.idealCredMachine_toprf_provenance vs
+  Qsag.Spec.idealCredDemo_toprf_provenance_needs_corruption_bound
+#tooth_pair Qsag.Spec.idealCredMachine_honest_holder_port vs
+  Qsag.Spec.idealCredDemo_adaptive_rejects
 
 end Qsag.Spec
 end

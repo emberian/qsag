@@ -7,7 +7,9 @@ Universal state-machine refinement framework (`seL4` / `CompCert` style) support
 2. Constructive witness-carrying forward simulation (`Refines C A`, written `C ⊑ A`) with
    reflexivity, vertical transitivity (`0 Classical.choice`), and multi-turn trace inclusion,
 3. Functional lockstep simulation (`LockstepSim`) via an invariant and abstraction function,
-4. Hardware leakage-contract refinement (`ExecMode`, `ObsMachine`, `ObsRefines`).
+4. Hardware leakage-contract refinement (`ExecMode`, `ObsMachine`, `ObsRefines`),
+5. Interface-abstracting stuttering simulation (`DataRefines`) between machines with different
+   alphabets, with trace inclusion up to the interface maps (`projectTrace`).
 
 This module imports only `Spec` and `Tactic`. The morphisms to and from `Qsag.PartyMachine` /
 `Qsag.ForwardSim`, the `N`-party rushing-network product refinement (`NetworkRefines`) and the
@@ -289,12 +291,201 @@ theorem ObsRefines.preserve_admitsTrace {S_c S_a In Out Obs : Type}
     A.AdmitsTrace tr :=
   r.functional.preserve_admitsTrace hAdmits
 
+/-! ## 4. Interface-Abstracting Stuttering Refinement (`DataRefines`) -/
+
+/-- Forward simulation between machines with DIFFERENT input and output alphabets.
+    `visIn` names the abstract input a concrete input implements (`none` for a concrete-internal
+    turn such as a network delivery or a crash), `visOut` maps concrete outputs.
+    Unlike `Refines`, the concrete machine may reject an input the abstract machine would accept
+    (the abstract machine then does not move), so `DataRefines` transfers safety of accepted
+    visible events and does not transfer liveness. -/
+structure DataRefines {S_c S_a In_c In_a Out_c Out_a : Type}
+    (C : Machine S_c In_c Out_c) (A : Machine S_a In_a Out_a)
+    (visIn : In_c → Option In_a) (visOut : Out_c → Out_a) : Type 1 where
+  Rel : S_c → S_a → Prop
+  absInit : S_c → S_a
+  init_ok : ∀ {c₀ : S_c}, C.Init c₀ → A.Init (absInit c₀) ∧ Rel c₀ (absInit c₀)
+  sim_visible : ∀ {c c' : S_c} {a : S_a} {inp : In_c} {out : Out_c} {j : In_a},
+    Rel c a → C.step c inp = some (c', out) → visIn inp = some j →
+    ∃ a' : S_a, A.step a j = some (a', visOut out) ∧ Rel c' a'
+  sim_internal : ∀ {c c' : S_c} {a : S_a} {inp : In_c} {out : Out_c},
+    Rel c a → C.step c inp = some (c', out) → visIn inp = none → Rel c' a
+  sim_reject : ∀ {c : S_c} {a : S_a} {inp : In_c},
+    Rel c a → C.step c inp = none → Rel (C.errStep c inp) a
+
+/-- The abstract image of a concrete trace: internal turns are erased. -/
+@[expose] def projectTrace {In_c In_a Out_c Out_a : Type}
+    (visIn : In_c → Option In_a) (visOut : Out_c → Out_a) :
+    List (In_c × Out_c) → List (In_a × Out_a)
+  | [] => []
+  | (inp, out) :: rest =>
+    match visIn inp with
+    | some j => (j, visOut out) :: projectTrace visIn visOut rest
+    | none => projectTrace visIn visOut rest
+
+/-- Every concrete execution is matched by an abstract execution of its projected trace. -/
+theorem DataRefines.lift_validTrace {S_c S_a In_c In_a Out_c Out_a : Type}
+    {C : Machine S_c In_c Out_c} {A : Machine S_a In_a Out_a}
+    {visIn : In_c → Option In_a} {visOut : Out_c → Out_a}
+    (sim : DataRefines C A visIn visOut) :
+    ∀ {c₀ c_final : S_c} {a₀ : S_a} {trace : List (In_c × Out_c)},
+      sim.Rel c₀ a₀ →
+      C.ValidTrace c₀ trace c_final →
+      ∃ a_final : S_a,
+        A.ValidTrace a₀ (projectTrace visIn visOut trace) a_final ∧ sim.Rel c_final a_final
+  | _, _, a₀, _, hRel, .nil _ => ⟨a₀, .nil a₀, hRel⟩
+  | _, _, a₀, _, hRel, .accept (inp := inp) (out := out) hStepC hRest => by
+    cases hVis : visIn inp with
+    | some j =>
+      obtain ⟨a', hStepA, hRel'⟩ := sim.sim_visible hRel hStepC hVis
+      obtain ⟨a_final, hTrA, hRelFinal⟩ := sim.lift_validTrace hRel' hRest
+      refine ⟨a_final, ?_, hRelFinal⟩
+      simp only [projectTrace, hVis]
+      exact .accept hStepA hTrA
+    | none =>
+      obtain ⟨a_final, hTrA, hRelFinal⟩ :=
+        sim.lift_validTrace (sim.sim_internal hRel hStepC hVis) hRest
+      refine ⟨a_final, ?_, hRelFinal⟩
+      simp only [projectTrace, hVis]
+      exact hTrA
+  | _, _, _, _, hRel, .reject _ hNoneC hRest =>
+    sim.lift_validTrace (sim.sim_reject hRel hNoneC) hRest
+
+/-- Trace inclusion up to the interface maps. -/
+theorem DataRefines.preserve_admitsTrace {S_c S_a In_c In_a Out_c Out_a : Type}
+    {C : Machine S_c In_c Out_c} {A : Machine S_a In_a Out_a}
+    {visIn : In_c → Option In_a} {visOut : Out_c → Out_a}
+    (sim : DataRefines C A visIn visOut) {trace : List (In_c × Out_c)}
+    (hAdmitsC : C.AdmitsTrace trace) :
+    A.AdmitsTrace (projectTrace visIn visOut trace) := by
+  rcases hAdmitsC with ⟨c₀, c_final, hInitC, hTraceC⟩
+  obtain ⟨hInitA, hRel₀⟩ := sim.init_ok hInitC
+  obtain ⟨a_final, hTraceA, _⟩ := sim.lift_validTrace hRel₀ hTraceC
+  exact ⟨sim.absInit c₀, a_final, hInitA, hTraceA⟩
+
+/-- Every reachable concrete state is related to a reachable abstract state. -/
+theorem DataRefines.reachable_rel {S_c S_a In_c In_a Out_c Out_a : Type}
+    {C : Machine S_c In_c Out_c} {A : Machine S_a In_a Out_a}
+    {visIn : In_c → Option In_a} {visOut : Out_c → Out_a}
+    (sim : DataRefines C A visIn visOut) {c : S_c} (hReach : C.Reachable c) :
+    ∃ a : S_a, A.Reachable a ∧ sim.Rel c a := by
+  rcases hReach with ⟨c₀, tr, hInitC, hTraceC⟩
+  obtain ⟨hInitA, hRel₀⟩ := sim.init_ok hInitC
+  obtain ⟨a, hTraceA, hRel⟩ := sim.lift_validTrace hRel₀ hTraceC
+  exact ⟨a, ⟨sim.absInit c₀, _, hInitA, hTraceA⟩, hRel⟩
+
+/-- A same-interface `Refines` witness whose abstract machine keeps its state on rejection is a
+    `DataRefines` witness with identity interface maps. -/
+def Refines.toDataRefines {S_c S_a In Out : Type}
+    {C : Machine S_c In Out} {A : Machine S_a In Out}
+    (sim : C ⊑ A) (hErr : ∀ (a : S_a) (inp : In), A.errStep a inp = a) :
+    DataRefines C A some id where
+  Rel := sim.Rel
+  absInit := sim.absInit
+  init_ok := sim.init_ok
+  sim_visible {c c' a inp out j} hRel hStepC hVis := by
+    cases hVis
+    have hOk := sim.sim_ok hRel hStepC
+    cases hStepA : A.step a inp with
+    | none => rw [hStepA] at hOk; exact False.elim hOk
+    | some pairA =>
+      rw [hStepA] at hOk
+      rcases pairA with ⟨a', out_a⟩
+      rcases hOk with ⟨rfl, hRel'⟩
+      exact ⟨a', rfl, hRel'⟩
+  sim_internal _ _ hVis := by cases hVis
+  sim_reject {c a inp} hRel hNoneC := by
+    have h := (sim.sim_err hRel hNoneC).2
+    rw [hErr a inp] at h
+    exact h
+
 #verify_constructive
   Qsag.Spec.Refines.preserve_runStep
   Qsag.Spec.Refines.lift_validTrace
   Qsag.Spec.Refines.preserve_admitsTrace
   Qsag.Spec.Refines.preserve_trace_safety
   Qsag.Spec.ObsRefines.preserve_admitsTrace
+  Qsag.Spec.DataRefines.lift_validTrace
+  Qsag.Spec.DataRefines.preserve_admitsTrace
+  Qsag.Spec.DataRefines.reachable_rel
+
+/-! ### Exports for lane cred-mig -/
+
+theorem LockstepSim.toRefines_rel {S_c S_a In Out : Type}
+    {C : Machine S_c In Out} {A : Machine S_a In Out}
+    (L : LockstepSim C A) (c : S_c) (a : S_a) :
+    L.toRefines.Rel c a ↔ (L.Inv c ∧ L.abs c = a) := by exact Iff.rfl
+
+theorem Refines.trans_rel {S₁ S₂ S₃ In Out : Type}
+    {M₁ : Machine S₁ In Out} {M₂ : Machine S₂ In Out} {M₃ : Machine S₃ In Out}
+    (r₁₂ : M₁ ⊑ M₂) (r₂₃ : M₂ ⊑ M₃) (s₁ : S₁) (s₃ : S₃) :
+    (r₁₂.trans r₂₃).Rel s₁ s₃ = ∃ s₂ : S₂, r₁₂.Rel s₁ s₂ ∧ r₂₃.Rel s₂ s₃ := by rfl
 
 end Qsag.Spec
+end
+
+public section
+namespace Qsag
+/-! Error-preserving protocol machines shared with executable refinements. -/
+/-- Explicit step outcome when failed attempts mutate persistent state (quarantine, MAC burn, WAL). -/
+inductive StepOutcome (S Out Err : Type) where
+  | ok (nextState : S) (output : Out)
+  | err (nextState : S) (error : Err)
+  deriving Repr, DecidableEq
+
+/-- State after either an accepted or rejected attempt. -/
+@[expose] def StepOutcome.nextState {S Out Err : Type} : StepOutcome S Out Err → S
+  | .ok s _ => s
+  | .err s _ => s
+
+/-- Canonical per-party protocol state machine.
+    `step` handles accepted transitions `some (s', out)`; when `step s inp = none`,
+    `errStep s inp` updates the persistent state (defaulting to `s` for pure partial transitions). -/
+structure PartyMachine (S In Out : Type) where
+  step : S → In → Option (S × Out)
+  errStep : S → In → S := fun s _ => s
+
+/-- Construct a `PartyMachine` from a pure partial transition `S → In → Option (S × Out)`. -/
+@[expose]
+def PartyMachine.ofOption {S In Out : Type} (f : S → In → Option (S × Out)) :
+    PartyMachine S In Out :=
+  { step := f, errStep := fun s _ => s }
+
+/-- Construct a `PartyMachine` from an error-mutating `StepOutcome` transition. -/
+@[expose]
+def PartyMachine.ofOutcome {S In Out Err : Type} (f : S → In → StepOutcome S Out Err) :
+    PartyMachine S In Out where
+  step s inp :=
+    match f s inp with
+    | .ok s' out => some (s', out)
+    | .err _ _ => none
+  errStep s inp :=
+    match f s inp with
+    | .ok s' _ => s'
+    | .err s' _ => s'
+
+/-- Execute one total step of `M`, returning `(nextState, some out)` on accept or
+    `(M.errStep s inp, none)` on rejection. -/
+@[expose]
+def PartyMachine.runStep {S In Out : Type} (M : PartyMachine S In Out)
+    (s : S) (inp : In) : S × Option Out :=
+  match M.step s inp with
+  | some (s', out) => (s', some out)
+  | none => (M.errStep s inp, none)
+
+/-- Inductive multi-turn valid trace of accepted `(In × Out)` pairs for `PartyMachine`,
+    retaining rejected transitions via `M.errStep`. -/
+inductive PartyMachine.ValidTrace {S In Out : Type} (M : PartyMachine S In Out) :
+    S → List (In × Out) → S → Prop where
+  | nil (s : S) : M.ValidTrace s [] s
+  | accept {s s' s_final : S} {inp : In} {out : Out} {rest : List (In × Out)} :
+      M.step s inp = some (s', out) →
+      M.ValidTrace s' rest s_final →
+      M.ValidTrace s ((inp, out) :: rest) s_final
+  | reject {s s_final : S} (inp : In) {rest : List (In × Out)} :
+      M.step s inp = none →
+      M.ValidTrace (M.errStep s inp) rest s_final →
+      M.ValidTrace s rest s_final
+
+end Qsag
 end

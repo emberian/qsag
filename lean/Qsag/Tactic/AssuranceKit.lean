@@ -30,3 +30,67 @@ The tactics that depend on library definitions live with those definitions:
 
 public import Qsag.Tactic.Prelude
 public meta import Lean
+
+public meta section
+open Lean Meta Elab Command
+
+/-- Inline only registered compiler matchers, preserving named algorithm boundaries.
+    The bounded expansion is followed by a private-name check and kernel typechecking. -/
+private def expandEquationMatchers (env : Environment) (e : Expr) : Expr :=
+  (List.range 64).foldl (fun e _ => e.replace fun sub =>
+    match sub with
+    | .const n us =>
+      if isPrivateName n && (getMatcherInfoCore? env n).isSome then
+        match env.find? n with
+        | some (.defnInfo ci) => some (ci.value.instantiateLevelParams ci.levelParams us)
+        | _ => none
+      else none
+    | _ => none) e
+
+/-- Export selected, kernel-checked compiler equations in their owning module.
+    Public statements may not mention private helpers. No definition body is exposed. -/
+syntax (name := exportEqnsCmd) "#export_eqns " ident+ : command
+elab_rules : command
+  | `(command| #export_eqns $[$ids:ident]*) => do
+    for id in ids do
+      let fn ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
+      let env ← getEnv
+      if (env.getModuleIdxFor? fn).isSome then
+        throwErrorAt id "Export equations in the definition's owning module: {fn}"
+      if isPrivateName fn then
+        throwErrorAt id "The definition must be public: {privateToUserName fn}"
+      let some eqns ← liftTermElabM (getEqnsFor? fn) |
+        throwErrorAt id "No compiler equations for {fn}"
+      if eqns.isEmpty then throwErrorAt id "No compiler equations for {fn}"
+      -- Preflight every type before publishing any of the selected equations.
+      let infos ← eqns.mapM getConstInfo
+      let equationTypes := infos.map fun ci => expandEquationMatchers env ci.type
+      for ty in equationTypes do
+        for dep in ty.getUsedConstants do
+          if isPrivateName dep then
+            throwErrorAt id "Equation type exposes a private helper {privateToUserName dep}; write a projection lemma instead"
+      let mut levels : List Name := []
+      let mut types : List Expr := []
+      let mut values : List Expr := []
+      for i in [:eqns.size] do
+        let ci := infos[i]!
+        let ty := equationTypes[i]!
+        let name := fn ++ Name.mkSimple s!"public_eq_{i + 1}"
+        let value := mkConst eqns[i]! (ci.levelParams.map mkLevelParam)
+        liftTermElabM <| addDecl <| .thmDecl {
+          name, levelParams := ci.levelParams, type := ty, value }
+        for u in ci.levelParams do
+          if !levels.contains u then levels := levels ++ [u]
+        types := ty :: types
+        values := mkConst name (ci.levelParams.map mkLevelParam) :: values
+      let some lastType := types.head? | throwErrorAt id "Missing equation type"
+      let some lastValue := values.head? | throwErrorAt id "Missing equation proof"
+      let mut bundleType := lastType
+      let mut bundleValue := lastValue
+      for (ty, val) in types.tail!.zip values.tail! do
+        bundleValue := mkApp4 (mkConst ``And.intro) ty bundleType val bundleValue
+        bundleType := mkApp2 (mkConst ``And) ty bundleType
+      liftTermElabM <| addDecl <| .thmDecl {
+        name := fn ++ `public_eqs, levelParams := levels,
+        type := bundleType, value := bundleValue }
+end

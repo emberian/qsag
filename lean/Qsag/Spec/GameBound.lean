@@ -482,5 +482,67 @@ theorem FinGame.winCount_of_forall_lose {n : Nat} (G : FinGame n)
   Qsag.Spec.event_le_reduction_win
   Qsag.Spec.event_le_two_reductions
 
+/-! ### Exports for lane zkhem -/
+
+theorem sampleSum_zero (f : Fin 0 → Nat) : sampleSum 0 f = 0 := by rfl
+
+theorem sampleSum_succ (n : Nat) (f : Fin (n + 1) → Nat) :
+    sampleSum (n + 1) f =
+      f ⟨0, Nat.zero_lt_succ n⟩ + sampleSum n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := by
+  rfl
+
+theorem FinGame.winCount_eq {n : Nat} (G : FinGame n) :
+    G.winCount = sampleSum n (fun ω => if G.win ω then 1 else 0) := by rfl
+
+theorem Code.ret_bind {E : Iface} {A B : Type} (a : A) (f : A → Code E B) :
+    Code.bind (Code.ret a) f = f a := by rfl
+
+theorem Code.call_bind {E : Iface} {A B : Type} (q : E.Query) (k : E.Resp q → Code E A)
+    (f : A → Code E B) :
+    Code.bind (Code.call q k) f = Code.call q (fun r => Code.bind (k r) f) := by rfl
+
+theorem Code.evalState_ret {E : Iface} {R σ : Type}
+    (handler : σ → (q : E.Query) → E.Resp q × σ) (v : R) (s : σ) :
+    Code.evalState handler (Code.ret v) s = (v, s) := by rfl
+
+theorem Code.evalState_call {E : Iface} {R σ : Type}
+    (handler : σ → (q : E.Query) → E.Resp q × σ) (q : E.Query) (k : E.Resp q → Code E R)
+    (s : σ) :
+    Code.evalState handler (Code.call q k) s =
+      Code.evalState handler (k (handler s q).1) (handler s q).2 := by rfl
+
+theorem Code.evalClosed_ret {R : Type} (v : R) :
+    Code.evalClosed (Code.ret v : Code Iface.empty R) = v := by rfl
+
+theorem Code.linkPkg_ret {M E : Iface} {R σ₂ : Type} (Q : Pkg M E σ₂) (r : R) (s₂ : σ₂) :
+    Code.linkPkg Q (Code.ret r) s₂ = Code.ret (r, s₂) := by rfl
+
+theorem Code.linkPkg_call {M E : Iface} {R σ₂ : Type} (Q : Pkg M E σ₂) (q : M.Query)
+    (k : M.Resp q → Code M R) (s₂ : σ₂) :
+    Code.linkPkg Q (Code.call q k) s₂ =
+      Code.bind (Q.handle s₂ q) (fun x => Code.linkPkg Q (k x.1) x.2) := by rfl
+
+theorem Pkg.link_init {I M E : Iface} {σ₁ σ₂ : Type} (P : Pkg I M σ₁) (Q : Pkg M E σ₂) :
+    (P.link Q).init = (P.init, Q.init) := by rfl
+
+theorem Pkg.link_handle {I M E : Iface} {σ₁ σ₂ : Type} (P : Pkg I M σ₁) (Q : Pkg M E σ₂)
+    (st : σ₁ × σ₂) (q : I.Query) :
+    (P.link Q).handle st q =
+      Code.bind (Code.linkPkg Q (P.handle st.1 q) st.2)
+        (fun x => Code.ret (x.1.1, (x.1.2, x.2))) := by rfl
+
+theorem Pkg.par_init {I₁ I₂ E : Iface} {σ₁ σ₂ : Type} (P₁ : Pkg I₁ E σ₁) (P₂ : Pkg I₂ E σ₂) :
+    (P₁.par P₂).init = (P₁.init, P₂.init) := by rfl
+
+theorem Pkg.par_handle_inl {I₁ I₂ E : Iface} {σ₁ σ₂ : Type} (P₁ : Pkg I₁ E σ₁)
+    (P₂ : Pkg I₂ E σ₂) (st : σ₁ × σ₂) (q₁ : I₁.Query) :
+    (P₁.par P₂).handle st (PSum.inl q₁) =
+      Code.bind (P₁.handle st.1 q₁) (fun x => Code.ret (x.1, (x.2, st.2))) := by rfl
+
+theorem Pkg.par_handle_inr {I₁ I₂ E : Iface} {σ₁ σ₂ : Type} (P₁ : Pkg I₁ E σ₁)
+    (P₂ : Pkg I₂ E σ₂) (st : σ₁ × σ₂) (q₂ : I₂.Query) :
+    (P₁.par P₂).handle st (PSum.inr q₂) =
+      Code.bind (P₂.handle st.2 q₂) (fun x => Code.ret (x.1, (st.1, x.2))) := by rfl
+
 end Qsag.Spec
 end
