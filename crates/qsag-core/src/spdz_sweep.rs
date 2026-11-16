@@ -494,9 +494,10 @@ impl<'a> SpdzSweepEngine<'a> {
             return self.fail(KeccakMpcError::InvalidParameters);
         }
         let words = 600 * active;
-        // Bound retained tag memory to two full waves. Sparse waves share the
-        // same barrier without paying for an independent coin per permutation.
-        if self.pending_opened.len() + 2 * words > 4 * TRIPLE_WORDS_PER_PERMUTATION {
+        // Bound retained tag memory to one full 64-lane wave. Sparse waves share the
+        // same barrier without paying for an independent coin per permutation, and
+        // pooled OtMesh checks take ~31 us per flush.
+        if self.pending_opened.len() + 2 * words > 2 * TRIPLE_WORDS_PER_PERMUTATION {
             self.verify_now()?;
         }
         let mut vaults = match self.triples.vaults(words) {
@@ -593,18 +594,31 @@ impl<'a> SpdzSweepEngine<'a> {
             }
             return self.fail(e);
         }
+        // Release the permutation's triple buffer (~243 MB/party) immediately so it never
+        // overlaps with `verify_now` or subsequent permutations.
+        drop(vaults);
         #[cfg(test)]
         if self.verify_each_permutation {
             self.verify_now()?;
         }
-        for party in sh.iter_mut() {
-            party.truncate(DIGEST_BITS);
-        }
-        for party in mac.iter_mut() {
-            party.truncate(DIGEST_BITS);
-        }
-        // `truncate` leaves the capacity states behind; they are wiped with the vectors.
-        Ok(SharedDigests { sh, mac })
+        // Copy only the 256 digest positions into exact-capacity buffers so the 1,600-bit
+        // full-state vectors (6.25x larger) are wiped and freed immediately on drop.
+        let dig_sh = SecretVec::new(
+            sh.iter()
+                .map(|party| party[..DIGEST_BITS].to_vec())
+                .collect::<Vec<_>>(),
+        );
+        drop(sh);
+        let dig_mac = SecretVec::new(
+            mac.iter()
+                .map(|party| party[..DIGEST_BITS].to_vec())
+                .collect::<Vec<_>>(),
+        );
+        drop(mac);
+        Ok(SharedDigests {
+            sh: dig_sh,
+            mac: dig_mac,
+        })
     }
 
     /// XOR the shared 32-byte key `words` into the secret slot at byte `offset` of the
@@ -1349,38 +1363,38 @@ pub(crate) mod tests {
 
     #[test]
     fn baggy_two_of_three_equals_the_reference() {
-        let _memory = crate::test_budget::reserve_mb(1400);
+        let _memory = crate::test_budget::reserve_mb(900);
         sign_and_compare(&TINY, 2, 3, &[0, 2], 0x31);
     }
 
     #[test]
     fn baggy_three_of_five_equals_the_reference() {
-        let _memory = crate::test_budget::reserve_mb(2100);
+        let _memory = crate::test_budget::reserve_mb(1200);
         sign_and_compare(&TINY, 3, 5, &[0, 3, 4], 0x32);
     }
 
     #[test]
     fn baggy_five_of_seven_equals_the_reference() {
-        let _memory = crate::test_budget::reserve_mb(3300);
+        let _memory = crate::test_budget::reserve_mb(1700);
         sign_and_compare(&TINY, 5, 7, &[0, 1, 3, 5, 6], 0x33);
     }
 
     #[test]
     fn baggy_all_of_three_equals_the_reference() {
-        let _memory = crate::test_budget::reserve_mb(2100);
+        let _memory = crate::test_budget::reserve_mb(1200);
         sign_and_compare(&TINY, 3, 3, &[0, 1, 2], 0x34);
     }
 
     #[test]
     fn baggy_three_of_five_with_a_spare_party_equals_the_reference() {
-        let _memory = crate::test_budget::reserve_mb(2700);
+        let _memory = crate::test_budget::reserve_mb(1500);
         // Four parties of a 3-of-5 sharing: more than the threshold take part.
         sign_and_compare(&TINY, 3, 5, &[1, 2, 3, 4], 0x35);
     }
 
     #[test]
     fn keygen_two_of_three_equals_the_reference() {
-        let _memory = crate::test_budget::reserve_mb(1400);
+        let _memory = crate::test_budget::reserve_mb(900);
         let mut s = setup(2, 3, &[1, 2], 0x36);
         let sk = sk();
         let mut engine =

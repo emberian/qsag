@@ -282,4 +282,367 @@ def GuardedMachine.forwardSimTo {Sc Sa : Type} (C : GuardedMachine Sc In Out)
 #verify_constructive GuardedMachine.Models.at_most_one_accept
 #verify_constructive GuardedMachineSim.lift_trace GuardedMachineSim.trace_safety
 
+/-! ## Composable Guard Algebra: Lenses (`zoom`), Input Adapters (`comapIn`), Sequential Chains (`seq`) & Products (`prod`) -/
+
+/-- State lens focusing a composite state `S` onto a local guard slice `Sub`. -/
+structure Lens (S Sub : Type) where
+  get : S → Sub
+  set : S → Sub → S
+
+/-- Standard Get-Put, Put-Get, and Put-Put lens laws. -/
+structure Lens.Lawful {S Sub : Type} (L : Lens S Sub) : Prop where
+  get_set : ∀ (s : S) (g : Sub), L.get (L.set s g) = g
+  set_get : ∀ (s : S), L.set s (L.get s) = s
+  set_set : ∀ (s : S) (g₁ g₂ : Sub), L.set (L.set s g₁) g₂ = L.set s g₂
+
+/-- Identity lens on `S`. -/
+def Lens.id (S : Type) : Lens S S where
+  get s := s
+  set _ s' := s'
+
+theorem Lens.lawful_id (S : Type) : (Lens.id S).Lawful :=
+  ⟨fun _ _ => rfl, fun _ => rfl, fun _ _ _ => rfl⟩
+
+/-- Vertical lens composition focusing `S` through `Mid` onto `Sub`. -/
+def Lens.comp {S Mid Sub : Type} (L₁ : Lens S Mid) (L₂ : Lens Mid Sub) : Lens S Sub where
+  get s := L₂.get (L₁.get s)
+  set s g := L₁.set s (L₂.set (L₁.get s) g)
+
+theorem Lens.lawful_comp {S Mid Sub : Type} {L₁ : Lens S Mid} {L₂ : Lens Mid Sub}
+    (h₁ : L₁.Lawful) (h₂ : L₂.Lawful) : (L₁.comp L₂).Lawful where
+  get_set s g := by
+    show L₂.get (L₁.get (L₁.set s (L₂.set (L₁.get s) g))) = g
+    rw [h₁.get_set, h₂.get_set]
+  set_get s := by
+    show L₁.set s (L₂.set (L₁.get s) (L₂.get (L₁.get s))) = s
+    rw [h₂.set_get, h₁.set_get]
+  set_set s g₁ g₂ := by
+    show L₁.set (L₁.set s (L₂.set (L₁.get s) g₁))
+      (L₂.set (L₁.get (L₁.set s (L₂.set (L₁.get s) g₁))) g₂) =
+      L₁.set s (L₂.set (L₁.get s) g₂)
+    rw [h₁.get_set, h₂.set_set, h₁.set_set]
+
+/-- First-projection lens on `S₁ × S₂`. -/
+def Lens.fst (S₁ S₂ : Type) : Lens (S₁ × S₂) S₁ where
+  get p := p.1
+  set p x := (x, p.2)
+
+theorem Lens.lawful_fst (S₁ S₂ : Type) : (Lens.fst S₁ S₂).Lawful :=
+  ⟨fun _ _ => rfl, fun ⟨_, _⟩ => rfl, fun _ _ _ => rfl⟩
+
+/-- Second-projection lens on `S₁ × S₂`. -/
+def Lens.snd (S₁ S₂ : Type) : Lens (S₁ × S₂) S₂ where
+  get p := p.2
+  set p y := (p.1, y)
+
+theorem Lens.lawful_snd (S₁ S₂ : Type) : (Lens.snd S₁ S₂).Lawful :=
+  ⟨fun _ _ => rfl, fun ⟨_, _⟩ => rfl, fun _ _ _ => rfl⟩
+
+/-- **Lens Zoom (`GuardedMachine.zoom`)**:
+    Lift a slice guard `G : GuardedMachine Sub In Out` onto composite state `S` via `L`,
+    preserving all frame components outside `L` on both accepted and rejected turns. -/
+@[expose] def GuardedMachine.zoom {S Sub In Out : Type}
+    (L : Lens S Sub) (G : GuardedMachine Sub In Out) : GuardedMachine S In Out where
+  guard s i := G.guard (L.get s) i
+  next s i := L.set s (G.next (L.get s) i)
+  out s i := G.out (L.get s) i
+  reject s i := L.set s (G.reject (L.get s) i)
+
+/-- Any frame predicate preserved by `L.set` survives arbitrary traces of `G.zoom L`. -/
+theorem GuardedMachine.zoom_frame_trace {S Sub In Out : Type}
+    (L : Lens S Sub) (G : GuardedMachine Sub In Out)
+    (Frame : S → Prop) (hFrame : ∀ (s : S) (g : Sub), Frame s → Frame (L.set s g))
+    {s sF : S} {tr : List (In × Out)}
+    (hTr : (G.zoom L).toParty.ValidTrace s tr sF) (h₀ : Frame s) : Frame sF :=
+  ((G.zoom L).models_self.trace_invariant Frame
+    (fun s i hs _ => hFrame s (G.next (L.get s) i) hs)
+    (fun s i hs _ => hFrame s (G.reject (L.get s) i) hs)
+    hTr h₀).1
+
+/-- Under `L.Lawful`, every valid trace of `G.zoom L` projects to a valid trace of `G`! -/
+theorem GuardedMachine.zoom_proj_trace {S Sub In Out : Type}
+    {L : Lens S Sub} (hL : L.Lawful) (G : GuardedMachine Sub In Out)
+    {s sF : S} {tr : List (In × Out)}
+    (hTr : (G.zoom L).toParty.ValidTrace s tr sF) :
+    G.toParty.ValidTrace (L.get s) tr (L.get sF) := by
+  refine (G.zoom L).models_self.trace_induction
+    (motive := fun s tr sF => G.toParty.ValidTrace (L.get s) tr (L.get sF))
+    ?_ ?_ ?_ hTr
+  · intro s
+    exact .nil (L.get s)
+  · intro s i rest sF hg _ ih
+    have hgSub : G.guard (L.get s) i = true := hg
+    show G.toParty.ValidTrace (L.get s) ((i, G.out (L.get s) i) :: rest) (L.get sF)
+    have ih' : G.toParty.ValidTrace (G.next (L.get s) i) rest (L.get sF) := by
+      have hGet : L.get (L.set s (G.next (L.get s) i)) = G.next (L.get s) i :=
+        hL.get_set s (G.next (L.get s) i)
+      exact hGet ▸ ih
+    exact .accept (G.step_accept hgSub) ih'
+  · intro s i rest sF hg _ ih
+    have hgSub : G.guard (L.get s) i = false := hg
+    have ih' : G.toParty.ValidTrace (G.reject (L.get s) i) rest (L.get sF) := by
+      have hGet : L.get (L.set s (G.reject (L.get s) i)) = G.reject (L.get s) i :=
+        hL.get_set s (G.reject (L.get s) i)
+      exact hGet ▸ ih
+    exact .reject i (G.step_reject hgSub) ih'
+
+/-- Lift a `GuardedMachineSim` across lenses paired with a relational frame invariant. -/
+def GuardedMachineSim.zoom {Sc Sa SubC SubA In Out : Type}
+    {C : GuardedMachine SubC In Out} {A : GuardedMachine SubA In Out}
+    (sim : GuardedMachineSim C A)
+    (Lc : Lens Sc SubC) (La : Lens Sa SubA)
+    (FrameRel : Sc → Sa → Prop)
+    (hFrameSet : ∀ {c : Sc} {a : Sa} (gc : SubC) (ga : SubA),
+      FrameRel c a → FrameRel (Lc.set c gc) (La.set a ga))
+    (hLc : Lc.Lawful) (hLa : La.Lawful) :
+    GuardedMachineSim (C.zoom Lc) (A.zoom La) where
+  Rel c a := FrameRel c a ∧ sim.Rel (Lc.get c) (La.get a)
+  guard_eq i hR := sim.guard_eq i hR.2
+  next_rel i hR hg := by
+    refine ⟨hFrameSet _ _ hR.1, ?_⟩
+    dsimp only [GuardedMachine.zoom]
+    rw [hLc.get_set, hLa.get_set]
+    exact sim.next_rel i hR.2 hg
+  out_eq i hR hg := sim.out_eq i hR.2 hg
+  reject_rel i hR hg := by
+    refine ⟨hFrameSet _ _ hR.1, ?_⟩
+    dsimp only [GuardedMachine.zoom]
+    rw [hLc.get_set, hLa.get_set]
+    exact sim.reject_rel i hR.2 hg
+
+/-- Contravariant input projection for `GuardedMachine`. -/
+@[expose] def GuardedMachine.comapIn {S In' In Out : Type}
+    (f : In' → In) (G : GuardedMachine S In Out) : GuardedMachine S In' Out where
+  guard s i := G.guard s (f i)
+  next s i := G.next s (f i)
+  out s i := G.out s (f i)
+  reject s i := G.reject s (f i)
+
+theorem GuardedMachine.comapIn_proj_trace {S In' In Out : Type}
+    (f : In' → In) (G : GuardedMachine S In Out)
+    {s sF : S} {tr : List (In' × Out)}
+    (hTr : (G.comapIn f).toParty.ValidTrace s tr sF) :
+    G.toParty.ValidTrace s (tr.map (fun p => (f p.1, p.2))) sF := by
+  refine (G.comapIn f).models_self.trace_induction
+    (motive := fun s tr sF => G.toParty.ValidTrace s (tr.map (fun p => (f p.1, p.2))) sF)
+    ?_ ?_ ?_ hTr
+  · intro s
+    exact .nil s
+  · intro s i rest sF hg _ ih
+    exact .accept (G.step_accept hg) ih
+  · intro s i rest sF hg _ ih
+    exact .reject (f i) (G.step_reject hg) ih
+
+/-- **Sequential Guard Composition (`GuardedMachine.seq`)**:
+    Evaluates `G₁` first; on `G₁` pass, feeds `(G₁.next s i, G₁.out s i)` into `G₂`.
+    If `G₂` rejects, runs `G₂.reject (G₁.next s i) (G₁.out s i)` so state burns committed
+    by `G₁` (e.g., epoch-latch or HWM burn) are preserved fail-closed! -/
+@[expose] def GuardedMachine.seq {S In Mid Out : Type}
+    (G₁ : GuardedMachine S In Mid) (G₂ : GuardedMachine S Mid Out) :
+    GuardedMachine S In Out where
+  guard s i := G₁.guard s i && G₂.guard (G₁.next s i) (G₁.out s i)
+  next s i := G₂.next (G₁.next s i) (G₁.out s i)
+  out s i := G₂.out (G₁.next s i) (G₁.out s i)
+  reject s i :=
+    if G₁.guard s i then G₂.reject (G₁.next s i) (G₁.out s i)
+    else G₁.reject s i
+
+theorem GuardedMachine.seq_guard_true_iff {S In Mid Out : Type}
+    (G₁ : GuardedMachine S In Mid) (G₂ : GuardedMachine S Mid Out) (s : S) (i : In) :
+    (G₁.seq G₂).guard s i = true ↔
+      G₁.guard s i = true ∧ G₂.guard (G₁.next s i) (G₁.out s i) = true :=
+  Bool.and_eq_true_iff
+
+/-- Sequential simulation congruence when `sim₁` and `sim₂` share state relation `Rel`. -/
+def GuardedMachineSim.seq {Sc Sa In Mid Out : Type}
+    {C₁ : GuardedMachine Sc In Mid} {A₁ : GuardedMachine Sa In Mid}
+    {C₂ : GuardedMachine Sc Mid Out} {A₂ : GuardedMachine Sa Mid Out}
+    (sim₁ : GuardedMachineSim C₁ A₁) (sim₂ : GuardedMachineSim C₂ A₂)
+    (hRelEq : ∀ c a, sim₁.Rel c a ↔ sim₂.Rel c a) :
+    GuardedMachineSim (C₁.seq C₂) (A₁.seq A₂) where
+  Rel := sim₁.Rel
+  guard_eq {c a} i hR := by
+    dsimp only [GuardedMachine.seq]
+    cases hg₁ : C₁.guard c i with
+    | false =>
+      have ha₁ : A₁.guard a i = false := (sim₁.guard_eq i hR).symm.trans hg₁
+      rw [ha₁]
+      rfl
+    | true =>
+      have ha₁ : A₁.guard a i = true := (sim₁.guard_eq i hR).symm.trans hg₁
+      have hNextR : sim₂.Rel (C₁.next c i) (A₁.next a i) :=
+        (hRelEq _ _).mp (sim₁.next_rel i hR hg₁)
+      have hOutEq : C₁.out c i = A₁.out a i := sim₁.out_eq i hR hg₁
+      rw [ha₁, Bool.true_and, Bool.true_and, ← hOutEq]
+      exact sim₂.guard_eq (C₁.out c i) hNextR
+  next_rel {c a} i hR hg := by
+    obtain ⟨hg₁, hg₂⟩ := (C₁.seq_guard_true_iff C₂ c i).mp hg
+    have hNextR₂ : sim₂.Rel (C₁.next c i) (A₁.next a i) :=
+      (hRelEq _ _).mp (sim₁.next_rel i hR hg₁)
+    have hOutEq : C₁.out c i = A₁.out a i := sim₁.out_eq i hR hg₁
+    dsimp only [GuardedMachine.seq]
+    rw [← hOutEq]
+    exact (hRelEq _ _).mpr (sim₂.next_rel (C₁.out c i) hNextR₂ hg₂)
+  out_eq {c a} i hR hg := by
+    obtain ⟨hg₁, hg₂⟩ := (C₁.seq_guard_true_iff C₂ c i).mp hg
+    have hNextR₂ : sim₂.Rel (C₁.next c i) (A₁.next a i) :=
+      (hRelEq _ _).mp (sim₁.next_rel i hR hg₁)
+    have hOutEq : C₁.out c i = A₁.out a i := sim₁.out_eq i hR hg₁
+    dsimp only [GuardedMachine.seq]
+    rw [← hOutEq]
+    exact sim₂.out_eq (C₁.out c i) hNextR₂ hg₂
+  reject_rel {c a} i hR hg := by
+    dsimp only [GuardedMachine.seq] at hg ⊢
+    cases hg₁ : C₁.guard c i with
+    | false =>
+      have ha₁ : A₁.guard a i = false := (sim₁.guard_eq i hR).symm.trans hg₁
+      rw [ha₁]
+      exact sim₁.reject_rel i hR hg₁
+    | true =>
+      rw [hg₁, Bool.true_and] at hg
+      have ha₁ : A₁.guard a i = true := (sim₁.guard_eq i hR).symm.trans hg₁
+      have hNextR₂ : sim₂.Rel (C₁.next c i) (A₁.next a i) :=
+        (hRelEq _ _).mp (sim₁.next_rel i hR hg₁)
+      have hOutEq : C₁.out c i = A₁.out a i := sim₁.out_eq i hR hg₁
+      simp only [ha₁, ↓reduceIte, ← hOutEq]
+      exact (hRelEq _ _).mpr (sim₂.reject_rel (C₁.out c i) hNextR₂ hg)
+
+/-- Multi-turn invariant transfer across sequential guard pipelines `G₁.seq G₂`. -/
+theorem GuardedMachine.seq_trace_invariant {S In Mid Out : Type}
+    (G₁ : GuardedMachine S In Mid) (G₂ : GuardedMachine S Mid Out)
+    (Inv : S → Prop)
+    (hAcc₁ : ∀ s i, Inv s → G₁.guard s i = true → Inv (G₁.next s i))
+    (hRej₁ : ∀ s i, Inv s → G₁.guard s i = false → Inv (G₁.reject s i))
+    (hAcc₂ : ∀ s m, Inv s → G₂.guard s m = true → Inv (G₂.next s m))
+    (hRej₂ : ∀ s m, Inv s → G₂.guard s m = false → Inv (G₂.reject s m))
+    {s sF : S} {tr : List (In × Out)}
+    (hTr : (G₁.seq G₂).toParty.ValidTrace s tr sF) (h₀ : Inv s) :
+    Inv sF ∧ ∀ p ∈ tr, ∃ s₁, Inv s₁ ∧ G₁.guard s₁ p.1 = true ∧
+      G₂.guard (G₁.next s₁ p.1) (G₁.out s₁ p.1) = true ∧
+      p.2 = G₂.out (G₁.next s₁ p.1) (G₁.out s₁ p.1) := by
+  obtain ⟨hF, hAll⟩ := (G₁.seq G₂).models_self.trace_invariant Inv
+    (fun s i hs hg => by
+      obtain ⟨hg₁, hg₂⟩ := (G₁.seq_guard_true_iff G₂ s i).mp hg
+      exact hAcc₂ _ _ (hAcc₁ s i hs hg₁) hg₂)
+    (fun s i hs hg => by
+      dsimp only [GuardedMachine.seq] at hg ⊢
+      cases hg₁ : G₁.guard s i with
+      | false => exact hRej₁ s i hs hg₁
+      | true =>
+        rw [hg₁, Bool.true_and] at hg
+        exact hRej₂ _ _ (hAcc₁ s i hs hg₁) hg)
+    hTr h₀
+  refine ⟨hF, fun p hp => ?_⟩
+  obtain ⟨s₁, hs₁, hg, hOut⟩ := hAll p hp
+  obtain ⟨hg₁, hg₂⟩ := (G₁.seq_guard_true_iff G₂ s₁ p.1).mp hg
+  exact ⟨s₁, hs₁, hg₁, hg₂, hOut⟩
+
+/-- **Conjunctive Product Guard (`GuardedMachine.prod`)**:
+    Accepts iff both `G₁` and `G₂` accept. On rejection, each component runs `reject` iff its own
+    guard failed and stutters (`s₁` / `s₂` unchanged) if its own guard passed — ensuring that
+    every composite trace projects directly to valid traces of BOTH `G₁` and `G₂`! -/
+@[expose] def GuardedMachine.prod {S₁ S₂ In Out₁ Out₂ : Type}
+    (G₁ : GuardedMachine S₁ In Out₁) (G₂ : GuardedMachine S₂ In Out₂) :
+    GuardedMachine (S₁ × S₂) In (Out₁ × Out₂) where
+  guard p i := G₁.guard p.1 i && G₂.guard p.2 i
+  next p i := (G₁.next p.1 i, G₂.next p.2 i)
+  out p i := (G₁.out p.1 i, G₂.out p.2 i)
+  reject p i :=
+    (if G₁.guard p.1 i then p.1 else G₁.reject p.1 i,
+     if G₂.guard p.2 i then p.2 else G₂.reject p.2 i)
+
+/-- Product congruence of `GuardedMachineSim`. -/
+def GuardedMachineSim.prod {Sc₁ Sa₁ Sc₂ Sa₂ In Out₁ Out₂ : Type}
+    {C₁ : GuardedMachine Sc₁ In Out₁} {A₁ : GuardedMachine Sa₁ In Out₁}
+    {C₂ : GuardedMachine Sc₂ In Out₂} {A₂ : GuardedMachine Sa₂ In Out₂}
+    (sim₁ : GuardedMachineSim C₁ A₁) (sim₂ : GuardedMachineSim C₂ A₂) :
+    GuardedMachineSim (C₁.prod C₂) (A₁.prod A₂) where
+  Rel c a := sim₁.Rel c.1 a.1 ∧ sim₂.Rel c.2 a.2
+  guard_eq {c a} i hR := by
+    dsimp only [GuardedMachine.prod]
+    rw [sim₁.guard_eq i hR.1, sim₂.guard_eq i hR.2]
+  next_rel {c a} i hR hg := by
+    obtain ⟨hg₁, hg₂⟩ := Bool.and_eq_true_iff.mp hg
+    exact ⟨sim₁.next_rel i hR.1 hg₁, sim₂.next_rel i hR.2 hg₂⟩
+  out_eq {c a} i hR hg := by
+    obtain ⟨hg₁, hg₂⟩ := Bool.and_eq_true_iff.mp hg
+    dsimp only [GuardedMachine.prod]
+    rw [sim₁.out_eq i hR.1 hg₁, sim₂.out_eq i hR.2 hg₂]
+  reject_rel {c a} i hR _ := by
+    dsimp only [GuardedMachine.prod]
+    refine ⟨?_, ?_⟩
+    · cases hg₁ : C₁.guard c.1 i with
+      | false =>
+        have ha₁ : A₁.guard a.1 i = false := (sim₁.guard_eq i hR.1).symm.trans hg₁
+        rw [ha₁]
+        exact sim₁.reject_rel i hR.1 hg₁
+      | true =>
+        have ha₁ : A₁.guard a.1 i = true := (sim₁.guard_eq i hR.1).symm.trans hg₁
+        simp only [ha₁, ↓reduceIte]
+        exact hR.1
+    · cases hg₂ : C₂.guard c.2 i with
+      | false =>
+        have ha₂ : A₂.guard a.2 i = false := (sim₂.guard_eq i hR.2).symm.trans hg₂
+        rw [ha₂]
+        exact sim₂.reject_rel i hR.2 hg₂
+      | true =>
+        have ha₂ : A₂.guard a.2 i = true := (sim₂.guard_eq i hR.2).symm.trans hg₂
+        simp only [ha₂, ↓reduceIte]
+        exact hR.2
+
+/-- **First-component trace projection**: every multi-turn trace of `G₁.prod G₂` projects to a
+    multi-turn valid trace of `G₁`, transferring all `G₁` trace invariants and one-shot latches! -/
+theorem GuardedMachine.prod_fst_validTrace {S₁ S₂ In Out₁ Out₂ : Type}
+    (G₁ : GuardedMachine S₁ In Out₁) (G₂ : GuardedMachine S₂ In Out₂)
+    {p pF : S₁ × S₂} {tr : List (In × (Out₁ × Out₂))}
+    (hTr : (G₁.prod G₂).toParty.ValidTrace p tr pF) :
+    G₁.toParty.ValidTrace p.1 (tr.map (fun x => (x.1, x.2.1))) pF.1 := by
+  refine (G₁.prod G₂).models_self.trace_induction
+    (motive := fun p tr pF => G₁.toParty.ValidTrace p.1 (tr.map (fun x => (x.1, x.2.1))) pF.1)
+    ?_ ?_ ?_ hTr
+  · intro p
+    exact .nil p.1
+  · intro p i rest pF hg _ ih
+    obtain ⟨hg₁, _⟩ := Bool.and_eq_true_iff.mp hg
+    exact .accept (G₁.step_accept hg₁) ih
+  · intro p i rest pF _ _ ih
+    dsimp only [GuardedMachine.prod] at ih
+    cases hg₁ : G₁.guard p.1 i with
+    | true =>
+      simp only [hg₁, ↓reduceIte] at ih
+      exact ih
+    | false =>
+      simp only [hg₁, Bool.false_eq_true, ↓reduceIte] at ih
+      exact .reject i (G₁.step_reject hg₁) ih
+
+/-- **Second-component trace projection**: every multi-turn trace of `G₁.prod G₂` projects to a
+    multi-turn valid trace of `G₂`, transferring all `G₂` trace invariants and one-shot latches! -/
+theorem GuardedMachine.prod_snd_validTrace {S₁ S₂ In Out₁ Out₂ : Type}
+    (G₁ : GuardedMachine S₁ In Out₁) (G₂ : GuardedMachine S₂ In Out₂)
+    {p pF : S₁ × S₂} {tr : List (In × (Out₁ × Out₂))}
+    (hTr : (G₁.prod G₂).toParty.ValidTrace p tr pF) :
+    G₂.toParty.ValidTrace p.2 (tr.map (fun x => (x.1, x.2.2))) pF.2 := by
+  refine (G₁.prod G₂).models_self.trace_induction
+    (motive := fun p tr pF => G₂.toParty.ValidTrace p.2 (tr.map (fun x => (x.1, x.2.2))) pF.2)
+    ?_ ?_ ?_ hTr
+  · intro p
+    exact .nil p.2
+  · intro p i rest pF hg _ ih
+    obtain ⟨_, hg₂⟩ := Bool.and_eq_true_iff.mp hg
+    exact .accept (G₂.step_accept hg₂) ih
+  · intro p i rest pF _ _ ih
+    dsimp only [GuardedMachine.prod] at ih
+    cases hg₂ : G₂.guard p.2 i with
+    | true =>
+      simp only [hg₂, ↓reduceIte] at ih
+      exact ih
+    | false =>
+      simp only [hg₂, Bool.false_eq_true, ↓reduceIte] at ih
+      exact .reject i (G₂.step_reject hg₂) ih
+
+#verify_constructive Lens.lawful_id Lens.lawful_comp Lens.lawful_fst Lens.lawful_snd
+#verify_constructive GuardedMachine.zoom_frame_trace GuardedMachine.zoom_proj_trace
+#verify_constructive GuardedMachine.comapIn_proj_trace GuardedMachine.seq_trace_invariant
+#verify_constructive GuardedMachine.prod_fst_validTrace GuardedMachine.prod_snd_validTrace
+
 end Qsag.Exec.GuardedMachineSim

@@ -4565,10 +4565,11 @@ def honestChannelRun (msgs : List ChannelMsg) : List ChannelEvent :=
     by its set `admits` of possible event traces. The environment must admit the honest runs,
     so the empty environment is not an instance.
 
-    No instance exists in this library; `checkedChannel_contract` is a reference model only.
-    The one network model of the execution layer (`RssParticipant.networkStep`) allows
-    re-delivery and leaves replay handling to the receiving node, so it does not satisfy
-    `replayProtected`. -/
+    Instances: `checkedChannel_contract` (below) and the sequence-numbered anti-replay session
+    channel `Qsag.Exec.PlatformContractInstances.seqSessionChannel_contract` (re-exported in
+    `Qsag.Top.Custody` and `Qsag.Top.Credentials`). By contrast, the raw gossip step
+    `RssParticipant.networkStep` allows re-delivery and leaves replay filtering to the receiving
+    node, so it does not by itself satisfy `replayProtected`. -/
 structure AuthenticatedChannelContract (admits : List ChannelEvent → Prop) : Prop where
   /-- Sending pairwise different messages and delivering each once is possible. -/
   honestRunsAdmitted : ∀ msgs : List ChannelMsg, msgs.Nodup → admits (honestChannelRun msgs)
@@ -4720,11 +4721,11 @@ def ShareMemoryModel.run (M : ShareMemoryModel) : M.State → List ShareMemOp �
 /-- Post-quarantine secret-key erasure contract (`ct_memzero` before a fault or error return)
     for the memory environment `M`.
 
-    No instance exists in this library; `shareMemoryModel_contract` is a reference model only.
-    The execution layer models erasure logically (`shareSlot := none`), and the machine layer
-    has one refinement theorem per wipe routine (`Qsag.current_ct_memzero_x86_64_mc_refines`,
-    `Qsag.current_ct_memzero_aarch64_mc_refines`); neither is a `ShareMemoryModel` with a physical
-    residue across a quarantine event. -/
+    Instances: `shareMemoryModel_contract` (reference map model) and `arenaShareMemoryModel_contract`
+    (contiguous byte-arena slot allocator wiped in place by full-arena `ct_memzero`, paired with
+    `tooth_off_by_one_memzero_breaks_erasure_contract`). At the ISA level, the wipe routines are
+    verified in `Qsag.current_ct_memzero_x86_64_mc_refines` and
+    `Qsag.current_ct_memzero_aarch64_mc_refines`. -/
 structure KeyErasureContract (M : ShareMemoryModel) : Prop where
   /-- A loaded share is physically present in its slot. -/
   loadStoresShare : ∀ (s : M.State) (slot : Nat) (bytes : Bytes),
@@ -4778,6 +4779,117 @@ theorem elided_zeroization_has_no_erasure_contract :
   have h : (1 : UInt8) = 0 :=
     c.quarantineZeroizesShares (fun _ => [1]) [] 0 (fun _ h => nomatch h) 1 (List.Mem.head _)
   exact absurd h (by decide)
+
+/-- Contiguous byte-arena state tracking physical share allocations (`arena`) alongside a
+    slot directory `(slot, offset, len)` and quarantine generation counter. -/
+structure ArenaShareState where
+  arena : Bytes
+  dir : List (Nat × Nat × Nat)
+  useCount : Nat
+  quarantineGen : Nat
+  deriving DecidableEq, Repr
+
+/-- Lookup the latest `(offset, len)` slice allocated for `slot`. -/
+def arenaLookupSlot : List (Nat × Nat × Nat) → Nat → Option (Nat × Nat)
+  | [], _ => none
+  | (sl, off, len) :: rest, target =>
+    if sl = target then some (off, len) else arenaLookupSlot rest target
+
+/-- Wipe a contiguous byte arena; when `offByOne = true`, stops one byte early (`len - 1`). -/
+def wipeByteArena (offByOne : Bool) (arena : Bytes) : Bytes :=
+  if offByOne then
+    (arena.take (arena.length - 1)).map (fun _ => 0) ++ arena.drop (arena.length - 1)
+  else
+    arena.map (fun _ => 0)
+
+/-- Concrete contiguous byte-arena `ShareMemoryModel`: `.load` appends `bytes` into `arena` and
+    binds `slot` to `(arena.length, bytes.length)`, `.use` increments `useCount`, and `.quarantine`
+    wipes `arena` in place via `wipeByteArena`. -/
+def arenaShareMemoryModel (offByOne : Bool) : ShareMemoryModel where
+  State := ArenaShareState
+  step s
+    | .load slot bytes =>
+      { s with
+        arena := s.arena ++ bytes
+        dir := (slot, s.arena.length, bytes.length) :: s.dir }
+    | .use _ => { s with useCount := s.useCount + 1 }
+    | .quarantine =>
+      { s with
+        arena := wipeByteArena offByOne s.arena
+        quarantineGen := s.quarantineGen + 1 }
+  residue s slot :=
+    match arenaLookupSlot s.dir slot with
+    | none => []
+    | some (off, len) => (s.arena.drop off).take len
+
+private theorem mem_take_drop_zero :
+    ∀ {xs : Bytes}, (∀ b ∈ xs, b = (0 : UInt8)) →
+      ∀ (off len : Nat) {b : UInt8}, b ∈ (xs.drop off).take len → b = 0 := by
+  intro xs hZ off len b hb
+  exact hZ b (List.mem_of_mem_drop (List.mem_of_mem_take hb))
+
+private theorem arenaShare_run_zero :
+    ∀ (tr : List ShareMemOp) (s : ArenaShareState),
+      (∀ b ∈ s.arena, b = 0) → (∀ op ∈ tr, op.isLoad = false) →
+      ∀ b ∈ ((arenaShareMemoryModel false).run s tr).arena, b = 0
+  | [], _, hZ, _ => hZ
+  | .load sl bs :: _, _, _, hNo => nomatch hNo (.load sl bs) (List.Mem.head _)
+  | .use _ :: rest, s, hZ, hNo =>
+    arenaShare_run_zero rest { s with useCount := s.useCount + 1 } hZ
+      (fun op h => hNo op (List.mem_cons_of_mem _ h))
+  | .quarantine :: rest, s, _, hNo =>
+    arenaShare_run_zero rest
+      { s with arena := wipeByteArena false s.arena, quarantineGen := s.quarantineGen + 1 }
+      (fun b hb => by
+        obtain ⟨_, _, hEq⟩ := List.mem_map.mp hb
+        exact hEq.symm)
+      (fun op h => hNo op (List.mem_cons_of_mem _ h))
+
+/-- **Concrete Contiguous Byte-Arena `KeyErasureContract` (`arenaShareMemoryModel_contract`)**:
+    Full-length `ct_memzero` over the share arena satisfies `KeyErasureContract` across arbitrary
+    multi-slot loads, computations, and post-quarantine event traces. -/
+theorem arenaShareMemoryModel_contract : KeyErasureContract (arenaShareMemoryModel false) where
+  loadStoresShare s slot bytes := by
+    change (match arenaLookupSlot ((slot, s.arena.length, bytes.length) :: s.dir) slot with
+      | none => []
+      | some (off, len) => ((s.arena ++ bytes).drop off).take len) = bytes
+    dsimp only [arenaLookupSlot]
+    rw [iteOfPos rfl]
+    dsimp only
+    rw [List.drop_left, List.take_length]
+  quarantineZeroizesShares s tr slot hNo b hb := by
+    let sFinal : ArenaShareState :=
+      (arenaShareMemoryModel false).run ((arenaShareMemoryModel false).step s .quarantine) tr
+    have hZ : ∀ x ∈ sFinal.arena, x = 0 :=
+      arenaShare_run_zero tr ((arenaShareMemoryModel false).step s .quarantine)
+        (fun x hx => by
+          obtain ⟨_, _, hEq⟩ := List.mem_map.mp hx
+          exact hEq.symm)
+        hNo
+    change b ∈ (match arenaLookupSlot sFinal.dir slot with
+      | none => []
+      | some (off, len) => (sFinal.arena.drop off).take len) at hb
+    cases hLook : arenaLookupSlot sFinal.dir slot with
+    | none => rw [hLook] at hb; cases hb
+    | some pair =>
+      rw [hLook] at hb
+      exact mem_take_drop_zero hZ pair.1 pair.2 hb
+
+/-- **`#tooth` Off-by-One `ct_memzero` Leaves Residual Key Byte (`tooth_off_by_one_memzero_breaks_erasure_contract`)**:
+    If `ct_memzero` wipes `arena.length - 1` bytes instead of `arena.length`, the final byte `0xAA`
+    of a loaded 32-byte key share survives `.quarantine` in physical memory, violating
+    `KeyErasureContract`! -/
+theorem tooth_off_by_one_memzero_breaks_erasure_contract :
+    ¬ KeyErasureContract (arenaShareMemoryModel true) := by
+  intro c
+  let s₀ : ArenaShareState := ⟨[], [], 0, 0⟩
+  let share32 : Bytes := List.replicate 31 0x11 ++ [0xAA]
+  let s₁ := (arenaShareMemoryModel true).step s₀ (.load 0 share32)
+  have hMemAA : (0xAA : UInt8) ∈ (arenaShareMemoryModel true).residue
+      ((arenaShareMemoryModel true).run ((arenaShareMemoryModel true).step s₁ .quarantine) []) 0 := by
+    decide
+  have hZero := c.quarantineZeroizesShares s₁ [] 0 (fun _ h => nomatch h) 0xAA hMemAA
+  exact absurd hZero (by decide)
 
 /-! ### 3d. Data-independent timing and SIMT workgroup execution -/
 
@@ -5029,6 +5141,8 @@ theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSi
   Qsag.Spec.empty_network_has_no_channel_contract
   Qsag.Spec.shareMemoryModel_contract
   Qsag.Spec.elided_zeroization_has_no_erasure_contract
+  Qsag.Spec.arenaShareMemoryModel_contract
+  Qsag.Spec.tooth_off_by_one_memzero_breaks_erasure_contract
   Qsag.Spec.ExecMode.constantTimeSafe_flags
   Qsag.Spec.dit_contract_silent_outside_safe_mode
   Qsag.Spec.DitHardwareContract.trace_data_independent
@@ -5100,17 +5214,6 @@ theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSi
   Qsag.Spec.poly257Hash_smDtTcrHard_refuted
   Qsag.Spec.uniformOn_byte1SeedAndPre
   Qsag.Spec.poly257Hash_smDtPreHard_within
-
-end Qsag.Spec
-end
-
-/-! ### Exports for lane cust -/
-
-public section
-namespace Qsag.Spec
-
-theorem honestChannelRun_singleton (m : ChannelMsg) :
-    honestChannelRun [m] = [.send m, .deliver m] := by rfl
 
 end Qsag.Spec
 end

@@ -1221,32 +1221,3 @@ theorem blindVc_collision_filter_preserves_honest_openings
   blindVc_presentation_reduces_to_issuer_mldsa
 
 end Qsag
-
-/-! ### Exports for lane cust -/
-
-public section
-namespace Qsag
-
-theorem fin3AllTrue_eq (p : Fin 3 → Bool) : fin3AllTrue p = (p 0 && p 1 && p 2) := by rfl
-
-theorem vcMerkleTreeRoot_leaf (epoch : UInt64) (layer : Nat) (v : Lane6) :
-    vcMerkleTreeRoot epoch layer (.leaf v) = v := by rfl
-
-theorem blindVcParallelIop_inLang (H : List UInt8 → List UInt8)
-    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D) (k : Nat)
-    (stmt : BlindVcPublicStatement) :
-    (blindVcParallelIop H prgExpand k).inLang stmt ↔
-      ∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth,
-        BlindVcWitnessValid stmt wit := Iff.rfl
-
-theorem credentialSdOpeningAccepts_eq (k : Nat) (defect : Nat → Fin 256 → CredentialFp5)
-    (ch : Nat) :
-    credentialSdOpeningAccepts k defect ch =
-      (List.range k).all (fun idx =>
-        credentialGgmCheckDefects (defect idx)
-          ⟨(ch / 256 ^ idx) % 256, Nat.mod_lt _ (by decide)⟩) := by rfl
-
-#verify_constructive fin3_not_all_count_le_two
-
-end Qsag
-end

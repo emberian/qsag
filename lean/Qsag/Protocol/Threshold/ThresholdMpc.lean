@@ -6974,18 +6974,3 @@ theorem RssByteShares.wellFormed_iff (sh : RssByteShares) :
 
 end Qsag
 end
-
-/-! ### Exports for lane sig -/
-public section
-namespace Qsag
-
-theorem verifyShamirPolyConsistent_def (t : Nat) (polyCoeffs : List Goldilocks)
-    (pts shares : List Goldilocks) :
-    verifyShamirPolyConsistent t polyCoeffs pts shares =
-      (decide (polyCoeffs.length = t) &&
-       decide (pts.length = shares.length) &&
-       (List.zip pts shares).all (fun xy => decide (RoundPoly.evalCoeffs polyCoeffs xy.1 = xy.2))) := by
-  rfl
-
-end Qsag
-end

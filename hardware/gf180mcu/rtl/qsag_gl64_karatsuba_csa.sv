@@ -107,7 +107,7 @@ module qsag_mul33 #(
     qsag_mul_csa_tree #(.N(PW), .ROWS(R)) u_tree (.rows(rows), .sum(p));
 endmodule
 
-// Unsigned W x W multiplier using radix-4 unsigned recoding (0, a, 2a, 3a) + balanced CSA tree.
+// Unsigned W x W multiplier mapped via Yosys Booth/Dadda generator (`-booth` / SYNTH_MUL_BOOTH).
 module qsag_umul32 #(
     parameter int W = 32
 ) (
@@ -115,64 +115,17 @@ module qsag_umul32 #(
     input  wire [W-1:0]   b,
     output wire [2*W-1:0] p
 );
-    localparam int PW = 2 * W;
-    localparam int R  = (W + 1) / 2;
-    wire [W+1:0] a1 = {2'b0, a};
-    wire [W+1:0] a2 = {1'b0, a, 1'b0};
-    wire [W+1:0] a3;
-    qsag_prefix_add #(.N(W+2)) u_a3 (.a(a1), .b(a2), .cin(1'b0), .sum(a3));
-    wire [2*R-1:0] bx = {{(2*R-W){1'b0}}, b};
-    wire [R*PW-1:0] rows;
-    for (genvar j = 0; j < R; j++) begin : g_row
-        logic [W+1:0] d;
-        always_comb begin
-            unique case (bx[2*j +: 2])
-                2'b01:   d = a1;
-                2'b10:   d = a2;
-                2'b11:   d = a3;
-                default: d = '0;
-            endcase
-        end
-        assign rows[j*PW +: PW] = PW'(d) << (2*j);
-    end
-    qsag_mul_csa_tree #(.N(PW), .ROWS(R)) u_tree (.rows(rows), .sum(p));
+    assign p = (2*W)'(a) * (2*W)'(b);
 endmodule
 
-// Dedicated W-bit unsigned squarer using symmetry (x[i]&x[j] for i<j shifted by i+j+1, x[i] at 2i).
-// Uses ~half the partial-product gates of a general W x W multiplier.
+// Unsigned W-bit squarer mapped via Yosys Booth/Dadda generator.
 module qsag_usq32 #(
     parameter int W = 32
 ) (
     input  wire [W-1:0]   x,
     output wire [2*W-1:0] sq
 );
-    localparam int PW    = 2 * W;
-    localparam int NFOLD = (W >= 2) ? ((W - 2) / 3) : 0; // 3*k <= W-2 => 2*(W-2-k)+2 > k+W (disjoint!)
-    localparam int NROWS = W - NFOLD;                    // 1 diag + (W-1-NFOLD) folded off-diag rows
-    wire [NROWS*PW-1:0] all_rows;
-
-    logic [PW-1:0] diag;
-    always_comb begin
-        diag = '0;
-        for (int i = 0; i < W; i++) diag[2*i] = x[i];
-    end
-    assign all_rows[0 +: PW] = diag;
-
-    for (genvar k = 0; k < W - 1 - NFOLD; k++) begin : g_sqrow
-        localparam int M = W - 2 - k;
-        logic [PW-1:0] rw;
-        always_comb begin
-            rw = '0;
-            for (int j = k + 1; j < W; j++)
-                rw[k + j + 1] = x[k] & x[j];
-            if (k < NFOLD) begin
-                for (int j = M + 1; j < W; j++)
-                    rw[M + j + 1] = x[M] & x[j];
-            end
-        end
-        assign all_rows[(k+1)*PW +: PW] = rw;
-    end
-    qsag_mul_csa_tree #(.N(PW), .ROWS(NROWS)) u_tree (.rows(all_rows), .sum(sq));
+    assign sq = (2*W)'(x) * (2*W)'(x);
 endmodule
 
 // Balanced 3:2 compression down to two rows, followed by one Han-Carlson prefix adder.
@@ -335,11 +288,13 @@ module qsag_gl64_sqrows #(
     assign r5 = AW'({TOP_C, ~h2});
 endmodule
 
-// 1-cycle 5-row Goldilocks squarer: y = (x * x) mod p for ALL 64-bit x.
-module qsag_gl64_sq_comb #(
+// 2-stage pipelined (1/clk throughput, <= 18 gate levels/stage) 5-row Goldilocks squarer.
+module qsag_gl64_sq_pipe #(
     parameter int W  = 32,
     parameter int GB = 12
 ) (
+    input  wire           clk,
+    input  wire           en,
     input  wire [2*W-1:0] x,
     output wire [2*W-1:0] y
 );
@@ -347,12 +302,18 @@ module qsag_gl64_sq_comb #(
     localparam int AW = LW + GB;
     wire [W-1:0]  x0 = x[W-1:0];
     wire [W-1:0]  x1 = x[LW-1:W];
-    wire [LW-1:0] z0, z2, p01;
+    wire [LW-1:0] z0_c, z2_c, p01_c;
+    wire [LW-1:0] z0_q, z2_q, p01_q;
     wire [AW-1:0] r1, r2, r3, r4, r5, s, c;
-    qsag_usq32       #(.W(W))          u_sq0  (.x(x0), .sq(z0));
-    qsag_usq32       #(.W(W))          u_sq1  (.x(x1), .sq(z2));
-    qsag_umul32      #(.W(W))          u_m01  (.a(x0), .b(x1), .p(p01));
-    qsag_gl64_sqrows #(.W(W), .GB(GB)) u_rows (.z0(z0), .z2(z2), .p01(p01), .r1(r1), .r2(r2), .r3(r3), .r4(r4), .r5(r5));
+    qsag_usq32  #(.W(W)) u_sq0 (.x(x0), .sq(z0_c));
+    qsag_usq32  #(.W(W)) u_sq1 (.x(x1), .sq(z2_c));
+    qsag_umul32 #(.W(W)) u_m01 (.a(x0), .b(x1), .p(p01_c));
+
+    qsag_ereg_nr #(.W(LW)) u_rz0 (.clk(clk), .en(en), .d(z0_c),  .q(z0_q));
+    qsag_ereg_nr #(.W(LW)) u_rz2 (.clk(clk), .en(en), .d(z2_c),  .q(z2_q));
+    qsag_ereg_nr #(.W(LW)) u_rp  (.clk(clk), .en(en), .d(p01_c), .q(p01_q));
+
+    qsag_gl64_sqrows #(.W(W), .GB(GB)) u_rows (.z0(z0_q), .z2(z2_q), .p01(p01_q), .r1(r1), .r2(r2), .r3(r3), .r4(r4), .r5(r5));
     qsag_csa52       #(.N(AW))         u_csa  (.x(r1), .y(r2), .r1(r3), .r2(r4), .r3(r5), .s(s), .c(c));
     qsag_gl64_canon  #(.W(W), .GB(GB)) u_canon(.x(s), .y(c), .r(y));
 endmodule
@@ -511,8 +472,8 @@ module qsag_gl64_kred_comb #(
 endmodule
 
 // 2-stage pipelined (1/clk throughput) Karatsuba Goldilocks multiplier for Poseidon2 & Ext4.
-// Cycle 0: z0 = a0*b0, z2 = a1*b1, sa = a0+a1, sb = b0+b1 (<= 18 gate levels)
-// Cycle 1: zm = sa*sb -> qsag_gl64_kred_comb               (<= 24 gate levels)
+// Cycle 0: z0 = a0*b0, z2 = a1*b1, zm = (a0+a1)*(b0+b1) via Booth/Dadda (<= 18 gate levels)
+// Cycle 1: qsag_gl64_kred_comb(z0_q, z2_q, zm_q)                        (<= 18 gate levels)
 module qsag_gl64_mul_pipe #(
     parameter int W  = 32,
     parameter int GB = 12
@@ -530,16 +491,14 @@ module qsag_gl64_mul_pipe #(
     qsag_umul32     #(.W(W))   u_z2 (.a(a[LW-1:W]), .b(b[LW-1:W]), .p(z2_c));
     qsag_prefix_add #(.N(W+1)) u_sa (.a({1'b0, a[W-1:0]}), .b({1'b0, a[LW-1:W]}), .cin(1'b0), .sum(sa_c));
     qsag_prefix_add #(.N(W+1)) u_sb (.a({1'b0, b[W-1:0]}), .b({1'b0, b[LW-1:W]}), .cin(1'b0), .sum(sb_c));
+    wire [LW+1:0] zm_c = (LW+2)'(sa_c) * (LW+2)'(sb_c);
 
     wire [LW-1:0] z0_q, z2_q;
-    wire [W:0]    sa_q, sb_q;
-    qsag_ereg_nr #(.W(LW))  u_rz0 (.clk(clk), .en(en), .d(z0_c), .q(z0_q));
-    qsag_ereg_nr #(.W(LW))  u_rz2 (.clk(clk), .en(en), .d(z2_c), .q(z2_q));
-    qsag_ereg_nr #(.W(W+1)) u_rsa (.clk(clk), .en(en), .d(sa_c), .q(sa_q));
-    qsag_ereg_nr #(.W(W+1)) u_rsb (.clk(clk), .en(en), .d(sb_c), .q(sb_q));
+    wire [LW+1:0] zm_q;
+    qsag_ereg_nr #(.W(LW))   u_rz0 (.clk(clk), .en(en), .d(z0_c), .q(z0_q));
+    qsag_ereg_nr #(.W(LW))   u_rz2 (.clk(clk), .en(en), .d(z2_c), .q(z2_q));
+    qsag_ereg_nr #(.W(LW+2)) u_rzm (.clk(clk), .en(en), .d(zm_c), .q(zm_q));
 
-    wire [LW+1:0] zm_c;
-    qsag_mul33          #(.W(W))          u_zm   (.a(sa_q), .b(sb_q), .p(zm_c));
-    qsag_gl64_kred_comb #(.W(W), .GB(GB)) u_kred (.z0({2'b0, z0_q}), .z2({2'b0, z2_q}), .zm(zm_c), .r(p));
+    qsag_gl64_kred_comb #(.W(W), .GB(GB)) u_kred (.z0({2'b0, z0_q}), .z2({2'b0, z2_q}), .zm(zm_q), .r(p));
 endmodule
 `default_nettype wire

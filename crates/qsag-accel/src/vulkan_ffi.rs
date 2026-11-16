@@ -1,5 +1,5 @@
-//! Minimal zero-dependency Linux x86_64/aarch64 Vulkan 1.2+ dynamic loader (`dlopen("libvulkan.so.1")`)
-//! and RAII compute engine targeting discrete RDNA2/SPIR-V GPUs with `shaderInt64`.
+//! Minimal zero-dependency Linux/macOS 64-bit Vulkan 1.2+ dynamic loader (`dlopen`)
+//! and RAII compute engine targeting discrete RDNA2/SPIR-V and Wave32 portability GPUs with `shaderInt64`.
 //!
 //! All `unsafe` FFI calls in `qsag-accel` are strictly isolated inside this single module.
 //!
@@ -123,11 +123,9 @@ const VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: u32 = 1_000_094_000
 
 /// Canonical runtime search order for the Vulkan loader / MoltenVK ICD on macOS Apple Silicon.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) const MACOS_VULKAN_LIB_CANDIDATES: [&core::ffi::CStr; 4] = [
-    c"libvulkan.1.dylib",
+pub(crate) const MACOS_VULKAN_LIB_CANDIDATES: [&core::ffi::CStr; 2] = [
     c"/opt/homebrew/lib/libvulkan.1.dylib",
     c"/opt/homebrew/lib/libMoltenVK.dylib",
-    c"/usr/local/lib/libMoltenVK.dylib",
 ];
 
 const VK_QUEUE_GRAPHICS_BIT: u32 = 1;
@@ -1188,6 +1186,7 @@ impl AirTables<'_> {
 struct ProverSessionDims {
     num_polys: usize,
     num_vars: usize,
+    turboshake_canopy: bool,
 }
 
 /// Host copy of the static tables `exec_prover_air_init_shard` uploaded to the start of
@@ -1226,6 +1225,7 @@ struct ProverArena {
     limbo: std::vec::Vec<GpuBuffer>,
     initialized: bool,
     twiddles_ready: bool,
+    last_fold_k_dst: Option<u32>,
     salt_seed_words: [u64; 4],
     desc_pool: VkDescriptorPool,
     ds_lde_r0: VkDescriptorSet,
@@ -1277,6 +1277,7 @@ impl ProverArena {
         self.session = None;
         self.committed_trees = [None; 3];
         self.air = None;
+        self.last_fold_k_dst = None;
         self.scrub_pending = true;
         crate::ct::ct_zeroize_u64s(&mut self.salt_seed_words);
     }
@@ -1535,7 +1536,25 @@ impl RawVulkanEngine {
                 }
             }
 
-            let lib_handle = unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+            let linux_loader_paths = [
+                c"/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+                c"/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
+                c"/usr/lib64/libvulkan.so.1",
+                c"/usr/lib/libvulkan.so.1",
+            ];
+            let mut lib_handle: *mut c_void = null_mut();
+            for cand in linux_loader_paths {
+                let h = unsafe { dlopen(cand.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+                if !h.is_null() {
+                    lib_handle = h;
+                    break;
+                }
+            }
+            if lib_handle.is_null()
+                && std::env::var_os("QSAG_ALLOW_RELATIVE_VULKAN_LOADER").is_some()
+            {
+                lib_handle = unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+            }
             if lib_handle.is_null() {
                 if let Some(e) = radv_err {
                     return Err(e);
@@ -1677,9 +1696,9 @@ impl RawVulkanEngine {
     ) -> Option<Result<(Self, VulkanDeviceInfo), VulkanError>> {
         let radv_paths = [
             c"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so",
+            c"/usr/lib/aarch64-linux-gnu/libvulkan_radeon.so",
             c"/usr/lib64/libvulkan_radeon.so",
             c"/usr/lib/libvulkan_radeon.so",
-            c"libvulkan_radeon.so",
         ];
         let mut radv_lib: *mut c_void = null_mut();
         for path in radv_paths {
@@ -1688,6 +1707,9 @@ impl RawVulkanEngine {
                 radv_lib = h;
                 break;
             }
+        }
+        if radv_lib.is_null() && std::env::var_os("QSAG_ALLOW_RELATIVE_VULKAN_LOADER").is_some() {
+            radv_lib = unsafe { dlopen(c"libvulkan_radeon.so".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
         }
         if radv_lib.is_null() {
             return None;
@@ -3336,7 +3358,7 @@ impl RawVulkanEngine {
                 unsafe {
                     self.0.settle_staging();
                     if self.1 && self.0.exec_state == EngineExecState::Ready {
-                        let _ = self.0.scrub_all_vram();
+                        let _ = self.0.scrub_batch_vram();
                     }
                 }
             }
@@ -3585,6 +3607,26 @@ impl RawVulkanEngine {
                     (self.fns.cmd_fill_buffer)(self.cmd_buf, buffer, 0, bytes, 0);
                 }
             }
+        }
+    }
+
+    /// Scrub only batch-job VRAM buffers (`vram_a`, `vram_b`, `vram_c`) after a failed batch job
+    /// so an active `ProverArena` session and `twiddles_24` are preserved untouched.
+    unsafe fn scrub_batch_vram(&mut self) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
+        if self.cmd_buf.is_null() || self.vram_a.buffer == 0 {
+            return Ok(());
+        }
+        unsafe {
+            self.begin_cmd()?;
+            self.cmd_scrub_vram(&[
+                (self.vram_a.buffer, self.vram_a.capacity),
+                (self.vram_b.buffer, self.vram_b.capacity),
+                (self.vram_c.buffer, self.vram_c.capacity),
+            ]);
+            self.submit_and_wait()
         }
     }
 
@@ -5988,8 +6030,40 @@ impl RawVulkanEngine {
     where
         F: FnMut(usize, usize, &mut [u64]),
     {
+        self.exec_prover_whir_commit_round0_with_mode(
+            false,
+            num_polys,
+            salt_seed,
+            num_vars,
+            blowup,
+            group_arity,
+            max_stage1_domain_ext4,
+            max_stage1_groups,
+            extra_witness_words,
+            fill_chunk,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_prover_whir_commit_round0_with_mode<F>(
+        &mut self,
+        turboshake_canopy: bool,
+        num_polys: usize,
+        salt_seed: &[u8; 32],
+        num_vars: usize,
+        blowup: usize,
+        group_arity: usize,
+        max_stage1_domain_ext4: usize,
+        max_stage1_groups: usize,
+        extra_witness_words: usize,
+        fill_chunk: F,
+    ) -> Result<([u8; 32], u64), VulkanError>
+    where
+        F: FnMut(usize, usize, &mut [u64]),
+    {
         self.run_prover_job(|engine| {
             engine.job_prover_whir_commit_round0(
+                turboshake_canopy,
                 num_polys,
                 salt_seed,
                 num_vars,
@@ -6006,6 +6080,7 @@ impl RawVulkanEngine {
     #[allow(clippy::too_many_arguments)]
     fn job_prover_whir_commit_round0<F>(
         &mut self,
+        turboshake_canopy: bool,
         num_polys: usize,
         salt_seed: &[u8; 32],
         num_vars: usize,
@@ -6025,12 +6100,15 @@ impl RawVulkanEngine {
         }
         self.prover.session = None;
         self.prover.air = None;
+        self.prover.last_fold_k_dst = None;
         if num_polys == 0
+            || num_polys > 255
             || !(2..=26).contains(&num_vars)
             || !blowup.is_power_of_two()
             || blowup < 4
             || !group_arity.is_power_of_two()
             || group_arity == 0
+            || group_arity > 128
         {
             return Err(crate::AccelError::LengthOverflow.into());
         }
@@ -6120,10 +6198,9 @@ impl RawVulkanEngine {
                     while pos < c_len {
                         let take = (c_len - pos).min(CHUNK_WORDS);
                         {
-                            let dst = core::slice::from_raw_parts_mut(
-                                self.staging.mapped.cast::<u64>(),
-                                take,
-                            );
+                            let ptr = self.staging.mapped.cast::<u64>();
+                            core::ptr::write_bytes(ptr, 0, take);
+                            let dst = core::slice::from_raw_parts_mut(ptr, take);
                             fill_chunk(poly_idx, pos, dst);
                         }
                         self.begin_cmd()?;
@@ -6204,10 +6281,9 @@ impl RawVulkanEngine {
                         let take = (c_len - pos).min(HALF_WORDS);
                         let src_word_off = slot * HALF_WORDS;
                         {
-                            let dst = core::slice::from_raw_parts_mut(
-                                self.staging.mapped.cast::<u64>().add(src_word_off),
-                                take,
-                            );
+                            let ptr = self.staging.mapped.cast::<u64>().add(src_word_off);
+                            core::ptr::write_bytes(ptr, 0, take);
+                            let dst = core::slice::from_raw_parts_mut(ptr, take);
                             fill_chunk(poly_idx, pos, dst);
                         }
                         let begin_info = VkCommandBufferBeginInfo {
@@ -6588,6 +6664,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             );
+            let turbo_flag = if turboshake_canopy { 0x80u32 } else { 0u32 };
             let salt_w = self.prover.salt_seed_words;
             self.dispatch_whir_lde_1d(
                 kp.pipeline_layout,
@@ -6599,7 +6676,7 @@ impl RawVulkanEngine {
                     scalar1: salt_w[1],
                     scalar2: salt_w[2],
                     scalar3: salt_w[3],
-                    mode: 9,
+                    mode: 9 | turbo_flag,
                     len: num_groups as u32,
                     aux0: group_arity as u32,
                     aux1: num_polys as u32,
@@ -6627,7 +6704,7 @@ impl RawVulkanEngine {
                         scalar1: 0,
                         scalar2: 0,
                         scalar3: 0,
-                        mode: 11,
+                        mode: 11 | turbo_flag,
                         len: half as u32,
                         aux0: 0,
                         aux1: 0,
@@ -6656,7 +6733,7 @@ impl RawVulkanEngine {
                         scalar1: 0,
                         scalar2: 0,
                         scalar3: 0,
-                        mode: 12,
+                        mode: 12 | turbo_flag,
                         len: half as u32,
                         aux0: 0,
                         aux1: 0,
@@ -6705,6 +6782,7 @@ impl RawVulkanEngine {
             self.prover.session = Some(ProverSessionDims {
                 num_polys,
                 num_vars,
+                turboshake_canopy,
             });
             self.prover.committed_trees[0] = Some(CommittedTree {
                 stage_idx: 0,
@@ -7211,7 +7289,9 @@ impl RawVulkanEngine {
         out_dots: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
-            if mono_kronecker.len() != 768 && mono_kronecker.len() != 1024 {
+            if (mono_kronecker.len() != 768 && mono_kronecker.len() != 1024)
+                || (mono_kronecker.len() == 768 && num_vars > 24)
+            {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
             let core_len = pow2_len(num_vars, 26)?;
@@ -7898,6 +7978,7 @@ impl RawVulkanEngine {
                 "vram_work_a (folded kernel)",
                 span_end(u64::from(k_dst), cadd(kh, 1)?, 1, EXT4_BYTES)?,
             )?;
+            engine.prover.last_fold_k_dst = Some(k_dst);
             unsafe {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
                     engine.refresh_prover_descriptor_sets()?;
@@ -8020,10 +8101,13 @@ impl RawVulkanEngine {
                 "vram_work_b (folded coefficients)",
                 span_end(u64::from(c_dst), cadd(to_u64(m), 1)?, 1, EXT4_BYTES)?,
             )?;
-            let normalize = normalize_to_zero && c_dst != 0 && norm_len > 0;
-            let norm_copy = if normalize {
-                // Same-buffer copies must not overlap: the source starts at `c_dst`.
-                let norm_bytes = cmul(to_u64(norm_len), EXT4_BYTES)?;
+            let k_dst = engine.prover.last_fold_k_dst.unwrap_or(c_dst);
+            let norm_bytes = if normalize_to_zero && norm_len > 0 {
+                cmul(to_u64(norm_len), EXT4_BYTES)?
+            } else {
+                0
+            };
+            let norm_copy_b = if norm_bytes > 0 && c_dst != 0 {
                 let src_off = cmul(u64::from(c_dst), EXT4_BYTES)?;
                 if norm_bytes > src_off {
                     return Err(out_of_range(
@@ -8032,23 +8116,34 @@ impl RawVulkanEngine {
                         norm_bytes,
                     ));
                 }
-                let cp_b = checked_copy(
+                Some(checked_copy(
                     "vram_work_b (fold normalisation)",
                     &engine.prover.vram_work_b,
                     src_off,
                     engine.prover.vram_work_b.capacity,
                     0,
                     norm_bytes,
-                )?;
-                checked_copy(
+                )?)
+            } else {
+                None
+            };
+            let norm_copy_a = if norm_bytes > 0 && k_dst != 0 {
+                let src_off_a = cmul(u64::from(k_dst), EXT4_BYTES)?;
+                if norm_bytes > src_off_a {
+                    return Err(out_of_range(
+                        "fold kernel normalisation length (overlaps its source)",
+                        src_off_a,
+                        norm_bytes,
+                    ));
+                }
+                Some(checked_copy(
                     "vram_work_a (fold normalisation)",
                     &engine.prover.vram_work_a,
-                    src_off,
+                    src_off_a,
                     engine.prover.vram_work_a.capacity,
                     0,
                     norm_bytes,
-                )?;
-                Some(cp_b)
+                )?)
             } else {
                 None
             };
@@ -8088,27 +8183,34 @@ impl RawVulkanEngine {
                         aux5: 0,
                     },
                 );
-                if let Some(cp) = norm_copy {
+                if norm_copy_b.is_some() || norm_copy_a.is_some() {
                     engine.cmd_barrier(
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_ACCESS_SHADER_WRITE_BIT,
                         VK_ACCESS_TRANSFER_READ_BIT,
                     );
-                    (engine.fns.cmd_copy_buffer)(
-                        engine.cmd_buf,
-                        engine.prover.vram_work_b.buffer,
-                        engine.prover.vram_work_b.buffer,
-                        1,
-                        &cp,
-                    );
-                    (engine.fns.cmd_copy_buffer)(
-                        engine.cmd_buf,
-                        engine.prover.vram_work_a.buffer,
-                        engine.prover.vram_work_a.buffer,
-                        1,
-                        &cp,
-                    );
+                    if let Some(cp_b) = norm_copy_b {
+                        (engine.fns.cmd_copy_buffer)(
+                            engine.cmd_buf,
+                            engine.prover.vram_work_b.buffer,
+                            engine.prover.vram_work_b.buffer,
+                            1,
+                            &cp_b,
+                        );
+                    }
+                    if let Some(cp_a) = norm_copy_a {
+                        (engine.fns.cmd_copy_buffer)(
+                            engine.cmd_buf,
+                            engine.prover.vram_work_a.buffer,
+                            engine.prover.vram_work_a.buffer,
+                            1,
+                            &cp_a,
+                        );
+                    }
+                }
+                if normalize_to_zero && norm_len > 0 {
+                    engine.prover.last_fold_k_dst = Some(0);
                 }
                 engine.submit_and_wait()
             }
@@ -8124,15 +8226,18 @@ impl RawVulkanEngine {
     ) -> Result<[u8; 32], VulkanError> {
         self.run_prover_job(|engine| {
             if stage_idx == 0
+                || stage_idx > 255
                 || coeff_len > domain_len
                 || !domain_len.is_power_of_two()
                 || !group_arity.is_power_of_two()
                 || group_arity == 0
+                || group_arity > 128
                 || !domain_len.is_multiple_of(group_arity)
             {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
-            engine.prover_session()?;
+            let dims = engine.prover_session()?;
+            let turbo_flag = if dims.turboshake_canopy { 0x80u32 } else { 0u32 };
             let num_groups = domain_len / group_arity;
             let log_d = domain_len.trailing_zeros();
             to_u32(domain_len)?;
@@ -8307,7 +8412,7 @@ impl RawVulkanEngine {
                         scalar1: 0,
                         scalar2: 0,
                         scalar3: 0,
-                        mode: 10,
+                        mode: 10 | turbo_flag,
                         len: num_groups as u32,
                         aux0: group_arity as u32,
                         aux1: cw_base,
@@ -8335,7 +8440,7 @@ impl RawVulkanEngine {
                             scalar1: 0,
                             scalar2: 0,
                             scalar3: 0,
-                            mode: 11,
+                            mode: 11 | turbo_flag,
                             len: half as u32,
                             aux0: 0,
                             aux1: 0,
@@ -8364,7 +8469,7 @@ impl RawVulkanEngine {
                             scalar1: 0,
                             scalar2: 0,
                             scalar3: 0,
-                            mode: 12,
+                            mode: 12 | turbo_flag,
                             len: half as u32,
                             aux0: 0,
                             aux1: 0,
@@ -8597,10 +8702,19 @@ impl RawVulkanEngine {
                 cmul(cmul(np, arity)?, nq)?
             };
             let expected_out = cadd(cadd(salt_words, fiber_words)?, cmul(4, ns)?)?;
-            if to_u64(out_words.len()) != expected_out {
+            if to_u64(out_words.len()) != expected_out
+                || stage_idx > 255
+                || group_arity > 128
+                || num_polys > 255
+            {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
-            engine.prover_session()?;
+            let session_dims = engine.prover_session()?;
+            let turbo_flag = if session_dims.turboshake_canopy {
+                0x80u32
+            } else {
+                0u32
+            };
             if expected_out == 0 {
                 return Ok(());
             }
@@ -8736,7 +8850,7 @@ impl RawVulkanEngine {
                     scalar1: sc1,
                     scalar2: sc2,
                     scalar3: sc3,
-                    mode: 13,
+                    mode: 13 | turbo_flag,
                     len: num_q as u32,
                     aux0: group_arity as u32,
                     aux1: num_polys as u32,

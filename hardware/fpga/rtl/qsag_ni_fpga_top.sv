@@ -498,8 +498,8 @@ module qsag_ni_fpga_top #(
         /* verilator lint_off UNUSEDSIGNAL */
         logic [65:0] r0, r1;
         /* verilator lint_on UNUSEDSIGNAL */
-        wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {30'b0, hi, 32'b0}, {2'b0, lo}};
-        wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {30'b0, hi, 32'b0}, {2'b0, lo}};
+        wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
+        wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
         qsag_sum_csa #(.W(66), .N(4), .CHUNK(24)) u_r0 (.x(tr0), .y(r0));
         qsag_sum_csa #(.W(66), .N(4), .CHUNK(24)) u_r1 (.x(tr1), .y(r1));
         assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];

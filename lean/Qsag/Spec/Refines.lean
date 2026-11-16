@@ -409,7 +409,7 @@ def Refines.toDataRefines {S_c S_a In Out : Type}
   Qsag.Spec.DataRefines.preserve_admitsTrace
   Qsag.Spec.DataRefines.reachable_rel
 
-/-! ### Exports for lane cred-mig -/
+/-! ### Lockstep Simulation & Party-Machine Trace Equations -/
 
 theorem LockstepSim.toRefines_rel {S_c S_a In Out : Type}
     {C : Machine S_c In Out} {A : Machine S_a In Out}

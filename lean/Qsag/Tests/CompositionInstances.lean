@@ -416,45 +416,37 @@ def hrpQs : Bytes := [113, 115]
 def paid : Bytes := [0x70, 0x61, 0x79]
 def unpaid : Bytes := [0x70, 0x61, 0x7A]
 
-/-- Unfold the hybrid-envelope predicates of `HybridSecurity` through their exported equations,
-together with the fixtures of this section that mention them. -/
-local macro "hybrid_unfold" : tactic => `(tactic| simp only [
-  verifyWith.public_eq_1, validateForAddress.public_eq_1, addressOf.public_eq_1,
-  transcript.public_eq_1, idCommit.public_eq_1, idInput.public_eq_1, keyHash.public_eq_1,
-  hybridWins_eq, mass.public_eq_1, suiteBytes_secpMl44, suiteBytes_edMl65,
-  toyHash, encodePre, transcriptFields, toySign, toyVerifier, envelopeFor, hk])
-
 theorem hybrid_honest_accepts :
     validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 1) ∧
     verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) paid := by
-  hybrid_unfold; decide +kernel
+  unfold validateForAddress verifyWith; decide +kernel
 theorem hybrid_rejects_other_message :
     ¬ verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) unpaid := by
-  hybrid_unfold; decide +kernel
+  unfold verifyWith; decide +kernel
 /-- The envelope carries no HRP or version, so it validates for every address derived from the
 same keys. Network exclusivity has to be bound in the message, as the source module states. -/
 theorem hybrid_envelope_valid_for_every_network :
     validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk [113, 116] 1) ∧
     validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 2) := by
-  hybrid_unfold; decide +kernel
+  unfold validateForAddress; decide +kernel
 /-- Address metadata is bound by the commitment: relabelling the HRP or the version without
 recomputing the commitment is rejected. -/
 theorem hybrid_rejects_relabelled_hrp :
     ¬ validateForAddress toyHash (envelopeFor hk paid)
       { addressOf toyHash hk hrpQs 1 with hrp := [113, 116] } := by
-  hybrid_unfold; decide +kernel
+  unfold validateForAddress; decide +kernel
 theorem hybrid_rejects_relabelled_version :
     ¬ validateForAddress toyHash (envelopeFor hk paid)
       { addressOf toyHash hk hrpQs 1 with version := 2 } := by
-  hybrid_unfold; decide +kernel
+  unfold validateForAddress; decide +kernel
 theorem hybrid_address_commitments_differ :
     (addressOf toyHash hk [113, 116] 1).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment ∧
     (addressOf toyHash hk hrpQs 2).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment := by
-  hybrid_unfold; decide +kernel
+  decide +kernel
 theorem hybrid_rejects_other_keys_address :
     ¬ validateForAddress toyHash (envelopeFor hk paid)
       (addressOf toyHash { hk with classical := [3, 0xA1, 0xA2] } hrpQs 1) := by
-  hybrid_unfold; decide +kernel
+  unfold validateForAddress; decide +kernel
 /-- Identical component keys and one verification algorithm: the role flag in the transcript
 alone keeps a classical-role signature from being accepted in the PQ role. -/
 def twin : Keys := ⟨.secpMl44, [9], [9]⟩
@@ -463,11 +455,11 @@ theorem hybrid_rejects_swapped_roles :
     ¬ verifyWith toyHash toyVerifier toyVerifier
       ⟨twin, (envelopeFor twin paid).pqSignature, (envelopeFor twin paid).classicalSignature⟩
       paid := by
-  hybrid_unfold; simp only [twin, suiteBytes_secpMl44]; decide +kernel
+  unfold verifyWith; decide +kernel
 /-- An honest PQ signature is not accepted next to a substituted classical key. -/
 theorem hybrid_rejects_rogue_partner :
     ¬ (toyVerifier hk.pq (transcript toyHash { hk with classical := [0xEE] } true paid)
-      (envelopeFor hk paid).pqSignature = true) := by hybrid_unfold; decide +kernel
+      (envelopeFor hk paid).pqSignature = true) := by decide +kernel
 
 theorem hybrid_keybound_instance : ∃ (H : HybridSecurity.Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes)
     (v : Nat) (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
@@ -479,8 +471,6 @@ def brokenClassical : Verifier := fun _ _ _ => true
 /-- Output `0`: junk signatures on a fresh message. Output `1`: replay of a queried message. -/
 def advOut (j : Fin 2) : HybridPinnedEnvelope × Bytes :=
   if j.val = 0 then (⟨hk, [0], [0]⟩, unpaid) else (envelopeFor hk paid, paid)
-theorem advOut_zero (h : 0 < 2) : advOut ⟨0, h⟩ = (⟨hk, [0], [0]⟩, unpaid) := by rfl
-theorem advOut_one (h : 0 + 1 < 2) : advOut ⟨0 + 1, h⟩ = (envelopeFor hk paid, paid) := by rfl
 /-- Classical component accepting everything, PQ component binding: the hybrid win mass is
 `0` while the classical component game is won with mass `1`. -/
 theorem robust_combiner_instance :
@@ -492,17 +482,11 @@ theorem robust_combiner_instance :
     mass (fun _ : Fin 2 => 1) (fun j =>
       toyVerifier hk.pq (transcript toyHash hk true (advOut j).2)
         (advOut j).1.pqSignature && decide ((advOut j).2 ∉ [paid])) = 0 := by
-  simp only [mass.public_eq_1, hybridWins_eq, qsum_succ, qsum_zero, advOut_zero, advOut_one]
-  hybrid_unfold
-  simp only [decide_true, Bool.true_and]
   decide +kernel
 /-- Both components accepting everything: the fresh junk output wins. -/
 theorem both_components_broken_instance :
     mass (fun _ : Fin 2 => 1) (fun j =>
       hybridWins toyHash brokenClassical brokenClassical hk hrpQs 1 [paid] (advOut j)) = 1 := by
-  simp only [mass.public_eq_1, hybridWins_eq, qsum_succ, qsum_zero, advOut_zero, advOut_one]
-  hybrid_unfold
-  simp only [decide_true, Bool.true_and]
   decide +kernel
 
 /-! ### Real `cSHAKE256` (`keccakF1600`) + `verifyAggNativeSig` (`Poseidon2` Jorts) Hybrid Envelope -/
@@ -636,22 +620,16 @@ def tokensA (j : Fin 3) : AuthorizedSignReleaseToken :=
 
 theorem only_honest_member : ∀ j : Fin 3,
     quorum01 j = true → corrupt0 j = false → j = 1 := by decide +kernel
-theorem acceptsA : PolicyAccepts pol payA 2 := by
-  rw [PolicyAccepts.public_eq_1]
-  exact ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by rfl, by decide +kernel⟩
-theorem acceptsB : PolicyAccepts pol payB 2 := by
-  rw [PolicyAccepts.public_eq_1]
-  exact ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by rfl, by decide +kernel⟩
+theorem acceptsA : PolicyAccepts pol payA 2 :=
+  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
+theorem acceptsB : PolicyAccepts pol payB 2 :=
+  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
 theorem stepA : LedgerStep pol.maxWindowSpend 5 genesis payA (burn genesis payA) := by
-  simp only [LedgerStep.public_eq_1, burn.public_eq_1, projected.public_eq_1]; decide +kernel
+  unfold LedgerStep; decide +kernel
 theorem stepB : LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payB
     (burn (burn genesis payA) payB) := by
-  simp only [LedgerStep.public_eq_1, burn.public_eq_1, projected.public_eq_1]; decide +kernel
-theorem corrupt_token_not_minted : tokensA 0 ≠ minted intentHash pol payA := by
-  intro h
-  have h' := congrArg AuthorizedSignReleaseToken.policyDigest h
-  rw [minted.public_eq_1] at h'
-  exact absurd h' (by decide +kernel)
+  unfold LedgerStep; decide +kernel
+theorem corrupt_token_not_minted : tokensA 0 ≠ minted intentHash pol payA := by decide +kernel
 
 /-- `n = 3`, `t = 2`, `f = 1`: the quorum contains the corrupt party; the honest member alone
 supplies the release. -/
@@ -662,23 +640,14 @@ theorem corrupt_quorum_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
     (∀ j, q j = true → corrupt j = false →
       ValidRelease H p t w i (before j) (after j) (tokens j)) :=
   ⟨3, 2, 1, 5, pol, intentHash, payA, quorum01, corrupt0, fun _ => genesis,
-    fun _ => burn genesis payA, tokensA, by rw [cardinal.public_eq_1]; decide +kernel,
-    by rw [cardinal.public_eq_1]; decide +kernel, by decide,
+    fun _ => burn genesis payA, tokensA, by decide +kernel, by decide +kernel, by decide,
     fun j hq hc => by
       obtain rfl := only_honest_member j hq hc
-      rw [ValidRelease.public_eq_1]
-      exact ⟨by rfl, acceptsA, stepA⟩⟩
+      exact ⟨rfl, acceptsA, stepA⟩⟩
 
 def quorumOf (i : TransactionIntent) (j : Fin 3) : Bool :=
   if i = payA then decide (j.val < 2) else decide (0 < j.val)
 def beforeOf (i : TransactionIntent) : Ledger := if i = payA then genesis else burn genesis payA
-
-theorem payB_ne_payA : (payB = payA) = False :=
-  eq_false fun h => absurd (congrArg TransactionIntent.recipient h) (by decide)
-theorem beforeOf_payA : beforeOf payA = genesis := by
-  simp only [beforeOf, eq_self, ite_true]
-theorem beforeOf_payB : beforeOf payB = burn genesis payA := by
-  simp only [beforeOf, payB_ne_payA, ite_false]
 
 /-- Two intents, two different quorums sharing honest party `1`, one serialized ledger. -/
 theorem two_intent_spending_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
@@ -691,84 +660,56 @@ theorem two_intent_spending_instance : ∃ (n t f w : Nat) (p : TransactionPolic
     LedgerTrace p.maxWindowSpend w ⟨0, [], []⟩ is final := by
   refine ⟨3, 2, 1, 5, pol, intentHash, [payA, payB], corrupt0, quorumOf,
     fun i _ => beforeOf i, fun i _ => burn (beforeOf i) i, fun i _ => minted intentHash pol i,
-    burn (burn genesis payA) payB, by rw [cardinal.public_eq_1]; decide +kernel, by decide,
-    ?_, ?_, ?_⟩
+    burn (burn genesis payA) payB, by decide +kernel, by decide, ?_, ?_, ?_⟩
   · intro i hi
     rcases List.mem_cons.mp hi with rfl | hi
-    · rw [cardinal.public_eq_1]
-      simp only [quorumOf, eq_self, ite_true]
-      decide +kernel
+    · decide +kernel
     · obtain rfl := List.mem_singleton.mp hi
-      rw [cardinal.public_eq_1]
-      simp only [quorumOf, payB_ne_payA, ite_false]
       decide +kernel
   · intro i hi j _ _
     rcases List.mem_cons.mp hi with rfl | hi
-    · rw [ValidRelease.public_eq_1]
-      dsimp only
-      rw [beforeOf_payA]
-      exact ⟨rfl, acceptsA, stepA⟩
+    · exact ⟨rfl, acceptsA, stepA⟩
     · obtain rfl := List.mem_singleton.mp hi
-      rw [ValidRelease.public_eq_1]
-      dsimp only
-      rw [beforeOf_payB]
       exact ⟨rfl, acceptsB, stepB⟩
   · exact .cons stepA (.cons stepB (.nil _))
 
-theorem rejects_over_per_tx_cap : ¬ PolicyAccepts pol ⟨7, 101, 0, 3, 13, 5⟩ 3 := by
-  rw [PolicyAccepts.public_eq_1]
-  exact fun h => absurd h.2.1 (by decide +kernel)
-theorem rejects_unlisted_recipient : ¬ PolicyAccepts pol ⟨9, 10, 0, 3, 13, 5⟩ 3 := by
-  rw [PolicyAccepts.public_eq_1]
-  exact fun h => absurd h.1 (by decide +kernel)
+theorem rejects_over_per_tx_cap : ¬ PolicyAccepts pol ⟨7, 101, 0, 3, 13, 5⟩ 3 :=
+  fun h => absurd h.2.1 (by decide +kernel)
+theorem rejects_unlisted_recipient : ¬ PolicyAccepts pol ⟨9, 10, 0, 3, 13, 5⟩ 3 :=
+  fun h => absurd h.1 (by decide +kernel)
 theorem rejects_insufficient_approvals : ¬ PolicyAccepts pol payB 1 := by
-  rw [PolicyAccepts.public_eq_1]
   rintro ⟨_, _, r, hr, hn⟩
   have e : pol.tiers.find? (fun r => decide (payB.amount ≤ r.cap)) = some ⟨100, 2⟩ := by
-    rfl
+    decide +kernel
   rw [e] at hr
   cases hr
   exact absurd hn (by decide +kernel)
 theorem rejects_nonce_replay :
     ¬ LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payA
-      (burn (burn genesis payA) payA) := by
-  rw [LedgerStep.public_eq_1]
-  exact fun h => absurd h.2.1 (by rw [burn.public_eq_1]; decide +kernel)
+      (burn (burn genesis payA) payA) :=
+  fun h => absurd h.2.1 (by decide +kernel)
 /-- After `payA` and `payB` (140 of 150 spent) a further 20 has no ledger step at all. -/
 theorem rejects_window_overspend (next : Ledger) :
     ¬ LedgerStep pol.maxWindowSpend 5 (burn (burn genesis payA) payB)
-      ⟨7, 20, 0, 3, 13, 5⟩ next := by
-  rw [LedgerStep.public_eq_1]
-  exact fun h => absurd h.2.2.2.1 (by
-    simp only [projected.public_eq_1, burn.public_eq_1]; decide +kernel)
+      ⟨7, 20, 0, 3, 13, 5⟩ next :=
+  fun h => absurd h.2.2.2.1 (by decide +kernel)
 theorem rejects_stale_window (next : Ledger) :
-    ¬ LedgerStep pol.maxWindowSpend 6 genesis payA next := by
-  rw [LedgerStep.public_eq_1]
-  exact fun h => absurd h.1 (by decide +kernel)
+    ¬ LedgerStep pol.maxWindowSpend 6 genesis payA next :=
+  fun h => absurd h.1 (by decide +kernel)
 theorem token_is_intent_specific :
-    minted intentHash pol payA ≠ minted intentHash pol payB := by
-  intro h
-  have h' := congrArg AuthorizedSignReleaseToken.nonce h
-  rw [minted.public_eq_1, minted.public_eq_1] at h'
-  exact absurd h' (by decide +kernel)
+    minted intentHash pol payA ≠ minted intentHash pol payB := by decide +kernel
 
 def toyMac (policy old next : Nat) : Nat := (policy * 65537 + old) * 65537 + next + 0x5eed
 theorem window_advance_accepts :
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6⟩ = some ⟨0, [], []⟩ := by
-  rw [advanceAuthorized.public_eq_1, advanceWindow.public_eq_1]; rfl
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6⟩ = some ⟨0, [], []⟩ := by decide +kernel
 /-- Wrong tag, non-increasing epoch, tag for another policy, tag for another old epoch. -/
 theorem window_advance_rejects :
     advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ = none ∧
     advanceAuthorized toyMac 9 5 ⟨5, toyMac 9 5 5⟩ = none ∧
     advanceAuthorized toyMac 9 5 ⟨6, toyMac 8 5 6⟩ = none ∧
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 4 6⟩ = none := by
-  refine ⟨?_, ?_, ?_, ?_⟩ <;>
-    (rw [advanceAuthorized.public_eq_1, advanceWindow.public_eq_1]; rfl)
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 4 6⟩ = none := by decide +kernel
 theorem window_advance_rejects_wrong_tag :
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ ≠ some ⟨0, [], []⟩ := by
-  rw [window_advance_rejects.1]
-  intro h
-  cases h
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ ≠ some ⟨0, [], []⟩ := by decide +kernel
 end Hybrid
 
 /-! ## 3. Cross-protocol: the modelled Poseidon2 permutation and real labels -/

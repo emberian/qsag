@@ -140,11 +140,32 @@ def canon_a64_gpr(tok: str) -> str | None:
 
 def canon_a64_neon(tok: str) -> str | None:
     t = tok.strip().lower().lstrip("{").rstrip("}")
+    t = re.sub(r"\[[0-9]+\]$", "", t)
     m = re.match(r"^(?:v([0-9]+)\.[0-9a-z]+|[qdsbh]([0-9]+))$", t)
     if m:
         idx = m.group(1) or m.group(2)
         return f"v{idx}"
     return None
+
+
+def expand_a64_neon_list(ops_l: str) -> list[str]:
+    out: list[str] = []
+    for grp in re.findall(r"\{([^}]*)\}", ops_l):
+        for item in grp.split(","):
+            item = item.strip()
+            if "-" in item:
+                lo_s, hi_s = [s.strip() for s in item.split("-", 1)]
+                lo_v, hi_v = canon_a64_neon(lo_s), canon_a64_neon(hi_s)
+                if lo_v and hi_v:
+                    lo_i, hi_i = int(lo_v[1:]), int(hi_v[1:])
+                    n = ((hi_i - lo_i) % 32) + 1
+                    for k in range(n):
+                        out.append(f"v{(lo_i + k) % 32}")
+            else:
+                v = canon_a64_neon(item)
+                if v:
+                    out.append(v)
+    return out
 
 
 class InstructionStream(list):
@@ -212,7 +233,7 @@ def audit_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
     if not instrs:
         return [f"{sym}: empty instruction stream"]
 
-    uses_ymm = any("ymm" in ops.lower() for _, ops in instrs)
+    uses_ymm = any("ymm" in ops.lower() or "zmm" in ops.lower() for _, ops in instrs)
     ymm_upper_dirty = False
     dirty_simd: set[int] = set()
     reg_sum_tainted: set[str] = set()
@@ -232,18 +253,18 @@ def audit_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
         ops_l = ops.lower()
         parts = split_top_operands(ops_l)
 
-        # Track upper-YMM penalty state & live-at-ret XMM/YMM register dirtiness
-        if "ymm" in ops_l:
+        # Track upper-YMM/ZMM penalty state & live-at-ret XMM/YMM/ZMM register dirtiness
+        if "ymm" in ops_l or "zmm" in ops_l:
             ymm_upper_dirty = True
         if mnem == "vzeroupper":
-            # `vzeroupper` clears ONLY bits [255:128], NOT lower 128-bit `xmm0..xmm15`!
+            # `vzeroupper` clears ONLY bits [511:128], NOT lower 128-bit `xmm0..xmm31`!
             ymm_upper_dirty = False
 
         if parts and "[" not in parts[0]:
             dst_simd = canon_x86_simd(parts[0])
             if dst_simd is not None:
                 is_self_zero = (
-                    (mnem in ("vpxor", "vxorps", "vxorpd") and len(parts) == 3 and parts[0] == parts[1] == parts[2])
+                    (mnem in ("vpxor", "vpxorq", "vpxord", "vxorps", "vxorpd") and len(parts) == 3 and parts[0] == parts[1] == parts[2])
                     or (mnem in ("pxor", "xorps", "xorpd") and len(parts) == 2 and parts[0] == parts[1])
                 )
                 if is_self_zero:
@@ -293,7 +314,7 @@ def audit_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
             if vd is not None:
                 zero = (mnem in ("pxor", "xorps", "xorpd") and len(parts) == 2
                         and parts[0] == parts[1]) or (
-                        mnem in ("vpxor", "vxorps", "vxorpd") and len(parts) == 3
+                        mnem in ("vpxor", "vpxorq", "vpxord", "vxorps", "vxorpd") and len(parts) == 3
                         and parts[1] == parts[2])
                 if zero:
                     vector_tainted.discard(vd)
@@ -453,17 +474,59 @@ def is_branchless_portable_primitive(sym: str) -> bool:
 
 
 def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], strict=False) -> list[str]:
-    """Check upper-YMM hygiene and the shared architecture-aware taint screen."""
+    """Check upper-YMM/ZMM hygiene and the shared architecture-aware taint screen."""
     errors = []
     ymm_dirty = False
     for idx, (mnem, ops) in enumerate(instrs):
-        if "ymm" in ops.lower():
+        ops_l = ops.lower()
+        if "ymm" in ops_l or "zmm" in ops_l:
             ymm_dirty = True
         if mnem in ("vzeroupper", "vzeroall"):
             ymm_dirty = False
         if mnem in ("call", "callq", "ret") and ymm_dirty:
-            errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM state")
+            errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM/ZMM state")
     return errors + rust_errors(sym, instrs, strict, machine=62)
+
+
+AARCH64_CALLER_SAVED_NEON = {f"v{i}" for i in range(8)} | {f"v{i}" for i in range(16, 32)}
+
+
+def audit_compiled_rust_aarch64_symbol(sym: str, instrs: list[tuple[str, str]], strict=False) -> list[str]:
+    """Check shared taint screen plus strict caller-saved NEON (`v0..v7`, `v16..v31`) wipe on `aarch64_simd`."""
+    errors = []
+    if strict and "qsag_asm::aarch64_simd::" in sym and "enter_aarch64_dit_region" not in sym:
+        dirty_neon: set[str] = set()
+        for idx, (mnem, ops) in enumerate(instrs):
+            ops_l = ops.lower()
+            parts = split_top_operands(ops_l)
+            is_neon_self_zero = (
+                mnem in ("eor", "eor.16b")
+                and len(parts) == 3
+                and parts[0] == parts[1] == parts[2]
+                and canon_a64_neon(parts[0]) is not None
+            )
+            if is_neon_self_zero:
+                dirty_neon.discard(canon_a64_neon(parts[0]))
+            elif not mnem.startswith(("str", "stur", "stp", "st1", "st2", "st3", "st4")):
+                if mnem.startswith(("ld1", "ld2", "ld3", "ld4")):
+                    for vn in expand_a64_neon_list(ops_l):
+                        if vn in AARCH64_CALLER_SAVED_NEON:
+                            dirty_neon.add(vn)
+                elif mnem == "ldp" and len(parts) >= 2:
+                    for p in parts[:2]:
+                        vn = canon_a64_neon(p)
+                        if vn in AARCH64_CALLER_SAVED_NEON:
+                            dirty_neon.add(vn)
+                elif parts:
+                    vn = canon_a64_neon(parts[0])
+                    if vn in AARCH64_CALLER_SAVED_NEON:
+                        dirty_neon.add(vn)
+            if mnem == "ret" and dirty_neon:
+                leaked = sorted(dirty_neon, key=lambda r: int(r[1:]))
+                errors.append(
+                    f"{sym}[{idx}]: unzeroed caller-saved NEON registers at `ret`: {leaked}"
+                )
+    return errors + rust_errors(sym, instrs, strict, machine=183)
 
 
 def audit_aarch64_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
@@ -505,8 +568,11 @@ def audit_aarch64_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
         )
         if is_neon_self_zero:
             dirty_neon.discard(canon_a64_neon(parts[0]))
-        elif not mnem.startswith(("str", "stp", "st1", "st2", "st3", "st4")):
-            if mnem == "ldp" and len(parts) >= 2:
+        elif not mnem.startswith(("str", "stur", "stp", "st1", "st2", "st3", "st4")):
+            if mnem.startswith(("ld1", "ld2", "ld3", "ld4")):
+                for vn in expand_a64_neon_list(ops_l):
+                    dirty_neon.add(vn)
+            elif mnem == "ldp" and len(parts) >= 2:
                 for p in parts[:2]:
                     vn = canon_a64_neon(p)
                     if vn:
@@ -1101,7 +1167,8 @@ BITSLICE = {
          'qsag_asm_gf2_128_mul_acc_vpclmul'],
     183: ['qsag_asm_transpose64x256_neon', 'qsag_asm_gf2_128_mul_acc_pmull'],
 }
-RUST_MODULES = ('qsag_hd::linear_module::', 'qsag_asm::ct::',
+RUST_MODULES = ('qsag_hd::linear_module::', 'qsag_asm::aarch64_simd::',
+                'qsag_asm::linear_map::',
                 'qsag_core::rss256::', 'qsag_core::wots_c::', 'qsag_quorum::dzk::',
                 'qsag_asm::bitslice::', 'qsag_asm::portable::',
                 'qsag_asm::avx512::', 'qsag_asm::gf256_simd::',
@@ -1118,12 +1185,21 @@ REQUIRED_SIMD_SYMBOLS = {
         'gf256_simd::gf256_shamir_mul_vpshufb_avx2',
         'gf256_simd::gf256_shamir_mac_vpshufb_avx2_x1',
         'gf256_simd::gf256_shamir_mac_4vpshufb_avx2_x2',
+        'linear_map::gfni128', 'linear_map::gfni512', 'linear_map::gfni512x8',
         'sha2_hw::sha256_compress_blocks_shani',
         'ntt_simd::x86_simd::mldsa_ntt_avx2', 'ntt_simd::x86_simd::mldsa_ntt_avx512',
         'ntt_simd::x86_simd::mldsa_inv_ntt_avx2', 'ntt_simd::x86_simd::mldsa_inv_ntt_avx512',
         'ntt_simd::x86_simd::mldsa_pointwise_mul_avx2',
         'ntt_simd::x86_simd::mldsa_pointwise_mul_avx512')),
-    183: ('qsag_asm::sha2_hw::sha256_compress_blocks_aarch64_sha2',),
+    183: tuple('qsag_asm::' + name for name in (
+        'aarch64_simd::gf256_shamir_mul_pmull_neon',
+        'aarch64_simd::gf256_shamir_mac_pmull_neon',
+        'aarch64_simd::keccak_chi_mpc_row256_neon',
+        'aarch64_simd::mldsa_ntt_neon',
+        'aarch64_simd::mldsa_inv_ntt_neon',
+        'aarch64_simd::mldsa_pointwise_mul_neon',
+        'linear_map::pmull_map',
+        'sha2_hw::sha256_compress_blocks_aarch64_sha2')),
 }
 
 
@@ -1202,7 +1278,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                            ('qword', 8), ('dword', 4), ('word', 2), ('byte', 1)):
             if name in operand:
                 return size
-        return 32 if 'ymm' in operand else 16 if 'xmm' in operand else 8
+        return 64 if 'zmm' in operand else 32 if 'ymm' in operand else 16 if 'xmm' in operand else 8
     is_clmul64_acc = 'gf2_64x128_clmul_acc' in symbol or '::clmul_64x128_acc_' in symbol
     scalar = (not is_clmul64_acc) and (is_branchless_portable_primitive(symbol) or any(
         name in symbol for name in ('ct_reduce_mod_q_', '::mod_q_', 'goldilocks_',
@@ -1301,7 +1377,8 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             public_symbol = any(n in relocation for n in (
                 'qsag_asm::cpuid::CACHED_', 'qsag_asm::cpuid::BACKEND', '.LCPI', '.rodata.',
                 'T7_TO_POLY_SELECTORS', 'NTT_TABLES', 'T3_VPSHUFB_CONSTS',
-                'SHA256_HW_CONSTS', 'AVX2_GF256_ISO_LUTS'))
+                'SHA256_HW_CONSTS', 'AVX2_GF256_ISO_LUTS', 'AARCH64_GF256_PMULL_CONSTS',
+                'ByteMatrices'))
             size = width(op if not arm else (parts[0] if parts else ''), mnemonic)
             def store_stack(mem, value, length=size, extra=0):
                 key = stack_key(mem)
@@ -1420,7 +1497,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                         mnemonic == 'imul' and len(parts) == 3):
                     value |= secret(parts[0])
             zero = (mnemonic in ('xor', 'sub', 'pxor', 'xorps', 'xorpd') and len(parts) == 2 and parts[0] == parts[1]) or (
-                mnemonic in ('vpxor', 'vxorps', 'vxorpd', 'eor', 'sub') and len(parts) == 3 and parts[1] == parts[2])
+                mnemonic in ('vpxor', 'vpxorq', 'vpxord', 'vxorps', 'vxorpd', 'eor', 'sub') and len(parts) == 3 and parts[1] == parts[2])
             if arm and mnemonic in ('ins', 'bfi', 'bfxil', 'sli', 'sri', 'bsl', 'bit', 'bif'):
                 value |= secret(parts[0])
             if zero:
@@ -1451,7 +1528,16 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                     taint.add(dst)
                 else:
                     taint.discard(dst)
-            if arm and mnemonic == 'ldp' and len(parts) > 1:
+            if arm and mnemonic.startswith(('ld1', 'ld2', 'ld3', 'ld4')) and '{' in op:
+                mem_sources = [p for p in parts if '[' in p]
+                list_secret = any(secret(p) for p in mem_sources) if mem_sources else True
+                for vn in expand_a64_neon_list(op):
+                    public_pointer.discard(vn)
+                    if list_secret:
+                        taint.add(vn)
+                    else:
+                        taint.discard(vn)
+            elif arm and mnemonic == 'ldp' and len(parts) > 1:
                 second = reg(parts[1])
                 mem = re.search(r'\[([^\]]+)\]', op)
                 key = stack_key(mem[1]) if mem else None
@@ -1481,7 +1567,21 @@ def self_tests():
     assert audit_compiled_rust_x86_symbol('probe', dirty_call)
     clean_call = dirty_call[:1] + [('vzeroupper', '')] + dirty_call[1:]
     assert not audit_compiled_rust_x86_symbol('probe', clean_call)
-    count += 2
+    dirty_zmm = [('vpxorq', 'zmm0, zmm0, zmm0'), ('ret', '')]
+    assert audit_compiled_rust_x86_symbol('probe_zmm', dirty_zmm)
+    clean_zmm = [('vpxorq', 'zmm0, zmm0, zmm0'), ('vzeroupper', ''), ('ret', '')]
+    assert not audit_compiled_rust_x86_symbol('probe_zmm', clean_zmm)
+    assert not audit_x86_symbol('avx512_zero', [('vpxorq', 'zmm16, zmm16, zmm16'), ('vzeroupper', ''), ('ret', '')])
+    assert audit_aarch64_symbol('neon_ld4_leak', [('ld4', '{ v24.16b, v25.16b, v26.16b, v27.16b }, [x0]'),
+                                                  ('eor', 'v24.16b, v24.16b, v24.16b'), ('ret', '')])
+    assert audit_aarch64_symbol('neon_ld1_range_leak', [('ld1', '{ v28.16b - v31.16b }, [x0]'), ('ret', '')])
+    assert audit_compiled_rust_aarch64_symbol('qsag_asm::aarch64_simd::mldsa_ntt_neon',
+                                              [('eor', 'v23.16b, v23.16b, v23.16b'),
+                                               ('add', 'v24.4s, v24.4s, v24.4s'), ('ret', '')], True)
+    assert not audit_compiled_rust_aarch64_symbol('qsag_asm::aarch64_simd::mldsa_ntt_neon',
+                                                  [('add', 'v24.4s, v24.4s, v24.4s'),
+                                                   ('eor', 'v24.16b, v24.16b, v24.16b'), ('ret', '')], True)
+    count += 9
     for mnemonic in ('div', 'idiv', 'udiv', 'sdiv', 'fdiv', 'jne', 'b.eq', 'cbz', 'cbnz', 'tbz', 'tbnz'):
         assert rust_errors('qsag_hd::linear_module::ct_reduce_mod_q_u64', [(mnemonic, '')])
         count += 1
@@ -1679,7 +1779,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
             if machine == 62:
                 errors.extend(kernel_audit.audit_compiled_rust_x86_symbol(symbol, instructions, strict))
             else:
-                errors.extend(rust_errors(symbol, instructions, strict, machine))
+                errors.extend(kernel_audit.audit_compiled_rust_aarch64_symbol(symbol, instructions, strict))
             branches += sum(conditional(m) for m, _ in instructions)
         else:
             continue

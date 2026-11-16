@@ -1267,6 +1267,52 @@ impl VulkanSpirvBackend {
     /// they return [`VulkanError::Accel`] ([`AccelError::LengthOverflow`] or
     /// [`AccelError::LengthMismatch`]) without touching the device. A failed call scrubs the
     /// arena and ends the session's data: commit again to continue.
+    /// Whether all compute and prover pipelines passed zero-scratch / zero-spill driver telemetry.
+    pub fn is_secret_slots_audited(&self) -> bool {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            self.secret_slots_audited
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            match self._uninhabited {}
+        }
+    }
+
+    /// Acquire exclusive prover session ownership strictly for secret-bearing witness execution
+    /// (requires `is_secret_slots_audited() == true`; unaudited portability drivers are rejected).
+    pub fn try_acquire_secret_prover_session(&self) -> Result<(), VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(VulkanError::PipelineAuditFailed(
+                    "secret prover session requires audited zero-spill pipelines",
+                ));
+            }
+            self.try_acquire_prover_session()
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            match self._uninhabited {}
+        }
+    }
+
     pub fn try_acquire_prover_session(&self) -> Result<(), VulkanError> {
         #[cfg(all(
             feature = "std",
@@ -1299,6 +1345,8 @@ impl VulkanSpirvBackend {
     }
 
     /// Scrub all prover session VRAM buffers (`vkCmdFillBuffer`) and release session ownership.
+    /// Recovers poisoned engine locks so unwinds still zero VRAM; if scrubbing itself fails,
+    /// `prover_session_in_use` remains latched so subsequent callers fail closed.
     pub fn release_prover_session(&self) {
         #[cfg(all(
             feature = "std",
@@ -1306,10 +1354,13 @@ impl VulkanSpirvBackend {
             target_pointer_width = "64"
         ))]
         {
-            if let Ok(mut guard) = self.engine.lock() {
-                let _ = guard.scrub_prover_session();
+            let mut guard = self
+                .engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if guard.scrub_prover_session().is_ok() {
+                self.prover_session_in_use.store(false, Ordering::Release);
             }
-            self.prover_session_in_use.store(false, Ordering::Release);
         }
         #[cfg(not(all(
             feature = "std",
@@ -1353,6 +1404,7 @@ impl VulkanSpirvBackend {
                 *dst = w.to_le_bytes();
             }
             sp.absorb(&buf[..used]);
+            crate::ct::ct_zeroize_bytes(&mut buf[..used]);
         }
         finalize_cshake256(&mut sp, true);
         let mut out = [0u8; 32];
@@ -1378,6 +1430,7 @@ impl VulkanSpirvBackend {
                 dst[24..32].copy_from_slice(&elem[3].to_le_bytes());
             }
             sp.absorb(&buf[..used]);
+            crate::ct::ct_zeroize_bytes(&mut buf[..used]);
         }
         finalize_cshake256(&mut sp, true);
         let mut out = [0u8; 32];
@@ -1438,6 +1491,42 @@ impl VulkanSpirvBackend {
     where
         F: FnMut(usize, usize, &mut [u64]),
     {
+        self.prover_whir_commit_round0_with_mode(
+            false,
+            num_polys,
+            salt_seed,
+            num_vars,
+            blowup,
+            group_arity,
+            max_stage1_domain_ext4,
+            max_stage1_groups,
+            extra_witness_words,
+            fill_chunk,
+        )
+    }
+
+    /// [`Self::prover_whir_commit_round0_with`] with selectable Role-1 Canopy hash mode:
+    /// `turboshake_canopy == false` uses 24-round `cSHAKE256` (`CANOPY_MIDSTATE`);
+    /// `turboshake_canopy == true` uses RFC 9861 12-round `TurboSHAKE256` (`TURBOSHAKE_CANOPY_MIDSTATE`)
+    /// across Round-0 and all subsequent `prover_whir_commit_stage` / `prover_whir_gather_queries` calls
+    /// in this prover session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prover_whir_commit_round0_with_mode<F>(
+        &self,
+        turboshake_canopy: bool,
+        num_polys: usize,
+        salt_seed: &[u8; 32],
+        num_vars: usize,
+        blowup: usize,
+        group_arity: usize,
+        max_stage1_domain_ext4: usize,
+        max_stage1_groups: usize,
+        extra_witness_words: usize,
+        fill_chunk: F,
+    ) -> Result<[u8; 32], VulkanError>
+    where
+        F: FnMut(usize, usize, &mut [u64]),
+    {
         #[cfg(all(
             feature = "std",
             any(target_os = "linux", target_os = "macos"),
@@ -1449,7 +1538,8 @@ impl VulkanSpirvBackend {
                 .engine
                 .lock()
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
-            let (top_node, subs) = guard.exec_prover_whir_commit_round0_with(
+            let (top_node, subs) = guard.exec_prover_whir_commit_round0_with_mode(
+                turboshake_canopy,
                 num_polys,
                 salt_seed,
                 num_vars,
@@ -1470,6 +1560,7 @@ impl VulkanSpirvBackend {
         )))]
         {
             let _ = (
+                turboshake_canopy,
                 num_polys,
                 salt_seed,
                 num_vars,
@@ -1496,8 +1587,11 @@ impl VulkanSpirvBackend {
         max_stage1_groups: usize,
         extra_witness_words: usize,
     ) -> Result<[u8; 32], VulkanError> {
-        let c_len = 1usize.checked_shl(num_vars as u32).unwrap_or(0);
-        if polys.is_empty() || polys.iter().any(|p| p.len() != c_len) {
+        let c_len = u32::try_from(num_vars)
+            .ok()
+            .and_then(|shift| 1usize.checked_shl(shift))
+            .unwrap_or(0);
+        if c_len == 0 || polys.is_empty() || polys.iter().any(|p| p.len() != c_len) {
             return Err(crate::AccelError::LengthOverflow.into());
         }
         self.prover_whir_commit_round0_with(
@@ -1586,6 +1680,7 @@ impl VulkanSpirvBackend {
                             *b_dst = w.to_le_bytes();
                         }
                         witness_sp.absorb(&buf[..used]);
+                        crate::ct::ct_zeroize_bytes(&mut buf[..used]);
                     }
                 },
             )?;
@@ -1800,8 +1895,9 @@ impl VulkanSpirvBackend {
         }
     }
 
-    /// Expand a 768-entry Kronecker monomial table (auto-extended to 4-byte `1024`-entry for
-    /// `num_vars <= 26`) into `cur_k` (`vram_work_a[0..(1<<num_vars)+2]`), and optionally compute
+    /// Expand a 768-entry Kronecker monomial table (`num_vars <= 24`; callers with
+    /// `num_vars in 25..=26` must use [`Self::prover_whir_expand_monomial_and_dot_1024`])
+    /// into `cur_k` (`vram_work_a[0..(1<<num_vars)+2]`), and optionally compute
     /// `dot_base_ext4` against `vram_mono` for `out_dots.len()` polynomials.
     pub fn prover_whir_expand_monomial_and_dot(
         &self,
@@ -3855,16 +3951,16 @@ pub fn goldilocks_ntt_with_receipt<B: AcceleratorBackend>(
     inverse: bool,
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
-    #[cfg(feature = "std")]
+    #[cfg(all(test, feature = "std"))]
     let start = std::time::Instant::now();
     let input_digest = goldilocks_ntt_input_digest(buf, twiddles);
-    #[cfg(feature = "std")]
+    #[cfg(all(test, feature = "std"))]
     let input_elapsed = start.elapsed();
     backend.goldilocks_ntt_inplace(buf, twiddles, inverse)?;
-    #[cfg(feature = "std")]
+    #[cfg(all(test, feature = "std"))]
     let kernel_elapsed = start.elapsed() - input_elapsed;
     let output_digest = goldilocks_ntt_output_digest(buf);
-    #[cfg(feature = "std")]
+    #[cfg(all(test, feature = "std"))]
     if std::env::var_os("QSAG_PROFILE").is_some() {
         std::eprintln!(
             "qsag_ntt n={} input_digest={:.3} kernel={:.3} output_digest={:.3} ms",

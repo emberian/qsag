@@ -639,6 +639,641 @@ pub fn verify_migration_proof(
     )
 }
 
+pub(crate) const COZK_VIEW_MAGIC_V4: [u8; 8] = crate::batch_hash::COZK_VIEW_MAGIC_V4;
+pub(crate) const COZK_REP_MAGIC_V4: [u8; 8] = *b"COZKRP04";
+pub(crate) const MAX_COZK_CUSTODIANS: usize = 64;
+
+/// Fast public-seed SHAKE256 tape reader used only on publicly opened verifier sub-seeds.
+struct PublicTape {
+    sponge: Shake256,
+    bit_buf: u64,
+    bit_rem: u8,
+}
+impl PublicTape {
+    fn new(seed: &[u8; 32]) -> Self {
+        let mut sponge = Shake256::new();
+        sponge.absorb(b"QSAG.MIGRATE.TAPE.V3");
+        sponge.absorb(seed);
+        sponge.finalize(0x1f);
+        Self {
+            sponge,
+            bit_buf: 0,
+            bit_rem: 0,
+        }
+    }
+    #[inline]
+    fn sample(&mut self, d: Domain) -> Value {
+        if d == Domain::Bit {
+            if self.bit_rem == 0 {
+                let mut raw = [0u8; 8];
+                self.sponge.squeeze(&mut raw);
+                self.bit_buf = u64::from_le_bytes(raw);
+                self.bit_rem = 64;
+            }
+            let bit = self.bit_buf & 1;
+            self.bit_buf >>= 1;
+            self.bit_rem -= 1;
+            return [bit, 0, 0, 0, 0, 0];
+        }
+        if d == Domain::Gold {
+            loop {
+                let mut raw = [0u8; 8];
+                self.sponge.squeeze(&mut raw);
+                let v = u64::from_le_bytes(raw);
+                if v < GOLDILOCKS_PRIME {
+                    return [v, 0, 0, 0, 0, 0];
+                }
+            }
+        }
+        if d == Domain::PallasFp {
+            let mut raw = [0u8; 64];
+            self.sponge.squeeze(&mut raw);
+            let mut lo_b = [0u8; 32];
+            let mut hi_b = [0u8; 32];
+            lo_b.copy_from_slice(&raw[..32]);
+            hi_b.copy_from_slice(&raw[32..]);
+            lo_b[31] &= 0x3f;
+            hi_b[31] &= 0x3f;
+            let lo = crate::pallas::FpPallas(crate::limbs::from_le_bytes(&lo_b));
+            let hi = crate::pallas::FpPallas(crate::limbs::from_le_bytes(&hi_b));
+            let two254 = crate::pallas::FpPallas([0, 0, 0, 1u64 << 62]);
+            return lift4((lo + hi * two254).0);
+        }
+        if d == Domain::BlsFp {
+            let mut raw = [0u8; 96];
+            self.sponge.squeeze(&mut raw);
+            let mut lo_b = [0u8; 48];
+            let mut hi_b = [0u8; 48];
+            lo_b.copy_from_slice(&raw[..48]);
+            hi_b.copy_from_slice(&raw[48..]);
+            lo_b[47] &= 0x0f;
+            hi_b[47] &= 0x0f;
+            let lo = crate::bls12_381::FpBls381(crate::limbs::from_le_bytes(&lo_b));
+            let hi = crate::bls12_381::FpBls381(crate::limbs::from_le_bytes(&hi_b));
+            let two380 = crate::bls12_381::FpBls381([0, 0, 0, 0, 0, 1u64 << 60]);
+            return (lo + hi * two380).0;
+        }
+        loop {
+            let mut raw = [0u8; 32];
+            self.sponge.squeeze(&mut raw[..d.byte_len()]);
+            let mut v = lift4(crate::scalar::decode(&raw));
+            if d == Domain::Ed {
+                v[3] &= 0x7fff_ffff_ffff_ffff;
+            }
+            if d.canonical(v) {
+                return v;
+            }
+        }
+    }
+}
+
+struct PublicMultiTape {
+    tapes: Vec<PublicTape>,
+}
+impl PublicMultiTape {
+    fn new(subseeds: &[[u8; 32]]) -> Self {
+        Self {
+            tapes: subseeds.iter().map(PublicTape::new).collect(),
+        }
+    }
+    #[inline]
+    fn sample(&mut self, d: Domain) -> Value {
+        let mut acc = ZERO;
+        for t in &mut self.tapes {
+            acc = d.add(acc, t.sample(d));
+        }
+        acc
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct MultiTape {
+    tapes: Vec<Tape>,
+}
+#[cfg(test)]
+impl MultiTape {
+    pub(crate) fn new(subseeds: &[[u8; 32]]) -> Self {
+        Self {
+            tapes: subseeds.iter().map(Tape::new).collect(),
+        }
+    }
+    #[inline]
+    pub(crate) fn sample(&mut self, d: Domain) -> Value {
+        let mut acc = ZERO;
+        for t in &mut self.tapes {
+            acc = d.add(acc, t.sample(d));
+        }
+        acc
+    }
+}
+
+/// Tight LSB-first bit packer writing exact `d.width()` bits per value without interior byte padding.
+pub(crate) struct BitPacker {
+    bytes: Vec<u8>,
+    bit: u8,
+}
+impl Default for BitPacker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Drop for BitPacker {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.bytes);
+    }
+}
+impl BitPacker {
+    pub(crate) fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            bit: 0,
+        }
+    }
+    pub(crate) fn with_capacity(byte_cap: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(byte_cap),
+            bit: 0,
+        }
+    }
+    #[inline]
+    fn push_byte_unaligned(&mut self, b: u8) {
+        if self.bit == 0 {
+            self.bytes.push(b);
+        } else {
+            *self.bytes.last_mut().unwrap() |= b << self.bit;
+            self.bytes.push(b >> (8 - self.bit));
+        }
+    }
+    #[inline]
+    fn push_bit(&mut self, b: u8) {
+        if self.bit == 0 {
+            self.bytes.push(b & 1);
+            self.bit = 1;
+        } else {
+            *self.bytes.last_mut().unwrap() |= (b & 1) << self.bit;
+            self.bit = (self.bit + 1) & 7;
+        }
+    }
+    #[inline]
+    pub(crate) fn push_value(&mut self, d: Domain, v: Value) {
+        if d == Domain::Bit {
+            self.push_bit((v[0] & 1) as u8);
+            return;
+        }
+        let width = d.width();
+        let full_bytes = width / 8;
+        let rem_bits = width % 8;
+        if self.bit == 0 && rem_bits == 0 {
+            for b_idx in 0..full_bytes {
+                let limb = v[b_idx / 8];
+                self.bytes.push(((limb >> (8 * (b_idx % 8))) & 0xff) as u8);
+            }
+            return;
+        }
+        for b_idx in 0..full_bytes {
+            let limb = v[b_idx / 8];
+            self.push_byte_unaligned(((limb >> (8 * (b_idx % 8))) & 0xff) as u8);
+        }
+        for r in 0..rem_bits {
+            let bit_idx = full_bytes * 8 + r;
+            let bit = ((v[bit_idx / 64] >> (bit_idx % 64)) & 1) as u8;
+            self.push_bit(bit);
+        }
+    }
+    pub(crate) fn into_bytes(mut self) -> Vec<u8> {
+        core::mem::take(&mut self.bytes)
+    }
+}
+
+/// Tight LSB-first bit reader enforcing canonical domain bounds and zero trailing padding bits.
+pub(crate) struct BitPackedReader<'a> {
+    input: &'a [u8],
+    bit: u8,
+}
+impl<'a> BitPackedReader<'a> {
+    pub(crate) fn new(input: &'a [u8]) -> Self {
+        Self { input, bit: 0 }
+    }
+    #[inline]
+    fn take_bit(&mut self) -> Result<u64, MigrateError> {
+        let byte = *self
+            .input
+            .first()
+            .ok_or(MigrateError::MalformedProofStructure)?;
+        let out = u64::from((byte >> self.bit) & 1);
+        self.bit = (self.bit + 1) & 7;
+        if self.bit == 0 {
+            self.input = &self.input[1..];
+        }
+        Ok(out)
+    }
+    #[inline]
+    fn take_byte_unaligned(&mut self) -> Result<u8, MigrateError> {
+        if self.bit == 0 {
+            let b = *self
+                .input
+                .first()
+                .ok_or(MigrateError::MalformedProofStructure)?;
+            self.input = &self.input[1..];
+            Ok(b)
+        } else {
+            if self.input.len() < 2 {
+                return Err(MigrateError::MalformedProofStructure);
+            }
+            let lo = self.input[0] >> self.bit;
+            let hi = self.input[1] << (8 - self.bit);
+            self.input = &self.input[1..];
+            Ok(lo | hi)
+        }
+    }
+    #[inline]
+    pub(crate) fn take_value(&mut self, d: Domain) -> Result<Value, MigrateError> {
+        if d == Domain::Bit {
+            return Ok([self.take_bit()?, 0, 0, 0, 0, 0]);
+        }
+        let width = d.width();
+        let full_bytes = width / 8;
+        let rem_bits = width % 8;
+        let mut v = ZERO;
+        if self.bit == 0 && rem_bits == 0 {
+            if self.input.len() < full_bytes {
+                return Err(MigrateError::MalformedProofStructure);
+            }
+            for (limb, chunk) in v.iter_mut().zip(self.input[..full_bytes].chunks_exact(8)) {
+                *limb = u64::from_le_bytes(chunk.try_into().unwrap());
+            }
+            self.input = &self.input[full_bytes..];
+        } else {
+            for b_idx in 0..full_bytes {
+                let b = self.take_byte_unaligned()?;
+                v[b_idx / 8] |= u64::from(b) << (8 * (b_idx % 8));
+            }
+            for r in 0..rem_bits {
+                let bit_idx = full_bytes * 8 + r;
+                v[bit_idx / 64] |= self.take_bit()? << (bit_idx % 64);
+            }
+        }
+        if !d.canonical(v) {
+            return Err(MigrateError::MalformedProofStructure);
+        }
+        Ok(v)
+    }
+    pub(crate) fn finish(&mut self) -> Result<(), MigrateError> {
+        if self.bit != 0 {
+            let byte = *self
+                .input
+                .first()
+                .ok_or(MigrateError::MalformedProofStructure)?;
+            if byte >> self.bit != 0 {
+                return Err(MigrateError::MalformedProofStructure);
+            }
+            self.input = &self.input[1..];
+            self.bit = 0;
+        }
+        if !self.input.is_empty() {
+            return Err(MigrateError::MalformedProofStructure);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn is_cozk_v4_proof(proof: &MigrationZkProof) -> bool {
+    proof
+        .repetitions
+        .first()
+        .is_some_and(|r| r.pair[0].inputs.starts_with(&COZK_VIEW_MAGIC_V4))
+}
+
+pub(crate) fn encode_cozk_v4_inputs(
+    subseeds: &[[u8; 32]],
+    head_inputs: &[u8],
+) -> ([u8; 32], Vec<u8>) {
+    debug_assert!(!subseeds.is_empty() && subseeds.len() <= MAX_COZK_CUSTODIANS);
+    let mut inputs = Vec::with_capacity(9 + (subseeds.len() - 1) * 32 + head_inputs.len());
+    inputs.extend_from_slice(&COZK_VIEW_MAGIC_V4);
+    inputs.push(subseeds.len() as u8);
+    for s in &subseeds[1..] {
+        inputs.extend_from_slice(s);
+    }
+    inputs.extend_from_slice(head_inputs);
+    (subseeds[0], inputs)
+}
+
+pub(crate) fn parse_cozk_v4_inputs(
+    view: &PartyView,
+) -> Result<(Vec<[u8; 32]>, &[u8]), MigrateError> {
+    if view.inputs.len() < 9 || view.inputs[..8] != COZK_VIEW_MAGIC_V4 {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let m = usize::from(view.inputs[8]);
+    if !(1..=MAX_COZK_CUSTODIANS).contains(&m) {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let extra = (m - 1) * 32;
+    if view.inputs.len() < 9 + extra {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let mut subseeds = Vec::with_capacity(m);
+    subseeds.push(view.seed);
+    for chunk in view.inputs[9..9 + extra].chunks_exact(32) {
+        let mut s = [0u8; 32];
+        s.copy_from_slice(chunk);
+        subseeds.push(s);
+    }
+    Ok((subseeds, &view.inputs[9 + extra..]))
+}
+
+pub(crate) fn rep_root_cozk_v4(
+    rep: usize,
+    commits: &[[u8; 32]; 3],
+    outputs: [&[u8]; 3],
+) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.MIGRATE.REPETITION.V3",
+        &[
+            &COZK_REP_MAGIC_V4,
+            &(rep as u64).to_le_bytes(),
+            &commits[0],
+            &commits[1],
+            &commits[2],
+            outputs[0],
+            outputs[1],
+            outputs[2],
+        ],
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn simulate_cozk_v4(c: &Circuit, subseeds: &[Vec<[u8; 32]>; 3]) -> [PartyView; 3] {
+    let mut tapes: [MultiTape; 3] = core::array::from_fn(|h| MultiTape::new(&subseeds[h]));
+    let mut head2_in = BitPacker::new();
+    let mut prod_packers: [BitPacker; 3] = core::array::from_fn(|_| BitPacker::new());
+    let mut wires: [Wires; 3] = core::array::from_fn(|_| Wires(Vec::with_capacity(c.nodes.len())));
+    for node in &c.nodes {
+        let d = node.domain;
+        let value = match node.op {
+            Op::Input => {
+                let a = tapes[0].sample(d);
+                let b = tapes[1].sample(d);
+                let third = d.sub(node.value, d.add(a, b));
+                head2_in.push_value(d, third);
+                [a, b, third]
+            }
+            Op::Mul(a, b) => {
+                let masks = core::array::from_fn::<_, 3, _>(|p| tapes[p].sample(d));
+                let shares = core::array::from_fn(|p| {
+                    let n = (p + 1) % 3;
+                    gate(
+                        d,
+                        [wires[p].0[a], wires[n].0[a]],
+                        [wires[p].0[b], wires[n].0[b]],
+                        [masks[p], masks[n]],
+                    )
+                });
+                for (p, &sh) in shares.iter().enumerate() {
+                    prod_packers[p].push_value(d, sh);
+                }
+                shares
+            }
+            _ => core::array::from_fn(|p| local(node, p, &wires[p].0)),
+        };
+        for (w, v) in wires.iter_mut().zip(value) {
+            w.0.push(v);
+        }
+    }
+    let head2_in_bytes = head2_in.into_bytes();
+    let mut prod_iter = prod_packers.into_iter();
+    core::array::from_fn(|h| {
+        let mut out_packer = BitPacker::new();
+        for &i in &c.outputs {
+            out_packer.push_value(c.nodes[i].domain, wires[h].0[i]);
+        }
+        let h_in = if h == 2 {
+            head2_in_bytes.as_slice()
+        } else {
+            &[]
+        };
+        let (seed, inputs) = encode_cozk_v4_inputs(&subseeds[h], h_in);
+        PartyView {
+            seed,
+            inputs,
+            products: prod_iter.next().unwrap().into_bytes(),
+            outputs: out_packer.into_bytes(),
+        }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn commit_cozk_v4(rep: usize, head: usize, view: &PartyView) -> [u8; 32] {
+    let (subseeds, head_inputs) = parse_cozk_v4_inputs(view).expect("valid CoZK V4 view");
+    crate::batch_hash::commit_cozk_v4_one(
+        rep,
+        head,
+        &subseeds,
+        head_inputs,
+        &view.products,
+        &view.outputs,
+    )
+}
+
+/// Replay one CoZK V4 repetition, reconstructing `pair[0]`'s deterministic `products` stream
+/// (`KKW` / `ZKB++` optimization) so `commit_cozk_v4_indexed` authenticates both opened views.
+fn replay_cozk_v4_with_scratch(
+    c: &Circuit,
+    view: &OpenedRepetitionView,
+    wires: &mut [Wires; 2],
+    expected_m: usize,
+    product_byte_cap: usize,
+) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>, Vec<u8>, bool), MigrateError> {
+    let e = view.opened_e as usize;
+    if !view.pair[0].products.is_empty() {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let (subseeds_0, head_in_0) = parse_cozk_v4_inputs(&view.pair[0])?;
+    let (subseeds_1, head_in_1) = parse_cozk_v4_inputs(&view.pair[1])?;
+    if subseeds_0.len() != expected_m || subseeds_1.len() != expected_m {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    let head_inputs = [head_in_0, head_in_1];
+    for (j, hi) in head_inputs.iter().enumerate() {
+        if (e + j) % 3 != 2 && !hi.is_empty() {
+            return Err(MigrateError::MalformedProofStructure);
+        }
+    }
+    let mut tapes = [
+        PublicMultiTape::new(&subseeds_0),
+        PublicMultiTape::new(&subseeds_1),
+    ];
+    let mut input_readers = head_inputs.map(BitPackedReader::new);
+    let mut products_1 = BitPackedReader::new(&view.pair[1].products);
+    let mut reconstructed_0 = BitPacker::with_capacity(product_byte_cap);
+
+    for (gate_index, node) in c.nodes.iter().enumerate() {
+        let d = node.domain;
+        let values = match node.op {
+            Op::Input => {
+                let mut values = [ZERO; 2];
+                for (j, slot) in values.iter_mut().enumerate() {
+                    if (e + j) % 3 == 2 {
+                        *slot = input_readers[j].take_value(d)?;
+                    } else {
+                        *slot = tapes[j].sample(d);
+                    }
+                }
+                values
+            }
+            Op::Mul(a, b) => {
+                let masks = [tapes[0].sample(d), tapes[1].sample(d)];
+                let next = products_1.take_value(d)?;
+                let actual = gate(
+                    d,
+                    [wires[0].0[a], wires[1].0[a]],
+                    [wires[0].0[b], wires[1].0[b]],
+                    masks,
+                );
+                reconstructed_0.push_value(d, actual);
+                [actual, next]
+            }
+            _ => core::array::from_fn(|j| local(node, (e + j) % 3, &wires[j].0)),
+        };
+        for (w, v) in wires.iter_mut().zip(values) {
+            w.0[gate_index] = v;
+        }
+    }
+    for (j, reader) in input_readers.iter().enumerate() {
+        if (e + j) % 3 == 2 {
+            let mut r_chk = BitPackedReader {
+                input: reader.input,
+                bit: reader.bit,
+            };
+            r_chk.finish()?;
+        } else {
+            reader.finish()?;
+        }
+    }
+    products_1.finish()?;
+
+    let mut outputs = view.pair.each_ref().map(|v| BitPackedReader::new(&v.outputs));
+    let mut hidden = BitPackedReader::new(&view.hidden_outputs);
+    let mut outputs_ok = true;
+    for &w in &c.outputs {
+        let d = c.nodes[w].domain;
+        let a = outputs[0].take_value(d)?;
+        let b = outputs[1].take_value(d)?;
+        let h = hidden.take_value(d)?;
+        if a != wires[0].0[w] || b != wires[1].0[w] || d.add(d.add(a, b), h) != ZERO {
+            outputs_ok = false;
+        }
+    }
+    for output in outputs.iter_mut().chain(core::iter::once(&mut hidden)) {
+        output.finish()?;
+    }
+    Ok((subseeds_0, subseeds_1, reconstructed_0.into_bytes(), outputs_ok))
+}
+
+pub(crate) fn verify_cozk_v4_proof_body(
+    circuit: &Circuit,
+    proof: &MigrationZkProof,
+) -> Result<(), MigrateError> {
+    let (first_subseeds, _) = parse_cozk_v4_inputs(&proof.repetitions[0].pair[0])?;
+    let expected_m = first_subseeds.len();
+    for mut s in first_subseeds {
+        ct_zeroize_bytes(&mut s);
+    }
+    let product_bits: usize = circuit
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, Op::Mul(_, _)))
+        .map(|n| n.domain.width())
+        .sum();
+    let product_byte_cap = product_bits.div_ceil(8);
+
+    let workers = crate::parallel::workers(MIT_REPETITIONS);
+    let chunk = MIT_REPETITIONS.div_ceil(workers);
+    let worker_results = crate::parallel::map(workers, |worker| {
+        let start = worker * chunk;
+        let end = ((worker + 1) * chunk).min(MIT_REPETITIONS);
+        let mut wires = core::array::from_fn(|_| Wires(alloc::vec![ZERO; circuit.nodes.len()]));
+        let mut out = Vec::with_capacity(end.saturating_sub(start));
+        for rep in start..end {
+            out.push(replay_cozk_v4_with_scratch(
+                circuit,
+                &proof.repetitions[rep],
+                &mut wires,
+                expected_m,
+                product_byte_cap,
+            )?);
+        }
+        Ok::<_, MigrateError>(out)
+    });
+    let mut replayed = Vec::with_capacity(MIT_REPETITIONS);
+    for res in worker_results {
+        replayed.extend(res?);
+    }
+
+    let mut all_outputs_ok = true;
+    let mut indexed = Vec::with_capacity(2 * MIT_REPETITIONS);
+    for (rep, ((subseeds_0, subseeds_1, recon_prod_0, out_ok), view)) in
+        replayed.iter().zip(&proof.repetitions).enumerate()
+    {
+        all_outputs_ok &= *out_ok;
+        let e = view.opened_e as usize;
+        let (_, head_in_0) = parse_cozk_v4_inputs(&view.pair[0])?;
+        let (_, head_in_1) = parse_cozk_v4_inputs(&view.pair[1])?;
+        indexed.push(crate::batch_hash::CozkIndexedView {
+            rep,
+            head: e,
+            subseeds: subseeds_0.clone(),
+            head_inputs: head_in_0,
+            products: recon_prod_0,
+            outputs: &view.pair[0].outputs,
+        });
+        indexed.push(crate::batch_hash::CozkIndexedView {
+            rep,
+            head: (e + 1) % 3,
+            subseeds: subseeds_1.clone(),
+            head_inputs: head_in_1,
+            products: &view.pair[1].products,
+            outputs: &view.pair[1].outputs,
+        });
+    }
+    let opened_commits = crate::batch_hash::commit_cozk_v4_indexed(&indexed);
+    drop(indexed);
+    for (mut s0, mut s1, mut rp0, _) in replayed {
+        for s in &mut s0 {
+            ct_zeroize_bytes(s);
+        }
+        for s in &mut s1 {
+            ct_zeroize_bytes(s);
+        }
+        ct_zeroize_bytes(&mut rp0);
+    }
+
+    let roots: Vec<u8> = crate::parallel::map(MIT_REPETITIONS, |rep| {
+        let view = &proof.repetitions[rep];
+        let e = view.opened_e as usize;
+        let mut commits = [[0u8; 32]; 3];
+        commits[e] = opened_commits[2 * rep];
+        commits[(e + 1) % 3] = opened_commits[2 * rep + 1];
+        commits[(e + 2) % 3] = view.hidden_party_commit;
+        let mut outs = [&[][..]; 3];
+        outs[e] = &view.pair[0].outputs;
+        outs[(e + 1) % 3] = &view.pair[1].outputs;
+        outs[(e + 2) % 3] = &view.hidden_outputs;
+        rep_root_cozk_v4(rep, &commits, outs)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    if cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]) != proof.views_merkle_root {
+        return Err(MigrateError::ViewsMerkleRootMismatch);
+    }
+    if !all_outputs_ok {
+        return Err(MigrateError::PublicOutputShareMismatch);
+    }
+    Ok(())
+}
+
 /// Verify with batched commitment hashing on the selected backend.
 pub fn verify_migration_proof_with_backend<B: AcceleratorBackend>(
     statement: &MigrationStatement,
@@ -669,6 +1304,10 @@ pub fn verify_migration_proof_with_backend<B: AcceleratorBackend>(
         .any(|(v, &e)| v.opened_e != e)
     {
         return Err(MigrateError::MalformedProofStructure);
+    }
+    if is_cozk_v4_proof(proof) {
+        let circuit = crate::ownership::build(statement, &[0; 32]);
+        return verify_cozk_v4_proof_body(&circuit, proof);
     }
     let indexed: Vec<_> = proof
         .repetitions

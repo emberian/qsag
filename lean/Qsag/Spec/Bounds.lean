@@ -348,13 +348,3 @@ theorem RatBound.num_pos_of_le {a b : RatBound} (ha : 0 < a.num) (h : a.le b) : 
 
 end
 end Qsag
-
-/-! ### Exports for lane oracle -/
-
-public section
-namespace Qsag
-
-theorem RatBound.one_eq : RatBound.one = ⟨1, 1, Nat.zero_lt_one⟩ := by rfl
-
-end Qsag
-end

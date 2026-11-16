@@ -2,6 +2,7 @@ module
 import all QsagVerified.Funs
 import all QsagVerified.Proofs.Adrs
 public import QsagVerified.Proofs.SpongeConformance
+import all Qsag.Oracle.Keccak
 import all QsagVerified.Proofs.RealSpecKeccakWeld
 
 /-!
@@ -193,7 +194,7 @@ theorem load_le_u64_refines (block : Array Std.U8 136#usize) (off : Std.Usize) (
     keccak.load_le_u64 block off =
       .ok ⟨(Qsag.loadLe64 (u8Bytes block.val) k).toBitVec⟩ := by
   rw [load_le_u64_eq block off (by omega)]
-  simp only [Qsag.loadLe64_eq, u8Bytes_getD, hoff]
+  simp only [Qsag.loadLe64, u8Bytes_getD, hoff]
   rfl
 
 private def XorInv (state : Array Std.U64 25#usize) (block : Array Std.U8 136#usize)
@@ -897,7 +898,7 @@ private theorem spongeRateByte_spec32 (a : Array Std.U64 25#usize) (j : Nat)
   rw [spongeRateByte_nat]
   have hcases : j = 0 ∨ j = 1 ∨ j = 2 ∨ j = 3 ∨ j = 4 ∨ j = 5 ∨ j = 6 ∨ j = 7 ∨ j = 8 ∨ j = 9 ∨ j = 10 ∨ j = 11 ∨ j = 12 ∨ j = 13 ∨ j = 14 ∨ j = 15 ∨ j = 16 ∨ j = 17 ∨ j = 18 ∨ j = 19 ∨ j = 20 ∨ j = 21 ∨ j = 22 ∨ j = 23 ∨ j = 24 ∨ j = 25 ∨ j = 26 ∨ j = 27 ∨ j = 28 ∨ j = 29 ∨ j = 30 ∨ j = 31 := by omega
   rcases hcases with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
-  all_goals simp [Qsag.rateBlockBytes_eq_laneBytes, keccakStateOfArray,
+  all_goals simp [Qsag.rateBlockBytes, Qsag.laneBytesLE, keccakStateOfArray,
     UInt64.toNat_ofBitVec, UScalar.val]
 
 private theorem list_eq_of_getD {α : Type} (d : α) (xs ys : List α)
@@ -930,7 +931,7 @@ theorem sponge_squeeze32_refines (sp : keccak.Shake256Sponge) (out : Slice Std.U
   · intro j hj
     have hj32 : j < 32 := by rw [u8Bytes_length, hd, hlen] at hj; exact hj
     rw [u8Bytes_getD, hx j (by omega), spongeRateByte_spec32 sp.state j hj32]
-    simp [Qsag.squeezeXofAux_eq, Qsag.squeezeXofFuel_succ_succ, List.getD_eq_getElem?_getD, hj32]
+    simp [Qsag.squeezeXofAux, Qsag.squeezeXofFuel, List.getD_eq_getElem?_getD, hj32]
 
 /-- End-to-end SHAKE256 equality: the extracted Rust entry point returns exactly the
 canonical 32 bytes, for arbitrary input length. -/
@@ -1096,24 +1097,12 @@ theorem tooth_last_block_suffix_sensitive :
 
 /-! ## Multi-block squeeze and arbitrary-length `SHAKE256` / `cSHAKE256` -/
 
-/-- Local copy of the per-lane little-endian byte list used by `Qsag.rateBlockBytes`
-(tied to it by `Qsag.rateBlockBytes_eq_laneBytes`). -/
-private def laneBytesLE (w : UInt64) : List UInt8 :=
-  [UInt8.ofNat (w.toNat % 256),
-   UInt8.ofNat ((w.toNat / 256) % 256),
-   UInt8.ofNat ((w.toNat / 65536) % 256),
-   UInt8.ofNat ((w.toNat / 16777216) % 256),
-   UInt8.ofNat ((w.toNat / 4294967296) % 256),
-   UInt8.ofNat ((w.toNat / 1099511627776) % 256),
-   UInt8.ofNat ((w.toNat / 281474976710656) % 256),
-   UInt8.ofNat ((w.toNat / 72057594037927936) % 256)]
-
-private theorem laneBytesLE_len (w : UInt64) : (laneBytesLE w).length = 8 := rfl
+private theorem laneBytesLE_len (w : UInt64) : (Qsag.laneBytesLE w).length = 8 := rfl
 
 private theorem laneBytesLE_getD (w : UInt64) (r : Nat) (hr : r < 8) :
-    (laneBytesLE w).getD r 0 = UInt8.ofNat (w.toNat / 2 ^ (8 * r) % 256) := by
+    (Qsag.laneBytesLE w).getD r 0 = UInt8.ofNat (w.toNat / 2 ^ (8 * r) % 256) := by
   have h : r = 0 ∨ r = 1 ∨ r = 2 ∨ r = 3 ∨ r = 4 ∨ r = 5 ∨ r = 6 ∨ r = 7 := by omega
-  rcases h with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [laneBytesLE]
+  rcases h with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> simp [Qsag.laneBytesLE]
 
 private theorem getD_append_lt {α : Type} (xs ys : List α) (d : α) (i : Nat)
     (hi : i < xs.length) : (xs ++ ys).getD i d = xs.getD i d := by
@@ -1138,8 +1127,8 @@ private theorem getD_take_lt {α : Type} (xs : List α) (d : α) (n j : Nat)
 private theorem flatMap_laneBytesLE_getD :
     ∀ (ws : List UInt64) (j : Nat),
       j < 8 * ws.length →
-      (ws.flatMap laneBytesLE).getD j 0 =
-        (laneBytesLE (ws.getD (j / 8) 0)).getD (j % 8) 0
+      (ws.flatMap Qsag.laneBytesLE).getD j 0 =
+        (Qsag.laneBytesLE (ws.getD (j / 8) 0)).getD (j % 8) 0
   | [], j, hj => by simp at hj
   | w :: ws, j, hj => by
     simp only [List.flatMap_cons]
@@ -1161,8 +1150,9 @@ private def rateLanesList (s : Qsag.KState) : List UInt64 :=
    s.a9, s.a10, s.a11, s.a12, s.a13, s.a14, s.a15, s.a16]
 
 private theorem rateBlockBytes_eq_flatMap (s : Qsag.KState) :
-    Qsag.rateBlockBytes s = (rateLanesList s).flatMap laneBytesLE := by
-  exact Qsag.rateBlockBytes_eq_laneBytes s
+    Qsag.rateBlockBytes s = (rateLanesList s).flatMap Qsag.laneBytesLE := by
+  simp only [Qsag.rateBlockBytes, rateLanesList, List.flatMap_cons, List.flatMap_nil,
+    List.append_nil, List.append_assoc]
 
 private theorem rateLanesList_keccakStateOfArray_getD (a : Array Std.U64 25#usize)
     (q : Nat) (hq : q < 17) :
@@ -1234,7 +1224,7 @@ private theorem squeezeXofFuel_getD (fuel outLen : Nat) (s : Qsag.KState) (j : N
 theorem squeezeXofAux_getD (outLen : Nat) (s : Qsag.KState) (j : Nat) (hj : j < outLen) :
     (Qsag.squeezeXofAux outLen s).getD j 0 =
       (Qsag.rateBlockBytes (keccakIter (j / 136) s)).getD (j % 136) 0 :=
-  Qsag.squeezeXofAux_eq outLen s ▸ squeezeXofFuel_getD outLen outLen s j (by omega) hj
+  squeezeXofFuel_getD outLen outLen s j (by omega) hj
 
 /-- A squeeze from offset zero into a destination of any length, across any number of rate
 blocks, succeeds and writes `Qsag.squeezeXofAux out.val.length (keccakStateOfArray sp.state)`. -/
@@ -1406,22 +1396,10 @@ theorem shake256_squeeze_refines (chunks : List (Slice Std.U8)) (out : Slice Std
 
 /-! ### SP 800-185 `left_encode` and the `new_cshake256` constructor -/
 
-/-- Local copy of the fuel-driven little-endian digit recursion behind `Qsag.natBytesBE`
-(tied to it by `natBytesBE_eq_digits`). -/
-private def natBytesLEAux : Nat → Nat → List UInt8
-  | 0, _ => []
-  | fuel + 1, value =>
-    if value = 0 then [] else UInt8.ofNat (value % 256) :: natBytesLEAux fuel (value / 256)
-
-private theorem natBytesBE_eq_digits (value : Nat) :
-    Qsag.natBytesBE value =
-      (if natBytesLEAux value value = [] then [0] else natBytesLEAux value value).reverse :=
-  Qsag.natBytesBE_eq_of_digits natBytesLEAux (fun _ => rfl) (fun _ _ => rfl) value
-
 private theorem natBytesLEAux_fuel_eq :
     ∀ (f1 f2 x : Nat),
       x < 256 ^ f1 → x < 256 ^ f2 →
-      natBytesLEAux f1 x = natBytesLEAux f2 x
+      Qsag.natBytesLEAux f1 x = Qsag.natBytesLEAux f2 x
   | 0, 0, _, _, _ => rfl
   | 0, _ + 1, x, h1, _ => by
     have hx0 : x = 0 := by simp at h1; omega
@@ -1430,7 +1408,7 @@ private theorem natBytesLEAux_fuel_eq :
     have hx0 : x = 0 := by simp at h2; omega
     subst hx0; rfl
   | f1 + 1, f2 + 1, x, h1, h2 => by
-    unfold natBytesLEAux
+    unfold Qsag.natBytesLEAux
     by_cases hx0 : x = 0
     · simp [hx0]
     · simp only [hx0, ↓reduceIte]
@@ -1445,28 +1423,28 @@ private theorem lt_pow_256_self : ∀ x : Nat, x < 256 ^ x
     rw [Nat.pow_succ]
     omega
 
-private theorem natBytesLEAux_len_le : ∀ (f x : Nat), (natBytesLEAux f x).length ≤ f
+private theorem natBytesLEAux_len_le : ∀ (f x : Nat), (Qsag.natBytesLEAux f x).length ≤ f
   | 0, _ => Nat.le_refl 0
   | f + 1, x => by
-    unfold natBytesLEAux
+    unfold Qsag.natBytesLEAux
     by_cases hx0 : x = 0
     · simp [hx0]
     · simp only [hx0, ↓reduceIte, List.length_cons]
       exact Nat.succ_le_succ (natBytesLEAux_len_le f (x / 256))
 
 private theorem natBytesLEAux_nonempty_of_pos :
-    ∀ (f x : Nat), 0 < f → 0 < x → natBytesLEAux f x ≠ []
+    ∀ (f x : Nat), 0 < f → 0 < x → Qsag.natBytesLEAux f x ≠ []
   | 0, _, hf, _ => by omega
   | _ + 1, x, _, hx => by
-    unfold natBytesLEAux
+    unfold Qsag.natBytesLEAux
     have hne : ¬ x = 0 := by omega
     simp [hne]
 
 private theorem natBytesLEAux_eq_nil_imp_zero :
-    ∀ (f x : Nat), x < 256 ^ f → natBytesLEAux f x = [] → x = 0
+    ∀ (f x : Nat), x < 256 ^ f → Qsag.natBytesLEAux f x = [] → x = 0
   | 0, x, hx, _ => by simp at hx; omega
   | _ + 1, x, _, heq => by
-    unfold natBytesLEAux at heq
+    unfold Qsag.natBytesLEAux at heq
     by_cases hx0 : x = 0
     · exact hx0
     · simp [hx0] at heq
@@ -1498,8 +1476,7 @@ theorem sp800_185_left_encode_u128_refines (v : Std.U128) :
        0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8],
       2#usize, ?_, by decide, ?_⟩
     · simp only [keccak.sp800_185_left_encode_u128, ↓reduceIte]
-    · rw [Qsag.leftEncode_eq, natBytesBE_eq_digits]
-      decide
+    · decide
   · have hvpos : 0 < v.val := by
       by_cases hz : v.val = 0
       · exact False.elim (hv0 (UScalar.eq_of_val_eq hz))
@@ -1508,7 +1485,7 @@ theorem sp800_185_left_encode_u128_refines (v : Std.U128) :
       have h128 : v.val < 2 ^ 128 := v.bv.isLt
       have heq : (2 : Nat) ^ 128 = 256 ^ 16 := by decide
       omega
-    let ds := natBytesLEAux 16 v.val
+    let ds := Qsag.natBytesLEAux 16 v.val
     let m := ds.length
     have hm_le : m ≤ 16 := natBytesLEAux_len_le 16 v.val
     have hds_ne : ds ≠ [] := natBytesLEAux_nonempty_of_pos 16 v.val (by decide) hvpos
@@ -1517,8 +1494,8 @@ theorem sp800_185_left_encode_u128_refines (v : Std.U128) :
       | nil => exact False.elim (hds_ne hds)
       | cons _ _ => dsimp only [m]; rw [hds]; exact Nat.succ_pos _
     have hleft : Qsag.leftEncode v.val = UInt8.ofNat m :: ds.reverse := by
-      rw [Qsag.leftEncode_eq, natBytesBE_eq_digits]
-      have hf : natBytesLEAux v.val v.val = ds :=
+      unfold Qsag.leftEncode Qsag.natBytesBE
+      have hf : Qsag.natBytesLEAux v.val v.val = ds :=
         natBytesLEAux_fuel_eq v.val 16 v.val (lt_pow_256_self v.val) hv16
       simp only [hf, hds_ne, ↓reduceIte, List.length_reverse]
       rfl
@@ -1528,7 +1505,7 @@ theorem sp800_185_left_encode_u128_refines (v : Std.U128) :
     let P0 := fun (rem : Nat) (x : Array Std.U8 16#usize × Std.Usize × Std.U128) =>
       x.2.1.val + rem = m ∧
       x.2.2.val < 256 ^ (16 - x.2.1.val) ∧
-      natBytesLEAux (16 - x.2.1.val) x.2.2.val = ds.drop x.2.1.val ∧
+      Qsag.natBytesLEAux (16 - x.2.1.val) x.2.2.val = ds.drop x.2.1.val ∧
       u8Bytes (x.1.val.take x.2.1.val) = ds.take x.2.1.val
     let Q0 := fun (y : Array Std.U8 16#usize × Std.Usize) =>
       y.2.val = m ∧ u8Bytes (y.1.val.take m) = ds
@@ -1555,13 +1532,13 @@ theorem sp800_185_left_encode_u128_refines (v : Std.U128) :
       have hcur_pos : 0 < cur.val := by
         by_cases hc0 : cur.val = 0
         · rw [hf_succ] at haux
-          unfold natBytesLEAux at haux
+          unfold Qsag.natBytesLEAux at haux
           rw [ite_eq_left hc0, hdrop_cons] at haux
           cases haux
         · omega
       have hcgt : cur > 0#u128 := hcur_pos
       rw [hf_succ] at haux hbound
-      unfold natBytesLEAux at haux
+      unfold Qsag.natBytesLEAux at haux
       have hcne0 : ¬ cur.val = 0 := by omega
       simp only [hcne0, ↓reduceIte] at haux
       rw [hdrop_cons] at haux
@@ -1595,7 +1572,7 @@ theorem sp800_185_left_encode_u128_refines (v : Std.U128) :
         rw [vcur1, hsub]
         rw [Nat.pow_succ] at hbound
         omega
-      · change natBytesLEAux (16 - idx1.val) cur1.val = ds.drop idx1.val
+      · change Qsag.natBytesLEAux (16 - idx1.val) cur1.val = ds.drop idx1.val
         have hsub : 16 - idx1.val = 15 - idx.val := by omega
         rw [hsub, vcur1, vidx1]
         exact htail_eq
@@ -1773,16 +1750,15 @@ private theorem customizationPrefix_eq_of_z (cust : List UInt8) :
     Qsag.customizationPrefix cust =
       z ++ List.replicate ((136 - z.length % 136) % 136) 0 := by
   intro z
-  have h136 : Qsag.leftEncode 136 = [1, 136] := by
-    rw [Qsag.leftEncode_eq, natBytesBE_eq_digits]
-    decide
-  have hemp : Qsag.encodeString [] = [1, 0] := by
-    rw [Qsag.encodeString_eq, Qsag.leftEncode_eq, natBytesBE_eq_digits]
-    decide
-  rw [Qsag.customizationPrefix_eq, Qsag.bytepad_eq]
-  have hw : ¬ (136 : Nat) = 0 := by decide
-  rw [ite_eq_right hw, h136, hemp, Qsag.encodeString_eq]
+  have h136 : Qsag.leftEncode Qsag.shake256RateBytes = [1, 136] := by decide
+  have hemp : Qsag.encodeString [] = [1, 0] := by decide
+  unfold Qsag.customizationPrefix Qsag.bytepad
+  have hw : ¬ Qsag.shake256RateBytes = 0 := by decide
+  rw [ite_eq_right hw, h136, hemp]
+  unfold Qsag.encodeString
+  have hsw : Qsag.shake256RateBytes = 136 := rfl
   dsimp only []
+  rw [hsw]
   have hz_eq : ([1, 136] : List UInt8) ++ ([1, 0] ++ (Qsag.leftEncode (8 * cust.length) ++ cust)) =
       z := by
     simp only [z, List.cons_append, List.nil_append, List.append_assoc]
@@ -1979,7 +1955,7 @@ theorem cshake256_squeeze_refines (customization : Slice Std.U8)
 first rate block (`0xbd ≠ 0x00` from the zero state). -/
 theorem tooth_multiblock_squeeze_permuted_beyond_136 :
     (Qsag.squeezeXofAux 137 Qsag.zeroKState).getD 136 0 ≠
-      (Qsag.rateBlockBytes Qsag.zeroKState).getD 0 0 :=
-  Qsag.squeezeXofAux_zero_byte136_ne_byte0
+      (Qsag.rateBlockBytes Qsag.zeroKState).getD 0 0 := by
+  decide +kernel
 
 end qsag_verified.proofs

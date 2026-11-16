@@ -15,19 +15,21 @@ domains behave as independent random oracles" needs that reduction, which is a s
 obligation and is not proved in this module.
 
 1. **Multi-block rate-`r` sponge specification and padded-encoding injectivity
-   (`pad10star1_joint_injective`, `pad10star1_injective`, `absorbPayload_cross_domain_encodings_ne`)**:
+   (`pad10star1_joint_injective`, `pad10star1_injective`,
+   `absorbPayload_cross_domain_padded_blocks_ne`)**:
    byte-level rate-`r` (`r = 136` for `SHAKE256` / `cSHAKE256` / `TurboSHAKE256` / `SHA3-256`,
    `r = 64` for the 8-limb `Poseidon2` byte rate) multi-block XOR absorption, `pad10*1` padding,
    and arbitrary-length multi-block squeezing over any function `π` on states, proved equal to
    `Keccak.shake256Xof` at the Keccak permutation (`evalSponge_keccak_eq_shake256Xof`). The padded
    block sequence determines the message within one domain byte, and padded block sequences under
-   distinct valid domain bytes (`0x1F`, `0x04`, `0x06`) are unequal.
+   distinct valid domain bytes (`0x1F`, `0x04`, `0x06`) are unequal
+   (`fips202_shake_cshake_sha3_padded_blocks_ne`).
 2. **NIST SP 800-185 self-delimiting prefix injectivity (`leftEncode_prefix_inj`,
    `encodeString_prefix_inj`, `cshakePrefix_prefix_free`, `cshakePrefix_injective`)**:
    `cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂ → N₁ = N₂ ∧ S₁ = S₂ ∧ m₁ = m₂`, where
    `cshakePrefix N S = bytepad(encodeString(N) || encodeString(S), 136)`. Consequently the
    padded block sequences of distinct `(N, S)` pairs, the `QSAG.*` customization tags included,
-   are unequal as sequences (`cshake256_encodings_ne`, `qsag_tags_sponge_encodings_ne`).
+   are unequal as sequences (`cshake256_padded_blocks_ne`, `qsag_tags_sponge_padded_blocks_ne`).
 3. **Precomputed-midstate equivalence (`cshake_precomputed_midstate_eq`,
    `keccak_cshake256_precomputed_midstate_eq`)**:
    whenever `encodeString(N) ++ encodeString(S)` fits in a single `136`-byte `bytepad` block
@@ -37,7 +39,7 @@ obligation and is not proved in this module.
 -/
 
 public import Qsag.Oracle.Keccak
-import Qsag.Tactic.Prelude
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -544,18 +546,25 @@ end
 
 public section
 namespace Qsag
-theorem absorbPayload_cross_domain_disjoint {r : Nat} {d₁ d₂ : UInt8} (m₁ m₂ : List UInt8)
+/-- **Cross-domain inequality of padded block sequences (`absorbPayload_cross_domain_padded_blocks_ne`)**:
+    canonical theorem name emphasizing sequence inequality of `absorbPayload` block lists rather
+    than disjointness of internal permutation query sets. -/
+theorem absorbPayload_cross_domain_padded_blocks_ne {r : Nat} {d₁ d₂ : UInt8} (m₁ m₂ : List UInt8)
     (hr : 0 < r) (hNe : d₁ ≠ d₂) (hd₁ : ValidDomByte d₁) (hd₂ : ValidDomByte d₂) :
     absorbPayload r d₁ m₁ ≠ absorbPayload r d₂ m₂ :=
   absorbPayload_cross_domain_encodings_ne m₁ m₂ hr hNe hd₁ hd₂
 
-theorem fips202_shake_cshake_sha3_domains_disjoint (m₁ m₂ : List UInt8) :
+/-- Pairwise inequality of complete padded 136-byte block sequences across FIPS 202 `SHAKE256`
+    (`0x1F`), `cSHAKE256` (`0x04`), and `SHA3-256` (`0x06`). -/
+theorem fips202_shake_cshake_sha3_padded_blocks_ne (m₁ m₂ : List UInt8) :
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domCshake256 m₂ ∧
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ ∧
     absorbPayload 136 domCshake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ :=
   fips202_shake_cshake_sha3_encodings_ne m₁ m₂
 
-theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂ : List UInt8)
+/-- Pairwise inequality of complete padded 136-byte block sequences across distinct SP 800-185
+    `(N, S)` customization pairs. -/
+theorem cshake256_padded_blocks_ne {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂ : List UInt8)
     (hN₁ : 8 * N₁.length < 256 ^ 255) (hS₁ : 8 * S₁.length < 256 ^ 255)
     (hN₂ : 8 * N₂.length < 256 ^ 255) (hS₂ : 8 * S₂.length < 256 ^ 255)
     (hNe : (N₁, S₁) ≠ (N₂, S₂)) :
@@ -565,7 +574,8 @@ theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂
      else absorbPayload 136 domCshake256 (cshakePrefix N₂ S₂ ++ m₂)) :=
   cshake256_encodings_ne m₁ m₂ hN₁ hS₁ hN₂ hS₂ hNe
 
-theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
+/-- Pairwise inequality of complete padded 136-byte block sequences across `QSAG.*` customization tags. -/
+theorem qsag_tags_sponge_padded_blocks_ne (m₁ m₂ : List UInt8) :
     absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyLeaf ++ m₁) ≠
       absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyNode ++ m₂) ∧
     absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyLeaf ++ m₁) ≠
@@ -573,27 +583,24 @@ theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
     absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFiatShamir ++ m₁) ≠
       absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFtsOtPad ++ m₂) :=
   qsag_tags_sponge_encodings_ne m₁ m₂
-end Qsag
-end
 
-/-! ### Exports for lane oracle -/
+#export_eqns shakeRateBytes poseidon2RateBytes domShake256 domTurboShake256 domCshake256 domSha3_256
+#export_eqns qsagTagCanopyLeaf qsagTagCanopyNode qsagTagFiatShamir qsagTagFtsOtPad
 
-public section
-namespace Qsag
-
-theorem domShake256_eq : domShake256 = 0x1F := by rfl
-theorem domCshake256_eq : domCshake256 = 0x04 := by rfl
-
-theorem qsagTagCanopyLeaf_eq :
-    qsagTagCanopyLeaf =
-      [81, 83, 65, 71, 46, 87, 72, 73, 82, 46, 67, 65, 78, 79, 80, 89, 46, 76, 69, 65, 70, 47, 118, 49] := by
-  rfl
-
-#verify_constructive pad10star1_joint_injective pad10star1_injective
-  absorbPayload_cross_domain_encodings_ne evalSponge_keccak_eq_shake256Xof
-  cshakePrefix_prefix_free cshakePrefix_injective cshake256_encodings_ne
-  cshake_precomputed_midstate_eq keccak_cshake256_precomputed_midstate_eq
-  cshakePrefix_single_block_length
-
+#verify_constructive
+  Qsag.pad10star1_joint_injective
+  Qsag.pad10star1_injective
+  Qsag.absorbPayload_cross_domain_encodings_ne
+  Qsag.absorbPayload_cross_domain_padded_blocks_ne
+  Qsag.fips202_shake_cshake_sha3_padded_blocks_ne
+  Qsag.evalSponge_keccak_eq_shake256Xof
+  Qsag.cshakePrefix_prefix_free
+  Qsag.cshakePrefix_injective
+  Qsag.cshake256_encodings_ne
+  Qsag.cshake256_padded_blocks_ne
+  Qsag.qsag_tags_sponge_padded_blocks_ne
+  Qsag.cshakePrefix_single_block_length
+  Qsag.cshake_precomputed_midstate_eq
+  Qsag.keccak_cshake256_precomputed_midstate_eq
 end Qsag
 end

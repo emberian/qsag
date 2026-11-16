@@ -8,6 +8,7 @@ public import QsagVerified.Proofs.RealSpecFieldWeld
 public import QsagVerified.Proofs.BeltLatchKernel
 import all QsagVerified.Proofs.BeltLatchKernel
 public import Qsag.Machine.MirSpecBridge
+import all Qsag.Machine.MirSpecBridgeCore
 import Qsag.Tactic.AssuranceKit
 
 /-!
@@ -157,8 +158,7 @@ private theorem velocitySpendStep_abs (g : policy_and_addr.StatefulVelocityGuard
       | none => .err (velocityGuardAbs g) () := by
   have hcapmax := u128_val_le_max g.cap_units
   simp only [UScalar.val] at hcapmax
-  rw [Qsag.mirVelocityAuthorizeSpend.public_eq_1]
-  unfold velocitySpendStep
+  unfold Qsag.mirVelocityAuthorizeSpend velocitySpendStep
   by_cases hp : g.policy_pin = r.policy_pin
   case neg =>
     have : arrayU8ToBytes r.policy_pin ≠ arrayU8ToBytes g.policy_pin :=
@@ -195,8 +195,7 @@ theorem velocity_extracted_step_refines :
   intro g r
   have hx := velocity_authorize_spend_exact g r
   have hab := velocitySpendStep_abs g r
-  rw [Qsag.mirVelocityMachine.public_eq_1]
-  dsimp only [Qsag.PartyMachine.ofOutcome]
+  dsimp only [Qsag.mirVelocityMachine, Qsag.PartyMachine.ofOutcome]
   revert hx hab
   cases velocitySpendStep g r with
   | none =>
@@ -281,9 +280,8 @@ private theorem mlDsaGate_abs (g : cred_and_hd_guards.MlDsaReleaseGate)
       else .err (mlDsaGateAbs (mlDsaGateMealy.errStep g c)) () := by
   rcases g with ⟨sid, att, z, rel, ab⟩
   rcases c with ⟨csid, catt, zn, r0, w1, uc⟩
-  rw [Qsag.mirMlDsaTryReleaseZShare.public_eq_1]
-  unfold mlDsaBarrierPassBool
-  simp only [mlDsaGateMealy, mlDsaGateAbs, mlDsaChecksAbs, Qsag.abortMirMlDsaGate.public_eq_1]
+  unfold Qsag.mirMlDsaTryReleaseZShare mlDsaBarrierPassBool
+  simp only [mlDsaGateMealy, mlDsaGateAbs, mlDsaChecksAbs, Qsag.abortMirMlDsaGate]
   cases ab <;> cases rel <;> simp only [Bool.or_true, Bool.or_false,
     Bool.not_true, Bool.not_false, Bool.false_and, Bool.true_and, ↓reduceIte, Bool.false_eq_true]
   all_goals try rfl
@@ -312,8 +310,7 @@ theorem mlDsa_extracted_step_refines :
   intro g c
   obtain ⟨hPass, hFail⟩ := mldsa_gate_try_release_exact g c
   have hab := mlDsaGate_abs g c
-  rw [Qsag.mirMlDsaReleaseMachine.public_eq_1]
-  dsimp only [Qsag.PartyMachine.ofOutcome]
+  dsimp only [Qsag.mirMlDsaReleaseMachine, Qsag.PartyMachine.ofOutcome]
   cases hb : mlDsaBarrierPassBool g c
   · obtain ⟨e, he⟩ := hFail hb
     rw [hb] at hab
@@ -430,8 +427,7 @@ private theorem beltLatchBindPure_abs (s : BeltLatchKernel) (r : BeltLatchBindRe
   have hsalt : (beltRecordAbs s.in_flight).retry_salt = (beltReqAbs r).retry_salt ↔
       s.in_flight.retry_salt = r.retry_salt :=
     ⟨arrayU8ToBytes_injective, fun h => congrArg arrayU8ToBytes h⟩
-  rw [Qsag.mirBeltLatchKernelBind.public_eq_1]
-  unfold beltLatchBindPure
+  unfold Qsag.mirBeltLatchKernelBind beltLatchBindPure
   cases hp : s.wal_poisoned
   case true => simp [beltKernelAbs, hp]
   have hp' : (beltKernelAbs s).wal_poisoned = false := hp
@@ -467,7 +463,7 @@ private theorem beltLatchBindPure_abs (s : BeltLatchKernel) (r : BeltLatchBindRe
         exact fun h => he (hepoch.mp h)
     simp only [hmiss, Bool.false_eq_true, ↓reduceIte, hin]
     unfold beltLatchFreshPure
-    have hjump : Qsag.mirBeltMaxEpochJump = 64 := Qsag.mirBeltMaxEpochJump.public_eq_1
+    have hjump : Qsag.mirBeltMaxEpochJump = 64 := rfl
     simp only [beltKernelAbs, beltReqAbs, UInt64.toNat_ofBitVec, hjump]
     by_cases h1 : r.epoch.bv.toNat < s.next_epoch.bv.toNat
     · simp [h1]
@@ -488,8 +484,7 @@ theorem beltLatch_extracted_step_refines :
   intro s r
   have hab := beltLatchBindPure_abs s r
   rw [belt_latch_bind_eq]
-  rw [Qsag.mirBeltLatchKernelMachine.public_eq_1]
-  dsimp only [Qsag.PartyMachine.ofOutcome]
+  dsimp only [Qsag.mirBeltLatchKernelMachine, Qsag.PartyMachine.ofOutcome]
   revert hab
   rcases beltLatchBindPure s r with ⟨s', o | e⟩
   · intro hab; dsimp only at hab ⊢; rw [hab]
@@ -527,10 +522,8 @@ theorem extractedBeltLatch_equivocation_free
   change aF = beltKernelAbs kF at hRel
   subst hRel
   obtain ⟨hWfF, hCap, hPair⟩ :=
-    Qsag.mirBeltLatchKernel_equivocation_free
-      (by rw [Qsag.MirBeltLatchKernel.WellFormed.public_eq_1]; exact hWf₀)
+    Qsag.mirBeltLatchKernel_equivocation_free (by exact hWf₀)
       (comapInputs_validTrace hA)
-  rw [Qsag.MirBeltLatchKernel.WellFormed.public_eq_1] at hWfF
   refine ⟨hWfF, fun p hp => hCap (beltReqAbs p.1, p.2)
       (List.mem_map_of_mem (f := fun p => (beltReqAbs p.1, p.2)) hp),
     (List.pairwise_map.mp hPair).imp fun h he => ?_⟩
@@ -617,8 +610,8 @@ theorem tooth_velocity_used_nonce_model_is_not_monotone_nonce :
   constructor
   · simp [policy_and_addr.StatefulVelocityGuard.authorize_spend, ct_eq_bytes32_spec,
       bind_eq_result_bind, result_bind_ok]
-  · rw [Qsag.mirPolicyStep_eq]
-    simp [Qsag.u64MemBool.public_eq_1, Qsag.u64MemBool.public_eq_2]
+  · rw [Qsag.mirPolicyStep.eq_def]
+    simp [Qsag.u64MemBool.eq_def]
 
 private theorem extractedVelocity_replay_step_none
     (g : policy_and_addr.StatefulVelocityGuard) (r : policy_and_addr.VelocitySpendRequest)

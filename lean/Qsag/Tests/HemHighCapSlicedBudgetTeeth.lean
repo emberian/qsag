@@ -32,99 +32,6 @@ namespace HemHighCapSlicedBudgetTests
 set_option autoImplicit false
 attribute [-instance] Fin.instLinearOrderPackage
 
-/-! ### Fixture stages and rows -/
-
-/-- `nv = 28`, stage `0` of `pcs.rs::stage_geometry`. -/
-private abbrev g28s0 : HemStageGeom :=
-  { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
-
-/-- `nv = 25`, stage `1` of `pcs.rs::stage_geometry`. -/
-private abbrev g25s1 : HemStageGeom :=
-  { stageIdx := 1, logBlowup := 4, stepVars := 4, n := 524288, d := 32770 }
-
-private theorem list_get_zero_of_eq {α : Type} {l t : List α} {a : α} (h : l = a :: t)
-    (hi : 0 < l.length) : l.get ⟨0, hi⟩ = a := by
-  subst h
-  rfl
-
-private theorem list_get_one_of_eq {α : Type} {l t : List α} {a b : α} (h : l = a :: b :: t)
-    (hi : 1 < l.length) : l.get ⟨1, hi⟩ = b := by
-  subst h
-  rfl
-
-theorem pcsGeoms28_pos : 0 < (hemPcsHighCapStageGeoms 28).length := by
-  rw [hemPcsHighCapStageGeoms_nv28]
-  decide
-
-theorem pcsGeoms27_one_lt : 1 < (hemPcsHighCapStageGeoms 27).length := by
-  rw [hemPcsHighCapStageGeoms_nv27]
-  decide
-
-theorem pcsGeoms25_one_lt : 1 < (hemPcsHighCapStageGeoms 25).length := by
-  rw [hemPcsHighCapStageGeoms_nv25]
-  decide
-
-theorem stageGeoms28_pos : 0 < (hemStageGeoms 28).length := by
-  rw [← hemPcsHighCapStageGeoms_eq_hemStageGeoms]
-  exact pcsGeoms28_pos
-
-theorem stageGeoms25_one_lt : 1 < (hemStageGeoms 25).length := by
-  rw [← hemPcsHighCapStageGeoms_eq_hemStageGeoms]
-  exact pcsGeoms25_one_lt
-
-private theorem pcsGeoms28_get_zero :
-    (hemPcsHighCapStageGeoms 28).get ⟨0, pcsGeoms28_pos⟩ = g28s0 :=
-  list_get_zero_of_eq hemPcsHighCapStageGeoms_nv28 _
-
-private theorem pcsGeoms25_get_one :
-    (hemPcsHighCapStageGeoms 25).get ⟨1, pcsGeoms25_one_lt⟩ = g25s1 :=
-  list_get_one_of_eq hemPcsHighCapStageGeoms_nv25 _
-
-private theorem stageGeoms28_get_zero :
-    (hemStageGeoms 28).get ⟨0, stageGeoms28_pos⟩ = g28s0 :=
-  list_get_zero_of_eq
-    ((hemPcsHighCapStageGeoms_eq_hemStageGeoms 28).symm.trans hemPcsHighCapStageGeoms_nv28) _
-
-private theorem g28s0_mem : g28s0 ∈ hemPcsHighCapStageGeoms 28 := by
-  rw [hemPcsHighCapStageGeoms_nv28]
-  exact List.mem_cons_self ..
-
-private theorem g25s1_mem : g25s1 ∈ hemPcsHighCapStageGeoms 25 := by
-  rw [hemPcsHighCapStageGeoms_nv25]
-  exact List.mem_cons_of_mem _ (List.mem_cons_self ..)
-
-private theorem row_nv28_stage0 : hemPcsHighCapTableRow 28 0 = some (28, 0, 8433861, 128, 6362) := by
-  rw [hemPcsHighCapTableRow.public_eqs, hemPcsHighCapWitnessRows.public_eqs]
-  decide
-
-private theorem slicedRow_nv28_stage0 : slicedPcsHighCapRow 28 0 = some (28, 0, 8388611, 183) := by
-  rw [slicedPcsHighCapRow.public_eqs, slicedPcsHighCapTable.public_eqs]
-  decide
-
-private theorem row_nv25_stage1 : hemPcsHighCapTableRow 25 1 = some (25, 1, 133941, 32, 1732) := by
-  rw [hemPcsHighCapTableRow.public_eqs, hemPcsHighCapWitnessRows.public_eqs]
-  decide
-
-private theorem slicedRow_nv25_stage1 : slicedPcsHighCapRow 25 1 = some (25, 1, 131078, 196) := by
-  rw [slicedPcsHighCapRow.public_eqs, slicedPcsHighCapTable.public_eqs]
-  decide
-
-/-- Instantiate a budget statement `∃ r w, row = some r ∧ slicedRow = some w ∧ P r w` at the
-    known rows. -/
-private theorem at_rows {nv : Nat} {g : HemStageGeom} {R : Nat × Nat × Nat × Nat × Nat}
-    {W : Nat × Nat × Nat × Nat} (hR : hemPcsHighCapTableRow nv g.stageIdx = some R)
-    (hW : slicedPcsHighCapRow nv g.stageIdx = some W)
-    {P : Nat × Nat × Nat × Nat × Nat → Nat × Nat × Nat × Nat → Prop}
-    (h : ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
-      hemPcsHighCapTableRow nv g.stageIdx = some r ∧ slicedPcsHighCapRow nv g.stageIdx = some w ∧
-        P r w) : P R W := by
-  obtain ⟨r, w, hr, hw, hP⟩ := h
-  rw [hR] at hr
-  rw [hW] at hw
-  cases hr
-  cases hw
-  exact hP
-
 /-! ### Positive witnesses -/
 
 /-- Premises of both budgets are met at `nv = 28`, stage `0`. -/
@@ -132,18 +39,16 @@ theorem inhabited_highCap_sliced_budget_nv28 :
     ∃ (nv : Nat) (g : HemStageGeom),
       2 ≤ nv ∧ nv ≤ 28 ∧ g ∈ hemPcsHighCapStageGeoms nv ∧
         hemJohnsonQromStageExhaustive g = false :=
-  ⟨28, (hemPcsHighCapStageGeoms 28).get ⟨0, pcsGeoms28_pos⟩,
-    by decide, by decide, list_get_mem _ _,
-    (highCap_stages_nonexhaustive 28 (by decide) (by decide)).2 _ (list_get_mem _ _)⟩
+  ⟨28, (hemPcsHighCapStageGeoms 28).get ⟨0, by decide +kernel⟩,
+    by decide, by decide, list_get_mem _ _, by decide +kernel⟩
 
 /-- Premises of both budgets are met at `nv = 27`, stage `1`. -/
 theorem inhabited_highCap_sliced_budget_nv27 :
     ∃ (nv : Nat) (g : HemStageGeom),
       2 ≤ nv ∧ nv ≤ 28 ∧ g ∈ hemPcsHighCapStageGeoms nv ∧
         hemJohnsonQromStageExhaustive g = false :=
-  ⟨27, (hemPcsHighCapStageGeoms 27).get ⟨1, pcsGeoms27_one_lt⟩,
-    by decide, by decide, list_get_mem _ _,
-    (highCap_stages_nonexhaustive 27 (by decide) (by decide)).2 _ (list_get_mem _ _)⟩
+  ⟨27, (hemPcsHighCapStageGeoms 27).get ⟨1, by decide +kernel⟩,
+    by decide, by decide, list_get_mem _ _, by decide +kernel⟩
 
 /-- The two fixtures are above `24` variables and have the stage shape of
     `pcs.rs::stage_geometry` at `28` and `27`. -/
@@ -152,8 +57,7 @@ theorem inhabited_highCap_sliced_budget_fixture_shape :
       [(0, 2, 6), (1, 4, 6), (2, 6, 4), (3, 8, 4)] ∧
     (hemPcsHighCapStageGeoms 27).map (fun g => (g.stageIdx, g.logBlowup, g.stepVars)) =
       [(0, 2, 6), (1, 4, 5), (2, 6, 4), (3, 8, 4)] := by
-  rw [hemPcsHighCapStageGeoms_nv28, hemPcsHighCapStageGeoms_nv27]
-  exact ⟨rfl, rfl⟩
+  decide +kernel
 
 /-! ### Tightness of the floors -/
 
@@ -169,24 +73,6 @@ def multiFoldProfile (nv : Nat) (g : HemStageGeom) : RatBound :=
   | some r, some w => slicedMultiFoldStageBound g r w
   | _, _ => RatBound.one
 
-private theorem binaryProfile_nv28_stage0 :
-    binaryProfile 28 g28s0 = slicedBinaryStageBound g28s0 (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183) := by
-  simp only [binaryProfile, row_nv28_stage0, slicedRow_nv28_stage0]
-
-private theorem multiFoldProfile_nv28_stage0 :
-    multiFoldProfile 28 g28s0 = slicedMultiFoldStageBound g28s0 (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183) := by
-  simp only [multiFoldProfile, row_nv28_stage0, slicedRow_nv28_stage0]
-
-private theorem multiFoldProfile_nv25_stage1 :
-    multiFoldProfile 25 g25s1 = slicedMultiFoldStageBound g25s1 (25, 1, 133941, 32, 1732) (25, 1, 131078, 196) := by
-  simp only [multiFoldProfile, row_nv25_stage1, slicedRow_nv25_stage1]
-
-private theorem g28s0_nonexhaustive : hemJohnsonQromStageExhaustive g28s0 = false :=
-  (highCap_stages_nonexhaustive 28 (by decide) (by decide)).2 _ g28s0_mem
-
-private theorem g25s1_nonexhaustive : hemJohnsonQromStageExhaustive g25s1 = false :=
-  (highCap_stages_nonexhaustive 25 (by decide) (by decide)).2 _ g25s1_mem
-
 /-- At `nv = 28`, stage `0`, the binary bound has `183` bits and not `184`, and the DFM scale
     fails `128` bits at `Q + 1 = 2^27`: neither the `184`-bit floor nor the `Q + 1 ≤ 2^27`
     budget of `sliced_stage_supported_budget` extends above `24` variables, and `183` bits /
@@ -196,14 +82,11 @@ theorem tooth_highCap_nv28_binary_at_183_bits :
       g ∈ hemPcsHighCapStageGeoms 28 ∧
       atLeastBits 183 (binaryProfile 28 g) ∧
       ¬ atLeastBits 184 (binaryProfile 28 g) ∧
-      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (binaryProfile 28 g)) := by
-  refine ⟨(hemPcsHighCapStageGeoms 28).get ⟨0, pcsGeoms28_pos⟩, list_get_mem _ _, ?_⟩
-  rw [pcsGeoms28_get_zero, binaryProfile_nv28_stage0]
-  exact ⟨(at_rows (g := g28s0) row_nv28_stage0 slicedRow_nv28_stage0
-      (highCap_sliced_stage_supported_budget 28 (by decide) (by decide) g28s0 g28s0_mem
-        g28s0_nonexhaustive)).2.1,
-    highCap_nv28_stage0_binary_tight.1, highCap_nv28_stage0_binary_tight.2⟩
+      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (binaryProfile 28 g)) :=
+  ⟨(hemPcsHighCapStageGeoms 28).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel, by decide +kernel⟩
 
+set_option maxRecDepth 1000000 in
 /-- At `nv = 28`, stage `0` (`stepVars = 6`), the summed multi-fold bound has `177` bits and
     not `178`, and the DFM scale fails `128` bits at `Q + 1 = 2^24`. -/
 theorem tooth_highCap_nv28_multifold_at_177_bits :
@@ -212,14 +95,11 @@ theorem tooth_highCap_nv28_multifold_at_177_bits :
       g.stepVars = 6 ∧
       atLeastBits 177 (multiFoldProfile 28 g) ∧
       ¬ atLeastBits 178 (multiFoldProfile 28 g) ∧
-      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 24 - 1) (multiFoldProfile 28 g)) := by
-  refine ⟨(hemPcsHighCapStageGeoms 28).get ⟨0, pcsGeoms28_pos⟩, list_get_mem _ _, ?_⟩
-  rw [pcsGeoms28_get_zero, multiFoldProfile_nv28_stage0]
-  exact ⟨rfl, (at_rows (g := g28s0) row_nv28_stage0 slicedRow_nv28_stage0
-      (highCap_sliced_multifold_stage_supported_budget 28 (by decide) (by decide) g28s0
-        g28s0_mem g28s0_nonexhaustive)).2.2.2.2.1 (by decide),
-    highCap_nv28_stage0_multifold_tight.1, highCap_nv28_stage0_multifold_tight.2⟩
+      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 24 - 1) (multiFoldProfile 28 g)) :=
+  ⟨(hemPcsHighCapStageGeoms 28).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
 
+set_option maxRecDepth 1000000 in
 /-- At `nv = 25`, stage `1` (`stepVars = 4`, the stage where `pcs.rs::stage_geometry` differs
     from `hemHighCapStageGeometry`), the summed multi-fold bound has `193` bits and not `194`. -/
 theorem tooth_highCap_nv25_stage1_multifold_at_193_bits :
@@ -227,13 +107,9 @@ theorem tooth_highCap_nv25_stage1_multifold_at_193_bits :
       g ∈ hemPcsHighCapStageGeoms 25 ∧
       g.stepVars = 4 ∧
       atLeastBits 193 (multiFoldProfile 25 g) ∧
-      ¬ atLeastBits 194 (multiFoldProfile 25 g) := by
-  refine ⟨(hemPcsHighCapStageGeoms 25).get ⟨1, pcsGeoms25_one_lt⟩, list_get_mem _ _, ?_⟩
-  rw [pcsGeoms25_get_one, multiFoldProfile_nv25_stage1]
-  exact ⟨rfl, (at_rows (g := g25s1) row_nv25_stage1 slicedRow_nv25_stage1
-      (highCap_sliced_multifold_stage_supported_budget 25 (by decide) (by decide) g25s1
-        g25s1_mem g25s1_nonexhaustive)).2.2.2.2.2.2.1 (by decide) (by decide),
-    highCap_nv25_stage1_multifold_tight⟩
+      ¬ atLeastBits 194 (multiFoldProfile 25 g) :=
+  ⟨(hemPcsHighCapStageGeoms 25).get ⟨1, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 /-! ### The cap at `28` variables -/
 
@@ -247,14 +123,10 @@ theorem tooth_highCap_nv29_has_no_stage :
 /-- Neither table has a row at `nv = 29`, for any stage index. -/
 theorem highCap_nv29_has_no_row (stage : Nat) :
     hemPcsHighCapTableRow 29 stage = none ∧ slicedPcsHighCapRow 29 stage = none := by
-  have hJ : hemPcsHighCapWitnessRows.all (fun r => !(r.1 == 29)) = true := by
-    rw [hemPcsHighCapWitnessRows.public_eqs]
-    decide
-  have hS : slicedPcsHighCapTable.all (fun r => !(r.1 == 29)) = true := by
-    rw [slicedPcsHighCapTable.public_eqs]
-    decide
+  have hJ : hemPcsHighCapWitnessRows.all (fun r => !(r.1 == 29)) = true := by decide
+  have hS : slicedPcsHighCapTable.all (fun r => !(r.1 == 29)) = true := by decide
   have h24 : ¬ (29 ≤ 24) := by decide
-  rw [hemPcsHighCapTableRow.public_eqs, slicedPcsHighCapRow.public_eqs]
+  unfold hemPcsHighCapTableRow slicedPcsHighCapRow
   simp only [h24, ↓reduceIte]
   refine ⟨List.find?_eq_none.mpr fun x hx => ?_, List.find?_eq_none.mpr fun x hx => ?_⟩
   · have h := List.all_eq_true.mp hJ x hx
@@ -303,32 +175,13 @@ set_option maxRecDepth 1000000 in
 theorem highCap_witness_rows_pass_johnson_check (nv : Nat) (h25 : 25 ≤ nv) (h28 : nv ≤ 28)
     (g : HemStageGeom) (hg : g ∈ hemPcsHighCapStageGeoms nv) :
     johnsonStageChecked nv g = true := by
-  have hcases : nv = 25 ∨ nv = 26 ∨ nv = 27 ∨ nv = 28 := by omega
-  rcases hcases with rfl | rfl | rfl | rfl
-  · rw [hemPcsHighCapStageGeoms_nv25] at hg
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at hg
-    rcases hg with rfl | rfl | rfl | rfl <;>
-      (unfold johnsonStageChecked
-       rw [hemPcsHighCapTableRow.public_eqs, hemPcsHighCapWitnessRows.public_eqs]
-       decide +kernel)
-  · rw [hemPcsHighCapStageGeoms_nv26] at hg
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at hg
-    rcases hg with rfl | rfl | rfl | rfl <;>
-      (unfold johnsonStageChecked
-       rw [hemPcsHighCapTableRow.public_eqs, hemPcsHighCapWitnessRows.public_eqs]
-       decide +kernel)
-  · rw [hemPcsHighCapStageGeoms_nv27] at hg
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at hg
-    rcases hg with rfl | rfl | rfl | rfl <;>
-      (unfold johnsonStageChecked
-       rw [hemPcsHighCapTableRow.public_eqs, hemPcsHighCapWitnessRows.public_eqs]
-       decide +kernel)
-  · rw [hemPcsHighCapStageGeoms_nv28] at hg
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at hg
-    rcases hg with rfl | rfl | rfl | rfl <;>
-      (unfold johnsonStageChecked
-       rw [hemPcsHighCapTableRow.public_eqs, hemPcsHighCapWitnessRows.public_eqs]
-       decide +kernel)
+  have hAll : ((List.range 4).all fun i =>
+      (hemPcsHighCapStageGeoms (i + 25)).all (johnsonStageChecked (i + 25))) = true := by
+    decide +kernel
+  have h1 := List.all_eq_true.mp hAll (nv - 25) (List.mem_range.mpr (by omega))
+  have hEq : nv - 25 + 25 = nv := by omega
+  rw [hEq] at h1
+  exact List.all_eq_true.mp h1 g hg
 
 /-- Lowering the agreement threshold of the `nv = 28`, stage `0` row by `40000` breaks the
     Johnson check: the rows are not slack parameters. -/
@@ -338,11 +191,9 @@ theorem tooth_highCap_johnson_check_rejects_low_agreement :
       johnsonStageChecked 28 g = true ∧
       ¬ (checkWhirAffineWitness
         (johnsonWitness (hemJohnsonMinQueries true g.logBlowup) 256 g
-          (28, 0, 8433861 - 40000, 128, 6362)) (goldilocksPrime ^ 4) = true) := by
-  refine ⟨(hemPcsHighCapStageGeoms 28).get ⟨0, pcsGeoms28_pos⟩, list_get_mem _ _, ?_⟩
-  rw [pcsGeoms28_get_zero]
-  exact ⟨highCap_witness_rows_pass_johnson_check 28 (by decide) (by decide) g28s0 g28s0_mem,
-    by decide +kernel⟩
+          (28, 0, 8433861 - 40000, 128, 6362)) (goldilocksPrime ^ 4) = true) :=
+  ⟨(hemPcsHighCapStageGeoms 28).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel⟩
 
 /-! ### Constructive `[CWYZ26]` Johnson certificates, GS list bounds, and 3-challenge fold teeth -/
 
@@ -353,10 +204,8 @@ theorem inhabited_highCap_cwyz26_johnson_cert_nv28 :
     ∃ (nv : Nat) (g : HemStageGeom),
       2 ≤ nv ∧ nv ≤ 28 ∧ g ∈ hemStageGeoms nv ∧
         hemJohnsonQromStageExhaustive g = false :=
-  ⟨28, (hemStageGeoms 28).get ⟨0, stageGeoms28_pos⟩,
-    by decide, by decide, list_get_mem _ _,
-    (highCap_stages_nonexhaustive 28 (by decide) (by decide)).2 _
-      (by rw [hemPcsHighCapStageGeoms_eq_hemStageGeoms]; exact list_get_mem _ _)⟩
+  ⟨28, (hemStageGeoms 28).get ⟨0, by decide +kernel⟩,
+    by decide, by decide, list_get_mem _ _, by decide +kernel⟩
 
 /-- Premises of `highCap_cwyz26_johnson_cascade_cert_nv2_to_28` are met at `nv = 25`, stage `1`
     (`stepVars = 4`, matching `pcs.rs::stage_geometry(25)`). -/
@@ -364,10 +213,8 @@ theorem inhabited_highCap_cwyz26_johnson_cert_nv25 :
     ∃ (nv : Nat) (g : HemStageGeom),
       2 ≤ nv ∧ nv ≤ 28 ∧ g ∈ hemStageGeoms nv ∧
         hemJohnsonQromStageExhaustive g = false :=
-  ⟨25, (hemStageGeoms 25).get ⟨1, stageGeoms25_one_lt⟩,
-    by decide, by decide, list_get_mem _ _,
-    (highCap_stages_nonexhaustive 25 (by decide) (by decide)).2 _
-      (by rw [hemPcsHighCapStageGeoms_eq_hemStageGeoms]; exact list_get_mem _ _)⟩
+  ⟨25, (hemStageGeoms 25).get ⟨1, by decide +kernel⟩,
+    by decide, by decide, list_get_mem _ _, by decide +kernel⟩
 
 /-- 3-challenge equal-degree fold bound of a stage, `RatBound.one` when a row is missing. -/
 def threeChallengeProfile (nv : Nat) (g : HemStageGeom) : RatBound :=
@@ -382,31 +229,22 @@ theorem tooth_highCap_nv28_three_challenge_at_183_bits :
       g ∈ hemStageGeoms 28 ∧
       atLeastBits 183 (threeChallengeProfile 28 g) ∧
       ¬ atLeastBits 184 (threeChallengeProfile 28 g) ∧
-      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (threeChallengeProfile 28 g)) := by
-  have hProfile : threeChallengeProfile 28 g28s0 =
-      highCapSlicedThreeChallengeStageBound g28s0 (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183) := by
-    simp only [threeChallengeProfile, row_nv28_stage0, slicedRow_nv28_stage0]
-  refine ⟨(hemStageGeoms 28).get ⟨0, stageGeoms28_pos⟩, list_get_mem _ _, ?_⟩
-  rw [stageGeoms28_get_zero, hProfile]
-  exact ⟨(at_rows (g := g28s0) row_nv28_stage0 slicedRow_nv28_stage0
-      (highCap_sliced_three_challenge_stage_supported_budget 28 (by decide) (by decide) g28s0
-        (by rw [← hemPcsHighCapStageGeoms_eq_hemStageGeoms]; exact g28s0_mem)
-        g28s0_nonexhaustive)).2.2.2.1,
-    highCap_nv28_stage0_three_challenge_tight.1, highCap_nv28_stage0_three_challenge_tight.2⟩
+      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (threeChallengeProfile 28 g)) :=
+  ⟨(hemStageGeoms 28).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 set_option maxRecDepth 1000000 in
 /-- At `nv = 28`, stage `0`, multiplicity `m = 1` (Sudan) fails the bivariate Hasse interpolation
     dimension inequality `g.n * (m*(m+1)/2) < gsMonomialCount (m*A₀) d₀ listG₀`, whereas the
     deployed multiplicity `m = 128` strictly clears it. -/
 theorem tooth_highCap_nv28_gs_dim_rejects_sudan_m1 :
-    let g := (hemStageGeoms 28).get ⟨0, stageGeoms28_pos⟩
+    let g := (hemStageGeoms 28).get ⟨0, by decide +kernel⟩
     let d₀ := g.d - 1
     let A₀ := 8433861 - 1
     let listG_m1 := Nat.min 6362 ((1 * A₀ - 1) / d₀)
     let listG_m128 := Nat.min 6362 ((128 * A₀ - 1) / d₀)
     ¬ (g.n * (1 * (1 + 1) / 2) < gsMonomialCount (1 * A₀) d₀ listG_m1) ∧
     g.n * (128 * (128 + 1) / 2) < gsMonomialCount (128 * A₀) d₀ listG_m128 := by
-  rw [stageGeoms28_get_zero]
   decide +kernel
 
 /-- `hemStageGeoms 29` is empty (`MAX_PCS_NUM_VARS = 28`). -/

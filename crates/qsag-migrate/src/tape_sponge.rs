@@ -30,7 +30,7 @@ impl TapeSponge {
     }
 
     // One permutation and fixed-address scans regardless of the secret cursor.
-    // N <= 4, so lookahead spans at most two rate blocks.
+    // N <= 12 <= 17, so lookahead spans at most two rate blocks.
     fn lookahead<const N: usize>(&self) -> (Secret<[u64; 25]>, Secret<[u64; N]>) {
         let mut next = Secret(self.state);
         keccak_f1600(&mut next);
@@ -53,8 +53,32 @@ impl TapeSponge {
         }
     }
 
-    pub fn squeeze(&mut self, out: &mut [u8]) {
+    pub fn squeeze(&mut self, mut out: &mut [u8]) {
         assert!(out.len() % 8 == 0);
+        while out.len() >= 96 {
+            let (next, words) = self.lookahead::<12>();
+            for (chunk, &w) in out[..96].chunks_exact_mut(8).zip(words.iter()) {
+                chunk.copy_from_slice(&w.to_le_bytes());
+            }
+            self.advance(&next, 12);
+            out = &mut out[96..];
+        }
+        if out.len() >= 64 {
+            let (next, words) = self.lookahead::<8>();
+            for (chunk, &w) in out[..64].chunks_exact_mut(8).zip(words.iter()) {
+                chunk.copy_from_slice(&w.to_le_bytes());
+            }
+            self.advance(&next, 8);
+            out = &mut out[64..];
+        }
+        if out.len() >= 32 {
+            let (next, words) = self.lookahead::<4>();
+            for (chunk, &w) in out[..32].chunks_exact_mut(8).zip(words.iter()) {
+                chunk.copy_from_slice(&w.to_le_bytes());
+            }
+            self.advance(&next, 4);
+            out = &mut out[32..];
+        }
         for chunk in out.chunks_exact_mut(8) {
             let (next, words) = self.lookahead::<1>();
             chunk.copy_from_slice(&words[0].to_le_bytes());

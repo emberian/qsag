@@ -730,11 +730,17 @@ impl TwoSlotHwm<'_> {
                     if !crate::ct_eq_32(head.tip, &tip_a) {
                         return Err(invalid());
                     }
-                    if b != a || !crate::ct_eq_32(&tip_b, &tip_a) {
-                        self.write_slot(file, 1, a, head.tip)?;
-                        return Ok(HwmRecovery::RepairedSlotB);
+                    if b == a {
+                        if !crate::ct_eq_32(&tip_b, &tip_a) {
+                            return Err(invalid());
+                        }
+                        return Ok(HwmRecovery::Steady);
                     }
-                    Ok(HwmRecovery::Steady)
+                    if !crate::ct_eq_32(&tip_b, head.previous_tip) {
+                        return Err(invalid());
+                    }
+                    self.write_slot(file, 1, a, head.tip)?;
+                    Ok(HwmRecovery::RepairedSlotB)
                 } else if a.checked_add(1) == Some(head.len) {
                     // The record reached the disk; neither slot was advanced yet.
                     if a != b
@@ -1439,6 +1445,22 @@ mod tests {
                 hwm.recover_with_outcome(&disk.file, &zero, &before.1, &head(0))
                     .is_err()
             );
+
+            // Equivocating valid Slot B tips must fail closed without overwriting evidence:
+            // (a) `b == a` with a valid MAC for a conflicting `tip_b != tip_a`, and
+            // (b) `b == a - 1` with a valid MAC for a conflicting `tip_b != head.previous_tip`.
+            hwm.commit(&disk.file, 3, &tips[3]).unwrap();
+            let forged_same_ctr_b = hwm.encode(1, 3, &tips[1]);
+            write_at_exact(&disk.file, hwm.offset_b, &forged_same_ctr_b).unwrap();
+            let before_equiv = (disk.slot(&hwm, 0), disk.slot(&hwm, 1));
+            assert!(disk.recover(&hwm, &head(3)).is_err());
+            assert_eq!((disk.slot(&hwm, 0), disk.slot(&hwm, 1)), before_equiv);
+
+            let forged_prev_ctr_b = hwm.encode(1, 2, &tips[0]);
+            write_at_exact(&disk.file, hwm.offset_b, &forged_prev_ctr_b).unwrap();
+            let before_lag_equiv = (disk.slot(&hwm, 0), disk.slot(&hwm, 1));
+            assert!(disk.recover(&hwm, &head(3)).is_err());
+            assert_eq!((disk.slot(&hwm, 0), disk.slot(&hwm, 1)), before_lag_equiv);
         }
     }
 }

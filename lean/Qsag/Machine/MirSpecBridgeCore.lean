@@ -7019,6 +7019,239 @@ theorem tooth_mirBeltLatchSigner_window64_not_dataRefined :
   rw [hNone] at hA
   cases hA
 
+
+/-! ### Exact Window-64 Refinement via `Spec.ErrSyncDataRefines` (`L-Ex-2` Resolution)
+
+While `tooth_mirBeltLatchSigner_window64_not_dataRefined` proves that `Spec.DataRefines` cannot
+relate `mirBeltLatchSignerMachine` to `Spec.latchedSignerMachine` at `mirBeltMaxEpochJump = 64`
+(because `DataRefines.sim_reject` freezes the abstract latch when a concrete `Fresh` bind fails to
+sign), `Spec.ErrSyncDataRefines` (`Qsag.Exec.RefinesBridges`) synchronizes that exact epoch-burning
+rejection with `Machine.ValidTrace.reject` on `Spec.latchedSignerMachine`, keeping
+`a.nextEpoch = k.next_epoch.toNat` in lockstep at the exact `64`-epoch window! -/
+
+private theorem mirBeltLatchKernel_fresh_step_window {k k' : MirBeltLatchKernel}
+    {b : MirBeltLatchBindRequest}
+    (h : mirBeltLatchKernelMachine.step k b = some (k', .Fresh)) :
+    k.next_epoch.toNat ≤ b.epoch.toNat ∧
+    b.epoch.toNat ≤ k.next_epoch.toNat + mirBeltMaxEpochJump ∧
+    k'.next_epoch.toNat = b.epoch.toNat + 1 := by
+  obtain ⟨hLe, _, hNext⟩ := mirBeltLatchKernel_fresh_step h
+  obtain ⟨hg, _, ho⟩ := mirBeltLatchKernel_models.accepted h
+  dsimp only [mirBeltLatchKernelGuard] at hg ho
+  cases hI : mirBeltInFlightEpoch k b with
+  | true => rw [hI] at ho; cases ho
+  | false =>
+    rw [hI] at hg
+    have hg' : (!k.wal_poisoned && (mirBeltEpochAdmissible k b && b.persist_ok)) = true := hg
+    have hAdm : mirBeltEpochAdmissible k b = true :=
+      (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp hg').2).1
+    unfold mirBeltEpochAdmissible at hAdm
+    have hJumpB : (!decide (mirBeltMaxEpochJump < b.epoch.toNat - k.next_epoch.toNat)) = true :=
+      (Bool.and_eq_true_iff.mp hAdm).2
+    have hNotGt : ¬ (mirBeltMaxEpochJump < b.epoch.toNat - k.next_epoch.toNat) := fun hGt => by
+      rw [decide_eq_true hGt] at hJumpB; cases hJumpB
+    have hWin : b.epoch.toNat ≤ k.next_epoch.toNat + mirBeltMaxEpochJump := by omega
+    exact ⟨hLe, hWin, hNext⟩
+
+/-- Error-synchronization selector for `mirBeltLatchSignerMachine`:
+    emits `some ⟨epoch, message⟩` iff a digest-valid `Fresh` bind burned `epoch` and `S.sign`
+    returned `none`; all non-burning rejections (`msg_digest` mismatch, `Replay`, kernel `none`)
+    stutter (`none`). -/
+def mirBeltLatchSignerErrVis {PK SK Sig : Type} (S : Spec.SigScheme PK SK Sig) (sk : SK)
+    (digest : Spec.Bytes → List UInt8) (k : MirBeltLatchKernel) (req : MirBeltSignRequest) :
+    Option Spec.SignRequest :=
+  if req.bind.msg_digest = digest req.message then
+    match mirBeltLatchKernelMachine.step k req.bind with
+    | some (_, .Fresh) =>
+      match S.sign sk req.bind.epoch.toNat req.message with
+      | some _ => none
+      | none => some ⟨req.bind.epoch.toNat, req.message⟩
+    | _ => none
+  else none
+
+/-- **`L-Ex-2` Exact Window-64 Simulation (`mirBeltLatchSigner_errSyncDataRefines_latchedSigner_window64`)**:
+    From any initial kernel state `k₀` starting at epoch `0` (`k₀.next_epoch.toNat = 0`),
+    `mirBeltLatchSignerMachine` refines `Spec.latchedSignerMachine` at the exact hardware/kernel
+    jump window `mirBeltMaxEpochJump = 64` via `Spec.ErrSyncDataRefines` with exact epoch equality
+    `Rel k a := a.nextEpoch = k.next_epoch.toNat`! -/
+def mirBeltLatchSigner_errSyncDataRefines_latchedSigner_window64 {PK SK Sig : Type}
+    (S : Spec.SigScheme PK SK Sig) (sk : SK) (digest : Spec.Bytes → List UInt8)
+    (k₀ : MirBeltLatchKernel) (hZero : k₀.next_epoch.toNat = 0) :
+    Spec.ErrSyncDataRefines (mirBeltLatchSignerMachine S sk digest k₀)
+      (Spec.latchedSignerMachine S sk true mirBeltMaxEpochJump)
+      mirBeltSignVisIn id where
+  Rel k a := a.nextEpoch = k.next_epoch.toNat
+  absInit _ := ⟨0⟩
+  errVis := mirBeltLatchSignerErrVis S sk digest
+  init_ok {k} hk := by
+    subst hk
+    exact ⟨rfl, hZero.symm⟩
+  sim_visible {k k' a req sig j} hRel hStep hVis := by
+    obtain ⟨_, hK, hSign⟩ := mirBeltLatchSigner_step_some hStep
+    obtain ⟨hLe, hWin, hNext⟩ := mirBeltLatchKernel_fresh_step_window hK
+    have hj : (⟨req.bind.epoch.toNat, req.message⟩ : Spec.SignRequest) = j :=
+      Option.some.inj hVis
+    subst hj
+    have hAdm : Spec.epochAdmissible true mirBeltMaxEpochJump a.nextEpoch
+        req.bind.epoch.toNat = true := by
+      show (!true || (decide (a.nextEpoch ≤ req.bind.epoch.toNat) &&
+        decide (req.bind.epoch.toNat ≤ a.nextEpoch + mirBeltMaxEpochJump))) = true
+      rw [hRel, decide_eq_true hLe, decide_eq_true hWin]
+      rfl
+    refine ⟨⟨req.bind.epoch.toNat + 1⟩, ?_, hNext.symm⟩
+    show (if Spec.epochAdmissible true mirBeltMaxEpochJump a.nextEpoch
+        req.bind.epoch.toNat = true then
+        (S.sign sk req.bind.epoch.toNat req.message).map
+          (fun sig => ((⟨req.bind.epoch.toNat + 1⟩ : Spec.LatchedSignerState), sig))
+        else none) = some (⟨req.bind.epoch.toNat + 1⟩, sig)
+    rw [hAdm, hSign]
+    rfl
+  sim_internal _ _ hVis := by cases hVis
+  sim_reject_stutter {k a req} hRel hNoneC hEv := by
+    dsimp only [mirBeltLatchSignerMachine, Spec.Machine.ofPartyMachine,
+      PartyMachine.ofOutcome] at hNoneC ⊢
+    unfold mirBeltLatchSignerStep at hNoneC ⊢
+    unfold mirBeltLatchSignerErrVis at hEv
+    by_cases hD : req.bind.msg_digest = digest req.message
+    · rw [ite_eq_left hD] at hNoneC hEv ⊢
+      cases hK : mirBeltLatchKernelMachine.step k req.bind with
+      | none =>
+        dsimp only
+        rw [mirBeltLatchKernel_errStep_next_epoch hK]
+        exact hRel
+      | some p =>
+        rcases p with ⟨k₁, o⟩
+        cases o with
+        | Replay =>
+          dsimp only
+          obtain ⟨_, hk, ho⟩ := mirBeltLatchKernel_models.accepted hK
+          dsimp only [mirBeltLatchKernelGuard] at hk ho
+          cases hI : mirBeltInFlightEpoch k req.bind with
+          | false => rw [hI] at ho; cases ho
+          | true =>
+            rw [hI] at hk
+            have hkEq : k₁ = k := hk
+            rw [hkEq]
+            exact hRel
+        | Fresh =>
+          rw [hK] at hNoneC hEv
+          cases hS : S.sign sk req.bind.epoch.toNat req.message with
+          | none => rw [hS] at hEv; cases hEv
+          | some sig => rw [hS] at hNoneC; cases hNoneC
+    · rw [ite_eq_right hD]
+      exact hRel
+  sim_reject_sync {k a req j} hRel hNoneC hEv := by
+    dsimp only [mirBeltLatchSignerMachine, Spec.Machine.ofPartyMachine,
+      PartyMachine.ofOutcome] at hNoneC ⊢
+    unfold mirBeltLatchSignerStep at hNoneC ⊢
+    unfold mirBeltLatchSignerErrVis at hEv
+    by_cases hD : req.bind.msg_digest = digest req.message
+    · rw [ite_eq_left hD] at hNoneC hEv ⊢
+      cases hK : mirBeltLatchKernelMachine.step k req.bind with
+      | none => rw [hK] at hEv; cases hEv
+      | some p =>
+        rcases p with ⟨k₁, o⟩
+        cases o with
+        | Replay => rw [hK] at hEv; cases hEv
+        | Fresh =>
+          rw [hK] at hEv
+          cases hS : S.sign sk req.bind.epoch.toNat req.message with
+          | some _ => rw [hS] at hEv; cases hEv
+          | none =>
+            rw [hS] at hEv
+            have hj : (⟨req.bind.epoch.toNat, req.message⟩ : Spec.SignRequest) = j :=
+              Option.some.inj hEv
+            subst hj
+            obtain ⟨hLe, hWin, hNext⟩ := mirBeltLatchKernel_fresh_step_window hK
+            have hAdm : Spec.epochAdmissible true mirBeltMaxEpochJump a.nextEpoch
+                req.bind.epoch.toNat = true := by
+              show (!true || (decide (a.nextEpoch ≤ req.bind.epoch.toNat) &&
+                decide (req.bind.epoch.toNat ≤ a.nextEpoch + mirBeltMaxEpochJump))) = true
+              rw [hRel, decide_eq_true hLe, decide_eq_true hWin]
+              rfl
+            dsimp only
+            refine ⟨?_, ?_⟩
+            · show (if Spec.epochAdmissible true mirBeltMaxEpochJump a.nextEpoch
+                  req.bind.epoch.toNat = true then
+                  (S.sign sk req.bind.epoch.toNat req.message).map
+                    (fun sig => ((⟨req.bind.epoch.toNat + 1⟩ : Spec.LatchedSignerState), sig))
+                  else none) = none
+              rw [hAdm, hS]
+              rfl
+            · show (if Spec.epochAdmissible true mirBeltMaxEpochJump a.nextEpoch
+                  req.bind.epoch.toNat = true then
+                  (⟨req.bind.epoch.toNat + 1⟩ : Spec.LatchedSignerState) else a).nextEpoch =
+                  k₁.next_epoch.toNat
+              rw [hAdm]
+              exact hNext.symm
+    · rw [ite_eq_right hD] at hEv; cases hEv
+
+/-- **`L-Ex-2` End-to-End Exact Window-64 Ideal Refinement (`mirBeltLatchSigner_errSyncDataRefines_idealSign_window64`)**:
+    Composes `mirBeltLatchSigner_errSyncDataRefines_latchedSigner_window64` with
+    `Spec.latchedSigner_refines_ideal` via `Spec.ErrSyncDataRefines.postcompose`! -/
+def mirBeltLatchSigner_errSyncDataRefines_idealSign_window64 {PK SK Sig : Type}
+    (S : Spec.SigScheme PK SK Sig) (sk : SK) (digest : Spec.Bytes → List UInt8)
+    (k₀ : MirBeltLatchKernel) (hZero : k₀.next_epoch.toNat = 0) :
+    Spec.ErrSyncDataRefines (mirBeltLatchSignerMachine S sk digest k₀)
+      (Spec.idealSignMachine S (S.derivePk sk) true mirBeltMaxEpochJump
+        (fun req => S.sign sk req.epoch req.message))
+      mirBeltSignVisIn id :=
+  (mirBeltLatchSigner_errSyncDataRefines_latchedSigner_window64 S sk digest k₀ hZero).postcompose
+    (Spec.latchedSigner_refines_ideal S sk true mirBeltMaxEpochJump)
+
+/-- **Exact Window-64 Trace Inclusion (`mirBeltLatchSigner_window64_admits_idealTrace`)**:
+    Every trace admitted by `mirBeltLatchSignerMachine` from an epoch-0 kernel projects to a
+    trace admitted by `Spec.idealSignMachine` at window `mirBeltMaxEpochJump = 64`! -/
+theorem mirBeltLatchSigner_window64_admits_idealTrace {PK SK Sig : Type}
+    (S : Spec.SigScheme PK SK Sig) (sk : SK) (digest : Spec.Bytes → List UInt8)
+    (k₀ : MirBeltLatchKernel) (hZero : k₀.next_epoch.toNat = 0)
+    {tr : List (MirBeltSignRequest × Sig)}
+    (hAdmits : (mirBeltLatchSignerMachine S sk digest k₀).AdmitsTrace tr) :
+    (Spec.idealSignMachine S (S.derivePk sk) true mirBeltMaxEpochJump
+      (fun req => S.sign sk req.epoch req.message)).AdmitsTrace
+      (Spec.projectTrace mirBeltSignVisIn id tr) :=
+  (mirBeltLatchSigner_errSyncDataRefines_idealSign_window64 S sk digest k₀ hZero).preserve_admitsTrace
+    hAdmits
+
+/-- **Non-vacuity on the `DataRefines`-refuting witness (`inhabited_mirBeltLatchSigner_window64_burn10_then_sign70`)**:
+    On `mirBeltWitnessScheme` (where epoch `10` burns the latch and fails to sign, and epoch `70`
+    then signs), `mirBeltLatchSignerMachine` admits the trace AND `mirBeltLatchSigner_window64_admits_idealTrace`
+    lifts it into `Spec.idealSignMachine` at exact window `64` (`70 ≤ 11 + 64`)! -/
+theorem inhabited_mirBeltLatchSigner_window64_burn10_then_sign70 :
+    ∃ (PK SK Sig : Type) (S : Spec.SigScheme PK SK Sig) (sk : SK)
+      (digest : Spec.Bytes → List UInt8) (k₀ : MirBeltLatchKernel)
+      (tr : List (MirBeltSignRequest × Sig)),
+      k₀.next_epoch.toNat = 0 ∧
+      (mirBeltLatchSignerMachine S sk digest k₀).AdmitsTrace tr ∧
+      tr.length = 1 := by
+  have hRej10 : (mirBeltLatchSignerMachine mirBeltWitnessScheme 7 id mirBeltWitnessKernel).step
+      mirBeltWitnessKernel (mirBeltWitnessRequest 10 [1]) = none := by decide
+  have hAcc70 : (mirBeltLatchSignerMachine mirBeltWitnessScheme 7 id mirBeltWitnessKernel).step
+      ((mirBeltLatchSignerMachine mirBeltWitnessScheme 7 id mirBeltWitnessKernel).errStep
+        mirBeltWitnessKernel (mirBeltWitnessRequest 10 [1]))
+      (mirBeltWitnessRequest 70 [2]) =
+      some ({ capacity_limit := 1024, next_epoch := 71, has_in_flight := true,
+              in_flight := ⟨70, [2], [], ⟨0, [], [], [], []⟩⟩, wal_poisoned := false },
+            (7, [2])) := by decide
+  exact ⟨Nat, Nat, Nat × Spec.Bytes, mirBeltWitnessScheme, 7, id, mirBeltWitnessKernel,
+    [(mirBeltWitnessRequest 70 [2], (7, [2]))], rfl,
+    ⟨mirBeltWitnessKernel, _, rfl, .reject (mirBeltWitnessRequest 10 [1]) hRej10 (.accept hAcc70 (.nil _))⟩,
+    rfl⟩
+
+/-- **Tooth: jumping `65` epochs past the burned latch (`11 → 76`) is refused!** -/
+theorem tooth_mirBeltLatchSigner_jump76_after_burn10_refused :
+    ¬ ∃ res, (mirBeltLatchSignerMachine mirBeltWitnessScheme 7 id mirBeltWitnessKernel).step
+      ((mirBeltLatchSignerMachine mirBeltWitnessScheme 7 id mirBeltWitnessKernel).errStep
+        mirBeltWitnessKernel (mirBeltWitnessRequest 10 [1]))
+      (mirBeltWitnessRequest 76 [2]) = some res := by
+  rintro ⟨res, h⟩
+  have hNone : (mirBeltLatchSignerMachine mirBeltWitnessScheme 7 id mirBeltWitnessKernel).step
+      ((mirBeltLatchSignerMachine mirBeltWitnessScheme 7 id mirBeltWitnessKernel).errStep
+        mirBeltWitnessKernel (mirBeltWitnessRequest 10 [1]))
+      (mirBeltWitnessRequest 76 [2]) = none := by decide
+  rw [hNone] at h
+  cases h
+
 /-! ## §7. Concrete accepted traces and mutation witnesses for the four-layer model
 
 These witnesses evaluate the bodies of the four-layer definitions above, so they are proved in
@@ -8444,33 +8677,8 @@ end Qsag
 #tooth_pair Qsag.shamirSubset_preserves_multiturn_safety vs Qsag.tooth_stateless_policy_breaks_four_layer_safety
 #verify_constructive Qsag.inhabited_four_layer_chain
 
-/-! ### Exports for lane aeneas -/
-
-public section
-namespace Qsag
-#export_eqns mirVelocityAuthorizeSpend mirVelocityMachine
-#export_eqns abortMirMlDsaGate mirMlDsaTryReleaseZShare mirMlDsaReleaseMachine
-#export_eqns MirBeltLatchKernel.WellFormed mirBeltMaxEpochJump mirBeltLatchKernelBind mirBeltLatchKernelMachine
-#export_eqns u64MemBool
-
-/-- Defining equation of `mirPolicyStep`. -/
-theorem mirPolicyStep_eq (m : MirPolicyGuardState) (req : MirTxIntent) :
-    mirPolicyStep m req =
-      if req.windowId != m.windowId then none
-      else if req.policyDigest != m.pinnedPolicyDigest then none
-      else if req.authorityDigest != m.pinnedAuthorityDigest then none
-      else if ¬ (req.recipient ∈ m.allowedRecipients) then none
-      else if ¬ (req.amountUnits.toNat ≤ m.perTxCap.toNat) then none
-      else if ¬ (req.amountUnits.toNat ≤ (m.velocityWindowCap - m.accumulatedSpend).toNat) then none
-      else if u64MemBool req.nonce m.burnedNonces then none
-      else
-        let m' : MirPolicyGuardState :=
-          { m with
-            accumulatedSpend := m.accumulatedSpend + req.amountUnits
-            burnedNonces := req.nonce :: m.burnedNonces }
-        let tx := req.toTransactionIntent
-        some (m', { intent := tx, canonicalBytes := encodeTransactionIntent tx }) := by
-  unfold mirPolicyStep
-  rfl
-end Qsag
-end
+#verify_constructive Qsag.mirBeltLatchSigner_window64_admits_idealTrace
+#verify_constructive Qsag.inhabited_mirBeltLatchSigner_window64_burn10_then_sign70
+#verify_constructive Qsag.tooth_mirBeltLatchSigner_jump76_after_burn10_refused
+#verify_inhabited Qsag.mirBeltLatchSigner_window64_admits_idealTrace Qsag.inhabited_mirBeltLatchSigner_window64_burn10_then_sign70
+#tooth_pair Qsag.mirBeltLatchSigner_window64_admits_idealTrace vs Qsag.tooth_mirBeltLatchSigner_jump76_after_burn10_refused
