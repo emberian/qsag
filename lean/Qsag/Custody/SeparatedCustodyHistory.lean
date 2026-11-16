@@ -68,17 +68,41 @@ def submitRecorded (d : Deployment) (s : SharedHistory) (r : Intent) (cs : List 
   if result.2 then (⟨result.1, ⟨r, cs⟩ :: s.accepted⟩, true)
   else (⟨result.1, s.accepted⟩, false)
 
-private theorem submit_rejected (cfg : SigningConfig) (pks : Nat → PqPublicKey)
-    (n t : Nat) (st : Coordinator) (r : Intent) (cs : List Certificate)
-    (h : (submit cfg pks n t st r cs).2 = false) :
-    (submit cfg pks n t st r cs).1 = st := by
-  unfold submit at h ⊢
-  split
+/-- An accepted recorded submission passed the deployment's quorum check on the pre-state's
+consumed sessions, fit the capacity, and records exactly the session, the spend and the
+submission. -/
+theorem submitRecorded_accepted (d : Deployment) (s : SharedHistory) (r : Intent)
+    (cs : List Certificate) (h : (submitRecorded d s r cs).2 = true) :
+    acceptQuorum d.signer (publicKeys d) d.numParties d.threshold
+      s.coordinator.consumedSessions r cs = true ∧
+    s.coordinator.spent + r.spend ≤ s.coordinator.capacity ∧
+    (submitRecorded d s r cs).1 =
+      ⟨{ s.coordinator with
+          consumedSessions := r.session :: s.coordinator.consumedSessions
+          spent := s.coordinator.spent + r.spend },
+        ⟨r, cs⟩ :: s.accepted⟩ := by
+  unfold submitRecorded at h ⊢
+  dsimp only at h ⊢
+  split at h
   next ha =>
-    split
-    next hb => simp only [ha, hb, ↓reduceIte] at h; cases h
-    next => rfl
-  next => rfl
+    obtain ⟨hc, hb, he⟩ := submit_accepted d.signer (publicKeys d) d.numParties d.threshold
+      s.coordinator r cs ha
+    refine ⟨hc, hb, ?_⟩
+    simp only [ha, ↓reduceIte, he]
+  next => cases h
+
+/-- A rejected recorded submission leaves the shared history unchanged. -/
+theorem submitRecorded_rejected (d : Deployment) (s : SharedHistory) (r : Intent)
+    (cs : List Certificate) (h : (submitRecorded d s r cs).2 = false) :
+    (submitRecorded d s r cs).1 = s := by
+  unfold submitRecorded at h ⊢
+  dsimp only at h ⊢
+  split at h
+  next => cases h
+  next ha =>
+    have hn : (submit d.signer (publicKeys d) d.numParties d.threshold s.coordinator r cs).2 = false :=
+      Bool.eq_false_iff.mpr ha
+    simp only [hn, Bool.false_eq_true, ↓reduceIte, submit_rejected _ _ _ _ _ _ _ hn]
 
 theorem submitRecorded_safe (d : Deployment) (s : SharedHistory) (r : Intent)
     (cs : List Certificate) (hs : SharedSafe d.capacity s) :
@@ -362,6 +386,8 @@ end
 set_option maxRecDepth 4096
 #verify_constructive Qsag.Custody.generatedHistory_valid
 #verify_constructive Qsag.Custody.submitRecorded_safe
+#verify_constructive Qsag.Custody.submitRecorded_accepted
+#verify_constructive Qsag.Custody.submitRecorded_rejected
 #verify_constructive Qsag.Custody.generated_submit_provenance
 #verify_constructive Qsag.Custody.generated_shared_accounting
 #verify_constructive Qsag.Custody.generated_burn_accounting

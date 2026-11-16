@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 use core::hint::black_box;
 
-use crate::wipe::{ct_eq_u128, wipe_gf256_slice, wipe_tower128_slice};
+use crate::wipe::ct_eq_u128;
 
 #[inline(always)]
 const fn scale_x_t1(a: u8) -> u8 {
@@ -480,36 +480,14 @@ impl Tower128 {
     /// (`~36x` faster than general `Tower128::mul`, `0` table lookups, `0` branches).
     #[inline]
     pub fn mul_gf256(self, rhs: TowerGf256) -> Self {
-        #[inline(always)]
-        fn mul_x0_128(v: u128) -> u128 {
-            const M1: u128 = 0x5555_5555_5555_5555_5555_5555_5555_5555;
-            let lo = v & M1;
-            let hi = (v >> 1) & M1;
-            hi | ((lo ^ hi) << 1)
-        }
-        #[inline(always)]
-        fn mul_x1_128(v: u128) -> u128 {
-            const M2: u128 = 0x3333_3333_3333_3333_3333_3333_3333_3333;
-            let lo = v & M2;
-            let hi = (v >> 2) & M2;
-            hi | ((lo ^ mul_x0_128(hi)) << 2)
-        }
-        #[inline(always)]
-        fn mul_x2_128(v: u128) -> u128 {
-            const M4: u128 = 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
-            let lo = v & M4;
-            let hi = (v >> 4) & M4;
-            hi | ((lo ^ mul_x1_128(hi)) << 4)
-        }
-
         let b0 = self.0;
-        let b1 = mul_x0_128(b0);
-        let b2 = mul_x1_128(b0);
-        let b3 = mul_x0_128(b2);
-        let b4 = mul_x2_128(b0);
-        let b5 = mul_x0_128(b4);
-        let b6 = mul_x1_128(b4);
-        let b7 = mul_x0_128(b6);
+        let b1 = swar_mul_x0_128(b0);
+        let b2 = swar_mul_x1_128(b0);
+        let b3 = swar_mul_x0_128(b2);
+        let b4 = swar_mul_x2_128(b0);
+        let b5 = swar_mul_x0_128(b4);
+        let b6 = swar_mul_x1_128(b4);
+        let b7 = swar_mul_x0_128(b6);
 
         let s = black_box(rhs.0);
         let basis = [b0, b1, b2, b3, b4, b5, b6, b7];
@@ -538,17 +516,7 @@ impl Tower128 {
     }
 }
 
-/// Deterministically wipe a slice of secret `TowerGf256` shares.
-#[inline(never)]
-pub fn wipe_gf256(buf: &mut [TowerGf256]) {
-    wipe_gf256_slice(buf);
-}
-
-/// Deterministically wipe a slice of secret `Tower128` shares/MACs.
-#[inline(never)]
-pub fn wipe_tower128(buf: &mut [Tower128]) {
-    wipe_tower128_slice(buf);
-}
+pub use crate::wipe::{wipe_gf256_slice as wipe_gf256, wipe_tower128_slice as wipe_tower128};
 
 /// Evaluate polynomial `coeffs[0] + coeffs[1]*x + ...` over `TowerGf256`.
 #[inline]

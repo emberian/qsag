@@ -40,8 +40,21 @@ impl Drop for Workdir {
 }
 
 fn qsag(args: &[&str]) -> Output {
+    let mut args = args.to_vec();
+    // Tests without an anchor directory use disposable keys and say so, as the CLI
+    // requires. Anchored invocations run exactly as written.
+    let enrolls_custody = match (args.first(), args.get(1)) {
+        (Some(&"keygen" | &"sign" | &"aggregate"), _) => true,
+        // Jorts quorums anchor their belts and journals; the hem and coupon quorums do not.
+        (Some(&"quorum"), Some(&"keygen")) => !args.contains(&"hem-jorts-poseidon2"),
+        (Some(&"policy"), Some(&"init")) => true,
+        _ => false,
+    };
+    if enrolls_custody && !args.contains(&"--anchor-dir") && !args.contains(&"--help") {
+        args.push("--ephemeral-unanchored");
+    }
     Command::new(env!("CARGO_BIN_EXE_qsag"))
-        .args(args)
+        .args(&args)
         .output()
         .unwrap()
 }
@@ -217,8 +230,8 @@ fn help_info_and_usage_errors() {
     for needle in [
         "slh-dsa-shake-128s",
         "\"signature_bytes\": 7856",
-        "fts-frontier-514",
-        "\"signature_bytes\": 514",
+        "fts-compact-1122",
+        "\"signature_bytes\": 1122",
         "fts-threshold",
         "agg-jorts-poseidon2",
         "GoldilocksExt4",
@@ -406,7 +419,7 @@ fn slh_dsa_keygen_sign_verify_and_tamper() {
 #[test]
 fn few_time_key_enforces_its_use_budget_across_invocations() {
     let dir = Workdir::new("fts");
-    keygen(&dir, "fts-frontier-1058", &[]);
+    keygen(&dir, "fts-frontier-2338", &[]);
     let (sk, pk, msg, other) = (
         dir.path("sk"),
         dir.path("pk"),
@@ -802,7 +815,7 @@ fn policy_demo_and_known_answer_tests() {
 #[test]
 fn concurrent_frontier_processes_spend_exactly_once() {
     let dir = Workdir::new("concurrent-vault");
-    keygen(&dir, "fts-frontier-514", &[]);
+    keygen(&dir, "fts-compact-1122", &[]);
     let barrier = std::sync::Barrier::new(4);
     let mut codes = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..4)
@@ -841,7 +854,7 @@ fn concurrent_frontier_processes_spend_exactly_once() {
 #[test]
 fn vault_rejects_corruption_missing_state_and_overwrite() {
     let dir = Workdir::new("vault-corruption");
-    keygen(&dir, "fts-frontier-514", &[]);
+    keygen(&dir, "fts-compact-1122", &[]);
     let original = dir.read("sk");
     let sign = || {
         qsag(&[
@@ -870,7 +883,7 @@ fn vault_rejects_corruption_missing_state_and_overwrite() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-514",
+            "fts-compact-1122",
             "--secret-out",
             &dir.path("sk"),
             "--public-out",
@@ -882,7 +895,7 @@ fn vault_rejects_corruption_missing_state_and_overwrite() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-514",
+            "fts-compact-1122",
             "--secret-out",
             &dir.path("sk"),
             "--public-out",
@@ -906,12 +919,12 @@ fn vault_rejects_corruption_missing_state_and_overwrite() {
 #[test]
 fn stateful_seed_enrollments_are_distinct() {
     let dir = Workdir::new("enrollment");
-    keygen(&dir, "fts-frontier-514", &[]);
+    keygen(&dir, "fts-compact-1122", &[]);
     expect(
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-514",
+            "fts-compact-1122",
             "--seed-file",
             &dir.path("seed"),
             "--secret-out",
@@ -950,7 +963,7 @@ fn oversized_files_fail_before_allocation() {
 #[test]
 fn symlinked_vault_lock_is_refused() {
     let dir = Workdir::new("symlink-lock");
-    keygen(&dir, "fts-frontier-514", &[]);
+    keygen(&dir, "fts-compact-1122", &[]);
     std::fs::rename(dir.path("sk.vault.lock"), dir.path("other-lock")).unwrap();
     std::os::unix::fs::symlink(dir.path("other-lock"), dir.path("sk.vault.lock")).unwrap();
     expect(
@@ -1021,7 +1034,7 @@ fn external_anchor_isolation_and_full_vault_snapshot_rollback_refused() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-770",
+            "fts-frontier-2338",
             "--secret-out",
             sk_s,
             "--public-out",
@@ -1041,7 +1054,7 @@ fn external_anchor_isolation_and_full_vault_snapshot_rollback_refused() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-770",
+            "fts-frontier-2338",
             "--secret-out",
             sk_s,
             "--public-out",
@@ -1060,7 +1073,7 @@ fn external_anchor_isolation_and_full_vault_snapshot_rollback_refused() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-770",
+            "fts-frontier-2338",
             "--secret-out",
             sk_s,
             "--public-out",
@@ -1078,7 +1091,7 @@ fn external_anchor_isolation_and_full_vault_snapshot_rollback_refused() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-770",
+            "fts-frontier-2338",
             "--secret-out",
             sk_s,
             "--public-out",
@@ -1859,7 +1872,7 @@ fn anchored_policy_ledger_gates_stateful_signing_and_refuses_ledger_rollback() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-770",
+            "fts-frontier-2338",
             "--secret-out",
             &dir.path("recipient.sk"),
             "--public-out",
@@ -1930,7 +1943,7 @@ fn anchored_policy_ledger_gates_stateful_signing_and_refuses_ledger_rollback() {
     let mut keygen = vec![
         "keygen",
         "--scheme",
-        "fts-frontier-770",
+        "fts-frontier-2338",
         "--secret-out",
         &sk,
         "--public-out",
@@ -1942,7 +1955,7 @@ fn anchored_policy_ledger_gates_stateful_signing_and_refuses_ledger_rollback() {
         &[
             "keygen",
             "--scheme",
-            "fts-frontier-770",
+            "fts-frontier-2338",
             "--secret-out",
             &dir.path("x.sk"),
             "--public-out",
@@ -1990,7 +2003,11 @@ fn anchored_policy_ledger_gates_stateful_signing_and_refuses_ledger_rollback() {
         0,
     );
     assert_eq!(window_spend(&ledger), "900");
-    sign(&dir.path("replay.sig"), &[], 3);
+    // This PQ profile has one signing slot. Exhaustion refuses the retry before
+    // policy authorization, and cannot charge the already-spent intent again.
+    sign(&dir.path("replay.sig"), &[], 4);
+    assert!(!Path::new(&dir.path("replay.sig")).exists());
+    assert_eq!(window_spend(&ledger), "900");
     assert!(dir.read("sk").contains("\"uses_completed\": 1"));
 
     // Restore every file of the ledger directory to its approved-but-unspent state, in
@@ -2006,10 +2023,14 @@ fn anchored_policy_ledger_gates_stateful_signing_and_refuses_ledger_rollback() {
     assert!(dir.read("sk").contains("\"uses_completed\": 1"));
     assert_ne!(dir.read("sk"), key_before);
 
-    // With its real state back the ledger opens again and still refuses the replay.
+    // With its real state back the ledger opens again; the signing slot remains spent.
     restore_dir_files_in_place(&ledger_after);
     assert_eq!(window_spend(&ledger), "900");
-    sign(&dir.path("replay.sig"), &[], 3);
+    // This PQ profile has one signing slot. Exhaustion refuses the retry before
+    // policy authorization, and cannot charge the already-spent intent again.
+    sign(&dir.path("replay.sig"), &[], 4);
+    assert!(!Path::new(&dir.path("replay.sig")).exists());
+    assert_eq!(window_spend(&ledger), "900");
     // A second transfer that would pass the window cap is refused at proposal.
     let mut over = vec!["policy", "propose"];
     over.extend_from_slice(&ledger);
@@ -2336,8 +2357,10 @@ fn e2e_hem_quorum_switch_2of3_to_3of5_and_untrusted_public_aggregate() {
         0,
     );
     let refreshed_latch_seed = json_member(&dir.read("v0-3of5/quorum-meta.json"), "latch_seed");
-    assert_ne!(refreshed_latch_seed, reshare_latch_seed,
-        "refresh must rotate persisted latch authority as well as secret shares");
+    assert_ne!(
+        refreshed_latch_seed, reshare_latch_seed,
+        "refresh must rotate persisted latch authority as well as secret shares"
+    );
     expect(
         &[
             "quorum",
@@ -2645,19 +2668,19 @@ fn e2e_cred_hd_and_migrate_subcommands() {
     );
     expect(
         &[
-            "hd",
-            "derive",
-            "--watch",
-            &hd_watch,
-            "--index",
-            "3",
-            "--out",
-            &hd_child3,
+            "hd", "derive", "--watch", &hd_watch, "--index", "3", "--out", &hd_child3,
         ],
         0,
     );
     expect(
-        &["hd", "verify-child", "--watch", &hd_watch, "--proof", &hd_child3],
+        &[
+            "hd",
+            "verify-child",
+            "--watch",
+            &hd_watch,
+            "--proof",
+            &hd_child3,
+        ],
         0,
     );
     let target_pq_addr = json_member(&dir.read("hd-child3.json"), "address");
@@ -2781,16 +2804,84 @@ fn e2e_cred_hd_and_migrate_subcommands() {
     );
     // Wrong epoch or tampered proof fails verification with exit code 2.
     expect(
-        &[
-            "migrate",
-            "verify",
-            "--proof",
-            &mig_proof,
-            "--epoch",
-            "43",
-        ],
+        &["migrate", "verify", "--proof", &mig_proof, "--epoch", "43"],
         2,
     );
     flip_hex_digit(&mig_proof, "zk_proof");
     expect(&["migrate", "verify", "--proof", &mig_proof], 2);
+}
+
+#[test]
+fn durable_signing_requires_anchor_or_explicit_ephemeral_flag() {
+    let dir = Workdir::new("anchor-required-default");
+    keygen(&dir, "fts-compact-1122", &[]);
+    let secret = dir.path("sk");
+    let message = dir.path("msg");
+    let signature = dir.path("refused.sig");
+    let journal = format!("{secret}.ceremony");
+    let before = std::fs::read(&journal).unwrap();
+    // Deliberately bypass the ephemeral test command adapter.
+    let output = Command::new(env!("CARGO_BIN_EXE_qsag"))
+        .args([
+            "sign", "--secret", &secret, "--in", &message, "--out", &signature,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--ephemeral-unanchored"));
+    assert!(!Path::new(&signature).exists());
+    assert_eq!(std::fs::read(journal).unwrap(), before);
+
+    // Quorum and policy-ledger enrollment refuse the same default before creating anything,
+    // and naming an anchor while waiving it is refused as a contradiction.
+    let (vault, ledger, anchor) = (dir.path("quorum"), dir.path("ledger"), dir.path("anchor"));
+    let quorum_pk = dir.path("quorum.pk");
+    let (frontier_sk, frontier_pk) = (dir.path("anchored.sk"), dir.path("anchored.pk"));
+    let refusals: [&[&str]; 3] = [
+        &[
+            "quorum",
+            "keygen",
+            "--vault-dir",
+            &vault,
+            "--public-out",
+            &quorum_pk,
+        ],
+        &[
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger,
+            "--policy",
+            &message,
+            "--accept-single-host-custody",
+        ],
+        &[
+            "keygen",
+            "--scheme",
+            "fts-compact-1122",
+            "--secret-out",
+            &frontier_sk,
+            "--public-out",
+            &frontier_pk,
+            "--anchor-dir",
+            &anchor,
+            "--allow-single-disk-anchor",
+            "--ephemeral-unanchored",
+        ],
+    ];
+    for args in refusals {
+        let output = Command::new(env!("CARGO_BIN_EXE_qsag"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 1, "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--ephemeral-unanchored"),
+            "{args:?}: {stderr}"
+        );
+    }
+    for created in [&vault, &ledger, &anchor, &quorum_pk, &frontier_sk] {
+        assert!(!Path::new(created).exists(), "{created}");
+    }
 }

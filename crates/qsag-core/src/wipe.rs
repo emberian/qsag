@@ -22,114 +22,80 @@
 use crate::field::goldilocks::{Goldilocks, GoldilocksExt2};
 use crate::field::tower::{Tower128, TowerGf256};
 use core::hint::black_box;
-
-#[inline]
-fn volatile_zero_slice<T: Copy>(buf: &mut [T], zero: T) {
-    qsag_asm::volatile_fill(buf, zero);
-}
+use qsag_asm::volatile_fill;
 
 /// Deterministically overwrite a byte slice with zeros (`core::ptr::write_volatile` + `SeqCst` fence).
 #[inline(never)]
 pub fn wipe_bytes(buf: &mut [u8]) {
-    volatile_zero_slice(buf, 0u8);
+    volatile_fill(buf, 0u8);
 }
 
 /// Alias for [`wipe_bytes`] used across `fips205` and `tsw_baggy`.
-#[inline(never)]
-pub fn wipe_slice(buf: &mut [u8]) {
-    volatile_zero_slice(buf, 0u8);
-}
+pub use self::wipe_bytes as wipe_slice;
 
 /// Deterministically overwrite a fixed 16-byte array with zeros.
 #[inline(never)]
 pub fn wipe_bytes16(buf: &mut [u8; 16]) {
-    volatile_zero_slice(buf.as_mut_slice(), 0u8);
+    volatile_fill(buf.as_mut_slice(), 0u8);
 }
 
 /// Deterministically overwrite a fixed 32-byte array with zeros.
 #[inline(never)]
 pub fn wipe_bytes32(buf: &mut [u8; 32]) {
-    volatile_zero_slice(buf.as_mut_slice(), 0u8);
+    volatile_fill(buf.as_mut_slice(), 0u8);
 }
 
 /// Deterministically overwrite a `u16` slice with zeros via `write_volatile` + `SeqCst` fence.
 #[inline(never)]
 pub fn wipe_u16s(buf: &mut [u16]) {
-    volatile_zero_slice(buf, 0u16);
+    volatile_fill(buf, 0u16);
 }
 
 /// Deterministically overwrite a `u64` slice with zeros via `write_volatile` + `SeqCst` fence.
 #[inline(never)]
 pub fn wipe_u64s(buf: &mut [u64]) {
-    volatile_zero_slice(buf, 0u64);
+    volatile_fill(buf, 0u64);
 }
 
 /// Deterministically overwrite a `u128` slice with zeros via `write_volatile` + `SeqCst` fence.
 #[inline(never)]
 pub fn wipe_u128s(buf: &mut [u128]) {
-    volatile_zero_slice(buf, 0u128);
+    volatile_fill(buf, 0u128);
 }
 
 /// Deterministically overwrite a `Goldilocks` slice with zeros via `write_volatile` + `SeqCst` fence.
 #[inline(never)]
 pub fn wipe_goldilocks(buf: &mut [Goldilocks]) {
-    volatile_zero_slice(buf, Goldilocks::ZERO);
+    volatile_fill(buf, Goldilocks::ZERO);
 }
 
 /// Deterministically overwrite a `GoldilocksExt2` slice with zeros via `write_volatile` + `SeqCst` fence.
 #[inline(never)]
 pub fn wipe_ext2(buf: &mut [GoldilocksExt2]) {
-    volatile_zero_slice(buf, GoldilocksExt2::ZERO);
+    volatile_fill(buf, GoldilocksExt2::ZERO);
 }
 
 /// Deterministically overwrite a `TowerGf256` slice with zeros via `write_volatile` + `SeqCst` fence.
 #[inline(never)]
 pub fn wipe_gf256_slice(buf: &mut [TowerGf256]) {
-    volatile_zero_slice(buf, TowerGf256::ZERO);
+    volatile_fill(buf, TowerGf256::ZERO);
 }
 
 /// Deterministically overwrite a `Tower128` slice with zeros via `write_volatile` + `SeqCst` fence.
 #[inline(never)]
 pub fn wipe_tower128_slice(buf: &mut [Tower128]) {
-    volatile_zero_slice(buf, Tower128::ZERO);
+    volatile_fill(buf, Tower128::ZERO);
 }
 
-/// Constant-time equality over equal-length byte slices (returns `false` immediately only if
-/// public slice lengths differ).
-#[inline]
-pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    let diff = black_box(diff);
-    (((diff as u16).wrapping_sub(1)) >> 15) == 1
-}
+/// Constant-time equality over byte slices (`false` at once only when the public lengths
+/// differ), on the platform kernel of `qsag-asm`.
+pub use qsag_asm::ct_eq_bytes;
 
-/// Constant-time equality over 32-byte arrays.
-#[inline]
-pub fn ct_eq_bytes32(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    ct_eq_bytes(a, b)
-}
+/// Constant-time equality over 32-byte arrays, on the platform kernel of `qsag-asm`.
+pub use qsag_asm::ct_eq_32 as ct_eq_bytes32;
 
-/// Constant-time equality over `u64` words.
-#[inline]
-pub fn ct_eq_u64(a: u64, b: u64) -> bool {
-    let diff = black_box(a ^ b);
-    let folded = (diff | diff.wrapping_neg()) >> 63;
-    folded == 0
-}
-
-/// Constant-time equality over `u128` words.
-#[inline]
-pub fn ct_eq_u128(a: u128, b: u128) -> bool {
-    let lo = (a ^ b) as u64;
-    let hi = ((a ^ b) >> 64) as u64;
-    ct_eq_u64(lo | hi, 0)
-}
+/// Constant-time equality over `u64` and `u128` words.
+pub use qsag_accel::ct::{ct_eq_u64, ct_eq_u128};
 
 /// Constant-time branchless byte select: returns `if_true` if `choice == true`, else `if_false`.
 #[inline]
@@ -186,26 +152,26 @@ pub fn secret_vecs_with_capacity<T: SecretWipe>(
 
 impl SecretWipe for TowerGf256 {
     fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
+        volatile_fill(core::slice::from_mut(&mut self.0), 0);
     }
     fn wipe_slice(items: &mut [Self]) {
-        volatile_zero_slice(items, TowerGf256::ZERO);
+        volatile_fill(items, TowerGf256::ZERO);
     }
 }
 impl SecretWipe for Tower128 {
     fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
+        volatile_fill(core::slice::from_mut(&mut self.0), 0);
     }
     fn wipe_slice(items: &mut [Self]) {
-        volatile_zero_slice(items, Tower128::ZERO);
+        volatile_fill(items, Tower128::ZERO);
     }
 }
 impl SecretWipe for Goldilocks {
     fn secret_wipe(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0);
+        volatile_fill(core::slice::from_mut(&mut self.0), 0);
     }
     fn wipe_slice(items: &mut [Self]) {
-        volatile_zero_slice(items, Goldilocks::ZERO);
+        volatile_fill(items, Goldilocks::ZERO);
     }
 }
 impl SecretWipe for GoldilocksExt2 {
@@ -214,7 +180,53 @@ impl SecretWipe for GoldilocksExt2 {
         self.c1.secret_wipe();
     }
     fn wipe_slice(items: &mut [Self]) {
-        volatile_zero_slice(items, GoldilocksExt2::ZERO);
+        volatile_fill(items, GoldilocksExt2::ZERO);
+    }
+}
+
+#[cfg(test)]
+mod ct_tests {
+    use super::*;
+
+    #[test]
+    fn ct_equalities_agree_with_plain_equality() {
+        let base: [u8; 71] = core::array::from_fn(|i| (i as u8).wrapping_mul(0x9d) ^ 0x35);
+        for len in 0..=base.len() {
+            let a = &base[..len];
+            assert!(ct_eq_bytes(a, a));
+            assert!(!ct_eq_bytes(a, &base[..len.saturating_sub(1)]) || len == 0);
+            for pos in 0..len {
+                for bit in [0x01u8, 0x10, 0x80] {
+                    let mut b = base;
+                    b[pos] ^= bit;
+                    assert!(!ct_eq_bytes(a, &b[..len]), "len={len} pos={pos}");
+                    assert!(!ct_eq_bytes(&b[..len], a), "len={len} pos={pos}");
+                }
+            }
+        }
+        assert!(!ct_eq_bytes(&[], &[0]));
+
+        let x: [u8; 32] = core::array::from_fn(|i| 0xa7 ^ (i as u8).wrapping_mul(0x3b));
+        assert!(ct_eq_bytes32(&x, &x));
+        for pos in 0..32 {
+            for bit in 0..8 {
+                let mut y = x;
+                y[pos] ^= 1 << bit;
+                assert!(!ct_eq_bytes32(&x, &y), "pos={pos} bit={bit}");
+            }
+        }
+
+        let edge = [0u64, 1, 2, 1 << 32, 1 << 63, u64::MAX - 1, u64::MAX];
+        for &p in &edge {
+            for &q in &edge {
+                assert_eq!(ct_eq_u64(p, q), p == q);
+                for &hi in &edge {
+                    let (l, r) = (u128::from(p) | (u128::from(hi) << 64), u128::from(q));
+                    assert_eq!(ct_eq_u128(l, r), l == r);
+                    assert_eq!(ct_eq_u128(l, l ^ (u128::from(q) << 64)), q == 0);
+                }
+            }
+        }
     }
 }
 
@@ -255,7 +267,10 @@ mod raii_tests {
         let per_party = secret_vecs_with_capacity::<u64>(5, 7);
         assert!(per_party.len() == 5 && per_party.iter().all(|v| v.capacity() >= 7));
         // The trap the helper replaces: only the moved-in last element keeps its capacity.
-        assert_eq!(alloc::vec![alloc::vec::Vec::<u64>::with_capacity(7); 5][0].capacity(), 0);
+        assert_eq!(
+            alloc::vec![alloc::vec::Vec::<u64>::with_capacity(7); 5][0].capacity(),
+            0
+        );
 
         let mut key = SecretBytes::<32>::zeroed();
         key[7] = 9;

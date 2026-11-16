@@ -2,22 +2,29 @@ module
 /-
 # Qsag.Top.SecurityBounds — Unified Concrete Security Summary Over `Spec.RatBound`
 
-Top-level concrete security audit module (zero `import all`) unifying all five subsystem entries
-(`Top.Aggregation`, `Top.Signing`, `Top.Custody`, `Top.Credentials`, `Top.Migration`) and the
-12-component post-quantum portfolio (`ConcreteSecurityBudget`) under canonical `Spec.RatBound`:
-- **Clause I (Unconditional Algebraic, Statistical, and Simulation Bounds)**:
-  1. Deployed `[CWYZ26]` round-by-round soundness `atLeastBits 184` across all non-exhaustive
-     canonical stages `2 ≤ nv ≤ 24`,
-  2. Dual-LPN regular-block bias `strictlyMoreThanBits 256` (`< 2^{-256}`),
-  3. 438-repetition `ZKBoo` + sacrifice QROM soundness at `qHash + 1 ≤ 2 ^ 56`, and
-  4. Exact multi-turn trace inclusion for `waistbandCache_refines_stateless`,
-     `rssSharedRelease_refines_reference`, and `thresholdDurableShared_refines_ideal`.
-- **Clause II (Assumption- and Model-Conditional Concrete Security Bounds)**:
-  1. Standard-model tweakable-hash `EUF-CMA` `GameBound` (`εItsr + εTcr + εPre`) with explicit
-     `prodPathTargetCount` candidate pool bound,
-  2. Salted-Merkle QROM `HEM` `nv = 24` soundness `atLeastBits 128` up to `Q + 1 ≤ 2 ^ 40`, and
-  3. Full 12-component `PQ-128` portfolio classical & quantum bit-security (`atLeastBits 128`)
-     paired with non-vacuous `exceedsBitBudget` boundary witnesses!
+Top-level summary module (zero `import all`) collecting, under the canonical `Spec.RatBound`, the
+statement `qsag_unified_concrete_security_summary`. What that theorem states, exactly:
+- **Clause I (facts with no cryptographic hypothesis)**:
+  1. Dual-LPN regular-block parity bias `strictlyMoreThanBits 256` (`< 2^{-256}`) for any 64 block
+     weights satisfying the balance premise `hLpnBal` (`|32768 - 2w| ≤ 2047`). This is a hypothesis of the
+     theorem; `Protocol.Threshold.DensePcgTapLinearTests` shows the production tap row does not satisfy it,
+     so this conjunct does not speak about the deployed tap generator.
+  2. The arithmetic inequality `8 (q+1)^2 2^438 2^128 ≤ 3^438` behind the 438-repetition ZKBoo count,
+     for `q + 1 ≤ 2^56`.
+  3. Trace inclusion of the RSS shared-release machine in its reference machine, and prefix equivalence
+     of the durable threshold service with its ideal.
+- **Clause II (arithmetic on bound formulas)**: the 12-entry portfolio roster and the RLWE OR-sigma and
+  HEM `nv = 24` QROM compiler bound formulas evaluate to at most `2^{-128}` within the stated query
+  ceilings. These are evaluations of closed-form expressions; the theorem takes no hardness or
+  oracle-model hypothesis and does not show that any protocol's adversarial advantage is bounded by
+  them.
+The EUF-CMA event bound (`Top.Signing.production_euf_cma_gameBound`), the `[CWYZ26]` stage budget
+(`Top.Aggregation`) and the waistband-cache refinement (`Top.Custody`) are separate theorems in the
+imported modules and are not conjuncts of the summary.
+
+The platform-contract instances for the real storage, GPU and constant-time models
+(`Exec.PlatformContractInstances`, `Machine.PlatformContractInstances`) are re-exported here; no
+clause of the summary theorem below consumes a platform contract.
 -/
 
 public import Qsag.Top.Aggregation
@@ -27,6 +34,8 @@ public import Qsag.Top.Signing
 public import Qsag.Top.Custody
 public import Qsag.Top.Credentials
 public import Qsag.Top.Migration
+public import Qsag.Exec.PlatformContractInstances
+public import Qsag.Machine.PlatformContractInstances
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -34,10 +43,9 @@ namespace Qsag.Top
 
 set_option autoImplicit false
 
-/-- **Two-Clause Unified Concrete Security Summary (`qsag_unified_concrete_security_summary`)**:
-    Separates unconditional algebraic/statistical/refinement guarantees (Clause I) from
-    assumption- and oracle-model-conditional concrete `Spec.RatBound` guarantees (Clause II)
-    in a single auditable theorem! -/
+/-- **Two-clause summary (`qsag_unified_concrete_security_summary`)**: Clause I collects facts with no
+    cryptographic hypothesis (one of them under the balance premise `hLpnBal`); Clause II evaluates
+    bound formulas at the stated query ceilings. See the module header for what is not claimed. -/
 theorem qsag_unified_concrete_security_summary
     -- Portfolio & query-ceiling parameters
     (budget : Qsag.QueryBudget) (hqSess : budget.qOnlineSessions + 1 ≤ 2 ^ 20)
@@ -62,7 +70,7 @@ theorem qsag_unified_concrete_security_summary
        (Qsag.ThresholdIdealDurableService.ideal durCfg)
        Qsag.ThresholdIdealDurableService.initial
        Qsag.ThresholdIdealDurableService.initial) ∧
-    -- === Clause II: Assumption- & Oracle-Model-Conditional `Spec.RatBound` Guarantees ===
+    -- === Clause II: evaluations of bound formulas within the query ceilings ===
     ((Qsag.qsagPq128PortfolioRoster budget).length = 12 ∧
      (∀ entry ∈ Qsag.qsagPq128PortfolioRoster budget,
        budget.qHash + 1 ≤ 2 ^ entry.pq128HashQueryCeilingLog2 →

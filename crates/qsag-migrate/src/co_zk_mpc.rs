@@ -762,7 +762,7 @@ fn compute_batches<E: ProverEngine>(
                     .map(|h| h.join().unwrap_or(Err(Error::Transport)))
                     .collect();
                 // A sibling cancelled at an exchange reports Transport. Preserve the
-                // actual rejection (especially InvalidTape, which callers may retry).
+                // actual rejection.
                 if let Some(error) = results
                     .iter()
                     .filter_map(|r| r.as_ref().err())
@@ -884,11 +884,29 @@ struct FieldTapeDraw {
     domain: Domain,
 }
 
+/// Most candidates one field draw may consume. A Goldilocks word is rejected
+/// with probability `2^-32` (the 256-bit domains: below `2^-127`), so a draw
+/// that still has no canonical candidate after this many has probability at
+/// most `2^-256` and is reported as [`Error::InvalidTape`].
+const MAX_TAPE_ATTEMPTS: usize = 8;
+
 // Replay a finite tape with a public per-draw attempt budget. Rejection masks
 // remain shared: each lane conditionally removes a rejected word from the entire
 // unread suffix, including future Boolean refill words. Previously cached bits
 // precede `start` and are never moved. A failed budget is retried from the original
 // stream, so an unresolved draw cannot discard a later draw's valid candidate.
+//
+// The result is the stream `zk_engine::Tape` reads from the same seed: a
+// non-canonical word is skipped and the draw takes the next word of the same
+// width, Boolean refills take whole 64-bit words in stream order.
+//
+// What is opened: per head and lane, whether every draw found a canonical word
+// within `attempts` candidates. Which draw failed, how many words it skipped and
+// the skipped words stay shared, and the shape of the computation depends only
+// on the public `attempts`. The opened bit is a function of that lane's tape seed
+// alone. The words it is about are discarded, and the words that are used are
+// later squeezes of the same sponge, so the bit says nothing about any share a
+// view is built from or about the witness.
 fn canonical_tape_attempt<E: Core>(
     e: &mut E,
     streams: &[Word<E::Bit>],
@@ -1195,7 +1213,10 @@ fn evaluate_inner<E: Core>(
                 squeezed = repaired;
                 break;
             }
-            attempts = attempts.checked_mul(2).ok_or(Error::InvalidTape)?;
+            if attempts >= MAX_TAPE_ATTEMPTS {
+                return Err(Error::InvalidTape);
+            }
+            attempts *= 2;
         }
         for (word, draw) in raw_draw_words.iter_mut().zip(&field_draws) {
             word.copy_from_slice(
@@ -2005,6 +2026,87 @@ mod tests {
         });
     }
 
+    /// Head 2 reads one 64-bit Boolean word, then 66 Goldilocks masks (two for
+    /// the lift, 64 for the products), then a second Boolean word. For this seed
+    /// exactly one raw word in that range is not canonical, so the shared tape
+    /// has to skip it and move every later draw and the Boolean refill up by one
+    /// word, as `zk_engine::Tape` does.
+    #[test]
+    fn a_real_seed_with_a_rejected_goldilocks_word_gives_the_native_views() {
+        use qsag_accel::goldilocks::GOLDILOCKS_PRIME;
+        const PRODUCTS: u64 = 64;
+        const GOLD_DRAWS: usize = PRODUCTS as usize + 2;
+        const SEED: [u8; 32] = *b"QSAG.TAPE.REJECT\x02\x35\x26\0\0\0\0\0\0\0\0\0\0\0\0\x04";
+        const REJECTED_WORD: usize = 27;
+
+        let mut raw = [0u8; 8 * (GOLD_DRAWS + 3)];
+        crate::tape_sponge::TapeSponge::new(&SEED).squeeze(&mut raw);
+        let rejected: Vec<usize> = raw
+            .chunks_exact(8)
+            .enumerate()
+            .skip(1)
+            .filter(|(_, w)| u64::from_le_bytes((*w).try_into().unwrap()) >= GOLDILOCKS_PRIME)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(rejected, [REJECTED_WORD]);
+        assert!((1..=GOLD_DRAWS).contains(&REJECTED_WORD));
+
+        let clear_seeds = [[1; 32], [2; 32], SEED];
+        run(|p, n| {
+            let mut e = Engine::new(p, [52; 32], keys(p), n).unwrap();
+            let c = Builder::default();
+            let bit = c.input(1);
+            c.output(c.mul(bit, bit));
+            let a = c.lift(bit, Domain::Gold);
+            let b = c.add(a, c.small(Domain::Gold, 27));
+            for i in 0..PRODUCTS {
+                c.output(c.mul(c.add(a, c.small(Domain::Gold, 3 + i)), b));
+            }
+            for _ in 0..70 {
+                c.output(c.mul(bit, bit));
+            }
+            let c = c.finish();
+            let muls = |d| {
+                c.nodes
+                    .iter()
+                    .filter(|n| n.domain == d && matches!(n.op, Op::Mul(_, _)))
+                    .count()
+            };
+            assert_eq!((muls(Domain::Bit), muls(Domain::Gold)), (71, GOLD_DRAWS));
+            let witness = e.share(&[if p == 0 { u64::MAX } else { 0 }]).unwrap();
+            let seeds: Vec<_> = clear_seeds
+                .iter()
+                .map(|seed| {
+                    let own: Vec<u64> = (0..256)
+                        .map(|i| {
+                            if p == 0 && (seed[i / 8] >> (i % 8)) & 1 != 0 {
+                                u64::MAX
+                            } else {
+                                0
+                            }
+                        })
+                        .collect();
+                    e.share(&own).unwrap()
+                })
+                .collect();
+            let views = evaluate(&mut e, &c, &witness, &seeds).unwrap();
+            let native = zk_engine::simulate(&c, clear_seeds);
+            for (head, view) in views.iter().enumerate() {
+                let opened = e.open(&view.bytes()).unwrap();
+                let expected: Vec<_> = [
+                    native[head].seed.as_slice(),
+                    &native[head].inputs,
+                    &native[head].products,
+                    &native[head].outputs,
+                ]
+                .concat();
+                for lane in [0, 37, 63] {
+                    assert_eq!(outer_mpc::lane_bytes(&opened, lane), expected);
+                }
+            }
+        });
+    }
+
     #[test]
     fn shared_views_and_commitments_are_byte_identical_to_native() {
         run(|p, n| {
@@ -2285,120 +2387,101 @@ mod tests {
     fn complete_proof(ed: bool) {
         use std::io::Read;
         let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
-        let mut completed = false;
-        for _attempt in 0..4 {
-            let mut master = [0u8; 32];
-            std::fs::File::open("/dev/urandom")
-                .unwrap()
-                .read_exact(&mut master)
-                .unwrap();
-            let derive = |label: &[u8], id: u8| cshake256_framed_32(label, &[&master, &[id]]);
-            let witness = LegacyOwnershipWitness::from_raw_secret(derive(
-                b"OUTER.FULL.WITNESS",
-                u8::from(ed),
-            ));
-            let kind = if ed {
-                witness.compute_slip0010_commitment()
-            } else {
-                witness.compute_bitcoin_hash160().unwrap()
-            };
-            let request = zk_engine::tests::request(kind);
-            let scalar = witness.normalize_spending_scalar(&kind).unwrap();
-            let statement = MigrationStatement {
-                legacy_commitment: kind,
-                target_pq_address: request.target,
-                epoch_anchor: request.epoch,
-                migration_domain: request.domain,
-                migration_nullifier: scalar.compute_nullifier(&request.domain),
-                witness_anchor: [0; 4],
-            };
-            let mut parts = [
-                derive(b"OUTER.FULL.INPUT", 0),
-                derive(b"OUTER.FULL.INPUT", 1),
-                *scalar.as_le_bytes(),
-            ];
-            let masks = [parts[0], parts[1]];
-            for (i, byte) in parts[2].iter_mut().enumerate() {
-                *byte ^= masks[0][i] ^ masks[1][i];
-            }
-            let session = derive(b"OUTER.FULL.SESSION", 0);
-            let pair_keys: [_; 3] =
-                core::array::from_fn(|p| derive(b"OUTER.FULL.PAIR.KEY", p as u8));
-            let entropy: [_; 3] = core::array::from_fn(|p| derive(b"OUTER.FULL.ENTROPY", p as u8));
-            ct_zeroize_bytes(&mut master);
-            let states: [_; 3] = core::array::from_fn(|p| {
-                CoZkCustodianShare::new(
-                    p,
-                    session,
-                    parts[p],
-                    entropy[p],
-                    [pair_keys[(p + 2) % 3], pair_keys[p]],
-                )
-                .unwrap()
-            });
-            let start = std::time::Instant::now();
-            let outcomes = std::thread::scope(|scope| {
-                let handles: Vec<_> = states
-                    .into_iter()
-                    .zip(audited_networks())
-                    .map(|(state, (network, audit))| {
-                        let public = statement.clone();
-                        scope.spawn(move || (state.prove(&public, network), audit))
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap())
-                    .collect::<Vec<_>>()
-            });
-            let mut errors = Vec::new();
-            for (party, (result, audit)) in outcomes.into_iter().enumerate() {
-                match result {
-                    Ok(proof) => {
-                        zk_engine::verify_migration_proof(
-                            &statement,
-                            &proof,
-                            &statement.migration_domain,
-                            statement.epoch_anchor,
-                        )
-                        .unwrap();
-                        let candidates = audit.candidates();
-                        let former_attack_rounds = proof
-                            .repetitions
-                            .iter()
-                            .filter(|r| r.opened_e as usize != party)
-                            .count();
-                        assert_eq!(
-                            candidates.len(),
-                            MIT_REPETITIONS * 5 + former_attack_rounds * 9
-                        );
-                        for recovered in candidates {
-                            assert_ne!(&recovered, scalar.as_le_bytes());
-                        }
-                    }
-                    Err(error) => errors.push(error),
-                }
-            }
-            if errors.is_empty() {
-                std::eprintln!(
-                    "distributed 438-rep {}: {:?}",
-                    if ed { "Ed25519" } else { "Bitcoin HASH160" },
-                    start.elapsed()
-                );
-                completed = true;
-                break;
-            }
-            assert!(
-                errors.contains(&Error::InvalidTape),
-                "unexpected errors: {errors:?}"
-            );
-            assert!(
-                errors
-                    .iter()
-                    .all(|e| matches!(e, Error::InvalidTape | Error::Transport))
-            );
+        let mut master = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut master)
+            .unwrap();
+        let derive = |label: &[u8], id: u8| cshake256_framed_32(label, &[&master, &[id]]);
+        let witness =
+            LegacyOwnershipWitness::from_raw_secret(derive(b"OUTER.FULL.WITNESS", u8::from(ed)));
+        let kind = if ed {
+            witness.compute_slip0010_commitment()
+        } else {
+            witness.compute_bitcoin_hash160().unwrap()
+        };
+        let request = zk_engine::tests::request(kind);
+        let scalar = witness.normalize_spending_scalar(&kind).unwrap();
+        let statement = MigrationStatement {
+            legacy_commitment: kind,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: scalar.compute_nullifier(&request.domain),
+            witness_anchor: [0; 4],
+        };
+        let mut parts = [
+            derive(b"OUTER.FULL.INPUT", 0),
+            derive(b"OUTER.FULL.INPUT", 1),
+            *scalar.as_le_bytes(),
+        ];
+        let masks = [parts[0], parts[1]];
+        for (i, byte) in parts[2].iter_mut().enumerate() {
+            *byte ^= masks[0][i] ^ masks[1][i];
         }
-        assert!(completed, "four independent tape rejections");
+        let session = derive(b"OUTER.FULL.SESSION", 0);
+        let pair_keys: [_; 3] = core::array::from_fn(|p| derive(b"OUTER.FULL.PAIR.KEY", p as u8));
+        let entropy: [_; 3] = core::array::from_fn(|p| derive(b"OUTER.FULL.ENTROPY", p as u8));
+        ct_zeroize_bytes(&mut master);
+        let states: [_; 3] = core::array::from_fn(|p| {
+            CoZkCustodianShare::new(
+                p,
+                session,
+                parts[p],
+                entropy[p],
+                [pair_keys[(p + 2) % 3], pair_keys[p]],
+            )
+            .unwrap()
+        });
+        let start = std::time::Instant::now();
+        let outcomes = std::thread::scope(|scope| {
+            let handles: Vec<_> = states
+                .into_iter()
+                .zip(audited_networks())
+                .map(|(state, (network, audit))| {
+                    let public = statement.clone();
+                    scope.spawn(move || (state.prove(&public, network), audit))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut errors = Vec::new();
+        for (party, (result, audit)) in outcomes.into_iter().enumerate() {
+            match result {
+                Ok(proof) => {
+                    zk_engine::verify_migration_proof(
+                        &statement,
+                        &proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor,
+                    )
+                    .unwrap();
+                    let candidates = audit.candidates();
+                    let former_attack_rounds = proof
+                        .repetitions
+                        .iter()
+                        .filter(|r| r.opened_e as usize != party)
+                        .count();
+                    assert_eq!(
+                        candidates.len(),
+                        MIT_REPETITIONS * 5 + former_attack_rounds * 9
+                    );
+                    for recovered in candidates {
+                        assert_ne!(&recovered, scalar.as_le_bytes());
+                    }
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        std::eprintln!(
+            "distributed 438-rep {}: {:?}",
+            if ed { "Ed25519" } else { "Bitcoin HASH160" },
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -2511,88 +2594,71 @@ mod tests {
         } else {
             outer_mpc::tests::parallel_batches()
         });
-        for seed_try in 0..8u8 {
-            let witness = LegacyOwnershipWitness::from_raw_secret([0x31 + seed_try; 32]);
-            let kind = if ed {
-                witness.compute_slip0010_commitment()
-            } else {
-                witness.compute_bitcoin_hash160().unwrap()
-            };
-            let request = zk_engine::tests::request(kind);
-            let scalar = witness.normalize_spending_scalar(&kind).unwrap();
-            let statement = MigrationStatement {
-                legacy_commitment: kind,
-                target_pq_address: request.target,
-                epoch_anchor: request.epoch,
-                migration_domain: request.domain,
-                migration_nullifier: scalar.compute_nullifier(&request.domain),
-                witness_anchor: [0; 4],
-            };
-            let p0 = [0x11; 32];
-            let p1 = [0x22; 32];
-            let mut p2 = *scalar.as_le_bytes();
-            for i in 0..32 {
-                p2[i] ^= p0[i] ^ p1[i];
-            }
-            let parts = [p0, p1, p2];
-            let session = [session_tag.wrapping_add(seed_try); 32];
-            let leaked: [Arc<AtomicBool>; 3] =
-                core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+        let witness = LegacyOwnershipWitness::from_raw_secret([0x31; 32]);
+        let kind = if ed {
+            witness.compute_slip0010_commitment()
+        } else {
+            witness.compute_bitcoin_hash160().unwrap()
+        };
+        let request = zk_engine::tests::request(kind);
+        let scalar = witness.normalize_spending_scalar(&kind).unwrap();
+        let statement = MigrationStatement {
+            legacy_commitment: kind,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: scalar.compute_nullifier(&request.domain),
+            witness_anchor: [0; 4],
+        };
+        let p0 = [0x11; 32];
+        let p1 = [0x22; 32];
+        let mut p2 = *scalar.as_le_bytes();
+        for i in 0..32 {
+            p2[i] ^= p0[i] ^ p1[i];
+        }
+        let parts = [p0, p1, p2];
+        let session = [session_tag; 32];
+        let leaked: [Arc<AtomicBool>; 3] =
+            core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
 
-            let outcomes = std::thread::scope(|scope| {
-                let handles: Vec<_> = outer_mpc::tests::networks()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(p, net)| {
-                        let st = statement.clone();
-                        let flag = leaked[p].clone();
-                        scope.spawn(move || {
-                            let spy = ZkbooFaultSpy {
-                                inner: net,
-                                is_root: true,
-                                single_stream,
-                                fault: (p == 1).then_some(fault),
-                                precommit_or_view_opened: flag,
-                            };
-                            CoZkCustodianShare::new(
-                                p,
-                                session,
-                                parts[p],
-                                [0x50 + p as u8 + seed_try; 32],
-                                keys(p),
-                            )
+        let outcomes = std::thread::scope(|scope| {
+            let handles: Vec<_> = outer_mpc::tests::networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, net)| {
+                    let st = statement.clone();
+                    let flag = leaked[p].clone();
+                    scope.spawn(move || {
+                        let spy = ZkbooFaultSpy {
+                            inner: net,
+                            is_root: true,
+                            single_stream,
+                            fault: (p == 1).then_some(fault),
+                            precommit_or_view_opened: flag,
+                        };
+                        CoZkCustodianShare::new(p, session, parts[p], [0x50 + p as u8; 32], keys(p))
                             .unwrap()
                             .prove(&st, spy)
-                        })
                     })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap())
-                    .collect::<Vec<_>>()
-            });
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
 
-            // If a random seed hit upfront `InvalidTape` before reaching the injected gate, retry next seed.
-            if outcomes
-                .iter()
-                .any(|r| matches!(r, Err(Error::InvalidTape)))
-            {
-                continue;
-            }
-            for (p, res) in outcomes.into_iter().enumerate() {
-                assert_eq!(
-                    res,
-                    Err(Error::MultiplicationCheck),
-                    "custodian {p} must abort with MultiplicationCheck on ZKBoo fault"
-                );
-                assert!(
-                    !leaked[p].load(Ordering::SeqCst),
-                    "custodian {p} must NEVER reach PRECOMMIT or open commitments/views on ZKBoo fault!"
-                );
-            }
-            return;
+        for (p, res) in outcomes.into_iter().enumerate() {
+            assert_eq!(
+                res,
+                Err(Error::MultiplicationCheck),
+                "custodian {p} must abort with MultiplicationCheck on ZKBoo fault"
+            );
+            assert!(
+                !leaked[p].load(Ordering::SeqCst),
+                "custodian {p} must NEVER reach PRECOMMIT or open commitments/views on ZKBoo fault!"
+            );
         }
-        panic!("8 consecutive upfront InvalidTape rejections in ZKBoo fault test");
     }
 
     #[test]
@@ -2645,100 +2711,79 @@ mod tests {
     /// must stop there, before anything is opened.
     fn assert_input_substitution_aborts(ed: bool, delta_64bit: bool, session_tag: u8) {
         let _ceremony_guard = CeremonySlot::acquire(1);
-        let mut verified = false;
-        for seed_try in 0..8u8 {
-            let witness = LegacyOwnershipWitness::from_raw_secret([0x41 + seed_try; 32]);
-            let kind = if ed {
-                witness.compute_slip0010_commitment()
-            } else {
-                witness.compute_bitcoin_hash160().unwrap()
-            };
-            let request = zk_engine::tests::request(kind);
-            let scalar = witness.normalize_spending_scalar(&kind).unwrap();
-            let statement = MigrationStatement {
-                legacy_commitment: kind,
-                target_pq_address: request.target,
-                epoch_anchor: request.epoch,
-                migration_domain: request.domain,
-                migration_nullifier: scalar.compute_nullifier(&request.domain),
-                witness_anchor: [0; 4],
-            };
-            let p0 = [0x15; 32];
-            let p1 = [0x2a; 32];
-            let mut p2 = *scalar.as_le_bytes();
-            for i in 0..32 {
-                p2[i] ^= p0[i] ^ p1[i];
+        let witness = LegacyOwnershipWitness::from_raw_secret([0x41; 32]);
+        let kind = if ed {
+            witness.compute_slip0010_commitment()
+        } else {
+            witness.compute_bitcoin_hash160().unwrap()
+        };
+        let request = zk_engine::tests::request(kind);
+        let scalar = witness.normalize_spending_scalar(&kind).unwrap();
+        let statement = MigrationStatement {
+            legacy_commitment: kind,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: scalar.compute_nullifier(&request.domain),
+            witness_anchor: [0; 4],
+        };
+        let p0 = [0x15; 32];
+        let p1 = [0x2a; 32];
+        let mut p2 = *scalar.as_le_bytes();
+        for i in 0..32 {
+            p2[i] ^= p0[i] ^ p1[i];
+        }
+        // Malicious custodian 2 substitutes `share ^ Delta` (`64`-bit MITM delta or `1`-bit flip).
+        if delta_64bit {
+            for b in &mut p2[..8] {
+                *b ^= 0xa5;
             }
-            // Malicious custodian 2 substitutes `share ^ Delta` (`64`-bit MITM delta or `1`-bit flip).
-            if delta_64bit {
-                for b in &mut p2[..8] {
-                    *b ^= 0xa5;
-                }
-            } else {
-                p2[0] ^= 0x08;
-            }
-            let parts = [p0, p1, p2];
-            let session = [session_tag.wrapping_add(seed_try); 32];
-            let leaked: [Arc<AtomicBool>; 3] =
-                core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+        } else {
+            p2[0] ^= 0x08;
+        }
+        let parts = [p0, p1, p2];
+        let session = [session_tag; 32];
+        let leaked: [Arc<AtomicBool>; 3] =
+            core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
 
-            let outcomes = std::thread::scope(|scope| {
-                let handles: Vec<_> = outer_mpc::tests::networks()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(p, net)| {
-                        let st = statement.clone();
-                        let flag = leaked[p].clone();
-                        scope.spawn(move || {
-                            let spy = ZkbooFaultSpy {
-                                inner: net,
-                                is_root: true,
-                                single_stream: true,
-                                fault: None,
-                                precommit_or_view_opened: flag,
-                            };
-                            CoZkCustodianShare::new(
-                                p,
-                                session,
-                                parts[p],
-                                [0x60 + p as u8 + seed_try; 32],
-                                keys(p),
-                            )
+        let outcomes = std::thread::scope(|scope| {
+            let handles: Vec<_> = outer_mpc::tests::networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, net)| {
+                    let st = statement.clone();
+                    let flag = leaked[p].clone();
+                    scope.spawn(move || {
+                        let spy = ZkbooFaultSpy {
+                            inner: net,
+                            is_root: true,
+                            single_stream: true,
+                            fault: None,
+                            precommit_or_view_opened: flag,
+                        };
+                        CoZkCustodianShare::new(p, session, parts[p], [0x60 + p as u8; 32], keys(p))
                             .unwrap()
                             .prove(&st, spy)
-                        })
                     })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap())
-                    .collect::<Vec<_>>()
-            });
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
 
-            if outcomes
-                .iter()
-                .any(|r| matches!(r, Err(Error::InvalidTape)))
-            {
-                continue;
-            }
-            for (p, res) in outcomes.into_iter().enumerate() {
-                assert_eq!(
-                    res,
-                    Err(Error::InvalidProof),
-                    "custodian {p} must abort with InvalidProof on input key-share substitution"
-                );
-                assert!(
-                    !leaked[p].load(Ordering::SeqCst),
-                    "custodian {p} must NEVER open output residuals, commitments, or views on input substitution!"
-                );
-            }
-            verified = true;
-            break;
+        for (p, res) in outcomes.into_iter().enumerate() {
+            assert_eq!(
+                res,
+                Err(Error::InvalidProof),
+                "custodian {p} must abort with InvalidProof on input key-share substitution"
+            );
+            assert!(
+                !leaked[p].load(Ordering::SeqCst),
+                "custodian {p} must NEVER open output residuals, commitments, or views on input substitution!"
+            );
         }
-        assert!(
-            verified,
-            "8 consecutive upfront InvalidTape rejections in input-substitution test"
-        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import all Qsag.Protocol.Aggregation.Aggregation
 import all Qsag.Math.QuarticExt4
+import all Qsag.Math.PolyRing
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -171,7 +172,10 @@ def quarticExt4Codec32 : Qsag.Spec.FixedCodec Qsag.QuarticGoldilocks 32 where
   decode bs := (Qsag.Aggregation.GoldilocksExt4.decodeBytes32 bs).map isoQuarticToAgg.invFun
   encode_len x := Qsag.Aggregation.GoldilocksExt4.encodeBytes32_length _
   decode_encode x := by
-    rw [Qsag.Aggregation.GoldilocksExt4.decodeBytes32_encodeBytes32]
+    show Option.map isoQuarticToAgg.invFun
+        (Qsag.GoldilocksField.GoldilocksExt4.decodeBytes32
+          (Qsag.GoldilocksField.GoldilocksExt4.encodeBytes32 (isoQuarticToAgg.toFun x))) = some x
+    rw [Qsag.GoldilocksField.GoldilocksExt4.decodeBytes32_encodeBytes32]
     dsimp only [Option.map]
     rw [isoQuarticToAgg.left_inv]
 

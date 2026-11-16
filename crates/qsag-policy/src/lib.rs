@@ -24,7 +24,7 @@ use qsag_accel::AcceleratorBackend;
 use qsag_accel::ct::ct_eq_bytes;
 
 use qsag_accel::gf2_128::gf2_128_mul;
-use qsag_accel::keccak::{commit_mpc_broadcast, cshake256_framed_32};
+use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{QsagAddress, WitnessSuiteTag};
 use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretVec, wipe};
 
@@ -45,7 +45,8 @@ pub struct InitiatorPeerMac {
     pub mac_tag: [u8; 32],
 }
 
-/// Amount-escalating quorum tier rule.
+/// Amount-escalating quorum tier rule. A policy lists its tiers in the order
+/// [`TransactionPolicy::validate_quorum_tiers`] accepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuorumTierRule {
     /// Inclusive upper bound on `amount_units` covered by this tier.
@@ -118,14 +119,21 @@ pub enum PolicyViolation {
     InitiatorSelfApprovalForbidden,
     DuplicateApproverInQuorum,
     NoMatchingQuorumTier,
-    InsufficientTierApprovers { have: u16, need: u16 },
+    /// `quorum_tiers` fails [`TransactionPolicy::validate_quorum_tiers`].
+    InvalidQuorumTierOrder,
+    InsufficientTierApprovers {
+        have: u16,
+        need: u16,
+    },
     MissingHardwareGuardian,
     EmptySignerBarrierSet,
     IntentBindingMismatch,
     GuardPoisoned,
     BarrierPreprocExhausted,
     LedgerPersistenceFailed,
-    BarrierCommitmentMismatch { party_id: u16 },
+    BarrierCommitmentMismatch {
+        party_id: u16,
+    },
     BarrierBdozMacFailed,
 }
 
@@ -171,8 +179,34 @@ impl TransactionPolicy {
         )
     }
 
+    /// Check the order of `quorum_tiers`. [`Self::evaluate`] selects the first tier whose
+    /// `max_amount_units` covers the amount, so a list is in order only if every adjacent
+    /// pair `(lower, higher)` satisfies:
+    ///
+    /// * `lower.max_amount_units < higher.max_amount_units`: `higher` is the first match
+    ///   for the amounts above `lower`'s bound, so no tier is unreachable;
+    /// * `lower.min_approvers <= higher.min_approvers`, and a hardware guardian required
+    ///   by `lower` is required by `higher`: a larger amount never selects a weaker quorum
+    ///   than a smaller one.
+    ///
+    /// The empty list is in order; it covers no amount. `evaluate` refuses every intent
+    /// under a policy that fails this check.
+    pub fn validate_quorum_tiers(&self) -> Result<(), PolicyViolation> {
+        for pair in self.quorum_tiers.windows(2) {
+            let (lower, higher) = (&pair[0], &pair[1]);
+            if lower.max_amount_units >= higher.max_amount_units
+                || lower.min_approvers > higher.min_approvers
+                || (lower.require_hardware_guardian && !higher.require_hardware_guardian)
+            {
+                return Err(PolicyViolation::InvalidQuorumTierOrder);
+            }
+        }
+        Ok(())
+    }
+
     /// Deterministically evaluate `intent` against `self` in constant-time allowlist scan mode.
     pub fn evaluate(&self, intent: &TransactionIntent) -> Result<(), PolicyViolation> {
+        self.validate_quorum_tiers()?;
         if intent.chain_id != self.chain_id {
             return Err(PolicyViolation::ChainIdMismatch);
         }
@@ -216,7 +250,8 @@ impl TransactionPolicy {
             }
         }
 
-        // Select the first applicable quorum tier `intent.amount_units <= tier.max_amount_units`.
+        // The first tier covering the amount; `validate_quorum_tiers` makes it the only
+        // candidate and the weakest quorum any amount this large can select.
         let matched_tier = self
             .quorum_tiers
             .iter()
@@ -577,8 +612,10 @@ impl PolicySignerGuardShare {
         self.poisoned
     }
 
+    /// Every constructor sets the requirement and a checkpoint restore can only keep or
+    /// raise it; only this crate's own tests can waive it.
     #[cfg(test)]
-    pub fn set_require_authenticated_initiator(&mut self, required: bool) {
+    pub(crate) fn set_require_authenticated_initiator(&mut self, required: bool) {
         self.require_authenticated_initiator = required;
     }
 
@@ -997,9 +1034,6 @@ impl Drop for PolicySignerGuardShare {
         self.poison();
     }
 }
-
-pub type PartyPolicyGuard = PolicySignerGuardShare;
-pub type PolicyIntent = TransactionIntent;
 
 /// Unforgeable linear capability token (`!Clone`, `!Copy`, private constructor) minted ONLY when
 /// `TransactionPolicy::evaluate` AND the committed pairwise BDOZ 2-lane GF($2^{128}$) MAC barrier succeed!
@@ -1712,8 +1746,9 @@ impl PendingIntentStagingPool {
 }
 
 /// Evaluate `policy` across `quorum_guards` where each signer $i$ independently evaluates its own
-/// local `per_party_intents[i]` inside a 2-round **commit-then-open Eurocrypt-2011 pairwise BDOZ**
-/// barrier (`0` central MAC key reconstruction, private pairwise zero-shares!).
+/// local `per_party_intents[i]` inside the **commit-then-open Eurocrypt-2011 pairwise BDOZ**
+/// barrier (`0` central MAC key reconstruction, private pairwise zero-shares!). The rounds
+/// are those of the per-party phase states, run by [`barrier_rounds_in_process`].
 #[allow(clippy::too_many_arguments)]
 fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
     policy: &TransactionPolicy,
@@ -1736,7 +1771,6 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
     if quorum_ids.windows(2).any(|w| w[0] == w[1]) {
         return Err(PolicyViolation::DuplicateApproverInQuorum);
     }
-    let quorum_flat = policy_ids_bytes(&quorum_ids);
     let mut projected_spends = Vec::with_capacity(m);
     for (guard, intent) in quorum_guards.iter().zip(per_party_intents) {
         policy.evaluate(intent)?;
@@ -1780,7 +1814,6 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         )?;
         projected_spends.push(projected);
     }
-    let quorum_digest = cshake256_framed_32(b"QSAG.POLICY.QUORUM_SET.V2", &[&quorum_flat]);
     let policy_digest = policy.canonical_digest();
 
     // Verify all guards have an available preprocessing slot before advancing any slot latch.
@@ -1796,163 +1829,49 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         }
     }
 
-    // Round 1: Each party `i` independently consumes a single-use BDOZ preprocessing slot and
-    // broadcasts masked wire `delta_i = r_{i, slot} ^ folded_x_i`!
-    struct PartyLocalRound1 {
-        party_id: u16,
-        slot: usize,
-        intent_digest: [u8; 32],
-        folded_x: (u128, u128),
-        delta_broadcast: (u128, u128),
-    }
-
-    let mut r1_states: Vec<PartyLocalRound1> = Vec::with_capacity(m);
-    let online_res: Result<qsag_verified::OpeningReleasePermit, PolicyViolation> = (|| {
-        for (g, intent_i) in quorum_guards.iter().zip(per_party_intents.iter()) {
+    // Latch one preprocessing slot per guard. From here every exit retires these slots.
+    let sessions: Vec<PartyPolicyDeltaCommitMsg> = quorum_guards
+        .iter()
+        .zip(per_party_intents)
+        .map(|(g, intent)| {
             let slot = g.next_slot.get();
             g.next_slot.set(slot + 1);
-
-            let intent_digest = intent_i.canonical_digest();
-            let folded_x = compute_folded_policy_wire(
-                &policy_digest,
-                &intent_digest,
-                &session_id,
-                intent_i.initiator_party,
-                intent_i.window_id,
-                &intent_i.nonce,
-                accel,
-            )?;
-            let r_mask = SecretBuffer(g.preproc_r[slot]);
-            let delta = (r_mask[0] ^ folded_x.0, r_mask[1] ^ folded_x.1);
-            #[cfg(test)]
-            let delta = {
-                let mut delta = delta;
-                if let Some((fault_idx, fault_xor)) = injected_delta_fault
-                    && fault_idx == r1_states.len()
-                {
-                    delta.0 ^= fault_xor.0;
-                    delta.1 ^= fault_xor.1;
-                }
-                delta
-            };
-            r1_states.push(PartyLocalRound1 {
+            PartyPolicyDeltaCommitMsg {
                 party_id: g.party_id,
                 slot,
-                intent_digest,
-                folded_x,
-                delta_broadcast: delta,
-            });
-        }
-
-        let mut delta_transcript = Vec::new();
-        for st in &r1_states {
-            delta_transcript.extend_from_slice(&st.party_id.to_be_bytes());
-            delta_transcript.extend_from_slice(&(st.slot as u64).to_be_bytes());
-            delta_transcript.extend_from_slice(&policy_pair_bytes(&[
-                st.delta_broadcast.0,
-                st.delta_broadcast.1,
-            ]));
-        }
-
-        // Round 2a (Commit ONLY): Every party `i` computes its pairwise BDOZ difference share `sigma_i`
-        // strictly from its own `PolicySignerGuardShare` + Round-1 `delta_broadcast`s and commits BEFORE any open!
-        let mut commits = Vec::with_capacity(m);
-        /// Party, committed payload, sigma lanes and commitment salt.
-        type SigmaOpening = (u16, [u8; 32], [u128; 2], [u8; 32]);
-        let mut deferred_openings: SecretVec<SigmaOpening> = SecretVec::with_capacity(m);
-
-        for (g, st_i) in quorum_guards.iter().zip(r1_states.iter()) {
-            let mut sigma = g.pairwise_zero_share(&quorum_ids, &session_id, &quorum_digest);
-
-            for st_j in &r1_states {
-                if st_j.party_id == g.party_id {
-                    continue;
-                }
-                let m_ij = SecretBuffer(g.outgoing_mac(st_j.party_id, st_i.slot)?);
-                let k_ij = SecretBuffer(g.incoming_key(st_j.party_id, st_j.slot)?);
-                let alpha_ij = g.incoming_slot_alpha(st_j.party_id, st_j.slot);
-                let expected_r_j0 = st_i.folded_x.0 ^ st_j.delta_broadcast.0;
-                let expected_r_j1 = st_i.folded_x.1 ^ st_j.delta_broadcast.1;
-
-                let chi = cshake256_framed_32(
-                    b"QSAG.POLICY.PAIR_WEIGHT.V1",
-                    &[
-                        &session_id,
-                        &policy_digest,
-                        &st_i.intent_digest,
-                        &quorum_digest,
-                        &delta_transcript,
-                        &g.party_id.min(st_j.party_id).to_be_bytes(),
-                        &g.party_id.max(st_j.party_id).to_be_bytes(),
-                    ],
-                );
-                let [chi0, chi1] = policy_pair(&chi);
-                sigma[0] ^= gf2_128_mul(
-                    chi0,
-                    m_ij[0] ^ k_ij[0] ^ gf2_128_mul(alpha_ij[0], expected_r_j0),
-                );
-                sigma[1] ^= gf2_128_mul(
-                    chi1,
-                    m_ij[1] ^ k_ij[1] ^ gf2_128_mul(alpha_ij[1], expected_r_j1),
-                );
+                session_id,
+                initiator_party: intent.initiator_party,
+                window_id: intent.window_id,
+                quorum_ids: quorum_ids.clone(),
+                policy_digest,
+                intent_digest: intent.canonical_digest(),
+                commitment: [0; 32],
             }
+        })
+        .collect();
+    let online_res = barrier_rounds_in_process(
+        &sessions,
+        quorum_guards,
+        per_party_intents,
+        #[cfg(test)]
+        injected_delta_fault,
+        accel,
+    );
 
-            let payload = SecretBuffer(policy_pair_bytes(&sigma));
-            let slot_be = (st_i.slot as u32).to_be_bytes();
-            let salt = secret_digest(
-                b"QSAG.POLICY.COMMIT_SALT.V2",
-                &[&g.local_salt_seed, &session_id, &slot_be],
-            );
-            let comm = commit_mpc_broadcast(&session_id, 0x504F_4C32, g.party_id, &*payload, &salt);
-            commits.push((g.party_id, comm));
-            deferred_openings.push_wiping((g.party_id, *payload, *sigma, *salt));
-        }
-
-        // Round 2b: Verify ALL commitments in constant time FIRST, then verify `\bigoplus_i \sigma_i == (0, 0)`!
-        let mut sigma_openings = Vec::with_capacity(commits.len());
-        for ((c_pid, comm), (o_pid, payload, sigmas, salt)) in
-            commits.iter().zip(deferred_openings.iter())
-        {
-            debug_assert_eq!(c_pid, o_pid);
-            let expected_comm =
-                commit_mpc_broadcast(&session_id, 0x504F_4C32, *o_pid, payload, salt);
-            if !ct_eq_bytes(&expected_comm, comm) {
-                return Err(PolicyViolation::BarrierCommitmentMismatch { party_id: *o_pid });
-            }
-            sigma_openings.push((*comm, expected_comm, *sigmas));
-        }
-
-        let mut all_digests_equal = true;
-        for st in &r1_states[1..] {
-            all_digests_equal &= ct_eq_bytes(&st.intent_digest, &r1_states[0].intent_digest);
-        }
-        if !all_digests_equal {
-            return Err(PolicyViolation::BarrierBdozMacFailed);
-        }
-
-        // The zero-sum decision and the release permit come from the extracted guard.
-        release_sigma_round(
-            &session_id,
-            0x504F_4C32,
-            &r1_states[0].intent_digest,
-            &sigma_openings,
-        )
-    })();
-
+    let peer_slots_of = |party_id: u16| -> Vec<(u16, usize)> {
+        sessions
+            .iter()
+            .filter(|peer| peer.party_id != party_id)
+            .map(|peer| (peer.party_id, peer.slot))
+            .collect()
+    };
     let abort_all = |quorum_guards: &mut [PolicySignerGuardShare]| {
-        for (idx, g_abort) in quorum_guards.iter_mut().enumerate() {
-            if let Some(st_own) = r1_states.get(idx) {
-                let peer_slots: Vec<(u16, usize)> = r1_states
-                    .iter()
-                    .filter(|st| st.party_id != g_abort.party_id)
-                    .map(|st| (st.party_id, st.slot))
-                    .collect();
-                g_abort.abort_session_slot(st_own.slot, &peer_slots);
-            }
+        for (g_abort, own) in quorum_guards.iter_mut().zip(&sessions) {
+            g_abort.abort_session_slot(own.slot, &peer_slots_of(g_abort.party_id));
         }
     };
-    let permit = match online_res {
-        Ok(permit) => permit,
+    let (permit, _sigma_commits) = match online_res {
+        Ok(rounds) => rounds,
         Err(err) => {
             abort_all(quorum_guards);
             return Err(err);
@@ -1972,11 +1891,7 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
     // Atomically advance accumulated window spend, burn intent nonces + session ID, and retire slots.
     let mut record_failure = None;
     for (idx, g) in quorum_guards.iter_mut().enumerate() {
-        let peer_slots: Vec<(u16, usize)> = r1_states
-            .iter()
-            .filter(|st| st.party_id != g.party_id)
-            .map(|st| (st.party_id, st.slot))
-            .collect();
+        let peer_slots = peer_slots_of(g.party_id);
         let recorded_spend = if shared_ledger.is_some() {
             projected_spends[idx].max(global_projected)
         } else {
@@ -1988,7 +1903,7 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
             per_party_intents[idx].nonce,
             session_id,
         );
-        g.abort_session_slot(r1_states[idx].slot, &peer_slots);
+        g.abort_session_slot(sessions[idx].slot, &peer_slots);
         if let Err(err) = recorded {
             // The verified guard refused a spend the barrier approved: nothing is released.
             g.poison();
@@ -2005,9 +1920,105 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         permit,
         session_id,
         policy_digest,
-        r1_states[0].intent_digest,
+        sessions[0].intent_digest,
         per_party_intents[0].clone(),
     )
+}
+
+/// The four barrier rounds for guards that share one process, after the caller latched
+/// the slot named in each guard's entry of `sessions` (commitment still unset). Every
+/// value is derived by the functions the per-party phase states use (`masked_policy_wire`,
+/// `delta_commitment`, `committed_sigma`, `release_committed_sigmas`); only the message
+/// passing is elided. Returns the release permit of the sigma opening and the frozen
+/// sigma commitments, sorted by party.
+fn barrier_rounds_in_process<B: AcceleratorBackend>(
+    sessions: &[PartyPolicyDeltaCommitMsg],
+    quorum_guards: &[PolicySignerGuardShare],
+    per_party_intents: &[TransactionIntent],
+    #[cfg(test)] injected_delta_fault: Option<(usize, (u128, u128))>,
+    accel: &B,
+) -> Result<
+    (
+        qsag_verified::OpeningReleasePermit,
+        Vec<PartyPolicySigmaCommitMsg>,
+    ),
+    PolicyViolation,
+> {
+    let m = sessions.len();
+
+    // Round 1: every guard commits to its masked wire.
+    let mut own_commits: Vec<PartyPolicyDeltaCommitMsg> = Vec::with_capacity(m);
+    let mut folded = Vec::with_capacity(m);
+    let mut delta_opens = Vec::with_capacity(m);
+    for ((g, intent), session) in quorum_guards.iter().zip(per_party_intents).zip(sessions) {
+        let mut own = session.clone();
+        let MaskedWire {
+            folded: folded_x,
+            delta,
+            salt,
+        } = g.masked_policy_wire(&own, &intent.nonce, accel)?;
+        #[cfg(test)]
+        let delta = match injected_delta_fault {
+            Some((fault_index, fault)) if fault_index == own_commits.len() => {
+                [delta[0] ^ fault.0, delta[1] ^ fault.1]
+            }
+            _ => delta,
+        };
+        own.commitment = delta_commitment(&own, &salt, &delta);
+        delta_opens.push(PartyPolicyDeltaOpenMsg {
+            party_id: g.party_id,
+            salt_i: salt,
+            delta_i: delta,
+        });
+        folded.push(folded_x);
+        own_commits.push(own);
+    }
+
+    // Rounds 2 and 3: with the whole delta commitment vector frozen, every guard checks
+    // the openings and commits to its sigma share. No sigma is opened before all exist.
+    let mut delta_commits = own_commits.clone();
+    delta_commits.sort_by_key(|c| c.party_id);
+    delta_opens.sort_by_key(|o| o.party_id);
+    let mut sigma_commits = Vec::with_capacity(m);
+    /// Party, sigma commitment salt and sigma lanes.
+    type SigmaOpening = (u16, [u8; 32], [u128; 2]);
+    let mut deferred_openings: SecretVec<SigmaOpening> = SecretVec::with_capacity(m);
+    for ((g, own), folded_x) in quorum_guards.iter().zip(&own_commits).zip(&folded) {
+        let (msg, sigma, salt) = g.committed_sigma(own, folded_x, &delta_commits, &delta_opens)?;
+        sigma_commits.push(msg);
+        deferred_openings.push_wiping((g.party_id, *salt, *sigma));
+    }
+    sigma_commits.sort_by_key(|c| c.party_id);
+
+    // Round 4. Guards that evaluated different intents froze different transcripts.
+    let (first_delta, first_sigma) = delta_commits
+        .first()
+        .zip(sigma_commits.first())
+        .ok_or(PolicyViolation::EmptySignerBarrierSet)?;
+    let mut one_transcript = true;
+    for (d, c) in delta_commits.iter().zip(&sigma_commits) {
+        one_transcript &= ct_eq_bytes(&d.intent_digest, &first_delta.intent_digest);
+        one_transcript &= ct_eq_bytes(&c.transcript_digest, &first_sigma.transcript_digest);
+    }
+    if !one_transcript {
+        return Err(PolicyViolation::BarrierBdozMacFailed);
+    }
+    let mut sigma_opens: Vec<PartyPolicySigmaOpenMsg> = deferred_openings
+        .iter()
+        .map(|(party_id, salt, sigma)| PartyPolicySigmaOpenMsg {
+            party_id: *party_id,
+            sigma_salt_i: *salt,
+            sigma_i: *sigma,
+        })
+        .collect();
+    sigma_opens.sort_by_key(|o| o.party_id);
+    let permit = release_committed_sigmas(
+        &first_delta.session_id,
+        first_delta.slot as u64,
+        &sigma_commits,
+        &sigma_opens,
+    )?;
+    Ok((permit, sigma_commits))
 }
 
 /// Evaluate `policy` across `guards`; peer/session MAC or commitment faults abort ONLY the
@@ -2395,6 +2406,23 @@ impl PolicyGuardDkgRound1 {
     }
 }
 
+fn policy_ot_pad_stream(
+    seed: &[u8; 32],
+    domain: &[u8; 32],
+    sender: u16,
+    receiver: u16,
+    start: usize,
+) -> qsag_accel::keccak::Shake256 {
+    let mut pads = qsag_accel::keccak::init_cshake256(b"", b"QSAG.POLICY.DKG.OT_PAD_STREAM.V2");
+    pads.absorb(seed);
+    pads.absorb(domain);
+    pads.absorb(&sender.to_be_bytes());
+    pads.absorb(&receiver.to_be_bytes());
+    pads.absorb(&(start as u64).to_be_bytes());
+    qsag_accel::keccak::finalize_cshake256(&mut pads, true);
+    pads
+}
+
 /// Complete pairwise preprocessing without any shared master secret or dealer.
 /// OT authenticates each private r bit under the peer's private per-`(peer, slot)` alpha.
 /// XOR of the 128 selected values is M; XOR of the sender pads is K, hence M = K + alpha_{peer,slot} * r.
@@ -2463,6 +2491,10 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
                     ],
                 )
             };
+            // One private, domain-separated stream per peer and pool batch. The
+            // cursor gives distinct pads for every (slot, lane, bit).
+            let mut pads =
+                policy_ot_pad_stream(&g.local_salt_seed, &domain, g.party_id, o.sender, start);
             let mut alternatives = SecretVec::with_capacity((end - start) * 256);
             let mut choices = SecretVec::with_capacity((end - start) * 256);
             for slot in start..end {
@@ -2470,26 +2502,20 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
                 let mut key = SecretBuffer([0u128; 2]);
                 for (lane, key_lane) in key.iter_mut().enumerate() {
                     for bit in 0..128 {
-                        let raw = secret_digest(
-                            b"QSAG.POLICY.DKG.OT_PAD.V1",
-                            &[
-                                &g.local_salt_seed,
-                                &domain,
-                                &(slot as u64).to_be_bytes(),
-                                &[lane as u8, bit as u8],
-                            ],
-                        );
-                        let pad = SecretBuffer(policy_pair(&raw)[0]);
-                        alternatives
-                            .push_wiping([*pad, *pad ^ gf2_128_mul(slot_alpha[lane], 1u128 << bit)]);
+                        let mut raw = SecretBuffer([0u8; 16]);
+                        pads.squeeze(&mut raw[..]);
+                        let pad = SecretBuffer(u128::from_le_bytes(*raw));
+                        alternatives.push_wiping([
+                            *pad,
+                            *pad ^ gf2_128_mul(slot_alpha[lane], 1u128 << bit),
+                        ]);
                         choices.push_wiping(((g.preproc_r[slot][lane] >> bit) & 1) != 0);
                         *key_lane ^= *pad;
                     }
                 }
                 keys.push_wiping(*key);
             }
-            let selected =
-                SecretVec::new(ot.exchange(
+            let selected = SecretVec::new(ot.exchange(
                 g.party_id,
                 o.sender,
                 domain,
@@ -2506,10 +2532,8 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
                 ]);
             }
         }
-        g.preproc_outgoing_macs
-            .push((o.sender, macs.into_inner()));
-        g.preproc_incoming_keys
-            .push((o.sender, keys.into_inner()));
+        g.preproc_outgoing_macs.push((o.sender, macs.into_inner()));
+        g.preproc_incoming_keys.push((o.sender, keys.into_inner()));
     }
     Ok(state.first.guard)
 }
@@ -2536,9 +2560,6 @@ pub struct PartyPolicyDeltaOpenMsg {
     pub salt_i: [u8; 32],
     pub delta_i: [u128; 2],
 }
-
-/// Round two opens only delta. Sigma cannot be computed until every delta is verified.
-pub type PartyPolicyDeltaOpenAndSigmaCommitMsg = PartyPolicyDeltaOpenMsg;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartyPolicySigmaCommitMsg {
@@ -2632,7 +2653,7 @@ fn secret_digest(domain: &[u8], fields: &[&[u8]]) -> SecretBytes<32> {
 
 fn delta_commitment(c: &PartyPolicyDeltaCommitMsg, salt: &[u8; 32], delta: &[u128; 2]) -> [u8; 32] {
     cshake256_framed_32(
-        b"DELTA_COMMIT.V2",
+        b"QSAG.POLICY.DELTA_COMMIT.V2",
         &[
             &c.session_id,
             &c.party_id.to_be_bytes(),
@@ -2650,7 +2671,7 @@ fn delta_commitment(c: &PartyPolicyDeltaCommitMsg, salt: &[u8; 32], delta: &[u12
 
 fn sigma_commitment(c: &PartyPolicySigmaCommitMsg, salt: &[u8; 32], sigma: &[u128; 2]) -> [u8; 32] {
     cshake256_framed_32(
-        b"SIGMA_COMMIT",
+        b"QSAG.POLICY.SIGMA_COMMIT.V1",
         &[
             &c.transcript_digest,
             &c.party_id.to_be_bytes(),
@@ -2658,6 +2679,181 @@ fn sigma_commitment(c: &PartyPolicySigmaCommitMsg, salt: &[u8; 32], sigma: &[u12
             &policy_pair_bytes(sigma),
         ],
     )
+}
+
+/// The values one guard derives in barrier round 1: the folded policy wire, that wire
+/// masked with the guard's preprocessed `r` of the session slot, and the salt of the
+/// delta commitment.
+struct MaskedWire {
+    folded: [u128; 2],
+    delta: [u128; 2],
+    salt: [u8; 32],
+}
+
+/// The values one guard derives in barrier round 3: its sigma commitment message, its
+/// sigma share and the salt of the commitment.
+type CommittedSigma = (
+    PartyPolicySigmaCommitMsg,
+    SecretBuffer<[u128; 2]>,
+    SecretBytes<32>,
+);
+
+// The round derivations of the committed barrier. The per-party phase states and the
+// in-process barrier both call these and nothing else, so one session produces the same
+// commitments, transcript digest and sigma shares on either path.
+impl PolicySignerGuardShare {
+    /// Round 1 for the session `own` describes.
+    fn masked_policy_wire<B: AcceleratorBackend>(
+        &self,
+        own: &PartyPolicyDeltaCommitMsg,
+        intent_nonce: &[u8; 32],
+        accel: &B,
+    ) -> Result<MaskedWire, PolicyViolation> {
+        let r = SecretBuffer(
+            *self
+                .preproc_r
+                .get(own.slot)
+                .ok_or(PolicyViolation::BarrierPreprocExhausted)?,
+        );
+        let x = compute_folded_policy_wire(
+            &own.policy_digest,
+            &own.intent_digest,
+            &own.session_id,
+            own.initiator_party,
+            own.window_id,
+            intent_nonce,
+            accel,
+        )?;
+        let salt = cshake256_framed_32(
+            b"QSAG.POLICY.DELTA_SALT.V1",
+            &[
+                &self.local_salt_seed,
+                &own.session_id,
+                &(own.slot as u64).to_be_bytes(),
+            ],
+        );
+        Ok(MaskedWire {
+            folded: [x.0, x.1],
+            delta: [r[0] ^ x.0, r[1] ^ x.1],
+            salt,
+        })
+    }
+
+    /// Round 3 for the session `own` describes: check every delta opening against its
+    /// frozen commitment, bind the verified openings into the transcript digest, and
+    /// derive this guard's sigma share with its commitment. `commits` and `opens` are
+    /// sorted by party and cover `own.quorum_ids`.
+    fn committed_sigma(
+        &self,
+        own: &PartyPolicyDeltaCommitMsg,
+        folded: &[u128; 2],
+        commits: &[PartyPolicyDeltaCommitMsg],
+        opens: &[PartyPolicyDeltaOpenMsg],
+    ) -> Result<CommittedSigma, PolicyViolation> {
+        if opens.len() != commits.len() {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        let mut transcript = Vec::new();
+        for (c, o) in commits.iter().zip(opens) {
+            if c.party_id != o.party_id
+                || !ct_eq_bytes(&c.commitment, &delta_commitment(c, &o.salt_i, &o.delta_i))
+            {
+                return Err(PolicyViolation::BarrierCommitmentMismatch {
+                    party_id: c.party_id,
+                });
+            }
+            transcript.extend_from_slice(&c.party_id.to_be_bytes());
+            transcript.extend_from_slice(&(c.slot as u64).to_be_bytes());
+            transcript.extend_from_slice(&c.commitment);
+            transcript.extend_from_slice(&o.salt_i);
+            transcript.extend_from_slice(&policy_pair_bytes(&o.delta_i));
+        }
+        let q_digest = cshake256_framed_32(
+            b"QSAG.POLICY.QUORUM_SET.V2",
+            &[&policy_ids_bytes(&own.quorum_ids)],
+        );
+        let digest = cshake256_framed_32(
+            b"QSAG.POLICY.VERIFIED_DELTAS.V2",
+            &[
+                &own.session_id,
+                &own.initiator_party.to_be_bytes(),
+                &own.window_id.to_be_bytes(),
+                &own.policy_digest,
+                &own.intent_digest,
+                &q_digest,
+                &transcript,
+            ],
+        );
+        let mut sigma = self.pairwise_zero_share(&own.quorum_ids, &own.session_id, &q_digest);
+        for (c, o) in commits.iter().zip(opens) {
+            if c.party_id == own.party_id {
+                continue;
+            }
+            let m = SecretBuffer(self.outgoing_mac(c.party_id, own.slot)?);
+            let k = SecretBuffer(self.incoming_key(c.party_id, c.slot)?);
+            let peer_alpha = self.incoming_slot_alpha(c.party_id, c.slot);
+            let chi = policy_pair(&cshake256_framed_32(
+                b"QSAG.POLICY.PAIR_WEIGHT.V3",
+                &[
+                    &digest,
+                    &own.party_id.min(c.party_id).to_be_bytes(),
+                    &own.party_id.max(c.party_id).to_be_bytes(),
+                ],
+            ));
+            for lane in 0..2 {
+                sigma[lane] ^= gf2_128_mul(
+                    chi[lane],
+                    m[lane]
+                        ^ k[lane]
+                        ^ gf2_128_mul(peer_alpha[lane], folded[lane] ^ o.delta_i[lane]),
+                );
+            }
+        }
+        let salt = secret_digest(
+            b"QSAG.POLICY.SIGMA_SALT.V1",
+            &[
+                &self.local_salt_seed,
+                &digest,
+                &(own.slot as u64).to_be_bytes(),
+            ],
+        );
+        let mut msg = PartyPolicySigmaCommitMsg {
+            party_id: own.party_id,
+            transcript_digest: digest,
+            commitment: [0; 32],
+        };
+        msg.commitment = sigma_commitment(&msg, &salt, &sigma);
+        Ok((msg, sigma, salt))
+    }
+}
+
+/// Round 4 verification: every sigma opening against its frozen commitment, then the
+/// zero-sum release decision of the extracted single-use guard, bound to the transcript
+/// digest the commitments froze. `commits` and `opens` are sorted by party.
+fn release_committed_sigmas(
+    session_id: &[u8; 32],
+    round_id: u64,
+    commits: &[PartyPolicySigmaCommitMsg],
+    opens: &[PartyPolicySigmaOpenMsg],
+) -> Result<qsag_verified::OpeningReleasePermit, PolicyViolation> {
+    if opens.len() != commits.len() {
+        return Err(PolicyViolation::IntentBindingMismatch);
+    }
+    let mut sigma_openings = Vec::with_capacity(opens.len());
+    for (c, o) in commits.iter().zip(opens) {
+        let recomputed = sigma_commitment(c, &o.sigma_salt_i, &o.sigma_i);
+        if c.party_id != o.party_id || !ct_eq_bytes(&c.commitment, &recomputed) {
+            return Err(PolicyViolation::BarrierCommitmentMismatch {
+                party_id: c.party_id,
+            });
+        }
+        sigma_openings.push((c.commitment, recomputed, o.sigma_i));
+    }
+    let binding = commits
+        .first()
+        .map(|c| c.transcript_digest)
+        .ok_or(PolicyViolation::IntentBindingMismatch)?;
+    release_sigma_round(session_id, round_id, &binding, &sigma_openings)
 }
 
 impl PolicySignerGuardShare {
@@ -2730,12 +2926,9 @@ impl PolicySignerGuardShare {
             return Err(PolicyViolation::MissingHardwareGuardian);
         }
         let slot = self.next_slot.get();
-        let r = SecretBuffer(
-            *self
-                .preproc_r
-                .get(slot)
-                .ok_or(PolicyViolation::BarrierPreprocExhausted)?,
-        );
+        if slot >= self.preproc_r.len() {
+            return Err(PolicyViolation::BarrierPreprocExhausted);
+        }
         for &peer in &ids {
             if peer != self.party_id {
                 self.outgoing_mac(peer, slot)?;
@@ -2757,12 +2950,12 @@ impl PolicySignerGuardShare {
             intent_digest: intent.canonical_digest(),
             commitment: [0; 32],
         };
-        let x = match compute_folded_policy_wire(
-            &own.policy_digest,
-            &own.intent_digest,
-            &session_id,
-            intent.initiator_party,
-            intent.window_id,
+        let MaskedWire {
+            folded,
+            delta,
+            salt,
+        } = match self.masked_policy_wire(
+            &own,
             &intent.nonce,
             &qsag_accel::CpuReferenceBackend::new(),
         ) {
@@ -2772,15 +2965,6 @@ impl PolicySignerGuardShare {
                 return Err(err);
             }
         };
-        let delta = [r[0] ^ x.0, r[1] ^ x.1];
-        let salt = cshake256_framed_32(
-            b"QSAG.POLICY.DELTA_SALT.V1",
-            &[
-                &self.local_salt_seed,
-                &session_id,
-                &(slot as u64).to_be_bytes(),
-            ],
-        );
         own.commitment = delta_commitment(&own, &salt, &delta);
         let context = PartyPolicyContext {
             intent: intent.clone(),
@@ -2791,7 +2975,7 @@ impl PolicySignerGuardShare {
             guard_binding: self.phase_binding(slot),
             salt,
             delta,
-            folded: [x.0, x.1],
+            folded,
             sigma: [0; 2],
             sigma_salt: [0; 32],
         };
@@ -2891,13 +3075,7 @@ impl PartyPolicyRound1State {
         self,
         guard: &mut PolicySignerGuardShare,
         all_r1_commits: &[PartyPolicyDeltaCommitMsg],
-    ) -> Result<
-        (
-            PartyPolicyRound2State,
-            PartyPolicyDeltaOpenAndSigmaCommitMsg,
-        ),
-        PolicyViolation,
-    > {
+    ) -> Result<(PartyPolicyRound2State, PartyPolicyDeltaOpenMsg), PolicyViolation> {
         self.round2_open_delta(guard, all_r1_commits)
     }
 
@@ -2963,85 +3141,13 @@ impl PartyPolicyRound2State {
         let result = (|| {
             let mut opens = openings.to_vec();
             opens.sort_by_key(|o| o.party_id);
-            if opens.len() != self.commits.len() {
-                return Err(PolicyViolation::IntentBindingMismatch);
-            }
-            let mut transcript = Vec::new();
-            for (c, o) in self.commits.iter().zip(&opens) {
-                if c.party_id != o.party_id
-                    || !ct_eq_bytes(&c.commitment, &delta_commitment(c, &o.salt_i, &o.delta_i))
-                {
-                    return Err(PolicyViolation::BarrierCommitmentMismatch {
-                        party_id: c.party_id,
-                    });
-                }
-                transcript.extend_from_slice(&c.party_id.to_be_bytes());
-                transcript.extend_from_slice(&(c.slot as u64).to_be_bytes());
-                transcript.extend_from_slice(&c.commitment);
-                transcript.extend_from_slice(&o.salt_i);
-                transcript.extend_from_slice(&policy_pair_bytes(&o.delta_i));
-            }
-            let own = &self.context.own;
-            let q_digest = cshake256_framed_32(
-                b"QSAG.POLICY.QUORUM_SET.V2",
-                &[&policy_ids_bytes(&own.quorum_ids)],
-            );
-            let digest = cshake256_framed_32(
-                b"QSAG.POLICY.VERIFIED_DELTAS.V2",
-                &[
-                    &own.session_id,
-                    &own.initiator_party.to_be_bytes(),
-                    &own.window_id.to_be_bytes(),
-                    &own.policy_digest,
-                    &own.intent_digest,
-                    &q_digest,
-                    &transcript,
-                ],
-            );
-            let mut sigma =
-                guard.pairwise_zero_share(&own.quorum_ids, &own.session_id, &q_digest);
-            for (c, o) in self.commits.iter().zip(&opens) {
-                if c.party_id == own.party_id {
-                    continue;
-                }
-                let m = SecretBuffer(guard.outgoing_mac(c.party_id, own.slot)?);
-                let k = SecretBuffer(guard.incoming_key(c.party_id, c.slot)?);
-                let peer_alpha = guard.incoming_slot_alpha(c.party_id, c.slot);
-                let chi = policy_pair(&cshake256_framed_32(
-                    b"QSAG.POLICY.PAIR_WEIGHT.V3",
-                    &[
-                        &digest,
-                        &own.party_id.min(c.party_id).to_be_bytes(),
-                        &own.party_id.max(c.party_id).to_be_bytes(),
-                    ],
-                ));
-                for lane in 0..2 {
-                    sigma[lane] ^= gf2_128_mul(
-                        chi[lane],
-                        m[lane]
-                            ^ k[lane]
-                            ^ gf2_128_mul(
-                                peer_alpha[lane],
-                                self.context.folded[lane] ^ o.delta_i[lane],
-                            ),
-                    );
-                }
-            }
-            let salt = secret_digest(
-                b"QSAG.POLICY.SIGMA_SALT.V1",
-                &[
-                    &guard.local_salt_seed,
-                    &digest,
-                    &(own.slot as u64).to_be_bytes(),
-                ],
-            );
-            let mut msg = PartyPolicySigmaCommitMsg {
-                party_id: own.party_id,
-                transcript_digest: digest,
-                commitment: [0; 32],
-            };
-            msg.commitment = sigma_commitment(&msg, &salt, &sigma);
-            guard.active_phase = Some((own.slot, 3));
+            let (msg, sigma, salt) = guard.committed_sigma(
+                &self.context.own,
+                &self.context.folded,
+                &self.commits,
+                &opens,
+            )?;
+            guard.active_phase = Some((own_slot, 3));
             self.context.sigma = *sigma;
             self.context.sigma_salt = *salt;
             Ok((
@@ -3109,30 +3215,11 @@ impl PartyPolicyFinalizeState {
         let result = (|| {
             let mut opens = openings.to_vec();
             opens.sort_by_key(|o| o.party_id);
-            if opens.len() != self.commits.len() {
-                return Err(PolicyViolation::IntentBindingMismatch);
-            }
-            let mut sigma_openings = Vec::with_capacity(opens.len());
-            for (c, o) in self.commits.iter().zip(&opens) {
-                let recomputed = sigma_commitment(c, &o.sigma_salt_i, &o.sigma_i);
-                if c.party_id != o.party_id || !ct_eq_bytes(&c.commitment, &recomputed) {
-                    return Err(PolicyViolation::BarrierCommitmentMismatch {
-                        party_id: c.party_id,
-                    });
-                }
-                sigma_openings.push((c.commitment, recomputed, o.sigma_i));
-            }
-            // Round 4 froze one transcript digest for every commitment; it binds the round.
-            let binding = self
-                .commits
-                .first()
-                .map(|c| c.transcript_digest)
-                .ok_or(PolicyViolation::IntentBindingMismatch)?;
-            let permit = release_sigma_round(
+            let permit = release_committed_sigmas(
                 &self.context.own.session_id,
                 own_slot as u64,
-                &binding,
-                &sigma_openings,
+                &self.commits,
+                &opens,
             )?;
             let projected_spend = guard.check_window_nonce_and_projected_spend(
                 self.context.velocity_window_cap,
@@ -3422,12 +3509,172 @@ mod tests {
     }
 
     #[test]
-    fn initiator_authentication_is_default() {
-        assert!(
-            super::trusted_dealer_setup_for_testing([8; 32], &[1, 2])
-                .iter()
-                .all(|g| g.require_authenticated_initiator)
+    fn provisioned_guards_require_initiator_authentication_and_cannot_be_downgraded() {
+        let accel = CpuReferenceBackend::new();
+        let (policy, intent) = phase_fixture(&[1, 4]);
+        let provision = || -> Vec<PolicySignerGuardShare> {
+            super::trusted_dealer_setup_for_testing([8; 32], &[1, 4])
+                .into_iter()
+                .map(|g| g.with_window_authority([42; 32], [43; 32]).unwrap())
+                .collect()
+        };
+        let mut guards = provision();
+        assert!(guards.iter().all(|g| g.require_authenticated_initiator));
+
+        // The intent carries no initiator MAC. The entry points that do not force
+        // authentication refuse it all the same.
+        assert_eq!(
+            evaluate_policy_committed_barrier(
+                &policy,
+                &intent,
+                intent.session_id,
+                intent.timestamp_secs,
+                &mut guards,
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::UnauthenticatedInitiator
         );
+        assert_eq!(
+            guards[0]
+                .round1_commit_intent(
+                    &policy,
+                    &intent,
+                    intent.session_id,
+                    intent.timestamp_secs,
+                    intent.rolling_window_spent,
+                )
+                .err(),
+            Some(PolicyViolation::UnauthenticatedInitiator)
+        );
+
+        // A checkpoint of the same guard with the requirement waived is a rollback; one
+        // with the requirement set restores.
+        let waived = raw_test_guards([8; 32], &[1, 4]);
+        assert!(!waived[0].require_authenticated_initiator);
+        let downgrade = waived[0].export_durable_checkpoint(&[7; 32], 1);
+        assert!(matches!(
+            guards[0].restore_from_durable_checkpoint(&downgrade, &[7; 32], 1),
+            Err(PolicyGuardError::Rollback)
+        ));
+        assert!(guards[0].require_authenticated_initiator);
+        let twin = provision();
+        let same = twin[0].export_durable_checkpoint(&[7; 32], 1);
+        guards[0]
+            .restore_from_durable_checkpoint(&same, &[7; 32], 1)
+            .unwrap();
+        assert!(guards[0].require_authenticated_initiator);
+    }
+
+    #[test]
+    fn quorum_tier_order_is_validated_before_any_tier_is_selected() {
+        let (mut policy, intent) = phase_fixture(&[1, 4]);
+        let tier = |max_amount_units, min_approvers, require_hardware_guardian| QuorumTierRule {
+            max_amount_units,
+            min_approvers,
+            require_hardware_guardian,
+        };
+        // The intent (amount 10, approvers {1, 4}, guardian 4) satisfies the first tier of
+        // every list below, so each refusal comes from the order check alone.
+        let mut verdict = |tiers: Vec<QuorumTierRule>| {
+            policy.quorum_tiers = tiers;
+            (policy.validate_quorum_tiers(), policy.evaluate(&intent))
+        };
+        let refused = (
+            Err(PolicyViolation::InvalidQuorumTierOrder),
+            Err(PolicyViolation::InvalidQuorumTierOrder),
+        );
+
+        assert_eq!(
+            verdict(vec![
+                tier(50, 2, false),
+                tier(100, 2, false),
+                tier(1_000, 3, true)
+            ]),
+            (Ok(()), Ok(()))
+        );
+        // A later tier whose bound an earlier tier already covers is unreachable.
+        assert_eq!(
+            verdict(vec![tier(100, 2, false), tier(100, 3, true)]),
+            refused
+        );
+        assert_eq!(
+            verdict(vec![tier(100, 2, false), tier(50, 3, true)]),
+            refused
+        );
+        assert_eq!(
+            verdict(vec![
+                tier(50, 2, false),
+                tier(1_000, 2, false),
+                tier(100, 3, true)
+            ]),
+            refused
+        );
+        // A larger amount selecting a weaker quorum than a smaller one.
+        assert_eq!(
+            verdict(vec![tier(50, 2, false), tier(100, 1, false)]),
+            refused
+        );
+        assert_eq!(
+            verdict(vec![tier(50, 2, true), tier(100, 2, false)]),
+            refused
+        );
+        assert_eq!(
+            verdict(vec![
+                tier(50, 2, true),
+                tier(100, 3, true),
+                tier(1_000, 3, false)
+            ]),
+            refused
+        );
+        // No tier: in order, and no amount is covered.
+        assert_eq!(
+            verdict(Vec::new()),
+            (Ok(()), Err(PolicyViolation::NoMatchingQuorumTier))
+        );
+    }
+
+    #[test]
+    fn in_process_barrier_and_party_phases_derive_identical_rounds() {
+        let (policy, intent) = phase_fixture(&[1, 4]);
+        // The dealer is deterministic: both guard sets hold the same secrets.
+        let mut phase_guards = raw_test_guards([0x5A; 32], &[1, 4]);
+        let batch_guards = raw_test_guards([0x5A; 32], &[1, 4]);
+
+        let (states, delta_commits) = start_phases(&mut phase_guards, &policy, &intent);
+        let (states, delta_opens): (Vec<_>, Vec<_>) = states
+            .into_iter()
+            .zip(&mut phase_guards)
+            .map(|(s, g)| s.round2_open_delta(g, &delta_commits).unwrap())
+            .unzip();
+        let (_states, sigma_commits): (Vec<_>, Vec<_>) = states
+            .into_iter()
+            .zip(&mut phase_guards)
+            .map(|(s, g)| s.round3_commit_sigma(g, &delta_opens).unwrap())
+            .unzip();
+
+        // The same session on the in-process path: same slots, commitments not yet set.
+        let sessions: Vec<PartyPolicyDeltaCommitMsg> = delta_commits
+            .iter()
+            .map(|c| PartyPolicyDeltaCommitMsg {
+                commitment: [0; 32],
+                ..c.clone()
+            })
+            .collect();
+        for g in &batch_guards {
+            g.next_slot.set(1);
+        }
+        let (_permit, batch_sigma_commits) = barrier_rounds_in_process(
+            &sessions,
+            &batch_guards,
+            &[intent.clone(), intent.clone()],
+            None,
+            &CpuReferenceBackend::new(),
+        )
+        .unwrap();
+        // A sigma commitment covers the transcript digest (every delta commitment, salt
+        // and opening), the sigma share and its salt.
+        assert_eq!(batch_sigma_commits, sigma_commits);
     }
     #[test]
     fn replay_capacity_exceeds_legacy_limit_and_is_durable() {
@@ -3874,7 +4121,12 @@ mod tests {
             let last = capacity - 1;
             assert!(!guard.is_peer_slot_consumed(2, last));
             assert!(guard.incoming_key(2, last).is_ok());
-            for beyond in [capacity, capacity + 1, capacity.next_multiple_of(64), usize::MAX] {
+            for beyond in [
+                capacity,
+                capacity + 1,
+                capacity.next_multiple_of(64),
+                usize::MAX,
+            ] {
                 assert!(guard.is_peer_slot_consumed(2, beyond));
                 assert_eq!(
                     guard.incoming_key(2, beyond),
@@ -4072,6 +4324,7 @@ mod tests {
             };
             let start = self.slot_cursors[cursor].2;
             self.slot_cursors[cursor].2 += alternatives.len() / 256;
+            let mut pads = policy_ot_pad_stream(seed, &domain, peer, local_party, start);
             let mut selected = Vec::new();
             for (i, choice) in choices.iter().enumerate() {
                 let slot = start + i / 256;
@@ -4083,16 +4336,9 @@ mod tests {
                     alternatives[i][0] ^ alternatives[i][1],
                     gf2_128_mul(local_slot_alpha[lane], 1u128 << bit)
                 );
-                let raw = cshake256_framed_32(
-                    b"QSAG.POLICY.DKG.OT_PAD.V1",
-                    &[
-                        seed,
-                        &domain,
-                        &(slot as u64).to_be_bytes(),
-                        &[lane as u8, bit as u8],
-                    ],
-                );
-                let pad = policy_pair(&raw)[0];
+                let mut raw = SecretBuffer([0u8; 16]);
+                pads.squeeze(&mut raw[..]);
+                let pad = u128::from_le_bytes(*raw);
                 selected.push(
                     pad ^ if *choice {
                         gf2_128_mul(peer_slot_alpha[lane], 1u128 << bit)

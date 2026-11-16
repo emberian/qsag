@@ -2,7 +2,7 @@
 //! signature library implementing NIST FIPS 205 `SLH-DSA-SHAKE` (`128s`, `128f`,
 //! `192s`, `192f`, `256s`, `256f`) and the pure-hash threshold suite:
 //!
-//! * [`baggy`] — stateless `WOTS+C` hypertree signatures over `FORS+C` or [`pors_fp`], on the
+//! * [`baggy`] — stateless `WOTS+C` hypertree signatures over [`pors_fp`] (`PORS+FP`), on the
 //!   2-of-3 256-lane replicated engine ([`rss256`]) or the `t`-of-`n` engine
 //!   ([`spdz_sweep`]), with the `Waistband` top-layer cache;
 //! * [`jorts`] — stateful single-tree 2-of-3 signatures gated by the durable
@@ -75,7 +75,14 @@ pub mod corduroy;
 #[cfg(feature = "std")]
 mod durable_ledger;
 #[cfg(feature = "std")]
-pub use durable_ledger::{ExternalMonotoneAnchor, LedgerCheckpoint};
+pub use durable_ledger::{
+    AnchorStanding, AnchorTicket, ExternalMonotoneAnchor, LedgerCheckpoint, TicketSeal,
+};
+#[cfg(feature = "std")]
+#[forbid(unsafe_code)]
+mod two_slot_record;
+#[cfg(feature = "std")]
+pub use two_slot_record::{TwoSlotPaths, TwoSlotRecord};
 
 /// Hardware (`TPM 2.0` NV counter) and hypervisor (`ACPI VMGENID` / `boot_id` / inode)
 /// anti-rollback and fork-detection anchors.

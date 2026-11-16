@@ -193,9 +193,10 @@ theorem padMap_eq (z : Fp4) (r : Pad) :
     padMap z r = ⟨add (padAlpha z r) (mul (padBeta z r) z.c0), mul (padBeta z r) z.c1⟩ := by
   apply GoldilocksField.GoldilocksExt4.ext
   · simp only [padMap, embed, padAlpha, padBeta, zS, zW, zT, zN, fp4_add_c0, fp4_mul_c0,
-      fp4_mul_c1]
+      fp4_mul_c1, GoldilocksField.GoldilocksExt4.c0, GoldilocksField.GoldilocksExt4.c1]
     constructive_ring
-  · simp only [padMap, embed, padBeta, zS, zT, zN, fp4_add_c1, fp4_mul_c0, fp4_mul_c1]
+  · simp only [padMap, embed, padBeta, zS, zT, zN, fp4_add_c1, fp4_mul_c0, fp4_mul_c1,
+      GoldilocksField.GoldilocksExt4.c0, GoldilocksField.GoldilocksExt4.c1]
     constructive_ring
 
 /-- Determinant of the `F_p`-linear system for `(r_2, r_3)`. -/
@@ -275,11 +276,13 @@ theorem padDet_norm_identity (z : Fp4) :
        mul (GoldilocksExt2.ofBase (zT z).c1) z.c1⟩ = GoldilocksExt2.ofBase (padDet z) := by
   obtain ⟨⟨a0, a1⟩, ⟨b0, b1⟩⟩ := z
   apply GoldilocksExt2.ext
-  · simp only [GoldilocksField.GoldilocksExt4.norm, GoldilocksField.GoldilocksExt4.nonResidue,
+  · simp only [GoldilocksField.GoldilocksExt4.norm,
+      QuarticGoldilocks.norm, GoldilocksField.GoldilocksExt4.c0, GoldilocksField.GoldilocksExt4.c1,
       padDet, zS, zW, zT, zN, fp2_sub_c0, fp2_sub_c1, fp2_mul_c0, fp2_mul_c1, fp2_add_c0,
       fp2_add_c1, fp2_u_c0, fp2_u_c1, GoldilocksExt2.ofBase_c0, GoldilocksExt2.ofBase_c1]
     constructive_ring
-  · simp only [GoldilocksField.GoldilocksExt4.norm, GoldilocksField.GoldilocksExt4.nonResidue,
+  · simp only [GoldilocksField.GoldilocksExt4.norm,
+      QuarticGoldilocks.norm, GoldilocksField.GoldilocksExt4.c0, GoldilocksField.GoldilocksExt4.c1,
       padDet, zS, zW, zT, zN, fp2_sub_c0, fp2_sub_c1, fp2_mul_c0, fp2_mul_c1, fp2_add_c0,
       fp2_add_c1, fp2_u_c0, fp2_u_c1, GoldilocksExt2.ofBase_c0, GoldilocksExt2.ofBase_c1]
     constructive_ring
@@ -296,8 +299,8 @@ theorem padDet_ne_zero (z : Fp4) (hB : z.c1 ≠ zero) : padDet z ≠ zero := by
           (mul (GoldilocksExt2.ofBase (zT ⟨⟨a0, a1⟩, ⟨b0, b1⟩⟩).c1) ⟨a0, a1⟩),
         mul (GoldilocksExt2.ofBase (zT ⟨⟨a0, a1⟩, ⟨b0, b1⟩⟩).c1) ⟨b0, b1⟩⟩ : Fp4) =
         GoldilocksField.GoldilocksExt4.zero
-  · have hX := congrArg GoldilocksField.GoldilocksExt4.c0 hXY
-    have hY := congrArg GoldilocksField.GoldilocksExt4.c1 hXY
+  · have hX := congrArg QuarticGoldilocks.c0 hXY
+    have hY := congrArg QuarticGoldilocks.c1 hXY
     have hτ : add a1 a1 = zero := by
       rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hY with h | h
       · exact congrArg GoldilocksExt2.c0 h

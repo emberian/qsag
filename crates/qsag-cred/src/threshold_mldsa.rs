@@ -196,7 +196,6 @@ pub trait NonceBurnPersistence {
 /// and recover the signer's epoch.
 #[cfg(feature = "std")]
 pub struct FsNonceBurnStore {
-    path: std::path::PathBuf,
     lock_id: [u8; 16],
     record: qsag_asm::durable::LockedRecord,
     key_id: [u8; 32],
@@ -204,27 +203,6 @@ pub struct FsNonceBurnStore {
     generation: u64,
     burns: Vec<(u16, u64, [u8; 32], u32)>,
     poisoned: bool,
-}
-
-#[cfg(feature = "std")]
-fn mldsa_burn_lock_inode(path: &std::path::Path) -> std::io::Result<[u8; 16]> {
-    let mut os = path.as_os_str().to_os_string();
-    os.push(".lock");
-    let meta = std::fs::symlink_metadata(std::path::PathBuf::from(os))?;
-    if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid nonce ledger lock sidecar",
-        ));
-    }
-    let mut id = [0u8; 16];
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        id[..8].copy_from_slice(&meta.dev().to_le_bytes());
-        id[8..].copy_from_slice(&meta.ino().to_le_bytes());
-    }
-    Ok(id)
 }
 
 #[cfg(feature = "std")]
@@ -236,11 +214,10 @@ impl FsNonceBurnStore {
     ) -> std::io::Result<Self> {
         let path = path.into();
         let record = qsag_asm::durable::LockedRecord::create_new(&path)?;
-        let lock_id = mldsa_burn_lock_inode(&path)?;
+        let lock_id = record.lock_inode();
         let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
         qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let store = Self {
-            path,
             lock_id,
             record,
             key_id,
@@ -269,7 +246,7 @@ impl FsNonceBurnStore {
     ) -> std::io::Result<Self> {
         let path = path.into();
         let record = qsag_asm::durable::LockedRecord::open_existing(&path)?;
-        let lock_id = mldsa_burn_lock_inode(&path)?;
+        let lock_id = record.lock_inode();
         let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
         qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let bytes = record.read()?;
@@ -302,7 +279,6 @@ impl FsNonceBurnStore {
             return Err(invalid());
         }
         let mut store = Self {
-            path,
             lock_id,
             record,
             key_id,
@@ -364,10 +340,6 @@ impl NonceBurnPersistence for FsNonceBurnStore {
         if !self.available(party_id, epoch, session_id, attempt) {
             return false;
         }
-        if mldsa_burn_lock_inode(&self.path).ok() != Some(self.lock_id) {
-            self.poisoned = true;
-            return false;
-        }
         let Some(next_gen) = self.generation.checked_add(1) else {
             self.poisoned = true;
             return false;
@@ -385,7 +357,6 @@ impl NonceBurnPersistence for FsNonceBurnStore {
         let expected = self.encode();
         if self.poisoned
             || !qsag_accel::ct::ct_eq_bytes(key_id, &self.key_id)
-            || mldsa_burn_lock_inode(&self.path).ok() != Some(self.lock_id)
             || self.record.read().map_or(true, |bytes| {
                 !qsag_accel::ct::ct_eq_bytes(&bytes, &expected)
             })

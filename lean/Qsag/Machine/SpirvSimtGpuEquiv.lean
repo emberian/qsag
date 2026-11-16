@@ -1394,6 +1394,11 @@ structure WorkgroupConfig where
 def WorkgroupConfig.totalThreads (cfg : WorkgroupConfig) : Nat :=
   cfg.numWaves * wave32Lanes
 
+theorem WorkgroupConfig.totalThreads_eq (cfg : WorkgroupConfig) :
+    cfg.totalThreads = cfg.numWaves * wave32Lanes := by rfl
+
+theorem wave32Lanes_eq : wave32Lanes = 32 := by rfl
+
 def WorkgroupConfig.localTid (_cfg : WorkgroupConfig) (wave lane : Nat) : Nat :=
   wave * wave32Lanes + lane
 

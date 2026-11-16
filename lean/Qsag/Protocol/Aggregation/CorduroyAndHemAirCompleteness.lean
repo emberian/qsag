@@ -703,6 +703,21 @@ def corduroyChainIterWith (eng : CorduroyPermEngine) (pkSeed : Lane4)
 def corduroyChainIter (pkSeed : Lane4) (layer treeIdx kpIdx chainIdx startStep steps : Nat) (val : Lane4) : Lane4 :=
   corduroyChainIterWith corduroyPoseidon2Engine pkSeed layer treeIdx kpIdx chainIdx startStep steps val
 
+theorem corduroyChainIterWith_zero (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx chainIdx startStep : Nat) (val : Lane4) :
+    corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep 0 val = val := by
+  rfl
+
+/-- One-step unfolding. Stated as a rewrite lemma: the two sides differ in their last argument by
+    one weighted feed-forward step, whose tweak limbs are closed numerals, so a definitional
+    comparison of the two chain values would normalise unary arithmetic on a 62-bit literal. -/
+theorem corduroyChainIterWith_succ (eng : CorduroyPermEngine) (pkSeed : Lane4)
+    (layer treeIdx kpIdx chainIdx startStep steps : Nat) (val : Lane4) :
+    corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep (steps + 1) val =
+      corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx (startStep + 1) steps
+        (corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep val) := by
+  conv => lhs; unfold corduroyChainIterWith
+
 theorem corduroyChainIterWith_add (eng : CorduroyPermEngine) (pkSeed : Lane4) (layer treeIdx kpIdx chainIdx : Nat)
     (a b startStep : Nat) (val : Lane4) :
     corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx (startStep + a) b
@@ -710,13 +725,11 @@ theorem corduroyChainIterWith_add (eng : CorduroyPermEngine) (pkSeed : Lane4) (l
     corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep (a + b) val := by
   induction a generalizing startStep val with
   | zero =>
-    rw [Nat.add_zero, Nat.zero_add]
-    rfl
+    rw [Nat.add_zero, Nat.zero_add, corduroyChainIterWith_zero]
   | succ a ih =>
-    dsimp only [corduroyChainIterWith]
     have hShift : startStep + (a + 1) = (startStep + 1) + a := by omega
     have hAdd   : a + 1 + b = (a + b) + 1 := by omega
-    rw [hShift, hAdd]
+    rw [corduroyChainIterWith_succ, hShift, hAdd, corduroyChainIterWith_succ]
     exact ih (startStep + 1) (corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep val)
 
 theorem corduroyChainIter_add (pkSeed : Lane4) (layer treeIdx kpIdx chainIdx : Nat)
@@ -2151,7 +2164,8 @@ private theorem mpcCorduroySharedChainIterWith_eq (eng : CorduroyPermEngine) (mr
     rw [hStepEq] at hNextComb
     obtain ⟨endSh, hRest, hEndLen, hEndComb⟩ :=
       ih (startStep + 1) nextSh _ hNextLen hNextComb
-    refine ⟨endSh, ?_, hEndLen, hEndComb⟩
+    refine ⟨endSh, ?_, hEndLen, hEndComb.trans
+      (corduroyChainIterWith_succ eng pkSeed layer treeIdx kpIdx chainIdx startStep steps val).symm⟩
     dsimp only [mpcCorduroySharedChainIterWith]
     rw [hJive]
     exact hRest
@@ -2878,13 +2892,15 @@ private def extractForwardChainCollisionWith (eng : CorduroyPermEngine) (pkSeed 
           rw [← corduroyWotsStepWith_eq, ← corduroyWotsStepWith_eq]
           exact hv }
     else
-      extractForwardChainCollisionWith eng pkSeed layer treeIdx kpIdx chainIdx steps' (startStep + 1) v1 v2 hv hEq
+      extractForwardChainCollisionWith eng pkSeed layer treeIdx kpIdx chainIdx steps' (startStep + 1) v1 v2 hv
+        (by rw [corduroyChainIterWith_succ, corduroyChainIterWith_succ] at hEq; exact hEq)
 termination_by structural steps
 
 private theorem chainIterWith_one (eng : CorduroyPermEngine) (pkSeed : Lane4)
     (layer treeIdx kpIdx chainIdx startStep : Nat) (val : Lane4) :
     corduroyChainIterWith eng pkSeed layer treeIdx kpIdx chainIdx startStep 1 val =
-      corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep val := rfl
+      corduroyWotsStepWith eng pkSeed layer treeIdx kpIdx chainIdx startStep val := by
+  rw [corduroyChainIterWith_succ, corduroyChainIterWith_zero]
 
 private def extractEarlierDigitBreakWith (eng : CorduroyPermEngine) (sk : CorduroySecretKey)
     (pkSeed : Lane4) (hSeed : pkSeed = sk.pkSeed)
@@ -4481,7 +4497,9 @@ def stepOpExpectedNext (kind : StepConstraintKind) (_c0 : Goldilocks) (x : StepO
   | .statelessDecompLimb l => stepStatelessDecompExpected x l j
   | .forsLeafHash slot =>
     if j = stRemPack + slot then x.aux 8
-    else if stepInBlock stWork 4 j then x.permOut (j - stWork) +ₚ x.aux (j - stWork)
+    else if stepInBlock stWork 4 j then
+      let i := j - stWork
+      x.permOut i +ₚ ((x.aux i +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ (‹4› *ₚ x.stIn (8 + i)))
     else if j = stCursorIdx then stepWeightedSum (fun k => x.aux (4 + k)) (fun k => 4 ^ k) 4
     else x.prev j
   | .forsMerkleBlockA | .xmssMerkleBlockA => stepMerkleBlockAExpectedNext x j
@@ -4497,7 +4515,8 @@ def stepOpExpectedNext (kind : StepConstraintKind) (_c0 : Goldilocks) (x : StepO
     if j = stRemPack + slot then x.aux 7
     else if stepInBlock stWork 4 j then
       let i := j - stWork
-      (x.aux 4 *ₚ x.aux i) +ₚ ((Goldilocks.one -ₚ x.aux 4) *ₚ (x.permOut i +ₚ x.aux i))
+      (x.aux 4 *ₚ x.aux i) +ₚ ((Goldilocks.one -ₚ x.aux 4) *ₚ
+        (x.permOut i +ₚ ((x.aux i +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ (‹4› *ₚ x.stIn (8 + i)))))
     else if j = stAccOrU1 then x.aux 5
     else if j = stWotsU2 then x.aux 6
     else x.prev j
@@ -4505,14 +4524,18 @@ def stepOpExpectedNext (kind : StepConstraintKind) (_c0 : Goldilocks) (x : StepO
     if stepInBlock stWork 4 j then
       let i := j - stWork
       (x.prev stAccOrU1 *ₚ x.prev (stWork + i)) +ₚ
-        ((Goldilocks.one -ₚ x.prev stAccOrU1) *ₚ (x.permOut i +ₚ x.prev (stWork + i)))
+        ((Goldilocks.one -ₚ x.prev stAccOrU1) *ₚ
+          (x.permOut i +ₚ ((x.prev (stWork + i) +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ
+            (‹4› *ₚ x.stIn (8 + i)))))
     else x.prev j
   | .wotsChainStep2 isOdd =>
     let base := if isOdd then stWork else stSubSponge
     if stepInBlock base 4 j then
       let i := j - base
       (x.prev stWotsU2 *ₚ x.prev (stWork + i)) +ₚ
-        ((Goldilocks.one -ₚ x.prev stWotsU2) *ₚ (x.permOut i +ₚ x.prev (stWork + i)))
+        ((Goldilocks.one -ₚ x.prev stWotsU2) *ₚ
+          (x.permOut i +ₚ ((x.prev (stWork + i) +ₚ (‹2› *ₚ x.stIn (4 + i))) +ₚ
+            (‹4› *ₚ x.stIn (8 + i)))))
     else x.prev j
   | .wotsTellFinalSqueeze =>
     if stepInBlock stWork 4 j then x.permOut (j - stWork)
@@ -6215,6 +6238,12 @@ def stepRegsAt (R : Nat → StepOpRow) (t : Nat) : StepRegs := stepRegs (stepPre
 /-- `poseidon2Perm12` of the `COL_ST_IN` block of row `t`. -/
 def stepPermAt (R : Nat → StepOpRow) (t : Nat) : Poseidon2State12 := poseidon2Perm12 (R t).stIn
 
+/-- Weighted Jive feed-forward of row `t` on the lane `v`:
+    `perm.b0 + v + 2·st_in[4..8] + 4·st_in[8..12]`, the value every chain-step and FORS-leaf row
+    constrains (`poseidon2_compress12_ff` once `v` is the first block of `COL_ST_IN`). -/
+def stepFfAt (R : Nat → StepOpRow) (t : Nat) (v : Lane4) : Lane4 :=
+  lane4Add (stepPermAt R t).b0 (poseidon2WeightedFeedForward ⟨v, (R t).stIn.b1, (R t).stIn.b2⟩)
+
 /-- Four consecutive auxiliary cells of row `t`. -/
 def stepAuxLane (R : Nat → StepOpRow) (t base : Nat) : Lane4 :=
   ⟨stepAux R t base, stepAux R t (base + 1), stepAux R t (base + 2), stepAux R t (base + 3)⟩
@@ -6299,7 +6328,7 @@ theorem stepSem_wotsChainStep1 {pub : AggValidatorPk × Digest5} {R : Nat → St
     stepRegsAt R (t + 1) =
       { stepRegsAt R t with
         work := lane4Mux (stepRegsAt R t).acc (stepRegsAt R t).work
-          (lane4Add (stepPermAt R t).b0 (stepRegsAt R t).work) } := by
+          (stepFfAt R t (stepRegsAt R t).work) } := by
   have hG := h.guard
   exact ⟨state12_ext12 (gz% hG 0) (gz% hG 2) (gz% hG 4) (gz% hG 6) (gz% hG 1) (gz% hG 3)
     (gz% hG 5) (gz% hG 7) (gz% hG 8) (gz% hG 9) (gz% hG 10) (gz% hG 11), h.regs⟩
@@ -6359,7 +6388,7 @@ theorem stepSem_wotsChainStep0 {pub : AggValidatorPk × Digest5} {R : Nat → St
       { stepRegsAt R t with
         rem := (stepRegsAt R t).rem.set slot (stepAux R t 7)
         work := lane4Mux (stepAux R t 4) (stepAuxLane R t 0)
-          (lane4Add (stepPermAt R t).b0 (stepAuxLane R t 0))
+          (stepFfAt R t (stepAuxLane R t 0))
         acc := stepAux R t 5
         u2 := stepAux R t 6 } := by
   have hG := h.guard
@@ -6380,7 +6409,7 @@ theorem stepSem_wotsChainStep2_odd {pub : AggValidatorPk × Digest5} {R : Nat �
     stepRegsAt R (t + 1) =
       { stepRegsAt R t with
         work := lane4Mux (stepRegsAt R t).u2 (stepRegsAt R t).work
-          (lane4Add (stepPermAt R t).b0 (stepRegsAt R t).work) } := by
+          (stepFfAt R t (stepRegsAt R t).work) } := by
   have hG := h.guard
   exact ⟨state12_ext12 (gz% hG 0) (gz% hG 2) (gz% hG 4) (gz% hG 6) (gz% hG 1) (gz% hG 3)
     (gz% hG 5) (gz% hG 7) (gz% hG 8) (gz% hG 9) (gz% hG 10) (gz% hG 11), h.regs⟩
@@ -6393,7 +6422,7 @@ theorem stepSem_wotsChainStep2_even {pub : AggValidatorPk × Digest5} {R : Nat �
     stepRegsAt R (t + 1) =
       { stepRegsAt R t with
         sub := ⟨lane4Mux (stepRegsAt R t).u2 (stepRegsAt R t).work
-            (lane4Add (stepPermAt R t).b0 (stepRegsAt R t).work),
+            (stepFfAt R t (stepRegsAt R t).work),
           (stepRegsAt R t).sub.b1, (stepRegsAt R t).sub.b2⟩ } := by
   have hG := h.guard
   exact ⟨state12_ext12 (gz% hG 0) (gz% hG 2) (gz% hG 4) (gz% hG 6) (gz% hG 1) (gz% hG 3)
@@ -6608,7 +6637,7 @@ private theorem stepWotsHash_eq {R : Nat → StepOpRow} {t : Nat} {r : StepRegs}
     (hIn : (R t).stIn = ⟨cur, pkSeed, stepWotsTweak r c0⟩) (hAddr : StepAddrOk r kpN tree)
     (hc0 : c0 = layer * 2 ^ 44 + chain * 2 ^ 4 + k)
     (hl : layer < 64) (hk : kpN < 2 ^ 28) (hc : chain < 4096) (hk16 : k < 16) :
-    lane4Add (stepPermAt R t).b0 cur = wotsStepHash pkSeed cur layer tree kpN chain k := by
+    stepFfAt R t cur = wotsStepHash pkSeed cur layer tree kpN chain k := by
   have hT : stepWotsTweak r c0 =
       ⟨domainWotsStep, packWotsAddrLimb layer kpN chain k, ‹tree % 2 ^ 32›,
         ‹(tree / 2 ^ 32) % 2 ^ 32›⟩ := by
@@ -6618,7 +6647,7 @@ private theorem stepWotsHash_eq {R : Nat → StepOpRow} {t : Nat} {r : StepRegs}
     have e : layer * 2 ^ 44 + chain * 2 ^ 4 + k + kpN * 2 ^ 16 =
         layer * 2 ^ 44 + kpN * 2 ^ 16 + chain * 16 + k := by omega
     rw [e]
-  unfold stepPermAt wotsStepHash poseidon2Compress12FF
+  unfold stepFfAt stepPermAt wotsStepHash poseidon2Compress12FF poseidon2CompressWeighted
   rw [hIn, hT]
 
 /-- **Chain rows.** The three rows of one WOTS+C chain shift the remaining-step count
@@ -6674,7 +6703,7 @@ theorem stepChain_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
           layer tree kpN chain 1) := by
     rw [hR2']
     show lane4Mux (stepRegsAt R (t + 1)).acc (stepRegsAt R (t + 1)).work
-      (lane4Add (stepPermAt R (t + 1)).b0 (stepRegsAt R (t + 1)).work) = _
+      (stepFfAt R (t + 1) (stepRegsAt R (t + 1)).work) = _
     rw [e1, hacc1, hw1]
   have hu2 : (stepRegsAt R (t + 2)).u2 = stepAux R t 6 := by
     rw [hR2']; exact hu1
@@ -6695,7 +6724,7 @@ theorem stepChain_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
       have e2 := stepWotsHash_eq (k := 2) (c0 := layer * 2 ^ 44 + chain * 2 ^ 4 + 2) hIn2 hA2
         (Eq.refl _) hl hk hc (by decide)
       have hX : lane4Mux (stepRegsAt R (t + 2)).u2 (stepRegsAt R (t + 2)).work
-          (lane4Add (stepPermAt R (t + 2)).b0 (stepRegsAt R (t + 2)).work) =
+          (stepFfAt R (t + 2) (stepRegsAt R (t + 2)).work) =
           wotsChainWalk pub.1.pkSeed layer tree kpN chain (stepChainDigit R t)
             (3 - stepChainDigit R t) (stepAuxLane R t 0) := by
         rw [e2, hu2, hw2, ← hWalk]
@@ -6707,7 +6736,7 @@ theorem stepChain_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
       have e2 := stepWotsHash_eq (k := 2) (c0 := layer * 2 ^ 44 + chain * 2 ^ 4 + 2) hIn2 hA2
         (Eq.refl _) hl hk hc (by decide)
       have hX : lane4Mux (stepRegsAt R (t + 2)).u2 (stepRegsAt R (t + 2)).work
-          (lane4Add (stepPermAt R (t + 2)).b0 (stepRegsAt R (t + 2)).work) =
+          (stepFfAt R (t + 2) (stepRegsAt R (t + 2)).work) =
           wotsChainWalk pub.1.pkSeed layer tree kpN chain (stepChainDigit R t)
             (3 - stepChainDigit R t) (stepAuxLane R t 0) := by
         rw [e2, hu2, hw2, ← hWalk]
@@ -8281,7 +8310,7 @@ theorem stepSem_forsLeafHash {pub : AggValidatorPk × Digest5} {R : Nat → Step
     stepRegsAt R (t + 1) =
       { stepRegsAt R t with
         rem := (stepRegsAt R t).rem.set slot (stepAux R t 8)
-        work := lane4Add (stepPermAt R t).b0 (stepAuxLane R t 0)
+        work := stepFfAt R t (stepAuxLane R t 0)
         cursor := stepForsIdxF R t } := by
   have hG := h.guard
   have hQ : allZeroGoldilocks ((List.range 4).map
@@ -9025,8 +9054,8 @@ theorem stepForsTree_sem {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRo
       rw [h1, h2, Nat.shiftLeft_eq, Nat.shiftLeft_eq, ← g_ofNat_mul, ← g_ofNat_add,
         ← g_ofNat_add]
     rw [hRL']
-    show lane4Add (stepPermAt R T).b0 (stepAuxLane R T 0) = _
-    unfold poseidon2Compress12FF stepPermAt
+    show stepFfAt R T (stepAuxLane R T 0) = _
+    unfold poseidon2Compress12FF poseidon2CompressWeighted stepFfAt stepPermAt
     rw [hInL, hAddr.kp, hAddr.lo, hAddr.hi, hIdxEq, hTw]
   rw [hLeafWork] at hWalk
   rw [hIdxEq] at hGet

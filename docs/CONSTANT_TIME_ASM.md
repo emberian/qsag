@@ -1,10 +1,10 @@
-# `qsag-asm` & `Qsag.ConstantTimeIsa`: Platform SIMD Assembly, Formal Machine-Code Noninterference, and Empirical Timing Verification
+# `qsag-asm` & `Qsag.Machine.ConstantTimeIsa`: Platform SIMD Assembly, Formal Machine-Code Noninterference, and Empirical Timing Verification
 
 This document specifies **Pillar 3** of qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation:
 
 1. **`crates/qsag-asm`**: Zero-dependency `#![no_std]` hand-crafted platform assembly kernels for `x86_64` (`AVX2`, `GFNI`, `VPCLMULQDQ`/`PCLMULQDQ`, `BMI2`/`ADX`) and `aarch64` (`ARMv8.2-SHA3`, `PMULL`, `NEON`, `ARMv8.4-DIT`), backed by runtime `CPUID`/`XGETBV`/`AT_HWCAP`/`sysctlbyname` capability probing and a 100% branchless, table-free portable fallback.
 2. **`crates/qsag-asm/scripts/audit_elf_ct.py`**: Automated static binary disassembly verifier auditing every `x86_64` assembly symbol, compiled Rust crypto functions in native `.o` or `.rlib`, and both Linux ELF and Apple Mach-O `aarch64` assembly kernels (paired with 15 negative `#tooth` self-tests).
-3. **`lean/Qsag/ConstantTimeIsa.lean`**: Self-contained Lean 4.35 formal machine-code semantics and relational taint-noninterference checker (`0 sorry`, `0 axiom`, `0 native_decide`, `8` `@[expose]`) proving modeled architectural leakage invariance and algebraic functional correctness for the specific modeled programs listed below. Public loops abstract dispatch-guarded positive counts; the ARM equality model expands paired loads into scalar loads.
+3. **`lean/Qsag/Machine/ConstantTimeIsa.lean`**: Self-contained Lean 4.35 formal machine-code semantics and relational taint-noninterference checker (`0 sorry`, `0 axiom`, `0 native_decide`, `8` `@[expose]`) proving modeled architectural leakage invariance and algebraic functional correctness for the specific modeled programs listed below. Public loops abstract dispatch-guarded positive counts; the ARM equality model expands paired loads into scalar loads.
 4. **`crates/qsag-asm/{examples,tests}/ct_dudect.rs`**: Empirical Welch's $t$-test constant-time harness (`1,000,192` cycle-counter traces per kernel in deep mode; `25,600`-trace sub-second CI gate via `QSAG_DUDECT_SAMPLES`), validated on both **Intel Core i9-12900 (`Alder Lake`, `AVX2+GFNI+VPCLMULQDQ`)** and **AMD EPYC-Milan (`Zen 3`, `AVX2+PCLMULQDQ`)**.
 
 Lean timing theorems cover exactly eight modeled programs: AVX2 MPC chi, SHA3 NEON chi,
@@ -207,9 +207,9 @@ Following Reparaz–Balasch–Verbauwhede (*dudect*, DATE 2017), `examples/ct_du
 
 ---
 
-## 6. Lean 4.35 Formal Machine-Code Verification (`lean/Qsag/ConstantTimeIsa.lean`)
+## 6. Lean 4.35 Formal Machine-Code Verification (`lean/Qsag/Machine/ConstantTimeIsa.lean`)
 
-`lean/Qsag/ConstantTimeIsa.lean` (`module` + `public section`, `8` `@[expose]`, `0 sorryAx`, `0 Lean.ofReduceBool`) models concrete operational semantics and microarchitectural `LeakageEvent` traces (`pc`, `branchTaken`, `memAddrs`, `varLatencyOperands`, `dirtyUpperYmmOnRet`) for both `x86_64` (`X86Gpr`, `YmmReg`, `X86Flags`, `X86Instr`, `X86Stmt`) and `aarch64` (`ArmGpr`, `NeonReg`, `ArmFlags`, `ArmInstr`, `ArmStmt`).
+`lean/Qsag/Machine/ConstantTimeIsa.lean` (`module` + `public section`, `8` `@[expose]`, `0 sorryAx`, `0 Lean.ofReduceBool`) models concrete operational semantics and microarchitectural `LeakageEvent` traces (`pc`, `branchTaken`, `memAddrs`, `varLatencyOperands`, `dirtyUpperYmmOnRet`) for both `x86_64` (`X86Gpr`, `YmmReg`, `X86Flags`, `X86Instr`, `X86Stmt`) and `aarch64` (`ArmGpr`, `NeonReg`, `ArmFlags`, `ArmInstr`, `ArmStmt`).
 
 | Section / Domain | Key Exported Lean 4 Theorems | What Is Kernel-Proved |
 | :--- | :--- | :--- |

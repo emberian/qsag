@@ -39,7 +39,10 @@ fn portable_dispatch_matches_integer_modular_arithmetic() {
         state ^= state << 17;
         state
     };
-    for _ in 0..100_000 {
+    // Keep every boundary pair under Miri; the native gate retains the 100,000-case
+    // randomized differential sweep without interpreting the same arithmetic repeatedly.
+    let random_cases = if cfg!(miri) { 256 } else { 100_000 };
+    for _ in 0..random_cases {
         check(next(), next());
     }
 }

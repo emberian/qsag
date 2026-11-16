@@ -34,7 +34,9 @@
 //!
 //! ### Limits
 //! * Share pairs, pad keys and MAC keys come from a dealer in the tests and the benchmark
-//!   ([`deal_rss256_keys`], [`deal_keccak_shares`]); this module has no key agreement.
+//!   (`deal_rss256_keys`, `deal_keccak_shares`, compiled only for tests and with the
+//!   `testing-ephemeral` feature); this module has no key agreement, and without that
+//!   feature no share pair can be created or loaded.
 //! * The engine evaluates plain `Keccak-f[1600]` states one 64-bit word per lane. It is not
 //!   bitsliced across signatures and is not a replacement for the 256-lane engine of
 //!   `qsag_core::rss256`; it exists to run the protocol with separated parties.
@@ -48,6 +50,7 @@ use core::fmt;
 use qsag_asm::{KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS};
 use qsag_core::belt_latch::DurableWal;
 use qsag_core::rss256::Shake256Prg256;
+use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes};
 
 use crate::dzk::{
     DzkShape, Gf128, NodeBasis, challenge_points, data_node_sum, decode_elements, derive_weights,
@@ -84,6 +87,7 @@ const TAG_SEED_A: &[u8] = b"QSAG.QUORUM.RSS.SEED.A/v1";
 const TAG_SEED_B: &[u8] = b"QSAG.QUORUM.RSS.SEED.B/v1";
 const TAG_VERDICT: &[u8] = b"QSAG.QUORUM.RSS.VERDICT/v1";
 const TAG_DZK_PRG: &[u8] = b"QSAG.QUORUM.RSS.DZK.PRG/v1";
+#[cfg(any(test, feature = "testing-ephemeral"))]
 const TAG_RSS_KEY: &[u8] = b"QSAG.QUORUM.RSS.DEAL/v1";
 
 const PURPOSE_CHI_PAD: u64 = 1;
@@ -109,7 +113,7 @@ pub enum NodeError {
     InvalidParameters,
     /// The party's poison flag is set for this session.
     Poisoned,
-    /// An opening was requested while unverified gates exist.
+    /// An opening or a share load was requested while unverified gates exist.
     OpenBeforeCheck,
     /// A peer's message has the wrong length or encoding for its round.
     MalformedMessage {
@@ -192,32 +196,13 @@ impl fmt::Display for NodeError {
 
 impl core::error::Error for NodeError {}
 
-#[derive(PartialEq, Eq)]
-struct SecretBytes(Vec<u8>);
-impl SecretBytes {
-    fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-}
-impl core::ops::Deref for SecretBytes {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.0
-    }
-}
-impl Drop for SecretBytes {
-    fn drop(&mut self) {
-        qsag_asm::volatile_fill(&mut self.0, 0);
-    }
-}
-
 fn recv_from<T: WireTransport>(
     transport: &mut T,
     from: usize,
     round: u32,
-) -> Result<SecretBytes, NodeError> {
+) -> Result<SecretVec<u8>, NodeError> {
     match transport.recv_frame(from, round) {
-        Ok(payload) => Ok(SecretBytes(payload)),
+        Ok(payload) => Ok(SecretBuffer(payload)),
         Err(TransportError::RoundTagMismatch {
             got: ROUND_ABORT, ..
         }) => Err(NodeError::PeerAborted { party: from }),
@@ -261,11 +246,11 @@ fn decode_echo(from: usize, raw: &[u8]) -> Option<LatchEcho> {
     })
 }
 
-fn encode_opening(opening: &ShareOpening) -> SecretBytes {
-    let mut out = Vec::with_capacity(SHARE_OPENING_WIRE_BYTES);
-    out.extend_from_slice(&opening.leaf.to_be_bytes());
-    out.extend_from_slice(opening.shares.as_flattened());
-    SecretBytes(out)
+fn encode_opening(opening: &ShareOpening) -> SecretVec<u8> {
+    let mut out = SecretVec::with_capacity(SHARE_OPENING_WIRE_BYTES);
+    out.extend_wiping(&opening.leaf.to_be_bytes());
+    out.extend_wiping(opening.shares.as_flattened());
+    out
 }
 
 fn decode_opening(from: usize, raw: &[u8]) -> Option<ShareOpening> {
@@ -613,7 +598,13 @@ fn reconstruct_opened(
 
 /// One party's replicated share of a `Keccak-f[1600]` state: share slot `party` and share
 /// slot `party + 1`. The state is the xor of the three slots.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Opaque outside this module: no field, accessor or comparison is exported, so the
+/// words can only be consumed by `IsolatedRss256Party::load_shares`. The sole
+/// constructor is the trusted dealer `deal_keccak_shares`; both, and `Clone`, exist
+/// only in test and `testing-ephemeral` builds. A build without that feature cannot
+/// create, copy or load a share pair.
+#[cfg_attr(any(test, feature = "testing-ephemeral"), derive(Clone))]
 pub struct SharePair {
     mine: [u64; 25],
     next: [u64; 25],
@@ -634,6 +625,7 @@ pub struct Rss256PartyKeys {
 /// Dealer for the three parties' keys (tests and measurements; stands in for pairwise key
 /// agreement).
 /// TRUSTED DEALER TEST/MEASUREMENT HELPER: not dealerless provisioning.
+#[cfg(any(test, feature = "testing-ephemeral"))]
 pub fn deal_rss256_keys(seed: &[u8; 32]) -> [Rss256PartyKeys; 3] {
     let slot = |j: usize| h32(TAG_RSS_KEY, &[seed, b"slot", &[(j % 3) as u8]]);
     let pair = |a: usize, b: usize| {
@@ -650,6 +642,7 @@ pub fn deal_rss256_keys(seed: &[u8; 32]) -> [Rss256PartyKeys; 3] {
 
 /// Dealer for one shared state: three random slots that xor to `secret`.
 /// TRUSTED DEALER TEST/MEASUREMENT HELPER: not dealerless provisioning.
+#[cfg(any(test, feature = "testing-ephemeral"))]
 pub fn deal_keccak_shares(secret: &[u64; 25], rng: &mut SeedRng) -> [SharePair; 3] {
     let mut slots = [[0u64; 25]; 3];
     for slot in &mut slots[..2] {
@@ -693,8 +686,12 @@ const fn chi_operands(lane: usize) -> (usize, usize) {
     (row + (lane + 1) % 5, row + (lane + 2) % 5)
 }
 
-fn words_to_bytes(words: &[u64]) -> SecretBytes {
-    SecretBytes(words.iter().flat_map(|w| w.to_le_bytes()).collect())
+fn words_to_bytes(words: &[u64]) -> SecretVec<u8> {
+    let mut out = SecretVec::with_capacity(8 * words.len());
+    for word in words {
+        out.extend_wiping(&word.to_le_bytes());
+    }
+    out
 }
 
 fn bytes_to_words(raw: &[u8], count: usize) -> Option<Vec<u64>> {
@@ -914,11 +911,24 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         self.barrier
     }
 
-    /// Add this party's share pair of a state; returns the state's index. All three parties
-    /// must load their pairs of the same states in the same order.
-    pub fn load_shares(&mut self, pair: SharePair) -> usize {
-        self.states.push(pair);
-        self.states.len() - 1
+    /// Add this party's share pair of a state; returns the index the state takes. All
+    /// three parties must load their pairs of the same states in the same order.
+    ///
+    /// The state set changes only under the session guard: the journal must be healthy,
+    /// the session unpoisoned, and every gate so far accepted by a barrier (the gate
+    /// record of an open wave is sized for the states it ran on). Otherwise the pair is
+    /// erased and nothing is loaded: [`NodeError::Journal`] or [`NodeError::Poisoned`] for
+    /// a session already in that state, [`NodeError::OpenBeforeCheck`] for unverified
+    /// gates, which also poisons the session.
+    #[cfg(any(test, feature = "testing-ephemeral"))]
+    pub fn load_shares(&mut self, pair: SharePair) -> Result<usize, NodeError> {
+        self.guarded(|party| {
+            if party.has_unverified_gates() {
+                return Err(NodeError::OpenBeforeCheck);
+            }
+            party.states.push(pair);
+            Ok(party.states.len() - 1)
+        })
     }
 
     #[cfg(test)]
@@ -1002,26 +1012,11 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         self.unverified = true;
         self.record
             .reserve(n.checked_mul(25 * 24).ok_or(NodeError::Poisoned)?)?;
-        struct ZeroizingWords(Vec<u64>);
-        impl Drop for ZeroizingWords {
-            fn drop(&mut self) {
-                qsag_asm::volatile_fill(&mut self.0[..], 0);
-            }
-        }
-        struct ZeroizingStateBuf(Vec<[u64; 25]>);
-        impl Drop for ZeroizingStateBuf {
-            fn drop(&mut self) {
-                for st in &mut self.0 {
-                    qsag_asm::volatile_fill(&mut st[..], 0);
-                }
-            }
-        }
-
-        let mut lin_mine = ZeroizingStateBuf(vec![[0u64; 25]; n]);
-        let mut lin_next = ZeroizingStateBuf(vec![[0u64; 25]; n]);
-        let mut pads_mine = ZeroizingWords(vec![0u64; 25 * n]);
-        let mut pads_next = ZeroizingWords(vec![0u64; 25 * n]);
-        let mut message = ZeroizingWords(vec![0u64; 25 * n]);
+        let mut lin_mine: SecretVec<[u64; 25]> = SecretBuffer(vec![[0u64; 25]; n]);
+        let mut lin_next: SecretVec<[u64; 25]> = SecretBuffer(vec![[0u64; 25]; n]);
+        let mut pads_mine: SecretVec<u64> = SecretBuffer(vec![0u64; 25 * n]);
+        let mut pads_next: SecretVec<u64> = SecretBuffer(vec![0u64; 25 * n]);
+        let mut message: SecretVec<u64> = SecretBuffer(vec![0u64; 25 * n]);
         for (round, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
             pad_mine.fill_words(&mut pads_mine.0);
             pad_next.fill_words(&mut pads_next.0);
@@ -1060,7 +1055,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
                 .send_frame(pred, ROUND_GATE | round as u32, &wire_bytes)?;
             drop(wire_bytes);
             let raw = recv_from(&mut self.transport, succ, ROUND_GATE | round as u32)?;
-            let mut received = ZeroizingWords(bytes_to_words(&raw, 25 * n).ok_or(
+            let received: SecretVec<u64> = SecretBuffer(bytes_to_words(&raw, 25 * n).ok_or(
                 NodeError::MalformedMessage {
                     from: succ,
                     round: ROUND_GATE | round as u32,
@@ -1083,7 +1078,6 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
                 }
             }
             self.record.received.extend_from_slice(&received.0);
-            let _ = &mut received;
         }
         Ok(())
     }
@@ -1476,7 +1470,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             from: pred,
             round: ROUND_OPEN,
         })?;
-        if from_pred != from_succ {
+        if !ct_eq_bytes(&from_pred, &from_succ) {
             return Err(NodeError::OpenShareMismatch);
         }
         // The release decision is the extracted guard's: one decision per opening round,
@@ -1756,7 +1750,7 @@ mod tests {
                     IsolatedRss256Party::new(SESSION, keys, transport, MemoryPoisonJournal::new())
                         .unwrap();
                 for share in &shares {
-                    party.load_shares(share[p].clone());
+                    party.load_shares(share[p].clone()).unwrap();
                 }
                 party
             })
@@ -2054,6 +2048,60 @@ mod tests {
         assert!(party.is_poisoned());
         assert_eq!(party.check(), Err(NodeError::Journal));
         assert_eq!(party.open_prefix(4), Err(NodeError::Journal));
+    }
+
+    #[test]
+    fn shares_load_only_under_the_session_guard() {
+        let pair = || SharePair {
+            mine: [7; 25],
+            next: [9; 25],
+        };
+        let keys = deal_rss256_keys(&SEED);
+
+        // A session the journal lists as poisoned takes no state.
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+        let mut journal = MemoryPoisonJournal::new();
+        journal.mark_poisoned(&SESSION).unwrap();
+        let mut party =
+            IsolatedRss256Party::new(SESSION, keys[0].clone(), endpoints.remove(0), journal)
+                .unwrap();
+        assert_eq!(party.load_shares(pair()), Err(NodeError::Poisoned));
+        assert_eq!(party.state_count(), 0);
+
+        // A clean session takes states in order, until a wave leaves gates unverified:
+        // the next load is refused and poisons the session durably.
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+        let mut party = IsolatedRss256Party::new(
+            SESSION,
+            keys[0].clone(),
+            endpoints.remove(0),
+            MemoryPoisonJournal::new(),
+        )
+        .unwrap();
+        assert_eq!(party.load_shares(pair()), Ok(0));
+        assert_eq!(party.load_shares(pair()), Ok(1));
+        assert_eq!(party.state_count(), 2);
+        assert!(!party.is_poisoned());
+        party.unverified = true;
+        assert_eq!(party.load_shares(pair()), Err(NodeError::OpenBeforeCheck));
+        assert_eq!(party.state_count(), 2);
+        assert!(party.is_poisoned());
+        assert!(party.journal.is_poisoned(&SESSION));
+        assert_eq!(party.permute(), Err(NodeError::Poisoned));
+
+        // A journal that could not record the poison refuses loads as well.
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+        let mut journal = MemoryPoisonJournal::new();
+        journal.fail_next_write();
+        let mut party =
+            IsolatedRss256Party::new(SESSION, keys[0].clone(), endpoints.remove(0), journal)
+                .unwrap();
+        assert_eq!(
+            party.guarded(|_| Err::<(), _>(NodeError::BadChallenge)),
+            Err(NodeError::Journal)
+        );
+        assert_eq!(party.load_shares(pair()), Err(NodeError::Journal));
+        assert_eq!(party.state_count(), 0);
     }
 
     #[test]

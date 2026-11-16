@@ -15,6 +15,7 @@ path = "src/main.rs"
 qsag-accel = { path = "../qsag-accel", features = ["std"] }
 qsag-addr = { path = "../qsag-addr", features = ["std"] }
 qsag-agg = { path = "../qsag-agg", features = ["std"] }
+qsag-asm = { path = "../qsag-asm", features = ["std"] }
 qsag-core = { path = "../qsag-core", features = ["std"] }
 qsag-cred = { path = "../qsag-cred", features = ["std"] }
 qsag-fts = { path = "../qsag-fts", features = ["std"] }

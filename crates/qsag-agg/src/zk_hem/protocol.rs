@@ -474,38 +474,129 @@ fn squeeze_point(tr: &mut FiatShamirTranscript<InstanceBound>, label: &[u8], n: 
 // Prover
 // ============================================================================
 
-fn fold_in_place(table: &mut Vec<E>, r: E) {
-    let half = table.len() / 2;
-    for i in 0..half {
-        let lo = table[2 * i];
-        table[i] = lo + r * (table[2 * i + 1] - lo);
+/// Smallest table worth splitting across workers.
+const PAR_MIN: usize = 1 << 12;
+
+/// Chunk length that spreads `len` items over the worker budget.
+fn par_chunk(len: usize) -> usize {
+    #[cfg(feature = "std")]
+    let workers = crate::parallel_workers();
+    #[cfg(not(feature = "std"))]
+    let workers = 1;
+    len.div_ceil(workers).max(PAR_MIN)
+}
+
+/// `f(k, chunk_k)` over `data.chunks_mut(chunk)`, on the worker pool when there are several.
+fn for_each_chunk_mut<T: Send>(data: &mut [T], chunk: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    #[cfg(feature = "std")]
+    if data.len() > chunk {
+        std::thread::scope(|scope| {
+            for (k, part) in data.chunks_mut(chunk).enumerate() {
+                let f = &f;
+                crate::spawn_bounded(scope, move || f(k, part));
+            }
+        });
+        return;
     }
-    // The folded-away half may hold witness values; clear it before it leaves the length.
-    qsag_asm::volatile_fill(&mut table[half..], E::ZERO);
+    for (k, part) in data.chunks_mut(chunk).enumerate() {
+        f(k, part);
+    }
+}
+
+/// Replace every pair `(table[2i], table[2i + 1])` by `f` of it, halving the table.
+/// `secret` erases the vacated half, which may hold witness-dependent values.
+fn fold_pairs(table: &mut Vec<E>, secret: bool, f: impl Fn(E, E) -> E + Sync) {
+    let half = table.len() / 2;
+    let chunk = 2 * par_chunk(half);
+    // Each chunk folds into its own first half; the halves are then packed in order.
+    for_each_chunk_mut(table, chunk, |_, part| {
+        for i in 0..part.len() / 2 {
+            part[i] = f(part[2 * i], part[2 * i + 1]);
+        }
+    });
+    for start in (chunk..table.len()).step_by(chunk) {
+        let len = (table.len() - start).min(chunk) / 2;
+        table.copy_within(start..start + len, start / 2);
+    }
+    if secret {
+        qsag_asm::volatile_fill(&mut table[half..], E::ZERO);
+    }
     table.truncate(half);
 }
 
-/// Sum over the remaining hypercube of `per_pair`, which returns the contributions of one
-/// pair of rows to the round polynomial at `0, 1, .., N - 1`.
-fn round_evals<const N: usize>(pairs: usize, per_pair: impl Fn(usize) -> [E; N] + Sync) -> [E; N] {
+/// Bind the lowest variable of a multilinear table to `r`.
+fn fold_in_place(table: &mut Vec<E>, r: E, secret: bool) {
+    fold_pairs(table, secret, |lo, hi| lo + r * (hi - lo));
+}
+
+/// [`fold_in_place`] for a table that is still over the base field.
+fn fold_base(table: &[F], r: E) -> Vec<E> {
+    let mut out = vec![E::ZERO; table.len() / 2];
+    let chunk = par_chunk(out.len());
+    for_each_chunk_mut(&mut out, chunk, |k, part| {
+        let pairs = table[2 * k * chunk..].as_chunks::<2>().0;
+        for (slot, &[lo, hi]) in part.iter_mut().zip(pairs) {
+            *slot = E::from_base(lo) + r.mul_base(hi - lo);
+        }
+    });
+    out
+}
+
+/// `eq(point, x)` for every `x`, with `point[0]` on the lowest index bit.
+fn eq_table(point: &[E]) -> Vec<E> {
+    let split = point.len() / 2;
+    if 1usize << point.len() <= PAR_MIN {
+        return build_eq_table_ext4(point);
+    }
+    let low = build_eq_table_ext4(&point[..split]);
+    let high = build_eq_table_ext4(&point[split..]);
+    let mut table = vec![E::ZERO; 1 << point.len()];
+    let rows = par_chunk(table.len()).div_ceil(low.len());
+    for_each_chunk_mut(&mut table, rows * low.len(), |k, part| {
+        for (block, &h) in part.chunks_mut(low.len()).zip(&high[k * rows..]) {
+            for (slot, &l) in block.iter_mut().zip(&low) {
+                *slot = h * l;
+            }
+        }
+    });
+    table
+}
+
+/// Sum of `per_item` over `range`. Partial sums are erased: in the hiding mode they are
+/// unmasked witness polynomials.
+fn round_evals<const N: usize>(
+    range: core::ops::Range<usize>,
+    per_item: impl Fn(usize) -> [E; N] + Sync,
+) -> [E; N] {
     let add = |mut acc: [E; N], part: [E; N]| {
         for (a, p) in acc.iter_mut().zip(part) {
             *a += p;
         }
         acc
     };
+    let sum =
+        |range: core::ops::Range<usize>| range.fold([E::ZERO; N], |acc, i| add(acc, per_item(i)));
     #[cfg(feature = "std")]
-    if pairs >= 1 << 12 && crate::parallel_workers() > 1 {
-        let idx: Vec<usize> = (0..pairs).collect();
-        return crate::map_chunks_bounded_with_limit(&idx, crate::parallel_workers(), |chunk| {
-            chunk
-                .iter()
-                .fold([E::ZERO; N], |acc, &i| add(acc, per_pair(i)))
-        })
-        .into_iter()
-        .fold([E::ZERO; N], add);
+    if range.len() > PAR_MIN && crate::parallel_workers() > 1 {
+        let chunk = par_chunk(range.len());
+        let mut parts: Vec<[E; N]> = std::thread::scope(|scope| {
+            let workers: Vec<_> = range
+                .clone()
+                .step_by(chunk)
+                .map(|start| {
+                    let (sum, end) = (&sum, (start + chunk).min(range.end));
+                    crate::spawn_bounded(scope, move || sum(start..end))
+                })
+                .collect();
+            workers.into_iter().map(crate::join_worker).collect()
+        });
+        let total = parts.iter().fold([E::ZERO; N], |acc, &part| add(acc, part));
+        for part in &mut parts {
+            qsag_asm::volatile_fill(part, E::ZERO);
+        }
+        return total;
     }
-    (0..pairs).fold([E::ZERO; N], |acc, i| add(acc, per_pair(i)))
+    sum(range)
 }
 
 fn evals_to_coeffs(evals: &[E]) -> Vec<E> {
@@ -516,31 +607,478 @@ fn evals_to_coeffs(evals: &[E]) -> Vec<E> {
     }
 }
 
-/// Runs one masked sumcheck; returns the round coefficient lists and the challenge point.
-fn masked_sumcheck(
+/// Runs one sumcheck, masked when `mask` is given; returns the round coefficient lists and
+/// the challenge point.
+fn sumcheck(
     tr: &mut FiatShamirTranscript<InstanceBound>,
     label: &[u8],
-    mask: &LibraMask,
-    rho: E,
+    n: usize,
+    mask: Option<(&LibraMask, E)>,
     mut witness_round: impl FnMut(Option<E>) -> Vec<E>,
 ) -> (Vec<Vec<E>>, Vec<E>) {
-    let n = mask.num_rounds();
     let mut rounds = Vec::with_capacity(n);
     let mut point = Vec::with_capacity(n);
     let mut last = None;
     for _ in 0..n {
         let mut f = witness_round(last);
-        let mut g = mask.round_poly(&point);
-        let masked: Vec<E> = f.iter().zip(&g).map(|(&f, &g)| f + rho * g).collect();
-        qsag_asm::volatile_fill(&mut f, E::ZERO);
-        qsag_asm::volatile_fill(&mut g, E::ZERO);
-        tr.absorb_ext4_slice(label, &masked);
+        if let Some((mask, rho)) = mask {
+            let mut g = mask.round_poly(&point);
+            for (v, &g) in f.iter_mut().zip(&g) {
+                *v += rho * g;
+            }
+            qsag_asm::volatile_fill(&mut g, E::ZERO);
+        }
+        tr.absorb_ext4_slice(label, &f);
         let c = tr.squeeze_ext4(label);
-        rounds.push(masked);
+        rounds.push(f);
         point.push(c);
         last = Some(c);
     }
     (rounds, point)
+}
+
+/// The multilinear selector of rows `0..count`, folded lowest variable first without a
+/// table: after `k` folds entry `j` is one below `count >> k`, zero above it and
+/// `boundary` at it.
+struct PrefixSelector {
+    count: usize,
+    boundary: E,
+}
+
+impl PrefixSelector {
+    fn new(count: usize) -> Self {
+        Self {
+            count,
+            boundary: E::ZERO,
+        }
+    }
+
+    fn at(&self, j: usize) -> E {
+        match j.cmp(&self.count) {
+            core::cmp::Ordering::Less => E::ONE,
+            core::cmp::Ordering::Equal => self.boundary,
+            core::cmp::Ordering::Greater => E::ZERO,
+        }
+    }
+
+    fn fold(&mut self, r: E) {
+        // The new boundary entry covers the old one and one neighbour: an all-one entry
+        // below it when the folded bit of `count` is set, an all-zero entry above otherwise.
+        self.boundary = if self.count & 1 == 1 {
+            E::ONE + r * (self.boundary - E::ONE)
+        } else {
+            self.boundary - r * self.boundary
+        };
+        self.count >>= 1;
+    }
+}
+
+/// Field in which one row round evaluates its gate: the base field before the first
+/// challenge, the extension after it. Both use the same branchless software arithmetic.
+trait GateField:
+    Copy + core::ops::Add<Output = Self> + core::ops::Sub<Output = Self> + Send + Sync
+{
+    fn is_zero(self) -> bool;
+    fn times(self, rhs: Self) -> Self;
+    /// `weight * self`.
+    fn weigh(self, weight: E) -> E;
+    fn lift(self) -> E;
+}
+
+impl GateField for F {
+    #[inline(always)]
+    fn is_zero(self) -> bool {
+        self == F::ZERO
+    }
+    #[inline(always)]
+    fn times(self, rhs: Self) -> Self {
+        self.const_mul(rhs)
+    }
+    #[inline(always)]
+    fn weigh(self, weight: E) -> E {
+        weight.mul_base(self)
+    }
+    #[inline(always)]
+    fn lift(self) -> E {
+        E::from_base(self)
+    }
+}
+
+impl GateField for E {
+    #[inline(always)]
+    fn is_zero(self) -> bool {
+        E::is_zero(self)
+    }
+    #[inline(always)]
+    fn times(self, rhs: Self) -> Self {
+        self * rhs
+    }
+    #[inline(always)]
+    fn weigh(self, weight: E) -> E {
+        weight * self
+    }
+    #[inline(always)]
+    fn lift(self) -> E {
+        self
+    }
+}
+
+/// `h(X) = sum_x eq_rest(x) gate(X, x)` for one row round, as `ROW_DEGREE` coefficients:
+/// the round polynomial without the factor `eq` contributes for the current variable.
+///
+/// Rows below the selector boundary are S-box rows (degree 7 in `X`), rows above it are
+/// multiplication rows (degree 2); only the pair holding the boundary needs the general
+/// degree-8 gate. Each part is evaluated at as many points as its degree requires.
+fn row_round<T: GateField>(
+    [ta, tb, tc]: [&[T]; 3],
+    eq_rest: &[E],
+    selector: &PrefixSelector,
+    secret: bool,
+) -> Vec<E> {
+    let pairs = eq_rest.len();
+    let mixed = (selector.count / 2).min(pairs);
+    let line = |t: &[T], i: usize| (t[2 * i], t[2 * i + 1] - t[2 * i]);
+    // A zero A/C pair gives the zero gate at every X, whatever B is. This covers padding
+    // and satisfied linear rows. It reads witness values, so only the public mode uses it.
+    let vanishes = |i: usize| {
+        !secret
+            && ta[2 * i].is_zero()
+            && ta[2 * i + 1].is_zero()
+            && tc[2 * i].is_zero()
+            && tc[2 * i + 1].is_zero()
+    };
+    let mut sbox = round_evals::<{ ROW_DEGREE - 1 }>(0..mixed, |i| {
+        if vanishes(i) {
+            return [E::ZERO; ROW_DEGREE - 1];
+        }
+        let (mut a, da) = line(ta, i);
+        let (mut c, dc) = line(tc, i);
+        core::array::from_fn(|_| {
+            let a2 = a.times(a);
+            let v = (a2.times(a2).times(a2).times(a) - c).weigh(eq_rest[i]);
+            a = a + da;
+            c = c + dc;
+            v
+        })
+    });
+    let mut mul = round_evals::<3>((mixed + 1).min(pairs)..pairs, |i| {
+        if vanishes(i) {
+            return [E::ZERO; 3];
+        }
+        let (mut a, da) = line(ta, i);
+        let (mut b, db) = line(tb, i);
+        let (mut c, dc) = line(tc, i);
+        core::array::from_fn(|_| {
+            let v = (a.times(b) - c).weigh(eq_rest[i]);
+            a = a + da;
+            b = b + db;
+            c = c + dc;
+            v
+        })
+    });
+    let mut coeffs = vec![E::ZERO; ROW_DEGREE];
+    let mut add = |evals: &mut [E]| {
+        let mut part = evals_to_coeffs(evals);
+        for (c, &p) in coeffs.iter_mut().zip(&part) {
+            *c += p;
+        }
+        qsag_asm::volatile_fill(&mut part, E::ZERO);
+        qsag_asm::volatile_fill(evals, E::ZERO);
+    };
+    add(&mut sbox);
+    add(&mut mul);
+    if mixed < pairs {
+        let lift = |t: &[T]| {
+            let (lo, hi) = (t[2 * mixed].lift(), t[2 * mixed + 1].lift());
+            (lo, hi - lo)
+        };
+        let (mut a, da) = lift(ta);
+        let (mut b, db) = lift(tb);
+        let (mut c, dc) = lift(tc);
+        let mut s = selector.at(2 * mixed);
+        let ds = selector.at(2 * mixed + 1) - s;
+        let mut evals: [E; ROW_DEGREE] = core::array::from_fn(|_| {
+            let v = eq_rest[mixed] * row_gate(s, a, b, c);
+            a += da;
+            b += db;
+            c += dc;
+            s += ds;
+            v
+        });
+        add(&mut evals);
+    }
+    coeffs
+}
+
+/// Row sumcheck of `eq(tau, x) gate(x)` over the row tables `(Az, Bz, Cz)`. Returns the
+/// round polynomials, the point and the three tables' values at it.
+fn row_sumcheck(
+    tr: &mut FiatShamirTranscript<InstanceBound>,
+    tau: &[E],
+    num_sbox: usize,
+    mut base: [Vec<F>; 3],
+    mask: Option<(&LibraMask, E)>,
+) -> (Vec<Vec<E>>, Vec<E>, [E; 3]) {
+    let _phase = crate::profile::span("hem_row_sumcheck");
+    let secret = mask.is_some();
+    let mut ext: [Vec<E>; 3] = core::array::from_fn(|_| Vec::new());
+    let mut selector = PrefixSelector::new(num_sbox);
+    // `eq` splits into the bound prefix, the current variable and the rest. Summing the
+    // rest table over its lowest variable removes that variable.
+    let mut eq_rest = eq_table(&tau[1..]);
+    let mut eq_bound = E::ONE;
+    let bind = |c: E,
+                round: usize,
+                base: &mut [Vec<F>; 3],
+                ext: &mut [Vec<E>; 3],
+                selector: &mut PrefixSelector| {
+        if round == 1 {
+            for (e, b) in ext.iter_mut().zip(base.iter_mut()) {
+                *e = fold_base(b, c);
+                if secret {
+                    qsag_asm::volatile_fill(b, F::ZERO);
+                }
+                *b = Vec::new();
+            }
+        } else {
+            for e in ext.iter_mut() {
+                fold_in_place(e, c, secret);
+            }
+        }
+        selector.fold(c);
+    };
+    let mut round = 0;
+    let (rounds, rx) = sumcheck(tr, b"ZKHEM_ROW_ROUND", tau.len(), mask, |c| {
+        if let Some(c) = c {
+            bind(c, round, &mut base, &mut ext, &mut selector);
+            let t = tau[round - 1];
+            let tc = t * c;
+            eq_bound *= E::ONE - t - c + tc + tc;
+            fold_pairs(&mut eq_rest, false, |lo, hi| lo + hi);
+        }
+        let mut h = if round == 0 {
+            row_round(
+                base.each_ref().map(Vec::as_slice),
+                &eq_rest,
+                &selector,
+                secret,
+            )
+        } else {
+            row_round(
+                ext.each_ref().map(Vec::as_slice),
+                &eq_rest,
+                &selector,
+                secret,
+            )
+        };
+        // Times `eq_bound * eq(tau[round], X)`.
+        let l1 = eq_bound * (tau[round] + tau[round] - E::ONE);
+        let l0 = eq_bound * (E::ONE - tau[round]);
+        let mut coeffs = vec![E::ZERO; ROW_DEGREE + 1];
+        for (k, &hk) in h.iter().enumerate() {
+            coeffs[k] += l0 * hk;
+            coeffs[k + 1] += l1 * hk;
+        }
+        qsag_asm::volatile_fill(&mut h, E::ZERO);
+        round += 1;
+        coeffs
+    });
+    bind(rx[tau.len() - 1], round, &mut base, &mut ext, &mut selector);
+    let values = [ext[0][0], ext[1][0], ext[2][0]];
+    (rounds, rx, values)
+}
+
+/// Column sumcheck of `M(y) Z(y)` over the variable cells. Returns the round polynomials,
+/// the point, `M` at it and `Z` at it.
+fn column_sumcheck(
+    tr: &mut FiatShamirTranscript<InstanceBound>,
+    mut tm: Vec<E>,
+    z: &[F],
+    mask: Option<(&LibraMask, E)>,
+) -> (Vec<Vec<E>>, Vec<E>, E, E) {
+    let _phase = crate::profile::span("hem_column_sumcheck");
+    let secret = mask.is_some();
+    let rounds = tm.len().trailing_zeros() as usize;
+    let mut tz: Vec<E> = Vec::new();
+    let finish = |mut evals: [E; COL_DEGREE + 1]| {
+        let coeffs = evals_to_coeffs(&evals);
+        qsag_asm::volatile_fill(&mut evals, E::ZERO);
+        coeffs
+    };
+    let mut round = 0;
+    let bind = |c: E, round: usize, tm: &mut Vec<E>, tz: &mut Vec<E>| {
+        if round == 1 {
+            *tz = fold_base(z, c);
+        } else {
+            fold_in_place(tz, c, secret);
+        }
+        fold_in_place(tm, c, false);
+    };
+    let (col_rounds, ry) = sumcheck(tr, b"ZKHEM_COL_ROUND", rounds, mask, |c| {
+        if let Some(c) = c {
+            bind(c, round, &mut tm, &mut tz);
+        }
+        round += 1;
+        let tm = &tm;
+        if round == 1 {
+            return finish(round_evals(0..tm.len() / 2, |i| {
+                let (m0, m1) = (tm[2 * i], tm[2 * i + 1]);
+                let (z0, z1) = (z[2 * i], z[2 * i + 1]);
+                [
+                    m0.mul_base(z0),
+                    m1.mul_base(z1),
+                    (m1 + m1 - m0).mul_base(z1 + z1 - z0),
+                ]
+            }));
+        }
+        let tz = &tz;
+        finish(round_evals(0..tm.len() / 2, |i| {
+            let (m0, m1) = (tm[2 * i], tm[2 * i + 1]);
+            let (z0, z1) = (tz[2 * i], tz[2 * i + 1]);
+            [m0 * z0, m1 * z1, (m1 + m1 - m0) * (z1 + z1 - z0)]
+        }))
+    });
+    bind(ry[rounds - 1], round, &mut tm, &mut tz);
+    let (matrix, value) = (tm[0], tz[0]);
+    if secret {
+        qsag_asm::volatile_fill(&mut tz, E::ZERO);
+    }
+    (col_rounds, ry, matrix, value)
+}
+
+/// `(Az, Bz, Cz)` as row tables. With `check`, `None` unless every row is satisfied; the
+/// scan does not stop at the first failing row.
+fn row_tables(shape: &Shape, assignment: &[F], check: bool) -> Option<[Vec<F>; 3]> {
+    let _phase = crate::profile::span("hem_row_tables");
+    let mut tables: [Vec<F>; 3] = core::array::from_fn(|_| vec![F::ZERO; shape.num_rows()]);
+    let valid = core::sync::atomic::AtomicBool::new(true);
+    let chunk = par_chunk(shape.num_rows());
+    {
+        let [a, b, c] = &mut tables;
+        let mut rows: Vec<_> = a
+            .chunks_mut(chunk)
+            .zip(b.chunks_mut(chunk))
+            .zip(c.chunks_mut(chunk))
+            .collect();
+        for_each_chunk_mut(&mut rows, 1, |k, part| {
+            let ((a, b), c) = &mut part[0];
+            let mut ok = true;
+            for (j, ((ta, tb), tc)) in a.iter_mut().zip(b.iter_mut()).zip(c.iter_mut()).enumerate()
+            {
+                let i = k * chunk + j;
+                let va = shape.a.row_dot(i, assignment);
+                let vb = shape.b.row_dot(i, assignment);
+                let vc = shape.c.row_dot(i, assignment);
+                let expected = if i < shape.num_sbox {
+                    crate::sponge::poseidon2_sbox7(va)
+                } else {
+                    va.const_mul(vb)
+                };
+                ok &= expected == vc;
+                (*ta, *tb, *tc) = (va, vb, vc);
+            }
+            if !ok {
+                valid.store(false, core::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
+    if check && !valid.load(core::sync::atomic::Ordering::Relaxed) {
+        for t in &mut tables {
+            qsag_asm::volatile_fill(t, F::ZERO);
+        }
+        return None;
+    }
+    Some(tables)
+}
+
+/// `sum_i eq_rx[i] (r_a A + r_b B + r_c C)[i, .]` on `cells` columns.
+///
+/// Rows of one kind allocate their variables in row order, so a run of rows mostly touches
+/// one window of columns. Each worker owns such a window of the table and writes it
+/// directly; its remaining entries are deferred and added afterwards. The result is the
+/// exact sparse contraction whatever the windows are.
+fn column_table(shape: &Shape, eq_rx: &[E], combine: &[E], cells: usize) -> Vec<E> {
+    let _phase = crate::profile::span("hem_column_table");
+    let mut table = vec![E::ZERO; cells];
+    let matrices = [&shape.a, &shape.b, &shape.c];
+    // Rows `rows` into `window`, the table's columns from `home` on; other columns to `far`.
+    let scatter = |rows: core::ops::Range<usize>,
+                   home: usize,
+                   window: &mut [E],
+                   far: &mut Vec<(usize, E)>| {
+        for i in rows {
+            for (matrix, &r) in matrices.into_iter().zip(combine) {
+                let mut entries = matrix.row(i).peekable();
+                if entries.peek().is_none() {
+                    continue;
+                }
+                let weight = r * eq_rx[i];
+                for (col, val) in entries {
+                    let term = weight.mul_base(val);
+                    match col.checked_sub(home).and_then(|c| window.get_mut(c)) {
+                        Some(slot) => *slot += term,
+                        None => far.push((col, term)),
+                    }
+                }
+            }
+        }
+    };
+    let mut far = Vec::new();
+    #[cfg(feature = "std")]
+    if eq_rx.len() > PAR_MIN && crate::parallel_workers() > 1 {
+        // The newest variable among the first rows of a run marks where its window starts.
+        let newest = |rows: core::ops::Range<usize>| {
+            rows.take(64)
+                .flat_map(|i| matrices.into_iter().flat_map(move |m| m.row(i)))
+                .map(|(col, _)| col)
+                .max()
+        };
+        for block in [0..shape.num_sbox, shape.num_sbox..eq_rx.len()] {
+            let chunk = par_chunk(block.len());
+            let runs: Vec<_> = block
+                .clone()
+                .step_by(chunk)
+                .map(|start| start..(start + chunk).min(block.end))
+                .collect();
+            // Run `k` owns the columns `homes[k]..homes[k + 1]`: nondecreasing bounds that
+            // cover the table.
+            let mut homes = vec![0; runs.len() + 1];
+            for (k, run) in runs.iter().enumerate().skip(1) {
+                homes[k] = newest(run.clone()).unwrap_or(0).clamp(homes[k - 1], cells);
+            }
+            homes[runs.len()] = cells;
+            let deferred = std::thread::scope(|scope| {
+                let mut rest = table.as_mut_slice();
+                let workers: Vec<_> = runs
+                    .iter()
+                    .zip(homes.windows(2))
+                    .map(|(run, home)| {
+                        let (window, tail) =
+                            core::mem::take(&mut rest).split_at_mut(home[1] - home[0]);
+                        rest = tail;
+                        let (scatter, run, home) = (&scatter, run.clone(), home[0]);
+                        crate::spawn_bounded(scope, move || {
+                            let mut far = Vec::new();
+                            scatter(run, home, window, &mut far);
+                            far
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(crate::join_worker)
+                    .collect::<Vec<_>>()
+            });
+            far.extend(deferred.into_iter().flatten());
+        }
+        for (col, term) in far {
+            table[col] += term;
+        }
+        return table;
+    }
+    scatter(0..eq_rx.len(), 0, &mut table, &mut far);
+    debug_assert!(far.is_empty());
+    table
 }
 
 /// Prove that `assignment` satisfies `shape`, bound to `statement`.
@@ -618,13 +1156,18 @@ fn prove_with_claimed_publics(
     for slot in &mut assignment[shape.mask_var_base..] {
         *slot = stream.next_base();
     }
-    if check && !shape.is_satisfied(&assignment) {
+    // Row values `(Az, Bz, Cz)`, taken before the table moves into the commitment.
+    let row_base = if check && assignment[0] != F::ONE {
+        None
+    } else {
+        row_tables(shape, &assignment, check)
+    };
+    let Some(row_base) = row_base else {
         qsag_asm::volatile_fill(&mut assignment, F::ZERO);
         return Err(ZkHemError::Unsatisfied);
-    }
+    };
 
     let cells = 1usize << layout.log_cells;
-    let rows = shape.num_rows();
     let row_mask = Mask::sample(&mut stream, shape.log_rows, ROW_DEGREE);
     let col_mask = Mask::sample(&mut stream, layout.var_bits, COL_DEGREE);
     let mut table = vec![F::ZERO; cells];
@@ -641,18 +1184,7 @@ fn prove_with_claimed_publics(
         *slot = stream.next_base();
     }
 
-    // Row values before the table moves into the commitment.
-    let lift = |m: &super::relation::Csr| -> Vec<E> {
-        (0..rows)
-            .map(|i| E::from_base(m.row_dot(i, &assignment)))
-            .collect()
-    };
-    let (mut ta, mut tb, mut tc) = (lift(&shape.a), lift(&shape.b), lift(&shape.c));
     qsag_asm::volatile_fill(&mut assignment, F::ZERO);
-    let mut tz: Vec<E> = table[..1usize << layout.var_bits]
-        .iter()
-        .map(|&v| E::from_base(v))
-        .collect();
 
     let mut polys = Vec::with_capacity(1 + COMPANIONS);
     polys.push(table);
@@ -675,41 +1207,13 @@ fn prove_with_claimed_publics(
     let row_mask_sum = row_libra.sum();
     tr.absorb_ext4(b"ZKHEM_ROW_MASK_SUM", row_mask_sum);
     let rho1 = NonzeroChallenge::squeeze(&mut tr, b"ZKHEM_RHO1").get();
-    let mut teq = build_eq_table_ext4(&tau);
-    let mut ts: Vec<E> = (0..rows)
-        .map(|i| if i < shape.num_sbox { E::ONE } else { E::ZERO })
-        .collect();
-    let (row_rounds, rx) = masked_sumcheck(&mut tr, b"ZKHEM_ROW_ROUND", &row_libra, rho1, |c| {
-        if let Some(c) = c {
-            for t in [&mut teq, &mut ts, &mut ta, &mut tb, &mut tc] {
-                fold_in_place(t, c);
-            }
-        }
-        let (teq, ts, ta, tb, tc) = (&teq, &ts, &ta, &tb, &tc);
-        let mut evals = round_evals::<{ ROW_DEGREE + 1 }>(teq.len() / 2, |i| {
-            let step = |t: &Vec<E>| (t[2 * i], t[2 * i + 1] - t[2 * i]);
-            let (mut e, de) = step(teq);
-            let (mut s, ds) = step(ts);
-            let (mut a, da) = step(ta);
-            let (mut b, db) = step(tb);
-            let (mut c, dc) = step(tc);
-            core::array::from_fn(|_| {
-                let v = e * row_gate(s, a, b, c);
-                e += de;
-                s += ds;
-                a += da;
-                b += db;
-                c += dc;
-                v
-            })
-        });
-        let coeffs = evals_to_coeffs(&evals);
-        qsag_asm::volatile_fill(&mut evals, E::ZERO);
-        coeffs
-    });
-    for t in [&mut teq, &mut ts, &mut ta, &mut tb, &mut tc] {
-        fold_in_place(t, rx[shape.log_rows - 1]);
-    }
+    let (row_rounds, rx, row_values) = row_sumcheck(
+        &mut tr,
+        &tau,
+        shape.num_sbox,
+        row_base,
+        Some((&row_libra, rho1)),
+    );
     if !mask_rows_full_rank(shape, &rx) {
         qsag_asm::volatile_fill(&mut state.salt_seed, 0u8);
         for secret in state
@@ -719,15 +1223,10 @@ fn prove_with_claimed_publics(
         {
             qsag_asm::volatile_fill(secret, F::ZERO);
         }
-        qsag_asm::volatile_fill(&mut tz, E::ZERO);
-        for t in [&mut ta, &mut tb, &mut tc] {
-            qsag_asm::volatile_fill(t, E::ZERO);
-        }
         return Err(ZkHemError::MaskRankDeficient);
     }
 
     // 2. Row values.
-    let row_values = [ta[0], tb[0], tc[0]];
     tr.absorb_ext4_slice(b"ZKHEM_ROW_VALUES", &row_values);
 
     // 3. Masked column sumcheck of `M(rx, y) Z(y)`.
@@ -736,37 +1235,14 @@ fn prove_with_claimed_publics(
     let col_mask_sum = col_libra.sum();
     tr.absorb_ext4(b"ZKHEM_COL_MASK_SUM", col_mask_sum);
     let rho2 = NonzeroChallenge::squeeze(&mut tr, b"ZKHEM_RHO2").get();
-    let eq_rx = build_eq_table_ext4(&rx);
-    let mut tm = vec![E::ZERO; 1usize << layout.var_bits];
-    for (i, &e) in eq_rx.iter().enumerate() {
-        for (m, &r) in [&shape.a, &shape.b, &shape.c].into_iter().zip(&combine) {
-            let w = r * e;
-            for (col, val) in m.row(i) {
-                tm[col] += w.mul_base(val);
-            }
-        }
-    }
-    drop(eq_rx);
-    let (col_rounds, ry) = masked_sumcheck(&mut tr, b"ZKHEM_COL_ROUND", &col_libra, rho2, |c| {
-        if let Some(c) = c {
-            fold_in_place(&mut tm, c);
-            fold_in_place(&mut tz, c);
-        }
-        let (tm, tz) = (&tm, &tz);
-        let mut evals = round_evals::<{ COL_DEGREE + 1 }>(tm.len() / 2, |i| {
-            let (m0, m1) = (tm[2 * i], tm[2 * i + 1]);
-            let (z0, z1) = (tz[2 * i], tz[2 * i + 1]);
-            [m0 * z0, m1 * z1, (m1 + m1 - m0) * (z1 + z1 - z0)]
-        });
-        let coeffs = evals_to_coeffs(&evals);
-        qsag_asm::volatile_fill(&mut evals, E::ZERO);
-        coeffs
-    });
-    fold_in_place(&mut tm, ry[layout.var_bits - 1]);
-    let matrix_at_point = tm[0];
-    drop(tm);
-    qsag_asm::volatile_fill(&mut tz, E::ZERO);
-    drop(tz);
+    let tm = column_table(shape, &eq_table(&rx), &combine, 1 << layout.var_bits);
+    // Neither `Z(ry)` nor the mask value there is sent.
+    let (col_rounds, ry, matrix_at_point, _) = column_sumcheck(
+        &mut tr,
+        tm,
+        &state.hypercube_evals[0][..1 << layout.var_bits],
+        Some((&col_libra, rho2)),
+    );
 
     // 4. One linear functional for everything that remains.
     let lambda = tr.squeeze_ext4(b"ZKHEM_LAMBDA");
@@ -871,8 +1347,8 @@ fn verify_sumcheck(
 
 /// `sum_i eq(rx, i) (r_a A + r_b B + r_c C)[i, .]` evaluated at `ry` on the variable cells.
 fn matrix_at(shape: &Shape, rx: &[E], ry: &[E], combine: &[E]) -> E {
-    let eq_rx = build_eq_table_ext4(rx);
-    let eq_ry = build_eq_table_ext4(ry);
+    let eq_rx = eq_table(rx);
+    let eq_ry = eq_table(ry);
     let cols = &eq_ry[..shape.num_vars];
     let row_term = |i: usize| {
         let mut row = E::ZERO;
@@ -989,6 +1465,226 @@ pub fn verify(
     )
 }
 
+/// Non-hiding Hem proof. Use only when revealing the assignment is acceptable.
+/// Public inputs are checked in the column sumcheck before the single-point opening.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicHemProof {
+    pub commitment: CanopyCommitment,
+    pub row_rounds: Vec<Vec<E>>,
+    pub row_values: [E; 3],
+    pub col_rounds: Vec<Vec<E>>,
+    pub evaluation: E,
+    pub opening: HemWhirOpeningProof,
+}
+
+fn public_layout(shape: &Shape, regime: WhirSecurityRegime) -> Option<Layout> {
+    let var_bits = shape
+        .num_vars
+        .checked_next_power_of_two()?
+        .trailing_zeros()
+        .max(2) as usize;
+    (regime.meets_qrom_128_floor() && var_bits <= MAX_PCS_NUM_VARS).then(|| Layout {
+        log_cells: var_bits,
+        var_bits,
+        blind_cells: 0,
+        schedule: regime.schedule(var_bits),
+    })
+}
+
+impl PublicHemProof {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = self.commitment.to_bytes().to_vec();
+        for v in self
+            .row_rounds
+            .iter()
+            .flatten()
+            .chain(&self.row_values)
+            .chain(self.col_rounds.iter().flatten())
+            .chain(core::iter::once(&self.evaluation))
+        {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        self.opening.push_bytes(&mut out);
+        out
+    }
+    /// Canonical decoding for a public relation; rejects trailing bytes.
+    pub fn from_bytes(bytes: &[u8], shape: &Shape, regime: WhirSecurityRegime) -> Option<Self> {
+        let layout = public_layout(shape, regime)?;
+        let (commitment, mut pos) = CanopyCommitment::from_bytes_canonical(bytes)?;
+        let mut take = || -> Option<E> {
+            let chunk = bytes.get(pos..pos + 32)?.try_into().ok()?;
+            pos += 32;
+            E::from_le_bytes_canonical(chunk)
+        };
+        let row_rounds = (0..shape.log_rows)
+            .map(|_| (0..=ROW_DEGREE).map(|_| take()).collect())
+            .collect::<Option<_>>()?;
+        let row_values = [take()?, take()?, take()?];
+        let col_rounds = (0..layout.var_bits)
+            .map(|_| (0..=COL_DEGREE).map(|_| take()).collect())
+            .collect::<Option<_>>()?;
+        let evaluation = take()?;
+        let (opening, used) = HemWhirOpeningProof::from_bytes_canonical(&bytes[pos..])?;
+        (pos + used == bytes.len()).then_some(Self {
+            commitment,
+            row_rounds,
+            row_values,
+            col_rounds,
+            evaluation,
+            opening,
+        })
+    }
+}
+
+fn public_transcript(
+    shape: &Shape,
+    layout: &Layout,
+    statement: &[u8],
+    public: &[F],
+    commitment: &CanopyCommitment,
+) -> FiatShamirTranscript<InstanceBound> {
+    let bytes: Vec<u8> = public.iter().flat_map(|v| v.to_le_bytes()).collect();
+    FiatShamirTranscript::new()
+        .bind_relation(b"QSAG.HEM.PUBLIC/v1", &shape.digest(), &layout.schedule)
+        .bind_instance(&[statement, &bytes, &commitment.to_bytes()])
+}
+
+/// Commit one assignment table on its tight hypercube, without hiding masks, companions,
+/// or opening blinders. This intentionally reveals witness information. Private callers
+/// must use [`prove`]. `seed` supplies leaf salts; secrecy is not required in this mode.
+pub fn prove_public(
+    shape: &Shape,
+    assignment: Vec<F>,
+    statement: &[u8],
+    regime: WhirSecurityRegime,
+    seed: &[u8; 32],
+) -> Result<PublicHemProof, ZkHemError> {
+    prove_public_inner(shape, assignment, statement, regime, seed, true, None)
+}
+
+fn prove_public_inner(
+    shape: &Shape,
+    mut assignment: Vec<F>,
+    statement: &[u8],
+    regime: WhirSecurityRegime,
+    seed: &[u8; 32],
+    check: bool,
+    claimed: Option<&[F]>,
+) -> Result<PublicHemProof, ZkHemError> {
+    let layout = public_layout(shape, regime).ok_or(ZkHemError::RelationTooLarge)?;
+    if assignment.len() != shape.num_vars || (check && assignment.first() != Some(&F::ONE)) {
+        return Err(ZkHemError::Unsatisfied);
+    }
+    let public = claimed.map_or_else(|| assignment[1..=shape.num_public].to_vec(), <[F]>::to_vec);
+    let row_base = row_tables(shape, &assignment, check).ok_or(ZkHemError::Unsatisfied)?;
+    assignment.resize(1 << layout.var_bits, F::ZERO);
+    let (commitment, state) =
+        crate::pcs::whir_commit_owned_with_schedule(assignment, seed, &layout.schedule);
+    let mut tr = public_transcript(shape, &layout, statement, &public, &commitment);
+    let tau = squeeze_point(&mut tr, b"ZKHEM_TAU", shape.log_rows);
+    let (row_rounds, rx, row_values) = row_sumcheck(&mut tr, &tau, shape.num_sbox, row_base, None);
+    tr.absorb_ext4_slice(b"ZKHEM_ROW_VALUES", &row_values);
+    let combine = squeeze_point(&mut tr, b"ZKHEM_COMBINE", 3);
+    // Bind the constant/public cells in the same degree-two column sumcheck. The
+    // assignment was committed before lambda, so erroneous cells cannot cancel at will.
+    let lambda = tr.squeeze_ext4(b"HEM_PUBLIC_CELLS");
+    let mut tm = column_table(shape, &eq_table(&rx), &combine, 1 << layout.var_bits);
+    let mut weight = lambda;
+    for slot in tm.iter_mut().take(shape.num_public + 1) {
+        *slot += weight;
+        weight *= lambda;
+    }
+    let (col_rounds, ry, _, evaluation) =
+        column_sumcheck(&mut tr, tm, &state.hypercube_evals[0], None);
+    let opening = crate::pcs::whir_open(&state, &ry, evaluation, &mut tr);
+    Ok(PublicHemProof {
+        commitment,
+        row_rounds,
+        row_values,
+        col_rounds,
+        evaluation,
+        opening,
+    })
+}
+
+/// Verify the explicitly non-hiding proof, with a domain distinct from private zk-Hem.
+pub fn verify_public(
+    shape: &Shape,
+    public: &[F],
+    statement: &[u8],
+    regime: WhirSecurityRegime,
+    proof: &PublicHemProof,
+) -> bool {
+    let Some(layout) = public_layout(shape, regime) else {
+        return false;
+    };
+    if public.len() != shape.num_public
+        || proof.row_rounds.len() != shape.log_rows
+        || proof.col_rounds.len() != layout.var_bits
+    {
+        return false;
+    }
+    let mut tr = public_transcript(shape, &layout, statement, public, &proof.commitment);
+    let tau = squeeze_point(&mut tr, b"ZKHEM_TAU", shape.log_rows);
+    let Some((row_final, rx)) = verify_sumcheck(
+        &mut tr,
+        b"ZKHEM_ROW_ROUND",
+        &proof.row_rounds,
+        ROW_DEGREE,
+        E::ZERO,
+    ) else {
+        return false;
+    };
+    let [a, b, c] = proof.row_values;
+    if row_final != eq_eval(&tau, &rx) * row_gate(prefix_indicator(&rx, shape.num_sbox), a, b, c) {
+        return false;
+    }
+    tr.absorb_ext4_slice(b"ZKHEM_ROW_VALUES", &proof.row_values);
+    let combine = squeeze_point(&mut tr, b"ZKHEM_COMBINE", 3);
+    let lambda = tr.squeeze_ext4(b"HEM_PUBLIC_CELLS");
+    let mut claim = combine[0] * a + combine[1] * b + combine[2] * c;
+    let mut weight = lambda;
+    for v in core::iter::once(&F::ONE).chain(public) {
+        claim += weight.mul_base(*v);
+        weight *= lambda;
+    }
+    let Some((col_final, ry)) = verify_sumcheck(
+        &mut tr,
+        b"ZKHEM_COL_ROUND",
+        &proof.col_rounds,
+        COL_DEGREE,
+        claim,
+    ) else {
+        return false;
+    };
+    let mut matrix = matrix_at(shape, &rx, &ry, &combine);
+    let mut weight = lambda;
+    for cell in 0..=shape.num_public {
+        // `eq(ry, cell)`: the constant and public-input cells of the column sumcheck.
+        let eq = ry.iter().enumerate().fold(E::ONE, |acc, (bit, &r)| {
+            acc * if (cell >> bit) & 1 == 1 {
+                r
+            } else {
+                E::ONE - r
+            }
+        });
+        matrix += weight * eq;
+        weight *= lambda;
+    }
+    if col_final != matrix * proof.evaluation {
+        return false;
+    }
+    crate::pcs::whir_verify_with_schedule(
+        &proof.commitment,
+        layout.var_bits,
+        &ry,
+        proof.evaluation,
+        &proof.opening,
+        &mut tr,
+        &layout.schedule,
+    )
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::super::relation::{ConstraintSystem, Lc, MASK_ROWS, sponge12, sponge12_native};
@@ -1017,6 +1713,355 @@ mod tests {
         let out = sponge12(&mut cs, &v);
         cs.enforce_zero(out[0].plus_const(F::ZERO - digest));
         cs.finish()
+    }
+
+    fn test_transcript(tag: &[u8]) -> FiatShamirTranscript<InstanceBound> {
+        let schedule = WhirSecurityRegime::BciksJohnsonQrom128.schedule(4);
+        FiatShamirTranscript::new()
+            .bind_relation(b"QSAG.ZKHEM.TEST/v1", &[0; 32], &schedule)
+            .bind_instance(&[tag])
+    }
+
+    /// Row round polynomials straight from the definition: `eq` and the selector as
+    /// tables, every table folded explicitly, ten evaluation points per pair.
+    fn reference_row_rounds(
+        tau: &[E],
+        num_sbox: usize,
+        base: &[Vec<F>; 3],
+        rx: &[E],
+    ) -> (Vec<Vec<E>>, [E; 3]) {
+        let lift = |t: &Vec<F>| t.iter().map(|&v| E::from_base(v)).collect::<Vec<E>>();
+        let selector = (0..1usize << tau.len())
+            .map(|i| if i < num_sbox { E::ONE } else { E::ZERO })
+            .collect();
+        let mut tables = [
+            build_eq_table_ext4(tau),
+            selector,
+            lift(&base[0]),
+            lift(&base[1]),
+            lift(&base[2]),
+        ];
+        let mut rounds = Vec::new();
+        for &r in rx {
+            let mut evals = [E::ZERO; ROW_DEGREE + 1];
+            for i in 0..tables[0].len() / 2 {
+                for (k, slot) in evals.iter_mut().enumerate() {
+                    let at =
+                        |t: &Vec<E>| t[2 * i] + E::from_u64(k as u64) * (t[2 * i + 1] - t[2 * i]);
+                    *slot += at(&tables[0])
+                        * row_gate(
+                            at(&tables[1]),
+                            at(&tables[2]),
+                            at(&tables[3]),
+                            at(&tables[4]),
+                        );
+                }
+            }
+            rounds.push(evals_to_coeffs(&evals));
+            for t in &mut tables {
+                *t = t
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[lo, hi]| lo + r * (hi - lo))
+                    .collect();
+            }
+        }
+        (rounds, [tables[2][0], tables[3][0], tables[4][0]])
+    }
+
+    #[test]
+    fn row_sumcheck_matches_the_direct_definition() {
+        let mut stream = SeedStream::new(b"QSAG.ZKHEM.TEST.ROWS/v1", &[3; 32]);
+        // Boundaries: none, odd, even, every row, and a table large enough for the workers.
+        for (log_rows, num_sbox) in [(4, 0), (4, 5), (4, 6), (4, 16), (6, 37), (14, 9001)] {
+            let rows = 1usize << log_rows;
+            let mut base: [Vec<F>; 3] =
+                core::array::from_fn(|_| (0..rows).map(|_| stream.next_base()).collect());
+            // Pairs with zero A and C, at several fold depths, on both sides of the boundary.
+            for i in (0..rows).filter(|i| (i / 4) % 3 == 0) {
+                base[0][i] = F::ZERO;
+                base[2][i] = F::ZERO;
+            }
+            let tau: Vec<E> = (0..log_rows).map(|_| stream.next_ext4()).collect();
+            let libra = LibraMask::from_stream(&mut stream, log_rows, ROW_DEGREE);
+            let rho = stream.next_ext4();
+            for mask in [None, Some((&libra, rho))] {
+                let mut tr = test_transcript(b"rows");
+                let (rounds, rx, values) =
+                    row_sumcheck(&mut tr, &tau, num_sbox, base.clone(), mask);
+                let (mut expected, expected_values) =
+                    reference_row_rounds(&tau, num_sbox, &base, &rx);
+                if let Some((libra, rho)) = mask {
+                    for (i, round) in expected.iter_mut().enumerate() {
+                        for (c, g) in round.iter_mut().zip(libra.round_poly(&rx[..i])) {
+                            *c += rho * g;
+                        }
+                    }
+                }
+                assert_eq!(
+                    rounds, expected,
+                    "log_rows {log_rows}, {num_sbox} S-box rows"
+                );
+                assert_eq!(values, expected_values);
+            }
+        }
+    }
+
+    #[test]
+    fn column_sumcheck_matches_the_direct_definition() {
+        let mut stream = SeedStream::new(b"QSAG.ZKHEM.TEST.COLS/v1", &[4; 32]);
+        for bits in [1usize, 2, 5, 14] {
+            let matrix: Vec<E> = (0..1 << bits).map(|_| stream.next_ext4()).collect();
+            let z: Vec<F> = (0..1 << bits).map(|_| stream.next_base()).collect();
+            let libra = LibraMask::from_stream(&mut stream, bits, COL_DEGREE);
+            let rho = stream.next_ext4();
+            for mask in [None, Some((&libra, rho))] {
+                let mut tr = test_transcript(b"columns");
+                let (rounds, ry, matrix_at_point, value) =
+                    column_sumcheck(&mut tr, matrix.clone(), &z, mask);
+                let mut tm = matrix.clone();
+                let mut tz: Vec<E> = z.iter().map(|&v| E::from_base(v)).collect();
+                for (i, (round, &r)) in rounds.iter().zip(&ry).enumerate() {
+                    let mut evals = [E::ZERO; COL_DEGREE + 1];
+                    for (m, z) in tm.as_chunks::<2>().0.iter().zip(tz.as_chunks::<2>().0) {
+                        for (k, slot) in evals.iter_mut().enumerate() {
+                            let k = E::from_u64(k as u64);
+                            *slot += (m[0] + k * (m[1] - m[0])) * (z[0] + k * (z[1] - z[0]));
+                        }
+                    }
+                    let mut expected = evals_to_coeffs(&evals);
+                    if let Some((libra, rho)) = mask {
+                        for (c, g) in expected.iter_mut().zip(libra.round_poly(&ry[..i])) {
+                            *c += rho * g;
+                        }
+                    }
+                    assert_eq!(round, &expected, "{bits} variables, round {i}");
+                    for t in [&mut tm, &mut tz] {
+                        *t = t
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|&[lo, hi]| lo + r * (hi - lo))
+                            .collect();
+                    }
+                }
+                assert_eq!((matrix_at_point, value), (tm[0], tz[0]));
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_tables_match_their_serial_definitions() {
+        let mut stream = SeedStream::new(b"QSAG.ZKHEM.TEST.TABLES/v1", &[5; 32]);
+        let point: Vec<E> = (0..15).map(|_| stream.next_ext4()).collect();
+        for n in [0, 1, 11, 12, 13, 15] {
+            assert_eq!(eq_table(&point[..n]), build_eq_table_ext4(&point[..n]));
+        }
+        // S-box and multiplication rows that reach back to an early variable and to a
+        // public input, enough of them for several workers.
+        let mut cs = ConstraintSystem::new();
+        let public: Lc = cs.public_input(f(5)).into();
+        let first: Lc = cs.alloc(f(3)).into();
+        let mut prev = first.clone();
+        for _ in 0..6000 {
+            let y: Lc = cs.sbox7(&prev.plus(&public)).into();
+            prev = cs.mul(&y, &first).into();
+            cs.enforce_boolean(&Lc::constant(F::ONE));
+        }
+        let (shape, z) = cs.finish();
+        assert!(shape.num_rows() > PAR_MIN && shape.is_satisfied(&z));
+        let eq = eq_table(&point[..shape.log_rows]);
+        let combine = &point[..3];
+        let cells = shape.num_vars.next_power_of_two();
+        let mut expected = vec![E::ZERO; cells];
+        for (i, &e) in eq.iter().enumerate() {
+            for (m, &r) in [&shape.a, &shape.b, &shape.c].into_iter().zip(combine) {
+                for (col, val) in m.row(i) {
+                    expected[col] += (r * e).mul_base(val);
+                }
+            }
+        }
+        assert_eq!(column_table(&shape, &eq, combine, cells), expected);
+        let tables = row_tables(&shape, &z, true).unwrap();
+        for (table, m) in tables.iter().zip([&shape.a, &shape.b, &shape.c]) {
+            let expected: Vec<F> = (0..shape.num_rows()).map(|i| m.row_dot(i, &z)).collect();
+            assert_eq!(table, &expected);
+        }
+        let mut bad = z;
+        bad[2] += F::ONE;
+        assert!(row_tables(&shape, &bad, true).is_none());
+        assert!(row_tables(&shape, &bad, false).is_some());
+    }
+
+    #[test]
+    fn public_mode_checks_public_inputs_and_the_relation() {
+        let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+        let mut cs = ConstraintSystem::new();
+        let x: Lc = cs.public_input(f(9)).into();
+        let y: Lc = cs.public_input(f(81)).into();
+        let w: Lc = cs.alloc(f(3)).into();
+        cs.enforce_mul(w.clone(), w, x.clone());
+        cs.enforce_mul(x.clone(), x, y);
+        let (shape, z) = cs.finish();
+        let proof = prove_public(&shape, z, b"public", regime, &[5; 32]).unwrap();
+        assert!(verify_public(
+            &shape,
+            &[f(9), f(81)],
+            b"public",
+            regime,
+            &proof
+        ));
+        for public in [
+            &[f(9), f(82)][..],
+            &[f(10), f(81)],
+            &[f(81), f(9)],
+            &[f(9)],
+            &[f(9), f(81), f(0)],
+        ] {
+            assert!(!verify_public(&shape, public, b"public", regime, &proof));
+        }
+        // The same proof under another regime, another relation, or the hiding verifier's
+        // transcript domain.
+        assert!(!verify_public(
+            &shape,
+            &[f(9), f(81)],
+            b"public",
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+            &proof
+        ));
+        let (other, _) = preimage_relation([1, 77]);
+        assert!(!verify_public(
+            &other,
+            &[f(9), f(81)],
+            b"public",
+            regime,
+            &proof
+        ));
+        assert!(!verify_public(&other, &[], b"public", regime, &proof));
+    }
+
+    /// Flip one bit in every 8-byte word of a serialized public proof: commitment, each
+    /// sumcheck coefficient, the claimed values, and everything the opening carries
+    /// (out-of-domain values, fold polynomials, nonces, leaf values, salts, Merkle siblings).
+    #[test]
+    fn every_serialized_word_of_a_public_proof_is_bound() {
+        for regime in [
+            WhirSecurityRegime::BciksJohnsonQrom128,
+            WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+        ] {
+            let mut cs = ConstraintSystem::new();
+            let public: Lc = cs.public_input(f(11)).into();
+            let mut prev: Lc = cs.alloc(f(2)).into();
+            for _ in 0..40 {
+                prev = cs.sbox7(&prev.plus(&public)).into();
+                prev = cs.mul(&prev, &public).into();
+            }
+            // Enough cells that the opening does not query every leaf.
+            for i in 0..4000 {
+                cs.alloc(f(i));
+            }
+            let (shape, z) = cs.finish();
+            let proof = prove_public(&shape, z, b"sweep", regime, &[6; 32]).unwrap();
+            assert!(!proof.opening.round0_multiproof.auth_siblings.is_empty());
+            let bytes = proof.to_bytes();
+            assert!(verify_public(&shape, &[f(11)], b"sweep", regime, &proof));
+            let mut decoded = 0usize;
+            for pos in (0..bytes.len()).step_by(8) {
+                let mut bad = bytes.clone();
+                bad[pos] ^= 1;
+                if let Some(bad) = PublicHemProof::from_bytes(&bad, &shape, regime) {
+                    decoded += 1;
+                    assert!(
+                        !verify_public(&shape, &[f(11)], b"sweep", regime, &bad),
+                        "{regime:?}: byte {pos} of {} is not bound",
+                        bytes.len()
+                    );
+                }
+            }
+            // Most single-bit changes are still canonical encodings and reach the verifier.
+            assert!(
+                decoded * 2 > bytes.len() / 8,
+                "{decoded} of {}",
+                bytes.len() / 8
+            );
+            std::println!(
+                "PUBLIC_SWEEP {regime:?} bytes={} verified_tampers={decoded}",
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn public_mode_rejects_a_corrupt_authentication_path() {
+        let mut cs = ConstraintSystem::new();
+        for i in 0..4096 {
+            cs.alloc(f(i));
+        }
+        let (shape, z) = cs.finish();
+        let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+        let mut proof = prove_public(&shape, z, b"merkle", regime, &[7; 32]).unwrap();
+        assert!(verify_public(&shape, &[], b"merkle", regime, &proof));
+        assert!(!proof.opening.round0_multiproof.auth_siblings.is_empty());
+        proof.opening.round0_multiproof.auth_siblings[0][0] ^= 1;
+        assert!(!verify_public(&shape, &[], b"merkle", regime, &proof));
+    }
+
+    #[test]
+    fn public_mode_binds_witness_statement_cells_and_openings() {
+        for regime in REGIMES
+            .into_iter()
+            .chain([WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128])
+        {
+            let (shape, z) = preimage_relation([1, 77]);
+            let proof = prove_public(&shape, z, b"public", regime, &[1; 32]).unwrap();
+            assert!(verify_public(&shape, &[], b"public", regime, &proof));
+            assert!(!verify_public(&shape, &[], b"changed", regime, &proof));
+            let bytes = proof.to_bytes();
+            assert_eq!(
+                PublicHemProof::from_bytes(&bytes, &shape, regime),
+                Some(proof.clone())
+            );
+            assert!(
+                PublicHemProof::from_bytes(&bytes[..bytes.len() - 1], &shape, regime).is_none()
+            );
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert!(PublicHemProof::from_bytes(&trailing, &shape, regime).is_none());
+            let (_, bad) = preimage_relation([1, 78]);
+            assert_eq!(
+                prove_public(&shape, bad.clone(), b"public", regime, &[1; 32]),
+                Err(ZkHemError::Unsatisfied)
+            );
+            let forged =
+                prove_public_inner(&shape, bad, b"public", regime, &[1; 32], false, None).unwrap();
+            assert!(!verify_public(&shape, &[], b"public", regime, &forged));
+            let changes: &[fn(&mut PublicHemProof)] = &[
+                |p| p.row_rounds[0][1] += E::ONE,
+                |p| p.row_values[0] += E::ONE,
+                |p| p.col_rounds[0][1] += E::ONE,
+                |p| p.evaluation += E::ONE,
+                |p| p.opening.stage0_ood_evals[0] += E::ONE,
+                |p| p.opening.round0_vals[0] += F::ONE,
+                |p| p.opening.round0_salts[0][0] ^= 1,
+                |p| p.commitment.root[0] ^= 1,
+            ];
+            for change in changes {
+                let mut bad = proof.clone();
+                change(&mut bad);
+                assert!(!verify_public(&shape, &[], b"public", regime, &bad));
+            }
+            let mut cs = ConstraintSystem::new();
+            let public: Lc = cs.public_input(f(9)).into();
+            let private: Lc = cs.alloc(f(3)).into();
+            cs.enforce_mul(private.clone(), private, public);
+            let (shape, z) = cs.finish();
+            let claimed = [f(10)];
+            let forged =
+                prove_public_inner(&shape, z, b"public", regime, &[2; 32], true, Some(&claimed))
+                    .unwrap();
+            assert!(!verify_public(&shape, &claimed, b"public", regime, &forged));
+        }
     }
 
     #[test]

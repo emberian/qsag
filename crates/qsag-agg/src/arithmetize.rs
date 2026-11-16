@@ -47,9 +47,9 @@ use crate::sponge::{
     FiatShamirTranscript, InstanceBound, cshake256_32, encode_multi_frame, shake256_into,
 };
 use crate::trace::{
-    COL_AUX, COL_SBOX_OUT, COL_ST_IN, ConstraintKind, LOG_TRACE_COLS, NUM_TRACE_COLS,
-    RowPublicEvalExt4, SparseBaseRowPublicEvalExt4, SparseRowPublicEvalExt4, StepOp,
-    build_gamma_schedule_ext4, build_signer_program, dot_shift_state_base_ext4,
+    COL_AUX, COL_SBOX_OUT, COL_ST_IN, ConstraintKind, GroupALineExt4, LOG_TRACE_COLS,
+    NUM_TRACE_COLS, RowPublicEvalExt4, SparseBaseRowPublicEvalExt4, SparseRowPublicEvalExt4,
+    StepOp, build_gamma_schedule_ext4, build_signer_program, dot_shift_state_base_ext4,
     dot_shift_state_ext4, eval_batched_row_constraints_ext4, eval_eq_part_base_row_ext4,
     eval_eq_part_sparse_ext4, index_unique_program_ops, populate_active_signer_rows,
     populate_inactive_signer_rows, record_poseidon2_perm12, rows_per_signer,
@@ -1063,6 +1063,7 @@ fn prove_shard_rows(
                 };
                 let da = a1 - a0;
                 let db = b1 - b0;
+                let line = GroupALineExt4::new(&sched, &eval_cols, &dc);
 
                 if folding_signer {
                     let loc = idx & (cur_r - 1);
@@ -1084,6 +1085,7 @@ fn prove_shard_rows(
                             eq_not_last: nl0,
                             shift_tau: sh0,
                         },
+                        &line.at(0),
                     ) + (nl0 * a0 - sh0 * b0);
 
                     for c in 0..NUM_TRACE_COLS {
@@ -1129,6 +1131,7 @@ fn prove_shard_rows(
                                 eq_not_last: cur_nl,
                                 shift_tau: cur_sh,
                             },
+                            &line.at(k as u64),
                         ) + (cur_nl * cur_a - cur_sh * cur_b);
                         if k + 1 < ROW_SUMCHECK_COEFFS {
                             for c in 0..NUM_TRACE_COLS {
@@ -1176,6 +1179,7 @@ fn prove_shard_rows(
                             eq_not_last: nl0,
                             shift_tau: sh0,
                         },
+                        &line.at(0),
                     ) + (nl0 * a0 - sh0 * b0);
 
                     for c in 0..NUM_TRACE_COLS {
@@ -1216,6 +1220,7 @@ fn prove_shard_rows(
                                 eq_not_last: cur_nl,
                                 shift_tau: cur_sh,
                             },
+                            &line.at(k as u64),
                         ) + (cur_nl * cur_a - cur_sh * cur_b);
                         if k + 1 < ROW_SUMCHECK_COEFFS {
                             for c in 0..NUM_TRACE_COLS {
@@ -2157,6 +2162,7 @@ fn prove_shard_rows_gpu(
                     let (a1, b1) = dot_shift_state_ext4(&sched, c1);
                     let da = a1 - a0;
                     let db = b1 - b0;
+                    let line = GroupALineExt4::new(&sched, &eval_cols, &dc);
 
                     union_sparse_op_pairs(
                         &op_sparse_tbl[idx],
@@ -2184,6 +2190,7 @@ fn prove_shard_rows_gpu(
                             eq_not_last: nl0,
                             shift_tau: sh0,
                         },
+                        &line.at(0),
                     ) + (nl0 * a0 - sh0 * b0);
 
                     for c in 0..NUM_TRACE_COLS {
@@ -2224,6 +2231,7 @@ fn prove_shard_rows_gpu(
                                 eq_not_last: cur_nl,
                                 shift_tau: cur_sh,
                             },
+                            &line.at(k as u64),
                         ) + (cur_nl * cur_a - cur_sh * cur_b);
                         if k + 1 < ROW_SUMCHECK_COEFFS {
                             for c in 0..NUM_TRACE_COLS {
@@ -2396,12 +2404,7 @@ fn prove_shard_rows_gpu(
     for v in &col_evals {
         col_eval_bytes.extend_from_slice(&v.to_le_bytes());
     }
-    if !session.certify_stage(
-        qsag_accel::ProverKernelSlot::AirRowGroupB,
-        b"AIR.SHARD.ROWS/v1",
-        total_rows,
-        &col_eval_bytes,
-    ) {
+    if !session.record_stage(qsag_accel::ProverKernelSlot::AirRowGroupB) {
         return Err(qsag_accel::VulkanError::WorkspacePoisoned);
     }
     transcript.absorb(b"LEAF_COL_EVALS", &col_eval_bytes);

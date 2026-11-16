@@ -340,7 +340,7 @@ fn write_party_bundle(
     lock.set_key_material(&opened);
     lock.bind(&mut bundle)?;
     lock.seal(&mut bundle)?;
-    let encoded = ZeroizingBuf(bundle.to_pretty().into_bytes());
+    let encoded = ZeroizingBuf::new(bundle.to_pretty().into_bytes());
     if encoded.len() as u64 > limit {
         return Err(CliError::input("party share bundle exceeds file bound"));
     }
@@ -381,7 +381,7 @@ fn write_voprf_bundle(
     payload: &ZeroizingBuf,
     passphrase: Option<&[u8]>,
 ) -> Result<(), CliError> {
-    let enrollment_nonce = Secret32(os_random_32()?);
+    let enrollment_nonce = Secret32::new(os_random_32()?);
     let bundle = Json::object(vec![
         ("format", Json::str(enrollment.share_format)),
         ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
@@ -488,7 +488,7 @@ fn voprf_spdz_keygen(
         commitment,
     };
     for (party, server) in servers.iter().enumerate() {
-        let payload = ZeroizingBuf(server.to_secret_bytes());
+        let payload = ZeroizingBuf::new(server.to_secret_bytes());
         write_voprf_bundle(vault_dir, party, &enrollment, &payload, passphrase)?;
     }
     let record = public.to_bytes();
@@ -779,7 +779,7 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
             &args,
             threshold,
             parties,
-            passphrase.as_deref(),
+            passphrase.as_deref().map(Vec::as_slice),
             vault_dir,
             public_out,
         );
@@ -791,7 +791,7 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
         b"QSAG.CLI.TOPRF.DET.SESSION.V1",
         &[b"voprf-keygen"],
     )?;
-    let mut entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|_| Secret32([0; 32]));
+    let mut entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|_| Secret32::new([0; 32]));
     for (party, entropy) in entropies.iter_mut().enumerate() {
         entropy.0 = toprf_seed(
             deterministic,
@@ -819,13 +819,13 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
         commitment,
     };
     for (party, server) in servers.iter().enumerate() {
-        let payload = ZeroizingBuf(server.to_secret_bytes());
+        let payload = ZeroizingBuf::new(server.to_secret_bytes());
         write_voprf_bundle(
             vault_dir,
             party,
             &enrollment,
             &payload,
-            passphrase.as_deref(),
+            passphrase.as_deref().map(Vec::as_slice),
         )?;
     }
 
@@ -918,7 +918,7 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
             out_path,
             counter,
             &input,
-            passphrase.as_deref(),
+            passphrase.as_deref().map(Vec::as_slice),
         );
     }
     let session = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
@@ -953,8 +953,12 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
         };
         let mut servers = Vec::with_capacity(TOPRF_SERVERS);
         for party in selected {
-            let (lock, opened) =
-                load_voprf_bundle(vault_dir, party, &enrollment, passphrase.as_deref())?;
+            let (lock, opened) = load_voprf_bundle(
+                vault_dir,
+                party,
+                &enrollment,
+                passphrase.as_deref().map(Vec::as_slice),
+            )?;
             servers.push(
                 voprf::Server::from_secret_bytes(opened.secret_key()?, &pk, party)
                     .map_err(|e| CliError::input(format!("invalid TOPRF share: {e}")))?,
@@ -969,7 +973,8 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
                 "legacy seed-only TOPRF vaults are unencrypted",
             ));
         }
-        let mut entropies: [Secret32; TOPRF_SERVERS] = core::array::from_fn(|_| Secret32([0; 32]));
+        let mut entropies: [Secret32; TOPRF_SERVERS] =
+            core::array::from_fn(|_| Secret32::new([0; 32]));
         for (party, slot) in entropies.iter_mut().enumerate() {
             let path = voprf_seed_path(vault_dir, party);
             locks.push(crate::vault::Vault::acquire(&path, false)?);
@@ -997,7 +1002,7 @@ fn voprf_eval(raw: &[String]) -> Result<(), CliError> {
     } else {
         os_random_32()?
     };
-    let client_entropy = Secret32(if deterministic {
+    let client_entropy = Secret32::new(if deterministic {
         cshake256_framed_32(
             b"QSAG.CLI.TOPRF.DET.CLIENT.V1",
             &[&commitment, &counter.to_le_bytes(), &input.0],
@@ -1429,7 +1434,7 @@ fn run_mldsa_dkg_threads(
                         me: pos,
                         hub: Arc::clone(&hub_ref),
                     },
-                    transcript: ZeroizingBuf(Vec::new()),
+                    transcript: ZeroizingBuf::new(Vec::new()),
                 };
                 let res = threshold_mldsa_dkg_party(&cfg_clone, party_id, &seed_bytes, &mut net);
                 if res.is_err() {
@@ -1477,7 +1482,7 @@ fn run_mldsa_shamir_ceremony(
             .enumerate()
         {
             let hub_ref = Arc::clone(&hub);
-            let seed = Secret32(cshake256_framed_32(
+            let seed = Secret32::new(cshake256_framed_32(
                 b"QSAG.CLI.TMLDSA.SHAMIR.EXPAND_SEED.V1",
                 &[&ent.0],
             ));
@@ -1598,7 +1603,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         } else {
             os_random_32()?
         };
-        entropies.push(Secret32(seed));
+        entropies.push(Secret32::new(seed));
     }
 
     // Custody payload after the burn MAC key: the recorded ceremony transcript and its
@@ -1610,7 +1615,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
                 let encoded = share.to_shamir_bytes().ok_or_else(|| {
                     CliError::state("Shamir ceremony returned a replicated share")
                 })?;
-                Ok((share, ZeroizingBuf(encoded)))
+                Ok((share, ZeroizingBuf::new(encoded)))
             })
             .collect::<Result<_, CliError>>()?
     } else {
@@ -1622,7 +1627,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     let issuer_digest = pack.issuer_pk_digest();
 
     for (idx, ((_, transcript), ent)) in shares.iter().zip(&entropies).enumerate() {
-        let mac_key = Secret32(if deterministic {
+        let mac_key = Secret32::new(if deterministic {
             cshake256_framed_32(
                 b"QSAG.CLI.TMLDSA.DET.BURN_MAC.V1",
                 &[&key_id, &(idx as u64).to_le_bytes()],
@@ -1630,13 +1635,13 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         } else {
             os_random_32()?
         });
-        let mut payload = ZeroizingBuf(Vec::with_capacity(64 + transcript.len()));
+        let mut payload = ZeroizingBuf::new(Vec::with_capacity(64 + transcript.len()));
         if !shamir {
             payload.0.extend_from_slice(&ent.0);
         }
         payload.0.extend_from_slice(&mac_key.0);
         payload.0.extend_from_slice(transcript);
-        let enrollment_nonce = Secret32(os_random_32()?);
+        let enrollment_nonce = Secret32::new(os_random_32()?);
         let bundle = Json::object(vec![
             ("format", Json::str(share_format)),
             ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
@@ -1652,7 +1657,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         write_party_bundle(
             &mldsa_share_path(vault_dir, idx),
             bundle,
-            passphrase.as_deref(),
+            passphrase.as_deref().map(Vec::as_slice),
             MLDSA_BUNDLE_LIMIT,
         )?;
         FsNonceBurnStore::create(mldsa_burn_path(vault_dir, idx), key_id, mac_key.0)
@@ -1771,7 +1776,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
     let msg = read_input_arg(&args)?;
     let ctx = match args.get("context-hex") {
         Some(h) => from_hex(h)?,
-        None => ZeroizingBuf(Vec::new()),
+        None => ZeroizingBuf::new(Vec::new()),
     };
     if ctx.len() > 255 {
         return Err(CliError::usage("--context-hex must be at most 255 bytes"));
@@ -1842,7 +1847,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
                 &mldsa_share_path(vault_dir, idx),
                 share_format,
                 MLDSA_BUNDLE_LIMIT,
-                passphrase.as_deref(),
+                passphrase.as_deref().map(Vec::as_slice),
             )?;
             if bundle.field_u64("party")? != idx as u64
                 || bundle.field_u64("threshold")? != threshold as u64
@@ -1865,15 +1870,15 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
                     (idx + 1) as u16,
                 )
                 .map_err(|e| CliError::input(format!("invalid ML-DSA Shamir share: {e}")))?;
-                loaded.push((idx, share, Secret32(mac.try_into().unwrap())));
+                loaded.push((idx, share, Secret32::new(mac.try_into().unwrap())));
                 locks.push(lock);
                 continue;
             }
             if payload.len() < 64 {
                 return Err(CliError::input("truncated ML-DSA share"));
             }
-            let entropy = Secret32(payload[..32].try_into().unwrap());
-            let mac = Secret32(payload[32..64].try_into().unwrap());
+            let entropy = Secret32::new(payload[..32].try_into().unwrap());
+            let mac = Secret32::new(payload[32..64].try_into().unwrap());
             let mut restore = RestoringMpc {
                 remaining: &payload[64..],
                 parties,
@@ -1898,9 +1903,9 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         let mut entropies = Vec::with_capacity(parties);
         for idx in 0..parties {
             let bytes = read_bounded_file(&mldsa_seed_path(vault_dir, idx), 32)?;
-            entropies.push(Secret32(bytes.0.as_slice().try_into().map_err(|_| {
-                CliError::input("corrupt ML-DSA custodian seed length")
-            })?));
+            entropies.push(Secret32::new(bytes.0.as_slice().try_into().map_err(
+                |_| CliError::input("corrupt ML-DSA custodian seed length"),
+            )?));
         }
         for (idx, (share, _)) in run_mldsa_dkg_threads(&dkg_cfg, &entropies)?
             .into_iter()
@@ -1908,7 +1913,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         {
             if signer_indices.contains(&idx) {
                 let bytes = read_bounded_file(&mldsa_mac_path(vault_dir, idx), 32)?;
-                let mac = Secret32(
+                let mac = Secret32::new(
                     bytes
                         .0
                         .as_slice()
@@ -1943,7 +1948,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         } else {
             os_random_32()?
         };
-        selected.push((idx, share, mac, Secret32(sign_ent)));
+        selected.push((idx, share, mac, Secret32::new(sign_ent)));
     }
 
     let hub = SharedMpcHub::new(selected.len());
@@ -2076,7 +2081,7 @@ fn mldsa_verify(raw: &[String]) -> Result<(), CliError> {
             .and_then(Json::as_str)
             .map(from_hex)
             .transpose()?
-            .unwrap_or_else(|| ZeroizingBuf(Vec::new())),
+            .unwrap_or_else(|| ZeroizingBuf::new(Vec::new())),
     };
 
     if !ml_dsa_verify(level, &pk_bytes, &msg.0, &ctx, &sig_bytes) {

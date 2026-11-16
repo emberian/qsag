@@ -188,7 +188,6 @@ where
     let mut classes = [0u8; CHUNK];
     let mut ticks = [0u64; CHUNK];
 
-    let mut warmup_samples = Vec::with_capacity(WARMUP_CHUNKS * CHUNK);
     for _ in 0..WARMUP_CHUNKS {
         for c in &mut classes {
             *c = (rng.next_u64() & 1) as u8;
@@ -200,22 +199,13 @@ where
             let t1 = serialized_ticks_end();
             *tick = t1.wrapping_sub(t0);
         }
-        warmup_samples.extend_from_slice(&ticks);
     }
-    warmup_samples.sort_unstable();
-    let wn = warmup_samples.len();
-    let thresholds = [
-        warmup_samples[(wn * 50) / 100].max(1) as f64,
-        warmup_samples[(wn * 75) / 100].max(1) as f64,
-        warmup_samples[(wn * 90) / 100].max(1) as f64,
-        warmup_samples[(wn * 95) / 100].max(1) as f64,
-        warmup_samples[(wn * 99) / 100].max(1) as f64,
-    ];
 
     let n_chunks = min_traces.div_ceil(CHUNK);
     let total_traces = n_chunks * CHUNK;
     let mut raw_estimator = WelfordPair::default();
     let mut estimators = [WelfordPair::default(); 5];
+    let mut measured = Vec::with_capacity(total_traces);
 
     for _ in 0..n_chunks {
         for c in &mut classes {
@@ -229,13 +219,18 @@ where
             *tick = t1.wrapping_sub(t0);
         }
         for i in 0..CHUNK {
-            let cls = classes[i] as usize;
-            let dt = ticks[i] as f64;
-            raw_estimator.push(cls, dt);
-            for (tier, &cap) in thresholds.iter().enumerate() {
-                if dt <= cap {
-                    estimators[tier].push(cls, dt);
-                }
+            raw_estimator.push(classes[i] as usize, ticks[i] as f64);
+            measured.push((classes[i], ticks[i]));
+        }
+    }
+
+    let mut sorted: Vec<u64> = measured.iter().map(|&(_, dt)| dt).collect();
+    sorted.sort_unstable();
+    let thresholds = [50, 75, 90, 95, 99].map(|p| sorted[(sorted.len() * p) / 100]);
+    for &(class, dt) in &measured {
+        for (tier, &cap) in thresholds.iter().enumerate() {
+            if dt <= cap {
+                estimators[tier].push(class as usize, dt as f64);
             }
         }
     }

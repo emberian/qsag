@@ -548,8 +548,8 @@ pub fn cshake256_32(customization: &[u8], input: &[u8]) -> [u8; 32] {
 // 3. Width-12 `Poseidon2` over `Goldilocks` and `GoldilocksExt2`
 // ============================================================================
 
-pub use qsag_core::sponge::{POSEIDON2_CONST_IV, poseidon2_rc_bijection, poseidon2_sbox7};
 use qsag_core::sponge::poseidon2_const_at as poseidon2_const_compute;
+pub use qsag_core::sponge::{POSEIDON2_CONST_IV, poseidon2_rc_bijection, poseidon2_sbox7};
 
 pub const POSEIDON2_HALF_EXT_ROUNDS: usize = 4;
 pub const POSEIDON2_INT_ROUNDS: usize = 22;
@@ -631,7 +631,9 @@ fn apply_m4_base(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
 #[inline(always)]
 pub fn poseidon2_apply_me(st: &mut [Goldilocks; 12]) {
     // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
+    *st = [
+        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
+    ];
     let y0 = apply_m4_base([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_base([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_base([st[8], st[9], st[10], st[11]]);
@@ -651,7 +653,9 @@ pub fn poseidon2_apply_me(st: &mut [Goldilocks; 12]) {
     st[9] = y2[1] + s1;
     st[10] = y2[2] + s2;
     st[11] = y2[3] + s3;
-    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
+    *st = [
+        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
+    ];
 }
 
 /// Unrolled internal diffusion `M_I = I + diag(-3, 0, 1, 3, ..., 1023) + 1*1^T` (`0` muls:
@@ -701,7 +705,9 @@ fn apply_m4_ext4(b: [GoldilocksExt4; 4]) -> [GoldilocksExt4; 4] {
 #[inline(always)]
 pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
     // M4 tensor P3: transpose lanes, apply P3 tensor M4, transpose back.
-    *st = [st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11]];
+    *st = [
+        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
+    ];
     let y0 = apply_m4_ext4([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_ext4([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_ext4([st[8], st[9], st[10], st[11]]);
@@ -721,7 +727,9 @@ pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
     st[9] = y2[1] + s1;
     st[10] = y2[2] + s2;
     st[11] = y2[3] + s3;
-    *st = [st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11]];
+    *st = [
+        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
+    ];
 }
 
 /// Unrolled internal diffusion over `GoldilocksExt4` (`0` muls: shift/add power-of-two diagonal).
@@ -1383,7 +1391,8 @@ impl FiatShamirTranscript<InstanceBound> {
                     Vec::with_capacity(1 + label.len().div_ceil(7) + payload_limbs.len());
                 push_packed_bytes_7_limbs(&mut limbs, label);
                 limbs.extend_from_slice(payload_limbs);
-                let next = poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_ABSORB_LIMBS, *p2_chain, &limbs);
+                let next =
+                    poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_ABSORB_LIMBS, *p2_chain, &limbs);
                 *p2_chain = next;
                 self.chain_digest = limbs4_to_le_bytes32(next);
                 self.counter = 0;
@@ -1402,12 +1411,12 @@ impl FiatShamirTranscript<InstanceBound> {
     pub fn absorb(&mut self, label: &[u8], payload: &[u8]) {
         match &mut self.backend {
             TranscriptBackend::Poseidon2 { p2_chain } => {
-                let mut limbs = Vec::with_capacity(
-                    2 + label.len().div_ceil(7) + payload.len().div_ceil(7),
-                );
+                let mut limbs =
+                    Vec::with_capacity(2 + label.len().div_ceil(7) + payload.len().div_ceil(7));
                 push_packed_bytes_7_limbs(&mut limbs, label);
                 push_packed_bytes_7_limbs(&mut limbs, payload);
-                let next = poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_ABSORB_BYTES, *p2_chain, &limbs);
+                let next =
+                    poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_ABSORB_BYTES, *p2_chain, &limbs);
                 *p2_chain = next;
                 self.chain_digest = limbs4_to_le_bytes32(next);
                 self.counter = 0;
@@ -1917,20 +1926,37 @@ mod canonical_compression_tests {
     #[test]
     fn weighted_jive_kat() {
         let st: [Goldilocks; 12] = core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
-        let out = poseidon2_compress12_ff(st[..4].try_into().unwrap(), st[4..8].try_into().unwrap(), st[8..].try_into().unwrap());
-        assert_eq!(out.map(|x| x.to_canonical_u64()), [13782584570844608185, 13136387643152332218, 7171133015474200873, 7643370872200861755]);
+        let out = poseidon2_compress12_ff(
+            st[..4].try_into().unwrap(),
+            st[4..8].try_into().unwrap(),
+            st[8..].try_into().unwrap(),
+        );
+        assert_eq!(
+            out.map(|x| x.to_canonical_u64()),
+            [
+                13782584570844608185,
+                13136387643152332218,
+                7171133015474200873,
+                7643370872200861755
+            ]
+        );
     }
     #[test]
     fn external_layer_matches_dense_kronecker_matrix_in_base_and_ext4() {
-        let m4 = [[2,3,1,1],[1,2,3,1],[1,1,2,3],[3,1,1,2]];
+        let m4 = [[2, 3, 1, 1], [1, 2, 3, 1], [1, 1, 2, 3], [3, 1, 1, 2]];
         for j in 0..12 {
-            let mut st = [Goldilocks::ZERO; 12]; st[j] = Goldilocks::ONE;
+            let mut st = [Goldilocks::ZERO; 12];
+            st[j] = Goldilocks::ONE;
             let mut ext = [GoldilocksExt4::ZERO; 12];
             ext[j] = GoldilocksExt4::from_limbs([Goldilocks::ONE; 4]);
-            poseidon2_apply_me(&mut st); poseidon2_apply_me_ext4(&mut ext);
+            poseidon2_apply_me(&mut st);
+            poseidon2_apply_me_ext4(&mut ext);
             for i in 0..12 {
-                let entry = Goldilocks::from_u64_reduced(m4[i/3][j/3] * if i%3 == j%3 {2} else {1});
-                assert_eq!(st[i], entry); assert_eq!(ext[i].to_limbs(), [entry; 4]);
+                let entry = Goldilocks::from_u64_reduced(
+                    m4[i / 3][j / 3] * if i % 3 == j % 3 { 2 } else { 1 },
+                );
+                assert_eq!(st[i], entry);
+                assert_eq!(ext[i].to_limbs(), [entry; 4]);
             }
         }
     }

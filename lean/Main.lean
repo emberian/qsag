@@ -6,6 +6,7 @@ module
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Protocol.Signing.Fips205
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
+public import Qsag.Tests.OracleAndQrom
 public section
 open Qsag
 namespace CrossKat

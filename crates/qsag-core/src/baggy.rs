@@ -1,13 +1,10 @@
 //! `Baggy`: stateless threshold hash-based signatures (`WOTS+C` `w = 4`, `v = 128`, `T = 192`,
-//! hypertree, over `FORS+C` or `PORS+FP`), with the `Waistband` top-layer cache.
+//! hypertree, over `PORS+FP`), with the `Waistband` top-layer cache.
 //!
 //! ### Structure
 //! A hypertree of `d` layers of height-`h'` subtrees over `WOTS+C` leaves ([`crate::wots_c`]);
-//! the bottom leaf signs a few-time public key ([`BaggyFewTime`]):
-//! * **Version 1, `FORS+C`:** `k - 1` trees of height `a`. A public counter is ground until
-//!   the index of the `k`-th tree is zero, and that tree is omitted.
-//! * **Version 2, `PORS+FP`** ([`crate::pors_fp`]): one tree; a public counter is ground
-//!   until the distinct sorted index subset has a multiproof within the pruning bound.
+//! the bottom leaf signs a `PORS+FP` root ([`crate::pors_fp`]). A public counter is ground
+//! until the distinct sorted index subset has a multiproof within the pruning bound.
 //!
 //! All secret values derive from the shared `sk_seed`; only values that belong in a
 //! signature, or chain endpoints and leaf hashes that are public-key material, are opened.
@@ -26,7 +23,7 @@
 //! 2. **All-layer sweep.** `R` fixes every address, so the few-time leaves and the chains of
 //!    every subtree on the path are evaluated together, level by level: one `PRF` level and
 //!    three `F` levels in total, however many layers there are.
-//! 3. **Cut.** One barrier verifies every gate of phase 2. Then chain endpoints and FORS leaf
+//! 3. **Cut.** One barrier verifies every gate of phase 2. Then chain endpoints and PORS leaf
 //!    hashes are opened (first round), the subtree roots and the digits they imply are
 //!    computed in public, and the selected chain nodes are opened (second round). Upper-layer
 //!    leaves always sign the same child root, so they always reveal the same digits.
@@ -72,13 +69,13 @@
 //! * The number of signatures per key is bounded by the few-time security of the bottom
 //!   scheme at the chosen geometry; [`BaggyParams::SHA3_128F`] reuses the tree geometry of
 //!   [`crate::tsw_baggy::PqHashParams::BAGGY_TSW_128F`], which that preset sizes for `2^16`
-//!   signatures. For version 2 the per-tree bound is
+//!   signatures. The per-tree bound is
 //!   [`crate::pors_fp::PorsFpParams::forgery_bits_milli`]; how often one hypertree leaf is
-//!   reused over `2^16` signatures of a height-32 hypertree is the same as for version 1.
+//!   reused over `2^16` signatures of a height-32 hypertree is governed by that height.
 //!   The layer signatures use the 128-chain `WOTS+C` encoding of a full
 //!   256-bit digest ([`crate::wots_c::WotsCParams::V128`]).
 //! * The `t`-of-`n` engine costs one authenticated 64-instance permutation per 64 lanes per
-//!   level, 38,400 triple words each. A [`BaggyParams::SHA3_128F_V2`] signature without
+//!   level, 38,400 triple words each. A [`BaggyParams::SHA3_128F`] signature without
 //!   `Waistband` is 578 such permutations (512 for the hypertree, 64 for the `PORS+FP`
 //!   tree, 2 for the randomiser); see [`crate::spdz_sweep`].
 //! * `BaggyPoseidon2` is the existing authenticated-share Poseidon2 engine under this suite's
@@ -93,13 +90,10 @@ use crate::pors_fp::{
     PorsFpOpening, PorsFpParams, pors_fp_auth, pors_fp_root, pors_fp_select, pors_levels,
 };
 use crate::rss256::{Rss256Engine, Rss256Error, SharedState256, active_lane_mask};
-use crate::sponge::keccak::{
-    Cshake256Xof, SHAKE256_RATE_BYTES, cshake256_32, encode_multi_frame,
-};
+use crate::sponge::keccak::{Cshake256Xof, SHAKE256_RATE_BYTES, cshake256_32, encode_multi_frame};
 use crate::tsw_baggy::{
-    AdrsKind, Cshake256Suite, HashAdrs, PqSecretKey, extract_bit_window_checked,
-    fors_leaf_hash_from_secret, fors_pk_from_roots, th_call, th_call_secret, th_chain_f,
-    th_pre_hash, th_preimage, th_secret_prf, walk_merkle_auth_path,
+    AdrsKind, Cshake256Suite, HashAdrs, PqSecretKey, th_call_secret, th_chain_f, th_pre_hash,
+    th_preimage, th_secret_prf, walk_merkle_auth_path,
 };
 use crate::wipe::SecretVec;
 use crate::wots_c::{
@@ -111,10 +105,9 @@ use crate::wots_c::{
 /// Role tags of the `Baggy` suite.
 pub const TAG_BAGGY_OPT_RAND: &[u8] = b"QSAG.BAGGY.OPTRAND/v1";
 pub const TAG_BAGGY_R: &[u8] = b"QSAG.BAGGY.R/v1";
-pub const TAG_BAGGY_HMSG: &[u8] = b"QSAG.BAGGY.HMSG/v1";
-/// Message hash of the `PORS+FP` suite (version 2): an XOF, read as the hypertree leaf index
+/// Message hash of the `PORS+FP` suite: an XOF, read as the hypertree leaf index
 /// followed by the index words of [`pors_fp_select`].
-pub const TAG_BAGGY_V2_HMSG: &[u8] = b"QSAG.BAGGY.HMSG/v2";
+pub const TAG_BAGGY_HMSG: &[u8] = b"QSAG.BAGGY.HMSG/v2";
 pub const TAG_BAGGY_DIGEST: &[u8] = b"QSAG.BAGGY.DIGEST/v1";
 pub const TAG_BAGGY_PARAMS: &[u8] = b"QSAG.BAGGY.PARAMS/v1";
 pub const TAG_BAGGY_KEY_ID: &[u8] = b"QSAG.BAGGY.KEYID/v1";
@@ -133,17 +126,6 @@ pub use crate::poseidon2_mpc::{
     sign_stateless_tsw_poseidon2_mpc_cached as sign_baggy_poseidon2_mpc_cached,
 };
 
-/// The few-time scheme a hypertree leaf signs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BaggyFewTime {
-    /// `FORS+C` with [`BaggyParams::fors_trees`] trees of height
-    /// [`BaggyParams::fors_height`] (version 1).
-    ForsC,
-    /// [`crate::pors_fp`]: one tree, a distinct sorted subset, a bounded canonical
-    /// multiproof (version 2). `fors_trees` and `fors_height` are zero.
-    PorsFp(PorsFpParams),
-}
-
 /// `Baggy` parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BaggyParams {
@@ -152,35 +134,20 @@ pub struct BaggyParams {
     pub subtree_height: usize,
     /// Layers `d`.
     pub num_layers: usize,
-    /// FORS trees `k`, counting the omitted one.
-    pub fors_trees: usize,
-    /// FORS tree height `a`.
-    pub fors_height: usize,
     /// Bound on each public grind.
     pub max_grind: u32,
-    pub few_time: BaggyFewTime,
+    pub pors: PorsFpParams,
 }
 
 impl BaggyParams {
-    /// `h = 32`, `d = 16`, `h' = 2`, `k = 33`, `a = 6`: 73,828-byte signatures.
+    /// `h = 32`, `d = 16`, `h' = 2`, PORS+FP over 2,048 leaves:
+    /// at most 71,654 bytes, with the same MPC leaf budget as the retired FORS+C design.
     pub const SHA3_128F: Self = Self {
         wots: WotsCParams::V128,
         subtree_height: 2,
         num_layers: 16,
-        fors_trees: 33,
-        fors_height: 6,
         max_grind: 1 << 26,
-        few_time: BaggyFewTime::ForsC,
-    };
-
-    /// Version 2: the hypertree of [`Self::SHA3_128F`] over
-    /// [`PorsFpParams::SHA3_128F`]. At most 71,654-byte signatures; the few-time layer is
-    /// 2048 leaves under MPC, as before, and at most 4,994 bytes instead of 7,168.
-    pub const SHA3_128F_V2: Self = Self {
-        fors_trees: 0,
-        fors_height: 0,
-        few_time: BaggyFewTime::PorsFp(PorsFpParams::SHA3_128F),
-        ..Self::SHA3_128F
+        pors: PorsFpParams::SHA3_128F,
     };
 
     /// Small geometry for tests.
@@ -188,30 +155,12 @@ impl BaggyParams {
         wots: WotsCParams::V128,
         subtree_height: 2,
         num_layers: 3,
-        fors_trees: 5,
-        fors_height: 3,
         max_grind: 1 << 26,
-        few_time: BaggyFewTime::ForsC,
-    };
-
-    /// Small version-2 geometry for tests.
-    pub const TEST_SMALL_V2: Self = Self {
-        fors_trees: 0,
-        fors_height: 0,
-        few_time: BaggyFewTime::PorsFp(PorsFpParams::TEST_SMALL),
-        ..Self::TEST_SMALL
+        pors: PorsFpParams::TEST_SMALL,
     };
 
     pub const fn total_height_checked(&self) -> Option<usize> {
         self.subtree_height.checked_mul(self.num_layers)
-    }
-
-    /// FORS trees that appear in a signature (none under `PORS+FP`).
-    pub const fn signed_fors_trees_checked(&self) -> Option<usize> {
-        match self.few_time {
-            BaggyFewTime::ForsC => self.fors_trees.checked_sub(1),
-            BaggyFewTime::PorsFp(_) => Some(0),
-        }
     }
 
     pub const fn is_well_formed(&self) -> bool {
@@ -229,30 +178,8 @@ impl BaggyParams {
         if total_h > 62 {
             return false;
         }
-        match self.few_time {
-            BaggyFewTime::ForsC => {
-                if self.fors_trees < 2
-                    || self.fors_trees > 256
-                    || self.fors_height < 1
-                    || self.fors_height > 16
-                {
-                    return false;
-                }
-                let Some(fors_bits) = self.fors_trees.checked_mul(self.fors_height) else {
-                    return false;
-                };
-                let Some(total_bits) = fors_bits.checked_add(total_h) else {
-                    return false;
-                };
-                if total_bits > 256 {
-                    return false;
-                }
-            }
-            BaggyFewTime::PorsFp(pors) => {
-                if self.fors_trees != 0 || self.fors_height != 0 || !pors.is_well_formed() {
-                    return false;
-                }
-            }
+        if !self.pors.is_well_formed() {
+            return false;
         }
         self.sig_bytes_checked().is_some()
     }
@@ -260,24 +187,10 @@ impl BaggyParams {
     /// Signature size; under `PORS+FP` the largest one, reached when the multiproof is at
     /// its bound.
     pub const fn sig_bytes_checked(&self) -> Option<usize> {
-        let fors_bytes = match self.few_time {
-            BaggyFewTime::ForsC => {
-                let Some(signed_fors) = self.signed_fors_trees_checked() else {
-                    return None;
-                };
-                let Some(fors_auth_bytes) = 32usize.checked_mul(self.fors_height) else {
-                    return None;
-                };
-                let Some(per_fors) = 32usize.checked_add(fors_auth_bytes) else {
-                    return None;
-                };
-                let Some(fors_bytes) = signed_fors.checked_mul(per_fors) else {
-                    return None;
-                };
-                fors_bytes
-            }
-            BaggyFewTime::PorsFp(pors) => pors.opening_bytes_max(),
-        };
+        if !self.pors.is_well_formed() {
+            return None;
+        }
+        let pors_bytes = self.pors.opening_bytes_max();
         let Some(wots_bytes) = 32usize.checked_mul(self.wots.chains) else {
             return None;
         };
@@ -293,7 +206,7 @@ impl BaggyParams {
         let Some(layers_bytes) = self.num_layers.checked_mul(layer_inner) else {
             return None;
         };
-        let Some(prefix_bytes) = 36usize.checked_add(fors_bytes) else {
+        let Some(prefix_bytes) = 36usize.checked_add(pors_bytes) else {
             return None;
         };
         prefix_bytes.checked_add(layers_bytes)
@@ -309,10 +222,8 @@ impl BaggyParams {
             wots,
             subtree_height,
             num_layers,
-            fors_trees,
-            fors_height,
             max_grind,
-            few_time,
+            pors,
         } = *self;
         let WotsCParams {
             chains,
@@ -326,23 +237,17 @@ impl BaggyParams {
             word(target_sum),
             word(subtree_height),
             word(num_layers),
-            word(fors_trees),
-            word(fors_height),
             u64::from(max_grind).to_be_bytes(),
         ];
         let mut fields: Vec<&[u8]> = words.iter().map(|w| w.as_slice()).collect();
-        // Version 1 hashes exactly the eight words above, as it always has.
-        let pors_words;
-        if let BaggyFewTime::PorsFp(PorsFpParams {
+        let PorsFpParams {
             tree_height,
             reveal,
             max_auth_nodes,
-        }) = few_time
-        {
-            pors_words = [word(tree_height), word(reveal), word(max_auth_nodes)];
-            fields.push(b"PORS+FP");
-            fields.extend(pors_words.iter().map(|w| w.as_slice()));
-        }
+        } = pors;
+        let pors_words = [word(tree_height), word(reveal), word(max_auth_nodes)];
+        fields.push(b"PORS+FP");
+        fields.extend(pors_words.iter().map(|w| w.as_slice()));
         cshake256_32(TAG_BAGGY_PARAMS, &encode_multi_frame(&fields))
     }
 
@@ -425,7 +330,7 @@ impl BaggyKeyBinding {
 }
 
 /// One `WOTS+C` key of the hypertree of one signing key. Every such key signs a value fixed
-/// by the signing key alone (a child subtree root, or at layer 0 a FORS public key).
+/// by the signing key alone (a child subtree root, or at layer 0 a PORS public key).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StaticKeyId {
     /// [`BaggyKeyBinding::identity`] of the signing key.
@@ -661,13 +566,6 @@ impl FirstSignedLedger for FsFirstSignedLedger {
     }
 }
 
-/// One revealed FORS secret with its root-first authentication path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BaggyForsOpening {
-    pub secret: [u8; 32],
-    pub auth: Vec<[u8; 32]>,
-}
-
 /// One hypertree layer: `WOTS+C` signature on the node below and the path to the subtree root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BaggyLayerSig {
@@ -681,29 +579,19 @@ pub struct BaggyLayerSig {
 pub struct BaggySig {
     pub r: [u8; 32],
     pub msg_ctr: u32,
-    /// `FORS+C` openings (version 1); empty under `PORS+FP`.
-    pub fors: Vec<BaggyForsOpening>,
-    /// The `PORS+FP` opening (version 2); `None` under `FORS+C`.
-    pub pors: Option<PorsFpOpening>,
+    /// Canonical bounded PORS+FP multiproof.
+    pub pors: PorsFpOpening,
     pub layers: Vec<BaggyLayerSig>,
 }
 
 impl BaggySig {
-    /// `r || be32(msg_ctr) || few-time part || layers`, where a `FORS+C` opening is
-    /// `secret || auth`, the `PORS+FP` part is [`PorsFpOpening::to_wire_bytes`], and a layer
-    /// is `be32(ctr) || chains || auth`. Every count is fixed by the parameters except the
-    /// `PORS+FP` multiproof length, which the encoding carries.
+    /// `r || be32(msg_ctr) || PORS+FP opening || layers`. A layer is
+    /// `be32(ctr) || chains || auth`. Only the bounded multiproof length is variable.
     pub fn to_wire_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.r);
         out.extend_from_slice(&self.msg_ctr.to_be_bytes());
-        for opening in &self.fors {
-            out.extend_from_slice(&opening.secret);
-            out.extend_from_slice(opening.auth.as_flattened());
-        }
-        if let Some(pors) = &self.pors {
-            out.extend_from_slice(&pors.to_wire_bytes());
-        }
+        out.extend_from_slice(&self.pors.to_wire_bytes());
         for layer in &self.layers {
             out.extend_from_slice(&layer.ctr.to_be_bytes());
             out.extend_from_slice(layer.chains.as_flattened());
@@ -729,23 +617,8 @@ impl BaggySig {
         let be32 = |bytes: &[u8]| Some(u32::from_be_bytes(bytes.try_into().ok()?));
         let r: [u8; 32] = take(&mut rest, 32)?.try_into().ok()?;
         let msg_ctr = be32(take(&mut rest, 4)?)?;
-        let mut fors = Vec::new();
-        let mut pors = None;
-        match params.few_time {
-            BaggyFewTime::ForsC => {
-                for _ in 0..params.signed_fors_trees_checked()? {
-                    fors.push(BaggyForsOpening {
-                        secret: take(&mut rest, 32)?.try_into().ok()?,
-                        auth: nodes(take(&mut rest, 32 * params.fors_height)?),
-                    });
-                }
-            }
-            BaggyFewTime::PorsFp(pors_params) => {
-                let (opening, used) = PorsFpOpening::from_wire_bytes(&pors_params, rest)?;
-                take(&mut rest, used)?;
-                pors = Some(opening);
-            }
-        }
+        let (pors, used) = PorsFpOpening::from_wire_bytes(&params.pors, rest)?;
+        take(&mut rest, used)?;
         let mut layers = Vec::with_capacity(params.num_layers);
         for _ in 0..params.num_layers {
             layers.push(BaggyLayerSig {
@@ -760,7 +633,6 @@ impl BaggySig {
         .then_some(Self {
             r,
             msg_ctr,
-            fors,
             pors,
             layers,
         })
@@ -841,11 +713,7 @@ impl BaggyEngine for Rss256Engine {
         Ok(self.open_digests(&st.digest(), &one, 1)?[0])
     }
 
-    fn sweep(
-        &mut self,
-        pk_seed: &[u8; 32],
-        lanes: Vec<LaneSpec>,
-    ) -> Result<Sweep, BaggyError> {
+    fn sweep(&mut self, pk_seed: &[u8; 32], lanes: Vec<LaneSpec>) -> Result<Sweep, BaggyError> {
         Ok(Sweep::evaluate(self, pk_seed, lanes, WOTS_STEPS as u8)?)
     }
 
@@ -956,43 +824,8 @@ pub(crate) fn keyed_mu_frame(tag: &[u8], mu: &[u8; 32]) -> ([u8; SHAKE256_RATE_B
     (frame, pre.len() - 33 - 32)
 }
 
-/// FORS indices and hypertree leaf index selected by a message hash, if the omitted tree's
-/// index is zero.
-fn parse_hmsg(params: &BaggyParams, hash: &[u8; 32]) -> Option<(Vec<u32>, u64)> {
-    let (k, a) = (params.fors_trees, params.fors_height);
-    let mut idxs = Vec::with_capacity(k - 1);
-    for j in 0..k {
-        let idx = extract_bit_window_checked(hash, j * a, a)? as u32;
-        if j == k - 1 {
-            if idx != 0 {
-                return None;
-            }
-        } else {
-            idxs.push(idx);
-        }
-    }
-    let leaf = extract_bit_window_checked(hash, k * a, params.total_height_checked()?)?;
-    Some((idxs, leaf))
-}
-
-fn hmsg(pk: &BaggyPublicKey, r: &[u8; 32], mu: &[u8; 32], ctr: u32) -> [u8; 32] {
-    let adrs = HashAdrs {
-        kind: AdrsKind::ForsRoots,
-        hash_step: ctr,
-        ..HashAdrs::ZERO
-    };
-    th_call(
-        Cshake256Suite,
-        TAG_BAGGY_HMSG,
-        &pk.pk_seed,
-        &adrs,
-        &[r, &pk.pk_root, mu],
-    )
-}
-
 /// Few-time indices and hypertree leaf index selected by message counter `ctr`, if that
-/// counter is usable: under `FORS+C` the omitted tree's index is zero, under `PORS+FP` the
-/// subset passes the forced-pruning bound.
+/// counter is usable: the subset passes the forced-pruning bound.
 fn select_at(
     params: &BaggyParams,
     pk: &BaggyPublicKey,
@@ -1000,23 +833,18 @@ fn select_at(
     mu: &[u8; 32],
     ctr: u32,
 ) -> Option<(Vec<u32>, u64)> {
-    match params.few_time {
-        BaggyFewTime::ForsC => parse_hmsg(params, &hmsg(pk, r, mu, ctr)),
-        BaggyFewTime::PorsFp(pors) => {
-            let mut xof = Cshake256Xof::new(TAG_BAGGY_V2_HMSG);
-            xof.absorb(&encode_multi_frame(&[
-                r,
-                &pk.pk_seed,
-                &pk.pk_root,
-                mu,
-                &ctr.to_be_bytes(),
-            ]));
-            let mut word = [0u8; 8];
-            xof.squeeze(&mut word);
-            let leaf = u64::from_be_bytes(word) & ((1u64 << params.total_height_checked()?) - 1);
-            Some((pors_fp_select(&pors, &mut xof)?, leaf))
-        }
-    }
+    let mut xof = Cshake256Xof::new(TAG_BAGGY_HMSG);
+    xof.absorb(&encode_multi_frame(&[
+        r,
+        &pk.pk_seed,
+        &pk.pk_root,
+        mu,
+        &ctr.to_be_bytes(),
+    ]));
+    let mut word = [0u8; 8];
+    xof.squeeze(&mut word);
+    let leaf = u64::from_be_bytes(word) & ((1u64 << params.total_height_checked()?) - 1);
+    Some((pors_fp_select(&params.pors, &mut xof)?, leaf))
 }
 
 /// Smallest usable message counter.
@@ -1030,40 +858,21 @@ fn grind_hmsg(
         .find_map(|ctr| select_at(params, pk, r, mu, ctr).map(|(idxs, leaf)| (ctr, idxs, leaf)))
 }
 
-/// The lanes of the few-time instance of hypertree leaf `(tree, key_pair)`: every `FORS+C`
-/// leaf of every signed tree, or every `PORS+FP` leaf. Position 0 of a lane is the leaf
+/// The lanes of the PORS+FP instance of hypertree leaf `(tree, key_pair)`. Position 0 of a lane is the leaf
 /// secret and position 1 its leaf hash.
 fn few_time_lanes(params: &BaggyParams, tree: u64, key_pair: u32) -> Vec<LaneSpec> {
-    match params.few_time {
-        BaggyFewTime::ForsC => (0..params.fors_trees as u32 - 1)
-            .flat_map(|j| {
-                (0..1u32 << params.fors_height)
-                    .map(move |leaf| LaneSpec::fors(tree, key_pair, j, leaf))
-            })
-            .collect(),
-        BaggyFewTime::PorsFp(pors) => (0..pors.leaves() as u32)
-            .map(|leaf| LaneSpec::pors(tree, key_pair, leaf))
-            .collect(),
-    }
+    (0..params.pors.leaves() as u32)
+        .map(|leaf| LaneSpec::pors(tree, key_pair, leaf))
+        .collect()
 }
 
 /// Offsets into [`few_time_lanes`] of the secrets a signature reveals.
-fn few_time_picks(params: &BaggyParams, idxs: &[u32]) -> Vec<usize> {
-    match params.few_time {
-        BaggyFewTime::ForsC => idxs
-            .iter()
-            .enumerate()
-            .map(|(j, idx)| (j << params.fors_height) + *idx as usize)
-            .collect(),
-        BaggyFewTime::PorsFp(_) => idxs.iter().map(|idx| *idx as usize).collect(),
-    }
+fn few_time_picks(_params: &BaggyParams, idxs: &[u32]) -> Vec<usize> {
+    idxs.iter().map(|idx| *idx as usize).collect()
 }
 
-/// Authentication data of a few-time opening, before the secrets are known.
-enum FewTimeAuth {
-    Fors(Vec<Vec<[u8; 32]>>),
-    Pors(Vec<[u8; 32]>),
-}
+/// Canonical multiproof nodes, before the selected secrets are opened.
+type FewTimeAuth = Vec<[u8; 32]>;
 
 /// From the leaf hashes of [`few_time_lanes`]: the node the bottom hypertree layer signs
 /// and the authentication data of the selected leaves.
@@ -1075,64 +884,19 @@ fn few_time_public(
     idxs: &[u32],
     leaf_hashes: &[[u8; 32]],
 ) -> Option<([u8; 32], FewTimeAuth)> {
-    match params.few_time {
-        BaggyFewTime::ForsC => {
-            let per_tree = 1usize << params.fors_height;
-            let mut roots = Vec::with_capacity(idxs.len());
-            let mut auths = Vec::with_capacity(idxs.len());
-            for (j, idx) in idxs.iter().enumerate() {
-                let levels = merkle_levels(
-                    pk_seed,
-                    0,
-                    tree,
-                    AdrsKind::ForsTree,
-                    key_pair,
-                    leaf_hashes.get(j * per_tree..(j + 1) * per_tree)?,
-                    j,
-                );
-                roots.push(levels[params.fors_height][0]);
-                auths.push(merkle_auth_path(&levels, *idx as usize));
-            }
-            Some((
-                fors_pk_from_roots(Cshake256Suite, pk_seed, tree, key_pair, &roots),
-                FewTimeAuth::Fors(auths),
-            ))
-        }
-        BaggyFewTime::PorsFp(pors) => {
-            if leaf_hashes.len() != pors.leaves() {
-                return None;
-            }
-            let levels = pors_levels(pk_seed, tree, key_pair, leaf_hashes);
-            let auth = pors_fp_auth(&pors, &levels, idxs)?;
-            Some((levels[pors.tree_height][0], FewTimeAuth::Pors(auth)))
-        }
+    if leaf_hashes.len() != params.pors.leaves() {
+        return None;
     }
+    let levels = pors_levels(pk_seed, tree, key_pair, leaf_hashes);
+    let auth = pors_fp_auth(&params.pors, &levels, idxs)?;
+    Some((levels[params.pors.tree_height][0], auth))
 }
 
 /// Join the authentication data with the revealed secrets (in [`few_time_picks`] order).
-fn few_time_assemble(
-    auth: FewTimeAuth,
-    secrets: &[[u8; 32]],
-) -> (Vec<BaggyForsOpening>, Option<PorsFpOpening>) {
-    match auth {
-        FewTimeAuth::Fors(auths) => (
-            auths
-                .into_iter()
-                .zip(secrets)
-                .map(|(auth, secret)| BaggyForsOpening {
-                    secret: *secret,
-                    auth,
-                })
-                .collect(),
-            None,
-        ),
-        FewTimeAuth::Pors(auth) => (
-            Vec::new(),
-            Some(PorsFpOpening {
-                secrets: secrets.to_vec(),
-                auth,
-            }),
-        ),
+fn few_time_assemble(auth: FewTimeAuth, secrets: &[[u8; 32]]) -> PorsFpOpening {
+    PorsFpOpening {
+        secrets: secrets.to_vec(),
+        auth,
     }
 }
 
@@ -1146,43 +910,7 @@ fn few_time_node(
     idxs: &[u32],
     sig: &BaggySig,
 ) -> Option<[u8; 32]> {
-    match (params.few_time, &sig.pors) {
-        (BaggyFewTime::ForsC, None) => {
-            if sig.fors.len() != idxs.len() {
-                return None;
-            }
-            let mut roots = Vec::with_capacity(idxs.len());
-            for (j, (idx, opening)) in idxs.iter().zip(&sig.fors).enumerate() {
-                let leaf = fors_leaf_hash_from_secret(
-                    Cshake256Suite,
-                    pk_seed,
-                    tree,
-                    key_pair,
-                    j as u32,
-                    *idx,
-                    &opening.secret,
-                );
-                roots.push(walk_merkle_auth_path(
-                    Cshake256Suite,
-                    pk_seed,
-                    0,
-                    tree,
-                    AdrsKind::ForsTree,
-                    key_pair,
-                    params.fors_height,
-                    j,
-                    *idx as usize,
-                    leaf,
-                    &opening.auth,
-                )?);
-            }
-            Some(fors_pk_from_roots(Cshake256Suite, pk_seed, tree, key_pair, &roots))
-        }
-        (BaggyFewTime::PorsFp(pors), Some(opening)) if sig.fors.is_empty() => {
-            pors_fp_root(&pors, pk_seed, tree, key_pair, idxs, opening)
-        }
-        _ => None,
-    }
+    pors_fp_root(&params.pors, pk_seed, tree, key_pair, idxs, &sig.pors)
 }
 
 fn layer_grinder(
@@ -1244,7 +972,7 @@ pub fn baggy_verify(params: &BaggyParams, pk: &BaggyPublicKey, msg: &[u8], sig: 
     verified_path(params, pk, msg, sig).is_some()
 }
 
-/// The nodes of a valid signature's path: entry 0 is the FORS public key, entry `l + 1` the
+/// The nodes of a valid signature's path: entry 0 is the PORS public key, entry `l + 1` the
 /// root of the layer-`l` subtree, and the last one equals `pk_root`. `None` if the
 /// signature does not verify.
 fn verified_path(
@@ -1254,7 +982,6 @@ fn verified_path(
     sig: &BaggySig,
 ) -> Option<Vec<[u8; 32]>> {
     if !params.is_well_formed()
-        || Some(sig.fors.len()) != params.signed_fors_trees_checked()
         || sig.layers.len() != params.num_layers
         || sig.msg_ctr >= params.max_grind
     {
@@ -1264,14 +991,7 @@ fn verified_path(
     let (idxs, leaf_idx) = select_at(params, pk, &sig.r, &mu, sig.msg_ctr)?;
     let (kp0, tree0) = params.path_at(leaf_idx, 0);
     let mut nodes = Vec::with_capacity(params.num_layers + 1);
-    nodes.push(few_time_node(
-        params,
-        &pk.pk_seed,
-        tree0,
-        kp0,
-        &idxs,
-        sig,
-    )?);
+    nodes.push(few_time_node(params, &pk.pk_seed, tree0, kp0, &idxs, sig)?);
     for (layer, layer_sig) in sig.layers.iter().enumerate() {
         let (kp, tree) = params.path_at(leaf_idx, layer);
         let root = layer_root(
@@ -1352,7 +1072,7 @@ pub fn baggy_reference_sign(
         .into_iter()
         .map(|lane| secrets[lane])
         .collect();
-    let (fors, pors) = few_time_assemble(few_auth, &revealed);
+    let pors = few_time_assemble(few_auth, &revealed);
     let mut layers = Vec::with_capacity(params.num_layers);
     for layer in 0..params.num_layers {
         let (kp, tree) = params.path_at(leaf_idx, layer);
@@ -1380,7 +1100,6 @@ pub fn baggy_reference_sign(
     Some(BaggySig {
         r,
         msg_ctr,
-        fors,
         pors,
         layers,
     })
@@ -1550,7 +1269,7 @@ impl WaistbandCache {
 
     /// Fill every signature of the top `top_layers` layers eagerly (distributed-key-ceremony
     /// time). Requires `top_layers < num_layers`: the bottom layer signs message-dependent
-    /// FORS keys and cannot be precomputed. Sweeps `sum_{j <= L} 2^{h' j}` subtrees.
+    /// PORS keys and cannot be precomputed. Sweeps `sum_{j <= L} 2^{h' j}` subtrees.
     ///
     /// Refused before any MPC work if `binding` does not match the engine, `pk` and `params`
     /// or if the cache is bound to another identity. Every digit vector is checked against
@@ -2057,9 +1776,8 @@ pub fn baggy_sign_mpc<E: BaggyEngine, L: FirstSignedLedger + ?Sized>(
     let opened = engine.open_round(&sweep, &picks)?;
     let (endpoints, few_hashes) = opened.split_at(endpoint_count);
     // The secrets are opened only after every cached child-root binding has passed.
-    let (few_node, few_auth) =
-        few_time_public(params, &pk.pk_seed, tree0, kp0, &idxs, few_hashes)
-            .ok_or(BaggyError::SelfCheckFailed)?;
+    let (few_node, few_auth) = few_time_public(params, &pk.pk_seed, tree0, kp0, &idxs, few_hashes)
+        .ok_or(BaggyError::SelfCheckFailed)?;
 
     // Public pass up the path: roots, digits and authentication paths of every layer.
     // `node` is the value the current layer signs; `node_from_cache` says whether the cache
@@ -2165,7 +1883,7 @@ pub fn baggy_sign_mpc<E: BaggyEngine, L: FirstSignedLedger + ?Sized>(
     );
     let revealed = engine.open_round(&sweep, &node_picks)?;
     let (nodes, few_secrets) = revealed.split_at(chain_node_count);
-    let (fors, pors) = few_time_assemble(few_auth, few_secrets);
+    let pors = few_time_assemble(few_auth, few_secrets);
     let mut opened_layers = Vec::with_capacity(pending.len());
     for ((layer, ctr, auth), chain_nodes) in pending.into_iter().zip(nodes.chunks_exact(chains)) {
         layers[layer] = Some(BaggyLayerSig {
@@ -2178,7 +1896,6 @@ pub fn baggy_sign_mpc<E: BaggyEngine, L: FirstSignedLedger + ?Sized>(
     let sig = BaggySig {
         r,
         msg_ctr,
-        fors,
         pors,
         layers: layers.into_iter().flatten().collect(),
     };
@@ -2265,9 +1982,7 @@ mod tests {
     /// Hypertree leaf index a valid signature on `msg` selects.
     fn leaf_of(params: &BaggyParams, pk: &BaggyPublicKey, msg: &[u8], sig: &BaggySig) -> u64 {
         let mu = baggy_msg_digest(pk, msg);
-        parse_hmsg(params, &hmsg(pk, &sig.r, &mu, sig.msg_ctr))
-            .unwrap()
-            .1
+        select_at(params, pk, &sig.r, &mu, sig.msg_ctr).unwrap().1
     }
 
     /// Key id and reference digit vector of the path's leaf at `layer`.
@@ -2301,7 +2016,7 @@ mod tests {
         let big = BaggyParams::SHA3_128F;
         assert_eq!(
             big.sig_bytes_checked(),
-            Some(36 + 32 * (32 + 32 * 6) + 16 * (4 + 32 * big.wots.chains + 32 * 2))
+            Some(36 + big.pors.opening_bytes_max() + 16 * (4 + 32 * big.wots.chains + 32 * 2))
         );
         let (mut engine, sk) = test_engine(0xC1, 1);
         let mut cache = WaistbandCache::disabled();
@@ -2335,7 +2050,7 @@ mod tests {
             assert_eq!(ledger.first_signed(&key), Ok(Some(digits)), "layer {layer}");
         }
         assert!(baggy_verify(&params, &pk, msg, &sig));
-        // Two randomiser levels, then four levels for every layer and the FORS leaves.
+        // Two randomiser levels, then four levels for every layer and the PORS leaves.
         assert_eq!(after.perm_levels - before.perm_levels, 6);
         // Two cut barriers (randomiser, cut) and three opening rounds (R, endpoints, nodes).
         // The memory bound may force further barriers inside the sweep.
@@ -2348,10 +2063,10 @@ mod tests {
         bad.r[0] ^= 1;
         assert!(!baggy_verify(&params, &pk, msg, &bad));
         let mut bad = sig.clone();
-        bad.fors[0].secret[0] ^= 1;
+        bad.pors.secrets[0][0] ^= 1;
         assert!(!baggy_verify(&params, &pk, msg, &bad));
         let mut bad = sig.clone();
-        bad.fors[3].auth[2][5] ^= 1;
+        bad.pors.auth[0][5] ^= 1;
         assert!(!baggy_verify(&params, &pk, msg, &bad));
         let mut bad = sig.clone();
         bad.layers[1].chains[17][9] ^= 0x80;
@@ -2369,7 +2084,7 @@ mod tests {
 
     /// The randomiser depends on the shared key and the message only: a second session with
     /// fresh party randomness (a retry after an abort) produces the identical signature, so
-    /// aborting never buys a new draw of the FORS indices.
+    /// aborting never buys a new draw of the PORS indices.
     #[test]
     fn retries_with_fresh_session_randomness_give_the_identical_signature() {
         let params = BaggyParams::TEST_SMALL;
@@ -2449,11 +2164,11 @@ mod tests {
             assert_eq!(warm, want, "message {i}");
             assert_eq!(lazily, want, "message {i}");
 
-            // Uncached: three full subtrees and the FORS leaves. Eagerly cached: only the
-            // bottom subtree and the FORS leaves are evaluated.
-            let fors = 4 * 8 * 2;
-            assert_eq!(s1.lane_perms - s0.lane_perms, 2 + 3 * 4 * chains * 4 + fors);
-            assert_eq!(s2.lane_perms - s1.lane_perms, 2 + 4 * chains * 4 + fors);
+            // Uncached: three full subtrees and the PORS leaves. Eagerly cached: only the
+            // bottom subtree and the PORS leaves are evaluated.
+            let pors = (params.pors.leaves() * 2) as u64;
+            assert_eq!(s1.lane_perms - s0.lane_perms, 2 + 3 * 4 * chains * 4 + pors);
+            assert_eq!(s2.lane_perms - s1.lane_perms, 2 + 4 * chains * 4 + pors);
         }
         assert_eq!(eager.hits(), 8);
         assert_eq!(eager.misses(), 0);
@@ -2699,14 +2414,15 @@ mod tests {
     fn a_cache_or_binding_for_another_key_or_parameter_set_is_refused_before_any_mpc_work() {
         let params = BaggyParams::TEST_SMALL;
         // Every field moves the digest.
-        let edits: [fn(&mut BaggyParams); 8] = [
+        let edits: [fn(&mut BaggyParams); 9] = [
             |p| p.wots.chains -= 1,
             |p| p.wots.zero_digits += 1,
             |p| p.wots.target_sum -= 1,
             |p| p.subtree_height += 1,
             |p| p.num_layers += 1,
-            |p| p.fors_trees += 1,
-            |p| p.fors_height += 1,
+            |p| p.pors.reveal += 1,
+            |p| p.pors.tree_height += 1,
+            |p| p.pors.max_auth_nodes += 1,
             |p| p.max_grind -= 1,
         ];
         let mut digests = alloc::vec![params.digest()];
@@ -2962,7 +2678,7 @@ mod tests {
         let (mut engine, sk) = test_engine(0xC6, 1);
         let (pk, binding) = keyed(&mut engine, &params, &sk);
         let msg = b"mode 1A";
-        // 2 randomiser waves; the chain lanes of three subtrees and 32 FORS lanes over PRF
+        // 2 randomiser waves; the chain lanes of three subtrees and the PORS lanes over PRF
         // and the first F level, then the chain lanes alone over the two remaining levels.
         let chain_lanes = 3 * 4 * params.wots.chains;
         let waves = 2 + 2 * (chain_lanes + 32).div_ceil(256) + 2 * chain_lanes.div_ceil(256);
@@ -3005,7 +2721,7 @@ mod tests {
     /// Faults in either phase abort at that phase's barrier; nothing of the signature is
     /// opened (a randomiser fault opens nothing at all, a sweep fault only `R`).
     #[test]
-    fn active_faults_in_either_phase_abort_before_any_wots_or_fors_share_is_opened() {
+    fn active_faults_in_either_phase_abort_before_any_wots_or_pors_share_is_opened() {
         let params = BaggyParams::TEST_SMALL;
         let cases: [(u64, usize, usize, usize, [u64; 4], u64); 6] = [
             // (wave, round, plane, sender, mask, opened bytes allowed). Once phase 1 has
@@ -3078,16 +2794,19 @@ mod tests {
         assert!(!bad.is_well_formed());
         assert_eq!(bad.total_height_checked(), None);
 
-        let mut bad_fors = BaggyParams::TEST_SMALL;
-        bad_fors.fors_trees = usize::MAX;
-        bad_fors.fors_height = 2;
-        assert!(!bad_fors.is_well_formed());
-        assert_eq!(bad_fors.sig_bytes_checked(), None);
-
-        let mut no_fors = BaggyParams::TEST_SMALL;
-        no_fors.fors_trees = 0;
-        assert!(!no_fors.is_well_formed());
-        assert_eq!(no_fors.signed_fors_trees_checked(), None);
+        let mut bad_pors = BaggyParams::TEST_SMALL;
+        bad_pors.pors.tree_height = usize::MAX;
+        assert!(!bad_pors.is_well_formed());
+        assert_eq!(bad_pors.sig_bytes_checked(), None);
+        let mut oversized = BaggyParams::TEST_SMALL;
+        oversized.pors.reveal = usize::MAX;
+        assert_eq!(oversized.sig_bytes_checked(), None);
+        oversized.pors.reveal = 6;
+        oversized.pors.max_auth_nodes = usize::MAX;
+        assert_eq!(oversized.sig_bytes_checked(), None);
+        let mut no_pors = BaggyParams::TEST_SMALL;
+        no_pors.pors.reveal = 0;
+        assert!(!no_pors.is_well_formed());
         let sk = PqSecretKey {
             sk_seed: [1; 32],
             sk_prf: [2; 32],
@@ -3097,7 +2816,7 @@ mod tests {
             pk_seed: [3; 32],
             pk_root: [0; 32],
         };
-        for malformed in [bad, bad_fors, no_fors] {
+        for malformed in [bad, bad_pors, no_pors] {
             assert_eq!(baggy_reference_keygen(&malformed, &sk), None);
             assert_eq!(baggy_reference_sign(&malformed, &sk, &pk, b"m"), None);
             assert!(!baggy_verify(
@@ -3107,8 +2826,10 @@ mod tests {
                 &BaggySig {
                     r: [0; 32],
                     msg_ctr: 0,
-                    fors: Vec::new(),
-                    pors: None,
+                    pors: PorsFpOpening {
+                        secrets: Vec::new(),
+                        auth: Vec::new()
+                    },
                     layers: Vec::new(),
                 }
             ));
@@ -3138,72 +2859,54 @@ mod tests {
     }
 
     #[test]
-    fn v2_reference_signature_verifies_round_trips_and_rejects_tampering() {
-        let params = BaggyParams::TEST_SMALL_V2;
-        let BaggyFewTime::PorsFp(pors_params) = params.few_time else {
-            unreachable!()
-        };
+    fn reference_signature_verifies_round_trips_and_rejects_tampering() {
+        let params = BaggyParams::TEST_SMALL;
+        let pors_params = params.pors;
         let sk = PqSecretKey {
             sk_seed: [0x17; 32],
             sk_prf: [0x29; 32],
             pk_seed: [0x3b; 32],
         };
         let pk = baggy_reference_keygen(&params, &sk).unwrap();
-        // Same hypertree, so the same public key as version 1 over these seeds.
-        assert_eq!(
-            Some(pk),
-            baggy_reference_keygen(&BaggyParams::TEST_SMALL, &sk)
-        );
-        assert_ne!(params.digest(), BaggyParams::TEST_SMALL.digest());
         let msg = b"version two";
         let sig = baggy_reference_sign(&params, &sk, &pk, msg).unwrap();
         assert!(baggy_verify(&params, &pk, msg, &sig));
         assert!(!baggy_verify(&params, &pk, b"version 2", &sig));
-        let opening = sig.pors.as_ref().unwrap();
-        assert!(sig.fors.is_empty());
+        let opening = &sig.pors;
         assert_eq!(opening.secrets.len(), pors_params.reveal);
         assert!(opening.auth.len() <= pors_params.max_auth_nodes);
 
-        // The two versions do not accept each other's signatures.
-        assert!(!baggy_verify(&BaggyParams::TEST_SMALL, &pk, msg, &sig));
-        let v1 = baggy_reference_sign(&BaggyParams::TEST_SMALL, &sk, &pk, msg).unwrap();
-        assert!(!baggy_verify(&params, &pk, msg, &v1));
-
         // Every part of the opening is bound.
         let mut bad = sig.clone();
-        bad.pors.as_mut().unwrap().secrets[0][0] ^= 1;
+        bad.pors.secrets[0][0] ^= 1;
         assert!(!baggy_verify(&params, &pk, msg, &bad));
         let mut bad = sig.clone();
-        bad.pors.as_mut().unwrap().auth[0][0] ^= 1;
+        bad.pors.auth[0][0] ^= 1;
         assert!(!baggy_verify(&params, &pk, msg, &bad));
         let mut bad = sig.clone();
-        bad.pors.as_mut().unwrap().auth.push([0; 32]);
+        bad.pors.auth.push([0; 32]);
         assert!(!baggy_verify(&params, &pk, msg, &bad));
         let mut bad = sig.clone();
-        bad.pors.as_mut().unwrap().secrets.swap(0, 1);
+        bad.pors.secrets.swap(0, 1);
         assert!(!baggy_verify(&params, &pk, msg, &bad));
         // Another counter selects another subset (or fails the pruning bound).
         let mut bad = sig.clone();
         bad.msg_ctr += 1;
         assert!(!baggy_verify(&params, &pk, msg, &bad));
-        // A FORS opening smuggled next to the PORS one is refused.
-        let mut bad = sig.clone();
-        bad.fors = v1.fors.clone();
-        assert!(!baggy_verify(&params, &pk, msg, &bad));
-
         // A multiproof above the bound is refused even though it hashes to the same root:
         // tighten the bound to one node below this signature's.
         let tight = BaggyParams {
-            few_time: BaggyFewTime::PorsFp(PorsFpParams {
+            pors: PorsFpParams {
                 max_auth_nodes: opening.auth.len() - 1,
                 ..pors_params
-            }),
+            },
             ..params
         };
         assert!(tight.is_well_formed());
         assert!(!baggy_verify(&tight, &pk, msg, &sig));
 
-        for (p, s) in [(&params, &sig), (&BaggyParams::TEST_SMALL, &v1)] {
+        {
+            let (p, s) = (&params, &sig);
             let raw = s.to_wire_bytes();
             assert!(raw.len() <= p.sig_bytes_checked().unwrap());
             assert_eq!(BaggySig::from_wire_bytes(p, &raw).as_ref(), Some(s));
@@ -3212,26 +2915,13 @@ mod tests {
             long.push(0);
             assert_eq!(BaggySig::from_wire_bytes(p, &long), None);
         }
-        assert_eq!(
-            v1.to_wire_bytes().len(),
-            BaggyParams::TEST_SMALL.sig_bytes_checked().unwrap()
-        );
-        assert_eq!(BaggyParams::SHA3_128F.sig_bytes_checked(), Some(73_828));
-        assert_eq!(BaggyParams::SHA3_128F_V2.sig_bytes_checked(), Some(71_654));
-        assert!(BaggyParams::SHA3_128F_V2.is_well_formed());
-        // FORS fields have no meaning under PORS+FP and must be zero.
-        assert!(
-            !BaggyParams {
-                fors_trees: 5,
-                ..params
-            }
-            .is_well_formed()
-        );
+        assert_eq!(BaggyParams::SHA3_128F.sig_bytes_checked(), Some(71_654));
+        assert!(BaggyParams::SHA3_128F.is_well_formed());
     }
 
     #[test]
-    fn v2_mpc_signature_on_the_replicated_engine_equals_the_reference() {
-        let params = BaggyParams::TEST_SMALL_V2;
+    fn mpc_signature_on_the_replicated_engine_equals_the_reference() {
+        let params = BaggyParams::TEST_SMALL;
         let (mut engine, sk) = test_engine(0x61, 0x62);
         let (pk, binding) =
             baggy_keygen_mpc(&mut engine, &params, &mut WaistbandCache::disabled()).unwrap();

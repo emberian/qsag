@@ -139,8 +139,7 @@ impl Request {
             policy,
         );
         Ok(bound.and_then(|(mut intent, _)| {
-            let guards =
-                provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])?;
+            let guards = provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])?;
             let initiator = guards
                 .iter()
                 .find(|g| g.party_id == intent.initiator_party)
@@ -273,8 +272,8 @@ fn mint_release_tokens(
     // This evaluation is stateless: nothing is written. What a persistent ledger would store
     // is still exercised, by exporting each guard's checkpoint and restoring it into a freshly
     // provisioned share, which must come back with the intent nonce and the session burned.
-    let fresh = provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50])
-        .map_err(barrier)?;
+    let fresh =
+        provision_distributed_policy_guards([0x99; 32], &[10, 20, 30, 40, 50]).map_err(barrier)?;
     for (guard, mut restored) in guards.iter().zip(
         fresh
             .into_iter()

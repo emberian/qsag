@@ -21,16 +21,11 @@ use std::path::{Path, PathBuf};
 use qsag_asm::durable::LockedRecord;
 use qsag_core::LedgerCheckpoint;
 use qsag_core::baggy::{
-    BaggyError, BaggyKeyBinding, BaggyParams, BaggyPublicKey, BaggySig, FirstSignedError,
-    FirstSignedLedger, FirstSignedRecord, FsFirstSignedLedger, WaistbandCache, baggy_msg_digest,
-    baggy_sign_mpc,
+    BaggyError, FirstSignedError, FirstSignedLedger, FirstSignedRecord, FsFirstSignedLedger,
 };
 use qsag_core::ceremony_journal::{CeremonyReservation, FsCeremonyJournal};
-use qsag_core::pcg_dense::{
-    DensePcgExpandedVault, DensePcgPartySeed, FsSeedBurnTracker, SeedBurnError, SeedBurnTracker,
-};
+use qsag_core::pcg_dense::{FsSeedBurnTracker, SeedBurnError, SeedBurnTracker};
 use qsag_core::preprocessing::PreprocessError;
-use qsag_core::rss256::Rss256Engine;
 use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes32};
 
 use crate::hash::{SecretKey, mac32, mac32_verify};
@@ -53,23 +48,6 @@ fn derive_subkey(master_key: &[u8; 32], key_id: &[u8; 32], purpose: &[u8]) -> [u
     mac32(master_key, KEY_DERIVE_DOMAIN, &[key_id, purpose])
 }
 
-fn anchor_lock_inode(path: &Path) -> io::Result<[u8; 16]> {
-    let mut os = path.as_os_str().to_os_string();
-    os.push(".lock");
-    let meta = std::fs::symlink_metadata(PathBuf::from(os))?;
-    if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err(invalid_anchor("invalid checkpoint anchor lock sidecar"));
-    }
-    let mut id = [0u8; 16];
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        id[..8].copy_from_slice(&meta.dev().to_le_bytes());
-        id[8..].copy_from_slice(&meta.ino().to_le_bytes());
-    }
-    Ok(id)
-}
-
 /// Independent OS-locked, MAC-authenticated monotonic [`LedgerCheckpoint`] anchor.
 ///
 /// Place `path` in an independent directory / mount or hardware-backed filesystem from the
@@ -77,7 +55,6 @@ fn anchor_lock_inode(path: &Path) -> io::Result<[u8; 16]> {
 /// [`AnchoredSeedBurnTracker::open_existing`] and [`AnchoredFirstSignedCustody::open_existing`].
 pub struct FsLedgerCheckpointAnchor {
     path: PathBuf,
-    lock_id: [u8; 16],
     record: LockedRecord,
     key: [u8; 32],
     domain: &'static [u8],
@@ -102,7 +79,7 @@ impl FsLedgerCheckpointAnchor {
         let mut key = SecretKey(key);
         let path = path.into();
         let record = LockedRecord::create_new(&path)?;
-        let lock_id = anchor_lock_inode(&path)?;
+        let lock_id = record.lock_inode();
         let derived = mac32(
             &key,
             ANCHOR_MAC_DOMAIN,
@@ -111,7 +88,6 @@ impl FsLedgerCheckpointAnchor {
         wipe_bytes32(&mut key);
         let anchor = Self {
             path,
-            lock_id,
             record,
             key: derived,
             domain,
@@ -131,7 +107,7 @@ impl FsLedgerCheckpointAnchor {
         let mut key = SecretKey(key);
         let path = path.into();
         let record = LockedRecord::open_existing(&path)?;
-        let lock_id = anchor_lock_inode(&path)?;
+        let lock_id = record.lock_inode();
         let derived = mac32(
             &key,
             ANCHOR_MAC_DOMAIN,
@@ -140,7 +116,6 @@ impl FsLedgerCheckpointAnchor {
         wipe_bytes32(&mut key);
         let mut anchor = Self {
             path,
-            lock_id,
             record,
             key: derived,
             domain,
@@ -167,10 +142,6 @@ impl FsLedgerCheckpointAnchor {
     pub fn ratchet_to(&mut self, next: LedgerCheckpoint) -> io::Result<()> {
         if self.poisoned {
             return Err(io::Error::other("checkpoint anchor handle is poisoned"));
-        }
-        if anchor_lock_inode(&self.path).ok() != Some(self.lock_id) {
-            self.poisoned = true;
-            return Err(invalid_anchor("checkpoint anchor lock sidecar replaced"));
         }
         let meta = std::fs::symlink_metadata(&self.path)?;
         if meta.file_type().is_symlink() || !meta.is_file() {
@@ -451,63 +422,6 @@ impl AnchoredSeedBurnTracker {
             .map_err(AnchoredSeedBurnError::Io)?;
         Ok(ckpt)
     }
-
-    /// Authorize, burn, expand a [`DensePcgPartySeed`], and `fsync` the updated
-    /// [`LedgerCheckpoint`] anchor BEFORE releasing [`DensePcgExpandedVault`].
-    pub fn expand_party_seed_anchored(
-        &mut self,
-        seed: DensePcgPartySeed,
-        hedge_generation: u64,
-    ) -> Result<(DensePcgExpandedVault, LedgerCheckpoint), AnchoredSeedBurnError> {
-        let seed_id = seed.seed_id();
-        if self
-            .burns
-            .is_burned(&seed_id)
-            .map_err(AnchoredSeedBurnError::Burn)?
-        {
-            return Err(AnchoredSeedBurnError::Preprocess(
-                PreprocessError::PcgSeedAlreadyBurned,
-            ));
-        }
-        let cursor = self.next_cursor;
-        let next_cursor = cursor
-            .checked_add(1)
-            .ok_or_else(|| AnchoredSeedBurnError::Io(invalid_anchor("cursor exhausted")))?;
-        let permit = self
-            .journal
-            .persist_before_release(CeremonyReservation {
-                ceremony_id: seed.session_id,
-                key_id: self.key_id,
-                epoch_or_codeword: seed_id,
-                seed_burn_cursor: cursor,
-                hedge_generation,
-            })
-            .map_err(AnchoredSeedBurnError::Io)?;
-        self.next_cursor = next_cursor;
-        self.burns
-            .authorize_release(&self.journal, permit)
-            .map_err(AnchoredSeedBurnError::Burn)?;
-
-        let prev_gen = self.anchor.checkpoint().generation;
-        match seed.expand_local(&mut self.burns) {
-            Ok(vault) => {
-                let ckpt = self.burns.checkpoint();
-                self.anchor
-                    .ratchet_to(ckpt)
-                    .map_err(AnchoredSeedBurnError::Io)?;
-                Ok((vault, ckpt))
-            }
-            Err(err) => {
-                let ckpt = self.burns.checkpoint();
-                if ckpt.generation > prev_gen {
-                    self.anchor
-                        .ratchet_to(ckpt)
-                        .map_err(AnchoredSeedBurnError::Io)?;
-                }
-                Err(AnchoredSeedBurnError::Preprocess(err))
-            }
-        }
-    }
 }
 
 /// Errors from [`AnchoredFirstSignedCustody`] operations.
@@ -667,73 +581,6 @@ impl AnchoredFirstSignedCustody {
             .map_err(AnchoredFirstSignedError::Io)?;
         Ok(ckpt)
     }
-
-    /// Authorize, sign via [`baggy_sign_mpc`], and `fsync` the updated [`LedgerCheckpoint`]
-    /// to [`FsLedgerCheckpointAnchor`] BEFORE releasing the [`BaggySig`].
-    #[allow(clippy::too_many_arguments)]
-    pub fn baggy_sign_mpc_anchored(
-        &mut self,
-        engine: &mut Rss256Engine,
-        params: &BaggyParams,
-        pk: &BaggyPublicKey,
-        binding: &BaggyKeyBinding,
-        cache: &mut WaistbandCache,
-        msg: &[u8],
-        hedge_generation: u64,
-    ) -> Result<(BaggySig, LedgerCheckpoint), AnchoredFirstSignedError> {
-        if binding.identity() != self.key_id {
-            return Err(AnchoredFirstSignedError::Baggy(
-                BaggyError::KeyBindingMismatch,
-            ));
-        }
-        let mu = baggy_msg_digest(pk, msg);
-        let cursor = self.next_cursor;
-        let next_cursor = cursor
-            .checked_add(1)
-            .ok_or_else(|| AnchoredFirstSignedError::Io(invalid_anchor("cursor exhausted")))?;
-        let permit = self
-            .journal
-            .persist_before_release(CeremonyReservation {
-                ceremony_id: *engine.session_id(),
-                key_id: self.key_id,
-                epoch_or_codeword: mu,
-                seed_burn_cursor: cursor,
-                hedge_generation,
-            })
-            .map_err(AnchoredFirstSignedError::Io)?;
-        self.next_cursor = next_cursor;
-        self.first_signed
-            .authorize_release(&self.journal, permit)
-            .map_err(AnchoredFirstSignedError::Ledger)?;
-
-        let prev_gen = self.anchor.checkpoint().generation;
-        match baggy_sign_mpc(
-            engine,
-            params,
-            pk,
-            binding,
-            cache,
-            &mut self.first_signed,
-            msg,
-        ) {
-            Ok(sig) => {
-                let ckpt = self.first_signed.checkpoint();
-                self.anchor
-                    .ratchet_to(ckpt)
-                    .map_err(AnchoredFirstSignedError::Io)?;
-                Ok((sig, ckpt))
-            }
-            Err(err) => {
-                let ckpt = self.first_signed.checkpoint();
-                if ckpt.generation > prev_gen {
-                    self.anchor
-                        .ratchet_to(ckpt)
-                        .map_err(AnchoredFirstSignedError::Io)?;
-                }
-                Err(AnchoredFirstSignedError::Baggy(err))
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -756,6 +603,61 @@ mod tests {
         std::fs::create_dir_all(dir.join("ledger")).unwrap();
         std::fs::create_dir_all(dir.join("anchor")).unwrap();
         dir
+    }
+
+    #[test]
+    fn anchor_binds_the_lock_sidecar_its_handle_holds() {
+        let dir = test_dir("lock-swap");
+        let path = dir.join("anchor/ckpt");
+        let lock = dir.join("anchor/ckpt.lock");
+        let parked = dir.join("anchor/ckpt.lock.parked");
+        let domain: &'static [u8] = b"anchor.lock.swap";
+        let ckpt = |generation: u64| LedgerCheckpoint {
+            generation,
+            tag: [generation as u8; 32],
+        };
+        let mut anchor =
+            FsLedgerCheckpointAnchor::provision_genesis(&path, [9; 32], domain, ckpt(0)).unwrap();
+        anchor.ratchet_to(ckpt(1)).unwrap();
+
+        // The sidecar name now points at a byte-identical copy on another inode, while the
+        // handle still holds the original locked.
+        std::fs::rename(&lock, &parked).unwrap();
+        std::fs::copy(&parked, &lock).unwrap();
+        assert_eq!(
+            anchor.ratchet_to(ckpt(2)).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // Putting the name back does not revive the handle.
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::rename(&parked, &lock).unwrap();
+        assert_eq!(
+            anchor.ratchet_to(ckpt(2)).unwrap_err().to_string(),
+            "checkpoint anchor handle is poisoned"
+        );
+        drop(anchor);
+
+        // Nothing was written: a fresh handle on the original sidecar resumes at 1.
+        let mut reopened = FsLedgerCheckpointAnchor::open_existing(&path, [9; 32], domain).unwrap();
+        assert_eq!(reopened.checkpoint(), ckpt(1));
+        reopened.ratchet_to(ckpt(2)).unwrap();
+        drop(reopened);
+
+        // A sidecar copy that names its own inode satisfies `LockedRecord` and keeps the
+        // seal, so the record still reads. The anchor MAC key covers the identity of the
+        // sidecar the handle holds, and that one is not the provisioned sidecar.
+        std::fs::rename(&lock, &parked).unwrap();
+        std::fs::copy(&parked, &lock).unwrap();
+        let mut forged = std::fs::read(&parked).unwrap();
+        let identity = qsag_asm::durable::file_identity(&std::fs::symlink_metadata(&lock).unwrap());
+        forged[16..].copy_from_slice(&identity);
+        std::fs::write(&lock, &forged).unwrap();
+        match FsLedgerCheckpointAnchor::open_existing(&path, [9; 32], domain) {
+            Ok(_) => panic!("anchor opened under a substituted lock sidecar"),
+            Err(e) => assert_eq!(e.to_string(), "checkpoint anchor MAC verification failed"),
+        }
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

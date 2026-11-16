@@ -15,7 +15,7 @@ namespace ExternalSpecOracle
 
 open Qsag
 
--- Curve parameters matching `lean/Qsag/PallasAndBlsMigration.lean` (inlined here so the
+-- Curve parameters matching `lean/Qsag/Math/EllipticCurves.lean` (inlined here so the
 -- standalone oracle evaluates `Qsag.rcbSmul` cleanly even when proof-only modules are in flight).
 def p_pallas : Nat := 0x40000000000000000000000000000000224698fc094cf91b992d30ed00000001
 def p_bls381 : Nat :=
@@ -245,7 +245,7 @@ def main : IO Unit := do
       s!"\"cshake256_64_hex\":\"{bytesToHex (cshake256Xof 64 custom msg)}\"" ++
     "}"
 
-  -- 4. BinaryTower T_3 (GF(2^8)) + ConstantTimeIsa GFNI isomorphism & T_7 (GF(2^128))
+  -- 4. Binary tower (`Qsag.Math.Gf2Pow128`) T_3 (GF(2^8)) + ConstantTimeIsa GFNI isomorphism & T_7 (GF(2^128))
   let gf256Pairs : List (Nat × Nat) := [
     (0x00, 0x53), (0x01, 0xCA), (0x53, 0xCA), (0xFF, 0xFF), (0x80, 0x80), (0xA5, 0x3C)
   ]

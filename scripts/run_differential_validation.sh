@@ -59,6 +59,8 @@ if [[ "$REGEN_LEAN" -eq 1 ]]; then
             > "${FIXTURES_DIR}/lean_cross_kat.jsonl"
         ./.lake/build/bin/qsag-kat \
             > "${FIXTURES_DIR}/lean_kat_snapshot.json"
+        lake env lean --run "${FIXTURES_DIR}/lean_pack256_limbs56.gen.lean" \
+            > "${FIXTURES_DIR}/lean_pack256_limbs56.jsonl"
     )
 fi
 
@@ -72,7 +74,9 @@ fi
 
 if [[ "$RUN_FUZZ" -eq 1 ]]; then
     echo "==> Running coverage-guided libFuzzer campaign (${FUZZ_SECS}s per target)..."
-    SANCOV_RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares"
+    # `-sanitizer-coverage-level` defaults to 0. At that level the sancov pass inserts
+    # no counters and the other three flags do nothing, so the level must be explicit.
+    SANCOV_RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares"
     (
         cd "${REPO_ROOT}/fuzz"
         # These LLVM coverage flags work with the repository's pinned stable compiler.
@@ -85,11 +89,18 @@ if [[ "$RUN_FUZZ" -eq 1 ]]; then
             CORPUS_DIR="${REPO_ROOT}/fuzz/corpus/${target}"
             ARTIFACT_DIR="${REPO_ROOT}/fuzz/artifacts/${target}"
             mkdir -p "${CORPUS_DIR}" "${ARTIFACT_DIR}"
+            RUN_LOG="${ARTIFACT_DIR}/last_run.log"
             "./target/${HOST_TRIPLE}/release/${target}" "${CORPUS_DIR}" \
                 -max_total_time="${FUZZ_SECS}" \
                 -max_len=65536 -timeout=20 -rss_limit_mb=4096 \
                 -artifact_prefix="${ARTIFACT_DIR}/" \
-                -print_final_stats=1
+                -print_final_stats=1 2>&1 | tee "${RUN_LOG}"
+            # An uninstrumented binary still runs and exits 0; it just never reports
+            # an edge count. Refuse to call that a fuzzing campaign.
+            if ! grep -Eq '^#[0-9]+[[:space:]]+DONE[[:space:]]+cov: [1-9]' "${RUN_LOG}"; then
+                echo "${target}: libFuzzer reported no edge coverage; the build is not instrumented." >&2
+                exit 1
+            fi
         done
     )
 fi

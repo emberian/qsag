@@ -15,7 +15,8 @@ import all QsagVerified.Proofs.RealSpecKeccakWeld
 
 Root of the `QsagSpecWeld` library: the modules that weld extracted primitives to the `Qsag`
 specifications of the same primitives. Its `Qsag` imports are the primitive specifications only
-(`Goldilocks`, `SimulationSpine`, `BinaryTower`, `HashSigs`, `Keccak` and what those import), so
+(`Math.Goldilocks`, `Exec.SimulationSpine`, `Math.Gf2Pow128`, `Protocol.Signing.HashSigs`,
+`Oracle.Keccak` and what those import), so
 it builds independently of the protocol-level `Qsag` modules. The welds whose statements mention
 protocol specifications (`MirSpecBridge`, `JortsBeltLatchAndQuorumSwitching`) are the separate
 `QsagCustodyWeld` library.

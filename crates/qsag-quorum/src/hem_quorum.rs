@@ -1999,12 +1999,18 @@ impl HemDynamicShamirQuorum {
             // Authenticate a fresh private random mask, then open only the masked
             // linear combination. Public transcript challenges select the combination;
             // they must never determine the mask or its authentication randomness.
-            let check_quorum = new_t;
-            let check_pts = &new_pts[..check_quorum];
-            let check_lambdas = lagrange_weights_zero_goldilocks(check_pts)
+            let check_quorum = new_n;
+            let check_pts = &new_pts[..];
+            let check_lambdas = lagrange_weights_zero_goldilocks(&check_pts[..new_t])
                 .ok_or(HemQuorumError::InvalidQuorum { t: new_t, n: new_n })?;
             let alpha_contribs: Vec<GoldilocksExt2> = (0..check_quorum)
-                .map(|j| new_alpha_shares[j].mul_base(check_lambdas[j]))
+                .map(|j| {
+                    if j < new_t {
+                        new_alpha_shares[j].mul_base(check_lambdas[j])
+                    } else {
+                        GoldilocksExt2::ZERO
+                    }
+                })
                 .collect();
 
             let mut check_rngs = private_operation_rngs(
@@ -2021,7 +2027,7 @@ impl HemDynamicShamirQuorum {
             let r_inputs: Vec<Vec<Goldilocks>> = (0..check_quorum)
                 .map(|j| {
                     let rj = check_rngs[j].next_goldilocks();
-                    shamir_share_goldilocks(check_quorum, check_pts, rj, &mut check_rngs[j])
+                    shamir_share_goldilocks(new_t, check_pts, rj, &mut check_rngs[j])
                 })
                 .collect();
             let mut r_sh = vec![Goldilocks::ZERO; check_quorum];
@@ -2033,7 +2039,7 @@ impl HemDynamicShamirQuorum {
             let r_batch: Vec<Vec<Goldilocks>> = r_sh.iter().map(|&x| vec![x]).collect();
             let r_macs = qsag_core::preprocessing::spdz_authenticate_goldilocks_batch_ext2(
                 &cshake256_32(b"QSAG.HEM.QSB.MACCHK.AUTH/v1", &session_id),
-                check_quorum,
+                new_t,
                 check_pts,
                 &mut mesh,
                 &alpha_contribs,
@@ -2064,7 +2070,7 @@ impl HemDynamicShamirQuorum {
             let opened_res = commit_and_open_spdz_goldilocks_batch_quorum(
                 &session_id,
                 "hem_qsb_reshare_const_mac_check",
-                check_quorum,
+                new_t,
                 check_pts,
                 &masked_sh,
                 &masked_mac,
@@ -2999,11 +3005,8 @@ mod tests {
         let new_points = canonical_eval_points(5);
         let mut public_mask = Goldilocks::ZERO;
         let mut vulnerable_recipient = Goldilocks::ZERO;
-        for (party, (&weight, share)) in weights
-            .iter()
-            .zip(quorum.shares.iter())
-            .enumerate()
-            .take(2)
+        for (party, (&weight, share)) in
+            weights.iter().zip(quorum.shares.iter()).enumerate().take(2)
         {
             let seed = cshake256_32(
                 b"QSAG.HEM.QSB.DEALER.RNG/v1",
@@ -3383,6 +3386,30 @@ mod tests {
             .iter()
             .map(|s| s.to_vault_bytes().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn unanimous_reshare_shift_aborts_and_preserves_live_custody() {
+        let mut qsb = HemDynamicShamirQuorum::stage([0xd1; 32], 2, 2, 1).unwrap();
+        let pk = qsb.public_key();
+        let before = all_share_bytes(&qsb);
+        assert!(matches!(
+            qsb.reshare_quorum_with_fault(
+                [0xd2; 32],
+                &[0, 1],
+                2,
+                2,
+                &mut test_party_rngs(21, 2),
+                &mut test_party_rngs(31, 2),
+                ReshareFaultInjection::ShiftConstantTerm { dealer: 0 },
+            ),
+            Err(HemQuorumError::ReshareMacCheckFailed)
+        ));
+        assert_eq!(all_share_bytes(&qsb), before);
+        assert_eq!(qsb.quorum_epoch(), 0);
+        assert_eq!(qsb.high_water_leaf(), 0);
+        let (_, sig) = qsb.sign_quorum(&[0, 1], &[0, 1], b"after-abort").unwrap();
+        assert!(verify_hem_jorts_signature(&pk, b"after-abort", &sig));
     }
 
     #[test]
@@ -3772,7 +3799,8 @@ mod tests {
             &mut test_party_rngs(120, 4),
         )
         .unwrap();
-        let agg_pk = ValidatorPublicKey::from_bytes_canonical(&spdz.public_key().to_bytes()).unwrap();
+        let agg_pk =
+            ValidatorPublicKey::from_bytes_canonical(&spdz.public_key().to_bytes()).unwrap();
 
         let dir = std::env::temp_dir().join(format!(
             "qsag-hem-spdz-durable-cert-{}-{}",
@@ -3782,9 +3810,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mac_keys: Vec<[u8; 32]> = (0..4)
-            .map(|i| [0x41 + i as u8; 32])
-            .collect();
+        let mac_keys: Vec<[u8; 32]> = (0..4).map(|i| [0x41 + i as u8; 32]).collect();
         let latches: Vec<FsWalEpochLatch> = (0..4)
             .map(|i| {
                 FsWalEpochLatch::create_new_for_fresh_key(
@@ -3801,7 +3827,9 @@ mod tests {
         let binding0 = spdz.epoch_latch_binding(0, msg0);
         // Under (n=4, t=2, f=1), 2q > n+f = 5 requires q = 3: 2 approvals fail closed, 3 succeed.
         assert!(durable_cluster.certify_epoch(&[0, 1], 0, binding0).is_err());
-        let cert0 = durable_cluster.certify_epoch(&[0, 1, 3], 0, binding0).unwrap();
+        let cert0 = durable_cluster
+            .certify_epoch(&[0, 1, 3], 0, binding0)
+            .unwrap();
 
         // Before enrollment, `Some(&cert0)` fails closed without spending leaf 0.
         assert!(

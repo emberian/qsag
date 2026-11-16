@@ -118,7 +118,11 @@ impl BlindVcStatement {
         let mut node = commit(&witness.holder_blind, VC_ATTR_COMMIT_TAG);
         for (level, (&bit, sibling)) in witness.path_bits.iter().zip(&witness.siblings).enumerate()
         {
-            let (left, right) = if bit { (sibling, &node) } else { (&node, sibling) };
+            let (left, right) = if bit {
+                (sibling, &node)
+            } else {
+                (&node, sibling)
+            };
             let mut msg = Vec::with_capacity(16);
             msg.extend_from_slice(left);
             msg.extend_from_slice(right);
@@ -290,7 +294,13 @@ pub fn verify_presentation(
     proof: &ZkHemProof,
 ) -> bool {
     statement.shape().is_some_and(|shape| {
-        protocol::verify(&shape, &[], &statement.statement_bytes(context), regime, proof)
+        protocol::verify(
+            &shape,
+            &[],
+            &statement.statement_bytes(context),
+            regime,
+            proof,
+        )
     })
 }
 

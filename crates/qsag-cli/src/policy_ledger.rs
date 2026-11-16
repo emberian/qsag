@@ -145,7 +145,7 @@ fn intent_path(dir: &str, id: &[u8; 32]) -> Result<String, CliError> {
 }
 
 fn party_secret(seed: &Secret32, label: &[u8], party: u16) -> Secret32 {
-    Secret32(cshake256_framed_32(
+    Secret32::new(cshake256_framed_32(
         b"QSAG.CLI.POLICY.LEDGER.KDF.V1",
         &[&seed.0, label, &party.to_be_bytes()],
     ))
@@ -483,7 +483,7 @@ fn ledger_id(
     committee: &Committee,
     nonce: &[u8],
 ) -> [u8; 32] {
-    let commitment = Secret32(cshake256_framed_32(
+    let commitment = Secret32::new(cshake256_framed_32(
         b"QSAG.CLI.POLICY.LEDGER_ID.SEED.V1",
         &[&seed.0],
     ));
@@ -1342,7 +1342,12 @@ impl Gate {
         } else {
             Access::Inspect
         };
-        let ledger = OpenLedger::open(dir, passphrase.as_deref(), anchor_cfg.as_ref(), access)?;
+        let ledger = OpenLedger::open(
+            dir,
+            passphrase.as_deref().map(Vec::as_slice),
+            anchor_cfg.as_ref(),
+            access,
+        )?;
         Ok(Some(Self { ledger, intent }))
     }
 
@@ -1447,6 +1452,8 @@ other. Set `preprocessing_slots` in the enrollment policy to budget single-use b
   --anchor-dir <dir>            ratchet every guard generation in an external monotone anchor,
                                 so restoring an old copy of the ledger directory is refused
   --allow-single-disk-anchor    permit --anchor-dir on the ledger's filesystem device
+  --ephemeral-unanchored        enroll a disposable ledger without rollback protection
+                                (required when --anchor-dir is absent)
   --passphrase-env <VAR> / --passphrase-file <PATH>  seal the provisioning seed
   --json                        print the ledger identifier and policy digest as JSON
 ";
@@ -1464,6 +1471,7 @@ fn init(raw: &[String]) -> Result<(), CliError> {
         &[
             "accept-single-host-custody",
             "allow-single-disk-anchor",
+            "ephemeral-unanchored",
             "json",
             "help",
         ],
@@ -1479,6 +1487,11 @@ fn init(raw: &[String]) -> Result<(), CliError> {
             "policy init requires --accept-single-host-custody: one provisioning seed on this host derives every guard share",
         ));
     }
+    crate::anchor::require_anchor_or_waiver(
+        args.get("anchor-dir").is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
     let policy_text = read_text(args.require("policy")?)?;
     let (policy, committee) = policy_from_json(&Json::parse(&policy_text)?)?;
     let passphrase = crate::envelope::passphrase(&args)?;
@@ -1502,7 +1515,7 @@ fn init(raw: &[String]) -> Result<(), CliError> {
         private_dir(&join(dir, &[sub])?, true)?;
     }
     let mut vault = Vault::acquire(&root, true)?;
-    let seed = Secret32(os_random_32()?);
+    let seed = Secret32::new(os_random_32()?);
     let nonce = os_random_32()?;
     let nonce = &nonce[..16];
     let id = ledger_id(&seed, &policy, &committee, nonce);
@@ -1564,7 +1577,7 @@ fn init(raw: &[String]) -> Result<(), CliError> {
     }
     vault.bind(&mut file)?;
     vault.seal(&mut file)?;
-    let encoded = ZeroizingBuf(file.to_pretty().into_bytes());
+    let encoded = ZeroizingBuf::new(file.to_pretty().into_bytes());
     // Written last: a directory without it was never a usable ledger.
     write_new(&root, &encoded.0, true)?;
 
@@ -1597,7 +1610,12 @@ fn open_from_args(args: &Args, access: Access) -> Result<OpenLedger, CliError> {
     let dir = args.require("ledger-dir")?;
     let passphrase = crate::envelope::passphrase(args)?;
     let anchor_cfg = AnchorConfig::for_vault(args, dir, "anchor-dir", "allow-single-disk-anchor")?;
-    OpenLedger::open(dir, passphrase.as_deref(), anchor_cfg.as_ref(), access)
+    OpenLedger::open(
+        dir,
+        passphrase.as_deref().map(Vec::as_slice),
+        anchor_cfg.as_ref(),
+        access,
+    )
 }
 
 const LEDGER_HELP: &str = "\
@@ -1922,6 +1940,7 @@ mod tests {
                 "--policy",
                 &self.path("policy.json"),
                 "--accept-single-host-custody",
+                "--ephemeral-unanchored",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -1986,6 +2005,7 @@ mod tests {
             "--policy",
             &scratch.path("policy.json"),
             "--accept-single-host-custody",
+            "--ephemeral-unanchored",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -2303,7 +2323,7 @@ mod tests {
 
     #[test]
     fn committee_checkpoint_codec_rejects_noncanonical_input() {
-        let key = Secret32([9; 32]);
+        let key = Secret32::new([9; 32]);
         let ledger = [3u8; 32];
         let parts = vec![(1u16, vec![1u8, 2, 3]), (2u16, Vec::new())];
         let bytes = encode_bundle(&key, &ledger, 7, &parts, b"shared");
@@ -2315,7 +2335,7 @@ mod tests {
                 shared: b"shared",
             }
         );
-        assert!(decode_bundle(&Secret32([8; 32]), &ledger, &bytes).is_err());
+        assert!(decode_bundle(&Secret32::new([8; 32]), &ledger, &bytes).is_err());
         assert!(decode_bundle(&key, &[4u8; 32], &bytes).is_err());
         // Authenticated but ill-formed bodies: a length running past the end, trailing bytes.
         let retag = |body: &[u8]| {

@@ -17,7 +17,7 @@
 //!    under an additive `pk_seed + position` tweak, a primitive distinct from the two-permutation
 //!    `merkle_node_hash`; the additive tweak makes `(pk_seed, position)` pairs with equal sums
 //!    collide, which is pinned here as a property of the construction.
-//! 4. The live `VulkanRdna2Backend` permutation (when a GPU is present on Linux) against the
+//! 4. The live `VulkanSpirvBackend` permutation (when a GPU is present on Linux) against the
 //!    reference. CPU permutation parity of the three crates lives in `simd_fields_goldilocks.rs`.
 
 use proptest::prelude::*;
@@ -283,7 +283,7 @@ fn accel_merkle_layer_is_the_weighted_compression_and_gpu_matches_reference() {
 
     // 4. With a Vulkan GPU on a Linux host, the hardware permutation matches the reference.
     #[cfg(target_os = "linux")]
-    if let Ok(gpu) = qsag_accel::VulkanRdna2Backend::try_new() {
+    if let Ok(gpu) = qsag_accel::VulkanSpirvBackend::try_new() {
         use qsag_accel::AcceleratorBackend;
         let mut states: Vec<[u64; 12]> = (0..64)
             .map(|i| {

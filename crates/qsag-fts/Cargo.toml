@@ -22,3 +22,7 @@ qsag-accel = { path = "../qsag-accel", default-features = false }
 
 [dev-dependencies]
 qsag-core = { path = "../qsag-core", features = ["testing-ephemeral"] }
+
+[[example]]
+name = "dealerless_bench"
+required-features = ["std"]

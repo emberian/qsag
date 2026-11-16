@@ -8,10 +8,20 @@ Layer-0 ideal specification for succinct post-quantum signature aggregation and 
    individual signature `verify (pks i) msg (sigs i) = true`),
 3. Inductive binary `AggregateMergeTree` verifying hierarchical shard-proof composition with
    disjoint signer bitmaps (`b₁ &&& b₂ = 0`), and
-4. Knowledge-extraction soundness contract (`AggregateExtractorSound`): on every execution on
-   which the aggregate verifier accepts and the soundness-error event does not occur, the
-   extractor's witness map is valid or the break finder returns a collision of the commitment
-   hash (`ValidBreak`); the soundness-error event has probability at most `εSound`.
+4. Knowledge-extraction soundness contract `AggregateExtractorSound ℰ … oracle q ε`, a
+   proposition about the verifier and the extractor: the extractor belongs to the class `ℰ`, and
+   against every prover that reads only its own coins and the answers of the sampled hash
+   oracle, the probability that the verifier accepts while the extractor's witness map (a
+   function of the oracle transcript, the statement and the proof) is not valid and the
+   transcript contains no collision of the oracle is at most `ε`. The class matters: an
+   unrestricted extractor may search the signature space, and then the accept-all verifier
+   satisfies the contract with `ε = 0` when every statement is satisfiable
+   (`acceptAll_alwaysValid_unrestricted_extractorSound`). `StraightLineExtractor` is the class
+   of extractors that return only signatures carried by the proof or decoded from the
+   transcript; for it accept-all is refuted without any unsatisfiability hypothesis
+   (`acceptAll_not_straightLine_extractorSound`).
+5. Corruption scope: the prover is adversarial; validators are not parties and no key material
+   is held (see the section on knowledge soundness).
 -/
 
 public import Qsag.Spec.Primitives
@@ -87,9 +97,50 @@ theorem mergeWitnessMaps_valid {PK Sig : Type} {w : Nat}
   · simp only [↓reduceIte]
     exact hL i hbL
 
-/-! ## Knowledge soundness: validated breaks and the extractor contract -/
+/-! ## Knowledge soundness in the oracle model
 
-/-- Break data an aggregate extractor may return: a candidate collision of the commitment hash. -/
+The experiment has two parties. The challenger samples the hash oracle `oracle c` from its
+coin `c`. The prover is an oracle program: it reads its own coin and the oracle's answers, and
+outputs a statement and a proof. The challenger records the prover's queries; at most `q` are
+answered. The extractor is a function of that transcript, the statement and the proof, and of
+nothing else. The prover loses on a coin when the verifier rejects, when the extracted witness
+map is valid, or when two different recorded queries have the same answer.
+
+`AggregateExtractorSound ℰ … q ε` states that the extractor belongs to the class `ℰ` and that
+every prover wins with probability at most `ε`. The bound `ε` is an index of the proposition,
+not a field: with `ε = 1` it holds for every verifier (`aggregateExtractorSound_one`), and for
+the verifier that accepts everything and a straight-line extractor it holds for no `ε < 1`
+(`acceptAll_not_straightLine_extractorSound`).
+
+What stays information-theoretic: provers are arbitrary oracle programs, with a query budget
+and no running-time bound; the decoder of a straight-line extractor is an arbitrary function of
+one byte string; the oracle family carries no uniformity law. Nothing here transfers to
+unforgeability of the aggregate against a bounded adversary.
+
+**Corruption scope.** The aggregator / prover is adversarial: the proposition quantifies over
+all of them. Validators are not parties of this functionality and it holds no key material. A
+valid witness is one verifying signature per active signer, whoever produced it, so a validator
+whose key is compromised counts as a signer. That an honest validator's signature was produced
+by that validator is unforgeability of `verifySingle`, which is a separate hypothesis; the
+second branch of `AggregateSoundnessOutcome.signer_trichotomy` (the run's extractor output is a
+verifying signature of a validator that did not participate) is where it enters. -/
+
+private theorem aggItePos {α : Type} {p : Prop} [Decidable p] (hp : p) (a b : α) :
+    (if p then a else b) = a := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem aggIteNeg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (a b : α) :
+    (if p then a else b) = b := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+private theorem aggAndSplit {a b : Bool} (h : (a && b) = true) : a = true ∧ b = true := by
+  cases a <;> cases b <;> first | exact ⟨rfl, rfl⟩ | cases h
+
+/-- Break data: a candidate collision of the commitment hash. -/
 structure AggregateBreak where
   m₁ : Bytes
   m₂ : Bytes
@@ -109,186 +160,128 @@ theorem HashCollision.validBreak {H : Bytes → Bytes} (c : HashCollision H) :
     ValidBreak H ⟨c.m₁, c.m₂⟩ :=
   ⟨c.distinct, c.collides⟩
 
-/-- Executable validity check of a break. -/
-def validBreakCheck (H : Bytes → Bytes) (b : AggregateBreak) : Bool :=
-  decide (b.m₁ ≠ b.m₂) && decide (H b.m₁ = H b.m₂)
-
-theorem validBreakCheck_iff (H : Bytes → Bytes) (b : AggregateBreak) :
-    validBreakCheck H b = true ↔ ValidBreak H b := by
-  unfold validBreakCheck ValidBreak
-  constructor
-  · intro h
-    cases h₁ : decide (b.m₁ ≠ b.m₂) with
-    | false => rw [h₁] at h; cases h
-    | true =>
-      rw [h₁, Bool.true_and] at h
-      exact ⟨of_decide_eq_true h₁, of_decide_eq_true h⟩
-  · rintro ⟨h₁, h₂⟩
-    rw [decide_eq_true h₁, decide_eq_true h₂]
-    rfl
-
 /-- An injective commitment hash admits no validated break. -/
 theorem not_validBreak_of_injective {H : Bytes → Bytes}
     (hInj : ∀ a b : Bytes, H a = H b → a = b) (b : AggregateBreak) : ¬ ValidBreak H b :=
   fun h => h.1 (hInj _ _ h.2)
 
-/-- Knowledge-soundness outcome for one accepted aggregate: the extracted witness map satisfies
-    `ValidAggregateWitness`, or the break finder returned a validated collision of `H`. -/
+/-- `b` is a break of the experiment with transcript `log`: a collision of `H` both of whose
+    inputs are recorded queries. A collision the prover did not query is not one. -/
+def TranscriptBreak (H : Bytes → Bytes) (log : List (Bytes × Bytes)) (b : AggregateBreak) : Prop :=
+  b.m₁ ∈ log.map Prod.fst ∧ b.m₂ ∈ log.map Prod.fst ∧ ValidBreak H b
+
+theorem TranscriptBreak.append_left {H : Bytes → Bytes} {log : List (Bytes × Bytes)}
+    {b : AggregateBreak} (h : TranscriptBreak H log b) (log' : List (Bytes × Bytes)) :
+    TranscriptBreak H (log ++ log') b := by
+  refine ⟨?_, ?_, h.2.2⟩
+  · rw [List.map_append]; exact List.mem_append_left _ h.1
+  · rw [List.map_append]; exact List.mem_append_left _ h.2.1
+
+theorem TranscriptBreak.append_right {H : Bytes → Bytes} {log : List (Bytes × Bytes)}
+    {b : AggregateBreak} (h : TranscriptBreak H log b) (log' : List (Bytes × Bytes)) :
+    TranscriptBreak H (log' ++ log) b := by
+  refine ⟨?_, ?_, h.2.2⟩
+  · rw [List.map_append]; exact List.mem_append_right _ h.1
+  · rw [List.map_append]; exact List.mem_append_right _ h.2.1
+
+/-- Executable collision search over a transcript: two entries with different queries and the
+    same answer. -/
+def transcriptCollision (log : List (Bytes × Bytes)) : Bool :=
+  log.any (fun e => log.any (fun e' => decide (e.1 ≠ e'.1) && decide (e.2 = e'.2)))
+
+/-- A collision found in a transcript whose answers are those of `H` is a transcript break. -/
+theorem transcriptCollision_sound (H : Bytes → Bytes) (log : List (Bytes × Bytes))
+    (hLog : ∀ e ∈ log, e.2 = H e.1) (h : transcriptCollision log = true) :
+    ∃ b : AggregateBreak, TranscriptBreak H log b := by
+  obtain ⟨e, he, h'⟩ := List.any_eq_true.mp h
+  obtain ⟨e', he', hc⟩ := List.any_eq_true.mp h'
+  obtain ⟨hNe, hEq⟩ := aggAndSplit hc
+  refine ⟨⟨e.1, e'.1⟩, List.mem_map.mpr ⟨e, he, rfl⟩, List.mem_map.mpr ⟨e', he', rfl⟩,
+    of_decide_eq_true hNe, ?_⟩
+  show H e.1 = H e'.1
+  rw [← hLog e he, ← hLog e' he']
+  exact of_decide_eq_true hEq
+
+/-- Every transcript break is found by the search. -/
+theorem transcriptCollision_complete (H : Bytes → Bytes) (log : List (Bytes × Bytes))
+    (hLog : ∀ e ∈ log, e.2 = H e.1) {b : AggregateBreak} (h : TranscriptBreak H log b) :
+    transcriptCollision log = true := by
+  obtain ⟨e, he, he1⟩ := List.mem_map.mp h.1
+  obtain ⟨e', he', he1'⟩ := List.mem_map.mp h.2.1
+  refine List.any_eq_true.mpr ⟨e, he, List.any_eq_true.mpr ⟨e', he', ?_⟩⟩
+  have hNe : e.1 ≠ e'.1 := by rw [he1, he1']; exact h.2.2.1
+  have hEq : e.2 = e'.2 := by rw [hLog e he, hLog e' he', he1, he1']; exact h.2.2.2
+  rw [decide_eq_true hNe, decide_eq_true hEq]
+  rfl
+
+/-- Knowledge-soundness outcome of one accepted aggregate with transcript `log`: the extracted
+    witness map is valid, or the transcript contains a collision of `H`. -/
 def AggregateSoundnessOutcome {PK Sig : Type} {w : Nat}
-    (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes)
-    (stmt : AggregateStatement PK w)
-    (extracted : Fin w → Option Sig)
-    (brk : Option AggregateBreak) : Prop :=
-  ValidAggregateWitness verifySingle stmt extracted ∨ ∃ b : AggregateBreak, brk = some b ∧ ValidBreak H b
+    (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes) (log : List (Bytes × Bytes))
+    (stmt : AggregateStatement PK w) (extracted : Fin w → Option Sig) : Prop :=
+  ValidAggregateWitness verifySingle stmt extracted ∨ ∃ b : AggregateBreak, TranscriptBreak H log b
 
 /-- With an injective commitment hash the outcome is a valid extracted witness. -/
 theorem AggregateSoundnessOutcome.witness_of_injective {PK Sig : Type} {w : Nat}
-    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes}
+    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes} {log : List (Bytes × Bytes)}
     {stmt : AggregateStatement PK w} {extracted : Fin w → Option Sig}
-    {brk : Option AggregateBreak}
     (hInj : ∀ a b : Bytes, H a = H b → a = b)
-    (h : AggregateSoundnessOutcome verifySingle H stmt extracted brk) :
+    (h : AggregateSoundnessOutcome verifySingle H log stmt extracted) :
     ValidAggregateWitness verifySingle stmt extracted := by
-  rcases h with hW | ⟨b, _, hB⟩
+  rcases h with hW | ⟨b, hB⟩
   · exact hW
-  · exact absurd hB (not_validBreak_of_injective hInj b)
+  · exact absurd hB.2.2 (not_validBreak_of_injective hInj b)
 
-/-- Break returned for a merged aggregate: the left break if it validates, else the right. -/
-def mergeBreaks (H : Bytes → Bytes) (l r : Option AggregateBreak) : Option AggregateBreak :=
-  match l with
-  | some b => if validBreakCheck H b = true then some b else r
-  | none => r
-
-/-- Soundness outcomes compose along a merge: outcomes for the two children give the outcome
-    for the bitwise-OR bitmap with the merged witness map and the merged break. -/
-theorem mergeSoundnessOutcome {PK Sig : Type} {w : Nat}
-    (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes)
-    (roster : Fin w → PK) (msg : Bytes) (bmL bmR : BitVec w)
-    (wL wR : Fin w → Option Sig) (brkL brkR : Option AggregateBreak)
-    (hL : AggregateSoundnessOutcome verifySingle H ⟨roster, bmL, msg⟩ wL brkL)
-    (hR : AggregateSoundnessOutcome verifySingle H ⟨roster, bmR, msg⟩ wR brkR) :
-    AggregateSoundnessOutcome verifySingle H ⟨roster, bmL ||| bmR, msg⟩
-      (mergeWitnessMaps bmL wL wR) (mergeBreaks H brkL brkR) := by
-  have hOfRight : (∃ b : AggregateBreak, brkR = some b ∧ ValidBreak H b) →
-      ∃ b : AggregateBreak, mergeBreaks H brkL brkR = some b ∧ ValidBreak H b := by
-    rintro ⟨b, hb, hV⟩
-    unfold mergeBreaks
-    cases brkL with
-    | none => exact ⟨b, hb, hV⟩
-    | some bl =>
-      cases hc : validBreakCheck H bl with
-      | true =>
-        refine ⟨bl, ?_, (validBreakCheck_iff H bl).mp hc⟩
-        show (if validBreakCheck H bl = true then some bl else brkR) = some bl
-        rw [hc]
-        rfl
-      | false =>
-        refine ⟨b, ?_, hV⟩
-        show (if validBreakCheck H bl = true then some bl else brkR) = some b
-        rw [hc]
-        exact hb
-  rcases hL with hWL | ⟨bl, hbl, hVl⟩
-  · rcases hR with hWR | hBR
-    · exact .inl (mergeWitnessMaps_valid verifySingle roster msg bmL bmR wL wR hWL hWR)
-    · exact .inr (hOfRight hBR)
-  · refine .inr ⟨bl, ?_, hVl⟩
-    rw [hbl]
-    show (if validBreakCheck H bl = true then some bl else brkR) = some bl
-    rw [(validBreakCheck_iff H bl).mpr hVl]
-    rfl
-
-/-- One execution of the aggregate soundness experiment: the statement and proof output by the
-    prover and the extractor's view of that prover (its oracle queries and committed data). -/
-structure AggregateRun (PK Proof View : Type) (w : Nat) where
-  stmt : AggregateStatement PK w
-  proof : Proof
-  view : View
-
-/-- **Knowledge-soundness contract** of the aggregate verifier `verifyAgg` against the prover
-    whose executions over the coin space `Fin n` are `run`.
-
-    `extract` and `findBreak` are functions of the extractor's view alone. On every coin on
-    which `verifyAgg` accepts and the soundness-error event `bad` does not occur, the outcome
-    is a valid extracted witness or a validated collision of `H`; `bad` has probability at most
-    `εSound`. -/
-structure AggregateExtractorSound {PK Sig Proof View : Type} {w n : Nat}
-    (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes)
-    (verifyAgg : AggregateStatement PK w → Proof → Bool)
-    (run : Fin n → AggregateRun PK Proof View w) where
-  samplePos : 0 < n
-  extract : View → Fin w → Option Sig
-  findBreak : View → Option AggregateBreak
-  bad : Fin n → Bool
-  εSound : RatBound
-  accepted_outcome : ∀ ω : Fin n,
-    verifyAgg (run ω).stmt (run ω).proof = true → bad ω = false →
-    AggregateSoundnessOutcome verifySingle H (run ω).stmt (extract (run ω).view)
-      (findBreak (run ω).view)
-  bad_bound : GameBound (FinGame.mk samplePos bad).winProb εSound
-
-/-- Any event contained in "the verifier accepts and the outcome fails" has probability at most
-    `εSound`. -/
-theorem AggregateExtractorSound.failure_bound {PK Sig Proof View : Type} {w n : Nat}
-    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes}
-    {verifyAgg : AggregateStatement PK w → Proof → Bool}
-    {run : Fin n → AggregateRun PK Proof View w}
-    (C : AggregateExtractorSound verifySingle H verifyAgg run)
-    (fail : Fin n → Bool)
-    (hFail : ∀ ω : Fin n, fail ω = true →
-      verifyAgg (run ω).stmt (run ω).proof = true ∧
-      ¬ AggregateSoundnessOutcome verifySingle H (run ω).stmt (C.extract (run ω).view)
-        (C.findBreak (run ω).view)) :
-    GameBound (FinGame.mk C.samplePos fail).winProb C.εSound := by
-  refine GameBound.trans
-    (event_le_reduction_win (FinGame.mk C.samplePos fail) (FinGame.mk C.samplePos C.bad) ?_)
-    C.bad_bound
-  intro ω hF
-  obtain ⟨hAcc, hNot⟩ := hFail ω hF
-  cases hb : C.bad ω with
-  | true => exact hb
-  | false => exact absurd (C.accepted_outcome ω hAcc hb) hNot
-
-/-- With an injective commitment hash, every accepted aggregate outside the soundness-error
-    event has a valid extracted witness. -/
-theorem AggregateExtractorSound.accepted_extracts_of_injective
-    {PK Sig Proof View : Type} {w n : Nat}
-    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes}
-    {verifyAgg : AggregateStatement PK w → Proof → Bool}
-    {run : Fin n → AggregateRun PK Proof View w}
-    (C : AggregateExtractorSound verifySingle H verifyAgg run)
-    (hInj : ∀ a b : Bytes, H a = H b → a = b) (ω : Fin n)
-    (hAcc : verifyAgg (run ω).stmt (run ω).proof = true) (hGood : C.bad ω = false) :
-    ValidAggregateWitness verifySingle (run ω).stmt (C.extract (run ω).view) :=
-  (C.accepted_outcome ω hAcc hGood).witness_of_injective hInj
-
-/-- **Accepted aggregate, per signer.** On a coin where the verifier accepts outside the
-    soundness-error event, for every active signer `i` and every participation predicate:
-    the break finder returned a validated collision of `H`, or some signature verifies under
-    signer `i`'s key although `i` did not participate (a forgery against `i`), or `i`
-    participated. -/
-theorem AggregateExtractorSound.accepted_signer_trichotomy
-    {PK Sig Proof View : Type} {w n : Nat}
-    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes}
-    {verifyAgg : AggregateStatement PK w → Proof → Bool}
-    {run : Fin n → AggregateRun PK Proof View w}
-    (C : AggregateExtractorSound verifySingle H verifyAgg run)
-    (participated : Fin w → Bool) (ω : Fin n)
-    (hAcc : verifyAgg (run ω).stmt (run ω).proof = true) (hGood : C.bad ω = false)
-    (i : Fin w) (hActive : (run ω).stmt.bitmap.getLsbD i.val = true) :
-    (∃ b : AggregateBreak, C.findBreak (run ω).view = some b ∧ ValidBreak H b) ∨
-    (∃ sig : Sig, verifySingle ((run ω).stmt.roster i) (run ω).stmt.message sig = true ∧
-      participated i = false) ∨
+/-- **Accepted aggregate, per signer.** Under the outcome, for every active signer `i` and
+    every participation predicate: the transcript contains a collision of `H`, or the extracted
+    witness map of this run holds a signature that verifies under signer `i`'s key although `i`
+    did not participate, or `i` participated. The second branch names the signature the
+    extractor produced from the run; the mere existence of a verifying signature is not in it. -/
+theorem AggregateSoundnessOutcome.signer_trichotomy {PK Sig : Type} {w : Nat}
+    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes} {log : List (Bytes × Bytes)}
+    {stmt : AggregateStatement PK w} {extracted : Fin w → Option Sig}
+    (h : AggregateSoundnessOutcome verifySingle H log stmt extracted)
+    (participated : Fin w → Bool) (i : Fin w) (hActive : stmt.bitmap.getLsbD i.val = true) :
+    (∃ b : AggregateBreak, TranscriptBreak H log b) ∨
+    (∃ sig : Sig, extracted i = some sig ∧
+      verifySingle (stmt.roster i) stmt.message sig = true ∧ participated i = false) ∨
     participated i = true := by
-  rcases C.accepted_outcome ω hAcc hGood with hW | hB
+  rcases h with hW | hB
   · have hi := hW i hActive
-    cases hs : C.extract (run ω).view i with
+    cases hs : extracted i with
     | none => rw [hs] at hi; exact False.elim hi
     | some sig =>
       rw [hs] at hi
       cases hp : participated i with
-      | false => exact .inr (.inl ⟨sig, hi, rfl⟩)
+      | false => exact .inr (.inl ⟨sig, rfl, hi, rfl⟩)
       | true => exact .inr (.inr rfl)
   · exact .inl hB
+
+/-- The second branch is about the extracted map: when the extractor returns nothing for a
+    non-participating active signer and the transcript has no collision, the outcome fails,
+    even if every signature verifies under every key. -/
+theorem aggregateOutcome_rejects_unextracted_signer :
+    ¬ AggregateSoundnessOutcome (PK := Unit) (Sig := Unit) (fun _ _ _ => true) (fun m => m)
+        [] ⟨fun _ => (), 1#1, []⟩ (fun _ => none) := by
+  rintro (hW | ⟨b, hb⟩)
+  · exact hW ⟨0, Nat.one_pos⟩ (by decide)
+  · exact nomatch hb.1
+
+/-- Soundness outcomes compose along a merge: outcomes for the two children give the outcome
+    for the bitwise-OR bitmap with the merged witness map over the concatenated transcript. -/
+theorem mergeSoundnessOutcome {PK Sig : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes)
+    (roster : Fin w → PK) (msg : Bytes) (bmL bmR : BitVec w)
+    (wL wR : Fin w → Option Sig) (logL logR : List (Bytes × Bytes))
+    (hL : AggregateSoundnessOutcome verifySingle H logL ⟨roster, bmL, msg⟩ wL)
+    (hR : AggregateSoundnessOutcome verifySingle H logR ⟨roster, bmR, msg⟩ wR) :
+    AggregateSoundnessOutcome verifySingle H (logL ++ logR) ⟨roster, bmL ||| bmR, msg⟩
+      (mergeWitnessMaps bmL wL wR) := by
+  rcases hL with hWL | ⟨b, hb⟩
+  · rcases hR with hWR | ⟨b, hb⟩
+    · exact .inl (mergeWitnessMaps_valid verifySingle roster msg bmL bmR wL wR hWL hWR)
+    · exact .inr ⟨b, hb.append_right logL⟩
+  · exact .inr ⟨b, hb.append_left logR⟩
 
 /-- Executable check of `ValidAggregateWitness`. -/
 def aggregateWitnessCheck {PK Sig : Type} {w : Nat}
@@ -312,51 +305,413 @@ theorem aggregateWitnessCheck_sound {PK Sig : Type} {w : Nat}
   | none => rw [hs] at hi; cases hi
   | some sig => rw [hs] at hi; exact hi
 
-/-- The contract is satisfiable: the aggregate whose proof is the signature map itself, checked
-    signature by signature, is knowledge sound with the identity extractor and an empty
-    soundness-error event. -/
-def transparentAggregate_extractorSound {PK Sig : Type} {w n : Nat} (hPos : 0 < n)
-    (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes)
-    (run : Fin n → AggregateRun PK (Fin w → Option Sig) (Fin w → Option Sig) w)
-    (hView : ∀ ω : Fin n, (run ω).view = (run ω).proof) :
-    AggregateExtractorSound verifySingle H (aggregateWitnessCheck verifySingle) run where
-  samplePos := hPos
-  extract := fun view => view
-  findBreak := fun _ => none
-  bad := fun _ => false
-  εSound := (FinGame.mk hPos (fun _ => false)).winProb
-  accepted_outcome := fun ω hAcc _ => .inl (by
-    rw [hView ω]
-    exact aggregateWitnessCheck_sound verifySingle (run ω).stmt (run ω).proof hAcc)
-  bad_bound := GameBound.refl _
+/-- The challenger's recording oracle: the first `q` queries are answered by `H` and logged
+    with their answers; later queries are answered `[]` and not logged. -/
+def recordingOracle (H : Bytes → Bytes) (q : Nat) (log : List (Bytes × Bytes)) :
+    (x : byteOracleIface.Query) → byteOracleIface.Resp x × List (Bytes × Bytes) :=
+  fun (x : Bytes) => if log.length < q then (H x, log ++ [(x, H x)]) else ([], log)
 
-/-- A returned pair that is not a collision does not discharge the outcome: with a verifier
-    that rejects every individual signature, an active signer and the identity hash, the pair
-    `([0], [1])` leaves the outcome false. -/
-theorem aggregateOutcome_rejects_unvalidated_break :
-    ¬ AggregateSoundnessOutcome (PK := Unit) (Sig := Unit) (fun _ _ _ => false) (fun m => m)
-        ⟨fun _ => (), 1#1, []⟩ (fun _ => some ()) (some ⟨[0], [1]⟩) := by
-  rintro (hW | ⟨b, hb, hV⟩)
+/-- One run of a prover against the recording oracle: its output and the transcript. -/
+def aggregateRun {PK Proof : Type} {w : Nat} (H : Bytes → Bytes) (q : Nat)
+    (prover : Code byteOracleIface (AggregateStatement PK w × Proof)) :
+    (AggregateStatement PK w × Proof) × List (Bytes × Bytes) :=
+  Code.play (recordingOracle H q) prover []
+
+/-- Every transcript entry is a query with the answer of `H`, and at most `q` are recorded. -/
+theorem aggregateRun_log {PK Proof : Type} {w : Nat} (H : Bytes → Bytes) (q : Nat)
+    (prover : Code byteOracleIface (AggregateStatement PK w × Proof)) :
+    (∀ e ∈ (aggregateRun H q prover).2, e.2 = H e.1) ∧ (aggregateRun H q prover).2.length ≤ q :=
+  Code.play_invariant (recordingOracle H q)
+    (fun log => (∀ e ∈ log, e.2 = H e.1) ∧ log.length ≤ q)
+    (fun log (x : Bytes) h => by
+      if hc : log.length < q then
+        have hEq : recordingOracle H q log x = (H x, log ++ [(x, H x)]) := aggItePos hc _ _
+        rw [hEq]
+        refine ⟨fun e he => ?_, ?_⟩
+        · rcases List.mem_append.mp he with hOld | hNew
+          · exact h.1 e hOld
+          · rcases List.mem_cons.mp hNew with hHead | hNil
+            · rw [hHead]
+            · exact nomatch hNil
+        · show (log ++ [(x, H x)]).length ≤ q
+          rw [List.length_append]
+          exact hc
+      else
+        have hEq : recordingOracle H q log x = ([], log) := aggIteNeg hc _ _
+        rw [hEq]
+        exact h)
+    prover []
+    (show (∀ e ∈ ([] : List (Bytes × Bytes)), e.2 = H e.1) ∧
+        ([] : List (Bytes × Bytes)).length ≤ q from
+      ⟨fun _ h => (nomatch h), Nat.zero_le q⟩)
+
+/-- The prover's winning condition on one run: the verifier accepts, the extracted witness map
+    is not valid, and the transcript contains no collision. -/
+def aggregateFailure {PK Sig Proof : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (H : Bytes → Bytes) (r : (AggregateStatement PK w × Proof) × List (Bytes × Bytes)) : Bool :=
+  verifyAgg H r.1.1 r.1.2 &&
+    (!aggregateWitnessCheck verifySingle r.1.1 (extract r.2 r.1.1 r.1.2) && !transcriptCollision r.2)
+
+/-- **Knowledge-soundness game.** On coin `ω` the oracle is `oracle ω`, the prover `prover ω`
+    runs against the recording oracle with budget `q`, and the prover wins when
+    `aggregateFailure` holds of the run. -/
+def aggregateSoundnessGame {PK Sig Proof : Type} {w n : Nat} (hPos : 0 < n)
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (q : Nat) (oracle : Fin n → Bytes → Bytes)
+    (prover : Fin n → Code byteOracleIface (AggregateStatement PK w × Proof)) : FinGame n :=
+  ⟨hPos, fun ω => aggregateFailure verifySingle verifyAgg extract (oracle ω)
+    (aggregateRun (oracle ω) q (prover ω))⟩
+
+/-- On a run the prover does not win and the verifier accepts, the outcome holds: the
+    extracted witness map is valid or the transcript contains a collision of the oracle. -/
+theorem aggregateFailure_false_outcome {PK Sig Proof : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (H : Bytes → Bytes) (q : Nat)
+    (prover : Code byteOracleIface (AggregateStatement PK w × Proof))
+    (hLose : aggregateFailure verifySingle verifyAgg extract H (aggregateRun H q prover) = false)
+    (hAcc : verifyAgg H (aggregateRun H q prover).1.1 (aggregateRun H q prover).1.2 = true) :
+    AggregateSoundnessOutcome verifySingle H (aggregateRun H q prover).2
+      (aggregateRun H q prover).1.1
+      (extract (aggregateRun H q prover).2 (aggregateRun H q prover).1.1
+        (aggregateRun H q prover).1.2) := by
+  have hF := hLose
+  unfold aggregateFailure at hF
+  rw [hAcc, Bool.true_and] at hF
+  cases hW : aggregateWitnessCheck verifySingle (aggregateRun H q prover).1.1
+      (extract (aggregateRun H q prover).2 (aggregateRun H q prover).1.1
+        (aggregateRun H q prover).1.2) with
+  | true => exact .inl (aggregateWitnessCheck_sound verifySingle _ _ hW)
+  | false =>
+    rw [hW] at hF
+    cases hC : transcriptCollision (aggregateRun H q prover).2 with
+    | true => exact .inr (transcriptCollision_sound H _ (aggregateRun_log H q prover).1 hC)
+    | false =>
+      rw [hC] at hF
+      cases hF
+
+/-- A run on which the verifier accepts and the outcome fails is a win of the prover. -/
+theorem aggregateFailure_of_no_outcome {PK Sig Proof : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (H : Bytes → Bytes) (q : Nat)
+    (prover : Code byteOracleIface (AggregateStatement PK w × Proof))
+    (hAcc : verifyAgg H (aggregateRun H q prover).1.1 (aggregateRun H q prover).1.2 = true)
+    (hNot : ¬ AggregateSoundnessOutcome verifySingle H (aggregateRun H q prover).2
+      (aggregateRun H q prover).1.1
+      (extract (aggregateRun H q prover).2 (aggregateRun H q prover).1.1
+        (aggregateRun H q prover).1.2)) :
+    aggregateFailure verifySingle verifyAgg extract H (aggregateRun H q prover) = true := by
+  cases hG : aggregateFailure verifySingle verifyAgg extract H (aggregateRun H q prover) with
+  | true => rfl
+  | false =>
+    exact absurd (aggregateFailure_false_outcome verifySingle verifyAgg extract H q prover hG hAcc)
+      hNot
+
+/-- **Straight-line extractors.** Every signature the extractor returns is carried by the proof
+    (`proofSigs proof`) or is the decoding, by the fixed decoder `decode`, of a recorded query or
+    answer. Such an extractor cannot return a signature it found by searching `Sig` with
+    `verifySingle`: the decoder sees one byte string and neither the statement nor the keys. -/
+def StraightLineExtractor {PK Sig Proof : Type} {w : Nat}
+    (decode : Bytes → Option Sig) (proofSigs : Proof → List Sig)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) :
+    Prop :=
+  ∀ (log : List (Bytes × Bytes)) (stmt : AggregateStatement PK w) (proof : Proof) (i : Fin w)
+    (sig : Sig), extract log stmt proof i = some sig →
+    sig ∈ proofSigs proof ∨ ∃ e ∈ log, decode e.1 = some sig ∨ decode e.2 = some sig
+
+/-- **Knowledge-soundness contract** of the aggregate verifier `verifyAgg` with extractor
+    `extract` of the class `ℰ`, for the oracle family `oracle` sampled by the challenger, prover
+    query budget `q` and error `ε`: the extractor belongs to `ℰ`, and every prover, reading only
+    its own coin and the oracle's answers, makes the verifier accept without a valid extracted
+    witness and without a transcript collision with probability at most `ε`.
+
+    The class `ℰ` is where a restriction on extractors lives. With the unrestricted class the
+    contract does not express soundness on satisfiable statements
+    (`acceptAll_alwaysValid_unrestricted_extractorSound`); `StraightLineExtractor` is a class
+    for which it does (`acceptAll_not_straightLine_extractorSound`).
+
+    The oracle family is an index. A family the prover can predict (a constant one) gives a
+    contract only verifiers that need no oracle satisfy with small `ε`; the intended instance
+    is a family in which the answers at different queries are independent. No instance for the
+    deployed verifier is constructed in this library. -/
+@[expose] def AggregateExtractorSound {PK Sig Proof : Type} {w nC : Nat}
+    (ℰ : (List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) → Prop)
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (oracle : Fin nC → Bytes → Bytes) (q : Nat) (ε : RatBound) : Prop :=
+  ℰ extract ∧
+  ∀ (n nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA)
+    (prover : Fin nA → Code byteOracleIface (AggregateStatement PK w × Proof)),
+    GameBound (aggregateSoundnessGame hPos verifySingle verifyAgg extract q
+      (fun ω => oracle (π.chal ω)) (fun ω => prover (π.advc ω))).winProb ε
+
+section Contract
+variable {PK Sig Proof : Type} {w nC : Nat}
+  {ℰ : (List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) → Prop}
+  {verifySingle : PK → Bytes → Sig → Bool}
+  {verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool}
+  {extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig}
+  {oracle : Fin nC → Bytes → Bytes} {q : Nat} {ε : RatBound}
+
+/-- **Explicit bound.** For every prover, any event contained in "the verifier accepts, the
+    extracted witness map is not valid and the transcript has no collision of the oracle" has
+    probability at most `ε`. -/
+theorem AggregateExtractorSound.failure_bound
+    (C : AggregateExtractorSound ℰ verifySingle verifyAgg extract oracle q ε)
+    {n nA : Nat} (hPos : 0 < n) (π : CoinSplit n nC nA)
+    (prover : Fin nA → Code byteOracleIface (AggregateStatement PK w × Proof))
+    (fail : Fin n → Bool)
+    (hFail : ∀ ω : Fin n, fail ω = true →
+      verifyAgg (oracle (π.chal ω))
+        (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+        (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 = true ∧
+      ¬ AggregateSoundnessOutcome verifySingle (oracle (π.chal ω))
+        (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2
+        (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+        (extract (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2
+          (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+          (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2)) :
+    GameBound (FinGame.mk hPos fail).winProb ε :=
+  GameBound.trans
+    (event_le_reduction_win (FinGame.mk hPos fail)
+      (aggregateSoundnessGame hPos verifySingle verifyAgg extract q
+        (fun ω => oracle (π.chal ω)) (fun ω => prover (π.advc ω)))
+      (fun ω hF => aggregateFailure_of_no_outcome verifySingle verifyAgg extract
+        (oracle (π.chal ω)) q (prover (π.advc ω)) (hFail ω hF).1 (hFail ω hF).2))
+    (C.2 n nA hPos π prover)
+
+/-- The contract weakens along the bound. -/
+theorem AggregateExtractorSound.mono {ε' : RatBound}
+    (C : AggregateExtractorSound ℰ verifySingle verifyAgg extract oracle q ε) (hLe : ε.le ε') :
+    AggregateExtractorSound ℰ verifySingle verifyAgg extract oracle q ε' :=
+  ⟨C.1, fun n nA hPos π prover => GameBound.trans (C.2 n nA hPos π prover) hLe⟩
+
+end Contract
+
+/-- With `ε = 1` the contract holds for every verifier, every extractor of the class and every
+    oracle family: it carries no information. -/
+theorem aggregateExtractorSound_one {PK Sig Proof : Type} {w nC : Nat}
+    (ℰ : (List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) → Prop)
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (hℰ : ℰ extract) (oracle : Fin nC → Bytes → Bytes) (q : Nat) :
+    AggregateExtractorSound ℰ verifySingle verifyAgg extract oracle q RatBound.one :=
+  ⟨hℰ, fun _ _ _ _ _ => FinGame.winProb_le_one _⟩
+
+/-- **Transparent control.** The aggregate whose proof is the signature map itself, checked
+    signature by signature, is knowledge sound with error `0` and a straight-line extractor:
+    the extractor reads the witness off the proof. It is not succinct and uses no oracle; it
+    shows that the contract is satisfiable with a small bound by a verifier that does check. -/
+theorem transparentAggregate_extractorSound {PK Sig : Type} {w nC : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool) (oracle : Fin nC → Bytes → Bytes) (q : Nat) :
+    AggregateExtractorSound
+      (StraightLineExtractor (fun _ => none)
+        (fun proof : Fin w → Option Sig => (List.finRange w).filterMap proof))
+      verifySingle
+      (fun _ stmt (proof : Fin w → Option Sig) => aggregateWitnessCheck verifySingle stmt proof)
+      (fun _ _ proof => proof) oracle q RatBound.zero := by
+  refine ⟨fun _ _ proof i sig hs =>
+    .inl (List.mem_filterMap.mpr ⟨i, List.mem_finRange i, hs⟩), ?_⟩
+  intro n nA hPos π prover
+  refine FinGame.bound_zero_of_forall_lose _ (fun ω => ?_)
+  show (aggregateWitnessCheck verifySingle
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 &&
+    (!aggregateWitnessCheck verifySingle
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 &&
+      !transcriptCollision (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2)) = false
+  cases aggregateWitnessCheck verifySingle
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 <;> rfl
+
+/-- **The unrestricted extractor class does not express soundness.** When every signature
+    verifies under every key, the accept-all verifier satisfies the contract with error `0`
+    for the unrestricted class: the extractor that returns a signature for every validator,
+    looking at nothing, is always right. A contract stated for `fun _ => True` says nothing
+    about a verifier on statements that have a witness. -/
+theorem acceptAll_alwaysValid_unrestricted_extractorSound {PK Proof : Type} {w nC : Nat}
+    (oracle : Fin nC → Bytes → Bytes) (q : Nat) :
+    AggregateExtractorSound (PK := PK) (Sig := Unit) (Proof := Proof) (w := w) (fun _ => True)
+      (fun _ _ _ => true) (fun _ _ _ => true) (fun _ _ _ _ => some ()) oracle q
+      RatBound.zero := by
+  refine ⟨trivial, ?_⟩
+  intro n nA hPos π prover
+  refine FinGame.bound_zero_of_forall_lose _ (fun ω => ?_)
+  have hCheck : aggregateWitnessCheck (PK := PK) (Sig := Unit) (fun _ _ _ => true)
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1 (fun _ => some ()) = true :=
+    List.all_eq_true.mpr (fun _ _ => Bool.or_true _)
+  show (true && (!aggregateWitnessCheck (PK := PK) (Sig := Unit) (fun _ _ _ => true)
+      (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1 (fun _ => some ()) &&
+    !transcriptCollision (aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2)) = false
+  rw [hCheck]
+  rfl
+
+/-! ## Rejected instances -/
+
+/-- **The accept-all verifier is not knowledge sound on an unsatisfiable statement.** For every
+    extractor of any class, every oracle
+    family (injective or not, predictable or not) and every query budget: if some statement has
+    no valid witness, the verifier that accepts everything satisfies the contract for no
+    `ε < 1`. The prover outputs that statement and asks nothing, so no transcript collision can
+    excuse the extractor. -/
+theorem acceptAll_not_extractorSound {PK Sig Proof : Type} {w nC : Nat} (hPos : 0 < nC)
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (oracle : Fin nC → Bytes → Bytes) (q : Nat)
+    (stmt : AggregateStatement PK w) (proof : Proof)
+    (hUnsat : ∀ sigs : Fin w → Option Sig, aggregateWitnessCheck verifySingle stmt sigs = false)
+    (ℰ : (List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) → Prop)
+    {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ AggregateExtractorSound ℰ verifySingle (fun _ _ _ => true) extract oracle q ε := by
+  intro h
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε
+    (h.2 nC 1 hPos (CoinSplit.challengerOnly nC) (fun _ => .ret (stmt, proof)))
+  have hRun : aggregateRun (oracle ((CoinSplit.challengerOnly nC).chal ω)) q
+      (Code.ret (stmt, proof) : Code byteOracleIface (AggregateStatement PK w × Proof)) =
+      ((stmt, proof), []) := Code.play_ret _ _ _
+  show aggregateFailure verifySingle (fun _ _ _ => true) extract
+    (oracle ((CoinSplit.challengerOnly nC).chal ω))
+    (aggregateRun (oracle ((CoinSplit.challengerOnly nC).chal ω)) q (Code.ret (stmt, proof))) = true
+  rw [hRun]
+  show (true && (!aggregateWitnessCheck verifySingle stmt (extract [] stmt proof) &&
+    !transcriptCollision [])) = true
+  rw [hUnsat]
+  rfl
+
+/-- A statement naming one signer under a single-signature verifier that rejects everything
+    has no valid witness. -/
+theorem rejectAll_statement_unsatisfiable (sigs : Fin 1 → Option Unit) :
+    aggregateWitnessCheck (PK := Unit) (fun _ _ _ => false) ⟨fun _ => (), 1#1, []⟩ sigs = false := by
+  cases hc : aggregateWitnessCheck (PK := Unit) (Sig := Unit) (fun _ _ _ => false)
+      ⟨fun _ => (), 1#1, []⟩ sigs with
+  | false => rfl
+  | true =>
+    have hi := aggregateWitnessCheck_sound _ _ _ hc ⟨0, Nat.one_pos⟩ (by decide)
+    cases hs : sigs ⟨0, Nat.one_pos⟩ with
+    | none => rw [hs] at hi; exact False.elim hi
+    | some sig => rw [hs] at hi; exact Bool.noConfusion hi
+
+/-- The first audit's instance: one signer, no valid signature, a verifier that accepts. No
+    extractor, oracle family or bound `ε < 1` makes it knowledge sound. -/
+theorem acceptAll_unit_not_extractorSound {nC : Nat} (hPos : 0 < nC)
+    (extract : List (Bytes × Bytes) → AggregateStatement Unit 1 → Unit → Fin 1 → Option Unit)
+    (oracle : Fin nC → Bytes → Bytes) (q : Nat)
+    (ℰ : (List (Bytes × Bytes) → AggregateStatement Unit 1 → Unit → Fin 1 → Option Unit) → Prop)
+    {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ AggregateExtractorSound ℰ (fun _ _ _ => false) (fun _ _ _ => true) extract oracle q ε :=
+  acceptAll_not_extractorSound hPos _ extract oracle q ⟨fun _ => (), 1#1, []⟩ ()
+    rejectAll_statement_unsatisfiable ℰ hε
+
+/-- **The accept-all verifier is not knowledge sound for straight-line extractors**, whether or
+    not the statement has a valid witness. For every single-signature verifier, decoder,
+    extractor, oracle family and budget: given a statement with an active signer and a proof
+    carrying no signature, the prover outputs them and asks nothing; a straight-line extractor
+    then has nothing to return, so the contract holds for no `ε < 1`. -/
+theorem acceptAll_not_straightLine_extractorSound {PK Sig Proof : Type} {w nC : Nat}
+    (hPos : 0 < nC) (verifySingle : PK → Bytes → Sig → Bool)
+    (decode : Bytes → Option Sig) (proofSigs : Proof → List Sig)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (oracle : Fin nC → Bytes → Bytes) (q : Nat)
+    (stmt : AggregateStatement PK w) (proof : Proof) (i : Fin w)
+    (hActive : stmt.bitmap.getLsbD i.val = true) (hEmpty : proofSigs proof = [])
+    {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ AggregateExtractorSound (StraightLineExtractor decode proofSigs) verifySingle
+        (fun _ _ _ => true) extract oracle q ε := by
+  intro h
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε
+    (h.2 nC 1 hPos (CoinSplit.challengerOnly nC) (fun _ => .ret (stmt, proof)))
+  have hRun : aggregateRun (oracle ((CoinSplit.challengerOnly nC).chal ω)) q
+      (Code.ret (stmt, proof) : Code byteOracleIface (AggregateStatement PK w × Proof)) =
+      ((stmt, proof), []) := Code.play_ret _ _ _
+  have hCheck : aggregateWitnessCheck verifySingle stmt (extract [] stmt proof) = false := by
+    cases hc : aggregateWitnessCheck verifySingle stmt (extract [] stmt proof) with
+    | false => rfl
+    | true =>
+      have hi := aggregateWitnessCheck_sound verifySingle _ _ hc i hActive
+      cases hs : extract [] stmt proof i with
+      | none => rw [hs] at hi; exact False.elim hi
+      | some sig =>
+        rcases h.1 [] stmt proof i sig hs with hIn | ⟨e, he, _⟩
+        · rw [hEmpty] at hIn
+          exact nomatch hIn
+        · exact nomatch he
+  show aggregateFailure verifySingle (fun _ _ _ => true) extract
+    (oracle ((CoinSplit.challengerOnly nC).chal ω))
+    (aggregateRun (oracle ((CoinSplit.challengerOnly nC).chal ω)) q (Code.ret (stmt, proof))) = true
+  rw [hRun]
+  show (true && (!aggregateWitnessCheck verifySingle stmt (extract [] stmt proof) &&
+    !transcriptCollision [])) = true
+  rw [hCheck]
+  rfl
+
+/-- The referee's instance: every signature verifies and the verifier accepts everything. For
+    a straight-line extractor over proofs that carry no signature, no oracle family and no
+    `ε < 1` make it knowledge sound. -/
+theorem acceptAll_alwaysValid_not_straightLine_extractorSound {nC : Nat} (hPos : 0 < nC)
+    (decode : Bytes → Option Unit)
+    (extract : List (Bytes × Bytes) → AggregateStatement Unit 1 → Unit → Fin 1 → Option Unit)
+    (oracle : Fin nC → Bytes → Bytes) (q : Nat) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ AggregateExtractorSound (StraightLineExtractor decode (fun _ : Unit => []))
+        (fun _ _ _ => true) (fun _ _ _ => true) extract oracle q ε :=
+  acceptAll_not_straightLine_extractorSound hPos _ decode _ extract oracle q
+    ⟨fun _ => (), 1#1, []⟩ () ⟨0, Nat.one_pos⟩ (by decide) rfl hε
+
+/-- A collision of `H` outside the transcript is not a break of the experiment: with the
+    constant hash and an empty transcript, the colliding pair `([0], [1])` does not discharge
+    the outcome. -/
+theorem aggregateOutcome_rejects_unqueried_collision :
+    ¬ AggregateSoundnessOutcome (PK := Unit) (Sig := Unit) (fun _ _ _ => false) (fun _ => [])
+        [] ⟨fun _ => (), 1#1, []⟩ (fun _ => some ()) := by
+  rintro (hW | ⟨b, hb⟩)
   · have h := hW ⟨0, Nat.one_pos⟩ (by decide)
     exact Bool.noConfusion h
-  · cases hb
-    exact absurd hV.2 (by decide)
+  · exact nomatch hb.1
 
-#tooth_pair AggregateExtractorSound.failure_bound vs aggregateOutcome_rejects_unvalidated_break
-#tooth_pair mergeSoundnessOutcome vs aggregateOutcome_rejects_unvalidated_break
+#tooth_pair AggregateExtractorSound.failure_bound vs acceptAll_not_extractorSound
+#tooth_pair aggregateExtractorSound_one vs acceptAll_unit_not_extractorSound
+#tooth_pair transparentAggregate_extractorSound vs acceptAll_unit_not_extractorSound
+#tooth_pair mergeSoundnessOutcome vs aggregateOutcome_rejects_unqueried_collision
+#tooth_pair acceptAll_alwaysValid_unrestricted_extractorSound vs acceptAll_alwaysValid_not_straightLine_extractorSound
+#tooth_pair transparentAggregate_extractorSound vs acceptAll_not_straightLine_extractorSound
+#tooth_pair AggregateSoundnessOutcome.signer_trichotomy vs aggregateOutcome_rejects_unextracted_signer
 
-#verify_constructive
-  Qsag.Spec.mergeWitnessMaps_valid
-  Qsag.Spec.HashCollision.validBreak
-  Qsag.Spec.validBreakCheck_iff
-  Qsag.Spec.not_validBreak_of_injective
-  Qsag.Spec.AggregateSoundnessOutcome.witness_of_injective
-  Qsag.Spec.mergeSoundnessOutcome
-  Qsag.Spec.AggregateExtractorSound.failure_bound
-  Qsag.Spec.AggregateExtractorSound.accepted_extracts_of_injective
-  Qsag.Spec.AggregateExtractorSound.accepted_signer_trichotomy
-  Qsag.Spec.aggregateWitnessCheck_sound
-  Qsag.Spec.aggregateOutcome_rejects_unvalidated_break
+#verify_constructive Qsag.Spec.mergeWitnessMaps_valid
+#verify_constructive Qsag.Spec.HashCollision.validBreak
+#verify_constructive Qsag.Spec.not_validBreak_of_injective
+#verify_constructive Qsag.Spec.TranscriptBreak.append_left
+#verify_constructive Qsag.Spec.TranscriptBreak.append_right
+#verify_constructive Qsag.Spec.transcriptCollision_sound
+#verify_constructive Qsag.Spec.transcriptCollision_complete
+#verify_constructive Qsag.Spec.AggregateSoundnessOutcome.witness_of_injective
+#verify_constructive Qsag.Spec.AggregateSoundnessOutcome.signer_trichotomy
+#verify_constructive Qsag.Spec.mergeSoundnessOutcome
+#verify_constructive Qsag.Spec.aggregateWitnessCheck_sound
+#verify_constructive Qsag.Spec.aggregateRun_log
+#verify_constructive Qsag.Spec.aggregateFailure_false_outcome
+#verify_constructive Qsag.Spec.aggregateFailure_of_no_outcome
+#verify_constructive Qsag.Spec.AggregateExtractorSound.failure_bound
+#verify_constructive Qsag.Spec.AggregateExtractorSound.mono
+#verify_constructive Qsag.Spec.aggregateExtractorSound_one
+#verify_constructive Qsag.Spec.transparentAggregate_extractorSound
+#verify_constructive Qsag.Spec.acceptAll_not_extractorSound
+#verify_constructive Qsag.Spec.rejectAll_statement_unsatisfiable
+#verify_constructive Qsag.Spec.acceptAll_unit_not_extractorSound
+#verify_constructive Qsag.Spec.aggregateOutcome_rejects_unqueried_collision
+#verify_constructive Qsag.Spec.aggregateOutcome_rejects_unextracted_signer
+#verify_constructive Qsag.Spec.acceptAll_alwaysValid_unrestricted_extractorSound
+#verify_constructive Qsag.Spec.acceptAll_not_straightLine_extractorSound
+#verify_constructive Qsag.Spec.acceptAll_alwaysValid_not_straightLine_extractorSound
 
 end Qsag.Spec
 end

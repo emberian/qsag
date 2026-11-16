@@ -88,7 +88,11 @@ fn default_regime_single_opening_bytes() {
     ));
     let mut bytes = comm.to_bytes().to_vec();
     proof.push_bytes(&mut bytes);
-    println!("KAT single nv=12 len={} digest={}", bytes.len(), digest(&bytes));
+    println!(
+        "KAT single nv=12 len={} digest={}",
+        bytes.len(),
+        digest(&bytes)
+    );
     assert_eq!(bytes.len(), SINGLE_NV12_LEN);
     assert_eq!(digest(&bytes), SINGLE_NV12_DIGEST);
 }
@@ -116,7 +120,11 @@ fn default_regime_batch_opening_bytes() {
     ));
     let mut bytes = comm.to_bytes().to_vec();
     proof.push_bytes(&mut bytes);
-    println!("KAT batch nv=16 len={} digest={}", bytes.len(), digest(&bytes));
+    println!(
+        "KAT batch nv=16 len={} digest={}",
+        bytes.len(),
+        digest(&bytes)
+    );
     assert_eq!(bytes.len(), BATCH_NV16_LEN);
     assert_eq!(digest(&bytes), BATCH_NV16_DIGEST);
 }
@@ -138,7 +146,11 @@ fn default_config_aggregate_bytes() {
     let proof = aggregate_signatures(&pks, &bitmap, &mode, &sigs, [11; 32]).unwrap();
     assert!(verify_aggregate(&pks, &mode, &proof));
     let bytes = proof.to_bytes();
-    println!("KAT aggregate K=4 len={} digest={}", bytes.len(), digest(&bytes));
+    println!(
+        "KAT aggregate K=4 len={} digest={}",
+        bytes.len(),
+        digest(&bytes)
+    );
     assert_eq!(bytes.len(), AGG_K4_LEN);
     assert_eq!(digest(&bytes), AGG_K4_DIGEST);
 }

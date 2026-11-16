@@ -428,6 +428,7 @@ def is_rust_non_crypto_helper(sym: str) -> bool:
         "rust_eh_personality",
         "__rust_",
         "drop_in_place",
+        "drop_glue",
     )
     return any(m in sym for m in non_crypto_markers)
 

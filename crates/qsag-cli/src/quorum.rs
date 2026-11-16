@@ -69,6 +69,8 @@ Run a dealerless 2-of-3 RSS key generation ceremony with zero central secret rec
   --public-out <path>           destination for the quorum public key JSON
   --tree-height <1..=30>         Merkle tree height (default: 3, capacity = 2^height signatures)
   --anchor-dir <dir>            enroll per-party external monotone anchors in <dir>
+  --ephemeral-unanchored        enroll a disposable quorum without rollback protection
+                                (one of the two is required)
   --allow-single-disk-anchor    permit --anchor-dir on the same filesystem device as --vault-dir
   --passphrase-env <VAR> / --passphrase-file <PATH>  seal each party secret share
   --policy-ledger-dir <dir>     enroll the quorum against this custody policy ledger: it will
@@ -150,7 +152,7 @@ pub(crate) fn ensure_absent(path: &str) -> Result<(), CliError> {
 }
 
 fn derive_party_secret(seed: &[u8; 32], party: usize, role: &[u8]) -> Secret32 {
-    Secret32(cshake256_framed_32(
+    Secret32::new(cshake256_framed_32(
         b"QSAG.CLI.QUORUM.PARTY_KDF.V1",
         &[seed, &(party as u64).to_be_bytes(), role],
     ))
@@ -335,6 +337,7 @@ fn reject_hem_unsupported_keygen_args(args: &Args) -> Result<(), CliError> {
     }
     for flag in [
         "allow-single-disk-anchor",
+        "ephemeral-unanchored",
         "policy-allow-single-disk-anchor",
     ] {
         if args.flag(flag) {
@@ -425,6 +428,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         ],
         &[
             "allow-single-disk-anchor",
+            "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
             "json",
             "help",
@@ -471,6 +475,11 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let params = JortsParams::with_height(height);
     let passphrase = crate::envelope::passphrase(&args)?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    crate::anchor::require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
 
     ensure_absent(public_out)?;
     private_dir(vault_dir, true)?;
@@ -494,9 +503,9 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
 
     let dkg_session_id = os_random_32()?;
     let party_seeds: [Secret32; 3] = [
-        Secret32(os_random_32()?),
-        Secret32(os_random_32()?),
-        Secret32(os_random_32()?),
+        Secret32::new(os_random_32()?),
+        Secret32::new(os_random_32()?),
+        Secret32::new(os_random_32()?),
     ];
     let mut dkg_rngs: [PartyPrivateRng; 3] = std::array::from_fn(|p| {
         PartyPrivateRng::from_seed(party_seeds[p].0, b"QSAG.CLI.QUORUM.DKG.RNG.V1")
@@ -619,7 +628,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         }
         vault.bind(&mut secret)?;
         vault.prepare(&mut secret)?;
-        let encoded = ZeroizingBuf(secret.to_pretty().into_bytes());
+        let encoded = ZeroizingBuf::new(secret.to_pretty().into_bytes());
         vault.seal(&mut secret)?;
         write_new(sk_path, &encoded.0, true)?;
     }
@@ -783,7 +792,8 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         {
             return Err(corrupt());
         }
-        let opened = crate::envelope::open(&secret_on_disk, passphrase.as_deref())?;
+        let opened =
+            crate::envelope::open(&secret_on_disk, passphrase.as_deref().map(Vec::as_slice))?;
         vault.set_key_material(&opened);
         vault.authenticate(&secret_on_disk)?;
         crate::policy_ledger::enforce_key_pin(&secret_on_disk, gate.as_ref())?;
@@ -952,9 +962,9 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         .map_err(|_| CliError::state("internal quorum journal count mismatch"))?;
 
     let party_seeds: [Secret32; 3] = [
-        Secret32(parties_vec[0].seed.0),
-        Secret32(parties_vec[1].seed.0),
-        Secret32(parties_vec[2].seed.0),
+        Secret32::new(parties_vec[0].seed.0),
+        Secret32::new(parties_vec[1].seed.0),
+        Secret32::new(parties_vec[2].seed.0),
     ];
     let (shares, derived_pk_seed) =
         reconstruct_dkg_shares(dkg_session_id, &party_seeds, &tree_digest)?;
@@ -979,9 +989,9 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
 
     let msg_digest = jorts_msg_digest(&pk, &message);
     let attempt_entropy = if deterministic {
-        Secret32([0u8; 32])
+        Secret32::new([0u8; 32])
     } else {
-        Secret32(os_random_32()?)
+        Secret32::new(os_random_32()?)
     };
     let online_session_id = cshake256_framed_32(
         b"QSAG.CLI.QUORUM.ONLINE_SID.V1",
@@ -996,9 +1006,9 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
     );
     // Drawn up front so an entropy failure stops the ceremony instead of thinning a hedge.
     let mut party_fresh = [
-        Secret32([0u8; 32]),
-        Secret32([0u8; 32]),
-        Secret32([0u8; 32]),
+        Secret32::new([0u8; 32]),
+        Secret32::new([0u8; 32]),
+        Secret32::new([0u8; 32]),
     ];
     if !deterministic {
         for fresh in &mut party_fresh {
@@ -1006,7 +1016,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         }
     }
     let online_rngs: [PartyPrivateRng; 3] = std::array::from_fn(|p| {
-        let hedge = Secret32(cshake256_framed_32(
+        let hedge = Secret32::new(cshake256_framed_32(
             b"QSAG.CLI.QUORUM.ONLINE_RNG.V1",
             &[
                 &party_seeds[p].0,
@@ -1136,7 +1146,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         ));
     }
 
-    let sig_bytes = ZeroizingBuf(encode_jorts_sig(&params, &sig));
+    let sig_bytes = ZeroizingBuf::new(encode_jorts_sig(&params, &sig));
     let mut sig_fields = vec![
         ("format", Json::str(SIG_FORMAT)),
         ("scheme", Json::str(SCHEME_NAME)),

@@ -44,6 +44,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};
+use qsag_asm::wipe::{secret_vec_extend_from_slice, secret_vec_push, secret_vec_reserve};
 use qsag_core::wipe::{SecretBuffer, SecretWipe};
 
 const Q64: u64 = MLDSA_Q as u64;
@@ -246,9 +247,7 @@ impl core::fmt::Debug for Sh {
 
 impl Drop for Sh {
     fn drop(&mut self) {
-        for comp in &mut self.c {
-            ct_zeroize_u32s(comp);
-        }
+        self.c.secret_wipe();
     }
 }
 
@@ -324,9 +323,9 @@ impl Sh {
         Self {
             c: (0..comps)
                 .map(|i| {
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(parts.iter().map(|part| part.len()).sum());
                     for part in parts {
-                        out.extend_from_slice(&part.c[i]);
+                        secret_vec_extend_from_slice(&mut out, &part.c[i]);
                     }
                     out
                 })
@@ -399,9 +398,7 @@ impl core::fmt::Debug for BinSh {
 
 impl Drop for BinSh {
     fn drop(&mut self) {
-        for comp in &mut self.c {
-            qsag_accel::ct::ct_zeroize_u64s(comp);
-        }
+        self.c.secret_wipe();
     }
 }
 
@@ -487,9 +484,9 @@ impl BinSh {
         Self {
             c: (0..comps)
                 .map(|i| {
-                    let mut out = Vec::new();
+                    let mut out = Vec::with_capacity(parts.iter().map(|part| part.len()).sum());
                     for part in parts {
-                        out.extend_from_slice(&part.c[i]);
+                        secret_vec_extend_from_slice(&mut out, &part.c[i]);
                     }
                     out
                 })
@@ -689,7 +686,7 @@ fn k_is_zero(a: &Kx) -> bool {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn pack(values: &[u32], out: &mut Vec<u8>) {
-    out.reserve(values.len() * 3);
+    secret_vec_reserve(out, values.len() * 3);
     for &v in values {
         out.extend_from_slice(&v.to_le_bytes()[..3]);
     }
@@ -711,7 +708,7 @@ pub(crate) fn unpack(bytes: &[u8], count: usize) -> Option<Vec<u32>> {
 }
 
 fn pack_u64(values: &[u64], out: &mut Vec<u8>) {
-    out.reserve(values.len() * 8);
+    secret_vec_reserve(out, values.len() * 8);
     for &v in values {
         out.extend_from_slice(&v.to_le_bytes());
     }
@@ -798,16 +795,56 @@ impl Prss {
 // Engine
 // ---------------------------------------------------------------------------
 
+/// Pending `F_q` multiplications: operands and products of every gate since the last
+/// check, one contiguous row per component, in gate order. The check draws its
+/// challenges only after every product is fixed, so no gate may be left out.
 struct Tuple {
     x: Sh,
     y: Sh,
     z: Sh,
 }
 
+/// Pending binary multiplications, as [`Tuple`].
 struct BinTuple {
     x: BinSh,
     y: BinSh,
     z: BinSh,
+}
+
+fn append_rows<T: Copy + SecretWipe>(rows: &mut [Vec<T>], gates: &[Vec<T>]) {
+    for (row, gates) in rows.iter_mut().zip(gates) {
+        secret_vec_extend_from_slice(row, gates);
+    }
+}
+
+impl Tuple {
+    fn empty(comps: usize) -> Self {
+        Self {
+            x: Sh::zeros(comps, 0),
+            y: Sh::zeros(comps, 0),
+            z: Sh::zeros(comps, 0),
+        }
+    }
+    fn append(&mut self, x: &Sh, y: &Sh, z: &Sh) {
+        append_rows(&mut self.x.c, &x.c);
+        append_rows(&mut self.y.c, &y.c);
+        append_rows(&mut self.z.c, &z.c);
+    }
+}
+
+impl BinTuple {
+    fn empty(comps: usize) -> Self {
+        Self {
+            x: BinSh::zeros(comps, 0),
+            y: BinSh::zeros(comps, 0),
+            z: BinSh::zeros(comps, 0),
+        }
+    }
+    fn append(&mut self, x: &BinSh, y: &BinSh, z: &BinSh) {
+        append_rows(&mut self.x.c, &x.c);
+        append_rows(&mut self.y.c, &y.c);
+        append_rows(&mut self.z.c, &z.c);
+    }
 }
 
 /// One party's state in a session.
@@ -880,14 +917,15 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                     .collect()
             })
             .collect();
+        let capacity = comps.len();
         let mut engine = Self {
             net,
             st,
             me,
             comps,
-            keys: Vec::new(),
-            streams: Vec::new(),
-            views: Vec::new(),
+            keys: Vec::with_capacity(capacity),
+            streams: Vec::with_capacity(capacity),
+            views: Vec::with_capacity(capacity),
             correction_subset,
             plan,
             log: Vec::new(),
@@ -906,26 +944,27 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
         }
         let result = (|| {
             let parties = self.st.parties;
-            let mine: Vec<[u8; 32]> = self
-                .comps
-                .iter()
-                .map(|&s| {
-                    cshake256_framed_32(
-                        b"QSAG.RSS.KEYSHARE.V1",
-                        &[
-                            entropy,
-                            context,
-                            &(s as u32).to_le_bytes(),
-                            &(self.me as u32).to_le_bytes(),
-                        ],
-                    )
-                })
-                .collect();
+            let mine: SecretBuffer<Vec<[u8; 32]>> = SecretBuffer(
+                self.comps
+                    .iter()
+                    .map(|&s| {
+                        cshake256_framed_32(
+                            b"QSAG.RSS.KEYSHARE.V1",
+                            &[
+                                entropy,
+                                context,
+                                &(s as u32).to_le_bytes(),
+                                &(self.me as u32).to_le_bytes(),
+                            ],
+                        )
+                    })
+                    .collect(),
+            );
             let mut private = vec![Vec::new(); parties];
             for (i, &s) in self.comps.iter().enumerate() {
                 for (j, out) in private.iter_mut().enumerate() {
                     if j != self.me && self.st.holds(s, j) {
-                        out.extend_from_slice(&mine[i]);
+                        secret_vec_extend_from_slice(out, &mine[i]);
                     }
                 }
             }
@@ -951,9 +990,9 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                     }
                 }
                 finalize_cshake256(&mut xof, true);
-                let mut key = [0u8; 32];
-                xof.squeeze(&mut key);
-                self.keys.push(key);
+                let mut key = SecretBuffer([0u8; 32]);
+                xof.squeeze(&mut key[..]);
+                self.keys.push(*key);
             }
             let mut broadcast = Vec::with_capacity(32 * self.comps.len());
             for key in &self.keys {
@@ -1322,11 +1361,10 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             let acc = test_support::apply_armed_binary_fault(self.phase, acc);
             let z = self.reshare_u64(acc, RoundKind::Multiply)?;
             self.stats.multiplications += (len * 64) as u64;
-            self.bin_log.push(BinTuple {
-                x: a.clone(),
-                y: b.clone(),
-                z: z.clone(),
-            });
+            if self.bin_log.is_empty() {
+                self.bin_log.push(BinTuple::empty(self.comps.len()));
+            }
+            self.bin_log[0].append(a, b, &z);
             Ok(z)
         })();
         if result.is_err() {
@@ -1576,7 +1614,7 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
         let result = (|| {
             assert_eq!(a.len(), b.len());
             let len = a.len();
-            let mut acc = vec![0u64; len];
+            let mut acc = SecretBuffer(vec![0u64; len]);
             for (i, others) in self.plan.iter().enumerate() {
                 if others.is_empty() {
                     continue;
@@ -1595,11 +1633,10 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             let value = test_support::apply_armed_fault(self.phase, value);
             let z = self.reshare(value, RoundKind::Multiply)?;
             self.stats.multiplications += len as u64;
-            self.log.push(Tuple {
-                x: a.clone(),
-                y: b.clone(),
-                z: z.clone(),
-            });
+            if self.log.is_empty() {
+                self.log.push(Tuple::empty(self.comps.len()));
+            }
+            self.log[0].append(a, b, &z);
             Ok(z)
         })();
         if result.is_err() {
@@ -1822,8 +1859,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             left.clear();
             right.clear();
             for k in (offset..x[i].len()).step_by(stride) {
-                left.push(x[i][k]);
-                right.push(others.iter().fold(0, |sum, &j| sum ^ y[j][k]));
+                left.push_wiping(x[i][k]);
+                right.push_wiping(others.iter().fold(0, |sum, &j| sum ^ y[j][k]));
             }
             acc ^= qsag_asm::bitslice::gf2_128_dot(&left, &right);
             left.secret_wipe();
@@ -1932,8 +1969,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                     .collect::<Vec<Vec<u128>>>(),
             );
             for i in 0..comps {
-                xe[i].push(gf128_mul(row[0], mask_a[i][0]));
-                ye[i].push(gf128_mul(row[0], mask_b[i][0]));
+                secret_vec_push(&mut xe[i], gf128_mul(row[0], mask_a[i][0]));
+                secret_vec_push(&mut ye[i], gf128_mul(row[0], mask_b[i][0]));
                 for idx in 0..p_group.len() {
                     let xb = x_bytes[i][idx];
                     let yb = y_bytes[i][idx];
@@ -1943,8 +1980,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                         x_acc ^= row_sh[d] & 0u128.wrapping_sub(((xb >> d) & 1) as u128);
                         y_acc ^= row[d] & 0u128.wrapping_sub(((yb >> d) & 1) as u128);
                     }
-                    xe[i].push(gf128_mul(p_group[idx], x_acc));
-                    ye[i].push(y_acc);
+                    secret_vec_push(&mut xe[i], gf128_mul(p_group[idx], x_acc));
+                    secret_vec_push(&mut ye[i], y_acc);
                 }
             }
             locals0.push(self.ip_local_gf128(&xe, &ye, 0, 1));
@@ -1984,8 +2021,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             }
             bz[i] = next_z;
 
-            bx[i].push(gf128_mul(basis0[0], mask_a[i][0]));
-            by[i].push(gf128_mul(basis0[0], mask_b[i][0]));
+            secret_vec_push(&mut bx[i], gf128_mul(basis0[0], mask_a[i][0]));
+            secret_vec_push(&mut by[i], gf128_mul(basis0[0], mask_b[i][0]));
             for idx in 0..p_group.len() {
                 let xb = x_bytes[i][idx];
                 let yb = y_bytes[i][idx];
@@ -1995,8 +2032,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                     x_acc ^= basis0_sh[d] & 0u128.wrapping_sub(((xb >> d) & 1) as u128);
                     y_acc ^= basis0[d] & 0u128.wrapping_sub(((yb >> d) & 1) as u128);
                 }
-                bx[i].push(gf128_mul(p_group[idx], x_acc));
-                by[i].push(y_acc);
+                secret_vec_push(&mut bx[i], gf128_mul(p_group[idx], x_acc));
+                secret_vec_push(&mut by[i], y_acc);
             }
             bx[i].resize(dim, 0);
             by[i].resize(dim, 0);
@@ -2113,15 +2150,15 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 );
                 let mut z = SecretBuffer((0..comps).map(|i| mask_c[i][0]).collect::<Vec<Kx>>());
                 for i in 0..comps {
-                    x[i].push(mask_a[i][0]);
-                    y[i].push(mask_b[i][0]);
+                    secret_vec_push(&mut x[i], mask_a[i][0]);
+                    secret_vec_push(&mut y[i], mask_b[i][0]);
                 }
                 let mut power = lambda;
                 for tuple in &log {
                     for k in 0..tuple.x.len() {
                         for i in 0..comps {
-                            x[i].push(k_scale(&power, tuple.x.c[i][k]));
-                            y[i].push(k_base(tuple.y.c[i][k]));
+                            secret_vec_push(&mut x[i], k_scale(&power, tuple.x.c[i][k]));
+                            secret_vec_push(&mut y[i], k_base(tuple.y.c[i][k]));
                             z[i] = k_add(&z[i], &k_scale(&power, tuple.z.c[i][k]));
                         }
                         power = k_mul(&power, &lambda);
@@ -2695,5 +2732,44 @@ pub(crate) mod test_support {
             expected = k_add(&k_mul(&expected, &xi), &k_base(1_000 + 37 * i));
         }
         assert_eq!(folded, expected);
+    }
+    #[test]
+    fn compact_log_matches_clone_transcript() {
+        let a = Sh {
+            c: vec![vec![7; 16]; 8],
+        };
+        let b = Sh {
+            c: vec![vec![9; 16]; 8],
+        };
+        let z = a.scale(9);
+        let start = std::time::Instant::now();
+        let old: Vec<_> = (0..10_000)
+            .map(|_| Tuple {
+                x: a.clone(),
+                y: b.clone(),
+                z: z.clone(),
+            })
+            .collect();
+        let old_elapsed = start.elapsed();
+        let start = std::time::Instant::now();
+        let mut compact = Tuple::empty(8);
+        for _ in 0..10_000 {
+            compact.append(&a, &b, &z);
+        }
+        let compact_elapsed = start.elapsed();
+        for (index, tuple) in old.iter().enumerate() {
+            for (dense, original) in [
+                (&compact.x, &tuple.x),
+                (&compact.y, &tuple.y),
+                (&compact.z, &tuple.z),
+            ] {
+                for (dense, original) in dense.c.iter().zip(&original.c) {
+                    assert_eq!(&dense[index * 16..(index + 1) * 16], original);
+                }
+            }
+        }
+        std::println!(
+            "RSS 10000 records, 8 components x 16 words: cloned={old_elapsed:?}, compact={compact_elapsed:?}; live row allocations 240000 -> 24"
+        );
     }
 }

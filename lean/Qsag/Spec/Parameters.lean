@@ -35,7 +35,6 @@ set_option autoImplicit false
     `wotsChainCount = ell1`, `subtreeHeight = h'`, `hypertreeLayers = d`, `forsTrees = k`,
     `forsTreeHeight = a`. `winternitzLog2` is `log2 w` (Rust derives it as `w.trailing_zeros()`). -/
 structure HashSigProfile where
-  securityBits : Nat
   digestBytes : Nat
   winternitzRadix : Nat
   winternitzLog2 : Nat
@@ -48,6 +47,13 @@ structure HashSigProfile where
   statefulBottomLayer : Bool
   deriving DecidableEq, Repr
 
+/-- Security label of a hash-signature profile, derived from the digest width: half of the
+    `8 * digestBytes` digest bits, the exponent a generic quantum preimage search leaves an
+    `n`-bit hash. It is a derived label: `WellFormed` forces `digestBytes = 32`, so it is the
+    constant `128` on every well-formed profile (`HashSigProfile.WellFormed.securityBits_eq`).
+    It is not derived from a budget theorem and proves nothing about the scheme. -/
+def HashSigProfile.securityBits (p : HashSigProfile) : Nat := 4 * p.digestBytes
+
 /-- Parameter equations of a deployed `HashSigProfile`, following `PqHashParams::is_well_formed`
     (`crates/qsag-core/src/tsw_baggy.rs:630`):
     * `w = 2 ^ lg w` with `1 ≤ lg w ≤ 8` (Rust: `2 ≤ w ≤ 256`, power of two);
@@ -57,12 +63,9 @@ structure HashSigProfile where
     * `0 < maxSigsLog2 ≤ d * h'`: the signature budget never exceeds the number of leaves;
     * stateless profiles have `0 < k`, `0 < a`; stateful profiles have `k = a = 0`.
 
-    The `securityBits` label is bounded on both sides by quantities of the profile: it is at least
-    `128`, at most half the digest width (a `2n`-bit budget is the most a generic quantum
-    preimage search leaves an `n`-bit hash), and for stateless profiles at most the `k * a` bits of
-    FORS index material. With the 256-bit digest this pins the label to exactly `128`
-    (`HashSigProfile.WellFormed.securityBits_eq`). These are necessary conditions on the label, not
-    a security proof of the scheme. -/
+    The security label is not a field: `HashSigProfile.securityBits` is derived as half the digest
+    width. Stateless profiles additionally need at least that many bits of FORS index material
+    (`4 * digestBytes ≤ k * a`). These are necessary conditions, not a security proof. -/
 @[expose] def HashSigProfile.WellFormed (p : HashSigProfile) : Prop :=
   1 ≤ p.winternitzLog2 ∧ p.winternitzLog2 ≤ 8 ∧
   p.winternitzRadix = 2 ^ p.winternitzLog2 ∧
@@ -74,25 +77,22 @@ structure HashSigProfile where
   p.hypertreeLayers * p.subtreeHeight ≤ 62 ∧
   0 < p.maxSigsLog2 ∧
   p.maxSigsLog2 ≤ p.hypertreeLayers * p.subtreeHeight ∧
-  128 ≤ p.securityBits ∧
-  2 * p.securityBits ≤ 8 * p.digestBytes ∧
   ((p.statefulBottomLayer = false ∧ 0 < p.forsTrees ∧ 0 < p.forsTreeHeight ∧
-      p.securityBits ≤ p.forsTrees * p.forsTreeHeight) ∨
+      4 * p.digestBytes ≤ p.forsTrees * p.forsTreeHeight) ∨
    (p.statefulBottomLayer = true ∧ p.forsTrees = 0 ∧ p.forsTreeHeight = 0))
 
 /-- Shape of a NIST FIPS-205 `SLH-DSA` reference parameter set, which is NOT a deployed
     `PqHashParams` profile: checksum WOTS+ with `lg w = 4` and `len = 2n + 3` chains
-    (`len1 = 8n / 4 = 2n`, `len2 = 3`), classical label `8n`, total height at most `66 = 64 + 2`
+    (`len1 = 8n / 4 = 2n`, `len2 = 3`), at least `8n` bits of FORS index material, total height at most `66 = 64 + 2`
     and at least the `2^64` signature budget. -/
 def HashSigProfile.Fips205Shaped (p : HashSigProfile) : Prop :=
   p.winternitzLog2 = 4 ∧
   p.winternitzRadix = 2 ^ p.winternitzLog2 ∧
   (p.digestBytes = 16 ∨ p.digestBytes = 24 ∨ p.digestBytes = 32) ∧
   p.wotsChainCount = 2 * p.digestBytes + 3 ∧
-  p.securityBits = 8 * p.digestBytes ∧
   p.statefulBottomLayer = false ∧
   0 < p.forsTrees ∧ 0 < p.forsTreeHeight ∧
-  p.securityBits ≤ p.forsTrees * p.forsTreeHeight ∧
+  8 * p.digestBytes ≤ p.forsTrees * p.forsTreeHeight ∧
   0 < p.subtreeHeight ∧ 0 < p.hypertreeLayers ∧
   p.maxSigsLog2 = 64 ∧
   p.maxSigsLog2 ≤ p.hypertreeLayers * p.subtreeHeight ∧
@@ -102,7 +102,6 @@ def HashSigProfile.Fips205Shaped (p : HashSigProfile) : Prop :=
     `crates/qsag-core/src/tsw_baggy.rs:749`: 32-byte digest, `w = 4, ell1 = 128`, `d = 16, h' = 2`
     (`h = 32`), `k = 33, a = 6`, `Q_max = 2^16`). -/
 @[expose] def pq128StatelessProfile : HashSigProfile where
-  securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
   winternitzLog2 := 2
@@ -118,7 +117,6 @@ def HashSigProfile.Fips205Shaped (p : HashSigProfile) : Prop :=
     `crates/qsag-core/src/tsw_baggy.rs:737`: 32-byte digest, `w = 4, ell1 = 128`, `d = 7, h' = 4`
     (`h = 28`), `k = 33, a = 6`, `Q_max = 2^12`). -/
 @[expose] def corduroyCustody128Profile : HashSigProfile where
-  securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
   winternitzLog2 := 2
@@ -134,7 +132,6 @@ def HashSigProfile.Fips205Shaped (p : HashSigProfile) : Prop :=
     `crates/qsag-core/src/tsw_baggy.rs:761`: `w = 4, ell1 = 128`, `d = 1, h' = 16`, `k = a = 0`,
     `Q_max = 2^16`). -/
 def jortsPoseidon2HashProfile : HashSigProfile where
-  securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
   winternitzLog2 := 2
@@ -150,7 +147,6 @@ def jortsPoseidon2HashProfile : HashSigProfile where
     `len = 35 = 32 + 3`, `d = 22, h' = 3` (`h = 66`), `k = 33, a = 6`, `2^64` signatures). Not a
     deployed `PqHashParams` preset; it satisfies `Fips205Shaped`, not `WellFormed`. -/
 def slhDsaShake128fProfile : HashSigProfile where
-  securityBits := 128
   digestBytes := 16
   winternitzRadix := 16
   winternitzLog2 := 4
@@ -177,12 +173,12 @@ theorem pq128StatelessProfile_wellFormed :
   · unfold HashSigProfile.Fips205Shaped slhDsaShake128fProfile
     decide
 
-/-- A well-formed profile carries exactly the `128`-bit label. -/
+/-- The derived label of a well-formed profile is `128`: a consequence of the 256-bit digest. -/
 theorem HashSigProfile.WellFormed.securityBits_eq {p : HashSigProfile} (h : p.WellFormed) :
     p.securityBits = 128 := by
-  obtain ⟨_, _, _, hDig, _, _, _, _, _, _, _, _, hLo, hHi, _⟩ := h
-  rw [hDig] at hHi
-  omega
+  obtain ⟨_, _, _, hDig, _⟩ := h
+  unfold HashSigProfile.securityBits
+  rw [hDig]
 
 /-- A well-formed profile has exactly as many WOTS chains as the 256-bit digest has base-`w`
     digits (`ell1 * lg w = 256`, `tsw_baggy.rs:640`). -/
@@ -200,9 +196,11 @@ theorem HashSigProfile.WellFormed.maxSigs_le_leaves {p : HashSigProfile} (h : p.
   obtain ⟨_, _, _, _, _, _, _, _, _, hTot, _, hSigs, _⟩ := h
   exact ⟨Nat.pow_le_pow_right (by decide) hSigs, Nat.pow_le_pow_right (by decide) hTot⟩
 
-/-- Tooth (audit #28): an oversized security label is rejected. -/
-theorem HashSigProfile.wellFormed_rejects_oversized_securityBits :
-    ¬ ({ pq128StatelessProfile with securityBits := 256 } : HashSigProfile).WellFormed := by
+/-- Tooth (audit #28): a 16-byte digest, whose derived label would be `64`, is rejected even with
+    the matching `64` chains. -/
+theorem HashSigProfile.wellFormed_rejects_short_digest :
+    ¬ ({ pq128StatelessProfile with digestBytes := 16, wotsChainCount := 64 } :
+        HashSigProfile).WellFormed := by
   unfold HashSigProfile.WellFormed pq128StatelessProfile
   decide
 
@@ -226,7 +224,6 @@ theorem slhDsaShake128fProfile_not_wellFormed : ¬ slhDsaShake128fProfile.WellFo
 
 /-- Normative parameter profile for FORS-free stateful epoch XMSS/Jorts signing. -/
 structure StatefulJortsProfile where
-  securityBits : Nat
   digestBytes : Nat
   winternitzRadix : Nat
   winternitzLog2 : Nat
@@ -235,24 +232,25 @@ structure StatefulJortsProfile where
   maxEpochLeavesLog2 : Nat
   deriving DecidableEq, Repr
 
+/-- Security label derived from the digest width (half of `8 * digestBytes`): a derived label,
+    constant `128` under `WellFormed`; not derived from a budget theorem. -/
+def StatefulJortsProfile.securityBits (p : StatefulJortsProfile) : Nat := 4 * p.digestBytes
+
 /-- Parameter equations of a FORS-free `StatefulJortsProfile` (the stateful, single-layer case of
     `PqHashParams::is_well_formed`, `crates/qsag-core/src/tsw_baggy.rs:630`): `w = 2 ^ lg w`,
     `1 ≤ lg w ≤ 8`, `ell1 * lg w = 8 * digestBytes = 256`, `0 < h ≤ 30`, one epoch leaf per
-    signature (`maxEpochLeavesLog2 = h`), and a label between `128` and half the digest width. -/
+    signature (`maxEpochLeavesLog2 = h`). The label `StatefulJortsProfile.securityBits` is derived. -/
 @[expose] def StatefulJortsProfile.WellFormed (p : StatefulJortsProfile) : Prop :=
   1 ≤ p.winternitzLog2 ∧ p.winternitzLog2 ≤ 8 ∧
   p.winternitzRadix = 2 ^ p.winternitzLog2 ∧
   p.digestBytes = 32 ∧
   p.wotsChainCount * p.winternitzLog2 = 8 * p.digestBytes ∧
   0 < p.treeHeight ∧ p.treeHeight ≤ 30 ∧
-  p.maxEpochLeavesLog2 = p.treeHeight ∧
-  128 ≤ p.securityBits ∧
-  2 * p.securityBits ≤ 8 * p.digestBytes
+  p.maxEpochLeavesLog2 = p.treeHeight
 
 /-- Deployed stateful `JortsPoseidon2` profile (`PqHashParams::JORTS_POSEIDON2`,
     `crates/qsag-core/src/tsw_baggy.rs:761`: FORS-free, `w = 4, ell1 = 128`, `h = 16`, `2^16` leaves). -/
 @[expose] def pq128StatefulEpochProfile : StatefulJortsProfile where
-  securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
   winternitzLog2 := 2
@@ -263,7 +261,6 @@ structure StatefulJortsProfile where
 /-- Committee shard `HEM_JORTS` XMSS profile (`HEM_JORTS_XMSS_HEIGHT = 6` in `poseidon2_mpc.rs`:
     FORS-free, `w = 4, ell1 = 128`, `h = 6`, `64` leaves). -/
 def hemJortsXmssProfile : StatefulJortsProfile where
-  securityBits := 128
   digestBytes := 32
   winternitzRadix := 4
   winternitzLog2 := 2
@@ -277,17 +274,19 @@ theorem pq128StatefulEpochProfile_wellFormed :
   unfold StatefulJortsProfile.WellFormed pq128StatefulEpochProfile hemJortsXmssProfile
   decide
 
-/-- A well-formed stateful profile carries exactly the `128`-bit label and `256 / lg w` chains. -/
+/-- A well-formed stateful profile has derived label `128` and `256 / lg w` chains. -/
 theorem StatefulJortsProfile.WellFormed.securityBits_eq {p : StatefulJortsProfile}
     (h : p.WellFormed) :
     p.securityBits = 128 ∧ p.wotsChainCount * p.winternitzLog2 = 256 := by
-  obtain ⟨_, _, _, hDig, hChain, _, _, _, hLo, hHi⟩ := h
-  rw [hDig] at hHi hChain
-  exact ⟨by omega, hChain⟩
+  obtain ⟨_, _, _, hDig, hChain, _⟩ := h
+  rw [hDig] at hChain
+  refine ⟨?_, hChain⟩
+  unfold StatefulJortsProfile.securityBits
+  rw [hDig]
 
-/-- Tooth (audit #28): neither an oversized label nor a non-covering chain count is accepted. -/
+/-- Tooth (audit #28): neither a 16-byte digest nor a non-covering chain count is accepted. -/
 theorem StatefulJortsProfile.wellFormed_rejects_oversized_or_wrong_chains :
-    ¬ (({ pq128StatefulEpochProfile with securityBits := 256 } : StatefulJortsProfile).WellFormed ∨
+    ¬ (({ pq128StatefulEpochProfile with digestBytes := 16 } : StatefulJortsProfile).WellFormed ∨
        ({ pq128StatefulEpochProfile with wotsChainCount := 64 } : StatefulJortsProfile).WellFormed) := by
   unfold StatefulJortsProfile.WellFormed pq128StatefulEpochProfile
   decide
@@ -301,7 +300,8 @@ theorem jortsPoseidon2HashProfile_eq_statefulEpochProfile :
     jortsPoseidon2HashProfile.hypertreeLayers * jortsPoseidon2HashProfile.subtreeHeight =
       pq128StatefulEpochProfile.treeHeight ∧
     jortsPoseidon2HashProfile.maxSigsLog2 = pq128StatefulEpochProfile.maxEpochLeavesLog2 := by
-  unfold jortsPoseidon2HashProfile pq128StatefulEpochProfile
+  unfold HashSigProfile.securityBits StatefulJortsProfile.securityBits
+    jortsPoseidon2HashProfile pq128StatefulEpochProfile
   decide
 
 /-- Normative parameter profile for quartic-Goldilocks Reed-Solomon IOP succinct aggregation (`HEM`/`WHIR`),
@@ -337,6 +337,60 @@ structure AggregationProfile where
   cdhzQromQueries := [202, 102, 70, 52]
   grindingBits := 16
   maxMergeDepth := 16
+
+/-- Parameter equations of an `AggregationProfile` (`crates/qsag-agg/src/pcs.rs`):
+    * the field is the degree-`4` extension of Goldilocks, of at least `255` bits;
+    * `earlyStopVars ≤ maxPcsVars`, and the PoW is the `16`-bit grind of the default regime
+      (`pcs.rs:276`–`277`);
+    * the stage blowups start at `4` and quadruple, and there is one query count per stage;
+    * per stage with blowup `B`, the classical Johnson count is exactly `⌈256 / log₂ B⌉ + 1`
+      (`B^(q-1) ≥ 2^256 > B^(q-2)`, `pcs.rs:254`) and the QROM Johnson count is exactly
+      `⌈512 / log₂ B⌉ + 2` (`B^(q-2) ≥ 2^512 > B^(q-3)`, `pcs.rs:255`);
+    * the `[CDHZ25]` table (`pcs.rs:141`, `:257`) is a literal in Rust; it is only required to have
+      one entry per stage, each below the Johnson QROM count. -/
+def AggregationProfile.WellFormed (p : AggregationProfile) : Prop :=
+  p.basePrime = 2 ^ 64 - 2 ^ 32 + 1 ∧ p.extDegree = 4 ∧
+  2 ^ 255 ≤ p.basePrime ^ p.extDegree ∧
+  p.earlyStopVars ≤ p.maxPcsVars ∧
+  p.grindingBits = 16 ∧
+  p.stageBlowups.head? = some 4 ∧
+  (p.stageBlowups.zip p.stageBlowups.tail).all (fun x => decide (x.2 = 4 * x.1)) = true ∧
+  p.johnsonClassicalQueries.length = p.stageBlowups.length ∧
+  p.johnsonQromQueries.length = p.stageBlowups.length ∧
+  p.cdhzQromQueries.length = p.stageBlowups.length ∧
+  (p.stageBlowups.zip p.johnsonClassicalQueries).all (fun x =>
+    decide (2 ≤ x.2) && decide (2 ^ 256 ≤ x.1 ^ (x.2 - 1)) &&
+      decide (x.1 ^ (x.2 - 2) < 2 ^ 256)) = true ∧
+  (p.stageBlowups.zip p.johnsonQromQueries).all (fun x =>
+    decide (3 ≤ x.2) && decide (2 ^ 512 ≤ x.1 ^ (x.2 - 2)) &&
+      decide (x.1 ^ (x.2 - 3) < 2 ^ 512)) = true ∧
+  (p.cdhzQromQueries.zip p.johnsonQromQueries).all (fun x => decide (x.1 < x.2)) = true
+
+theorem hemGoldilocksExt4Profile_wellFormed : hemGoldilocksExt4Profile.WellFormed := by
+  unfold AggregationProfile.WellFormed hemGoldilocksExt4Profile
+  decide +kernel
+
+/-- A well-formed aggregation profile has one query count of each kind per stage, and at least
+    one stage. -/
+theorem AggregationProfile.WellFormed.query_lists_aligned {p : AggregationProfile}
+    (h : p.WellFormed) :
+    p.johnsonClassicalQueries.length = p.stageBlowups.length ∧
+    p.johnsonQromQueries.length = p.stageBlowups.length ∧
+    p.cdhzQromQueries.length = p.stageBlowups.length ∧
+    p.stageBlowups.head? = some 4 := by
+  obtain ⟨_, _, _, _, _, hHead, _, hC, hQ, hZ, _⟩ := h
+  exact ⟨hC, hQ, hZ, hHead⟩
+
+/-- Tooth: a stage with one query fewer than `⌈512 / log₂ B⌉ + 2`, a dropped stage count, or a
+    PoW other than `16` bits is rejected. -/
+theorem AggregationProfile.wellFormed_rejects_short_queries :
+    ¬ (({ hemGoldilocksExt4Profile with johnsonQromQueries := [257, 130, 88, 66] } :
+          AggregationProfile).WellFormed ∨
+       ({ hemGoldilocksExt4Profile with johnsonClassicalQueries := [129, 65, 44] } :
+          AggregationProfile).WellFormed ∨
+       ({ hemGoldilocksExt4Profile with grindingBits := 0 } : AggregationProfile).WellFormed) := by
+  unfold AggregationProfile.WellFormed hemGoldilocksExt4Profile
+  decide +kernel
 
 theorem hemGoldilocksExt4Profile_basePrime_eq :
     hemGoldilocksExt4Profile.basePrime = 2 ^ 64 - 2 ^ 32 + 1 ∧
@@ -624,6 +678,8 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
   Qsag.Spec.StatefulJortsProfile.WellFormed.securityBits_eq
   Qsag.Spec.jortsPoseidon2HashProfile_eq_statefulEpochProfile
   Qsag.Spec.hemGoldilocksExt4Profile_basePrime_eq
+  Qsag.Spec.hemGoldilocksExt4Profile_wellFormed
+  Qsag.Spec.AggregationProfile.WellFormed.query_lists_aligned
   Qsag.Spec.pqCredentialProfile_wellFormed
   Qsag.Spec.pqCredentialProfile_soundness_params
   Qsag.Spec.pqCredentialProfile_rust_parity
@@ -631,11 +687,13 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
   Qsag.Spec.CustodyQuorumProfile.honest_quorum_intersection
 
 #tooth_pair Qsag.Spec.HashSigProfile.WellFormed.securityBits_eq vs
-  Qsag.Spec.HashSigProfile.wellFormed_rejects_oversized_securityBits
+  Qsag.Spec.HashSigProfile.wellFormed_rejects_short_digest
 #tooth_pair Qsag.Spec.HashSigProfile.WellFormed.wotsChainCount_mul_log2 vs
   Qsag.Spec.HashSigProfile.wellFormed_rejects_wrong_wotsChainCount
 #tooth_pair Qsag.Spec.HashSigProfile.WellFormed.maxSigs_le_leaves vs
   Qsag.Spec.HashSigProfile.wellFormed_rejects_maxSigs_above_leaves
+#tooth_pair Qsag.Spec.AggregationProfile.WellFormed.query_lists_aligned vs
+  Qsag.Spec.AggregationProfile.wellFormed_rejects_short_queries
 #tooth_pair Qsag.Spec.StatefulJortsProfile.WellFormed.securityBits_eq vs
   Qsag.Spec.StatefulJortsProfile.wellFormed_rejects_oversized_or_wrong_chains
 #tooth_pair Qsag.Spec.CredentialProfile.WellFormed.attrs_and_parties vs

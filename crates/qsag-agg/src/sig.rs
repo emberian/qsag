@@ -8,11 +8,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::field::{Goldilocks, GoldilocksOps as _};
-use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch as _};
 use crate::sponge::{
     POSEIDON2_CONST_IV, cshake256_32, encode_multi_frame, poseidon2_compress12_ff,
     poseidon2_hash32, poseidon2_perm12,
 };
+use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch as _};
 
 /// Number of base-4 `WOTS+C` chains ($\ell_1 = 128 \implies 256$-bit full message security, `[P0-02]`).
 pub const WOTS_CHAINS: usize = 128;
@@ -229,8 +229,8 @@ impl ValidatorSignature {
     pub fn from_bytes_canonical(
         profile: AggSigProfile,
         bytes: &[u8],
-    ) -> Result<Self, crate::AggError> {
-        let bad = crate::AggError::MalformedWireBytes;
+    ) -> Result<Self, crate::HemAggError> {
+        let bad = crate::HemAggError::MalformedWireBytes;
         if bytes.len() != profile.raw_signature_bytes() {
             return Err(bad);
         }

@@ -667,7 +667,7 @@ pub fn pk_encode(params: &MlDsaParams, rho: &[u8; 32], t1: &[Poly256]) -> Vec<u8
 
 /// FIPS 204 `pkDecode(pk)` (`Algorithm 23`).
 pub fn pk_decode(params: &MlDsaParams, pk_bytes: &[u8]) -> Option<([u8; 32], Vec<Poly256>)> {
-    if pk_bytes.len() != params.pk_bytes {
+    if *params != params.level.params() || pk_bytes.len() != params.pk_bytes {
         return None;
     }
     let mut rho = [0u8; 32];
@@ -814,7 +814,7 @@ pub type DecodedSignature = (Vec<u8>, Vec<Poly256>, Vec<[u8; MLDSA_N]>);
 
 /// FIPS 204 `sigDecode(sig)` (`Algorithm 27` + strict `HintBitUnpack` `Algorithm 21` validation!).
 pub fn sig_decode(params: &MlDsaParams, sig: &[u8]) -> Option<DecodedSignature> {
-    if sig.len() != params.sig_bytes {
+    if *params != params.level.params() || sig.len() != params.sig_bytes {
         return None;
     }
     let c_tilde = sig[0..params.c_tilde_bytes].to_vec();
@@ -1270,15 +1270,15 @@ fn expand_signing_masks_batch(
                 state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
                 state.0[16][lane] = 1u64 << 63;
             }
-            let mut bufs: [SecretBytes<680>; 8] = core::array::from_fn(|_| SecretBytes::new([0u8; 680]));
+            let mut bufs: [SecretBytes<680>; 8] =
+                core::array::from_fn(|_| SecretBytes::new([0u8; 680]));
             for blk in 0..5 {
                 qsag_asm::keccak_f1600_x8(&mut state);
                 let blk_off = blk * 136;
                 for lane in 0..count {
                     for w in 0..17 {
                         let off = blk_off + 8 * w;
-                        bufs[lane].0[off..off + 8]
-                            .copy_from_slice(&state.0[w][lane].to_le_bytes());
+                        bufs[lane].0[off..off + 8].copy_from_slice(&state.0[w][lane].to_le_bytes());
                     }
                 }
             }
@@ -1296,15 +1296,15 @@ fn expand_signing_masks_batch(
                 state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
                 state.0[16][lane] = 1u64 << 63;
             }
-            let mut bufs: [SecretBytes<680>; 4] = core::array::from_fn(|_| SecretBytes::new([0u8; 680]));
+            let mut bufs: [SecretBytes<680>; 4] =
+                core::array::from_fn(|_| SecretBytes::new([0u8; 680]));
             for blk in 0..5 {
                 qsag_asm::keccak_f1600_x4(&mut state);
                 let blk_off = blk * 136;
                 for lane in 0..count {
                     for w in 0..17 {
                         let off = blk_off + 8 * w;
-                        bufs[lane].0[off..off + 8]
-                            .copy_from_slice(&state.0[w][lane].to_le_bytes());
+                        bufs[lane].0[off..off + 8].copy_from_slice(&state.0[w][lane].to_le_bytes());
                     }
                 }
             }
@@ -1717,7 +1717,10 @@ mod nist_signature_vectors {
                 assert_eq!(row.len(), params.ell);
                 for (j, poly) in row.iter().enumerate() {
                     let exp = Poly256::rej_ntt_shake128(&rho, j as u8, i as u8);
-                    assert_eq!(poly.coeffs, exp.coeffs, "ExpandA mismatch at {level:?} ({i},{j})");
+                    assert_eq!(
+                        poly.coeffs, exp.coeffs,
+                        "ExpandA mismatch at {level:?} ({i},{j})"
+                    );
                 }
             }
 
@@ -1729,7 +1732,10 @@ mod nist_signature_vectors {
             assert_eq!(got_s.len(), params.ell + params.k);
             for (idx, poly) in got_s.iter().enumerate() {
                 let exp = expand_secret_poly(&seed64, idx as u16, params.eta);
-                assert_eq!(poly.coeffs, exp.coeffs, "ExpandS mismatch at {level:?} idx={idx}");
+                assert_eq!(
+                    poly.coeffs, exp.coeffs,
+                    "ExpandS mismatch at {level:?} idx={idx}"
+                );
             }
 
             let start_nonce = 21u16;
@@ -1741,6 +1747,44 @@ mod nist_signature_vectors {
                     poly.coeffs, exp.coeffs,
                     "ExpandMask mismatch at {level:?} idx={idx}"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod malformed_parameter_tests {
+    use super::*;
+    #[test]
+    fn decoders_reject_invalid_shapes_and_truncation() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let p = level.params();
+            for len in [0, 1, 31, p.pk_bytes - 1, p.pk_bytes + 1] {
+                assert!(pk_decode(&p, &alloc::vec![0; len]).is_none());
+            }
+            for len in [0, 1, p.c_tilde_bytes - 1, p.sig_bytes - 1, p.sig_bytes + 1] {
+                assert!(sig_decode(&p, &alloc::vec![0; len]).is_none());
+            }
+            let mut malformed = [p; 8];
+            malformed[0].pk_bytes = 0;
+            malformed[1].sig_bytes = 0;
+            malformed[2].k = usize::MAX;
+            malformed[3].ell = usize::MAX;
+            malformed[4].c_tilde_bytes = usize::MAX;
+            malformed[5].z_poly_bytes = 0;
+            malformed[6].omega = usize::MAX;
+            malformed[7].gamma1 = 0;
+            for bad in malformed {
+                for bytes in [&[][..], &alloc::vec![0; p.pk_bytes][..]] {
+                    assert!(pk_decode(&bad, bytes).is_none());
+                }
+                for bytes in [&[][..], &alloc::vec![0; p.sig_bytes][..]] {
+                    assert!(sig_decode(&bad, bytes).is_none());
+                }
             }
         }
     }

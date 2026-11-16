@@ -610,7 +610,8 @@ pub(crate) unsafe fn poly_scale_xor_avx512_evex(
     }
 }
 
-#[cfg(test)]
+// Native gate: platform assembly / filesystem flags are unsupported by Miri.
+#[cfg(all(test, not(miri)))]
 mod tests {
     use crate::cpuid::SimdBackend;
     use crate::portable::{self, KeccakState4x};

@@ -22,16 +22,14 @@ fn run(args: &[&str], success: bool) {
 }
 #[test]
 fn encrypted_hd_recovers_and_signs_with_nonparticipant_file_absent() {
-    let tmp = Temp(
-        std::env::temp_dir().join(format!(
+    let tmp = Temp(std::env::temp_dir().join(format!(
             "qsag-hd-subset-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        )),
-    );
+        )));
     fs::create_dir(&tmp.0).unwrap();
     let path = |s: &str| tmp.0.join(s).to_string_lossy().into_owned();
     let vault = path("vault");

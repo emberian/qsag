@@ -6,6 +6,9 @@
 //! Welch-$t$ estimators over all 9 cryptographic assembly kernels (including
 //! `tower128_bdoz_2lane_mac_with_backend`), paired with a `#tooth` negative-control leak check.
 
+// Machine timing and rdtsc have no interpretation under Miri.
+#![cfg(not(miri))]
+
 use core::hint::black_box;
 use qsag_asm::{
     GOLDILOCKS_PRIME, KeccakRow256, KeccakState4x, ct_eq_32, detect_backend, enable_hardware_dit,
@@ -185,7 +188,6 @@ where
     let mut classes = [0u8; CHUNK];
     let mut ticks = [0u64; CHUNK];
 
-    let mut warmup = Vec::with_capacity(WARMUP_CHUNKS * CHUNK);
     for _ in 0..WARMUP_CHUNKS {
         for c in &mut classes {
             *c = (rng.next_u64() & 1) as u8;
@@ -197,21 +199,12 @@ where
             let t1 = serialized_ticks_end();
             *tick = t1.wrapping_sub(t0);
         }
-        warmup.extend_from_slice(&ticks);
     }
-    warmup.sort_unstable();
-    let wn = warmup.len();
-    let thresholds = [
-        warmup[(wn * 50) / 100].max(1) as f64,
-        warmup[(wn * 75) / 100].max(1) as f64,
-        warmup[(wn * 90) / 100].max(1) as f64,
-        warmup[(wn * 95) / 100].max(1) as f64,
-        warmup[(wn * 99) / 100].max(1) as f64,
-    ];
 
     let n_chunks = min_traces.div_ceil(CHUNK);
     let mut raw_est = WelfordPair::default();
     let mut cropped = [WelfordPair::default(); 5];
+    let mut measured = Vec::with_capacity(n_chunks * CHUNK);
 
     for _ in 0..n_chunks {
         for c in &mut classes {
@@ -225,13 +218,20 @@ where
             *tick = t1.wrapping_sub(t0);
         }
         for i in 0..CHUNK {
-            let cls = classes[i] as usize;
-            let dt = ticks[i] as f64;
-            raw_est.push(cls, dt);
-            for (tier, &cap) in thresholds.iter().enumerate() {
-                if dt <= cap {
-                    cropped[tier].push(cls, dt);
-                }
+            raw_est.push(classes[i] as usize, ticks[i] as f64);
+            measured.push((classes[i], ticks[i]));
+        }
+    }
+
+    // Crop at percentiles of the measured ticks themselves so DVFS frequency steps between
+    // warmup and measurement cannot leave a crop tier empty (`n = 0`).
+    let mut sorted: Vec<u64> = measured.iter().map(|&(_, dt)| dt).collect();
+    sorted.sort_unstable();
+    let thresholds = [50, 75, 90, 95, 99].map(|p| sorted[(sorted.len() * p) / 100]);
+    for &(class, dt) in &measured {
+        for (tier, &cap) in thresholds.iter().enumerate() {
+            if dt <= cap {
+                cropped[tier].push(class as usize, dt as f64);
             }
         }
     }

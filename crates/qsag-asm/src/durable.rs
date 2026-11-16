@@ -61,9 +61,28 @@ fn invalid() -> io::Error {
     )
 }
 
+fn private_file(meta: &fs::Metadata) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "durable record and lock files must have private permissions",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = meta;
+    Ok(())
+}
+
 fn regular_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => Ok(Some(meta)),
+        Ok(meta) if meta.is_file() => {
+            private_file(&meta)?;
+            Ok(Some(meta))
+        }
         Ok(_) => Err(invalid()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
@@ -144,6 +163,7 @@ pub fn file_identity(meta: &fs::Metadata) -> [u8; 16] {
 // Compare fstat(fd) with lstat(path), never just two pathname observations.
 fn verify_path(file: &File, path: &Path) -> io::Result<fs::Metadata> {
     let held = file.metadata()?;
+    private_file(&held)?;
     let named = regular_metadata(path)?.ok_or_else(invalid)?;
     if !held.is_file() || file_identity(&held) != file_identity(&named) {
         return Err(invalid());
@@ -772,7 +792,8 @@ impl TwoSlotHwm<'_> {
     }
 }
 
-#[cfg(all(test, unix))]
+// Native gate: platform assembly / filesystem flags are unsupported by Miri.
+#[cfg(all(test, unix, not(miri)))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
@@ -797,6 +818,28 @@ mod tests {
     impl Drop for Temp {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_nonprivate_record_and_lock_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", ".lock"] {
+            let temp = Temp::new();
+            let path = temp.record();
+            let record = LockedRecord::create_new(&path).unwrap();
+            record.replace(b"private").unwrap();
+            let changed = side_path(&path, suffix);
+            fs::set_permissions(&changed, fs::Permissions::from_mode(0o640)).unwrap();
+            assert!(record.read().is_err());
+            assert!(record.replace(b"refuse").is_err());
+            drop(record);
+            assert!(LockedRecord::open_existing(&path).is_err());
+            fs::set_permissions(&changed, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(
+                LockedRecord::open_existing(&path).unwrap().read().unwrap(),
+                b"private"
+            );
         }
     }
 
@@ -863,11 +906,25 @@ mod tests {
     fn descriptor_identity_rejects_identical_path_replacement() {
         let temp = Temp::new();
         let path = temp.record();
-        fs::write(&path, b"identical").unwrap();
+        no_follow_options()
+            .unwrap()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"identical")
+            .unwrap();
         let held = File::open(&path).unwrap();
         verify_path(&held, &path).unwrap();
         fs::rename(&path, side_path(&path, ".old")).unwrap();
-        fs::write(&path, b"identical").unwrap();
+        no_follow_options()
+            .unwrap()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"identical")
+            .unwrap();
         assert!(verify_path(&held, &path).is_err());
     }
 
@@ -944,7 +1001,14 @@ mod tests {
         let second = LockedRecord::open_existing(&path).unwrap();
         assert!(!second.is_fresh());
         assert_eq!(second.lock_seal(), seal);
-        fs::write(side_path(&path, ".tmp"), b"stale").unwrap();
+        no_follow_options()
+            .unwrap()
+            .write(true)
+            .create_new(true)
+            .open(side_path(&path, ".tmp"))
+            .unwrap()
+            .write_all(b"stale")
+            .unwrap();
         second.replace(b"second").unwrap();
         assert_eq!(second.read().unwrap(), b"second");
         drop(second);

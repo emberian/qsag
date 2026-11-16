@@ -5,7 +5,7 @@ public import Qsag.Math.Gf2Pow128
 import all Qsag.Math.Gf2Pow128
 
 /-!
-# Binary-tower weld between the Aeneas extraction and `Qsag.BinaryTower`
+# Binary-tower weld between the Aeneas extraction and `Qsag.Math.Gf2Pow128`
 
 Every extracted Wiedemann-tower operation is identified with the canonical recursive field
 `Qsag.TowerElem k` under `Qsag.unpackTower`: GF(256) (`k = 3`), `Tower128` (`k = 7`) and

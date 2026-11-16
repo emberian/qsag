@@ -69,6 +69,7 @@ public section
 namespace Qsag
 
 attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+attribute [-instance] Fin.instLinearOrderPackage
 
 set_option autoImplicit false
 
@@ -14507,5 +14508,9 @@ def blindVcReachableBinding204
 #verify_inhabited ext6Mul_inv_cancel ext6Inv_inhabited
 #tooth_pair prss_multi_key_hybrid vs tooth_prss_constant_expansion_distinguished
 #verify_inhabited prss_multi_key_hybrid prss_multi_key_hybrid_inhabited
+#verify_constructive subsets3Of5_intersect_nonempty
+#verify_constructive tooth_subsets2Of5_disjoint
+#verify_constructive toprfHolders_spec
+#verify_constructive blind_vc_zkboo_selective_disclosure_sound_and_hiding
 
 end Qsag

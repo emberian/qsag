@@ -16,7 +16,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
 /// Lowercase hex of secret bytes, as ASCII in a wiping buffer allocated once at its final size.
 pub fn to_hex_zeroizing(bytes: &[u8]) -> crate::cli::ZeroizingBuf {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = crate::cli::ZeroizingBuf(Vec::with_capacity(bytes.len() * 2));
+    let mut out = crate::cli::ZeroizingBuf::new(Vec::with_capacity(bytes.len() * 2));
     for &b in bytes {
         out.0.push(HEX[(b >> 4) as usize]);
         out.0.push(HEX[(b & 0x0F) as usize]);
@@ -36,7 +36,7 @@ pub fn from_hex(text: &str) -> Result<crate::cli::ZeroizingBuf, CliError> {
         b'A'..=b'F' => Ok(c - b'A' + 10),
         _ => Err(CliError::input("hex string contains a non-hex character")),
     };
-    let mut decoded = crate::cli::ZeroizingBuf(Vec::with_capacity(text.len() / 2));
+    let mut decoded = crate::cli::ZeroizingBuf::new(Vec::with_capacity(text.len() / 2));
     for pair in text.as_bytes().as_chunks::<2>().0 {
         decoded.0.push(nibble(pair[0])? << 4 | nibble(pair[1])?);
     }
@@ -55,7 +55,7 @@ pub fn from_hex_secret32(text: &str, what: &str) -> Result<crate::cli::Secret32,
             "{what} must be exactly 32 bytes of hex"
         )));
     }
-    let mut secret = crate::cli::Secret32([0u8; 32]);
+    let mut secret = crate::cli::Secret32::new([0u8; 32]);
     secret.0.copy_from_slice(&decoded);
     Ok(secret)
 }
@@ -99,7 +99,7 @@ impl std::fmt::Debug for Json {
 impl Drop for Json {
     fn drop(&mut self) {
         if let Self::Str(s) | Self::Number(s) = self {
-            let _wipe = crate::cli::ZeroizingBuf(std::mem::take(s).into_bytes());
+            let _wipe = crate::cli::ZeroizingBuf::new(std::mem::take(s).into_bytes());
         }
     }
 }
@@ -452,7 +452,7 @@ impl Parser<'_> {
                 _ => max_decoded_len += 1,
             }
         }
-        let mut out = crate::cli::ZeroizingBuf(Vec::with_capacity(max_decoded_len));
+        let mut out = crate::cli::ZeroizingBuf::new(Vec::with_capacity(max_decoded_len));
         loop {
             let byte = *self
                 .bytes

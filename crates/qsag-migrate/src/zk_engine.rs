@@ -424,53 +424,12 @@ pub(crate) fn transcript(statement: &MigrationStatement, root: &[u8; 32]) -> Int
     t
 }
 
-/// Compatibility entry point: the epoch identifies the replay domain. Applications
-/// needing an independent campaign identifier should use the explicit-domain API.
-pub fn prove_migration_ownership<B: AcceleratorBackend>(
-    witness: &LegacyOwnershipWitness,
-    legacy: LegacyCommitmentKind,
-    target: QsagAddress,
-    epoch: u64,
-    entropy: [u8; 32],
-    accel: &B,
-) -> Result<(MigrationStatement, MigrationZkProof), MigrateError> {
-    let domain = cshake256_framed_32(b"QSAG.MIGRATE.CAMPAIGN.V3", &[&epoch.to_le_bytes()]);
-    prove_migration_in_domain(
-        witness,
-        MigrationRequest {
-            legacy,
-            target,
-            epoch,
-            domain,
-        },
-        entropy,
-        accel,
-    )
-}
 #[derive(Clone, Debug)]
 pub struct MigrationRequest {
     pub legacy: LegacyCommitmentKind,
     pub target: QsagAddress,
     pub epoch: u64,
     pub domain: [u8; 32],
-}
-/// Obtain fresh kernel entropy and hedge it with the witness and full statement.
-#[cfg(all(feature = "std", unix))]
-pub fn prove_migration_in_domain_os_rng<B: AcceleratorBackend>(
-    witness: &LegacyOwnershipWitness,
-    request: MigrationRequest,
-    accel: &B,
-) -> Result<(MigrationStatement, MigrationZkProof), MigrateError> {
-    use std::io::Read;
-    let mut entropy = [0; 32];
-    let read = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut entropy));
-    if read.is_err() {
-        ct_zeroize_bytes(&mut entropy);
-        return Err(MigrateError::EntropyUnavailable);
-    }
-    let result = prove_migration_in_domain(witness, request, entropy, accel);
-    ct_zeroize_bytes(&mut entropy);
-    result
 }
 pub fn prove_migration_in_domain<B: AcceleratorBackend>(
     witness: &LegacyOwnershipWitness,

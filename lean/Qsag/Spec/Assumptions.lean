@@ -2,14 +2,23 @@ module
 /-
 # Qsag.Spec.Assumptions — Cryptographic Experiments, Oracle-Model Locales, and Platform Contracts
 
-Assumption records (`structure`s, zero `axiom` declarations) for every cryptographic hardness
-premise, idealized oracle model, and operating-system / hardware platform contract referenced by
-top-level security theorems.
+Experiments, hardness propositions and platform contracts referenced by top-level security
+theorems (zero `axiom` declarations).
 
-* A hardness locale is indexed by its primitive, the challenger's samplers, the adversary and the
-  enforced resource bound; its game is constructed from those objects (`smDtTcrGame`,
-  `smDtPreGame`, `itsrGame`, `prfRealGame` / `prfIdealGame`, the Ring-LWE, Module-SIS and
-  dual-LPN games).
+* An experiment is a game constructed from the primitive, the challenger's samplers, the
+  adversary and the enforced resource bound (`smDtTcrGame`, `smDtPreGame`, `itsrGame`,
+  `prfRealGame` / `prfIdealGame`, the Ring-LWE, Module-SIS and dual-LPN games).
+* Hardness of a primitive against a class `𝒜` of adversaries is a proposition that quantifies
+  over every adversary with programs in `𝒜` and every uniform challenger sampler, with challenger
+  coins and adversary coins as independent coordinates of the coin space (`CoinSplit`,
+  `UniformOn`; `SmDtTcrHard`, `SmDtPreHard`, `ItsrHard`, `PrfHard`, `DecisionRlweHard`,
+  `ModuleSisHard`, `DualLpnHard`). The class is a parameter because this development has no
+  running-time model. `…Hard 𝒜` is meaningful only for a class that excludes exhaustive search:
+  against the unrestricted class `SM-DT-PRE` hardness is false for every tweakable hash
+  (`smDtPreHard_unrestricted_refuted`). That a class excludes such adversaries and that a
+  deployed primitive is hard against it is an assumption outside this logic.
+* Degenerate primitives are refuted for every class containing one explicit short program
+  (`smDtTcrHard_constHash_refuted` and its siblings).
 * A platform contract is a set of laws over the event traces of an environment model
   (`PosixFsyncContract`, `AuthenticatedChannelContract`, `KeyErasureContract`,
   `DitHardwareContract`, `SimtWorkgroupContract` / `WellFormedSimtContract`).
@@ -81,15 +90,11 @@ theorem FramedCodec.collisionOfDigestEq_sound {α : Type} [DecidableEq α]
 
 /-! ## 2. Experiments Against a Primitive
 
-Every hardness locale below is indexed by the primitive, the challenger's coin-indexed samplers,
-the adversary and the resource bound the challenger enforces. Its game is the function of those
-objects defined here; a locale has no free `FinGame` field. A locale records a proved bound on
-the success of one adversary in one experiment, which is the form a concrete reduction consumes.
-
-The coin `ω : Fin n` indexes both the challenger's samples and the adversary's randomness. The
-samplers are explicit fields, so a consumer can see what the adversary's coin dependence is
-measured against; uniformity of a sampler is not expressible over a bare `Fin n` and is not
-claimed. -/
+Every experiment below is the function of the primitive, the challenger's coin-indexed samplers,
+the adversary and the resource bound the challenger enforces. The game constructors take the
+samplers and the adversary as functions of one coin `ω : Fin n`; the hardness propositions of
+section 2e instantiate them only with samplers that read the challenger coordinate of `ω` and
+adversaries that read the adversary coordinate. -/
 
 private theorem iteOfPos {α : Type} {p : Prop} [Decidable p] (hp : p) (a b : α) :
     (if p then a else b) = a := by
@@ -170,6 +175,15 @@ def Code.play {E : Iface} {R σ : Type} (oracle : σ → (q : E.Query) → E.Res
   | .ret v, st => (v, st)
   | .call q k, st => Code.play oracle (k (oracle st q).1) (oracle st q).2
 
+theorem Code.play_ret {E : Iface} {R σ : Type} (oracle : σ → (q : E.Query) → E.Resp q × σ)
+    (v : R) (st : σ) : Code.play oracle (.ret v) st = (v, st) := by
+  rfl
+
+theorem Code.play_call {E : Iface} {R σ : Type} (oracle : σ → (q : E.Query) → E.Resp q × σ)
+    (q : E.Query) (k : E.Resp q → Code E R) (st : σ) :
+    Code.play oracle (.call q k) st = Code.play oracle (k (oracle st q).1) (oracle st q).2 := by
+  rfl
+
 /-- A property of the challenger state preserved by every oracle answer holds at the end of
     every run. -/
 theorem Code.play_invariant {E : Iface} {R σ : Type}
@@ -184,6 +198,160 @@ theorem Code.play_invariant {E : Iface} {R σ : Type}
 @[expose] def byteOracleIface : Iface where
   Query := Bytes
   Resp _ := Bytes
+
+
+/-! ### 2.0 Counting facts, independent coin coordinates and uniform samplers
+
+An experiment separates the challenger's coins from the adversary's. `CoinSplit n nC nA` presents
+the coin space `Fin n` as the product of a challenger coordinate `Fin nC` and an adversary
+coordinate `Fin nA`: every pair of coordinates is hit by exactly one coin, so under the uniform
+measure on `Fin n` the two coordinates are independent and each is uniform. The challenger's
+samples are functions of the first coordinate; an adversary is a function of the second
+coordinate and of the oracle answers. `UniformOn support sample` says that a sampler is a
+bijection from its coin space onto `support`, i.e. the sample is uniform on that set. -/
+
+/-- A game won on every coin has probability `1`: it is not bounded by any `ε < 1`. -/
+theorem FinGame.not_bound_of_forall_win {n : Nat} (G : FinGame n)
+    (hWin : ∀ ω : Fin n, G.win ω = true) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ GameBound G.winProb ε := by
+  intro h
+  have h' : G.winCount * ε.den ≤ ε.num * n := h
+  rw [G.winCount_of_forall_win hWin, Nat.mul_comm ε.num n] at h'
+  exact Nat.not_le_of_lt hε (Nat.le_of_mul_le_mul_left h' G.samplePos)
+
+/-- A game lost on every coin has probability `0`. -/
+theorem FinGame.bound_zero_of_forall_lose {n : Nat} (G : FinGame n)
+    (hLose : ∀ ω : Fin n, G.win ω = false) : GameBound G.winProb RatBound.zero := by
+  show G.winCount * 1 ≤ 0 * n
+  rw [G.winCount_of_forall_lose hLose, Nat.zero_mul, Nat.zero_mul]
+  exact Nat.le_refl 0
+
+/-- Every game has probability at most `1`. -/
+theorem FinGame.winProb_le_one {n : Nat} (G : FinGame n) : GameBound G.winProb RatBound.one := by
+  have hMono := event_le_reduction_win G (FinGame.mk G.samplePos (fun _ => true)) (fun _ _ => rfl)
+  have hAll : (FinGame.mk G.samplePos (fun _ => true)).winCount = n :=
+    FinGame.winCount_of_forall_win _ (fun _ => rfl)
+  have h' : G.winCount * n ≤ (FinGame.mk G.samplePos (fun _ => true)).winCount * n := hMono
+  rw [hAll] at h'
+  show G.winCount * 1 ≤ 1 * n
+  rw [Nat.mul_one, Nat.one_mul]
+  exact Nat.le_of_mul_le_mul_right h' G.samplePos
+
+/-- A distinguisher that outputs `true` on every coin of `G₀` and `false` on every coin of `G₁`
+    has advantage `1`: it is not bounded by any `ε < 1`. -/
+theorem advDist_not_bound_of_always_never {n : Nat} (G₀ G₁ : FinGame n)
+    (h₀ : ∀ ω : Fin n, G₀.win ω = true) (h₁ : ∀ ω : Fin n, G₁.win ω = false)
+    {ε : RatBound} (hε : ε.num < ε.den) : ¬ GameBound (AdvDist G₀ G₁) ε := by
+  intro h
+  have h' : natAbsDiff G₀.winCount G₁.winCount * ε.den ≤ ε.num * n := h
+  have hAbs : natAbsDiff n 0 = n := by
+    unfold natAbsDiff
+    rw [iteOfNeg (Nat.not_le_of_lt G₀.samplePos)]
+    rfl
+  rw [G₀.winCount_of_forall_win h₀, G₁.winCount_of_forall_lose h₁, hAbs,
+    Nat.mul_comm ε.num n] at h'
+  exact Nat.not_le_of_lt hε (Nat.le_of_mul_le_mul_left h' G₀.samplePos)
+
+/-- Presentation of the coin space `Fin n` as the product of a challenger coordinate and an
+    adversary coordinate. -/
+structure CoinSplit (n nC nA : Nat) where
+  /-- The challenger's coordinate of a coin. -/
+  chal : Fin n → Fin nC
+  /-- The adversary's coordinate of a coin. -/
+  advc : Fin n → Fin nA
+  /-- The coin with the given coordinates. -/
+  pair : Fin nC → Fin nA → Fin n
+  chal_pair : ∀ (c : Fin nC) (a : Fin nA), chal (pair c a) = c
+  advc_pair : ∀ (c : Fin nC) (a : Fin nA), advc (pair c a) = a
+  pair_eta : ∀ ω : Fin n, pair (chal ω) (advc ω) = ω
+
+/-- The adversary's coordinate does not determine the challenger's: for a fixed adversary coin
+    every challenger coin occurs. -/
+theorem CoinSplit.chal_free {n nC nA : Nat} (π : CoinSplit n nC nA) (a : Fin nA) (c : Fin nC) :
+    ∃ ω : Fin n, π.advc ω = a ∧ π.chal ω = c :=
+  ⟨π.pair c a, π.advc_pair c a, π.chal_pair c a⟩
+
+/-- The split with a single adversary coin (a deterministic adversary). -/
+def CoinSplit.challengerOnly (n : Nat) : CoinSplit n n 1 where
+  chal ω := ω
+  advc _ := ⟨0, Nat.one_pos⟩
+  pair c _ := c
+  chal_pair _ _ := rfl
+  advc_pair _ a := Fin.ext (Nat.lt_one_iff.mp a.2).symm
+  pair_eta _ := rfl
+
+theorem prodCoin_right_pos {nC nA : Nat} (ω : Fin (nC * nA)) : 0 < nA :=
+  Nat.pos_of_ne_zero (fun h => by
+    subst h
+    exact Nat.not_lt_zero _ ω.2)
+
+theorem prodCoin_quot_lt {nC nA : Nat} (ω : Fin (nC * nA)) : ω.val / nA < nC :=
+  (Nat.div_lt_iff_lt_mul (prodCoin_right_pos ω)).mpr ω.2
+
+theorem prodCoin_pair_lt {nC nA : Nat} (c : Fin nC) (a : Fin nA) :
+    c.val * nA + a.val < nC * nA :=
+  Nat.lt_of_lt_of_le (Nat.add_lt_add_left a.2 _)
+    (Nat.succ_mul c.val nA ▸ Nat.mul_le_mul_right nA c.2)
+
+theorem prodCoin_pair_quot {nC nA : Nat} (c : Fin nC) (a : Fin nA) :
+    (c.val * nA + a.val) / nA = c.val := by
+  rw [Nat.mul_comm c.val nA, Nat.mul_add_div (Nat.lt_of_le_of_lt (Nat.zero_le _) a.2),
+    Nat.div_eq_of_lt a.2]
+  rfl
+
+theorem prodCoin_pair_rem {nC nA : Nat} (c : Fin nC) (a : Fin nA) :
+    (c.val * nA + a.val) % nA = a.val := by
+  rw [Nat.mul_add_mod_self_right, Nat.mod_eq_of_lt a.2]
+
+/-- The split of `Fin (nC * nA)` by quotient and remainder. -/
+def CoinSplit.prod (nC nA : Nat) : CoinSplit (nC * nA) nC nA where
+  chal ω := ⟨ω.val / nA, prodCoin_quot_lt ω⟩
+  advc ω := ⟨ω.val % nA, Nat.mod_lt _ (prodCoin_right_pos ω)⟩
+  pair c a := ⟨c.val * nA + a.val, prodCoin_pair_lt c a⟩
+  chal_pair c a := Fin.ext (prodCoin_pair_quot c a)
+  advc_pair c a := Fin.ext (prodCoin_pair_rem c a)
+  pair_eta ω := Fin.ext (Nat.div_add_mod' ω.val nA)
+
+/-- `sample` is a uniform sampler on `support`: a bijection from its coin space onto that set. -/
+structure UniformOn {n : Nat} {α : Type} (support : α → Prop) (sample : Fin n → α) : Prop where
+  mem : ∀ c : Fin n, support (sample c)
+  injective : ∀ c c' : Fin n, sample c = sample c' → c = c'
+  surjective : ∀ x : α, support x → ∃ c : Fin n, sample c = x
+
+/-- The one-coin sampler is uniform on a one-element set. -/
+theorem uniformOn_unique {α : Type} (support : α → Prop) (x : α) (hx : support x)
+    (hUnique : ∀ y : α, support y → y = x) : UniformOn support (fun _ : Fin 1 => x) where
+  mem _ := hx
+  injective c c' _ :=
+    Fin.ext ((Nat.lt_one_iff.mp c.2).trans (Nat.lt_one_iff.mp c'.2).symm)
+  surjective y hy := ⟨⟨0, Nat.one_pos⟩, (hUnique y hy).symm⟩
+
+/-- A sampler that ignores a coin is not uniform: the constant sampler on two coins has no
+    `UniformOn` law, whatever the support. -/
+theorem constant_sampler_not_uniform {α : Type} (support : α → Prop) (x : α) :
+    ¬ UniformOn support (fun _ : Fin 2 => x) := by
+  intro h
+  have hEq := h.injective ⟨0, by decide⟩ ⟨1, by decide⟩ rfl
+  exact absurd (congrArg Fin.val hEq) (by decide)
+
+/-- A challenger sample that is uniform on a set with two different elements is not determined
+    by the adversary's coordinate: whatever function of the adversary coin is used as a guess,
+    some coin with that adversary coordinate carries a different sample. -/
+theorem CoinSplit.sample_not_adversary_determined {n nC nA : Nat} {α : Type} [DecidableEq α]
+    (π : CoinSplit n nC nA) {support : α → Prop} {sample : Fin nC → α}
+    (hU : UniformOn support sample) {x y : α} (hx : support x) (hy : support y) (hxy : x ≠ y)
+    (guess : Fin nA → α) (a : Fin nA) :
+    ∃ ω : Fin n, π.advc ω = a ∧ sample (π.chal ω) ≠ guess (π.advc ω) := by
+  obtain ⟨cx, hcx⟩ := hU.surjective x hx
+  obtain ⟨cy, hcy⟩ := hU.surjective y hy
+  if hg : guess a = x then
+    refine ⟨π.pair cy a, π.advc_pair cy a, ?_⟩
+    rw [π.chal_pair, π.advc_pair, hcy, hg]
+    exact fun h => hxy h.symm
+  else
+    refine ⟨π.pair cx a, π.advc_pair cx a, ?_⟩
+    rw [π.chal_pair, π.advc_pair, hcx]
+    exact fun h => hg h.symm
 
 /-! ### 2a. `SM-DT-TCR` and `SM-DT-PRE` for a tweakable hash `th seed tweak message` -/
 
@@ -566,222 +734,266 @@ def dualLpnShapeOk (N rows weight : Nat) (H : List (List Bool)) (e u : List Bool
   decide (H.length = rows) && (H.all (fun row => decide (row.length = N)) &&
     (decide (e.length = N) && (decide (e.count true = weight) && decide (u.length = rows))))
 
-/-! ### 2e. Hardness locales: a proved bound for one adversary in one experiment -/
+/-! ### 2e. Hardness of a primitive against a class of adversaries
 
-/-- Multi-target, distinct-tweak target-collision resistance (`SM-DT-TCR`) of the tweakable
-    hash `th`: the adversary `adv` wins `smDtTcrGame` with probability at most `εTcr` when the
-    challenger admits `qSign` targets. -/
-structure SmDtTcrAssumption (n : Nat) where
-  samplePos : 0 < n
-  th : Bytes → Bytes → Bytes → Bytes
-  seed : Fin n → Bytes
-  qSign : Nat
-  adv : Fin n → Code targetIface TargetBreak
-  εTcr : RatBound
-  bound : GameBound (smDtTcrGame samplePos th qSign seed adv).winProb εTcr
+Hardness is a proposition about the primitive and a class `𝒜` of adversaries, indexed by the
+sample-space sizes of the experiment, the challenger's query budget and the bound `ε`. It
+quantifies over every coin space split into a challenger coordinate and an adversary coordinate
+(`CoinSplit`), every challenger sampler that is uniform on the stated sample set (`UniformOn`),
+and every randomized adversary whose program on each adversary coin belongs to `𝒜`. Nothing in
+the index is chosen by an adversary.
 
-/-- The `SM-DT-TCR` game of the locale. -/
-def SmDtTcrAssumption.tcrGame {n : Nat} (A : SmDtTcrAssumption n) : FinGame n :=
-  smDtTcrGame A.samplePos A.th A.qSign A.seed A.adv
+The class `𝒜` is where a resource bound on adversaries lives. This development has no
+running-time model, so it cannot define the class of efficient adversaries; `𝒜` is a parameter,
+and a theorem that uses `…Hard 𝒜` also needs its reduction adversaries to belong to `𝒜`, as
+explicit hypotheses.
 
-theorem SmDtTcrAssumption.tcrGame_eq {n : Nat} (A : SmDtTcrAssumption n) :
-    A.tcrGame = smDtTcrGame A.samplePos A.th A.qSign A.seed A.adv := by rfl
+For the unrestricted class `fun _ => True` the hash propositions are false, not merely strong:
+`smDtPreHard_unrestricted_refuted` shows `SmDtPreHard (fun _ => True) th …` fails for every
+tweakable hash `th`, every budget `q ≥ 1` and every `ε < 1` (commit one target, take the seed
+from `reveal`, search the `inputLen`-byte strings for a preimage). The analogous facts, that
+`SmDtTcrHard` and `ItsrHard` fail on the unrestricted class for every primitive with bounded
+output and `PrfHard` once `q · outLen > keyLen`, are not proved here. A proposition `…Hard 𝒜`
+is therefore meaningful only for a class `𝒜` that excludes such search adversaries; that `𝒜`
+is such a class and that a deployed primitive is hard against it is an assumption outside this
+logic. What this layer proves is the other direction: degenerate primitives are refuted for
+every class containing one explicit short program (section 2g). -/
 
-theorem SmDtTcrAssumption.tcrGame_bound {n : Nat} (A : SmDtTcrAssumption n) :
-    GameBound A.tcrGame.winProb A.εTcr := A.bound
+/-- **`SM-DT-TCR` hardness** of the tweakable hash `th` against the adversary class `𝒜`, with
+    uniform `seedLen`-byte seeds: every adversary with programs in `𝒜` wins the `q`-target
+    experiment with probability at most `ε`. -/
+@[expose] def SmDtTcrHard (𝒜 : Code targetIface TargetBreak → Prop)
+    (th : Bytes → Bytes → Bytes → Bytes) (seedLen q : Nat) (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA) (seed : Fin nC → Bytes),
+    UniformOn (fun s : Bytes => s.length = seedLen) seed →
+    ∀ adv : Fin nA → Code targetIface TargetBreak, (∀ a : Fin nA, 𝒜 (adv a)) →
+      GameBound (smDtTcrGame hPos th q (fun ω => seed (π.chal ω))
+        (fun ω => adv (π.advc ω))).winProb ε
 
-/-- Multi-target, distinct-tweak preimage resistance (`SM-DT-PRE`) of `th`. -/
-structure SmDtPreAssumption (n : Nat) where
-  samplePos : 0 < n
-  th : Bytes → Bytes → Bytes → Bytes
-  seed : Fin n → Bytes
-  hidden : Fin n → Nat → Bytes
-  qSign : Nat
-  adv : Fin n → Code targetIface TargetBreak
-  εPre : RatBound
-  bound : GameBound (smDtPreGame samplePos th qSign seed hidden adv).winProb εPre
+/-- Sample set of the `SM-DT-PRE` challenger: a `seedLen`-byte seed and `q` hidden inputs of
+    `inputLen` bytes. -/
+def SmDtPreSampleOk (seedLen inputLen q : Nat) (x : Bytes × List Bytes) : Prop :=
+  x.1.length = seedLen ∧ x.2.length = q ∧ ∀ h ∈ x.2, h.length = inputLen
 
-/-- The `SM-DT-PRE` game of the locale. -/
-def SmDtPreAssumption.preGame {n : Nat} (A : SmDtPreAssumption n) : FinGame n :=
-  smDtPreGame A.samplePos A.th A.qSign A.seed A.hidden A.adv
+/-- **`SM-DT-PRE` hardness** of `th` against the adversary class `𝒜`: with a uniform seed and
+    `q` independent uniform hidden inputs, every adversary with programs in `𝒜` wins with
+    probability at most `ε`. False for the unrestricted class
+    (`smDtPreHard_unrestricted_refuted`). -/
+@[expose] def SmDtPreHard (𝒜 : Code targetIface TargetBreak → Prop)
+    (th : Bytes → Bytes → Bytes → Bytes) (seedLen inputLen q : Nat) (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA) (sample : Fin nC → Bytes × List Bytes),
+    UniformOn (SmDtPreSampleOk seedLen inputLen q) sample →
+    ∀ adv : Fin nA → Code targetIface TargetBreak, (∀ a : Fin nA, 𝒜 (adv a)) →
+      GameBound (smDtPreGame hPos th q (fun ω => (sample (π.chal ω)).1)
+        (fun ω i => (sample (π.chal ω)).2.getD i []) (fun ω => adv (π.advc ω))).winProb ε
 
-theorem SmDtPreAssumption.preGame_eq {n : Nat} (A : SmDtPreAssumption n) :
-    A.preGame = smDtPreGame A.samplePos A.th A.qSign A.seed A.hidden A.adv := by rfl
+/-- Sample set of the `ITSR` challenger: `q` randomizers of `randLen` bytes. -/
+def ItsrSampleOk (randLen q : Nat) (x : List Bytes) : Prop :=
+  x.length = q ∧ ∀ r ∈ x, r.length = randLen
 
-theorem SmDtPreAssumption.preGame_bound {n : Nat} (A : SmDtPreAssumption n) :
-    GameBound A.preGame.winProb A.εPre := A.bound
+/-- **`ITSR` hardness** of the keyed subset hash `hmsg` against the adversary class `𝒜`: with
+    `q` independent uniform randomizers, every adversary with programs in `𝒜` wins with
+    probability at most `ε`. -/
+@[expose] def ItsrHard (𝒜 : Code byteOracleIface (Bytes × Bytes) → Prop)
+    (hmsg : Bytes → Bytes → List Nat) (randLen q : Nat) (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA) (rand : Fin nC → List Bytes),
+    UniformOn (ItsrSampleOk randLen q) rand →
+    ∀ adv : Fin nA → Code byteOracleIface (Bytes × Bytes), (∀ a : Fin nA, 𝒜 (adv a)) →
+      GameBound (itsrGame hPos hmsg q (fun ω i => (rand (π.chal ω)).getD i [])
+        (fun ω => adv (π.advc ω))).winProb ε
 
-/-- Interleaved target subset resilience (`ITSR`) of the keyed subset hash `hmsg` used for
-    FORS / TSW message hashing. -/
-structure ItsrAssumption (n : Nat) where
-  samplePos : 0 < n
-  hmsg : Bytes → Bytes → List Nat
-  rand : Fin n → Nat → Bytes
-  qSign : Nat
-  adv : Fin n → Code byteOracleIface (Bytes × Bytes)
-  εItsr : RatBound
-  bound : GameBound (itsrGame samplePos hmsg qSign rand adv).winProb εItsr
+/-- Sample set of the PRF challenger: a `keyLen`-byte key and a function that maps
+    `inLen`-byte inputs to `outLen`-byte outputs and every other input to `[]`. -/
+def PrfSampleOk (keyLen inLen outLen : Nat) (x : Bytes × (Bytes → Bytes)) : Prop :=
+  x.1.length = keyLen ∧
+  ∀ inp : Bytes, (inp.length = inLen → (x.2 inp).length = outLen) ∧
+    (inp.length ≠ inLen → x.2 inp = [])
 
-/-- The `ITSR` game of the locale. -/
-def ItsrAssumption.itsrGame {n : Nat} (A : ItsrAssumption n) : FinGame n :=
-  Qsag.Spec.itsrGame A.samplePos A.hmsg A.qSign A.rand A.adv
+/-- **PRF hardness** of `prf` against the distinguisher class `𝒜`: with a uniform key and an
+    independent uniform function, every `q`-query distinguisher with programs in `𝒜` has
+    advantage at most `ε`. -/
+@[expose] def PrfHard (𝒜 : Code byteOracleIface Bool → Prop)
+    (prf : Bytes → Bytes → Bytes) (keyLen inLen outLen q : Nat) (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA)
+    (sample : Fin nC → Bytes × (Bytes → Bytes)),
+    UniformOn (PrfSampleOk keyLen inLen outLen) sample →
+    ∀ adv : Fin nA → Code byteOracleIface Bool, (∀ a : Fin nA, 𝒜 (adv a)) →
+      GameBound
+        (AdvDist
+          (prfRealGame hPos prf q (fun ω => (sample (π.chal ω)).1) (fun ω => adv (π.advc ω)))
+          (prfIdealGame hPos q (fun ω => (sample (π.chal ω)).2) (fun ω => adv (π.advc ω)))) ε
 
-theorem ItsrAssumption.itsrGame_eq {n : Nat} (A : ItsrAssumption n) :
-    A.itsrGame = Qsag.Spec.itsrGame A.samplePos A.hmsg A.qSign A.rand A.adv := by rfl
+/-- Challenger sample of the decision Ring-LWE experiment. -/
+structure RlweSample where
+  a : List (List Nat)
+  s : List Nat
+  e : List (List Nat)
+  u : List (List Nat)
 
-theorem ItsrAssumption.itsrGame_bound {n : Nat} (A : ItsrAssumption n) :
-    GameBound A.itsrGame.winProb A.εItsr := A.bound
+/-- Sample set of the decision Ring-LWE challenger over `ℤ_q[X]/(X^N + 1)`: `m` ring elements
+    `aᵢ`, a secret and `m` errors of centered absolute value at most `β`, and `m` ring elements
+    `uᵢ`. -/
+def RlweSampleOk (N q m β : Nat) (x : RlweSample) : Prop :=
+  (x.a.length = m ∧ ∀ p ∈ x.a, rqPolyOk N q p = true) ∧
+  rqShortOk N q β x.s = true ∧
+  (x.e.length = m ∧ ∀ p ∈ x.e, rqShortOk N q β p = true) ∧
+  (x.u.length = m ∧ ∀ p ∈ x.u, rqPolyOk N q p = true)
 
-/-- Keyed pseudorandom function (`PRF`) distinguishing locale (PRSS and key generation): the
-    distinguisher `adv` separates `prf (key ω)` from the sampled function `rf ω` with advantage
-    at most `εPrf` in `qPrf` queries. -/
-structure KeyedPrfAssumption (n : Nat) where
-  samplePos : 0 < n
-  prf : Bytes → Bytes → Bytes
-  key : Fin n → Bytes
-  rf : Fin n → Bytes → Bytes
-  qPrf : Nat
-  adv : Fin n → Code byteOracleIface Bool
-  εPrf : RatBound
-  bound : GameBound
-    (AdvDist (prfRealGame samplePos prf qPrf key adv) (prfIdealGame samplePos qPrf rf adv)) εPrf
+/-- The real game of the Ring-LWE experiment: the distinguisher sees `(aᵢ, aᵢ · s + eᵢ)`. -/
+def rlweRealGame {n nC nA : Nat} (hPos : 0 < n) (π : CoinSplit n nC nA) (N q m : Nat)
+    (sample : Fin nC → RlweSample) (dist : Fin nA → List (List Nat × List Nat) → Bool) :
+    FinGame n :=
+  ⟨hPos, fun ω => dist (π.advc ω)
+    (rlweRealSamples N q m (fun i => (sample (π.chal ω)).a.getD i []) (sample (π.chal ω)).s
+      (fun i => (sample (π.chal ω)).e.getD i []))⟩
 
-/-- The real game of the PRF locale. -/
-def KeyedPrfAssumption.realGame {n : Nat} (P : KeyedPrfAssumption n) : FinGame n :=
-  prfRealGame P.samplePos P.prf P.qPrf P.key P.adv
+/-- The ideal game of the Ring-LWE experiment: the distinguisher sees `(aᵢ, uᵢ)`. -/
+def rlweUniformGame {n nC nA : Nat} (hPos : 0 < n) (π : CoinSplit n nC nA) (m : Nat)
+    (sample : Fin nC → RlweSample) (dist : Fin nA → List (List Nat × List Nat) → Bool) :
+    FinGame n :=
+  ⟨hPos, fun ω => dist (π.advc ω)
+    (rlweUniformSamples m (fun i => (sample (π.chal ω)).a.getD i [])
+      (fun i => (sample (π.chal ω)).u.getD i []))⟩
 
-/-- The ideal game of the PRF locale. -/
-def KeyedPrfAssumption.idealGame {n : Nat} (P : KeyedPrfAssumption n) : FinGame n :=
-  prfIdealGame P.samplePos P.qPrf P.rf P.adv
+/-- **Decision Ring-LWE hardness** over `ℤ_q[X]/(X^N + 1)` with `m` samples and secret and
+    errors uniform among the elements of centered absolute value at most `β`: every
+    distinguisher with decision functions in the class `𝒜` has advantage at most `ε`. -/
+def DecisionRlweHard (𝒜 : (List (List Nat × List Nat) → Bool) → Prop) (N q m β : Nat)
+    (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA) (sample : Fin nC → RlweSample),
+    UniformOn (RlweSampleOk N q m β) sample →
+    ∀ dist : Fin nA → List (List Nat × List Nat) → Bool, (∀ a : Fin nA, 𝒜 (dist a)) →
+      GameBound (AdvDist (rlweRealGame hPos π N q m sample dist)
+        (rlweUniformGame hPos π m sample dist)) ε
 
-theorem KeyedPrfAssumption.realGame_eq {n : Nat} (P : KeyedPrfAssumption n) :
-    P.realGame = prfRealGame P.samplePos P.prf P.qPrf P.key P.adv := by rfl
+/-- Sample set of the Module-SIS challenger: a `rows × cols` matrix over `ℤ_q[X]/(X^N + 1)`. -/
+def SisMatrixOk (N q rows cols : Nat) (A : List (List (List Nat))) : Prop :=
+  A.length = rows ∧ ∀ row ∈ A, row.length = cols ∧ ∀ p ∈ row, rqPolyOk N q p = true
 
-theorem KeyedPrfAssumption.idealGame_eq {n : Nat} (P : KeyedPrfAssumption n) :
-    P.idealGame = prfIdealGame P.samplePos P.qPrf P.rf P.adv := by rfl
+/-- **Module-SIS hardness** for a uniform `rows × cols` matrix and infinity-norm bound `β`:
+    every adversary with solvers in the class `𝒜` outputs a short nonzero kernel vector with
+    probability at most `ε`. -/
+def ModuleSisHard (𝒜 : (List (List (List Nat)) → List (List Nat)) → Prop)
+    (N q rows cols β : Nat) (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA)
+    (matrix : Fin nC → List (List (List Nat))),
+    UniformOn (SisMatrixOk N q rows cols) matrix →
+    ∀ adv : Fin nA → List (List (List Nat)) → List (List Nat), (∀ a : Fin nA, 𝒜 (adv a)) →
+      GameBound (moduleSisGame hPos N q cols β (fun ω => matrix (π.chal ω))
+        (fun ω => adv (π.advc ω))).winProb ε
 
-theorem KeyedPrfAssumption.advantage_bound {n : Nat} (P : KeyedPrfAssumption n) :
-    GameBound (AdvDist P.realGame P.idealGame) P.εPrf := P.bound
+/-- Challenger sample of the dual-LPN experiment. -/
+structure DualLpnSample where
+  parity : List (List Bool)
+  noise : List Bool
+  uniform : List Bool
 
-/-- Decision Ring-LWE locale over `ℤ_modulus[X]/(X^ringDim + 1)` with `samples` samples and
-    secret and error of centered absolute value at most `errBound`. -/
-structure DecisionRlweAssumption (n : Nat) where
-  samplePos : 0 < n
-  ringDim : Nat
-  modulus : Nat
-  samples : Nat
-  errBound : Nat
-  a : Fin n → Nat → List Nat
-  s : Fin n → List Nat
-  e : Fin n → Nat → List Nat
-  u : Fin n → Nat → List Nat
-  dist : Fin n → List (List Nat × List Nat) → Bool
-  h_params : 0 < ringDim ∧ 2 ≤ modulus
-  h_secret : ∀ ω : Fin n, rqShortOk ringDim modulus errBound (s ω) = true
-  h_samples : ∀ (ω : Fin n) (i : Nat), i < samples →
-    rqPolyOk ringDim modulus (a ω i) = true ∧
-    rqShortOk ringDim modulus errBound (e ω i) = true ∧
-    rqPolyOk ringDim modulus (u ω i) = true
-  εRlwe : RatBound
-  bound : GameBound
-    (AdvDist
-      (FinGame.mk samplePos
-        (fun ω => dist ω (rlweRealSamples ringDim modulus samples (a ω) (s ω) (e ω))))
-      (FinGame.mk samplePos (fun ω => dist ω (rlweUniformSamples samples (a ω) (u ω)))))
-    εRlwe
+/-- **Dual-LPN hardness** for a uniform parity-check matrix with `rows` rows over `𝔽₂^N`, noise
+    uniform among the vectors of Hamming weight `weight`, and a uniform `rows`-bit string:
+    every distinguisher of `(H, H · e)` from `(H, u)` with decision functions in the class `𝒜`
+    has advantage at most `ε`. -/
+def DualLpnHard (𝒜 : (List (List Bool) × List Bool → Bool) → Prop) (N rows weight : Nat)
+    (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA) (sample : Fin nC → DualLpnSample),
+    UniformOn (fun x : DualLpnSample =>
+      dualLpnShapeOk N rows weight x.parity x.noise x.uniform = true) sample →
+    ∀ dist : Fin nA → List (List Bool) × List Bool → Bool, (∀ a : Fin nA, 𝒜 (dist a)) →
+      GameBound
+        (AdvDist
+          (FinGame.mk hPos (fun ω => dist (π.advc ω)
+            ((sample (π.chal ω)).parity,
+              lpnSyndrome (sample (π.chal ω)).parity (sample (π.chal ω)).noise)))
+          (FinGame.mk hPos (fun ω => dist (π.advc ω)
+            ((sample (π.chal ω)).parity, (sample (π.chal ω)).uniform)))) ε
 
-/-- The real game of the Ring-LWE locale: the distinguisher sees `(aᵢ, aᵢ · s + eᵢ)`. -/
-def DecisionRlweAssumption.rlweReal {n : Nat} (A : DecisionRlweAssumption n) : FinGame n :=
-  ⟨A.samplePos, fun ω =>
-    A.dist ω (rlweRealSamples A.ringDim A.modulus A.samples (A.a ω) (A.s ω) (A.e ω))⟩
+/-- Hardness weakens along the bound. -/
+theorem SmDtTcrHard.mono {𝒜 : Code targetIface TargetBreak → Prop}
+    {th : Bytes → Bytes → Bytes → Bytes} {seedLen q : Nat}
+    {ε ε' : RatBound} (h : SmDtTcrHard 𝒜 th seedLen q ε) (hLe : ε.le ε') :
+    SmDtTcrHard 𝒜 th seedLen q ε' :=
+  fun n nC nA hPos π seed hU adv hA => GameBound.trans (h n nC nA hPos π seed hU adv hA) hLe
 
-/-- The ideal game of the Ring-LWE locale: the distinguisher sees `(aᵢ, uᵢ)`. -/
-def DecisionRlweAssumption.rlweUniform {n : Nat} (A : DecisionRlweAssumption n) : FinGame n :=
-  ⟨A.samplePos, fun ω => A.dist ω (rlweUniformSamples A.samples (A.a ω) (A.u ω))⟩
+theorem SmDtPreHard.mono {𝒜 : Code targetIface TargetBreak → Prop}
+    {th : Bytes → Bytes → Bytes → Bytes} {seedLen inputLen q : Nat}
+    {ε ε' : RatBound} (h : SmDtPreHard 𝒜 th seedLen inputLen q ε) (hLe : ε.le ε') :
+    SmDtPreHard 𝒜 th seedLen inputLen q ε' :=
+  fun n nC nA hPos π sample hU adv hA => GameBound.trans (h n nC nA hPos π sample hU adv hA) hLe
 
-theorem DecisionRlweAssumption.advantage_bound {n : Nat} (A : DecisionRlweAssumption n) :
-    GameBound (AdvDist A.rlweReal A.rlweUniform) A.εRlwe := A.bound
+theorem ItsrHard.mono {𝒜 : Code byteOracleIface (Bytes × Bytes) → Prop}
+    {hmsg : Bytes → Bytes → List Nat} {randLen q : Nat}
+    {ε ε' : RatBound} (h : ItsrHard 𝒜 hmsg randLen q ε) (hLe : ε.le ε') :
+    ItsrHard 𝒜 hmsg randLen q ε' :=
+  fun n nC nA hPos π rand hU adv hA => GameBound.trans (h n nC nA hPos π rand hU adv hA) hLe
 
-/-- Module-SIS locale over `ℤ_modulus[X]/(X^ringDim + 1)` for a `rows × cols` matrix and
-    infinity-norm bound `betaInf`. -/
-structure ModuleSisAssumption (n : Nat) where
-  samplePos : 0 < n
-  ringDim : Nat
-  modulus : Nat
-  rows : Nat
-  cols : Nat
-  betaInf : Nat
-  matrix : Fin n → List (List (List Nat))
-  adv : Fin n → List (List (List Nat)) → List (List Nat)
-  h_params : 0 < ringDim ∧ 2 ≤ modulus
-  h_matrix : ∀ ω : Fin n, (matrix ω).length = rows ∧
-    ∀ row ∈ matrix ω, row.length = cols ∧ ∀ p ∈ row, rqPolyOk ringDim modulus p = true
-  εSis : RatBound
-  bound : GameBound (moduleSisGame samplePos ringDim modulus cols betaInf matrix adv).winProb εSis
+/-- Hardness against a class gives hardness against every smaller class. -/
+theorem SmDtTcrHard.anti {𝒜 ℬ : Code targetIface TargetBreak → Prop}
+    {th : Bytes → Bytes → Bytes → Bytes} {seedLen q : Nat} {ε : RatBound}
+    (h : SmDtTcrHard 𝒜 th seedLen q ε) (hSub : ∀ c, ℬ c → 𝒜 c) : SmDtTcrHard ℬ th seedLen q ε :=
+  fun n nC nA hPos π seed hU adv hA => h n nC nA hPos π seed hU adv (fun a => hSub _ (hA a))
 
-/-- The Module-SIS game of the locale. -/
-def ModuleSisAssumption.sisGame {n : Nat} (A : ModuleSisAssumption n) : FinGame n :=
-  moduleSisGame A.samplePos A.ringDim A.modulus A.cols A.betaInf A.matrix A.adv
+theorem SmDtPreHard.anti {𝒜 ℬ : Code targetIface TargetBreak → Prop}
+    {th : Bytes → Bytes → Bytes → Bytes} {seedLen inputLen q : Nat} {ε : RatBound}
+    (h : SmDtPreHard 𝒜 th seedLen inputLen q ε) (hSub : ∀ c, ℬ c → 𝒜 c) :
+    SmDtPreHard ℬ th seedLen inputLen q ε :=
+  fun n nC nA hPos π sample hU adv hA => h n nC nA hPos π sample hU adv (fun a => hSub _ (hA a))
 
-theorem ModuleSisAssumption.sisGame_eq {n : Nat} (A : ModuleSisAssumption n) :
-    A.sisGame = moduleSisGame A.samplePos A.ringDim A.modulus A.cols A.betaInf A.matrix A.adv := by
-  rfl
+/-- With bound `1` the proposition holds for every hash and every class:
+    `SmDtTcrHard 𝒜 th seedLen q 1` carries no information about `th`. -/
+theorem smDtTcrHard_one (𝒜 : Code targetIface TargetBreak → Prop)
+    (th : Bytes → Bytes → Bytes → Bytes) (seedLen q : Nat) :
+    SmDtTcrHard 𝒜 th seedLen q RatBound.one :=
+  fun _ _ _ _ _ _ _ _ _ => FinGame.winProb_le_one _
 
-theorem ModuleSisAssumption.sisGame_bound {n : Nat} (A : ModuleSisAssumption n) :
-    GameBound A.sisGame.winProb A.εSis := A.bound
+/-- Against the empty class every bound holds: `SmDtPreHard (fun _ => False) th … 0` carries no
+    information about `th`. A hardness hypothesis is only as strong as the class it is stated
+    for, and that class must contain the reduction adversaries of the theorem that uses it. -/
+theorem smDtPreHard_emptyClass (th : Bytes → Bytes → Bytes → Bytes) (seedLen inputLen q : Nat) :
+    SmDtPreHard (fun _ => False) th seedLen inputLen q RatBound.zero :=
+  fun _ _ _ hPos π _ _ _ hA => (hA (π.advc ⟨0, hPos⟩)).elim
 
-/-- Dual-LPN locale for silent VOLE / PCG expansion: parity-check matrix with `syndromeDim`
-    rows over `𝔽₂^ambientDim` and noise of Hamming weight `rowWeight`. -/
-structure DualLpnAssumption (n : Nat) where
-  samplePos : 0 < n
-  ambientDim : Nat
-  syndromeDim : Nat
-  rowWeight : Nat
-  parity : Fin n → List (List Bool)
-  noise : Fin n → List Bool
-  uniform : Fin n → List Bool
-  dist : Fin n → List (List Bool) × List Bool → Bool
-  h_shape : ∀ ω : Fin n,
-    dualLpnShapeOk ambientDim syndromeDim rowWeight (parity ω) (noise ω) (uniform ω) = true
-  εLpn : RatBound
-  bound : GameBound
-    (AdvDist
-      (FinGame.mk samplePos (fun ω => dist ω (parity ω, lpnSyndrome (parity ω) (noise ω))))
-      (FinGame.mk samplePos (fun ω => dist ω (parity ω, uniform ω))))
-    εLpn
+/-- With zero samples the two Ring-LWE games are the same game, so the advantage is `0`. -/
+theorem decisionRlweHard_zero_samples (𝒜 : (List (List Nat × List Nat) → Bool) → Prop)
+    (N q β : Nat) : DecisionRlweHard 𝒜 N q 0 β RatBound.zero := by
+  intro n nC nA hPos π sample _ dist _
+  have hEq : rlweRealGame hPos π N q 0 sample dist = rlweUniformGame hPos π 0 sample dist :=
+    FinGame.ext_win (fun _ => rfl)
+  rw [hEq]
+  exact adv_refl _
 
-/-- The real game of the dual-LPN locale: the distinguisher sees `(H, H · e)`. -/
-def DualLpnAssumption.lpnReal {n : Nat} (A : DualLpnAssumption n) : FinGame n :=
-  ⟨A.samplePos, fun ω => A.dist ω (A.parity ω, lpnSyndrome (A.parity ω) (A.noise ω))⟩
-
-/-- The ideal game of the dual-LPN locale: the distinguisher sees `(H, u)`. -/
-def DualLpnAssumption.lpnUniform {n : Nat} (A : DualLpnAssumption n) : FinGame n :=
-  ⟨A.samplePos, fun ω => A.dist ω (A.parity ω, A.uniform ω)⟩
-
-theorem DualLpnAssumption.advantage_bound {n : Nat} (A : DualLpnAssumption n) :
-    GameBound (AdvDist A.lpnReal A.lpnUniform) A.εLpn := A.bound
-
-/-- Composed standard-model hash-signature assumption bundle (`ITSR + SM-DT-TCR + SM-DT-PRE`). -/
-structure HashSigAssumptions (n : Nat) where
-  itsr : ItsrAssumption n
-  tcr : SmDtTcrAssumption n
-  pre : SmDtPreAssumption n
-
-/-- Combined rational upper bound `εItsr + εTcr + εPre` for `HashSigAssumptions`. -/
-@[expose] def HashSigAssumptions.totalBound {n : Nat} (A : HashSigAssumptions n) : RatBound :=
-  (A.itsr.εItsr.add A.tcr.εTcr).add A.pre.εPre
-
-/-- A forger every one of whose winning coins is a winning coin of the `ITSR`, `SM-DT-TCR` or
-    `SM-DT-PRE` experiment of the bundle wins with probability at most `εItsr + εTcr + εPre`. -/
-theorem HashSigAssumptions.forger_bound {n : Nat} (A : HashSigAssumptions n)
-    (forger : FinGame n)
-    (hExtract : ∀ ω : Fin n, forger.win ω = true →
-      A.itsr.itsrGame.win ω = true ∨
-      A.tcr.tcrGame.win ω = true ∨
-      A.pre.preGame.win ω = true) :
-    GameBound forger.winProb A.totalBound :=
-  event_le_three_reductions forger A.itsr.itsrGame A.tcr.tcrGame A.pre.preGame hExtract
-    A.itsr.itsrGame_bound A.tcr.tcrGame_bound A.pre.preGame_bound
+/-- **Three-way union bound for hash-based signatures.** If every winning coin of `G` is a
+    winning coin of an `ITSR`, an `SM-DT-TCR` or an `SM-DT-PRE` experiment whose challengers are
+    uniform and whose adversaries read only their adversary coordinate and run programs of the
+    classes the hardness hypotheses are stated for, then `Pr[G] ≤ εItsr + εTcr + εPre`. Each
+    experiment may split the coin space differently. -/
+theorem hashSig_forger_bound {n : Nat} (G : FinGame n)
+    {𝒜I : Code byteOracleIface (Bytes × Bytes) → Prop}
+    {𝒜T 𝒜P : Code targetIface TargetBreak → Prop}
+    {hmsg : Bytes → Bytes → List Nat} {th : Bytes → Bytes → Bytes → Bytes}
+    {randLen seedLen inputLen qItsr qTcr qPre : Nat} {εItsr εTcr εPre : RatBound}
+    (hItsr : ItsrHard 𝒜I hmsg randLen qItsr εItsr)
+    (hTcr : SmDtTcrHard 𝒜T th seedLen qTcr εTcr)
+    (hPre : SmDtPreHard 𝒜P th seedLen inputLen qPre εPre)
+    {nCi nAi nCt nAt nCp nAp : Nat}
+    (πi : CoinSplit n nCi nAi) (πt : CoinSplit n nCt nAt) (πp : CoinSplit n nCp nAp)
+    (rand : Fin nCi → List Bytes) (hRand : UniformOn (ItsrSampleOk randLen qItsr) rand)
+    (seed : Fin nCt → Bytes) (hSeed : UniformOn (fun s : Bytes => s.length = seedLen) seed)
+    (sample : Fin nCp → Bytes × List Bytes)
+    (hSample : UniformOn (SmDtPreSampleOk seedLen inputLen qPre) sample)
+    (advI : Fin nAi → Code byteOracleIface (Bytes × Bytes)) (hAdvI : ∀ a, 𝒜I (advI a))
+    (advT : Fin nAt → Code targetIface TargetBreak) (hAdvT : ∀ a, 𝒜T (advT a))
+    (advP : Fin nAp → Code targetIface TargetBreak) (hAdvP : ∀ a, 𝒜P (advP a))
+    (hExtract : ∀ ω : Fin n, G.win ω = true →
+      (itsrGame G.samplePos hmsg qItsr (fun ω i => (rand (πi.chal ω)).getD i [])
+        (fun ω => advI (πi.advc ω))).win ω = true ∨
+      (smDtTcrGame G.samplePos th qTcr (fun ω => seed (πt.chal ω))
+        (fun ω => advT (πt.advc ω))).win ω = true ∨
+      (smDtPreGame G.samplePos th qPre (fun ω => (sample (πp.chal ω)).1)
+        (fun ω i => (sample (πp.chal ω)).2.getD i []) (fun ω => advP (πp.advc ω))).win ω = true) :
+    GameBound G.winProb ((εItsr.add εTcr).add εPre) :=
+  event_le_three_reductions G _ _ _ hExtract
+    (hItsr n nCi nAi G.samplePos πi rand hRand advI hAdvI)
+    (hTcr n nCt nAt G.samplePos πt seed hSeed advT hAdvT)
+    (hPre n nCp nAp G.samplePos πp sample hSample advP hAdvP)
 
 /-! ### 2f. The games are determined by their indices -/
 
@@ -852,25 +1064,327 @@ theorem moduleSis_zero_vector_loses (N q cols β : Nat) (A : List (List (List Na
 #tooth_pair prfGames_agree_of_fun_eq vs prf_real_ideal_games_differ
 #tooth_pair moduleSisGame_win_sound vs moduleSis_zero_vector_loses
 
-/-! ## 3. Idealized Oracle-Model Locales (ROM / Ideal Permutation / Compressed QROM) -/
+/-! ### 2g. Degenerate primitives are refuted
 
-/-- Classical lazy random-oracle model locale tracking digest bit-width `digestBits` and
-    adversarial query budget `qRo`. -/
+For each search experiment, a primitive that carries no hardness is shown not to satisfy the
+hardness proposition for any `ε < 1` and any class containing one explicit program: that
+program wins on every coin whatever the uniform challenger samples are. Section 2h refutes
+`SM-DT-PRE` hardness of every primitive against the unrestricted class. -/
+
+private theorem constHashTcr_play (q : Nat) (hq : 0 < q) (s : Bytes) :
+    Code.play (smDtTcrOracle (fun _ _ _ => []) q) constHashTcrAdv ⟨s, [], false⟩ =
+      (⟨[], [], [0]⟩, ⟨s, [([], [])], false⟩) := by
+  have hc : (false = false ∧ ([] : List (Bytes × Bytes)).length < q ∧
+      ([] : Bytes) ∉ ([] : List (Bytes × Bytes)).map Prod.fst) :=
+    ⟨rfl, hq, fun h => nomatch h⟩
+  have hEq : smDtTcrOracle (fun _ _ _ => []) q ⟨s, [], false⟩ (.target [] []) =
+      (some [], ⟨s, [([], [])], false⟩) := iteOfPos hc _ _
+  show Code.play (smDtTcrOracle (fun _ _ _ => []) q)
+    (TargetBreak.mk [] [] [0] |> Code.ret)
+    (smDtTcrOracle (fun _ _ _ => []) q ⟨s, [], false⟩ (.target [] [])).2 = _
+  rw [hEq]
+  rfl
+
+/-- **The constant tweakable hash is not `SM-DT-TCR` hard** against any class containing the
+    two-line program `constHashTcrAdv`. For every seed length for which a uniform seed sampler
+    is given, every budget `q ≥ 1` and every `ε < 1`. -/
+theorem smDtTcrHard_constHash_refuted {nC : Nat} (hPos : 0 < nC) (seedLen q : Nat)
+    (seed : Fin nC → Bytes) (hU : UniformOn (fun s : Bytes => s.length = seedLen) seed)
+    (𝒜 : Code targetIface TargetBreak → Prop) (h𝒜 : 𝒜 constHashTcrAdv)
+    (hq : 0 < q) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ SmDtTcrHard 𝒜 (fun _ _ _ => []) seedLen q ε := by
+  intro h
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε
+    (h nC nC 1 hPos (CoinSplit.challengerOnly nC) seed hU (fun _ => constHashTcrAdv)
+      (fun _ => h𝒜))
+  show smDtTcrWin (fun _ _ _ => [])
+    (Code.play (smDtTcrOracle (fun _ _ _ => []) q) constHashTcrAdv ⟨seed ω, [], false⟩).2
+    (Code.play (smDtTcrOracle (fun _ _ _ => []) q) constHashTcrAdv ⟨seed ω, [], false⟩).1 = true
+  rw [constHashTcr_play q hq]
+  rfl
+
+/-- The empty byte string is the uniform sample of the zero-length seed space. -/
+theorem uniformOn_emptyBytes : UniformOn (fun s : Bytes => s.length = 0) (fun _ : Fin 1 => []) :=
+  uniformOn_unique _ [] rfl (fun _ hy => List.eq_nil_of_length_eq_zero hy)
+
+/-- Unconditional instance of the refutation: with seedless hashing, the constant hash is not
+    `SM-DT-TCR` hard for any `ε < 1`. -/
+theorem smDtTcrHard_constHash_refuted_seedless (𝒜 : Code targetIface TargetBreak → Prop)
+    (h𝒜 : 𝒜 constHashTcrAdv) (q : Nat) (hq : 0 < q) {ε : RatBound}
+    (hε : ε.num < ε.den) : ¬ SmDtTcrHard 𝒜 (fun _ _ _ => []) 0 q ε :=
+  smDtTcrHard_constHash_refuted Nat.one_pos 0 q _ uniformOn_emptyBytes 𝒜 h𝒜 hq hε
+
+private theorem constHashPre_play (q : Nat) (hq : 0 < q) (hidden : Nat → Bytes) (s : Bytes) :
+    Code.play (smDtPreOracle (fun _ _ _ => []) q hidden) constHashTcrAdv ⟨s, [], false⟩ =
+      (⟨[], [], [0]⟩, ⟨s, [([], hidden 0)], false⟩) := by
+  have hc : (false = false ∧ ([] : List (Bytes × Bytes)).length < q ∧
+      ([] : Bytes) ∉ ([] : List (Bytes × Bytes)).map Prod.fst) :=
+    ⟨rfl, hq, fun h => nomatch h⟩
+  have hEq : smDtPreOracle (fun _ _ _ => []) q hidden ⟨s, [], false⟩ (.target [] []) =
+      (some [], ⟨s, [([], hidden 0)], false⟩) := iteOfPos hc _ _
+  show Code.play (smDtPreOracle (fun _ _ _ => []) q hidden)
+    (TargetBreak.mk [] [] [0] |> Code.ret)
+    (smDtPreOracle (fun _ _ _ => []) q hidden ⟨s, [], false⟩ (.target [] [])).2 = _
+  rw [hEq]
+  rfl
+
+/-- **The constant tweakable hash is not `SM-DT-PRE` hard**: any input is a preimage. -/
+theorem smDtPreHard_constHash_refuted {nC : Nat} (hPos : 0 < nC) (seedLen inputLen q : Nat)
+    (sample : Fin nC → Bytes × List Bytes)
+    (hU : UniformOn (SmDtPreSampleOk seedLen inputLen q) sample)
+    (𝒜 : Code targetIface TargetBreak → Prop) (h𝒜 : 𝒜 constHashTcrAdv)
+    (hq : 0 < q) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ SmDtPreHard 𝒜 (fun _ _ _ => []) seedLen inputLen q ε := by
+  intro h
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε
+    (h nC nC 1 hPos (CoinSplit.challengerOnly nC) sample hU (fun _ => constHashTcrAdv)
+      (fun _ => h𝒜))
+  show smDtPreWin (fun _ _ _ => [])
+    (Code.play (smDtPreOracle (fun _ _ _ => []) q (fun i => (sample ω).2.getD i []))
+      constHashTcrAdv ⟨(sample ω).1, [], false⟩).2
+    (Code.play (smDtPreOracle (fun _ _ _ => []) q (fun i => (sample ω).2.getD i []))
+      constHashTcrAdv ⟨(sample ω).1, [], false⟩).1 = true
+  rw [constHashPre_play q hq]
+  rfl
+
+/-- **A subset hash that selects no position is not `ITSR` hard**: the adversary that asks
+    nothing and outputs `([], [])` is covered by the empty log. -/
+theorem itsrHard_emptySelector_refuted {nC : Nat} (hPos : 0 < nC) (randLen q : Nat)
+    (rand : Fin nC → List Bytes) (hU : UniformOn (ItsrSampleOk randLen q) rand)
+    (𝒜 : Code byteOracleIface (Bytes × Bytes) → Prop) (h𝒜 : 𝒜 (.ret ([], [])))
+    {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ ItsrHard 𝒜 (fun _ _ => []) randLen q ε := by
+  intro h
+  exact FinGame.not_bound_of_forall_win _ (fun _ => rfl) hε
+    (h nC nC 1 hPos (CoinSplit.challengerOnly nC) rand hU (fun _ => .ret ([], []))
+      (fun _ => h𝒜))
+
+/-- Distinguisher that queries the all-zero `inLen`-byte input and outputs whether the answer
+    is empty. -/
+def emptyOutputDistinguisher (inLen : Nat) : Code byteOracleIface Bool :=
+  .call (List.replicate inLen (0 : UInt8) : Bytes) (fun (r : Bytes) => .ret (decide (r = [])))
+
+private theorem emptyOutputDistinguisher_play (f : Bytes → Bytes) (q inLen : Nat) (hq : 0 < q) :
+    (Code.play (budgetedFunOracle f q) (emptyOutputDistinguisher inLen) 0).1 =
+      decide (f (List.replicate inLen (0 : UInt8)) = []) := by
+  have hEq : budgetedFunOracle f q 0 (List.replicate inLen (0 : UInt8)) =
+      (f (List.replicate inLen (0 : UInt8)), 0 + 1) := iteOfPos hq _ _
+  show (Code.play (budgetedFunOracle f q)
+    ((fun (r : Bytes) => (Code.ret (decide (r = [])) : Code byteOracleIface Bool))
+      (budgetedFunOracle f q 0 (List.replicate inLen (0 : UInt8))).1)
+    (budgetedFunOracle f q 0 (List.replicate inLen (0 : UInt8))).2).1 = _
+  rw [hEq]
+  rfl
+
+/-- **A keyed function with empty outputs is not a PRF** onto `outLen ≥ 1` bytes: one query
+    separates it from every function of the ideal sample set with advantage `1`. -/
+theorem prfHard_emptyOutput_refuted {nC : Nat} (hPos : 0 < nC) (keyLen inLen outLen q : Nat)
+    (sample : Fin nC → Bytes × (Bytes → Bytes))
+    (hU : UniformOn (PrfSampleOk keyLen inLen outLen) sample)
+    (𝒜 : Code byteOracleIface Bool → Prop) (h𝒜 : 𝒜 (emptyOutputDistinguisher inLen))
+    (hOut : 0 < outLen) (hq : 0 < q) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ PrfHard 𝒜 (fun _ _ => []) keyLen inLen outLen q ε := by
+  intro h
+  refine advDist_not_bound_of_always_never _ _ (fun ω => ?_) (fun ω => ?_) hε
+    (h nC nC 1 hPos (CoinSplit.challengerOnly nC) sample hU
+      (fun _ => emptyOutputDistinguisher inLen) (fun _ => h𝒜))
+  · exact (emptyOutputDistinguisher_play (fun _ => []) q inLen hq).trans (decide_eq_true rfl)
+  · have hLen : ((sample ω).2 (List.replicate inLen (0 : UInt8))).length = outLen :=
+      ((hU.mem ω).2 (List.replicate inLen (0 : UInt8))).1 List.length_replicate
+    have hNe : ¬ ((sample ω).2 (List.replicate inLen (0 : UInt8)) = []) := fun hNil => by
+      rw [hNil] at hLen
+      exact Nat.ne_of_lt hOut hLen
+    exact (emptyOutputDistinguisher_play (sample ω).2 q inLen hq).trans (decide_eq_false hNe)
+
+/-- **Module-SIS with no equations is not hard**: over `ℤ₂[X]/(X + 1)` with a `0 × 1` matrix
+    the vector `[[1]]` is a short nonzero kernel vector on every coin. -/
+theorem moduleSisHard_noRows_refuted (𝒜 : (List (List (List Nat)) → List (List Nat)) → Prop)
+    (h𝒜 : 𝒜 (fun _ => [[1]])) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ ModuleSisHard 𝒜 1 2 0 1 1 ε := by
+  intro h
+  have hU : UniformOn (SisMatrixOk 1 2 0 1) (fun _ : Fin 1 => []) :=
+    uniformOn_unique _ [] ⟨rfl, fun _ hr => nomatch hr⟩
+      (fun _ hy => List.eq_nil_of_length_eq_zero hy.1)
+  refine FinGame.not_bound_of_forall_win _ (fun _ => ?_) hε
+    (h 1 1 1 Nat.one_pos (CoinSplit.challengerOnly 1) _ hU (fun _ _ => [[1]]) (fun _ => h𝒜))
+  show moduleSisWin 1 2 1 1 [] [[1]] = true
+  decide
+
+#tooth_pair smDtTcrHard_one vs smDtTcrHard_constHash_refuted
+#tooth_pair SmDtTcrHard.mono vs smDtTcrHard_constHash_refuted_seedless
+#tooth_pair SmDtPreHard.mono vs smDtPreHard_constHash_refuted
+#tooth_pair ItsrHard.mono vs itsrHard_emptySelector_refuted
+#tooth_pair hashSig_forger_bound vs smDtTcrHard_constHash_refuted
+#tooth_pair uniformOn_unique vs constant_sampler_not_uniform
+
+/-! ### 2h. `SM-DT-PRE` hardness is false for the unrestricted adversary class
+
+The experiment gives the adversary the digest of the hidden input and, after `reveal`, the seed.
+An adversary that is an arbitrary function then finds a preimage by searching the finitely many
+`inputLen`-byte strings: the hidden input is one of them. So `SmDtPreHard 𝒜 th …` fails for
+every tweakable hash `th` as soon as `𝒜` contains that search program. -/
+
+/-- All byte strings of a given length. -/
+def allByteStrings : Nat → List Bytes
+  | 0 => [[]]
+  | len + 1 =>
+    (allByteStrings len).flatMap (fun t => (List.range 256).map (fun b => UInt8.ofNat b :: t))
+
+theorem mem_allByteStrings : ∀ m : Bytes, m ∈ allByteStrings m.length
+  | [] => List.Mem.head _
+  | b :: t =>
+    List.mem_flatMap.mpr ⟨t, mem_allByteStrings t,
+      List.mem_map.mpr ⟨b.toNat, List.mem_range.mpr b.toNat_lt,
+        congrArg (· :: t) UInt8.ofNat_toNat⟩⟩
+
+/-- The first element of a list satisfying `p`, and `[]` if there is none. -/
+def firstByteString (p : Bytes → Bool) : List Bytes → Bytes
+  | [] => []
+  | x :: xs => cond (p x) x (firstByteString p xs)
+
+theorem firstByteString_spec (p : Bytes → Bool) :
+    ∀ (l : List Bytes) (x : Bytes), x ∈ l → p x = true → p (firstByteString p l) = true
+  | [], _, hx, _ => nomatch hx
+  | y :: ys, x, hx, hp => by
+    show p (cond (p y) y (firstByteString p ys)) = true
+    cases hy : p y with
+    | true => exact hy
+    | false =>
+      rcases List.mem_cons.mp hx with hEq | hTail
+      · rw [hEq, hy] at hp
+        cases hp
+      · exact firstByteString_spec p ys x hTail hp
+
+/-- Second phase of preimage search: given the target digest `y`, take the seed from `reveal`
+    and return the first `inputLen`-byte string whose digest equals `y`. -/
+def preimageSearchCont (th : Bytes → Bytes → Bytes → Bytes) (inputLen : Nat) (y : Option Bytes) :
+    Code targetIface TargetBreak :=
+  .call .reveal (fun (s : Option Bytes) =>
+    .ret ⟨[], [], firstByteString (fun m => decide (some (th (s.getD []) [] m) = y))
+      (allByteStrings inputLen)⟩)
+
+/-- **Preimage search**: commit one target under the empty tweak, take the seed from `reveal`,
+    and return the first `inputLen`-byte string whose digest equals the target digest. -/
+def preimageSearchAdv (th : Bytes → Bytes → Bytes → Bytes) (inputLen : Nat) :
+    Code targetIface TargetBreak :=
+  .call (.target [] []) (preimageSearchCont th inputLen)
+
+private theorem preimageSearch_play (th : Bytes → Bytes → Bytes → Bytes) (inputLen q : Nat)
+    (hq : 0 < q) (hidden : Nat → Bytes) (s : Bytes) :
+    Code.play (smDtPreOracle th q hidden) (preimageSearchAdv th inputLen) ⟨s, [], false⟩ =
+      (⟨[], [], firstByteString
+          (fun m => decide (some (th s [] m) = some (th s [] (hidden 0))))
+          (allByteStrings inputLen)⟩,
+        ⟨s, [([], hidden 0)], true⟩) := by
+  have hc : (false = false ∧ ([] : List (Bytes × Bytes)).length < q ∧
+      ([] : Bytes) ∉ ([] : List (Bytes × Bytes)).map Prod.fst) :=
+    ⟨rfl, hq, fun h => nomatch h⟩
+  have hEq : smDtPreOracle th q hidden ⟨s, [], false⟩ (.target [] []) =
+      (some (th s [] (hidden 0)), ⟨s, [([], hidden 0)], false⟩) := iteOfPos hc _ _
+  show Code.play (smDtPreOracle th q hidden)
+    (preimageSearchCont th inputLen
+      (smDtPreOracle th q hidden ⟨s, [], false⟩ (.target [] [])).1)
+    (smDtPreOracle th q hidden ⟨s, [], false⟩ (.target [] [])).2 = _
+  rw [hEq]
+  rfl
+
+private theorem getD_zero_mem : ∀ (l : List Bytes), 0 < l.length → l.getD 0 [] ∈ l
+  | [], h => absurd h (Nat.lt_irrefl 0)
+  | _ :: xs, _ => List.Mem.head xs
+
+/-- **No tweakable hash is `SM-DT-PRE` hard against a class containing preimage search.** For
+    every `th`, every size for which a uniform challenger sampler is given, every budget
+    `q ≥ 1` and every `ε < 1`: the search adversary wins on every coin. -/
+theorem smDtPreHard_preimageSearch_refuted {nC : Nat} (hPos : 0 < nC)
+    (th : Bytes → Bytes → Bytes → Bytes) (seedLen inputLen q : Nat)
+    (sample : Fin nC → Bytes × List Bytes)
+    (hU : UniformOn (SmDtPreSampleOk seedLen inputLen q) sample)
+    (𝒜 : Code targetIface TargetBreak → Prop) (h𝒜 : 𝒜 (preimageSearchAdv th inputLen))
+    (hq : 0 < q) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ SmDtPreHard 𝒜 th seedLen inputLen q ε := by
+  intro h
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε
+    (h nC nC 1 hPos (CoinSplit.challengerOnly nC) sample hU
+      (fun _ => preimageSearchAdv th inputLen) (fun _ => h𝒜))
+  have hOk := hU.mem ω
+  have hLen : ((sample ω).2.getD 0 []).length = inputLen :=
+    hOk.2.2 _ (getD_zero_mem _ (hOk.2.1 ▸ hq))
+  have hFound := firstByteString_spec
+    (fun m => decide (some (th (sample ω).1 [] m) =
+      some (th (sample ω).1 [] ((sample ω).2.getD 0 []))))
+    (allByteStrings inputLen) ((sample ω).2.getD 0 [])
+    (hLen ▸ mem_allByteStrings ((sample ω).2.getD 0 [])) (decide_eq_true rfl)
+  have hCol := Option.some.inj (of_decide_eq_true hFound)
+  show smDtPreWin th
+    (Code.play (smDtPreOracle th q (fun i => (sample ω).2.getD i []))
+      (preimageSearchAdv th inputLen) ⟨(sample ω).1, [], false⟩).2
+    (Code.play (smDtPreOracle th q (fun i => (sample ω).2.getD i []))
+      (preimageSearchAdv th inputLen) ⟨(sample ω).1, [], false⟩).1 = true
+  rw [preimageSearch_play th inputLen q hq]
+  show ((decide (([] : Bytes) = []) && decide (th (sample ω).1 [] _ =
+    th (sample ω).1 [] ((sample ω).2.getD 0 []))) || false) = true
+  rw [decide_eq_true hCol]
+  rfl
+
+/-- **`SM-DT-PRE` hardness against all adversaries is false for every primitive.** -/
+theorem smDtPreHard_unrestricted_refuted {nC : Nat} (hPos : 0 < nC)
+    (th : Bytes → Bytes → Bytes → Bytes) (seedLen inputLen q : Nat)
+    (sample : Fin nC → Bytes × List Bytes)
+    (hU : UniformOn (SmDtPreSampleOk seedLen inputLen q) sample)
+    (hq : 0 < q) {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ SmDtPreHard (fun _ => True) th seedLen inputLen q ε :=
+  smDtPreHard_preimageSearch_refuted hPos th seedLen inputLen q sample hU _ trivial hq hε
+
+/-- Unconditional instance: with empty seeds, empty inputs and one target, no tweakable hash is
+    `SM-DT-PRE` hard against all adversaries for any `ε < 1`. -/
+theorem smDtPreHard_unrestricted_refuted_trivialSizes (th : Bytes → Bytes → Bytes → Bytes)
+    {ε : RatBound} (hε : ε.num < ε.den) : ¬ SmDtPreHard (fun _ => True) th 0 0 1 ε :=
+  smDtPreHard_unrestricted_refuted Nat.one_pos th 0 0 1 (fun _ => ([], [[]]))
+    (uniformOn_unique _ ([], [[]])
+      ⟨rfl, rfl, fun h hh => by
+        rcases List.mem_cons.mp hh with hEq | hNil
+        · rw [hEq]
+          rfl
+        · exact nomatch hNil⟩
+      (fun y hy => by
+        obtain ⟨y1, y2⟩ := y
+        obtain ⟨h1, h2, h3⟩ := hy
+        have hy1 : y1 = [] := List.eq_nil_of_length_eq_zero h1
+        match y2, h2, h3 with
+        | [z], _, h3 =>
+          have hz : z = [] := List.eq_nil_of_length_eq_zero (h3 z (List.Mem.head _))
+          rw [hy1, hz]))
+    Nat.one_pos hε
+
+#tooth_pair SmDtPreHard.anti vs smDtPreHard_unrestricted_refuted
+#tooth_pair smDtPreHard_emptyClass vs smDtPreHard_unrestricted_refuted_trivialSizes
+#tooth_pair SmDtTcrHard.anti vs smDtPreHard_preimageSearch_refuted
+
+/-! ## 3. Idealized-Oracle Parameter Records (ROM / Ideal Permutation / Compressed QROM)
+
+These three records carry the sizes and query budgets that bound expressions elsewhere are
+written in. They are parameter carriers, not assumptions: none of them states a sampling law, and
+a theorem that takes one as an argument assumes nothing about any oracle. An experiment in which
+an oracle is sampled states that explicitly, as the hardness propositions of section 2e do with
+`UniformOn` and as `aggregateSoundnessGame` (`Spec.IdealAggregate`) does with its oracle family. -/
+
+/-- Parameter record of a random-oracle analysis: digest bit-width `digestBits` and query budget
+    `qRo`. Not an assumption. -/
 structure RandomOracleModel where
   digestBits : Nat
   qRo : Nat
   h_width : 256 ≤ digestBits
 
-/-- Ideal public-permutation / sponge model locale tracking state width `stateBits`,
-    capacity `capacityBits`, and permutation query budget `qPerm`. -/
+/-- Parameter record of an ideal-permutation / sponge analysis: state width `stateBits`,
+    capacity `capacityBits` and permutation query budget `qPerm`. Not an assumption. -/
 structure IdealPermutationModel where
   stateBits : Nat
   capacityBits : Nat
   qPerm : Nat
   h_cap : 256 ≤ capacityBits ∧ capacityBits ≤ stateBits
 
-/-- Zhandry compressed quantum random-oracle model (`QROM`) locale tracking digest width `digestBits`
-    and superposition query budget `qQuantum`. -/
+/-- Parameter record of a compressed-oracle (`QROM`) analysis: digest width `digestBits` and
+    superposition query budget `qQuantum`. Not an assumption. -/
 structure CompressedQromModel where
   digestBits : Nat
   qQuantum : Nat
@@ -909,7 +1423,7 @@ structure FsyncStorageModel where
   anchor : State → Nat
 
 /-- Run a trace of storage events. -/
-def FsyncStorageModel.run (M : FsyncStorageModel) : M.State → List FsyncOp → M.State
+@[expose] def FsyncStorageModel.run (M : FsyncStorageModel) : M.State → List FsyncOp → M.State
   | s, [] => s
   | s, op :: rest => M.run (M.step s op) rest
 
@@ -920,14 +1434,28 @@ theorem FsyncStorageModel.run_append (M : FsyncStorageModel) :
 
 /-- The commit protocol for one record: stage, `fsync` the file, `rename`, `fsync` the
     directory, advance the anchor. -/
-def walCommitOps (rec : Bytes) : List FsyncOp :=
+@[expose] def walCommitOps (rec : Bytes) : List FsyncOp :=
   [.append rec, .fsyncFile, .rename, .fsyncDir, .bumpAnchor]
 
-/-- POSIX crash-consistent write-ahead log contract for the storage environment `M`. -/
+/-- POSIX crash-consistent write-ahead log contract for the storage environment `M`.
+
+    `fsyncFile` denotes a flush to the storage medium (`F_FULLFSYNC` / a drive-cache flush), not
+    a hand-off to a volatile drive cache. `committedRecordLast` does not say that a commit adds
+    exactly one record: a `rename` that an earlier, unfinished commit performed is made durable
+    by the directory `fsync` of the next commit, so the durable log may grow by those pending
+    records first. `noRollback`, `anchorMonotone` and `anchorWitnessesDurable` are properties of
+    the storage together with the host discipline of the write-ahead log: `rename` is refused
+    unless the staging file is synced, and the anchor is not advanced while a rename is waiting
+    for its directory `fsync`.
+
+    Instance for the three-tier `PosixFsState` model: `Qsag.PosixWalHost.walModel_contract`
+    (`Exec.PlatformContractInstances`). -/
 structure PosixFsyncContract (M : FsyncStorageModel) : Prop where
-  /-- The commit protocol appends exactly its record to the durable log. -/
-  committedRecordDurable : ∀ (s : M.State) (rec : Bytes),
-    M.durable (M.run s (walCommitOps rec)) = M.durable s ++ [rec]
+  /-- After the commit protocol the record is the last durable record, behind everything that
+      was durable and everything already renamed. -/
+  committedRecordLast : ∀ (s : M.State) (rec : Bytes),
+    ∃ pending : List Bytes,
+      M.durable (M.run s (walCommitOps rec)) = M.durable s ++ pending ++ [rec]
   /-- No event trace, crashes included, removes or reorders durable records. -/
   noRollback : ∀ (s : M.State) (tr : List FsyncOp), M.durable s <+: M.durable (M.run s tr)
   /-- The external anchor never decreases. -/
@@ -943,7 +1471,8 @@ theorem PosixFsyncContract.committed_survives {M : FsyncStorageModel} (c : Posix
     rec ∈ M.durable (M.run s (walCommitOps rec ++ post)) := by
   rw [M.run_append]
   obtain ⟨t, ht⟩ := c.noRollback (M.run s (walCommitOps rec)) post
-  rw [← ht, c.committedRecordDurable]
+  obtain ⟨pending, hp⟩ := c.committedRecordLast s rec
+  rw [← ht, hp]
   exact List.mem_append_left t (List.mem_append_right _ (List.Mem.head _))
 
 /-- A whole-log snapshot shorter than the anchor is never what recovery returns. -/
@@ -953,35 +1482,39 @@ theorem PosixFsyncContract.anchor_excludes_stale_snapshot {M : FsyncStorageModel
     M.anchor s ≤ (M.durable (M.run s tr)).length :=
   Nat.le_trans (c.anchorMonotone s tr) (c.anchorWitnessesDurable s tr h)
 
-/-- State of the reference journal: the durable log, the staged record, whether the staging
-    file is synced, whether it has been renamed, and the anchor. -/
+/-- State of the reference journal: the durable log, the records renamed into the log but not
+    yet covered by a directory `fsync`, the staged record, whether the staging file is synced,
+    and the anchor. -/
 structure FsyncJournalState where
   durable : List Bytes
+  pending : List Bytes
   staged : Option Bytes
   fileSynced : Bool
-  renamed : Bool
   anchor : Nat
 
-/-- Reference journal. A record becomes durable at the directory `fsync` that follows a
-    `rename` of a synced staging file. With `rollbackOnCrash = true` a crash discards the
-    durable log (a volume that loses synced data). -/
+/-- `rename` in the reference journal: a synced staged record joins the pending records; an
+    unsynced or absent staging file is not renamed. -/
+def fsyncJournalRename (s : FsyncJournalState) : FsyncJournalState :=
+  match s.fileSynced, s.staged with
+  | true, some rec => { s with pending := s.pending ++ [rec], staged := none, fileSynced := false }
+  | _, _ => s
+
+/-- Reference journal. A renamed record stays renamed: `append` starts a new staging file and
+    leaves the pending records alone. Pending records become durable at the next directory
+    `fsync`; a crash drops them. With `rollbackOnCrash = true` a crash also discards the durable
+    log (a volume that loses synced data). -/
 def fsyncJournalStep (rollbackOnCrash : Bool) (s : FsyncJournalState) :
     FsyncOp → FsyncJournalState
-  | .append rec => { s with staged := some rec, fileSynced := false, renamed := false }
+  | .append rec => { s with staged := some rec, fileSynced := false }
   | .fsyncFile => { s with fileSynced := s.staged.isSome }
-  | .rename => { s with renamed := s.fileSynced }
-  | .fsyncDir =>
-    { s with
-      durable := s.durable ++ (if s.renamed then s.staged.toList else [])
-      staged := if s.renamed then none else s.staged
-      fileSynced := s.fileSynced && !s.renamed
-      renamed := false }
+  | .rename => fsyncJournalRename s
+  | .fsyncDir => { s with durable := s.durable ++ s.pending, pending := [] }
   | .bumpAnchor => { s with anchor := Nat.max s.anchor s.durable.length }
   | .crash =>
     { durable := if rollbackOnCrash then [] else s.durable
+      pending := []
       staged := none
       fileSynced := false
-      renamed := false
       anchor := s.anchor }
 
 /-- The reference journal as a storage environment. -/
@@ -991,13 +1524,21 @@ def fsyncJournalModel (rollbackOnCrash : Bool) : FsyncStorageModel where
   durable := fun s => s.durable
   anchor := fun s => s.anchor
 
+private theorem fsyncJournalRename_facts (s : FsyncJournalState) :
+    (fsyncJournalRename s).durable = s.durable ∧ (fsyncJournalRename s).anchor = s.anchor := by
+  unfold fsyncJournalRename
+  split <;> exact ⟨rfl, rfl⟩
+
 private theorem fsyncJournalStep_prefix (s : FsyncJournalState) (op : FsyncOp) :
     s.durable <+: (fsyncJournalStep false s op).durable := by
   cases op with
   | fsyncDir => exact List.prefix_append _ _
   | append _ => exact List.prefix_refl _
   | fsyncFile => exact List.prefix_refl _
-  | rename => exact List.prefix_refl _
+  | rename =>
+    show s.durable <+: (fsyncJournalRename s).durable
+    rw [(fsyncJournalRename_facts s).1]
+    exact List.prefix_refl _
   | bumpAnchor => exact List.prefix_refl _
   | crash => exact List.prefix_refl _
 
@@ -1007,7 +1548,10 @@ private theorem fsyncJournalStep_anchor (s : FsyncJournalState) (op : FsyncOp) :
   | bumpAnchor => exact Nat.le_max_left _ _
   | append _ => exact Nat.le_refl _
   | fsyncFile => exact Nat.le_refl _
-  | rename => exact Nat.le_refl _
+  | rename =>
+    show s.anchor ≤ (fsyncJournalRename s).anchor
+    rw [(fsyncJournalRename_facts s).2]
+    exact Nat.le_refl _
   | fsyncDir => exact Nat.le_refl _
   | crash => exact Nat.le_refl _
 
@@ -1017,12 +1561,15 @@ private theorem fsyncJournalStep_anchor_le (s : FsyncJournalState) (op : FsyncOp
   cases op with
   | bumpAnchor => exact Nat.max_le.mpr ⟨h, Nat.le_refl _⟩
   | fsyncDir =>
-    show s.anchor ≤ (s.durable ++ (if s.renamed then s.staged.toList else [])).length
+    show s.anchor ≤ (s.durable ++ s.pending).length
     rw [List.length_append]
     exact Nat.le_trans h (Nat.le_add_right _ _)
   | append _ => exact h
   | fsyncFile => exact h
-  | rename => exact h
+  | rename =>
+    show (fsyncJournalRename s).anchor ≤ (fsyncJournalRename s).durable.length
+    rw [(fsyncJournalRename_facts s).1, (fsyncJournalRename_facts s).2]
+    exact h
   | crash => exact h
 
 private theorem fsyncJournal_run_prefix :
@@ -1052,7 +1599,9 @@ private theorem fsyncJournal_run_anchor_le :
 
 /-- The reference journal that keeps synced data across crashes satisfies the contract. -/
 theorem fsyncJournalModel_contract : PosixFsyncContract (fsyncJournalModel false) where
-  committedRecordDurable _ _ := by rfl
+  committedRecordLast s rec := ⟨s.pending, by
+    show s.durable ++ (s.pending ++ [rec]) = s.durable ++ s.pending ++ [rec]
+    rw [List.append_assoc]⟩
   noRollback s tr := fsyncJournal_run_prefix tr s
   anchorMonotone s tr := fsyncJournal_run_anchor tr s
   anchorWitnessesDurable s tr h := fsyncJournal_run_anchor_le tr s h
@@ -1060,10 +1609,20 @@ theorem fsyncJournalModel_contract : PosixFsyncContract (fsyncJournalModel false
 /-- A volume that loses its durable log at a crash has no contract. -/
 theorem fsync_rollback_volume_has_no_contract : ¬ PosixFsyncContract (fsyncJournalModel true) := by
   intro c
-  obtain ⟨t, ht⟩ := c.noRollback ⟨[[]], none, false, false, 0⟩ [.crash]
+  obtain ⟨t, ht⟩ := c.noRollback ⟨[[]], [], none, false, 0⟩ [.crash]
   have hLen := congrArg List.length ht
   rw [List.length_append] at hLen
   exact Nat.succ_ne_zero _ (Nat.eq_zero_of_add_eq_zero_right hLen)
+
+/-- A commit does not add exactly one record: in the reference journal, a commit started while
+    an earlier rename is waiting for its directory `fsync` makes that record durable too. The
+    law "the commit protocol appends exactly its record" is false for honest storage. -/
+theorem fsyncJournal_commit_flushes_pending_rename :
+    ¬ ∀ (s : (fsyncJournalModel false).State) (rec : Bytes),
+      (fsyncJournalModel false).durable ((fsyncJournalModel false).run s (walCommitOps rec)) =
+        (fsyncJournalModel false).durable s ++ [rec] := by
+  intro h
+  exact absurd (congrArg List.length (h ⟨[], [[1]], none, false, 0⟩ [])) (by decide)
 
 /-! ### 4b. Authenticated point-to-point channels -/
 
@@ -1082,9 +1641,21 @@ inductive ChannelEvent where
   | deliver (m : ChannelMsg)
   deriving DecidableEq, Repr
 
+/-- The honest run that sends and then delivers each message of `msgs` once, in order. -/
+def honestChannelRun (msgs : List ChannelMsg) : List ChannelEvent :=
+  msgs.flatMap (fun m => [.send m, .deliver m])
+
 /-- Sender-authenticated, replay-protected channel contract for a network environment given
-    by its set `admits` of possible event traces. -/
+    by its set `admits` of possible event traces. The environment must admit the honest runs,
+    so the empty environment is not an instance.
+
+    No instance exists in this library; `checkedChannel_contract` is a reference model only.
+    The one network model of the execution layer (`RssParticipant.networkStep`) allows
+    re-delivery and leaves replay handling to the receiving node, so it does not satisfy
+    `replayProtected`. -/
 structure AuthenticatedChannelContract (admits : List ChannelEvent → Prop) : Prop where
+  /-- Sending pairwise different messages and delivering each once is possible. -/
+  honestRunsAdmitted : ∀ msgs : List ChannelMsg, msgs.Nodup → admits (honestChannelRun msgs)
   /-- Every delivery is preceded by the matching send from the named sender. -/
   peerAuthenticated : ∀ (tr : List ChannelEvent), admits tr →
     ∀ (pre post : List ChannelEvent) (m : ChannelMsg),
@@ -1159,9 +1730,27 @@ private theorem channelRun_authentic (m : ChannelMsg) (post : List ChannelEvent)
     · exact .inl hSent
     · exact .inr (List.mem_cons_of_mem _ hPre)
 
+private theorem channelRun_honest :
+    ∀ (msgs : List ChannelMsg) (sent dl : List ChannelMsg), msgs.Nodup →
+      (∀ m ∈ msgs, m ∉ dl) → channelRun (honestChannelRun msgs) sent dl = true
+  | [], _, _, _, _ => rfl
+  | m :: rest, sent, dl, hNd, hFresh => by
+    obtain ⟨hHead, hTail⟩ := List.nodup_cons.mp hNd
+    have ih := channelRun_honest rest (m :: sent) (m :: dl) hTail (fun m' hm' hIn => by
+      rcases List.mem_cons.mp hIn with hEq | hOld
+      · exact hHead (hEq ▸ hm')
+      · exact hFresh m' (List.mem_cons_of_mem _ hm') hOld)
+    show (decide (m ∈ m :: sent) &&
+      (!decide (m ∈ dl) && channelRun (honestChannelRun rest) (m :: sent) (m :: dl))) = true
+    have h1 : decide (m ∈ m :: sent) = true := decide_eq_true (List.Mem.head sent)
+    have h2 : decide (m ∈ dl) = false := decide_eq_false (hFresh m (List.Mem.head rest))
+    rw [h1, h2, ih]
+    rfl
+
 /-- The reference channel satisfies the contract. -/
 theorem checkedChannel_contract :
     AuthenticatedChannelContract (fun tr => channelRun tr [] [] = true) where
+  honestRunsAdmitted msgs hNd := channelRun_honest msgs [] [] hNd (fun _ _ h => nomatch h)
   peerAuthenticated tr hRun pre post m hEq := by
     rw [hEq] at hRun
     rcases channelRun_authentic m post pre [] [] hRun with hSent | hPre
@@ -1176,6 +1765,12 @@ theorem open_relay_has_no_channel_contract :
     ¬ AuthenticatedChannelContract (fun _ => True) := by
   intro c
   exact nomatch c.peerAuthenticated [.deliver ⟨0, 0, 0, []⟩] trivial [] [] ⟨0, 0, 0, []⟩ rfl
+
+/-- A network that admits no trace (it delivers nothing, and does not even exist as a run) has
+    no contract: the laws are not allowed to hold vacuously. -/
+theorem empty_network_has_no_channel_contract :
+    ¬ AuthenticatedChannelContract (fun _ => False) :=
+  fun c => c.honestRunsAdmitted [] List.nodup_nil
 
 /-! ### 4c. Secret-share erasure at quarantine -/
 
@@ -1207,7 +1802,12 @@ def ShareMemoryModel.run (M : ShareMemoryModel) : M.State → List ShareMemOp �
   | s, op :: rest => M.run (M.step s op) rest
 
 /-- Post-quarantine secret-key erasure contract (`ct_memzero` before a fault or error return)
-    for the memory environment `M`. -/
+    for the memory environment `M`.
+
+    No instance exists in this library; `shareMemoryModel_contract` is a reference model only.
+    The execution layer models erasure logically (`shareSlot := none`), and the machine layer
+    proves `ct_memzero` per function; neither is a `ShareMemoryModel` with a physical residue
+    across a quarantine event. -/
 structure KeyErasureContract (M : ShareMemoryModel) : Prop where
   /-- A loaded share is physically present in its slot. -/
   loadStoresShare : ∀ (s : M.State) (slot : Nat) (bytes : Bytes),
@@ -1265,36 +1865,51 @@ theorem elided_zeroization_has_no_erasure_contract :
 /-! ### 4d. Data-independent timing and SIMT workgroup execution -/
 
 /-- Hardware data-independent timing (`DOIT` / `DIT`) contract. `observe mode op data` is the
-    timing observation of executing instruction `op` on operand values `data`; in the
-    constant-time-safe mode it does not depend on `data`. -/
+    timing observation of executing `op` on operand values `data` with the processor in mode
+    `mode`; with the processor in `ExecMode.constantTimeSafe` it does not depend on `data`.
+
+    `Op` is the set of admitted kernel entries, not the instruction set: an ISA has
+    instructions whose timing depends on operands in every mode (integer division), so the law
+    is satisfiable only for entries restricted to the data-independent subset.
+
+    The contract says nothing about which mode the processor is in. That the kernels run with
+    `DIT` / `DOITM` set and clean SIMD upper halves is a hardware and operating-system
+    assumption; every consequence below takes the mode as a hypothesis, and
+    `dit_contract_silent_outside_safe_mode` shows that a contract constrains no other mode.
+    The `speculationFence` bit of `ExecMode` is part of the safe mode but no leakage model of
+    `Machine.ConstantTimeIsa` reads it: nothing here is a statement about transient execution.
+
+    Instances: `Qsag.ConstantTimeIsa.armDitContract`, `x86DitContract`
+    (`Machine.PlatformContractInstances`). -/
 structure DitHardwareContract (Op Data Obs : Type) where
-  mode : ExecMode
-  mode_safe : mode = ExecMode.constantTimeSafe
   observe : ExecMode → Op → Data → Obs
   dataIndependent : ∀ (op : Op) (d₁ d₂ : Data),
     observe ExecMode.constantTimeSafe op d₁ = observe ExecMode.constantTimeSafe op d₂
 
-theorem DitHardwareContract.dit_enabled {Op Data Obs : Type} (c : DitHardwareContract Op Data Obs) :
-    c.mode.ditEnabled = true ∧ c.mode.cleanSimdUpper = true ∧ c.mode.speculationFence = true := by
-  rw [c.mode_safe]
-  exact ⟨rfl, rfl, rfl⟩
+/-- The safe mode has `DIT` enabled, clean SIMD upper halves and the speculation fence. -/
+theorem ExecMode.constantTimeSafe_flags :
+    ExecMode.constantTimeSafe.ditEnabled = true ∧
+    ExecMode.constantTimeSafe.cleanSimdUpper = true ∧
+    ExecMode.constantTimeSafe.speculationFence = true :=
+  ⟨rfl, rfl, rfl⟩
 
-/-- Two executions of the same instruction sequence on different operand values produce the
-    same timing trace. -/
+/-- If the processor is in the safe mode, two executions of the same sequence of kernel entries
+    on different operand values produce the same timing trace. -/
 theorem DitHardwareContract.trace_data_independent {Op Data Obs : Type}
-    (c : DitHardwareContract Op Data Obs) :
+    (c : DitHardwareContract Op Data Obs) (mode : ExecMode)
+    (hMode : mode = ExecMode.constantTimeSafe) :
     ∀ (tr₁ tr₂ : List (Op × Data)), tr₁.map Prod.fst = tr₂.map Prod.fst →
-      tr₁.map (fun e => c.observe c.mode e.1 e.2) = tr₂.map (fun e => c.observe c.mode e.1 e.2)
+      tr₁.map (fun e => c.observe mode e.1 e.2) = tr₂.map (fun e => c.observe mode e.1 e.2)
   | [], [], _ => rfl
   | [], _ :: _, h => nomatch h
   | _ :: _, [], h => nomatch h
   | (op₁, d₁) :: r₁, (op₂, d₂) :: r₂, h => by
     have hOp : op₁ = op₂ := List.head_eq_of_cons_eq h
     have hTail : r₁.map Prod.fst = r₂.map Prod.fst := List.tail_eq_of_cons_eq h
-    have ih := c.trace_data_independent r₁ r₂ hTail
-    show c.observe c.mode op₁ d₁ :: r₁.map (fun e => c.observe c.mode e.1 e.2) =
-      c.observe c.mode op₂ d₂ :: r₂.map (fun e => c.observe c.mode e.1 e.2)
-    rw [ih, hOp, c.mode_safe, c.dataIndependent op₂ d₁ d₂]
+    have ih := c.trace_data_independent mode hMode r₁ r₂ hTail
+    show c.observe mode op₁ d₁ :: r₁.map (fun e => c.observe mode e.1 e.2) =
+      c.observe mode op₂ d₂ :: r₂.map (fun e => c.observe mode e.1 e.2)
+    rw [ih, hOp, hMode, c.dataIndependent op₂ d₁ d₂]
 
 /-- An execution unit whose timing reveals its operand has no contract. -/
 theorem operand_timed_unit_has_no_dit_contract :
@@ -1304,31 +1919,51 @@ theorem operand_timed_unit_has_no_dit_contract :
   rw [hObs] at h
   exact absurd h (by decide)
 
-/-- GPU SIMT workgroup execution of a SPIR-V batch-verification / NTT kernel: the subgroup and
-    workgroup sizes, the basic-block trace of every invocation and the storage cells every
-    invocation writes. The subgroup size divides the workgroup size. -/
+/-- A contract constrains the safe mode only: the unit that is silent with `DIT` enabled and
+    reveals its operand otherwise has a contract, and leaks with `DIT` disabled. -/
+theorem dit_contract_silent_outside_safe_mode :
+    ∃ c : DitHardwareContract Unit Nat Nat,
+      ¬ (c.observe { ExecMode.constantTimeSafe with ditEnabled := false } () 0 =
+         c.observe { ExecMode.constantTimeSafe with ditEnabled := false } () 1) :=
+  ⟨{ observe := fun mode _ d => if mode.ditEnabled then 0 else d
+     dataIndependent := fun _ _ _ => rfl }, by decide⟩
+
+/-- GPU SIMT workgroup execution of one barrier epoch of a SPIR-V batch-verification / NTT
+    kernel: the subgroup and workgroup sizes, the basic-block trace of every invocation, and
+    the storage cells every invocation writes and reads during the epoch. The subgroup size
+    divides the workgroup size.
+
+    The contract is per barrier epoch. A kernel with `OpControlBarrier`s is a sequence of
+    epochs, each with its own contract; the access sets of different epochs are not compared,
+    since a barrier orders them. -/
 structure SimtWorkgroupContract where
   subgroupSize : Nat
   workgroupSize : Nat
   blockTrace : Nat → List Nat
   writeSet : Nat → List Nat
+  readSet : Nat → List Nat
   h_divides : 0 < subgroupSize ∧ subgroupSize ∣ workgroupSize
 
 theorem SimtWorkgroupContract.h_subgroup_pos (c : SimtWorkgroupContract) : 0 < c.subgroupSize :=
   c.h_divides.1
 
 /-- Uniform control flow: invocations of one subgroup execute the same basic blocks. -/
-def SimtWorkgroupContract.UniformControlFlow (c : SimtWorkgroupContract) : Prop :=
+@[expose] def SimtWorkgroupContract.UniformControlFlow (c : SimtWorkgroupContract) : Prop :=
   ∀ i j : Nat, i < c.workgroupSize → j < c.workgroupSize →
     i / c.subgroupSize = j / c.subgroupSize → c.blockTrace i = c.blockTrace j
 
-/-- Disjoint storage bindings: no storage cell is written by two invocations. -/
-def SimtWorkgroupContract.DisjointStorageBindings (c : SimtWorkgroupContract) : Prop :=
+/-- Disjoint storage bindings: a storage cell written by an invocation is neither written nor
+    read by any other invocation in the epoch (`W(i) ∩ (W(j) ∪ R(j)) = ∅` for `i ≠ j`). This is
+    the data-race-freedom condition under which the schedule of an epoch does not matter. -/
+@[expose] def SimtWorkgroupContract.DisjointStorageBindings (c : SimtWorkgroupContract) : Prop :=
   ∀ i j : Nat, i < c.workgroupSize → j < c.workgroupSize → i ≠ j →
-    ∀ cell ∈ c.writeSet i, cell ∉ c.writeSet j
+    ∀ cell ∈ c.writeSet i, cell ∉ c.writeSet j ∧ cell ∉ c.readSet j
 
-/-- Well-formed SIMT execution: divisibility of the sizes together with both safety
-    properties of the execution. -/
+/-- Well-formed SIMT execution of an epoch: divisibility of the sizes together with both
+    safety properties of the execution.
+
+    Instances: `Qsag.simtEpochContract_wellFormed_of_ownerCheck`,
+    `Qsag.faial_disjointStorageBindings` (`Machine.PlatformContractInstances`). -/
 structure WellFormedSimtContract (c : SimtWorkgroupContract) : Prop where
   h_divides : 0 < c.subgroupSize ∧ c.subgroupSize ∣ c.workgroupSize
   uniformControlFlow : c.UniformControlFlow
@@ -1348,14 +1983,23 @@ theorem WellFormedSimtContract.subgroup_leader_trace {c : SimtWorkgroupContract}
     (Nat.lt_of_le_of_lt (Nat.div_mul_le_self i c.subgroupSize) hi)
     (Nat.mul_div_cancel _ w.h_divides.1).symm
 
-/-- A storage cell written inside a well-formed workgroup has a unique writer. -/
+/-- A storage cell written inside a well-formed epoch has a unique writer. -/
 theorem WellFormedSimtContract.write_race_free {c : SimtWorkgroupContract}
     (w : WellFormedSimtContract c) (i j cell : Nat)
     (hi : i < c.workgroupSize) (hj : j < c.workgroupSize)
     (hci : cell ∈ c.writeSet i) (hcj : cell ∈ c.writeSet j) : i = j :=
   match Nat.decEq i j with
   | .isTrue h => h
-  | .isFalse h => absurd hcj (w.disjointStorageBindings i j hi hj h cell hci)
+  | .isFalse h => absurd hcj (w.disjointStorageBindings i j hi hj h cell hci).1
+
+/-- A storage cell written inside a well-formed epoch is read only by its writer. -/
+theorem WellFormedSimtContract.read_write_race_free {c : SimtWorkgroupContract}
+    (w : WellFormedSimtContract c) (i j cell : Nat)
+    (hi : i < c.workgroupSize) (hj : j < c.workgroupSize)
+    (hci : cell ∈ c.writeSet i) (hcj : cell ∈ c.readSet j) : i = j :=
+  match Nat.decEq i j with
+  | .isTrue h => h
+  | .isFalse h => absurd hcj (w.disjointStorageBindings i j hi hj h cell hci).2
 
 /-- Subgroup size `32` with workgroup size `33` is not a SIMT contract. -/
 theorem simt_subgroup32_workgroup33_rejected :
@@ -1371,6 +2015,7 @@ def racingSimtContract : SimtWorkgroupContract where
   workgroupSize := 2
   blockTrace _ := []
   writeSet _ := [0]
+  readSet _ := []
   h_divides := ⟨Nat.one_pos, ⟨2, rfl⟩⟩
 
 /-- A workgroup with a write race is not well formed, whatever its sizes. -/
@@ -1379,12 +2024,32 @@ theorem racing_simt_not_wellFormed : ¬ WellFormedSimtContract racingSimtContrac
   exact absurd (w.write_race_free 0 1 0 (by decide) (by decide) (List.Mem.head _) (List.Mem.head _))
     (by decide)
 
+/-- Invocation `0` writes cell `0`, invocation `1` reads it: disjoint writes, one read/write
+    race. -/
+def readRacingSimtContract : SimtWorkgroupContract where
+  subgroupSize := 1
+  workgroupSize := 2
+  blockTrace _ := []
+  writeSet i := if i = 0 then [0] else []
+  readSet i := if i = 1 then [0] else []
+  h_divides := ⟨Nat.one_pos, ⟨2, rfl⟩⟩
+
+/-- A workgroup in which one invocation reads a cell another writes in the same epoch is not
+    well formed, although no cell has two writers. -/
+theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSimtContract := by
+  intro w
+  exact absurd (w.read_write_race_free 0 1 0 (by decide) (by decide) (List.Mem.head _)
+    (List.Mem.head _)) (by decide)
+
 #tooth_pair PosixFsyncContract.committed_survives vs fsync_rollback_volume_has_no_contract
 #tooth_pair checkedChannel_contract vs open_relay_has_no_channel_contract
 #tooth_pair shareMemoryModel_contract vs elided_zeroization_has_no_erasure_contract
 #tooth_pair DitHardwareContract.trace_data_independent vs operand_timed_unit_has_no_dit_contract
 #tooth_pair SimtWorkgroupContract.subgroups_tile vs simt_subgroup32_workgroup33_rejected
 #tooth_pair WellFormedSimtContract.write_race_free vs racing_simt_not_wellFormed
+#tooth_pair WellFormedSimtContract.read_write_race_free vs read_racing_simt_not_wellFormed
+#tooth_pair PosixFsyncContract.anchor_excludes_stale_snapshot vs fsyncJournal_commit_flushes_pending_rename
+#tooth_pair checkedChannel_contract vs empty_network_has_no_channel_contract
 
 #verify_constructive
   Qsag.Spec.SecondPreimage.toCollision_collides
@@ -1402,14 +2067,32 @@ theorem racing_simt_not_wellFormed : ¬ WellFormedSimtContract racingSimtContrac
   Qsag.Spec.itsrRun_log_length_le
   Qsag.Spec.prfGames_agree_of_fun_eq
   Qsag.Spec.moduleSisGame_win_sound
-  Qsag.Spec.SmDtTcrAssumption.tcrGame_bound
-  Qsag.Spec.SmDtPreAssumption.preGame_bound
-  Qsag.Spec.ItsrAssumption.itsrGame_bound
-  Qsag.Spec.KeyedPrfAssumption.advantage_bound
-  Qsag.Spec.DecisionRlweAssumption.advantage_bound
-  Qsag.Spec.ModuleSisAssumption.sisGame_bound
-  Qsag.Spec.DualLpnAssumption.advantage_bound
-  Qsag.Spec.HashSigAssumptions.forger_bound
+  Qsag.Spec.FinGame.not_bound_of_forall_win
+  Qsag.Spec.FinGame.bound_zero_of_forall_lose
+  Qsag.Spec.FinGame.winProb_le_one
+  Qsag.Spec.advDist_not_bound_of_always_never
+  Qsag.Spec.CoinSplit.chal_free
+  Qsag.Spec.prodCoin_right_pos
+  Qsag.Spec.prodCoin_quot_lt
+  Qsag.Spec.prodCoin_pair_lt
+  Qsag.Spec.prodCoin_pair_quot
+  Qsag.Spec.prodCoin_pair_rem
+  Qsag.Spec.uniformOn_unique
+  Qsag.Spec.constant_sampler_not_uniform
+  Qsag.Spec.CoinSplit.sample_not_adversary_determined
+  Qsag.Spec.SmDtTcrHard.mono
+  Qsag.Spec.SmDtPreHard.mono
+  Qsag.Spec.ItsrHard.mono
+  Qsag.Spec.smDtTcrHard_one
+  Qsag.Spec.decisionRlweHard_zero_samples
+  Qsag.Spec.hashSig_forger_bound
+  Qsag.Spec.smDtTcrHard_constHash_refuted
+  Qsag.Spec.uniformOn_emptyBytes
+  Qsag.Spec.smDtTcrHard_constHash_refuted_seedless
+  Qsag.Spec.smDtPreHard_constHash_refuted
+  Qsag.Spec.itsrHard_emptySelector_refuted
+  Qsag.Spec.prfHard_emptyOutput_refuted
+  Qsag.Spec.moduleSisHard_noRows_refuted
   Qsag.Spec.smDtTcr_constHash_adversary_wins
   Qsag.Spec.smDtTcr_committed_message_loses
   Qsag.Spec.itsr_answered_pair_loses
@@ -1421,11 +2104,14 @@ theorem racing_simt_not_wellFormed : ¬ WellFormedSimtContract racingSimtContrac
   Qsag.Spec.PosixFsyncContract.anchor_excludes_stale_snapshot
   Qsag.Spec.fsyncJournalModel_contract
   Qsag.Spec.fsync_rollback_volume_has_no_contract
+  Qsag.Spec.fsyncJournal_commit_flushes_pending_rename
   Qsag.Spec.checkedChannel_contract
   Qsag.Spec.open_relay_has_no_channel_contract
+  Qsag.Spec.empty_network_has_no_channel_contract
   Qsag.Spec.shareMemoryModel_contract
   Qsag.Spec.elided_zeroization_has_no_erasure_contract
-  Qsag.Spec.DitHardwareContract.dit_enabled
+  Qsag.Spec.ExecMode.constantTimeSafe_flags
+  Qsag.Spec.dit_contract_silent_outside_safe_mode
   Qsag.Spec.DitHardwareContract.trace_data_independent
   Qsag.Spec.operand_timed_unit_has_no_dit_contract
   Qsag.Spec.SimtWorkgroupContract.subgroups_tile
@@ -1433,6 +2119,40 @@ theorem racing_simt_not_wellFormed : ¬ WellFormedSimtContract racingSimtContrac
   Qsag.Spec.WellFormedSimtContract.write_race_free
   Qsag.Spec.simt_subgroup32_workgroup33_rejected
   Qsag.Spec.racing_simt_not_wellFormed
+  Qsag.Spec.WellFormedSimtContract.read_write_race_free
+  Qsag.Spec.read_racing_simt_not_wellFormed
+  Qsag.Spec.iteOfPos
+  Qsag.Spec.iteOfNeg
+  Qsag.Spec.andTrueSplit
+  Qsag.Spec.Code.play_ret
+  Qsag.Spec.Code.play_call
+  Qsag.Spec.targetInv_extend
+  Qsag.Spec.SmDtTcrHard.anti
+  Qsag.Spec.SmDtPreHard.anti
+  Qsag.Spec.smDtPreHard_emptyClass
+  Qsag.Spec.constHashTcr_play
+  Qsag.Spec.constHashPre_play
+  Qsag.Spec.emptyOutputDistinguisher_play
+  Qsag.Spec.mem_allByteStrings
+  Qsag.Spec.firstByteString_spec
+  Qsag.Spec.preimageSearch_play
+  Qsag.Spec.getD_zero_mem
+  Qsag.Spec.smDtPreHard_preimageSearch_refuted
+  Qsag.Spec.smDtPreHard_unrestricted_refuted
+  Qsag.Spec.smDtPreHard_unrestricted_refuted_trivialSizes
+  Qsag.Spec.fsyncJournalRename_facts
+  Qsag.Spec.fsyncJournalStep_prefix
+  Qsag.Spec.fsyncJournalStep_anchor
+  Qsag.Spec.fsyncJournalStep_anchor_le
+  Qsag.Spec.fsyncJournal_run_prefix
+  Qsag.Spec.fsyncJournal_run_anchor
+  Qsag.Spec.fsyncJournal_run_anchor_le
+  Qsag.Spec.channelRun_delivered_absent
+  Qsag.Spec.channelRun_no_replay
+  Qsag.Spec.channelRun_authentic
+  Qsag.Spec.channelRun_honest
+  Qsag.Spec.shareMemory_run_zero
+  Qsag.Spec.SimtWorkgroupContract.h_subgroup_pos
 
 end Qsag.Spec
 end

@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn batch_heterogeneous_production_profiles() {
         let profiles = [
-            FrontierFtsProfile::Compact514,
+            FrontierFtsProfile::Compact1122,
             FrontierFtsProfile::Full256Bit,
             FrontierFtsProfile::Compact1122,
         ];

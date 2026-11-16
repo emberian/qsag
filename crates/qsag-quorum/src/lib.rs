@@ -65,4 +65,4 @@ pub mod volatile_coupon;
     target_os = "linux",
     target_pointer_width = "64"
 ))]
-pub use volatile_coupon::{BaggyV2Sig, baggy_v2_verify};
+pub use volatile_coupon::{BaggySig, baggy_verify};

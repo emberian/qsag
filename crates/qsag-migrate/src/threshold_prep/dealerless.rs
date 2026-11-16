@@ -14,12 +14,13 @@
 //! # Building blocks
 //!
 //! * **Base correlation.** For every ordered pair (owner `o`, holder `h`) one
-//!   batch of 768 random OTs from the mesh, with `h` as receiver and the bits
+//!   batch of 832 random OTs from the mesh, with `h` as receiver and the bits
 //!   of all of `h`'s MAC key shares as choice bits. Each pad seeds a cSHAKE256
 //!   stream; all later authentications between the pair read these streams,
 //!   so the key `h` uses towards `o` is fixed once (COPE, MASCOT: Keller,
 //!   Orsini, Scholl, CCS 2016, ePrint 2016/505, Section 3; IKNP/KOS for the
-//!   Boolean key).
+//!   Boolean key). The last 64 OTs have choice bit 0: their first pads are
+//!   common to the pair and mask the openings of the key-consistency check.
 //! * **Field authentication** (`Ceremony::authenticate`). The owner sends,
 //!   per key bit, `t0 − t1 + x`; the holder obtains `t0 + bit·x`. Summed with
 //!   weights `2^l` this shares `key_h · x`. An opened random combination with
@@ -78,7 +79,7 @@ use super::{Demand, PartyPreprocessing};
 use crate::{
     circuit::{Domain, Value},
     outer_mpc::Error,
-    secret::SecretVec,
+    secret::{Secret, SecretVec},
     threshold_mpc::{
         AuthWord, BooleanTriple, DaBitWord, FieldShare, FieldTriple, MacKeyShare, ThresholdConfig,
         ThresholdField, mac_add, mac_scale, mac_sub, pack_macs,
@@ -93,7 +94,8 @@ use qsag_accel::{
 use qsag_core::{
     field::tower::{PublicGf256Matrix, TowerGf256, lagrange_weights_zero_gf256},
     preprocessing::{
-        OtMesh, PartyPrivateRng, run_commit_and_open_coin, run_dealerless_pi_triple_f2,
+        OtMesh, PartyPrivateRng, run_commit_and_open_coin,
+        run_dealerless_pi_triple_f2_with_transcript,
     },
     wipe::{wipe_bytes, wipe_bytes32},
 };
@@ -133,9 +135,13 @@ const fn triple_inputs(field: ThresholdField) -> usize {
 }
 
 /// Choice words of one base-OT batch: two Goldilocks keys, the secp256k1 key,
-/// the Ed25519 key (255 bits, one OT unused), the Boolean key.
-const BASE_WORDS: usize = 12;
+/// the Ed25519 key (255 bits, one OT unused), the Boolean key, and one zero
+/// word. The holder receives the owner's first pad of every OT of the zero
+/// word, so the stream of such a pad is known to exactly that pair.
+const BASE_WORDS: usize = 13;
 const BOOLEAN_BASE: usize = 640;
+/// The OT whose first pad seeds the pair's common mask stream.
+const SHARED_BASE: usize = 768;
 const fn field_base(field: ThresholdField, key: usize) -> usize {
     match field {
         ThresholdField::Goldilocks => 64 * key,
@@ -275,6 +281,28 @@ pub enum Fault<'a> {
         check: Check,
         share: &'a mut Value,
     },
+    /// The check share `party` commits to for one opened item of the
+    /// key-consistency check, after every party's value share of that item
+    /// (`sent`, by party) is public.
+    KeyConsistencySigma {
+        field: ThresholdField,
+        party: usize,
+        sent: &'a [Value],
+        sigma: &'a mut Value,
+    },
+    /// The commitment `party` sends in commit-then-open invocation
+    /// `invocation` of the ceremony.
+    Commitment {
+        invocation: u64,
+        party: usize,
+        commitment: &'a mut [u8; 32],
+    },
+    /// The nonce `party` opens its commitment of invocation `invocation` with.
+    CommitmentNonce {
+        invocation: u64,
+        party: usize,
+        nonce: &'a mut [u8; 32],
+    },
 }
 
 // ============================================================================
@@ -347,7 +375,10 @@ fn pad_element(d: Domain, pad: &[u8; 48]) -> Value {
 }
 
 /// cSHAKE256 stream expanding one OT pad.
-struct Prg(Shake256);
+struct Prg(
+    Shake256,
+    Option<qsag_core::sponge::keccak::Cshake256WordStream4>,
+);
 impl Prg {
     fn new(
         session: &[u8; 32],
@@ -356,15 +387,18 @@ impl Prg {
         index: usize,
         pad: &[u8; 48],
     ) -> Self {
-        Self(xof(
-            b"QSAG.MIGRATE.PREP.PAD.V1",
-            &[
-                session,
-                &[sender as u8, receiver as u8],
-                &(index as u64).to_le_bytes(),
-                pad,
-            ],
-        ))
+        Self(
+            xof(
+                b"QSAG.MIGRATE.PREP.PAD.V1",
+                &[
+                    session,
+                    &[sender as u8, receiver as u8],
+                    &(index as u64).to_le_bytes(),
+                    pad,
+                ],
+            ),
+            None,
+        )
     }
     fn elements(&mut self, d: Domain, out: &mut [Value]) {
         let size = 8 * limbs_of(d);
@@ -384,15 +418,16 @@ impl Prg {
         wipe_bytes(&mut block);
     }
     fn words(&mut self, out: &mut [u64]) {
-        let mut block = [0u8; 8 * 136];
-        for chunk in out.chunks_mut(block.len() / 8) {
-            let bytes = &mut block[..chunk.len() * 8];
-            self.0.squeeze(bytes);
-            for (word, raw) in chunk.iter_mut().zip(bytes.chunks_exact(8)) {
-                *word = u64::from_le_bytes(raw.try_into().unwrap());
-            }
-        }
-        wipe_bytes(&mut block);
+        use qsag_core::sponge::keccak::{Cshake256WordStream4, cshake256_static_midstate};
+        const MID: [u64; 25] = cshake256_static_midstate(b"QSAG.MIGRATE.PREP.WORD_PAD.V2");
+        let stream = self.1.get_or_insert_with(|| {
+            let mut seed = [0u8; 32];
+            self.0.squeeze(&mut seed);
+            let stream = Cshake256WordStream4::new(&MID, &seed);
+            wipe_bytes(&mut seed);
+            stream
+        });
+        stream.fill_words(out);
     }
 }
 
@@ -458,6 +493,32 @@ fn mask_mac(macs: &[u128]) -> u128 {
     let low: &[u128; 64] = macs[..64].try_into().unwrap();
     let high: &[u128; 64] = macs[64..128].try_into().unwrap();
     pack_macs(low, u64::MAX) ^ gf2_128_mul(pack_macs(high, u64::MAX), 1 << 64)
+}
+
+/// Commitment of `party` to `payload` in commit-then-open invocation
+/// `invocation` of the ceremony `session`. The invocation number is part of
+/// the preimage, so a commitment and its opening are valid in one invocation
+/// only, whatever the label and the payload.
+fn commitment(
+    session: &[u8; 32],
+    label: &[u8],
+    invocation: u64,
+    party: usize,
+    payload: &[u64],
+    nonce: &[u8; 32],
+) -> [u8; 32] {
+    let bytes: SecretVec<u8> = payload.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cshake256_framed_32(
+        b"QSAG.MIGRATE.PREP.COMMIT.V2",
+        &[
+            session,
+            label,
+            &invocation.to_le_bytes(),
+            &[party as u8],
+            &bytes,
+            nonce,
+        ],
+    )
 }
 
 /// Hash chain over everything the parties send each other. The schedule of
@@ -610,6 +671,8 @@ struct Ceremony<'a> {
     fault: &'a mut dyn FnMut(Fault<'_>),
     transcript: Transcript,
     coins: u64,
+    /// Commit-then-open invocations started so far.
+    commits: u64,
     boolean_keys: SecretVec<u128>,
     field_keys: SecretVec<[Value; 3]>,
     /// `[o][h]`: the keys `h` committed to in its base OTs with `o`.
@@ -637,6 +700,7 @@ impl<'a> Ceremony<'a> {
             rngs,
             fault,
             coins: 0,
+            commits: 0,
             boolean_keys: SecretVec::new(),
             field_keys: SecretVec::new(),
             pair_boolean_keys: Vec::new(),
@@ -647,11 +711,16 @@ impl<'a> Ceremony<'a> {
 
     /// Jointly random public coin over the transcript so far, as a challenge
     /// stream.
+    ///
+    /// The mesh's chain over all OT extension batches run so far is absorbed
+    /// first, so the coin also depends on every OT message sent before it.
     fn coin(&mut self, label: &[u8]) -> Result<Challenges, Abort> {
+        self.transcript.label(b"ot mesh");
+        self.transcript.bytes(&self.mesh.transcript_digest());
         let digest = self.transcript.digest();
         let mut phase = label.to_vec();
         phase.extend_from_slice(&self.coins.to_le_bytes());
-        self.coins += 1;
+        self.coins = self.coins.checked_add(1).ok_or(Check::Coin)?;
         let coin = run_commit_and_open_coin(&self.session, &phase, &digest, self.rngs)
             .map_err(|_| Check::Coin)?;
         self.transcript.label(b"coin");
@@ -664,28 +733,50 @@ impl<'a> Ceremony<'a> {
 
     /// Every party commits to its payload; after all commitments are sent the
     /// payloads are opened and compared with them.
+    ///
+    /// Every call takes the next value of the ceremony's invocation counter,
+    /// which enters each commitment and the transcript: what a party sent in
+    /// one invocation opens in no other.
     fn commit_then_open(&mut self, label: &[u8], payloads: &[SecretVec<u64>]) -> Result<(), Abort> {
-        let commitment = |session: &[u8; 32], party: usize, payload: &[u64], nonce: &[u8; 32]| {
-            let mut bytes: SecretVec<u8> = payload.iter().flat_map(|w| w.to_le_bytes()).collect();
-            let digest = cshake256_framed_32(
-                b"QSAG.MIGRATE.PREP.COMMIT.V1",
-                &[session, label, &[party as u8], &bytes, nonce],
-            );
-            bytes.clear();
-            digest
-        };
+        let invocation = self.commits;
+        self.commits = invocation.checked_add(1).ok_or(Check::Commitment)?;
         let mut nonces: SecretVec<[u8; 32]> = SecretVec::with_capacity(payloads.len());
         let mut commitments = Vec::with_capacity(payloads.len());
         self.transcript.label(label);
+        self.transcript.bytes(&invocation.to_le_bytes());
         for (party, payload) in payloads.iter().enumerate() {
-            let nonce = self.rngs[party].next_bytes32();
-            let digest = commitment(&self.session, party, payload, &nonce);
+            nonces.push(self.rngs[party].next_bytes32());
+            let mut digest = commitment(
+                &self.session,
+                label,
+                invocation,
+                party,
+                payload,
+                &nonces[party],
+            );
+            (self.fault)(Fault::Commitment {
+                invocation,
+                party,
+                commitment: &mut digest,
+            });
             self.transcript.bytes(&digest);
-            nonces.push(nonce);
             commitments.push(digest);
         }
         for (party, payload) in payloads.iter().enumerate() {
-            if commitment(&self.session, party, payload, &nonces[party]) != commitments[party] {
+            (self.fault)(Fault::CommitmentNonce {
+                invocation,
+                party,
+                nonce: &mut nonces[party],
+            });
+            let opened = commitment(
+                &self.session,
+                label,
+                invocation,
+                party,
+                payload,
+                &nonces[party],
+            );
+            if opened != commitments[party] {
                 return Err(Check::Commitment.into());
             }
             for word in payload.iter() {
@@ -702,16 +793,16 @@ impl<'a> Ceremony<'a> {
 
     /// The key share `party` uses in a check of material that `owner` alone
     /// input (`None`: material combined over the owners).
-    fn field_key_for(&self, field: ThresholdField, owner: Option<usize>, party: usize) -> Value {
+    fn field_key_for(&self, field: ThresholdField, owner: Option<usize>, party: usize) -> &Value {
         match owner {
-            Some(owner) if owner != party => self.pair_field_keys[owner][party][field.index()],
-            _ => self.field_keys[party][field.index()],
+            Some(owner) if owner != party => &self.pair_field_keys[owner][party][field.index()],
+            _ => &self.field_keys[party][field.index()],
         }
     }
-    fn boolean_key_for(&self, owner: Option<usize>, party: usize) -> u128 {
+    fn boolean_key_for(&self, owner: Option<usize>, party: usize) -> &u128 {
         match owner {
-            Some(owner) if owner != party => self.pair_boolean_keys[owner][party],
-            _ => self.boolean_keys[party],
+            Some(owner) if owner != party => &self.pair_boolean_keys[owner][party],
+            _ => &self.boolean_keys[party],
         }
     }
 
@@ -722,15 +813,14 @@ impl<'a> Ceremony<'a> {
     /// Every party samples its field key shares (two for Goldilocks).
     fn sample_field_keys(&mut self) {
         for party in 0..self.parties {
-            let mut keys = [ZERO; 3];
+            self.field_keys.push([ZERO; 3]);
             for field in ThresholdField::ALL {
                 let d = field.domain();
                 for key in 0..key_count(d) {
-                    let value = self.sample(party, d);
-                    set_part(d, &mut keys[field.index()], key, value);
+                    let value = Secret(self.sample(party, d));
+                    set_part(d, &mut self.field_keys[party][field.index()], key, *value);
                 }
             }
-            self.field_keys.push(keys);
         }
     }
 
@@ -744,11 +834,11 @@ impl<'a> Ceremony<'a> {
             let mut field_keys = SecretVec::with_capacity(parties);
             let mut row = Vec::with_capacity(parties);
             for holder in 0..parties {
-                let mut boolean = self.boolean_keys[holder];
-                let mut fields = self.field_keys[holder];
+                let mut boolean = Secret(self.boolean_keys[holder]);
+                let mut fields = Secret(self.field_keys[holder]);
                 if holder == owner {
-                    boolean_keys.push(boolean);
-                    field_keys.push(fields);
+                    boolean_keys.push(*boolean);
+                    field_keys.push(*fields);
                     row.push(None);
                     continue;
                 }
@@ -769,7 +859,9 @@ impl<'a> Ceremony<'a> {
                 choices.extend_from_slice(&fields[0][..2]);
                 choices.extend_from_slice(&fields[1]);
                 choices.extend_from_slice(&fields[2]);
-                choices.extend_from_slice(&[boolean as u64, (boolean >> 64) as u64]);
+                choices.push(*boolean as u64);
+                choices.push((*boolean >> 64) as u64);
+                choices.push(0);
                 let (send, receive) = self
                     .mesh
                     .run_correlated_ot_words(owner, holder, &choices, self.rngs)
@@ -792,8 +884,8 @@ impl<'a> Ceremony<'a> {
                         .map(|(index, pad)| Prg::new(session, owner, holder, index, pad))
                         .collect(),
                 }));
-                boolean_keys.push(boolean);
-                field_keys.push(fields);
+                boolean_keys.push(*boolean);
+                field_keys.push(*fields);
             }
             self.pair_boolean_keys.push(boolean_keys);
             self.pair_field_keys.push(field_keys);
@@ -820,13 +912,16 @@ impl<'a> Ceremony<'a> {
         let d = field.domain();
         let count = inputs.len();
         let base = field_base(field, key);
-        let key_bits = part(d, self.pair_field_keys[owner][holder][field.index()], key);
         let Self {
             pairs,
             fault,
             transcript,
+            pair_field_keys,
             ..
         } = self;
+        let key_share = &pair_field_keys[owner][holder][field.index()];
+        // A Goldilocks key is one limb of the share; the other keys are the share.
+        let word = |bit: usize| if d == Domain::Gold { key } else { bit / 64 };
         let pair = pairs[owner][holder].as_mut().unwrap();
         let zeros = || SecretVec::from(vec![ZERO; count]);
         let (mut t, mut q) = (zeros(), zeros());
@@ -845,12 +940,12 @@ impl<'a> Ceremony<'a> {
                 bit,
                 values: &mut encoded,
             });
-            let select = 0u64.wrapping_sub((key_bits[bit / 64] >> (bit % 64)) & 1);
+            let select = Secret(0u64.wrapping_sub((key_share[word(bit)] >> (bit % 64)) & 1));
             for k in 0..count {
                 // Owner to holder.
                 let correction = d.add(d.sub(zero[k], one[k]), encoded[k]);
                 transcript.element(d, &correction);
-                let received = d.add(chosen[k], correction.map(|limb| limb & select));
+                let received = d.add(chosen[k], correction.map(|limb| limb & *select));
                 t[k] = d.add(d.add(t[k], t[k]), zero[k]);
                 q[k] = d.add(d.add(q[k], q[k]), received);
             }
@@ -918,12 +1013,12 @@ impl<'a> Ceremony<'a> {
                 let mask = self.sample(owner, d);
                 extended.push(mask);
             }
-            let own_key = self.field_keys[owner][field.index()];
+            let own_key = &self.field_keys[owner][field.index()];
             let mut shares: Vec<SecretVec<Value>> = (0..parties)
                 .map(|_| SecretVec::from(vec![ZERO; total]))
                 .collect();
             for k in 0..total {
-                shares[owner][k] = mac_scale(d, own_key, extended[k]);
+                shares[owner][k] = mac_scale(d, *own_key, extended[k]);
             }
             let mut owner_pads = Vec::with_capacity(parties - 1);
             for holder in (0..parties).filter(|&h| h != owner) {
@@ -969,8 +1064,12 @@ impl<'a> Ceremony<'a> {
                 // The owner broadcasts the combination.
                 self.transcript.element(d, &opened);
                 for p in 0..parties {
-                    let key = self.field_key_for(field, Some(owner), p);
-                    let share = mac_sub(d, sigma[p], mac_scale(d, key, opened));
+                    let keyed = Secret(mac_scale(
+                        d,
+                        *self.field_key_for(field, Some(owner), p),
+                        opened,
+                    ));
+                    let share = mac_sub(d, sigma[p], *keyed);
                     sigmas[p].extend_from_slice(&share);
                 }
             }
@@ -1062,13 +1161,18 @@ impl<'a> Ceremony<'a> {
                     self.transcript.element(d, &u);
                     self.transcript.element(d, &v);
                     // Holder.
-                    let alpha = part(d, self.pair_field_keys[owner][holder][field.index()], key);
+                    let alpha = Secret(part(
+                        d,
+                        self.pair_field_keys[owner][holder][field.index()],
+                        key,
+                    ));
                     let mut left = q[mask];
                     for (chi, k) in chi[key].iter().zip(bits.clone()) {
-                        let term = d.mul(q[k], d.sub(q[k], alpha));
+                        let term = d.mul(q[k], d.sub(q[k], *alpha));
                         left = d.add(left, d.mul(*chi, term));
                     }
-                    accepted &= left == d.add(u, d.mul(alpha, v));
+                    let keyed = Secret(d.mul(*alpha, v));
+                    accepted &= left == d.add(u, *keyed);
                 }
             }
         }
@@ -1144,8 +1248,13 @@ impl<'a> Ceremony<'a> {
             for (entry, value) in queue.values.iter().enumerate() {
                 let chi = challenges.element(d);
                 for p in 0..parties {
-                    let share_key = part(d, self.field_key_for(field, queue.owners[entry], p), key);
-                    let term = d.sub(part(d, queue.macs[p][entry], key), d.mul(share_key, *value));
+                    let share_key = Secret(part(
+                        d,
+                        *self.field_key_for(field, queue.owners[entry], p),
+                        key,
+                    ));
+                    let keyed = Secret(d.mul(*share_key, *value));
+                    let term = d.sub(part(d, queue.macs[p][entry], key), *keyed);
                     let sum = d.add(part(d, sigma[p], key), d.mul(chi, term));
                     set_part(d, &mut sigma[p], key, sum);
                 }
@@ -1373,27 +1482,28 @@ impl<'a> Ceremony<'a> {
         let parties = self.parties;
         if count == 0 {
             for party in 0..parties {
-                let key = self.rngs[party].next_u128();
-                self.boolean_keys.push(key);
+                let key = Secret(self.rngs[party].next_u128());
+                self.boolean_keys.push(*key);
             }
             return Ok((0..parties).map(|_| Vec::new()).collect());
         }
         let points: Vec<TowerGf256> = (1..=parties as u8).map(TowerGf256).collect();
         let weights = lagrange_weights_zero_gf256(&points).ok_or(Abort::Config)?;
         let session = cshake256_framed_32(b"QSAG.MIGRATE.PREP.BOOLEAN.V1", &[&self.session]);
-        let vaults =
-            run_dealerless_pi_triple_f2(session, parties, &points, count, self.mesh, self.rngs)
-                .map_err(|_| Check::BooleanCeremony)?;
+        let (vaults, broadcasts) = run_dealerless_pi_triple_f2_with_transcript(
+            session, parties, &points, count, self.mesh, self.rngs,
+        )
+        .map_err(|_| Check::BooleanCeremony)?;
         self.transcript.label(b"boolean ceremony");
+        self.transcript.bytes(&broadcasts);
         let mut out = Vec::with_capacity(parties);
         for (vault, &weight) in vaults.iter().zip(&weights) {
             if vault.triples_slice().len() != count {
                 return Err(Check::BooleanCeremony.into());
             }
-            let mut key = [vault.mac_alpha_lanes[0].mul_gf256(weight).0];
-            qsag_asm::tower128_to_poly128_batch_ct(&mut key);
+            let mut key = Secret([vault.mac_alpha_lanes[0].mul_gf256(weight).0]);
+            qsag_asm::tower128_to_poly128_batch_ct(&mut *key);
             self.boolean_keys.push(key[0]);
-            qsag_asm::volatile_fill(&mut key, 0);
             let scale = PublicGf256Matrix::from_public_scalar(weight);
             let word = |planes: &[u64; 8], tags: &[qsag_core::field::tower::Tower128; 64]| {
                 let mut macs: [u128; 64] =
@@ -1445,29 +1555,36 @@ impl<'a> Ceremony<'a> {
         let mut macs: Vec<Vec<SecretVec<u128>>> = Vec::with_capacity(parties);
         for owner in 0..parties {
             let own: SecretVec<u64> = (0..words).map(|_| self.rngs[owner].next_u64()).collect();
-            let own_key = self.boolean_keys[owner];
+            let own_key = &self.boolean_keys[owner];
             let mut shares: Vec<SecretVec<u128>> = (0..parties)
                 .map(|_| SecretVec::from(vec![0u128; total]))
                 .collect();
             for k in 0..total {
                 shares[owner][k] =
-                    own_key & 0u128.wrapping_sub(((own[k / 64] >> (k % 64)) & 1) as u128);
+                    *own_key & 0u128.wrapping_sub(((own[k / 64] >> (k % 64)) & 1) as u128);
             }
             for holder in (0..parties).filter(|&h| h != owner) {
-                let key = self.pair_boolean_keys[owner][holder];
                 let Self {
                     pairs,
                     fault,
                     transcript,
+                    pair_boolean_keys,
                     ..
                 } = self;
+                let key = &pair_boolean_keys[owner][holder];
                 let pair = pairs[owner][holder].as_mut().unwrap();
+                // Each independent base-OT column is expanded once. Keep columns until
+                // the 64x128 transpose, instead of scattering every bit into a u128 tag.
+                let mut zero_cols = SecretVec::from(vec![0u64; 128 * words]);
+                let mut recv_cols = SecretVec::from(vec![0u64; 128 * words]);
                 let zeros = || SecretVec::from(vec![0u64; words]);
-                let (mut zero, mut one, mut chosen, mut encoded) =
-                    (zeros(), zeros(), zeros(), zeros());
+                let (mut one, mut chosen, mut encoded) = (zeros(), zeros(), zeros());
+                let mut correction_bytes = SecretVec::from(vec![0u8; words * 8]);
                 transcript.label(b"boolean cope");
                 for bit in 0..128 {
-                    pair.send[BOOLEAN_BASE + bit][0].words(&mut zero);
+                    let zero = &mut zero_cols[bit * words..(bit + 1) * words];
+                    let received = &mut recv_cols[bit * words..(bit + 1) * words];
+                    pair.send[BOOLEAN_BASE + bit][0].words(zero);
                     pair.send[BOOLEAN_BASE + bit][1].words(&mut one);
                     pair.receive[BOOLEAN_BASE + bit].words(&mut chosen);
                     encoded.copy_from_slice(&own);
@@ -1477,16 +1594,31 @@ impl<'a> Ceremony<'a> {
                         bit,
                         words: &mut encoded,
                     });
-                    let select = 0u64.wrapping_sub(((key >> bit) & 1) as u64);
+                    let select = Secret(0u64.wrapping_sub(((*key >> bit) & 1) as u64));
                     for w in 0..words {
                         let correction = zero[w] ^ one[w] ^ encoded[w];
-                        transcript.bytes(&correction.to_le_bytes());
-                        let received = chosen[w] ^ (correction & select);
-                        for lane in 0..64 {
-                            let k = 64 * w + lane;
-                            shares[owner][k] ^= (((zero[w] >> lane) & 1) as u128) << bit;
-                            shares[holder][k] |= (((received >> lane) & 1) as u128) << bit;
-                        }
+                        correction_bytes[8 * w..8 * w + 8]
+                            .copy_from_slice(&correction.to_le_bytes());
+                        received[w] = chosen[w] ^ (correction & *select);
+                    }
+                    transcript.bytes(&correction_bytes);
+                }
+                for w in 0..words {
+                    let mut planes =
+                        qsag_asm::wipe::SecretBuffer(core::array::from_fn::<_, 64, _>(|b| {
+                            [
+                                zero_cols[b * words + w],
+                                zero_cols[(64 + b) * words + w],
+                                recv_cols[b * words + w],
+                                recv_cols[(64 + b) * words + w],
+                            ]
+                        }));
+                    qsag_asm::transpose64x256(&mut planes);
+                    for (lane, row) in planes.iter().enumerate() {
+                        shares[owner][64 * w + lane] ^=
+                            u128::from(row[0]) | (u128::from(row[1]) << 64);
+                        shares[holder][64 * w + lane] =
+                            u128::from(row[2]) | (u128::from(row[3]) << 64);
                     }
                 }
             }
@@ -1509,9 +1641,10 @@ impl<'a> Ceremony<'a> {
             for p in 0..parties {
                 let row = &macs[owner][p];
                 let selected: SecretVec<u128> = checked.clone().map(|k| row[k]).collect();
+                let keyed = Secret(gf2_128_mul(*self.boolean_key_for(Some(owner), p), opened));
                 let sigma = qsag_asm::gf2_128_dot(&chi, &selected)
                     ^ mask_mac(&row[mask..mask + MASK_BITS])
-                    ^ gf2_128_mul(self.boolean_key_for(Some(owner), p), opened);
+                    ^ *keyed;
                 sigmas[p].extend_from_slice(&[sigma as u64, (sigma >> 64) as u64]);
             }
         }
@@ -1543,8 +1676,11 @@ impl<'a> Ceremony<'a> {
         for p in 0..parties {
             let mut sigma = qsag_asm::gf2_128_dot(&chi, &queue.macs[p]);
             for (entry, value) in queue.values.iter().enumerate() {
-                let key = self.boolean_key_for(queue.owners[entry], p);
-                sigma ^= gf2_128_mul(key, gf2_128_mul(chi[entry], *value));
+                let keyed = Secret(gf2_128_mul(
+                    *self.boolean_key_for(queue.owners[entry], p),
+                    gf2_128_mul(chi[entry], *value),
+                ));
+                sigma ^= *keyed;
             }
             sigmas.push([sigma as u64, (sigma >> 64) as u64].into_iter().collect());
         }
@@ -1599,7 +1735,8 @@ impl<'a> Ceremony<'a> {
             macs.push(mac);
         }
         for p in 0..parties {
-            let sigma = macs[p] ^ gf2_128_mul(self.boolean_keys[p], opened);
+            let keyed = Secret(gf2_128_mul(self.boolean_keys[p], opened));
+            let sigma = macs[p] ^ *keyed;
             sigmas.push([sigma as u64, (sigma >> 64) as u64].into_iter().collect());
         }
         self.commit_then_open(b"boolean key sigma", &sigmas)?;
@@ -1691,17 +1828,52 @@ impl<'a> Ceremony<'a> {
         // equations, so a difference in a single 64-bit key is also caught
         // except with probability `2^-128`. A failure reveals nothing beyond
         // the sacrificed items.
+        //
+        // The holder commits to its check share after the value shares are
+        // public, and a party's value share of the sum is its own item. Sent
+        // as it is, the item of each honest owner would be known in time for
+        // the holder to subtract `ε` times it. So every pair adds a common
+        // mask from its shared pad stream, one party with each sign: the sum
+        // is unchanged, and what two honest owners send determines only the
+        // sum of their items.
+        let mut blinds: Vec<SecretVec<Value>> = (0..parties)
+            .map(|_| SecretVec::from(vec![ZERO; keys]))
+            .collect();
+        let mut common = SecretVec::from(vec![ZERO; keys]);
+        for low in 0..parties {
+            for high in low + 1..parties {
+                let pair = self.pairs[low][high].as_mut().unwrap();
+                pair.send[SHARED_BASE][0].elements(d, &mut common);
+                for (blind, mask) in blinds[low].iter_mut().zip(common.iter()) {
+                    *blind = d.add(*blind, *mask);
+                }
+                pair.receive[SHARED_BASE].elements(d, &mut common);
+                for (blind, mask) in blinds[high].iter_mut().zip(common.iter()) {
+                    *blind = d.sub(*blind, *mask);
+                }
+            }
+        }
         let mut sigmas: Vec<SecretVec<u64>> = (0..parties).map(|_| SecretVec::new()).collect();
         self.transcript.label(b"key consistency");
         for k in key_at..bit_at {
+            let sent: Vec<Value> = (0..parties)
+                .map(|p| d.add(joint[p][k][0], blinds[p][k - key_at]))
+                .collect();
             let mut opened = ZERO;
-            for p in 0..parties {
-                self.transcript.element(d, &joint[p][k][0]);
-                opened = d.add(opened, joint[p][k][0]);
+            for share in &sent {
+                self.transcript.element(d, share);
+                opened = d.add(opened, *share);
             }
             for p in 0..parties {
-                let key = self.field_keys[p][index];
-                sigmas[p].extend_from_slice(&mac_sub(d, joint[p][k][1], mac_scale(d, key, opened)));
+                let keyed = Secret(mac_scale(d, self.field_keys[p][index], opened));
+                let mut sigma = mac_sub(d, joint[p][k][1], *keyed);
+                (self.fault)(Fault::KeyConsistencySigma {
+                    field,
+                    party: p,
+                    sent: &sent,
+                    sigma: &mut sigma,
+                });
+                sigmas[p].extend_from_slice(&sigma);
             }
         }
         self.commit_then_open(b"key consistency sigma", &sigmas)?;
@@ -1809,8 +1981,12 @@ impl<'a> Ceremony<'a> {
                         .fold(row[bit_at + retained + rep][1], |sum, &k| {
                             mac_add(d, sum, row[bit_at + k][1])
                         });
-                    let key = self.field_key_for(field, Some(owner), p);
-                    sum = mac_sub(d, sum, mac_scale(d, key, [parity, 0, 0, 0]));
+                    let keyed = Secret(mac_scale(
+                        d,
+                        *self.field_key_for(field, Some(owner), p),
+                        [parity, 0, 0, 0],
+                    ));
+                    sum = mac_sub(d, sum, *keyed);
                     for digit in 0..digits {
                         let weight = [2u64 << digit, 0, 0, 0];
                         let mac = digit_shares[owner][p][rep * digits + digit][1];
@@ -1856,14 +2032,13 @@ impl<'a> Ceremony<'a> {
                 let constant = d.mul(delta, epsilon);
                 for p in 0..parties {
                     let [a, b, c] = checked[p][triple];
-                    let key = self.field_keys[p][index];
-                    let public = [
+                    let public = Secret([
                         if p == 0 { constant } else { ZERO },
-                        mac_scale(d, key, constant),
-                    ];
+                        mac_scale(d, self.field_keys[p][index], constant),
+                    ]);
                     let product = share_add(
                         d,
-                        share_add(d, c, public),
+                        share_add(d, c, *public),
                         share_add(d, share_scale(d, b, delta), share_scale(d, a, epsilon)),
                     );
                     let sum = share_add(d, bits[p][k], shares[owner][p][bit_at + k]);
@@ -2371,6 +2546,226 @@ mod tests {
                 "{target:?}"
             );
         }
+    }
+
+    /// A holder that used another key towards one owner knows the difference
+    /// `ε`, and it commits to its check share only after the value shares are
+    /// public. If an owner's share were its item, the holder could subtract
+    /// `ε` times it and pass. No triple is demanded here, so no later check
+    /// of the ceremony would see the inconsistency either.
+    #[test]
+    fn a_holder_cannot_cancel_its_key_inconsistency_from_what_the_owner_sent() {
+        let (mut mesh, mut rngs) = setup(12);
+        let demand = Demand {
+            field_randoms: [2, 1, 1],
+            ..Demand::default()
+        };
+        for target in ThresholdField::ALL {
+            let d = target.domain();
+            let mut epsilon = ZERO;
+            bump(d, &mut epsilon);
+            let mut corrected = 0;
+            let outcome = deviate(60, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::FieldKey {
+                    field,
+                    owner: 0,
+                    holder: 2,
+                    key,
+                } if field == target => {
+                    bump(d, key);
+                    true
+                }
+                Fault::KeyConsistencySigma {
+                    field,
+                    party: 2,
+                    sent,
+                    sigma,
+                } if field == target => {
+                    *sigma = mac_sub(d, *sigma, mac_scale(d, epsilon, sent[0]));
+                    corrected += 1;
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(corrected, key_count(d), "{target:?}");
+            assert_eq!(
+                outcome,
+                Err(Abort::Check(Check::KeyConsistency)),
+                "{target:?}"
+            );
+        }
+    }
+
+    fn commit_payloads() -> Vec<SecretVec<u64>> {
+        (0..3).map(|p| [p, 7, 9].into_iter().collect()).collect()
+    }
+
+    /// One commit-then-open of a fixed label and payload by a fresh ceremony
+    /// whose counter stands at `start`: party 1's commitment, its nonce, and
+    /// the transcript digest. The generators are in the same state every time.
+    fn commit_once(start: u64) -> ([u8; 32], [u8; 32], [u8; 32]) {
+        let (mut mesh, mut rngs) = setup(13);
+        let (mut sent, mut opened) = ([0; 32], [0; 32]);
+        let mut hook = |point: Fault<'_>| match point {
+            Fault::Commitment {
+                invocation,
+                party: 1,
+                commitment: c,
+            } => {
+                assert_eq!(invocation, start);
+                sent = *c;
+            }
+            Fault::CommitmentNonce {
+                party: 1, nonce, ..
+            } => opened = *nonce,
+            _ => {}
+        };
+        let mut ceremony = Ceremony::new([13; 32], &mut mesh, &mut rngs, &mut hook).unwrap();
+        ceremony.commits = start;
+        ceremony
+            .commit_then_open(b"replay", &commit_payloads())
+            .unwrap();
+        assert_eq!(ceremony.commits, start + 1);
+        let digest = ceremony.transcript.digest();
+        drop(ceremony);
+        (sent, opened, digest)
+    }
+
+    #[test]
+    fn commit_then_open_binds_its_invocation_counter() {
+        let (first, first_nonce, first_digest) = commit_once(0);
+        assert_eq!(commit_once(0), (first, first_nonce, first_digest));
+        let (later, later_nonce, later_digest) = commit_once(1);
+        // Same session, label, party, payload and nonce: only the counter differs.
+        assert_eq!(later_nonce, first_nonce);
+        assert_ne!(later, first);
+        assert_ne!(later_digest, first_digest);
+        let payload = &commit_payloads()[1];
+        for (invocation, sent) in [(0, first), (1, later)] {
+            assert_eq!(
+                sent,
+                commitment(&[13; 32], b"replay", invocation, 1, payload, &first_nonce)
+            );
+        }
+    }
+
+    /// Two invocations with the same label and payloads. In the second,
+    /// party 1 opens with its nonce of the first and sends either its
+    /// commitment of the first (`stale`) or a commitment to the same payload
+    /// and nonce under the second invocation.
+    fn reuse_in_second_invocation(stale: bool) -> Result<(), Abort> {
+        let (mut mesh, mut rngs) = setup(14);
+        let session = [14; 32];
+        let payloads = commit_payloads();
+        let (mut sent, mut opened) = ([0; 32], [0; 32]);
+        let mut hook = |point: Fault<'_>| match point {
+            Fault::Commitment {
+                invocation: 0,
+                party: 1,
+                commitment: c,
+            } => sent = *c,
+            Fault::CommitmentNonce {
+                invocation: 0,
+                party: 1,
+                nonce,
+            } => opened = *nonce,
+            Fault::Commitment {
+                invocation: 1,
+                party: 1,
+                commitment: c,
+            } => {
+                *c = if stale {
+                    sent
+                } else {
+                    commitment(&session, b"replay", 1, 1, &payloads[1], &opened)
+                };
+            }
+            Fault::CommitmentNonce {
+                invocation: 1,
+                party: 1,
+                nonce,
+            } => *nonce = opened,
+            _ => {}
+        };
+        let mut ceremony = Ceremony::new(session, &mut mesh, &mut rngs, &mut hook).unwrap();
+        ceremony.commit_then_open(b"replay", &payloads).unwrap();
+        let outcome = ceremony.commit_then_open(b"replay", &payloads);
+        assert_eq!(ceremony.commits, 2);
+        outcome
+    }
+
+    #[test]
+    fn a_commitment_replayed_from_an_earlier_invocation_is_rejected() {
+        assert_eq!(reuse_in_second_invocation(false), Ok(()));
+        assert_eq!(
+            reuse_in_second_invocation(true),
+            Err(Abort::Check(Check::Commitment))
+        );
+    }
+
+    #[test]
+    fn the_invocation_counter_does_not_wrap() {
+        let (mut mesh, mut rngs) = setup(15);
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([15; 32], &mut mesh, &mut rngs, hook).unwrap();
+        ceremony.commits = u64::MAX - 1;
+        assert_eq!(
+            ceremony.commit_then_open(b"replay", &commit_payloads()),
+            Ok(())
+        );
+        assert_eq!(
+            ceremony.commit_then_open(b"replay", &commit_payloads()),
+            Err(Abort::Check(Check::Commitment))
+        );
+        assert_eq!(ceremony.commits, u64::MAX);
+    }
+
+    /// The ceremony transcript after a Boolean stage of `count` triple words
+    /// run by the parties of `setup(seed)` in a fixed session.
+    fn digest_after_boolean_stage(seed: u8, count: usize) -> [u8; 32] {
+        let (mut mesh, mut rngs) = setup(seed);
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([16; 32], &mut mesh, &mut rngs, hook).unwrap();
+        ceremony.boolean_stage(count).unwrap();
+        ceremony.transcript.digest()
+    }
+
+    #[test]
+    fn the_boolean_ceremony_transcript_is_chained() {
+        let first = digest_after_boolean_stage(16, 1);
+        assert_eq!(first, digest_after_boolean_stage(16, 1));
+        assert_ne!(first, digest_after_boolean_stage(17, 1));
+        // Without a ceremony nothing of the parties' randomness is sent.
+        assert_eq!(
+            digest_after_boolean_stage(16, 0),
+            digest_after_boolean_stage(17, 0)
+        );
+    }
+
+    /// A coin drawn by generators in a fixed state, on the mesh of
+    /// `setup(18)` as established or after one further OT batch; with the
+    /// coin, the mesh's chain.
+    fn coin_on_mesh(extra_batch: bool) -> (u128, [u8; 32]) {
+        let (mut mesh, mut rngs) = setup(18);
+        if extra_batch {
+            mesh.run_correlated_ot_words(0, 1, &[5], &mut rngs).unwrap();
+        }
+        let chain = mesh.transcript_digest();
+        let mut rngs: Vec<_> = (0..3u8)
+            .map(|p| PartyPrivateRng::from_seed([p; 32], b"TEST.PREP.COIN"))
+            .collect();
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([18; 32], &mut mesh, &mut rngs, hook).unwrap();
+        (ceremony.coin(b"test").unwrap().u128(), chain)
+    }
+
+    #[test]
+    fn coins_depend_on_all_ot_traffic() {
+        let (coin, chain) = coin_on_mesh(false);
+        assert_eq!(coin_on_mesh(false), (coin, chain));
+        let (later_coin, later_chain) = coin_on_mesh(true);
+        assert_ne!(later_chain, chain);
+        assert_ne!(later_coin, coin);
     }
 
     #[test]

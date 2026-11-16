@@ -1,4 +1,5 @@
 module
+import all Qsag.Spec.Encoding
 public import Qsag.Custody.SeparatedCustodyPolicy
 import all Qsag.Custody.SeparatedCustodySpine
 import all Qsag.Custody.CompleteMediationBoundary

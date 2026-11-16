@@ -94,7 +94,7 @@ theorem ringDot_trimPoly_eq {F : Type} [LawfulCommRing F] [DecidableEq F] :
       change CommRingOps.zero =
         CommRingOps.add (CommRingOps.mul CommRingOps.zero k) (ringDot cs ks)
       rw [← ih, hcsNil, ringDot_zero_left, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
-    · simp only [ringDot, ih]
+    · simp only [ringDot_cons_cons, ih]
 
 /-- Canonical trailing-zero trimming also preserves shifted functional evaluations `⟨X · P, v⟩`. -/
 theorem ringDot_shiftPoly_trimPoly_eq {F : Type} [LawfulCommRing F] [DecidableEq F]
@@ -103,7 +103,7 @@ theorem ringDot_shiftPoly_trimPoly_eq {F : Type} [LawfulCommRing F] [DecidableEq
   cases v with
   | nil => rfl
   | cons k ks =>
-    simp only [shiftPoly, ringDot, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+    simp only [shiftPoly, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
     exact ringDot_trimPoly_eq p ks
 
 private theorem filter_eq_nil_of_false {α : Type} (p : α → Bool) :
@@ -1145,8 +1145,8 @@ private theorem gsDecodeList_zero_length_le_one (domPts : List QuarticGoldilocks
         hpLen (Nat.zero_le (d + 1))
         (List.Pairwise.filter _ hDom) (Nat.le_trans hdA hpAg)
         (fun x hx => of_decide_eq_true (List.mem_filter.mp hx).2)
-      apply Subtype.ext
-      rw [← p.property, hTrim]
+      apply UPoly.ext
+      rw [← p.trimmed, hTrim]
       rfl
     have e1 := eqZero p₁ hp₁.1 hp₁.2
     have e2 := eqZero p₂ hp₂.1 hp₂.2
@@ -1549,7 +1549,7 @@ theorem overlap_unique_decode_le_one (domPts : List QuarticGoldilocks) (d₀ A�
       (fun x hx => by
         rcases (Bool.and_eq_true _ _).mp (List.mem_filter.mp hx).2 with ⟨e1, e2⟩
         exact (of_decide_eq_true e1).trans (of_decide_eq_true e2).symm)
-    have hEq : p₁ = p₂ := Subtype.ext (p₁.property.symm.trans (hTrim.trans p₂.property))
+    have hEq : p₁ = p₂ := UPoly.ext (p₁.trimmed.symm.trans (hTrim.trans p₂.trimmed))
     exact (List.pairwise_cons.mp hNd).1 p₂ (.head _) hEq
 
 theorem hemWelchBerlekampCert (S domPts : List QuarticGoldilocks) (d₀ A₀ : Nat)

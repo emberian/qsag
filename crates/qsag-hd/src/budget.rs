@@ -8,8 +8,9 @@ use alloc::boxed::Box;
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::{
-    ChainHead, CounterOrder, HWM_SLOT_BYTES, LockedRecord, RECORD_HEADER_BYTES, TwoSlotHwm,
-    file_identity, no_follow_options, sync_parent_dir, write_at_exact,
+    ChainHead, CounterOrder, HWM_PAGE_BYTES, HWM_SLOT_BYTES, HwmSlotState, LockedRecord,
+    RECORD_HEADER_BYTES, TwoSlotHwm, file_identity, no_follow_options, sync_parent_dir,
+    write_at_exact,
 };
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::fs::{self, File};
@@ -19,10 +20,12 @@ use std::path::{Path, PathBuf};
 const LIMIT: u64 = 128;
 const RECORD: usize = 40;
 const DATA_SEAL_BYTES: usize = 16;
-const HWM_SLOT_A_PAYLOAD_OFFSET: usize = DATA_SEAL_BYTES;
-const HWM_SLOT_B_PAYLOAD_OFFSET: usize = DATA_SEAL_BYTES + HWM_SLOT_BYTES;
-const PAYLOAD_HEADER_BYTES: usize = DATA_SEAL_BYTES + 2 * HWM_SLOT_BYTES; // 176 bytes
-const FILE_PREFIX_BYTES: usize = RECORD_HEADER_BYTES + PAYLOAD_HEADER_BYTES; // 192 bytes
+// Header, each HWM slot, and the chain occupy disjoint physical pages.
+const FORMAT_MAGIC: &[u8; 8] = b"QSHDQB04";
+const HWM_SLOT_A_PAYLOAD_OFFSET: usize = HWM_PAGE_BYTES as usize - RECORD_HEADER_BYTES;
+const HWM_SLOT_B_PAYLOAD_OFFSET: usize = 2 * HWM_PAGE_BYTES as usize - RECORD_HEADER_BYTES;
+const FILE_PREFIX_BYTES: usize = 3 * HWM_PAGE_BYTES as usize;
+const PAYLOAD_HEADER_BYTES: usize = FILE_PREFIX_BYTES - RECORD_HEADER_BYTES;
 const MAX_BUDGET_PAYLOAD_BYTES: usize = PAYLOAD_HEADER_BYTES + RECORD * (LIMIT as usize + 1);
 
 /// Append-only authenticated journal, held under an exclusive OS lock and pinned
@@ -67,7 +70,7 @@ impl Binding<'_> {
         let mut out = [0u8; RECORD];
         out[..8].copy_from_slice(&count.to_le_bytes());
         let mac = cshake256_framed_32(
-            b"QSAG.HD.QUERY_BUDGET.V2",
+            b"QSAG.HD.QUERY_BUDGET.V3",
             &[
                 self.key,
                 self.family,
@@ -87,7 +90,7 @@ impl Binding<'_> {
     fn with_hwm<T>(&self, f: impl FnOnce(&TwoSlotHwm<'_>) -> T) -> T {
         let mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], reserved: &[u8; 8]| {
             cshake256_framed_32(
-                b"QSAG.HD.QUERY_BUDGET.HWM.V3",
+                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
                 &[
                     self.key,
                     self.family,
@@ -101,13 +104,20 @@ impl Binding<'_> {
                 ],
             )
         };
-        f(&TwoSlotHwm {
-            offset_a: (RECORD_HEADER_BYTES + HWM_SLOT_A_PAYLOAD_OFFSET) as u64,
-            offset_b: (RECORD_HEADER_BYTES + HWM_SLOT_B_PAYLOAD_OFFSET) as u64,
-            order: CounterOrder::Little,
-            mac: &mac,
-        })
+        let hwm = TwoSlotHwm::paged(1, CounterOrder::Little, &mac);
+        assert!(hwm.slots_on_distinct_pages());
+        f(&hwm)
     }
+}
+
+/// True when every slot that authenticates marks exactly `used`.
+fn slots_mark_exactly(hwm: &TwoSlotHwm<'_>, raw_a: &[u8], raw_b: &[u8], used: u64) -> bool {
+    [(0, raw_a), (1, raw_b)]
+        .into_iter()
+        .all(|(slot, raw)| match hwm.classify(slot, raw) {
+            HwmSlotState::Valid { counter, .. } => counter == used,
+            _ => true,
+        })
 }
 
 fn checkpoint_at_least(current: LedgerCheckpoint, minimum: LedgerCheckpoint) -> bool {
@@ -203,15 +213,23 @@ impl DurableQueryBudget {
             data_seal: file_identity(&meta),
         };
         let (genesis_rec, genesis_mac) = binding.record(0, &[0u8; 32]);
-        let (slot_a, slot_b) =
-            binding.with_hwm(|hwm| (hwm.encode(0, 0, &genesis_mac), hwm.encode(1, 0, &genesis_mac)));
+        let (slot_a, slot_b) = binding.with_hwm(|hwm| {
+            (
+                hwm.encode(0, 0, &genesis_mac),
+                hwm.encode(1, 0, &genesis_mac),
+            )
+        });
 
         let mut init_buf = [0u8; FILE_PREFIX_BYTES + RECORD];
         init_buf[..RECORD_HEADER_BYTES].copy_from_slice(&record.record_header());
         let payload = &mut init_buf[RECORD_HEADER_BYTES..];
         payload[..DATA_SEAL_BYTES].copy_from_slice(&binding.data_seal);
-        payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET].copy_from_slice(&slot_a);
-        payload[HWM_SLOT_B_PAYLOAD_OFFSET..PAYLOAD_HEADER_BYTES].copy_from_slice(&slot_b);
+        payload[DATA_SEAL_BYTES..DATA_SEAL_BYTES + FORMAT_MAGIC.len()]
+            .copy_from_slice(FORMAT_MAGIC);
+        payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_A_PAYLOAD_OFFSET + HWM_SLOT_BYTES]
+            .copy_from_slice(&slot_a);
+        payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES]
+            .copy_from_slice(&slot_b);
         payload[PAYLOAD_HEADER_BYTES..].copy_from_slice(&genesis_rec);
         storage(write_at_exact(&file, 0, &init_buf))?;
         storage(file.sync_all())?;
@@ -237,8 +255,12 @@ impl DurableQueryBudget {
         })
     }
 
-    /// Recover strictly. Missing, torn, wrong-key, wrong-family, reordered, symlinked,
-    /// tail-truncated, or unlinked-and-recreated (new inode) journals fail closed.
+    /// Recover strictly. Missing, wrong-key, wrong-family, reordered, symlinked,
+    /// tail-truncated, or unlinked-and-recreated (new inode) journals fail closed, and so
+    /// does damage to any committed record. The one repair besides the slots: up to one
+    /// record's worth of unauthenticated bytes after the chain, left by a `reserve`
+    /// interrupted while writing its record, is truncated. A record that reached the
+    /// disk whole stays spent and the slots are advanced onto it.
     pub fn open(path: impl AsRef<Path>, family: [u8; 32], key: [u8; 32]) -> Result<Self, HdError> {
         let key_secret = guard_key(key);
         Self::open_guarded(path.as_ref(), family, key_secret)
@@ -263,6 +285,13 @@ impl DurableQueryBudget {
                 .open(&path_buf),
         )?;
         let file_meta = storage(file.metadata())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if file_meta.permissions().mode() & 0o077 != 0 {
+                return Err(HdError::BudgetStorageFailed);
+            }
+        }
         if !file_meta.is_file() {
             return Err(HdError::BudgetStorageFailed);
         }
@@ -272,12 +301,13 @@ impl DurableQueryBudget {
         }
 
         let payload = storage(record.read_bounded(MAX_BUDGET_PAYLOAD_BYTES))?;
-        if payload.len() < PAYLOAD_HEADER_BYTES + RECORD {
+        if payload.len() < PAYLOAD_HEADER_BYTES + RECORD
+            || &payload[DATA_SEAL_BYTES..DATA_SEAL_BYTES + FORMAT_MAGIC.len()] != FORMAT_MAGIC
+        {
             return Err(HdError::BudgetStorageFailed);
         }
         let records_slice = &payload[PAYLOAD_HEADER_BYTES..];
         if records_slice.len() > RECORD * (LIMIT as usize + 1)
-            || records_slice.len() % RECORD != 0
             || file_meta.len() != (RECORD_HEADER_BYTES + payload.len()) as u64
             || !ct_eq_bytes(&payload[..DATA_SEAL_BYTES], &data_seal)
         {
@@ -292,25 +322,45 @@ impl DurableQueryBudget {
         };
         let mut prev_mac = [0u8; 32];
         let mut penultimate_mac = [0u8; 32];
-        let mut used = 0u64;
-        for (i, rec_bytes) in records_slice.as_chunks::<RECORD>().0.iter().enumerate() {
-            let count = i as u64;
-            penultimate_mac = prev_mac;
-            let (expected, mac) = binding.record(count, &prev_mac);
+        // Records from the genesis record on that continue the chain. Whatever follows
+        // the first one that does not is the tail.
+        let mut verified = 0usize;
+        for rec_bytes in records_slice.as_chunks::<RECORD>().0 {
+            let (expected, mac) = binding.record(verified as u64, &prev_mac);
             if !ct_eq_bytes(&expected, rec_bytes) {
-                return Err(HdError::BudgetStorageFailed);
+                break;
             }
+            penultimate_mac = prev_mac;
             prev_mac = mac;
-            used = count;
+            verified += 1;
         }
+        // The genesis record is never a tail.
+        let used = (verified as u64)
+            .checked_sub(1)
+            .ok_or(HdError::BudgetStorageFailed)?;
+        let tail_len = records_slice.len() - verified * RECORD;
+        // An interrupted `reserve` leaves at most one record's worth of unauthenticated
+        // bytes after the chain, with every readable slot still on the chain's count.
+        // Nothing else is a torn append: a longer tail, or a tail behind a record the
+        // slots have not reached, is refused before anything is written.
+        if tail_len > RECORD {
+            return Err(HdError::BudgetStorageFailed);
+        }
+        let slot_a =
+            &payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_A_PAYLOAD_OFFSET + HWM_SLOT_BYTES];
+        let slot_b =
+            &payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES];
 
-        // Rejects tail truncation and unexplained gaps; heals the two crash states
-        // (record synced before slot A, slot A synced before slot B).
+        // Rejects tail truncation and unexplained gaps; heals the crash states (record
+        // synced before slot A, slot A synced before slot B, one slot torn mid-write).
         storage(binding.with_hwm(|hwm| {
+            if tail_len != 0 && !slots_mark_exactly(hwm, slot_a, slot_b, used) {
+                return Err(io::Error::other("unexplained journal tail"));
+            }
             hwm.recover(
                 &file,
-                &payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET],
-                &payload[HWM_SLOT_B_PAYLOAD_OFFSET..PAYLOAD_HEADER_BYTES],
+                slot_a,
+                slot_b,
                 &ChainHead {
                     len: used,
                     tip: &prev_mac,
@@ -318,6 +368,13 @@ impl DurableQueryBudget {
                 },
             )
         }))?;
+        if tail_len != 0 {
+            // The slots hold `used` and the chain up to it verified, so the tail was
+            // never acknowledged: drop it.
+            storage(file.set_len((FILE_PREFIX_BYTES + verified * RECORD) as u64))?;
+            storage(file.sync_all())?;
+            storage(sync_parent_dir(&path_buf))?;
+        }
 
         Ok(Self {
             path: path_buf,
@@ -371,13 +428,14 @@ impl DurableQueryBudget {
         });
         let payload = storage(self.record.read_bounded(MAX_BUDGET_PAYLOAD_BYTES))?;
         if payload.len() != PAYLOAD_HEADER_BYTES + expected_records_len
+            || &payload[DATA_SEAL_BYTES..DATA_SEAL_BYTES + FORMAT_MAGIC.len()] != FORMAT_MAGIC
             || !ct_eq_bytes(&payload[..DATA_SEAL_BYTES], &self.data_seal)
             || !ct_eq_bytes(
-                &payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET],
+                &payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_A_PAYLOAD_OFFSET + HWM_SLOT_BYTES],
                 &slot_a,
             )
             || !ct_eq_bytes(
-                &payload[HWM_SLOT_B_PAYLOAD_OFFSET..PAYLOAD_HEADER_BYTES],
+                &payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES],
                 &slot_b,
             )
             || !ct_eq_bytes(&payload[payload.len() - 32..], &self.last_mac)
@@ -423,6 +481,57 @@ mod tests {
     use super::*;
     use std::fs::OpenOptions;
     use std::io::Write;
+
+    fn tear_slot_pages(pages: &[u64], recoverable: bool) {
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "hd-budget-paged-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("budget");
+        let mut budget = DurableQueryBudget::create(&path, [1; 32], [2; 32]).unwrap();
+        budget.reserve().unwrap();
+        let checkpoint = budget.checkpoint();
+        drop(budget);
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        for &page in pages {
+            write_at_exact(
+                &file,
+                page * HWM_PAGE_BYTES,
+                &[0xa5; HWM_PAGE_BYTES as usize],
+            )
+            .unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+        let reopened = DurableQueryBudget::open(&path, [1; 32], [2; 32]);
+        if recoverable {
+            let mut budget = reopened.unwrap();
+            assert_eq!(budget.checkpoint(), checkpoint);
+            budget.reserve().unwrap();
+            assert_eq!(budget.used(), 2);
+        } else {
+            assert_eq!(reopened.err(), Some(HdError::BudgetStorageFailed));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn torn_slot_a_page_recovers() {
+        tear_slot_pages(&[1], true);
+    }
+    #[test]
+    fn torn_slot_b_page_recovers() {
+        tear_slot_pages(&[2], true);
+    }
+    #[test]
+    fn both_slot_pages_torn_fail_closed() {
+        tear_slot_pages(&[1, 2], false);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -536,7 +645,7 @@ mod tests {
         );
 
         // Even patching the header's `data_seal` to match the new inode fails closed because
-        // `data_seal` is cryptographically authenticated inside `QSAG.HD.QUERY_BUDGET.V2`.
+        // `data_seal` is cryptographically authenticated inside `QSAG.HD.QUERY_BUDGET.V3`.
         let new_meta = std::fs::symlink_metadata(&replay_path).unwrap();
         let forged_seal = file_identity(&new_meta);
         let mut patched = saved_genesis_bytes.clone();
@@ -597,6 +706,231 @@ mod tests {
         assert!(DurableQueryBudget::open(&path, [1; 32], [2; 32]).is_err());
         assert!(DurableQueryBudget::create(&path, [1; 32], [2; 32]).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn junk(len: usize, seed: u64) -> alloc::vec::Vec<u8> {
+        let mut x = seed | 1;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    /// A budget with two uses spent, closed.
+    struct TwoUses {
+        dir: PathBuf,
+        path: PathBuf,
+        /// The file with both uses committed (genesis record plus two).
+        committed: alloc::vec::Vec<u8>,
+        /// The record a third use appends.
+        next: [u8; RECORD],
+        /// The file after that third use committed.
+        advanced: alloc::vec::Vec<u8>,
+        checkpoint: LedgerCheckpoint,
+    }
+
+    impl TwoUses {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(alloc::format!(
+                "hd-budget-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("budget");
+            let mut budget = DurableQueryBudget::create(&path, [1; 32], [2; 32]).unwrap();
+            budget.reserve().unwrap();
+            budget.reserve().unwrap();
+            let checkpoint = budget.checkpoint();
+            let committed = std::fs::read(&path).unwrap();
+            assert_eq!(committed.len(), FILE_PREFIX_BYTES + 3 * RECORD);
+            budget.reserve().unwrap();
+            drop(budget);
+            let advanced = std::fs::read(&path).unwrap();
+            let next = advanced[committed.len()..].try_into().unwrap();
+            // `fs::write` truncates in place: the inode the MACs bind is kept.
+            std::fs::write(&path, &committed).unwrap();
+            Self {
+                dir,
+                path,
+                committed,
+                next,
+                advanced,
+                checkpoint,
+            }
+        }
+        /// Put the committed file back, followed by `tail`.
+        fn with_tail(&self, tail: &[u8]) -> alloc::vec::Vec<u8> {
+            let mut bytes = self.committed.clone();
+            bytes.extend_from_slice(tail);
+            std::fs::write(&self.path, &bytes).unwrap();
+            bytes
+        }
+        fn open(&self) -> Result<DurableQueryBudget, HdError> {
+            DurableQueryBudget::open_at_least(&self.path, [1; 32], [2; 32], self.checkpoint)
+        }
+        /// Recovery lands on the two committed uses with the tail gone, and the budget
+        /// then spends the third use as if the tear had never happened.
+        fn assert_recovers_and_continues(&self) {
+            let mut budget = self.open().unwrap();
+            assert_eq!(budget.used(), 2);
+            assert_eq!(budget.checkpoint(), self.checkpoint);
+            assert_eq!(std::fs::read(&self.path).unwrap(), self.committed);
+            budget.reserve().unwrap();
+            assert_eq!(budget.used(), 3);
+            drop(budget);
+            let budget = self.open().unwrap();
+            assert_eq!(budget.used(), 3);
+            drop(budget);
+            assert_eq!(std::fs::read(&self.path).unwrap(), self.advanced);
+        }
+        /// Recovery refuses the file as it stands and leaves every byte alone.
+        fn assert_fails_closed(&self, on_disk: &[u8]) {
+            assert_eq!(self.open().err(), Some(HdError::BudgetStorageFailed));
+            assert_eq!(
+                DurableQueryBudget::open(&self.path, [1; 32], [2; 32]).err(),
+                Some(HdError::BudgetStorageFailed)
+            );
+            assert_eq!(std::fs::read(&self.path).unwrap(), on_disk);
+        }
+    }
+
+    impl Drop for TwoUses {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn torn_tail_record_is_truncated_and_the_budget_continues() {
+        let budget = TwoUses::new("tail-partial");
+        for cut in [1, 7, 8, 9, RECORD - 1] {
+            // A prefix of the real record, a prefix that never left the page cache as
+            // data (zeros), and arbitrary bytes.
+            for tail in [
+                budget.next[..cut].to_vec(),
+                alloc::vec![0; cut],
+                junk(cut, cut as u64),
+            ] {
+                budget.with_tail(&tail);
+                budget.assert_recovers_and_continues();
+            }
+        }
+        // The tear may coincide with one unreadable slot; the other still marks the chain.
+        for page in [1, 2] {
+            budget.with_tail(&budget.next[..17]);
+            let file = OpenOptions::new().write(true).open(&budget.path).unwrap();
+            write_at_exact(&file, page * HWM_PAGE_BYTES, &junk(HWM_SLOT_BYTES, 31)).unwrap();
+            drop(file);
+            budget.assert_recovers_and_continues();
+        }
+    }
+
+    #[test]
+    fn full_length_unauthenticated_tail_is_truncated() {
+        let budget = TwoUses::new("tail-full");
+        let mut bad_mac = budget.next;
+        bad_mac[RECORD - 1] ^= 1;
+        let mut bad_count = budget.next;
+        bad_count[0] ^= 1;
+        for tail in [
+            bad_mac.to_vec(),
+            bad_count.to_vec(),
+            alloc::vec![0; RECORD],
+            junk(RECORD, 5),
+        ] {
+            budget.with_tail(&tail);
+            budget.assert_recovers_and_continues();
+        }
+    }
+
+    #[test]
+    fn synced_unacknowledged_record_is_rolled_forward_not_truncated() {
+        let budget = TwoUses::new("tail-valid");
+        budget.with_tail(&budget.next);
+        let reopened = budget.open().unwrap();
+        assert_eq!(reopened.used(), 3);
+        drop(reopened);
+        assert_eq!(std::fs::read(&budget.path).unwrap(), budget.advanced);
+    }
+
+    #[test]
+    fn torn_tail_never_excuses_a_corrupt_committed_record() {
+        let budget = TwoUses::new("tail-corrupt");
+        // Record 0 is the genesis record; 1 and 2 are the committed uses.
+        for record in [0, 1, 2] {
+            for index in [0, 7, 8, RECORD - 1] {
+                for tail in [
+                    &budget.next[..17],
+                    &junk(RECORD, 7)[..],
+                    &budget.next[..],
+                    &[][..],
+                ] {
+                    let mut bytes = budget.with_tail(tail);
+                    bytes[FILE_PREFIX_BYTES + record * RECORD + index] ^= 1;
+                    std::fs::write(&budget.path, &bytes).unwrap();
+                    budget.assert_fails_closed(&bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn torn_tail_never_excuses_a_slot_ahead_of_the_chain() {
+        let budget = TwoUses::new("tail-short");
+        // Keep the genesis record alone, then genesis plus one use; the slots say two.
+        for kept in [1, 2] {
+            for tail in [
+                &budget.next[..17],
+                &junk(RECORD, 9)[..],
+                &junk(RECORD - 1, 10)[..],
+            ] {
+                let mut bytes = budget.committed[..FILE_PREFIX_BYTES + kept * RECORD].to_vec();
+                bytes.extend_from_slice(tail);
+                std::fs::write(&budget.path, &bytes).unwrap();
+                budget.assert_fails_closed(&bytes);
+            }
+        }
+        // One slot ahead of the other is the crash between the two slot writes; the record
+        // it points at must be there, torn tail or not.
+        let slot_a = HWM_PAGE_BYTES as usize..HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES;
+        let mut ahead = budget.committed.clone();
+        ahead[slot_a.clone()].copy_from_slice(&budget.advanced[slot_a]);
+        for tail in [&budget.next[..17], &junk(RECORD, 11)[..], &[][..]] {
+            let mut bytes = ahead.clone();
+            bytes.extend_from_slice(tail);
+            std::fs::write(&budget.path, &bytes).unwrap();
+            budget.assert_fails_closed(&bytes);
+        }
+    }
+
+    #[test]
+    fn tail_longer_than_one_record_fails_closed() {
+        let budget = TwoUses::new("tail-long");
+        for len in [RECORD + 1, 2 * RECORD - 1, 2 * RECORD, 4096] {
+            let bytes = budget.with_tail(&junk(len, len as u64));
+            budget.assert_fails_closed(&bytes);
+        }
+        // A synced record the slots have not reached, then more bytes: two appends past
+        // the mark, which one interrupted reserve cannot produce.
+        for extra in [1, 17, RECORD] {
+            let mut tail = budget.next.to_vec();
+            tail.extend_from_slice(&junk(extra, 3));
+            let bytes = budget.with_tail(&tail);
+            budget.assert_fails_closed(&bytes);
+        }
+        // An unauthenticated record followed by an authentic-looking one is no better.
+        let mut tail = junk(RECORD, 4);
+        tail.extend_from_slice(&budget.next);
+        let bytes = budget.with_tail(&tail);
+        budget.assert_fails_closed(&bytes);
     }
 
     #[cfg(unix)]

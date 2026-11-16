@@ -24,8 +24,8 @@
 //! tweaks, inventory child seeds) are pseudorandom functions of these seeds, so
 //! they are consistent by construction and need no further private messages.
 
-use qsag_asm::wipe::{SecretBuffer, SecretBytes, wipe};
 use alloc::vec::Vec;
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, wipe};
 
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes};
 use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};

@@ -166,6 +166,7 @@ public import Qsag.Exec.InteractiveUcEngine
 public import Qsag.Exec.MirSpecBridge
 public import Qsag.Exec.MirSpecBridgeCore
 public import Qsag.Exec.MirSpecBridgeWitnesses
+public import Qsag.Exec.PlatformContractInstances
 public import Qsag.Exec.PosixCrashWal
 public import Qsag.Exec.RefinesBridges
 public import Qsag.Exec.RssParticipantBinding
@@ -214,9 +215,13 @@ public import Qsag.Machine.FaultAndSpeculativeSafety
 public import Qsag.Machine.Gf128ClmulLoopAgreement
 public import Qsag.Machine.IsaCosim
 public import Qsag.Machine.McRefine
+public import Qsag.Machine.PlatformContractInstances
 public import Qsag.Machine.SimdBinaryEquiv
 public import Qsag.Machine.SpirvSimtGpuEquiv
 public import Qsag.Machine.SydTvTranslationValidation
+
+-- Qsag/Machine/Tactic
+public import Qsag.Machine.Tactic.KernelRfl
 
 -- Qsag/Top
 public import Qsag.Top.Aggregation

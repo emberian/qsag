@@ -3260,6 +3260,68 @@ pub(crate) fn add_public_u64_to_spdz_word(
     }
 }
 
+/// MAC update for a Beaver product, with the 128 coefficients of each tag
+/// transposed into planes. Each GF(256) multiply handles all 64 sponge lanes.
+fn beaver_mac_planes(
+    c: &SpdzMacWord,
+    b: &SpdzMacWord,
+    a: &SpdzMacWord,
+    alpha: &[Tower128; 2],
+    d: &BitslicedGf256x64,
+    e: &BitslicedGf256x64,
+    de: &BitslicedGf256x64,
+) -> SpdzMacWord {
+    // Valid Boolean circuit openings have only plane zero. Public bit masks
+    // scale the entire tag directly; retain the field-plane path for arbitrary
+    // GF(256) inputs and malformed openings (which the MAC barrier rejects).
+    if d[1..].iter().chain(&e[1..]).all(|&plane| plane == 0) {
+        return core::array::from_fn(|ml| {
+            core::array::from_fn(|i| {
+                let dm = 0u128.wrapping_sub(u128::from((d[0] >> i) & 1));
+                let em = 0u128.wrapping_sub(u128::from((e[0] >> i) & 1));
+                Tower128(
+                    c[ml][i].0 ^ (b[ml][i].0 & dm) ^ (a[ml][i].0 & em) ^ (alpha[ml].0 & dm & em),
+                )
+            })
+        });
+    }
+    let planes = |mac: &SpdzMacWord| {
+        SecretBuffer(core::array::from_fn::<_, 64, _>(|i| {
+            [
+                mac[0][i].0 as u64,
+                (mac[0][i].0 >> 64) as u64,
+                mac[1][i].0 as u64,
+                (mac[1][i].0 >> 64) as u64,
+            ]
+        }))
+    };
+    let mut bp = planes(b);
+    let mut ap = planes(a);
+    qsag_asm::transpose64x256(&mut bp);
+    qsag_asm::transpose64x256(&mut ap);
+    for col in 0..4 {
+        for byte in 0..8 {
+            let bb = core::array::from_fn(|bit| bp[8 * byte + bit][col]);
+            let aa = core::array::from_fn(|bit| ap[8 * byte + bit][col]);
+            let alpha_byte = (alpha[col / 2].0 >> (64 * (col % 2) + 8 * byte)) as u8;
+            let alph =
+                core::array::from_fn(|bit| 0u64.wrapping_sub(u64::from((alpha_byte >> bit) & 1)));
+            let db = bs_gf256_mul_planes_ct(d, &bb);
+            let ea = bs_gf256_mul_planes_ct(e, &aa);
+            let public = bs_gf256_mul_planes_ct(de, &alph);
+            for bit in 0..8 {
+                bp[8 * byte + bit][col] = db[bit] ^ ea[bit] ^ public[bit];
+            }
+        }
+    }
+    qsag_asm::transpose64x256(&mut bp);
+    core::array::from_fn(|ml| {
+        core::array::from_fn(|i| {
+            Tower128(c[ml][i].0 ^ u128::from(bp[i][2 * ml]) ^ (u128::from(bp[i][2 * ml + 1]) << 64))
+        })
+    })
+}
+
 /// Commit-before-open + full `0..m` Shamir degree-`< t` opening for Beaver masked `(d, e)` words,
 /// appending `(opened_word, mac_shares)` to `pending_mac_words` and `pending_mac_tags` for the
 /// pre-cut 2-lane `Tower128` SPDZ `MacCheck` barrier (`[P0-08]`).
@@ -3384,41 +3446,8 @@ pub(crate) fn verify_pending_spdz_mac_batch(
 
     let fold_coin =
         run_commit_and_open_coin(session_id, phase.as_bytes(), &open_digest, party_rngs)?;
-    let mut chi_xof = Cshake256Xof::new(b"QSAG.SPDZ.KECCAK.PEND.CHIS/v1");
-    chi_xof.absorb(&fold_coin);
-
-    let total_words = pending_opened.len();
-    let mut x_folded = [Tower128::ZERO; 2];
-    let mut m_folded = SecretBuffer(vec![[Tower128::ZERO; 2]; t]);
-    let mut chi_buf = [0u8; 64 * 32];
-
-    for w in 0..total_words {
-        chi_xof.squeeze(&mut chi_buf);
-        let chis: [[u128; 2]; 64] = core::array::from_fn(|bit| {
-            core::array::from_fn(|lane| {
-                let off = (2 * bit + lane) * 16;
-                u128::from_le_bytes(core::array::from_fn(|i| chi_buf[off + i]))
-            })
-        });
-        for (bit, pair) in chis.iter().enumerate() {
-            let value = bs_gf256_extract_lane(&pending_opened[w], bit);
-            for lane in 0..2 {
-                x_folded[lane] = x_folded[lane].add(Tower128(pair[lane]).mul_gf256(value));
-            }
-        }
-        for q in 0..t {
-            let mut macs: [[u128; 2]; 64] = core::array::from_fn(|bit| {
-                [pending_macs[q][w][0][bit].0, pending_macs[q][w][1][bit].0]
-            });
-            let mut folded = qsag_asm::tower128_bdoz_2lane_mac(&chis, &macs);
-            for lane in 0..2 {
-                m_folded[q][lane] = m_folded[q][lane].add(Tower128(folded[lane]));
-            }
-            wipe_u128s(macs.as_flattened_mut());
-            crate::wipe::wipe_u128s(&mut folded);
-        }
-    }
-    wipe_bytes(&mut chi_buf);
+    let (x_folded, mut m_folded) =
+        crate::preprocessing::fold_spdz_mac_words(&fold_coin, pending_opened, pending_macs, t);
 
     let mut z_masks = SecretBuffer(vec![[Tower128::ZERO; 2]; t]);
     if t > 1 {
@@ -3681,19 +3710,15 @@ pub fn eval_spdz_keccak_f1600_single(
                 bs_gf256_xor_assign(&mut prod_sh, &de_pub);
 
                 let alpha_p = vaults[p].mac_alpha_lanes;
-                let mut prod_mac = round_mac_c[p][lane];
-                for ml in 0..2 {
-                    for bit in 0..64 {
-                        let term = round_mac_b[p][lane][ml][bit]
-                            .mul_gf256(bs_gf256_extract_lane(d_pub, bit))
-                            .add(
-                                round_mac_a[p][lane][ml][bit]
-                                    .mul_gf256(bs_gf256_extract_lane(e_pub, bit)),
-                            )
-                            .add(alpha_p[ml].mul_gf256(bs_gf256_extract_lane(&de_pub, bit)));
-                        prod_mac[ml][bit] = prod_mac[ml][bit].add(term);
-                    }
-                }
+                let prod_mac = beaver_mac_planes(
+                    &round_mac_c[p][lane],
+                    &round_mac_b[p][lane],
+                    &round_mac_a[p][lane],
+                    &alpha_p,
+                    d_pub,
+                    e_pub,
+                    &de_pub,
+                );
 
                 states_sh[p][lane] = bs_gf256_xor(&b_sh[p][lane], &prod_sh);
                 states_mac[p][lane] = b_mac[p][lane];
@@ -3889,12 +3914,6 @@ pub fn eval_spdz_keccak_f1600_batch64(
             let d_pub = &de_opened[2 * idx];
             let e_pub = &de_opened[2 * idx + 1];
             let de_pub = bs_gf256_mul_planes_ct(d_pub, e_pub);
-            let d_lanes: [TowerGf256; 64] =
-                core::array::from_fn(|i| bs_gf256_extract_lane(d_pub, i));
-            let e_lanes: [TowerGf256; 64] =
-                core::array::from_fn(|i| bs_gf256_extract_lane(e_pub, i));
-            let de_lanes: [TowerGf256; 64] =
-                core::array::from_fn(|i| bs_gf256_extract_lane(&de_pub, i));
             for p in 0..m {
                 let db = bs_gf256_mul_planes_ct(d_pub, &tr_b[p][idx]);
                 let ea = bs_gf256_mul_planes_ct(e_pub, &tr_a[p][idx]);
@@ -3904,16 +3923,16 @@ pub fn eval_spdz_keccak_f1600_batch64(
                 bs_gf256_xor_assign(&mut prod_sh, &de_pub);
 
                 let alpha_p = vaults[p].mac_alpha_lanes;
-                let mut out_mac = b_mac[p][idx];
-                for ml in 0..2 {
-                    for i in 0..64 {
-                        let term = mac_c[p][idx][ml][i]
-                            .add(mac_b[p][idx][ml][i].mul_gf256(d_lanes[i]))
-                            .add(mac_a[p][idx][ml][i].mul_gf256(e_lanes[i]))
-                            .add(alpha_p[ml].mul_gf256(de_lanes[i]));
-                        out_mac[ml][i] = out_mac[ml][i].add(term);
-                    }
-                }
+                let mut out_mac = beaver_mac_planes(
+                    &mac_c[p][idx],
+                    &mac_b[p][idx],
+                    &mac_a[p][idx],
+                    &alpha_p,
+                    d_pub,
+                    e_pub,
+                    &de_pub,
+                );
+                xor_spdz_macs_assign(&mut out_mac, &b_mac[p][idx]);
                 states_sh[p][idx] = bs_gf256_xor(&b_sh[p][idx], &prod_sh);
                 states_mac[p][idx] = out_mac;
             }
@@ -5633,13 +5652,8 @@ pub fn sign_stateless_tsw_rss_mpc(
             auth_path,
         });
     }
-    let mut cur_root = crate::tsw_baggy::fors_pk_from_roots(
-        Cshake256Suite,
-        &pk.pk_seed,
-        tree0,
-        kp0,
-        &fors_roots,
-    );
+    let mut cur_root =
+        crate::tsw_baggy::fors_pk_from_roots(Cshake256Suite, &pk.pk_seed, tree0, kp0, &fors_roots);
 
     // Evaluate hypertree layers `0..num_layers` with public TSW target-sum grinding (`0` r_rand on internal nodes `[P0-02]`)
     let target_sum = canonical_target_sum(params.w, params.ell1);
@@ -5753,6 +5767,35 @@ pub fn sign_stateless_tsw_rss_mpc(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn plane_beaver_mac_matches_scalar_for_distinct_field_lanes() {
+        let mut rng = PartyPrivateRng::from_seed([0x9a; 32], b"plane-mac");
+        for iteration in 0..8 {
+            let a = core::array::from_fn(|_| core::array::from_fn(|_| rng.next_tower128()));
+            let b = core::array::from_fn(|_| core::array::from_fn(|_| rng.next_tower128()));
+            let c = core::array::from_fn(|_| core::array::from_fn(|_| rng.next_tower128()));
+            let alpha = [rng.next_tower128(), rng.next_tower128()];
+            let mut d = core::array::from_fn(|_| rng.next_u64());
+            let mut e = core::array::from_fn(|_| rng.next_u64());
+            if iteration % 2 == 0 {
+                d[1..].fill(0);
+                e[1..].fill(0);
+            }
+            let de = bs_gf256_mul_planes_ct(&d, &e);
+            let got = beaver_mac_planes(&c, &b, &a, &alpha, &d, &e, &de);
+            for ml in 0..2 {
+                for bit in 0..64 {
+                    assert_eq!(
+                        got[ml][bit],
+                        c[ml][bit]
+                            .add(b[ml][bit].mul_gf256(bs_gf256_extract_lane(&d, bit)))
+                            .add(a[ml][bit].mul_gf256(bs_gf256_extract_lane(&e, bit)))
+                            .add(alpha[ml].mul_gf256(bs_gf256_extract_lane(&de, bit)))
+                    );
+                }
+            }
+        }
+    }
     use super::*;
     use crate::fips205::{
         fips205_prf_msg, slh_keygen_internal, slh_keygen_mpc, slh_sign_mpc, slh_verify,
@@ -7035,42 +7078,56 @@ pub(crate) mod tests {
         }
 
         /// Authenticated sharing of 64 bits: per-party share word and MAC word.
-        #[expect(
-            clippy::needless_range_loop,
-            reason = "bit, lane and party indices each address several parallel tables"
-        )]
         fn auth_word(&mut self, bits: u64) -> (Vec<BitslicedGf256x64>, Vec<SpdzMacWord>) {
             let n = self.pts.len();
             let mut sh = vec![[0u64; 8]; n];
             let mut mac = vec![[[Tower128::ZERO; 64]; 2]; n];
-            // Reuse polynomial storage across lanes instead of allocating six
-            // vectors per bit of every test triple (millions of tiny allocations).
-            let mut coeffs = vec![TowerGf256::ZERO; self.t];
-            let mut mac_coeffs = vec![Tower128::ZERO; self.t];
-            for i in 0..64 {
-                let bit = (bits >> i) & 1 == 1;
-                coeffs[0] = TowerGf256(u8::from(bit));
-                for c in &mut coeffs[1..] {
-                    *c = TowerGf256(self.word() as u8);
+            // Sample independent degree-(t-1) polynomials in plane layout. This
+            // test dealer must not dominate online circuit benchmarks with
+            // millions of scalar field operations and one-word PRG calls.
+            let mut coeffs = SecretBuffer(vec![[0u64; 8]; self.t]);
+            coeffs[0][0] = bits;
+            for coeff in &mut coeffs[1..] {
+                self.stream.fill_words(coeff);
+            }
+            let mut tags = SecretBuffer(vec![[[0u64; 4]; 64]; self.t]);
+            for bit in 0..64 {
+                for col in 0..4 {
+                    let alpha_bit = (self.alpha[col / 2].0 >> (64 * (col % 2) + bit)) & 1;
+                    tags[0][bit][col] = bits & 0u64.wrapping_sub(alpha_bit as u64);
                 }
-                for (p, &pt) in self.pts.iter().enumerate() {
-                    let mut value = coeffs[self.t - 1];
-                    for &c in coeffs[..self.t - 1].iter().rev() {
-                        value = value.mul(pt).add(c);
-                    }
-                    bs_gf256_insert_lane(&mut sh[p], i, value);
+            }
+            for coeff in &mut tags[1..] {
+                self.stream.fill_words(coeff.as_flattened_mut());
+            }
+            for (p, &pt) in self.pts.iter().enumerate() {
+                let scale = crate::field::tower::PublicGf256Matrix::from_public_scalar(pt);
+                let mut value = coeffs[self.t - 1];
+                for coeff in coeffs[..self.t - 1].iter().rev() {
+                    value = scale.scale_planes(&value);
+                    bs_gf256_xor_assign(&mut value, coeff);
                 }
-                for l in 0..2 {
-                    mac_coeffs[0] = if bit { self.alpha[l] } else { Tower128::ZERO };
-                    for c in &mut mac_coeffs[1..] {
-                        *c = self.tower();
-                    }
-                    for (p, &pt) in self.pts.iter().enumerate() {
-                        let mut value = mac_coeffs[self.t - 1];
-                        for &c in mac_coeffs[..self.t - 1].iter().rev() {
-                            value = value.mul_gf256(pt).add(c);
+                sh[p] = value;
+                let mut planes = SecretBuffer(tags[self.t - 1]);
+                for coeff in tags[..self.t - 1].iter().rev() {
+                    for col in 0..4 {
+                        for byte in 0..8 {
+                            let block = core::array::from_fn(|bit| planes[8 * byte + bit][col]);
+                            let scaled = scale.scale_planes(&block);
+                            for bit in 0..8 {
+                                planes[8 * byte + bit][col] =
+                                    scaled[bit] ^ coeff[8 * byte + bit][col];
+                            }
                         }
-                        mac[p][l][i] = value;
+                    }
+                }
+                qsag_asm::transpose64x256(&mut planes);
+                for i in 0..64 {
+                    for ml in 0..2 {
+                        mac[p][ml][i] = Tower128(
+                            u128::from(planes[i][2 * ml])
+                                | (u128::from(planes[i][2 * ml + 1]) << 64),
+                        );
                     }
                 }
             }

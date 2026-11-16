@@ -1,5 +1,5 @@
 //! Hardware differential, kernel-pin provenance, `ExecutionReceipt` authentication, and SPIR-V
-//! reproducibility tests for `VulkanSpirvBackend` (`VulkanRdna2Backend`).
+//! reproducibility tests for `VulkanSpirvBackend` (`VulkanSpirvBackend`).
 
 #![cfg(feature = "std")]
 
@@ -19,8 +19,7 @@ use qsag_accel::vulkan::{
 use qsag_accel::{
     AccelError, AcceleratorBackend, BackendAttestationKey, CertifiedBackend, CertifiedKernelPin,
     CpuReferenceBackend, KernelRegistryError, KernelSlot, KernelTargetArch, ProverKernelSlot,
-    VerifiedKernelDigestRegistry, VulkanError, VulkanRdna2Backend, VulkanSpirvBackend,
-    spot_check_merkle_layer,
+    VerifiedKernelDigestRegistry, VulkanError, VulkanSpirvBackend, spot_check_merkle_layer,
 };
 
 fn splitmix64(state: &mut u64) -> u64 {
@@ -83,7 +82,7 @@ fn test_spirv_shaders_reproducible_from_comp_sources() {
 
 #[test]
 fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
-    let gpu = match VulkanRdna2Backend::try_new() {
+    let gpu = match VulkanSpirvBackend::try_new() {
         Ok(b) => b,
         Err(
             VulkanError::UnsupportedPlatform
@@ -201,7 +200,7 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         unmeasured_err,
         Some(KernelRegistryError::LoaderMeasurementRequired)
     );
-    let gpu = VulkanRdna2Backend::try_new().expect("re-open discrete GPU");
+    let gpu = VulkanSpirvBackend::try_new().expect("re-open discrete GPU");
     let certified_gpu = CertifiedBackend::try_new_measured(gpu, &registry, &measured_pins)
         .expect("certified GPU backend with verified SPIR-V loader pins");
 

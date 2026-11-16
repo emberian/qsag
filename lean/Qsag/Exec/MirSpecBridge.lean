@@ -185,3 +185,4 @@ end Qsag
 #tooth_pair Qsag.isa_to_ideal_preserves_multiturn_safety vs Qsag.tooth_unregistered_round1_opening_refused
 #tooth_pair Qsag.isa_to_ideal_preserves_multiturn_safety vs Qsag.tooth_forged_quorum_cert_refused
 #tooth_pair Qsag.shamirSubset_preserves_multiturn_safety vs Qsag.tooth_stateless_policy_breaks_four_layer_safety
+#verify_constructive Qsag.inhabited_four_layer_chain

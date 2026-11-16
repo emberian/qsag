@@ -21,7 +21,7 @@ pub fn passphrase_named(
 ) -> Result<Option<ZeroizingBuf>, CliError> {
     let pass = match (args.get(env_option), args.get(file_option)) {
         (Some(_), Some(_)) => return Err(CliError::usage("choose one passphrase source")),
-        (Some(name), None) => Some(ZeroizingBuf(
+        (Some(name), None) => Some(ZeroizingBuf::new(
             std::env::var_os(name)
                 .ok_or_else(|| CliError::input("passphrase environment variable unavailable"))?
                 .into_encoded_bytes(),
@@ -71,14 +71,14 @@ fn immutable_header_bytes(json: &Json, secret_field: &str) -> ZeroizingBuf {
 }
 
 fn derive(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {
-    let mut state = Secret32([0u8; 32]);
+    let mut state = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.KDF.V1",
         &[pass, salt, scheme.as_bytes()],
         &mut state.0,
     );
     for i in 0..KDF_ROUNDS {
-        let mut next = Secret32([0u8; 32]);
+        let mut next = Secret32::new([0u8; 32]);
         cshake256_framed_xof(
             b"QSAG.ENVELOPE.ITER.V1",
             &[&state.0, salt, &i.to_le_bytes()],
@@ -86,13 +86,13 @@ fn derive(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {
         );
         state = next;
     }
-    let mut enc = Secret32([0u8; 32]);
+    let mut enc = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.ENC.V1",
         &[&state.0, salt, scheme.as_bytes()],
         &mut enc.0,
     );
-    let mut mac = Secret32([0u8; 32]);
+    let mut mac = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.MAC.V1",
         &[&state.0, salt, scheme.as_bytes()],
@@ -103,7 +103,7 @@ fn derive(pass: &[u8], salt: &[u8; 32], scheme: &str) -> (Secret32, Secret32) {
 
 fn crypt(bytes: &mut [u8], enc_key: &Secret32, salt: &[u8; 32], scheme: &str, field: &str) {
     for (i, block) in bytes.chunks_mut(32).enumerate() {
-        let mut stream = Secret32([0u8; 32]);
+        let mut stream = Secret32::new([0u8; 32]);
         cshake256_framed_xof(
             b"QSAG.ENVELOPE.STREAM.V1",
             &[
@@ -130,7 +130,7 @@ fn tag(
     mac_key: &Secret32,
 ) -> Secret32 {
     let header = immutable_header_bytes(json, field);
-    let mut out = Secret32([0u8; 32]);
+    let mut out = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.TAG.V1",
         &[
@@ -198,7 +198,7 @@ impl OpenedSecret {
     /// The 32-byte master seed of a scheme whose key file stores one.
     pub fn seed(&self) -> Result<Secret32, CliError> {
         let bytes = self.of("seed")?;
-        let mut seed = Secret32([0u8; 32]);
+        let mut seed = Secret32::new([0u8; 32]);
         if bytes.len() != seed.0.len() {
             return Err(CliError::input("seed must be exactly 32 bytes of hex"));
         }

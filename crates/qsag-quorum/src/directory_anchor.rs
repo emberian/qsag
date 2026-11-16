@@ -1,37 +1,47 @@
 //! Fsynced dual-slot checkpoint authority. Its directory must reside in a
 //! rollback domain independent of the journals it protects.
-use qsag_asm::durable::LockedRecord;
-use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
+//!
+//! The directory is private (`0700`) and holds one [`TwoSlotRecord`] (`genesis`,
+//! `slot_a`, `slot_b`). Nothing outside retains a minimum for it, so every advance
+//! is mirrored into both slots before it is acknowledged: the loss of either slot
+//! then recovers the acknowledged checkpoint, never its predecessor.
+use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint, TwoSlotPaths, TwoSlotRecord};
 use std::{io, path::Path, sync::Mutex};
 
-use crate::hash::{SecretKey, mac32, mac32_verify};
+use crate::hash::SecretKey;
+
+const DOMAIN: &[u8] = b"QSAG.DIRECTORY.ANCHOR.V2";
+const CHECKPOINT_LEN: usize = 8 + 32;
 
 pub struct FsDirectoryMonotoneAnchor {
-    state: Mutex<State>,
-}
-struct State {
-    slots: [LockedRecord; 2],
-    key: [u8; 32],
-    current: Option<LedgerCheckpoint>,
-    failed: bool,
-}
-impl Drop for State {
-    fn drop(&mut self) {
-        qsag_core::wipe::wipe_bytes32(&mut self.key);
-    }
-}
-fn same_checkpoint(a: Option<LedgerCheckpoint>, b: Option<LedgerCheckpoint>) -> bool {
-    match (a, b) {
-        (Some(a), Some(b)) => {
-            a.generation == b.generation && qsag_core::wipe::ct_eq_bytes32(&a.tag, &b.tag)
-        }
-        (None, None) => true,
-        _ => false,
-    }
+    record: Mutex<TwoSlotRecord>,
 }
 
 fn invalid() -> io::Error {
     io::Error::other("monotone directory anchor failed or rolled back")
+}
+fn paths(directory: &Path) -> TwoSlotPaths {
+    TwoSlotPaths {
+        genesis: directory.join("genesis"),
+        slots: [directory.join("slot_a"), directory.join("slot_b")],
+    }
+}
+fn encode(checkpoint: LedgerCheckpoint) -> [u8; CHECKPOINT_LEN] {
+    let mut bytes = [0; CHECKPOINT_LEN];
+    bytes[..8].copy_from_slice(&checkpoint.generation.to_be_bytes());
+    bytes[8..].copy_from_slice(&checkpoint.tag);
+    bytes
+}
+/// An empty payload is the unenrolled authority.
+fn decode(payload: &[u8]) -> io::Result<Option<LedgerCheckpoint>> {
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    let bytes: &[u8; CHECKPOINT_LEN] = payload.try_into().map_err(|_| invalid())?;
+    Ok(Some(LedgerCheckpoint {
+        generation: u64::from_be_bytes(bytes[..8].try_into().map_err(|_| invalid())?),
+        tag: bytes[8..].try_into().map_err(|_| invalid())?,
+    }))
 }
 impl FsDirectoryMonotoneAnchor {
     /// Provision an empty authority. Existing directories are never overwritten.
@@ -49,22 +59,10 @@ impl FsDirectoryMonotoneAnchor {
             "private directories require Unix permissions",
         ));
         qsag_asm::durable::sync_parent_dir(path)?;
-        let slots = [
-            LockedRecord::create_new(path.join("slot_a"))?,
-            LockedRecord::create_new(path.join("slot_b"))?,
-        ];
-        let state = State {
-            slots,
-            key: key.0,
-            current: None,
-            failed: false,
-        };
-        for slot in &state.slots {
-            slot.replace(&state.encode(slot, None))?;
-        }
+        let record = TwoSlotRecord::create(paths(path), key.0, DOMAIN, CHECKPOINT_LEN, &[])?;
         std::fs::File::open(path)?.sync_all()?;
         Ok(Self {
-            state: Mutex::new(state),
+            record: Mutex::new(record),
         })
     }
     pub fn open_existing(path: impl AsRef<Path>, key: [u8; 32]) -> io::Result<Self> {
@@ -81,117 +79,35 @@ impl FsDirectoryMonotoneAnchor {
         if !metadata.is_dir() {
             return Err(invalid());
         }
-        let slots = [
-            LockedRecord::open_existing(path.join("slot_a"))?,
-            LockedRecord::open_existing(path.join("slot_b"))?,
-        ];
-        let mut state = State {
-            slots,
-            key: key.0,
-            current: None,
-            failed: false,
-        };
-        state.current = state.read()?;
+        let record = TwoSlotRecord::open(paths(path), key.0, DOMAIN, CHECKPOINT_LEN, None)?;
+        decode(&record.read()?)?;
         Ok(Self {
-            state: Mutex::new(state),
+            record: Mutex::new(record),
         })
-    }
-}
-impl State {
-    fn encode(&self, slot: &LockedRecord, checkpoint: Option<LedgerCheckpoint>) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(73);
-        bytes.push(u8::from(checkpoint.is_some()));
-        let checkpoint = checkpoint.unwrap_or(LedgerCheckpoint {
-            generation: 0,
-            tag: [0; 32],
-        });
-        bytes.extend_from_slice(&checkpoint.generation.to_be_bytes());
-        bytes.extend_from_slice(&checkpoint.tag);
-        let tag = mac32(
-            &self.key,
-            b"QSAG.DIRECTORY.ANCHOR.V1",
-            &[&slot.lock_seal(), &bytes],
-        );
-        bytes.extend_from_slice(&tag);
-        bytes
-    }
-    fn read(&self) -> io::Result<Option<LedgerCheckpoint>> {
-        let mut best: Option<LedgerCheckpoint> = None;
-        for slot in &self.slots {
-            let bytes = slot.read()?;
-            if bytes.len() != 73 || bytes[0] > 1 {
-                return Err(invalid());
-            }
-            let tag: [u8; 32] = bytes[41..].try_into().map_err(|_| invalid())?;
-            if !mac32_verify(
-                &self.key,
-                b"QSAG.DIRECTORY.ANCHOR.V1",
-                &[&slot.lock_seal(), &bytes[..41]],
-                &tag,
-            ) {
-                return Err(invalid());
-            }
-            if bytes[0] == 0 {
-                if bytes[1..41].iter().any(|&b| b != 0) {
-                    return Err(invalid());
-                }
-                continue;
-            }
-            let checkpoint = LedgerCheckpoint {
-                generation: u64::from_be_bytes(bytes[1..9].try_into().map_err(|_| invalid())?),
-                tag: bytes[9..41].try_into().map_err(|_| invalid())?,
-            };
-            if let Some(old) = best {
-                if old.generation == checkpoint.generation
-                    && !qsag_core::wipe::ct_eq_bytes32(&old.tag, &checkpoint.tag)
-                {
-                    return Err(invalid());
-                }
-                if old.generation > checkpoint.generation {
-                    continue;
-                }
-            }
-            best = Some(checkpoint);
-        }
-        Ok(best)
-    }
-    fn check_live(&mut self) -> io::Result<()> {
-        if self.failed {
-            return Err(invalid());
-        }
-        self.failed = true;
-        if !same_checkpoint(self.read()?, self.current) {
-            return Err(invalid());
-        }
-        self.failed = false;
-        Ok(())
     }
 }
 impl ExternalMonotoneAnchor for FsDirectoryMonotoneAnchor {
     fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
-        let mut state = self.state.lock().map_err(|_| invalid())?;
-        state.check_live()?;
-        Ok(state.current)
+        let record = self.record.lock().map_err(|_| invalid())?;
+        decode(&record.read()?)
     }
     fn advance(&self, checkpoint: LedgerCheckpoint) -> io::Result<()> {
-        let mut state = self.state.lock().map_err(|_| invalid())?;
-        state.check_live()?;
-        state.failed = true;
-        if let Some(old) = state.current
-            && (checkpoint.generation < old.generation
-                || (checkpoint.generation == old.generation
-                    && !qsag_core::wipe::ct_eq_bytes32(&checkpoint.tag, &old.tag)))
-        {
-            return Err(invalid());
+        let mut record = self.record.lock().map_err(|_| invalid())?;
+        match decode(&record.read()?)? {
+            Some(old)
+                if old.generation == checkpoint.generation
+                    && qsag_core::wipe::ct_eq_bytes32(&old.tag, &checkpoint.tag) =>
+            {
+                Ok(())
+            }
+            // A refused advance means the caller and this authority disagree about
+            // history; the handle stops answering until it is reopened.
+            Some(old) if old.generation >= checkpoint.generation => {
+                record.latch_failure();
+                Err(invalid())
+            }
+            _ => record.commit_mirrored(&encode(checkpoint)).map(|_| ()),
         }
-        // Both copies become durable before acknowledging. A crash between copies
-        // recovers the higher generation; equal-generation updates are idempotent.
-        for slot in &state.slots {
-            slot.replace(&state.encode(slot, Some(checkpoint)))?;
-        }
-        state.current = Some(checkpoint);
-        state.failed = false;
-        Ok(())
     }
 }
 
@@ -214,7 +130,14 @@ mod tests {
             std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o700
         );
-        for name in ["slot_a", "slot_b", "slot_a.lock", "slot_b.lock"] {
+        for name in [
+            "genesis",
+            "slot_a",
+            "slot_b",
+            "genesis.lock",
+            "slot_a.lock",
+            "slot_b.lock",
+        ] {
             assert_eq!(
                 std::fs::metadata(root.join(name))
                     .unwrap()
@@ -273,5 +196,40 @@ mod tests {
         );
         drop(anchor);
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn an_acknowledged_advance_survives_the_loss_of_either_slot() {
+        for lost in ["slot_a", "slot_b"] {
+            let path = std::env::temp_dir().join(format!(
+                "directory-anchor-mirror-{lost}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let anchor = FsDirectoryMonotoneAnchor::create_new(&path, [9; 32]).unwrap();
+            let checkpoint = |generation: u64| LedgerCheckpoint {
+                generation,
+                tag: [generation as u8; 32],
+            };
+            anchor.advance(checkpoint(1)).unwrap();
+            anchor.advance(checkpoint(5)).unwrap();
+            drop(anchor);
+            std::fs::write(path.join(lost), b"torn").unwrap();
+            assert!(FsDirectoryMonotoneAnchor::open_existing(&path, [8; 32]).is_err());
+            let anchor = FsDirectoryMonotoneAnchor::open_existing(&path, [9; 32]).unwrap();
+            assert_eq!(anchor.load().unwrap(), Some(checkpoint(5)));
+            assert!(anchor.advance(checkpoint(4)).is_err());
+            drop(anchor);
+            let anchor = FsDirectoryMonotoneAnchor::open_existing(&path, [9; 32]).unwrap();
+            anchor.advance(checkpoint(6)).unwrap();
+            drop(anchor);
+            std::fs::write(path.join("slot_a"), b"torn").unwrap();
+            std::fs::write(path.join("slot_b"), b"torn").unwrap();
+            assert!(FsDirectoryMonotoneAnchor::open_existing(&path, [9; 32]).is_err());
+            std::fs::remove_dir_all(path).unwrap();
+        }
     }
 }

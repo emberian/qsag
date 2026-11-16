@@ -431,7 +431,40 @@ theorem event_le_two_reductions {n : Nat} (G₀ R₁ R₂ : FinGame n)
   rw [← hRearr]
   exact hScaled
 
+private theorem sampleSum_const_one : ∀ (n : Nat), sampleSum n (fun _ => 1) = n
+  | 0 => rfl
+  | n + 1 => by
+    unfold sampleSum
+    rw [sampleSum_const_one n]
+    exact Nat.add_comm 1 n
+
+private theorem sampleSum_const_zero : ∀ (n : Nat), sampleSum n (fun _ => 0) = 0
+  | 0 => rfl
+  | n + 1 => by
+    unfold sampleSum
+    rw [sampleSum_const_zero n]
+
+/-- A game won on every sample point has win count `n`. -/
+theorem FinGame.winCount_of_forall_win {n : Nat} (G : FinGame n)
+    (h : ∀ ω : Fin n, G.win ω = true) : G.winCount = n := by
+  unfold FinGame.winCount
+  have hF : (fun ω : Fin n => if G.win ω then 1 else 0) = fun _ => 1 :=
+    funext (fun ω => by rw [h ω]; rfl)
+  rw [hF]
+  exact sampleSum_const_one n
+
+/-- A game lost on every sample point has win count `0`. -/
+theorem FinGame.winCount_of_forall_lose {n : Nat} (G : FinGame n)
+    (h : ∀ ω : Fin n, G.win ω = false) : G.winCount = 0 := by
+  unfold FinGame.winCount
+  have hF : (fun ω : Fin n => if G.win ω then 1 else 0) = fun _ => 0 :=
+    funext (fun ω => by rw [h ω]; rfl)
+  rw [hF]
+  exact sampleSum_const_zero n
+
 #verify_constructive
+  Qsag.Spec.FinGame.winCount_of_forall_win
+  Qsag.Spec.FinGame.winCount_of_forall_lose
   Qsag.Spec.Code.bind_ret
   Qsag.Spec.Code.bind_assoc
   Qsag.Spec.Within.mono

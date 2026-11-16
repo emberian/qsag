@@ -1152,18 +1152,18 @@ pub fn goldilocks_dot2_ct(a0: u64, b0: u64, a1: u64, b1: u64) -> u64 {
 /// Constant-time 32-byte tag comparison backed by straight-line platform assembly (`0` branches).
 #[inline]
 pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     {
         unsafe { x86_64_asm::qsag_asm_ct_eq_32_x86_64(a.as_ptr(), b.as_ptr()) == 1 }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     {
         let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
         // The kernel returns exactly 0 or 1. Take the low bit: `== 1` compiles to
         // `cmp; cset`, a flag-driven selection on the secret-derived verdict.
         unsafe { aarch64_asm::qsag_asm_ct_eq_32_aarch64(a.as_ptr(), b.as_ptr()) & 1 != 0 }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(any(miri, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         portable::ct_eq_32_portable(a, b)
     }
@@ -1178,15 +1178,15 @@ pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.is_empty() {
         return true;
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     {
         unsafe { x86_64_asm::qsag_asm_ct_eq_bytes_x86_64(a.as_ptr(), b.as_ptr(), a.len()) == 1 }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(any(miri, not(target_arch = "x86_64")))]
     {
         // Same scoped `PSTATE.DIT` as `ct_eq_32`: the portable loop is only data-independent
         // on AArch64 cores while DIT is set.
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
         let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
         portable::ct_eq_bytes_portable(a, b)
     }
@@ -1198,20 +1198,20 @@ pub fn ct_memzero(buf: &mut [u8]) {
     if buf.is_empty() {
         return;
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     {
         unsafe {
             x86_64_asm::qsag_asm_ct_memzero_x86_64(buf.as_mut_ptr(), buf.len());
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     {
         let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
         unsafe {
             aarch64_asm::qsag_asm_ct_memzero_aarch64(buf.as_mut_ptr(), buf.len());
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(any(miri, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         portable::ct_memzero_portable(buf);
     }
@@ -1221,7 +1221,8 @@ pub fn ct_memzero(buf: &mut [u8]) {
 // Exhaustive Algebraic, Boundary & Cross-Backend Differential Unit Tests
 // ============================================================================
 
-#[cfg(test)]
+// Native gate: platform assembly / filesystem flags are unsupported by Miri.
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 
@@ -1893,4 +1894,78 @@ pub fn tower128_to_poly128_batch_ct(values: &mut [u128]) {
 /// In-place inverse of [`tower128_to_poly128_batch_ct`].
 pub fn poly128_to_tower128_batch_ct(values: &mut [u128]) {
     linear_map::map_batch(values, true);
+}
+
+/// Interpreter coverage of dispatch, slice boundaries, and volatile byte erasure.
+/// Hardware parity remains in the native differential test modules.
+#[cfg(all(test, miri))]
+mod miri_tests {
+    use super::*;
+    #[test]
+    fn portable_dispatch_and_byte_boundaries() {
+        assert_eq!(detect_backend(), SimdBackend::Portable);
+        for n in [0, 1, 7, 16, 31, 32, 33, 65] {
+            let mut storage = [0xA5; 67];
+            let (left, rest) = storage.split_at_mut(1);
+            let (bytes, right) = rest.split_at_mut(n);
+            assert!(ct_eq_bytes(bytes, &std::vec![0xA5; n]));
+            ct_memzero(bytes);
+            assert_eq!(bytes, &std::vec![0; n]);
+            assert_eq!(left, &[0xA5]);
+            assert!(right.iter().all(|&b| b == 0xA5));
+        }
+        assert!(ct_eq_32(&[7; 32], &[7; 32]));
+        assert!(!ct_eq_32(&[7; 32], &[8; 32]));
+        assert!(!ct_eq_bytes(&[0], &[]));
+    }
+    #[test]
+    fn portable_dispatch_preserves_arithmetic_and_keccak() {
+        let p = GOLDILOCKS_PRIME;
+        for a in [0, 1, p - 1, p, u64::MAX] {
+            for b in [0, 1, p - 1, p, u64::MAX] {
+                assert_eq!(
+                    goldilocks_mul_ct(a, b),
+                    ((a as u128 * b as u128) % p as u128) as u64
+                );
+            }
+        }
+        let mut actual = KeccakState4x([[0; 4]; 25]);
+        let mut expected = actual;
+        keccak_f1600_x4(&mut actual);
+        portable::keccak_f1600_4x_portable(&mut expected);
+        assert_eq!(actual.0, expected.0);
+    }
+    #[test]
+    fn portable_transpose_and_mac_buffer_boundaries() {
+        let original = core::array::from_fn(|i| [i as u64, u64::MAX, 1 << (i % 64), 0]);
+        let mut matrix = original;
+        bitslice::transpose64x256(&mut matrix);
+        bitslice::transpose64x256(&mut matrix);
+        assert_eq!(matrix, original);
+        for n in [0, 1, 2, 3] {
+            let mut out = [[0xABu128; 2]; 5];
+            bitslice::gf2_64x128_clmul_acc(&mut out[1..1 + n], &[0xFF; 3][..n], 1);
+            assert_eq!(out[0], [0xAB; 2]);
+            assert_eq!(out[4], [0xAB; 2]);
+            for slot in &out[1..1 + n] {
+                assert_eq!(*slot, [0xAB ^ 0xFF, 0xAB]);
+            }
+        }
+        assert_eq!(bitslice::gf2_128_dot(&[2], &[1 << 127]), 0x87);
+    }
+    #[test]
+    fn portable_ntt_and_sha_unaligned_tail() {
+        let input: [u32; 256] = core::array::from_fn(|i| i as u32);
+        let mut transformed = input;
+        mldsa_ntt_with_backend(&mut transformed, SimdBackend::Portable);
+        mldsa_inv_ntt_with_backend(&mut transformed, SimdBackend::Portable);
+        assert_eq!(transformed, input);
+        let data = [0x55; 67];
+        let mut got = [0u32; 8];
+        let mut expected = got;
+        let remainder = sha2_hw::sha256_compress_bytes(&mut got, &data[1..66]);
+        assert_eq!(remainder, &data[65..66]);
+        sha256_compress_blocks_portable(&mut expected, &[[0x55; 64]]);
+        assert_eq!(got, expected);
+    }
 }

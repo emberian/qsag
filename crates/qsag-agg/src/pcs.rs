@@ -2188,9 +2188,6 @@ pub struct WhirStageProof {
     pub multiproof: CanopyMultiProof,
 }
 
-/// Compatibility alias for [`WhirStageProof`].
-pub type FoldedOracleProof = WhirStageProof;
-
 /// Complete `Hem` WHIR rate-escalated opening proof over `GoldilocksExt4` against one commitment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HemWhirOpeningProof {
@@ -3242,6 +3239,10 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
     let group_arity_0 = 1usize << st0.step_vars;
 
     #[cfg(feature = "vulkan")]
+    if schedule.regime.uses_poseidon2_canopy() {
+        crate::acceleration::report_cpu_poseidon_canopy();
+    }
+    #[cfg(feature = "vulkan")]
     if table_len >= 4_096
         && num_vars <= MAX_GPU_PCS_NUM_VARS
         && !schedule.regime.uses_poseidon2_canopy()
@@ -3290,12 +3291,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
             },
         ) {
             Ok(top_node)
-                if session.certify_stage(
-                    qsag_accel::ProverKernelSlot::WhirLdeCommitment,
-                    b"WHIR.COMMIT.ROUND0/v1",
-                    polys.len() * domain_len,
-                    &top_node,
-                ) =>
+                if session.record_stage(qsag_accel::ProverKernelSlot::WhirLdeCommitment) =>
             {
                 let log_leaves = num_groups.trailing_zeros() as usize;
                 let root = hash_tree_root(log_leaves as u8, &top_node);
@@ -3320,7 +3316,7 @@ pub(crate) fn whir_commit_batch_owned_with_schedule_and_extra_vram(
                     },
                 );
             }
-            Ok(_) => session.record_fallback("whir_commit_round0", "V5 stage receipt invalid"),
+            Ok(_) => session.record_fallback("whir_commit_round0", "prover kernel pin mismatch"),
             Err(err) => session.record_fallback("whir_commit_round0", err),
         }
     }
@@ -3359,8 +3355,11 @@ fn build_cpu_round0(
     group_arity_0: usize,
 ) -> (Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
     let encode = |evals: &Vec<Goldilocks>| {
-        let coeffs = hypercube_to_monomial_coeffs(evals);
-        encode_rs_coset_goldilocks(&coeffs, blowup)
+        let mut coeffs = hypercube_to_monomial_coeffs(evals);
+        let codeword = encode_rs_coset_goldilocks(&coeffs, blowup);
+        // The coefficients determine the table, which hiding callers keep secret.
+        qsag_asm::volatile_fill(&mut coeffs, Goldilocks::ZERO);
+        codeword
     };
     #[cfg(feature = "std")]
     let codewords_0: Vec<Vec<Goldilocks>> = if polys.len() > 1 && crate::parallel_workers() > 1 {
@@ -4564,12 +4563,7 @@ fn whir_open_core_gpu(
 
             let top_next =
                 raw.prover_whir_commit_stage(stage_idx + 1, c_len, next_domain, next_arity)?;
-            if !session.certify_stage(
-                qsag_accel::ProverKernelSlot::WhirLdeCommitment,
-                b"WHIR.COMMIT.STAGE/v1",
-                next_domain,
-                &top_next,
-            ) {
+            if !session.record_stage(qsag_accel::ProverKernelSlot::WhirLdeCommitment) {
                 return Err(qsag_accel::VulkanError::WorkspacePoisoned);
             }
             let comm_next = CanopyCommitment {
@@ -4922,12 +4916,7 @@ fn whir_open_core_gpu(
                 });
             }
 
-            if !session.certify_stage(
-                qsag_accel::ProverKernelSlot::WhirFoldSumcheck,
-                b"WHIR.OPEN.CORE/v1",
-                core_len,
-                &final_bytes,
-            ) {
+            if !session.record_stage(qsag_accel::ProverKernelSlot::WhirFoldSumcheck) {
                 return Err(qsag_accel::VulkanError::WorkspacePoisoned);
             }
             return Ok(HemWhirOpeningProof {
@@ -6569,6 +6558,35 @@ mod pcs_unit_tests {
         FiatShamirTranscript::new()
             .bind_relation(b"REGIME_TEST", b"", schedule)
             .bind_instance(&[instance])
+    }
+
+    #[test]
+    #[cfg(feature = "vulkan")]
+    fn gpu_round0_can_be_opened_after_session_release() {
+        if std::env::var("QSAG_ACCEL").ok().as_deref() != Some("vulkan") {
+            return;
+        }
+        let nv = 12;
+        let schedule = WhirSecurityRegime::BciksJohnsonQrom128.schedule(nv);
+        let poly = regime_test_poly(nv, 41);
+        let point = regime_test_point(nv, 51);
+        let value = crate::field::mle_eval_base_at_ext4(&poly, &point);
+        let (commitment, mut state) = whir_commit_with_schedule(&poly, &[7; 32], &schedule);
+        assert!(state.gpu_session.is_some());
+        assert!(state.codewords_0.is_empty());
+        drop(state.gpu_session.take());
+        let mut prover = regime_transcript(&schedule, b"cpu-after-gpu");
+        let proof = whir_open(&state, &point, value, &mut prover);
+        let mut verifier = regime_transcript(&schedule, b"cpu-after-gpu");
+        assert!(whir_verify_with_schedule(
+            &commitment,
+            nv,
+            &point,
+            value,
+            &proof,
+            &mut verifier,
+            &schedule
+        ));
     }
 
     /// Commit, batch-open and verify three polynomials at `nv` under `regime`.

@@ -433,7 +433,9 @@ pub(crate) unsafe fn sha256_compress_blocks_aarch64_sha2(
     }
 }
 
-#[cfg(test)]
+// Exhaustive multi-backend parity belongs to the native gate; Miri has a
+// bounded dispatch/buffer-boundary suite in lib.rs.
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

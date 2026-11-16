@@ -82,7 +82,6 @@ mod freed_secret_watch {
     }
 }
 
-
 use freed_secret_watch::{outcome, watch};
 
 /// Records where the scratch handed to the OT lives, then fails, panics or answers.

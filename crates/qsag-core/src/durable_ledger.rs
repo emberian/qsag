@@ -1,12 +1,10 @@
-//! Authenticated two-slot snapshots under a permanent genesis lock.
+//! External monotone anchors, single-use commit tickets over them, and the key-value
+//! ledger kept in a [`TwoSlotRecord`].
 //! An independently retained checkpoint is a minimum generation, not an exact snapshot:
 //! recovery also accepts a durable successor whose external checkpoint was not yet saved.
-use crate::{
-    sponge::Cshake256Xof,
-    wipe::{ct_eq_bytes32, wipe_bytes32},
-};
+use crate::two_slot_record::{TwoSlotPaths, TwoSlotRecord};
+use crate::{sponge::Cshake256Xof, wipe::ct_eq_bytes32};
 use alloc::{collections::BTreeMap, vec::Vec};
-use qsag_asm::durable::LockedRecord;
 
 /// Persist outside the snapshot's rollback domain before releasing reserved material.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +17,10 @@ pub struct LedgerCheckpoint {
 /// remote monotonic service). The anchor must not share the WAL's rollback domain.
 /// `advance` atomically rejects older generations and unequal tags at equal generation;
 /// success means the checkpoint survives a crash. A fresh resource returns `None`.
+///
+/// Every anchor also serves single-use commit tickets through `reserve_ticket`,
+/// `consume_ticket` and `reconcile` on `dyn ExternalMonotoneAnchor`; they are built on
+/// `load` and `advance` and need nothing from the implementer beyond the contract above.
 pub trait ExternalMonotoneAnchor: Send + Sync {
     fn load(&self) -> std::io::Result<Option<LedgerCheckpoint>>;
     fn advance(&self, checkpoint: LedgerCheckpoint) -> std::io::Result<()>;
@@ -40,30 +42,325 @@ pub(crate) fn advance_anchor(
     anchor.advance(checkpoint)
 }
 
-pub(crate) struct Ledger {
-    genesis: LockedRecord,
-    slots: [Option<LockedRecord>; 2],
-    slot_seals: [[u8; 8]; 2],
-    paths: [std::path::PathBuf; 2],
-    key: [u8; 32],
-    domain: &'static [u8],
-    ledger_id: [u8; 32],
-    checkpoint: LedgerCheckpoint,
-    failed: bool,
+/// What the holder of a ticket writes into the record it commits under it. The
+/// committed record's own checkpoint (its generation and MAC, which therefore cover
+/// all three fields) is what consumption leaves in the anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TicketSeal {
+    /// Generation the committed record must carry.
+    pub generation: u64,
+    /// The anchor's tag while the ticket was outstanding.
+    pub reservation: [u8; 32],
+    /// Drawn inside `consume_ticket`, after the ticket was issued.
+    pub nonce: [u8; 32],
 }
-const LIMIT: usize = 16 * 1024 * 1024;
-type Records = BTreeMap<Vec<u8>, Vec<u8>>;
-impl Drop for Ledger {
-    fn drop(&mut self) {
-        wipe_bytes32(&mut self.key);
+
+impl TicketSeal {
+    /// The seal of a record committed with no anchor.
+    pub const fn unanchored(generation: u64) -> Self {
+        Self {
+            generation,
+            reservation: [0; 32],
+            nonce: [0; 32],
+        }
     }
 }
-fn slot_paths(path: &std::path::Path) -> [std::path::PathBuf; 2] {
-    [".slot_a", ".slot_b"].map(|suffix| {
+
+/// A single-use commit permit issued by `reserve_ticket` on an anchor
+/// (the `AnchorTicket` of `Qsag.Exec.CeremonyAtomicityAndAbort`). It is not `Clone`
+/// and has no constructor: the only way to spend it is to hand it back to
+/// `consume_ticket`, which takes it by value. It lives in memory only, so a crash
+/// forfeits it, as `AnchoredJournalStep.crash` clears `pending`.
+#[derive(Debug)]
+#[must_use = "an unspent ticket leaves the anchor reserved"]
+pub struct AnchorTicket {
+    epoch: u64,
+    owner: [u8; 32],
+    floor: [u8; 16],
+    context: [u8; 32],
+}
+
+fn floor_mark(floor: &LedgerCheckpoint) -> [u8; 16] {
+    let mut xof = Cshake256Xof::new(b"QSAG.ANCHOR.FLOOR/v1");
+    xof.absorb(&floor.generation.to_le_bytes());
+    xof.absorb(&floor.tag);
+    let mut mark = [0; 16];
+    xof.squeeze(&mut mark);
+    mark
+}
+
+impl AnchorTicket {
+    /// The anchor generation at which this ticket is outstanding.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn context(&self) -> &[u8; 32] {
+        &self.context
+    }
+    /// The anchor's tag while this ticket is outstanding: the floor mark, which a
+    /// reopening holder recomputes from its disk, then 16 bytes binding the epoch,
+    /// the contender and the context.
+    pub fn reservation(&self) -> [u8; 32] {
+        let mut xof = Cshake256Xof::new(b"QSAG.ANCHOR.TICKET/v2");
+        xof.absorb(&self.epoch.to_le_bytes());
+        xof.absorb(&self.owner);
+        xof.absorb(&self.floor);
+        xof.absorb(&self.context);
+        let mut tag = [0; 32];
+        tag[..16].copy_from_slice(&self.floor);
+        xof.squeeze(&mut tag[16..]);
+        tag
+    }
+    fn issued(&self) -> LedgerCheckpoint {
+        LedgerCheckpoint {
+            generation: self.epoch,
+            tag: self.reservation(),
+        }
+    }
+}
+
+fn fresh_nonce() -> std::io::Result<[u8; 32]> {
+    use std::io::Read;
+    let mut nonce = [0; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+    Ok(nonce)
+}
+
+fn same_checkpoint(a: &LedgerCheckpoint, b: &LedgerCheckpoint) -> bool {
+    a.generation == b.generation && ct_eq_bytes32(&a.tag, &b.tag)
+}
+
+/// How an anchor stands to the record a holder found on its disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorStanding {
+    /// The anchor holds nothing. Only a holder still at its genesis may enrol it.
+    Unenrolled,
+    /// The anchor holds exactly the holder's checkpoint.
+    Settled,
+    /// The anchor holds this reservation, taken from the holder's checkpoint and
+    /// never committed. The ticket died with its process; the holder supersedes it
+    /// with `reserve_ticket(this, its checkpoint, ..)`.
+    Reserved(LedgerCheckpoint),
+}
+
+/// Single-use commit tickets over any anchor: `anchorCAS` and `anchorConsume` of
+/// `Qsag.Exec.CeremonyAtomicityAndAbort`, kept in the anchor's one checkpoint cell
+/// together with the holder's own checkpoints.
+///
+/// The cell alternates between a holder checkpoint `(g, tag)` (settled) and a
+/// reservation `(g + 1, floor mark || ticket binding)`; consuming the ticket settles
+/// the cell on the successor checkpoint at `g + 2`. A settled cell is therefore
+/// always the holder's exact durable checkpoint, and a reserved cell still pins the
+/// checkpoint the reservation was taken from, so the cell is a rollback floor in
+/// every state.
+///
+/// These are inherent methods of the trait object, not trait methods, so an
+/// implementer cannot replace or omit them; they rely only on the contract of
+/// `advance` (an unequal tag at an equal generation is rejected atomically). A
+/// reservation carries a nonce drawn inside `reserve_ticket` and a consuming
+/// checkpoint covers a nonce drawn inside `consume_ticket`, so two contenders never
+/// write equal tags and the anchor admits exactly one of them, including two copies
+/// of one process image that both hold the same ticket.
+///
+/// Differences from the Lean model, all on the refusing side except the last:
+/// * the cell holds one ticket, so a later reservation voids an unspent earlier one
+///   (`anchorConsume` would still accept it);
+/// * `anchorCAS` also refuses a context that an earlier ticket carried
+///   (`reservationValid`). One cell has no history, so that check stays with the
+///   holder's journal, whose every record the cell pins;
+/// * the durable write happens inside `consume_ticket`, between its nonce draw and
+///   its anchor write, where the model's `release` is one step. Two copies of a
+///   process image taken inside that window write the same checkpoint and are both
+///   admitted.
+impl dyn ExternalMonotoneAnchor + '_ {
+    /// Issue the ticket to commit the successor of `floor`, the holder's durable
+    /// checkpoint. Fails unless the anchor holds exactly `expected` (`floor` itself
+    /// when settled, an abandoned reservation when `reconcile` said `Reserved`), or
+    /// if another contender reserved first.
+    pub fn reserve_ticket(
+        &self,
+        expected: LedgerCheckpoint,
+        floor: LedgerCheckpoint,
+        context: [u8; 32],
+    ) -> std::io::Result<AnchorTicket> {
+        if !self
+            .load()?
+            .is_some_and(|current| same_checkpoint(&current, &expected))
+        {
+            return Err(std::io::Error::other(
+                "external anchor is not at the expected checkpoint",
+            ));
+        }
+        let epoch = expected
+            .generation
+            .checked_add(1)
+            .filter(|epoch| *epoch < u64::MAX)
+            .ok_or_else(|| std::io::Error::other("anchor generations exhausted"))?;
+        let ticket = AnchorTicket {
+            epoch,
+            owner: fresh_nonce()?,
+            floor: floor_mark(&floor),
+            context,
+        };
+        self.advance(ticket.issued())?;
+        Ok(ticket)
+    }
+
+    /// Spend `ticket` on the record `commit` makes durable: `commit` receives the
+    /// seal to write into that record and returns the record's checkpoint, which
+    /// then replaces the reservation in the anchor. Succeeds at most once per ticket
+    /// across every holder of a copy; on any error nothing may be released under it.
+    pub fn consume_ticket(
+        &self,
+        ticket: AnchorTicket,
+        commit: impl FnOnce(&TicketSeal) -> std::io::Result<LedgerCheckpoint>,
+    ) -> std::io::Result<(TicketSeal, LedgerCheckpoint)> {
+        let issued = ticket.issued();
+        if !self
+            .load()?
+            .is_some_and(|current| same_checkpoint(&current, &issued))
+        {
+            return Err(std::io::Error::other(
+                "external anchor does not hold this ticket unspent",
+            ));
+        }
+        let seal = TicketSeal {
+            generation: issued.generation + 1,
+            reservation: issued.tag,
+            nonce: fresh_nonce()?,
+        };
+        let checkpoint = commit(&seal)?;
+        if checkpoint.generation != seal.generation {
+            return Err(std::io::Error::other(
+                "committed record does not carry the ticket's generation",
+            ));
+        }
+        self.advance(checkpoint)?;
+        Ok((seal, checkpoint))
+    }
+
+    /// Reserve from `floor` and commit under the ticket in one step.
+    pub fn commit_with_ticket(
+        &self,
+        expected: LedgerCheckpoint,
+        floor: LedgerCheckpoint,
+        context: [u8; 32],
+        commit: impl FnOnce(&TicketSeal) -> std::io::Result<LedgerCheckpoint>,
+    ) -> std::io::Result<(TicketSeal, LedgerCheckpoint)> {
+        let ticket = self.reserve_ticket(expected, floor, context)?;
+        self.consume_ticket(ticket, commit)
+    }
+
+    /// Place a reopening holder, whose authenticated record on disk has `checkpoint`
+    /// and was written under `reservation` (all zero if under none):
+    ///
+    /// * the anchor holds `checkpoint`: settled;
+    /// * the anchor holds the reservation that record was written under, one
+    ///   generation below it: the crash came after the durable write, and the
+    ///   anchor is settled on the record here. Nothing was released under it;
+    /// * the anchor holds a reservation taken from `checkpoint`: the crash came
+    ///   before the durable write (`Reserved`);
+    /// * anything else is a disk older than, or foreign to, what the anchor pins.
+    pub fn reconcile(
+        &self,
+        checkpoint: LedgerCheckpoint,
+        reservation: &[u8; 32],
+    ) -> std::io::Result<AnchorStanding> {
+        let Some(current) = self.load()? else {
+            return Ok(AnchorStanding::Unenrolled);
+        };
+        if same_checkpoint(&current, &checkpoint) {
+            return Ok(AnchorStanding::Settled);
+        }
+        if current.generation.checked_add(1) == Some(checkpoint.generation)
+            && *reservation != [0; 32]
+            && ct_eq_bytes32(&current.tag, reservation)
+        {
+            self.advance(checkpoint)?;
+            return Ok(AnchorStanding::Settled);
+        }
+        if checkpoint.generation < current.generation
+            && current.tag[..16] == floor_mark(&checkpoint)
+        {
+            return Ok(AnchorStanding::Reserved(current));
+        }
+        Err(std::io::Error::other(
+            "external anchor rejects rolled-back state",
+        ))
+    }
+}
+
+const LIMIT: usize = 16 * 1024 * 1024;
+type Records = BTreeMap<Vec<u8>, Vec<u8>>;
+
+/// A key-value snapshot in one [`TwoSlotRecord`] at `path`, `path.slot_a`, `path.slot_b`.
+pub(crate) struct Ledger {
+    record: TwoSlotRecord,
+}
+fn layout(path: std::path::PathBuf) -> TwoSlotPaths {
+    let slots = [".slot_a", ".slot_b"].map(|suffix| {
         let mut name = path.as_os_str().to_os_string();
         name.push(suffix);
         name.into()
-    })
+    });
+    TwoSlotPaths {
+        genesis: path,
+        slots,
+    }
+}
+fn encode(records: &Records) -> Result<Vec<u8>, ()> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
+    for (k, v) in records {
+        let size = k
+            .len()
+            .checked_add(v.len())
+            .and_then(|n| n.checked_add(8))
+            .ok_or(())?;
+        if size > LIMIT.saturating_sub(bytes.len()) {
+            return Err(());
+        }
+        bytes.extend_from_slice(&u32::try_from(k.len()).map_err(|_| ())?.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(v.len()).map_err(|_| ())?.to_le_bytes());
+        bytes.extend_from_slice(k);
+        bytes.extend_from_slice(v);
+    }
+    Ok(bytes)
+}
+fn decode(bytes: &[u8]) -> Result<Records, ()> {
+    let end = bytes.len();
+    let count = u64::from_le_bytes(bytes.get(..8).ok_or(())?.try_into().map_err(|_| ())?);
+    if count > ((end - 8) / 8) as u64 {
+        return Err(());
+    }
+    let mut cur = 8;
+    let mut records = Records::new();
+    for _ in 0..count {
+        if end - cur < 8 {
+            return Err(());
+        }
+        let k = u32::from_le_bytes(bytes[cur..cur + 4].try_into().map_err(|_| ())?) as usize;
+        let v = u32::from_le_bytes(bytes[cur + 4..cur + 8].try_into().map_err(|_| ())?) as usize;
+        cur += 8;
+        let size = k.checked_add(v).ok_or(())?;
+        if size > end - cur {
+            return Err(());
+        }
+        if records
+            .insert(
+                bytes[cur..cur + k].to_vec(),
+                bytes[cur + k..cur + size].to_vec(),
+            )
+            .is_some()
+        {
+            return Err(());
+        }
+        cur += size;
+    }
+    if cur != end {
+        return Err(());
+    }
+    Ok(records)
 }
 impl Ledger {
     pub(crate) fn create(
@@ -71,50 +368,10 @@ impl Ledger {
         key: [u8; 32],
         domain: &'static [u8],
     ) -> Result<Self, ()> {
-        use std::io::Read;
-        let key_guard = crate::wipe::SecretBuffer(key);
-        let path = path.into();
-        let genesis = LockedRecord::create_new(path.clone()).map_err(|_| ())?;
-        let paths = slot_paths(&path);
-        let slots = [
-            LockedRecord::create_new(&paths[0]).map_err(|_| ())?,
-            LockedRecord::create_new(&paths[1]).map_err(|_| ())?,
-        ];
-        let slot_seals = slots.each_ref().map(LockedRecord::lock_seal);
-        let slots = slots.map(Some);
-        let mut ledger_id = [0; 32];
-        std::fs::File::open("/dev/urandom")
-            .map_err(|_| ())?
-            .read_exact(&mut ledger_id)
-            .map_err(|_| ())?;
-        let owned_key = *key_guard;
-        drop(key_guard);
-        let mut this = Self {
-            genesis,
-            slots,
-            slot_seals,
-            paths,
-            key: owned_key,
-            domain,
-            ledger_id,
-            checkpoint: LedgerCheckpoint {
-                generation: 0,
-                tag: [0; 32],
-            },
-            failed: false,
-        };
-        // Provision both slot sidecars before sealing genesis. An interrupted genesis
-        // never becomes a usable authority and cannot be silently reprovisioned.
-        this.slots[1]
-            .as_ref()
-            .ok_or(())?
-            .replace(&[])
-            .map_err(|_| ())?;
-        this.genesis
-            .replace(&this.genesis_bytes())
-            .map_err(|_| ())?;
-        this.write(&Records::new(), 0)?;
-        Ok(this)
+        let genesis = encode(&Records::new())?;
+        TwoSlotRecord::create(layout(path.into()), key, domain, LIMIT, &genesis)
+            .map(|record| Self { record })
+            .map_err(|_| ())
     }
     pub(crate) fn open(
         path: impl Into<std::path::PathBuf>,
@@ -122,209 +379,254 @@ impl Ledger {
         domain: &'static [u8],
         checkpoint: LedgerCheckpoint,
     ) -> Result<Self, ()> {
-        let key_guard = crate::wipe::SecretBuffer(key);
-        let path = path.into();
-        let genesis = LockedRecord::open_existing(&path).map_err(|_| ())?;
-        let bytes = genesis.read_bounded(88).map_err(|_| ())?;
-        if bytes.len() != 88 || &bytes[..8] != b"QSAGLDG2" {
-            return Err(());
-        }
-        let ledger_id = bytes[8..40].try_into().map_err(|_| ())?;
-        let paths = slot_paths(&path);
-        // acquire retains existing sidecars even when a slot file is missing. The
-        // genesis seal below rejects replacement or recreation of either sidecar.
-        let slot_seals = [
-            bytes[40..48].try_into().map_err(|_| ())?,
-            bytes[48..56].try_into().map_err(|_| ())?,
-        ];
-        // One damaged slot must not hide the other authenticated snapshot. A
-        // missing/replaced sidecar makes that slot unavailable for future writes;
-        // recovery can still read the surviving generation under the genesis lock.
-        let slots = core::array::from_fn(|i| {
-            LockedRecord::acquire(&paths[i])
-                .ok()
-                .filter(|slot| slot.lock_seal() == slot_seals[i])
-        });
-        let owned_key = *key_guard;
-        drop(key_guard);
-        let mut this = Self {
-            genesis,
-            slots,
-            slot_seals,
-            paths,
-            key: owned_key,
-            domain,
-            ledger_id,
-            checkpoint,
-            failed: false,
-        };
-        this.check_genesis()?;
-        let mut best = None;
-        for slot in 0..2 {
-            if let Ok((candidate, _)) = this.read_slot(slot) {
-                if candidate.generation < checkpoint.generation {
-                    continue;
-                }
-                if candidate.generation == checkpoint.generation
-                    && !ct_eq_bytes32(&candidate.tag, &checkpoint.tag)
-                {
-                    continue;
-                }
-                if best.is_none_or(|old: LedgerCheckpoint| candidate.generation > old.generation) {
-                    best = Some(candidate);
-                }
-            }
-        }
-        this.checkpoint = best.ok_or(())?;
-        Ok(this)
+        TwoSlotRecord::open(layout(path.into()), key, domain, LIMIT, Some(checkpoint))
+            .map(|record| Self { record })
+            .map_err(|_| ())
     }
     pub(crate) fn checkpoint(&self) -> LedgerCheckpoint {
-        self.checkpoint
-    }
-    fn tag(&self, purpose: &[u8], bytes: &[u8]) -> [u8; 32] {
-        let mut xof = Cshake256Xof::new(b"QSAG.LEDGER.MAC/v2");
-        xof.absorb(&(self.domain.len() as u64).to_le_bytes());
-        xof.absorb(self.domain);
-        xof.absorb(&self.key);
-        xof.absorb(&self.genesis.lock_seal());
-        xof.absorb(&self.ledger_id);
-        xof.absorb(purpose);
-        xof.absorb(bytes);
-        let mut tag = [0; 32];
-        xof.squeeze(&mut tag);
-        tag
-    }
-    fn genesis_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"QSAGLDG2".to_vec();
-        bytes.extend_from_slice(&self.ledger_id);
-        for seal in &self.slot_seals {
-            bytes.extend_from_slice(seal);
-        }
-        bytes.extend_from_slice(&self.tag(b"genesis", &bytes));
-        bytes
-    }
-    fn check_genesis(&self) -> Result<(), ()> {
-        if self.failed {
-            return Err(());
-        }
-        let actual = self.genesis.read_bounded(88).map_err(|_| ())?;
-        let expected = self.genesis_bytes();
-        if actual.len() != 88 || expected.len() != 88 || actual[..56] != expected[..56] {
-            return Err(());
-        }
-        let actual_tag: [u8; 32] = actual[56..88].try_into().map_err(|_| ())?;
-        let expected_tag: [u8; 32] = expected[56..88].try_into().map_err(|_| ())?;
-        if !ct_eq_bytes32(&actual_tag, &expected_tag) {
-            return Err(());
-        }
-        Ok(())
-    }
-    fn read_slot(&self, slot: usize) -> Result<(LedgerCheckpoint, Records), ()> {
-        let meta = std::fs::symlink_metadata(&self.paths[slot]).map_err(|_| ())?;
-        if !meta.is_file() || meta.len() > (LIMIT + 16) as u64 {
-            return Err(());
-        }
-        let bytes = self.slots[slot]
-            .as_ref()
-            .ok_or(())?
-            .read_bounded(LIMIT)
-            .map_err(|_| ())?;
-        if bytes.len() < 48 || bytes.len() > LIMIT {
-            return Err(());
-        }
-        let end = bytes.len() - 32;
-        let tag: [u8; 32] = bytes[end..].try_into().map_err(|_| ())?;
-        if !ct_eq_bytes32(&tag, &self.tag(b"snapshot", &bytes[..end])) {
-            return Err(());
-        }
-        let generation = u64::from_le_bytes(bytes[..8].try_into().map_err(|_| ())?);
-        if generation % 2 != slot as u64 {
-            return Err(());
-        }
-        let count = u64::from_le_bytes(bytes[8..16].try_into().map_err(|_| ())?);
-        if count > ((end - 16) / 8) as u64 {
-            return Err(());
-        }
-        let mut cur = 16;
-        let mut records = Records::new();
-        for _ in 0..count {
-            if end - cur < 8 {
-                return Err(());
-            }
-            let k = u32::from_le_bytes(bytes[cur..cur + 4].try_into().map_err(|_| ())?) as usize;
-            let v =
-                u32::from_le_bytes(bytes[cur + 4..cur + 8].try_into().map_err(|_| ())?) as usize;
-            cur += 8;
-            let size = k.checked_add(v).ok_or(())?;
-            if size > end - cur {
-                return Err(());
-            }
-            if records
-                .insert(
-                    bytes[cur..cur + k].to_vec(),
-                    bytes[cur + k..cur + size].to_vec(),
-                )
-                .is_some()
-            {
-                return Err(());
-            }
-            cur += size;
-        }
-        if cur != end {
-            return Err(());
-        }
-        Ok((LedgerCheckpoint { generation, tag }, records))
+        self.record.checkpoint()
     }
     pub(crate) fn read(&self) -> Result<Records, ()> {
-        self.check_genesis()?;
-        let (checkpoint, records) = self.read_slot((self.checkpoint.generation % 2) as usize)?;
-        if checkpoint != self.checkpoint {
-            return Err(());
-        }
-        Ok(records)
+        decode(&self.record.read().map_err(|_| ())?)
     }
     pub(crate) fn commit(&mut self, records: &Records) -> Result<(), ()> {
-        self.read()?;
-        let generation = self.checkpoint.generation.checked_add(1).ok_or(())?;
-        self.write(records, generation)
-    }
-    fn write(&mut self, records: &Records, generation: u64) -> Result<(), ()> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&generation.to_le_bytes());
-        bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
-        for (k, v) in records {
-            let size = k
-                .len()
-                .checked_add(v.len())
-                .and_then(|n| n.checked_add(8))
-                .ok_or(())?;
-            if size > LIMIT.saturating_sub(bytes.len() + 32) {
-                return Err(());
-            }
-            bytes.extend_from_slice(&(k.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(&(v.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(k);
-            bytes.extend_from_slice(v);
-        }
-        let tag = self.tag(b"snapshot", &bytes);
-        bytes.extend_from_slice(&tag);
-        self.failed = true;
-        // replace syncs the temporary inode, renames it, then syncs its parent.
-        // Never overwrite the active generation before its successor is durable.
-        self.slots[(generation % 2) as usize]
-            .as_ref()
-            .ok_or(())?
-            .replace(&bytes)
-            .map_err(|_| ())?;
-        self.checkpoint = LedgerCheckpoint { generation, tag };
-        self.failed = false;
-        Ok(())
+        let bytes = encode(records)?;
+        self.record.commit(&bytes).map(|_| ()).map_err(|_| ())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A conforming anchor. With `stale_reads`, `load` keeps answering with the
+    /// state it saw first, as a contender does that read before another one wrote.
+    #[derive(Default)]
+    struct MemAnchor {
+        cell: std::sync::Mutex<Option<LedgerCheckpoint>>,
+        stale: std::sync::Mutex<Option<Option<LedgerCheckpoint>>>,
+    }
+    impl MemAnchor {
+        fn freeze_reads(&self) {
+            *self.stale.lock().unwrap() = Some(*self.cell.lock().unwrap());
+        }
+        fn thaw_reads(&self) {
+            *self.stale.lock().unwrap() = None;
+        }
+        fn stored(&self) -> Option<LedgerCheckpoint> {
+            *self.cell.lock().unwrap()
+        }
+    }
+    impl ExternalMonotoneAnchor for MemAnchor {
+        fn load(&self) -> std::io::Result<Option<LedgerCheckpoint>> {
+            Ok(self.stale.lock().unwrap().unwrap_or(self.stored()))
+        }
+        fn advance(&self, checkpoint: LedgerCheckpoint) -> std::io::Result<()> {
+            let mut cell = self.cell.lock().unwrap();
+            if let Some(old) = *cell
+                && (checkpoint.generation < old.generation
+                    || (checkpoint.generation == old.generation && checkpoint.tag != old.tag))
+            {
+                return Err(std::io::Error::other("rejected"));
+            }
+            *cell = Some(checkpoint);
+            Ok(())
+        }
+    }
+    /// What a copy of the holder's memory contains.
+    fn memory_copy(ticket: &AnchorTicket) -> AnchorTicket {
+        AnchorTicket {
+            epoch: ticket.epoch,
+            owner: ticket.owner,
+            floor: ticket.floor,
+            context: ticket.context,
+        }
+    }
+    fn ckpt(generation: u64, byte: u8) -> LedgerCheckpoint {
+        LedgerCheckpoint {
+            generation,
+            tag: [byte; 32],
+        }
+    }
+    /// A holder's durable record written under `seal`; its tag covers the seal.
+    fn record(seal: &TicketSeal) -> std::io::Result<LedgerCheckpoint> {
+        let mut xof = Cshake256Xof::new(b"QSAG.TEST.TICKET.RECORD");
+        xof.absorb(&seal.generation.to_le_bytes());
+        xof.absorb(&seal.reservation);
+        xof.absorb(&seal.nonce);
+        let mut tag = [0; 32];
+        xof.squeeze(&mut tag);
+        Ok(LedgerCheckpoint {
+            generation: seal.generation,
+            tag,
+        })
+    }
+
+    #[test]
+    fn a_ticket_is_consumed_once_and_a_replay_is_rejected() {
+        let mem = MemAnchor::default();
+        let anchor: &dyn ExternalMonotoneAnchor = &mem;
+        let genesis = ckpt(1, 1);
+        // An unenrolled anchor issues nothing, and neither does a wrong expectation.
+        assert!(anchor.reserve_ticket(genesis, genesis, [7; 32]).is_err());
+        assert_eq!(mem.stored(), None);
+        anchor.advance(genesis).unwrap();
+        assert!(anchor.reserve_ticket(ckpt(1, 2), genesis, [7; 32]).is_err());
+        assert_eq!(mem.stored(), Some(genesis));
+
+        let ticket = anchor.reserve_ticket(genesis, genesis, [7; 32]).unwrap();
+        assert_eq!((ticket.epoch(), *ticket.context()), (2, [7; 32]));
+        assert_eq!(
+            mem.stored(),
+            Some(LedgerCheckpoint {
+                generation: 2,
+                tag: ticket.reservation()
+            })
+        );
+        let copy = memory_copy(&ticket);
+        let (seal, first) = anchor.consume_ticket(ticket, record).unwrap();
+        assert_eq!((seal.generation, first.generation), (3, 3));
+        assert_eq!(seal.reservation, copy.reservation());
+        assert_eq!(mem.stored(), Some(first));
+        // A replayed ticket is refused before anything is committed under it.
+        assert!(
+            anchor
+                .consume_ticket(copy, |_| panic!("a spent ticket reached its commit"))
+                .is_err()
+        );
+        assert_eq!(mem.stored(), Some(first));
+
+        // The spent floor cannot be reserved from again; the settled one can.
+        assert!(anchor.reserve_ticket(genesis, genesis, [7; 32]).is_err());
+        let next = anchor.reserve_ticket(first, first, [8; 32]).unwrap();
+        assert_eq!(next.epoch(), 4);
+        let reserved = mem.stored();
+        // A record at another generation does not consume the ticket.
+        let copy = memory_copy(&next);
+        assert!(
+            anchor
+                .consume_ticket(next, |seal| Ok(ckpt(seal.generation + 1, 9)))
+                .is_err()
+        );
+        assert_eq!(mem.stored(), reserved);
+        let (_, second) = anchor.consume_ticket(copy, record).unwrap();
+        assert_eq!(second.generation, 5);
+    }
+
+    #[test]
+    fn two_holders_of_one_ticket_cannot_both_consume_it_even_on_stale_reads() {
+        let mem = MemAnchor::default();
+        let anchor: &dyn ExternalMonotoneAnchor = &mem;
+        let genesis = ckpt(1, 1);
+        anchor.advance(genesis).unwrap();
+        let ticket = anchor.reserve_ticket(genesis, genesis, [1; 32]).unwrap();
+        let copy = memory_copy(&ticket);
+        // Both holders read the anchor before either writes.
+        mem.freeze_reads();
+        let (_, spent) = anchor.consume_ticket(ticket, record).unwrap();
+        assert!(anchor.consume_ticket(copy, record).is_err());
+        assert_eq!(mem.stored(), Some(spent));
+    }
+
+    #[test]
+    fn two_contenders_cannot_both_reserve_one_successor_even_on_stale_reads() {
+        let mem = MemAnchor::default();
+        let anchor: &dyn ExternalMonotoneAnchor = &mem;
+        let genesis = ckpt(1, 1);
+        anchor.advance(genesis).unwrap();
+        mem.freeze_reads();
+        let winner = anchor.reserve_ticket(genesis, genesis, [1; 32]).unwrap();
+        let issued = mem.stored();
+        // Same floor and same context: only the contender identity differs.
+        assert!(anchor.reserve_ticket(genesis, genesis, [1; 32]).is_err());
+        assert_eq!(mem.stored(), issued);
+        mem.thaw_reads();
+        anchor.consume_ticket(winner, record).unwrap();
+    }
+
+    #[test]
+    fn a_ticket_is_refused_by_another_anchor_and_after_a_later_reservation() {
+        let (mem_a, mem_b) = (MemAnchor::default(), MemAnchor::default());
+        let a: &dyn ExternalMonotoneAnchor = &mem_a;
+        let b: &dyn ExternalMonotoneAnchor = &mem_b;
+        let genesis = ckpt(1, 1);
+        a.advance(genesis).unwrap();
+        b.advance(genesis).unwrap();
+        let from_a = a.reserve_ticket(genesis, genesis, [3; 32]).unwrap();
+        let from_b = b.reserve_ticket(genesis, genesis, [3; 32]).unwrap();
+        // Equal epoch, floor and context, issued elsewhere.
+        assert!(b.consume_ticket(from_a, record).is_err());
+        // Abandoned (for example by a crash), then superseded.
+        let abandoned = mem_b.stored().unwrap();
+        let later = b.reserve_ticket(abandoned, genesis, [4; 32]).unwrap();
+        assert_eq!(later.epoch(), 3);
+        assert!(b.consume_ticket(from_b, record).is_err());
+        let (_, settled) = b.consume_ticket(later, record).unwrap();
+        // A forged ticket for the spent epoch.
+        let forged = AnchorTicket {
+            epoch: 3,
+            owner: [0; 32],
+            floor: floor_mark(&genesis),
+            context: [4; 32],
+        };
+        assert!(b.consume_ticket(forged, record).is_err());
+        assert_eq!(mem_b.stored(), Some(settled));
+    }
+
+    #[test]
+    fn reconcile_places_each_crash_state_and_refuses_everything_else() {
+        let mem = MemAnchor::default();
+        let anchor: &dyn ExternalMonotoneAnchor = &mem;
+        let genesis = ckpt(1, 1);
+        let unsealed = [0; 32];
+        assert_eq!(
+            anchor.reconcile(genesis, &unsealed).unwrap(),
+            AnchorStanding::Unenrolled
+        );
+        anchor.advance(genesis).unwrap();
+        assert_eq!(
+            anchor.reconcile(genesis, &unsealed).unwrap(),
+            AnchorStanding::Settled
+        );
+
+        // Crash after the reservation, before the durable write.
+        let ticket = anchor.reserve_ticket(genesis, genesis, [5; 32]).unwrap();
+        let reserved = mem.stored().unwrap();
+        assert_eq!(
+            anchor.reconcile(genesis, &unsealed).unwrap(),
+            AnchorStanding::Reserved(reserved)
+        );
+        // A reservation pins the checkpoint it was taken from and no other.
+        assert!(anchor.reconcile(ckpt(1, 2), &unsealed).is_err());
+        assert!(anchor.reconcile(ckpt(0, 1), &unsealed).is_err());
+        assert_eq!(mem.stored(), Some(reserved));
+
+        // Crash after the durable write, before the anchor settled on it.
+        let seal = TicketSeal {
+            generation: 3,
+            reservation: ticket.reservation(),
+            nonce: [6; 32],
+        };
+        let successor = record(&seal).unwrap();
+        assert!(anchor.reconcile(successor, &unsealed).is_err());
+        assert!(anchor.reconcile(successor, &[9; 32]).is_err());
+        assert!(anchor.reconcile(ckpt(4, 3), &seal.reservation).is_err());
+        assert_eq!(mem.stored(), Some(reserved));
+        assert_eq!(
+            anchor.reconcile(successor, &seal.reservation).unwrap(),
+            AnchorStanding::Settled
+        );
+        assert_eq!(mem.stored(), Some(successor));
+
+        // Settled on the successor, the anchor no longer admits its predecessor,
+        // nor another record at the successor's generation.
+        assert!(anchor.reconcile(genesis, &unsealed).is_err());
+        assert!(anchor.reconcile(ckpt(3, 3), &seal.reservation).is_err());
+        assert_eq!(mem.stored(), Some(successor));
+    }
+    fn slot_paths(path: &std::path::Path) -> [std::path::PathBuf; 2] {
+        layout(path.to_path_buf()).slots
+    }
     fn directory() -> std::path::PathBuf {
         static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         let id = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -356,6 +658,13 @@ mod tests {
             if boundary == 0 {
                 // Crash before inactive slot sync: a partial temporary inode is ignored.
                 std::fs::write(dir.join("burn.slot_a.tmp"), b"partial").unwrap();
+                // Real interrupted replacements create their temporary inode as 0600.
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    dir.join("burn.slot_a.tmp"),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
             } else {
                 ledger.burn(&[2; 32]).unwrap();
                 if boundary == 2 {
@@ -414,7 +723,7 @@ mod tests {
         let mut ledger = Ledger::create(&path, key, b"test").unwrap();
         let genesis = ledger.checkpoint();
         assert!(Ledger::open(&path, key, b"test", genesis).is_err());
-        let old = std::fs::read(&ledger.paths[0]).unwrap();
+        let old = std::fs::read(&slot_paths(&path)[0]).unwrap();
         let mut records = Records::new();
         records.insert(alloc::vec![1], alloc::vec![2]);
         ledger.commit(&records).unwrap();

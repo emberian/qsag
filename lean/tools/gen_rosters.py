@@ -60,21 +60,34 @@ for g in groups:
     body += [f"public import {m}" for m in modules if group(m) == g]
 root.write_text(header + "\n" + "\n".join(body) + "\n")
 
-# --- AuditAxioms.lean: regenerate `import all` lines and the audited module array.
+# --- AuditAxioms.lean: regenerate `import all` lines and the three module manifests.
+def is_reexport(m):
+    """Import-only umbrella: nothing but `module`, imports and comments."""
+    src = (qsag / Path(*m.split(".")[1:])).with_suffix(".lean").read_text()
+    src = re.sub(r"/-.*?-/", "", src, flags=re.S)
+    src = re.sub(r"--.*", "", src)
+    line = r"\s*(module|(public |private )?(meta )?import (all )?[\w.]+)?\s*"
+    return all(re.fullmatch(line, l) for l in src.splitlines())
+
+
+def set_array(text, name, entries):
+    marker = f"  let {name} : Array Name := #[\n"
+    a = text.index(marker) + len(marker)
+    b = text.index("  ]\n", a)
+    return text[:a] + "".join(f"    `{m}{',' if k + 1 < len(entries) else ''}\n" for k, m in enumerate(entries)) + text[b:]
+
+
 audit = lean / "AuditAxioms.lean"
 text = audit.read_text()
 start = text.index("import Qsag\n") + len("import Qsag\n")
 end = text.index("import Lean\n")
 ordered = [m for g in groups for m in modules if group(m) == g]
 text = text[:start] + "".join(f"import all {m}\n" for m in ordered) + text[end:]
-imarker = "  let infrastructureModules : Array Name := #[\n"
-ia = text.index(imarker) + len(imarker)
-ib = text.index("\n  ]\n", ia)
-text = text[:ia] + ",\n".join(f"    `{m}" for m in ordered if is_infrastructure(m)) + text[ib:]
-marker = "  let auditedProofModules : Array Name := #[\n"
-a = text.index(marker) + len(marker)
-b = text.index("\n  ]\n", a)
-proof = [m for m in ordered if not is_infrastructure(m)]
-text = text[:a] + ",\n".join(f"    `{m}" for m in proof) + text[b:]
+infra = [m for m in ordered if is_infrastructure(m)]
+reexport = [m for m in ordered if not is_infrastructure(m) and is_reexport(m)]
+proof = [m for m in ordered if m not in infra and m not in reexport]
+text = set_array(text, "infrastructureModules", infra)
+text = set_array(text, "reexportModules", reexport)
+text = set_array(text, "auditedProofModules", proof)
 audit.write_text(text)
-print(f"{len(modules)} modules registered ({len(proof)} proof modules, {len(excluded)} excluded)")
+print(f"{len(modules)} modules registered ({len(proof)} proof, {len(infra)} tactic, {len(reexport)} re-export, {len(excluded)} excluded)")

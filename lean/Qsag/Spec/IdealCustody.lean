@@ -15,8 +15,16 @@ Layer-0 ideal functionality for threshold custody, as one reactive `Machine` wit
   amount charged is `intent.spend`, and the oracle signs `digest deploymentId intent`.
 
 The state is bound to an immutable `deploymentId`. The ledger part (`CustodyLedger`: spend budget,
-epoch write-ahead log, session set, quarantine latch) is shared with the protocol-level machines
-that refine this functionality, which supply their own count of approving parties.
+epoch write-ahead log, session set, quarantine latch) and its signing transition `custodyLedgerSign`
+take the number of approving parties as an argument.
+
+Scope of the refinements into this functionality: `Qsag.Top.certCustodyMachine`, a certificate-pool
+coordinator model with a raw certificate interface that reuses `custodyLedgerSign`, is related to it
+on traces without a forgery event. The real coordinator `Custody.submitRecorded` is related to it by
+`Qsag.Top.separatedCustody_refines_idealCustody_of` on runs satisfying three named, unproved run
+assumptions (no forgery event, a single deployment, increasing leaves); that theorem covers the
+verdict and state correspondence only, not the signature output or WAL replay. The `IdealTsig`, ELF,
+MIR, RSS and WAL machines are not proved to refine this functionality.
 
 The digest is a parameter (`CustodyDigestScheme`) whose only law is joint injectivity in
 `(deploymentId, intent)`.
@@ -42,14 +50,35 @@ structure CustodyIntent where
   epoch : Nat
   spend : Nat
   payload : Bytes
-  deriving DecidableEq, Repr
+  deriving Repr
+
+theorem CustodyIntent.eq_of_fields : ∀ {a b : CustodyIntent},
+    a.sessionId = b.sessionId → a.round = b.round → a.epoch = b.epoch → a.spend = b.spend →
+    a.payload = b.payload → a = b
+  | ⟨_, _, _, _, _⟩, ⟨_, _, _, _, _⟩, rfl, rfl, rfl, rfl, rfl => rfl
+
+/-- Field-wise decidable equality, exposed so that importing modules can evaluate custody runs. -/
+instance instDecidableEqCustodyIntent : DecidableEq CustodyIntent := fun a b =>
+  if h : a.sessionId = b.sessionId ∧ a.round = b.round ∧ a.epoch = b.epoch ∧
+      a.spend = b.spend ∧ a.payload = b.payload then
+    .isTrue (CustodyIntent.eq_of_fields h.1 h.2.1 h.2.2.1 h.2.2.2.1 h.2.2.2.2)
+  else .isFalse (fun he => h (by rw [he]; exact ⟨rfl, rfl, rfl, rfl, rfl⟩))
 
 /-- An approval permit: `party` approved `intent` for deployment `deploymentId`. -/
 structure CustodyApproval where
   party : Nat
   deploymentId : Nat
   intent : CustodyIntent
-  deriving DecidableEq, Repr
+  deriving Repr
+
+theorem CustodyApproval.eq_of_fields : ∀ {a b : CustodyApproval},
+    a.party = b.party → a.deploymentId = b.deploymentId → a.intent = b.intent → a = b
+  | ⟨_, _, _⟩, ⟨_, _, _⟩, rfl, rfl, rfl => rfl
+
+instance instDecidableEqCustodyApproval : DecidableEq CustodyApproval := fun a b =>
+  if h : a.party = b.party ∧ a.deploymentId = b.deploymentId ∧ a.intent = b.intent then
+    .isTrue (CustodyApproval.eq_of_fields h.1 h.2.1 h.2.2)
+  else .isFalse (fun he => h (by rw [he]; exact ⟨rfl, rfl, rfl⟩))
 
 /-- Digest of `(deploymentId, intent)` committed into the signing transition and the WAL.
     `digest_inj` is the binding law required of the instantiation. -/
@@ -335,6 +364,19 @@ theorem mem_custodyApprovers {numParties : Nat} {honest corrupt : List CustodyAp
   · exact .inl (of_decide_eq_true h1)
   · exact .inr (of_decide_eq_true h1)
 
+/-- A duplicate-free list of enrolled parties that all hold a permit for `(dep, i)` is no longer
+    than the list of approvers. -/
+theorem custodyApprovers_length_le_of_subset {numParties : Nat} {parties : List Nat}
+    {honest corrupt : List CustodyApproval} {dep : Nat} {i : CustodyIntent}
+    (hNd : parties.Nodup)
+    (hSub : ∀ p ∈ parties, p < numParties ∧
+      (CustodyApproval.mk p dep i ∈ honest ∨ CustodyApproval.mk p dep i ∈ corrupt)) :
+    parties.length ≤ (custodyApprovers numParties honest corrupt dep i).length := by
+  refine nodup_subset_length parties _ hNd (fun p hp => ?_)
+  unfold custodyApprovers
+  exact List.mem_filter.mpr ⟨List.mem_range.mpr (hSub p hp).1,
+    Bool.or_eq_true_iff.mpr ((hSub p hp).2.imp decide_eq_true decide_eq_true)⟩
+
 /-- Honest-quorum intersection: when the adversary's permits all belong to the `corruptP` parties
     and fewer than `t` parties are corrupted, a `t`-quorum of permit holders for `(dep, i)` contains
     a party outside `corruptP`, and that party's permit was recorded through its own port. -/
@@ -431,6 +473,33 @@ private theorem custodyLedgerSign_of_found
       if S.digest L.deploymentId i = r.digest then some (L, .replayedFromWal r.sig) else none := by
   unfold custodyLedgerSign
   rw [custody_if_pos (And.intro hP hD), hF]
+
+/-- The ledger's signing transition reads the approval count only through `threshold ≤ count`:
+    an accepted step stays accepted, with the same result, for any larger count. -/
+theorem custodyLedgerSign_mono
+    {L : CustodyLedger PK D Sig} {n m dep : Nat} {i : CustodyIntent} {ab : Bool}
+    {r : CustodyLedger PK D Sig × CustodyOutcome Sig}
+    (h : custodyLedgerSign S oracleSign L n dep i ab = some r) (hnm : n ≤ m) :
+    custodyLedgerSign S oracleSign L m dep i ab = some r := by
+  rcases r with ⟨L', out⟩
+  obtain ⟨hP, hD, hCase⟩ := custodyLedgerSign_inv h
+  rcases hCase with ⟨rec, hF, hDig, hSame, hOut⟩ | ⟨hF, hEp, hSess, hQ, hCap, hAb⟩
+  · rw [custodyLedgerSign_of_found hP hD hF, custody_if_pos hDig, hSame, hOut]
+  · unfold custodyLedgerSign
+    rw [custody_if_pos (And.intro hP hD), hF]
+    dsimp only
+    rw [custody_if_pos (show L.nextFreshEpoch ≤ i.epoch ∧ i.sessionId ∉ L.usedSessions ∧
+      L.quorum.threshold ≤ m ∧ L.spent + i.spend ≤ L.quorum.spendCap from
+      ⟨hEp, hSess, Nat.le_trans hQ hnm, hCap⟩)]
+    rcases hAb with ⟨hab, hL', hOut⟩ | ⟨hab, hL', hOut⟩
+    · subst hab
+      subst hL'
+      subst hOut
+      exact custody_if_pos rfl _ _
+    · subst hab
+      subst hL'
+      subst hOut
+      exact custody_if_neg Bool.false_ne_true _ _
 
 theorem idealCustodyStep_approve_inv
     {st st' : IdealCustodyState PK D Sig} {p dep : Nat} {i : CustodyIntent}
@@ -1083,6 +1152,99 @@ theorem idealCustody_admitsTrace_release_honestly_approved
   obtain ⟨s₀, s, hInit, hTr⟩ := hAdmits
   exact idealCustody_trace_release_honestly_approved hInit hTr hEv
 
+/-- An accepted signing step that outputs a signature (fresh release or WAL replay) is for this
+    deployment, outputs the oracle's signature on `digest dep₀ i`, and finds a permit for
+    `(dep₀, i)` already recorded through an enrolled custodian's own port. -/
+theorem idealCustodyStep_sign_output_honest
+    {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {st st' : IdealCustodyState PK D Sig} {dep : Nat} {i : CustodyIntent} {ab : Bool}
+    {out : CustodyOutcome Sig} {sig : Sig}
+    (hInv : st.SafeInv S oracleSign dep₀ pk₀ quorum₀)
+    (hStep : idealCustodyStep S oracleSign st (.sign dep i ab) = some (st', out))
+    (hOut : out = .released sig ∨ out = .replayedFromWal sig) :
+    dep = dep₀ ∧ sig = oracleSign (S.digest dep₀ i) ∧
+    ∃ p, p < quorum₀.numParties ∧ CustodyApproval.mk p dep₀ i ∈ st.honestApprovals := by
+  rcases hOut with hO | hO
+  · subst hO
+    obtain ⟨hD, hSig, _, _, _⟩ := idealCustodyStep_release_spec hStep
+    obtain ⟨L', hL, _⟩ := idealCustodyStep_sign_inv hStep
+    obtain ⟨_, _, hCase⟩ := custodyLedgerSign_inv hL
+    rcases hCase with ⟨r, _, _, _, hBad⟩ | ⟨hF, _⟩
+    · cases hBad
+    · obtain ⟨_, p, hp, _, hm⟩ := idealCustodyStep_sign_fresh_has_honest_approver hInv hStep hF
+      refine ⟨hD.trans hInv.deployment, ?_, p, hp, hm⟩
+      rw [hSig, hInv.deployment]
+  · subst hO
+    obtain ⟨_, hD, hSig, r, hr, hI, _⟩ := idealCustodyStep_replay_binds_intent hInv hStep
+    obtain ⟨p, hp, hm⟩ := hInv.honestAuthorized _ (hInv.walAuthorized r hr)
+    rw [hI] at hm
+    exact ⟨hD, hSig, p, hp, hm⟩
+
+/-- Along a trace from a state satisfying the invariant, every signature output (fresh release or
+    WAL replay) for `i` is preceded by an honest permit for `(dep₀, i)`: one already recorded in the
+    starting state, or an accepted `.approve p dep₀ i` strictly earlier in the trace. -/
+theorem idealCustody_validTrace_signature_approved_before
+    {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {s s' : IdealCustodyState PK D Sig} {tr pre post : List (CustodyInput × CustodyOutcome Sig)}
+    {dep : Nat} {i : CustodyIntent} {ab : Bool} {out : CustodyOutcome Sig} {sig : Sig}
+    (hInv : s.SafeInv S oracleSign dep₀ pk₀ quorum₀)
+    (hTr : (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).ValidTrace s tr s')
+    (hSplit : tr = pre ++ (CustodyInput.sign dep i ab, out) :: post)
+    (hOut : out = .released sig ∨ out = .replayedFromWal sig) :
+    dep = dep₀ ∧ sig = oracleSign (S.digest dep₀ i) ∧
+    ∃ p, p < quorum₀.numParties ∧
+      (CustodyApproval.mk p dep₀ i ∈ s.honestApprovals ∨
+       (CustodyInput.approve p dep₀ i,
+         (CustodyOutcome.approvalRecorded : CustodyOutcome Sig)) ∈ pre) := by
+  induction hTr generalizing pre with
+  | nil _ => cases pre <;> cases hSplit
+  | @accept a a1 _ inp o rest hStep _ ih =>
+    cases pre with
+    | nil =>
+      rw [List.nil_append] at hSplit
+      have hHead := (List.cons.inj hSplit).1
+      cases hHead
+      obtain ⟨hD, hS, p, hp, hm⟩ := idealCustodyStep_sign_output_honest hInv hStep hOut
+      exact ⟨hD, hS, p, hp, .inl hm⟩
+    | cons x pre' =>
+      rw [List.cons_append] at hSplit
+      have hx : (inp, o) = x := (List.cons.inj hSplit).1
+      obtain ⟨hD, hS, p, hp, hm⟩ :=
+        ih (idealCustodyStep_preserves_safeInv hInv hStep) (List.cons.inj hSplit).2
+      refine ⟨hD, hS, p, hp, ?_⟩
+      rcases hm with hm | hm
+      · rcases idealCustodyStep_honestApproval_provenance hStep hm with hOld | ⟨hI, hO, _⟩
+        · exact .inl hOld
+        · refine .inr ?_
+          rw [← hx, hI, hO]
+          exact List.mem_cons_self
+      · exact .inr (List.mem_cons_of_mem _ hm)
+  | reject _ _ _ ih => exact ih hInv hSplit
+
+/-- **Every signature output is preceded by an honest approval.** In any trace of the ideal
+    custody functionality from its initial state, a signature output for `i` (fresh release or WAL
+    replay) is the oracle's signature on `digest dep₀ i`, and an accepted `.approve p dep₀ i` by an
+    enrolled party `p` occurs strictly earlier in the trace. -/
+theorem idealCustody_trace_signature_approved_before
+    {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {s₀ s : IdealCustodyState PK D Sig} {tr pre post : List (CustodyInput × CustodyOutcome Sig)}
+    {dep : Nat} {i : CustodyIntent} {ab : Bool} {out : CustodyOutcome Sig} {sig : Sig}
+    (hInit : (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).Init s₀)
+    (hTr : (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).ValidTrace s₀ tr s)
+    (hSplit : tr = pre ++ (CustodyInput.sign dep i ab, out) :: post)
+    (hOut : out = .released sig ∨ out = .replayedFromWal sig) :
+    dep = dep₀ ∧ sig = oracleSign (S.digest dep₀ i) ∧
+    ∃ p, p < quorum₀.numParties ∧
+      (CustodyInput.approve p dep₀ i,
+        (CustodyOutcome.approvalRecorded : CustodyOutcome Sig)) ∈ pre := by
+  have h0 : s₀ = IdealCustodyState.init dep₀ pk₀ quorum₀ := hInit
+  subst h0
+  obtain ⟨hD, hS, p, hp, hm⟩ := idealCustody_validTrace_signature_approved_before
+    (IdealCustodyState.init_safeInv (PK := PK) S oracleSign dep₀ pk₀ quorum₀) hTr hSplit hOut
+  rcases hm with hm | hm
+  · exact False.elim (List.not_mem_nil hm)
+  · exact ⟨hD, hS, p, hp, hm⟩
+
 end Step
 
 /-! ## 10. Concrete instance: 2-of-3 custody for deployment `7`, budget `100` -/
@@ -1177,6 +1339,11 @@ theorem idealCustody_tooth_wrong_deployment_rejected :
   Qsag.Spec.idealCustody_validTrace_release_authorized
   Qsag.Spec.idealCustody_trace_release_honestly_approved
   Qsag.Spec.idealCustody_admitsTrace_release_honestly_approved
+  Qsag.Spec.custodyLedgerSign_mono
+  Qsag.Spec.custodyApprovers_length_le_of_subset
+  Qsag.Spec.idealCustodyStep_sign_output_honest
+  Qsag.Spec.idealCustody_validTrace_signature_approved_before
+  Qsag.Spec.idealCustody_trace_signature_approved_before
   Qsag.Spec.idealCustody_tooth_quorum_releases
 
 #tooth_pair Qsag.Spec.idealCustody_reachable_spend_accounting vs

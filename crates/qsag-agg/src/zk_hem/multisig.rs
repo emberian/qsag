@@ -552,8 +552,20 @@ fn synthesize(
     threshold: u32,
     slots: &[Slot],
 ) -> (Shape, Vec<F>) {
-    assert_eq!(slots.len(), params.capacity);
     let mut cs = ConstraintSystem::new();
+    populate(&mut cs, params, address, message, threshold, slots);
+    cs.finish()
+}
+
+fn populate(
+    cs: &mut ConstraintSystem,
+    params: MultisigParams,
+    address: &Digest,
+    message: &[u8; 32],
+    threshold: u32,
+    slots: &[Slot],
+) {
+    assert_eq!(slots.len(), params.capacity);
     let publics: Vec<Lc> = public_inputs(address, message)
         .into_iter()
         .map(|v| cs.public_input(v).into())
@@ -564,7 +576,7 @@ fn synthesize(
     // Bound the hidden threshold independently of Policy::new and the active slots.
     // Both differences are below 128, so no field wrap can pass.
     let lower = alloc_bits(
-        &mut cs,
+        cs,
         u64::from(threshold.saturating_sub(1)),
         params.slack_bits(),
     );
@@ -573,7 +585,7 @@ fn synthesize(
         &pack_bits(&lower),
     );
     let upper = alloc_bits(
-        &mut cs,
+        cs,
         params.capacity.saturating_sub(threshold as usize) as u64,
         params.slack_bits(),
     );
@@ -586,12 +598,12 @@ fn synthesize(
     let mut active_sum = Lc::zero();
     let mut members_root = None;
     for slot in slots {
-        let (active, index, root) = slot_gadget(&mut cs, params, slot, message_limbs);
+        let (active, index, root) = slot_gadget(cs, params, slot, message_limbs);
         active_sum = active_sum.plus(&active);
         match &prev {
             None => members_root = Some(root.clone()),
             Some((prev_active, prev_index, prev_root)) => {
-                enforce_equal4(&mut cs, &root, prev_root);
+                enforce_equal4(cs, &root, prev_root);
                 // Active slots are a prefix.
                 cs.enforce_mul(
                     active.clone(),
@@ -602,7 +614,7 @@ fn synthesize(
                 let gap = cs.eval(&index).to_canonical_u64() as i128
                     - cs.eval(prev_index).to_canonical_u64() as i128
                     - 1;
-                let gap_bits = alloc_bits(&mut cs, gap.max(0) as u64, params.depth);
+                let gap_bits = alloc_bits(cs, gap.max(0) as u64, params.depth);
                 cs.enforce_mul(
                     active.clone(),
                     index
@@ -618,7 +630,7 @@ fn synthesize(
 
     // `sum(active) >= threshold`.
     let slack = cs.eval(&active_sum).to_canonical_u64() as i128 - i128::from(threshold);
-    let slack_bits = alloc_bits(&mut cs, slack.max(0) as u64, params.slack_bits());
+    let slack_bits = alloc_bits(cs, slack.max(0) as u64, params.slack_bits());
     cs.enforce_equal(&active_sum.minus(&threshold_lc), &pack_bits(&slack_bits));
 
     // Address of the policy.
@@ -628,14 +640,13 @@ fn synthesize(
     let mut msg: Vec<Lc> = members_root.to_vec();
     msg.push(threshold_lc);
     msg.push(Lc::constant(f(POLICY_ROOT_TAG)));
-    let policy_root = first4_lc(&sponge12(&mut cs, &msg));
+    let policy_root = first4_lc(&sponge12(cs, &msg));
     let mut msg: Vec<Lc> = label_limbs().map(Lc::constant).to_vec();
     msg.extend_from_slice(&policy_root);
-    let computed = first4_lc(&sponge12(&mut cs, &msg));
+    let computed = first4_lc(&sponge12(cs, &msg));
     for (got, want) in computed.iter().zip(address_lc) {
         cs.enforce_equal(got, want);
     }
-    cs.finish()
 }
 
 /// The relation for one `(capacity, depth)`, built once and reused by provers and verifiers.
@@ -729,14 +740,18 @@ impl MultisigRelation {
         seed: &[u8; 32],
     ) -> Result<ZkHemProof, MultisigError> {
         let slots = self.slots(policy, message, signers)?;
-        let (shape, assignment) = synthesize(
+        let mut cs = ConstraintSystem::witness_only();
+        populate(
+            &mut cs,
             self.params,
             &policy.address(),
             message,
             policy.threshold,
             &slots,
         );
-        debug_assert_eq!(shape, self.shape);
+        let assignment = cs
+            .finish_assignment(&self.shape)
+            .ok_or(MultisigError::InvalidParams)?;
         protocol::prove(
             &self.shape,
             assignment,

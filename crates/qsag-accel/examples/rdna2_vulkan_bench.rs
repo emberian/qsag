@@ -17,8 +17,7 @@ fn main() {
     use qsag_accel::goldilocks::precompute_goldilocks_twiddles;
     use qsag_accel::{
         AcceleratorBackend, BackendAttestationKey, CertifiedBackend, CpuReferenceBackend,
-        KernelSlot, KernelTargetArch, VerifiedKernelDigestRegistry, VulkanRdna2Backend,
-        VulkanSpirvBackend,
+        KernelSlot, KernelTargetArch, VerifiedKernelDigestRegistry, VulkanSpirvBackend,
     };
 
     fn splitmix64(state: &mut u64) -> u64 {
@@ -38,7 +37,7 @@ fn main() {
         s
     }
 
-    let gpu_raw = match VulkanRdna2Backend::try_new_audited() {
+    let gpu_raw = match VulkanSpirvBackend::try_new_audited() {
         Ok(b) => b,
         Err(err) => {
             panic!("Discrete Vulkan SPIR-V GPU unavailable: {err}");

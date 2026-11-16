@@ -40,6 +40,7 @@ dependencies = [
  "qsag-accel",
  "qsag-addr",
  "qsag-agg",
+ "qsag-asm",
  "qsag-core",
  "qsag-cred",
  "qsag-fts",
@@ -67,6 +68,7 @@ dependencies = [
  "qsag-accel",
  "qsag-addr",
  "qsag-asm",
+ "qsag-core",
  "qsag-policy",
  "qsag-verified",
 ]
@@ -76,6 +78,7 @@ name = "qsag-fts"
 version = "0.1.0"
 dependencies = [
  "qsag-accel",
+ "qsag-asm",
  "qsag-core",
  "qsag-verified",
 ]
@@ -98,6 +101,7 @@ dependencies = [
  "qsag-accel",
  "qsag-addr",
  "qsag-asm",
+ "qsag-core",
 ]
 
 [[package]]
@@ -115,9 +119,11 @@ dependencies = [
 name = "qsag-quorum"
 version = "0.1.0"
 dependencies = [
+ "qsag-accel",
  "qsag-agg",
  "qsag-asm",
  "qsag-core",
+ "qsag-fts",
  "qsag-verified",
 ]
 

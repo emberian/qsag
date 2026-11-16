@@ -3,7 +3,7 @@
 //! Uses the existing 256-bit, 128-chain WOTS+C primitive. [`mint`] runs the
 //! dealerless binary-SPDZ chain sweep directly into locked slots and independently
 //! rerandomizes each retained state. Its Baggy adapter certifies descriptors under
-//! a `FORS+C` (version 1) or `PORS+FP` (version 2) root on any
+//! a `PORS+FP` root on any
 //! [`qsag_core::baggy::BaggyEngine`], with an authenticated RAM-only Waistband option.
 //! [`compact_hop`] supplies real Compact1122 indexed one-time capability bundles.
 //!
@@ -23,11 +23,11 @@
 //! Fixed minting subsets require *every* member, irrespective of the parent t-of-n
 //! configuration. Changing subsets requires minting a different coupon.
 //!
-//! The online signature is [`BaggyV2Sig`]: the coupon's public descriptor, the root's
-//! [`BaggySig`] on it, and the coupon's WOTS+C opening on the message. It has a
-//! canonical wire form ([`BaggyV2Sig::to_wire_bytes`]) and is checked by
-//! [`baggy_v2_verify`] against the root public key alone, with no state. Producing one
-//! online touches no disk. It is not a bare [`BaggySig`] over the message: a verifier
+//! The online signature is [`BaggySig`]: the coupon's public descriptor, the root's
+//! [`RootSignature`] on it, and the coupon's WOTS+C opening on the message. It has a
+//! canonical wire form ([`BaggySig::to_wire_bytes`]) and is checked by
+//! [`baggy_verify`] against the root public key alone, with no state. Producing one
+//! online touches no disk. It is not a bare [`RootSignature`] over the message: a verifier
 //! of bare root signatures does not accept it, and it expires with its coupon.
 //!
 //! Thresholds: the root certificate has the threshold of the engine that signed it
@@ -35,7 +35,9 @@
 //! a coupon needs every member of its fixed subset. Neither implies the other.
 
 use crate::quorum_jorts::{WOTS_CHAINS, WOTS_STEPS, chain_walk, digits_at};
-use qsag_core::baggy::{BaggyParams, BaggyPublicKey, BaggySig, baggy_verify};
+use qsag_core::baggy::{
+    BaggyParams, BaggyPublicKey, BaggySig as RootSignature, baggy_verify as verify_root,
+};
 use qsag_core::sponge::keccak::Cshake256Xof;
 use qsag_core::wipe::{ct_eq_bytes32, wipe_bytes};
 use std::collections::BTreeMap;
@@ -355,17 +357,17 @@ impl CouponDescriptor {
 #[derive(Clone)]
 pub struct CertifiedCoupon {
     descriptor: CouponDescriptor,
-    certificate: BaggySig,
+    certificate: RootSignature,
 }
 impl CertifiedCoupon {
     pub fn verify(
         parent: &BaggyPublicKey,
         params: &BaggyParams,
         descriptor: CouponDescriptor,
-        certificate: BaggySig,
+        certificate: RootSignature,
     ) -> Result<Self, CouponError> {
         if &descriptor.parent != parent
-            || !baggy_verify(
+            || !verify_root(
                 params,
                 parent,
                 &descriptor.certificate_message()?,
@@ -598,15 +600,13 @@ impl CouponOpening {
 /// The stateless online signature: a certified coupon and its one-time opening on the
 /// message. See the module documentation.
 #[derive(Clone)]
-pub struct BaggyV2Sig {
+pub struct BaggySig {
     pub coupon: CertifiedCoupon,
     pub counter: u32,
     pub nodes: Vec<Node>,
 }
-/// Earlier name of [`BaggyV2Sig`].
-pub type CouponSignature = BaggyV2Sig;
 
-impl BaggyV2Sig {
+impl BaggySig {
     /// `be16(threshold) || be16(parties) || members (be32 each) || pk_seed || be64(leaf)
     /// || be64(expires_at) || chain ends || be32(len) || root certificate || be32(counter)
     /// || nodes`. The parent key is not encoded: the verifier supplies the one it trusts.
@@ -641,7 +641,7 @@ impl BaggyV2Sig {
     /// Inverse of [`Self::to_wire_bytes`] for the root key `parent` under `params`. The
     /// whole input must be used, and the root certificate is verified here: a value of
     /// this type always carries a certificate that `parent` signed. The message is checked
-    /// by [`baggy_v2_verify`].
+    /// by [`baggy_verify`].
     pub fn from_wire_bytes(
         parent: &BaggyPublicKey,
         params: &BaggyParams,
@@ -670,7 +670,7 @@ impl BaggyV2Sig {
         let expires_at = u64::from_be_bytes(be(take(&mut rest, 8)?)?);
         let chain_ends = nodes(take(&mut rest, 32 * WOTS_CHAINS)?);
         let certificate_len = u32::from_be_bytes(be(take(&mut rest, 4)?)?) as usize;
-        let certificate = BaggySig::from_wire_bytes(params, take(&mut rest, certificate_len)?)
+        let certificate = RootSignature::from_wire_bytes(params, take(&mut rest, certificate_len)?)
             .ok_or(CouponError::Certificate)?;
         let counter = u32::from_be_bytes(be(take(&mut rest, 4)?)?);
         let opened = nodes(take(&mut rest, 32 * WOTS_CHAINS)?);
@@ -695,13 +695,13 @@ impl BaggyV2Sig {
     }
 }
 
-/// Verify a [`BaggyV2Sig`] on `message` under the root key `parent`: the root certificate,
+/// Verify a [`BaggySig`] on `message` under the root key `parent`: the root certificate,
 /// the coupon's expiry, the codeword and every one-time chain. Stateless.
-pub fn baggy_v2_verify(
+pub fn baggy_verify(
     parent: &BaggyPublicKey,
     params: &BaggyParams,
     message: &[u8],
-    sig: &BaggyV2Sig,
+    sig: &BaggySig,
 ) -> bool {
     verify(parent, params, message, sig)
 }
@@ -711,7 +711,7 @@ pub fn combine(
     coupon: &CertifiedCoupon,
     req: &SignRequest,
     openings: &[CouponOpening],
-) -> Result<CouponSignature, CouponError> {
+) -> Result<BaggySig, CouponError> {
     let d = &coupon.descriptor;
     if now()? > d.expires_at {
         return Err(CouponError::Expired);
@@ -752,7 +752,7 @@ pub fn combine(
             return Err(CouponError::InvalidOpenings);
         }
     }
-    Ok(CouponSignature {
+    Ok(BaggySig {
         coupon: coupon.clone(),
         counter: req.counter,
         nodes,
@@ -765,7 +765,7 @@ pub fn verify(
     parent: &BaggyPublicKey,
     params: &BaggyParams,
     message: &[u8],
-    sig: &CouponSignature,
+    sig: &BaggySig,
 ) -> bool {
     let d = &sig.coupon.descriptor;
     let Ok(certificate_message) = d.certificate_message() else {
@@ -780,7 +780,7 @@ pub fn verify(
     if d.parent != *parent
         || time > d.expires_at
         || sig.nodes.len() != WOTS_CHAINS
-        || !baggy_verify(
+        || !verify_root(
             params,
             parent,
             &certificate_message,
@@ -949,7 +949,11 @@ mod tests {
     fn fixture(t: usize, n: usize) -> (CertifiedCoupon, Vec<CouponPool>) {
         fixture_with(&BaggyParams::SHA3_128F, t, n)
     }
-    fn fixture_with(params: &BaggyParams, t: usize, n: usize) -> (CertifiedCoupon, Vec<CouponPool>) {
+    fn fixture_with(
+        params: &BaggyParams,
+        t: usize,
+        n: usize,
+    ) -> (CertifiedCoupon, Vec<CouponPool>) {
         let sk = PqSecretKey {
             sk_seed: [0x19; 32],
             sk_prf: [0x42; 32],
@@ -1050,40 +1054,40 @@ mod tests {
     }
 
     #[test]
-    fn baggy_v2_sig_round_trips_on_the_wire_and_binds_every_field() {
-        let params = BaggyParams::SHA3_128F_V2;
+    fn baggy_sig_round_trips_on_the_wire_and_binds_every_field() {
+        let params = BaggyParams::SHA3_128F;
         let (coupon, mut pools) = fixture_with(&params, 3, 5);
         let parent = coupon.descriptor.parent;
         let req = request(&coupon, b"stateless online signature");
         let openings: Vec<_> = pools.iter_mut().map(|p| p.open(&req).unwrap()).collect();
-        let sig: BaggyV2Sig = combine(&coupon, &req, &openings).unwrap();
+        let sig: BaggySig = combine(&coupon, &req, &openings).unwrap();
         // The root certificate is a PORS+FP signature within the pruning bound.
-        let opening = sig.coupon.certificate.pors.as_ref().unwrap();
-        assert!(sig.coupon.certificate.fors.is_empty());
+        let opening = &sig.coupon.certificate.pors;
+        assert!(!sig.coupon.certificate.pors.secrets.is_empty());
         assert_eq!(opening.secrets.len(), 28);
         assert!(opening.auth.len() <= 128);
-        assert!(baggy_v2_verify(&parent, &params, &req.message, &sig));
+        assert!(baggy_verify(&parent, &params, &req.message, &sig));
 
         let raw = sig.to_wire_bytes().unwrap();
         // Descriptor (64 + 4 t + 4096), length-prefixed certificate, counter, 128 nodes.
         let overhead = 2 + 2 + 4 * 3 + 32 + 8 + 8 + 4096 + 4 + 4 + 4096;
         assert!(raw.len() <= overhead + params.sig_bytes_checked().unwrap());
-        let back = BaggyV2Sig::from_wire_bytes(&parent, &params, &raw).unwrap();
+        let back = BaggySig::from_wire_bytes(&parent, &params, &raw).unwrap();
         assert_eq!(back.to_wire_bytes().unwrap(), raw);
-        assert!(baggy_v2_verify(&parent, &params, &req.message, &back));
-        assert!(!baggy_v2_verify(&parent, &params, b"another message", &back));
+        assert!(baggy_verify(&parent, &params, &req.message, &back));
+        assert!(!baggy_verify(&parent, &params, b"another message", &back));
 
-        // Version-1 parameters, another root key, a short or long input: refused.
-        assert!(BaggyV2Sig::from_wire_bytes(&parent, &BaggyParams::SHA3_128F, &raw).is_err());
+        // Another parameter set, root key, or truncated/extended input is refused.
+        assert!(BaggySig::from_wire_bytes(&parent, &BaggyParams::TEST_SMALL, &raw).is_err());
         let other = BaggyPublicKey {
             pk_root: [9; 32],
             ..parent
         };
-        assert!(BaggyV2Sig::from_wire_bytes(&other, &params, &raw).is_err());
-        assert!(BaggyV2Sig::from_wire_bytes(&parent, &params, &raw[..raw.len() - 1]).is_err());
+        assert!(BaggySig::from_wire_bytes(&other, &params, &raw).is_err());
+        assert!(BaggySig::from_wire_bytes(&parent, &params, &raw[..raw.len() - 1]).is_err());
         let mut long = raw.clone();
         long.push(0);
-        assert!(BaggyV2Sig::from_wire_bytes(&parent, &params, &long).is_err());
+        assert!(BaggySig::from_wire_bytes(&parent, &params, &long).is_err());
 
         // One flipped bit in each field: the envelope does not decode, or does not verify.
         let certificate_at = 2 + 2 + 12 + 32 + 8 + 8 + 4096 + 4;
@@ -1103,9 +1107,9 @@ mod tests {
         ] {
             let mut bad = raw.clone();
             bad[offset] ^= 1;
-            if let Ok(decoded) = BaggyV2Sig::from_wire_bytes(&parent, &params, &bad) {
+            if let Ok(decoded) = BaggySig::from_wire_bytes(&parent, &params, &bad) {
                 assert!(
-                    !baggy_v2_verify(&parent, &params, &req.message, &decoded),
+                    !baggy_verify(&parent, &params, &req.message, &decoded),
                     "offset {offset}"
                 );
             }
@@ -1114,7 +1118,7 @@ mod tests {
         for offset in [1, 3, 7, 20, 55, 63, 100] {
             let mut bad = raw.clone();
             bad[offset] ^= 1;
-            assert!(BaggyV2Sig::from_wire_bytes(&parent, &params, &bad).is_err());
+            assert!(BaggySig::from_wire_bytes(&parent, &params, &bad).is_err());
         }
     }
 

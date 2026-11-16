@@ -92,7 +92,7 @@ re-sealed under the source passphrase with a fresh KDF salt.
 fn fresh_party_rngs(n: usize) -> Result<Vec<PartyPrivateRng>, CliError> {
     (0..n)
         .map(|_| {
-            let seed = Secret32(os_random_32()?);
+            let seed = Secret32::new(os_random_32()?);
             Ok(PartyPrivateRng::from_seed(
                 seed.0,
                 b"QSAG.CLI.HEM.PRIVATE/v1",
@@ -432,14 +432,14 @@ impl HemEnvelopeKeys {
 }
 
 fn derive_hem_envelope_keys(pass: &[u8], salt: &[u8; 32]) -> (Secret32, Secret32) {
-    let mut state = Secret32([0u8; 32]);
+    let mut state = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.KDF.V1",
         &[pass, salt, HEM_SCHEME_NAME.as_bytes()],
         &mut state.0,
     );
     for i in 0..crate::envelope::KDF_ROUNDS {
-        let mut next = Secret32([0u8; 32]);
+        let mut next = Secret32::new([0u8; 32]);
         cshake256_framed_xof(
             b"QSAG.ENVELOPE.ITER.V1",
             &[&state.0, salt, &i.to_le_bytes()],
@@ -447,13 +447,13 @@ fn derive_hem_envelope_keys(pass: &[u8], salt: &[u8; 32]) -> (Secret32, Secret32
         );
         state = next;
     }
-    let mut enc = Secret32([0u8; 32]);
+    let mut enc = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.ENC.V1",
         &[&state.0, salt, HEM_SCHEME_NAME.as_bytes()],
         &mut enc.0,
     );
-    let mut mac = Secret32([0u8; 32]);
+    let mut mac = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.ENVELOPE.MAC.V1",
         &[&state.0, salt, HEM_SCHEME_NAME.as_bytes()],
@@ -469,7 +469,7 @@ fn crypt_latch_seed(
     nonce: &[u8; 32],
     generation: u64,
 ) {
-    let mut stream = Secret32([0u8; 32]);
+    let mut stream = Secret32::new([0u8; 32]);
     cshake256_framed_xof(
         b"QSAG.HEM.LATCH.STREAM.V1",
         &[
@@ -497,7 +497,7 @@ fn crypt_share_payload(
     let party_le = (party as u64).to_le_bytes();
     let gen_le = generation.to_le_bytes();
     for (blk_idx, block) in bytes.chunks_mut(32).enumerate() {
-        let mut stream = Secret32([0u8; 32]);
+        let mut stream = Secret32::new([0u8; 32]);
         cshake256_framed_xof(
             b"QSAG.HEM.SHARE.STREAM.V1",
             &[
@@ -549,7 +549,7 @@ fn seal_share_bytes(
     generation: u64,
     party: usize,
 ) -> ZeroizingBuf {
-    let mut ct = ZeroizingBuf(plain.to_vec());
+    let mut ct = ZeroizingBuf::new(plain.to_vec());
     crypt_share_payload(&mut ct.0, &keys.enc, &keys.salt, nonce, generation, party);
     let tag = compute_share_seal_tag(&keys.mac, pk, &keys.salt, nonce, generation, party, &ct.0);
     let mut out = Vec::with_capacity(HEM_SHARE_SEAL_HEADER_BYTES + ct.0.len());
@@ -559,7 +559,7 @@ fn seal_share_bytes(
     out.extend_from_slice(nonce);
     out.extend_from_slice(&tag);
     out.extend_from_slice(&ct.0);
-    ZeroizingBuf(out)
+    ZeroizingBuf::new(out)
 }
 
 fn open_sealed_share_bytes(
@@ -598,7 +598,7 @@ fn open_sealed_share_bytes(
             "wrong passphrase or damaged sealed Hem quorum share",
         ));
     }
-    let mut plain = ZeroizingBuf(ct.to_vec());
+    let mut plain = ZeroizingBuf::new(ct.to_vec());
     crypt_share_payload(
         &mut plain.0,
         &keys.enc,
@@ -832,9 +832,9 @@ impl Meta {
             None
         };
         let latch_seed = if envelope.is_some() {
-            Secret32([0u8; 32])
+            Secret32::new([0u8; 32])
         } else {
-            Secret32(latch_disk)
+            Secret32::new(latch_disk)
         };
         let meta = Self {
             t: json.field_u64("threshold")? as usize,
@@ -899,7 +899,7 @@ impl Meta {
                         "wrong passphrase or damaged sealed Hem quorum vault",
                     ));
                 }
-                let mut seed = Secret32(env.encrypted_latch_seed);
+                let mut seed = Secret32::new(env.encrypted_latch_seed);
                 crypt_latch_seed(
                     &mut seed.0,
                     &keys.enc,
@@ -919,7 +919,7 @@ impl Meta {
 
     /// Put this meta on disk. Replacing an existing meta is one atomic rename.
     fn write(&self, vault_dir: &str, fresh: bool) -> Result<(), CliError> {
-        let bytes = ZeroizingBuf(self.to_json().to_pretty().into_bytes());
+        let bytes = ZeroizingBuf::new(self.to_json().to_pretty().into_bytes());
         if fresh {
             write_new(&meta_path(vault_dir), &bytes.0, true)
         } else {
@@ -1014,7 +1014,7 @@ fn commit(
     };
     let mut digests = Vec::with_capacity(quorum.custodian_shares().len());
     for (party, share) in quorum.custodian_shares().iter().enumerate() {
-        let raw = ZeroizingBuf(share.to_vault_bytes().map_err(map_quorum_err)?);
+        let raw = ZeroizingBuf::new(share.to_vault_bytes().map_err(map_quorum_err)?);
         let on_disk = match (keys, &seal_nonce) {
             (Some(k), Some(nonce)) => {
                 seal_share_bytes(&raw.0, k, &meta.pk, nonce, generation, party)
@@ -1057,7 +1057,7 @@ fn retire(vault_dir: &str, meta: &mut Meta, hook: Hook<'_>) -> Result<(), CliErr
     meta.invalidated = true;
     meta.pending = None;
     meta.envelope = None;
-    meta.latch_seed = Secret32([0u8; 32]);
+    meta.latch_seed = Secret32::new([0u8; 32]);
     meta.share_digests = Vec::new();
     meta.generation = meta
         .generation
@@ -1118,7 +1118,7 @@ fn load_legacy(
     )?;
     let expected_dir_digest: [u8; 32] =
         from_hex_exact(json.field_str("directory_digest")?, "directory_digest")?;
-    let latch_seed = Secret32(from_hex_exact(json.field_str("latch_seed")?, "latch_seed")?);
+    let latch_seed = Secret32::new(from_hex_exact(json.field_str("latch_seed")?, "latch_seed")?);
 
     let public_dir = read_directory(vault_dir, &expected_dir_digest)?;
     if public_dir.pk.to_bytes() != expected_pk {
@@ -1403,7 +1403,7 @@ fn refresh_tx(
             "proactive refresh mutated validator pubkey",
         ));
     }
-    vault.meta.latch_seed = Secret32(os_random_32()?);
+    vault.meta.latch_seed = Secret32::new(os_random_32()?);
     commit(
         vault_dir,
         &vault.quorum,
@@ -1466,7 +1466,7 @@ fn reshare_tx(
     } else {
         os_random_32()?
     };
-    let new_latch_seed = Secret32(os_random_32()?);
+    let new_latch_seed = Secret32::new(os_random_32()?);
 
     let mut old_party_rngs = fresh_party_rngs(old_n)?;
     let mut new_party_rngs = fresh_party_rngs(new_n)?;
@@ -1563,14 +1563,14 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
         if raw.0.len() < 32 {
             return Err(CliError::usage("--seed-file must hold at least 32 bytes"));
         }
-        Secret32(cshake256_framed_32(
+        Secret32::new(cshake256_framed_32(
             b"QSAG.CLI.HEM.QUORUM.SEED_FILE.V1",
             &[&raw.0],
         ))
     } else {
-        Secret32(os_random_32()?)
+        Secret32::new(os_random_32()?)
     };
-    let latch_seed = Secret32(cshake256_framed_32(
+    let latch_seed = Secret32::new(cshake256_framed_32(
         b"QSAG.CLI.HEM.QUORUM.LATCH_SEED.V1",
         &[&ceremony_seed.0],
     ));
@@ -1581,7 +1581,7 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
         vault_dir,
         &quorum,
         latch_seed,
-        passphrase.as_deref(),
+        passphrase.as_deref().map(Vec::as_slice),
         &mut no_crash,
     )?;
 
@@ -1622,7 +1622,7 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         args.get("ackers"),
         args.get_u64("epoch")?,
         &message,
-        passphrase.as_deref(),
+        passphrase.as_deref().map(Vec::as_slice),
         &mut no_crash,
     )?;
     let quorum = &vault.quorum;
@@ -1692,7 +1692,7 @@ pub fn refresh(raw: &[String]) -> Result<(), CliError> {
     let vault = refresh_tx(
         vault_dir,
         args.flag("deterministic"),
-        passphrase.as_deref(),
+        passphrase.as_deref().map(Vec::as_slice),
         &mut no_crash,
     )?;
     let quorum = &vault.quorum;
@@ -1770,8 +1770,8 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
         new_t,
         new_n,
         args.flag("deterministic"),
-        old_passphrase.as_deref(),
-        new_passphrase.as_deref(),
+        old_passphrase.as_deref().map(Vec::as_slice),
+        new_passphrase.as_deref().map(Vec::as_slice),
         &mut no_crash,
     )?;
     let pk = quorum.public_key();
@@ -1921,7 +1921,7 @@ mod tests {
 
     fn new_vault(dir: &str, leaves: usize) -> HemJortsPublicKey {
         let quorum = stage(leaves);
-        create_vault(dir, &quorum, Secret32([0x33; 32]), None, &mut no_crash).unwrap();
+        create_vault(dir, &quorum, Secret32::new([0x33; 32]), None, &mut no_crash).unwrap();
         quorum.public_key()
     }
 
@@ -2419,7 +2419,7 @@ mod tests {
         create_vault(
             &v1,
             &quorum,
-            Secret32(raw_latch),
+            Secret32::new(raw_latch),
             Some(pass_a),
             &mut no_crash,
         )

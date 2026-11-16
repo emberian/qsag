@@ -17,6 +17,26 @@ when `ValidLegacyOwnership` holds (the key is enrolled, the nullifier is the der
 satisfies `ownsKey` for this claim) and the nullifier is unspent. The minted amount is the enrolled
 entitlement of the key; a claim carries no amount.
 
+Scope of the ownership guarantee. Every statement below is relative to the parameter `ownsKey`:
+the machine guarantees that an accepted claim carries a witness satisfying `ownsKey`, and nothing
+about what `ownsKey` means. `LegacyOwnershipScheme` states no law on `ownsKey`. For a scheme whose
+`ownsKey` always holds, every enrolled key is claimable by any caller with any witness, exactly
+once (`idealMigrateMachine_trivial_ownsKey_admits_any_witness`,
+`tooth_idealMigrateOpen_any_witness_claims_enrolled_key`); enrollment, the derived nullifier,
+single use per key and conservation still hold for that scheme.
+
+Parties and corruption scope. The functionality has one interface, used by every caller including
+the adversary: submit `(claim, witness)`. There are no party identities, no registrar interface
+(the snapshot is fixed before the first step) and no corruption transition. A compromised legacy
+key is a caller who can supply a witness satisfying `ownsKey` for that key: such a caller is
+indistinguishable from the owner and can migrate the entitlement to a destination of its choice,
+once; the functionality gives the original owner no recourse and no priority. A caller without
+such a witness cannot move the entitlement of that key, cannot spend its nullifier and cannot
+prevent its owner from claiming (`idealMigrateMachine_unclaimed_owner_accepts`). The destination is
+bound only through the input: the receipt carries the destination of the claim that was submitted
+together with the witness, and `ownsKey` receives the whole claim, so a scheme may make the witness
+destination-specific.
+
 Results:
 1. `idealMigrateMachine_step_eq_some_iff`: exact characterization of acceptance.
 2. `idealMigrateMachine_trace_ownership_sound`: every accepted claim of a valid trace satisfies
@@ -649,6 +669,53 @@ theorem tooth_idealMigrate_second_claim_same_legacyPk_rejected {LegacyPk Witness
   rw [hNullEq]
   exact .head _
 
+/-! ## 6b. Ownership Is Relative to `ownsKey` -/
+
+/-- Caveat: the ownership guarantee is exactly as strong as `scheme.ownsKey`. If `ownsKey` holds
+    for every key, witness and claim, then in every state satisfying the invariant a claim for an
+    enrolled, not yet settled key under its derived nullifier is accepted with ANY witness and ANY
+    destination. -/
+theorem idealMigrateMachine_trivial_ownsKey_admits_any_witness {LegacyPk Witness : Type}
+    [DecidableEq LegacyPk]
+    {scheme : LegacyOwnershipScheme LegacyPk Witness} {snapshot : EnrolledSnapshot LegacyPk}
+    (hTrivial : ∀ (pk : LegacyPk) (wit : Witness) (claim : MigrationClaim LegacyPk),
+      scheme.ownsKey pk wit claim)
+    {st : IdealMigrateState LegacyPk} (hInv : st.Inv scheme snapshot)
+    {pk : LegacyPk} {amount : Nat} (hEnrolled : EnrolledEntitlement snapshot pk amount)
+    (hUnclaimed : pk ∉ st.settledClaims.map (fun r => r.claim.legacyPk))
+    (wit : Witness) (dest : Bytes) :
+    (idealMigrateMachine scheme snapshot).step st (⟨pk, scheme.deriveNullifier pk, dest⟩, wit) =
+      some ({ totalMigrated := st.totalMigrated + amount
+              spentNullifiers := scheme.deriveNullifier pk :: st.spentNullifiers
+              settledClaims := ⟨⟨pk, scheme.deriveNullifier pk, dest⟩, amount⟩ ::
+                st.settledClaims },
+            ⟨⟨pk, scheme.deriveNullifier pk, dest⟩, amount⟩) :=
+  idealMigrateMachine_unclaimed_owner_accepts hInv
+    ⟨hEnrolled, rfl, hTrivial pk wit ⟨pk, scheme.deriveNullifier pk, dest⟩⟩ hUnclaimed
+
+/-- Degenerate scheme over 256-bit keys whose ownership relation always holds. -/
+def idealMigrateOpenScheme : LegacyOwnershipScheme Digest256 Digest256 where
+  ownsKey _ _ _ := 0 = 0
+  checkOwnership _ _ _ := true
+  check_iff _ _ _ := ⟨fun _ => rfl, fun _ => rfl⟩
+  deriveNullifier pk := pk
+  deriveNullifier_injective h := h
+
+/-- `#tooth` Under the degenerate scheme the enrolled toy key is claimed from the initial state by
+    every witness to every destination: no witness is rejected. -/
+theorem tooth_idealMigrateOpen_any_witness_claims_enrolled_key (wit : Digest256) (dest : Bytes) :
+    ¬ ((idealMigrateMachine idealMigrateOpenScheme [(6#256, 100)]).step
+        IdealMigrateState.init (⟨6#256, 6#256, dest⟩, wit) = none) := by
+  have h := idealMigrateMachine_trivial_ownsKey_admits_any_witness
+    (scheme := idealMigrateOpenScheme) (snapshot := [(6#256, 100)]) (fun _ _ _ => rfl)
+    (IdealMigrateState.init_inv idealMigrateOpenScheme [(6#256, 100)])
+    (entitlement_cons_eq (6#256) 100 []) (fun h => nomatch h) wit dest
+  intro hNone
+  have h' : (idealMigrateMachine idealMigrateOpenScheme [(6#256, 100)]).step
+      IdealMigrateState.init (⟨6#256, 6#256, dest⟩, wit) = some _ := h
+  rw [hNone] at h'
+  exact nomatch h'
+
 /-! ## 7. Concrete Instance: the Audit's Pool-Drain Attempt -/
 
 /-- Toy scheme over 256-bit keys: the witness `wit` owns `pk` when `pk = wit + wit`, and the
@@ -711,7 +778,11 @@ theorem tooth_idealMigrate_audit_enrolled_key_fresh_nullifier_rejected
 #tooth_pair Qsag.Spec.idealMigrateMachine_unclaimed_owner_accepts vs
   Qsag.Spec.tooth_idealMigrate_audit_enrolled_key_fresh_nullifier_rejected
 
+#tooth_pair Qsag.Spec.idealMigrateMachine_trivial_ownsKey_admits_any_witness vs
+  Qsag.Spec.tooth_idealMigrateOpen_any_witness_claims_enrolled_key
+
 #verify_constructive
+  Qsag.Spec.idealMigrateMachine_trivial_ownsKey_admits_any_witness
   Qsag.Spec.EnrolledEntitlement.mem
   Qsag.Spec.LegacyOwnershipScheme.accepts_iff
   Qsag.Spec.idealMigrateMachine_step_eq_some_iff

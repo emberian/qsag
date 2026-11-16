@@ -24,7 +24,6 @@
 //! The recipient accepts a received vector only if it equals the other vector
 //! or matches that digest. Two of the three contributions are honest, so an
 //! accepted vector is the honest one unless the hash collides.
-use qsag_core::wipe::SecretBuffer;
 use crate::voprf::{Error, SERVERS, Transport};
 use alloc::{vec, vec::Vec};
 use qsag_accel::{
@@ -33,6 +32,7 @@ use qsag_accel::{
     keccak::{Shake256, cshake256_framed_32},
     poseidon2::{poseidon2_apply_me, poseidon2_apply_mi, poseidon2_const_at},
 };
+use qsag_core::wipe::SecretBuffer;
 /// Layers with at most this many gates send three plain vectors: a digest would
 /// not be shorter than the vector it replaces.
 pub(crate) const DIGEST_THRESHOLD: usize = 4;

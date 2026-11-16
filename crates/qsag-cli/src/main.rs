@@ -115,7 +115,7 @@ fn main() -> ExitCode {
         match arg.into_string() {
             Ok(arg) => raw.0.push(arg),
             Err(arg) => {
-                drop(cli::ZeroizingBuf(arg.into_encoded_bytes()));
+                drop(cli::ZeroizingBuf::new(arg.into_encoded_bytes()));
                 eprintln!("qsag: error: arguments must be valid UTF-8");
                 return ExitCode::from(exit::USAGE);
             }
