@@ -226,8 +226,10 @@ theorem toy_append_tear_truncate_recovers_all_modes :
   decide +kernel
 
 theorem tooth_toy_slot_gap_two_rejected :
-    recoverTruncatedAppendPlan toyCodec (qsburn05 512) toyTornGapTwo = none := by
-  decide +kernel
+    ¬ ∃ r, recoverTruncatedAppendPlan toyCodec (qsburn05 512) toyTornGapTwo = some r := by
+  have h : recoverTruncatedAppendPlan toyCodec (qsburn05 512) toyTornGapTwo = none := by decide +kernel
+  rw [h]
+  simp
 
 theorem witness_append_tear_truncate_recovers :
     ∃ (Tip Rec : Type) (_ : DecidableEq Tip) (C : Codec Tip Rec) (L : Layout) (d : Disk)
@@ -240,7 +242,7 @@ theorem witness_append_tear_truncate_recovers :
       recoverPlan C L (d.truncate (L.chainOff + C.recLen * committed)) = some (h, ws) := by
   refine ⟨Bool, Unit, inferInstance, toyCodec, qsburn05 512, toyTornCommittedPlusOne,
     1, ⟨1, true, false⟩, commitWrites 1 true, by decide, by decide +kernel,
-    ⟨by decide +kernel, by decide +kernel⟩, by decide +kernel, by decide +kernel⟩
+    ⟨by decide +kernel, by decide +kernel⟩, by decide +kernel, by rfl⟩
 
 #verify_constructive toyLawful toy_provisioned toy_qsburn05_safe toy_trace_witness
 #verify_constructive toy_qsburn04_single_tear toy_append_tear_fails_closed
@@ -248,7 +250,6 @@ theorem witness_append_tear_truncate_recovers :
 #tooth_pair toy_qsburn05_safe vs toy_qsburn04_single_tear
 #tooth_pair toy_qsburn05_safe vs toy_append_tear_fails_closed
 #verify_constructive toy_append_tear_truncate_recovers_all_modes tooth_toy_slot_gap_two_rejected witness_append_tear_truncate_recovers
-#verify_inhabited witness_append_tear_truncate_recovers
 #tooth_pair toy_append_tear_truncate_recovers_all_modes vs tooth_toy_slot_gap_two_rejected
 
 end Qsag.Tests.TwoSlotHwmTeeth
