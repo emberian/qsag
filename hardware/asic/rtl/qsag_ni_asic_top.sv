@@ -112,6 +112,12 @@ module qsag_ni_asic_top #(
     .done       (f_done)
   );
 
+  // ------------------------------------------------------------ 4-Bank 512 KiB Dual-Port SRAM signals
+  logic        a_en, a_we, b_en, b_we;
+  logic [15:0] a_addr, b_addr;
+  logic [63:0] a_wdata, b_wdata;
+  wire  [63:0] a_rdata, b_rdata;
+
   // ------------------------------------------------------------ Keccak + Canopy framing
   logic         k_start, k_r12, k_we, k_xor, k_save, k_restore;
   logic         k_pair_en, k_pair_single, k_pad_end, k_cn_go;
@@ -155,10 +161,6 @@ module qsag_ni_asic_top #(
   qsag_poly_to_tower128 u_gfr (.x(gf_poly), .y(gf_tower));
 
   // ------------------------------------------------------------ 4-Bank 512 KiB Dual-Port SRAM
-  logic        a_en, a_we, b_en, b_we;
-  logic [15:0] a_addr, b_addr;
-  logic [63:0] a_wdata, b_wdata;
-  wire  [63:0] a_rdata, b_rdata;
   qsag_sram_512k_4bank u_sram (
     .clk    (clk),
     .rst    (rst),

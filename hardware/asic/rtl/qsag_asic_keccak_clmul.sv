@@ -104,6 +104,7 @@ module qsag_keccak_2rpc (
 
   logic [4:0] r;
   logic       run;
+  (* keep = "true" *) logic [24:0] run_l;
 
   // 69-byte Canopy Merkle internal node block: [8'h00, node_idx(32b), left(256b), right(256b), 8'h07, 0.., 8'h80]
   wire [575:0] cn_raw = {16'h0000, 8'h07, canopy_right, canopy_left, canopy_node_idx, 8'h00};
@@ -151,24 +152,31 @@ module qsag_keccak_2rpc (
   always_ff @(posedge clk) begin
     if (rst) begin
       for (int i = 0; i < 25; i++) begin sl[i] <= 64'd0; sh[i] <= 64'd0; end
-      run <= 1'b0;
-      r   <= '0;
-    end else if (run) begin
-      for (int i = 0; i < 25; i++) sl[i] <= n[64*i +: 64];
-      r <= r + 5'd2;
-      if (r == 5'd22) run <= 1'b0;
-    end else if (canopy_node_go) begin
-      for (int i = 0; i < 25; i++) sl[i] <= n[64*i +: 64];
-      r   <= 5'd14;
-      run <= 1'b1;
+      run   <= 1'b0;
+      run_l <= '0;
+      r     <= '0;
     end else begin
-      for (int i = 0; i < 25; i++) sl[i] <= sl_idle[i];
-      if (save) begin
-        for (int i = 0; i < 25; i++) sh[i] <= sl[i];
+      for (int i = 0; i < 25; i++) begin
+        if (run_l[i]) sl[i] <= n[64*i +: 64];
+        else if (canopy_node_go) sl[i] <= n[64*i +: 64];
+        else sl[i] <= sl_idle[i];
       end
-      if (start) begin
-        run <= 1'b1;
-        r   <= rounds12 ? 5'd12 : 5'd0;
+      if (run) begin
+        r <= r + 5'd2;
+        if (r == 5'd22) begin run <= 1'b0; run_l <= '0; end
+      end else if (canopy_node_go) begin
+        r     <= 5'd14;
+        run   <= 1'b1;
+        run_l <= {25{1'b1}};
+      end else begin
+        if (save) begin
+          for (int i = 0; i < 25; i++) sh[i] <= sl[i];
+        end
+        if (start) begin
+          run   <= 1'b1;
+          run_l <= {25{1'b1}};
+          r     <= rounds12 ? 5'd12 : 5'd0;
+        end
       end
     end
   end
