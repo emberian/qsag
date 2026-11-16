@@ -64,9 +64,33 @@ fn guard_mac_key(mut raw: [u8; 32]) -> RedactedSecret<32> {
     guarded
 }
 
-fn private_file(path: &Path) -> io::Result<OpenOptions> {
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+fn check_private_regular(metadata: &fs::Metadata) -> io::Result<()> {
+    if !metadata.is_file() {
         return Err(invalid());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "burn journal must have private (0600) permissions",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn private_file(path: &Path) -> io::Result<OpenOptions> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(invalid());
+            }
+            check_private_regular(&meta)?;
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     let mut opts = no_follow_options().map_err(|_| invalid())?;
     opts.read(true).write(true);
@@ -77,9 +101,7 @@ fn private_file(path: &Path) -> io::Result<OpenOptions> {
 /// into the genesis and high-water-mark MACs of the journal format.
 fn file_identity(file: &File) -> io::Result<[u8; 16]> {
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(invalid());
-    }
+    check_private_regular(&metadata)?;
     let (dev, ino) = file_dev_ino(&metadata).ok_or_else(invalid)?;
     let mut identity = [0; 16];
     identity[..8].copy_from_slice(&dev.to_be_bytes());
@@ -87,14 +109,25 @@ fn file_identity(file: &File) -> io::Result<[u8; 16]> {
     Ok(identity)
 }
 
-/// True when every slot that authenticates marks exactly `committed` records.
-fn slots_mark_exactly(hwm: &TwoSlotHwm<'_>, raw_a: &[u8], raw_b: &[u8], committed: u64) -> bool {
-    [(0, raw_a), (1, raw_b)]
-        .into_iter()
-        .all(|(slot, raw)| match hwm.classify(slot, raw) {
-            HwmSlotState::Valid { counter, .. } => counter == committed,
-            _ => true,
-        })
+/// True when at least one HWM slot authenticates and every valid slot lies within
+/// `hwm_counter <= committed <= hwm_counter + 1` (permitting torn-tail recovery when
+/// Slot A = `c` and Slot B = `c - 1`, or when `committed = c + 1` reached disk before HWM).
+fn slots_permit_tail_truncation(
+    hwm: &TwoSlotHwm<'_>,
+    raw_a: &[u8],
+    raw_b: &[u8],
+    committed: u64,
+) -> bool {
+    let mut any_valid = false;
+    for (slot, raw) in [(0, raw_a), (1, raw_b)] {
+        if let HwmSlotState::Valid { counter, .. } = hwm.classify(slot, raw) {
+            any_valid = true;
+            if !(counter <= committed && committed <= counter.saturating_add(1)) {
+                return false;
+            }
+        }
+    }
+    any_valid
 }
 
 impl DurableBurnJournal {
@@ -261,6 +294,7 @@ impl DurableBurnJournal {
             journal.file.sync_all()?;
             sync_parent_dir(path)?;
         } else {
+            journal.check_path_identity()?;
             let held_len = journal.file.metadata()?.len();
             if held_len < HEADER_LEN as u64 || held_len > MAX_JOURNAL_BYTES {
                 return Err(invalid());
@@ -305,17 +339,19 @@ impl DurableBurnJournal {
             let slot_a = &bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN];
             let slot_b = &bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN];
             // An interrupted `reserve` leaves at most one record's worth of unauthenticated
-            // bytes after the chain, with every readable slot still on the chain's length.
-            // Nothing else is a torn append: a longer tail, or a tail behind a record the
-            // slots have not reached, is refused before anything is written.
+            // bytes after the authenticated prefix. Verify descriptor/path identity before
+            // healing slots or truncating a torn tail.
             if tail_len > RECORD_LEN {
                 return Err(invalid());
             }
+            journal.check_path_identity()?;
             // Rejects tail truncation and unexplained gaps; heals the crash states (record
             // synced before slot A, slot A synced before slot B, one slot torn mid-write).
             journal
                 .with_hwm(|hwm, file| {
-                    if tail_len != 0 && !slots_mark_exactly(hwm, slot_a, slot_b, committed) {
+                    if tail_len != 0
+                        && !slots_permit_tail_truncation(hwm, slot_a, slot_b, committed)
+                    {
                         return Err(invalid());
                     }
                     hwm.recover(
@@ -331,12 +367,14 @@ impl DurableBurnJournal {
                 })
                 .map_err(|_| invalid())?;
             if tail_len != 0 {
-                // The slots hold `committed` and the chain up to it verified, so the tail
-                // was never acknowledged: drop it.
+                // Truncate the unauthenticated tail after prefix authentication and converge
+                // both HWM slots onto `committed`.
                 let committed_len = (HEADER_LEN + RECORD_LEN * journal.entries.len()) as u64;
                 journal.file.set_len(committed_len)?;
                 journal.file.sync_all()?;
-                sync_parent_dir(path)?;
+                journal
+                    .with_hwm(|hwm, file| hwm.commit(file, committed, &journal.last_tag))
+                    .map_err(|_| invalid())?;
             }
         }
         journal.check_identity()?;
@@ -354,14 +392,20 @@ impl DurableBurnJournal {
             ],
         )
     }
-    fn check_identity(&self) -> io::Result<()> {
+    fn check_path_identity(&self) -> io::Result<fs::Metadata> {
         let metadata = fs::symlink_metadata(&self.path)?;
-        if !metadata.is_file() {
+        check_private_regular(&metadata)?;
+        let held = self.file.metadata()?;
+        check_private_regular(&held)?;
+        if file_dev_ino(&metadata) != file_dev_ino(&held)
+            || file_identity(&self.file)? != self.identity
+        {
             return Err(invalid());
         }
-        if file_dev_ino(&metadata) != file_dev_ino(&self.file.metadata()?) {
-            return Err(invalid());
-        }
+        Ok(metadata)
+    }
+    fn check_identity(&self) -> io::Result<()> {
+        let metadata = self.check_path_identity()?;
         if metadata.len() != (HEADER_LEN + RECORD_LEN * self.entries.len()) as u64 {
             return Err(invalid());
         }
@@ -910,9 +954,9 @@ mod tests {
             let bytes = journal.with_tail(&junk(len, len as u64));
             journal.assert_fails_closed(&bytes);
         }
-        // A synced record the slots have not reached, then more bytes: two appends past
-        // the mark, which one interrupted burn cannot produce.
-        for extra in [1, 17, RECORD_LEN] {
+        // A synced record the slots have not reached, followed by more than one record's
+        // worth of unauthenticated bytes, still fails closed.
+        for extra in [RECORD_LEN + 1, 2 * RECORD_LEN] {
             let mut tail = journal.next.to_vec();
             tail.extend_from_slice(&junk(extra, 3));
             let bytes = journal.with_tail(&tail);
@@ -923,6 +967,49 @@ mod tests {
         tail.extend_from_slice(&journal.next);
         let bytes = journal.with_tail(&tail);
         journal.assert_fails_closed(&bytes);
+    }
+
+    #[test]
+    fn lagging_slots_with_torn_tail_recover_and_converge_hwm() {
+        let journal = TwoBurns::new("burn-tail-lagging-slots");
+        // Case 1: `committed = c + 1` (`3` records synced, both HWM slots still at `c = 2`)
+        // alongside `1..=RECORD_LEN` stray trailing bytes.
+        for extra in [1, 17, RECORD_LEN] {
+            let mut tail = journal.next.to_vec();
+            tail.extend_from_slice(&junk(extra, 3));
+            journal.with_tail(&tail);
+            let mut reopened = journal.open().unwrap();
+            assert_eq!(reopened.checkpoint().generation, 3);
+            assert!(reopened.reserve(&[1; 32], 0, 2).is_err());
+            drop(reopened);
+            assert_eq!(fs::read(&journal.path).unwrap(), journal.advanced);
+        }
+
+        // Case 2: `Slot A = c` (`3`) and `Slot B = c - 1` (`2`) with `committed = c` (`3`)
+        // alongside `1..=RECORD_LEN` torn trailing bytes of a fourth attempt.
+        for extra in [1, 17, RECORD_LEN] {
+            let mut mixed = journal.advanced.clone();
+            mixed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN].copy_from_slice(
+                &journal.committed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN],
+            );
+            mixed.extend_from_slice(&junk(extra, 19));
+            fs::write(&journal.path, &mixed).unwrap();
+            let mut reopened = journal.open().unwrap();
+            assert_eq!(reopened.checkpoint().generation, 3);
+            assert!(reopened.reserve(&[1; 32], 0, 2).is_err());
+            drop(reopened);
+            assert_eq!(fs::read(&journal.path).unwrap(), journal.advanced);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&journal.path, &journal.committed).unwrap();
+            fs::set_permissions(&journal.path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(DurableBurnJournal::open_existing(&journal.path, [1; 32], [2; 32]).is_err());
+            fs::set_permissions(&journal.path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(DurableBurnJournal::open_existing(&journal.path, [1; 32], [2; 32]).is_ok());
+        }
     }
 
     #[test]

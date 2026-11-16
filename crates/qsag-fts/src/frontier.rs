@@ -6,7 +6,7 @@
 //! 2. Exact `U384` (and `u128` fast-view) factorized DP tables `M(h, w, L, S) = N(h, L) * D(L, S)`;
 //!    `unrank` / `rank` operate exclusively on **public** randomized message digests
 //!    `H_msg(R, pk, M, ctr)` (never secret ranks), while secret `SK.seed`/`SK.prf` expansion and
-//!    `U384` primitives exefrontiere in straight-line constant time.
+//!    `U384` primitives execute in straight-line constant time.
 //! 3. Mandatory `SK.prf`-derived per-signature randomizer `R` + monotonic `UseBudgetLatch`
 //!    preventing deterministic 2-message reuse or unbounded `q >= 3` over-signing.
 //! 4. Full 256-bit message digest pre-binding with 32-byte nodes: `Compact1122`
