@@ -4016,7 +4016,10 @@ pub(crate) struct DeferredPcsClaim<W: RecBase> {
 
 impl<W: RecBase> DeferredPcsClaim<W> {
     pub(crate) fn digest<B: RecBackend<W = W>>(&self, b: &mut B) -> [W; 4] {
-        let mut words = vec![W::constant(rec_f(self.regime as u64)), W::constant(rec_f(self.num_vars as u64))];
+        let mut words = vec![
+            W::constant(rec_f(self.regime as u64)),
+            W::constant(rec_f(self.num_vars as u64)),
+        ];
         words.extend_from_slice(&self.transcript);
         words.extend(self.roots.iter().flatten().cloned());
         for point in &self.points {
@@ -4044,8 +4047,18 @@ impl DeferredPcsClaim<F> {
             return false;
         }
         let mut b = RecNative::default();
-        let mut tr = RecTranscript { state: self.transcript };
-        verify_correlated3_gadget(&mut b, &params, &mut tr, &self.roots, &self.points, &self.claims, opening);
+        let mut tr = RecTranscript {
+            state: self.transcript,
+        };
+        verify_correlated3_gadget(
+            &mut b,
+            &params,
+            &mut tr,
+            &self.roots,
+            &self.points,
+            &self.claims,
+            opening,
+        );
         !b.failed
     }
 }
@@ -4059,9 +4072,20 @@ pub(crate) fn verify_public_gadget<B: RecBackend>(
     proof: &RecursivePublicHemProof,
 ) {
     let obligation = verify_public_algebraic_gadget(b, vk, statement_tag, public, proof);
-    let params = FixedPathWhirParams::new(vk.regime, vk.pack_vars()).expect("validated recursion params");
-    let mut tr = RecTranscript { state: obligation.transcript };
-    verify_correlated3_gadget(b, &params, &mut tr, &obligation.roots, &obligation.points, &obligation.claims, &proof.opening);
+    let params =
+        FixedPathWhirParams::new(vk.regime, vk.pack_vars()).expect("validated recursion params");
+    let mut tr = RecTranscript {
+        state: obligation.transcript,
+    };
+    verify_correlated3_gadget(
+        b,
+        &params,
+        &mut tr,
+        &obligation.roots,
+        &obligation.points,
+        &obligation.claims,
+        &proof.opening,
+    );
 }
 
 /// Verify the algebraic IOP and return its remaining PCS obligation. This is NOT an

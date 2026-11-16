@@ -4288,15 +4288,27 @@ pub trait SubtreeRootProof: subtree_root_sealed::Sealed {
 }
 impl subtree_root_sealed::Sealed for SuccinctSubtreeAggregate {}
 impl SubtreeRootProof for SuccinctSubtreeAggregate {
-    fn active_signers(&self) -> u64 { self.total_active_signers }
-    fn verify_root(&self, vk: &crate::zk_hem::protocol::ShapeVerifierKey, statement: &RosterRootStatement<'_>) -> bool {
+    fn active_signers(&self) -> u64 {
+        self.total_active_signers
+    }
+    fn verify_root(
+        &self,
+        vk: &crate::zk_hem::protocol::ShapeVerifierKey,
+        statement: &RosterRootStatement<'_>,
+    ) -> bool {
         verify_legacy_subtree_aggregate_against_roster_root(vk, statement, self)
     }
 }
 impl subtree_root_sealed::Sealed for split::SplitSubtreeAggregate {}
 impl SubtreeRootProof for split::SplitSubtreeAggregate {
-    fn active_signers(&self) -> u64 { self.public().total_active_signers.to_canonical_u64() }
-    fn verify_root(&self, vk: &crate::zk_hem::protocol::ShapeVerifierKey, statement: &RosterRootStatement<'_>) -> bool {
+    fn active_signers(&self) -> u64 {
+        self.public().total_active_signers.to_canonical_u64()
+    }
+    fn verify_root(
+        &self,
+        vk: &crate::zk_hem::protocol::ShapeVerifierKey,
+        statement: &RosterRootStatement<'_>,
+    ) -> bool {
         self.verify_against_roster_root(vk, statement)
     }
 }
@@ -6370,7 +6382,7 @@ mod tests {
     }
 
     #[test]
-    fn two_level_four_shard_subtree_recursion_and_tamper_suite() {
+    fn three_level_four_shard_subtree_recursion_and_tamper_suite() {
         subtree_two_level(false, 2);
     }
     #[test]
@@ -6382,8 +6394,8 @@ mod tests {
         subtree_two_level(false, 1);
     }
     fn subtree_two_level(sparse: bool, leaf_fan: usize) {
-        use std::time::Instant;
         use super::split::{SplitSubtreeAggregate, SplitSubtreeProof, SplitSubtreeRelation};
+        use std::time::Instant;
         let _permit = crate::prover_admission::acquire();
 
         let child_regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
@@ -6460,13 +6472,12 @@ mod tests {
             })
             .collect();
 
-        // Setup & prove Level-1 (`2` shards -> `1` SubtreePublic), then release `l1_rel` before
-        // constructing Level-2.
+        // Prove one shard per leaf; binary split nodes keep every internal level contractive.
         let t_setup1 = Instant::now();
         let l1_rel = if sparse {
-            SubtreeLeafMergeRelation::with_sparse_roster(params.clone(), leaf_fan, 37)
+            SubtreeLeafMergeRelation::with_sparse_roster(params.clone(), 1, 37)
         } else {
-            SubtreeLeafMergeRelation::new(params.clone(), leaf_fan)
+            SubtreeLeafMergeRelation::new(params.clone(), 1)
         }
         .unwrap();
         let setup1_ms = t_setup1.elapsed().as_secs_f64() * 1000.0;
@@ -6474,68 +6485,95 @@ mod tests {
         let l1_rows = l1_rel.stats().padded_rows;
         let l1_vk = l1_rel.verifier_key().clone();
 
-        // Level-1 merges (`[0, 1]` and `[2, 3]`).
+        // Leaf proofs bind each real shard and its weighted roster opening.
         let t_l1 = Instant::now();
         let prove_pair = |offset: usize, seed: &[u8; 32]| {
             if let Some(registry) = &registry {
-                let openings: Vec<_> = policies[offset..offset + leaf_fan]
+                let openings: Vec<_> = policies[offset..offset + 1]
                     .iter()
                     .map(|p| registry.opening(p.shard_id).unwrap())
                     .collect();
                 prove_subtree_roster_leaf_merge_for_recursion(
                     &l1_rel,
-                    &policies[offset..offset + leaf_fan],
+                    &policies[offset..offset + 1],
                     &openings,
                     epoch_floor,
                     message,
-                    &witnesses[offset..offset + leaf_fan],
+                    &witnesses[offset..offset + 1],
                     seed,
                 )
             } else {
                 prove_subtree_leaf_merge_for_recursion(
                     &l1_rel,
-                    &policies[offset..offset + leaf_fan],
+                    &policies[offset..offset + 1],
                     epoch_floor,
                     message,
-                    &witnesses[offset..offset + leaf_fan],
+                    &witnesses[offset..offset + 1],
                     seed,
                 )
             }
             .unwrap()
         };
-        let (l1_left_pub, l1_left_proof) = prove_pair(0, &[0x11; 32]);
-        std::println!("SUBTREE_LEFT_PROVED");
-        let (l1_right_pub, l1_right_proof) = prove_pair(leaf_fan, &[0x22; 32]);
+        let mut children = Vec::with_capacity(shard_count);
+        for s in 0..shard_count {
+            let (public, proof) = prove_pair(s, &[(s + 17) as u8; 32]);
+            children.push(SplitSubtreeProof::leaf(public, proof));
+            std::println!("SUBTREE_LEAF_PROVED index={s}");
+        }
         let l1_ms = t_l1.elapsed().as_secs_f64() * 1000.0;
         drop(l1_rel);
+        let child_vk = if leaf_fan == 2 {
+            let middle = SplitSubtreeRelation::new(l1_vk, 0, sparse, child_regime).unwrap();
+            let start = Instant::now();
+            children = children
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| {
+                    middle
+                        .prove_for_recursion(&[pair[0].clone(), pair[1].clone()])
+                        .unwrap()
+                })
+                .collect();
+            std::println!(
+                "SUBTREE_MIDDLE rows={} prove_ms={:.1}",
+                middle.stats().padded_rows,
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            middle.verifier_key().clone()
+        } else {
+            l1_vk
+        };
+        let children: [SplitSubtreeProof; 2] = children.try_into().ok().unwrap();
         assert_eq!(
-            l1_left_pub.total_active_signers.to_canonical_u64(),
+            children[0].public().total_active_signers.to_canonical_u64(),
             if leaf_fan == 1 { 2 } else { 3 }
         );
         assert_eq!(
-            l1_right_pub.total_active_signers.to_canonical_u64(),
+            children[1].public().total_active_signers.to_canonical_u64(),
             if leaf_fan == 1 { 1 } else { 3 }
         );
 
         let t_setup2 = Instant::now();
         let l2_rel = SplitSubtreeRelation::new(
-            l1_vk, leaf_fan.trailing_zeros() as usize, sparse, root_regime,
-        ).unwrap();
+            child_vk,
+            leaf_fan.trailing_zeros() as usize,
+            sparse,
+            root_regime,
+        )
+        .unwrap();
         let setup_ms = setup1_ms + t_setup2.elapsed().as_secs_f64() * 1000.0;
         let root_vk = l2_rel.verifier_key();
         assert!(root_vk.to_bytes().len() < 256);
 
-        // Level-2 root proof plus the two bound deferred PCS openings.
+        // Root proof plus every bound deferred PCS opening in the tree.
         let t_l2 = Instant::now();
-        let root_agg = l2_rel.prove_root(
-            &[
-                SplitSubtreeProof::leaf(l1_left_pub, l1_left_proof),
-                SplitSubtreeProof::leaf(l1_right_pub, l1_right_proof),
-            ],
-            &[0x33; 32],
-        ).unwrap();
+        let root_agg = l2_rel.prove_root(&children, &[0x33; 32]).unwrap();
         let l2_ms = t_l2.elapsed().as_secs_f64() * 1000.0;
-        assert_eq!(root_agg.public().total_active_signers.to_canonical_u64(), total_signers);
+        assert_eq!(
+            root_agg.public().total_active_signers.to_canonical_u64(),
+            total_signers
+        );
 
         let root_bytes = root_agg.to_bytes();
         let decoded = SplitSubtreeAggregate::from_bytes_canonical(root_vk, &root_bytes).unwrap();
@@ -6571,7 +6609,7 @@ mod tests {
         ));
         let ver_ms = t_ver.elapsed().as_secs_f64() * 1000.0;
         std::println!(
-            "SUBTREE_2LEVEL sparse={sparse} shards={shard_count} signers={total_signers} l1_rows={} l2_rows={} vk_bytes={} root_bytes={} setup_ms={setup_ms:.1} l1_prove_ms={l1_ms:.1} l2_prove_ms={l2_ms:.1} root_verify_ms={ver_ms:.2}",
+            "SUBTREE_ROSTER_TREE sparse={sparse} shards={shard_count} signers={total_signers} l1_rows={} l2_rows={} vk_bytes={} root_bytes={} setup_ms={setup_ms:.1} l1_prove_ms={l1_ms:.1} l2_prove_ms={l2_ms:.1} root_verify_ms={ver_ms:.2}",
             l1_rows,
             l2_rel.stats().padded_rows,
             root_vk.to_bytes().len(),
