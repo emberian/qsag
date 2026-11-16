@@ -16,25 +16,25 @@ mkdir -p build
 
 kat() { python3 tb/gen_kat.py "$FIXTURE" build/kat_vectors.h; }
 
-sim() {  # sim <UNITS|TOP> <top module> <extra sources>
-    local mode="$1" top="$2" extra="${3:-}"
+sim() {  # sim <tag> <UNITS|TOP> <top module> <extra sources>
+    local tag="$1" mode="$2" top="$3" extra="${4:-}"
     kat
     verilator --cc --exe --build -j "$JOBS" -Wall -sv -O3 --x-initial unique \
-        --Mdir "build/obj_$mode" --top-module "$top" \
+        --Mdir "build/obj_$tag" --top-module "$top" \
         -CFLAGS "-O2 -std=c++17 ${SIM_CFLAGS:-} -DQSAG_$mode -I$HERE/build -I$HERE/tb" \
-        $SRC $extra ${SIM_PARAMS:-} "$HERE/tb/sim_qsag_ni_fpga.cpp" -o "sim_$mode" > "build/verilate_$mode.log" 2>&1 \
-        || { cat "build/verilate_$mode.log"; exit 1; }
-    "build/obj_$mode/sim_$mode" +verilator+rand+reset+2 +verilator+seed+20261116 "build/trace_report_$mode.txt" \
-        | tee "build/sim_$mode.log"
+        $SRC $extra ${SIM_PARAMS:-} "$HERE/tb/sim_qsag_ni_fpga.cpp" -o "sim_$tag" > "build/verilate_$tag.log" 2>&1 \
+        || { cat "build/verilate_$tag.log"; exit 1; }
+    "build/obj_$tag/sim_$tag" +verilator+rand+reset+2 +verilator+seed+20261116 "build/trace_report_$tag.txt" \
+        | tee "build/sim_$tag.log"
 }
 
 case "$what" in
-    lint)  ./lint.sh ;;
-    units) sim UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv" ;;
-    top)   sim TOP qsag_ni_fpga_top ;;
-    compact) SIM_CFLAGS=-DQSAG_COMPACT SIM_PARAMS="-GPROFILE_COMPACT=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16" sim TOP qsag_ni_fpga_top ;;
-    pipe) SIM_CFLAGS=-DQSAG_PIPE SIM_PARAMS="-GP2_UNROLLED=1 -GKECCAK_PIPE=1 -GCHAIN_SLOTW=8" sim TOP qsag_ni_fpga_top ;;
-    lec-*) ./lec/lec.sh "${what#lec-}" ;;
-    all)   ./lint.sh; sim UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv"; sim TOP qsag_ni_fpga_top; ./lec/lec.sh ;;
-    *) echo "usage: $0 [lint|units|top|lec-gl|lec-glmut|lec-gf|lec-try|lec-anf|all]"; exit 2 ;;
+    lint)    ./lint.sh ;;
+    units)   sim UNITS UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv" ;;
+    top)     sim TOP TOP qsag_ni_fpga_top ;;
+    compact) SIM_CFLAGS=-DQSAG_COMPACT SIM_PARAMS="-GPROFILE_COMPACT=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16" sim COMPACT TOP qsag_ni_fpga_top ;;
+    pipe)    SIM_CFLAGS=-DQSAG_PIPE SIM_PARAMS="-GP2_UNROLLED=1 -GKECCAK_PIPE=1 -GCHAIN_SLOTW=8" sim PIPE TOP qsag_ni_fpga_top ;;
+    lec-*)   ./lec/lec.sh "${what#lec-}" ;;
+    all)     ./lint.sh; sim UNITS UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv"; sim TOP TOP qsag_ni_fpga_top; ./lec/lec.sh ;;
+    *) echo "usage: $0 [lint|units|top|compact|pipe|lec-gl|lec-glmut|lec-gf|lec-tower|lec-try|lec-anf|all]"; exit 2 ;;
 esac

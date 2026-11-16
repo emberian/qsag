@@ -3,11 +3,17 @@
 //   -DQSAG_TOP   : drives rtl/qsag_ni_fpga_top.sv through its AXI4-Lite / AXI4-Stream ports
 // Expected values come from tb/qsag_model.h, which is first checked against the Lean oracle
 // vectors of validation/tests/fixtures/lean_external_oracle_vectors.json (build/kat_vectors.h).
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <fstream>
 #include <map>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <verilated.h>
 #include "qsag_model.h"
 #include "kat_vectors.h"
@@ -24,13 +30,16 @@ static const int GL_MUL_LAT = 5, RED_LAT = 2, P2_SBOX_LAT = 13, EXT4_MAC_LAT = 7
 static const int P2_RING_LEN = 16, P2_PASSES = 31, P2_PIPE_LAT = 453;
 #if defined(QSAG_COMPACT)
 static constexpr bool COMPACT = true;
-static const int TOP_P2_LAT = 1878, TOP_EXT_LAT = 24, TOP_KEC_RPC = 1;
+static const int TOP_P2_LAT = 1878, TOP_EXT_LAT = 24, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
+static const char* PROFILE_NAME = "ECP5_COMPACT";
 #elif defined(QSAG_PIPE)
 static constexpr bool COMPACT = false;
-static const int TOP_P2_LAT = P2_PIPE_LAT - 1, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2;
+static const int TOP_P2_LAT = P2_PIPE_LAT - 1, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2, CHAIN_SLOTS = 256;
+static const char* PROFILE_NAME = "VU9P_TURBO";
 #else
 static constexpr bool COMPACT = false;
-static const int TOP_P2_LAT = P2_PASSES*P2_RING_LEN, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2;
+static const int TOP_P2_LAT = P2_PASSES*P2_RING_LEN, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2, CHAIN_SLOTS = 32;
+static const char* PROFILE_NAME = "XCUP_RING";
 #endif
 
 static std::unique_ptr<Dut> dut;
@@ -402,9 +411,7 @@ static void set_x4(int base, const E4& e) { for (int i = 0; i < 4; i++) set_x(ba
 static E4 get_y4() { return E4{get_y(0), get_y(1), get_y(2), get_y(3)}; }
 
 struct OpRes { bool ok; uint32_t cycles; };
-// Start an operation, poll until done, return its ok flag and the core's own cycle count.
-static OpRes run_op(uint8_t op, uint8_t a0 = 0, uint16_t a1 = 0) {
-    axil_write(R_CMD, (uint32_t)op | ((uint32_t)a0 << 8) | ((uint32_t)a1 << 16));
+static OpRes wait_op(uint8_t op = 0) {
     uint32_t st;
     for (long guard = 0;; guard++) {
         st = axil_read(R_STATUS);
@@ -412,6 +419,11 @@ static OpRes run_op(uint8_t op, uint8_t a0 = 0, uint16_t a1 = 0) {
         if (guard > 50000000) { printf("timeout in op %02x\n", op); exit(2); }
     }
     return OpRes{(st & 4) != 0, axil_read(R_OPCYC)};
+}
+// Start an operation, poll until done, return its ok flag and the core's own cycle count.
+static OpRes run_op(uint8_t op, uint8_t a0 = 0, uint16_t a1 = 0) {
+    axil_write(R_CMD, (uint32_t)op | ((uint32_t)a0 << 8) | ((uint32_t)a1 << 16));
+    return wait_op(op);
 }
 static void stream_beat(const uint64_t* lanes, int n) {
     for (int i = 0; i < 8; i++) set64(dut->s_axis_tdata, i, i < n ? lanes[i] : 0);
@@ -876,6 +888,525 @@ static void trace_edge_fold(FILE* rep) {
     section("16-variable hyperweb edge fold vs fold_first_var model", c0, f0);
 }
 
+// =====================================================================================
+// Real Rust `QSAGSTA1` (TurboSHAKE256 Canopy & Poseidon2 Canopy) + `[CWYZ26]` `DuetFold`
+// Verifier Hardware Replay & Single-Bit Tamper Rejection Suite
+// =====================================================================================
+
+struct KsBlk {
+    uint8_t mid, nr12, init, chk;
+    uint64_t lanes[17];
+    E4 exp;
+};
+struct TcOp {
+    bool turbo;
+    uint8_t log_leaves;
+    E4 root;
+    std::vector<std::pair<uint32_t, D4>> leaves;
+    std::vector<D4> sibs;
+};
+struct P2SingleOp {
+    bool jive;
+    St12 in;
+    St12 out;
+};
+struct PlItem {
+    D4 cap, out;
+    std::vector<std::array<uint64_t, 8>> blocks;
+};
+struct PcnNode {
+    uint32_t idx;
+    D4 l, r, p;
+};
+struct PcOp {
+    uint64_t key[3];
+    std::vector<std::vector<PcnNode>> levels;
+};
+struct ScOp {
+    uint8_t deg;
+    E4 prev, chal, next;
+    std::vector<E4> coeffs_hi_to_lo; // c[deg] .. c[0]
+};
+struct ExtMacItem {
+    E4 a, b, c, out;
+};
+struct FdOp {
+    std::vector<E4> table, point;
+    E4 out;
+};
+
+enum TraceKind { TK_KS, TK_KM, TK_TC, TK_P2, TK_PL, TK_PC, TK_SC, TK_EMAC, TK_FD };
+struct TraceCmd {
+    TraceKind kind;
+    std::vector<KsBlk> ks;
+    std::array<uint64_t, 25> km{};
+    TcOp tc;
+    P2SingleOp p2;
+    std::vector<PlItem> pl;
+    PcOp pc;
+    ScOp sc;
+    std::vector<ExtMacItem> emac;
+    FdOp fd;
+};
+
+static uint64_t parse_hex64(std::istream& is) {
+    std::string s;
+    if (!(is >> s)) { printf("unexpected EOF in trace\n"); exit(2); }
+    return std::strtoull(s.c_str(), nullptr, 16);
+}
+static E4 parse_e4(std::istream& is) {
+    E4 e;
+    for (int i = 0; i < 4; i++) e[i] = parse_hex64(is);
+    return e;
+}
+
+static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_cnt, long& p2_cnt,
+                                             long& sc_cnt, long& emac_cnt, long& canopy_cnt) {
+    std::ifstream in(path);
+    if (!in) { printf("missing real trace fixture: %s\n", path.c_str()); exit(2); }
+    std::vector<TraceCmd> cmds;
+    ks_cnt = p2_cnt = sc_cnt = emac_cnt = canopy_cnt = 0;
+    std::string line;
+    auto next_line = [&](std::istringstream& ss) -> bool {
+        while (std::getline(in, line)) {
+            if (!line.empty()) { ss.clear(); ss.str(line); return true; }
+        }
+        return false;
+    };
+    std::istringstream ss;
+    while (next_line(ss)) {
+        std::string tag;
+        ss >> tag;
+        if (tag == "KS") {
+            KsBlk b{};
+            int m, nr, ini, ck;
+            ss >> m >> nr >> ini >> ck;
+            b.mid = (uint8_t)m; b.nr12 = (uint8_t)nr; b.init = (uint8_t)ini; b.chk = (uint8_t)ck;
+            for (int i = 0; i < 17; i++) b.lanes[i] = parse_hex64(ss);
+            b.exp = parse_e4(ss);
+            if (cmds.empty() || cmds.back().kind != TK_KS || cmds.back().ks.size() == 65535) {
+                TraceCmd c{}; c.kind = TK_KS; cmds.push_back(std::move(c));
+            }
+            cmds.back().ks.push_back(b);
+            ks_cnt++;
+        } else if (tag == "KM") {
+            TraceCmd c{}; c.kind = TK_KM;
+            for (int i = 0; i < 25; i++) c.km[i] = parse_hex64(ss);
+            cmds.push_back(std::move(c));
+        } else if (tag == "TC") {
+            TraceCmd c{}; c.kind = TK_TC;
+            int tb, lg, nl, ns;
+            ss >> tb >> lg >> nl >> ns;
+            c.tc.turbo = (tb != 0); c.tc.log_leaves = (uint8_t)lg;
+            c.tc.root = parse_e4(ss);
+            c.tc.leaves.resize(nl);
+            c.tc.sibs.resize(ns);
+            for (int i = 0; i < nl; i++) {
+                if (!next_line(ss)) exit(2);
+                std::string t2; uint32_t u; ss >> t2 >> u;
+                c.tc.leaves[i] = {u, parse_e4(ss)};
+            }
+            for (int i = 0; i < ns; i++) {
+                if (!next_line(ss)) exit(2);
+                std::string t2; ss >> t2;
+                c.tc.sibs[i] = parse_e4(ss);
+            }
+            cmds.push_back(std::move(c));
+            canopy_cnt++;
+        } else if (tag == "P" || tag == "J") {
+            TraceCmd c{}; c.kind = TK_P2;
+            c.p2.jive = (tag == "J");
+            for (int i = 0; i < 12; i++) c.p2.in[i] = parse_hex64(ss);
+            int nout = c.p2.jive ? 4 : 12;
+            for (int i = 0; i < nout; i++) c.p2.out[i] = parse_hex64(ss);
+            cmds.push_back(std::move(c));
+            p2_cnt++;
+        } else if (tag == "PL") {
+            PlItem it{};
+            int nb; ss >> nb;
+            it.cap = parse_e4(ss);
+            it.out = parse_e4(ss);
+            it.blocks.resize(nb);
+            for (int b = 0; b < nb; b++)
+                for (int j = 0; j < 8; j++) it.blocks[b][j] = parse_hex64(ss);
+            if (cmds.empty() || cmds.back().kind != TK_PL) {
+                TraceCmd c{}; c.kind = TK_PL; cmds.push_back(std::move(c));
+            }
+            cmds.back().pl.push_back(std::move(it));
+            p2_cnt += nb;
+        } else if (tag == "PC") {
+            TraceCmd c{}; c.kind = TK_PC;
+            int nlev; ss >> nlev;
+            for (int i = 0; i < 3; i++) c.pc.key[i] = parse_hex64(ss);
+            c.pc.levels.resize(nlev);
+            for (int lv = 0; lv < nlev; lv++) {
+                if (!next_line(ss)) exit(2);
+                std::string t2; int nn; ss >> t2 >> nn;
+                c.pc.levels[lv].resize(nn);
+                for (int k = 0; k < nn; k++) {
+                    if (!next_line(ss)) exit(2);
+                    std::string t3; uint32_t idx; ss >> t3 >> idx;
+                    PcnNode nd{};
+                    nd.idx = idx;
+                    nd.l = parse_e4(ss);
+                    nd.r = parse_e4(ss);
+                    nd.p = parse_e4(ss);
+                    c.pc.levels[lv][k] = nd;
+                    p2_cnt++;
+                }
+            }
+            cmds.push_back(std::move(c));
+            canopy_cnt++;
+        } else if (tag == "SC") {
+            TraceCmd c{}; c.kind = TK_SC;
+            int deg; ss >> deg;
+            c.sc.deg = (uint8_t)deg;
+            c.sc.prev = parse_e4(ss);
+            c.sc.chal = parse_e4(ss);
+            c.sc.coeffs_hi_to_lo.resize(deg + 1);
+            for (int i = 0; i <= deg; i++) c.sc.coeffs_hi_to_lo[i] = parse_e4(ss);
+            c.sc.next = parse_e4(ss);
+            cmds.push_back(std::move(c));
+            sc_cnt++;
+        } else if (tag == "E") {
+            ExtMacItem e{};
+            e.a = parse_e4(ss); e.b = parse_e4(ss); e.c = parse_e4(ss); e.out = parse_e4(ss);
+            if (cmds.empty() || cmds.back().kind != TK_EMAC || cmds.back().emac.size() == 65535) {
+                TraceCmd c{}; c.kind = TK_EMAC; cmds.push_back(std::move(c));
+            }
+            cmds.back().emac.push_back(e);
+            emac_cnt++;
+        } else if (tag == "FD") {
+            TraceCmd c{}; c.kind = TK_FD;
+            int k; ss >> k;
+            int n = 1 << k;
+            c.fd.table.resize(n);
+            c.fd.point.resize(k);
+            for (int i = 0; i < n; i++) {
+                if (!next_line(ss)) exit(2);
+                std::string t2; ss >> t2;
+                c.fd.table[i] = parse_e4(ss);
+            }
+            for (int i = 0; i < k; i++) {
+                if (!next_line(ss)) exit(2);
+                std::string t2; ss >> t2;
+                c.fd.point[i] = parse_e4(ss);
+            }
+            if (!next_line(ss)) exit(2);
+            std::string t3; ss >> t3;
+            c.fd.out = parse_e4(ss);
+            cmds.push_back(std::move(c));
+        }
+    }
+    return cmds;
+}
+
+static OpRes exec_ks_batch(const std::vector<KsBlk>& ks) {
+    axil_write(R_CMD, 0x22u | ((uint32_t)ks.size() << 16));
+    for (const auto& b : ks) {
+        uint64_t flags = (b.init ? 1ULL : 0ULL)
+                       | ((uint64_t)(b.mid & 3) << 1)
+                       | (b.nr12 ? 8ULL : 0ULL)
+                       | (b.chk ? 16ULL : 0ULL)
+                       | ((uint64_t)((b.mid >> 2) & 1) << 5);
+        stream_beat(b.lanes, 8);
+        stream_beat(b.lanes + 8, 8);
+        uint64_t b2[8] = {b.lanes[16], flags, b.exp[0], b.exp[1], b.exp[2], b.exp[3], 0, 0};
+        stream_beat(b2, 6);
+    }
+    return wait_op(0x22);
+}
+
+static OpRes exec_tc_op(const TcOp& tc) {
+    axil_write(R_STREAM, 0x10000000u);
+    for (const auto& lv : tc.leaves) {
+        uint64_t b[8] = {lv.second[0], lv.second[1], lv.second[2], lv.second[3], (uint64_t)lv.first, 0, 0, 0};
+        stream_beat(b, 5);
+    }
+    if (!tc.sibs.empty()) {
+        axil_write(R_STREAM, 0x20000000u);
+        for (const auto& s : tc.sibs) stream_beat(s.data(), 4);
+    }
+    axil_write(R_ARG32, (uint32_t)tc.sibs.size());
+    set_x4(0, tc.root);
+    return run_op(0x24, (uint8_t)((tc.turbo ? 1 : 0) | (tc.log_leaves << 1)), (uint16_t)tc.leaves.size());
+}
+
+static OpRes exec_sc_op(const ScOp& sc) {
+    set_x4(0, sc.prev);
+    run_op(0x11);
+    axil_write(R_CMD, 0x12u | ((uint32_t)sc.deg << 8));
+    stream_beat(sc.chal.data(), 4);
+    for (const auto& c : sc.coeffs_hi_to_lo) stream_beat(c.data(), 4);
+    return wait_op(0x12);
+}
+
+static OpRes exec_emac_batch(const std::vector<ExtMacItem>& batch) {
+    axil_write(R_CMD, 0x16u | ((uint32_t)batch.size() << 16));
+    for (const auto& e : batch) {
+        uint64_t b0[8] = {e.a[0], e.a[1], e.a[2], e.a[3], e.b[0], e.b[1], e.b[2], e.b[3]};
+        uint64_t b1[8] = {e.c[0], e.c[1], e.c[2], e.c[3], e.out[0], e.out[1], e.out[2], e.out[3]};
+        stream_beat(b0, 8);
+        stream_beat(b1, 8);
+    }
+    return wait_op(0x16);
+}
+
+static void check_wire_proof_file(const char* bin_path, size_t min_bytes) {
+    std::ifstream f(bin_path, std::ios::binary | std::ios::ate);
+    check((bool)f, "real QSAGSTA1 proof binary exists");
+    if (!f) return;
+    size_t sz = (size_t)f.tellg();
+    f.seekg(0);
+    char magic[8] = {};
+    f.read(magic, 8);
+    check(sz >= min_bytes && std::memcmp(magic, "QSAGSTA1", 8) == 0, "QSAGSTA1 wire magic & canonical size");
+}
+
+static void replay_single_real_proof(const char* label, const char* trace_path, const char* bin_path, FILE* rep) {
+    long c0 = checks, f0 = fails;
+    if (bin_path) check_wire_proof_file(bin_path, 160000);
+
+    long ks_cnt = 0, p2_cnt = 0, sc_cnt = 0, emac_cnt = 0, canopy_cnt = 0;
+    auto cmds = load_trace_file(trace_path, ks_cnt, p2_cnt, sc_cnt, emac_cnt, canopy_cnt);
+
+    uint64_t x_shadow[32];
+    bool x_valid[32] = {};
+    auto set_x_fast = [&](int idx, uint64_t v) {
+        if (!x_valid[idx] || x_shadow[idx] != v) {
+            set_x(idx, v);
+            x_shadow[idx] = v;
+            x_valid[idx] = true;
+        }
+    };
+
+    run_op(0x3F);
+    uint64_t t_begin = cyc, w0 = bus_writes, r0 = bus_reads, b0 = stream_beats;
+    uint64_t cy_kec = 0, cy_canopy = 0, cy_p2 = 0, cy_sc = 0, cy_emac = 0, cy_fold = 0;
+
+    for (const auto& cmd : cmds) {
+        switch (cmd.kind) {
+            case TK_KS: {
+                OpRes r = exec_ks_batch(cmd.ks);
+                cy_kec += r.cycles;
+                check(r.ok, "real proof KEC_STREAM_SPONGE batch ok");
+                if (cmd.ks.back().chk) {
+                    E4 got = get_y4();
+                    for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.ks.back().exp[i], "real proof KEC digest");
+                }
+                break;
+            }
+            case TK_KM: {
+                for (int i = 0; i < 25; i++) set_x_fast(i, cmd.km[i]);
+                cy_kec += run_op(0x20).cycles;
+                break;
+            }
+            case TK_TC: {
+                x_valid[0] = x_valid[1] = x_valid[2] = x_valid[3] = false;
+                OpRes r = exec_tc_op(cmd.tc);
+                cy_canopy += r.cycles;
+                check(r.ok, "real proof TS_CANOPY_VERIFY ok");
+                E4 got = get_y4();
+                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.tc.root[i], "real proof TS_CANOPY root");
+                break;
+            }
+            case TK_P2: {
+                for (int i = 0; i < 12; i++) set_x_fast(i, cmd.p2.in[i]);
+                OpRes r = run_op(cmd.p2.jive ? 0x02 : 0x01);
+                cy_p2 += r.cycles;
+                check(r.ok, "real proof P2 op ok");
+                int nout = cmd.p2.jive ? 4 : 12;
+                for (int i = 0; i < nout; i++) CHECK_EQ64(get_y(i), cmd.p2.out[i], "real proof P2 state");
+                break;
+            }
+            case TK_PL: {
+                for (int i = 0; i < 8; i++) set_x_fast(i, 0);
+                axil_write(R_ARG32, 0);
+                for (size_t base = 0; base < cmd.pl.size(); base += (size_t)CHAIN_SLOTS) {
+                    size_t n = std::min((size_t)CHAIN_SLOTS, cmd.pl.size() - base);
+                    cy_p2 += run_op(0x03, 3).cycles;
+                    for (size_t s = 0; s < n; s++) {
+                        const auto& it = cmd.pl[base + s];
+                        for (int i = 0; i < 4; i++) set_x_fast(8 + i, it.cap[i]);
+                        axil_write(R_STREAM, (uint32_t)s << 6);
+                        for (const auto& blk : it.blocks) stream_beat(blk.data(), 8);
+                        OpRes rs = run_op(0x04, (uint8_t)s, (uint16_t)it.blocks.size());
+                        cy_p2 += rs.cycles;
+                        check(rs.ok, "real proof PL CHAIN_START");
+                    }
+                    cy_p2 += run_op(0x05).cycles;
+                    for (size_t s = 0; s < n; s++) {
+                        run_op(0x06, (uint8_t)s);
+                        E4 got = get_y4();
+                        for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.pl[base + s].out[i], "real proof PL digest");
+                    }
+                }
+                break;
+            }
+            case TK_PC: {
+                for (int i = 0; i < 3; i++) set_x_fast(i, cmd.pc.key[i]);
+                D4 top_root = cmd.pc.levels.back().back().p;
+                for (int i = 0; i < 4; i++) set_x_fast(4 + i, top_root[i]);
+                cy_canopy += run_op(0x03, 1).cycles;
+                for (const auto& lvl : cmd.pc.levels) {
+                    bool is_root_lvl = (lvl.size() == 1 && lvl[0].idx == 1);
+                    for (size_t base = 0; base < lvl.size(); base += (size_t)CHAIN_SLOTS) {
+                        size_t n = std::min((size_t)CHAIN_SLOTS, lvl.size() - base);
+                        cy_canopy += run_op(0x03, 3).cycles;
+                        for (size_t s = 0; s < n; s++) {
+                            const auto& nd = lvl[base + s];
+                            axil_write(R_STREAM, (uint32_t)s << 6);
+                            stream_beat(nd.r.data(), 4);
+                            for (int i = 0; i < 4; i++) set_x_fast(i, nd.l[i]);
+                            axil_write(R_ARG32, 0x80000000u | (nd.idx << 1));
+                            OpRes rs = run_op(0x04, (uint8_t)s, 0);
+                            cy_canopy += rs.cycles;
+                            check(rs.ok, "real proof PCN CHAIN_START");
+                        }
+                        OpRes rw = run_op(0x05);
+                        cy_canopy += rw.cycles;
+                        if (is_root_lvl) check(rw.ok, "real proof Poseidon2 Canopy root verified in hardware");
+                        for (size_t s = 0; s < n; s++) {
+                            run_op(0x06, (uint8_t)s);
+                            E4 got = get_y4();
+                            for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], lvl[base + s].p[i], "real proof PCN parent");
+                        }
+                    }
+                }
+                break;
+            }
+            case TK_SC: {
+                x_valid[0] = x_valid[1] = x_valid[2] = x_valid[3] = false;
+                OpRes r = exec_sc_op(cmd.sc);
+                cy_sc += r.cycles;
+                check(r.ok, "real proof SC_ROUND ok");
+                E4 got = get_y4();
+                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.sc.next[i], "real proof SC next_claim");
+                break;
+            }
+            case TK_EMAC: {
+                OpRes r = exec_emac_batch(cmd.emac);
+                cy_emac += r.cycles;
+                check(r.ok, "real proof EXT4_BATCH ok");
+                E4 got = get_y4();
+                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.emac.back().out[i], "real proof EXT4_BATCH tail");
+                break;
+            }
+            case TK_FD: {
+                for (int i = 0; i < 32; i++) x_valid[i] = false;
+                E4 got{};
+                cy_fold += fold_table(cmd.fd.table, cmd.fd.point, got);
+                for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], cmd.fd.out[i], "real proof FOLD_MULTI out");
+                break;
+            }
+        }
+    }
+
+    uint64_t wall = cyc - t_begin;
+    uint64_t active = total_cycles();
+    check((axil_read(R_STATUS) & 0x18) == 0, "real proof zero sticky bus/canonicality errors");
+
+    for (FILE* f : {stdout, rep}) {
+        if (!f) continue;
+        fprintf(f,
+                "REAL PROOF REPLAY [%s :: %s]\n"
+                "  operations : %ld Keccak blks, %ld P2 perms, %ld Canopy MultiProofs, %ld sumcheck rnds, %ld Ext4 MACs\n"
+                "  TOTAL_CYCLES (exact hardware engine-active clocks) : %llu\n"
+                "  wall clocks (incl. AXI4-Lite + Y readback checks)  : %llu\n"
+                "  breakdown (OP_CYCLES): kec=%llu canopy=%llu p2=%llu sc=%llu emac=%llu fold=%llu\n"
+                "  bus traffic: %llu AXI4-Lite writes, %llu reads, %llu 512-bit stream beats\n",
+                PROFILE_NAME, label, ks_cnt, p2_cnt, canopy_cnt, sc_cnt, emac_cnt,
+                (unsigned long long)active, (unsigned long long)wall,
+                (unsigned long long)cy_kec, (unsigned long long)cy_canopy, (unsigned long long)cy_p2,
+                (unsigned long long)cy_sc, (unsigned long long)cy_emac, (unsigned long long)cy_fold,
+                (unsigned long long)(bus_writes - w0), (unsigned long long)(bus_reads - r0),
+                (unsigned long long)(stream_beats - b0));
+    }
+    section(label, c0, f0);
+}
+
+static void test_real_proof_tamper_rejection() {
+    long c0 = checks, f0 = fails;
+    long d0, d1, d2, d3, d4;
+    auto ts_cmds = load_trace_file("tb/fixtures/real_qsagsta1_ts_trace.txt", d0, d1, d2, d3, d4);
+    auto p2_cmds = load_trace_file("tb/fixtures/real_qsagsta1_p2_trace.txt", d0, d1, d2, d3, d4);
+
+    // 1. Flip 1 bit in a real Fiat-Shamir / PoW Keccak rate block -> immediate hardware rejection!
+    for (auto& c : ts_cmds) {
+        if (c.kind == TK_KS && !c.ks.empty() && c.ks[0].init && c.ks[0].chk) {
+            std::vector<KsBlk> one = {c.ks[0]};
+            check(exec_ks_batch(one).ok, "honest real KS block accepted");
+            one[0].lanes[0] ^= 1ULL;
+            check(!exec_ks_batch(one).ok, "1-bit flip in real proof transcript/PoW block rejected");
+            break;
+        }
+    }
+    // 2. Flip 1 bit in a real TurboSHAKE256 Canopy Merkle authentication sibling -> immediate rejection!
+    for (auto& c : ts_cmds) {
+        if (c.kind == TK_TC && !c.tc.sibs.empty()) {
+            TcOp bad = c.tc;
+            bad.sibs[bad.sibs.size() / 2][1] ^= (1ULL << 19);
+            check(!exec_tc_op(bad).ok, "1-bit flip in real TurboSHAKE256 Canopy sibling rejected");
+            TcOp bad_leaf = c.tc;
+            bad_leaf.leaves[0].second[0] ^= 1ULL;
+            check(!exec_tc_op(bad_leaf).ok, "1-bit flip in real TurboSHAKE256 Canopy leaf rejected");
+            break;
+        }
+    }
+    // 3. Flip 1 bit in a real Poseidon2 Canopy Merkle root node input -> immediate rejection!
+    for (auto& c : p2_cmds) {
+        if (c.kind == TK_PC) {
+            const auto& root_nd = c.pc.levels.back().back();
+            for (int i = 0; i < 3; i++) set_x(i, c.pc.key[i]);
+            for (int i = 0; i < 4; i++) set_x(4 + i, root_nd.p[i]);
+            run_op(0x03, 1);
+            axil_write(R_STREAM, 0);
+            D4 bad_r = root_nd.r;
+            bad_r[0] ^= 1ULL;
+            if (bad_r[0] >= GLP) bad_r[0] = gl_add(root_nd.r[0], 1);
+            stream_beat(bad_r.data(), 4);
+            for (int i = 0; i < 4; i++) set_x(i, root_nd.l[i]);
+            axil_write(R_ARG32, 0x80000000u | (root_nd.idx << 1));
+            run_op(0x04, 0, 0);
+            check(!run_op(0x05).ok, "1-bit flip in real Poseidon2 Canopy sibling rejected");
+            break;
+        }
+    }
+    // 4. Flip 1 bit in a real QSAGSTA1 sumcheck round polynomial coefficient -> immediate rejection!
+    for (auto& c : ts_cmds) {
+        if (c.kind == TK_SC && c.sc.coeffs_hi_to_lo.back()[0] + 2 < GLP) {
+            ScOp bad = c.sc;
+            bad.coeffs_hi_to_lo.back()[0] ^= 1ULL;
+            check(!exec_sc_op(bad).ok, "1-bit flip in real QSAGSTA1 sumcheck polynomial rejected");
+            break;
+        }
+    }
+    // 5. Flip 1 bit in a real QSAGSTA1 Ext4 gate evaluation -> immediate rejection!
+    for (auto& c : ts_cmds) {
+        if (c.kind == TK_EMAC && !c.emac.empty() && c.emac[0].b[0] != 0 && c.emac[0].a[0] + 2 < GLP) {
+            std::vector<ExtMacItem> one = {c.emac[0]};
+            one[0].a[0] ^= 1ULL;
+            check(!exec_emac_batch(one).ok, "1-bit flip in real QSAGSTA1 Ext4 gate evaluation rejected");
+            break;
+        }
+    }
+    run_op(0x3F);
+    section("real QSAGSTA1 single-bit tamper rejection (proof, TS/P2 Merkle, sumcheck, Ext4)", c0, f0);
+}
+
+static void replay_all_real_proofs(FILE* rep) {
+    replay_single_real_proof("real QSAGSTA1 Role-1 (TurboSHAKE256 Canopy, 170,317 B)",
+                             "tb/fixtures/real_qsagsta1_ts_trace.txt",
+                             "tb/fixtures/real_qsagsta1_ts.bin", rep);
+    replay_single_real_proof("real QSAGSTA1 Role-2 (Poseidon2 Canopy, 169,741 B)",
+                             "tb/fixtures/real_qsagsta1_p2_trace.txt",
+                             "tb/fixtures/real_qsagsta1_p2.bin", rep);
+    replay_single_real_proof("real [CWYZ26] DuetFold (4 statements, cSHAKE256 Canopy)",
+                             "tb/fixtures/real_duet_fold_trace.txt",
+                             nullptr, rep);
+    test_real_proof_tamper_rejection();
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     dut.reset(new Dut);
@@ -895,6 +1426,7 @@ int main(int argc, char** argv) {
     test_basic_ops();
     test_top_keccak();
     test_fold_and_chains();
+    replay_all_real_proofs(rep);
     if (!COMPACT && !std::getenv("QSAG_REAL_ONLY")) { trace_qsagsta1(rep); trace_edge_fold(rep); }
     check((axil_read(R_STATUS) & 0x18) == 0, "no sticky error flags");
     if (rep) fclose(rep);

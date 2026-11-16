@@ -43,6 +43,13 @@ set_disable_timing -from C2 -to ZN [get_cells $core.u_io.u_mptx.u_c.u_maj]
 foreach puf_ro [get_cells -quiet "$core.u_puf.g_bank*u_ro*g_st\[0\].u_n"] {
     set_disable_timing -from A1 -to ZN $puf_ro
 }
+# Mark Vernier TDC strobe clocks & PUF ripple-counter clocks as local non-CTS leaf nets
+foreach vtap_pin [get_pins -quiet "$core.u_db.u_tdc.g_vernier*u_fc.u_buf/Z"] {
+    set_false_path -through $vtap_pin
+}
+foreach pcnt_pin [get_pins -quiet "$core.u_puf.u_c*.u_buf/Z"] {
+    set_false_path -through $pcnt_pin
+}
 
 # 4. Static straps & asynchronous reset pad
 set_false_path -from [get_ports {input_PAD[*]}]

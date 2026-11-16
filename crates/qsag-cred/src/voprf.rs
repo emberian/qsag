@@ -58,10 +58,11 @@
 //! not a publicly transferable NIZK. An authenticated output must be associated
 //! with its actual sender; passing attacker-invented sender identities violates
 //! the API's channel contract. Persistent counter reservation precedes every
-//! key-dependent message and burns evaluations aborted after it. It follows the
-//! two key-independent rounds (context agreement and input confirmation), in
-//! which all five servers must deliver, so an absent or silent server makes the
-//! batch fail before any counter or quota is spent. Outputs also bind the
+//! key-dependent message and burns evaluations aborted after it. It is made
+//! once all five servers have delivered in the two key-independent rounds
+//! (context agreement and input confirmation), so an absent or silent server
+//! makes the batch fail before any counter or quota is spent; a request whose
+//! delivered confirmations disagree is still charged. Outputs also bind the
 //! root of the salted request components, preventing cross-input relabeling.
 //! Restore custody only with
 //! the same monotonic store. Every batch consumes one counter and quota equal to
@@ -707,6 +708,30 @@ impl Server {
         }
         let input_commits =
             transport.broadcast(hash(b"QSAG.TOPRF.INPUT.CHECK.V1", &[&context]), commitments)?;
+        // Readiness: every holder of every component delivered its digest. A
+        // server that is offline or silent fails the batch here, before the
+        // counter and quota are spent.
+        for component in 0..5 {
+            for (party, message) in input_commits.iter().enumerate() {
+                if party != component && message.get(component * 32..component * 32 + 32).is_none()
+                {
+                    return Err(Error::BadDelivery { party });
+                }
+            }
+        }
+        // All five servers answered both rounds, and neither round carries
+        // anything derived from the key. The reservation is made now: after
+        // delivery is confirmed, before the verdict on what was delivered (a
+        // request whose holders disagree is charged, as it always was) and
+        // before the first key-dependent message. An evaluation aborted from
+        // here on stays burned.
+        store.reserve(
+            &self.key.commitment,
+            self.party,
+            request.context.counter,
+            request.inputs.len(),
+        )?;
+        self.last_counter = Some(request.context.counter);
         let mut verified_commitments = Vec::new();
         for component in 0..5 {
             let mut expected = None;
@@ -729,18 +754,6 @@ impl Server {
         ) {
             return Err(Error::Context);
         }
-        // Every server delivered in both rounds above, and neither round carries
-        // anything derived from the key. The counter and quota are spent here,
-        // after that readiness is confirmed and before the first key-dependent
-        // message, so a server that is offline at the start costs no counter,
-        // while an evaluation aborted from here on stays burned.
-        store.reserve(
-            &self.key.commitment,
-            self.party,
-            request.context.counter,
-            request.inputs.len(),
-        )?;
-        self.last_counter = Some(request.context.counter);
         let mut states = Zeroizing(vec![[[0; 5]; 12]; request.inputs.len()]);
         for (st, input) in states.iter_mut().zip(&request.inputs) {
             st[..4].copy_from_slice(input);
@@ -1697,6 +1710,41 @@ mod tests {
             assert_eq!(transport.exchanges, 0);
             assert!(store.reserved.is_empty());
             assert_eq!(server.last_counter, None);
+        }
+        // A delivered but different confirmation is not an availability failure:
+        // it is charged, as before this change.
+        {
+            let mut scratch = Server {
+                party: 0,
+                key: PublicKey::test_key(),
+                seeds: [[3; 32]; 25],
+                key_share: [[4; 5]; 4],
+                last_counter: None,
+            };
+            let mut charged = CountingStore {
+                reserved: Vec::new(),
+            };
+            let mut disagreeing = commits.clone();
+            disagreeing[3][0] ^= 1;
+            let mut transport = Offline {
+                absent: None,
+                step: 0,
+                exchanges: 0,
+                commits: disagreeing,
+            };
+            assert_eq!(
+                scratch
+                    .evaluate(
+                        request().into_iter().next().unwrap(),
+                        &mut charged,
+                        &mut transport
+                    )
+                    .unwrap_err(),
+                Error::InconsistentShares
+            );
+            assert_eq!(transport.exchanges, 0);
+            assert_eq!(charged.reserved, vec![(0, 1)]);
+            assert_eq!(scratch.last_counter, Some(0));
         }
         // With every server present the same counter is still admissible, and it
         // is reserved before the first key-dependent exchange.

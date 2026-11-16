@@ -1458,8 +1458,9 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
         if previous is not None:
             old_taint, old_stack, old_public, old_flags = previous
             taint = taint | old_taint
-            stack = {key: stack.get(key, True) or old_stack.get(key, True)
-                     for key in stack.keys() | old_stack.keys()}
+            # The map holds public slots only (see `store_stack`); a slot is public after a
+            # join exactly when it is public on both edges.
+            stack = {key: False for key in stack.keys() & old_stack.keys()}
             public_pointer = public_pointer & old_public
             flags |= old_flags
             if (taint, stack, public_pointer, flags) == previous:
@@ -1509,11 +1510,17 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                 'ByteMatrices'))
             size = width(op if not arm else (parts[0] if parts else ''), mnemonic)
             def store_stack(mem, value, length=size, extra=0):
+                # Normal form: a slot that is not recorded reads as secret, so secret
+                # stores remove the slot instead of recording it. This keeps the state
+                # finite when a stack-probe loop moves the stack pointer on its backedge.
                 key = stack_key(mem)
                 if key:
                     base, offset = key
                     for byte in range(length):
-                        stack[base, offset + extra + byte] = value
+                        if value:
+                            stack.pop((base, offset + extra + byte), None)
+                        else:
+                            stack[base, offset + extra + byte] = False
             def secret(value):
                 memory = re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', value)
                 if memory:
@@ -1837,6 +1844,23 @@ def self_tests():
         stream.addresses = list(range(0, 4 * len(stream), 4))
         assert rust_errors('buffer_probe', stream, True, 62)
         count += 1
+    # A stack-probe loop moves the stack pointer on its backedge. The analysis must reach a
+    # fixpoint there, keep a public spill made after it, and forget one made before it.
+    def probe(spill_before):
+        operations = ([('mov', 'qword ptr [rsp + 0x8], rcx')] if spill_before else []) + [
+            ('mov', 'r11, rsp'), ('sub', 'r11, 0xc000'),
+            ('sub', 'rsp, 0x1000'), ('mov', 'qword ptr [rsp], 0x0'), ('cmp', 'rsp, r11'),
+            ('jne', hex(8 + 4 * spill_before)), ('sub', 'rsp, 0x808')]
+        operations += ([] if spill_before else [('mov', 'qword ptr [rsp + 0x8], rcx')]) + [
+            ('mov', 'rax, qword ptr [rsp + 0x8]'), ('test', 'rax, rax'), ('je', '0x0'), ('ret', '')]
+        out = InstructionStream()
+        out.extend(operations)
+        out.addresses = list(range(0, 4 * len(out), 4))
+        return out
+    assert not rust_errors('buffer_probe', probe(False), True, 62)
+    assert any('secret-tainted conditional branch' in e
+               for e in rust_errors('buffer_probe', probe(True), True, 62))
+    count += 2
     partial_spill = [('mov', 'qword ptr [rsp], rdi'), ('mov', 'dl, [rsi]'),
                      ('mov', 'byte ptr [rsp+7], dl'), ('mov', 'rax, qword ptr [rsp]'),
                      ('test', 'rax, rax'), ('jne', '0x40')]

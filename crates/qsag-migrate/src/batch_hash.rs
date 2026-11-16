@@ -384,9 +384,22 @@ pub(crate) fn turboshake256_slices_32(
 /// Compute all 8 parallel leaf digests `L_0..L_7` of `products` simultaneously in one
 /// 8-lane SIMD `keccak_p1600_12_lanes::<8>` pass, then hash the length-framed root tuple.
 pub(crate) fn commit_cozk_v4_one(
-    rep: usize, head: usize, subseeds: &[[u8; 32]], head_inputs: &[u8], products: &[u8], outputs: &[u8],
+    rep: usize,
+    head: usize,
+    subseeds: &[[u8; 32]],
+    head_inputs: &[u8],
+    products: &[u8],
+    outputs: &[u8],
 ) -> [u8; 32] {
-    commit_cozk_tree_one(&COZK_VIEW_MAGIC_V4, rep, head, subseeds, head_inputs, products, outputs)
+    commit_cozk_tree_one(
+        &COZK_VIEW_MAGIC_V4,
+        rep,
+        head,
+        subseeds,
+        head_inputs,
+        products,
+        outputs,
+    )
 }
 
 /// V5 commits to seed commitments and a seed-masked view. Binding follows from
@@ -395,7 +408,13 @@ pub(crate) fn commit_cozk_v4_one(
 /// domain-separated from the inner proof tapes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn commit_cozk_tree_one(
-    magic: &[u8; 8], rep: usize, head: usize, subseeds: &[[u8; 32]], head_inputs: &[u8], products: &[u8], outputs: &[u8],
+    magic: &[u8; 8],
+    rep: usize,
+    head: usize,
+    subseeds: &[[u8; 32]],
+    head_inputs: &[u8],
+    products: &[u8],
+    outputs: &[u8],
 ) -> [u8; 32] {
     let mut st8 = Secret(TURBOSHAKE_VIEW_MIDSTATE.map(|w| [w; COZK_TREE_LEAVES]));
     let ranges: [(usize, usize); COZK_TREE_LEAVES] =
@@ -498,37 +517,68 @@ pub(crate) fn commit_cozk_tree_one(
     out
 }
 
-pub(crate) fn cozk_seed_commit(rep: usize, head: usize, position: usize, seed: &[u8; 32]) -> [u8; 32] {
-    qsag_accel::keccak::cshake256_framed_32(b"QSAG.COZK.SEED.COMMIT.V5", &[&(rep as u64).to_le_bytes(), &(head as u64).to_le_bytes(), &(position as u64).to_le_bytes(), seed])
+pub(crate) fn cozk_seed_commit(
+    rep: usize,
+    head: usize,
+    position: usize,
+    seed: &[u8; 32],
+) -> [u8; 32] {
+    qsag_accel::keccak::cshake256_framed_32(
+        b"QSAG.COZK.SEED.COMMIT.V5",
+        &[
+            &(rep as u64).to_le_bytes(),
+            &(head as u64).to_le_bytes(),
+            &(position as u64).to_le_bytes(),
+            seed,
+        ],
+    )
 }
 
-pub(crate) fn view_mask_stream(seed: &[u8; 32], rep: usize, head: usize) -> qsag_core::sponge::keccak::Cshake256WordStream4 {
-    const MIDSTATE: [u64; 25] = qsag_core::sponge::keccak::cshake256_static_midstate(b"QSAG.COZK.VIEW.MASK.V5");
-    let mut input = Secret([0u8; 41]);
-    input[..32].copy_from_slice(seed);
-    input[32..40].copy_from_slice(&(rep as u64).to_le_bytes());
-    input[40] = head as u8;
-    qsag_core::sponge::keccak::Cshake256WordStream4::new(&MIDSTATE, &input[..])
+pub(crate) fn view_mask_seed(seed: &[u8; 32], rep: usize, head: usize) -> [u8; 32] {
+    qsag_accel::keccak::cshake256_framed_32(b"QSAG.COZK.VIEW.FIELD.MASK.V5", &[seed, &(rep as u64).to_le_bytes(), &(head as u64).to_le_bytes()])
 }
 
-fn commit_cozk_v5_one(v: &CozkIndexedView<'_>) -> [u8; 32] {
-    let mut masked: SecretVec<u8> = v.head_inputs.iter().chain(v.products).chain(v.outputs).copied().collect();
-    let seed_commits: Vec<_> = v.subseeds.iter().enumerate().map(|(i, s)| cozk_seed_commit(v.rep, v.head, i, s)).collect();
-    for seed in &v.subseeds {
-        let mut mask = view_mask_stream(seed, v.rep, v.head);
-        let mut words = Secret([0u64; 4]);
-        for chunk in masked.chunks_mut(32) {
-            mask.fill_words(&mut words[..]);
-            for (i, byte) in chunk.iter_mut().enumerate() { *byte ^= (words[i / 8] >> (8 * (i % 8))) as u8; }
+pub(crate) struct CozkViewLayout {
+    pub inputs: Vec<crate::circuit::Domain>,
+    pub products: Vec<crate::circuit::Domain>,
+    pub outputs: Vec<crate::circuit::Domain>,
+}
+impl CozkViewLayout {
+    pub fn new(c: &crate::circuit::Circuit) -> Self {
+        use crate::circuit::Op;
+        Self {
+            inputs: c.nodes.iter().filter(|n| matches!(n.op, Op::Input)).map(|n| n.domain).collect(),
+            products: c.nodes.iter().filter(|n| matches!(n.op, Op::Mul(_, _))).map(|n| n.domain).collect(),
+            outputs: c.outputs.iter().map(|&i| c.nodes[i].domain).collect(),
         }
     }
-    let a = v.head_inputs.len();
-    let b = a + v.products.len();
-    commit_cozk_tree_one(&COZK_VIEW_MAGIC_V5, v.rep, v.head, &seed_commits, &masked[..a], &masked[a..b], &masked[b..])
 }
 
-pub(crate) fn commit_cozk_v5_indexed(views: &[CozkIndexedView<'_>]) -> Vec<[u8; 32]> {
-    crate::parallel::map(views.len(), |i| commit_cozk_v5_one(&views[i]))
+fn commit_cozk_v5_one(v: &CozkIndexedView<'_>, layout: &CozkViewLayout) -> Result<[u8; 32], crate::MigrateError> {
+    use crate::zk_engine::{BitPackedReader, BitPacker, PublicTape};
+    let mut masks: Vec<_> = v.subseeds.iter().map(|seed| {
+        let seed = Secret(view_mask_seed(seed, v.rep, v.head));
+        PublicTape::new(&seed)
+    }).collect();
+    let domains = [if v.head == 2 { layout.inputs.as_slice() } else { &[] }, layout.products.as_slice(), layout.outputs.as_slice()];
+    let mut packed = Vec::with_capacity(3);
+    for (bytes, domains) in [v.head_inputs, v.products, v.outputs].into_iter().zip(domains) {
+        let mut reader = BitPackedReader::new(bytes);
+        let mut writer = BitPacker::with_capacity(bytes.len());
+        for &d in domains {
+            let mut value = reader.take_value(d)?;
+            for tape in &mut masks { value = d.add(value, tape.sample(d)); }
+            writer.push_value(d, value);
+        }
+        reader.finish()?;
+        packed.push(writer.into_bytes());
+    }
+    let seed_commits: Vec<_> = v.subseeds.iter().enumerate().map(|(i, s)| cozk_seed_commit(v.rep, v.head, i, s)).collect();
+    Ok(commit_cozk_tree_one(&COZK_VIEW_MAGIC_V5, v.rep, v.head, &seed_commits, &packed[0], &packed[1], &packed[2]))
+}
+
+pub(crate) fn commit_cozk_v5_indexed(views: &[CozkIndexedView<'_>], layout: &CozkViewLayout) -> Result<Vec<[u8; 32]>, crate::MigrateError> {
+    crate::parallel::map(views.len(), |i| commit_cozk_v5_one(&views[i], layout)).into_iter().collect()
 }
 
 pub(crate) struct CozkIndexedView<'a> {
@@ -712,7 +762,9 @@ mod tests {
     #[test]
     fn cozk_v4_turboshake_tree_matches_scalar_reference_at_rate_boundaries() {
         let subseeds = [[0x11u8; 32], [0x22u8; 32], [0x33u8; 32]];
-        for prod_len in [0usize, 1, 119, 120, 121, 135, 136, 137, 960, 1088, 1089, 5000] {
+        for prod_len in [
+            0usize, 1, 119, 120, 121, 135, 136, 137, 960, 1088, 1089, 5000,
+        ] {
             let products: Vec<u8> = (0..prod_len).map(|i| (i * 37 + 13) as u8).collect();
             let head_inputs: Vec<u8> = (0..41).map(|i| (i ^ 0x5a) as u8).collect();
             let outputs: Vec<u8> = (0..19).map(|i| (i + 7) as u8).collect();

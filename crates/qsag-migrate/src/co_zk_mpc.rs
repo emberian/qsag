@@ -17,6 +17,11 @@
 //! fields and `< 2^-186` over Goldilocks `GF(p^3)`; authenticated: per check
 //! `< 2^-126`). Abort is non-identifiable and unfair in both: one corrupt
 //! custodian can force it. See `SECURITY.md` for exact scope.
+#[cfg(test)]
+use crate::batch_hash::{
+    COZK_TREE_LEAVES, COZK_VIEW_MAGIC_V4, TURBOSHAKE_LEAF_SUFFIX, TURBOSHAKE_ROOT_SUFFIX,
+    TURBOSHAKE_VIEW_MIDSTATE, cozk_product_leaf_range,
+};
 pub use crate::outer_mpc::{Envelope, Error, Transport};
 use crate::secret::{Secret, SecretVec, Wipe};
 #[cfg(any(feature = "std", test))]
@@ -35,8 +40,6 @@ use crate::{
         PartyView,
     },
 };
-#[cfg(test)]
-use crate::batch_hash::{COZK_TREE_LEAVES, COZK_VIEW_MAGIC_V4, TURBOSHAKE_LEAF_SUFFIX, TURBOSHAKE_ROOT_SUFFIX, TURBOSHAKE_VIEW_MIDSTATE, cozk_product_leaf_range};
 use alloc::{vec, vec::Vec};
 use qsag_accel::{
     ct::{ct_eq_bytes_mask, ct_zeroize_bytes, ct_zeroize_u64s},
@@ -803,7 +806,12 @@ impl CoZkCustodianShare {
                         &salts[head][lane],
                     );
                     own_commits_flat.extend_from_slice(&com);
-                    own_commits_flat.extend_from_slice(&crate::batch_hash::cozk_seed_commit(rep, head, quorum_pos, &subseeds[head][lane]));
+                    own_commits_flat.extend_from_slice(&crate::batch_hash::cozk_seed_commit(
+                        rep,
+                        head,
+                        quorum_pos,
+                        &subseeds[head][lane],
+                    ));
                 }
             }
             local_batches.push(LocalBatchSeeds { subseeds, salts });
@@ -849,8 +857,13 @@ impl CoZkCustodianShare {
         let mut public = Vec::with_capacity(MIT_REPETITIONS);
         for (batch, item) in computed_batches.iter_mut().enumerate() {
             let opening_engine = item.engine.as_mut().unwrap_or(&mut *e);
-            let rounds =
-                open_batch_public_rounds(opening_engine, batch, &item.masked_views, &item.views, &peer_commits)?;
+            let rounds = open_batch_public_rounds(
+                opening_engine,
+                batch,
+                &item.masked_views,
+                &item.views,
+                &peer_commits,
+            )?;
             public.extend(rounds);
         }
 
@@ -927,8 +940,12 @@ impl CoZkCustodianShare {
                     let com_off = (rep * 3 + head) * 64;
                     let expected: &[u8; 32] = commit_buf[com_off..com_off + 32].try_into().unwrap();
                     all_ok &= ct_eq_bytes_mask(&actual, expected);
-                    let expected_seed: &[u8; 32] = commit_buf[com_off + 32..com_off + 64].try_into().unwrap();
-                    all_ok &= ct_eq_bytes_mask(&crate::batch_hash::cozk_seed_commit(rep, head, pos, subseed), expected_seed);
+                    let expected_seed: &[u8; 32] =
+                        commit_buf[com_off + 32..com_off + 64].try_into().unwrap();
+                    all_ok &= ct_eq_bytes_mask(
+                        &crate::batch_hash::cozk_seed_commit(rep, head, pos, subseed),
+                        expected_seed,
+                    );
                 }
             }
             if all_ok != u64::MAX {
@@ -1367,22 +1384,42 @@ fn compute_batch<E: Core>(
 /// Sharing these contributions uses PRSS/authenticated input masking. Opening
 /// the result reveals no virtual view to a single custodian. The same seeds
 /// are committed before evaluation and bind the deterministic masks in V5.
-fn mask_shared_views<E: Core>(e: &mut E, batch: usize, seeds: &LocalBatchSeeds, views: &[SharedView<E::Bit>]) -> Result<[Word<E::Bit>; 3], Error> {
+fn mask_shared_views<E: Core>(
+    e: &mut E,
+    batch: usize,
+    seeds: &LocalBatchSeeds,
+    views: &[SharedView<E::Bit>],
+) -> Result<[Word<E::Bit>; 3], Error> {
     let mut masked: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
     for h in 0..3 {
         let view = &views[h];
         let count = view.inputs.len() + view.products.len() + view.outputs.len();
-        let mut streams: Vec<_> = seeds.subseeds[h].iter().enumerate().map(|(lane, seed)| crate::batch_hash::view_mask_stream(seed, batch * 64 + lane, h)).collect();
+        let mut streams: Vec<_> = seeds.subseeds[h]
+            .iter()
+            .enumerate()
+            .map(|(lane, seed)| crate::batch_hash::view_mask_stream(seed, batch * 64 + lane, h))
+            .collect();
         let mut own = SecretVec::with_capacity(count);
         let mut rows = Secret([[0u64; 4]; 64]);
         while own.len() < count {
-            for (stream, row) in streams.iter_mut().zip(rows.iter_mut()) { stream.fill_words(row); }
+            for (stream, row) in streams.iter_mut().zip(rows.iter_mut()) {
+                stream.fill_words(row);
+            }
             qsag_asm::transpose64x256(&mut rows);
             let take = (count - own.len()).min(256);
-            for bit in 0..take { own.push(rows[bit % 64][bit / 64]); }
+            for bit in 0..take {
+                own.push(rows[bit % 64][bit / 64]);
+            }
         }
         let shared_mask = e.share_masked(&own)?;
-        masked[h] = view.inputs.iter().chain(view.products.iter()).chain(view.outputs.iter()).zip(shared_mask.iter()).map(|(&v, &m)| v ^ m).collect();
+        masked[h] = view
+            .inputs
+            .iter()
+            .chain(view.products.iter())
+            .chain(view.outputs.iter())
+            .zip(shared_mask.iter())
+            .map(|(&v, &m)| v ^ m)
+            .collect();
     }
     Ok(masked)
 }
@@ -1398,8 +1435,14 @@ fn open_batch_public_rounds<E: Core>(
     e.on_public_or_view_open();
     // Called only after the cross-batch active-check barrier. Only masked
     // views and the already constrained public outputs are reconstructed.
-    let masked: Vec<_> = masked_views.iter().map(|v| e.open(v)).collect::<Result<_, _>>()?;
-    let outputs: Vec<_> = views.iter().map(|v| e.open(&v.outputs)).collect::<Result<_, _>>()?;
+    let masked: Vec<_> = masked_views
+        .iter()
+        .map(|v| e.open(v))
+        .collect::<Result<_, _>>()?;
+    let outputs: Vec<_> = views
+        .iter()
+        .map(|v| e.open(&v.outputs))
+        .collect::<Result<_, _>>()?;
     let count = core::cmp::min(64, MIT_REPETITIONS - batch * 64);
     Ok(crate::parallel::map(count, |lane| {
         let rep = batch * 64 + lane;
@@ -1408,10 +1451,24 @@ fn open_batch_public_rounds<E: Core>(
             let a = views[h].inputs.len() / 8;
             let b = a + views[h].products.len() / 8;
             let offset = (rep * 3 + h) * 64 + 32;
-            let seeds: Vec<[u8; 32]> = seed_commitments.iter().map(|v| v[offset..offset + 32].try_into().unwrap()).collect();
-            crate::batch_hash::commit_cozk_tree_one(&COZK_VIEW_MAGIC_V5, rep, h, &seeds, &bytes[..a], &bytes[a..b], &bytes[b..])
+            let seeds: Vec<[u8; 32]> = seed_commitments
+                .iter()
+                .map(|v| v[offset..offset + 32].try_into().unwrap())
+                .collect();
+            crate::batch_hash::commit_cozk_tree_one(
+                &COZK_VIEW_MAGIC_V5,
+                rep,
+                h,
+                &seeds,
+                &bytes[..a],
+                &bytes[a..b],
+                &bytes[b..],
+            )
         });
-        PublicRound { commits, outputs: core::array::from_fn(|h| outer_mpc::lane_bytes(&outputs[h], lane)) }
+        PublicRound {
+            commits,
+            outputs: core::array::from_fn(|h| outer_mpc::lane_bytes(&outputs[h], lane)),
+        }
     }))
 }
 
@@ -3333,17 +3390,21 @@ mod tests {
         }
         let commitments = compute_cozk_view_commit_bits(e, 0, &views).unwrap();
         let masked = mask_shared_views(e, 0, &seeds, &views).unwrap();
-        let peer_commits: Vec<Vec<u8>> = (0..m).map(|p| {
-            let mut row = vec![0u8; MIT_REPETITIONS * 3 * 64];
-            for rep in 0..64 {
-                for h in 0..3 {
-                    let seed = [((p * 11 + h * 3 + rep) % 256) as u8; 32];
-                    let offset = (rep * 3 + h) * 64 + 32;
-                    row[offset..offset + 32].copy_from_slice(&crate::batch_hash::cozk_seed_commit(rep, h, p, &seed));
+        let peer_commits: Vec<Vec<u8>> = (0..m)
+            .map(|p| {
+                let mut row = vec![0u8; MIT_REPETITIONS * 3 * 64];
+                for rep in 0..64 {
+                    for h in 0..3 {
+                        let seed = [((p * 11 + h * 3 + rep) % 256) as u8; 32];
+                        let offset = (rep * 3 + h) * 64 + 32;
+                        row[offset..offset + 32].copy_from_slice(
+                            &crate::batch_hash::cozk_seed_commit(rep, h, p, &seed),
+                        );
+                    }
                 }
-            }
-            row
-        }).collect();
+                row
+            })
+            .collect();
         let v5_rounds = open_batch_public_rounds(e, 0, &masked, &views, &peer_commits).unwrap();
         let opened_commits: Vec<_> = commitments.iter().map(|w| e.open(w).unwrap()).collect();
         let opened_views: Vec<_> = views
@@ -3365,8 +3426,18 @@ mod tests {
             let native = zk_engine::simulate_cozk_v4(&c, &all_seeds);
             for h in 0..3 {
                 let (subseeds, input) = zk_engine::parse_cozk_v4_inputs(&native[h]).unwrap();
-                let indexed = crate::batch_hash::CozkIndexedView { rep: lane, head: h, subseeds, head_inputs: input, products: &native[h].products, outputs: &native[h].outputs };
-                assert_eq!(v5_rounds[lane].commits[h], crate::batch_hash::commit_cozk_v5_indexed(&[indexed])[0]);
+                let indexed = crate::batch_hash::CozkIndexedView {
+                    rep: lane,
+                    head: h,
+                    subseeds,
+                    head_inputs: input,
+                    products: &native[h].products,
+                    outputs: &native[h].outputs,
+                };
+                assert_eq!(
+                    v5_rounds[lane].commits[h],
+                    crate::batch_hash::commit_cozk_v5_indexed(&[indexed])[0]
+                );
                 assert_eq!(v5_rounds[lane].outputs[h], native[h].outputs);
                 assert_eq!(outer_mpc::lane_bytes(&opened_views[h].0, lane), input);
                 assert_eq!(

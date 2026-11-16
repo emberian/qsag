@@ -28,9 +28,9 @@
 //! Availability. A recipient can decode a term from two of its three senders, so
 //! one silent server does not by itself stop a layer. That is not a four-of-five
 //! availability guarantee for the protocol: [`crate::voprf::Server::evaluate`]
-//! reaches this engine only after all five servers have confirmed the client's
-//! input, and it spends the durable counter between that confirmation and the
-//! first layer. A server that drops out after that point can still abort the
+//! reaches this engine only after all five servers have delivered their
+//! confirmation of the client's input and agree on it, and it spends the durable
+//! counter once those confirmations are delivered, before the first layer. A server that drops out after that point can still abort the
 //! batch (a layer needs agreeing senders), and the counter stays burned.
 use crate::voprf::{Error, SERVERS, Transport};
 use alloc::{vec, vec::Vec};

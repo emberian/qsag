@@ -1162,6 +1162,85 @@ theorem sampledQuery_false_statement_accepted_once :
    Bool.eq_false_iff.mpr (fun h =>
      absurd ((sampledQuery_verify_iff 2 _ _ _ 0 2).mp h).2.2.2 (by decide))⟩
 
+/-! ## §6. Negative controls evaluated on this module's definitions
+
+These statements evaluate `johnsonOk`, `scheduleQromError` and the verifier on concrete
+schedules, so they are proved here, where the definitions can be unfolded.
+`Qsag.Tests.ClosedReductionTeeth` pairs them with the theorems they guard. -/
+
+/-- A stage with its Johnson list size replaced by `1`. -/
+def dropListSize (s : WhirStage) : WhirStage := { s with listSize := 1 }
+
+/-- The deployed schedule with the Johnson list-size multipliers omitted. -/
+def deployedNoList : WhirVerifierSchedule :=
+  ⟨24, goldilocksExt4Card, goldilocksExt4Card_pos, deployedStages.map dropListSize⟩
+
+set_option maxRecDepth 65536 in
+/-- `#tooth` Omitting the list-size multipliers gives a strictly smaller error than the
+    schedule's. -/
+theorem tooth_omitting_list_size_factor_underestimates_error :
+    ¬ (RatBound.le (scheduleQromError deployedSched (2 ^ 40))
+        (scheduleQromError deployedNoList (2 ^ 40))) := by
+  unfold RatBound.le
+  simp only [scheduleQromError, WhirVerifierSchedule.roundBounds, deployedSched, deployedNoList,
+    deployedStages_full_eq, List.map_cons, List.map_nil, dropListSize]
+  decide +kernel
+
+/-- `#tooth` The schedule without list sizes fails the Johnson check. -/
+theorem tooth_omitting_list_size_fails_johnson_check :
+    ¬ (deployedNoList.johnsonOk = true) := by
+  simp only [WhirVerifierSchedule.johnsonOk, deployedNoList, deployedStages_full_eq,
+    List.map_cons, List.map_nil, dropListSize]
+  decide +kernel
+
+/-- First deployed stage with agreement `n / 2`, any slack `e / E` and any list size `L`. -/
+def beyondRadiusStage (e E L : Nat) : WhirStage :=
+  { foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216,
+    degBound := 262146, agree := 524288, etaNum := e, etaDen := E, listSize := L,
+    sumcheckDeg := 3, mcaNum := 0 }
+
+/-- `#tooth` Beyond the Johnson radius no slack and no list size pass the check. -/
+theorem tooth_beyond_johnson_radius_invalidates_certificate (e E L : Nat) :
+    ¬ ((beyondRadiusStage e E L).johnsonOk = true) := by
+  have h : (beyondRadiusStage e E L).johnsonOk = false :=
+    WhirStage.johnsonOk_false_of_beyond_radius _ (by
+      show (524288 : Nat) * 524288 ≤ 2 ^ 20 * 262146
+      decide +kernel)
+  rw [h]
+  exact Bool.false_ne_true
+
+section EmptySchedule
+variable {F : Type} [CommRingOps F] [DecidableEq F]
+
+/-- The certificate type is also inhabited at the stage-free schedule, whose verifier rejects
+    everything. This is the degenerate inhabitant; `sampledQueryCert` is the one with a stage. -/
+def emptyScheduleCert (env : WhirEnv F) (nv q : Nat) (hq : 0 < q) (w : Nat) :
+    WhirScheduleCert env ⟨nv, q, hq, []⟩ w where
+  cert :=
+    { state := fun _ _ => false
+      bad := fun r => Fin.elim0 r
+      init := fun _ _ => rfl
+      accept := fun x tr h => by
+        rw [OracleIop.verify_eq] at h
+        obtain ⟨hLenD, hVerd⟩ := Bool.and_eq_true_iff.mp h
+        have hLen : tr = [] := List.eq_nil_of_length_eq_zero (of_decide_eq_true hLenD)
+        subst hLen
+        exact absurd hVerd Bool.false_ne_true
+      flip := fun _ _ r _ _ _ _ => Fin.elim0 r }
+  covers := fun r => Fin.elim0 r
+
+/-- `#tooth` A stage-free schedule accepts no transcript: its certificate is a negative control,
+    not evidence about a verifier that can accept. -/
+theorem tooth_empty_schedule_rejects (env : WhirEnv F) (nv q w : Nat) (hq : 0 < q)
+    (x : WhirStmt F) (tr : List (WhirMsg F × Nat)) :
+    (whirOracleIop env ⟨nv, q, hq, []⟩ w).verify x tr = false := by
+  cases h : (whirOracleIop env ⟨nv, q, hq, []⟩ w).verify x tr
+  · rfl
+  · have bad := (emptyScheduleCert env nv q hq w).cert.accept x tr h
+    exact False.elim (Bool.false_ne_true bad)
+
+end EmptySchedule
+
 #verify_constructive Qsag.ClosedWhir.johnson_core
 #verify_constructive Qsag.ClosedWhir.WhirStage.johnson_list_le
 #verify_constructive Qsag.ClosedWhir.WhirStage.johnsonOk_false_of_beyond_radius
@@ -1183,8 +1262,21 @@ theorem sampledQuery_false_statement_accepted_once :
 #verify_constructive Qsag.ClosedWhir.sampledQuery_false_not_inLang
 #verify_constructive Qsag.ClosedWhir.sampledQuery_false_statement_accepted_once
 
+#verify_constructive Qsag.ClosedWhir.tooth_omitting_list_size_factor_underestimates_error
+#verify_constructive Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
+#verify_constructive Qsag.ClosedWhir.tooth_beyond_johnson_radius_invalidates_certificate
+#verify_constructive Qsag.ClosedWhir.tooth_empty_schedule_rejects
+
 #tooth_pair Qsag.ClosedWhir.sampledQuery_honest_accepts vs
   Qsag.ClosedWhir.sampledQuery_false_not_inLang
+#tooth_pair Qsag.ClosedWhir.deployedSched_error_at_2pow40 vs
+  Qsag.ClosedWhir.tooth_omitting_list_size_factor_underestimates_error
+#tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
+  Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
+#tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
+  Qsag.ClosedWhir.tooth_beyond_johnson_radius_invalidates_certificate
+#tooth_pair Qsag.ClosedWhir.whir_exec_closed_qrom_soundness vs
+  Qsag.ClosedWhir.tooth_empty_schedule_rejects
 
 end Qsag.ClosedWhir
 end
