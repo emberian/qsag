@@ -180,7 +180,7 @@ private theorem epoch_fresh_success (st : threshold.EpochLatch)
     (hlt : st.next_epoch.val < st.max_epoch.val) (hv : next.val = st.next_epoch.val + 1) :
     EpochAcquireSuccess st req
       { st with next_epoch := next, last_bound := .Bound ⟨st.next_epoch, req.msg_digest, req.deterministic_r_rand⟩ }
-      ⟨st.next_epoch, req.msg_digest, req.deterministic_r_rand, false⟩ := by
+      ⟨(), st.next_epoch, req.msg_digest, req.deterministic_r_rand, false⟩ := by
   refine ⟨⟨?_, ?_⟩, rfl, rfl, hk, he.symm, rfl, rfl, rfl, Or.inr ⟨rfl, rfl, hv⟩⟩
   · change next.val ≤ st.max_epoch.val
     rw [hv]; exact hlt
@@ -228,7 +228,7 @@ theorem epoch_latch_acquire_or_retry_spec (st : threshold.EpochLatch)
         else do
           let next ← st.next_epoch + 1#u64
           Result.ok (.Ok ({ st with next_epoch := next, last_bound := .Bound ⟨st.next_epoch, req.msg_digest, req.deterministic_r_rand⟩ },
-            ⟨st.next_epoch, req.msg_digest, req.deterministic_r_rand, false⟩))) = .ok res ∧
+            ⟨(), st.next_epoch, req.msg_digest, req.deterministic_r_rand, false⟩))) = .ok res ∧
         match res with
         | .Err e => EpochFreshError st req.requested_epoch e
         | .Ok (st', g) => EpochAcquireSuccess st req st' g := by
@@ -628,13 +628,13 @@ theorem tooth_epoch_acquire_and_retry_ok :
       ⟨0#u64, epochWitnessBytes, epochWitnessBytes, epochWitnessBytes⟩ =
       .ok (.Ok (⟨1#u64, 4#u64, epochWitnessBytes,
         .Bound ⟨0#u64, epochWitnessBytes, epochWitnessBytes⟩⟩,
-        ⟨0#u64, epochWitnessBytes, epochWitnessBytes, false⟩)) ∧
+        ⟨(), 0#u64, epochWitnessBytes, epochWitnessBytes, false⟩)) ∧
     threshold.EpochLatch.acquire_or_retry
       ⟨1#u64, 4#u64, epochWitnessBytes, .Bound ⟨0#u64, epochWitnessBytes, epochWitnessBytes⟩⟩
       ⟨0#u64, epochWitnessBytes, epochWitnessBytes, epochWitnessBytes⟩ =
       .ok (.Ok (⟨1#u64, 4#u64, epochWitnessBytes,
         .Bound ⟨0#u64, epochWitnessBytes, epochWitnessBytes⟩⟩,
-        ⟨0#u64, epochWitnessBytes, epochWitnessBytes, true⟩)) := by
+        ⟨(), 0#u64, epochWitnessBytes, epochWitnessBytes, true⟩)) := by
   refine ⟨rfl, ?_, ?_⟩ <;>
     simp [threshold.EpochLatch.acquire_or_retry, ct_eq_bytes32_spec]
 

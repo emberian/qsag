@@ -1016,7 +1016,7 @@ theorem belt_mealy_authorize_inv
     beltGuardCorrupt s = false ∧ s.has_bound_epoch = true ∧ reqEp = s.bound_epoch ∧
     s.bound_msg_tag = reqTag ∧ s.q.val ≤ s.ack_count.val ∧
     s' = { s with phase := .SharesAuthorized } ∧
-    o = .SharesAuthorized { authorized_epoch := s.bound_epoch,
+    o = .SharesAuthorized { _private := (), authorized_epoch := s.bound_epoch,
                             msg_tag := s.bound_msg_tag,
                             certified_acks := s.ack_count } := by
   have h2 := h
@@ -1036,7 +1036,7 @@ theorem belt_mealy_authorize_inv
               simp [hb, he, ht, hq, hp] at h2
             have hf : beltQuorumMealy.step s (.AuthorizeShares reqEp reqTag) =
                 some ({ s with phase := .SharesAuthorized },
-                      .SharesAuthorized { authorized_epoch := s.bound_epoch,
+                      .SharesAuthorized { _private := (), authorized_epoch := s.bound_epoch,
                                           msg_tag := s.bound_msg_tag,
                                           certified_acks := s.ack_count }) := by
               dsimp only [beltQuorumMealy]; rw [hc]
@@ -1287,7 +1287,7 @@ inductive BeltStepOutcome (st st' : authenticated_belt.VerifiedBeltQuorumGuard) 
       st.inner.q.val ≤ st.inner.ack_count.val →
       st' = { st with inner := { st.inner with phase := .SharesAuthorized } } →
       BeltStepOutcome st st'
-        (.granted { authorized_epoch := st.inner.bound_epoch,
+        (.granted { _private := (), authorized_epoch := st.inner.bound_epoch,
                     msg_tag := st.inner.bound_msg_tag,
                     certified_acks := st.inner.ack_count })
 
@@ -2278,7 +2278,7 @@ theorem sponge_absorb_total (sp : keccak.Shake256Sponge) (data : Slice Std.U8)
     · simpa only [Slice.len_val] using usize_lt_loopMaxFuel (Slice.len data)
     · exact hloop
   refine ⟨{ sp with state := a, buf := buf, buf_len := i }, ?_, hn, hi⟩
-  simp only [keccak.Shake256Sponge.absorb, hn, Bool.false_eq_true, ite_false,
+  simp only [keccak.Shake256Sponge.absorb, massert_not_of_eq_false hn,
     hactual, bind_eq_result_bind, result_bind_ok]
 
 theorem u64_shr_i32_total (x : Std.U64) (s : Std.I32)
@@ -2527,7 +2527,7 @@ theorem belt_mealy_authorize_granted {s : pants_and_quorum_guards.BeltQuorumCore
     (hq : s.q.val ≤ s.ack_count.val) (hphase : s.phase ≠ .SharesAuthorized) :
     beltQuorumMealy.step s (.AuthorizeShares s.bound_epoch s.bound_msg_tag) =
       some ({ s with phase := .SharesAuthorized },
-            .SharesAuthorized { authorized_epoch := s.bound_epoch,
+            .SharesAuthorized { _private := (), authorized_epoch := s.bound_epoch,
                                 msg_tag := s.bound_msg_tag,
                                 certified_acks := s.ack_count }) := by
   have hnq : ¬ s.ack_count.val < s.q.val := Nat.not_lt.mpr hq
@@ -2818,7 +2818,7 @@ theorem belt_step_authorize_granted (st : authenticated_belt.VerifiedBeltQuorumG
     authenticated_belt.VerifiedBeltQuorumGuard.step st
         (.AuthorizeShares st.inner.bound_epoch st.inner.bound_msg_tag) =
       .ok (beltAfterGrant st,
-           .Ok (.SharesAuthorized { authorized_epoch := st.inner.bound_epoch,
+           .Ok (.SharesAuthorized { _private := (), authorized_epoch := st.inner.bound_epoch,
                                     msg_tag := st.inner.bound_msg_tag,
                                     certified_acks := st.inner.ack_count })) := by
   have hcore := belt_core_authorize_of_mealy (belt_mealy_authorize_granted hc hb hq hphase)
@@ -2857,7 +2857,7 @@ theorem belt_two_custodian_round_certifies
     BeltTraceReachable st
       [.ProposeOrRetryEpoch e msg rd rt, .RecordCustodianAck e msg a tagA,
        .RecordCustodianAck e msg b tagB, .AuthorizeShares e msg]
-      [⟨{ authorized_epoch := e, msg_tag := msg, certified_acks := 2#u32 },
+      [⟨{ _private := (), authorized_epoch := e, msg_tag := msg, certified_acks := 2#u32 },
         (0#u64 ||| beltCustodianBit a) ||| beltCustodianBit b⟩]
       (beltAfterGrant (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b)) := by
   have hlt := u64_val_succ_lt_of_ne_max hmax
@@ -2916,7 +2916,7 @@ theorem belt_two_custodian_round_exists
     (ha64 : a.val < 64) (hb64 : b.val < 64) :
     ∃ acts : List BeltAction, acts.length = 4 ∧
       BeltTraceReachable st acts
-        [⟨{ authorized_epoch := e, msg_tag := msg, certified_acks := 2#u32 },
+        [⟨{ _private := (), authorized_epoch := e, msg_tag := msg, certified_acks := 2#u32 },
           (0#u64 ||| beltCustodianBit a) ||| beltCustodianBit b⟩]
         (beltRoundEnd st e msg a b) := by
   obtain ⟨rt, hwal⟩ := belt_wal_receipt_tag_total st.wal_key st.guard_key_commit e msg msg
@@ -3045,7 +3045,7 @@ theorem tooth_belt_ack_without_signer_dedup_forges_quorum :
         (.AuthorizeShares 10#u64 beltWitnessBytes) =
       .ok (beltAfterGrant
              (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8),
-           .Ok (.SharesAuthorized { authorized_epoch := 10#u64,
+           .Ok (.SharesAuthorized { _private := (), authorized_epoch := 10#u64,
                                     msg_tag := beltWitnessBytes,
                                     certified_acks := 3#u32 })) ∧
     beltPopcount
