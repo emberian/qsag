@@ -238,33 +238,42 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
     let mut seen_base = 0usize;
     let mut seen_high = 0usize;
     for nv in 2..=MAX_PCS_NUM_VARS {
-        let schedule = WhirSecurityRegime::BciksJohnsonQrom128.schedule(nv);
-        let mut rem = nv;
-        for (stage, spec) in schedule.stages.iter().enumerate() {
-            rem -= spec.step_vars;
-            let n = (spec.blowup * (1usize << rem)) as u128;
-            if spec.num_queries as u128 >= n {
-                continue;
+        for base_regime in [
+            WhirSecurityRegime::BciksJohnsonQrom128,
+            WhirSecurityRegime::TurboShakeBciksJohnsonQrom128,
+        ] {
+            let schedule = base_regime.schedule(nv);
+            let mut rem = nv;
+            for (stage, spec) in schedule.stages.iter().enumerate() {
+                rem -= spec.step_vars;
+                let n = (spec.blowup * (1usize << rem)) as u128;
+                if spec.num_queries as u128 >= n {
+                    continue;
+                }
+                let &(_, _, a, m, big_d) = if nv <= 24 {
+                    if base_regime == WhirSecurityRegime::BciksJohnsonQrom128 {
+                        seen_base += 1;
+                    }
+                    WITNESSES
+                        .iter()
+                        .find(|w| w.0 == nv && w.1 == stage)
+                        .expect("missing finite affine witness (nv <= 24)")
+                } else {
+                    if base_regime == WhirSecurityRegime::BciksJohnsonQrom128 {
+                        seen_high += 1;
+                    }
+                    HIGH_CAPACITY_WITNESSES
+                        .iter()
+                        .find(|w| w.0 == nv && w.1 == stage)
+                        .expect("missing high-capacity affine witness (nv = 25..=28)")
+                };
+                assert!(query_error_below_2pow_minus256(
+                    n,
+                    a + spec.step_vars as u128,
+                    spec.num_queries
+                ));
+                check_witness_row(nv, stage, spec, n, (a, m, big_d), 256);
             }
-            let &(_, _, a, m, big_d) = if nv <= 24 {
-                seen_base += 1;
-                WITNESSES
-                    .iter()
-                    .find(|w| w.0 == nv && w.1 == stage)
-                    .expect("missing finite affine witness (nv <= 24)")
-            } else {
-                seen_high += 1;
-                HIGH_CAPACITY_WITNESSES
-                    .iter()
-                    .find(|w| w.0 == nv && w.1 == stage)
-                    .expect("missing high-capacity affine witness (nv = 25..=28)")
-            };
-            assert!(query_error_below_2pow_minus256(
-                n,
-                a + spec.step_vars as u128,
-                spec.num_queries
-            ));
-            check_witness_row(nv, stage, spec, n, (a, m, big_d), 256);
         }
     }
     assert_eq!(seen_base, WITNESSES.len());
@@ -277,6 +286,7 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
         WhirSecurityRegime::Cdhz25ZeroPowQrom128,
         WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
         WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+        WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
     ] {
         let target_bits = regime.pure_query_target_bits();
         for nv in 2..=MAX_PCS_NUM_VARS {
@@ -305,7 +315,7 @@ fn finite_johnson_witnesses_cover_every_canonical_stage() {
         }
     }
 
-    assert_eq!(seen_cdhz, 4 * CDHZ25_WITNESSES.len());
+    assert_eq!(seen_cdhz, 5 * CDHZ25_WITNESSES.len());
 
     // p^4 > 127^2 * 2^242 > 2000 * 2^245, certifying >245 stage
     // combiner bits for the bound above. This is not a protocol-wide union bound.

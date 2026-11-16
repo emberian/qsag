@@ -16,22 +16,45 @@ pub(crate) fn prover_parallel_jobs() -> usize {
     .min(crate::parallel_workers())
     .max(1)
 }
-static ACTIVE: Mutex<usize> = Mutex::new(0);
+struct AdmissionState {
+    active_threads: usize,
+    holders: alloc::vec::Vec<(std::thread::ThreadId, usize)>,
+}
+
+static STATE: Mutex<AdmissionState> = Mutex::new(AdmissionState {
+    active_threads: 0,
+    holders: alloc::vec::Vec::new(),
+});
 static READY: Condvar = Condvar::new();
 pub(crate) struct Permit;
 pub(crate) fn acquire() -> Permit {
-    let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
-    while *active >= prover_parallel_jobs() {
-        active = READY.wait(active).unwrap_or_else(|e| e.into_inner());
+    let tid = std::thread::current().id();
+    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, depth)) = state.holders.iter_mut().find(|(id, _)| *id == tid) {
+        *depth += 1;
+        return Permit;
     }
-    *active += 1;
+    let limit = prover_parallel_jobs();
+    while state.active_threads >= limit {
+        state = READY.wait(state).unwrap_or_else(|e| e.into_inner());
+    }
+    state.active_threads += 1;
+    state.holders.push((tid, 1));
     Permit
 }
 impl Drop for Permit {
     fn drop(&mut self) {
-        let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
-        *active -= 1;
-        READY.notify_all();
+        let tid = std::thread::current().id();
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = state.holders.iter().position(|(id, _)| *id == tid) {
+            if state.holders[pos].1 > 1 {
+                state.holders[pos].1 -= 1;
+                return;
+            }
+            state.holders.swap_remove(pos);
+            state.active_threads -= 1;
+            READY.notify_all();
+        }
     }
 }
 
