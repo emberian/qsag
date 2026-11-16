@@ -260,3 +260,76 @@ fn pinned_address_encodings() {
         "qsp1zqcqs8q9dpcanthu7s02cjf0wymexxz0th5vrtgyppu9t93g52tvhlqwgk8y6yw"
     );
 }
+
+#[test]
+fn canonical_intent_128_aligns_suite_tags_and_enforces_identity_kind_consistency() {
+    let all_suites = [
+        WitnessSuiteTag::MlDsa44,
+        WitnessSuiteTag::MlDsa65,
+        WitnessSuiteTag::MlDsa87,
+        WitnessSuiteTag::SlhDsa128s,
+        WitnessSuiteTag::SlhDsa128f,
+        WitnessSuiteTag::SlhDsa192s,
+        WitnessSuiteTag::SlhDsa192f,
+        WitnessSuiteTag::SlhDsa256s,
+        WitnessSuiteTag::SlhDsa256f,
+        WitnessSuiteTag::Baggy,
+        WitnessSuiteTag::Jorts,
+        WitnessSuiteTag::QuorumJorts,
+        WitnessSuiteTag::JortsPoseidon2,
+        WitnessSuiteTag::CorduroyPoseidon2,
+        WitnessSuiteTag::FrontierSumFts,
+        WitnessSuiteTag::ParallelSeededFts,
+        WitnessSuiteTag::PiHdCommitInventory,
+        WitnessSuiteTag::PiHdLinearModule,
+        WitnessSuiteTag::HybridSecp256k1MlDsa44,
+        WitnessSuiteTag::HybridEd25519MlDsa65,
+        WitnessSuiteTag::PolicyPredicateScript,
+    ];
+    let all_kinds = [
+        KeyIdentityKind::SingleOrThreshold,
+        KeyIdentityKind::HybridConjunctive,
+        KeyIdentityKind::ScriptPredicate,
+    ];
+    for suite in all_suites {
+        let expected_kind = suite.expected_identity_kind();
+        let addr = QsagAddress::from_pubkey_cshake256("qsp", suite, expected_kind, &[0x42; 64])
+            .expect("valid suite/kind pair must derive address");
+        for kind in all_kinds {
+            let intent = CanonicalIntent128 {
+                suite_tag: suite,
+                address_version: AddressVersion::V1Cshake256,
+                identity_kind: kind,
+                chain_id: 7,
+                nonce: 9,
+                timestamp_secs: 11,
+                amount_units: 13,
+                rolling_window_spent: 17,
+                recipient_commitment: addr.commitment_256,
+                payload_digest: [0xEE; 32],
+            };
+            let raw = encode_intent_128(&intent);
+            assert_eq!(u16::from_be_bytes([raw[4], raw[5]]), suite as u16);
+            assert_eq!(raw[6], AddressVersion::V1Cshake256 as u8);
+            assert_eq!(raw[7], kind as u8);
+            if kind == expected_kind {
+                assert_eq!(try_encode_intent_128(&intent), Ok(raw));
+                let decoded = decode_intent_128(&raw).expect("consistent pair must decode");
+                assert_eq!(decoded, intent);
+                assert!(decoded.matches_address_profile(&addr));
+            } else {
+                assert!(try_encode_intent_128(&intent).is_err());
+                assert!(
+                    decode_intent_128(&raw).is_none(),
+                    "inconsistent ({suite:?}, {kind:?}) must be rejected by decode_intent_128"
+                );
+            }
+        }
+    }
+    // Verify hybrid suite codes never invert 0x0501 / 0x0502.
+    assert_eq!(IntentSuiteTag::HybridSecp256k1MlDsa44 as u16, 0x0501);
+    assert_eq!(IntentSuiteTag::HybridEd25519MlDsa65 as u16, 0x0502);
+    assert_eq!(IntentIdentityKind::SingleOrThreshold as u8, 0x01);
+    assert_eq!(IntentIdentityKind::HybridConjunctive as u8, 0x02);
+    assert_eq!(IntentIdentityKind::ScriptPredicate as u8, 0x03);
+}

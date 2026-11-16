@@ -16,9 +16,7 @@ use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_is_canonical};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_accel::poseidon2::poseidon2_hash_framed_limbs4;
 pub use qsag_verified::{
-    CanonicalIntent128, HybridRoleTag, INTENT_V1_MAGIC, IntentAddressVersion, IntentIdentityKind,
-    IntentSuiteTag, check_hybrid_domain_framing, decode_intent_128,
-    derive_hybrid_transcript_digest, encode_intent_128,
+    HybridRoleTag, INTENT_V1_MAGIC, check_hybrid_domain_framing, derive_hybrid_transcript_digest,
 };
 
 pub use bech32m::{
@@ -165,6 +163,168 @@ impl KeyIdentityKind {
             other => Err(AddrError::UnsupportedIdentityKind(other)),
         }
     }
+}
+
+/// Canonical intent suite tag alias, sharing exact wire discriminators with [`WitnessSuiteTag`].
+pub type IntentSuiteTag = WitnessSuiteTag;
+
+/// Canonical intent address version alias, sharing exact wire discriminators with [`AddressVersion`].
+pub type IntentAddressVersion = AddressVersion;
+
+/// Canonical intent identity kind alias, sharing exact wire discriminators with [`KeyIdentityKind`].
+pub type IntentIdentityKind = KeyIdentityKind;
+
+/// Canonical deterministic 128-byte `TransactionIntent` payload (`INTENT_V1_MAGIC`).
+///
+/// Every byte in `[0..128)` is canonically constrained with zero unvalidated padding bits,
+/// and `(suite_tag, identity_kind)` is validated against [`WitnessSuiteTag::validate_identity_kind`]:
+/// - `bytes[0..4]`   : `INTENT_V1_MAGIC` (`0x5153_4931`, big-endian)
+/// - `bytes[4..6]`   : `suite_tag` (`u16` big-endian, canonical [`WitnessSuiteTag`])
+/// - `bytes[6]`      : `address_version` (`u8`, canonical [`AddressVersion`])
+/// - `bytes[7]`      : `identity_kind` (`u8`, canonical [`KeyIdentityKind`] matching `suite_tag`)
+/// - `bytes[8..16]`  : `chain_id` (`u64` big-endian)
+/// - `bytes[16..24]` : `nonce` (`u64` big-endian)
+/// - `bytes[24..32]` : `timestamp_secs` (`u64` big-endian)
+/// - `bytes[32..48]` : `amount_units` (`u128` big-endian)
+/// - `bytes[48..64]` : `rolling_window_spent` (`u128` big-endian)
+/// - `bytes[64..96]` : `recipient_commitment` (`[u8; 32]`)
+/// - `bytes[96..128]`: `payload_digest` (`[u8; 32]`)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CanonicalIntent128 {
+    pub suite_tag: IntentSuiteTag,
+    pub address_version: IntentAddressVersion,
+    pub identity_kind: IntentIdentityKind,
+    pub chain_id: u64,
+    pub nonce: u64,
+    pub timestamp_secs: u64,
+    pub amount_units: u128,
+    pub rolling_window_spent: u128,
+    pub recipient_commitment: [u8; 32],
+    pub payload_digest: [u8; 32],
+}
+
+impl CanonicalIntent128 {
+    /// Validate `(suite_tag, identity_kind)` consistency.
+    pub const fn validate(&self) -> Result<(), AddrError> {
+        self.suite_tag.validate_identity_kind(self.identity_kind)
+    }
+
+    /// Check whether this intent's `(suite_tag, address_version, identity_kind)` header matches `addr`.
+    pub const fn matches_address_profile(&self, addr: &QsagAddress) -> bool {
+        (self.suite_tag as u16) == (addr.suite_tag as u16)
+            && (self.address_version as u8) == (addr.version as u8)
+            && (self.identity_kind as u8) == (addr.kind as u8)
+    }
+}
+
+/// Validate `(suite_tag, identity_kind)` and encode [`CanonicalIntent128`] into a 128-byte wire frame.
+pub const fn try_encode_intent_128(intent: &CanonicalIntent128) -> Result<[u8; 128], AddrError> {
+    if let Err(err) = intent.validate() {
+        return Err(err);
+    }
+    Ok(encode_intent_128(intent))
+}
+
+/// Encode [`CanonicalIntent128`] deterministically into a fixed 128-byte wire frame.
+pub const fn encode_intent_128(intent: &CanonicalIntent128) -> [u8; 128] {
+    let mut out = [0u8; 128];
+    let magic = INTENT_V1_MAGIC.to_be_bytes();
+    let suite = (intent.suite_tag as u16).to_be_bytes();
+    let chain = intent.chain_id.to_be_bytes();
+    let nonce = intent.nonce.to_be_bytes();
+    let ts = intent.timestamp_secs.to_be_bytes();
+    let amount = intent.amount_units.to_be_bytes();
+    let spent = intent.rolling_window_spent.to_be_bytes();
+    out[0] = magic[0];
+    out[1] = magic[1];
+    out[2] = magic[2];
+    out[3] = magic[3];
+    out[4] = suite[0];
+    out[5] = suite[1];
+    out[6] = intent.address_version as u8;
+    out[7] = intent.identity_kind as u8;
+    let mut i = 0;
+    while i < 8 {
+        out[8 + i] = chain[i];
+        out[16 + i] = nonce[i];
+        out[24 + i] = ts[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < 16 {
+        out[32 + j] = amount[j];
+        out[48 + j] = spent[j];
+        j += 1;
+    }
+    let mut k = 0;
+    while k < 32 {
+        out[64 + k] = intent.recipient_commitment[k];
+        out[96 + k] = intent.payload_digest[k];
+        k += 1;
+    }
+    out
+}
+
+/// Decode and validate a 128-byte canonical `TransactionIntent` frame.
+/// Returns `None` on wrong magic, unknown discriminators, or inconsistent `(suite_tag, identity_kind)`.
+pub const fn decode_intent_128(bytes: &[u8; 128]) -> Option<CanonicalIntent128> {
+    let magic = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if magic != INTENT_V1_MAGIC {
+        return None;
+    }
+    let suite_raw = u16::from_be_bytes([bytes[4], bytes[5]]);
+    let suite_tag = match WitnessSuiteTag::from_u16(suite_raw) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    let address_version = match AddressVersion::from_u8(bytes[6]) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let identity_kind = match KeyIdentityKind::from_u8(bytes[7]) {
+        Ok(k) => k,
+        Err(_) => return None,
+    };
+    if suite_tag.validate_identity_kind(identity_kind).is_err() {
+        return None;
+    }
+    let chain_id = u64::from_be_bytes([
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ]);
+    let nonce = u64::from_be_bytes([
+        bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
+    ]);
+    let timestamp_secs = u64::from_be_bytes([
+        bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30], bytes[31],
+    ]);
+    let amount_units = u128::from_be_bytes([
+        bytes[32], bytes[33], bytes[34], bytes[35], bytes[36], bytes[37], bytes[38], bytes[39],
+        bytes[40], bytes[41], bytes[42], bytes[43], bytes[44], bytes[45], bytes[46], bytes[47],
+    ]);
+    let rolling_window_spent = u128::from_be_bytes([
+        bytes[48], bytes[49], bytes[50], bytes[51], bytes[52], bytes[53], bytes[54], bytes[55],
+        bytes[56], bytes[57], bytes[58], bytes[59], bytes[60], bytes[61], bytes[62], bytes[63],
+    ]);
+    let mut recipient_commitment = [0u8; 32];
+    let mut payload_digest = [0u8; 32];
+    let mut k = 0;
+    while k < 32 {
+        recipient_commitment[k] = bytes[64 + k];
+        payload_digest[k] = bytes[96 + k];
+        k += 1;
+    }
+    Some(CanonicalIntent128 {
+        suite_tag,
+        address_version,
+        identity_kind,
+        chain_id,
+        nonce,
+        timestamp_secs,
+        amount_units,
+        rolling_window_spent,
+        recipient_commitment,
+        payload_digest,
+    })
 }
 
 /// Canonical 35-byte (`version` witness symbol + 35-byte program = `1 + 56 = 57` 5-bit symbols ->
@@ -902,9 +1062,11 @@ impl HybridPinnedEnvelope {
         Ok(spec)
     }
 
-    /// Conjunctive verification bound directly to an expected [`QsagAddress`] and HRP (`expected_hrp`),
-    /// preventing cross-network HRP substitution, `AddressVersion` confusion, or wrong-address
-    /// witness replay.
+    /// Conjunctive verification bound to an expected [`QsagAddress`] and HRP (`expected_hrp`),
+    /// preventing target-address HRP substitution, `AddressVersion` relabeling, or wrong-address
+    /// witness substitution. Note that `signing_transcript` binds `(id_commit, msg)` without
+    /// `hrp` or `AddressVersion`, so deployments sharing one hybrid keypair across networks or
+    /// address versions must commit to network/version inside `msg`.
     pub fn verify_bound_address<VC, VP>(
         &self,
         expected_address: &QsagAddress,
@@ -1759,8 +1921,8 @@ mod tests {
 
         let intent = CanonicalIntent128 {
             suite_tag: IntentSuiteTag::HybridEd25519MlDsa65,
-            address_version: IntentAddressVersion::V2,
-            identity_kind: IntentIdentityKind::PolicyBound,
+            address_version: IntentAddressVersion::V2Poseidon2,
+            identity_kind: IntentIdentityKind::HybridConjunctive,
             chain_id: 0x0102_0304_0506_0708,
             nonce: 42,
             timestamp_secs: 1_735_689_600,
