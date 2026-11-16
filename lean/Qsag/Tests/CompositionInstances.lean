@@ -1,5 +1,5 @@
 module
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Math.GoldilocksBase
 /-
 Nondegenerate instances, negative controls and consumer bridges for
 `ComposedQsAgAndMergeSecurity`, `CrossProtocolAndDualOracleComposition` and
@@ -26,22 +26,18 @@ public import Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
 public import Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition
 public import Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity
 public import Qsag.Protocol.Aggregation.HemOpening
-import all Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
-import all Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition
-import all Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity
-import all Qsag.Protocol.Aggregation.HemOpening
-import all Qsag.Oracle.Qrom
-import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
-import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
-import all Qsag.Protocol.Threshold.ThresholdApproval
-import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Oracle.Sponge
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Math.Goldilocks
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Oracle.Keccak
-import all Qsag.Protocol.Signing.Fips205
-import all Qsag.Protocol.Aggregation.UcGames
+public import Qsag.Oracle.Qrom
+public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
+public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
+public import Qsag.Protocol.Threshold.ThresholdApproval
+public import Qsag.Protocol.Aggregation.Aggregation
+public import Qsag.Oracle.Sponge
+public import Qsag.Oracle.Poseidon2
+public import Qsag.Math.Goldilocks
+public import Qsag.Math.Gf2Pow128
+public import Qsag.Oracle.Keccak
+public import Qsag.Protocol.Signing.Fips205
+public import Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 public section
