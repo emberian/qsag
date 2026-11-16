@@ -80,6 +80,7 @@ use qsag_core::wipe::{
 };
 use qsag_core::wots_c::{LaneSpec, WOTS_STEPS};
 
+use crate::dzk::Gf128;
 use crate::hash::{SeedRng, expand, h32};
 use crate::party_node::{PoisonJournal, ROUND_ABORT};
 use crate::wire_channel::{MacSealedWireChannel, TransportError, WireTransport};
@@ -106,10 +107,10 @@ const STATE_BITS: usize = 1600;
 const RATE_BYTES: usize = 136;
 /// Multiplication outputs that may wait for a barrier before one is run automatically.
 const MAX_PENDING_OUTPUTS: usize = 16 * 24 * STATE_BITS;
-/// Parallel sponges evaluated per batched bit-plane `Keccak-f[1600]` wave (`1.57 MiB` reshare frame `< 4 MiB` cap).
+/// Parallel sponges evaluated per batched `Keccak-f[1600]` wave (`12.8 KiB` reshare frame).
 const BATCH_SPONGES: usize = 64;
-/// Bit-plane `u64` words per plane (`64` sponges = `38,400` words) before an automatic barrier flush.
-const MAX_PENDING_PLANE_WORDS: usize = 24 * BATCH_SPONGES * 25;
+/// Packed `u64` AND-gate words (`64` sponges = `38,400` words = `2,457,600` gates) per barrier flush.
+const MAX_PENDING_BOOL_WORDS: usize = 24 * BATCH_SPONGES * 25;
 
 const PURPOSE_RESHARE: u8 = 1;
 const PURPOSE_MAC_KEY: u8 = 2;
@@ -876,28 +877,6 @@ pub(crate) enum Fault {
     WrongConsistencyHash { peer: usize },
 }
 
-/// Per held slot: packed `u64` bit-shares and flattened `128 * words` `u64` `GF(2^128)` bit-planes.
-type PlaneSlotShares = (Vec<Vec<u64>>, Vec<Vec<u64>>);
-
-struct CachedKeyPlanes {
-    words: usize,
-    /// Per held slot: `words` little-endian `u64` words.
-    bits: Vec<Vec<u64>>,
-    /// Per held slot: `128 * words` `u64` words (`plane k` at `k * words..(k + 1) * words`).
-    rand: Vec<Vec<u64>>,
-}
-
-impl Drop for CachedKeyPlanes {
-    fn drop(&mut self) {
-        for b in &mut self.bits {
-            wipe_u64s(b);
-        }
-        for r in &mut self.rand {
-            wipe_u64s(r);
-        }
-    }
-}
-
 /// Shared chain-node digests produced by [`IsolatedCnfParty::sweep`] for one custodian.
 pub struct IsolatedCnfSweep {
     party: usize,
@@ -952,16 +931,16 @@ pub struct IsolatedCnfParty<T: WireTransport, J: PoisonJournal> {
     mult_ctr: u64,
     barrier_ctr: u64,
     hedged_ctr: u64,
-    cached_sk_seed: Option<CachedKeyPlanes>,
-    cached_sk_prf: Option<CachedKeyPlanes>,
     /// Per held slot: bit shares of every unverified scalar multiplication output and input.
     pending_bits: Vec<Vec<u64>>,
     /// Per held slot: the matching shares of `r * bit`.
     pending_rand: Vec<Vec<[u64; 2]>>,
-    /// Per held slot: packed `u64` bit-shares from batched multi-sponge permutations.
-    pending_plane_bits: Vec<Vec<u64>>,
-    /// Per held slot and `GF(2^128)` bit-plane `0..128`: packed `u64` shares of `r * bit`.
-    pending_plane_rand: Vec<Vec<Vec<u64>>>,
+    /// Per held slot: packed `u64` left-operand shares of batched Boolean AND gates.
+    pending_bool_x: Vec<Vec<u64>>,
+    /// Per held slot: packed `u64` right-operand shares of batched Boolean AND gates.
+    pending_bool_y: Vec<Vec<u64>>,
+    /// Per held slot: packed `u64` product shares of batched Boolean AND gates.
+    pending_bool_z: Vec<Vec<u64>>,
     poisoned: bool,
     #[cfg(test)]
     fault: Option<Fault>,
@@ -1074,12 +1053,11 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             mult_ctr: 0,
             barrier_ctr: 0,
             hedged_ctr: 0,
-            cached_sk_seed: None,
-            cached_sk_prf: None,
             pending_bits: vec![Vec::new(); held],
             pending_rand: vec![Vec::new(); held],
-            pending_plane_bits: vec![Vec::new(); held],
-            pending_plane_rand: vec![vec![Vec::new(); 128]; held],
+            pending_bool_x: vec![Vec::new(); held],
+            pending_bool_y: vec![Vec::new(); held],
+            pending_bool_z: vec![Vec::new(); held],
             poisoned: false,
             #[cfg(test)]
             fault: None,
@@ -1114,10 +1092,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
     /// Whether multiplications are waiting for a barrier.
     pub fn has_unverified_gates(&self) -> bool {
         self.pending_rand.first().is_some_and(|p| !p.is_empty())
-            || self
-                .pending_plane_bits
-                .first()
-                .is_some_and(|p| !p.is_empty())
+            || self.pending_bool_z.first().is_some_and(|p| !p.is_empty())
     }
 
     /// Multiplication batches run so far (one per chi round and one per loaded input).
@@ -1138,8 +1113,6 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         {
             wipe_bytes32(k);
         }
-        self.cached_sk_seed = None;
-        self.cached_sk_prf = None;
         wipe_u128s(&mut self.r);
         for p in &mut self.pending_bits {
             wipe_u64s(p);
@@ -1149,15 +1122,14 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             qsag_asm::volatile_fill(p, [0; 2]);
             p.clear();
         }
-        for p in &mut self.pending_plane_bits {
+        for p in self
+            .pending_bool_x
+            .iter_mut()
+            .chain(&mut self.pending_bool_y)
+            .chain(&mut self.pending_bool_z)
+        {
             wipe_u64s(p);
             p.clear();
-        }
-        for planes in &mut self.pending_plane_rand {
-            for plane in planes {
-                wipe_u64s(plane);
-                plane.clear();
-            }
         }
     }
 
@@ -1514,13 +1486,13 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             return Ok(());
         }
         let held = self.topo.held.len();
-        self.exchange_consistency(0)?;
-        let coin = self.joint_coin()?;
-        let mut u = vec![0u128; held];
-        let mut w = vec![0u128; held];
-        let count = self.pending_rand[0].len();
-        if count > 0 {
-            let mut raw = vec![0u8; 16 * count];
+        let scalar_count = self.pending_rand[0].len();
+        let bool_words = self.pending_bool_z[0].len();
+
+        if scalar_count > 0 {
+            self.exchange_consistency(0)?;
+            let coin = self.joint_coin()?;
+            let mut raw = vec![0u8; 16 * scalar_count];
             expand(b"cnf-party/alpha", &[&coin], &mut raw);
             let alpha: Vec<[u64; 2]> = raw
                 .as_chunks::<16>()
@@ -1528,10 +1500,12 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                 .iter()
                 .map(|c| gf_words(u128::from_le_bytes(*c)))
                 .collect();
+            let mut u = vec![0u128; held];
+            let mut w = vec![0u128; held];
             for l in 0..held {
                 let mut acc = [0u64; 2];
                 qsag_asm::gf2_128_mul_acc_batch(&mut acc, &alpha, &self.pending_rand[l]);
-                u[l] ^= gf_from_words(acc);
+                u[l] = gf_from_words(acc);
                 let bits = &self.pending_bits[l];
                 let mut sum = [0u64; 2];
                 for (k, a) in alpha.iter().enumerate() {
@@ -1539,114 +1513,63 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                     sum[0] ^= a[0] & mask;
                     sum[1] ^= a[1] & mask;
                 }
-                w[l] ^= gf_from_words(sum);
+                w[l] = gf_from_words(sum);
             }
-        }
-        let plane_words = self.pending_plane_bits[0].len();
-        if plane_words > 0 {
-            let mut raw_plane = vec![0u8; 16 * (64 + plane_words)];
-            expand(b"cnf-party/plane-alpha", &[&coin], &mut raw_plane);
-            let chunks = raw_plane.as_chunks::<16>().0;
-            let mut gamma = [[0u64; 2]; 64];
-            for (dst, chunk) in gamma.iter_mut().zip(&chunks[..64]) {
-                *dst = gf_words(u128::from_le_bytes(*chunk));
-            }
-            let beta: Vec<[u64; 2]> = chunks[64..]
-                .iter()
-                .map(|chunk| gf_words(u128::from_le_bytes(*chunk)))
+            let r = self.r.clone();
+            let rw = self.mul_field(&r, &w)?;
+            let t: Vec<u128> = u.iter().zip(&rw).map(|(a, b)| a ^ b).collect();
+            let rho: Vec<u128> = (0..held)
+                .map(|l| {
+                    let mut raw = [0u8; 16];
+                    expand(
+                        b"cnf-party/prss-key",
+                        &[
+                            &self.prss_seeds[l],
+                            &self.session,
+                            &(self.topo.held[l] as u64).to_be_bytes(),
+                            &[PURPOSE_CHECK_BLIND],
+                            &self.barrier_ctr.to_be_bytes(),
+                        ],
+                        &mut raw,
+                    );
+                    u128::from_le_bytes(raw)
+                })
                 .collect();
-            let mut gamma_lut = vec![[[0u64; 2]; 256]; 8];
-            for (byte_pos, table) in gamma_lut.iter_mut().enumerate() {
-                for (val, entry) in table.iter_mut().enumerate() {
-                    let mut sum = [0u64; 2];
-                    for bit in 0..8 {
-                        if ((val >> bit) & 1) == 1 {
-                            let g = gamma[8 * byte_pos + bit];
-                            sum[0] ^= g[0];
-                            sum[1] ^= g[1];
-                        }
-                    }
-                    *entry = sum;
-                }
+            let blinded = self.mul_field(&rho, &t)?;
+            self.exchange_consistency(1)?;
+            let shares: Vec<Vec<u8>> = blinded.iter().map(|s| s.to_le_bytes().to_vec()).collect();
+            let opened = self.open_shares(ROUND_CNF_CHECK_OPEN, &shares)?;
+            if !ct_eq_bytes(&opened, &[0u8; 16]) {
+                return Err(CnfPartyError::MultiplicationCheckFailed);
             }
-            let mut row_g = vec![[0u64; 2]; plane_words];
-            let fold_plane = |plane: &[u64], row_g: &mut [[u64; 2]]| -> u128 {
-                for (dst, &word) in row_g.iter_mut().zip(plane) {
-                    let b = word.to_le_bytes();
-                    let s0 = gamma_lut[0][b[0] as usize][0]
-                        ^ gamma_lut[1][b[1] as usize][0]
-                        ^ gamma_lut[2][b[2] as usize][0]
-                        ^ gamma_lut[3][b[3] as usize][0]
-                        ^ gamma_lut[4][b[4] as usize][0]
-                        ^ gamma_lut[5][b[5] as usize][0]
-                        ^ gamma_lut[6][b[6] as usize][0]
-                        ^ gamma_lut[7][b[7] as usize][0];
-                    let s1 = gamma_lut[0][b[0] as usize][1]
-                        ^ gamma_lut[1][b[1] as usize][1]
-                        ^ gamma_lut[2][b[2] as usize][1]
-                        ^ gamma_lut[3][b[3] as usize][1]
-                        ^ gamma_lut[4][b[4] as usize][1]
-                        ^ gamma_lut[5][b[5] as usize][1]
-                        ^ gamma_lut[6][b[6] as usize][1]
-                        ^ gamma_lut[7][b[7] as usize][1];
-                    *dst = [s0, s1];
-                }
-                let mut acc = [0u64; 2];
-                qsag_asm::gf2_128_mul_acc_batch(&mut acc, &beta, row_g);
-                gf_from_words(acc)
-            };
             for l in 0..held {
-                w[l] ^= fold_plane(&self.pending_plane_bits[l], &mut row_g);
-                for m in 0..128 {
-                    let pm = fold_plane(&self.pending_plane_rand[l][m], &mut row_g);
-                    u[l] ^= gf_mul(pm, 1u128 << m);
-                }
+                wipe_u64s(&mut self.pending_bits[l]);
+                self.pending_bits[l].clear();
+                qsag_asm::volatile_fill(&mut self.pending_rand[l], [0; 2]);
+                self.pending_rand[l].clear();
             }
-            qsag_asm::volatile_fill(&mut row_g, [0; 2]);
+            self.barrier_ctr = self
+                .barrier_ctr
+                .checked_add(1)
+                .ok_or(CnfPartyError::CounterOverflow)?;
         }
-        let r = self.r.clone();
-        let rw = self.mul_field(&r, &w)?;
-        let t: Vec<u128> = u.iter().zip(&rw).map(|(a, b)| a ^ b).collect();
-        let rho: Vec<u128> = (0..held)
-            .map(|l| {
-                let mut raw = [0u8; 16];
-                expand(
-                    b"cnf-party/prss-key",
-                    &[
-                        &self.prss_seeds[l],
-                        &self.session,
-                        &(self.topo.held[l] as u64).to_be_bytes(),
-                        &[PURPOSE_CHECK_BLIND],
-                        &self.barrier_ctr.to_be_bytes(),
-                    ],
-                    &mut raw,
-                );
-                u128::from_le_bytes(raw)
-            })
-            .collect();
-        let blinded = self.mul_field(&rho, &t)?;
-        self.exchange_consistency(1)?;
-        let shares: Vec<Vec<u8>> = blinded.iter().map(|s| s.to_le_bytes().to_vec()).collect();
-        let opened = self.open_shares(ROUND_CNF_CHECK_OPEN, &shares)?;
-        if !ct_eq_bytes(&opened, &[0u8; 16]) {
-            return Err(CnfPartyError::MultiplicationCheckFailed);
-        }
-        for l in 0..held {
-            wipe_u64s(&mut self.pending_bits[l]);
-            self.pending_bits[l].clear();
-            qsag_asm::volatile_fill(&mut self.pending_rand[l], [0; 2]);
-            self.pending_rand[l].clear();
-            wipe_u64s(&mut self.pending_plane_bits[l]);
-            self.pending_plane_bits[l].clear();
-            for plane in &mut self.pending_plane_rand[l] {
-                wipe_u64s(plane);
-                plane.clear();
+
+        if bool_words > 0 {
+            self.verify_pending_bool_triples()?;
+            for l in 0..held {
+                wipe_u64s(&mut self.pending_bool_x[l]);
+                self.pending_bool_x[l].clear();
+                wipe_u64s(&mut self.pending_bool_y[l]);
+                self.pending_bool_y[l].clear();
+                wipe_u64s(&mut self.pending_bool_z[l]);
+                self.pending_bool_z[l].clear();
             }
+            self.barrier_ctr = self
+                .barrier_ctr
+                .checked_add(1)
+                .ok_or(CnfPartyError::CounterOverflow)?;
         }
-        self.barrier_ctr = self
-            .barrier_ctr
-            .checked_add(1)
-            .ok_or(CnfPartyError::CounterOverflow)?;
+
         Ok(())
     }
 
