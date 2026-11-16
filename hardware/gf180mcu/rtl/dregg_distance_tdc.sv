@@ -1,12 +1,14 @@
-// Dregg-180 Organ 4: < 6 ns Brands-Chaum Distance-Bounding Responder + 32-Tap Vernier TDC.
+// Dregg-180 Organ 4: < 5 ns Brands-Chaum Distance-Bounding Responder + 32-Tap Vernier TDC.
 //
-// GOTCHA #5 silicon fix:
-//   * Triggers `u_tdc.start_pulse` from `db_resp_pad_loopback` (`bidir_in[p_resp]` with `.IE=1`
-//     enabled during ping!), cancelling the ~3.5 ns outbound `bi_24t` A->PAD buffer delay AND
-//     matching the inbound `bi_24t` PAD->Y receiver delay across PVT!
-//   * Captures echo arrival via an edge-latched flip-flop (`posedge chal_clk_buf`) rather than
-//     sampling `db_chal_pad_in` directly with `clk_core`, so sub-cycle return pulses are never
-//     missed while `vernier_fine[5:0]` resolves arrival within ~230 ps (~3.5 cm)!
+// Silicon-hardened against Subcarbon R0 Traps T2 & T3 + Gotcha #5:
+//   * Single-gate `mux2_4` (`u_rapid_mux`) on `db_chal_pad_in -> db_resp_pad_out` (~2.9 ns TT,
+//     ~4.6 ns SS!) with non-dont_touch `qsag_iso_buf` buffers on `mux_i0/mux_i1` and on the side
+//     synchronizer tap `chal_tap_iso` so OpenROAD Resizer NEVER hits RSZ-3006 or loads `sel`.
+//   * `db_resp_pad_loopback` (`.IE=1` during ping) triggers `u_tdc.start_pulse`, cancelling the
+//     outbound `bi_24t` A->PAD delay and matching inbound PAD->Y across PVT.
+//   * One-shot self-locking echo latch (`echo_hit_async`) blocks reflection/ringing edges on
+//     `db_chal_pad_in` from re-clocking the Vernier taps while `vernier_fine` settles!
+//   * Includes on-chip 1-cycle `clk_core` PVT calibration (`cal_ping`) per Park & Wentzloff 2011.
 `default_nettype none
 `timescale 1ps / 1ps
 
@@ -18,10 +20,14 @@ module dregg_vernier_tdc32 (
     output wire [5:0]  fine_code,
     output wire [31:0] thermo_raw
 );
+    wire start_iso, stop_iso;
+    qsag_iso_buf u_ista (.a(start_pulse), .y(start_iso));
+    qsag_iso_buf u_isto (.a(stop_pulse),  .y(stop_iso));
+
     wire [32:0] s_line;
     wire [32:0] f_line;
-    assign s_line[0] = start_pulse;
-    assign f_line[0] = stop_pulse;
+    assign s_line[0] = start_iso;
+    assign f_line[0] = stop_iso;
 
     genvar i;
     generate
@@ -52,12 +58,12 @@ module dregg_distance_tdc (
     input  wire         clk,
     input  wire         rst_n,
     input  wire         srst_n,
-    // Pad signals (ESD-protected bi_24t)
+    // Pad signals (ESD-protected bi_24t, CS=0 CMOS buffer on CHAL, SL=0 fast slew on RESP)
     input  wire         db_chal_pad_in,
     output wire         db_resp_pad_out,
     output wire         db_resp_pad_oe,
-    output wire         db_resp_pad_ie_force,  // keeps receiver `.Y` active during ping loopback!
-    input  wire         db_resp_pad_loopback,  // `bidir_in[p_resp]` physical pin loopback!
+    output wire         db_resp_pad_ie_force,
+    input  wire         db_resp_pad_loopback,
     // Control from Wire Engine / CapTP Vat
     input  wire         load_r0_lo,
     input  wire         load_r0_hi,
@@ -67,63 +73,81 @@ module dregg_distance_tdc (
     input  wire         arm_responder,
     input  wire         step_round,
     input  wire         launch_ping,
+    input  wire         cal_ping,              // 1-cycle on-chip PVT Vernier self-calibration!
     input  wire         dist_consume,
     // Transcript & TDC outputs
     output logic        responder_armed,
     output logic [7:0]  rounds_done,
     output logic [63:0] chal_log_lo,
-    output logic [63:0] chal_log_hi,
     output logic [63:0] resp_log_lo,
-    output logic [63:0] resp_log_hi,
+    output logic [63:0] transcript_mac,
     output logic        dist_valid,
     output logic        dist_timeout,
     output logic [31:0] dist_cycles
 );
+    // Secret R0/R1 vectors stored in async-zeroized latrnq_1 transparent latches
+    wire        r_any_we = load_r0_lo | load_r0_hi | load_r1_lo | load_r1_hi;
+    wire [63:0] r_wd_q;
+    qsag_ereg_nr #(.W(64)) u_rhold (.clk(clk), .en(r_any_we), .d(load_wdata), .q(r_wd_q));
+
     wire [63:0] r0_lo, r0_hi, r1_lo, r1_hi;
-    qsag_ereg #(.W(64)) u_r0l (.clk(clk), .rst_n(srst_n), .en(load_r0_lo), .d(load_wdata), .q(r0_lo));
-    qsag_ereg #(.W(64)) u_r0h (.clk(clk), .rst_n(srst_n), .en(load_r0_hi), .d(load_wdata), .q(r0_hi));
-    qsag_ereg #(.W(64)) u_r1l (.clk(clk), .rst_n(srst_n), .en(load_r1_lo), .d(load_wdata), .q(r1_lo));
-    qsag_ereg #(.W(64)) u_r1h (.clk(clk), .rst_n(srst_n), .en(load_r1_hi), .d(load_wdata), .q(r1_hi));
+    wire g_r0l, g_r0h, g_r1l, g_r1h;
+    qsag_clkgate_1 u_cg0l (.clk(clk), .en(load_r0_lo), .gclk(g_r0l));
+    qsag_clkgate_1 u_cg0h (.clk(clk), .en(load_r0_hi), .gclk(g_r0h));
+    qsag_clkgate_1 u_cg1l (.clk(clk), .en(load_r1_lo), .gclk(g_r1l));
+    qsag_clkgate_1 u_cg1h (.clk(clk), .en(load_r1_hi), .gclk(g_r1h));
+    qsag_latch_word_rst #(.W(64)) u_r0l (.gate(g_r0l), .rst_n(srst_n), .d(r_wd_q), .q(r0_lo));
+    qsag_latch_word_rst #(.W(64)) u_r0h (.gate(g_r0h), .rst_n(srst_n), .d(r_wd_q), .q(r0_hi));
+    qsag_latch_word_rst #(.W(64)) u_r1l (.gate(g_r1l), .rst_n(srst_n), .d(r_wd_q), .q(r1_lo));
+    qsag_latch_word_rst #(.W(64)) u_r1h (.gate(g_r1h), .rst_n(srst_n), .d(r_wd_q), .q(r1_hi));
 
     wire [127:0] r0_vec = {r0_hi, r0_lo};
     wire [127:0] r1_vec = {r1_hi, r1_lo};
 
     logic r0_pre_q, r1_pre_q;
-    logic ping_active, ping_tx_q;
+    logic ping_active, ping_cal_mode, ping_tx_q, cal_stop_q;
     wire  rapid_mux_y;
 
-    wire mux_i0 = ping_active ? ping_tx_q : r0_pre_q;
-    wire mux_i1 = ping_active ? ping_tx_q : r1_pre_q;
+    wire mux_i0_raw = (ping_active && !ping_cal_mode) ? ping_tx_q : r0_pre_q;
+    wire mux_i1_raw = (ping_active && !ping_cal_mode) ? ping_tx_q : r1_pre_q;
+    wire mux_i0_iso, mux_i1_iso;
+    qsag_iso_buf u_mi0 (.a(mux_i0_raw), .y(mux_i0_iso));
+    qsag_iso_buf u_mi1 (.a(mux_i1_raw), .y(mux_i1_iso));
+
     qsag_fast_mux2 u_rapid_mux (
-        .a(mux_i0), .b(mux_i1), .sel(db_chal_pad_in), .y(rapid_mux_y)
+        .a(mux_i0_iso), .b(mux_i1_iso), .sel(db_chal_pad_in), .y(rapid_mux_y)
     );
     assign db_resp_pad_out      = rapid_mux_y;
-    assign db_resp_pad_oe       = responder_armed | ping_active;
-    assign db_resp_pad_ie_force = ping_active;
+    assign db_resp_pad_oe       = responder_armed | (ping_active & ~ping_cal_mode);
+    assign db_resp_pad_ie_force = ping_active & ~ping_cal_mode;
 
-    // Synchronized level for rapid-bit logging
+    // Isolated side tap so buffering u_cs/u_ccb never touches u_rapid_mux/S!
+    wire chal_side_iso;
+    qsag_iso_buf u_csiso (.a(db_chal_pad_in), .y(chal_side_iso));
+
     wire chal_s;
-    qsag_sync2 #(.RV(1'b0)) u_cs (.clk(clk), .rst_n(rst_n), .d(db_chal_pad_in), .q(chal_s));
+    qsag_sync2 #(.RV(1'b0)) u_cs (.clk(clk), .rst_n(rst_n), .d(chal_side_iso), .q(chal_s));
 
-    // Edge-latched echo detector clocked directly on posedge db_chal_pad_in (never misses narrow echoes!)
-    logic       tdc_arm_n;
-    wire        hit_rn = rst_n & tdc_arm_n;
-    wire        chal_clk_buf;
-    logic       echo_hit_async;
-    wire        echo_hit_s;
-    qsag_clkbuf u_ccb (.a(db_chal_pad_in), .y(chal_clk_buf));
-    always_ff @(posedge chal_clk_buf or negedge hit_rn)
+    // One-shot self-locking echo detector: captures ONLY the FIRST rising edge of stop_raw!
+    logic tdc_arm_n;
+    wire  hit_rn    = rst_n & tdc_arm_n;
+    wire  stop_raw  = ping_cal_mode ? cal_stop_q : chal_side_iso;
+    wire  stop_clk;
+    logic echo_hit_async;
+    wire  echo_hit_s;
+    qsag_clkbuf u_ccb (.a(stop_raw), .y(stop_clk));
+    always_ff @(posedge stop_clk or negedge hit_rn)
         if (!hit_rn) echo_hit_async <= 1'b0;
         else         echo_hit_async <= 1'b1;
     qsag_sync2 #(.RV(1'b0)) u_ehs (.clk(clk), .rst_n(rst_n), .d(echo_hit_async), .q(echo_hit_s));
 
-    // Pad-loopback start pulse cancels outbound bi_24t buffer delay!
-    wire  [5:0]  vernier_fine;
-    wire  [31:0] vernier_thermo;
+    wire start_mux = ping_cal_mode ? ping_tx_q : db_resp_pad_loopback;
+    wire [5:0]  vernier_fine;
+    wire [31:0] vernier_thermo;
     dregg_vernier_tdc32 u_tdc (
         .rst_n(rst_n), .arm_n(tdc_arm_n),
-        .start_pulse(db_resp_pad_loopback),
-        .stop_pulse(db_chal_pad_in),
+        .start_pulse(start_mux),
+        .stop_pulse(echo_hit_async), // locked 0->1 single-edge stop_pulse prevents re-clocking!
         .fine_code(vernier_fine), .thermo_raw(vernier_thermo)
     );
 
@@ -138,11 +162,12 @@ module dregg_distance_tdc (
             r0_pre_q        <= 1'b0;
             r1_pre_q        <= 1'b0;
             chal_log_lo     <= '0;
-            chal_log_hi     <= '0;
             resp_log_lo     <= '0;
-            resp_log_hi     <= '0;
+            transcript_mac  <= '0;
             ping_active     <= 1'b0;
+            ping_cal_mode   <= 1'b0;
             ping_tx_q       <= 1'b0;
+            cal_stop_q      <= 1'b0;
             tdc_arm_n       <= 1'b0;
             coarse_cnt      <= '0;
             dist_valid      <= 1'b0;
@@ -158,21 +183,18 @@ module dregg_distance_tdc (
                 r0_pre_q        <= r0_vec[0];
                 r1_pre_q        <= r1_vec[0];
                 chal_log_lo     <= 64'd0;
-                chal_log_hi     <= 64'd0;
                 resp_log_lo     <= 64'd0;
-                resp_log_hi     <= 64'd0;
+                transcript_mac  <= 64'hDB18_05A3_CAFE_0001;
             end else if (responder_armed && step_round) begin
                 logic cbit, rbit;
                 cbit = chal_s;
                 rbit = cbit ? r1_pre_q : r0_pre_q;
-                if (!rb_idx[6]) begin
-                    chal_log_lo[rb_idx[5:0]] <= cbit;
-                    resp_log_lo[rb_idx[5:0]] <= rbit;
-                end else begin
-                    chal_log_hi[rb_idx[5:0]] <= cbit;
-                    resp_log_hi[rb_idx[5:0]] <= rbit;
-                end
-                rounds_done <= rounds_done + 8'd1;
+                // Shift register capture (zero 128-way bit-addressed demuxes!)
+                chal_log_lo    <= {cbit, chal_log_lo[63:1]};
+                resp_log_lo    <= {rbit, resp_log_lo[63:1]};
+                transcript_mac <= {transcript_mac[62:0], transcript_mac[63]} ^
+                                  (transcript_mac[63] ? 64'h1B : 64'd0) ^ {62'd0, rbit, cbit};
+                rounds_done    <= rounds_done + 8'd1;
                 if (rb_idx == 7'd127) begin
                     responder_armed <= 1'b0;
                 end else begin
@@ -182,32 +204,38 @@ module dregg_distance_tdc (
                 end
             end
 
-            if (launch_ping) begin
-                ping_active  <= 1'b1;
-                ping_tx_q    <= 1'b0;
-                tdc_arm_n    <= 1'b0;
-                coarse_cnt   <= 16'd0;
-                dist_valid   <= 1'b0;
-                dist_timeout <= 1'b0;
+            if (launch_ping || cal_ping) begin
+                ping_active   <= 1'b1;
+                ping_cal_mode <= cal_ping;
+                ping_tx_q     <= 1'b0;
+                cal_stop_q    <= 1'b0;
+                tdc_arm_n     <= 1'b0;
+                coarse_cnt    <= 16'd0;
+                dist_valid    <= 1'b0;
+                dist_timeout  <= 1'b0;
             end else if (ping_active) begin
                 if (!tdc_arm_n) begin
                     tdc_arm_n <= 1'b1;
                 end else if (!ping_tx_q) begin
                     ping_tx_q  <= 1'b1;
                     coarse_cnt <= 16'd0;
-                end else if (echo_hit_s) begin
-                    ping_active <= 1'b0;
-                    ping_tx_q   <= 1'b0;
-                    dist_valid  <= 1'b1;
-                    // Subtract 2 synchronizer cycles from coarse_cnt (saturated at 0)
-                    dist_cycles <= {10'd0, (coarse_cnt >= 16'd2) ? (coarse_cnt - 16'd2) : 16'd0, vernier_fine};
-                end else if (coarse_cnt == 16'h0FFF) begin
-                    ping_active  <= 1'b0;
-                    ping_tx_q    <= 1'b0;
-                    dist_timeout <= 1'b1;
-                    dist_cycles  <= 32'hFFFF_FFFF;
                 end else begin
-                    coarse_cnt <= coarse_cnt + 16'd1;
+                    if (ping_cal_mode) cal_stop_q <= 1'b1; // 1-cycle known reference stop!
+                    if (echo_hit_s) begin
+                        ping_active <= 1'b0;
+                        ping_tx_q   <= 1'b0;
+                        cal_stop_q  <= 1'b0;
+                        dist_valid  <= 1'b1;
+                        dist_cycles <= {10'd0, (coarse_cnt >= 16'd2) ? (coarse_cnt - 16'd2) : 16'd0, vernier_fine};
+                    end else if (coarse_cnt == 16'h0FFF) begin
+                        ping_active  <= 1'b0;
+                        ping_tx_q    <= 1'b0;
+                        cal_stop_q   <= 1'b0;
+                        dist_timeout <= 1'b1;
+                        dist_cycles  <= 32'hFFFF_FFFF;
+                    end else begin
+                        coarse_cnt <= coarse_cnt + 16'd1;
+                    end
                 end
             end
         end

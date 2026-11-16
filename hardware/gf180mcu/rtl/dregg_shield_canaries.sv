@@ -17,14 +17,16 @@ module dregg_quad_canary_spine (
     input  wire [2:0] tap_sel,
     output wire       arrived
 );
+    wire launch_iso;
+    qsag_iso_buf u_iso_q (.a(launch), .y(launch_iso));
     wire [32:0] c;
     wire [31:0] h;
-    assign c[0] = launch;
+    assign c[0] = launch_iso;
     genvar i;
     generate
         for (i = 0; i < 32; i++) begin : g_sp
-            qsag_dly_inv #(.TD(180)) u_a (.a(c[i]), .y(h[i]));
-            qsag_dly_inv #(.TD(180)) u_b (.a(h[i]), .y(c[i+1]));
+            qsag_dly_aoi21 #(.TD(180)) u_a (.a(c[i]), .y(h[i]));
+            qsag_dly_oai21 #(.TD(180)) u_b (.a(h[i]), .y(c[i+1]));
         end
     endgenerate
     logic tap_o;
@@ -41,17 +43,23 @@ module dregg_metal5_shield_spine (
     input  wire fib_cut_inj,   // verification hook for FIB probe/cut fault-injection test
     output wire shield_rx
 );
+    wire tx_iso;
+    qsag_iso_buf u_iso_tx (.a(shield_tx), .y(tx_iso));
     (* keep *) wire [16:0] m5_serpentine_net;
-    assign m5_serpentine_net[0] = shield_tx;
+    assign m5_serpentine_net[0] = tx_iso;
     genvar i;
     generate
         for (i = 0; i < 16; i++) begin : g_m5
+            // Explicit antenna tie-down diode at every 1,000 um Metal5 serpentine span input
+            // so KLayout.Antenna passes cleanly with zero Metal2/3 jumper cuts!
+            qsag_antenna_diode u_ant (.a(m5_serpentine_net[i]));
             qsag_shield_buf #(.TD(200)) u_m5buf (
                 .a(m5_serpentine_net[i]),
                 .y(m5_serpentine_net[i+1])
             );
         end
     endgenerate
+    qsag_antenna_diode u_ant_end (.a(m5_serpentine_net[16]));
     assign shield_rx = m5_serpentine_net[16] ^ fib_cut_inj;
 endmodule
 

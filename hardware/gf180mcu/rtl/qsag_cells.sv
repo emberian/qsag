@@ -112,6 +112,58 @@ module qsag_latch_word #(parameter int W = 64) (
 `endif
 endmodule
 
+// Secret-bearing transparent latch word with asynchronous active-low clear (`latrnq_1`),
+// guaranteeing immediate 0-clock zeroization even if `clk_core` is stopped or crowbarred!
+module qsag_latch_word_rst #(parameter int W = 64) (
+    input  wire         gate,
+    input  wire         rst_n,
+    input  wire [W-1:0] d,
+    output wire [W-1:0] q
+);
+`ifdef QSAG_GF180_CELLS
+    for (genvar i = 0; i < W; i++) begin : g_bit
+        (* keep *) gf180mcu_fd_sc_mcu7t5v0__latrnq_1 u_lr (.D(d[i]), .E(gate), .RN(rst_n), .Q(q[i]));
+    end
+`else
+    logic [W-1:0] qr;
+    /* verilator lint_off LATCH */
+    /* verilator lint_off COMBDLY */
+    always_latch begin
+        if (!rst_n)    qr <= '0;
+        else if (gate) qr <= d;
+    end
+    /* verilator lint_on COMBDLY */
+    /* verilator lint_on LATCH */
+    assign q = qr;
+`endif
+endmodule
+
+// Non-dont_touch isolation buffer placed immediately outside dont_touch rings, C-elements,
+// and responder muxes so OpenROAD Resizer never hits RSZ-3006 when repairing upstream nets.
+module qsag_iso_buf (
+    input  wire a,
+    output wire y
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__buf_2 u_iso (.I(a), .Z(y));
+`else
+    assign y = a;
+`endif
+endmodule
+
+// Explicit Metal4/Metal5 long-wire antenna tie-down diode (`gf180mcu_fd_sc_mcu7t5v0__antenna`).
+module qsag_antenna_diode (
+    input  wire a
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__antenna u_ant (.I(a));
+`else
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused = a;
+    /* verilator lint_on UNUSEDSIGNAL */
+`endif
+endmodule
+
 // Two-flop synchronizer with asynchronous clear.
 module qsag_sync2 #(
     parameter bit RV = 1'b0
@@ -404,8 +456,8 @@ module qsag_dly_inv #(
 `endif
 endmodule
 
-// Mixed-cell critical-path replica stages: stacked AOI21 + XOR2 gates tracking SS/125C/4.50V
-// PMOS/NMOS series-stack roll-off of the Han-Carlson + Karatsuba-CSA datapath.
+// Mixed-cell critical-path replica stages: series-stacked OAI21 + AOI21 + XOR2 gates tracking
+// SS/125C/4.50V PMOS/NMOS series-stack roll-off of the Han-Carlson + Karatsuba-CSA datapath.
 module qsag_dly_aoi21 #(
     parameter int TD = 210
 ) (
@@ -413,9 +465,31 @@ module qsag_dly_aoi21 #(
     output wire y
 );
 `ifdef QSAG_GF180_CELLS
-    wire tie_hi;
+    wire tie_hi, tie_lo;
     (* keep *) gf180mcu_fd_sc_mcu7t5v0__tieh    u_th  (.Z(tie_hi));
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__aoi21_1 u_aoi (.A1(a), .A2(tie_hi), .B(a), .ZN(y));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tiel    u_tl  (.ZN(tie_lo));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__aoi21_1 u_aoi (.A1(a), .A2(tie_hi), .B(tie_lo), .ZN(y));
+`elsif QSAG_SIM_DELAYS
+    logic yr;
+    initial yr = #(TD) ~a;
+    always @(a) yr <= #(TD) ~a;
+    assign y = yr;
+`else
+    assign y = ~a;
+`endif
+endmodule
+
+module qsag_dly_oai21 #(
+    parameter int TD = 210
+) (
+    input  wire a,
+    output wire y
+);
+`ifdef QSAG_GF180_CELLS
+    wire tie_hi, tie_lo;
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tieh    u_th  (.Z(tie_hi));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tiel    u_tl  (.ZN(tie_lo));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__oai21_1 u_oai (.A1(a), .A2(tie_lo), .B(tie_hi), .ZN(y));
 `elsif QSAG_SIM_DELAYS
     logic yr;
     initial yr = #(TD) ~a;
