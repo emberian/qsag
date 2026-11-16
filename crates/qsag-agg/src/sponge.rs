@@ -650,7 +650,16 @@ pub fn turboshake256_from_midstate_32_x4(
     midstate: &[u64; 25],
     inputs: [&[u8]; 4],
 ) -> [[u8; 32]; 4] {
-    turboshake256_from_midstate_32_lanes::<4>(midstate, inputs)
+    #[cfg(any(target_feature = "avx2", target_feature = "avx512f"))]
+    {
+        turboshake256_from_midstate_32_lanes::<4>(midstate, inputs)
+    }
+    #[cfg(not(any(target_feature = "avx2", target_feature = "avx512f")))]
+    {
+        let lo = turboshake256_from_midstate_32_lanes::<2>(midstate, [inputs[0], inputs[1]]);
+        let hi = turboshake256_from_midstate_32_lanes::<2>(midstate, [inputs[2], inputs[3]]);
+        [lo[0], lo[1], hi[0], hi[1]]
+    }
 }
 
 #[inline]
@@ -658,7 +667,22 @@ pub fn turboshake256_from_midstate_32_x8(
     midstate: &[u64; 25],
     inputs: [&[u8]; 8],
 ) -> [[u8; 32]; 8] {
-    turboshake256_from_midstate_32_lanes::<8>(midstate, inputs)
+    #[cfg(target_feature = "avx512f")]
+    {
+        turboshake256_from_midstate_32_lanes::<8>(midstate, inputs)
+    }
+    #[cfg(not(target_feature = "avx512f"))]
+    {
+        let lo = turboshake256_from_midstate_32_x4(
+            midstate,
+            [inputs[0], inputs[1], inputs[2], inputs[3]],
+        );
+        let hi = turboshake256_from_midstate_32_x4(
+            midstate,
+            [inputs[4], inputs[5], inputs[6], inputs[7]],
+        );
+        [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]]
+    }
 }
 
 #[inline]
@@ -688,10 +712,14 @@ pub fn turboshake256_from_midstate_16_x8(
 }
 
 #[inline]
-pub fn turboshake256_pow_u64_x8(midstate: &[u64; 25], chal: &[u8; 32], base_nonce: u64) -> [u64; 8] {
-    let mut st = [[0u64; 8]; 25];
+fn turboshake256_pow_lanes<const N: usize>(
+    midstate: &[u64; 25],
+    chal: &[u8; 32],
+    base_nonce: u64,
+) -> [u64; N] {
+    let mut st = [[0u64; N]; 25];
     for (dst_lane, &ms_val) in st.iter_mut().zip(midstate.iter()) {
-        *dst_lane = [ms_val; 8];
+        *dst_lane = [ms_val; N];
     }
     for (lane, st_lane) in st.iter_mut().enumerate().take(4) {
         let s = &chal[8 * lane..8 * (lane + 1)];
@@ -711,6 +739,28 @@ pub fn turboshake256_pow_u64_x8(midstate: &[u64; 25], chal: &[u8; 32], base_nonc
     }
     keccak_p1600_12_lanes(&mut st);
     st[0]
+}
+
+#[inline]
+pub fn turboshake256_pow_u64_x8(midstate: &[u64; 25], chal: &[u8; 32], base_nonce: u64) -> [u64; 8] {
+    #[cfg(target_feature = "avx512f")]
+    {
+        turboshake256_pow_lanes::<8>(midstate, chal, base_nonce)
+    }
+    #[cfg(all(not(target_feature = "avx512f"), target_feature = "avx2"))]
+    {
+        let lo = turboshake256_pow_lanes::<4>(midstate, chal, base_nonce);
+        let hi = turboshake256_pow_lanes::<4>(midstate, chal, base_nonce.wrapping_add(4));
+        [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]]
+    }
+    #[cfg(not(any(target_feature = "avx2", target_feature = "avx512f")))]
+    {
+        let a = turboshake256_pow_lanes::<2>(midstate, chal, base_nonce);
+        let b = turboshake256_pow_lanes::<2>(midstate, chal, base_nonce.wrapping_add(2));
+        let c = turboshake256_pow_lanes::<2>(midstate, chal, base_nonce.wrapping_add(4));
+        let d = turboshake256_pow_lanes::<2>(midstate, chal, base_nonce.wrapping_add(6));
+        [a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1]]
+    }
 }
 
 #[inline]
