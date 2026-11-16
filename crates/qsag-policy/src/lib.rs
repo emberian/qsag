@@ -76,8 +76,9 @@ pub struct TransactionPolicy {
     /// Maximum value transferable in a single transaction.
     pub max_single_tx_amount: u128,
     /// Maximum cumulative spend (`rolling_window_spent + amount_units`) inside the velocity window.
-    /// Setting `u128::MAX` selects an uncapped velocity window (exempt from cross-quorum
-    /// `SharedWindowSpendLedger` intersection, while per-signer `u128` overflow bounds still hold).
+    /// `u128::MAX` leaves the window uncapped apart from `u128` overflow. It grants no
+    /// exemption from cross-quorum accounting: a quorum that is neither the full committee
+    /// nor contains `hardware_guardian_party` still needs a [`SharedWindowSpendLedger`].
     pub velocity_window_cap: u128,
     pub valid_not_before_secs: u64,
     pub valid_not_after_secs: u64,
@@ -129,6 +130,8 @@ pub enum PolicyViolation {
     VelocityCapOverflowOrExceeded,
     InitiatorSelfApprovalForbidden,
     DuplicateApproverInQuorum,
+    /// `approver_parties` is longer than `u16::MAX`, the largest count a tier can require.
+    ApproverCountOutOfRange,
     NoMatchingQuorumTier,
     /// `quorum_tiers` fails [`TransactionPolicy::validate_quorum_tiers`].
     InvalidQuorumTierOrder,
@@ -217,7 +220,12 @@ impl TransactionPolicy {
     }
 
     /// Deterministically evaluate `intent` against `self` in constant-time allowlist scan mode.
+    ///
+    /// The approver list is attacker-supplied, so its length is bounded before anything is
+    /// scanned and every later step is linear in it.
     pub fn evaluate(&self, intent: &TransactionIntent) -> Result<(), PolicyViolation> {
+        let approver_count = u16::try_from(intent.approver_parties.len())
+            .map_err(|_| PolicyViolation::ApproverCountOutOfRange)?;
         self.validate_quorum_tiers()?;
         if intent.chain_id != self.chain_id {
             return Err(PolicyViolation::ChainIdMismatch);
@@ -250,31 +258,35 @@ impl TransactionPolicy {
         )
         .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
 
-        // Validate distinctness of approvers + anti-self-approval rule in O(N) time!
-        if intent.approver_parties.len() > 32 {
-            let mut seen = alloc::vec![0u64; 1024];
-            for &p_i in &intent.approver_parties {
-                if self.forbid_initiator_self_approval && p_i == intent.initiator_party {
-                    return Err(PolicyViolation::InitiatorSelfApprovalForbidden);
-                }
-                let word = usize::from(p_i >> 6);
-                let bit = 1u64 << (p_i & 63);
-                if (seen[word] & bit) != 0 {
-                    return Err(PolicyViolation::DuplicateApproverInQuorum);
-                }
-                seen[word] |= bit;
+        // Distinct approvers and the anti-self-approval rule, in one pass each over a bitset
+        // of the `u16` party-id space. The reverse pass leaves in `first_duplicate` the
+        // lowest index whose party appears again later, so the violation reported is that of
+        // the earliest offending approver, self-approval first when both name the same one.
+        let mut later = [0u64; 1024];
+        let mut first_duplicate = None;
+        for (index, &party) in intent.approver_parties.iter().enumerate().rev() {
+            let word = &mut later[usize::from(party >> 6)];
+            let bit = 1u64 << (party & 63);
+            if *word & bit != 0 {
+                first_duplicate = Some(index);
             }
+            *word |= bit;
+        }
+        let first_self_approval = if self.forbid_initiator_self_approval {
+            intent
+                .approver_parties
+                .iter()
+                .position(|&party| party == intent.initiator_party)
         } else {
-            for (i, &p_i) in intent.approver_parties.iter().enumerate() {
-                if self.forbid_initiator_self_approval && p_i == intent.initiator_party {
-                    return Err(PolicyViolation::InitiatorSelfApprovalForbidden);
-                }
-                for &p_j in &intent.approver_parties[i + 1..] {
-                    if p_i == p_j {
-                        return Err(PolicyViolation::DuplicateApproverInQuorum);
-                    }
-                }
+            None
+        };
+        match (first_self_approval, first_duplicate) {
+            (Some(own), Some(duplicate)) if duplicate < own => {
+                return Err(PolicyViolation::DuplicateApproverInQuorum);
             }
+            (Some(_), _) => return Err(PolicyViolation::InitiatorSelfApprovalForbidden),
+            (None, Some(_)) => return Err(PolicyViolation::DuplicateApproverInQuorum),
+            (None, None) => {}
         }
 
         // The first tier covering the amount; `validate_quorum_tiers` makes it the only
@@ -285,10 +297,9 @@ impl TransactionPolicy {
             .find(|t| intent.amount_units <= t.max_amount_units)
             .ok_or(PolicyViolation::NoMatchingQuorumTier)?;
 
-        let have = u16::try_from(intent.approver_parties.len()).unwrap_or(u16::MAX);
-        if have < matched_tier.min_approvers {
+        if approver_count < matched_tier.min_approvers {
             return Err(PolicyViolation::InsufficientTierApprovers {
-                have,
+                have: approver_count,
                 need: matched_tier.min_approvers,
             });
         }
@@ -491,8 +502,11 @@ impl Drop for WindowAuthority {
 /// - Private pairwise PRG zero-share seeds $k_{\min(i,j),\max(i,j)}$ ONLY for peers $j \neq i$,
 /// - Preprocessed pairwise BDOZ correlations $(r_{i, s}, M_{i \to j, s}, K_{i \leftarrow j, s})$
 ///   with monotonic single-use slot latch (`Cell<usize>`),
-/// - Durable authoritative velocity ledger (`current_window_id`, `accumulated_window_spend`,
-///   non-evicting monotone-watermarked `burned_intent_nonces` & `burned_sessions` sets),
+/// - Durable authoritative velocity ledger: `current_window_id`, `accumulated_window_spend`,
+///   and the replay sets `burned_intent_nonces` and `burned_sessions`. Each set is a sorted
+///   `Vec` of at most `replay_capacity` entries that never evicts: a full set refuses new
+///   intents (`ReplayWindowExhausted`). Entries leave only when the window advances or when
+///   `compact_monotone_replay_floor` raises the watermark that burns everything at or below it,
 /// - `<REDACTED>` `fmt::Debug` and `write_volatile` `Drop`.
 pub struct PolicySignerGuardShare {
     pub party_id: u16,
@@ -546,6 +560,43 @@ fn rebuild_verified_velocity(
         authority_pin: pin,
     });
     result.ok().map(|_| (guard, nonce))
+}
+
+/// An independent guard in the state of `guard`, reached through the verified transitions
+/// alone. `StatefulVelocityGuard` is affine, so this is how a spend is decided without
+/// advancing the retained guard. `None` if `guard` is in a state those transitions cannot
+/// reach.
+fn replay_verified_velocity(
+    guard: &qsag_verified::StatefulVelocityGuard,
+) -> Option<qsag_verified::StatefulVelocityGuard> {
+    let fresh = qsag_verified::StatefulVelocityGuard::new_window(
+        guard.window_id(),
+        guard.cap_units(),
+        guard.policy_pin(),
+        guard.authority_pin(),
+    );
+    if guard.last_nonce() == 0 {
+        return (guard.spent_units() == 0).then_some(fresh);
+    }
+    let (replayed, result) = fresh.authorize_spend(qsag_verified::VelocitySpendRequest {
+        window_id: guard.window_id(),
+        nonce: guard.last_nonce(),
+        amount_units: guard.spent_units(),
+        policy_pin: guard.policy_pin(),
+        authority_pin: guard.authority_pin(),
+    });
+    result.ok().map(|_| replayed)
+}
+
+/// A spend one signer guard's verified guard accepted, not yet installed. Built only by
+/// `PolicySignerGuardShare::prepare_approved_intent` and consumed by
+/// `commit_approved_intent`, which cannot fail.
+struct PreparedGuardSpend {
+    verified: qsag_verified::StatefulVelocityGuard,
+    generation: u64,
+    spend: u128,
+    nonce: [u8; 32],
+    session_id: [u8; 32],
 }
 
 impl fmt::Debug for PolicySignerGuardShare {
@@ -859,39 +910,18 @@ impl PolicySignerGuardShare {
         .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)
     }
 
-    /// Bring the retained verified guard to `cap` in the current window. A guard that has
-    /// to be built (first use, restore without a pinned cap, policy cap change) replays the
-    /// recorded spend through the verified transition, so it is refused if it exceeds `cap`.
-    fn pin_verified_velocity(&mut self, cap: u128) -> Result<(), PolicyViolation> {
-        if let Some(guard) = &self.verified_velocity
-            && guard.cap_units() == cap
-            && guard.window_id() == self.current_window_id
-            && guard.spent_units() == self.accumulated_window_spend
-        {
-            return Ok(());
-        }
-        let (guard, generation) = rebuild_verified_velocity(
-            self.current_window_id,
-            cap,
-            self.durable_key_id,
-            self.velocity_generation,
-            self.accumulated_window_spend,
-        )
-        .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
-        self.verified_velocity = Some(guard);
-        self.velocity_generation = generation;
-        Ok(())
-    }
-
-    /// Commit an approved spend through the retained verified guard. A refusal leaves the
-    /// ledger and the guard unchanged.
-    fn record_approved_intent(
-        &mut self,
+    /// Decide an approved spend without changing this guard. The verified transition runs
+    /// on a guard replayed from the retained one (or built for `velocity_window_cap` on
+    /// first use, after a restore without a pinned cap, or after a policy cap change, which
+    /// replays the recorded spend and so refuses a spend already above the cap). Everything
+    /// that can refuse the spend is decided here; [`Self::commit_approved_intent`] cannot fail.
+    fn prepare_approved_intent(
+        &self,
         velocity_window_cap: u128,
         projected_spend: u128,
         nonce: [u8; 32],
         session_id: [u8; 32],
-    ) -> Result<(), PolicyViolation> {
+    ) -> Result<PreparedGuardSpend, PolicyViolation> {
         if self.is_nonce_burned(&nonce) || self.is_session_burned(&session_id) {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
@@ -903,30 +933,64 @@ impl PolicySignerGuardShare {
         let amount = projected_spend
             .checked_sub(self.accumulated_window_spend)
             .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
-        self.pin_verified_velocity(velocity_window_cap)?;
-        let generation = self
-            .velocity_generation
+        let (pinned, pinned_generation) = match &self.verified_velocity {
+            Some(retained)
+                if retained.cap_units() == velocity_window_cap
+                    && retained.window_id() == self.current_window_id
+                    && retained.spent_units() == self.accumulated_window_spend =>
+            {
+                (
+                    replay_verified_velocity(retained)
+                        .ok_or(PolicyViolation::LedgerPersistenceFailed)?,
+                    self.velocity_generation,
+                )
+            }
+            _ => rebuild_verified_velocity(
+                self.current_window_id,
+                velocity_window_cap,
+                self.durable_key_id,
+                self.velocity_generation,
+                self.accumulated_window_spend,
+            )
+            .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?,
+        };
+        let generation = pinned_generation
             .checked_add(1)
             .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
-        let guard = self
-            .verified_velocity
-            .take()
-            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
-        let (guard, result) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+        let (verified, result) = pinned.authorize_spend(qsag_verified::VelocitySpendRequest {
             window_id: self.current_window_id,
             nonce: generation,
             amount_units: amount,
             policy_pin: self.durable_key_id,
             authority_pin: self.durable_key_id,
         });
-        self.verified_velocity = Some(guard);
         if result.is_err() {
             return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
         }
+        Ok(PreparedGuardSpend {
+            verified,
+            generation,
+            spend: projected_spend,
+            nonce,
+            session_id,
+        })
+    }
+
+    /// Install a spend [`Self::prepare_approved_intent`] decided on this guard, with no
+    /// guard mutation in between.
+    fn commit_approved_intent(&mut self, prepared: PreparedGuardSpend) {
+        let PreparedGuardSpend {
+            verified,
+            generation,
+            spend,
+            nonce,
+            session_id,
+        } = prepared;
+        self.verified_velocity = Some(verified);
         self.velocity_generation = generation;
-        self.accumulated_window_spend = projected_spend;
-        // Retain every nonce above `min_*_watermark` in this authenticated window without
-        // clearing any established monotone replay floor!
+        self.accumulated_window_spend = spend;
+        // Every identifier above the monotone floor stays in its sorted set: nothing is
+        // evicted, and the floor itself is untouched.
         for (values, value) in [
             (&mut self.burned_intent_nonces, nonce),
             (&mut self.burned_sessions, session_id),
@@ -934,6 +998,20 @@ impl PolicySignerGuardShare {
             let index = values.binary_search(&value).unwrap_or_else(|i| i);
             values.insert(index, value);
         }
+    }
+
+    /// Commit an approved spend through the verified guard. A refusal leaves this guard,
+    /// its ledger and its retained verified guard exactly as they were.
+    fn record_approved_intent(
+        &mut self,
+        velocity_window_cap: u128,
+        projected_spend: u128,
+        nonce: [u8; 32],
+        session_id: [u8; 32],
+    ) -> Result<(), PolicyViolation> {
+        let prepared =
+            self.prepare_approved_intent(velocity_window_cap, projected_spend, nonce, session_id)?;
+        self.commit_approved_intent(prepared);
         Ok(())
     }
 
@@ -1425,14 +1503,17 @@ impl PolicySignerGuardShare {
         Ok(v[peer_slot])
     }
 
+    /// Whether every quorum this policy can approve shares a party with `quorum_ids`, so
+    /// that party's own ledger sees the whole window: the quorum is the full committee, or
+    /// it contains the fixed `hardware_guardian_party`. Any other quorum can be disjoint
+    /// from another approving quorum and is accepted only with a [`SharedWindowSpendLedger`].
+    /// The rule does not depend on `velocity_window_cap`: the common ledger also carries the
+    /// committee-wide nonce and session replay sets and the overflow bound of the window sum.
     fn has_global_velocity_intersection(
         &self,
         policy: &TransactionPolicy,
         quorum_ids: &[u16],
     ) -> bool {
-        if policy.velocity_window_cap == u128::MAX {
-            return true;
-        }
         let full_committee = quorum_ids.len() == 1 + self.pairwise_zero_seeds.len();
         let fixed_guardian = policy
             .hardware_guardian_party
@@ -1827,22 +1908,48 @@ impl PendingIntentStagingPool {
     }
 }
 
+/// What one in-process barrier evaluation is asked to approve.
+struct BarrierRequest<'a> {
+    policy: &'a TransactionPolicy,
+    /// One intent per guard, in guard order.
+    per_party_intents: &'a [TransactionIntent],
+    session_id: [u8; 32],
+    current_timestamp: u64,
+    force_authenticated_initiator: bool,
+    #[cfg(test)]
+    injected_delta_fault: Option<(usize, (u128, u128))>,
+}
+
 /// Evaluate `policy` across `quorum_guards` where each signer $i$ independently evaluates its own
 /// local `per_party_intents[i]` inside the **commit-then-open Eurocrypt-2011 pairwise BDOZ**
 /// barrier (`0` central MAC key reconstruction, private pairwise zero-shares!). The rounds
 /// are those of the per-party phase states, run by [`barrier_rounds_in_process`].
-#[allow(clippy::too_many_arguments)]
+///
+/// Recording the approval is all-or-nothing across `shared_ledger` and every guard. Each
+/// guard's spend is first decided without mutation; only when all of them and the shared
+/// ledger accept is anything advanced, and those commits cannot fail. On a refusal:
+/// * by a guard: that guard is poisoned (its own verified guard contradicts the spend it
+///   projected a moment ago), the shared ledger and every other guard keep their spend,
+///   generation and replay sets unchanged;
+/// * by the shared ledger: the ledger is disabled (`LedgerPersistenceFailed` until it is
+///   recovered from its checkpoint) with its accounting unchanged, and no guard advances.
+///
+/// Either way the session's own and peer slots are retired, since its openings exist.
 fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
-    policy: &TransactionPolicy,
-    per_party_intents: &[TransactionIntent],
-    session_id: [u8; 32],
-    current_timestamp: u64,
+    request: BarrierRequest<'_>,
     quorum_guards: &mut [PolicySignerGuardShare],
-    mut shared_ledger: Option<&mut SharedWindowSpendLedger>,
-    force_authenticated_initiator: bool,
-    #[cfg(test)] injected_delta_fault: Option<(usize, (u128, u128))>,
+    shared_ledger: Option<&mut SharedWindowSpendLedger>,
     accel: &B,
 ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
+    let BarrierRequest {
+        policy,
+        per_party_intents,
+        session_id,
+        current_timestamp,
+        force_authenticated_initiator,
+        #[cfg(test)]
+        injected_delta_fault,
+    } = request;
     let m = quorum_guards.len();
     if m < 2 || per_party_intents.len() != m {
         return Err(PolicyViolation::EmptySignerBarrierSet);
@@ -1960,64 +2067,48 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         }
     };
 
+    // Decide every guard's spend without changing any guard or the shared ledger.
     let global_projected = projected_spends.iter().copied().max().unwrap_or(0);
-    // Pre-validate every quorum guard's replay/generation headroom BEFORE mutating `shared_ledger`
-    // so a guard capacity or generation refusal never leaves `shared_ledger` partially advanced.
+    let mut prepared = Vec::with_capacity(m);
+    let mut refusal = None;
     for (idx, g) in quorum_guards.iter().enumerate() {
-        let nonce = per_party_intents[idx].nonce;
-        if g.is_nonce_burned(&nonce) || g.is_session_burned(&session_id) {
-            abort_all(quorum_guards);
-            return Err(PolicyViolation::DuplicateIntentNonce);
-        }
-        if g.burned_intent_nonces.len() >= g.replay_capacity
-            || g.burned_sessions.len() >= g.replay_capacity
-        {
-            abort_all(quorum_guards);
-            return Err(PolicyViolation::ReplayWindowExhausted);
-        }
-        if g.velocity_generation == u64::MAX {
-            abort_all(quorum_guards);
-            return Err(PolicyViolation::LedgerPersistenceFailed);
-        }
-    }
-    if let Some(ledger) = shared_ledger.as_deref_mut()
-        && let Err(err) =
-            ledger.record_approved_intent(global_projected, per_party_intents[0].nonce, session_id)
-    {
-        // The openings of this session exist: its own and peer slots are spent either way.
-        abort_all(quorum_guards);
-        return Err(err);
-    }
-
-    // Atomically advance accumulated window spend, burn intent nonces + session ID, and retire slots.
-    let mut record_failure = None;
-    for (idx, g) in quorum_guards.iter_mut().enumerate() {
-        let peer_slots = peer_slots_of(g.party_id);
         let recorded_spend = if shared_ledger.is_some() {
             projected_spends[idx].max(global_projected)
         } else {
             projected_spends[idx]
         };
-        let recorded = g.record_approved_intent(
+        match g.prepare_approved_intent(
             policy.velocity_window_cap,
             recorded_spend,
             per_party_intents[idx].nonce,
             session_id,
-        );
-        g.abort_session_slot(sessions[idx].slot, &peer_slots);
-        if let Err(err) = recorded {
-            // The verified guard refused a spend the barrier approved: nothing is released.
-            g.poison();
-            record_failure = Some(err);
-            break;
+        ) {
+            Ok(spend) => prepared.push(spend),
+            Err(err) => {
+                refusal = Some((idx, err));
+                break;
+            }
         }
     }
-    if let Some(err) = record_failure {
-        if let Some(ledger) = shared_ledger {
-            ledger.failed = true;
-        }
+    if let Some((idx, err)) = refusal {
+        // The guard refused a spend the barrier approved: nothing is released or recorded.
+        abort_all(quorum_guards);
+        quorum_guards[idx].poison();
+        return Err(err);
+    }
+    // The shared ledger's record is atomic and is the last step that can refuse.
+    if let Some(ledger) = shared_ledger
+        && let Err(err) =
+            ledger.record_approved_intent(global_projected, per_party_intents[0].nonce, session_id)
+    {
+        ledger.failed = true;
         abort_all(quorum_guards);
         return Err(err);
+    }
+    // Advance accumulated window spend, burn the intent nonces and session ID, retire slots.
+    for ((g, spend), own) in quorum_guards.iter_mut().zip(prepared).zip(&sessions) {
+        g.commit_approved_intent(spend);
+        g.abort_session_slot(own.slot, &peer_slots_of(g.party_id));
     }
 
     AuthorizedSignReleaseToken::mint(
@@ -2137,15 +2228,17 @@ pub fn evaluate_per_party_intents_barrier<B: AcceleratorBackend>(
     accel: &B,
 ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
     evaluate_per_party_intents_barrier_inner(
-        policy,
-        intents,
-        session_id,
-        current_timestamp,
+        BarrierRequest {
+            policy,
+            per_party_intents: intents,
+            session_id,
+            current_timestamp,
+            force_authenticated_initiator: false,
+            #[cfg(test)]
+            injected_delta_fault: fault,
+        },
         guards,
         None,
-        false,
-        #[cfg(test)]
-        fault,
         accel,
     )
 }
@@ -2206,15 +2299,17 @@ pub fn evaluate_policy_committed_barrier_with_ledger<B: AcceleratorBackend>(
     let intents: Vec<TransactionIntent> =
         (0..quorum_guards.len()).map(|_| intent.clone()).collect();
     let token = evaluate_per_party_intents_barrier_inner(
-        policy,
-        &intents,
-        session_id,
-        current_timestamp,
+        BarrierRequest {
+            policy,
+            per_party_intents: &intents,
+            session_id,
+            current_timestamp,
+            force_authenticated_initiator: false,
+            #[cfg(test)]
+            injected_delta_fault: None,
+        },
         quorum_guards,
         Some(&mut *shared_ledger),
-        false,
-        #[cfg(test)]
-        None,
         accel,
     )?;
     // No token escapes until the common ledger and participating guard snapshots are durable.
@@ -2241,14 +2336,16 @@ pub fn evaluate_policy_committed_barrier_authenticated<B: AcceleratorBackend>(
     let intents: Vec<TransactionIntent> =
         (0..quorum_guards.len()).map(|_| intent.clone()).collect();
     evaluate_per_party_intents_barrier_inner(
-        policy,
-        &intents,
-        session_id,
-        current_timestamp,
+        BarrierRequest {
+            policy,
+            per_party_intents: &intents,
+            session_id,
+            current_timestamp,
+            force_authenticated_initiator: true,
+            #[cfg(test)]
+            injected_delta_fault: None,
+        },
         quorum_guards,
-        None,
-        true,
-        #[cfg(test)]
         None,
         accel,
     )
@@ -2259,8 +2356,9 @@ pub fn evaluate_policy_committed_barrier_authenticated<B: AcceleratorBackend>(
 /// Implementations must bind both authenticated endpoint IDs, the domain and vector length,
 /// reject replay, and hide sender alternatives and receiver choices. An ordinary channel
 /// cannot implement this contract. Base OT and its security parameters belong to the provider.
-/// Implementations must avoid deadlocks on bidirectional peer exchanges (e.g., via canonical
-/// `local_party < peer` flight ordering on synchronous transports or concurrent channels).
+/// One call covers both directions with `peer`. The trait does not say in which order: each
+/// implementation fixes one, and both endpoints must agree on it or a blocking transport
+/// deadlocks.
 pub trait PolicyAuthenticatedOt {
     fn exchange(
         &mut self,
@@ -2273,7 +2371,10 @@ pub trait PolicyAuthenticatedOt {
 }
 
 /// Production adapter using the interactive KOS check and committed Ring-LWE base OT.
-/// The ID ordering avoids crossed blocking sends on synchronous transports.
+/// The two directions run one after the other, never concurrently: for every chunk of at
+/// most 65,536 choices the party with the lower ID sends its pairs and then receives, and
+/// the party with the higher ID receives and then sends. The opposite orders at the two
+/// endpoints are what keeps blocking sends from crossing on a synchronous transport.
 impl<W: qsag_fts::ot::AuthenticatedOtWire> PolicyAuthenticatedOt
     for qsag_fts::ot::CommittedCorrelatedOt<W>
 {
@@ -3191,6 +3292,10 @@ impl PartyPolicyRound1State {
     ) -> Result<(PartyPolicyRound2State, PartyPolicyDeltaOpenMsg), PolicyViolation> {
         guard.check_phase(&self.context, 1)?;
         let own_slot = self.context.own.slot;
+        // Peer slots this guard accepted as bound to the session. They are retired with the
+        // own slot even when a later commitment is rejected: the peer latched each of them
+        // for this session and can never present it again.
+        let mut peer_slots = Vec::with_capacity(all_r1_commits.len().saturating_sub(1));
         let result = (|| {
             let own = &self.context.own;
             let mut commits = all_r1_commits.to_vec();
@@ -3198,7 +3303,6 @@ impl PartyPolicyRound1State {
             if commits.len() != own.quorum_ids.len() {
                 return Err(PolicyViolation::IntentBindingMismatch);
             }
-            let mut peer_slots = Vec::with_capacity(commits.len().saturating_sub(1));
             for (c, id) in commits.iter().zip(&own.quorum_ids) {
                 if c.party_id != *id
                     || c.session_id != own.session_id
@@ -3221,7 +3325,7 @@ impl PartyPolicyRound1State {
                 salt_i: self.context.salt,
                 delta_i: self.context.delta,
             };
-            self.context.peer_slots = peer_slots;
+            self.context.peer_slots = peer_slots.clone();
             guard.active_phase = Some((own.slot, 2));
             Ok((
                 PartyPolicyRound2State {
@@ -3231,7 +3335,7 @@ impl PartyPolicyRound1State {
                 msg,
             ))
         })();
-        policy_phase_result(guard, own_slot, &[], result)
+        policy_phase_result(guard, own_slot, &peer_slots, result)
     }
 }
 
@@ -5614,6 +5718,595 @@ mod tests {
         )
         .unwrap();
         assert!(guards.iter().all(|g| g.next_slot.get() == 1));
+    }
+
+    // ---- Regressions for the hostile-audit findings H-11, M-11, L-06 and L-07. ----
+
+    fn incoming_key_words(g: &PolicySignerGuardShare, peer: u16, slot: usize) -> [u128; 2] {
+        g.preproc_incoming_keys
+            .iter()
+            .find(|(p, _)| *p == peer)
+            .map(|(_, keys)| keys[slot])
+            .unwrap()
+    }
+
+    fn assert_peer_slot_retired(g: &PolicySignerGuardShare, peer: u16, slot: usize) {
+        assert!(
+            g.is_peer_slot_consumed(peer, slot),
+            "guard {} must retire slot {slot} of peer {peer}",
+            g.party_id
+        );
+        assert_eq!(
+            incoming_key_words(g, peer, slot),
+            [0; 2],
+            "guard {} must wipe its incoming key for slot {slot} of peer {peer}",
+            g.party_id
+        );
+    }
+
+    fn assert_peer_slot_live(g: &PolicySignerGuardShare, peer: u16, slot: usize) {
+        assert!(!g.is_peer_slot_consumed(peer, slot));
+        assert_ne!(incoming_key_words(g, peer, slot), [0; 2]);
+    }
+
+    /// H-11: every way a Round 3 delta opening vector can be refused retires each peer
+    /// slot of the session and wipes its incoming key, and the slot cannot be presented
+    /// to this guard again.
+    #[test]
+    fn round3_abort_retires_every_peer_slot_and_wipes_incoming_keys() {
+        type Fault = fn(&mut Vec<PartyPolicyDeltaOpenMsg>);
+        let faults: [Fault; 6] = [
+            |opens| opens[1].delta_i[0] ^= 1,
+            |opens| opens[1].salt_i[31] ^= 0x80,
+            |opens| opens[1].party_id = 9,
+            |opens| {
+                opens.pop();
+            },
+            |opens| opens.clear(),
+            |opens| opens[1] = opens[0].clone(),
+        ];
+        let ids = [1u16, 2, 4];
+        for (case, fault) in faults.iter().enumerate() {
+            let (policy, intent) = phase_fixture(&ids);
+            let mut guards = raw_test_guards([0x90 + case as u8; 32], &ids);
+            // Slot 0 is spent honestly; the faulted session runs on slot 1.
+            run_phases(&mut guards, &policy, &intent);
+            let mut faulted = intent.clone();
+            faulted.nonce = [0xA1; 32];
+            faulted.session_id = [0xA2; 32];
+            faulted.rolling_window_spent = 30;
+            let (states, mut opens) = delta_phases(&mut guards, &policy, &faulted);
+            for g in &guards {
+                for peer in ids.into_iter().filter(|p| *p != g.party_id) {
+                    assert_peer_slot_live(g, peer, 1);
+                }
+            }
+            fault(&mut opens);
+            for (state, g) in states.into_iter().zip(&mut guards) {
+                assert!(
+                    state.round3_commit_sigma(g, &opens).is_err(),
+                    "case {case}"
+                );
+                assert_slot_aborted_not_bricked(g, 1);
+                for peer in ids.into_iter().filter(|p| *p != g.party_id) {
+                    assert_peer_slot_retired(g, peer, 1);
+                    assert_peer_slot_live(g, peer, 2);
+                }
+                assert_eq!(g.accumulated_window_spend(), 30);
+            }
+
+            // A peer that presents the retired slot again is refused in Round 2.
+            let mut replay = faulted.clone();
+            replay.nonce = [0xA3; 32];
+            replay.session_id = [0xA4; 32];
+            let (mut states, mut commits) = start_phases(&mut guards, &policy, &replay);
+            assert!(commits.iter().all(|c| c.slot == 2));
+            commits[1].slot = 1;
+            assert_eq!(
+                states
+                    .remove(0)
+                    .round2_open_delta(&mut guards[0], &commits)
+                    .err(),
+                Some(PolicyViolation::IntentBindingMismatch),
+                "case {case}"
+            );
+        }
+    }
+
+    /// H-11, same class in Round 2: a commitment vector rejected part-way retires the peer
+    /// slots the guard had already accepted as bound to the session, and no others.
+    #[test]
+    fn round2_rejection_retires_the_peer_slots_it_accepted() {
+        let ids = [1u16, 2, 4];
+        let (policy, intent) = phase_fixture(&ids);
+        let mut guards = raw_test_guards([0x97; 32], &ids);
+        let (mut states, mut commits) = start_phases(&mut guards, &policy, &intent);
+        // Guard 1 accepts its own commitment and that of peer 2, then rejects peer 4.
+        commits[2].intent_digest[0] ^= 1;
+        assert_eq!(
+            states
+                .remove(0)
+                .round2_open_delta(&mut guards[0], &commits)
+                .err(),
+            Some(PolicyViolation::IntentBindingMismatch)
+        );
+        assert_slot_aborted_not_bricked(&guards[0], 0);
+        assert_peer_slot_retired(&guards[0], 2, 0);
+        assert_peer_slot_live(&guards[0], 4, 0);
+        assert_peer_slot_live(&guards[0], 2, 1);
+    }
+
+    fn open_quorum_policy(ids: &[u16]) -> (TransactionPolicy, TransactionIntent) {
+        let (mut policy, intent) = phase_fixture(ids);
+        policy.forbid_initiator_self_approval = false;
+        policy.hardware_guardian_party = None;
+        policy.quorum_tiers = vec![QuorumTierRule {
+            max_amount_units: 100,
+            min_approvers: 2,
+            require_hardware_guardian: false,
+        }];
+        (policy, intent)
+    }
+
+    /// M-11: a list longer than the `u16` party-id space is refused before anything else
+    /// is looked at, and the longest admissible list is still evaluated.
+    #[test]
+    fn evaluate_bounds_the_approver_list_before_scanning_it() {
+        let (policy, mut intent) = open_quorum_policy(&[1, 2]);
+        intent.approver_parties = (1..=u16::MAX).collect();
+        assert_eq!(intent.approver_parties.len(), 65_535);
+        assert_eq!(policy.evaluate(&intent), Ok(()));
+
+        // 65,536 distinct IDs: no duplicate exists, and a wrapping count would read 0.
+        intent.approver_parties = (0..=u16::MAX).collect();
+        assert_eq!(
+            policy.evaluate(&intent),
+            Err(PolicyViolation::ApproverCountOutOfRange)
+        );
+        intent.approver_parties = vec![7; 70_000];
+        assert_eq!(
+            policy.evaluate(&intent),
+            Err(PolicyViolation::ApproverCountOutOfRange)
+        );
+        // The bound is checked before every other rule, including the cheap ones.
+        intent.chain_id ^= 1;
+        intent.amount_units = u128::MAX;
+        assert_eq!(
+            policy.evaluate(&intent),
+            Err(PolicyViolation::ApproverCountOutOfRange)
+        );
+    }
+
+    /// M-11: the bitset reports exactly what the quadratic scan it replaced reported, for
+    /// duplicates and self-approval at every position and across bitset word boundaries.
+    #[test]
+    fn evaluate_distinctness_matches_the_pairwise_scan() {
+        fn pairwise(approvers: &[u16], initiator: u16, forbid: bool) -> Option<PolicyViolation> {
+            for (i, &p_i) in approvers.iter().enumerate() {
+                if forbid && p_i == initiator {
+                    return Some(PolicyViolation::InitiatorSelfApprovalForbidden);
+                }
+                if approvers[i + 1..].contains(&p_i) {
+                    return Some(PolicyViolation::DuplicateApproverInQuorum);
+                }
+            }
+            None
+        }
+        fn observed(
+            policy: &TransactionPolicy,
+            intent: &TransactionIntent,
+        ) -> Option<PolicyViolation> {
+            match policy.evaluate(intent) {
+                Err(
+                    err @ (PolicyViolation::InitiatorSelfApprovalForbidden
+                    | PolicyViolation::DuplicateApproverInQuorum),
+                ) => Some(err),
+                _ => None,
+            }
+        }
+        let (mut policy, mut intent) = open_quorum_policy(&[1, 2]);
+        intent.initiator_party = 64;
+
+        let fixed: [&[u16]; 12] = [
+            &[],
+            &[5, 6],
+            &[5, 6, 5],
+            &[5, 64, 5],
+            &[64, 5, 5],
+            &[5, 5, 64],
+            &[64, 64],
+            &[63, 64, 127, 128, 0, u16::MAX],
+            &[u16::MAX, 0, u16::MAX],
+            &[0, 63, 0],
+            &[1023, 1024, 1024],
+            &[65_472, 65_535, 65_472],
+        ];
+        let mut cases: Vec<Vec<u16>> = fixed.iter().map(|c| c.to_vec()).collect();
+        // Deterministic lists over a small ID range, so duplicates and the initiator recur.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for _ in 0..1_200 {
+            let len = next(40) as usize;
+            let spread = 1 + next(120);
+            cases.push((0..len).map(|_| (next(spread) + 20) as u16).collect());
+        }
+        // Long lists: all distinct, a duplicate at the far ends, the initiator at the end.
+        let long: Vec<u16> = (1_000..41_000).collect();
+        cases.push(long.clone());
+        let mut ends = long.clone();
+        *ends.last_mut().unwrap() = ends[0];
+        cases.push(ends);
+        let mut with_initiator = long;
+        with_initiator.push(64);
+        cases.push(with_initiator);
+
+        let mut seen = [0usize; 3];
+        for forbid in [false, true] {
+            policy.forbid_initiator_self_approval = forbid;
+            for case in &cases {
+                intent.approver_parties = case.clone();
+                let expected = pairwise(case, intent.initiator_party, forbid);
+                assert_eq!(observed(&policy, &intent), expected, "{forbid} {case:?}");
+                seen[match expected {
+                    None => 0,
+                    Some(PolicyViolation::DuplicateApproverInQuorum) => 1,
+                    Some(_) => 2,
+                }] += 1;
+            }
+        }
+        assert!(seen.iter().all(|count| *count > 20), "{seen:?}");
+    }
+
+    fn quorum_intent(
+        base: &TransactionIntent,
+        ids: &[u16],
+        tag: u8,
+        amount: u128,
+    ) -> TransactionIntent {
+        let mut intent = base.clone();
+        intent.amount_units = amount;
+        intent.rolling_window_spent = 0;
+        intent.nonce = [tag; 32];
+        intent.session_id = [tag ^ 0xFF; 32];
+        intent.approver_parties = ids.to_vec();
+        intent.quorum_ids = ids.to_vec();
+        intent
+    }
+
+    /// L-06: an uncapped velocity window is no exemption. A quorum that can be disjoint
+    /// from another one is refused without the shared ledger, and with it stays under the
+    /// committee-wide replay sets and cumulative spend.
+    #[test]
+    fn uncapped_velocity_window_keeps_disjoint_quorums_on_the_shared_ledger() {
+        let accel = CpuReferenceBackend::new();
+        let (mut policy, base) = open_quorum_policy(&[1, 2, 3, 4]);
+        policy.velocity_window_cap = u128::MAX;
+        let mut committee = raw_test_guards([0x73; 32], &[1, 2, 3, 4]);
+
+        let first = quorum_intent(&base, &[1, 2], 0x11, 60);
+        assert_eq!(
+            evaluate_policy_committed_barrier(
+                &policy,
+                &first,
+                first.session_id,
+                first.timestamp_secs,
+                &mut committee[0..2],
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::MissingHardwareGuardian
+        );
+        assert_eq!(
+            committee[0]
+                .round1_commit_intent(&policy, &first, first.session_id, first.timestamp_secs, 0)
+                .err(),
+            Some(PolicyViolation::MissingHardwareGuardian)
+        );
+        assert!(committee.iter().all(|g| g.next_slot.get() == 0));
+
+        let mut ledger = SharedWindowSpendLedger::new(&policy, 0);
+        evaluate_policy_committed_barrier_with_ledger(
+            &policy,
+            &first,
+            first.session_id,
+            first.timestamp_secs,
+            &mut committee[0..2],
+            &mut ledger,
+            |_, _| Ok(()),
+            &accel,
+        )
+        .unwrap();
+        // The disjoint quorum cannot reuse the nonce or the session the first one burned.
+        let mut reused_nonce = quorum_intent(&base, &[3, 4], 0x12, 60);
+        reused_nonce.nonce = first.nonce;
+        let mut reused_session = quorum_intent(&base, &[3, 4], 0x13, 60);
+        reused_session.session_id = first.session_id;
+        for replay in [&reused_nonce, &reused_session] {
+            assert_eq!(
+                evaluate_policy_committed_barrier_with_ledger(
+                    &policy,
+                    replay,
+                    replay.session_id,
+                    replay.timestamp_secs,
+                    &mut committee[2..4],
+                    &mut ledger,
+                    |_, _| Ok(()),
+                    &accel,
+                )
+                .unwrap_err(),
+                PolicyViolation::DuplicateIntentNonce
+            );
+        }
+        let second = quorum_intent(&base, &[3, 4], 0x14, 60);
+        evaluate_policy_committed_barrier_with_ledger(
+            &policy,
+            &second,
+            second.session_id,
+            second.timestamp_secs,
+            &mut committee[2..4],
+            &mut ledger,
+            |_, _| Ok(()),
+            &accel,
+        )
+        .unwrap();
+        assert_eq!(ledger.accumulated_window_spend(), 120);
+        assert_eq!(committee[3].accumulated_window_spend(), 120);
+
+        // The structural exemptions are unchanged: the full committee needs no ledger.
+        let mut full = raw_test_guards([0x74; 32], &[1, 2, 3, 4]);
+        let all = quorum_intent(&base, &[1, 2, 3, 4], 0x15, 60);
+        evaluate_policy_committed_barrier(
+            &policy,
+            &all,
+            all.session_id,
+            all.timestamp_secs,
+            &mut full,
+            &accel,
+        )
+        .unwrap();
+    }
+
+    /// Replace the retained verified guard by one in the same window, cap, spend and
+    /// nonce but pinned to another key: every pre-barrier check still passes and only the
+    /// verified transition of the record step refuses.
+    fn pin_verified_guard_elsewhere(g: &mut PolicySignerGuardShare, cap: u128) {
+        let (foreign, generation) = rebuild_verified_velocity(
+            g.current_window_id,
+            cap,
+            [0xEE; 32],
+            g.velocity_generation,
+            g.accumulated_window_spend,
+        )
+        .unwrap();
+        assert_eq!(generation, g.velocity_generation);
+        g.verified_velocity = Some(foreign);
+    }
+
+    /// What recording an approval advances on a guard.
+    fn recorded_state(g: &PolicySignerGuardShare) -> (u128, u64, Vec<[u8; 32]>, Vec<[u8; 32]>) {
+        (
+            g.accumulated_window_spend,
+            g.velocity_generation,
+            g.burned_intent_nonces.clone(),
+            g.burned_sessions.clone(),
+        )
+    }
+
+    /// L-07: when a guard refuses to record after the barrier opened, the shared ledger is
+    /// byte-for-byte what it was, no other guard has advanced, and the survivors still
+    /// agree with the ledger in a later session.
+    #[test]
+    fn guard_refusal_leaves_the_shared_ledger_and_the_other_guards_unadvanced() {
+        let accel = CpuReferenceBackend::new();
+        let (mut policy, base) = open_quorum_policy(&[1, 2, 3, 4]);
+        policy.velocity_window_cap = 100;
+        let mut committee = raw_test_guards([0x75; 32], &[1, 2, 3, 4]);
+        let g4 = committee.pop().unwrap();
+        let g3 = committee.pop().unwrap();
+        let mut pair_12 = committee;
+        let mut ledger = SharedWindowSpendLedger::new(&policy, 0);
+
+        let honest = quorum_intent(&base, &[1, 2], 0x21, 10);
+        evaluate_policy_committed_barrier_with_ledger(
+            &policy,
+            &honest,
+            honest.session_id,
+            honest.timestamp_secs,
+            &mut pair_12,
+            &mut ledger,
+            |_, _| Ok(()),
+            &accel,
+        )
+        .unwrap();
+
+        // The second guard of the quorum refuses; the first one would already have advanced.
+        pin_verified_guard_elsewhere(&mut pair_12[1], policy.velocity_window_cap);
+        let ledger_before = ledger.export_durable_checkpoint(&[0x55; 32]);
+        let ledger_generation = ledger.generation();
+        let first_before = recorded_state(&pair_12[0]);
+        let refused = quorum_intent(&base, &[1, 2], 0x22, 10);
+        assert_eq!(
+            evaluate_policy_committed_barrier_with_ledger(
+                &policy,
+                &refused,
+                refused.session_id,
+                refused.timestamp_secs,
+                &mut pair_12,
+                &mut ledger,
+                |_, _| panic!("nothing to persist: no approval was recorded"),
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::VelocityCapOverflowOrExceeded
+        );
+        assert_eq!(ledger.export_durable_checkpoint(&[0x55; 32]), ledger_before);
+        assert_eq!(ledger.generation(), ledger_generation);
+        assert_eq!(ledger.accumulated_window_spend(), 10);
+        assert!(!ledger.failed);
+        assert!(!ledger.is_nonce_burned(&refused.nonce));
+        assert!(!ledger.is_session_burned(&refused.session_id));
+        let verified = ledger.verified_velocity.as_ref().unwrap();
+        assert_eq!((verified.spent_units(), verified.last_nonce()), (10, 1));
+
+        let first = &pair_12[0];
+        assert_eq!(recorded_state(first), first_before);
+        assert!(!first.is_nonce_burned(&refused.nonce));
+        assert!(!first.is_session_burned(&refused.session_id));
+        let verified = first.verified_velocity.as_ref().unwrap();
+        assert_eq!((verified.spent_units(), verified.last_nonce()), (10, 1));
+        // The openings of the refused session exist, so its slots are spent on every guard.
+        assert_slot_aborted_not_bricked(first, 1);
+        assert_peer_slot_retired(first, 2, 1);
+        assert_erased(&pair_12[1]);
+
+        // Guard 1 and the ledger still agree: the same intent nonce completes with guard 3.
+        let mut pair_13 = vec![pair_12.remove(0), g3];
+        let mut retry = quorum_intent(&base, &[1, 3], 0x23, 10);
+        retry.nonce = refused.nonce;
+        evaluate_policy_committed_barrier_with_ledger(
+            &policy,
+            &retry,
+            retry.session_id,
+            retry.timestamp_secs,
+            &mut pair_13,
+            &mut ledger,
+            |_, _| Ok(()),
+            &accel,
+        )
+        .unwrap();
+        assert_eq!(ledger.accumulated_window_spend(), 20);
+        assert!(pair_13.iter().all(|g| g.accumulated_window_spend() == 20));
+        assert_eq!(ledger.generation(), ledger_generation + 1);
+
+        // A refusal by the shared ledger itself disables it without changing its
+        // accounting, and advances no guard.
+        let mut pair_34 = vec![pair_13.pop().unwrap(), g4];
+        let before: Vec<_> = pair_34.iter().map(recorded_state).collect();
+        ledger.verified_velocity = rebuild_verified_velocity(
+            0,
+            policy.velocity_window_cap,
+            [0xEE; 32],
+            ledger.generation,
+            ledger.accumulated_window_spend,
+        )
+        .map(|(foreign, _)| foreign);
+        let ledger_before = ledger.export_durable_checkpoint(&[0x55; 32]);
+        let last = quorum_intent(&base, &[3, 4], 0x24, 10);
+        assert_eq!(
+            evaluate_policy_committed_barrier_with_ledger(
+                &policy,
+                &last,
+                last.session_id,
+                last.timestamp_secs,
+                &mut pair_34,
+                &mut ledger,
+                |_, _| panic!("nothing to persist: no approval was recorded"),
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::VelocityCapOverflowOrExceeded
+        );
+        assert!(ledger.failed);
+        assert_eq!(ledger.export_durable_checkpoint(&[0x55; 32]), ledger_before);
+        assert!(pair_34.iter().all(|g| !g.is_poisoned()));
+        assert_eq!(
+            pair_34.iter().map(recorded_state).collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    /// L-07 without a shared ledger: a refusing guard leaves the guards before it unadvanced.
+    #[test]
+    fn guard_refusal_without_a_ledger_advances_no_guard() {
+        let accel = CpuReferenceBackend::new();
+        let (policy, base) = open_quorum_policy(&[1, 2]);
+        let mut guards = raw_test_guards([0x76; 32], &[1, 2]);
+        let honest = quorum_intent(&base, &[1, 2], 0x31, 10);
+        evaluate_policy_committed_barrier(
+            &policy,
+            &honest,
+            honest.session_id,
+            honest.timestamp_secs,
+            &mut guards,
+            &accel,
+        )
+        .unwrap();
+        pin_verified_guard_elsewhere(&mut guards[1], policy.velocity_window_cap);
+        let first_before = recorded_state(&guards[0]);
+        let refused = quorum_intent(&base, &[1, 2], 0x32, 10);
+        assert_eq!(
+            evaluate_policy_committed_barrier(
+                &policy,
+                &refused,
+                refused.session_id,
+                refused.timestamp_secs,
+                &mut guards,
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::VelocityCapOverflowOrExceeded
+        );
+        assert_eq!(recorded_state(&guards[0]), first_before);
+        assert_eq!(first_before.0, 10);
+        assert_slot_aborted_not_bricked(&guards[0], 1);
+        assert_erased(&guards[1]);
+    }
+
+    /// L-07: a refused record leaves a guard's retained verified guard as it was, and the
+    /// replay used to decide a spend reproduces the retained guard exactly.
+    #[test]
+    fn refused_record_leaves_the_retained_verified_guard_untouched() {
+        let mut guard = raw_test_guards([0x77; 32], &[1, 2]).remove(0);
+        guard
+            .record_approved_intent(50, 7, [1; 32], [2; 32])
+            .unwrap();
+        guard
+            .record_approved_intent(50, 30, [3; 32], [4; 32])
+            .unwrap();
+        let observe = |v: &qsag_verified::StatefulVelocityGuard| {
+            (
+                v.window_id(),
+                v.spent_units(),
+                v.cap_units(),
+                v.policy_pin(),
+                v.authority_pin(),
+                v.last_nonce(),
+            )
+        };
+        let retained = observe(guard.verified_velocity.as_ref().unwrap());
+        assert_eq!((retained.1, retained.5), (30, 2));
+        let replayed =
+            replay_verified_velocity(guard.verified_velocity.as_ref().unwrap()).unwrap();
+        assert_eq!(observe(&replayed), retained);
+
+        let state = recorded_state(&guard);
+        for (cap, spend, nonce) in [
+            (50u128, 51u128, [5u8; 32]), // above the cap
+            (50, 29, [5; 32]),           // below the recorded spend
+            (50, 40, [3; 32]),           // burned nonce
+            (20, 31, [5; 32]),           // a lower cap than the recorded spend
+        ] {
+            assert!(
+                guard
+                    .record_approved_intent(cap, spend, nonce, [6; 32])
+                    .is_err()
+            );
+            assert_eq!(recorded_state(&guard), state);
+            assert_eq!(
+                observe(guard.verified_velocity.as_ref().unwrap()),
+                retained
+            );
+        }
+        guard
+            .record_approved_intent(50, 50, [5; 32], [6; 32])
+            .unwrap();
+        let v = guard.verified_velocity.as_ref().unwrap();
+        assert_eq!((v.spent_units(), v.last_nonce()), (50, 3));
     }
 }
 

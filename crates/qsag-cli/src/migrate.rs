@@ -107,6 +107,18 @@ fn parse_domain(spec: Option<&str>) -> Result<[u8; 32], CliError> {
     }
 }
 
+fn reject_sealed_legacy_key(json: &Json) -> Result<(), CliError> {
+    if ["envelope", "salt", "envelope_tag"]
+        .iter()
+        .any(|key| json.get(key).is_some())
+    {
+        return Err(CliError::input(
+            "sealed legacy keys are not supported by migrate; decrypt the key through an authenticated envelope reader before migration",
+        ));
+    }
+    Ok(())
+}
+
 /// Read a 32-byte classical spending key from either:
 /// 1. Raw 32-byte binary secret file,
 /// 2. 64-character hex secret file, or
@@ -114,6 +126,13 @@ fn parse_domain(spec: Option<&str>) -> Result<[u8; 32], CliError> {
 fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
     let raw = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
     if raw.0.len() == 32 {
+        // Valid JSON remains an envelope even when whitespace makes it exactly
+        // the binary-key length. Other 32-byte inputs retain raw-key semantics.
+        if let Ok(text) = std::str::from_utf8(&raw.0)
+            && let Ok(json) = Json::parse(text)
+        {
+            reject_sealed_legacy_key(&json)?;
+        }
         let mut out = Secret32::new([0u8; 32]);
         out.0.copy_from_slice(&raw.0);
         return Ok(out);
@@ -126,14 +145,7 @@ fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
     let trimmed = text.trim();
     if trimmed.starts_with('{') {
         let json = Json::parse(trimmed)?;
-        if ["envelope", "salt", "envelope_tag"]
-            .iter()
-            .any(|key| json.get(key).is_some())
-        {
-            return Err(CliError::input(
-                "sealed legacy keys are not supported by migrate; decrypt the key through an authenticated envelope reader before migration",
-            ));
-        }
+        reject_sealed_legacy_key(&json)?;
         let seed_buf = json.field_hex("seed")?;
         if seed_buf.0.len() != 32 {
             return Err(CliError::input("JSON legacy key \"seed\" must be 32 bytes"));
@@ -550,7 +562,7 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
     )?;
     if args.flag("help") {
         println!(
-            "qsag migrate verify --proof <path> [--target <bech32m_addr>] [--epoch <n>] [--domain-hex <64-hex>] [--legacy-commitment <hex>] [--json]"
+            "qsag migrate verify --proof <path> [--target <bech32m_addr>] [--epoch <n>] [--domain-hex <64-hex>] [--legacy-commitment <hex>] [--json]\n  --domain-hex defaults to the QSAG migration domain; foreign campaign proofs require an explicit domain."
         );
         return Ok(());
     }

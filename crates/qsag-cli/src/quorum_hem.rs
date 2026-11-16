@@ -1079,7 +1079,9 @@ fn wipe_and_remove(path: &str) -> Result<(), CliError> {
         let zeros = vec![0u8; 64 * 1024];
         let mut left = meta.len();
         while left > 0 {
-            let chunk = left.min(zeros.len() as u64) as usize;
+            let chunk = usize::try_from(left.min(zeros.len() as u64)).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "wipe chunk out of range")
+            })?;
             file.write_all(&zeros[..chunk])?;
             left -= chunk as u64;
         }
@@ -1261,6 +1263,11 @@ fn load_legacy(
         .map_err(|_| CliError::input("threshold out of range"))?;
     let n = usize::try_from(json.field_u64("parties")?)
         .map_err(|_| CliError::input("parties out of range"))?;
+    if t < 2 || t > n || n >= MAX_HEM_QUORUM_PARTIES {
+        return Err(CliError::input(
+            "invalid legacy Hem threshold or party count",
+        ));
+    }
     let expected_qe = json.field_u64("quorum_epoch")?;
     let meta_hw = usize::try_from(json.field_u64("high_water_leaf")?)
         .map_err(|_| CliError::input("high_water_leaf out of range"))?;
@@ -2317,8 +2324,25 @@ mod tests {
         let anchor_dir = scratch.path("anchor");
         private_dir(&anchor_dir, true).unwrap();
         let cfg = AnchorConfig::dir_only(&anchor_dir, Some(target.clone()), true);
-        new_vault(&old, 2);
-        let mut previous_id = None;
+        let pk = new_vault(&old, 2);
+        // Reproduce the old failure: provisioning left an external record while
+        // the destination lock inode survived and no reshare intent was recorded.
+        private_dir(&target, true).unwrap();
+        let leftover_lock = lock_new_vault(&target).unwrap();
+        let leftover_id = hem_anchor_key_id(&pk.to_bytes(), lock_identity(&leftover_lock).unwrap());
+        drop(
+            FsExternalMountAnchor::provision_fresh(
+                &cfg,
+                &[&meta_path(&target)],
+                &[&target],
+                HEM_ANCHOR_DOMAIN,
+                leftover_id,
+                [0x42; 32],
+            )
+            .unwrap(),
+        );
+        drop(leftover_lock);
+        let mut previous_id = Some(leftover_id);
         // Interrupt twice on the same target after provisioning. Both attempts must
         // provision distinct identities, and recovery must remove only their targets.
         for _ in 0..2 {
@@ -2329,22 +2353,20 @@ mod tests {
                     Ok(())
                 }
             };
-            assert!(
-                reshare_tx_anchored(
-                    &old,
-                    &target,
-                    None,
-                    2,
-                    3,
-                    false,
-                    None,
-                    None,
-                    None,
-                    Some(&cfg),
-                    &mut stop
-                )
-                .is_err()
+            let stopped = reshare_tx_anchored(
+                &old,
+                &target,
+                None,
+                2,
+                3,
+                false,
+                None,
+                None,
+                None,
+                Some(&cfg),
+                &mut stop,
             );
+            assert!(matches!(stopped, Err(err) if err.message == "simulated interruption"));
             let meta = Meta::read(&old).unwrap();
             let key_id = meta.pending.as_ref().unwrap().anchor_key_id.unwrap();
             assert_ne!(Some(key_id), previous_id);
@@ -2591,7 +2613,7 @@ mod tests {
                             Step::LeafBurned,
                         ]
                     );
-                    assert_eq!(signed.leaf_epoch as usize, high_water);
+                    assert_eq!(usize::try_from(signed.leaf_epoch).unwrap(), high_water);
                     assert!(verify_hem_jorts_signature(
                         &pk,
                         message.as_bytes(),

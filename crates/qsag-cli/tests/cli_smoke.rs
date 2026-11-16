@@ -589,7 +589,14 @@ fn aggregate_merge_verify_and_tamper() {
     keygen(
         &dir,
         "agg-jorts-poseidon2",
-        &["--validators", "4", "--wal-dir", &wal, "--passphrase-file", &pass],
+        &[
+            "--validators",
+            "4",
+            "--wal-dir",
+            &wal,
+            "--passphrase-file",
+            &pass,
+        ],
     );
     let (sk, pk, msg, other) = (
         dir.path("sk"),
@@ -3742,6 +3749,21 @@ fn migration_rejects_sealed_or_damaged_envelope_legacy_seeds() {
     let output = dir.path("claim.json");
     for header in ["envelope", "salt", "envelope_tag"] {
         std::fs::write(&key, format!("{{\"seed\":\"{SEED}\",\"{header}\":\"00\"}}")).unwrap();
+        let rejected = qsag(&[
+            "migrate",
+            "commit",
+            "--kind",
+            "btc-taproot",
+            "--legacy-secret",
+            &key,
+            "--out",
+            &output,
+        ]);
+        assert_eq!(code(&rejected), 1);
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("sealed legacy keys"));
+        assert!(!Path::new(&output).exists());
+        let short_json = format!("{{\"{header}\":0}}");
+        std::fs::write(&key, format!("{short_json:<32}")).unwrap();
         let rejected = qsag(&[
             "migrate",
             "commit",
