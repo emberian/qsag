@@ -51,15 +51,17 @@ module dp_top (
         .mul_busy, .mul_last, .cv, .cv_zero, .res
     );
     qsag_keccak_serial u_kc (
-        .clk, .rst_n, .srst_n(rst_n), .start(k_start), .turbo(k_turbo), .busy(k_busy), .done(k_done),
+        .clk, .rst_n, .srst_n(rst_n), .start(k_start), .turbo(k_turbo), .fault_inj(1'b0),
+        .busy(k_busy), .done(k_done),
         .rd_addr(k_rd), .port, .wr_en(k_we), .wr_addr(k_wa), .wr_data(k_wd)
     );
     qsag_sponge u_sp (
-        .clk, .wipe(1'b0),
+        .clk, .srst_n(rst_n), .wipe(!rst_n),
         .wr_en(busy ? fe_we : k_busy ? k_we : tb_we),
         .wr_addr(busy ? fe_wa : k_busy ? k_wa : tb_addr),
         .wr_data(busy ? cv : k_busy ? k_wd : tb_wdata),
-        .rd_addr(busy ? fe_rd : k_busy ? k_rd : tb_addr), .rd_data(port)
+        .rd_addr(busy ? fe_rd : k_busy ? k_rd : tb_addr), .rd_data(port),
+        .blk_absorb_mask(8'd0)
     );
     assign tb_rdata = port;
     wire unused = &{1'b0, mul_busy};

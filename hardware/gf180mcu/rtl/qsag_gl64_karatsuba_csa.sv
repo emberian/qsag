@@ -426,19 +426,32 @@ module qsag_gl64_karatsuba_csa #(
     qsag_prefix_add #(.N(W+1)) u_sb (.a({1'b0, mb[W-1:0]}), .b({1'b0, mb[LW-1:W]}), .cin(1'b0), .sum(sb_n));
 
     always_ff @(posedge clk) begin
-        if (ld_opa) opa <= cv;
-        if (ld_opb) opb <= cv;
-        if (ld_res) resr <= cv;
-        if (in_mul ? (mph != 2'd3) : acc_we) begin
-            acc_s <= ns;
-            acc_c <= nc;
-        end
-        if ((mph == 2'd0 && mul_start) || mph == 2'd1 || mph == 2'd2) preg <= m_p;
-        if (mph == 2'd0 && mul_start) begin
-            sa     <= sa_n;
-            sb     <= sb_n;
-            asel_q <= mul_asel;
-            bsel_q <= mul_bsel;
+        if (!rst_n) begin
+            opa    <= '0;
+            opb    <= '0;
+            resr   <= '0;
+            acc_s  <= '0;
+            acc_c  <= '0;
+            preg   <= '0;
+            sa     <= '0;
+            sb     <= '0;
+            asel_q <= 1'b0;
+            bsel_q <= 1'b0;
+        end else begin
+            if (ld_opa) opa <= cv;
+            if (ld_opb) opb <= cv;
+            if (ld_res) resr <= cv;
+            if (in_mul ? (mph != 2'd3) : acc_we) begin
+                acc_s <= ns;
+                acc_c <= nc;
+            end
+            if ((mph == 2'd0 && mul_start) || mph == 2'd1 || mph == 2'd2) preg <= m_p;
+            if (mph == 2'd0 && mul_start) begin
+                sa     <= sa_n;
+                sb     <= sb_n;
+                asel_q <= mul_asel;
+                bsel_q <= mul_bsel;
+            end
         end
     end
 
@@ -447,58 +460,5 @@ module qsag_gl64_karatsuba_csa #(
         else if (mph == 2'd0) mph <= mul_start ? 2'd1 : 2'd0;
         else                  mph <= mph + 2'd1;
     end
-endmodule
-
-// Combinational reference composition of Karatsuba reduction, also used by fast 2-stage mul.
-module qsag_gl64_kred_comb #(
-    parameter int W  = 32,
-    parameter int GB = 12
-) (
-    input  wire [2*W+1:0] z0,
-    input  wire [2*W+1:0] z2,
-    input  wire [2*W+1:0] zm,
-    output wire [2*W-1:0] r
-);
-    localparam int AW = 2 * W + GB;
-    wire [AW-1:0] a1, a2, a3, b1, b2, b3, c1, c2, c3;
-    wire [AW-1:0] s1, k1, s2, k2, s3, k3;
-    qsag_gl64_mrows #(.W(W), .GB(GB)) u_r0 (.p(z0), .ph(2'd1), .r1(a1), .r2(a2), .r3(a3));
-    qsag_gl64_mrows #(.W(W), .GB(GB)) u_r2 (.p(z2), .ph(2'd2), .r1(b1), .r2(b2), .r3(b3));
-    qsag_gl64_mrows #(.W(W), .GB(GB)) u_rm (.p(zm), .ph(2'd3), .r1(c1), .r2(c2), .r3(c3));
-    qsag_csa52 #(.N(AW)) u_c0 (.x('0), .y('0), .r1(a1), .r2(a2), .r3(a3), .s(s1), .c(k1));
-    qsag_csa52 #(.N(AW)) u_c2 (.x(s1), .y(k1), .r1(b1), .r2(b2), .r3(b3), .s(s2), .c(k2));
-    qsag_csa52 #(.N(AW)) u_cm (.x(s2), .y(k2), .r1(c1), .r2(c2), .r3(c3), .s(s3), .c(k3));
-    qsag_gl64_canon #(.W(W), .GB(GB)) u_canon (.x(s3), .y(k3), .r(r));
-endmodule
-
-// 2-stage pipelined (1/clk throughput) Karatsuba Goldilocks multiplier for Poseidon2 & Ext4.
-// Cycle 0: z0 = a0*b0, z2 = a1*b1, zm = (a0+a1)*(b0+b1) via Booth/Dadda (<= 18 gate levels)
-// Cycle 1: qsag_gl64_kred_comb(z0_q, z2_q, zm_q)                        (<= 18 gate levels)
-module qsag_gl64_mul_pipe #(
-    parameter int W  = 32,
-    parameter int GB = 12
-) (
-    input  wire           clk,
-    input  wire           en,
-    input  wire [2*W-1:0] a,
-    input  wire [2*W-1:0] b,
-    output wire [2*W-1:0] p
-);
-    localparam int LW = 2 * W;
-    wire [LW-1:0] z0_c, z2_c;
-    wire [W:0]    sa_c, sb_c;
-    qsag_umul32     #(.W(W))   u_z0 (.a(a[W-1:0]),  .b(b[W-1:0]),  .p(z0_c));
-    qsag_umul32     #(.W(W))   u_z2 (.a(a[LW-1:W]), .b(b[LW-1:W]), .p(z2_c));
-    qsag_prefix_add #(.N(W+1)) u_sa (.a({1'b0, a[W-1:0]}), .b({1'b0, a[LW-1:W]}), .cin(1'b0), .sum(sa_c));
-    qsag_prefix_add #(.N(W+1)) u_sb (.a({1'b0, b[W-1:0]}), .b({1'b0, b[LW-1:W]}), .cin(1'b0), .sum(sb_c));
-    wire [LW+1:0] zm_c = (LW+2)'(sa_c) * (LW+2)'(sb_c);
-
-    wire [LW-1:0] z0_q, z2_q;
-    wire [LW+1:0] zm_q;
-    qsag_ereg_nr #(.W(LW))   u_rz0 (.clk(clk), .en(en), .d(z0_c), .q(z0_q));
-    qsag_ereg_nr #(.W(LW))   u_rz2 (.clk(clk), .en(en), .d(z2_c), .q(z2_q));
-    qsag_ereg_nr #(.W(LW+2)) u_rzm (.clk(clk), .en(en), .d(zm_c), .q(zm_q));
-
-    qsag_gl64_kred_comb #(.W(W), .GB(GB)) u_kred (.z0({2'b0, z0_q}), .z2({2'b0, z2_q}), .zm(zm_q), .r(p));
 endmodule
 `default_nettype wire
