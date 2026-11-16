@@ -107,6 +107,19 @@ fn map_hd_err(err: HdError) -> CliError {
     }
 }
 
+/// The `--deterministic` HD ceremony label. Each count enters as its own full-width frame,
+/// so no two committee shapes share a label.
+fn deterministic_ceremony_label(threshold: usize, parties: usize, batch_size: usize) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.CLI.HD.DET.LABEL.V1",
+        &[
+            &(threshold as u64).to_le_bytes(),
+            &(parties as u64).to_le_bytes(),
+            &(batch_size as u64).to_le_bytes(),
+        ],
+    )
+}
+
 fn build_committee(
     threshold: usize,
     parties: usize,
@@ -529,14 +542,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
 
     let deterministic = args.flag("deterministic");
     let label = if deterministic {
-        cshake256_framed_32(
-            b"QSAG.CLI.HD.DET.LABEL.V1",
-            &[
-                &(threshold as u64).to_le_bytes(),
-                &(parties as u64).to_le_bytes(),
-                &(batch_size as u64).to_le_bytes(),
-            ],
-        )
+        deterministic_ceremony_label(threshold, parties, batch_size)
     } else {
         os_random_32()?
     };
@@ -1378,5 +1384,27 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         other => Err(CliError::usage(format!(
             "unknown hd subcommand '{other}' (expected keygen, derive, verify-child, recover, or export-rss)"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_label_separates_counts_that_agree_modulo_256() {
+        let base = deterministic_ceremony_label(2, 3, 16);
+        for (threshold, parties) in [(258, 3), (2, 259), (65538, 3), (2, 65539)] {
+            assert_ne!(deterministic_ceremony_label(threshold, parties, 16), base);
+        }
+        assert_ne!(deterministic_ceremony_label(2, 3, 32), base);
+    }
+
+    #[test]
+    fn committee_rejects_counts_outside_u16_instead_of_truncating() {
+        // 65538 truncates to 2 and 65539 to 3: both used to build a 2-of-3 committee.
+        assert!(build_committee(2, 3, [7; 32]).is_ok());
+        assert!(build_committee(65538, 3, [7; 32]).is_err());
+        assert!(build_committee(2, 65539, [7; 32]).is_err());
     }
 }
