@@ -4189,3 +4189,276 @@ theorem constantSuite1B_production_forgery_accepted (msg : List UInt8) :
   exact h0
 end Qsag
 end
+
+/-! ### Exports for lane sig -/
+public section
+namespace Qsag
+
+theorem ProductionParameterProfile_iff (p : PqHashParams) :
+    ProductionParameterProfile p ↔ p.productionWellFormed = true := Iff.rfl
+
+theorem verifyProductionStatelessChecked_def (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig) :
+    verifyProductionStatelessChecked suite params pk msg sig =
+      (!params.statefulJorts && verifyProductionPqHashSig suite params pk msg sig) := by rfl
+
+/-- The checked stateless signer returns a signature on the all-zero toy instance. -/
+theorem evalStatelessCheckedSign_zeroToy_isSome :
+    (evalStatelessCheckedSign zeroToySuite zeroToyParams ⟨[], [], []⟩ [] [] 1).isSome = true := by
+  decide +kernel
+
+/-- A 16-bit WOTS profile (`ell1 = 8`, `w = 4`) passes `wellFormed` and fails `productionWellFormed`. -/
+theorem PqHashParams.shortWots_wellFormed_not_production :
+    (⟨4, 8, 2, 2, 4, 2, 4, false⟩ : PqHashParams).wellFormed = true ∧
+    (⟨4, 8, 2, 2, 4, 2, 4, false⟩ : PqHashParams).productionWellFormed = false := by
+  decide +kernel
+
+theorem PqHashParams.zeroSubtreeHeight_not_production :
+    (⟨4, 128, 0, 1, 0, 0, 1, true⟩ : PqHashParams).productionWellFormed = false := by
+  decide +kernel
+
+theorem PqHashParams.statefulWithFors_not_production :
+    (⟨4, 128, 4, 2, 8, 4, 4, true⟩ : PqHashParams).productionWellFormed = false := by
+  decide +kernel
+
+theorem PqHashParams.invalidBudget_not_production :
+    (⟨4, 128, 4, 2, 8, 4, 0, false⟩ : PqHashParams).productionWellFormed = false ∧
+    (⟨4, 128, 4, 2, 8, 4, 9, false⟩ : PqHashParams).productionWellFormed = false := by
+  decide +kernel
+
+#verify_constructive production_profile_covers_full_digest verifyProductionStatelessChecked_sound
+
+/-! #### Kernel evaluations on the toy fixtures of `Qsag.Tests.SigningTeeth` -/
+
+/-- Domain-separated concrete hash suite for executable leaf-reuse checks:
+    - `thPrfMsg` (`6` frames) maps `epoch = 0` (`bytes[88] = 0`) vs `epoch ≠ 0` (`bytes[88] ≠ 0`)
+      to distinct `rRand` prefixes `[1, ...]` vs `[2, ...]`;
+    - `thHashMsg` (`7` frames) maps `rRand[0] = 1, 2, 3` (`bytes[52]`) to three pairwise distinct
+      128-crumb (`w = 4`) codewords, all with target sum `192`, the third dominating the
+      pointwise minimum of the first two. -/
+def toothDistinctSuite : TweakableHashSuite where
+  suiteId := []
+  rawHash := fun bytes =>
+    match bytes with
+    | b :: _ =>
+      if b == 6 then
+        if bytes.getD 88 0 == 0 then
+          [1] ++ List.replicate 31 0
+        else
+          [2] ++ List.replicate 31 0
+      else if b == 7 then
+        match bytes.getD 52 0 with
+        | 1 => [0x0F, 0xF0] ++ List.replicate 30 0x1B
+        | 2 => [0xF0, 0x0F] ++ List.replicate 30 0x1B
+        | 3 => [0x66, 0x99] ++ List.replicate 30 0x1B
+        | _ => List.replicate 32 0x1B
+      else
+        List.replicate 32 0x1B
+    | [] => List.replicate 32 0x1B
+  rawHash_len := fun bytes => by
+    cases bytes with
+    | nil => rfl
+    | cons b bs =>
+      dsimp only
+      by_cases hb6 : b == 6
+      · simp only [hb6, ↓reduceIte]
+        split <;> rfl
+      · simp only [hb6, Bool.false_eq_true, ↓reduceIte]
+        by_cases hb7 : b == 7
+        · simp only [hb7, ↓reduceIte]
+          split <;> rfl
+        · simp [hb7]
+
+private theorem byteArray_loop_eq' (bs : ByteArray) :
+    ∀ i acc, ByteArray.toList.loop bs i acc = acc.reverse ++ (bs.data.toList.drop i) := by
+  intro i acc
+  induction h : bs.size - i generalizing i acc with
+  | zero =>
+    rw [ByteArray.toList.loop.eq_1]
+    have hGe : ¬ (i < bs.size) := by omega
+    simp only [hGe, ↓reduceIte]
+    have hLen : bs.data.toList.length ≤ i := by
+      have : bs.data.toList.length = bs.size := Array.length_toList
+      omega
+    rw [List.drop_of_length_le hLen, List.append_nil]
+  | succ k ih =>
+    rw [ByteArray.toList.loop.eq_1]
+    have hLt : i < bs.size := by omega
+    simp only [hLt, ↓reduceIte]
+    rw [ih (i + 1) (bs.get! i :: acc) (by omega)]
+    have hLtList : i < bs.data.toList.length := by
+      have : bs.data.toList.length = bs.size := Array.length_toList
+      omega
+    have hGet : bs.get! i = bs.data.toList[i] := by
+      simp only [ByteArray.get!, Array.getElem_toList]
+      exact getElem!_pos bs.data i hLt
+    rw [hGet, List.reverse_cons, List.append_assoc, List.singleton_append,
+        ← List.drop_eq_getElem_cons hLtList]
+
+/-- The list of a byte array is the list of its backing array. -/
+private theorem byteArray_toList_eq' (bs : ByteArray) : bs.toList = bs.data.toList := by
+  unfold ByteArray.toList
+  rw [byteArray_loop_eq' bs 0 []]
+  simp
+
+/-- Byte literal of `tagPrfMsg`, obtained without decoding UTF-8 in the kernel. -/
+theorem tagPrfMsg_bytes_eq :
+    tagPrfMsg = [81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 70, 77, 83, 71, 47, 118, 49] := by
+  unfold tagPrfMsg
+  rw [byteArray_toList_eq']
+  rfl
+
+theorem thPrfMsg_toothDistinctSuite_eq (skPrf optRand mu : List UInt8) :
+    thPrfMsg toothDistinctSuite skPrf optRand mu =
+      toothDistinctSuite.rawHash
+        (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 70, 77, 83, 71, 47, 118, 49],
+          [], encodeAdrs zeroAdrs, skPrf, optRand, mu]) := by
+  unfold thPrfMsg thCall thPreimage
+  rw [tagPrfMsg_bytes_eq]
+  rfl
+
+theorem toothStatefulParams_geometry :
+    (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).wellFormed = true ∧ (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedDigitGeometry = true ∧
+    (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams).wellFormed = true ∧ (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams).checkedDigitGeometry = true := by
+  decide +kernel
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+/-- The reference signer succeeds under `toothDistinctSuite` on the three queries of the
+    leaf-reuse tooth (`dom e` is the stateful deterministic-randomness domain of epoch `e`). -/
+theorem toothDistinctSuite_sign_isSome :
+    (evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 0, []]) 0 1).isSome = true ∧
+    (evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [9] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 1, []]) 1 1).isSome = true ∧
+    (evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [2] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 2, []]) 0 1).isSome = true := by
+  unfold evalSingleSign
+  simp only [thPrfMsg_toothDistinctSuite_eq]
+  decide +kernel
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+/-- The codeword of `(rRand, msg, ctr) = ([3], [3], 0)` meets the target sum. -/
+theorem toothDistinctSuite_star_targetSum :
+    checkTargetSum 4 128 (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).targetSum
+      (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite [3] (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [3]) 0 0 0 0)) = true := by
+  decide +kernel
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+/-- The codewords of the two signatures on leaf `0` are jointly dominated by the third codeword. -/
+theorem toothDistinctSuite_reuse_dominance (s1 s2 : PqHashSig)
+    (h1 : evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 0, []]) 0 1 = some s1)
+    (h2 : evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [2] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 2, []]) 0 1 = some s2) :
+    ∀ r, r < 128 →
+      (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite s1.rRand (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [1]) 0 0 0 (s1.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)).getD r 0 ≤
+        (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite [3] (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [3]) 0 0 0 0)).getD r 0 ∨
+      (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite s2.rRand (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [2]) 0 0 0 (s2.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)).getD r 0 ≤
+        (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite [3] (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [3]) 0 0 0 0)).getD r 0 := by
+  have hC :
+      (match evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 0, []]) 0 1 with
+       | some s1 =>
+         match evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [2] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 2, []]) 0 1 with
+         | some s2 =>
+           (List.range 128).all (fun r => decide (
+             (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite s1.rRand (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [1]) 0 0 0 (s1.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)).getD r 0 ≤
+               (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite [3] (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [3]) 0 0 0 0)).getD r 0 ∨
+             (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite s2.rRand (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [2]) 0 0 0 (s2.layerSigs.getD 0 ⟨0, [], []⟩).tswCtr)).getD r 0 ≤
+               (extractBaseWDigits 4 128
+        (thHashMsg toothDistinctSuite [3] (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash toothDistinctSuite (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [3]) 0 0 0 0)).getD r 0))
+         | none => false
+       | none => false) = true := by
+    unfold evalSingleSign
+    simp only [thPrfMsg_toothDistinctSuite_eq]
+    decide +kernel
+  rw [h1, h2] at hC
+  intro r hr
+  exact of_decide_eq_true (List.all_eq_true.mp hC r (List.mem_range.mpr hr))
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+/-- The constant suite `0x1B…1B` accepts, under the one-layer stateless parameters
+    `⟨4, 128, 1, 1, 1, 1, 1, false⟩`, a signature whose values are all empty. -/
+theorem constantSuite1B_stateless_forgery_accepted :
+    verifyPqHashSig (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)) []
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0,
+        forsOpenings := [⟨[], [[]]⟩],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] } = true := by
+  decide +kernel
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+/-- Under the constant suite, the signature on `[1]` at leaf `0` opens the FORS leaf that the
+    digest of the empty message with empty randomness selects. -/
+theorem constantSuite1B_sign_fors_cover :
+    (evalSingleSign (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] [] 0 1).isSome = true ∧
+    ∀ s, evalSingleSign (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] [] 0 1 = some s →
+      s.leafGlobalIdx = 0 ∧
+      deriveForsIndices 1 1
+        (thHashMsg (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) s.rRand (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [1]) 0 0 0 s.msgTswCtr) =
+      deriveForsIndices 1 1
+        (thHashMsg (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) [] (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+          (thPreHash (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot []) 0 0 0 0) := by
+  have hC :
+      (match evalSingleSign (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] [] 0 1 with
+       | some s =>
+         decide (s.leafGlobalIdx = 0 ∧
+           deriveForsIndices 1 1
+             (thHashMsg (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) s.rRand (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+               (thPreHash (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot [1]) 0 0 0 s.msgTswCtr) =
+           deriveForsIndices 1 1
+             (thHashMsg (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) [] (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot
+               (thPreHash (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkSeed (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)).pkRoot []) 0 0 0 0))
+       | none => false) = true := by
+    decide +kernel
+  refine ⟨?_, ?_⟩
+  · cases hE : evalSingleSign (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] [] 0 1 with
+    | none => rw [hE] at hC; cases hC
+    | some s => rfl
+  · intro s hE
+    rw [hE] at hC
+    exact of_decide_eq_true hC
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+/-- The reference signer succeeds under the constant suite on the two-layer stateful profile
+    `⟨4, 128, 1, 2, 0, 0, 2, true⟩` at epochs `0`, `1`, `2`. -/
+theorem constantSuite1B_twoLayer_sign_isSome :
+    (evalSingleSign (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [10] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 0, []]) 0 1).isSome = true ∧
+    (evalSingleSign (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [20] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 1, []]) 1 1).isSome = true ∧
+    (evalSingleSign (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [30] (encodeMultiFrame [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49], be 8 2, []]) 2 1).isSome = true := by
+  decide +kernel
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+/-- The constant suite accepts a well-shaped two-layer signature on leaf `0` for `[99]`. -/
+theorem constantSuite1B_twoLayer_forgery_accepted :
+    verifyPqHashSig (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (derivePublicKey (⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ : TweakableHashSuite) (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)) [99]
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩, ⟨0, List.replicate 128 [], [[]]⟩] } = true := by
+  decide +kernel
+
+set_option maxRecDepth 32768 in
+#verify_constructive toothStatefulParams_geometry toothDistinctSuite_sign_isSome
+  toothDistinctSuite_star_targetSum toothDistinctSuite_reuse_dominance
+  constantSuite1B_stateless_forgery_accepted constantSuite1B_sign_fors_cover
+  constantSuite1B_twoLayer_sign_isSome constantSuite1B_twoLayer_forgery_accepted
+
+end Qsag
+end
