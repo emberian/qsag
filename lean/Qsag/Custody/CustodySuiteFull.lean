@@ -21,7 +21,7 @@ assumption. No computational-security assumption is replaced by nonempty bytes.
 -/
 
 public import Qsag.Tactic.Prelude
-public import Qsag.Exec.SimulationSpine
+public import Qsag.Spec.Refines
 public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
@@ -35,7 +35,7 @@ namespace Qsag
 
 set_option autoImplicit false
 
-/-! ## 0. Shared Multi-Turn Guard Transition, Quarantine Trace & `SimulationSpine` Bridge -/
+/-! ## 0. Shared Multi-Turn Guard Transition, Quarantine Trace & `Spec.Machine` Bridge -/
 
 /-- Outcome of a stateful custody guard transition where rejected attempts may still mutate
     persistent quarantine or burn state. -/
@@ -44,24 +44,38 @@ inductive CustodyStepOutcome (S Out Err : Type) where
   | rejected (nextState : S) (err : Err)
   deriving DecidableEq, Repr
 
-/-- Convert `CustodyStepOutcome` into `SimulationSpine`'s `StepOutcome`. -/
+/-- Preserve accepted and state-mutating rejected custody transitions in the shared outcome. -/
 def CustodyStepOutcome.toStepOutcome {S Out Err : Type} :
     CustodyStepOutcome S Out Err → StepOutcome S Out Err
-  | .accepted s' out => .ok s' out
-  | .rejected s' err => .err s' err
+  | .accepted s out => .ok s out
+  | .rejected s err => .err s err
 
-/-- Lift any `CustodyStepOutcome` transition into a compositional `SimulationSpine` `PartyMachine`,
-    preserving quarantine/burn state mutations on rejected inputs. -/
 def PartyMachine.ofCustodyStep {S In Out Err : Type}
     (step : S → In → CustodyStepOutcome S Out Err) : PartyMachine S In Out :=
   PartyMachine.ofOutcome (fun s inp => (step s inp).toStepOutcome)
 
-/-- Pure partial Mealy projection (`S → In → Option (S × Out)`) for compositional simulation spines. -/
-def custodyAcceptedStep {S In Out Err : Type}
+/-- Pure partial Mealy projection (`S → In → Option (S × Out)`): the accepted transitions. -/
+@[expose] def custodyAcceptedStep {S In Out Err : Type}
     (step : S → In → CustodyStepOutcome S Out Err) (s : S) (inp : In) : Option (S × Out) :=
   match step s inp with
   | .accepted s' out => some (s', out)
   | .rejected _ _ => none
+
+/-- Next state of a transition, accepted or rejected. -/
+@[expose] def custodyNextState {S In Out Err : Type}
+    (step : S → In → CustodyStepOutcome S Out Err) (s : S) (inp : In) : S :=
+  match step s inp with
+  | .accepted s' _ => s'
+  | .rejected s' _ => s'
+
+/-- Lift a `CustodyStepOutcome` transition into a `Spec.Machine` with initial-state predicate
+    `init`. Accepted transitions are the machine's steps; a rejected input still moves the state
+    (quarantine, burn) through `errStep`. -/
+@[expose] def custodyStepMachine {S In Out Err : Type} (init : S → Prop)
+    (step : S → In → CustodyStepOutcome S Out Err) : Spec.Machine S In Out where
+  Init := init
+  step := custodyAcceptedStep step
+  errStep := custodyNextState step
 
 /-- Multi-turn execution trace recording both accepted outputs (`some out`) and rejected attempts
     (`none`, including state-mutating quarantine transitions). -/
@@ -84,33 +98,30 @@ def traceApprovedPairs {In Out : Type} : List (In × Option Out) → List (In ×
   | (inp, some out) :: rest => (inp, out) :: traceApprovedPairs rest
   | (_, none) :: rest => traceApprovedPairs rest
 
-/-- Every `ValidCustodyTrace` induces a valid `SimulationSpine` `PartyMachine.ValidTrace`
-    with identical initial/final states and accepted `(In × Out)` transcript. -/
-theorem validCustodyTrace_to_partyMachine_validTrace {S In Out Err : Type}
+/-- Every `ValidCustodyTrace` is a `Spec.Machine.ValidTrace` of `custodyStepMachine` with the same
+    initial and final states and the accepted `(In × Out)` transcript. -/
+theorem validCustodyTrace_to_machine_validTrace {S In Out Err : Type} (init : S → Prop)
     {step : S → In → CustodyStepOutcome S Out Err}
     {s₀ sFinal : S} {trace : List (In × Option Out)}
     (hTr : ValidCustodyTrace step s₀ trace sFinal) :
-    (PartyMachine.ofCustodyStep step).ValidTrace s₀ (traceApprovedPairs trace) sFinal := by
+    (custodyStepMachine init step).ValidTrace s₀ (traceApprovedPairs trace) sFinal := by
   induction hTr with
   | nil s => exact .nil s
   | @consAccepted s s' _ inp out _ hStep _ ih =>
-    apply PartyMachine.ValidTrace.accept _ ih
-    unfold PartyMachine.ofCustodyStep PartyMachine.ofOutcome
-    dsimp only
+    refine Spec.Machine.ValidTrace.accept ?_ ih
+    show custodyAcceptedStep step s inp = some (s', out)
+    unfold custodyAcceptedStep
     rw [hStep]
-    rfl
   | @consRejected s s' _ inp err _ hStep _ ih =>
-    have hNone : (PartyMachine.ofCustodyStep step).step s inp = none := by
-      unfold PartyMachine.ofCustodyStep PartyMachine.ofOutcome
-      dsimp only
+    have hNone : (custodyStepMachine init step).step s inp = none := by
+      show custodyAcceptedStep step s inp = none
+      unfold custodyAcceptedStep
       rw [hStep]
-      rfl
-    have hErr : (PartyMachine.ofCustodyStep step).errStep s inp = s' := by
-      unfold PartyMachine.ofCustodyStep PartyMachine.ofOutcome
-      dsimp only
+    have hErr : (custodyStepMachine init step).errStep s inp = s' := by
+      show custodyNextState step s inp = s'
+      unfold custodyNextState
       rw [hStep]
-      rfl
-    exact PartyMachine.ValidTrace.reject inp hNone (hErr ▸ ih)
+    exact Spec.Machine.ValidTrace.reject inp hNone (hErr ▸ ih)
 
 /-- Extract all accepted outputs emitted along a multi-turn custody trace. -/
 def traceApprovedOutputs {In Out : Type} : List (In × Option Out) → List Out
@@ -5856,20 +5867,25 @@ def policyWindowAdvanceDomainV1 : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x50, 0x4F, 0x4C, 0x49, 0x43, 0x59, 0x2E, 0x57, 0x49, 0x4E, 0x44,
    0x4F, 0x57, 0x5F, 0x41, 0x44, 0x56, 0x41, 0x4E, 0x43, 0x45, 0x2F, 0x76, 0x31]
 
-/-- Exact ASCII bytes of `QSAG.MIGRATE.CHECKED_HEADS.V1` (29 bytes, `0` string literals). -/
+/-- ASCII bytes of `QSAG.MIGRATE.CHECKED_HEADS.V1` (29 bytes). Model-only label of the three-head
+    Co-ZK machine below: no Rust constant has this name. -/
 def cozkCheckedHeadsDomainV1 : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x4D, 0x49, 0x47, 0x52, 0x41, 0x54, 0x45, 0x2E, 0x43, 0x48, 0x45,
    0x43, 0x4B, 0x45, 0x44, 0x5F, 0x48, 0x45, 0x41, 0x44, 0x53, 0x2E, 0x56, 0x31]
 
-/-- Exact ASCII bytes of `QSAG.MIGRATE.HEAD_COMMIT.V1` (27 bytes, `0` string literals). -/
+/-- ASCII bytes of `QSAG.MIGRATE.HEAD_COMMIT.V1` (27 bytes). Model-only label of the three-head
+    Co-ZK machine below: no Rust constant has this name. Rust commits ZKBoo views under
+    `QSAG.MIGRATE.VIEW.V3` with a different frame layout (`compute_view_commit_bits`), which this
+    machine does not mirror. -/
 def cozkHeadCommitDomainV1 : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x4D, 0x49, 0x47, 0x52, 0x41, 0x54, 0x45, 0x2E, 0x48, 0x45, 0x41,
    0x44, 0x5F, 0x43, 0x4F, 0x4D, 0x4D, 0x49, 0x54, 0x2E, 0x56, 0x31]
 
-/-- Exact ASCII bytes of `QSAG.PSFTS.POW7_ROUND.V4` (24 bytes, `0` string literals). -/
-def ftsPow7RoundDomainV4 : List UInt8 :=
+/-- Exact ASCII bytes of `QSAG.PSFTS.POW7_ROUNDS.V5` (25 bytes), the customization of Rust
+    `round_constants` in `qsag-fts/src/parallel_mpc.rs`. -/
+def ftsPow7RoundsDomainV5 : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x50, 0x53, 0x46, 0x54, 0x53, 0x2E, 0x50, 0x4F, 0x57, 0x37, 0x5F,
-   0x52, 0x4F, 0x55, 0x4E, 0x44, 0x2E, 0x56, 0x34]
+   0x52, 0x4F, 0x55, 0x4E, 0x44, 0x53, 0x2E, 0x56, 0x35]
 
 /-- Exact ASCII bytes of `QSAG.PSFTS.SIGN_CONTEXT.V3` (26 bytes, `0` string literals). -/
 def ftsSignContextDomainV3 : List UInt8 :=
@@ -7708,15 +7724,24 @@ def ftsSigningContextV3 (sessionSeed pkSeed : List UInt8) (epoch useCount : Nat)
     (encodeFramedU64Le
       [sessionSeed, pkSeed, be 4 epoch, [UInt8.ofNat (useCount % 256)], msg, quorumBytes])
 
-/-- Domain-prefixed FTS message hash matching `QSAG.PSFTS.HMSG.V2` in `parallel_mpc.rs`. -/
-def ftsHmsgV2 (randomizer pkSeed rootBytes : List UInt8) (epoch grindCounter : Nat)
-    (msg : List UInt8) : List UInt8 :=
-  cshake256Bytes ftsHmsgDomainV2
-    (encodeFramedU64Le [randomizer, pkSeed, rootBytes, be 4 epoch, be 4 grindCounter, msg])
+/-- FTS message-hash stream of Rust `derive_sum_constrained_offsets` (`parallel_mpc.rs`):
+    `2 * num_chains` bytes of cSHAKE256 under `QSAG.PSFTS.HMSG.V2` over the frames
+    `[pk_seed, root_bytes, epoch_be, randomizer, counter_be, msg]`. -/
+def ftsHmsgV2 (numChains : Nat) (pkSeed rootBytes : List UInt8) (epoch : Nat)
+    (randomizer : List UInt8) (grindCounter : Nat) (msg : List UInt8) : List UInt8 :=
+  cshake256Xof (2 * numChains) ftsHmsgDomainV2
+    (encodeFramedU64Le [pkSeed, rootBytes, be 4 epoch, randomizer, be 4 grindCounter, msg])
 
+/-- Round-constant stream of Rust `round_constants` (`SPN_ROUNDS = 48`): one cSHAKE256 XOF output
+    of `48 * 32` bytes under `QSAG.PSFTS.POW7_ROUNDS.V5` over the frames
+    `[c0_le, c1_le, (48 : u32)_be]`. The stream commits to both tweak lanes and the round count. -/
+def ftsRustRoundStream (tweak : FtsLanes) : List UInt8 :=
+  cshake256Xof (48 * 32) ftsPow7RoundsDomainV5
+    (encodeFramedU64Le [le 16 tweak.1.toNat, le 16 tweak.2.toNat, be 4 48])
+
+/-- Round `r` reads bytes `[32 r, 32 r + 32)` of the stream as two little-endian lanes. -/
 def ftsRustRoundConstants (tweak : FtsLanes) (r : Nat) : FtsLanes :=
-  ftsDecodeLanes (cshake256Bytes ftsPow7RoundDomainV4
-    (encodeFramedU64Le [le 16 tweak.1.toNat, le 16 tweak.2.toNat, be 4 r]))
+  ftsDecodeLanes (((ftsRustRoundStream tweak).drop (32 * r)).take 32)
 
 /-- Exact 2-lane SplitMix64 MDS diffusion matching `GF128_MDS_A` and `GF128_MDS_B` in `parallel_mpc.rs:19-20`. -/
 def ftsRustMix (p : FtsLanes) : FtsLanes :=
@@ -9033,7 +9058,7 @@ theorem tooth_hd_unmasked_radix5_single_query_injective
   rw [Nat.mod_eq_of_lt hxLt, Nat.mod_eq_of_lt hyLt] at hVal
   exact hdRadix5Nat_injective 8 x y hVal
 
-/-! ### §E. Strengthened Compatibility Theorems & Operational `PartyMachine` Exports -/
+/-! ### §E. Strengthened Compatibility Theorems & Operational `Spec.Machine` Exports -/
 
 /-- Compatibility theorem pairing legacy scalar-SPN algebraic evidence with operational 8-phase
     `ftsSpnStep` / `ftsSpnEpochStep` multi-epoch non-replay and final-MAC barrier guarantees. -/
@@ -9159,32 +9184,30 @@ theorem hd_authorized_budget_blocks_full_rank_reconstruction
   exact ⟨hd_authorized_budget_blocks_full_rank_reconstruction_evidence H n dim,
          hd_actual_wire_trace_secret_independence H n⟩
 
-/-! ### Compositional Exports: Operational Party Machines Only -/
+/-! ### Compositional Exports: Operational Machines Only
 
-def ftsSpnPartyMachine (H : Hash) :
-    PartyMachine FtsOperationalGuard FtsOperationalInput FtsSpnEvent :=
-  PartyMachine.ofCustodyStep (ftsSpnEpochStep H)
+Each export is a `Spec.Machine` that admits every state as a starting state; the trace theorems
+above quantify over the starting state. -/
 
-def hdZeroTestPartyMachine (H : Hash) (n d1 d2 Q : Nat) :
-    PartyMachine (HdMaskedState n d1 d2 Q) (HdMaskedInput n) HdZeroTestEvent :=
-  PartyMachine.ofCustodyStep (hdZeroTestStep H n d1 d2 Q)
+def ftsSpnMachine (H : Hash) :
+    Spec.Machine FtsOperationalGuard FtsOperationalInput FtsSpnEvent :=
+  custodyStepMachine (fun _ => True) (ftsSpnEpochStep H)
 
-def policyGuardPartyMachine :
-    PartyMachine AuthenticatedPolicyState AuthenticatedPolicyInput PolicyWatermarkEvent :=
-  PartyMachine.ofCustodyStep policyWatermarkGuardStep
+def hdZeroTestMachine (H : Hash) (n d1 d2 Q : Nat) :
+    Spec.Machine (HdMaskedState n d1 d2 Q) (HdMaskedInput n) HdZeroTestEvent :=
+  custodyStepMachine (fun _ => True) (hdZeroTestStep H n d1 d2 Q)
 
-def policyWatermarkGuardPartyMachine :
-    PartyMachine AuthenticatedPolicyState AuthenticatedPolicyInput PolicyWatermarkEvent :=
-  PartyMachine.ofCustodyStep policyWatermarkGuardStep
+def policyWatermarkGuardMachine :
+    Spec.Machine AuthenticatedPolicyState AuthenticatedPolicyInput PolicyWatermarkEvent :=
+  custodyStepMachine (fun _ => True) policyWatermarkGuardStep
 
-def policyQuorumClusterPartyMachine :
-    PartyMachine PolicyQuorumCluster PolicyQuorumInput PolicyQuorumEvent :=
-  PartyMachine.ofCustodyStep policyQuorumClusterStep
+def policyQuorumClusterMachine :
+    Spec.Machine PolicyQuorumCluster PolicyQuorumInput PolicyQuorumEvent :=
+  custodyStepMachine (fun _ => True) policyQuorumClusterStep
 
-def cozkCeremonyPartyMachine (H : Hash) :
-    PartyMachine CoZkCommittedState CoZkCommittedInput CoZkPublicEvent :=
-  PartyMachine.ofCustodyStep (cozkPreOpenCeremonyStep H)
-
+def cozkCeremonyMachine (H : Hash) :
+    Spec.Machine CoZkCommittedState CoZkCommittedInput CoZkPublicEvent :=
+  custodyStepMachine (fun _ => True) (cozkPreOpenCeremonyStep H)
 
 /-- Replacing committed wires after challenge disclosure can never be an accepted transition. -/
 theorem tooth_cozk_substitution_cannot_accept (H : Hash)
@@ -9205,6 +9228,23 @@ theorem inhabited_cozk_reachable_release (H : Hash) :
 
 #verify_inhabited cozk_multiturn_operational_ceremony_sound inhabited_cozk_reachable_release
 #tooth_pair cozk_multiturn_operational_ceremony_sound vs tooth_cozk_substitution_cannot_accept
+
+/-! ### Exports for lane custody-b -/
+
+/-- Defining equation of `authenticatedPolicyGuardStep`. -/
+theorem authenticatedPolicyGuardStep_eq (g : AuthenticatedPolicyState) (tx : TransactionIntent)
+    (tags : List InitiatorPeerTag) (currentTimestamp : Nat) :
+    authenticatedPolicyGuardStep g tx tags currentTimestamp =
+      if policyCheckAdmission g tx tags currentTimestamp then
+        .accepted
+          { g with
+            rules := { g.rules with accumulated_spend := policyProjectedSpend g tx }
+            nonceBurns := policyBurn g.burnCapacity g.nonceBurns tx.nonce
+            sessionBurns :=
+              policyBurn g.burnCapacity g.sessionBurns (ofLE tx.session_id.reverse) }
+          (.intentApproved tx (toCanonicalSigningBytes tx))
+      else .rejected g .unauthenticatedInitiator := by
+  rfl
 
 end Qsag
 end
