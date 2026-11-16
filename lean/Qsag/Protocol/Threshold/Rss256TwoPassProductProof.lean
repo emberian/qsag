@@ -37,13 +37,13 @@ structure FinalCrossShares where
   c1_1 : Tower128
   c1_2 : Tower128
 
-/-- `V1` and `V2` masked openings (`rss256.rs:2606-2615`). -/
-def finalMaskedOpenV1 (m : FinalMasks) (sh : FinalCrossShares)
+/-- First and second party-pair masked openings (`rss256.rs:2606-2615`). -/
+def finalMaskedOpenFirst (m : FinalMasks) (sh : FinalCrossShares)
     (xfp yfp claim1 tau : Tower128) : Tower128 × Tower128 × Tower128 :=
   (towerAdd 7 m.r1x (towerMul 7 tau xfp), towerAdd 7 m.r1y (towerMul 7 tau yfp),
    towerAdd 7 (towerAdd 7 sh.c0_1 (towerMul 7 tau sh.c1_1)) (towerMul 7 (towerMul 7 tau tau) claim1))
 
-def finalMaskedOpenV2 (m : FinalMasks) (sh : FinalCrossShares)
+def finalMaskedOpenSecond (m : FinalMasks) (sh : FinalCrossShares)
     (xfq yfq claim2 tau : Tower128) : Tower128 × Tower128 × Tower128 :=
   (towerAdd 7 m.r2x (towerMul 7 tau xfq), towerAdd 7 m.r2y (towerMul 7 tau yfq),
    towerAdd 7 (towerAdd 7 sh.c0_2 (towerMul 7 tau sh.c1_2)) (towerMul 7 (towerMul 7 tau tau) claim2))
@@ -52,8 +52,8 @@ def finalMaskedOpenV2 (m : FinalMasks) (sh : FinalCrossShares)
     (`rss256.rs:2621-2626`). -/
 @[expose] def finalMaskedCrossCheck (m : FinalMasks) (sh : FinalCrossShares)
     (xfp yfq xfq yfp claim1 claim2 tau : Tower128) : Bool :=
-  let v1 := finalMaskedOpenV1 m sh xfp yfp claim1 tau
-  let v2 := finalMaskedOpenV2 m sh xfq yfq claim2 tau
+  let v1 := finalMaskedOpenFirst m sh xfp yfp claim1 tau
+  let v2 := finalMaskedOpenSecond m sh xfq yfq claim2 tau
   let lhs := towerAdd 7 (towerMul 7 v1.1 v2.2.1) (towerMul 7 v2.1 v1.2.1)
   let rhs := towerAdd 7 v1.2.2 v2.2.2
   decide (lhs = rhs)
@@ -85,8 +85,8 @@ theorem finalMaskedCrossCheck_iff_evalCoeffs_zero (m : FinalMasks) (sh : FinalCr
     finalMaskedCrossCheck m sh xfp yfq xfq yfp claim1 claim2 tau = true ↔
       RoundPoly.evalCoeffs (finalMaskedResidualCoeffs m sh xfp yfq xfq yfp claim1 claim2) tau =
         towerZero 7 := by
-  let v1 := finalMaskedOpenV1 m sh xfp yfp claim1 tau
-  let v2 := finalMaskedOpenV2 m sh xfq yfq claim2 tau
+  let v1 := finalMaskedOpenFirst m sh xfp yfp claim1 tau
+  let v2 := finalMaskedOpenSecond m sh xfq yfq claim2 tau
   let lhs := towerAdd 7 (towerMul 7 v1.1 v2.2.1) (towerMul 7 v2.1 v1.2.1)
   let rhs := towerAdd 7 v1.2.2 v2.2.2
   have hDec : (finalMaskedCrossCheck m sh xfp yfq xfq yfp claim1 claim2 tau = true) ↔ lhs = rhs :=
@@ -94,7 +94,7 @@ theorem finalMaskedCrossCheck_iff_evalCoeffs_zero (m : FinalMasks) (sh : FinalCr
   have hXor := (towerAdd_eq_zero_iff_eq lhs rhs).symm
   have hDiff : towerAdd 7 lhs rhs =
       RoundPoly.evalCoeffs (finalMaskedResidualCoeffs m sh xfp yfq xfq yfp claim1 claim2) tau := by
-    dsimp only [lhs, rhs, v1, v2, finalMaskedOpenV1, finalMaskedOpenV2, finalMaskedResidualCoeffs]
+    dsimp only [lhs, rhs, v1, v2, finalMaskedOpenFirst, finalMaskedOpenSecond, finalMaskedResidualCoeffs]
     rw [evalCoeffs3_eq]
     simp only [towerAdd_mul_distrib, towerMul_add_distrib]
     rw [show towerMul 7 m.r1x (towerMul 7 tau yfq) = towerMul 7 tau (towerMul 7 m.r1x yfq) by ac_rfl,
