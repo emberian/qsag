@@ -26,6 +26,8 @@
 //!    else. Shards are `JortsPoseidon2` only, proved in the recursion format, and sign
 //!    [`full_shard_signing_message`].
 
+pub mod split;
+
 /// The `k`-child PCS-verifier relation behind [`SuccinctShardWhirAggregate`]; unlike the
 /// legacy digest hierarchy, it checks the child openings in the outer relation. It does not
 /// by itself certify the signature/AIR relation that produced a child opening statement.
@@ -3661,12 +3663,18 @@ pub fn prove_subtree_leaf_aggregate(
 }
 
 // ----------------------------------------------------------------------------
-// Level-2+ Internal Subtree Merge (`Merge -> Merge` Arbitrary Depth!)
+// Level-2+ internal subtree merge
 // ----------------------------------------------------------------------------
 
 /// Level-2+ internal subtree relation merging `fan_in` (`2`, `4`, `8`, or `16`) child
-/// [`crate::zk_hem::protocol::RecursivePublicHemProof`]s into ONE constant-14-word
-/// [`SubtreePublic`].
+/// [`crate::zk_hem::protocol::RecursivePublicHemProof`]s into one 14-word [`SubtreePublic`].
+///
+/// Size: verifying one child in-circuit costs about 5.0 million rows when the child's
+/// hologram has `2^23` slots (`recursive_verifier_row_census`), almost all of it the
+/// correlated WHIR opening, and never less than 1.7 million. A fan-in-two parent of the
+/// two-shard leaf relation therefore has `2^24` rows, larger than its `2^21`-row children,
+/// and its own hologram exceeds the recursion format's 28-variable limit: the relation
+/// compiles and proves natively as a root, but cannot itself be a child.
 #[derive(Clone)]
 pub struct SubtreeInternalMergeRelation {
     shared_roster_root: bool,
@@ -3965,8 +3973,9 @@ fn internal_merge_gadget<B: crate::zk_hem::recursive_whir::Backend>(
     enforce_subtree_intervals(b, &mins, &maxs, &parent_pub[11], &parent_pub[12]);
 }
 
-/// Prove a Level-2+ internal subtree merge into another [`crate::zk_hem::protocol::RecursivePublicHemProof`]
-/// for Level-3+ arbitrary-depth recursion.
+/// Prove a Level-2+ internal subtree merge in the recursion format, for a further parent.
+/// Fails with [`FullShardError::InvalidChild`] when the relation's hologram has no recursive
+/// commitment (see [`SubtreeInternalMergeRelation`] on which geometries have one).
 pub fn prove_subtree_internal_merge_for_recursion(
     relation: &SubtreeInternalMergeRelation,
     children: &[(
@@ -4029,9 +4038,9 @@ pub struct SubtreeAggregateStatement<'a> {
 }
 
 /// Root proof carrying one hologram proof, signer/weight totals and a directory interval.
-/// No child proofs or per-shard counts are carried. Further recursive levels require a
-/// supported compiled geometry; the current full-signature two-level prover exceeds the
-/// 16 GiB test budget. This format alone does not establish arbitrary-depth scalability.
+/// No child proofs or per-shard counts are carried. A two-level tree over real signature
+/// shards has a `2^24`-row root relation whose native hologram commitment alone is 16 GiB of
+/// codewords, so that root has not been proved; see [`SubtreeInternalMergeRelation`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuccinctSubtreeAggregate {
     pub total_active_signers: u64,
@@ -6323,17 +6332,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "full signature recursion resource gate: exceeds the 16 GiB build-host budget"]
+    #[ignore = "2^24-row root relation: its native hologram commitment needs 16 GiB of codewords"]
     fn two_level_four_shard_subtree_recursion_and_tamper_suite() {
         subtree_two_level(false, 2);
     }
     #[test]
-    #[ignore = "full signature recursion resource gate: exceeds the 16 GiB build-host budget"]
+    #[ignore = "2^24-row root relation: its native hologram commitment needs 16 GiB of codewords"]
     fn sparse_roster_depth37_weighted_two_level_recursion() {
         subtree_two_level(true, 1);
     }
     #[test]
-    #[ignore = "full signature recursion resource gate: exceeds the 16 GiB build-host budget"]
+    #[ignore = "2^24-row root relation: its native hologram commitment needs 16 GiB of codewords"]
     fn two_level_two_shard_roster_root_recursion() {
         subtree_two_level(false, 1);
     }
@@ -6415,7 +6424,7 @@ mod tests {
             .collect();
 
         // Setup & prove Level-1 (`2` shards -> `1` SubtreePublic), then release `l1_rel` before
-        // constructing Level-2. The full pipeline currently exceeds the 16 GiB test budget.
+        // constructing Level-2.
         let t_setup1 = Instant::now();
         let l1_rel = if sparse {
             SubtreeLeafMergeRelation::with_sparse_roster(params.clone(), leaf_fan, 37)
