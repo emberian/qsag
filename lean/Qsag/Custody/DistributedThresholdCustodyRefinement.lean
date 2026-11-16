@@ -46,6 +46,7 @@ statement, and it is information-theoretic about the dealt shares only.
 -/
 
 public import Qsag.Spec.IdealCustody
+public import Qsag.Spec.IdealSign
 public import Qsag.Protocol.Threshold.ParametricThresholdAndUnlinkableQsa
 import Qsag.Tactic.AssuranceKit
 
@@ -973,12 +974,1324 @@ theorem execute_ready_fresh_releases (dep : Deployment F C PK D Sig) (hWf : dep.
 
 end Defs
 
+/-! ## 8. Unconditional Share-Check Branching & Zero-Reconstruction Share-Opening Custody (`L-Ex-6`)
+
+Upgrades the distributed custody refinement along all three model axes:
+1. **Genuine `Spec.SigScheme` (`ShareOpeningDeployment.sigScheme`)**: signatures are produced and
+   verified against a real `Spec.SigScheme PK SK Sig` (`verify pk (encodeDigest digest) sig = true`
+   via `sigScheme.correct`), replacing uninterpreted `signWith : F → D → Sig`.
+2. **Share-Level Per-Request Opening Release (Zero Key Reconstruction)**: each custodian holds only
+   its local `Share` and emits only a per-request contribution `Contrib` (`evalContrib`) on `.approve`;
+   the public combiner `assembleSig : List (Nat × Contrib) → Nat → D → Option Sig` assembles the
+   signature without any party or coordinator holding or reconstructing `SK` or long-term `Share`s.
+3. **Collision-Branching 256-Bit Commitment (`commit : Preimage → BitVec 256`)**: eliminates global
+   commitment injectivity (`commit_binding`), providing both:
+   * `distCustody_injOn_dataRefines_ideal`: finite-set `InjOnPreimages` on observed preimages yields
+     full `Spec.DataRefines` into `Spec.idealCustodyMachine`, and
+   * `distCustody_dataRefines_or_collision`: unconditionally for ANY compressing 256-bit hash
+     `commit : Preimage → BitVec 256`, every multi-turn trace of `shareOpeningMachine` either
+     projects to an admitted `Spec.idealCustodyMachine` trace with `sigScheme.verify = true` on
+     every released/WAL signature, or constructively yields an explicit colliding pair `x₁ ≠ x₂`
+     observed in the transcript with `commit x₁ = commit x₂` (`0 Classical.choice`). -/
+
+section UnconditionalAndShareOpening
+
+/-- Deployment structural conditions WITHOUT global `commit_binding`. -/
+structure Deployment.WellFormedNoBinding {F C PK D Sig : Type} [LawfulField F]
+    (dep : Deployment F C PK D Sig) : Prop where
+  points_nodup : ((List.range dep.quorum.numParties).map dep.point).Nodup
+  points_nonzero : ∀ p : Nat, p < dep.quorum.numParties → dep.point p ≠ CommRingOps.zero
+  degree : dep.poly.length = dep.quorum.threshold
+  commitments_dealt : ∀ p : Nat, p < dep.quorum.numParties →
+    dep.shareCommitment p = dep.commit (dep.trueShare p)
+
+/-- Unconditional reconstruction-or-collision lemma from `verifyShare_dealt_or_collision`:
+    without `commit_binding`, any accepted quorum either reconstructs `dep.secret` or witnesses an
+    explicit buffered share collision against a dealt share commitment (`0 Classical.choice`). -/
+theorem quorumKey_eq_secret_or_collision {F C PK D Sig : Type}
+    [LawfulField F] [DecidableEq F] [DecidableEq C]
+    (dep : Deployment F C PK D Sig) (hWf : dep.WellFormedNoBinding)
+    (buffer : List (Approval F)) (approvers : List Nat) (i : CustodyIntent)
+    (h : quorumReady dep buffer approvers i = true) :
+    quorumKey dep buffer approvers i = dep.secret ∨
+      ∃ m ∈ buffer, ∃ p < dep.quorum.numParties,
+        m.sender = p ∧ m.deploymentId = dep.deploymentId ∧ m.intent = i ∧
+        m.share ≠ dep.trueShare p ∧ dep.commit m.share = dep.commit (dep.trueShare p) := by
+  obtain ⟨hThr, hNd, hAll⟩ := quorumReady_spec dep buffer approvers i h
+  cases hMis : approvers.find? (fun p =>
+      decide ((approvalShare dep buffer i p).getD CommRingOps.zero ≠ dep.trueShare p)) with
+  | none =>
+    left
+    have hShares : approvers.map
+        (fun p => (approvalShare dep buffer i p).getD CommRingOps.zero) =
+        approvers.map dep.trueShare := by
+      apply List.map_congr_left
+      intro p hp
+      have hFalse := List.find?_eq_none.mp hMis p hp
+      by_cases hEq : (approvalShare dep buffer i p).getD CommRingOps.zero = dep.trueShare p
+      · exact hEq
+      · exact absurd (decide_eq_true hEq) hFalse
+    have hPointInj : ∀ p q : Nat, p < dep.quorum.numParties → q < dep.quorum.numParties →
+        dep.point p = dep.point q → p = q := fun p q hp hq hEq =>
+      inj_of_nodup_map dep.point _ hWf.points_nodup p q
+        (List.mem_range.mpr hp) (List.mem_range.mpr hq) hEq
+    have hPtsNd : (approvers.map dep.point).Nodup :=
+      nodup_map_of_inj_on dep.point dep.quorum.numParties hPointInj approvers hNd
+        (fun p hp => (hAll p hp).1)
+    have hLen : (approvers.map dep.point).length = approvers.length := List.length_map _
+    unfold quorumKey reconstruct
+    rw [hShares, zipWith_map_map]
+    have hMap : approvers.map (fun a =>
+        lagrangeToAdditiveShare (approvers.map dep.point) (dep.point a) (dep.trueShare a)) =
+        (approvers.map dep.point).map (fun x =>
+          lagrangeToAdditiveShare (approvers.map dep.point) x
+            (RoundPoly.evalCoeffs dep.poly x)) :=
+      (List.map_map (f := dep.point)
+        (g := fun x => lagrangeToAdditiveShare (approvers.map dep.point) x
+          (RoundPoly.evalCoeffs dep.poly x)) (l := approvers)).symm
+    rw [hMap]
+    exact lagrange_to_additive_reconstructs_poly (approvers.map dep.point).length
+      (hLen ▸ Nat.le_trans dep.quorum.h_pos hThr) (approvers.map dep.point) hPtsNd rfl
+      dep.poly (hLen ▸ hWf.degree ▸ hThr)
+  | some p =>
+    right
+    have hpMem : p ∈ approvers := List.mem_of_find?_eq_some hMis
+    have hpNe : (approvalShare dep buffer i p).getD CommRingOps.zero ≠ dep.trueShare p :=
+      of_decide_eq_true (List.find?_some
+        (p := fun q => decide ((approvalShare dep buffer i q).getD CommRingOps.zero ≠ dep.trueShare q)) hMis)
+    obtain ⟨hLt, s, hs⟩ := hAll p hpMem
+    rw [hs] at hpNe
+    dsimp only [Option.getD] at hpNe
+    obtain ⟨m, hmBuf, hmS, hmD, hmI, hmShare, hVer⟩ := approvalShare_sound dep buffer i p s hs
+    rcases verifyShare_dealt_or_collision dep (hWf.commitments_dealt p hLt) hVer with hEq | ⟨hNe, hCol⟩
+    · exact absurd hEq hpNe
+    · exact ⟨m, hmBuf, p, hLt, hmS, hmD, hmI, hmShare ▸ hNe, hmShare ▸ hCol⟩
+
+/-- One share-opening custodian: holds its private `Share`, durable epoch latch, and volatile coupons. -/
+structure ShareCustodian (Share : Type) where
+  share : Share
+  latch : Nat
+  latched : List CustodyIntent
+  coupons : List Nat
+
+/-- Per-request share-opening approval in transit: carries ONLY the per-request contribution `contrib`
+    (never the custodian's reusable `Share` or `SK`). -/
+structure ShareApproval (Contrib : Type) where
+  sender : Nat
+  deploymentId : Nat
+  intent : CustodyIntent
+  contrib : Contrib
+  deriving DecidableEq, Repr
+
+/-- Distributed state of the share-opening custody machine (zero `SK` in state). -/
+structure ShareState (Share Contrib PK D Sig : Type) where
+  nodes : Nat → ShareCustodian Share
+  buffer : List (ShareApproval Contrib)
+  corrupt : List Nat
+  ledger : CustodyLedger PK D Sig
+
+/-- Schedule alphabet of the share-opening custody machine. -/
+inductive ShareTurn (Contrib : Type) where
+  | approve (p deploymentId : Nat) (intent : CustodyIntent)
+  | inject (m : ShareApproval Contrib)
+  | corrupt (p : Nat)
+  | crash (p : Nat)
+  | dropMsg (idx : Nat)
+  | execute (deploymentId : Nat) (approvers : List Nat) (intent : CustodyIntent)
+      (abortBeforeRelease : Bool)
+  deriving DecidableEq, Repr
+
+/-- Observable event of the share-opening custody machine. -/
+inductive ShareEvent (Share Sig : Type) where
+  | approved
+  | injected
+  | corrupted (share : Share) (latched : List CustodyIntent)
+  | recovered
+  | dropped
+  | custody (out : CustodyOutcome Sig)
+  deriving DecidableEq, Repr
+
+/-- Share-opening deployment parameterized over a genuine `Spec.SigScheme PK SK Sig`, per-request
+    share-opening evaluator `evalContrib`, public key-free signature combiner `assembleSig`, and a
+    compressing 256-bit commitment hash `commit : Preimage → BitVec 256`. -/
+structure ShareOpeningDeployment (Share Contrib Preimage PK SK D Sig : Type) where
+  deploymentId : Nat
+  quorum : CustodyQuorumProfile
+  sigScheme : SigScheme PK SK Sig
+  dealtSk : SK
+  fallbackSig : Sig
+  digests : CustodyDigestScheme D
+  encodeDigest : D → Bytes
+  epochOfDigest : D → Nat
+  dealShare : Nat → Share
+  evalContrib : Nat → Share → Nat → CustodyIntent → Contrib
+  assembleSig : List (Nat × Contrib) → Nat → D → Option Sig
+  preimageOf : Nat → Nat → CustodyIntent → Contrib → Preimage
+  commit : Preimage → BitVec 256
+  commitmentOf : Nat → Nat → CustodyIntent → BitVec 256
+
+/-- Enrolled public key derived via `sigScheme.derivePk`. -/
+def ShareOpeningDeployment.pk {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) : PK :=
+  dep.sigScheme.derivePk dep.dealtSk
+
+/-- Dealt per-request share contribution of custodian `p` for intent `i`. -/
+def ShareOpeningDeployment.trueContrib {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (p : Nat) (i : CustodyIntent) : Contrib :=
+  dep.evalContrib p (dep.dealShare p) dep.deploymentId i
+
+/-- Ideal signing oracle induced by `sigScheme.sign dealtSk`. -/
+def ShareOpeningDeployment.idealOracle {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) (d : D) : Sig :=
+  (dep.sigScheme.sign dep.dealtSk (dep.epochOfDigest d) (dep.encodeDigest d)).getD dep.fallbackSig
+
+/-- Deployment structural laws — ZERO global `commit` injectivity assumption! -/
+structure ShareOpeningDeployment.WellFormed {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) : Prop where
+  /-- Digest recovers `i.epoch` via `epochOfDigest`. -/
+  epoch_digest : ∀ i : CustodyIntent,
+    dep.epochOfDigest (dep.digests.digest dep.deploymentId i) = i.epoch
+  /-- Preimage encoding frames `Contrib` injectively at fixed `(p, d, i)`. -/
+  preimage_framed : ∀ (p d : Nat) (i : CustodyIntent) (c₁ c₂ : Contrib),
+    dep.preimageOf p d i c₁ = dep.preimageOf p d i c₂ → c₁ = c₂
+  /-- Public commitments match `commit` of the dealt per-request contributions. -/
+  commitments_dealt : ∀ p : Nat, p < dep.quorum.numParties → ∀ i : CustodyIntent,
+    dep.commitmentOf p dep.deploymentId i =
+      dep.commit (dep.preimageOf p dep.deploymentId i (dep.trueContrib p i))
+  /-- Public assembly of dealt per-request contributions agrees with `sigScheme.sign dealtSk`. -/
+  assemble_dealt : ∀ (approvers : List Nat) (i : CustodyIntent),
+    approvers.Nodup →
+    (∀ p, p ∈ approvers → p < dep.quorum.numParties) →
+    dep.quorum.threshold ≤ approvers.length →
+    dep.assembleSig (approvers.map (fun p => (p, dep.trueContrib p i))) i.epoch
+      (dep.digests.digest dep.deploymentId i) =
+      dep.sigScheme.sign dep.dealtSk i.epoch
+        (dep.encodeDigest (dep.digests.digest dep.deploymentId i))
+
+/-- Initial state of the share-opening custody machine (stores only `dealShare p` per node and
+    `sigScheme.derivePk dealtSk` in the ledger; `dealtSk` never enters runtime state). -/
+@[expose] def ShareState.init {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) :
+    ShareState Share Contrib PK D Sig where
+  nodes := fun p => { share := dep.dealShare p, latch := 0, latched := [], coupons := [] }
+  buffer := []
+  corrupt := []
+  ledger := (IdealCustodyState.init dep.deploymentId (dep.sigScheme.derivePk dep.dealtSk) dep.quorum).ledger
+
+/-- One transition of the share-opening custody machine. Notice `dep.dealtSk` is NEVER read in any
+    runtime transition (`derivePk dep.dealtSk` is read from `st.ledger.enrolledPk`!). -/
+@[expose] def shareOpeningStep {Share Contrib Preimage PK SK D Sig : Type} [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (st : ShareState Share Contrib PK D Sig) :
+    ShareTurn Contrib → Option (ShareState Share Contrib PK D Sig × ShareEvent Share Sig)
+  | .approve p d i =>
+    if p < dep.quorum.numParties ∧ p ∉ st.corrupt ∧ d = dep.deploymentId ∧
+        (st.nodes p).latch ≤ i.epoch ∧ i.sessionId ∉ (st.nodes p).coupons then
+      let contrib := dep.evalContrib p (st.nodes p).share d i
+      some ({ st with
+              nodes := fun q =>
+                if q = p then
+                  { share := (st.nodes p).share
+                    latch := i.epoch + 1
+                    latched := i :: (st.nodes p).latched
+                    coupons := i.sessionId :: (st.nodes p).coupons }
+                else st.nodes q
+              buffer := { sender := p, deploymentId := d, intent := i, contrib := contrib } :: st.buffer },
+            .approved)
+    else none
+  | .inject m =>
+    if m.sender ∈ st.corrupt then
+      some ({ st with buffer := m :: st.buffer }, .injected)
+    else none
+  | .corrupt p =>
+    if p < dep.quorum.numParties ∧ p ∉ st.corrupt ∧
+        st.corrupt.length + 1 < dep.quorum.threshold then
+      some ({ st with corrupt := p :: st.corrupt },
+            .corrupted (st.nodes p).share (st.nodes p).latched)
+    else none
+  | .crash p =>
+    some ({ st with
+            nodes := fun q =>
+              if q = p then
+                { share := (st.nodes p).share
+                  latch := (st.nodes p).latch
+                  latched := (st.nodes p).latched
+                  coupons := [] }
+              else st.nodes q },
+          .recovered)
+  | .dropMsg idx =>
+    some ({ st with buffer := st.buffer.take idx ++ st.buffer.drop (idx + 1) }, .dropped)
+  | .execute d approvers i ab =>
+    let matchMsg (p : Nat) (m : ShareApproval Contrib) : Bool :=
+      decide (m.sender = p) && decide (m.deploymentId = dep.deploymentId) &&
+      decide (m.intent = i) &&
+      decide (dep.commit (dep.preimageOf p dep.deploymentId i m.contrib) =
+        dep.commitmentOf p dep.deploymentId i)
+    let ready : Bool :=
+      decide (dep.quorum.threshold ≤ approvers.length) &&
+      decide approvers.Nodup &&
+      approvers.all (fun p =>
+        decide (p < dep.quorum.numParties) && (st.buffer.find? (matchMsg p)).isSome)
+    match findReleasedEpoch st.ledger.releasedHistory i.epoch with
+    | some _ =>
+      (custodyLedgerSign dep.digests (fun _ => dep.fallbackSig) st.ledger 0 d i ab).map
+        (fun r => ({ st with ledger := r.1 }, .custody r.2))
+    | none =>
+      if ab = true then
+        (custodyLedgerSign dep.digests (fun _ => dep.fallbackSig) st.ledger
+          (if ready then approvers.length else 0) d i true).map
+          (fun r => ({ st with ledger := r.1 }, .custody r.2))
+      else if ready = true then
+        let contribs : List (Nat × Contrib) :=
+          approvers.filterMap (fun p =>
+            (st.buffer.find? (matchMsg p)).map (fun m => (p, m.contrib)))
+        let dig := dep.digests.digest dep.deploymentId i
+        match dep.assembleSig contribs i.epoch dig with
+        | none => none
+        | some sig =>
+          if dep.sigScheme.verify st.ledger.enrolledPk (dep.encodeDigest dig) sig = true then
+            (custodyLedgerSign dep.digests (fun _ => sig) st.ledger approvers.length d i false).map
+              (fun r => ({ st with ledger := r.1 }, .custody r.2))
+          else none
+      else none
+
+/-- Reactive `Spec.Machine` for the share-opening threshold custody system. -/
+def shareOpeningMachine {Share Contrib Preimage PK SK D Sig : Type} [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) :
+    Machine (ShareState Share Contrib PK D Sig) (ShareTurn Contrib) (ShareEvent Share Sig) where
+  Init st := st = ShareState.init dep
+  step := shareOpeningStep dep
+  errStep st _ := st
+
+/-- Interface map from `ShareTurn` to `Spec.CustodyInput`. -/
+def shareVisIn {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) :
+    ShareTurn Contrib → Option CustodyInput
+  | .approve p d i => some (.approve p d i)
+  | .inject m =>
+    if m.deploymentId = dep.deploymentId then
+      some (.advApprove m.sender m.deploymentId m.intent)
+    else none
+  | .corrupt p => some (.corrupt p)
+  | .crash _ => none
+  | .dropMsg _ => none
+  | .execute d _ i ab => some (.sign d i ab)
+
+/-- Interface map from `ShareEvent` to `Spec.CustodyOutcome`. -/
+def shareVisOut {Share Sig : Type} : ShareEvent Share Sig → CustodyOutcome Sig
+  | .approved => .approvalRecorded
+  | .injected => .approvalRecorded
+  | .corrupted _ latched => .corrupted latched
+  | .recovered => .approvalRecorded
+  | .dropped => .approvalRecorded
+  | .custody out => out
+
+theorem shareVisIn_eq {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (t : ShareTurn Contrib) :
+    shareVisIn dep t =
+      match t with
+      | .approve p d i => some (.approve p d i)
+      | .inject m =>
+        if m.deploymentId = dep.deploymentId then
+          some (.advApprove m.sender m.deploymentId m.intent)
+        else none
+      | .corrupt p => some (.corrupt p)
+      | .crash _ => none
+      | .dropMsg _ => none
+      | .execute d _ i ab => some (.sign d i ab) := by
+  cases t <;> rfl
+
+theorem shareVisOut_eq {Share Sig : Type} (e : ShareEvent Share Sig) :
+    shareVisOut e =
+      match e with
+      | .approved => .approvalRecorded
+      | .injected => .approvalRecorded
+      | .corrupted _ latched => .corrupted latched
+      | .recovered => .approvalRecorded
+      | .dropped => .approvalRecorded
+      | .custody out => out := by
+  cases e <;> rfl
+
+/-- Constructive share-contribution check (`0 Classical.choice`): any contribution `c` passing the
+    256-bit commitment check for enrolled custodian `p` is either `dep.trueContrib p i` or produces
+    an explicit colliding preimage pair `x₁ ≠ x₂` under `dep.commit`. -/
+theorem verifyContrib_dealt_or_collision {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq Contrib]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (hWf : dep.WellFormed) {p : Nat} {i : CustodyIntent} {c : Contrib}
+    (hp : p < dep.quorum.numParties)
+    (hVer : dep.commit (dep.preimageOf p dep.deploymentId i c) =
+      dep.commitmentOf p dep.deploymentId i) :
+    c = dep.trueContrib p i ∨
+      (dep.preimageOf p dep.deploymentId i c ≠
+        dep.preimageOf p dep.deploymentId i (dep.trueContrib p i) ∧
+       dep.commit (dep.preimageOf p dep.deploymentId i c) =
+        dep.commit (dep.preimageOf p dep.deploymentId i (dep.trueContrib p i))) := by
+  have hCol : dep.commit (dep.preimageOf p dep.deploymentId i c) =
+      dep.commit (dep.preimageOf p dep.deploymentId i (dep.trueContrib p i)) :=
+    hVer.trans (hWf.commitments_dealt p hp i)
+  by_cases hc : c = dep.trueContrib p i
+  · exact .inl hc
+  · refine .inr ⟨fun hPre => hc (hWf.preimage_framed p dep.deploymentId i c _ hPre), hCol⟩
+
+/-- Preimages observed across all `.approve` and `.inject` turns in a trace (paired with dealt
+    counterpart preimages so any collision in the execution lies inside this finite list). -/
+def observedSharePreimages {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) :
+    List (ShareTurn Contrib × ShareEvent Share Sig) → List Preimage
+  | [] => []
+  | (turn, _) :: rest =>
+    match turn with
+    | .approve p d i =>
+      dep.preimageOf p d i (dep.evalContrib p (dep.dealShare p) d i) ::
+      dep.preimageOf p d i (dep.trueContrib p i) ::
+      observedSharePreimages dep rest
+    | .inject m =>
+      dep.preimageOf m.sender m.deploymentId m.intent m.contrib ::
+      dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ::
+      observedSharePreimages dep rest
+    | _ => observedSharePreimages dep rest
+
+/-- Finite-set injectivity (`InjOn`) of `commit` restricted to an observed preimage list `obs`.
+    Unlike global injectivity on `Bytes → BitVec 256` (which is mathematically `False`), this
+    finite-set condition holds and is kernel-decidable on every collision-free execution. -/
+abbrev InjOnPreimages {Preimage : Type} (commit : Preimage → BitVec 256) (obs : List Preimage) : Prop :=
+  ∀ x ∈ obs, ∀ y ∈ obs, commit x = commit y → x = y
+
+instance instDecidableInjOnPreimages {Preimage : Type} [DecidableEq Preimage]
+    (commit : Preimage → BitVec 256) (obs : List Preimage) :
+    Decidable (InjOnPreimages commit obs) :=
+  if h : obs.all (fun x => obs.all (fun y => !decide (commit x = commit y) || decide (x = y))) then
+    .isTrue (fun x hx y hy hEq => by
+      have hx' := List.all_eq_true.mp h x hx
+      have hy' := List.all_eq_true.mp hx' y hy
+      rcases Bool.or_eq_true_iff.mp hy' with hNe | hSame
+      · rw [decide_eq_true hEq] at hNe; cases hNe
+      · exact of_decide_eq_true hSame)
+  else
+    .isFalse (fun hInj => h (by
+      rw [List.all_eq_true]
+      intro x hx
+      rw [List.all_eq_true]
+      intro y hy
+      by_cases hEq : commit x = commit y
+      · exact Bool.or_eq_true_iff.mpr (.inr (decide_eq_true (hInj x hx y hy hEq)))
+      · rw [decide_eq_false hEq]; rfl))
+
+/-- Guarded transition restricting buffered messages to a finite observed preimage list `obs`. -/
+def shareOpeningObservedStep {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq Preimage] [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (obs : List Preimage)
+    (st : ShareState Share Contrib PK D Sig) (turn : ShareTurn Contrib) :
+    Option (ShareState Share Contrib PK D Sig × ShareEvent Share Sig) :=
+  match turn with
+  | .approve p d i =>
+    let c := dep.evalContrib p (st.nodes p).share d i
+    if dep.preimageOf p d i c ∈ obs ∧ dep.preimageOf p d i (dep.trueContrib p i) ∈ obs then
+      shareOpeningStep dep st (.approve p d i)
+    else none
+  | .inject m =>
+    if dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obs ∧
+        dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obs then
+      shareOpeningStep dep st (.inject m)
+    else none
+  | t => shareOpeningStep dep st t
+
+/-- Guarded `Spec.Machine` over a finite observed preimage domain `obs`. -/
+def shareOpeningObservedMachine {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq Preimage] [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (obs : List Preimage) :
+    Machine (ShareState Share Contrib PK D Sig) (ShareTurn Contrib) (ShareEvent Share Sig) where
+  Init st := st = ShareState.init dep
+  step := shareOpeningObservedStep dep obs
+  errStep st _ := st
+
+/-- Concrete state invariant of `ShareState`. -/
+structure ShareInv {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (st : ShareState Share Contrib PK D Sig) : Prop where
+  deployment : st.ledger.deploymentId = dep.deploymentId
+  enrolled : st.ledger.enrolledPk = dep.pk
+  profile : st.ledger.quorum = dep.quorum
+  shares : ∀ p : Nat, (st.nodes p).share = dep.dealShare p
+  latchBound : ∀ (p : Nat) (e : CustodyIntent), e ∈ (st.nodes p).latched →
+    e.epoch < (st.nodes p).latch
+  latchNodup : ∀ p : Nat, ((st.nodes p).latched.map CustodyIntent.epoch).Nodup
+  walVerified : ∀ r ∈ st.ledger.releasedHistory,
+    dep.sigScheme.verify dep.pk (dep.encodeDigest r.digest) r.sig = true
+
+/-- Simulation relation from `ShareState` into `Spec.IdealCustodyState`. -/
+structure ShareRel {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (c : ShareState Share Contrib PK D Sig)
+    (a : IdealCustodyState PK D Sig) : Prop where
+  inv : ShareInv dep c
+  ledger : a.ledger = c.ledger
+  corrupt : a.corruptParties = c.corrupt
+  latched : ∀ p : Nat, (c.nodes p).latched = custodyRevealed a.honestApprovals p
+  buffered : ∀ m : ShareApproval Contrib, m ∈ c.buffer → m.deploymentId = dep.deploymentId →
+    CustodyApproval.mk m.sender m.deploymentId m.intent ∈ a.honestApprovals ∨
+      CustodyApproval.mk m.sender m.deploymentId m.intent ∈ a.corruptApprovals
+
+private theorem sh_if_pos {α : Type} {p : Prop} [Decidable p] (hp : p) (a b : α) :
+    (if p then a else b) = a := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem sh_if_neg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (a b : α) :
+    (if p then a else b) = b := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+private theorem shareInit_rel {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) :
+    ShareRel dep (ShareState.init dep : ShareState Share Contrib PK D Sig)
+      (IdealCustodyState.init dep.deploymentId dep.pk dep.quorum) where
+  inv :=
+    { deployment := rfl
+      enrolled := rfl
+      profile := rfl
+      shares _ := rfl
+      latchBound _ _ h := absurd h List.not_mem_nil
+      latchNodup _ := List.nodup_nil
+      walVerified _ h := absurd h List.not_mem_nil }
+  ledger := rfl
+  corrupt := rfl
+  latched _ := rfl
+  buffered _ h _ := absurd h List.not_mem_nil
+
+private theorem filterMap_all_some {α β : Type} (f : α → Option β) (g : α → β) :
+    ∀ (L : List α), (∀ a ∈ L, f a = some (g a)) → L.filterMap f = L.map g
+  | [], _ => rfl
+  | x :: xs, h => by
+    rw [List.filterMap_cons, h x List.mem_cons_self, List.map_cons,
+      filterMap_all_some f g xs (fun a ha => h a (List.mem_cons_of_mem _ ha))]
+
+private theorem option_map_ledger_buffer {Share Contrib PK D Sig : Type}
+    {c c' : ShareState Share Contrib PK D Sig} {ev : ShareEvent Share Sig}
+    {res : Option (CustodyLedger PK D Sig × CustodyOutcome Sig)}
+    (h : res.map (fun r => ({ c with ledger := r.1 }, ShareEvent.custody r.2)) = some (c', ev)) :
+    c'.buffer = c.buffer := by
+  cases res with
+  | none => cases h
+  | some pair =>
+    dsimp only [Option.map] at h
+    injection h with hPair
+    injection hPair with hSt _
+    rw [← hSt]
+
+private theorem shareOpeningStep_execute_buffer {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    {c c' : ShareState Share Contrib PK D Sig}
+    {d : Nat} {approvers : List Nat} {i : CustodyIntent} {ab : Bool}
+    {ev : ShareEvent Share Sig}
+    (h : shareOpeningStep dep c (.execute d approvers i ab) = some (c', ev)) :
+    c'.buffer = c.buffer := by
+  unfold shareOpeningStep at h
+  dsimp only at h
+  cases hF : findReleasedEpoch c.ledger.releasedHistory i.epoch with
+  | some _ =>
+    rw [hF] at h
+    exact option_map_ledger_buffer h
+  | none =>
+    rw [hF] at h
+    dsimp only at h
+    cases ab with
+    | true =>
+      rw [sh_if_pos rfl] at h
+      exact option_map_ledger_buffer h
+    | false =>
+      rw [sh_if_neg Bool.false_ne_true] at h
+      by_cases hR :
+          (decide (dep.quorum.threshold ≤ approvers.length) &&
+            decide approvers.Nodup &&
+            approvers.all (fun p =>
+              decide (p < dep.quorum.numParties) &&
+              (c.buffer.find? (fun m =>
+                decide (m.sender = p) && decide (m.deploymentId = dep.deploymentId) &&
+                decide (m.intent = i) &&
+                decide (dep.commit (dep.preimageOf p dep.deploymentId i m.contrib) =
+                  dep.commitmentOf p dep.deploymentId i))).isSome)) = true
+      · rw [sh_if_pos hR] at h
+        cases hAss : dep.assembleSig _ i.epoch (dep.digests.digest dep.deploymentId i) with
+        | none => rw [hAss] at h; cases h
+        | some sig =>
+          rw [hAss] at h
+          by_cases hV : dep.sigScheme.verify c.ledger.enrolledPk
+              (dep.encodeDigest (dep.digests.digest dep.deploymentId i)) sig = true
+          · rw [sh_if_pos hV] at h
+            exact option_map_ledger_buffer h
+          · rw [sh_if_neg hV] at h; cases h
+      · rw [sh_if_neg hR] at h; cases h
+
+private theorem shareStep_sim_or_collision {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq Contrib] [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (hWf : dep.WellFormed)
+    {c c' : ShareState Share Contrib PK D Sig}
+    {a : IdealCustodyState PK D Sig}
+    {turn : ShareTurn Contrib} {ev : ShareEvent Share Sig}
+    (hRel : ShareRel dep c a)
+    (hStep : shareOpeningStep dep c turn = some (c', ev)) :
+    (match shareVisIn dep turn with
+     | some j =>
+       ∃ a' : IdealCustodyState PK D Sig,
+         idealCustodyStep dep.digests dep.idealOracle a j = some (a', shareVisOut ev) ∧
+         ShareRel dep c' a'
+     | none => ShareRel dep c' a) ∨
+    (∃ m ∈ c.buffer, ∃ p < dep.quorum.numParties,
+      m.sender = p ∧ m.deploymentId = dep.deploymentId ∧
+      dep.preimageOf p dep.deploymentId m.intent m.contrib ≠
+        dep.preimageOf p dep.deploymentId m.intent (dep.trueContrib p m.intent) ∧
+      dep.commit (dep.preimageOf p dep.deploymentId m.intent m.contrib) =
+        dep.commit (dep.preimageOf p dep.deploymentId m.intent (dep.trueContrib p m.intent))) := by
+  have hNum : a.ledger.quorum.numParties = dep.quorum.numParties := by
+    rw [hRel.ledger, hRel.inv.profile]
+  have hThr : a.ledger.quorum.threshold = dep.quorum.threshold := by
+    rw [hRel.ledger, hRel.inv.profile]
+  have hDep : a.ledger.deploymentId = dep.deploymentId := by
+    rw [hRel.ledger, hRel.inv.deployment]
+  cases turn with
+  | approve p d i =>
+    left
+    dsimp only [shareVisIn]
+    unfold shareOpeningStep at hStep
+    dsimp only at hStep
+    by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧ d = dep.deploymentId ∧
+        (c.nodes p).latch ≤ i.epoch ∧ i.sessionId ∉ (c.nodes p).coupons
+    · rw [sh_if_pos hg] at hStep
+      cases hStep
+      obtain ⟨hLt, hHon, hD, hLatch, _⟩ := hg
+      refine ⟨_, idealCustodyStep_approve_of (S := dep.digests) (oracleSign := dep.idealOracle) i
+        ⟨hNum ▸ hLt, hRel.corrupt ▸ hHon, hD.trans hDep.symm⟩,
+        { inv :=
+            { deployment := hRel.inv.deployment
+              enrolled := hRel.inv.enrolled
+              profile := hRel.inv.profile
+              shares := fun q => by
+                dsimp only
+                by_cases hqp : q = p
+                · subst hqp; rw [sh_if_pos rfl]; exact hRel.inv.shares q
+                · rw [sh_if_neg hqp]; exact hRel.inv.shares q
+              latchBound := fun q e he => by
+                dsimp only at he ⊢
+                by_cases hqp : q = p
+                · subst hqp
+                  rw [sh_if_pos rfl] at he ⊢
+                  rcases List.mem_cons.mp he with rfl | hOld
+                  · exact Nat.lt_succ_self _
+                  · exact Nat.lt_succ_of_lt (Nat.lt_of_lt_of_le (hRel.inv.latchBound q e hOld) hLatch)
+                · rw [sh_if_neg hqp] at he ⊢
+                  exact hRel.inv.latchBound q e he
+              latchNodup := fun q => by
+                dsimp only
+                by_cases hqp : q = p
+                · subst hqp
+                  rw [sh_if_pos rfl, List.map_cons, List.nodup_cons]
+                  refine ⟨?_, hRel.inv.latchNodup q⟩
+                  intro hMem
+                  obtain ⟨e, he, hEq⟩ := List.mem_map.mp hMem
+                  have hLtE := hRel.inv.latchBound q e he
+                  rw [hEq] at hLtE
+                  exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le hLtE hLatch)
+                · rw [sh_if_neg hqp]
+                  exact hRel.inv.latchNodup q
+              walVerified := hRel.inv.walVerified }
+          ledger := hRel.ledger
+          corrupt := hRel.corrupt
+          latched := fun q => by
+            dsimp only
+            by_cases hqp : q = p
+            · subst hqp
+              rw [sh_if_pos rfl, custodyRevealed_cons_self]
+              exact congrArg _ (hRel.latched q)
+            · rw [sh_if_neg hqp, custodyRevealed_cons_ne _ _ _ (fun h => hqp h.symm)]
+              exact hRel.latched q
+          buffered := fun m hm hmD => by
+            rcases List.mem_cons.mp hm with rfl | hOld
+            · exact .inl List.mem_cons_self
+            · exact (hRel.buffered m hOld hmD).imp (List.mem_cons_of_mem _) id }⟩
+    · rw [sh_if_neg hg] at hStep; cases hStep
+  | inject m =>
+    left
+    unfold shareOpeningStep at hStep
+    dsimp only at hStep
+    by_cases hg : m.sender ∈ c.corrupt
+    · rw [sh_if_pos hg] at hStep
+      cases hStep
+      dsimp only [shareVisIn]
+      by_cases hmD : m.deploymentId = dep.deploymentId
+      · rw [sh_if_pos hmD]
+        refine ⟨_, idealCustodyStep_advApprove_of (S := dep.digests) (oracleSign := dep.idealOracle)
+          m.intent ⟨hRel.corrupt ▸ hg, hmD.trans hDep.symm⟩,
+          { inv :=
+              { deployment := hRel.inv.deployment
+                enrolled := hRel.inv.enrolled
+                profile := hRel.inv.profile
+                shares := hRel.inv.shares
+                latchBound := hRel.inv.latchBound
+                latchNodup := hRel.inv.latchNodup
+                walVerified := hRel.inv.walVerified }
+            ledger := hRel.ledger
+            corrupt := hRel.corrupt
+            latched := hRel.latched
+            buffered := fun m' hm' hm'D => by
+              rcases List.mem_cons.mp hm' with rfl | hOld
+              · exact .inr List.mem_cons_self
+              · exact (hRel.buffered m' hOld hm'D).imp id (List.mem_cons_of_mem _) }⟩
+      · rw [sh_if_neg hmD]
+        exact
+          { inv :=
+              { deployment := hRel.inv.deployment
+                enrolled := hRel.inv.enrolled
+                profile := hRel.inv.profile
+                shares := hRel.inv.shares
+                latchBound := hRel.inv.latchBound
+                latchNodup := hRel.inv.latchNodup
+                walVerified := hRel.inv.walVerified }
+            ledger := hRel.ledger
+            corrupt := hRel.corrupt
+            latched := hRel.latched
+            buffered := fun m' hm' hm'D => by
+              rcases List.mem_cons.mp hm' with rfl | hOld
+              · exact absurd hm'D hmD
+              · exact hRel.buffered m' hOld hm'D }
+    · rw [sh_if_neg hg] at hStep; cases hStep
+  | corrupt p =>
+    left
+    dsimp only [shareVisIn]
+    unfold shareOpeningStep at hStep
+    dsimp only at hStep
+    by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧
+        c.corrupt.length + 1 < dep.quorum.threshold
+    · rw [sh_if_pos hg] at hStep
+      cases hStep
+      have hStepA := idealCustodyStep_corrupt_of (S := dep.digests) (oracleSign := dep.idealOracle)
+        (st := a) (p := p) ⟨hNum ▸ hg.1, hRel.corrupt ▸ hg.2.1, by
+          rw [hRel.corrupt, hThr]; exact hg.2.2⟩
+      refine ⟨{ a with corruptParties := p :: a.corruptParties }, ?_,
+        { inv :=
+            { deployment := hRel.inv.deployment
+              enrolled := hRel.inv.enrolled
+              profile := hRel.inv.profile
+              shares := hRel.inv.shares
+              latchBound := hRel.inv.latchBound
+              latchNodup := hRel.inv.latchNodup
+              walVerified := hRel.inv.walVerified }
+          ledger := hRel.ledger
+          corrupt := congrArg (List.cons p) hRel.corrupt
+          latched := hRel.latched
+          buffered := hRel.buffered }⟩
+      rw [hStepA]
+      show some (_, CustodyOutcome.corrupted (custodyRevealed a.honestApprovals p)) =
+        some (_, CustodyOutcome.corrupted (c.nodes p).latched)
+      rw [hRel.latched p]
+    · rw [sh_if_neg hg] at hStep; cases hStep
+  | crash p =>
+    left
+    dsimp only [shareVisIn]
+    unfold shareOpeningStep at hStep
+    cases hStep
+    exact
+      { inv :=
+          { deployment := hRel.inv.deployment
+            enrolled := hRel.inv.enrolled
+            profile := hRel.inv.profile
+            shares := fun q => by
+              dsimp only
+              by_cases hqp : q = p
+              · subst hqp; rw [sh_if_pos rfl]; exact hRel.inv.shares q
+              · rw [sh_if_neg hqp]; exact hRel.inv.shares q
+            latchBound := fun q e he => by
+              dsimp only at he ⊢
+              by_cases hqp : q = p
+              · subst hqp; rw [sh_if_pos rfl] at he ⊢; exact hRel.inv.latchBound q e he
+              · rw [sh_if_neg hqp] at he ⊢; exact hRel.inv.latchBound q e he
+            latchNodup := fun q => by
+              dsimp only
+              by_cases hqp : q = p
+              · subst hqp; rw [sh_if_pos rfl]; exact hRel.inv.latchNodup q
+              · rw [sh_if_neg hqp]; exact hRel.inv.latchNodup q
+            walVerified := hRel.inv.walVerified }
+        ledger := hRel.ledger
+        corrupt := hRel.corrupt
+        latched := fun q => by
+          dsimp only
+          by_cases hqp : q = p
+          · subst hqp; rw [sh_if_pos rfl]; exact hRel.latched q
+          · rw [sh_if_neg hqp]; exact hRel.latched q
+        buffered := hRel.buffered }
+  | dropMsg idx =>
+    left
+    dsimp only [shareVisIn]
+    unfold shareOpeningStep at hStep
+    cases hStep
+    exact
+      { inv :=
+          { deployment := hRel.inv.deployment
+            enrolled := hRel.inv.enrolled
+            profile := hRel.inv.profile
+            shares := hRel.inv.shares
+            latchBound := hRel.inv.latchBound
+            latchNodup := hRel.inv.latchNodup
+            walVerified := hRel.inv.walVerified }
+        ledger := hRel.ledger
+        corrupt := hRel.corrupt
+        latched := hRel.latched
+        buffered := fun m hm hmD => by
+          rcases List.mem_append.mp hm with hT | hDr
+          · exact hRel.buffered m (List.mem_of_mem_take hT) hmD
+          · exact hRel.buffered m (List.mem_of_mem_drop hDr) hmD }
+  | execute d approvers i ab =>
+    dsimp only [shareVisIn]
+    unfold shareOpeningStep at hStep
+    dsimp only at hStep
+    let matchMsg (p : Nat) (m : ShareApproval Contrib) : Bool :=
+      decide (m.sender = p) && decide (m.deploymentId = dep.deploymentId) &&
+      decide (m.intent = i) &&
+      decide (dep.commit (dep.preimageOf p dep.deploymentId i m.contrib) =
+        dep.commitmentOf p dep.deploymentId i)
+    let ready : Bool :=
+      decide (dep.quorum.threshold ≤ approvers.length) &&
+      decide approvers.Nodup &&
+      approvers.all (fun p =>
+        decide (p < dep.quorum.numParties) && (c.buffer.find? (matchMsg p)).isSome)
+    have hReadySpec : ready = true →
+        dep.quorum.threshold ≤ approvers.length ∧ approvers.Nodup ∧
+        ∀ p ∈ approvers, p < dep.quorum.numParties ∧
+          ∃ m : ShareApproval Contrib, c.buffer.find? (matchMsg p) = some m ∧
+            m ∈ c.buffer ∧ m.sender = p ∧ m.deploymentId = dep.deploymentId ∧ m.intent = i ∧
+            dep.commit (dep.preimageOf p dep.deploymentId i m.contrib) =
+              dep.commitmentOf p dep.deploymentId i := by
+      intro hR
+      dsimp only [ready] at hR
+      rw [Bool.and_eq_true, Bool.and_eq_true] at hR
+      refine ⟨of_decide_eq_true hR.1.1, of_decide_eq_true hR.1.2, ?_⟩
+      intro p hp
+      have hp' := List.all_eq_true.mp hR.2 p hp
+      rw [Bool.and_eq_true] at hp'
+      refine ⟨of_decide_eq_true hp'.1, ?_⟩
+      cases hF : c.buffer.find? (matchMsg p) with
+      | none => rw [hF] at hp'; cases hp'.2
+      | some m =>
+        have hM := List.find?_some hF
+        dsimp only [matchMsg] at hM
+        rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at hM
+        exact ⟨m, rfl, List.mem_of_find?_eq_some hF, of_decide_eq_true hM.1.1.1,
+          of_decide_eq_true hM.1.1.2, of_decide_eq_true hM.1.2, of_decide_eq_true hM.2⟩
+    have hReadyCount : (if ready then approvers.length else 0) ≤
+        (custodyApprovers a.ledger.quorum.numParties a.honestApprovals a.corruptApprovals
+          a.ledger.deploymentId i).length := by
+      cases hR : ready with
+      | false => rw [sh_if_neg Bool.false_ne_true]; exact Nat.zero_le _
+      | true =>
+        rw [sh_if_pos rfl]
+        obtain ⟨_, hNd, hAll⟩ := hReadySpec hR
+        refine custodyApprovers_length_le_of_subset hNd (fun p hp => ?_)
+        obtain ⟨hLt, m, _, hmBuf, hmS, hmD, hmI, _⟩ := hAll p hp
+        have hB := hRel.buffered m hmBuf hmD
+        rw [hmS, hmD, hmI] at hB
+        rw [hDep]
+        exact ⟨hNum ▸ hLt, hB⟩
+    cases hFindEp : findReleasedEpoch c.ledger.releasedHistory i.epoch with
+    | some rec =>
+      left
+      rw [hFindEp] at hStep
+      dsimp only at hStep
+      cases hL : custodyLedgerSign dep.digests (fun _ => dep.fallbackSig) c.ledger 0 d i ab with
+      | none => rw [hL] at hStep; cases hStep
+      | some pair =>
+        rcases pair with ⟨L', o⟩
+        rw [hL] at hStep
+        cases hStep
+        have hIrrel := custodyLedgerSign_replay_irrelevant
+          (S := dep.digests) (dep := d) (ab := ab)
+          (o := fun _ => dep.fallbackSig) (o' := dep.idealOracle)
+          (n := 0) (m := (custodyApprovers a.ledger.quorum.numParties a.honestApprovals
+            a.corruptApprovals a.ledger.deploymentId i).length) hFindEp
+        rw [hIrrel, ← hRel.ledger] at hL
+        obtain ⟨_, _, hCase⟩ := custodyLedgerSign_inv hL
+        rcases hCase with ⟨_, _, _, hSame, _⟩ | ⟨hNone, _⟩
+        · refine ⟨_, idealCustodyStep_sign_of (S := dep.digests) (oracleSign := dep.idealOracle) hL,
+            { inv := by
+                rw [hSame, hRel.ledger]
+                exact hRel.inv
+              ledger := rfl
+              corrupt := hRel.corrupt
+              latched := hRel.latched
+              buffered := hRel.buffered }⟩
+        · rw [hRel.ledger, hFindEp] at hNone; cases hNone
+    | none =>
+      rw [hFindEp] at hStep
+      dsimp only at hStep
+      cases hab : ab with
+      | true =>
+        left
+        rw [hab, sh_if_pos rfl] at hStep
+        change (custodyLedgerSign dep.digests (fun _ => dep.fallbackSig) c.ledger
+            (if ready then approvers.length else 0) d i true).map
+            (fun r => ({ c with ledger := r.1 }, .custody r.2)) = some (c', ev) at hStep
+        cases hL : custodyLedgerSign dep.digests (fun _ => dep.fallbackSig) c.ledger
+            (if ready then approvers.length else 0) d i true with
+        | none => rw [hL] at hStep; cases hStep
+        | some pair =>
+          rcases pair with ⟨L', o⟩
+          rw [hL] at hStep
+          cases hStep
+          obtain ⟨hPois, hDepEq, hCase⟩ := custodyLedgerSign_inv hL
+          rcases hCase with ⟨_, hFound, _⟩ | ⟨_, hEp, hSess, hQ, hCap, hAbCase⟩
+          · rw [hFindEp] at hFound; cases hFound
+          · rcases hAbCase with ⟨_, hL', hOut⟩ | ⟨hFalse, _⟩
+            · have hIdeal : custodyLedgerSign dep.digests dep.idealOracle c.ledger
+                  (if ready then approvers.length else 0) d i true = some (L', o) := by
+                unfold custodyLedgerSign
+                rw [sh_if_pos ⟨hPois, hDepEq⟩, hFindEp]
+                dsimp only
+                rw [sh_if_pos ⟨hEp, hSess, hQ, hCap⟩, sh_if_pos rfl, hL', hOut]
+              have hMono := custodyLedgerSign_mono hIdeal hReadyCount
+              rw [← hRel.ledger] at hMono
+              obtain ⟨hD', hPk', hQ'⟩ := custodyLedgerSign_static hL
+              refine ⟨_, idealCustodyStep_sign_of (S := dep.digests) (oracleSign := dep.idealOracle) hMono,
+                { inv :=
+                    { deployment := hD'.trans hRel.inv.deployment
+                      enrolled := hPk'.trans hRel.inv.enrolled
+                      profile := hQ'.trans hRel.inv.profile
+                      shares := hRel.inv.shares
+                      latchBound := hRel.inv.latchBound
+                      latchNodup := hRel.inv.latchNodup
+                      walVerified := by rw [hL']; exact hRel.inv.walVerified }
+                  ledger := rfl
+                  corrupt := hRel.corrupt
+                  latched := hRel.latched
+                  buffered := hRel.buffered }⟩
+            · cases hFalse
+      | false =>
+        rw [hab, sh_if_neg Bool.false_ne_true] at hStep
+        change (if ready = true then
+            let contribs := approvers.filterMap (fun p =>
+              (c.buffer.find? (matchMsg p)).map (fun m => (p, m.contrib)))
+            let dig := dep.digests.digest dep.deploymentId i
+            match dep.assembleSig contribs i.epoch dig with
+            | none => none
+            | some sig =>
+              if dep.sigScheme.verify c.ledger.enrolledPk (dep.encodeDigest dig) sig = true then
+                (custodyLedgerSign dep.digests (fun _ => sig) c.ledger approvers.length d i false).map
+                  (fun r => ({ c with ledger := r.1 }, .custody r.2))
+              else none
+          else none) = some (c', ev) at hStep
+        cases hR : ready with
+        | false => rw [hR, sh_if_neg Bool.false_ne_true] at hStep; cases hStep
+        | true =>
+          rw [hR, sh_if_pos rfl] at hStep
+          dsimp only at hStep
+          obtain ⟨hThrLen, hNd, hAll⟩ := hReadySpec hR
+          cases hBad : approvers.find? (fun p =>
+              match c.buffer.find? (matchMsg p) with
+              | none => false
+              | some m => decide (m.contrib ≠ dep.trueContrib p i)) with
+          | some p =>
+            right
+            have hpMem : p ∈ approvers := List.mem_of_find?_eq_some hBad
+            have hSome := List.find?_some (p := fun q =>
+              match c.buffer.find? (matchMsg q) with
+              | none => false
+              | some m => decide (m.contrib ≠ dep.trueContrib q i)) hBad
+            obtain ⟨hLt, m, hFindM, hmBuf, hmS, hmD, hmI, hComEq⟩ := hAll p hpMem
+            rw [hFindM] at hSome
+            have hmNe : m.contrib ≠ dep.trueContrib p i := of_decide_eq_true hSome
+            rcases verifyContrib_dealt_or_collision dep hWf hLt hComEq with hEq | ⟨hPreNe, hCol⟩
+            · exact absurd hEq hmNe
+            · exact ⟨m, hmBuf, p, hLt, hmS, hmD, hmI ▸ hPreNe, hmI ▸ hCol⟩
+          | none =>
+            left
+            have hContribsEq :
+                approvers.filterMap (fun p =>
+                  (c.buffer.find? (matchMsg p)).map (fun m => (p, m.contrib))) =
+                approvers.map (fun p => (p, dep.trueContrib p i)) := by
+              apply filterMap_all_some
+              intro p hp
+              obtain ⟨_, m, hFindM, _, _, _, _, _⟩ := hAll p hp
+              have hFalse := List.find?_eq_none.mp hBad p hp
+              rw [hFindM] at hFalse ⊢
+              have hmEq : m.contrib = dep.trueContrib p i := by
+                by_cases hE : m.contrib = dep.trueContrib p i
+                · exact hE
+                · exact absurd (decide_eq_true hE) hFalse
+              dsimp only [Option.map]
+              rw [hmEq]
+            rw [hContribsEq] at hStep
+            let dig := dep.digests.digest dep.deploymentId i
+            have hAssem := hWf.assemble_dealt approvers i hNd (fun p hp => (hAll p hp).1) hThrLen
+            cases hAss : dep.assembleSig (approvers.map (fun p => (p, dep.trueContrib p i))) i.epoch dig with
+            | none => rw [hAss] at hStep; cases hStep
+            | some sig =>
+              rw [hAss] at hStep
+              dsimp only at hStep
+              have hSign : dep.sigScheme.sign dep.dealtSk i.epoch (dep.encodeDigest dig) = some sig :=
+                hAssem.symm.trans hAss
+              have hVer : dep.sigScheme.verify dep.pk (dep.encodeDigest dig) sig = true :=
+                dep.sigScheme.correct dep.dealtSk i.epoch (dep.encodeDigest dig) sig hSign
+              by_cases hVerL : dep.sigScheme.verify c.ledger.enrolledPk (dep.encodeDigest dig) sig = true
+              · rw [sh_if_pos hVerL] at hStep
+                cases hL : custodyLedgerSign dep.digests (fun _ => sig) c.ledger
+                    approvers.length d i false with
+                | none => rw [hL] at hStep; cases hStep
+                | some pair =>
+                  rcases pair with ⟨L', o⟩
+                  rw [hL] at hStep
+                  cases hStep
+                  obtain ⟨hPois, hDepEq, hCase⟩ := custodyLedgerSign_inv hL
+                  rcases hCase with ⟨_, hFound, _⟩ | ⟨_, hEp, hSess, hQ, hCap, hAbCase⟩
+                  · rw [hFindEp] at hFound; cases hFound
+                  · rcases hAbCase with ⟨hAbT, _⟩ | ⟨_, hL', hOut⟩
+                    · cases hAbT
+                    · have hOraEq : dep.idealOracle (dep.digests.digest c.ledger.deploymentId i) = sig := by
+                        rw [hRel.inv.deployment]
+                        show (dep.sigScheme.sign dep.dealtSk (dep.epochOfDigest dig) (dep.encodeDigest dig)).getD
+                          dep.fallbackSig = sig
+                        rw [hWf.epoch_digest i, hSign]
+                        rfl
+                      have hIdeal : custodyLedgerSign dep.digests dep.idealOracle c.ledger
+                          (if ready then approvers.length else 0) d i false = some (L', o) := by
+                        rw [hR, sh_if_pos rfl]
+                        unfold custodyLedgerSign
+                        rw [sh_if_pos ⟨hPois, hDepEq⟩, hFindEp]
+                        dsimp only
+                        rw [sh_if_pos ⟨hEp, hSess, hQ, hCap⟩, sh_if_neg Bool.false_ne_true,
+                          hOraEq, hL', hOut]
+                      have hMono := custodyLedgerSign_mono hIdeal hReadyCount
+                      rw [← hRel.ledger] at hMono
+                      obtain ⟨hD', hPk', hQ'⟩ := custodyLedgerSign_static hL
+                      refine ⟨_, idealCustodyStep_sign_of (S := dep.digests) (oracleSign := dep.idealOracle) hMono,
+                        { inv :=
+                            { deployment := hD'.trans hRel.inv.deployment
+                              enrolled := hPk'.trans hRel.inv.enrolled
+                              profile := hQ'.trans hRel.inv.profile
+                              shares := hRel.inv.shares
+                              latchBound := hRel.inv.latchBound
+                              latchNodup := hRel.inv.latchNodup
+                              walVerified := fun r hr => by
+                                rw [hL'] at hr
+                                rcases List.mem_cons.mp hr with rfl | hOld
+                                · dsimp only
+                                  rw [hRel.inv.deployment]
+                                  exact hVer
+                                · exact hRel.inv.walVerified r hOld }
+                          ledger := rfl
+                          corrupt := hRel.corrupt
+                          latched := hRel.latched
+                          buffered := hRel.buffered }⟩
+              · rw [sh_if_neg hVerL] at hStep; cases hStep
+
+/-- **Finite-Set `InjOn` `Spec.DataRefines` Theorem (`distCustody_injOn_dataRefines_ideal`)**:
+    Whenever `dep.commit` is collision-free on a finite observed preimage list `obs`
+    (`InjOnPreimages dep.commit obs`, with ZERO global injectivity assumption!), the `obs`-guarded
+    share-opening machine refines `Spec.idealCustodyMachine` via `Spec.DataRefines`. -/
+def distCustody_injOn_dataRefines_ideal {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq Contrib] [DecidableEq Preimage] [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (hWf : dep.WellFormed) (obs : List Preimage)
+    (hInj : InjOnPreimages dep.commit obs) :
+    DataRefines (shareOpeningObservedMachine dep obs)
+      (idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk dep.quorum)
+      (shareVisIn dep) shareVisOut where
+  Rel c a :=
+    ShareRel dep c a ∧
+    ∀ m ∈ c.buffer,
+      dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obs ∧
+      dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obs
+  absInit _ := IdealCustodyState.init dep.deploymentId dep.pk dep.quorum
+  init_ok {c₀} hInit := by
+    have hc : c₀ = ShareState.init dep := hInit
+    subst hc
+    exact ⟨rfl, shareInit_rel dep, fun _ h => absurd h List.not_mem_nil⟩
+  sim_visible {c c' a turn ev j} hRelPair hStepObs hVis := by
+    obtain ⟨hRel, hObsBuf⟩ := hRelPair
+    have hUnpack : shareOpeningStep dep c turn = some (c', ev) ∧
+        ∀ m ∈ c'.buffer,
+          dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obs ∧
+          dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obs := by
+      cases turn with
+      | approve p d i =>
+        change shareOpeningObservedStep dep obs c (.approve p d i) = some (c', ev) at hStepObs
+        unfold shareOpeningObservedStep at hStepObs
+        dsimp only at hStepObs
+        by_cases hIn : dep.preimageOf p d i (dep.evalContrib p (c.nodes p).share d i) ∈ obs ∧
+            dep.preimageOf p d i (dep.trueContrib p i) ∈ obs
+        · rw [sh_if_pos hIn] at hStepObs
+          refine ⟨hStepObs, ?_⟩
+          unfold shareOpeningStep at hStepObs
+          dsimp only at hStepObs
+          by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧ d = dep.deploymentId ∧
+              (c.nodes p).latch ≤ i.epoch ∧ i.sessionId ∉ (c.nodes p).coupons
+          · rw [sh_if_pos hg] at hStepObs; cases hStepObs
+            intro m hm
+            rcases List.mem_cons.mp hm with rfl | hOld
+            · exact hIn
+            · exact hObsBuf m hOld
+          · rw [sh_if_neg hg] at hStepObs; cases hStepObs
+        · rw [sh_if_neg hIn] at hStepObs; cases hStepObs
+      | inject m =>
+        change shareOpeningObservedStep dep obs c (.inject m) = some (c', ev) at hStepObs
+        unfold shareOpeningObservedStep at hStepObs
+        dsimp only at hStepObs
+        by_cases hIn : dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obs ∧
+            dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obs
+        · rw [sh_if_pos hIn] at hStepObs
+          refine ⟨hStepObs, ?_⟩
+          unfold shareOpeningStep at hStepObs
+          dsimp only at hStepObs
+          by_cases hg : m.sender ∈ c.corrupt
+          · rw [sh_if_pos hg] at hStepObs; cases hStepObs
+            intro m' hm'
+            rcases List.mem_cons.mp hm' with rfl | hOld
+            · exact hIn
+            · exact hObsBuf m' hOld
+          · rw [sh_if_neg hg] at hStepObs; cases hStepObs
+        · rw [sh_if_neg hIn] at hStepObs; cases hStepObs
+      | corrupt p =>
+        change shareOpeningStep dep c (.corrupt p) = some (c', ev) at hStepObs
+        refine ⟨hStepObs, ?_⟩
+        unfold shareOpeningStep at hStepObs; dsimp only at hStepObs
+        by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧
+            c.corrupt.length + 1 < dep.quorum.threshold
+        · rw [sh_if_pos hg] at hStepObs; cases hStepObs; exact hObsBuf
+        · rw [sh_if_neg hg] at hStepObs; cases hStepObs
+      | crash _ => cases hVis
+      | dropMsg _ => cases hVis
+      | execute d approvers i ab =>
+        change shareOpeningStep dep c (.execute d approvers i ab) = some (c', ev) at hStepObs
+        refine ⟨hStepObs, ?_⟩
+        rw [shareOpeningStep_execute_buffer dep hStepObs]
+        exact hObsBuf
+    rcases shareStep_sim_or_collision dep hWf hRel hUnpack.1 with hSim | ⟨m, hmBuf, p, _, rfl, hmD, hNe, hCol⟩
+    · rw [hVis] at hSim
+      obtain ⟨a', hStepA, hRel'⟩ := hSim
+      exact ⟨a', hStepA, hRel', hUnpack.2⟩
+    · obtain ⟨h1, h2⟩ := hObsBuf m hmBuf
+      rw [hmD] at h1 h2
+      exact absurd (hInj _ h1 _ h2 hCol) hNe
+  sim_internal {c c' a turn ev} hRelPair hStepObs hInt := by
+    obtain ⟨hRel, hObsBuf⟩ := hRelPair
+    have hUnpack : shareOpeningStep dep c turn = some (c', ev) ∧
+        ∀ m ∈ c'.buffer,
+          dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obs ∧
+          dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obs := by
+      cases turn with
+      | approve _ _ _ => cases hInt
+      | corrupt _ => cases hInt
+      | execute _ _ _ _ => cases hInt
+      | inject m =>
+        change shareOpeningObservedStep dep obs c (.inject m) = some (c', ev) at hStepObs
+        unfold shareOpeningObservedStep at hStepObs; dsimp only at hStepObs
+        by_cases hIn : dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obs ∧
+            dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obs
+        · rw [sh_if_pos hIn] at hStepObs
+          refine ⟨hStepObs, ?_⟩
+          unfold shareOpeningStep at hStepObs; dsimp only at hStepObs
+          by_cases hg : m.sender ∈ c.corrupt
+          · rw [sh_if_pos hg] at hStepObs; cases hStepObs
+            intro m' hm'
+            rcases List.mem_cons.mp hm' with rfl | hOld
+            · exact hIn
+            · exact hObsBuf m' hOld
+          · rw [sh_if_neg hg] at hStepObs; cases hStepObs
+        · rw [sh_if_neg hIn] at hStepObs; cases hStepObs
+      | crash p =>
+        change shareOpeningStep dep c (.crash p) = some (c', ev) at hStepObs
+        refine ⟨hStepObs, ?_⟩
+        unfold shareOpeningStep at hStepObs; cases hStepObs; exact hObsBuf
+      | dropMsg idx =>
+        change shareOpeningStep dep c (.dropMsg idx) = some (c', ev) at hStepObs
+        refine ⟨hStepObs, ?_⟩
+        unfold shareOpeningStep at hStepObs; cases hStepObs
+        intro m hm
+        rcases List.mem_append.mp hm with hT | hDr
+        · exact hObsBuf m (List.mem_of_mem_take hT)
+        · exact hObsBuf m (List.mem_of_mem_drop hDr)
+    rcases shareStep_sim_or_collision dep hWf hRel hUnpack.1 with hSim | ⟨m, hmBuf, p, _, rfl, hmD, hNe, hCol⟩
+    · rw [hInt] at hSim
+      exact ⟨hSim, hUnpack.2⟩
+    · obtain ⟨h1, h2⟩ := hObsBuf m hmBuf
+      rw [hmD] at h1 h2
+      exact absurd (hInj _ h1 _ h2 hCol) hNe
+  sim_reject hRelPair _ := hRelPair
+
+private theorem shareTrace_lift_or_collision {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq Contrib] [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (hWf : dep.WellFormed) :
+    ∀ {c₀ cFinal : ShareState Share Contrib PK D Sig}
+      {a₀ : IdealCustodyState PK D Sig}
+      {obsPrefix : List Preimage}
+      {tr : List (ShareTurn Contrib × ShareEvent Share Sig)},
+      ShareRel dep c₀ a₀ →
+      (∀ m ∈ c₀.buffer,
+        dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obsPrefix ∧
+        dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obsPrefix) →
+      (shareOpeningMachine dep).ValidTrace c₀ tr cFinal →
+      (∃ aFinal : IdealCustodyState PK D Sig,
+        (idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk dep.quorum).ValidTrace
+          a₀ (projectTrace (shareVisIn dep) shareVisOut tr) aFinal ∧
+        ShareRel dep cFinal aFinal) ∨
+      (∃ x₁ x₂ : Preimage,
+        x₁ ≠ x₂ ∧ dep.commit x₁ = dep.commit x₂ ∧
+        x₁ ∈ obsPrefix ++ observedSharePreimages dep tr ∧
+        x₂ ∈ obsPrefix ++ observedSharePreimages dep tr)
+  | _, _, a₀, _, _, hRel, _, .nil _ => .inl ⟨a₀, .nil a₀, hRel⟩
+  | c, cFinal, a₀, obsPrefix, _, hRel, hBufObs, .reject _ _ hRest =>
+    shareTrace_lift_or_collision dep hWf hRel hBufObs hRest
+  | c, cFinal, a₀, obsPrefix, (turn, ev) :: rest, hRel, hBufObs, .accept hStep hRest => by
+    have hStep' : shareOpeningStep dep c turn = some (_, ev) := hStep
+    rcases shareStep_sim_or_collision dep hWf hRel hStep' with hSim | ⟨m, hmBuf, p, _, rfl, hmD, hNe, hCol⟩
+    · let stepObs : List Preimage :=
+        match turn with
+        | .approve p d i =>
+          [dep.preimageOf p d i (dep.evalContrib p (dep.dealShare p) d i),
+           dep.preimageOf p d i (dep.trueContrib p i)]
+        | .inject m =>
+          [dep.preimageOf m.sender m.deploymentId m.intent m.contrib,
+           dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent)]
+        | _ => []
+      have hObsEq : obsPrefix ++ observedSharePreimages dep ((turn, ev) :: rest) =
+          (obsPrefix ++ stepObs) ++ observedSharePreimages dep rest := by
+        cases turn <;> simp [observedSharePreimages, stepObs, List.append_assoc]
+      have hBufObsNext : ∀ {c₁}, shareOpeningStep dep c turn = some (c₁, ev) →
+          ∀ m ∈ c₁.buffer,
+            dep.preimageOf m.sender m.deploymentId m.intent m.contrib ∈ obsPrefix ++ stepObs ∧
+            dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ∈ obsPrefix ++ stepObs := by
+        intro c₁ hS m' hm'
+        cases turn with
+        | approve p d i =>
+          unfold shareOpeningStep at hS; dsimp only at hS
+          by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧ d = dep.deploymentId ∧
+              (c.nodes p).latch ≤ i.epoch ∧ i.sessionId ∉ (c.nodes p).coupons
+          · rw [sh_if_pos hg] at hS; cases hS
+            rcases List.mem_cons.mp hm' with rfl | hOld
+            · dsimp only [stepObs]
+              rw [hRel.inv.shares p]
+              exact ⟨List.mem_append_right _ List.mem_cons_self,
+                List.mem_append_right _ (List.mem_cons_of_mem _ List.mem_cons_self)⟩
+            · exact (hBufObs m' hOld).imp (List.mem_append_left _) (List.mem_append_left _)
+          · rw [sh_if_neg hg] at hS; cases hS
+        | inject m =>
+          unfold shareOpeningStep at hS; dsimp only at hS
+          by_cases hg : m.sender ∈ c.corrupt
+          · rw [sh_if_pos hg] at hS; cases hS
+            rcases List.mem_cons.mp hm' with rfl | hOld
+            · exact ⟨List.mem_append_right _ List.mem_cons_self,
+                List.mem_append_right _ (List.mem_cons_of_mem _ List.mem_cons_self)⟩
+            · exact (hBufObs m' hOld).imp (List.mem_append_left _) (List.mem_append_left _)
+          · rw [sh_if_neg hg] at hS; cases hS
+        | corrupt p =>
+          unfold shareOpeningStep at hS; dsimp only at hS
+          by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧
+              c.corrupt.length + 1 < dep.quorum.threshold
+          · rw [sh_if_pos hg] at hS; cases hS
+            exact (hBufObs m' hm').imp (List.mem_append_left _) (List.mem_append_left _)
+          · rw [sh_if_neg hg] at hS; cases hS
+        | crash p =>
+          unfold shareOpeningStep at hS; cases hS
+          exact (hBufObs m' hm').imp (List.mem_append_left _) (List.mem_append_left _)
+        | dropMsg idx =>
+          unfold shareOpeningStep at hS; cases hS
+          rcases List.mem_append.mp hm' with hT | hDr
+          · exact (hBufObs m' (List.mem_of_mem_take hT)).imp (List.mem_append_left _) (List.mem_append_left _)
+          · exact (hBufObs m' (List.mem_of_mem_drop hDr)).imp (List.mem_append_left _) (List.mem_append_left _)
+        | execute d approvers i ab =>
+          rw [shareOpeningStep_execute_buffer dep hS] at hm'
+          exact (hBufObs m' hm').imp (List.mem_append_left _) (List.mem_append_left _)
+      cases hVis : shareVisIn dep turn with
+      | some j =>
+        rw [hVis] at hSim
+        obtain ⟨a₁, hStepA, hRel₁⟩ := hSim
+        rcases shareTrace_lift_or_collision dep hWf hRel₁ (hBufObsNext hStep') hRest with
+          ⟨aFinal, hTrA, hRelF⟩ | ⟨x₁, x₂, hNe, hCol, hx₁, hx₂⟩
+        · refine .inl ⟨aFinal, ?_, hRelF⟩
+          simp only [projectTrace, hVis]
+          exact .accept hStepA hTrA
+        · rw [← hObsEq] at hx₁ hx₂
+          exact .inr ⟨x₁, x₂, hNe, hCol, hx₁, hx₂⟩
+      | none =>
+        rw [hVis] at hSim
+        rcases shareTrace_lift_or_collision dep hWf hSim (hBufObsNext hStep') hRest with
+          ⟨aFinal, hTrA, hRelF⟩ | ⟨x₁, x₂, hNe, hCol, hx₁, hx₂⟩
+        · refine .inl ⟨aFinal, ?_, hRelF⟩
+          simp only [projectTrace, hVis]
+          exact hTrA
+        · rw [← hObsEq] at hx₁ hx₂
+          exact .inr ⟨x₁, x₂, hNe, hCol, hx₁, hx₂⟩
+    · obtain ⟨h1, h2⟩ := hBufObs m hmBuf
+      rw [hmD] at h1 h2
+      exact .inr ⟨_, _, hNe, hCol, List.mem_append_left _ h1, List.mem_append_left _ h2⟩
+
+/-- **Unconditional Collision-Branching Refinement Theorem (`distCustody_dataRefines_or_collision`)**:
+    For ANY compressing commitment hash `commit : Preimage → BitVec 256` with **zero injectivity
+    assumptions**, every multi-turn execution of `shareOpeningMachine dep` from `ShareState.init dep`
+    EITHER:
+    1. Projects to an admitted `Spec.idealCustodyMachine` trace where every WAL/released signature
+       passes `dep.sigScheme.verify dep.pk (dep.encodeDigest r.digest) r.sig = true`, fewer than
+       `threshold` parties are corrupted, cumulative spend stays within `spendCap`, and every WAL
+       record was approved in the durable latch of an enrolled custodian, OR
+    2. Yields an explicit colliding preimage pair `x₁ ≠ x₂` observed in the transcript with
+       `dep.commit x₁ = dep.commit x₂`! -/
+theorem distCustody_dataRefines_or_collision {Share Contrib Preimage PK SK D Sig : Type}
+    [DecidableEq Contrib] [DecidableEq D]
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (hWf : dep.WellFormed)
+    {stFinal : ShareState Share Contrib PK D Sig}
+    {tr : List (ShareTurn Contrib × ShareEvent Share Sig)}
+    (hTr : (shareOpeningMachine dep).ValidTrace (ShareState.init dep) tr stFinal) :
+    ((idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk
+        dep.quorum).AdmitsTrace (projectTrace (shareVisIn dep) shareVisOut tr) ∧
+      stFinal.corrupt.length < dep.quorum.threshold ∧
+      stFinal.ledger.spent ≤ dep.quorum.spendCap ∧
+      (∀ r : CustodyRelease D Sig, r ∈ stFinal.ledger.releasedHistory →
+        dep.sigScheme.verify dep.pk (dep.encodeDigest r.digest) r.sig = true ∧
+        r.sig = dep.idealOracle (dep.digests.digest dep.deploymentId r.intent) ∧
+        ∃ p : Nat, p < dep.quorum.numParties ∧ r.intent ∈ (stFinal.nodes p).latched ∧
+          r.intent.epoch < (stFinal.nodes p).latch)) ∨
+    (∃ x₁ x₂ : Preimage,
+      x₁ ≠ x₂ ∧ dep.commit x₁ = dep.commit x₂ ∧
+      x₁ ∈ observedSharePreimages dep tr ∧
+      x₂ ∈ observedSharePreimages dep tr) := by
+  rcases shareTrace_lift_or_collision dep hWf (obsPrefix := []) (shareInit_rel dep)
+      (fun _ h => absurd h List.not_mem_nil) hTr with
+    ⟨aFinal, hTrA, hRelF⟩ | ⟨x₁, x₂, hNe, hCol, hx₁, hx₂⟩
+  · left
+    have hReachA : (idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk
+        dep.quorum).Reachable aFinal := ⟨_, _, rfl, hTrA⟩
+    have hSafe := idealCustody_reachable_safeInv hReachA
+    refine ⟨⟨_, aFinal, rfl, hTrA⟩, hRelF.corrupt ▸ hSafe.corruptBudget,
+      hRelF.ledger ▸ hSafe.budget, ?_⟩
+    intro r hr
+    obtain ⟨hSig, p, hLt, hMem⟩ :=
+      idealCustody_reachable_release_honestly_approved hReachA (hRelF.ledger ▸ hr)
+    have hLat : r.intent ∈ (stFinal.nodes p).latched := by
+      rw [hRelF.latched p]
+      unfold custodyRevealed
+      exact List.mem_map.mpr ⟨_, List.mem_filter.mpr ⟨hMem, decide_eq_true rfl⟩, rfl⟩
+    exact ⟨hRelF.inv.walVerified r hr, hSig, p, hLt, hLat, hRelF.inv.latchBound p _ hLat⟩
+  · right
+    rw [List.nil_append] at hx₁ hx₂
+    exact ⟨x₁, x₂, hNe, hCol, hx₁, hx₂⟩
+
+end UnconditionalAndShareOpening
+
 #verify_constructive
   Qsag.DistCustody.Deployment.WellFormed.point_inj
   Qsag.DistCustody.verifyShare_dealt_or_collision
   Qsag.DistCustody.verifyShare_sound
   Qsag.DistCustody.reconstruct_dealt_shares
   Qsag.DistCustody.quorumKey_eq_secret
+  Qsag.DistCustody.quorumKey_eq_secret_or_collision
   Qsag.DistCustody.corrupt_shares_independent_of_secret
   Qsag.DistCustody.init_inv
   Qsag.DistCustody.executeStep_ledger_ideal
@@ -989,6 +2302,8 @@ end Defs
   Qsag.DistCustody.distCustody_latch_unique
   Qsag.DistCustody.latched_epoch_rejected_after_crash
   Qsag.DistCustody.execute_ready_fresh_releases
+  Qsag.DistCustody.verifyContrib_dealt_or_collision
+  Qsag.DistCustody.distCustody_dataRefines_or_collision
 
 end Qsag.DistCustody
 end

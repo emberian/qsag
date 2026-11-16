@@ -5893,7 +5893,7 @@ def ftsSignContextDomainV3 : List UInt8 :=
    0x43, 0x4F, 0x4E, 0x54, 0x45, 0x58, 0x54, 0x2E, 0x56, 0x33]
 
 /-- Exact ASCII bytes of `QSAG.PSFTS.HMSG.V2` (18 bytes, `0` string literals). -/
-def ftsHmsgDomainV2 : List UInt8 :=
+def ftsHmsgDomain : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x50, 0x53, 0x46, 0x54, 0x53, 0x2E, 0x48, 0x4D, 0x53, 0x47, 0x2E,
    0x56, 0x32]
 
@@ -7727,9 +7727,9 @@ def ftsSigningContextV3 (sessionSeed pkSeed : List UInt8) (epoch useCount : Nat)
 /-- FTS message-hash stream of Rust `derive_sum_constrained_offsets` (`parallel_mpc.rs`):
     `2 * num_chains` bytes of cSHAKE256 under `QSAG.PSFTS.HMSG.V2` over the frames
     `[pk_seed, root_bytes, epoch_be, randomizer, counter_be, msg]`. -/
-def ftsHmsgV2 (numChains : Nat) (pkSeed rootBytes : List UInt8) (epoch : Nat)
+def ftsHmsg (numChains : Nat) (pkSeed rootBytes : List UInt8) (epoch : Nat)
     (randomizer : List UInt8) (grindCounter : Nat) (msg : List UInt8) : List UInt8 :=
-  cshake256Xof (2 * numChains) ftsHmsgDomainV2
+  cshake256Xof (2 * numChains) ftsHmsgDomain
     (encodeFramedU64Le [pkSeed, rootBytes, be 4 epoch, randomizer, be 4 grindCounter, msg])
 
 /-- Round-constant stream of Rust `round_constants` (`SPN_ROUNDS = 48`): one cSHAKE256 XOF output

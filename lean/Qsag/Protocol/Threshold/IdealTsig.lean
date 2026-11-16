@@ -29,6 +29,7 @@ explicit `sk`-free UC simulator:
    at the head of section 5.
 -/
 
+public import Qsag.Spec.IdealCustody
 public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Poseidon2
@@ -2712,6 +2713,476 @@ theorem tsigRealOutcome_tower128_signs_and_rejects
     (towerMul 7 sk (towerAdd 7 sk m)) τ alpha tags
 
 end TsigSharedBeaverAndTower128
+
+/-! ## 7. Unification with `Spec.idealCustodyMachine` (`idealTsig_dataRefines_idealCustody`)
+
+Couples the `sk`-free, share-free $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ state (`IdealTsigState`,
+`validThresholdApproval`, `idealTsigRecordAbort`, `idealTsigVerify`) with the custody ledger and
+per-party permits as a reactive `Spec.Machine`, and proves a constructive `Spec.DataRefines`
+simulation into `Spec.idealCustodyMachine`:
+
+* `.approve`, `.advApprove`, `.corrupt` and `.sign` implement the four ports of
+  `Spec.idealCustodyMachine`;
+* `.recordAbort` (`idealTsigRecordAbort`, quarantining a corrupt party in `identifiedCheaters`) and
+  `.verify` (`idealTsigVerify`) are internal turns (`idealTsigVisIn = none`);
+* Fresh signing requires `validThresholdApproval` on the unquarantined honest permit holders AND
+  counts only unquarantined permit holders towards `Spec.custodyLedgerSign`, so quarantined
+  corrupt parties lose both approval ports and quorum weight while refining `Spec.idealCustodyMachine`. -/
+
+section IdealTsigCustodyRefinement
+
+open Qsag.Spec
+
+/-- State of the custody-coupled $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ machine. -/
+structure IdealTsigCustodyState (PK D Sig : Type) where
+  tsig : IdealTsigState PK D
+  ledger : CustodyLedger PK D Sig
+  honestApprovals : List CustodyApproval
+  corruptApprovals : List CustodyApproval
+
+/-- Initial custody-coupled $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ state for `(dep₀, pk₀, quorum₀)`. -/
+@[expose] def IdealTsigCustodyState.init {PK D Sig : Type}
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) :
+    IdealTsigCustodyState PK D Sig where
+  tsig :=
+    { pk := pk₀
+      threshold := quorum₀.threshold
+      numParties := quorum₀.numParties
+      corruptParties := []
+      approvedMsgs := []
+      identifiedCheaters := [] }
+  ledger := (IdealCustodyState.init dep₀ pk₀ quorum₀).ledger
+  honestApprovals := []
+  corruptApprovals := []
+
+/-- Input alphabet of the custody-coupled $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ machine. -/
+inductive IdealTsigCustodyInput (D Sig : Type) where
+  | approve (party deploymentId : Nat) (intent : CustodyIntent)
+  | advApprove (party deploymentId : Nat) (intent : CustodyIntent)
+  | corrupt (party : Nat)
+  | recordAbort (culprit : Nat)
+  | verify (msg : D) (sig : Sig)
+  | sign (deploymentId : Nat) (intent : CustodyIntent) (abortBeforeRelease : Bool)
+  deriving DecidableEq, Repr
+
+/-- Output alphabet of the custody-coupled $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ machine. -/
+inductive IdealTsigCustodyOutput (Sig : Type) where
+  | custody (out : CustodyOutcome Sig)
+  | abortedBy (culprit : Nat)
+  | verified (accepted : Bool)
+  deriving DecidableEq, Repr
+
+/-- Unquarantined honest enrolled parties holding a recorded honest permit for `(dep, i)`. -/
+def idealTsigHonestPermitHolders {PK D Sig : Type}
+    (st : IdealTsigCustodyState PK D Sig) (dep : Nat) (i : CustodyIntent) : List Nat :=
+  (List.range st.tsig.numParties).filter (fun p =>
+    decide (p ∉ st.tsig.corruptParties) &&
+    decide (p ∉ st.tsig.identifiedCheaters) &&
+    decide (CustodyApproval.mk p dep i ∈ st.honestApprovals))
+
+/-- Unquarantined enrolled parties (honest or corrupt) holding a recorded permit for `(dep, i)`. -/
+def idealTsigActivePermitHolders {PK D Sig : Type}
+    (st : IdealTsigCustodyState PK D Sig) (dep : Nat) (i : CustodyIntent) : List Nat :=
+  (List.range st.tsig.numParties).filter (fun p =>
+    decide (p ∉ st.tsig.identifiedCheaters) &&
+    (decide (CustodyApproval.mk p dep i ∈ st.honestApprovals) ||
+      decide (CustodyApproval.mk p dep i ∈ st.corruptApprovals)))
+
+/-- Single-step transition of the custody-coupled $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ machine. -/
+@[expose] def idealTsigCustodyStep {PK SK D Sig : Type} [DecidableEq D]
+    (S_sig : AbstractSigScheme PK SK D Sig)
+    (S_dig : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (st : IdealTsigCustodyState PK D Sig)
+    (inp : IdealTsigCustodyInput D Sig) :
+    Option (IdealTsigCustodyState PK D Sig × IdealTsigCustodyOutput Sig) :=
+  match inp with
+  | .approve p dep i =>
+    if p < st.ledger.quorum.numParties ∧ p ∉ st.tsig.corruptParties ∧
+        p ∉ st.tsig.identifiedCheaters ∧ dep = st.ledger.deploymentId then
+      some ({ st with honestApprovals := CustodyApproval.mk p dep i :: st.honestApprovals },
+            .custody .approvalRecorded)
+    else none
+  | .advApprove p dep i =>
+    if p ∈ st.tsig.corruptParties ∧ p ∉ st.tsig.identifiedCheaters ∧
+        dep = st.ledger.deploymentId then
+      some ({ st with corruptApprovals := CustodyApproval.mk p dep i :: st.corruptApprovals },
+            .custody .approvalRecorded)
+    else none
+  | .corrupt p =>
+    if p < st.ledger.quorum.numParties ∧ p ∉ st.tsig.corruptParties ∧
+        st.tsig.corruptParties.length + 1 < st.ledger.quorum.threshold then
+      some ({ st with
+              tsig := { st.tsig with corruptParties := p :: st.tsig.corruptParties } },
+            .custody (.corrupted (custodyRevealed st.honestApprovals p)))
+    else none
+  | .recordAbort culprit =>
+    (idealTsigRecordAbort st.tsig culprit).map
+      (fun tsig' => ({ st with tsig := tsig' }, .abortedBy culprit))
+  | .verify m sig =>
+    some (st, .verified (idealTsigVerify S_sig st.tsig m sig))
+  | .sign dep i ab =>
+    let honHolders := (List.range st.tsig.numParties).filter (fun p =>
+      decide (p ∉ st.tsig.corruptParties) &&
+      decide (p ∉ st.tsig.identifiedCheaters) &&
+      decide (CustodyApproval.mk p dep i ∈ st.honestApprovals))
+    let activeHolders := (List.range st.tsig.numParties).filter (fun p =>
+      decide (p ∉ st.tsig.identifiedCheaters) &&
+      (decide (CustodyApproval.mk p st.ledger.deploymentId i ∈ st.honestApprovals) ||
+        decide (CustodyApproval.mk p st.ledger.deploymentId i ∈ st.corruptApprovals)))
+    let ReplayOrFreshOk : Bool :=
+      match findReleasedEpoch st.ledger.releasedHistory i.epoch with
+      | some _ => true
+      | none => validThresholdApproval st.tsig honHolders
+    if ReplayOrFreshOk = true then
+      let count := activeHolders.length
+      match custodyLedgerSign S_dig oracleSign st.ledger count dep i ab with
+      | none => none
+      | some (L', out) =>
+        let tsig' :=
+          match out with
+          | .released _ =>
+            { st.tsig with approvedMsgs := S_dig.digest st.ledger.deploymentId i :: st.tsig.approvedMsgs }
+          | _ => st.tsig
+        some ({ st with tsig := tsig', ledger := L' }, .custody out)
+    else none
+
+/-- Reactive `Spec.Machine` packaging of the custody-coupled $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ functionality. -/
+def idealTsigCustodyMachine {PK SK D Sig : Type} [DecidableEq D]
+    (S_sig : AbstractSigScheme PK SK D Sig)
+    (S_dig : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) :
+    Machine (IdealTsigCustodyState PK D Sig)
+      (IdealTsigCustodyInput D Sig) (IdealTsigCustodyOutput Sig) where
+  Init st := st = IdealTsigCustodyState.init dep₀ pk₀ quorum₀
+  step := idealTsigCustodyStep S_sig S_dig oracleSign
+  errStep st _ := st
+
+/-- Interface map from `IdealTsigCustodyInput` to `Spec.CustodyInput` (`.recordAbort` and `.verify` are internal). -/
+def idealTsigVisIn {D Sig : Type} : IdealTsigCustodyInput D Sig → Option CustodyInput
+  | .approve p dep i => some (.approve p dep i)
+  | .advApprove p dep i => some (.advApprove p dep i)
+  | .corrupt p => some (.corrupt p)
+  | .recordAbort _ => none
+  | .verify _ _ => none
+  | .sign dep i ab => some (.sign dep i ab)
+
+/-- Interface map from `IdealTsigCustodyOutput` to `Spec.CustodyOutcome`. -/
+def idealTsigVisOut {Sig : Type} : IdealTsigCustodyOutput Sig → CustodyOutcome Sig
+  | .custody out => out
+  | .abortedBy _ => .approvalRecorded
+  | .verified _ => .approvalRecorded
+
+theorem idealTsigVisIn_eq {D Sig : Type} (inp : IdealTsigCustodyInput D Sig) :
+    idealTsigVisIn inp =
+      match inp with
+      | .approve p dep i => some (.approve p dep i)
+      | .advApprove p dep i => some (.advApprove p dep i)
+      | .corrupt p => some (.corrupt p)
+      | .recordAbort _ => none
+      | .verify _ _ => none
+      | .sign dep i ab => some (.sign dep i ab) := by
+  cases inp <;> rfl
+
+theorem idealTsigVisOut_eq {Sig : Type} (out : IdealTsigCustodyOutput Sig) :
+    idealTsigVisOut out =
+      match out with
+      | .custody o => o
+      | .abortedBy _ => .approvalRecorded
+      | .verified _ => .approvalRecorded := by
+  cases out <;> rfl
+
+/-- Simulation relation between `IdealTsigCustodyState` and `Spec.IdealCustodyState`,
+    carrying the anti-framing and WAL-digest synchronization invariants. -/
+structure IdealTsigCustodyRel {PK D Sig : Type}
+    (c : IdealTsigCustodyState PK D Sig)
+    (a : IdealCustodyState PK D Sig) : Prop where
+  pk_eq : c.tsig.pk = c.ledger.enrolledPk
+  num_eq : c.tsig.numParties = c.ledger.quorum.numParties
+  thr_eq : c.tsig.threshold = c.ledger.quorum.threshold
+  anti_framing : ∀ x ∈ c.tsig.identifiedCheaters, x ∈ c.tsig.corruptParties
+  approved_wal : c.tsig.approvedMsgs = c.ledger.releasedHistory.map CustodyRelease.digest
+  ledger_eq : a.ledger = c.ledger
+  corrupt_eq : a.corruptParties = c.tsig.corruptParties
+  honest_eq : a.honestApprovals = c.honestApprovals
+  corrupt_app_eq : a.corruptApprovals = c.corruptApprovals
+
+private theorem tsig_if_pos {α : Type} {p : Prop} [Decidable p] (hp : p) (x y : α) :
+    (if p then x else y) = x := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem tsig_if_neg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (x y : α) :
+    (if p then x else y) = y := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+private theorem idealTsigActivePermitHolders_le_custodyApprovers {PK D Sig : Type}
+    (c : IdealTsigCustodyState PK D Sig) (a : IdealCustodyState PK D Sig)
+    (hRel : IdealTsigCustodyRel c a) (i : CustodyIntent) :
+    (idealTsigActivePermitHolders c c.ledger.deploymentId i).length ≤
+      (custodyApprovers a.ledger.quorum.numParties a.honestApprovals a.corruptApprovals
+        a.ledger.deploymentId i).length := by
+  have hNd : (idealTsigActivePermitHolders c c.ledger.deploymentId i).Nodup := by
+    unfold idealTsigActivePermitHolders
+    exact List.Pairwise.filter _ (Qsag.Constructive.nodup_range c.tsig.numParties)
+  refine custodyApprovers_length_le_of_subset hNd (fun p hp => ?_)
+  unfold idealTsigActivePermitHolders at hp
+  rcases List.mem_filter.mp hp with ⟨hRange, hCond⟩
+  rcases Bool.and_eq_true_iff.mp hCond with ⟨_, hOr⟩
+  have hpLt : p < a.ledger.quorum.numParties := by
+    rw [hRel.ledger_eq, ← hRel.num_eq]
+    exact List.mem_range.mp hRange
+  have hDep : a.ledger.deploymentId = c.ledger.deploymentId := by
+    rw [hRel.ledger_eq]
+  refine ⟨hpLt, ?_⟩
+  rw [hDep, hRel.honest_eq, hRel.corrupt_app_eq]
+  rcases Bool.or_eq_true_iff.mp hOr with hH | hC
+  · exact .inl (of_decide_eq_true hH)
+  · exact .inr (of_decide_eq_true hC)
+
+/-- **Unification of `IdealTsig` and `Spec.idealCustodyMachine` (`idealTsig_dataRefines_idealCustody`)**:
+    The custody-coupled $\mathcal{F}_{\text{TSIG}}^{\text{id-abort}}$ machine refines
+    `Spec.idealCustodyMachine` via `Spec.DataRefines`, preserving anti-framing and exact
+    synchronization between `approvedMsgs` and committed WAL digests. -/
+def idealTsig_dataRefines_idealCustody {PK SK D Sig : Type} [DecidableEq D]
+    (S_sig : AbstractSigScheme PK SK D Sig)
+    (S_dig : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) :
+    DataRefines
+      (idealTsigCustodyMachine S_sig S_dig oracleSign dep₀ pk₀ quorum₀)
+      (idealCustodyMachine S_dig oracleSign dep₀ pk₀ quorum₀)
+      idealTsigVisIn idealTsigVisOut where
+  Rel := IdealTsigCustodyRel
+  absInit _ := IdealCustodyState.init dep₀ pk₀ quorum₀
+  init_ok {c₀} hInit := by
+    have hc : c₀ = IdealTsigCustodyState.init dep₀ pk₀ quorum₀ := hInit
+    subst hc
+    exact ⟨rfl,
+      { pk_eq := rfl
+        num_eq := rfl
+        thr_eq := rfl
+        anti_framing := fun _ h => False.elim (List.not_mem_nil h)
+        approved_wal := rfl
+        ledger_eq := rfl
+        corrupt_eq := rfl
+        honest_eq := rfl
+        corrupt_app_eq := rfl }⟩
+  sim_visible {c c' a inp out j} hRel hStepC hVis := by
+    cases inp with
+    | approve p dep i =>
+      cases hVis
+      change idealTsigCustodyStep S_sig S_dig oracleSign c (.approve p dep i) = some (c', out) at hStepC
+      unfold idealTsigCustodyStep at hStepC
+      dsimp only at hStepC
+      by_cases hg : p < c.ledger.quorum.numParties ∧ p ∉ c.tsig.corruptParties ∧
+          p ∉ c.tsig.identifiedCheaters ∧ dep = c.ledger.deploymentId
+      · rw [tsig_if_pos hg] at hStepC
+        cases hStepC
+        have hgA : p < a.ledger.quorum.numParties ∧ p ∉ a.corruptParties ∧
+            dep = a.ledger.deploymentId := by
+          rw [hRel.ledger_eq, hRel.corrupt_eq]
+          exact ⟨hg.1, hg.2.1, hg.2.2.2⟩
+        refine ⟨_, idealCustodyStep_approve_of (S := S_dig) (oracleSign := oracleSign) i hgA,
+          { pk_eq := hRel.pk_eq
+            num_eq := hRel.num_eq
+            thr_eq := hRel.thr_eq
+            anti_framing := hRel.anti_framing
+            approved_wal := hRel.approved_wal
+            ledger_eq := hRel.ledger_eq
+            corrupt_eq := hRel.corrupt_eq
+            honest_eq := congrArg (List.cons _) hRel.honest_eq
+            corrupt_app_eq := hRel.corrupt_app_eq }⟩
+      · rw [tsig_if_neg hg] at hStepC
+        cases hStepC
+    | advApprove p dep i =>
+      cases hVis
+      change idealTsigCustodyStep S_sig S_dig oracleSign c (.advApprove p dep i) = some (c', out) at hStepC
+      unfold idealTsigCustodyStep at hStepC
+      dsimp only at hStepC
+      by_cases hg : p ∈ c.tsig.corruptParties ∧ p ∉ c.tsig.identifiedCheaters ∧
+          dep = c.ledger.deploymentId
+      · rw [tsig_if_pos hg] at hStepC
+        cases hStepC
+        have hgA : p ∈ a.corruptParties ∧ dep = a.ledger.deploymentId := by
+          rw [hRel.ledger_eq, hRel.corrupt_eq]
+          exact ⟨hg.1, hg.2.2⟩
+        refine ⟨_, idealCustodyStep_advApprove_of (S := S_dig) (oracleSign := oracleSign) i hgA,
+          { pk_eq := hRel.pk_eq
+            num_eq := hRel.num_eq
+            thr_eq := hRel.thr_eq
+            anti_framing := hRel.anti_framing
+            approved_wal := hRel.approved_wal
+            ledger_eq := hRel.ledger_eq
+            corrupt_eq := hRel.corrupt_eq
+            honest_eq := hRel.honest_eq
+            corrupt_app_eq := congrArg (List.cons _) hRel.corrupt_app_eq }⟩
+      · rw [tsig_if_neg hg] at hStepC
+        cases hStepC
+    | corrupt p =>
+      cases hVis
+      change idealTsigCustodyStep S_sig S_dig oracleSign c (.corrupt p) = some (c', out) at hStepC
+      unfold idealTsigCustodyStep at hStepC
+      dsimp only at hStepC
+      by_cases hg : p < c.ledger.quorum.numParties ∧ p ∉ c.tsig.corruptParties ∧
+          c.tsig.corruptParties.length + 1 < c.ledger.quorum.threshold
+      · rw [tsig_if_pos hg] at hStepC
+        cases hStepC
+        have hgA : p < a.ledger.quorum.numParties ∧ p ∉ a.corruptParties ∧
+            a.corruptParties.length + 1 < a.ledger.quorum.threshold := by
+          rw [hRel.ledger_eq, hRel.corrupt_eq]
+          exact hg
+        have hStepA := idealCustodyStep_corrupt_of (S := S_dig) (oracleSign := oracleSign)
+          (st := a) (p := p) hgA
+        refine ⟨{ a with corruptParties := p :: a.corruptParties }, ?_, ?_⟩
+        · change idealCustodyStep S_dig oracleSign a (.corrupt p) =
+            some ({ a with corruptParties := p :: a.corruptParties },
+                  .corrupted (custodyRevealed c.honestApprovals p))
+          rw [hStepA, hRel.honest_eq]
+        · exact
+            { pk_eq := hRel.pk_eq
+              num_eq := hRel.num_eq
+              thr_eq := hRel.thr_eq
+              anti_framing := fun x hx => List.mem_cons_of_mem _ (hRel.anti_framing x hx)
+              approved_wal := hRel.approved_wal
+              ledger_eq := hRel.ledger_eq
+              corrupt_eq := congrArg (List.cons p) hRel.corrupt_eq
+              honest_eq := hRel.honest_eq
+              corrupt_app_eq := hRel.corrupt_app_eq }
+      · rw [tsig_if_neg hg] at hStepC
+        cases hStepC
+    | recordAbort _ => cases hVis
+    | verify _ _ => cases hVis
+    | sign dep i ab =>
+      cases hVis
+      change idealTsigCustodyStep S_sig S_dig oracleSign c (.sign dep i ab) = some (c', out) at hStepC
+      unfold idealTsigCustodyStep at hStepC
+      dsimp only at hStepC
+      let gate : Bool :=
+        match findReleasedEpoch c.ledger.releasedHistory i.epoch with
+        | some _ => true
+        | none => validThresholdApproval c.tsig (idealTsigHonestPermitHolders c dep i)
+      change (if gate = true then _ else none) = some (c', out) at hStepC
+      by_cases hGate : gate = true
+      · rw [tsig_if_pos hGate] at hStepC
+        change (match custodyLedgerSign S_dig oracleSign c.ledger
+            (idealTsigActivePermitHolders c c.ledger.deploymentId i).length dep i ab with
+          | none => none
+          | some (L', o) => _) = some (c', out) at hStepC
+        cases hL : custodyLedgerSign S_dig oracleSign c.ledger
+            (idealTsigActivePermitHolders c c.ledger.deploymentId i).length dep i ab with
+        | none => rw [hL] at hStepC; cases hStepC
+        | some pair =>
+          rcases pair with ⟨L', o⟩
+          rw [hL] at hStepC
+          cases hStepC
+          have hLe := idealTsigActivePermitHolders_le_custodyApprovers c a hRel i
+          have hMono := custodyLedgerSign_mono hL hLe
+          rw [← hRel.ledger_eq] at hMono
+          obtain ⟨hD', hPk', hQ'⟩ := custodyLedgerSign_static hL
+          have hAppWal :
+              (match o with
+               | .released _ =>
+                 { c.tsig with approvedMsgs := S_dig.digest c.ledger.deploymentId i :: c.tsig.approvedMsgs }
+               | _ => c.tsig).approvedMsgs =
+              L'.releasedHistory.map CustodyRelease.digest := by
+            obtain ⟨_, _, hCase⟩ := custodyLedgerSign_inv hL
+            rcases hCase with ⟨r, _, _, hSame, hOut⟩ | ⟨_, _, _, _, _, hAb⟩
+            · subst hSame; subst hOut
+              exact hRel.approved_wal
+            · rcases hAb with ⟨_, hL', hOut⟩ | ⟨_, hL', hOut⟩
+              · subst hL'; subst hOut
+                exact hRel.approved_wal
+              · subst hL'; subst hOut
+                show S_dig.digest c.ledger.deploymentId i :: c.tsig.approvedMsgs =
+                  S_dig.digest c.ledger.deploymentId i ::
+                    c.ledger.releasedHistory.map CustodyRelease.digest
+                exact congrArg (List.cons _) hRel.approved_wal
+          refine ⟨{ a with ledger := L' },
+            idealCustodyStep_sign_of (S := S_dig) (oracleSign := oracleSign) hMono,
+            { pk_eq := by
+                cases o <;> exact hRel.pk_eq.trans hPk'.symm
+              num_eq := by
+                have hN : L'.quorum.numParties = c.ledger.quorum.numParties :=
+                  congrArg CustodyQuorumProfile.numParties hQ'
+                cases o <;> exact hRel.num_eq.trans hN.symm
+              thr_eq := by
+                have hT : L'.quorum.threshold = c.ledger.quorum.threshold :=
+                  congrArg CustodyQuorumProfile.threshold hQ'
+                cases o <;> exact hRel.thr_eq.trans hT.symm
+              anti_framing := by
+                cases o <;> exact hRel.anti_framing
+              approved_wal := hAppWal
+              ledger_eq := rfl
+              corrupt_eq := by
+                cases o <;> exact hRel.corrupt_eq
+              honest_eq := hRel.honest_eq
+              corrupt_app_eq := hRel.corrupt_app_eq }⟩
+      · rw [tsig_if_neg hGate] at hStepC
+        cases hStepC
+  sim_internal {c c' a inp out} hRel hStepC hInt := by
+    cases inp with
+    | approve _ _ _ => cases hInt
+    | advApprove _ _ _ => cases hInt
+    | corrupt _ => cases hInt
+    | sign _ _ _ => cases hInt
+    | verify m sig =>
+      change idealTsigCustodyStep S_sig S_dig oracleSign c (.verify m sig) = some (c', out) at hStepC
+      unfold idealTsigCustodyStep at hStepC
+      cases hStepC
+      exact hRel
+    | recordAbort culprit =>
+      change idealTsigCustodyStep S_sig S_dig oracleSign c (.recordAbort culprit) = some (c', out) at hStepC
+      unfold idealTsigCustodyStep idealTsigRecordAbort at hStepC
+      dsimp only at hStepC
+      by_cases hc : culprit ∈ c.tsig.corruptParties
+      · rw [tsig_if_pos hc] at hStepC
+        cases hStepC
+        exact
+          { pk_eq := hRel.pk_eq
+            num_eq := hRel.num_eq
+            thr_eq := hRel.thr_eq
+            anti_framing := fun x hx => by
+              rcases List.mem_cons.mp hx with rfl | hOld
+              · exact hc
+              · exact hRel.anti_framing x hOld
+            approved_wal := hRel.approved_wal
+            ledger_eq := hRel.ledger_eq
+            corrupt_eq := hRel.corrupt_eq
+            honest_eq := hRel.honest_eq
+            corrupt_app_eq := hRel.corrupt_app_eq }
+      · rw [tsig_if_neg hc] at hStepC
+        cases hStepC
+  sim_reject hRel _ := hRel
+
+/-- Observable trace inclusion from `idealTsigCustodyMachine` into `Spec.idealCustodyMachine`,
+    paired with reachable anti-framing and WAL-digest synchronization. -/
+theorem idealTsig_admitsTrace_idealCustody {PK SK D Sig : Type} [DecidableEq D]
+    (S_sig : AbstractSigScheme PK SK D Sig)
+    (S_dig : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) :
+    (∀ tr : List (IdealTsigCustodyInput D Sig × IdealTsigCustodyOutput Sig),
+      (idealTsigCustodyMachine S_sig S_dig oracleSign dep₀ pk₀ quorum₀).AdmitsTrace tr →
+      (idealCustodyMachine S_dig oracleSign dep₀ pk₀ quorum₀).AdmitsTrace
+        (projectTrace idealTsigVisIn idealTsigVisOut tr)) ∧
+    (∀ st : IdealTsigCustodyState PK D Sig,
+      (idealTsigCustodyMachine S_sig S_dig oracleSign dep₀ pk₀ quorum₀).Reachable st →
+      (∀ x ∈ st.tsig.identifiedCheaters, x ∈ st.tsig.corruptParties) ∧
+      st.tsig.approvedMsgs = st.ledger.releasedHistory.map CustodyRelease.digest ∧
+      st.ledger.spent ≤ quorum₀.spendCap) := by
+  let ref := idealTsig_dataRefines_idealCustody S_sig S_dig oracleSign dep₀ pk₀ quorum₀
+  refine ⟨fun _ h => ref.preserve_admitsTrace h, ?_⟩
+  intro st hReach
+  obtain ⟨a, hReachA, hRel⟩ := ref.reachable_rel hReach
+  have hRel' : IdealTsigCustodyRel st a := hRel
+  have hSafe := idealCustody_reachable_safeInv hReachA
+  exact ⟨hRel'.anti_framing, hRel'.approved_wal, hRel'.ledger_eq ▸ hSafe.budget⟩
+
+end IdealTsigCustodyRefinement
+
+#verify_constructive
+  Qsag.idealTsig_admitsTrace_idealCustody
 
 end Qsag
 end
