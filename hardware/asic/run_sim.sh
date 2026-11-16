@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# bb2 only: generate RTL + vectors, lint, build and run the co-simulations.
-#   usage: run_sim.sh [gen|lint|units|top|all]   (each step is a separate bounded build scope)
+# bb2 only: generate RTL + vectors, lint (-Wall, 0 warnings), build and run unit + real-proof co-simulations.
 set -euo pipefail
 cd "$(dirname "$0")"
 export PATH=/home/build/qsag-ni-asic/tools/oss-cad-suite/bin:$PATH
@@ -15,15 +14,17 @@ if [[ $step == gen || $step == all ]]; then
 fi
 if [[ $step == lint || $step == all ]]; then
   $RUN verilator --lint-only -Wall -Wno-fatal tb/lint.vlt -Irtl $RTL tb/sram_dp_model.sv --top-module qsag_ni_asic_top 2>&1 | tee logs/lint.log
-  echo "lint warnings: $(grep -c '^%Warning' logs/lint.log || true)" | tee -a logs/lint.log
+  wcnt="$(grep -c '^%Warning' logs/lint.log || true)"
+  echo "lint warnings: $wcnt" | tee -a logs/lint.log
+  [[ "$wcnt" == "0" ]]
 fi
 if [[ $step == units || $step == all ]]; then
-  $RUN verilator --binary --timing $VFLAGS $RTL tb/tb_units.sv --top-module tb_units --Mdir obj_units -o tb_units > logs/build_units.log 2>&1 || { tail -30 logs/build_units.log; exit 1; }
+  $RUN verilator --binary --timing $VFLAGS $RTL tb/tb_units.sv --top-module tb_units --Mdir obj_units -o tb_units > logs/build_units.log 2>&1 || { tail -40 logs/build_units.log; exit 1; }
   $RUN ./obj_units/tb_units 2>&1 | tee logs/sim_units.log
 fi
 if [[ $step == top || $step == all ]]; then
-  $RUN verilator --binary --timing $VFLAGS $RTL tb/sram_dp_model.sv tb/tb_top.sv --top-module tb_top --Mdir obj_top -o tb_top > logs/build_top.log 2>&1 || { tail -30 logs/build_top.log; exit 1; }
-  for t in kat sta1_p2 sta1_ts fold16; do
+  $RUN verilator --binary --timing $VFLAGS $RTL tb/sram_dp_model.sv tb/tb_top.sv --top-module tb_top --Mdir obj_top -o tb_top > logs/build_top.log 2>&1 || { tail -40 logs/build_top.log; exit 1; }
+  for t in kat sta1_p2 sta1_p2_tamper sta1_ts sta1_ts_tamper duet_comp duet_comp_tamper fold16; do
     $RUN ./obj_top/tb_top +trace=vec/trace_$t.hex 2>&1 | grep -v '^MARK tag=0 ' | tee logs/sim_top_$t.log | tail -40
   done
 fi

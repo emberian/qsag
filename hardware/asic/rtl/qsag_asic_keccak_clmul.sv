@@ -140,9 +140,9 @@ module qsag_keccak_2rpc (
           s[64*lane_idx +: 64] <= lane_xor ? (s[64*lane_idx +: 64] ^ lane_wdata) : lane_wdata;
         end
         if (pair_xor_en) begin
-          s[64*pair_idx +: 64] <= s[64*pair_idx +: 64] ^ pair_w0;
+          s[64*int'(pair_idx) +: 64] <= s[64*int'(pair_idx) +: 64] ^ pair_w0;
           if (!pair_single) begin
-            s[64*(pair_idx + 5'd1) +: 64] <= s[64*(pair_idx + 5'd1) +: 64] ^ pair_w1;
+            s[64*(int'(pair_idx) + 1) +: 64] <= s[64*(int'(pair_idx) + 1) +: 64] ^ pair_w1;
           end
         end
         if (pad_end_en) begin
