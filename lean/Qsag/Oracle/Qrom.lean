@@ -7471,6 +7471,13 @@ theorem publicSpnPreimageMass_def {anc q : Nat} (p : PublicPermutation PublicSpn
           (publicSpnPreimageFinalState p adversary challenge input output auxiliary)
         else 0))) := by rfl
 
+theorem ClassicalQueryAddresses_iff {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (addr : (Fin cardX → BitVec w) → Nat → Fin cardX) :
+    ClassicalQueryAddresses A addr ↔
+      ∀ (H : Fin cardX → BitVec w) (t : Nat) (ht : t < q) (x : Fin cardX) (y : Fin (2 ^ w))
+        (a : Fin cardAnc), x ≠ addr H t →
+          advStateAt A H t (Nat.le_of_lt ht) x y a = GaussInt.zero := Iff.rfl
+
 /-- A basis vector of a two-address, two-bit-response register has positive norm. -/
 theorem qrom_witness_init_kat (init : QVec 2 2 1)
     (hInit : init = fun x y _ => if x.1 = 0 ∧ y.1 = 0 then ⟨1, 0⟩ else GaussInt.zero) :

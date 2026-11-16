@@ -1159,6 +1159,29 @@ theorem tooth_poseidon2_margin_fails_at_rp17 : ¬ Poseidon2InterpolationMargin 1
 
 
 
+private theorem gold_add_cring_here (a b : Goldilocks) :
+    Goldilocks.add a b = CommRingOps.add a b := by rfl
+private theorem gold_sub_cring_here (a b : Goldilocks) :
+    Goldilocks.sub a b = CommRingOps.sub a b := by rfl
+private theorem gold_mul_cring_here (a b : Goldilocks) :
+    Goldilocks.mul a b = CommRingOps.mul a b := by rfl
+private theorem gold_neg_cring_here (a : Goldilocks) :
+    Goldilocks.neg a = CommRingOps.neg a := by rfl
+private theorem gold_zero_cring_here : Goldilocks.zero = (CommRingOps.zero : Goldilocks) := by rfl
+private theorem gold_one_cring_here : Goldilocks.one = (CommRingOps.one : Goldilocks) := by rfl
+private theorem gold_2_cring_here : Goldilocks.ofNat 2 = CRing.natCast 2 := by decide +kernel
+private theorem gold_3_cring_here : Goldilocks.ofNat 3 = CRing.natCast 3 := by decide +kernel
+private theorem gold_4_cring_here : Goldilocks.ofNat 4 = CRing.natCast 4 := by decide +kernel
+
+/-- `gold_cring` of `Qsag.Oracle.Poseidon2`, over bridge lemmas visible in this module: the
+    library macro cites lemmas private to its module, so outside it the bridge step is skipped. -/
+local macro "gold_cring_here" : tactic => `(tactic| (
+  try dsimp only
+  try simp only [gold_add_cring_here, gold_sub_cring_here, gold_mul_cring_here,
+    gold_neg_cring_here, gold_zero_cring_here, gold_one_cring_here, gold_2_cring_here,
+    gold_3_cring_here, gold_4_cring_here]
+  try (open scoped Qsag.CRing in constructive_ring)))
+
 /-- `#tooth` **Merz–Rodríguez García (`2026/306`) `(X, -X, 0)` Subspace & Partial Feed-Forward Vulnerability**:
     1. On the block-circulant factor `applyMEStd = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)` (the external layer before the `M_4 ⊗ P_3` lane transposition was deployed), the entire 4-dimensional subspace
        `⟨X, -X, 0⟩` maps to `⟨M_4 X, -M_4 X, 0⟩`, leaving the sponge capacity block `b2 = 0` untouched!
@@ -1181,14 +1204,14 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
       ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ := by
     unfold applyMEStd
     simp only [lane4Neg_eq, applyM4_eq, lane4Add_eq, lane4Sub_eq, lane4Sum_eq, lane4Zero_eq]
-    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring_here
   have hDecomp : ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
       state12Add ⟨U0, lane4Zero, U2⟩ ⟨X, lane4Neg X, lane4Zero⟩ := by
     simp only [state12Add_eq, lane4Add_eq, lane4Neg_eq, lane4Sub_eq, lane4Zero_eq]
-    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring_here
   refine ⟨hLinSub, ?_, ?_, rfl, ?_⟩
   · rw [hDecomp, applyMEStd_add, hLinSub]
-    simp only [state12Add_eq, sboxState12_eq, sboxLane4_eq]
+    simp only [state12Add_eq, sboxState12_eq]
     have hHelper : ∀ (M0 M1 A C0 C1 : Lane4),
         lane4Add M0 C0 = lane4Neg (lane4Add M1 C1) →
         lane4Add (lane4Add M1 (lane4Neg A)) C1 = lane4Neg (lane4Add (lane4Add M0 A) C0) := by
@@ -1199,39 +1222,39 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
       have h3 := congrArg Lane4.x3 hEq
       simp only [lane4Add_eq, lane4Neg_eq, lane4Sub_eq, lane4Zero_eq] at h0 h1 h2 h3 ⊢
       have hInv : ∀ a : Goldilocks, Goldilocks.sub Goldilocks.zero (Goldilocks.sub Goldilocks.zero a) = a :=
-        fun _ => by gold_cring
+        fun _ => by gold_cring_here
       apply Lane4.ext
       · have hL : Goldilocks.add (Goldilocks.add M1.x0 (Goldilocks.sub Goldilocks.zero A.x0)) C1.x0 =
-            Goldilocks.sub (Goldilocks.add M1.x0 C1.x0) A.x0 := by gold_cring
+            Goldilocks.sub (Goldilocks.add M1.x0 C1.x0) A.x0 := by gold_cring_here
         have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x0 A.x0) C0.x0) =
-            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0)) A.x0 := by gold_cring
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0)) A.x0 := by gold_cring_here
         have hFlip : Goldilocks.add M1.x0 C1.x0 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h0
           rw [hInv] at this
           exact this.symm
         rw [hL, rhsEq, hFlip]
       · have hL : Goldilocks.add (Goldilocks.add M1.x1 (Goldilocks.sub Goldilocks.zero A.x1)) C1.x1 =
-            Goldilocks.sub (Goldilocks.add M1.x1 C1.x1) A.x1 := by gold_cring
+            Goldilocks.sub (Goldilocks.add M1.x1 C1.x1) A.x1 := by gold_cring_here
         have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x1 A.x1) C0.x1) =
-            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1)) A.x1 := by gold_cring
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1)) A.x1 := by gold_cring_here
         have hFlip : Goldilocks.add M1.x1 C1.x1 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h1
           rw [hInv] at this
           exact this.symm
         rw [hL, rhsEq, hFlip]
       · have hL : Goldilocks.add (Goldilocks.add M1.x2 (Goldilocks.sub Goldilocks.zero A.x2)) C1.x2 =
-            Goldilocks.sub (Goldilocks.add M1.x2 C1.x2) A.x2 := by gold_cring
+            Goldilocks.sub (Goldilocks.add M1.x2 C1.x2) A.x2 := by gold_cring_here
         have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x2 A.x2) C0.x2) =
-            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2)) A.x2 := by gold_cring
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2)) A.x2 := by gold_cring_here
         have hFlip : Goldilocks.add M1.x2 C1.x2 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h2
           rw [hInv] at this
           exact this.symm
         rw [hL, rhsEq, hFlip]
       · have hL : Goldilocks.add (Goldilocks.add M1.x3 (Goldilocks.sub Goldilocks.zero A.x3)) C1.x3 =
-            Goldilocks.sub (Goldilocks.add M1.x3 C1.x3) A.x3 := by gold_cring
+            Goldilocks.sub (Goldilocks.add M1.x3 C1.x3) A.x3 := by gold_cring_here
         have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x3 A.x3) C0.x3) =
-            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3)) A.x3 := by gold_cring
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3)) A.x3 := by gold_cring_here
         have hFlip : Goldilocks.add M1.x3 C1.x3 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3) := by
           have := congrArg (Goldilocks.sub Goldilocks.zero) h3
           rw [hInv] at this
@@ -1243,12 +1266,12 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
     simp only [lane4Neg_eq, lane4Sub_eq, lane4Zero_eq]
     exact Lane4.ext (sbox7_odd _) (sbox7_odd _) (sbox7_odd _) (sbox7_odd _)
   · rw [hDecomp, applyMEStd_add, hLinSub]
-    simp only [state12Add_eq, sboxState12_eq]
+    simp only [state12Add_eq, sboxState12_eq, sboxLane4_eq]
     have hAddZ : ∀ a : Lane4, lane4Add a lane4Zero = a := fun a => by
       rw [lane4Add_eq, lane4Zero_eq]; apply Lane4.ext <;> exact LawfulCommRing.add_zero _
     rw [hAddZ]
   · simp only [lane4Add_eq, lane4Neg_eq, lane4Sub_eq, lane4Zero_eq]
-    apply Lane4.ext <;> gold_cring
+    apply Lane4.ext <;> gold_cring_here
 
 
 /-- Superseded internal diffusion matrix `diag(-2, 1, 2, 4, ..., 1024) + 1·1ᵀ` (first diagonal entry
@@ -1401,10 +1424,11 @@ theorem toy_measured_merkle_execution :
     satisfiable and the transfer theorem applies to them. -/
 theorem toyQueryAdv_classical (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasisInit x₀)) :
     ClassicalQueryAddresses (toyQueryAdv x₀ h) (fun _ _ => x₀) := by
-  unfold ClassicalQueryAddresses
+  refine (ClassicalQueryAddresses_iff _ _).mpr ?_
   intro H t ht x y a hx
   have ht0 : t = 0 := by omega
   subst ht0
+  rw [advStateAt_zero]
   show (if x = x₀ ∧ y.val = 0 then (⟨1, 0⟩ : GaussInt) else GaussInt.zero) = GaussInt.zero
   exact ite_eq_right (fun hh => hx hh.1)
 

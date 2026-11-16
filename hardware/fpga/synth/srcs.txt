@@ -1,5 +1,6 @@
 rtl/qsag_ni_pkg.sv
 rtl/qsag_add_split.sv
+rtl/qsag_csa_reduce2.sv
 rtl/qsag_sum_csa.sv
 rtl/qsag_sdp_bram.sv
 rtl/qsag_bram_delay.sv

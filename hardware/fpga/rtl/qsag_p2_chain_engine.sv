@@ -1,17 +1,9 @@
-// Batched Poseidon2 chain engine: up to SLOTS independent hash chains share the C-slow ring core.
+// Batched Poseidon2 chain engine: up to SLOTS independent hash chains share the Poseidon2 engine
+// (C-slow ring, unrolled 1-perm/clk VU9P pipeline, or compact core).
 //
-// A chain is the verification of one WHIR query against a Poseidon2 Canopy tree:
-//   1. `nsponge` rate-8 sponge steps  state[0..7] += block (mod p); state <- perm(state)
-//      (crates/qsag-accel poseidon2_sponge_hash_limbs_with_cap; the host frames the blocks);
-//   2. Canopy internal nodes up the tree from heap index `heap` (leaf = 2^depth + index):
-//      digest <- Jive(left, right, [0x50324E44_00000000 | parent, k0, k1, k2]) with
-//      (left, right) ordered by the low bit of the child index, until the parent is node 1
-//      (crates/qsag-accel merkle_layer_poseidon2_canopy_at_cpu).
-// The final digest is compared with `exp_root` (the tree's top node). Per-step data (sponge
-// blocks, then siblings, in order) and the running state live in block RAM, both read
-// synchronously. Results coming back from the ring are stored at once and a three-stage
-// injector re-offers pending chains at up to one job per clock, so nothing ever stalls the ring.
-// Block and sibling limbs must be canonical.
+// Upgraded with:
+//   1. Logarithmic binary-tree round-robin priority encoder ($clog2(SLOTS) mux levels vs SLOTS);
+//   2. Parallel speculative modular rate absorption (<= 12 LUT+CARRY4 levels vs 32 cascaded).
 module qsag_p2_chain_engine #(
     parameter int SLOTW = 5,
     parameter int STEPW = 6
@@ -37,14 +29,14 @@ module qsag_p2_chain_engine #(
     input  logic [SLOTW-1:0]       rd_slot,
     output logic                   rd_done,
     output logic [767:0]           rd_state,
-    // jobs to the ring core
+    // jobs to the Poseidon2 core
     output logic                   job_valid,
     input  logic                   job_ready,
     output logic [767:0]           job_state,
     output logic                   job_jive,
     output logic                   job_last,
     output logic [SLOTW-1:0]       job_slot,
-    // results from the ring core
+    // results from the Poseidon2 core
     input  logic                   res_valid,
     input  logic                   res_last,
     input  logic [SLOTW-1:0]       res_slot,
@@ -54,35 +46,46 @@ module qsag_p2_chain_engine #(
     output logic [(1<<SLOTW)-1:0]  done_map,
     output logic [(1<<SLOTW)-1:0]  ok_map
 );
-    localparam logic [63:0] GL_P = qsag_ni_pkg::GL_P;
+    localparam logic [63:0] GL_P   = qsag_ni_pkg::GL_P;
+    localparam logic [65:0] NEG_1P = 66'h3_0000_0000_FFFF_FFFF; // 2^66 - GL_P
     localparam int SLOTS = 1 << SLOTW;
     localparam int METAW = 6 + STEPW + 32;
     localparam logic [31:0] CANOPY_NODE_HI = 32'h5032_4E44;
 
     logic [SLOTS-1:0] pend;
     logic [METAW-1:0] meta [SLOTS];
+    logic [SLOTW-1:0] rr;
 
-    // Round-robin choice among the pending slots: first pending slot at or after `rr`,
-    // so no chain waits behind lower-numbered ones when the ring is full.
-    logic [SLOTW-1:0] pick, pick_lo, pick_hi, rr;
+    // Balanced binary-tree find-first-one over pend_hi (slots >= rr) and pend (all slots).
     logic [SLOTS-1:0] pend_hi;
-    always_comb begin
-        pick_lo = '0;
-        pick_hi = '0;
-        for (int i = 0; i < SLOTS; i++) pend_hi[i] = pend[i] && (SLOTW'(i) >= rr);
-        for (int i = SLOTS - 1; i >= 0; i--) begin
-            if (pend[i])    pick_lo = SLOTW'(i);
-            if (pend_hi[i]) pick_hi = SLOTW'(i);
-        end
+    for (genvar i = 0; i < SLOTS; i++) begin : g_mask
+        assign pend_hi[i] = pend[i] && (SLOTW'(i) >= rr);
     end
-    assign pick = (|pend_hi) ? pick_hi : pick_lo;
 
-    // Injector pipeline, one job per clock when the ring accepts:
-    //   A  pick a pending slot, read its state and step data, advance its step counters
-    //   B  RAM outputs -> next ring job
-    //   C  job register offered to the ring
-    // `en` moves all three together; while the ring refuses the job in C the RAM read
-    // addresses are held, so stage B keeps its data.
+    logic [2*SLOTS-1:0]        v_lo, v_hi;
+    logic [2*SLOTS*SLOTW-1:0]  idx_lo, idx_hi;
+    for (genvar i = 0; i < SLOTS; i++) begin : g_leaf
+        assign v_lo[SLOTS + i]                   = pend[i];
+        assign idx_lo[(SLOTS + i)*SLOTW +: SLOTW] = SLOTW'(i);
+        assign v_hi[SLOTS + i]                   = pend_hi[i];
+        assign idx_hi[(SLOTS + i)*SLOTW +: SLOTW] = SLOTW'(i);
+    end
+    for (genvar n = SLOTS - 1; n >= 1; n--) begin : g_tree
+        assign v_lo[n]                = v_lo[2*n] | v_lo[2*n + 1];
+        assign idx_lo[n*SLOTW +: SLOTW] = v_lo[2*n] ? idx_lo[(2*n)*SLOTW +: SLOTW]
+                                                    : idx_lo[(2*n+1)*SLOTW +: SLOTW];
+        assign v_hi[n]                = v_hi[2*n] | v_hi[2*n + 1];
+        assign idx_hi[n*SLOTW +: SLOTW] = v_hi[2*n] ? idx_hi[(2*n)*SLOTW +: SLOTW]
+                                                    : idx_hi[(2*n+1)*SLOTW +: SLOTW];
+    end
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused_tree0 = v_lo[0] ^ v_hi[0] ^ (|idx_lo[SLOTW-1:0]) ^ (|idx_hi[SLOTW-1:0]);
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    logic [SLOTW-1:0] pick;
+    assign pick = v_hi[1] ? idx_hi[SLOTW +: SLOTW] : idx_lo[SLOTW +: SLOTW];
+
+    // Injector pipeline (A -> B -> C).
     logic             a_valid, en;
     logic [SLOTW-1:0] a_s;
     logic [METAW-1:0] a_m, meta_pick;
@@ -97,10 +100,9 @@ module qsag_p2_chain_engine #(
     logic rd_busy, rd_q, do_start, do_read, do_pick;
     assign do_start    = !rst && en && start_valid && !res_valid && !busy_map[start_slot];
     assign do_read     = en && !start_valid && rd_valid && !rd_busy;
-    assign do_pick     = en && !start_valid && !do_read && (|pend);
+    assign do_pick     = en && !start_valid && !do_read && v_lo[1];
     assign start_ready = do_start;
 
-    // Running state RAM and step data RAM.
     logic [767:0] cur_rd;
     logic [511:0] blk_rd;
     qsag_sdp_bram #(.AW(SLOTW), .DW(768)) u_cur (
@@ -112,16 +114,20 @@ module qsag_p2_chain_engine #(
         .clk(clk), .we(bw_en), .wa(bw_addr), .wd(bw_data),
         .ra(!en ? {a_s, m_step} : {pick, p_step}), .rd(blk_rd));
 
-    // Stage B: next job from the RAM outputs.
+    // Stage B: parallel speculative modular rate absorption (<= 11 levels).
     logic [511:0] absorbed;
     for (genvar i = 0; i < 8; i++) begin : g_abs
-        logic [64:0] s;
+        wire [63:0] c_i = cur_rd[64*i +: 64];
+        wire [63:0] b_i = blk_rd[64*i +: 64];
         /* verilator lint_off UNUSEDSIGNAL */
-        logic [65:0] sm;
+        logic [64:0] s0;
+        logic [65:0] s1;
         /* verilator lint_on UNUSEDSIGNAL */
-        assign s  = {1'b0, cur_rd[64*i +: 64]} + {1'b0, blk_rd[64*i +: 64]};
-        assign sm = {1'b0, s} - {2'b0, GL_P};
-        assign absorbed[64*i +: 64] = sm[65] ? s[63:0] : sm[63:0];
+        qsag_add_split #(.W(65), .CHUNK(16)) u_s0 (
+            .a({1'b0, c_i}), .b({1'b0, b_i}), .y(s0));
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(16)) u_s1 (
+            .x({NEG_1P, {2'b0, b_i}, {2'b0, c_i}}), .y(s1));
+        assign absorbed[64*i +: 64] = !s1[65] ? s1[63:0] : s0[63:0];
     end
 
     logic         sponge;
@@ -157,7 +163,6 @@ module qsag_p2_chain_engine #(
             if (do_read) rd_busy <= 1'b1;
             if (rd_q)    rd_busy <= 1'b0;
             if (en) begin
-                // C <= B
                 job_valid <= a_valid;
                 job_slot  <= a_s;
                 job_jive  <= !sponge;
@@ -169,7 +174,6 @@ module qsag_p2_chain_engine #(
                                   m_heap[0] ? dg : sib, m_heap[0] ? sib : dg};
                     job_last  <= (parent == 32'd1);
                 end
-                // A
                 a_valid <= do_pick;
                 a_s     <= pick;
                 a_m     <= meta_pick;

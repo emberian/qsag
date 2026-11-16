@@ -636,16 +636,22 @@ def tokensA (j : Fin 3) : AuthorizedSignReleaseToken :=
 
 theorem only_honest_member : ∀ j : Fin 3,
     quorum01 j = true → corrupt0 j = false → j = 1 := by decide +kernel
-theorem acceptsA : PolicyAccepts pol payA 2 :=
-  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
-theorem acceptsB : PolicyAccepts pol payB 2 :=
-  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
+theorem acceptsA : PolicyAccepts pol payA 2 := by
+  rw [PolicyAccepts.public_eq_1]
+  exact ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by rfl, by decide +kernel⟩
+theorem acceptsB : PolicyAccepts pol payB 2 := by
+  rw [PolicyAccepts.public_eq_1]
+  exact ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by rfl, by decide +kernel⟩
 theorem stepA : LedgerStep pol.maxWindowSpend 5 genesis payA (burn genesis payA) := by
-  unfold LedgerStep; decide +kernel
+  simp only [LedgerStep.public_eq_1, burn.public_eq_1, projected.public_eq_1]; decide +kernel
 theorem stepB : LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payB
     (burn (burn genesis payA) payB) := by
-  unfold LedgerStep; decide +kernel
-theorem corrupt_token_not_minted : tokensA 0 ≠ minted intentHash pol payA := by decide +kernel
+  simp only [LedgerStep.public_eq_1, burn.public_eq_1, projected.public_eq_1]; decide +kernel
+theorem corrupt_token_not_minted : tokensA 0 ≠ minted intentHash pol payA := by
+  intro h
+  have h' := congrArg AuthorizedSignReleaseToken.policyDigest h
+  rw [minted.public_eq_1] at h'
+  exact absurd h' (by decide +kernel)
 
 /-- `n = 3`, `t = 2`, `f = 1`: the quorum contains the corrupt party; the honest member alone
 supplies the release. -/
@@ -656,14 +662,23 @@ theorem corrupt_quorum_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
     (∀ j, q j = true → corrupt j = false →
       ValidRelease H p t w i (before j) (after j) (tokens j)) :=
   ⟨3, 2, 1, 5, pol, intentHash, payA, quorum01, corrupt0, fun _ => genesis,
-    fun _ => burn genesis payA, tokensA, by decide +kernel, by decide +kernel, by decide,
+    fun _ => burn genesis payA, tokensA, by rw [cardinal.public_eq_1]; decide +kernel,
+    by rw [cardinal.public_eq_1]; decide +kernel, by decide,
     fun j hq hc => by
       obtain rfl := only_honest_member j hq hc
-      exact ⟨rfl, acceptsA, stepA⟩⟩
+      rw [ValidRelease.public_eq_1]
+      exact ⟨by rfl, acceptsA, stepA⟩⟩
 
 def quorumOf (i : TransactionIntent) (j : Fin 3) : Bool :=
   if i = payA then decide (j.val < 2) else decide (0 < j.val)
 def beforeOf (i : TransactionIntent) : Ledger := if i = payA then genesis else burn genesis payA
+
+theorem payB_ne_payA : (payB = payA) = False :=
+  eq_false fun h => absurd (congrArg TransactionIntent.recipient h) (by decide)
+theorem beforeOf_payA : beforeOf payA = genesis := by
+  simp only [beforeOf, eq_self, ite_true]
+theorem beforeOf_payB : beforeOf payB = burn genesis payA := by
+  simp only [beforeOf, payB_ne_payA, ite_false]
 
 /-- Two intents, two different quorums sharing honest party `1`, one serialized ledger. -/
 theorem two_intent_spending_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
@@ -676,56 +691,84 @@ theorem two_intent_spending_instance : ∃ (n t f w : Nat) (p : TransactionPolic
     LedgerTrace p.maxWindowSpend w ⟨0, [], []⟩ is final := by
   refine ⟨3, 2, 1, 5, pol, intentHash, [payA, payB], corrupt0, quorumOf,
     fun i _ => beforeOf i, fun i _ => burn (beforeOf i) i, fun i _ => minted intentHash pol i,
-    burn (burn genesis payA) payB, by decide +kernel, by decide, ?_, ?_, ?_⟩
+    burn (burn genesis payA) payB, by rw [cardinal.public_eq_1]; decide +kernel, by decide,
+    ?_, ?_, ?_⟩
   · intro i hi
     rcases List.mem_cons.mp hi with rfl | hi
-    · decide +kernel
+    · rw [cardinal.public_eq_1]
+      simp only [quorumOf, eq_self, ite_true]
+      decide +kernel
     · obtain rfl := List.mem_singleton.mp hi
+      rw [cardinal.public_eq_1]
+      simp only [quorumOf, payB_ne_payA, ite_false]
       decide +kernel
   · intro i hi j _ _
     rcases List.mem_cons.mp hi with rfl | hi
-    · exact ⟨rfl, acceptsA, stepA⟩
+    · rw [ValidRelease.public_eq_1]
+      dsimp only
+      rw [beforeOf_payA]
+      exact ⟨rfl, acceptsA, stepA⟩
     · obtain rfl := List.mem_singleton.mp hi
+      rw [ValidRelease.public_eq_1]
+      dsimp only
+      rw [beforeOf_payB]
       exact ⟨rfl, acceptsB, stepB⟩
   · exact .cons stepA (.cons stepB (.nil _))
 
-theorem rejects_over_per_tx_cap : ¬ PolicyAccepts pol ⟨7, 101, 0, 3, 13, 5⟩ 3 :=
-  fun h => absurd h.2.1 (by decide +kernel)
-theorem rejects_unlisted_recipient : ¬ PolicyAccepts pol ⟨9, 10, 0, 3, 13, 5⟩ 3 :=
-  fun h => absurd h.1 (by decide +kernel)
+theorem rejects_over_per_tx_cap : ¬ PolicyAccepts pol ⟨7, 101, 0, 3, 13, 5⟩ 3 := by
+  rw [PolicyAccepts.public_eq_1]
+  exact fun h => absurd h.2.1 (by decide +kernel)
+theorem rejects_unlisted_recipient : ¬ PolicyAccepts pol ⟨9, 10, 0, 3, 13, 5⟩ 3 := by
+  rw [PolicyAccepts.public_eq_1]
+  exact fun h => absurd h.1 (by decide +kernel)
 theorem rejects_insufficient_approvals : ¬ PolicyAccepts pol payB 1 := by
+  rw [PolicyAccepts.public_eq_1]
   rintro ⟨_, _, r, hr, hn⟩
   have e : pol.tiers.find? (fun r => decide (payB.amount ≤ r.cap)) = some ⟨100, 2⟩ := by
-    decide +kernel
+    rfl
   rw [e] at hr
   cases hr
   exact absurd hn (by decide +kernel)
 theorem rejects_nonce_replay :
     ¬ LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payA
-      (burn (burn genesis payA) payA) :=
-  fun h => absurd h.2.1 (by decide +kernel)
+      (burn (burn genesis payA) payA) := by
+  rw [LedgerStep.public_eq_1]
+  exact fun h => absurd h.2.1 (by rw [burn.public_eq_1]; decide +kernel)
 /-- After `payA` and `payB` (140 of 150 spent) a further 20 has no ledger step at all. -/
 theorem rejects_window_overspend (next : Ledger) :
     ¬ LedgerStep pol.maxWindowSpend 5 (burn (burn genesis payA) payB)
-      ⟨7, 20, 0, 3, 13, 5⟩ next :=
-  fun h => absurd h.2.2.2.1 (by decide +kernel)
+      ⟨7, 20, 0, 3, 13, 5⟩ next := by
+  rw [LedgerStep.public_eq_1]
+  exact fun h => absurd h.2.2.2.1 (by
+    simp only [projected.public_eq_1, burn.public_eq_1]; decide +kernel)
 theorem rejects_stale_window (next : Ledger) :
-    ¬ LedgerStep pol.maxWindowSpend 6 genesis payA next :=
-  fun h => absurd h.1 (by decide +kernel)
+    ¬ LedgerStep pol.maxWindowSpend 6 genesis payA next := by
+  rw [LedgerStep.public_eq_1]
+  exact fun h => absurd h.1 (by decide +kernel)
 theorem token_is_intent_specific :
-    minted intentHash pol payA ≠ minted intentHash pol payB := by decide +kernel
+    minted intentHash pol payA ≠ minted intentHash pol payB := by
+  intro h
+  have h' := congrArg AuthorizedSignReleaseToken.nonce h
+  rw [minted.public_eq_1, minted.public_eq_1] at h'
+  exact absurd h' (by decide +kernel)
 
 def toyMac (policy old next : Nat) : Nat := (policy * 65537 + old) * 65537 + next + 0x5eed
 theorem window_advance_accepts :
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6⟩ = some ⟨0, [], []⟩ := by decide +kernel
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6⟩ = some ⟨0, [], []⟩ := by
+  rw [advanceAuthorized.public_eq_1, advanceWindow.public_eq_1]; rfl
 /-- Wrong tag, non-increasing epoch, tag for another policy, tag for another old epoch. -/
 theorem window_advance_rejects :
     advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ = none ∧
     advanceAuthorized toyMac 9 5 ⟨5, toyMac 9 5 5⟩ = none ∧
     advanceAuthorized toyMac 9 5 ⟨6, toyMac 8 5 6⟩ = none ∧
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 4 6⟩ = none := by decide +kernel
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 4 6⟩ = none := by
+  refine ⟨?_, ?_, ?_, ?_⟩ <;>
+    (rw [advanceAuthorized.public_eq_1, advanceWindow.public_eq_1]; rfl)
 theorem window_advance_rejects_wrong_tag :
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ ≠ some ⟨0, [], []⟩ := by decide +kernel
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ ≠ some ⟨0, [], []⟩ := by
+  rw [window_advance_rejects.1]
+  intro h
+  cases h
 end Hybrid
 
 /-! ## 3. Cross-protocol: the modelled Poseidon2 permutation and real labels -/

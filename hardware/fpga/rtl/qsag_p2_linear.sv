@@ -32,25 +32,24 @@ module qsag_p2_linear #(
 
     if (FIXED != 1) begin : g_me
         logic [12*LW-1:0] me_s, me_c;
-        // m4_s, m4_c: row k of M4 on column c in 67-bit carry-save form (zero carry chains!).
-        // Row 0 = 2*b0 + 3*b1 + b2 + b3 = (b0<<1) + (b1<<1) + b1 + b2 + b3 (5 terms), cyclic.
-        logic [12*67-1:0] m4_s, m4_c;
+        // Keep m4_s, m4_c at full LW=76 width so carry-save never wraps at bit 67!
+        logic [12*LW-1:0] m4_s, m4_c;
         for (genvar c = 0; c < 3; c++) begin : g_col
-            wire [66:0] b [4];
-            assign b[0] = 67'(x[64*(c)     +: 64]);
-            assign b[1] = 67'(x[64*(c + 3) +: 64]);
-            assign b[2] = 67'(x[64*(c + 6) +: 64]);
-            assign b[3] = 67'(x[64*(c + 9) +: 64]);
+            wire [LW-1:0] b [4];
+            assign b[0] = LW'(x[64*(c)     +: 64]);
+            assign b[1] = LW'(x[64*(c + 3) +: 64]);
+            assign b[2] = LW'(x[64*(c + 6) +: 64]);
+            assign b[3] = LW'(x[64*(c + 9) +: 64]);
             for (genvar k = 0; k < 4; k++) begin : g_m4
-                wire [5*67-1:0] t5 = {
+                wire [5*LW-1:0] t5 = {
                     b[(k + 3) % 4],
                     b[(k + 2) % 4],
                     b[(k + 1) % 4],
                     b[(k + 1) % 4] << 1,
                     b[k] << 1
                 };
-                qsag_csa_reduce2 #(.W(67), .N(5)) u_m4_csa (
-                    .x(t5), .s(m4_s[67*(4*c + k) +: 67]), .c(m4_c[67*(4*c + k) +: 67]));
+                qsag_csa_reduce2 #(.W(LW), .N(5)) u_m4_csa (
+                    .x(t5), .s(m4_s[LW*(4*c + k) +: LW]), .c(m4_c[LW*(4*c + k) +: LW]));
             end
         end
         // me[3*k + c] + addend = 2*m4[c,k] + m4[c1,k] + m4[c2,k] + addend (7 vectors -> 2 vectors).
@@ -60,12 +59,12 @@ module qsag_p2_linear #(
                 localparam int C2 = (c + 2) % 3;
                 wire [7*LW-1:0] t7 = {
                     LW'(addend[67*(3*k + c) +: 67]),
-                    LW'(m4_c[67*(4*C2 + k) +: 67]),
-                    LW'(m4_s[67*(4*C2 + k) +: 67]),
-                    LW'(m4_c[67*(4*C1 + k) +: 67]),
-                    LW'(m4_s[67*(4*C1 + k) +: 67]),
-                    LW'(m4_c[67*(4*c + k) +: 67]) << 1,
-                    LW'(m4_s[67*(4*c + k) +: 67]) << 1
+                    m4_c[LW*(4*C2 + k) +: LW],
+                    m4_s[LW*(4*C2 + k) +: LW],
+                    m4_c[LW*(4*C1 + k) +: LW],
+                    m4_s[LW*(4*C1 + k) +: LW],
+                    m4_c[LW*(4*c + k) +: LW] << 1,
+                    m4_s[LW*(4*c + k) +: LW] << 1
                 };
                 qsag_csa_reduce2 #(.W(LW), .N(7)) u_me_csa (
                     .x(t7), .s(me_s[LW*(3*k + c) +: LW]), .c(me_c[LW*(3*k + c) +: LW]));

@@ -45,34 +45,49 @@ for w in (4, 6, 8):
     q = f"(declare-fun s () |{tag}_s|)\n(assert (not (= {n('p')} (bvmul {av} {bv_}))))"
     l.check(f"qsag_umul32 W={w} == a*b exact", "unsat", rtl + q)
 
-# Full W=32 compositional proof of 5-row Goldilocks squarer qsag_gl64_sq_comb:
+# Full W=32 compositional proof of 5-row Goldilocks squarer qsag_gl64_sqrows:
 W, GB = 32, 12
 LW, AW = 64, 76
-P = (1 << LW) - (1 << W) + 1
-t_sq = l.smt(src, "qsag_gl64_sq_comb", "sq64",
-             passes="cutpoint w:z0 w:z2 w:p01 w:y;")
-n = lambda x: f"(|sq64_n {x}| s)"
-E = 132
-q_sq = f"""(declare-fun s () |sq64_s|)
-(assert (= {l.zx(n('z0'), 64, E)}  (bvmul {l.zx(n('x0'), 32, E)} {l.zx(n('x0'), 32, E)})))
-(assert (= {l.zx(n('z2'), 64, E)}  (bvmul {l.zx(n('x1'), 32, E)} {l.zx(n('x1'), 32, E)})))
-(assert (= {l.zx(n('p01'), 64, E)} (bvmul {l.zx(n('x0'), 32, E)} {l.zx(n('x1'), 32, E)})))
-(define-fun x_full () (_ BitVec {E}) {l.zx(n('x'), 64, E)})
-(define-fun sum5 () (_ BitVec {E}) (bvadd {l.zx(n('s'), AW, E)} {l.zx(n('c'), AW, E)}))
-(assert (not (and (bvult sum5 {l.bv(1 << AW, E)})
-                  (= (bvurem sum5 {l.bv(P, E)}) (bvurem (bvmul x_full x_full) {l.bv(P, E)})))))
-"""
-l.check("qsag_gl64_sq_comb W=32 full-width 5-row congruence == x^2 mod p", "unsat", t_sq + q_sq)
+PHI, P = 1 << W, (1 << LW) - (1 << W) + 1
+
+
+def sqrows_query(sfile, tag):
+    t_sq = l.smt(sfile, "qsag_gl64_sqrows", tag)
+    n = lambda x: f"(|{tag}_n {x}| s)"
+    m = f"(concat {n('p01')} #b0)"
+    m0 = l.zx(f"((_ extract 31 0) {m})", 32, AW)
+    m1 = l.zx(f"((_ extract 63 32) {m})", 32, AW)
+    m2 = l.zx(f"((_ extract 64 64) {m})", 1, AW)
+    l2 = l.zx(f"((_ extract 31 0) {n('z2')})", 32, AW)
+    h2 = l.zx(f"((_ extract 63 32) {n('z2')})", 32, AW)
+    z0 = l.zx(n("z0"), 64, AW)
+    sh32 = lambda v: f"(bvshl {v} {l.bv(W, AW)})"
+    exp = (f"(bvadd {z0} {sh32(f'(bvadd {m0} {m1})')} (bvneg {m1}) (bvneg {m2}) "
+           f"{sh32(l2)} (bvneg {l2}) (bvneg {h2}) {l.bv(P, AW)})")
+    return t_sq + f"(declare-fun s () |{tag}_s|)\n(assert (not (= (bvadd {n('s')} {n('c')}) {exp})))"
+
+
+l.check("qsag_gl64_sqrows W=32 RTL 5-row sum == exact algebraic form", "unsat", sqrows_query(src, "sq64"))
+l.check("qsag_gl64_sqrows W=32 integer congruence == z0 + m*phi + z2*(phi-1) mod p", "unsat", f"""
+(declare-const z0 Int) (declare-const l2 Int) (declare-const h2 Int)
+(declare-const m0 Int) (declare-const m1 Int) (declare-const m2 Int)
+(define-fun phi () Int {PHI}) (define-fun p () Int {P})
+(assert (and (<= 0 z0) (< z0 (* phi phi)) (<= 0 l2) (< l2 phi) (<= 0 h2) (< h2 phi)))
+(assert (and (<= 0 m0) (< m0 phi) (<= 0 m1) (< m1 phi) (<= 0 m2) (< m2 2)))
+(define-fun z2 () Int (+ l2 (* h2 phi)))
+(define-fun m  () Int (+ m0 (* m1 phi) (* m2 phi phi)))
+(define-fun T  () Int (+ z0 (* (+ m0 m1) phi) (- m1) (- m2) (* l2 phi) (- l2) (- h2) p))
+(define-fun V  () Int (+ z0 (* m phi) (* z2 phi phi)))
+(assert (not (and (<= 0 T) (< T {1 << AW})
+                  (= V (+ T (* (- (+ h2 m1 (* m2 (+ phi 1))) 1) p))))))
+""")
 
 text = open(src).read()
 old_sq = "m2 ? 3'd3 : 3'd4"
 assert text.count(old_sq) == 1
 mut_sq = f"{l.B}/sq_mutant.sv"
 open(mut_sq, "w").write(text.replace(old_sq, "m2 ? 3'd2 : 3'd3"))
-t_mut = l.smt(mut_sq, "qsag_gl64_sq_comb", "sq64m",
-              passes="cutpoint w:z0 w:z2 w:p01 w:y;")
-l.check("qsag_gl64_sq_comb negative control: 3-m2 offset bug", "sat",
-        t_mut + q_sq.replace("|sq64_", "|sq64m_"))
+l.check("qsag_gl64_sqrows negative control: 3-m2 offset bug", "sat", sqrows_query(mut_sq, "sq64m"))
 
 print(f"{sum(l.results)}/{len(l.results)} prefix + squarer queries as expected")
 sys.exit(0 if all(l.results) else 1)

@@ -20,8 +20,8 @@ typedef Vqsag_units_tb Dut;
 typedef Vqsag_ni_fpga_top Dut;
 #endif
 
-static const int GL_MUL_LAT = 6, RED_LAT = 2, P2_SBOX_LAT = 18, EXT4_MAC_LAT = 7, GF128_LAT = 3;
-static const int P2_RING_LEN = 21, P2_PASSES = 31, P2_PIPE_LAT = 603;
+static const int GL_MUL_LAT = 5, RED_LAT = 2, P2_SBOX_LAT = 13, EXT4_MAC_LAT = 7, GF128_LAT = 3;
+static const int P2_RING_LEN = 16, P2_PASSES = 31, P2_PIPE_LAT = 453;
 #if defined(QSAG_COMPACT)
 static constexpr bool COMPACT = true;
 static const int TOP_P2_LAT = 3397, TOP_EXT_LAT = 125, TOP_KEC_RPC = 1;

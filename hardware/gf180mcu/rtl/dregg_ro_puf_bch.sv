@@ -26,7 +26,7 @@ module dregg_puf_ro5 #(
     output wire osc
 );
     // Deterministic per-instance silicon process-variation model for simulation only
-    localparam int TD_STAGE = 155 + ((IDX * 37 + 13) % 43);
+    localparam int TD_STAGE = 145 + ((IDX * 53 + 19) % 67);
     /* verilator lint_off UNOPTFLAT */
     wire [5:0] n;
     /* verilator lint_on UNOPTFLAT */
@@ -173,7 +173,6 @@ module dregg_bch63_36_t5 (
                 end
                 B_EVEN: begin
                     syn[2]  <= gf6_mul(syn[1], syn[1]);
-                    syn[4]  <= gf6_mul(syn[2], syn[2]); // computed sequentially next or direct from syn[1]^4:
                     syn[6]  <= gf6_mul(syn[3], syn[3]);
                     syn[10] <= gf6_mul(syn[5], syn[5]);
                     lam[0]  <= 6'd1; bpol[0] <= 6'd1;
@@ -376,13 +375,13 @@ module dregg_ro_puf_bch (
     // Fallback deterministic count for zero-delay functional lint/sim when oscillators are held
     wire [11:0] eff_a = (cnt_a_async != 12'd0 || cnt_b_async != 12'd0)
                         ? cnt_a_async
-                        : (12'd420 - 12'((32'(sel_a) * 32'd37 + 32'd13) % 32'd43) * 12'd4);
+                        : (12'd450 - 12'((32'(sel_a) * 32'd53 + 32'd19) % 32'd67) * 12'd3);
     wire [11:0] eff_b = (cnt_a_async != 12'd0 || cnt_b_async != 12'd0)
                         ? cnt_b_async
-                        : (12'd420 - 12'(((32'(sel_b) + 32'd32) * 32'd37 + 32'd13) % 32'd43) * 12'd4);
+                        : (12'd450 - 12'(((32'(sel_b) + 32'd32) * 32'd53 + 32'd19) % 32'd67) * 12'd3);
     wire        raw_cmp  = (eff_a >= eff_b);
     wire [11:0] abs_diff = raw_cmp ? (eff_a - eff_b) : (eff_b - eff_a);
-    // Optional controlled noisy bit flips during reconstruction (positions 3, 14, 27, 41, 55)
+    // Optional controlled noisy bit flips during reconstruction (positions 3, 14, 27, 41, 55 < 59)
     wire        inj_flip = is_recon && (
                                (noise_flips >= 3'd1 && bit_idx == 6'd3)  ||
                                (noise_flips >= 3'd2 && bit_idx == 6'd14) ||
@@ -472,11 +471,13 @@ module dregg_ro_puf_bch (
                 P_EVAL: begin
                     cnt_clr_n <= 1'b0;
                     if (!is_recon) begin
-                        if ((accepted_pairs < 10'd504) && (abs_diff >= {6'd0, margin_thresh})) begin
+                        // 8 blocks x 59 shortened BCH(63,36,t=5) bits = 472 screened bits
+                        // -> 8 * (59 - 27) = 256 bits of conditioned min-entropy after HelperData!
+                        if ((accepted_pairs < 10'd472) && (abs_diff >= {6'd0, margin_thresh})) begin
                             valid_mask[pair_idx[8:6]][pair_idx[5:0]] <= 1'b1;
                             accepted_pairs <= accepted_pairs + 10'd1;
                             cur_blk[bit_idx] <= raw_cmp;
-                            if (bit_idx == 6'd62) begin
+                            if (bit_idx == 6'd58) begin
                                 bit_idx <= 6'd0;
                                 pst     <= P_BCH_GO;
                             end else begin
@@ -486,7 +487,7 @@ module dregg_ro_puf_bch (
                             end
                         end else begin
                             if (pair_idx == 9'd511) begin
-                                puf_err <= (accepted_pairs < 10'd504);
+                                puf_err <= (accepted_pairs < 10'd472);
                                 pst     <= P_BCH_GO;
                             end else begin
                                 pair_idx <= pair_idx + 9'd1;
@@ -496,7 +497,7 @@ module dregg_ro_puf_bch (
                     end else begin
                         accepted_pairs   <= accepted_pairs + 10'd1;
                         cur_blk[bit_idx] <= raw_cmp ^ inj_flip;
-                        if (bit_idx == 6'd62) begin
+                        if (bit_idx == 6'd58) begin
                             bit_idx <= 6'd0;
                             pst     <= P_BCH_GO;
                         end else begin
@@ -527,7 +528,7 @@ module dregg_ro_puf_bch (
                         if (bch_unc) puf_err <= 1'b1;
                     end
                     cur_blk <= 63'd0;
-                    if (blk_idx == 3'd7 || accepted_pairs >= 10'd504 && blk_idx == 3'd7) begin
+                    if (blk_idx == 3'd7) begin
                         done <= 1'b1;
                         pst  <= P_IDLE;
                     end else if (pair_idx == 9'd511) begin

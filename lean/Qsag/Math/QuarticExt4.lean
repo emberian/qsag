@@ -1692,11 +1692,6 @@ theorem decodeExt4Bytes32_noncanonical_limb_kat :
     decodeExt4Bytes32 (List.replicate 32 (0 : UInt8)) = some GoldilocksExt4.zero := by
   decide
 
-/-- The inverse of the base-field element `3` in the quartic extension is nonzero. -/
-theorem GoldilocksField.GoldilocksExt4.inv_three_ne_zero_kat :
-    (⟨⟨⟨3, by decide⟩, ⟨0, by decide⟩⟩, ⟨⟨0, by decide⟩, ⟨0, by decide⟩⟩⟩ :
-      GoldilocksField.GoldilocksExt4)⁻¹ ≠ GoldilocksField.GoldilocksExt4.zero := by decide
-
 end Qsag
 
 end

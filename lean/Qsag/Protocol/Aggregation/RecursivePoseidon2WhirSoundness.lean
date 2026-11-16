@@ -2865,10 +2865,10 @@ private theorem fsSqueeze_eq_addend_fold (frames : List FsFrame) :
     fold over their block addends. -/
 private theorem fsSqueeze_eq_imp_fold_vals {fs gs : List FsFrame} (h : fsSqueeze fs = fsSqueeze gs) :
     (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
-        ⟨lane4Zero, lane4Zero, lane4Zero⟩ ((fsTranscriptBlocks fs).map FsBlock.addend)
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩ ((fsTranscriptBlocks fs).map FsBlock.addend);
       [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) =
     (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
-        ⟨lane4Zero, lane4Zero, lane4Zero⟩ ((fsTranscriptBlocks gs).map FsBlock.addend)
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩ ((fsTranscriptBlocks gs).map FsBlock.addend);
       [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) := by
   rw [fsSqueeze_eq_addend_fold, fsSqueeze_eq_addend_fold] at h
   exact congrArg (fun l : Lane4 => [l.x0.val, l.x1.val, l.x2.val, l.x3.val])

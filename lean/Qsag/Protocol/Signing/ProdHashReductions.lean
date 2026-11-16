@@ -4145,7 +4145,7 @@ namespace Qsag
 
 #export_eqns eufCmaWithinWin eufCmaRealWithinWins smDtTcrWithinWin smDtTcrWithinWins
   smDtTcrChallengerCheck tcrExtractorAdv advCollectTcrSubmissions HashSignAdv.map HashSignAdv.bind
-  advRawHash runHashSignAdv challengerSignStep challengerEpochConflict bestTcrExtractorAdv
+  advRawHash runHashSignAdv challengerSignStep challengerEpochConflict
   runSeedWithheldEufCma evalProdAdaptiveTree publicVerifierWithTcrCands hypertreeLayersWithCands
 
 end Qsag

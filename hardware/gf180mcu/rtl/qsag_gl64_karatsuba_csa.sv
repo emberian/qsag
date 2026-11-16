@@ -303,6 +303,37 @@ module qsag_gl64_canon #(
     assign r = (u[LW] | v[LW]) ? v[LW-1:0] : u[LW-1:0];
 endmodule
 
+// 5-row Goldilocks squarer partial-product combiner (separated for compositional Z3 LEC).
+module qsag_gl64_sqrows #(
+    parameter int W  = 32,
+    parameter int GB = 12
+) (
+    input  wire [2*W-1:0]      z0,
+    input  wire [2*W-1:0]      z2,
+    input  wire [2*W-1:0]      p01,
+    output wire [2*W+GB-1:0]   s,
+    output wire [2*W+GB-1:0]   c
+);
+    localparam int LW = 2 * W;
+    localparam int AW = LW + GB;
+    localparam logic [W-1:0] TOP_C = {W{1'b1}} - W'(3); // 0xFFFF_FFFC for W=32
+    wire [LW:0]  m    = {p01, 1'b0};                    // 2 * x0 * x1 < 2^(2W+1)
+    wire [W-1:0] m0   = m[W-1:0];
+    wire [W-1:0] m1   = m[LW-1:W];
+    wire         m2   = m[LW];
+    wire [W-1:0] l2   = z2[W-1:0];
+    wire [W-1:0] h2   = z2[LW-1:W];
+    wire [2:0]   c_m2 = m2 ? 3'd3 : 3'd4;               // 4 - m2
+
+    wire [AW-1:0] r1 = AW'(z0);
+    wire [AW-1:0] r2 = AW'({m0, ~m1});
+    wire [AW-1:0] r3 = AW'({m1, {(W-3){1'b0}}, c_m2});
+    wire [AW-1:0] r4 = AW'({l2, ~l2});
+    wire [AW-1:0] r5 = AW'({TOP_C, ~h2});
+
+    qsag_csa52 #(.N(AW)) u_csa (.x(r1), .y(r2), .r1(r3), .r2(r4), .r3(r5), .s(s), .c(c));
+endmodule
+
 // 1-cycle 5-row Goldilocks squarer: y = (x * x) mod p for ALL 64-bit x.
 module qsag_gl64_sq_comb #(
     parameter int W  = 32,
@@ -313,31 +344,15 @@ module qsag_gl64_sq_comb #(
 );
     localparam int LW = 2 * W;
     localparam int AW = LW + GB;
-    localparam logic [W-1:0] TOP_C = {W{1'b1}} - W'(3); // 0xFFFF_FFFC for W=32
     wire [W-1:0]  x0 = x[W-1:0];
     wire [W-1:0]  x1 = x[LW-1:W];
     wire [LW-1:0] z0, z2, p01;
-    qsag_usq32  #(.W(W)) u_sq0 (.x(x0), .sq(z0));
-    qsag_usq32  #(.W(W)) u_sq1 (.x(x1), .sq(z2));
-    qsag_umul32 #(.W(W)) u_m01 (.a(x0), .b(x1), .p(p01));
-
-    wire [LW:0]  m  = {p01, 1'b0}; // 2 * x0 * x1 < 2^(2W+1)
-    wire [W-1:0] m0 = m[W-1:0];
-    wire [W-1:0] m1 = m[LW-1:W];
-    wire         m2 = m[LW];
-    wire [W-1:0] l2 = z2[W-1:0];
-    wire [W-1:0] h2 = z2[LW-1:W];
-    wire [2:0]   c_m2 = m2 ? 3'd3 : 3'd4; // 4 - m2
-
-    wire [AW-1:0] r1 = AW'(z0);
-    wire [AW-1:0] r2 = AW'({m0, ~m1});
-    wire [AW-1:0] r3 = AW'({m1, {(W-3){1'b0}}, c_m2});
-    wire [AW-1:0] r4 = AW'({l2, ~l2});
-    wire [AW-1:0] r5 = AW'({TOP_C, ~h2});
-
     wire [AW-1:0] s, c;
-    qsag_csa52      #(.N(AW))           u_csa   (.x(r1), .y(r2), .r1(r3), .r2(r4), .r3(r5), .s(s), .c(c));
-    qsag_gl64_canon #(.W(W), .GB(GB))   u_canon (.x(s), .y(c), .r(y));
+    qsag_usq32       #(.W(W))          u_sq0  (.x(x0), .sq(z0));
+    qsag_usq32       #(.W(W))          u_sq1  (.x(x1), .sq(z2));
+    qsag_umul32      #(.W(W))          u_m01  (.a(x0), .b(x1), .p(p01));
+    qsag_gl64_sqrows #(.W(W), .GB(GB)) u_rows (.z0(z0), .z2(z2), .p01(p01), .s(s), .c(c));
+    qsag_gl64_canon  #(.W(W), .GB(GB)) u_canon(.x(s), .y(c), .r(y));
 endmodule
 
 module qsag_gl64_karatsuba_csa #(
