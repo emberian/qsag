@@ -334,9 +334,9 @@ impl CoZkCustodianShare {
         self.prove_with_backend(statement, transport, &qsag_accel::CpuReferenceBackend)
     }
 
-    /// Use the backend to hash the challenged views during final verification.
-    /// Unopened commitments remain interactive shared sponges: applying an
-    /// ordinary Keccak kernel to individual shares would not compute their hash.
+    /// Use the selected backend for legacy commitment verification. V4/V5
+    /// commitments use the versioned TurboSHAKE tree implementation. V5 opens
+    /// only seed-masked views for hashing, never an unchallenged plaintext view.
     pub fn prove_with_backend<T: Transport, B: qsag_accel::AcceleratorBackend>(
         mut self,
         statement: &MigrationStatement,

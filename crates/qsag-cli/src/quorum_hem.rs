@@ -2397,14 +2397,14 @@ mod tests {
             );
             let stem = format!("hem_quorum-{}", to_hex(&digest));
             let artifact = join(&target, &format!(".qsag-{stem}.target"));
-            let ext_anchor_file = join(&anchor_dir, &format!("{stem}.anchor"));
+            let ext_anchor_lock = join(&anchor_dir, &format!("{stem}.anchor.lock"));
             let ext_mirror_dir = join(&anchor_dir, &format!("{stem}.mirror"));
-            assert!(exists(&ext_anchor_file).unwrap());
+            assert!(exists(&ext_anchor_lock).unwrap());
             assert!(exists(&ext_mirror_dir).unwrap());
             std::fs::write(&artifact, b"uncommitted target").unwrap();
             drop(open_vault(&old, None, &mut no_crash).unwrap());
             assert!(!exists(&artifact).unwrap());
-            assert!(!exists(&ext_anchor_file).unwrap());
+            assert!(!exists(&ext_anchor_lock).unwrap());
             assert!(!exists(&ext_mirror_dir).unwrap());
             assert!(!exists(&meta_path(&target)).unwrap());
         }
@@ -2417,7 +2417,7 @@ mod tests {
         assert!(
             exists(&join(
                 &anchor_dir,
-                &format!("hem_quorum-{}.anchor", to_hex(&leftover_digest)),
+                &format!("hem_quorum-{}.anchor.lock", to_hex(&leftover_digest)),
             ))
             .unwrap()
         );

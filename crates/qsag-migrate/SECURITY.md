@@ -272,10 +272,11 @@ aborts immediately with
 `Err(Error::InvalidProof)` before any output share, view commitment, or view
 opens.
 
-### CoZK V4 tape contributions and commitments
+### CoZK V4/V5 tape contributions and commitments
 
-The default distributed prover uses the `COZKVW04` view envelope and
-`COZKRP04` repetition-root domain. The legacy verifier remains available for
+The default distributed prover uses the `COZKVW05` view envelope and
+`COZKRP05` repetition-root domain. Verification also retains `COZKVW04` /
+`COZKRP04`; mixed versions within a proof are rejected. The legacy verifier remains available for
 proofs without this envelope; the legacy shared-sponge parity and rejection
 sampling tests still exercise that format. Native local migration proofs retain
 their previous format.
@@ -305,7 +306,7 @@ both opened views. The second head's products remain explicit. Inputs are
 stored only for virtual head 2; field values and bits use a canonical packed
 encoding with checked trailing padding.
 
-Shared view commitments use eight length-framed product leaves and a
+V4 shared view commitments use eight length-framed product leaves and a
 length-framed root over the magic, repetition, head, ordered sub-seeds, inputs,
 product length, leaf digests and outputs. Leaves and roots have distinct suffix
 bytes (`0x0b` and `0x07`) and use the last 12 Keccak rounds. This is the crate's
@@ -313,6 +314,37 @@ versioned tree construction, not the KangarooTwelve wire format. These hashes
 are still computed inside actively checked MPC; clear hashing of separate
 shares never substitutes for the shared permutation. All 438 repetitions,
 output-zero checks, multiplication checks and freeze/completion barriers remain.
+
+V5 removes interactive hashing of the large views without opening their
+plaintext. For each `(repetition, head, custodian)` the existing private
+sub-seed drives a separate `QSAG.COZK.VIEW.MASK.V5` XOF, bound to the repetition
+and head and independent of the inner tape domain. Each custodian inputs its
+mask through the same private masked-input primitive. After every circuit
+batch passes its active checks and the cross-batch barrier, the custodians
+open only `C = view XOR mask_0 XOR ... XOR mask_(m-1)` and the constrained
+public outputs. They hash this masked byte string locally with the same
+12-round tree, under the V5 magic. The root includes the ordered, position-bound
+`QSAG.COZK.SEED.COMMIT.V5` hashes, which were broadcast and agreed alongside the
+salted seed commitments before evaluation.
+
+The binding argument is explicit: a fixed ordered seed-commitment vector fixes
+the seeds under collision resistance, and thus fixes the mask. A fixed masked
+view then fixes exactly one plaintext view. Altering either the seed vector or
+the masked view requires a collision in a committed hash. The verifier
+recomputes both from each challenged view, including the first view's
+reconstructed multiplication messages. Every transcript and length field is
+still bound; this is a new commitment format, not a reinterpretation of V4.
+
+For privacy, one replicated custodian knows its own mask seed and two outer
+replica components, but lacks the honest custodians' independent mask streams
+and the third replica component. In the authenticated backend any strict
+subset of the quorum still lacks at least one honest mask stream. Opening `C`
+therefore does not expose a virtual view under the XOF pseudorandomness
+assumption, even before the Fiat-Shamir challenge. Revealing seeds for two
+virtual heads unmasks only those two heads: head/repetition separation and
+fresh custodian entropy remain mandatory. The masks do not replace any
+multiplication check or the output-zero check. Custodians still verify the
+finished public proof before the final agreement.
 
 Local sub-seeds, salts, flat tape contribution buffers, shared views and
 unreleased decommitment buffers have wipe-on-drop owners, including error and
@@ -417,8 +449,8 @@ serial. Tests allow seven live ceremony batches across custodians.
 
 The backend batch sponge hashes native party commitments and opened-view
 commitments in verification, including CoZK final verification through
-`prove_with_backend`. Secret shared commitments still use interactive Boolean
-permutations. An ordinary Keccak permutation on each share cannot substitute
+`prove_with_backend`. V4 secret shared commitments use interactive Boolean
+permutations; V5 uses the seed-masked commitment construction above. An ordinary Keccak permutation on each share cannot substitute
 for those permutations, and unopened views are never reconstructed for GPU
 hashing. The optional `vulkan` tests require an actually supported backend and
 check that its CPU fallback counter does not increase.
