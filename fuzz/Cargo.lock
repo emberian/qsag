@@ -484,6 +484,7 @@ dependencies = [
  "qsag-core",
  "qsag-cred",
  "qsag-fts",
+ "qsag-policy",
  "qsag-quorum",
  "sha2",
  "sha3",
