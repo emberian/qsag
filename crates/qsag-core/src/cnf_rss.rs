@@ -3818,6 +3818,8 @@ mod tests {
 
     #[test]
     fn e2e_3of5_slh_dsa_shake_128f_stock_verify_and_tamper_abort() {
+        // Historical test name: this bounded regression uses the compact profile.
+        // The ignored latency benchmark below verifies the actual SHAKE-128f profile.
         let params = Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST;
         let cfg35 = CnfRssConfig::new(3, 5).unwrap();
         let mut dkg_rngs = make_rngs(5, 0x80);
@@ -3884,8 +3886,9 @@ mod tests {
     fn bench_3of5_stateless_baggy_and_slh_dsa_release_latency() {
         let cfg35 = CnfRssConfig::new(3, 5).unwrap();
 
-        // 1. Full `BaggyParams::SHA3_128F` (`h = 32, d = 16, PORS+FP 2048 leaves`) with Waistband
-        //    top-8-layers precomputed (`hp * 8 = 16`) + online `3-of-5` staged bank release!
+        // 1. Full `BaggyParams::SHA3_128F` with only its topmost layer cached.
+        //    Production signing below streams correlations; the separate TEST_SMALL
+        //    measurement stages all tuples before starting its online timer.
         let baggy_params = BaggyParams::SHA3_128F;
         let mut dkg_rngs = make_rngs(5, 0xA0);
         let (mut shares_b, _) =
@@ -4003,7 +4006,7 @@ mod tests {
         ));
 
         // 2. Full `3-of-5` NIST FIPS 205 `SLH-DSA-SHAKE-128f` (`d = 22, hp = 3, k = 33, a = 6`)
-        //    under bounded-memory streaming (`< 3.8 GB` peak RSS)!
+        //    with bounded-batch streaming (several GiB; allocator/phase dependent).
         let slh_params = Fips205Params::SLH_DSA_SHAKE_128F;
         let mut slh_dkg_rngs = make_rngs(5, 0xC0);
         let (mut shares_s, pk_seed32) =
