@@ -159,32 +159,50 @@ module qsag_latch_word_rst #(parameter int W = 64) (
 `endif
 endmodule
 
-// Single-bit transparent latch (`latq_1`, ~190 ps D->Q) for single-shot Brands-Chaum challenge lock.
-module qsag_chal_lock_latch #(
-    parameter int TD = 190
+// Single-shot challenge lock of the rapid-bit responder: a set-dominant SR element made of one
+// AOI21 and one NOR2 (same construction as the Muller C-element).
+//     hit_n = ~((chal & open) | hit)      hit = ~(hit_n | clr)
+// A high level on `chal` while `open` is set pulls hit_n low; the NOR feeds that back, so the
+// element stays set until `clr`. The responder multiplexer is selected by hit_n itself, so a pulse
+// that is too short to be latched is also too short to select the other response bit for longer
+// than this one gate, and a pulse that selects it is held. One gate (AOI21) sits on the timed
+// challenge -> response path. The B -> ZN feedback arc is cut in the SDC.
+module qsag_chal_lock #(
+    parameter int TD = 170
 ) (
-    input  wire d,
-    input  wire en,
-    output wire q
+    input  wire chal,
+    input  wire open,
+    input  wire clr,
+    output wire hit_n,
+    output wire hit
 );
 `ifdef QSAG_GF180_CELLS
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__latq_1 u_cl (.D(d), .E(en), .Q(q));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__aoi21_2 u_set  (.A1(chal), .A2(open), .B(hit), .ZN(hit_n));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__nor2_2  u_hold (.A1(hit_n), .A2(clr), .ZN(hit));
 `elsif QSAG_SIM_DELAYS
-    logic qr;
-    /* verilator lint_off LATCH */
-    /* verilator lint_off COMBDLY */
-    always_latch if (en) qr <= #(TD) d;
-    /* verilator lint_on COMBDLY */
-    /* verilator lint_on LATCH */
-    assign q = qr;
+    /* verilator lint_off UNOPTFLAT */
+    logic hn, h;
+    /* verilator lint_on UNOPTFLAT */
+    initial begin
+        hn = 1'b1;
+        h  = 1'b0;
+    end
+    always @(chal or open or h) hn <= #(TD) ~((chal & open) | h);
+    always @(hn or clr)         h  <= #(TD) ~(hn | clr);
+    assign hit_n = hn;
+    assign hit   = h;
 `else
-    logic qr;
+    logic h;
     /* verilator lint_off LATCH */
     /* verilator lint_off COMBDLY */
-    always_latch if (en) qr <= d;
+    always_latch begin
+        if (clr)              h <= 1'b0;
+        else if (chal & open) h <= 1'b1;
+    end
     /* verilator lint_on COMBDLY */
     /* verilator lint_on LATCH */
-    assign q = qr;
+    assign hit   = h;
+    assign hit_n = ~h;
 `endif
 endmodule
 
