@@ -40,8 +40,20 @@ pub const SECP_GY: [u64; 4] = [
     0x483A_DA77_26A3_C465,
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct Fp256(pub [u64; 4]);
+
+// Public constructors permit unnormalized representatives. Compare residues,
+// scanning all four limbs without a secret-dependent short-circuit.
+impl PartialEq for Fp256 {
+    fn eq(&self, other: &Self) -> bool {
+        let a = self.normalize();
+        let b = other.normalize();
+        ct_eq_u64((a.0[0] ^ b.0[0]) | (a.0[1] ^ b.0[1])
+            | (a.0[2] ^ b.0[2]) | (a.0[3] ^ b.0[3]), 0)
+    }
+}
+impl Eq for Fp256 {}
 
 impl Fp256 {
     pub const ZERO: Self = Self([0, 0, 0, 0]);
@@ -659,6 +671,23 @@ mod tests {
                     .scalar_mul_ct(&scalar)
                     .to_compressed_bytes()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod canonical_equality_tests {
+    use super::*;
+    #[test]
+    fn equality_is_canonical_and_checks_every_limb() {
+        assert!(Fp256(SECP_P) == Fp256::ZERO);
+        let mut p1 = SECP_P;
+        p1[0] += 1;
+        assert!(Fp256(p1) == Fp256::ONE);
+        for i in 0..4 {
+            let mut x = [0; 4];
+            x[i] = 1;
+            assert!(Fp256(x) != Fp256::ZERO);
         }
     }
 }

@@ -154,7 +154,23 @@ private def requiredWhirMirTheorems : Array Name := #[
   ``qsag_whir_verified.proofs.tooth_coset_inverse_premises_inhabited_and_fold_rejects_perturbation,
   ``qsag_whir_verified.proofs.tooth_cwyz_bridge_accepts_dual_and_rejects_perturbation,
   ``qsag_whir_verified.proofs.tooth_horner_and_pin_accepts_ascending_and_rejects_perturbation,
-  ``qsag_whir_verified.proofs.tooth_quadratic_sumcheck_wire_nontrivial_eval
+  ``qsag_whir_verified.proofs.tooth_quadratic_sumcheck_wire_nontrivial_eval,
+  ``qsag_whir_verified.proofs.whirWp_ok,
+  ``qsag_whir_verified.proofs.whirWp_mono,
+  ``qsag_whir_verified.proofs.FieldRefines_canonicalFieldWord,
+  ``qsag_whir_verified.proofs.FieldRefines_iff_eq_canonicalFieldWord,
+  ``qsag_whir_verified.proofs.Ext4Refines_canonicalExt4,
+  ``qsag_whir_verified.proofs.Ext4Refines_iff_eq_canonicalExt4,
+  ``qsag_whir_verified.proofs.extAdd_rel2,
+  ``qsag_whir_verified.proofs.extSub_rel2,
+  ``qsag_whir_verified.proofs.extMul_rel2,
+  ``qsag_whir_verified.proofs.extInv_rel1,
+  ``qsag_whir_verified.proofs.decode_canonical_ext4_wp_ext4Refines,
+  ``qsag_whir_verified.proofs.fold_duet_affine_ext4_wp_ext4Refines,
+  ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_wp_ext4Refines,
+  ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_wp_ext4Refines,
+  ``qsag_whir_verified.proofs.verify_ood_pin_eq_wp_ext4Refines,
+  ``qsag_whir_verified.proofs.checked_quorum_sum_wp_u64NatRefines
 ]
 
 /-! ## Symbol coverage

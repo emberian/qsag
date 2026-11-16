@@ -69,7 +69,7 @@ Post-quantum public-key capability chains over one-time Compact1122 (FrontierSum
 
   keygen     --secret-out <sk.json> --public-out <pk.json> [--tree-height <0..=8>]
              [--authority-id-hex <64-hex>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> |
-             --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-*]
+             --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <PATH>]
   mint       --secret <sk.json> --audience-hex <64-hex> [--token-id-hex <64-hex>]
              --token-out <biscuit.json> --step-key-out <step1.sk> [caveats] [anchor options]
   attenuate  --in <biscuit.json> --step-key <step.sk> --token-out <next.json>
@@ -83,6 +83,9 @@ Post-quantum public-key capability chains over one-time Compact1122 (FrontierSum
 First-party caveat flags:
   --expires-at <secs>  --not-before <secs>  --resource-hex <64-hex>
   --actions <u64>      --max-amount <u128>
+  --passphrase-env <VAR> / --passphrase-file <PATH>  seal keygen or unlock mint authority
+  --vault-dir <dir>  local custody directory for external anchor isolation
+  --allow-single-disk-anchor  permit a distinct anchor directory on the same filesystem
 ";
 
 const CAVEAT_OPTIONS: &[&str] = &[
@@ -805,13 +808,8 @@ fn biscuit_mint(raw: &[String]) -> Result<(), CliError> {
         )
         .map_err(map_cap_err)?;
 
-    // Ratchet external anchor AND durable vault state BEFORE releasing the minted token or step key!
-    if let Some(anchor) = &anchor_opt {
-        anchor.advance_floor(
-            BISCUIT_ANCHOR_DOMAIN.as_bytes(),
-            u64::from(auth_sk.next_leaf()),
-        )?;
-    }
+    // Persist the consumed leaf before advancing the external floor. Failed resealing
+    // must leave both states unchanged; a later anchor failure only burns a leaf.
     let updated_sk = auth_sk.to_secret_bytes();
     let updated_hex = crate::codec::to_hex_zeroizing(&updated_sk);
     let updated_str = String::from_utf8(updated_hex.0.clone())
@@ -820,7 +818,12 @@ fn biscuit_mint(raw: &[String]) -> Result<(), CliError> {
         fields.retain(|(k, _)| {
             !matches!(
                 k.as_str(),
-                "uses_completed" | "secret_key" | "envelope" | "state_mac"
+                "uses_completed"
+                    | "secret_key"
+                    | "envelope"
+                    | "salt"
+                    | "envelope_tag"
+                    | "state_mac"
             )
         });
         fields.push(("uses_completed".into(), Json::num(auth_sk.next_leaf())));
@@ -834,6 +837,12 @@ fn biscuit_mint(raw: &[String]) -> Result<(), CliError> {
     let updated_bytes = ZeroizingBuf::new(secret_doc.to_pretty().into_bytes());
     replace(Path::new(secret_path), &updated_bytes, || Ok(()))
         .map_err(|e| CliError::io("persisting advanced biscuit authority vault", e))?;
+    if let Some(anchor) = &anchor_opt {
+        anchor.advance_floor(
+            BISCUIT_ANCHOR_DOMAIN.as_bytes(),
+            u64::from(auth_sk.next_leaf()),
+        )?;
+    }
 
     save_step_key(step_out, &step1)?;
     let doc = save_biscuit_token(token_out, &token)?;

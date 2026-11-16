@@ -126,6 +126,14 @@ fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
     let trimmed = text.trim();
     if trimmed.starts_with('{') {
         let json = Json::parse(trimmed)?;
+        if ["envelope", "salt", "envelope_tag"]
+            .iter()
+            .any(|key| json.get(key).is_some())
+        {
+            return Err(CliError::input(
+                "sealed legacy keys are not supported by migrate; decrypt the key through an authenticated envelope reader before migration",
+            ));
+        }
         let seed_buf = json.field_hex("seed")?;
         if seed_buf.0.len() != 32 {
             return Err(CliError::input("JSON legacy key \"seed\" must be 32 bytes"));
@@ -609,7 +617,7 @@ fn verify(raw: &[String]) -> Result<(), CliError> {
     .map_err(|e| CliError::verify(e.message))?;
     let expected_domain = match args.get("domain-hex") {
         Some(h) => from_hex_exact::<32>(h, "--domain-hex")?,
-        None => statement_domain,
+        None => default_migration_domain(),
     };
 
     let nullifier_bytes = from_hex_exact::<32>(

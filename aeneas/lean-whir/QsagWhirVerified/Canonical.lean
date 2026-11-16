@@ -1,6 +1,7 @@
 module
 public import QsagWhirVerified.Proofs
 public import Qsag.Exec.WhirKernels
+public import Qsag.Exec.Tactic.SimulationKit
 public import Qsag.Protocol.Aggregation.HemRbrSoundness
 import Qsag.Tactic.AssuranceKit
 /-!
@@ -1258,6 +1259,214 @@ theorem tooth_canonical_cwyz_fold_rejects_wrong_twiddle_and_forged_claim :
     exact absurd (congrArg Qsag.Goldilocks.val h3eq1) (by decide)
   exact ⟨hAccept, hRejectForged, hRejectTwiddle⟩
 
+/-! ## 8. Composable `DataRefinement` (`FieldRefines`, `Ext4Refines`) & `WhirWp` Hoare-Triple Bridge
+
+Connects `qsag-whir-verified`'s Aeneas `Std.Result` verifier kernels directly to
+`Qsag.Exec.Tactic.SimulationKit`'s relational `DataRefinement` / `Rel1` / `Rel2` algebra
+(`0 import all`, `0 Classical.choice`). -/
+
+/-- Canonical relational refinement between `Qsag.Goldilocks` and limb-canonical MIR `U64`. -/
+@[expose] def FieldRefines : Qsag.DataRefinement Qsag.Goldilocks U64 where
+  Rel x w := IsCanonical w ∧ fieldAbs w = x
+
+/-- Canonical relational refinement between `Qsag.Aggregation.GoldilocksExt4` (tower basis)
+    and limb-canonical MIR `Ext4` (polynomial basis). -/
+@[expose] def Ext4Refines : Qsag.DataRefinement Qsag.Aggregation.GoldilocksExt4 Ext4 where
+  Rel z w := IsCanonicalExt4 w ∧ ext4Abs w = z
+
+/-- Canonical relational refinement between bounded mathematical `Nat` and Aeneas `U64`. -/
+@[expose] def U64NatRefines : Qsag.DataRefinement Nat U64 where
+  Rel n w := n = w.val
+
+/-- Total-correctness weakest precondition over `Aeneas.Std.Result` (`∃ v, m = .ok v ∧ post v`). -/
+@[expose] def WhirWp {α : Type} (m : Result α) (post : α → Prop) : Prop :=
+  ∃ v : α, m = .ok v ∧ post v
+
+theorem whirWp_ok {α : Type} (v : α) (post : α → Prop) :
+    WhirWp (.ok v) post ↔ post v := by
+  constructor
+  · rintro ⟨w, hEq, hPost⟩
+    cases hEq
+    exact hPost
+  · intro hPost
+    exact ⟨v, rfl, hPost⟩
+
+theorem whirWp_mono {α : Type} {m : Result α} {P Q : α → Prop}
+    (h : WhirWp m P) (hImp : ∀ v, P v → Q v) : WhirWp m Q := by
+  rcases h with ⟨v, hEq, hP⟩
+  exact ⟨v, hEq, hImp v hP⟩
+
+theorem FieldRefines_canonicalFieldWord (x : Qsag.Goldilocks) :
+    FieldRefines.Rel x (canonicalFieldWord x) :=
+  ⟨isCanonical_canonicalFieldWord x, fieldAbs_canonicalFieldWord x⟩
+
+theorem FieldRefines_iff_eq_canonicalFieldWord (x : Qsag.Goldilocks) (w : U64) :
+    FieldRefines.Rel x w ↔ w = canonicalFieldWord x := by
+  constructor
+  · rintro ⟨hw, rfl⟩
+    exact (canonicalFieldWord_fieldAbs hw).symm
+  · rintro rfl
+    exact FieldRefines_canonicalFieldWord x
+
+theorem Ext4Refines_canonicalExt4 (z : Qsag.Aggregation.GoldilocksExt4) :
+    Ext4Refines.Rel z (canonicalExt4 z) :=
+  ⟨isCanonicalExt4_canonicalExt4 z, ext4Abs_canonicalExt4 z⟩
+
+theorem Ext4Refines_iff_eq_canonicalExt4 (z : Qsag.Aggregation.GoldilocksExt4) (w : Ext4) :
+    Ext4Refines.Rel z w ↔ w = canonicalExt4 z := by
+  constructor
+  · rintro ⟨hw, rfl⟩
+    exact (canonicalExt4_ext4Abs hw).symm
+  · rintro rfl
+    exact Ext4Refines_canonicalExt4 z
+
+theorem extAdd_rel2 :
+    Qsag.Rel2 Ext4Refines Ext4Refines Ext4Refines Qsag.Aggregation.GoldilocksExt4.add extAdd := by
+  rintro _ x _ y ⟨_, rfl⟩ ⟨_, rfl⟩
+  exact ⟨extAdd_canonical x y, ext4Abs_add x y⟩
+
+theorem extSub_rel2 :
+    Qsag.Rel2 Ext4Refines Ext4Refines Ext4Refines Qsag.Aggregation.GoldilocksExt4.sub extSub := by
+  rintro _ x _ y ⟨_, rfl⟩ ⟨_, rfl⟩
+  exact ⟨extSub_canonical x y, ext4Abs_sub x y⟩
+
+theorem extMul_rel2 :
+    Qsag.Rel2 Ext4Refines Ext4Refines Ext4Refines Qsag.Aggregation.GoldilocksExt4.mul extMul := by
+  rintro _ x _ y ⟨_, rfl⟩ ⟨_, rfl⟩
+  exact ⟨extMul_canonical x y, ext4Abs_mul x y⟩
+
+theorem extInv_rel1 :
+    Qsag.Rel1 Ext4Refines Ext4Refines Qsag.Aggregation.GoldilocksExt4.inv extInv := by
+  rintro _ x ⟨_, rfl⟩
+  exact ⟨isCanonicalExt4_extInv x, ext4Abs_inv x⟩
+
+private theorem isCanonicalExt4_quadraticWireValue (c0 c2 sum_claim r : Ext4) :
+    IsCanonicalExt4 (quadraticWireValue c0 c2 sum_claim r) := by
+  rw [quadraticWireValue.public_eqs]
+  exact extAdd_canonical _ _
+
+/-- `WhirWp` + `Ext4Refines.option` specification for `decode_canonical_ext4`. -/
+theorem decode_canonical_ext4_wp_ext4Refines (a b c d : U64) :
+    WhirWp (decode_canonical_ext4 a b c d)
+      (Ext4Refines.option.Rel
+        (if a.val < Qsag.goldilocksPrime ∧ b.val < Qsag.goldilocksPrime ∧
+            c.val < Qsag.goldilocksPrime ∧ d.val < Qsag.goldilocksPrime
+         then some (Qsag.Math.aggOfPolynomial ⟨fieldAbs a, fieldAbs b, fieldAbs c, fieldAbs d⟩)
+         else none)) := by
+  rw [decode_canonical_ext4_spec, whirWp_ok]
+  have hp : IsCanonical a ∧ IsCanonical b ∧ IsCanonical c ∧ IsCanonical d ↔
+      a.val < Qsag.goldilocksPrime ∧ b.val < Qsag.goldilocksPrime ∧
+      c.val < Qsag.goldilocksPrime ∧ d.val < Qsag.goldilocksPrime := Iff.rfl
+  by_cases h : IsCanonical a ∧ IsCanonical b ∧ IsCanonical c ∧ IsCanonical d
+  · have h' := hp.mp h
+    simp only [h, h', Qsag.DataRefinement.option, Ext4Refines]
+    exact ⟨h, rfl⟩
+  · have h' : ¬ (a.val < Qsag.goldilocksPrime ∧ b.val < Qsag.goldilocksPrime ∧
+        c.val < Qsag.goldilocksPrime ∧ d.val < Qsag.goldilocksPrime) := fun hc => h (hp.mpr hc)
+    simp only [h, h', ↓reduceIte, Qsag.DataRefinement.option]
+
+/-- `WhirWp` + `Ext4Refines` specification for `fold_duet_affine_ext4`, discharging the
+    `hit`/`hiy`/`hyy` inverse twiddle obligations directly from `FieldRefines`. -/
+theorem fold_duet_affine_ext4_wp_ext4Refines
+    {v0s v1s ts as_ bs : Qsag.Aggregation.GoldilocksExt4}
+    {v0 v1 theta alpha beta : Ext4}
+    {x : Qsag.Goldilocks} {iy it yy : U64}
+    (hv0 : Ext4Refines.Rel v0s v0) (hv1 : Ext4Refines.Rel v1s v1)
+    (ht : Ext4Refines.Rel ts theta) (ha : Ext4Refines.Rel as_ alpha)
+    (hb : Ext4Refines.Rel bs beta)
+    (hiy : FieldRefines.Rel
+      (Qsag.Goldilocks.mul (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)) (Qsag.Goldilocks.inv x)) iy)
+    (hit : FieldRefines.Rel (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)) it)
+    (hyy : FieldRefines.Rel (Qsag.Goldilocks.mul x x) yy) :
+    WhirWp (fold_duet_affine_ext4 v0 v1 iy it yy theta alpha beta)
+      (Ext4Refines.Rel (Qsag.Exec.hemAffineDuetFold v0s v1s x ts as_ bs)) := by
+  have hMap := fold_duet_affine_ext4_refines_exec v0 v1 iy it yy theta alpha beta x
+    hit.2 hiy.2 hyy.2
+  rw [fold_duet_affine_ext4_spec] at hMap ⊢
+  rw [whirWp_ok]
+  have hVal : ext4Abs (cwyzValue v0 v1 iy it yy theta alpha beta) =
+      Qsag.Exec.hemAffineDuetFold v0s v1s x ts as_ bs := by
+    have hInj : ext4Abs (cwyzValue v0 v1 iy it yy theta alpha beta) =
+        Qsag.Exec.hemAffineDuetFold (ext4Abs v0) (ext4Abs v1) x
+          (ext4Abs theta) (ext4Abs alpha) (ext4Abs beta) := Result.ok.inj hMap
+    rw [hv0.2, hv1.2, ht.2, ha.2, hb.2] at hInj
+    exact hInj
+  exact ⟨isCanonicalExt4_cwyzValue v0 v1 iy it yy theta alpha beta, hVal⟩
+
+/-- `WhirWp` + `Ext4Refines` specification for `cwyz_bridge_claim_step` into canonical
+    `Qsag.hemBridgeFoldClaim`. -/
+theorem cwyz_bridge_claim_step_wp_ext4Refines
+    {w0s w1s w2s w3s w4s claims phis thetas alphas betas : Qsag.Aggregation.GoldilocksExt4}
+    {w0 w1 w2 w3 w4 claim phi theta alpha beta : Ext4}
+    (hw0 : Ext4Refines.Rel w0s w0) (hw1 : Ext4Refines.Rel w1s w1)
+    (hw2 : Ext4Refines.Rel w2s w2) (hw3 : Ext4Refines.Rel w3s w3)
+    (hw4 : Ext4Refines.Rel w4s w4) (hc : Ext4Refines.Rel claims claim)
+    (hp : Ext4Refines.Rel phis phi) (ht : Ext4Refines.Rel thetas theta)
+    (ha : Ext4Refines.Rel alphas alpha) (hb : Ext4Refines.Rel betas beta) :
+    WhirWp (cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta)
+      (Ext4Refines.Rel
+        (Qsag.hemBridgeFoldClaim claims w0s w1s w2s w3s w4s phis thetas alphas betas)) := by
+  have hExec := cwyz_bridge_refines_exec w0 w1 w2 w3 w4 claim phi theta alpha beta
+  rw [cwyz_bridge_claim_step_refines] at hExec ⊢
+  rw [whirWp_ok]
+  have hVal : ext4Abs (cwyzBridgeValue w0 w1 w2 w3 w4 claim phi theta alpha beta) =
+      Qsag.hemBridgeFoldClaim claims w0s w1s w2s w3s w4s phis thetas alphas betas := by
+    have h1 := (Result.ok.inj hExec).trans
+      (hemBridgeClaimStep_eq_hemBridgeFoldClaim _ _ _ _ _ _ _ _ _ _)
+    rw [hw0.2, hw1.2, hw2.2, hw3.2, hw4.2, hc.2, hp.2, ht.2, ha.2, hb.2] at h1
+    exact h1
+  exact ⟨isCanonicalExt4_cwyzBridgeValue w0 w1 w2 w3 w4 claim phi theta alpha beta, hVal⟩
+
+/-- `WhirWp` + `Ext4Refines` specification for `eval_quadratic_sumcheck_wire` into
+    `Qsag.RoundPoly.evalCoeffs`. -/
+theorem eval_quadratic_sumcheck_wire_wp_ext4Refines
+    {c0s c2s claims rs : Qsag.Aggregation.GoldilocksExt4}
+    {c0 c2 sum_claim r : Ext4}
+    (hc0 : Ext4Refines.Rel c0s c0) (hc2 : Ext4Refines.Rel c2s c2)
+    (hcl : Ext4Refines.Rel claims sum_claim) (hr : Ext4Refines.Rel rs r) :
+    WhirWp (eval_quadratic_sumcheck_wire c0 c2 sum_claim r)
+      (Ext4Refines.Rel
+        (Qsag.RoundPoly.evalCoeffs (canonicalQuadraticWirePoly c0s c2s claims) rs)) := by
+  have hRef := eval_quadratic_sumcheck_wire_refines_qsag c0 c2 sum_claim r
+  rw [eval_quadratic_sumcheck_wire_refines] at hRef ⊢
+  rw [whirWp_ok]
+  have hVal : ext4Abs (quadraticWireValue c0 c2 sum_claim r) =
+      Qsag.RoundPoly.evalCoeffs (canonicalQuadraticWirePoly c0s c2s claims) rs := by
+    have h1 := Result.ok.inj hRef
+    rw [hc0.2, hc2.2, hcl.2, hr.2] at h1
+    exact h1
+  exact ⟨isCanonicalExt4_quadraticWireValue c0 c2 sum_claim r, hVal⟩
+
+/-- `WhirWp` Hoare-triple specification for `verify_ood_pin_eq` over canonical `GoldilocksExt4` OOD vectors. -/
+theorem verify_ood_pin_eq_wp_ext4Refines
+    (expected supplied : Slice U64)
+    (expPins supPins : List Qsag.Aggregation.GoldilocksExt4)
+    (he : expected.val = ext4SliceWords expPins)
+    (hs : supplied.val = ext4SliceWords supPins) :
+    WhirWp (verify_ood_pin_eq expected supplied) (fun ok => ok = true ↔ expPins = supPins) := by
+  rw [verify_ood_pin_eq_spec, whirWp_ok, he, hs, decide_eq_true_eq]
+  exact ⟨ext4SliceWords_injective, congrArg ext4SliceWords⟩
+
+/-- `WhirWp` + `U64NatRefines` specification for `checked_quorum_sum`. -/
+theorem checked_quorum_sum_wp_u64NatRefines
+    (counts minimums : Slice U64) (minimum_global : U64) :
+    WhirWp (checked_quorum_sum counts minimums minimum_global)
+      (fun out => ∀ total : U64, out = some total ↔
+        (counts.val ≠ [] ∧
+         counts.val.length = minimums.val.length ∧
+         0 < minimum_global.val ∧
+         (∀ i (hi : i < counts.val.length) (hmi : i < minimums.val.length),
+           0 < (minimums.val[i]'hmi).val ∧ (minimums.val[i]'hmi).val ≤ (counts.val[i]'hi).val) ∧
+         U64NatRefines.Rel (counts.val.map UScalar.val).sum total ∧
+         minimum_global.val ≤ total.val ∧
+         (counts.val.map UScalar.val).sum < 2 ^ 64)) := by
+  obtain ⟨out, hOut⟩ := checked_quorum_sum_total counts minimums minimum_global
+  refine ⟨out, hOut, fun total => ?_⟩
+  have hIff := checked_quorum_sum_sound_qsag counts minimums minimum_global total
+  rw [hOut, Result.ok.injEq] at hIff
+  refine hIff.trans ?_
+  simp only [U64NatRefines, eq_comm (a := total.val)]
+
 #verify_constructive
   fieldAbs_canonicalFieldWord
   ext4Abs_canonicalExt4
@@ -1287,6 +1496,22 @@ theorem tooth_canonical_cwyz_fold_rejects_wrong_twiddle_and_forged_claim :
   step_merkle_pair_order_canonical_parity
   checked_quorum_sum_sound_qsag
   tooth_canonical_cwyz_fold_rejects_wrong_twiddle_and_forged_claim
+  whirWp_ok
+  whirWp_mono
+  FieldRefines_canonicalFieldWord
+  FieldRefines_iff_eq_canonicalFieldWord
+  Ext4Refines_canonicalExt4
+  Ext4Refines_iff_eq_canonicalExt4
+  extAdd_rel2
+  extSub_rel2
+  extMul_rel2
+  extInv_rel1
+  decode_canonical_ext4_wp_ext4Refines
+  fold_duet_affine_ext4_wp_ext4Refines
+  cwyz_bridge_claim_step_wp_ext4Refines
+  eval_quadratic_sumcheck_wire_wp_ext4Refines
+  verify_ood_pin_eq_wp_ext4Refines
+  checked_quorum_sum_wp_u64NatRefines
 
 end qsag_whir_verified.proofs
 end

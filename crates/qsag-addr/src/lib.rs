@@ -15,8 +15,21 @@ use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_is_canonical};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_accel::poseidon2::poseidon2_hash_framed_limbs4;
-pub use qsag_verified::{
-    HybridRoleTag, INTENT_V1_MAGIC, check_hybrid_domain_framing, derive_hybrid_transcript_digest,
+// The MIR-verified `qsag_verified::policy_and_addr` module has its own intent tag namespace
+// (`IntentSuiteTag` / `IntentIdentityKind`) whose wire discriminators collide with, and partially
+// invert, the canonical `WitnessSuiteTag` / `KeyIdentityKind` below, and the names of its
+// `SUITE_HYBRID_*` constants disagree with this crate (its `0x0501` is named Ed25519/ML-DSA-65
+// but is hashed, as here, as secp256k1/ML-DSA-44). That file and its names are pinned by the
+// Aeneas extraction and its Lean proofs, so the mismatch is contained here instead: none of those
+// items is re-exported. The hybrid kernels are reachable only through the typed wrappers
+// [`hybrid_domain_framing_ok`] / [`hybrid_transcript_digest`], and the verified intent namespace
+// only through [`intent_from_verified`] / [`decode_verified_intent_128`].
+pub use qsag_verified::{HybridRoleTag, INTENT_V1_MAGIC};
+use qsag_verified::{
+    CanonicalIntent128 as VerifiedCanonicalIntent128,
+    IntentAddressVersion as VerifiedIntentAddressVersion,
+    IntentIdentityKind as VerifiedIntentIdentityKind, IntentSuiteTag as VerifiedIntentSuiteTag,
+    check_hybrid_domain_framing, derive_hybrid_transcript_digest,
 };
 
 pub use bech32m::{
@@ -327,6 +340,95 @@ pub const fn decode_intent_128(bytes: &[u8; 128]) -> Option<CanonicalIntent128> 
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// Verified intent namespace bridge
+// ---------------------------------------------------------------------------------------------
+
+/// Canonical suite named by a tag of the MIR-verified intent namespace.
+///
+/// The translation is by meaning, never by number: the verified wire words `0x0101`, `0x0201`,
+/// `0x0302`, `0x0501` and `0x0502` each name a different suite in [`WitnessSuiteTag`]. A
+/// threshold ML-DSA-65 key is an ML-DSA-65 key on the wire. `HybridSecp256k1SlhDsa` has no
+/// canonical suite and is refused, reporting its verified wire word.
+pub const fn intent_suite_from_verified(
+    tag: VerifiedIntentSuiteTag,
+) -> Result<WitnessSuiteTag, AddrError> {
+    match tag {
+        VerifiedIntentSuiteTag::JortsPoseidon2 => Ok(WitnessSuiteTag::JortsPoseidon2),
+        VerifiedIntentSuiteTag::SlhDsaShake128f => Ok(WitnessSuiteTag::SlhDsa128f),
+        VerifiedIntentSuiteTag::ThresholdMlDsa65 => Ok(WitnessSuiteTag::MlDsa65),
+        VerifiedIntentSuiteTag::HybridEd25519MlDsa65 => Ok(WitnessSuiteTag::HybridEd25519MlDsa65),
+        VerifiedIntentSuiteTag::HybridSecp256k1SlhDsa => {
+            Err(AddrError::UnsupportedSuiteTag(tag.to_u16()))
+        }
+    }
+}
+
+/// Canonical identity kind named by a kind of the MIR-verified intent namespace.
+///
+/// Single and threshold keys are one canonical kind, so that they stay indistinguishable. The
+/// verified namespace has no conjunctive-hybrid kind.
+pub const fn intent_identity_kind_from_verified(kind: VerifiedIntentIdentityKind) -> KeyIdentityKind {
+    match kind {
+        VerifiedIntentIdentityKind::SingleKey | VerifiedIntentIdentityKind::ThresholdCommittee => {
+            KeyIdentityKind::SingleOrThreshold
+        }
+        VerifiedIntentIdentityKind::PolicyBound => KeyIdentityKind::ScriptPredicate,
+    }
+}
+
+/// Translate an intent of the MIR-verified namespace into a canonical [`CanonicalIntent128`],
+/// refusing a suite with no canonical counterpart and any `(suite_tag, identity_kind)` pair that
+/// [`WitnessSuiteTag::validate_identity_kind`] refuses.
+///
+/// Since the verified namespace has no conjunctive-hybrid kind, every verified intent that names
+/// a hybrid suite is refused here.
+pub const fn intent_from_verified(
+    intent: &VerifiedCanonicalIntent128,
+) -> Result<CanonicalIntent128, AddrError> {
+    let suite_tag = match intent_suite_from_verified(intent.suite_tag) {
+        Ok(tag) => tag,
+        Err(err) => return Err(err),
+    };
+    let identity_kind = intent_identity_kind_from_verified(intent.identity_kind);
+    if let Err(err) = suite_tag.validate_identity_kind(identity_kind) {
+        return Err(err);
+    }
+    let address_version = match intent.address_version {
+        VerifiedIntentAddressVersion::V1 => AddressVersion::V1Cshake256,
+        VerifiedIntentAddressVersion::V2 => AddressVersion::V2Poseidon2,
+    };
+    Ok(CanonicalIntent128 {
+        suite_tag,
+        address_version,
+        identity_kind,
+        chain_id: intent.chain_id,
+        nonce: intent.nonce,
+        timestamp_secs: intent.timestamp_secs,
+        amount_units: intent.amount_units,
+        rolling_window_spent: intent.rolling_window_spent,
+        recipient_commitment: intent.recipient_commitment,
+        payload_digest: intent.payload_digest,
+    })
+}
+
+/// Decode a 128-byte frame written in the MIR-verified namespace (by
+/// `qsag_verified::encode_intent_128`) and translate it with [`intent_from_verified`]. `None` if
+/// the verified decoder or the translation refuses it.
+///
+/// Such a frame is not a canonical frame: [`decode_intent_128`] reads the same bytes as a
+/// different suite, or refuses them. Re-encode the result with [`try_encode_intent_128`] to get
+/// the canonical frame.
+pub const fn decode_verified_intent_128(bytes: &[u8; 128]) -> Option<CanonicalIntent128> {
+    match qsag_verified::decode_intent_128(bytes) {
+        Some(intent) => match intent_from_verified(&intent) {
+            Ok(canonical) => Some(canonical),
+            Err(_) => None,
+        },
+        None => None,
+    }
+}
+
 /// Canonical 35-byte (`version` witness symbol + 35-byte program = `1 + 56 = 57` 5-bit symbols ->
 /// `67` chars total for 3-char HRP `"qsp"`, strictly `< 90` BIP-350 bound!) post-quantum address.
 ///
@@ -575,6 +677,50 @@ impl HybridRole {
             Self::PostQuantum => HybridRoleTag::PostQuantum,
         }
     }
+}
+
+/// The MIR-verified `QSAG.HYBRID.V2` framing check, for a canonical suite: the 14-byte magic,
+/// a conjunctive hybrid `suite_tag`, `wire_role_byte` equal to `expected_role`, and equal
+/// identity commitments.
+pub fn hybrid_domain_framing_ok(
+    magic14: &[u8; 14],
+    wire_role_byte: u8,
+    expected_role: HybridRole,
+    suite_tag: WitnessSuiteTag,
+    expected_id_commit: &[u8; 32],
+    wire_id_commit: &[u8; 32],
+) -> bool {
+    HybridSuiteSpec::for_suite(suite_tag).is_ok()
+        && check_hybrid_domain_framing(
+            magic14,
+            wire_role_byte,
+            expected_role.to_verified_tag(),
+            suite_tag as u16,
+            expected_id_commit,
+            wire_id_commit,
+        )
+}
+
+/// The MIR-verified role-separated `QSAG.HYBRID.V2` SHAKE256 transcript digest, for a canonical
+/// suite. [`AddrError::HybridUnsupportedSuite`] unless `suite_tag` is a conjunctive hybrid.
+pub fn hybrid_transcript_digest(
+    role: HybridRole,
+    suite_tag: WitnessSuiteTag,
+    id_commit: &[u8; 32],
+    pk_classical_digest: &[u8; 32],
+    pk_pq_digest: &[u8; 32],
+    message: &[u8],
+) -> Result<[u8; 32], AddrError> {
+    HybridSuiteSpec::for_suite(suite_tag)?;
+    derive_hybrid_transcript_digest(
+        role.to_verified_tag(),
+        suite_tag as u16,
+        id_commit,
+        pk_classical_digest,
+        pk_pq_digest,
+        message,
+    )
+    .ok_or(AddrError::HybridUnsupportedSuite(suite_tag as u16))
 }
 
 /// The classical and post-quantum algorithms fixed by a hybrid [`WitnessSuiteTag`].
@@ -874,19 +1020,19 @@ impl HybridPinnedEnvelope {
             & ct_eq_bytes(&pq_digest, &self.pk_pq_digest)
             & ct_eq_bytes(&id_commit, &self.id_commit)
             & ct_eq_bytes(&id_commit, expected_id_commit)
-            & check_hybrid_domain_framing(
+            & hybrid_domain_framing_ok(
                 HYBRID_PINNED_MAGIC,
                 HybridRole::Classical as u8,
-                HybridRoleTag::Classical,
-                self.suite_tag as u16,
+                HybridRole::Classical,
+                self.suite_tag,
                 expected_id_commit,
                 &self.id_commit,
             )
-            & check_hybrid_domain_framing(
+            & hybrid_domain_framing_ok(
                 HYBRID_PINNED_MAGIC,
                 HybridRole::PostQuantum as u8,
-                HybridRoleTag::PostQuantum,
-                self.suite_tag as u16,
+                HybridRole::PostQuantum,
+                self.suite_tag,
                 expected_id_commit,
                 &self.id_commit,
             );
@@ -905,25 +1051,24 @@ impl HybridPinnedEnvelope {
         msg: &[u8],
     ) -> Result<[u8; 32], AddrError> {
         self.validate_structure(&self.id_commit)?;
-        if !check_hybrid_domain_framing(
+        if !hybrid_domain_framing_ok(
             HYBRID_PINNED_MAGIC,
             role as u8,
-            role.to_verified_tag(),
-            self.suite_tag as u16,
+            role,
+            self.suite_tag,
             &self.id_commit,
             &self.id_commit,
         ) {
             return Err(AddrError::HybridCommitmentMismatch);
         }
-        derive_hybrid_transcript_digest(
-            role.to_verified_tag(),
-            self.suite_tag as u16,
+        hybrid_transcript_digest(
+            role,
+            self.suite_tag,
             &self.id_commit,
             &self.pk_classical_digest,
             &self.pk_pq_digest,
             msg,
         )
-        .ok_or(AddrError::HybridUnsupportedSuite(self.suite_tag as u16))
     }
 
     /// Conjunctive verification. [`Self::validate_structure`] must pass before either callback
@@ -974,22 +1119,22 @@ impl HybridPinnedEnvelope {
             else {
                 return false;
             };
-            check_hybrid_domain_framing(
+            hybrid_domain_framing_ok(
                 &magic14,
                 wire_role,
-                role.to_verified_tag(),
-                spec.suite_tag as u16,
+                role,
+                spec.suite_tag,
                 &self.id_commit,
                 &wire_id,
-            ) && derive_hybrid_transcript_digest(
-                role.to_verified_tag(),
-                spec.suite_tag as u16,
+            ) && hybrid_transcript_digest(
+                role,
+                spec.suite_tag,
                 &self.id_commit,
                 &self.pk_classical_digest,
                 &self.pk_pq_digest,
                 msg,
             )
-            .is_some_and(|d| ct_eq_bytes(&d, &qsag_verified::shake256_32(transcript)))
+            .is_ok_and(|d| ct_eq_bytes(&d, &qsag_verified::shake256_32(transcript)))
         };
         let classical_transcript = Self::signing_transcript(
             HybridRole::Classical,

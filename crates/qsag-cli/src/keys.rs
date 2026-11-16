@@ -224,9 +224,8 @@ fn write_threshold_reservoirs(
             LockedRecord::create_new(&path)
                 .map_err(|e| CliError::io("creating threshold reservoir sidecar", e))?
         } else {
-            LockedRecord::open_existing(&path).map_err(|_| {
-                CliError::state("CorruptOrRolledBackThresholdReservoir")
-            })?
+            LockedRecord::open_existing(&path)
+                .map_err(|_| CliError::state("CorruptOrRolledBackThresholdReservoir"))?
         };
         let seal = record.lock_identity_seal();
         let rand = os_random_32()?;
@@ -279,9 +278,7 @@ fn load_or_setup_threshold(
         return Ok((setup, false));
     };
     let expected_gen = match gen_val {
-        Json::Number(s) => s
-            .parse::<u64>()
-            .map_err(|_| crate::vault::corrupt())?,
+        Json::Number(s) => s.parse::<u64>().map_err(|_| crate::vault::corrupt())?,
         _ => return Err(crate::vault::corrupt()),
     };
     let expected_commit: [u8; 32] = from_hex_exact(
@@ -590,7 +587,7 @@ The secret file is created with owner-only permissions.
   --force-overwrite     replace an authenticated stateless vault; stateful overwrite is refused
   --hrp <hrp>           address human-readable part (default: qsp)
   --fast-demo          fts-threshold only: use an eight-epoch demonstration tree
-  --parties <n>         fts-threshold: number of signing parties, 2..=65535 (default: 3)
+  --parties <n>         fts-threshold: number of signing parties, 2..=255 (default: 3)
   --validators <k>      agg-jorts-poseidon2: committee size (default: 8; bounded by public-key file size)
   --wal-dir <dir>       agg-jorts-poseidon2: directory in which each validator's epoch
                         write-ahead log is created (required for that scheme)
@@ -639,6 +636,9 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             "anchor-tpm-auth-env",
             "policy-ledger-dir",
             "policy-anchor-dir",
+            "policy-anchor-tpm-nv",
+            "policy-anchor-tpm-device",
+            "policy-anchor-tpm-auth-env",
             "policy-passphrase-env",
             "policy-passphrase-file",
         ],
@@ -654,6 +654,8 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             "anchor-vmgenid-strict",
             "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
+            "policy-vmgenid",
+            "policy-vmgenid-strict",
         ],
     )?;
     if args.flag("help") {
@@ -681,9 +683,6 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         ));
     }
     let passphrase = crate::envelope::passphrase(&args)?;
-    if matches!(scheme, Scheme::AggCommittee) && passphrase.is_some() {
-        return Err(CliError::usage("committee envelope support is unavailable"));
-    }
     let secret_out = args.require("secret-out")?;
     let public_out = args.require("public-out")?;
     if let Some(cfg) = &anchor_cfg {
@@ -1054,6 +1053,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             "policy-ledger-dir",
             "policy-intent",
             "policy-anchor-dir",
+            "policy-anchor-tpm-nv",
+            "policy-anchor-tpm-device",
+            "policy-anchor-tpm-auth-env",
             "policy-passphrase-env",
             "policy-passphrase-file",
         ],
@@ -1067,6 +1069,8 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             "anchor-vmgenid-strict",
             "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
+            "policy-vmgenid",
+            "policy-vmgenid-strict",
             "policy-retry",
         ],
     )?;
@@ -1307,9 +1311,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 )));
             }
             let parties = secret.field_u64("parties")?;
-            if !(2..=u16::MAX as u64).contains(&parties) {
+            if !(2..=255).contains(&parties) {
                 return Err(CliError::usage(
-                    "dealerless threshold setup requires 2 <= parties <= 65535",
+                    "dealerless threshold setup requires 2 <= parties <= 255",
                 ));
             }
             let cached_tree = load_cached_threshold_tree(&secret, params)?;
@@ -1336,9 +1340,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                         pk_seed_bytes,
                         burn_mac.0,
                     )
-                    .map_err(|e| {
-                        CliError::state(format!("epoch burn journal unavailable: {e}"))
-                    })?;
+                    .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
                     let preloaded = if secret.get("reservoir_generation").is_some() {
                         Some(load_or_setup_threshold(
                             secret_path,
@@ -1410,9 +1412,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                         setup.pk.pk_seed_bytes,
                         burn_mac.0,
                     )
-                    .map_err(|e| {
-                        CliError::state(format!("epoch burn journal unavailable: {e}"))
-                    })?;
+                    .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
                     let ceremony_id = cshake256_framed_32(
                         b"QSAG.CLI.THRESHOLD.CEREMONY.V1",
                         &[

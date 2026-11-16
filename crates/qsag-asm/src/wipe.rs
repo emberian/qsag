@@ -199,8 +199,10 @@ impl<T: SecretWipe + Default> SecretBuffer<T> {
     /// Release the secret to the caller, who becomes responsible for erasing it.
     ///
     /// The value is moved out and the guard's own storage is then erased byte for
-    /// byte, so no placeholder is built, wiped and dropped in its place.
-    #[inline]
+    /// byte, so no placeholder is built, wiped and dropped in its place. Always
+    /// inlined, so `self` is not first moved into a separate callee parameter slot
+    /// that the wipe below would not reach.
+    #[inline(always)]
     pub fn into_inner(self) -> T {
         let mut slot = core::mem::MaybeUninit::new(self);
         // SAFETY: `slot` holds an initialized guard whose only field is the secret.

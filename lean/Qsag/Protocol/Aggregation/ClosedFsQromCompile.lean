@@ -256,6 +256,15 @@ def OracleIop.verify (iop : OracleIop Stmt PStmt Msg Pub F k) (x : Stmt)
     (tr : List (Msg × Nat)) : Bool :=
   decide (tr.length = k) && iop.verdict (iop.pubStmt x) (iop.pubTr tr) (iop.readValues x tr)
 
+theorem OracleIop.verify_eq (iop : OracleIop Stmt PStmt Msg Pub F k) (x : Stmt)
+    (tr : List (Msg × Nat)) :
+    iop.verify x tr =
+      (decide (tr.length = k) &&
+       iop.verdict (iop.pubStmt x) (tr.map (fun mc => (iop.pubMsg mc.1, mc.2)))
+         ((iop.queries (iop.pubStmt x) (tr.map (fun mc => (iop.pubMsg mc.1, mc.2)))).map
+           (fun q => iop.table x (tr.map (fun mc => mc.1)) q.1 q.2))) := by
+  rfl
+
 /-- The IOP as a `PublicCoinIop` of `MultiRoundFsQrom`. -/
 def OracleIop.toPublicCoin (iop : OracleIop Stmt PStmt Msg Pub F k) : PublicCoinIop Stmt Msg k where
   challengeCard := fun _ => 2 ^ iop.w

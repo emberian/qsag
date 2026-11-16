@@ -29,12 +29,34 @@ const T_GATE_THRESHOLD: f64 = 5.5;
 #[cfg(debug_assertions)]
 const T_GATE_THRESHOLD: f64 = 7.5;
 
+/// Minimum counter ticks per recorded sample before inner batching kicks in.
+///
+/// `rdtsc` counts at core-clock granularity, so x86 keeps one call per sample. AArch64
+/// `cntvct_el0` runs at a fixed `CNTFRQ_EL0` (24 MHz on Apple cores, 25-1000 MHz on Neoverse),
+/// so a single nanosecond-scale call quantizes to `0`/`1` ticks and the Welch statistic
+/// degenerates. There each sample instead times `reps` back-to-back calls on the same slot,
+/// where `reps` is calibrated once per kernel from warmup chunks (independently of class) so
+/// that a sample spans at least this many ticks. Override with `QSAG_DUDECT_MIN_SAMPLE_TICKS`.
+#[cfg(target_arch = "aarch64")]
+const DEFAULT_MIN_SAMPLE_TICKS: u64 = 256;
+#[cfg(not(target_arch = "aarch64"))]
+const DEFAULT_MIN_SAMPLE_TICKS: u64 = 1;
+const MAX_INNER_REPS: u64 = 1 << 16;
+
 fn configured_samples() -> usize {
     std::env::var("QSAG_DUDECT_SAMPLES")
         .ok()
         .and_then(|s| s.replace('_', "").parse::<usize>().ok())
         .filter(|&n| n >= CHUNK)
         .unwrap_or(DEFAULT_TEST_TRACES)
+}
+
+fn configured_min_sample_ticks() -> u64 {
+    std::env::var("QSAG_DUDECT_MIN_SAMPLE_TICKS")
+        .ok()
+        .and_then(|s| s.replace('_', "").parse::<u64>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(DEFAULT_MIN_SAMPLE_TICKS)
 }
 
 struct KeccakRng {
@@ -80,6 +102,34 @@ impl KeccakRng {
             let take = (buf.len() - off).min(8);
             buf[off..off + take].copy_from_slice(&w[..take]);
             off += take;
+        }
+    }
+
+    /// Bulk masked fill for multi-kilobyte operands: one Keccak-derived seed per call expanded
+    /// with SplitMix64, so the random class stays full-entropy per slot without spending a
+    /// portable Keccak permutation per 544 bytes. `mask = 0` yields the fixed (all-zero) class.
+    fn fill_masked_u64(&mut self, words: &mut [u64], mask: u64) {
+        let mut s = self.next_u64();
+        for w in words {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            *w = (z ^ (z >> 31)) & mask;
+        }
+    }
+
+    fn fill_masked_bytes(&mut self, buf: &mut [u8], mask: u8) {
+        let mut s = self.next_u64();
+        for chunk in buf.chunks_mut(8) {
+            s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = s;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            let w = (z ^ (z >> 31)).to_le_bytes();
+            for (dst, src) in chunk.iter_mut().zip(w) {
+                *dst = src & mask;
+            }
         }
     }
 }
@@ -171,8 +221,26 @@ struct GateStat {
     t_raw: f64,
     t_cropped_max: f64,
     max_abs_t: f64,
+    reps: u64,
 }
 
+/// Time `reps` back-to-back evaluations of slot `i` as one sample.
+#[inline(always)]
+fn time_slot<S, Meas>(state: &mut S, measure_slot: &mut Meas, i: usize, reps: u64) -> u64
+where
+    Meas: FnMut(&mut S, usize) -> u64,
+{
+    let t0 = serialized_ticks_start();
+    for _ in 0..reps {
+        black_box(measure_slot(state, i));
+    }
+    let t1 = serialized_ticks_end();
+    t1.wrapping_sub(t0)
+}
+
+/// Every `measure_slot` must be idempotent per slot (in-place kernels copy their prepared
+/// input into a work buffer inside the closure), so a batched sample re-runs the kernel on
+/// the same class-`c` operand `reps` times rather than on its own output.
 fn measure_dudect<S, Prep, Meas>(
     name: &'static str,
     min_traces: usize,
@@ -188,18 +256,32 @@ where
     let mut classes = [0u8; CHUNK];
     let mut ticks = [0u64; CHUNK];
 
+    // Warmup doubles as class-blind calibration of the inner batch size: the whole chunk
+    // (both classes, random order) is timed with single calls, and `reps` is chosen from the
+    // mean so that one sample spans at least `min_sample_ticks` counter ticks.
+    let min_sample_ticks = configured_min_sample_ticks();
+    let mut warm_total = 0u64;
     for _ in 0..WARMUP_CHUNKS {
         for c in &mut classes {
             *c = (rng.next_u64() & 1) as u8;
         }
         prepare_chunk(state, &mut rng, &classes);
+        let w0 = serialized_ticks_start();
         for (i, tick) in ticks.iter_mut().enumerate() {
-            let t0 = serialized_ticks_start();
-            black_box(measure_slot(state, i));
-            let t1 = serialized_ticks_end();
-            *tick = t1.wrapping_sub(t0);
+            *tick = time_slot(state, &mut measure_slot, i, 1);
         }
+        let w1 = serialized_ticks_end();
+        warm_total = warm_total.saturating_add(w1.wrapping_sub(w0));
     }
+    let warm_calls = (WARMUP_CHUNKS * CHUNK) as u64;
+    let reps = if min_sample_ticks <= 1 {
+        1
+    } else {
+        // ceil(min_sample_ticks * calls / total), with a zero-tick total mapped to the cap.
+        (min_sample_ticks.saturating_mul(warm_calls))
+            .div_ceil(warm_total.max(1))
+            .clamp(1, MAX_INNER_REPS)
+    };
 
     let n_chunks = min_traces.div_ceil(CHUNK);
     let mut raw_est = WelfordPair::default();
@@ -212,10 +294,7 @@ where
         }
         prepare_chunk(state, &mut rng, &classes);
         for (i, tick) in ticks.iter_mut().enumerate() {
-            let t0 = serialized_ticks_start();
-            black_box(measure_slot(state, i));
-            let t1 = serialized_ticks_end();
-            *tick = t1.wrapping_sub(t0);
+            *tick = time_slot(state, &mut measure_slot, i, reps);
         }
         for i in 0..CHUNK {
             raw_est.push(classes[i] as usize, ticks[i] as f64);
@@ -247,6 +326,26 @@ where
         t_raw,
         t_cropped_max,
         max_abs_t,
+        reps,
+    }
+}
+
+fn report_and_gate(stats: &[GateStat], limit: f64) {
+    for st in stats {
+        eprintln!(
+            "{}: raw t={:+.3}, cropped max |t|={:.3}, max |t|={:.3}, reps/sample={}",
+            st.name, st.t_raw, st.t_cropped_max, st.max_abs_t, st.reps
+        );
+    }
+    for st in stats {
+        assert!(
+            st.max_abs_t < limit,
+            "Constant-time Welch-t gate exceeded for {}: t_raw={:+.2}, t_cropped_max={:.2} (limit {})",
+            st.name,
+            st.t_raw,
+            st.t_cropped_max,
+            limit
+        );
     }
 }
 
@@ -289,16 +388,22 @@ fn dudect_constant_time_statistical_gate() {
         "dudect negative control must detect timing leak (got max|t| = {:.2})",
         neg.max_abs_t
     );
+    eprintln!(
+        "{}: max |t|={:.3}, reps/sample={} (must exceed 8.0)",
+        neg.name, neg.max_abs_t, neg.reps
+    );
 
     let mut stats = Vec::new();
 
-    // 1. Keccak-f[1600] x4
+    // 1. Keccak-f[1600] x4 (prepared input copied into a work state so batched reps stay
+    //    on the class operand instead of iterating the permutation on its own output)
     let mut k_batch = vec![KeccakState4x::default(); CHUNK];
+    let mut k_work = KeccakState4x::default();
     stats.push(measure_dudect(
         "qsag_asm_keccak_f1600_x4",
         samples,
-        &mut k_batch,
-        |batch, rng, classes| {
+        &mut (&mut k_batch, &mut k_work),
+        |(batch, _), rng, classes| {
             for i in 0..CHUNK {
                 let mask = 0u64.wrapping_sub(classes[i] as u64);
                 for lane in &mut batch[i].0 {
@@ -308,9 +413,10 @@ fn dudect_constant_time_statistical_gate() {
                 }
             }
         },
-        |batch, i| {
-            keccak_f1600_x4_with_backend(black_box(&mut batch[i]), active);
-            batch[i].0[0][0]
+        |(batch, work), i| {
+            **work = batch[i];
+            keccak_f1600_x4_with_backend(black_box(&mut **work), active);
+            work.0[0][0]
         },
     ));
 
@@ -514,16 +620,7 @@ fn dudect_constant_time_statistical_gate() {
         |tags, i| ct_eq_32(black_box(&ref32), black_box(&tags[i])) as u64,
     ));
 
-    for st in &stats {
-        assert!(
-            st.max_abs_t < T_GATE_THRESHOLD,
-            "Constant-time Welch-t gate exceeded for {}: t_raw={:+.2}, t_cropped_max={:.2} (limit {})",
-            st.name,
-            st.t_raw,
-            st.t_cropped_max,
-            T_GATE_THRESHOLD
-        );
-    }
+    report_and_gate(&stats, T_GATE_THRESHOLD);
 }
 
 /// Fixed versus random operands for each exported x86 bitslice kernel, including
@@ -619,8 +716,8 @@ fn dudect_bitslice_exported_kernels() {
     }
     for stat in stats {
         eprintln!(
-            "{}: raw t={:+.3}, cropped max |t|={:.3}",
-            stat.name, stat.t_raw, stat.t_cropped_max
+            "{}: raw t={:+.3}, cropped max |t|={:.3}, reps/sample={}",
+            stat.name, stat.t_raw, stat.t_cropped_max, stat.reps
         );
         assert!(
             stat.max_abs_t < 4.5,

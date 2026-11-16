@@ -71,19 +71,28 @@ const STATE_RELEASED: &str = "released";
 pub const KEY_PIN_FIELD: &str = "policy_ledger_id";
 
 /// Options of `sign`, `quorum sign` and the key generators that select a policy ledger.
-pub const GATE_VALUE_OPTIONS: [&str; 5] = [
+pub const GATE_VALUE_OPTIONS: [&str; 8] = [
     "policy-ledger-dir",
     "policy-intent",
     "policy-anchor-dir",
+    "policy-anchor-tpm-nv",
+    "policy-anchor-tpm-device",
+    "policy-anchor-tpm-auth-env",
     "policy-passphrase-env",
     "policy-passphrase-file",
 ];
-pub const GATE_FLAG_OPTIONS: [&str; 1] = ["policy-allow-single-disk-anchor"];
+pub const GATE_FLAG_OPTIONS: [&str; 3] = [
+    "policy-allow-single-disk-anchor",
+    "policy-vmgenid",
+    "policy-vmgenid-strict",
+];
 
 pub const GATE_HELP: &str = "\
   --policy-ledger-dir <dir>   enforce the custody policy ledger in <dir> before any key state moves
   --policy-intent <id>        the proposed and approved intent this signature releases
   --policy-anchor-dir <dir>   the ledger's external monotone anchor (required if enrolled with one)
+  --policy-anchor-tpm-nv <idx> [--policy-anchor-tpm-device <path>] [--policy-anchor-tpm-auth-env <VAR>]
+  --policy-vmgenid [--policy-vmgenid-strict]  use the ledger's VM generation fence
   --policy-allow-single-disk-anchor  permit that anchor on the ledger's filesystem device
   --policy-passphrase-env <VAR> / --policy-passphrase-file <PATH>  unlock a sealed ledger
 ";

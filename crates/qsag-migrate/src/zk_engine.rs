@@ -1078,13 +1078,14 @@ pub(crate) fn commit_cozk_v4(rep: usize, head: usize, view: &PartyView) -> [u8; 
 
 /// Replay one CoZK V4 repetition, reconstructing `pair[0]`'s deterministic `products` stream
 /// (`KKW` / `ZKB++` optimization) so `commit_cozk_v4_indexed` authenticates both opened views.
+type CozkReplay = (Vec<[u8; 32]>, Vec<[u8; 32]>, Vec<u8>, bool);
 fn replay_cozk_v4_with_scratch(
     c: &Circuit,
     view: &OpenedRepetitionView,
     wires: &mut [Wires; 2],
     expected_m: usize,
     product_byte_cap: usize,
-) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>, Vec<u8>, bool), MigrateError> {
+) -> Result<CozkReplay, MigrateError> {
     let e = view.opened_e as usize;
     if !view.pair[0].products.is_empty() {
         return Err(MigrateError::MalformedProofStructure);
@@ -1140,7 +1141,7 @@ fn replay_cozk_v4_with_scratch(
             w.0[gate_index] = v;
         }
     }
-    for (j, reader) in input_readers.iter().enumerate() {
+    for (j, reader) in input_readers.iter_mut().enumerate() {
         if (e + j) % 3 == 2 {
             let mut r_chk = BitPackedReader {
                 input: reader.input,

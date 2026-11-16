@@ -1,0 +1,4 @@
+* GlobalFoundries 180nm (gf180mcuD) mandatory ngspice compatibility initialization
+set ngbehavior=hsa
+set ng_nomodcheck
+set num_threads=4

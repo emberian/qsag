@@ -216,3 +216,6 @@ mod tests {
         assert!(slip_wit.matches_commitment(&slip_comm));
     }
 }
+
+#[cfg(test)]
+mod benchmarks;

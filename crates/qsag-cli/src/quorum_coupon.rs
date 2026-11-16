@@ -78,6 +78,61 @@ mod linux {
     const WAISTBAND_ENTRIES: usize = 1024;
     const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
 
+    fn read_request_line(input: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<usize> {
+        std::io::Read::take(input, (MAX_REQUEST_LINE_BYTES + 2) as u64).read_until(b'\n', line)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn unterminated_requests_are_bounded_before_allocation() {
+            let mut infinite = std::io::BufReader::new(std::io::repeat(b'a'));
+            let mut line = Vec::new();
+            assert_eq!(
+                read_request_line(&mut infinite, &mut line).unwrap(),
+                MAX_REQUEST_LINE_BYTES + 2
+            );
+            assert_eq!(line.len(), MAX_REQUEST_LINE_BYTES + 2);
+            let mut input = std::io::Cursor::new(b"first\nsecond\n");
+            line.clear();
+            read_request_line(&mut input, &mut line).unwrap();
+            assert_eq!(line, b"first\n");
+        }
+
+        #[test]
+        fn legacy_coupon_roots_require_lock_and_authentication() {
+            let dir = std::env::temp_dir().join(format!(
+                "qsag-coupon-lock-{}",
+                to_hex(&os_random_32().unwrap())
+            ));
+            let dir = dir.to_str().unwrap();
+            private_dir(dir, true).unwrap();
+            let path = party_path(dir, 0);
+            let json = Json::object(vec![
+                ("format", Json::str(ROOT_PARTY_FORMAT)),
+                ("scheme", Json::str(SCHEME_NAME)),
+                ("party_id", Json::num(0)),
+                ("params", Json::str(DEFAULT_PARAMS)),
+                ("pk_seed", Json::hex(&[0; 32])),
+                ("pk_root", Json::hex(&[0; 32])),
+                ("dkg_session_id", Json::hex(&[0; 32])),
+                ("seed", Json::hex(&[1; 32])),
+            ]);
+            write_new(&path, json.to_pretty().as_bytes(), true).unwrap();
+            assert!(
+                matches!(load_root(dir, None), Err(err) if err.code == crate::cli::exit::STATE_CONFLICT)
+            );
+            drop(Vault::acquire(&path, true).unwrap());
+            // A lock alone must not authorize unauthenticated legacy seed material.
+            assert!(
+                matches!(load_root(dir, None), Err(err) if err.code == crate::cli::exit::STATE_CONFLICT)
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     const KEYGEN_HELP: &str = "\
 qsag quorum coupon keygen --vault-dir <dir> --public-out <path> [options]
 
@@ -330,12 +385,7 @@ signature stops verifying when its coupon expires.
 
         for party in 0..3 {
             let path = party_path(vault_dir, party);
-            let has_lock = std::fs::symlink_metadata(format!("{path}.vault.lock")).is_ok();
-            let mut vault_opt = if has_lock {
-                Some(Vault::acquire(&path, false)?)
-            } else {
-                None
-            };
+            let mut vault = Vault::acquire(&path, false)?;
             let text = read_text(&path)?;
             let json = Json::parse(&text)?;
             if json.field_str("format")? != ROOT_PARTY_FORMAT
@@ -363,24 +413,20 @@ signature stops verifying when its coupon expires.
                 }
             }
             let opened = crate::envelope::open(&json, passphrase)?;
-            if let Some(vault) = &mut vault_opt {
-                vault.set_key_material(&opened);
-                vault.authenticate(&json)?;
-            }
+            vault.set_key_material(&opened);
+            vault.authenticate(&json)?;
+            vaults.push(vault);
             if json.get("secret_key").is_some() {
-                if vault_opt.is_none() {
-                    return Err(crate::vault::corrupt());
-                }
-                let share = RssKeyShare256::from_secret_bytes(opened.secret_key()?).map_err(
-                    |e| CliError::state(format!("corrupt coupon root RSS share ({path}): {e}")),
-                )?;
+                let share =
+                    RssKeyShare256::from_secret_bytes(opened.secret_key()?).map_err(|e| {
+                        CliError::state(format!("corrupt coupon root RSS share ({path}): {e}"))
+                    })?;
                 if share.party_id != party || share.pk_seed != header.as_ref().unwrap().1.pk_seed {
                     return Err(CliError::state(format!(
                         "{path} RSS share identity does not match root header"
                     )));
                 }
                 loaded_shares[party] = Some(share);
-                vaults.push(vault_opt.unwrap());
             } else {
                 let dkg_sid: [u8; 32] =
                     from_hex_exact(json.field_str("dkg_session_id")?, "dkg_session_id")?;
@@ -725,24 +771,29 @@ signature stops verifying when its coupon expires.
         };
         let mut first_refusal = None;
         let mut stdin = std::io::stdin().lock();
-        let mut line = String::new();
+        let mut line = Vec::new();
         let mut number = 0u64;
         loop {
             line.clear();
-            let read = stdin
-                .read_line(&mut line)
+            let read = read_request_line(&mut stdin, &mut line)
                 .map_err(|e| CliError::io("reading a request from standard input", e))?;
             if read == 0 {
                 break;
             }
-            if line.trim().is_empty() {
+            // Stop after reporting an oversized frame: its remainder is not a new request.
+            let oversized = line.len() > MAX_REQUEST_LINE_BYTES;
+            let text = std::str::from_utf8(&line);
+            if !oversized && text.is_ok_and(|text| text.trim().is_empty()) {
                 continue;
             }
             number += 1;
-            let outcome = if line.len() > MAX_REQUEST_LINE_BYTES {
+            let outcome = if oversized {
                 Err(CliError::usage("request line is too long").into())
             } else {
-                session.sign(&line)
+                match text {
+                    Ok(text) => session.sign(text),
+                    Err(_) => Err(CliError::input("request line is not UTF-8").into()),
+                }
             };
             let mut fields = vec![("request", Json::num(number))];
             match outcome {
@@ -758,6 +809,9 @@ signature stops verifying when its coupon expires.
                 }
             }
             emit(&mut stdout, &Json::object(fields))?;
+            if oversized {
+                break;
+            }
         }
         match first_refusal {
             Some(error) => Err(error),

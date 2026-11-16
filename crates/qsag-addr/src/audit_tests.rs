@@ -333,3 +333,178 @@ fn canonical_intent_128_aligns_suite_tags_and_enforces_identity_kind_consistency
     assert_eq!(IntentIdentityKind::HybridConjunctive as u8, 0x02);
     assert_eq!(IntentIdentityKind::ScriptPredicate as u8, 0x03);
 }
+
+fn verified_intent(
+    suite_tag: VerifiedIntentSuiteTag,
+    identity_kind: VerifiedIntentIdentityKind,
+) -> VerifiedCanonicalIntent128 {
+    VerifiedCanonicalIntent128 {
+        suite_tag,
+        address_version: VerifiedIntentAddressVersion::V2,
+        identity_kind,
+        chain_id: 7,
+        nonce: 9,
+        timestamp_secs: 11,
+        amount_units: 13,
+        rolling_window_spent: 17,
+        recipient_commitment: [0xA5; 32],
+        payload_digest: [0xEE; 32],
+    }
+}
+
+/// H-01: the verified intent namespace reuses canonical wire words for other suites, so a
+/// verified frame must never be read as a canonical frame with the same meaning, and the
+/// bridge must translate by meaning and enforce the canonical `(suite, kind)` rule.
+#[test]
+fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
+    use VerifiedIntentIdentityKind as VK;
+    use VerifiedIntentSuiteTag as VS;
+    let suites = [
+        (VS::JortsPoseidon2, Some(WitnessSuiteTag::JortsPoseidon2)),
+        (VS::SlhDsaShake128f, Some(WitnessSuiteTag::SlhDsa128f)),
+        (VS::ThresholdMlDsa65, Some(WitnessSuiteTag::MlDsa65)),
+        (
+            VS::HybridEd25519MlDsa65,
+            Some(WitnessSuiteTag::HybridEd25519MlDsa65),
+        ),
+        (VS::HybridSecp256k1SlhDsa, None),
+    ];
+    let kinds = [
+        (VK::SingleKey, KeyIdentityKind::SingleOrThreshold),
+        (VK::ThresholdCommittee, KeyIdentityKind::SingleOrThreshold),
+        (VK::PolicyBound, KeyIdentityKind::ScriptPredicate),
+    ];
+    let mut accepted = 0;
+    for (verified_suite, canonical_suite) in suites {
+        assert_eq!(intent_suite_from_verified(verified_suite).ok(), canonical_suite);
+        // Every verified wire word names a different canonical suite, or none.
+        let colliding = WitnessSuiteTag::from_u16(verified_suite.to_u16()).ok();
+        assert!(colliding.is_some());
+        assert_ne!(colliding, canonical_suite);
+        for (verified_kind, canonical_kind) in kinds {
+            assert_eq!(
+                intent_identity_kind_from_verified(verified_kind),
+                canonical_kind
+            );
+            let verified = verified_intent(verified_suite, verified_kind);
+            let frame = qsag_verified::encode_intent_128(&verified);
+            let translated = intent_from_verified(&verified);
+            assert_eq!(decode_verified_intent_128(&frame), translated.ok());
+            let valid = canonical_suite
+                .is_some_and(|suite| suite.validate_identity_kind(canonical_kind).is_ok());
+            assert_eq!(translated.is_ok(), valid);
+            let Ok(canonical) = translated else {
+                continue;
+            };
+            accepted += 1;
+            assert_eq!(Some(canonical.suite_tag), canonical_suite);
+            assert_eq!(canonical.identity_kind, canonical_kind);
+            assert_eq!(canonical.address_version, AddressVersion::V2Poseidon2);
+            assert_eq!(canonical.validate(), Ok(()));
+            assert_eq!(
+                (canonical.chain_id, canonical.nonce, canonical.timestamp_secs),
+                (7, 9, 11)
+            );
+            assert_eq!(
+                (canonical.amount_units, canonical.rolling_window_spent),
+                (13, 17)
+            );
+            assert_eq!(canonical.recipient_commitment, [0xA5; 32]);
+            assert_eq!(canonical.payload_digest, [0xEE; 32]);
+            // The canonical frame differs from the verified frame, and the verified frame read
+            // as canonical is never this intent.
+            let canonical_frame = try_encode_intent_128(&canonical).unwrap();
+            assert_ne!(canonical_frame, frame);
+            assert_ne!(decode_intent_128(&frame), Some(canonical));
+            assert_eq!(decode_intent_128(&canonical_frame), Some(canonical));
+        }
+    }
+    // Three non-hybrid suites with single or threshold keys; nothing else.
+    assert_eq!(accepted, 6);
+
+    // The pair the verified decoder admits and the audit named: hybrid suite, single key.
+    let invalid = verified_intent(VS::HybridEd25519MlDsa65, VK::SingleKey);
+    assert!(qsag_verified::decode_intent_128(&qsag_verified::encode_intent_128(&invalid)).is_some());
+    assert_eq!(
+        intent_from_verified(&invalid),
+        Err(AddrError::InconsistentSuiteIdentityKind {
+            suite_tag: 0x0502,
+            kind: 0x01,
+        })
+    );
+    assert_eq!(
+        intent_from_verified(&verified_intent(VS::HybridSecp256k1SlhDsa, VK::SingleKey)),
+        Err(AddrError::UnsupportedSuiteTag(0x0502))
+    );
+    let mut bad_magic = qsag_verified::encode_intent_128(&verified_intent(
+        VS::JortsPoseidon2,
+        VK::SingleKey,
+    ));
+    assert!(decode_verified_intent_128(&bad_magic).is_some());
+    bad_magic[0] ^= 1;
+    assert!(decode_verified_intent_128(&bad_magic).is_none());
+}
+
+/// H-01: the hybrid kernels take canonical suites only, and agree with the envelope.
+#[test]
+fn typed_hybrid_kernels_refuse_non_hybrid_suites_and_match_the_envelope() {
+    let id = [0x77; 32];
+    let (dc, dp) = ([0x11; 32], [0x22; 32]);
+    for suite in SUITES {
+        let spec = HybridSuiteSpec::for_suite(suite).unwrap();
+        for (role, other) in [
+            (HybridRole::Classical, HybridRole::PostQuantum),
+            (HybridRole::PostQuantum, HybridRole::Classical),
+        ] {
+            assert!(hybrid_domain_framing_ok(
+                HYBRID_PINNED_MAGIC,
+                role as u8,
+                role,
+                suite,
+                &id,
+                &id
+            ));
+            assert!(!hybrid_domain_framing_ok(
+                HYBRID_PINNED_MAGIC,
+                role as u8,
+                other,
+                suite,
+                &id,
+                &id
+            ));
+            assert!(!hybrid_domain_framing_ok(
+                HYBRID_PINNED_MAGIC,
+                role as u8,
+                role,
+                suite,
+                &id,
+                &[0x78; 32]
+            ));
+            let transcript =
+                HybridPinnedEnvelope::signing_transcript(role, &spec, &id, &dc, &dp, b"m");
+            assert_eq!(
+                hybrid_transcript_digest(role, suite, &id, &dc, &dp, b"m"),
+                Ok(qsag_verified::shake256_32(&transcript))
+            );
+        }
+    }
+    for suite in [
+        WitnessSuiteTag::MlDsa44,
+        WitnessSuiteTag::SlhDsa128s,
+        WitnessSuiteTag::ParallelSeededFts,
+        WitnessSuiteTag::PolicyPredicateScript,
+    ] {
+        assert!(!hybrid_domain_framing_ok(
+            HYBRID_PINNED_MAGIC,
+            HybridRole::Classical as u8,
+            HybridRole::Classical,
+            suite,
+            &id,
+            &id
+        ));
+        assert_eq!(
+            hybrid_transcript_digest(HybridRole::Classical, suite, &id, &dc, &dp, b"m"),
+            Err(AddrError::HybridUnsupportedSuite(suite as u16))
+        );
+    }
+}

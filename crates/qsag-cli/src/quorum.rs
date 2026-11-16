@@ -67,7 +67,7 @@ Run a dealerless 2-of-3 RSS key generation ceremony with zero central secret rec
 
   --vault-dir <dir>             private 0700 directory for party-{0,1,2}.{sk,belt,ceremony}
   --public-out <path>           destination for the quorum public key JSON
-  --tree-height <1..=30>         Merkle tree height (default: 3, capacity = 2^height signatures)
+  --tree-height <1..=20>         Merkle tree height (default: 3, capacity = 2^height signatures)
   --anchor-dir <dir>            enroll per-party external monotone anchors in <dir>
   --ephemeral-unanchored        enroll a disposable quorum without rollback protection
                                 (one of the two is required)
@@ -325,6 +325,9 @@ fn reject_hem_unsupported_keygen_args(args: &Args) -> Result<(), CliError> {
         "tree-height",
         "policy-ledger-dir",
         "policy-anchor-dir",
+        "policy-anchor-tpm-nv",
+        "policy-anchor-tpm-device",
+        "policy-anchor-tpm-auth-env",
         "policy-passphrase-env",
         "policy-passphrase-file",
     ] {
@@ -334,7 +337,10 @@ fn reject_hem_unsupported_keygen_args(args: &Args) -> Result<(), CliError> {
             )));
         }
     }
-    if args.flag("policy-allow-single-disk-anchor") {
+    if args.flag("policy-allow-single-disk-anchor")
+        || args.flag("policy-vmgenid")
+        || args.flag("policy-vmgenid-strict")
+    {
         return Err(CliError::usage(format!(
             "--policy-allow-single-disk-anchor is only supported with --scheme {SCHEME_NAME}"
         )));
@@ -349,6 +355,9 @@ fn reject_hem_unsupported_sign_args(args: &Args) -> Result<(), CliError> {
         "policy-ledger-dir",
         "policy-intent",
         "policy-anchor-dir",
+        "policy-anchor-tpm-nv",
+        "policy-anchor-tpm-device",
+        "policy-anchor-tpm-auth-env",
         "policy-passphrase-env",
         "policy-passphrase-file",
     ] {
@@ -360,6 +369,8 @@ fn reject_hem_unsupported_sign_args(args: &Args) -> Result<(), CliError> {
     }
     for flag in [
         "policy-allow-single-disk-anchor",
+        "policy-vmgenid",
+        "policy-vmgenid-strict",
         "policy-retry",
         "retry",
         "deterministic",
@@ -417,6 +428,9 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             "passphrase-file",
             "policy-ledger-dir",
             "policy-anchor-dir",
+            "policy-anchor-tpm-nv",
+            "policy-anchor-tpm-device",
+            "policy-anchor-tpm-auth-env",
             "policy-passphrase-env",
             "policy-passphrase-file",
         ],
@@ -426,6 +440,8 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             "anchor-vmgenid-strict",
             "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
+            "policy-vmgenid",
+            "policy-vmgenid-strict",
             "json",
             "help",
         ],
@@ -691,6 +707,9 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
             "policy-ledger-dir",
             "policy-intent",
             "policy-anchor-dir",
+            "policy-anchor-tpm-nv",
+            "policy-anchor-tpm-device",
+            "policy-anchor-tpm-auth-env",
             "policy-passphrase-env",
             "policy-passphrase-file",
         ],
@@ -700,6 +719,8 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
             "anchor-vmgenid-strict",
             "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
+            "policy-vmgenid",
+            "policy-vmgenid-strict",
             "policy-retry",
             "retry",
             "deterministic",

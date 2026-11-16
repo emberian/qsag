@@ -83,7 +83,10 @@ impl std::fmt::Debug for Json {
             Json::Object(members) => {
                 let mut map = f.debug_map();
                 for (key, value) in members {
-                    if matches!(key.as_str(), "seed" | "secret_key") {
+                    if matches!(
+                        key.as_str(),
+                        "seed" | "secret_key" | "salt" | "envelope_tag"
+                    ) {
                         map.entry(key, &format_args!("<redacted>"));
                     } else {
                         map.entry(key, value);
@@ -376,6 +379,7 @@ impl Parser<'_> {
     fn object(&mut self) -> Result<Json, CliError> {
         self.expect(b'{')?;
         let mut members: Vec<(String, Json)> = Vec::new();
+        let mut keys: Option<std::collections::BTreeSet<String>> = None;
         self.skip_ws();
         if self.bytes.get(self.pos) == Some(&b'}') {
             self.pos += 1;
@@ -384,7 +388,14 @@ impl Parser<'_> {
         loop {
             self.skip_ws();
             let key = self.string()?;
-            if members.iter().any(|(k, _)| *k == key) {
+            if members.len() >= 32 && keys.is_none() {
+                keys = Some(members.iter().map(|(key, _)| key.clone()).collect());
+            }
+            let duplicate = match &mut keys {
+                Some(keys) => !keys.insert(key.clone()),
+                None => members.iter().any(|(k, _)| *k == key),
+            };
+            if duplicate {
                 return Err(self.error("duplicate object key"));
             }
             self.skip_ws();
@@ -491,9 +502,10 @@ impl Parser<'_> {
                 other => out.0.push(other),
             }
         }
-        std::str::from_utf8(&out.0)
-            .map(str::to_owned)
-            .map_err(|_| self.error("string is not UTF-8"))
+        String::from_utf8(std::mem::take(&mut out.0)).map_err(|error| {
+            let _wipe = crate::cli::ZeroizingBuf::new(error.into_bytes());
+            self.error("string is not UTF-8")
+        })
     }
     fn number(&mut self) -> Result<Json, CliError> {
         let start = self.pos;
@@ -537,6 +549,8 @@ mod tests {
         let key = Json::object(vec![
             ("scheme", Json::str("test")),
             ("seed", Json::hex(&[0xAB; 32])),
+            ("salt", Json::hex(&[0xEF; 32])),
+            ("envelope_tag", Json::hex(&[0x12; 32])),
             (
                 "nested",
                 Json::Array(vec![Json::object(vec![(
@@ -547,11 +561,35 @@ mod tests {
         ]);
         let shown = format!("{key:?}");
         assert!(shown.contains("\"scheme\": \"test\""), "{shown}");
-        assert_eq!(shown.matches("<redacted>").count(), 2, "{shown}");
+        assert_eq!(shown.matches("<redacted>").count(), 4, "{shown}");
         assert!(
-            !shown.contains("abab") && !shown.contains("cdcd"),
+            !shown.contains("abab")
+                && !shown.contains("cdcd")
+                && !shown.contains("efef")
+                && !shown.contains("1212"),
             "{shown}"
         );
+    }
+
+    #[test]
+    fn large_objects_reject_duplicates_across_tracking_boundary() {
+        for count in [31, 32, 33, 4096] {
+            let fields: Vec<_> = (0..count).map(|i| format!("\"key{i}\":{i}")).collect();
+            let valid = format!("{{{}}}", fields.join(","));
+            assert_eq!(
+                Json::parse(&valid).unwrap().get("key0"),
+                Some(&Json::num(0))
+            );
+            for duplicate in [0, count - 1] {
+                let invalid = format!("{{{},\"key{duplicate}\":0}}", fields.join(","));
+                assert!(
+                    Json::parse(&invalid)
+                        .unwrap_err()
+                        .message
+                        .contains("duplicate object key")
+                );
+            }
+        }
     }
 
     #[test]

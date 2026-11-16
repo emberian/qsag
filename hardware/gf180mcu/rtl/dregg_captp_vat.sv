@@ -78,26 +78,26 @@ module dregg_captp_vat (
     endgenerate
     assign kvat_rdata = k_vat[kvat_ridx];
 
-    // Last verified ZK transcript / statement root (4 x 64 bits)
+    // Last verified ZK transcript / statement root (4 x 64 bits in async-cleared latrnq_1 latches!)
+    wire        zkr_any_we = zk_latch_we & permit_control;
+    wire [63:0] dhold_in   = zkr_any_we ? zk_latch_wdata : desc_wdata;
+    wire        pmeta_we   = parent_we && permit_control && (parent_idx >= 3'd1) && (parent_idx <= 3'd5);
+    wire [63:0] desc_wd_q;
+    qsag_ereg_nr #(.W(64)) u_dhold (.clk(clk), .en(pmeta_we | zkr_any_we), .d(dhold_in), .q(desc_wd_q));
+
     wire [63:0] zk_root [4];
     generate
         for (i = 0; i < 4; i++) begin : g_zkr
-            qsag_ereg #(.W(64)) u_zr (
-                .clk(clk), .rst_n(srst_n),
-                .en(zk_latch_we && (zk_latch_idx == 2'(i)) && permit_control),
-                .d(zk_latch_wdata), .q(zk_root[i])
-            );
+            wire z_en = zkr_any_we && (zk_latch_idx == 2'(i));
+            wire z_gate;
+            qsag_clkgate_1 u_zcg (.clk(clk), .en(z_en), .gclk(z_gate));
+            qsag_latch_word_rst #(.W(64)) u_zr (.gate(z_gate), .rst_n(srst_n), .d(desc_wd_q), .q(zk_root[i]));
         end
     endgenerate
 
-    // Parent metadata words pw1, pw2, pw3 in async-cleared latrnq_1 transparent latches
-    wire        pmeta_we = parent_we && permit_control && (parent_idx >= 3'd1) && (parent_idx <= 3'd3);
-    wire [63:0] desc_wd_q;
-    qsag_ereg_nr #(.W(64)) u_dhold (.clk(clk), .en(pmeta_we), .d(desc_wdata), .q(desc_wd_q));
-
-    wire [63:0] pw_meta [3]; // [0]=w1, [1]=w2, [2]=w3
+    wire [63:0] pw_meta [5]; // [0]=w1, [1]=w2, [2]=w3, [3]=w4(pk0), [4]=w5(pk1)
     generate
-        for (i = 0; i < 3; i++) begin : g_pmeta
+        for (i = 0; i < 5; i++) begin : g_pmeta
             wire p_en = pmeta_we && (parent_idx == 3'(i + 1));
             wire p_gate;
             qsag_clkgate_1 u_pcg (.clk(clk), .en(p_en), .gclk(p_gate));
@@ -112,11 +112,11 @@ module dregg_captp_vat (
     wire [31:0] p_eceil  = pw_meta[1][63:32];
     wire [31:0] p_spend  = pw_meta[2][31:0];
 
-    // Streaming parent VK-binding check on words 4..7 (`1` shared 64-bit comparator!)
-    logic p_vk_nz_q, p_vk_pk_ok_q, p_vk_zk_ok_q;
+    // Streaming parent VK-binding check on words 4..7 (`zk_root` checked as parent streams in;
+    // 128-bit `PK.seed` checked live against `pw_meta[3..4]` + `p_vk_hi_zero_q`!)
+    logic p_vk_nz_q, p_vk_hi_zero_q, p_vk_zk_ok_q;
     wire [63:0] zk_expected = zk_root[parent_idx[1:0]];
-    wire [63:0] pk_expected = (parent_idx == 3'd4) ? req_bind_lo :
-                              (parent_idx == 3'd5) ? req_bind_hi : 64'd0;
+    wire        p_vk_pk_ok  = (pw_meta[3] == req_bind_lo) && (pw_meta[4] == req_bind_hi) && p_vk_hi_zero_q;
 
     // Streaming child lattice monotonicity check (`pw_sponge_word` holds parent w[child_idx]!)
     logic child_word_ok;
@@ -146,7 +146,7 @@ module dregg_captp_vat (
     wire [32:0] next_spend = {1'b0, vat_spend_used} + {1'b0, req_spend};
     wire spend_ok = (req_spend <= p_spend) && (next_spend <= {1'b0, p_spend});
 
-    wire vk_ok   = !p_guards[G_PIN_VK] || (check_is_zk ? (zk_root_valid && p_vk_zk_ok_q) : p_vk_pk_ok_q);
+    wire vk_ok   = !p_guards[G_PIN_VK] || (check_is_zk ? (zk_root_valid && p_vk_zk_ok_q) : p_vk_pk_ok);
     wire nfc_ok  = !p_guards[G_NFC]    || (nfc_token_valid && (nfc_digest_bind == req_bind_lo));
     wire dist_ok = !p_guards[G_DIST]   || (dist_valid && !dist_timeout && (dist_cycles <= p_maxd));
 
@@ -161,7 +161,7 @@ module dregg_captp_vat (
             zk_root_valid  <= 1'b0;
             vat_spend_used <= 32'd0;
             p_vk_nz_q      <= 1'b0;
-            p_vk_pk_ok_q   <= 1'b0;
+            p_vk_hi_zero_q <= 1'b0;
             p_vk_zk_ok_q   <= 1'b0;
             att_ok_q       <= 1'b0;
             att_seen_q     <= 8'd0;
@@ -176,13 +176,13 @@ module dregg_captp_vat (
                 zk_root_valid <= 1'b1;
 
             if (parent_chk_clr) begin
-                p_vk_nz_q    <= 1'b0;
-                p_vk_pk_ok_q <= 1'b1;
-                p_vk_zk_ok_q <= 1'b1;
+                p_vk_nz_q      <= 1'b0;
+                p_vk_hi_zero_q <= 1'b1;
+                p_vk_zk_ok_q   <= 1'b1;
             end else if (parent_we && permit_control && parent_idx[2]) begin
-                if (desc_wdata != 64'd0)       p_vk_nz_q    <= 1'b1;
-                if (parent_idx <= 3'd5 && desc_wdata != pk_expected) p_vk_pk_ok_q <= 1'b0;
-                if (desc_wdata != zk_expected) p_vk_zk_ok_q <= 1'b0;
+                if (desc_wdata != 64'd0)                     p_vk_nz_q      <= 1'b1;
+                if (parent_idx >= 3'd6 && desc_wdata != 64'd0) p_vk_hi_zero_q <= 1'b0;
+                if (desc_wdata != zk_expected)               p_vk_zk_ok_q   <= 1'b0;
             end
 
             if (child_chk_clr) begin

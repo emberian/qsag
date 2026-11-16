@@ -9,6 +9,7 @@ public import QsagVerified.Proofs.RealSpecBeltWeld
 import all QsagVerified.Proofs.RealSpecBeltWeld
 public import QsagVerified.Proofs.CustodyMediation
 import all QsagVerified.Proofs.CustodyMediation
+public import QsagVerified.Proofs.ElfMirTriangles
 
 /-!
 # Protocol-level weld library and its axiom census
@@ -87,7 +88,8 @@ run_cmd do
     "QsagVerified.Proofs.RealSpecBeltWeld",
     "QsagVerified.Proofs.RealSpecGuardBoundary",
     "QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld",
-    "QsagVerified.Proofs.CustodyMediation"]
+    "QsagVerified.Proofs.CustodyMediation",
+    "QsagVerified.Proofs.ElfMirTriangles"]
   let requiredTheorems : List Name := [
     ``qsag_verified.proofs.belt_grant_refines_qsag_mask,
     ``qsag_verified.proofs.belt_quorum_intersection_refines_qsag,

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """bb2 only: Real OpenROAD Physical Implementation & Parasitic-Aware Post-Placement STA/Power!
 
-Runs OpenROAD (`tools/openroad_env/bin/openroad`) on Nangate45:
-  1. Emits a physical LEF macro stub for `sram_dp_64x16384_bank` (4 peripheral foundry SRAM banks),
-  2. Runs die floorplanning, track creation, peripheral macro placement (`odb` instance lookup),
-     IO pin placement, RePlAce global placement, layer RC setup (`nangate45_setRC.tcl`),
+Runs OpenROAD (`tools/openroad_env/bin/openroad`) on BOTH Nangate45 (45 nm) and Sky130 HD (130 nm):
+  1. Emits a physical LEF macro stub + complete threshold-qualified Liberty stub for `sram_dp_64x16384_bank`,
+  2. Runs die floorplanning, track creation, peripheral 4-bank SRAM macro placement (`odb` instance lookup),
+     IO pin placement, RePlAce global placement, layer RC setup (`setRC.tcl`),
      `estimate_parasitics -placement` (Manhattan Steiner wire R/C extraction), `repair_design` +
      `repair_timing` (high-fanout & slew buffer tree synthesis + gate sizing), OpenDP `detailed_placement`
      (`check_placement` -> 0 violations!), post-placement STA, and dynamic/leakage power analysis!
@@ -14,9 +14,13 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
+sys.path.insert(0, str(ROOT / "synth"))
+from run_hier import write_sram_stub_lib  # noqa: E402
+
 RUN = ["env", "SWARM_MEM_MAX=16G", "swarm-build", "timeout", "--kill-after=10s", "600s"]
 OPENROAD = "/home/build/qsag-ni-asic/tools/openroad_env/bin/openroad"
 PDK = pathlib.Path("/home/build/qsag-ni-asic/pdk")
@@ -70,55 +74,58 @@ def write_sram_lef(path, metal_pin, site_w, site_h, macro_w, macro_h):
     path.write_text("\n".join(lines))
 
 
-def run_openroad_nangate45():
-    out = ROOT / "synth" / "hier" / "nangate45" / "openroad"
+def run_pdk_pnr(cfg):
+    lib = cfg["lib"]
+    out = ROOT / "synth" / "hier" / lib / "openroad"
     out.mkdir(parents=True, exist_ok=True)
     sram_lef = out / "sram_dp_64x16384_bank.lef"
-    write_sram_lef(sram_lef, "metal3", 0.19, 1.40, 190.0, 140.0)
+    write_sram_lef(sram_lef, cfg["pin_metal"], cfg["site_w"], cfg["site_h"], cfg["macro_w"], cfg["macro_h"])
+    sram_lib = write_sram_stub_lib(lib, ROOT / "synth" / "hier" / lib)
 
-    sram_lib = ROOT / "synth" / "hier" / "nangate45" / "sram_stub_nangate45.lib"
-    flat_v = ROOT / "synth" / "hier" / "nangate45" / "flat_gates.v"
-    period_ns = 8.00
+    flat_v = ROOT / "synth" / "hier" / lib / "flat_gates.v"
+    period_ns = cfg["period_ns"]
+    die_w, die_h = cfg["die_w"], cfg["die_h"]
+    margin = cfg["margin"]
+    xs_dbu = " ".join(str(int(x * cfg["dbu"])) for x in cfg["bank_xs"])
+    y_dbu = int(cfg["bank_y"] * cfg["dbu"])
 
-    tcl = f"""read_lef {PDK / 'NangateOpenCellLibrary.tech.lef'}
-read_lef {PDK / 'NangateOpenCellLibrary.macro.mod.lef'}
+    tcl = f"""read_lef {PDK / cfg['tech_lef']}
+read_lef {PDK / cfg['cell_lef']}
 read_lef {sram_lef}
-read_liberty {PDK / 'NangateOpenCellLibrary_typical.lib'}
+read_liberty {PDK / cfg['liberty']}
 read_liberty {sram_lib}
 read_verilog {flat_v}
 link_design qsag_ni_asic_top
 
 create_clock -name core -period {period_ns} [get_ports clk]
-set_input_delay 0.4 -clock core [get_ports {{cmd_valid cmd_op* cmd_idx* cmd_addr* cmd_data*}}]
-set_output_delay 0.4 -clock core [get_ports {{cmd_ready rsp_valid rsp_data*}}]
+set_input_delay {cfg['io_delay']} -clock core [get_ports {{cmd_valid cmd_op* cmd_idx* cmd_addr* cmd_data*}}]
+set_output_delay {cfg['io_delay']} -clock core [get_ports {{cmd_ready rsp_valid rsp_data*}}]
 set_false_path -from [get_ports rst]
 
-# Die size: 1350 x 1350 um (~1.8225 mm^2) for stdcells + 4 peripheral SRAM banks + routing channels
-initialize_floorplan -die_area "0 0 1350 1350" -core_area "20 20 1330 1330" -site FreePDK45_38x28_10R_NP_162NW_34O
+initialize_floorplan -die_area "0 0 {die_w} {die_h}" -core_area "{margin} {margin} {die_w - margin} {die_h - margin}" -site {cfg['site']}
 make_tracks
 
-# Place all 4 dual-port SRAM banks deterministically via OpenDB block->getInsts()
 set block [ord::get_db_block]
-set xs {{30000 260000 880000 1110000}}
+set xs {{{xs_dbu}}}
 set bi 0
 foreach inst [$block getInsts] {{
   if {{[[$inst getMaster] getName] eq "sram_dp_64x16384_bank"}} {{
     set x [lindex $xs $bi]
     $inst setOrient R0
-    $inst setLocation $x 1170000
+    $inst setLocation $x {y_dbu}
     $inst setPlacementStatus FIRM
     incr bi
   }}
 }}
 puts "Placed $bi SRAM macro banks"
 
-place_pins -hor_layers metal3 -ver_layers metal2
-global_placement -density 0.55
+place_pins -hor_layers {cfg['hor_layer']} -ver_layers {cfg['ver_layer']}
+global_placement -density 0.52
 
-source {PDK / 'nangate45_setRC.tcl'}
+source {PDK / cfg['set_rc']}
 estimate_parasitics -placement
 repair_design
-repair_timing -setup -max_passes 200
+repair_timing -setup -max_passes 150
 detailed_placement
 check_placement -verbose
 estimate_parasitics -placement
@@ -139,35 +146,93 @@ exit
     with log_path.open("w") as f:
         p = subprocess.run(RUN + [OPENROAD, "-exit", str(tcl_path)], stdout=f, stderr=subprocess.STDOUT)
     txt = log_path.read_text()
-    print(f"[OpenROAD Nangate45] exit={p.returncode}", flush=True)
+    print(f"[OpenROAD {lib}] exit={p.returncode}", flush=True)
     for line in txt.splitlines():
-        if any(k in line for k in ("Placed", "Design area", "period_min", "worst slack", "tns", "Total", "Error", "check_placement")):
+        if any(k in line for k in ("Placed", "Design area", "period_min", "worst slack", "tns", "Total", "Error", "Repaired")):
             print(" ", line, flush=True)
     if p.returncode != 0 or "Error:" in txt:
-        raise RuntimeError(f"OpenROAD Nangate45 failed:\n" + "\n".join(txt.splitlines()[-35:]))
+        raise RuntimeError(f"OpenROAD {lib} failed:\n" + "\n".join(txt.splitlines()[-35:]))
 
     m_per = re.search(r"period_min\s*=\s*([0-9.]+)\s+fmax\s*=\s*([0-9.]+)", txt)
     m_area = re.search(r"Design area\s+([0-9.]+)\s+u\^2\s+([0-9.]+)%\s+utilization", txt)
     m_wns = re.search(r"worst slack max\s+([0-9.eE+-]+)", txt)
     m_pwr = re.search(r"^Total\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)", txt, re.M)
+    macro_area = 4.0 * cfg["macro_w"] * cfg["macro_h"]
+    std_area = (float(m_area.group(1)) - macro_area) if m_area else None
     summary = {
-        "pdk": "nangate45",
+        "pdk": lib,
         "stage": "post-detailed-placement + repair_design/repair_timing + Manhattan RC parasitics (OpenROAD)",
-        "die_um": "1350 x 1350 (1.8225 mm^2)",
+        "die_um": f"{die_w} x {die_h} ({round(die_w * die_h / 1e6, 3)} mm^2)",
         "sram_banks_placed": 4,
         "design_area_um2": float(m_area.group(1)) if m_area else None,
-        "stdcell_plus_buf_kGE": round((float(m_area.group(1)) - 4 * 190.0 * 140.0) / 0.798 / 1000.0, 2) if m_area else None,
+        "post_repair_stdcell_um2": round(std_area, 1) if std_area else None,
+        "post_repair_stdcell_kGE": round(std_area / cfg["nand2_um2"] / 1000.0, 2) if std_area else None,
         "utilization_pct": float(m_area.group(2)) if m_area else None,
         "target_period_ns": period_ns,
         "post_place_wns_ns": float(m_wns.group(1)) if m_wns else None,
         "post_place_min_period_ns": float(m_per.group(1)) if m_per else None,
         "post_place_fmax_mhz": float(m_per.group(2)) if m_per else None,
         "post_place_total_power_mw": round(float(m_pwr.group(4)) * 1e3, 3) if m_pwr else None,
-        "post_place_leakage_mw": round(float(m_pwr.group(3)) * 1e3, 3) if m_pwr else None,
+        "post_place_leakage_mw": round(float(m_pwr.group(3)) * 1e3, 4) if m_pwr else None,
     }
     (out / "openroad_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(json.dumps(summary, indent=2), flush=True)
+    return summary
+
+
+CONFIGS = [
+    {
+        "lib": "nangate45",
+        "tech_lef": "NangateOpenCellLibrary.tech.lef",
+        "cell_lef": "NangateOpenCellLibrary.macro.mod.lef",
+        "liberty": "NangateOpenCellLibrary_typical.lib",
+        "set_rc": "nangate45_setRC.tcl",
+        "site": "FreePDK45_38x28_10R_NP_162NW_34O",
+        "site_w": 0.19,
+        "site_h": 1.40,
+        "dbu": 2000,
+        "pin_metal": "metal3",
+        "hor_layer": "metal3",
+        "ver_layer": "metal2",
+        "macro_w": 190.0,
+        "macro_h": 140.0,
+        "die_w": 1400,
+        "die_h": 1400,
+        "margin": 20,
+        "bank_xs": [30, 260, 920, 1150],
+        "bank_y": 1220,
+        "period_ns": 8.0,
+        "io_delay": 0.4,
+        "nand2_um2": 0.7980,
+    },
+    {
+        "lib": "sky130",
+        "tech_lef": "sky130_fd_sc_hd.tlef",
+        "cell_lef": "sky130_fd_sc_hd_merged.lef",
+        "liberty": "sky130_fd_sc_hd__tt_025C_1v80.lib",
+        "set_rc": "sky130hd_setRC.tcl",
+        "site": "unithd",
+        "site_w": 0.46,
+        "site_h": 2.72,
+        "dbu": 1000,
+        "pin_metal": "met3",
+        "hor_layer": "met3",
+        "ver_layer": "met2",
+        "macro_w": 368.0,
+        "macro_h": 272.0,
+        "die_w": 3200,
+        "die_h": 3200,
+        "margin": 40,
+        "bank_xs": [60, 500, 2260, 2700],
+        "bank_y": 2860,
+        "period_ns": 25.0,
+        "io_delay": 1.5,
+        "nand2_um2": 3.7536,
+    },
+]
 
 
 if __name__ == "__main__":
-    run_openroad_nangate45()
+    all_res = [run_pdk_pnr(c) for c in CONFIGS]
+    out_all = ROOT / "synth" / "hier" / "openroad_all_summary.json"
+    out_all.write_text(json.dumps(all_res, indent=2) + "\n")
+    print(json.dumps(all_res, indent=2), flush=True)

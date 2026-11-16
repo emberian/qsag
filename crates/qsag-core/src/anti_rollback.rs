@@ -450,13 +450,15 @@ impl HypervisorGenerationAnchor<LinuxSysfsVmGenSource> {
     pub fn open_or_create(
         anchor_path: impl Into<PathBuf>,
         guarded_target: impl Into<PathBuf>,
-        mac_key: [u8; 32],
+        mut mac_key: [u8; 32],
         policy: VmGenPolicy,
     ) -> Result<Self, AntiRollbackError> {
+        // The by-value argument is the callee's to wipe; `key_arg` wipes this frame's copy.
+        let key_arg = SecretBuffer(&mut mac_key);
         Self::open_or_create_with_source(
             anchor_path,
             guarded_target,
-            mac_key,
+            **key_arg,
             policy,
             LinuxSysfsVmGenSource,
         )
@@ -468,23 +470,25 @@ impl<S: VmGenSource> HypervisorGenerationAnchor<S> {
     pub fn open_or_create_with_source(
         anchor_path: impl Into<PathBuf>,
         guarded_target: impl Into<PathBuf>,
-        mac_key: [u8; 32],
+        mut mac_key: [u8; 32],
         policy: VmGenPolicy,
         source: S,
     ) -> Result<Self, AntiRollbackError> {
-        let key_guard = SecretBuffer(mac_key);
+        // Wipes the by-value key argument on every return, `?` and unwind; the key is
+        // copied straight into the anchor (whose `Drop` wipes it), not via a temporary.
+        let key_arg = SecretBuffer(&mut mac_key);
         let record = LockedRecord::acquire(anchor_path)?;
         let guarded_target = guarded_target.into();
         let guard = VmGenIdForkGuard::new(policy);
-        let owned_key = *key_guard;
-        drop(key_guard);
-        let this = Self {
+        let mut this = Self {
             record,
             guarded_target,
-            mac_key: owned_key,
+            mac_key: [0u8; 32],
             guard,
             source,
         };
+        this.mac_key.copy_from_slice(key_arg.as_slice());
+        drop(key_arg);
         // Immediately verify existing state (if already sealed) so fork/rollback fails on open.
         let _ = this.load_checked()?;
         Ok(this)
@@ -784,26 +788,37 @@ fn parse_tpm2_response_header(rsp: &[u8]) -> Result<(u16, usize), AntiRollbackEr
             .ok_or(AntiRollbackError::ProtocolFramingError(
                 "TPM2 parameterSize arithmetic overflow",
             ))?;
-    if auth_offset + 5 > rsp.len() {
+    // `param_size` is untrusted: every offset derived from it is checked, so a wrapping
+    // `usize` (32-bit targets) is a framing error rather than a panicking slice.
+    if auth_offset.checked_add(5).is_none_or(|end| end > rsp.len()) {
         return Err(AntiRollbackError::ProtocolFramingError(
             "TPM2 parameterSize overruns response auth area",
         ));
     }
     // Validate TPMS_AUTH_RESPONSE framing: nonceTPM (TPM2B) + sessionAttributes (1B) + hmac (TPM2B)
-    let auth = &rsp[auth_offset..];
+    let auth = rsp
+        .get(auth_offset..)
+        .ok_or(AntiRollbackError::ProtocolFramingError(
+            "TPM2 parameterSize overruns response auth area",
+        ))?;
     let nonce_len = u16::from_be_bytes([auth[0], auth[1]]) as usize;
     let attr_pos = 2usize
         .checked_add(nonce_len)
         .ok_or(AntiRollbackError::ProtocolFramingError(
             "TPM2 nonceTPM overflow",
         ))?;
-    if attr_pos + 3 > auth.len() {
+    let hmac_size_end = attr_pos
+        .checked_add(3)
+        .ok_or(AntiRollbackError::ProtocolFramingError(
+            "TPM2 nonceTPM overflow",
+        ))?;
+    if hmac_size_end > auth.len() {
         return Err(AntiRollbackError::ProtocolFramingError(
             "TPM2 auth response truncated before hmac size",
         ));
     }
     let hmac_len = u16::from_be_bytes([auth[attr_pos + 1], auth[attr_pos + 2]]) as usize;
-    if attr_pos + 3 + hmac_len != auth.len() {
+    if hmac_size_end.checked_add(hmac_len) != Some(auth.len()) {
         return Err(AntiRollbackError::ProtocolFramingError(
             "TPM2 auth response trailing bytes mismatch",
         ));
@@ -966,10 +981,12 @@ impl Tpm2NvMonotoneAnchor<DevTpmRm0> {
         seal_path: impl Into<PathBuf>,
         nv_index: u32,
         nv_password: &[u8],
-        mac_key: [u8; 32],
+        mut mac_key: [u8; 32],
     ) -> Result<Self, AntiRollbackError> {
+        let key_arg = SecretBuffer(&mut mac_key);
         let dev = DevTpmRm0::open_default()?;
-        Self::open_with_transport(dev, seal_path, nv_index, nv_index, nv_password, mac_key)
+        // The by-value argument is the callee's to wipe; `key_arg` wipes this frame's copy.
+        Self::open_with_transport(dev, seal_path, nv_index, nv_index, nv_password, **key_arg)
     }
 }
 
@@ -982,9 +999,12 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
         auth_handle: u32,
         nv_index: u32,
         nv_password: &[u8],
-        mac_key: [u8; 32],
+        mut mac_key: [u8; 32],
     ) -> Result<Self, AntiRollbackError> {
-        let key_guard = SecretBuffer(mac_key);
+        // Wipes the by-value key argument on every return, `?` and unwind. The secrets
+        // are copied straight into the anchor (whose `Drop` wipes them), never through
+        // intermediate by-value stack temporaries.
+        let key_arg = SecretBuffer(&mut mac_key);
         if !is_valid_tpm2_nv_index(nv_index) {
             return Err(AntiRollbackError::ProtocolFramingError(
                 "nv_index handle outside TPM_HT_NV_INDEX (0x01000000..=0x01FFFFFF)",
@@ -995,24 +1015,20 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
                 "TPM2 password authorization exceeds 64-byte TPM2B_AUTH limit",
             ));
         }
-        let mut auth_buf = SecretBuffer([0u8; MAX_TPM2_AUTH_BYTES]);
-        auth_buf[..nv_password.len()].copy_from_slice(nv_password);
 
         let record = LockedRecord::acquire(seal_path)?;
-        let owned_key = *key_guard;
-        let owned_auth = *auth_buf;
-        drop(key_guard);
-        drop(auth_buf);
-
-        let this = Self {
+        let mut this = Self {
             transport,
             record,
             nv_index,
             auth_handle,
-            auth_value: owned_auth,
+            auth_value: [0u8; MAX_TPM2_AUTH_BYTES],
             auth_len: nv_password.len(),
-            mac_key: owned_key,
+            mac_key: [0u8; 32],
         };
+        this.mac_key.copy_from_slice(key_arg.as_slice());
+        drop(key_arg);
+        this.auth_value[..nv_password.len()].copy_from_slice(nv_password);
         // Immediately verify hardware counter vs local sealed state on open!
         let _ = this.load_checked()?;
         Ok(this)
@@ -1494,6 +1510,58 @@ mod tests {
             marshal_tpm2_nv_increment_cmd(0x8100_0001, 0x8100_0001, b""),
             Err(AntiRollbackError::ProtocolFramingError(_))
         ));
+    }
+
+    #[test]
+    fn tpm2_response_with_oversized_parameter_size_is_refused_without_panic() {
+        // Honest frames parse.
+        assert!(parse_tpm2_nv_increment_rsp(&build_session_rsp(&[])).is_ok());
+        let mut counter = [0u8; 10];
+        counter[..2].copy_from_slice(&8u16.to_be_bytes());
+        counter[2..].copy_from_slice(&7u64.to_be_bytes());
+        assert_eq!(
+            parse_tpm2_nv_read_u64_rsp(&build_session_rsp(&counter)).unwrap(),
+            7
+        );
+        // `parameterSize` patched to every value that overruns the auth area, up to
+        // `u32::MAX` (which wraps `14 + param_size + 5` on a 32-bit `usize`).
+        let honest = build_session_rsp(&counter);
+        let fits = honest.len() - 14 - 5;
+        for param_size in [
+            fits as u32 + 1,
+            fits as u32 + 5,
+            honest.len() as u32,
+            u32::MAX - 18,
+            u32::MAX - 14,
+            u32::MAX - 4,
+            u32::MAX,
+        ] {
+            let mut rsp = honest.clone();
+            rsp[10..14].copy_from_slice(&param_size.to_be_bytes());
+            assert!(
+                matches!(
+                    parse_tpm2_nv_read_u64_rsp(&rsp),
+                    Err(AntiRollbackError::ProtocolFramingError(_))
+                ),
+                "param_size {param_size:#x}"
+            );
+            assert!(matches!(
+                parse_tpm2_nv_increment_rsp(&rsp),
+                Err(AntiRollbackError::ProtocolFramingError(_))
+            ));
+        }
+        // An oversized nonceTPM / hmac size inside the auth area is refused as well.
+        for (offset, value) in [(14 + 10, u16::MAX), (14 + 10 + 3, u16::MAX), (14 + 10 + 3, 1)] {
+            let mut rsp = honest.clone();
+            rsp[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+            assert!(
+                matches!(
+                    parse_tpm2_nv_read_u64_rsp(&rsp),
+                    Err(AntiRollbackError::ProtocolFramingError(_))
+                ),
+                "offset {offset} value {value:#x}"
+            );
+        }
     }
 
     #[test]

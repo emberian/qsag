@@ -13494,6 +13494,14 @@ theorem polyToTower128_gf128PclmulFieldSum (n : Nat) (m : UInt64 → UInt8) (pL 
   | succ n ih =>
     simp only [gf128PclmulFieldSum, gf128PclmulTowerSum, polyToTower128_gf128FieldMul_xor, ih]
 
+/-- Public singleton equation for composing the decoded kernel with a scalar MIR product. -/
+theorem gf128PclmulTowerSum_one (m : UInt64 → UInt8) (pL pR : UInt64) :
+    gf128PclmulTowerSum 1 m pL pR =
+      towerMul 7
+        (polyToTower128 (gf128Words (readMem128 m pL).w0 (readMem128 m pL).w1))
+        (polyToTower128 (gf128Words (readMem128 m pR).w0 (readMem128 m pR).w1)) := by
+  simp only [gf128PclmulTowerSum, towerAdd_zero]
+
 /-- The decoded production `pclmul` kernel run, read in the tower basis: the output block is the
     initial accumulator plus the `Tower128` dot product of the input blocks. -/
 theorem current_rlib_gf2_128_mul_acc_pclmul_tower_dot
