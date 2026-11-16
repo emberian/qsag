@@ -172,7 +172,10 @@ R_PR_S    dvss_bank dvss_loc 15m
 * bi_24t: A CS DVDD DVSS IE OE PAD PD PU SL VDD VSS Y
 X_BI24T   a_buf vss_c dvdd_loc dvss_loc vss_c vdd_c pad_die vss_c vss_c sl_in vdd_c vss_c y_unused gf180mcu_fd_io__bi_24t
 L_BW      pad_die bw_mid 1.8n
-R_BW      bw_mid  pcb_load_node 125m
+R_BW      bw_mid  pcb_pin 125m
+C_PKG_PAD pcb_pin 0 0.5p
+* PCB source termination, also specified by the reference SPI schematic.
+R_PCB_SER pcb_pin pcb_load_node 33
 C_PCB     pcb_load_node 0 15.0p
 .ends ssn_bi24t_lane
 
@@ -218,6 +221,98 @@ X_VIC_CLK_HI DVDD_VHI DVSS_VHI CLK_HI_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CL
 .nodeset v(VDD_CORE)={vdd_val} v(VDD_SOUTH)={vdd_val}
 + v(VDD_EAST)={vdd_val} v(VDD_NORTH)={vdd_val} v(VDD_WEST)={vdd_val}
 + v(VSS_CORE)=0 v(VSS_SOUTH)=0 v(VSS_EAST)=0 v(VSS_NORTH)=0 v(VSS_WEST)=0
+* Seed the powered, settled ESD RC ladder; .nodeset is released for the
+* actual operating-point solve and transient. No node is voltage-clamped.
+.nodeset v(X_DVDD_S.n8)={vdd_val}
+.nodeset v(X_DVDD_S.n11)={vdd_val}
+.nodeset v(X_DVDD_S.n10)={vdd_val}
+.nodeset v(X_DVDD_S.n19)={vdd_val}
+.nodeset v(X_DVDD_S.n21)={vdd_val}
+.nodeset v(X_DVDD_S.n17)={vdd_val}
+.nodeset v(X_DVDD_S.n20)={vdd_val}
+.nodeset v(X_DVDD_S.n22)={vdd_val}
+.nodeset v(X_DVDD_S.n18)={vdd_val}
+.nodeset v(X_DVDD_S.n13)={vdd_val}
+.nodeset v(X_DVDD_S.n12)={vdd_val}
+.nodeset v(X_DVDD_S.n15)={vdd_val}
+.nodeset v(X_DVDD_S.n6)={vdd_val}
+.nodeset v(X_DVDD_S.n7)=0
+.nodeset v(X_DVDD_S.n4)=0
+.nodeset v(X_DVSS_S.n8)={vdd_val}
+.nodeset v(X_DVSS_S.n11)={vdd_val}
+.nodeset v(X_DVSS_S.n10)={vdd_val}
+.nodeset v(X_DVSS_S.n19)={vdd_val}
+.nodeset v(X_DVSS_S.n21)={vdd_val}
+.nodeset v(X_DVSS_S.n17)={vdd_val}
+.nodeset v(X_DVSS_S.n20)={vdd_val}
+.nodeset v(X_DVSS_S.n22)={vdd_val}
+.nodeset v(X_DVSS_S.n18)={vdd_val}
+.nodeset v(X_DVSS_S.n13)={vdd_val}
+.nodeset v(X_DVSS_S.n12)={vdd_val}
+.nodeset v(X_DVSS_S.n15)={vdd_val}
+.nodeset v(X_DVSS_S.n6)={vdd_val}
+.nodeset v(X_DVSS_S.n7)=0
+.nodeset v(X_DVSS_S.n4)=0
+.nodeset v(X_DVDD_E.n8)={vdd_val}
+.nodeset v(X_DVDD_E.n11)={vdd_val}
+.nodeset v(X_DVDD_E.n10)={vdd_val}
+.nodeset v(X_DVDD_E.n19)={vdd_val}
+.nodeset v(X_DVDD_E.n21)={vdd_val}
+.nodeset v(X_DVDD_E.n17)={vdd_val}
+.nodeset v(X_DVDD_E.n20)={vdd_val}
+.nodeset v(X_DVDD_E.n22)={vdd_val}
+.nodeset v(X_DVDD_E.n18)={vdd_val}
+.nodeset v(X_DVDD_E.n13)={vdd_val}
+.nodeset v(X_DVDD_E.n12)={vdd_val}
+.nodeset v(X_DVDD_E.n15)={vdd_val}
+.nodeset v(X_DVDD_E.n6)={vdd_val}
+.nodeset v(X_DVDD_E.n7)=0
+.nodeset v(X_DVDD_E.n4)=0
+.nodeset v(X_DVSS_E.n8)={vdd_val}
+.nodeset v(X_DVSS_E.n11)={vdd_val}
+.nodeset v(X_DVSS_E.n10)={vdd_val}
+.nodeset v(X_DVSS_E.n19)={vdd_val}
+.nodeset v(X_DVSS_E.n21)={vdd_val}
+.nodeset v(X_DVSS_E.n17)={vdd_val}
+.nodeset v(X_DVSS_E.n20)={vdd_val}
+.nodeset v(X_DVSS_E.n22)={vdd_val}
+.nodeset v(X_DVSS_E.n18)={vdd_val}
+.nodeset v(X_DVSS_E.n13)={vdd_val}
+.nodeset v(X_DVSS_E.n12)={vdd_val}
+.nodeset v(X_DVSS_E.n15)={vdd_val}
+.nodeset v(X_DVSS_E.n6)={vdd_val}
+.nodeset v(X_DVSS_E.n7)=0
+.nodeset v(X_DVSS_E.n4)=0
+.nodeset v(X_DVDD_N.n8)={vdd_val}
+.nodeset v(X_DVDD_N.n11)={vdd_val}
+.nodeset v(X_DVDD_N.n10)={vdd_val}
+.nodeset v(X_DVDD_N.n19)={vdd_val}
+.nodeset v(X_DVDD_N.n21)={vdd_val}
+.nodeset v(X_DVDD_N.n17)={vdd_val}
+.nodeset v(X_DVDD_N.n20)={vdd_val}
+.nodeset v(X_DVDD_N.n22)={vdd_val}
+.nodeset v(X_DVDD_N.n18)={vdd_val}
+.nodeset v(X_DVDD_N.n13)={vdd_val}
+.nodeset v(X_DVDD_N.n12)={vdd_val}
+.nodeset v(X_DVDD_N.n15)={vdd_val}
+.nodeset v(X_DVDD_N.n6)={vdd_val}
+.nodeset v(X_DVDD_N.n7)=0
+.nodeset v(X_DVDD_N.n4)=0
+.nodeset v(X_DVSS_N.n8)={vdd_val}
+.nodeset v(X_DVSS_N.n11)={vdd_val}
+.nodeset v(X_DVSS_N.n10)={vdd_val}
+.nodeset v(X_DVSS_N.n19)={vdd_val}
+.nodeset v(X_DVSS_N.n21)={vdd_val}
+.nodeset v(X_DVSS_N.n17)={vdd_val}
+.nodeset v(X_DVSS_N.n20)={vdd_val}
+.nodeset v(X_DVSS_N.n22)={vdd_val}
+.nodeset v(X_DVSS_N.n18)={vdd_val}
+.nodeset v(X_DVSS_N.n13)={vdd_val}
+.nodeset v(X_DVSS_N.n12)={vdd_val}
+.nodeset v(X_DVSS_N.n15)={vdd_val}
+.nodeset v(X_DVSS_N.n6)={vdd_val}
+.nodeset v(X_DVSS_N.n7)=0
+.nodeset v(X_DVSS_N.n4)=0
 .tran 10p 25n
 
 .param vmid='0.5*vdd_val'

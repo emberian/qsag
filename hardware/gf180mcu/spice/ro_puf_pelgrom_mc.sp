@@ -1,7 +1,7 @@
 * Foundry Pelgrom mismatch: 128 physical five-stage NAND ROs (64 disjoint pairs).
 * Topology follows dregg_puf_ro5; inverter-ring witnesses retain the earlier comparison.
 * Independent local mismatch enabled; global process spread disabled.
-* Seed is set BEFORE model parsing in .spiceinit by run_corners.py.
+* Parser RNG seed is set by .options seed; .spiceinit setseed alone is insufficient.
 * No transient-noise claim: BER postprocessing uses measured frequencies and an
 * explicit asynchronous counter quantization/stop-edge model (see README.md).
 .include "/spice/pdk/ngspice/design.ngspice"
@@ -12,7 +12,7 @@
 .temp 27
 * __CORNER_END__
 .include "/spice/pdk/gf180mcu_fd_sc_mcu7t5v0.spice"
-.options klu method=gear reltol=1e-4
+.options klu method=gear reltol=1e-4 seed=20261116
 VVDD VDD 0 {vdd_val}
 VVSS VSS 0 0
 VEN EN 0 PWL(0 0 0.4n 0 0.6n {vdd_val})
