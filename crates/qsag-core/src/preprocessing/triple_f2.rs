@@ -3450,6 +3450,7 @@ mod tests {
         let shifted = vec![vec![1u128], vec![0u128]];
         let total = delta[0][0] ^ delta[1][0];
         let mut seen = alloc::collections::BTreeSet::new();
+        let mut seen_randomizers = alloc::collections::BTreeSet::new();
         for honest_tape in 1..=16 {
             // Fixed alpha, shift, corrupt tape and base-OT setup. Only the
             // honest party's fresh private randomness varies between aborts.
@@ -3461,19 +3462,16 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             let mut private = rngs();
-            let mut replay = rngs();
             let mut setup_rngs: Vec<_> = (0..2)
                 .map(|p| PartyPrivateRng::from_seed([0x42 + p; 32], b"fixed-additive-base-ot"))
                 .collect();
             let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut setup_rngs);
             let before = mesh.transcript_digest();
-            let randomizer = replay.iter_mut().fold(Tower128::ZERO, |sum, rng| {
-                // Value salt, sigma salt, committed projection coin share, then R.
-                rng.next_bytes32();
-                rng.next_bytes32();
-                rng.next_bytes32();
-                sum.add(rng.next_tower128())
-            });
+            // The retained mesh blinds from its single-use pool. Stage it from the same
+            // private tapes and read the joint randomizer the first round will consume.
+            mesh.prestage_blinded_checks(1, &mut private).unwrap();
+            let staged = mesh.staged_blinding_serials();
+            let randomizer = mesh.next_blinding_randomizer().unwrap();
             ADDITIVE_CHECK_OPENINGS.with(|checks| checks.borrow_mut().clear());
             ADDITIVE_CHECK_WEIGHTS.with(|weights| weights.borrow_mut().clear());
             assert!(matches!(
@@ -3499,6 +3497,9 @@ mod tests {
             assert_ne!(checks[0], Tower128::ZERO);
             assert_ne!(checks[0], projected);
             assert_ne!(mesh.transcript_digest(), before);
+            // The rejecting round spent exactly the triple whose randomizer was read.
+            assert_eq!(mesh.staged_blinding_serials(), staged[..staged.len() - 1]);
+            assert!(seen_randomizers.insert(randomizer.0));
             seen.insert(checks[0].0);
         }
         assert_eq!(seen.len(), 16);
