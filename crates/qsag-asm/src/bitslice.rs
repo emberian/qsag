@@ -65,6 +65,7 @@ pub fn transpose64x256_portable(rows: &mut [BitPlane256; 64]) {
     butterfly_stage::<4>(rows, 0x0F0F_0F0F_0F0F_0F0F);
     butterfly_stage::<2>(rows, 0x3333_3333_3333_3333);
     butterfly_stage::<1>(rows, 0x5555_5555_5555_5555);
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// In-place transpose of four 64x64 bit matrices on the detected backend.
@@ -228,6 +229,7 @@ pub fn gf2_128_mul_acc_batch_portable(acc: &mut [u64; 2], a: &[[u64; 2]], b: &[[
         acc[1] ^= p[1];
         crate::volatile_fill(&mut p, 0);
     }
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// `acc ^= sum_i a[i] * b[i]` in `GF(2)[x] / (x^128 + x^7 + x^2 + x + 1)` on the detected
@@ -315,6 +317,7 @@ pub fn gf2_128_scale_xor_with_backend(
         *d ^= u128::from(product[0]) | (u128::from(product[1]) << 64);
         crate::volatile_fill(&mut product, 0);
     }
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// One public-count loop, fixed-address stride, no stack scratch. Every touched
@@ -427,10 +430,12 @@ pub fn gf2_128_dot_with_backend(a: &[u128], b: &[u128], backend: SimdBackend) ->
 /// word, with immediate shift counts.
 pub fn gf2_64x128_clmul_acc_portable(acc: &mut [[u128; 2]], words: &[u64], scalar: u128) {
     assert_eq!(acc.len(), words.len());
+    let mut lo = 0u128;
+    let mut hi = 0u128;
     for (slot, word) in acc.iter_mut().zip(words) {
         let mut w = *word;
-        let mut lo = scalar & u128::from(u64::MAX);
-        let mut hi = scalar >> 64;
+        lo = scalar & u128::from(u64::MAX);
+        hi = scalar >> 64;
         let mut product = [0u128; 2];
         for _ in 0..64 {
             let take = 0u128.wrapping_sub(u128::from(w & 1));
@@ -445,6 +450,10 @@ pub fn gf2_64x128_clmul_acc_portable(acc: &mut [[u128; 2]], words: &[u64], scala
         crate::volatile_fill(&mut product, 0);
         crate::volatile_fill(core::slice::from_mut(&mut w), 0);
     }
+    // The shifted scalar halves of the last word; earlier ones were overwritten.
+    crate::volatile_fill(core::slice::from_mut(&mut lo), 0);
+    crate::volatile_fill(core::slice::from_mut(&mut hi), 0);
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// Unreduced carryless multiply-accumulate of 64-bit words by one 128-bit scalar:
@@ -473,6 +482,8 @@ pub fn gf2_64x128_clmul_acc_with_backend(
     if words.is_empty() {
         return;
     }
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     #[cfg(target_arch = "x86_64")]
     {
         let caps = cpuid::probe_capabilities();
@@ -623,8 +634,9 @@ pub fn gf2_xor_combine_planes_portable(
             }
         }
     }
+    let mut acc = [0u64; 4];
     for (k, nibbles) in pattern.iter().enumerate() {
-        let mut acc = [0u64; 4];
+        acc = [0; 4];
         for (table, nibble) in tables.iter().zip(nibbles) {
             for (dst, src) in acc.iter_mut().zip(&table[usize::from(nibble & 15)]) {
                 *dst ^= src;
@@ -632,7 +644,9 @@ pub fn gf2_xor_combine_planes_portable(
         }
         planes[k / 64][k % 64] = acc;
     }
+    crate::volatile_fill(&mut acc, 0);
     crate::volatile_fill(&mut tables, [[0; 4]; 16]);
+    crate::wipe::wipe_vector_scratch();
 }
 
 /// `planes[k / 64][k % 64] = XOR of rows[4 * g + d]` over all `(g, d)` with bit `d` of
@@ -659,6 +673,8 @@ pub fn gf2_xor_combine_planes_with_backend(
     planes: &mut [[BitPlane256; 64]; 2],
     backend: SimdBackend,
 ) {
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     #[cfg(target_arch = "x86_64")]
     {
         let caps = cpuid::probe_capabilities();
@@ -679,7 +695,8 @@ pub fn gf2_xor_combine_planes_with_backend(
 }
 
 /// One 256-bit register per row and per table entry: a combination costs sixteen
-/// `vpxor ymm, ymm, [table]` for all four columns together.
+/// `vpxor ymm, ymm, [table]` for all four columns together. The tables and then every
+/// vector register are cleared before returning.
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 #[target_feature(enable = "avx2")]
@@ -710,6 +727,8 @@ unsafe fn xor_combine_planes_avx2(
         unsafe { _mm256_storeu_si256(plane.as_mut_ptr().cast::<__m256i>(), acc) };
     }
     crate::volatile_fill(&mut tables, [_mm256_setzero_si256(); 16]);
+    // SAFETY: AVX is enabled here; no vector value is live past this point.
+    unsafe { crate::wipe::wipe_ymm_regs() };
 }
 
 /// [`gf2_128_mul_acc_batch`] on an explicit backend; falls back to the portable code when

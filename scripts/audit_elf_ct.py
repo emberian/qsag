@@ -485,48 +485,157 @@ def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], stri
             ymm_dirty = False
         if mnem in ("call", "callq", "ret") and ymm_dirty:
             errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM/ZMM state")
-    return errors + rust_errors(sym, instrs, strict, machine=62)
-
-
-AARCH64_CALLER_SAVED_NEON = {f"v{i}" for i in range(8)} | {f"v{i}" for i in range(16, 32)}
+    return errors + vector_wipe_errors(sym, instrs, 62) + rust_errors(sym, instrs, strict, machine=62)
 
 
 def audit_compiled_rust_aarch64_symbol(sym: str, instrs: list[tuple[str, str]], strict=False) -> list[str]:
-    """Check shared taint screen plus strict caller-saved NEON (`v0..v7`, `v16..v31`) wipe on `aarch64_simd`."""
-    errors = []
-    if strict and "qsag_asm::aarch64_simd::" in sym and "enter_aarch64_dit_region" not in sym:
-        dirty_neon: set[str] = set()
-        for idx, (mnem, ops) in enumerate(instrs):
-            ops_l = ops.lower()
-            parts = split_top_operands(ops_l)
-            is_neon_self_zero = (
-                mnem in ("eor", "eor.16b")
-                and len(parts) == 3
-                and parts[0] == parts[1] == parts[2]
-                and canon_a64_neon(parts[0]) is not None
-            )
-            if is_neon_self_zero:
-                dirty_neon.discard(canon_a64_neon(parts[0]))
-            elif not mnem.startswith(("str", "stur", "stp", "st1", "st2", "st3", "st4")):
-                if mnem.startswith(("ld1", "ld2", "ld3", "ld4")):
-                    for vn in expand_a64_neon_list(ops_l):
-                        if vn in AARCH64_CALLER_SAVED_NEON:
-                            dirty_neon.add(vn)
-                elif mnem == "ldp" and len(parts) >= 2:
-                    for p in parts[:2]:
-                        vn = canon_a64_neon(p)
-                        if vn in AARCH64_CALLER_SAVED_NEON:
-                            dirty_neon.add(vn)
-                elif parts:
-                    vn = canon_a64_neon(parts[0])
-                    if vn in AARCH64_CALLER_SAVED_NEON:
-                        dirty_neon.add(vn)
-            if mnem == "ret" and dirty_neon:
-                leaked = sorted(dirty_neon, key=lambda r: int(r[1:]))
-                errors.append(
-                    f"{sym}[{idx}]: unzeroed caller-saved NEON registers at `ret`: {leaked}"
-                )
-    return errors + rust_errors(sym, instrs, strict, machine=183)
+    """Caller-saved NEON (`v0..v7`, `v16..v31`) wipe on every SIMD kernel, plus the shared taint screen.
+
+    The wipe check does not depend on `strict`: a kernel that leaves a register is a finding in
+    every mode.
+    """
+    return vector_wipe_errors(sym, instrs, 183) + rust_errors(sym, instrs, strict, machine=183)
+
+
+# Compiled Rust functions that must return, or tail-call, with every caller-saved vector
+# register they wrote zeroed again: the `target_feature` kernels, everything in `bitslice` and
+# `linear_map` (dispatchers and portable fallbacks included), and the register-wipe helpers
+# themselves. The remaining compiled Rust (portable code elsewhere that LLVM vectorizes on its
+# own) carries no such wipe; `audit` counts those functions and reports the number instead of
+# passing them silently.
+SIMD_KERNEL_MARKERS = (
+    'qsag_asm::aarch64_simd::',
+    'qsag_asm::linear_map::',
+    'qsag_asm::avx512::',
+    'qsag_asm::gf256_simd::',
+    'qsag_asm::ntt_simd::x86_simd::',
+    'qsag_asm::sha2_hw::sha256_compress_blocks_shani',
+    'qsag_asm::sha2_hw::sha256_compress_blocks_aarch64_sha2',
+    'qsag_asm::bitslice::',
+    'qsag_asm::wipe::wipe_xmm_regs',
+    'qsag_asm::wipe::wipe_ymm_regs',
+    'qsag_asm::wipe::wipe_zmm_regs',
+)
+
+# First operand is a vector register that the instruction only reads.
+X86_VECTOR_READ_ONLY = {
+    'ptest', 'vptest', 'vtestps', 'vtestpd', 'comiss', 'comisd', 'ucomiss', 'ucomisd',
+    'vcomiss', 'vcomisd', 'vucomiss', 'vucomisd',
+}
+A64_VECTOR_READ_ONLY = {'fcmp', 'fcmpe', 'fccmp', 'fccmpe'}
+
+
+def is_simd_kernel_symbol(symbol):
+    return (any(marker in symbol for marker in SIMD_KERNEL_MARKERS)
+            and 'enter_aarch64_dit_region' not in symbol)
+
+
+def vector_register_effect(mnemonic, operands, machine):
+    """`(written, zeroed)` vector registers of one instruction, as register numbers.
+
+    A register counts as zeroed only by an unmasked full self-XOR (or, on AArch64, an all-zero
+    `movi`); every other write, masked writes included, leaves it dirty. `vzeroall` zeroes
+    `0..15` only and `vzeroupper` zeroes nothing whole, so `zmm16..zmm31` need their own XOR.
+    """
+    op = operands.lower()
+    if machine == 62:
+        if mnemonic == 'vzeroall':
+            return set(), set(range(16))
+        parts = split_top_operands(op)
+        if not parts or '[' in parts[0] or mnemonic in X86_VECTOR_READ_ONLY:
+            return set(), set()
+        masked = '{' in parts[0]
+        destination = canon_x86_simd(re.sub(r'\s*\{[^}]*\}', '', parts[0]))
+        if destination is None:
+            return set(), set()
+        zero = not masked and (
+            (mnemonic in ('pxor', 'xorps', 'xorpd') and len(parts) == 2 and parts[0] == parts[1])
+            or (mnemonic in ('vpxor', 'vpxorq', 'vpxord', 'vxorps', 'vxorpd') and len(parts) == 3
+                and parts[1] == parts[2] and canon_x86_simd(parts[1]) is not None))
+        return (set(), {destination}) if zero else ({destination}, set())
+    if mnemonic.startswith(('str', 'stur', 'stp', 'st1', 'st2', 'st3', 'st4')) or (
+            mnemonic in A64_VECTOR_READ_ONLY):
+        return set(), set()
+    parts = split_top_operands(op)
+    if mnemonic.startswith(('ld1', 'ld2', 'ld3', 'ld4')):
+        names = expand_a64_neon_list(op) or [canon_a64_neon(parts[0])] if parts else []
+    elif mnemonic == 'ldp':
+        names = [canon_a64_neon(p) for p in parts[:2]]
+    else:
+        names = [canon_a64_neon(parts[0])] if parts else []
+    registers = {int(name[1:]) for name in names if name}
+    if not registers:
+        return set(), set()
+    zero = len(parts) >= 2 and (
+        (mnemonic == 'eor' and len(parts) == 3 and parts[0] == parts[1] == parts[2]
+         and parts[0].endswith('.16b'))
+        or (mnemonic == 'movi' and re.fullmatch(r'#(?:0x)?0+', parts[1]) is not None))
+    return (set(), registers) if zero else (registers, set())
+
+
+def live_vector_registers_at_exit(instructions, machine):
+    """`[(index, [register numbers])]` for every exit some path reaches with a dirty register.
+
+    Forward may-analysis over the function's own control-flow graph: a register is dirty at a
+    join if it is dirty on any incoming edge, so a wipe on one arm of a branch does not cover the
+    other, and a write in a loop body after the wipe is seen through the backedge. Exits are
+    `ret` and tail jumps. Calls leave the set unchanged: each audited callee answers for its own
+    registers, and a kernel must still wipe after its last use, not before a call.
+    """
+    arm = machine == 183
+    tracked = (set(range(8)) | set(range(16, 32))) if arm else set(range(32))
+    addresses = getattr(instructions, 'addresses', [])
+    relocations = getattr(instructions, 'relocations', {})
+    positions = {address: index for index, address in enumerate(addresses)}
+    incoming = {}
+    exits = {}
+    pending = [(0, frozenset())]
+    while pending:
+        index, dirty = pending.pop()
+        if index >= len(instructions):
+            continue
+        previous = incoming.get(index)
+        if previous is not None:
+            if dirty <= previous:
+                continue
+            dirty = dirty | previous
+        incoming[index] = dirty
+        mnemonic, operands = instructions[index]
+        target_text = operands.split(',')[-1].strip()
+        target = (positions.get(int(target_text, 16))
+                  if re.fullmatch(r'(?:0x)?[0-9a-f]+', target_text) else None)
+        if mnemonic in ('ret', 'retq') or (arm and mnemonic in ('br', 'braa', 'brab')):
+            if dirty:
+                exits[index] = dirty
+            continue
+        if mnemonic in ('jmp', 'jmpq', 'b'):
+            if index in relocations or target is None:
+                # Tail call, or a jump this decoder cannot follow: the registers leave with it.
+                if dirty:
+                    exits[index] = dirty
+            else:
+                pending.append((target, dirty))
+            continue
+        written, zeroed = vector_register_effect(mnemonic, operands, machine)
+        dirty = frozenset((dirty - zeroed) | (written & tracked))
+        if conditional(mnemonic) and target is not None:
+            pending.append((target, dirty))
+        pending.append((index + 1, dirty))
+    return [(index, sorted(registers)) for index, registers in sorted(exits.items())]
+
+
+def vector_wipe_errors(symbol, instructions, machine):
+    if not is_simd_kernel_symbol(symbol):
+        return []
+    name = 'v{}' if machine == 183 else 'xmm{0}/ymm{0}/zmm{0}'
+    return [f'{symbol}[{index}]: unzeroed live vector registers at exit: '
+            f'{[name.format(register) for register in registers]}'
+            for index, registers in live_vector_registers_at_exit(instructions, machine)]
+
+
+def writes_vector_registers(instructions, machine):
+    return any(vector_register_effect(mnemonic, operands, machine)[0]
+               for mnemonic, operands in instructions)
 
 
 def audit_aarch64_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
@@ -1561,6 +1670,70 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
     return sorted(set(errors))
 
 
+def vector_wipe_self_tests():
+    """#tooth: every way a compiled SIMD kernel can leave a vector register must be rejected."""
+    def stream(operations):
+        out = InstructionStream()
+        out.extend(operations)
+        out.addresses = list(range(0, 4 * len(out), 4))
+        return out
+    x86 = 'qsag_asm::linear_map::gfni512x8'
+    arm = 'qsag_asm::linear_map::pmull_map'
+    xmm_wipe = [('pxor', f'xmm{i}, xmm{i}') for i in range(16)]
+    zmm_wipe = [('vpxorq', f'zmm{i}, zmm{i}, zmm{i}') for i in range(32)] + [('vzeroupper', '')]
+    neon_wipe = [('eor', f'v{i}.16b, v{i}.16b, v{i}.16b') for i in list(range(8)) + list(range(16, 32))]
+    load = [('vmovdqu64', 'zmm3, zmmword ptr [rsi]')]
+    rejected = [
+        # No wipe at all; `vzeroupper` alone; `vzeroall` does not reach zmm16..zmm31.
+        (x86, 62, [('movdqu', 'xmm3, xmmword ptr [rsi]'), ('ret', '')]),
+        (x86, 62, load + [('vzeroupper', ''), ('ret', '')]),
+        (x86, 62, [('vmovdqu64', 'zmm17, zmmword ptr [rsi]'), ('vzeroall', ''), ('ret', '')]),
+        # A wipe that skips one register; a reload after the wipe; a masked self-XOR.
+        (x86, 62, load + [w for w in zmm_wipe if not w[1].startswith('zmm3,')] + [('ret', '')]),
+        (x86, 62, zmm_wipe + [('movq', 'xmm0, rax'), ('ret', '')]),
+        (x86, 62, load + [('vpxorq', 'zmm3 {k1}, zmm3, zmm3'), ('vzeroupper', ''), ('ret', '')]),
+        # The wipe sits on one arm of a branch only (index 2 jumps past it to the `ret`).
+        (x86, 62, stream(load + [('test', 'rdx, rdx'), ('je', '0x14'),
+                                 ('vpxorq', 'zmm3, zmm3, zmm3'), ('vzeroupper', ''), ('ret', '')])),
+        # A loop body dirties the register again after the wipe at its head.
+        (x86, 62, stream([('pxor', 'xmm3, xmm3'), ('movdqu', 'xmm3, xmmword ptr [rsi]'),
+                          ('dec', 'rcx'), ('jne', '0x0'), ('ret', '')])),
+        # A tail call leaves with the registers.
+        (x86, 62, stream(load + [('jmp', 'rax')])),
+        (arm, 183, [('ldr', 'q24, [x1]'), ('ret', '')]),
+        (arm, 183, [('ld1', '{ v28.16b - v31.16b }, [x0]')] + neon_wipe[:-1] + [('ret', '')]),
+        (arm, 183, [('ldp', 'q0, q17, [x8]'), ('eor', 'v0.16b, v0.16b, v0.16b'), ('ret', '')]),
+        (arm, 183, [('pmull', 'v16.1q, v0.1d, v2.1d')] + neon_wipe + [('fmov', 'd0, x1'), ('ret', '')]),
+        # A half-width XOR is not a wipe.
+        (arm, 183, [('ldr', 'q5, [x1]'), ('eor', 'v5.8b, v5.8b, v5.8b'), ('ret', '')]),
+        (arm, 183, stream([('ldr', 'q5, [x1]'), ('cbz', 'x2, 0xc'),
+                           ('eor', 'v5.16b, v5.16b, v5.16b'), ('ret', '')])),
+    ]
+    for symbol, machine, operations in rejected:
+        assert vector_wipe_errors(symbol, operations, machine), (symbol, list(operations))
+    accepted = [
+        (x86, 62, [('movdqu', 'xmm3, xmmword ptr [rsi]'), ('movq', 'rax, xmm3')] + xmm_wipe + [('ret', '')]),
+        (x86, 62, load + [('vmovdqu64', 'zmm17, zmmword ptr [rsi]')] + zmm_wipe + [('ret', '')]),
+        (x86, 62, load + [('vzeroall', ''), ('ret', '')]),
+        # The wipe runs before the join that both arms reach.
+        (x86, 62, stream(load + [('vpxorq', 'zmm3, zmm3, zmm3'), ('vzeroupper', ''),
+                                 ('test', 'rdx, rdx'), ('je', '0x18'), ('mov', 'rax, rdx'), ('ret', '')])),
+        (arm, 183, [('ld1', '{ v28.16b - v31.16b }, [x0]'), ('pmull', 'v16.1q, v0.1d, v2.1d')]
+         + neon_wipe + [('ret', '')]),
+        # Callee-saved v8..v15 are restored by the epilogue, and an all-zero `movi` is a wipe.
+        (arm, 183, [('ldr', 'q5, [x1]'), ('movi', 'v5.2d, #0000000000000000'),
+                    ('ldp', 'd9, d8, [sp]'), ('ret', '')]),
+    ]
+    for symbol, machine, operations in accepted:
+        assert not vector_wipe_errors(symbol, operations, machine), (symbol, list(operations))
+    # The check is tied to the kernel set, and the set covers every required SIMD entrypoint.
+    assert not vector_wipe_errors('qsag_asm::portable::clmul64_portable',
+                                  [('movdqu', 'xmm3, xmmword ptr [rsi]'), ('ret', '')], 62)
+    for names in REQUIRED_SIMD_SYMBOLS.values():
+        assert all(is_simd_kernel_symbol(name) for name in names)
+    return len(rejected) + len(accepted) + 2
+
+
 def self_tests():
     count = kernel_audit.run_negative_self_tests()
     dirty_call = [('vpxor', 'ymm0,ymm0,ymm0'), ('call', 'callee'), ('ret', '')]
@@ -1582,6 +1755,7 @@ def self_tests():
                                                   [('add', 'v24.4s, v24.4s, v24.4s'),
                                                    ('eor', 'v24.16b, v24.16b, v24.16b'), ('ret', '')], True)
     count += 9
+    count += vector_wipe_self_tests()
     for mnemonic in ('div', 'idiv', 'udiv', 'sdiv', 'fdiv', 'jne', 'b.eq', 'cbz', 'cbnz', 'tbz', 'tbnz'):
         assert rust_errors('qsag_hd::linear_module::ct_reduce_mod_q_u64', [(mnemonic, '')])
         count += 1
@@ -1767,6 +1941,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
     expected = (kernel_audit.EXPECTED_X86_SYMBOLS if machine == 62 else kernel_audit.EXPECTED_AARCH64_SYMBOLS) + BITSLICE[machine]
     errors, audited = [], []
     branches = 0
+    wiped_kernels, unenforced_vector_writers = [], []
     for symbol, instructions in functions.items():
         # Test/benchmark timing and assertion code is not a cryptographic kernel.
         if re.search(r'::(?:tests|[A-Za-z0-9_]+_tests)::', symbol):
@@ -1781,6 +1956,10 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
             else:
                 errors.extend(kernel_audit.audit_compiled_rust_aarch64_symbol(symbol, instructions, strict))
             branches += sum(conditional(m) for m, _ in instructions)
+            if is_simd_kernel_symbol(symbol):
+                wiped_kernels.append(symbol)
+            elif writes_vector_registers(instructions, machine):
+                unenforced_vector_writers.append(symbol)
         else:
             continue
         audited.append(symbol)
@@ -1805,6 +1984,9 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
         if not any(module in s for s in audited):
             print(f'  absent Rust namespace: {module}')
     print(f'  Rust conditional instructions inspected: {branches}; protocol control flow requires dataflow review')
+    print(f'  vector-register wipe at exit enforced on {len(wiped_kernels)} compiled SIMD kernels; '
+          f'{len(unenforced_vector_writers)} other compiled functions write vector registers '
+          'without that check (compiler-vectorized portable code)')
     for error in errors:
         print(f'  FAIL: {error}', file=sys.stderr)
     present = sum(any(module in symbol for symbol in audited) for module in RUST_MODULES)

@@ -3,8 +3,9 @@
 //! Defaults to `25_600` traces per kernel (`< 2s` in `cargo test --release`) and honors
 //! `QSAG_DUDECT_SAMPLES` (e.g. `QSAG_DUDECT_SAMPLES=1000000`) for deep saturation runs.
 //! Reports and enforces `|t| < 5.5` across BOTH uncropped (`raw`) and cropped (`p50..p99`)
-//! Welch-$t$ estimators over all 9 cryptographic assembly kernels (including
-//! `tower128_bdoz_2lane_mac_with_backend`), paired with a `#tooth` negative-control leak check.
+//! Welch-$t$ estimators over the cryptographic assembly kernels (including
+//! `tower128_bdoz_2lane_mac_with_backend`) and, in a second gate, the remaining runtime-dispatched
+//! entry points, paired with a `#tooth` negative-control leak check.
 
 // Machine timing and rdtsc have no interpretation under Miri.
 #![cfg(not(miri))]
@@ -618,6 +619,372 @@ fn dudect_constant_time_statistical_gate() {
             }
         },
         |tags, i| ct_eq_32(black_box(&ref32), black_box(&tags[i])) as u64,
+    ));
+
+    report_and_gate(&stats, T_GATE_THRESHOLD);
+}
+
+/// Fixed versus random secret operands for the runtime-dispatched entry points the main gate
+/// does not reach: the ML-DSA transforms, SHA-256 compression, the GF(2) accumulate, combine
+/// and scale kernels, the bitslice pack and unpack, the tower basis maps, the scalar Goldilocks
+/// add and sub, the byte comparison and erasure, the 8-way Keccak, and the AVX2
+/// Russian-peasant Shamir pair. Each one runs on whatever backend this CPU dispatches to.
+#[test]
+fn dudect_dispatched_kernels_outside_the_main_gate() {
+    use qsag_asm::bitslice::gf2_128_scale_xor;
+    use qsag_asm::ntt_simd::{MLDSA_N, MLDSA_Q};
+    use qsag_asm::{
+        BITSLICE_LANES, BitPlane256, KECCAK_STATE_BITS, KECCAK_STATE_BYTES, KeccakState8x,
+        XorCombinePattern, ct_eq_bytes, ct_memzero, gf2_64x128_clmul_acc, gf2_xor_combine_planes,
+        gf256_shamir_mac_avx2_russian_peasant, gf256_shamir_mul_avx2_russian_peasant,
+        goldilocks_add_ct, goldilocks_sub_ct, keccak_f1600_x8, mldsa_inv_ntt, mldsa_ntt,
+        mldsa_pointwise_mul, pack_256x200_bitslice, poly128_to_tower128_ct, sha256_compress_blocks,
+        tower128_to_poly128_ct, unpack_256x200_bitslice,
+    };
+
+    let _ = enable_hardware_dit();
+    let samples = configured_samples();
+    let mut stats = Vec::new();
+
+    // ML-DSA forward and inverse transforms and the pointwise product, coefficients below q.
+    type Poly = [u32; MLDSA_N];
+    fn fill_polys(polys: &mut [Poly], rng: &mut KeccakRng, classes: &[u8; CHUNK]) {
+        for (poly, class) in polys.iter_mut().zip(classes) {
+            let mask = 0u32.wrapping_sub(u32::from(*class));
+            for c in poly.iter_mut() {
+                *c = ((rng.next_u64() % u64::from(MLDSA_Q)) as u32) & mask;
+            }
+        }
+    }
+    let mut polys = vec![[0u32; MLDSA_N]; CHUNK];
+    let mut poly_work = [0u32; MLDSA_N];
+    for (name, transform) in [
+        ("mldsa_ntt", mldsa_ntt as fn(&mut Poly)),
+        ("mldsa_inv_ntt", mldsa_inv_ntt as fn(&mut Poly)),
+    ] {
+        stats.push(measure_dudect(
+            name,
+            samples,
+            &mut (&mut polys, &mut poly_work),
+            |(polys, _), rng, classes| fill_polys(polys, rng, classes),
+            |(polys, work), i| {
+                **work = polys[i];
+                transform(black_box(&mut **work));
+                u64::from(work[0])
+            },
+        ));
+    }
+    let mut polys_rhs = vec![[0u32; MLDSA_N]; CHUNK];
+    stats.push(measure_dudect(
+        "mldsa_pointwise_mul",
+        samples,
+        &mut (&mut polys, &mut polys_rhs, &mut poly_work),
+        |(lhs, rhs, _), rng, classes| {
+            fill_polys(lhs, rng, classes);
+            fill_polys(rhs, rng, classes);
+        },
+        |(lhs, rhs, out), i| {
+            mldsa_pointwise_mul(black_box(&mut **out), black_box(&lhs[i]), black_box(&rhs[i]));
+            u64::from(out[0])
+        },
+    ));
+
+    // SHA-256 compression: secret chaining value and four secret blocks.
+    let mut sha_in = vec![([0u32; 8], [[0u8; 64]; 4]); CHUNK];
+    let mut sha_state = [0u32; 8];
+    stats.push(measure_dudect(
+        "sha256_compress_blocks",
+        samples,
+        &mut (&mut sha_in, &mut sha_state),
+        |(inputs, _), rng, classes| {
+            for ((state, blocks), class) in inputs.iter_mut().zip(classes) {
+                let mask = 0u8.wrapping_sub(*class);
+                for word in state.iter_mut() {
+                    *word = (rng.next_u64() as u32) & 0u32.wrapping_sub(u32::from(*class));
+                }
+                for block in blocks.iter_mut() {
+                    rng.fill_masked_bytes(block, mask);
+                }
+            }
+        },
+        |(inputs, state), i| {
+            **state = inputs[i].0;
+            sha256_compress_blocks(black_box(&mut **state), black_box(&inputs[i].1));
+            u64::from(state[0])
+        },
+    ));
+
+    // Unreduced 64x128 carryless multiply-accumulate: secret words and a secret scalar.
+    let mut clmul_in = vec![([0u64; 16], 0u128); CHUNK];
+    let mut clmul_acc = [[0u128; 2]; 16];
+    stats.push(measure_dudect(
+        "gf2_64x128_clmul_acc",
+        samples,
+        &mut (&mut clmul_in, &mut clmul_acc),
+        |(inputs, _), rng, classes| {
+            for ((words, scalar), class) in inputs.iter_mut().zip(classes) {
+                let mask = 0u64.wrapping_sub(u64::from(*class));
+                rng.fill_masked_u64(words, mask);
+                *scalar = rng.next_u128() & (u128::from(mask) | (u128::from(mask) << 64));
+            }
+        },
+        |(inputs, acc), i| {
+            **acc = [[0; 2]; 16];
+            gf2_64x128_clmul_acc(
+                black_box(&mut acc[..]),
+                black_box(&inputs[i].0),
+                black_box(inputs[i].1),
+            );
+            acc[0][0] as u64
+        },
+    ));
+
+    // Elementwise scale-XOR in the polynomial field: secret source and scalar.
+    let mut scale_in = vec![([0u128; 16], 0u128); CHUNK];
+    let mut scale_dst = [0u128; 16];
+    stats.push(measure_dudect(
+        "gf2_128_scale_xor",
+        samples,
+        &mut (&mut scale_in, &mut scale_dst),
+        |(inputs, _), rng, classes| {
+            for ((src, scalar), class) in inputs.iter_mut().zip(classes) {
+                let mask = 0u128.wrapping_sub(u128::from(*class));
+                for value in src.iter_mut() {
+                    *value = rng.next_u128() & mask;
+                }
+                *scalar = rng.next_u128() & mask;
+            }
+        },
+        |(inputs, dst), i| {
+            **dst = [0; 16];
+            gf2_128_scale_xor(
+                black_box(&mut dst[..]),
+                black_box(&inputs[i].0),
+                black_box(inputs[i].1),
+            );
+            dst[0] as u64
+        },
+    ));
+
+    // Subset-XOR combination: secret rows under one fixed public pattern.
+    let mut pattern_rng = KeccakRng::new(0x5EED_0000_0000_0A77);
+    let mut pattern: XorCombinePattern = [[0; 16]; 128];
+    for row in pattern.iter_mut() {
+        pattern_rng.fill_bytes(row);
+    }
+    let mut combine_rows = vec![[[0u64; 4]; 64]; CHUNK];
+    let mut combine_out = Box::new([[[0u64; 4]; 64]; 2]);
+    stats.push(measure_dudect(
+        "gf2_xor_combine_planes",
+        samples,
+        &mut (&mut combine_rows, &mut combine_out),
+        |(rows, _), rng, classes| {
+            for (row, class) in rows.iter_mut().zip(classes) {
+                let mask = 0u64.wrapping_sub(u64::from(*class));
+                for plane in row.iter_mut() {
+                    rng.fill_masked_u64(plane, mask);
+                }
+            }
+        },
+        |(rows, out), i| {
+            gf2_xor_combine_planes(black_box(&rows[i]), black_box(&pattern), black_box(&mut **out));
+            out[0][0][0]
+        },
+    ));
+
+    // Bitslice pack and unpack of 256 Keccak states. Both are pure functions of their input,
+    // so no work copy is needed.
+    let mut states = vec![[[0u8; KECCAK_STATE_BYTES]; BITSLICE_LANES]; CHUNK];
+    let mut planes_out = vec![[0u64; 4]; KECCAK_STATE_BITS];
+    stats.push(measure_dudect(
+        "pack_256x200_bitslice",
+        samples,
+        &mut (&mut states, &mut planes_out),
+        |(states, _), rng, classes| {
+            for (state, class) in states.iter_mut().zip(classes) {
+                let mask = 0u8.wrapping_sub(*class);
+                for lane in state.iter_mut() {
+                    rng.fill_masked_bytes(lane, mask);
+                }
+            }
+        },
+        |(states, planes), i| {
+            let planes: &mut [BitPlane256; KECCAK_STATE_BITS] =
+                (&mut planes[..]).try_into().unwrap();
+            pack_256x200_bitslice(black_box(&states[i]), black_box(planes));
+            planes[0][0]
+        },
+    ));
+    drop(states);
+    let mut planes_in = vec![[[0u64; 4]; KECCAK_STATE_BITS]; CHUNK];
+    let mut states_out = vec![[0u8; KECCAK_STATE_BYTES]; BITSLICE_LANES];
+    stats.push(measure_dudect(
+        "unpack_256x200_bitslice",
+        samples,
+        &mut (&mut planes_in, &mut states_out),
+        |(planes, _), rng, classes| {
+            for (plane_set, class) in planes.iter_mut().zip(classes) {
+                let mask = 0u64.wrapping_sub(u64::from(*class));
+                for plane in plane_set.iter_mut() {
+                    rng.fill_masked_u64(plane, mask);
+                }
+            }
+        },
+        |(planes, states), i| {
+            let states: &mut [[u8; KECCAK_STATE_BYTES]; BITSLICE_LANES] =
+                (&mut states[..]).try_into().unwrap();
+            unpack_256x200_bitslice(black_box(&planes[i]), black_box(states));
+            u64::from(states[0][0])
+        },
+    ));
+    drop(planes_in);
+
+    // Tower <-> polynomial basis maps (`linear_map`).
+    let mut field = [0u128; CHUNK];
+    for (name, map) in [
+        ("tower128_to_poly128_ct", tower128_to_poly128_ct as fn(u128) -> u128),
+        ("poly128_to_tower128_ct", poly128_to_tower128_ct as fn(u128) -> u128),
+    ] {
+        stats.push(measure_dudect(
+            name,
+            samples,
+            &mut field,
+            |values, rng, classes| {
+                for (value, class) in values.iter_mut().zip(classes) {
+                    *value = rng.next_u128() & 0u128.wrapping_sub(u128::from(*class));
+                }
+            },
+            |values, i| map(black_box(values[i])) as u64,
+        ));
+    }
+
+    // Scalar Goldilocks add and sub on canonical operands.
+    let mut gl = [(0u64, 0u64); CHUNK];
+    for (name, op) in [
+        ("goldilocks_add_ct", goldilocks_add_ct as fn(u64, u64) -> u64),
+        ("goldilocks_sub_ct", goldilocks_sub_ct as fn(u64, u64) -> u64),
+    ] {
+        stats.push(measure_dudect(
+            name,
+            samples,
+            &mut gl,
+            |pairs, rng, classes| {
+                for (pair, class) in pairs.iter_mut().zip(classes) {
+                    let mask = 0u64.wrapping_sub(u64::from(*class));
+                    // Fixed class: the operands whose sum and difference both wrap.
+                    *pair = (
+                        ((rng.next_u64() % GOLDILOCKS_PRIME) & mask) | (!mask & 1),
+                        ((rng.next_u64() % GOLDILOCKS_PRIME) & mask)
+                            | (!mask & (GOLDILOCKS_PRIME - 1)),
+                    );
+                }
+            },
+            |pairs, i| op(black_box(pairs[i].0), black_box(pairs[i].1)),
+        ));
+    }
+
+    // Variable-length comparison: equal against a difference in the first byte.
+    let eq_ref = [0x5Au8; 96];
+    let mut eq_in = [[0x5Au8; 96]; CHUNK];
+    stats.push(measure_dudect(
+        "ct_eq_bytes",
+        samples,
+        &mut eq_in,
+        |tags, _rng, classes| {
+            for (tag, class) in tags.iter_mut().zip(classes) {
+                *tag = [0x5A; 96];
+                tag[0] ^= (*class ^ 1) & 1;
+            }
+        },
+        |tags, i| u64::from(ct_eq_bytes(black_box(&eq_ref), black_box(&tags[i]))),
+    ));
+
+    // Erasure must not depend on what is erased.
+    let mut zero_in = [[0u8; 96]; CHUNK];
+    let mut zero_work = [0u8; 96];
+    stats.push(measure_dudect(
+        "ct_memzero",
+        samples,
+        &mut (&mut zero_in, &mut zero_work),
+        |(inputs, _), rng, classes| {
+            for (input, class) in inputs.iter_mut().zip(classes) {
+                rng.fill_masked_bytes(input, 0u8.wrapping_sub(*class));
+            }
+        },
+        |(inputs, work), i| {
+            **work = inputs[i];
+            ct_memzero(black_box(&mut work[..]));
+            u64::from(work[0])
+        },
+    ));
+
+    // Eight-way Keccak-f[1600].
+    let mut k8 = vec![KeccakState8x::default(); CHUNK];
+    let mut k8_work = KeccakState8x::default();
+    stats.push(measure_dudect(
+        "keccak_f1600_x8",
+        samples,
+        &mut (&mut k8, &mut k8_work),
+        |(batch, _), rng, classes| {
+            for (state, class) in batch.iter_mut().zip(classes) {
+                let mask = 0u64.wrapping_sub(u64::from(*class));
+                for lane in state.0.iter_mut() {
+                    rng.fill_masked_u64(lane, mask);
+                }
+            }
+        },
+        |(batch, work), i| {
+            **work = batch[i];
+            keccak_f1600_x8(black_box(&mut **work));
+            work.0[0][0]
+        },
+    ));
+
+    // AVX2 Russian-peasant Shamir multiply and multiply-accumulate (portable elsewhere),
+    // at a length with both whole blocks and a tail.
+    const SHAMIR_LEN: usize = 80;
+    let mut sh = vec![([0u8; SHAMIR_LEN], [0u8; SHAMIR_LEN], 0u8); CHUNK];
+    let mut sh_out = [0u8; SHAMIR_LEN];
+    fn fill_shamir(
+        inputs: &mut [([u8; SHAMIR_LEN], [u8; SHAMIR_LEN], u8)],
+        rng: &mut KeccakRng,
+        classes: &[u8; CHUNK],
+    ) {
+        for ((a, b, scalar), class) in inputs.iter_mut().zip(classes) {
+            let mask = 0u8.wrapping_sub(*class);
+            rng.fill_masked_bytes(a, mask);
+            rng.fill_masked_bytes(b, mask);
+            *scalar = (rng.next_u64() as u8) & mask;
+        }
+    }
+    stats.push(measure_dudect(
+        "gf256_shamir_mul_avx2_russian_peasant",
+        samples,
+        &mut (&mut sh, &mut sh_out),
+        |(inputs, _), rng, classes| fill_shamir(inputs, rng, classes),
+        |(inputs, out), i| {
+            gf256_shamir_mul_avx2_russian_peasant(
+                black_box(&mut out[..]),
+                black_box(&inputs[i].0),
+                black_box(&inputs[i].1),
+            );
+            u64::from(out[0])
+        },
+    ));
+    stats.push(measure_dudect(
+        "gf256_shamir_mac_avx2_russian_peasant",
+        samples,
+        &mut (&mut sh, &mut sh_out),
+        |(inputs, _), rng, classes| fill_shamir(inputs, rng, classes),
+        |(inputs, out), i| {
+            **out = inputs[i].1;
+            gf256_shamir_mac_avx2_russian_peasant(
+                black_box(&mut out[..]),
+                black_box(&inputs[i].0),
+                black_box(inputs[i].2),
+            );
+            u64::from(out[0])
+        },
     ));
 
     report_and_gate(&stats, T_GATE_THRESHOLD);

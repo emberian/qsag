@@ -41,7 +41,7 @@ pub fn enter_aarch64_dit_region() -> HardwareDitGuard {
 /// Explicitly zeroize volatile scratch caller-saved NEON vector registers `v0..v7` and `v16..v31`
 /// (`v8..v15` low 64 bits are AAPCS64 callee-saved and managed by the compiler epilogue).
 #[inline(always)]
-unsafe fn wipe_neon_scratch_regs() {
+pub(crate) unsafe fn wipe_neon_scratch_regs() {
     // SAFETY: `v0..v7` and `v16..v31` are AAPCS64 caller-saved volatile vector registers;
     // declaring them as `out` clobbers ensures live secret intermediates are wiped before `ret`.
     unsafe {

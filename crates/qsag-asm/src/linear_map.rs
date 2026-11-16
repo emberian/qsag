@@ -94,10 +94,11 @@ pub(crate) fn map(x: u128, inverse: bool) -> u128 {
         }
     }
     #[cfg(target_arch = "aarch64")]
+    let _dit = crate::cpuid::ensure_aarch64_dit_enabled();
+    #[cfg(target_arch = "aarch64")]
     {
         let caps = crate::probe_capabilities();
         if caps.aarch64_neon && caps.aarch64_pmull {
-            let _dit = crate::cpuid::ensure_aarch64_dit_enabled();
             // SAFETY: checked NEON and PMULL support.
             return unsafe {
                 pmull_map(
@@ -124,7 +125,8 @@ unsafe fn gfni512(x: u128, matrices: &ByteMatrices) -> u128 {
     use core::arch::x86_64::*;
     let mut lo = _mm512_setzero_si512();
     let mut hi = _mm512_setzero_si512();
-    for (byte, matrix) in x.to_le_bytes().iter().zip(&matrices.0) {
+    let mut input_bytes = x.to_le_bytes();
+    for (byte, matrix) in input_bytes.iter().zip(&matrices.0) {
         let input = _mm512_set1_epi64(i64::from(*byte));
         // SAFETY: each matrix is sixteen u64s at a 64-byte boundary of `ByteMatrices`.
         unsafe {
@@ -146,6 +148,9 @@ unsafe fn gfni512(x: u128, matrices: &ByteMatrices) -> u128 {
     }
     let low = _mm_cvtsi128_si64(_mm512_cvtepi64_epi8(lo)) as u64;
     let high = _mm_cvtsi128_si64(_mm512_cvtepi64_epi8(hi)) as u64;
+    crate::volatile_fill(&mut input_bytes, 0);
+    // SAFETY: AVX-512F is enabled here; no vector value is live past this point.
+    unsafe { crate::wipe::wipe_zmm_regs() };
     u128::from(low) | (u128::from(high) << 64)
 }
 
@@ -193,6 +198,8 @@ unsafe fn gfni512x8(values: &mut [u128], matrices: &ByteMatrices) {
         *value = u128::from_le_bytes(bytes);
     }
     crate::volatile_fill(&mut columns, 0);
+    // SAFETY: AVX-512F is enabled here; no vector value is live past this point.
+    unsafe { crate::wipe::wipe_zmm_regs() };
 }
 
 pub(crate) fn map_batch(values: &mut [u128], inverse: bool) {
@@ -219,9 +226,10 @@ pub(crate) fn map_batch(values: &mut [u128], inverse: bool) {
 unsafe fn gfni128(x: u128, matrices: &ByteMatrices) -> u128 {
     use core::arch::x86_64::*;
     let mut out = [0u8; 16];
+    let mut input_bytes = x.to_le_bytes();
     for (pair, dst) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let mut sum = _mm_setzero_si128();
-        for (byte, matrix) in x.to_le_bytes().iter().zip(&matrices.0) {
+        for (byte, matrix) in input_bytes.iter().zip(&matrices.0) {
             // SAFETY: each public pair indexes two elements of the matrix, at a
             // 16-byte boundary of `ByteMatrices`.
             let m = unsafe { _mm_load_si128(matrix.as_ptr().add(pair * 2).cast()) };
@@ -233,7 +241,12 @@ unsafe fn gfni128(x: u128, matrices: &ByteMatrices) -> u128 {
         dst[0] = _mm_cvtsi128_si64(sum) as u8;
         dst[1] = _mm_cvtsi128_si64(_mm_srli_si128::<8>(sum)) as u8;
     }
-    u128::from_le_bytes(out)
+    let result = u128::from_le_bytes(out);
+    crate::volatile_fill(&mut out, 0);
+    crate::volatile_fill(&mut input_bytes, 0);
+    // SAFETY: SSE2 is baseline; no vector value is live past this point.
+    unsafe { crate::wipe::wipe_xmm_regs() };
+    result
 }
 
 // For each eight-bit row r, the coefficient of x^7 in x * reverse(r)
@@ -249,7 +262,8 @@ unsafe fn pclmul_map<const INVERSE: bool>(x: u128) -> u128 {
     };
     use core::arch::x86_64::*;
     let mut output = [0u8; 16];
-    for (byte, matrix) in x.to_le_bytes().iter().zip(&matrices.0) {
+    let mut input_bytes = x.to_le_bytes();
+    for (byte, matrix) in input_bytes.iter().zip(&matrices.0) {
         let input = _mm_cvtsi64_si128(i64::from(*byte));
         for (pair, dst) in output.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             // SAFETY: public pair index selects two in-bounds matrix words, at a
@@ -261,7 +275,12 @@ unsafe fn pclmul_map<const INVERSE: bool>(x: u128) -> u128 {
             dst[1] ^= _pext_u64(high, 0x8080808080808080) as u8;
         }
     }
-    u128::from_le_bytes(output)
+    let result = u128::from_le_bytes(output);
+    crate::volatile_fill(&mut output, 0);
+    crate::volatile_fill(&mut input_bytes, 0);
+    // SAFETY: SSE2 is baseline; no vector value is live past this point.
+    unsafe { crate::wipe::wipe_xmm_regs() };
+    result
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -269,14 +288,20 @@ unsafe fn pclmul_map<const INVERSE: bool>(x: u128) -> u128 {
 unsafe fn pmull_map(x: u128, matrices: &ByteMatrices) -> u128 {
     use core::arch::aarch64::*;
     let mut output = [0u8; 16];
-    for (byte, matrix) in x.to_le_bytes().iter().zip(&matrices.0) {
+    let mut input_bytes = x.to_le_bytes();
+    for (byte, matrix) in input_bytes.iter().zip(&matrices.0) {
         for (dst, &rows) in output.iter_mut().zip(matrix) {
             let product = vmull_p64(u64::from(*byte), rows) as u64;
             let parities = (product >> 7) & 0x0101010101010101;
             *dst ^= (parities.wrapping_mul(0x0102040810204080) >> 56) as u8;
         }
     }
-    u128::from_le_bytes(output)
+    let result = u128::from_le_bytes(output);
+    crate::volatile_fill(&mut output, 0);
+    crate::volatile_fill(&mut input_bytes, 0);
+    // SAFETY: NEON is baseline; no vector value is live past this point.
+    unsafe { crate::aarch64_simd::wipe_neon_scratch_regs() };
+    result
 }
 
 #[cfg(test)]

@@ -282,7 +282,8 @@ fn probe_x86_64() -> CpuCapabilities {
         let sha_ni = ssse3 && sse41 && ((leaf7_0.ebx & (1 << 29)) != 0);
         let avx512bw = (leaf7_0.ebx & (1 << 30)) != 0;
         let avx512vl = (leaf7_0.ebx & (1 << 31)) != 0;
-        let avx512 = os_zmm && avx512f && avx512dq && avx512bw && avx512vl;
+        // The AVX-512 kernels also run AVX2 code, so AVX2 is part of the capability.
+        let avx512 = os_zmm && avx2 && avx512f && avx512dq && avx512bw && avx512vl;
 
         let gfni = os_ymm && ((leaf7_0.ecx & (1 << 8)) != 0);
         let vaes = os_ymm && ((leaf7_0.ecx & (1 << 9)) != 0);
