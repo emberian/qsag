@@ -1477,4 +1477,12 @@ theorem projEqAffine_zk_constraint_sound {p ax ay : Nat} {P : RcbProjPoint} {zIn
   exact ⟨hZNe, hCoord hAx hX, hCoord hAy hY⟩
 
 
+/-! ### Exports for lane cred-mig -/
+
+theorem NULLIFIER_DOMAIN_eq : NULLIFIER_DOMAIN = 0x4d49475f4e554c31 := by rfl
+
+theorem ScalarGroup.nullifierTag_injective {g₁ g₂ : ScalarGroup}
+    (h : g₁.nullifierTag = g₂.nullifierTag) : g₁ = g₂ := by
+  cases g₁ <;> cases g₂ <;> first | rfl | (exact absurd (congrArg Goldilocks.val h) (by decide))
+
 end Qsag

@@ -1669,4 +1669,11 @@ theorem gf128_linear_layer_basis_certificate :
     gf2_128_mul_bv 0x9E3779B97F4A7C15F39CC0605CEDC835#128
       0xBF58476D1CE4E5B994D049BB133111EB#128 ≠ 1#128 := by
   decide
+
+/-! ### Exports for lane cred-mig -/
+
+/-- `X · X^j = X^(j+1)` below the reduction degree. -/
+theorem MigrationExecution.rustGf128MulX_twoPow_succ (j : Nat) (hj : j < 127) :
+    MigrationExecution.rustGf128MulX (BitVec.twoPow 128 j) = BitVec.twoPow 128 (j + 1) :=
+  MigrationExecution.rustGf128MulX_twoPow j hj
 end Qsag

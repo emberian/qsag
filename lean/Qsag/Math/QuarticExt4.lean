@@ -148,30 +148,37 @@ private theorem quadExtMulAssoc1 {R : Type} [LawfulCommRing R] (n x0 x1 y0 y1 z0
 structure QuarticGoldilocks where
   c0 : GoldilocksExt2
   c1 : GoldilocksExt2
-  deriving DecidableEq, Repr
+  deriving Repr
+
+@[expose, instance_reducible] def instDecidableEqQuarticGoldilocks (a b : QuarticGoldilocks) : Decidable (a = b) :=
+  if h0 : a.c0 = b.c0 then
+    if h1 : a.c1 = b.c1 then isTrue (by cases a; cases b; cases h0; cases h1; rfl)
+    else isFalse (fun h => h1 (congrArg QuarticGoldilocks.c1 h))
+  else isFalse (fun h => h0 (congrArg QuarticGoldilocks.c0 h))
+attribute [instance] instDecidableEqQuarticGoldilocks
 
 namespace QuarticGoldilocks
 
 @[ext] theorem ext {x y : QuarticGoldilocks} (h0 : x.c0 = y.c0) (h1 : x.c1 = y.c1) : x = y := by
   cases x; cases y; subst h0; subst h1; rfl
 
-def zero : QuarticGoldilocks := ⟨CommRingOps.zero, CommRingOps.zero⟩
-def one : QuarticGoldilocks := ⟨CommRingOps.one, CommRingOps.zero⟩
-def vBasis : QuarticGoldilocks := ⟨CommRingOps.zero, CommRingOps.one⟩
-def ofExt2 (a : GoldilocksExt2) : QuarticGoldilocks := ⟨a, CommRingOps.zero⟩
+@[expose] def zero : QuarticGoldilocks := ⟨CommRingOps.zero, CommRingOps.zero⟩
+@[expose] def one : QuarticGoldilocks := ⟨CommRingOps.one, CommRingOps.zero⟩
+@[expose] def vBasis : QuarticGoldilocks := ⟨CommRingOps.zero, CommRingOps.one⟩
+@[expose] def ofExt2 (a : GoldilocksExt2) : QuarticGoldilocks := ⟨a, CommRingOps.zero⟩
 
 instance : Inhabited QuarticGoldilocks := ⟨zero⟩
 
-def add (x y : QuarticGoldilocks) : QuarticGoldilocks :=
+@[expose] def add (x y : QuarticGoldilocks) : QuarticGoldilocks :=
   ⟨CommRingOps.add x.c0 y.c0, CommRingOps.add x.c1 y.c1⟩
 
-def neg (x : QuarticGoldilocks) : QuarticGoldilocks :=
+@[expose] def neg (x : QuarticGoldilocks) : QuarticGoldilocks :=
   ⟨CommRingOps.neg x.c0, CommRingOps.neg x.c1⟩
 
-def sub (x y : QuarticGoldilocks) : QuarticGoldilocks :=
+@[expose] def sub (x y : QuarticGoldilocks) : QuarticGoldilocks :=
   ⟨CommRingOps.sub x.c0 y.c0, CommRingOps.sub x.c1 y.c1⟩
 
-def mul (x y : QuarticGoldilocks) : QuarticGoldilocks :=
+@[expose] def mul (x y : QuarticGoldilocks) : QuarticGoldilocks :=
   ⟨CommRingOps.add (CommRingOps.mul x.c0 y.c0)
       (CommRingOps.mul GoldilocksExt2.uBasis (CommRingOps.mul x.c1 y.c1)),
    CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0)⟩
@@ -442,7 +449,7 @@ abbrev mul := QuarticGoldilocks.mul
 abbrev norm := QuarticGoldilocks.norm
 abbrev inv := QuarticGoldilocks.inv
 
-def embedBase (a : Goldilocks) : GoldilocksExt4 := ofExt2 (GoldilocksExt2.ofBase a)
+@[expose] def embedBase (a : Goldilocks) : GoldilocksExt4 := ofExt2 (GoldilocksExt2.ofBase a)
 theorem uBasis_not_square (z : GoldilocksExt2) : CommRingOps.mul z z ≠ nonResidue := QuarticGoldilocks.uBasis_not_square z
 theorem norm_ne_zero {z : GoldilocksExt4} (hz : z ≠ zero) : norm z ≠ GoldilocksExt2.zero := QuarticGoldilocks.norm_ne_zero hz
 theorem ext4_mul_inv_cancel {z : GoldilocksExt4} (hz : z ≠ zero) : z * z⁻¹ = one ∧ z⁻¹ * z = one :=
@@ -517,7 +524,219 @@ theorem towerToPoly_mul_hom (x y : GoldilocksExt4) :
     GoldilocksExt2.uBasis_c0, GoldilocksExt2.uBasis_c1]
   congr 1 <;> constructive_ring
 
+/-! ### The polynomial basis `𝔽_p[v]/(v^4 - 7)` as a field isomorphic to the tower
 
+`Ext4Poly` is the representation of `qsag-whir-verified`'s `Ext4 { a, b, c, d }`
+(`a + b v + c v^2 + d v^3`). Its ring operations are coordinatewise addition and `Ext4Poly.mul`;
+`towerToPoly`/`polyToTower` are mutually inverse and preserve `0, 1, +, -, sub, *` and the
+inverse, so every statement over the canonical tower `QuarticGoldilocks` transfers. -/
+
+private theorem eq_neg_of_add_eq_zero {R : Type} [LawfulCommRing R] {a b : R}
+    (h : CommRingOps.add b a = CommRingOps.zero) : b = CommRingOps.neg a := by
+  apply LawfulCommRing.add_left_cancel (a := a)
+  rw [LawfulCommRing.add_comm a b, h, LawfulCommRing.add_right_neg]
+
+private theorem ext2_neg_c0 (x : GoldilocksExt2) :
+    (CommRingOps.neg x).c0 = CommRingOps.neg x.c0 := by
+  apply eq_neg_of_add_eq_zero
+  rw [← GoldilocksExt2.add_c0, LawfulCommRing.add_left_neg, GoldilocksExt2.ring_zero,
+    GoldilocksExt2.zero_c0]
+
+private theorem ext2_neg_c1 (x : GoldilocksExt2) :
+    (CommRingOps.neg x).c1 = CommRingOps.neg x.c1 := by
+  apply eq_neg_of_add_eq_zero
+  rw [← GoldilocksExt2.add_c1, LawfulCommRing.add_left_neg, GoldilocksExt2.ring_zero,
+    GoldilocksExt2.zero_c1]
+
+private theorem ext2_sub_c0 (x y : GoldilocksExt2) :
+    (CommRingOps.sub x y).c0 = CommRingOps.sub x.c0 y.c0 := by
+  rw [LawfulCommRing.sub_eq_add_neg, GoldilocksExt2.add_c0, ext2_neg_c0,
+    ← LawfulCommRing.sub_eq_add_neg]
+
+private theorem ext2_sub_c1 (x y : GoldilocksExt2) :
+    (CommRingOps.sub x y).c1 = CommRingOps.sub x.c1 y.c1 := by
+  rw [LawfulCommRing.sub_eq_add_neg, GoldilocksExt2.add_c1, ext2_neg_c1,
+    ← LawfulCommRing.sub_eq_add_neg]
+
+namespace Ext4Poly
+
+theorem ext {x y : Ext4Poly} (h0 : x.a0 = y.a0) (h1 : x.a1 = y.a1) (h2 : x.a2 = y.a2)
+    (h3 : x.a3 = y.a3) : x = y := by
+  cases x; cases y; simp only at h0 h1 h2 h3; subst h0 h1 h2 h3; rfl
+
+def zero : Ext4Poly := ⟨CommRingOps.zero, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero⟩
+def one : Ext4Poly := ⟨CommRingOps.one, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero⟩
+
+def add (x y : Ext4Poly) : Ext4Poly :=
+  ⟨CommRingOps.add x.a0 y.a0, CommRingOps.add x.a1 y.a1, CommRingOps.add x.a2 y.a2,
+    CommRingOps.add x.a3 y.a3⟩
+
+def neg (x : Ext4Poly) : Ext4Poly :=
+  ⟨CommRingOps.neg x.a0, CommRingOps.neg x.a1, CommRingOps.neg x.a2, CommRingOps.neg x.a3⟩
+
+def sub (x y : Ext4Poly) : Ext4Poly :=
+  ⟨CommRingOps.sub x.a0 y.a0, CommRingOps.sub x.a1 y.a1, CommRingOps.sub x.a2 y.a2,
+    CommRingOps.sub x.a3 y.a3⟩
+
+instance : CommRingOps Ext4Poly where
+  zero := zero
+  one := one
+  add := add
+  mul := Ext4Poly.mul
+  neg := neg
+  sub := sub
+
+end Ext4Poly
+
+theorem towerToPoly_zero : towerToPoly CommRingOps.zero = CommRingOps.zero := by
+  show Ext4Poly.mk (CommRingOps.zero : GoldilocksExt2).c0 (CommRingOps.zero : GoldilocksExt2).c0
+    (CommRingOps.zero : GoldilocksExt2).c1 (CommRingOps.zero : GoldilocksExt2).c1 = Ext4Poly.zero
+  rw [GoldilocksExt2.ring_zero, GoldilocksExt2.zero_c0, GoldilocksExt2.zero_c1]
+  rfl
+
+theorem towerToPoly_one : towerToPoly CommRingOps.one = CommRingOps.one := by
+  show Ext4Poly.mk GoldilocksExt2.one.c0 (CommRingOps.zero : GoldilocksExt2).c0
+    GoldilocksExt2.one.c1 (CommRingOps.zero : GoldilocksExt2).c1 = Ext4Poly.one
+  rw [GoldilocksExt2.ring_zero, GoldilocksExt2.zero_c0, GoldilocksExt2.zero_c1,
+    GoldilocksExt2.one_c0, GoldilocksExt2.one_c1]
+  rfl
+
+theorem towerToPoly_add (x y : GoldilocksExt4) :
+    towerToPoly (CommRingOps.add x y) = CommRingOps.add (towerToPoly x) (towerToPoly y) := by
+  show Ext4Poly.mk (CommRingOps.add x.c0 y.c0).c0 (CommRingOps.add x.c1 y.c1).c0
+    (CommRingOps.add x.c0 y.c0).c1 (CommRingOps.add x.c1 y.c1).c1 =
+      Ext4Poly.add (towerToPoly x) (towerToPoly y)
+  rw [GoldilocksExt2.add_c0, GoldilocksExt2.add_c0, GoldilocksExt2.add_c1, GoldilocksExt2.add_c1]
+  rfl
+
+theorem towerToPoly_neg (x : GoldilocksExt4) :
+    towerToPoly (CommRingOps.neg x) = CommRingOps.neg (towerToPoly x) := by
+  show Ext4Poly.mk (CommRingOps.neg x.c0).c0 (CommRingOps.neg x.c1).c0
+    (CommRingOps.neg x.c0).c1 (CommRingOps.neg x.c1).c1 = Ext4Poly.neg (towerToPoly x)
+  rw [ext2_neg_c0, ext2_neg_c0, ext2_neg_c1, ext2_neg_c1]
+  rfl
+
+theorem towerToPoly_sub (x y : GoldilocksExt4) :
+    towerToPoly (CommRingOps.sub x y) = CommRingOps.sub (towerToPoly x) (towerToPoly y) := by
+  show Ext4Poly.mk (CommRingOps.sub x.c0 y.c0).c0 (CommRingOps.sub x.c1 y.c1).c0
+    (CommRingOps.sub x.c0 y.c0).c1 (CommRingOps.sub x.c1 y.c1).c1 =
+      Ext4Poly.sub (towerToPoly x) (towerToPoly y)
+  rw [ext2_sub_c0, ext2_sub_c0, ext2_sub_c1, ext2_sub_c1]
+  rfl
+
+theorem towerToPoly_mul (x y : GoldilocksExt4) :
+    towerToPoly (CommRingOps.mul x y) = CommRingOps.mul (towerToPoly x) (towerToPoly y) :=
+  towerToPoly_mul_hom x y
+
+theorem towerToPoly_injective {x y : GoldilocksExt4} (h : towerToPoly x = towerToPoly y) :
+    x = y := by
+  have h' := congrArg polyToTower h
+  rw [polyToTower_towerToPoly, polyToTower_towerToPoly] at h'
+  exact h'
+
+theorem polyToTower_injective {p q : Ext4Poly} (h : polyToTower p = polyToTower q) : p = q := by
+  have h' := congrArg towerToPoly h
+  rw [towerToPoly_polyToTower, towerToPoly_polyToTower] at h'
+  exact h'
+
+private theorem polyToTower_eq_of {p : Ext4Poly} {z : GoldilocksExt4} (h : towerToPoly z = p) :
+    polyToTower p = z := by
+  rw [← h, polyToTower_towerToPoly]
+
+theorem polyToTower_zero : polyToTower CommRingOps.zero = CommRingOps.zero :=
+  polyToTower_eq_of towerToPoly_zero
+
+theorem polyToTower_one : polyToTower CommRingOps.one = CommRingOps.one :=
+  polyToTower_eq_of towerToPoly_one
+
+theorem polyToTower_add (p q : Ext4Poly) :
+    polyToTower (CommRingOps.add p q) = CommRingOps.add (polyToTower p) (polyToTower q) :=
+  polyToTower_eq_of (by rw [towerToPoly_add, towerToPoly_polyToTower, towerToPoly_polyToTower])
+
+theorem polyToTower_neg (p : Ext4Poly) :
+    polyToTower (CommRingOps.neg p) = CommRingOps.neg (polyToTower p) :=
+  polyToTower_eq_of (by rw [towerToPoly_neg, towerToPoly_polyToTower])
+
+theorem polyToTower_sub (p q : Ext4Poly) :
+    polyToTower (CommRingOps.sub p q) = CommRingOps.sub (polyToTower p) (polyToTower q) :=
+  polyToTower_eq_of (by rw [towerToPoly_sub, towerToPoly_polyToTower, towerToPoly_polyToTower])
+
+theorem polyToTower_mul (p q : Ext4Poly) :
+    polyToTower (CommRingOps.mul p q) = CommRingOps.mul (polyToTower p) (polyToTower q) :=
+  polyToTower_eq_of (by rw [towerToPoly_mul, towerToPoly_polyToTower, towerToPoly_polyToTower])
+
+instance : LawfulCommRing Ext4Poly where
+  add_assoc a b c := polyToTower_injective (by
+    rw [polyToTower_add, polyToTower_add, polyToTower_add, polyToTower_add]
+    exact LawfulCommRing.add_assoc _ _ _)
+  add_comm a b := polyToTower_injective (by
+    rw [polyToTower_add, polyToTower_add]; exact LawfulCommRing.add_comm _ _)
+  zero_add a := polyToTower_injective (by
+    rw [polyToTower_add, polyToTower_zero]; exact LawfulCommRing.zero_add _)
+  add_zero a := polyToTower_injective (by
+    rw [polyToTower_add, polyToTower_zero]; exact LawfulCommRing.add_zero _)
+  add_left_neg a := polyToTower_injective (by
+    rw [polyToTower_add, polyToTower_neg, polyToTower_zero]
+    exact LawfulCommRing.add_left_neg _)
+  sub_eq_add_neg a b := polyToTower_injective (by
+    rw [polyToTower_sub, polyToTower_add, polyToTower_neg]
+    exact LawfulCommRing.sub_eq_add_neg _ _)
+  mul_assoc a b c := polyToTower_injective (by
+    rw [polyToTower_mul, polyToTower_mul, polyToTower_mul, polyToTower_mul]
+    exact LawfulCommRing.mul_assoc _ _ _)
+  mul_comm a b := polyToTower_injective (by
+    rw [polyToTower_mul, polyToTower_mul]; exact LawfulCommRing.mul_comm _ _)
+  one_mul a := polyToTower_injective (by
+    rw [polyToTower_mul, polyToTower_one]; exact LawfulCommRing.one_mul _)
+  mul_one a := polyToTower_injective (by
+    rw [polyToTower_mul, polyToTower_one]; exact LawfulCommRing.mul_one _)
+  left_distrib a b c := polyToTower_injective (by
+    rw [polyToTower_mul, polyToTower_add, polyToTower_add, polyToTower_mul, polyToTower_mul]
+    exact LawfulCommRing.left_distrib _ _ _)
+  right_distrib a b c := polyToTower_injective (by
+    rw [polyToTower_mul, polyToTower_add, polyToTower_add, polyToTower_mul, polyToTower_mul]
+    exact LawfulCommRing.right_distrib _ _ _)
+
+/-- Inverse in the polynomial basis, computed through the tower norm. -/
+def Ext4Poly.inv (p : Ext4Poly) : Ext4Poly := towerToPoly (QuarticGoldilocks.inv (polyToTower p))
+
+instance : LawfulField Ext4Poly where
+  inv := Ext4Poly.inv
+  zero_ne_one h := by
+    have h' := congrArg polyToTower h
+    rw [polyToTower_zero, polyToTower_one] at h'
+    exact LawfulField.zero_ne_one h'
+  inv_zero := by
+    show towerToPoly (QuarticGoldilocks.inv (polyToTower CommRingOps.zero)) = CommRingOps.zero
+    rw [polyToTower_zero]
+    show towerToPoly (QuarticGoldilocks.inv QuarticGoldilocks.zero) = CommRingOps.zero
+    rw [QuarticGoldilocks.inv_zero]
+    exact towerToPoly_zero
+  mul_inv_cancel {a} ha := polyToTower_injective (by
+    rw [polyToTower_mul, polyToTower_one]
+    show CommRingOps.mul (polyToTower a)
+      (polyToTower (towerToPoly (QuarticGoldilocks.inv (polyToTower a)))) = CommRingOps.one
+    rw [polyToTower_towerToPoly]
+    exact QuarticGoldilocks.mul_inv_cancel
+      (fun h0 => ha (polyToTower_injective (h0.trans polyToTower_zero.symm))))
+
+instance : NoZeroDivisors Ext4Poly where
+  eq_zero_or_eq_zero_of_mul_eq_zero {a b} h := by
+    have h' := congrArg polyToTower h
+    rw [polyToTower_mul, polyToTower_zero] at h'
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h' with h0 | h0
+    · exact .inl (polyToTower_injective (h0.trans polyToTower_zero.symm))
+    · exact .inr (polyToTower_injective (h0.trans polyToTower_zero.symm))
+
+theorem towerToPoly_inv (z : GoldilocksExt4) :
+    towerToPoly (LawfulField.inv z) = LawfulField.inv (towerToPoly z) := by
+  show towerToPoly (QuarticGoldilocks.inv z) =
+    towerToPoly (QuarticGoldilocks.inv (polyToTower (towerToPoly z)))
+  rw [polyToTower_towerToPoly]
+
+theorem polyToTower_inv (p : Ext4Poly) :
+    polyToTower (LawfulField.inv p) = LawfulField.inv (polyToTower p) :=
+  polyToTower_eq_of (by rw [towerToPoly_inv, towerToPoly_polyToTower])
 
 def ofLimbs (l0 l1 l2 l3 : Goldilocks) : GoldilocksExt4 := ⟨⟨l0, l1⟩, ⟨l2, l3⟩⟩
 def toLimbs (x : GoldilocksExt4) : List Goldilocks := [x.c0.c0, x.c0.c1, x.c1.c0, x.c1.c1]
@@ -950,6 +1169,94 @@ theorem decodeExt4Bytes32_injective (bs bs' : List UInt8) (x : GoldilocksExt4)
     (h : decodeExt4Bytes32 bs = some x) (h' : decodeExt4Bytes32 bs' = some x) : bs = bs' :=
   (decodeExt4Bytes32_canonical bs x h).symm.trans (decodeExt4Bytes32_canonical bs' x h')
 
+/-! ### The same 32 bytes read in the polynomial basis
+
+`field.rs:GoldilocksExt4::from_le_bytes_canonical` passes the four little-endian words to
+`qsag_whir_verified::decode_canonical_ext4` as `(w0, w2, w1, w3)`: the wire carries a
+polynomial-basis element `a0 + a1 v + a2 v^2 + a3 v^3` as `a0 ‖ a2 ‖ a1 ‖ a3`. -/
+
+open GoldilocksField.GoldilocksExt4 in
+/-- Wire encoding of a polynomial-basis element: limb order `a0, a2, a1, a3`. -/
+def encodeExt4PolyBytes32 (p : Ext4Poly) : List UInt8 :=
+  encodeGoldilocksLe8 p.a0 ++ (encodeGoldilocksLe8 p.a2 ++
+    (encodeGoldilocksLe8 p.a1 ++ (encodeGoldilocksLe8 p.a3 ++ [])))
+
+open GoldilocksField.GoldilocksExt4 in
+/-- `decode_canonical_ext4` on the four wire words: exactly 32 bytes, every limb `< p`. -/
+def decodeExt4PolyBytes32 (bs : List UInt8) : Option Ext4Poly :=
+  match decodeGoldilocksLe8 bs with
+  | none => none
+  | some (l0, r0) =>
+    match decodeGoldilocksLe8 r0 with
+    | none => none
+    | some (l1, r1) =>
+      match decodeGoldilocksLe8 r1 with
+      | none => none
+      | some (l2, r2) =>
+        match decodeGoldilocksLe8 r2 with
+        | some (l3, []) => some ⟨l0, l2, l1, l3⟩
+        | _ => none
+
+open GoldilocksField.GoldilocksExt4 in
+/-- The tower encoder and the polynomial-basis encoder write the same bytes. -/
+theorem encodeExt4Bytes32_eq_poly (x : GoldilocksExt4) :
+    encodeExt4Bytes32 x = encodeExt4PolyBytes32 (towerToPoly x) := by
+  rfl
+
+open GoldilocksField.GoldilocksExt4 in
+/-- The tower decoder is the polynomial-basis decoder followed by `polyToTower`. -/
+theorem decodeExt4Bytes32_eq_poly (bs : List UInt8) :
+    decodeExt4Bytes32 bs = (decodeExt4PolyBytes32 bs).map polyToTower := by
+  unfold decodeExt4Bytes32 decodeExt4PolyBytes32
+  cases decodeGoldilocksLe8 bs with
+  | none => rfl
+  | some p0 =>
+    obtain ⟨l0, r0⟩ := p0
+    dsimp only
+    cases decodeGoldilocksLe8 r0 with
+    | none => rfl
+    | some p1 =>
+      obtain ⟨l1, r1⟩ := p1
+      dsimp only
+      cases decodeGoldilocksLe8 r1 with
+      | none => rfl
+      | some p2 =>
+        obtain ⟨l2, r2⟩ := p2
+        dsimp only
+        cases decodeGoldilocksLe8 r2 with
+        | none => rfl
+        | some p3 =>
+          obtain ⟨l3, r3⟩ := p3
+          cases r3 with
+          | nil => rfl
+          | cons _ _ => rfl
+
+open GoldilocksField.GoldilocksExt4 in
+theorem decodeExt4PolyBytes32_eq_tower (bs : List UInt8) :
+    decodeExt4PolyBytes32 bs = (decodeExt4Bytes32 bs).map towerToPoly := by
+  rw [decodeExt4Bytes32_eq_poly]
+  cases decodeExt4PolyBytes32 bs with
+  | none => rfl
+  | some p => exact congrArg some (towerToPoly_polyToTower p).symm
+
+open GoldilocksField.GoldilocksExt4 in
+theorem decodeExt4PolyBytes32_encode (p : Ext4Poly) :
+    decodeExt4PolyBytes32 (encodeExt4PolyBytes32 p) = some p := by
+  rw [decodeExt4PolyBytes32_eq_tower, ← towerToPoly_polyToTower p, ← encodeExt4Bytes32_eq_poly,
+    decodeExt4Bytes32_encode]
+  rfl
+
+open GoldilocksField.GoldilocksExt4 in
+/-- Every accepted byte string is the canonical polynomial-basis encoding of what it decodes to. -/
+theorem decodeExt4PolyBytes32_canonical (bs : List UInt8) (p : Ext4Poly)
+    (h : decodeExt4PolyBytes32 bs = some p) : encodeExt4PolyBytes32 p = bs := by
+  have ht : decodeExt4Bytes32 bs = some (polyToTower p) := by
+    rw [decodeExt4Bytes32_eq_poly, h]; rfl
+  have hc := decodeExt4Bytes32_canonical bs (polyToTower p) ht
+  rw [encodeExt4Bytes32_eq_poly, towerToPoly_polyToTower] at hc
+  exact hc
+
+
 end Qsag
 
 namespace Qsag
@@ -982,7 +1289,309 @@ theorem natCast_ne_zero (k : Nat) (h1 : 1 ≤ k) (hk : k < goldilocksPrime) :
       change (CRing.natCast k : Goldilocks) = GoldilocksExt2.zero.c0 at h
       simpa only [GoldilocksExt2.zero_c0, Goldilocks.ring_zero] using h)
 
+/-! ### Exports for lane zkhem -/
+
+theorem add_c0 (x y : QuarticGoldilocks) :
+    (CommRingOps.add x y).c0 = CommRingOps.add x.c0 y.c0 := by
+  change (QuarticGoldilocks.add x y).c0 = _; unfold QuarticGoldilocks.add; rfl
+theorem add_c1 (x y : QuarticGoldilocks) :
+    (CommRingOps.add x y).c1 = CommRingOps.add x.c1 y.c1 := by
+  change (QuarticGoldilocks.add x y).c1 = _; unfold QuarticGoldilocks.add; rfl
+theorem sub_c0 (x y : QuarticGoldilocks) :
+    (CommRingOps.sub x y).c0 = CommRingOps.sub x.c0 y.c0 := by
+  change (QuarticGoldilocks.sub x y).c0 = _; unfold QuarticGoldilocks.sub; rfl
+theorem sub_c1 (x y : QuarticGoldilocks) :
+    (CommRingOps.sub x y).c1 = CommRingOps.sub x.c1 y.c1 := by
+  change (QuarticGoldilocks.sub x y).c1 = _; unfold QuarticGoldilocks.sub; rfl
+theorem neg_c0 (x : QuarticGoldilocks) : (CommRingOps.neg x).c0 = CommRingOps.neg x.c0 := by
+  change (QuarticGoldilocks.neg x).c0 = _; unfold QuarticGoldilocks.neg; rfl
+theorem neg_c1 (x : QuarticGoldilocks) : (CommRingOps.neg x).c1 = CommRingOps.neg x.c1 := by
+  change (QuarticGoldilocks.neg x).c1 = _; unfold QuarticGoldilocks.neg; rfl
+theorem mul_c0 (x y : QuarticGoldilocks) :
+    (CommRingOps.mul x y).c0 = CommRingOps.add (CommRingOps.mul x.c0 y.c0)
+      (CommRingOps.mul GoldilocksExt2.uBasis (CommRingOps.mul x.c1 y.c1)) := by
+  change (QuarticGoldilocks.mul x y).c0 = _; unfold QuarticGoldilocks.mul; rfl
+theorem mul_c1 (x y : QuarticGoldilocks) :
+    (CommRingOps.mul x y).c1 = CommRingOps.add (CommRingOps.mul x.c0 y.c1)
+      (CommRingOps.mul x.c1 y.c0) := by
+  change (QuarticGoldilocks.mul x y).c1 = _; unfold QuarticGoldilocks.mul; rfl
+theorem ringZero_c0 : (CommRingOps.zero : QuarticGoldilocks).c0 = CommRingOps.zero := by
+  change QuarticGoldilocks.zero.c0 = _; unfold QuarticGoldilocks.zero; rfl
+theorem ringZero_c1 : (CommRingOps.zero : QuarticGoldilocks).c1 = CommRingOps.zero := by
+  change QuarticGoldilocks.zero.c1 = _; unfold QuarticGoldilocks.zero; rfl
+theorem ringOne_c0 : (CommRingOps.one : QuarticGoldilocks).c0 = CommRingOps.one := by
+  change QuarticGoldilocks.one.c0 = _; unfold QuarticGoldilocks.one; rfl
+theorem ringOne_c1 : (CommRingOps.one : QuarticGoldilocks).c1 = CommRingOps.zero := by
+  change QuarticGoldilocks.one.c1 = _; unfold QuarticGoldilocks.one; rfl
+theorem norm_eq (z : QuarticGoldilocks) :
+    norm z = CommRingOps.sub (CommRingOps.mul z.c0 z.c0)
+      (CommRingOps.mul GoldilocksExt2.uBasis (CommRingOps.mul z.c1 z.c1)) := by
+  unfold norm; rfl
+theorem vBasis_c0 : vBasis.c0 = CommRingOps.zero := by unfold vBasis; rfl
+theorem vBasis_c1 : vBasis.c1 = CommRingOps.one := by unfold vBasis; rfl
+theorem fieldInv_eq (z : QuarticGoldilocks) : LawfulField.inv z = QuarticGoldilocks.inv z := by
+  rfl
+
 end QuarticGoldilocks
 
+
+end Qsag
+
+/-! ## Preimage multiplicity of 64-bit word reduction (`Goldilocks::from_u64_reduced`)
+
+A Fiat–Shamir field challenge is four 64-bit words, each reduced mod `p = 2^64 - 2^32 + 1`.
+Since `2^64 = p + (2^32 - 1)`, a residue `r < 2^32 - 1` has exactly the two preimages `r` and
+`r + p` in `[0, 2^64)` and every other residue exactly one. The induced distribution on
+`QuarticGoldilocks` therefore gives an element `z` exactly
+`ext4WordMultiplicity z ∈ {1, 2, 4, 8, 16}` of the `2^256` word quadruples; `0` gets `16`. -/
+
+namespace Qsag
+
+theorem range_filter_eq_length (r : Nat) : ∀ n : Nat,
+    ((List.range n).filter (fun w => decide (w = r))).length = if r < n then 1 else 0
+  | 0 => by
+    rw [ite_eq_right (Nat.not_lt_zero r)]
+    rfl
+  | n + 1 => by
+    rw [List.range_succ, List.filter_append, List.length_append, range_filter_eq_length r n]
+    by_cases h : n = r
+    · have hs : ([n].filter (fun w => decide (w = r))).length = 1 := by
+        rw [List.filter_cons, decide_eq_true h]; rfl
+      rw [hs, ite_eq_right (h ▸ Nat.lt_irrefl n), ite_eq_left (h ▸ Nat.lt_succ_self n)]
+    · have hs : ([n].filter (fun w => decide (w = r))).length = 0 := by
+        rw [List.filter_cons, decide_eq_false h]; rfl
+      rw [hs, Nat.add_zero]
+      by_cases hr : r < n
+      · rw [ite_eq_left hr, ite_eq_left (Nat.lt_succ_of_lt hr)]
+      · have hr' : ¬ r < n + 1 := fun hlt =>
+          h (Nat.le_antisymm (Nat.le_of_not_lt hr) (Nat.le_of_lt_succ hlt))
+        rw [ite_eq_right hr, ite_eq_right hr']
+
+/-- Among `0, …, p + e - 1` with `e ≤ p`, a residue `r < p` has exactly two preimages under
+    `· % p` when `r < e` (namely `r` and `r + p`) and exactly one otherwise. -/
+theorem range_filter_mod_length (p e r : Nat) (he : e ≤ p) (hr : r < p) :
+    ((List.range (p + e)).filter (fun w => decide (w % p = r))).length =
+      if r < e then 2 else 1 := by
+  have h1 : (List.range p).filter (fun w => decide (w % p = r)) =
+      (List.range p).filter (fun w => decide (w = r)) := by
+    apply List.filter_congr
+    intro w hw
+    rw [Nat.mod_eq_of_lt (List.mem_range.mp hw)]
+  have h2 : (List.range e).filter ((fun w => decide (w % p = r)) ∘ (fun w => p + w)) =
+      (List.range e).filter (fun w => decide (w = r)) := by
+    apply List.filter_congr
+    intro w hw
+    show decide ((p + w) % p = r) = decide (w = r)
+    rw [Nat.add_mod_left, Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le (List.mem_range.mp hw) he)]
+  rw [List.range_add, List.filter_append, List.length_append, List.filter_map, List.length_map,
+    h1, h2, range_filter_eq_length, range_filter_eq_length, ite_eq_left hr]
+  by_cases hre : r < e
+  · rw [ite_eq_left hre, ite_eq_left hre]
+  · rw [ite_eq_right hre, ite_eq_right hre]
+
+theorem goldilocksPrime_add_epsilon : goldilocksPrime + (2 ^ 32 - 1) = 2 ^ 64 := by decide
+
+/-- Proof-only exhaustive sample space. Its constructive list definition supports counting
+lemmas; compiling this closed constant would eagerly allocate 2^64 cells at module import. -/
+noncomputable def wordPool : List Nat := List.range (2 ^ 64)
+
+theorem wordPool_length : wordPool.length = 2 ^ 64 := List.length_range
+
+theorem mem_wordPool {w : Nat} : w ∈ wordPool ↔ w < 2 ^ 64 := List.mem_range
+
+/-- Number of 64-bit words that `Goldilocks.ofNat` (`from_u64_reduced`) sends to `a`. -/
+def Goldilocks.wordMultiplicity (a : Goldilocks) : Nat := if a.val < 2 ^ 32 - 1 then 2 else 1
+
+/-- **Exact preimage multiplicity of 64-bit word reduction.** -/
+theorem Goldilocks.wordPool_fiber_length (a : Goldilocks) :
+    (wordPool.filter (fun w => decide (Goldilocks.ofNat w = a))).length =
+      Goldilocks.wordMultiplicity a := by
+  have hc : wordPool.filter (fun w => decide (Goldilocks.ofNat w = a)) =
+      (List.range (goldilocksPrime + (2 ^ 32 - 1))).filter
+        (fun w => decide (w % goldilocksPrime = a.val)) := by
+    unfold wordPool
+    rw [goldilocksPrime_add_epsilon]
+    apply List.filter_congr
+    intro w _
+    exact decide_eq_decide.mpr
+      ⟨fun h => congrArg Goldilocks.val h, fun h => Goldilocks.ext h⟩
+  rw [hc, range_filter_mod_length goldilocksPrime (2 ^ 32 - 1) a.val (by decide) a.isLt]
+  rfl
+
+theorem Goldilocks.wordMultiplicity_le_two (a : Goldilocks) :
+    Goldilocks.wordMultiplicity a ≤ 2 := by
+  unfold Goldilocks.wordMultiplicity
+  by_cases h : a.val < 2 ^ 32 - 1
+  · rw [ite_eq_left h]; exact Nat.le_refl 2
+  · rw [ite_eq_right h]; exact Nat.le_succ 1
+
+theorem Goldilocks.wordMultiplicity_pos (a : Goldilocks) :
+    0 < Goldilocks.wordMultiplicity a := by
+  unfold Goldilocks.wordMultiplicity
+  by_cases h : a.val < 2 ^ 32 - 1
+  · rw [ite_eq_left h]; exact Nat.zero_lt_succ 1
+  · rw [ite_eq_right h]; exact Nat.zero_lt_succ 0
+
+/-- All pairs, first coordinate outermost. -/
+def pairPool {α β : Type} (A : List α) (B : List β) : List (α × β) :=
+  A.flatMap (fun a => B.map (fun b => (a, b)))
+
+private theorem filter_const_false {β : Type} : ∀ B : List β, B.filter (fun _ => false) = []
+  | [] => rfl
+  | _ :: B => filter_const_false B
+
+/-- A product predicate on a product pool is counted by the product of the two counts. -/
+theorem pairPool_filter_length {α β : Type} (B : List β) (p : α → Bool) (q : β → Bool) :
+    ∀ A : List α, ((pairPool A B).filter (fun x => p x.1 && q x.2)).length =
+      (A.filter p).length * (B.filter q).length
+  | [] => (Nat.zero_mul _).symm
+  | a :: A => by
+    have ih := pairPool_filter_length B p q A
+    have hrow : ((B.map (fun b => (a, b))).filter (fun x => p x.1 && q x.2)).length =
+        if p a = true then (B.filter q).length else 0 := by
+      rw [List.filter_map, List.length_map]
+      cases hp : p a
+      · have hf : B.filter ((fun x : α × β => p x.1 && q x.2) ∘ (fun b => (a, b))) = [] := by
+          have hg : B.filter ((fun x : α × β => p x.1 && q x.2) ∘ (fun b => (a, b))) =
+              B.filter (fun _ => false) := by
+            apply List.filter_congr
+            intro b _
+            show (p a && q b) = false
+            rw [hp, Bool.false_and]
+          rw [hg]
+          exact filter_const_false B
+        rw [hf, ite_eq_right Bool.false_ne_true]
+        rfl
+      · have hf : B.filter ((fun x : α × β => p x.1 && q x.2) ∘ (fun b => (a, b))) =
+            B.filter q := by
+          apply List.filter_congr
+          intro b _
+          show (p a && q b) = q b
+          rw [hp, Bool.true_and]
+        rw [hf, ite_eq_left rfl]
+    show (((B.map (fun b => (a, b))) ++ pairPool A B).filter
+      (fun x => p x.1 && q x.2)).length = _
+    rw [List.filter_append, List.length_append, ih, hrow, List.filter_cons]
+    cases hp : p a
+    · rw [ite_eq_right Bool.false_ne_true, ite_eq_right Bool.false_ne_true, Nat.zero_add]
+    · rw [ite_eq_left rfl, ite_eq_left rfl, List.length_cons, Nat.succ_mul, Nat.add_comm]
+
+theorem pairPool_length {α β : Type} (B : List β) :
+    ∀ A : List α, (pairPool A B).length = A.length * B.length
+  | [] => (Nat.zero_mul _).symm
+  | a :: A => by
+    show ((B.map (fun b => (a, b))) ++ pairPool A B).length = _
+    rw [List.length_append, List.length_map, pairPool_length B A, List.length_cons,
+      Nat.succ_mul, Nat.add_comm]
+
+theorem mem_pairPool {α β : Type} {A : List α} {B : List β} {x : α × β} :
+    x ∈ pairPool A B ↔ x.1 ∈ A ∧ x.2 ∈ B := by
+  unfold pairPool
+  rw [List.mem_flatMap]
+  constructor
+  · rintro ⟨a, ha, hx⟩
+    obtain ⟨b, hb, rfl⟩ := List.mem_map.mp hx
+    exact ⟨ha, hb⟩
+  · rintro ⟨h1, h2⟩
+    exact ⟨x.1, h1, List.mem_map.mpr ⟨x.2, h2, rfl⟩⟩
+
+/-- All quadruples of 64-bit words: the `2^256` equally likely outcomes of a 32-byte squeeze. -/
+noncomputable def wordQuadPool : List (Nat × Nat × Nat × Nat) :=
+  pairPool wordPool (pairPool wordPool (pairPool wordPool wordPool))
+
+theorem wordQuadPool_length : wordQuadPool.length = 2 ^ 256 := by
+  unfold wordQuadPool
+  rw [pairPool_length, pairPool_length, pairPool_length, wordPool_length]
+
+theorem mem_wordQuadPool {q : Nat × Nat × Nat × Nat} :
+    q ∈ wordQuadPool ↔ q.1 < 2 ^ 64 ∧ q.2.1 < 2 ^ 64 ∧ q.2.2.1 < 2 ^ 64 ∧ q.2.2.2 < 2 ^ 64 := by
+  unfold wordQuadPool
+  rw [mem_pairPool, mem_pairPool, mem_pairPool, mem_wordPool, mem_wordPool, mem_wordPool,
+    mem_wordPool]
+
+/-- Limbwise reduction of four words into the tower, in `from_limbs` order
+    `[c0.c0, c0.c1, c1.c0, c1.c1]`. -/
+def ofWordQuad (q : Nat × Nat × Nat × Nat) : QuarticGoldilocks :=
+  ⟨⟨Goldilocks.ofNat q.1, Goldilocks.ofNat q.2.1⟩,
+    ⟨Goldilocks.ofNat q.2.2.1, Goldilocks.ofNat q.2.2.2⟩⟩
+
+theorem ofWordQuad_mk (w0 w1 w2 w3 : Nat) :
+    ofWordQuad (w0, w1, w2, w3) =
+      ⟨⟨Goldilocks.ofNat w0, Goldilocks.ofNat w1⟩, ⟨Goldilocks.ofNat w2, Goldilocks.ofNat w3⟩⟩ := by
+  rfl
+
+/-- Number of word quadruples that reduce to `z`. -/
+def ext4WordMultiplicity (z : QuarticGoldilocks) : Nat :=
+  Goldilocks.wordMultiplicity z.c0.c0 * (Goldilocks.wordMultiplicity z.c0.c1 *
+    (Goldilocks.wordMultiplicity z.c1.c0 * Goldilocks.wordMultiplicity z.c1.c1))
+
+theorem ofWordQuad_eq_iff (q : Nat × Nat × Nat × Nat) (z : QuarticGoldilocks) :
+    ofWordQuad q = z ↔ Goldilocks.ofNat q.1 = z.c0.c0 ∧ Goldilocks.ofNat q.2.1 = z.c0.c1 ∧
+      Goldilocks.ofNat q.2.2.1 = z.c1.c0 ∧ Goldilocks.ofNat q.2.2.2 = z.c1.c1 := by
+  constructor
+  · rintro rfl
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  · rintro ⟨h0, h1, h2, h3⟩
+    exact QuarticGoldilocks.ext (GoldilocksExt2.ext h0 h1) (GoldilocksExt2.ext h2 h3)
+
+/-- **Exact point mass of the squeezed challenge.** Of the `2^256` word quadruples, exactly
+    `ext4WordMultiplicity z` reduce to `z`. -/
+theorem wordQuadPool_fiber_length (z : QuarticGoldilocks) :
+    (wordQuadPool.filter (fun q => decide (ofWordQuad q = z))).length =
+      ext4WordMultiplicity z := by
+  have hc : wordQuadPool.filter (fun q => decide (ofWordQuad q = z)) =
+      wordQuadPool.filter (fun q => decide (Goldilocks.ofNat q.1 = z.c0.c0) &&
+        (decide (Goldilocks.ofNat q.2.1 = z.c0.c1) &&
+          (decide (Goldilocks.ofNat q.2.2.1 = z.c1.c0) &&
+            decide (Goldilocks.ofNat q.2.2.2 = z.c1.c1)))) := by
+    apply List.filter_congr
+    intro q _
+    rw [decide_eq_decide.mpr (ofWordQuad_eq_iff q z), Bool.decide_and, Bool.decide_and,
+      Bool.decide_and]
+  have h3 := pairPool_filter_length wordPool
+    (fun w => decide (Goldilocks.ofNat w = z.c1.c0))
+    (fun w => decide (Goldilocks.ofNat w = z.c1.c1)) wordPool
+  have h2 := pairPool_filter_length (pairPool wordPool wordPool)
+    (fun w => decide (Goldilocks.ofNat w = z.c0.c1))
+    (fun t : Nat × Nat => decide (Goldilocks.ofNat t.1 = z.c1.c0) &&
+      decide (Goldilocks.ofNat t.2 = z.c1.c1)) wordPool
+  have h1 := pairPool_filter_length (pairPool wordPool (pairPool wordPool wordPool))
+    (fun w => decide (Goldilocks.ofNat w = z.c0.c0))
+    (fun t : Nat × Nat × Nat => decide (Goldilocks.ofNat t.1 = z.c0.c1) &&
+      (decide (Goldilocks.ofNat t.2.1 = z.c1.c0) &&
+        decide (Goldilocks.ofNat t.2.2 = z.c1.c1))) wordPool
+  rw [h2, h3, Goldilocks.wordPool_fiber_length, Goldilocks.wordPool_fiber_length,
+    Goldilocks.wordPool_fiber_length, Goldilocks.wordPool_fiber_length] at h1
+  rw [hc]
+  exact h1
+
+theorem ext4WordMultiplicity_le_sixteen (z : QuarticGoldilocks) :
+    ext4WordMultiplicity z ≤ 16 :=
+  Nat.mul_le_mul (Goldilocks.wordMultiplicity_le_two _)
+    (Nat.mul_le_mul (Goldilocks.wordMultiplicity_le_two _)
+      (Nat.mul_le_mul (Goldilocks.wordMultiplicity_le_two _)
+        (Goldilocks.wordMultiplicity_le_two _)))
+
+theorem ext4WordMultiplicity_pos (z : QuarticGoldilocks) : 0 < ext4WordMultiplicity z :=
+  Nat.mul_pos (Goldilocks.wordMultiplicity_pos _)
+    (Nat.mul_pos (Goldilocks.wordMultiplicity_pos _)
+      (Nat.mul_pos (Goldilocks.wordMultiplicity_pos _) (Goldilocks.wordMultiplicity_pos _)))
+
+/-- The constant `16` is attained: zero has sixteen word-quadruple preimages. -/
+theorem ext4WordMultiplicity_zero :
+    ext4WordMultiplicity (CommRingOps.zero : QuarticGoldilocks) = 16 := by
+  show Goldilocks.wordMultiplicity (CommRingOps.zero : GoldilocksExt2).c0 *
+    (Goldilocks.wordMultiplicity (CommRingOps.zero : GoldilocksExt2).c1 *
+      (Goldilocks.wordMultiplicity (CommRingOps.zero : GoldilocksExt2).c0 *
+        Goldilocks.wordMultiplicity (CommRingOps.zero : GoldilocksExt2).c1)) = 16
+  rw [GoldilocksExt2.ring_zero, GoldilocksExt2.zero_c0, GoldilocksExt2.zero_c1,
+    Goldilocks.ring_zero]
+  decide
+
+/-- At most sixteen of the `2^256` word quadruples reduce to any fixed element. -/
+theorem wordQuadPool_fiber_le_sixteen (z : QuarticGoldilocks) :
+    (wordQuadPool.filter (fun q => decide (ofWordQuad q = z))).length ≤ 16 := by
+  rw [wordQuadPool_fiber_length]
+  exact ext4WordMultiplicity_le_sixteen z
 
 end Qsag
