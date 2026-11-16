@@ -6408,3 +6408,155 @@ theorem poseidon2CompressWeighted_iota_kat : (let out := poseidon2CompressWeight
 
 end Qsag
 end
+
+/-! ### Exports for lane agg -/
+public section
+namespace Qsag
+
+/-- Kernel KAT for two 188-byte messages that differ in one byte (offset 6: `1` versus `2`). They
+    are the `encodeRegistry` images of the two-key S-box registry row with threshold `1` and `2`
+    (`Qsag.sbox7TwoKeyRegistry_threshold_digest_kat`). -/
+theorem poseidon2Hash32_sbox7TwoKeyRegistry_threshold_kat :
+    poseidon2Hash32
+      [
+       1, 185, 1, 5, 1, 0, 1, 1, 22, 81, 83, 65, 71, 46, 80, 81, 46, 83, 85, 73, 84, 69, 46, 83,
+       66, 79, 88, 55, 47, 118, 49, 17, 8, 1, 2, 1, 2, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1,
+       1, 137, 1, 2, 67, 2, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       67, 2, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] ≠
+    poseidon2Hash32
+      [
+       1, 185, 1, 5, 1, 0, 1, 2, 22, 81, 83, 65, 71, 46, 80, 81, 46, 83, 85, 73, 84, 69, 46, 83,
+       66, 79, 88, 55, 47, 118, 49, 17, 8, 1, 2, 1, 2, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1,
+       1, 137, 1, 2, 67, 2, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       67, 2, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] := by
+  decide +kernel
+
+theorem lane4Neg_eq (a : Lane4) : lane4Neg a = lane4Sub lane4Zero a := by rfl
+
+theorem state12Sum_eq (st : Poseidon2State12) :
+    state12Sum st =
+      Goldilocks.add (Goldilocks.add (lane4Sum st.b0) (lane4Sum st.b1)) (lane4Sum st.b2) := by
+  rfl
+
+/-- `x ↦ x ^ 3` identifies `ω₃ ≠ 1` with `1`, because `3 ∣ p - 1`. -/
+theorem goldilocksOmega3_cube_collision :
+    goldilocksOmega3 ≠ Goldilocks.one ∧ goldilocksOmega3 ≠ Goldilocks.zero ∧
+    goldilocksPow goldilocksOmega3 3 = goldilocksPow Goldilocks.one 3 ∧
+    3 ∣ goldilocksPrime - 1 := by
+  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
+    ⟨6148914689804861440, by decide⟩⟩
+  apply Goldilocks.ext
+  rw [goldilocksPow_val, goldilocksPow_val]
+  decide
+
+/-- `x ↦ x ^ 5` identifies `ω₅ ≠ 1` with `1`, because `5 ∣ p - 1`. -/
+theorem goldilocksOmega5_fifth_power_collision :
+    goldilocksOmega5 ≠ Goldilocks.one ∧ goldilocksOmega5 ≠ Goldilocks.zero ∧
+    goldilocksPow goldilocksOmega5 5 = goldilocksPow Goldilocks.one 5 ∧
+    5 ∣ goldilocksPrime - 1 := by
+  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
+    ⟨3689348813882916864, by decide⟩⟩
+  apply Goldilocks.ext
+  rw [goldilocksPow_val, goldilocksPow_val]
+  decide
+
+/-- The superseded internal matrix `diag(-2, 1, 2, 4, ..., 1024) + 1·1ᵀ` has the displayed
+    nonzero eigenvector for `λ₀ = 8914261387277420341`; the deployed `applyMI` does not. The
+    binders name the displayed matrix and vector. -/
+theorem superseded_mi_rational_eigenvector_kat
+    (mi : Poseidon2State12 → Poseidon2State12)
+    (hMi : mi = fun st =>
+      ⟨⟨Goldilocks.add (Goldilocks.mul (goldOfInt (-2)) st.b0.x0) (state12Sum st),
+        Goldilocks.add st.b0.x1 (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 2) st.b0.x2) (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 4) st.b0.x3) (state12Sum st)⟩,
+       ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 8) st.b1.x0) (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 16) st.b1.x1) (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 32) st.b1.x2) (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 64) st.b1.x3) (state12Sum st)⟩,
+       ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 128) st.b2.x0) (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 256) st.b2.x1) (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 512) st.b2.x2) (state12Sum st),
+        Goldilocks.add (Goldilocks.mul (goldOfInt 1024) st.b2.x3) (state12Sum st)⟩⟩)
+    (v : Poseidon2State12)
+    (hV : v =
+      ⟨⟨Goldilocks.ofNat 8415733694666260766, Goldilocks.ofNat 10081604446170657914,
+        Goldilocks.ofNat 13429757962329074280, Goldilocks.ofNat 7212905167159261059⟩,
+       ⟨Goldilocks.ofNat 7177536167446655380, Goldilocks.ofNat 16173559831921257667,
+        Goldilocks.ofNat 11410676009809774369, Goldilocks.ofNat 263994636750658321⟩,
+       ⟨Goldilocks.ofNat 11338638786567724180, Goldilocks.ofNat 17416777037312523837,
+        Goldilocks.ofNat 8867871345638664998, Goldilocks.ofNat 17338153400129577477⟩⟩) :
+    v ≠ state12Zero ∧
+    mi v = state12Scale (Goldilocks.ofNat 8914261387277420341) v ∧
+    ¬ (applyMI v = state12Scale (Goldilocks.ofNat 8914261387277420341) v) := by
+  subst hMi hV
+  decide +kernel
+
+#verify_constructive poseidon2_interpolation_margin_needs_26
+#verify_constructive CrossProtocol.inverse_feedforward_relation
+
+/-- Kernel KAT of the duplex `s ↦ poseidon2Perm12 (s + addend)` from the zero state: the two
+    orders of the block addends of the frames `(10, [1]), (11, [])` and `(10, [2]), (11, [])`
+    leave different squeezed lanes `b0`. -/
+theorem poseidon2Duplex_swapped_rounds_kat :
+    ¬ ((let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩
+        [⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 2, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩]
+      [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) =
+       (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩
+        [⟨⟨Goldilocks.ofNat 2, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩]
+      [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val])) := by
+  decide +kernel
+
+/-- Kernel KAT of the same duplex on the block addends of a child-verifier transcript prefix
+    (geometry, public, root, two sumcheck rounds `[1, 0, 0, 0]` / `[0, 0, 0, 0]` with their
+    challenge frames, shift frame, `theta` frame): exchanging the two sumcheck rounds changes the
+    squeezed lane `b0`. -/
+theorem poseidon2Duplex_swapped_sumcheck_kat :
+    ¬ ((let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩
+        [⟨⟨Goldilocks.ofNat 0x4657484952000001, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 1⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 3⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 2, Goldilocks.ofNat 12⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 3, Goldilocks.ofNat 4⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 4⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 4⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 12, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 13, Goldilocks.ofNat 0⟩⟩]
+      [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) =
+       (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩
+        [⟨⟨Goldilocks.ofNat 0x4657484952000001, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 1⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 3⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 2, Goldilocks.ofNat 12⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 3, Goldilocks.ofNat 4⟩⟩,
+         ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 4⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 4⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 12, Goldilocks.ofNat 0⟩⟩,
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 13, Goldilocks.ofNat 0⟩⟩]
+      [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val])) := by
+  decide +kernel
+
+end Qsag
+end
