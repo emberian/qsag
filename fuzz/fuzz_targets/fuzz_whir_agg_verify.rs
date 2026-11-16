@@ -33,7 +33,8 @@ use qsag_agg::zk_hem::blind_vc::{
 };
 use qsag_agg::zk_hem::capability::{
     CAPABILITY_WIRE_MAGIC, CapabilityBatchStatement, CapabilityParams, CapabilityRelation,
-    CapabilityRequest, ZkCapabilityBatchProof,
+    BearerCapability, CapCaveat, CapabilityIssuerDirectory, CapabilityPresentationInput,
+    CapabilityRequest, SortedRevocationTree, ZkCapabilityBatchProof,
 };
 use qsag_agg::zk_hem::full_shard::{
     FullShardMergeProof, FullShardMergeRelation, FullShardParams, RECURSIVE_SHARD_WIRE_MAGIC,
@@ -59,6 +60,7 @@ struct FuzzFixtures {
     multisig_rel: MultisigRelation,
     cap_rel: CapabilityRelation,
     cap_stmt: CapabilityBatchStatement,
+    cap_seed: Vec<u8>,
     fp_params: FixedPathWhirParams,
     fp_stmt: ChildWhirStatement,
     child_whir_rel: ChildWhirMergeRelation,
@@ -112,19 +114,31 @@ fn fixtures() -> &'static FuzzFixtures {
             revocation_depth: 2,
         })
         .expect("valid CapabilityRelation");
-        let cap_stmt = CapabilityBatchStatement {
-            issuer_root: [f(0x11); 4],
-            revocation_root: [f(0x22); 4],
-            revocation_epoch: 1,
-            request: CapabilityRequest {
-                audience: [f(0x33); 4],
-                resource: [f(0x44); 4],
-                actions: 1,
-                amount: 100,
-                now: 1_700_000_000,
-            },
-            presentation_tags: vec![[f(0x55); 4]],
-        };
+        // A valid enrolled capability seed reaches deep parsing and verification even
+        // in short campaigns, rather than requiring random bytes to discover a proof.
+        let mut cap = BearerCapability::issue(&[f(7); 4], [f(1); 4], [f(0x33); 4]).unwrap();
+        cap.attenuate(CapCaveat::Actions(1)).unwrap();
+        let directory = CapabilityIssuerDirectory::new(2, &[cap.mint_leaf()]).unwrap();
+        let revocations = SortedRevocationTree::new(2, 1, &[]).unwrap();
+        let non_membership = revocations.prove_non_membership(cap.token_id()).unwrap();
+        let mut inputs = [CapabilityPresentationInput {
+            capability: cap,
+            issuer_index: 0,
+            issuer_siblings: directory.opening(0).unwrap(),
+            non_membership,
+        }];
+        let cap_stmt = CapabilityBatchStatement::prepare_sorted(
+            directory.root(), revocations.root(), 1,
+            CapabilityRequest {
+                audience: [f(0x33); 4], resource: [f(0x44); 4],
+                actions: 1, amount: 100, now: 1_700_000_000,
+            }, &mut inputs, b"fuzz-cap",
+        ).unwrap();
+        let cap_proof = cap_rel.prove(&cap_stmt, &inputs, b"fuzz-cap",
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, &[0x42; 32]).unwrap();
+        assert!(cap_rel.verify(&cap_stmt, b"fuzz-cap",
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, &cap_proof));
+        let cap_seed = cap_proof.to_bytes();
 
         // 5. `FixedPathWhirParams` + 1-child `ChildWhirMergeRelation`.
         let fp_regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
@@ -183,6 +197,7 @@ fn fixtures() -> &'static FuzzFixtures {
             multisig_rel,
             cap_rel,
             cap_stmt,
+            cap_seed,
             fp_params,
             fp_stmt,
             child_whir_rel,
@@ -252,6 +267,23 @@ fuzz_target!(|data: &[u8]| {
             let _ = fx
                 .cap_rel
                 .verify(&fx.cap_stmt, b"fuzz-cap", zk_regime, &proof);
+        }
+    }
+
+    // Structured sparse mutations of a real proof. The two-byte corpus seed also
+    // exercises an unchanged valid proof; each subsequent (offset:u32, xor:u8) edits it.
+    if let Some(edits) = data.strip_prefix(&[0xca, 0x50]) {
+        let mut candidate = fx.cap_seed.clone();
+        for edit in edits.chunks_exact(5) {
+            let offset = u32::from_le_bytes(edit[..4].try_into().unwrap()) as usize;
+            let index = offset % candidate.len();
+            candidate[index] ^= edit[4];
+        }
+        let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
+        if let Some(proof) = ZkCapabilityBatchProof::from_bytes(&candidate, &fx.cap_rel, regime) {
+            assert_eq!(proof.to_bytes(), candidate);
+            let verified = fx.cap_rel.verify(&fx.cap_stmt, b"fuzz-cap", regime, &proof);
+            if candidate == fx.cap_seed { assert!(verified); }
         }
     }
 

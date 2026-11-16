@@ -41,9 +41,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$RUN_FUZZ" -eq 1 && "$FUZZ_SECS" -eq 0 ]]; then
-    echo "Fuzz duration must be positive (libFuzzer treats zero as unlimited)." >&2
-    exit 2
+if [[ "$RUN_FUZZ" -eq 1 ]]; then
+    # Normalize decimal input (including 08), rejecting zero and arithmetic overflow.
+    if [[ ! "$FUZZ_SECS" =~ ^0*([1-9][0-9]{0,4})$ ]]; then
+        echo "Fuzz duration must be 1..86400 seconds." >&2
+        exit 2
+    fi
+    FUZZ_SECS=$((10#${BASH_REMATCH[1]}))
+    if [[ "$FUZZ_SECS" -gt 86400 ]]; then
+        echo "Fuzz duration must be 1..86400 seconds." >&2
+        exit 2
+    fi
 fi
 
 if [[ "$REGEN_LEAN" -eq 1 ]]; then
@@ -94,6 +102,13 @@ if [[ "$RUN_FUZZ" -eq 1 ]]; then
             CORPUS_DIR="${REPO_ROOT}/fuzz/corpus/${target}"
             ARTIFACT_DIR="${REPO_ROOT}/fuzz/artifacts/${target}"
             mkdir -p "${CORPUS_DIR}" "${ARTIFACT_DIR}"
+            if [[ "$target" == fuzz_whir_agg_verify ]]; then
+                # Deterministic entry into the structured real-capability proof mutator.
+                # Keep an existing seed intact when resuming a corpus.
+                if [[ ! -e "${CORPUS_DIR}/capability-structured" ]]; then
+                    printf '\312\120' > "${CORPUS_DIR}/capability-structured"
+                fi
+            fi
             RUN_LOG="${ARTIFACT_DIR}/last_run.log"
             "./target/${HOST_TRIPLE}/release/${target}" "${CORPUS_DIR}" \
                 -max_total_time="${FUZZ_SECS}" \
