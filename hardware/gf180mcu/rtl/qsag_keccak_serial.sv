@@ -2,14 +2,7 @@
 //
 // Executes 1 full Keccak round in 5 clocks (60 clocks for 12-round TurboSHAKE256, 120 clocks for
 // 24-round Keccak-f[1600] — 25.0x faster than the 1,500 / 3,000-clock word-serial baseline) with
-// ZERO eviction scratch flip-flops:
-//   * Column parities D[0..4] are computed combinationally over the 25 sponge wires at `start`
-//     and at step k = 4 of each round (when st[0..19] hold rows 0..3 of A_next and a_out[0..4]
-//     holds row 4 of A_next), latching into 5 x 64-bit secret-cleared registers (320 bits total,
-//     64 bits smaller than the old serial ring + tmp!).
-//   * Steps k = 0..4 each consume one diagonal of 5 lanes through fixed wire-only rotations,
-//     apply chi + iota, write row k of A_next, and evict still-live lanes into the just-freed
-//     diagonal slots so all 25 lanes return to canonical order at k = 4.
+// ZERO eviction scratch flip-flops and ONLY 5 x 64-bit output wires (`kc_aout_flat`).
 `default_nettype none
 
 module qsag_keccak_rc (
@@ -56,8 +49,9 @@ module qsag_keccak_serial (
     output wire              busy,
     output logic             done,
     input  wire  [25*64-1:0] st_flat_i,
-    output logic [24:0]      kc_we,
-    output logic [25*64-1:0] kc_wdata
+    output wire              kc_run,
+    output wire  [2:0]       kc_k,
+    output wire  [5*64-1:0]  kc_aout_flat
 );
     function automatic logic [63:0] rol64(input logic [63:0] v, input int sh);
         if (sh == 0) rol64 = v;
@@ -77,7 +71,9 @@ module qsag_keccak_serial (
     logic [2:0] k;
     wire [63:0] d_reg [5];
 
-    assign busy = run;
+    assign busy   = run;
+    assign kc_run = run;
+    assign kc_k   = k;
 
     wire [63:0] rc;
     qsag_keccak_rc u_rc (.idx(rnd), .rc(rc));
@@ -124,7 +120,6 @@ module qsag_keccak_serial (
         endcase
     end
 
-    // Chi + Iota (plus optional single-bit laser fault-injection test hook at round 18, k=0)
     wire [63:0] iota_xor = (k == 3'd0) ? (rc ^ ((fault_inj && rnd == 5'd18) ? 64'h0000_0000_0001_0000 : 64'd0)) : 64'd0;
     wire [63:0] a_out [5];
     assign a_out[0] = b0 ^ (~b1 & b2) ^ iota_xor;
@@ -133,9 +128,12 @@ module qsag_keccak_serial (
     assign a_out[3] = b3 ^ (~b4 & b0);
     assign a_out[4] = b4 ^ (~b0 & b1);
 
-    // Combinational column parity C[0..4] and D[0..4]:
-    //   - At !run && start: over st[0..24]
-    //   - At run && k == 4: over st[0..19] (already holding A_next rows 0..3) and a_out[0..4] (row 4)
+    generate
+        for (gi = 0; gi < 5; gi++) begin : g_pk_aout
+            assign kc_aout_flat[64*gi +: 64] = a_out[gi];
+        end
+    endgenerate
+
     wire [63:0] c_col [5];
     wire [63:0] d_nxt [5];
     generate
@@ -156,60 +154,6 @@ module qsag_keccak_serial (
             qsag_ereg #(.W(64)) u_d (.clk(clk), .rst_n(srst_n), .en(load_d), .d(d_nxt[gi]), .q(d_reg[gi]));
         end
     endgenerate
-
-    // In-place row write + live-lane eviction muxing
-    always_comb begin
-        kc_we    = 25'd0;
-        kc_wdata = '0;
-        if (run) begin
-            unique case (k)
-                3'd0: begin
-                    for (int xp = 0; xp < 5; xp++) begin
-                        kc_we[xp]             = 1'b1;
-                        kc_wdata[64*xp +: 64] = a_out[xp];
-                    end
-                    kc_we[6]  = 1'b1; kc_wdata[64*6  +: 64] = st[1];
-                    kc_we[12] = 1'b1; kc_wdata[64*12 +: 64] = st[2];
-                    kc_we[18] = 1'b1; kc_wdata[64*18 +: 64] = st[3];
-                    kc_we[24] = 1'b1; kc_wdata[64*24 +: 64] = st[4];
-                end
-                3'd1: begin
-                    for (int xp = 0; xp < 5; xp++) begin
-                        kc_we[5 + xp]             = 1'b1;
-                        kc_wdata[64*(5+xp) +: 64] = a_out[xp];
-                    end
-                    kc_we[10] = 1'b1; kc_wdata[64*10 +: 64] = st[5];
-                    kc_we[16] = 1'b1; kc_wdata[64*16 +: 64] = st[6];
-                    kc_we[18] = 1'b1; kc_wdata[64*18 +: 64] = st[7];
-                    kc_we[22] = 1'b1; kc_wdata[64*22 +: 64] = st[8];
-                end
-                3'd2: begin
-                    for (int xp = 0; xp < 5; xp++) begin
-                        kc_we[10 + xp]             = 1'b1;
-                        kc_wdata[64*(10+xp) +: 64] = a_out[xp];
-                    end
-                    kc_we[16] = 1'b1; kc_wdata[64*16 +: 64] = st[10];
-                    kc_we[18] = 1'b1; kc_wdata[64*18 +: 64] = st[11];
-                    kc_we[19] = 1'b1; kc_wdata[64*19 +: 64] = st[12];
-                    kc_we[20] = 1'b1; kc_wdata[64*20 +: 64] = st[14];
-                end
-                3'd3: begin
-                    for (int xp = 0; xp < 5; xp++) begin
-                        kc_we[15 + xp]             = 1'b1;
-                        kc_wdata[64*(15+xp) +: 64] = a_out[xp];
-                    end
-                    kc_we[23] = 1'b1; kc_wdata[64*23 +: 64] = st[15];
-                    kc_we[24] = 1'b1; kc_wdata[64*24 +: 64] = st[19];
-                end
-                default: begin // 3'd4
-                    for (int xp = 0; xp < 5; xp++) begin
-                        kc_we[20 + xp]             = 1'b1;
-                        kc_wdata[64*(20+xp) +: 64] = a_out[xp];
-                    end
-                end
-            endcase
-        end
-    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

@@ -375,16 +375,16 @@ module qsag_io_shell (
     assign an_miso  = bidir_in[25];
     assign tamper_n = bidir_in[26];
 
-    // Sideband bank selection:
-    //   - IO_MODE 00 (SPI):                         bidir[8..13]
-    //   - IO_MODE 01 (SS) or IO_MODE 1x + async_sb: bidir[0..5]
+    // Sideband bank selection (placed directly adjacent to dvss/dvdd pad pairs for minimal L*di/dt!):
+    //   - IO_MODE 00 (SPI):                         bidir[8..11] + bidir[13..14] (next to dvss[1]/dvdd[1]!)
+    //   - IO_MODE 01 (SS) or IO_MODE 1x + async_sb: bidir[0..5]                  (next to dvss[0]/dvdd[0]!)
     wire sb_on_b8  = m_spi;
     wire sb_on_b0  = m_ss || (m_async && csr_async_sb_en);
 
-    assign nfc_clk_in       = sb_on_b8 ? bidir_in[8]  : (sb_on_b0 ? bidir_in[0] : 1'b0);
-    assign nfc_ask_in       = sb_on_b8 ? bidir_in[9]  : (sb_on_b0 ? bidir_in[1] : 1'b1);
-    assign db_chal_in       = sb_on_b8 ? bidir_in[12] : (sb_on_b0 ? bidir_in[4] : 1'b0);
-    assign db_resp_loopback = sb_on_b8 ? bidir_in[13] : (sb_on_b0 ? bidir_in[5] : 1'b0);
+    assign nfc_clk_in       = sb_on_b8 ? bidir_in[8]  : (sb_on_b0 ? bidir_in[2] : 1'b0);
+    assign nfc_ask_in       = sb_on_b8 ? bidir_in[9]  : (sb_on_b0 ? bidir_in[3] : 1'b1);
+    assign db_chal_in       = sb_on_b8 ? bidir_in[13] : (sb_on_b0 ? bidir_in[1] : 1'b0);
+    assign db_resp_loopback = sb_on_b8 ? bidir_in[14] : (sb_on_b0 ? bidir_in[0] : 1'b0);
 
     always_comb begin
         bidir_out = '0;
@@ -392,7 +392,7 @@ module qsag_io_shell (
         bidir_cs  = '0;
         bidir_pu  = '0;
         bidir_pd  = '0;
-        // Per-bank slew defaults
+        // Per-bank slew defaults (slow slew = 1'b1 on general/status pins to suppress L*di/dt SSN)
         bidir_sl[7:0]   = {8{slew_dq}};
         bidir_sl[15:8]  = {8{slew_tx}};
         bidir_sl[37:16] = {22{slew_ctrl}};
@@ -414,21 +414,25 @@ module qsag_io_shell (
             2'd0: begin
                 bidir_out[7:0]  = sdq_o;
                 bidir_oe[7:0]   = !soe_o ? 8'h00 : (s_w == 2'd0) ? 8'h02 : (s_w == 2'd1) ? 8'h0F : 8'hFF;
-                // Houyhnhnm sideband on b8..b13:
+                // Houyhnhnm sideband on PAD_EAST (bidir[13..14] straddle dvss_pads[1]/dvdd_pads[1]!):
                 bidir_cs[8]     = 1'b1;            // NFC 13.56 MHz Schmitt trigger
                 bidir_pd[8]     = 1'b1;
+                bidir_cs[9]     = 1'b1;            // NFC ASK Schmitt trigger
                 bidir_pu[9]     = 1'b1;            // NFC ASK idle high
                 bidir_out[10]   = nfc_load_mod;    // NFC 847.5 kHz load-mod TX
                 bidir_oe[10]    = 1'b1;
+                bidir_sl[10]    = 1'b1;            // hard slow slew on NFC shunt gate!
                 bidir_out[11]   = nco_rf_out;      // 32-bit NCO RF TX
                 bidir_oe[11]    = 1'b1;
-                bidir_sl[11]    = slew_rf_db;      // fast slew default!
-                bidir_pd[12]    = 1'b1;            // DB_CHAL_IN
-                bidir_out[13]   = db_resp_out;     // DB_RESP_OUT (< 6 ns mux2_4!)
-                bidir_oe[13]    = db_resp_oe;
-                bidir_sl[13]    = slew_rf_db;      // fast slew default!
-                bidir_pd[13]    = ~db_resp_oe;
-                bidir_pd[15:14] = 2'b11;
+                bidir_sl[11]    = slew_rf_db;      // fast slew default
+                bidir_pd[12]    = 1'b1;            // guard pin between NCO_RF and DB_CHAL
+                bidir_cs[13]    = 1'b0;            // DB_CHAL_IN: CMOS buffer (saves 0.65 ns vs Schmitt!)
+                bidir_pd[13]    = 1'b1;
+                bidir_out[14]   = db_resp_out;     // DB_RESP_OUT (< 5 ns mux2_4, next to dvss[1]!)
+                bidir_oe[14]    = db_resp_oe;
+                bidir_sl[14]    = 1'b0;            // hard fast slew for < 5 ns turnaround!
+                bidir_pd[14]    = ~db_resp_oe;
+                bidir_pd[15]    = 1'b1;
 
                 bidir_out[16]   = verify_ok;
                 bidir_out[17]   = fault;
@@ -439,20 +443,23 @@ module qsag_io_shell (
                 bidir_pd[37:27] = 11'h7FF;
             end
             2'd1: begin
-                // Houyhnhnm sideband on b0..b5:
-                bidir_cs[0]     = 1'b1;
-                bidir_pd[0]     = 1'b1;
-                bidir_pu[1]     = 1'b1;
-                bidir_out[2]    = nfc_load_mod;
-                bidir_oe[2]     = 1'b1;
-                bidir_out[3]    = nco_rf_out;
-                bidir_oe[3]     = 1'b1;
-                bidir_sl[3]     = slew_rf_db;
-                bidir_pd[4]     = 1'b1;
-                bidir_out[5]    = db_resp_out;
-                bidir_oe[5]     = db_resp_oe;
+                // Houyhnhnm sideband on PAD_SOUTH (bidir[0..1] straddle dvss_pads[0]/dvdd_pads[0]!):
+                bidir_out[0]    = db_resp_out;     // DB_RESP_OUT (next to dvdd_pads[0]!)
+                bidir_oe[0]     = db_resp_oe;
+                bidir_sl[0]     = 1'b0;            // hard fast slew for < 5 ns turnaround!
+                bidir_pd[0]     = ~db_resp_oe;
+                bidir_cs[1]     = 1'b0;            // DB_CHAL_IN: CMOS buffer
+                bidir_pd[1]     = 1'b1;
+                bidir_cs[2]     = 1'b1;            // NFC 13.56 MHz Schmitt
+                bidir_pd[2]     = 1'b1;
+                bidir_cs[3]     = 1'b1;            // NFC ASK Schmitt
+                bidir_pu[3]     = 1'b1;
+                bidir_out[4]    = nfc_load_mod;    // NFC load-mod TX
+                bidir_oe[4]     = 1'b1;
+                bidir_sl[4]     = 1'b1;            // slow slew
+                bidir_out[5]    = nco_rf_out;      // 32-bit NCO RF TX
+                bidir_oe[5]     = 1'b1;
                 bidir_sl[5]     = slew_rf_db;
-                bidir_pd[5]     = ~db_resp_oe;
 
                 bidir_out[6]    = verify_ok;
                 bidir_oe[6]     = 1'b1;
@@ -470,19 +477,22 @@ module qsag_io_shell (
             end
             default: begin
                 if (csr_async_sb_en) begin
-                    bidir_cs[0]   = 1'b1;
-                    bidir_pd[0]   = 1'b1;
-                    bidir_pu[1]   = 1'b1;
-                    bidir_out[2]  = nfc_load_mod;
-                    bidir_oe[2]   = 1'b1;
-                    bidir_out[3]  = nco_rf_out;
-                    bidir_oe[3]   = 1'b1;
-                    bidir_sl[3]   = slew_rf_db;
-                    bidir_pd[4]   = 1'b1;
-                    bidir_out[5]  = db_resp_out;
-                    bidir_oe[5]   = db_resp_oe;
+                    bidir_out[0]  = db_resp_out;
+                    bidir_oe[0]   = db_resp_oe;
+                    bidir_sl[0]   = 1'b0;
+                    bidir_pd[0]   = ~db_resp_oe;
+                    bidir_cs[1]   = 1'b0;
+                    bidir_pd[1]   = 1'b1;
+                    bidir_cs[2]   = 1'b1;
+                    bidir_pd[2]   = 1'b1;
+                    bidir_cs[3]   = 1'b1;
+                    bidir_pu[3]   = 1'b1;
+                    bidir_out[4]  = nfc_load_mod;
+                    bidir_oe[4]   = 1'b1;
+                    bidir_sl[4]   = 1'b1;
+                    bidir_out[5]  = nco_rf_out;
+                    bidir_oe[5]   = 1'b1;
                     bidir_sl[5]   = slew_rf_db;
-                    bidir_pd[5]   = ~db_resp_oe;
                 end
                 bidir_out[14:7] = as_tx_dout;
                 bidir_out[15]   = as_tx_req_out;
@@ -501,13 +511,13 @@ module qsag_io_shell (
         // Input enables: ~OE normally, PLUS force IE=1 on DB_RESP_OUT during Vernier TDC ping loopback!
         bidir_ie = ~bidir_oe;
         if (db_resp_ie_force) begin
-            if (sb_on_b8)      bidir_ie[13] = 1'b1;
-            else if (sb_on_b0) bidir_ie[5]  = 1'b1;
+            if (sb_on_b8)      bidir_ie[14] = 1'b1;
+            else if (sb_on_b0) bidir_ie[0]  = 1'b1;
         end
     end
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, i_wcount_u, e_rcount_u, bidir_in[35], bidir_in[24:19], bidir_in[16:14], bidir_in[11:10]};
+    wire unused = &{1'b0, i_wcount_u, e_rcount_u, bidir_in[35], bidir_in[24:19], bidir_in[16:15], bidir_in[12:10]};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire
