@@ -1,0 +1,19 @@
+Selected benchmark output, 2026-11-14, hbox (i9-12900 + RX 6750 XT).
+Historical hierarchy format; prepared registry; 22 workers; shared host.
+
+Source: beam-s3.log
+  Keygen    : 8192 distinct validator keys in 122523 ms (22 threads)
+  Aggregator: one 128-key subnet shard prove = 1463.1 ms warm p50 (cold first call 1831.7 ms)
+  [Beam-Network-16x128] validators=2048 | joint_host_prove = 22626 ms (22 workers) | shard gossip to proposer = 6973.9 KiB (435.9 KiB/shard)
+    Verify    : all 16 child proofs, prepared registry: multi-core p50/p99 = 42.57/49.41 ms | 1-core p50/p99 = 207.39/263.65 ms | target < 8.0 ms: MISSED
+  [Beam-Network-64x128] validators=8192 | joint_host_prove = 99150 ms (22 workers) | shard gossip to proposer = 27889.6 KiB (435.8 KiB/shard)
+    Verify    : all 64 child proofs, prepared registry: multi-core p50/p99 = 109.34/113.10 ms | 1-core p50/p99 = 786.81/797.53 ms | target < 8.0 ms: MISSED
+  Vulkan totals: submissions=7567 accepted_v5_receipts=512 cpu_fallbacks=0
+
+Source: beam-s3-128.log
+  Keygen    : 16384 distinct validator keys in 214716 ms (22 threads)
+  Aggregator: one 128-key subnet shard prove = 1264.7 ms warm p50 (cold first call 1499.1 ms)
+  [Beam-Network-128x128] validators=16384 | joint_host_prove = 181881 ms (22 workers) | shard gossip to proposer = 55779.1 KiB (435.8 KiB/shard)
+    Verify    : all 128 child proofs, prepared registry: multi-core p50/p99 = 107.63/109.89 ms | 1-core p50/p99 = 1233.10/1239.78 ms | target < 8.0 ms: MISSED
+  Vulkan totals: submissions=11795 accepted_v5_receipts=796 cpu_fallbacks=0
+
