@@ -15,7 +15,7 @@ out="build/synth/$tag.$fam"
 # Multiplier tiling per family: 26x17 on DSP48E2, 16x16 on MULT18X18D.
 case "$fam" in
     xcup) tile="-chparam AW 26 -chparam BW 17"; cmd="synth_xilinx -family xcup -top $top -noiopad" ;;
-    ecp5) tile="-chparam AW 16 -chparam BW 16"; cmd="synth_ecp5 -top $top ${ECP5_FLAT:--noflatten}" ;;
+    ecp5) tile="-chparam AW 16 -chparam BW 16"; cmd="synth_ecp5 -nowidelut -top $top ${ECP5_FLAT:--noflatten}" ;;
     *) echo "family must be xcup or ecp5"; exit 2 ;;
 esac
 case "$top" in
@@ -25,7 +25,7 @@ json=""; [ "${WRITE_JSON:-0}" = 1 ] && json="write_json $out.json;"
 # Logic depth: delete every sequential / hard cell, then the longest remaining path in any module
 # is the longest register-to-register run of LUTs and carry elements.
 SEQ="t:FDRE t:FDSE t:FDCE t:FDPE t:SRL16E t:SRLC32E t:DSP48E2 t:RAMB36E2 t:RAMB18E2 t:RAM32M t:RAM64M t:RAM32X1D t:RAM64X1D t:RAM32M16 t:RAM64M8 t:BUFG t:TRELLIS_FF t:MULT18X18D t:DP16KD t:TRELLIS_DPR16X4"
-INLINE_CSA="flatten t:*qsag_sum_csa*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_add_split*; opt -fast;"
+INLINE_CSA="flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; opt -fast;"
 yosys -l "$out.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $tile $chparam; proc; $INLINE_CSA $cmd; $json tee -o $out.stat stat -top $top; flatten; delete $SEQ; tee -o $out.ltp ltp" \
     > /dev/null
 python3 synth/summarize.py "$out.stat" "$out.ltp" "$fam" "$tag" | tee "$out.summary"
