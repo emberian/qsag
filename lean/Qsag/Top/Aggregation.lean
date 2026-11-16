@@ -15,7 +15,7 @@ and coherent Fourier QROM Merkle-opening extractors (`QromBatchMerkleExtraction`
 `HemExtractedOpeningBridge`, `QromCoherentMerkleBridge`, `QromFourierSupport`), the hierarchical
 shard merge-tree and quorum reduction (`ComposedQsAgAndMergeSecurity`, `Spec/IdealAggregate`),
 the quartic-extension field isomorphism (`Math/QuarticExt4`), and SIMT GPU constant-time kernel
-execution (`SpirvSimtGpuEquiv`).
+execution (`SpirvSimt`).
 
 Section 6 connects the ideal knowledge-soundness contract `Spec.AggregateExtractorSound` to the
 quorum layer of `ComposedQsAgAndMergeSecurity`. For an aggregate verifier over native signatures
@@ -216,7 +216,7 @@ theorem qrom_hem_opening_and_invalid_coordinate_chain
 /-- **Aggregate Merge-Tree & Quorum Reduction Paired With SIMT GPU Constant-Time Verification
     (`aggregate_merge_and_simt_gpu_noninterference`)**:
     Composes `Spec.IdealAggregate.mergeWitnessMaps_valid`, `Composed.binary_merge_sound`,
-    and `SpirvSimtGpuEquiv.decoded_spirv_words_simt_ct_noninterference`. -/
+    and `decoded_spirv_words_simt_ct_noninterference` (`Machine.SpirvSimt`). -/
 theorem aggregate_merge_and_simt_gpu_noninterference
     {PK Sig : Type} {numValidators : Nat}
     (verifySingle : PK → Qsag.Spec.Bytes → Sig → Bool)
@@ -228,16 +228,16 @@ theorem aggregate_merge_and_simt_gpu_noninterference
     (rootHdr : Qsag.Composed.Header) (verifyShard : Qsag.Composed.Shard numValidators → Bool)
     (tree : Qsag.Composed.MergeTree numValidators) (depth : Nat)
     (hTreeOk : Qsag.Composed.checkTree rootHdr verifyShard depth tree = true)
-    {words : List UInt32} {pol : Qsag.SimtCtPolicy} {prog : List Qsag.SpirvInst}
-    (hCt : Qsag.checkDecodedWordsSimtCt words pol prog = true)
+    {words : List UInt32} {pol : Qsag.SimtCtPolicy}
+    (hCt : Qsag.checkDecodedWordsSimtCt words pol = true)
     (cfg : Qsag.WorkgroupConfig) (subvecIdx fuel : Nat)
     {m₁ m₂ : Qsag.GpuMemState} (hMem : Qsag.MemLowEq pol m₁ m₂) :
     Qsag.Spec.ValidAggregateWitness verifySingle ⟨roster, bmL ||| bmR, msg⟩
       (Qsag.Spec.mergeWitnessMaps bmL wL wR) ∧
     Qsag.Composed.weight tree.bitmap = (tree.leaves.map fun s => Qsag.Composed.weight s.bitmap).sum ∧
     tree.leaves.length ≤ 2 ^ depth ∧
-    Qsag.runDecodedWordsWaveWithObs words cfg subvecIdx prog fuel m₁ =
-      Qsag.runDecodedWordsWaveWithObs words cfg subvecIdx prog fuel m₂ := by
+    Qsag.runDecodedWordsWaveWithObs words cfg subvecIdx fuel m₁ =
+      Qsag.runDecodedWordsWaveWithObs words cfg subvecIdx fuel m₂ := by
   obtain ⟨hWt, _, _, hLeaves⟩ := Qsag.Composed.binary_merge_sound rootHdr verifyShard tree depth hTreeOk
   exact ⟨Qsag.Spec.mergeWitnessMaps_valid verifySingle roster msg bmL bmR wL wR hWitL hWitR,
          hWt, hLeaves,

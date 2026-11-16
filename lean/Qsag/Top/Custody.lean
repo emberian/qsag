@@ -251,7 +251,7 @@ def refines_trans_dataRefines {S₁ S₂ S₃ In₁₂ In₃ Out₁₂ Out₃ : 
       exact ⟨M₂.errStep c₂ inp, hErr.2, d₂₃.sim_reject hR₂₃ hStep₂⟩
     | some _ =>
       rw [hStep₂] at hErr
-      exact Option.noConfusion hErr.1
+      exact nomatch hErr.1
 
 /-- Top-level re-export of `IdealTsig ⊑ Spec.idealCustodyMachine` (`L-Ex-7`):
     `idealTsigCustodyMachine` refines `Spec.idealCustodyMachine` under `Spec.DataRefines`,
@@ -428,31 +428,34 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
       simp only [Bool.false_eq_true, ↓reduceIte] at hStep₁ ⊢
       cases turn with
       | approve p dep i =>
+        dsimp only at hStep₁ ⊢
         by_cases hg : p < n ∧ p ∉ c₁.enrolledCorrupt ∧ dep = dep₀
         · rw [fl_if_pos hg] at hStep₁
           cases hStep₁
           have hg₂ : p < n ∧ p ∉ c₂.enrolledCorrupt ∧ dep = dep₀ := by
             rw [← hEnr]; exact hg
           rw [fl_if_pos hg₂]
-          exact ⟨rfl, hCore, congrArg (List.cons _) hHon, hCorr, hEnr, hPois⟩
+          exact ⟨rfl, hCore, congrArg (List.cons _) hHon, hCorr, hEnr, rfl⟩
         · rw [fl_if_neg hg] at hStep₁; cases hStep₁
       | advApprove p dep i =>
+        dsimp only at hStep₁ ⊢
         by_cases hg : p ∈ c₁.enrolledCorrupt ∧ dep = dep₀
         · rw [fl_if_pos hg] at hStep₁
           cases hStep₁
           have hg₂ : p ∈ c₂.enrolledCorrupt ∧ dep = dep₀ := by
             rw [← hEnr]; exact hg
           rw [fl_if_pos hg₂]
-          exact ⟨rfl, hCore, hHon, congrArg (List.cons _) hCorr, hEnr, hPois⟩
+          exact ⟨rfl, hCore, hHon, congrArg (List.cons _) hCorr, hEnr, rfl⟩
         · rw [fl_if_neg hg] at hStep₁; cases hStep₁
       | corrupt p =>
+        dsimp only at hStep₁ ⊢
         by_cases hg : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₁.enrolledCorrupt ∧ c₁.enrolledCorrupt.length + 1 < q
         · rw [fl_if_pos hg] at hStep₁
           cases hStep₁
           have hg₂ : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₂.enrolledCorrupt ∧ c₂.enrolledCorrupt.length + 1 < q := by
             rw [← hEnr]; exact hg
           rw [fl_if_pos hg₂, ← hHon]
-          exact ⟨rfl, hCore, hHon, hCorr, congrArg (List.cons _) hEnr, hPois⟩
+          exact ⟨rfl, hCore, rfl, hCorr, congrArg (List.cons _) hEnr, rfl⟩
         · rw [fl_if_neg hg] at hStep₁; cases hStep₁
       | execute dep req =>
         dsimp only at hStep₁ ⊢
@@ -477,25 +480,27 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
               rcases p₂ with ⟨core₂', out4₂⟩
               rw [hM₂] at hSim
               rcases hSim with ⟨rfl, hCore'⟩
-              exact ⟨rfl, hCore', hHon, hCorr, hEnr, hPois⟩
+              exact ⟨rfl, hCore', hHon, hCorr, hEnr, rfl⟩
         · rw [fl_if_neg hg] at hStep₁; cases hStep₁
   sim_err {c₁ c₂ turn} hRel hNone₁ := by
     rcases hRel with ⟨hCore, hHon, hCorr, hEnr, hPois⟩
     dsimp only [fourLayerCustodyMachine] at hNone₁ ⊢
-    unfold fourLayerCustodyStep fourLayerCustodyErrStep at hNone₁ ⊢
+    unfold fourLayerCustodyStep at hNone₁ ⊢
+    unfold fourLayerCustodyErrStep
     cases hP₁ : c₁.poisoned with
     | true =>
       have hP₂ : c₂.poisoned = true := hPois.symm.trans hP₁
-      rw [hP₁, hP₂]
+      rw [hP₂]
       simp only [↓reduceIte]
-      exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
+      exact ⟨trivial, hCore, hHon, hCorr, hEnr, hPois⟩
     | false =>
       have hP₂ : c₂.poisoned = false := hPois.symm.trans hP₁
-      rw [hP₁] at hNone₁ ⊢
+      rw [hP₁] at hNone₁
       rw [hP₂]
       simp only [Bool.false_eq_true, ↓reduceIte] at hNone₁ ⊢
       cases turn with
       | approve p dep i =>
+        dsimp only at hNone₁ ⊢
         by_cases hg : p < n ∧ p ∉ c₁.enrolledCorrupt ∧ dep = dep₀
         · rw [fl_if_pos hg] at hNone₁; cases hNone₁
         · have hg₂ : ¬ (p < n ∧ p ∉ c₂.enrolledCorrupt ∧ dep = dep₀) := by
@@ -503,6 +508,7 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
           rw [fl_if_neg hg₂]
           exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
       | advApprove p dep i =>
+        dsimp only at hNone₁ ⊢
         by_cases hg : p ∈ c₁.enrolledCorrupt ∧ dep = dep₀
         · rw [fl_if_pos hg] at hNone₁; cases hNone₁
         · have hg₂ : ¬ (p ∈ c₂.enrolledCorrupt ∧ dep = dep₀) := by
@@ -510,6 +516,7 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
           rw [fl_if_neg hg₂]
           exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
       | corrupt p =>
+        dsimp only at hNone₁ ⊢
         by_cases hg : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₁.enrolledCorrupt ∧ c₁.enrolledCorrupt.length + 1 < q
         · rw [fl_if_pos hg] at hNone₁; cases hNone₁
         · have hg₂ : ¬ (p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₂.enrolledCorrupt ∧ c₂.enrolledCorrupt.length + 1 < q) := by
@@ -525,20 +532,20 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
               c₂.enrolledCorrupt req.quorum i = true := by
             rw [← hHon, ← hCorr, ← hEnr]; exact hg
           rw [fl_if_pos hg] at hNone₁ ⊢
-          rw [fl_if_pos hg₂]
+          rw [fl_if_pos hg₂, fl_if_pos hg₂]
           cases hM₁ : M₁.step c₁.core req with
           | some _ => rw [hM₁] at hNone₁; cases hNone₁
           | none =>
             have hErr := sim.sim_err hCore hM₁
             cases hM₂ : M₂.step c₂.core req with
-            | some _ => rw [hM₂] at hErr; exact Option.noConfusion hErr.1
+            | some _ => rw [hM₂] at hErr; exact nomatch hErr.1
             | none =>
               rw [hM₂] at hErr
               exact ⟨rfl, hErr.2, hHon, hCorr, hEnr, rfl⟩
         · have hg₂ : ¬ (dep = dep₀ ∧ fourLayerPermitsReady q dep₀ c₂.honestPermits c₂.corruptPermits
               c₂.enrolledCorrupt req.quorum i = true) := by
             rw [← hHon, ← hCorr, ← hEnr]; exact hg
-          rw [fl_if_neg hg, fl_if_neg hg₂]
+          rw [fl_if_neg hg, fl_if_neg hg₂, fl_if_neg hg₂]
           exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
 
 /-- Simulation invariant connecting `fourLayerCustodyMachine ... (layer4IdealTsigMachine ...)`
@@ -585,7 +592,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
   intro quorum₀ M4
   let oracle4 : Nat × Qsag.Spec.CustodyIntent → ByteArray := fun d => idealSignOracle d.2.payload
   refine
-    { Rel := fun c a => Layer4CustodyIdealRel dep₀ pk quorum₀ c a idealSignOracle
+    { Rel := fun c a => Layer4CustodyIdealRel (n := n) dep₀ pk quorum₀ c a idealSignOracle
       absInit := fun _ => Qsag.Spec.IdealCustodyState.init dep₀ pk quorum₀
       init_ok := ?_
       sim_visible := ?_
@@ -613,6 +620,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
       cases turn with
       | approve p dep i =>
         cases hVis
+        dsimp only at hStepC
         by_cases hg : p < n ∧ p ∉ c.enrolledCorrupt ∧ dep = dep₀
         · rw [fl_if_pos hg] at hStepC
           cases hStepC
@@ -632,6 +640,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
         · rw [fl_if_neg hg] at hStepC; cases hStepC
       | advApprove p dep i =>
         cases hVis
+        dsimp only at hStepC
         by_cases hg : p ∈ c.enrolledCorrupt ∧ dep = dep₀
         · rw [fl_if_pos hg] at hStepC
           cases hStepC
@@ -650,6 +659,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
         · rw [fl_if_neg hg] at hStepC; cases hStepC
       | corrupt p =>
         cases hVis
+        dsimp only at hStepC
         by_cases hg : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c.enrolledCorrupt ∧ c.enrolledCorrupt.length + 1 < q
         · rw [fl_if_pos hg] at hStepC
           cases hStepC
@@ -769,7 +779,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
                         have hSub := Qsag.Spec.custodyApprovers_length_le_of_subset
                           (of_decide_eq_true hNdP) hSubP
                         rw [List.length_map] at hSub
-                        rw [hRel.safe.profile]
+                        rw [hRel.safe.profile] at hSub ⊢
                         exact Nat.le_trans (of_decide_eq_true hQLeP) hSub
                       have hDepA : dep = a.ledger.deploymentId := hg.1.trans hRel.safe.deployment.symm
                       have hLSign : Qsag.Spec.custodyLedgerSign
@@ -803,7 +813,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
                       rw [← hSigEq] at hStepA
                       refine ⟨_, hStepA,
                         { safe := Qsag.Spec.idealCustodyStep_preserves_safeInv hRel.safe
-                            (by rw [hSigEq]; exact hStepA)
+                            hStepA
                           notPoisonedA := hRel.notPoisonedA
                           honestEq := hRel.honestEq
                           corruptAppEq := hRel.corruptAppEq
@@ -824,12 +834,13 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
     cases turn <;> cases hInt
   · intro c a turn hRel hNone
     dsimp only [fourLayerCustodyMachine] at hNone ⊢
-    unfold fourLayerCustodyStep fourLayerCustodyErrStep at hNone ⊢
+    unfold fourLayerCustodyStep at hNone
+    unfold fourLayerCustodyErrStep
     cases hPC : c.poisoned with
     | true =>
-      rw [hPC]; simp only [↓reduceIte]; exact hRel
+      simp only [↓reduceIte]; exact hRel
     | false =>
-      rw [hPC] at hNone ⊢
+      rw [hPC] at hNone
       simp only [Bool.false_eq_true, ↓reduceIte] at hNone ⊢
       cases turn with
       | approve _ _ _ => exact hRel
@@ -850,7 +861,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
                 honestEq := hRel.honestEq
                 corruptAppEq := hRel.corruptAppEq
                 corruptEq := hRel.corruptEq
-                activeAlign := fun hF => absurd hF Bool.true_ne_false }
+                activeAlign := fun hF => nomatch hF }
         · rw [fl_if_neg hg]
           exact hRel
 
@@ -3297,7 +3308,14 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
             (st := st) (sepIntent r) hgA
           exact ⟨_, hStepA,
             { safe := idealCustodyStep_preserves_safeInv hRel.safe hStepA
-              baseRel := hRel.baseRel
+              baseRel :=
+                { poisoned := hRel.baseRel.poisoned
+                  spent := hRel.baseRel.spent
+                  capacity := hRel.baseRel.capacity
+                  sessions := hRel.baseRel.sessions
+                  corrupt := hRel.baseRel.corrupt
+                  honest := hRel.baseRel.honest
+                  authorized := hRel.baseRel.authorized }
               advEq := congrArg (List.cons _) hRel.advEq
               watermark := hRel.watermark
               noForgeries := hRel.noForgeries }⟩
@@ -3403,10 +3421,8 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
         have hDigEq : oracleSign (S.digest st.ledger.deploymentId (sepIntent r)) =
             oracleSign (S.digest d.deploymentId (sepIntent r)) := by
           rw [hD]
-        refine ⟨_, ?_, ?_⟩
-        · change idealCustodyStep S oracleSign st (.sign d.deploymentId (sepIntent r) false) =
-            some (_, .released (oracleSign (S.digest d.deploymentId (sepIntent r))))
-          rw [hStepA, hDigEq]
+        rw [hDigEq] at hStepA
+        refine ⟨_, hStepA, ?_⟩
         · exact
             { safe := idealCustodyStep_preserves_safeInv hRel.safe hStepA
               baseRel :=
@@ -3704,7 +3720,7 @@ private theorem extractSepForgeryOutcome_complete (d : Qsag.Custody.Deployment) 
 private theorem extractSepForgeryOutcome_sound (d : Qsag.Custody.Deployment) :
     ∀ (sched : List SepCustodyInput) (c : SepCustodyState)
       (pool : List SepIssue)
-      (hSub : ∀ a ∈ c.issued, a ∈ pool)
+      (_hSub : ∀ a ∈ c.issued, a ∈ pool)
       {pStar : Nat} {o : Qsag.ProdEufCmaOutcome},
       extractSepForgeryOutcome d c sched = some (pStar, o) →
       pStar < d.numParties ∧
@@ -3801,7 +3817,8 @@ private theorem extractSepForgeryOutcome_sound (d : Qsag.Custody.Deployment) :
         exact ⟨a, List.mem_append_left _ (hSub a haIss), of_decide_eq_true haParty, rfl⟩
       | nil =>
         rw [hF] at h
-        exact extractSepForgeryOutcome_sound d rest _ pool hSub h
+        refine extractSepForgeryOutcome_sound d rest _ pool ?_ h
+        exact hSub
     · rw [cert_if_neg hAcc] at h
       exact extractSepForgeryOutcome_sound d rest c pool hSub h
 

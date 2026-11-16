@@ -186,6 +186,7 @@ theorem checkElfSliceWithCert_sound {slice : ElfFuncSlice} {c : FuncContract} {c
     ElfSliceThreeWayNISafe slice c :=
   by sorry
 
+set_option maxRecDepth 65536 in
 theorem currentX86_rlib_every_symbol_three_way_ni_sound :
     (extractAllRlibFuncs currentX86RlibArchiveBytes).length = currentX86SymbolContracts.length ∧
     ∀ i : Nat, (hs : i < (extractAllRlibFuncs currentX86RlibArchiveBytes).length) →
@@ -196,6 +197,7 @@ theorem currentX86_rlib_every_symbol_three_way_ni_sound :
         (currentX86SymbolContracts[i]'hc) :=
   by sorry
 
+set_option maxRecDepth 65536 in
 theorem currentAarch64_rlib_every_symbol_three_way_ni_sound :
     (extractAllRlibFuncs currentAarch64RlibArchiveBytes).length = currentAarch64SymbolContracts.length ∧
     ∀ i : Nat, (hs : i < (extractAllRlibFuncs currentAarch64RlibArchiveBytes).length) →
@@ -206,6 +208,7 @@ theorem currentAarch64_rlib_every_symbol_three_way_ni_sound :
         (currentAarch64SymbolContracts[i]'hc) :=
   by sorry
 
+set_option maxRecDepth 65536 in
 theorem mutant_unwiped_neon_reg_rejected :
     (match findSliceByNameBytes (extractAllRlibFuncs currentAarch64RlibArchiveBytes)
              [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x74, 0x6f, 0x77, 0x65, 0x72,
