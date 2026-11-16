@@ -36,7 +36,7 @@ VVSS VSS 0 0.0
 
 * External Verifier Challenge Pulse on 50-ohm / SMA port (0 -> VDD -> 0, tr=tf=250ps)
 V_CHAL_SRC  CHAL_SRC 0 PWL(0 0 2n 0 2.25n {vdd_val} 12n {vdd_val} 12.25n 0 22n 0 22.25n {vdd_val} 28n {vdd_val} 28.25n 0 38n 0 38.25n {vdd_val} 48n {vdd_val})
-R_SRC_MATCH CHAL_SRC PCB_CHAL 15.0
+R_SRC_MATCH CHAL_SRC PCB_CHAL 50.0
 C_SMA_IN    PCB_CHAL 0        1.2p
 
 * Inbound QFN-64 bondwire (1.8 nH + 125 mOhm) to bidir[13] (DB_CHAL_IN, CS=0, IE=1, OE=0)
@@ -64,7 +64,10 @@ X_EDGE CHAL_HELD IDLE NONIDLE VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__xor2_1
 X_D1 NONIDLE D1 VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
 X_D2 D1 D2 VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
 X_D3 D2 D3 VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
-X_D4 D3 SET_LOCK VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
+X_D4 D3 SET_RAW VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
+* Reset has priority over a stale nonidle state at power-up/rearm.
+X_RINV REARM REARM_N VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
+X_SET SET_RAW REARM_N SET_LOCK VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__and2_1
 X_LOCK SET_LOCK LOCKED OPEN VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__nor2_1
 X_LOCKB REARM OPEN LOCKED VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__nor2_1
 C_PKG_IN PAD_CHAL_DIE VSS 0.5p
@@ -200,6 +203,7 @@ X_VT13 S13 S14 F13 F14 QT13 TAP_RN VDD VSS vernier_tap
 .meas tran pass_tdc PARAM='(delta_tau>0)*(delta_tau<1n)'
 .control
 run
+wrdata rapid_debug.dat v(PCB_CHAL) v(PAD_CHAL_DIE) v(PCB_RESP) v(OPEN) v(CHAL_HELD) v(S14) v(F14)
 quit
 .endc
 .end

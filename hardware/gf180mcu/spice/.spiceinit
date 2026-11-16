@@ -2,4 +2,4 @@
 set ngbehavior=hsa
 set ng_nomodcheck
 set num_threads=1
-set seed=20261116
+setseed 20261116
