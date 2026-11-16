@@ -16,14 +16,14 @@ public section
 namespace Qsag.RssSigning
 set_option autoImplicit false
 
-def selectedValues (profile : RssProduction.Profile) (layer : UInt32) (tree : UInt64)
+@[expose] def selectedValues (profile : RssProduction.Profile) (layer : UInt32) (tree : UInt64)
     (kp : Nat) (digits : List Nat) : List Bytes :=
   (List.range profile.params.ell1).map fun r =>
     (RssProduction.sharedOracle profile).evalWotsChainEnd layer tree kp r (digits.getD r 0)
 
 /-- This function receives already disclosed values only and has no secret
 material or oracle callback in its input. -/
-def completeSelectedLeaf (params : PqHashParams) (pkSeed : Bytes) (layer : UInt32)
+@[expose] def completeSelectedLeaf (params : PqHashParams) (pkSeed : Bytes) (layer : UInt32)
     (tree : UInt64) (kp : Nat) (digits : List Nat) (values : List Bytes) : Bytes :=
   recoverWotsPkFromSig cshake256Suite params pkSeed layer tree kp digits values
 

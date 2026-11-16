@@ -31,7 +31,7 @@ abbrev Program (α : Type) := OracleComp Query Bytes α
   | .forsReveal tree kp j u => o.evalIndexedForsReveal tree kp j u
   | .forsLeaf tree kp j u => o.evalIndexedForsLeafHash tree kp j u
 
-def bind {α β : Type} : Program α → (α → Program β) → Program β
+@[expose] def bind {α β : Type} : Program α → (α → Program β) → Program β
   | .pure x, k => k x
   | .query q next, k => .query q (fun result => bind (next result) k)
 
@@ -39,7 +39,7 @@ instance : Monad Program where
   pure := OracleComp.pure
   bind := bind
 
-def ask (q : Query) : Program Bytes := .query q .pure
+@[expose] def ask (q : Query) : Program Bytes := .query q .pure
 
 @[expose] def evaluate {α : Type} (o : ProductionPqHashMpcOracles) (program : Program α) : α :=
   evalOracleComp (answer o) program
@@ -57,7 +57,7 @@ def ask (q : Query) : Program Bytes := .query q .pure
 @[simp] theorem evaluate_ask (o : ProductionPqHashMpcOracles) (q : Query) :
     evaluate o (ask q) = answer o q := by rfl
 
-def mapProgram {α β : Type} (f : α → Program β) : List α → Program (List β)
+@[expose] def mapProgram {α β : Type} (f : α → Program β) : List α → Program (List β)
   | [] => pure []
   | x :: xs => do
       let y ← f x
@@ -71,7 +71,7 @@ def mapProgram {α β : Type} (f : α → Program β) : List α → Program (Lis
   | nil => rfl
   | cons x xs ih => simp only [mapProgram, evaluate_bind, evaluate_pure, ih, List.map_cons]
 
-def merkle (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
+@[expose] def merkle (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
     (tree : UInt64) (kind : AdrsKind) (leaf : Nat → Program Bytes) :
     Nat → Nat → Program Bytes
   | 0, index => leaf index
@@ -90,7 +90,7 @@ def merkle (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
   | zero => simp only [merkle, computeMerkleNode_zero]
   | succ height ih => simp only [merkle, evaluate_bind, evaluate_pure, ih, computeMerkleNode_succ]
 
-def merkleKp (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
+@[expose] def merkleKp (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
     (tree : UInt64) (kind : AdrsKind) (kp : UInt32) (leaf : Nat → Program Bytes) :
     Nat → Nat → Nat → Program Bytes
   | 0, _, base => leaf base
@@ -110,7 +110,7 @@ def merkleKp (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
   | zero => simp only [merkleKp, computeMerkleNodeKp_zero]
   | succ height ih => simp only [merkleKp, evaluate_bind, evaluate_pure, ih, computeMerkleNodeKp_succ]
 
-def authPath (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
+@[expose] def authPath (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
     (tree : UInt64) (kind : AdrsKind) (kp : UInt32) (leaf : Nat → Program Bytes) :
     Nat → Nat → Nat → Nat → Program (List Bytes)
   | 0, _, _, _ => pure []
@@ -137,7 +137,7 @@ def authPath (suite : TweakableHashSuite) (pkSeed : Bytes) (layer : UInt32)
       simp only [authPath, buildMerkleAuthPathKp.public_eq_2]
       split <;> simp only [evaluate_bind, evaluate_merkleKp, evaluate_pure, ih]
 
-def wotsPk (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
+@[expose] def wotsPk (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
     (layer : UInt32) (tree : UInt64) (kp : Nat) : Program Bytes := do
   let chains ← mapProgram (fun r => ask (.wotsChain layer tree kp r (params.w - 1)))
     (List.range params.ell1)
@@ -150,7 +150,7 @@ def wotsPk (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
   simp only [wotsPk, evaluate_bind, evaluate_mapProgram, evaluate_ask, evaluate_pure,
     answer, mpcComputeWotsPk.public_eq_1]
 
-def xmssRoot (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
+@[expose] def xmssRoot (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
     (layer : UInt32) (tree : UInt64) : Program Bytes :=
   merkle suite pkSeed layer tree .tree (wotsPk suite params pkSeed layer tree) params.subtreeHeight 0
 
@@ -160,7 +160,7 @@ def xmssRoot (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Byte
       mpcComputeXmssSubtreeRoot suite params o.toPqHashMpcOracles pkSeed layer tree := by
   simp only [xmssRoot, evaluate_merkle, evaluate_wotsPk, mpcComputeXmssSubtreeRoot.public_eq_1]
 
-def publicKey (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes) :
+@[expose] def publicKey (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes) :
     Program PqPublicKey := do
   let root ← xmssRoot suite params pkSeed (UInt32.ofNat (params.numLayers - 1)) 0
   pure ⟨pkSeed, root⟩

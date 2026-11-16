@@ -18,16 +18,16 @@ inductive LeafTree (α : Type) : Nat → Type where
   | leaf (value : α) : LeafTree α 0
   | node {height : Nat} (left right : LeafTree α height) : LeafTree α (height + 1)
 
-def buildLeafTree {α : Type} (f : Nat → α) : (height : Nat) → Nat → LeafTree α height
+@[expose] def buildLeafTree {α : Type} (f : Nat → α) : (height : Nat) → Nat → LeafTree α height
   | 0, base => .leaf (f base)
   | height + 1, base => .node (buildLeafTree f height (2 * base))
       (buildLeafTree f height (2 * base + 1))
 
-def mapLeafTree {α β : Type} (f : α → β) : {height : Nat} → LeafTree α height → LeafTree β height
+@[expose] def mapLeafTree {α β : Type} (f : α → β) : {height : Nat} → LeafTree α height → LeafTree β height
   | 0, .leaf value => .leaf (f value)
   | _ + 1, .node left right => .node (mapLeafTree f left) (mapLeafTree f right)
 
-def mapIndexedTree {α β : Type} (f : Nat → α → β) :
+@[expose] def mapIndexedTree {α β : Type} (f : Nat → α → β) :
     {height : Nat} → Nat → LeafTree α height → LeafTree β height
   | 0, base, .leaf value => .leaf (f base value)
   | _ + 1, base, .node left right => .node (mapIndexedTree f (2 * base) left)
@@ -52,7 +52,7 @@ structure UnverifiedTree (height : Nat) where
 
 /-- A single grouped workload, with monotonically threaded internal invocation
 coordinates and no intermediate answer reconstruction. -/
-def produceTree (prepared : Prepared) (material : RssProduction.Material) (tape : ParticipantTape) :
+@[expose] def produceTree (prepared : Prepared) (material : RssProduction.Material) (tape : ParticipantTape) :
     {height : Nat} → Nat → LeafTree (List Query) height → UnverifiedTree height
   | 0, first, .leaf queries =>
     let batch := produceBatch prepared material tape first queries
@@ -62,7 +62,7 @@ def produceTree (prepared : Prepared) (material : RssProduction.Material) (tape 
     let rhs := produceTree prepared material tape lhs.nextInvocation right
     ⟨rhs.nextInvocation, .node lhs.batches rhs.batches⟩
 
-def treeQueryCount : {height : Nat} → LeafTree (List Query) height → Nat
+@[expose] def treeQueryCount : {height : Nat} → LeafTree (List Query) height → Nat
   | 0, .leaf queries => queries.length
   | _ + 1, .node left right => treeQueryCount left + treeQueryCount right
 
@@ -76,7 +76,7 @@ theorem produceTree_counter (prepared : Prepared) (material : RssProduction.Mate
 
 /-- Observation only after the complete grouped computation; this is not an
 unchecked active protocol port. -/
-def candidateTree {height : Nat} (tree : UnverifiedTree height) : LeafTree (List Bytes) height :=
+@[expose] def candidateTree {height : Nat} (tree : UnverifiedTree height) : LeafTree (List Bytes) height :=
   mapLeafTree candidateBatch tree.batches
 
 theorem produceTree_correct (profile : RssProduction.Profile) (request : SessionScheduleReq)
@@ -91,7 +91,7 @@ theorem produceTree_correct (profile : RssProduction.Profile) (request : Session
     rw [ihl, ihr]
 
 /-- Both routines below receive only public completed leaf bytes. -/
-def cacheRoot (pkSeed : Bytes) (layer : UInt32) (tree : UInt64) :
+@[expose] def cacheRoot (pkSeed : Bytes) (layer : UInt32) (tree : UInt64) :
     {height : Nat} → LeafTree Bytes height → Nat → Bytes
   | 0, .leaf value, _ => value
   | height + 1, .node left right, index =>
@@ -99,7 +99,7 @@ def cacheRoot (pkSeed : Bytes) (layer : UInt32) (tree : UInt64) :
       (cacheRoot pkSeed layer tree left (2 * index))
       (cacheRoot pkSeed layer tree right (2 * index + 1))
 
-def cachePath (pkSeed : Bytes) (layer : UInt32) (tree : UInt64) :
+@[expose] def cachePath (pkSeed : Bytes) (layer : UInt32) (tree : UInt64) :
     {height : Nat} → LeafTree Bytes height → Nat → Nat → List Bytes
   | 0, .leaf _, _, _ => []
   | height + 1, .node left right, index, localIndex =>
@@ -126,11 +126,11 @@ theorem cachePath_build (pkSeed : Bytes) (layer : UInt32) (tree : UInt64)
   | succ height ih =>
     simp only [buildLeafTree, cachePath, buildMerkleAuthPathKp, cacheRoot_build, ih]
 
-def wotsTreePlan (params : PqHashParams) (layer : UInt32) (tree : UInt64)
+@[expose] def wotsTreePlan (params : PqHashParams) (layer : UInt32) (tree : UInt64)
     (selected : Nat) (digits : List Nat) : LeafTree (List Query) params.subtreeHeight :=
   buildLeafTree (wotsRowQueries params layer tree selected digits) params.subtreeHeight 0
 
-def completeWotsCache (params : PqHashParams) (pkSeed : Bytes) (layer : UInt32) (tree : UInt64)
+@[expose] def completeWotsCache (params : PqHashParams) (pkSeed : Bytes) (layer : UInt32) (tree : UInt64)
     (selected : Nat) (digits : List Nat) (rows : LeafTree (List Bytes) params.subtreeHeight) :
     LeafTree Bytes params.subtreeHeight :=
   mapIndexedTree (completeWotsRow params pkSeed layer tree selected digits) 0 rows
