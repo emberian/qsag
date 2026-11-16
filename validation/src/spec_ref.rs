@@ -99,7 +99,8 @@ impl ExactNat {
                 out[i + j] = acc as u64;
                 carry = acc >> 64;
             }
-            out[i + rhs.0.len()] += carry as u64;
+            // Earlier rows end below this limb; it has not been written yet.
+            out[i + rhs.0.len()] = carry as u64;
         }
         let mut res = Self(out);
         res.trim();
@@ -143,8 +144,11 @@ impl ExactNat {
         res
     }
 
-    pub fn div_rem_u32(&self, divisor: u32) -> (Self, u32) {
-        assert!(divisor > 0);
+    /// Euclidean division; a zero divisor has no quotient (including `0 / 0`).
+    pub fn div_rem_u32(&self, divisor: u32) -> Option<(Self, u32)> {
+        if divisor == 0 {
+            return None;
+        }
         let d = divisor as u128;
         let mut quot = vec![0u64; self.0.len()];
         let mut rem = 0u128;
@@ -155,7 +159,7 @@ impl ExactNat {
         }
         let mut q = Self(quot);
         q.trim();
-        (q, rem as u32)
+        Some((q, rem as u32))
     }
 
     pub fn to_decimal_string(&self) -> String {
@@ -165,7 +169,7 @@ impl ExactNat {
         let mut cur = self.clone();
         let mut chunks = Vec::new();
         while !cur.is_zero() {
-            let (q, r) = cur.div_rem_u32(1_000_000_000);
+            let (q, r) = cur.div_rem_u32(1_000_000_000).expect("nonzero decimal radix");
             chunks.push(r);
             cur = q;
         }
@@ -221,9 +225,13 @@ pub fn rational_at_least_bits(bits: usize, num: &ExactNat, den: &ExactNat) -> bo
 }
 
 /// Exact floor of `-log2(num / den)` in whole bits: unique `b` with
-/// `num * 2^b <= den < num * 2^(b + 1)` (requires `0 < num <= den`).
-pub fn exact_neg_log2_floor_bits(num: &ExactNat, den: &ExactNat) -> usize {
-    assert!(!num.is_zero() && num <= den);
+/// `num * 2^b <= den < num * 2^(b + 1)`.
+/// Returns `None` outside `0 < num <= den`: zero probability has no finite floor,
+/// a zero denominator is undefined, and probabilities above one have a negative bound.
+pub fn exact_neg_log2_floor_bits(num: &ExactNat, den: &ExactNat) -> Option<usize> {
+    if num.is_zero() || num > den {
+        return None;
+    }
     let approx = den.bit_len().saturating_sub(num.bit_len());
     let mut b = approx.saturating_sub(1);
     while &num.shl_bits(b + 1) <= den {
@@ -231,13 +239,16 @@ pub fn exact_neg_log2_floor_bits(num: &ExactNat, den: &ExactNat) -> usize {
     }
     assert!(rational_at_least_bits(b, num, den));
     assert!(!rational_at_least_bits(b + 1, num, den));
-    b
+    Some(b)
 }
 
 /// Exact floor of `-1000 * log2(num / den)` (millibits), matching `Qsag.PorsFpSecurity.MilliAtLeast`:
 /// unique `m` with `num^1000 * 2^m <= den^1000 < num^1000 * 2^(m + 1)`.
-pub fn exact_neg_log2_floor_millibits(num: &ExactNat, den: &ExactNat) -> usize {
-    assert!(!num.is_zero() && num <= den);
+/// Returns `None` outside `0 < num <= den`, as for [`exact_neg_log2_floor_bits`].
+pub fn exact_neg_log2_floor_millibits(num: &ExactNat, den: &ExactNat) -> Option<usize> {
+    if num.is_zero() || num > den {
+        return None;
+    }
     let num_1000 = num.pow_u32(1000);
     let den_1000 = den.pow_u32(1000);
     exact_neg_log2_floor_bits(&num_1000, &den_1000)
@@ -270,6 +281,37 @@ pub fn octopus_cover_ref(tree_height: usize, indices: &[u32]) -> Option<Vec<(u32
     Some(cover)
 }
 
+/// PORS selection from an independent NIST XOF: order distinct indices by their
+/// first occurrence in the complete bounded draw stream, then apply the cover cap.
+/// This avoids the production selector's incremental XOF/acceptance state machine.
+pub fn pors_selection_nist_ref(
+    tree_height: usize,
+    reveal: usize,
+    draw_budget: usize,
+    max_auth: usize,
+    custom: &[u8],
+    seed: &[u8],
+) -> Option<Vec<u32>> {
+    if tree_height > 31 || reveal == 0 {
+        return None;
+    }
+    let bytes = cshake256_nist_sp800_185_ref(b"", custom, seed, draw_budget.checked_mul(4)?);
+    let mask = (1u32 << tree_height) - 1;
+    let mut first_occurrences = std::collections::BTreeMap::new();
+    for (pos, word) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        let index = u32::from_be_bytes(*word) & mask;
+        first_occurrences.entry(index).or_insert(pos);
+    }
+    if first_occurrences.len() < reveal {
+        return None;
+    }
+    let mut ordered: Vec<_> = first_occurrences.into_iter().collect();
+    ordered.sort_unstable_by_key(|&(_, pos)| pos);
+    let mut selected: Vec<_> = ordered[..reveal].iter().map(|&(idx, _)| idx).collect();
+    selected.sort_unstable();
+    (octopus_cover_ref(tree_height, &selected)?.len() <= max_auth).then_some(selected)
+}
+
 /// Independent exact combinatorics recurrence `(N_root(h, L), D(L, S), M(h, w, L, S))`
 /// matching `Qsag.frontierRootSubCount` and `Qsag.frontierDecCount` in
 /// `FrontierCompact1122AndCorduroySecurity.lean`.
@@ -280,7 +322,7 @@ pub fn frontier_fts_cardinalities_ref(
     s: usize,
 ) -> (ExactNat, ExactNat, ExactNat) {
     let mut sub: Vec<Vec<ExactNat>> = vec![vec![ExactNat::zero(); l + 1]; h + 1];
-    if l >= 1 {
+    if h > 0 && l >= 1 {
         sub[0][1] = ExactNat::from_u64(1);
     }
     for t in 1..=h {

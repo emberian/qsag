@@ -9,7 +9,7 @@
 //!      canonical bottom-up left-to-right ordering, sibling-pair pruning, and strict rejection of
 //!      empty, duplicate, unsorted, out-of-range, non-canonical, or unpruned (`> 128`) openings,
 //!    - Zero-float exact rational subset-cover security verification over `ExactNat`:
-//!      `-floor(log2(C(28*r, 28) / C(2048, 28))) == [209, 157, 136, 122]` bits and exact millibit
+//!      `floor(-log2(C(28*r, 28) / C(2048, 28))) == [209, 157, 136, 122]` bits and exact millibit
 //!      floors `[209_788, 157_024, 136_093, 122_451]` (`PorsFpSecurity.lean:sha3_128f_binomial_bits`,
 //!      `sha3_128f_millibits`) vs `forgery_bits_milli` `[209_767, 156_999, 136_068, 122_425]`, plus
 //!      witness that dropping index distinctness (`28^28 / 2048^28`) collapses below 209 bits.
@@ -41,7 +41,7 @@ use qsag_core::baggy::{
 use qsag_core::keccak_mpc::{RssKeyShare256, run_dealerless_rss_dkg_2of3};
 use qsag_core::pors_fp::{
     PorsFpOpening, PorsFpParams, octopus_positions, pors_fp_auth, pors_fp_root, pors_fp_select,
-    pors_leaf_adrs, pors_leaf_hash, pors_prf_adrs, pors_reference_tree,
+    pors_leaf_adrs, pors_prf_adrs, pors_reference_tree,
 };
 use qsag_core::preprocessing::PartyPrivateRng;
 use qsag_core::rss256::Rss256Engine;
@@ -50,7 +50,7 @@ use qsag_core::tsw_baggy::{AdrsKind, PqSecretKey};
 use qsag_external_validation::spec_ref::{
     ExactNat, cshake256_framed_32_nist_ref, exact_neg_log2_floor_bits,
     exact_neg_log2_floor_millibits, ff_top_exact, frontier_fts_cardinalities_ref,
-    octopus_cover_ref, rational_at_least_bits,
+    octopus_cover_ref, pors_selection_nist_ref, rational_at_least_bits,
 };
 use qsag_fts::{
     EpochKeyLink, FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsSignature,
@@ -155,8 +155,8 @@ fn pors_fp_sha3_128f_geometry_adrs_and_exact_rational_subset_cover_bounds() {
 
     for r in 1..=4usize {
         let num = ff_top_exact(28 * r as u64, 28);
-        let exact_bits = exact_neg_log2_floor_bits(&num, &den);
-        let exact_milli = exact_neg_log2_floor_millibits(&num, &den);
+        let exact_bits = exact_neg_log2_floor_bits(&num, &den).unwrap();
+        let exact_milli = exact_neg_log2_floor_millibits(&num, &den).unwrap();
         let rust_milli = p.forgery_bits_milli(r as u32).expect("forgery_bits_milli");
 
         assert_eq!(
@@ -192,7 +192,7 @@ fn pors_fp_sha3_128f_geometry_adrs_and_exact_rational_subset_cover_bounds() {
     ));
     assert_eq!(
         exact_neg_log2_floor_bits(&non_distinct_num, &non_distinct_den),
-        173
+        Some(173)
     );
 }
 
@@ -227,14 +227,21 @@ fn pors_fp_octopus_sorting_uniqueness_pruning_and_tamper_rejection() {
     let mut accepted_indices = None;
     let mut unpruned_indices = None;
     for ctr in 0u32..50_000 {
-        if let Some(idx) = pors_fp_select(&params, &mut make_xof(ctr)) {
+        let reference = |max_auth| pors_selection_nist_ref(
+            params.tree_height, params.reveal, params.draw_budget(), max_auth,
+            b"QSAG.VALIDATION.PORS_FP/v1", &ctr.to_be_bytes(),
+        );
+        let selected = pors_fp_select(&params, &mut make_xof(ctr));
+        assert_eq!(selected, reference(params.max_auth_nodes), "counter={ctr}");
+        if let Some(idx) = selected {
             if accepted_indices.is_none() {
                 accepted_indices = Some(idx);
             }
         } else if unpruned_indices.is_none()
             && let Some(idx) = pors_fp_select(&loose_params, &mut make_xof(ctr))
         {
-            let cover = octopus_positions(params.tree_height, &idx).unwrap();
+            assert_eq!(Some(idx.clone()), reference(loose_params.max_auth_nodes));
+            let cover = octopus_cover_ref(params.tree_height, &idx).unwrap();
             assert!(cover.len() > params.max_auth_nodes);
             unpruned_indices = Some(idx);
         }
@@ -266,11 +273,25 @@ fn pors_fp_octopus_sorting_uniqueness_pruning_and_tamper_rejection() {
     };
     let (secrets, levels) = pors_reference_tree(&params, &sk, 9, 2);
     let root = levels[params.tree_height][0];
-    // Spot-check leaf 0 against `pors_leaf_hash`.
-    assert_eq!(
-        levels[0][indices[0] as usize],
-        pors_leaf_hash(&sk.pk_seed, 9, 2, indices[0], &secrets[indices[0] as usize])
+    // Independent leaf-hash oracle: four LEB128-framed fields, all lengths < 128.
+    // This is the legacy PQ framing, not the u64 framing used by FrontierSumFts.
+    let mut adrs = [0u8; 32];
+    adrs[8..16].copy_from_slice(&9u64.to_be_bytes());
+    adrs[16..20].copy_from_slice(&8u32.to_be_bytes());
+    adrs[20..24].copy_from_slice(&2u32.to_be_bytes());
+    adrs[28..].copy_from_slice(&indices[0].to_be_bytes());
+    let mut leaf_preimage = vec![4];
+    for field in [
+        &b"QSAG.PQ.TH_F/v1"[..], &sk.pk_seed, &adrs, &secrets[indices[0] as usize],
+    ] {
+        leaf_preimage.push(field.len() as u8);
+        leaf_preimage.extend_from_slice(field);
+    }
+    let expected_leaf = qsag_external_validation::cshake256_nist_sp800_185_ref(
+        b"", b"QSAG.PQ.SUITE.CSHAKE256/v1", &leaf_preimage, 32,
     );
+    assert_eq!(levels[0][indices[0] as usize].as_slice(), expected_leaf);
+
 
     let opening = PorsFpOpening {
         secrets: indices.iter().map(|&i| secrets[i as usize]).collect(),
@@ -323,9 +344,25 @@ fn pors_fp_octopus_sorting_uniqueness_pruning_and_tamper_rejection() {
     let mut flipped_sec = opening.clone();
     flipped_sec.secrets[13][0] ^= 0x01;
     assert_ne!(
-        pors_fp_root(&params, &sk.pk_seed, 9, 2, &indices, &flipped_sec),
-        Some(root)
+        pors_fp_root(&params, &sk.pk_seed, 9, 2, &indices, &flipped_sec)
+            .expect("secret tamper preserves opening structure"),
+        root
     );
+    let mut flipped_auth = opening.clone();
+    flipped_auth.auth[0][0] ^= 1;
+    let mut swapped_auth = opening.clone();
+    assert_ne!(swapped_auth.auth[0], swapped_auth.auth[1]);
+    swapped_auth.auth.swap(0, 1);
+    for bad in [flipped_auth, swapped_auth] {
+        let (parsed, consumed) = PorsFpOpening::from_wire_bytes(&params, &bad.to_wire_bytes())
+            .expect("auth tamper preserves canonical wire format");
+        assert_eq!(consumed, wire.len());
+        assert_ne!(
+            pors_fp_root(&params, &sk.pk_seed, 9, 2, &indices, &parsed)
+                .expect("auth tamper preserves opening structure"),
+            root
+        );
+    }
 
     // Honest opening of `wide_indices` (> 128 auth nodes) succeeds under `loose_params` but
     // MUST fail closed under `SHA3_128F` in `pors_fp_auth`, `pors_fp_root`, AND `from_wire_bytes`!
@@ -728,7 +765,7 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
             &msgs_1122[bad_lane],
             &mutated[bad_lane],
         );
-        assert!(scalar_res.is_err());
+        assert_eq!(scalar_res, Err(FrontierFtsError::SignatureVerificationFailed));
         let batch_inputs = assemble_batch(
             &pks_1122, &dp_1122, &msgs_1122, &mutated, &pks_full, &dp_full, &msgs_full, &sigs_full,
         );
@@ -823,7 +860,11 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x5153_4147_5735),
+        ..ProptestConfig::default()
+    })]
 
     /// Every 256-bit digest rank embeds injectively into both `Compact1122` and `Full256Bit`
     /// with exact `rank(unrank(r)) == r`, prefix-free antichain partition, and constant sum `S`.
