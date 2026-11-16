@@ -56,7 +56,7 @@ BLS aggregation relies on pairings, which a quantum computer breaks. The post-qu
 
 To make verification cheap to prove, the signatures being aggregated use Poseidon2, a hash designed for arithmetic circuits, in place of Keccak. Hem lays out the $K$ verifications as a table over the 64-bit Goldilocks field, checks the table's constraints with a sumcheck, and commits to it with WHIR, a hash-based polynomial commitment. No trusted setup is involved, and the only cryptographic assumption is on the hash functions.
 
-One parameter choice deserves a sentence. Proof systems of this family choose how many positions of a Reed–Solomon codeword to sample, and many deployed systems choose that number by conjecturing that sampling behaves well all the way up to the code's capacity. Those conjectures were disproved in 2025–26. Hem sets its sample counts from the proven Guruswami–Sudan (Johnson) list-decoding bound instead, sized for a quantum adversary. Its proofs are larger as a result, a few hundred kilobytes, and its soundness does not depend on an open conjecture about codes.
+One parameter choice deserves a sentence. Proof systems of this family choose how many positions of a Reed–Solomon codeword to sample, and many deployed systems choose that number by conjecturing that sampling behaves well all the way up to the code's capacity. Those conjectures were disproved in 2025–26. Hem sets its sample counts from the proven Guruswami–Sudan (Johnson) list-decoding bound instead. The default profile sizes them so that a Grover search over one round of challenges costs at least $2^{128}$ work with no limit on the number of hash queries; four smaller profiles are also accepted, and those are 128-bit secure only for an adversary limited to $2^{38}$ or $2^{40}$ hash queries ([details](docs/SECURITY_AND_CT_PROOFS.md#hem-profile-and-qrom-accounting)). Proofs are a few hundred kilobytes as a result, and soundness does not depend on an open conjecture about codes.
 
 The prover runs on CPUs (AVX2, AVX-512, NEON) and on GPUs through Vulkan compute shaders. Both produce identical proofs.
 
@@ -77,7 +77,7 @@ Threshold signing is built for general $(t, n)$, but not every path is equally f
 | SLH-DSA, Baggy, and Jorts on the three-party engine | 2-of-3 | 1 malicious custodian (signing may abort) | The fast path for whole-signature signing. Uses replicated secret sharing, whose storage grows as $\binom{n}{t-1}$, so it stays at three parties. |
 | Jorts with quorum switching, QS-A | any $(t, n)$ | $t - 1$ malicious | One round online. Tree capacity is divided among $\binom{n}{t}$ groups, so it suits small and medium committees. |
 | Jorts with quorum switching, QS-B | any $(t, n)$ up to 255 custodians | $f$ malicious, with $n \ge 3f + 1$ | Shamir shares of a fixed size per custodian, whatever $n$ is. |
-| Threshold ML-DSA | $n \le 5$ | $t - 1$ malicious | $2t - 1$ custodians sign together. |
+| Threshold ML-DSA | $n \le 64$, $n \ge 2t - 1$ | $t - 1$ malicious | A quorum of $2t - 1 \le 16$ custodians signs together (so $t \le 8$): Shamir shares with an honest majority inside the quorum, and checked multiplications and share conversions. |
 | General engine (SPDZ-style authenticated shares) | any $(t, n)$ | up to $n - 1$ malicious (signing may abort) | Slow today: generating its correlated randomness dominates, and signing a whole stateless tree this way takes minutes. |
 
 ## Performance
@@ -109,7 +109,7 @@ All figures are measured, at the sizes stated. Hardware and method are in §7 of
 | 128 signers, 24 CPU threads | 4.9–8.8 s | 3.4 ms | 435 KiB |
 | 1,200 signers, one joint proof, CPU | — | 14.4 ms | 1.93 MiB |
 
-A single proof shard covers up to 128 Jorts signers, and several shards can be proved jointly (the 1,200-signer row). Larger sets are handled by merging proofs, which today means concatenating them: 2,048 validators come to 6.8 MiB and verify in 16–43 ms, and size keeps growing linearly from there. Constant-size recursion is not implemented. For comparison, 128 raw Jorts signatures are 541 KiB and 1,200 are 4.95 MiB.
+A single proof shard covers up to 128 Jorts signers, and several shards can be proved jointly (the 1,200-signer row). Larger sets are handled by merging proofs, which today means concatenating them: 2,048 validators come to 6.8 MiB and verify in 16–43 ms, and size keeps growing linearly from there. Constant-size recursion is not implemented: a proof that verifies the WHIR openings of up to 16 child shards inside one parent circuit exists (over the Poseidon2 commitment profile), but it certifies those openings rather than the shards' signatures, so the child proofs are still needed for authorization. For comparison, 128 raw Jorts signatures are 541 KiB and 1,200 are 4.95 MiB.
 
 **Primitives** (one Zen 5 core, AVX-512): Keccak at 3.15 GB/s; a Merkle node hash in 111 ns, eight at a time.
 
@@ -117,7 +117,7 @@ A single proof shard covers up to 128 Jorts signers, and several shards can be p
 
 The project uses formal proof as a design tool. A construction is modelled in Lean, and the attempt to prove it secure is what finds the missing check. There are four layers, each covering something the others cannot.
 
-1. **Protocol proofs** ([`lean/Qsag/`](lean/Qsag)). About 140 Lean 4 modules cover the signature schemes, the threshold protocols, crash recovery of the write-ahead log under a model of POSIX and disk behaviour, the quorum-overlap argument, and the coding-theory bounds behind Hem. The library is constructive: there is no `sorry` and no use of `Classical.choice`, so a security reduction is a function that computes the forgery or collision it promises. Most guards also come with a counterexample, a theorem showing the concrete attack that appears when the guard is removed.
+1. **Protocol proofs** ([`lean/Qsag/`](lean/Qsag)). About 200 Lean 4 modules cover the signature schemes, the threshold protocols, crash recovery of the write-ahead log under a model of POSIX and disk behaviour, the quorum-overlap argument, and the coding-theory bounds behind Hem. The library is constructive: there is no `sorry` and no use of `Classical.choice`, so a security reduction is a function that computes the forgery or collision it promises. Most guards also come with a counterexample, a theorem showing the concrete attack that appears when the guard is removed.
 2. **Proofs about the Rust itself** ([`aeneas/`](aeneas)). The safety-critical checks in the Rust code (field arithmetic, the sponge, and the guards that decide whether a share may be released) live in two small crates. Charon and Aeneas translate their compiled MIR into Lean, where they are proved to match the specification. The production crates call these exact functions.
 3. **Constant-time proofs about machine code.** The 28 hand-written assembly routines (19 for x86-64, 9 for AArch64) are decoded from the compiled object files, and Lean proves that their branches, memory addresses, and variable-time instructions do not depend on secrets. For 26 of them it also proves that they compute the right function. A separate screen checks every compiled cryptographic symbol for secret-dependent branches, and `dudect` timing tests run on real CPUs. The GPU shaders have a corresponding SPIR-V model, which is not yet connected to the exact shader binaries.
 4. **Differential testing** ([`validation/`](validation)). The Lean specifications are executable, so they are run against the Rust byte for byte. Both are also run against 17 independent crates (`fips205`, `fips204`, `sha3`, `k256`, `curve25519-dalek`, `blstrs`, Plonky3's Goldilocks, and others), and the assembly is single-stepped against a real Zen 5 CPU.
@@ -191,7 +191,8 @@ The libraries are `no_std` with `alloc`. Only the CLI, the file-backed logs, and
 - [paper/qsag.typ](paper/qsag.typ): the constructions, parameters, and measurements in full.
 - [ASSURANCE.md](ASSURANCE.md): threat models, what each proof covers, and the trusted base.
 - [docs/QUORUM_AND_CONSENSUS_SCALING.md](docs/QUORUM_AND_CONSENSUS_SCALING.md): how aggregation scales to large validator sets.
-- [PROJECT.md](PROJECT.md): current status and open work.
+- [docs/PROOF_ARCHITECTURE.md](docs/PROOF_ARCHITECTURE.md): how the Lean library is organised and where to start reading it.
+- [docs/SECURITY_AND_CT_PROOFS.md](docs/SECURITY_AND_CT_PROOFS.md): parameters, the theorems behind them, and the open proof obligations.
 
 ## License
 

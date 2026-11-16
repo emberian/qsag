@@ -4,8 +4,8 @@
 mathematical refinement: 26/28.** The two transpose kernels remain open.
 
 The current fixture APIs bind the 19 x86-64 and nine AArch64 exported assembly
-symbols to native ELF members in [CompiledRlibFixtures.lean](../lean/Qsag/CompiledRlibFixtures.lean)
-and [ElfFixtureSlices.lean](../lean/Qsag/ElfFixtureSlices.lean). Digests are
+symbols to native ELF members in [CompiledRlibFixtures.lean](../lean/Qsag/Machine/CompiledRlibFixtures.lean)
+and [ElfFixtureSlices.lean](../lean/Qsag/Machine/ElfFixtureSlices.lean). Digests are
 external freshness checks, not Lean axioms.
 
 ## Functional coverage
@@ -113,24 +113,22 @@ Outstanding work:
    explicit. Full compiled-wrapper refinement and final linked-executable
    coverage are separate obligations.
 
-This work leaves `QsagChallenge.lean` and `Qsag/Apex.lean` untouched. Historical names retain historical bytes and budgets. For example,
+This work leaves `QsagChallenge.lean` and `Qsag/Top/Apex.lean` untouched. Historical names retain historical bytes and budgets. For example,
 the current fixed-size x86 equality kernel needs 28 instructions, so the old
 20-step theorem cannot describe it; the current APIs state the correct budget.
 
 ## Reproduction
 
-Run compilers only on the designated Linux build host, with six Lean threads
-and the project resource wrapper. From the repository root:
+Run the builds on a Linux host with a memory limit in place (the commands below were
+sized for 12 GiB and six Lean threads). From the repository root:
 
 ```sh
-SWARM_MEM_MAX=12G timeout --kill-after=10s 600s swarm-build \
-  env CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release \
+CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release \
   --target x86_64-unknown-linux-gnu --target-dir target/ct-audit
-SWARM_MEM_MAX=12G timeout --kill-after=10s 600s swarm-build \
-  env CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release \
+CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release \
   --target aarch64-unknown-linux-gnu --target-dir target/ct-audit
 python3 scripts/audit_elf_ct.py --fixture-generation current \
-  --check-fixtures lean/Qsag/CompiledRlibFixtures.lean --fixture-binding kernel-bytes \
+  --check-fixtures lean/Qsag/Machine/CompiledRlibFixtures.lean --fixture-binding kernel-bytes \
   --fixture-x86-rlib target/ct-audit/x86_64-unknown-linux-gnu/release/libqsag_asm.rlib \
   --fixture-aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib
 python3 scripts/sydtv_driver.py --self-test --require-z3 --check-lean
@@ -138,11 +136,12 @@ python3 scripts/isa_cosim_silicon.py --count 128 \
   --kernel-elf target/ct-audit/x86_64-unknown-linux-gnu/release/libqsag_asm.rlib
 python3 scripts/check_lean_policy.py
 cd lean
-LEAN_NUM_THREADS=6 SWARM_MEM_MAX=12G timeout --kill-after=10s 600s swarm-build \
-  lake build --wfail Qsag.CompiledRlibFixtures Qsag.ElfFixtureSlices \
-  Qsag.ElfInvCerts Qsag.ElfParse Qsag.McRefine Qsag.ElfBinaryVerify \
-  Qsag.ElfFixtureVerify Qsag.ElfFunctionalEquiv Qsag.SydTvTranslationValidation Qsag.IsaCosim
-LEAN_NUM_THREADS=6 SWARM_MEM_MAX=12G timeout --kill-after=10s 600s swarm-build \
+LEAN_NUM_THREADS=6 \
+  lake build --wfail Qsag.Machine.CompiledRlibFixtures Qsag.Machine.ElfFixtureSlices \
+  Qsag.Machine.ElfInvCerts Qsag.Machine.ElfParse Qsag.Machine.McRefine \
+  Qsag.Machine.ElfBinaryVerify Qsag.Machine.ElfFixtureVerify \
+  Qsag.Machine.ElfFunctionalEquiv Qsag.Machine.SydTvTranslationValidation Qsag.Machine.IsaCosim
+LEAN_NUM_THREADS=6 \
   lake env lean fixtures/AuditVertical.lean
 ```
 

@@ -4,39 +4,36 @@ Run `AENEAS_TOOLS_DIR=<tool-directory> ./aeneas/extract_whir.sh` from the reposi
 
 ## Production Linkage (`crates/qsag-agg`)
 
-`qsag-whir-verified` is a zero-dependency `#![no_std]` + `#![forbid(unsafe_code)]` Rust crate linked by `crates/qsag-agg`. Production callers and library-only coverage are distinguished below:
+`qsag-whir-verified` is a zero-dependency `#![no_std]` + `#![forbid(unsafe_code)]` Rust crate linked by `crates/qsag-agg`, whose WHIR verifier calls the extracted kernels directly on its acceptance path. File names below are under `crates/qsag-agg/src/`:
 
 - **Canonical Wire Decoding (`field.rs`):** `decode_canonical_u64` and `decode_canonical_ext4` enforce `< GOLDILOCKS_P` on all 64-bit and 256-bit wire elements.
-- **Quartic Extension & Affine/CWYZ Folding (`pcs/affine.rs`, `pcs.rs`):** Production calls `cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`, and `affine_cascade_claim_step`. The acceptance wrappers `verify_affine_duet_fold_step`, `verify_cwyz_duet_fold_step`, and `verify_cwyz_bridge_claim_step` have test-only callers. `qsag_whir_verified::Ext4` uses polynomial order `[1, u, u², u³]` modulo `u⁴ − 7`; the production adapter maps its Karatsuba tower order `[1, u², u, u³]`, and `towerToPoly_mul_hom` in `Arithmetic.lean` proves exact multiplicative isomorphism.
-- **Terminal/OOD Equality, PoW, & Query Indexing (`pcs.rs`, `arithmetize.rs`):** Production calls `verify_ood_pin_eq`, `verify_stage_pow_mask`, and `canonical_query_group_idx`. The arbitrary-slice polynomial pin wrapper `verify_ext4_univariate_at_base_pin` currently has test-only callers.
+- **Quartic Extension & Affine/CWYZ Folding (`pcs/affine.rs`, `pcs.rs`):** Production calls `cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`, and `affine_cascade_claim_step`, and decides acceptance through the wrappers `verify_affine_duet_fold_step` and `verify_cwyz_duet_fold_step` (the last fold step of every opened fiber, `FiberLastDuet::accepts`) and `verify_cwyz_bridge_claim_step`. The folding-scheme checker in `recursive_fold.rs` reuses `verify_cwyz_duet_fold_step`. `qsag_whir_verified::Ext4` uses polynomial order `[1, u, u², u³]` modulo `u⁴ − 7`; the production adapter maps its Karatsuba tower order `[1, u², u, u³]`, and `towerToPoly_mul_hom` in `Arithmetic.lean` proves exact multiplicative isomorphism.
+- **Terminal/OOD Equality, PoW, & Query Indexing (`pcs.rs`, `arithmetize.rs`):** Production calls `verify_ood_pin_eq`, `verify_stage_pow_mask`, and `canonical_query_group_idx`; the terminal polynomial is evaluated with `eval_ext4_univariate_at_base`, and folded fibers are pinned with the arbitrary-slice wrapper `verify_ext4_univariate_at_base_pin`.
 - **Indexed Canopy Merkle Ordering (`pcs.rs`):** `step_merkle_pair_order` returns `MerklePair` carrying `TAG_CANOPY_MERKLE_INTERNAL = 0x00` along with direction-bit-ordered `(left, right)` 32-byte siblings, consumed directly by `hash_merkle_internal` inside `verify_canopy_multiproof` (where internal nodes use tag `0x00` and the tree root uses tag `0x01`).
 - **Overflow-Free Hierarchical Quorum Summation (`recursive.rs`):** `checked_quorum_sum` validates non-empty equal-length slices, positive per-shard and global quorum floors, per-shard threshold satisfaction, and checked 64-bit natural-number summation.
 
 ## Fold and Horner integration contract
 
-The extracted Rust exports `fold_duet_affine_ext4(v0, v1, inv_two_xk, inv_two,
-xk_sq, theta, alpha, beta)` and `eval_univariate_ext4_at_base(coeffs, z)` are
-ready for the production PCS adapters. They delegate to the extracted
-CWYZ fold (`cwyz_duet_fold`) and descending-index Horner loop
-(`eval_ext4_univariate_at_base`); the production names themselves are
-present in generated `Funs.lean`. `Proofs.lean` proves their total refinements
-and the stronger coset-recovery / ascending-polynomial statements.
+The production PCS reaches the extracted CWYZ fold through `verify_cwyz_duet_fold_step`
+and the descending-index Horner loop through `eval_ext4_univariate_at_base`. The crate also
+exports `fold_duet_affine_ext4(v0, v1, inv_two_xk, inv_two, xk_sq, theta, alpha, beta)` and
+`eval_univariate_ext4_at_base(coeffs, z)` under the production names; they delegate to
+`cwyz_duet_fold` and `eval_ext4_univariate_at_base`. `QsagWhirVerified/Proofs.lean` proves
+total refinement for all of them, together with the stronger coset-recovery and
+ascending-polynomial statements.
 
-Inputs and outputs use `Ext4` in polynomial basis, with base-field parameters as
-`u64`. Convert production tower limbs with permutation `[0, 2, 1, 3]` in both
-directions. Horner coefficients are ordered by ascending degree, and an empty
-slice returns zero. Production integration must adapt the coefficient slice as
-well as the result. These functions retain the extracted modular arithmetic;
-performance parity with the optimized production field implementation is not
-established by the proofs.
+Inputs and outputs use `Ext4` in polynomial basis, with base-field parameters as `u64`.
+The production adapter converts its tower limbs with the permutation `[0, 2, 1, 3]` in both
+directions. Horner coefficients are ordered by ascending degree, and an empty slice returns
+zero. The extracted functions keep their straightforward modular arithmetic: the proofs say
+nothing about performance parity with the optimized production field code, and the prover's
+own folding (as opposed to the verifier's acceptance checks) still runs on that optimized
+code.
 
-The standalone Rust tests in `tests/production_entrypoints.rs` recover known
-even/odd components from cosets, verify dual-functional bridge steps, check
-perturbation rejection across all four `verify_*` entrypoints, and compare
-polynomial evaluation against an ascending power sum, including zero, empty,
-and modulus-boundary cases. Switching the current `pcs.rs` fold and `field.rs`
-Horner call sites to these exports remains a separate integration change; their
-availability does not establish production adoption.
+The standalone Rust tests in `aeneas/qsag-whir-verified/tests/production_entrypoints.rs`
+recover known even/odd components from cosets, verify dual-functional bridge steps, check
+perturbation rejection across all four `verify_*` entrypoints, and compare polynomial
+evaluation against an ascending power sum, including zero, empty, and modulus-boundary cases.
 
 ## Lean 4.35 Theorem Coverage, Six-Kernel Replay, & Axiom Audit
 
@@ -47,14 +44,16 @@ availability does not establish production adoption.
 
 Every Lean file in `aeneas/lean-whir` stays within the `<= 12` `@[expose]` declaration limit and avoids file-wide `@[expose] public section`. The mask-to-modulo proof uses a constructive bit induction, so the audit also rejects indirect dependencies on choice in imported arithmetic lemmas.
 
-From the repository root, run `python3 crates/qsag-agg/tests/check_affine_witness_parity.py` to
-check all 46 deployed Rust witness rows against `AffineProximityGaps` and pin both folding
-thresholds to `< 2000`. This read-only check complements the Rust finite-witness test and the
-Lean certificate.
+The 46 witness rows of the default regime for 2 to 24 variables are checked twice: by the
+Rust finite-witness test (`crates/qsag-agg/src/pcs/affine_schedule.rs`), and by the Lean
+certificate in `lean/Qsag/Coding/Cwyz26.lean` and
+`lean/Qsag/Protocol/Aggregation/Cwyz26JohnsonCertificate.lean`, which also pin both folding
+thresholds below `2000`. The 16 rows for 25 to 28 variables are checked by the Rust test
+only.
 
 ## Scope & Protocol Assumptions
 
-These theorems prove exact MIR-to-specification refinement of the extracted verifier kernels and loop invariants, not the end-to-end cryptographic security reduction of WHIR. Hash collision resistance, Fiat–Shamir random-oracle unpredictability, and out-of-band authentication of the ordered disjoint `ShardHemPolicy` registry remain protocol-level assumptions. Two-layer hierarchical aggregation (`crates/qsag-agg/src/recursive.rs`) verifies every regional `JortsPoseidon2` or `CorduroyPoseidon2` `Hem` proof in parallel and binds the length-framed (`encode_multi_frame`) policy registry root, message digest, epoch floor, and `checked_quorum_sum` quorum weights without compressing child verifiers into a recursive SNARK circuit.
+These theorems prove exact MIR-to-specification refinement of the extracted verifier kernels and loop invariants, not the end-to-end cryptographic security reduction of WHIR. Hash collision resistance, Fiat–Shamir random-oracle unpredictability, and out-of-band authentication of the ordered disjoint `ShardHemPolicy` registry remain protocol-level assumptions. Two-layer hierarchical aggregation (`crates/qsag-agg/src/recursive.rs`) verifies every regional `JortsPoseidon2` or `CorduroyPoseidon2` `Hem` proof in parallel and binds the length-framed (`encode_multi_frame`) policy registry root, message digest, epoch floor, and `checked_quorum_sum` quorum weights without compressing child verifiers into a recursive SNARK circuit. The separate fixed-path merge in `crates/qsag-agg/src/zk_hem/recursive_whir.rs` does verify child WHIR openings inside a committed relation; that verifier is a distinct transcript and is not covered by this extraction.
 
 All production scoped workers in `qsag-agg`, including nested arithmetic kernels, share one
 nonblocking permit budget. Saturated budgets and OS thread-creation failures execute the job

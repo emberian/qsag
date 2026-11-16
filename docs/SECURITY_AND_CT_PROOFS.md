@@ -5,54 +5,59 @@ The later recorded 2026-11-14 freshness check matched 19 x86-64 and 9 AArch64 ce
 **qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation** uses four
 complementary assurance pillars. The theorem source and its premises are the
 contract; neither a declaration count nor a passing test substitutes for a bridge
-to the deployed code. [ASSURANCE.md](../ASSURANCE.md) defines the full TCB and
-[PROJECT.md](../PROJECT.md) tracks integration work.
+to the deployed code. [ASSURANCE.md](../ASSURANCE.md) defines the full TCB,
+[PROOF_ARCHITECTURE.md](PROOF_ARCHITECTURE.md) describes the layout of the Lean library,
+and the open reductions are collected in the
+[last section](#from-component-statements-to-actual-construction-security) of this guide.
 
 ## Protocol, UC, storage and QROM spine
 
+Paths in this guide are relative to `lean/Qsag/` unless they begin with another directory.
+
 | Modules under `lean/Qsag/` | Subject | Scope to preserve |
 | --- | --- | --- |
-| `Goldilocks.lean`, `BinaryTower.lean` | Prime-field and extension arithmetic, Wiedemann towers | Algebraic laws apply to their exact representations; MIR/binary refinement is separate. Hem uses GoldilocksExt4, not a quadratic challenge field. |
-| `Keccak.lean`, `Poseidon2.lean` | Sponge/permutation algebra and framing | Match byte order, domain tags, lengths and padding to runtime codecs; permutation invertibility is not cryptanalytic security. |
-| `Fips205.lean`, `ThresholdMpc.lean` | SLH-DSA parameters, domain separation, threshold/reference evaluation | Match key, message, context and randomizer before asserting identical output. |
-| `HashSigs.lean`, `HypertreeEufCma.lean`, `BaggyAndRss256Security.lean` | WOTS+C, TSW, hypertrees, Baggy, Waistband and RSS256 | Reductions require reachable layers and valid transcripts; a first-success grinder and cached internal signatures must refine the reference construction. |
-| `MirSpecBridge.lean`, `MaliciousSecurity.lean` | Stateful signing, certified BeltLatch, quorum intersection, active checks | Global latch condition is `2q > n+f`; BFT availability needs `q <= n-f` (feasible together when `n >= 3f+1`). QS-A deliberately uses disjoint committee custody. |
-| `UcGames.lean`, `IdealTsig.lean`, `SimulationSpine.lean`, `InteractiveUcEngine.lean` | Oracle games, ideal functionality and simulation | Generic simulation premises must be instantiated with the concrete scheduler, messages and shared resources. Sequential sessions do not establish arbitrary concurrent composition. |
-| `PosixCrashWal.lean` | POSIX/NVMe persistence, torn writes, recovery, genesis seals and `OpenDescriptionId` flock ownership | `CeremonyAtomicityAndAbort.lean` supplies a valid-trace multi-ledger crash/interleaving theorem; production events must instantiate it. Host persistence and snapshot assumptions remain explicit. |
-| `ConcreteSecurityBudget.lean` | Square-root-free unitary BBBV97/O2H, fiber-cardinality search reductions | A fixed-bad-set search lemma does not automatically establish adaptive multi-round Fiat–Shamir security. |
-| `Aggregation.lean`, `SuccinctAggregationIop.lean` | Hem WHIR, committed traces, signer disjointness and Canopy commitments | Bind the exact GoldilocksExt4 verifier, profile and transcript to the reduction; no free independence assumptions. |
-| `LatticePreprocessingFull.lean` | Lattice preprocessing and extraction | `RlweCyclotomicExtraction.lean` proves signed-monomial difference invertibility and short relaxed extraction; see the exact parameter map below. |
-| `CustodySuiteFull.lean`, `ThresholdMlDsaAndToprf.lean` | Custody, credentials and migration | Local checks and source-landed bridges are not automatically integrated production theorems. |
+| `Math/Goldilocks.lean`, `Math/QuarticExt4.lean`, `Math/Gf2Pow128.lean` | Prime-field and extension arithmetic, Wiedemann towers | Algebraic laws apply to their exact representations; MIR/binary refinement is separate. Hem uses GoldilocksExt4, not a quadratic challenge field. |
+| `Oracle/Keccak.lean`, `Oracle/Poseidon2.lean`, `Oracle/Sponge.lean` | Sponge/permutation algebra and framing | Match byte order, domain tags, lengths and padding to runtime codecs; permutation invertibility is not cryptanalytic security. |
+| `Protocol/Signing/Fips205.lean`, `Protocol/Threshold/ThresholdMpc.lean` | SLH-DSA parameters, domain separation, threshold/reference evaluation | Match key, message, context and randomizer before asserting identical output. |
+| `Protocol/Signing/HashSigs.lean`, `Protocol/Signing/HypertreeEufCma.lean`, `Protocol/Threshold/BaggyAndRss256Security.lean` | WOTS+C, TSW, hypertrees, Baggy, Waistband and RSS256 | Reductions require reachable layers and valid transcripts; a first-success grinder and cached internal signatures must refine the reference construction. |
+| `Exec/MirSpecBridge.lean`, `Protocol/Threshold/MaliciousSecurity.lean`, `Custody/JortsBeltLatchAndQuorumSwitching.lean` | Stateful signing, certified BeltLatch, quorum intersection, active checks | Global latch condition is `2q > n+f`; BFT availability needs `q <= n-f` (feasible together when `n >= 3f+1`). QS-A deliberately uses disjoint committee custody. |
+| `Protocol/Aggregation/UcGames.lean`, `Protocol/Threshold/IdealTsig.lean`, `Exec/SimulationSpine.lean`, `Exec/InteractiveUcEngine.lean` | Oracle games, ideal functionality and simulation | Generic simulation premises must be instantiated with the concrete scheduler, messages and shared resources. Sequential sessions do not establish arbitrary concurrent composition. |
+| `Exec/PosixCrashWal.lean` | POSIX/NVMe persistence, torn writes, recovery, genesis seals and `OpenDescriptionId` flock ownership | `Exec/CeremonyAtomicityAndAbort.lean` supplies a valid-trace multi-ledger crash/interleaving theorem; production events must instantiate it. Host persistence and snapshot assumptions remain explicit. |
+| `Protocol/Aggregation/ConcreteSecurityBudget.lean`, `Oracle/Qrom.lean` | Square-root-free unitary BBBV97/O2H, fiber-cardinality search reductions | A fixed-bad-set search lemma does not automatically establish adaptive multi-round Fiat–Shamir security. |
+| `Protocol/Aggregation/Aggregation.lean`, `Protocol/Aggregation/SuccinctAggregationIop.lean` | Hem WHIR, committed traces, signer disjointness and Canopy commitments | Bind the exact GoldilocksExt4 verifier, profile and transcript to the reduction; no free independence assumptions. |
+| `Protocol/Threshold/LatticePreprocessingFull.lean`, `Math/Lattices.lean` | Lattice preprocessing and extraction | `Protocol/Threshold/RlweCyclotomicExtraction.lean` proves signed-monomial difference invertibility and short relaxed extraction; `Protocol/Threshold/RlweExtractionBoundary.lean` adds the Euclidean-norm relation. See the exact parameter map below. |
+| `Custody/CustodySuiteFull.lean`, `Protocol/Threshold/ThresholdMlDsaAndToprf.lean` | Custody, credentials and migration | Local checks and source-landed bridges are not automatically integrated production theorems. |
 
 The constructive discipline is **0 sorry / 0 Classical.choice**, with permitted
 axioms `{propext, Quot.sound}`. Axiom audits must cover loaded/generated modules
 and private declarations; CI challenge exports need an explicit production roster.
-Which modules a check covered, and whether those bytes are still the current ones, is
-recorded in [CURRENT_SCOPED_CHECKS.json](CURRENT_SCOPED_CHECKS.json) and reported by
-`scripts/check_evidence_freshness.py`; see
-[current integration checks](CONVERGENCE_STATUS.md#current-integration-checks).
+A recorded audit describes the source bytes it ran on. The module roster it must cover is
+`lean/Qsag.lean` together with `lean/AuditAxioms.lean`, both regenerated by
+`lean/tools/gen_rosters.py`; `scripts/check_lean_policy.py` rejects a file on disk that is
+missing from either, and `scripts/check_extraction_provenance.py` checks the extracted
+crates against their recorded source hashes.
 
 ### Boundary, bridge and test modules
 
-These modules state what a neighbouring result does and does not cover, usually with a
-proved counterexample or an executed instance. They are registered in the library root and
-the axiom audit.
+These results state what a neighbouring theorem does and does not cover, usually with a
+proved counterexample or an executed instance. Several formerly separate boundary files now
+live inside the domain module named in the first column; executed instances are under `Tests/`.
 
 | Module | Statement | Scope |
 | --- | --- | --- |
-| `HemVerifierAcceptance.lean` | Facts read off `verifyHemAffineWhir` itself: the oracle/claim arity check is necessary (`tooth_missing_batch_claim_erases_oracle`); for a zero-oracle false statement, acceptance forces a linear challenge collision (`verifyHemZeroOracle_implies_linear_collision`, `verifyHemZeroOracle_accepted_pairs_le`); the packaged core agreement is stronger than the checker (`tooth_core_agreement_is_stronger_than_checker`). | One false-statement family, not arbitrary Hem statements; no refinement of the Rust transcript parser. |
-| `HemPointReductionSoundness.lean` | The point-reduction wire decoder reconstructs `c1 = claim - 2*c0 - c2`, so the sum equation holds by construction (`hemPointReductionWire_sum`); a wrong hypercube sum agrees on at most two challenges and the bound is attained. | Local algebra; no adaptive composition. |
-| `HemFoldDecompositionBridge.lean` | The `UPoly` and coefficient-list forms of the claim-preserving fold relation are equivalent (`hasPolynomialExplanation_iff_decomposes`), with the same selected post-fold polynomial and no uniqueness-radius premise. | Representation bridge between the coding and transcript developments. |
-| `CodingTheory/PlaneBezoutResultant.lean`, `NonpersistentIncidenceBound.lean`, `PersistentPairsBound.lean`, `PersistentPairsBoundTests.lean` | Primitive plane-curve common-root bound; dimension-one nonpersistent cover; candidate-specific persistent-pair count under `|D|·(d+1) < B²`; inhabited instances and `tooth_persistent_needs_far`. | The two-dimensional step of CWYZ Claim 4.8 remains open (multi-sheet branch); see the tracker. |
-| `QromExtractionBoundary.lean` | Measured-query branch masses, observed-response consistency, bridge to `merkleQueryConsistent`; target cardinality does not give locality; recording a query changes Born probability. | Measured-query interface. Coherent extraction is separate. |
-| `QromMeasuredQueryExperiment.lean`, `QromMeasuredMerkleExtraction.lean`, `QromClassicalQueryTransfer.lean`, `QromMeasuredMerkleExtractionTests.lean` | A measured-query experiment with lazy sampling; Merkle extraction-failure mass at most `(d·(3Q+1) + (0+…+(Q-1))) / 2^w` with the consistency premise derived from the log; the same bound on the coherent run for adversaries whose queries sit on one address. | Not coherent-query QROM security: the parity circuit gives 8/8 coherently and 4/8 when measured. |
-| `RlweExtractionBoundary.lean` | The short-SIS branch of the fork-extraction dichotomy has the public solution `s=1, e=centered(-A)` (norm ≤6144 always, ≤6142 outside four residues per coefficient). | A statement about the reduction target, not a forged transcript. |
-| `HashTrailSampling.lean` | `≤ 6^k` of `N^k` assignments succeed in the fresh-independent-input S-box experiment; a realised trail of the fixed SPN cannot have probability `(6/2^128)^48`. | Separates component arithmetic from a fixed-permutation trail bound. |
-| `CompleteMediationBoundary.lean`, `SeparatedCustodyCore.lean`, `SeparatedCustodySpine.lean`, `SeparatedCustodyChecks.lean`, `SeparatedCustodyPolicy.lean`, `SeparatedCustodyHistory.lean`, `SeparatedCustodyHistoryChecks.lean` | One-custodian vault transitions with durable change before release (`release_durable`, `release_replay_rejected`, `forget_burns`, `trace_burned_spend_le_cap`); independently keyed approvals composed into a quorum certificate with structural extraction to the production hash-signature break events; executed cSHAKE256/Jorts construction checks. | Specification level: no fsync, key-isolation, anchor or ELF/MIR refinement; separate keys, not threshold reconstruction of one key. |
-| `SpongeFramingAndDomainSep.lean`, `CompositionInstances.lean` and the three composition modules | pad10*1 and cSHAKE prefix injectivity and cross-domain separation; generic composition reductions, with fixtures in which bad and forgery events are false and wrong-context constituents are rejected. | The fixtures use public checksums and a non-succinct reference aggregator; none instantiates a cryptographic assumption. |
-| `IdealOutputBoundary.lean` | Fresh successful ideal release equals the functionality's signature; injective request and key encodings; exact-retry versus changed-intent. | The engine's callbacks are cluster-level; party-local custody and a partial production oracle are separate. |
-| `CodingTheory/SlicedJetIncidence.lean`, `Cwyz26JohnsonCertificate.lean`, `GoldilocksCharacteristic.lean` | The non-excluded count one challenge slope at a time; `NonExcludedDecompBound` with an explicit `rest`; `1..k` invertible in `Goldilocks` and `QuarticGoldilocks` for `k < p`. | The nonpersistent term is linear in `|S|`, weaker than the paper's constant. |
-| `DensePcgTapLinearTests.lean`, `DensePcgProductionTaps.lean` | Exact bias of a linear test as a product over trees; the production tap generator on the Keccak specification; row 0 of one generated matrix has bias between `2^-118` and `2^-117`. | Taps modelled as uniform for the second-moment law; no bound over all row subsets. |
+| `Protocol/Aggregation/HemVerifierAcceptance.lean` | Facts read off `verifyHemAffineWhir` itself: the oracle/claim arity check is necessary (`tooth_missing_batch_claim_erases_oracle`); for a zero-oracle false statement, acceptance forces a linear challenge collision (`verifyHemZeroOracle_implies_linear_collision`, `verifyHemZeroOracle_accepted_pairs_le`); the packaged core agreement is stronger than the checker (`tooth_core_agreement_is_stronger_than_checker`). | One false-statement family, not arbitrary Hem statements; no refinement of the Rust transcript parser. |
+| `Protocol/Aggregation/HemPointReductionSoundness.lean` | The point-reduction wire decoder reconstructs `c1 = claim - 2*c0 - c2`, so the sum equation holds by construction (`hemPointReductionWire_sum`); a wrong hypercube sum agrees on at most two challenges and the bound is attained. | Local algebra; no adaptive composition. |
+| `Coding/Cwyz26.lean` (fold-decomposition bridge) | The `UPoly` and coefficient-list forms of the claim-preserving fold relation are equivalent (`hasPolynomialExplanation_iff_decomposes`), with the same selected post-fold polynomial and no uniqueness-radius premise. | Representation bridge between the coding and transcript developments. |
+| `Coding/Resultant.lean`, `Coding/AffineProximity.lean`, `Coding/Cwyz26.lean`; instances in `Tests/MathAndCoding.lean` | Primitive plane-curve common-root bound; dimension-one nonpersistent cover; candidate-specific persistent-pair count under `|D|·(d+1) < B²`; inhabited instances and a tooth showing the persistent bound needs the far-from-code premise. | The two-dimensional step of CWYZ Claim 4.8 remains open (multi-sheet branch). |
+| `Oracle/Qrom.lean` (extraction boundary) | Measured-query branch masses, observed-response consistency, bridge to `merkleQueryConsistent`; target cardinality does not give locality; recording a query changes Born probability. | Measured-query interface. Coherent extraction is separate. |
+| `Oracle/Qrom.lean` (measured-query experiment, Merkle extraction, classical-query transfer); instances in `Tests/OracleAndQrom.lean` | A measured-query experiment with lazy sampling; Merkle extraction-failure mass at most `(d·(3Q+1) + (0+…+(Q-1))) / 2^w` with the consistency premise derived from the log; the same bound on the coherent run for adversaries whose queries sit on one address. | Not coherent-query QROM security: the parity circuit gives 8/8 coherently and 4/8 when measured. |
+| `Protocol/Threshold/RlweExtractionBoundary.lean` | The `ℓ∞`-only short-SIS branch of the fork-extraction dichotomy has the public solution `s=1, e=centered(-A)` (norm ≤6144 always, ≤6142 outside four residues per coefficient). With the production Euclidean check `‖z_s‖₂²+‖z_e‖₂² ≤ 1,500,000,000`, extraction lands in a joint relation with squared norm ≤ 6,060,827,392 that rejects it (`extract_rlwe_or_sigma_24_euclidean_sis_dichotomy`, `tooth_rlweUnitSis_refuted_by_euclidean_bound`). | A statement about the reduction target, not a forged transcript; hardness of the resulting Ring-SIS instance is an assumption. |
+| `Oracle/Spn.lean` (trail sampling) | `≤ 6^k` of `N^k` assignments succeed in the fresh-independent-input S-box experiment; a realised trail of the fixed SPN cannot have probability `(6/2^128)^48`. | Separates component arithmetic from a fixed-permutation trail bound. |
+| `Custody/CompleteMediationBoundary.lean`, `Custody/SeparatedCustodyCore.lean`, `Custody/SeparatedCustodySpine.lean`, `Custody/SeparatedCustodyPolicy.lean`, `Custody/SeparatedCustodyHistory.lean`; `Tests/SeparatedCustodyChecks.lean`, `Tests/SeparatedCustodyHistoryChecks.lean` | One-custodian vault transitions with durable change before release (`release_durable`, `release_replay_rejected`, `forget_burns`, `trace_burned_spend_le_cap`); independently keyed approvals composed into a quorum certificate with structural extraction to the production hash-signature break events; executed cSHAKE256/Jorts construction checks. | Specification level: no fsync, key-isolation, anchor or ELF/MIR refinement; separate keys, not threshold reconstruction of one key. |
+| `Oracle/Sponge.lean`, `Protocol/Aggregation/CompositionInstances.lean`, `Protocol/Aggregation/ComposedQsAgAndMergeSecurity.lean`, `Protocol/Aggregation/CrossProtocolAndDualOracleComposition.lean` | pad10*1 and cSHAKE prefix injectivity and cross-domain separation; generic composition reductions, with fixtures in which bad and forgery events are false and wrong-context constituents are rejected. | The fixtures use public checksums and a non-succinct reference aggregator; none instantiates a cryptographic assumption. |
+| `Exec/IdealOutputBoundary.lean` | Fresh successful ideal release equals the functionality's signature; injective request and key encodings; exact-retry versus changed-intent. | The engine's callbacks are cluster-level; party-local custody and a partial production oracle are separate. |
+| `Coding/AffineProximity.lean` (sliced jet incidence), `Protocol/Aggregation/Cwyz26JohnsonCertificate.lean`, `Math/Goldilocks.lean` and `Math/QuarticExt4.lean` (characteristic) | The non-excluded count one challenge slope at a time; `NonExcludedDecompBound` with an explicit `rest`; `1..k` invertible in `Goldilocks` and `QuarticGoldilocks` for `k < p`. | The nonpersistent term is linear in `|S|`, weaker than the paper's constant. |
+| `Protocol/Threshold/DensePcgTapLinearTests.lean`, `Protocol/Threshold/DensePcgProductionTaps.lean` | Exact bias of a linear test as a product over trees; the production tap generator on the Keccak specification; row 0 of one generated matrix has bias between `2^-118` and `2^-117`. | Taps modelled as uniform for the second-moment law; no bound over all row subsets. |
 
 ## Signature output laws and Pants state
 
@@ -85,11 +90,45 @@ transport anonymity. Match the actual signing threshold and latch quorum.
 Hem uses EUROCRYPT 2025 rate-escalating WHIR over
 $\mathbb{F}_p[v]/(v^4-7)$, $p=2^{64}-2^{32}+1$, with $p^4>2^{255.99}$.
 Steiner-deduplicated `CanopyMultiProof` commitments reduce repeated Merkle paths.
-The default Johnson query-accounting regime `BciksJohnsonQrom128` has
-$q=(258,130,88,66)$; the classical regime has $q=(129,65,44,33)$.
-Capacity-proximity regimes, including Habr24, have been retired; wire tags 0, 1 and 3 reject. The default is `BciksJohnsonQrom128`; `BciksJohnsonClassical128` is available below the aggregate authorization boundary. The aggregate verifier enforces a
-mandatory **128-bit QROM Grover query-search floor** and compatible profiles on
-merge; this is not a total QROM theorem.
+Every accepted regime sets its per-stage query counts from the Johnson radius
+$1-\sqrt{\rho}-\eta$. Capacity-proximity regimes, including Habr24, are retired: wire tags
+0, 1 and 3 fail to decode. Six tags decode (`WhirSecurityRegime` in
+`crates/qsag-agg/src/pcs.rs`):
+
+| Tag | Regime | Queries at $B=(4,16,64,256)$ | PoW bits | Hash | Query target | Round bits (classical / Grover) | Query bound of the accounting | Aggregate authorization |
+| ---: | --- | --- | ---: | --- | ---: | ---: | --- | --- |
+| 2 | `BciksJohnsonClassical128` | 129, 65, 44, 33 | 16 | cSHAKE256 | $2^{-128}$ | 144 / 72 | classical only | never; low-level PCS callers only |
+| 4 | `BciksJohnsonQrom128` (default) | 258, 130, 88, 66 | 16 | cSHAKE256 | $2^{-256}$ | 272 / 136 | none | yes: unconditional floor |
+| 5 | `Cdhz25JohnsonQrom128` | 202, 102, 70, 52 | 16 | cSHAKE256 | $2^{-200}$ | 216 / 108 | $Q \le 2^{38}$ | yes: bounded-query profile |
+| 6 | `Cdhz25ZeroPowQrom128` | 216, 109, 74, 56 | 0 | cSHAKE256 | $2^{-214}$ | 214 / 107 | $Q+1 \le 2^{40}$ | yes: bounded-query profile |
+| 7 | `Poseidon2Cdhz25JohnsonQrom128` | 202, 102, 70, 52 | 16 | Poseidon2-12 | $2^{-200}$ | 216 / 108 | $Q \le 2^{38}$ | yes: bounded-query profile |
+| 8 | `Poseidon2Cdhz25ZeroPowQrom128` | 216, 109, 74, 56 | 0 | Poseidon2-12 | $2^{-214}$ | 214 / 107 | $Q+1 \le 2^{40}$ | yes: bounded-query profile |
+
+"Query target" is the exponent below which every non-exhaustive canonical stage keeps its
+distinct-fiber query error. "Round bits" is that exponent plus the proof-of-work bits, and
+its half: the nominal work of a classical, respectively Grover, search over one round of
+challenges. It is a per-round estimate, not a composed QROM security theorem.
+
+Two predicates separate the regimes, and they should not be conflated:
+
+- `meets_unconditional_grover_128_floor` holds when the Grover round work is at least 128
+  bits with no bound on the number of oracle queries. **Only tag 4 satisfies it** (136 bits).
+- `meets_bounded_qrom_128_profile` holds for tags 5–8. Their query tables come from the
+  [CDHZ25] compressed-oracle state-restoration accounting in
+  `Protocol/Aggregation/QromSaltedMerkleStateRestoration.lean`
+  (`HemOptimizedQromSchedule.minQueries`: `cdhzPow16At2pow38` and `unitaryZeroPow`), which
+  is stated for an adversary making at most $2^{38}$ (tags 5, 7) or $2^{40}-1$ (tags 6, 8)
+  oracle queries. Their nominal Grover round work is 108 and 107 bits: **they do not meet a
+  128-bit Grover floor**, and the accounting promises nothing at $2^{64}$ queries. Tags 7
+  and 8 additionally rely on Poseidon2-12 as the Merkle and Fiat–Shamir hash.
+
+Aggregate authorization (`WhirSchedule::validate`, and the regime checks in
+`arithmetize.rs` and `recursive.rs`) uses `meets_qrom_128_floor`, which is the disjunction
+of the two predicates. The name is historical: a `true` result does not imply 128 bits of
+unconditional Grover work. The entry points without a regime argument (`verify_aggregate`,
+`verify_shard_batch`) accept tag 4 only; a verifier that accepts tags 5–8 opts in through
+the `*_with_regime` entry points and thereby adopts the query bound in the table. Merged
+proofs must carry the same regime. None of this is a total QROM theorem.
 
 A complete bound must consume the deployed profile and account for list sizes,
 Johnson slack, field/folding/OOD errors, hash binding, all sessions and applicable
@@ -121,7 +160,7 @@ part of the contract. No filesystem-only proof prevents a fully cloned disk/VM
 rollback without external monotone state.
 
 Leaf use, policy spend, preprocessing, nonce burns and poison state must compose
-before any useful partial share release. `CeremonyAtomicityAndAbort.lean` proves ceremony-level safety for valid crash/interleaving traces; the runtime reservation and release paths must refine that event model. Policy time windows need an authoritative clock or
+before any useful partial share release. `Exec/CeremonyAtomicityAndAbort.lean` proves ceremony-level safety for valid crash/interleaving traces; the runtime reservation and release paths must refine that event model. Policy time windows need an authoritative clock or
 agreed logical epoch; authenticated caller timestamps alone are insufficient.
 Channels must provide confidentiality, authenticity, replay protection and the
 broadcast consistency the protocol assumes. Loopback/RAM and simulated-WAN
@@ -131,12 +170,15 @@ Migration now implements active pre-open Boolean and prime-field multiplication
 checks, including a cross-batch barrier, for three-custodian secp256k1/Taproot/
 Ed25519 ownership proofs, alongside standalone 438-repetition ZKBoo modules for
 Pallas (Orchard/RedPallas) and BLS12-381 (G1). Its live ZKBoo default is 438 repetitions, giving interactive error `(2/3)^438 < 2^-256` and nominal generic Grover search exponent 128.1068. Per flush, the packed Boolean `AND` checks use `<(63/(2^128-1))^2<2^-244`, the large-prime pre-open multiplication checks use `<=35/(p-1)<2^-249`, and the cubic-Goldilocks checks use `<=35/(p^3-1)<2^-186`. Those two field-check numbers are separate prime-domain errors, not a classical/quantum pair. Full FS/QROM extraction remains a separate reduction.
-Threshold ML-DSA has a $2t-1$ active quorum and rejection-transcript assumptions;
-six-limb BlindVC's 438-repetition Quantum128 profile likewise needs its FS reduction.
+Threshold ML-DSA admits $n\le64$ custodians with $n\ge2t-1$ and signs with a quorum of
+$2t-1\le16$ under rejection-transcript assumptions. Six-limb BlindVC's `Quantum128` profile
+uses 438 ZKBoo repetitions for issuance and 33 repetitions of a 256-party
+MPC-in-the-head check over $\mathrm{GF}(p^5)$ for selective-disclosure presentations; both
+likewise need their FS reductions.
 
 ## Grounded ISA, compiled ELF64 and zeroization
 
-`ConstantTimeIsa.lean` and `ElfBinaryVerify.lean` cover scoped x86_64
+`Machine/ConstantTimeIsa.lean` and `Machine/ElfBinaryVerify.lean` cover scoped x86_64
 AVX2/PCLMULQDQ/VPCLMULQDQ and aarch64 SHA3/PMULL programs: taint noninterference,
 scratch-register zero-on-exit and mutation `#tooth` witnesses. LNSym / x86lean /
 ELFSage grounding, linked ThinLTO and full dispatch/caller closure are active
@@ -181,39 +223,39 @@ Source inspection dated 2026-11-14. This map names statements and runtime consum
 | Parameter / relation | Exact current statement | Source |
 | --- | --- | --- |
 | RLWE OR-Sigma | `C={±X^k:0≤k<1024}`, 2,048 choices; 24 × 11 = 264 joint bits. Nominal exhaustive-search exponents: 264 classical / 132 generic Grover; these are challenge-space arithmetic, not a quantum-active OT theorem. | `preprocessing.rs`: `RLWE_ZKPOK_REPS`, `RLWE_ZKPOK_CHAL_BITS`, `poly_from_chal11` |
-| RLWE response sampler | Truncated Gaussian σ=700, masks in `[-3072,3071]`, accepted responses in `[-3070,3069]`; acceptance `min(1, exp((‖y‖²−‖z‖²)/980000)/M)`, `M=exp(3615102/980000)≈40`. Q192 finite-precision sampling and normalized vector Gaussian/tail hypotheses still need production proof instantiation. | `crates/qsag-core/src/preprocessing.rs` |
-| RLWE extraction | For degree `2^ν` and odd `q≥3`, distinct signed monomials satisfy `(c−c′)g=2` and their difference is a unit. Isometric extraction yields `A s_iso+e_iso=(1−c⁻¹c′)u`; at q=12289 the infinity norms are ≤6140. Secret recovery or a nonzero short-SIS relation has bound ≤6142. This is a relaxed relation, not unconditional recovery of the original CBD witness. | `RlweCyclotomicExtraction.lean`: `signedMonomial_challenge_set_pairwise_invertible`, `extract_rlwe_or_sigma_13_short_witness_1024_sound`, `short_monomial_witness_recovers_secret_or_breaks_short_sis` |
-| WHIR query ladder | Johnson classical `(129,65,44,33)`; default Johnson QROM `ceil(512/log₂ B)+2=(258,130,88,66)` at B=(4,16,64,256). Stage work is 16 bits under `QSAG.PCS.POW2/v1`; `maxQueryCap=512`. The 272/136 round bits are nominal query-plus-work search accounting. Runtime CWYZ witness tables cover the QROM regime; classical witness rows for nv=20/24 are Lean-only. | `pcs.rs`, `sponge.rs`; `Aggregation.lean` |
-| Multi-round budget | `multiRoundFsQromCompilerBound` is <2^-128 for Q+1≤2^40, five 256-bit Merkle roots and the deployed 24-variable geometry. Aggregated RBR numerators are `[4182,1644,824,489,792]/p⁴`, sum 7931/p⁴. The same expression fails at 2^41. Hem transcript flip bounds and quantum commitment extraction are premises still to instantiate. | `MultiRoundFsQrom.lean`: `multiRoundFsQrom_budget_bound`, `tooth_multiRoundFsQrom_budget_fails_at_2pow41` |
-| WOTS+C | 128 base-four digits sum to 192. The accepted language has `[x^192](1+x+x²+x³)^128` = 3647133497298879801227908259470154861817607767728241841601287895307331452700 elements (≈251.01137 bits); uniform first-success grinding averages ≈31.7488 trials. Encoding width alone does not give 256 bits of accepted-language entropy. | `tsw_baggy.rs`; `HashSigs.lean` |
+| RLWE response sampler | Truncated Gaussian σ=700, masks in `[-3072,3071]`, accepted responses in `[-3070,3069]` and, per branch pair, `‖z_s‖₂²+‖z_e‖₂² ≤ 1,500,000,000` (`RLWE_ZKPOK_PAIR_L2_SQ_BOUND`, checked by prover and verifier); acceptance `min(1, exp((‖y‖²−‖z‖²)/980000)/M)`, `M=exp(3615102/980000)≈40`. Q192 finite-precision sampling and normalized vector Gaussian/tail hypotheses still need production proof instantiation. | `crates/qsag-core/src/preprocessing.rs` |
+| RLWE extraction | For degree `2^ν` and odd `q≥3`, distinct signed monomials satisfy `(c−c′)g=2` and their difference is a unit. Isometric extraction yields `A s_iso+e_iso=(1−c⁻¹c′)u`; at q=12289 the infinity norms are ≤6140. Secret recovery or a nonzero short-SIS relation has bound ≤6142. With the Euclidean check the extracted pair also satisfies `‖s‖₂²+‖e‖₂² ≤ 6,060,827,392`, which the public solution `s=1, e=centered(-A)` fails. This is a relaxed relation, not unconditional recovery of the original CBD witness. | `Protocol/Threshold/RlweCyclotomicExtraction.lean`: `signedMonomial_challenge_set_pairwise_invertible`, `extract_rlwe_or_sigma_13_short_witness_1024_sound`, `short_monomial_witness_recovers_secret_or_breaks_short_sis`; `Protocol/Threshold/RlweExtractionBoundary.lean`: `extract_rlwe_or_sigma_24_euclidean_sis_dichotomy` |
+| WHIR query ladder | Johnson classical `(129,65,44,33)`; default Johnson QROM `ceil(512/log₂ B)+2=(258,130,88,66)` at B=(4,16,64,256); bounded-query profiles `(202,102,70,52)` with 16-bit work and `(216,109,74,56)` without. Stage work is 16 bits under `QSAG.PCS.POW2/v1` where enabled; `maxQueryCap=512`. Round bits (272/136 for the default) are nominal query-plus-work search accounting; see the regime table above. The PCS admits 2…28 variables (`MAX_PCS_NUM_VARS = 28`, 72 canonical stages); the Lean witness coverage below stops at 24. Runtime CWYZ witness tables cover the default QROM regime; classical witness rows for nv=20/24 are Lean-only. | `crates/qsag-agg/src/pcs.rs`, `crates/qsag-agg/src/sponge.rs`; `Protocol/Aggregation/Aggregation.lean` |
+| Multi-round budget | `multiRoundFsQromCompilerBound` is <2^-128 for Q+1≤2^40, five 256-bit Merkle roots and the deployed 24-variable geometry. Aggregated RBR numerators are `[4182,1644,824,489,792]/p⁴`, sum 7931/p⁴. The same expression fails at 2^41. Hem transcript flip bounds and quantum commitment extraction are premises still to instantiate. | `Protocol/Aggregation/MultiRoundFsQrom.lean`: `multiRoundFsQrom_budget_bound`, `tooth_multiRoundFsQrom_budget_fails_at_2pow41` |
+| WOTS+C | 128 base-four digits sum to 192. The accepted language has the coefficient of `x^192` in `(1+x+x²+x³)^128`, namely 3647133497298879801227908259470154861817607767728241841601287895307331452700 elements (≈251.01137 bits); uniform first-success grinding averages ≈31.7488 trials. Encoding width alone does not give 256 bits of accepted-language entropy. | `crates/qsag-core/src/tsw_baggy.rs`; `Protocol/Signing/HashSigs.lean` |
 | Migration | `MIT_REPETITIONS=438`; `(2/3)^438≈2^-256.2136`. Active multiplication errors per flush are `<(63/(2^128-1))^2<2^-244` for packed Boolean `AND` (`BIT_CHECK_NUMERATOR=63`), `<2^-249` over the large primes, and `<2^-186` over cubic Goldilocks. No one of these numbers is a complete FS/QROM acceptance theorem. | `zk_engine.rs`; `outer_mpc.rs`; `pallas.rs`; `bls12_381.rs` |
 
-`hem_johnson_qrom_witnesses_cover_every_canonical_stage` checks canonical nv=2…24 stage coverage and equality of the used-row/table counts. It establishes the stated numerical side conditions for the deployed QROM table; the underlying decomposition theorem remains the separate obligation below.
+`hem_johnson_qrom_witnesses_cover_every_canonical_stage` checks canonical nv=2…24 stage coverage and equality of the used-row/table counts; the Rust schedule also admits nv=25…28, which this check does not cover. It establishes the stated numerical side conditions for the deployed QROM table; the underlying decomposition theorem remains the separate obligation below.
 
-Constructive Guruswami–Sudan interpolation produces nonzero Hasse-vanishing witnesses; arbitrary-multiplicity factor and formal-polynomial list bounds are proved in `AffineProximityGaps.lean`. The remaining CWYZ `NonExcludedDecompBound` must be derived, then connected to the deployed arbitrary-batch, multistage checker. The packaged RBR construction currently has one batch, zero folds and two rounds; it is not the deployed protocol merely because its arithmetic budget is favorable. `MultiRoundFsQrom.lean` also proves adaptive unitary oracle-dependent measure-and-reprogram and multi-round union results; the numerical compiler budget has the explicit protocol premises above.
+Constructive Guruswami–Sudan interpolation produces nonzero Hasse-vanishing witnesses; arbitrary-multiplicity factor and formal-polynomial list bounds are proved in `Coding/AffineProximity.lean` and `Coding/GuruswamiSudan.lean`. The remaining CWYZ `NonExcludedDecompBound` must be derived, then connected to the deployed arbitrary-batch, multistage checker. The packaged RBR construction currently has one batch, zero folds and two rounds; it is not the deployed protocol merely because its arithmetic budget is favorable. `Protocol/Aggregation/MultiRoundFsQrom.lean` also proves adaptive unitary oracle-dependent measure-and-reprogram and multi-round union results; the numerical compiler budget has the explicit protocol premises above.
 
-`CeremonyAtomicityAndAbort.lean` establishes batch disjointness, unique ceremony/message per leaf, spend caps and persistent poison or fail-closed behavior for valid multi-ledger crash/interleaving traces. Its pre-open masked-view selective-abort theorem gives statistical-distance numerator zero with positive survival count. Arbitrary post-output withholding is outside that conditioning theorem. `HypertreeEufCma.lean` reduces accepted fresh-message forgeries in the specified stateless signing-log model (at most 2^32 layers) to ITSR, TCR or preimage breaks; this is stronger than its legacy Type-valued extractor interface.
+`Exec/CeremonyAtomicityAndAbort.lean` establishes batch disjointness, unique ceremony/message per leaf, spend caps and persistent poison or fail-closed behavior for valid multi-ledger crash/interleaving traces. Its pre-open masked-view selective-abort theorem gives statistical-distance numerator zero with positive survival count. Arbitrary post-output withholding is outside that conditioning theorem. `Protocol/Signing/HypertreeEufCma.lean` reduces accepted fresh-message forgeries in the specified stateless signing-log model (at most 2^32 layers) to ITSR, TCR or preimage breaks; this is stronger than its legacy Type-valued extractor interface.
 
 ### Runtime consumers and extracted proofs
 
 | Production consumer | Executed extracted interface | Proof surface |
 | --- | --- | --- |
-| `qsag-core`, `qsag-quorum` | `VerifiedWotsC256Guard`, `VerifiedBeltQuorumGuard` (`record_custodian_ack`, `authorize_release`), `ct_eq_bytes32`, `validate_belt_quorum_config` | `PantsAndQuorumGuards.lean`, `MultiTurnMediationAndReachability.lean` |
-| `qsag-policy` | `checked_velocity_spend`, `StatefulVelocityGuard::authorize_spend` | `PolicyAndAddr.lean`, multi-turn reachability |
-| `qsag-agg` | `cwyz_duet_fold`, `verify_ood_pin_eq`, `verify_stage_pow_mask`, `verify_ext4_univariate_at_base_pin` | `aeneas/lean-whir/QsagWhirVerified/Proofs.lean` |
+| `qsag-core`, `qsag-quorum` | `VerifiedWotsC256Guard`, `VerifiedBeltQuorumGuard` (`record_custodian_ack`, `authorize_release`), `ct_eq_bytes32`, `validate_belt_quorum_config` | `aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean`, `aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean` |
+| `qsag-policy` | `checked_velocity_spend`, `StatefulVelocityGuard::authorize_spend` | `aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean`, multi-turn reachability |
+| `qsag-agg` | `verify_cwyz_duet_fold_step`, `eval_ext4_univariate_at_base`, `cwyz_bridge_claim_step`, `affine_cascade_claim_step`, `eval_quadratic_sumcheck_wire`, `verify_ood_pin_eq`, `verify_stage_pow_mask`, `canonical_query_group_idx`, `step_merkle_pair_order`, `checked_quorum_sum`, canonical decoders | `aeneas/lean-whir/QsagWhirVerified/Proofs.lean` |
 
-`RealSpecFieldWeld.lean` proves Goldilocks inverse refinement and the nonzero multiplicative-inverse law. `RealSpecKeccakWeld.lean` proves the 24-round permutation refinement. Sponge totality/phase results cover arbitrary slices; full SHAKE emitted-byte refinement still needs the rate-block XOR, padding and squeeze bridge. `bdoz_verify_arbitrary_batch` proves slice acceptance under its tag-execution premise; commitment-before-challenge and freshness need state-level binding. Multi-turn guard invariants do not by themselves establish complete mediation of every raw-secret caller.
+`RealSpecFieldWeld.lean` (under `aeneas/lean/QsagVerified/Proofs/`) proves Goldilocks inverse refinement and the nonzero multiplicative-inverse law. `RealSpecKeccakWeld.lean` proves the 24-round permutation refinement. Sponge totality/phase results cover arbitrary slices; full SHAKE emitted-byte refinement still needs the rate-block XOR, padding and squeeze bridge. `bdoz_verify_arbitrary_batch` proves slice acceptance under its tag-execution premise; commitment-before-challenge and freshness need state-level binding. Multi-turn guard invariants do not by themselves establish complete mediation of every raw-secret caller.
 
-`SydTvTranslationValidation.lean` provides five looping-kernel functional certificates, including `tower128_bdoz_mac_vpclmul_sydtv_refines_all_n`. `SimdBinaryEquiv.lean` covers decoded PCLMUL/VPCLMUL and transpose noninterference. The later certified fixture inventory contains 19 x86-64 and 9 AArch64 symbols / 3,355 decoded instructions; the earlier 16/7 inventory is historical. Archive, ELF-member and deterministic-wrapper hashes are separate identifiers in `CompiledRlibFixtures.lean`. RFLAGS validity masks and edge-vector theorems supersede the historical fixed eight-mismatch description; a fresh silicon-run result must identify its artifact.
+`Machine/SydTvTranslationValidation.lean` provides five looping-kernel functional certificates, including `tower128_bdoz_mac_vpclmul_sydtv_refines_all_n`. `Machine/SimdBinaryEquiv.lean` covers decoded PCLMUL/VPCLMUL and transpose noninterference. The later certified fixture inventory contains 19 x86-64 and 9 AArch64 symbols / 3,355 decoded instructions; the earlier 16/7 inventory is historical. Archive, ELF-member and deterministic-wrapper hashes are separate identifiers in `Machine/CompiledRlibFixtures.lean`. RFLAGS validity masks and edge-vector theorems supersede the historical fixed eight-mismatch description; a fresh silicon-run result must identify its artifact.
 
-`SpirvSimtGpuEquiv.lean` supplies modeled codec roundtrip/injectivity, race-conditioned multi-wave schedule confluence, bank-layout arithmetic and SIMT noninterference, with missing-barrier/wiping/leakage counterexamples. Runtime Vulkan shaders target SPIR-V 1.5; an enum named `SpirV15` does not establish exact shader-to-model equivalence. Driver-reported Wave32 and zero scratch, byte-output comparisons, keyed receipts and universal functional refinement are distinct evidence. See [the measurement ledger](../PROJECT.md#c-06-publication-evidence-and-follow-up).
+`Machine/SpirvSimtGpuEquiv.lean` supplies modeled codec roundtrip/injectivity, race-conditioned multi-wave schedule confluence, bank-layout arithmetic and SIMT noninterference, with missing-barrier/wiping/leakage counterexamples. Runtime Vulkan shaders target SPIR-V 1.5; an enum named `SpirV15` does not establish exact shader-to-model equivalence. Driver-reported Wave32 and zero scratch, byte-output comparisons, keyed receipts and universal functional refinement are distinct evidence.
 
 ## From component statements to actual construction security
 
-The [construction obligation ledger](../PROJECT.md#construction-proof-obligations) names the outstanding reductions and implementation refinements. Three distinctions are especially important:
+The outstanding reductions and implementation refinements are stated next to the results they qualify, in the scope columns above and in [ASSURANCE.md](../ASSURANCE.md). Three distinctions are especially important:
 
-- The compact hierarchy's outer AIR proves a public commitment chain. `VerifiedHierarchicalHemEvidence` is obtained by verifying the actual children and is required for authorization. `SuccinctRecursiveHemEnv.outerRelationSound` still assumes the missing recursive relation; it cannot certify first-time verification from a compact proof alone.
-- `QromMerkleOnlineExtraction.lean` has a constructive classical-table classifier and a conditional local-target union bound. The latter leaves `hLocal`, `hCard` and `hCover` to the caller and does not itself provide an extractor for coherent quantum queries. `QromExtractionBoundary.lean` supplies exact measured-query branch masses, observed-response consistency and a bridge to `merkleQueryConsistent`; its locality and coherent-recording counterexamples identify the scope of that interface. Its five new theorems passed a scoped Lean 4.35 check and constructive audit. A numerical compiler bound becomes protocol security after the remaining coherent-extraction premises and actual RBR/query event bounds are instantiated.
+- The compact hierarchy's outer AIR proves a public commitment chain. `VerifiedHierarchicalHemEvidence` is obtained by verifying the actual children and is required for authorization. `SuccinctRecursiveHemEnv.outerRelationSound` still assumes the missing recursive relation; it cannot certify first-time verification from a compact proof alone. The fixed-path child-WHIR merge in `crates/qsag-agg/src/zk_hem/recursive_whir.rs` verifies up to 16 child PCS openings inside one committed relation; it binds them to shard headers but verifies neither the shard signatures nor quorum authorization.
+- `Oracle/Qrom.lean` has a constructive classical-table classifier and a conditional local-target union bound. The latter leaves `hLocal`, `hCard` and `hCover` to the caller and does not itself provide an extractor for coherent quantum queries. The same module supplies exact measured-query branch masses, observed-response consistency and a bridge to `merkleQueryConsistent`; its locality and coherent-recording counterexamples identify the scope of that interface. A numerical compiler bound becomes protocol security after the remaining coherent-extraction premises and actual RBR/query event bounds are instantiated.
 - Poseidon symbolic evaluation and degree upper bounds, active-box counts, and rational trail-factor arithmetic are different statements from actual reduced degree, Gröbner complexity or a differential probability bound for the fixed permutation. Likewise, primitive-break predicates must describe outputs of a reduction from the actual adversary, rather than unrestricted existential collisions.
 
 The acceptance target is a theorem about the implemented key generation, messages, signature/proof verifier, corruption view and abort/retry law. An ideal functionality with an abstract signer is an interface for that proof, not a substitute for it.
