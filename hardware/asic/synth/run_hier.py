@@ -34,8 +34,7 @@ LIBS = {
 }
 
 MACROS = [
-    "qsag_gl64_mul_tree",
-    "qsag_gl64_fold",
+    "qsag_gl64_mul_csa",
     "qsag_p2_me",
     "qsag_p2_mi_tail",
     "qsag_p2_mi_apply",
@@ -49,7 +48,7 @@ MACROS = [
 ]
 
 RTL = " ".join(str(p) for p in sorted(pathlib.Path("rtl").glob("*.sv")))
-ABC = "+strash;dretime;&get,-n;&dch,-f;&nf,{D};&put;buffer,-c;topo;upsize,{D};dnsize,{D};stime,-p"
+ABC = "+strash;dretime;&get,-n;&dch,-f;&nf,{D};&put;buffer,-N,16;topo;upsize,{D};dnsize,{D};stime,-p"
 
 
 def write_sram_stub_lib(lib_name, out_dir):
