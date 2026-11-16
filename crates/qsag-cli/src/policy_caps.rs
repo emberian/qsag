@@ -113,6 +113,14 @@ fn map_cap_err(err: CapabilityError) -> CliError {
     }
 }
 
+fn ensure_absent(path: &str) -> Result<(), CliError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Err(CliError::usage(format!("{path} already exists"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(CliError::io(format_args!("inspecting {path}"), e)),
+    }
+}
+
 fn load_json_checked(path: &str, expected_format: &str) -> Result<Json, CliError> {
     let raw = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
     let text = std::str::from_utf8(&raw.0)
@@ -620,6 +628,8 @@ fn biscuit_keygen(raw: &[String]) -> Result<(), CliError> {
     )?;
     let secret_out = args.require("secret-out")?;
     let public_out = args.require("public-out")?;
+    ensure_absent(secret_out)?;
+    ensure_absent(public_out)?;
     let tree_height_u64 = args.get_u64("tree-height")?.unwrap_or(4);
     let tree_height = u8::try_from(tree_height_u64)
         .ok()
@@ -664,8 +674,8 @@ fn biscuit_keygen(raw: &[String]) -> Result<(), CliError> {
         None => None,
     };
 
-    let sk_hex = crate::codec::to_hex_zeroizing(&sk_bytes);
-    let sk_hex_str = String::from_utf8(sk_hex.0.clone())
+    let mut sk_hex = crate::codec::to_hex_zeroizing(&sk_bytes);
+    let sk_hex_str = String::from_utf8(std::mem::take(&mut sk_hex.0))
         .map_err(|_| CliError::state("encoding biscuit authority secret key failed"))?;
     let mut secret_fields = vec![
         ("format", Json::str(BISCUIT_AUTH_SK_FORMAT)),
@@ -743,6 +753,8 @@ fn biscuit_mint(raw: &[String]) -> Result<(), CliError> {
     let secret_path = args.require("secret")?;
     let token_out = args.require("token-out")?;
     let step_out = args.require("step-key-out")?;
+    ensure_absent(token_out)?;
+    ensure_absent(step_out)?;
     let audience: [u8; 32] = from_hex_exact(args.require("audience-hex")?, "--audience-hex")?;
     let token_id: [u8; 32] = match args.get("token-id-hex") {
         Some(hex) => from_hex_exact(hex, "--token-id-hex")?,
@@ -811,8 +823,8 @@ fn biscuit_mint(raw: &[String]) -> Result<(), CliError> {
     // Persist the consumed leaf before advancing the external floor. Failed resealing
     // must leave both states unchanged; a later anchor failure only burns a leaf.
     let updated_sk = auth_sk.to_secret_bytes();
-    let updated_hex = crate::codec::to_hex_zeroizing(&updated_sk);
-    let updated_str = String::from_utf8(updated_hex.0.clone())
+    let mut updated_hex = crate::codec::to_hex_zeroizing(&updated_sk);
+    let updated_str = String::from_utf8(std::mem::take(&mut updated_hex.0))
         .map_err(|_| CliError::state("encoding updated biscuit authority key failed"))?;
     if let Json::Object(fields) = &mut secret_doc {
         fields.retain(|(k, _)| {
@@ -870,6 +882,8 @@ fn biscuit_attenuate(raw: &[String]) -> Result<(), CliError> {
     let token = load_biscuit_token(args.require("in")?)?;
     let token_out = args.require("token-out")?;
     let step_out = args.require("step-key-out")?;
+    ensure_absent(token_out)?;
+    ensure_absent(step_out)?;
     let caveats = parse_caveats(&args, false)?;
     let step = consume_step_key(args.require("step-key")?)?;
     let next_entropy = Secret32::new(os_random_32()?);
@@ -920,6 +934,7 @@ fn biscuit_seal(raw: &[String]) -> Result<(), CliError> {
     args.no_positionals()?;
     let token = load_biscuit_token(args.require("in")?)?;
     let out_path = args.require("out")?;
+    ensure_absent(out_path)?;
     let bound_req = if args.flag("bind-request") {
         Some(parse_capability_request(&args)?)
     } else {

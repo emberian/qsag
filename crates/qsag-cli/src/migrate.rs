@@ -108,15 +108,32 @@ fn parse_domain(spec: Option<&str>) -> Result<[u8; 32], CliError> {
 }
 
 fn reject_sealed_legacy_key(json: &Json) -> Result<(), CliError> {
-    if ["envelope", "salt", "envelope_tag"]
-        .iter()
-        .any(|key| json.get(key).is_some())
+    if [
+        "envelope",
+        "salt",
+        "envelope_tag",
+        "envelope_salt",
+        "envelope_nonce",
+    ]
+    .iter()
+    .any(|key| json.get(key).is_some())
     {
         return Err(CliError::input(
             "sealed legacy keys are not supported by migrate; decrypt the key through an authenticated envelope reader before migration",
         ));
     }
     Ok(())
+}
+
+fn extract_json_legacy_seed(json: &Json) -> Result<Secret32, CliError> {
+    reject_sealed_legacy_key(json)?;
+    let seed_buf = json.field_hex("seed")?;
+    if seed_buf.0.len() != 32 {
+        return Err(CliError::input("JSON legacy key \"seed\" must be 32 bytes"));
+    }
+    let mut out = Secret32::new([0u8; 32]);
+    out.0.copy_from_slice(&seed_buf.0);
+    Ok(out)
 }
 
 /// Read a 32-byte classical spending key from either:
@@ -126,12 +143,13 @@ fn reject_sealed_legacy_key(json: &Json) -> Result<(), CliError> {
 fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
     let raw = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
     if raw.0.len() == 32 {
-        // Valid JSON remains an envelope even when whitespace makes it exactly
-        // the binary-key length. Other 32-byte inputs retain raw-key semantics.
+        // Valid JSON object remains structured key metadata even when whitespace makes it
+        // exactly 32 bytes; never reinterpret JSON text as raw binary key material.
         if let Ok(text) = std::str::from_utf8(&raw.0)
-            && let Ok(json) = Json::parse(text)
+            && text.trim().starts_with('{')
+            && let Ok(json @ Json::Object(_)) = Json::parse(text.trim())
         {
-            reject_sealed_legacy_key(&json)?;
+            return extract_json_legacy_seed(&json);
         }
         let mut out = Secret32::new([0u8; 32]);
         out.0.copy_from_slice(&raw.0);
@@ -145,14 +163,7 @@ fn read_legacy_secret_32(path: &str) -> Result<Secret32, CliError> {
     let trimmed = text.trim();
     if trimmed.starts_with('{') {
         let json = Json::parse(trimmed)?;
-        reject_sealed_legacy_key(&json)?;
-        let seed_buf = json.field_hex("seed")?;
-        if seed_buf.0.len() != 32 {
-            return Err(CliError::input("JSON legacy key \"seed\" must be 32 bytes"));
-        }
-        let mut out = Secret32::new([0u8; 32]);
-        out.0.copy_from_slice(&seed_buf.0);
-        return Ok(out);
+        return extract_json_legacy_seed(&json);
     }
     let hex_str = trimmed.strip_prefix("0x").unwrap_or(trimmed);
     let decoded = from_hex(hex_str)?;

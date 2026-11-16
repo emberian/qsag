@@ -212,7 +212,8 @@ fn decode_tree_json(
     if json.field_str("format")? != TREE_FORMAT || json.field_str("scheme")? != SCHEME_NAME {
         return Err(CliError::state("CorruptQuorumTreeMetadata"));
     }
-    let height = json.field_u64("tree_height")? as usize;
+    let height = usize::try_from(json.field_u64("tree_height")?)
+        .map_err(|_| CliError::state("QuorumTreeHeaderMismatch"))?;
     let pk_seed: [u8; 32] = from_hex_exact(json.field_str("pk_seed")?, "pk_seed")?;
     let pk_root: [u8; 32] = from_hex_exact(json.field_str("pk_root")?, "pk_root")?;
     if height != expected_height || pk_seed != expected_pk.pk_seed || pk_root != expected_pk.pk_root
