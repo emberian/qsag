@@ -3681,6 +3681,7 @@ pub(crate) fn verify_pending_spdz_mac_batch_with_mesh(
 
     // Additive masking alone cancels in the aggregate and leaks alpha on abort.
     // Keep residuals private and open only independently multiplicatively blinded lanes.
+    let mut verdict = Ok(());
     for lane in 0..2 {
         let residual = SecretBuffer(
             (0..n)
@@ -3711,18 +3712,24 @@ pub(crate) fn verify_pending_spdz_mac_batch_with_mesh(
             &residual,
             mesh.as_deref_mut(),
             party_rngs,
-        )?;
-        if !opened.ct_eq(Tower128::ZERO) {
-            return Err(PreprocessError::MacCheckFailed {
+        );
+        verdict = match opened {
+            Ok(w) if w.ct_eq(Tower128::ZERO) => Ok(()),
+            Ok(_) => Err(PreprocessError::MacCheckFailed {
                 phase,
                 accused_party: None,
-            });
+            }),
+            Err(e) => Err(e),
+        };
+        if verdict.is_err() {
+            break;
         }
     }
+    // Folded MAC shares are wiped on the abort paths too.
     for row in m_folded.iter_mut() {
         wipe_tower128(row);
     }
-    Ok(())
+    verdict
 }
 
 /// A vault poisoned by an earlier abort has a zeroed MAC key share, so no MAC relation
@@ -6073,6 +6080,7 @@ pub(crate) mod tests {
 
     #[test]
     fn scheduled_chunks_preserve_serial_shares_counters_and_verifier_rng() {
+        let _memory = crate::test_budget::reserve_mb(400);
         let make = || {
             let mut rngs = make_rngs3(0x23);
             let (keys, _) = run_dealerless_rss_dkg_2of3([0x44; 32], 16, &mut rngs).unwrap();
@@ -7594,6 +7602,7 @@ pub(crate) mod tests {
 
     #[test]
     fn spdz_batch64_prf_and_masked_f_match_fips_and_cut_tamper_poisons() {
+        let _memory = crate::test_budget::reserve_mb(1700);
         let t = 2usize;
         let pts: Vec<TowerGf256> = (1..=2u8).map(TowerGf256).collect();
         let mut rngs = spdz_test_rngs(2, 0x80);
@@ -7672,6 +7681,7 @@ pub(crate) mod tests {
 
     #[test]
     fn spdz_batch64_aborts_and_poisons_on_corrupted_triple_and_exhaustion() {
+        let _memory = crate::test_budget::reserve_mb(1700);
         let t = 2usize;
         let pts: Vec<TowerGf256> = (1..=2u8).map(TowerGf256).collect();
         let mut dealer = SpdzTestDealer::new(b"batch64-tamper", t, &pts);
@@ -7733,6 +7743,7 @@ pub(crate) mod tests {
 
     #[test]
     fn spdz_poisoned_quorum_refuses_every_later_evaluation_and_opening() {
+        let _memory = crate::test_budget::reserve_mb(1100);
         let t = 2usize;
         let pts: Vec<TowerGf256> = (1..=2u8).map(TowerGf256).collect();
         let mut dealer = SpdzTestDealer::new(b"batch64-latch", t, &pts);

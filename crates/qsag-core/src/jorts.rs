@@ -1111,6 +1111,7 @@ mod tests {
 
     #[test]
     fn keygen_and_both_modes_match_the_reference_and_verify() {
+        let _memory = crate::test_budget::reserve_mb(350);
         let params = JortsParams::with_height(3);
         let (mut engine, sk) = test_engine(0xB1);
         let key = jorts_keygen_mpc(&mut engine, &params).unwrap();
