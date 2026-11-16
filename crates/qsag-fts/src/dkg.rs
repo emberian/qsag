@@ -293,7 +293,8 @@ pub trait ParallelSeededDkgProducts {
         sender_operand: &[u128],
         receiver_operand: &[u128],
     ) -> Result<Vec<u128>, ParallelSeededError> {
-        if width == 0 || receiver_operand.len().checked_mul(width) != Some(sender_operand.len())
+        if width == 0
+            || receiver_operand.len().checked_mul(width) != Some(sender_operand.len())
             || !valid_product_roster(roster, self.party_id())
         {
             return Err(ParallelSeededError::InvalidThresholdParameters);
@@ -430,7 +431,8 @@ pub trait ParallelSeededDkgOt {
 // Product adapters are public entry points too: duplicate peers would reuse OT
 // contexts, and noncanonical ordering can deadlock a pairwise transport.
 fn valid_product_roster(roster: &[u16], party_id: u16) -> bool {
-    !roster.is_empty() && roster.len() <= 255
+    !roster.is_empty()
+        && roster.len() <= 255
         && roster.windows(2).all(|w| w[0] < w[1])
         && roster.binary_search(&party_id).is_ok()
 }
@@ -2232,7 +2234,10 @@ mod gilboa_tests {
         );
         assert_eq!(party.keyed_products([0; 32], &[2, 3], 1, &[0]), invalid);
         for roster in [&[1, 1][..], &[2, 1][..], &[1, 2, 2][..], &[][..]] {
-            assert_eq!(party.cross_products([0; 32], roster, 1, &[0], &[0]), invalid);
+            assert_eq!(
+                party.cross_products([0; 32], roster, 1, &[0], &[0]),
+                invalid
+            );
             assert_eq!(party.keyed_products([0; 32], roster, 1, &[0]), invalid);
         }
         assert!(mailbox.is_empty());

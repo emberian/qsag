@@ -303,10 +303,15 @@ impl DurableBurnJournal {
             let mut bytes = std::vec::Vec::new();
             bytes.try_reserve_exact(cap).map_err(|_| invalid())?;
             journal.file.seek(SeekFrom::Start(0))?;
-            // Bound the read itself as well as the initial fstat: an external
-            // writer must not turn a growth race into an unbounded allocation.
-            (&mut journal.file).take(held_len + 1).read_to_end(&mut bytes)?;
-            if bytes.len() != cap || bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC || !ct_eq_bytes(&bytes[8..40], &key)
+            // Read at most one byte past the `fstat` length: a file growing under the
+            // read is refused below instead of being buffered without bound.
+            (&mut journal.file)
+                .take(held_len + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() != cap
+                || bytes.len() < HEADER_LEN
+                || &bytes[..8] != MAGIC
+                || !ct_eq_bytes(&bytes[8..40], &key)
             {
                 return Err(invalid());
             }
@@ -417,12 +422,14 @@ impl DurableBurnJournal {
         if self.failed || !ct_eq_bytes(key, &self.key) || self.entries.contains(&(party, epoch)) {
             return Err(invalid());
         }
-        self.failed = true;
-        self.check_identity()?;
+        // Recovery refuses a journal above `MAX_JOURNAL_BYTES`, so never grow one past
+        // it. A full journal is a refusal, not damage: the handle stays readable.
         let append_offset = (HEADER_LEN + RECORD_LEN * self.entries.len()) as u64;
         if append_offset + RECORD_LEN as u64 > MAX_JOURNAL_BYTES {
             return Err(invalid());
         }
+        self.failed = true;
+        self.check_identity()?;
         let mut record = [0; RECORD_LEN];
         record[..2].copy_from_slice(&party.to_be_bytes());
         record[2..10].copy_from_slice(&epoch.to_be_bytes());
@@ -998,8 +1005,9 @@ mod tests {
         for tail_len in 1..=RECORD_LEN {
             let mut bytes = advanced_twice.clone();
             bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN].fill(0xa5);
-            bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]
-                .copy_from_slice(&journal.committed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]);
+            bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN].copy_from_slice(
+                &journal.committed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN],
+            );
             bytes.extend_from_slice(&junk(tail_len, 72));
             std::fs::write(&journal.path, &bytes).unwrap();
             journal.assert_fails_closed(&bytes);
