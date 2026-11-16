@@ -209,4 +209,111 @@ theorem networkStep_preserves_addresses (corrupt : Option (Fin 3))
   networkStep_emitted_prefix runCommands_emitted_prefix wellAddressed_get wellAddressed_set
   prepare_preserves_party receive_preserves_party networkStep_preserves_addresses
 
+
+/-! ## Anti-Replay Authenticated Scheduler Wrapper (`AuthNetwork`) -/
+
+/-- Replay-protected participant network state pairing `Network` with a persistent table
+    `deliveredIndices` of already-delivered wire slots so re-delivery of any wire index is
+    dropped at the transport boundary before reaching `receive`. -/
+structure AuthNetwork where
+  base : Network
+  deliveredIndices : List Nat
+  deriving DecidableEq, Repr
+
+/-- Replay-protected step over `AuthNetwork`: `.deliver index` executes iff `index` has not
+    previously been delivered and points to a valid emitted envelope. -/
+@[expose] def authNetworkStep (corrupt : Option (Fin 3))
+    (localMasks : Fin 3 → Nat → LocalMasks) (anet : AuthNetwork) (command : Command) : AuthNetwork :=
+  match command with
+  | .deliver index =>
+      if decide (index ∈ anet.deliveredIndices) then
+        anet
+      else
+        match anet.base.emitted[index]? with
+        | none => anet
+        | some message =>
+            { base := { anet.base with
+                          nodes := anet.base.nodes.set message.receiver
+                            (receive (anet.base.nodes.get message.receiver) message) }
+              deliveredIndices := index :: anet.deliveredIndices }
+  | other =>
+      { base := networkStep corrupt localMasks anet.base other
+        deliveredIndices := anet.deliveredIndices }
+
+@[expose] def runAuthCommands (corrupt : Option (Fin 3)) (localMasks : Fin 3 → Nat → LocalMasks) :
+    AuthNetwork → List Command → AuthNetwork
+  | anet, [] => anet
+  | anet, cmd :: cmds =>
+      runAuthCommands corrupt localMasks (authNetworkStep corrupt localMasks anet cmd) cmds
+
+/-- **Anti-Replay Tooth (`tooth_authNetworkStep_redelivery_blocked`)**:
+    Re-delivering an already-delivered wire index `index ∈ anet.deliveredIndices` is a strict no-op. -/
+theorem authNetworkStep_redelivery_noop (corrupt : Option (Fin 3))
+    (localMasks : Fin 3 → Nat → LocalMasks) (anet : AuthNetwork) (index : Nat)
+    (hReplay : index ∈ anet.deliveredIndices) :
+    authNetworkStep corrupt localMasks anet (.deliver index) = anet := by
+  simp [authNetworkStep, hReplay]
+
+theorem tooth_authNetworkStep_redelivery_blocked (corrupt : Option (Fin 3))
+    (localMasks : Fin 3 → Nat → LocalMasks) (anet : AuthNetwork) (index : Nat)
+    (hReplay : index ∈ anet.deliveredIndices) :
+    (authNetworkStep corrupt localMasks anet (.deliver index)).deliveredIndices ≠
+      index :: anet.deliveredIndices := by
+  rw [authNetworkStep_redelivery_noop corrupt localMasks anet index hReplay]
+  intro hEq
+  have hLen := congrArg List.length hEq
+  rw [List.length_cons] at hLen
+  omega
+
+/-- Every delivered index recorded in `deliveredIndices` stays bounded by `emitted.length` and `Nodup`. -/
+theorem authNetworkStep_preserves_nodup (corrupt : Option (Fin 3))
+    (localMasks : Fin 3 → Nat → LocalMasks) (anet : AuthNetwork) (cmd : Command)
+    (hNd : anet.deliveredIndices.Nodup) :
+    (authNetworkStep corrupt localMasks anet cmd).deliveredIndices.Nodup := by
+  cases cmd with
+  | compute _ => exact hNd
+  | corruptSend _ => exact hNd
+  | abort _ => exact hNd
+  | deliver idx =>
+    dsimp only [authNetworkStep]
+    by_cases hMem : idx ∈ anet.deliveredIndices
+    · simp only [decide_eq_true hMem, ↓reduceIte]
+      exact hNd
+    · simp only [decide_eq_false hMem, Bool.false_eq_true, ↓reduceIte]
+      cases anet.base.emitted[idx]? with
+      | none => exact hNd
+      | some _ => exact List.nodup_cons.mpr ⟨hMem, hNd⟩
+
+theorem runAuthCommands_preserves_nodup (corrupt : Option (Fin 3))
+    (localMasks : Fin 3 → Nat → LocalMasks) (anet : AuthNetwork) (cmds : List Command)
+    (hNd : anet.deliveredIndices.Nodup) :
+    (runAuthCommands corrupt localMasks anet cmds).deliveredIndices.Nodup := by
+  induction cmds generalizing anet with
+  | nil => exact hNd
+  | cons cmd rest ih =>
+    exact ih (authNetworkStep corrupt localMasks anet cmd)
+      (authNetworkStep_preserves_nodup corrupt localMasks anet cmd hNd)
+
+theorem authNetworkStep_preserves_addresses (corrupt : Option (Fin 3))
+    (localMasks : Fin 3 → Nat → LocalMasks) (anet : AuthNetwork) (cmd : Command)
+    (h : WellAddressed anet.base.nodes) :
+    WellAddressed (authNetworkStep corrupt localMasks anet cmd).base.nodes := by
+  cases cmd with
+  | compute p => exact networkStep_preserves_addresses corrupt localMasks anet.base (.compute p) h
+  | corruptSend m => exact networkStep_preserves_addresses corrupt localMasks anet.base (.corruptSend m) h
+  | abort p => exact networkStep_preserves_addresses corrupt localMasks anet.base (.abort p) h
+  | deliver idx =>
+    dsimp only [authNetworkStep]
+    split
+    · exact h
+    · cases hEm : anet.base.emitted[idx]? with
+      | none => exact h
+      | some msg =>
+        exact wellAddressed_set _ _ _ h
+          ((receive_preserves_party _ _).trans (wellAddressed_get _ _ h))
+
+#verify_constructive tooth_authNetworkStep_redelivery_blocked authNetworkStep_preserves_nodup
+  runAuthCommands_preserves_nodup authNetworkStep_preserves_addresses
+#tooth_pair runAuthCommands_preserves_nodup vs tooth_authNetworkStep_redelivery_blocked
+
 end Qsag.RssParticipant
