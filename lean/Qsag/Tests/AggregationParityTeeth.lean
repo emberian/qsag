@@ -235,32 +235,73 @@ end
 public section
 namespace Qsag.Aggregation
 /-- Concrete inhabitedness witness: a genuine 16-bit `cSHAKE256` Proof-of-Work (`powBits = 16`,
-    nonce `5791`) on the digest of `powWitnessSeedV2`, checked by the Lean kernel. -/
+    nonce `70035`) on the digest of `powWitnessSeed` (`"WHIR_STAGE_POW"` under
+    `"QSAG.AGG.FS_TRANSCRIPT/v1"`), checked by the Lean kernel. -/
 theorem inhabited_whir_stage_pow_16 :
-    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 5791 16 = true := by
+    verifyWhirStagePow (stagePowDigest powWitnessSeed) 70035 16 = true := by
   decide +kernel
 
 /-- `#tooth` Invalid PoW Nonce Rejection (`powNonce = 0` fails 16-bit PoW on the witness digest). -/
 theorem tooth_whir_pow16_nonce0_rejected :
-    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 0 16 = false := by
+    verifyWhirStagePow (stagePowDigest powWitnessSeed) 0 16 = false := by
   decide +kernel
 
 theorem tooth_whir_pow_nonce_mutation :
-    ∃ nonce : Nat, nonce ≠ 5791 ∧
-      verifyWhirStagePow (stagePowDigest powWitnessSeedV2) nonce 16 = false :=
+    ∃ nonce : Nat, nonce ≠ 70035 ∧
+      verifyWhirStagePow (stagePowDigest powWitnessSeed) nonce 16 = false :=
   ⟨0, by decide, tooth_whir_pow16_nonce0_rejected⟩
 
 #tooth_pair verifyWhirStagePow_16_iff vs tooth_whir_pow_nonce_mutation
 theorem inhabited_whir_pow_inputs :
     ∃ (chal : List UInt8) (nonce : Nat),
-      chal = stagePowDigest powWitnessSeedV2 ∧ nonce = 5791 ∧
+      chal = stagePowDigest powWitnessSeed ∧ nonce = 70035 ∧
       chal.length = 32 ∧ nonce < 2 ^ 64 ∧ verifyWhirStagePow chal nonce 16 = true :=
-  ⟨stagePowDigest powWitnessSeedV2, 5791, rfl, rfl, stagePowDigest_length _,
+  ⟨stagePowDigest powWitnessSeed, 70035, rfl, rfl, stagePowDigest_length _,
     by decide, inhabited_whir_stage_pow_16⟩
 
 #verify_inhabited verifyWhirStagePow_16_iff inhabited_whir_pow_inputs
 
-
+/-- Dual-OOD (`whirOodSamples = 2`) challenge derivation produces two well-defined challenges,
+    and mutating `oodChallenges.2` triggers `verifyOneWhirStage = false`. -/
+theorem tooth_whir_dual_ood_samples_enforced :
+    whirOodSamples = 2 ∧
+    let oods := deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)
+    let spBad : WhirStageProof :=
+      { stageRoot := stagePowDigest powWitnessSeed
+        oodChallenges := (oods.1, CommRingOps.add oods.2 GoldilocksExt4.one)
+        oodEvals := (GoldilocksExt4.zero, GoldilocksExt4.zero)
+        shiftClaim := GoldilocksExt4.zero
+        shiftPolys := []
+        layerRoots := []
+        shiftChallenges := []
+        foldChallenges := []
+        shiftTerminalEval := GoldilocksExt4.zero
+        powNonce := 0
+        queries := [] }
+    let sdom0 : WhirStageDomain :=
+      { stageIdx := 0, blowup := 4, groups0 := 4, foldLayers := 1, numQueries := 1,
+        powBits := 0, invTwo := Goldilocks.one, invTwoY0 := fun _ _ => Goldilocks.one,
+        sampleFuel := 1 }
+    spBad.oodChallenge = deriveStageOodChallenge powWitnessSeed spBad.stageRoot ∧
+    verifyOneWhirStage [] [] powWitnessSeed sdom0 spBad none = false := by
+  refine ⟨rfl, rfl, ?_⟩
+  apply tooth_whir_wrong_second_ood_challenge_rejected
+  intro hEq
+  have hSub : CommRingOps.sub
+      (CommRingOps.add (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2
+        GoldilocksExt4.one)
+      (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2 =
+      GoldilocksExt4.zero := by
+    rw [hEq, LawfulCommRing.sub_self]
+  have hOne : CommRingOps.sub
+      (CommRingOps.add (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2
+        GoldilocksExt4.one)
+      (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2 =
+      GoldilocksExt4.one := by
+    change QuarticGoldilocks.sub (QuarticGoldilocks.add _ QuarticGoldilocks.one) _ =
+      QuarticGoldilocks.one
+    constructive_ring
+  exact LawfulField.one_ne_zero (F := QuarticGoldilocks) (hOne.symm.trans hSub)
 
 end Qsag.Aggregation
 end

@@ -1278,7 +1278,7 @@ def deriveRowSumcheckChallenges (prior : List UInt8) :
   | [] => []
   | p :: ps =>
     let frame := encodeMultiFrame [prior, encodePolyExt4 p]
-    let r := squeezeExt4Challenge "QSAG.AGG.WHIR.ROW_SC/v2".toUTF8.toList frame
+    let r := squeezeExt4Challenge "LEAF_SC_CHAL".toUTF8.toList frame
     r :: deriveRowSumcheckChallenges frame ps
 
 def rowSumcheckTranscriptTail (prior : List UInt8) : List (List GoldilocksExt4) → List UInt8
@@ -1353,11 +1353,10 @@ def merkleDepthFuel : Nat → Nat → Nat
 
 def merkleDepth (n : Nat) : Nat := merkleDepthFuel n n
 
-/-- Kernel-reducible witness seed `"QSAG.POW.WITNESS/v2"` avoiding `@[extern] String.toUTF8`
-    during kernel reduction of 16-bit PoW KAT proofs. -/
-def powWitnessSeedV2 : List UInt8 :=
-  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x4f, 0x57, 0x2e, 0x57, 0x49, 0x54, 0x4e, 0x45,
-   0x53, 0x53, 0x2f, 0x76, 0x32]
+/-- Kernel-reducible witness seed `"WHIR_STAGE_POW"` (`pcs.rs` stage PoW transcript label)
+    avoiding `@[extern] String.toUTF8` during kernel reduction of 16-bit PoW KAT proofs. -/
+def powWitnessSeed : List UInt8 :=
+  [0x57, 0x48, 0x49, 0x52, 0x5f, 0x53, 0x54, 0x41, 0x47, 0x45, 0x5f, 0x50, 0x4f, 0x57]
 
 /-- The low `w` bytes of `n` in little-endian order (`u64::to_le_bytes` at `w = 8`). -/
 def leBytes : Nat → Nat → List UInt8
@@ -1433,16 +1432,15 @@ def verifyWhirStagePow (chal : List UInt8) (powNonce powBits : Nat) : Bool :=
     whirStagePowMask (whirPowWord chal powNonce) powBits
   else false
 
-/-- Kernel-reducible UTF-8 bytes of `"QSAG.AGG.WHIR.POW_DIGEST/v2"`. -/
-def tagStagePowDigestV2 : List UInt8 :=
-  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x41, 0x47, 0x47, 0x2e, 0x57, 0x48, 0x49, 0x52, 0x2e,
-   0x50, 0x4f, 0x57, 0x5f, 0x44, 0x49, 0x47, 0x45, 0x53, 0x54, 0x2f, 0x76, 0x32]
+/-- Kernel-reducible UTF-8 bytes of `"QSAG.AGG.FS_TRANSCRIPT/v1"` (`sponge.rs`). -/
+def tagStagePowDigest : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x41, 0x47, 0x47, 0x2e, 0x46, 0x53, 0x5f, 0x54, 0x52,
+   0x41, 0x4e, 0x53, 0x43, 0x52, 0x49, 0x50, 0x54, 0x2f, 0x76, 0x31]
 
 /-- 32-byte digest of this module's stage transcript frame, the challenge handed to
-    `verifyWhirStagePow`. The label is local to this model: the deployed challenge is the
-    transcript's running chain digest, which has no counterpart here. -/
+    `verifyWhirStagePow`. -/
 def stagePowDigest (seed : List UInt8) : List UInt8 :=
-  cshake256Bytes tagStagePowDigestV2 seed
+  cshake256Bytes tagStagePowDigest seed
 
 @[simp] theorem stagePowDigest_length (seed : List UInt8) : (stagePowDigest seed).length = 32 :=
   cshake256Bytes_length _ _
@@ -1528,13 +1526,17 @@ structure StageQueryOpening where
   layers : List FoldLayerOpening
   nextStageBridge : Option FoldLayerOpening := none
 
+/-- Number of out-of-domain samples squeezed per WHIR stage (`pcs.rs::OOD_SAMPLES = 2`). -/
+def whirOodSamples : Nat := 2
+
 /-- Proof transcript data for one WHIR stage `s`:
-    `stageRoot` -> squeeze `oodChallenge` -> absorb `oodEval` -> interleaved degree-2 shift/OOD
-    sumcheck (`shiftPolys`, `layerRoots`, `shiftChallenges`) -> `powNonce` -> `queries`. -/
+    `stageRoot` -> squeeze dual `oodChallenges` (`OOD_SAMPLES = 2`) -> absorb dual `oodEvals` ->
+    interleaved degree-2 shift/OOD sumcheck (`shiftPolys`, `layerRoots`, `shiftChallenges`) ->
+    `powNonce` -> `queries`. -/
 structure WhirStageProof where
   stageRoot : List UInt8
-  oodChallenge : GoldilocksExt4
-  oodEval : GoldilocksExt4
+  oodChallenges : GoldilocksExt4 × GoldilocksExt4
+  oodEvals : GoldilocksExt4 × GoldilocksExt4
   shiftClaim : GoldilocksExt4
   shiftPolys : List (List GoldilocksExt4)
   layerRoots : List (List UInt8)
@@ -1543,6 +1545,22 @@ structure WhirStageProof where
   shiftTerminalEval : GoldilocksExt4
   powNonce : Nat
   queries : List StageQueryOpening
+
+/-- First Fiat–Shamir OOD sample of a stage (`OOD_SAMPLES = 2`). -/
+def WhirStageProof.oodChallenge (sp : WhirStageProof) : GoldilocksExt4 :=
+  sp.oodChallenges.1
+
+/-- Second Fiat–Shamir OOD sample of a stage (`OOD_SAMPLES = 2`). -/
+def WhirStageProof.oodChallenge2 (sp : WhirStageProof) : GoldilocksExt4 :=
+  sp.oodChallenges.2
+
+/-- First OOD evaluation of a stage (`OOD_SAMPLES = 2`). -/
+def WhirStageProof.oodEval (sp : WhirStageProof) : GoldilocksExt4 :=
+  sp.oodEvals.1
+
+/-- Second OOD evaluation of a stage (`OOD_SAMPLES = 2`). -/
+def WhirStageProof.oodEval2 (sp : WhirStageProof) : GoldilocksExt4 :=
+  sp.oodEvals.2
 
 /-- Complete succinct `GoldilocksExt4` WHIR aggregate certificate: zero `PqHashSig` lists. -/
 structure SuccinctAggregateProof where
@@ -1553,13 +1571,26 @@ structure SuccinctAggregateProof where
 def stageAllRoots (sp : WhirStageProof) : List (List UInt8) :=
   sp.stageRoot :: sp.layerRoots
 
-/-- Squeeze the Fiat–Shamir OOD point `z_ood` after absorbing `stageRoot`. -/
-def deriveStageOodChallenge (prior : List UInt8) (stageRoot : List UInt8) : GoldilocksExt4 :=
-  squeezeExt4Challenge "QSAG.AGG.WHIR.OOD/v2".toUTF8.toList (encodeMultiFrame [prior, stageRoot])
+/-- Squeeze the `OOD_SAMPLES = 2` Fiat–Shamir OOD points `(z_ood_0, z_ood_1)` after absorbing
+    `stageRoot` (`"WHIR_OOD_CHAL"` in `pcs.rs`). -/
+def deriveStageOodChallenges (prior : List UInt8) (stageRoot : List UInt8) :
+    GoldilocksExt4 × GoldilocksExt4 :=
+  let frame0 := encodeMultiFrame [prior, stageRoot]
+  let z0 := squeezeExt4Challenge "WHIR_OOD_CHAL".toUTF8.toList frame0
+  let frame1 := encodeMultiFrame [frame0, GoldilocksExt4.encodeBytes32 z0]
+  let z1 := squeezeExt4Challenge "WHIR_OOD_CHAL".toUTF8.toList frame1
+  (z0, z1)
 
-/-- Transcript state after absorbing `stageRoot`, `oodEval`, and `shiftClaim`. -/
+/-- First Fiat–Shamir OOD point `z_ood_0` of `deriveStageOodChallenges`. -/
+def deriveStageOodChallenge (prior : List UInt8) (stageRoot : List UInt8) : GoldilocksExt4 :=
+  (deriveStageOodChallenges prior stageRoot).1
+
+/-- Transcript state after absorbing `stageRoot`, both `OOD_SAMPLES = 2` evaluations `oodEvals`,
+    and `shiftClaim`. -/
 def stagePostOodTranscript (prior : List UInt8) (sp : WhirStageProof) : List UInt8 :=
-  encodeMultiFrame [prior, sp.stageRoot, GoldilocksExt4.encodeBytes32 sp.oodEval,
+  encodeMultiFrame [prior, sp.stageRoot,
+    GoldilocksExt4.encodeBytes32 sp.oodEvals.1,
+    GoldilocksExt4.encodeBytes32 sp.oodEvals.2,
     GoldilocksExt4.encodeBytes32 sp.shiftClaim]
 
 /-- Interleaved per-stage shift/fold challenge derivation (`[stageRoot] ++ layerRoots` paired with
@@ -1568,7 +1599,7 @@ def deriveStageShiftChallenges (prior : List UInt8) :
     List (List UInt8) → List (List GoldilocksExt4) → List GoldilocksExt4
   | root :: roots, p :: ps =>
     let frame := encodeMultiFrame [prior, root, encodePolyExt4 p]
-    let α := squeezeExt4Challenge "QSAG.AGG.WHIR.FOLD/v2".toUTF8.toList frame
+    let α := squeezeExt4Challenge "WHIR_AFFINE_ALPHA".toUTF8.toList frame
     α :: deriveStageShiftChallenges frame roots ps
   | _, _ => []
 
@@ -1610,7 +1641,7 @@ def scanFillDistinct (target : Nat) : List Nat → List Nat → List Nat
     else scanFillDistinct target xs (sortedInsertDistinct x acc)
 
 def squeezeQueryIndex (seed : List UInt8) (groups k : Nat) : Nat :=
-  ofBE ((cshake256Bytes "QSAG.AGG.WHIR.QUERY/v2".toUTF8.toList
+  ofBE ((cshake256Bytes "WHIR_QUERIES_S00".toUTF8.toList
     (encodeMultiFrame [seed, (toString k).toUTF8.toList])).take 8) % groups
 
 def deriveStageQueryIndices (sdom : WhirStageDomain) (qSeed : List UInt8) : List Nat :=
@@ -2038,7 +2069,8 @@ def verifyStageTrajectory (sdom : WhirStageDomain)
       roots αs ops
   | _, _, _, _, _, _, _ => false
 
-/-- Verify one WHIR stage's header, OOD challenge, degree-2 shift sumcheck, PoW, and queries. -/
+/-- Verify one WHIR stage's header, dual OOD challenges (`OOD_SAMPLES = 2`), degree-2 shift
+    sumcheck, PoW, and queries. -/
 def verifyOneWhirStage (rowChallenges : List GoldilocksExt4)
     (finalWord : List GoldilocksExt4) (prior : List UInt8)
     (sdom : WhirStageDomain) (sp : WhirStageProof)
@@ -2048,7 +2080,7 @@ def verifyOneWhirStage (rowChallenges : List GoldilocksExt4)
   let qSeed := stageQuerySeed pSeed sp.powNonce
   let expectedFold := if sdom.bindRowChallenges then rowChallenges
                       else sp.shiftChallenges
-  decide (sp.oodChallenge = deriveStageOodChallenge prior sp.stageRoot) &&
+  decide (sp.oodChallenges = deriveStageOodChallenges prior sp.stageRoot) &&
   decide ((stageAllRoots sp).length = sdom.foldLayers) &&
   decide (sp.shiftPolys.length = sdom.foldLayers) &&
   decide (sp.shiftChallenges =
@@ -5693,11 +5725,13 @@ private def sbox7Stage0Proof (x0 b1 : Goldilocks) (prior0 root1 : List UInt8)
   let leaf0 := sbox7Leaf0 table0
   let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
   let finalWord := List.replicate 8 pr0
-  let ood0 := deriveStageOodChallenge prior0 root0
-  let oodEval0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
-    (CommRingOps.mul ood0 (GoldilocksExt4.embedBase b1))
+  let oods0 := deriveStageOodChallenges prior0 root0
+  let oodEval0_0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
+    (CommRingOps.mul oods0.1 (GoldilocksExt4.embedBase b1))
+  let oodEval0_1 := CommRingOps.add (GoldilocksExt4.embedBase x0)
+    (CommRingOps.mul oods0.2 (GoldilocksExt4.embedBase b1))
   let sp0Pre : WhirStageProof :=
-    { stageRoot := root0, oodChallenge := ood0, oodEval := oodEval0,
+    { stageRoot := root0, oodChallenges := oods0, oodEvals := (oodEval0_0, oodEval0_1),
       shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
       layerRoots := [], shiftChallenges := [], foldChallenges := [],
       shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
@@ -5723,9 +5757,9 @@ private def sbox7Stage1Proof (prior1 : List UInt8) (pr0 : GoldilocksExt4) : Whir
   let leaf1 := sbox7Leaf1 table1
   let root1 := buildMerkleRootByDepth pcsMerkleHash 3 leaf1
   let finalWord := List.replicate 8 pr0
-  let ood1 := deriveStageOodChallenge prior1 root1
+  let oods1 := deriveStageOodChallenges prior1 root1
   let sp1Pre : WhirStageProof :=
-    { stageRoot := root1, oodChallenge := ood1, oodEval := pr0,
+    { stageRoot := root1, oodChallenges := oods1, oodEvals := (pr0, pr0),
       shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
       layerRoots := [], shiftChallenges := [], foldChallenges := [],
       shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
@@ -5774,11 +5808,13 @@ private theorem verifyOneWhirStage_sbox7Stage0Proof (x0 b1 : Goldilocks)
   let leaf0 := sbox7Leaf0 table0
   let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
   let finalWord := List.replicate 8 pr0
-  let ood0 := deriveStageOodChallenge prior0 root0
-  let oodEval0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
-    (CommRingOps.mul ood0 (GoldilocksExt4.embedBase b1))
+  let oods0 := deriveStageOodChallenges prior0 root0
+  let oodEval0_0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
+    (CommRingOps.mul oods0.1 (GoldilocksExt4.embedBase b1))
+  let oodEval0_1 := CommRingOps.add (GoldilocksExt4.embedBase x0)
+    (CommRingOps.mul oods0.2 (GoldilocksExt4.embedBase b1))
   let sp0Pre : WhirStageProof :=
-    { stageRoot := root0, oodChallenge := ood0, oodEval := oodEval0,
+    { stageRoot := root0, oodChallenges := oods0, oodEvals := (oodEval0_0, oodEval0_1),
       shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
       layerRoots := [], shiftChallenges := [], foldChallenges := [],
       shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
@@ -5813,7 +5849,7 @@ private theorem verifyOneWhirStage_sbox7Stage0Proof (x0 b1 : Goldilocks)
   dsimp only [Option.map]
   have hPowSeed0 : stagePowSeed prior0 sp0 (some root1) finalWord = pSeed0 := rfl
   have hQSeed0 : stageQuerySeed pSeed0 sp0.powNonce = qSeed0 := rfl
-  have hOod0 : sp0.oodChallenge = deriveStageOodChallenge prior0 sp0.stageRoot := rfl
+  have hOod0 : sp0.oodChallenges = deriveStageOodChallenges prior0 sp0.stageRoot := rfl
   have hRootsLen0 : (stageAllRoots sp0).length = sbox7Stage0Dom.foldLayers := rfl
   have hPolysLen0 : sp0.shiftPolys.length = sbox7Stage0Dom.foldLayers := rfl
   have hShiftCh0 : sp0.shiftChallenges =
@@ -5892,9 +5928,9 @@ private theorem verifyOneWhirStage_sbox7Stage1Proof (rowChalls : List Goldilocks
   let leaf1 := sbox7Leaf1 table1
   let root1 := buildMerkleRootByDepth pcsMerkleHash 3 leaf1
   let finalWord := List.replicate 8 pr0
-  let ood1 := deriveStageOodChallenge prior1 root1
+  let oods1 := deriveStageOodChallenges prior1 root1
   let sp1Pre : WhirStageProof :=
-    { stageRoot := root1, oodChallenge := ood1, oodEval := pr0,
+    { stageRoot := root1, oodChallenges := oods1, oodEvals := (pr0, pr0),
       shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
       layerRoots := [], shiftChallenges := [], foldChallenges := [],
       shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
@@ -5926,7 +5962,7 @@ private theorem verifyOneWhirStage_sbox7Stage1Proof (rowChalls : List Goldilocks
   dsimp only [Option.map]
   have hPowSeed1 : stagePowSeed prior1 sp1 none finalWord = pSeed1 := rfl
   have hQSeed1 : stageQuerySeed pSeed1 sp1.powNonce = qSeed1 := rfl
-  have hOod1 : sp1.oodChallenge = deriveStageOodChallenge prior1 sp1.stageRoot := rfl
+  have hOod1 : sp1.oodChallenges = deriveStageOodChallenges prior1 sp1.stageRoot := rfl
   have hRootsLen1 : (stageAllRoots sp1).length = sbox7Stage1Dom.foldLayers := rfl
   have hPolysLen1 : sp1.shiftPolys.length = sbox7Stage1Dom.foldLayers := rfl
   have hShiftCh1 : sp1.shiftChallenges =
@@ -6165,7 +6201,7 @@ theorem succinct_knowledge_soundness_hypotheses_satisfiable :
   let seed := Goldilocks.ofNat 11
   let x0 := Goldilocks.ofNat 3
   let b1 := Goldilocks.ofNat 5
-  let msg := "QSAG.AGG.WITNESS.MSG/v2".toUTF8.toList
+  let msg := "QSAG.HEM.MSG/v2".toUTF8.toList
   let root := CommRingOps.add (pow7Goldilocks x0) seed
   let bundle := buildHonestSbox7WhirBundle seed x0 b1 msg
   have hAcc : verifySuccinctAggregate (rsSbox7TraceArith seed root) rsSbox7WhirDomain
@@ -6213,8 +6249,36 @@ theorem tooth_whir_wrong_ood_challenge_rejected (rowChalls finalWord : List Gold
     (nextInfo : Option (WhirStageDomain × List UInt8))
     (hBad : sp.oodChallenge ≠ deriveStageOodChallenge prior sp.stageRoot) :
     verifyOneWhirStage rowChalls finalWord prior sdom sp nextInfo = false := by
+  have hPairNe : sp.oodChallenges ≠ deriveStageOodChallenges prior sp.stageRoot :=
+    fun hEq => hBad (congrArg Prod.fst hEq)
   unfold verifyOneWhirStage
-  simp [decide_eq_false hBad]
+  simp [decide_eq_false hPairNe]
+
+/-- `#tooth` `verifyOneWhirStage` rejects a forged second OOD challenge
+    `oodChallenge2 ≠ (deriveStageOodChallenges prior sp.stageRoot).2` (`OOD_SAMPLES = 2`). -/
+theorem tooth_whir_wrong_second_ood_challenge_rejected (rowChalls finalWord : List GoldilocksExt4)
+    (prior : List UInt8) (sdom : WhirStageDomain) (sp : WhirStageProof)
+    (nextInfo : Option (WhirStageDomain × List UInt8))
+    (hBad : sp.oodChallenge2 ≠ (deriveStageOodChallenges prior sp.stageRoot).2) :
+    verifyOneWhirStage rowChalls finalWord prior sdom sp nextInfo = false := by
+  have hPairNe : sp.oodChallenges ≠ deriveStageOodChallenges prior sp.stageRoot :=
+    fun hEq => hBad (congrArg Prod.snd hEq)
+  unfold verifyOneWhirStage
+  simp [decide_eq_false hPairNe]
+
+/-- `#tooth` Both `OOD_SAMPLES = 2` evaluations are injectively framed into `stagePostOodTranscript`:
+    mutating `oodEvals.2` strictly changes `stagePostOodTranscript`. -/
+theorem tooth_whir_second_ood_eval_mutates_shift_transcript (prior : List UInt8)
+    (sp : WhirStageProof) (e2' : GoldilocksExt4) (hNe : sp.oodEvals.2 ≠ e2') :
+    stagePostOodTranscript prior sp ≠
+      stagePostOodTranscript prior { sp with oodEvals := (sp.oodEvals.1, e2') } := by
+  intro hEq
+  have hFrames := encodeMultiFrame_injective hEq
+  have hTail1 := (List.cons.inj hFrames).2
+  have hTail2 := (List.cons.inj hTail1).2
+  have hTail3 := (List.cons.inj hTail2).2
+  have hEncEq := (List.cons.inj hTail3).1
+  exact hNe (GoldilocksExt4.encodeBytes32_injective hEncEq)
 
 /-- `#tooth` `verifyOneWhirStage` rejects invalid Proof-of-Work nonces. -/
 theorem tooth_whir_bad_pow_rejected (rowChalls finalWord : List GoldilocksExt4)

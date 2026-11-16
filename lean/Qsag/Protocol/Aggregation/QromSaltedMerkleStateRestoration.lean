@@ -2497,7 +2497,12 @@ private def hemStageGeometryK (nv : Nat) : List (Nat × Nat) :=
   else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
   else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
   else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
-  else [(2, 6), (4, 4), (6, 3), (8, 3)]
+  else if nv ≤ 24 then [(2, 6), (4, 4), (6, 3), (8, 3)]
+  else if nv = 25 then [(2, 6), (4, 4), (6, 4), (8, 3)]
+  else if nv = 26 then [(2, 6), (4, 5), (6, 4), (8, 3)]
+  else if nv = 27 then [(2, 6), (4, 5), (6, 4), (8, 4)]
+  else if nv = 28 then [(2, 6), (4, 6), (6, 4), (8, 4)]
+  else []
 
 private theorem hemStageGeometry_eq_K : hemStageGeometry = hemStageGeometryK := by
   funext nv
