@@ -39,14 +39,16 @@
 //!
 //! What this file does not establish is listed on [`prove`].
 
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use super::recursive_whir::{
     Backend as RecBackend, Base as RecBase, Correlated3WhirProof, Digest as RecDigest,
-    Ext as RecExt, FixedPathWhirParams, Native as RecNative, PublicRecursionCommitment,
-    Transcript as RecTranscript, commit_for_recursion, f as rec_f, open_correlated3_for_recursion,
-    verify_correlated3_gadget,
+    Ext as RecExt, FixedPathWhirParams, FoldedEdgeSpec, FoldedLevelWhirProof,
+    Native as RecNative, PublicRecursionCommitment, Transcript as RecTranscript,
+    commit_for_recursion, f as rec_f, open_correlated3_for_recursion,
+    prove_folded_level_for_recursion, verify_correlated3_gadget, verify_folded_level,
 };
 use super::relation::{HologramMeta, Poseidon2InteriorTemplate, Shape};
 use super::{CornerPadBasis, LibraMask, NonzeroChallenge, PrimitiveChallenge, SeedStream, interp};
@@ -1859,15 +1861,15 @@ const HOLOGRAM_ROUND0_CACHE_MAX_VARS: usize = 22;
 /// Offline-compiled Spark matrix hologram for a fixed public [`Shape`].
 pub struct ShapeHologram {
     vk: ShapeVerifierKey,
-    row_idx: Vec<u32>,
-    col_idx: Vec<u32>,
-    val_a: Vec<F>,
-    val_b: Vec<F>,
-    val_c: Vec<F>,
-    count_x: Vec<F>,
-    count_y: Vec<F>,
+    row_idx: Arc<Vec<u32>>,
+    col_idx: Arc<Vec<u32>>,
+    val_a: Arc<Vec<F>>,
+    val_b: Arc<Vec<F>>,
+    val_c: Arc<Vec<F>>,
+    count_x: Arc<Vec<F>>,
+    count_y: Arc<Vec<F>>,
     h_state: crate::pcs::HemWhirProverState,
-    rec_h: Option<PublicRecursionCommitment>,
+    rec_h: Option<Arc<PublicRecursionCommitment>>,
 }
 
 impl Clone for ShapeHologram {
@@ -1883,15 +1885,15 @@ impl Clone for ShapeHologram {
         }
         Self {
             vk: self.vk.clone(),
-            row_idx: self.row_idx.clone(),
-            col_idx: self.col_idx.clone(),
-            val_a: self.val_a.clone(),
-            val_b: self.val_b.clone(),
-            val_c: self.val_c.clone(),
-            count_x: self.count_x.clone(),
-            count_y: self.count_y.clone(),
+            row_idx: Arc::clone(&self.row_idx),
+            col_idx: Arc::clone(&self.col_idx),
+            val_a: Arc::clone(&self.val_a),
+            val_b: Arc::clone(&self.val_b),
+            val_c: Arc::clone(&self.val_c),
+            count_x: Arc::clone(&self.count_x),
+            count_y: Arc::clone(&self.count_y),
             h_state,
-            rec_h: self.rec_h.clone(),
+            rec_h: self.rec_h.as_ref().map(Arc::clone),
         }
     }
 }
@@ -2083,14 +2085,14 @@ impl ShapeHologram {
         let rec_h = if include_recursive && regime.uses_poseidon2_canopy() {
             let rec_params = FixedPathWhirParams::new(regime, pack_vars)
                 .map_err(|_| ZkHemError::RelationTooLarge)?;
-            Some(
+            Some(Arc::new(
                 PublicRecursionCommitment::commit(&rec_params, &h_super)
                     .map_err(|_| ZkHemError::RelationTooLarge)?,
-            )
+            ))
         } else {
             None
         };
-        let rec_hologram_root = rec_h.as_ref().map(PublicRecursionCommitment::root);
+        let rec_hologram_root = rec_h.as_deref().map(PublicRecursionCommitment::root);
 
         drop(h_super);
 
@@ -2109,13 +2111,13 @@ impl ShapeHologram {
         };
         Ok(Self {
             vk,
-            row_idx,
-            col_idx,
-            val_a,
-            val_b,
-            val_c,
-            count_x,
-            count_y,
+            row_idx: Arc::new(row_idx),
+            col_idx: Arc::new(col_idx),
+            val_a: Arc::new(val_a),
+            val_b: Arc::new(val_b),
+            val_c: Arc::new(val_c),
+            count_x: Arc::new(count_x),
+            count_y: Arc::new(count_y),
             h_state,
             rec_h,
         })
@@ -2124,6 +2126,22 @@ impl ShapeHologram {
     #[inline]
     pub fn verifier_key(&self) -> &ShapeVerifierKey {
         &self.vk
+    }
+
+    pub(crate) fn split_ref(&self) -> Option<SplitHologramRef> {
+        let rec_h = self.rec_h.as_ref().map(Arc::clone)?;
+        Some(SplitHologramRef {
+            ell_nz: self.vk.ell_nz,
+            pack_vars: self.vk.pack_vars(),
+            row_idx: Arc::clone(&self.row_idx),
+            col_idx: Arc::clone(&self.col_idx),
+            val_a: Arc::clone(&self.val_a),
+            val_b: Arc::clone(&self.val_b),
+            val_c: Arc::clone(&self.val_c),
+            count_x: Arc::clone(&self.count_x),
+            count_y: Arc::clone(&self.count_y),
+            rec_h,
+        })
     }
 
     /// Give up the Reed-Solomon cache as a large hologram does, whatever this one's size.
@@ -3538,6 +3556,99 @@ pub fn verify_public_hologram(
 
 const REC_HOLO_VERSION: u64 = 0x5248_4F4C_0000_0001;
 
+#[derive(Clone)]
+pub(crate) struct SplitHologramRef {
+    pub(crate) ell_nz: usize,
+    pub(crate) pack_vars: usize,
+    pub(crate) row_idx: Arc<Vec<u32>>,
+    pub(crate) col_idx: Arc<Vec<u32>>,
+    pub(crate) val_a: Arc<Vec<F>>,
+    pub(crate) val_b: Arc<Vec<F>>,
+    pub(crate) val_c: Arc<Vec<F>>,
+    pub(crate) count_x: Arc<Vec<F>>,
+    pub(crate) count_y: Arc<Vec<F>>,
+    pub(crate) rec_h: Arc<PublicRecursionCommitment>,
+}
+
+impl SplitHologramRef {
+    fn fill_h_super(&self, dst: &mut Vec<F>) {
+        let nz_cap = 1usize << self.ell_nz;
+        let eval_n = 1usize << self.pack_vars;
+        dst.clear();
+        dst.resize(eval_n, F::ZERO);
+        for k in 0..nz_cap {
+            dst[k] = F::from_u64_reduced(u64::from(self.row_idx[k]));
+            dst[nz_cap + k] = F::from_u64_reduced(u64::from(self.col_idx[k]));
+        }
+        dst[2 * nz_cap..3 * nz_cap].copy_from_slice(&self.val_a);
+        dst[3 * nz_cap..4 * nz_cap].copy_from_slice(&self.val_b);
+        dst[4 * nz_cap..5 * nz_cap].copy_from_slice(&self.val_c);
+        dst[5 * nz_cap..6 * nz_cap].copy_from_slice(&self.count_x);
+        dst[6 * nz_cap..7 * nz_cap].copy_from_slice(&self.count_y);
+    }
+}
+
+pub(crate) struct SecretAssignment(Vec<F>);
+impl Drop for SecretAssignment {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.0, F::ZERO);
+    }
+}
+
+/// Compact prover-side witness retained by split subtree nodes so `prove_root` can fold all
+/// homogeneous siblings at a level into ONE `[CWYZ26]` `FoldedLevelWhirProof` without retaining
+/// multi-GiB RS codewords across siblings.
+pub(crate) struct SplitDeferredWitness {
+    pub(crate) holo: SplitHologramRef,
+    pub(crate) z_unpadded: SecretAssignment,
+    pub(crate) rx: Vec<E>,
+    pub(crate) ry: Vec<E>,
+    pub(crate) z_levels: Vec<Vec<RecDigest>>,
+    pub(crate) e_levels: Vec<Vec<RecDigest>>,
+}
+
+impl SplitDeferredWitness {
+    fn fill_z_padded(&self, dst: &mut Vec<F>) {
+        let eval_n = 1usize << self.holo.pack_vars;
+        dst.clear();
+        dst.reserve_exact(eval_n);
+        dst.extend_from_slice(&self.z_unpadded.0);
+        dst.resize(eval_n, F::ZERO);
+    }
+
+    fn fill_e_super(&self, dst: &mut Vec<F>) {
+        let eq_rx = eq_table(&self.rx);
+        let eq_ry = eq_table(&self.ry);
+        let m = 1usize << self.holo.ell_nz;
+        let eval_n = 1usize << self.holo.pack_vars;
+        dst.clear();
+        dst.resize(eval_n, F::ZERO);
+        for k in 0..m {
+            let lx = eq_rx[self.holo.row_idx[k] as usize].to_limbs();
+            let ly = eq_ry[self.holo.col_idx[k] as usize].to_limbs();
+            for j in 0..4 {
+                dst[j * m + k] = lx[j];
+                dst[(4 + j) * m + k] = ly[j];
+            }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct OptionalSplitWitness(pub(crate) Option<Arc<SplitDeferredWitness>>);
+
+impl core::fmt::Debug for OptionalSplitWitness {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        fmt.write_str("..")
+    }
+}
+impl PartialEq for OptionalSplitWitness {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for OptionalSplitWitness {}
+
 /// Field-native Poseidon2 recursive public proof of a relation, for a parent relation to
 /// verify. Verified both natively ([`verify_public_for_recursion`]) and inside a parent
 /// [`super::relation::ConstraintSystem`] ([`verify_public_gadget`]).
@@ -3558,6 +3669,8 @@ pub struct RecursivePublicHemProof {
     pub h_at_gkr: [E; 7],
     pub e_limbs_at_gkr: [E; 8],
     pub opening: Correlated3WhirProof,
+    #[doc(hidden)]
+    pub split_witness: OptionalSplitWitness,
 }
 
 impl RecursivePublicHemProof {
@@ -3588,6 +3701,7 @@ impl RecursivePublicHemProof {
             h_at_gkr: [E::ZERO; 7],
             e_limbs_at_gkr: [E::ZERO; 8],
             opening: params.placeholder_correlated3(),
+            split_witness: OptionalSplitWitness::default(),
         })
     }
 
@@ -3767,14 +3881,36 @@ fn col_sumcheck_rec(
 pub fn prove_public_for_recursion(
     shape: &Shape,
     hologram: &ShapeHologram,
+    assignment: Vec<F>,
+    statement_tag: [u8; 32],
+) -> Result<RecursivePublicHemProof, ZkHemError> {
+    prove_public_for_recursion_inner(shape, hologram, assignment, statement_tag, true)
+}
+
+/// Emit the algebraic recursive proof + compact [`SplitDeferredWitness`] for split subtree
+/// recursion, skipping redundant per-child WHIR cascades that `prove_root` folds per level!
+pub(crate) fn prove_public_for_split(
+    shape: &Shape,
+    hologram: &ShapeHologram,
+    assignment: Vec<F>,
+    statement_tag: [u8; 32],
+) -> Result<RecursivePublicHemProof, ZkHemError> {
+    prove_public_for_recursion_inner(shape, hologram, assignment, statement_tag, false)
+}
+
+fn prove_public_for_recursion_inner(
+    shape: &Shape,
+    hologram: &ShapeHologram,
     mut assignment: Vec<F>,
     statement_tag: [u8; 32],
+    with_individual_opening: bool,
 ) -> Result<RecursivePublicHemProof, ZkHemError> {
     let vk = &hologram.vk;
     let rec_h = hologram
         .rec_h
-        .as_ref()
+        .as_deref()
         .ok_or(ZkHemError::RelationTooLarge)?;
+    let split_holo = hologram.split_ref().ok_or(ZkHemError::RelationTooLarge)?;
     if vk.shape_digest != shape.digest() || !vk.regime.uses_poseidon2_canopy() {
         return Err(ZkHemError::Unsatisfied);
     }
@@ -3783,6 +3919,7 @@ pub fn prove_public_for_recursion(
     }
     let public = assignment[1..=shape.num_public].to_vec();
     let row_base = row_tables(shape, &assignment, true).ok_or(ZkHemError::Unsatisfied)?;
+    let z_unpadded = SecretAssignment(assignment.clone());
 
     let pack_vars = vk.pack_vars();
     let rec_params =
@@ -3812,6 +3949,7 @@ pub fn prove_public_for_recursion(
     }
     let (col_rounds, ry, eval_z) =
         col_sumcheck_rec(&mut tr, &mut b, tm, &assignment[..1 << vk.var_bits]);
+    qsag_asm::volatile_fill(&mut assignment, F::ZERO);
     drop(assignment);
     tr.absorb_exts(&mut b, 211, &[RecExt::constant(eval_z)]);
 
@@ -3821,7 +3959,7 @@ pub fn prove_public_for_recursion(
     let val_comb = spark_value_table(hologram, &combine);
     let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
 
-    let e_super = pack_e_super(&ex, &ey);
+    let mut e_super = pack_e_super(&ex, &ey);
     let e_comm =
         commit_for_recursion(&rec_params, &e_super).map_err(|_| ZkHemError::RelationTooLarge)?;
     let comm_e = e_comm.root();
@@ -3887,6 +4025,7 @@ pub fn prove_public_for_recursion(
     let r_gkr = &r_cur[..vk.ell_nz];
     let (h_at_gkr, e_limbs_at_gkr) =
         eval_h_and_e_limbs_at_point(hologram, &e_super[..half_e], &e_super[half_e..], r_gkr);
+    qsag_asm::volatile_fill(&mut e_super, F::ZERO);
     drop(e_super);
     tr.absorb_exts(&mut b, 228, &h_at_gkr.map(RecExt::constant));
     tr.absorb_exts(&mut b, 229, &e_limbs_at_gkr.map(RecExt::constant));
@@ -3894,23 +4033,42 @@ pub fn prove_public_for_recursion(
     let sel_mat: [E; 3] = core::array::from_fn(|_| tr.ext(&mut b, 230).value(&b));
     let sel_gkr: [E; 3] = core::array::from_fn(|_| tr.ext(&mut b, 231).value(&b));
 
-    let mut p_z = ry;
-    p_z.resize(pack_vars, E::ZERO);
-    let mut p_mat = r_mat;
-    p_mat.extend_from_slice(&sel_mat);
-    let mut p_gkr = r_gkr.to_vec();
-    p_gkr.extend_from_slice(&sel_gkr);
-
-    let opening = open_correlated3_for_recursion(
-        &rec_params,
-        &mut tr,
-        z_comm,
-        rec_h,
-        e_comm,
-        &[p_z, p_mat, p_gkr],
-    )
-    .map_err(|_| ZkHemError::RelationTooLarge)?;
+    let (opening, z_levels, e_levels) = if with_individual_opening {
+        let z_lvls = z_comm.levels().to_vec();
+        let e_lvls = e_comm.levels().to_vec();
+        let mut p_z = ry.clone();
+        p_z.resize(pack_vars, E::ZERO);
+        let mut p_mat = r_mat;
+        p_mat.extend_from_slice(&sel_mat);
+        let mut p_gkr = r_gkr.to_vec();
+        p_gkr.extend_from_slice(&sel_gkr);
+        let op = open_correlated3_for_recursion(
+            &rec_params,
+            &mut tr,
+            z_comm,
+            rec_h,
+            e_comm,
+            &[p_z, p_mat, p_gkr],
+        )
+        .map_err(|_| ZkHemError::RelationTooLarge)?;
+        (op, z_lvls, e_lvls)
+    } else {
+        (
+            rec_params.placeholder_correlated3(),
+            z_comm.into_levels(),
+            e_comm.into_levels(),
+        )
+    };
     debug_assert!(!b.failed);
+
+    let split_witness = OptionalSplitWitness(Some(Arc::new(SplitDeferredWitness {
+        holo: split_holo,
+        z_unpadded,
+        rx,
+        ry,
+        z_levels,
+        e_levels,
+    })));
 
     Ok(RecursivePublicHemProof {
         comm_z,
@@ -3928,6 +4086,7 @@ pub fn prove_public_for_recursion(
         h_at_gkr,
         e_limbs_at_gkr,
         opening,
+        split_witness,
     })
 }
 
@@ -4037,30 +4196,79 @@ impl<W: RecBase> DeferredPcsClaim<W> {
 }
 
 impl DeferredPcsClaim<F> {
-    pub(crate) fn verify(&self, opening: &Correlated3WhirProof) -> bool {
-        let Ok(params) = FixedPathWhirParams::new(self.regime, self.num_vars) else {
-            return false;
-        };
-        if self.points.iter().any(|p| p.len() != self.num_vars)
-            || !params.well_formed_correlated3(opening)
-        {
-            return false;
+    pub(crate) fn to_folded_edge_spec(&self) -> FoldedEdgeSpec {
+        let mut nb = RecNative::default();
+        let claim_digest = self.digest(&mut nb);
+        let points = core::array::from_fn(|j| {
+            self.points[j]
+                .iter()
+                .map(|ext| E::from_limbs(ext.0))
+                .collect()
+        });
+        let claims = core::array::from_fn(|m| {
+            core::array::from_fn(|j| self.claims[m][j].as_ref().map(|ext| E::from_limbs(ext.0)))
+        });
+        FoldedEdgeSpec {
+            regime: self.regime,
+            num_vars: self.num_vars,
+            claim_digest,
+            roots: self.roots,
+            points,
+            claims,
         }
-        let mut b = RecNative::default();
-        let mut tr = RecTranscript {
-            state: self.transcript,
-        };
-        verify_correlated3_gadget(
-            &mut b,
-            &params,
-            &mut tr,
-            &self.roots,
-            &self.points,
-            &self.claims,
-            opening,
-        );
-        !b.failed
     }
+}
+
+pub(crate) fn prove_folded_level_from_split(
+    level: usize,
+    top_accumulator_root: RecDigest,
+    items: &[(&DeferredPcsClaim<F>, &SplitDeferredWitness)],
+) -> Result<FoldedLevelWhirProof, ZkHemError> {
+    if items.is_empty() {
+        return Err(ZkHemError::Unsatisfied);
+    }
+    let specs: Vec<FoldedEdgeSpec> = items.iter().map(|(c, _)| c.to_folded_edge_spec()).collect();
+    let holo0 = &items[0].1.holo;
+    prove_folded_level_for_recursion(
+        level,
+        top_accumulator_root,
+        &specs,
+        |k, dst| {
+            if k == 0 {
+                holo0.fill_h_super(dst);
+            } else {
+                let u = (k - 1) / 2;
+                if (k - 1) % 2 == 0 {
+                    items[u].1.fill_z_padded(dst);
+                } else {
+                    items[u].1.fill_e_super(dst);
+                }
+            }
+        },
+        |k| {
+            if k == 0 {
+                holo0.rec_h.levels()
+            } else {
+                let u = (k - 1) / 2;
+                if (k - 1) % 2 == 0 {
+                    &items[u].1.z_levels
+                } else {
+                    &items[u].1.e_levels
+                }
+            }
+        },
+    )
+    .map_err(|_| ZkHemError::RelationTooLarge)
+}
+
+pub(crate) fn verify_folded_level_claims(
+    level: usize,
+    top_accumulator_root: RecDigest,
+    claims: &[&DeferredPcsClaim<F>],
+    proof: &FoldedLevelWhirProof,
+) -> bool {
+    let specs: Vec<FoldedEdgeSpec> = claims.iter().map(|c| c.to_folded_edge_spec()).collect();
+    verify_folded_level(level, top_accumulator_root, &specs, proof)
 }
 
 /// Complete fixed-topology verifier. Existing callers still discharge the PCS in-circuit.

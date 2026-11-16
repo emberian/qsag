@@ -2280,13 +2280,15 @@ pub(super) fn open_correlated3_for_recursion(
         return Err(RecursiveWhirError::InvalidParameters);
     }
     let mut b = Native::default();
+    let core_n = want_len - 2;
+    let splits: [(Vec<E>, Vec<E>); 3] =
+        core::array::from_fn(|j| crate::pcs::split_monomial_table(&points[j]));
     let coeffs_ref: [&[F]; 3] = [&w0.coeffs.0, &w1.coeffs, &w2.coeffs.0];
     let mut cross_evals = [[E::ZERO; 3]; 3];
     // Evaluate through square-root-sized Kronecker factors, without materializing
     // a full extension table for each of the three points.
-    for (j, point) in points.iter().enumerate() {
-        let (lo, hi) = crate::pcs::split_monomial_table(point);
-        let values = sum_indexed(want_len - 2, |i| {
+    for (j, (lo, hi)) in splits.iter().enumerate() {
+        let values = sum_indexed(core_n, |i| {
             let kernel = lo[i % lo.len()] * hi[i / lo.len()];
             core::array::from_fn::<_, 3, _>(|m| kernel.mul_base(coeffs_ref[m][i]))
         });
@@ -2297,7 +2299,17 @@ pub(super) fn open_correlated3_for_recursion(
 
     let mut proof = params.placeholder_correlated3();
     proof.cross_evals = cross_evals;
-    let oracles0 = [&w0.oracle, &w1.oracle, &w2.oracle];
+    let RecursionCommitment {
+        coeffs: w0_coeffs,
+        oracle: w0_oracle,
+    } = w0;
+    let RecursionCommitment {
+        coeffs: w2_coeffs,
+        oracle: w2_oracle,
+    } = w2;
+    let mut w0_opt = Some(w0_coeffs);
+    let mut w2_opt = Some(w2_coeffs);
+    let oracles0 = [&w0_oracle, &w1.oracle, &w2_oracle];
     for (slot, orc) in proof.stage0_canopy_leaves.iter_mut().zip(&oracles0) {
         *slot = orc.canopy_leaves();
     }
@@ -2316,16 +2328,17 @@ pub(super) fn open_correlated3_for_recursion(
     let mu_pows = [E::ONE, mu, mu2];
     let zeta_pows = [E::ONE, zeta, zeta2];
 
-    let mut coeffs = SecretExts(vec![E::ZERO; want_len]);
-    crate::pcs::fill_indexed(&mut coeffs.0, |i| {
-        E::from_base(w0.coeffs.0[i]) + mu.mul_base(w1.coeffs[i]) + mu2.mul_base(w2.coeffs.0[i])
-    });
-    drop(w0.coeffs);
-    drop(w2.coeffs);
     let mut kernel = vec![E::ZERO; want_len];
-    for (point, weight) in points.iter().zip(zeta_pows) {
-        crate::pcs::add_point_kernel(&mut kernel, weight, point);
+    {
+        let lo_len = splits[0].0.len();
+        crate::pcs::fill_indexed(&mut kernel[..core_n], |i| {
+            let (il, ih) = (i % lo_len, i / lo_len);
+            splits[0].0[il] * splits[0].1[ih]
+                + zeta * (splits[1].0[il] * splits[1].1[ih])
+                + zeta2 * (splits[2].0[il] * splits[2].1[ih])
+        });
     }
+    drop(splits);
     let mut claim = E::ZERO;
     for j in 0..3 {
         let mut col_sum = E::ZERO;
@@ -2341,7 +2354,13 @@ pub(super) fn open_correlated3_for_recursion(
     }
     tr.absorb(&mut b, 53, &roots0_words);
     let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
-    let evals = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+    let evals = {
+        let c0 = &w0_opt.as_ref().unwrap().0;
+        let c1 = &w1.coeffs;
+        let c2 = &w2_opt.as_ref().unwrap().0;
+        let u_at = |i: usize| E::from_base(c0[i]) + mu.mul_base(c1[i]) + mu2.mul_base(c2[i]);
+        zs.map(|z| eval_univariate_fn(want_len, z, u_at))
+    };
     proof.ood_evals[0] = evals;
     tr.absorb_exts(&mut b, 5, &evals.map(Ext::constant));
     for (z, e) in zs.into_iter().zip(evals) {
@@ -2350,6 +2369,7 @@ pub(super) fn open_correlated3_for_recursion(
         crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, z);
     }
 
+    let mut coeffs = SecretExts(Vec::new());
     let mut cursor = 0usize;
     let mut scratch_c = SecretExts(Vec::new());
     let mut scratch_k = Vec::new();
@@ -2359,40 +2379,87 @@ pub(super) fn open_correlated3_for_recursion(
         let mut chals = Vec::with_capacity(spec.step_vars);
         for _ in 0..spec.step_vars {
             let mut wire = [E::ZERO; 5];
-            {
-                let (c, k) = (&coeffs.0, &kernel);
-                let head = sum_indexed(c.len() / 2, |i| {
-                    [
-                        c[2 * i] * k[2 * i],
-                        c[2 * i] * k[2 * i + 1],
-                        c[2 * i + 1] * k[2 * i],
-                    ]
-                });
-                wire[..3].copy_from_slice(&head);
-            }
-            tr.absorb_exts(
-                &mut b,
-                10,
-                &wire[..3]
-                    .iter()
-                    .copied()
-                    .map(Ext::constant)
-                    .collect::<Vec<_>>(),
-            );
-            let phi = tr.ext(&mut b, 11);
-            if kernel.len() >= 1 << 20 {
-                crate::pcs::affine::fold_kernel_in_place(&mut kernel, phi.value(&b));
+            let phi = if cursor == 0 {
+                {
+                    let c0 = &w0_opt.as_ref().unwrap().0;
+                    let c1 = &w1.coeffs;
+                    let c2 = &w2_opt.as_ref().unwrap().0;
+                    let u_at =
+                        |i: usize| E::from_base(c0[i]) + mu.mul_base(c1[i]) + mu2.mul_base(c2[i]);
+                    let k = &kernel;
+                    let head = sum_indexed(want_len / 2, |i| {
+                        let u0 = u_at(2 * i);
+                        let u1 = u_at(2 * i + 1);
+                        [u0 * k[2 * i], u0 * k[2 * i + 1], u1 * k[2 * i]]
+                    });
+                    wire[..3].copy_from_slice(&head);
+                }
+                tr.absorb_exts(
+                    &mut b,
+                    10,
+                    &wire[..3]
+                        .iter()
+                        .copied()
+                        .map(Ext::constant)
+                        .collect::<Vec<_>>(),
+                );
+                let phi = tr.ext(&mut b, 11);
+                if kernel.len() >= 1 << 20 {
+                    crate::pcs::affine::fold_kernel_in_place(&mut kernel, phi.value(&b));
+                } else {
+                    crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
+                    core::mem::swap(&mut kernel, &mut scratch_k);
+                }
+                {
+                    let c0 = &w0_opt.as_ref().unwrap().0;
+                    let c1 = &w1.coeffs;
+                    let c2 = &w2_opt.as_ref().unwrap().0;
+                    let u_at =
+                        |i: usize| E::from_base(c0[i]) + mu.mul_base(c1[i]) + mu2.mul_base(c2[i]);
+                    let k = &kernel;
+                    let tail = sum_indexed(want_len / 2, |i| {
+                        [u_at(2 * i) * k[i + 1], u_at(2 * i + 1) * k[i + 1]]
+                    });
+                    wire[3..].copy_from_slice(&tail);
+                }
+                phi
             } else {
-                crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
-                core::mem::swap(&mut kernel, &mut scratch_k);
-            }
-            {
-                let (c, k) = (&coeffs.0, &kernel);
-                let tail = sum_indexed(c.len() / 2, |i| {
-                    [c[2 * i] * k[i + 1], c[2 * i + 1] * k[i + 1]]
-                });
-                wire[3..].copy_from_slice(&tail);
-            }
+                {
+                    let (c, k) = (&coeffs.0, &kernel);
+                    let head = sum_indexed(c.len() / 2, |i| {
+                        [
+                            c[2 * i] * k[2 * i],
+                            c[2 * i] * k[2 * i + 1],
+                            c[2 * i + 1] * k[2 * i],
+                        ]
+                    });
+                    wire[..3].copy_from_slice(&head);
+                }
+                tr.absorb_exts(
+                    &mut b,
+                    10,
+                    &wire[..3]
+                        .iter()
+                        .copied()
+                        .map(Ext::constant)
+                        .collect::<Vec<_>>(),
+                );
+                let phi = tr.ext(&mut b, 11);
+                if kernel.len() >= 1 << 20 {
+                    crate::pcs::affine::fold_kernel_in_place(&mut kernel, phi.value(&b));
+                } else {
+                    crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
+                    core::mem::swap(&mut kernel, &mut scratch_k);
+                }
+                {
+                    let (c, k) = (&coeffs.0, &kernel);
+                    let tail = sum_indexed(c.len() / 2, |i| {
+                        [c[2 * i] * k[i + 1], c[2 * i + 1] * k[i + 1]]
+                    });
+                    wire[3..].copy_from_slice(&tail);
+                }
+                phi
+            };
             tr.absorb_exts(
                 &mut b,
                 12,
@@ -2414,7 +2481,23 @@ pub(super) fn open_correlated3_for_recursion(
             )
             .value(&b);
             let chal_values = core::array::from_fn(|i| chal[i].value(&b));
-            if coeffs.0.len() >= 1 << 20 {
+            if cursor == 0 {
+                let folded = {
+                    let c0 = &w0_opt.as_ref().unwrap().0;
+                    let c1 = &w1.coeffs;
+                    let c2 = &w2_opt.as_ref().unwrap().0;
+                    let u_at =
+                        |i: usize| E::from_base(c0[i]) + mu.mul_base(c1[i]) + mu2.mul_base(c2[i]);
+                    fold_coeffs_from_fn(want_len, chal_values, u_at)
+                };
+                coeffs = SecretExts(folded);
+                if matches!(w0_oracle.codeword, Codeword::Base(_)) {
+                    w0_opt = None;
+                }
+                if matches!(w2_oracle.codeword, Codeword::Base(_)) {
+                    w2_opt = None;
+                }
+            } else if coeffs.0.len() >= 1 << 20 {
                 crate::pcs::affine::fold_coeffs_in_place(&mut coeffs.0, chal_values);
             } else {
                 crate::pcs::affine::fold_coeffs_into(&coeffs.0, chal_values, &mut scratch_c.0);
@@ -2468,22 +2551,38 @@ pub(super) fn open_correlated3_for_recursion(
         let mut shifted = Vec::with_capacity(count);
         let sampled = sample_queries(&mut b, tr, groups, count);
         if stage == 0 {
-            for (q, (index, binary)) in sampled.into_iter().enumerate() {
-                let idx = index.to_canonical_u64() as usize;
-                let q_triple: [FixedPathQuery; 3] =
-                    core::array::from_fn(|m| oracles0[m].query(idx));
+            let indices: Vec<usize> = sampled
+                .iter()
+                .map(|(idx, _)| idx.to_canonical_u64() as usize)
+                .collect();
+            let mut reuse_cw = Vec::new();
+            let q0 = w0_oracle.queries_base(
+                w0_opt.as_ref().map(|s| &s.0[..core_n]).unwrap_or(&[]),
+                &indices,
+                &mut reuse_cw,
+            );
+            w0_opt = None;
+            let q1 = w1
+                .oracle
+                .queries_base(&w1.coeffs[..core_n], &indices, &mut reuse_cw);
+            let q2 = w2_oracle.queries_base(
+                w2_opt.as_ref().map(|s| &s.0[..core_n]).unwrap_or(&[]),
+                &indices,
+                &mut reuse_cw,
+            );
+            w2_opt = None;
+            drop(reuse_cw);
+            for ((((q, (_, binary)), fq0), fq1), fq2) in
+                sampled.into_iter().enumerate().zip(q0).zip(q1).zip(q2)
+            {
                 let combined: Vec<Ext<F>> = (0..arity)
                     .map(|k| {
-                        Ext::constant(
-                            q_triple[0].values[k]
-                                + mu * q_triple[1].values[k]
-                                + mu2 * q_triple[2].values[k],
-                        )
+                        Ext::constant(fq0.values[k] + mu * fq1.values[k] + mu2 * fq2.values[k])
                     })
                     .collect();
                 let x = coset_point(&mut b, &binary, domain_log2);
                 shifted.push(fold_fiber(&mut b, &combined, x, &chals, false));
-                proof.stage0_queries[q] = q_triple;
+                proof.stage0_queries[q] = [fq0, fq1, fq2];
             }
         } else {
             let cur_oracle = later_oracle.as_ref().expect("folded extension oracle");
@@ -2742,6 +2841,1011 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
             }
         }
     }
+}
+
+// ============================================================================
+// Succinct `[CWYZ26]` Homogeneous Level Folded WHIR PCS Accumulator (`O(depth)`)
+// ============================================================================
+
+const FOLDED_LEVEL_VERSION: u64 = 0x464C_5748_0000_0001;
+
+/// Succinct `[CWYZ26]` folded PCS opening discharging all `M` homogeneous child
+/// `DeferredPcsClaim`s at a single recursion tree level in ONE WHIR cascade:
+/// 1. Deduplicates the shared circuit hologram commitment `W_0 = H_super` across all `M` siblings,
+///    yielding `K = 2 * M + 1` base-field polynomials `[H_super, Z_0, E_0, ..., Z_{M-1}, E_{M-1}]`.
+/// 2. Runs one `nv`-round degree-2 multilinear sumcheck reducing all `<= 5 * M` evaluation claims
+///    across `3 * M` points to `[W_0(r_star), ..., W_{K-1}(r_star)]` at a single point `r_star`.
+/// 3. Runs ONE WHIR fold, OOD, PoW, and query cascade on `U(X) = sum_{k=0}^{K-1} mu^k * W_k(X)` at
+///    `r_star`, authenticating base-field Stage-0 fibers and folded extension fibers via canonical
+///    Steiner-deduplicated Poseidon2 Merkle multi-proofs (zero canopy leaf shipping).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldedLevelWhirProof {
+    pub point_rounds: Vec<[E; 3]>,
+    pub poly_evals: Vec<E>,
+    pub stage0_fibers: Vec<Vec<F>>,
+    pub stage0_siblings: Vec<Vec<Digest>>,
+    pub later_stage_roots: Vec<Digest>,
+    pub ood_evals: Vec<[E; 2]>,
+    pub fold_polys: Vec<[E; 5]>,
+    pub fold_nonces: Vec<[u32; 2]>,
+    pub query_nonces: Vec<[u32; 2]>,
+    pub later_fibers: Vec<Vec<E>>,
+    pub later_siblings: Vec<Vec<Digest>>,
+    pub final_coeffs: Vec<E>,
+}
+
+/// Public edge specification fed to [`prove_folded_level_for_recursion`] and [`verify_folded_level`].
+pub(crate) struct FoldedEdgeSpec {
+    pub(crate) regime: WhirSecurityRegime,
+    pub(crate) num_vars: usize,
+    pub(crate) claim_digest: Digest,
+    pub(crate) roots: [Digest; 3],
+    pub(crate) points: [Vec<E>; 3],
+    pub(crate) claims: [[Option<E>; 3]; 3],
+}
+
+fn steiner_siblings(levels: &[Vec<Digest>], uniq_sorted: &[usize]) -> Vec<Digest> {
+    let path_depth = levels.len().saturating_sub(1);
+    let mut active: Vec<usize> = uniq_sorted.to_vec();
+    let mut siblings = Vec::new();
+    for level in levels.iter().take(path_depth) {
+        let mut next = Vec::with_capacity(active.len());
+        let mut k = 0usize;
+        while k < active.len() {
+            let idx = active[k];
+            if k + 1 < active.len() && active[k + 1] == (idx ^ 1) {
+                k += 2;
+            } else {
+                siblings.push(level[idx ^ 1]);
+                k += 1;
+            }
+            next.push(idx >> 1);
+        }
+        active = next;
+    }
+    siblings
+}
+
+fn verify_steiner_multiproof(
+    stage: usize,
+    path_depth: usize,
+    expected_root: &Digest,
+    uniq_sorted: &[usize],
+    leaf_digests: &[Digest],
+    siblings: &[Digest],
+) -> bool {
+    let n_leaves = 1usize << path_depth;
+    if uniq_sorted.is_empty()
+        || uniq_sorted.len() != leaf_digests.len()
+        || uniq_sorted.windows(2).any(|w| w[0] >= w[1])
+        || uniq_sorted.last().is_some_and(|&idx| idx >= n_leaves)
+    {
+        return false;
+    }
+    let mut frontier: Vec<(usize, Digest)> = uniq_sorted
+        .iter()
+        .copied()
+        .zip(leaf_digests.iter().copied())
+        .collect();
+    let mut cursor = 0usize;
+    let mut nb = Native::default();
+    for d in 0..path_depth {
+        let mut next = Vec::with_capacity(frontier.len());
+        let mut k = 0usize;
+        while k < frontier.len() {
+            let (idx, h_cur) = frontier[k];
+            let (left, right) = if k + 1 < frontier.len() && frontier[k + 1].0 == (idx ^ 1) {
+                let h_sib = frontier[k + 1].1;
+                k += 2;
+                (h_cur, h_sib)
+            } else {
+                let Some(&sib) = siblings.get(cursor) else {
+                    return false;
+                };
+                cursor += 1;
+                k += 1;
+                if idx & 1 == 0 {
+                    (h_cur, sib)
+                } else {
+                    (sib, h_cur)
+                }
+            };
+            next.push((idx >> 1, compress(&mut nb, &left, &right, stage, d)));
+        }
+        frontier = next;
+    }
+    cursor == siblings.len() && frontier.as_slice() == [(0, *expected_root)]
+}
+
+fn start_folded_level_transcript(
+    b: &mut Native,
+    level: usize,
+    top_accumulator_root: &Digest,
+    edges: &[FoldedEdgeSpec],
+) -> Transcript<F> {
+    let mut words = Vec::with_capacity(9 + 4 * edges.len());
+    words.extend([
+        f(FOLDED_LEVEL_VERSION),
+        f(level as u64),
+        f(edges.len() as u64),
+        f(edges[0].regime as u64),
+        f(edges[0].num_vars as u64),
+    ]);
+    words.extend_from_slice(top_accumulator_root);
+    for e in edges {
+        words.extend_from_slice(&e.claim_digest);
+    }
+    let mut tr = Transcript::new();
+    tr.absorb(b, 300, &words);
+    tr
+}
+
+fn collect_active_folded_claims(edges: &[FoldedEdgeSpec]) -> Vec<(usize, Vec<E>, E)> {
+    let mut out = Vec::with_capacity(5 * edges.len());
+    for (u, edge) in edges.iter().enumerate() {
+        for m_local in 0..3 {
+            let poly_idx = match m_local {
+                0 => 2 * u + 1,
+                1 => 0,
+                _ => 2 * u + 2,
+            };
+            for j in 0..3 {
+                if let Some(val) = edge.claims[m_local][j] {
+                    out.push((poly_idx, edge.points[j].clone(), val));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Construct one succinct [`FoldedLevelWhirProof`] across all `M` homogeneous edges at `level`.
+///
+/// Streams one base-field polynomial (`1 << nv` `Goldilocks` elements) at a time during both
+/// the Split-Eq point-reduction sumcheck and Stage-0 RS fiber extraction so prover memory stays
+/// `O(2^nv)` independent of the level width `M`!
+pub(crate) fn prove_folded_level_for_recursion<'a>(
+    level: usize,
+    top_accumulator_root: Digest,
+    edges: &[FoldedEdgeSpec],
+    mut fill_poly_evals: impl FnMut(usize, &mut Vec<F>),
+    poly_levels: impl Fn(usize) -> &'a [Vec<Digest>],
+) -> Result<FoldedLevelWhirProof, RecursiveWhirError> {
+    if edges.is_empty() {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    let regime = edges[0].regime;
+    let nv = edges[0].num_vars;
+    let h_root = edges[0].roots[1];
+    let params = FixedPathWhirParams::new(regime, nv)?;
+    if edges.iter().any(|e| {
+        e.regime != regime
+            || e.num_vars != nv
+            || e.roots[1] != h_root
+            || e.points.iter().any(|p| p.len() != nv)
+    }) {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+
+    let num_polys = 2 * edges.len() + 1;
+    let mut roots0 = Vec::with_capacity(num_polys);
+    roots0.push(h_root);
+    for e in edges {
+        roots0.push(e.roots[0]);
+        roots0.push(e.roots[2]);
+    }
+    for (k, r) in roots0.iter().enumerate() {
+        let lvls = poly_levels(k);
+        if lvls.last().and_then(|top| top.first()) != Some(r) {
+            return Err(RecursiveWhirError::InvalidParameters);
+        }
+    }
+
+    let active = collect_active_folded_claims(edges);
+    if active.is_empty() {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+
+    let mut b = Native::default();
+    let mut tr = start_folded_level_transcript(&mut b, level, &top_accumulator_root, edges);
+    let alpha = tr.ext(&mut b, 301).value(&b);
+
+    let mut weights = Vec::with_capacity(active.len());
+    let mut sc_claim = E::ZERO;
+    let mut w = E::ONE;
+    for &(_, _, val) in &active {
+        weights.push(w);
+        sc_claim += w * val;
+        w *= alpha;
+    }
+
+    // 1. Streaming Split-Eq Degree-2 Multilinear Point-Reduction Sumcheck (`nv` rounds).
+    let split = nv / 2;
+    let rem = nv - split;
+    let lo_len = 1usize << split;
+    let hi_len = 1usize << rem;
+    let eval_n = 1usize << nv;
+    let inv_two = F::TWO.inv();
+
+    let mut by_poly: Vec<Vec<usize>> = vec![Vec::new(); num_polys];
+    let mut lo_tables = Vec::with_capacity(active.len());
+    let mut hi_tables = Vec::with_capacity(active.len());
+    for (t, ((poly_idx, pt, _), &wt)) in active.iter().zip(&weights).enumerate() {
+        by_poly[*poly_idx].push(t);
+        let mut lo = crate::field::build_eq_table_ext4(&pt[..split]);
+        for v in &mut lo {
+            *v *= wt;
+        }
+        let hi = crate::field::build_eq_table_ext4(&pt[split..]);
+        lo_tables.push(lo);
+        hi_tables.push(hi);
+    }
+    let mut s_tables: Vec<Vec<E>> = (0..active.len()).map(|_| vec![E::ZERO; lo_len]).collect();
+    let mut poly_buf: Vec<F> = Vec::with_capacity(eval_n);
+
+    for (k, claim_slots) in by_poly.iter().enumerate() {
+        if claim_slots.is_empty() {
+            continue;
+        }
+        poly_buf.clear();
+        fill_poly_evals(k, &mut poly_buf);
+        if poly_buf.len() != eval_n {
+            qsag_asm::volatile_fill(&mut poly_buf, F::ZERO);
+            return Err(RecursiveWhirError::InvalidParameters);
+        }
+        for &t in claim_slots {
+            let hi = &hi_tables[t];
+            let p_ref = &poly_buf;
+            crate::pcs::fill_indexed(&mut s_tables[t], |x_lo| {
+                let mut acc = E::ZERO;
+                for (x_hi, &h_w) in hi.iter().enumerate() {
+                    acc += h_w.mul_base(p_ref[x_lo + (x_hi << split)]);
+                }
+                acc
+            });
+        }
+        qsag_asm::volatile_fill(&mut poly_buf, F::ZERO);
+    }
+
+    let mut point_rounds = Vec::with_capacity(nv);
+    let mut r_star = Vec::with_capacity(nv);
+
+    // Phase 1 (`round in 0..split`): fold tiny `lo_len`-sized `(lo_tables, s_tables)` in L2/L3 cache.
+    for round in 0..split {
+        let half = 1usize << (split - 1 - round);
+        let mut e0 = E::ZERO;
+        let mut e1 = E::ZERO;
+        let mut e2 = E::ZERO;
+        for (lo, s) in lo_tables.iter().zip(&s_tables) {
+            for i in 0..half {
+                let (l0, l1) = (lo[2 * i], lo[2 * i + 1]);
+                let (s0, s1) = (s[2 * i], s[2 * i + 1]);
+                e0 += l0 * s0;
+                e1 += l1 * s1;
+                e2 += (l1 + l1 - l0) * (s1 + s1 - s0);
+            }
+        }
+        let c0 = e0;
+        let c2 = (e2 - e1 - e1 + e0).mul_base(inv_two);
+        let c1 = e1 - e0 - c2;
+        debug_assert_eq!(c0 + (c0 + c1 + c2), sc_claim);
+        let coeffs_r = [c0, c1, c2];
+        tr.absorb_exts(&mut b, 302, &coeffs_r.map(Ext::constant));
+        let r = tr.ext(&mut b, 303).value(&b);
+        sc_claim = c0 + r * (c1 + r * c2);
+        point_rounds.push(coeffs_r);
+        r_star.push(r);
+        for (lo, s) in lo_tables.iter_mut().zip(&mut s_tables) {
+            for i in 0..half {
+                lo[i] = lo[2 * i] + r * (lo[2 * i + 1] - lo[2 * i]);
+                s[i] = s[2 * i] + r * (s[2 * i + 1] - s[2 * i]);
+            }
+            lo.truncate(half);
+            s.truncate(half);
+        }
+    }
+
+    // Halfway transition (`round == split`): contract each `evals_k` against `eq(r_star[..split])`
+    // into a compact `hi_len` (`<= 16,384` elements) table.
+    let eq_r_lo = crate::field::build_eq_table_ext4(&r_star[..split]);
+    let mut q_hi: Vec<Vec<E>> = (0..num_polys).map(|_| vec![E::ZERO; hi_len]).collect();
+    for (t, (poly_idx, _, _)) in active.iter().enumerate() {
+        let w_lo = lo_tables[t][0];
+        let dst = &mut q_hi[*poly_idx];
+        for (slot, &hv) in dst.iter_mut().zip(&hi_tables[t]) {
+            *slot += w_lo * hv;
+        }
+    }
+    drop(lo_tables);
+    drop(hi_tables);
+    drop(s_tables);
+
+    let mut p_hi: Vec<Vec<E>> = Vec::with_capacity(num_polys);
+    for k in 0..num_polys {
+        poly_buf.clear();
+        fill_poly_evals(k, &mut poly_buf);
+        if poly_buf.len() != eval_n {
+            qsag_asm::volatile_fill(&mut poly_buf, F::ZERO);
+            return Err(RecursiveWhirError::InvalidParameters);
+        }
+        let mut pk = vec![E::ZERO; hi_len];
+        let p_ref = &poly_buf;
+        let eq_ref = &eq_r_lo;
+        crate::pcs::fill_indexed(&mut pk, |x_hi| {
+            let row = &p_ref[(x_hi << split)..((x_hi + 1) << split)];
+            let mut acc = E::ZERO;
+            for (lv, &v) in eq_ref.iter().zip(row) {
+                acc += lv.mul_base(v);
+            }
+            acc
+        });
+        qsag_asm::volatile_fill(&mut poly_buf, F::ZERO);
+        p_hi.push(pk);
+    }
+    drop(eq_r_lo);
+
+    // Phase 2 (`round in split..nv`): finish on compact `hi_len` tables.
+    for round in split..nv {
+        let half = 1usize << (nv - 1 - round);
+        let mut e0 = E::ZERO;
+        let mut e1 = E::ZERO;
+        let mut e2 = E::ZERO;
+        for (pk, qk) in p_hi.iter().zip(&q_hi) {
+            for i in 0..half {
+                let (p0, p1) = (pk[2 * i], pk[2 * i + 1]);
+                let (q0, q1) = (qk[2 * i], qk[2 * i + 1]);
+                e0 += p0 * q0;
+                e1 += p1 * q1;
+                e2 += (p1 + p1 - p0) * (q1 + q1 - q0);
+            }
+        }
+        let c0 = e0;
+        let c2 = (e2 - e1 - e1 + e0).mul_base(inv_two);
+        let c1 = e1 - e0 - c2;
+        debug_assert_eq!(c0 + (c0 + c1 + c2), sc_claim);
+        let coeffs_r = [c0, c1, c2];
+        tr.absorb_exts(&mut b, 302, &coeffs_r.map(Ext::constant));
+        let r = tr.ext(&mut b, 303).value(&b);
+        sc_claim = c0 + r * (c1 + r * c2);
+        point_rounds.push(coeffs_r);
+        r_star.push(r);
+        for (pk, qk) in p_hi.iter_mut().zip(&mut q_hi) {
+            for i in 0..half {
+                pk[i] = pk[2 * i] + r * (pk[2 * i + 1] - pk[2 * i]);
+                qk[i] = qk[2 * i] + r * (qk[2 * i + 1] - qk[2 * i]);
+            }
+            pk.truncate(half);
+            qk.truncate(half);
+        }
+    }
+
+    let poly_evals: Vec<E> = p_hi.iter().map(|pk| pk[0]).collect();
+    debug_assert_eq!(
+        poly_evals
+            .iter()
+            .zip(&q_hi)
+            .fold(E::ZERO, |acc, (&pe, qk)| acc + pe * qk[0]),
+        sc_claim
+    );
+    drop(p_hi);
+    drop(q_hi);
+
+    // 2. Absorb `poly_evals` & `roots0`, squeeze codeword combiner `mu`, and stream `U(X)`.
+    let poly_evals_ext: Vec<Ext<F>> = poly_evals.iter().copied().map(Ext::constant).collect();
+    tr.absorb_exts(&mut b, 304, &poly_evals_ext);
+    let roots0_words: Vec<F> = roots0.iter().flatten().copied().collect();
+    tr.absorb(&mut b, 305, &roots0_words);
+    let mu = tr.ext(&mut b, 306).value(&b);
+
+    let want_len = eval_n + 2;
+    let mut mu_pows = Vec::with_capacity(num_polys);
+    let mut claim = E::ZERO;
+    let mut mu_cur = E::ONE;
+    for &pe in &poly_evals {
+        mu_pows.push(mu_cur);
+        claim += mu_cur * pe;
+        mu_cur *= mu;
+    }
+
+    let mut coeffs = SecretExts(vec![E::ZERO; want_len]);
+    for (k, &mu_k) in mu_pows.iter().enumerate() {
+        poly_buf.clear();
+        fill_poly_evals(k, &mut poly_buf);
+        let mut w_coeffs = hypercube_to_monomial_coeffs(&poly_buf);
+        qsag_asm::volatile_fill(&mut poly_buf, F::ZERO);
+        #[cfg(feature = "std")]
+        if eval_n >= 16_384 {
+            let workers = crate::parallel_workers().min(eval_n.div_ceil(4_096));
+            let chunk = eval_n.div_ceil(workers);
+            std::thread::scope(|scope| {
+                for (dst_c, src_c) in coeffs.0[..eval_n]
+                    .chunks_mut(chunk)
+                    .zip(w_coeffs.chunks(chunk))
+                {
+                    crate::spawn_bounded(scope, move || {
+                        for (d, &s) in dst_c.iter_mut().zip(src_c) {
+                            *d += mu_k.mul_base(s);
+                        }
+                    });
+                }
+            });
+        } else {
+            for (d, &s) in coeffs.0[..eval_n].iter_mut().zip(&w_coeffs) {
+                *d += mu_k.mul_base(s);
+            }
+        }
+        #[cfg(not(feature = "std"))]
+        for (d, &s) in coeffs.0[..eval_n].iter_mut().zip(&w_coeffs) {
+            *d += mu_k.mul_base(s);
+        }
+        qsag_asm::volatile_fill(&mut w_coeffs, F::ZERO);
+    }
+    drop(poly_buf);
+
+    // 3. Single WHIR Cascade on `U(X)` at `r_star` with Steiner-Deduplicated Multi-Proofs.
+    let mut kernel = crate::pcs::affine::monomial_table(&r_star);
+    debug_assert_eq!(dot(&coeffs.0, &kernel), claim);
+
+    let stages = params.schedule.stages.len();
+    let geos = params.geometries();
+    let mut ood_evals = vec![[E::ZERO; 2]; stages];
+    let zs0 = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+    let evals0 = zs0.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+    ood_evals[0] = evals0;
+    tr.absorb_exts(&mut b, 5, &evals0.map(Ext::constant));
+    for (z, e) in zs0.into_iter().zip(evals0) {
+        let weight = tr.ext(&mut b, 6).value(&b);
+        claim += weight * e;
+        crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, z);
+    }
+
+    let fold_len = nv - params.schedule.early_stop_vars;
+    let mut fold_polys = vec![[E::ZERO; 5]; fold_len];
+    let mut fold_nonces = vec![[0u32; 2]; fold_len];
+    let mut query_nonces = vec![[0u32; 2]; stages];
+    let mut later_stage_roots = vec![[F::ZERO; 4]; stages.saturating_sub(1)];
+    let mut stage0_fibers = Vec::with_capacity(num_polys);
+    let mut stage0_siblings = Vec::with_capacity(num_polys);
+    let mut later_fibers = Vec::with_capacity(stages.saturating_sub(1));
+    let mut later_siblings = Vec::with_capacity(stages.saturating_sub(1));
+    let mut final_coeffs = Vec::new();
+
+    let mut cursor = 0usize;
+    let mut scratch_c = SecretExts(Vec::new());
+    let mut scratch_k = Vec::new();
+    let mut later_oracle: Option<Oracle> = None;
+
+    for (stage, spec) in params.schedule.stages.iter().enumerate() {
+        let mut chals = Vec::with_capacity(spec.step_vars);
+        for _ in 0..spec.step_vars {
+            let mut wire = [E::ZERO; 5];
+            {
+                let (c, k) = (&coeffs.0, &kernel);
+                let head = sum_indexed(c.len() / 2, |i| {
+                    [
+                        c[2 * i] * k[2 * i],
+                        c[2 * i] * k[2 * i + 1],
+                        c[2 * i + 1] * k[2 * i],
+                    ]
+                });
+                wire[..3].copy_from_slice(&head);
+            }
+            tr.absorb_exts(
+                &mut b,
+                10,
+                &wire[..3]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let phi = tr.ext(&mut b, 11);
+            if kernel.len() >= 1 << 20 {
+                crate::pcs::affine::fold_kernel_in_place(&mut kernel, phi.value(&b));
+            } else {
+                crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
+                core::mem::swap(&mut kernel, &mut scratch_k);
+            }
+            {
+                let (c, k) = (&coeffs.0, &kernel);
+                let tail = sum_indexed(c.len() / 2, |i| {
+                    [c[2 * i] * k[i + 1], c[2 * i + 1] * k[i + 1]]
+                });
+                wire[3..].copy_from_slice(&tail);
+            }
+            tr.absorb_exts(
+                &mut b,
+                12,
+                &wire[3..]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let nonce = grind(&tr, params.schedule.regime.pow_bits());
+            pow(&mut b, &mut tr, nonce, params.schedule.regime.pow_bits());
+            let chal = [tr.ext(&mut b, 13), tr.ext(&mut b, 14), tr.ext(&mut b, 15)];
+            claim = bridge(
+                &mut b,
+                &wire.map(Ext::constant),
+                &Ext::constant(claim),
+                &phi,
+                &chal,
+            )
+            .value(&b);
+            let chal_values = core::array::from_fn(|i| chal[i].value(&b));
+            if coeffs.0.len() >= 1 << 20 {
+                crate::pcs::affine::fold_coeffs_in_place(&mut coeffs.0, chal_values);
+            } else {
+                crate::pcs::affine::fold_coeffs_into(&coeffs.0, chal_values, &mut scratch_c.0);
+                qsag_asm::volatile_fill(&mut coeffs.0, E::ZERO);
+                core::mem::swap(&mut coeffs.0, &mut scratch_c.0);
+            }
+            debug_assert_eq!(dot(&coeffs.0, &kernel), claim);
+            fold_polys[cursor] = wire;
+            fold_nonces[cursor] = nonce;
+            chals.push(chal);
+            cursor += 1;
+        }
+        if stage == 0 {
+            // Shrink folded Stage-0 buffers (`16 MiB` from `1 GiB`) before Stage-0 RS re-encoding.
+            coeffs.0.shrink_to_fit();
+            kernel.shrink_to_fit();
+        }
+        let last = stage + 1 == stages;
+        let mut next_ood = None;
+        let next = if last {
+            final_coeffs.clone_from(&coeffs.0);
+            tr.absorb_exts(
+                &mut b,
+                21,
+                &coeffs
+                    .0
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            None
+        } else {
+            let next_spec = params.schedule.stages[stage + 1];
+            let next = Oracle::new(
+                &coeffs.0,
+                next_spec.blowup,
+                1 << next_spec.step_vars,
+                stage + 1,
+            );
+            later_stage_roots[stage] = next.root();
+            tr.absorb(&mut b, 3, &next.root());
+            let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+            let ood = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+            ood_evals[stage + 1] = ood;
+            tr.absorb_exts(&mut b, 5, &ood.map(Ext::constant));
+            next_ood = Some((zs, ood));
+            Some(next)
+        };
+        let nonce = grind(&tr, params.schedule.regime.pow_bits());
+        query_nonces[stage] = nonce;
+        pow(&mut b, &mut tr, nonce, params.schedule.regime.pow_bits());
+        let (arity, groups, count) = geos[stage];
+        let domain_log2 = (groups * arity).trailing_zeros() as usize;
+        let sampled = sample_queries(&mut b, &mut tr, groups, count);
+        let mut uniq_q: Vec<usize> = sampled
+            .iter()
+            .map(|(idx, _)| idx.to_canonical_u64() as usize)
+            .collect();
+        uniq_q.sort_unstable();
+        uniq_q.dedup();
+
+        let mut shifted = Vec::with_capacity(count);
+        if stage == 0 {
+            let blowup0 = spec.blowup;
+            let mut combined_uniq = vec![vec![E::ZERO; arity]; uniq_q.len()];
+            let mut eval_tmp = Vec::with_capacity(eval_n);
+            let mut reuse_cw = Vec::new();
+            for (k, &mu_k) in mu_pows.iter().enumerate() {
+                eval_tmp.clear();
+                fill_poly_evals(k, &mut eval_tmp);
+                let mut w_coeffs = hypercube_to_monomial_coeffs(&eval_tmp);
+                qsag_asm::volatile_fill(&mut eval_tmp, F::ZERO);
+                let mut cw = encode_base_single_buf(&w_coeffs, blowup0, &mut reuse_cw);
+                qsag_asm::volatile_fill(&mut w_coeffs, F::ZERO);
+                drop(w_coeffs);
+
+                let mut fibers_k = Vec::with_capacity(uniq_q.len() * arity);
+                for (u_idx, &g_idx) in uniq_q.iter().enumerate() {
+                    for j in 0..arity {
+                        let v = cw[g_idx + j * groups];
+                        fibers_k.push(v);
+                        combined_uniq[u_idx][j] += mu_k.mul_base(v);
+                    }
+                }
+                qsag_asm::volatile_fill(&mut cw, F::ZERO);
+                cw.clear();
+                reuse_cw = cw;
+
+                stage0_fibers.push(fibers_k);
+                stage0_siblings.push(steiner_siblings(poly_levels(k), &uniq_q));
+            }
+            drop(eval_tmp);
+            drop(reuse_cw);
+
+            for (index, binary) in sampled {
+                let idx = index.to_canonical_u64() as usize;
+                let u_idx = uniq_q.binary_search(&idx).expect("deduplicated query");
+                let combined: Vec<Ext<F>> = combined_uniq[u_idx]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                shifted.push(fold_fiber(&mut b, &combined, x, &chals, false));
+            }
+        } else {
+            let cur_oracle = later_oracle.as_ref().expect("folded extension oracle");
+            let mut fibers_s = Vec::with_capacity(uniq_q.len() * arity);
+            for &g_idx in &uniq_q {
+                for j in 0..arity {
+                    fibers_s.push(cur_oracle.codeword.at(g_idx + j * groups));
+                }
+            }
+            later_siblings.push(steiner_siblings(&cur_oracle.levels, &uniq_q));
+            for (index, binary) in sampled {
+                let idx = index.to_canonical_u64() as usize;
+                let u_idx = uniq_q.binary_search(&idx).expect("deduplicated query");
+                let values: Vec<Ext<F>> = fibers_s[u_idx * arity..(u_idx + 1) * arity]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                shifted.push(fold_fiber(&mut b, &values, x, &chals, false));
+            }
+            later_fibers.push(fibers_s);
+        }
+
+        if let Some(next) = next {
+            let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
+            tr.absorb_exts(&mut b, 22, &values);
+            let (zs, ood) = next_ood.expect("nonterminal stage OOD pins");
+            for (z, e) in zs.into_iter().zip(ood) {
+                let weight = tr.ext(&mut b, 6).value(&b);
+                claim += weight * e;
+                crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, z);
+            }
+            let gamma = tr.ext(&mut b, 23).value(&b);
+            let mut weight = gamma;
+            for (z, e) in shifted {
+                claim += weight * e.value(&b);
+                crate::pcs::affine::add_geometric_scaled_in_place(
+                    &mut kernel,
+                    weight,
+                    E::from_base(z),
+                );
+                weight *= gamma;
+            }
+            later_oracle = Some(next);
+        }
+    }
+
+    debug_assert!(!b.failed);
+    Ok(FoldedLevelWhirProof {
+        point_rounds,
+        poly_evals,
+        stage0_fibers,
+        stage0_siblings,
+        later_stage_roots,
+        ood_evals,
+        fold_polys,
+        fold_nonces,
+        query_nonces,
+        later_fibers,
+        later_siblings,
+        final_coeffs,
+    })
+}
+
+/// Verify a [`FoldedLevelWhirProof`] natively against all `M` homogeneous child edge claims at `level`.
+pub(crate) fn verify_folded_level(
+    level: usize,
+    top_accumulator_root: Digest,
+    edges: &[FoldedEdgeSpec],
+    proof: &FoldedLevelWhirProof,
+) -> bool {
+    if edges.is_empty() {
+        return false;
+    }
+    let regime = edges[0].regime;
+    let nv = edges[0].num_vars;
+    let h_root = edges[0].roots[1];
+    let Ok(params) = FixedPathWhirParams::new(regime, nv) else {
+        return false;
+    };
+    if edges.iter().any(|e| {
+        e.regime != regime
+            || e.num_vars != nv
+            || e.roots[1] != h_root
+            || e.points.iter().any(|p| p.len() != nv)
+    }) {
+        return false;
+    }
+
+    let num_polys = 2 * edges.len() + 1;
+    let stages = params.schedule.stages.len();
+    let fold_len = nv - params.schedule.early_stop_vars;
+    if proof.point_rounds.len() != nv
+        || proof.poly_evals.len() != num_polys
+        || proof.stage0_fibers.len() != num_polys
+        || proof.stage0_siblings.len() != num_polys
+        || proof.later_stage_roots.len() != stages.saturating_sub(1)
+        || proof.ood_evals.len() != stages
+        || proof.fold_polys.len() != fold_len
+        || proof.fold_nonces.len() != fold_len
+        || proof.query_nonces.len() != stages
+        || proof.later_fibers.len() != stages.saturating_sub(1)
+        || proof.later_siblings.len() != stages.saturating_sub(1)
+        || proof.final_coeffs.len() != (1usize << params.schedule.early_stop_vars) + 2
+    {
+        return false;
+    }
+
+    let active = collect_active_folded_claims(edges);
+    if active.is_empty() {
+        return false;
+    }
+
+    let mut roots0 = Vec::with_capacity(num_polys);
+    roots0.push(h_root);
+    for e in edges {
+        roots0.push(e.roots[0]);
+        roots0.push(e.roots[2]);
+    }
+
+    let mut b = Native::default();
+    let mut tr = start_folded_level_transcript(&mut b, level, &top_accumulator_root, edges);
+    let alpha = tr.ext(&mut b, 301).value(&b);
+
+    let mut weights = Vec::with_capacity(active.len());
+    let mut sc_claim = E::ZERO;
+    let mut w = E::ONE;
+    for &(_, _, val) in &active {
+        weights.push(w);
+        sc_claim += w * val;
+        w *= alpha;
+    }
+
+    let mut r_star = Vec::with_capacity(nv);
+    for &[c0, c1, c2] in &proof.point_rounds {
+        if c0 + (c0 + c1 + c2) != sc_claim {
+            return false;
+        }
+        tr.absorb_exts(&mut b, 302, &[c0, c1, c2].map(Ext::constant));
+        let r = tr.ext(&mut b, 303).value(&b);
+        sc_claim = c0 + r * (c1 + r * c2);
+        r_star.push(r);
+    }
+
+    let mut q_evals = vec![E::ZERO; num_polys];
+    for ((poly_idx, pt, _), &wt) in active.iter().zip(&weights) {
+        q_evals[*poly_idx] += wt * crate::field::eq_poly_ext4(&r_star, pt);
+    }
+    let final_sc = proof
+        .poly_evals
+        .iter()
+        .zip(&q_evals)
+        .fold(E::ZERO, |acc, (&pe, &qe)| acc + pe * qe);
+    if final_sc != sc_claim {
+        return false;
+    }
+
+    let poly_evals_ext: Vec<Ext<F>> = proof.poly_evals.iter().copied().map(Ext::constant).collect();
+    tr.absorb_exts(&mut b, 304, &poly_evals_ext);
+    let roots0_words: Vec<F> = roots0.iter().flatten().copied().collect();
+    tr.absorb(&mut b, 305, &roots0_words);
+    let mu = tr.ext(&mut b, 306).value(&b);
+
+    let mut mu_pows = Vec::with_capacity(num_polys);
+    let mut comb_eval = E::ZERO;
+    let mut mu_cur = E::ONE;
+    for &pe in &proof.poly_evals {
+        mu_pows.push(mu_cur);
+        comb_eval += mu_cur * pe;
+        mu_cur *= mu;
+    }
+
+    let r_star_w: Vec<Ext<F>> = r_star.iter().copied().map(Ext::constant).collect();
+    let mut kernels = vec![Kernel::initial(r_star_w)];
+    let mut claim = Ext::constant(comb_eval);
+
+    let zs0 = [tr.ext(&mut b, 4), tr.ext(&mut b, 4)];
+    let ood0 = proof.ood_evals[0].map(Ext::constant);
+    tr.absorb_exts(&mut b, 5, &ood0);
+    let mut cursor = 0usize;
+    let mut remaining = nv;
+    for (z, e) in zs0.into_iter().zip(ood0) {
+        let weight = tr.ext(&mut b, 6);
+        claim = claim.add(&weight.mul(&mut b, &e));
+        kernels.push(geometric(&mut b, cursor, weight, z, remaining));
+    }
+
+    let geos = params.geometries();
+    let mut phis = Vec::new();
+    for (stage, spec) in params.schedule.stages.iter().enumerate() {
+        let mut chals = Vec::with_capacity(spec.step_vars);
+        for _ in 0..spec.step_vars {
+            let wire = proof.fold_polys[cursor].map(Ext::constant);
+            tr.absorb_exts(&mut b, 10, &wire[..3]);
+            let phi = tr.ext(&mut b, 11);
+            tr.absorb_exts(&mut b, 12, &wire[3..]);
+            pow(
+                &mut b,
+                &mut tr,
+                proof.fold_nonces[cursor],
+                params.schedule.regime.pow_bits(),
+            );
+            let chal = [tr.ext(&mut b, 13), tr.ext(&mut b, 14), tr.ext(&mut b, 15)];
+            claim = bridge(&mut b, &wire, &claim, &phi, &chal);
+            phis.push(phi);
+            chals.push(chal);
+            cursor += 1;
+        }
+        remaining -= spec.step_vars;
+        let last = stage + 1 == stages;
+        let mut next_ood = None;
+        let final_coeffs_w: Vec<Ext<F>> = if last {
+            let values: Vec<_> = proof.final_coeffs.iter().copied().map(Ext::constant).collect();
+            tr.absorb_exts(&mut b, 21, &values);
+            let expected = terminal(&mut b, &values, &phis, &kernels);
+            claim.equal(&mut b, &expected);
+            values
+        } else {
+            tr.absorb(&mut b, 3, &proof.later_stage_roots[stage]);
+            let zs = [tr.ext(&mut b, 4), tr.ext(&mut b, 4)];
+            let ood = proof.ood_evals[stage + 1].map(Ext::constant);
+            tr.absorb_exts(&mut b, 5, &ood);
+            next_ood = Some((zs, ood));
+            Vec::new()
+        };
+        pow(
+            &mut b,
+            &mut tr,
+            proof.query_nonces[stage],
+            params.schedule.regime.pow_bits(),
+        );
+        if b.failed {
+            return false;
+        }
+        let (arity, groups, count) = geos[stage];
+        let path_depth = groups.trailing_zeros() as usize;
+        let domain_log2 = (groups * arity).trailing_zeros() as usize;
+        let sampled = sample_queries(&mut b, &mut tr, groups, count);
+        let mut uniq_q: Vec<usize> = sampled
+            .iter()
+            .map(|(idx, _)| idx.to_canonical_u64() as usize)
+            .collect();
+        uniq_q.sort_unstable();
+        uniq_q.dedup();
+
+        let mut shifted = Vec::with_capacity(count);
+        if stage == 0 {
+            let want_vals = uniq_q.len() * arity;
+            for k in 0..num_polys {
+                let fibers = &proof.stage0_fibers[k];
+                if fibers.len() != want_vals {
+                    return false;
+                }
+                let mut leaf_digests = vec![[F::ZERO; 4]; uniq_q.len()];
+                crate::pcs::fill_indexed(&mut leaf_digests, |u_idx| {
+                    let g_idx = uniq_q[u_idx];
+                    let vals = &fibers[u_idx * arity..(u_idx + 1) * arity];
+                    let ext_fiber: Vec<Ext<F>> = vals
+                        .iter()
+                        .map(|&v| Ext::constant(E::from_base(v)))
+                        .collect();
+                    leaf(&mut Native::default(), 0, &f(g_idx as u64), &ext_fiber)
+                });
+                if !verify_steiner_multiproof(
+                    0,
+                    path_depth,
+                    &roots0[k],
+                    &uniq_q,
+                    &leaf_digests,
+                    &proof.stage0_siblings[k],
+                ) {
+                    return false;
+                }
+            }
+            let mut combined_uniq = vec![vec![E::ZERO; arity]; uniq_q.len()];
+            for (k, &mu_k) in mu_pows.iter().enumerate() {
+                let fibers = &proof.stage0_fibers[k];
+                for (u_idx, comb_slot) in combined_uniq.iter_mut().enumerate() {
+                    let vals = &fibers[u_idx * arity..(u_idx + 1) * arity];
+                    for (dst, &v) in comb_slot.iter_mut().zip(vals) {
+                        *dst += mu_k.mul_base(v);
+                    }
+                }
+            }
+            for (index, binary) in sampled {
+                let idx = index.to_canonical_u64() as usize;
+                let Ok(u_idx) = uniq_q.binary_search(&idx) else {
+                    return false;
+                };
+                let combined: Vec<Ext<F>> = combined_uniq[u_idx]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                let (z, e) = fold_fiber(&mut b, &combined, x, &chals, false);
+                if last {
+                    let expected = horner(&mut b, &final_coeffs_w, &z);
+                    e.equal(&mut b, &expected);
+                }
+                shifted.push((z, e));
+            }
+        } else {
+            let fibers = &proof.later_fibers[stage - 1];
+            if fibers.len() != uniq_q.len() * arity {
+                return false;
+            }
+            let mut leaf_digests = vec![[F::ZERO; 4]; uniq_q.len()];
+            crate::pcs::fill_indexed(&mut leaf_digests, |u_idx| {
+                let g_idx = uniq_q[u_idx];
+                let ext_fiber: Vec<Ext<F>> = fibers[u_idx * arity..(u_idx + 1) * arity]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect();
+                leaf(&mut Native::default(), stage, &f(g_idx as u64), &ext_fiber)
+            });
+            if !verify_steiner_multiproof(
+                stage,
+                path_depth,
+                &proof.later_stage_roots[stage - 1],
+                &uniq_q,
+                &leaf_digests,
+                &proof.later_siblings[stage - 1],
+            ) {
+                return false;
+            }
+            for (index, binary) in sampled {
+                let idx = index.to_canonical_u64() as usize;
+                let Ok(u_idx) = uniq_q.binary_search(&idx) else {
+                    return false;
+                };
+                let values: Vec<Ext<F>> = fibers[u_idx * arity..(u_idx + 1) * arity]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                let (z, e) = fold_fiber(&mut b, &values, x, &chals, false);
+                if last {
+                    let expected = horner(&mut b, &final_coeffs_w, &z);
+                    e.equal(&mut b, &expected);
+                }
+                shifted.push((z, e));
+            }
+        }
+        if !last {
+            let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
+            tr.absorb_exts(&mut b, 22, &values);
+            let (zs, ood) = next_ood.expect("nonterminal stage OOD pins");
+            for (z, e) in zs.into_iter().zip(ood) {
+                let weight = tr.ext(&mut b, 6);
+                claim = claim.add(&weight.mul(&mut b, &e));
+                kernels.push(geometric(&mut b, cursor, weight, z, remaining));
+            }
+            let gamma = tr.ext(&mut b, 23);
+            let mut weight = gamma.clone();
+            for (z, e) in shifted {
+                claim = claim.add(&weight.mul(&mut b, &e));
+                kernels.push(geometric_base(&mut b, cursor, weight.clone(), z, remaining));
+                weight = weight.mul(&mut b, &gamma);
+            }
+        }
+    }
+    !b.failed
 }
 
 /// Largest fan-in of one merge relation.
