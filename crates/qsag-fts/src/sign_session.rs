@@ -71,7 +71,7 @@ pub struct ParallelSeededSignSession<'a> {
     jobs: Vec<Job>,
     powers: Vec<AuthenticatedPowerShare>,
     masked: Vec<AuthWire128>,
-    payload: Vec<u128>,
+    payload: SecretVec<u128>,
     commitments: Vec<(u16, [u8; 32])>,
     /// Opened candidates, withheld until the MAC check accepts.
     gate: Option<OutputGate>,
@@ -85,7 +85,7 @@ pub struct ParallelSeededSignSession<'a> {
 }
 impl Drop for ParallelSeededSignSession<'_> {
     fn drop(&mut self) {
-        ct_zeroize_u128s(&mut self.payload);
+        self.payload = SecretBuffer(Vec::new());
         // Once MAC differences can have been sent, an interrupted or rushing-aborted
         // check may have exposed the authentication key. Retain custody bytes but
         // quarantine this authentication context until freshly authenticated preprocessing.
@@ -95,7 +95,7 @@ impl Drop for ParallelSeededSignSession<'_> {
         {
             self.share.poison();
         }
-        self.share.pending_openings.clear();
+        self.share.clear_pending_openings();
     }
 }
 fn encode_values(values: &[u128]) -> Vec<u8> {
@@ -312,7 +312,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             jobs: Vec::new(),
             powers: Vec::new(),
             masked: Vec::new(),
-            payload: Vec::new(),
+            payload: SecretBuffer(Vec::new()),
             commitments: Vec::new(),
             gate: None,
             digits: Vec::new(),
@@ -365,7 +365,7 @@ impl<'a> ParallelSeededSignSession<'a> {
                     party_id: self.share.party_id,
                     session: self.session,
                     round: self.sequence,
-                    values: self.payload.clone(),
+                    values: self.payload.0.clone(),
                     salt: self.salt(),
                 })
             }
@@ -395,8 +395,8 @@ impl<'a> ParallelSeededSignSession<'a> {
                 self.share.poison();
             }
             self.phase = Phase::Aborted;
-            ct_zeroize_u128s(&mut self.payload);
-            self.share.pending_openings.clear();
+            self.payload = SecretBuffer(Vec::new());
+            self.share.clear_pending_openings();
         }
         result
     }
@@ -512,13 +512,14 @@ impl<'a> ParallelSeededSignSession<'a> {
                     return Err(ParallelSeededError::BdozMacCheckFailed);
                 }
                 self.mac_opening_exposed = false;
-                self.share.pending_openings.clear();
-                ct_zeroize_u128s(&mut self.payload);
-                self.payload = self
-                    .jobs
-                    .iter()
-                    .flat_map(|j| j.state.iter().map(|w| w.val_sh))
-                    .collect();
+                self.share.clear_pending_openings();
+                let mut next_payload = SecretBuffer(Vec::with_capacity(2 * self.jobs.len()));
+                for j in &self.jobs {
+                    for w in &j.state {
+                        next_payload.0.push(w.val_sh);
+                    }
+                }
+                self.payload = next_payload;
                 self.phase = Phase::ValueCommit;
                 Ok(())
             }
@@ -533,7 +534,7 @@ impl<'a> ParallelSeededSignSession<'a> {
                     .ok_or(ParallelSeededError::BdozMacCheckFailed)?
                     .verify_mac(residual)?;
                 self.mac_opening_exposed = false;
-                self.share.pending_openings.clear();
+                self.share.clear_pending_openings();
                 self.after_mac()
             }
             _ => Err(ParallelSeededError::BdozMacCheckFailed),
@@ -566,8 +567,10 @@ impl<'a> ParallelSeededSignSession<'a> {
     fn prepare_power(&mut self) -> Result<(), ParallelSeededError> {
         self.masked.clear();
         self.powers.clear();
-        ct_zeroize_u128s(&mut self.payload);
-        self.payload.clear();
+        let active_jobs = self.jobs.iter().filter(|j| !j.done).count();
+        let mut next_payload = SecretBuffer(Vec::with_capacity(2 * active_jobs));
+        self.masked.reserve(2 * active_jobs);
+        self.powers.reserve(2 * active_jobs);
         let party = if self.share.party_id == self.roster[0] {
             0
         } else {
@@ -598,11 +601,12 @@ impl<'a> ParallelSeededSignSession<'a> {
                 );
                 self.share.beaver_cursor += 1;
                 let masked = auth_xor(wire, &power.powers[0]);
-                self.payload.push(masked.val_sh);
+                next_payload.0.push(masked.val_sh);
                 self.masked.push(masked);
                 self.powers.push(power);
             }
         }
+        self.payload = next_payload;
         self.phase = Phase::PowerCommit;
         Ok(())
     }
@@ -674,8 +678,8 @@ impl<'a> ParallelSeededSignSession<'a> {
                 &encode_values(&values),
             ],
         );
-        ct_zeroize_u128s(&mut self.payload);
-        self.payload.clear();
+        let mut next_payload =
+            SecretBuffer(Vec::with_capacity(2 * self.share.pending_openings.len()));
         for (index, (value, wire)) in self.share.pending_openings.iter().enumerate() {
             let mut sigma = core::array::from_fn::<_, 2, _>(|lane| {
                 wire.mac[lane] ^ gf2_128_mul(self.share.bdoz_alpha_share[lane], *value)
@@ -690,9 +694,10 @@ impl<'a> ParallelSeededSignSession<'a> {
                 sigma[1] ^= zero.1;
                 ct_zeroize_bytes(&mut bytes);
             }
-            self.payload.extend_from_slice(&sigma);
+            next_payload.0.extend_from_slice(&sigma);
             ct_zeroize_u128s(&mut sigma);
         }
+        self.payload = next_payload;
     }
     fn prepare_mac(&mut self, opened: Vec<u128>) -> Result<(), ParallelSeededError> {
         // Unverified candidates: the gate below takes them, every other exit wipes them.
@@ -731,8 +736,9 @@ impl<'a> ParallelSeededSignSession<'a> {
             sigma[1] ^= zero.1;
             ct_zeroize_bytes(&mut bytes);
         }
-        ct_zeroize_u128s(&mut self.payload);
-        self.payload = sigma.to_vec();
+        let mut next_payload = SecretBuffer(Vec::with_capacity(2));
+        next_payload.0.extend_from_slice(&sigma);
+        self.payload = next_payload;
         ct_zeroize_u128s(&mut sigma);
         self.gate = Some(OutputGate::hold(
             &self.pk.params,
@@ -745,18 +751,19 @@ impl<'a> ParallelSeededSignSession<'a> {
         Ok(())
     }
     fn after_mac(&mut self) -> Result<(), ParallelSeededError> {
-        let mut opened = self
-            .gate
-            .take()
-            .ok_or(ParallelSeededError::BdozMacCheckFailed)?
-            .release(&self.digits)?;
+        let opened = SecretBuffer(
+            self.gate
+                .take()
+                .ok_or(ParallelSeededError::BdozMacCheckFailed)?
+                .release(&self.digits)?,
+        );
         if self.mode == Mode::Randomizer {
             if opened.len() != 2 {
                 return Err(ParallelSeededError::BdozMacCheckFailed);
             }
             self.randomizer = lanes_to_bytes32(opened[0], opened[1]);
             let mut chosen = None;
-            for counter in 0..1_000_000 {
+            for counter in 0..MAX_GRIND_COUNTER {
                 if let Some(offsets) = derive_sum_constrained_offsets(
                     &self.pk.params,
                     &self.pk.pk_seed_bytes,
@@ -783,7 +790,7 @@ impl<'a> ParallelSeededSignSession<'a> {
                 .iter()
                 .map(|pair| lanes_to_bytes32(pair[0], pair[1]))
                 .collect();
-            ct_zeroize_u128s(&mut opened);
+            drop(opened);
             self.result = Some(if self.mode == Mode::Leaf {
                 ParallelSeededSignResult::Leaf {
                     epoch: self.epoch,
@@ -844,7 +851,12 @@ pub fn assemble_parallel_seeded_public_key(
     leaves: &[[u64; 4]],
 ) -> Result<(ParallelSeededPublicKey, ParallelSeededMerkleLayers), ParallelSeededError> {
     params.validate()?;
-    if leaves.len() != 1usize << params.tree_height {
+    if leaves.len() != 1usize << params.tree_height
+        || leaves
+            .iter()
+            .flatten()
+            .any(|&limb| !qsag_accel::goldilocks::gl_is_canonical(limb))
+    {
         return Err(ParallelSeededError::InvalidAuthenticationPath);
     }
     let pk_seed_limbs =
@@ -1005,5 +1017,24 @@ mod release_barrier_tests {
         // Honest party 2 MUST be poisoned immediately so compromised authentication keys
         // cannot be reused on a subsequent signing session!
         assert!(setup.shares[1].is_poisoned());
+    }
+
+    #[test]
+    fn assemble_public_key_rejects_noncanonical_goldilocks_leaves() {
+        let params = ParallelSeededParams {
+            tree_height: 1,
+            winternitz_w: 2,
+            num_chains: 2,
+            target_sum: 1,
+        };
+        let canonical = [[1, 2, 3, 4], [5, 6, 7, 8]];
+        assert!(assemble_parallel_seeded_public_key(params, [9; 32], &canonical).is_ok());
+        for bad in [qsag_accel::goldilocks::GOLDILOCKS_PRIME, u64::MAX] {
+            let noncanonical = [[bad, 2, 3, 4], [5, 6, 7, 8]];
+            assert_eq!(
+                assemble_parallel_seeded_public_key(params, [9; 32], &noncanonical).err(),
+                Some(ParallelSeededError::InvalidAuthenticationPath)
+            );
+        }
     }
 }

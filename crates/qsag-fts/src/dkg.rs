@@ -115,8 +115,8 @@ impl ParallelSeededDkgRound1State {
             && config.roster.windows(2).all(|w| w[0] < w[1])
             && config.roster.contains(&party_id)
             && config.power_count > 0
-            // Up to 32 custody leaves per independently authenticated batch.
-            && config.power_count <= 1_048_576
+            // Bounded to `DEFAULT_BEAVER_TRIPLE_POOL` (`131_072`, up to 4 custody leaves per reservoir batch).
+            && config.power_count <= DEFAULT_BEAVER_TRIPLE_POOL
             && config.beaver_count <= DEFAULT_BEAVER_TRIPLE_POOL;
         if !valid {
             ct_zeroize_bytes(&mut entropy);
@@ -220,18 +220,24 @@ impl ParallelSeededDkgRound1State {
         }
         let context = self.frozen_context()?;
         self.packages_sent = true;
-        Ok(self
+        let count = self
             .config
             .roster
             .iter()
             .filter(|&&id| id > self.party_id)
-            .map(|&recipient| ParallelSeededDkgSharePackage {
-                sender: self.party_id,
-                recipient,
-                context,
-                seed: self.pair_seed(recipient, &context),
-            })
-            .collect())
+            .count();
+        let mut pkgs = Vec::with_capacity(count);
+        for &recipient in &self.config.roster {
+            if recipient > self.party_id {
+                pkgs.push(ParallelSeededDkgSharePackage {
+                    sender: self.party_id,
+                    recipient,
+                    context,
+                    seed: self.pair_seed(recipient, &context),
+                });
+            }
+        }
+        Ok(pkgs)
     }
     fn sample(&self, label: &[u8], count: usize) -> SecretVec<u128> {
         SecretBuffer(xof_field_elements(

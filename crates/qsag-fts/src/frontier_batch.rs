@@ -47,7 +47,7 @@ impl<'a> Lane<'a> {
         {
             return Err(FrontierFtsError::MalformedSignatureLength);
         }
-        if (sig.grind_counter as u32) >= (1u32 << p.counter_bits) {
+        if (sig.grind_counter as u64) >= (1u64 << p.counter_bits) {
             return Err(FrontierFtsError::SignatureVerificationFailed);
         }
         let pid = pk.profile.pid_bytes();

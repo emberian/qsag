@@ -167,14 +167,12 @@ impl OutputGate {
             && values.len() == 2 * WOTS_CS_CHAINS
         {
             let rounds = u8::try_from(spn_rounds).unwrap_or(0);
-            let sessions = values
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| {
-                    FtsDeferredMacSession::new_spn48_evaluated(session, rounds, pair[0], pair[1])
-                })
-                .collect();
+            let mut sessions = Vec::with_capacity(values.len() / 2);
+            for pair in values.as_chunks::<2>().0 {
+                sessions.push(FtsDeferredMacSession::new_spn48_evaluated(
+                    session, rounds, pair[0], pair[1],
+                ));
+            }
             ct_zeroize_u128s(&mut values);
             Held::Verified(sessions)
         } else {
@@ -200,7 +198,9 @@ impl OutputGate {
                 // A mismatched request drives each session into verified quarantine,
                 // which zeroes its candidate wires.
                 let mismatched = self.session.map(|byte| !byte);
-                for session in core::mem::take(sessions) {
+                let old = core::mem::take(sessions);
+                sessions.reserve_exact(old.len());
+                for session in old {
                     let (next, _) = session.verify_intermediate_mac(mismatched, 1, 1);
                     sessions.push(next);
                 }
@@ -226,7 +226,9 @@ impl OutputGate {
         let accepted = match &mut self.held {
             Held::Verified(sessions) => {
                 let mut accepted = !sessions.is_empty();
-                for session in core::mem::take(sessions) {
+                let old = core::mem::take(sessions);
+                sessions.reserve_exact(old.len());
+                for session in old {
                     let (next, result) =
                         session.verify_intermediate_mac(request, residual[0], residual[1]);
                     accepted &= result.is_ok();

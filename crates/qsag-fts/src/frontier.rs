@@ -7,8 +7,9 @@
 //!    `unrank` / `rank` operate exclusively on **public** randomized message digests
 //!    `H_msg(R, pk, M, ctr)` (never secret ranks), while secret `SK.seed`/`SK.prf` expansion and
 //!    `U384` primitives execute in straight-line constant time.
-//! 3. Mandatory `SK.prf`-derived per-signature randomizer `R` + monotonic `UseBudgetLatch`
-//!    preventing deterministic 2-message reuse or unbounded `q >= 3` over-signing.
+//! 3. Mandatory `SK.prf`-derived per-signature randomizer `R` + monotonic `uses_completed`
+//!    and [`FtsEpochWal`] reservation preventing deterministic 2-message reuse or unbounded
+//!    `q >= 3` over-signing.
 //! 4. Full 256-bit message digest pre-binding with 32-byte nodes: `Compact1122`
 //!    (`1,122 B`) and `Full256Bit` (`2,338 B`) wire profiles.
 
@@ -519,7 +520,7 @@ impl FrontierDpTable {
 // Chained Binary Tree Key Generation, Signing, & Verification
 // ============================================================================
 
-/// Public key for `FrontierSumFts` (`32 B` `pk_seed` + `n_trunc`-byte `root`).
+/// Public key for `FrontierSumFts` (`32 B` `pk_seed` + `32 B` `root`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrontierFtsPublicKey {
     pub profile: FrontierFtsProfile,
@@ -553,7 +554,7 @@ pub struct FrontierFtsSigningKey {
     max_uses: u8,
     /// Write-once `(randomizer, grind_counter)` consistency record per use index.
     released_uses: Vec<Option<(Vec<u8>, u16)>>,
-    /// Optional flat cache of `[X_{v, j}]` across `v in 2..2^{h+1}, j in 0..w` (`n_trunc` bytes each)
+    /// Optional flat cache of `[X_{v, j}]` across `v in 2..2^{h+1}, j in 0..w` (`32` bytes each)
     /// wiped via `ct_zeroize_bytes` on `Drop`.
     cached_chains: Option<Vec<u8>>,
     #[cfg(test)]
@@ -1155,13 +1156,17 @@ impl FrontierFtsSigningKey {
             *slot ^= mask;
         }
 
-        let sig = FrontierFtsSignature {
+        let mut sig = FrontierFtsSignature {
             randomizer,
             grind_counter,
             chain_values,
         };
         // Mandatory verify-before-release + pre-grind randomizer & canonical counter check!
-        self.verify_before_release(dp, use_seq, msg, opt_hedging_nonce, &sig)?;
+        if let Err(err) = self.verify_before_release(dp, use_seq, msg, opt_hedging_nonce, &sig) {
+            ct_zeroize_bytes(&mut sig.chain_values);
+            ct_zeroize_bytes(&mut sig.randomizer);
+            return Err(err);
+        }
         Ok(sig)
     }
 
@@ -1303,7 +1308,7 @@ pub fn verify_frontier_fts(
     if sig.randomizer.len() != n || sig.chain_values.len() != p.frontier_len * n {
         return Err(FrontierFtsError::MalformedSignatureLength);
     }
-    if (sig.grind_counter as u32) >= (1u32 << p.counter_bits) {
+    if (sig.grind_counter as u64) >= (1u64 << p.counter_bits) {
         return Err(FrontierFtsError::SignatureVerificationFailed);
     }
 
