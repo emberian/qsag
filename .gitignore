@@ -15,6 +15,7 @@
 **/*.rlib
 **/*.prof
 **/*.comp
+!crates/qsag-accel/shaders/*.comp
 **/perf.data*
 **/benchmarks/
 aeneas/lean/*-evidence/
@@ -47,3 +48,36 @@ __pycache__/
 # Python bytecode and freshly extracted native fixtures
 *.py[cod]
 /lean/fixtures/current-elf/
+
+# Fuzzing corpora and crash/timeout artifacts
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+
+# Hardware / RTL / Verilator / Yosys / LibreLane / OpenROAD build & generated outputs
+**/obj_dir/
+**/sim_build/
+**/*.vvp
+**/*.vcd
+**/*.fst
+**/*.ghw
+**/results.xml
+**/generated_defines.svh
+**/*.lyrdb
+**/*.klayout.xml
+**/*.blif
+**/*.edif
+**/*.asc
+**/*.bit
+**/*.fasm
+**/*.spef
+**/*.sdf
+hardware/**/*.smt2
+hardware/**/logs/
+hardware/**/work/
+hardware/**/build/
+hardware/**/out/
+hardware/**/runs/
+hardware/**/final/
+hardware/**/img/
+hardware/gf180mcu/gf180mcu/
