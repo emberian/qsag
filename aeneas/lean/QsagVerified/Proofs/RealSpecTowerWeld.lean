@@ -24,6 +24,85 @@ set_option maxRecDepth 4096
 set_option maxHeartbeats 4000000
 attribute [-simp] BitVec.getLsbD_eq_getElem
 
+private theorem mulExec_via_tower (k : Nat) (a b : Qsag.TowerBitVec k) :
+    Qsag.mulExec k a b =
+      Qsag.packTower k (Qsag.towerMul k (Qsag.unpackTower k a) (Qsag.unpackTower k b)) := by
+  have h := Qsag.mulExec_refines k (Qsag.unpackTower k a) (Qsag.unpackTower k b)
+  rw [Qsag.packTower_unpackTower, Qsag.packTower_unpackTower] at h
+  exact h
+
+private theorem scaleXExec_via_tower (k : Nat) (a : Qsag.TowerBitVec k) :
+    Qsag.scaleXExec k a =
+      Qsag.packTower k (Qsag.towerScaleX k (Qsag.unpackTower k a)) := by
+  have h := Qsag.scaleXExec_refines k (Qsag.unpackTower k a)
+  rw [Qsag.packTower_unpackTower] at h
+  exact h
+
+private theorem mulExec_zero (a b : Qsag.TowerBitVec 0) :
+    Qsag.mulExec 0 a b = a &&& b := by
+  rw [mulExec_via_tower 0 a b]
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have hi0 : i = 0 := by omega
+  subst hi0
+  simp [Qsag.packTower, Qsag.towerMul, Qsag.unpackTower]
+
+private theorem scaleXExec_zero (a : Qsag.TowerBitVec 0) :
+    Qsag.scaleXExec 0 a = a := by
+  rw [scaleXExec_via_tower 0 a]
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have hi0 : i = 0 := by omega
+  subst hi0
+  simp [Qsag.packTower, Qsag.towerScaleX, Qsag.unpackTower]
+
+private theorem scaleXExec_succ (k : Nat) (a : Qsag.TowerBitVec (k + 1)) :
+    Qsag.scaleXExec (k + 1) a =
+      Qsag.joinBits k (Qsag.highBits k a)
+        (Qsag.lowBits k a ^^^ Qsag.scaleXExec k (Qsag.highBits k a)) := by
+  rw [scaleXExec_via_tower (k + 1) a]
+  dsimp only [Qsag.unpackTower, Qsag.towerScaleX, Qsag.packTower]
+  rw [Qsag.packTower_unpackTower, Qsag.packTower_add, Qsag.packTower_unpackTower,
+    ← scaleXExec_via_tower k (Qsag.highBits k a)]
+
+private theorem mulExec_succ (k : Nat) (a b : Qsag.TowerBitVec (k + 1)) :
+    Qsag.mulExec (k + 1) a b =
+      Qsag.joinBits k
+        (Qsag.mulExec k (Qsag.lowBits k a) (Qsag.lowBits k b) ^^^
+          Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b))
+        (Qsag.mulExec k (Qsag.lowBits k a ^^^ Qsag.highBits k a)
+            (Qsag.lowBits k b ^^^ Qsag.highBits k b) ^^^
+          (Qsag.mulExec k (Qsag.lowBits k a) (Qsag.lowBits k b) ^^^
+            Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b)) ^^^
+          Qsag.scaleXExec k (Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b))) := by
+  let al := Qsag.unpackTower k (Qsag.lowBits k a)
+  let ah := Qsag.unpackTower k (Qsag.highBits k a)
+  let bl := Qsag.unpackTower k (Qsag.lowBits k b)
+  let bh := Qsag.unpackTower k (Qsag.highBits k b)
+  have hXorL : Qsag.lowBits k a ^^^ Qsag.highBits k a = Qsag.packTower k (Qsag.towerAdd k al ah) := by
+    rw [Qsag.packTower_add, Qsag.packTower_unpackTower, Qsag.packTower_unpackTower]
+  have hXorR : Qsag.lowBits k b ^^^ Qsag.highBits k b = Qsag.packTower k (Qsag.towerAdd k bl bh) := by
+    rw [Qsag.packTower_add, Qsag.packTower_unpackTower, Qsag.packTower_unpackTower]
+  rw [mulExec_via_tower (k + 1) a b]
+  dsimp only [Qsag.unpackTower, Qsag.towerMul, Qsag.packTower]
+  change Qsag.joinBits k
+      (Qsag.packTower k (Qsag.towerAdd k (Qsag.towerMul k al bl) (Qsag.towerMul k ah bh)))
+      (Qsag.packTower k (Qsag.towerAdd k
+        (Qsag.towerAdd k (Qsag.towerMul k al bh) (Qsag.towerMul k ah bl))
+        (Qsag.towerMul k (Qsag.towerX k) (Qsag.towerMul k ah bh)))) = _
+  have hKara : Qsag.towerAdd k (Qsag.towerMul k al bh) (Qsag.towerMul k ah bl) =
+      Qsag.towerAdd k (Qsag.towerMul k (Qsag.towerAdd k al ah) (Qsag.towerAdd k bl bh))
+        (Qsag.towerAdd k (Qsag.towerMul k al bl) (Qsag.towerMul k ah bh)) := by
+    rw [Qsag.towerMul_add_distrib, Qsag.towerAdd_mul_distrib, Qsag.towerAdd_mul_distrib]
+    simp only [Qsag.towerAdd_assoc, Qsag.towerAdd_comm, Qsag.towerAdd_left_comm,
+      Qsag.towerAdd_self_zero, Qsag.towerZero_add, Qsag.towerAdd_cancel]
+  rw [hKara, ← Qsag.towerScaleX_eq_mul]
+  rw [Qsag.packTower_add, Qsag.packTower_add, Qsag.packTower_add, Qsag.packTower_add,
+      ← Qsag.scaleXExec_refines, ← Qsag.mulExec_refines, ← Qsag.mulExec_refines,
+      ← Qsag.mulExec_refines, ← hXorL, ← hXorR]
+  dsimp only [al, ah, bl, bh]
+  simp only [Qsag.packTower_unpackTower]
+
 set_option linter.unusedSimpArgs false in
 /-- The base-256 MIR product uses the canonical Wiedemann packed coordinates. -/
 theorem pureGf256Mul_eq_qsag (a b : Std.U8) :
@@ -33,8 +112,8 @@ theorem pureGf256Mul_eq_qsag (a b : Std.U8) :
   change i < 8 at hi
   match i, hi with
   | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ =>
-    simp only [Qsag.mulExec.eq_1, Qsag.mulExec.eq_2, Qsag.scaleXExec.eq_1,
-      Qsag.scaleXExec.eq_2, Qsag.joinBits.eq_def, Qsag.lowBits.eq_def, Qsag.highBits.eq_def]
+    simp only [mulExec_zero, mulExec_succ, scaleXExec_zero, scaleXExec_succ,
+      Qsag.joinBits_eq_append, Qsag.lowBits.public_eq_1, Qsag.highBits.public_eq_1]
     simp [-BitVec.setWidth_setWidth, pureGf256Mul, pureMulT2, pureMulT1, pureScaleXT1, pureScaleXT2,
       UScalar.bv_and, UScalar.bv_or, UScalar.bv_xor, UScalarTy.numBits,
       BitVec.getLsbD_and, BitVec.getLsbD_or, BitVec.getLsbD_xor,
@@ -106,14 +185,14 @@ private theorem towerLow (k : Nat) (a m : BitVec (2 ^ (k + 1)))
     (hm : m.toNat = 2 ^ (2 ^ k) - 1) :
     (a &&& m).setWidth (2 ^ k) = Qsag.lowBits k a := by
   apply BitVec.eq_of_toNat_eq
-  simp only [Qsag.lowBits, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
+  simp only [Qsag.lowBits.public_eq_1, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
     BitVec.extractLsb'_toNat, and_lowMask, Nat.shiftRight_zero, Nat.mod_mod]
 
 private theorem towerHigh (k : Nat) (a m : BitVec (2 ^ (k + 1)))
     (hm : m.toNat = 2 ^ (2 ^ k) - 1) :
     ((a >>> (2 ^ k)) &&& m).setWidth (2 ^ k) = Qsag.highBits k a := by
   apply BitVec.eq_of_toNat_eq
-  simp only [Qsag.highBits, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
+  simp only [Qsag.highBits.public_eq_1, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
     BitVec.extractLsb'_toNat, and_lowMask, BitVec.toNat_ushiftRight,
     Nat.mod_mod]
 
@@ -123,31 +202,14 @@ private theorem towerJoin (k : Nat) (lo hi : BitVec (2 ^ k)) :
   have hw : 2 ^ (k + 1) = 2 ^ k + 2 ^ k := by rw [Nat.pow_succ]; omega
   apply BitVec.eq_of_getLsbD_eq
   intro i hi'
-  simp only [Qsag.joinBits, BitVec.getLsbD_or, BitVec.getLsbD_setWidth,
-    BitVec.getLsbD_shiftLeft, BitVec.getLsbD_cast, BitVec.getLsbD_append]
+  simp only [Qsag.joinBits_eq_append, BitVec.getLsbD_or, BitVec.getLsbD_setWidth,
+    BitVec.getLsbD_shiftLeft, BitVec.getLsbD_cast]
+  rw [BitVec.getLsbD_append]
   by_cases h : i < 2 ^ k
   · simp [h, hi']
   · have hlo : lo.getLsbD i = false := BitVec.getLsbD_of_ge lo i (by omega)
     have h2 : i - 2 ^ k < 2 ^ (k + 1) := by omega
     simp [h, hi', hlo, h2]
-
-private theorem mulExec_succ (k : Nat) (a b : Qsag.TowerBitVec (k + 1)) :
-    Qsag.mulExec (k + 1) a b =
-      Qsag.joinBits k
-        (Qsag.mulExec k (Qsag.lowBits k a) (Qsag.lowBits k b) ^^^
-          Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b))
-        (Qsag.mulExec k (Qsag.lowBits k a ^^^ Qsag.highBits k a)
-            (Qsag.lowBits k b ^^^ Qsag.highBits k b) ^^^
-          (Qsag.mulExec k (Qsag.lowBits k a) (Qsag.lowBits k b) ^^^
-            Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b)) ^^^
-          Qsag.scaleXExec k (Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b))) := by
-  simp only [Qsag.mulExec]
-
-private theorem scaleXExec_succ (k : Nat) (a : Qsag.TowerBitVec (k + 1)) :
-    Qsag.scaleXExec (k + 1) a =
-      Qsag.joinBits k (Qsag.highBits k a)
-        (Qsag.lowBits k a ^^^ Qsag.scaleXExec k (Qsag.highBits k a)) := by
-  simp only [Qsag.scaleXExec]
 
 /-- One Karatsuba level: if `mulS`/`sxS` compute the canonical packed product and `X`-scaling
 at level `k`, the mask/shift/zero-extend shape used by the Rust source computes the canonical
@@ -194,8 +256,8 @@ theorem pureScaleXT3_eq_qsag (a : Std.U8) :
   change i < 8 at hi
   match i, hi with
   | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ =>
-    simp only [Qsag.scaleXExec.eq_1, Qsag.scaleXExec.eq_2, Qsag.joinBits.eq_def,
-      Qsag.lowBits.eq_def, Qsag.highBits.eq_def]
+    simp only [scaleXExec_zero, scaleXExec_succ, Qsag.joinBits_eq_append,
+      Qsag.lowBits.public_eq_1, Qsag.highBits.public_eq_1]
     simp [-BitVec.setWidth_setWidth, pureScaleXT3, pureScaleXT2, pureScaleXT1,
       UScalar.bv_and, UScalar.bv_or, UScalar.bv_xor, UScalarTy.numBits,
       BitVec.getLsbD_and, BitVec.getLsbD_or, BitVec.getLsbD_xor,

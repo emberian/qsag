@@ -613,5 +613,25 @@ export qsag_verified.proofs (
   goldilocks_inverse_mul_eq_one
   goldilocks_inv_none_iff_zero
   goldilocks_inv_some_mul_eq_one
+  Result.wp
+  Result.wlp
+  wp_ok
+  wp_fail_elim
+  wp_iff_exists_ok
+  wp_of_eq_ok
+  wp_mono
+  wp_result_bind
+  wp_bind
+  wp_let
+  wp_ite
+  wp_massert
+  wp_uscalar_add
+  wp_uscalar_sub
+  wp_uscalar_mul
+  MirRel1
+  MirRel2
+  MirRel1.comp_bind
+  mirCheckedDeltaCheck_wp_spec
+  tooth_mirCheckedDeltaCheck_exceeds_cap_fails
 )
 end QsagMirProofs
