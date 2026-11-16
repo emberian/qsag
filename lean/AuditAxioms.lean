@@ -129,6 +129,7 @@ import all Qsag.Exec.InteractiveUcEngine
 import all Qsag.Exec.MirSpecBridge
 import all Qsag.Exec.MirSpecBridgeCore
 import all Qsag.Exec.MirSpecBridgeWitnesses
+import all Qsag.Exec.PlatformContractInstances
 import all Qsag.Exec.PosixCrashWal
 import all Qsag.Exec.RefinesBridges
 import all Qsag.Exec.RssParticipantBinding
@@ -173,9 +174,11 @@ import all Qsag.Machine.FaultAndSpeculativeSafety
 import all Qsag.Machine.Gf128ClmulLoopAgreement
 import all Qsag.Machine.IsaCosim
 import all Qsag.Machine.McRefine
+import all Qsag.Machine.PlatformContractInstances
 import all Qsag.Machine.SimdBinaryEquiv
 import all Qsag.Machine.SpirvSimtGpuEquiv
 import all Qsag.Machine.SydTvTranslationValidation
+import all Qsag.Machine.Tactic.KernelRfl
 import all Qsag.Top.Aggregation
 import all Qsag.Top.Apex
 import all Qsag.Top.ClosedProtocolReductions
@@ -239,7 +242,12 @@ run_cmd do
     `Qsag.Tactic.Prelude,
     `Qsag.Math.Tactic.CommRing,
     `Qsag.Math.Tactic.MaskBijection,
-    `Qsag.Exec.Tactic.SimulationKit
+    `Qsag.Exec.Tactic.SimulationKit,
+    `Qsag.Machine.Tactic.KernelRfl
+  ]
+  -- Re-export umbrellas: import-only modules that own no declarations (checked below).
+  let reexportModules : Array Name := #[
+    `Qsag.Math.Algebra
   ]
   let auditedProofModules : Array Name := #[
     `Qsag.Spec.Algebra,
@@ -255,7 +263,6 @@ run_cmd do
     `Qsag.Spec.Parameters,
     `Qsag.Spec.Primitives,
     `Qsag.Spec.Refines,
-    `Qsag.Math.Algebra,
     `Qsag.Math.CoeffPoly,
     `Qsag.Math.Counting,
     `Qsag.Math.EllipticCurves,
@@ -367,6 +374,7 @@ run_cmd do
     `Qsag.Exec.MirSpecBridge,
     `Qsag.Exec.MirSpecBridgeCore,
     `Qsag.Exec.MirSpecBridgeWitnesses,
+    `Qsag.Exec.PlatformContractInstances,
     `Qsag.Exec.PosixCrashWal,
     `Qsag.Exec.RefinesBridges,
     `Qsag.Exec.RssParticipantBinding,
@@ -410,6 +418,7 @@ run_cmd do
     `Qsag.Machine.Gf128ClmulLoopAgreement,
     `Qsag.Machine.IsaCosim,
     `Qsag.Machine.McRefine,
+    `Qsag.Machine.PlatformContractInstances,
     `Qsag.Machine.SimdBinaryEquiv,
     `Qsag.Machine.SpirvSimtGpuEquiv,
     `Qsag.Machine.SydTvTranslationValidation,
@@ -457,7 +466,8 @@ run_cmd do
       throwError "Manifest proof module must be directly imported with `import all`: {modName}"
   for importedMod in importedNames do
     if importedMod.toString.startsWith "Qsag." then
-      unless auditedProofModules.contains importedMod || infrastructureModules.contains importedMod do
+      unless auditedProofModules.contains importedMod || infrastructureModules.contains importedMod ||
+          reexportModules.contains importedMod do
         throwError "Transitive Qsag module missing from explicit audit manifest: {importedMod}"
 
   -- 3. Dynamic filesystem check: zero Qsag/*.lean modules on disk may escape the manifest.
@@ -476,7 +486,8 @@ run_cmd do
       else if entry.path.extension == some "lean" then
         if let some stem := entry.path.fileStem then
           let diskMod := modulePrefix.str stem
-          unless auditedProofModules.contains diskMod || infrastructureModules.contains diskMod do
+          unless auditedProofModules.contains diskMod || infrastructureModules.contains diskMod ||
+              reexportModules.contains diskMod do
             throwError "Unregistered Qsag source module missing from AuditAxioms: {diskMod}"
 
   let mut perModuleCounts : Array Nat := Array.replicate auditedProofModules.size 0
@@ -487,6 +498,8 @@ run_cmd do
   for (name, _) in privEnv.constants.toList do
     if let some idx := privEnv.getModuleIdxFor? name then
       let owner := importedNames[idx.toNat]!
+      if reexportModules.contains owner then
+        throwError "Re-export module owns a declaration and must be audited as a proof module: {owner} ({name})"
       -- Select by owning module, including private and non-Qsag-namespaced declarations.
       if let some mPos := auditedProofModules.findIdx? (· == owner) then
         checked := checked + 1

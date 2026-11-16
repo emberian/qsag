@@ -302,8 +302,8 @@ theorem threshold_sig_hedged_statistical_distance_zero
     (N : Nat) (run : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
     (hedge : Fin N → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
     natAbsDiff
-      (finSum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
-      (finSum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
+      (qsum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
+      (qsum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
         (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))) then 1 else 0)) = 0 :=
   by sorry
 
@@ -331,7 +331,7 @@ theorem bdoz_tampered_opening_accepting_keys_le_one
     (hInj : ∀ i j, keyDec i = keyDec j → i = j)
     (hon : Nat → Tower128 × Tower128 × Tower128) (op : BdozPairOpening)
     (hNe : op.shareX ≠ (hon op.partyId).1) :
-    finSum CK (fun i =>
+    qsum CK (fun i =>
       if verifyBdozPairMac (bdozKeyFromView (keyDec i) hon) op then 1 else 0) ≤ 1 :=
   by sorry
 
@@ -353,10 +353,10 @@ theorem ucSimulatorTsig_hop1_perfect {R PK SK Msg Sig : Type} [LawfulCommRing R]
     (sk : SK) (m : Msg)
     (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
     (macKey : Tower128 × Tower128) (D : Option (TsigAdvView R pp.k) → Bool) :
-    finSum Ct (fun i =>
+    qsum Ct (fun i =>
       if D (some (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m)
         (padEnum.toFun i))) then 1 else 0) =
-    finSum Ct (fun i =>
+    qsum Ct (fun i =>
       if D (ucSimulatorTsig pp
         ⟨pk, m, corrupt, honest, corruptVk, corruptTags, .signed (S.sign sk m)⟩
         ⟨padEnum.toFun i, macKey⟩) then 1 else 0) :=
@@ -402,7 +402,7 @@ theorem tsigForgery_keys_le (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128
     ∀ (es : List (Nat × Tower128)) (s : Nat) (ops : List BdozPairOpening)
       (hon : Nat → Tower128 × Tower128 × Tower128),
       (∀ i, (hon (s + i)).1 = tsigShareAt es i) →
-      finSum CK (fun i =>
+      qsum CK (fun i =>
         if (tsigFindForgery (bdozKeyFromView (keyDec i) hon) s es ops).isSome then 1 else 0) ≤
         es.length :=
   by sorry

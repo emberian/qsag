@@ -39,7 +39,7 @@ def unhex (s : String) : Except String (List UInt8) := do
   return (List.range (ns.length / 2)).map fun i =>
     UInt8.ofNat (16 * ns.getD (2 * i) 0 + ns.getD (2 * i + 1) 0)
 
-def requireSome (x : Option α) (message : String) : Except String α :=
+def requireSome {α : Type} (x : Option α) (message : String) : Except String α :=
   match x with
   | some a => .ok a
   | none => .error message
