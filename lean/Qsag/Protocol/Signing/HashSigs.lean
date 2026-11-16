@@ -34,15 +34,32 @@ set_option autoImplicit false
 
 /-! ## 1. Pre-Locked 32-Byte Big-Endian `HashAdrs` Framing (`encodeAdrs_injective`) -/
 
-/-- Domain-separation role of a 32-byte hash address inside the hypertree / FORS / WOTS+C hierarchy. -/
+/-- Domain-separation role of a 32-byte hash address inside the hypertree / FORS / PORS+FP / WOTS+C hierarchy
+    (`crates/qsag-core/src/tsw_baggy.rs:39-74` and `pors_fp.rs:241-248`). -/
 inductive AdrsKind where
-  | wotsHash | wotsPk | tree | forsTree | forsRoots | wotsPrf | forsPrf
+  | wotsHash | wotsPk | tree | forsTree | forsRoots | wotsPrf | forsPrf | porsPrf | porsTree
   deriving DecidableEq, Repr, Inhabited
 
-/-- Canonical 32-bit wire tag for `AdrsKind`. -/
+/-- Canonical 32-bit wire tag for `AdrsKind` (`0..=8`). -/
 def AdrsKind.toCode : AdrsKind → UInt32
   | .wotsHash => 0 | .wotsPk => 1 | .tree => 2 | .forsTree => 3
   | .forsRoots => 4 | .wotsPrf => 5 | .forsPrf => 6
+  | .porsPrf => 7 | .porsTree => 8
+
+/-- Checked inverse of `AdrsKind.toCode` matching `AdrsKind::from_code` (`tsw_baggy.rs:60-73`). -/
+def AdrsKind.fromCode : UInt32 → Option AdrsKind
+  | 0 => some .wotsHash | 1 => some .wotsPk | 2 => some .tree | 3 => some .forsTree
+  | 4 => some .forsRoots | 5 => some .wotsPrf | 6 => some .forsPrf
+  | 7 => some .porsPrf | 8 => some .porsTree | _ => none
+
+theorem AdrsKind.fromCode_toCode (k : AdrsKind) : AdrsKind.fromCode k.toCode = some k := by
+  cases k <;> rfl
+
+theorem AdrsKind.toCode_pors :
+    AdrsKind.porsPrf.toCode = 7 ∧ AdrsKind.porsTree.toCode = 8 ∧
+    AdrsKind.fromCode 7 = some .porsPrf ∧ AdrsKind.fromCode 8 = some .porsTree ∧
+    AdrsKind.fromCode 9 = none := by
+  decide
 
 theorem AdrsKind.toCode_injective {k₁ k₂ : AdrsKind} (h : k₁.toCode = k₂.toCode) : k₁ = k₂ := by
   cases k₁ <;> cases k₂ <;> first | rfl | cases h

@@ -55,11 +55,13 @@ structure HashSigProfile where
 def HashSigProfile.securityBits (p : HashSigProfile) : Nat := 4 * p.digestBytes
 
 /-- Parameter equations of a deployed `HashSigProfile`, following `PqHashParams::is_well_formed`
-    (`crates/qsag-core/src/tsw_baggy.rs:630`):
+    (`crates/qsag-core/src/tsw_baggy.rs:630`) extended to the 64-bit `CorduroyPoseidon2` leaf space
+    (`crates/qsag-agg/src/sig.rs:36-45`):
     * `w = 2 ^ lg w` with `1 ≤ lg w ≤ 8` (Rust: `2 ≤ w ≤ 256`, power of two);
     * the target-sum WOTS chains carry the whole digest: `ell1 * lg w = 8 * digestBytes = 256`
       (Rust: `digest_bits != 256` is rejected; there are no checksum chains);
-    * `0 < h' ≤ 30`, `a ≤ 30`, `0 < d`, total height `d * h' ≤ 62`;
+    * `0 < h' ≤ 30`, `a ≤ 30`, `0 < d`, total height `d * h' ≤ 64`, and `h' * (d - 1) ≤ 60`
+      (`u64` subtree-index shift guard across all `0 ..< d` layers);
     * `0 < maxSigsLog2 ≤ d * h'`: the signature budget never exceeds the number of leaves;
     * stateless profiles have `0 < k`, `0 < a`; stateful profiles have `k = a = 0`.
 
@@ -74,12 +76,19 @@ def HashSigProfile.securityBits (p : HashSigProfile) : Nat := 4 * p.digestBytes
   0 < p.subtreeHeight ∧ p.subtreeHeight ≤ 30 ∧
   p.forsTreeHeight ≤ 30 ∧
   0 < p.hypertreeLayers ∧
-  p.hypertreeLayers * p.subtreeHeight ≤ 62 ∧
+  p.hypertreeLayers * p.subtreeHeight ≤ 64 ∧
+  p.subtreeHeight * (p.hypertreeLayers - 1) ≤ 60 ∧
   0 < p.maxSigsLog2 ∧
   p.maxSigsLog2 ≤ p.hypertreeLayers * p.subtreeHeight ∧
   ((p.statefulBottomLayer = false ∧ 0 < p.forsTrees ∧ 0 < p.forsTreeHeight ∧
       4 * p.digestBytes ≤ p.forsTrees * p.forsTreeHeight) ∨
    (p.statefulBottomLayer = true ∧ p.forsTrees = 0 ∧ p.forsTreeHeight = 0))
+
+/-- Exact raw signature byte length for a stateless FORS/TSW `HashSigProfile`
+    (`crates/qsag-agg/src/sig.rs:88-90`). -/
+def HashSigProfile.rawSigBytes (p : HashSigProfile) : Nat :=
+  p.digestBytes + p.forsTrees * (1 + p.forsTreeHeight) * p.digestBytes +
+    p.hypertreeLayers * (4 + p.wotsChainCount * p.digestBytes + p.subtreeHeight * p.digestBytes)
 
 /-- Shape of a NIST FIPS-205 `SLH-DSA` reference parameter set, which is NOT a deployed
     `PqHashParams` profile: checksum WOTS+ with `lg w = 4` and `len = 2n + 3` chains
@@ -143,6 +152,85 @@ def jortsPoseidon2HashProfile : HashSigProfile where
   maxSigsLog2 := 16
   statefulBottomLayer := true
 
+/-- Deployed stateless `CorduroyPoseidon2` aggregation profile (`AggSigProfile::CorduroyPoseidon2`,
+    `crates/qsag-agg/src/sig.rs:33-45, 67-68, 87-91`: 32-byte digest, `w = 4, ell1 = 128`,
+    `d = 16, h' = 4` (`h = 64`, `h' * (d - 1) = 60`), `k = 32, a = 8`, `Q_max = 2^20`,
+    `76,896`-byte raw signature). -/
+def corduroyPoseidon2Profile : HashSigProfile where
+  digestBytes := 32
+  winternitzRadix := 4
+  winternitzLog2 := 2
+  wotsChainCount := 128
+  subtreeHeight := 4
+  hypertreeLayers := 16
+  forsTrees := 32
+  forsTreeHeight := 8
+  maxSigsLog2 := 20
+  statefulBottomLayer := false
+
+/-- Normative parameter profile for `Baggy` hypertree-over-`PORS+FP` signing
+    (`BaggyParams`, `crates/qsag-core/src/baggy.rs:131-213` and `pors_fp.rs:38-87`). -/
+structure BaggyPorsFpProfile where
+  digestBytes : Nat
+  winternitzRadix : Nat
+  winternitzLog2 : Nat
+  wotsChainCount : Nat
+  wotsZeroDigits : Nat
+  wotsTargetSum : Nat
+  subtreeHeight : Nat
+  hypertreeLayers : Nat
+  maxGrind : Nat
+  porsTreeHeight : Nat
+  porsReveal : Nat
+  porsMaxAuthNodes : Nat
+  maxSigBytes : Nat
+  deriving DecidableEq, Repr
+
+/-- Worst-case byte length of a `PORS+FP` opening (`32 * reveal + 2 + 32 * max_auth_nodes`,
+    `crates/qsag-core/src/pors_fp.rs:85-87`). -/
+def BaggyPorsFpProfile.porsOpeningBytesMax (p : BaggyPorsFpProfile) : Nat :=
+  p.digestBytes * p.porsReveal + 2 + p.digestBytes * p.porsMaxAuthNodes
+
+/-- Worst-case byte length of a serialized `BaggySig` (`36 + pors_bytes + d * (4 + 32*chains + 32*h')`,
+    `crates/qsag-core/src/baggy.rs:189-213`). -/
+def BaggyPorsFpProfile.sigBytesMax (p : BaggyPorsFpProfile) : Nat :=
+  36 + p.porsOpeningBytesMax +
+    p.hypertreeLayers * (4 + p.digestBytes * p.wotsChainCount + p.digestBytes * p.subtreeHeight)
+
+/-- Parameter equations of `BaggyParams::is_well_formed` (`baggy.rs:166-185`) and
+    `PorsFpParams::is_well_formed` (`pors_fp.rs:64-73`). -/
+def BaggyPorsFpProfile.WellFormed (p : BaggyPorsFpProfile) : Prop :=
+  p.digestBytes = 32 ∧
+  p.winternitzRadix = 4 ∧ p.winternitzLog2 = 2 ∧
+  p.wotsChainCount = 128 ∧ p.wotsZeroDigits = 0 ∧ p.wotsTargetSum = 192 ∧
+  1 ≤ p.subtreeHeight ∧ p.subtreeHeight ≤ 8 ∧
+  1 ≤ p.hypertreeLayers ∧ p.hypertreeLayers ≤ 62 ∧
+  p.hypertreeLayers * p.subtreeHeight ≤ 62 ∧
+  0 < p.maxGrind ∧ p.maxGrind < 2 ^ 32 ∧
+  1 ≤ p.porsTreeHeight ∧ p.porsTreeHeight ≤ 20 ∧
+  1 ≤ p.porsReveal ∧ p.porsReveal ≤ 1024 ∧
+  p.porsReveal ≤ (2 ^ p.porsTreeHeight) / 2 ∧
+  1 ≤ p.porsMaxAuthNodes ∧ p.porsMaxAuthNodes ≤ p.porsReveal * p.porsTreeHeight ∧
+  p.maxSigBytes = p.sigBytesMax
+
+/-- Deployed `BaggyParams::SHA3_128F` profile (`crates/qsag-core/src/baggy.rs:145-151` &
+    `pors_fp.rs:51-55`: `d = 16, h' = 2` (`h = 32`), `WotsCParams::V128`, `PORS+FP`
+    `tree_height = 11, reveal = 28, max_auth_nodes = 128`, max signature `71,654` bytes). -/
+def baggySha3_128fProfile : BaggyPorsFpProfile where
+  digestBytes := 32
+  winternitzRadix := 4
+  winternitzLog2 := 2
+  wotsChainCount := 128
+  wotsZeroDigits := 0
+  wotsTargetSum := 192
+  subtreeHeight := 2
+  hypertreeLayers := 16
+  maxGrind := 2 ^ 26
+  porsTreeHeight := 11
+  porsReveal := 28
+  porsMaxAuthNodes := 128
+  maxSigBytes := 71654
+
 /-- NIST FIPS-205 `SLH-DSA-SHAKE-128f` reference profile (`n = 16`-byte digest, `w = 16`,
     `len = 35 = 32 + 3`, `d = 22, h' = 3` (`h = 66`), `k = 33, a = 6`, `2^64` signatures). Not a
     deployed `PqHashParams` preset; it satisfies `Fips205Shaped`, not `WellFormed`. -/
@@ -161,17 +249,54 @@ def slhDsaShake128fProfile : HashSigProfile where
 theorem pq128StatelessProfile_wellFormed :
     pq128StatelessProfile.WellFormed ∧
     corduroyCustody128Profile.WellFormed ∧
+    corduroyPoseidon2Profile.WellFormed ∧
     jortsPoseidon2HashProfile.WellFormed ∧
     slhDsaShake128fProfile.Fips205Shaped := by
-  refine ⟨?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · unfold HashSigProfile.WellFormed pq128StatelessProfile
     decide
   · unfold HashSigProfile.WellFormed corduroyCustody128Profile
+    decide
+  · unfold HashSigProfile.WellFormed corduroyPoseidon2Profile
     decide
   · unfold HashSigProfile.WellFormed jortsPoseidon2HashProfile
     decide
   · unfold HashSigProfile.Fips205Shaped slhDsaShake128fProfile
     decide
+
+theorem corduroyPoseidon2Profile_params :
+    corduroyPoseidon2Profile.WellFormed ∧
+    corduroyPoseidon2Profile.hypertreeLayers = 16 ∧
+    corduroyPoseidon2Profile.subtreeHeight = 4 ∧
+    corduroyPoseidon2Profile.forsTrees = 32 ∧
+    corduroyPoseidon2Profile.forsTreeHeight = 8 ∧
+    corduroyPoseidon2Profile.maxSigsLog2 = 20 ∧
+    corduroyPoseidon2Profile.rawSigBytes = 76896 := by
+  unfold HashSigProfile.WellFormed HashSigProfile.rawSigBytes corduroyPoseidon2Profile
+  decide
+
+theorem baggySha3_128fProfile_wellFormed :
+    baggySha3_128fProfile.WellFormed ∧
+    baggySha3_128fProfile.porsOpeningBytesMax = 4994 ∧
+    baggySha3_128fProfile.sigBytesMax = 71654 ∧
+    baggySha3_128fProfile.hypertreeLayers = 16 ∧
+    baggySha3_128fProfile.subtreeHeight = 2 ∧
+    baggySha3_128fProfile.porsTreeHeight = 11 ∧
+    baggySha3_128fProfile.porsReveal = 28 ∧
+    baggySha3_128fProfile.porsMaxAuthNodes = 128 := by
+  unfold BaggyPorsFpProfile.WellFormed BaggyPorsFpProfile.sigBytesMax
+    BaggyPorsFpProfile.porsOpeningBytesMax baggySha3_128fProfile
+  decide
+
+/-- Tooth: `BaggyPorsFpProfile.WellFormed` rejects multiproof caps above `reveal * treeHeight`,
+    oversized reveal counts above half the leaves, and mismatched `maxSigBytes`. -/
+theorem BaggyPorsFpProfile.wellFormed_rejects_bad_pors_or_bytes :
+    ¬ (({ baggySha3_128fProfile with porsMaxAuthNodes := 309 } : BaggyPorsFpProfile).WellFormed ∨
+       ({ baggySha3_128fProfile with porsReveal := 1025 } : BaggyPorsFpProfile).WellFormed ∨
+       ({ baggySha3_128fProfile with maxSigBytes := 71655 } : BaggyPorsFpProfile).WellFormed) := by
+  unfold BaggyPorsFpProfile.WellFormed BaggyPorsFpProfile.sigBytesMax
+    BaggyPorsFpProfile.porsOpeningBytesMax baggySha3_128fProfile
+  decide
 
 /-- The derived label of a well-formed profile is `128`: a consequence of the 256-bit digest. -/
 theorem HashSigProfile.WellFormed.securityBits_eq {p : HashSigProfile} (h : p.WellFormed) :
@@ -189,12 +314,13 @@ theorem HashSigProfile.WellFormed.wotsChainCount_mul_log2 {p : HashSigProfile} (
   exact ⟨hChain, hRad⟩
 
 /-- The signature budget of a well-formed profile fits in its `2 ^ (d * h')` hypertree leaves, of
-    which there are at most `2 ^ 62`. -/
+    which there are at most `2 ^ 64`, with `h' * (d - 1) ≤ 60` subtree-index bits. -/
 theorem HashSigProfile.WellFormed.maxSigs_le_leaves {p : HashSigProfile} (h : p.WellFormed) :
     2 ^ p.maxSigsLog2 ≤ 2 ^ (p.hypertreeLayers * p.subtreeHeight) ∧
-    2 ^ (p.hypertreeLayers * p.subtreeHeight) ≤ 2 ^ 62 := by
-  obtain ⟨_, _, _, _, _, _, _, _, _, hTot, _, hSigs, _⟩ := h
-  exact ⟨Nat.pow_le_pow_right (by decide) hSigs, Nat.pow_le_pow_right (by decide) hTot⟩
+    2 ^ (p.hypertreeLayers * p.subtreeHeight) ≤ 2 ^ 64 ∧
+    p.subtreeHeight * (p.hypertreeLayers - 1) ≤ 60 := by
+  obtain ⟨_, _, _, _, _, _, _, _, _, hTot, hShift, _, hSigs, _⟩ := h
+  exact ⟨Nat.pow_le_pow_right (by decide) hSigs, Nat.pow_le_pow_right (by decide) hTot, hShift⟩
 
 /-- Tooth (audit #28): a 16-byte digest, whose derived label would be `64`, is rejected even with
     the matching `64` chains. -/
@@ -305,7 +431,7 @@ theorem jortsPoseidon2HashProfile_eq_statefulEpochProfile :
   decide
 
 /-- Normative parameter profile for quartic-Goldilocks Reed-Solomon IOP succinct aggregation (`HEM`/`WHIR`),
-    matching `Aggregation.productionAggParams` and `crates/qsag-agg`. -/
+    matching `Aggregation.productionAggParams` and `crates/qsag-agg/src/pcs.rs`. -/
 structure AggregationProfile where
   basePrime : Nat
   extDegree : Nat
@@ -317,17 +443,21 @@ structure AggregationProfile where
   johnsonQromQueries : List Nat
   johnsonClassicalQueries : List Nat
   cdhzQromQueries : List Nat
+  cdhzZeroPowQueries : List Nat := [216, 109, 74, 56]
   grindingBits : Nat
   maxMergeDepth : Nat
+  maxBatchPolys : Nat := 16
   deriving DecidableEq, Repr
 
 /-- Production `GoldilocksExt4` (`p = 2^64 - 2^32 + 1`, degree `4`) 4-stage `WHIR`/`HEM` profile:
-    blowups `B = [4, 16, 64, 256]`, `[BCIKS20]` Johnson QROM-128 queries `q = [258, 130, 88, 66]`,
-    classical-128 queries `[129, 65, 44, 33]`, and `[CDHZ25]` capacity QROM queries `[202, 102, 70, 52]`. -/
+    `maxPcsVars = 28` (`pcs.rs:86`), `maxBatchPolys = 16` (`pcs.rs:93`), blowups `B = [4, 16, 64, 256]`,
+    `[BCIKS20]` Johnson QROM-128 queries `q = [258, 130, 88, 66]`, classical-128 queries
+    `[129, 65, 44, 33]`, `[CDHZ25]` 16-bit PoW QROM queries `[202, 102, 70, 52]` (`tags 5, 7`), and
+    `[CDHZ25]` zero-PoW QROM queries `[216, 109, 74, 56]` (`tags 6, 8`, `pcs.rs:289-290`). -/
 @[expose] def hemGoldilocksExt4Profile : AggregationProfile where
   basePrime := 18446744069414584321
   extDegree := 4
-  maxPcsVars := 24
+  maxPcsVars := 28
   earlyStopVars := 8
   logTraceCols := 8
   rowSumcheckDegree := 8
@@ -335,36 +465,41 @@ structure AggregationProfile where
   johnsonQromQueries := [258, 130, 88, 66]
   johnsonClassicalQueries := [129, 65, 44, 33]
   cdhzQromQueries := [202, 102, 70, 52]
+  cdhzZeroPowQueries := [216, 109, 74, 56]
   grindingBits := 16
   maxMergeDepth := 16
+  maxBatchPolys := 16
 
 /-- Parameter equations of an `AggregationProfile` (`crates/qsag-agg/src/pcs.rs`):
     * the field is the degree-`4` extension of Goldilocks, of at least `255` bits;
-    * `earlyStopVars ≤ maxPcsVars`, and the PoW is the `16`-bit grind of the default regime
-      (`pcs.rs:276`–`277`);
-    * the stage blowups start at `4` and quadruple, and there is one query count per stage;
-    * per stage with blowup `B`, the classical Johnson count is exactly `⌈256 / log₂ B⌉ + 1`
-      (`B^(q-1) ≥ 2^256 > B^(q-2)`, `pcs.rs:254`) and the QROM Johnson count is exactly
-      `⌈512 / log₂ B⌉ + 2` (`B^(q-2) ≥ 2^512 > B^(q-3)`, `pcs.rs:255`);
-    * the `[CDHZ25]` table (`pcs.rs:141`, `:257`) is a literal in Rust; it is only required to have
-      one entry per stage, each below the Johnson QROM count. -/
+    * `earlyStopVars ≤ maxPcsVars ≤ 28`, `0 < maxBatchPolys ≤ 16`, and the PoW of the default
+      regime is `16` bits (`pcs.rs:86`, `:93`, `:234-244`);
+    * the stage blowups start at `4` and quadruple, and there is one query count per stage across
+      all four schedules (`johnsonClassical`, `johnsonQrom`, `cdhzQrom`, `cdhzZeroPow`);
+    * per stage with blowup `B`, the classical Johnson count is `⌈256 / log₂ B⌉ + 1` and the QROM
+      Johnson count is `⌈512 / log₂ B⌉ + 2` (`pcs.rs:282-285`);
+    * the `[CDHZ25]` 16-bit PoW (`[202, 102, 70, 52]`) and zero-PoW (`[216, 109, 74, 56]`) tables
+      satisfy `cdhzQrom < cdhzZeroPow < johnsonQrom` at every stage (`pcs.rs:286-290`). -/
 def AggregationProfile.WellFormed (p : AggregationProfile) : Prop :=
   p.basePrime = 2 ^ 64 - 2 ^ 32 + 1 ∧ p.extDegree = 4 ∧
   2 ^ 255 ≤ p.basePrime ^ p.extDegree ∧
-  p.earlyStopVars ≤ p.maxPcsVars ∧
+  p.earlyStopVars ≤ p.maxPcsVars ∧ p.maxPcsVars ≤ 28 ∧
+  0 < p.maxBatchPolys ∧ p.maxBatchPolys ≤ 16 ∧
   p.grindingBits = 16 ∧
   p.stageBlowups.head? = some 4 ∧
   (p.stageBlowups.zip p.stageBlowups.tail).all (fun x => decide (x.2 = 4 * x.1)) = true ∧
   p.johnsonClassicalQueries.length = p.stageBlowups.length ∧
   p.johnsonQromQueries.length = p.stageBlowups.length ∧
   p.cdhzQromQueries.length = p.stageBlowups.length ∧
+  p.cdhzZeroPowQueries.length = p.stageBlowups.length ∧
   (p.stageBlowups.zip p.johnsonClassicalQueries).all (fun x =>
     decide (2 ≤ x.2) && decide (2 ^ 256 ≤ x.1 ^ (x.2 - 1)) &&
       decide (x.1 ^ (x.2 - 2) < 2 ^ 256)) = true ∧
   (p.stageBlowups.zip p.johnsonQromQueries).all (fun x =>
     decide (3 ≤ x.2) && decide (2 ^ 512 ≤ x.1 ^ (x.2 - 2)) &&
       decide (x.1 ^ (x.2 - 3) < 2 ^ 512)) = true ∧
-  (p.cdhzQromQueries.zip p.johnsonQromQueries).all (fun x => decide (x.1 < x.2)) = true
+  (p.cdhzQromQueries.zip p.cdhzZeroPowQueries).all (fun x => decide (x.1 < x.2)) = true ∧
+  (p.cdhzZeroPowQueries.zip p.johnsonQromQueries).all (fun x => decide (x.1 < x.2)) = true
 
 theorem hemGoldilocksExt4Profile_wellFormed : hemGoldilocksExt4Profile.WellFormed := by
   unfold AggregationProfile.WellFormed hemGoldilocksExt4Profile
@@ -377,16 +512,21 @@ theorem AggregationProfile.WellFormed.query_lists_aligned {p : AggregationProfil
     p.johnsonClassicalQueries.length = p.stageBlowups.length ∧
     p.johnsonQromQueries.length = p.stageBlowups.length ∧
     p.cdhzQromQueries.length = p.stageBlowups.length ∧
+    p.cdhzZeroPowQueries.length = p.stageBlowups.length ∧
     p.stageBlowups.head? = some 4 := by
-  obtain ⟨_, _, _, _, _, hHead, _, hC, hQ, hZ, _⟩ := h
-  exact ⟨hC, hQ, hZ, hHead⟩
+  obtain ⟨_, _, _, _, _, _, _, _, hHead, _, hC, hQ, hZ, hZP, _⟩ := h
+  exact ⟨hC, hQ, hZ, hZP, hHead⟩
 
-/-- Tooth: a stage with one query fewer than `⌈512 / log₂ B⌉ + 2`, a dropped stage count, or a
-    PoW other than `16` bits is rejected. -/
+/-- Tooth: a stage with one query fewer than `⌈512 / log₂ B⌉ + 2`, a dropped stage count, a zero
+    batch cap, or a PoW other than `16` bits is rejected. -/
 theorem AggregationProfile.wellFormed_rejects_short_queries :
     ¬ (({ hemGoldilocksExt4Profile with johnsonQromQueries := [257, 130, 88, 66] } :
           AggregationProfile).WellFormed ∨
        ({ hemGoldilocksExt4Profile with johnsonClassicalQueries := [129, 65, 44] } :
+          AggregationProfile).WellFormed ∨
+       ({ hemGoldilocksExt4Profile with cdhzZeroPowQueries := [202, 109, 74, 56] } :
+          AggregationProfile).WellFormed ∨
+       ({ hemGoldilocksExt4Profile with maxBatchPolys := 0 } :
           AggregationProfile).WellFormed ∨
        ({ hemGoldilocksExt4Profile with grindingBits := 0 } : AggregationProfile).WellFormed) := by
   unfold AggregationProfile.WellFormed hemGoldilocksExt4Profile
@@ -398,6 +538,13 @@ theorem hemGoldilocksExt4Profile_basePrime_eq :
     hemGoldilocksExt4Profile.stageBlowups = [4, 16, 64, 256] ∧
     hemGoldilocksExt4Profile.johnsonQromQueries = [258, 130, 88, 66] ∧
     hemGoldilocksExt4Profile.cdhzQromQueries = [202, 102, 70, 52] := by
+  unfold hemGoldilocksExt4Profile
+  decide
+
+theorem hemGoldilocksExt4Profile_highCap_and_zeroPow_eq :
+    hemGoldilocksExt4Profile.maxPcsVars = 28 ∧
+    hemGoldilocksExt4Profile.maxBatchPolys = 16 ∧
+    hemGoldilocksExt4Profile.cdhzZeroPowQueries = [216, 109, 74, 56] := by
   unfold hemGoldilocksExt4Profile
   decide
 
@@ -670,6 +817,8 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
 
 #verify_constructive
   Qsag.Spec.pq128StatelessProfile_wellFormed
+  Qsag.Spec.corduroyPoseidon2Profile_params
+  Qsag.Spec.baggySha3_128fProfile_wellFormed
   Qsag.Spec.HashSigProfile.WellFormed.securityBits_eq
   Qsag.Spec.HashSigProfile.WellFormed.wotsChainCount_mul_log2
   Qsag.Spec.HashSigProfile.WellFormed.maxSigs_le_leaves
@@ -678,6 +827,7 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
   Qsag.Spec.StatefulJortsProfile.WellFormed.securityBits_eq
   Qsag.Spec.jortsPoseidon2HashProfile_eq_statefulEpochProfile
   Qsag.Spec.hemGoldilocksExt4Profile_basePrime_eq
+  Qsag.Spec.hemGoldilocksExt4Profile_highCap_and_zeroPow_eq
   Qsag.Spec.hemGoldilocksExt4Profile_wellFormed
   Qsag.Spec.AggregationProfile.WellFormed.query_lists_aligned
   Qsag.Spec.pqCredentialProfile_wellFormed
@@ -685,6 +835,9 @@ theorem CustodyQuorumProfile.honest_quorum_intersection
   Qsag.Spec.pqCredentialProfile_rust_parity
   Qsag.Spec.CredentialProfile.WellFormed.attrs_and_parties
   Qsag.Spec.CustodyQuorumProfile.honest_quorum_intersection
+
+#tooth_pair Qsag.Spec.baggySha3_128fProfile_wellFormed vs
+  Qsag.Spec.BaggyPorsFpProfile.wellFormed_rejects_bad_pors_or_bytes
 
 #tooth_pair Qsag.Spec.HashSigProfile.WellFormed.securityBits_eq vs
   Qsag.Spec.HashSigProfile.wellFormed_rejects_short_digest

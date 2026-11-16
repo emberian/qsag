@@ -1427,6 +1427,3020 @@ theorem smDtPreHard_unrestricted_refuted_trivialSizes (th : Bytes → Bytes → 
 #tooth_pair smDtPreHard_emptyClass vs smDtPreHard_unrestricted_refuted_trivialSizes
 #tooth_pair SmDtTcrHard.anti vs smDtPreHard_preimageSearch_refuted
 
+/-! ### 2i. Query-Bounded (`Within`) Coin-Sampled ROM Hardness and Inhabited `…Hard` Classes
+
+Sections 2g–2h establish the two trivial extremes: the empty class `fun _ => False` satisfies every
+bound vacuously, while the unrestricted class `fun _ => True` fails because pure continuations can
+exhaustively search all inputs offline. This section bridges the gap constructively in two ways:
+
+1. **Lazy coin-sampled Random Oracle (`lazyRomRun`, `romSmDtTcrGame`, `romSmDtPreGame`,
+   `romItsrGame`)**: over a finite coin space of uniform digest draws (`roCoinPow cardD K`), every
+   adaptive oracle adversary satisfying `Within qH` achieves:
+   - `SM-DT-TCR` win probability at most `(qH + 1) / cardD` (`romSmDtTcr_within_bound`, with zero
+     factor in the number of committed targets thanks to pairwise-distinct tweaks),
+   - `SM-DT-PRE` win probability at most `(qH + 1) / cardX + (qH + 1) / cardD`
+     (`romSmDtPre_within_bound`), and
+   - `ITSR` win probability at most `(qH + 1) * maxCovered / cardSub` (`romItsr_within_bound`),
+     specializing to `(qH + 1) * (qS * k)^k / M^k` on `k`-index subset selection
+     (`romItsrTuple_within_bound`).
+   Dropping `Within qH` refutes each bound on the same game (`tooth_romSmDtTcr_without_within`,
+   `tooth_romSmDtPre_without_within`, `tooth_romItsr_without_within`).
+
+2. **Non-empty query-bounded adversary classes inhabiting `SmDtTcrHard`, `SmDtPreHard`, and
+   `ItsrHard`** (`WithinTcrQueries`, `WithinPreQueries`, `WithinItsrQueries`): each class requires
+   `Within qOracle` on the challenger interface together with a `qEval`-bounded offline candidate
+   budget, contains explicit oracle-querying programs with strictly positive win probability, and
+   satisfies `SmDtTcrHard`, `SmDtPreHard`, and `ItsrHard` with strict `< 1` bounds `(qEval + 1) / 256`
+   whenever `qEval + 1 < 256` (`poly257Hash_smDtTcrHard_within`, `byteXorHash_smDtPreHard_within`,
+   `byteIdxHmsg_itsrHard_within`), while failing at `qEval ≥ 256` (`poly257Hash_smDtTcrHard_refuted`,
+   `byteIdxHmsg_itsrHard_refuted`). -/
+
+private theorem sampleSum_ext {m : Nat} {f g : Fin m → Nat} (h : ∀ i, f i = g i) :
+    sampleSum m f = sampleSum m g :=
+  congrArg (sampleSum m) (funext h)
+
+private theorem sampleSum_le :
+    ∀ (m : Nat) (f g : Fin m → Nat), (∀ i, f i ≤ g i) → sampleSum m f ≤ sampleSum m g
+  | 0, _, _, _ => Nat.le_refl 0
+  | m + 1, f, g, h =>
+    Nat.add_le_add (h ⟨0, Nat.zero_lt_succ m⟩)
+      (sampleSum_le m _ _ (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
+
+private theorem sampleSum_add_fn :
+    ∀ (m : Nat) (f g : Fin m → Nat),
+      sampleSum m (fun i => f i + g i) = sampleSum m f + sampleSum m g
+  | 0, _, _ => rfl
+  | m + 1, f, g => by
+    rw [sampleSum_succ, sampleSum_succ, sampleSum_succ, sampleSum_add_fn m]
+    omega
+
+private theorem sampleSum_mul_right :
+    ∀ (m : Nat) (f : Fin m → Nat) (c : Nat),
+      sampleSum m (fun i => f i * c) = sampleSum m f * c
+  | 0, _, _ => (Nat.zero_mul _).symm
+  | m + 1, f, c => by
+    rw [sampleSum_succ, sampleSum_succ, sampleSum_mul_right m, Nat.add_mul]
+
+private theorem sampleSum_const :
+    ∀ (m c : Nat), sampleSum m (fun _ => c) = m * c
+  | 0, c => (Nat.zero_mul c).symm
+  | m + 1, c => by
+    rw [sampleSum_succ, sampleSum_const m, Nat.succ_mul, Nat.add_comm]
+
+private theorem sampleSum_le_card_of_le_one :
+    ∀ (m : Nat) (f : Fin m → Nat), (∀ i, f i ≤ 1) → sampleSum m f ≤ m
+  | m, f, h => by
+    have h1 := sampleSum_le m f (fun _ => 1) h
+    rw [sampleSum_const m 1, Nat.mul_one] at h1
+    exact h1
+
+private theorem sampleSum_indicator_le_one :
+    ∀ (m : Nat) (x : Fin m), sampleSum m (fun i => if i = x then 1 else 0) ≤ 1
+  | 0, x => nomatch x
+  | m + 1, ⟨0, _⟩ => by
+    rw [sampleSum_succ]
+    simp only [↓reduceIte]
+    have hTail : sampleSum m (fun i : Fin m =>
+        if (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (m + 1)) = ⟨0, Nat.zero_lt_succ m⟩ then 1 else 0) = 0 := by
+      have hZero : (fun i : Fin m =>
+          if (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (m + 1)) = ⟨0, Nat.zero_lt_succ m⟩ then 1 else 0) =
+          (fun _ => 0) := by
+        funext i
+        exact iteOfNeg (fun h => Nat.succ_ne_zero i.1 (congrArg Fin.val h)) 1 0
+      rw [hZero, sampleSum_const m 0, Nat.mul_zero]
+    rw [hTail]
+    exact Nat.le_refl 1
+  | m + 1, ⟨k + 1, hk⟩ => by
+    rw [sampleSum_succ]
+    have hHead : (if (⟨0, Nat.zero_lt_succ m⟩ : Fin (m + 1)) = ⟨k + 1, hk⟩ then 1 else 0) = 0 :=
+      iteOfNeg (fun h => Nat.zero_ne_succ k (congrArg Fin.val h)) 1 0
+    have hTail : (fun i : Fin m =>
+        if (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (m + 1)) = ⟨k + 1, hk⟩ then 1 else 0) =
+        (fun i : Fin m => if i = ⟨k, Nat.lt_of_succ_lt_succ hk⟩ then 1 else 0) := by
+      funext i
+      by_cases hi : i = ⟨k, Nat.lt_of_succ_lt_succ hk⟩
+      · subst hi; rfl
+      · exact iteOfNeg (fun h => hi (Fin.ext (Nat.succ.inj (congrArg Fin.val h)))) 1 0 |>.trans
+          (iteOfNeg hi 1 0).symm
+    rw [hHead, Nat.zero_add, hTail]
+    exact sampleSum_indicator_le_one m ⟨k, Nat.lt_of_succ_lt_succ hk⟩
+
+private theorem sampleSum_bool_le_one_of_subsingleton {m : Nat} (p : Fin m → Bool)
+    (hSub : ∀ i j : Fin m, p i = true → p j = true → i = j) :
+    sampleSum m (fun i => if p i then 1 else 0) ≤ 1 := by
+  suffices ∀ (k : Nat) (q : Fin k → Bool),
+      (∀ i j : Fin k, q i = true → q j = true → i = j) →
+      sampleSum k (fun i => if q i then 1 else 0) ≤ 1 from this m p hSub
+  intro k
+  induction k with
+  | zero => intro _ _; exact Nat.zero_le 1
+  | succ k ih =>
+    intro q hq
+    rw [sampleSum_succ]
+    cases h0 : q ⟨0, Nat.zero_lt_succ k⟩
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      exact ih (fun i => q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) (fun i j hi hj =>
+        Fin.ext (Nat.succ.inj (congrArg Fin.val (hq _ _ hi hj))))
+    · simp only [↓reduceIte]
+      have hRest : sampleSum k (fun i => if q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ then 1 else 0) = 0 := by
+        have hZ : (fun i : Fin k => if q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ then 1 else 0) =
+            (fun _ => 0) := by
+          funext i
+          cases hi : q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩
+          · rfl
+          · exact False.elim (Nat.succ_ne_zero i.1 (congrArg Fin.val (hq _ _ hi h0)))
+        rw [hZ, sampleSum_const, Nat.mul_zero]
+      rw [hRest]
+      exact Nat.le_refl 1
+
+private theorem sampleSum_cast {m m' : Nat} (h : m = m') (f : Fin m' → Nat) :
+    sampleSum m (fun i => f ⟨i.1, h ▸ i.2⟩) = sampleSum m' f := by
+  subst h; rfl
+
+private theorem sampleSum_split_add :
+    ∀ (a b : Nat) (f : Fin (a + b) → Nat),
+      sampleSum (a + b) f =
+        sampleSum a (fun i => f ⟨i.1, Nat.lt_of_lt_of_le i.2 (Nat.le_add_right a b)⟩) +
+        sampleSum b (fun j => f ⟨a + j.1, Nat.add_lt_add_left j.2 a⟩)
+  | 0, b, f => by
+    rw [sampleSum_zero, Nat.zero_add]
+    have hEq := sampleSum_cast (Nat.zero_add b) f
+    rw [← hEq]
+    refine sampleSum_ext (fun i => congrArg f (Fin.ext rfl)) |>.trans ?_
+    refine sampleSum_ext (fun j => congrArg f (Fin.ext (Nat.zero_add j.1).symm))
+  | a + 1, b, f => by
+    have hCast : sampleSum ((a + 1) + b) f =
+        sampleSum ((a + b) + 1) (fun i => f ⟨i.1, (Nat.succ_add a b).symm ▸ i.2⟩) := by
+      have h := sampleSum_cast (Nat.succ_add a b)
+        (fun i : Fin ((a + b) + 1) => f ⟨i.1, (Nat.succ_add a b).symm ▸ i.2⟩)
+      exact (sampleSum_ext (fun i => rfl)).trans h
+    rw [hCast, sampleSum_succ, sampleSum_split_add a b, sampleSum_succ]
+    have hMid : sampleSum a (fun i : Fin a =>
+        f ⟨i.1 + 1, (Nat.succ_add a b).symm ▸ Nat.succ_lt_succ
+          (Nat.lt_of_lt_of_le i.2 (Nat.le_add_right a b))⟩) =
+        sampleSum a (fun i : Fin a =>
+          f ⟨i.1 + 1, Nat.lt_of_lt_of_le (Nat.succ_lt_succ i.2) (Nat.le_add_right (a + 1) b)⟩) :=
+      sampleSum_ext (fun _ => rfl)
+    have hRight : sampleSum b (fun j : Fin b =>
+        f ⟨(a + j.1) + 1, (Nat.succ_add a b).symm ▸ Nat.succ_lt_succ (Nat.add_lt_add_left j.2 a)⟩) =
+        sampleSum b (fun j : Fin b => f ⟨(a + 1) + j.1, Nat.add_lt_add_left j.2 (a + 1)⟩) :=
+      sampleSum_ext (fun j => congrArg f (Fin.ext (by omega)))
+    rw [hMid, hRight, Nat.add_assoc]
+
+private theorem sampleSum_prod :
+    ∀ (m n : Nat) (f : Fin (m * n) → Nat),
+      sampleSum (m * n) f =
+        sampleSum m (fun i => sampleSum n (fun j => f ⟨i.1 * n + j.1, prodCoin_pair_lt i j⟩))
+  | 0, n, f => by
+    rw [sampleSum_zero]
+    have h := sampleSum_cast (Nat.zero_mul n)
+      (fun i : Fin 0 => f ⟨i.1, (Nat.zero_mul n).symm ▸ i.2⟩)
+    exact h
+  | m + 1, n, f => by
+    have hEq : (m + 1) * n = n + m * n := (Nat.succ_mul m n).trans (Nat.add_comm (m * n) n)
+    have hCast : sampleSum ((m + 1) * n) f =
+        sampleSum (n + m * n) (fun k => f ⟨k.1, hEq.symm ▸ k.2⟩) :=
+      sampleSum_cast hEq (fun k : Fin (n + m * n) => f ⟨k.1, hEq.symm ▸ k.2⟩)
+    rw [hCast, sampleSum_split_add n (m * n), sampleSum_prod m n, sampleSum_succ]
+    have hHead : sampleSum n (fun i : Fin n =>
+        f ⟨i.1, hEq.symm ▸ Nat.lt_of_lt_of_le i.2 (Nat.le_add_right n (m * n))⟩) =
+        sampleSum n (fun j : Fin n =>
+          f ⟨(⟨0, Nat.zero_lt_succ m⟩ : Fin (m + 1)).1 * n + j.1,
+            prodCoin_pair_lt ⟨0, Nat.zero_lt_succ m⟩ j⟩) :=
+      sampleSum_ext (fun j => congrArg f (Fin.ext (by simp)))
+    have hTail : sampleSum m (fun i : Fin m => sampleSum n (fun j : Fin n =>
+        f ⟨n + (i.1 * n + j.1), hEq.symm ▸ Nat.add_lt_add_left (prodCoin_pair_lt i j) n⟩)) =
+        sampleSum m (fun i : Fin m => sampleSum n (fun j : Fin n =>
+          f ⟨(i.1 + 1) * n + j.1, prodCoin_pair_lt ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j⟩)) :=
+      sampleSum_ext (fun i => sampleSum_ext (fun j => congrArg f (Fin.ext (by
+        rw [Nat.succ_mul]
+        omega))))
+    rw [hHead, hTail]
+
+private theorem sampleSum_point_update :
+    ∀ (m : Nat) (p : Fin m) (v : Nat) (u : Fin m → Nat),
+      u p + sampleSum m (fun i => if i = p then v else u i) = v + sampleSum m u
+  | 0, p, _, _ => nomatch p
+  | m + 1, ⟨0, _⟩, v, u => by
+    rw [sampleSum_succ, sampleSum_succ]
+    simp only [↓reduceIte]
+    have hRest : sampleSum m (fun i : Fin m =>
+        if (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (m + 1)) = ⟨0, Nat.zero_lt_succ m⟩ then v
+        else u ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) =
+        sampleSum m (fun i : Fin m => u ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) :=
+      sampleSum_ext (fun i =>
+        iteOfNeg (fun h => Nat.succ_ne_zero i.1 (congrArg Fin.val h)) v _)
+    rw [hRest]
+    omega
+  | m + 1, ⟨p + 1, hp⟩, v, u => by
+    rw [sampleSum_succ, sampleSum_succ]
+    have hHead : (if (⟨0, Nat.zero_lt_succ m⟩ : Fin (m + 1)) = ⟨p + 1, hp⟩ then v
+        else u ⟨0, Nat.zero_lt_succ m⟩) = u ⟨0, Nat.zero_lt_succ m⟩ :=
+      iteOfNeg (fun h => Nat.zero_ne_succ p (congrArg Fin.val h)) v _
+    have hRest : sampleSum m (fun i : Fin m =>
+        if (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (m + 1)) = ⟨p + 1, hp⟩ then v
+        else u ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) =
+        sampleSum m (fun i : Fin m =>
+          if i = ⟨p, Nat.lt_of_succ_lt_succ hp⟩ then v else u ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := by
+      refine sampleSum_ext (fun i => ?_)
+      by_cases hi : i = ⟨p, Nat.lt_of_succ_lt_succ hp⟩
+      · subst hi; rfl
+      · exact (iteOfNeg (fun h => hi (Fin.ext (Nat.succ.inj (congrArg Fin.val h)))) v _).trans
+          (iteOfNeg hi v _).symm
+    rw [hHead, hRest]
+    have ih := sampleSum_point_update m ⟨p, Nat.lt_of_succ_lt_succ hp⟩ v
+      (fun i => u ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    omega
+
+private def finSwapZero {k : Nat} (j₀ j : Fin (k + 1)) : Fin (k + 1) :=
+  if j = ⟨0, Nat.zero_lt_succ k⟩ then j₀
+  else if j = j₀ then ⟨0, Nat.zero_lt_succ k⟩
+  else j
+
+private theorem finSwapZero_involutive {k : Nat} (j₀ j : Fin (k + 1)) :
+    finSwapZero j₀ (finSwapZero j₀ j) = j := by
+  unfold finSwapZero
+  by_cases hj0 : j = ⟨0, Nat.zero_lt_succ k⟩
+  · subst hj0
+    by_cases h0 : j₀ = ⟨0, Nat.zero_lt_succ k⟩
+    · subst h0; rfl
+    · rw [iteOfPos rfl, iteOfNeg h0, iteOfPos rfl]
+  · rw [iteOfNeg hj0]
+    by_cases hjj : j = j₀
+    · subst hjj; rw [iteOfPos rfl, iteOfPos rfl]
+    · rw [iteOfNeg hjj, iteOfNeg hj0, iteOfNeg hjj]
+
+private theorem sampleSum_swapZero {k : Nat} (j₀ : Fin (k + 1)) (w : Fin (k + 1) → Nat) :
+    sampleSum (k + 1) (fun j => w (finSwapZero j₀ j)) = sampleSum (k + 1) w := by
+  cases j₀ with
+  | mk v hv =>
+    cases v with
+    | zero =>
+      refine sampleSum_ext (fun j => congrArg w ?_)
+      unfold finSwapZero
+      by_cases hj : j = ⟨0, Nat.zero_lt_succ k⟩
+      · subst hj; rfl
+      · rw [iteOfNeg hj, iteOfNeg hj]
+    | succ j₁ =>
+      cases k with
+      | zero => omega
+      | succ k' =>
+        rw [sampleSum_succ, sampleSum_succ]
+        have hHead : w (finSwapZero ⟨j₁ + 1, hv⟩ ⟨0, Nat.zero_lt_succ (k' + 1)⟩) =
+            w ⟨j₁ + 1, hv⟩ := rfl
+        have hTail : sampleSum (k' + 1) (fun i : Fin (k' + 1) =>
+            w (finSwapZero ⟨j₁ + 1, hv⟩ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) =
+            sampleSum (k' + 1) (fun i : Fin (k' + 1) =>
+              if i = ⟨j₁, Nat.lt_of_succ_lt_succ hv⟩ then w ⟨0, Nat.zero_lt_succ (k' + 1)⟩
+              else w ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := by
+          refine sampleSum_ext (fun i => ?_)
+          unfold finSwapZero
+          rw [iteOfNeg (fun h => Nat.succ_ne_zero i.1 (congrArg Fin.val h))]
+          by_cases hi : i = ⟨j₁, Nat.lt_of_succ_lt_succ hv⟩
+          · subst hi; rw [iteOfPos rfl, iteOfPos rfl]
+          · rw [iteOfNeg (fun h => hi (Fin.ext (Nat.succ.inj (congrArg Fin.val h)))),
+              iteOfNeg hi]
+        rw [hHead, hTail]
+        exact sampleSum_point_update (k' + 1) ⟨j₁, Nat.lt_of_succ_lt_succ hv⟩
+          (w ⟨0, Nat.zero_lt_succ (k' + 1)⟩) (fun i => w ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+
+private theorem bij_sampleSum :
+    ∀ (m n : Nat) (f : Fin m → Fin n) (g : Fin n → Fin m),
+      (∀ i, g (f i) = i) → (∀ j, f (g j) = j) →
+      ∀ (w : Fin n → Nat), sampleSum m (fun i => w (f i)) = sampleSum n w
+  | 0, 0, _, _, _, _, _ => rfl
+  | 0, k + 1, _, g, _, _, _ => nomatch (g ⟨0, Nat.zero_lt_succ k⟩)
+  | m + 1, 0, f, _, _, _, _ => nomatch (f ⟨0, Nat.zero_lt_succ m⟩)
+  | m + 1, k + 1, f, g, hgf, hfg, w => by
+    let j₀ := f ⟨0, Nat.zero_lt_succ m⟩
+    let f₁ : Fin (m + 1) → Fin (k + 1) := fun i => finSwapZero j₀ (f i)
+    let g₁ : Fin (k + 1) → Fin (m + 1) := fun j => g (finSwapZero j₀ j)
+    have hgf₁ : ∀ i, g₁ (f₁ i) = i := fun i => by
+      dsimp only [f₁, g₁]; rw [finSwapZero_involutive, hgf]
+    have hfg₁ : ∀ j, f₁ (g₁ j) = j := fun j => by
+      dsimp only [f₁, g₁]; rw [hfg, finSwapZero_involutive]
+    have hf₁_pos : ∀ i : Fin m, 0 < (f₁ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩).1 := by
+      intro i
+      refine Nat.pos_of_ne_zero (fun hZ => ?_)
+      have hEq0 : f₁ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ = ⟨0, Nat.zero_lt_succ k⟩ := Fin.ext hZ
+      have hG := congrArg g₁ hEq0
+      rw [hgf₁] at hG
+      have hG0 : g₁ ⟨0, Nat.zero_lt_succ k⟩ = ⟨0, Nat.zero_lt_succ m⟩ := by
+        dsimp only [g₁, finSwapZero]; rw [iteOfPos rfl]; exact hgf ⟨0, Nat.zero_lt_succ m⟩
+      rw [hG0] at hG
+      exact Nat.succ_ne_zero i.1 (congrArg Fin.val hG)
+    have hg₁_pos : ∀ j : Fin k, 0 < (g₁ ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩).1 := by
+      intro j
+      refine Nat.pos_of_ne_zero (fun hZ => ?_)
+      have hEq0 : g₁ ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩ = ⟨0, Nat.zero_lt_succ m⟩ := Fin.ext hZ
+      have hF := congrArg f₁ hEq0
+      rw [hfg₁] at hF
+      have hF0 : f₁ ⟨0, Nat.zero_lt_succ m⟩ = ⟨0, Nat.zero_lt_succ k⟩ := by
+        dsimp only [f₁, finSwapZero, j₀]
+        by_cases h : f ⟨0, Nat.zero_lt_succ m⟩ = ⟨0, Nat.zero_lt_succ k⟩
+        · rw [iteOfPos h]; exact h
+        · rw [iteOfNeg h, iteOfPos rfl]
+      rw [hF0] at hF
+      exact Nat.succ_ne_zero j.1 (congrArg Fin.val hF)
+    let f' : Fin m → Fin k := fun i =>
+      ⟨(f₁ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩).1 - 1,
+        by have h1 := (f₁ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩).2; have h2 := hf₁_pos i; omega⟩
+    let g' : Fin k → Fin m := fun j =>
+      ⟨(g₁ ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩).1 - 1,
+        by have h1 := (g₁ ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩).2; have h2 := hg₁_pos j; omega⟩
+    have hgf' : ∀ i, g' (f' i) = i := fun i => by
+      apply Fin.ext
+      dsimp only [f', g']
+      have h1 : (⟨(f₁ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩).1 - 1 + 1,
+          Nat.succ_lt_succ (f' i).2⟩ : Fin (k + 1)) = f₁ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ :=
+        Fin.ext (by have := hf₁_pos i; omega)
+      rw [h1, hgf₁]
+      rfl
+    have hfg' : ∀ j, f' (g' j) = j := fun j => by
+      apply Fin.ext
+      dsimp only [f', g']
+      have h1 : (⟨(g₁ ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩).1 - 1 + 1,
+          Nat.succ_lt_succ (g' j).2⟩ : Fin (m + 1)) = g₁ ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩ :=
+        Fin.ext (by have := hg₁_pos j; omega)
+      rw [h1, hfg₁]
+      rfl
+    have hStep : sampleSum (m + 1) (fun i => w (f i)) =
+        sampleSum (m + 1) (fun i => w (finSwapZero j₀ (f₁ i))) :=
+      sampleSum_ext (fun i => congrArg w (finSwapZero_involutive j₀ (f i)).symm)
+    rw [hStep, sampleSum_succ]
+    have hHead : w (finSwapZero j₀ (f₁ ⟨0, Nat.zero_lt_succ m⟩)) = w j₀ := by
+      have hF0 : f₁ ⟨0, Nat.zero_lt_succ m⟩ = ⟨0, Nat.zero_lt_succ k⟩ := by
+        dsimp only [f₁, finSwapZero, j₀]
+        by_cases h : f ⟨0, Nat.zero_lt_succ m⟩ = ⟨0, Nat.zero_lt_succ k⟩
+        · rw [iteOfPos h]; exact h
+        · rw [iteOfNeg h, iteOfPos rfl]
+      rw [hF0]; rfl
+    have hTail : sampleSum m (fun i : Fin m =>
+        w (finSwapZero j₀ (f₁ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))) =
+        sampleSum m (fun i : Fin m =>
+          w (finSwapZero j₀ ⟨(f' i).1 + 1, Nat.succ_lt_succ (f' i).2⟩)) :=
+      sampleSum_ext (fun i => congrArg (fun x => w (finSwapZero j₀ x))
+        (Fin.ext (by dsimp only [f']; have := hf₁_pos i; omega)))
+    rw [hHead, hTail,
+      bij_sampleSum m k f' g' hgf' hfg' (fun j => w (finSwapZero j₀ ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)),
+      ← sampleSum_swapZero j₀ w, sampleSum_succ]
+    rfl
+
+private theorem bij_card_eq {m n : Nat} (f : Fin m → Fin n) (g : Fin n → Fin m)
+    (hgf : ∀ i, g (f i) = i) (hfg : ∀ j, f (g j) = j) : m = n := by
+  have h := bij_sampleSum m n f g hgf hfg (fun _ => 1)
+  rw [sampleSum_const m 1, sampleSum_const n 1, Nat.mul_one, Nat.mul_one] at h
+  exact h
+
+theorem CoinSplit.card_eq {n nC nA : Nat} (π : CoinSplit n nC nA) : n = nC * nA := by
+  let p := CoinSplit.prod nC nA
+  exact bij_card_eq
+    (fun ω => p.pair (π.chal ω) (π.advc ω))
+    (fun z => π.pair (p.chal z) (p.advc z))
+    (fun ω => by rw [p.chal_pair, p.advc_pair, π.pair_eta])
+    (fun z => by rw [π.chal_pair, π.advc_pair, p.pair_eta])
+
+theorem CoinSplit.sampleSum_eq {n nC nA : Nat} (π : CoinSplit n nC nA) (w : Fin n → Nat) :
+    sampleSum n w = sampleSum nC (fun c => sampleSum nA (fun a => w (π.pair c a))) := by
+  let p := CoinSplit.prod nC nA
+  have hBij := bij_sampleSum n (nC * nA)
+    (fun ω => p.pair (π.chal ω) (π.advc ω))
+    (fun z => π.pair (p.chal z) (p.advc z))
+    (fun ω => by rw [p.chal_pair, p.advc_pair, π.pair_eta])
+    (fun z => by rw [π.chal_pair, π.advc_pair, p.pair_eta])
+    (fun z => w (π.pair (p.chal z) (p.advc z)))
+  have hLhs : sampleSum n (fun ω => w (π.pair (p.chal (p.pair (π.chal ω) (π.advc ω)))
+      (p.advc (p.pair (π.chal ω) (π.advc ω))))) = sampleSum n w :=
+    sampleSum_ext (fun ω => by rw [p.chal_pair, p.advc_pair, π.pair_eta])
+  rw [← hLhs, hBij, sampleSum_prod nC nA]
+  exact sampleSum_ext (fun c => sampleSum_ext (fun a => by
+    have hPair : (⟨c.1 * nA + a.1, prodCoin_pair_lt c a⟩ : Fin (nC * nA)) = p.pair c a := rfl
+    rw [hPair, p.chal_pair, p.advc_pair]))
+
+private def finFind {α : Type} [DecidableEq α] :
+    (k : Nat) → (Fin k → α) → α → Option (Fin k)
+  | 0, _, _ => none
+  | k + 1, s, x =>
+    if s ⟨0, Nat.zero_lt_succ k⟩ = x then some ⟨0, Nat.zero_lt_succ k⟩
+    else (finFind k (fun j => s ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) x).map
+      (fun j => ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+
+private theorem finFind_complete {α : Type} [DecidableEq α] :
+    ∀ (k : Nat) (s : Fin k → α) (x : α),
+      (∃ j : Fin k, s j = x) → ∃ j : Fin k, finFind k s x = some j ∧ s j = x
+  | 0, _, _, ⟨j, _⟩ => nomatch j
+  | k + 1, s, x, ⟨j, hj⟩ => by
+    unfold finFind
+    by_cases h0 : s ⟨0, Nat.zero_lt_succ k⟩ = x
+    · exact ⟨⟨0, Nat.zero_lt_succ k⟩, iteOfPos h0 _ _, h0⟩
+    · rw [iteOfNeg h0]
+      cases j with
+      | mk v hv =>
+        cases v with
+        | zero => exact False.elim (h0 hj)
+        | succ v' =>
+          obtain ⟨j', hj'1, hj'2⟩ := finFind_complete k
+            (fun i => s ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) x
+            ⟨⟨v', Nat.lt_of_succ_lt_succ hv⟩, hj⟩
+          exact ⟨⟨j'.1 + 1, Nat.succ_lt_succ j'.2⟩, by rw [hj'1]; rfl, hj'2⟩
+
+theorem UniformOn.card_and_sampleSum_eq {m k : Nat} {α : Type} [DecidableEq α]
+    {support : α → Prop} {s₁ : Fin m → α} {s₂ : Fin k → α}
+    (h₁ : UniformOn support s₁) (h₂ : UniformOn support s₂) (u : α → Nat) :
+    m = k ∧ sampleSum m (fun i => u (s₁ i)) = sampleSum k (fun j => u (s₂ j)) := by
+  cases m with
+  | zero =>
+    cases k with
+    | zero => exact ⟨rfl, rfl⟩
+    | succ k' =>
+      obtain ⟨i, _⟩ := h₁.surjective (s₂ ⟨0, Nat.zero_lt_succ k'⟩) (h₂.mem _)
+      exact nomatch i
+  | succ m' =>
+    cases k with
+    | zero =>
+      obtain ⟨j, _⟩ := h₂.surjective (s₁ ⟨0, Nat.zero_lt_succ m'⟩) (h₁.mem _)
+      exact nomatch j
+    | succ k' =>
+      let f : Fin (m' + 1) → Fin (k' + 1) := fun i =>
+        (finFind (k' + 1) s₂ (s₁ i)).getD ⟨0, Nat.zero_lt_succ k'⟩
+      let g : Fin (k' + 1) → Fin (m' + 1) := fun j =>
+        (finFind (m' + 1) s₁ (s₂ j)).getD ⟨0, Nat.zero_lt_succ m'⟩
+      have hf : ∀ i, s₂ (f i) = s₁ i := fun i => by
+        obtain ⟨j, hj1, hj2⟩ := finFind_complete (k' + 1) s₂ (s₁ i)
+          (h₂.surjective (s₁ i) (h₁.mem i))
+        dsimp only [f]; rw [hj1]; exact hj2
+      have hg : ∀ j, s₁ (g j) = s₂ j := fun j => by
+        obtain ⟨i, hi1, hi2⟩ := finFind_complete (m' + 1) s₁ (s₂ j)
+          (h₁.surjective (s₂ j) (h₂.mem j))
+        dsimp only [g]; rw [hi1]; exact hi2
+      have hgf : ∀ i, g (f i) = i := fun i => h₁.injective _ _ ((hg (f i)).trans (hf i))
+      have hfg : ∀ j, f (g j) = j := fun j => h₂.injective _ _ ((hf (g j)).trans (hg j))
+      refine ⟨bij_card_eq f g hgf hfg, ?_⟩
+      exact (sampleSum_ext (fun i => congrArg u (hf i).symm)).trans
+        (bij_sampleSum (m' + 1) (k' + 1) f g hgf hfg (fun j => u (s₂ j)))
+
+/-! #### 2i.1 Lazy Coin-Sampled Random Oracle (`lazyRomRun`) and `O(q / 2^n)` `GameBound`s -/
+
+/-- Cardinality `base ^ k` of a `k`-draw random-oracle coin space. -/
+def roCoinPow (base : Nat) : Nat → Nat
+  | 0 => 1
+  | k + 1 => base * roCoinPow base k
+
+theorem roCoinPow_zero (base : Nat) : roCoinPow base 0 = 1 := rfl
+
+theorem roCoinPow_succ (base k : Nat) : roCoinPow base (k + 1) = base * roCoinPow base k := rfl
+
+theorem roCoinPow_pos {base : Nat} (h : 0 < base) : ∀ k : Nat, 0 < roCoinPow base k
+  | 0 => Nat.one_pos
+  | k + 1 => Nat.mul_pos h (roCoinPow_pos h k)
+
+/-- Random-oracle interface mapping queries in `Dom` to uniform digests in `Fin cardD`. -/
+def roOracleIface (Dom : Type) (cardD : Nat) : Iface where
+  Query := Dom
+  Resp _ := Fin cardD
+
+theorem roOracleIface_query (Dom : Type) (cardD : Nat) :
+    (roOracleIface Dom cardD).Query = Dom := rfl
+
+/-- Consistent lookup in a lazy random-oracle transcript table. -/
+def roLookup {Dom : Type} [DecidableEq Dom] {cardD : Nat} :
+    List (Dom × Fin cardD) → Dom → Option (Fin cardD)
+  | [], _ => none
+  | (x, y) :: rest, q => if q = x then some y else roLookup rest q
+
+/-- Single consistent lazy-sampling step: returns the recorded digest if `q` was already queried,
+    and otherwise records `(q, draw)` using the fresh coin draw `draw : Fin cardD`. -/
+def lazyRomStep {Dom : Type} [DecidableEq Dom] {cardD : Nat}
+    (st : List (Dom × Fin cardD)) (q : Dom) (draw : Fin cardD) :
+    Fin cardD × List (Dom × Fin cardD) :=
+  match roLookup st q with
+  | some y => (y, st)
+  | none => (draw, (q, draw) :: st)
+
+theorem lazyRomStep_mem {Dom : Type} [DecidableEq Dom] {cardD : Nat} :
+    ∀ (st : List (Dom × Fin cardD)) (q : Dom) (draw : Fin cardD),
+      (q, (lazyRomStep st q draw).1) ∈ (lazyRomStep st q draw).2 := by
+  intro st q draw
+  unfold lazyRomStep
+  cases hL : roLookup st q with
+  | none => exact List.Mem.head _
+  | some y =>
+    suffices ∀ l : List (Dom × Fin cardD), roLookup l q = some y → (q, y) ∈ l from this st hL
+    intro l hl
+    induction l with
+    | nil => cases hl
+    | cons hd tl ih =>
+      unfold roLookup at hl
+      by_cases hq : q = hd.1
+      · rw [iteOfPos hq] at hl
+        cases hl
+        cases hd
+        dsimp only at hq
+        subst hq
+        exact List.Mem.head _
+      · rw [iteOfNeg hq] at hl
+        exact List.Mem.tail _ (ih hl)
+
+theorem lazyRomStep_preserves_mem {Dom : Type} [DecidableEq Dom] {cardD : Nat}
+    (st : List (Dom × Fin cardD)) (q : Dom) (draw : Fin cardD) {e : Dom × Fin cardD}
+    (he : e ∈ st) : e ∈ (lazyRomStep st q draw).2 := by
+  unfold lazyRomStep
+  cases roLookup st q with
+  | some _ => exact he
+  | none => exact List.Mem.tail _ he
+
+/-- Execute an adaptive random-oracle program `c` against a lazy random oracle over `K` coin draws. -/
+def lazyRomRun {Dom R : Type} [DecidableEq Dom] {cardD : Nat} (hCard : 0 < cardD) :
+    Code (roOracleIface Dom cardD) R → (K : Nat) → List (Dom × Fin cardD) →
+      Fin (roCoinPow cardD K) → R × List (Dom × Fin cardD)
+  | .ret v, _, st, _ => (v, st)
+  | .call q next, 0, st, ω =>
+    let step := lazyRomStep st q ⟨0, hCard⟩
+    lazyRomRun hCard (next step.1) 0 step.2 ω
+  | .call q next, K + 1, st, ω =>
+    let split := CoinSplit.prod cardD (roCoinPow cardD K)
+    let step := lazyRomStep st q (split.chal ω)
+    lazyRomRun hCard (next step.1) K step.2 (split.advc ω)
+
+theorem lazyRomRun_ret {Dom R : Type} [DecidableEq Dom] {cardD : Nat} (hCard : 0 < cardD)
+    (v : R) (K : Nat) (st : List (Dom × Fin cardD)) (ω : Fin (roCoinPow cardD K)) :
+    lazyRomRun hCard (.ret v) K st ω = (v, st) := rfl
+
+theorem lazyRomRun_call_succ {Dom R : Type} [DecidableEq Dom] {cardD : Nat} (hCard : 0 < cardD)
+    (q : Dom) (next : Fin cardD → Code (roOracleIface Dom cardD) R) (K : Nat)
+    (st : List (Dom × Fin cardD)) (ω : Fin (roCoinPow cardD (K + 1))) :
+    lazyRomRun hCard (.call q next) (K + 1) st ω =
+      lazyRomRun hCard (next (lazyRomStep st q ((CoinSplit.prod cardD (roCoinPow cardD K)).chal ω)).1)
+        K (lazyRomStep st q ((CoinSplit.prod cardD (roCoinPow cardD K)).chal ω)).2
+        ((CoinSplit.prod cardD (roCoinPow cardD K)).advc ω) := rfl
+
+/-- Whether any recorded `(query, digest)` entry in `st` triggers `stepBad`. -/
+def tableHasBad {Dom : Type} {cardD : Nat} (stepBad : Dom → Fin cardD → Bool)
+    (st : List (Dom × Fin cardD)) : Bool :=
+  st.any (fun e => stepBad e.1 e.2)
+
+/-- **Master `Within` Lazy-ROM Bad-Event Bound.** If every fresh query `x : Dom` has at most `B`
+    bad draws in `Fin cardD`, then for every adaptive program `c` satisfying `Within qH c` (`qH ≤ K`)
+    starting from a bad-free initial table `st`, the probability of recording a bad entry is at most
+    `(qH * B) / cardD`. -/
+theorem lazyRomRun_bad_bound {Dom R : Type} [DecidableEq Dom] {cardD : Nat} (hCard : 0 < cardD)
+    (stepBad : Dom → Fin cardD → Bool) (B : Nat)
+    (hStepBound : ∀ x : Dom, sampleSum cardD (fun d => if stepBad x d then 1 else 0) ≤ B) :
+    ∀ (c : Code (roOracleIface Dom cardD) R) {qH K : Nat},
+      qH ≤ K → Within qH c → ∀ (st : List (Dom × Fin cardD)),
+      tableHasBad stepBad st = false →
+      sampleSum (roCoinPow cardD K)
+        (fun ω => if tableHasBad stepBad (lazyRomRun hCard c K st ω).2 then 1 else 0) * cardD ≤
+        (qH * B) * roCoinPow cardD K
+  | .ret _, _, K, _, _, st, hClean => by
+    have hZero : (fun ω : Fin (roCoinPow cardD K) =>
+        if tableHasBad stepBad (lazyRomRun hCard (.ret _) K st ω).2 then 1 else 0) =
+        (fun _ => 0) := by
+      funext ω; rw [lazyRomRun_ret, hClean]; rfl
+    rw [hZero, sampleSum_const, Nat.mul_zero, Nat.zero_mul]
+    exact Nat.zero_le _
+  | .call q next, 0, _, _, hW, _, _ => nomatch hW
+  | .call _ _, _ + 1, 0, hqK, _, _, _ => absurd hqK (Nat.not_succ_le_zero _)
+  | .call q next, qH + 1, K + 1, hqK, .call _ _ hk, st, hClean => by
+    have hqK' : qH ≤ K := Nat.le_of_succ_le_succ hqK
+    rw [show roCoinPow cardD (K + 1) = cardD * roCoinPow cardD K from rfl,
+      sampleSum_prod cardD (roCoinPow cardD K)]
+    let p := CoinSplit.prod cardD (roCoinPow cardD K)
+    let inner : Fin cardD → Nat := fun d =>
+      sampleSum (roCoinPow cardD K) (fun τ =>
+        if tableHasBad stepBad
+            (lazyRomRun hCard (next (lazyRomStep st q d).1) K (lazyRomStep st q d).2 τ).2
+        then 1 else 0)
+    have hInnerEq : sampleSum cardD (fun d => sampleSum (roCoinPow cardD K) (fun τ =>
+        if tableHasBad stepBad
+            (lazyRomRun hCard (.call q next) (K + 1) st ⟨d.1 * roCoinPow cardD K + τ.1,
+              prodCoin_pair_lt d τ⟩).2
+        then 1 else 0)) = sampleSum cardD inner := by
+      refine sampleSum_ext (fun d => sampleSum_ext (fun τ => ?_))
+      have hPair : (⟨d.1 * roCoinPow cardD K + τ.1, prodCoin_pair_lt d τ⟩ :
+          Fin (cardD * roCoinPow cardD K)) = p.pair d τ := rfl
+      rw [hPair, lazyRomRun_call_succ, p.chal_pair, p.advc_pair]
+    rw [hInnerEq, ← sampleSum_mul_right cardD inner cardD]
+    cases hLook : roLookup st q with
+    | some y =>
+      have hStepEq : ∀ d, lazyRomStep st q d = (y, st) := fun d => by
+        unfold lazyRomStep; rw [hLook]
+      have hPt : ∀ d : Fin cardD, inner d * cardD ≤ (qH * B) * roCoinPow cardD K := fun d => by
+        dsimp only [inner]
+        rw [hStepEq d]
+        exact lazyRomRun_bad_bound hCard stepBad B hStepBound (next y) hqK' (hk y) st hClean
+      have hSum := sampleSum_le cardD (fun d => inner d * cardD)
+        (fun _ => (qH * B) * roCoinPow cardD K) hPt
+      rw [sampleSum_const] at hSum
+      refine Nat.le_trans hSum ?_
+      have h1 : cardD * ((qH * B) * roCoinPow cardD K) = (qH * B) * (cardD * roCoinPow cardD K) := by
+        simp only [Nat.mul_left_comm, Nat.mul_comm]
+      rw [h1]
+      exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_right B (Nat.le_succ qH))
+    | none =>
+      have hStepEq : ∀ d, lazyRomStep st q d = (d, (q, d) :: st) := fun d => by
+        unfold lazyRomStep; rw [hLook]
+      have hPt : ∀ d : Fin cardD,
+          inner d * cardD ≤
+            (if stepBad q d then 1 else 0) * (cardD * roCoinPow cardD K) +
+              (qH * B) * roCoinPow cardD K := fun d => by
+        dsimp only [inner]
+        rw [hStepEq d]
+        cases hBadD : stepBad q d
+        · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul, Nat.zero_add]
+          have hClean' : tableHasBad stepBad ((q, d) :: st) = false := by
+            unfold tableHasBad
+            rw [List.any_cons, hBadD, Bool.false_or]
+            exact hClean
+          exact lazyRomRun_bad_bound hCard stepBad B hStepBound (next d) hqK' (hk d)
+            ((q, d) :: st) hClean'
+        · simp only [↓reduceIte, Nat.one_mul]
+          have hTriv : sampleSum (roCoinPow cardD K) (fun τ =>
+              if tableHasBad stepBad (lazyRomRun hCard (next d) K ((q, d) :: st) τ).2
+              then 1 else 0) ≤ roCoinPow cardD K :=
+            sampleSum_le_card_of_le_one _ _ (fun τ => by
+              cases tableHasBad stepBad (lazyRomRun hCard (next d) K ((q, d) :: st) τ).2 <;> decide)
+          have hMul := Nat.mul_le_mul_right cardD hTriv
+          rw [Nat.mul_comm (roCoinPow cardD K) cardD] at hMul
+          exact Nat.le_trans hMul (Nat.le_add_right _ _)
+      have hSum := sampleSum_le cardD (fun d => inner d * cardD) _ hPt
+      rw [sampleSum_add_fn, sampleSum_mul_right, sampleSum_const] at hSum
+      refine Nat.le_trans hSum ?_
+      have hB := Nat.mul_le_mul_right (cardD * roCoinPow cardD K) (hStepBound q)
+      have hRearr : B * (cardD * roCoinPow cardD K) + cardD * (qH * B * roCoinPow cardD K) =
+          (qH + 1) * B * (cardD * roCoinPow cardD K) := by
+        rw [Nat.succ_mul, Nat.add_mul]
+        have hMid : cardD * (qH * B * roCoinPow cardD K) = qH * B * (cardD * roCoinPow cardD K) := by
+          simp only [Nat.mul_left_comm, Nat.mul_comm]
+        rw [hMid, Nat.add_comm]
+      exact Nat.le_trans (Nat.add_le_add_right hB _) (Nat.le_of_eq hRearr)
+
+/-- Verify a final query after running `adv`, consuming one additional RO evaluation. -/
+def withFinalRoCheck {Dom R : Type} {cardD : Nat} (finalQuery : R → Dom)
+    (adv : Code (roOracleIface Dom cardD) R) : Code (roOracleIface Dom cardD) (R × Fin cardD) :=
+  Code.bind adv (fun out => .call (finalQuery out) (fun y => .ret (out, y)))
+
+theorem withFinalRoCheck_within {Dom R : Type} {cardD qH : Nat} (finalQuery : R → Dom)
+    {adv : Code (roOracleIface Dom cardD) R} (hW : Within qH adv) :
+    Within (qH + 1) (withFinalRoCheck finalQuery adv) :=
+  Within.bind hW (fun out => Within.call (finalQuery out) _ (fun y => Within.ret 0 (out, y)))
+
+theorem withFinalRoCheck_mem {Dom R : Type} [DecidableEq Dom] {cardD : Nat} (hCard : 0 < cardD)
+    (finalQuery : R → Dom) :
+    ∀ (adv : Code (roOracleIface Dom cardD) R) (K : Nat) (st : List (Dom × Fin cardD))
+      (ω : Fin (roCoinPow cardD K)),
+      let res := lazyRomRun hCard (withFinalRoCheck finalQuery adv) K st ω
+      (finalQuery res.1.1, res.1.2) ∈ res.2
+  | .ret out, 0, st, _ => lazyRomStep_mem st (finalQuery out) ⟨0, hCard⟩
+  | .ret out, K + 1, st, ω =>
+    lazyRomStep_mem st (finalQuery out) ((CoinSplit.prod cardD (roCoinPow cardD K)).chal ω)
+  | .call q next, 0, st, ω =>
+    withFinalRoCheck_mem hCard finalQuery (next (lazyRomStep st q ⟨0, hCard⟩).1) 0
+      (lazyRomStep st q ⟨0, hCard⟩).2 ω
+  | .call q next, K + 1, st, ω =>
+    withFinalRoCheck_mem hCard finalQuery
+      (next (lazyRomStep st q ((CoinSplit.prod cardD (roCoinPow cardD K)).chal ω)).1) K
+      (lazyRomStep st q ((CoinSplit.prod cardD (roCoinPow cardD K)).chal ω)).2
+      ((CoinSplit.prod cardD (roCoinPow cardD K)).advc ω)
+
+/-- Committed distinct-tweak target entry `(tweak, msg, digest)` for coin-sampled ROM `SM-DT-TCR`. -/
+structure RomTcrTarget (cardD : Nat) where
+  tweak : Bytes
+  msg : Bytes
+  digest : Fin cardD
+  deriving DecidableEq, Repr
+
+/-- Bad step predicate for `SM-DT-TCR`: `(t, m')` collides with the committed target under tweak `t`
+    on a distinct message `m' ≠ m`. -/
+def romTcrStepBad {cardD : Nat} (targets : List (RomTcrTarget cardD))
+    (q : Bytes × Bytes) (d : Fin cardD) : Bool :=
+  targets.any (fun e => decide (q.1 = e.tweak ∧ q.2 ≠ e.msg ∧ d = e.digest))
+
+private theorem romTcrStepBad_initial_clean {cardD : Nat} (targets : List (RomTcrTarget cardD))
+    (hNodup : (targets.map RomTcrTarget.tweak).Nodup) :
+    tableHasBad (romTcrStepBad targets)
+      (targets.map (fun e => ((e.tweak, e.msg), e.digest))) = false := by
+  apply Bool.eq_false_iff.mpr
+  intro hBad
+  unfold tableHasBad at hBad
+  obtain ⟨pair, hMemPair, hStep⟩ := List.any_eq_true.mp hBad
+  obtain ⟨e₁, hMem₁, rfl⟩ := List.mem_map.mp hMemPair
+  unfold romTcrStepBad at hStep
+  obtain ⟨e₂, hMem₂, hDec⟩ := List.any_eq_true.mp hStep
+  obtain ⟨hTw, hNeMsg, _⟩ := of_decide_eq_true hDec
+  have hSame : e₁ = e₂ := by
+    induction targets with
+    | nil => nomatch hMem₁
+    | cons hd tl ih =>
+      obtain ⟨hHead, hTail⟩ := List.nodup_cons.mp hNodup
+      rcases List.mem_cons.mp hMem₁ with rfl | h1
+      · rcases List.mem_cons.mp hMem₂ with rfl | h2
+        · rfl
+        · exact False.elim (hHead (hTw ▸ List.mem_map_of_mem h2))
+      · rcases List.mem_cons.mp hMem₂ with rfl | h2
+        · exact False.elim (hHead (hTw.symm ▸ List.mem_map_of_mem h1))
+        · exact ih hTail h1 h2
+  subst hSame
+  exact hNeMsg rfl
+
+private theorem romTcrStepBad_le_one {cardD : Nat} (targets : List (RomTcrTarget cardD))
+    (hNodup : (targets.map RomTcrTarget.tweak).Nodup) (q : Bytes × Bytes) :
+    sampleSum cardD (fun d => if romTcrStepBad targets q d then 1 else 0) ≤ 1 := by
+  refine sampleSum_bool_le_one_of_subsingleton _ (fun d₁ d₂ h₁ h₂ => ?_)
+  obtain ⟨e₁, hMem₁, hDec₁⟩ := List.any_eq_true.mp h₁
+  obtain ⟨e₂, hMem₂, hDec₂⟩ := List.any_eq_true.mp h₂
+  obtain ⟨hTw₁, _, hd₁⟩ := of_decide_eq_true hDec₁
+  obtain ⟨hTw₂, _, hd₂⟩ := of_decide_eq_true hDec₂
+  have hSame : e₁ = e₂ := by
+    have hTwEq : e₁.tweak = e₂.tweak := hTw₁.symm.trans hTw₂
+    induction targets with
+    | nil => nomatch hMem₁
+    | cons hd tl ih =>
+      obtain ⟨hHead, hTail⟩ := List.nodup_cons.mp hNodup
+      rcases List.mem_cons.mp hMem₁ with rfl | h1
+      · rcases List.mem_cons.mp hMem₂ with rfl | h2
+        · rfl
+        · exact False.elim (hHead (hTwEq ▸ List.mem_map_of_mem h2))
+      · rcases List.mem_cons.mp hMem₂ with rfl | h2
+        · exact False.elim (hHead (hTwEq.symm ▸ List.mem_map_of_mem h1))
+        · exact ih hTail h1 h2
+  subst hSame
+  exact hd₁.trans hd₂.symm
+
+/-- **Coin-Sampled Lazy-ROM `SM-DT-TCR` Game.** Given committed distinct-tweak targets `targets`,
+    the adversary `adv` queries the random oracle `(tweak, msg) ↦ Fin cardD` over a tape of `K + 1`
+    independent draws and wins if it outputs `(tweak, committed, candidate)` colliding with a
+    committed target on `candidate ≠ committed`. -/
+def romSmDtTcrGame {cardD : Nat} (hCard : 0 < cardD) (targets : List (RomTcrTarget cardD))
+    (K : Nat) (adv : Code (roOracleIface (Bytes × Bytes) cardD) TargetBreak) :
+    FinGame (roCoinPow cardD (K + 1)) where
+  samplePos := roCoinPow_pos hCard (K + 1)
+  win ω :=
+    let st₀ := targets.map (fun e => ((e.tweak, e.msg), e.digest))
+    let res := lazyRomRun hCard
+      (withFinalRoCheck (fun out : TargetBreak => (out.tweak, out.candidate)) adv) (K + 1) st₀ ω
+    let out := res.1.1
+    let yCand := res.1.2
+    targets.any (fun e =>
+      decide (out.tweak = e.tweak ∧ out.committed = e.msg ∧
+        out.candidate ≠ e.msg ∧ yCand = e.digest))
+
+theorem romSmDtTcrGame_win_eq {cardD : Nat} (hCard : 0 < cardD)
+    (targets : List (RomTcrTarget cardD)) (K : Nat)
+    (adv : Code (roOracleIface (Bytes × Bytes) cardD) TargetBreak)
+    (ω : Fin (roCoinPow cardD (K + 1))) :
+    (romSmDtTcrGame hCard targets K adv).win ω =
+      let st₀ := targets.map (fun e => ((e.tweak, e.msg), e.digest))
+      let res := lazyRomRun hCard
+        (withFinalRoCheck (fun out : TargetBreak => (out.tweak, out.candidate)) adv) (K + 1) st₀ ω
+      targets.any (fun e =>
+        decide (res.1.1.tweak = e.tweak ∧ res.1.1.committed = e.msg ∧
+          res.1.1.candidate ≠ e.msg ∧ res.1.2 = e.digest)) := rfl
+
+/-- **Query-Bounded ROM `SM-DT-TCR` Hardness (`(qH + 1) / cardD`).** Under pairwise-distinct target
+    tweaks, every `Within qH` random-oracle adversary (`qH ≤ K`) wins `romSmDtTcrGame` with
+    probability at most `(qH + 1) / cardD`, independent of the number of committed targets. -/
+theorem romSmDtTcr_within_bound {cardD : Nat} (hCard : 0 < cardD)
+    (targets : List (RomTcrTarget cardD)) (hNodup : (targets.map RomTcrTarget.tweak).Nodup)
+    {qH K : Nat} (hqK : qH ≤ K)
+    (adv : Code (roOracleIface (Bytes × Bytes) cardD) TargetBreak) (hW : Within qH adv) :
+    GameBound (romSmDtTcrGame hCard targets K adv).winProb ⟨qH + 1, cardD, hCard⟩ := by
+  let st₀ := targets.map (fun e => ((e.tweak, e.msg), e.digest))
+  let prog := withFinalRoCheck (fun out : TargetBreak => (out.tweak, out.candidate)) adv
+  have hImp : ∀ ω : Fin (roCoinPow cardD (K + 1)),
+      (romSmDtTcrGame hCard targets K adv).win ω = true →
+      tableHasBad (romTcrStepBad targets) (lazyRomRun hCard prog (K + 1) st₀ ω).2 = true := by
+    intro ω hWin
+    obtain ⟨e, hMemE, hDec⟩ := List.any_eq_true.mp hWin
+    obtain ⟨hTw, _, hNe, hDig⟩ := of_decide_eq_true hDec
+    have hInTable := withFinalRoCheck_mem hCard
+      (fun out : TargetBreak => (out.tweak, out.candidate)) adv K st₀ ω
+    unfold tableHasBad
+    exact List.any_eq_true.mpr ⟨_, hInTable,
+      List.any_eq_true.mpr ⟨e, hMemE, decide_eq_true ⟨hTw, hNe, hDig⟩⟩⟩
+  have hRed := sampleSum_le (roCoinPow cardD (K + 1))
+    (fun ω => if (romSmDtTcrGame hCard targets K adv).win ω then 1 else 0)
+    (fun ω => if tableHasBad (romTcrStepBad targets) (lazyRomRun hCard prog (K + 1) st₀ ω).2
+      then 1 else 0)
+    (fun ω => by
+      cases hw : (romSmDtTcrGame hCard targets K adv).win ω
+      · exact Nat.zero_le _
+      · rw [hImp ω hw]; exact Nat.le_refl 1)
+  have hMaster := lazyRomRun_bad_bound hCard (romTcrStepBad targets) 1
+    (romTcrStepBad_le_one targets hNodup) prog (Nat.succ_le_succ hqK)
+    (withFinalRoCheck_within _ hW) st₀ (romTcrStepBad_initial_clean targets hNodup)
+  rw [Nat.mul_one] at hMaster
+  unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
+  dsimp only
+  exact Nat.le_trans (Nat.mul_le_mul_right cardD hRed) hMaster
+
+/-- **Coin-Sampled Lazy-ROM `SM-DT-PRE` Game.** Given distinct tweaks `tweaks` (`tweaks.length = qT`),
+    a coin in `roCoinPow cardX qT * (roCoinPow cardD qT * roCoinPow cardD (K + 1))` samples `qT`
+    independent uniform hidden inputs in `Fin cardX`, `qT` uniform target digests in `Fin cardD`,
+    and `K + 1` lazy RO draws; the adversary receives `[(t_i, y_i)]` and wins if its candidate
+    `(tweak, idx)` hashes to `y_i` under `tweak = t_i`. -/
+def romPreDecodeVec {base : Nat} (hBase : 0 < base) :
+    (m : Nat) → Fin (roCoinPow base m) → List (Fin base)
+  | 0, _ => []
+  | m + 1, ω =>
+    let p := CoinSplit.prod base (roCoinPow base m)
+    p.chal ω :: romPreDecodeVec hBase m (p.advc ω)
+
+theorem romPreDecodeVec_length {base : Nat} (hBase : 0 < base) :
+    ∀ (m : Nat) (ω : Fin (roCoinPow base m)), (romPreDecodeVec hBase m ω).length = m
+  | 0, _ => rfl
+  | m + 1, ω => congrArg Nat.succ (romPreDecodeVec_length hBase m _)
+
+private theorem romPreDecodeVec_hit_bound {cardX : Nat} (hX : 0 < cardX) :
+    ∀ (m idx : Nat) (target : Fin cardX),
+      sampleSum (roCoinPow cardX m)
+        (fun xVec =>
+          match (romPreDecodeVec hX m xVec)[idx]? with
+          | some x => if x = target then 1 else 0
+          | none => 0) * cardX ≤ roCoinPow cardX m
+  | 0, _, _ => by
+    have hZ : (fun xVec : Fin 1 =>
+        match (romPreDecodeVec hX 0 xVec)[_]? with
+        | some x => if x = _ then 1 else 0
+        | none => 0) = (fun _ => 0) := rfl
+    rw [hZ, sampleSum_const, Nat.mul_zero, Nat.zero_mul]
+    exact Nat.zero_le _
+  | m + 1, 0, target => by
+    rw [show roCoinPow cardX (m + 1) = cardX * roCoinPow cardX m from rfl,
+      sampleSum_prod cardX (roCoinPow cardX m)]
+    let p := CoinSplit.prod cardX (roCoinPow cardX m)
+    have hSimpl : sampleSum cardX (fun d => sampleSum (roCoinPow cardX m) (fun τ =>
+        match (romPreDecodeVec hX (m + 1) ⟨d.1 * roCoinPow cardX m + τ.1,
+          prodCoin_pair_lt d τ⟩)[0]? with
+        | some x => if x = target then 1 else 0
+        | none => 0)) =
+        sampleSum cardX (fun d => (if d = target then 1 else 0) * roCoinPow cardX m) := by
+      refine sampleSum_ext (fun d => ?_)
+      have hInner : (fun τ : Fin (roCoinPow cardX m) =>
+          match (romPreDecodeVec hX (m + 1) ⟨d.1 * roCoinPow cardX m + τ.1,
+            prodCoin_pair_lt d τ⟩)[0]? with
+          | some x => if x = target then 1 else 0
+          | none => 0) = (fun _ => if d = target then 1 else 0) := by
+        funext τ
+        have hPair : (⟨d.1 * roCoinPow cardX m + τ.1, prodCoin_pair_lt d τ⟩ :
+            Fin (cardX * roCoinPow cardX m)) = p.pair d τ := rfl
+        rw [hPair]
+        show (if p.chal (p.pair d τ) = target then 1 else 0) = _
+        rw [p.chal_pair]
+      rw [hInner, sampleSum_const, Nat.mul_comm]
+    rw [hSimpl, sampleSum_mul_right]
+    have hLe := Nat.mul_le_mul_right (roCoinPow cardX m * cardX)
+      (sampleSum_indicator_le_one cardX target)
+    rw [Nat.one_mul, ← Nat.mul_assoc] at hLe
+    refine Nat.le_trans hLe ?_
+    rw [Nat.mul_comm (roCoinPow cardX m) cardX]
+    exact Nat.le_refl _
+  | m + 1, idx + 1, target => by
+    rw [show roCoinPow cardX (m + 1) = cardX * roCoinPow cardX m from rfl,
+      sampleSum_prod cardX (roCoinPow cardX m)]
+    let p := CoinSplit.prod cardX (roCoinPow cardX m)
+    have hSimpl : sampleSum cardX (fun d => sampleSum (roCoinPow cardX m) (fun τ =>
+        match (romPreDecodeVec hX (m + 1) ⟨d.1 * roCoinPow cardX m + τ.1,
+          prodCoin_pair_lt d τ⟩)[idx + 1]? with
+        | some x => if x = target then 1 else 0
+        | none => 0)) =
+        sampleSum cardX (fun _ => sampleSum (roCoinPow cardX m) (fun τ =>
+          match (romPreDecodeVec hX m τ)[idx]? with
+          | some x => if x = target then 1 else 0
+          | none => 0)) := by
+      refine sampleSum_ext (fun d => sampleSum_ext (fun τ => ?_))
+      have hPair : (⟨d.1 * roCoinPow cardX m + τ.1, prodCoin_pair_lt d τ⟩ :
+          Fin (cardX * roCoinPow cardX m)) = p.pair d τ := rfl
+      rw [hPair]
+      show (match (p.chal (p.pair d τ) :: romPreDecodeVec hX m (p.advc (p.pair d τ)))[idx + 1]? with
+        | some x => if x = target then 1 else 0
+        | none => 0) = _
+      rw [p.advc_pair]
+      rfl
+    rw [hSimpl, sampleSum_const, Nat.mul_assoc]
+    exact Nat.mul_le_mul_left cardX (romPreDecodeVec_hit_bound hX m idx target)
+
+/-- Coin-sampled ROM `SM-DT-PRE` game over `(xVec, yVec, τ)`. -/
+def romSmDtPreGame {cardX cardD : Nat} (hX : 0 < cardX) (hD : 0 < cardD)
+    (tweaks : List Bytes) (K : Nat)
+    (adv : List (Bytes × Fin cardD) → Code (roOracleIface (Bytes × Fin cardX) cardD) (Bytes × Fin cardX)) :
+    FinGame (roCoinPow cardX tweaks.length *
+      (roCoinPow cardD tweaks.length * roCoinPow cardD (K + 1))) where
+  samplePos := Nat.mul_pos (roCoinPow_pos hX _)
+    (Nat.mul_pos (roCoinPow_pos hD _) (roCoinPow_pos hD (K + 1)))
+  win ω :=
+    let s1 := CoinSplit.prod (roCoinPow cardX tweaks.length)
+      (roCoinPow cardD tweaks.length * roCoinPow cardD (K + 1))
+    let s2 := CoinSplit.prod (roCoinPow cardD tweaks.length) (roCoinPow cardD (K + 1))
+    let xs := romPreDecodeVec hX tweaks.length (s1.chal ω)
+    let ys := romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))
+    let τ := s2.advc (s1.advc ω)
+    let pubTargets := List.zip tweaks ys
+    let st₀ := List.zip (List.zip tweaks xs) ys
+    let res := lazyRomRun hD (withFinalRoCheck id (adv pubTargets)) (K + 1) st₀ τ
+    pubTargets.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2))
+
+theorem romSmDtPreGame_win_eq {cardX cardD : Nat} (hX : 0 < cardX) (hD : 0 < cardD)
+    (tweaks : List Bytes) (K : Nat)
+    (adv : List (Bytes × Fin cardD) → Code (roOracleIface (Bytes × Fin cardX) cardD) (Bytes × Fin cardX))
+    (ω : Fin (roCoinPow cardX tweaks.length *
+      (roCoinPow cardD tweaks.length * roCoinPow cardD (K + 1)))) :
+    (romSmDtPreGame hX hD tweaks K adv).win ω =
+      let s1 := CoinSplit.prod (roCoinPow cardX tweaks.length)
+        (roCoinPow cardD tweaks.length * roCoinPow cardD (K + 1))
+      let s2 := CoinSplit.prod (roCoinPow cardD tweaks.length) (roCoinPow cardD (K + 1))
+      let xs := romPreDecodeVec hX tweaks.length (s1.chal ω)
+      let ys := romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))
+      let τ := s2.advc (s1.advc ω)
+      let pubTargets := List.zip tweaks ys
+      let st₀ := List.zip (List.zip tweaks xs) ys
+      let res := lazyRomRun hD (withFinalRoCheck id (adv pubTargets)) (K + 1) st₀ τ
+      pubTargets.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2)) := rfl
+
+private def romPreIdealQueries {Dom R : Type} [DecidableEq Dom] {cardD : Nat} (hD : 0 < cardD) :
+    Code (roOracleIface Dom cardD) R → (K : Nat) → List (Dom × Fin cardD) →
+      Fin (roCoinPow cardD K) → List Dom
+  | .ret _, _, _, _ => []
+  | .call q next, 0, st, ω =>
+    let step := lazyRomStep st q ⟨0, hD⟩
+    q :: romPreIdealQueries hD (next step.1) 0 step.2 ω
+  | .call q next, K + 1, st, ω =>
+    let p := CoinSplit.prod cardD (roCoinPow cardD K)
+    let step := lazyRomStep st q (p.chal ω)
+    q :: romPreIdealQueries hD (next step.1) K step.2 (p.advc ω)
+
+private theorem romPreIdealQueries_length {Dom R : Type} [DecidableEq Dom] {cardD : Nat}
+    (hD : 0 < cardD) :
+    ∀ (c : Code (roOracleIface Dom cardD) R) {qH K : Nat},
+      Within qH c → ∀ (st : List (Dom × Fin cardD)) (ω : Fin (roCoinPow cardD K)),
+      (romPreIdealQueries hD c K st ω).length ≤ qH
+  | .ret _, _, _, _, _, _ => Nat.zero_le _
+  | .call _ _, 0, _, hW, _, _ => nomatch hW
+  | .call q next, _ + 1, 0, .call _ _ hk, st, ω =>
+    Nat.succ_le_succ (romPreIdealQueries_length hD _ (hk _) _ ω)
+  | .call q next, _ + 1, K + 1, .call _ _ hk, st, ω =>
+    Nat.succ_le_succ (romPreIdealQueries_length hD _ (hk _) _ _)
+
+private theorem lazyRomRun_agree_unless_queried {Dom R : Type} [DecidableEq Dom] {cardD : Nat}
+    (hD : 0 < cardD) (stBase : List (Dom × Fin cardD)) :
+    ∀ (c : Code (roOracleIface Dom cardD) R) (K : Nat) (stExtra : List (Dom × Fin cardD))
+      (ω : Fin (roCoinPow cardD K)),
+      (∀ q ∈ romPreIdealQueries hD c K stExtra ω, q ∉ stBase.map Prod.fst) →
+      (lazyRomRun hD c K (stExtra ++ stBase) ω).1 = (lazyRomRun hD c K stExtra ω).1
+  | .ret _, _, _, _, _ => rfl
+  | .call q next, 0, stExtra, ω, hDisj => by
+    have hNotBase : q ∉ stBase.map Prod.fst := hDisj q (List.Mem.head _)
+    have hLookEq : roLookup (stExtra ++ stBase) q = roLookup stExtra q := by
+      induction stExtra with
+      | nil =>
+        suffices ∀ l : List (Dom × Fin cardD), q ∉ l.map Prod.fst → roLookup l q = none from
+          this stBase hNotBase
+        intro l hl
+        induction l with
+        | nil => rfl
+        | cons hd tl ihL =>
+          unfold roLookup
+          rw [iteOfNeg (fun h => hl (h ▸ List.Mem.head _))]
+          exact ihL (fun h => hl (List.Mem.tail _ h))
+      | cons hd tl ihE =>
+        unfold roLookup
+        by_cases hq : q = hd.1
+        · rw [iteOfPos hq, iteOfPos hq]
+        · rw [iteOfNeg hq, iteOfNeg hq]; exact ihE
+    have hStep : lazyRomStep (stExtra ++ stBase) q ⟨0, hD⟩ =
+        ((lazyRomStep stExtra q ⟨0, hD⟩).1, (lazyRomStep stExtra q ⟨0, hD⟩).2 ++ stBase) := by
+      unfold lazyRomStep; rw [hLookEq]
+      cases roLookup stExtra q <;> rfl
+    show (lazyRomRun hD (next (lazyRomStep (stExtra ++ stBase) q ⟨0, hD⟩).1) 0
+      (lazyRomStep (stExtra ++ stBase) q ⟨0, hD⟩).2 ω).1 = _
+    rw [hStep]
+    exact lazyRomRun_agree_unless_queried hD stBase _ 0 _ ω
+      (fun q' hq' => hDisj q' (List.Mem.tail _ hq'))
+  | .call q next, K + 1, stExtra, ω, hDisj => by
+    let p := CoinSplit.prod cardD (roCoinPow cardD K)
+    have hNotBase : q ∉ stBase.map Prod.fst := hDisj q (List.Mem.head _)
+    have hLookEq : roLookup (stExtra ++ stBase) q = roLookup stExtra q := by
+      induction stExtra with
+      | nil =>
+        suffices ∀ l : List (Dom × Fin cardD), q ∉ l.map Prod.fst → roLookup l q = none from
+          this stBase hNotBase
+        intro l hl
+        induction l with
+        | nil => rfl
+        | cons hd tl ihL =>
+          unfold roLookup
+          rw [iteOfNeg (fun h => hl (h ▸ List.Mem.head _))]
+          exact ihL (fun h => hl (List.Mem.tail _ h))
+      | cons hd tl ihE =>
+        unfold roLookup
+        by_cases hq : q = hd.1
+        · rw [iteOfPos hq, iteOfPos hq]
+        · rw [iteOfNeg hq, iteOfNeg hq]; exact ihE
+    have hStep : lazyRomStep (stExtra ++ stBase) q (p.chal ω) =
+        ((lazyRomStep stExtra q (p.chal ω)).1, (lazyRomStep stExtra q (p.chal ω)).2 ++ stBase) := by
+      unfold lazyRomStep; rw [hLookEq]
+      cases roLookup stExtra q <;> rfl
+    show (lazyRomRun hD (next (lazyRomStep (stExtra ++ stBase) q (p.chal ω)).1) K
+      (lazyRomStep (stExtra ++ stBase) q (p.chal ω)).2 (p.advc ω)).1 = _
+    rw [hStep]
+    exact lazyRomRun_agree_unless_queried hD stBase _ K _ (p.advc ω)
+      (fun q' hq' => hDisj q' (List.Mem.tail _ hq'))
+
+private def findTweakIdx (tweaks : List Bytes) (t : Bytes) : Option Nat :=
+  (tweaks.zipIdx).find? (fun e => decide (e.1 = t)) |>.map Prod.snd
+
+private theorem mem_zip_tweaks_implies_find {cardX : Nat} :
+    ∀ (tweaks : List Bytes) (xs : List (Fin cardX)) (q : Bytes × Fin cardX),
+      tweaks.Nodup → q ∈ List.zip tweaks xs →
+      ∃ idx : Nat, findTweakIdx tweaks q.1 = some idx ∧ xs[idx]? = some q.2 := by
+  suffices ∀ (tweaks : List Bytes) (xs : List (Fin cardX)) (q : Bytes × Fin cardX) (k : Nat),
+      tweaks.Nodup → q ∈ List.zip tweaks xs →
+      ∃ idx : Nat,
+        ((tweaks.zipIdx k).find? (fun e => decide (e.1 = q.1)) |>.map Prod.snd) = some (k + idx) ∧
+        xs[idx]? = some q.2 from
+    fun tweaks xs q hNd hMem => by
+      obtain ⟨idx, h1, h2⟩ := this tweaks xs q 0 hNd hMem
+      rw [Nat.zero_add] at h1
+      exact ⟨idx, h1, h2⟩
+  intro tweaks
+  induction tweaks with
+  | nil => intro _ _ _ _ h; nomatch h
+  | cons t ts ih =>
+    intro xs q k hNd hMem
+    cases xs with
+    | nil => nomatch hMem
+    | cons x xs' =>
+      obtain ⟨hHead, hTail⟩ := List.nodup_cons.mp hNd
+      rcases List.mem_cons.mp hMem with rfl | hRest
+      · refine ⟨0, ?_, rfl⟩
+        simp [Nat.add_zero]
+      · have hNe : ¬ (t = q.1) := fun hEq => by
+          subst hEq
+          have hIn : t ∈ ts := by
+            clear hHead hTail ih
+            induction ts generalizing xs' with
+            | nil => nomatch hRest
+            | cons t' ts' ih2 =>
+              cases xs' with
+              | nil => nomatch hRest
+              | cons x' xs'' =>
+                rcases List.mem_cons.mp hRest with hE | hR
+                · injection hE with h1 _; subst h1; exact List.Mem.head _
+                · exact List.Mem.tail _ (ih2 xs'' hR)
+          exact hHead hIn
+        obtain ⟨idx, h1, h2⟩ := ih xs' q (k + 1) hTail hRest
+        refine ⟨idx + 1, ?_, h2⟩
+        simp only [List.zipIdx_cons, List.find?_cons, decide_eq_false hNe]
+        rw [h1]
+        exact congrArg some (by omega)
+
+private theorem romPre_queryList_hit_bound {cardX : Nat} (hX : 0 < cardX)
+    (tweaks : List Bytes) (hNodup : tweaks.Nodup) :
+    ∀ (qs : List (Bytes × Fin cardX)),
+      sampleSum (roCoinPow cardX tweaks.length)
+        (fun xVec =>
+          let xs := romPreDecodeVec hX tweaks.length xVec
+          if qs.any (fun q => decide (q ∈ List.zip tweaks xs)) then 1 else 0) * cardX ≤
+        qs.length * roCoinPow cardX tweaks.length
+  | [] => by
+    have hZ : (fun _ : Fin (roCoinPow cardX tweaks.length) =>
+        if ([] : List (Bytes × Fin cardX)).any _ then 1 else 0) = (fun _ => 0) := rfl
+    rw [hZ, sampleSum_const, Nat.mul_zero, Nat.zero_mul, Nat.zero_mul]
+    exact Nat.le_refl 0
+  | q :: qs => by
+    have hSplit : ∀ xVec : Fin (roCoinPow cardX tweaks.length),
+        (let xs := romPreDecodeVec hX tweaks.length xVec
+         if (q :: qs).any (fun q' => decide (q' ∈ List.zip tweaks xs)) then 1 else 0) ≤
+        (match findTweakIdx tweaks q.1 with
+         | some idx =>
+           match (romPreDecodeVec hX tweaks.length xVec)[idx]? with
+           | some x => if x = q.2 then 1 else 0
+           | none => 0
+         | none => 0) +
+        (let xs := romPreDecodeVec hX tweaks.length xVec
+         if qs.any (fun q' => decide (q' ∈ List.zip tweaks xs)) then 1 else 0) := by
+      intro xVec
+      dsimp only
+      rw [List.any_cons]
+      by_cases hq : q ∈ List.zip tweaks (romPreDecodeVec hX tweaks.length xVec)
+      · rw [decide_eq_true hq, Bool.true_or]
+        obtain ⟨idx, hFind, hGet⟩ := mem_zip_tweaks_implies_find tweaks _ q hNodup hq
+        rw [hFind, hGet, iteOfPos rfl]
+        omega
+      · rw [decide_eq_false hq, Bool.false_or]
+        exact Nat.le_add_left _ _
+    have hSum := sampleSum_le _ _ _ hSplit
+    rw [sampleSum_add_fn] at hSum
+    have hMul := Nat.mul_le_mul_right cardX hSum
+    rw [Nat.add_mul] at hMul
+    have hHead : sampleSum (roCoinPow cardX tweaks.length) (fun xVec =>
+        match findTweakIdx tweaks q.1 with
+        | some idx =>
+          match (romPreDecodeVec hX tweaks.length xVec)[idx]? with
+          | some x => if x = q.2 then 1 else 0
+          | none => 0
+        | none => 0) * cardX ≤ roCoinPow cardX tweaks.length := by
+      cases findTweakIdx tweaks q.1 with
+      | none =>
+        rw [sampleSum_const, Nat.mul_zero, Nat.zero_mul]; exact Nat.zero_le _
+      | some idx => exact romPreDecodeVec_hit_bound hX tweaks.length idx q.2
+    have hTail := romPre_queryList_hit_bound hX tweaks hNodup qs
+    refine Nat.le_trans hMul ?_
+    rw [List.length_cons, Nat.succ_mul, Nat.add_comm (qs.length * _)]
+    exact Nat.add_le_add hHead hTail
+
+/-- **Query-Bounded ROM `SM-DT-PRE` Hardness (`(qH + 1) / cardX + (qH + 1) / cardD`).** Under
+    pairwise-distinct tweaks, every family of `Within qH` random-oracle adversaries (`qH ≤ K`) wins
+    `romSmDtPreGame` with probability at most `(qH + 1) / cardX + (qH + 1) / cardD`. -/
+theorem romSmDtPre_within_bound {cardX cardD : Nat} (hX : 0 < cardX) (hD : 0 < cardD)
+    (tweaks : List Bytes) (hNodup : tweaks.Nodup) {qH K : Nat} (hqK : qH ≤ K)
+    (adv : List (Bytes × Fin cardD) → Code (roOracleIface (Bytes × Fin cardX) cardD) (Bytes × Fin cardX))
+    (hW : ∀ pub, Within qH (adv pub)) :
+    GameBound (romSmDtPreGame hX hD tweaks K adv).winProb
+      ((⟨qH + 1, cardX, hX⟩ : RatBound).add ⟨qH + 1, cardD, hD⟩) := by
+  let N_X := roCoinPow cardX tweaks.length
+  let N_Y := roCoinPow cardD tweaks.length
+  let N_T := roCoinPow cardD (K + 1)
+  let s1 := CoinSplit.prod N_X (N_Y * N_T)
+  let s2 := CoinSplit.prod N_Y N_T
+  have hPosTotal : 0 < N_X * (N_Y * N_T) := (romSmDtPreGame hX hD tweaks K adv).samplePos
+  let hitHidden : Fin (N_X * (N_Y * N_T)) → Bool := fun ω =>
+    let xs := romPreDecodeVec hX tweaks.length (s1.chal ω)
+    let ys := romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))
+    let τ := s2.advc (s1.advc ω)
+    let prog := withFinalRoCheck id (adv (List.zip tweaks ys))
+    (romPreIdealQueries hD prog (K + 1) [] τ).any (fun q => decide (q ∈ List.zip tweaks xs))
+  let hitDigestIdeal : Fin (N_X * (N_Y * N_T)) → Bool := fun ω =>
+    let ys := romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))
+    let τ := s2.advc (s1.advc ω)
+    let pub := List.zip tweaks ys
+    let prog := withFinalRoCheck id (adv pub)
+    let res := lazyRomRun hD prog (K + 1) [] τ
+    pub.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2))
+  let G₁ : FinGame (N_X * (N_Y * N_T)) := ⟨hPosTotal, hitHidden⟩
+  let G₂ : FinGame (N_X * (N_Y * N_T)) := ⟨hPosTotal, hitDigestIdeal⟩
+  have hCover : ∀ ω, (romSmDtPreGame hX hD tweaks K adv).win ω = true →
+      G₁.win ω = true ∨ G₂.win ω = true := by
+    intro ω hWin
+    cases hH : G₁.win ω
+    · refine .inr ?_
+      dsimp only [G₁, hitHidden] at hH
+      have hDisj : ∀ q ∈ romPreIdealQueries hD
+          (withFinalRoCheck id (adv (List.zip tweaks (romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))))))
+          (K + 1) [] (s2.advc (s1.advc ω)),
+          q ∉ (List.zip (List.zip tweaks (romPreDecodeVec hX tweaks.length (s1.chal ω)))
+            (romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω)))).map Prod.fst := by
+        intro q hq hInMap
+        obtain ⟨pair, hInZip, rfl⟩ := List.mem_map.mp hInMap
+        have hInZX : pair.1 ∈ List.zip tweaks (romPreDecodeVec hX tweaks.length (s1.chal ω)) := by
+          clear hH hq hWin
+          generalize List.zip tweaks (romPreDecodeVec hX tweaks.length (s1.chal ω)) = zx at hInZip
+          generalize romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω)) = zy at hInZip
+          induction zx generalizing zy with
+          | nil => nomatch hInZip
+          | cons a as ih =>
+            cases zy with
+            | nil => nomatch hInZip
+            | cons b bs =>
+              rcases List.mem_cons.mp hInZip with rfl | hR
+              · exact List.Mem.head _
+              · exact List.Mem.tail _ (ih bs hR)
+        have hAny : (romPreIdealQueries hD
+            (withFinalRoCheck id (adv (List.zip tweaks (romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))))))
+            (K + 1) [] (s2.advc (s1.advc ω))).any
+            (fun q' => decide (q' ∈ List.zip tweaks (romPreDecodeVec hX tweaks.length (s1.chal ω)))) = true :=
+          List.any_eq_true.mpr ⟨pair.1, hq, decide_eq_true hInZX⟩
+        rw [hAny] at hH
+        cases hH
+      have hAgree := lazyRomRun_agree_unless_queried hD
+        (List.zip (List.zip tweaks (romPreDecodeVec hX tweaks.length (s1.chal ω)))
+          (romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))))
+        (withFinalRoCheck id (adv (List.zip tweaks (romPreDecodeVec hD tweaks.length (s2.chal (s1.advc ω))))))
+        (K + 1) [] (s2.advc (s1.advc ω)) hDisj
+      rw [List.nil_append] at hAgree
+      dsimp only [G₂, hitDigestIdeal]
+      rw [romSmDtPreGame_win_eq] at hWin
+      dsimp only at hWin
+      rw [hAgree] at hWin
+      exact hWin
+    · exact .inl rfl
+  have hB1 : GameBound G₁.winProb ⟨qH + 1, cardX, hX⟩ := by
+    unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
+    dsimp only [G₁, hitHidden]
+    rw [s1.sampleSum_eq]
+    have hSwap : sampleSum N_X (fun xVec => sampleSum (N_Y * N_T) (fun yτ =>
+        if (romPreIdealQueries hD
+            (withFinalRoCheck id (adv (List.zip tweaks
+              (romPreDecodeVec hD tweaks.length (s2.chal (s1.advc (s1.pair xVec yτ)))))))
+            (K + 1) [] (s2.advc (s1.advc (s1.pair xVec yτ)))).any
+            (fun q => decide (q ∈ List.zip tweaks
+              (romPreDecodeVec hX tweaks.length (s1.chal (s1.pair xVec yτ)))))
+        then 1 else 0)) =
+        sampleSum (N_Y * N_T) (fun yτ => sampleSum N_X (fun xVec =>
+          let xs := romPreDecodeVec hX tweaks.length xVec
+          if (romPreIdealQueries hD
+              (withFinalRoCheck id (adv (List.zip tweaks (romPreDecodeVec hD tweaks.length (s2.chal yτ)))))
+              (K + 1) [] (s2.advc yτ)).any (fun q => decide (q ∈ List.zip tweaks xs))
+          then 1 else 0)) := by
+      have hClean1 : sampleSum N_X (fun xVec => sampleSum (N_Y * N_T) (fun yτ =>
+          if (romPreIdealQueries hD
+              (withFinalRoCheck id (adv (List.zip tweaks
+                (romPreDecodeVec hD tweaks.length (s2.chal (s1.advc (s1.pair xVec yτ)))))))
+              (K + 1) [] (s2.advc (s1.advc (s1.pair xVec yτ)))).any
+              (fun q => decide (q ∈ List.zip tweaks
+                (romPreDecodeVec hX tweaks.length (s1.chal (s1.pair xVec yτ)))))
+          then 1 else 0)) =
+          sampleSum N_X (fun xVec => sampleSum (N_Y * N_T) (fun yτ =>
+            let xs := romPreDecodeVec hX tweaks.length xVec
+            if (romPreIdealQueries hD
+                (withFinalRoCheck id (adv (List.zip tweaks (romPreDecodeVec hD tweaks.length (s2.chal yτ)))))
+                (K + 1) [] (s2.advc yτ)).any (fun q => decide (q ∈ List.zip tweaks xs))
+            then 1 else 0)) :=
+        sampleSum_ext (fun xVec => sampleSum_ext (fun yτ => by rw [s1.chal_pair, s1.advc_pair]))
+      rw [hClean1]
+      clear hCover s1
+      generalize N_Y * N_T = M
+      suffices ∀ (a b : Nat) (g : Fin a → Fin b → Nat),
+          sampleSum a (fun i => sampleSum b (fun j => g i j)) =
+          sampleSum b (fun j => sampleSum a (fun i => g i j)) from this N_X M _
+      intro a
+      induction a with
+      | zero =>
+        intro b _
+        rw [sampleSum_zero]
+        have hZ : (fun _ : Fin b => sampleSum 0 _) = (fun _ => 0) := rfl
+        rw [hZ, sampleSum_const, Nat.mul_zero]
+      | succ a ih =>
+        intro b g
+        rw [sampleSum_succ, ih b]
+        have hR : sampleSum b (fun j => sampleSum (a + 1) (fun i => g i j)) =
+            sampleSum b (fun j => g ⟨0, Nat.zero_lt_succ a⟩ j +
+              sampleSum a (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j)) :=
+          sampleSum_ext (fun _ => rfl)
+        rw [hR, sampleSum_add_fn]
+    rw [hSwap, ← sampleSum_mul_right]
+    have hPt : ∀ yτ : Fin (N_Y * N_T),
+        sampleSum N_X (fun xVec =>
+          let xs := romPreDecodeVec hX tweaks.length xVec
+          if (romPreIdealQueries hD
+              (withFinalRoCheck id (adv (List.zip tweaks (romPreDecodeVec hD tweaks.length (s2.chal yτ)))))
+              (K + 1) [] (s2.advc yτ)).any (fun q => decide (q ∈ List.zip tweaks xs))
+          then 1 else 0) * cardX ≤ (qH + 1) * N_X := fun yτ => by
+      have hLen := romPreIdealQueries_length hD _
+        (withFinalRoCheck_within id (hW _)) [] (s2.advc yτ)
+      exact Nat.le_trans (romPre_queryList_hit_bound hX tweaks hNodup _)
+        (Nat.mul_le_mul_right N_X hLen)
+    have hSum := sampleSum_le (N_Y * N_T) _ _ hPt
+    rw [sampleSum_const] at hSum
+    refine Nat.le_trans hSum ?_
+    simp only [Nat.mul_left_comm, Nat.mul_comm]
+    exact Nat.le_refl _
+  have hB2 : GameBound G₂.winProb ⟨qH + 1, cardD, hD⟩ := by
+    unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
+    dsimp only [G₂, hitDigestIdeal]
+    rw [s1.sampleSum_eq]
+    have hInnerConst : ∀ xVec : Fin N_X,
+        sampleSum (N_Y * N_T) (fun yτ =>
+          let ys := romPreDecodeVec hD tweaks.length (s2.chal (s1.advc (s1.pair xVec yτ)))
+          let τ := s2.advc (s1.advc (s1.pair xVec yτ))
+          let pub := List.zip tweaks ys
+          let res := lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ
+          if pub.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2)) then 1 else 0) * cardD ≤
+        (qH + 1) * (N_Y * N_T) := fun xVec => by
+      have hS2 : sampleSum (N_Y * N_T) (fun yτ =>
+          let ys := romPreDecodeVec hD tweaks.length (s2.chal (s1.advc (s1.pair xVec yτ)))
+          let τ := s2.advc (s1.advc (s1.pair xVec yτ))
+          let pub := List.zip tweaks ys
+          let res := lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ
+          if pub.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2)) then 1 else 0) =
+          sampleSum N_Y (fun yVec => sampleSum N_T (fun τ =>
+            let pub := List.zip tweaks (romPreDecodeVec hD tweaks.length yVec)
+            let res := lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ
+            if pub.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2)) then 1 else 0)) := by
+        rw [s2.sampleSum_eq]
+        exact sampleSum_ext (fun yVec => sampleSum_ext (fun τ => by
+          rw [s1.advc_pair, s2.chal_pair, s2.advc_pair]))
+      rw [hS2, ← sampleSum_mul_right]
+      have hPerY : ∀ yVec : Fin N_Y,
+          sampleSum N_T (fun τ =>
+            let pub := List.zip tweaks (romPreDecodeVec hD tweaks.length yVec)
+            let res := lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ
+            if pub.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2)) then 1 else 0) * cardD ≤
+          (qH + 1) * N_T := fun yVec => by
+        let pub := List.zip tweaks (romPreDecodeVec hD tweaks.length yVec)
+        let stepBad : (Bytes × Fin cardX) → Fin cardD → Bool := fun q d =>
+          pub.any (fun ty => decide (q.1 = ty.1 ∧ d = ty.2))
+        have hSub : ∀ q : Bytes × Fin cardX,
+            sampleSum cardD (fun d => if stepBad q d then 1 else 0) ≤ 1 := fun q => by
+          refine sampleSum_bool_le_one_of_subsingleton _ (fun d₁ d₂ h₁ h₂ => ?_)
+          obtain ⟨ty₁, hm₁, hd₁⟩ := List.any_eq_true.mp h₁
+          obtain ⟨ty₂, hm₂, hd₂⟩ := List.any_eq_true.mp h₂
+          obtain ⟨ht₁, hv₁⟩ := of_decide_eq_true hd₁
+          obtain ⟨ht₂, hv₂⟩ := of_decide_eq_true hd₂
+          have hSame : ty₁ = ty₂ := by
+            have htEq : ty₁.1 = ty₂.1 := ht₁.symm.trans ht₂
+            clear hv₁ hv₂ h₁ h₂
+            generalize romPreDecodeVec hD tweaks.length yVec = ys at hm₁ hm₂
+            induction tweaks generalizing ys with
+            | nil => nomatch hm₁
+            | cons t ts ihT =>
+              cases ys with
+              | nil => nomatch hm₁
+              | cons y ys' =>
+                obtain ⟨hHd, hTl⟩ := List.nodup_cons.mp hNodup
+                rcases List.mem_cons.mp hm₁ with rfl | r1
+                · rcases List.mem_cons.mp hm₂ with rfl | r2
+                  · rfl
+                  · exfalso
+                    have hIn : t ∈ ts := by
+                      clear hHd hTl ihT
+                      induction ts generalizing ys' with
+                      | nil => nomatch r2
+                      | cons t' ts' ih2 =>
+                        cases ys' with
+                        | nil => nomatch r2
+                        | cons y' ys'' =>
+                          rcases List.mem_cons.mp r2 with hE | hR
+                          · injection hE with hE1 _; rw [htEq, hE1]; exact List.Mem.head _
+                          · exact List.Mem.tail _ (ih2 ys'' hR)
+                    exact hHd hIn
+                · rcases List.mem_cons.mp hm₂ with rfl | r2
+                  · exfalso
+                    have hIn : t ∈ ts := by
+                      clear hHd hTl ihT
+                      induction ts generalizing ys' with
+                      | nil => nomatch r1
+                      | cons t' ts' ih2 =>
+                        cases ys' with
+                        | nil => nomatch r1
+                        | cons y' ys'' =>
+                          rcases List.mem_cons.mp r1 with hE | hR
+                          · injection hE with hE1 _; rw [← htEq, hE1]; exact List.Mem.head _
+                          · exact List.Mem.tail _ (ih2 ys'' hR)
+                    exact hHd hIn
+                  · exact ihT hTl ys' r1 r2
+          subst hSame
+          exact hv₁.trans hv₂.symm
+        have hImp : ∀ τ : Fin N_T,
+            (let res := lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ
+             pub.any (fun ty => decide (res.1.1.1 = ty.1 ∧ res.1.2 = ty.2))) = true →
+            tableHasBad stepBad
+              (lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ).2 = true := by
+          intro τ hWτ
+          have hIn := withFinalRoCheck_mem hD id (adv pub) K [] τ
+          exact List.any_eq_true.mpr ⟨_, hIn, hWτ⟩
+        have hLe := sampleSum_le N_T _ _ (fun τ => by
+          cases hw : pub.any (fun ty => decide
+            ((lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ).1.1.1 = ty.1 ∧
+             (lazyRomRun hD (withFinalRoCheck id (adv pub)) (K + 1) [] τ).1.2 = ty.2))
+          · exact Nat.zero_le _
+          · rw [hImp τ hw]; exact Nat.le_refl 1)
+        have hM := lazyRomRun_bad_bound hD stepBad 1 hSub (withFinalRoCheck id (adv pub))
+          (Nat.succ_le_succ hqK) (withFinalRoCheck_within id (hW pub)) [] rfl
+        rw [Nat.mul_one] at hM
+        exact Nat.le_trans (Nat.mul_le_mul_right cardD hLe) hM
+      have hSum := sampleSum_le N_Y _ _ hPerY
+      rw [sampleSum_const] at hSum
+      refine Nat.le_trans hSum ?_
+      simp only [Nat.mul_left_comm, Nat.mul_comm]
+      exact Nat.le_refl _
+    rw [← sampleSum_mul_right]
+    have hSum := sampleSum_le N_X _ _ hInnerConst
+    rw [sampleSum_const] at hSum
+    refine Nat.le_trans hSum ?_
+    simp only [Nat.mul_left_comm, Nat.mul_comm]
+    exact Nat.le_refl _
+  exact RatBound.le_trans
+    (event_le_two_reductions (romSmDtPreGame hX hD tweaks K adv) G₁ G₂ hCover)
+    (RatBound.add_le_add hB1 hB2)
+
+/-- **Coin-Sampled Lazy-ROM `ITSR` Game.** Given a signed transcript `signedPairs : List (Bytes × Bytes)`
+    and its opened subset-codeword outputs `opened : List (Fin cardSub)` (`st₀ = zip signedPairs opened`),
+    the adversary queries the subset random oracle `(rand, msg) ↦ Fin cardSub` over `K + 1` draws
+    and outputs `(r*, m*)`, winning if `(r*, m*) ∉ signedPairs` and its subset codeword is covered
+    by `opened` (`coveredBy opened yStar = true`). -/
+def romItsrGame {cardSub : Nat} (hCard : 0 < cardSub)
+    (coveredBy : List (Fin cardSub) → Fin cardSub → Bool)
+    (signedPairs : List (Bytes × Bytes)) (opened : List (Fin cardSub))
+    (K : Nat) (adv : Code (roOracleIface (Bytes × Bytes) cardSub) (Bytes × Bytes)) :
+    FinGame (roCoinPow cardSub (K + 1)) where
+  samplePos := roCoinPow_pos hCard (K + 1)
+  win ω :=
+    let st₀ := List.zip signedPairs opened
+    let res := lazyRomRun hCard (withFinalRoCheck id adv) (K + 1) st₀ ω
+    !decide (res.1.1 ∈ signedPairs) && coveredBy opened res.1.2
+
+theorem romItsrGame_win_eq {cardSub : Nat} (hCard : 0 < cardSub)
+    (coveredBy : List (Fin cardSub) → Fin cardSub → Bool)
+    (signedPairs : List (Bytes × Bytes)) (opened : List (Fin cardSub))
+    (K : Nat) (adv : Code (roOracleIface (Bytes × Bytes) cardSub) (Bytes × Bytes))
+    (ω : Fin (roCoinPow cardSub (K + 1))) :
+    (romItsrGame hCard coveredBy signedPairs opened K adv).win ω =
+      let st₀ := List.zip signedPairs opened
+      let res := lazyRomRun hCard (withFinalRoCheck id adv) (K + 1) st₀ ω
+      (!decide (res.1.1 ∈ signedPairs) && coveredBy opened res.1.2) := rfl
+
+/-- **Query-Bounded ROM `ITSR` Hardness (`(qH + 1) * maxCovered / cardSub`).** Whenever at most
+    `maxCovered` subset codewords in `Fin cardSub` are covered by `opened`, every `Within qH`
+    random-oracle adversary (`qH ≤ K`) wins `romItsrGame` with probability at most
+    `((qH + 1) * maxCovered) / cardSub`. -/
+theorem romItsr_within_bound {cardSub : Nat} (hCard : 0 < cardSub)
+    (coveredBy : List (Fin cardSub) → Fin cardSub → Bool)
+    (signedPairs : List (Bytes × Bytes)) (opened : List (Fin cardSub))
+    (maxCovered : Nat)
+    (hCover : sampleSum cardSub (fun s => if coveredBy opened s then 1 else 0) ≤ maxCovered)
+    {qH K : Nat} (hqK : qH ≤ K)
+    (adv : Code (roOracleIface (Bytes × Bytes) cardSub) (Bytes × Bytes)) (hW : Within qH adv) :
+    GameBound (romItsrGame hCard coveredBy signedPairs opened K adv).winProb
+      ⟨(qH + 1) * maxCovered, cardSub, hCard⟩ := by
+  let st₀ := List.zip signedPairs opened
+  let stepBad : (Bytes × Bytes) → Fin cardSub → Bool := fun q s =>
+    !decide (q ∈ signedPairs) && coveredBy opened s
+  have hInitClean : tableHasBad stepBad st₀ = false := by
+    apply Bool.eq_false_iff.mpr
+    intro hBad
+    obtain ⟨e, hMem, hStep⟩ := List.any_eq_true.mp hBad
+    obtain ⟨hNotIn, _⟩ := andTrueSplit hStep
+    have hIn : e.1 ∈ signedPairs := by
+      clear hNotIn hStep hBad
+      induction signedPairs generalizing opened with
+      | nil => nomatch hMem
+      | cons p ps ih =>
+        cases opened with
+        | nil => nomatch hMem
+        | cons o os =>
+          rcases List.mem_cons.mp hMem with rfl | hR
+          · exact List.Mem.head _
+          · exact List.Mem.tail _ (ih os hR)
+    rw [decide_eq_true hIn] at hNotIn
+    cases hNotIn
+  have hStepB : ∀ q : Bytes × Bytes,
+      sampleSum cardSub (fun s => if stepBad q s then 1 else 0) ≤ maxCovered := fun q => by
+    refine Nat.le_trans (sampleSum_le cardSub _ _ (fun s => ?_)) hCover
+    dsimp only [stepBad]
+    cases decide (q ∈ signedPairs)
+    · exact Nat.le_refl _
+    · exact Nat.zero_le _
+  let prog := withFinalRoCheck id adv
+  have hImp : ∀ ω : Fin (roCoinPow cardSub (K + 1)),
+      (romItsrGame hCard coveredBy signedPairs opened K adv).win ω = true →
+      tableHasBad stepBad (lazyRomRun hCard prog (K + 1) st₀ ω).2 = true := fun ω hWin =>
+    List.any_eq_true.mpr ⟨_, withFinalRoCheck_mem hCard id adv K st₀ ω, hWin⟩
+  have hRed := sampleSum_le (roCoinPow cardSub (K + 1)) _ _ (fun ω => by
+    cases hw : (romItsrGame hCard coveredBy signedPairs opened K adv).win ω
+    · exact Nat.zero_le _
+    · rw [hImp ω hw]; exact Nat.le_refl 1)
+  have hM := lazyRomRun_bad_bound hCard stepBad maxCovered hStepB prog
+    (Nat.succ_le_succ hqK) (withFinalRoCheck_within id hW) st₀ hInitClean
+  exact Nat.le_trans (Nat.mul_le_mul_right cardSub hRed) hM
+
+/-- Subset-cover predicate for `k`-tuples in `Fin (roCoinPow M k)`: every selected leaf in `Fin M`
+    was already revealed among the `opened` `k`-tuples. -/
+def tupleSubsetCovered {M k : Nat} (hM : 0 < M)
+    (opened : List (Fin (roCoinPow M k))) (cand : Fin (roCoinPow M k)) : Bool :=
+  let revLeaves := opened.flatMap (romPreDecodeVec hM k)
+  (romPreDecodeVec hM k cand).all (fun x => decide (x ∈ revLeaves))
+
+private theorem list_mem_indicator_sum_le {M : Nat} :
+    ∀ (rev : List (Fin M)),
+      sampleSum M (fun d => if decide (d ∈ rev) then 1 else 0) ≤ rev.length
+  | [] => by
+    have hZ : (fun _ : Fin M => if decide (_ ∈ ([] : List (Fin M))) then 1 else 0) = (fun _ => 0) :=
+      rfl
+    rw [hZ, sampleSum_const, Nat.mul_zero]
+    exact Nat.le_refl 0
+  | x :: xs => by
+    have hSplit : ∀ d : Fin M,
+        (if decide (d ∈ x :: xs) then 1 else 0) ≤
+        (if d = x then 1 else 0) + (if decide (d ∈ xs) then 1 else 0) := fun d => by
+      by_cases hd : d ∈ x :: xs
+      · rw [decide_eq_true hd, ↓reduceIte]
+        rcases List.mem_cons.mp hd with rfl | hTail
+        · rw [iteOfPos rfl]; omega
+        · rw [decide_eq_true hTail]; omega
+      · rw [decide_eq_false hd]; exact Nat.zero_le _
+    have hSum := sampleSum_le M _ _ hSplit
+    rw [sampleSum_add_fn] at hSum
+    exact Nat.le_trans hSum
+      (Nat.le_trans (Nat.add_le_add (sampleSum_indicator_le_one M x) (list_mem_indicator_sum_le xs))
+        (by rw [List.length_cons, Nat.add_comm]))
+
+private theorem tupleSubsetCovered_count_le {M : Nat} (hM : 0 < M) (rev : List (Fin M)) :
+    ∀ k : Nat,
+      sampleSum (roCoinPow M k)
+        (fun s => if (romPreDecodeVec hM k s).all (fun x => decide (x ∈ rev)) then 1 else 0) ≤
+      rev.length ^ k
+  | 0 => by
+    rw [show roCoinPow M 0 = 1 from rfl, sampleSum_succ, sampleSum_zero]
+    decide
+  | k + 1 => by
+    rw [show roCoinPow M (k + 1) = M * roCoinPow M k from rfl,
+      sampleSum_prod M (roCoinPow M k)]
+    let p := CoinSplit.prod M (roCoinPow M k)
+    have hFactor : sampleSum M (fun d => sampleSum (roCoinPow M k) (fun τ =>
+        if (romPreDecodeVec hM (k + 1) ⟨d.1 * roCoinPow M k + τ.1, prodCoin_pair_lt d τ⟩).all
+            (fun x => decide (x ∈ rev))
+        then 1 else 0)) =
+        sampleSum M (fun d =>
+          (if decide (d ∈ rev) then 1 else 0) *
+          sampleSum (roCoinPow M k) (fun τ =>
+            if (romPreDecodeVec hM k τ).all (fun x => decide (x ∈ rev)) then 1 else 0)) := by
+      refine sampleSum_ext (fun d => ?_)
+      cases hd : decide (d ∈ rev)
+      · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_mul]
+        have hZ : (fun τ : Fin (roCoinPow M k) =>
+            if (romPreDecodeVec hM (k + 1) ⟨d.1 * roCoinPow M k + τ.1, prodCoin_pair_lt d τ⟩).all
+                (fun x => decide (x ∈ rev))
+            then 1 else 0) = (fun _ => 0) := by
+          funext τ
+          have hPair : (⟨d.1 * roCoinPow M k + τ.1, prodCoin_pair_lt d τ⟩ :
+              Fin (M * roCoinPow M k)) = p.pair d τ := rfl
+          rw [hPair]
+          show (if (p.chal (p.pair d τ) :: romPreDecodeVec hM k (p.advc (p.pair d τ))).all
+              (fun x => decide (x ∈ rev)) then 1 else 0) = 0
+          rw [p.chal_pair, List.all_cons, hd, Bool.false_and]
+          rfl
+        rw [hZ, sampleSum_const, Nat.mul_zero]
+      · simp only [↓reduceIte, Nat.one_mul]
+        refine sampleSum_ext (fun τ => ?_)
+        have hPair : (⟨d.1 * roCoinPow M k + τ.1, prodCoin_pair_lt d τ⟩ :
+            Fin (M * roCoinPow M k)) = p.pair d τ := rfl
+        rw [hPair]
+        show (if (p.chal (p.pair d τ) :: romPreDecodeVec hM k (p.advc (p.pair d τ))).all
+            (fun x => decide (x ∈ rev)) then 1 else 0) = _
+        rw [p.chal_pair, p.advc_pair, List.all_cons, hd, Bool.true_and]
+    rw [hFactor, sampleSum_mul_right, Nat.pow_succ, Nat.mul_comm (rev.length ^ k)]
+    exact Nat.mul_le_mul (list_mem_indicator_sum_le rev) (tupleSubsetCovered_count_le hM rev k)
+
+private theorem flatMap_decodeVec_length_le {M k : Nat} (hM : 0 < M) :
+    ∀ (opened : List (Fin (roCoinPow M k))),
+      (opened.flatMap (romPreDecodeVec hM k)).length ≤ opened.length * k
+  | [] => Nat.zero_le _
+  | x :: xs => by
+    rw [List.flatMap_cons, List.length_append, romPreDecodeVec_length, List.length_cons,
+      Nat.succ_mul, Nat.add_comm _ k]
+    exact Nat.add_le_add_left (flatMap_decodeVec_length_le hM xs) k
+
+private theorem pow_le_pow_of_le {a b : Nat} (h : a ≤ b) : ∀ k : Nat, a ^ k ≤ b ^ k
+  | 0 => Nat.le_refl 1
+  | k + 1 => Nat.mul_le_mul (pow_le_pow_of_le h k) h
+
+/-- **Query-Bounded ROM `k`-Tuple Subset-Cover Hardness (`(qH + 1) * (qS * k)^k / M^k`).** After
+    `opened.length ≤ qS` signatures each opening `k` leaves in `Fin M`, every `Within qH`
+    random-oracle adversary (`qH ≤ K`) wins `romItsrGame` with probability at most
+    `((qH + 1) * (qS * k)^k) / M^k`. -/
+theorem romItsrTuple_within_bound {M k : Nat} (hM : 0 < M)
+    (signedPairs : List (Bytes × Bytes)) (opened : List (Fin (roCoinPow M k)))
+    {qS qH K : Nat} (hOpened : opened.length ≤ qS) (hqK : qH ≤ K)
+    (adv : Code (roOracleIface (Bytes × Bytes) (roCoinPow M k)) (Bytes × Bytes))
+    (hW : Within qH adv) :
+    GameBound (romItsrGame (roCoinPow_pos hM k) (tupleSubsetCovered hM) signedPairs opened K adv).winProb
+      ⟨(qH + 1) * (qS * k) ^ k, roCoinPow M k, roCoinPow_pos hM k⟩ := by
+  have hLen : (opened.flatMap (romPreDecodeVec hM k)).length ≤ qS * k :=
+    Nat.le_trans (flatMap_decodeVec_length_le hM opened) (Nat.mul_le_mul_right k hOpened)
+  have hCov : sampleSum (roCoinPow M k)
+      (fun s => if tupleSubsetCovered hM opened s then 1 else 0) ≤ (qS * k) ^ k :=
+    Nat.le_trans (tupleSubsetCovered_count_le hM _ k) (pow_le_pow_of_le hLen k)
+  exact romItsr_within_bound (roCoinPow_pos hM k) (tupleSubsetCovered hM) signedPairs opened
+    ((qS * k) ^ k) hCov hqK adv hW
+
+/-- `#tooth`: Dropping `Within 0` on `romSmDtTcrGame` breaks the `(0 + 1) / 4` bound — a 2-query
+    adversary testing `[1]` and `[2]` against committed target `([], [0], 0)` over `cardD = 4`
+    wins with probability `7 / 16 > 1 / 4`. -/
+def twoQueryRomTcrAdv : Code (roOracleIface (Bytes × Bytes) 4) TargetBreak :=
+  .call ([], [1]) (fun d₁ =>
+    if d₁.1 = 0 then .ret ⟨[], [0], [1]⟩
+    else .call ([], [2]) (fun _ => .ret ⟨[], [0], [2]⟩))
+
+theorem tooth_romSmDtTcr_without_within :
+    ¬ GameBound
+        (romSmDtTcrGame (by decide : 0 < 4) [⟨[], [0], ⟨0, by decide⟩⟩] 2 twoQueryRomTcrAdv).winProb
+        ⟨0 + 1, 4, by decide⟩ := by
+  decide
+
+/-- `#tooth`: Dropping `Within 0` on `romSmDtPreGame` breaks the `1/2 + 1/4 = 3/4` bound — a
+    1-query adversary checking `([], 0)` and falling back to `([], 1)` over `cardX = 2, cardD = 4`
+    wins on every coin (`1 > 3 / 4`). -/
+def allSearchRomPreAdv :
+    List (Bytes × Fin 4) → Code (roOracleIface (Bytes × Fin 2) 4) (Bytes × Fin 2) :=
+  fun pub =>
+    .call ([], ⟨0, by decide⟩) (fun d₀ =>
+      match pub with
+      | (_, y) :: _ =>
+        if d₀ = y then .ret ([], ⟨0, by decide⟩) else .ret ([], ⟨1, by decide⟩)
+      | [] => .ret ([], ⟨0, by decide⟩))
+
+theorem tooth_romSmDtPre_without_within :
+    ¬ GameBound
+        (romSmDtPreGame (by decide : 0 < 2) (by decide : 0 < 4) [[]] 1 allSearchRomPreAdv).winProb
+        ((⟨0 + 1, 2, by decide⟩ : RatBound).add ⟨0 + 1, 4, by decide⟩) := by
+  decide
+
+/-- `#tooth`: Dropping `Within 0` on `romItsrGame` breaks the `1 / 4` bound — a 2-query grinding
+    adversary over `cardSub = 4` wins with probability `7 / 16 > 1 / 4`. -/
+def twoQueryRomItsrAdv : Code (roOracleIface (Bytes × Bytes) 4) (Bytes × Bytes) :=
+  .call ([1], [1]) (fun s₁ =>
+    if s₁.1 = 0 then .ret ([1], [1])
+    else .call ([2], [1]) (fun _ => .ret ([2], [1])))
+
+theorem tooth_romItsr_without_within :
+    ¬ GameBound
+        (romItsrGame (by decide : 0 < 4)
+          (fun opened s => opened.any (fun o => decide (s = o)))
+          [([0], [0])] [⟨0, by decide⟩] 2 twoQueryRomItsrAdv).winProb
+        ⟨(0 + 1) * 1, 4, by decide⟩ := by
+  decide
+
+/-! #### 2i.2 Non-Empty Query-Bounded Classes Inhabiting `SmDtTcrHard`, `SmDtPreHard`, and `ItsrHard` -/
+
+/-- Canonical uniform 1-byte seed sampler (`256` seeds). -/
+def byte1SeedSampler (i : Fin 256) : Bytes := [UInt8.ofNat i.1]
+
+theorem uniformOn_byte1Seed : UniformOn (fun s : Bytes => s.length = 1) byte1SeedSampler where
+  mem _ := rfl
+  injective i j h := by
+    injection h with hHd _
+    have hNat := congrArg UInt8.toNat hHd
+    rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat',
+      Nat.mod_eq_of_lt i.2, Nat.mod_eq_of_lt j.2] at hNat
+    exact Fin.ext hNat
+  surjective s hs := by
+    match s, hs with
+    | [b], _ => exact ⟨⟨b.toNat, b.toNat_lt⟩, congrArg (· :: []) UInt8.ofNat_toNat⟩
+
+/-- Canonical uniform 1-byte hidden-input `SM-DT-PRE` sampler (`seedLen = 0, inputLen = 1, q = 1`). -/
+def byte1PreSampler (i : Fin 256) : Bytes × List Bytes := ([], [[UInt8.ofNat i.1]])
+
+theorem uniformOn_byte1Pre : UniformOn (SmDtPreSampleOk 0 1 1) byte1PreSampler where
+  mem _ := ⟨rfl, rfl, fun h hh => by
+    rcases List.mem_cons.mp hh with rfl | hNil
+    · rfl
+    · nomatch hNil⟩
+  injective i j h := by
+    injection h with _ h2
+    injection h2 with hHead _
+    injection hHead with hB _
+    have hNat := congrArg UInt8.toNat hB
+    rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat',
+      Nat.mod_eq_of_lt i.2, Nat.mod_eq_of_lt j.2] at hNat
+    exact Fin.ext hNat
+  surjective x hx := by
+    obtain ⟨s, hs⟩ := x
+    obtain ⟨h1, h2, h3⟩ := hx
+    have hsNil : s = [] := List.eq_nil_of_length_eq_zero h1
+    match hs, h2, h3 with
+    | [h], _, h3 =>
+      have hLen1 : h.length = 1 := h3 h (List.Mem.head _)
+      match h, hLen1 with
+      | [b], _ =>
+        refine ⟨⟨b.toNat, b.toNat_lt⟩, ?_⟩
+        rw [hsNil]
+        exact congrArg (fun u => ([], [[u]])) UInt8.ofNat_toNat
+
+/-- Canonical uniform 1-byte randomizer `ITSR` sampler (`randLen = 1, q = 1`). -/
+def byte1ItsrSampler (i : Fin 256) : List Bytes := [[UInt8.ofNat i.1]]
+
+theorem uniformOn_byte1Itsr : UniformOn (ItsrSampleOk 1 1) byte1ItsrSampler where
+  mem _ := ⟨rfl, fun r hr => by
+    rcases List.mem_cons.mp hr with rfl | hNil
+    · rfl
+    · nomatch hNil⟩
+  injective i j h := by
+    injection h with hHead _
+    injection hHead with hB _
+    have hNat := congrArg UInt8.toNat hB
+    rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat',
+      Nat.mod_eq_of_lt i.2, Nat.mod_eq_of_lt j.2] at hNat
+    exact Fin.ext hNat
+  surjective x hx := by
+    obtain ⟨h1, h2⟩ := hx
+    match x, h1, h2 with
+    | [r], _, h2 =>
+      have hrLen : r.length = 1 := h2 r (List.Mem.head _)
+      match r, hrLen with
+      | [b], _ => exact ⟨⟨b.toNat, b.toNat_lt⟩, congrArg (fun u => [[u]]) UInt8.ofNat_toNat⟩
+
+private theorem firstByteString_mem_cons (p : Bytes → Bool) :
+    ∀ (l : List Bytes), firstByteString p l ∈ ([] : Bytes) :: l
+  | [] => List.Mem.head _
+  | x :: xs => by
+    unfold firstByteString
+    cases p x
+    · exact List.Mem.tail _ (List.Mem.tail _ (firstByteString_mem_cons p xs) |> fun h => by
+        rcases List.mem_cons.mp (firstByteString_mem_cons p xs) with hNil | hIn
+        · rw [hNil]; exact List.Mem.head _
+        · exact List.Mem.tail _ (List.Mem.tail _ hIn))
+    · exact List.Mem.tail _ (List.Mem.head _)
+
+private theorem byteList_hit_sum_le :
+    ∀ (L : List UInt8),
+      sampleSum 256 (fun i => if decide (UInt8.ofNat i.1 ∈ L) then 1 else 0) ≤ L.length
+  | [] => by
+    have hZ : (fun _ : Fin 256 => if decide (_ ∈ ([] : List UInt8)) then 1 else 0) = (fun _ => 0) :=
+      rfl
+    rw [hZ, sampleSum_const, Nat.mul_zero]
+    exact Nat.le_refl 0
+  | b :: bs => by
+    have hSplit : ∀ i : Fin 256,
+        (if decide (UInt8.ofNat i.1 ∈ b :: bs) then 1 else 0) ≤
+        (if i = ⟨b.toNat, b.toNat_lt⟩ then 1 else 0) +
+        (if decide (UInt8.ofNat i.1 ∈ bs) then 1 else 0) := fun i => by
+      by_cases hi : UInt8.ofNat i.1 ∈ b :: bs
+      · rw [decide_eq_true hi, ↓reduceIte]
+        rcases List.mem_cons.mp hi with hEq | hTl
+        · have hiEq : i = ⟨b.toNat, b.toNat_lt⟩ := by
+            have hN := congrArg UInt8.toNat hEq
+            rw [UInt8.toNat_ofNat', Nat.mod_eq_of_lt i.2] at hN
+            exact Fin.ext hN
+          rw [iteOfPos hiEq]; omega
+        · rw [decide_eq_true hTl]; omega
+      · rw [decide_eq_false hi]; exact Nat.zero_le _
+    have hSum := sampleSum_le 256 _ _ hSplit
+    rw [sampleSum_add_fn] at hSum
+    exact Nat.le_trans hSum
+      (Nat.le_trans (Nat.add_le_add (sampleSum_indicator_le_one 256 ⟨b.toNat, b.toNat_lt⟩)
+          (byteList_hit_sum_le bs))
+        (by rw [List.length_cons, Nat.add_comm]))
+
+/-- **Query-bounded `SM-DT-PRE` adversary class (`WithinPreQueries`).** Requires `Within qTarget`
+    oracle calls on `targetIface` and restricts offline preimage candidates to a dictionary of
+    size at most `qEval`. -/
+def WithinPreQueries (qTarget qEval : Nat) (c : Code targetIface TargetBreak) : Prop :=
+  Within qTarget c ∧
+  ∃ dict : List Bytes, dict.length ≤ qEval ∧
+    ∀ (oracle : TargetState → (qr : targetIface.Query) → targetIface.Resp qr × TargetState)
+      (st : TargetState),
+      (Code.play oracle c st).1.candidate ∈ ([] : Bytes) :: dict
+
+/-- Explicit 2-call `SM-DT-PRE` dictionary-search adversary generalizing `preimageSearchAdv`. -/
+def boundedPreAdv (th : Bytes → Bytes → Bytes → Bytes) (tweak : Bytes)
+    (dict : List Bytes) : Code targetIface TargetBreak :=
+  .call (.target tweak []) (fun y =>
+    .call .reveal (fun s =>
+      .ret ⟨tweak, [], firstByteString
+        (fun m => decide (some (th (s.getD []) tweak m) = y)) dict⟩))
+
+theorem boundedPreAdv_mem_within (th : Bytes → Bytes → Bytes → Bytes) (tweak : Bytes)
+    {qEval : Nat} (dict : List Bytes) (hLen : dict.length ≤ qEval) :
+    WithinPreQueries 2 qEval (boundedPreAdv th tweak dict) :=
+  ⟨.call _ _ (fun _ => .call _ _ (fun _ => .ret 0 _)),
+   dict, hLen, fun oracle st => by
+     show firstByteString _ dict ∈ ([] : Bytes) :: dict
+     exact firstByteString_mem_cons _ dict⟩
+
+/-- Concrete 1-byte XOR tweakable hash `byteXorHash` (bijective on 1-byte hidden inputs). -/
+def byteXorHash (seed tweak msg : Bytes) : Bytes :=
+  [((seed.headD 0) ^^^ (tweak.headD 0)) ^^^ (msg.headD 0)]
+
+theorem byteXorHash_eq (seed tweak msg : Bytes) :
+    byteXorHash seed tweak msg = [((seed.headD 0) ^^^ (tweak.headD 0)) ^^^ (msg.headD 0)] := rfl
+
+private theorem uint8_xor_left_inj : ∀ a x y : UInt8, (a ^^^ x) = (a ^^^ y) → x = y := by
+  decide
+
+/-- **Inhabited `SmDtPreHard` Theorem (`(qEval + 1) / 256`).** Against `WithinPreQueries qTarget qEval`,
+    `byteXorHash` satisfies `SmDtPreHard` with exact rational bound `(qEval + 1) / 256` (strictly `< 1`
+    for every `qEval < 255`, while `boundedPreAdv` is in the class and wins with positive probability). -/
+theorem byteXorHash_smDtPreHard_within (qTarget qEval : Nat) :
+    SmDtPreHard (WithinPreQueries qTarget qEval) byteXorHash 0 1 1 ⟨qEval + 1, 256, by decide⟩ := by
+  intro n nC nA hPos π sample hU adv hA
+  unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
+  dsimp only
+  rw [π.card_eq, π.sampleSum_eq]
+  obtain ⟨hnC, _⟩ := hU.card_and_sampleSum_eq uniformOn_byte1Pre (fun _ => 0)
+  have hSwap : sampleSum nC (fun c => sampleSum nA (fun a =>
+      if (smDtPreGame hPos byteXorHash 1 (fun ω => (sample (π.chal ω)).1)
+          (fun ω i => (sample (π.chal ω)).2.getD i []) (fun ω => adv (π.advc ω))).win (π.pair c a)
+      then 1 else 0)) =
+      sampleSum nA (fun a => sampleSum nC (fun c =>
+        if smDtPreWin byteXorHash
+            (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).2
+            (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).1
+        then 1 else 0)) := by
+    have hSimpl : sampleSum nC (fun c => sampleSum nA (fun a =>
+        if (smDtPreGame hPos byteXorHash 1 (fun ω => (sample (π.chal ω)).1)
+            (fun ω i => (sample (π.chal ω)).2.getD i []) (fun ω => adv (π.advc ω))).win (π.pair c a)
+        then 1 else 0)) =
+        sampleSum nC (fun c => sampleSum nA (fun a =>
+          if smDtPreWin byteXorHash
+              (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample c).2.getD i []))
+                (adv a) ⟨(sample c).1, [], false⟩).2
+              (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample c).2.getD i []))
+                (adv a) ⟨(sample c).1, [], false⟩).1
+          then 1 else 0)) :=
+      sampleSum_ext (fun c => sampleSum_ext (fun a => by
+        show (if smDtPreWin byteXorHash
+            (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample (π.chal (π.pair c a))).2.getD i []))
+              (adv (π.advc (π.pair c a))) ⟨(sample (π.chal (π.pair c a))).1, [], false⟩).2
+            (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample (π.chal (π.pair c a))).2.getD i []))
+              (adv (π.advc (π.pair c a))) ⟨(sample (π.chal (π.pair c a))).1, [], false⟩).1
+          then 1 else 0) = _
+        rw [π.chal_pair, π.advc_pair]))
+    rw [hSimpl]
+    suffices ∀ (k m : Nat) (g : Fin k → Fin m → Nat),
+        sampleSum k (fun i => sampleSum m (fun j => g i j)) =
+        sampleSum m (fun j => sampleSum k (fun i => g i j)) from this nC nA _
+    intro k
+    induction k with
+    | zero =>
+      intro m _
+      rw [sampleSum_zero]
+      have hZ : (fun _ : Fin m => sampleSum 0 _) = (fun _ => 0) := rfl
+      rw [hZ, sampleSum_const, Nat.mul_zero]
+    | succ k ih =>
+      intro m g
+      rw [sampleSum_succ, ih m]
+      have hR : sampleSum m (fun j => sampleSum (k + 1) (fun i => g i j)) =
+          sampleSum m (fun j => g ⟨0, Nat.zero_lt_succ k⟩ j +
+            sampleSum k (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j)) :=
+        sampleSum_ext (fun _ => rfl)
+      rw [hR, sampleSum_add_fn]
+  rw [hSwap]
+  have hPerA : ∀ a : Fin nA,
+      sampleSum nC (fun c =>
+        if smDtPreWin byteXorHash
+            (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).2
+            (Code.play (smDtPreOracle byteXorHash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).1
+        then 1 else 0) ≤ qEval + 1 := fun a => by
+    obtain ⟨_, dict, hDictLen, hDictMem⟩ := hA a
+    obtain ⟨_, hSampleSum⟩ := hU.card_and_sampleSum_eq uniformOn_byte1Pre (fun s =>
+      if smDtPreWin byteXorHash
+          (Code.play (smDtPreOracle byteXorHash 1 (fun i => s.2.getD i [])) (adv a) ⟨s.1, [], false⟩).2
+          (Code.play (smDtPreOracle byteXorHash 1 (fun i => s.2.getD i [])) (adv a) ⟨s.1, [], false⟩).1
+      then 1 else 0)
+    rw [hSampleSum]
+    let bytesL : List UInt8 := (([] : Bytes) :: dict).map (fun m => m.headD 0)
+    have hImp : ∀ i : Fin 256,
+        (if smDtPreWin byteXorHash
+            (Code.play (smDtPreOracle byteXorHash 1 (fun j => (byte1PreSampler i).2.getD j []))
+              (adv a) ⟨(byte1PreSampler i).1, [], false⟩).2
+            (Code.play (smDtPreOracle byteXorHash 1 (fun j => (byte1PreSampler i).2.getD j []))
+              (adv a) ⟨(byte1PreSampler i).1, [], false⟩).1
+        then 1 else 0) ≤ (if decide (UInt8.ofNat i.1 ∈ bytesL) then 1 else 0) := fun i => by
+      cases hW : smDtPreWin byteXorHash
+          (Code.play (smDtPreOracle byteXorHash 1 (fun j => (byte1PreSampler i).2.getD j []))
+            (adv a) ⟨(byte1PreSampler i).1, [], false⟩).2
+          (Code.play (smDtPreOracle byteXorHash 1 (fun j => (byte1PreSampler i).2.getD j []))
+            (adv a) ⟨(byte1PreSampler i).1, [], false⟩).1
+      · exact Nat.zero_le _
+      · obtain ⟨e, hMemE, hAnd⟩ := List.any_eq_true.mp hW
+        obtain ⟨_, hDig⟩ := andTrueSplit hAnd
+        have hCol := of_decide_eq_true hDig
+        have hSndEq : e.2 = [UInt8.ofNat i.1] := by
+          have hAllHidden : ∀ (c : Code targetIface TargetBreak) (st : TargetState),
+              (∀ p ∈ st.targets, p.2 = [UInt8.ofNat i.1]) → st.targets.length ≤ 1 →
+              ∀ p ∈ (Code.play (smDtPreOracle byteXorHash 1
+                (fun j => (byte1PreSampler i).2.getD j [])) c st).2.targets,
+                p.2 = [UInt8.ofNat i.1] := by
+            intro c
+            induction c with
+            | ret _ => intro st hP _ p hp; exact hP p hp
+            | call qr k ihC =>
+              intro st hP hLen p hp
+              cases qr with
+              | reveal => exact ihC _ _ hP hLen p hp
+              | target t m =>
+                if hc : st.revealed = false ∧ st.targets.length < 1 ∧ t ∉ st.targets.map Prod.fst then
+                  have hStep : smDtPreOracle byteXorHash 1
+                      (fun j => (byte1PreSampler i).2.getD j []) st (.target t m) =
+                      (some _, { st with targets := st.targets ++
+                        [(t, (byte1PreSampler i).2.getD st.targets.length [])] }) :=
+                    iteOfPos hc _ _
+                  show p.2 = [UInt8.ofNat i.1]
+                  rw [Code.play_call, hStep] at hp
+                  refine ihC _ _ (fun q hq => ?_) (by rw [List.length_append]; exact hc.2.1) p hp
+                  rcases List.mem_append.mp hq with hOld | hNew
+                  · exact hP q hOld
+                  · rcases List.mem_cons.mp hNew with rfl | hN
+                    · have hZ : st.targets.length = 0 := Nat.lt_one_iff.mp hc.2.1
+                      rw [hZ]; rfl
+                    · nomatch hN
+                else
+                  have hStep : smDtPreOracle byteXorHash 1
+                      (fun j => (byte1PreSampler i).2.getD j []) st (.target t m) = (none, st) :=
+                    iteOfNeg hc _ _
+                  rw [Code.play_call, hStep] at hp
+                  exact ihC _ _ hP hLen p hp
+          exact hAllHidden (adv a) ⟨[], [], false⟩ (fun _ h => nomatch h) (Nat.zero_le 1) e hMemE
+        rw [hSndEq] at hCol
+        injection hCol with hByteEq _
+        have hHeadEq := uint8_xor_left_inj _ _ _ hByteEq
+        have hCandMem := hDictMem
+          (smDtPreOracle byteXorHash 1 (fun j => (byte1PreSampler i).2.getD j [])) ⟨[], [], false⟩
+        have hInL : UInt8.ofNat i.1 ∈ bytesL :=
+          List.mem_map.mpr ⟨_, hCandMem, hHeadEq⟩
+        rw [decide_eq_true hInL]
+        exact Nat.le_refl 1
+    exact Nat.le_trans (sampleSum_le 256 _ _ hImp)
+      (Nat.le_trans (byteList_hit_sum_le bytesL) (by
+        dsimp only [bytesL]
+        rw [List.length_map, List.length_cons]
+        exact Nat.succ_le_succ hDictLen))
+  have hSum := sampleSum_le nA _ _ hPerA
+  rw [sampleSum_const, hnC] at hSum ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right 256 hSum) ?_
+  simp only [Nat.mul_left_comm, Nat.mul_comm]
+  exact Nat.le_refl _
+
+/-- **Query-bounded `ITSR` adversary class (`WithinItsrQueries`).** Requires `Within qSign` signing
+    queries and restricts output pairs to a candidate pool of size at most `qEval`. -/
+def WithinItsrQueries (qSign qEval : Nat) (c : Code byteOracleIface (Bytes × Bytes)) : Prop :=
+  Within qSign c ∧
+  ∃ pool : List (Bytes × Bytes), pool.length ≤ qEval ∧
+    ∀ (oracle : List (Bytes × Bytes) → (msg : Bytes) → Bytes × List (Bytes × Bytes))
+      (st : List (Bytes × Bytes)),
+      (Code.play oracle c st).1 ∈ (([], []) : Bytes × Bytes) :: pool
+
+/-- First candidate pair in `pool` satisfying `p`, or `([], [])`. -/
+def firstBytePair (p : Bytes × Bytes → Bool) : List (Bytes × Bytes) → Bytes × Bytes
+  | [] => ([], [])
+  | x :: xs => cond (p x) x (firstBytePair p xs)
+
+private theorem firstBytePair_mem_cons (p : Bytes × Bytes → Bool) :
+    ∀ l : List (Bytes × Bytes), firstBytePair p l ∈ (([], []) : Bytes × Bytes) :: l
+  | [] => List.Mem.head _
+  | x :: xs => by
+    unfold firstBytePair
+    cases p x
+    · rcases List.mem_cons.mp (firstBytePair_mem_cons p xs) with hNil | hIn
+      · rw [hNil]; exact List.Mem.head _
+      · exact List.Mem.tail _ (List.Mem.tail _ hIn)
+    · exact List.Mem.tail _ (List.Mem.head _)
+
+private theorem firstBytePair_spec (p : Bytes × Bytes → Bool) :
+    ∀ (l : List (Bytes × Bytes)) (x : Bytes × Bytes),
+      x ∈ l → p x = true → p (firstBytePair p l) = true
+  | [], _, hx, _ => nomatch hx
+  | y :: ys, x, hx, hp => by
+    unfold firstBytePair
+    cases hy : p y
+    · rcases List.mem_cons.mp hx with rfl | hTl
+      · rw [hy] at hp; cases hp
+      · exact firstBytePair_spec p ys x hTl hp
+    · exact hy
+
+/-- Explicit 1-query `ITSR` pool-search adversary. -/
+def boundedItsrAdv (hmsg : Bytes → Bytes → List Nat) (queryMsg : Bytes)
+    (pool : List (Bytes × Bytes)) : Code byteOracleIface (Bytes × Bytes) :=
+  .call queryMsg (fun r₀ =>
+    .ret (firstBytePair
+      (fun pm => !decide (pm = (r₀, queryMsg)) &&
+        (hmsg pm.1 pm.2).all (fun x => decide (x ∈ hmsg r₀ queryMsg)))
+      pool))
+
+theorem boundedItsrAdv_mem_within (hmsg : Bytes → Bytes → List Nat) (queryMsg : Bytes)
+    {qEval : Nat} (pool : List (Bytes × Bytes)) (hLen : pool.length ≤ qEval) :
+    WithinItsrQueries 1 qEval (boundedItsrAdv hmsg queryMsg pool) :=
+  ⟨.call queryMsg _ (fun _ => .ret 0 _), pool, hLen, fun _ _ => firstBytePair_mem_cons _ pool⟩
+
+/-- Concrete 1-leaf 256-domain subset selector `byteIdxHmsg`. -/
+def byteIdxHmsg (rand msg : Bytes) : List Nat :=
+  [((rand.headD 0) ^^^ (msg.headD 0)).toNat]
+
+theorem byteIdxHmsg_eq (rand msg : Bytes) :
+    byteIdxHmsg rand msg = [((rand.headD 0) ^^^ (msg.headD 0)).toNat] := rfl
+
+private theorem uint8_xor_solve : ∀ a b c : UInt8, (a ^^^ b) = c → a = (c ^^^ b) := by
+  decide
+
+private theorem itsr_fixed_log_once (rand₀ : Bytes) (msg₀ : Bytes) :
+    ∀ (c : Code byteOracleIface (Bytes × Bytes)) (st : List (Bytes × Bytes)),
+      st = [(rand₀, msg₀)] →
+      (Code.play (itsrOracle 1 (fun i => if i = 0 then rand₀ else [])) c st).2 = [(rand₀, msg₀)]
+  | .ret _, st, hSt => hSt
+  | .call m k, st, hSt => by
+    subst hSt
+    have hStep : itsrOracle 1 (fun i => if i = 0 then rand₀ else []) [(rand₀, msg₀)] m =
+        ([], [(rand₀, msg₀)]) := iteOfNeg (by decide) _ _
+    rw [Code.play_call, hStep]
+    exact itsr_fixed_log_once rand₀ msg₀ (k []) [(rand₀, msg₀)] rfl
+
+/-- **Inhabited `ItsrHard` Theorem (`(qEval + 1) / 256`).** Against `WithinItsrQueries qSign qEval`,
+    `byteIdxHmsg` satisfies `ItsrHard` at `randLen = 1, q = 1` with exact rational bound
+    `(qEval + 1) / 256` (strictly `< 1` for every `qEval < 255`). -/
+theorem byteIdxHmsg_itsrHard_within (qSign qEval : Nat) :
+    ItsrHard (WithinItsrQueries qSign qEval) byteIdxHmsg 1 1 ⟨qEval + 1, 256, by decide⟩ := by
+  intro n nC nA hPos π rand hU adv hA
+  unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
+  dsimp only
+  rw [π.card_eq, π.sampleSum_eq]
+  obtain ⟨hnC, _⟩ := hU.card_and_sampleSum_eq uniformOn_byte1Itsr (fun _ => 0)
+  have hSwap : sampleSum nC (fun c => sampleSum nA (fun a =>
+      if (itsrGame hPos byteIdxHmsg 1 (fun ω i => (rand (π.chal ω)).getD i [])
+          (fun ω => adv (π.advc ω))).win (π.pair c a)
+      then 1 else 0)) =
+      sampleSum nA (fun a => sampleSum nC (fun c =>
+        if itsrWin byteIdxHmsg
+            (Code.play (itsrOracle 1 (fun i => (rand c).getD i [])) (adv a) []).2
+            (Code.play (itsrOracle 1 (fun i => (rand c).getD i [])) (adv a) []).1
+        then 1 else 0)) := by
+    have hS : sampleSum nC (fun c => sampleSum nA (fun a =>
+        if (itsrGame hPos byteIdxHmsg 1 (fun ω i => (rand (π.chal ω)).getD i [])
+            (fun ω => adv (π.advc ω))).win (π.pair c a)
+        then 1 else 0)) =
+        sampleSum nC (fun c => sampleSum nA (fun a =>
+          if itsrWin byteIdxHmsg
+              (Code.play (itsrOracle 1 (fun i => (rand c).getD i [])) (adv a) []).2
+              (Code.play (itsrOracle 1 (fun i => (rand c).getD i [])) (adv a) []).1
+          then 1 else 0)) :=
+      sampleSum_ext (fun c => sampleSum_ext (fun a => by
+        show (if itsrWin byteIdxHmsg
+            (Code.play (itsrOracle 1 (fun i => (rand (π.chal (π.pair c a))).getD i []))
+              (adv (π.advc (π.pair c a))) []).2
+            (Code.play (itsrOracle 1 (fun i => (rand (π.chal (π.pair c a))).getD i []))
+              (adv (π.advc (π.pair c a))) []).1
+          then 1 else 0) = _
+        rw [π.chal_pair, π.advc_pair]))
+    rw [hS]
+    suffices ∀ (k m : Nat) (g : Fin k → Fin m → Nat),
+        sampleSum k (fun i => sampleSum m (fun j => g i j)) =
+        sampleSum m (fun j => sampleSum k (fun i => g i j)) from this nC nA _
+    intro k
+    induction k with
+    | zero =>
+      intro m _; rw [sampleSum_zero]
+      have hZ : (fun _ : Fin m => sampleSum 0 _) = (fun _ => 0) := rfl
+      rw [hZ, sampleSum_const, Nat.mul_zero]
+    | succ k ih =>
+      intro m g; rw [sampleSum_succ, ih m]
+      have hR : sampleSum m (fun j => sampleSum (k + 1) (fun i => g i j)) =
+          sampleSum m (fun j => g ⟨0, Nat.zero_lt_succ k⟩ j +
+            sampleSum k (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j)) :=
+        sampleSum_ext (fun _ => rfl)
+      rw [hR, sampleSum_add_fn]
+  rw [hSwap]
+  have hPerA : ∀ a : Fin nA,
+      sampleSum nC (fun c =>
+        if itsrWin byteIdxHmsg
+            (Code.play (itsrOracle 1 (fun i => (rand c).getD i [])) (adv a) []).2
+            (Code.play (itsrOracle 1 (fun i => (rand c).getD i [])) (adv a) []).1
+        then 1 else 0) ≤ qEval + 1 := fun a => by
+    obtain ⟨_, pool, hPoolLen, hPoolMem⟩ := hA a
+    obtain ⟨_, hSampleSum⟩ := hU.card_and_sampleSum_eq uniformOn_byte1Itsr (fun rList =>
+      if itsrWin byteIdxHmsg
+          (Code.play (itsrOracle 1 (fun i => rList.getD i [])) (adv a) []).2
+          (Code.play (itsrOracle 1 (fun i => rList.getD i [])) (adv a) []).1
+      then 1 else 0)
+    rw [hSampleSum]
+    cases hAdv : adv a with
+    | ret out =>
+      have hZ : (fun i : Fin 256 =>
+          if itsrWin byteIdxHmsg
+              (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j [])) (.ret out) []).2
+              (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j [])) (.ret out) []).1
+          then 1 else 0) = (fun _ => 0) := by
+        funext i
+        have hF : itsrWin byteIdxHmsg [] out = false := by
+          unfold itsrWin byteIdxHmsg
+          simp
+        rw [Code.play_ret, hF]
+        rfl
+      rw [hZ, sampleSum_const, Nat.mul_zero]
+      exact Nat.zero_le _
+    | call msg₀ kNext =>
+      let bytesL : List UInt8 := ((([], []) : Bytes × Bytes) :: pool).map
+        (fun pm => ((pm.1.headD 0) ^^^ (pm.2.headD 0)) ^^^ (msg₀.headD 0))
+      have hImp : ∀ i : Fin 256,
+          (if itsrWin byteIdxHmsg
+              (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j []))
+                (.call msg₀ kNext) []).2
+              (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j []))
+                (.call msg₀ kNext) []).1
+          then 1 else 0) ≤ (if decide (UInt8.ofNat i.1 ∈ bytesL) then 1 else 0) := fun i => by
+        cases hW : itsrWin byteIdxHmsg
+            (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j []))
+              (.call msg₀ kNext) []).2
+            (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j []))
+              (.call msg₀ kNext) []).1
+        · exact Nat.zero_le _
+        · have hFunEq : (fun j => (byte1ItsrSampler i).getD j []) =
+              (fun j => if j = 0 then [UInt8.ofNat i.1] else []) := by
+            funext j; cases j <;> rfl
+          have hLog : (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j []))
+              (.call msg₀ kNext) []).2 = [([UInt8.ofNat i.1], msg₀)] := by
+            rw [hFunEq, Code.play_call]
+            have hStep0 : itsrOracle 1 (fun j => if j = 0 then [UInt8.ofNat i.1] else []) [] msg₀ =
+                ([UInt8.ofNat i.1], [([UInt8.ofNat i.1], msg₀)]) := rfl
+            rw [hStep0]
+            exact itsr_fixed_log_once [UInt8.ofNat i.1] msg₀ (kNext [UInt8.ofNat i.1]) _ rfl
+          rw [hLog] at hW
+          obtain ⟨_, hCov⟩ := andTrueSplit hW
+          let out := (Code.play (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j []))
+            (.call msg₀ kNext) []).1
+          have hAll := List.all_eq_true.mp hCov
+            (((out.1.headD 0) ^^^ (out.2.headD 0)).toNat) (List.Mem.head _)
+          obtain ⟨e, he, hxe⟩ := List.any_eq_true.mp hAll
+          rcases List.mem_cons.mp he with rfl | hNil
+          · have hInIdx := of_decide_eq_true hxe
+            rcases List.mem_cons.mp hInIdx with hNatEq | hNil2
+            · have hByteEq : (UInt8.ofNat i.1) ^^^ (msg₀.headD 0) =
+                  (out.1.headD 0) ^^^ (out.2.headD 0) :=
+                UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hNatEq.symm)
+              have hSolved := uint8_xor_solve _ _ _ hByteEq
+              have hOutMem : out ∈ (([], []) : Bytes × Bytes) :: pool := by
+                have hM := hPoolMem (itsrOracle 1 (fun j => (byte1ItsrSampler i).getD j [])) []
+                rw [hAdv] at hM
+                exact hM
+              have hInL : UInt8.ofNat i.1 ∈ bytesL :=
+                List.mem_map.mpr ⟨out, hOutMem, hSolved.symm⟩
+              rw [decide_eq_true hInL]
+              exact Nat.le_refl 1
+            · nomatch hNil2
+          · nomatch hNil
+      exact Nat.le_trans (sampleSum_le 256 _ _ hImp)
+        (Nat.le_trans (byteList_hit_sum_le bytesL) (by
+          dsimp only [bytesL]
+          rw [List.length_map, List.length_cons]
+          exact Nat.succ_le_succ hPoolLen))
+  have hSum := sampleSum_le nA _ _ hPerA
+  rw [sampleSum_const, hnC] at hSum ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right 256 hSum) ?_
+  simp only [Nat.mul_left_comm, Nat.mul_comm]
+  exact Nat.le_refl _
+
+/-- `#tooth`: At `qEval = 256`, `boundedItsrAdv` searches all 256 candidate randomizers on fresh
+    message `[1]`, winning on every coin and refuting `ItsrHard` for every `ε < 1`. -/
+def fullItsrSearchPool : List (Bytes × Bytes) :=
+  (List.range 256).map (fun b => ([UInt8.ofNat b], [1]))
+
+theorem byteIdxHmsg_itsrHard_refuted {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ ItsrHard (fun _ => True) byteIdxHmsg 1 1 ε := by
+  intro h
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε
+    (h 256 256 1 (by decide) (CoinSplit.challengerOnly 256) byte1ItsrSampler uniformOn_byte1Itsr
+      (fun _ => boundedItsrAdv byteIdxHmsg [0] fullItsrSearchPool) (fun _ => trivial))
+  let targetB := UInt8.ofNat ω.1 ^^^ (0 : UInt8) ^^^ (1 : UInt8)
+  have hInPool : ([targetB], [1]) ∈ fullItsrSearchPool :=
+    List.mem_map.mpr ⟨targetB.toNat, List.mem_range.mpr targetB.toNat_lt,
+      congrArg (fun u => ([u], [1])) UInt8.ofNat_toNat⟩
+  have hPredTrue : (!decide (([targetB], ([1] : Bytes)) = ([UInt8.ofNat ω.1], [0])) &&
+      (byteIdxHmsg [targetB] [1]).all
+        (fun x => decide (x ∈ byteIdxHmsg [UInt8.ofNat ω.1] [0]))) = true := by
+    have hXor : ∀ b : UInt8, ((b ^^^ (0 : UInt8) ^^^ (1 : UInt8)) ^^^ (1 : UInt8)) = (b ^^^ (0 : UInt8)) := by
+      decide
+    unfold byteIdxHmsg
+    dsimp only [targetB, List.headD]
+    rw [hXor]
+    decide
+  have hFound := firstBytePair_spec
+    (fun pm => !decide (pm = ([UInt8.ofNat ω.1], [0])) &&
+      (byteIdxHmsg pm.1 pm.2).all (fun x => decide (x ∈ byteIdxHmsg [UInt8.ofNat ω.1] [0])))
+    fullItsrSearchPool ([targetB], [1]) hInPool hPredTrue
+  obtain ⟨hNeq, hAll⟩ := andTrueSplit hFound
+  show itsrWin byteIdxHmsg [([UInt8.ofNat ω.1], [0])]
+    (firstBytePair _ fullItsrSearchPool) = true
+  unfold itsrWin
+  apply (Bool.and_eq_true _ _).mpr
+  refine ⟨?_, ?_⟩
+  · cases hMem : decide (firstBytePair
+      (fun pm => !decide (pm = ([UInt8.ofNat ω.1], [0])) &&
+        (byteIdxHmsg pm.1 pm.2).all (fun x => decide (x ∈ byteIdxHmsg [UInt8.ofNat ω.1] [0])))
+      fullItsrSearchPool ∈ [([UInt8.ofNat ω.1], ([0] : Bytes))])
+    · rfl
+    · rcases List.mem_cons.mp (of_decide_eq_true hMem) with hEq | hNil
+      · rw [decide_eq_true hEq] at hNeq; cases hNeq
+      · nomatch hNil
+  · refine List.all_eq_true.mpr (fun x hx => List.any_eq_true.mpr
+      ⟨([UInt8.ofNat ω.1], [0]), List.Mem.head _, List.all_eq_true.mp hAll x hx⟩)
+
+/-- **Query-bounded `SM-DT-TCR` adversary class (`WithinTcrQueries`).** Requires `Within qTarget`
+    calls on `targetIface` and restricts candidate second preimages to a pool of size `≤ qEval`. -/
+def WithinTcrQueries (qTarget qEval : Nat) (c : Code targetIface TargetBreak) : Prop :=
+  Within qTarget c ∧
+  ∃ cands : List Bytes, cands.length ≤ qEval ∧
+    ∀ (oracle : TargetState → (qr : targetIface.Query) → targetIface.Resp qr × TargetState)
+      (st : TargetState),
+      (Code.play oracle c st).1.candidate ∈ ([] : Bytes) :: cands
+
+/-- Explicit 2-call `SM-DT-TCR` pool-search adversary. -/
+def boundedTcrAdv (th : Bytes → Bytes → Bytes → Bytes) (tweak msg : Bytes)
+    (cands : List Bytes) : Code targetIface TargetBreak :=
+  .call (.target tweak msg) (fun y =>
+    .call .reveal (fun s =>
+      .ret ⟨tweak, msg, firstByteString
+        (fun m' => decide (m' ≠ msg ∧ some (th (s.getD []) tweak m') = y)) cands⟩))
+
+theorem boundedTcrAdv_mem_within (th : Bytes → Bytes → Bytes → Bytes) (tweak msg : Bytes)
+    {qEval : Nat} (cands : List Bytes) (hLen : cands.length ≤ qEval) :
+    WithinTcrQueries 2 qEval (boundedTcrAdv th tweak msg cands) :=
+  ⟨.call _ _ (fun _ => .call _ _ (fun _ => .ret 0 _)),
+   cands, hLen, fun _ _ => firstByteString_mem_cons _ cands⟩
+
+/-- Polynomial universal hash modulo prime `257` compressing 2-byte messages (`65,536` inputs)
+    into `257` field values with 1-byte seeds (`seedLen = 1`). -/
+def poly257Coeff0 : Bytes → Nat
+  | [] => 0
+  | b :: _ => b.toNat + 1
+
+def poly257Coeff1 : Bytes → Nat
+  | _ :: b :: _ => b.toNat + 1
+  | _ => 0
+
+def poly257Eval (s : Nat) (m : Bytes) : Nat :=
+  (poly257Coeff0 m + s * poly257Coeff1 m) % 257
+
+def poly257Hash (seed tweak msg : Bytes) : Bytes :=
+  if msg.length ≤ 2 then
+    let v := poly257Eval (seed.headD 0).toNat msg
+    0x00 :: UInt8.ofNat (v / 256) :: UInt8.ofNat (v % 256) :: tweak
+  else
+    0x01 :: msg
+
+theorem poly257Hash_eq (seed tweak msg : Bytes) :
+    poly257Hash seed tweak msg =
+      if msg.length ≤ 2 then
+        let v := poly257Eval (seed.headD 0).toNat msg
+        0x00 :: UInt8.ofNat (v / 256) :: UInt8.ofNat (v % 256) :: tweak
+      else
+        0x01 :: msg := rfl
+
+private def inv257 (d : Nat) : Nat :=
+  ((List.range 257).find? (fun x => decide ((x * d) % 257 = 1))).getD 0
+
+private theorem inv257_spec : ∀ d : Fin 257, d.1 ≠ 0 → (inv257 d.1 * d.1) % 257 = 1 := by
+  decide
+
+private theorem add_mod_cancel_left257 {c x y : Nat} (h : (c + x) % 257 = (c + y) % 257) :
+    x % 257 = y % 257 := by
+  have h1 := congrArg (fun z => ((257 - c % 257) + z) % 257) h
+  dsimp only at h1
+  have hL : ((257 - c % 257) + (c + x) % 257) % 257 = x % 257 := by
+    rw [Nat.add_mod (257 - c % 257), Nat.mod_mod, ← Nat.add_mod]
+    have hcLt : c % 257 < 257 := Nat.mod_lt c (by decide)
+    have hSplit : (257 - c % 257) + (c + x) = 257 * (c / 257 + 1) + x := by
+      have hDiv := Nat.div_add_mod c 257
+      omega
+    rw [hSplit, Nat.mul_add_mod_self_left]
+  have hR : ((257 - c % 257) + (c + y) % 257) % 257 = y % 257 := by
+    rw [Nat.add_mod (257 - c % 257), Nat.mod_mod, ← Nat.add_mod]
+    have hcLt : c % 257 < 257 := Nat.mod_lt c (by decide)
+    have hSplit : (257 - c % 257) + (c + y) = 257 * (c / 257 + 1) + y := by
+      have hDiv := Nat.div_add_mod c 257
+      omega
+    rw [hSplit, Nat.mul_add_mod_self_left]
+  exact hL.symm.trans (h1.trans hR)
+
+private theorem poly257_coeffs_inj :
+    ∀ {m m' : Bytes}, m.length ≤ 2 → m'.length ≤ 2 →
+      poly257Coeff0 m = poly257Coeff0 m' → poly257Coeff1 m = poly257Coeff1 m' → m = m'
+  | [], [], _, _, _, _ => rfl
+  | [], b :: _, _, _, h0, _ => by dsimp only [poly257Coeff0] at h0; omega
+  | b :: _, [], _, _, h0, _ => by dsimp only [poly257Coeff0] at h0; omega
+  | [b], [b'], _, _, h0, _ => by
+    dsimp only [poly257Coeff0] at h0
+    have hb : b.toNat = b'.toNat := by omega
+    exact congrArg (· :: []) (UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hb))
+  | [_], _ :: c' :: _, _, _, _, h1 => by dsimp only [poly257Coeff1] at h1; omega
+  | _ :: c :: _, [_], _, _, _, h1 => by dsimp only [poly257Coeff1] at h1; omega
+  | [b₀, b₁], [b₀', b₁'], _, _, h0, h1 => by
+    dsimp only [poly257Coeff0, poly257Coeff1] at h0 h1
+    have hb0 : b₀ = b₀' := UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by omega))
+    have hb1 : b₁ = b₁' := UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by omega))
+    rw [hb0, hb1]
+  | _ :: _ :: _ :: _, _, hL, _, _, _ => by simp at hL
+  | _, _ :: _ :: _ :: _, _, hL', _, _ => by simp at hL'
+
+private theorem poly257Hash_unique_seed (t m m' : Bytes) (hNe : m' ≠ m)
+    (s₁ s₂ : Fin 256)
+    (h₁ : poly257Hash [UInt8.ofNat s₁.1] t m' = poly257Hash [UInt8.ofNat s₁.1] t m)
+    (h₂ : poly257Hash [UInt8.ofNat s₂.1] t m' = poly257Hash [UInt8.ofNat s₂.1] t m) :
+    s₁ = s₂ := by
+  unfold poly257Hash at h₁ h₂
+  by_cases hm : m.length ≤ 2
+  · by_cases hm' : m'.length ≤ 2
+    · rw [iteOfPos hm', iteOfPos hm] at h₁ h₂
+      have decodeEq : ∀ {u w : Nat}, u < 257 → w < 257 →
+          (0x00 :: UInt8.ofNat (u / 256) :: UInt8.ofNat (u % 256) :: t) =
+          (0x00 :: UInt8.ofNat (w / 256) :: UInt8.ofNat (w % 256) :: t) → u = w := by
+        intro u w hu hw hEq
+        injection hEq with _ hTl1
+        injection hTl1 with hHi hTl2
+        injection hTl2 with hLo _
+        have hHiN := congrArg UInt8.toNat hHi
+        have hLoN := congrArg UInt8.toNat hLo
+        rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat',
+          Nat.mod_eq_of_lt (by omega : u / 256 < 256),
+          Nat.mod_eq_of_lt (by omega : w / 256 < 256)] at hHiN
+        rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat',
+          Nat.mod_eq_of_lt (Nat.mod_lt u (by decide)),
+          Nat.mod_eq_of_lt (Nat.mod_lt w (by decide))] at hLoN
+        have huDiv := Nat.div_add_mod u 256
+        have hwDiv := Nat.div_add_mod w 256
+        omega
+      have hs1Nat : ([UInt8.ofNat s₁.1] : Bytes).headD 0 |>.toNat = s₁.1 := by
+        dsimp only [List.headD]; rw [UInt8.toNat_ofNat', Nat.mod_eq_of_lt s₁.2]
+      have hs2Nat : ([UInt8.ofNat s₂.1] : Bytes).headD 0 |>.toNat = s₂.1 := by
+        dsimp only [List.headD]; rw [UInt8.toNat_ofNat', Nat.mod_eq_of_lt s₂.2]
+      rw [hs1Nat] at h₁
+      rw [hs2Nat] at h₂
+      have he1 := decodeEq (Nat.mod_lt _ (by decide)) (Nat.mod_lt _ (by decide)) h₁
+      have he2 := decodeEq (Nat.mod_lt _ (by decide)) (Nat.mod_lt _ (by decide)) h₂
+      unfold poly257Eval at he1 he2
+      let a₀ := poly257Coeff0 m
+      let a₁ := poly257Coeff1 m
+      let b₀ := poly257Coeff0 m'
+      let b₁ := poly257Coeff1 m'
+      have ha₀ : a₀ < 257 := by
+        dsimp only [a₀, poly257Coeff0]; cases m with | nil => decide | cons b _ => have := b.toNat_lt; omega
+      have hb₀ : b₀ < 257 := by
+        dsimp only [b₀, poly257Coeff0]; cases m' with | nil => decide | cons b _ => have := b.toNat_lt; omega
+      have ha₁ : a₁ < 257 := by
+        dsimp only [a₁, poly257Coeff1]
+        match m with | _ :: b :: _ => have := b.toNat_lt; omega | [] => decide | [_] => decide
+      have hb₁ : b₁ < 257 := by
+        dsimp only [b₁, poly257Coeff1]
+        match m' with | _ :: b :: _ => have := b.toNat_lt; omega | [] => decide | [_] => decide
+      have hCross : ((b₀ + s₁.1 * b₁) + (a₀ + s₂.1 * a₁)) % 257 =
+          ((a₀ + s₁.1 * a₁) + (b₀ + s₂.1 * b₁)) % 257 := by
+        rw [Nat.add_mod, he1, he2, ← Nat.add_mod]
+      by_cases hEq1 : a₁ = b₁
+      · have hMod0 : b₀ % 257 = a₀ % 257 := by
+          have hC : (s₁.1 * a₁ + b₀) % 257 = (s₁.1 * a₁ + a₀) % 257 := by
+            rw [Nat.add_comm _ b₀, Nat.add_comm _ a₀, ← hEq1]; exact he1
+          exact add_mod_cancel_left257 hC
+        rw [Nat.mod_eq_of_lt hb₀, Nat.mod_eq_of_lt ha₀] at hMod0
+        exact False.elim (hNe (poly257_coeffs_inj hm' hm hMod0 hEq1.symm))
+      · have cancelMul : ∀ {k d : Nat}, k < 257 → 0 < d → d < 257 → (k * d) % 257 = 0 → k = 0 := by
+          intro k d hk hdPos hdLt hZero
+          have hInv := inv257_spec ⟨d, hdLt⟩ (Nat.ne_of_gt hdPos)
+          have hCalc : k % 257 = 0 := by
+            calc k % 257
+              _ = (k * 1) % 257 := by rw [Nat.mul_one]
+              _ = (k * ((inv257 d * d) % 257)) % 257 := by rw [hInv]
+              _ = (k * (inv257 d * d)) % 257 := by rw [← Nat.mul_mod, Nat.mod_mod, Nat.mul_mod]
+              _ = (inv257 d * (k * d)) % 257 := by
+                exact congrArg (· % 257) (by simp only [Nat.mul_left_comm, Nat.mul_comm])
+              _ = (inv257 d * ((k * d) % 257)) % 257 := by rw [← Nat.mul_mod, Nat.mod_mod, Nat.mul_mod]
+              _ = 0 := by rw [hZero, Nat.mul_zero]; rfl
+          rwa [Nat.mod_eq_of_lt hk] at hCalc
+        by_cases hsLe : s₁.1 ≤ s₂.1
+        · by_cases hab : a₁ < b₁
+          · let d := b₁ - a₁
+            let k := s₂.1 - s₁.1
+            have hRearr : (a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₁.1 * d + 0) % 257 =
+                (a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₁.1 * d + k * d) % 257 := by
+              have hL : (b₀ + s₁.1 * b₁) + (a₀ + s₂.1 * a₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₁.1 * d + 0 := by
+                have hb1Eq : b₁ = a₁ + d := by omega
+                rw [hb1Eq, Nat.mul_add, Nat.add_mul]; omega
+              have hR : (a₀ + s₁.1 * a₁) + (b₀ + s₂.1 * b₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₁.1 * d + k * d := by
+                have hb1Eq : b₁ = a₁ + d := by omega
+                have hs2Eq : s₂.1 = s₁.1 + k := by omega
+                rw [hb1Eq, hs2Eq, Nat.mul_add, Nat.add_mul, Nat.add_mul]; omega
+              rw [← hL, ← hR]; exact hCross
+            have hkd0 := (add_mod_cancel_left257 hRearr).symm
+            have hk0 := cancelMul (by omega) (by omega) (by omega) hkd0
+            exact Fin.ext (by omega)
+          · have hba : b₁ < a₁ := by omega
+            let d := a₁ - b₁
+            let k := s₂.1 - s₁.1
+            have hRearr : (a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₁.1 * d + k * d) % 257 =
+                (a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₁.1 * d + 0) % 257 := by
+              have hL : (b₀ + s₁.1 * b₁) + (a₀ + s₂.1 * a₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₁.1 * d + k * d := by
+                have ha1Eq : a₁ = b₁ + d := by omega
+                have hs2Eq : s₂.1 = s₁.1 + k := by omega
+                rw [ha1Eq, hs2Eq, Nat.mul_add, Nat.add_mul, Nat.add_mul]; omega
+              have hR : (a₀ + s₁.1 * a₁) + (b₀ + s₂.1 * b₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₁.1 * d + 0 := by
+                have ha1Eq : a₁ = b₁ + d := by omega
+                rw [ha1Eq, Nat.mul_add, Nat.add_mul]; omega
+              rw [← hL, ← hR]; exact hCross
+            have hkd0 := add_mod_cancel_left257 hRearr
+            have hk0 := cancelMul (by omega) (by omega) (by omega) hkd0
+            exact Fin.ext (by omega)
+        · have hs2Le : s₂.1 ≤ s₁.1 := by omega
+          by_cases hab : a₁ < b₁
+          · let d := b₁ - a₁
+            let k := s₁.1 - s₂.1
+            have hRearr : (a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₂.1 * d + k * d) % 257 =
+                (a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₂.1 * d + 0) % 257 := by
+              have hL : (b₀ + s₁.1 * b₁) + (a₀ + s₂.1 * a₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₂.1 * d + k * d := by
+                have hb1Eq : b₁ = a₁ + d := by omega
+                have hs1Eq : s₁.1 = s₂.1 + k := by omega
+                rw [hb1Eq, hs1Eq, Nat.mul_add, Nat.add_mul, Nat.add_mul]; omega
+              have hR : (a₀ + s₁.1 * a₁) + (b₀ + s₂.1 * b₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * a₁ + s₂.1 * d + 0 := by
+                have hb1Eq : b₁ = a₁ + d := by omega
+                rw [hb1Eq, Nat.mul_add, Nat.add_mul]; omega
+              rw [← hL, ← hR]; exact hCross
+            have hkd0 := add_mod_cancel_left257 hRearr
+            have hk0 := cancelMul (by omega) (by omega) (by omega) hkd0
+            exact Fin.ext (by omega)
+          · have hba : b₁ < a₁ := by omega
+            let d := a₁ - b₁
+            let k := s₁.1 - s₂.1
+            have hRearr : (a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₂.1 * d + 0) % 257 =
+                (a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₂.1 * d + k * d) % 257 := by
+              have hL : (b₀ + s₁.1 * b₁) + (a₀ + s₂.1 * a₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₂.1 * d + 0 := by
+                have ha1Eq : a₁ = b₁ + d := by omega
+                rw [ha1Eq, Nat.mul_add, Nat.add_mul]; omega
+              have hR : (a₀ + s₁.1 * a₁) + (b₀ + s₂.1 * b₁) =
+                  a₀ + b₀ + (s₁.1 + s₂.1) * b₁ + s₂.1 * d + k * d := by
+                have ha1Eq : a₁ = b₁ + d := by omega
+                have hs1Eq : s₁.1 = s₂.1 + k := by omega
+                rw [ha1Eq, hs1Eq, Nat.mul_add, Nat.add_mul, Nat.add_mul]; omega
+              rw [← hL, ← hR]; exact hCross
+            have hkd0 := (add_mod_cancel_left257 hRearr).symm
+            have hk0 := cancelMul (by omega) (by omega) (by omega) hkd0
+            exact Fin.ext (by omega)
+    · rw [iteOfNeg hm', iteOfPos hm] at h₁
+      cases h₁
+  · by_cases hm' : m'.length ≤ 2
+    · rw [iteOfPos hm', iteOfNeg hm] at h₁
+      cases h₁
+    · rw [iteOfNeg hm', iteOfNeg hm] at h₁
+      injection h₁ with _ hEqM
+      exact False.elim (hNe hEqM)
+
+private theorem poly257_candList_hit_le (t m : Bytes) :
+    ∀ (cands : List Bytes),
+      sampleSum 256 (fun s =>
+        if cands.any (fun m' => decide (m' ≠ m ∧
+            poly257Hash [UInt8.ofNat s.1] t m' = poly257Hash [UInt8.ofNat s.1] t m))
+        then 1 else 0) ≤ cands.length
+  | [] => by
+    have hZ : (fun _ : Fin 256 => if ([] : List Bytes).any _ then 1 else 0) = (fun _ => 0) := rfl
+    rw [hZ, sampleSum_const, Nat.mul_zero]
+    exact Nat.le_refl 0
+  | m' :: ms => by
+    have hSplit : ∀ s : Fin 256,
+        (if (m' :: ms).any (fun x => decide (x ≠ m ∧
+            poly257Hash [UInt8.ofNat s.1] t x = poly257Hash [UInt8.ofNat s.1] t m))
+         then 1 else 0) ≤
+        (if decide (m' ≠ m ∧
+            poly257Hash [UInt8.ofNat s.1] t m' = poly257Hash [UInt8.ofNat s.1] t m)
+         then 1 else 0) +
+        (if ms.any (fun x => decide (x ≠ m ∧
+            poly257Hash [UInt8.ofNat s.1] t x = poly257Hash [UInt8.ofNat s.1] t m))
+         then 1 else 0) := fun s => by
+      rw [List.any_cons]
+      cases decide (m' ≠ m ∧ poly257Hash [UInt8.ofNat s.1] t m' = poly257Hash [UInt8.ofNat s.1] t m) <;>
+        cases ms.any (fun x => decide (x ≠ m ∧
+          poly257Hash [UInt8.ofNat s.1] t x = poly257Hash [UInt8.ofNat s.1] t m)) <;>
+        decide
+    have hHead : sampleSum 256 (fun s =>
+        if decide (m' ≠ m ∧
+            poly257Hash [UInt8.ofNat s.1] t m' = poly257Hash [UInt8.ofNat s.1] t m)
+        then 1 else 0) ≤ 1 :=
+      sampleSum_bool_le_one_of_subsingleton _ (fun s₁ s₂ h₁ h₂ => by
+        obtain ⟨hNe, he₁⟩ := of_decide_eq_true h₁
+        obtain ⟨_, he₂⟩ := of_decide_eq_true h₂
+        exact poly257Hash_unique_seed t m m' hNe s₁ s₂ he₁ he₂)
+    have hSum := sampleSum_le 256 _ _ hSplit
+    rw [sampleSum_add_fn] at hSum
+    exact Nat.le_trans hSum
+      (Nat.le_trans (Nat.add_le_add hHead (poly257_candList_hit_le t m ms))
+        (by rw [List.length_cons, Nat.add_comm]))
+
+private theorem tcr_targets_after_revealed (th : Bytes → Bytes → Bytes → Bytes) :
+    ∀ (c : Code targetIface TargetBreak) (st : TargetState),
+      st.revealed = true →
+      (Code.play (smDtTcrOracle th 1) c st).2.targets = st.targets
+  | .ret _, _, _ => rfl
+  | .call .reveal k, st, _ => tcr_targets_after_revealed th (k (some st.seed)) { st with revealed := true } rfl
+  | .call (.target t m) k, st, hRev => by
+    have hStep : smDtTcrOracle th 1 st (.target t m) = (none, st) :=
+      iteOfNeg (fun h => by rw [hRev] at h; exact Bool.noConfusion h.1) _ _
+    rw [Code.play_call, hStep]
+    exact tcr_targets_after_revealed th (k none) st hRev
+
+private theorem tcr_targets_after_one (th : Bytes → Bytes → Bytes → Bytes) (t₀ m₀ : Bytes) :
+    ∀ (c : Code targetIface TargetBreak) (st : TargetState),
+      st.targets = [(t₀, m₀)] →
+      (Code.play (smDtTcrOracle th 1) c st).2.targets = [(t₀, m₀)]
+  | .ret _, st, hT => hT
+  | .call .reveal k, st, hT => tcr_targets_after_one th t₀ m₀ (k (some st.seed)) { st with revealed := true } hT
+  | .call (.target t m) k, st, hT => by
+    have hStep : smDtTcrOracle th 1 st (.target t m) = (none, st) :=
+      iteOfNeg (fun h => by rw [hT] at h; exact Nat.lt_irrefl 1 h.2.1) _ _
+    rw [Code.play_call, hStep]
+    exact tcr_targets_after_one th t₀ m₀ (k none) st hT
+
+/-- **Inhabited `SmDtTcrHard` Theorem (`(qEval + 1) / 256`).** Against `WithinTcrQueries qTarget qEval`,
+    the compressing polynomial universal hash `poly257Hash` satisfies `SmDtTcrHard` at
+    `seedLen = 1, q = 1` with exact rational bound `(qEval + 1) / 256` (strictly `< 1` for every
+    `qEval < 255`). -/
+theorem poly257Hash_smDtTcrHard_within (qTarget qEval : Nat) :
+    SmDtTcrHard (WithinTcrQueries qTarget qEval) poly257Hash 1 1 ⟨qEval + 1, 256, by decide⟩ := by
+  intro n nC nA hPos π seed hU adv hA
+  unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
+  dsimp only
+  rw [π.card_eq, π.sampleSum_eq]
+  obtain ⟨hnC, _⟩ := hU.card_and_sampleSum_eq uniformOn_byte1Seed (fun _ => 0)
+  have hSwap : sampleSum nC (fun c => sampleSum nA (fun a =>
+      if (smDtTcrGame hPos poly257Hash 1 (fun ω => seed (π.chal ω))
+          (fun ω => adv (π.advc ω))).win (π.pair c a)
+      then 1 else 0)) =
+      sampleSum nA (fun a => sampleSum nC (fun c =>
+        if smDtTcrWin poly257Hash
+            (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨seed c, [], false⟩).2
+            (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨seed c, [], false⟩).1
+        then 1 else 0)) := by
+    have hS : sampleSum nC (fun c => sampleSum nA (fun a =>
+        if (smDtTcrGame hPos poly257Hash 1 (fun ω => seed (π.chal ω))
+            (fun ω => adv (π.advc ω))).win (π.pair c a)
+        then 1 else 0)) =
+        sampleSum nC (fun c => sampleSum nA (fun a =>
+          if smDtTcrWin poly257Hash
+              (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨seed c, [], false⟩).2
+              (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨seed c, [], false⟩).1
+          then 1 else 0)) :=
+      sampleSum_ext (fun c => sampleSum_ext (fun a => by
+        show (if smDtTcrWin poly257Hash
+            (Code.play (smDtTcrOracle poly257Hash 1) (adv (π.advc (π.pair c a)))
+              ⟨seed (π.chal (π.pair c a)), [], false⟩).2
+            (Code.play (smDtTcrOracle poly257Hash 1) (adv (π.advc (π.pair c a)))
+              ⟨seed (π.chal (π.pair c a)), [], false⟩).1
+          then 1 else 0) = _
+        rw [π.chal_pair, π.advc_pair]))
+    rw [hS]
+    suffices ∀ (k m : Nat) (g : Fin k → Fin m → Nat),
+        sampleSum k (fun i => sampleSum m (fun j => g i j)) =
+        sampleSum m (fun j => sampleSum k (fun i => g i j)) from this nC nA _
+    intro k
+    induction k with
+    | zero =>
+      intro m _; rw [sampleSum_zero]
+      have hZ : (fun _ : Fin m => sampleSum 0 _) = (fun _ => 0) := rfl
+      rw [hZ, sampleSum_const, Nat.mul_zero]
+    | succ k ih =>
+      intro m g; rw [sampleSum_succ, ih m]
+      have hR : sampleSum m (fun j => sampleSum (k + 1) (fun i => g i j)) =
+          sampleSum m (fun j => g ⟨0, Nat.zero_lt_succ k⟩ j +
+            sampleSum k (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j)) :=
+        sampleSum_ext (fun _ => rfl)
+      rw [hR, sampleSum_add_fn]
+  rw [hSwap]
+  have hPerA : ∀ a : Fin nA,
+      sampleSum nC (fun c =>
+        if smDtTcrWin poly257Hash
+            (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨seed c, [], false⟩).2
+            (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨seed c, [], false⟩).1
+        then 1 else 0) ≤ qEval + 1 := fun a => by
+    obtain ⟨_, cands, hCandsLen, hCandsMem⟩ := hA a
+    obtain ⟨_, hSampleSum⟩ := hU.card_and_sampleSum_eq uniformOn_byte1Seed (fun s =>
+      if smDtTcrWin poly257Hash
+          (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨s, [], false⟩).2
+          (Code.play (smDtTcrOracle poly257Hash 1) (adv a) ⟨s, [], false⟩).1
+      then 1 else 0)
+    rw [hSampleSum]
+    cases hAdv : adv a with
+    | ret out =>
+      have hZ : (fun i : Fin 256 =>
+          if smDtTcrWin poly257Hash
+              (Code.play (smDtTcrOracle poly257Hash 1) (.ret out) ⟨byte1SeedSampler i, [], false⟩).2
+              (Code.play (smDtTcrOracle poly257Hash 1) (.ret out) ⟨byte1SeedSampler i, [], false⟩).1
+          then 1 else 0) = (fun _ => 0) := by
+        funext i; rfl
+      rw [hZ, sampleSum_const, Nat.mul_zero]
+      exact Nat.zero_le _
+    | call qr kNext =>
+      cases qr with
+      | reveal =>
+        have hZ : (fun i : Fin 256 =>
+            if smDtTcrWin poly257Hash
+                (Code.play (smDtTcrOracle poly257Hash 1) (.call .reveal kNext)
+                  ⟨byte1SeedSampler i, [], false⟩).2
+                (Code.play (smDtTcrOracle poly257Hash 1) (.call .reveal kNext)
+                  ⟨byte1SeedSampler i, [], false⟩).1
+            then 1 else 0) = (fun _ => 0) := by
+          funext i
+          have hEmpty : (Code.play (smDtTcrOracle poly257Hash 1) (.call .reveal kNext)
+              ⟨byte1SeedSampler i, [], false⟩).2.targets = [] :=
+            tcr_targets_after_revealed poly257Hash (kNext (some (byte1SeedSampler i)))
+              ⟨byte1SeedSampler i, [], true⟩ rfl
+          cases hW : smDtTcrWin poly257Hash
+              (Code.play (smDtTcrOracle poly257Hash 1) (.call .reveal kNext)
+                ⟨byte1SeedSampler i, [], false⟩).2
+              (Code.play (smDtTcrOracle poly257Hash 1) (.call .reveal kNext)
+                ⟨byte1SeedSampler i, [], false⟩).1
+          · rfl
+          · obtain ⟨hMem, _⟩ := andTrueSplit hW
+            rw [hEmpty] at hMem
+            nomatch (of_decide_eq_true hMem)
+        rw [hZ, sampleSum_const, Nat.mul_zero]
+        exact Nat.zero_le _
+      | target t₀ m₀ =>
+        have hImp : ∀ i : Fin 256,
+            (if smDtTcrWin poly257Hash
+                (Code.play (smDtTcrOracle poly257Hash 1) (.call (.target t₀ m₀) kNext)
+                  ⟨byte1SeedSampler i, [], false⟩).2
+                (Code.play (smDtTcrOracle poly257Hash 1) (.call (.target t₀ m₀) kNext)
+                  ⟨byte1SeedSampler i, [], false⟩).1
+            then 1 else 0) ≤
+            (if (([] : Bytes) :: cands).any (fun m' => decide (m' ≠ m₀ ∧
+                poly257Hash [UInt8.ofNat i.1] t₀ m' = poly257Hash [UInt8.ofNat i.1] t₀ m₀))
+             then 1 else 0) := fun i => by
+          cases hW : smDtTcrWin poly257Hash
+              (Code.play (smDtTcrOracle poly257Hash 1) (.call (.target t₀ m₀) kNext)
+                ⟨byte1SeedSampler i, [], false⟩).2
+              (Code.play (smDtTcrOracle poly257Hash 1) (.call (.target t₀ m₀) kNext)
+                ⟨byte1SeedSampler i, [], false⟩).1
+          · exact Nat.zero_le _
+          · have hStep0 : smDtTcrOracle poly257Hash 1 ⟨byte1SeedSampler i, [], false⟩ (.target t₀ m₀) =
+                (some (poly257Hash (byte1SeedSampler i) t₀ m₀),
+                  ⟨byte1SeedSampler i, [(t₀, m₀)], false⟩) := rfl
+            have hTgt : (Code.play (smDtTcrOracle poly257Hash 1) (.call (.target t₀ m₀) kNext)
+                ⟨byte1SeedSampler i, [], false⟩).2.targets = [(t₀, m₀)] := by
+              rw [Code.play_call, hStep0]
+              exact tcr_targets_after_one poly257Hash t₀ m₀ _ _ rfl
+            have hSeedInv := (smDtTcrRun_inv poly257Hash 1 (fun _ : Fin 1 => byte1SeedSampler i)
+              (fun _ => .call (.target t₀ m₀) kNext) ⟨0, Nat.one_pos⟩).1
+            obtain ⟨hMem, hRest⟩ := andTrueSplit hW
+            obtain ⟨hNe, hCol⟩ := andTrueSplit hRest
+            rw [hTgt] at hMem
+            rcases List.mem_cons.mp (of_decide_eq_true hMem) with hPairEq | hNil
+            · injection hPairEq with hTwEq hMsgEq
+              have hCandMem : (Code.play (smDtTcrOracle poly257Hash 1) (.call (.target t₀ m₀) kNext)
+                  ⟨byte1SeedSampler i, [], false⟩).1.candidate ∈ ([] : Bytes) :: cands := by
+                have hM := hCandsMem (smDtTcrOracle poly257Hash 1) ⟨byte1SeedSampler i, [], false⟩
+                rw [hAdv] at hM
+                exact hM
+              have hColProp := of_decide_eq_true hCol
+              have hNeProp := of_decide_eq_true hNe
+              rw [hTwEq, hMsgEq] at hColProp hNeProp
+              have hSeedEq : (Code.play (smDtTcrOracle poly257Hash 1) (.call (.target t₀ m₀) kNext)
+                  ⟨byte1SeedSampler i, [], false⟩).2.seed = [UInt8.ofNat i.1] := hSeedInv
+              rw [hSeedEq] at hColProp
+              have hAny : (([] : Bytes) :: cands).any (fun m' => decide (m' ≠ m₀ ∧
+                  poly257Hash [UInt8.ofNat i.1] t₀ m' = poly257Hash [UInt8.ofNat i.1] t₀ m₀)) = true :=
+                List.any_eq_true.mpr ⟨_, hCandMem, decide_eq_true ⟨hNeProp, hColProp⟩⟩
+              rw [hAny]
+              exact Nat.le_refl 1
+            · nomatch hNil
+        exact Nat.le_trans (sampleSum_le 256 _ _ hImp)
+          (Nat.le_trans (poly257_candList_hit_le t₀ m₀ (([] : Bytes) :: cands))
+            (by rw [List.length_cons]; exact Nat.succ_le_succ hCandsLen))
+  have hSum := sampleSum_le nA _ _ hPerA
+  rw [sampleSum_const, hnC] at hSum ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right 256 hSum) ?_
+  simp only [Nat.mul_left_comm, Nat.mul_comm]
+  exact Nat.le_refl _
+
+/-- `#tooth`: Post-reveal unrestricted computation refutes `SmDtTcrHard (fun _ => True) poly257Hash`
+    for every `ε < 1`, even though the adversary makes only 2 `targetIface` calls (`Within 2`). -/
+def poly257PostRevealBreakAdv : Code targetIface TargetBreak :=
+  .call (.target [] [0, 0]) (fun _ =>
+    .call .reveal (fun sOpt =>
+      let s := ((sOpt.getD []).headD 0).toNat
+      let cand : Bytes :=
+        if s = 0 then [0, 1]
+        else if s = 1 then [1]
+        else [UInt8.ofNat (257 - s), 1]
+      .ret ⟨[], [0, 0], cand⟩))
+
+private theorem poly257PostRevealBreak_collides :
+    ∀ i : Fin 256,
+      let s := i.1
+      let cand : Bytes :=
+        if s = 0 then [0, 1]
+        else if s = 1 then [1]
+        else [UInt8.ofNat (257 - s), 1]
+      cand ≠ [0, 0] ∧
+        poly257Hash [UInt8.ofNat i.1] [] cand = poly257Hash [UInt8.ofNat i.1] [] [0, 0] := by
+  decide
+
+theorem poly257Hash_smDtTcrHard_refuted {ε : RatBound} (hε : ε.num < ε.den) :
+    ¬ SmDtTcrHard (fun _ => True) poly257Hash 1 1 ε := by
+  intro h
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε
+    (h 256 256 1 (by decide) (CoinSplit.challengerOnly 256) byte1SeedSampler uniformOn_byte1Seed
+      (fun _ => poly257PostRevealBreakAdv) (fun _ => trivial))
+  have hCol := poly257PostRevealBreak_collides ω
+  have hsNat : ([UInt8.ofNat ω.1] : Bytes).headD 0 |>.toNat = ω.1 := by
+    dsimp only [List.headD]; rw [UInt8.toNat_ofNat', Nat.mod_eq_of_lt ω.2]
+  show smDtTcrWin poly257Hash ⟨[UInt8.ofNat ω.1], [([], [0, 0])], true⟩
+    ⟨[], [0, 0],
+      if ([UInt8.ofNat ω.1] : Bytes).headD 0 |>.toNat = 0 then [0, 1]
+      else if ([UInt8.ofNat ω.1] : Bytes).headD 0 |>.toNat = 1 then [1]
+      else [UInt8.ofNat (257 - ([UInt8.ofNat ω.1] : Bytes).headD 0 |>.toNat), 1]⟩ = true
+  rw [hsNat]
+  unfold smDtTcrWin
+  rw [decide_eq_true (List.Mem.head _), decide_eq_true hCol.1, decide_eq_true hCol.2]
+  rfl
+
+/-- Canonical uniform sampler on `SmDtPreSampleOk 1 1 1` (`256 * 256` `(seed, [hidden])` pairs). -/
+def byte1SeedAndPreSampler (z : Fin (256 * 256)) : Bytes × List Bytes :=
+  let p := CoinSplit.prod 256 256
+  ([UInt8.ofNat (p.chal z).1], [[UInt8.ofNat (p.advc z).1]])
+
+theorem byte1SeedAndPreSampler_eq (z : Fin (256 * 256)) :
+    byte1SeedAndPreSampler z =
+      ([UInt8.ofNat ((CoinSplit.prod 256 256).chal z).1],
+       [[UInt8.ofNat ((CoinSplit.prod 256 256).advc z).1]]) := rfl
+
+theorem uniformOn_byte1SeedAndPre : UniformOn (SmDtPreSampleOk 1 1 1) byte1SeedAndPreSampler where
+  mem _ := ⟨rfl, rfl, fun h hh => by
+    rcases List.mem_cons.mp hh with rfl | hNil
+    · rfl
+    · nomatch hNil⟩
+  injective z₁ z₂ h := by
+    let p := CoinSplit.prod 256 256
+    injection h with hS hH
+    injection hH with hHd _
+    have hc := uniformOn_byte1Seed.injective (p.chal z₁) (p.chal z₂) hS
+    have ha := uniformOn_byte1Seed.injective (p.advc z₁) (p.advc z₂) hHd
+    rw [← p.pair_eta z₁, ← p.pair_eta z₂, hc, ha]
+  surjective x hx := by
+    let p := CoinSplit.prod 256 256
+    obtain ⟨s, hs⟩ := x
+    obtain ⟨h1, h2, h3⟩ := hx
+    obtain ⟨cs, hcs⟩ := uniformOn_byte1Seed.surjective s h1
+    match hs, h2, h3 with
+    | [h], _, h3 =>
+      obtain ⟨ch, hch⟩ := uniformOn_byte1Seed.surjective h (h3 h (List.Mem.head _))
+      refine ⟨p.pair cs ch, ?_⟩
+      unfold byte1SeedAndPreSampler
+      dsimp only
+      rw [p.chal_pair, p.advc_pair]
+      exact Prod.ext hcs (congrArg (· :: []) hch)
+
+private theorem poly257Hash_oneByte_unique (seed tweak m' : Bytes)
+    (x₁ x₂ : Fin 256)
+    (h₁ : poly257Hash seed tweak m' = poly257Hash seed tweak [UInt8.ofNat x₁.1])
+    (h₂ : poly257Hash seed tweak m' = poly257Hash seed tweak [UInt8.ofNat x₂.1]) :
+    x₁ = x₂ := by
+  have hEq := h₁.symm.trans h₂
+  unfold poly257Hash at hEq
+  rw [iteOfPos (by decide : ([UInt8.ofNat x₁.1] : Bytes).length ≤ 2),
+    iteOfPos (by decide : ([UInt8.ofNat x₂.1] : Bytes).length ≤ 2)] at hEq
+  injection hEq with _ h1
+  injection h1 with hHi h2
+  injection h2 with hLo _
+  have hHiN := congrArg UInt8.toNat hHi
+  have hLoN := congrArg UInt8.toNat hLo
+  have hv1 : poly257Eval (seed.headD 0).toNat [UInt8.ofNat x₁.1] = x₁.1 + 1 := by
+    unfold poly257Eval poly257Coeff0 poly257Coeff1
+    rw [Nat.mul_zero, Nat.add_zero, UInt8.toNat_ofNat', Nat.mod_eq_of_lt x₁.2,
+      Nat.mod_eq_of_lt (by omega : x₁.1 + 1 < 257)]
+  have hv2 : poly257Eval (seed.headD 0).toNat [UInt8.ofNat x₂.1] = x₂.1 + 1 := by
+    unfold poly257Eval poly257Coeff0 poly257Coeff1
+    rw [Nat.mul_zero, Nat.add_zero, UInt8.toNat_ofNat', Nat.mod_eq_of_lt x₂.2,
+      Nat.mod_eq_of_lt (by omega : x₂.1 + 1 < 257)]
+  rw [hv1, hv2] at hHiN hLoN
+  rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat',
+    Nat.mod_eq_of_lt (by omega : (x₁.1 + 1) / 256 < 256),
+    Nat.mod_eq_of_lt (by omega : (x₂.1 + 1) / 256 < 256)] at hHiN
+  rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat',
+    Nat.mod_eq_of_lt (Nat.mod_lt _ (by decide)),
+    Nat.mod_eq_of_lt (Nat.mod_lt _ (by decide))] at hLoN
+  have hd1 := Nat.div_add_mod (x₁.1 + 1) 256
+  have hd2 := Nat.div_add_mod (x₂.1 + 1) 256
+  exact Fin.ext (by omega)
+
+private theorem poly257_preCandList_hit_le (seed tweak : Bytes) :
+    ∀ (dict : List Bytes),
+      sampleSum 256 (fun x =>
+        if dict.any (fun m' =>
+            decide (poly257Hash seed tweak m' = poly257Hash seed tweak [UInt8.ofNat x.1]))
+        then 1 else 0) ≤ dict.length
+  | [] => by
+    have hZ : (fun _ : Fin 256 => if ([] : List Bytes).any _ then 1 else 0) = (fun _ => 0) := rfl
+    rw [hZ, sampleSum_const, Nat.mul_zero]
+    exact Nat.le_refl 0
+  | m' :: ms => by
+    have hSplit : ∀ x : Fin 256,
+        (if (m' :: ms).any (fun c =>
+            decide (poly257Hash seed tweak c = poly257Hash seed tweak [UInt8.ofNat x.1]))
+         then 1 else 0) ≤
+        (if decide (poly257Hash seed tweak m' = poly257Hash seed tweak [UInt8.ofNat x.1])
+         then 1 else 0) +
+        (if ms.any (fun c =>
+            decide (poly257Hash seed tweak c = poly257Hash seed tweak [UInt8.ofNat x.1]))
+         then 1 else 0) := fun x => by
+      rw [List.any_cons]
+      cases decide (poly257Hash seed tweak m' = poly257Hash seed tweak [UInt8.ofNat x.1]) <;>
+        cases ms.any (fun c =>
+          decide (poly257Hash seed tweak c = poly257Hash seed tweak [UInt8.ofNat x.1])) <;>
+        decide
+    have hHead : sampleSum 256 (fun x =>
+        if decide (poly257Hash seed tweak m' = poly257Hash seed tweak [UInt8.ofNat x.1])
+        then 1 else 0) ≤ 1 :=
+      sampleSum_bool_le_one_of_subsingleton _ (fun x₁ x₂ h₁ h₂ =>
+        poly257Hash_oneByte_unique seed tweak m' x₁ x₂
+          (of_decide_eq_true h₁) (of_decide_eq_true h₂))
+    have hSum := sampleSum_le 256 _ _ hSplit
+    rw [sampleSum_add_fn] at hSum
+    exact Nat.le_trans hSum
+      (Nat.le_trans (Nat.add_le_add hHead (poly257_preCandList_hit_le seed tweak ms))
+        (by rw [List.length_cons, Nat.add_comm]))
+
+/-- **Simultaneous `SmDtPreHard` Theorem for `poly257Hash` (`(qEval + 1) / 256`).** Together with
+    `poly257Hash_smDtTcrHard_within`, the single compressing hash `poly257Hash` simultaneously
+    satisfies both `SmDtTcrHard` and `SmDtPreHard` at `seedLen = 1, inputLen = 1, q = 1`. -/
+theorem poly257Hash_smDtPreHard_within (qTarget qEval : Nat) :
+    SmDtPreHard (WithinPreQueries qTarget qEval) poly257Hash 1 1 1 ⟨qEval + 1, 256, by decide⟩ := by
+  intro n nC nA hPos π sample hU adv hA
+  unfold GameBound RatBound.le FinGame.winProb FinGame.winCount
+  dsimp only
+  rw [π.card_eq, π.sampleSum_eq]
+  obtain ⟨hnC, _⟩ := hU.card_and_sampleSum_eq uniformOn_byte1SeedAndPre (fun _ => 0)
+  have hSwap : sampleSum nC (fun c => sampleSum nA (fun a =>
+      if (smDtPreGame hPos poly257Hash 1 (fun ω => (sample (π.chal ω)).1)
+          (fun ω i => (sample (π.chal ω)).2.getD i []) (fun ω => adv (π.advc ω))).win (π.pair c a)
+      then 1 else 0)) =
+      sampleSum nA (fun a => sampleSum nC (fun c =>
+        if smDtPreWin poly257Hash
+            (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).2
+            (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).1
+        then 1 else 0)) := by
+    have hS : sampleSum nC (fun c => sampleSum nA (fun a =>
+        if (smDtPreGame hPos poly257Hash 1 (fun ω => (sample (π.chal ω)).1)
+            (fun ω i => (sample (π.chal ω)).2.getD i []) (fun ω => adv (π.advc ω))).win (π.pair c a)
+        then 1 else 0)) =
+        sampleSum nC (fun c => sampleSum nA (fun a =>
+          if smDtPreWin poly257Hash
+              (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample c).2.getD i []))
+                (adv a) ⟨(sample c).1, [], false⟩).2
+              (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample c).2.getD i []))
+                (adv a) ⟨(sample c).1, [], false⟩).1
+          then 1 else 0)) :=
+      sampleSum_ext (fun c => sampleSum_ext (fun a => by
+        show (if smDtPreWin poly257Hash
+            (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample (π.chal (π.pair c a))).2.getD i []))
+              (adv (π.advc (π.pair c a))) ⟨(sample (π.chal (π.pair c a))).1, [], false⟩).2
+            (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample (π.chal (π.pair c a))).2.getD i []))
+              (adv (π.advc (π.pair c a))) ⟨(sample (π.chal (π.pair c a))).1, [], false⟩).1
+          then 1 else 0) = _
+        rw [π.chal_pair, π.advc_pair]))
+    rw [hS]
+    suffices ∀ (k m : Nat) (g : Fin k → Fin m → Nat),
+        sampleSum k (fun i => sampleSum m (fun j => g i j)) =
+        sampleSum m (fun j => sampleSum k (fun i => g i j)) from this nC nA _
+    intro k
+    induction k with
+    | zero =>
+      intro m _; rw [sampleSum_zero]
+      have hZ : (fun _ : Fin m => sampleSum 0 _) = (fun _ => 0) := rfl
+      rw [hZ, sampleSum_const, Nat.mul_zero]
+    | succ k ih =>
+      intro m g; rw [sampleSum_succ, ih m]
+      have hR : sampleSum m (fun j => sampleSum (k + 1) (fun i => g i j)) =
+          sampleSum m (fun j => g ⟨0, Nat.zero_lt_succ k⟩ j +
+            sampleSum k (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j)) :=
+        sampleSum_ext (fun _ => rfl)
+      rw [hR, sampleSum_add_fn]
+  rw [hSwap]
+  have hPerA : ∀ a : Fin nA,
+      sampleSum nC (fun c =>
+        if smDtPreWin poly257Hash
+            (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).2
+            (Code.play (smDtPreOracle poly257Hash 1 (fun i => (sample c).2.getD i []))
+              (adv a) ⟨(sample c).1, [], false⟩).1
+        then 1 else 0) ≤ 256 * (qEval + 1) := fun a => by
+    obtain ⟨_, dict, hDictLen, hDictMem⟩ := hA a
+    obtain ⟨_, hSampleSum⟩ := hU.card_and_sampleSum_eq uniformOn_byte1SeedAndPre (fun sx =>
+      if smDtPreWin poly257Hash
+          (Code.play (smDtPreOracle poly257Hash 1 (fun i => sx.2.getD i []))
+            (adv a) ⟨sx.1, [], false⟩).2
+          (Code.play (smDtPreOracle poly257Hash 1 (fun i => sx.2.getD i []))
+            (adv a) ⟨sx.1, [], false⟩).1
+      then 1 else 0)
+    rw [hSampleSum, (CoinSplit.prod 256 256).sampleSum_eq]
+    have hPerSeed : ∀ s : Fin 256,
+        sampleSum 256 (fun x =>
+          let z := (CoinSplit.prod 256 256).pair s x
+          if smDtPreWin poly257Hash
+              (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                (adv a) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).2
+              (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                (adv a) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).1
+          then 1 else 0) ≤ qEval + 1 := fun s => by
+      cases hAdv : adv a with
+      | ret out =>
+        have hZ : (fun x : Fin 256 =>
+            let z := (CoinSplit.prod 256 256).pair s x
+            if smDtPreWin poly257Hash
+                (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                  (.ret out) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).2
+                (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                  (.ret out) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).1
+            then 1 else 0) = (fun _ => 0) := by
+          funext x; rfl
+        rw [hZ, sampleSum_const, Nat.mul_zero]
+        exact Nat.zero_le _
+      | call qr kNext =>
+        let firstTweak : Bytes :=
+          match qr with
+          | .reveal => []
+          | .target t₀ _ => t₀
+        have hImp : ∀ x : Fin 256,
+            (let z := (CoinSplit.prod 256 256).pair s x
+             if smDtPreWin poly257Hash
+                 (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                   (.call qr kNext) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).2
+                 (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                   (.call qr kNext) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).1
+             then 1 else 0) ≤
+            (if (([] : Bytes) :: dict).any (fun m' =>
+                decide (poly257Hash [UInt8.ofNat s.1] firstTweak m' =
+                  poly257Hash [UInt8.ofNat s.1] firstTweak [UInt8.ofNat x.1]))
+             then 1 else 0) := fun x => by
+          let z := (CoinSplit.prod 256 256).pair s x
+          have hz : byte1SeedAndPreSampler z = ([UInt8.ofNat s.1], [[UInt8.ofNat x.1]]) := by
+            unfold byte1SeedAndPreSampler
+            dsimp only [z]
+            rw [(CoinSplit.prod 256 256).chal_pair, (CoinSplit.prod 256 256).advc_pair]
+          cases hW : smDtPreWin poly257Hash
+              (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                (.call qr kNext) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).2
+              (Code.play (smDtPreOracle poly257Hash 1 (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                (.call qr kNext) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).1
+          · exact Nat.zero_le _
+          · cases qr with
+            | reveal =>
+              have hEmpty : ∀ (c : Code targetIface TargetBreak) (st : TargetState) (hid : Nat → Bytes),
+                  st.revealed = true → (Code.play (smDtPreOracle poly257Hash 1 hid) c st).2.targets = st.targets
+                | .ret _, _, _, _ => rfl
+                | .call .reveal k, st, hid, _ => hEmpty (k (some st.seed)) { st with revealed := true } hid rfl
+                | .call (.target t m) k, st, hid, hRev => by
+                  have hSt : smDtPreOracle poly257Hash 1 hid st (.target t m) = (none, st) :=
+                    iteOfNeg (fun h => by rw [hRev] at h; exact Bool.noConfusion h.1) _ _
+                  rw [Code.play_call, hSt]
+                  exact hEmpty (k none) st hid hRev
+              have hTNil := hEmpty (kNext (some (byte1SeedAndPreSampler z).1))
+                ⟨(byte1SeedAndPreSampler z).1, [], true⟩ _ rfl
+              unfold smDtPreWin at hW
+              rw [Code.play_call] at hW
+              dsimp only [smDtPreOracle] at hW
+              rw [hTNil] at hW
+              cases hW
+            | target t₀ m₀ =>
+              have hOne : ∀ (c : Code targetIface TargetBreak) (st : TargetState) (hid : Nat → Bytes),
+                  st.targets = [(t₀, hid 0)] →
+                  (Code.play (smDtPreOracle poly257Hash 1 hid) c st).2.targets = [(t₀, hid 0)]
+                | .ret _, st, _, hT => hT
+                | .call .reveal k, st, hid, hT => hOne (k (some st.seed)) { st with revealed := true } hid hT
+                | .call (.target t m) k, st, hid, hT => by
+                  have hSt : smDtPreOracle poly257Hash 1 hid st (.target t m) = (none, st) :=
+                    iteOfNeg (fun h => by rw [hT] at h; exact Nat.lt_irrefl 1 h.2.1) _ _
+                  rw [Code.play_call, hSt]
+                  exact hOne (k none) st hid hT
+              have hTgt : (Code.play (smDtPreOracle poly257Hash 1
+                  (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                  (.call (.target t₀ m₀) kNext) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).2.targets =
+                  [(t₀, [UInt8.ofNat x.1])] := by
+                rw [hz]
+                exact hOne _ _ _ rfl
+              have hSeedInv := (smDtPreRun_inv poly257Hash 1
+                (fun _ : Fin 1 => (byte1SeedAndPreSampler z).1)
+                (fun _ i => (byte1SeedAndPreSampler z).2.getD i [])
+                (fun _ => .call (.target t₀ m₀) kNext) ⟨0, Nat.one_pos⟩).1
+              obtain ⟨e, hMemE, hAnd⟩ := List.any_eq_true.mp hW
+              rw [hTgt] at hMemE
+              rcases List.mem_cons.mp hMemE with rfl | hNil
+              · obtain ⟨_, hCol⟩ := andTrueSplit hAnd
+                have hColP := of_decide_eq_true hCol
+                have hSd : (Code.play (smDtPreOracle poly257Hash 1
+                    (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                    (.call (.target t₀ m₀) kNext) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).2.seed =
+                    [UInt8.ofNat s.1] := hSeedInv.trans (congrArg Prod.fst hz)
+                rw [hSd] at hColP
+                have hCandMem : (Code.play (smDtPreOracle poly257Hash 1
+                    (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                    (.call (.target t₀ m₀) kNext) ⟨(byte1SeedAndPreSampler z).1, [], false⟩).1.candidate ∈
+                    ([] : Bytes) :: dict := by
+                  have hM := hDictMem (smDtPreOracle poly257Hash 1
+                    (fun i => (byte1SeedAndPreSampler z).2.getD i []))
+                    ⟨(byte1SeedAndPreSampler z).1, [], false⟩
+                  rw [hAdv] at hM
+                  exact hM
+                have hAny : (([] : Bytes) :: dict).any (fun m' =>
+                    decide (poly257Hash [UInt8.ofNat s.1] t₀ m' =
+                      poly257Hash [UInt8.ofNat s.1] t₀ [UInt8.ofNat x.1])) = true :=
+                  List.any_eq_true.mpr ⟨_, hCandMem, decide_eq_true hColP⟩
+                dsimp only [firstTweak]
+                rw [hAny]
+                exact Nat.le_refl 1
+              · nomatch hNil
+        exact Nat.le_trans (sampleSum_le 256 _ _ hImp)
+          (Nat.le_trans (poly257_preCandList_hit_le [UInt8.ofNat s.1] firstTweak (([] : Bytes) :: dict))
+            (by rw [List.length_cons]; exact Nat.succ_le_succ hDictLen))
+    exact Nat.le_trans (sampleSum_le 256 _ _ hPerSeed) (by rw [sampleSum_const])
+  have hSum := sampleSum_le nA _ _ hPerA
+  rw [sampleSum_const, hnC] at hSum ⊢
+  refine Nat.le_trans (Nat.mul_le_mul_right 256 hSum) ?_
+  simp only [Nat.mul_left_comm, Nat.mul_comm]
+  exact Nat.le_refl _
+
+#tooth_pair romSmDtTcr_within_bound vs tooth_romSmDtTcr_without_within
+#tooth_pair romSmDtPre_within_bound vs tooth_romSmDtPre_without_within
+#tooth_pair romItsr_within_bound vs tooth_romItsr_without_within
+#tooth_pair byteXorHash_smDtPreHard_within vs smDtPreHard_unrestricted_refuted
+#tooth_pair byteIdxHmsg_itsrHard_within vs byteIdxHmsg_itsrHard_refuted
+#tooth_pair poly257Hash_smDtTcrHard_within vs poly257Hash_smDtTcrHard_refuted
+
 /-! ## 3. Operating-System and Hardware Platform Contracts
 
 Each contract is a set of laws over the event traces of an explicit environment model. A model
@@ -2194,6 +5208,35 @@ theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSi
   Qsag.Spec.channelRun_honest
   Qsag.Spec.shareMemory_run_zero
   Qsag.Spec.SimtWorkgroupContract.h_subgroup_pos
+  Qsag.Spec.CoinSplit.card_eq
+  Qsag.Spec.CoinSplit.sampleSum_eq
+  Qsag.Spec.UniformOn.card_and_sampleSum_eq
+  Qsag.Spec.roCoinPow_pos
+  Qsag.Spec.lazyRomStep_mem
+  Qsag.Spec.lazyRomStep_preserves_mem
+  Qsag.Spec.lazyRomRun_bad_bound
+  Qsag.Spec.withFinalRoCheck_within
+  Qsag.Spec.withFinalRoCheck_mem
+  Qsag.Spec.romSmDtTcr_within_bound
+  Qsag.Spec.romSmDtPre_within_bound
+  Qsag.Spec.romItsr_within_bound
+  Qsag.Spec.romItsrTuple_within_bound
+  Qsag.Spec.tooth_romSmDtTcr_without_within
+  Qsag.Spec.tooth_romSmDtPre_without_within
+  Qsag.Spec.tooth_romItsr_without_within
+  Qsag.Spec.uniformOn_byte1Seed
+  Qsag.Spec.uniformOn_byte1Pre
+  Qsag.Spec.uniformOn_byte1Itsr
+  Qsag.Spec.boundedPreAdv_mem_within
+  Qsag.Spec.byteXorHash_smDtPreHard_within
+  Qsag.Spec.boundedItsrAdv_mem_within
+  Qsag.Spec.byteIdxHmsg_itsrHard_within
+  Qsag.Spec.byteIdxHmsg_itsrHard_refuted
+  Qsag.Spec.boundedTcrAdv_mem_within
+  Qsag.Spec.poly257Hash_smDtTcrHard_within
+  Qsag.Spec.poly257Hash_smDtTcrHard_refuted
+  Qsag.Spec.uniformOn_byte1SeedAndPre
+  Qsag.Spec.poly257Hash_smDtPreHard_within
 
 end Qsag.Spec
 end
