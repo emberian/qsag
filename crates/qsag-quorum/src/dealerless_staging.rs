@@ -1152,7 +1152,16 @@ impl CommitteeBeaverReservoir {
             other => other.into(),
         })?;
 
-        let regroup = |macs: &[u128]| -> Vec<[u128; 64]> { macs.as_chunks::<64>().0.to_vec() };
+        let regroup_take = |macs: &mut [Vec<u128>; 2]| -> Vec<[u128; 64]> {
+            // Wipe and release the unused second factory MAC lane immediately before
+            // allocating the regrouped lane-0 buffer, avoiding a 2x heap spike.
+            wipe_u128s(&mut macs[1]);
+            macs[1] = Vec::new();
+            let out = macs[0].as_chunks::<64>().0.to_vec();
+            wipe_u128s(&mut macs[0]);
+            macs[0] = Vec::new();
+            out
+        };
         for (u, shares) in staged.iter_mut().enumerate() {
             for (buf, words) in [
                 (&mut self.buf_a[u], &mut shares.a),
@@ -1163,14 +1172,15 @@ impl CommitteeBeaverReservoir {
                 *buf = core::mem::take(words);
             }
             for (buf, macs) in [
-                (&mut self.buf_mac_a[u], &shares.a_mac),
-                (&mut self.buf_mac_b[u], &shares.b_mac),
-                (&mut self.buf_mac_c[u], &shares.c_mac),
+                (&mut self.buf_mac_a[u], &mut shares.a_mac),
+                (&mut self.buf_mac_b[u], &mut shares.b_mac),
+                (&mut self.buf_mac_c[u], &mut shares.c_mac),
             ] {
                 for word in buf.iter_mut() {
                     wipe_u128s(word);
                 }
-                *buf = regroup(&macs[0]);
+                *buf = Vec::new();
+                *buf = regroup_take(macs);
             }
         }
         self.cursor = 0;
@@ -1620,49 +1630,34 @@ fn stage_volatile_subset_into_inner(
         jobs.push((half, sid, private));
     }
     // Both halves must pass before the external sink sees any intermediate share.
-    let pending = std::sync::Mutex::new(SecretBuffer(vec![
-        vec![
-            vec![[0u8; 32]; LEAF_SHARE_NODES];
-            leaves.len()
-        ];
+    // Evaluate the two 64-chain halves sequentially: each half already parallelizes across
+    // all CPU cores inside `run_pairs` and `Π_triple_f2`, so sequential execution halves peak RSS.
+    let mut pending = SecretBuffer(vec![
+        vec![vec![[0u8; 32]; LEAF_SHARE_NODES]; leaves.len()];
         rngs.len()
-    ]));
-    let parts = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for (half, sid, mut private) in jobs {
-            let pending = &pending;
-            handles.push(scope.spawn(move || {
-                stage_single_committee_into(
-                    0,
-                    StagingSlice {
-                        leaves,
-                        chains: half * 64..(half + 1) * 64,
-                    },
-                    pk_seed,
-                    sid,
-                    &mut private,
-                    &mut |party, epoch, position, share| {
-                        pending
-                            .lock()
-                            .map_err(|_| DealerlessStagingError::OutputRejected)?[party][epoch]
-                            [position] = *share;
-                        Ok(())
-                    },
-                    #[cfg(test)]
-                    fault
-                        .filter(|&(target, _)| target == half)
-                        .map(|(_, fault)| fault),
-                )
-            }));
-        }
-        let raw_joins: Vec<_> = handles.into_iter().map(|handle| handle.join()).collect();
-        let mut out = Vec::with_capacity(raw_joins.len());
-        for joined in raw_joins {
-            let part = joined.map_err(|_| DealerlessStagingError::OutputRejected)??;
-            out.push(part);
-        }
-        Ok::<Vec<_>, DealerlessStagingError>(out)
-    })?;
+    ]);
+    let mut parts = Vec::with_capacity(jobs.len());
+    for (half, sid, mut private) in jobs {
+        let part = stage_single_committee_into(
+            0,
+            StagingSlice {
+                leaves,
+                chains: half * 64..(half + 1) * 64,
+            },
+            pk_seed,
+            sid,
+            &mut private,
+            &mut |party, epoch, position, share| {
+                pending[party][epoch][position] = *share;
+                Ok(())
+            },
+            #[cfg(test)]
+            fault
+                .filter(|&(target, _)| target == half)
+                .map(|(_, fault)| fault),
+        )?;
+        parts.push(part);
+    }
     let mut ends: Vec<_> = leaves
         .iter()
         .map(|&leaf| (leaf, vec![[0; 32]; WOTS_CHAINS]))
@@ -1672,9 +1667,6 @@ fn stage_volatile_subset_into_inner(
             dest[half * 64..(half + 1) * 64].copy_from_slice(&source[half * 64..(half + 1) * 64]);
         }
     }
-    let pending = pending
-        .into_inner()
-        .map_err(|_| DealerlessStagingError::OutputRejected)?;
     for (party, epochs) in pending.iter().enumerate() {
         for (epoch, pages) in epochs.iter().enumerate() {
             for (position, share) in pages.iter().enumerate() {
@@ -1773,36 +1765,11 @@ fn stage_committee_partitioned_inner(
         });
     }
 
-    #[cfg(any(test, feature = "std"))]
-    for batch in jobs.chunks_mut(4) {
-        std::thread::scope(|scope| {
-            for job in batch.iter_mut() {
-                let pk_seed_ref = &pk_seed;
-                #[cfg(test)]
-                let fault_copy = fault;
-                scope.spawn(move || {
-                    job.result = Some(stage_single_committee_subtree_mpc(
-                        job.committee,
-                        &job.leaf_indices,
-                        pk_seed_ref,
-                        job.committee_sid,
-                        &mut job.member_rngs,
-                        #[cfg(test)]
-                        fault_copy,
-                    ));
-                });
-            }
-        });
-        for job in batch {
-            if let Some(Err(error)) = &job.result {
-                return Err(*error);
-            }
-        }
-    }
-
-    #[cfg(not(any(test, feature = "std")))]
+    // Stage one committee at a time: each committee's `OtMesh::try_establish`, `run_pairs`
+    // and `Π_triple_f2` already saturate available CPU cores internally, so staging committees
+    // sequentially avoids multiplying peak `DeltaCotPool` RSS across four concurrent committees.
     for job in &mut jobs {
-        job.result = Some(stage_single_committee_subtree_mpc(
+        let out = stage_single_committee_subtree_mpc(
             job.committee,
             &job.leaf_indices,
             &pk_seed,
@@ -1810,7 +1777,8 @@ fn stage_committee_partitioned_inner(
             &mut job.member_rngs,
             #[cfg(test)]
             fault,
-        ));
+        )?;
+        job.result = Some(Ok(out));
     }
 
     let mut stores_by_party: Vec<Vec<CommitteeShareStore>> = (0..n).map(|_| Vec::new()).collect();
@@ -3326,7 +3294,7 @@ mod tests {
 
     #[test]
     fn dealerless_qs_a_stages_signs_refreshes_and_unlinks_epochs() {
-        let _memory = crate::test_budget::reserve_mb(5900);
+        let _memory = crate::test_budget::reserve_mb(2200);
         let mut rngs = make_party_rngs(3, 0x21);
         let staged = stage_committee_partitioned_dealerless_mpc(2, 3, 2, [0x41; 32], &mut rngs)
             .expect("QS-A MPC");
@@ -3719,7 +3687,7 @@ mod tests {
     /// between wire sessions (including a rejected one) keeps them signing under one key.
     #[test]
     fn dealerless_qs_a_material_signs_over_the_wire_across_refresh() {
-        let _memory = crate::test_budget::reserve_mb(5900);
+        let _memory = crate::test_budget::reserve_mb(2200);
         let mut rngs = make_party_rngs(3, 0xb1);
         let staged = stage_committee_partitioned_dealerless_mpc(2, 3, 2, [0xb2; 32], &mut rngs)
             .expect("QS-A MPC");

@@ -246,8 +246,7 @@ fn ole_blind_ext2_batch(
             }
             let (send, recv) =
                 mesh.run_correlated_ot_words(sender, receiver, &choices[receiver], party_rngs)?;
-            for k in 0..count {
-                let s_val = senders[sender][k];
+            for (k, &s_val) in senders[sender].iter().enumerate().take(count) {
                 let base_bit = k * BITS_PER_ITEM;
                 for b in 0..BITS_PER_ITEM {
                     let bit = base_bit + b;
