@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! End-to-End Cross-Crate Custody, BlindVC -> `zk-Hem`, Policy/Capability -> Threshold `ML-DSA`,
-//! and Paged Crash-Journal (`QSBURN05` & `QSHDQB04`) Validation Suite.
+//! and Paged Crash-Journal (`QSBURN05` & `QSHDQB05`) Validation Suite.
 //!
 //! Proves zero architectural seams across crates (`Subcarbon C4` & `Subcarbon C5` remediation):
 //! 1. **Journey A (`qsag-cred` -> `qsag-agg` `239 KiB` `zk-Hem` BlindVC Selective Disclosure):**
@@ -23,7 +23,7 @@
 //!      with move-only `PqBiscuitStepKey::attenuate` + PoP request-bound `seal` -> `PolicyEngine` ->
 //!      `threshold_sign_mldsa_party_policy_gated`, plus pre-slot capability refusal and digest mismatch checks.
 //! 3. **Journey C (`TwoSlotHwmCrashModel` Paged Crash Journals: `QSBURN05` in `qsag-fts::wal` &
-//!    `QSHDQB04` in `qsag-hd::budget`):**
+//!    `QSHDQB05` in `qsag-hd::budget`):**
 //!    - Verifies 3-page `12,288 B` physical layout (`4096` Slot A, `8192` Slot B, `12288` records)
 //!      and NIST SP 800-185 `cshake256_framed_32_nist_ref` HWM/record MAC parity
 //!    - Simulates sector tears on Slot A (`4096`), sector tears on Slot B (`8192`), simultaneous
@@ -1239,7 +1239,7 @@ fn e2e_nonce_burn_reopen_preserves_public_replay_contract() {
 }
 
 // ============================================================================
-// Journey C: Paged Crash Journals (`QSBURN05` in `qsag-fts` & `QSHDQB04` in `qsag-hd`)
+// Journey C: Paged Crash Journals (`QSBURN05` in `qsag-fts` & `QSHDQB05` in `qsag-hd`)
 // ============================================================================
 
 const PAGE_BYTES: usize = HWM_PAGE_BYTES as usize; // 4096
@@ -1500,8 +1500,8 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
     let family = [0x3B; 32];
     let key = [0x4D; 32];
 
-    // Provision a clean `QSHDQB04` HD query-budget journal with `used = 2` (`3` records including genesis `0`).
-    let mk_two_uses = |name: &str| -> (PathBuf, [u8; 8], [u8; 16], [u8; 32], [u8; 32]) {
+    // Provision a clean `QSHDQB05` HD query-budget journal with `used = 2` (`3` records including genesis `0`).
+    let mk_two_uses = |name: &str| -> (PathBuf, [u8; 24], [u8; 16], [u8; 32], [u8; 32]) {
         let p = tmp.path().join(name);
         let mut b = DurableQueryBudget::create(&p, family, key).unwrap();
         b.reserve().unwrap();
@@ -1515,32 +1515,44 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         assert_eq!(raw.len(), HEADER_BYTES + 3 * QSHDQB04_REC_BYTES);
         assert_eq!(
             &raw[RECORD_HEADER_BYTES + 16..RECORD_HEADER_BYTES + 24],
-            b"QSHDQB04"
+            b"QSHDQB05"
         );
         // `LockedRecord` 16-byte header stores `QSAGREC1` (`[0..8]`) + `lock_seal` (`[8..16]`).
         assert_eq!(&raw[0..8], b"QSAGREC1");
         let lock_seal: [u8; 8] = raw[8..16].try_into().unwrap();
+        // `QSHDQB05` MACs bind the sidecar's full `dev_le64 || ino_le64 || seal8` identity,
+        // taken here from an independent `stat` of the `.lock` file.
+        let mut lock_path = p.clone().into_os_string();
+        lock_path.push(".lock");
+        let mut lock_identity = [0u8; 24];
+        lock_identity[..16]
+            .copy_from_slice(&asm_file_identity(&fs::metadata(&lock_path).unwrap()));
+        lock_identity[16..].copy_from_slice(&lock_seal);
+        assert_eq!(
+            &raw[RECORD_HEADER_BYTES + 24..RECORD_HEADER_BYTES + 48],
+            &lock_identity
+        );
         let data_seal = asm_file_identity(&fs::metadata(&p).unwrap());
         assert_eq!(
             &raw[RECORD_HEADER_BYTES..RECORD_HEADER_BYTES + 16],
             &data_seal
         );
-        (p, lock_seal, data_seal, mac1, mac2)
+        (p, lock_identity, data_seal, mac1, mac2)
     };
 
     // 1. Verify physical page alignment (`4096` Slot A, `8192` Slot B, `12288` genesis record)
     //    and NIST SP 800-185 `cshake256_framed_32_nist_ref` MAC parity!
     {
-        let (p, lock_seal, data_seal, mac1, mac2) = mk_two_uses("layout.hdqb");
+        let (p, lock_identity, data_seal, mac1, mac2) = mk_two_uses("layout.hdqb");
         let raw = fs::read(&p).unwrap();
         let limit_le = 128u64.to_le_bytes();
 
         let mac0 = cshake256_framed_32_nist_ref(
-            b"QSAG.HD.QUERY_BUDGET.V3",
+            b"QSAG.HD.QUERY_BUDGET.V4",
             &[
                 &key,
                 &family,
-                &lock_seal,
+                &lock_identity,
                 &data_seal,
                 &limit_le,
                 &0u64.to_le_bytes(),
@@ -1549,11 +1561,11 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         );
         assert_eq!(&raw[HEADER_BYTES + 8..HEADER_BYTES + 40], &mac0);
         let expected_mac1 = cshake256_framed_32_nist_ref(
-            b"QSAG.HD.QUERY_BUDGET.V3",
+            b"QSAG.HD.QUERY_BUDGET.V4",
             &[
                 &key,
                 &family,
-                &lock_seal,
+                &lock_identity,
                 &data_seal,
                 &limit_le,
                 &1u64.to_le_bytes(),
@@ -1567,11 +1579,11 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
             assert_eq!(&slot_bytes[..8], &2u64.to_le_bytes());
             assert_eq!(&slot_bytes[8..40], &mac2);
             let expected_hwm_mac = cshake256_framed_32_nist_ref(
-                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
+                b"QSAG.HD.QUERY_BUDGET.HWM.V5",
                 &[
                     &key,
                     &family,
-                    &lock_seal,
+                    &lock_identity,
                     &data_seal,
                     &[slot],
                     &limit_le,
@@ -1625,15 +1637,15 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
 
     {
         // Lagging Slot B (`Slot A = 2, Slot B = 1`) + 40-byte uncommitted tail -> truncates & heals!
-        let (p, lock_seal, data_seal, mac1, mac2) = mk_two_uses("tail_lagging_b.hdqb");
+        let (p, lock_identity, data_seal, mac1, mac2) = mk_two_uses("tail_lagging_b.hdqb");
         let limit_le = 128u64.to_le_bytes();
         let hwm_mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
             cshake256_framed_32_nist_ref(
-                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
+                b"QSAG.HD.QUERY_BUDGET.HWM.V5",
                 &[
                     &key,
                     &family,
-                    &lock_seal,
+                    &lock_identity,
                     &data_seal,
                     &[slot],
                     &limit_le,
@@ -1662,15 +1674,15 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
 
     {
         // Unacknowledged synced record `count = 3` (`used = 3`) while HWM slots hold `2`, plus 15B tail!
-        let (p, lock_seal, data_seal, _, mac2) = mk_two_uses("tail_committed_plus_1.hdqb");
+        let (p, lock_identity, data_seal, _, mac2) = mk_two_uses("tail_committed_plus_1.hdqb");
         let mut rec3 = [0u8; QSHDQB04_REC_BYTES];
         rec3[..8].copy_from_slice(&3u64.to_le_bytes());
         let mac3 = cshake256_framed_32_nist_ref(
-            b"QSAG.HD.QUERY_BUDGET.V3",
+            b"QSAG.HD.QUERY_BUDGET.V4",
             &[
                 &key,
                 &family,
-                &lock_seal,
+                &lock_identity,
                 &data_seal,
                 &128u64.to_le_bytes(),
                 &rec3[..8],
@@ -1709,7 +1721,7 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         );
     }
 
-    // 4. Committed-record corruption & overclaimed HWM must fail closed!
+    // 4. Committed-record corruption, overclaimed HWM, & `.lock` inode-swap attack must fail closed!
     {
         let (p, _, _, _, _) = mk_two_uses("corrupt_committed.hdqb");
         let rec2_off = HEADER_BYTES + 2 * QSHDQB04_REC_BYTES + 12;
@@ -1722,15 +1734,15 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         );
     }
     {
-        let (p, lock_seal, data_seal, _, mac2) = mk_two_uses("overclaimed_hwm.hdqb");
+        let (p, lock_identity, data_seal, _, mac2) = mk_two_uses("overclaimed_hwm.hdqb");
         let limit_le = 128u64.to_le_bytes();
         let hwm_mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
             cshake256_framed_32_nist_ref(
-                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
+                b"QSAG.HD.QUERY_BUDGET.HWM.V5",
                 &[
                     &key,
                     &family,
-                    &lock_seal,
+                    &lock_identity,
                     &data_seal,
                     &[slot],
                     &limit_le,
@@ -1743,6 +1755,19 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         let hwm = TwoSlotHwm::paged(1, CounterOrder::Little, &hwm_mac);
         write_in_place(&p, SLOT_A_OFF as u64, &hwm.encode(0, 3, &mac2));
         write_in_place(&p, SLOT_B_OFF as u64, &hwm.encode(1, 3, &mac2));
+        assert_eq!(
+            DurableQueryBudget::open(&p, family, key).err(),
+            Some(HdError::BudgetStorageFailed)
+        );
+    }
+    {
+        // Replacing `.lock` with a fresh inode keeping the old 8-byte seal fails `verify_lock_identity`!
+        let (p, _, _, _, _) = mk_two_uses("swapped_lock_inode.hdqb");
+        let mut lock_path = p.clone().into_os_string();
+        lock_path.push(".lock");
+        let lock_bytes = fs::read(&lock_path).unwrap();
+        fs::remove_file(&lock_path).unwrap();
+        fs::write(&lock_path, &lock_bytes).unwrap();
         assert_eq!(
             DurableQueryBudget::open(&p, family, key).err(),
             Some(HdError::BudgetStorageFailed)
