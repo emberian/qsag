@@ -1278,6 +1278,10 @@ module qsag_wire_engine #(
                                             ret2 <= S_KSW;
                                             st   <= S_VLD;
                                         end
+                                    end else if (vat_ready) begin
+                                        // R1 A5.2: once the vat root key exists, PRF_msg over SK.prf
+                                        // is only reachable through a verified SpongeMacaroon.
+                                        st <= S_DRAIN;
                                     end else st <= S_KSW;
                                 end
                                 OP_FOLD, OP_HEM: begin
@@ -1868,7 +1872,7 @@ module qsag_wire_engine #(
                                     if (in_data[18]) begin
                                         if (!vat_ready || !key_valid) rcode <= E_NOKEY;
                                         else if (in_data[47:24] < 24'd96) rcode <= E_LEN;
-                                    end
+                                    end else if (vat_ready) rcode <= E_CAP;
                                 end
                                 OP_FOLD, OP_HEM: if (in_data[26:24] != 3'd0) rcode <= E_LEN;
                                 OP_KEYLOAD: begin

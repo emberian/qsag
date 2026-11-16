@@ -150,7 +150,7 @@ module qsag_io_shell (
     // ------------------------------------------------------------ SPI target, receive side
     wire [7:0]  dq = bidir_in[7:0];
     logic [2:0] cbit;
-    logic       cmd_done, s_rd;
+    logic       cmd_done, s_rd, s_diag;
     logic [1:0] s_w;
     logic [6:0] cmd_sh;
     logic [2:0] sub;
@@ -182,6 +182,7 @@ module qsag_io_shell (
             cbit     <= '0;
             cmd_done <= 1'b0;
             s_rd     <= 1'b0;
+            s_diag   <= 1'b0;
             s_w      <= '0;
             cmd_sh   <= '0;
             sub      <= '0;
@@ -192,7 +193,9 @@ module qsag_io_shell (
                 cbit   <= cbit + 3'd1;
                 if (cbit == 3'd7) begin
                     cmd_done <= 1'b1;
-                    s_rd     <= cmd_now[1];
+                    // 0x05 READ_DIAG: a single-bit read whose data is the diagnostic word below
+                    s_diag   <= (cmd_now == 8'h05);
+                    s_rd     <= cmd_now[1] || (cmd_now == 8'h05);
                     s_w      <= cmd_now[7] ? 2'd2 : cmd_now[6] ? 2'd1 : 2'd0;
                 end
             end else if (!s_rd) begin
@@ -289,9 +292,42 @@ module qsag_io_shell (
     wire       spi_last  = spi_rd && tx_act && (tpos + tstep == 6'd0);
     wire       spi_first = spi_rd && !tx_act && (dummy == 4'd7);
 
+    // ------------------------------------------------------------ READ_DIAG (SPI command 0x05)
+    // A 64-bit word shifted out on DQ1 like a single-bit read, using SCK only: the command decoder,
+    // the bit counter and the output flop are all clocked by SCK and reset by CS_N / the reset pad,
+    // so it answers with the core clock stopped, the core reset stuck, or the engine in S_DEAD.
+    // It never pops the egress FIFO. Bytes leave least-significant first:
+    //   [15:0]   16'hD180
+    //   [23:16]  core heartbeat (Gray code of a free-running clk_core counter), sample 1
+    //   [31:24]  {rst_core_n, busy, fault, verify_ok, io_mode[1:0], csr_sck_clkpad, clk_mon}
+    //   [39:32]  core heartbeat, sample 2 (taken 24 SCK cycles after sample 1)
+    //   [47:40]  {rx_overrun, tx_underrun, ingress full, egress empty, rx_credit, tx_irq, TAMPER_N, cs_ok}
+    //   [55:48]  {ingress fill (SCK side) [3:0], 1'b0, egress fill (SCK side) [2:0]}
+    //   [63:56]  8'h5A
+    // The two heartbeat samples differ when clk_core is running. Status bits are live levels.
+    logic [7:0] hb_bin, hb_gray;
+    wire  [7:0] hb_nxt = hb_bin + 8'd1;
+    always_ff @(posedge clk_core or negedge rst_core_n)
+        if (!rst_core_n) begin
+            hb_bin  <= '0;
+            hb_gray <= '0;
+        end else begin
+            hb_bin  <= hb_nxt;
+            hb_gray <= hb_nxt ^ {1'b0, hb_nxt[7:1]};
+        end
+    logic [7:0] dg_hb1, dg_hb2;
+    wire [63:0] diag_word = {8'h5A,
+                             i_wcount_u, 1'b0, e_rcount_u,
+                             ovr, und, i_full, e_empty, rx_credit, tx_irq, bidir_in[26], cs_ok,
+                             dg_hb2,
+                             rst_core_n, busy, fault, verify_ok, io_mode, csr_sck_clkpad, clk_mon,
+                             dg_hb1,
+                             16'hD180};
+    wire [63:0] t_src = s_diag ? diag_word : e_rdata;
+
     always_comb begin
         e_rinc = 1'b0;
-        if (m_spi)     e_rinc = spi_last;
+        if (m_spi)     e_rinc = spi_last && !s_diag;
         else if (m_ss) e_rinc = !e_empty && t_in_s && (t_byte == 3'd7);
         else           e_rinc = t_have && t_armed && (as_tx_cdone_s == as_tx_src) && (t_byte == 3'd7);
     end
@@ -306,7 +342,11 @@ module qsag_io_shell (
             dummy   <= '0;
             tpos    <= '0;
             tx_act  <= 1'b0;
+            dg_hb1  <= '0;
+            dg_hb2  <= '0;
         end else if (m_spi) begin
+            if (spi_rd && s_diag && !tx_act && dummy == 4'd0) dg_hb1 <= hb_gray;
+            if (spi_rd && s_diag && tx_act && tpos == 6'd16)  dg_hb2 <= hb_gray;
             if (spi_rd) begin
                 if (!tx_act) dummy <= dummy + 4'd1;
                 else         tpos  <= tpos + tstep;
@@ -349,10 +389,10 @@ module qsag_io_shell (
             und       <= 1'b0;
         end else begin
             if (m_async && t_have && !t_armed) as_tx_src <= ~as_tx_src;
-            if (spi_rd && tx_act && e_empty) und <= 1'b1;
+            if (spi_rd && !s_diag && tx_act && e_empty) und <= 1'b1;
         end
 
-    wire [7:0]  tbyte = e_rdata[8*tpos[5:3] +: 8];
+    wire [7:0]  tbyte = t_src[8*tpos[5:3] +: 8];
     logic [7:0] sdq_o;
     logic       soe_o;
     always_ff @(posedge clk_txn or negedge spi_rst_n)
@@ -517,7 +557,7 @@ module qsag_io_shell (
     end
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, i_wcount_u, e_rcount_u, bidir_in[35], bidir_in[24:19], bidir_in[16:15], bidir_in[12:10]};
+    wire unused = &{1'b0, bidir_in[35], bidir_in[24:19], bidir_in[16:15], bidir_in[12:10]};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire
