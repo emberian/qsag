@@ -1,8 +1,8 @@
 module
 
-public import Qsag.Exec.MirSpecBridgeCore
-public import Qsag.Exec.MirSpecBridgeWitnesses
-import all Qsag.Exec.MirSpecBridgeWitnesses
+public import Qsag.Machine.MirSpecBridgeCore
+public import Qsag.Machine.MirSpecBridgeWitnesses
+import all Qsag.Machine.MirSpecBridgeWitnesses
 import Qsag.Tactic.AssuranceKit
 
 /-! Public entry point for the hand-written MIR guard models, their four-layer
