@@ -2389,24 +2389,41 @@ pub fn build_gamma_schedule_ext4(
     }
 }
 
-/// Dense Horner-batched evaluation of ALL row constraints at `cols[0..256]` over `GoldilocksExt4`.
-///
-/// Used directly by the Sumcheck Verifier in its **terminal evaluation check** at $r_x \in \mathbb{F}_{p^4}^{\ell_x}$!
-pub fn eval_batched_row_constraints_ext4(
+/// Public inputs of one row over any [`TraceField`]: the generic form of [`RowPublicEvalExt4`].
+#[derive(Clone)]
+pub struct RowPublicEval<'a, F: TraceField> {
+    pub active_signer: F,
+    pub pk_seed: [F; 4],
+    pub pk_root: [F; 4],
+    pub mu: [F; 5],
+    pub gated_op_sels: &'a [F],
+    pub step_c0: F,
+    pub is_row_first: F,
+    pub is_row_last: F,
+    pub eq_tau: F,
+    pub eq_not_last: F,
+    pub shift_tau: F,
+}
+
+/// Dense Horner-batched evaluation of ALL row constraints at `cols[0..256]`, over any
+/// [`TraceField`]. This is the one definition of the batched row polynomial: the native
+/// verifier evaluates it over `GoldilocksExt4`, and the recursive shard verifier records the
+/// same operations as a relation ([`crate::zk_hem::full_shard`]).
+pub fn eval_batched_row_constraints_generic<F: TraceField>(
     unique_ops: &[ConstraintKind],
-    cols: &[GoldilocksExt4; NUM_TRACE_COLS],
-    pub_in: &RowPublicEvalExt4<'_>,
-    gamma: GoldilocksExt4,
-) -> GoldilocksExt4 {
-    let mut eq_acc = GoldilocksExt4::ZERO;
-    let mut g_pow = GoldilocksExt4::ONE;
+    cols: &[F; NUM_TRACE_COLS],
+    pub_in: &RowPublicEval<'_, F>,
+    gamma: F,
+) -> F {
+    let mut eq_acc = F::ZERO;
+    let mut g_pow = F::ONE;
     let perm_out = eval_group_a_and_boundaries_generic(
         cols,
         pub_in.is_row_first,
         pub_in.is_row_last,
         |_, res| {
             eq_acc += g_pow * res;
-            g_pow *= gamma;
+            g_pow = g_pow * gamma;
         },
     );
     let prev = &cols[COL_PREV_STATE..COL_PREV_STATE + NUM_STATE_LIMBS];
@@ -2416,7 +2433,7 @@ pub fn eval_batched_row_constraints_ext4(
 
     for (op_uid, &kind) in unique_ops.iter().enumerate() {
         let sel = pub_in.gated_op_sels[op_uid];
-        let mut op_acc = GoldilocksExt4::ZERO;
+        let mut op_acc = F::ZERO;
         eval_single_op_constraints_generic(
             kind,
             pub_in.step_c0,
@@ -2432,7 +2449,7 @@ pub fn eval_batched_row_constraints_ext4(
             },
             &mut |expr| {
                 op_acc += g_pow * expr;
-                g_pow *= gamma;
+                g_pow = g_pow * gamma;
             },
         );
         eq_acc += sel * op_acc;
@@ -2442,9 +2459,38 @@ pub fn eval_batched_row_constraints_ext4(
     for j in 0..NUM_STATE_LIMBS {
         let shift_res = pub_in.eq_not_last * next[j] - pub_in.shift_tau * prev[j];
         total += g_pow * shift_res;
-        g_pow *= gamma;
+        g_pow = g_pow * gamma;
     }
     total
+}
+
+/// [`eval_batched_row_constraints_generic`] over `GoldilocksExt4`.
+///
+/// Used directly by the Sumcheck Verifier in its **terminal evaluation check** at $r_x \in \mathbb{F}_{p^4}^{\ell_x}$!
+pub fn eval_batched_row_constraints_ext4(
+    unique_ops: &[ConstraintKind],
+    cols: &[GoldilocksExt4; NUM_TRACE_COLS],
+    pub_in: &RowPublicEvalExt4<'_>,
+    gamma: GoldilocksExt4,
+) -> GoldilocksExt4 {
+    eval_batched_row_constraints_generic(
+        unique_ops,
+        cols,
+        &RowPublicEval {
+            active_signer: pub_in.active_signer,
+            pk_seed: pub_in.pk_seed,
+            pk_root: pub_in.pk_root,
+            mu: pub_in.mu,
+            gated_op_sels: pub_in.gated_op_sels,
+            step_c0: pub_in.step_c0,
+            is_row_first: pub_in.is_row_first,
+            is_row_last: pub_in.is_row_last,
+            eq_tau: pub_in.eq_tau,
+            eq_not_last: pub_in.eq_not_last,
+            shift_tau: pub_in.shift_tau,
+        },
+        gamma,
+    )
 }
 
 /// Public inputs of one row for [`eval_batched_row_constraints_sparse_ext4`].

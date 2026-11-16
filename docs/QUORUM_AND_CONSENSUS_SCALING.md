@@ -1,12 +1,19 @@
 # QSAG quorum custody and consensus scaling
 
-Engineering assessment, reconciled 2026-11-14. The numerical tables retain the older affine-v6 calibration and explicit deployment hypotheses; they are not current prover benchmarks. Habr24 rows are historical: those regimes and wire tags are now rejected. The current default is Johnson QROM. No new hardware benchmark was run for this documentation update.
+Engineering assessment, recalibrated 2026-11-15 on measured release runs of the current prover. The tables below separate three kinds of number: **measured** (one recorded run on named hardware), **exact** (arithmetic on wire formats), and **projection** (arithmetic on measured constants outside the size at which they were measured). Projections are labelled in their table titles.
 
 ## Executive finding
 
-QSAG addresses two independent problems: Hem aggregates signatures from independently controlled validator keys, while threshold custody distributes control of each signing key. A validator fleet does not need threshold custody to use Hem. Conversely, a custody committee does not replace a consensus validator set: distributing one key among custodians still yields one validator vote.
+QSAG addresses two independent problems. Hem aggregates signatures from independently controlled validator keys; threshold custody distributes control of one signing key. A validator fleet does not need threshold custody to use Hem, and a custody committee does not replace a validator set: one key shared among custodians is still one vote.
 
-The implementation does **not yet establish the requested 150 ms end-to-end consensus path, sub-millisecond Hem verification, or constant-size two-level recursive proof**. The older affine v6 measurements are seconds of proving and tens of milliseconds of verification at a small batch size; newer GPU and prepared-verifier implementations are not represented by that calibration. The hierarchy in `recursive.rs` verifies every regional proof and commits to their contents. The compact outer proof checks only the public commitment chain; authorization requires `VerifiedHierarchicalHemEvidence` obtained by checking the real children and bound to the same registry, epoch, message, threshold, regime and child digests. The useful engineering destination is larger jointly witnessed batches, bounded-memory parallel proving, and eventually a genuine recursive verifier circuit. Calling concatenation recursion would conceal the dominant scaling cost.
+What the current code establishes, per 128-signer Jorts shard (24 PCS variables, default `BciksJohnsonQrom128` regime): a **445,566-byte** proof, **3.67 s** to prove on an Intel Core i9-12900, **1.56 s** on an AMD Radeon RX 6750 XT (RADV NAVI22), and **3.00 ms** to verify on all workers (**6.21 ms** on one core). Shards are independent, so a validator set is proved in parallel, one prover per 128 validators, and verified at 6.21 core-milliseconds per shard.
+
+What it does not establish:
+
+- **Constant-size certificates.** Across shards the certificate is still the shard proofs themselves: 7.1 MB at 2,048 validators and 28.5 MB at 8,192. Verification time is small; bytes are the binding cost.
+- **Signature recursion.** `prove_succinct_shard_whir_merge` proves, in one parent circuit, that up to 16 child WHIR *openings* verify. It does not execute a shard's row sumcheck or AIR check, so it does not certify signatures. `verify_succinct_shard_whir_merge` therefore requires `VerifiedHierarchicalHemEvidence`, which is obtained only by verifying every shard proof.
+- **A merge of real shard openings.** The merge is measured on 4,096-cell child oracles (12 variables), not on 24-variable shard commitments, and under the bounded-query Poseidon2 regime (tag 8), not the default regime. Parent proofs are not merged again in the current code. Every merge-tree row below is a projection.
+- **A sub-slot Solana path through Hem.** Hem does not aggregate the single-packet `Compact1122` votes; it aggregates `JortsPoseidon2` or `CorduroyPoseidon2` signatures. On Solana it is an asynchronous checkpoint over a second signature, and at 1,000–1,500 validators its proofs are larger than the votes.
 
 ## Reproduction and interpretation
 
@@ -14,121 +21,161 @@ Run from the repository root:
 
 ```sh
 python3 scripts/quorum_and_consensus_scaling.py --self-test
-python3 scripts/quorum_and_consensus_scaling.py --self-test -o ./scaling-report.json
+python3 scripts/quorum_and_consensus_scaling.py --write-tables
+python3 scripts/quorum_and_consensus_scaling.py -o ./scaling-report.txt
 ```
 
-The second command writes the summary and numerical tables to `./scaling-report.json`. The model uses only the Python standard library; self-test performs bounded arithmetic and small source/document reads, with no build, network, GPU initialization, or prover execution. `--write-tables` regenerates the marked block below. Self-test checks exact equality of every generated table, independent arithmetic identities, invalid-input boundaries, and selected source drift guards. It does not certify prose, cryptography, or the accuracy of historical benchmark measurements.
+The model uses only the Python standard library and runs no build, prover, GPU or network code. `--write-tables` regenerates the marked block below. `--self-test` checks the arithmetic identities, the merge-tree shapes, the ratios quoted in this prose, a set of source-drift guards (shard size, merge fan-in, the benchmark's child size and regime, packet constants), and byte equality of the generated block. It does not certify prose, cryptography, or the measurements themselves. `--link-mbps` and `--merge-arity` change the transfer and tree columns of a report written with `-o`; the checked-in tables use the defaults (100 Mbps, k = 4).
 
-Use `--help` for sensitivity parameters. For example, `--proof-bytes 500000 --verify-ms 25 --gpu-fraction 0.5 --gpu-kernel-speedup 4` changes hypothetical batch costs without changing the checked-in report. No hardware speedup is inferred from a GPU's marketing FLOPS. Bytes are decimal B; MB means decimal million bytes. GiB is binary. Durations are explicitly labelled. All bandwidth totals count one delivered copy, not network-wide gossip traffic.
+Bytes are decimal; MB is 10^6 bytes; GiB is binary. Bandwidth figures count one delivered copy, not network-wide gossip.
 
-## Evidence and model equations
+## Calibration
 
-The calibration is the affine v6 `bench_affine_regimes`, K=8, Intel Core i9-12900, as recorded in an earlier paper snapshot. The [current paper source](../paper/qsag.typ) may use newer results; this model retains its named calibration constants. Habr24 capacity-proximity regimes have since been retired; their rows are historical calibration only. The Johnson schedule avoids that capacity claim, but its integration still needs the CWYZ decomposition and concrete checker reduction. Neither label resolves the paper's outstanding multi-round QROM Fiat–Shamir extraction or trace-to-verifier linkage obligations. Old pre-v6 numbers are deliberately excluded from the model. The reported decimals are rounded observations, not distributions or p99 estimates; no raw benchmark artifact was available in the inspected report.
+All aggregation measurements are single release runs (thin LTO, one codegen unit) with 22 worker threads on an Intel Core i9-12900 (Alder Lake); GPU runs use an AMD Radeon RX 6750 XT (RADV NAVI22) through Vulkan with the Poseidon2 Canopy and WHIR opening work left on the CPU. They are rounded observations, not distributions: there is no p99.
 
-There are three distinct quantitative layers:
+**Shard.** `bench_consensus_scale` with 128 `JortsPoseidon2` signers in one shard (`DEFAULT_SHARD_PCS_NUM_VARS = 24`), all signing one message. Under the default regime (wire tag 4, cSHAKE256 Canopy trees, no bound on oracle queries) repeated CPU runs gave 3.67–3.73 s to prove, 2.7–3.0 ms to verify on all workers and 6.2–6.4 ms on one core; GPU runs gave 1.56–1.57 s. The same proof bytes (and proof digest) come out of the CPU and GPU provers. Under the Poseidon2-12 Canopy regime (tag 7, a 128-bit profile only for at most 2^38 oracle queries) the proof is 360,702 bytes; its 7.24 s prove time was recorded before the latest row-sumcheck speedup and has no GPU measurement, so the model does not use it for timing.
 
-1. **Exact arithmetic from specified inputs:** raw payload is `N × signature_bytes`; base trace storage is `N × rows_per_signer × 256 × 8`. The PCS bound is on the flattened polynomial: under the default 24-variable shard (`DEFAULT_SHARD_PCS_NUM_VARS`), `2^24 / (rows_per_signer × 256)` signers per shard, not `2^24` signature-verification rows. Hence a default Jorts shard has 128 signers and its base witness alone occupies 128 MiB. The PCS itself admits 28 variables (`MAX_PCS_NUM_VARS`), so an explicitly configured shard can hold 16 times as many signers at 16 times the memory. The allowed 16-polynomial batch can hold 2,048 Jorts signers and needs 2 GiB of base witnesses alone. PCS extension buffers, Merkle trees, scratch space and parallel copies increase peak RSS substantially. The default code uses two shards per batch; the hypothetical table requires an explicit larger batch configuration.
-2. **Repeated measured-job envelope:** `ceil(N/8)` independent jobs, each charged the reported K=8 Johnson bytes and time. The final partial job is charged a full job. This is a conservative scheduling/billing convention, not a proof-size upper bound for production committees: statement bitmaps, larger registries and key validation change costs. Sum-of-standalone-proof bytes are labelled as such, not exact serialized merge bytes. This baseline exhibits why blindly repeating small batches does not yield compression.
-3. **Large-batch hypothesis:** each batch up to the configured capacity is assigned a total proof-size budget and verification time. Defaults are illustrative round numbers, **not predictions fitted from K=8**. Every proof budget must include committee-sized bitmaps and public-statement encoding. Reference proving work is `N/8 × 4.90 s`, a linear-work extrapolation with unknown large-batch error; no claim is made that FFT, Merkle or sumcheck scaling stays exactly linear. A CPU improvement divides this entire reference-host work by a user-supplied relative speedup. Because the reference code already uses bounded parallel workers, this factor must not be interpreted as a core count or another free division by the reference machine's cores.
+**Opening merge.** `two_child_multistage_release_benchmark` and `four_child_multistage_compression_benchmark` merge the fixed-path WHIR openings of two or four **4,096-cell** oracles under regime tag 8 (Poseidon2-12, no proof of work, 128-bit profile only for Q + 1 ≤ 2^40). Two children: 1.00 s to prove, 123 ms to verify, a 302,547-byte parent against 527,872 bytes of child openings (0.57×). Four children: 1.88 s, 246 ms, 339,643 bytes against 1,055,744 (0.32×). A four-child merge fills 4,133,722 of 4,194,304 padded rows. A 24-variable shard opening has more folding stages and Merkle paths about twice as deep, so its merge relation is larger; that cost has not been measured.
 
-For a region containing `j` hypothetical independent batch proofs of `P` bytes, merging gives `jP − 40(j−1)` bytes: remove repeated 41-byte top-level headers and add one byte per branch. This equation requires that `P` already describes each leaf against the same full regional registry. The hierarchy serialization then gives exactly `76 + Σ(124 + regional_proof_bytes)`. Those framing constants come from `to_bytes` in [lib.rs](../crates/qsag-agg/src/lib.rs) and [recursive.rs](../crates/qsag-agg/src/recursive.rs). The resulting numerical root sizes are conditional on the hypothetical child sizes, not exact predictions of real proof output. They include the existing hierarchy wrapper, even for the single-region Solana sizing row. An ordinary non-hierarchical aggregate can omit that wrapper.
+**Votes.** 1,200 `Compact1122` signatures verify in 1.23 s on one core with SIMD multibuffering and in 158–187 ms on eight threads (earlier measurement, unchanged code path).
 
-GPU sensitivity uses Amdahl's law: `T_gpu = T_reference × ((1−f) + f/s) + overhead` per batch, where `f` is the accelerable share of **whole-prover wall time**, `s` the acceleration of that share, and overhead includes transfers, launches, synchronization and receipt processing. The table sums batches serially on one hypothetical GPU. CPU and GPU columns are alternatives against the same reference, not compounded improvements. At the default fractions, the nonaccelerated work alone remains a substantial fraction of the total. Required reference-host equivalents are ideal throughput lower bounds `ceil(reference_work/deadline)`, assuming perfect distribution; they do not prove deadline latency, schedulability or sufficient memory.
+## Model equations
+
+1. **Exact.** Raw payload is `N × signature_bytes`. A Jorts signer occupies 512 trace rows of 256 columns, so a 24-variable shard holds `2^24 / (512 × 256) = 128` signers and its base witness is 128 MiB. The hierarchy wrapper is `76 + Σ(124 + child_proof_bytes)` (`to_bytes` in [recursive.rs](../crates/qsag-agg/src/recursive.rs)).
+2. **Repeated measured shard.** `ceil(N/128)` shards, each charged the measured proof bytes and times; a partial last shard is charged in full. Proving is charged once per shard and can run on as many provers as there are shards; "ideal" prover counts are `ceil(total_work / deadline)` and assume perfect distribution. Direct verification is charged 6.21 core-ms per shard. Several shards can also be proved as one joint batch with a shared opening, which is smaller than the sum of separate proofs; the model does not use it because the prover must then hold every witness.
+3. **Merge-tree projection.** A k-ary tree over `S` shards has `ceil(log_k S)` levels and `Σ ceil(S / k^i)` merge provers. Pipelined latency is one shard proof plus one merge per level; each level is charged the time measured for 4,096-cell children. This is a lower bound in two ways: real shard openings are larger, and a second level requires merging parent proofs, which the current relation does not do (it would have to verify the parent's own sumchecks, not only its opening).
 
 <!-- BEGIN GENERATED SCALING TABLES -->
 
-### Reported calibration (not rerun here)
+### Measured: one 128-signer Jorts shard (24 variables)
 
-| Profile / regime | K | Proof B | Prove ms | Verify ms |
-| --- | --- | --- | --- | --- |
-| Jorts / Habr24 | 8 | 161,112 | 4,300 | 13.550 |
-| Jorts / Johnson | 8 | 291,352 | 4,900 | 26.690 |
-| Corduroy / Habr24 | 8 | 240,014 | 49,200 | 18.880 |
-| Corduroy / Johnson | 8 | 446,254 | 48,840 | 35.330 |
-
-### Raw signatures and trace storage
-
-| Signers | ML-DSA-44 B | Jorts B | Corduroy B | Jorts base trace GiB |
-| --- | --- | --- | --- | --- |
-| 1,000 | 2,420,000 | 4,328,000 | 76,896,000 | 0.977 |
-| 1,500 | 3,630,000 | 6,492,000 | 115,344,000 | 1.465 |
-| 8,192 | 19,824,640 | 35,454,976 | 629,932,032 | 8.000 |
-| 131,072 | 317,194,240 | 567,279,616 | 10,078,912,512 | 128.000 |
-| 1,048,576 | 2,537,553,920 | 4,538,236,928 | 80,631,300,096 | 1,024.000 |
-
-### Repeated K=8 Johnson calibration: payload/work envelope
-
-| Signers | K=8 jobs | Sum standalone proof B | Reference-host work s | Serial verify ms |
-| --- | --- | --- | --- | --- |
-| 1,000 | 125 | 36,419,000 | 612.500 | 3,336.250 |
-| 8,192 | 1,024 | 298,344,448 | 5,017.600 | 27,330.560 |
-| 131,072 | 16,384 | 4,773,511,168 | 80,281.600 | 437,288.960 |
-| 1,048,576 | 131,072 | 38,188,089,344 | 642,252.800 | 3,498,311.680 |
-
-### Hypothetical Jorts batch parameters
-
-| Batch cap | Proof B/batch | Verify ms/batch | CPU relative speedup | GPU fraction | GPU kernel speedup | GPU overhead ms/batch |
+| Regime | Tag | Proof B | CPU prove s | GPU prove s | Verify ms (all workers) | Verify ms (1 core) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2,048 | 1,000,000 | 50.000 | 4.000 | 0.800 | 10.000 | 2.000 |
+| BciksJohnsonQrom128 (cSHAKE256 Canopy, default) | 4 | 445,566 | 3.67 | 1.56 | 3.00 | 6.21 |
+| Poseidon2Cdhz25JohnsonQrom128 (Poseidon2-12 Canopy, Q <= 2^38) | 7 | 360,702 | 7.24 | not measured | 6.84 | 13.21 |
 
-### Hypothetical hierarchy bandwidth (one copy, four-second slot)
+### Measured: fixed-path WHIR opening merge (4,096-cell children, tag 8)
 
-| Signers | Regions | Batch proofs | Root B | Root B/s | ML-DSA/raw to root ratio | Serial verify ms |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1,000 | 1 | 1 | 1,000,200 | 250,050.000 | 2.420 | 50.000 |
-| 8,192 | 1 | 4 | 4,000,080 | 1,000,020.000 | 4.956 | 200.000 |
-| 131,072 | 16 | 64 | 64,000,140 | 16,000,035.000 | 4.956 | 3,200.000 |
-| 1,048,576 | 128 | 512 | 512,000,588 | 128,000,147.000 | 4.956 | 25,600.000 |
+| Children | Prove s | Verify ms | Parent B | Children B | Parent / children |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 1.00 | 123.00 | 302,547 | 527,872 | 0.57 |
+| 4 | 1.88 | 246.00 | 339,643 | 1,055,744 | 0.32 |
 
-### Hypothetical aggregation latency and capacity requirements
+### Exact: raw signature payload and Hem base trace
 
-| Signers | Batches | Reference work s | Faster CPU s | GPU scenario s | Required speedup to deadline | Ideal reference-host equivalents |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1,000 | 1 | 612.500 | 153.125 | 171.502 | 4,083.333 | 4,084 |
-| 8,192 | 4 | 5,017.600 | 1,254.400 | 1,404.936 | 1,254.400 | 1,255 |
+| Signers | Compact1122 B | ML-DSA-44 B | Jorts B | Shards | Jorts base trace GiB |
+| --- | --- | --- | --- | --- | --- |
+| 1,000 | 1,122,000 | 2,420,000 | 4,328,000 | 8 | 0.98 |
+| 1,200 | 1,346,400 | 2,904,000 | 5,193,600 | 10 | 1.17 |
+| 1,500 | 1,683,000 | 3,630,000 | 6,492,000 | 12 | 1.46 |
+| 2,048 | 2,297,856 | 4,956,160 | 8,863,744 | 16 | 2.00 |
+| 8,192 | 9,191,424 | 19,824,640 | 35,454,976 | 64 | 8.00 |
+| 131,072 | 147,062,784 | 317,194,240 | 567,279,616 | 1,024 | 128.00 |
+| 1,048,576 | 1,176,502,272 | 2,537,553,920 | 4,538,236,928 | 8,192 | 1,024.00 |
+
+### Solana / Alpenglow live vote path (400 ms slot, Compact1122)
+
+| Votes | Datagram B | Ingress B / recipient | Mbps over 400 ms | 1-core SIMD verify ms | Cores to verify inside the slot (ideal) |
+| --- | --- | --- | --- | --- | --- |
+| 1,000 | 1,218 | 1,218,000 | 24.36 | 1,025.00 | 3 |
+| 1,200 | 1,218 | 1,461,600 | 29.23 | 1,230.00 | 4 |
+| 1,500 | 1,218 | 1,827,000 | 36.54 | 1,537.50 | 4 |
+
+### Solana / Alpenglow asynchronous checkpoint (full shard proofs retained)
+
+| Signers | Shards | Hierarchy B | Raw Jorts / hierarchy | Raw Compact1122 / hierarchy | CPU prove s (one host, serial) | GPU prove s (one GPU, serial) | Verify core-ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1,000 | 8 | 3,565,596 | 1.21 | 0.31 | 29.36 | 12.48 | 49.68 |
+| 1,200 | 10 | 4,456,976 | 1.17 | 0.30 | 36.70 | 15.60 | 62.10 |
+| 1,500 | 12 | 5,348,356 | 1.21 | 0.31 | 44.04 | 18.72 | 74.52 |
+
+### Lean-Ethereum / Beam subnets (4 s slot, direct verification of every shard)
+
+| Validators | Subnets of 128 | Hierarchy B | Transfer s at 100 Mbps | GPU prove s (parallel, per subnet) | CPU prove s (parallel, per subnet) | Total GPU-s | Verify ms (serial, all workers) | Verify core-ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2,048 | 16 | 7,131,116 | 0.57 | 1.56 | 3.67 | 24.96 | 48.00 | 99.36 |
+| 8,192 | 64 | 28,524,236 | 2.28 | 1.56 | 3.67 | 99.84 | 192.00 | 397.44 |
+
+### Projection: pipelined k=4 opening-merge tree (per-level cost from 4,096-cell children)
+
+| Validators | Shards | Tree depth | Merge provers | Pipelined s (GPU shards) | Pipelined s (CPU shards) | Total merge prover-s | Root opening proof B | Signer bitmap B |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2,048 | 16 | 2 | 5 | 5.31 | 7.42 | 9.38 | 339,643 | 256 |
+| 8,192 | 64 | 3 | 21 | 7.19 | 9.30 | 39.40 | 339,643 | 1,024 |
+| 131,072 | 1,024 | 5 | 341 | 10.94 | 13.05 | 639.72 | 339,643 | 16,384 |
+| 1,048,576 | 8,192 | 7 | 2,731 | 14.69 | 16.80 | 5,123.36 | 339,643 | 131,072 |
+
+### Epoch / finality scale (12 s slots, 384 s epochs)
+
+| Validators | Shards | Sum of shard proofs B | Total GPU-s | GPUs to prove in 12 s (ideal) | GPUs to prove in 384 s (ideal) | Direct verify core-s | Evidence transfer s at 100 Mbps |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 131,072 | 1,024 | 456,259,584 | 1,597.44 | 134 | 5 | 6.36 | 36.50 |
+| 1,048,576 | 8,192 | 3,650,076,672 | 12,779.52 | 1,065 | 34 | 50.87 | 292.01 |
 
 ### Trace geometry and verifier chain work
 
-| Profile | w | Chains | Target sum | Verifier chain steps | Rows/signer | Max signers/shard |
+| Profile | w | Chains | Target sum | Verifier chain steps | Rows/signer | Signers per 24-variable shard |
 | --- | --- | --- | --- | --- | --- | --- |
 | Hem Jorts | 4 | 128 | 192 | 192 | 512 | 128 |
 | Hem Corduroy (per WOTS layer) | 4 | 128 | 192 | 192 | 8,192 | 8 |
 | Custody base-16 (per WOTS layer) | 16 | 64 | 480 | 480 | not Hem | not Hem |
 
-### Johnson QROM query schedule
+### WHIR query schedules
 
-| log2 blowup | Queries |
-| --- | --- |
-| 2 | 258 |
-| 4 | 130 |
-| 6 | 88 |
-| 8 | 66 |
+| log2 blowup | Tag 4 (default) | Tags 5, 7 | Tags 6, 8 |
+| --- | --- | --- | --- |
+| 2 | 258 | 202 | 216 |
+| 4 | 130 | 102 | 109 |
+| 6 | 88 | 70 | 74 |
+| 8 | 66 | 52 | 56 |
 
 <!-- END GENERATED SCALING TABLES -->
 
-## For Solana / @toly: what fits a finality budget?
+## Solana / Alpenglow: 1,000–1,500 validators, 400 ms slots
 
-Treat 1,500 validators and 1,000 signatures as the requested sizing case, not a consensus quorum derivation. Alpenglow's rules use stake, not equal-weight validator counts. Votor governs voting/finalization, while Rotor concerns dissemination. Anza's original approximately 150 ms median estimate explicitly excluded computation; it is not an available 150 ms proving allowance on top of network delay. The original one-round and two-round paths are protocol alternatives, not a guarantee that every finalization uses the same number of certificates. ([Anza design introduction](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana))
+Treat the validator counts as sizing cases, not a quorum derivation: Alpenglow's rules use stake. Anza's roughly 150 ms median finality estimate excludes computation ([design introduction](https://www.anza.xyz/blog/alpenglow-a-new-consensus-for-solana)).
 
-The requested ML-DSA-44 baseline is 2,420,000 B for a thousand signatures. This is a comparison of signature payloads under different signing schemes: Hem currently cannot compress ML-DSA-44 signatures. The relevant Hem input alternatives are Jorts WOTS+C/XMSS or Corduroy FORS/WOTS+C hypertrees. Even after aggregation, those individual signatures still travel from validators to aggregators. Proof compression reduces downstream certificate traffic; it does not eliminate signature ingress. Blockspace savings apply only if the protocol actually stores those signatures or certificates on chain; off-chain votes do not automatically consume that blockspace.
+**Live path.** A vote is one `Compact1122` signature (1,122 bytes, 32-byte hash nodes, single use) plus a 96-byte header: 1,218 bytes, which fits the 1,232-byte payload of a minimum-MTU IPv6 packet (Solana's `PACKET_DATA_SIZE`) but not the 1,200-byte RFC 9000 floor. The ingress table gives one recipient's vote traffic; at 1,500 votes it is 36.5 Mbps averaged over a 400 ms slot. Verification is the tighter constraint: about 1.03 ms per vote on one core, so 1,500 votes need four cores inside a slot, and the 150 ms fast path needs the eight-thread figure or better. Each vote key signs once, and the signer burns the key in a synced journal before releasing the signature.
 
-The hypothetical large-batch row expresses a conditional compression benefit against raw ML-DSA, but the repeated measured-job baseline expands that payload dramatically. A claim of succinct bandwidth at this scale therefore requires a real large-batch proof measurement. Its amortization comes from shared WHIR openings within one jointly witnessed batch; independent completed proofs cannot acquire that benefit merely by merging.
+**Checkpoint path.** Hem cannot compress those votes: its circuit verifies Poseidon2 signatures, and `Compact1122` is a Keccak scheme. An aggregate certificate needs each validator to also sign the checkpoint with a `JortsPoseidon2` key (4,328 bytes). At these sizes the certificate does not save bytes against the votes: twelve shard proofs for 1,500 signers are 5.35 MB, against 1.68 MB of raw `Compact1122` votes and 6.49 MB of raw Jorts signatures. What it buys is verification: 75 core-milliseconds for 1,500 signers instead of 1.5 core-seconds, by a verifier that never sees the signatures. Proving takes 44 s on one CPU host or 19 s on one GPU, serially, so it runs behind finality as an archival, bridge or light-client proof, or on twelve provers in parallel.
 
-The critical path is `vote collection + custody online path + leaf proving + merge/transport + final verification`. Multiply relevant certificate work by the actual number of vote phases and recipients; do not equate a per-certificate number with total network traffic. A 3-of-5 QS-A loopback online result near 0.56 ms excludes offline staging, durable `fsync`, WAN delivery and production ceremony costs. It supports a narrow local online result, not a sub-millisecond global committee SLA. Full FIPS 205 dishonest-majority signing is a separate, much more expensive path in the paper.
+A 3-of-5 QS-A loopback signing result near 0.56 ms excludes offline staging, durable `fsync` and WAN delivery. It is a local online-path figure, not a committee SLA.
 
-The Johnson reference verifier already exceeds a sub-millisecond target for one small proof. Increasing the number of independent proofs adds work. Multicore verification can reduce latency across leaves, but public-input hashing, registry checks, scheduling and memory remain. The table's ideal capacity counts allocate the *entire* finality target to proving, making them optimistic lower bounds. Meeting the real deadline requires tighter budgets and tail-latency measurements, or moving aggregation off the immediate finality path with an explicit protocol design for delayed certification.
+## Lean-Ethereum / Beam: 2,048 and 8,192 validators per 4 s slot
 
-## For Ethereum / @VitalikButerin: subnet and root accounting
+Use the four-second slot and 128-validator subnets as deployment assumptions, not claims about a settled specification. Sixteen subnets cover 2,048 validators and sixty-four cover 8,192.
 
-Use the requested four-second slot and 8,192-validator subnet as deployment assumptions, not claims about a settled Ethereum specification. The larger populations comprise 16 and 128 such regions. Subnets may work in parallel, so the leaf latency critical path is approximately the slowest subnet, while total system work multiplies by the number of subnets. The generated hierarchy table reports final certificate bytes per slot and bytes per second for a recipient of the whole certificate. Each subnet aggregator additionally ingests its own raw signatures; raw ingress per second is the appropriate raw table entry divided by the slot duration. Retransmissions, redundant aggregators, messages, keys, eligibility proofs and gossip fanout are excluded.
+**Proving.** Subnets prove in parallel, so the critical path is one shard: 1.56 s on a GPU, 3.67 s on a CPU. The CPU figure leaves about 1% of a four-second slot (the Beam harness measured 3.97 s warm for the same shard), so a CPU-only subnet aggregator is not a safe design point. One host proving all sixteen subnets itself does not fit either: the harness measured 5.67 s for the sixteen-subnet slot.
 
-A root aggregator receives the regional proofs whose sum remains present in the root object. Root merge is serialization/hash/policy work plus any required verification, **not another succinct proving pass**. Serial verifier work is the sum of batch verification times; parallel lower bounds divide independent leaf work by available capacity but retain root and registry overhead. No measurement here establishes root hashing/serialization time or p99 verify latency. A 32-byte root commitment is useful for binding and transport identification, but a verifier still needs the child evidence and independently trusted registry.
+**Direct verification.** Verifying every shard proof costs `64 × 3.00 ms ≈ 192 ms` run one after another on all workers, or 397 core-milliseconds spread over cores (25 ms on sixteen cores, ideally). This path needs no recursion and certifies the signatures. Its cost is bytes: 7.1 MB per slot at 2,048 validators and 28.5 MB at 8,192, which is 0.57 s and 2.28 s of a 100 Mbps link. At 8,192 validators dissemination, not proving or verification, is what does not fit a four-second slot.
 
-For hypothetical genuine two-level recursion, the accounting would instead be `T_slot ≥ max(T_leaf) + T_recursive_prove + transport + T_recursive_verify`, with root bytes equal to the new recursive proof plus public statement/participation data. Those three recursive costs are **unknown**, not zero and not equal to a single K=8 Hem proof. The circuit must verify child transcript challenges, regimes, Merkle/WHIR openings, sumchecks, statement/registry binding and non-overlapping signer sets. It must also bind stake weights and sufficient participation. A commitment without these checks does not establish quorum. This is the main missing component for a bounded root-verification cost as the validator count grows.
+**What the opening merge changes, and what it does not.** Three objects must be kept apart.
 
-Even a recursively succinct cryptographic proof does not automatically make explicit participation data constant-size. A bitmap grows with the committee; hiding it behind a commitment requires proving the weight/quorum rule and specifying how accountability and slashing recover signer identities. Individual public keys remain necessary at leaf verification, and registry updates/key rotation must be authenticated.
+| Object | Checked inside a proof | Checked by the verifier outside it | Authorizes a quorum |
+| --- | --- | --- | --- |
+| Shard proof (`ShardBatchProof`) | Signature verification of every signer: row sumcheck, AIR, WHIR opening | Public keys, bitmap, message | Yes |
+| Compact hierarchy (`SuccinctHierarchicalHemAggregate`) | A Poseidon2 commitment chain over shard summaries | Registry, epoch, message, threshold | Only with `VerifiedHierarchicalHemEvidence` |
+| Opening merge (`SuccinctShardWhirAggregate`) | The fixed-path WHIR opening of each child's evaluation claim, bound to its shard header, through the one-table public Hem relation | Registry, per-shard quorum minimum, global quorum sum | Only with `VerifiedHierarchicalHemEvidence` of the same regime |
 
-## For Zcash / @zooko: custody is orthogonal to aggregation
+`VerifiedHierarchicalHemEvidence` is produced by verifying each shard's full proof for the same registry, epoch, message and threshold. So today the merge is a compact statement about openings that an authorizing verifier can use only after it, or a party it trusts, has verified the shard proofs. It reduces what must be re-sent to parties that already trust that evidence. It does not reduce what a trustless verifier must download.
+
+Full in-circuit shard recursion would add the missing half: the parent relation would also run each shard's row sumcheck and AIR evaluation at the opened point, with shards committed in fixed-path mode, so that the parent proof alone certified the signatures. The root would then be one proof plus the signer bitmap, and the per-slot bytes at 8,192 validators would fall from 28.5 MB to a few hundred kilobytes. That relation does not exist yet, and its prover cost is unknown.
+
+**Projection.** If each level of a k = 4 tree cost what the measured four-child merge costs, sixteen subnets would need two levels (1.56 + 2 × 1.88 = 5.3 s) and sixty-four would need three (7.2 s). Neither fits one four-second slot, so the tree would be pipelined across slots, and a single merge of all sixteen children (the relation's maximum fan-in) is unmeasured. Read these rows as the floor for a design that still has to be built.
+
+## Epoch and finality-gadget scale: 131,072 and 1,048,576 validators
+
+At this scale per-slot aggregation of every validator is not the design point; the question is what an epoch-level finality proof costs.
+
+- **Proving is parallel and affordable in aggregate.** 1,024 shards are 1,597 GPU-seconds; 8,192 shards are 12,780 GPU-seconds. With one GPU per shard the shard layer still takes 1.56 s. Finishing inside one 384 s epoch needs at least 5 and 34 GPUs respectively; inside one 12 s slot, 134 and 1,065.
+- **Direct verification is cheap in time and expensive in bytes.** Verifying every shard proof is 6.4 and 50.9 core-seconds, but the evidence is 456 MB and 3.65 GB: 37 s and 292 s of a 100 Mbps link. A million-validator certificate made of shard proofs is not something a light client downloads.
+- **A merge tree would be about 11 to 15 seconds deep.** 1,024 shards form a depth-5 tree and 8,192 a depth-7 tree at k = 4 (the last two levels of the larger tree are partly filled). At the measured per-level cost the pipelined latency is 10.9 s and 14.7 s with GPU shard proving (13.1 s and 16.8 s with CPU shards), using 341 and 2,731 merge provers and 640 and 5,123 prover-seconds of merge work. That is about one 12 s slot of latency and well inside a 384 s epoch, and the root would be one 339,643-byte opening proof plus a signer bitmap of 16 KB or 131 KB.
+
+The last bullet is a projection with three unmet preconditions, restated because the numbers are attractive: the per-level cost was measured on 4,096-cell children, not 24-variable shard openings; merging parent proofs is not implemented; and a tree of opening merges would still certify openings rather than signatures. Until shard-AIR recursion exists, an epoch-scale deployment budgets bytes and verification as sums over shard proofs, or samples committees.
+
+Even a succinct proof does not make participation data constant-size. A bitmap grows with the validator set, and replacing it with a commitment means proving the stake-weight rule in-circuit and deciding how slashing recovers signer identities.
+
+## Custody is orthogonal to aggregation
 
 | Deployment | What the signer controls | What the verifier sees | Current boundary |
 | --- | --- | --- | --- |
@@ -145,35 +192,30 @@ Current Jorts aggregation keys have a height-six tree and thus a short finite le
 
 ## Comparing signature aggregation systems
 
-A signature implementation, an aggregation virtual machine, and proof-system components occupy different layers. Throughput comparisons must specify the complete task and parameter set. A research direction or recursive capability is not evidence of measured deployment performance.
+A signature scheme, an aggregation proof system and a consensus protocol occupy different layers, and throughput comparisons must fix the complete task and parameter set.
 
 | Comparison axis | QSAG Hem / custody | Fair comparison requirement |
 | --- | --- | --- |
-| Signature task | Stateful Jorts or stateless Corduroy; independent keys supported | Match security, message entropy, key lifetime, statefulness, signer count and key/message bytes |
-| Proof backend | Degree-eight sumcheck, GoldilocksExt4, WHIR, affine RS folds | Match proven/conjectural proximity assumptions, query budget and Fiat–Shamir threat model |
-| Composition | Shared openings within a batch; child-proof retention across batches | Compare actual recursive proof output against actual concatenated output, including public inputs |
-| Performance | Paper-reported small-batch host measurements | Same CPU threads/RAM, release flags, security regime, cold/warm state, serialized bytes and p50/p99 |
-| GPU | Persistent prover arena, GPU AIR/sumcheck and WHIR paths exist; older tables do not calibrate them | Measure the current whole prover with transfer, launches, receipts and CPU residual work |
-| Custody | Dedicated threshold protocols, preprocessing and durable state | Treat custody as an additional capability; it does not itself accelerate a proof backend |
+| Signature task | Stateful Jorts or stateless Corduroy; independent keys | Match security level, message entropy, key lifetime, statefulness, signer count and key/message bytes |
+| Proof backend | Degree-eight sumcheck, GoldilocksExt4, WHIR with affine Reed–Solomon folds, Johnson-radius query counts | Match proven versus conjectured proximity assumptions, query budget and Fiat–Shamir threat model |
+| Composition | Shared opening inside a batch; full child proofs across batches; opening-only merge | Compare real recursive proof output against real concatenated output, public inputs included |
+| Performance | Single recorded runs on the hardware named above | Same threads and memory, release flags, security regime, cold or warm state, serialized bytes, p50 and p99 |
+| GPU | Whole-prover runs with the AIR, sumcheck and NTT stages on the device and Canopy hashing on the CPU | Whole prover including transfers, launches and CPU residual work |
+| Custody | Dedicated threshold protocols, preprocessing and durable state | Custody is an additional capability; it does not accelerate a proof backend |
 
-There is no matched competitor benchmark in this report, so it makes **no numerical throughput or proof-size superiority claim**. A reproducible comparison should record immutable commits for both stacks and raw machine-readable runs at each requested population, separating key generation, signing, aggregation and verification. This is a concrete missing measurement, not a reason to substitute an unrelated microbenchmark.
+There is no matched competitor benchmark in this report, so it makes **no numerical throughput or proof-size superiority claim**.
 
-The [CWYZ26 affine-combiner result](https://arxiv.org/abs/2611.15128) improves the field-size dependence of Reed–Solomon proximity gaps. In this repository, the Johnson QROM query formula yields the generated schedule. That is a soundness/parameter choice, not an empirical GPU speedup. The paper separately records incomplete full Johnson mechanization and multi-round QROM extraction; larger challenge fields and query counts alone do not discharge those obligations.
+The [CWYZ26 affine-combiner result](https://arxiv.org/abs/2611.15128) improves the field-size dependence of Reed–Solomon proximity gaps. In this repository the Johnson query formula yields the generated schedule. That is a soundness and parameter choice, not a speedup, and the paper records which parts of the Johnson analysis and the multi-round QROM extraction are not mechanized.
 
-The small-coefficient `M_4` external Poseidon2 matrix can be implemented with additions and doubling rather than general field multiplication. The inspected CPU code expresses multiplication by the constant two; the algebra permits replacing it with doubling. Calling this “zero-mul Poseidon2” would be misleading: nonlinear `x^7` S-boxes and other layers still require multiplication, and no end-to-end runtime reduction follows without measurement. See [core Poseidon2](../crates/qsag-core/src/sponge/poseidon2.rs), [accelerator implementation](../crates/qsag-accel/src/poseidon2.rs), and [Vulkan shader](../crates/qsag-accel/shaders/poseidon2_perm12.comp).
+Fixing the digit sum removes checksum chains and fixes verifier chain work; it does not remove digest decoding, counter grinding, endpoint compression or Merkle authentication.
 
-Likewise, `z=2, S=480` is not the current Hem trace parameter set. The inspected [custody parameter code](../crates/qsag-core/src/tsw_baggy.rs) supports the base-sixteen target-sum profile in the generated geometry table; Hem uses base four. If `z` denotes pinned zero trailing digits, the paper explicitly distinguishes its full-digest profile from such encodings: narrowing the accepted digest space changes security accounting. If `z` denotes another construction's parameter, that construction must be specified before assigning trace savings. Fixed sum removes checksum chains and fixes verifier chain work, but does not remove digest decoding, counter grinding, endpoint compression, Merkle authentication or FORS work. Trace compactness must be measured for the exact accepted signature language.
+## Work that would change the answer
 
-## GPU and deployment work that would change the answer
+1. Commit shards in fixed-path mode and measure the opening merge on real 24-variable shard openings, at fan-in 4 and 16.
+2. Put the shard's row sumcheck and AIR evaluation into the parent relation, so that a parent proof certifies signatures and `VerifiedHierarchicalHemEvidence` is no longer needed. Measure its prover.
+3. Make parent proofs mergeable, then measure a tree end to end across slots, including transfer.
+4. Measure tail latency: every figure here is a single run or a small range.
+5. Measure custody on authenticated WAN links with offline inventory depletion, active faults and durable reservation latency included.
+6. Exercise protocol-level stake weighting, duplicate-signer rejection, stale-epoch rejection, equivocation accountability and key rotation. The arithmetic model does not infer these from signature validity.
 
-The RX 6750 XT RDNA2 Vulkan path now includes a persistent prover arena, AIR/sumcheck and WHIR integration in `acceleration.rs`, `arithmetize.rs` and `pcs.rs`, as well as a [hardware benchmark entry point](../crates/qsag-accel/examples/rdna2_vulkan_bench.rs), [backend](../crates/qsag-accel/src/vulkan.rs), and shader kernels. The older kernel-only calibration below is not a measurement of that integrated path. The GPU table is therefore a sensitivity analysis only. Kernel receipt checking and CPU revalidation must be included where enabled; accelerating Poseidon2 alone may leave Keccak commitments, extension arithmetic, sumcheck, NTTs and memory traffic dominant.
-
-The next useful gates are:
-
-1. Measure joint batches at the actual shard/batch geometries, including full regional registry bitmaps, serialization and peak memory. Record CPU topology, worker count, regime and raw proof sizes. Keep historical measurements separately versioned.
-2. Profile full-prover fractions before offloading; then run the integrated prover on the named GPU with identical statements and security settings. Report both compute time and complete wall time. Verify output independently on CPU.
-3. Measure custody on authenticated WAN links with offline inventory depletion, active faults and durable reservation latency included. Validate the custody-to-Hem signature adapter rather than assuming profile compatibility.
-4. Implement and benchmark a genuine recursive verifier relation if constant-size root certification is required. Until then, budget root bandwidth and verification as sums over child proofs.
-5. Exercise protocol-level quorum weight, duplicate signer rejection, stale epoch rejection, equivocation accountability, key rotation and tail latency. The arithmetic model deliberately does not infer these consensus properties from signature validity.
-
-These are engineering obligations attached to this analysis, not claims that work has already been completed. They preserve the distinction between an achievable local custody fast path, a succinct jointly witnessed signature batch, and a scalable network finality protocol.
+These are obligations attached to this analysis, not claims that the work is done.

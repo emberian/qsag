@@ -27,11 +27,11 @@ const LEAF: u64 = 0x4657_4C45_4146;
 const NODE: u64 = 0x4657_4E4F_4445;
 const MERGE: u64 = 0x4657_4D45_5247;
 
-fn f(v: u64) -> F {
+pub(super) fn f(v: u64) -> F {
     F::from_u64_reduced(v)
 }
 
-trait Base: Clone {
+pub(super) trait Base: Clone {
     fn constant(v: F) -> Self;
     fn plus(&self, rhs: &Self) -> Self;
     fn minus(&self, rhs: &Self) -> Self;
@@ -65,7 +65,7 @@ impl Base for Lc {
         self.scaled(k)
     }
 }
-trait Backend {
+pub(super) trait Backend {
     type W: Base;
     fn alloc(&mut self, v: F) -> Self::W;
     fn value(&self, v: &Self::W) -> F;
@@ -81,8 +81,8 @@ trait Backend {
     }
 }
 #[derive(Default)]
-struct Native {
-    failed: bool,
+pub(super) struct Native {
+    pub(super) failed: bool,
 }
 impl Backend for Native {
     type W = F;
@@ -112,8 +112,8 @@ impl Backend for Native {
 /// in synthesis order. In particular `pin` allocates and each permutation records
 /// all 118 S-box outputs. The compiled Shape still checks the whole assignment.
 #[derive(Default)]
-struct Assignment {
-    values: Vec<F>,
+pub(super) struct Assignment {
+    pub(super) values: Vec<F>,
 }
 impl Backend for Assignment {
     type W = F;
@@ -160,18 +160,18 @@ impl Backend for ConstraintSystem {
 
 /// Tower limbs [1, u, v, uv], u²=7, v²=u (polynomial order [1,v²,v,v³]).
 #[derive(Clone)]
-struct Ext<W: Base>([W; 4]);
+pub(super) struct Ext<W: Base>(pub(super) [W; 4]);
 impl<W: Base> Ext<W> {
-    fn constant(v: E) -> Self {
+    pub(super) fn constant(v: E) -> Self {
         Self(v.to_limbs().map(W::constant))
     }
-    fn zero() -> Self {
+    pub(super) fn zero() -> Self {
         Self::constant(E::ZERO)
     }
-    fn one() -> Self {
+    pub(super) fn one() -> Self {
         Self::constant(E::ONE)
     }
-    fn base(v: W) -> Self {
+    pub(super) fn base(v: W) -> Self {
         Self([
             v,
             W::constant(F::ZERO),
@@ -179,29 +179,29 @@ impl<W: Base> Ext<W> {
             W::constant(F::ZERO),
         ])
     }
-    fn alloc<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
+    pub(super) fn alloc<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
         Self(v.to_limbs().map(|v| b.alloc(v)))
     }
     /// A base-field value: only limb zero is a wire, the other limbs are the constant zero.
-    fn alloc_base<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
+    pub(super) fn alloc_base<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
         Self::base(b.alloc(v.to_limbs()[0]))
     }
-    fn value<B: Backend<W = W>>(&self, b: &B) -> E {
+    pub(super) fn value<B: Backend<W = W>>(&self, b: &B) -> E {
         E::from_limbs(core::array::from_fn(|i| b.value(&self.0[i])))
     }
-    fn add(&self, v: &Self) -> Self {
+    pub(super) fn add(&self, v: &Self) -> Self {
         Self(core::array::from_fn(|i| self.0[i].plus(&v.0[i])))
     }
-    fn sub(&self, v: &Self) -> Self {
+    pub(super) fn sub(&self, v: &Self) -> Self {
         Self(core::array::from_fn(|i| self.0[i].minus(&v.0[i])))
     }
-    fn scale(&self, k: F) -> Self {
+    pub(super) fn scale(&self, k: F) -> Self {
         Self(core::array::from_fn(|i| self.0[i].scale(k)))
     }
-    fn mul_base<B: Backend<W = W>>(&self, b: &mut B, v: &W) -> Self {
+    pub(super) fn mul_base<B: Backend<W = W>>(&self, b: &mut B, v: &W) -> Self {
         Self(core::array::from_fn(|i| b.mul(&self.0[i], v)))
     }
-    fn mul<B: Backend<W = W>>(&self, b: &mut B, v: &Self) -> Self {
+    pub(super) fn mul<B: Backend<W = W>>(&self, b: &mut B, v: &Self) -> Self {
         // Regard the tower as F[v]/(v^4 - 7), with polynomial-order
         // limbs [0,2,1,3]. Seven products at 0..6 determine the degree-six
         // product exactly; interpolate and reduce v^4=7. No witness-dependent
@@ -263,7 +263,7 @@ impl<W: Base> Ext<W> {
         }))
     }
 
-    fn equal<B: Backend<W = W>>(&self, b: &mut B, v: &Self) {
+    pub(super) fn equal<B: Backend<W = W>>(&self, b: &mut B, v: &Self) {
         for i in 0..4 {
             b.equal(&self.0[i], &v.0[i]);
         }
@@ -271,18 +271,18 @@ impl<W: Base> Ext<W> {
 }
 
 #[derive(Clone)]
-struct Transcript<W: Base> {
-    state: [W; 12],
+pub(super) struct Transcript<W: Base> {
+    pub(super) state: [W; 12],
 }
 impl<W: Base> Transcript<W> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: core::array::from_fn(|_| W::constant(F::ZERO)),
         }
     }
     // Fixed-length, domain-separated duplex frames. Capacity receives tag and length;
     // padding is mandatory even at an exact rate boundary.
-    fn absorb<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, msg: &[W]) {
+    pub(super) fn absorb<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, msg: &[W]) {
         self.state[10] = self.state[10].plus(&W::constant(f(tag)));
         self.state[11] = self.state[11].plus(&W::constant(f(msg.len() as u64)));
         for chunk in msg.chunks(6) {
@@ -299,13 +299,13 @@ impl<W: Base> Transcript<W> {
             b.perm(&mut self.state);
         }
     }
-    fn ext<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64) -> Ext<W> {
+    pub(super) fn ext<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64) -> Ext<W> {
         self.absorb(b, tag, &[]);
         // A challenge enters many products: give it single-variable limbs. The state
         // itself stays a linear form over the permutation's last S-box outputs.
         Ext(core::array::from_fn(|i| b.pin(self.state[i].clone())))
     }
-    fn absorb_exts<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, es: &[Ext<W>]) {
+    pub(super) fn absorb_exts<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, es: &[Ext<W>]) {
         let words: Vec<_> = es.iter().flat_map(|e| e.0.clone()).collect();
         self.absorb(b, tag, &words);
     }
@@ -313,7 +313,7 @@ impl<W: Base> Transcript<W> {
 
 /// Little-endian Boolean decomposition. Below 64 bits the integer sum cannot reach `p`;
 /// at 64 bits the alias `x + p` is excluded explicitly.
-fn bits<B: Backend>(b: &mut B, value: &B::W, n: usize) -> Vec<B::W> {
+pub(super) fn bits<B: Backend>(b: &mut B, value: &B::W, n: usize) -> Vec<B::W> {
     assert!(n <= 64);
     let raw = b.value(value).to_canonical_u64();
     let zero = B::W::constant(F::ZERO);
@@ -542,7 +542,7 @@ impl FixedPathWhirParams {
             })
             .collect()
     }
-    fn placeholder(&self) -> FixedPathWhirProof {
+    pub(super) fn placeholder(&self) -> FixedPathWhirProof {
         let nv = self.num_vars().expect("validated parameters");
         FixedPathWhirProof {
             stage_roots: vec![[F::ZERO; 4]; self.schedule.stages.len()],
@@ -566,7 +566,11 @@ impl FixedPathWhirParams {
             final_coeffs: vec![E::ZERO; (1 << self.schedule.early_stop_vars) + 2],
         }
     }
-    fn well_formed(&self, statement: &ChildWhirStatement, proof: &FixedPathWhirProof) -> bool {
+    pub(super) fn well_formed(
+        &self,
+        statement: &ChildWhirStatement,
+        proof: &FixedPathWhirProof,
+    ) -> bool {
         let Some(nv) = self.num_vars() else {
             return false;
         };
@@ -614,7 +618,7 @@ fn start<B: Backend>(b: &mut B, params: &FixedPathWhirParams, public: &[B::W]) -
 }
 // All comparisons synthesize the same constraints. Values choose only the assignments
 // of inverse/slack witnesses, never control flow or coefficients of the relation.
-fn equal_bit<B: Backend>(b: &mut B, a: &B::W, c: &B::W) -> B::W {
+pub(super) fn equal_bit<B: Backend>(b: &mut B, a: &B::W, c: &B::W) -> B::W {
     let d = a.minus(c);
     let v = b.value(&d);
     let eq = b.alloc(if v == F::ZERO { F::ONE } else { F::ZERO });
@@ -649,7 +653,7 @@ fn bounded<B: Backend>(b: &mut B, v: &B::W, max: u64) {
         }
     }
 }
-fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -> B::W {
+pub(super) fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -> B::W {
     let delta = yes.minus(no);
     let out = b.alloc(b.value(no) + b.value(bit).const_mul(b.value(&delta)));
     b.product(bit, &delta, &out.minus(no));
@@ -1083,7 +1087,7 @@ fn terminal<B: Backend>(
     }
     total
 }
-fn horner<B: Backend>(b: &mut B, coeffs: &[Ext<B::W>], x: &B::W) -> Ext<B::W> {
+pub(super) fn horner<B: Backend>(b: &mut B, coeffs: &[Ext<B::W>], x: &B::W) -> Ext<B::W> {
     let (last, rest) = coeffs.split_last().expect("nonempty polynomial");
     rest.iter()
         .rev()
@@ -1092,7 +1096,7 @@ fn horner<B: Backend>(b: &mut B, coeffs: &[Ext<B::W>], x: &B::W) -> Ext<B::W> {
 
 // This one verifier executes both natively and as a relation; equality checks never
 // influence the control flow, and no witness value selects a circuit branch.
-fn verify_gadget<B: Backend>(
+pub(super) fn verify_gadget<B: Backend>(
     b: &mut B,
     params: &FixedPathWhirParams,
     public: &[B::W],
@@ -1243,33 +1247,64 @@ pub fn verify_fixed_path(
     !b.failed
 }
 
+/// A Reed-Solomon codeword. The first oracle encodes a base-field polynomial and stays in
+/// the base field; later oracles are over the extension.
+enum Codeword {
+    Base(Vec<F>),
+    Ext(Vec<E>),
+}
+impl Codeword {
+    fn len(&self) -> usize {
+        match self {
+            Self::Base(v) => v.len(),
+            Self::Ext(v) => v.len(),
+        }
+    }
+    fn at(&self, i: usize) -> E {
+        match self {
+            Self::Base(v) => E::from_base(v[i]),
+            Self::Ext(v) => v[i],
+        }
+    }
+}
 struct Oracle {
-    codeword: Vec<E>,
+    codeword: Codeword,
     levels: Vec<Vec<Digest>>,
     arity: usize,
 }
 impl Oracle {
+    /// First oracle: `coeffs` are the monomial coefficients of the committed polynomial.
+    fn base(coeffs: &[F], blowup: usize, arity: usize) -> Self {
+        let codeword = crate::field::encode_rs_coset_goldilocks(coeffs, blowup);
+        Self::commit(Codeword::Base(codeword), arity, 0)
+    }
     fn new(coeffs: &[E], blowup: usize, arity: usize, stage: usize) -> Self {
         let codeword = crate::pcs::affine::encode_overflow(coeffs, blowup);
+        Self::commit(Codeword::Ext(codeword), arity, stage)
+    }
+    fn commit(codeword: Codeword, arity: usize, stage: usize) -> Self {
         let groups = codeword.len() / arity;
-        let mut b = Native::default();
-        let leaves = (0..groups)
-            .map(|g| {
-                let fiber: Vec<_> = (0..arity)
-                    .map(|j| Ext::constant(codeword[g + j * groups]))
-                    .collect();
-                leaf(&mut b, stage, &f(g as u64), &fiber)
-            })
-            .collect();
+        let mut leaves = vec![[F::ZERO; 4]; groups];
+        crate::pcs::fill_indexed(&mut leaves, |g| {
+            let fiber: Vec<_> = (0..arity)
+                .map(|j| Ext::constant(codeword.at(g + j * groups)))
+                .collect();
+            leaf(&mut Native::default(), stage, &f(g as u64), &fiber)
+        });
         let mut levels: Vec<Vec<Digest>> = vec![leaves];
         while levels.last().unwrap().len() > 1 {
             let depth = levels.len() - 1;
-            let next = levels[depth]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|p| compress(&mut b, &p[0], &p[1], stage, depth))
-                .collect();
+            let below = &levels[depth];
+            let mut next = vec![[F::ZERO; 4]; below.len() / 2];
+            crate::pcs::fill_indexed(&mut next, |i| {
+                compress(
+                    &mut Native::default(),
+                    &below[2 * i],
+                    &below[2 * i + 1],
+                    stage,
+                    depth,
+                )
+            });
             levels.push(next);
         }
         Self {
@@ -1285,7 +1320,7 @@ impl Oracle {
         let groups = self.codeword.len() / self.arity;
         FixedPathQuery {
             values: (0..self.arity)
-                .map(|j| self.codeword[index + j * groups])
+                .map(|j| self.codeword.at(index + j * groups))
                 .collect(),
             siblings: (0..self.levels.len() - 1)
                 .map(|d| self.levels[d][(index >> d) ^ 1])
@@ -1295,7 +1330,10 @@ impl Oracle {
 }
 impl Drop for Oracle {
     fn drop(&mut self) {
-        qsag_asm::volatile_fill(&mut self.codeword, E::ZERO);
+        match &mut self.codeword {
+            Codeword::Base(v) => qsag_asm::volatile_fill(v, F::ZERO),
+            Codeword::Ext(v) => qsag_asm::volatile_fill(v, E::ZERO),
+        }
     }
 }
 struct SecretExts(Vec<E>);
@@ -1304,53 +1342,118 @@ impl Drop for SecretExts {
         qsag_asm::volatile_fill(&mut self.0, E::ZERO);
     }
 }
-fn dense_point(point: &[E]) -> Vec<E> {
-    let mut out = vec![E::ONE];
-    for &r in point {
-        let len = out.len();
-        for i in 0..len {
-            out.push(out[i] * r);
+/// `sum_i f(i)` over `0..count`, split across the worker budget.
+fn sum_indexed<const N: usize>(count: usize, f: impl Fn(usize) -> [E; N] + Sync) -> [E; N] {
+    let range = |start: usize, end: usize| {
+        let mut acc = [E::ZERO; N];
+        for i in start..end {
+            for (a, v) in acc.iter_mut().zip(f(i)) {
+                *a += v;
+            }
         }
+        acc
+    };
+    #[cfg(feature = "std")]
+    if count >= 8_192 {
+        let workers = crate::parallel_workers().min(count.div_ceil(2_048));
+        let chunk = count.div_ceil(workers);
+        let range = &range;
+        return std::thread::scope(|scope| {
+            let parts: Vec<_> = (0..workers)
+                .map(|w| {
+                    let (start, end) = ((w * chunk).min(count), ((w + 1) * chunk).min(count));
+                    crate::spawn_bounded(scope, move || range(start, end))
+                })
+                .collect();
+            let mut acc = [E::ZERO; N];
+            for part in parts {
+                for (a, v) in acc.iter_mut().zip(crate::join_worker(part)) {
+                    *a += v;
+                }
+            }
+            acc
+        });
     }
-    out.extend([E::ZERO; 2]);
-    out
-}
-fn add_geometric(kernel: &mut [E], weight: E, z: E) {
-    let mut power = weight;
-    for v in kernel {
-        *v += power;
-        power *= z;
-    }
+    range(0, count)
 }
 fn dot(a: &[E], b: &[E]) -> E {
-    a.iter().zip(b).fold(E::ZERO, |v, (&x, &y)| v + x * y)
+    let [out] = sum_indexed(a.len().min(b.len()), |i| [a[i] * b[i]]);
+    out
+}
+
+/// A fixed-path commitment to a base-field evaluation table, kept by the prover until it
+/// opens. Holds the committed polynomial; erased on drop.
+pub struct RecursionCommitment {
+    coeffs: SecretExts,
+    oracle: Oracle,
+}
+impl RecursionCommitment {
+    /// The commitment: Merkle root of the first Reed-Solomon oracle.
+    pub fn root(&self) -> Digest {
+        self.oracle.root()
+    }
+}
+
+/// Commit to a base-field evaluation table in the recursion format.
+/// This PCS mode is binding but not independently hiding; keep child witnesses private
+/// when using the zero-knowledge merge.
+pub fn commit_for_recursion(
+    params: &FixedPathWhirParams,
+    evaluations: &[F],
+) -> Result<RecursionCommitment, RecursiveWhirError> {
+    let nv = params
+        .num_vars()
+        .ok_or(RecursiveWhirError::InvalidParameters)?;
+    if evaluations.len() != 1usize << nv {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    let mut base = hypercube_to_monomial_coeffs(evaluations);
+    let spec = params.schedule.stages[0];
+    // The two overflow coefficients of the first oracle are zero, so its codeword is the
+    // base-field encoding of the committed coefficients.
+    let oracle = Oracle::base(&base, spec.blowup, 1 << spec.step_vars);
+    let mut coeffs = SecretExts(vec![E::ZERO; base.len() + 2]);
+    crate::pcs::fill_indexed(&mut coeffs.0[..base.len()], |i| E::from_base(base[i]));
+    qsag_asm::volatile_fill(&mut base, F::ZERO);
+    Ok(RecursionCommitment { coeffs, oracle })
 }
 
 /// Commit to a base-field evaluation table and prove its multilinear evaluation using
 /// the recursion transcript. The returned commitment is part of the opening statement.
-/// This PCS mode is binding but not independently hiding; keep child witnesses private
-/// when using the zero-knowledge merge.
 pub fn prove_for_recursion(
     params: &FixedPathWhirParams,
     shard_header: [u8; 32],
     evaluations: &[F],
     point: &[E],
 ) -> Result<(ChildWhirStatement, FixedPathWhirProof), RecursiveWhirError> {
+    open_for_recursion(
+        params,
+        shard_header,
+        commit_for_recursion(params, evaluations)?,
+        point,
+    )
+}
+
+/// Open a [`RecursionCommitment`] at `point` under the recursion transcript. The opening
+/// statement binds the header, the commitment, the point and the value.
+pub fn open_for_recursion(
+    params: &FixedPathWhirParams,
+    shard_header: [u8; 32],
+    committed: RecursionCommitment,
+    point: &[E],
+) -> Result<(ChildWhirStatement, FixedPathWhirProof), RecursiveWhirError> {
     let nv = params
         .num_vars()
         .ok_or(RecursiveWhirError::InvalidParameters)?;
-    if point.len() != nv || evaluations.len() != 1usize << nv {
+    let RecursionCommitment {
+        mut coeffs,
+        mut oracle,
+    } = committed;
+    if point.len() != nv || coeffs.0.len() != (1usize << nv) + 2 {
         return Err(RecursiveWhirError::InvalidParameters);
     }
-    let mut base = hypercube_to_monomial_coeffs(evaluations);
-    let mut coeffs = SecretExts(Vec::with_capacity(base.len() + 2));
-    coeffs.0.extend(base.iter().copied().map(E::from_base));
-    qsag_asm::volatile_fill(&mut base, F::ZERO);
-    coeffs.0.extend([E::ZERO; 2]);
-    let mut kernel = dense_point(point);
+    let mut kernel = crate::pcs::affine::monomial_table(point);
     let mut claim = dot(&coeffs.0, &kernel);
-    let spec = params.schedule.stages[0];
-    let mut oracle = Oracle::new(&coeffs.0, spec.blowup, 1 << spec.step_vars, 0);
     let statement = ChildWhirStatement {
         shard_header,
         commitment: oracle.root(),
@@ -1372,22 +1475,22 @@ pub fn prove_for_recursion(
     for (z, e) in zs.into_iter().zip(evals) {
         let weight = tr.ext(&mut b, 6).value(&b);
         claim += weight * e;
-        add_geometric(&mut kernel, weight, z);
+        crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, z);
     }
     for (stage, spec) in params.schedule.stages.iter().enumerate() {
         let mut chals = Vec::with_capacity(spec.step_vars);
         for _ in 0..spec.step_vars {
             let mut wire = [E::ZERO; 5];
-            for (c, k) in coeffs
-                .0
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .zip(kernel.as_chunks::<2>().0.iter())
             {
-                wire[0] += c[0] * k[0];
-                wire[1] += c[0] * k[1];
-                wire[2] += c[1] * k[0];
+                let (c, k) = (&coeffs.0, &kernel);
+                let head = sum_indexed(c.len() / 2, |i| {
+                    [
+                        c[2 * i] * k[2 * i],
+                        c[2 * i] * k[2 * i + 1],
+                        c[2 * i + 1] * k[2 * i],
+                    ]
+                });
+                wire[..3].copy_from_slice(&head);
             }
             tr.absorb_exts(
                 &mut b,
@@ -1401,9 +1504,12 @@ pub fn prove_for_recursion(
             let phi = tr.ext(&mut b, 11);
             crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
             core::mem::swap(&mut kernel, &mut scratch_k);
-            for (i, c) in coeffs.0.as_chunks::<2>().0.iter().enumerate() {
-                wire[3] += c[0] * kernel[i + 1];
-                wire[4] += c[1] * kernel[i + 1];
+            {
+                let (c, k) = (&coeffs.0, &kernel);
+                let tail = sum_indexed(c.len() / 2, |i| {
+                    [c[2 * i] * k[i + 1], c[2 * i + 1] * k[i + 1]]
+                });
+                wire[3..].copy_from_slice(&tail);
             }
             tr.absorb_exts(
                 &mut b,
@@ -1489,13 +1595,13 @@ pub fn prove_for_recursion(
             for (z, e) in zs.into_iter().zip(ood) {
                 let weight = tr.ext(&mut b, 6).value(&b);
                 claim += weight * e;
-                add_geometric(&mut kernel, weight, z);
+                crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, z);
             }
             let gamma = tr.ext(&mut b, 23).value(&b);
             let mut weight = gamma;
             for (z, e) in shifted {
                 claim += weight * e.value(&b);
-                add_geometric(&mut kernel, weight, E::from_base(z));
+                crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, E::from_base(z));
                 weight *= gamma;
             }
             oracle = next;
@@ -2248,6 +2354,45 @@ mod tests {
     fn four_child_multistage_compression_benchmark() {
         let (parent, children) = measure_children(12, 4);
         assert!(parent < children, "parent={parent} children={children}");
+    }
+
+    /// Cost of the fixed-path format at a real shard size: `QSAG_PROBE_NV` variables
+    /// (24 is one 128-signer Jorts shard). Prints the one-child verifier relation and, unless
+    /// `QSAG_PROBE_PROVE=0`, times the child commit-and-open.
+    #[test]
+    #[ignore = "measurement: QSAG_PROBE_NV, QSAG_PROBE_PROVE"]
+    fn fixed_path_scale_probe() {
+        let nv: usize = std::env::var("QSAG_PROBE_NV")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        let params = FixedPathWhirParams::new(REGIME, nv).unwrap();
+        let start = Instant::now();
+        let relation = ChildWhirMergeRelation::with_children(params.clone(), 1).unwrap();
+        std::println!(
+            "FIXED_PATH_PROBE nv={nv} stages={:?} early_stop={} sbox_rows={} multiplication_rows={} padded_rows={} setup_ms={:.1}",
+            params.geometries(),
+            params.schedule.early_stop_vars,
+            relation.stats.sbox_rows,
+            relation.stats.multiplication_rows,
+            relation.stats.padded_rows,
+            start.elapsed().as_secs_f64() * 1000.
+        );
+        if std::env::var("QSAG_PROBE_PROVE").as_deref() == Ok("0") {
+            return;
+        }
+        let table: Vec<F> = (0..1u64 << nv).map(|i| f(i * i + 5)).collect();
+        let point: Vec<E> = (0..nv).map(sample).collect();
+        let start = Instant::now();
+        let (statement, proof) = prove_for_recursion(&params, [7; 32], &table, &point).unwrap();
+        let prove_ms = start.elapsed().as_secs_f64() * 1000.;
+        let start = Instant::now();
+        assert!(verify_fixed_path(&params, &statement, &proof));
+        std::println!(
+            "FIXED_PATH_PROBE nv={nv} child_prove_ms={prove_ms:.1} child_verify_ms={:.1} child_bytes={}",
+            start.elapsed().as_secs_f64() * 1000.,
+            proof.to_bytes().len()
+        );
     }
 
     /// Returns `(parent bytes, summed child proof bytes)`.

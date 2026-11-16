@@ -325,6 +325,13 @@ pub(super) fn blind_open_tower128(
     Ok(Tower128::ZERO)
 }
 
+// Keep the large portable field circuit out of the basis-table loop's
+// vectorization, just as for the regression's independent product oracle.
+#[inline(never)]
+fn blinding_tower_product(a: Tower128, b: Tower128) -> Tower128 {
+    a.mul(b)
+}
+
 /// Entropy-amplified native-field Tower OLE with six independent 128-bit receiver masks.
 /// Correlations and ciphertexts are fixed before the field-valued hash coin. The masks
 /// supply 128-bit statistical privacy under affine bit errors, up to field-sized
@@ -348,6 +355,20 @@ pub(super) fn pairwise_ole_tower128(
         .collect();
     if count == 0 {
         return Ok(w_per_party);
+    }
+
+    // Each sender payload is multiplied by the same public basis elements in
+    // every mask and receiver transfer. Compute those products once, preserving
+    // the exact ciphertexts and RNG stream. Only PUBLIC (sender, column, bit)
+    // indices address this secret table, which is wiped on every return path.
+    let mut sender_basis = SecretBuffer(vec![vec![[Tower128::ZERO; 128]; count]; n]);
+    for sender in 0..n {
+        for k in 0..count {
+            for bit in 0..128 {
+                sender_basis[sender][k][bit] =
+                    blinding_tower_product(u_per_party[sender][k], Tower128(1u128 << bit));
+            }
+        }
     }
 
     // Each party `i` samples `6 * count` uniform `Tower128` OT masks (`12 * count` u64 choice words)
@@ -376,7 +397,6 @@ pub(super) fn pairwise_ole_tower128(
             let (send_pads, recv_pads) =
                 ot_mesh.run_correlated_ot_words(j, i, &choice_words[i], party_rngs)?;
             for k in 0..count {
-                let uj = u_per_party[j][k];
                 for m in 0..6 {
                     let rm_raw = black_box(r_masks[i][k][m].0);
                     let mut s_sum = Tower128::ZERO;
@@ -394,9 +414,8 @@ pub(super) fn pairwise_ole_tower128(
                             })));
                         let mask = party_rngs[j].next_tower128();
                         s_sum = s_sum.add(mask);
-                        let basis = Tower128(1u128 << bit);
                         let ct0 = mask.add(pad0);
-                        let ct1 = mask.add(uj.mul(basis)).add(pad1);
+                        let ct1 = mask.add(sender_basis[j][k][bit]).add(pad1);
                         bind.absorb(&ct0.0.to_le_bytes());
                         bind.absorb(&ct1.0.to_le_bytes());
 

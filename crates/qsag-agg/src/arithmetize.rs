@@ -565,22 +565,23 @@ fn union_sparse_op_pairs(
 
 /// One shard signer's public inputs to the row constraints.
 #[derive(Clone, Copy)]
-struct ShardSigner {
-    pk: ValidatorPublicKey,
-    mu: Digest5,
+pub(crate) struct ShardSigner {
+    pub(crate) pk: ValidatorPublicKey,
+    pub(crate) mu: Digest5,
 }
 
 /// The per-signer step program and its constraint index, shared by every shard of a batch.
-struct ShardCircuit {
-    program: Vec<StepOp>,
-    unique_ops: Vec<ConstraintKind>,
-    step_to_uid: Vec<usize>,
-    step_c0_base: Vec<Goldilocks>,
-    num_signer_slots: usize,
+#[derive(Clone)]
+pub(crate) struct ShardCircuit {
+    pub(crate) program: Vec<StepOp>,
+    pub(crate) unique_ops: Vec<ConstraintKind>,
+    pub(crate) step_to_uid: Vec<usize>,
+    pub(crate) step_c0_base: Vec<Goldilocks>,
+    pub(crate) num_signer_slots: usize,
 }
 
 impl ShardCircuit {
-    fn new(profile: AggSigProfile, num_signer_slots: usize) -> Self {
+    pub(crate) fn new(profile: AggSigProfile, num_signer_slots: usize) -> Self {
         let _phase = crate::profile::span("shard_circuit_new");
         let program = build_signer_program(profile);
         let (unique_ops, step_to_uid, step_c0_base) = index_unique_program_ops(&program);
@@ -594,17 +595,17 @@ impl ShardCircuit {
     }
 
     #[inline]
-    fn rows_per_signer(&self) -> usize {
+    pub(crate) fn rows_per_signer(&self) -> usize {
         self.program.len()
     }
 
     #[inline]
-    fn log_local(&self) -> usize {
+    pub(crate) fn log_local(&self) -> usize {
         self.rows_per_signer().trailing_zeros() as usize
     }
 
     #[inline]
-    fn log_rows(&self) -> usize {
+    pub(crate) fn log_rows(&self) -> usize {
         self.log_local() + self.num_signer_slots.trailing_zeros() as usize
     }
 }
@@ -681,7 +682,7 @@ fn resolve_batch_statement(
 /// Populate one shard's `num_signer_slots * rows_per_signer` trace rows (active signers first,
 /// then inactive slots; every `Idle` row blinded) and flatten them into the witness table
 /// `flat[u * 256 + c]`.
-fn build_shard_witness(
+pub(crate) fn build_shard_witness(
     circuit: &ShardCircuit,
     signers: &[ShardSigner],
     sigs: &[ValidatorSignature],
@@ -745,10 +746,49 @@ fn build_shard_witness(
     rows.into_flattened()
 }
 
+/// The Fiat-Shamir messages of one shard's row sumcheck, in protocol order. The byte
+/// transcript of a [`ShardBatchProof`] and the field-native transcript of the recursive shard
+/// mode ([`crate::zk_hem::full_shard`]) both drive [`prove_shard_rows`] through it.
+pub(crate) trait RowTranscript {
+    /// The `count` coordinates of the row-zerocheck point.
+    fn row_tau(&mut self, count: usize) -> Vec<GoldilocksExt4>;
+    /// The constraint-batching challenge.
+    fn row_gamma(&mut self) -> GoldilocksExt4;
+    /// Absorb one round polynomial (wire form) and return that round's challenge.
+    fn row_round(&mut self, wire: &[GoldilocksExt4; ROW_SUMCHECK_WIRE_COEFFS]) -> GoldilocksExt4;
+    /// Absorb the 256 column evaluations.
+    fn row_col_evals(&mut self, col_evals: &[GoldilocksExt4]);
+    /// One coordinate of the column-folding point.
+    fn row_rz(&mut self) -> GoldilocksExt4;
+}
+
+impl RowTranscript for FiatShamirTranscript<InstanceBound> {
+    fn row_tau(&mut self, count: usize) -> Vec<GoldilocksExt4> {
+        self.squeeze_ext4_vec(b"LEAF_TAU", count)
+    }
+    fn row_gamma(&mut self) -> GoldilocksExt4 {
+        self.squeeze_ext4(b"LEAF_GAMMA")
+    }
+    fn row_round(&mut self, wire: &[GoldilocksExt4; ROW_SUMCHECK_WIRE_COEFFS]) -> GoldilocksExt4 {
+        let mut sc_bytes = [0u8; ROW_SUMCHECK_WIRE_COEFFS * 32];
+        for (i, c) in wire.iter().enumerate() {
+            sc_bytes[32 * i..32 * (i + 1)].copy_from_slice(&c.to_le_bytes());
+        }
+        self.absorb(b"LEAF_SC_POLY", &sc_bytes);
+        self.squeeze_ext4(b"LEAF_SC_CHAL")
+    }
+    fn row_col_evals(&mut self, col_evals: &[GoldilocksExt4]) {
+        absorb_col_evals(self, col_evals);
+    }
+    fn row_rz(&mut self) -> GoldilocksExt4 {
+        self.squeeze_ext4(b"LEAF_RZ")
+    }
+}
+
 /// Run one shard's degree-8 `GoldilocksExt4` row sumcheck over its committed witness table `flat`,
 /// continuing the batch transcript. Returns the shard's proof part and its PCS claim `W(point) = v_star`.
-fn prove_shard_rows(
-    transcript: &mut FiatShamirTranscript<InstanceBound>,
+pub(crate) fn prove_shard_rows<T: RowTranscript>(
+    transcript: &mut T,
     circuit: &ShardCircuit,
     signers: &[ShardSigner],
     flat: &[Goldilocks],
@@ -762,8 +802,8 @@ fn prove_shard_rows(
     let log_rows = circuit.log_rows();
     let log_s = num_signer_slots.trailing_zeros() as usize;
 
-    let tau = transcript.squeeze_ext4_vec(b"LEAF_TAU", log_rows);
-    let gamma = transcript.squeeze_ext4(b"LEAF_GAMMA");
+    let tau = transcript.row_tau(log_rows);
+    let gamma = transcript.row_gamma();
     let sched = build_gamma_schedule_ext4(unique_ops, gamma);
 
     // Build row-level multilinear tables for MSB-to-LSB degree-8 Sumcheck over `GoldilocksExt4`.
@@ -1280,12 +1320,7 @@ fn prove_shard_rows(
 
         let poly_coeffs = interpolate_deg8_from_evals_ext4(&sum_evals);
         let wire_poly = pack_deg8_wire(&poly_coeffs);
-        let mut sc_bytes = [0u8; ROW_SUMCHECK_WIRE_COEFFS * 32];
-        for (i, c) in wire_poly.iter().enumerate() {
-            sc_bytes[32 * i..32 * (i + 1)].copy_from_slice(&c.to_le_bytes());
-        }
-        transcript.absorb(b"LEAF_SC_POLY", &sc_bytes);
-        let chal = transcript.squeeze_ext4(b"LEAF_SC_CHAL");
+        let chal = transcript.row_round(&wire_poly);
         cur_sum_claim = eval_univariate_ext4(&poly_coeffs, chal);
         row_sumcheck_polys.push(wire_poly);
         challenges_msb_to_lsb.push(chal);
@@ -1440,7 +1475,7 @@ fn prove_shard_rows(
 
     debug_assert_eq!(cols_ext4.len(), 1);
     let col_evals = cols_ext4[0].to_vec();
-    absorb_col_evals(transcript, &col_evals);
+    transcript.row_col_evals(&col_evals);
 
     // Reverse `challenges_msb_to_lsb` to standard `(X_0 .. X_{log_rows - 1})` coordinate order:
     let mut rx = challenges_msb_to_lsb;
@@ -1449,7 +1484,7 @@ fn prove_shard_rows(
     // Squeeze the column challenge `r_z` (`8` `GoldilocksExt4` coords): claim is `W(r_z, r_x) = v_star`.
     let mut point = Vec::with_capacity(LOG_TRACE_COLS + log_rows);
     for _ in 0..LOG_TRACE_COLS {
-        point.push(transcript.squeeze_ext4(b"LEAF_RZ"));
+        point.push(transcript.row_rz());
     }
     let v_star = mle_eval_ext4(&col_evals, &point);
     point.extend_from_slice(&rx);
