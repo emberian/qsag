@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(log2_milli_floor(3), 1584);
         assert_eq!(log2_milli_floor(1000), 9965);
 
-        // Exact values are 210.2, 157.5, 136.3 and 122.2 bits for one to four signatures
+        // Exact values are 209.788, 157.024, 136.093 and 122.451 bits for one to four signatures
         // on one tree; the function rounds every term down and stays below them.
         let p = PorsFpParams::SHA3_128F;
         let bits: Vec<u32> = (1..=4)
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(bits, vec![209, 156, 136, 122]);
         assert!(
             bits.iter()
-                .zip([210.2, 157.5, 136.3, 122.2])
+                .zip([209.788, 157.024, 136.093, 122.451])
                 .all(|(lo, exact)| { f64::from(*lo) <= exact && exact - f64::from(*lo) < 2.0 })
         );
         assert_eq!(p.forgery_bits_milli(0), None);

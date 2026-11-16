@@ -55,6 +55,7 @@ use crate::wipe::{
 
 mod mac_blind;
 mod triple_f2;
+pub use mac_blind::blind_open_additive_gf128_poly;
 use mac_blind::{
     blind_open_degree_ext2, blind_open_degree_tower128, blind_open_ext2, blind_open_tower128,
 };
@@ -1723,6 +1724,10 @@ fn encode_rlwe_poly_le(p: &RlwePoly, out: &mut [u8; RLWE_N * 2]) {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve explicit statement, CRS, role, and polynomial bindings in the ZKPoK challenge XOF"
+)]
 #[inline]
 fn init_rlwe_zkpok_challenge_xof(
     crs_coin: &[u8; 32],
@@ -1730,6 +1735,7 @@ fn init_rlwe_zkpok_challenge_xof(
     sender_id: usize,
     receiver_id: usize,
     ot_idx: u32,
+    a_crs: &RlwePoly,
     pk0: &RlwePoly,
     t_crs: &RlwePoly,
 ) -> Cshake256Xof {
@@ -1745,6 +1751,8 @@ fn init_rlwe_zkpok_challenge_xof(
     xof.absorb(&hdr);
 
     let mut poly_buf = [0u8; RLWE_N * 2];
+    encode_rlwe_poly_le(a_crs, &mut poly_buf);
+    xof.absorb(&poly_buf);
     encode_rlwe_poly_le(pk0, &mut poly_buf);
     xof.absorb(&poly_buf);
     encode_rlwe_poly_le(t_crs, &mut poly_buf);
@@ -1772,6 +1780,7 @@ fn hash_rlwe_zkpok_joint_challenges(
     sender_id: usize,
     receiver_id: usize,
     ot_idx: u32,
+    a_crs: &RlwePoly,
     pk0: &RlwePoly,
     t_crs: &RlwePoly,
     commitments: &[(RlwePoly, RlwePoly)],
@@ -1782,6 +1791,7 @@ fn hash_rlwe_zkpok_joint_challenges(
         sender_id,
         receiver_id,
         ot_idx,
+        a_crs,
         pk0,
         t_crs,
     );
@@ -1855,12 +1865,14 @@ impl RlweReceiverZkPok {
         }
         wipe_u16s(&mut y_fake.0);
 
+        let a_crs = a_ntt.from_ntt();
         let base_xof = init_rlwe_zkpok_challenge_xof(
             crs_coin,
             session_id,
             sender_id,
             receiver_id,
             ot_idx,
+            &a_crs,
             pk0,
             t_crs,
         );
@@ -1972,7 +1984,8 @@ impl RlweReceiverZkPok {
         t_crs: &RlwePoly,
         pk0: &RlwePoly,
     ) -> bool {
-        if !t_crs.is_canonical() || !pk0.is_canonical() {
+        let a_crs = a_ntt.from_ntt();
+        if !a_crs.is_canonical() || !t_crs.is_canonical() || !pk0.is_canonical() {
             return false;
         }
         let y0 = *pk0;
@@ -2022,6 +2035,7 @@ impl RlweReceiverZkPok {
             sender_id,
             receiver_id,
             ot_idx,
+            &a_crs,
             pk0,
             t_crs,
             &commitments,
@@ -2244,7 +2258,7 @@ pub fn rlwe_ot_choose(
 ) -> (RlweOtReceiverSecret, RlweOtReceiverMsg) {
     let zero_coin = rlwe_session_crs(session_id, sender_id, receiver_id);
     let a_ntt =
-        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, 0, 0)
+        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 0)
             .to_ntt();
     let t_crs =
         RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 1);
@@ -2343,7 +2357,7 @@ pub fn try_rlwe_ot_transfer(
 ) -> Result<RlweOtSenderMsg, PreprocessError> {
     let zero_coin = rlwe_session_crs(session_id, sender_id, receiver_id);
     let a_ntt =
-        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, 0, 0)
+        RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 0)
             .to_ntt();
     let t_crs =
         RlwePoly::from_crs_xof_with_coin(&zero_coin, session_id, sender_id, receiver_id, ot_idx, 1);
@@ -2470,7 +2484,7 @@ pub fn rlwe_ot_decrypt(
         &sec.session_id,
         sec.sender_id,
         sec.receiver_id,
-        0,
+        sec.ot_idx,
         0,
     )
     .to_ntt();
@@ -3770,6 +3784,48 @@ impl OtExtSenderChannel {
             wipe_bytes32(s);
         }
     }
+
+    /// Derive a domain-separated child sender channel over the same 128-bit `delta` correlation
+    /// so independent concurrent repetition streams never contend or re-run Ring-LWE Base OT.
+    pub fn fork_substream(
+        &self,
+        child_session_id: [u8; 32],
+        stream_idx: u64,
+    ) -> Result<Self, PreprocessError> {
+        if self.poisoned {
+            return Err(PreprocessError::ChannelPoisoned {
+                sender_id: self.sender_id,
+                receiver_id: self.receiver_id,
+            });
+        }
+        let s_be = (self.sender_id as u64).to_be_bytes();
+        let r_be = (self.receiver_id as u64).to_be_bytes();
+        let idx_be = stream_idx.to_be_bytes();
+        let combined_seeds: [[u8; 32]; 128] = core::array::from_fn(|col| {
+            let col_be = (col as u64).to_be_bytes();
+            cshake256_32_multi_frame(
+                b"QSAG.OT.EXT.FORK/v1",
+                &[
+                    &self.session_id,
+                    &child_session_id,
+                    &s_be,
+                    &r_be,
+                    &idx_be,
+                    &col_be,
+                    &self.combined_seeds[col],
+                ],
+            )
+        });
+        Ok(Self {
+            session_id: child_session_id,
+            sender_id: self.sender_id,
+            receiver_id: self.receiver_id,
+            delta: self.delta,
+            combined_seeds,
+            batch_ctr: 0,
+            poisoned: false,
+        })
+    }
 }
 
 impl Drop for OtExtSenderChannel {
@@ -3785,6 +3841,50 @@ pub struct OtExtReceiverChannel {
     pub receiver_id: usize,
     combined_seed_pairs: [([u8; 32], [u8; 32]); 128],
     batch_ctr: u64,
+}
+
+impl OtExtReceiverChannel {
+    /// Derive the matching domain-separated child receiver channel for [`OtExtSenderChannel::fork_substream`].
+    pub fn fork_substream(&self, child_session_id: [u8; 32], stream_idx: u64) -> Self {
+        let s_be = (self.sender_id as u64).to_be_bytes();
+        let r_be = (self.receiver_id as u64).to_be_bytes();
+        let idx_be = stream_idx.to_be_bytes();
+        let combined_seed_pairs: [([u8; 32], [u8; 32]); 128] = core::array::from_fn(|col| {
+            let col_be = (col as u64).to_be_bytes();
+            let s0 = cshake256_32_multi_frame(
+                b"QSAG.OT.EXT.FORK/v1",
+                &[
+                    &self.session_id,
+                    &child_session_id,
+                    &s_be,
+                    &r_be,
+                    &idx_be,
+                    &col_be,
+                    &self.combined_seed_pairs[col].0,
+                ],
+            );
+            let s1 = cshake256_32_multi_frame(
+                b"QSAG.OT.EXT.FORK/v1",
+                &[
+                    &self.session_id,
+                    &child_session_id,
+                    &s_be,
+                    &r_be,
+                    &idx_be,
+                    &col_be,
+                    &self.combined_seed_pairs[col].1,
+                ],
+            );
+            (s0, s1)
+        });
+        Self {
+            session_id: child_session_id,
+            sender_id: self.sender_id,
+            receiver_id: self.receiver_id,
+            combined_seed_pairs,
+            batch_ctr: 0,
+        }
+    }
 }
 
 impl Drop for OtExtReceiverChannel {
@@ -7094,6 +7194,35 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
     alpha_shares: &[[Tower128; 2]],
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Vec<BitslicedGf256x64>, PreprocessError> {
+    commit_and_open_spdz_bs_gf256_batch_quorum_with_mesh(
+        session_id,
+        phase,
+        t,
+        quorum_eval_points,
+        batch_shares,
+        batch_macs,
+        alpha_shares,
+        None,
+        party_rngs,
+    )
+}
+
+/// Variant of [`commit_and_open_spdz_bs_gf256_batch_quorum`] reusing a caller-owned [`OtMesh`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Quorum, value shares, MAC shares, optional OT mesh and private randomness are separate protocol inputs"
+)]
+pub fn commit_and_open_spdz_bs_gf256_batch_quorum_with_mesh(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    t: usize,
+    quorum_eval_points: &[TowerGf256],
+    batch_shares: &[Vec<BitslicedGf256x64>],
+    batch_macs: &[Vec<[[Tower128; 64]; 2]>],
+    alpha_shares: &[[Tower128; 2]],
+    mesh: Option<&mut OtMesh>,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<BitslicedGf256x64>, PreprocessError> {
     let m = quorum_eval_points.len();
     if t == 0
         || m < t
@@ -7231,12 +7360,32 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
         run_commit_and_open_coin(session_id, phase.as_bytes(), &open_digest, party_rngs)?;
     let (x_folded, m_folded) = fold_spdz_mac_words(&fold_coin, &opened, batch_macs, t);
 
-    let sid = cshake256_32_multi_frame(
-        b"QSAG.SPDZ.BS64.BLIND.OT/v1",
-        &[session_id, phase.as_bytes(), &fold_coin],
-    );
-    let mut mesh = OtMesh::establish(sid, party_rngs)?;
+    let mut local_mesh = match mesh {
+        Some(_) => None,
+        None => {
+            let sid = cshake256_32_multi_frame(
+                b"QSAG.SPDZ.BS64.BLIND.OT/v1",
+                &[session_id, phase.as_bytes(), &fold_coin],
+            );
+            Some(OtMesh::establish(sid, party_rngs)?)
+        }
+    };
+    let active_mesh: &mut OtMesh = match mesh {
+        Some(m_ref) => m_ref,
+        None => local_mesh
+            .as_mut()
+            .ok_or(PreprocessError::InvalidThreshold { t, n: m })?,
+    };
     for lane in 0..2 {
+        let lane_sid = cshake256_32_multi_frame(
+            b"QSAG.SPDZ.BS64.BLIND.LANE/v1",
+            &[
+                session_id,
+                phase.as_bytes(),
+                &fold_coin,
+                &(lane as u64).to_be_bytes(),
+            ],
+        );
         let additive = SecretBuffer(
             (0..m)
                 .map(|p| {
@@ -7250,7 +7399,13 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
                 })
                 .collect::<Vec<_>>(),
         );
-        let w = blind_open_tower128(session_id, phase, &additive, Some(&mut mesh), party_rngs)?;
+        let w = blind_open_tower128(
+            &lane_sid,
+            phase,
+            &additive,
+            Some(&mut *active_mesh),
+            party_rngs,
+        )?;
         if !w.ct_eq(Tower128::ZERO) {
             return Err(PreprocessError::MacCheckFailed {
                 phase,
@@ -8575,6 +8730,8 @@ fn spdz_authenticate_goldilocks_batch_ext2_block(
     // Sender `i in 0..n` inputs ONLY private `alpha_contribs[i]`; Receiver `j in 0..t` inputs random `r_words[j]`
     let mut raw_keys = SecretBuffer(vec![vec![vec![GoldilocksExt2::ZERO; m_bits]; t]; n]);
     let mut raw_macs = SecretBuffer(vec![vec![vec![GoldilocksExt2::ZERO; m_bits]; t]; n]);
+    let mut ct_xof = Cshake256Xof::new(b"QSAG.SPDZ.GL.PIMAC.CT/v1");
+    ct_xof.absorb(session_id);
 
     for i in 0..n {
         if i < t {
@@ -8593,6 +8750,8 @@ fn spdz_authenticate_goldilocks_batch_ext2_block(
             let ai = alpha_contribs[i];
             let (send_pads, recv_pads) =
                 ot_mesh.run_correlated_ot_words(i, j, &r_words[j], party_rngs)?;
+            ct_xof.absorb(&(i as u64).to_be_bytes());
+            ct_xof.absorb(&(j as u64).to_be_bytes());
             #[inline]
             fn expand_ot_pad48_to_ext2(pad: &[u8; 48]) -> GoldilocksExt2 {
                 GoldilocksExt2::new(
@@ -8614,6 +8773,12 @@ fn spdz_authenticate_goldilocks_batch_ext2_block(
                 raw_keys[i][j][s] = mask;
                 let ct0 = pad0 - mask;
                 let ct1 = (ai - mask) + pad1;
+                let mut ct_frame = [0u8; 32];
+                ct_frame[0..8].copy_from_slice(&ct0.c0.to_canonical_u64().to_be_bytes());
+                ct_frame[8..16].copy_from_slice(&ct0.c1.to_canonical_u64().to_be_bytes());
+                ct_frame[16..24].copy_from_slice(&ct1.c0.to_canonical_u64().to_be_bytes());
+                ct_frame[24..32].copy_from_slice(&ct1.c1.to_canonical_u64().to_be_bytes());
+                ct_xof.absorb(&ct_frame);
 
                 let pad_c = expand_ot_pad48_to_ext2(&recv_pads[s]);
 
@@ -8632,6 +8797,9 @@ fn spdz_authenticate_goldilocks_batch_ext2_block(
             }
         }
     }
+    ct_xof.absorb(&ot_mesh.transcript_digest());
+    let mut ct_digest = [0u8; 32];
+    ct_xof.squeeze(&mut ct_digest);
 
     // Post-OT full-vector 2-universal Toeplitz combiner `H[idx, s] = toeplitz_all[idx + s]`
     // over ALL `idx in 0..total_items` and ALL `s in 0..m_bits`:
@@ -8640,12 +8808,8 @@ fn spdz_authenticate_goldilocks_batch_ext2_block(
     // `(H \cdot \Delta r)[idx]` adds `\pm toeplitz_all[idx + s*]`, which is freshly uniform in `F_p`.
     // By the chain rule across `idx = 0 .. total_items - 1`, `Pr_H[H r == H r'] == p^{-total_items}`
     // unconditionally across the entire `m_bits`-bit input vector (`0` block-diagonal blind spots).
-    let lhl_coin = run_commit_and_open_coin(
-        session_id,
-        b"SPDZ_GL_PIMAC_LHL",
-        &ot_mesh.transcript_digest(),
-        party_rngs,
-    )?;
+    let lhl_coin =
+        run_commit_and_open_coin(session_id, b"SPDZ_GL_PIMAC_LHL", &ct_digest, party_rngs)?;
     let mut h_xof = Cshake256Xof::new(b"QSAG.SPDZ.GL.LHL_H/v2");
     h_xof.absorb(&lhl_coin);
 
@@ -14043,8 +14207,8 @@ mod hardening_regressions {
             // `s_bad = [1; 1024], e_bad = [-2000; 1024]`: every coordinate lies in `[-2000, 2000]`
             // (`||z||_inf = 2000 < 3070`) and every ring + Fiat-Shamir equation holds with `w0 = w1 = 0`,
             // yet `||z_s0||_2^2 + ||z_e0||_2^2 = 4_096_001_024 > RLWE_ZKPOK_PAIR_L2_SQ_BOUND` rejects it.
-            let a_ntt =
-                RlwePoly::from_crs_xof_with_coin(&secret.crs_coin, &sid, 0, 1, 0, 0).to_ntt();
+            let a_crs = RlwePoly::from_crs_xof_with_coin(&secret.crs_coin, &sid, 0, 1, index, 0);
+            let a_ntt = a_crs.to_ntt();
             let t_crs = RlwePoly::from_crs_xof_with_coin(&secret.crs_coin, &sid, 0, 1, index, 1);
             let s_bad = [1i16; RLWE_N];
             let e_bad = [-2000i16; RLWE_N];
@@ -14058,6 +14222,7 @@ mod hardening_regressions {
                 0,
                 1,
                 index,
+                &a_crs,
                 &pk0_bad,
                 &t_crs,
                 &zero_coms,
@@ -14194,6 +14359,7 @@ mod hardening_regressions {
             0,
             &zero,
             &zero,
+            &zero,
             &commitments,
         );
         for rep in 0..RLWE_ZKPOK_REPS {
@@ -14206,6 +14372,7 @@ mod hardening_regressions {
                 0,
                 &zero,
                 &zero,
+                &zero,
                 &commitments,
             );
             assert_ne!(base, changed);
@@ -14213,6 +14380,67 @@ mod hardening_regressions {
                 base.iter().zip(changed).filter(|(a, b)| *a != b).count() >= RLWE_ZKPOK_REPS - 3
             );
             commitments[rep].0.0[0] ^= 1;
+        }
+    }
+
+    #[test]
+    fn joint_challenge_and_verify_bind_public_poly_a() {
+        let sid = [0x5a; 32];
+        let mut receiver = PartyPrivateRng::from_seed([0x33; 32], b"bind-poly-a");
+        let (secret, request) = rlwe_ot_choose(&sid, 0, 1, 7, true, &mut receiver);
+        let a_crs = RlwePoly::from_crs_xof_with_coin(&secret.crs_coin, &sid, 0, 1, 7, 0);
+        let a_ntt = a_crs.to_ntt();
+        let t_crs = RlwePoly::from_crs_xof_with_coin(&secret.crs_coin, &sid, 0, 1, 7, 1);
+        assert!(request.pok.verify(
+            &secret.crs_coin,
+            &sid,
+            0,
+            1,
+            7,
+            &a_ntt,
+            &t_crs,
+            &request.pk0,
+        ));
+
+        // Perturbing any coefficient of `a_crs` changes the Fiat-Shamir challenge vector
+        // and causes `RlweReceiverZkPok::verify` to reject immediately.
+        let commitments = vec![(RlwePoly::ZERO, RlwePoly::ZERO); RLWE_ZKPOK_REPS];
+        let base_chals = hash_rlwe_zkpok_joint_challenges(
+            &secret.crs_coin,
+            &sid,
+            0,
+            1,
+            7,
+            &a_crs,
+            &request.pk0,
+            &t_crs,
+            &commitments,
+        );
+        for coeff_idx in [0usize, 1, 511, RLWE_N - 1] {
+            let mut tampered_a = a_crs;
+            tampered_a.0[coeff_idx] = (tampered_a.0[coeff_idx] + 1) % RLWE_Q;
+            let tampered_chals = hash_rlwe_zkpok_joint_challenges(
+                &secret.crs_coin,
+                &sid,
+                0,
+                1,
+                7,
+                &tampered_a,
+                &request.pk0,
+                &t_crs,
+                &commitments,
+            );
+            assert_ne!(base_chals, tampered_chals);
+            assert!(!request.pok.verify(
+                &secret.crs_coin,
+                &sid,
+                0,
+                1,
+                7,
+                &tampered_a.to_ntt(),
+                &t_crs,
+                &request.pk0,
+            ));
         }
     }
 }
