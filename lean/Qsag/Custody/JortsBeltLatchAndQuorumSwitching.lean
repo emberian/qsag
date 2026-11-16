@@ -17,8 +17,10 @@ Shamir `WOTS+C` evaluation tables over `TowerElem 7` ($\mathbb{F}_{2^{128}}$) an
    - Domain tags and big-endian codecs for `belt_latch.rs`; concrete wire operations below
      separate cSHAKE customization from the retained abstract certificate model
      (`"QSAG.BELT.LATCH.BINDING/v1"`, `"QSAG.BELT.ECHO.MAC/v1"`, `"QSAG.BELT.ECHO.KEY/v1"`,
-     `"QSAG.BELT.LATCH.WAL.MAC/v2"`) and all 12 `quorum_jorts.rs` domain tags
-     (`"QSAG.QUORUM.CHAIN/v1"` through `"QSAG.QUORUM.STAGE.PKSEED/v1"`), with proved injectivity
+     `"QSAG.BELT.LATCH.WAL.MAC/v3"`, `"QSAG.BELT.LATCH.WAL.TICKET/v1"`), the 72-byte WAL record
+     header `generation || reservation || nonce`, the 11 `quorum_jorts.rs` domain tags
+     (`"QSAG.QUORUM.CHAIN/v1"` through `"QSAG.QUORUM.STAGE.PKSEED/v1"`) and the custodian
+     acknowledgement domain `"QSAG.BELT.ACK.v1"` of `authenticated_belt.rs`, with proved injectivity
      and cross-domain non-collision (`encodeNatBeBytes_injective`, `encodeBeltLatchRecord_injective`,
      `quorumLeafRecordBinding_binding`, `allBeltAndQuorumDomainTags_nodup`).
    - **Sufficiency (`beltLatch_quorum_intersection_global_uniqueness`)**, **Necessity
@@ -168,7 +170,7 @@ structure BeltLatchRecord where
 
 /-! ### Exact `belt_latch.rs` & `quorum_jorts.rs` Domain Separators (`ByteArray` Parity) -/
 
-/-- Exact 26-byte domain tag `"QSAG.BELT.LATCH.BINDING/v1"` (`belt_latch.rs:84`). -/
+/-- Exact 26-byte domain tag `"QSAG.BELT.LATCH.BINDING/v1"` (`belt_latch.rs:92`). -/
 def beltLatchBindingTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x45, 0x4C, 0x54, 0x2E, 0x4C, 0x41, 0x54,
                  0x43, 0x48, 0x2E, 0x42, 0x49, 0x4E, 0x44, 0x49, 0x4E, 0x47, 0x2F, 0x76, 0x31]
@@ -176,7 +178,7 @@ def beltLatchBindingTag : ByteArray :=
 theorem beltLatchBindingTag_size : beltLatchBindingTag.size = 26 := by
   simp [beltLatchBindingTag, ByteArray.size]
 
-/-- Exact 21-byte domain tag `"QSAG.BELT.ECHO.MAC/v1"` (`belt_latch.rs:66`). -/
+/-- Exact 21-byte domain tag `"QSAG.BELT.ECHO.MAC/v1"` (`TAG_ECHO_MAC`, `belt_latch.rs:70`). -/
 def beltEchoMacTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x45, 0x4C, 0x54, 0x2E, 0x45, 0x43, 0x48,
                  0x4F, 0x2E, 0x4D, 0x41, 0x43, 0x2F, 0x76, 0x31]
@@ -184,7 +186,7 @@ def beltEchoMacTag : ByteArray :=
 theorem beltEchoMacTag_size : beltEchoMacTag.size = 21 := by
   simp [beltEchoMacTag, ByteArray.size]
 
-/-- Exact 21-byte domain tag `"QSAG.BELT.ECHO.KEY/v1"` (`belt_latch.rs:65`). -/
+/-- Exact 21-byte domain tag `"QSAG.BELT.ECHO.KEY/v1"` (`TAG_ECHO_KEY`, `belt_latch.rs:69`). -/
 def beltEchoKeyTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x45, 0x4C, 0x54, 0x2E, 0x45, 0x43, 0x48,
                  0x4F, 0x2E, 0x4B, 0x45, 0x59, 0x2F, 0x76, 0x31]
@@ -192,15 +194,25 @@ def beltEchoKeyTag : ByteArray :=
 theorem beltEchoKeyTag_size : beltEchoKeyTag.size = 21 := by
   simp [beltEchoKeyTag, ByteArray.size]
 
-/-- Exact 26-byte domain tag `"QSAG.BELT.LATCH.WAL.MAC/v2"` (`belt_latch.rs:68`). -/
+/-- Exact 26-byte domain tag `"QSAG.BELT.LATCH.WAL.MAC/v3"` (`TAG_WAL_MAC`, `belt_latch.rs:72`). -/
 def beltLatchWalMacTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x45, 0x4C, 0x54, 0x2E, 0x4C, 0x41, 0x54,
-                 0x43, 0x48, 0x2E, 0x57, 0x41, 0x4C, 0x2E, 0x4D, 0x41, 0x43, 0x2F, 0x76, 0x32]
+                 0x43, 0x48, 0x2E, 0x57, 0x41, 0x4C, 0x2E, 0x4D, 0x41, 0x43, 0x2F, 0x76, 0x33]
 
 theorem beltLatchWalMacTag_size : beltLatchWalMacTag.size = 26 := by
   simp [beltLatchWalMacTag, ByteArray.size]
 
-/-- Exact 20-byte domain tag `"QSAG.QUORUM.CHAIN/v1"` (`quorum_jorts.rs:73`). -/
+/-- Exact 29-byte domain tag `"QSAG.BELT.LATCH.WAL.TICKET/v1"` (`TAG_WAL_TICKET`,
+    `belt_latch.rs:74`). -/
+def beltLatchWalTicketTag : ByteArray :=
+  ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x45, 0x4C, 0x54, 0x2E, 0x4C, 0x41, 0x54,
+                 0x43, 0x48, 0x2E, 0x57, 0x41, 0x4C, 0x2E, 0x54, 0x49, 0x43, 0x4B, 0x45, 0x54,
+                 0x2F, 0x76, 0x31]
+
+theorem beltLatchWalTicketTag_size : beltLatchWalTicketTag.size = 29 := by
+  simp [beltLatchWalTicketTag, ByteArray.size]
+
+/-- Exact 20-byte domain tag `"QSAG.QUORUM.CHAIN/v1"` (`quorum_jorts.rs:80`). -/
 def quorumChainTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x43,
                  0x48, 0x41, 0x49, 0x4E, 0x2F, 0x76, 0x31]
@@ -208,7 +220,7 @@ def quorumChainTag : ByteArray :=
 theorem quorumChainTag_size : quorumChainTag.size = 20 := by
   simp [quorumChainTag, ByteArray.size]
 
-/-- Exact 19-byte domain tag `"QSAG.QUORUM.LEAF/v1"` (`quorum_jorts.rs:74`). -/
+/-- Exact 19-byte domain tag `"QSAG.QUORUM.LEAF/v1"` (`quorum_jorts.rs:81`). -/
 def quorumLeafTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x4C,
                  0x45, 0x41, 0x46, 0x2F, 0x76, 0x31]
@@ -216,7 +228,7 @@ def quorumLeafTag : ByteArray :=
 theorem quorumLeafTag_size : quorumLeafTag.size = 19 := by
   simp [quorumLeafTag, ByteArray.size]
 
-/-- Exact 30-byte domain tag `"QSAG.QUORUM.LEAF.UNASSIGNED/v1"` (`quorum_jorts.rs:75`). -/
+/-- Exact 30-byte domain tag `"QSAG.QUORUM.LEAF.UNASSIGNED/v1"` (`quorum_jorts.rs:82`). -/
 def quorumLeafUnassignedTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x4C,
                  0x45, 0x41, 0x46, 0x2E, 0x55, 0x4E, 0x41, 0x53, 0x53, 0x49, 0x47, 0x4E, 0x45,
@@ -225,7 +237,7 @@ def quorumLeafUnassignedTag : ByteArray :=
 theorem quorumLeafUnassignedTag_size : quorumLeafUnassignedTag.size = 30 := by
   simp [quorumLeafUnassignedTag, ByteArray.size]
 
-/-- Exact 19-byte domain tag `"QSAG.QUORUM.NODE/v1"` (`quorum_jorts.rs:76`). -/
+/-- Exact 19-byte domain tag `"QSAG.QUORUM.NODE/v1"` (`quorum_jorts.rs:83`). -/
 def quorumNodeTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x4E,
                  0x4F, 0x44, 0x45, 0x2F, 0x76, 0x31]
@@ -233,7 +245,7 @@ def quorumNodeTag : ByteArray :=
 theorem quorumNodeTag_size : quorumNodeTag.size = 19 := by
   simp [quorumNodeTag, ByteArray.size]
 
-/-- Exact 18-byte domain tag `"QSAG.QUORUM.MSG/v1"` (`quorum_jorts.rs:77`). -/
+/-- Exact 18-byte domain tag `"QSAG.QUORUM.MSG/v1"` (`quorum_jorts.rs:84`). -/
 def quorumMsgTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x4D,
                  0x53, 0x47, 0x2F, 0x76, 0x31]
@@ -241,7 +253,7 @@ def quorumMsgTag : ByteArray :=
 theorem quorumMsgTag_size : quorumMsgTag.size = 18 := by
   simp [quorumMsgTag, ByteArray.size]
 
-/-- Exact 21-byte domain tag `"QSAG.QUORUM.DIGEST/v1"` (`quorum_jorts.rs:78`). -/
+/-- Exact 21-byte domain tag `"QSAG.QUORUM.DIGEST/v1"` (`quorum_jorts.rs:85`). -/
 def quorumDigestTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x44,
                  0x49, 0x47, 0x45, 0x53, 0x54, 0x2F, 0x76, 0x31]
@@ -249,7 +261,7 @@ def quorumDigestTag : ByteArray :=
 theorem quorumDigestTag_size : quorumDigestTag.size = 21 := by
   simp [quorumDigestTag, ByteArray.size]
 
-/-- Exact 22-byte domain tag `"QSAG.QUORUM.BINDING/v1"` (`quorum_jorts.rs:79`). -/
+/-- Exact 22-byte domain tag `"QSAG.QUORUM.BINDING/v1"` (`quorum_jorts.rs:86`). -/
 def quorumBindingTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x42,
                  0x49, 0x4E, 0x44, 0x49, 0x4E, 0x47, 0x2F, 0x76, 0x31]
@@ -257,7 +269,7 @@ def quorumBindingTag : ByteArray :=
 theorem quorumBindingTag_size : quorumBindingTag.size = 22 := by
   simp [quorumBindingTag, ByteArray.size]
 
-/-- Exact 23-byte domain tag `"QSAG.QUORUM.ECHO.MAC/v1"` (`quorum_jorts.rs:80`). -/
+/-- Exact 23-byte domain tag `"QSAG.QUORUM.ECHO.MAC/v1"` (`quorum_jorts.rs:87`). -/
 def quorumEchoMacTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x45,
                  0x43, 0x48, 0x4F, 0x2E, 0x4D, 0x41, 0x43, 0x2F, 0x76, 0x31]
@@ -265,15 +277,18 @@ def quorumEchoMacTag : ByteArray :=
 theorem quorumEchoMacTag_size : quorumEchoMacTag.size = 23 := by
   simp [quorumEchoMacTag, ByteArray.size]
 
-/-- Exact 22-byte domain tag `"QSAG.QUORUM.ACK.MAC/v1"` (`quorum_jorts.rs:81`). -/
-def quorumAckMacTag : ByteArray :=
-  ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x41,
-                 0x43, 0x4B, 0x2E, 0x4D, 0x41, 0x43, 0x2F, 0x76, 0x31]
+/-- Exact 16-byte domain `"QSAG.BELT.ACK.v1"` absorbed first by
+    `qsag_verified::custodian_ack_tag` (`authenticated_belt.rs:40`), the function
+    `ShamirCustodian::ack` and `verified_certificate_acks` call for every latch acknowledgement
+    (`quorum_jorts.rs:1819, 1866`). `quorum_jorts.rs` has no acknowledgement tag of its own. -/
+def beltCustodianAckTag : ByteArray :=
+  ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x45, 0x4C, 0x54, 0x2E, 0x41, 0x43, 0x4B,
+                 0x2E, 0x76, 0x31]
 
-theorem quorumAckMacTag_size : quorumAckMacTag.size = 22 := by
-  simp [quorumAckMacTag, ByteArray.size]
+theorem beltCustodianAckTag_size : beltCustodianAckTag.size = 16 := by
+  simp [beltCustodianAckTag, ByteArray.size]
 
-/-- Exact 23-byte domain tag `"QSAG.QUORUM.PAIR.KEY/v1"` (`quorum_jorts.rs:82`). -/
+/-- Exact 23-byte domain tag `"QSAG.QUORUM.PAIR.KEY/v1"` (`quorum_jorts.rs:88`). -/
 def quorumPairKeyTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x50,
                  0x41, 0x49, 0x52, 0x2E, 0x4B, 0x45, 0x59, 0x2F, 0x76, 0x31]
@@ -281,7 +296,7 @@ def quorumPairKeyTag : ByteArray :=
 theorem quorumPairKeyTag_size : quorumPairKeyTag.size = 23 := by
   simp [quorumPairKeyTag, ByteArray.size]
 
-/-- Exact 23-byte domain tag `"QSAG.QUORUM.STAGE.SK/v1"` (`quorum_jorts.rs:83`). -/
+/-- Exact 23-byte domain tag `"QSAG.QUORUM.STAGE.SK/v1"` (`quorum_jorts.rs:89`). -/
 def quorumStageSkTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x53,
                  0x54, 0x41, 0x47, 0x45, 0x2E, 0x53, 0x4B, 0x2F, 0x76, 0x31]
@@ -289,7 +304,7 @@ def quorumStageSkTag : ByteArray :=
 theorem quorumStageSkTag_size : quorumStageSkTag.size = 23 := by
   simp [quorumStageSkTag, ByteArray.size]
 
-/-- Exact 27-byte domain tag `"QSAG.QUORUM.STAGE.PKSEED/v1"` (`quorum_jorts.rs:84`). -/
+/-- Exact 27-byte domain tag `"QSAG.QUORUM.STAGE.PKSEED/v1"` (`quorum_jorts.rs:90`). -/
 def quorumStagePkSeedTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x51, 0x55, 0x4F, 0x52, 0x55, 0x4D, 0x2E, 0x53,
                  0x54, 0x41, 0x47, 0x45, 0x2E, 0x50, 0x4B, 0x53, 0x45, 0x45, 0x44, 0x2F, 0x76, 0x31]
@@ -297,12 +312,15 @@ def quorumStagePkSeedTag : ByteArray :=
 theorem quorumStagePkSeedTag_size : quorumStagePkSeedTag.size = 27 := by
   simp [quorumStagePkSeedTag, ByteArray.size]
 
-/-- Complete roster of all 16 `BeltLatch` and `QuorumJorts` domain separator byte lists. -/
+/-- The 17 domain separators of this module: five of `belt_latch.rs`, the eleven `TAG_*`
+    constants of `quorum_jorts.rs:80-90`, and the acknowledgement domain of
+    `authenticated_belt.rs`. -/
 def allBeltAndQuorumDomainTags : List (List UInt8) :=
   [ beltLatchBindingTag.data.toList,
     beltEchoMacTag.data.toList,
     beltEchoKeyTag.data.toList,
     beltLatchWalMacTag.data.toList,
+    beltLatchWalTicketTag.data.toList,
     quorumChainTag.data.toList,
     quorumLeafTag.data.toList,
     quorumLeafUnassignedTag.data.toList,
@@ -311,14 +329,14 @@ def allBeltAndQuorumDomainTags : List (List UInt8) :=
     quorumDigestTag.data.toList,
     quorumBindingTag.data.toList,
     quorumEchoMacTag.data.toList,
-    quorumAckMacTag.data.toList,
+    beltCustodianAckTag.data.toList,
     quorumPairKeyTag.data.toList,
     quorumStageSkTag.data.toList,
     quorumStagePkSeedTag.data.toList ]
 
-/-- Pairwise distinctness of all 16 `belt_latch.rs` and `quorum_jorts.rs` domain tags. -/
+/-- Pairwise distinctness of the 17 domain separators. -/
 theorem allBeltAndQuorumDomainTags_nodup :
-    allBeltAndQuorumDomainTags.length = 16 ∧ allBeltAndQuorumDomainTags.Nodup := by
+    allBeltAndQuorumDomainTags.length = 17 ∧ allBeltAndQuorumDomainTags.Nodup := by
   decide
 
 /-! ### Big-Endian `BeltLatchRecord` Encoding & Commitment Binding (`belt_latch.rs:82-92`) -/
@@ -399,29 +417,303 @@ theorem deriveBeltEchoMacKey_symm
   unfold deriveBeltEchoMacKey
   rw [Nat.min_comm, Nat.max_comm]
 
-/-- Durable WAL seal tag under `"QSAG.BELT.LATCH.WAL.MAC/v2"` (`FsBeltWal::tag`, `belt_latch.rs:271-273`). -/
+/-! ### Durable WAL record (`FsBeltWal`, `belt_latch.rs:269-505`)
+
+The stored record is `generation.to_be_bytes() || reservation || nonce || state_bytes || tag`. The
+72-byte header is the `TicketSeal` of the anchor ticket the record was committed under; `tag` is
+the MAC of `FsBeltWal::tag` under `"QSAG.BELT.LATCH.WAL.MAC/v3"`. `state_bytes` is opaque here:
+`BeltLatchState::to_bytes` / `from_bytes` are not modelled, so `unsealBeltWalRecord` returns the
+authenticated state bytes and stops before Rust's final `from_bytes`. `H` stands for the framed
+`cSHAKE256` of `cshake256_32_multi_frame`; the `*Cshake256` definitions instantiate it. -/
+
+/-- `crate::TicketSeal` (`durable_ledger.rs:49-56`): the anchor ticket a record is committed
+    under. All zero reservation and nonce without an anchor. -/
+structure BeltWalTicketSeal where
+  generation : UInt64
+  reservation : Digest256
+  nonce : Digest256
+  deriving DecidableEq, Repr
+
+/-- `WAL_HEADER_LEN = 8 + 32 + 32` (`belt_latch.rs:76`). -/
+def beltWalHeaderLen : Nat := 8 + 32 + 32
+
+/-- The record header `generation.to_be_bytes() || reservation || nonce`
+    (`FsBeltWal::seal`, `belt_latch.rs:449-451`). -/
+def encodeBeltWalHeader (tkt : BeltWalTicketSeal) : List UInt8 :=
+  encodeNatBeBytes 8 tkt.generation.toNat ++
+    (encodeDigest256 tkt.reservation ++ encodeDigest256 tkt.nonce)
+
+/-- The header is exactly 72 bytes. -/
+theorem encodeBeltWalHeader_length (tkt : BeltWalTicketSeal) :
+    (encodeBeltWalHeader tkt).length = 72 := by
+  unfold encodeBeltWalHeader
+  rw [List.length_append, List.length_append, encodeNatBeBytes_length, encodeDigest256_length,
+    encodeDigest256_length]
+
+/-- Header parse of `FsBeltWal::unseal` (`belt_latch.rs:474-478`): `header[..8]`, `header[8..40]`,
+    `header[40..]`. -/
+def decodeBeltWalHeader (header : List UInt8) : BeltWalTicketSeal where
+  generation := UInt64.ofNat (decodeNatBeBytes (header.take 8))
+  reservation := digest256OfBytesBe (header.drop 8)
+  nonce := digest256OfBytesBe (header.drop 40)
+
+private theorem digest256OfBytesBe_append (d : Digest256) (rest : List UInt8) :
+    digest256OfBytesBe (encodeDigest256 d ++ rest) = d := by
+  have hTake : (encodeDigest256 d ++ rest).take 32 = (encodeDigest256 d).take 32 := by
+    rw [List.take_append_of_le_length (Nat.le_of_eq (encodeDigest256_length d).symm)]
+  have h := digest256OfBytesBe_encodeDigest256 d
+  unfold digest256OfBytesBe at h ⊢
+  rw [hTake]
+  exact h
+
+/-- Parsing an encoded header returns the ticket seal. -/
+theorem decodeBeltWalHeader_encodeBeltWalHeader (tkt : BeltWalTicketSeal) :
+    decodeBeltWalHeader (encodeBeltWalHeader tkt) = tkt := by
+  have hGenLen : (encodeNatBeBytes 8 tkt.generation.toNat).length = 8 :=
+    encodeNatBeBytes_length 8 _
+  have hTake : (encodeBeltWalHeader tkt).take 8 = encodeNatBeBytes 8 tkt.generation.toNat := by
+    unfold encodeBeltWalHeader
+    exact List.take_left' hGenLen
+  have hDrop8 : (encodeBeltWalHeader tkt).drop 8 =
+      encodeDigest256 tkt.reservation ++ encodeDigest256 tkt.nonce := by
+    unfold encodeBeltWalHeader
+    exact List.drop_left' hGenLen
+  have hDrop40 : (encodeBeltWalHeader tkt).drop 40 = encodeDigest256 tkt.nonce := by
+    have h40 : (40 : Nat) = 8 + 32 := rfl
+    rw [h40, ← List.drop_drop, hDrop8]
+    exact List.drop_left' (encodeDigest256_length _)
+  have hGen : UInt64.ofNat (decodeNatBeBytes (encodeNatBeBytes 8 tkt.generation.toNat)) =
+      tkt.generation := by
+    have hLt : tkt.generation.toNat < 256 ^ 8 :=
+      Nat.lt_of_lt_of_eq tkt.generation.toBitVec.isLt pow2_64_eq_256_8
+    rw [decodeNatBeBytes_encodeNatBeBytes hLt]
+    exact UInt64.ofNat_toNat
+  have hNonce : digest256OfBytesBe (encodeDigest256 tkt.nonce) = tkt.nonce :=
+    digest256OfBytesBe_encodeDigest256 _
+  cases tkt with
+  | mk g r n =>
+    unfold decodeBeltWalHeader
+    rw [hTake, hDrop8, hDrop40, hGen, digest256OfBytesBe_append, hNonce]
+
+/-- The header determines the ticket seal. -/
+theorem encodeBeltWalHeader_injective {s₁ s₂ : BeltWalTicketSeal}
+    (h : encodeBeltWalHeader s₁ = encodeBeltWalHeader s₂) : s₁ = s₂ := by
+  rw [← decodeBeltWalHeader_encodeBeltWalHeader s₁, ← decodeBeltWalHeader_encodeBeltWalHeader s₂, h]
+
+private theorem list6_eq_iff {α : Type} {a₁ b₁ c₁ d₁ e₁ f₁ a₂ b₂ c₂ d₂ e₂ f₂ : α}
+    (h : [a₁, b₁, c₁, d₁, e₁, f₁] = [a₂, b₂, c₂, d₂, e₂, f₂]) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ ∧ d₁ = d₂ ∧ e₁ = e₂ ∧ f₁ = f₂ := by
+  have h1 := List.cons.inj h
+  have h2 := List.cons.inj h1.2
+  have h3 := List.cons.inj h2.2
+  have h4 := List.cons.inj h3.2
+  have h5 := List.cons.inj h4.2
+  have h6 := List.cons.inj h5.2
+  exact ⟨h1.1, h2.1, h3.1, h4.1, h5.1, h6.1⟩
+
+/-- The six MAC inputs of `FsBeltWal::tag` (`belt_latch.rs:422-439`):
+    `(wal_key, lock_seal, generation, reservation, nonce, state_bytes)`. -/
+def beltWalSealTagFields (walKey : Digest256) (lockSeal : List UInt8)
+    (tkt : BeltWalTicketSeal) (stateBytes : List UInt8) : List (List UInt8) :=
+  [encodeDigest256 walKey, lockSeal, encodeNatBeBytes 8 tkt.generation.toNat,
+    encodeDigest256 tkt.reservation, encodeDigest256 tkt.nonce, stateBytes]
+
+/-- Durable WAL record MAC under `"QSAG.BELT.LATCH.WAL.MAC/v3"` (`FsBeltWal::tag`,
+    `belt_latch.rs:422-439`). The MAC covers the anchor ticket's reservation and nonce, which the
+    `/v2` framing did not. -/
 def computeBeltWalSealTag
     (H : List UInt8 → Digest256) (walKey : Digest256) (lockSeal : List UInt8)
-    (generation : UInt64) (body : List UInt8) : Digest256 :=
+    (tkt : BeltWalTicketSeal) (stateBytes : List UInt8) : Digest256 :=
   H (encodeMultiFrame [beltLatchWalMacTag.data.toList,
-    encodeMultiFrame [encodeDigest256 walKey, lockSeal, encodeNatBeBytes 8 generation.toNat, body]])
+    encodeMultiFrame (beltWalSealTagFields walKey lockSeal tkt stateBytes)])
 
+/-- `cSHAKE256` instance of `computeBeltWalSealTag`, customization
+    `"QSAG.BELT.LATCH.WAL.MAC/v3"`. -/
+def computeBeltWalSealTagCshake256 (walKey : Digest256) (lockSeal : List UInt8)
+    (tkt : BeltWalTicketSeal) (stateBytes : List UInt8) : Digest256 :=
+  cshake256Digest256 beltLatchWalMacTag.data.toList
+    (encodeMultiFrame (beltWalSealTagFields walKey lockSeal tkt stateBytes))
+
+/-- Equal WAL MACs have equal key, lock seal, ticket seal and state bytes, or exhibit a collision
+    of `H`. -/
 theorem computeBeltWalSealTag_binding (H : List UInt8 → Digest256)
-    {k₁ k₂ : Digest256} {l₁ l₂ b₁ b₂ : List UInt8} {g₁ g₂ : UInt64}
-    (hTag : computeBeltWalSealTag H k₁ l₁ g₁ b₁ = computeBeltWalSealTag H k₂ l₂ g₂ b₂) :
-    (k₁ = k₂ ∧ l₁ = l₂ ∧ encodeNatBeBytes 8 g₁.toNat = encodeNatBeBytes 8 g₂.toNat ∧ b₁ = b₂) ∨
-      Nonempty (HashCollision256 H) := by
+    {k₁ k₂ : Digest256} {l₁ l₂ b₁ b₂ : List UInt8} {s₁ s₂ : BeltWalTicketSeal}
+    (hTag : computeBeltWalSealTag H k₁ l₁ s₁ b₁ = computeBeltWalSealTag H k₂ l₂ s₂ b₂) :
+    (k₁ = k₂ ∧ l₁ = l₂ ∧ s₁ = s₂ ∧ b₁ = b₂) ∨ Nonempty (HashCollision256 H) := by
   let pre₁ := encodeMultiFrame [beltLatchWalMacTag.data.toList,
-    encodeMultiFrame [encodeDigest256 k₁, l₁, encodeNatBeBytes 8 g₁.toNat, b₁]]
+    encodeMultiFrame (beltWalSealTagFields k₁ l₁ s₁ b₁)]
   let pre₂ := encodeMultiFrame [beltLatchWalMacTag.data.toList,
-    encodeMultiFrame [encodeDigest256 k₂, l₂, encodeNatBeBytes 8 g₂.toNat, b₂]]
+    encodeMultiFrame (beltWalSealTagFields k₂ l₂ s₂ b₂)]
   if hPre : pre₁ = pre₂ then
     have hOuter := encodeMultiFrame_injective hPre
     injection hOuter with _ hRest
     injection hRest with hInner _
-    obtain ⟨hk, hl, hg, hb⟩ := list4_eq_iff (encodeMultiFrame_injective hInner)
-    exact .inl ⟨encodeDigest256_injective hk, hl, hg, hb⟩
+    obtain ⟨hk, hl, hg, hr, hn, hb⟩ := list6_eq_iff (encodeMultiFrame_injective hInner)
+    have hGenNat : s₁.generation.toNat = s₂.generation.toNat :=
+      encodeNatBeBytes_injective
+        (Nat.lt_of_lt_of_eq s₁.generation.toBitVec.isLt pow2_64_eq_256_8)
+        (Nat.lt_of_lt_of_eq s₂.generation.toBitVec.isLt pow2_64_eq_256_8) hg
+    have hGen : s₁.generation = s₂.generation :=
+      UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hGenNat)
+    have hRes := encodeDigest256_injective hr
+    have hNonce := encodeDigest256_injective hn
+    have hSeal : s₁ = s₂ := by
+      cases s₁; cases s₂
+      dsimp only at hGen hRes hNonce
+      subst hGen hRes hNonce
+      rfl
+    exact .inl ⟨encodeDigest256_injective hk, hl, hSeal, hb⟩
   else exact .inr ⟨⟨pre₁, pre₂, hPre, hTag⟩⟩
+
+/-- What an anchor ticket for a record is bound to, under `"QSAG.BELT.LATCH.WAL.TICKET/v1"`
+    (`FsBeltWal::ticket_context`, `belt_latch.rs:500-505`): the log's lock seal and the state
+    bytes. -/
+def computeBeltWalTicketContext (H : List UInt8 → Digest256)
+    (lockSeal stateBytes : List UInt8) : Digest256 :=
+  H (encodeMultiFrame [beltLatchWalTicketTag.data.toList,
+    encodeMultiFrame [lockSeal, stateBytes]])
+
+/-- `cSHAKE256` instance of `computeBeltWalTicketContext`. -/
+def computeBeltWalTicketContextCshake256 (lockSeal stateBytes : List UInt8) : Digest256 :=
+  cshake256Digest256 beltLatchWalTicketTag.data.toList (encodeMultiFrame [lockSeal, stateBytes])
+
+/-- Equal ticket contexts name the same log and state bytes, or exhibit a collision of `H`. -/
+theorem computeBeltWalTicketContext_binding (H : List UInt8 → Digest256)
+    {l₁ l₂ b₁ b₂ : List UInt8}
+    (hCtx : computeBeltWalTicketContext H l₁ b₁ = computeBeltWalTicketContext H l₂ b₂) :
+    (l₁ = l₂ ∧ b₁ = b₂) ∨ Nonempty (HashCollision256 H) := by
+  let pre₁ := encodeMultiFrame [beltLatchWalTicketTag.data.toList, encodeMultiFrame [l₁, b₁]]
+  let pre₂ := encodeMultiFrame [beltLatchWalTicketTag.data.toList, encodeMultiFrame [l₂, b₂]]
+  if hPre : pre₁ = pre₂ then
+    have hOuter := encodeMultiFrame_injective hPre
+    injection hOuter with _ hRest
+    injection hRest with hInner _
+    have hIn := encodeMultiFrame_injective hInner
+    injection hIn with hl hRest2
+    injection hRest2 with hb _
+    exact .inl ⟨hl, hb⟩
+  else exact .inr ⟨⟨pre₁, pre₂, hPre, hCtx⟩⟩
+
+/-- The ticket-context preimage is never a record-MAC preimage: the two domains are separated. -/
+theorem beltWalTicketContext_preimage_ne_sealTag_preimage
+    (walKey : Digest256) (lockSeal lockSeal' stateBytes stateBytes' : List UInt8)
+    (tkt : BeltWalTicketSeal) :
+    encodeMultiFrame [beltLatchWalTicketTag.data.toList,
+        encodeMultiFrame [lockSeal', stateBytes']] ≠
+      encodeMultiFrame [beltLatchWalMacTag.data.toList,
+        encodeMultiFrame (beltWalSealTagFields walKey lockSeal tkt stateBytes)] := by
+  intro h
+  have hOuter := encodeMultiFrame_injective h
+  injection hOuter with hTag _
+  exact absurd hTag (by decide)
+
+/-- The stored record `header || state_bytes || tag` (`FsBeltWal::seal`, `belt_latch.rs:441-462`). -/
+def sealBeltWalRecord (H : List UInt8 → Digest256) (walKey : Digest256) (lockSeal : List UInt8)
+    (tkt : BeltWalTicketSeal) (stateBytes : List UInt8) : List UInt8 :=
+  encodeBeltWalHeader tkt ++
+    (stateBytes ++ encodeDigest256 (computeBeltWalSealTag H walKey lockSeal tkt stateBytes))
+
+/-- `FsBeltWal::unseal` (`belt_latch.rs:464-496`) up to the final `BeltLatchState::from_bytes`:
+    split off the 32-byte tag, split the 72-byte header, refuse generation 0, recompute the MAC
+    over the parsed ticket seal and the state bytes, and compare. -/
+def unsealBeltWalRecord (H : List UInt8 → Digest256) (walKey : Digest256) (lockSeal : List UInt8)
+    (raw : List UInt8) : Option (BeltWalTicketSeal × List UInt8) :=
+  if raw.length < beltWalHeaderLen + 32 then none
+  else
+    let body := raw.take (raw.length - 32)
+    let tkt := decodeBeltWalHeader (body.take beltWalHeaderLen)
+    let stateBytes := body.drop beltWalHeaderLen
+    if tkt.generation = 0 then none
+    else if encodeDigest256 (computeBeltWalSealTag H walKey lockSeal tkt stateBytes) =
+        raw.drop (raw.length - 32) then
+      some (tkt, stateBytes)
+    else none
+
+theorem sealBeltWalRecord_length (H : List UInt8 → Digest256) (walKey : Digest256)
+    (lockSeal : List UInt8) (tkt : BeltWalTicketSeal) (stateBytes : List UInt8) :
+    (sealBeltWalRecord H walKey lockSeal tkt stateBytes).length = 72 + stateBytes.length + 32 := by
+  unfold sealBeltWalRecord
+  rw [List.length_append, List.length_append, encodeBeltWalHeader_length, encodeDigest256_length,
+    Nat.add_assoc]
+
+/-- A record sealed at a nonzero generation unseals to its ticket seal and state bytes. -/
+theorem unsealBeltWalRecord_sealBeltWalRecord (H : List UInt8 → Digest256) (walKey : Digest256)
+    (lockSeal : List UInt8) (tkt : BeltWalTicketSeal) (stateBytes : List UInt8)
+    (hGen : tkt.generation ≠ 0) :
+    unsealBeltWalRecord H walKey lockSeal (sealBeltWalRecord H walKey lockSeal tkt stateBytes) =
+      some (tkt, stateBytes) := by
+  have hLen := sealBeltWalRecord_length H walKey lockSeal tkt stateBytes
+  have hBodyLen : (encodeBeltWalHeader tkt ++ stateBytes).length =
+      (sealBeltWalRecord H walKey lockSeal tkt stateBytes).length - 32 := by
+    rw [hLen, List.length_append, encodeBeltWalHeader_length, Nat.add_sub_cancel]
+  have hAssoc : sealBeltWalRecord H walKey lockSeal tkt stateBytes =
+      (encodeBeltWalHeader tkt ++ stateBytes) ++
+        encodeDigest256 (computeBeltWalSealTag H walKey lockSeal tkt stateBytes) := by
+    unfold sealBeltWalRecord
+    rw [List.append_assoc]
+  have hBody : (sealBeltWalRecord H walKey lockSeal tkt stateBytes).take
+      ((sealBeltWalRecord H walKey lockSeal tkt stateBytes).length - 32) =
+      encodeBeltWalHeader tkt ++ stateBytes := by
+    rw [← hBodyLen]
+    conv => lhs; arg 2; rw [hAssoc]
+    exact List.take_left' rfl
+  have hTagBytes : (sealBeltWalRecord H walKey lockSeal tkt stateBytes).drop
+      ((sealBeltWalRecord H walKey lockSeal tkt stateBytes).length - 32) =
+      encodeDigest256 (computeBeltWalSealTag H walKey lockSeal tkt stateBytes) := by
+    rw [← hBodyLen]
+    conv => lhs; arg 2; rw [hAssoc]
+    exact List.drop_left' rfl
+  have hHeader : (encodeBeltWalHeader tkt ++ stateBytes).take beltWalHeaderLen =
+      encodeBeltWalHeader tkt := List.take_left' (encodeBeltWalHeader_length tkt)
+  have hState : (encodeBeltWalHeader tkt ++ stateBytes).drop beltWalHeaderLen = stateBytes :=
+    List.drop_left' (encodeBeltWalHeader_length tkt)
+  have hNotShort : ¬ (sealBeltWalRecord H walKey lockSeal tkt stateBytes).length <
+      beltWalHeaderLen + 32 := by
+    rw [hLen]
+    show ¬ (72 + stateBytes.length + 32 < 72 + 32)
+    omega
+  unfold unsealBeltWalRecord
+  rw [ite_eq_right_of_eq_false _ _ (eq_false hNotShort)]
+  dsimp only
+  rw [hBody, hHeader, hState, decodeBeltWalHeader_encodeBeltWalHeader,
+    ite_eq_right_of_eq_false _ _ (eq_false hGen), hTagBytes,
+    ite_eq_left_of_eq_true _ _ (eq_true rfl)]
+
+/-- An accepted record has a nonzero generation and ends in the MAC of the returned ticket seal
+    and state bytes. -/
+theorem unsealBeltWalRecord_some (H : List UInt8 → Digest256) (walKey : Digest256)
+    (lockSeal raw : List UInt8) {tkt : BeltWalTicketSeal} {stateBytes : List UInt8}
+    (h : unsealBeltWalRecord H walKey lockSeal raw = some (tkt, stateBytes)) :
+    tkt.generation ≠ 0 ∧
+      raw.drop (raw.length - 32) =
+        encodeDigest256 (computeBeltWalSealTag H walKey lockSeal tkt stateBytes) := by
+  unfold unsealBeltWalRecord at h
+  split at h
+  · cases h
+  · dsimp only at h
+    split at h
+    · cases h
+    · split at h
+      · rename_i hGen hTag
+        cases h
+        exact ⟨hGen, hTag.symm⟩
+      · cases h
+
+/-- Two accepted records that end in the same 32 tag bytes carry the same ticket seal and state
+    bytes, or exhibit a collision of `H`. This is the check an external anchor holding the last
+    record's tag makes on recovery (`LedgerCheckpoint.tag`). -/
+theorem unsealBeltWalRecord_same_tag_binding (H : List UInt8 → Digest256) (walKey : Digest256)
+    (lockSeal raw₁ raw₂ : List UInt8) {s₁ s₂ : BeltWalTicketSeal} {b₁ b₂ : List UInt8}
+    (h₁ : unsealBeltWalRecord H walKey lockSeal raw₁ = some (s₁, b₁))
+    (h₂ : unsealBeltWalRecord H walKey lockSeal raw₂ = some (s₂, b₂))
+    (hTag : raw₁.drop (raw₁.length - 32) = raw₂.drop (raw₂.length - 32)) :
+    (s₁ = s₂ ∧ b₁ = b₂) ∨ Nonempty (HashCollision256 H) := by
+  have e₁ := (unsealBeltWalRecord_some H walKey lockSeal raw₁ h₁).2
+  have e₂ := (unsealBeltWalRecord_some H walKey lockSeal raw₂ h₂).2
+  have hEq := encodeDigest256_injective (e₁.symm.trans (hTag.trans e₂))
+  rcases computeBeltWalSealTag_binding H hEq with ⟨_, _, hs, hb⟩ | hCol
+  · exact .inl ⟨hs, hb⟩
+  · exact .inr hCol
 
 /-- Pairwise MAC-authenticated `BeltEcho` message from `sender` to `receiver`. -/
 structure AuthenticatedBeltEcho (n : Nat) where
@@ -725,30 +1017,111 @@ def computeQuorumEchoMac
         encodeNatBeBytes 8 epoch.toNat,
         encodeDigest256 binding ])
 
-/-- Global latch acknowledgement MAC under `"QSAG.QUORUM.ACK.MAC/v1"` (`ShamirCustodian::ack`, `quorum_jorts.rs:1352-1358, 1454-1460`). -/
-def computeQuorumAckMac
-    (MAC : Digest256 → List UInt8 → Digest256)
-    (pairwiseKey : Digest256) (fromParty toParty : Nat)
-    (leaf : UInt64) (binding : Digest256) : Digest256 :=
-  MAC pairwiseKey
-    (quorumEncodeFramed quorumAckMacTag
-      [ encodeNatBeBytes 8 fromParty,
-        encodeNatBeBytes 8 toParty,
-        encodeNatBeBytes 8 leaf.toNat,
-        encodeDigest256 binding ])
+/-! ### Custodian acknowledgement tag (`authenticated_belt.rs:31-49`)
 
-/-- Cross-protocol MAC domain separation: `QS-A` echo MAC frames and `QS-B` ack MAC frames never collide. -/
-theorem quorumEchoMac_ne_ackMac_frame
-    (f₁ t₁ c₁ f₂ t₂ : Nat) (ep leaf : UInt64) (b₁ b₂ : Digest256) :
+`qsag_verified::custodian_ack_tag` absorbs, with no length framing, the 16-byte domain
+`"QSAG.BELT.ACK.v1"`, the 32-byte MAC key, the 32-byte guard-key commitment of the recipient, the
+epoch as 8 little-endian bytes (`encode_epoch`), the 32-byte message tag and the custodian id as
+one byte, into `SHAKE256`, and squeezes 32 bytes. Every field has a fixed width, so the 121-byte
+preimage is injective. `ShamirCustodian::ack` calls it with `(mac_keys[to],
+belt_guard_key_commit(pk, to), leaf, record.binding(), party as u8)`. -/
+
+/-- `encodeNatLeBytes 8` is `encode_epoch` (`authenticated_belt.rs:18-29`); it is injective
+    below `256 ^ w`. -/
+theorem encodeNatLeBytes_injective {w n m : Nat} (hn : n < 256 ^ w) (hm : m < 256 ^ w)
+    (h : encodeNatLeBytes w n = encodeNatLeBytes w m) : n = m := by
+  rw [← decodeNatLeBytes_encodeNatLeBytes w n hn, ← decodeNatLeBytes_encodeNatLeBytes w m hm, h]
+
+/-- Little-endian order: the low byte of `1` comes first. -/
+theorem tooth_encodeNatLeBytes_ne_be :
+    encodeNatLeBytes 8 1 = [1, 0, 0, 0, 0, 0, 0, 0] ∧
+    encodeNatLeBytes 8 1 ≠ encodeNatBeBytes 8 1 := by
+  decide
+
+/-- The 121-byte `SHAKE256` preimage of `custodian_ack_tag`. -/
+def custodianAckFrame (key guardKeyCommit : Digest256) (epoch : UInt64) (msgTag : Digest256)
+    (custodianId : UInt8) : List UInt8 :=
+  beltCustodianAckTag.data.toList ++
+    (encodeDigest256 key ++
+      (encodeDigest256 guardKeyCommit ++
+        (encodeNatLeBytes 8 epoch.toNat ++ (encodeDigest256 msgTag ++ [custodianId]))))
+
+theorem custodianAckFrame_length (key guardKeyCommit : Digest256) (epoch : UInt64)
+    (msgTag : Digest256) (custodianId : UInt8) :
+    (custodianAckFrame key guardKeyCommit epoch msgTag custodianId).length = 121 := by
+  unfold custodianAckFrame
+  rw [List.length_append, List.length_append, List.length_append, List.length_append,
+    List.length_append, encodeDigest256_length, encodeDigest256_length, encodeDigest256_length,
+    encodeNatLeBytes_length]
+  rfl
+
+/-- The preimage determines all five inputs. -/
+theorem custodianAckFrame_injective {k₁ k₂ g₁ g₂ : Digest256} {e₁ e₂ : UInt64}
+    {m₁ m₂ : Digest256} {c₁ c₂ : UInt8}
+    (h : custodianAckFrame k₁ g₁ e₁ m₁ c₁ = custodianAckFrame k₂ g₂ e₂ m₂ c₂) :
+    k₁ = k₂ ∧ g₁ = g₂ ∧ e₁ = e₂ ∧ m₁ = m₂ ∧ c₁ = c₂ := by
+  unfold custodianAckFrame at h
+  have h0 := List.append_cancel_left h
+  obtain ⟨hk, h1⟩ := List.append_inj h0
+    ((encodeDigest256_length k₁).trans (encodeDigest256_length k₂).symm)
+  obtain ⟨hg, h2⟩ := List.append_inj h1
+    ((encodeDigest256_length g₁).trans (encodeDigest256_length g₂).symm)
+  obtain ⟨he, h3⟩ := List.append_inj h2
+    ((encodeNatLeBytes_length 8 _).trans (encodeNatLeBytes_length 8 _).symm)
+  obtain ⟨hm, h4⟩ := List.append_inj h3
+    ((encodeDigest256_length m₁).trans (encodeDigest256_length m₂).symm)
+  have heNat : e₁.toNat = e₂.toNat :=
+    encodeNatLeBytes_injective
+      (Nat.lt_of_lt_of_eq e₁.toBitVec.isLt pow2_64_eq_256_8)
+      (Nat.lt_of_lt_of_eq e₂.toBitVec.isLt pow2_64_eq_256_8) he
+  exact ⟨encodeDigest256_injective hk, encodeDigest256_injective hg,
+    UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq heNat), encodeDigest256_injective hm,
+    (List.cons.inj h4).1⟩
+
+/-- `custodian_ack_tag` with the hash abstracted: `H` of the 121-byte preimage. -/
+def custodianAckTag (H : List UInt8 → Digest256) (key guardKeyCommit : Digest256)
+    (epoch : UInt64) (msgTag : Digest256) (custodianId : UInt8) : Digest256 :=
+  H (custodianAckFrame key guardKeyCommit epoch msgTag custodianId)
+
+/-- `custodian_ack_tag` as deployed: 32 bytes of `SHAKE256` over the preimage. -/
+def custodianAckTagShake256 (key guardKeyCommit : Digest256) (epoch : UInt64)
+    (msgTag : Digest256) (custodianId : UInt8) : Digest256 :=
+  custodianAckTag shake256Digest256 key guardKeyCommit epoch msgTag custodianId
+
+/-- Equal acknowledgement tags have equal inputs, or exhibit a collision of `H`. -/
+theorem custodianAckTag_binding (H : List UInt8 → Digest256)
+    {k₁ k₂ g₁ g₂ : Digest256} {e₁ e₂ : UInt64} {m₁ m₂ : Digest256} {c₁ c₂ : UInt8}
+    (hTag : custodianAckTag H k₁ g₁ e₁ m₁ c₁ = custodianAckTag H k₂ g₂ e₂ m₂ c₂) :
+    (k₁ = k₂ ∧ g₁ = g₂ ∧ e₁ = e₂ ∧ m₁ = m₂ ∧ c₁ = c₂) ∨ Nonempty (HashCollision256 H) := by
+  if hPre : custodianAckFrame k₁ g₁ e₁ m₁ c₁ = custodianAckFrame k₂ g₂ e₂ m₂ c₂ then
+    exact .inl (custodianAckFrame_injective hPre)
+  else exact .inr ⟨⟨_, _, hPre, hTag⟩⟩
+
+/-- A `QS-A` echo MAC frame is never an acknowledgement preimage: the echo frame begins with the
+    8-byte length of its domain, whose first byte is `0x00`, and the acknowledgement preimage
+    begins with `'Q'`. -/
+theorem quorumEchoMac_frame_ne_custodianAckFrame
+    (f₁ t₁ c₁ : Nat) (ep : UInt64) (b₁ : Digest256)
+    (key guardKeyCommit : Digest256) (leaf : UInt64) (msgTag : Digest256) (custodianId : UInt8) :
     quorumEncodeFramed quorumEchoMacTag
       [encodeNatBeBytes 8 f₁, encodeNatBeBytes 8 t₁, encodeNatBeBytes 8 c₁,
        encodeNatBeBytes 8 ep.toNat, encodeDigest256 b₁] ≠
-    quorumEncodeFramed quorumAckMacTag
-      [encodeNatBeBytes 8 f₂, encodeNatBeBytes 8 t₂, encodeNatBeBytes 8 leaf.toNat,
-       encodeDigest256 b₂] :=
-  quorumEncodeFramed_cross_domain_ne _ _
-    (Nat.lt_trans (by decide) pow256_8_gt_64)
-    (Nat.lt_trans (by decide) pow256_8_gt_64) (by decide)
+    custodianAckFrame key guardKeyCommit leaf msgTag custodianId := by
+  intro h
+  have hHead := congrArg List.head? h
+  have hL : (quorumEncodeFramed quorumEchoMacTag
+      [encodeNatBeBytes 8 f₁, encodeNatBeBytes 8 t₁, encodeNatBeBytes 8 c₁,
+       encodeNatBeBytes 8 ep.toNat, encodeDigest256 b₁]).head? = some 0x00 := by
+    have hPre : encodeNatBeBytes 8 quorumEchoMacTag.data.toList.length =
+        [0, 0, 0, 0, 0, 0, 0, 23] := by decide
+    unfold quorumEncodeFramed quorumFrameField
+    rw [hPre]
+    rfl
+  have hR : (custodianAckFrame key guardKeyCommit leaf msgTag custodianId).head? = some 0x51 := by
+    unfold custodianAckFrame
+    rfl
+  rw [hL, hR] at hHead
+  exact absurd hHead (by decide)
 
 /-- Durable WAL payload persisted atomically before memory state advances. -/
 structure BeltLatchWalPayload where
@@ -6220,28 +6593,35 @@ structure QsBWireAck where
   binding : Digest256
   mac : Digest256
 
-/-- ACK authentication binds the sequential global leaf, never a committee subtree index. -/
+/-- ACK authentication binds the sequential global leaf, never a committee subtree index. Each
+    acknowledgement carries `custodianAckTag` under the pairwise key of its sender and the
+    receiver, over the receiver's guard-key commitment, the leaf, the record binding and the
+    sender's id as one byte (`verified_certificate_acks`, `quorum_jorts.rs:1855-1881`;
+    `cfg.valid` gives `n ≤ 255`). -/
 def checkQsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (guardCommits : Nat → Digest256)
     (cfg : QsBQuorumConfig) (receiver : Nat) (nextLeaf : Nat)
     (rec : QuorumLeafRecord) (acks : List QsBWireAck) : Bool :=
   cfg.valid && decide (receiver < cfg.n ∧ rec.leaf.toNat = nextLeaf ∧
     (acks.map (·.sender)).Nodup ∧ cfg.q ≤ acks.length) &&
   acks.all (fun a => decide (a.sender < cfg.n ∧ a.receiver = receiver ∧ a.leaf = rec.leaf ∧
     a.binding = quorumLeafRecordBinding H rec ∧
-    a.mac = quorumWireMac H (keys a.sender receiver) quorumAckMacTag
-      [encodeNatBeBytes 8 a.sender, encodeNatBeBytes 8 receiver,
-        encodeNatBeBytes 8 rec.leaf.toNat, encodeDigest256 a.binding]))
+    a.mac = custodianAckTag H (keys a.sender receiver) (guardCommits receiver) rec.leaf
+      a.binding (UInt8.ofNat a.sender)))
 
 abbrev QsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (guardCommits : Nat → Digest256)
     (cfg : QsBQuorumConfig) (receiver nextLeaf : Nat) (acks : List QsBWireAck) :=
-  { rec : QuorumLeafRecord // checkQsBWirePermit H keys cfg receiver nextLeaf rec acks = true }
+  { rec : QuorumLeafRecord //
+    checkQsBWirePermit H keys guardCommits cfg receiver nextLeaf rec acks = true }
 
 /-- QS-B consumes a global ACK permit and reserves the shared cursor before opening.
 A QS-A committee permit cannot be passed to this interface. -/
 def signQsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (guardCommits : Nat → Digest256)
     (cfg : QsBQuorumConfig) (receiver : Nat) (acks : List QsBWireAck)
     (allocator : QsBGlobalAllocator)
-    (permit : QsBWirePermit H keys cfg receiver allocator.nextLeaf acks)
+    (permit : QsBWirePermit H keys guardCommits cfg receiver allocator.nextLeaf acks)
     (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
     (ledger : QuorumSigningLedger) :
     QsBGlobalAllocator × QuorumSigningLedger × Option QuorumSteppedOpening :=
@@ -6259,14 +6639,17 @@ def signQsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Dig
     else (next, burned, none)
 
 theorem signQsBWirePermit_output_authorized (H : List UInt8 → Digest256)
-    (keys : Nat → Nat → Digest256) (cfg : QsBQuorumConfig) (receiver : Nat)
+    (keys : Nat → Nat → Digest256) (guardCommits : Nat → Digest256)
+    (cfg : QsBQuorumConfig) (receiver : Nat)
     (acks : List QsBWireAck) (allocator : QsBGlobalAllocator)
-    (permit : QsBWirePermit H keys cfg receiver allocator.nextLeaf acks)
+    (permit : QsBWirePermit H keys guardCommits cfg receiver allocator.nextLeaf acks)
     (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
     (ledger : QuorumSigningLedger) (out : QuorumSteppedOpening)
-    (h : (signQsBWirePermit H keys cfg receiver acks allocator permit seed pk msg path ledger).2.2 = some out) :
+    (h : (signQsBWirePermit H keys guardCommits cfg receiver acks allocator permit seed pk msg path
+      ledger).2.2 = some out) :
     out.leaf.toNat = allocator.nextLeaf ∧
-      checkQsBWirePermit H keys cfg receiver allocator.nextLeaf permit.val acks = true := by
+      checkQsBWirePermit H keys guardCommits cfg receiver allocator.nextLeaf permit.val acks =
+        true := by
   unfold signQsBWirePermit at h
   cases ha : allocator.reserve pk.height.toNat with
   | none => simp [ha] at h

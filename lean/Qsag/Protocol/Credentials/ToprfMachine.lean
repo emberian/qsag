@@ -23,6 +23,16 @@ Protocol-layer state machine and algebraic soundness foundation for:
      multi-turn reservoir consumption (`piToprfCredService_reservoir_monotone`) and non-identity
      forward simulation (`piToprfCredMachine_dataRefines_idealCred` via `Spec.DataRefines`) to
      `Spec.idealCredMachine cfg`.
+   * The evaluation wire carries data, not verdicts: `SpdzOnlineTranscript` holds the bound
+     context, the request word and three MAC-carrying openings, and the machine computes the
+     seven gate verdicts from them and from the MAC key in its state
+     (`SpdzOnlineTranscript.checks`, `piToprfCredService_eval_accept_checks`). A counter-store
+     write failure is its own wire event (`approveToprfStoreFault`), not a flag on an approval.
+   * `prepareReservoir` turns install only a session identifier that is neither current nor
+     retired (`piToprfCredMachine_reservoir_never_rewinds`), so no session's cursors restart.
+   * Not modelled here: the SPDZ arithmetic itself. An accepted evaluation returns `cfg.oprf` at
+     the ticket's point, issuance carries no ZKBoo transcript, and the MAC key is a plain state
+     field (its initial value `initialSpdzMacKey` is a fixed constant).
 2. **`crates/qsag-cred/src/blind_vc.rs` (`GF(p^5) = GF(p)[T]/(T^5 - 3)` & `192 × 192` Limbo Kernel)**:
    * Constructive irreducibility of `T^5 - 3` over `Goldilocks` (`3^((p-1)/5) mod p ≠ 1` excludes
      degree-1 roots, and the exact integer Bézout identity
@@ -556,8 +566,11 @@ inductive ToprfRefusal where
   | quorum (phase : Nat)
   deriving DecidableEq, Repr
 
-/-- Transcript summary of the 3 MAC-checked online phases of `SpdzSession::evaluate_inner` (`voprf_spdz.rs:1098-1206`). -/
-structure SpdzOnlineTranscript where
+/-- The seven verdicts of the online gate of `SpdzSession::evaluate_inner`
+    (`voprf_spdz.rs:1098-1206`). The machine never reads these from a wire: they are computed by
+    `SpdzOnlineTranscript.checks` from the opened values, the MAC sums and the MAC key in the
+    machine state. -/
+structure SpdzOnlineChecks where
   contextMatchesGrant : Bool
   canonicalDiffs : Bool
   phase1MacOk : Bool
@@ -567,7 +580,7 @@ structure SpdzOnlineTranscript where
   clientDualPadConsistent : Bool
   deriving DecidableEq, Repr
 
-def SpdzOnlineTranscript.honest : SpdzOnlineTranscript :=
+def SpdzOnlineChecks.honest : SpdzOnlineChecks :=
   { contextMatchesGrant := true
     canonicalDiffs := true
     phase1MacOk := true
@@ -576,9 +589,74 @@ def SpdzOnlineTranscript.honest : SpdzOnlineTranscript :=
     phase3MacOk := true
     clientDualPadConsistent := true }
 
+theorem SpdzOnlineChecks.eq_of_fields {a : SpdzOnlineChecks} {b0 b1 b2 b3 b4 b5 b6 : Bool}
+    (h0 : a.contextMatchesGrant = b0) (h1 : a.canonicalDiffs = b1) (h2 : a.phase1MacOk = b2)
+    (h3 : a.phase1DiffZero = b3) (h4 : a.phase2MacOk = b4) (h5 : a.phase3MacOk = b5)
+    (h6 : a.clientDualPadConsistent = b6) : a = ⟨b0, b1, b2, b3, b4, b5, b6⟩ := by
+  rcases a with ⟨a0, a1, a2, a3, a4, a5, a6⟩
+  dsimp only at h0 h1 h2 h3 h4 h5 h6
+  subst h0 h1 h2 h3 h4 h5 h6
+  rfl
+
+/-- One opened SPDZ value with the quorum's summed MAC share on it. -/
+structure SpdzMacOpening where
+  val : Goldilocks
+  mac : GoldilocksExt2
+  deriving DecidableEq, Repr
+
+/-- The opening of `v` that passes the MAC check under `alpha`. -/
+def SpdzMacOpening.authentic (alpha : GoldilocksExt2) (v : Goldilocks) : SpdzMacOpening :=
+  ⟨v, CommRingOps.mul alpha (GoldilocksExt2.ofBase v)⟩
+
+/-- What the online phases put on the wire for one evaluation: the context the quorum bound, the
+    client's raw masked-difference word, and the three MAC-carrying openings (`"toprf_spdz_input_bind"`
+    dual-copy difference, `"toprf_spdz_circuit"`, `"toprf_spdz_output"`), plus the two pad-masked
+    copies of the output. It carries data only; no field is a verdict. -/
+structure SpdzOnlineTranscript where
+  context : Spec.ToprfTicket
+  requestWord : Nat
+  inputBind : SpdzMacOpening
+  circuit : SpdzMacOpening
+  output : SpdzMacOpening
+  outputCopyA : Goldilocks
+  outputCopyB : Goldilocks
+  deriving DecidableEq, Repr
+
+/-- The gate's verdicts, computed from the transcript, the granted ticket and the session MAC key:
+    the context equals the grant, the request word is a canonical field element, each opening
+    satisfies `mac = alpha * val` (`spdzMacCheckAccepts`), the opened dual-copy difference is zero,
+    and the two output copies agree. -/
+def SpdzOnlineTranscript.checks (tr : SpdzOnlineTranscript) (alpha : GoldilocksExt2)
+    (grant : Spec.ToprfTicket) : SpdzOnlineChecks :=
+  { contextMatchesGrant := decide (tr.context = grant)
+    canonicalDiffs := decide (tr.requestWord < goldilocksPrime)
+    phase1MacOk := spdzMacCheckAccepts alpha tr.inputBind.val tr.inputBind.mac
+    phase1DiffZero := decide (tr.inputBind.val = Goldilocks.zero)
+    phase2MacOk := spdzMacCheckAccepts alpha tr.circuit.val tr.circuit.mac
+    phase3MacOk := spdzMacCheckAccepts alpha tr.output.val tr.output.mac
+    clientDualPadConsistent := decide (tr.outputCopyA = tr.outputCopyB) }
+
+/-- A transcript whose openings are authentic under `alpha` for the granted ticket, releasing `y`. -/
+def SpdzOnlineTranscript.honest (alpha : GoldilocksExt2) (grant : Spec.ToprfTicket)
+    (y : Goldilocks) : SpdzOnlineTranscript :=
+  { context := grant
+    requestWord := 0
+    inputBind := SpdzMacOpening.authentic alpha Goldilocks.zero
+    circuit := SpdzMacOpening.authentic alpha y
+    output := SpdzMacOpening.authentic alpha y
+    outputCopyA := y
+    outputCopyB := y }
+
+theorem SpdzOnlineTranscript.honest_checks (alpha : GoldilocksExt2) (grant : Spec.ToprfTicket)
+    (y : Goldilocks) :
+    (SpdzOnlineTranscript.honest alpha grant y).checks alpha grant = SpdzOnlineChecks.honest := by
+  have hp : decide ((0 : Nat) < goldilocksPrime) = true := by decide
+  exact SpdzOnlineChecks.eq_of_fields (decide_eq_true rfl) hp (decide_eq_true rfl)
+    (decide_eq_true rfl) (decide_eq_true rfl) (decide_eq_true rfl) (decide_eq_true rfl)
+
 /-- Exact 3-phase gate of `SpdzPreparedSession::evaluate` (`voprf_spdz.rs:1098-1206, 1519-1525`). -/
 def evaluatePreparedSpdzSession (afterReserve : ToprfReservoir)
-    (tr : SpdzOnlineTranscript) : StepOutcome ToprfReservoir Unit ToprfRefusal :=
+    (tr : SpdzOnlineChecks) : StepOutcome ToprfReservoir Unit ToprfRefusal :=
   if tr.contextMatchesGrant then
     if tr.canonicalDiffs then
       if tr.phase1MacOk then
@@ -601,6 +679,15 @@ def evaluatePreparedSpdzSession (afterReserve : ToprfReservoir)
       .err afterReserve (.request 1)
   else
     .err afterReserve (.request 0)
+
+/-- The gate releases only when every verdict is `true`, and then leaves the reservation as is. -/
+theorem evaluatePreparedSpdzSession_ok_all_checks (r r' : ToprfReservoir) (ch : SpdzOnlineChecks)
+    (u : Unit) (h : evaluatePreparedSpdzSession r ch = .ok r' u) :
+    ch = SpdzOnlineChecks.honest ∧ r' = r := by
+  rcases ch with ⟨b0, b1, b2, b3, b4, b5, b6⟩
+  unfold evaluatePreparedSpdzSession at h
+  cases b0 <;> cases b1 <;> cases b2 <;> cases b3 <;> cases b4 <;> cases b5 <;> cases b6 <;>
+    cases h <;> exact ⟨rfl, rfl⟩
 
 /-- **Monotone Cursor Advance & Refusal Isolation (`reservoir_cursor_strict_monotone_and_refusal_isolation`)**:
     1. Every successful `reserveSession` strictly advances `pow7Cursor` by `items * 118` (`≥ 118`),
@@ -625,7 +712,7 @@ theorem reservoir_cursor_strict_monotone_and_refusal_isolation
       rAfter.poisoned = true ∧ rAfter.sessionsRemaining = 0 ∧
       rAfter.remainingPow7 = 0 ∧ rAfter.remainingBeaver = 0 ∧
       ∀ k, rAfter.reserveSession k = none) := by
-  have hReq : ∀ (s : ToprfReservoir) (hp : s.poisoned = false) (tr : SpdzOnlineTranscript)
+  have hReq : ∀ (s : ToprfReservoir) (hp : s.poisoned = false) (tr : SpdzOnlineChecks)
       (rAfter : ToprfReservoir) (reason : Nat),
       evaluatePreparedSpdzSession s tr = .err rAfter (.request reason) →
       rAfter = s ∧ rAfter.poisoned = false := by
@@ -651,7 +738,7 @@ theorem reservoir_cursor_strict_monotone_and_refusal_isolation
                 cases b6 with
                 | false => injection hEv with _ hE; cases hE
                 | true => cases hEv
-  have hQuo : ∀ (s : ToprfReservoir) (tr : SpdzOnlineTranscript)
+  have hQuo : ∀ (s : ToprfReservoir) (tr : SpdzOnlineChecks)
       (rAfter : ToprfReservoir) (phase : Nat),
       evaluatePreparedSpdzSession s tr = .err rAfter (.quorum phase) →
       rAfter.poisoned = true ∧ rAfter.sessionsRemaining = 0 ∧
@@ -2107,7 +2194,8 @@ inductive ToprfCredWire (Attr : Type) where
   | advanceEpochWire (newEpoch : Nat) (newRoot : Spec.Digest256)
   | presentWire (holder : Nat) (credId : Nat) (stmt : Spec.CredentialStatement Attr)
       (opening : LimboSdOpeningWire)
-  | approveToprfWire (server : Nat) (ticket : Spec.ToprfTicket) (ioOk : Bool)
+  | approveToprfWire (server : Nat) (ticket : Spec.ToprfTicket)
+  | approveToprfStoreFault (server : Nat) (ticket : Spec.ToprfTicket)
   | evalToprfWire (ticket : Spec.ToprfTicket) (input : Spec.Bytes) (online : SpdzOnlineTranscript)
   | corruptWire (party : Spec.CredParty)
   deriving DecidableEq, Repr
@@ -2115,7 +2203,7 @@ inductive ToprfCredWire (Attr : Type) where
 /-- Extended concrete input including internal volatile `SpdzReservoir::prepare` turns (`visIn = none`). -/
 inductive ToprfMachineInput (Attr : Type) where
   | external (port : Spec.CredPort) (wire : ToprfCredWire Attr)
-  | prepareReservoir (preprocessSid : BitVec 256) (items sessions : Nat)
+  | prepareReservoir (preprocessSid : BitVec 256) (macKey : GoldilocksExt2) (items sessions : Nat)
   deriving DecidableEq, Repr
 
 /-- Concrete protocol state combining `ToprfReservoir`, monotone server high-water marks, 3-phase
@@ -2123,6 +2211,8 @@ inductive ToprfMachineInput (Attr : Type) where
 structure PiToprfCredState (Attr O : Type) where
   spdzCfg : SpdzConfig
   reservoir : ToprfReservoir
+  spdzMacKey : GoldilocksExt2
+  retiredSids : List (BitVec 256)
   serverHighWater : List (Nat × Nat)
   phaseAuditCount : Nat
   issuerPk : Spec.Bytes
@@ -2148,10 +2238,17 @@ def initialToprfReservoir : ToprfReservoir :=
     sessionsRemaining := 64
     poisoned := false }
 
+/-- MAC key of the initial reservoir's preprocessing session. A fixed model value: secrecy of the
+    key is not a property of this machine; `spdz_mac_check_unique_alpha_on_shift` is the statement
+    about how many keys accept a shifted opening. -/
+def initialSpdzMacKey : GoldilocksExt2 := GoldilocksExt2.ofBase (Goldilocks.ofNat 7)
+
 /-- Initial concrete protocol state for `cfg : Spec.IdealCredConfig O`. -/
 def PiToprfCredState.init {Attr O : Type} (cfg : Spec.IdealCredConfig O) : PiToprfCredState Attr O :=
   { spdzCfg := ⟨Spec.pqCredentialProfile.toprfThreshold, Spec.pqCredentialProfile.toprfServers⟩
     reservoir := initialToprfReservoir
+    spdzMacKey := initialSpdzMacKey
+    retiredSids := []
     serverHighWater := []
     phaseAuditCount := 0
     issuerPk := cfg.issuerPk
@@ -2188,7 +2285,8 @@ def ToprfCredWire.toCommand {Attr : Type} : ToprfCredWire Attr → Spec.CredComm
   | .issueWire h attrs newRoot _ => .issue h attrs newRoot
   | .advanceEpochWire newEpoch newRoot => .advanceEpoch newEpoch newRoot
   | .presentWire h cid stmt _ => .present h cid stmt
-  | .approveToprfWire srv t _ => .approveToprf srv t
+  | .approveToprfWire srv t => .approveToprf srv t
+  | .approveToprfStoreFault srv t => .approveToprf srv t
   | .evalToprfWire t input _ => .evalToprf t input
   | .corruptWire party => .corrupt party
 
@@ -2199,7 +2297,9 @@ def PiToprfCredState.checkCallerPort {Attr O : Type} (c : PiToprfCredState Attr 
   | .advanceEpochWire _ _ => decide (port = .issuer) || (decide (port = .adversary) && c.issuerCorrupt)
   | .presentWire h _ _ _ =>
     decide (port = .holder h) || (decide (port = .adversary) && decide (h ∈ c.corruptHolders))
-  | .approveToprfWire srv _ _ =>
+  | .approveToprfWire srv _ =>
+    decide (port = .server srv) || (decide (port = .adversary) && decide (srv ∈ c.corruptServers))
+  | .approveToprfStoreFault srv _ =>
     decide (port = .server srv) || (decide (port = .adversary) && decide (srv ∈ c.corruptServers))
   | .evalToprfWire _ _ _ => true
   | .corruptWire _ => decide (port = .adversary)
@@ -2295,12 +2395,12 @@ def piToprfCredWireOutcome {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealC
       else
         .ok { c with phaseAuditCount := c.phaseAuditCount + 1 }
             (.presentationVerdict false)
-    | .approveToprfWire srv t ioOk =>
-      if !ioOk then
-        .err { c with
-               serverHighWater := (srv, t.counter) :: c.serverHighWater
-               phaseAuditCount := c.phaseAuditCount + 1 } ()
-      else if decide (srv < Spec.pqCredentialProfile.toprfServers) && decide (t.epoch = c.epoch) then
+    | .approveToprfStoreFault srv t =>
+      .err { c with
+             serverHighWater := (srv, t.counter) :: c.serverHighWater
+             phaseAuditCount := c.phaseAuditCount + 1 } ()
+    | .approveToprfWire srv t =>
+      if decide (srv < Spec.pqCredentialProfile.toprfServers) && decide (t.epoch = c.epoch) then
         .ok { c with
               toprfApprovals := (srv, t) :: c.toprfApprovals
               serverHighWater := (srv, t.counter) :: c.serverHighWater
@@ -2317,7 +2417,7 @@ def piToprfCredWireOutcome {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealC
         match c.reservoir.reserveSession 1 with
         | none => .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
         | some resReserved =>
-          match evaluatePreparedSpdzSession resReserved online with
+          match evaluatePreparedSpdzSession resReserved (online.checks c.spdzMacKey t) with
           | .err resAfter _ =>
             .err { c with
                    reservoir := resAfter
@@ -2374,21 +2474,27 @@ def piToprfCredMachine {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealCredC
       match piToprfCredWireOutcome cfg c port w with
       | .ok c' out => some (c', some out)
       | .err _ _ => none
-    | .prepareReservoir sid items sessions =>
-      match ToprfReservoir.prepare sid items sessions with
-      | some freshRes =>
-        some ({ c with reservoir := freshRes, phaseAuditCount := c.phaseAuditCount + 1 }, none)
-      | none => none
+    | .prepareReservoir sid macKey items sessions =>
+      if sid ≠ c.reservoir.preprocessSid ∧ sid ∉ c.retiredSids then
+        match ToprfReservoir.prepare sid items sessions with
+        | some freshRes =>
+          some ({ c with
+                  reservoir := freshRes
+                  spdzMacKey := macKey
+                  retiredSids := c.reservoir.preprocessSid :: c.retiredSids
+                  phaseAuditCount := c.phaseAuditCount + 1 }, none)
+        | none => none
+      else none
   errStep c inp :=
     match inp with
     | .external port w => (piToprfCredService cfg).errStep c (port, w)
-    | .prepareReservoir _ _ _ => c
+    | .prepareReservoir _ _ _ _ => c
 
 /-- Visible input projection for `DataRefines`: `.prepareReservoir` is erased (`none`), `.external` maps
     `(port, w)` to `some (port, w.toCommand)`. -/
 def toprfMachineVisIn {Attr : Type} : ToprfMachineInput Attr → Option (Spec.IdealCredInput Attr)
   | .external port w => some (port, w.toCommand)
-  | .prepareReservoir _ _ _ => none
+  | .prepareReservoir _ _ _ _ => none
 
 def toprfMachineVisOut {O : Type} (defaultOut : Spec.IdealCredOutput O) :
     Option (Spec.IdealCredOutput O) → Spec.IdealCredOutput O
@@ -2504,25 +2610,20 @@ theorem piToprfCredWireOutcome_sound {Attr O : Type} [DecidableEq Attr]
         rw [checkPresentation_eq_presentAccepts, hStepEq, Spec.credExec_present_eq]
         cases c.abs.presentAccepts h cid stmt <;>
           simp only [↓reduceIte, Bool.false_eq_true, PiToprfCredState.abs]
-    | approveToprfWire srv t ioOk =>
+    | approveToprfStoreFault srv t => rfl
+    | approveToprfWire srv t =>
       dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
-      cases ioOk with
+      have hEpEq : c.epoch = c.abs.epoch := rfl
+      rw [hEpEq]
+      cases hApp : (decide (srv < Spec.pqCredentialProfile.toprfServers) &&
+          decide (t.epoch = c.abs.epoch)) with
       | false =>
-        simp only [Bool.not_false, ↓reduceIte]
+        simp only [Bool.false_eq_true, ↓reduceIte]
         rfl
       | true =>
-        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-        have hEpEq : c.epoch = c.abs.epoch := rfl
-        rw [hEpEq]
-        cases hApp : (decide (srv < Spec.pqCredentialProfile.toprfServers) &&
-            decide (t.epoch = c.abs.epoch)) with
-        | false =>
-          simp only [Bool.false_eq_true, ↓reduceIte]
-          rfl
-        | true =>
-          simp only [↓reduceIte]
-          rw [hStepEq, Spec.credExec_approveToprf_eq, hApp]
-          rfl
+        simp only [↓reduceIte]
+        rw [hStepEq, Spec.credExec_approveToprf_eq, hApp]
+        rfl
     | evalToprfWire t input online =>
       dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
       rw [checkToprfTicket_eq_toprfAccepts]
@@ -2536,7 +2637,7 @@ theorem piToprfCredWireOutcome_sound {Attr O : Type} [DecidableEq Attr]
         | none => rfl
         | some resReserved =>
           dsimp only
-          cases hEv : evaluatePreparedSpdzSession resReserved online with
+          cases hEv : evaluatePreparedSpdzSession resReserved (online.checks c.spdzMacKey t) with
           | err resAfter _ => rfl
           | ok resOk u =>
             cases u
@@ -2571,7 +2672,7 @@ def piToprfCredMachine_dataRefines_idealCred {Attr O : Type} [DecidableEq Attr]
   sim_visible {c c' a inp out j} hRel hStepC hVis := by
     subst hRel
     cases inp with
-    | prepareReservoir _ _ _ => cases hVis
+    | prepareReservoir _ _ _ _ => cases hVis
     | external port w =>
       injection hVis with hJ
       subst hJ
@@ -2589,20 +2690,22 @@ def piToprfCredMachine_dataRefines_idealCred {Attr O : Type} [DecidableEq Attr]
     subst hRel
     cases inp with
     | external _ _ => cases hVis
-    | prepareReservoir sid items sessions =>
+    | prepareReservoir sid macKey items sessions =>
       dsimp only [piToprfCredMachine] at hStepC
-      cases hPrep : ToprfReservoir.prepare sid items sessions with
-      | none => rw [hPrep] at hStepC; cases hStepC
-      | some freshRes =>
-        rw [hPrep] at hStepC
-        injection hStepC with hPair
-        obtain ⟨hC, _⟩ := Prod.mk.inj hPair
-        subst hC
-        rfl
+      split at hStepC
+      · cases hPrep : ToprfReservoir.prepare sid items sessions with
+        | none => rw [hPrep] at hStepC; cases hStepC
+        | some freshRes =>
+          rw [hPrep] at hStepC
+          injection hStepC with hPair
+          obtain ⟨hC, _⟩ := Prod.mk.inj hPair
+          subst hC
+          rfl
+      · cases hStepC
   sim_reject {c a inp} hRel hNoneC := by
     subst hRel
     cases inp with
-    | prepareReservoir _ _ _ => rfl
+    | prepareReservoir _ _ _ _ => rfl
     | external port w =>
       dsimp only [piToprfCredMachine, piToprfCredService] at hNoneC ⊢
       have hSound := piToprfCredWireOutcome_sound cfg c port w
@@ -2613,19 +2716,21 @@ def piToprfCredMachine_dataRefines_idealCred {Attr O : Type} [DecidableEq Attr]
         rw [hOut] at hSound
         exact hSound
 
-/-- Monotone SPDZ reservoir progression relation across concrete wire turns:
-    cursors never decrease, remaining session quota never increases, and quorum poisoning is sticky. -/
+/-- Monotone SPDZ reservoir progression relation across concrete wire turns: the preprocessing
+    session is the same one, cursors never decrease, remaining session quota never increases, and
+    quorum poisoning is sticky. -/
 def ReservoirStepMonotone (r r' : ToprfReservoir) : Prop :=
+  r'.preprocessSid = r.preprocessSid ∧
   r.pow7Cursor ≤ r'.pow7Cursor ∧
   r.beaverCursor ≤ r'.beaverCursor ∧
   r'.sessionsRemaining ≤ r.sessionsRemaining ∧
   (r.poisoned = true → r'.poisoned = true)
 
 private theorem reservoirStepMonotone_refl (r : ToprfReservoir) : ReservoirStepMonotone r r :=
-  ⟨Nat.le_refl _, Nat.le_refl _, Nat.le_refl _, id⟩
+  ⟨rfl, Nat.le_refl _, Nat.le_refl _, Nat.le_refl _, id⟩
 
 private theorem reservoirStepMonotone_of_reserve_eval {r rRes rAfter : ToprfReservoir}
-    {online : SpdzOnlineTranscript}
+    {online : SpdzOnlineChecks}
     (hRes : r.reserveSession 1 = some rRes)
     (hEv : (∃ u, evaluatePreparedSpdzSession rRes online = .ok rAfter u) ∨
            (∃ reason, evaluatePreparedSpdzSession rRes online = .err rAfter reason)) :
@@ -2636,6 +2741,14 @@ private theorem reservoirStepMonotone_of_reserve_eval {r rRes rAfter : ToprfRese
     cases hp : r.poisoned with
     | false => rfl
     | true => rw [hp] at hRes; simp only [Bool.not_true, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hRes; cases hRes
+  have hSid : rRes.preprocessSid = r.preprocessSid := by
+    unfold ToprfReservoir.reserveSession at hRes
+    dsimp only at hRes
+    split at hRes
+    · injection hRes with hEq
+      subst hEq
+      rfl
+    · cases hRes
   have hBounds : r.pow7Cursor ≤ rRes.pow7Cursor ∧ rRes.pow7Cursor ≤ rRes.pow7Total ∧
       r.beaverCursor ≤ rRes.beaverCursor ∧ rRes.beaverCursor ≤ rRes.beaverTotal ∧
       rRes.sessionsRemaining ≤ r.sessionsRemaining := by
@@ -2655,12 +2768,12 @@ private theorem reservoirStepMonotone_of_reserve_eval {r rRes rAfter : ToprfRese
       refine ⟨by omega, by omega, by omega, by omega, by omega⟩
     · cases hRes
   have hPoisMono : ReservoirStepMonotone r rRes.poison :=
-    ⟨Nat.le_trans hBounds.1 hBounds.2.1,
+    ⟨hSid, Nat.le_trans hBounds.1 hBounds.2.1,
      Nat.le_trans hBounds.2.2.1 hBounds.2.2.2.1,
      Nat.zero_le _,
      fun hp => by rw [hNotPois] at hp; cases hp⟩
   have hIdMono : ReservoirStepMonotone r rRes :=
-    ⟨hBounds.1, hBounds.2.2.1, hBounds.2.2.2.2, fun hp => by rw [hNotPois] at hp; cases hp⟩
+    ⟨hSid, hBounds.1, hBounds.2.2.1, hBounds.2.2.2.2, fun hp => by rw [hNotPois] at hp; cases hp⟩
   have hEvCases : rAfter = rRes ∨ rAfter = rRes.poison := by
     unfold evaluatePreparedSpdzSession at hEv
     rcases online with ⟨b0, b1, b2, b3, b4, b5, b6⟩
@@ -2683,6 +2796,78 @@ private theorem reservoirStepMonotone_of_reserve_eval {r rRes rAfter : ToprfRese
   · exact hIdMono
   · exact hPoisMono
 
+/-- Closes a leaf of `piToprfCredWireOutcome_session_step`; `simp only` may already have reduced
+    the two ledger equations to `True`. -/
+local macro "session_step_close " t:term : tactic =>
+  `(tactic| first
+    | exact And.intro $t ⟨rfl, rfl⟩
+    | exact And.intro $t ⟨trivial, trivial⟩)
+
+/-- One wire step, accepted or rejected: the reservoir moves monotonically inside its session and
+    the session ledger (retired identifiers, MAC key) is untouched. -/
+private theorem piToprfCredWireOutcome_session_step {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (c : PiToprfCredState Attr O)
+    (port : Spec.CredPort) (w : ToprfCredWire Attr) :
+    match piToprfCredWireOutcome cfg c port w with
+    | .ok c' _ => ReservoirStepMonotone c.reservoir c'.reservoir ∧
+        c'.retiredSids = c.retiredSids ∧ c'.spdzMacKey = c.spdzMacKey
+    | .err c' _ => ReservoirStepMonotone c.reservoir c'.reservoir ∧
+        c'.retiredSids = c.retiredSids ∧ c'.spdzMacKey = c.spdzMacKey := by
+  unfold piToprfCredWireOutcome
+  cases c.checkCallerPort port w with
+  | false =>
+    simp only [Bool.not_false, ↓reduceIte]
+    session_step_close (reservoirStepMonotone_refl c.reservoir)
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases w with
+    | issueWire h attrs newRoot tag =>
+      dsimp only
+      cases c.checkIssueWire attrs <;>
+        (simp only [Bool.false_eq_true, ↓reduceIte]; session_step_close (reservoirStepMonotone_refl c.reservoir))
+    | advanceEpochWire newEpoch newRoot =>
+      dsimp only
+      cases decide (c.epoch < newEpoch) <;>
+        (simp only [Bool.false_eq_true, ↓reduceIte]; session_step_close (reservoirStepMonotone_refl c.reservoir))
+    | presentWire h cid stmt opening =>
+      dsimp only
+      cases opening.verify33 with
+      | false =>
+        simp only [Bool.not_false, ↓reduceIte]
+        session_step_close (reservoirStepMonotone_refl c.reservoir)
+      | true =>
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases c.checkPresentation h cid stmt <;>
+          (simp only [Bool.false_eq_true, ↓reduceIte]; session_step_close (reservoirStepMonotone_refl c.reservoir))
+    | approveToprfStoreFault srv t => session_step_close (reservoirStepMonotone_refl c.reservoir)
+    | approveToprfWire srv t =>
+      dsimp only
+      cases (decide (srv < Spec.pqCredentialProfile.toprfServers) && decide (t.epoch = c.epoch)) <;>
+        (simp only [Bool.false_eq_true, ↓reduceIte]; session_step_close (reservoirStepMonotone_refl c.reservoir))
+    | evalToprfWire t input online =>
+      dsimp only
+      cases c.checkToprfTicket cfg t with
+      | false =>
+        simp only [Bool.not_false, ↓reduceIte]
+        session_step_close (reservoirStepMonotone_refl c.reservoir)
+      | true =>
+        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+        cases hRes : c.reservoir.reserveSession 1 with
+        | none => session_step_close (reservoirStepMonotone_refl c.reservoir)
+        | some resReserved =>
+          dsimp only
+          cases hEv : evaluatePreparedSpdzSession resReserved (online.checks c.spdzMacKey t) with
+          | err resAfter reason =>
+            session_step_close (reservoirStepMonotone_of_reserve_eval hRes (Or.inr ⟨reason, hEv⟩))
+          | ok resOk u =>
+            cases u
+            dsimp only
+            have hM := reservoirStepMonotone_of_reserve_eval hRes (Or.inl ⟨(), hEv⟩)
+            cases c.oprfTable.find? (fun e => decide (e.1 = ⟨t.keyId, t.epoch, input⟩)) <;> session_step_close hM
+    | corruptWire party =>
+      dsimp only
+      cases party <;> session_step_close (reservoirStepMonotone_refl c.reservoir)
+
 /-- **Multi-Turn SPDZ Reservoir Monotonicity (`piToprfCredService_reservoir_monotone`)**:
     Every wire step of `piToprfCredService` (whether accepted via `.step` or rejected via `.errStep`)
     preserves `ReservoirStepMonotone`: `c.reservoir` is **never** reset to `initialToprfReservoir`,
@@ -2694,80 +2879,19 @@ theorem piToprfCredService_reservoir_monotone {Attr O : Type} [DecidableEq Attr]
     ReservoirStepMonotone c.reservoir ((piToprfCredService cfg).errStep c (port, w)).reservoir ∧
     ∀ c' out, (piToprfCredService cfg).step c (port, w) = some (c', out) →
       ReservoirStepMonotone c.reservoir c'.reservoir := by
-  have hOutMono : match piToprfCredWireOutcome cfg c port w with
-      | .ok c' _ => ReservoirStepMonotone c.reservoir c'.reservoir
-      | .err c' _ => ReservoirStepMonotone c.reservoir c'.reservoir := by
-    unfold piToprfCredWireOutcome
-    cases c.checkCallerPort port w with
-    | false =>
-      simp only [Bool.not_false, ↓reduceIte]
-      exact reservoirStepMonotone_refl c.reservoir
-    | true =>
-      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-      cases w with
-      | issueWire h attrs newRoot tag =>
-        dsimp only
-        cases c.checkIssueWire attrs <;>
-          (simp only [Bool.false_eq_true, ↓reduceIte]; exact reservoirStepMonotone_refl c.reservoir)
-      | advanceEpochWire newEpoch newRoot =>
-        dsimp only
-        cases decide (c.epoch < newEpoch) <;>
-          (simp only [Bool.false_eq_true, ↓reduceIte]; exact reservoirStepMonotone_refl c.reservoir)
-      | presentWire h cid stmt opening =>
-        dsimp only
-        cases opening.verify33 with
-        | false =>
-          simp only [Bool.not_false, ↓reduceIte]
-          exact reservoirStepMonotone_refl c.reservoir
-        | true =>
-          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-          cases c.checkPresentation h cid stmt <;>
-            (simp only [Bool.false_eq_true, ↓reduceIte]; exact reservoirStepMonotone_refl c.reservoir)
-      | approveToprfWire srv t ioOk =>
-        dsimp only
-        cases ioOk with
-        | false =>
-          simp only [Bool.not_false, ↓reduceIte]
-          exact reservoirStepMonotone_refl c.reservoir
-        | true =>
-          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-          cases (decide (srv < Spec.pqCredentialProfile.toprfServers) && decide (t.epoch = c.epoch)) <;>
-            (simp only [Bool.false_eq_true, ↓reduceIte]; exact reservoirStepMonotone_refl c.reservoir)
-      | evalToprfWire t input online =>
-        dsimp only
-        cases c.checkToprfTicket cfg t with
-        | false =>
-          simp only [Bool.not_false, ↓reduceIte]
-          exact reservoirStepMonotone_refl c.reservoir
-        | true =>
-          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-          cases hRes : c.reservoir.reserveSession 1 with
-          | none => exact reservoirStepMonotone_refl c.reservoir
-          | some resReserved =>
-            dsimp only
-            cases hEv : evaluatePreparedSpdzSession resReserved online with
-            | err resAfter reason =>
-              exact reservoirStepMonotone_of_reserve_eval hRes (Or.inr ⟨reason, hEv⟩)
-            | ok resOk u =>
-              cases u
-              dsimp only
-              have hM := reservoirStepMonotone_of_reserve_eval hRes (Or.inl ⟨(), hEv⟩)
-              cases c.oprfTable.find? (fun e => decide (e.1 = ⟨t.keyId, t.epoch, input⟩)) <;> exact hM
-      | corruptWire party =>
-        dsimp only
-        cases party <;> exact reservoirStepMonotone_refl c.reservoir
+  have hOutMono := piToprfCredWireOutcome_session_step cfg c port w
   dsimp only [piToprfCredService]
   cases hOut : piToprfCredWireOutcome cfg c port w with
   | err cErr _ =>
     rw [hOut] at hOutMono
-    exact ⟨hOutMono, fun _ _ hS => nomatch hS⟩
+    exact ⟨hOutMono.1, fun _ _ hS => nomatch hS⟩
   | ok cOk v =>
     rw [hOut] at hOutMono
-    refine ⟨hOutMono, fun c' out hS => ?_⟩
+    refine ⟨hOutMono.1, fun c' out hS => ?_⟩
     injection hS with hPair
     obtain ⟨hC, _⟩ := Prod.mk.inj hPair
     subst hC
-    exact hOutMono
+    exact hOutMono.1
 
 /-- Forged 33-repetition Limbo opening carrying a nonzero `GF(p^5)` defect (`(1, 0, 0, 0, 0)`) on
     opened party `1` under challenge `0` (where hidden party in repetition `0` is `0 ≠ 1`). -/
@@ -2799,23 +2923,206 @@ theorem tooth_forged_limbo_opening_rejected_by_piToprfCredService {Attr O : Type
   | true =>
     simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hVerFalse, Bool.not_false]
 
+/-- **An accepted TOPRF evaluation passed every check on the wire data.** If `piToprfCredService`
+    accepts `.evalToprfWire t input online`, then the transcript's context is the granted ticket,
+    its request word is canonical, all three openings satisfy the SPDZ MAC equation under the MAC
+    key held in the machine state, the opened dual-copy difference is zero and the two output
+    copies agree. The released value itself is `cfg.oprf` at the ticket's point: this machine
+    models the gate around the SPDZ arithmetic, and does not recompute the PRF from shares. -/
+theorem piToprfCredService_eval_accept_checks {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (c c' : PiToprfCredState Attr O) (port : Spec.CredPort)
+    (t : Spec.ToprfTicket) (input : Spec.Bytes) (online : SpdzOnlineTranscript)
+    (out : Spec.IdealCredOutput O)
+    (hStep : (piToprfCredService cfg).step c (port, .evalToprfWire t input online) =
+      some (c', out)) :
+    online.context = t ∧ online.requestWord < goldilocksPrime ∧
+    online.inputBind.val = Goldilocks.zero ∧
+    online.inputBind.mac =
+      CommRingOps.mul c.spdzMacKey (GoldilocksExt2.ofBase online.inputBind.val) ∧
+    online.circuit.mac = CommRingOps.mul c.spdzMacKey (GoldilocksExt2.ofBase online.circuit.val) ∧
+    online.output.mac = CommRingOps.mul c.spdzMacKey (GoldilocksExt2.ofBase online.output.val) ∧
+    online.outputCopyA = online.outputCopyB := by
+  dsimp only [piToprfCredService] at hStep
+  unfold piToprfCredWireOutcome at hStep
+  cases hPort : c.checkCallerPort port (.evalToprfWire t input online) with
+  | false =>
+    rw [hPort] at hStep
+    simp only [Bool.not_false, ↓reduceIte] at hStep
+    cases hStep
+  | true =>
+    rw [hPort] at hStep
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep
+    cases hTk : c.checkToprfTicket cfg t with
+    | false =>
+      rw [hTk] at hStep
+      simp only [Bool.not_false, ↓reduceIte] at hStep
+      cases hStep
+    | true =>
+      rw [hTk] at hStep
+      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep
+      cases hRes : c.reservoir.reserveSession 1 with
+      | none => rw [hRes] at hStep; cases hStep
+      | some resReserved =>
+        rw [hRes] at hStep
+        dsimp only at hStep
+        cases hEv : evaluatePreparedSpdzSession resReserved (online.checks c.spdzMacKey t) with
+        | err resAfter reason => rw [hEv] at hStep; cases hStep
+        | ok resOk u =>
+          have hAll := (evaluatePreparedSpdzSession_ok_all_checks _ _ _ _ hEv).1
+          have h0 : decide (online.context = t) = true :=
+            congrArg SpdzOnlineChecks.contextMatchesGrant hAll
+          have h1 : decide (online.requestWord < goldilocksPrime) = true :=
+            congrArg SpdzOnlineChecks.canonicalDiffs hAll
+          have h2 : spdzMacCheckAccepts c.spdzMacKey online.inputBind.val online.inputBind.mac =
+              true := congrArg SpdzOnlineChecks.phase1MacOk hAll
+          have h3 : decide (online.inputBind.val = Goldilocks.zero) = true :=
+            congrArg SpdzOnlineChecks.phase1DiffZero hAll
+          have h4 : spdzMacCheckAccepts c.spdzMacKey online.circuit.val online.circuit.mac =
+              true := congrArg SpdzOnlineChecks.phase2MacOk hAll
+          have h5 : spdzMacCheckAccepts c.spdzMacKey online.output.val online.output.mac =
+              true := congrArg SpdzOnlineChecks.phase3MacOk hAll
+          have h6 : decide (online.outputCopyA = online.outputCopyB) = true :=
+            congrArg SpdzOnlineChecks.clientDualPadConsistent hAll
+          unfold spdzMacCheckAccepts at h2 h4 h5
+          exact ⟨of_decide_eq_true h0, of_decide_eq_true h1, of_decide_eq_true h3,
+            of_decide_eq_true h2, of_decide_eq_true h4, of_decide_eq_true h5,
+            of_decide_eq_true h6⟩
+
+/-- Wire steps never touch the preprocessing-session ledger: the retired session identifiers and
+    the session MAC key are those of the state before the step, accepted or rejected. -/
+theorem piToprfCredWireOutcome_keeps_session_ledger {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (c : PiToprfCredState Attr O)
+    (port : Spec.CredPort) (w : ToprfCredWire Attr) :
+    match piToprfCredWireOutcome cfg c port w with
+    | .ok c' _ => c'.retiredSids = c.retiredSids ∧ c'.spdzMacKey = c.spdzMacKey
+    | .err c' _ => c'.retiredSids = c.retiredSids ∧ c'.spdzMacKey = c.spdzMacKey := by
+  have h := piToprfCredWireOutcome_session_step cfg c port w
+  cases hOut : piToprfCredWireOutcome cfg c port w with
+  | ok cNext v => rw [hOut] at h; exact h.2
+  | err cNext u => rw [hOut] at h; exact h.2
+
+/-- **The full machine never rewinds a preprocessing session.** Every accepted step of
+    `piToprfCredMachine` either keeps the session (same `preprocessSid`, cursors only advance,
+    session quota only drops, poisoning sticky, ledger untouched), or is a `prepareReservoir` turn
+    that installs a session identifier different from the current one and from every retired one,
+    and retires the current one. A retired or current identifier is therefore never installed
+    again, so no tuple position of a session is ever handed out twice. -/
+theorem piToprfCredMachine_reservoir_never_rewinds {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (c c' : PiToprfCredState Attr O)
+    (inp : ToprfMachineInput Attr) (out : Option (Spec.IdealCredOutput O))
+    (hStep : (piToprfCredMachine cfg).step c inp = some (c', out)) :
+    (ReservoirStepMonotone c.reservoir c'.reservoir ∧ c'.retiredSids = c.retiredSids ∧
+      c'.spdzMacKey = c.spdzMacKey) ∨
+    (c'.reservoir.preprocessSid ≠ c.reservoir.preprocessSid ∧
+      c'.reservoir.preprocessSid ∉ c.retiredSids ∧
+      c'.retiredSids = c.reservoir.preprocessSid :: c.retiredSids ∧
+      c'.reservoir.pow7Cursor = 0 ∧ c'.reservoir.beaverCursor = 0) := by
+  cases inp with
+  | external port w =>
+    dsimp only [piToprfCredMachine] at hStep
+    have hMono := (piToprfCredService_reservoir_monotone cfg c port w).2
+    have hLedger := piToprfCredWireOutcome_keeps_session_ledger cfg c port w
+    dsimp only [piToprfCredService] at hMono
+    cases hOut : piToprfCredWireOutcome cfg c port w with
+    | err _ _ => rw [hOut] at hStep; cases hStep
+    | ok cNext v =>
+      rw [hOut] at hStep hMono hLedger
+      injection hStep with hPair
+      obtain ⟨hC, _⟩ := Prod.mk.inj hPair
+      subst hC
+      exact .inl (And.intro (hMono cNext v rfl) ⟨hLedger.1, hLedger.2⟩)
+  | prepareReservoir sid macKey items sessions =>
+    dsimp only [piToprfCredMachine] at hStep
+    split at hStep
+    · rename_i hFresh
+      cases hPrep : ToprfReservoir.prepare sid items sessions with
+      | none => rw [hPrep] at hStep; cases hStep
+      | some freshRes =>
+        rw [hPrep] at hStep
+        injection hStep with hPair
+        obtain ⟨hC, _⟩ := Prod.mk.inj hPair
+        subst hC
+        have hSid : freshRes.preprocessSid = sid ∧ freshRes.pow7Cursor = 0 ∧
+            freshRes.beaverCursor = 0 := by
+          unfold ToprfReservoir.prepare at hPrep
+          split at hPrep
+          · injection hPrep with hEq
+            subst hEq
+            exact ⟨rfl, rfl, rfl⟩
+          · cases hPrep
+        dsimp only
+        rw [hSid.1]
+        exact .inr ⟨hFresh.1, hFresh.2, rfl, hSid.2.1, hSid.2.2⟩
+    · cases hStep
+
+/-- A circuit-phase opening whose value was shifted by one while keeping the MAC of the true
+    value, inside an otherwise authentic transcript. -/
+def forgedCircuitTranscript (grant : Spec.ToprfTicket) : SpdzOnlineTranscript :=
+  { SpdzOnlineTranscript.honest initialSpdzMacKey grant (Goldilocks.ofNat 5) with
+    circuit := ⟨Goldilocks.ofNat 6,
+      CommRingOps.mul initialSpdzMacKey (GoldilocksExt2.ofBase (Goldilocks.ofNat 5))⟩ }
+
+/-- The authentic transcript passes the gate computed from its data. -/
+theorem honest_transcript_passes_spdz_gate (alpha : GoldilocksExt2) (grant : Spec.ToprfTicket)
+    (y : Goldilocks) (r : ToprfReservoir) :
+    evaluatePreparedSpdzSession r
+      ((SpdzOnlineTranscript.honest alpha grant y).checks alpha grant) = .ok r () := by
+  rw [SpdzOnlineTranscript.honest_checks]
+  rfl
+
+/-- The shifted circuit opening fails the MAC equation computed by the machine: the gate refuses
+    with `.quorum 2` and poisons the reservoir. No field of the transcript says so. -/
+theorem forged_circuit_opening_poisons_reservoir (grant : Spec.ToprfTicket) :
+    evaluatePreparedSpdzSession initialToprfReservoir
+        ((forgedCircuitTranscript grant).checks initialSpdzMacKey grant) =
+      .err initialToprfReservoir.poison (.quorum 2) := by
+  have hBad : decide (CommRingOps.mul initialSpdzMacKey (GoldilocksExt2.ofBase (Goldilocks.ofNat 5)) =
+      CommRingOps.mul initialSpdzMacKey (GoldilocksExt2.ofBase (Goldilocks.ofNat 6))) = false := by
+    decide
+  have hp : decide ((0 : Nat) < goldilocksPrime) = true := by decide
+  have hChecks : (forgedCircuitTranscript grant).checks initialSpdzMacKey grant =
+      ⟨true, true, true, true, false, true, true⟩ :=
+    SpdzOnlineChecks.eq_of_fields (decide_eq_true rfl) hp (decide_eq_true rfl)
+      (decide_eq_true rfl) hBad (decide_eq_true rfl) (decide_eq_true rfl)
+  rw [hChecks]
+  rfl
+
+/-- `#tooth` The gate does not release on the shifted circuit opening. -/
+theorem tooth_forged_circuit_opening_not_released (grant : Spec.ToprfTicket) :
+    ¬ (evaluatePreparedSpdzSession initialToprfReservoir
+        ((forgedCircuitTranscript grant).checks initialSpdzMacKey grant) =
+      .ok initialToprfReservoir ()) := by
+  rw [forged_circuit_opening_poisons_reservoir]
+  intro h
+  cases h
+
+/-- `#tooth` A `prepareReservoir` turn naming the current preprocessing session is refused: the
+    cursors of a session cannot be reset by preparing it again. -/
+theorem tooth_reprepare_same_session_refused {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (c : PiToprfCredState Attr O) (macKey : GoldilocksExt2)
+    (items sessions : Nat) :
+    (piToprfCredMachine cfg).step c
+      (.prepareReservoir c.reservoir.preprocessSid macKey items sessions) = none := by
+  dsimp only [piToprfCredMachine]
+  rw [ite_eq_right (fun h => absurd rfl h.1)]
+
 /-! ## 7. `#tooth` Mutation Guards for `ToprfMachine` -/
 
 /-- Mutant evaluation gate that skips the Phase-2 (`"toprf_spdz_circuit"`) MAC check! -/
 def evaluatePreparedWithoutCircuitMac (afterReserve : ToprfReservoir)
-    (tr : SpdzOnlineTranscript) : StepOutcome ToprfReservoir Unit ToprfRefusal :=
+    (tr : SpdzOnlineChecks) : StepOutcome ToprfReservoir Unit ToprfRefusal :=
   evaluatePreparedSpdzSession afterReserve { tr with phase2MacOk := true }
 
 /-- `#tooth` Skipping the Phase-2 `"toprf_spdz_circuit"` MAC check accepts a forged S-box opening
     transcript and leaves the compromised reservoir unpoisoned, whereas `evaluatePreparedSpdzSession`
     rejects with `.quorum 2` and poisons the entire reservoir! -/
 theorem tooth_skipping_phase2_mac_check_releases_unauthenticated_output :
-    ∃ (r : ToprfReservoir) (tr : SpdzOnlineTranscript),
+    ∃ (r : ToprfReservoir) (tr : SpdzOnlineChecks),
       tr.phase2MacOk = false ∧
       evaluatePreparedWithoutCircuitMac r tr = .ok r () ∧
       evaluatePreparedSpdzSession r tr = .err r.poison (.quorum 2) ∧
       r.poison.poisoned = true := by
-  refine ⟨initialToprfReservoir, { SpdzOnlineTranscript.honest with phase2MacOk := false },
+  refine ⟨initialToprfReservoir, { SpdzOnlineChecks.honest with phase2MacOk := false },
     rfl, rfl, rfl, rfl⟩
 
 /-- Mutant reservoir reservation that forgets to advance `pow7Cursor` and `beaverCursor`! -/
@@ -3079,6 +3386,15 @@ theorem tooth_unratcheted_failed_slot_recycles_counter :
   Qsag.piToprfCredState_abs_non_injective
   Qsag.piToprfCredWireOutcome_sound
   Qsag.piToprfCredService_reservoir_monotone
+  Qsag.SpdzOnlineTranscript.honest_checks
+  Qsag.evaluatePreparedSpdzSession_ok_all_checks
+  Qsag.piToprfCredService_eval_accept_checks
+  Qsag.piToprfCredWireOutcome_keeps_session_ledger
+  Qsag.piToprfCredMachine_reservoir_never_rewinds
+  Qsag.honest_transcript_passes_spdz_gate
+  Qsag.forged_circuit_opening_poisons_reservoir
+  Qsag.tooth_forged_circuit_opening_not_released
+  Qsag.tooth_reprepare_same_session_refused
   Qsag.tooth_forged_limbo_opening_rejected_by_piToprfCredService
   Qsag.piToprfCredService_accept_ok
   Qsag.piToprfCredService_reject_ok
@@ -3095,6 +3411,10 @@ theorem tooth_unratcheted_failed_slot_recycles_counter :
   Qsag.tooth_forged_limbo_opening_rejected_by_piToprfCredService
 #tooth_pair Qsag.reservoir_cursor_strict_monotone_and_refusal_isolation vs
   Qsag.tooth_skipping_phase2_mac_check_releases_unauthenticated_output
+#tooth_pair Qsag.honest_transcript_passes_spdz_gate vs
+  Qsag.tooth_forged_circuit_opening_not_released
+#tooth_pair Qsag.piToprfCredMachine_reservoir_never_rewinds vs
+  Qsag.tooth_reprepare_same_session_refused
 #tooth_pair Qsag.reservoir_cursor_strict_monotone_and_refusal_isolation vs
   Qsag.tooth_omitting_cursor_advance_reuses_pow7_tuples
 #tooth_pair Qsag.spdz_quorum_contains_honest_server vs
