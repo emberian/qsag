@@ -49,8 +49,9 @@ use core::fmt;
 
 use qsag_asm::{KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS};
 use qsag_core::belt_latch::DurableWal;
+use qsag_core::keccak_mpc::RssKeyShare256;
 use qsag_core::rss256::Shake256Prg256;
-use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes};
+use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes, ct_eq_bytes32};
 
 use crate::dzk::{
     DzkShape, Gf128, NodeBasis, challenge_points, data_node_sum, decode_elements, derive_weights,
@@ -599,13 +600,13 @@ fn reconstruct_opened(
 /// One party's replicated share of a `Keccak-f[1600]` state: share slot `party` and share
 /// slot `party + 1`. The state is the xor of the three slots.
 ///
-/// Opaque outside this module: no field, accessor or comparison is exported, so the
-/// words can only be consumed by `IsolatedRss256Party::load_shares`. The sole
-/// constructor is the trusted dealer `deal_keccak_shares`; both, and `Clone`, exist
-/// only in test and `testing-ephemeral` builds. A build without that feature cannot
-/// create, copy or load a share pair.
-#[cfg_attr(any(test, feature = "testing-ephemeral"), derive(Clone))]
+/// Strictly move-only (`!Clone` in all profiles) and opaque outside this module (`R-Ex-10`):
+/// production callers enroll states exclusively via WAL/session-mediated
+/// [`IsolatedRss256Party::enroll_rss_key_block`], while test/`testing-ephemeral` harnesses
+/// consume party- and session-bound tickets once via [`IsolatedRss256Party::load_shares`].
 pub struct SharePair {
+    party: usize,
+    session_id: Option<[u8; 32]>,
     mine: [u64; 25],
     next: [u64; 25],
 }
@@ -640,11 +641,31 @@ pub fn deal_rss256_keys(seed: &[u8; 32]) -> [Rss256PartyKeys; 3] {
     })
 }
 
-/// Dealer for one shared state: three random slots that xor to `secret`.
+/// Dealer for one shared state: three move-only party-bound slots that xor to `secret`.
 /// TRUSTED DEALER TEST/MEASUREMENT HELPER: not dealerless provisioning.
 #[cfg(any(test, feature = "testing-ephemeral"))]
 pub fn deal_keccak_shares(secret: &[u64; 25], rng: &mut SeedRng) -> [SharePair; 3] {
-    let mut slots = [[0u64; 25]; 3];
+    deal_keccak_shares_inner(None, secret, rng)
+}
+
+/// Session-bound variant of [`deal_keccak_shares`] rejecting cross-session enrollment.
+/// TRUSTED DEALER TEST/MEASUREMENT HELPER: not dealerless provisioning.
+#[cfg(any(test, feature = "testing-ephemeral"))]
+pub fn deal_keccak_shares_for_session(
+    session_id: [u8; 32],
+    secret: &[u64; 25],
+    rng: &mut SeedRng,
+) -> [SharePair; 3] {
+    deal_keccak_shares_inner(Some(session_id), secret, rng)
+}
+
+#[cfg(any(test, feature = "testing-ephemeral"))]
+fn deal_keccak_shares_inner(
+    session_id: Option<[u8; 32]>,
+    secret: &[u64; 25],
+    rng: &mut SeedRng,
+) -> [SharePair; 3] {
+    let mut slots = SecretBuffer([[0u64; 25]; 3]);
     for slot in &mut slots[..2] {
         for word in slot.iter_mut() {
             let mut raw = [0u8; 8];
@@ -656,6 +677,8 @@ pub fn deal_keccak_shares(secret: &[u64; 25], rng: &mut SeedRng) -> [SharePair; 
         slots[2][i] = word ^ slots[0][i] ^ slots[1][i];
     }
     core::array::from_fn(|p| SharePair {
+        party: p,
+        session_id,
         mine: slots[p],
         next: slots[(p + 1) % 3],
     })
@@ -911,20 +934,61 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         self.barrier
     }
 
-    /// Add this party's share pair of a state; returns the index the state takes. All
+    /// Production WAL/session-mediated state enrollment directly from a scheme-bound
+    /// [`RssKeyShare256`] and a public 200-byte (`[u64; 25]`) framing template (`R-Ex-10`),
+    /// without constructing or exposing any external [`SharePair`].
+    pub fn enroll_rss_key_block(
+        &mut self,
+        key_share: &RssKeyShare256,
+        expected_scheme_identity: &[u8; 32],
+        use_prf: bool,
+        public_template: &[u64; 25],
+        secret_byte_offset: usize,
+    ) -> Result<usize, NodeError> {
+        self.guarded(|party| {
+            if party.has_unverified_gates() {
+                return Err(NodeError::OpenBeforeCheck);
+            }
+            if key_share.party_id != party.party {
+                return Err(NodeError::InvalidParameters);
+            }
+            let shares = key_share
+                .replicated_keccak_state_shares(
+                    expected_scheme_identity,
+                    use_prf,
+                    public_template,
+                    secret_byte_offset,
+                )
+                .map_err(|_| NodeError::InvalidParameters)?;
+            party.states.push(SharePair {
+                party: party.party,
+                session_id: Some(party.session_id),
+                mine: shares.0,
+                next: shares.1,
+            });
+            Ok(party.states.len() - 1)
+        })
+    }
+
+    /// Add this party's move-only share pair of a state; returns the index the state takes. All
     /// three parties must load their pairs of the same states in the same order.
     ///
     /// The state set changes only under the session guard: the journal must be healthy,
-    /// the session unpoisoned, and every gate so far accepted by a barrier (the gate
-    /// record of an open wave is sized for the states it ran on). Otherwise the pair is
-    /// erased and nothing is loaded: [`NodeError::Journal`] or [`NodeError::Poisoned`] for
-    /// a session already in that state, [`NodeError::OpenBeforeCheck`] for unverified
-    /// gates, which also poisons the session.
+    /// the session unpoisoned, `pair.party == self.party`, `pair.session_id` (if bound) must
+    /// match `self.session_id`, and every gate so far must be accepted by a barrier.
     #[cfg(any(test, feature = "testing-ephemeral"))]
     pub fn load_shares(&mut self, pair: SharePair) -> Result<usize, NodeError> {
         self.guarded(|party| {
             if party.has_unverified_gates() {
                 return Err(NodeError::OpenBeforeCheck);
+            }
+            if pair.party != party.party {
+                return Err(NodeError::InvalidParameters);
+            }
+            if let Some(bound_sid) = &pair.session_id
+                && !ct_eq_bytes32(bound_sid, &party.session_id)
+            {
+                return Err(NodeError::InvalidParameters);
             }
             party.states.push(pair);
             Ok(party.states.len() - 1)
@@ -972,7 +1036,8 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         if self.journal_failed {
             return Err(NodeError::Journal);
         }
-        if self.is_poisoned() {
+        if self.is_poisoned() || self.journal.is_poisoned(&self.session_id) {
+            self.poisoned = true;
             return Err(NodeError::Poisoned);
         }
         let result = body(self);
@@ -1728,15 +1793,20 @@ mod tests {
         let (endpoints, stats) = InMemoryWireMesh::connect(3, SESSION);
         let keys = deal_rss256_keys(&SEED);
         let mut rng = SeedRng::new(&SEED, b"shares");
-        let shares: Vec<[SharePair; 3]> = secrets
-            .iter()
-            .map(|s| deal_keccak_shares(s, &mut rng))
-            .collect();
+        let mut per_party_shares: [Vec<SharePair>; 3] =
+            [Vec::with_capacity(secrets.len()), Vec::with_capacity(secrets.len()), Vec::with_capacity(secrets.len())];
+        for s in secrets {
+            let [s0, s1, s2] = deal_keccak_shares_for_session(SESSION, s, &mut rng);
+            per_party_shares[0].push(s0);
+            per_party_shares[1].push(s1);
+            per_party_shares[2].push(s2);
+        }
         let mut tamper = Some(tamper);
         let parties = endpoints
             .into_iter()
             .zip(keys)
-            .map(|(endpoint, keys)| {
+            .zip(per_party_shares)
+            .map(|((endpoint, keys), party_shares)| {
                 let p = keys.party;
                 let transport = if p == 2 {
                     TamperTransport {
@@ -1749,8 +1819,8 @@ mod tests {
                 let mut party =
                     IsolatedRss256Party::new(SESSION, keys, transport, MemoryPoisonJournal::new())
                         .unwrap();
-                for share in &shares {
-                    party.load_shares(share[p].clone()).unwrap();
+                for share in party_shares {
+                    party.load_shares(share).unwrap();
                 }
                 party
             })
@@ -2053,6 +2123,8 @@ mod tests {
     #[test]
     fn shares_load_only_under_the_session_guard() {
         let pair = || SharePair {
+            party: 0,
+            session_id: Some(SESSION),
             mine: [7; 25],
             next: [9; 25],
         };
@@ -2107,6 +2179,8 @@ mod tests {
     #[test]
     fn share_debug_and_gate_wipe() {
         let share = SharePair {
+            party: 0,
+            session_id: Some(SESSION),
             mine: [123; 25],
             next: [456; 25],
         };
@@ -2115,6 +2189,104 @@ mod tests {
         record.a_mine.resize(4, u64::MAX);
         record.wipe();
         assert!(record.a_mine.is_empty());
+    }
+
+    #[test]
+    fn enroll_rss_key_block_and_share_pair_sealing() {
+        let keys = deal_rss256_keys(&SEED);
+        // Party mismatch or session mismatch on `load_shares` rejects and poisons.
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+        let mut p0 = IsolatedRss256Party::new(
+            SESSION,
+            keys[0].clone(),
+            endpoints.remove(0),
+            MemoryPoisonJournal::new(),
+        )
+        .unwrap();
+        let mut rng = SeedRng::new(&SEED, b"seal");
+        let [_s0, s1, _s2] = deal_keccak_shares_for_session(SESSION, &[1u64; 25], &mut rng);
+        assert_eq!(p0.load_shares(s1), Err(NodeError::InvalidParameters));
+        assert!(p0.is_poisoned());
+
+        let (mut endpoints2, _) = InMemoryWireMesh::connect(3, SESSION);
+        let mut p0_sid = IsolatedRss256Party::new(
+            SESSION,
+            keys[0].clone(),
+            endpoints2.remove(0),
+            MemoryPoisonJournal::new(),
+        )
+        .unwrap();
+        let [wrong_sid_s0, _, _] =
+            deal_keccak_shares_for_session([0xEE; 32], &[1u64; 25], &mut rng);
+        assert_eq!(
+            p0_sid.load_shares(wrong_sid_s0),
+            Err(NodeError::InvalidParameters)
+        );
+        assert!(p0_sid.is_poisoned());
+
+        // Production `enroll_rss_key_block` enrolls scheme-bound `RssKeyShare256` states
+        // without touching `SharePair` or `load_shares`, runs `permute` + `check` + `open_prefix`,
+        // and matches single-prover `Keccak-f[1600]` bit-for-bit.
+        let scheme_id = [0x42; 32];
+        let sk_slots = [[0x11u8; 32], [0x22u8; 32], [0x33u8; 32]];
+        let prf_slots = [[0x44u8; 32], [0x55u8; 32], [0x66u8; 32]];
+        let prg_slots = [[0x77u8; 32], [0x88u8; 32], [0x99u8; 32]];
+        let mut sk_clear = [0u8; 32];
+        for i in 0..32 {
+            sk_clear[i] = sk_slots[0][i] ^ sk_slots[1][i] ^ sk_slots[2][i];
+        }
+        let template: [u64; 25] = core::array::from_fn(|i| (i as u64 + 1) * 0x0102_0304_0506_0708);
+        let mut expected_state = template;
+        for w in 0..4 {
+            let mut b8 = [0u8; 8];
+            b8.copy_from_slice(&sk_clear[8 * w..8 * w + 8]);
+            expected_state[2 + w] ^= u64::from_le_bytes(b8);
+        }
+        qsag_asm::keccak_f1600_batch(core::slice::from_mut(&mut expected_state));
+
+        let (endpoints3, _) = InMemoryWireMesh::connect(3, SESSION);
+        let nodes: Vec<_> = endpoints3
+            .into_iter()
+            .zip(keys)
+            .map(|(ep, k)| {
+                let p = k.party;
+                let mut rss_share = RssKeyShare256::from_replicated_shares(
+                    p,
+                    32,
+                    [0xAB; 32],
+                    (sk_slots[p], sk_slots[(p + 1) % 3]),
+                    (prf_slots[p], prf_slots[(p + 1) % 3]),
+                    (prg_slots[p], prg_slots[(p + 1) % 3]),
+                )
+                .unwrap();
+                rss_share.bind_scheme_identity(&scheme_id).unwrap();
+                let mut node =
+                    IsolatedRss256Party::new(SESSION, k, honest(ep), MemoryPoisonJournal::new())
+                        .unwrap();
+                assert_eq!(
+                    node.enroll_rss_key_block(&rss_share, &scheme_id, false, &template, 16),
+                    Ok(0)
+                );
+                node
+            })
+            .collect();
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = nodes
+                .into_iter()
+                .map(|mut node| {
+                    scope.spawn(move || {
+                        node.permute().unwrap();
+                        node.check().unwrap();
+                        node.open_prefix(4).unwrap()
+                    })
+                })
+                .collect();
+            for h in handles {
+                let opened = h.join().unwrap();
+                assert_eq!(opened[0][..], expected_state[..4]);
+            }
+        });
     }
 
     #[test]
