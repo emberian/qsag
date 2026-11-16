@@ -16,6 +16,8 @@ Paths in this guide are relative to `lean/Qsag/` unless they begin with another 
 
 | Modules under `lean/Qsag/` | Subject | Scope to preserve |
 | --- | --- | --- |
+| `Spec/IdealSign.lean`, `Spec/IdealCustody.lean`, `Spec/IdealMigrate.lean`, `Spec/IdealCred.lean`, `Spec/IdealAggregate.lean`, `Spec/Assumptions.lean` | Ideal machines for signing (verifying candidates only, strictly increasing epochs, failed signing burns the epoch), custody (`deploymentId`, quorum over recorded approvals of the exact intent, adaptive corruption below threshold), migration (enrolled key, derived nullifier, single claim, conservation), credentials (capability handles, 4-of-5 TOPRF gate, quota), aggregation (break = collision among recorded queries; `AggregateExtractorSound` indexed by error and extractor class); games with separated coins over an explicit adversary class | Only the signing latch refines its machine unconditionally. The others are targets: see the [specification table](../ASSURANCE.md#specification-layer-what-the-ideal-machines-state). Hardness for an unrestricted adversary class is refutable. |
+| `Spec/Algebra.lean`, `Spec/Parameters.lean`, `Spec/Primitives.lean` | `LawfulField` (with `inv_zero`), `PrimeOrderGroup` (with `n_prime`), deployed parameters, primitive interfaces | Parameters are checked against the Rust constants by inspection of each line, not by extraction. Curve group laws are assumed. |
 | `Math/Goldilocks.lean`, `Math/QuarticExt4.lean`, `Math/Gf2Pow128.lean` | Prime-field and extension arithmetic, Wiedemann towers | Algebraic laws apply to their exact representations; MIR/binary refinement is separate. Hem uses GoldilocksExt4, not a quadratic challenge field. |
 | `Oracle/Keccak.lean`, `Oracle/Poseidon2.lean`, `Oracle/Sponge.lean` | Sponge/permutation algebra and framing | Match byte order, domain tags, lengths and padding to runtime codecs; permutation invertibility is not cryptanalytic security. |
 | `Protocol/Signing/Fips205.lean`, `Protocol/Threshold/ThresholdMpc.lean` | SLH-DSA parameters, domain separation, threshold/reference evaluation | Match key, message, context and randomizer before asserting identical output. |
@@ -36,6 +38,15 @@ A recorded audit describes the source bytes it ran on. The module roster it must
 `lean/tools/gen_rosters.py`; `scripts/check_lean_policy.py` rejects a file on disk that is
 missing from either, and `scripts/check_extraction_provenance.py` checks the extracted
 crates against their recorded source hashes.
+
+The most recent whole-library run (2026-11-15, cold build with warnings as errors, 208
+modules) audited 96,449 declarations, 48,484 of them theorems, with none rejected.
+`scripts/check_lean_policy.py` reported no violation for `Spec/`, `Tactic/`, `Math/`,
+`Coding/` and `Oracle/` (no `import all`, no upward import, at most 12 `@[expose]` per
+module) and still fails for the tree as a whole, on `import all` edges and upward imports in
+the layers above. Further leaf modules are proved and audited on their own and are not yet
+registered; they are listed, with their limits, under
+[Staged formal work](../ASSURANCE.md#staged-formal-work).
 
 ### Boundary, bridge and test modules
 
@@ -72,7 +83,14 @@ per-path obligation.
 
 Baggy is a stateless hypertree + TSW construction. Waistband caches only static
 Top-$L$ internal child-root WOTS signatures, never message-binding leaves. Its
-256-bit digest WOTS+C profile has `w=4, chains=128, target_sum=192`. The 256-lane
+256-bit digest WOTS+C profile has `w=4, chains=128, target_sum=192`. Its few-time
+layer is PORS+FP and nothing else: one tree of $2^{11}$ leaves per hypertree leaf, 28
+distinct leaves revealed, a canonical multiproof of at most 128 nodes (the signer grinds
+the public counter until the selected subset qualifies, about one in $2^{10}$), at most
+4,994 bytes for the layer and 71,654 for the signature. The verifier refuses unsorted,
+duplicated and oversized openings and consumes exactly the canonical node sequence;
+PORS geometry is checked before any signature-size arithmetic. The FORS+C layer and
+its selection, opening and verification code are deleted. The 256-lane
 Keccak path and carryless $GF(2^{128})$ BGIN19 DZK support threshold evaluation.
 “Unlimited lifetime” excludes a stateful leaf budget, not finite-query security
 accounting or persistence of MPC resources. Corduroy is the algebraic Poseidon2
@@ -84,6 +102,20 @@ malicious online custodians can withhold participation. **QS-B (`BftShamirJorts`
 uses a global tree and quorum-independent allocation with certified BeltLatch and
 self-verifying pre-stepped Shamir WOTS+C. Allocation privacy does not imply
 transport anonymity. Match the actual signing threshold and latch quorum.
+
+### Few-time signature profiles
+
+| `qsag-fts` profile | Bytes | Node bytes | $w$ | $h$ | $L$ | Target sum | Uses |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Compact1122` | 1,122 | 32 | 96 | 8 | 34 | 1,615 | 1 |
+| `Full256Bit` | 2,338 | 32 | 5 | 8 | 72 | 144 | 1 |
+
+Both have rank domains above $2^{256}$ and 32-byte nodes, so a generic Grover preimage
+search costs more than $2^{128}$. The former `Compact514`, `Compact770` and `Compact1314`
+profiles used 16-byte nodes (64 Grover bits) and two of them allowed two uses; they, their
+CLI spellings and their fuzz and test consumers are removed, and the former two-use tests
+now assert single-use behaviour. `Fast256Test` is a test-only geometry. Node width is not a
+security reduction: an EUF-CMA proof for the $w=96$ profile is open.
 
 ## Hem profile and QROM accounting
 
@@ -137,6 +169,100 @@ checks and their binding proof. PoW work is not an automatic information-theoret
 soundness multiplier. Binary merge trees establish checked constituent proofs and
 disjoint signer sets, not recursive SNARK verification.
 
+### Public-mode proofs and the opening merge
+
+The zk-Hem prover (`crates/qsag-agg/src/zk_hem/protocol.rs`) has two modes. The hiding
+mode (`prove`: five tables, Libra masks, opening blinders) is used by the BlindVC
+presentation and the zk-Multisig relation. The public mode (`prove_public`: one table, no
+masks) is used only by the recursive opening merge, whose relation has no private witness.
+What the public transcript binds, in order: the relation digest (all matrices, variable
+count, public-input count), the WHIR schedule, the statement, the public inputs and the
+commitment, before the first challenge; each row round before its challenge; the three row
+values before the combination challenges; each column round before its coordinate. The
+constant and public cells enter the column sumcheck with weights $\lambda^{j+1}$ beside
+three independent combination challenges, with the assignment committed first, giving error
+at most $(\mathit{num\_public}+1)/\lvert\mathbb{F}_{p^4}\rvert$. A test flips one bit in
+every 8-byte word of a serialized public proof under a cSHAKE and a Poseidon2 regime
+(12,644 and 11,092 mutants); all are rejected.
+
+Prover-side changes that do not alter the proof: the selector is a prefix indicator held
+as three words rather than a folded table; the first round uses base-field tables; round
+polynomials omit the current variable's `eq` factor; and the weighted S-box residual
+along a row pair is evaluated as a degree-7 polynomial at about 24 extension
+multiplications per S-box (`GroupALineExt4` in `trace.rs`), with a byte-identical proof
+digest before and after and a test comparing it with the row evaluator at every point.
+
+`verify_succinct_shard_whir_merge` (`recursive.rs`) authorizes only when given
+`VerifiedHierarchicalHemEvidence` naming the same registry, epoch, message, threshold,
+summaries and regime; a mismatched regime is rejected. The opening-only predicate is
+`check_succinct_shard_whir_merge`. Before this split, an honestly proved merge over
+summaries nobody had verified returned `true` from a function whose name suggested
+authorization. The underlying gap is unchanged: no relation executes a shard's row
+sumcheck and AIR check, and the composed QROM reduction for the fixed-path transcript
+and for public mode is not mechanized. The Poseidon2 Merkle tweak is injective per key
+but not across keys (`pk_seed + (0,0,d,0)` at index `idx - d` equals `pk_seed` at `idx`);
+no full authentication path can be replayed that way, and the scope is pinned by a test.
+
+## Blinded MAC checks
+
+The dishonest-majority engine keeps its MAC key $\alpha$ across sessions and through
+resharing, so a failed MAC check must not reveal anything about it. A residual
+$d=m-\alpha x$ is zero for a correct opening; after a shift $\Delta$ of the opening it
+equals $-\alpha\Delta$, and opening it gives away $\alpha$. A degree check does not prevent
+this: at $t=n$ there is no redundancy, and a reshare dealer can distribute a
+degree-consistent value polynomial whose constant term violates the MAC relation.
+
+`crates/qsag-core/src/preprocessing/mac_blind.rs` opens $w=(\sum_i r_i)(\sum_j d_j)$
+instead, for every valid $(t,n)$ and for the scalar Goldilocks, extension-field and Boolean
+wrappers. The protocol, step by step:
+
+1. Commit the value shares before opening them. Form additive shares of the folded
+   residual privately.
+2. Each party draws a private randomizer contribution $r_i$.
+3. Compute additive shares of $w$ by oblivious linear evaluation on KOS OT extension, with
+   the residual on the sender side and disposable random masks as the receiver's choices.
+   Goldilocks: one product in $\mathbb{F}_{p^2}$ (not two independently corruptible
+   base-field products), 640 disposable choice bits, then a hash in the native field.
+   `Tower128`: six independent 128-bit masks.
+4. Derive both hash coins from the completed OT transcript and the ciphertext transcript.
+5. Commit every share of $w$, then open $w$, and accept when it is zero. For Shamir MAC
+   consistency, blind each degree syndrome and the reconstructed constant with its own
+   randomizer.
+
+| Check | Function | False-zero term in the ideal-OLE hybrid |
+| --- | --- | --- |
+| Goldilocks extension residual and degree syndromes | `blind_open_ext2`, `blind_open_degree_ext2` | $p^{-2}$ per test |
+| `Tower128` two-lane residual | `blind_open_tower128`, two independent rounds | $2^{-256}$ |
+| Additive Boolean opening (`open_additive_authenticated` in `triple_f2.rs`) | Commit the full residual vector; three projection coins bound to the commitments and the running OT transcript; each projection through `blind_open_tower128` | $(q^{-1}+(1-q^{-1})q^{-2})^3<q^{-2}=2^{-256}$, $q=2^{128}$ |
+
+With every corrupt input fixed, an honest $r_i$ leaves $\sum r_i$ uniform, and for $d\ne0$
+the map $r\mapsto rd$ permutes the field, so $w$ is uniform; conditioned on abort it is
+uniform on the nonzero elements and independent of $\alpha$. Raw Gilboa multiplication on
+the bits of the residual would not have this property, because selective failure on a
+choice bit is then a test on the residual. The additive Boolean path never reconstructs an
+unblinded residual sum; its projections stay in the MAC's polynomial basis and the final
+map into the tower representation is XOR-linear and zero-preserving, so no field
+isomorphism is needed to test zero.
+
+Scope: the terms above add to the folding, OT and PRG bounds and assume the
+post-correlation entropy amplifier satisfies the leftover-hash criterion of MASCOT
+(Appendix C). Evidence is by regression: unanimous Goldilocks and Boolean shifts, a
+degree-consistent 3-of-4 coalition shift, a degree-consistent dealer shift with full
+redundancy, a fault confined to the second lane, and repeated aborts with $\alpha$, the
+corrupt tape and the base OT fixed, in which the opened value equals $r\cdot d$ and differs
+across 16 honest tapes. A unanimous reshare with a shifted share ends in
+`ReshareMacCheckFailed`, leaves the old custody bytes intact, and the old custody still
+signs. No Lean theorem states this property.
+
+Related preprocessing parameters:
+
+| Item | Statement | Source |
+| --- | --- | --- |
+| Bucket size for Boolean triple combine | Least $f$ with $n/\binom{f(n+1)}{f}\le2^{-40}$ over $n$ output bits, after a post-hoc bit-level permutation: $f=3$ at 8,192 words, $f=4$ at 7,720 words, $f=7$ at one word. One bucket per pass discarded so the pool parity stays hidden; two passes on the claimed-factor PCG path. | `crates/qsag-core/src/preprocessing/triple_f2.rs` |
+| `GoldilocksExt2` authentication | Toeplitz combiner in blocks of 32 values; block id binds session, start and total count; fresh 256-bit tail entropy and a post-correlation coin per block; union bound over $\lceil\mathrm{count}/32\rceil$ blocks. The coin binds the completed OT-mesh transcript digest. | `crates/qsag-core/src/preprocessing.rs` |
+| Migration tapes | Canonical rejection sampling, `word < p`; no modulo bias; bounded retries, exhaustion is a liveness abort. | `crates/qsag-migrate/src/co_zk_mpc.rs` |
+| 192-bit reduction | `reduce_192_mod_p` has total-variation distance $(p-1)/(p\cdot2^{192})<2^{-192}$ from uniform, not zero. | `crates/qsag-accel/src/keccak.rs` |
+
 ## Compiler-extracted MIR and release ownership
 
 The 12-package root workspace consumes two separately rooted extraction crates: `aeneas/qsag-verified` (core/policy/quorum) and `aeneas/qsag-whir-verified` (aggregation), for 14 project packages. Charon + Aeneas generate `QsagVerified.Funs`; `QsagMirProofs`
@@ -158,6 +284,28 @@ and do not serialize threads using the same description. File and parent-directo
 `fsync`, stable lock sidecars, genesis binding and explicit error recovery remain
 part of the contract. No filesystem-only proof prevents a fully cloned disk/VM
 rollback without external monotone state.
+
+The journals that count one-time and few-time uses share one layout and one recovery rule:
+
+| Journal | Magic | Layout | Recovery |
+| --- | --- | --- | --- |
+| FTS burn journal (`crates/qsag-fts/src/wal.rs`) | `QSBURN05` | Page 0 genesis prefix; high-water-mark slots at 4096 and 8192; records from 12288 | Authenticate the committed prefix and the mark; truncate an uncommitted tail to the authenticated boundary and sync; a corrupt or missing committed record or an overclaimed mark fails closed |
+| HD query budget (`crates/qsag-hd/src/budget.rs`) | `QSHDQB04` | Same paged two-slot layout | Same; the guarded open also checks permissions by `fstat` on its second descriptor |
+| Core durable ledger, quorum directory anchor | — | Shared `TwoSlotRecord` (`crates/qsag-core/src/two_slot_record.rs`) | Two-slot recovery with corruption tests |
+
+Records and their locks go through `qsag_asm::durable::LockedRecord`
+(`crates/qsag-asm/src/durable.rs`): the lock is identified by the held descriptor and
+re-checked inside every read and replace, and on Unix a record or lock with
+`mode & 0o077 != 0` is refused, on the path and on the descriptor. External anchors are
+consumed through single-use tickets (`AnchorTicket` in `durable_ledger.rs`): a ticket is
+reserved, the journal write is made durable, and the ticket is consumed; replay, a failed
+persist, a crash at either point and a second consumption are all refused. The CLI gate
+(`require_anchor_or_waiver` in `crates/qsag-cli/src/anchor.rs`) demands exactly one of
+`--anchor-dir` and `--ephemeral-unanchored` for `keygen`, `sign`, `aggregate`,
+`quorum keygen` and `policy init`, and the MAC-covered `anchor_required` field stops an
+anchored key from being used under the waiver. A staged Lean crash model covers the paged
+layout under torn sectors with the MAC as an assumption; see
+[Staged formal work](../ASSURANCE.md#staged-formal-work).
 
 Leaf use, policy spend, preprocessing, nonce burns and poison state must compose
 before any useful partial share release. `Exec/CeremonyAtomicityAndAbort.lean` proves ceremony-level safety for valid crash/interleaving traces; the runtime reservation and release paths must refine that event model. Policy time windows need an authoritative clock or
@@ -192,6 +340,40 @@ Higher-level rustc/LLVM, wrappers and fallbacks remain trusted for leakage claim
 See [CONSTANT_TIME_ASM.md](CONSTANT_TIME_ASM.md) and
 [BINARY_RLIB_VERIFICATION.md](BINARY_RLIB_VERIFICATION.md).
 
+### Constant-time screen of the current release archives
+
+`scripts/audit_elf_ct.py` disassembles a compiled `libqsag_asm` archive and flags
+branches, divisions and indexed loads whose operands are tainted by secret inputs. The
+2026-11-15 run used four archives built from the current sources with the pinned
+toolchain, `codegen-units=1` (the workspace release setting) and LTO off so that the
+native objects are retained:
+
+| Archive | Taint errors |
+| --- | ---: |
+| x86-64 Linux, `no_std` | 0 |
+| x86-64 Linux, `std` | 0 |
+| AArch64 Linux, `no_std` | 0 |
+| AArch64 Linux, `std` | 0 |
+
+The strict native audits require the SIMD and Rust namespaces to be present. The
+cross-platform checks also pass: 19 native x86-64 assembly kernels,
+the 81 compiled Rust crypto functions of the `no_std` cross audit, Windows and Apple x86-64 assembly, 7 Linux and 7 Apple
+AArch64 kernels, architecture parity, the two-kernel AArch64
+bitslice cross check, and 15 negative self-tests that must be rejected.
+
+Three limits. First, the result is specific to the code generation profile: a control
+build that changes only the codegen-unit count from 1 to 16 produces 489 errors on the
+x86-64 `no_std` archive, because the optimizer outlines differently across 16 objects
+(`transpose64x256_portable` has 20 outlined calls there and none in the single-unit
+build). No assembly was changed and no allowlist widened to obtain the pass; the audit
+simply has to be run on the profile that ships. Second, this is an instruction and
+dataflow screen with its own model of taint: it is not a proof about every Rust branch,
+protocol caller or microarchitectural channel, and the script itself marks protocol
+control flow as needing review. Third, AArch64 and the non-Linux targets were compiled or
+assembled and inspected, not executed. The Lean certificates above concern the pinned
+kernel fixtures; these archives are a newer build and have not been re-pinned as
+fixtures.
+
 ## Verify your code, test your specs
 
 - **Native spec oracle:** `lean/SpecOracle.lean` / `lake exe spec-oracle` and
@@ -207,18 +389,39 @@ See [CONSTANT_TIME_ASM.md](CONSTANT_TIME_ASM.md) and
 - **Independent proof checking:** six-kernel `comparator --paranoid` CI challenges
   replay selected exports. Required-gate integration must include fresh extraction,
   both axiom audits, nonempty theorem instantiations and the exact release bytes.
+- **Workspace tests:** the 2026-11-15 release census lists 1,179 test cases across the 12
+  workspace crates and runs each exactly once: 1,144 pass, none fail, and 35 stay ignored
+  (opt-in throughput, production-depth, full-height and large-committee cases). A
+  zero-test filter cannot satisfy the census, since per-batch counts are compared with
+  the list. 44 doctests pass separately.
+- **Differential validation:** 50 tests in `validation/` pass with none ignored,
+  comparing the production crates with independent implementations and with the
+  executable Lean oracle's recorded vectors.
+- **Cross-language known answers:** `scripts/cross_kat_runner.py` checks 277 vectors and
+  279 mutations between the production crates and a compiled Lean reference
+  (`qsag-kat`). The reference binary predates the current Lean edits.
+- **Miri:** the full `qsag-asm` invocation passes 19 library tests, 1 integration test
+  and 1 compile-fail doctest. Under Miri the backend is the portable one; dispatch,
+  unaligned and tail buffers with sentinels, modular arithmetic, Keccak, transpose and
+  MAC, NTT and SHA are covered, and the hardware, file-lock and timing modules are
+  excluded there and run natively.
+- **Fuzzing:** five libFuzzer harnesses in `fuzz/fuzz_targets/`
+  (`fuzz_fips205_and_fts_decode`, `fuzz_blind_vc_and_agg_decode`, `fuzz_quorum_frames`,
+  `fuzz_whir_agg_verify`, `fuzz_diff_hashes_and_ntt`) build with sanitizer coverage and
+  compare tracing and ran ten seconds each with nonzero coverage and no crash. That is
+  a build-and-smoke gate; it says little about deep states.
 
 Each security theorem needs a load-bearing-check mutation or concrete attack
 witness where feasible. `#tooth` witnesses demonstrate specific failures; their
 existence alone does not guarantee that every theorem is nonvacuous. The desired
 acceptance chain connects production entrypoint, source/configuration, generated
 function, theorem/assumptions, profile, binary digest and tests. Independent green
-lanes without those links do not close the assurance architecture.
+checks without those links do not close the assurance architecture.
 
 
 ## Current parameter and theorem map
 
-Source inspection dated 2026-11-14. This map names statements and runtime consumers; it does not report a fresh Lean build of the concurrently edited tree.
+Source inspection dated 2026-11-14, with the Baggy, FTS, TOPRF and ceremony rows added on 2026-11-15. This map names statements and runtime consumers; it does not report a fresh Lean build of the concurrently edited tree.
 
 | Parameter / relation | Exact current statement | Source |
 | --- | --- | --- |
@@ -228,6 +431,9 @@ Source inspection dated 2026-11-14. This map names statements and runtime consum
 | WHIR query ladder | Johnson classical `(129,65,44,33)`; default Johnson QROM `ceil(512/log₂ B)+2=(258,130,88,66)` at B=(4,16,64,256); bounded-query profiles `(202,102,70,52)` with 16-bit work and `(216,109,74,56)` without. Stage work is 16 bits under `QSAG.PCS.POW2/v1` where enabled; `maxQueryCap=512`. Round bits (272/136 for the default) are nominal query-plus-work search accounting; see the regime table above. The PCS admits 2…28 variables (`MAX_PCS_NUM_VARS = 28`, 72 canonical stages); the Lean witness coverage below stops at 24. Runtime CWYZ witness tables cover the default QROM regime; classical witness rows for nv=20/24 are Lean-only. | `crates/qsag-agg/src/pcs.rs`, `crates/qsag-agg/src/sponge.rs`; `Protocol/Aggregation/Aggregation.lean` |
 | Multi-round budget | `multiRoundFsQromCompilerBound` is <2^-128 for Q+1≤2^40, five 256-bit Merkle roots and the deployed 24-variable geometry. Aggregated RBR numerators are `[4182,1644,824,489,792]/p⁴`, sum 7931/p⁴. The same expression fails at 2^41. Hem transcript flip bounds and quantum commitment extraction are premises still to instantiate. | `Protocol/Aggregation/MultiRoundFsQrom.lean`: `multiRoundFsQrom_budget_bound`, `tooth_multiRoundFsQrom_budget_fails_at_2pow41` |
 | WOTS+C | 128 base-four digits sum to 192. The accepted language has the coefficient of `x^192` in `(1+x+x²+x³)^128`, namely 3647133497298879801227908259470154861817607767728241841601287895307331452700 elements (≈251.01137 bits); uniform first-success grinding averages ≈31.7488 trials. Encoding width alone does not give 256 bits of accepted-language entropy. | `crates/qsag-core/src/tsw_baggy.rs`; `Protocol/Signing/HashSigs.lean` |
+| Baggy few-time layer | PORS+FP `SHA3_128F`: tree height 11, 28 revealed leaves, at most 128 multiproof nodes; layer at most `32·28 + 2 + 32·128 = 4,994` bytes; signature at most 71,654 bytes. Subset-cover bound $\binom{28g}{28}/\binom{2048}{28}$: at least 209, 157, 136, 122 bits for $g=1..4$ (proved in a staged module; the in-tree estimate is `forgery_bits_milli`). | `crates/qsag-core/src/pors_fp.rs` |
+| Threshold FTS ceremony | Per tuple and ordered pair: 256 random OTs for the shared-operand products (three operands in the three 16-byte segments of a 48-byte KOS pad, plus one set for $a^6$) instead of 7,552; MACs from 128 random OTs per lane on the key share, expanded to cSHAKE256 streams and folded by powers of $z$; squarings checked by one batched linear check; three products combined with weights $s,s^2,s^3$ against one sacrificial product; 9 authenticated values instead of 25. Tested by fault injection, not modelled in Lean. | `crates/qsag-fts/src/dkg.rs`, `crates/qsag-fts/src/ot.rs` |
+| Threshold OPRF reservoir | Chunks of 4 power tuples or 32 triples per preprocessing run, each under its own session id `PREPROCESS.V2(binding, sessions, scope, counter)`; union bound over runs. Client checks $ab=c$ on each reconstructed triple (a shifted factor passes with probability $1/p$) and masks each input limb with two triples ($1/p^2$). | `crates/qsag-cred/src/voprf_spdz.rs` |
 | Migration | `MIT_REPETITIONS=438`; `(2/3)^438≈2^-256.2136`. Active multiplication errors per flush are `<(63/(2^128-1))^2<2^-244` for packed Boolean `AND` (`BIT_CHECK_NUMERATOR=63`), `<2^-249` over the large primes, and `<2^-186` over cubic Goldilocks. No one of these numbers is a complete FS/QROM acceptance theorem. | `zk_engine.rs`; `outer_mpc.rs`; `pallas.rs`; `bls12_381.rs` |
 
 `hem_johnson_qrom_witnesses_cover_every_canonical_stage` checks canonical nv=2…24 stage coverage and equality of the used-row/table counts; the Rust schedule also admits nv=25…28, which this check does not cover. It establishes the stated numerical side conditions for the deployed QROM table; the underlying decomposition theorem remains the separate obligation below.
@@ -256,6 +462,8 @@ The outstanding reductions and implementation refinements are stated next to the
 
 - The compact hierarchy's outer AIR proves a public commitment chain. `VerifiedHierarchicalHemEvidence` is obtained by verifying the actual children and is required for authorization. `SuccinctRecursiveHemEnv.outerRelationSound` still assumes the missing recursive relation; it cannot certify first-time verification from a compact proof alone. The fixed-path child-WHIR merge in `crates/qsag-agg/src/zk_hem/recursive_whir.rs` verifies up to 16 child PCS openings inside one committed relation; it binds them to shard headers but verifies neither the shard signatures nor quorum authorization.
 - `Oracle/Qrom.lean` has a constructive classical-table classifier and a conditional local-target union bound. The latter leaves `hLocal`, `hCard` and `hCover` to the caller and does not itself provide an extractor for coherent quantum queries. The same module supplies exact measured-query branch masses, observed-response consistency and a bridge to `merkleQueryConsistent`; its locality and coherent-recording counterexamples identify the scope of that interface. A numerical compiler bound becomes protocol security after the remaining coherent-extraction premises and actual RBR/query event bounds are instantiated.
+- The ideal machines under `Spec/` say what each protocol must deliver. Apart from the signing latch, no real protocol is proved to refine its machine, and the hardness predicates are meaningful only for adversary classes that exclude exhaustive search. A sharper specification is not a stronger theorem about the implementation.
+- The blinded MAC check, the adaptive bucket size and the threshold FTS consistency check are implemented, reviewed and tested against injected faults. None has a Lean statement, and the modules listed under [Staged formal work](../ASSURANCE.md#staged-formal-work) are not yet covered by the library's build and audit.
 - Poseidon symbolic evaluation and degree upper bounds, active-box counts, and rational trail-factor arithmetic are different statements from actual reduced degree, Gröbner complexity or a differential probability bound for the fixed permutation. Likewise, primitive-break predicates must describe outputs of a reduction from the actual adversary, rather than unrestricted existential collisions.
 
 The acceptance target is a theorem about the implemented key generation, messages, signature/proof verifier, corruption view and abort/retry law. An ideal functionality with an abstract signer is an interface for that proof, not a substitute for it.
