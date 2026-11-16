@@ -30,7 +30,7 @@ structure Execution (α : Type) where
   cuts : List CutEvidence
   result : α
 
-def runPrepared {α : Type} (prepared : Prepared) (material : RssProduction.Material)
+@[expose] def runPrepared {α : Type} (prepared : Prepared) (material : RssProduction.Material)
     (tape : ParticipantTape) : Nat → Program α → Execution α
   | cut, .pure result => ⟨cut, [], result⟩
   | cut, .query query next =>
@@ -39,7 +39,7 @@ def runPrepared {α : Type} (prepared : Prepared) (material : RssProduction.Mate
       let rest := runPrepared prepared material tape (cut + 1) (next response)
       ⟨rest.nextCut, ⟨cut, query, computation⟩ :: rest.cuts, rest.result⟩
 
-def CutsFrom : Nat → List CutEvidence → Prop
+@[expose] def CutsFrom : Nat → List CutEvidence → Prop
   | _, [] => True
   | index, cut :: cuts => cut.index = index ∧
       HashesFrom index cut.query 0 cut.computation.evidence ∧ CutsFrom (index + 1) cuts
@@ -85,7 +85,7 @@ theorem runPrepared_query_log {α : Type} (profile : RssProduction.Profile)
       simp only [runPrepared, List.map_cons, queryLog_query]
       rw [(queryRun_correct profile request first query tape).2, ih]
 
-def signingProgram (profile : RssProduction.Profile) (request : SessionScheduleReq) :
+@[expose] def signingProgram (profile : RssProduction.Profile) (request : SessionScheduleReq) :
     Program (Option PqHashSig) :=
   if profile.params.statefulJorts then
     stateful cshake256Suite profile.params profile.material.pkSeed (RssProduction.payload profile request)
@@ -100,7 +100,7 @@ theorem signingProgram_refines (profile : RssProduction.Profile) (request : Sess
   simp only [signingProgram, RssProduction.sharedSign]
   split <;> simp only [evaluate_stateful, evaluate_stateless]
 
-def honestSigningExecution (profile : RssProduction.Profile) (request : SessionScheduleReq)
+@[expose] def honestSigningExecution (profile : RssProduction.Profile) (request : SessionScheduleReq)
     (tape : ParticipantTape) (first : Nat := 0) : Execution (Option PqHashSig) :=
   runPrepared (preparePublic profile request) profile.material tape first (signingProgram profile request)
 

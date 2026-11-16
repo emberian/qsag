@@ -25,7 +25,7 @@ structure UnverifiedBatch where
 
 /-- All query coordinates are already public. Internal invocation identifiers
 advance across the group; no answer is reconstructed by this producer. -/
-def produceBatch (prepared : Prepared) (material : RssProduction.Material)
+@[expose] def produceBatch (prepared : Prepared) (material : RssProduction.Material)
     (tape : ParticipantTape) : Nat → List Query → UnverifiedBatch
   | first, [] => ⟨first, []⟩
   | first, query :: queries =>
@@ -34,7 +34,7 @@ def produceBatch (prepared : Prepared) (material : RssProduction.Material)
     ⟨rest.nextInvocation, computation :: rest.computations⟩
 
 /-- External correctness observation, not an executable active release port. -/
-def candidateBatch (batch : UnverifiedBatch) : List Bytes :=
+@[expose] def candidateBatch (batch : UnverifiedBatch) : List Bytes :=
   batch.computations.map (fun computation => reconstructRssBytes computation.shares)
 
 theorem produceBatch_counter (prepared : Prepared) (material : RssProduction.Material)
@@ -65,7 +65,7 @@ theorem produceBatch_correct (profile : RssProduction.Profile) (request : Sessio
 
 /-- Every retained hash record names its actual public query and unique internal
 invocation; subcall numbering restarts only in the next invocation namespace. -/
-def BatchNumbered : Nat → List Query → List UnverifiedAnswer → Prop
+@[expose] def BatchNumbered : Nat → List Query → List UnverifiedAnswer → Prop
   | _, [], [] => True
   | first, query :: queries, computation :: computations =>
     HashesFrom first query 0 computation.evidence ∧ BatchNumbered (first + 1) queries computations
@@ -81,18 +81,18 @@ theorem produceBatch_numbered (prepared : Prepared) (material : RssProduction.Ma
 
 /-- The exact public coordinate selection of eval_tsw_wots_subtree_rss.
 A row consists of ell1 chain outputs for one leaf. -/
-def wotsRowQueries (params : PqHashParams) (layer : UInt32) (tree : UInt64)
+@[expose] def wotsRowQueries (params : PqHashParams) (layer : UInt32) (tree : UInt64)
     (selected : Nat) (digits : List Nat) (kp : Nat) : List Query :=
   (List.range params.ell1).map fun chain =>
     .wotsChain layer tree kp chain (if kp = selected then digits.getD chain 0 else params.w - 1)
 
-def wotsSubtreeQueries (params : PqHashParams) (layer : UInt32) (tree : UInt64)
+@[expose] def wotsSubtreeQueries (params : PqHashParams) (layer : UInt32) (tree : UInt64)
     (selected : Nat) (digits : List Nat) : List Query :=
   ((List.range (2 ^ params.subtreeHeight)).map
     (wotsRowQueries params layer tree selected digits)).flatten
 
 /-- Public-only row completion, after a separately checked grouped opening. -/
-def completeWotsRow (params : PqHashParams) (pkSeed : Bytes) (layer : UInt32) (tree : UInt64)
+@[expose] def completeWotsRow (params : PqHashParams) (pkSeed : Bytes) (layer : UInt32) (tree : UInt64)
     (selected : Nat) (digits : List Nat) (kp : Nat) (values : List Bytes) : Bytes :=
   if kp = selected then completeSelectedLeaf params pkSeed layer tree kp digits values
   else thTweakTl cshake256Suite pkSeed ⟨layer, tree, .wotsPk, UInt32.ofNat kp, 0, 0⟩ values

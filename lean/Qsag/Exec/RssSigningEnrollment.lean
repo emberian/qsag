@@ -24,7 +24,7 @@ structure PublicEnrollment where
   context : Bytes
   grindLimit : Nat
 
-def sharedEnrollment (profile : RssProduction.Profile) : PublicEnrollment :=
+@[expose] def sharedEnrollment (profile : RssProduction.Profile) : PublicEnrollment :=
   ⟨profile.params, derivePublicKeyMpc cshake256Suite profile.params
     (RssProduction.sharedOracle profile).toPqHashMpcOracles profile.material.pkSeed,
     profile.context, profile.grindLimit⟩
@@ -33,7 +33,7 @@ theorem sharedEnrollment_key (profile : RssProduction.Profile) :
     (sharedEnrollment profile).key = RssProduction.enrolledKey profile :=
   RssProduction.enrollment_from_shared_computation profile
 
-def publicPayload (enrollment : PublicEnrollment) (request : SessionScheduleReq) : Bytes :=
+@[expose] def publicPayload (enrollment : PublicEnrollment) (request : SessionScheduleReq) : Bytes :=
   encodeMultiFrame ["QSAG.RSS.PRODUCTION.REQUEST/v1".toUTF8.data.toList,
     encodeUcPqPublicKey enrollment.key, RssProduction.encodeParameters enrollment.params,
     enrollment.context, leb128 enrollment.grindLimit, encodeUcSigningRequest request]
@@ -44,7 +44,7 @@ theorem publicPayload_eq (profile : RssProduction.Profile) (request : SessionSch
   rw [sharedEnrollment_key]
   rfl
 
-def publicPrepared (enrollment : PublicEnrollment) (request : SessionScheduleReq) : Prepared :=
+@[expose] def publicPrepared (enrollment : PublicEnrollment) (request : SessionScheduleReq) : Prepared :=
   ⟨publicPayload enrollment request⟩
 
 theorem publicPrepared_eq (profile : RssProduction.Profile) (request : SessionScheduleReq) :
@@ -52,7 +52,7 @@ theorem publicPrepared_eq (profile : RssProduction.Profile) (request : SessionSc
   unfold publicPrepared preparePublic
   rw [publicPayload_eq]
 
-def enrolledStateful (enrollment : PublicEnrollment) (msg optRand : Bytes)
+@[expose] def enrolledStateful (enrollment : PublicEnrollment) (msg optRand : Bytes)
     (epoch : Nat) : Program (Option PqHashSig) :=
   if !enrollment.params.statefulJorts || !enrollment.params.productionWellFormed ||
       !enrollment.params.productionLeafIdxInRange epoch then pure none
@@ -63,7 +63,7 @@ def enrolledStateful (enrollment : PublicEnrollment) (msg optRand : Bytes)
       let rRand ← ask (.prfMsg optRand mu)
       core cshake256Suite enrollment.params pk.pkSeed pk msg mu rRand epoch none enrollment.grindLimit
 
-def enrolledStateless (enrollment : PublicEnrollment) (msg optRand : Bytes) : Program (Option PqHashSig) :=
+@[expose] def enrolledStateless (enrollment : PublicEnrollment) (msg optRand : Bytes) : Program (Option PqHashSig) :=
   if enrollment.params.statefulJorts || !enrollment.params.productionWellFormed then pure none
   else
     let pk := enrollment.key
@@ -119,7 +119,7 @@ theorem evaluate_enrolledStateless (profile : RssProduction.Profile) (msg optRan
   enrolledStateless_of_key (sharedEnrollment profile) (RssProduction.sharedOracle profile)
     msg optRand (by rfl)
 
-def enrolledSigningProgram (enrollment : PublicEnrollment) (request : SessionScheduleReq) :
+@[expose] def enrolledSigningProgram (enrollment : PublicEnrollment) (request : SessionScheduleReq) :
     Program (Option PqHashSig) :=
   if enrollment.params.statefulJorts then
     enrolledStateful enrollment (publicPayload enrollment request) request.optRand request.reqEpoch
@@ -134,7 +134,7 @@ theorem enrolledSigningProgram_refines (profile : RssProduction.Profile) (reques
 
 /-- Public enrollment + separate local share material are the executable inputs;
 referenceKey and RssProduction.payload are absent from the executable body. -/
-def enrolledExecution (enrollment : PublicEnrollment) (material : RssProduction.Material)
+@[expose] def enrolledExecution (enrollment : PublicEnrollment) (material : RssProduction.Material)
     (request : SessionScheduleReq) (tape : ParticipantTape) (first : Nat := 0) :
     Execution (Option PqHashSig) :=
   runPrepared (publicPrepared enrollment request) material tape first (enrolledSigningProgram enrollment request)
@@ -158,11 +158,11 @@ theorem enrolledExecution_wire_refines (profile : RssProduction.Profile) (reques
 
 /-- Exact keccak_mpc.rs tsw_rss_opt_rand domain/frame; it is different from
 `build_stateless_det_opt_domain` in tsw_baggy.rs. -/
-def rustRssOptRand (pk : PqPublicKey) : Bytes :=
+@[expose] def rustRssOptRand (pk : PqPublicKey) : Bytes :=
   cshake256Bytes "QSAG.TSW.RSS.OPT_RAND/v1".toUTF8.data.toList
     (encodeMultiFrame [pk.pkSeed, pk.pkRoot])
 
-def rustStatelessProgram (enrollment : PublicEnrollment) (message : Bytes) : Program (Option PqHashSig) :=
+@[expose] def rustStatelessProgram (enrollment : PublicEnrollment) (message : Bytes) : Program (Option PqHashSig) :=
   enrolledStateless enrollment message (rustRssOptRand enrollment.key)
 
 theorem rustStatelessProgram_refines (profile : RssProduction.Profile) (message : Bytes) :

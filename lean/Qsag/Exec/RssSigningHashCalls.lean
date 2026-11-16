@@ -20,7 +20,7 @@ set_option autoImplicit false
 
 abbrev ParticipantTape := Nat → Nat → Nat → Nat → RssPrfZeroSeeds
 
-def queryEncoding : Query → Bytes
+@[expose] def queryEncoding : Query → Bytes
   | .prfMsg rand mu => encodeMultiFrame [[0], rand, mu]
   | .wotsChain layer tree kp chain steps =>
       encodeMultiFrame [[1], leb128 layer.toNat, leb128 tree.toNat,
@@ -28,7 +28,7 @@ def queryEncoding : Query → Bytes
   | .forsReveal tree kp j u => encodeMultiFrame [[2], leb128 tree.toNat, leb128 kp, leb128 j, leb128 u]
   | .forsLeaf tree kp j u => encodeMultiFrame [[3], leb128 tree.toNat, leb128 kp, leb128 j, leb128 u]
 
-def hashPhase (query : Query) (subcall : Nat) : Bytes :=
+@[expose] def hashPhase (query : Query) (subcall : Nat) : Bytes :=
   encodeMultiFrame ["QSAG.RSS.SECRET-HASH/v1".toUTF8.data.toList, queryEncoding query, leb128 subcall]
 
 theorem hashPhase_subcall {query query' : Query} {i j : Nat}
@@ -47,7 +47,7 @@ structure HashEvidence where
 /-- The default is unreachable for this concrete honest32-byte driver; the
 following theorem proves an actual `some` result for every input. It is not a
 conversion from an active protocol abort into successful empty bytes. -/
-def hashRun (profile : RssProduction.Profile) (request : SessionScheduleReq)
+@[expose] def hashRun (profile : RssProduction.Profile) (request : SessionScheduleReq)
     (cut subcall : Nat) (query : Query) (input : RssByteShares) (tape : ParticipantTape) :
     HashEvidence × RssByteShares :=
   let result := cshakeForRequest profile request cut (hashPhase query subcall)
@@ -59,10 +59,10 @@ otherwise repeatedly deriving enrollment inside each label would dominate runtim
 structure Prepared where
   payload : Bytes
 
-def preparePublic (profile : RssProduction.Profile) (request : SessionScheduleReq) : Prepared :=
+@[expose] def preparePublic (profile : RssProduction.Profile) (request : SessionScheduleReq) : Prepared :=
   ⟨RssProduction.payload profile request⟩
 
-def hashRunPrepared (prepared : Prepared) (cut subcall : Nat) (query : Query)
+@[expose] def hashRunPrepared (prepared : Prepared) (cut subcall : Nat) (query : Query)
     (input : RssByteShares) (tape : ParticipantTape) : HashEvidence × RssByteShares :=
   let binding := encodeMultiFrame ["QSAG.RSS.PARTICIPANT/v1".toUTF8.data.toList,
     prepared.payload, leb128 cut, hashPhase query subcall]
@@ -90,7 +90,7 @@ theorem cshake32_has_output (profile : RssProduction.Profile) (request : Session
   · simp only [cshakeForRequest, cshakeParticipant, show 32 ≤ shake256RateBytes by rw [shake256RateBytes_eq]; decide,
       ↓reduceIte, cshakeNodes]
     exact rateOutputShares_represents _ _ _ _ _ h
-  · simp [RssByteShares.WellFormed, rssTakeShares, rateBlockBytes_length]
+  · simp [RssByteShares.WellFormed, rssTakeShares.public_eq_1, rateBlockBytes_length]
 
 theorem hashRun_is_actual_output (profile : RssProduction.Profile) (request : SessionScheduleReq)
     (cut subcall : Nat) (query : Query) (input : RssByteShares) (tape : ParticipantTape) :

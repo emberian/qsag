@@ -14,7 +14,7 @@ public section
 namespace Qsag.RssSigning
 set_option autoImplicit false
 
-def forsPk (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
+@[expose] def forsPk (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
     (tree : UInt64) (kp : Nat) : Program Bytes := do
   let roots ← mapProgram (fun j => merkleKp suite pkSeed 0 tree .forsTree (UInt32.ofNat kp)
     (fun u => ask (.forsLeaf tree kp j u)) params.forsHeight j 0) (List.range params.forsTrees)
@@ -27,7 +27,7 @@ def forsPk (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
   simp only [forsPk, evaluate_bind, evaluate_mapProgram, evaluate_merkleKp,
     evaluate_ask, answer, evaluate_pure, mpcComputeProductionForsPk.public_eq_1]
 
-def forsOpenings (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
+@[expose] def forsOpenings (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
     (tree : UInt64) (kp : Nat) (indices : List Nat) : Program (List ForsTreeOpening) :=
   mapProgram (fun j => do
     let secret ← ask (.forsReveal tree kp j (indices.getD j 0))
@@ -43,7 +43,7 @@ def forsOpenings (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : 
   simp only [forsOpenings, evaluate_mapProgram, evaluate_bind, evaluate_ask,
     evaluate_authPath, answer, evaluate_pure, mpcBuildProductionForsOpenings.public_eq_1]
 
-def layers (suite : TweakableHashSuite) (params : PqHashParams)
+@[expose] def layers (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed pkRoot rRand : Bytes) (maxGrind : Nat) :
     Nat → Nat → Bytes → Nat → Program (Option (List LayerXmssSig))
   | _, _, _, 0 => pure (some [])
@@ -86,7 +86,7 @@ def layers (suite : TweakableHashSuite) (params : PqHashParams)
         evaluate_authPath, evaluate_wotsPk, evaluate_xmssRoot, evaluate_pure]
       split <;> simp_all only [Option.map]
 
-def core (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
+@[expose] def core (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
     (pk : PqPublicKey) (msg mu rRand : Bytes) (leafIndex : Nat)
     (forsIndices : Option (List Nat)) (maxGrind : Nat) : Program (Option PqHashSig) := do
   let openingAndRoot ←
@@ -119,7 +119,7 @@ def core (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
       evaluate_forsPk, evaluate_layers]
   all_goals split <;> simp_all only [evaluate_pure]
 
-def stateful (suite : TweakableHashSuite) (params : PqHashParams)
+@[expose] def stateful (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed msg optRand : Bytes) (epoch maxGrind : Nat) : Program (Option PqHashSig) :=
   if !params.statefulJorts || !params.productionWellFormed || !params.productionLeafIdxInRange epoch then
     pure none
@@ -129,7 +129,7 @@ def stateful (suite : TweakableHashSuite) (params : PqHashParams)
     let rRand ← ask (.prfMsg optRand mu)
     core suite params pkSeed pk msg mu rRand epoch none maxGrind
 
-def stateless (suite : TweakableHashSuite) (params : PqHashParams)
+@[expose] def stateless (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed msg optRand : Bytes) (maxGrind : Nat) : Program (Option PqHashSig) :=
   if params.statefulJorts || !params.productionWellFormed then pure none
   else do
