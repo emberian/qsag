@@ -910,3 +910,932 @@ theorem zipWith_leaf_binding [DecidableEq S] (suite : HashSuite S D) : ∀ (idx 
 
 /-- **Authentication-path binding.** Two accepted openings of one index set to one root are
 the same opening, or they exhibit a collision of the leaf hash or of the node hash. -/
+theorem porsFpRoot_binding [DecidableEq S] [DecidableEq D] (p : Params) (suite : HashSuite S D)
+    (idx : List Nat) (secs secs' : List S) (auth auth' : List D) (r : D)
+    (h : porsFpRoot p suite idx secs auth = some r)
+    (h' : porsFpRoot p suite idx secs' auth' = some r) :
+    (secs = secs' ∧ auth = auth') ∨ LeafCollision suite ∨ NodeCollision suite := by
+  obtain ⟨hh, hc⟩ := (porsFpRoot_eq_some_iff p suite idx secs auth r).mp h
+  obtain ⟨hh', hc'⟩ := (porsFpRoot_eq_some_iff p suite idx secs' auth' r).mp h'
+  have hl := (headerOk_iff p idx _ _).mp hh
+  have hl' := (headerOk_iff p idx _ _).mp hh'
+  rcases climb_binding suite.node _ _ _ _ _ _ _ _ _ hc hc' with ⟨e1, e2⟩ | ⟨l, hcol⟩
+  · rcases zipWith_leaf_binding suite idx secs secs' (hl.2.2.1.trans hl.2.1.symm)
+      (hl'.2.2.1.trans hl'.2.1.symm) e1 with e | hcl
+    · exact .inl ⟨e, e2⟩
+    · exact .inr (.inl hcl)
+  · obtain ⟨i, a, b, a', b', hne, heq⟩ := hcol
+    exact .inr (.inr ⟨l, i, a, b, a', b', hne, heq⟩)
+
+/-- An opening accepted against the root of the signer's tree reveals the signer's secrets
+at those indices and carries the tree's own nodes, or it exhibits a collision. -/
+theorem opening_against_honest_root [DecidableEq S] [DecidableEq D] (p : Params)
+    (suite : HashSuite S D) (sec : Nat → S) (idx : List Nat) (secs : List S) (auth : List D)
+    (h : porsFpRoot p suite idx secs auth = some (honestTree suite sec p.treeHeight 0)) :
+    (secs = idx.map sec ∧ auth = honestAuth suite sec p.treeHeight idx) ∨
+      LeafCollision suite ∨ NodeCollision suite := by
+  have hs := porsFpRoot_some_shape p suite idx secs auth _ h
+  exact porsFpRoot_binding p suite idx secs (idx.map sec) auth
+    (honestAuth suite sec p.treeHeight idx) _ h
+    (porsFpRoot_complete p suite sec idx hs.1 hs.2.1)
+
+/-! ## 7. Index selection (`pors_fp_select`) -/
+
+def insertSorted (v : Nat) : List Nat → List Nat
+  | [] => [v]
+  | x :: xs => if v < x then v :: x :: xs else x :: insertSorted v xs
+
+def sortNat (l : List Nat) : List Nat := l.foldr insertSorted []
+
+/-- The draw loop: stop at `k` values, skip a word already drawn. -/
+def drawDistinct (k : Nat) : List Nat → List Nat → List Nat
+  | [], acc => acc
+  | v :: ws, acc =>
+    if acc.length = k then acc
+    else if v ∈ acc then drawDistinct k ws acc else drawDistinct k ws (acc ++ [v])
+
+def drawn (p : Params) (words : List Nat) : List Nat :=
+  drawDistinct p.reveal ((words.take p.drawBudget).map fun w => w % p.leaves) []
+
+/-- `pors_fp_select` on the 32-bit words read from the message XOF. -/
+def select (p : Params) (words : List Nat) : Option (List Nat) :=
+  if p.wellFormed && decide ((drawn p words).length = p.reveal) &&
+      decide ((octopusFrom p.treeHeight 0 (sortNat (drawn p words))).length ≤ p.maxAuthNodes)
+  then some (sortNat (drawn p words)) else none
+
+theorem insertSorted_cons (v x : Nat) (xs : List Nat) :
+    insertSorted v (x :: xs) = if v < x then v :: x :: xs else x :: insertSorted v xs := by rfl
+
+theorem mem_insertSorted (v y : Nat) (l : List Nat) : y ∈ insertSorted v l ↔ y = v ∨ y ∈ l := by
+  induction l with
+  | nil =>
+    show y ∈ [v] ↔ _
+    exact ⟨fun h => .inl (List.mem_singleton.mp h),
+      fun h => h.elim (fun e => List.mem_singleton.mpr e) (fun h => absurd h List.not_mem_nil)⟩
+  | cons x xs ih =>
+    rw [insertSorted_cons]
+    split
+    · exact List.mem_cons
+    · rw [List.mem_cons, ih, List.mem_cons]
+      exact ⟨fun h => h.elim (fun e => .inr (.inl e)) (fun h => h.elim .inl (fun h => .inr (.inr h))),
+        fun h => h.elim (fun e => .inr (.inl e)) (fun h => h.elim .inl (fun h => .inr (.inr h)))⟩
+
+theorem length_insertSorted (v : Nat) (l : List Nat) :
+    (insertSorted v l).length = l.length + 1 := by
+  induction l with
+  | nil => rfl
+  | cons x xs ih =>
+    rw [insertSorted_cons]
+    split
+    · rfl
+    · rw [List.length_cons, ih, List.length_cons]
+
+theorem insertSorted_strictInc (v : Nat) (l : List Nat) (hs : StrictInc l) (hv : v ∉ l) :
+    StrictInc (insertSorted v l) := by
+  induction l with
+  | nil => exact List.pairwise_singleton _ _
+  | cons x xs ih =>
+    have hp := List.pairwise_cons.mp hs
+    rw [insertSorted_cons]
+    split
+    · rename_i hvx
+      refine List.pairwise_cons.mpr ⟨fun a ha => ?_, hs⟩
+      rcases List.mem_cons.mp ha with heq | hmem
+      · rw [heq]
+        exact hvx
+      · have hxa : x < a := hp.1 a hmem
+        exact Nat.lt_trans hvx hxa
+    · rename_i hvx
+      have hne : ¬ v = x := fun e => hv (by rw [e]; exact List.mem_cons_self)
+      have hxv : x < v := by omega
+      refine List.pairwise_cons.mpr ⟨fun a ha => ?_,
+        ih hp.2 fun h => hv (List.mem_cons_of_mem _ h)⟩
+      rcases (mem_insertSorted v a xs).mp ha with heq | hmem
+      · rw [heq]
+        exact hxv
+      · exact hp.1 a hmem
+
+theorem sortNat_cons (x : Nat) (l : List Nat) : sortNat (x :: l) = insertSorted x (sortNat l) := by
+  rfl
+
+theorem mem_sortNat (y : Nat) (l : List Nat) : y ∈ sortNat l ↔ y ∈ l := by
+  induction l with
+  | nil => exact Iff.rfl
+  | cons x xs ih => rw [sortNat_cons, mem_insertSorted, ih, List.mem_cons]
+
+theorem length_sortNat (l : List Nat) : (sortNat l).length = l.length := by
+  induction l with
+  | nil => rfl
+  | cons x xs ih => rw [sortNat_cons, length_insertSorted, ih, List.length_cons]
+
+theorem sortNat_strictInc (l : List Nat) (hn : l.Nodup) : StrictInc (sortNat l) := by
+  induction l with
+  | nil => exact List.Pairwise.nil
+  | cons x xs ih =>
+    have hc := List.nodup_cons.mp hn
+    rw [sortNat_cons]
+    exact insertSorted_strictInc x _ (ih hc.2) fun h => hc.1 ((mem_sortNat x xs).mp h)
+
+theorem drawDistinct_full {k v : Nat} (ws : List Nat) {acc : List Nat} (h : acc.length = k) :
+    drawDistinct k (v :: ws) acc = acc := by
+  rw [drawDistinct]
+  split
+  · rfl
+  · contradiction
+
+theorem drawDistinct_dup {k v : Nat} (ws : List Nat) {acc : List Nat} (h : ¬ acc.length = k)
+    (hm : v ∈ acc) : drawDistinct k (v :: ws) acc = drawDistinct k ws acc := by
+  rw [drawDistinct]
+  split
+  · contradiction
+  · rfl
+
+theorem drawDistinct_new {k v : Nat} (ws : List Nat) {acc : List Nat} (h : ¬ acc.length = k)
+    (hm : v ∉ acc) : drawDistinct k (v :: ws) acc = drawDistinct k ws (acc ++ [v]) := by
+  rw [drawDistinct]
+  split
+  · contradiction
+  · rfl
+
+theorem drawDistinct_inv (k t : Nat) : ∀ (ws acc : List Nat), (∀ v ∈ ws, v < t) → acc.Nodup →
+    (∀ x ∈ acc, x < t) →
+    (drawDistinct k ws acc).Nodup ∧ ∀ x ∈ drawDistinct k ws acc, x < t := by
+  intro ws
+  induction ws with
+  | nil =>
+    intro acc _ hn hr
+    exact ⟨hn, hr⟩
+  | cons v ws ih =>
+    intro acc hws hn hr
+    have hws' : ∀ w ∈ ws, w < t := fun w hw => hws w (List.mem_cons_of_mem _ hw)
+    by_cases h1 : acc.length = k
+    · rw [drawDistinct_full ws h1]
+      exact ⟨hn, hr⟩
+    · by_cases hm : v ∈ acc
+      · rw [drawDistinct_dup ws h1 hm]
+        exact ih acc hws' hn hr
+      · rw [drawDistinct_new ws h1 hm]
+        refine ih (acc ++ [v]) hws' ?_ ?_
+        · refine List.nodup_append.mpr ⟨hn, List.pairwise_singleton _ _, fun a ha b hb => ?_⟩
+          rw [List.mem_singleton.mp hb]
+          exact fun e => hm (e ▸ ha)
+        · intro x hx
+          rcases List.mem_append.mp hx with hin | hlast
+          · exact hr x hin
+          · rw [List.mem_singleton.mp hlast]
+            exact hws v List.mem_cons_self
+
+/-- **Selection.** Every subset the selection returns is admissible: sorted, distinct,
+`reveal` many, in range, and inside the pruning bound. -/
+theorem select_admissible (p : Params) (words : List Nat) (idx : List Nat)
+    (h : select p words = some idx) : Admissible p idx := by
+  have hinv := drawDistinct_inv p.reveal p.leaves
+    ((words.take p.drawBudget).map fun w => w % p.leaves) []
+    (fun v hv => by
+      obtain ⟨w, _, hw⟩ := List.mem_map.mp hv
+      rw [← hw]
+      exact Nat.mod_lt _ (Nat.two_pow_pos _))
+    List.Pairwise.nil (fun x hx => absurd hx List.not_mem_nil)
+  unfold select at h
+  split at h
+  · rename_i hc
+    cases h
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+    exact ⟨sortNat_strictInc _ hinv.1, by rw [length_sortNat]; exact hc.1.2,
+      fun x hx => hinv.2 x ((mem_sortNat x _).mp hx), hc.2⟩
+  · cases h
+
+/-- A selected subset opens: the honest opening of what `select` returns is accepted. -/
+theorem selected_subset_opens (p : Params) (suite : HashSuite S D) (sec : Nat → S)
+    (words : List Nat) (idx : List Nat) (hw : p.wellFormed = true)
+    (h : select p words = some idx) :
+    porsFpRoot p suite idx (idx.map sec) (honestAuth suite sec p.treeHeight idx) =
+      some (honestTree suite sec p.treeHeight 0) :=
+  porsFpRoot_complete p suite sec idx hw (select_admissible p words idx h)
+
+/-! ## 8. Counting subsets
+
+`subsetsFrom k lo n` lists the strictly increasing `k`-element index lists inside
+`[lo, lo + n)`, each once. The counts below are proved for arbitrary sizes; nothing here is
+evaluated on a concrete tree. -/
+
+def choose : Nat → Nat → Nat
+  | _, 0 => 1
+  | 0, _ + 1 => 0
+  | n + 1, k + 1 => choose n k + choose n (k + 1)
+
+def subsetsFrom : Nat → Nat → Nat → List (List Nat)
+  | 0, _, _ => [[]]
+  | _ + 1, _, 0 => []
+  | k + 1, lo, n + 1 =>
+    (subsetsFrom k (lo + 1) n).map (fun s => lo :: s) ++ subsetsFrom (k + 1) (lo + 1) n
+
+theorem choose_zero_right (n : Nat) : choose n 0 = 1 := by cases n <;> rfl
+
+theorem choose_zero_succ (k : Nat) : choose 0 (k + 1) = 0 := by rfl
+
+theorem choose_succ_succ (n k : Nat) :
+    choose (n + 1) (k + 1) = choose n k + choose n (k + 1) := by rfl
+
+theorem subsetsFrom_zero (lo n : Nat) : subsetsFrom 0 lo n = [[]] := by cases n <;> rfl
+
+theorem subsetsFrom_succ (k lo n : Nat) :
+    subsetsFrom (k + 1) lo (n + 1) =
+      (subsetsFrom k (lo + 1) n).map (fun s => lo :: s) ++ subsetsFrom (k + 1) (lo + 1) n := by
+  rfl
+
+theorem length_subsetsFrom : ∀ (n k lo : Nat), (subsetsFrom k lo n).length = choose n k := by
+  intro n
+  induction n with
+  | zero =>
+    intro k lo
+    cases k with
+    | zero => rfl
+    | succ k => rfl
+  | succ n ih =>
+    intro k lo
+    cases k with
+    | zero => rw [subsetsFrom_zero, choose_zero_right]; rfl
+    | succ k =>
+      rw [subsetsFrom_succ, List.length_append, List.length_map, ih, ih, choose_succ_succ]
+
+theorem lt_shift {x lo n : Nat} (h : x < lo + 1 + n) : x < lo + (n + 1) := by omega
+
+theorem lt_unshift {x lo n : Nat} (h : x < lo + (n + 1)) : x < lo + 1 + n := by omega
+
+/-- The enumeration is exactly the sorted distinct `k`-subsets of the interval. -/
+theorem mem_subsetsFrom : ∀ (n k lo : Nat) (s : List Nat),
+    s ∈ subsetsFrom k lo n ↔
+      StrictInc s ∧ s.length = k ∧ ∀ x ∈ s, lo ≤ x ∧ x < lo + n := by
+  intro n
+  induction n with
+  | zero =>
+    intro k lo s
+    cases k with
+    | zero =>
+      rw [subsetsFrom_zero, List.mem_singleton]
+      constructor
+      · intro h
+        rw [h]
+        exact ⟨List.Pairwise.nil, rfl, fun x hx => absurd hx List.not_mem_nil⟩
+      · intro h
+        cases s with
+        | nil => rfl
+        | cons a t => exact absurd h.2.1 (Nat.succ_ne_zero _)
+    | succ k =>
+      constructor
+      · intro h
+        exact absurd h List.not_mem_nil
+      · intro h
+        cases s with
+        | nil => exact absurd h.2.1.symm (Nat.succ_ne_zero _)
+        | cons a t =>
+          have ha := h.2.2 a List.mem_cons_self
+          exact absurd ha.2 (Nat.not_lt.mpr ha.1)
+  | succ n ih =>
+    intro k lo s
+    cases k with
+    | zero =>
+      rw [subsetsFrom_zero, List.mem_singleton]
+      constructor
+      · intro h
+        rw [h]
+        exact ⟨List.Pairwise.nil, rfl, fun x hx => absurd hx List.not_mem_nil⟩
+      · intro h
+        cases s with
+        | nil => rfl
+        | cons a t => exact absurd h.2.1 (Nat.succ_ne_zero _)
+    | succ k =>
+      rw [subsetsFrom_succ, List.mem_append, List.mem_map]
+      constructor
+      · intro h
+        rcases h with ⟨s', hs', heq⟩ | hright
+        · obtain ⟨hst, hlen, hr⟩ := (ih k (lo + 1) s').mp hs'
+          rw [← heq]
+          refine ⟨List.pairwise_cons.mpr ⟨fun a ha => ?_, hst⟩, by rw [List.length_cons, hlen],
+            fun x hx => ?_⟩
+          · exact (hr a ha).1
+          · rcases List.mem_cons.mp hx with hx0 | hxs
+            · rw [hx0]
+              exact ⟨Nat.le_refl _, Nat.lt_succ_of_le (Nat.le_add_right _ _)⟩
+            · exact ⟨Nat.le_of_succ_le (hr x hxs).1, lt_shift (hr x hxs).2⟩
+        · obtain ⟨hst, hlen, hr⟩ := (ih (k + 1) (lo + 1) s).mp hright
+          exact ⟨hst, hlen, fun x hx => ⟨Nat.le_of_succ_le (hr x hx).1, lt_shift (hr x hx).2⟩⟩
+      · intro ⟨hst, hlen, hr⟩
+        cases s with
+        | nil => exact absurd hlen.symm (Nat.succ_ne_zero _)
+        | cons a t =>
+          have hp := List.pairwise_cons.mp hst
+          have ha := hr a List.mem_cons_self
+          by_cases hal : a = lo
+          · left
+            refine ⟨t, (ih k (lo + 1) t).mpr ⟨hp.2, Nat.succ.inj hlen, fun y hy => ?_⟩, by rw [hal]⟩
+            have h1 : a < y := hp.1 y hy
+            rw [hal] at h1
+            exact ⟨h1, lt_unshift (hr y (List.mem_cons_of_mem _ hy)).2⟩
+          · right
+            refine (ih (k + 1) (lo + 1) (a :: t)).mpr ⟨hst, hlen, fun y hy => ?_⟩
+            rcases List.mem_cons.mp hy with hy0 | hyt
+            · rw [hy0]
+              exact ⟨Nat.lt_of_le_of_ne ha.1 (fun e => hal e.symm), lt_unshift ha.2⟩
+            · have h1 : a < y := hp.1 y hyt
+              exact ⟨Nat.lt_of_le_of_lt ha.1 h1, lt_unshift (hr y (List.mem_cons_of_mem _ hyt)).2⟩
+
+/-- No subset is listed twice. -/
+theorem nodup_subsetsFrom : ∀ (n k lo : Nat), (subsetsFrom k lo n).Nodup := by
+  intro n
+  induction n with
+  | zero =>
+    intro k lo
+    cases k with
+    | zero => exact List.pairwise_singleton _ _
+    | succ k => exact List.Pairwise.nil
+  | succ n ih =>
+    intro k lo
+    cases k with
+    | zero =>
+      rw [subsetsFrom_zero]
+      exact List.pairwise_singleton _ _
+    | succ k =>
+      rw [subsetsFrom_succ]
+      refine List.nodup_append.mpr ⟨?_, ih (k + 1) (lo + 1), fun a ha b hb e => ?_⟩
+      · refine List.pairwise_map.mpr (List.Pairwise.imp (fun hne e => hne ?_) (ih k (lo + 1)))
+        exact (List.cons.inj e).2
+      · obtain ⟨s', _, heq⟩ := List.mem_map.mp ha
+        rw [← e, ← heq] at hb
+        have hlo := ((mem_subsetsFrom n (k + 1) (lo + 1) (lo :: s')).mp hb).2.2 lo List.mem_cons_self
+        exact Nat.not_succ_le_self lo hlo.1
+
+/-- Number of marked positions of `[lo, lo + n)`. -/
+def covCount (cov : Nat → Bool) : Nat → Nat → Nat
+  | _, 0 => 0
+  | lo, n + 1 => (if cov lo then 1 else 0) + covCount cov (lo + 1) n
+
+theorem covCount_succ (cov : Nat → Bool) (lo n : Nat) :
+    covCount cov lo (n + 1) = (if cov lo then 1 else 0) + covCount cov (lo + 1) n := by rfl
+
+theorem filter_all_map_cons_pos (cov : Nat → Bool) (a : Nat) (l : List (List Nat))
+    (h : cov a = true) :
+    (l.map fun s => a :: s).filter (fun s => s.all cov) =
+      (l.filter fun s => s.all cov).map fun s => a :: s := by
+  rw [List.filter_map]
+  refine congrArg (List.map fun s => a :: s) (List.filter_congr fun s _ => ?_)
+  show (a :: s).all cov = s.all cov
+  rw [List.all_cons, h, Bool.true_and]
+
+theorem filter_all_map_cons_neg (cov : Nat → Bool) (a : Nat) (l : List (List Nat))
+    (h : cov a = false) : (l.map fun s => a :: s).filter (fun s => s.all cov) = [] := by
+  induction l with
+  | nil => rfl
+  | cons s l ih =>
+    rw [List.map_cons, List.filter_cons_of_neg (p := fun s => s.all cov) (a := a :: s)
+      (by
+        show ¬ (a :: s).all cov = true
+        rw [List.all_cons, h, Bool.false_and]
+        exact Bool.false_ne_true)]
+    exact ih
+
+/-- **Subset-cover count.** The `k`-subsets all of whose members are marked are as many as the
+`k`-subsets of the marked positions. -/
+theorem covered_subsets_count (cov : Nat → Bool) : ∀ (n k lo : Nat),
+    ((subsetsFrom k lo n).filter fun s => s.all cov).length = choose (covCount cov lo n) k := by
+  intro n
+  induction n with
+  | zero =>
+    intro k lo
+    cases k with
+    | zero => rfl
+    | succ k => rfl
+  | succ n ih =>
+    intro k lo
+    cases k with
+    | zero =>
+      rw [subsetsFrom_zero, choose_zero_right]
+      rfl
+    | succ k =>
+      rw [subsetsFrom_succ, List.filter_append, List.length_append, ih (k + 1) (lo + 1),
+        covCount_succ]
+      cases hc : cov lo
+      · rw [filter_all_map_cons_neg cov lo _ hc]
+        show 0 + choose _ _ = choose (0 + _) _
+        rw [Nat.zero_add, Nat.zero_add]
+      · rw [filter_all_map_cons_pos cov lo _ hc, List.length_map, ih k (lo + 1)]
+        show _ = choose (1 + covCount cov (lo + 1) n) (k + 1)
+        rw [Nat.add_comm 1, choose_succ_succ]
+
+theorem choose_le_succ (n k : Nat) : choose n k ≤ choose (n + 1) k := by
+  cases k with
+  | zero =>
+    rw [choose_zero_right, choose_zero_right]
+    exact Nat.le_refl _
+  | succ k =>
+    rw [choose_succ_succ]
+    exact Nat.le_add_left _ _
+
+/-- Binomial dominance in the upper argument. -/
+theorem choose_mono (k : Nat) {a b : Nat} (h : a ≤ b) : choose a k ≤ choose b k := by
+  induction h with
+  | refl => exact Nat.le_refl _
+  | step _ ih => exact Nat.le_trans ih (choose_le_succ _ k)
+
+/-- Absorption: `(k + 1) * C(n + 1, k + 1) = (n + 1) * C(n, k)`. -/
+theorem succ_mul_choose (n k : Nat) :
+    (k + 1) * choose (n + 1) (k + 1) = (n + 1) * choose n k := by
+  induction n generalizing k with
+  | zero =>
+    cases k with
+    | zero => rfl
+    | succ k => rfl
+  | succ n ih =>
+    cases k with
+    | zero =>
+      have h1 := ih 0
+      rw [choose_zero_right] at h1
+      rw [choose_succ_succ (n + 1) 0, choose_zero_right]
+      omega
+    | succ j =>
+      have h1 := ih j
+      have h2 := ih (j + 1)
+      have hc : choose (n + 1) (j + 1) = choose n j + choose n (j + 1) := choose_succ_succ n j
+      rw [choose_succ_succ (n + 1) (j + 1), Nat.mul_add, h2, Nat.add_one_mul (j + 1), h1,
+        Nat.add_one_mul (n + 1) (choose (n + 1) (j + 1)), hc, Nat.mul_add]
+      omega
+
+def fact : Nat → Nat
+  | 0 => 1
+  | k + 1 => (k + 1) * fact k
+
+/-- The falling factorial `n (n - 1) ⋯ (n - k + 1)`. -/
+def ffTop : Nat → Nat → Nat
+  | _, 0 => 1
+  | 0, _ + 1 => 0
+  | n + 1, k + 1 => (n + 1) * ffTop n k
+
+theorem choose_mul_fact (n k : Nat) : choose n k * fact k = ffTop n k := by
+  induction k generalizing n with
+  | zero =>
+    rw [choose_zero_right]
+    cases n <;> rfl
+  | succ k ih =>
+    cases n with
+    | zero =>
+      rw [choose_zero_succ, Nat.zero_mul]
+      rfl
+    | succ n =>
+      show choose (n + 1) (k + 1) * ((k + 1) * fact k) = (n + 1) * ffTop n k
+      rw [← ih n, ← Nat.mul_assoc, Nat.mul_comm (choose (n + 1) (k + 1)) (k + 1),
+        succ_mul_choose, Nat.mul_assoc]
+
+/-- The binomial ratio is the falling-factorial ratio: `C(c,k) / C(t,k) = c^(k) / t^(k)`. -/
+theorem choose_cross (c t k : Nat) : choose c k * ffTop t k = choose t k * ffTop c k := by
+  rw [← choose_mul_fact t k, ← choose_mul_fact c k]
+  exact Nat.mul_left_comm _ _ _
+
+/-- `num / den ≤ 2^(-e)`. -/
+@[expose] def AtLeastBits (e num den : Nat) : Prop := 2 ^ e * num ≤ den
+
+/-- `num / den > 2^(-e)`. -/
+def BelowBits (e num den : Nat) : Prop := den < 2 ^ e * num
+
+theorem atLeastBits_choose_of_ffTop {c t k e : Nat} (hpos : 0 < ffTop c k)
+    (h : AtLeastBits e (ffTop c k) (ffTop t k)) : AtLeastBits e (choose c k) (choose t k) := by
+  unfold AtLeastBits at h ⊢
+  have h1 : choose c k * (2 ^ e * ffTop c k) ≤ choose c k * ffTop t k := Nat.mul_le_mul_left _ h
+  rw [choose_cross c t k] at h1
+  have h3 : 2 ^ e * choose c k * ffTop c k = choose c k * (2 ^ e * ffTop c k) := by
+    rw [Nat.mul_assoc]
+    exact Nat.mul_left_comm _ _ _
+  rw [← h3] at h1
+  exact Nat.le_of_mul_le_mul_right h1 hpos
+
+theorem belowBits_choose_of_ffTop {c t k e : Nat} (hpos : 0 < ffTop c k)
+    (h : BelowBits e (ffTop c k) (ffTop t k)) : BelowBits e (choose c k) (choose t k) := by
+  unfold BelowBits at h ⊢
+  have hcpos : 0 < choose c k := by
+    refine Nat.pos_of_ne_zero fun h0 => ?_
+    have hf := choose_mul_fact c k
+    rw [h0, Nat.zero_mul] at hf
+    rw [← hf] at hpos
+    exact Nat.lt_irrefl _ hpos
+  refine Nat.lt_of_not_le fun hle => ?_
+  have h1 : 2 ^ e * choose c k * ffTop c k ≤ choose t k * ffTop c k := Nat.mul_le_mul_right _ hle
+  rw [← choose_cross c t k] at h1
+  have h2 : choose c k * ffTop t k < choose c k * (2 ^ e * ffTop c k) :=
+    Nat.mul_lt_mul_of_pos_left h hcpos
+  have h3 : 2 ^ e * choose c k * ffTop c k = choose c k * (2 ^ e * ffTop c k) := by
+    rw [Nat.mul_assoc]
+    exact Nat.mul_left_comm _ _ _
+  rw [h3] at h1
+  exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le h2 h1)
+
+/-! ## 9. The subset-cover bound -/
+
+theorem filter_length_lt {α : Type} (q : α → Bool) (l : List α) (a : α) (ha : a ∈ l)
+    (hq : q a = false) : (l.filter q).length < l.length := by
+  induction l with
+  | nil => exact absurd ha List.not_mem_nil
+  | cons x xs ih =>
+    cases hx : q x
+    · rw [List.filter_cons_of_neg (by rw [hx]; exact Bool.false_ne_true)]
+      exact Nat.lt_succ_of_le (List.length_filter_le q xs)
+    · rw [List.filter_cons_of_pos hx]
+      rcases List.mem_cons.mp ha with heq | hmem
+      · rw [heq, hx] at hq
+        cases hq
+      · exact Nat.succ_lt_succ (ih hmem)
+
+theorem covCount_congr (cov cov' : Nat → Bool) : ∀ (n lo : Nat),
+    (∀ x, lo ≤ x → x < lo + n → cov x = cov' x) → covCount cov lo n = covCount cov' lo n := by
+  intro n
+  induction n with
+  | zero =>
+    intro lo _
+    rfl
+  | succ n ih =>
+    intro lo h
+    rw [covCount_succ, covCount_succ, h lo (Nat.le_refl _) (by omega),
+      ih (lo + 1) fun x h1 h2 => h x (by omega) (by omega)]
+
+/-- The marked positions that lie in a list are at most as many as its entries. -/
+theorem covCount_mem_le : ∀ (n lo : Nat) (L : List Nat),
+    covCount (fun x => decide (x ∈ L)) lo n ≤ L.length := by
+  intro n
+  induction n with
+  | zero =>
+    intro lo L
+    exact Nat.zero_le _
+  | succ n ih =>
+    intro lo L
+    rw [covCount_succ]
+    show (if decide (lo ∈ L) = true then 1 else 0) + covCount (fun x => decide (x ∈ L)) (lo + 1) n
+      ≤ L.length
+    by_cases hmem : lo ∈ L
+    · have hlt := filter_length_lt (fun y => !decide (y = lo)) L lo hmem
+        (by show (!decide (lo = lo)) = false; rw [decide_eq_true rfl]; rfl)
+      have hcongr := covCount_congr (fun x => decide (x ∈ L))
+        (fun x => decide (x ∈ L.filter fun y => !decide (y = lo))) n (lo + 1) (fun x h1 _ => by
+          have hne : ¬ x = lo := by omega
+          show decide (x ∈ L) = decide (x ∈ L.filter fun y => !decide (y = lo))
+          by_cases hx : x ∈ L
+          · rw [decide_eq_true hx, decide_eq_true (List.mem_filter.mpr
+              ⟨hx, by show (!decide (x = lo)) = true; rw [decide_eq_false hne]; rfl⟩)]
+          · rw [decide_eq_false hx, decide_eq_false (fun h => hx (List.mem_filter.mp h).1)])
+      have hih := ih (lo + 1) (L.filter fun y => !decide (y = lo))
+      have h1 : (if decide (lo ∈ L) = true then 1 else 0) = 1 := by
+        rw [decide_eq_true hmem]
+        rfl
+      rw [h1, hcongr]
+      omega
+    · have h0 : (if decide (lo ∈ L) = true then 1 else 0) = 0 := by
+        rw [decide_eq_false hmem]
+        rfl
+      rw [h0, Nat.zero_add]
+      exact ih (lo + 1) L
+
+/-- The leaves made public by a list of signatures, each given by its index set. -/
+def revealedBy (sigs : List (List Nat)) : Nat → Bool := fun x => decide (x ∈ sigs.flatten)
+
+theorem flatten_length_of_uniform (k : Nat) : ∀ sigs : List (List Nat),
+    (∀ s ∈ sigs, s.length = k) → sigs.flatten.length = sigs.length * k := by
+  intro sigs
+  induction sigs with
+  | nil =>
+    intro _
+    exact (Nat.zero_mul k).symm
+  | cons s t ih =>
+    intro h
+    rw [List.flatten_cons, List.length_append, h s List.mem_cons_self,
+      ih fun s' hs' => h s' (List.mem_cons_of_mem _ hs'), List.length_cons, Nat.add_one_mul,
+      Nat.add_comm]
+
+/-- After `g` signatures of `k` leaves each at most `g * k` leaves are public. -/
+theorem revealed_count_le (sigs : List (List Nat)) (k t : Nat) (h : ∀ s ∈ sigs, s.length = k) :
+    covCount (revealedBy sigs) 0 t ≤ sigs.length * k := by
+  rw [← flatten_length_of_uniform k sigs h]
+  exact covCount_mem_le t 0 sigs.flatten
+
+/-- All sorted distinct `reveal`-subsets of the leaves. -/
+def subsets (p : Params) : List (List Nat) := subsetsFrom p.reveal 0 p.leaves
+
+/-- The subsets that pass an acceptance test (the pruning test, the draw budget, anything)
+and consist of public leaves only: the message-hash outputs that make a forgery. -/
+def coverWins (p : Params) (acc : List Nat → Bool) (cov : Nat → Bool) : List (List Nat) :=
+  (subsets p).filter fun s => acc s && s.all cov
+
+theorem mem_subsets_iff (p : Params) (s : List Nat) :
+    s ∈ subsets p ↔ StrictInc s ∧ s.length = p.reveal ∧ ∀ x ∈ s, x < p.leaves := by
+  unfold subsets
+  rw [mem_subsetsFrom]
+  constructor
+  · intro ⟨h1, h2, h3⟩
+    refine ⟨h1, h2, fun x hx => ?_⟩
+    have hx2 := (h3 x hx).2
+    rw [Nat.zero_add] at hx2
+    exact hx2
+  · intro ⟨h1, h2, h3⟩
+    refine ⟨h1, h2, fun x hx => ⟨Nat.zero_le _, ?_⟩⟩
+    rw [Nat.zero_add]
+    exact h3 x hx
+
+/-- The admissible index sets are the listed subsets that pass the pruning test. -/
+theorem admissible_iff (p : Params) (idx : List Nat) :
+    Admissible p idx ↔
+      idx ∈ subsets p ∧ (octopusFrom p.treeHeight 0 idx).length ≤ p.maxAuthNodes := by
+  rw [mem_subsets_iff]
+  exact ⟨fun h => ⟨⟨h.strict, h.length, h.range⟩, h.pruned⟩,
+    fun h => ⟨h.1.1, h.1.2.1, h.1.2.2, h.2⟩⟩
+
+theorem subsets_nodup (p : Params) : (subsets p).Nodup := nodup_subsetsFrom _ _ _
+
+theorem subsets_length (p : Params) : (subsets p).length = choose p.leaves p.reveal :=
+  length_subsetsFrom _ _ _
+
+theorem coverWins_length_le (p : Params) (acc : List Nat → Bool) (cov : Nat → Bool) :
+    (coverWins p acc cov).length ≤ choose (covCount cov 0 p.leaves) p.reveal := by
+  have e : coverWins p acc cov =
+      ((subsetsFrom p.reveal 0 p.leaves).filter fun s => s.all cov).filter acc :=
+    List.filter_filter.symm
+  rw [e]
+  exact Nat.le_trans (List.length_filter_le _ _)
+    (Nat.le_of_eq (covered_subsets_count cov p.leaves p.reveal 0))
+
+/-- Without an acceptance test the count is exact. -/
+theorem coverWins_all_length (p : Params) (cov : Nat → Bool) :
+    (coverWins p (fun _ => true) cov).length = choose (covCount cov 0 p.leaves) p.reveal :=
+  covered_subsets_count cov p.leaves p.reveal 0
+
+/-- **Subset-cover bound.** After at most `r` signatures under one tree, the subsets that
+would be a forgery are at most a `2^(-e)` fraction of all subsets, whenever the
+falling-factorial ratio `(r k)^(k) / t^(k)` is at most `2^(-e)`. The acceptance test `acc`
+is arbitrary: pruning removes subsets and cannot raise the fraction. -/
+theorem forgery_fraction_bound (p : Params) (acc : List Nat → Bool) (sigs : List (List Nat))
+    (r e : Nat) (hk : ∀ s ∈ sigs, s.length = p.reveal) (hsigs : sigs.length ≤ r)
+    (hb : AtLeastBits e (ffTop (r * p.reveal) p.reveal) (ffTop p.leaves p.reveal))
+    (hpos : 0 < ffTop (r * p.reveal) p.reveal) :
+    AtLeastBits e (coverWins p acc (revealedBy sigs)).length (subsets p).length := by
+  have h1 := atLeastBits_choose_of_ffTop hpos hb
+  unfold AtLeastBits at h1 ⊢
+  rw [subsets_length]
+  have hc : covCount (revealedBy sigs) 0 p.leaves ≤ r * p.reveal :=
+    Nat.le_trans (revealed_count_le sigs p.reveal p.leaves hk) (Nat.mul_le_mul_right _ hsigs)
+  exact Nat.le_trans (Nat.mul_le_mul_left _
+    (Nat.le_trans (coverWins_length_le p acc _) (choose_mono p.reveal hc))) h1
+
+/-! ## 10. `SHA3_128F`: 2048 leaves, 28 revealed
+
+The four ratios `(28 r)^(28) / 2048^(28)` are products of 28 factors each; the kernel
+multiplies them out. No subset is enumerated. -/
+
+/-- Floor of `-log2` of the forgery fraction after `r` signatures on one tree. -/
+def sha3Bits : Nat → Nat
+  | 1 => 209
+  | 2 => 157
+  | 3 => 136
+  | 4 => 122
+  | _ => 0
+
+theorem sha3_128f_ff_pos :
+    0 < ffTop 28 28 ∧ 0 < ffTop 56 28 ∧ 0 < ffTop 84 28 ∧ 0 < ffTop 112 28 := by
+  decide +kernel
+
+/-- The floors are exact: each ratio is at most `2^(-b)` and above `2^(-(b+1))`. -/
+theorem sha3_128f_ff_bits :
+    (AtLeastBits 209 (ffTop 28 28) (ffTop 2048 28) ∧
+      BelowBits 210 (ffTop 28 28) (ffTop 2048 28)) ∧
+    (AtLeastBits 157 (ffTop 56 28) (ffTop 2048 28) ∧
+      BelowBits 158 (ffTop 56 28) (ffTop 2048 28)) ∧
+    (AtLeastBits 136 (ffTop 84 28) (ffTop 2048 28) ∧
+      BelowBits 137 (ffTop 84 28) (ffTop 2048 28)) ∧
+    (AtLeastBits 122 (ffTop 112 28) (ffTop 2048 28) ∧
+      BelowBits 123 (ffTop 112 28) (ffTop 2048 28)) := by
+  unfold AtLeastBits BelowBits
+  decide +kernel
+
+/-- **Exact binomial bounds.** `C(28 r, 28) / C(2048, 28)` lies in `(2^(-(b+1)), 2^(-b)]` for
+`b = 209, 157, 136, 122` at `r = 1, 2, 3, 4`. -/
+theorem sha3_128f_binomial_bits :
+    (AtLeastBits 209 (choose 28 28) (choose 2048 28) ∧
+      BelowBits 210 (choose 28 28) (choose 2048 28)) ∧
+    (AtLeastBits 157 (choose 56 28) (choose 2048 28) ∧
+      BelowBits 158 (choose 56 28) (choose 2048 28)) ∧
+    (AtLeastBits 136 (choose 84 28) (choose 2048 28) ∧
+      BelowBits 137 (choose 84 28) (choose 2048 28)) ∧
+    (AtLeastBits 122 (choose 112 28) (choose 2048 28) ∧
+      BelowBits 123 (choose 112 28) (choose 2048 28)) :=
+  ⟨⟨atLeastBits_choose_of_ffTop sha3_128f_ff_pos.1 sha3_128f_ff_bits.1.1,
+      belowBits_choose_of_ffTop sha3_128f_ff_pos.1 sha3_128f_ff_bits.1.2⟩,
+    ⟨atLeastBits_choose_of_ffTop sha3_128f_ff_pos.2.1 sha3_128f_ff_bits.2.1.1,
+      belowBits_choose_of_ffTop sha3_128f_ff_pos.2.1 sha3_128f_ff_bits.2.1.2⟩,
+    ⟨atLeastBits_choose_of_ffTop sha3_128f_ff_pos.2.2.1 sha3_128f_ff_bits.2.2.1.1,
+      belowBits_choose_of_ffTop sha3_128f_ff_pos.2.2.1 sha3_128f_ff_bits.2.2.1.2⟩,
+    ⟨atLeastBits_choose_of_ffTop sha3_128f_ff_pos.2.2.2 sha3_128f_ff_bits.2.2.2.1,
+      belowBits_choose_of_ffTop sha3_128f_ff_pos.2.2.2 sha3_128f_ff_bits.2.2.2.2⟩⟩
+
+/-- **`SHA3_128F` few-time bound.** After at most `r ∈ {1, 2, 3, 4}` signatures under one
+tree, at most a `2^(-209)`, `2^(-157)`, `2^(-136)`, `2^(-122)` fraction of the subsets a
+message hash can select consists of revealed leaves, under any acceptance test. -/
+theorem sha3_128f_forgery_bound (acc : List Nat → Bool) (sigs : List (List Nat)) (r : Nat)
+    (hk : ∀ s ∈ sigs, s.length = sha3_128f.reveal) (hsigs : sigs.length ≤ r)
+    (hr1 : 1 ≤ r) (hr4 : r ≤ 4) :
+    AtLeastBits (sha3Bits r) (coverWins sha3_128f acc (revealedBy sigs)).length
+      (subsets sha3_128f).length := by
+  have hcases : r = 1 ∨ r = 2 ∨ r = 3 ∨ r = 4 := by omega
+  rcases hcases with h | h | h | h
+  · rw [h] at hsigs ⊢
+    exact forgery_fraction_bound sha3_128f acc sigs 1 209 hk hsigs sha3_128f_ff_bits.1.1
+      sha3_128f_ff_pos.1
+  · rw [h] at hsigs ⊢
+    exact forgery_fraction_bound sha3_128f acc sigs 2 157 hk hsigs sha3_128f_ff_bits.2.1.1
+      sha3_128f_ff_pos.2.1
+  · rw [h] at hsigs ⊢
+    exact forgery_fraction_bound sha3_128f acc sigs 3 136 hk hsigs sha3_128f_ff_bits.2.2.1.1
+      sha3_128f_ff_pos.2.2.1
+  · rw [h] at hsigs ⊢
+    exact forgery_fraction_bound sha3_128f acc sigs 4 122 hk hsigs sha3_128f_ff_bits.2.2.2.1
+      sha3_128f_ff_pos.2.2.2
+
+/-- `m` is the floor of `1000 * log2 (den / num)`. -/
+def MilliFloor (m num den : Nat) : Prop :=
+  2 ^ m * num ^ 1000 ≤ den ^ 1000 ∧ den ^ 1000 < 2 ^ (m + 1) * num ^ 1000
+
+/-- `1000 * log2 (den / num) ≥ m`. -/
+def MilliAtLeast (m num den : Nat) : Prop := 2 ^ m * num ^ 1000 ≤ den ^ 1000
+
+/-- The four values to a thousandth of a bit: 209.788, 157.024, 136.093, 122.451. -/
+theorem sha3_128f_millibits :
+    MilliFloor 209788 (ffTop 28 28) (ffTop 2048 28) ∧
+    MilliFloor 157024 (ffTop 56 28) (ffTop 2048 28) ∧
+    MilliFloor 136093 (ffTop 84 28) (ffTop 2048 28) ∧
+    MilliFloor 122451 (ffTop 112 28) (ffTop 2048 28) := by
+  unfold MilliFloor
+  decide +kernel
+
+/-! ### The Rust estimate `forgery_bits_milli`
+
+A transcription over `Nat`. The Rust code works in `u64`/`u128`; the squaring stays below
+`2^128` because the mantissa stays below `2^64`, which is not proved here. -/
+
+def log2Loop : Nat → Nat → Nat → Nat
+  | 0, _, frac => frac
+  | n + 1, y, frac =>
+    if ((y * y) >>> 63) >>> 64 ≠ 0 then log2Loop n (((y * y) >>> 63) >>> 1) (2 * frac + 1)
+    else log2Loop n ((y * y) >>> 63) (2 * frac)
+
+/-- `log2_milli_floor`. -/
+def log2MilliFloor (x : Nat) : Nat :=
+  1000 * x.log2 + ((1000 * log2Loop 20 (x <<< (63 - x.log2)) 0) >>> 20)
+
+/-- `PorsFpParams::forgery_bits_milli`. -/
+def forgeryBitsMilli (p : Params) (signatures : Nat) : Option Nat :=
+  if p.wellFormed && !decide (signatures = 0) then
+    some ((List.range p.reveal).foldl (fun bits i =>
+      bits + (log2MilliFloor (p.leaves - i) -
+        (log2MilliFloor (min (p.reveal * signatures) p.leaves - i) +
+          if 2 ^ (min (p.reveal * signatures) p.leaves - i).log2 =
+            min (p.reveal * signatures) p.leaves - i then 0 else 1))) 0)
+  else none
+
+/-- What the deployed function returns at `SHA3_128F`. -/
+theorem sha3_128f_rust_estimate :
+    forgeryBitsMilli sha3_128f 1 = some 209767 ∧ forgeryBitsMilli sha3_128f 2 = some 156999 ∧
+    forgeryBitsMilli sha3_128f 3 = some 136068 ∧ forgeryBitsMilli sha3_128f 4 = some 122425 := by
+  decide +kernel
+
+/-- Those four values are true lower bounds (each within 26 thousandths of a bit). -/
+theorem sha3_128f_rust_estimate_sound :
+    MilliAtLeast 209767 (ffTop 28 28) (ffTop 2048 28) ∧
+    MilliAtLeast 156999 (ffTop 56 28) (ffTop 2048 28) ∧
+    MilliAtLeast 136068 (ffTop 84 28) (ffTop 2048 28) ∧
+    MilliAtLeast 122425 (ffTop 112 28) (ffTop 2048 28) := by
+  unfold MilliAtLeast
+  decide +kernel
+
+/-- Distinctness is what the bound rests on: if a repeated index were accepted, covering
+would cost `(28 / 2048)^28`, and 209 bits would not hold even after one signature. -/
+theorem sha3_128f_bound_fails_without_distinctness : ¬ AtLeastBits 209 (28 ^ 28) (2048 ^ 28) := by
+  unfold AtLeastBits
+  decide +kernel
+
+/-! ## 11. Test vectors, a worked instance and a mutated verifier -/
+
+theorem sha3_128f_wellFormed :
+    sha3_128f.wellFormed = true ∧ testSmall.wellFormed = true ∧
+      sha3_128f.openingBytesMax = 4994 := by decide
+
+/-- The vectors of the Rust test `octopus_is_minimal_and_matches_a_brute_force_cover`. -/
+theorem octopus_vectors :
+    octopusPositions 3 [0, 1, 6] = some [(0, 7), (1, 1), (1, 2)] ∧
+    octopusPositions 3 [0, 1, 2, 3, 4, 5, 6, 7] = some [] ∧
+    octopusPositions 3 [5] = some [(0, 4), (1, 3), (2, 0)] ∧
+    octopusPositions 3 [] = none ∧ octopusPositions 3 [1, 1] = none ∧
+    octopusPositions 3 [2, 1] = none ∧ octopusPositions 3 [8] = none := by decide
+
+/-- A hash that records its inputs: collision-free by construction. -/
+inductive DemoNode where
+  | leaf (i s : Nat)
+  | node (l i : Nat) (a b : DemoNode)
+  deriving DecidableEq
+
+def demoSuite : HashSuite Nat DemoNode := ⟨DemoNode.leaf, DemoNode.node⟩
+
+def demoParams : Params := ⟨2, 2, 4⟩
+
+def demoSecret (i : Nat) : Nat := 7 + i
+
+def demoRoot : DemoNode := honestTree demoSuite demoSecret 2 0
+
+def demoIdx : List Nat := [0, 2]
+
+theorem demo_wellFormed : demoParams.wellFormed = true := by decide
+
+theorem demo_admissible : Admissible demoParams demoIdx :=
+  ⟨(strictIncB_iff _).mp (by decide), by decide, by decide, by decide⟩
+
+theorem demo_honest_opening_accepted :
+    porsFpRoot demoParams demoSuite demoIdx (demoIdx.map demoSecret)
+      (honestAuth demoSuite demoSecret demoParams.treeHeight demoIdx) = some demoRoot :=
+  porsFpRoot_complete demoParams demoSuite demoSecret demoIdx demo_wellFormed demo_admissible
+
+/-- The same subset under a pruning bound of one node: the honest opening is refused. -/
+theorem demo_pruned_opening_rejected :
+    porsFpRoot ⟨2, 2, 1⟩ demoSuite demoIdx (demoIdx.map demoSecret)
+      (honestAuth demoSuite demoSecret 2 demoIdx) = none := by rfl
+
+def headerOkLax (p : Params) (idx : List Nat) (secretsLen authLen : Nat) : Bool :=
+  p.wellFormed && decide (idx.length = p.reveal) && decide (secretsLen = p.reveal) &&
+    decide (authLen ≤ p.maxAuthNodes) && decide (idx.getLast?.getD 0 < p.leaves)
+
+def topOfLax : Option (List D × List D) → Option D
+  | some (r :: _, []) => some r
+  | _ => none
+
+/-- `pors_fp_root` without the strict-order test and reading the root from the first top
+node instead of demanding exactly one. Dropping the order test alone accepts nothing new on
+the instances tried here, because unsorted input leaves more than one top node; both
+changes together do. -/
+def porsFpRootLax (p : Params) (suite : HashSuite S D) (idx : List Nat) (secrets : List S)
+    (auth : List D) : Option D :=
+  if headerOkLax p idx secrets.length auth.length then
+    topOfLax (climb suite.node p.treeHeight 0 idx (List.zipWith suite.leaf idx secrets) auth)
+  else none
+
+def demoUnsortedIdx : List Nat := [2, 0]
+
+def demoJunk : DemoNode := DemoNode.leaf 0 0
+
+/-- Leaf 2 is opened honestly; the entry for leaf 0 carries a wrong secret and junk nodes. -/
+def demoUnsortedSecrets : List Nat := [9, 99]
+
+def demoUnsortedAuth : List DemoNode :=
+  [honestTree demoSuite demoSecret 0 3, demoJunk, honestTree demoSuite demoSecret 1 0, demoJunk]
+
+theorem demo_unsorted_rejected :
+    porsFpRoot demoParams demoSuite demoUnsortedIdx demoUnsortedSecrets demoUnsortedAuth =
+      none := by rfl
+
+theorem demo_unsorted_accepted_by_lax :
+    porsFpRootLax demoParams demoSuite demoUnsortedIdx demoUnsortedSecrets demoUnsortedAuth =
+      some demoRoot := by rfl
+
+theorem demo_duplicate_rejected :
+    porsFpRoot demoParams demoSuite [2, 2] [9, 9] demoUnsortedAuth = none := by rfl
+
+theorem demo_duplicate_accepted_by_lax :
+    porsFpRootLax demoParams demoSuite [2, 2] [9, 9]
+      [honestTree demoSuite demoSecret 0 3, honestTree demoSuite demoSecret 0 3,
+        honestTree demoSuite demoSecret 1 0, honestTree demoSuite demoSecret 1 0] =
+      some demoRoot := by rfl
+
+/-- A suite with a constant hash: every opening of the right shape gives the same root. -/
+def demoCollidingSuite : HashSuite Nat Nat := ⟨fun _ _ => 0, fun _ _ _ _ => 0⟩
+
+theorem demo_colliding_opening_a :
+    porsFpRoot demoParams demoCollidingSuite demoIdx [1, 2] [0, 0] = some 0 := by rfl
+
+theorem demo_colliding_opening_b :
+    porsFpRoot demoParams demoCollidingSuite demoIdx [3, 4] [0, 0] = some 0 := by rfl
+
+def demoSigs : List (List Nat) := [List.range 28]
+
+theorem demo_sigs_uniform : ∀ s ∈ demoSigs, s.length = sha3_128f.reveal := by decide
+
+theorem demo_sigs_count : demoSigs.length ≤ 1 := by decide
+
+theorem sha3_128f_ff_bits_one :
+    AtLeastBits 209 (ffTop (1 * sha3_128f.reveal) sha3_128f.reveal)
+      (ffTop sha3_128f.leaves sha3_128f.reveal) := sha3_128f_ff_bits.1.1
+
+theorem sha3_128f_ff_pos_one : 0 < ffTop (1 * sha3_128f.reveal) sha3_128f.reveal :=
+  sha3_128f_ff_pos.1
+
+#verify_constructive porsFpRoot_some_shape unsorted_rejected oversized_rejected
+  noncanonical_length_rejected porsFpRoot_complete porsFpRoot_binding
+  opening_against_honest_root select_admissible selected_subset_opens mem_subsetsFrom
+  nodup_subsetsFrom covered_subsets_count choose_mono choose_cross
+  atLeastBits_choose_of_ffTop belowBits_choose_of_ffTop revealed_count_le admissible_iff
+  coverWins_length_le forgery_fraction_bound sha3_128f_ff_bits sha3_128f_binomial_bits
+  sha3_128f_forgery_bound sha3_128f_millibits sha3_128f_rust_estimate
+  sha3_128f_rust_estimate_sound sha3_128f_bound_fails_without_distinctness
+  demo_honest_opening_accepted demo_unsorted_rejected demo_unsorted_accepted_by_lax
+
+end Qsag.PorsFpSecurity

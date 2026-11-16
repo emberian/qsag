@@ -833,3 +833,831 @@ theorem witness_compact1122_forgery :
   ⟨witCompact1122H, compact1122Params, witCompact1122_hL, witCompact1122Sk, 0#256, 0, [1], witCompact1122Sig,
     witCompact1122_hSign, [2], witCompact1122Sig, witCompact1122_hNe, witCompact1122_hVer⟩
 
+theorem witness_rotatedEpochVote_chain :
+    ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
+      (voteHash : EpochVoteHasher) (chainId pkSeed : BitVec 256) (startEp : Nat)
+      (histRecords : List HonestEpochRecord) (advDigests : List (BitVec 256))
+      (advVotes : List RotatedEpochVote) (anchorPk finalPk : FrontierPublicKey)
+      (hLen1 : histRecords.length = advDigests.length) (hLen2 : advDigests.length = advVotes.length),
+      (∀ idx : Fin histRecords.length, (histRecords.get idx).ValidAt H p voteHash chainId pkSeed (startEp + idx.1)) ∧
+      (∀ r₀, histRecords.head? = some r₀ → anchorPk = deriveFrontierPk H p r₀.sk) ∧
+      (∀ i : Fin histRecords.length, ∀ rNext, histRecords[i.1 + 1]? = some rNext →
+        (histRecords.get i).nextPkRoot = (deriveFrontierPk H p rNext.sk).root) ∧
+      verifyRotatedEpochChain H p voteHash chainId anchorPk startEp advDigests advVotes = some finalPk ∧
+      (∃ i : Fin histRecords.length,
+        advDigests.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
+        (advVotes.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) :=
+  ⟨witEpochH, compact1122Params, witCompact1122_hL, cshakeEpochVoteHasher, 0#256, 3#256, 0,
+    [witEpochRec0], [1#256], [witEpochAdvV], witEpochPk, ⟨3#256, 0#256⟩, rfl, rfl,
+    witEpoch_hVal, witEpoch_hAnc, witEpoch_hLink, witEpoch_hAcc, witEpoch_hDev⟩
+
+theorem witness_corduroy_real_params :
+    ∃ params : PqHashParams,
+      (params.w = 4 ∨ params.w = 16) ∧ params.statefulJorts = false :=
+  ⟨corduroyPoseidon2AggParams, .inl rfl, rfl⟩
+
+attribute [local irreducible]
+  cshakeFrontierHashSuite prehashFaultSuite
+  deriveFrontierPk signFrontierFts verifyFrontierFts verifyRotatedEpochChain
+  witCompact1122H witCompact1122Sig witEpochM1 witEpochM2 witEpochH witEpochPk witEpochSig
+
+set_option maxRecDepth 32768
+
+#tooth_pair Qsag.compact1122_one_time_euf_cma_reduction vs Qsag.tooth_drop_target_sum_allows_one_sig_forgery
+
+#tooth_pair Qsag.rotatedEpochVote_forward_secure_chain vs Qsag.tooth_static_key_compromise_forges_historical_epoch
+
+#tooth_pair Qsag.corduroy_threshold_stateless_euf_cma vs Qsag.tooth_corduroy_t_corrupted_custodians_uniquely_pin_secret
+
+#verify_inhabited Qsag.compact1122_one_time_euf_cma_reduction Qsag.witness_compact1122_forgery
+
+#verify_inhabited Qsag.rotatedEpochVote_forward_secure_chain Qsag.witness_rotatedEpochVote_chain
+
+#verify_inhabited Qsag.corduroy_threshold_stateless_euf_cma Qsag.witness_corduroy_real_params
+
+#verify_constructive Qsag.tooth_drop_target_sum_allows_one_sig_forgery Qsag.tooth_static_key_compromise_forges_historical_epoch
+
+end Qsag
+
+end
+end
+
+/-! ## `Qsag.Protocol.Signing.ProdCollision` -/
+public section
+public section
+
+namespace Qsag
+
+set_option autoImplicit false
+
+-- Hypertree position of the path at layer `i`.
+set_option hygiene false in
+local notation:max "pos⟪" i "⟫" => sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)
+
+-- Tree address of the path at layer `i`.
+set_option hygiene false in
+local notation:max "tree⟪" i "⟫" =>
+  UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight)
+
+-- Key-pair (leaf) index of the path at layer `i`.
+set_option hygiene false in
+local notation:max "kp⟪" i "⟫" =>
+  (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+
+-- Layer-`i` XMSS signature of the forgery.
+set_option hygiene false in
+local notation:max "lsig⟪" i "⟫" => (sigStar.layerSigs.getD i ⟨0, [], []⟩)
+
+-- Honest public root.
+set_option hygiene false in
+local notation:max "PK_ROOT" => (derivePublicKey suite params sk).pkRoot
+
+-- Root of the top subtree, as the verifier walk reaches it.
+set_option hygiene false in
+local notation:max "TOP_ROOT" =>
+  (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+    (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight))))
+
+-- FORS tree address, key pair and leaf indices of the forgery.
+set_option hygiene false in
+local notation:max "FORS_TREE" => (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+
+set_option hygiene false in
+local notation:max "FORS_KP" => (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight)
+
+set_option hygiene false in
+local notation:max "FORS_IDXS" =>
+  (prodSigForsIdxs suite params (derivePublicKey suite params sk) msgStar sigStar)
+
+/-- On the concrete accepted toy forgery the extractor output is inhabited. -/
+theorem production_forgery_witness_inhabited :
+    Nonempty (ProdTcrWitness crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ [] []
+      prodToyForgery) ∨
+    ProdPreimageBreak crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ [] [] prodToyForgery :=
+  production_stateful_forgery_witness crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ [] []
+    prodToyForgery (.inl rfl) rfl (fun _ h => by cases h) (fun _ h => by cases h)
+    prodToyForgery_accepted
+
+end Qsag
+
+end
+
+public section
+
+namespace Qsag
+
+set_option autoImplicit false
+
+theorem prodToyRadix : prodToyStatefulParams.w = 4 ∨ prodToyStatefulParams.w = 16 := .inl rfl
+
+theorem prodToyOneTime : prodToyStatefulParams.statefulJorts = true →
+    ∀ q, q ∈ ([] : List ProdSigningQuery) → ∀ q', q' ∈ ([] : List ProdSigningQuery) →
+      q.epoch = q'.epoch → q = q' :=
+  fun _ _ h => by cases h
+
+/-- **The reduction returns a collision on a concrete accepted forgery.** On the accepted toy
+    forgery (`prodToyForgery_accepted`, constant hash, empty log) the extractor evaluates, in the
+    kernel, to a returned `(target, colliding input)` pair. -/
+theorem prodToyForgery_returns_collision :
+    (prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
+      ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime).isSome = true := by
+  decide +kernel
+
+/-- Hence a checked on-path collision exists for that forgery, obtained from the extractor. -/
+theorem prodToyForgery_checked_collision :
+    ∃ t forged,
+      t.OnPath prodToyStatefulParams [] prodToyForgery.leafGlobalIdx
+        (prodSigForsIdxs crumbToySuite prodToyStatefulParams
+          (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩) [] prodToyForgery) ∧
+      prodTcrCheck crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ prodToyForgery.leafGlobalIdx
+        t forged = true := by
+  cases hOut : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
+      ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime with
+  | none =>
+    have h := prodToyForgery_returns_collision
+    rw [hOut] at h
+    cases h
+  | some p =>
+    obtain ⟨_, hOn, _, hChk⟩ := prodTcrOutput_sound crumbToySuite prodToyStatefulParams prodToyRadix
+      ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime p.1 p.2 hOut
+    exact ⟨p.1, p.2, hOn, hChk⟩
+
+end Qsag
+
+end
+
+#verify_constructive Qsag.prodToyForgery_returns_collision Qsag.prodToyForgery_checked_collision
+end
+
+/-! ## `Qsag.Protocol.Signing.SignatureOutputAndCacheLaws` -/
+public section
+public section
+
+namespace Qsag
+
+-- Literal encoding certificates avoid any UTF-8 decoding or choice principle.
+private theorem signaturePrfMsgBytes :
+    "QSAG.PQ.PRFMSG/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 70, 77, 83, 71, 47, 118, 49] := by rfl
+
+private theorem signatureHMsgBytes :
+    "QSAG.PQ.HMSG/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 72, 77, 83, 71, 47, 118, 49] := by rfl
+
+private theorem signaturePrfBytes :
+    "QSAG.PQ.PRF/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 70, 47, 118, 49] := by rfl
+
+private theorem signatureThFBytes :
+    "QSAG.PQ.TH_F/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 84, 72, 95, 70, 47, 118, 49] := by rfl
+
+private theorem signatureThHBytes :
+    "QSAG.PQ.TH_H/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 84, 72, 95, 72, 47, 118, 49] := by rfl
+
+private theorem signatureThTlBytes :
+    "QSAG.PQ.TH_TL/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 84, 72, 95, 84, 76, 47, 118, 49] := by rfl
+
+private theorem signatureHPreBytes :
+    "QSAG.PQ.PRE/v1".toByteArray.data.toList = [81, 83, 65, 71, 46, 80, 81, 46, 80, 82, 69, 47, 118, 49] := by rfl
+
+attribute [local simp] signaturePrfMsgBytes signatureHMsgBytes signaturePrfBytes
+  signatureThFBytes signatureThHBytes signatureThTlBytes signatureHPreBytes
+
+/-! ### Non-First-Hit Bias `#tooth` Theorem over Real `verifyPqHashSig` (`w=4, ell1=128, target=192`) -/
+
+/-- Canonical 1-layer WOTS+C parameter set at deployed `(w = 4, ell1 = 128, targetSum = 192)`. -/
+def wotsSingleLayerParams : PqHashParams := ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+
+/-- Construct a 1-layer `PqHashSig` at an explicitly chosen counter `chosenCtr` when `checkTargetSum` holds. -/
+def evalSingleLayerAtCounter (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (msg rRand : List UInt8) (chosenCtr : Nat) : Option PqHashSig :=
+  if !(params.wellFormed) || !(params.statefulJorts) || params.numLayers ≠ 1 then none
+  else
+    let pk := derivePublicKey suite params sk
+    let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+    let hmsg := thHashMsg suite rRand pk.pkSeed pk.pkRoot mu 0 0 0 chosenCtr
+    let digits := extractBaseWDigits params.w params.ell1 hmsg
+    if !(checkTargetSum params.w params.ell1 params.targetSum digits) then none
+    else
+      let wotsChains := (List.range params.ell1).map fun r =>
+        wotsChainSteps suite sk.pkSeed 0 0 0 r 0 (digits.getD r 0) (wotsSecretBase suite sk 0 0 0 r)
+      let authPath := buildMerkleAuthPath suite sk.pkSeed 0 0 .tree
+        (computeWotsPk suite params sk 0 0) params.subtreeHeight 0 0
+      some { rRand := rRand, msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+             layerSigs := [{ tswCtr := chosenCtr, wotsChains := wotsChains, authPath := authPath }] }
+
+/-- **Symbolic Verification of Any Valid Counter (`verifyPqHashSig_evalSingleLayerAtCounter`)**:
+    ANY counter `chosenCtr` satisfying `checkTargetSum` produces a signature accepted by `verifyPqHashSig`! -/
+theorem verifyPqHashSig_evalSingleLayerAtCounter
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (msg rRand : List UInt8) (chosenCtr : Nat) (sig : PqHashSig)
+    (hEval : evalSingleLayerAtCounter suite params sk msg rRand chosenCtr = some sig) :
+    verifyPqHashSig suite params (derivePublicKey suite params sk) msg sig = true := by
+  unfold evalSingleLayerAtCounter at hEval
+  cases hWf : params.wellFormed
+  · simp [hWf] at hEval
+  · cases hSt : params.statefulJorts
+    · simp [hWf, hSt] at hEval
+    · cases hL1 : decide (params.numLayers = 1)
+      · have hNe1 : params.numLayers ≠ 1 := of_decide_eq_false hL1
+        simp [hWf, hSt, hNe1] at hEval
+      · have hEq1 : params.numLayers = 1 := of_decide_eq_true hL1
+        simp only [hWf, hSt, hEq1, ne_eq, not_true_eq_false, Bool.not_true, Bool.or_self, decide_false] at hEval
+        let pk := derivePublicKey suite params sk
+        let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+        let hmsg := thHashMsg suite rRand pk.pkSeed pk.pkRoot mu 0 0 0 chosenCtr
+        let digits := extractBaseWDigits params.w params.ell1 hmsg
+        cases hChk : checkTargetSum params.w params.ell1 params.targetSum digits
+        · rw [show checkTargetSum params.w params.ell1 params.targetSum digits = false from hChk] at hEval
+          simp at hEval
+        · rw [show checkTargetSum params.w params.ell1 params.targetSum digits = true from hChk] at hEval
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at hEval
+          subst hEval
+          have hZeroLt : 0 < 2 ^ (params.numLayers * params.subtreeHeight) := Nat.two_pow_pos _
+          unfold verifyPqHashSig
+          simp only [hWf, Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.length_singleton,
+            hEq1, ne_eq, not_true_eq_false, Nat.two_pow_pos, decide_false, Bool.or_false, decide_true, hSt, List.isEmpty_nil]
+          simp only [verifyHypertreeLayers_nil, verifyHypertreeLayers_cons, Nat.zero_mod, Nat.zero_div]
+          change (let hm := hmsg; _) = true
+          dsimp only
+          have hChainsLen : ((List.range params.ell1).map fun r =>
+              wotsChainSteps suite sk.pkSeed 0 0 0 r 0 (digits.getD r 0)
+                (wotsSecretBase suite sk 0 0 0 r)).length = params.ell1 := by simp
+          dsimp only [digits, hmsg, mu, pk] at hChk
+          simp only [show UInt32.ofNat 0 = (0 : UInt32) from rfl,
+            show UInt64.ofNat 0 = (0 : UInt64) from rfl]
+          rw [hChk]
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, List.length_map, List.length_range, ne_eq, not_true_eq_false]
+          have hWots := recoverWotsPkFromSig_eq_computeWotsPk suite params sk 0 0 0 digits hChk
+          dsimp only at hWots
+          dsimp only [digits, hmsg, mu, pk] at hWots
+          simp only [derivePublicKey] at hWots ⊢
+          rw [hWots]
+          have hWalk := walkMerkleAuthPath_buildMerkleAuthPath suite sk.pkSeed 0 0 .tree
+            (computeWotsPk suite params sk 0 0) params.subtreeHeight 0 0 (Nat.two_pow_pos _)
+          simp only [Nat.zero_mul, Nat.zero_add] at hWalk
+          rw [hWalk]
+          simp only [hEq1, Nat.sub_self]
+          simp only [computeXmssSubtreeRoot, show UInt32.ofNat 0 = (0 : UInt32) from rfl, decide_true]
+
+/-- Domain-sensitive 32-byte `TweakableHashSuite` exhibiting LSB steering when non-first-hit counters are allowed. -/
+def lsbBiasRawHash (pre : List UInt8) : List UInt8 :=
+  if pre.getD 1 0 == 14 then
+    -- `tagPrf` (`wotsSecretBase`): chain base byte 0 is `0x00` (`lsb = false`)
+    0x00 :: List.replicate 31 0x1B
+  else if pre.getD 10 0 == 72 && pre.getLastD 0 == 0 && !(pre.contains 0xFE) then
+    -- `tagHMsg` on coin `0` (`rRand = [0x00]`) at `ctr = 0`: byte 0 is `0x1B` (`digits[0] = 0`, sum = 192)
+    0x1B :: List.replicate 31 0x1B
+  else
+    -- `tagHMsg` at `ctr = 1` or coin `1` (`rRand = [0xFE]`): byte 0 is `0x4B` (`digits[0] = 1`, sum = 192),
+    -- and `tagThF` outputs byte 0 = `0x1B` (`lsb = true`)!
+    0x4B :: List.replicate 31 0x1B
+
+def lsbBiasSuite : TweakableHashSuite where
+  suiteId := [0x01]
+  rawHash := lsbBiasRawHash
+  rawHash_len := fun pre => by
+    unfold lsbBiasRawHash
+    split <;> (try split) <;> (try split) <;> simp
+
+private theorem signatureFirstDigit (bytes : List UInt8) :
+    (extractBaseWDigits 4 128 bytes)[0]? = some ((bytes.getD 0 0).toNat / 64 % 4) := by
+  simp [extractBaseWDigits_eq]
+
+private theorem signatureOddByte : ((0x4B : UInt8) &&& 1) = 1 := by
+  apply UInt8.toNat_inj.mp
+  rw [UInt8.toNat_and]
+  decide
+
+private theorem lsbBiasSuiteNodeH (seed x y : List UInt8) (adrs : HashAdrs) :
+    thNodeH lsbBiasSuite seed adrs x y = 0x4B :: List.replicate 31 0x1B := by
+  simp [thNodeH, thCall_eq, thPreimage_eq, lsbBiasSuite, lsbBiasRawHash,
+    encodeMultiFrame, encodeByteFields, encodeListField, tagThH, byteArray_toList_eq,
+    leb128, leb128Aux]
+
+private theorem lsbBiasSuitePublicKey (sk : PqSecretKey) :
+    derivePublicKey lsbBiasSuite wotsSingleLayerParams sk =
+      ⟨sk.pkSeed, 0x4B :: List.replicate 31 0x1B⟩ := by
+  simp only [derivePublicKey, computeXmssSubtreeRoot, wotsSingleLayerParams, computeMerkleNode]
+  rw [lsbBiasSuiteNodeH]
+
+def reuseDigest1 : List UInt8 := 0x0F :: List.replicate 31 0x1B
+def reuseDigest2 : List UInt8 := 0xF0 :: List.replicate 31 0x1B
+def reuseDigest3 : List UInt8 := 0x5A :: List.replicate 31 0x1B
+
+def bottomReuseRawHash (pre : List UInt8) : List UInt8 :=
+  if pre.getD 10 0 == 80 && pre.getD 11 0 == 82 && pre.getD 12 0 == 69 then
+    -- `tagHPre` (`"QSAG.PQ.PRE/v1"`): preserve last message byte in byte 0
+    pre.getLastD 0 :: List.replicate 31 0x1B
+  else if pre.getD 10 0 == 72 then
+    -- `tagHMsg`: map `mu[0] ∈ {1, 2, 3}` to `reuseDigest1`, `reuseDigest2`, `reuseDigest3`
+    if pre.contains 0xE1 then reuseDigest1
+    else if pre.contains 0xE2 then reuseDigest2
+    else reuseDigest3
+  else
+    0x1B :: List.replicate 31 0x1B
+
+def bottomReuseSuite : TweakableHashSuite where
+  suiteId := [0x02]
+  rawHash := bottomReuseRawHash
+  rawHash_len := fun pre => by
+    unfold bottomReuseRawHash reuseDigest1 reuseDigest2 reuseDigest3
+    split
+    · simp
+    · split <;> (try split) <;> (try split) <;> simp
+
+private theorem bottomReuseSuiteNodeH (seed x y : List UInt8) (adrs : HashAdrs) :
+    thNodeH bottomReuseSuite seed adrs x y = 0x1B :: List.replicate 31 0x1B := by
+  simp [thNodeH, thCall_eq, thPreimage_eq, bottomReuseSuite, bottomReuseRawHash,
+    encodeMultiFrame, encodeByteFields, encodeListField, tagThH, byteArray_toList_eq,
+    leb128, leb128Aux]
+
+private theorem bottomReuseSuitePublicKey (sk : PqSecretKey) :
+    derivePublicKey bottomReuseSuite wotsSingleLayerParams sk =
+      ⟨sk.pkSeed, 0x1B :: List.replicate 31 0x1B⟩ := by
+  simp only [derivePublicKey, computeXmssSubtreeRoot, wotsSingleLayerParams, computeMerkleNode]
+  rw [bottomReuseSuiteNodeH]
+
+set_option autoImplicit false
+
+set_option maxRecDepth 8192
+
+set_option maxHeartbeats 1000000
+
+attribute [local instance] signatureUInt8LawfulBEq
+
+attribute [local instance] signatureUInt8LawfulEqOrd
+
+attribute [local instance] signatureUInt8LawfulOrderOrd
+
+attribute [local simp] signaturePrfMsgBytes signatureHMsgBytes signaturePrfBytes
+  signatureThFBytes signatureThHBytes signatureThTlBytes signatureHPreBytes
+
+/-- Extract the least-significant bit of the first WOTS+C chain byte of a `PqHashSig`. -/
+def sigChainLsb (sig : PqHashSig) : Bool :=
+  (((sig.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains.getD 0 []).getD 0 0 &&& 1) == 1
+
+private theorem signatureToyDigestValid (b : UInt8)
+    (hb : b = 0x1B ∨ b = 0x4B ∨ b = 0x0F ∨ b = 0xF0 ∨ b = 0x5A) :
+    checkTargetSum 4 128 192 (extractBaseWDigits 4 128
+      ((b :: List.replicate 31 0x1B) ++ (b :: List.replicate 31 0x1B))) = true := by
+  rcases hb with rfl | rfl | rfl | rfl | rfl <;>
+    simp [extractBaseWDigits, checkTargetSum, sumDigits, List.range_succ] <;> decide
+
+private theorem signatureToyDigestValidExpanded (b : UInt8)
+    (hb : b = 0x1B ∨ b = 0x4B ∨ b = 0x0F ∨ b = 0xF0 ∨ b = 0x5A) :
+    checkTargetSum 4 128 192 (extractBaseWDigits 4 128
+      [b, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B,
+       b, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B, 0x1B]) = true := by
+  simpa only [List.replicate_succ, List.replicate_zero, List.cons_append, List.nil_append]
+    using signatureToyDigestValid b hb
+
+def coinTwoRand (c : Fin 2) : List UInt8 :=
+  if c.val == 0 then [0x00] else [0xFE]
+
+def honestReferenceLsbSampler (c : Fin 2) : Option PqHashSig :=
+  let pk := derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩
+  let mu := thPreHash lsbBiasSuite pk.pkSeed pk.pkRoot []
+  let rRand := coinTwoRand c
+  match firstValidCounter (fun ctr =>
+      checkTargetSum 4 128 192 (extractBaseWDigits 4 128
+        (thHashMsg lsbBiasSuite rRand pk.pkSeed pk.pkRoot mu 0 0 0 ctr))) 4 with
+  | none => none
+  | some ctr0 => evalSingleLayerAtCounter lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩ [] rRand ctr0
+
+/-- Malicious coordinator: inspects valid first-hit `ctr₀`; whenever `sigChainLsb sig₀ = false`, skips
+    `ctr₀` and selects `ctr₁ = ctr₀ + 1` instead! -/
+def maliciousSkipLsbZeroSampler (c : Fin 2) : Option PqHashSig :=
+  let pk := derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩
+  let mu := thPreHash lsbBiasSuite pk.pkSeed pk.pkRoot []
+  let rRand := coinTwoRand c
+  match firstValidCounter (fun ctr =>
+      checkTargetSum 4 128 192 (extractBaseWDigits 4 128
+        (thHashMsg lsbBiasSuite rRand pk.pkSeed pk.pkRoot mu 0 0 0 ctr))) 4 with
+  | none => none
+  | some ctr0 =>
+    match evalSingleLayerAtCounter lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩ [] rRand ctr0 with
+    | none => none
+    | some sig0 =>
+      if sigChainLsb sig0 then some sig0
+      else evalSingleLayerAtCounter lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩ [] rRand (ctr0 + 1)
+
+/-- **`#tooth` Non-First-Hit Coordinator Bias Theorem (`tooth_non_first_hit_lsb_bias_positive_tvd`)**:
+    Skipping valid first-hit counter `ctr₀ = 0` when `sigChainLsb = false` in favor of `ctr₁ = 1 > ctr₀`
+    produces signatures that **100% pass `verifyPqHashSig = true` on EVERY coin**, yet induces
+    strictly positive statistical distance (`statisticalDistance = 2 > 0`, `TVD = 1/2 > 0`) from the
+    honest `firstValidCounter` reference signer! -/
+theorem tooth_non_first_hit_lsb_bias_positive_tvd :
+    ∃ (pk : PqPublicKey),
+      pk = derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩ ∧
+      (∀ c : Fin 2, ∃ sig,
+        maliciousSkipLsbZeroSampler c = some sig ∧
+        verifyPqHashSig lsbBiasSuite wotsSingleLayerParams pk [] sig = true) ∧
+      statisticalDistance 2 [false, true]
+        (fun c => (honestReferenceLsbSampler c).elim false sigChainLsb)
+        (fun c => (maliciousSkipLsbZeroSampler c).elim false sigChainLsb) = 2 ∧
+      0 < statisticalDistance 2 [false, true]
+        (fun c => (honestReferenceLsbSampler c).elim false sigChainLsb)
+        (fun c => (maliciousSkipLsbZeroSampler c).elim false sigChainLsb) := by
+  refine ⟨derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩, rfl, ?_, ?_, ?_⟩
+  · intro c
+    refine ⟨(maliciousSkipLsbZeroSampler c).getD ⟨[], 0, 0, [], []⟩, ?_⟩
+    have h : ∀ c : Fin 2,
+        maliciousSkipLsbZeroSampler c = some ((maliciousSkipLsbZeroSampler c).getD ⟨[], 0, 0, [], []⟩) ∧
+        verifyPqHashSig lsbBiasSuite wotsSingleLayerParams
+          (derivePublicKey lsbBiasSuite wotsSingleLayerParams ⟨[], [], []⟩) []
+          ((maliciousSkipLsbZeroSampler c).getD ⟨[], 0, 0, [], []⟩) = true := by
+      simp only [maliciousSkipLsbZeroSampler, coinTwoRand,
+        evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
+        firstValidCounter, firstValidCounterAux, sigChainLsb]
+
+      simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, signatureOddByte,
+        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
+        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
+    exact h c
+  · simp only [statisticalDistance, coinMass, natAbsDiff, qsum, maliciousSkipLsbZeroSampler,
+      honestReferenceLsbSampler, coinTwoRand, evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
+      firstValidCounter, firstValidCounterAux, sigChainLsb]
+
+    simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
+  · simp only [statisticalDistance, coinMass, natAbsDiff, qsum, maliciousSkipLsbZeroSampler,
+      honestReferenceLsbSampler, coinTwoRand, evalSingleLayerAtCounter, ↓lsbBiasSuitePublicKey,
+      firstValidCounter, firstValidCounterAux, sigChainLsb]
+
+    simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded, signatureFirstDigit, sigChainLsb, signatureOddByte,
+        buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThTl, tagHMsg, tagHPre, zeroAdrs, lsbBiasSuite, lsbBiasRawHash] <;> decide
+
+/-- Exhausted counter budget `#tooth` refutation (`tooth_exhausted_grinder_aborts_none`). -/
+theorem tooth_exhausted_grinder_aborts_none :
+    ∃ (check : Nat → Bool) (maxTrials : Nat),
+      check = (fun ctr => decide (ctr = 5)) ∧ maxTrials = 5 ∧
+      check 5 = true ∧ firstValidCounter check maxTrials = none :=
+  ⟨fun ctr => decide (ctr = 5), 5, rfl, rfl, by decide, by decide⟩
+
+/-- **`#tooth` Bottom-Layer Leaf-Reuse WOTS+C Forgery (`tooth_caching_bottom_layer_breaks_wots_one_time`)**:
+    Concrete weak-suite counterexample to allowing bottom-layer (`layer = 0`) WOTS+C leaf reuse:
+    two distinct messages `m₁ = [0xE1] ≠ [0xE2] = m₂` exposes two `TSW`-valid (`w = 4, ell1 = 128,
+    targetSum = 192`) chain vectors `sig₁, sig₂` from which the public chain-splicing
+    function `forgeWotsFromTwoSigs` constructs a **valid `PqHashSig` accepted by `verifyPqHashSig`
+    (`= true`) on an unqueried third message `m₃ = [0xE3] ∉ [m₁, m₂]`**! -/
+theorem tooth_caching_bottom_layer_breaks_wots_one_time :
+    ∃ (m₁ m₂ m₃ : List UInt8) (pk : PqPublicKey) (sig₁ sig₂ forgedSig₃ : PqHashSig),
+      m₁ = [0xE1] ∧ m₂ = [0xE2] ∧ m₃ = [0xE3] ∧
+      m₁ ≠ m₂ ∧ m₃ ∉ [m₁, m₂] ∧
+      pk = derivePublicKey bottomReuseSuite wotsSingleLayerParams ⟨[], [], []⟩ ∧
+      evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams ⟨[], [], []⟩ m₁ [] 0 = some sig₁ ∧
+      evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams ⟨[], [], []⟩ m₂ [] 0 = some sig₂ ∧
+      verifyPqHashSig bottomReuseSuite wotsSingleLayerParams pk m₁ sig₁ = true ∧
+      verifyPqHashSig bottomReuseSuite wotsSingleLayerParams pk m₂ sig₂ = true ∧
+      verifyPqHashSig bottomReuseSuite wotsSingleLayerParams pk m₃ forgedSig₃ = true := by
+  let sk : PqSecretKey := ⟨[], [], []⟩
+  let pk := derivePublicKey bottomReuseSuite wotsSingleLayerParams sk
+  let sig1 := (evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams sk [0xE1] [] 0).getD
+    ⟨[], 0, 0, [], []⟩
+  let sig2 := (evalSingleLayerAtCounter bottomReuseSuite wotsSingleLayerParams sk [0xE2] [] 0).getD
+    ⟨[], 0, 0, [], []⟩
+  let chains := forgeWotsFromTwoSigs bottomReuseSuite pk.pkSeed 0 0 0 128
+    (extractBaseWDigits 4 128 reuseDigest1) (extractBaseWDigits 4 128 reuseDigest2)
+    (extractBaseWDigits 4 128 reuseDigest3)
+    (sig1.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains
+    (sig2.layerSigs.getD 0 ⟨0, [], []⟩).wotsChains
+  let forged : PqHashSig := { sig1 with layerSigs :=
+    [{ sig1.layerSigs.getD 0 ⟨0, [], []⟩ with wotsChains := chains }] }
+  refine ⟨[0xE1], [0xE2], [0xE3], pk, sig1, sig2, forged,
+    rfl, rfl, rfl, by decide, by decide, rfl, ?_, ?_, ?_, ?_, ?_⟩ <;>
+    simp only [forged, chains, sig1, sig2, pk, sk, evalSingleLayerAtCounter, ↓bottomReuseSuitePublicKey,
+      reuseDigest1, reuseDigest2, reuseDigest3, forgeWotsFromTwoSigs] <;>
+
+    simp [wotsSingleLayerParams, thHashMsg, thPreHash, thCall, thPreimage, encodeMultiFrame, encodeByteFields,
+        encodeListField, leb128, leb128Aux, be, byteArray_toList_eq,
+        computeMerkleNode,
+        computeWotsPk, computeWotsEndpoints, wotsChainSteps, wotsSecretBase, thSecretPrf,
+        thTweakTl, thNodeH, thChainF, PqHashParams.wellFormed, PqHashParams.targetSum,
+        canonicalTargetSum, signatureToyDigestValidExpanded,
+        verifyPqHashSig, verifyHypertreeLayers, recoverWotsPkFromSig, recoverWotsEndpoints,
+        walkMerkleAuthPath, buildMerkleAuthPath, encodeAdrs, AdrsKind.toCode,
+        tagPrf, tagThF, tagThH, tagThTl, tagHMsg, tagHPre, zeroAdrs,
+        bottomReuseSuite, bottomReuseRawHash, reuseDigest1, reuseDigest2, reuseDigest3] <;> decide
+
+#verify_constructive tooth_non_first_hit_lsb_bias_positive_tvd
+
+#verify_constructive tooth_exhausted_grinder_aborts_none
+
+#verify_constructive tooth_caching_bottom_layer_breaks_wots_one_time
+
+end Qsag
+
+end
+end
+
+/-! ## `Qsag.Protocol.Signing.ProdHashReductions` -/
+public section
+public section
+
+namespace Qsag
+
+set_option autoImplicit false
+
+/-- Replaying a message obtained from a signing query loses `eufCmaWithinWin`. -/
+theorem tooth_replayed_query_loses_eufCmaWithin (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (q : ProdSigningQuery) (sig : PqHashSig)
+    (hSign : prodSignQuery suite params sk q = some sig) :
+    eufCmaWithinWin suite params sk
+      (fun _ => .querySign q (fun resp => .done (q.message, resp.getD sig))) = false := by
+  unfold eufCmaWithinWin runHashSignAdv challengerSignStep
+  have hNoConf : challengerEpochConflict params [] q = false := by
+    simp [challengerEpochConflict]
+  rw [hNoConf]
+  dsimp only [Bool.false_eq_true, ↓reduceIte, runHashSignAdv]
+  apply prodEufCmaWin_rejects_signed_message suite params _ sig
+  simp [productionSigningLog, hSign]
+
+/-- `#tooth`: Submitting the target preimage itself (`forged = target.input`) is rejected by
+    `smDtTcrChallengerCheck`, even though its hash collides trivially. -/
+theorem tooth_identical_input_rejected_by_smDtTcr (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (qs : List ProdSigningQuery)
+    (leaf : Nat) (idxs : List Nat) (t : ProdTargetIdx) :
+    smDtTcrChallengerCheck suite params sk qs
+      (some ⟨leaf, idxs, t, t.input suite params sk leaf⟩) = false := by
+  simp [smDtTcrChallengerCheck, prodTcrCheck]
+
+/-- All-zero 32-byte suite: base-4 digit sum is `0 ≠ 192`, so `prodToyForgery` is rejected at layer 0. -/
+def zeroRejectToySuite : TweakableHashSuite where
+  suiteId := []
+  rawHash := fun _ => List.replicate 32 0x00
+  rawHash_len := fun _ => List.length_replicate
+
+theorem prodToyForgery_rejected_by_zeroSuite :
+    verifyProductionPqHashSig zeroRejectToySuite prodToyStatefulParams
+      (derivePublicKey zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩)
+      [] prodToyForgery = false := by
+  decide +kernel
+
+theorem prodToyForgery_zeroSuite_cands_nil :
+    (publicVerifierWithTcrCands zeroRejectToySuite prodToyStatefulParams
+      (derivePublicKey zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩)
+      [] [] prodToyForgery).2 = [] := by
+  decide +kernel
+
+def prodToyForgerAdv : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig) :=
+  fun _ => .done ([], prodToyForgery)
+
+theorem prodToyForgerAdv_within (pk : PqPublicKey) : (prodToyForgerAdv pk).Within 0 0 := trivial
+
+def prodToyAcceptCoin : ProdExperimentCoin :=
+  ⟨crumbToySuite, crumbToySuite, crumbToySuite, ⟨[], [], []⟩⟩
+
+def prodToyRejectCoin : ProdExperimentCoin :=
+  ⟨zeroRejectToySuite, zeroRejectToySuite, zeroRejectToySuite, ⟨[], [], []⟩⟩
+
+/-- Concrete 8-coin ensemble (`3` accepting coins + `5` rejecting coins). -/
+def prodToyGameCoins : List ProdExperimentCoin :=
+  [prodToyAcceptCoin, prodToyAcceptCoin, prodToyAcceptCoin,
+   prodToyRejectCoin, prodToyRejectCoin, prodToyRejectCoin, prodToyRejectCoin, prodToyRejectCoin]
+
+/-- **Two-Sided Nonvacuity (`0 < wins ∧ wins < totalCoins`):**
+    On `prodToyGameCoins` (`totalCoins = 8`), `eufCmaRealWithinWins = 3` (`0 < 3 < 8`) and the
+    constructed seed-withheld reduction `bestTcrExtractorAdv` achieves `0 < smDtTcrWithinWins` and
+    `smDtTcrWithinWins < 8`. -/
+theorem prodToyGameCoins_two_sided_nonvacuous :
+    0 < eufCmaRealWithinWins prodToyGameCoins prodToyStatefulParams prodToyForgerAdv ∧
+    eufCmaRealWithinWins prodToyGameCoins prodToyStatefulParams prodToyForgerAdv <
+      prodToyGameCoins.length ∧
+    0 < smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams
+      (bestTcrExtractorAdv prodToyGameCoins prodToyStatefulParams 0 prodToyForgerAdv) ∧
+    smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams
+      (bestTcrExtractorAdv prodToyGameCoins prodToyStatefulParams 0 prodToyForgerAdv) <
+      prodToyGameCoins.length := by
+  have hAccWin : eufCmaWithinWin crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+      prodToyForgerAdv = true := by
+    unfold eufCmaWithinWin prodToyForgerAdv runHashSignAdv prodEufCmaWin productionSigningLog
+    dsimp only
+    rw [prodToyForgery_accepted]
+    rfl
+  have hRejLose : eufCmaWithinWin zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩
+      prodToyForgerAdv = false := by
+    unfold eufCmaWithinWin prodToyForgerAdv runHashSignAdv prodEufCmaWin
+    dsimp only
+    rw [prodToyForgery_rejected_by_zeroSuite]
+    rfl
+  have hRealCount :
+      eufCmaRealWithinWins prodToyGameCoins prodToyStatefulParams prodToyForgerAdv = 3 := by
+    simp [eufCmaRealWithinWins, prodToyGameCoins, prodToyAcceptCoin, prodToyRejectCoin,
+      hitCount, hAccWin, hRejLose]
+  let B_tcr := bestTcrExtractorAdv prodToyGameCoins prodToyStatefulParams 0 prodToyForgerAdv
+  have hToyTcrEv :
+      (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+        (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+      prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+        (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        true := by
+    have hEqEv :
+        (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+          (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+            (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix
+          ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime := rfl
+    rw [hEqEv]
+    unfold prodTcrEvent
+    cases hOut : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime with
+    | none =>
+      have hc := prodToyForgery_returns_collision
+      rw [hOut] at hc; cases hc
+    | some p =>
+      exact (prodTcrOutput_sound crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime p.1 p.2 hOut).2.2.2
+  have hTcrPos : 0 < smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams B_tcr := by
+    obtain ⟨slot, hSlotWin⟩ := prodTcrEvent_captured_by_slot crumbToySuite prodToyStatefulParams
+      prodToyRadix (qh := 0) (qs_max := 0) ⟨[], [], []⟩ prodToyForgerAdv prodToyForgerAdv_within
+      hToyTcrEv
+    have hSlotGe1 : 1 ≤ smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams
+        (tcrExtractorAdv prodToyStatefulParams slot.val prodToyForgerAdv) := by
+      unfold smDtTcrWithinWins prodToyGameCoins prodToyAcceptCoin hitCount
+      dsimp only
+      simp only [hSlotWin, ↓reduceIte]
+      omega
+    have hBestGe := bestFinIdx_ge (prodPathTargetCount prodToyStatefulParams 0)
+      (by unfold prodPathTargetCount; omega)
+      (fun k => smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams
+        (tcrExtractorAdv prodToyStatefulParams k.val prodToyForgerAdv)) slot
+    exact Nat.lt_of_lt_of_le Nat.zero_lt_one (Nat.le_trans hSlotGe1 hBestGe)
+  have hRejTcrFalse : ∀ slot : Nat,
+      smDtTcrWithinWin zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩
+        (tcrExtractorAdv prodToyStatefulParams slot prodToyForgerAdv) = false := by
+    intro slot
+    unfold smDtTcrWithinWin tcrExtractorAdv advCollectTcrSubmissions HashSignAdv.map
+    rw [runHashSignAdv_bind, runHashSignAdv_advTrackSignLog zeroRejectToySuite
+      prodToyStatefulParams ⟨[], [], []⟩ [] [] _ rfl]
+    dsimp only [prodToyForgerAdv, runHashSignAdv, productionSigningLog]
+    rw [runHashSignAdv_bind]
+    dsimp only [HashSignAdv.bind]
+    rw [runHashSignAdv_bind]
+    dsimp only [advRawHash, runHashSignAdv]
+    rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+    dsimp only
+    rw [runHashSignAdv_bind, runHashSignAdv_advVerifyWithTcrCands]
+    dsimp only [runHashSignAdv]
+    rw [prodToyForgery_zeroSuite_cands_nil]
+    simp [smDtTcrChallengerCheck]
+  have hTcrLt : smDtTcrWithinWins prodToyGameCoins prodToyStatefulParams B_tcr <
+      prodToyGameCoins.length := by
+    have hB : smDtTcrWithinWin zeroRejectToySuite prodToyStatefulParams ⟨[], [], []⟩ B_tcr =
+        false := by
+      unfold B_tcr bestTcrExtractorAdv
+      exact hRejTcrFalse _
+    cases hC : smDtTcrWithinWin crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ B_tcr
+    · simp only [smDtTcrWithinWins, prodToyGameCoins, prodToyAcceptCoin, prodToyRejectCoin,
+        hitCount, hB, hC, Bool.false_eq_true, ↓reduceIte, List.length_cons, List.length_nil]
+      omega
+    · simp only [smDtTcrWithinWins, prodToyGameCoins, prodToyAcceptCoin, prodToyRejectCoin,
+        hitCount, hB, hC, Bool.false_eq_true, ↓reduceIte, List.length_cons, List.length_nil]
+      omega
+  rw [hRealCount]
+  exact ⟨by decide, by decide, hTcrPos, hTcrLt⟩
+
+theorem witness_within_game_reduction :
+    ∃ (_coins : List ProdExperimentCoin) (params : PqHashParams) (qh qs_max : Nat)
+      (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig)),
+      (params.w = 4 ∨ params.w = 16) ∧
+      (∀ pk, (A pk).Within qh qs_max) :=
+  ⟨prodToyGameCoins, prodToyStatefulParams, 0, 0, prodToyForgerAdv, prodToyRadix,
+    prodToyForgerAdv_within⟩
+
+theorem witness_smDtTcr_discharges_break :
+    ∃ (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+      (B : PqPublicKey → HashSignAdv (Option SmDtTcrSubmission)),
+      smDtTcrWithinWin suite params sk B = true := by
+  have hToyTcrEv :
+      (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+        (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+      prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+        (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        true := by
+    have hEqEv :
+        (let r := runHashSignAdv crumbToySuite prodToyStatefulParams ⟨[], [], []⟩ []
+          (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩))
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix ⟨⟨[], [], []⟩, r.2, r.1.1, r.1.2⟩
+          (runHashSignAdv_queries_oneTime crumbToySuite prodToyStatefulParams ⟨[], [], []⟩
+            (prodToyForgerAdv (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩)))) =
+        prodTcrEvent crumbToySuite prodToyStatefulParams prodToyRadix
+          ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime := rfl
+    rw [hEqEv]
+    unfold prodTcrEvent
+    cases hOut : prodTcrOutput crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime with
+    | none =>
+      have hc := prodToyForgery_returns_collision
+      rw [hOut] at hc; cases hc
+    | some p =>
+      exact (prodTcrOutput_sound crumbToySuite prodToyStatefulParams prodToyRadix
+        ⟨⟨[], [], []⟩, [], [], prodToyForgery⟩ prodToyOneTime p.1 p.2 hOut).2.2.2
+  obtain ⟨slot, hSlotWin⟩ := prodTcrEvent_captured_by_slot crumbToySuite prodToyStatefulParams
+    prodToyRadix (qh := 0) (qs_max := 0) ⟨[], [], []⟩ prodToyForgerAdv prodToyForgerAdv_within
+    hToyTcrEv
+  exact ⟨crumbToySuite, prodToyStatefulParams, ⟨[], [], []⟩,
+    tcrExtractorAdv prodToyStatefulParams slot.val prodToyForgerAdv, hSlotWin⟩
+
+end Qsag
+
+end
+
+#verify_constructive Qsag.prodToyGameCoins_two_sided_nonvacuous
+
+#tooth_pair Qsag.production_euf_cma_within_game_reduction_bound vs Qsag.tooth_replayed_query_loses_eufCmaWithin
+
+#tooth_pair Qsag.smDtTcrWithinWin_discharges_prodSmTcrBreak vs Qsag.tooth_identical_input_rejected_by_smDtTcr
+
+#verify_inhabited Qsag.production_euf_cma_within_game_reduction_bound Qsag.witness_within_game_reduction
+
+#verify_inhabited Qsag.smDtTcrWithinWin_discharges_prodSmTcrBreak Qsag.witness_smDtTcr_discharges_break
+
+public section
+
+namespace Qsag
+
+set_option autoImplicit false
+
+/-- Concrete 8-point 2-to-1 compression `x ↦ x / 2` witnessing the gap between unbudgeted
+    existential collision predicates (`ProdSmTcrBreak`-style) and `0`-query seed-withheld guessing:
+    every secret target `s ∈ Fin 8` has a distinct sibling `s ⊕ 1` colliding under `x / 2` (`8 / 8`),
+    whereas any fixed `0`-query guess `g : Fin 8` hits the distinct sibling of at most `1` secret `s`! -/
+def twoToOneHash8 (x : Fin 8) : Nat := x.1 / 2
+
+def unbudgetedCollisionExists8 (s : Fin 8) : Bool :=
+  (List.finRange 8).any (fun x => decide (x ≠ s ∧ twoToOneHash8 x = twoToOneHash8 s))
+
+def zeroQueryGuessHits8 (guess s : Fin 8) : Bool :=
+  decide (guess ≠ s ∧ twoToOneHash8 guess = twoToOneHash8 s)
+
+theorem tooth_unrestricted_smTcrBreak_exceeds_zero_query_tcr (guess : Fin 8) :
+    ¬ (hitCount unbudgetedCollisionExists8 (List.finRange 8) ≤
+        hitCount (zeroQueryGuessHits8 guess) (List.finRange 8)) := by
+  revert guess
+  decide +kernel
+
+/-- Inhabitedness witness for `prodAdaptive_eufCma_to_budgeted_events` using `crumbToySuite`
+    and a `0`-query `SeedWithheldEufCmaAdv` outputting `prodToyForgery`. -/
+def witnessZeroQueryAdv : SeedWithheldEufCmaAdv 0 0 where
+  run := fun _ => .pure ([], prodToyForgery)
+  bounded := fun _ => trivial
+
+theorem witness_prodAdaptive_eufCma_to_budgeted_events :
+    ∃ (qHash qSign : Nat) (suite : TweakableHashSuite) (params : PqHashParams)
+      (_ : params.w = 4 ∨ params.w = 16)
+      (adv : SeedWithheldEufCmaAdv qHash qSign)
+      (keyOf : Unit → PqSecretKey) (coins : List Unit),
+      (∀ ω, AdaptiveOneTimeOn suite params adv (keyOf ω)) ∧
+      1 ≤ hitCount (fun ω => prodEufCmaWin suite params
+        (runSeedWithheldEufCma suite params adv (keyOf ω)).1) coins := by
+  refine ⟨0, 0, crumbToySuite, prodToyStatefulParams, .inl rfl, witnessZeroQueryAdv,
+    (fun _ => ⟨[], [], []⟩), [()], ?_, ?_⟩
+  · intro _ _ qs q hMem
+    dsimp only [qs, runSeedWithheldEufCma, witnessZeroQueryAdv, evalProdAdaptiveTree] at hMem
+    exact nomatch hMem
+  · decide +kernel
+
+end Qsag
+
+end
+
+#tooth_pair Qsag.prodAdaptive_eufCma_to_budgeted_events vs Qsag.tooth_unrestricted_smTcrBreak_exceeds_zero_query_tcr
+
+#verify_inhabited Qsag.prodAdaptive_eufCma_to_budgeted_events Qsag.witness_prodAdaptive_eufCma_to_budgeted_events
+
+#verify_constructive Qsag.tooth_unrestricted_smTcrBreak_exceeds_zero_query_tcr
+end
+
+/-! ## Audits that read definitions of `Qsag.Math.Counting` -/
+
+#verify_inhabited Qsag.HybridSecurity.one_use_incomparable Qsag.HybridSecurity.incomparable_inhabited
+#tooth_pair Qsag.HybridSecurity.one_use_incomparable vs Qsag.HybridSecurity.two_uses_cover_third
+
+/-! ## Pairs whose two theorems are proved in different modules -/
+
+#verify_inhabited Qsag.production_stateful_forgery_witness Qsag.witness_production_stateful_forgery
+#tooth_pair Qsag.production_euf_cma_extracted_bound vs Qsag.prodEufCmaWin_rejects_signed_message
+
+/-! ## `prodPublicExtract` -/
+
+#tooth_pair Qsag.prodPublicExtract_complete vs Qsag.tooth_identical_input_rejected_by_smDtTcr
