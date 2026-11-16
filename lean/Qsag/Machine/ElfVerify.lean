@@ -26,7 +26,7 @@ attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLa
 set_option autoImplicit false
 set_option maxRecDepth 65536
 
-def checkElfSliceThreeWayNI (slice : ElfFuncSlice) (c : FuncContract) : Bool :=
+@[expose] def checkElfSliceThreeWayNI (slice : ElfFuncSlice) (c : FuncContract) : Bool :=
   if slice.machine == elfMachineX86_64 then
     checkX86ThreeWayNI slice.code c
   else if slice.machine == elfMachineAArch64 then
@@ -34,14 +34,14 @@ def checkElfSliceThreeWayNI (slice : ElfFuncSlice) (c : FuncContract) : Bool :=
   else
     false
 
-def checkElfFuncThreeWayNI (elfBytes : Bytes) (symName : String) (c : FuncContract) : Bool :=
+@[expose] def checkElfFuncThreeWayNI (elfBytes : Bytes) (symName : String) (c : FuncContract) : Bool :=
   match extractElfFuncBytes elfBytes symName with
   | none => false
   | some slice => checkElfSliceThreeWayNI slice c
 
 /-! ### Exact contracts for all 28 compiled `.rlib` symbols -/
 
-def mkContract (name : String) (pubGprs : List Nat)
+@[expose] def mkContract (name : String) (pubGprs : List Nat)
     (pubMem : List (Nat × Nat) := []) (wipedGprs : List Nat := [])
     (usesRbp : Bool := false) (outPtr : Nat := 0) (outBytes : Nat := 0)
     (doitEnabled : Bool := true) : FuncContract :=
@@ -49,7 +49,7 @@ def mkContract (name : String) (pubGprs : List Nat)
 
 /-- Contracts of the 19 `x86_64` symbols, in fixture order. Pointer/count inputs are public; loaded
 data remain secret. -/
-def currentX86SymbolContracts : List FuncContract := [
+@[expose] def currentX86SymbolContracts : List FuncContract := [
   mkContract "qsag_asm_keccak_f1600_avx2_4x"        [4, 7, 6]       []           []        true 7 0x320,
   mkContract "qsag_asm_keccak_chi_mpc_avx2"         [4, 7, 6, 2, 1] []           [],
   mkContract "qsag_asm_gf256_shamir_mul_gfni"       [4, 7, 6, 2, 1] []           [],
@@ -72,7 +72,7 @@ def currentX86SymbolContracts : List FuncContract := [
 ]
 
 /-- Contracts of the 9 `aarch64` symbols, in fixture order. -/
-def currentAarch64SymbolContracts : List FuncContract := [
+@[expose] def currentAarch64SymbolContracts : List FuncContract := [
   mkContract "qsag_asm_enable_dit_aarch64"          [],
   mkContract "qsag_asm_keccak_sha3_neon"            [0, 1, 2],
   mkContract "qsag_asm_keccak_theta_rho_sha3_neon"  [0, 1],
@@ -84,21 +84,21 @@ def currentAarch64SymbolContracts : List FuncContract := [
   mkContract "qsag_asm_gf2_128_mul_acc_pmull"       [0, 1, 2, 3]
 ]
 
-def verifySliceContractList : List ElfFuncSlice → List FuncContract → Bool
+@[expose] def verifySliceContractList : List ElfFuncSlice → List FuncContract → Bool
   | [], [] => true
   | s :: ss, c :: cs =>
     (s.name == c.symName) && checkElfSliceThreeWayNI s c && verifySliceContractList ss cs
   | _, _ => false
 
-def verifyAllRlibContracts (rlib : Bytes) (contracts : List FuncContract) : Bool :=
+@[expose] def verifyAllRlibContracts (rlib : Bytes) (contracts : List FuncContract) : Bool :=
   verifySliceContractList (extractAllRlibFuncs rlib) contracts
 
 /-! ### Mutation / Negative Teeth (`#tooth` Equivalents on Real & Mutated Machine-Code Streams) -/
 
-def patchBytesAt (bs : List UInt8) (off : Nat) (patch : List UInt8) : List UInt8 :=
+@[expose] def patchBytesAt (bs : List UInt8) (off : Nat) (patch : List UInt8) : List UInt8 :=
   takeTR off bs ++ patch ++ bs.drop (off + patch.length)
 
-def findSliceByNameBytes (slices : List ElfFuncSlice) (target : List UInt8) : Option ElfFuncSlice :=
+@[expose] def findSliceByNameBytes (slices : List ElfFuncSlice) (target : List UInt8) : Option ElfFuncSlice :=
   slices.find? (fun s => s.nameBytes == target)
 
 /-- Unified 3-Way Constant-Time NI + ABI Hygiene semantic postcondition for an `ELF64` `.text` slice. -/
@@ -162,7 +162,7 @@ inductive InvCert where
   | arm (inv : PcMap Arm64AbsState)
 
 /-- Architecture-dispatching certificate check for one slice. -/
-def checkElfSliceWithCert (slice : ElfFuncSlice) (c : FuncContract) : InvCert → Bool
+@[expose] def checkElfSliceWithCert (slice : ElfFuncSlice) (c : FuncContract) : InvCert → Bool
   | .x86 inv => slice.machine == elfMachineX86_64 && checkX86WithInv slice.code c inv
   | .arm inv => slice.machine == elfMachineAArch64 && checkArm64WithInv slice.code c inv
 
@@ -178,7 +178,7 @@ theorem checkElfSliceWithCert_sound {slice : ElfFuncSlice} {c : FuncContract} {c
     exact Or.inr ⟨hCheck.1, fun _ _ hInit fuel => checkArm64WithInv_sound hCheck.2 hInit fuel⟩
 
 /-- The check for the `i`-th slice against the `i`-th contract and the `i`-th certificate. -/
-def certSliceAt (slices : List ElfFuncSlice) (contracts : List FuncContract)
+@[expose] def certSliceAt (slices : List ElfFuncSlice) (contracts : List FuncContract)
     (certs : List InvCert) (i : Nat) : Bool :=
   match slices[i]?, contracts[i]?, certs[i]? with
   | some s, some c, some k => (s.name == c.symName) && checkElfSliceWithCert s c k
