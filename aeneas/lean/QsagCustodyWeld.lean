@@ -10,6 +10,7 @@ import all QsagVerified.Proofs.RealSpecBeltWeld
 public import QsagVerified.Proofs.CustodyMediation
 import all QsagVerified.Proofs.CustodyMediation
 public import QsagVerified.Proofs.ElfMirTriangles
+import Qsag.Tactic.AssuranceKit
 
 /-!
 # Protocol-level weld library and its axiom census
@@ -77,6 +78,16 @@ export qsag_verified.proofs (
   tooth_sigma_nonzero_lane_refused
 )
 end QsagMirProofs
+
+-- Ordinary imports use the owning-module theorem certificates and transitive
+-- kernel axiom inventories; no private-body import is needed for these anchors.
+#verify_constructive qsag_verified.proofs.elf_mir_goldilocks_add_x86_64
+#verify_constructive qsag_verified.proofs.elf_mir_goldilocks_sub_x86_64
+#verify_constructive qsag_verified.proofs.elf_mir_goldilocks_mul_x86_64
+#verify_constructive qsag_verified.proofs.elf_mir_goldilocks_mul_aarch64
+#verify_constructive qsag_verified.proofs.elf_mir_keccak_f1600_avx2_4x
+#verify_constructive qsag_verified.proofs.elf_mir_gf256_gfni
+#verify_constructive qsag_verified.proofs.elf_mir_tower128_pclmul
 
 open Lean Elab Command in
 run_cmd do
