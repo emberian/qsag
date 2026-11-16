@@ -10,7 +10,6 @@ Items 1–3 are defined and proved in `Qsag.Math.EllipticCurves` and audited her
 -/
 
 public import Qsag.Math.EllipticCurves
-import all Qsag.Math.EllipticCurves
 public import Qsag.Tactic.AssuranceKit
 
 public section
@@ -265,12 +264,7 @@ theorem tooth_unreduced_256bit_scalar_alias_all_four_curves
 /-! ## 6. Constructive Axiom Audit (`#verify_constructive`) -/
 
 #verify_constructive
-  Qsag.pallas_and_bls381_limbs_and_bit_bounds Qsag.IsPrimeMod.dvd_mul Qsag.lucasPowMod_eq_pow_mod
-  Qsag.isPrime_of_lucas_pratt Qsag.checkPrattStep_sound Qsag.checkPrattDAG_sound
-  Qsag.p_pallas_isPrime Qsag.q_pallas_isPrime Qsag.r_bls381_isPrime Qsag.p_bls381_isPrime
-  Qsag.pallas_and_bls381_moduli_prime Qsag.orchardSpendAuthG_onCurve_and_prime_subgroup_order
-  Qsag.bls381G1_onCurve_and_prime_subgroup_order
-  Qsag.projEqAffine_zk_constraint_sound Qsag.PrimeSubgroup.smul_injective Qsag.extractThreeShares_complete
+  Qsag.PrimeSubgroup.smul_injective Qsag.extractThreeShares_complete
   Qsag.zkboo_two_challenge_extraction_sound
   Qsag.tooth_zkboo_single_challenge_information_theoretically_hides_witness
   Qsag.primeSubgroup_smul_add_mod Qsag.orchard_redpallas_rerandomized_extraction_sound

@@ -53,11 +53,6 @@ public import Qsag.Protocol.Signing.Fips205
 public import Qsag.Protocol.Threshold.Preprocessing
 
 public import Qsag.Tactic.Prelude
-import all Qsag.Math.Goldilocks
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Signing.HashSigs
-import all Qsag.Protocol.Threshold.Preprocessing
 
 import Qsag.Tactic.AssuranceKit
 
@@ -1551,8 +1546,8 @@ theorem lagrangeCombine_zipAdd {R : Type} [LawfulCommRing R] :
       xs.length = ys.length →
       lagrangeCombine ls (List.zipWith CommRingOps.add xs ys) =
         CommRingOps.add (lagrangeCombine ls xs) (lagrangeCombine ls ys)
-  | [], _, _, _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.add_zero]
-  | _ :: _, [], [], _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.add_zero]
+  | [], _, _, _ => by simp [lagrangeCombine, LawfulCommRing.add_zero]
+  | _ :: _, [], [], _ => by simp [lagrangeCombine, LawfulCommRing.add_zero]
   | l :: ls, x :: xs, y :: ys, h => by
     have ih := lagrangeCombine_zipAdd ls xs ys (Nat.succ.inj h)
     simp only [lagrangeCombine] at ih
@@ -1564,8 +1559,8 @@ theorem lagrangeCombine_zipSub {R : Type} [LawfulCommRing R] :
       xs.length = ys.length →
       lagrangeCombine ls (List.zipWith CommRingOps.sub xs ys) =
         CommRingOps.sub (lagrangeCombine ls xs) (lagrangeCombine ls ys)
-  | [], _, _, _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.sub_self]
-  | _ :: _, [], [], _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.sub_self]
+  | [], _, _, _ => by simp [lagrangeCombine, LawfulCommRing.sub_self]
+  | _ :: _, [], [], _ => by simp [lagrangeCombine, LawfulCommRing.sub_self]
   | l :: ls, x :: xs, y :: ys, h => by
     have hNegAdd : ∀ (a b : R), CommRingOps.neg (CommRingOps.add a b) =
         CommRingOps.add (CommRingOps.neg a) (CommRingOps.neg b) := fun a b => by
@@ -1582,8 +1577,8 @@ theorem lagrangeCombine_scale {R : Type} [LawfulCommRing R] (c : R) :
     ∀ (ls xs : List R),
       lagrangeCombine ls (xs.map (CommRingOps.mul c)) =
         CommRingOps.mul c (lagrangeCombine ls xs)
-  | [], _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.mul_zero]
-  | _ :: _, [] => by simp [lagrangeCombine, ringDot, LawfulCommRing.mul_zero]
+  | [], _ => by simp [lagrangeCombine, LawfulCommRing.mul_zero]
+  | _ :: _, [] => by simp [lagrangeCombine, LawfulCommRing.mul_zero]
   | l :: ls, x :: xs => by
     have ih := lagrangeCombine_scale c ls xs
     simp only [lagrangeCombine] at ih
@@ -1910,8 +1905,8 @@ theorem evalSharedPow7Binomial_complete
   have hMacDSum : ringListSum (shareZipSub macX macR) =
       CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase dOpened) := by
     rw [ringListSum_zipSub (hMacXLen.trans hMacRLen.symm), hMacXSum, hMacRSum,
-        ← LawfulCommRing.mul_sub, hdEq]
-    congr 1
+        ← LawfulCommRing.mul_sub, hdEq, ← GoldilocksExt2.ofBase_sub]
+    rfl
   have hVer := verifySpdzZeroSumMac_complete
     (GoldilocksExt2.ofBase dOpened) (GoldilocksExt2.ofBase dOpened)
     (shareZipSub macX macR) alphaShares zeroMasks hMacDLen hMaskLen hMacDSum hZeroMask rfl
@@ -2075,6 +2070,183 @@ def demoPow7TupleFor4 : SharedPow7Tuple :=
     r6Sh := [Goldilocks.ofNat 4102,  Goldilocks.ofNat 4108,  Goldilocks.ofNat 4114]
     r7Sh := [Goldilocks.ofNat 16391, Goldilocks.ofNat 16398, Goldilocks.ofNat 16405] }
 
+/-- Recombination under the demo 2-of-3 weights as an evaluable dot product. -/
+private theorem lagrangeCombine_demoLambdas2of3 (xs : List Goldilocks) :
+    lagrangeCombine demoLambdas2of3 xs =
+      dotVec [Goldilocks.ofNat 2, Goldilocks.ofNat 18446744069414584320, Goldilocks.zero] xs :=
+  ringDot_demoLambdas2of3 xs
+
+private theorem demoPow7TupleFor4_validAt : demoPow7TupleFor4.validAt demoLambdas2of3 := by
+  unfold SharedPow7Tuple.validAt
+  simp only [lagrangeCombine_demoLambdas2of3, demoLambdas2of3_length]
+  decide +kernel
+
+private theorem demoX9_combine :
+    lagrangeCombine demoLambdas2of3 [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15] = Goldilocks.ofNat 9 := by
+  rw [lagrangeCombine_demoLambdas2of3]; decide +kernel
+
+private theorem demoR4_combine :
+    lagrangeCombine demoLambdas2of3 demoPow7TupleFor4.rSh = Goldilocks.ofNat 4 := by
+  rw [lagrangeCombine_demoLambdas2of3]; decide +kernel
+
+private theorem demoD5_combine :
+    lagrangeCombine demoLambdas2of3 (shareZipSub [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15] demoPow7TupleFor4.rSh) = Goldilocks.ofNat 5 := by
+  have h : lagrangeCombine demoLambdas2of3 (shareZipSub [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15] demoPow7TupleFor4.rSh) =
+      CommRingOps.sub (lagrangeCombine demoLambdas2of3 [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15])
+        (lagrangeCombine demoLambdas2of3 demoPow7TupleFor4.rSh) :=
+    ringDot_zipSub rfl
+  rw [h, demoX9_combine, demoR4_combine]; decide +kernel
+
+private theorem demoX9_length : [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15].length = demoLambdas2of3.length := by
+  rw [demoLambdas2of3_length]; rfl
+
+private theorem demoMac_length (s : Nat) : (mkDemoMacShares s).length = demoAlphaShares3.length :=
+  (mkDemoMacShares_length s).trans demoAlphaShares3_length.symm
+
+private theorem demoMask_length : demoZeroMasks3.length = demoAlphaShares3.length :=
+  demoZeroMasks3_length.trans demoAlphaShares3_length.symm
+
+private theorem demoMacX9_sum :
+    ringListSum (mkDemoMacShares 9) = CommRingOps.mul (ringListSum demoAlphaShares3)
+      (GoldilocksExt2.ofBase (lagrangeCombine demoLambdas2of3 [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15])) := by
+  rw [demoX9_combine]; exact mkDemoMacShares_sum 9
+
+private theorem demoMacR4_sum :
+    ringListSum (mkDemoMacShares 4) = CommRingOps.mul (ringListSum demoAlphaShares3)
+      (GoldilocksExt2.ofBase (lagrangeCombine demoLambdas2of3 demoPow7TupleFor4.rSh)) := by
+  rw [demoR4_combine]; exact mkDemoMacShares_sum 4
+
+private theorem demoMacD_length :
+    (shareZipSub (mkDemoMacShares 9) (mkDemoMacShares 4)).length = demoAlphaShares3.length := by
+  rw [shareZipSub_length_of_eq ((mkDemoMacShares_length 9).trans (mkDemoMacShares_length 4).symm)]
+  exact demoMac_length 9
+
+private theorem demoMacD_sum :
+    ringListSum (shareZipSub (mkDemoMacShares 9) (mkDemoMacShares 4)) =
+      CommRingOps.mul (ringListSum demoAlphaShares3)
+        (CommRingOps.sub (GoldilocksExt2.ofBase (Goldilocks.ofNat 9))
+          (GoldilocksExt2.ofBase (Goldilocks.ofNat 4))) := by
+  rw [ringListSum_zipSub ((mkDemoMacShares_length 9).trans (mkDemoMacShares_length 4).symm),
+    mkDemoMacShares_sum, mkDemoMacShares_sum, ← LawfulCommRing.mul_sub]
+
+private theorem demoOpened5_eq :
+    GoldilocksExt2.ofBase (Goldilocks.ofNat 5) =
+      CommRingOps.sub (GoldilocksExt2.ofBase (Goldilocks.ofNat 9))
+        (GoldilocksExt2.ofBase (Goldilocks.ofNat 4)) :=
+  (congrArg GoldilocksExt2.ofBase
+    (show Goldilocks.ofNat 5 = CommRingOps.sub (Goldilocks.ofNat 9) (Goldilocks.ofNat 4) from by
+      decide +kernel)).trans (GoldilocksExt2.ofBase_sub _ _)
+
+private theorem evalSharedPow7Binomial_eq_none_of_sum_ne (d : Goldilocks) (tup : SharedPow7Tuple)
+    (sigmas : List GoldilocksExt2) (h : ringListSum sigmas ≠ CommRingOps.zero) :
+    evalSharedPow7Binomial d tup sigmas = none := by
+  have hV : verifySpdzZeroSumMac sigmas = false := by
+    unfold verifySpdzZeroSumMac
+    exact decide_eq_false h
+  unfold evalSharedPow7Binomial
+  rw [hV]
+  rfl
+
+/-- Sum of the committee broadcast of an active `Π_pow7` round, for any opened scalar and any
+    MAC broadcast shifts. -/
+private theorem pow7_round_sigma_sum
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (dOpened : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero) :
+    ringListSum (ringListZipAdd
+        (spdzComputeSigmas (GoldilocksExt2.ofBase dOpened) (shareZipSub macX macR) alphaShares zeroMasks)
+        sigmaDevs) =
+      CommRingOps.add
+        (CommRingOps.mul (ringListSum alphaShares)
+          (CommRingOps.sub
+            (CommRingOps.sub (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh))
+              (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+            (GoldilocksExt2.ofBase dOpened)))
+        (ringListSum sigmaDevs) := by
+  have hMacDLen : (shareZipSub macX macR).length = alphaShares.length := by
+    rw [shareZipSub_length_of_eq (hMacXLen.trans hMacRLen.symm), hMacXLen]
+  rw [ringListSum_zipAdd, ringListSum_spdzComputeSigmas _ hMacDLen hMaskLen, hZeroMask,
+    LawfulCommRing.add_zero, ringListSum_zipSub (hMacXLen.trans hMacRLen.symm), hMacXSum, hMacRSum,
+    ← LawfulCommRing.mul_sub, ← LawfulCommRing.mul_sub]
+
+private theorem execActiveSharedPow7Round_eq_none_of_sum_ne
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero)
+    (hNe : CommRingOps.add
+        (CommRingOps.mul (ringListSum alphaShares)
+          (CommRingOps.sub
+            (CommRingOps.sub (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh))
+              (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+            (GoldilocksExt2.ofBase
+              (Goldilocks.add (lagrangeCombine lambdas (shareZipSub xSh tup.rSh)) deltaD))))
+        (ringListSum sigmaDevs) ≠ CommRingOps.zero) :
+    execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs =
+      none := by
+  unfold execActiveSharedPow7Round
+  dsimp only
+  apply evalSharedPow7Binomial_eq_none_of_sum_ne
+  rw [pow7_round_sigma_sum lambdas xSh tup macX macR alphaShares zeroMasks _ sigmaDevs
+    hMacXLen hMacRLen hMaskLen hMacXSum hMacRSum hZeroMask]
+  exact hNe
+
+private theorem execActiveSharedPow7Round_honest
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2) (sigmaDevs : List GoldilocksExt2)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hXLen : xSh.length = lambdas.length)
+    (hTup : tup.validAt lambdas)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero)
+    (hDev : ringListSum sigmaDevs = CommRingOps.zero) :
+    ∃ ySh : List Goldilocks,
+      execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks
+        Goldilocks.zero sigmaDevs = some ySh ∧
+      lagrangeCombine lambdas ySh = sbox7 (lagrangeCombine lambdas xSh) := by
+  have hd : Goldilocks.add (lagrangeCombine lambdas (shareZipSub xSh tup.rSh)) Goldilocks.zero =
+      lagrangeCombine lambdas (shareZipSub xSh tup.rSh) := LawfulCommRing.add_zero _
+  have hdEq : lagrangeCombine lambdas (shareZipSub xSh tup.rSh) =
+      CommRingOps.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh) :=
+    ringDot_zipSub (hXLen.trans hTup.1.symm)
+  obtain ⟨_, hYComb⟩ := lagrangeCombine_mpcPow7Shares_eq_sbox7 lambdas xSh tup hSumOne hXLen hTup
+  refine ⟨mpcPow7Shares (lagrangeCombine lambdas (shareZipSub xSh tup.rSh)) tup, ?_, hYComb⟩
+  unfold execActiveSharedPow7Round
+  dsimp only
+  rw [hd]
+  have hV : verifySpdzZeroSumMac (ringListZipAdd
+      (spdzComputeSigmas (GoldilocksExt2.ofBase (lagrangeCombine lambdas (shareZipSub xSh tup.rSh)))
+        (shareZipSub macX macR) alphaShares zeroMasks) sigmaDevs) = true := by
+    unfold verifySpdzZeroSumMac
+    apply decide_eq_true
+    rw [pow7_round_sigma_sum lambdas xSh tup macX macR alphaShares zeroMasks _ sigmaDevs
+      hMacXLen hMacRLen hMaskLen hMacXSum hMacRSum hZeroMask, hDev, LawfulCommRing.add_zero, hdEq,
+      GoldilocksExt2.ofBase_sub, LawfulCommRing.sub_self, LawfulCommRing.mul_zero]
+  unfold evalSharedPow7Binomial
+  rw [hV]
+  rfl
+
 /-- **Inhabitedness Witness (`evalSharedPow7Binomial_inhabited`)**:
     Evaluating `evalSharedPow7Binomial` on degree-1 2-of-3 Shamir shares of `x = 9` (`9 + 2X -> [11, 13, 15]`)
     and `demoPow7TupleFor4` (`r = 4`) returns `some ySh` recombining to `sbox7 9 = 4782969`. -/
@@ -2086,7 +2258,17 @@ theorem evalSharedPow7Binomial_inhabited :
     (match evalSharedPow7Binomial dOpened demoPow7TupleFor4 sigmas with
      | some ySh => lagrangeCombine demoLambdas2of3 ySh == sbox7 (Goldilocks.ofNat 9)
      | none => false) = true := by
-  refine ⟨by decide +kernel, by decide +kernel⟩
+  have hC := evalSharedPow7Binomial_complete demoLambdas2of3 [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15] demoPow7TupleFor4
+    (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+    demoLambdas2of3_sum demoX9_length demoPow7TupleFor4_validAt (demoMac_length 9)
+    (demoMac_length 4) demoMask_length demoMacX9_sum demoMacR4_sum demoZeroMasks3_sum
+  dsimp only [openSharedPow7Input] at hC ⊢
+  obtain ⟨ySh, hEv, _, hComb⟩ := hC
+  refine ⟨demoD5_combine, ?_⟩
+  rw [hEv]
+  dsimp only
+  rw [hComb, demoX9_combine]
+  exact beq_self_eq_true _
 
 /-- **`#tooth` Tampered `Π_pow7` Masked Opening & MAC Refusal (`tooth_evalSharedPow7Binomial_rejects_mac_tamper`)**:
     Corrupting the opened masked scalar from `d = 5` (`9 - 4`) to `d_bad = 6` causes the committee's
@@ -2104,7 +2286,50 @@ theorem tooth_evalSharedPow7Binomial_rejects_mac_tamper :
       | [] => []
     evalSharedPow7Binomial dBad demoPow7TupleFor4 sigmasOnBad = none ∧
     evalSharedPow7Binomial (Goldilocks.ofNat 5) demoPow7TupleFor4 corruptedSigmas = none := by
-  refine ⟨by decide +kernel, by decide +kernel⟩
+  dsimp only [openSharedPow7Input]
+  refine ⟨?_, ?_⟩
+  · apply evalSharedPow7Binomial_eq_none_of_sum_ne
+    have hV := verifySpdzZeroSumMac_rejects_wrong_opening
+      (CommRingOps.sub (GoldilocksExt2.ofBase (Goldilocks.ofNat 9))
+        (GoldilocksExt2.ofBase (Goldilocks.ofNat 4)))
+      (GoldilocksExt2.ofBase (Goldilocks.ofNat 6))
+      (shareZipSub (mkDemoMacShares 9) (mkDemoMacShares 4)) demoAlphaShares3 demoZeroMasks3
+      demoMacD_length demoMask_length demoMacD_sum demoZeroMasks3_sum demoAlphaShares3_sum_ne_zero
+      (fun h => absurd (GoldilocksExt2.ofBase_injective (h.trans (GoldilocksExt2.ofBase_sub _ _).symm))
+        (by decide +kernel :
+          ¬ (Goldilocks.ofNat 6 = CommRingOps.sub (Goldilocks.ofNat 9) (Goldilocks.ofNat 4))))
+    unfold verifySpdzZeroSumMac at hV
+    exact of_decide_eq_false hV
+  · apply evalSharedPow7Binomial_eq_none_of_sum_ne
+    generalize hσ : spdzComputeSigmas
+      (GoldilocksExt2.ofBase (lagrangeCombine demoLambdas2of3
+        (shareZipSub [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15]
+          demoPow7TupleFor4.rSh)))
+      (shareZipSub (mkDemoMacShares 9) (mkDemoMacShares 4)) demoAlphaShares3 demoZeroMasks3 = sig
+    have hLen : sig.length = demoAlphaShares3.length := by
+      rw [← hσ]; exact spdzComputeSigmas_length _ demoMacD_length demoMask_length
+    have hSum : ringListSum sig = CommRingOps.zero := by
+      rw [← hσ, demoD5_combine]
+      have hV := verifySpdzZeroSumMac_complete
+        (CommRingOps.sub (GoldilocksExt2.ofBase (Goldilocks.ofNat 9))
+          (GoldilocksExt2.ofBase (Goldilocks.ofNat 4)))
+        (GoldilocksExt2.ofBase (Goldilocks.ofNat 5))
+        (shareZipSub (mkDemoMacShares 9) (mkDemoMacShares 4)) demoAlphaShares3 demoZeroMasks3
+        demoMacD_length demoMask_length demoMacD_sum demoZeroMasks3_sum demoOpened5_eq
+      unfold verifySpdzZeroSumMac at hV
+      exact of_decide_eq_true hV
+    cases sig with
+    | nil => rw [demoAlphaShares3_length] at hLen; exact absurd hLen (by decide)
+    | cons s0 rest =>
+      dsimp only
+      intro h
+      have h1 : CommRingOps.add (ringListSum (s0 :: rest)) CommRingOps.one = CommRingOps.zero := by
+        rw [← h]
+        simp only [ringListSum]
+        rw [LawfulCommRing.add_assoc, LawfulCommRing.add_assoc,
+          LawfulCommRing.add_comm (ringListSum rest)]
+      rw [hSum, LawfulCommRing.zero_add] at h1
+      exact LawfulField.one_ne_zero h1
 
 /-- **`#tooth` Share-Grounded Active `Π_pow7` Rejects Unpinned Tampering
     (`tooth_execActiveSharedPow7Round_rejects_unpinned_tamper`)**:
@@ -2127,7 +2352,52 @@ theorem tooth_execActiveSharedPow7Round_rejects_unpinned_tamper :
     execActiveSharedPow7Round demoLambdas2of3 xSh demoPow7TupleFor4
       (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
       Goldilocks.zero oneDevs = none := by
-  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+  dsimp only
+  have hZeroDevs : ringListSum
+      ([CommRingOps.zero, CommRingOps.zero, CommRingOps.zero] : List GoldilocksExt2) =
+        CommRingOps.zero := by
+    simp only [ringListSum, LawfulCommRing.add_zero]
+  refine ⟨?_, ?_, ?_⟩
+  · obtain ⟨ySh, hEx, hComb⟩ := execActiveSharedPow7Round_honest demoLambdas2of3 [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15]
+      demoPow7TupleFor4 (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+      [CommRingOps.zero, CommRingOps.zero, CommRingOps.zero]
+      demoLambdas2of3_sum demoX9_length demoPow7TupleFor4_validAt (demoMac_length 9)
+      (demoMac_length 4) demoMask_length demoMacX9_sum demoMacR4_sum demoZeroMasks3_sum hZeroDevs
+    rw [hEx]
+    dsimp only
+    rw [hComb, demoX9_combine]
+    exact beq_self_eq_true _
+  · apply execActiveSharedPow7Round_eq_none_of_sum_ne demoLambdas2of3 [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15]
+      demoPow7TupleFor4 (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+      Goldilocks.one [CommRingOps.zero, CommRingOps.zero, CommRingOps.zero]
+      (demoMac_length 9) (demoMac_length 4) demoMask_length demoMacX9_sum demoMacR4_sum
+      demoZeroMasks3_sum
+    rw [hZeroDevs, LawfulCommRing.add_zero, demoX9_combine, demoR4_combine, demoD5_combine]
+    intro h
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h with h0 | h0
+    · exact demoAlphaShares3_sum_ne_zero h0
+    · exact absurd
+        (GoldilocksExt2.ofBase_injective
+          ((GoldilocksExt2.ofBase_sub _ _).trans (LawfulCommRing.sub_eq_zero_iff.mp h0)))
+        (by decide +kernel :
+          ¬ (CommRingOps.sub (Goldilocks.ofNat 9) (Goldilocks.ofNat 4) =
+            Goldilocks.add (Goldilocks.ofNat 5) Goldilocks.one))
+  · apply execActiveSharedPow7Round_eq_none_of_sum_ne demoLambdas2of3 [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15]
+      demoPow7TupleFor4 (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+      Goldilocks.zero [CommRingOps.one, CommRingOps.zero, CommRingOps.zero]
+      (demoMac_length 9) (demoMac_length 4) demoMask_length demoMacX9_sum demoMacR4_sum
+      demoZeroMasks3_sum
+    have h5 : GoldilocksExt2.ofBase (Goldilocks.add (Goldilocks.ofNat 5) Goldilocks.zero) =
+        CommRingOps.sub (GoldilocksExt2.ofBase (Goldilocks.ofNat 9))
+          (GoldilocksExt2.ofBase (Goldilocks.ofNat 4)) :=
+      (congrArg GoldilocksExt2.ofBase
+        (show Goldilocks.add (Goldilocks.ofNat 5) Goldilocks.zero =
+          CommRingOps.sub (Goldilocks.ofNat 9) (Goldilocks.ofNat 4) from by decide +kernel)).trans
+        (GoldilocksExt2.ofBase_sub _ _)
+    rw [demoX9_combine, demoR4_combine, demoD5_combine, h5, LawfulCommRing.sub_self,
+      LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+    simp only [ringListSum, LawfulCommRing.add_zero]
+    exact LawfulField.one_ne_zero
 
 /-! ### Share-Level `(t, n)` Shamir `Poseidon2` Permutation & Sponge Oracles (`mkShamirPoseidon2MpcOracles`) -/
 
@@ -2136,6 +2406,14 @@ def lagrangeCombineLane4 : List Goldilocks → List Lane4 → Lane4
   | [], _ => lane4Zero
   | _, [] => lane4Zero
   | l :: ls, b :: bs => lane4Add (lane4Scale l b) (lagrangeCombineLane4 ls bs)
+
+theorem lagrangeCombineLane4_nil (bs : List Lane4) :
+    lagrangeCombineLane4 [] bs = lane4Zero := by rfl
+
+theorem lagrangeCombineLane4_cons (l : Goldilocks) (ls : List Goldilocks)
+    (b : Lane4) (bs : List Lane4) :
+    lagrangeCombineLane4 (l :: ls) (b :: bs) =
+      lane4Add (lane4Scale l b) (lagrangeCombineLane4 ls bs) := by rfl
 
 /-- Recombine width-12 `Poseidon2State12` shares across a Shamir quorum. -/
 def lagrangeCombineState12 : List Goldilocks → List Poseidon2State12 → Poseidon2State12
@@ -2180,7 +2458,7 @@ private theorem zipLane4Shares_length :
     simp only [zipLane4Shares, List.length_cons,
       zipLane4Shares_length (Nat.succ.inj h0) (Nat.succ.inj h1) (Nat.succ.inj h2) (Nat.succ.inj h3)]
 
-private theorem zipState12Shares_length :
+theorem zipState12Shares_length :
     ∀ {bs0 bs1 bs2 : List Lane4} {n : Nat},
       bs0.length = n → bs1.length = n → bs2.length = n →
       (zipState12Shares bs0 bs1 bs2).length = n
@@ -2197,14 +2475,14 @@ private theorem lagrangeCombineLane4_zip :
         ⟨lagrangeCombine ls xs0, lagrangeCombine ls xs1,
          lagrangeCombine ls xs2, lagrangeCombine ls xs3⟩
   | [], [], [], [], [], _, _, _, _ => by
-    simp [lagrangeCombineLane4, lagrangeCombine, ringDot, lane4Zero_eq]; rfl
+    simp only [lagrangeCombineLane4, lagrangeCombine, ringDot_nilLeftC, lane4Zero_eq]; rfl
   | l :: ls, x0 :: xs0, x1 :: xs1, x2 :: xs2, x3 :: xs3, h0, h1, h2, h3 => by
     simp only [zipLane4Shares, lagrangeCombineLane4,
       lagrangeCombineLane4_zip ls xs0 xs1 xs2 xs3
         (Nat.succ.inj h0) (Nat.succ.inj h1) (Nat.succ.inj h2) (Nat.succ.inj h3),
-      lane4Scale_eq, lane4Add_eq, lagrangeCombine, ringDot]; rfl
+      lane4Scale_eq, lane4Add_eq, lagrangeCombine, ringDot_consC]; rfl
 
-private theorem lagrangeCombineState12_zip :
+theorem lagrangeCombineState12_zip :
     ∀ (ls : List Goldilocks) (bs0 bs1 bs2 : List Lane4),
       bs0.length = ls.length → bs1.length = ls.length → bs2.length = ls.length →
       lagrangeCombineState12 ls (zipState12Shares bs0 bs1 bs2) =
@@ -2216,18 +2494,21 @@ private theorem lagrangeCombineState12_zip :
         (Nat.succ.inj h0) (Nat.succ.inj h1) (Nat.succ.inj h2),
       state12Scale_eq, state12Add_eq]; rfl
 
-private theorem lagrangeCombineLane4_proj :
+theorem lagrangeCombineLane4_proj :
     ∀ (ls : List Goldilocks) (bs : List Lane4),
       lagrangeCombineLane4 ls bs =
         ⟨lagrangeCombine ls (bs.map (·.x0)), lagrangeCombine ls (bs.map (·.x1)),
          lagrangeCombine ls (bs.map (·.x2)), lagrangeCombine ls (bs.map (·.x3))⟩
-  | [], _ => by simp [lagrangeCombineLane4, lagrangeCombine, ringDot, lane4Zero_eq]; rfl
-  | _ :: _, [] => by simp [lagrangeCombineLane4, lagrangeCombine, ringDot, lane4Zero_eq]; rfl
+  | [], _ => by
+    simp only [lagrangeCombineLane4, lagrangeCombine, ringDot_nilLeftC, lane4Zero_eq]; rfl
+  | _ :: _, [] => by
+    simp only [lagrangeCombineLane4, lagrangeCombine, List.map_nil, ringDot_nilRightC,
+      lane4Zero_eq]; rfl
   | l :: ls, b :: bs => by
     simp only [List.map_cons, lagrangeCombineLane4, lagrangeCombineLane4_proj ls bs,
-      lane4Scale_eq, lane4Add_eq, lagrangeCombine, ringDot]; rfl
+      lane4Scale_eq, lane4Add_eq, lagrangeCombine, ringDot_consC]; rfl
 
-private theorem lagrangeCombineState12_proj :
+theorem lagrangeCombineState12_proj :
     ∀ (ls : List Goldilocks) (ss : List Poseidon2State12),
       lagrangeCombineState12 ls ss =
         ⟨lagrangeCombineLane4 ls (ss.map (·.b0)),
@@ -2239,10 +2520,10 @@ private theorem lagrangeCombineState12_proj :
     simp only [List.map_cons, lagrangeCombineState12, lagrangeCombineState12_proj ls ss,
       state12Scale_eq, state12Add_eq]; rfl
 
-private theorem ringDot_replicate_right {R : Type} [LawfulCommRing R] :
+theorem ringDot_replicate_right {R : Type} [LawfulCommRing R] :
     ∀ (ls : List R) (c : R),
       ringDot ls (List.replicate ls.length c) = CommRingOps.mul (ringListSum ls) c
-  | [], _ => by simp [ringDot, ringListSum, LawfulCommRing.zero_mul]
+  | [], _ => by simp [ringListSum, LawfulCommRing.zero_mul]
   | l :: ls, c => by
     simp only [List.length_cons, List.replicate_succ, ringDot_consC, ringListSum,
       ringDot_replicate_right ls c, LawfulCommRing.right_distrib]
@@ -2254,6 +2535,7 @@ private theorem lagrangeCombine_add_public
     lagrangeCombine ls (xs.map (fun x => Goldilocks.add x rc)) =
       Goldilocks.add (lagrangeCombine ls xs) rc := by
   have hComm : xs.map (fun x => Goldilocks.add x rc) = shareAddConst rc xs := by
+    rw [shareAddConst_def]
     apply List.map_congr_left
     intro x _
     exact LawfulCommRing.add_comm x rc
@@ -2286,6 +2568,7 @@ private theorem lagrangeCombineState12_add_public
       state12Add_eq, lane4Add_eq, lane4Add_eq, lane4Add_eq]
   simp only [List.map_map]
   refine Poseidon2State12.ext (Lane4.ext ?_ ?_ ?_ ?_) (Lane4.ext ?_ ?_ ?_ ?_) (Lane4.ext ?_ ?_ ?_ ?_)
+  all_goals simp only [Function.comp_def, state12Add_eq, lane4Add_eq]
   · exact lagrangeCombine_map_add_public ls ss (fun s => s.b0.x0) rc.b0.x0 hSumOne hLen
   · exact lagrangeCombine_map_add_public ls ss (fun s => s.b0.x1) rc.b0.x1 hSumOne hLen
   · exact lagrangeCombine_map_add_public ls ss (fun s => s.b0.x2) rc.b0.x2 hSumOne hLen
@@ -2691,6 +2974,37 @@ theorem evalSharedPoseidon2Perm_simulates
     dsimp only
     rw [hC3, hC2, hC1, lagrangeCombineState12_map_applyME]
 
+private theorem runOnlineIntRounds_eq_none_of_first_gate_rejected
+    (lambdas : List Goldilocks) (rc : Goldilocks) (rcs : List Goldilocks)
+    (ss : List Poseidon2State12) (rPrep : Nat → SharedPow7Tuple × List GoldilocksExt2) (idx : Nat)
+    (hBad : verifySpdzZeroSumMac (rPrep idx).2 = false) :
+    runOnlineIntRounds lambdas (rc :: rcs) ss rPrep idx = none := by
+  simp only [runOnlineIntRounds, evalSharedPoseidon2InternalRound, mkOnlineAuthGate,
+    evalSharedPow7Binomial, hBad, Bool.false_eq_true, ↓reduceIte]
+
+/-- A rejected SPDZ MAC at the first internal S-box gate aborts the whole online permutation,
+    whatever the external rounds computed. -/
+private theorem runSharedPoseidon2PermOnline_eq_none_of_first_internal_gate_rejected
+    (lambdas : List Goldilocks) (ss : List Poseidon2State12)
+    (extInitPrep : Nat → Nat → SharedPow7Tuple × List GoldilocksExt2)
+    (intPrep     : Nat → SharedPow7Tuple × List GoldilocksExt2)
+    (extTermPrep : Nat → Nat → SharedPow7Tuple × List GoldilocksExt2)
+    (hBad : verifySpdzZeroSumMac (intPrep 0).2 = false) :
+    runSharedPoseidon2PermOnline lambdas ss extInitPrep intPrep extTermPrep = none := by
+  unfold runSharedPoseidon2PermOnline
+  dsimp only
+  cases runOnlineExtRounds lambdas poseidon2InitialExtConsts (ss.map applyME) extInitPrep 0 with
+  | none => rfl
+  | some s1 =>
+    dsimp only
+    cases hC : poseidon2InternalConsts with
+    | nil =>
+      have h := poseidon2InternalConsts_length
+      rw [hC] at h
+      exact absurd h (by decide)
+    | cons rc rcs =>
+      rw [runOnlineIntRounds_eq_none_of_first_gate_rejected lambdas rc rcs s1 intPrep 0 hBad]
+
 /-- **`#tooth` Corrupted SPDZ MAC Aborts Share-Level `Poseidon2` (`tooth_evalSharedPoseidon2Perm_aborts_on_forged_gate`)**:
     Corrupting a single SPDZ MAC broadcast share in the internal round causes
     `runSharedPoseidon2PermOnline` to abort cleanly (`= none`)! -/
@@ -2702,7 +3016,17 @@ theorem tooth_evalSharedPoseidon2Perm_aborts_on_forged_gate :
       fun r => if r == 0 then (demoPow7TupleFor4, badSigmas) else goodPair
     runSharedPoseidon2PermOnline demoLambdas2of3 initSs
       (fun _ _ => goodPair) badIntPrep (fun _ _ => goodPair) = none := by
-  decide +kernel
+  intro initSs goodPair badSigmas badIntPrep
+  have hBad : verifySpdzZeroSumMac
+      ([⟨Goldilocks.one, Goldilocks.zero⟩, CommRingOps.zero, CommRingOps.zero] :
+        List GoldilocksExt2) = false := by
+    unfold verifySpdzZeroSumMac
+    apply decide_eq_false
+    intro h
+    have h0 := congrArg GoldilocksExt2.c0 h
+    simp only [ringListSum, GoldilocksExt2.add_c0, GoldilocksExt2.ringZero_c0] at h0
+    exact absurd h0 (by decide +kernel)
+  exact runSharedPoseidon2PermOnline_eq_none_of_first_internal_gate_rejected _ _ _ _ _ hBad
 
 /-- Shamir byte-share validity: each byte of `bs` is shared across `lambdas.length` parties. -/
 def ShamirByteSharesValid (lambdas : List Goldilocks) :
@@ -2833,22 +3157,23 @@ private theorem shamirChunk7Exact_valid (lambdas : List Goldilocks) :
     have hEqLimb : Goldilocks.ofNat ([b0, b1, b2, b3, b4, b5, b6].foldl (fun a b => a * 256 + b.toNat) 0) =
         pack7BytesLimb [b0, b1, b2, b3, b4, b5, b6] := by
       apply Goldilocks.ext
-      unfold pack7BytesLimb ofBE
-      dsimp only
+      rw [pack7BytesLimb_val]
       have hTake : (([b0, b1, b2, b3, b4, b5, b6] ++ List.replicate (7 - [b0, b1, b2, b3, b4, b5, b6].length) 0).take 7) =
           [b0, b1, b2, b3, b4, b5, b6] := rfl
       have hLtP : ([b0, b1, b2, b3, b4, b5, b6].foldl (fun a b => a * 256 + b.toNat) 0) < goldilocksPrime := by
         have h56 := pack7BytesLimb_lt_two_pow_56 [b0, b1, b2, b3, b4, b5, b6]
-        unfold pack7BytesLimb ofBE at h56
-        dsimp only at h56
-        rw [hTake] at h56
+        rw [pack7BytesLimb_val, hTake] at h56
         exact Nat.lt_trans h56 (by unfold goldilocksPrime; decide)
-      simp only [Goldilocks.ofNat, hTake, Nat.mod_eq_of_lt hLtP]
+      rw [hTake]
+      simp only [Goldilocks.ofNat, ofBE, Nat.mod_eq_of_lt hLtP]
+    rw [chunk7Exact_cons7]
     refine ⟨hPackLen, hPackVal.trans hEqLimb, shamirChunk7Exact_valid lambdas hRest⟩
-  | [], [], _ => trivial
+  | [], [], _ => by rw [chunk7Exact_of_length_lt _ (by decide)]; trivial
   | [_], [_], _ | [_, _], [_, _], _ | [_, _, _], [_, _, _], _
   | [_, _, _, _], [_, _, _, _], _ | [_, _, _, _, _], [_, _, _, _, _], _
-  | [_, _, _, _, _, _], [_, _, _, _, _, _], _ => trivial
+  | [_, _, _, _, _, _], [_, _, _, _, _, _], _ => by
+    rw [chunk7Exact_of_length_lt _ (by simp only [List.length_cons, List.length_nil]; omega)]
+    trivial
 
 def shamirPoseidon2PadBytes (nParties : Nat) (msgSh : List (List Goldilocks)) : List (List Goldilocks) :=
   let markedSh := msgSh ++ shamirPublicByteShares nParties [(0x01 : UInt8)]
@@ -2874,7 +3199,8 @@ private theorem shamirPoseidon2PadBytes_valid
     {msgSh : List (List Goldilocks)} {msg : List UInt8}
     (hValid : ShamirByteSharesValid lambdas msgSh msg) :
     ShamirLimbSharesValid lambdas (shamirPoseidon2PadBytes lambdas.length msgSh) (poseidon2PadBytes msg) := by
-  unfold shamirPoseidon2PadBytes poseidon2PadBytes poseidon2Pad bytesToLimbs56
+  rw [poseidon2PadBytes_def, bytesToLimbs56_def]
+  unfold shamirPoseidon2PadBytes poseidon2Pad
   have hMarkValid : ShamirByteSharesValid lambdas
       (msgSh ++ shamirPublicByteShares lambdas.length [(0x01 : UInt8)]) (msg ++ [(0x01 : UInt8)]) :=
     hValid.append (shamirPublicByteShares_valid lambdas hSumOne [(0x01 : UInt8)])
@@ -3015,14 +3341,17 @@ private theorem shamirAbsorbLimbStream_simulates
               | some ss' => shamirAbsorbLimbStream lambdas ss' blockPrep (blk + 1) restSh) = some ssOut
       rw [hPerm]
       exact hRestStep
-    · simp only [absorbLimbStream, absorbRate8Block]
+    · simp only [absorbLimbStream_cons8, absorbRate8Block_def]
       rw [hCombOut, hComb1, hAbsComb]
-  | [], [], ss, _, _, hSsLen => ⟨ss, rfl, hSsLen, rfl⟩
+  | [], [], ss, _, _, hSsLen =>
+    ⟨ss, rfl, hSsLen, (absorbLimbStream_of_length_lt _ _ (by decide)).symm⟩
   | [_], [_], ss, _, _, hSsLen | [_, _], [_, _], ss, _, _, hSsLen
   | [_, _, _], [_, _, _], ss, _, _, hSsLen | [_, _, _, _], [_, _, _, _], ss, _, _, hSsLen
   | [_, _, _, _, _], [_, _, _, _, _], ss, _, _, hSsLen
   | [_, _, _, _, _, _], [_, _, _, _, _, _], ss, _, _, hSsLen
-  | [_, _, _, _, _, _, _], [_, _, _, _, _, _, _], ss, _, _, hSsLen => ⟨ss, rfl, hSsLen, rfl⟩
+  | [_, _, _, _, _, _, _], [_, _, _, _, _, _, _], ss, _, _, hSsLen =>
+    ⟨ss, rfl, hSsLen, (absorbLimbStream_of_length_lt _ _
+      (by simp only [List.length_cons, List.length_nil]; omega)).symm⟩
 
 /-- Execute the full `(t, n)` Shamir `Poseidon2` sponge over Shamir-shared message bytes `msgSh`,
     keeping the entire width-12 sponge state shared across the committee. -/
@@ -3088,7 +3417,8 @@ theorem mpcPoseidon2SpongeShared_simulates
   refine ⟨⟨finalSs, hSpEq, hLen, hComb⟩, ?_⟩
   unfold mpcPoseidon2Hash32Shared
   rw [hSpEq]
-  unfold shamirOpenSqueeze32 poseidon2Hash32 squeeze32Bytes
+  unfold shamirOpenSqueeze32 poseidon2Hash32
+  simp only [squeeze32Bytes_def]
   have hProj := lagrangeCombineState12_proj lambdas finalSs
   rw [lagrangeCombineLane4_proj] at hProj
   simp only [List.map_map] at hProj
@@ -3117,7 +3447,7 @@ def shamirFrameSingleSecretCall
     encodeListField (encodeAdrs adrs) ++ leb128 secretSh.length
   shamirPublicByteShares nParties pubPrefix ++ secretSh
 
-private theorem shamirFrameSingleSecretCall_valid
+theorem shamirFrameSingleSecretCall_valid
     (lambdas : List Goldilocks) (hSumOne : ringListSum lambdas = Goldilocks.one)
     (roleTag pkSeed : List UInt8) (adrs : HashAdrs)
     {secretSh : List (List Goldilocks)} {secret : List UInt8}
@@ -3146,7 +3476,7 @@ def mpcPoseidon2SqueezeSecret32
   | some finalSs => some (shamirSqueezeShared32 decomp8 finalSs)
   | none => none
 
-private theorem mpcPoseidon2SqueezeSecret32_valid
+theorem mpcPoseidon2SqueezeSecret32_valid
     (lambdas : List Goldilocks) (hSumOne : ringListSum lambdas = Goldilocks.one)
     {decomp8 : List Goldilocks → List (List Goldilocks)}
     (hDecomp : ValidShamirLimbDecomp8 lambdas decomp8)
@@ -3161,7 +3491,8 @@ private theorem mpcPoseidon2SqueezeSecret32_valid
     mpcPoseidon2SpongeShared_simulates lambdas hSumOne hMsg blockPrep hPrep
   refine ⟨shamirSqueezeShared32 decomp8 finalSs, ?_, ?_⟩
   · unfold mpcPoseidon2SqueezeSecret32; rw [hSp]
-  · unfold shamirSqueezeShared32 poseidon2Hash32 squeeze32Bytes
+  · unfold shamirSqueezeShared32 poseidon2Hash32
+    simp only [squeeze32Bytes_def]
     have hProj := lagrangeCombineState12_proj lambdas finalSs
     rw [lagrangeCombineLane4_proj] at hProj
     simp only [List.map_map] at hProj
@@ -3610,6 +3941,23 @@ def shamirQuorumShares {R : Type} [CommRingOps R] (pts : List R) (polys : List (
     List (List R) :=
   polys.map (fun c => pts.map (fun x => RoundPoly.evalCoeffs c x))
 
+/-- A quorum's Lagrange weights recombine any polynomial of degree below the threshold to its
+    constant term. -/
+theorem ShamirQuorum.reconstruct {R : Type} [LawfulCommRing R] {t : Nat}
+    (Q : ShamirQuorum R t) (c : List R) (hc : c.length ≤ t) :
+    ringDot Q.lambdas (Q.pts.map (fun x => RoundPoly.evalCoeffs c x)) =
+      RoundPoly.evalCoeffs c CommRingOps.zero := by
+  have hZero : dotVec Q.lambdas (Q.pts.map (fun _ => CommRingOps.one)) = CommRingOps.one := by
+    rw [← ringDot_eq]; exact Q.sum_one
+  have hHigher : ∀ d, 1 ≤ d → d < t →
+      dotVec Q.lambdas (Q.pts.map (fun x => CRing.npow x d)) = CommRingOps.zero := by
+    intro d h1 h2
+    have h := Q.kills_higher d h1 h2
+    simp only [ringDot_eq, ringPow_eq] at h
+    exact h
+  rw [ringDot_eq]
+  exact lagrangeAtZero_evalCoeffs Q.lambdas Q.pts c t hc hZero hHigher
+
 /-- Quorum-side recombination of every secret byte. -/
 def shamirReconstructBytes {R : Type} [CommRingOps R] (decode : R → UInt8) (lambdas : List R)
     (shares : List (List R)) : List UInt8 :=
@@ -3631,8 +3979,7 @@ theorem shamirReconstructBytes_quorum {R : Type} [LawfulCommRing R] (decode : R 
   apply List.map_congr_left
   intro c hc
   simp only [Function.comp]
-  exact congrArg decode
-    (lagrangeAtZero_evalCoeffs Q.lambdas Q.pts c t (hDeg c hc) Q.sum_one Q.kills_higher)
+  exact congrArg decode (Q.reconstruct c (hDeg c hc))
 
 /-- A correct threshold signing run for the key `(skSeed, skPrf, pkSeed)`: cut-boundary oracles
     together with the proof that they evaluate that key. Constructors below build runs from the
@@ -3874,23 +4221,39 @@ theorem rss_threshold_sig_witness (pkSeed msgPrime optRand : List UInt8)
 def shamirGoldilocksQuorum12 : ShamirQuorum Goldilocks 2 where
   pts := [Goldilocks.ofNat 1, Goldilocks.ofNat 2]
   lambdas := [Goldilocks.ofNat 2, Goldilocks.ofNat (goldilocksPrime - 1)]
-  sum_one := by decide +kernel
+  sum_one := by rw [ringDot_eq]; decide +kernel
   kills_higher := by
     intro d h1 h2
     have hd : d = 1 := by omega
     subst hd
+    simp only [ringDot_eq, ringPow_eq]
     decide +kernel
+
+theorem shamirGoldilocksQuorum12_pts :
+    shamirGoldilocksQuorum12.pts = [Goldilocks.ofNat 1, Goldilocks.ofNat 2] := by rfl
+
+theorem shamirGoldilocksQuorum12_lambdas :
+    shamirGoldilocksQuorum12.lambdas =
+      [Goldilocks.ofNat 2, Goldilocks.ofNat (goldilocksPrime - 1)] := by rfl
 
 /-- Quorum `{2, 3}` of a threshold-2 Goldilocks sharing: `3·f(2) − 2·f(3) = f(0)`. -/
 def shamirGoldilocksQuorum23 : ShamirQuorum Goldilocks 2 where
   pts := [Goldilocks.ofNat 2, Goldilocks.ofNat 3]
   lambdas := [Goldilocks.ofNat 3, Goldilocks.ofNat (goldilocksPrime - 2)]
-  sum_one := by decide +kernel
+  sum_one := by rw [ringDot_eq]; decide +kernel
   kills_higher := by
     intro d h1 h2
     have hd : d = 1 := by omega
     subst hd
+    simp only [ringDot_eq, ringPow_eq]
     decide +kernel
+
+theorem shamirGoldilocksQuorum23_pts :
+    shamirGoldilocksQuorum23.pts = [Goldilocks.ofNat 2, Goldilocks.ofNat 3] := by rfl
+
+theorem shamirGoldilocksQuorum23_lambdas :
+    shamirGoldilocksQuorum23.lambdas =
+      [Goldilocks.ofNat 3, Goldilocks.ofNat (goldilocksPrime - 2)] := by rfl
 
 /-- Two different quorums of a 2-of-3 Goldilocks sharing hold different non-zero degree-1 shares
     of the byte `5` and recombine it identically; pairing each quorum with distinct non-zero
@@ -3918,9 +4281,13 @@ theorem shamir_threshold_sig_witness (pkSeed msgPrime optRand : List UInt8)
   let sh₂ : RssByteShares := ⟨[0x39], [0x30], [0x0C]⟩
   have hKey₁ : shamirReconstructBytes dec shamirGoldilocksQuorum12.lambdas
       (shamirQuorumShares shamirGoldilocksQuorum12.pts polys) = reconstructRssBytes sh₁ := by
+    unfold shamirReconstructBytes
+    simp only [ringDot_eq]
     decide +kernel
   have hKey₂ : shamirReconstructBytes dec shamirGoldilocksQuorum23.lambdas
       (shamirQuorumShares shamirGoldilocksQuorum23.pts polys) = reconstructRssBytes sh₂ := by
+    unfold shamirReconstructBytes
+    simp only [ringDot_eq]
     decide +kernel
   have hM₁ := mkRssSlhMpcOracles_matchesKey slhDsaShake128f
     (skSeedSh := sh₁) (skPrfSh := sh₁) ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ pkSeed tape
@@ -4030,8 +4397,7 @@ private theorem idealShamirBitDecompRef_valid
   | cons b rest ih =>
     refine ⟨by simp [hPtsLen], ?_, ih⟩
     unfold lagrangeCombine
-    refine Eq.trans (lagrangeAtZero_evalCoeffs Q.lambdas Q.pts [Goldilocks.ofNat b.toNat, maskSlope] 2
-          (Nat.le_refl 2) Q.sum_one Q.kills_higher) ?_
+    refine Eq.trans (Q.reconstruct [Goldilocks.ofNat b.toNat, maskSlope] (Nat.le_refl 2)) ?_
     simp [RoundPoly.evalCoeffs, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
 
 /-- **Pure-Shamir Share-Level `Poseidon2` Threshold Signing Witness (`shamir_poseidon2_threshold_sig_witness`)**:
@@ -4071,18 +4437,27 @@ theorem shamir_poseidon2_threshold_sig_witness
   have hSum₁ : ringListSum shamirGoldilocksQuorum12.lambdas = Goldilocks.one := by decide +kernel
   have hSum₂ : ringListSum shamirGoldilocksQuorum23.lambdas = Goldilocks.one := by decide +kernel
   have hSeed₁ : ShamirByteSharesValid shamirGoldilocksQuorum12.lambdas seedSh₁ [5] :=
-    ⟨by decide +kernel, by decide +kernel, trivial⟩
+    ⟨by decide +kernel, by simp only [lagrangeCombine, ringDot_eq]; decide +kernel, trivial⟩
   have hSeed₂ : ShamirByteSharesValid shamirGoldilocksQuorum23.lambdas seedSh₂ [5] :=
-    ⟨by decide +kernel, by decide +kernel, trivial⟩
+    ⟨by decide +kernel, by simp only [lagrangeCombine, ringDot_eq]; decide +kernel, trivial⟩
   have hPrf₁ : ShamirByteSharesValid shamirGoldilocksQuorum12.lambdas prfSh₁ [9] :=
-    ⟨by decide +kernel, by decide +kernel, trivial⟩
+    ⟨by decide +kernel, by simp only [lagrangeCombine, ringDot_eq]; decide +kernel, trivial⟩
   have hPrf₂ : ShamirByteSharesValid shamirGoldilocksQuorum23.lambdas prfSh₂ [9] :=
-    ⟨by decide +kernel, by decide +kernel, trivial⟩
+    ⟨by decide +kernel, by simp only [lagrangeCombine, ringDot_eq]; decide +kernel, trivial⟩
   have hTup12 : demoPow7TupleQuorum12.validAt shamirGoldilocksQuorum12.lambdas := by
-    unfold SharedPow7Tuple.validAt; decide +kernel
+    unfold SharedPow7Tuple.validAt
+    simp only [lagrangeCombine, ringDot_eq]
+    decide +kernel
   have hTup23 : demoPow7TupleQuorum23.validAt shamirGoldilocksQuorum23.lambdas := by
-    unfold SharedPow7Tuple.validAt; decide +kernel
-  have hMac2 : verifySpdzZeroSumMac demoZeroMasks2 = true := by decide +kernel
+    unfold SharedPow7Tuple.validAt
+    simp only [lagrangeCombine, ringDot_eq]
+    decide +kernel
+  have hMac2 : verifySpdzZeroSumMac demoZeroMasks2 = true := by
+    unfold verifySpdzZeroSumMac
+    apply decide_eq_true
+    unfold demoZeroMasks2
+    simp only [ringListSum, LawfulCommRing.add_zero]
+    exact LawfulCommRing.add_right_neg _
   have hPrep₁ : ∀ _ _ : Nat, demoCallPrep12.validAt shamirGoldilocksQuorum12.lambdas :=
     fun _ _ => ⟨fun _ _ => ⟨hTup12, hMac2⟩, fun _ => ⟨hTup12, hMac2⟩, fun _ _ => ⟨hTup12, hMac2⟩⟩
   have hPrep₂ : ∀ _ _ : Nat, demoCallPrep23.validAt shamirGoldilocksQuorum23.lambdas :=
@@ -4135,6 +4510,7 @@ theorem tooth_selective_abort_biases_committed_joint_coin :
     qsum 2 (fun i => if accepted i == some true then 1 else 0) = 1 ∧
     (∀ i, accepted i ≠ some false) ∧
     qsum 2 (fun i => if honest i then 1 else 0) = 1 := by
+  simp only [qsum_succ, qsum_zero]
   decide +kernel
 
 /-! ### Active-malicious hedged signing: abort, exact single-signer output, or counted tag forgery
@@ -4205,9 +4581,9 @@ def activeReleased {width nChal : Nat} {Dev : Type}
 private theorem qsum_natAbsDiff_le : ∀ (n : Nat) (f g b : Fin n → Nat),
     (∀ i, natAbsDiff (f i) (g i) ≤ b i) →
     natAbsDiff (qsum n f) (qsum n g) ≤ qsum n b
-  | 0, _, _, _, _ => by simp [qsum, natAbsDiff]
+  | 0, _, _, _, _ => by simp [qsum_zero, natAbsDiff_eq]
   | n + 1, f, g, b, h => by
-    simp only [qsum]
+    simp only [qsum_succ]
     have ih := qsum_natAbsDiff_le n
       (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
       (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
@@ -4399,7 +4775,9 @@ theorem tooth_active_tag_forgery_releases_tampered_output
       ⟨0, by decide⟩ ⟨1, by decide⟩ = none ∧
     qsum (2 ^ 1) (fun h => qsum 2 (fun c =>
       if activeTagForgery tags adv h c then 1 else 0)) = 2 := by
-  exact ⟨rfl, rfl, rfl⟩
+  refine ⟨rfl, rfl, ?_⟩
+  simp only [qsum_succ, qsum_zero]
+  rfl
 
 /-- The share view of the party outside quorum `q` (the corrupt party when `q` is honest). -/
 def RssQuorum.outsiderView (q : RssQuorum) (sh : RssByteShares) : List UInt8 × List UInt8 :=
@@ -4455,6 +4833,13 @@ def ProductionPqHashMpcOracles.MatchesKey (o : ProductionPqHashMpcOracles)
   o.toPqHashMpcOracles.MatchesKey suite sk ∧
   (∀ tree kp j u, o.evalIndexedForsReveal tree kp j u = forsIndexedSecretLeaf suite sk tree kp j u) ∧
   (∀ tree kp j u, o.evalIndexedForsLeafHash tree kp j u = forsIndexedLeafFn suite sk tree kp j u)
+
+theorem ProductionPqHashMpcOracles.MatchesKey_iff (o : ProductionPqHashMpcOracles)
+    (suite : TweakableHashSuite) (sk : PqSecretKey) :
+    o.MatchesKey suite sk ↔
+      o.toPqHashMpcOracles.MatchesKey suite sk ∧
+      (∀ tree kp j u, o.evalIndexedForsReveal tree kp j u = forsIndexedSecretLeaf suite sk tree kp j u) ∧
+      (∀ tree kp j u, o.evalIndexedForsLeafHash tree kp j u = forsIndexedLeafFn suite sk tree kp j u) := by rfl
 
 def mpcComputeProductionForsPk (suite : TweakableHashSuite) (params : PqHashParams)
     (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (tree0 : UInt64) (kp0 : Nat) : List UInt8 :=
@@ -4565,8 +4950,8 @@ private theorem production_mpc_fors_refines
   have hs : o.evalIndexedForsReveal tree kp = forsIndexedSecretLeaf suite sk tree kp :=
     funext fun j => funext fun u => hm.2.1 tree kp j u
   constructor
-  · simp only [mpcComputeProductionForsPk, computeProductionForsPk, hl]
-  · simp only [mpcBuildProductionForsOpenings, buildProductionForsOpenings, hl, hs]
+  · simp only [mpcComputeProductionForsPk, computeProductionForsPk_def, hl]
+  · simp only [mpcBuildProductionForsOpenings, buildProductionForsOpenings_def, hl, hs]
 
 private theorem production_mpc_layers_refines
     (suite : TweakableHashSuite) (params : PqHashParams)
@@ -4577,14 +4962,14 @@ private theorem production_mpc_layers_refines
       signProductionHypertreeLayers suite params sk pkRoot rRand maxGrind layer idx root rem := by
   intro rem
   induction rem with
-  | zero => intros; rfl
+  | zero => intros; rw [signProductionHypertreeLayers_zero]; rfl
   | succ rem ih =>
     intro layer idx root
     have hw : mpcComputeWotsPk suite params o.toPqHashMpcOracles sk.pkSeed =
         computeWotsPk suite params sk :=
       funext fun l => funext fun t => funext fun k =>
         mpcComputeWotsPk_eq suite params o.toPqHashMpcOracles sk hm.1 l t k
-    simp only [mpcSignProductionHypertreeLayers, signProductionHypertreeLayers,
+    simp only [mpcSignProductionHypertreeLayers, signProductionHypertreeLayers_succ,
       hm.1.2.1, hw, mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1, ih]
     rfl
 
@@ -4596,7 +4981,7 @@ private theorem production_mpc_core_refines
     mpcSignProductionHypertreeCore suite params o sk.pkSeed pk msg mu rRand leaf idxs maxGrind =
       signProductionHypertreeCore suite params sk pk msg mu rRand leaf idxs maxGrind := by
   have hf := production_mpc_fors_refines suite params o sk hm
-  simp only [mpcSignProductionHypertreeCore, signProductionHypertreeCore,
+  simp only [mpcSignProductionHypertreeCore, signProductionHypertreeCore_def,
     (fun tree kp => (hf tree kp []).1), (hf _ _ _).2, production_mpc_layers_refines suite params o sk hm]
   rfl
 
@@ -4612,7 +4997,7 @@ theorem thresholdProductionStatelessSign_eq_evalProductionStatelessSign
     dsimp only
     rw [mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1]
     rfl
-  simp only [mpcEvalProductionStatelessSign, evalProductionStatelessSign, hp, hm.1.1,
+  simp only [mpcEvalProductionStatelessSign, evalProductionStatelessSign_def, hp, hm.1.1,
     production_mpc_core_refines suite params o sk hm]
   rfl
 
@@ -4628,7 +5013,7 @@ theorem thresholdProductionStatefulSign_eq_evalProductionStatefulSign
     dsimp only
     rw [mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1]
     rfl
-  simp only [mpcEvalProductionStatefulSign, evalProductionStatefulSign, hp, hm.1.1,
+  simp only [mpcEvalProductionStatefulSign, evalProductionStatefulSign_def, hp, hm.1.1,
     production_mpc_core_refines suite params o sk hm]
 
 
@@ -4662,7 +5047,7 @@ set_option maxHeartbeats 800000 in
     dsimp only [mkRssProductionPqHashMpcOracles]
     obtain ⟨hFWf, hFRec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
     rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hFWf (tape 0)).2,
-        hFRec]
+        hFRec, forsIndexedSecretLeaf_eq, thSecretPrf_eq, thCall_eq]
     rfl
   · intro tree0 kp0 j u
     dsimp only [mkRssProductionPqHashMpcOracles]
@@ -4670,7 +5055,8 @@ set_option maxHeartbeats 800000 in
     obtain ⟨hSecWf, hSecRec⟩ := reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF1Wf (tape 0)
     obtain ⟨hF2Wf, hF2Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagThF pkSeed _ hSecWf
     rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF2Wf (tape 1)).2,
-        hF2Rec, hSecRec, hF1Rec]
+        hF2Rec, hSecRec, hF1Rec, forsIndexedLeafFn_eq, forsIndexedSecretLeaf_eq, thSecretPrf_eq,
+        forsIndexedLeafHash_eq, thChainF_eq, thCall_eq, thCall_eq]
     rfl
 
 theorem rss_production_stateless_sign_refines
@@ -4924,6 +5310,7 @@ theorem AuthShamirLane4.Valid.applyM4 {ls keys a} (ha : AuthShamirLane4.Valid ls
 theorem AuthShamirLane4.value_add {ls keys a b}
     (ha : AuthShamirLane4.Valid ls keys a) (hb : AuthShamirLane4.Valid ls keys b) :
     (a.add b).value ls = lane4Add (a.value ls) (b.value ls) := by
+  rw [lane4Add_eq]
   exact Lane4.ext (AuthShamirWire.value_add ha.1 hb.1)
     (AuthShamirWire.value_add ha.2.1 hb.2.1)
     (AuthShamirWire.value_add ha.2.2.1 hb.2.2.1)
@@ -4934,6 +5321,7 @@ theorem AuthShamirLane4.value_sum {ls keys a} (ha : AuthShamirLane4.Valid ls key
   simp only [AuthShamirLane4.sum,
     AuthShamirWire.value_add (ha.1.add ha.2.1) (ha.2.2.1.add ha.2.2.2),
     AuthShamirWire.value_add ha.1 ha.2.1, AuthShamirWire.value_add ha.2.2.1 ha.2.2.2]
+  rw [lane4Sum_def]
   rfl
 
 theorem AuthShamirLane4.value_applyM4 {ls keys a} (ha : AuthShamirLane4.Valid ls keys a) :
@@ -4942,22 +5330,22 @@ theorem AuthShamirLane4.value_applyM4 {ls keys a} (ha : AuthShamirLane4.Valid ls
   · change (a.sum.add (a.x0.add (a.x1.scale _))).value ls = _
     rw [AuthShamirWire.value_add ha.sum (ha.1.add (ha.2.1.scale _)),
       AuthShamirWire.value_add ha.1 (ha.2.1.scale _),
-      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha, applyM4_def]
     rfl
   · change (a.sum.add (a.x1.add (a.x2.scale _))).value ls = _
     rw [AuthShamirWire.value_add ha.sum (ha.2.1.add (ha.2.2.1.scale _)),
       AuthShamirWire.value_add ha.2.1 (ha.2.2.1.scale _),
-      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha, applyM4_def]
     rfl
   · change (a.sum.add (a.x2.add (a.x3.scale _))).value ls = _
     rw [AuthShamirWire.value_add ha.sum (ha.2.2.1.add (ha.2.2.2.scale _)),
       AuthShamirWire.value_add ha.2.2.1 (ha.2.2.2.scale _),
-      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha, applyM4_def]
     rfl
   · change (a.sum.add (a.x3.add (a.x0.scale _))).value ls = _
     rw [AuthShamirWire.value_add ha.sum (ha.2.2.2.add (ha.1.scale _)),
       AuthShamirWire.value_add ha.2.2.2 (ha.1.scale _),
-      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha]
+      AuthShamirWire.value_scale, AuthShamirLane4.value_sum ha, applyM4_def]
     rfl
 
 def AuthShamirState12.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
@@ -5039,10 +5427,12 @@ theorem AuthShamirState12.Valid.applyME {ls keys s} (hs : AuthShamirState12.Vali
   hs.transpose4x3.applyMEStd.transpose3x4
 
 theorem AuthShamirState12.value_transpose4x3 (ls : List Goldilocks) (s : AuthShamirState12) :
-    s.transpose4x3.value ls = poseidon2Transpose4x3 (s.value ls) := by rfl
+    s.transpose4x3.value ls = poseidon2Transpose4x3 (s.value ls) := by
+  rw [poseidon2Transpose4x3_def]; rfl
 
 theorem AuthShamirState12.value_transpose3x4 (ls : List Goldilocks) (s : AuthShamirState12) :
-    s.transpose3x4.value ls = poseidon2Transpose3x4 (s.value ls) := by rfl
+    s.transpose3x4.value ls = poseidon2Transpose3x4 (s.value ls) := by
+  rw [poseidon2Transpose3x4_def]; rfl
 
 theorem AuthShamirState12.value_applyMEStd {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
     s.applyMEStd.value ls = Qsag.applyMEStd (s.value ls) := by
@@ -5098,6 +5488,7 @@ theorem AuthShamirState12.value_sum {ls keys s} (hs : AuthShamirState12.Valid ls
     AuthShamirWire.value_add hs.1.sum hs.2.1.sum,
     AuthShamirLane4.value_sum hs.1, AuthShamirLane4.value_sum hs.2.1,
     AuthShamirLane4.value_sum hs.2.2]
+  rw [state12Sum_def]
   rfl
 
 theorem AuthShamirState12.value_applyMI {ls keys s} (hs : AuthShamirState12.Valid ls keys s) :
@@ -5155,6 +5546,7 @@ theorem AuthShamirLane4.Valid.addPublic {ls keys s} (rc : Lane4)
 theorem AuthShamirLane4.value_addPublic {ls keys s} (rc : Lane4)
     (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirLane4.Valid ls keys s) :
     (s.addPublic keys rc).value ls = lane4Add (s.value ls) rc := by
+  rw [lane4Add_eq]
   apply Lane4.ext
   · change (s.x0.addPublic keys rc.x0).value ls = _
     rw [AuthShamirWire.value_addPublic _ hOne hs.1]
@@ -5181,6 +5573,7 @@ theorem AuthShamirState12.Valid.addPublic {ls keys s} (rc : Poseidon2State12)
 theorem AuthShamirState12.value_addPublic {ls keys s} (rc : Poseidon2State12)
     (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s) :
     (s.addPublic keys rc).value ls = state12Add (s.value ls) rc := by
+  rw [state12Add_eq]
   exact Poseidon2State12.ext (AuthShamirLane4.value_addPublic _ hOne hs.1)
     (AuthShamirLane4.value_addPublic _ hOne hs.2.1)
     (AuthShamirLane4.value_addPublic _ hOne hs.2.2)
@@ -5246,7 +5639,7 @@ private theorem execAuthShamirLane4_exact {ls keys prep i s out}
   obtain ⟨v1, e1⟩ := execAuthShamirGateAt_exact hOne hs.2.1 hp hn h1
   obtain ⟨v2, e2⟩ := execAuthShamirGateAt_exact hOne hs.2.2.1 hp hn h2
   obtain ⟨v3, e3⟩ := execAuthShamirGateAt_exact hOne hs.2.2.2 hp hn h3
-  exact ⟨⟨v0, v1, v2, v3⟩, Lane4.ext e0 e1 e2 e3⟩
+  exact ⟨⟨v0, v1, v2, v3⟩, by rw [sboxLane4_def]; exact Lane4.ext e0 e1 e2 e3⟩
 
 def execAuthShamirExternalRound (ls : List Goldilocks) (keys : List GoldilocksExt2)
     (prep : ActiveShamirPermPrep) (rc : Poseidon2State12)
@@ -5274,9 +5667,12 @@ private theorem execAuthShamirExternalRound_exact {ls keys prep rc i s out}
   refine ⟨hv.applyME, ?_⟩
   rw [AuthShamirState12.value_applyME hv]
   have he : (AuthShamirState12.mk b0 b1 b2).value ls =
-      sboxState12 ((s.addPublic keys rc).value ls) := Poseidon2State12.ext e0 e1 e2
+      sboxState12 ((s.addPublic keys rc).value ls) := by
+    rw [sboxState12_eq]
+    exact Poseidon2State12.ext (e0.trans (sboxLane4_def _)) (e1.trans (sboxLane4_def _))
+      (e2.trans (sboxLane4_def _))
   rw [he, AuthShamirState12.value_addPublic rc hOne hs]
-  rfl
+  exact (externalRound_eq _ _).symm
 
 def execAuthShamirInternalRound (ls : List Goldilocks) (keys : List GoldilocksExt2)
     (prep : ActiveShamirPermPrep) (rc : Goldilocks)
@@ -5303,7 +5699,7 @@ private theorem execAuthShamirInternalRound_exact {ls keys prep rc i s out}
   rw [e0]
   have hc : Goldilocks.add rc (s.b0.x0.value ls) = Goldilocks.add (s.b0.x0.value ls) rc :=
     LawfulCommRing.add_comm _ _
-  rw [hc]
+  rw [hc, internalRound_eq]
   rfl
 
 /-- Execute a round list, carrying the authenticated state between rounds. -/
@@ -5324,13 +5720,13 @@ private theorem execAuthShamirRounds_exact {RC : Type} {ls keys}
   | [], _, _, _, hs, h => by
     simp only [execAuthShamirRounds, Option.some.injEq] at h
     subst h
-    exact ⟨hs, rfl⟩
+    exact ⟨hs, (runRounds_nil _ _).symm⟩
   | rc :: rcs, i, s, out, hs, h => by
     simp only [execAuthShamirRounds, Option.bind_eq_some_iff] at h
     obtain ⟨mid, hm, ho⟩ := h
     obtain ⟨vm, em⟩ := hstep rc i s mid hs hm
     obtain ⟨vo, eo⟩ := execAuthShamirRounds_exact step plain stride hstep rcs (i + stride) mid out vm ho
-    exact ⟨vo, by rw [eo, em]; rfl⟩
+    exact ⟨vo, by rw [eo, em, runRounds_cons]⟩
 
 /-- The full 30-round permutation: 48 + 22 + 48 share-grounded active pow7 gates.
 Every gate computes its MAC residual from the propagated MAC shares. -/
@@ -5395,8 +5791,8 @@ private theorem zipState12Shares_projections :
 
 private theorem ringListZipAdd_maps {A : Type} (f g : A → Goldilocks) :
     ∀ (xs : List A), ringListZipAdd (xs.map f) (xs.map g) = xs.map (fun x => Goldilocks.add (f x) (g x))
-  | [] => rfl
-  | _ :: xs => by simp only [List.map_cons, ringListZipAdd, ringListZipAdd_maps f g xs]; rfl
+  | [] => ringListZipAdd_nil_left _
+  | _ :: xs => by simp only [List.map_cons, ringListZipAdd_cons, ringListZipAdd_maps f g xs]; rfl
 
 private theorem zipLane4Shares_maps {A : Type} (f0 f1 f2 f3 : A → Goldilocks) :
     ∀ (xs : List A), zipLane4Shares (xs.map f0) (xs.map f1) (xs.map f2) (xs.map f3) =
@@ -5433,6 +5829,7 @@ theorem AuthShamirState12.shares_transpose4x3 {ls keys s}
   simp only [AuthShamirState12.transpose4x3, AuthShamirState12.shares, AuthShamirLane4.shares]
   rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
   simp only [List.map_map, zipLane4Shares_maps, zipState12Shares_maps]
+  rw [funext poseidon2Transpose4x3_def]
   rfl
 
 theorem AuthShamirState12.shares_transpose3x4 {ls keys s}
@@ -5445,6 +5842,7 @@ theorem AuthShamirState12.shares_transpose3x4 {ls keys s}
   simp only [AuthShamirState12.transpose3x4, AuthShamirState12.shares, AuthShamirLane4.shares]
   rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
   simp only [List.map_map, zipLane4Shares_maps, zipState12Shares_maps]
+  rw [funext poseidon2Transpose3x4_def]
   rfl
 
 theorem AuthShamirState12.shares_applyMEStd {ls keys s}
@@ -5458,8 +5856,11 @@ theorem AuthShamirState12.shares_applyMEStd {ls keys s}
     AuthShamirLane4.shares, AuthShamirLane4.applyM4,
     AuthShamirLane4.sum, AuthShamirLane4.add, AuthShamirWire.add, AuthShamirWire.scale]
   rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
-  simp only [shareScale, List.map_map, ringListZipAdd_maps,
+  simp only [shareScale_def, List.map_map, ringListZipAdd_maps,
     zipLane4Shares_maps, zipState12Shares_maps]
+  apply List.map_congr_left
+  intro x _
+  simp only [Function.comp_apply, Qsag.applyMEStd, applyM4_def, lane4Sum_def, lane4Add_eq]
   rfl
 
 theorem AuthShamirState12.shares_applyME {ls keys s}
@@ -5481,8 +5882,11 @@ theorem AuthShamirState12.shares_applyMI {ls keys s}
   simp only [AuthShamirState12.applyMI, AuthShamirState12.shares, AuthShamirState12.sum,
     AuthShamirLane4.shares, AuthShamirLane4.sum, AuthShamirWire.add, AuthShamirWire.scale]
   rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
-  simp only [shareScale, List.map_map, ringListZipAdd_maps,
+  simp only [shareScale_def, List.map_map, ringListZipAdd_maps,
     zipLane4Shares_maps, zipState12Shares_maps]
+  apply List.map_congr_left
+  intro x _
+  simp only [Function.comp_apply, Qsag.applyMI, state12Sum_def, lane4Sum_def]
   rfl
 theorem AuthShamirState12.shares_addPublic {ls keys s} (rc : Poseidon2State12)
     (hs : AuthShamirState12.Valid ls keys s) :
@@ -5494,9 +5898,10 @@ theorem AuthShamirState12.shares_addPublic {ls keys s} (rc : Poseidon2State12)
   simp only [AuthShamirState12.addPublic, AuthShamirState12.shares,
     AuthShamirLane4.shares, AuthShamirLane4.addPublic, AuthShamirWire.addPublic]
   rw [← h00, ← h01, ← h02, ← h03, ← h10, ← h11, ← h12, ← h13, ← h20, ← h21, ← h22, ← h23, ← hb0, ← hb1, ← hb2]
-  simp only [shareAddConst, List.map_map, zipLane4Shares_maps, zipState12Shares_maps]
+  simp only [shareAddConst_def, List.map_map, zipLane4Shares_maps, zipState12Shares_maps]
   apply List.map_congr_left
   intro x _
+  simp only [Function.comp_apply, state12Add_eq, lane4Add_eq]
   apply Poseidon2State12.ext <;> apply Lane4.ext <;>
     exact LawfulCommRing.add_comm _ _
 
@@ -5517,11 +5922,11 @@ theorem activeShamirPassiveCallPrep_valid {ls keys prep}
     (activeShamirPassiveCallPrep prep).validAt ls := by
   refine ⟨?_, ?_, ?_⟩
   · intro r k
-    exact ⟨(hp _).1.1, rfl⟩
+    exact ⟨(hp _).1.1, verifySpdzZeroSumMac_nil⟩
   · intro r
-    exact ⟨(hp _).1.1, rfl⟩
+    exact ⟨(hp _).1.1, verifySpdzZeroSumMac_nil⟩
   · intro r k
-    exact ⟨(hp _).1.1, rfl⟩
+    exact ⟨(hp _).1.1, verifySpdzZeroSumMac_nil⟩
 
 private theorem activeShamirNoPins {keys : List GoldilocksExt2} {prep : ActiveShamirPermPrep}
     (hz : ∀ j : Fin 118, (prep j : ActiveShamirPow7Prep).deltaD = Goldilocks.zero) :
@@ -5550,6 +5955,8 @@ private theorem execAuthShamirGateAt_refines {ls keys prep i x out}
     rw [hadd] at hy
     change evalSharedPow7Binomial _ p.tuple.toTuple [] = some ys
     rw [hy]
+    unfold evalSharedPow7Binomial
+    rw [verifySpdzZeroSumMac_nil]
     rfl
 
 private theorem execAuthShamirLane4_refines {ls keys prep i s out}
@@ -5633,7 +6040,7 @@ private theorem execAuthShamirInternalRound_refines {ls keys prep rc i s out}
       s.shares.map (fun x => Goldilocks.add x.b0.x0 rc) := by
     change shareAddConst rc s.b0.x0.shares = _
     rw [← h00]
-    simp only [shareAddConst, List.map_map]
+    simp only [shareAddConst_def, List.map_map]
     apply List.map_congr_left
     intro x _
     exact LawfulCommRing.add_comm _ _
@@ -5917,32 +6324,141 @@ def demoAuthShamirZeroTuple : AuthSharedPow7Tuple :=
 def demoActiveShamirPermPrep : ActiveShamirPermPrep := fun _ =>
   ⟨demoAuthShamirZeroTuple, [GoldilocksExt2.zero], Goldilocks.zero, [GoldilocksExt2.zero]⟩
 
+private theorem demoZeroExt2List_sum :
+    ringListSum [GoldilocksExt2.zero] = CommRingOps.zero := by
+  rw [← GoldilocksExt2.ring_zero]
+  simp only [ringListSum, LawfulCommRing.add_zero]
+
+private theorem demoOneExt2List_sum_ne_zero :
+    ringListSum [GoldilocksExt2.one] ≠ CommRingOps.zero := by
+  rw [← GoldilocksExt2.ring_one]
+  simp only [ringListSum, LawfulCommRing.add_zero]
+  exact LawfulField.one_ne_zero
+
+private theorem demoAuthShamirZeroWire_valid :
+    demoAuthShamirZeroWire.Valid [Goldilocks.one] [GoldilocksExt2.one] := by
+  have hc : lagrangeCombine [Goldilocks.one] [Goldilocks.zero] = Goldilocks.zero := by
+    rw [lagrangeCombine, ringDot_eq]; decide +kernel
+  refine ⟨rfl, rfl, ?_⟩
+  change ringListSum [GoldilocksExt2.zero] = CommRingOps.mul (ringListSum [GoldilocksExt2.one])
+    (GoldilocksExt2.ofBase (lagrangeCombine [Goldilocks.one] [Goldilocks.zero]))
+  rw [hc, GoldilocksExt2.ofBase_zero, demoZeroExt2List_sum, ← GoldilocksExt2.ring_zero,
+    LawfulCommRing.mul_zero]
+
 theorem demoActiveShamirPerm_valid :
     demoAuthShamirZeroState.Valid [Goldilocks.one] [GoldilocksExt2.one] ∧
     ∀ j, (demoActiveShamirPermPrep j).Valid [Goldilocks.one] [GoldilocksExt2.one] := by
+  have hw := demoAuthShamirZeroWire_valid
   constructor
-  · unfold AuthShamirState12.Valid AuthShamirLane4.Valid AuthShamirWire.Valid
-    decide +kernel
+  · exact ⟨⟨hw, hw, hw, hw⟩, ⟨hw, hw, hw, hw⟩, ⟨hw, hw, hw, hw⟩⟩
   · intro j
-    change ActiveShamirPow7Prep.Valid _ _ ⟨demoAuthShamirZeroTuple, _, _, _⟩
-    unfold ActiveShamirPow7Prep.Valid AuthSharedPow7Tuple.Valid AuthShamirWire.Valid SharedPow7Tuple.validAt
-    decide +kernel
+    have ht : demoAuthShamirZeroTuple.toTuple.validAt [Goldilocks.one] := by
+      unfold SharedPow7Tuple.validAt
+      simp only [lagrangeCombine, ringDot_eq]
+      decide +kernel
+    exact ⟨⟨ht, hw, hw, hw, hw, hw, hw, hw⟩, rfl, demoZeroExt2List_sum⟩
 
 theorem execActiveSharedPoseidon2Perm_inhabited :
     (execActiveSharedPoseidon2Perm [Goldilocks.one] [GoldilocksExt2.one]
       demoActiveShamirPermPrep demoAuthShamirZeroState).isSome = true := by
   obtain ⟨out, he, _⟩ := execActiveSharedPoseidon2Perm_complete (by rfl)
     demoActiveShamirPerm_valid.1 demoActiveShamirPerm_valid.2
-    (fun _ => rfl) (fun _ => rfl)
+    (fun _ => rfl) (fun _ => demoZeroExt2List_sum)
   rw [he]
   rfl
+
+/-- With a nonzero global key and zero-sum MAC broadcast shifts, any nonzero shift of the opened
+    scalar makes the active `Π_pow7` round abort. -/
+private theorem execActiveSharedPow7Round_eq_none_of_shift
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (hXLen : xSh.length = tup.rSh.length)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero)
+    (hKey : ringListSum alphaShares ≠ CommRingOps.zero)
+    (hDelta : deltaD ≠ Goldilocks.zero)
+    (hDev : ringListSum sigmaDevs = CommRingOps.zero) :
+    execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs =
+      none := by
+  apply execActiveSharedPow7Round_eq_none_of_sum_ne lambdas xSh tup macX macR alphaShares zeroMasks
+    deltaD sigmaDevs hMacXLen hMacRLen hMaskLen hMacXSum hMacRSum hZeroMask
+  rw [hDev, LawfulCommRing.add_zero]
+  intro h
+  rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h with h0 | h0
+  · exact hKey h0
+  · have hd : lagrangeCombine lambdas (shareZipSub xSh tup.rSh) =
+        CommRingOps.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh) :=
+      ringDot_zipSub hXLen
+    rw [hd, ← GoldilocksExt2.ofBase_sub] at h0
+    have h1 := GoldilocksExt2.ofBase_injective (LawfulCommRing.sub_eq_zero_iff.mp h0)
+    have h2 : CommRingOps.add
+          (CommRingOps.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))
+          CommRingOps.zero =
+        CommRingOps.add
+          (CommRingOps.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))
+          deltaD :=
+      (LawfulCommRing.add_zero _).trans h1
+    exact hDelta (LawfulCommRing.add_left_cancel h2).symm
+
+private theorem execAuthShamirGateAt_eq_none_of_shift {ls keys} {prep : ActiveShamirPermPrep}
+    {i : Nat} {x : AuthShamirWire}
+    (hx : AuthShamirWire.Valid ls keys x)
+    (hp : ActiveShamirPow7Prep.Valid ls keys (prep (activeShamirGateIndex i)))
+    (hKey : ringListSum keys ≠ CommRingOps.zero)
+    (hDelta : (prep (activeShamirGateIndex i)).deltaD ≠ Goldilocks.zero)
+    (hDev : ringListSum (prep (activeShamirGateIndex i)).sigmaDevs = CommRingOps.zero) :
+    execAuthShamirGateAt ls keys prep i x = none := by
+  unfold execAuthShamirGateAt execAuthShamirPow7
+  dsimp only
+  rw [execActiveSharedPow7Round_eq_none_of_shift ls x.shares (prep (activeShamirGateIndex i)).tuple.toTuple x.macs
+    (prep (activeShamirGateIndex i)).tuple.r.macs keys (prep (activeShamirGateIndex i)).zeroMasks (prep (activeShamirGateIndex i)).deltaD (prep (activeShamirGateIndex i)).sigmaDevs
+    (hx.1.trans hp.1.2.1.1.symm) hx.2.1 hp.1.2.1.2.1 hp.2.1 hx.2.2 hp.1.2.1.2.2 hp.2.2
+    hKey hDelta hDev]
+  rfl
+
+/-- A shifted opening at the first S-box gate aborts the whole active permutation. -/
+private theorem execActiveSharedPoseidon2Perm_eq_none_of_first_gate_shift {ls keys}
+    {prep : ActiveShamirPermPrep} {s : AuthShamirState12}
+    (hOne : ringListSum ls = Goldilocks.one) (hs : AuthShamirState12.Valid ls keys s)
+    (hp : ∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j))
+    (hKey : ringListSum keys ≠ CommRingOps.zero)
+    (hDelta : (prep (activeShamirGateIndex 0)).deltaD ≠ Goldilocks.zero)
+    (hDev : ringListSum (prep (activeShamirGateIndex 0)).sigmaDevs = CommRingOps.zero) :
+    execActiveSharedPoseidon2Perm ls keys prep s = none := by
+  cases hC : poseidon2InitialExtConsts with
+  | nil =>
+    have h := poseidon2InitialExtConsts_length
+    rw [hC] at h
+    exact absurd h (by decide)
+  | cons rc rcs =>
+    have hg := execAuthShamirGateAt_eq_none_of_shift (i := 0)
+      ((hs.applyME.addPublic rc hOne).1.1) (hp _) hKey hDelta hDev
+    simp only [execActiveSharedPoseidon2Perm, hC, execAuthShamirRounds, execAuthShamirExternalRound,
+      execAuthShamirLane4, hg, Option.bind_eq_bind, Option.bind_none]
 
 /-- A nonzero first opening deviation, with honest sigma broadcasts, aborts the full permutation. -/
 theorem tooth_execActiveSharedPoseidon2Perm_aborts_on_forged_gate :
     (execActiveSharedPoseidon2Perm [Goldilocks.one] [GoldilocksExt2.one]
       (fun j => if j.val = 0 then { demoActiveShamirPermPrep j with deltaD := Goldilocks.one }
         else demoActiveShamirPermPrep j) demoAuthShamirZeroState).isNone = true := by
-  decide +kernel
+  have hp : ∀ j : Fin 118, ActiveShamirPow7Prep.Valid [Goldilocks.one] [GoldilocksExt2.one]
+      (if j.val = 0 then { demoActiveShamirPermPrep j with deltaD := Goldilocks.one }
+        else demoActiveShamirPermPrep j) := by
+    intro j
+    split
+    · exact demoActiveShamirPerm_valid.2 j
+    · exact demoActiveShamirPerm_valid.2 j
+  rw [execActiveSharedPoseidon2Perm_eq_none_of_first_gate_shift (by rfl)
+    demoActiveShamirPerm_valid.1 hp demoOneExt2List_sum_ne_zero
+    (show Goldilocks.one ≠ Goldilocks.zero from by decide +kernel) demoZeroExt2List_sum]
+  rfl
 
 /-- Compose an active authenticated Shamir gate with its online continuation.
 Failure is propagated before the continuation can release anything. -/
@@ -6009,7 +6525,7 @@ theorem witness_active_shamir_permutation :
       execActiveSharedPoseidon2Perm ls keys prep s = some out := by
   obtain ⟨out, he, _⟩ := execActiveSharedPoseidon2Perm_complete (by rfl)
     demoActiveShamirPerm_valid.1 demoActiveShamirPerm_valid.2
-    (fun _ => rfl) (fun _ => rfl)
+    (fun _ => rfl) (fun _ => demoZeroExt2List_sum)
   exact ⟨[Goldilocks.one], [GoldilocksExt2.one], demoActiveShamirPermPrep,
     demoAuthShamirZeroState, out, rfl, demoActiveShamirPerm_valid.1,
     demoActiveShamirPerm_valid.2, (fun _ => rfl), he⟩
@@ -6220,45 +6736,55 @@ def enumShamirPadPolyGoldilocks :
     (t : Nat) → SimpleEquiv (Fin (ucPow goldilocksPrime t)) (ShamirPadPoly Goldilocks t)
   | 0 =>
     { toFun := fun _ => ⟨[], rfl⟩
-      invFun := fun _ => ⟨0, Nat.zero_lt_one⟩
+      invFun := fun _ => ⟨0, ucPow_pos goldilocksPrime_pos 0⟩
       left_inv := fun ⟨v, hv⟩ => by
-        have hv1 : v < 1 := hv
+        have hv1 : v < 1 := by rw [ucPow_zero] at hv; exact hv
         have hv0 : v = 0 := by omega
         subst hv0; rfl
       right_inv := fun ⟨l, hl⟩ => Subtype.ext (List.eq_nil_of_length_eq_zero hl).symm }
   | k + 1 =>
     let prev := enumShamirPadPolyGoldilocks k
+    have hk : ucPow goldilocksPrime (k + 1) = ucPow goldilocksPrime k * goldilocksPrime :=
+      ucPow_succ _ _
     { toFun := fun idx =>
-        let p := prev.toFun (ucSplitLeft goldilocksPrime_pos idx)
-        let c := enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx)
+        let p := prev.toFun (ucSplitLeft goldilocksPrime_pos (Fin.cast hk idx))
+        let c := enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos (Fin.cast hk idx))
         ⟨c :: p.1, by simp [p.2]⟩
       invFun := fun ⟨l, hl⟩ =>
         let hd := l.headD Goldilocks.zero
         let tl : ShamirPadPoly Goldilocks k := ⟨l.tail, by rw [List.length_tail, hl]; omega⟩
-        ucPairFin (prev.invFun tl) (enumGoldilocks.invFun hd)
+        Fin.cast hk.symm (ucPairFin (prev.invFun tl) (enumGoldilocks.invFun hd))
       left_inv := fun idx => by
-        change ucPairFin
-            (prev.invFun ⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).1, _⟩)
-            (enumGoldilocks.invFun (enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos idx))) = idx
-        have hSub : (⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).1,
-            (prev.toFun (ucSplitLeft goldilocksPrime_pos idx)).2⟩ : ShamirPadPoly Goldilocks k) =
-            prev.toFun (ucSplitLeft goldilocksPrime_pos idx) := by
-          cases prev.toFun (ucSplitLeft goldilocksPrime_pos idx); rfl
+        change Fin.cast hk.symm (ucPairFin
+            (prev.invFun
+              ⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos (Fin.cast hk idx))).1, _⟩)
+            (enumGoldilocks.invFun
+              (enumGoldilocks.toFun (ucSplitRight goldilocksPrime_pos (Fin.cast hk idx))))) = idx
+        have hSub : (⟨(prev.toFun (ucSplitLeft goldilocksPrime_pos (Fin.cast hk idx))).1,
+            (prev.toFun (ucSplitLeft goldilocksPrime_pos (Fin.cast hk idx))).2⟩ :
+              ShamirPadPoly Goldilocks k) =
+            prev.toFun (ucSplitLeft goldilocksPrime_pos (Fin.cast hk idx)) := by
+          cases prev.toFun (ucSplitLeft goldilocksPrime_pos (Fin.cast hk idx)); rfl
         rw [hSub, prev.left_inv, enumGoldilocks.left_inv]
-        exact ucPair_split goldilocksPrime_pos idx
+        exact (congrArg (Fin.cast hk.symm)
+          (ucPair_split goldilocksPrime_pos (Fin.cast hk idx))).trans (Fin.ext rfl)
       right_inv := fun ⟨l, hl⟩ => by
         apply Subtype.ext
         cases l with
         | nil => cases hl
         | cons x xs =>
           have hxs : xs.length = k := Nat.succ.inj hl
+          have hcc : ∀ y : Fin (ucPow goldilocksPrime k * goldilocksPrime),
+              Fin.cast hk (Fin.cast hk.symm y) = y := fun _ => Fin.ext rfl
           change enumGoldilocks.toFun
               (ucSplitRight goldilocksPrime_pos
-                (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x))) ::
+                (Fin.cast hk (Fin.cast hk.symm
+                  (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x))))) ::
             (prev.toFun
               (ucSplitLeft goldilocksPrime_pos
-                (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x)))).1 = x :: xs
-          rw [ucSplitRight_pair goldilocksPrime_pos, ucSplitLeft_pair goldilocksPrime_pos,
+                (Fin.cast hk (Fin.cast hk.symm
+                  (ucPairFin (prev.invFun ⟨xs, hxs⟩) (enumGoldilocks.invFun x)))))).1 = x :: xs
+          rw [hcc, ucSplitRight_pair goldilocksPrime_pos, ucSplitLeft_pair goldilocksPrime_pos,
               enumGoldilocks.right_inv, prev.right_inv] }
 
 /-- Degree-`< t` Shamir sacrificial / polynomial consistency check over evaluation points `pts`. -/
@@ -6415,5 +6941,24 @@ theorem witness_shamirPolyConsistent_inhabited :
 #tooth_pair Qsag.shamirPolyConsistent_unique_at_zero vs Qsag.tooth_shamir_unbounded_degree_forges_secret_at_zero
 #verify_inhabited Qsag.shamirPolyConsistent_unique_at_zero Qsag.witness_shamirPolyConsistent_inhabited
 
+/-! ### Exports for lane threshold-b -/
+
+theorem activeTagForgery_def {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) :
+    activeTagForgery tags adv honestCoin chal =
+      (!(adv.aborts (BitVec.ofFin honestCoin) chal) &&
+        tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal &&
+        !(tags.isHonest (adv.deviation (BitVec.ofFin honestCoin)))) := by rfl
+
+end Qsag
+end
+
+public section
+namespace Qsag
+ theorem Poseidon2CallPrep.validAt_eq (ls : List Goldilocks) (p : Poseidon2CallPrep) :
+    p.validAt ls = ((∀ r l, (p.extInit r l).1.validAt ls ∧ verifySpdzZeroSumMac (p.extInit r l).2 = true) ∧
+      (∀ r, (p.inter r).1.validAt ls ∧ verifySpdzZeroSumMac (p.inter r).2 = true) ∧
+      (∀ r l, (p.extTerm r l).1.validAt ls ∧ verifySpdzZeroSumMac (p.extTerm r l).2 = true)) := by rfl
 end Qsag
 end

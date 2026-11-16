@@ -35,21 +35,13 @@ public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Math.Counting
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.PolyRing
-import all Qsag.Math.HasseHensel
-import all Qsag.Oracle.Qrom
-import all Qsag.Math.Goldilocks
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Protocol.Aggregation.UcGames
 import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
 
 set_option autoImplicit false
+set_option maxRecDepth 10000
 
 /-! ## 1. Ring-LWE Base OT ($N \in \{512, 1024\}, q = 12289, \eta = 1$) Worst-Case Noise & Zero-Error Decryption -/
 
@@ -149,6 +141,14 @@ def ringListZipAdd : List R → List R → List R
   | [], ys => ys
   | xs, [] => xs
   | x :: xs, y :: ys => add x y :: ringListZipAdd xs ys
+
+theorem ringListZipAdd_cons (x y : R) (xs ys : List R) :
+    ringListZipAdd (x :: xs) (y :: ys) = add x y :: ringListZipAdd xs ys := by rfl
+
+theorem ringListZipAdd_nil_left (ys : List R) : ringListZipAdd [] ys = ys := by rfl
+
+theorem ringListZipAdd_nil_right (xs : List R) : ringListZipAdd xs [] = xs := by
+  cases xs <;> rfl
 
 theorem ringListZipAdd_length_of_eq :
     ∀ {xs ys : List R}, xs.length = ys.length → (ringListZipAdd xs ys).length = xs.length
@@ -326,6 +326,14 @@ def shareZipSub : List R → List R → List R
   | x :: xs, y :: ys => sub x y :: shareZipSub xs ys
   | _, _ => []
 
+theorem shareZipSub_cons (x y : R) (xs ys : List R) :
+    shareZipSub (x :: xs) (y :: ys) = sub x y :: shareZipSub xs ys := by rfl
+
+theorem shareZipSub_nil_left (ys : List R) : shareZipSub [] ys = [] := by rfl
+
+theorem shareZipSub_nil_right (xs : List R) : shareZipSub xs [] = [] := by
+  cases xs <;> rfl
+
 theorem shareZipSub_length_of_eq :
     ∀ {xs ys : List R}, xs.length = ys.length → (shareZipSub xs ys).length = xs.length
   | [], [], _ => rfl
@@ -336,6 +344,8 @@ theorem shareZipSub_length_of_eq :
 def shareScale (c : R) (xs : List R) : List R :=
   xs.map (mul c)
 
+theorem shareScale_def (c : R) (xs : List R) : shareScale c xs = xs.map (mul c) := by rfl
+
 @[simp] theorem shareScale_length (c : R) (xs : List R) :
     (shareScale c xs).length = xs.length := List.length_map _
 
@@ -343,24 +353,33 @@ def shareScale (c : R) (xs : List R) : List R :=
 def shareAddConst (c : R) (xs : List R) : List R :=
   xs.map (add c)
 
+theorem shareAddConst_def (c : R) (xs : List R) : shareAddConst c xs = xs.map (add c) := by rfl
+
 @[simp] theorem shareAddConst_length (c : R) (xs : List R) :
     (shareAddConst c xs).length = xs.length := List.length_map _
 
-private theorem ringDot_consC (a b : R) (as bs : List R) :
-    ringDot (a :: as) (b :: bs) = add (mul a b) (ringDot as bs) := by rfl
+theorem ringDot_consC (a b : R) (as bs : List R) :
+    ringDot (a :: as) (b :: bs) = add (mul a b) (ringDot as bs) := by
+  rw [ringDot_eq, ringDot_eq, dotVec_cons]
+
+theorem ringDot_nilLeftC (xs : List R) : ringDot [] xs = zero := by
+  rw [ringDot_eq, dotVec_nil_left]
+
+theorem ringDot_nilRightC (xs : List R) : ringDot xs [] = zero := by
+  rw [ringDot_eq, dotVec_nil_right]
 
 theorem ringListSum_zipWith_mul :
     ∀ (ls xs : List R), ringListSum (List.zipWith mul ls xs) = ringDot ls xs
-  | [], _ => rfl
-  | _ :: _, [] => rfl
+  | [], _ => (ringDot_nilLeftC _).symm
+  | _ :: _, [] => (ringDot_nilRightC _).symm
   | l :: ls, x :: xs => by
     simp only [List.zipWith, ringListSum, ringDot_consC, ringListSum_zipWith_mul ls xs]
 
 theorem ringDot_zipAdd :
     ∀ {ls xs ys : List R}, xs.length = ys.length →
       ringDot ls (ringListZipAdd xs ys) = add (ringDot ls xs) (ringDot ls ys)
-  | [], _, _, _ => by simp [ringDot, LawfulCommRing.add_zero]
-  | _ :: _, [], [], _ => by simp [ringListZipAdd, ringDot, LawfulCommRing.add_zero]
+  | [], _, _, _ => by simp [LawfulCommRing.add_zero]
+  | _ :: _, [], [], _ => by simp [ringListZipAdd, LawfulCommRing.add_zero]
   | _ :: ls, _ :: xs, _ :: ys, h => by
     simp only [ringListZipAdd, ringDot_consC, ringDot_zipAdd (Nat.succ.inj h),
       LawfulCommRing.left_distrib, LawfulCommRing.add_add_add_comm]
@@ -368,8 +387,8 @@ theorem ringDot_zipAdd :
 theorem ringDot_zipSub :
     ∀ {ls xs ys : List R}, xs.length = ys.length →
       ringDot ls (shareZipSub xs ys) = sub (ringDot ls xs) (ringDot ls ys)
-  | [], _, _, _ => by simp [ringDot, LawfulCommRing.sub_self]
-  | _ :: _, [], [], _ => by simp [shareZipSub, ringDot, LawfulCommRing.sub_self]
+  | [], _, _, _ => by simp [LawfulCommRing.sub_self]
+  | _ :: _, [], [], _ => by simp [shareZipSub, LawfulCommRing.sub_self]
   | l :: ls, x :: xs, y :: ys, h => by
     simp only [shareZipSub, ringDot_consC, ringDot_zipSub (Nat.succ.inj h), LawfulCommRing.mul_sub]
     apply LawfulCommRing.add_left_cancel (a := add (mul l y) (ringDot ls ys))
@@ -380,11 +399,11 @@ theorem ringDot_zipSub :
 
 theorem ringDot_scale (c : R) :
     ∀ (ls xs : List R), ringDot ls (shareScale c xs) = mul c (ringDot ls xs)
-  | [], _ => by simp [ringDot, LawfulCommRing.mul_zero]
-  | _ :: _, [] => by simp [shareScale, ringDot, LawfulCommRing.mul_zero]
+  | [], _ => by simp [LawfulCommRing.mul_zero]
+  | _ :: _, [] => by simp [shareScale, LawfulCommRing.mul_zero]
   | l :: ls, x :: xs => by
     have ih := ringDot_scale c ls xs
-    simp only [shareScale, List.map_cons, ringDot]
+    simp only [shareScale, List.map_cons, ringDot_consC]
     change add (mul l (mul c x)) (ringDot ls (shareScale c xs)) = mul c (add (mul l x) (ringDot ls xs))
     rw [ih]
     have hSwap : mul l (mul c x) = mul c (mul l x) := by
@@ -394,12 +413,12 @@ theorem ringDot_scale (c : R) :
 theorem ringDot_addConst (c : R) :
     ∀ {ls xs : List R}, ls.length ≤ xs.length →
       ringDot ls (shareAddConst c xs) = add (mul (ringListSum ls) c) (ringDot ls xs)
-  | [], _, _ => by simp [ringDot, ringListSum, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+  | [], _, _ => by simp [ringListSum, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
   | _ :: _, [], h => by simp at h
   | l :: ls, x :: xs, h => by
     simp only [List.length_cons] at h
     have ih := ringDot_addConst c (Nat.le_of_succ_le_succ h)
-    simp only [shareAddConst, List.map_cons, ringDot, ringListSum]
+    simp only [shareAddConst, List.map_cons, ringDot_consC, ringListSum]
     change add (mul l (add c x)) (ringDot ls (shareAddConst c xs)) =
       add (mul (add l (ringListSum ls)) c) (add (mul l x) (ringDot ls xs))
     rw [ih, LawfulCommRing.left_distrib, LawfulCommRing.right_distrib, LawfulCommRing.add_add_add_comm]
@@ -418,6 +437,13 @@ def SharedBeaverTriple.validAt (lambdas : List R) (tr : SharedBeaverTriple R) : 
   tr.bShares.length = lambdas.length ∧
   tr.cShares.length = lambdas.length ∧
   ringDot lambdas tr.cShares = mul (ringDot lambdas tr.aShares) (ringDot lambdas tr.bShares)
+
+theorem SharedBeaverTriple.validAt_iff (lambdas : List R) (tr : SharedBeaverTriple R) :
+    tr.validAt lambdas ↔
+      (tr.aShares.length = lambdas.length ∧ tr.bShares.length = lambdas.length ∧
+        tr.cShares.length = lambdas.length ∧
+        ringDot lambdas tr.cShares =
+          mul (ringDot lambdas tr.aShares) (ringDot lambdas tr.bShares)) := Iff.rfl
 
 /-- Sum received sub-shares at `pts` from `m` party-dealt Shamir sub-polynomials `cPolys`. -/
 def sumSubPolyShares (pts : List R) : List (List R) → List R
@@ -453,23 +479,32 @@ theorem shamirBeaverFromPairwiseOle_valid
       ringDot lambdas (sumSubPolyShares pts ps) =
         ringListSum (ps.map (fun p => RoundPoly.evalCoeffs p zero)) := by
     intro ps hPsDeg
+    have hZero' : dotVec lambdas (pts.map (fun _ => one)) = one := by
+      rw [← ringDot_eq]; exact hZero
+    have hHigher' : ∀ d, 1 ≤ d → d < t →
+        dotVec lambdas (pts.map (fun x => CRing.npow x d)) = zero := by
+      intro d h1 h2
+      have h := hHigher d h1 h2
+      simp only [ringDot_eq, ringPow_eq] at h
+      exact h
     induction ps with
     | nil =>
       simp only [sumSubPolyShares, List.map_nil, ringListSum]
       have h0 : ∀ (ls qs : List R), ringDot ls (qs.map (fun _ => zero)) = zero := by
         intro ls qs
         induction ls generalizing qs with
-        | nil => rfl
+        | nil => exact ringDot_nilLeftC _
         | cons l ls' ih =>
           cases qs with
-          | nil => rfl
-          | cons _ qs' => simp [ringDot_consC, LawfulCommRing.mul_zero, ih qs', LawfulCommRing.zero_add]
+          | nil => exact ringDot_nilRightC _
+          | cons _ qs' => simp [LawfulCommRing.mul_zero, ih qs', LawfulCommRing.zero_add]
       exact h0 lambdas pts
     | cons p ps' ih =>
       simp only [sumSubPolyShares, List.map_cons, ringListSum]
       rw [ringDot_zipAdd (by simp [sumSubPolyShares_length]),
           show ringDot lambdas (pts.map (RoundPoly.evalCoeffs p)) = RoundPoly.evalCoeffs p zero from
-            lagrangeAtZero_evalCoeffs lambdas pts p t (hPsDeg p (.head _)) hZero hHigher,
+            (ringDot_eq _ _).trans
+              (lagrangeAtZero_evalCoeffs lambdas pts p t (hPsDeg p (.head _)) hZero' hHigher'),
           ih (fun q hq => hPsDeg q (.tail _ hq))]
   refine ⟨hALen, hBLen, (sumSubPolyShares_length pts cPolys).trans hPtsLen, ?_⟩
   rw [hSubSum cPolys hDeg, hConst, ole_pairwise_cross_sum_eq_mul hOle,
@@ -488,6 +523,19 @@ def evalSharedBeaverMul (lambdas xSh ySh : List R) (tr : SharedBeaverTriple R) :
   let delta := ringDot lambdas (shareZipSub xSh tr.aShares)
   let eps   := ringDot lambdas (shareZipSub ySh tr.bShares)
   (evalSharedBeaverMulShares tr delta eps, delta, eps)
+
+theorem evalSharedBeaverMulShares_def (tr : SharedBeaverTriple R) (delta eps : R) :
+    evalSharedBeaverMulShares tr delta eps =
+      shareAddConst (mul delta eps)
+        (ringListZipAdd (ringListZipAdd tr.cShares (shareScale delta tr.bShares))
+          (shareScale eps tr.aShares)) := by rfl
+
+theorem evalSharedBeaverMul_def (lambdas xSh ySh : List R) (tr : SharedBeaverTriple R) :
+    evalSharedBeaverMul lambdas xSh ySh tr =
+      (evalSharedBeaverMulShares tr (ringDot lambdas (shareZipSub xSh tr.aShares))
+          (ringDot lambdas (shareZipSub ySh tr.bShares)),
+        ringDot lambdas (shareZipSub xSh tr.aShares),
+        ringDot lambdas (shareZipSub ySh tr.bShares)) := by rfl
 
 /-- **Beaver Masked-Opening Privacy Bijection (`sharedBeaverMaskEquiv`)**:
     For any secret inputs `(x, y : R)`, the map `(a, b) ↦ (x - a, y - b)` is an exact involution
@@ -859,8 +907,12 @@ theorem ringDot_ofBase :
     ∀ (ls xs : List Goldilocks),
       ringDot (ls.map GoldilocksExt2.ofBase) (xs.map GoldilocksExt2.ofBase) =
         GoldilocksExt2.ofBase (ringDot ls xs)
-  | [], _ => rfl
-  | _ :: _, [] => rfl
+  | [], _ => by
+    rw [List.map_nil, ringDot_nilLeftC, ringDot_nilLeftC, Goldilocks.ring_zero,
+      GoldilocksExt2.ring_zero, GoldilocksExt2.ofBase_zero]
+  | _ :: _, [] => by
+    rw [List.map_nil, ringDot_nilRightC, ringDot_nilRightC, Goldilocks.ring_zero,
+      GoldilocksExt2.ring_zero, GoldilocksExt2.ofBase_zero]
   | l :: ls, x :: xs => by
     simp only [List.map_cons, ringDot_consC, GoldilocksExt2.ofBase_add, GoldilocksExt2.ofBase_mul,
       ringDot_ofBase ls xs]
@@ -892,9 +944,32 @@ def spdzComputeSigmas {K : Type} [CommRingOps K] (yOpened : K) : List K → List
     add (sub m (mul a yOpened)) z :: spdzComputeSigmas yOpened ms as zs
   | _, _, _ => []
 
+theorem spdzComputeSigmas_cons {K : Type} [CommRingOps K] (yOpened m a z : K)
+    (ms as zs : List K) :
+    spdzComputeSigmas yOpened (m :: ms) (a :: as) (z :: zs) =
+      add (sub m (mul a yOpened)) z :: spdzComputeSigmas yOpened ms as zs := by rfl
+
+theorem spdzComputeSigmas_length {K : Type} [CommRingOps K] (yOpened : K) :
+    ∀ {macs alphas masks : List K},
+      macs.length = alphas.length → masks.length = alphas.length →
+      (spdzComputeSigmas yOpened macs alphas masks).length = alphas.length
+  | [], [], [], _, _ => rfl
+  | _ :: _, _ :: _, _ :: _, hm, hz => by
+    simp only [spdzComputeSigmas, List.length_cons,
+      spdzComputeSigmas_length yOpened (Nat.succ.inj hm) (Nat.succ.inj hz)]
+
 /-- Distributed zero-sum SPDZ `MacCheck` verifier (`∑_i σ_i = 0`). -/
 @[expose] def verifySpdzZeroSumMac {K : Type} [LawfulCommRing K] [DecidableEq K] (sigmas : List K) : Bool :=
   decide (ringListSum sigmas = zero)
+
+theorem verifySpdzZeroSumMac_rejects_sum {K : Type} [LawfulCommRing K] [DecidableEq K]
+    (sigmas : List K) (h : ringListSum sigmas ≠ zero) : verifySpdzZeroSumMac sigmas = false :=
+  decide_eq_false h
+
+theorem verifySpdzZeroSumMac_nil {K : Type} [LawfulCommRing K] [DecidableEq K] :
+    verifySpdzZeroSumMac ([] : List K) = true := by
+  unfold verifySpdzZeroSumMac
+  exact decide_eq_true rfl
 
 theorem ringListSum_spdzComputeSigmas {K : Type} [LawfulCommRing K] (yOpened : K) :
     ∀ {macs alphas masks : List K},
@@ -951,6 +1026,24 @@ theorem verifySpdzZeroSumMac_forged_pins_key
     fun h0 => hNe (LawfulCommRing.sub_eq_zero_iff.mp h0)
   rw [hDelta, LawfulCommRing.mul_assoc, GoldilocksExt2.mul_inv_cancel hDiffNz,
       LawfulCommRing.mul_one]
+
+/-- Under a nonzero global key, the honest committee broadcast computed on any opening other
+    than the authenticated value fails the zero-sum check. -/
+theorem verifySpdzZeroSumMac_rejects_wrong_opening
+    (yTrue yOpened : GoldilocksExt2) (macs alphas masks : List GoldilocksExt2)
+    (hLenM : macs.length = alphas.length) (hLenZ : masks.length = alphas.length)
+    (hMac : ringListSum macs = mul (ringListSum alphas) yTrue)
+    (hZeroMask : ringListSum masks = zero)
+    (hKey : ringListSum alphas ≠ zero) (hNe : yOpened ≠ yTrue) :
+    verifySpdzZeroSumMac (spdzComputeSigmas yOpened macs alphas masks) = false := by
+  unfold verifySpdzZeroSumMac
+  apply decide_eq_false
+  intro h
+  rw [ringListSum_spdzComputeSigmas yOpened hLenM hLenZ, hMac, hZeroMask,
+    LawfulCommRing.add_zero, ← LawfulCommRing.mul_sub] at h
+  rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h with h0 | h0
+  · exact hKey h0
+  · exact hNe (LawfulCommRing.sub_eq_zero_iff.mp h0).symm
 
 /-- Authenticated `(t, n)` Shamir Beaver triple over `Goldilocks` paired with `n`-party additive
     SPDZ MAC shares over `GoldilocksExt2` (`𝔽_{p^2}`). -/
@@ -1245,6 +1338,7 @@ def mkDemoMacShares (secret : Nat) : List GoldilocksExt2 :=
   let sK := GoldilocksExt2.ofBase (Goldilocks.ofNat secret)
   demoAlphaShares3.map (fun a_i => mul a_i sK)
 
+
 def demoHonestAuthTriple : AuthenticatedSharedTriple :=
   -- Degree-1 2-of-3 Shamir shares at x = [1, 2, 3]:
   -- A(X) = 3 + 5X -> [8, 13, 18]; B(X) = 4 + 2X -> [6, 8, 10]; C(X) = 12 + 7X -> [19, 26, 33]
@@ -1265,6 +1359,343 @@ def demoCompanionAuthTriple : AuthenticatedSharedTriple :=
     macB := mkDemoMacShares 2
     macC := mkDemoMacShares 10 }
 
+private theorem goldNeg_eq_ofNat (a : Goldilocks) (n : Nat)
+    (h : (goldilocksPrime - a.val) % goldilocksPrime = n % goldilocksPrime) :
+    Goldilocks.neg a = Goldilocks.ofNat n :=
+  Goldilocks.ext (by rw [Goldilocks.neg_val, Goldilocks.ofNat_val]; exact h)
+
+private theorem goldNeg_one : Goldilocks.neg Goldilocks.one = Goldilocks.ofNat 18446744069414584320 :=
+  goldNeg_eq_ofNat _ _ (by decide +kernel)
+
+private theorem goldNeg_two :
+    Goldilocks.neg (Goldilocks.ofNat 2) = Goldilocks.ofNat 18446744069414584319 :=
+  goldNeg_eq_ofNat _ _ (by decide +kernel)
+
+private theorem goldNeg_three :
+    Goldilocks.neg (Goldilocks.ofNat 3) = Goldilocks.ofNat 18446744069414584318 :=
+  goldNeg_eq_ofNat _ _ (by decide +kernel)
+
+theorem demoLambdas2of3_eq :
+    demoLambdas2of3 =
+      [Goldilocks.ofNat 2, Goldilocks.ofNat 18446744069414584320, Goldilocks.zero] := by
+  rw [demoLambdas2of3, goldNeg_one]
+
+theorem demoLambdas2of3_length : demoLambdas2of3.length = 3 := by rfl
+
+/-- Recombination under the demo weights as an evaluable dot product. -/
+theorem ringDot_demoLambdas2of3 (xs : List Goldilocks) :
+    ringDot demoLambdas2of3 xs =
+      dotVec [Goldilocks.ofNat 2, Goldilocks.ofNat 18446744069414584320, Goldilocks.zero] xs := by
+  rw [ringDot_eq, demoLambdas2of3_eq]
+
+theorem demoAlphaShares3_def :
+    demoAlphaShares3 =
+      [⟨Goldilocks.ofNat 3, Goldilocks.ofNat 1⟩, ⟨Goldilocks.ofNat 2, Goldilocks.ofNat 2⟩,
+       ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 1⟩] := by rfl
+
+theorem demoAlphaShares3_length : demoAlphaShares3.length = 3 := by rfl
+
+theorem demoZeroMasks3_length : demoZeroMasks3.length = 3 := by rfl
+
+theorem mkDemoMacShares_def (secret : Nat) :
+    mkDemoMacShares secret =
+      demoAlphaShares3.map
+        (fun a_i => mul a_i (GoldilocksExt2.ofBase (Goldilocks.ofNat secret))) := by rfl
+
+theorem mkDemoMacShares_length (secret : Nat) : (mkDemoMacShares secret).length = 3 := by rfl
+
+private theorem demoDot_a :
+    ringDot demoLambdas2of3 demoHonestAuthTriple.triple.aShares = Goldilocks.ofNat 3 := by
+  rw [ringDot_eq, demoLambdas2of3_eq]; decide +kernel
+
+private theorem demoDot_b :
+    ringDot demoLambdas2of3 demoHonestAuthTriple.triple.bShares = Goldilocks.ofNat 4 := by
+  rw [ringDot_eq, demoLambdas2of3_eq]; decide +kernel
+
+private theorem demoDot_c :
+    ringDot demoLambdas2of3 demoHonestAuthTriple.triple.cShares = Goldilocks.ofNat 12 := by
+  rw [ringDot_eq, demoLambdas2of3_eq]; decide +kernel
+
+private theorem demoDot_aT :
+    ringDot demoLambdas2of3 demoCompanionAuthTriple.triple.aShares = Goldilocks.ofNat 5 := by
+  rw [ringDot_eq, demoLambdas2of3_eq]; decide +kernel
+
+private theorem demoDot_bT :
+    ringDot demoLambdas2of3 demoCompanionAuthTriple.triple.bShares = Goldilocks.ofNat 2 := by
+  rw [ringDot_eq, demoLambdas2of3_eq]; decide +kernel
+
+private theorem demoDot_cT :
+    ringDot demoLambdas2of3 demoCompanionAuthTriple.triple.cShares = Goldilocks.ofNat 10 := by
+  rw [ringDot_eq, demoLambdas2of3_eq]; decide +kernel
+
+private theorem ringListSum_map_mul_right {R : Type} [LawfulCommRing R] (s : R) :
+    ∀ xs : List R, ringListSum (xs.map (fun a => mul a s)) = mul (ringListSum xs) s
+  | [] => by
+    simp only [List.map_nil, ringListSum]
+    exact (LawfulCommRing.zero_mul s).symm
+  | x :: xs => by
+    simp only [List.map_cons, ringListSum, ringListSum_map_mul_right s xs,
+      LawfulCommRing.right_distrib]
+
+theorem mkDemoMacShares_sum (secret : Nat) :
+    ringListSum (mkDemoMacShares secret) =
+      mul (ringListSum demoAlphaShares3) (GoldilocksExt2.ofBase (Goldilocks.ofNat secret)) :=
+  ringListSum_map_mul_right _ _
+
+theorem demoZeroMasks3_sum : ringListSum demoZeroMasks3 = zero := by
+  apply GoldilocksExt2.ext
+  · simp only [demoZeroMasks3, ringListSum, GoldilocksExt2.add_c0, GoldilocksExt2.ringZero_c0,
+      goldNeg_one, goldNeg_two, goldNeg_three]
+    decide +kernel
+  · simp only [demoZeroMasks3, ringListSum, GoldilocksExt2.add_c1, GoldilocksExt2.ringZero_c1,
+      goldNeg_one, goldNeg_two, goldNeg_three]
+    decide +kernel
+
+theorem demoAlphaShares3_sum_ne_zero : ringListSum demoAlphaShares3 ≠ zero := by
+  intro h
+  have h0 := congrArg GoldilocksExt2.c0 h
+  simp only [demoAlphaShares3, ringListSum, GoldilocksExt2.add_c0,
+    GoldilocksExt2.ringZero_c0] at h0
+  exact absurd h0 (by decide +kernel)
+
+private theorem demoHonest_validAt : demoHonestAuthTriple.triple.validAt demoLambdas2of3 :=
+  ⟨rfl, rfl, rfl, by rw [demoDot_c, demoDot_a, demoDot_b]; decide +kernel⟩
+
+private theorem demoCompanion_validAt : demoCompanionAuthTriple.triple.validAt demoLambdas2of3 :=
+  ⟨rfl, rfl, rfl, by rw [demoDot_cT, demoDot_aT, demoDot_bT]; decide +kernel⟩
+
+private theorem demoHonest_validMacs :
+    demoHonestAuthTriple.validMacs demoLambdas2of3 demoAlphaShares3 :=
+  ⟨rfl, rfl, rfl, by rw [demoDot_a]; exact mkDemoMacShares_sum 3,
+    by rw [demoDot_b]; exact mkDemoMacShares_sum 4,
+    by rw [demoDot_c]; exact mkDemoMacShares_sum 12⟩
+
+private theorem demoCompanion_validMacs :
+    demoCompanionAuthTriple.validMacs demoLambdas2of3 demoAlphaShares3 :=
+  ⟨rfl, rfl, rfl, by rw [demoDot_aT]; exact mkDemoMacShares_sum 5,
+    by rw [demoDot_bT]; exact mkDemoMacShares_sum 2,
+    by rw [demoDot_cT]; exact mkDemoMacShares_sum 10⟩
+
+/-- The honest opening is the masked transcript at the true openings `U = ρ·a - ã`,
+    `V = b - b̃` and the true residual `W = ρ·c - c̃ - (U·b + V·ã)`, for any triples of the
+    right lengths (no product relation assumed). -/
+private theorem honestSharedSpdzSacrificeOpening_eq_mk
+    (lambdas : List Goldilocks) (rho : GoldilocksExt2)
+    (alphaShares : List GoldilocksExt2)
+    (tr trTilde : AuthenticatedSharedTriple)
+    (maskU maskV maskW : List GoldilocksExt2)
+    (hALen : tr.triple.aShares.length = lambdas.length)
+    (hBLen : tr.triple.bShares.length = lambdas.length)
+    (hCLen : tr.triple.cShares.length = lambdas.length)
+    (hATLen : trTilde.triple.aShares.length = lambdas.length)
+    (hBTLen : trTilde.triple.bShares.length = lambdas.length)
+    (hCTLen : trTilde.triple.cShares.length = lambdas.length) :
+    honestSharedSpdzSacrificeOpening lambdas rho alphaShares tr trTilde maskU maskV maskW =
+      mkSharedSacrificeFromOpened
+        (sub (mul rho (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.aShares)))
+          (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.aShares)))
+        (sub (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.bShares))
+          (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.bShares)))
+        (sub
+          (sub (mul rho (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.cShares)))
+            (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.cShares)))
+          (add
+            (mul
+              (sub (mul rho (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.aShares)))
+                (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.aShares)))
+              (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.bShares)))
+            (mul
+              (sub (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.bShares))
+                (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.bShares)))
+              (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.aShares)))))
+        rho alphaShares tr trTilde maskU maskV maskW := by
+  have hUOpen :
+      ringDot (lambdas.map GoldilocksExt2.ofBase)
+        (shareZipSub (shareScale rho (tr.triple.aShares.map GoldilocksExt2.ofBase))
+          (trTilde.triple.aShares.map GoldilocksExt2.ofBase)) =
+        sub (mul rho (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.aShares)))
+          (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.aShares)) := by
+    rw [ringDot_zipSub (by simp [hALen, hATLen]), ringDot_scale,
+        ringDot_ofBase, ringDot_ofBase]
+  have hVOpen :
+      ringDot (lambdas.map GoldilocksExt2.ofBase)
+        (shareZipSub (tr.triple.bShares.map GoldilocksExt2.ofBase)
+          (trTilde.triple.bShares.map GoldilocksExt2.ofBase)) =
+        sub (GoldilocksExt2.ofBase (ringDot lambdas tr.triple.bShares))
+          (GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.bShares)) := by
+    rw [ringDot_zipSub (by simp [hBLen, hBTLen]), ringDot_ofBase, ringDot_ofBase]
+  unfold honestSharedSpdzSacrificeOpening
+  dsimp only
+  rw [hUOpen, hVOpen]
+  congr 1
+  unfold computeSacrificeWOpen
+  dsimp only
+  have hL1 : (shareZipSub (shareScale rho (tr.triple.cShares.map GoldilocksExt2.ofBase))
+      (trTilde.triple.cShares.map GoldilocksExt2.ofBase)).length = lambdas.length := by
+    rw [shareZipSub_length_of_eq (by simp [hCLen, hCTLen])]
+    simp [hCLen]
+  have hL2 : ∀ u v : GoldilocksExt2, (ringListZipAdd
+      (shareScale u (tr.triple.bShares.map GoldilocksExt2.ofBase))
+      (shareScale v (trTilde.triple.aShares.map GoldilocksExt2.ofBase))).length =
+        lambdas.length := by
+    intro u v
+    rw [ringListZipAdd_length_of_eq (by simp [hBLen, hATLen])]
+    simp [hBLen]
+  rw [ringDot_zipSub (hL1.trans (hL2 _ _).symm),
+      ringDot_zipSub (by simp [hCLen, hCTLen]),
+      ringDot_zipAdd (by simp [hBLen, hATLen]),
+      ringDot_scale, ringDot_scale, ringDot_scale,
+      ringDot_ofBase, ringDot_ofBase, ringDot_ofBase, ringDot_ofBase]
+
+/-- Sum of the party-local `W` MAC shares, for any opened `u`, `v`. -/
+private theorem sacrificeMacW_sum
+    (rho u v alpha cK cTK bK aTK : GoldilocksExt2)
+    (macC macCT macB macAT : List GoldilocksExt2)
+    (hLenC : macC.length = macCT.length) (hLenB : macB.length = macAT.length)
+    (hLenCB : macC.length = macB.length)
+    (hC : ringListSum macC = mul alpha cK) (hCT : ringListSum macCT = mul alpha cTK)
+    (hB : ringListSum macB = mul alpha bK) (hAT : ringListSum macAT = mul alpha aTK) :
+    ringListSum (shareZipSub (shareZipSub (shareScale rho macC) macCT)
+        (ringListZipAdd (shareScale u macB) (shareScale v macAT))) =
+      mul alpha (sub (sub (mul rho cK) cTK) (add (mul u bK) (mul v aTK))) := by
+  have hL1 : (shareZipSub (shareScale rho macC) macCT).length = macC.length := by
+    rw [shareZipSub_length_of_eq (by simp [hLenC])]
+    simp
+  have hL2 : (ringListZipAdd (shareScale u macB) (shareScale v macAT)).length = macC.length := by
+    rw [ringListZipAdd_length_of_eq (by simp [hLenB])]
+    simp [hLenCB]
+  rw [ringListSum_zipSub (hL1.trans hL2.symm),
+      ringListSum_zipSub (by simp [hLenC]),
+      ringListSum_zipAdd, ringListSum_scale, ringListSum_scale, ringListSum_scale,
+      hC, hCT, hB, hAT]
+  have hSwap : ∀ (x y : GoldilocksExt2), mul x (mul alpha y) = mul alpha (mul x y) := by
+    intro x y
+    rw [← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm x alpha, LawfulCommRing.mul_assoc]
+  rw [hSwap rho cK, hSwap u bK, hSwap v aTK,
+      ← LawfulCommRing.mul_sub, ← LawfulCommRing.left_distrib, ← LawfulCommRing.mul_sub]
+
+private def demoRho : GoldilocksExt2 := ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
+
+private def demoBadAuthTriple : AuthenticatedSharedTriple :=
+  { demoHonestAuthTriple with
+    triple := { demoHonestAuthTriple.triple with
+                cShares := [Goldilocks.ofNat 20, Goldilocks.ofNat 27, Goldilocks.ofNat 34] }
+    macC := mkDemoMacShares 13 }
+
+private def demoBadOpening : SharedSpdzSacrificeOpening :=
+  honestSharedSpdzSacrificeOpening demoLambdas2of3 demoRho
+    demoAlphaShares3 demoBadAuthTriple demoCompanionAuthTriple
+    demoZeroMasks3 demoZeroMasks3 demoZeroMasks3
+
+private def demoBadMacW : List GoldilocksExt2 :=
+  shareZipSub
+    (shareZipSub (shareScale demoRho demoBadAuthTriple.macC) demoCompanionAuthTriple.macC)
+    (ringListZipAdd (shareScale demoBadOpening.uOpened demoBadAuthTriple.macB)
+      (shareScale demoBadOpening.vOpened demoCompanionAuthTriple.macA))
+
+private def demoBadForgedZeroOpening : SharedSpdzSacrificeOpening :=
+  { demoBadOpening with
+    wOpened := zero
+    sigmaW := spdzComputeSigmas zero demoBadMacW demoAlphaShares3 demoZeroMasks3 }
+
+private theorem demoDot_bad_c :
+    ringDot demoLambdas2of3 demoBadAuthTriple.triple.cShares = Goldilocks.ofNat 13 := by
+  rw [ringDot_eq, demoLambdas2of3_eq]; decide +kernel
+
+private theorem demoDot_bad_a :
+    ringDot demoLambdas2of3 demoBadAuthTriple.triple.aShares = Goldilocks.ofNat 3 := demoDot_a
+
+private theorem demoDot_bad_b :
+    ringDot demoLambdas2of3 demoBadAuthTriple.triple.bShares = Goldilocks.ofNat 4 := demoDot_b
+
+private def demoBadU : GoldilocksExt2 :=
+  sub (mul demoRho (GoldilocksExt2.ofBase (Goldilocks.ofNat 3)))
+    (GoldilocksExt2.ofBase (Goldilocks.ofNat 5))
+
+private def demoBadV : GoldilocksExt2 :=
+  sub (GoldilocksExt2.ofBase (Goldilocks.ofNat 4)) (GoldilocksExt2.ofBase (Goldilocks.ofNat 2))
+
+private def demoBadW : GoldilocksExt2 :=
+  sub
+    (sub (mul demoRho (GoldilocksExt2.ofBase (Goldilocks.ofNat 13)))
+      (GoldilocksExt2.ofBase (Goldilocks.ofNat 10)))
+    (add (mul demoBadU (GoldilocksExt2.ofBase (Goldilocks.ofNat 4)))
+      (mul demoBadV (GoldilocksExt2.ofBase (Goldilocks.ofNat 5))))
+
+/-- The corrupted triple's true residual is `ρ·(13 - 3·4) = ρ`, whose `c1` coordinate is `1`. -/
+private theorem demoBadW_ne_zero : demoBadW ≠ zero := by
+  intro h
+  have h1 := congrArg GoldilocksExt2.c1 h
+  simp only [demoBadW, demoBadU, demoBadV, demoRho, GoldilocksExt2.sub_c1, GoldilocksExt2.add_c1,
+    GoldilocksExt2.mul_c1, GoldilocksExt2.ofBase_c0, GoldilocksExt2.ofBase_c1,
+    GoldilocksExt2.ringZero_c1, LawfulCommRing.mul_zero, LawfulCommRing.zero_add] at h1
+  exact absurd h1 (by decide +kernel)
+
+private theorem demoBadOpening_eq :
+    demoBadOpening =
+      mkSharedSacrificeFromOpened demoBadU demoBadV demoBadW demoRho demoAlphaShares3
+        demoBadAuthTriple demoCompanionAuthTriple demoZeroMasks3 demoZeroMasks3 demoZeroMasks3 := by
+  have h := honestSharedSpdzSacrificeOpening_eq_mk demoLambdas2of3 demoRho demoAlphaShares3
+    demoBadAuthTriple demoCompanionAuthTriple demoZeroMasks3 demoZeroMasks3 demoZeroMasks3
+    rfl rfl rfl rfl rfl rfl
+  rw [demoDot_bad_a, demoDot_bad_b, demoDot_bad_c, demoDot_aT, demoDot_bT, demoDot_cT] at h
+  exact h
+
+private theorem demoBad_cheated :
+    ringDot demoLambdas2of3 demoBadAuthTriple.triple.cShares ≠
+      Goldilocks.mul (ringDot demoLambdas2of3 demoBadAuthTriple.triple.aShares)
+        (ringDot demoLambdas2of3 demoBadAuthTriple.triple.bShares) := by
+  rw [demoDot_bad_c, demoDot_bad_a, demoDot_bad_b]; decide +kernel
+
+private theorem demoBadOpening_rejected : verifySharedSpdzSacrifice demoBadOpening = false := by
+  have hw : ¬ (demoBadOpening.wOpened = zero) := fun h =>
+    demoBadW_ne_zero
+      ((congrArg SharedSpdzSacrificeOpening.wOpened demoBadOpening_eq).symm.trans h)
+  change (decide (demoBadOpening.wOpened = zero) && verifySpdzZeroSumMac demoBadOpening.sigmaU &&
+    verifySpdzZeroSumMac demoBadOpening.sigmaV && verifySpdzZeroSumMac demoBadOpening.sigmaW) = false
+  rw [decide_eq_false hw]
+  simp only [Bool.false_and]
+
+private theorem demoBadForgedZeroOpening_rejected :
+    verifySharedSpdzSacrifice demoBadForgedZeroOpening = false := by
+  have hu : demoBadOpening.uOpened = demoBadU :=
+    congrArg SharedSpdzSacrificeOpening.uOpened demoBadOpening_eq
+  have hv : demoBadOpening.vOpened = demoBadV :=
+    congrArg SharedSpdzSacrificeOpening.vOpened demoBadOpening_eq
+  have hMW : ringListSum demoBadMacW =
+      mul (ringListSum demoAlphaShares3)
+        (sub
+          (sub (mul demoRho (GoldilocksExt2.ofBase (Goldilocks.ofNat 13)))
+            (GoldilocksExt2.ofBase (Goldilocks.ofNat 10)))
+          (add (mul demoBadOpening.uOpened (GoldilocksExt2.ofBase (Goldilocks.ofNat 4)))
+            (mul demoBadOpening.vOpened (GoldilocksExt2.ofBase (Goldilocks.ofNat 5))))) :=
+    sacrificeMacW_sum demoRho demoBadOpening.uOpened demoBadOpening.vOpened
+      (ringListSum demoAlphaShares3) _ _ _ _
+      demoBadAuthTriple.macC demoCompanionAuthTriple.macC demoBadAuthTriple.macB
+      demoCompanionAuthTriple.macA ((mkDemoMacShares_length 13).trans (mkDemoMacShares_length 10).symm)
+      ((mkDemoMacShares_length 4).trans (mkDemoMacShares_length 5).symm) ((mkDemoMacShares_length 13).trans (mkDemoMacShares_length 4).symm)
+      (mkDemoMacShares_sum 13) (mkDemoMacShares_sum 10) (mkDemoMacShares_sum 4)
+      (mkDemoMacShares_sum 5)
+  rw [hu, hv] at hMW
+  have hSum : ¬ (ringListSum
+      (spdzComputeSigmas zero demoBadMacW demoAlphaShares3 demoZeroMasks3) = zero) := by
+    intro h
+    have hLen : demoBadMacW.length = demoAlphaShares3.length := rfl
+    have hMaskLen : demoZeroMasks3.length = demoAlphaShares3.length := rfl
+    rw [ringListSum_spdzComputeSigmas zero hLen hMaskLen, demoZeroMasks3_sum,
+      LawfulCommRing.add_zero, LawfulCommRing.mul_zero, LawfulCommRing.sub_zero, hMW] at h
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h with h0 | h0
+    · exact demoAlphaShares3_sum_ne_zero h0
+    · exact demoBadW_ne_zero h0
+  have hW : verifySpdzZeroSumMac demoBadForgedZeroOpening.sigmaW = false :=
+    verifySpdzZeroSumMac_rejects_sum _ hSum
+  change (decide (demoBadForgedZeroOpening.wOpened = zero) &&
+    verifySpdzZeroSumMac demoBadForgedZeroOpening.sigmaU &&
+    verifySpdzZeroSumMac demoBadForgedZeroOpening.sigmaV &&
+    verifySpdzZeroSumMac demoBadForgedZeroOpening.sigmaW) = false
+  rw [hW]
+  exact Bool.and_false _
+
 /-- **Inhabitedness Witness (`shared_spdz_sacrifice_inhabited`)**:
     Genuine non-constant degree-1 2-of-3 Shamir Beaver triples (`A(X) = 3 + 5X`, `B(X) = 4 + 2X`,
     `C(X) = 12 + 7X`) authenticated under `α = ⟨9, 4⟩ ∈ GoldilocksExt2` satisfy `validAt` and
@@ -1278,7 +1709,12 @@ theorem shared_spdz_sacrifice_inhabited :
       (honestSharedSpdzSacrificeOpening demoLambdas2of3 ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
         demoAlphaShares3 demoHonestAuthTriple demoCompanionAuthTriple
         demoZeroMasks3 demoZeroMasks3 demoZeroMasks3) = true := by
-  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+  refine ⟨by decide +kernel, ?_, ?_⟩
+  · rw [demoDot_c, demoDot_a, demoDot_b]; decide +kernel
+  · exact verifySharedSpdzSacrifice_complete demoLambdas2of3 _ demoAlphaShares3
+      demoHonestAuthTriple demoCompanionAuthTriple demoZeroMasks3 demoZeroMasks3 demoZeroMasks3
+      demoHonest_validAt demoCompanion_validAt demoHonest_validMacs demoCompanion_validMacs
+      rfl rfl rfl demoZeroMasks3_sum demoZeroMasks3_sum demoZeroMasks3_sum
 
 /-- **`#tooth` Corrupted Shared Shamir Beaver Triple Refusal (`tooth_shared_spdz_sacrifice_rejects_corrupted_triple`)**:
     Corrupting the 2-of-3 Shamir product polynomial from `C(X) = 12 + 7X` to `C_bad(X) = 13 + 7X`
@@ -1304,7 +1740,8 @@ theorem tooth_shared_spdz_sacrifice_rejects_corrupted_triple :
         (ringDot demoLambdas2of3 badTr.triple.bShares) ∧
     verifySharedSpdzSacrifice op = false ∧
     verifySharedSpdzSacrifice forgedZeroOp = false := by
-  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+  intro rho badTr op macW forgedZeroOp
+  exact ⟨demoBad_cheated, demoBadOpening_rejected, demoBadForgedZeroOpening_rejected⟩
 
 end SharedSpdzSacrifice
 
@@ -2234,7 +2671,7 @@ private theorem coeffs_zero_of_eval_and_quotLinear_local {R : Type} [LawfulCommR
     · exact hc0
     · exact ihTl c hMemTl
 
-private theorem poly_coeffs_zero_of_vanish_nodup_local
+theorem poly_coeffs_zero_of_vanish_nodup_local
     {R : Type} [LawfulCommRing R] [DecidableEq R] [NoZeroDivisors R] :
     ∀ (S : List R) (cs : List R),
       S.Nodup → cs.length ≤ S.length →
@@ -2771,6 +3208,8 @@ theorem tooth_ggm_extra_query_distinguishes :
       (OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure) ≠
     keyedPrfIdealAccept 1 (fun _ : Fin 1 × Unit => false)
       (OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure) := by
+  rw [keyedPrfRealAccept_def, keyedPrfIdealAccept_def]
+  simp only [qsum_succ, qsum_zero]
   decide +kernel
 
 /-- Genuine non-empty 2-party pairwise OLE share witness (`us = [2, 3], vShares = [4, 5], sum(ws) = 5 * 9 = 45`). -/
@@ -2802,25 +3241,86 @@ theorem witness_auth_triple_validMacs_inhabited :
     ∃ (lambdas : List Goldilocks) (alphaShares : List GoldilocksExt2) (tr : AuthenticatedSharedTriple),
       tr.validMacs lambdas alphaShares :=
   ⟨demoLambdas2of3, demoAlphaShares3, demoHonestAuthTriple,
-    ⟨rfl, rfl, rfl, by decide +kernel, by decide +kernel, by decide +kernel⟩⟩
+    demoHonest_validMacs⟩
+
+private theorem witness_ggm_query_bounded_inhabited_proof :
+    QueryBounded 1
+      (OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure :
+        OracleComp (Fin 2 × Unit) Bool Bool) := by
+  change QueryBounded (0 + 1) _
+  rw [QueryBounded_succ_query]
+  intro b
+  exact cast (QueryBounded_pure 0 b).symm True.intro
 
 theorem witness_ggm_query_bounded_inhabited :
     ∃ (A : OracleComp (Fin 2 × Unit) Bool Bool), QueryBounded 1 A :=
-  ⟨OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure, fun _ => trivial⟩
+  ⟨OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure,
+    witness_ggm_query_bounded_inhabited_proof⟩
+
+theorem demoLambdas2of3_sum : ringListSum demoLambdas2of3 = Goldilocks.one := by
+  rw [demoLambdas2of3_eq]; decide +kernel
+
+private theorem eq_of_ratLe_natAbsDiff_zero_budget (a b : Nat)
+    (h : ratLe (natAbsDiff a b, 1) (2 * 0, 1)) : a = b := by
+  obtain ⟨_, _, h⟩ := h
+  have h' : natAbsDiff a b * 1 ≤ 2 * 0 * 1 := h
+  rw [natAbsDiff_eq] at h'
+  split at h' <;> omega
+
+/-- The conclusion of `ggm_punctured_tree_hiding` at budget `Q = 0` fails for a one-query
+    distinguisher: its advantage numerator is not bounded by `2 · 0`. -/
+theorem tooth_ggm_extra_query_breaks_zero_budget_bound :
+    ¬ ratLe
+      (natAbsDiff
+        (keyedPrfRealAccept 1 (fun _ : Fin 1 × Unit => false) (fun _ : Unit => true)
+          (OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure))
+        (keyedPrfIdealAccept 1 (fun _ : Fin 1 × Unit => false)
+          (OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure)), 1)
+      (2 * 0, 1) :=
+  fun h => tooth_ggm_extra_query_distinguishes (eq_of_ratLe_natAbsDiff_zero_budget _ _ h)
+
+/-- Joint premises of `evalSharedPow7Tree_correct`: 2-of-3 Lagrange weights summing to one, a
+    share vector of the right length and a valid shared Beaver triple. -/
+theorem witness_shared_pow7_tree_premises_inhabited :
+    ∃ (lambdas rSh : List Goldilocks) (tr : SharedBeaverTriple Goldilocks),
+      ringListSum lambdas = Goldilocks.one ∧ rSh.length = lambdas.length ∧ tr.validAt lambdas :=
+  ⟨demoLambdas2of3, demoHonestAuthTriple.triple.aShares, demoHonestAuthTriple.triple,
+    demoLambdas2of3_sum, rfl, demoHonest_validAt⟩
+
+/-- Joint premises of `verifySharedSpdzSacrifice_complete`: valid triple and companion, valid
+    MAC shares for both, and zero-sum masks of the committee size. -/
+theorem witness_shared_spdz_sacrifice_premises_inhabited :
+    ∃ (lambdas : List Goldilocks) (alphaShares : List GoldilocksExt2)
+      (tr trTilde : AuthenticatedSharedTriple) (masks : List GoldilocksExt2),
+      tr.triple.validAt lambdas ∧ trTilde.triple.validAt lambdas ∧
+      tr.validMacs lambdas alphaShares ∧ trTilde.validMacs lambdas alphaShares ∧
+      masks.length = alphaShares.length ∧ ringListSum masks = CommRingOps.zero :=
+  ⟨demoLambdas2of3, demoAlphaShares3, demoHonestAuthTriple, demoCompanionAuthTriple,
+    demoZeroMasks3, demoHonest_validAt, demoCompanion_validAt, demoHonest_validMacs,
+    demoCompanion_validMacs, rfl, demoZeroMasks3_sum⟩
+
+/-- A one-query adversary within budget `Q = 1` over two seeds, where the bound `2Q / 2` of
+    `ggm_punctured_tree_hiding` does not exceed one. -/
+theorem witness_ggm_query_bounded_bound_inhabited :
+    ∃ (A : OracleComp (Fin 2 × Unit) Bool Bool), QueryBounded 1 A ∧ ratLe (2 * 1, 2) (1, 1) :=
+  ⟨OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure,
+    witness_ggm_query_bounded_inhabited_proof, ⟨by decide, by decide, by decide⟩⟩
 
 #tooth_pair Qsag.rlwe1024_ot_decrypt_exact vs Qsag.tooth_rlwe1024_overflow_flips_decoded_bit
 #tooth_pair Qsag.rlwe_fo_cut_and_choose_sound vs Qsag.tooth_rlwe_fo_corrupted_batch_rejected
+/- Keep the already-certified concrete opening abstract during structural audits. -/
+attribute [local irreducible] demoForgedZeroSacrificeOpening
 #tooth_pair Qsag.verifySharedSpdzSacrifice_complete vs Qsag.tooth_shared_spdz_forged_zero_rejected
 #tooth_pair Qsag.verifySharedSpdzSacrifice_sound vs Qsag.tooth_shared_spdz_forged_zero_rejected
 #tooth_pair Qsag.extract384To128_two_universal vs Qsag.tooth_zero_row_extractor_collides_pair
 #tooth_pair Qsag.kos_batched_poly_check_sound vs Qsag.tooth_kos_prechallenge_cancels_fault_witness
-#tooth_pair Qsag.ggm_punctured_tree_hiding vs Qsag.tooth_ggm_extra_query_distinguishes
+#tooth_pair Qsag.ggm_punctured_tree_hiding vs Qsag.tooth_ggm_extra_query_breaks_zero_budget_bound
 
 #verify_inhabited Qsag.ole_pairwise_cross_sum_eq_mul Qsag.witness_valid_pairwise_ole_inhabited
 #verify_inhabited Qsag.pow7Tree_correct Qsag.witness_beaver_triple_val_inhabited
-#verify_inhabited Qsag.evalSharedPow7Tree_correct Qsag.witness_shared_triple_validAt_inhabited
-#verify_inhabited Qsag.verifySharedSpdzSacrifice_complete Qsag.witness_auth_triple_validMacs_inhabited
-#verify_inhabited Qsag.ggm_punctured_tree_hiding Qsag.witness_ggm_query_bounded_inhabited
+#verify_inhabited Qsag.evalSharedPow7Tree_correct Qsag.witness_shared_pow7_tree_premises_inhabited
+#verify_inhabited Qsag.verifySharedSpdzSacrifice_complete Qsag.witness_shared_spdz_sacrifice_premises_inhabited
+#verify_inhabited Qsag.ggm_punctured_tree_hiding Qsag.witness_ggm_query_bounded_bound_inhabited
 
 #verify_constructive Qsag.rlwe1024_ot_decrypt_exact
 #verify_constructive Qsag.ole_pairwise_cross_sum_eq_mul

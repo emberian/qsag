@@ -11,7 +11,7 @@ Constructive (`0 Classical.choice`, `0 sorry`) mechanization of the core algebra
    and weighted by `(chi^128)^j * chi^u = chi^(128 * j + u)`. Any corrupted gate message creates a
    nonzero degree-`< B` polynomial in `chi`, vanishing on at most `B` challenges in `S`.
 2. **`b`-Bit Ternary `{0, 1, slope}^b` Frobenius-Basis Multiquadratic Round (`nextClaim_honest_complete`,
-   `nextClaim_false_bad_coins_le`, `#tooth` `tooth_nextClaim_unlocked_s0_forges_all`)**:
+   `honestFold_nextClaim_false_bad_coins_le`, `#tooth` `tooth_honestFold_nextClaim_unlocked_s0_forges_all`)**:
    Both the `TENSOR_BITS = 7` plane-binding round (`3^7 = 2187` points, `w(u) = chi^u`) and every
    `b`-bit vector-folding round (`b ≤ FOLD_BITS = 4`, `3^b ≤ 81` points, `w(u) = 1`) interpolate
    with `basis(0, γ) = 1 + γ`, `basis(1, γ) = γ`, and `basis(2, γ) = towerFrobeniusPoly 7 γ = γ + γ^2`
@@ -27,9 +27,6 @@ public import Qsag.Math.Gf2Pow128
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Threshold.MaliciousSecurity
 
 import Qsag.Tactic.AssuranceKit
 
@@ -166,6 +163,39 @@ theorem quadratic_roots_le_two_tower128 (c0 c1 c2 : Tower128) (S : List Tower128
   have hLen : ([c0, c1, c2] : List Tower128).length ≤ 2 + 1 := Nat.le_refl 3
   exact RoundPoly.roots_nodup_length_le 2 [c0, c1, c2] S hS hLen
     (exists_eval_nonzero_quadratic_tower128 c0 c1 c2 hNe)
+
+/-- A coefficient list of length `≤ L + 1` with a nonzero entry is nonzero at some point of any
+    duplicate-free domain of size `≥ L + 1` (contrapositive of `poly_coeffs_zero_of_vanish_nodup`). -/
+theorem exists_eval_nonzero_of_coeff_nonzero
+    {R : Type} [LawfulCommRing R] [DecidableEq R] [NoZeroDivisors R]
+    (L : Nat) (cs S : List R)
+    (hNodup : S.Nodup) (hCsLen : cs.length ≤ L + 1) (hDom : L + 1 ≤ S.length)
+    (hNonzero : ∃ c ∈ cs, c ≠ CommRingOps.zero) :
+    ∃ x₀ : R, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero := by
+  have hScan : ∀ xs : List R,
+      (∃ x₀ : R, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero) ∨
+        (∀ r ∈ xs, RoundPoly.evalCoeffs cs r = CommRingOps.zero) := by
+    intro xs
+    induction xs with
+    | nil => exact Or.inr (fun _ hm => nomatch hm)
+    | cons x xs ih =>
+      by_cases hx : RoundPoly.evalCoeffs cs x = CommRingOps.zero
+      · rcases ih with hEx | hAll
+        · exact Or.inl hEx
+        · refine Or.inr (fun r hr => ?_)
+          rcases List.mem_cons.mp hr with rfl | hTl
+          · exact hx
+          · exact hAll r hTl
+      · exact Or.inl ⟨x, hx⟩
+  rcases hScan (S.take (L + 1)) with hEx | hAll
+  · exact hEx
+  · exfalso
+    obtain ⟨d, hdMem, hdNe⟩ := hNonzero
+    have hTakeLen : (S.take (L + 1)).length = L + 1 := List.length_take_of_le hDom
+    have hNdTake : (S.take (L + 1)).Nodup := (List.take_sublist (L + 1) S).nodup hNodup
+    have hZeroAll := poly_coeffs_zero_of_vanish_nodup (S.take (L + 1)) cs hNdTake
+      (by rw [hTakeLen]; exact hCsLen) hAll
+    exact hdNe (hZeroAll d hdMem)
 
 /-- Batching root bound for `PassWeights` (`rss256.rs:50-55`):
     Given `blocks : List Tower128` of `≤ B` 128-bit half-plane error blocks (`1 ≤ B ≤ S.length`)
@@ -770,6 +800,140 @@ theorem decide_eq_decide_of_iff {P Q : Prop} [Decidable P] [Decidable Q] (h : P 
   apply Bool.eq_iff_iff.mpr
   rw [decide_eq_true_eq, decide_eq_true_eq]
   exact h
+
+theorem vecCross_leaf (xp yq xq yp : Tower128) :
+    vecCross (BTree.leaf xp) (BTree.leaf yq) (BTree.leaf xq) (BTree.leaf yp) =
+      towerAdd 7 (towerMul 7 xp yq) (towerMul 7 xq yp) := by
+  rfl
+
+theorem honestRoundTab_vecZero (m b : Nat) :
+    honestRoundTab m b (vecZero (m + b)) (vecZero (m + b))
+      (vecZero (m + b)) (vecZero (m + b)) = zeroTab b := by
+  induction b with
+  | zero =>
+    dsimp only [honestRoundTab, btreeTernaryExpand, ttreeMap4, zeroTab, vecCross]
+    rw [vecDot_zero (m + 0), towerAdd_self_zero]
+  | succ b ih =>
+    dsimp only [vecZero, honestRoundTab, btreeTernaryExpand, ttreeMap4, zeroTab]
+    change TTree.branch
+      (honestRoundTab m b (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)))
+      (honestRoundTab m b (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)))
+      (honestRoundTab m b
+        (vecAdd (vecZero (m + b)) (vecZero (m + b))) (vecAdd (vecZero (m + b)) (vecZero (m + b)))
+        (vecAdd (vecZero (m + b)) (vecZero (m + b))) (vecAdd (vecZero (m + b)) (vecZero (m + b)))) =
+      TTree.branch (zeroTab b) (zeroTab b) (zeroTab b)
+    rw [vecAdd_zero, ih]
+
+/-- Root count, including the zero-dimensional base case. -/
+def ternaryBadBound (cardS : Nat) : Nat → Nat
+  | 0 => 0
+  | b + 1 => ternaryBadBound cardS b * cardS + 2 * cardS ^ b
+
+theorem ternaryBadBound_scale (cardS b : Nat) :
+    ternaryBadBound cardS b * cardS = 2 * b * cardS ^ b := by
+  induction b with
+  | zero => simp [ternaryBadBound]
+  | succ b ih =>
+    simp only [ternaryBadBound, Nat.add_mul]
+    rw [ih]
+    simp only [Nat.mul_assoc, ← Nat.pow_succ]
+    simp [Nat.mul_add, Nat.add_mul]
+
+/-- Constructive multivariate Schwartz–Zippel, in the actual ternary basis. -/
+theorem ternaryEval_nonzero_roots_le (S : List Tower128) (hS : S.Nodup) :
+    ∀ (b : Nat) (t : TernaryTab b), t ≠ zeroTab b →
+      ((challengeTuples S b).filter (fun gs => decide (ternaryEval gs t = towerZero 7))).length ≤
+        ternaryBadBound S.length b := by
+  intro b
+  induction b with
+  | zero =>
+    intro t ht
+    cases t with | leaf c =>
+    have hc : c ≠ towerZero 7 := fun h => ht (by rw [h]; rfl)
+    simp [challengeTuples, ternaryEval, hc, ternaryBadBound]
+  | succ b ih =>
+    intro t ht
+    cases t with | branch t0 t1 t2 =>
+    have hpick : ∃ chosen : TernaryTab b, chosen ≠ zeroTab b ∧
+        ∀ rest : ChallengeTuple b, ternaryEval rest chosen ≠ towerZero 7 →
+          ternaryEval rest t0 ≠ towerZero 7 ∨ ternaryEval rest t1 ≠ towerZero 7 ∨
+            ternaryEval rest t2 ≠ towerZero 7 := by
+      by_cases h0 : t0 = zeroTab b
+      · by_cases h1 : t1 = zeroTab b
+        · exact ⟨t2, fun h2 => ht (by rw [h0, h1, h2]; rfl), fun _ h => .inr (.inr h)⟩
+        · exact ⟨t1, h1, fun _ h => .inr (.inl h)⟩
+      · exact ⟨t0, h0, fun _ h => .inl h⟩
+    obtain ⟨chosen, hn, hp⟩ := hpick
+    unfold challengeTuples ternaryBadBound
+    rw [filter_flatMap_len]
+    have hs := sum_map_le_split
+      (fun rest => decide (ternaryEval rest chosen = towerZero 7))
+      (fun rest => ((S.map (fun g => ChallengeTuple.cons g rest)).filter
+        (fun gs => decide (ternaryEval gs (.branch t0 t1 t2) = towerZero 7))).length)
+      S.length 2
+      (fun rest _ => by rw [filter_map_len]; exact List.length_filter_le _ S)
+      (fun rest hgood => by
+        rw [filter_map_len]
+        simp only [ternaryEval_step_eq_evalCoeffs]
+        apply quadratic_roots_le_two_tower128 _ _ _ S hS
+        have hnz := hp rest (decide_eq_false_iff_not.mp hgood)
+        by_cases h0 : ternaryEval rest t0 = towerZero 7
+        · by_cases h2 : ternaryEval rest t2 = towerZero 7
+          · right; left
+            simp only [h0, h2, towerZero_add, towerAdd_zero]
+            exact (hnz.resolve_left (fun h => h h0)).resolve_right (fun h => h h2)
+          · exact .inr (.inr h2)
+        · exact .inl h0)
+      (challengeTuples S b)
+    rw [challengeTuples_length, Nat.mul_comm _ 2] at hs
+    exact Nat.le_trans hs
+      (Nat.add_le_add_right (Nat.mul_le_mul_right S.length (ih chosen hn)) _)
+
+/-- The round locks the incoming claim before sampling its challenge tuple.
+The table type enforces degree at most two in every variable. -/
+theorem honestFold_nextClaim_false_bad_coins_le (m b : Nat)
+    (w : BoolWeights b) (hw0 : zeroCornerBool w = towerOne 7)
+    (xp yq xq yp : Vec128 (m + b)) (claim : Tower128) (s : TernaryTab b)
+    (hf : claim ≠ weightedBoolSum w (honestRoundTab m b xp yq xq yp))
+    (S : List Tower128) (hS : S.Nodup) :
+    ((challengeTuples S b).filter (fun gs => decide (nextClaim b claim w s gs =
+      vecCross (foldVec m b gs xp) (foldVec m b gs yq)
+        (foldVec m b gs xq) (foldVec m b gs yp)))).length ≤ ternaryBadBound S.length b := by
+  have hn : diffTab (lockZeroCorner claim w s) (honestRoundTab m b xp yq xq yp) ≠ zeroTab b := by
+    intro hz
+    have he := (diffTab_eq_zero_iff _ _).mp hz
+    have hh := lockZeroCorner_weightedBoolSum claim w s hw0
+    rw [he] at hh
+    exact hf hh.symm
+  apply Nat.le_trans (filter_len_le_of_imp _
+    (fun gs => decide (ternaryEval gs
+      (diffTab (lockZeroCorner claim w s) (honestRoundTab m b xp yq xq yp)) = towerZero 7)) ?_
+    (challengeTuples S b))
+  · exact ternaryEval_nonzero_roots_le S hS b _ hn
+  · intro gs hg
+    apply decide_eq_true_iff.mpr
+    rw [ternaryEval_diffTab, ternaryEval_honestRoundTab_eq]
+    have he := decide_eq_true_iff.mp hg
+    change ternaryEval gs (lockZeroCorner claim w s) = _ at he
+    rw [he, towerAdd_self_zero]
+
+/-- Dropping the zero-corner lock lets the honest table repair any false
+incoming claim at EVERY challenge, hence with probability one. -/
+theorem tooth_honestFold_nextClaim_unlocked_s0_forges_all (m b : Nat)
+    (w : BoolWeights b) (xp yq xq yp : Vec128 (m + b)) :
+    ∃ claim, claim ≠ weightedBoolSum w (honestRoundTab m b xp yq xq yp) ∧
+      ∀ gs, ternaryEval gs (honestRoundTab m b xp yq xq yp) =
+        vecCross (foldVec m b gs xp) (foldVec m b gs yq)
+          (foldVec m b gs xq) (foldVec m b gs yp) := by
+  let honest := weightedBoolSum w (honestRoundTab m b xp yq xq yp)
+  refine ⟨towerAdd 7 honest (towerOne 7), ?_, (fun gs => ternaryEval_honestRoundTab_eq m b gs xp yq xq yp)⟩
+  intro he
+  have hh := congrArg (towerAdd 7 honest) he
+  rw [← towerAdd_assoc, towerAdd_self_zero, towerZero_add] at hh
+  exact (by decide : towerOne 7 ≠ towerZero 7) hh
+
+#tooth_pair honestFold_nextClaim_false_bad_coins_le vs tooth_honestFold_nextClaim_unlocked_s0_forges_all
+#verify_constructive ternaryBadBound_scale ternaryEval_nonzero_roots_le honestFold_nextClaim_false_bad_coins_le
 
 #verify_constructive
   Qsag.Rss256ProductProof.passWeight_eq_towerPow

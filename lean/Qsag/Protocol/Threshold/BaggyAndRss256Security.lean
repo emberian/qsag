@@ -26,18 +26,11 @@ public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Protocol.Aggregation.UcGames
-public import Qsag.Exec.SimulationSpine
+public import Qsag.Spec.Refines
 public import Qsag.Protocol.Threshold.MaliciousSecurity
-public import Qsag.Exec.InteractiveUcEngine
 public import Qsag.Protocol.Threshold.RssSlhFullSecurity
 public import Qsag.Protocol.Threshold.Rss256TwoPassProductProof
 
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Protocol.Threshold.MaliciousSecurity
-import all Qsag.Exec.InteractiveUcEngine
-import all Qsag.Protocol.Threshold.RssSlhFullSecurity
-import all Qsag.Protocol.Threshold.Rss256TwoPassProductProof
 import Lean
 
 import Qsag.Tactic.AssuranceKit
@@ -360,7 +353,7 @@ private theorem qsum_eq_of_le_pointwise_eq :
       ∀ i : Fin n, f i = g i
   | 0, _, _, _, _, i => Fin.elim0 i
   | n + 1, f, g, hLe, hSum, i => by
-    simp only [qsum] at hSum
+    simp only [qsum_succ] at hSum
     let i0 : Fin (n + 1) := ⟨0, Nat.zero_lt_succ n⟩
     let f' : Fin n → Nat := fun j => f ⟨j.val + 1, Nat.succ_lt_succ j.isLt⟩
     let g' : Fin n → Nat := fun j => g ⟨j.val + 1, Nat.succ_lt_succ j.isLt⟩
@@ -954,15 +947,17 @@ def unpackTower128Pair (v : BitVec 256) : Tower128 × Tower128 :=
 
 private theorem lowBits_xor_7 (u v : BitVec 256) :
     lowBits 7 (u ^^^ v) = lowBits 7 u ^^^ lowBits 7 v := by
-  apply BitVec.eq_of_getLsbD_eq
-  intro i hi
-  simp [lowBits, hi]
+  have h := congrArg (lowBits 7)
+    (joinBits_xor 7 (lowBits 7 u) (lowBits 7 v) (highBits 7 u) (highBits 7 v))
+  rw [lowBits_join, joinBits_split, joinBits_split] at h
+  exact h.symm
 
 private theorem highBits_xor_7 (u v : BitVec 256) :
     highBits 7 (u ^^^ v) = highBits 7 u ^^^ highBits 7 v := by
-  apply BitVec.eq_of_getLsbD_eq
-  intro i hi
-  simp [highBits, hi]
+  have h := congrArg (highBits 7)
+    (joinBits_xor 7 (lowBits 7 u) (lowBits 7 v) (highBits 7 u) (highBits 7 v))
+  rw [highBits_join, joinBits_split, joinBits_split] at h
+  exact h.symm
 
 private theorem unpackTower128Pair_xor_pack (v : BitVec 256) (d1 d2 : Tower128) :
     unpackTower128Pair (v ^^^ packTower128Pair d1 d2) =
@@ -1181,14 +1176,17 @@ private theorem tower128_pad_shift_B {r0 r1 r2 s0 s1 s2 : Tower128}
   rw [hr1, hs1]
   simp only [towerAdd_comm, towerAdd_left_comm, towerAdd_cancel]
 
-/-- **Exact 1-Corrupt `Rss256Engine` View Privacy (`rss256_one_corrupt_perfect_view_privacy`)**:
+/-- **Exact 1-Corrupt `Rss256Engine` View Simulation (`rss256_one_corrupt_view_pointwise_and_count_eq`)**:
     Under the corrected `(prg1, prg2, prg0)` mask-key assignment, for EVERY corrupt party
     `corrupt ∈ {P0, P1, P2}`, EVERY secret 256-lane input `(x, y)`, EVERY valid `BGIN19` degree-2
     witness `w`, EVERY challenge `τ ∈ GF(2^{128})`, and EVERY distinguisher `D`:
-    1. `rss256SimCorruptView` (using **0** bits of the missing honest share slot!) equals
+    1. `rss256SimCorruptView` (using **0** bits of the missing honest share slot) equals
        `rss256RealCorruptView` point-for-point under `rss256_and_bgin19_privacy_equiv`;
-    2. Acceptance counts are equal and rational statistical distance is **identically `0`**! -/
-theorem rss256_one_corrupt_perfect_view_privacy
+    2. `D` accepts the real view and the simulated view on equally many pad tapes.
+    The same statement in the vocabulary of the interactive UC engine (`distAcceptCount`,
+    `rationalAcceptDiff`) is `rss256_one_corrupt_perfect_view_privacy` in
+    `Qsag.Exec.Rss256OneCorruptViewPrivacy`. -/
+theorem rss256_one_corrupt_view_pointwise_and_count_eq
     (corrupt : Fin 3)
     (x y : RssPlane256Share) (w : Bgin19Deg2Witness) (hValid : w.Valid)
     (knownPrgA knownPrgB : Plane256)
@@ -1200,8 +1198,8 @@ theorem rss256_one_corrupt_perfect_view_privacy
     let realExec := rss256RealCorruptView corrupt x y w knownPrgA knownPrgB knownZpadA knownZpadB tau
     let simExec := rss256SimCorruptView corrupt x y w knownPrgA knownPrgB knownZpadA knownZpadB tau
     (∀ ω : Fin padCard, realExec ω = simExec (bij.toFun ω)) ∧
-    distAcceptCount padCard realExec D = distAcceptCount padCard simExec D ∧
-    ratLe (rationalAcceptDiff padCard realExec padCard simExec D) (0, 1) := by
+    qsum padCard (fun ω => if D (realExec ω) then 1 else 0) =
+      qsum padCard (fun ω => if D (simExec ω) then 1 else 0) := by
   intro padCard bij realExec simExec
   have hCardPos : 0 < padCard := Nat.mul_pos (Nat.two_pow_pos 256) (Nat.two_pow_pos 256)
   have hPointwiseGen : ∀ (c : Fin 3) (ω : Fin padCard),
@@ -1217,16 +1215,16 @@ theorem rss256_one_corrupt_perfect_view_privacy
             (fun _ => finBitVecXorEquiv 256 dBgin)).toFun ω)) =
         BitVec.ofFin (splitFinLeft (Nat.two_pow_pos 256) ω) ^^^ dAnd := by
       intro dAnd dBgin
-      dsimp [depProdFinEquiv, finBitVecXorEquiv]
-      rw [splitFinLeft_pairFin (Nat.two_pow_pos 256)]
+      rw [depProdFinEquiv_toFun, splitFinLeft_pairFin (Nat.two_pow_pos 256),
+        finBitVecXorEquiv_toFun]
     have hSplitR : ∀ (dAnd dBgin : BitVec 256),
         BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256)
           ((depProdFinEquiv (Nat.two_pow_pos 256) (finBitVecXorEquiv 256 dAnd)
             (fun _ => finBitVecXorEquiv 256 dBgin)).toFun ω)) =
         BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω) ^^^ dBgin := by
       intro dAnd dBgin
-      dsimp [depProdFinEquiv, finBitVecXorEquiv]
-      rw [splitFinRight_pairFin (Nat.two_pow_pos 256)]
+      rw [depProdFinEquiv_toFun, splitFinRight_pairFin (Nat.two_pow_pos 256),
+        finBitVecXorEquiv_toFun]
     match c with
     | ⟨0, hc⟩ =>
       dsimp only [rss256SimCorruptView, rss256_and_bgin19_privacy_equiv, rss256RealCorruptView]
@@ -1347,30 +1345,16 @@ theorem rss256_one_corrupt_perfect_view_privacy
         knownZpadA.2 (unpackTower128Pair (BitVec.ofFin (splitFinRight (Nat.two_pow_pos 256) ω))).2
       rw [hOwnAnd, hOwnD1, hOwnD2, hInAnd, hPA1, hPA2, hPB1, hPB2]
   have hPointwise : ∀ ω : Fin padCard, realExec ω = simExec (bij.toFun ω) := hPointwiseGen corrupt
-  have hCountEq : distAcceptCount padCard realExec D = distAcceptCount padCard simExec D := by
-    unfold distAcceptCount
+  have hCountEq : qsum padCard (fun ω => if D (realExec ω) then 1 else 0) =
+      qsum padCard (fun ω => if D (simExec ω) then 1 else 0) := by
     calc
       qsum padCard (fun ω => if D (realExec ω) then 1 else 0) =
         qsum padCard (fun ω => if D (simExec (bij.toFun ω)) then 1 else 0) :=
           qsum_congr (fun ω => by rw [hPointwise ω])
       _ = qsum padCard (fun ω => if D (simExec ω) then 1 else 0) :=
-          qsum_equiv_eq bij (fun ω => if D (simExec ω) then 1 else 0)
-  have hBad := bad_event_fundamental_lemma padCard hCardPos realExec simExec bij
-    (fun _ => false) (fun ω _ => hPointwise ω) D
-  have hZeroBad : qsum padCard (fun _ : Fin padCard => if false then 1 else 0) = 0 := by
-    simp [qsum_const]
-  have hRatDiff : ratLe (rationalAcceptDiff padCard realExec padCard simExec D) (0, 1) := by
-    obtain ⟨_, _, hR⟩ := hBad
-    rw [hZeroBad] at hR
-    refine ⟨hR.1, by decide, ?_⟩
-    have hNum0 : (rationalAcceptDiff padCard realExec padCard simExec D).1 * padCard ≤ 0 := by
-      simpa only [Nat.zero_mul] using hR.2.2
-    have hProd0 : (rationalAcceptDiff padCard realExec padCard simExec D).1 * padCard = 0 :=
-      Nat.eq_zero_of_le_zero hNum0
-    rcases Nat.mul_eq_zero.mp hProd0 with hN0 | hC0
-    · rw [hN0]; simp
-    · exact False.elim (Nat.ne_of_gt hCardPos hC0)
-  exact ⟨hPointwise, hCountEq, hRatDiff⟩
+          qsum_perm_invariant bij.toFun bij.invFun bij.left_inv bij.right_inv
+            (fun ω => if D (simExec ω) then 1 else 0)
+  exact ⟨hPointwise, hCountEq⟩
 
 /-- Verifier `P0`'s pad-cancellation extractor against the naive `(prg0, prg1, prg2)` assignment. -/
 def p0CancelNaivePads (u0Naive x0 y0 prg0 prg1 : Plane256) : Plane256 :=
@@ -1453,8 +1437,8 @@ theorem tooth_off_by_one_prg_map_leaks_and_wire
 
 private theorem qsum_mul_right_nat : ∀ (n c : Nat) (f : Fin n → Nat),
     qsum n (fun i => f i * c) = qsum n f * c
-  | 0, _, _ => by simp [qsum]
-  | n + 1, c, f => by simp only [qsum, qsum_mul_right_nat n c, Nat.add_mul]
+  | 0, _, _ => by simp [qsum_zero]
+  | n + 1, c, f => by simp only [qsum_succ, qsum_mul_right_nat n c, Nat.add_mul]
 
 /-- A full recorded AND gate, with three replicated-share components per wire. -/
 structure Rss256RecordedGate where
@@ -1787,11 +1771,17 @@ inductive Rss256EngineErr where
   | openBeforeCheck
   deriving DecidableEq, Repr
 
+/-- Result of one `Rss256Engine` call. A rejected call also returns the next persistent state
+    (the poison latch is written on the error path). -/
+inductive Rss256StepOutcome (S Out : Type) where
+  | ok (nextState : S) (output : Out)
+  | err (nextState : S) (error : Rss256EngineErr)
+
 /-- **Hardened `Rss256Engine` Transition (`rss256BarrierStep`)**:
     Every cryptographic barrier failure irreversibly latches `poisoned = true` and wipes state;
     every operation rejects a poisoned engine. -/
 @[expose] def rss256BarrierStep (st : Rss256BarrierState) (op : Rss256BarrierOp) :
-    StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr :=
+    Rss256StepOutcome Rss256BarrierState (Option Plane256) :=
   if st.poisoned then
     .err st .enginePoisoned
   else
@@ -1833,15 +1823,25 @@ inductive Rss256EngineErr where
       else
         .ok st (some st.sharedPlane)
 
-/-- `PartyMachine` (`SimulationSpine`) instantiation of hardened `Rss256Engine`. -/
-def rss256BarrierMachine : PartyMachine Rss256BarrierState Rss256BarrierOp (Option Plane256) :=
-  PartyMachine.ofOutcome rss256BarrierStep
+/-- The hardened `Rss256Engine` as a `Spec.Machine` started at `Rss256BarrierState.init`:
+    an accepted call is a `step`, a rejected call updates the state through `errStep`. -/
+def rss256BarrierMachine :
+    Spec.Machine Rss256BarrierState Rss256BarrierOp (Option Plane256) where
+  Init st := st = Rss256BarrierState.init
+  step st op :=
+    match rss256BarrierStep st op with
+    | .ok st' out => some (st', out)
+    | .err _ _ => none
+  errStep st op :=
+    match rss256BarrierStep st op with
+    | .ok st' _ => st'
+    | .err st' _ => st'
 
 /-- Buggy pre-fix `Rss256Engine` transition:
     clears `pendingInlineValid` / `pendingOpenedValid` on `check()` BEFORE returning `Err`,
     without latching `poisoned = true`! -/
 def rss256StepBuggy (st : Rss256BarrierState) (op : Rss256BarrierOp) :
-    StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr :=
+    Rss256StepOutcome Rss256BarrierState (Option Plane256) :=
   match op with
   | .permuteInline relOk outPlane =>
     .ok { st with
@@ -1880,7 +1880,7 @@ def rss256StepBuggy (st : Rss256BarrierState) (op : Rss256BarrierOp) :
 
 /-- Run a multi-step call sequence and record `(finalState, releasedPlanes, stepOutcomes)`. -/
 def rss256BarrierTrace (stepFn : Rss256BarrierState → Rss256BarrierOp →
-      StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr) :
+      Rss256StepOutcome Rss256BarrierState (Option Plane256)) :
     Rss256BarrierState → List Rss256BarrierOp → Rss256BarrierState × List Plane256
   | st, [] => (st, [])
   | st, op :: rest =>
@@ -2014,7 +2014,7 @@ theorem rss256_sticky_poison_terminal_absorption :
       exact ih st hp
   refine ⟨?_, ?_⟩
   · intro st ops hp
-    refine ⟨fun op => by simp [rss256BarrierMachine, PartyMachine.ofOutcome, rss256BarrierStep, hp],
+    refine ⟨fun op => by simp [rss256BarrierMachine, rss256BarrierStep, hp],
             (hAbsorb st ops hp).1, (hAbsorb st ops hp).2⟩
   · intro st ops hInv hTaint
     induction ops generalizing st with
@@ -3363,6 +3363,19 @@ def baggySignUnhardened (suite : BaggySuite256) (p : BaggyTreeParams)
           let sig : BaggySig256 := { r := r, msgCtr := msgCtr, forsSig := forsSig, layers := layers }
           if baggyVerify suite p pk msg sig then some (sig, recs) else none
 
+/-- Structural unrolling of `qsum`, used to evaluate `qsum` on closed digit maps (the body of
+    `qsum` is not exported by `Qsag.Math.Counting`). -/
+private def qsumUnrolled : (n : Nat) → (Fin n → Nat) → Nat
+  | 0, _ => 0
+  | n + 1, f =>
+    f ⟨0, Nat.zero_lt_succ n⟩ + qsumUnrolled n (fun i => f ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+
+private theorem qsum_eq_qsumUnrolled : ∀ (n : Nat) (f : Fin n → Nat), qsum n f = qsumUnrolled n f
+  | 0, f => qsum_zero f
+  | n + 1, f => by
+    rw [qsum_succ, qsum_eq_qsumUnrolled n]
+    rfl
+
 /-- Concrete constant-sum (`S = 192`) codewords for the 2-codeword top-layer exploit witness:
     - `dBad` (`(0, 3, 1, 2)` + alternating `(1, 2)`)
     - `dGood` (`(3, 0, 2, 1)` + alternating `(1, 2)`)
@@ -3391,9 +3404,9 @@ def dToothRogueFn (i : Fin 128) : Fin 4 :=
   else if i.val % 2 == 0 then ⟨1, by decide⟩
   else ⟨2, by decide⟩
 
-def dToothBad : WotsC256Digits := ⟨dToothBadFn, rfl⟩
-def dToothGood : WotsC256Digits := ⟨dToothGoodFn, rfl⟩
-def dToothRogue : WotsC256Digits := ⟨dToothRogueFn, rfl⟩
+def dToothBad : WotsC256Digits := ⟨dToothBadFn, (qsum_eq_qsumUnrolled _ _).trans rfl⟩
+def dToothGood : WotsC256Digits := ⟨dToothGoodFn, (qsum_eq_qsumUnrolled _ _).trans rfl⟩
+def dToothRogue : WotsC256Digits := ⟨dToothRogueFn, (qsum_eq_qsumUnrolled _ _).trans rfl⟩
 
 /-- Concrete `BaggySuite256` & 3-layer (`d = 3, h' = 1, L = 2`) instance for cache-mutation. -/
 def toothBaggyParams : BaggyTreeParams :=
@@ -4117,7 +4130,7 @@ run_cmd do
     `Qsag.rss256SimDummyInputs,
     `Qsag.rss256SimCorruptView,
     `Qsag.rss256_and_bgin19_privacy_equiv,
-    `Qsag.rss256_one_corrupt_perfect_view_privacy,
+    `Qsag.rss256_one_corrupt_view_pointwise_and_count_eq,
     `Qsag.p0CancelNaivePads,
     `Qsag.tooth_off_by_one_prg_map_leaks_and_wire,
     `Qsag.Rss256RecordedGate.error,
@@ -4241,7 +4254,7 @@ theorem rss256_product_degree_two_roots
   have hLen : (rss256ProductResidual a0 a1 b0 b1 c0 c1 c2).length ≤ 2 + 1 := by
     simp [rss256ProductResidual]
   exact RoundPoly.roots_nodup_length_le 2 _ domain hNodup hLen
-    (exists_eval_nonzero_of_coeff_nonzero 2 _ domain hNodup hLen hDomain hFalse)
+    (Rss256ProductProof.exists_eval_nonzero_of_coeff_nonzero 2 _ domain hNodup hLen hDomain hFalse)
 
 /-- Binding between the coefficient list and the final masked-product equation. -/
 theorem rss256_product_residual_evaluation
@@ -4464,7 +4477,7 @@ inductive Rss256EngineOp where
 there is no validity flag and no independent caller-selected output plane.
 Both revealed coin shares and both derived Horner evaluation points must be nonzero. -/
 def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
-    StepOutcome Rss256EngineState (List Plane256) Rss256EngineErr :=
+    Rss256StepOutcome Rss256EngineState (List Plane256) :=
   if st.poisoned then .err st .enginePoisoned
   else match op with
   | .permuteInline w => .ok { st with pending := st.pending ++ [.inlineWave w], coinCommits := none } []
@@ -5069,7 +5082,7 @@ theorem witness_baggy_two_session_opened_progression :
   let id0 : BaggyLedgerIdentity := ⟨0#256, 0#256, 0#256⟩
   let d0 : WotsC256Digits :=
     { digits := fun i => if i.val < 64 then ⟨3, by decide⟩ else ⟨0, by decide⟩
-      sum_eq := by decide }
+      sum_eq := (qsum_eq_qsumUnrolled _ _).trans (by decide) }
   let r1 : StaticWotsOpeningRecord := ⟨1, 0, 0, 1#256, d0⟩
   let r2 : StaticWotsOpeningRecord := ⟨1, 0, 1, 2#256, d0⟩
   let ops : List BaggyReleaseOp :=
@@ -5146,10 +5159,18 @@ theorem tooth_pre_wave_adaptive_error_exists (chi : Tower128) :
       (∃ e ∈ errors, e ≠ towerZero 7) ∧ batchDeviationPoly errors chi = towerZero 7 :=
   ⟨preWaveKernelFaultPair chi, tooth_pre_wave_challenge_kernel_bypass.1 chi⟩
 
-#verify_inhabited rss256_one_corrupt_perfect_view_privacy inhabited_rss256_privacy_soundness_and_poison
+#verify_inhabited rss256_one_corrupt_view_pointwise_and_count_eq inhabited_rss256_privacy_soundness_and_poison
 #verify_inhabited baggy_released_opening_durable_and_unique witness_baggy_two_session_opened_progression
 #tooth_pair baggy_released_opening_durable_and_unique vs tooth_baggy_conflicting_digits_not_released
 #tooth_pair rss256_polynomial_gate_weight_soundness vs tooth_pre_wave_adaptive_error_exists
+
+/-! ### Exports for lane custody-a -/
+
+/-- `wotsCDibits128` is the production digit map `wotsC256DigitOfDigest`. -/
+theorem wotsCDibits128_eq_digitOfDigest (digest : BitVec 256) :
+    wotsCDibits128 digest = wotsC256DigitOfDigest digest := by
+  unfold wotsCDibits128
+  rfl
 
 end Qsag
 end

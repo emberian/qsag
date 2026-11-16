@@ -1,13 +1,15 @@
 module
 
 public import Qsag.Protocol.Credentials.BlindVcQromSecurity
-import all Qsag.Protocol.Credentials.BlindVcQromSecurity
-import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 
 /-!
 Executable collision extraction, rate-6 / capacity-6 6-limb sponge coherence,
 transcript-log 3-opening assembly, and multi-epoch issuer signing-log freshness
 for `BlindVC`.
+0. **Seed-tree openings of the 256-party presentation (`credentialGgmCollisionFinder`,
+   `credentialGgmCollisionFinder_complete`)**: two accepted openings that reconstruct different
+   commitment preimages at a commonly opened party yield an explicit collision. Items 1 to 3
+   below are about the ternary (3-party ZKBoo) model.
 1. **Finite Opening-Table Collision Reduction (`vcRewoundCollisionFinder`,
    `blindVcCollisionReduction_mass`, `blindVc_fs_collisionFinder_mass_bound`)**:
    Extracts explicit colliding byte preimages with zero guessing loss.
@@ -23,12 +25,14 @@ for `BlindVC`.
    and constructively computes either `VcHashCollision H` or `BlindVcWitnessValid`.
    Constructing three openings by quantum rewinding remains a separate upstream
    obligation.
-4. **Multi-Epoch Signing-Log Fresh-Message EUF-CMA Reduction
-   (`encodeIssuerRootAttestationMsg_injective`,
+4. **Root attestation: fresh message or logged epoch
+   (`issuerRootAttestation_fresh_or_logged`,
+   `issuerRootAttestationBytes_fresh_forgery_or_logged`,
    `blindVc_multi_epoch_signing_log_fresh_forgery`)**:
-   Proves fixed-offset `97`-byte injectivity of `encodeIssuerRootAttestationMsg`
-   and establishes that any unlogged root attestation accepted by `ML-DSA`
-   verifies on a byte string strictly absent (`∉`) from `issuerSignedMessages signedLog`.
+   an attested field tuple either belongs to a logged epoch or its 142-byte attestation
+   message is absent from `issuerSignedMessages signedLog`; on wire bytes the accepted
+   attestation is then an ML-DSA-44 verification of an unsigned message. Protocol-independent;
+   the last theorem combines it with the ternary extraction.
 -/
 public section
 namespace Qsag
@@ -115,8 +119,96 @@ def blindVcTableCollisionFinder {k : Nat} (H : List UInt8 → List UInt8)
 theorem blindVcTableCollisionFinder_isSome {k : Nat} (H : List UInt8 → List UInt8)
     (hHLen : ∀ m, (H m).length < 256 ^ 8)
     (stmt : BlindVcPublicStatement) (msg : BlindVcParallelMsg k) :
-    (blindVcTableCollisionFinder H hHLen stmt msg).isSome = blindVcTableConflict H stmt msg :=
-  blindVcCollisionScan_isSome H hHLen stmt msg (List.range k)
+    (blindVcTableCollisionFinder H hHLen stmt msg).isSome = blindVcTableConflict H stmt msg := by
+  rw [blindVcTableConflict_eq]
+  exact blindVcCollisionScan_isSome H hHLen stmt msg (List.range k)
+
+/-! ### Seed-tree openings of the 256-party presentation: executable collision extraction
+
+Two accepted openings of the same round-1 commitments open 255 parties each. If they
+reconstruct different commitment preimages at a party both open, those preimages collide under
+`H`; the scan below returns them. -/
+
+/-- Commitment preimage of `party` reconstructed from opening `o`. -/
+def credentialGgmOpenedPreimage (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (o : CredentialGgmOpening) (party : Fin credentialSdParties) : List UInt8 :=
+  encode party (o.leafSeed prg party)
+
+/-- `party` is opened by both openings, with different preimages of equal digest. -/
+@[expose] def credentialGgmOverlapConflict (H : List UInt8 → List UInt8)
+    (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (a b : CredentialGgmOpening) (party : Fin credentialSdParties) : Prop :=
+  party ≠ a.hidden ∧ party ≠ b.hidden ∧
+  credentialGgmOpenedPreimage prg encode a party ≠ credentialGgmOpenedPreimage prg encode b party ∧
+  H (credentialGgmOpenedPreimage prg encode a party) =
+    H (credentialGgmOpenedPreimage prg encode b party)
+
+instance (H : List UInt8 → List UInt8) (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (a b : CredentialGgmOpening) (party : Fin credentialSdParties) :
+    Decidable (credentialGgmOverlapConflict H prg encode a b party) :=
+  inferInstanceAs (Decidable (party ≠ a.hidden ∧ party ≠ b.hidden ∧
+    credentialGgmOpenedPreimage prg encode a party ≠ credentialGgmOpenedPreimage prg encode b party ∧
+    H (credentialGgmOpenedPreimage prg encode a party) =
+      H (credentialGgmOpenedPreimage prg encode b party)))
+
+def credentialGgmCollisionScan (H : List UInt8 → List UInt8) (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (a b : CredentialGgmOpening) : List (Fin credentialSdParties) → Option (VcHashCollision H)
+  | [] => none
+  | party :: rest =>
+    if h : credentialGgmOverlapConflict H prg encode a b party then
+      some ⟨credentialGgmOpenedPreimage prg encode a party,
+        credentialGgmOpenedPreimage prg encode b party, h.2.2⟩
+    else credentialGgmCollisionScan H prg encode a b rest
+
+theorem credentialGgmCollisionScan_isSome (H : List UInt8 → List UInt8) (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (a b : CredentialGgmOpening) (parties : List (Fin credentialSdParties)) :
+    (credentialGgmCollisionScan H prg encode a b parties).isSome =
+      parties.any (fun party => decide (credentialGgmOverlapConflict H prg encode a b party)) := by
+  induction parties with
+  | nil => rfl
+  | cons party rest ih =>
+    simp only [credentialGgmCollisionScan, List.any_cons]
+    split <;> simp_all
+
+/-- Two accepted openings have equal commitment digests at every commonly opened party. -/
+theorem credentialGgmOpenedPreimage_same_digest
+    (H : List UInt8 → List UInt8) (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (commitments : Fin credentialSdParties → List UInt8) (a b : CredentialGgmOpening)
+    (ha : verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments a = true)
+    (hb : verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments b = true)
+    (party : Fin credentialSdParties) (hpa : party ≠ a.hidden) (hpb : party ≠ b.hidden) :
+    H (credentialGgmOpenedPreimage prg encode a party) =
+      H (credentialGgmOpenedPreimage prg encode b party) :=
+  credentialGgm_overlap_same_digest prg H encode commitments a b party ha hb hpa hpb
+
+def credentialGgmCollisionFinder (H : List UInt8 → List UInt8) (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (a b : CredentialGgmOpening) : Option (VcHashCollision H) :=
+  credentialGgmCollisionScan H prg encode a b (List.finRange credentialSdParties)
+
+/-- **Two accepted openings that disagree at a commonly opened party yield a collision**, found
+    by the scan with no guess of the party. -/
+theorem credentialGgmCollisionFinder_complete
+    (H : List UInt8 → List UInt8) (prg : CredentialGgmPrg)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (commitments : Fin credentialSdParties → List UInt8) (a b : CredentialGgmOpening)
+    (ha : verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments a = true)
+    (hb : verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments b = true)
+    (party : Fin credentialSdParties) (hpa : party ≠ a.hidden) (hpb : party ≠ b.hidden)
+    (hne : credentialGgmOpenedPreimage prg encode a party ≠
+      credentialGgmOpenedPreimage prg encode b party) :
+    (credentialGgmCollisionFinder H prg encode a b).isSome = true := by
+  rw [credentialGgmCollisionFinder, credentialGgmCollisionScan_isSome]
+  apply List.any_eq_true.mpr
+  refine ⟨party, List.mem_finRange party, decide_eq_true ?_⟩
+  exact ⟨hpa, hpb, hne,
+    credentialGgmOpenedPreimage_same_digest H prg encode commitments a b ha hb party hpa hpb⟩
 
 /-- A table-producing adversary may depend on the hash and its random tape. -/
 def blindVcCollisionReduction {Seed : Type} {k : Nat}
@@ -191,77 +283,16 @@ theorem vcRewoundCollisionFinder_honest
   rw [vcRewoundCollisionFinder_isSome]
   simp only [vcRewoundCommitConflict_honest_table, decide_false]
 
-/-- The concrete conflicting-view construction returns an actual collision. -/
-theorem vcRewoundCollisionFinder_constant_hash
-    (nonce : Vec UInt8 32) (idx : Nat) (o : OpenedBlindVcRep) :
-    let bad := { o with
-      viewE := { o.viewE with attrShares := [] }
-      viewE1 := { o.viewE with attrShares := [Goldilocks.zero] } }
-    (vcRewoundCollisionFinder (fun _ => []) (by intro _; decide)
-      nonce idx bad bad bad).isSome = true := by
-  intro bad
-  rw [vcRewoundCollisionFinder_isSome]
-  exact decide_eq_true (vcRewoundCommitConflict_constant_hash nonce idx o)
-
-#verify_constructive foldFramesHash_collision_of_ne vcCommitPartyView_binding
+#verify_constructive
   vcRewoundCollisionFinder_isSome blindVcCollisionScan_isSome
   blindVcTableCollisionFinder_isSome blindVcCollisionReduction_mass
   blindVc_fs_collisionFinder_decomposition blindVc_fs_collisionFinder_mass_bound
-  vcRewoundCollisionFinder_honest vcRewoundCollisionFinder_constant_hash
+  vcRewoundCollisionFinder_honest
+  credentialGgmOpenedPreimage_same_digest
+  credentialGgmCollisionScan_isSome credentialGgmCollisionFinder_complete
 
 
 /-! ## §2. Rate-6 / Capacity-6 6-Limb Sponge Coherence, Log-Based 3-Opening Extraction & Multi-Epoch Signing-Log Freshness -/
-
-set_option exponentiation.threshold 1024 in
-/-- **Rate-6 / Capacity-6 Width-12 `sponge12` 6-Limb Coherence (`blindVc_sponge12_rate6_cap6_six_limb_coherence`)**:
-    Locks `BlindVcCollisionFinder` directly to `crates/qsag-cred/src/blind_vc.rs:149-268`:
-    1. `computeVcPoseidon2Commit` accepts iff `1 ≤ attrs.length = schema.arity ≤ 6`, absorbs `schema.arity`
-       at `c2.x0` and `10*` pad `1` at `c2.x1` into the 3-block rate-6 / capacity-6 `absorbRate6Sponge3`
-       (with 6 zero-initialized capacity lanes), and squeezes 6 limbs (`Lane6`, `> 2^383` states);
-    2. `computeVcScopeTag` absorbs two 6-limb blocks plus the full-block `10*` pad `⟨1, 0, 0, 0, 0, 0⟩`
-       (`N = 12` multiple of rate `6`) into `absorbRate6Sponge3` and squeezes 6 limbs (`Lane6`);
-    3. `vcMerkleHashPair` absorbs left/right 6-limb child digests plus 4 domain limbs and `10*` pad `1`
-       at `c2.x4` (`N = 16`) into `absorbRate6Sponge3` and squeezes 6 limbs (`Lane6`). -/
-theorem blindVc_sponge12_rate6_cap6_six_limb_coherence
-    (schema : VcSchema) (attrs : List Goldilocks) (blind scopeLimbs : Lane4)
-    (tag epoch : UInt64) (left right : Lane6) (layer : Nat) :
-    ((attrs.length = schema.arity →
-        (vcCommitChunks schema attrs blind tag).2.2 =
-          ⟨Goldilocks.ofNat schema.arity, Goldilocks.one,
-           Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ ∧
-        computeVcPoseidon2Commit schema attrs blind tag =
-          some (state12Rate6 (absorbRate6Sponge3
-            (vcCommitChunks schema attrs blind tag).1
-            (vcCommitChunks schema attrs blind tag).2.1
-            (vcCommitChunks schema attrs blind tag).2.2))) ∧
-     (attrs.length ≠ schema.arity → computeVcPoseidon2Commit schema attrs blind tag = none)) ∧
-    ((vcScopeChunks schema.schemaId blind scopeLimbs).2.2 =
-        ⟨Goldilocks.one, Goldilocks.zero, Goldilocks.zero,
-         Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ ∧
-     computeVcScopeTag schema.schemaId blind scopeLimbs =
-        state12Rate6 (absorbRate6Sponge3
-          (vcScopeChunks schema.schemaId blind scopeLimbs).1
-          (vcScopeChunks schema.schemaId blind scopeLimbs).2.1
-          (vcScopeChunks schema.schemaId blind scopeLimbs).2.2)) ∧
-    ((vcMerkleChunks left right epoch layer).2.2.x4 = Goldilocks.one ∧
-     (vcMerkleChunks left right epoch layer).2.2.x5 = Goldilocks.zero ∧
-     vcMerkleHashPair left right epoch layer =
-        state12Rate6 (absorbRate6Sponge3 left right
-          (vcMerkleChunks left right epoch layer).2.2)) ∧
-    state12Cap6 (mkState12Of6 (vcCommitChunks schema attrs blind tag).1 lane6Zero) = lane6Zero ∧
-    2 ^ 383 < goldilocksPrime ^ 6 := by
-  refine ⟨⟨fun hEq => ⟨rfl, ?_⟩, fun hNe => ?_⟩, ⟨rfl, rfl⟩, ⟨rfl, rfl, rfl⟩, rfl, by decide⟩
-  · unfold computeVcPoseidon2Commit; simp only [hEq, ↓reduceIte]
-  · unfold computeVcPoseidon2Commit; simp only [hNe, ↓reduceIte]
-
-private def vecOfListExact {α : Type} : (xs : List α) → {n : Nat} → xs.length = n → Vec α n
-  | [], 0, _ => .nil
-  | x :: xs, _ + 1, h => .cons x (vecOfListExact xs (Nat.succ.inj h))
-
-private theorem vecOfListExact_toList {α : Type} : ∀ (xs : List α) {n : Nat} (h : xs.length = n),
-    (vecOfListExact xs h).toList = xs
-  | [], 0, _ => rfl
-  | _ :: xs, _ + 1, h => by simp [vecOfListExact, Vec.toList, vecOfListExact_toList xs (Nat.succ.inj h)]
 
 /-- Select the first accepting opening for challenge trit `targetE ∈ Fin 3` from an
     adaptive/measured transcript query log for repetition `repIdx` and Round-1 commitment `r1`. -/
@@ -344,37 +375,15 @@ private theorem blindVc_witness_of_collisionFinder_none
     have hSome := vcRewoundCollisionFinder_isSome H hHLen stmt.presNonce repIdx o0 o1 o2
     rw [hNone, decide_eq_true hc] at hSome
     cases hSome
-  simp only [verifyCommittedBlindVcRep, Bool.and_eq_true, decide_eq_true_eq] at h0 h1 h2
-  rcases h0 with ⟨hR0, hV0⟩
-  rcases h1 with ⟨hR1, hV1⟩
-  rcases h2 with ⟨hR2, hV2⟩
+  obtain ⟨hR0, hV0⟩ := verifyCommittedBlindVcRep_eq_true_iff.mp h0
+  obtain ⟨hR1, hV1⟩ := verifyCommittedBlindVcRep_eq_true_iff.mp h1
+  obtain ⟨hR2, hV2⟩ := verifyCommittedBlindVcRep_eq_true_iff.mp h2
   rcases verifyOpenedBlindVcRep_extract3_finite_conflict
       (hR1_01 := hR0.trans hR1.symm) (hR1_12 := hR1.trans hR2.symm) hV0 hV1 hV2 with hConf | hExt
   · exact False.elim (hNoConf hConf)
   · obtain ⟨attrs, hb, pb, leaf, steps, _, hAr, hDisc, hLeaf, hSLen, hRoot, hPres, hScope⟩ := hExt
-    have hAsc : vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true := by
-      unfold verifyOpenedBlindVcRep at hV0; dsimp only at hV0
-      cases hG :
-          (decide (o0.e = 0) &&
-           vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs &&
-           decide (o0.viewE.attrShares.length = stmt.schema.arity) &&
-           decide (o0.viewE1.attrShares.length = stmt.schema.arity) &&
-           decide (o0.viewE.merkleLevels.length = stmt.treeDepth) &&
-           decide (o0.viewE1.merkleLevels.length = stmt.treeDepth) &&
-           vcCheckPartyDisclosedShares o0.e o0.viewE.attrShares stmt.disclosedAttrs &&
-           vcCheckPartyDisclosedShares (vcNextParty3 o0.e) o0.viewE1.attrShares stmt.disclosedAttrs &&
-           checkPartyPrgTape prgExpand stmt.treeDepth repIdx o0.e o0.viewE &&
-           checkPartyPrgTape prgExpand stmt.treeDepth repIdx (vcNextParty3 o0.e) o0.viewE1) with
-      | false => rw [hG] at hV0; cases hV0
-      | true => simp only [Bool.and_eq_true] at hG; exact hG.1.1.1.1.1.1.1.1.2
-    refine ⟨{ attrs := vecOfListExact attrs hAr, holderBlind := hb, presBlind := pb,
-              merkleSteps := vecOfListExact steps hSLen }, ?_⟩
-    unfold BlindVcWitnessValid
-    refine ⟨hAsc, fun p hp => ?_, ⟨leaf, ?_, ?_⟩, ?_, hScope⟩
-    · rw [vecOfListExact_toList attrs hAr]; exact (hDisc p hp).2
-    · rw [vecOfListExact_toList attrs hAr]; exact hLeaf
-    · rw [vecOfListExact_toList steps hSLen]; exact hRoot
-    · rw [vecOfListExact_toList attrs hAr]; exact hPres
+    exact blindVcWitnessValid_of_extraction (verifyOpenedBlindVcRep_disclosedStrictAsc hV0)
+      hAr hSLen (fun p hp => (hDisc p hp).2) hLeaf hRoot hPres hScope
 
 /-- **Constructive `0-Classical` (`PSum`) 3-Opening Extractor (`blindVcExtractCollisionOrWitness`)**:
     Given three accepting opened transcripts `(o0, o1, o2)` on challenge trits `(0, 1, 2)` for a
@@ -431,125 +440,93 @@ theorem assembleThreeOpeningsFromLog_extracts_collision_of_not_inLang
   | some _ => rfl
   | none => exact False.elim (hFalse (blindVc_witness_of_collisionFinder_none hHLen h0 h1 h2 hFind))
 
-/-- Fixed-offset `97`-byte injectivity of `encodeIssuerRootAttestationMsg`
-    (`9`-byte `"QSAG.ROOT"` + `32`-byte `issuerRootTag` + `8`-byte `epoch` + `48`-byte `Lane6` root). -/
-theorem encodeIssuerRootAttestationMsg_injective
-    {tag₁ tag₂ : Vec UInt8 32} {ep₁ ep₂ : UInt64} {root₁ root₂ : Lane6}
-    (hEq : encodeIssuerRootAttestationMsg tag₁ ep₁ root₁ =
-           encodeIssuerRootAttestationMsg tag₂ ep₂ root₂) :
-    tag₁ = tag₂ ∧ ep₁ = ep₂ ∧ root₁ = root₂ := by
-  unfold encodeIssuerRootAttestationMsg at hEq
-  simp only [List.append_assoc] at hEq
-  have hPfxLen : ([0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x4F, 0x4F, 0x54] : List UInt8).length =
-      ([0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x4F, 0x4F, 0x54] : List UInt8).length := rfl
-  obtain ⟨_, hRest1⟩ := append_inj_of_eq_len hPfxLen hEq
-  have hTagLen : tag₁.toList.length = tag₂.toList.length := by
-    rw [Vec.toList_length, Vec.toList_length]
-  obtain ⟨hTagBytes, hRest2⟩ := append_inj_of_eq_len hTagLen hRest1
-  have hEpLen : (encodeNatLeBytes 8 ep₁.toNat).length = (encodeNatLeBytes 8 ep₂.toNat).length := by
-    rw [encodeNatLeBytes_length, encodeNatLeBytes_length]
-  obtain ⟨hEpBytes, hRootBytes⟩ := append_inj_of_eq_len hEpLen hRest2
-  have hTagEq : tag₁ = tag₂ := Vec.toList_injective hTagBytes
-  have hEp1Lt : ep₁.toNat < 256 ^ 8 := by
-    have h := ep₁.toNat_lt_size; change ep₁.toNat < 18446744073709551616 at h; omega
-  have hEp2Lt : ep₂.toNat < 256 ^ 8 := by
-    have h := ep₂.toNat_lt_size; change ep₂.toNat < 18446744073709551616 at h; omega
-  have hEpNat : ep₁.toNat = ep₂.toNat := by
-    have hd := congrArg decodeNatLeBytes hEpBytes
-    rwa [decodeNatLeBytes_encodeNatLeBytes 8 ep₁.toNat hEp1Lt,
-         decodeNatLeBytes_encodeNatLeBytes 8 ep₂.toNat hEp2Lt] at hd
-  have hEpEq : ep₁ = ep₂ := UInt64.toNat_inj.mp hEpNat
-  have hLimbs := encodeGoldilocksVecLe_injective hRootBytes
-  simp only [List.cons.injEq] at hLimbs
-  rcases hLimbs with ⟨e0, e1, e2, e3, e4, e5, _⟩
-  exact ⟨hTagEq, hEpEq, Lane6.ext e0 e1 e2 e3 e4 e5⟩
-
-/-- **`#tooth` (`tooth_unframed_varlen_tag_epoch_alias`)**:
-    Without fixed `32`-byte `Vec UInt8 32` framing on `issuerRootTag`, variable-length concatenation
-    `tag ++ encodeNatLeBytes 8 epoch.toNat` aliases `([0x41, 0x00], 0)` with `([0x41], 0)` + `[0x00]`
-    boundary shift (distinct variable-length prefixes producing identical signed message bytes). -/
-theorem tooth_unframed_varlen_tag_epoch_alias (tag₁ tag₂ : Vec UInt8 32) (hNe : tag₁ ≠ tag₂) :
-    ∃ (t₁ t₂ : List UInt8) (ep₁ ep₂ : UInt64),
-      (t₁, ep₁) ≠ (t₂, ep₂) ∧
-      t₁ ++ encodeNatLeBytes 8 ep₁.toNat = (t₂ ++ [0x00]) ++ encodeNatLeBytes 8 ep₂.toNat ∧
-      encodeIssuerRootAttestationMsg tag₁ 0 lane6Zero ≠
-        encodeIssuerRootAttestationMsg tag₂ 0 lane6Zero :=
-  ⟨[0x41, 0x00], [0x41], 0, 0, by decide, rfl,
-   fun hEq => hNe (encodeIssuerRootAttestationMsg_injective hEq).1⟩
-
 /-- Exact list of root-attestation byte messages signed by the issuer across a multi-epoch log. -/
 def issuerSignedMessages {schema : VcSchema} {treeDepth : Nat}
     (signedLog : List (IssuerMintedEpoch schema treeDepth)) : List (List UInt8) :=
-  signedLog.map (fun ep =>
-    encodeIssuerRootAttestationMsg ep.issuerRootTag ep.epoch (vcMerkleTreeRoot ep.epoch 0 ep.tree))
+  signedLog.map (fun ep => ep.attestationFields.message)
 
 private def findMatchingLoggedEpoch {schema : VcSchema} {treeDepth : Nat}
-    (tag : Vec UInt8 32) (epoch : UInt64) (accRoot : Lane6) :
+    (f : IssuerRootAttestationFields) :
     List (IssuerMintedEpoch schema treeDepth) → Option (IssuerMintedEpoch schema treeDepth)
   | [] => none
   | ep :: rest =>
-    if decide (ep.issuerRootTag = tag ∧ ep.epoch = epoch ∧ vcMerkleTreeRoot ep.epoch 0 ep.tree = accRoot) then
-      some ep
-    else
-      findMatchingLoggedEpoch tag epoch accRoot rest
+    if ep.attestationFields = f then some ep else findMatchingLoggedEpoch f rest
 
 private theorem findMatchingLoggedEpoch_some {schema : VcSchema} {treeDepth : Nat}
-    {tag : Vec UInt8 32} {epoch : UInt64} {accRoot : Lane6} :
+    {f : IssuerRootAttestationFields} :
     ∀ {log : List (IssuerMintedEpoch schema treeDepth)} {ep : IssuerMintedEpoch schema treeDepth},
-      findMatchingLoggedEpoch tag epoch accRoot log = some ep →
-      ep ∈ log ∧ ep.issuerRootTag = tag ∧ ep.epoch = epoch ∧
-      vcMerkleTreeRoot ep.epoch 0 ep.tree = accRoot
+      findMatchingLoggedEpoch f log = some ep → ep ∈ log ∧ ep.attestationFields = f
   | [], _, h => by cases h
   | hd :: rest, ep, h => by
     unfold findMatchingLoggedEpoch at h
-    cases hDec : decide (hd.issuerRootTag = tag ∧ hd.epoch = epoch ∧ vcMerkleTreeRoot hd.epoch 0 hd.tree = accRoot) with
-    | true =>
-      rw [hDec] at h; simp only [↓reduceIte, Option.some.injEq] at h
-      subst h
-      have hCond := of_decide_eq_true hDec
-      exact ⟨.head rest, hCond.1, hCond.2.1, hCond.2.2⟩
-    | false =>
-      rw [hDec] at h; simp only [Bool.false_eq_true, ↓reduceIte] at h
-      obtain ⟨hMem, h1, h2, h3⟩ := findMatchingLoggedEpoch_some h
-      exact ⟨.tail hd hMem, h1, h2, h3⟩
+    by_cases hc : hd.attestationFields = f
+    · rw [ite_eq_left hc] at h
+      cases h
+      exact ⟨.head rest, hc⟩
+    · rw [ite_eq_right hc] at h
+      obtain ⟨hMem, hf⟩ := findMatchingLoggedEpoch_some h
+      exact ⟨.tail hd hMem, hf⟩
 
 private theorem findMatchingLoggedEpoch_none_not_mem_signedMessages
-    {schema : VcSchema} {treeDepth : Nat}
-    {tag : Vec UInt8 32} {epoch : UInt64} {accRoot : Lane6} :
+    {schema : VcSchema} {treeDepth : Nat} {f : IssuerRootAttestationFields} :
     ∀ {log : List (IssuerMintedEpoch schema treeDepth)},
-      findMatchingLoggedEpoch tag epoch accRoot log = none →
-      encodeIssuerRootAttestationMsg tag epoch accRoot ∉ issuerSignedMessages log
+      findMatchingLoggedEpoch f log = none → f.message ∉ issuerSignedMessages log
   | [], _, hMem => nomatch hMem
   | hd :: rest, hNone, hMem => by
     unfold findMatchingLoggedEpoch at hNone
-    cases hDec : decide (hd.issuerRootTag = tag ∧ hd.epoch = epoch ∧ vcMerkleTreeRoot hd.epoch 0 hd.tree = accRoot) with
-    | true =>
-      rw [hDec] at hNone; simp only [↓reduceIte] at hNone
+    by_cases hc : hd.attestationFields = f
+    · rw [ite_eq_left hc] at hNone
       cases hNone
-    | false =>
-      rw [hDec] at hNone; simp only [Bool.false_eq_true, ↓reduceIte] at hNone
-      have hNotCond := of_decide_eq_false hDec
+    · rw [ite_eq_right hc] at hNone
       unfold issuerSignedMessages at hMem
-      simp only [List.map_cons, List.mem_cons] at hMem
-      rcases hMem with hEqMsg | hInRest
-      · obtain ⟨eTag, eEp, eRoot⟩ := encodeIssuerRootAttestationMsg_injective hEqMsg.symm
-        exact hNotCond ⟨eTag, eEp, eRoot⟩
+      rw [List.map_cons] at hMem
+      rcases List.mem_cons.mp hMem with hEqMsg | hInRest
+      · exact hc (IssuerRootAttestationFields.message_injective hEqMsg.symm)
       · exact findMatchingLoggedEpoch_none_not_mem_signedMessages hNone hInRest
 
-/-- **Multi-Epoch Signing-Log Fresh-Message EUF-CMA & Collision Reduction
+/-- **Root attestation: fresh message or logged epoch
+(`issuerRootAttestation_fresh_or_logged`)**. For any issuer signing log, a field tuple either
+is the tuple of a logged epoch, or its attestation message is none of the messages the issuer
+signed. This holds for every presentation protocol placed behind the attestation. -/
+theorem issuerRootAttestation_fresh_or_logged {schema : VcSchema} {treeDepth : Nat}
+    (signedLog : List (IssuerMintedEpoch schema treeDepth)) (f : IssuerRootAttestationFields) :
+    f.message ∉ issuerSignedMessages signedLog ∨
+    ∃ ep ∈ signedLog, ep.attestationFields = f := by
+  cases hMatch : findMatchingLoggedEpoch f signedLog with
+  | none => exact Or.inl (findMatchingLoggedEpoch_none_not_mem_signedMessages hMatch)
+  | some ep =>
+    obtain ⟨hMem, hf⟩ := findMatchingLoggedEpoch_some hMatch
+    exact Or.inr ⟨ep, hMem, hf⟩
+
+/-- **Wire-level fresh-message forgery (`issuerRootAttestationBytes_fresh_forgery_or_logged`)**.
+An attestation accepted by the ML-DSA-44 wire verifier for fields that belong to no logged
+epoch is an accepted `(pk, message, context, signature)` whose message the issuer never signed. -/
+theorem issuerRootAttestationBytes_fresh_forgery_or_logged {schema : VcSchema} {treeDepth : Nat}
+    (signedLog : List (IssuerMintedEpoch schema treeDepth)) {byteBudget : Nat}
+    {issuerPk : List UInt8} {f : IssuerRootAttestationFields} {sig : List UInt8}
+    (hVer : verifyIssuerRootAttestationBytes byteBudget issuerPk f sig = true) :
+    (mldsaVerifyBytes204 byteBudget issuerPk f.message issuerRootAttestationCtx sig = true ∧
+      f.message ∉ issuerSignedMessages signedLog) ∨
+    ∃ ep ∈ signedLog, ep.attestationFields = f := by
+  rcases issuerRootAttestation_fresh_or_logged signedLog f with hFresh | hLogged
+  · exact Or.inl ⟨hVer, hFresh⟩
+  · exact Or.inr hLogged
+
+/-- **Multi-Epoch Signing-Log Fresh-Message & Collision Reduction, ternary presentation model
     (`blindVc_multi_epoch_signing_log_fresh_forgery`)**:
-    Upgrades single-epoch `blindVc_presentation_reduces_to_issuer_mldsa` to an arbitrary multi-epoch
-    issuer signing log `signedLog : List (IssuerMintedEpoch expectedSchema treeDepth)`:
-    any accepted presentation with 3 rewound/logged openings `(o0, o1, o2)` on repetition `0` either:
-    1. Produces a valid `ML-DSA` signature on `msgBytes` **strictly absent (`∉`) from the entire
-       multi-epoch signing log `issuerSignedMessages signedLog`** (genuine fresh-message EUF-CMA forgery),
+    any accepted ternary presentation with 3 consistent openings `(o0, o1, o2)` on repetition `0`
+    either:
+    1. Carries a root attestation, accepted at the FIPS 204 message representative, of a message
+       absent from `issuerSignedMessages signedLog`,
     2. Computes an explicit `H`-collision (`(vcRewoundCollisionFinder ...).isSome = true`),
-    3. Exhibits a reachable rate-6/capacity-6 width-12 sponge collision (`Poseidon2Perm12Sponge6Collision`), or
-    4. Matches an authentic credential `(attrs, holderBlind)` minted in some logged epoch `ep ∈ signedLog`. -/
+    3. Exhibits a reachable rate-6/capacity-6 width-12 sponge collision, or
+    4. Matches a credential `(attrs, holderBlind)` minted in some logged epoch `ep ∈ signedLog`.
+    The three openings are a hypothesis; no prover is rewound here. -/
 theorem blindVc_multi_epoch_signing_log_fresh_forgery
     {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
     {sampleInBall : List UInt8 → Poly256}
-    {issuerA : PolyMat4} {issuerT1Scaled : PolyVec4} {H : List UInt8 → List UInt8}
+    {issuerA : PolyMat4} {issuerT1Scaled : PolyVec4} {issuerPk : List UInt8}
+    {issuerPkDigest : Vec UInt8 32} {H : List UInt8 → List UInt8}
     (hHLen : ∀ m, (H m).length < 256 ^ 8)
     {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
     {trusted : BlindVcTrustedContext} {expectedSchema : VcSchema} {treeDepth : Nat}
@@ -557,7 +534,8 @@ theorem blindVc_multi_epoch_signing_log_fresh_forgery
     (signedLog : List (IssuerMintedEpoch expectedSchema treeDepth))
     (o0 o1 o2 : OpenedBlindVcRep)
     (hVer : verifyBlindVcWithIssuerAttestation chalHash sampleInBall issuerA issuerT1Scaled
-      H prgExpand trusted expectedSchema treeDepth verifierChallenge rootSig pres = true)
+      issuerPk issuerPkDigest H prgExpand trusted expectedSchema treeDepth verifierChallenge
+      rootSig pres = true)
     (hRew01 : reconstructRepRound1 H pres.presentationNonce 0 o0 =
       reconstructRepRound1 H pres.presentationNonce 0 o1)
     (hRew12 : reconstructRepRound1 H pres.presentationNonce 0 o1 =
@@ -571,11 +549,9 @@ theorem blindVc_multi_epoch_signing_log_fresh_forgery
     (hRep2 : verifyOpenedBlindVcRep prgExpand expectedSchema pres.issuerEpoch treeDepth
       pres.accumulatorRoot pres.presCommit pres.scopeTag pres.verifierScopeLimbs
       pres.disclosedAttrs 0 2 o2 = true) :
-    let msgBytes := encodeIssuerRootAttestationMsg
-      trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot
-    (mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
-       msgBytes rootSig.cTilde rootSig.z rootSig.h = true ∧
-     msgBytes ∉ issuerSignedMessages signedLog) ∨
+    (verifyIssuerRootAttestation chalHash sampleInBall issuerA issuerT1Scaled issuerPk
+       (trusted.attestationFields issuerPkDigest) rootSig = true ∧
+     (trusted.attestationFields issuerPkDigest).message ∉ issuerSignedMessages signedLog) ∨
     (vcRewoundCollisionFinder H hHLen pres.presentationNonce 0 o0 o1 o2).isSome = true ∨
     (∃ (c₁ c₂ : Lane6 × Lane6 × Lane6) (r : Fin 3),
       Poseidon2Perm12Sponge6Collision (spongeTrace204 c₁ r) (spongeTrace204 c₂ r)) ∨
@@ -584,15 +560,14 @@ theorem blindVc_multi_epoch_signing_log_fresh_forgery
       (∀ p ∈ pres.disclosedAttrs, p.1 < expectedSchema.arity ∧ cred.1[p.1]? = some p.2) ∧
       computeVcPoseidon2Commit expectedSchema cred.1 presBlind vcPresCommitTag = some pres.presCommit ∧
       computeVcScopeTag expectedSchema.schemaId cred.2 trusted.verifierScopeLimbs = pres.scopeTag) := by
-  intro msgBytes
-  cases hMatch : findMatchingLoggedEpoch
-      trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot signedLog with
-  | none =>
-    unfold verifyBlindVcWithIssuerAttestation at hVer
-    rw [Bool.and_eq_true] at hVer
-    exact Or.inl ⟨hVer.1, findMatchingLoggedEpoch_none_not_mem_signedMessages hMatch⟩
-  | some ep =>
-    obtain ⟨hEpMem, hTagEq, hEpochEq, hRootEq⟩ := findMatchingLoggedEpoch_some hMatch
+  obtain ⟨hSigOk, hTrustedOk⟩ := verifyBlindVcWithIssuerAttestation_eq_true_iff.mp hVer
+  rcases issuerRootAttestation_fresh_or_logged signedLog
+      (trusted.attestationFields issuerPkDigest) with hFresh | ⟨ep, hEpMem, hFields⟩
+  · exact Or.inl ⟨hSigOk, hFresh⟩
+  · have hEpochEq : ep.epoch = trusted.issuerEpoch :=
+      congrArg IssuerRootAttestationFields.issuerEpoch hFields
+    have hRootEq : vcMerkleTreeRoot ep.epoch 0 ep.tree = trusted.accumulatorRoot :=
+      congrArg IssuerRootAttestationFields.accumulatorRoot hFields
     cases hFind : vcRewoundCollisionFinder H hHLen pres.presentationNonce 0 o0 o1 o2 with
     | some _ => exact Or.inr (Or.inl rfl)
     | none =>
@@ -601,9 +576,6 @@ theorem blindVc_multi_epoch_signing_log_fresh_forgery
         have hSome := vcRewoundCollisionFinder_isSome H hHLen pres.presentationNonce 0 o0 o1 o2
         rw [hFind, decide_eq_true hc] at hSome
         cases hSome
-      unfold verifyBlindVcWithIssuerAttestation at hVer
-      rw [Bool.and_eq_true] at hVer
-      obtain ⟨_, hTrustedOk⟩ := hVer
       obtain ⟨hPresRoot, _, hPresEp, hScopeEq, _⟩ := verifyBlindVcPresentationTrusted_context hTrustedOk
       rcases verifyOpenedBlindVcRep_extract3_finite_conflict hRew01 hRew12 hRep0 hRep1 hRep2
         with hConf | hWit
@@ -627,11 +599,10 @@ theorem blindVc_multi_epoch_signing_log_fresh_forgery
             exact Or.inr (Or.inr (Or.inl ⟨_, _, r, hCol⟩))
         · exact Or.inr (Or.inr (Or.inl hMkColl))
 
-#verify_constructive blindVc_sponge12_rate6_cap6_six_limb_coherence
+#verify_constructive
   findTritOpeningInLog_sound assembleThreeOpeningsFromLog_sound
   blindVcExtractCollisionOrWitness_sound assembleThreeOpeningsFromLog_extracts_collision_of_not_inLang
-  encodeIssuerRootAttestationMsg_injective tooth_unframed_varlen_tag_epoch_alias
+  issuerRootAttestation_fresh_or_logged issuerRootAttestationBytes_fresh_forgery_or_logged
   blindVc_multi_epoch_signing_log_fresh_forgery
-#tooth_pair encodeIssuerRootAttestationMsg_injective vs tooth_unframed_varlen_tag_epoch_alias
 
 end Qsag

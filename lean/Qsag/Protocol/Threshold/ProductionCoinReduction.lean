@@ -1,7 +1,5 @@
 module
 public import Qsag.Protocol.Threshold.RssSlhFullSecurity
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Threshold.RssSlhFullSecurity
 
 /-! Executable primitive reduction for the production preprocessing coin *helper*.
 This models the two loops in `run_commit_and_open_coin_with_hook`, including its
@@ -29,12 +27,12 @@ def deriveQuery (ctx : ProductionCoinContext) (share : BitVec 256) : Query :=
 
 theorem concrete_commit (ctx : ProductionCoinContext) (party : UInt64) (share : BitVec 256) :
     concrete (commitQuery ctx party share) = productionCoinCommit ctx party share := by
-  unfold concrete commitQuery productionCoinCommit
+  rw [productionCoinCommit_def]
   rfl
 
 theorem concrete_derive (ctx : ProductionCoinContext) (share : BitVec 256) :
     concrete (deriveQuery ctx share) = productionCoinDerive ctx share := by
-  unfold concrete deriveQuery productionCoinDerive
+  rw [productionCoinDerive_def]
   rfl
 
 /-- Domain-separated inputs to the primitive, before cSHAKE. -/
@@ -107,6 +105,10 @@ theorem eval_program (O : HashOracle) (ctx : ProductionCoinContext) (es : List E
     evalOracleComp O (program ctx es) = run O ctx es := by
   rw [program, eval_lock, eval_release]; rfl
 
+private theorem queryBounded_pure {α : Type} (q : Nat) (a : α) :
+    QueryBounded q (OracleComp.pure a : OracleComp Query Digest α) :=
+  cast (QueryBounded_pure q a).symm True.intro
+
 theorem lock_bound {α : Type} (ctx : ProductionCoinContext) (es : List Entry) (q : Nat)
     (k : List Committed → OracleComp Query Digest α)
     (hk : ∀ locked, locked.length = es.length → QueryBounded q (k locked)) :
@@ -115,7 +117,7 @@ theorem lock_bound {α : Type} (ctx : ProductionCoinContext) (es : List Entry) (
   | nil => simpa only [lockProgram, List.length_nil, Nat.zero_add] using hk [] rfl
   | cons e es ih =>
     change QueryBounded (es.length + 1 + q) (.query _ _)
-    rw [Nat.add_right_comm es.length 1 q]
+    rw [Nat.add_right_comm es.length 1 q, QueryBounded_succ_query]
     intro d
     apply ih
     intro locked hl
@@ -126,13 +128,18 @@ theorem release_bound (ctx : ProductionCoinContext) (es : List Committed)
     (combined : BitVec 256) :
     QueryBounded (es.length + 1) (releaseProgram ctx es combined) := by
   induction es generalizing combined with
-  | nil => intro d; trivial
-  | cons e es ih =>
+  | nil =>
+    change QueryBounded (0 + 1) (.query _ _)
+    rw [QueryBounded_succ_query]
     intro d
-    dsimp only
+    exact queryBounded_pure _ _
+  | cons e es ih =>
+    change QueryBounded (es.length + 1 + 1) (.query _ _)
+    rw [QueryBounded_succ_query]
+    intro d
     split
     · exact ih _
-    · trivial
+    · exact queryBounded_pure _ _
 
 theorem program_bound (ctx : ProductionCoinContext) (es : List Entry) :
     QueryBounded (es.length + (es.length + 1)) (program ctx es) := by
@@ -155,11 +162,15 @@ theorem eval_observe {α β : Type} (O : HashOracle) (f : α → β)
 theorem observe_bound {α β : Type} (f : α → β) (q : Nat)
     (p : OracleComp Query Digest α) (h : QueryBounded q p) : QueryBounded q (observe f p) := by
   induction p generalizing q with
-  | pure a => cases q <;> exact True.intro
+  | pure a => exact queryBounded_pure _ _
   | query x k ih =>
     cases q with
-    | zero => exact h
-    | succ q => intro d; exact ih d q (h d)
+    | zero => exact (cast (QueryBounded_zero_query x k) h).elim
+    | succ q =>
+      change QueryBounded (q + 1) (.query _ _)
+      rw [QueryBounded_succ_query]
+      intro d
+      exact ih d q (cast (QueryBounded_succ_query q x k) h d)
 
 /-- An actual primitive adversary, obtained by running the helper then D. -/
 def reduction (ctx : ProductionCoinContext) (es : List Entry) (D : Option Digest → Bool) :
@@ -225,8 +236,9 @@ theorem honest_release (O : HashOracle) (ctx : ProductionCoinContext) (es : List
 
 theorem honest_concrete (ctx : ProductionCoinContext) (es : List Entry)
     (h : ∀ e ∈ es, e.opened = e.share) :
-    run concrete ctx es = some (productionCoinDerive ctx (combinedShares es 0)) :=
-  honest_release concrete ctx es h 0
+    run concrete ctx es = some (productionCoinDerive ctx (combinedShares es 0)) := by
+  rw [← concrete_derive]
+  exact honest_release concrete ctx es h 0
 
 /-- A reused two-party share cancels before the final hash. This is a deterministic
 coin fixed by public context, even if the reused private share has 256 bits of entropy. -/
@@ -271,7 +283,7 @@ theorem derive_frame_binds_transcript (ctx ctx' : ProductionCoinContext)
     simp only [List.cons.injEq, and_true] at fields
     exact fields.2.2.1
   have recovered := congrArg (fixedBytesToBv 32) hb
-  simpa only [fixedBytesToBv_bvToFixedBytes] using recovered
+  simpa only [fixedBytesToBv_of_bvToFixedBytes] using recovered
 
 /-- Accepting the same derivation under changed transcript context supplies a
 concrete collision, instead of assuming an injective 256-bit hash. -/
@@ -282,7 +294,9 @@ def changed_context_collision (ctx ctx' : ProductionCoinContext)
   m1 := (deriveQuery ctx s).2
   m2 := (deriveQuery ctx' s').2
   ne := fun eq => hne (derive_frame_binds_transcript ctx ctx' s s' eq)
-  eq := h
+  eq := by
+    rw [productionCoinDerive_def, productionCoinDerive_def] at h
+    exact h
 
 /-- A context-misbound mutant drops transcript binding before hashing. Unlike
 `derive_frame_binds_transcript`, it produces identical inputs for every digest. -/

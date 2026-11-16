@@ -37,21 +37,21 @@ and nullifier sponge, the prime-field checks of the same flush,
 the coin-flip/PRSS transport of the sacrifice, and simulation of the entire
 adversarial execution. The circuit-to-`PendingAnd` fault link and the batching
 of Boolean `AND` gates into the first inner-product claims (`γ` combiner and
-degree-30 round 0, `BIT_CHECK_DEGREE = 54`) are proved in §11 below.
+degree-30 round 0 of the `D0_BITS = 16` packing, numerator `54`) are proved in §11 below.
+The packing of the current `outer_mpc.rs` (`BIT_CHECK_NUMERATOR = 63`: seven weight
+challenges, six ternary sumcheck rounds, eighteen halving rounds) is counted in §11 by
+`staged_sacrifice_false_claim_accepting_coins_bound` and `rust_bit_check_numerator_63_bound`,
+with the soundness of the thirteen stages ahead of the halving rounds as a hypothesis.
 -/
 
 public import Qsag.Tactic.Prelude
 public import Qsag.Math.Gf2Pow128
-import all Qsag.Math.Gf2Pow128
-public import Qsag.Exec.SimulationSpine
+public import Qsag.Spec.Refines
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Tactic.AssuranceKit
-public import Qsag.Exec.Tactic.SimulationKit
+public import Qsag.Math.Tactic.MaskBijection
 
 public import Qsag.Math.EllipticCurves
-import all Qsag.Math.EllipticCurves
-import all Qsag.Math.Primality
-
 
 public section
 
@@ -62,6 +62,38 @@ namespace Qsag
 attribute [-instance] Fin.instLinearOrderPackage
 
 set_option autoImplicit false
+
+private theorem cIte_pos {α : Type} {p : Prop} [inst : Decidable p] (hp : p) (a b : α) :
+    (if p then a else b) = a := by
+  cases inst with
+  | isTrue _ => rfl
+  | isFalse h => exact absurd hp h
+
+private theorem cIte_neg {α : Type} {p : Prop} [inst : Decidable p] (hnp : ¬ p) (a b : α) :
+    (if p then a else b) = b := by
+  cases inst with
+  | isTrue h => exact absurd h hnp
+  | isFalse _ => rfl
+
+private theorem cDIte_pos {α : Type} {p : Prop} [inst : Decidable p] (hp : p)
+    (a : p → α) (b : ¬ p → α) : (if h : p then a h else b h) = a hp := by
+  cases inst with
+  | isTrue _ => rfl
+  | isFalse h => exact absurd hp h
+
+open MigrationExecution in
+private theorem bxor_left_comm (a b c : RustGf128) : a ^^^ (b ^^^ c) = b ^^^ (a ^^^ c) := by
+  rw [← BitVec.xor_assoc, BitVec.xor_comm a b, BitVec.xor_assoc]
+
+open MigrationExecution in
+private theorem bxor_cancel (a b : RustGf128) : a ^^^ (a ^^^ b) = b := by
+  rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor]
+
+private theorem ite_twoPow_bit (c : Bool) (j i : Nat) (hj : j < 128) :
+    (if c then BitVec.twoPow 128 j else 0#128).getLsbD i = (c && decide (j = i)) := by
+  cases c
+  · exact BitVec.getLsbD_zero
+  · rw [cIte_pos rfl, BitVec.getLsbD_twoPow, decide_eq_true hj]
 
 /-! ## 2. Canonical Subgroup `ScalarPointHom`, Shor Pre-Migration Boundary & Premature-Open `#tooth` -/
 
@@ -563,7 +595,7 @@ theorem post_ceremony_nullifier_domain_binding_and_replay_sound
       pqDest1 ≠ pqDest2 →
       (fun _dest : BitVec 256 => computeMigrationNullifier poseidon2Hash group s migrationDomain) pqDest1 =
       (fun _dest : BitVec 256 => computeMigrationNullifier poseidon2Hash group s migrationDomain) pqDest2) := by
-  refine ⟨rfl, ?_, fun _ _ _ _ _ _ => rfl⟩
+  refine ⟨NULLIFIER_DOMAIN_eq, ?_, fun _ _ _ _ _ _ => rfl⟩
   intro g1 g2 s1 s2 dom1 dom2 hNullEq
   have hInEqDec : Decidable (migrationNullifierInput g1 s1 dom1 = migrationNullifierInput g2 s2 dom2) := by
     if h0 : g1 = g2 ∧ s1 = s2 ∧ dom1 = dom2 then
@@ -574,9 +606,9 @@ theorem post_ceremony_nullifier_domain_binding_and_replay_sound
       intro hFunEq
       apply h0
       have hgEq : g1 = g2 := by
-        have hTag := congrArg (fun f => (f ⟨0, by decide⟩).val) hFunEq
+        have hTag := congrArg (fun f => f ⟨0, by decide⟩) hFunEq
         dsimp only [migrationNullifierInput] at hTag
-        cases g1 <;> cases g2 <;> simp [ScalarGroup.nullifierTag] at hTag ⊢
+        exact ScalarGroup.nullifierTag_injective hTag
       have hsLimbs : pack256ToLimbs56 s1 = pack256ToLimbs56 s2 := by
         funext k
         have hk := congrArg (fun f => f ⟨k.val + 1, by omega⟩) hFunEq
@@ -603,9 +635,9 @@ theorem post_ceremony_nullifier_domain_binding_and_replay_sound
   | isTrue hSameIn =>
     left
     have hgEq : g1 = g2 := by
-      have hTag := congrArg (fun f => (f ⟨0, by decide⟩).val) hSameIn
+      have hTag := congrArg (fun f => f ⟨0, by decide⟩) hSameIn
       dsimp only [migrationNullifierInput] at hTag
-      cases g1 <;> cases g2 <;> simp [ScalarGroup.nullifierTag] at hTag ⊢
+      exact ScalarGroup.nullifierTag_injective hTag
     have hsLimbs : pack256ToLimbs56 s1 = pack256ToLimbs56 s2 := by
       funext k
       have hk := congrArg (fun f => f ⟨k.val + 1, by omega⟩) hSameIn
@@ -1642,7 +1674,7 @@ theorem coin_permuted_bucketing_hides_wire_and_bounds_double_fault
   vs
   Qsag.tooth_fixed_bucket_selective_abort_leaks_wire_bit
 
-/-! ## 6. `verify_all_pending` -> `all_outputs_zero` -> `PRECOMMIT` -> `FREEZE` Barrier, `InvalidTape` Conditional-Privacy & Multi-Turn `compose_forward_sim` -/
+/-! ## 6. `verify_all_pending` -> `all_outputs_zero` -> `PRECOMMIT` -> `FREEZE` Barrier, `InvalidTape` Conditional-Privacy -/
 
 /-- Encoded residual in the transparent scalar test model; not a Rust curve or
     hashed-address ownership residual. -/
@@ -2064,7 +2096,7 @@ theorem tooth_premature_witness_range_in_invalid_tape_leaks_secret_bit
   vs
   Qsag.tooth_premature_witness_range_in_invalid_tape_leaks_secret_bit
 
-/-! ## 7. Multi-Turn 3-Party RSS + BBCGGI19 + `all_outputs_zero` State Machine & `compose_forward_sim` -/
+/-! ## 7. Multi-Turn 3-Party RSS + BBCGGI19 + `all_outputs_zero` State Machine & Refinement to the Ideal Zero-Fault Machine (`Spec.Refines`) -/
 
 /-- Complete per-ceremony turn input exercising all four active outer-MPC barriers:
     1. `laneMask`: 64-lane uniformity (`isUniformLaneWord`),
@@ -2104,7 +2136,8 @@ structure AbstractCustodianState where
 def concreteCustodianMachine {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
     (zkCommit : MigrationKey256 → ZkView) :
-    PartyMachine ConcreteCustodianState RssCeremonyTurnInput ZkView where
+    Spec.Machine ConcreteCustodianState RssCeremonyTurnInput ZkView where
+  Init st := requireCanonicalScalar st.group st.shares.secret = true
   step st inp :=
     let pk := scalarMulKey (canonicalSubgroupHom st.group) st.shares.secret
     let s' := ((st.shares.s0 ^^^ inp.deltaScalar) ^^^ st.shares.s1) ^^^ st.shares.s2
@@ -2118,11 +2151,12 @@ def concreteCustodianMachine {ZkView : Type}
       some ({ st with completed := st.completed + 1 }, zkCommit s')
   errStep st _ := { st with aborted := st.aborted + 1 }
 
-/-- Layer 2: Intermediate barrier-gate `PartyMachine` operating over `st.secret ^^^ inp.deltaScalar`. -/
+/-- Layer 2: Intermediate barrier-gate `Spec.Machine` operating over `st.secret ^^^ inp.deltaScalar`. -/
 def residualGateMachine {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
     (zkCommit : MigrationKey256 → ZkView) :
-    PartyMachine AbstractCustodianState RssCeremonyTurnInput ZkView where
+    Spec.Machine AbstractCustodianState RssCeremonyTurnInput ZkView where
+  Init st := requireCanonicalScalar st.group st.secret = true
   step st inp :=
     let pk := scalarMulKey (canonicalSubgroupHom st.group) st.secret
     let s' := st.secret ^^^ inp.deltaScalar
@@ -2141,7 +2175,8 @@ def residualGateMachine {ZkView : Type}
 def idealZeroFaultMachine {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
     (zkCommit : MigrationKey256 → ZkView) :
-    PartyMachine AbstractCustodianState RssCeremonyTurnInput ZkView where
+    Spec.Machine AbstractCustodianState RssCeremonyTurnInput ZkView where
+  Init st := requireCanonicalScalar st.group st.secret = true
   step st inp :=
     let preGatesOk :=
       isUniformLaneWord inp.laneMask &&
@@ -2157,7 +2192,7 @@ def idealZeroFaultMachine {ZkView : Type}
 def custodian_to_residualGate_lockstep {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
     (zkCommit : MigrationKey256 → ZkView) :
-    LockstepSim
+    Spec.LockstepSim
       (concreteCustodianMachine drawValidPred zkCommit)
       (residualGateMachine drawValidPred zkCommit) where
   Inv _ := True
@@ -2166,6 +2201,7 @@ def custodian_to_residualGate_lockstep {ZkView : Type}
       secret := st.shares.secret
       completed := st.completed
       aborted := st.aborted }
+  init_inv hInit := ⟨trivial, hInit⟩
   step_eq {st} inp _ := by
     have hShift : ((st.shares.s0 ^^^ inp.deltaScalar) ^^^ st.shares.s1) ^^^ st.shares.s2 =
         st.shares.secret ^^^ inp.deltaScalar := by
@@ -2220,15 +2256,17 @@ private theorem residualGate_step_eq_ideal {ZkView : Type}
   · rfl
   · rw [eq_of_beq hD, bv_xor_zero]
 
-/-- `ForwardSim` from Layer 2 (`residualGateMachine`) to Layer 3 (`idealZeroFaultMachine`),
+/-- Forward refinement from Layer 2 (`residualGateMachine`) to Layer 3 (`idealZeroFaultMachine`),
     preserving `requireCanonicalScalar st.group st.secret = true` across every transition. -/
-def residualGate_to_ideal_forwardSim {ZkView : Type}
+def residualGate_to_ideal_refines {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
     (zkCommit : MigrationKey256 → ZkView) :
-    ForwardSim
+    Spec.Refines
       (residualGateMachine drawValidPred zkCommit)
       (idealZeroFaultMachine drawValidPred zkCommit) where
   Rel s₁ s₂ := s₁ = s₂ ∧ requireCanonicalScalar s₁.group s₁.secret = true
+  absInit s := s
+  init_ok hInit := ⟨hInit, rfl, hInit⟩
   sim_ok {s₁ s₁' s₂ inp out} hRel hStep := by
     rcases hRel with ⟨rfl, hCanon⟩
     rw [residualGate_step_eq_ideal drawValidPred zkCommit s₁ hCanon inp] at hStep
@@ -2253,28 +2291,16 @@ def residualGate_to_ideal_forwardSim {ZkView : Type}
     rw [residualGate_step_eq_ideal drawValidPred zkCommit s₁ hCanon inp] at hNone
     exact ⟨hNone, rfl, hCanon⟩
 
-/-- End-to-end 3-layer `ForwardSim` spine synthesized in one line via `by compose_forward_sim`! -/
+/-- End-to-end 3-layer refinement: the lockstep link composed with the Layer 2 to Layer 3
+    refinement by `Spec.Refines.trans`. -/
 def custodian_to_ideal_spine {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
     (zkCommit : MigrationKey256 → ZkView) :
-    ForwardSim
+    Spec.Refines
       (concreteCustodianMachine drawValidPred zkCommit)
-      (idealZeroFaultMachine drawValidPred zkCommit) := by
-  have h1 := custodian_to_residualGate_lockstep drawValidPred zkCommit
-  have h2 := residualGate_to_ideal_forwardSim drawValidPred zkCommit
-  compose_forward_sim
-
-/-- Explicit bracket syntax witness for `compose_forward_sim [h1, h2]`. -/
-def custodian_to_ideal_spine_explicit {ZkView : Type}
-    (drawValidPred : MigrationKey256 → Bool)
-    (zkCommit : MigrationKey256 → ZkView) :
-    ForwardSim
-      (concreteCustodianMachine drawValidPred zkCommit)
-      (idealZeroFaultMachine drawValidPred zkCommit) := by
-  compose_forward_sim [
-    custodian_to_residualGate_lockstep drawValidPred zkCommit,
-    residualGate_to_ideal_forwardSim drawValidPred zkCommit
-  ]
+      (idealZeroFaultMachine drawValidPred zkCommit) :=
+  (custodian_to_residualGate_lockstep drawValidPred zkCommit).toRefines.trans
+    (residualGate_to_ideal_refines drawValidPred zkCommit)
 
 private theorem idealZeroFault_trace_inv {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
@@ -2344,14 +2370,15 @@ theorem multi_turn_hardened_ceremony_trace_safe
       (concreteCustodianMachine drawValidPred zkCommit).step
         ⟨group, ks, comp₀, abort₀⟩ honestInp =
         some (⟨group, ks, comp₀ + 1, abort₀⟩, zkCommit ks.secret)) := by
-  let spine := custodian_to_ideal_spine drawValidPred zkCommit
-  have hRel₀ : spine.Rel ⟨group, ks, comp₀, abort₀⟩ ⟨group, ks.secret, comp₀, abort₀⟩ := by
-    simp only [spine, custodian_to_ideal_spine, ForwardSim.trans_rel, LockstepSim.toForwardSim_rel]
-    exact ⟨⟨group, ks.secret, comp₀, abort₀⟩, ⟨trivial, rfl⟩, ⟨rfl, hCanon⟩⟩
-  have hSafe := spine.preserve_trace_pred hRel₀
-    (fun hIdeal => idealZeroFault_trace_inv drawValidPred zkCommit hIdeal)
-    hTrace
-  refine ⟨hSafe, ?_⟩
+  have hRel₀ : (custodian_to_ideal_spine drawValidPred zkCommit).Rel
+      ⟨group, ks, comp₀, abort₀⟩ ⟨group, ks.secret, comp₀, abort₀⟩ := by
+    unfold custodian_to_ideal_spine
+    rw [Spec.Refines.trans_rel]
+    exact ⟨⟨group, ks.secret, comp₀, abort₀⟩,
+      (Spec.LockstepSim.toRefines_rel _ _ _).mpr ⟨trivial, rfl⟩, ⟨rfl, hCanon⟩⟩
+  obtain ⟨_, hIdeal, _⟩ :=
+    (custodian_to_ideal_spine drawValidPred zkCommit).lift_validTrace hRel₀ hTrace
+  refine ⟨idealZeroFault_trace_inv drawValidPred zkCommit hIdeal, ?_⟩
   intro seed0 seed1 seed2 chi hTapeValid honestZero honestInp
   dsimp only [concreteCustodianMachine, honestInp]
   have hUnif0 : isUniformLaneWord 0 = true := by decide
@@ -2701,17 +2728,6 @@ theorem fold_message_after_coin_cancels_defect (s : IpClaim) (rk : RustGf128) :
   rw [bxor_cancel, BitVec.xor_self, rustGf128Mul_zero_right, BitVec.xor_zero,
     rustGf128Mul_zero_right, BitVec.xor_zero, BitVec.xor_self]
 
-/-- Commit order matters: for a false claim, every coin has a forging message
-    when the message may be chosen after the coin. -/
-theorem tooth_fold_message_after_coin_forges :
-    ∃ s : IpClaim, s.err ≠ 0#128 ∧
-      ∀ rk : RustGf128, ∃ m : FoldMessage, (foldRound s m rk).err = 0#128 := by
-  refine ⟨⟨1, fun _ => 1#128, fun _ => 1#128, 0#128⟩, by decide +kernel, fun rk => ?_⟩
-  exact ⟨_, fold_message_after_coin_cancels_defect _ rk⟩
-
-#tooth_pair Qsag.MigrationExecution.foldRound_false_claim_survives_at_most_two_coins vs
-  Qsag.MigrationExecution.tooth_fold_message_after_coin_forges
-
 theorem honest_fold_preserves_true_claim (s : IpClaim) (rk : RustGf128)
     (h : s.err = 0#128) :
     (foldRound s ⟨s.crossLoHi, s.crossHiLo⟩ rk).err = 0#128 := by
@@ -2987,24 +3003,6 @@ theorem recursive_sacrifice_false_claim_accepting_coins_bound
       2 * (S.length ^ r * Sb.length) + S.length * sacrificeBadCoinBound S.length Sb.length r
     omega
 
-/-- The mutant base case that keeps the length test and drops the opened
-    product test. -/
-def baseAcceptsWithoutProductTest (s : IpClaim) (_m : BaseMessage) (_rb : RustGf128) : Bool :=
-  decide (s.len = 1)
-
-/-- Without the product test a false claim is accepted on every coin, while
-    the real base case rejects it. -/
-theorem tooth_sacrifice_without_product_test_accepts_false_claim :
-    ∃ (s : IpClaim) (m : BaseMessage),
-      s.err ≠ 0#128 ∧
-      (∀ rb : RustGf128, baseAcceptsWithoutProductTest s m rb = true) ∧
-      sacrificeAccepts 0 m s [1#128] = false := by
-  refine ⟨⟨1, fun _ => 1#128, fun _ => 1#128, 0#128⟩, ⟨0#128, 0#128, 0#128, 0#128⟩,
-    by decide +kernel, fun _ => rfl, by decide +kernel⟩
-
-#tooth_pair Qsag.MigrationExecution.recursive_sacrifice_false_claim_accepting_coins_bound vs
-  Qsag.MigrationExecution.tooth_sacrifice_without_product_test_accepts_false_claim
-
 /-- Named acceptance premise for nonvacuity registration. -/
 def SacrificeAccepted (r : Nat) (p : FoldProver r) (s : IpClaim)
     (coins : List RustGf128) : Prop :=
@@ -3024,19 +3022,6 @@ theorem sacrifice_accepted_coins_have_round_count (r : Nat) (p : FoldProver r) (
     | rk :: rest, h =>
       have hr := ih (p.2 rk) (foldRound s p.1 rk) rest h
       rw [List.length_cons, hr]
-
-/-- A true two-element claim is accepted through one honest fold and the
-    honest base case. -/
-theorem inhabited_sacrifice_accepted :
-    ∃ (p : FoldProver 1) (s : IpClaim) (coins : List RustGf128),
-      SacrificeAccepted 1 p s coins := by
-  refine ⟨(⟨0#128, 0#128⟩, fun _ => ⟨0#128, 0#128, 0#128, 0#128⟩),
-    ⟨2, fun _ => 1#128, fun _ => 1#128, 0#128⟩, [1#128, 1#128], ?_⟩
-  show sacrificeAccepts 1 _ _ _ = true
-  decide +kernel
-
-#verify_inhabited Qsag.MigrationExecution.sacrifice_accepted_coins_have_round_count
-  Qsag.MigrationExecution.inhabited_sacrifice_accepted
 
 /-! ### The production flush: two lockstep instances over 64 lanes
 
@@ -3426,25 +3411,6 @@ theorem flush_one_false_instance_accepting_coins_bound
     flushAccepting S Sb r p cl ≤
       sacrificeBadCoinBound S.length Sb.length r * (S.length ^ r * Sb.length) :=
   flushAccepting_le_weights S Sb hS hSb lane r p cl true false (fun _ => h0) (fun h => nomatch h)
-
-/-- The mutant base case that checks lane `0` only. -/
-def flushBaseAcceptsLaneZeroOnly (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage)
-    (rb : CoinPair) : Bool :=
-  finAll 2 (fun t => decide ((cl t 0).len = 1) && baseAccepts (cl t 0) (bm t 0) (coinAt rb t))
-
-/-- Checking one lane lets a false claim in another lane through; the real base
-    case rejects it. -/
-theorem tooth_flush_single_lane_check_accepts_false_lane :
-    ∃ (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage) (lane : Fin 64) (rb : CoinPair),
-      (cl 0 lane).err ≠ 0#128 ∧ (cl 1 lane).err ≠ 0#128 ∧
-      flushBaseAcceptsLaneZeroOnly cl bm rb = true ∧
-      flushBaseAccepts cl bm rb = false := by
-  refine ⟨fun _ lane => ⟨1, fun _ => 1#128, fun _ => 1#128, if lane.val = 0 then 1#128 else 0#128⟩,
-    fun _ _ => ⟨0#128, 0#128, 0#128, 0#128⟩, 1, (1#128, 1#128),
-    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
-
-#tooth_pair Qsag.MigrationExecution.flush_false_lane_accepting_coins_bound vs
-  Qsag.MigrationExecution.tooth_flush_single_lane_check_accepts_false_lane
 
 /-- Public statement fields stay separate; epoch is bounded rather than an
     unbounded natural silently truncated by a serializer. Authorization must bind
@@ -3950,50 +3916,9 @@ theorem tooth_replay_guard_removal :
 #tooth_pair Qsag.MigrationExecution.settle_replay_rejected vs
   Qsag.MigrationExecution.tooth_replay_guard_removal
 
-/-- Regression against treating Wiedemann coordinate bit-packing as the Rust polynomial basis
-    (the verified conversion is `rustToTower`):
-    under naive coordinate bit-packing, bit `1` (`x_0 ∈ Tower128`) squares to `x_0 + 1` (`3#128`),
-    whereas in `RustGf128` bit `1` (`x`) squares to `x^2` (`4#128`). -/
-theorem tooth_identity_basis_conversion_wrong :
-    ∃ x : RustGf128,
-      rustGf128Mul x x ≠
-        wiedemannPack128 (towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x)) ∧
-      wiedemannUnpack128 (rustGf128Mul x x) ≠
-        towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x) := by
-  refine ⟨2#128, ?_⟩
-  have hK : towerMul 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) =
-      wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) :=
-    (wiedemannKaratsuba_eq_towerMul 7 _ _).symm
-  have hW : wiedemannPack128 (wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128)) = 3#128 := by
-    decide
-  have hR : rustGf128Mul 2#128 2#128 = 4#128 := by decide +kernel
-  rw [hK]
-  refine ⟨?_, ?_⟩
-  · rw [hR, hW]; decide
-  · intro hEq
-    have hp := congrArg wiedemannPack128 hEq
-    rw [hW] at hp
-    have h4 : wiedemannPack128 (wiedemannUnpack128 (rustGf128Mul 2#128 2#128)) = 4#128 := by
-      rw [hR]; decide
-    rw [h4] at hp
-    revert hp; decide
-
-#tooth_pair Qsag.MigrationExecution.rustToTower_mul vs
-  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
-
 #verify_constructive
-  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
-  Qsag.MigrationExecution.rustGf128Mul_comm
-  Qsag.MigrationExecution.rustGf128Mul_assoc
-  Qsag.MigrationExecution.towerToRust_mul
-  Qsag.MigrationExecution.towerToRust_injective
-  Qsag.MigrationExecution.towerToRust_rustToTower
-  Qsag.MigrationExecution.rustToTower_towerToRust
-  Qsag.MigrationExecution.rustToTower_mul
-  Qsag.MigrationExecution.rustGf128Mul_eq_zero
   Qsag.MigrationExecution.foldRound_err
   Qsag.MigrationExecution.foldRound_false_claim_survives_at_most_two_coins
-  Qsag.MigrationExecution.tooth_fold_message_after_coin_forges
   Qsag.MigrationExecution.baseAccepts_false_claim_at_most_two_coins
   Qsag.MigrationExecution.honest_fold_preserves_true_claim
   Qsag.MigrationExecution.honest_base_accepts
@@ -4001,8 +3926,6 @@ theorem tooth_identity_basis_conversion_wrong :
   Qsag.MigrationExecution.coinVectors_length
   Qsag.MigrationExecution.sacrificeBadCoinBound_closed
   Qsag.MigrationExecution.recursive_sacrifice_false_claim_accepting_coins_bound
-  Qsag.MigrationExecution.tooth_sacrifice_without_product_test_accepts_false_claim
-  Qsag.MigrationExecution.inhabited_sacrifice_accepted
   Qsag.MigrationExecution.checkBaseOpenings_sound
   Qsag.MigrationExecution.ownership_same_witness_or_joint_collision
   Qsag.MigrationExecution.finish_checks_consumed_outputs
@@ -4025,12 +3948,6 @@ end MigrationExecution
 /-! ## 9. Module-Wide `#verify_constructive` Gate -/
 
 #verify_constructive
-  Qsag.curve_orders_match_le_limbs_and_bounds
-  Qsag.canonical_scalar_boundaries_exact
-  Qsag.secpNegScalar_props
-  Qsag.taproot_even_y_parity_restores_canonical_injectivity
-  Qsag.clampEd25519Bytes32_bits_and_range
-  Qsag.slip0010_ed25519_clamped_canonical_nonzero
   Qsag.odd_not_dvd_two_pow
   Qsag.scalarMulKey_xor_oneBit
   Qsag.canonicalSubgroupHom_scalarMulKey_val
@@ -4056,20 +3973,6 @@ end MigrationExecution
   Qsag.multi_turn_hardened_ceremony_trace_safe
   Qsag.inhabited_migration_256_zero_test_and_tooth
   Qsag.inhabited_coin_permuted_bucketing_witness
-  Qsag.TaprootCurveProjection.compressed_injective
-  Qsag.Weierstrass.IsPrime.dvd_mul
-  Qsag.Weierstrass.Curve.neg_onCurve
-  Qsag.Weierstrass.neg_y_parity
-  Qsag.Weierstrass.Curve.eq_or_eq_neg_of_same_x
-  Qsag.Weierstrass.Curve.add_eq_none_iff_neg
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_neg
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero
-  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
-  Qsag.Weierstrass.secp7Mod43_group
-  Qsag.Weierstrass.secp7Mod43_projection_coordinates
-  Qsag.Weierstrass.secp256k1_checked_parameters
-  Qsag.secp256k1_xonly_parity_on_curve_points
 
 /-- Rust runs seven independent 64-lane engines, using 438 of their 448 lanes. -/
 def migrationMitRepetitions : Nat := 438
@@ -4123,8 +4026,9 @@ inner-product claims and parameterizes over `FalseRepetitionGivesFalseClaims` (`
 Section 11 right below discharges `hLink` constructively (`circuit_round0_discharges_hLink`
 and `migration_unconditional_circuit_to_sacrifice_ceremony_bound`) by proving both
 the circuit-to-`PendingAnd` fault link (`false_witness_implies_pending_and_fault`)
-and the `γ`-combiner + degree-30 round-0 polynomial reduction (`round0IpClaim_err_eq_evalCoeffs`,
-`BIT_CHECK_DEGREE = 54` in `outer_mpc.rs:16-39`). The prime-field checks of the
+and the `γ`-combiner + degree-30 round-0 polynomial reduction (`round0IpClaim_err_eq_evalCoeffs`;
+numerator `54` for the `D0_BITS = 16` packing, which the current `outer_mpc.rs` replaced by
+the numerator-`63` packing counted by `rust_bit_check_numerator_63_bound`). The prime-field checks of the
 same flush (`outer_mpc.rs:2196, 2474`) are not modelled. -/
 
 namespace MigrationExecution
@@ -4241,8 +4145,9 @@ theorem productionBaseCoins_nodup : productionBaseCoins.Nodup := by
 /-- At the production supports and up to the thirteen binary folds of a full flush
     (`MAX_PENDING_BITS / D0_BITS = 8192` blocks, `outer_mpc.rs:16-33`), the squared
     bad-coin bound is below `2^-246` of the coin space, and the single-instance bound
-    is at most `28 / (2^128 - 1)`: the `2 · 13 + 2` fold and base terms of
-    `BIT_CHECK_DEGREE = 90`, whose other `62` belong to the unmodelled round 0. -/
+    is at most `28 / (2^128 - 1)`: the `2 · 13 + 2` fold and base terms. A full flush of the
+    current `outer_mpc.rs` has `18` halving rounds; `rust_bit_check_numerator_63_bound` covers
+    that count. -/
 theorem production_sacrifice_bound : ∀ r, r ≤ 13 →
     sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) r *
         sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) r * 2 ^ 246 ≤
@@ -4371,33 +4276,12 @@ theorem inhabited_false_statement_ceremony :
   Qsag.MigrationExecution.migration_false_statement_faces_sacrifice_in_every_repetition
   Qsag.MigrationExecution.inhabited_false_statement_ceremony
 
-/-- The mutant ceremony gate that checks the flush of fork `0` only. -/
-def ceremonyAcceptsForkZeroOnly (r : Nat) (p : CeremonyProver r) (cl : Fin 7 → FlushClaims)
-    (coins : CeremonyCoins) : Bool :=
-  flushAccepts r (p 0 coins) (cl 0) (coins 0)
-
-/-- Checking one of the seven forks accepts a false repetition of another fork
-    (repetition `64`, fork 1, lane 0); the seven-fork gate rejects it. -/
-theorem tooth_ceremony_single_fork_check_accepts_false_repetition :
-    ∃ (p : CeremonyProver 0) (cl : Fin 7 → FlushClaims) (rep : Fin 438) (coins : CeremonyCoins),
-      FalseRepetition 0 p cl rep ∧
-      ceremonyAcceptsForkZeroOnly 0 p cl coins = true ∧
-      ceremonyAccepts 0 p cl coins = false := by
-  refine ⟨fun _ _ => constFlushProver ⟨0#128, 0#128⟩ ⟨0#128, 0#128, 0#128, 0#128⟩ 0,
-    fun b _ _ => ⟨1, fun _ => 1#128, fun _ => 1#128, if b.val = 0 then 1#128 else 0#128⟩,
-    ⟨64, by decide⟩, fun _ => [(1#128, 1#128)],
-    ⟨fun _ _ => rfl, by decide +kernel, by decide +kernel⟩, by decide +kernel, by decide +kernel⟩
-
-#tooth_pair Qsag.MigrationExecution.ceremony_false_repetition_accepting_coins_bound vs
-  Qsag.MigrationExecution.tooth_ceremony_single_fork_check_accepts_false_repetition
-
 #verify_constructive
   Qsag.MigrationExecution.flushBaseAccepts_checks_all_openings
   Qsag.MigrationExecution.flushAccepting_eq_filter
   Qsag.MigrationExecution.flushCoinVectors_length
   Qsag.MigrationExecution.flush_false_lane_accepting_coins_bound
   Qsag.MigrationExecution.flush_one_false_instance_accepting_coins_bound
-  Qsag.MigrationExecution.tooth_flush_single_lane_check_accepts_false_lane
   Qsag.MigrationExecution.repetition_slot_geometry
   Qsag.MigrationExecution.ceremony_false_repetition_accepting_coins_bound
   Qsag.MigrationExecution.productionFoldCoins_nodup
@@ -4406,7 +4290,6 @@ theorem tooth_ceremony_single_fork_check_accepts_false_repetition :
   Qsag.MigrationExecution.migration_ceremony_false_repetition_below_2_pow_neg_246
   Qsag.MigrationExecution.migration_false_statement_faces_sacrifice_in_every_repetition
   Qsag.MigrationExecution.inhabited_false_repetition
-  Qsag.MigrationExecution.tooth_ceremony_single_fork_check_accepts_false_repetition
 
 /-! ## 11. Constructive Circuit-to-Sacrifice Link (`γ`-Combiner + Degree-30 Round 0) & 438-Repetition QROM Soundness
 
@@ -4427,8 +4310,9 @@ unconditional end-to-end 438-repetition ceremony + QROM Fiat–Shamir soundness 
    Packing `8` blocks of `D0_BITS = 16` gates per super-block (`DEG_R0 = 31`, `HALF_R0 = 15`), the
    Round-0 inner-product defect `(round0IpClaim … r0 lane).err` is a formal degree-`≤ 30` polynomial
    in `r0` whose `r0^15` coefficient equals `gammaCombinedDefect` (independent of the prover's 30
-   reshared cross-terms `h0`), surviving on at most `30` coins per instance (`BIT_CHECK_DEGREE =
-   30 + 2 * 11 + 2 = 54` at `r = 11`).
+   reshared cross-terms `h0`), surviving on at most `30` coins per instance (numerator
+   `30 + 2 * 11 + 2 = 54` at `r = 11` for this `D0_BITS = 16` packing; the current Rust
+   `BIT_CHECK_NUMERATOR` is `63`, see `rust_bit_check_numerator_63_bound`).
 4. **Unconditional `hLink` Discharge & 438-Repetition Ceremony + QROM Composition
    (`circuit_round0_discharges_hLink`, `migration_unconditional_circuit_to_sacrifice_ceremony_bound`,
    `migration_438_zkboo_and_ceremony_qrom_soundness`)**:
@@ -5117,8 +5001,8 @@ theorem rustTwoPow_mul : ∀ (i j : Nat), i + j < 128 →
   | i + 1, j, hij => by
     have hi : i < 127 := by omega
     have hij' : i + j < 127 := by omega
-    rw [← rustGf128MulX_twoPow i hi, rustGf128MulX_eq_mul, rustGf128Mul_assoc,
-        rustTwoPow_mul i j (by omega), ← rustGf128MulX_eq_mul, rustGf128MulX_twoPow (i + j) hij',
+    rw [← rustGf128MulX_twoPow_succ i hi, rustGf128MulX_eq_mul, rustGf128Mul_assoc,
+        rustTwoPow_mul i j (by omega), ← rustGf128MulX_eq_mul, rustGf128MulX_twoPow_succ (i + j) hij',
         show i + j + 1 = i + 1 + j from by omega]
 
 /-- Block `A` and `B` polynomials of degree `< 16` (`D0_BITS = 16`, `outer_mpc.rs:1703-1776`). -/
@@ -5524,7 +5408,7 @@ def round0FlushAccepts (r : Nat) (pending : List PendingAnd) (numSuper : Nat)
     flushAccepts r (p.afterR0 r0) (round0FlushClaims pending numSuper gammas p.h0 r0) rest
 
 /-- Single-instance bad-coin count across Round 0 (`30`) + `r` binary folds (`2r`) + base (`2`).
-    At `r = 11` (`MAX_PENDING_BITS / D0_BITS = 2048`), the numerator is `30 + 22 + 2 = 54 = BIT_CHECK_DEGREE`! -/
+    At `r = 11` (`2048` blocks of `D0_BITS = 16`) the numerator is `30 + 22 + 2 = 54`. -/
 def round0SacrificeBadBound (n nb r : Nat) : Nat :=
   30 * (n ^ r * nb) + n * sacrificeBadCoinBound n nb r
 
@@ -5617,10 +5501,12 @@ theorem round0Flush_false_gamma_accepting_coins_bound
     _ ≤ round0SacrificeBadBound S.length Sb.length r *
           round0SacrificeBadBound S.length Sb.length r := Nat.mul_le_mul hW0 hW1
 
-/-- Exact verification of Rust's `BIT_CHECK_DEGREE = 54` (`outer_mpc.rs:31-39`) at `r = 11`
-    (`32768 / 16 = 2048 = 2^11` blocks) and `< 2^-244` two-instance Round-0 + Sacrifice bound
-    up to `r ≤ 13`. -/
-theorem production_round0_sacrifice_bit_check_54_bound :
+/-- The `D0_BITS = 16` round-0 geometry modelled above (128-gate super-blocks, one degree-30
+    round 0, then `r` binary folds): at `r = 11` (`32768 / 16 = 2048 = 2^11` blocks) the
+    single-instance numerator is `30 + 2 · 11 + 2 = 54`, and the two-instance bound is below
+    `2^-244` up to `r ≤ 13`. This is not the geometry of the current `outer_mpc.rs`
+    (`BIT_CHECK_NUMERATOR = 63`); see `rust_bit_check_numerator_63_bound` for that one. -/
+theorem d16_round0_sacrifice_bit_check_54_bound :
     round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) 11 * (2 ^ 128 - 1) ≤
       54 * ((2 ^ 128) ^ 12 * (2 ^ 128 - 1)) ∧
     ∀ r, r ≤ 13 →
@@ -5628,6 +5514,197 @@ theorem production_round0_sacrifice_bit_check_54_bound :
         round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) r * 2 ^ 244 ≤
       ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) * ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) := by
   decide +kernel
+
+/-! ### Staged reductions ahead of the halving rounds: the `outer_mpc.rs` geometry (numerator 63)
+
+`verify_pending_bits_slice` no longer packs 16-gate blocks into a degree-30 round 0. It runs,
+per instance: a weighted embedding with `6` word-offset challenges and one group challenge
+(`BIT_TENSOR_BITS + 1 = 7` linear stages), `6` packed ternary sumcheck rounds (degree `3` in the
+round coin), then `log2 MAX_BIT_GROUPS + log2 BIT_LANES = 12 + 6 = 18` halving rounds and the
+base sacrifice. `BIT_CHECK_NUMERATOR = 7 + 3 · 6 + 2 · 18 + 2 = 63`.
+
+What is proved for this geometry. The `18` halving rounds and the base case are `foldRound` and
+`baseAccepts` above. The `13` stages before them are a parameter: `StagesSound` asks, for each
+stage, that at most `d` coins turn a false claim into a true one whatever message the prover
+sent before the coin. Under that hypothesis `staged_sacrifice_false_claim_accepting_coins_bound`
+counts the accepting coin vectors of any adaptive prover, and
+`rust_bit_check_numerator_63_bound` evaluates the count at the Rust stage list and coin sets.
+
+What is not proved. `StagesSound` is not derived from the Rust weighted embedding and ternary
+sumcheck (their claim types, the tensor weights and the round polynomials are not modelled),
+the group challenge is counted as one coin although Rust draws one coin per group, and the
+count is for one instance and one lane: the 64-lane two-instance lockstep flush and the
+438-repetition ceremony bound above remain theorems about the `D0_BITS = 16` model. -/
+
+/-- Adaptive prover for a list of reduction stages followed by a tail protocol with prover type
+    `T`: one message per stage, the rest of the strategy a function of that stage's coin. -/
+@[expose] def StagedProver (Msg T : Type) : List Nat → Type
+  | [] => T
+  | _ :: ds => Msg × (RustGf128 → StagedProver Msg T ds)
+
+/-- Verdict on one coin vector: one coin per stage, then the tail's coins. `stage k` is the
+    stage with `k` stages still to follow. A coin vector that is too short rejects. -/
+def stagedAccepts {Cl Msg T : Type} (stage : Nat → Cl → Msg → RustGf128 → Cl)
+    (tail : T → Cl → List RustGf128 → Bool) :
+    (ds : List Nat) → StagedProver Msg T ds → Cl → List RustGf128 → Bool
+  | [], p, s, coins => tail p s coins
+  | _ :: _, _, _, [] => false
+  | _ :: ds, p, s, c :: coins =>
+    stagedAccepts stage tail ds (p.2 c) (stage ds.length s p.1 c) coins
+
+/-- All coin vectors: one coin from `S` per stage, then a tail vector. -/
+def stagedCoinVectors (S : List RustGf128) (tailVecs : List (List RustGf128)) :
+    List Nat → List (List RustGf128)
+  | [] => tailVecs
+  | _ :: ds => S.flatMap (fun c => (stagedCoinVectors S tailVecs ds).map (fun rest => c :: rest))
+
+/-- Per-stage soundness: with `k` stages to follow and degree bound `d`, at most `d` coins of
+    `S` map a false claim to a true one, for every prover message. -/
+def StagesSound {Cl Msg : Type} (S : List RustGf128) (stage : Nat → Cl → Msg → RustGf128 → Cl)
+    (isFalse : Cl → Bool) : List Nat → Prop
+  | [] => True
+  | d :: ds =>
+    (∀ (s : Cl) (m : Msg), isFalse s = true →
+      (S.filter (fun c => !isFalse (stage ds.length s m c))).length ≤ d) ∧
+    StagesSound S stage isFalse ds
+
+/-- Bad-coin count of the staged protocol: `n` coins per stage, `T` tail vectors of which at
+    most `B` accept a false claim. Divided by `n ^ ds.length * T` it is `Σ d / n + B / T`. -/
+def stagedBadCoinBound (n T B : Nat) : List Nat → Nat
+  | [] => B
+  | d :: ds => d * (n ^ ds.length * T) + n * stagedBadCoinBound n T B ds
+
+private theorem flatMap_map_cons_length {α : Type} (V : List (List α)) : ∀ S : List α,
+    (S.flatMap (fun c => V.map (fun rest => c :: rest))).length = S.length * V.length
+  | [] => by rw [List.flatMap_nil, List.length_nil, List.length_nil, Nat.zero_mul]
+  | x :: xs => by
+    rw [List.flatMap_cons, List.length_append, List.length_map, flatMap_map_cons_length V xs,
+      List.length_cons, Nat.add_mul, Nat.one_mul, Nat.add_comm]
+
+theorem stagedCoinVectors_length (S : List RustGf128) (tailVecs : List (List RustGf128)) :
+    ∀ ds : List Nat,
+      (stagedCoinVectors S tailVecs ds).length = S.length ^ ds.length * tailVecs.length
+  | [] => by
+    show tailVecs.length = S.length ^ 0 * tailVecs.length
+    rw [Nat.pow_zero, Nat.one_mul]
+  | _ :: ds => by
+    show (S.flatMap (fun c => (stagedCoinVectors S tailVecs ds).map (fun rest => c :: rest))).length =
+      S.length ^ (ds.length + 1) * tailVecs.length
+    rw [flatMap_map_cons_length, stagedCoinVectors_length S tailVecs ds, Nat.pow_succ,
+      Nat.mul_comm (S.length ^ ds.length) S.length, Nat.mul_assoc]
+
+/-- **Staged reduction count.** If every stage is sound and the tail accepts a false claim on
+    at most `B` of its coin vectors, an adaptive prover starting from a false claim is accepted
+    on at most `stagedBadCoinBound` coin vectors. -/
+theorem staged_false_claim_accepting_coins_bound {Cl Msg T : Type}
+    (S : List RustGf128) (tailVecs : List (List RustGf128))
+    (stage : Nat → Cl → Msg → RustGf128 → Cl) (isFalse : Cl → Bool)
+    (tail : T → Cl → List RustGf128 → Bool) (B : Nat)
+    (hTail : ∀ (p : T) (s : Cl), isFalse s = true → (tailVecs.filter (tail p s)).length ≤ B) :
+    ∀ (ds : List Nat), StagesSound S stage isFalse ds →
+      ∀ (p : StagedProver Msg T ds) (s : Cl), isFalse s = true →
+        ((stagedCoinVectors S tailVecs ds).filter (stagedAccepts stage tail ds p s)).length ≤
+          stagedBadCoinBound S.length tailVecs.length B ds
+  | [], _, p, s, hs => hTail p s hs
+  | d :: ds, hSound, p, s, hs => by
+    obtain ⟨hHead, hRest⟩ := hSound
+    show ((S.flatMap (fun c => (stagedCoinVectors S tailVecs ds).map (fun rest => c :: rest))).filter
+        (stagedAccepts stage tail (d :: ds) p s)).length ≤
+      d * (S.length ^ ds.length * tailVecs.length) +
+        S.length * stagedBadCoinBound S.length tailVecs.length B ds
+    rw [filter_flatMap_length]
+    have hMapEq : (S.map (fun c =>
+        (((stagedCoinVectors S tailVecs ds).map (fun rest => c :: rest)).filter
+          (stagedAccepts stage tail (d :: ds) p s)).length)) =
+        (S.map (fun c =>
+          ((stagedCoinVectors S tailVecs ds).filter
+            (stagedAccepts stage tail ds (p.2 c) (stage ds.length s p.1 c))).length)) := by
+      apply List.map_congr_left
+      intro c _
+      rw [filter_map_length]
+      rfl
+    rw [hMapEq]
+    have hSplit := sum_map_le_cases (fun c => !isFalse (stage ds.length s p.1 c))
+      (fun c => ((stagedCoinVectors S tailVecs ds).filter
+        (stagedAccepts stage tail ds (p.2 c) (stage ds.length s p.1 c))).length)
+      (S.length ^ ds.length * tailVecs.length) (stagedBadCoinBound S.length tailVecs.length B ds)
+      (fun c _ => by
+        rw [← stagedCoinVectors_length S tailVecs ds]
+        exact List.length_filter_le _ _)
+      (fun c hc => by
+        have hc' : (!isFalse (stage ds.length s p.1 c)) = false := hc
+        have hStill : isFalse (stage ds.length s p.1 c) = true := by
+          cases h : isFalse (stage ds.length s p.1 c) with
+          | true => rfl
+          | false => rw [h] at hc'; cases hc'
+        exact staged_false_claim_accepting_coins_bound S tailVecs stage isFalse tail B hTail ds
+          hRest (p.2 c) (stage ds.length s p.1 c) hStill) S
+    have hBad := hHead s p.1 hs
+    have hMul := Nat.mul_le_mul_right (S.length ^ ds.length * tailVecs.length) hBad
+    exact Nat.le_trans hSplit (Nat.add_le_add_right hMul _)
+
+/-- **Staged reductions followed by `r` halving rounds and the base sacrifice.** `embed` reads
+    the inner-product claim the last stage hands to the halving rounds. -/
+theorem staged_sacrifice_false_claim_accepting_coins_bound {Cl Msg : Type}
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat)
+    (stage : Nat → Cl → Msg → RustGf128 → Cl) (embed : Cl → IpClaim) (ds : List Nat)
+    (hStages : StagesSound S stage (fun s => decide ((embed s).err ≠ 0#128)) ds)
+    (p : StagedProver Msg (FoldProver r) ds) (s : Cl) (hErr : (embed s).err ≠ 0#128) :
+    ((stagedCoinVectors S (coinVectors S Sb r) ds).filter
+      (stagedAccepts stage (fun q c coins => sacrificeAccepts r q (embed c) coins) ds p s)).length ≤
+      stagedBadCoinBound S.length (S.length ^ r * Sb.length)
+        (sacrificeBadCoinBound S.length Sb.length r) ds := by
+  have h := staged_false_claim_accepting_coins_bound S (coinVectors S Sb r) stage
+    (fun s => decide ((embed s).err ≠ 0#128))
+    (fun q c coins => sacrificeAccepts r q (embed c) coins)
+    (sacrificeBadCoinBound S.length Sb.length r)
+    (fun q c hc => by
+      have hq := recursive_sacrifice_false_claim_accepting_coins_bound S Sb hS hSb r q (embed c)
+        (of_decide_eq_true hc)
+      rw [acceptingCoins_eq_filter] at hq
+      exact hq)
+    ds hStages p s (decide_eq_true hErr)
+  rw [coinVectors_length] at h
+  exact h
+
+/-- Stage numerators of `verify_pending_bits_slice` ahead of the halving rounds: `6` word-offset
+    weights and `1` group weight (`7` linear stages), then `BIT_TENSOR_BITS = 6` ternary
+    sumcheck rounds of degree `3`. -/
+def rustBitCheckStageNumerators : List Nat := List.replicate 7 1 ++ List.replicate 6 3
+
+/-- Halving rounds of a full flush: `log2 MAX_BIT_GROUPS + log2 BIT_LANES`. -/
+def rustBitCheckHalvingRounds : Nat := 18
+
+/-- **`BIT_CHECK_NUMERATOR = 63` at the Rust geometry.** `MAX_PENDING_BITS / BIT_GROUP_WORDS =
+    262144 / 64 = 2^12` groups and `64 = 2^6` lanes give `18` halving rounds; the stage
+    numerators sum to `7 + 18 = 25`; with fold coins over `GF(2^128)` and a nonzero base coin
+    the staged count is at most `63 / (2^128 - 1)` of the coin space for one instance, and its
+    square (two independent instances) is below `2^-244`. -/
+theorem rust_bit_check_numerator_63_bound :
+    (262144 / 64 = 2 ^ 12 ∧ 64 = 2 ^ 6 ∧ rustBitCheckHalvingRounds = 12 + 6) ∧
+    rustBitCheckStageNumerators.sum + 2 * rustBitCheckHalvingRounds + 2 = 63 ∧
+    stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
+        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators * (2 ^ 128 - 1) ≤
+      63 * ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
+        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) ∧
+    stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
+        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators *
+      stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
+        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators * 2 ^ 244 ≤
+      ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
+        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) *
+      ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
+        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) := by
+  decide +kernel
+
+#verify_constructive
+  stagedCoinVectors_length
+  staged_false_claim_accepting_coins_bound
+  staged_sacrifice_false_claim_accepting_coins_bound
+  rust_bit_check_numerator_63_bound
 
 /-- Full adaptive 7-fork ceremony prover including `γ`-combiner + Round 0 + `r` folds + base. -/
 abbrev FullCeremonyCoins := Fin 7 → RustGf128 × List CoinPair
@@ -5752,7 +5829,7 @@ theorem migration_unconditional_circuit_to_sacrifice_ceremony_bound
   have hArith : (1 * T + S.length * B) * 2 ^ 127 ≤ S.length * T := by
     dsimp only [T, B, V]
     rw [flushCoinVectors_length, productionFoldCoins_card, productionBaseCoins_card]
-    have hR0 := production_round0_sacrifice_bit_check_54_bound.2 r hr
+    have hR0 := d16_round0_sacrifice_bit_check_54_bound.2 r hr
     generalize ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) * ((2 ^ 128) ^ (r + 1) * (2 ^ 128 - 1)) = M at hR0 ⊢
     generalize round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) r *
         round0SacrificeBadBound (2 ^ 128) (2 ^ 128 - 1) r = K at hR0 ⊢
@@ -5891,7 +5968,7 @@ theorem inhabited_unconditional_circuit_to_sacrifice_ceremony :
   Qsag.MigrationExecution.tooth_round0_unlocked_mid_forges_every_coin
   Qsag.MigrationExecution.circuit_round0_discharges_hLink
   Qsag.MigrationExecution.round0Flush_false_gamma_accepting_coins_bound
-  Qsag.MigrationExecution.production_round0_sacrifice_bit_check_54_bound
+  Qsag.MigrationExecution.d16_round0_sacrifice_bit_check_54_bound
   Qsag.MigrationExecution.migration_unconditional_circuit_to_sacrifice_ceremony_bound
   Qsag.MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness
   Qsag.MigrationExecution.inhabited_unconditional_circuit_to_sacrifice_ceremony

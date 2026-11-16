@@ -51,7 +51,7 @@ expansion and Rust wire-bytes transcript equivalence remain external to the alge
 
 public import Qsag.Protocol.Threshold.MlDsa44Parameters
 public import Qsag.Tactic.Prelude
-public import Qsag.Exec.SimulationSpine
+public import Qsag.Spec.Refines
 public import Qsag.Math.Goldilocks
 public import Qsag.Math.Lattices
 public import Qsag.Oracle.Poseidon2
@@ -59,11 +59,7 @@ public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 public import Qsag.Coding.Cwyz26
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
-import all Qsag.Coding.Cwyz26
-import all Qsag.Math.Goldilocks
-import all Qsag.Math.Lattices
-import all Qsag.Math.Primality
+import Qsag.Math.Primality
 
 public section
 namespace Qsag
@@ -1441,12 +1437,12 @@ private theorem ext6Sub_add_cancel (rest y : Ext6Fq204) : ext6Add rest (ext6Sub 
   rcases y with ⟨y0, y1, y2, y3, y4, y5⟩
   simp only [ext6Add, ext6Sub, fq204_sub_add_cancel_left]
 
-private theorem ext6Scale_mul (x : Ext6Fq204) (a b : Fq204) :
+theorem ext6Scale_mul (x : Ext6Fq204) (a b : Fq204) :
     ext6Scale (ext6Scale x a) b = ext6Scale x (Fq204.mul a b) := by
   rcases x with ⟨x0, x1, x2, x3, x4, x5⟩
   simp only [ext6Scale, Fq204.mul_assoc]
 
-private theorem ext6Scale_one (x : Ext6Fq204) : ext6Scale x Fq204.one = x := by
+theorem ext6Scale_one (x : Ext6Fq204) : ext6Scale x Fq204.one = x := by
   rcases x with ⟨x0, x1, x2, x3, x4, x5⟩
   simp only [ext6Scale, Fq204.mul_one]
 
@@ -2249,7 +2245,7 @@ def rssSignCore
       `accept`;
     - On rejection (`accept = false`), emits `(publicView, none)` (`rejectBit = true`, no separate unmasked `z` field);
     - On acceptance (`accept = true`), emits `(publicView, some sig)` (`rejectBit = false`). -/
-def rssThresholdSignStep
+@[expose] def rssThresholdSignStep
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
     (sampleInBall : List UInt8 → Poly256)
     (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput) :
@@ -2264,7 +2260,7 @@ def rssThresholdSignStep
     | false => .err stBurned .mpcSacrificeFailed
     | true => rssSignCore chalHash stBurned inp
 
-/-- Canonical `SimulationSpine.PartyMachine` instantiation of `rssThresholdSignStep`. -/
+/-- Canonical `PartyMachine` instantiation of `rssThresholdSignStep`. -/
 def rssThresholdSignMachine
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
     (sampleInBall : List UInt8 → Poly256) :
@@ -11383,7 +11379,7 @@ theorem rssSacrificedProductsValid_complete
 
 /-- Signing transition gated by the transcript-computed verdict. No exact-product oracle
     is consulted: the consumed products are whatever the sacrifice accepted. -/
-def rssSacrificedSignStep
+@[expose] def rssSacrificedSignStep
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
     (sampleInBall : List UInt8 → Poly256)
     (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
@@ -11537,12 +11533,6 @@ inductive RssDiskOutcome204 where
 
 def rssNonceMaterial204 (inp : RssMlDsaAttemptInput) : List UInt8 :=
   encodePolyVec4Bytes (rssSumVec4List inp.ySubsets)
-
-private theorem durableBurnReserve_failed_write (store : DurableNonceBurnStore)
-    (party : UInt16) (epoch : UInt64) (sid : List UInt8) (att : UInt32) :
-    (durableBurnReserve store party epoch sid att false).1 = false := by
-  unfold durableBurnReserve
-  cases durableBurnAvailable store party epoch sid att <;> rfl
 
 /-- Reserve before running any check or releasing any signing output. The nonce ledger is
     global to this key, so changing the session, epoch, attempt, or share decomposition does
@@ -11939,7 +11929,7 @@ theorem rssDurableSign204_inhabited :
       · exact nomatch hc
     · dsimp only
       rw [he0, ha0]
-      rfl
+      exact durableBurnReserve_empty _ _ _ _ _ (by decide)
   unfold RssDurableReleased204 rssDurableSign204
   dsimp only
   rw [hRes]
@@ -12663,26 +12653,6 @@ theorem toprfDigestCross204_correct_or_collision
     exact Or.inl rfl
   · exact Or.inr ⟨_, _, hne, heq⟩
 
-/-- Digest transport, whole execution: with no collision of the reshare digest, the client
-    output is correct against one malicious server deviating at every multiplication of all
-    30 rounds and at finalization. Explicit collision extraction is per gate (above); this
-    whole-execution statement is in contrapositive form. -/
-theorem toprfDigestClient204_correct_of_collision_free
-    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
-    (hCtx : ctx.length < 2 ^ 20) (bad : Fin 5)
-    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
-    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4)
-    (forgedFinal : Option (Fin 5 → Lane4)) (hFree : ¬ HashCollision204 H) :
-    toprfActiveClient204 bad (toprfDigestCross204 H ctx layer bad fault faultDigest)
-        masks keys inputs forgedFinal =
-      some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)) := by
-  apply toprfActiveClient204_correct_of
-  intro gate i j term
-  rcases toprfDigestCross204_correct_or_collision H ctx layer hCtx bad fault faultDigest
-      gate i j term with h | hcol
-  · exact h
-  · exact False.elim (hFree hcol)
-
 private theorem gold_one_ne_zero204 : Goldilocks.one ≠ Goldilocks.zero := by
   intro h
   have hv := congrArg Goldilocks.val h
@@ -13098,6 +13068,319 @@ def toprfDigestClient204_extract
       exact (toprf_2of5_corrects_one_malicious_server id [] 0 0 1 (by decide) bad).2.2
         masks keys inputs _ (fun p hp => ite_false_of hp _ _))
 
+
+/-! ## Finite adaptive cross-term execution program -/
+
+structure ToprfTraceCall204 where
+  gate : List Nat
+  sender : Fin 5
+  receiver : Fin 5
+  term : Goldilocks
+
+abbrev ToprfTraceProgram204 (A : Type) := OracleComp ToprfTraceCall204 (Option Goldilocks) A
+
+def toprfTraceOracle204 (cross : ToprfCross204) (q : ToprfTraceCall204) : Option Goldilocks :=
+  cross q.gate q.sender q.receiver q.term
+
+def toprfTraceCollect204 {A : Type} : (n : Nat) → (Fin n → ToprfTraceProgram204 A) →
+    ToprfTraceProgram204 (Fin n → A)
+  | 0, _ => .pure Fin.elim0
+  | n + 1, f => (f 0).bind fun x =>
+      (toprfTraceCollect204 n (fun i => f i.succ)).bind fun xs => .pure (Fin.cases x xs)
+
+theorem eval_toprfTraceCollect204 {A : Type} (O : ToprfTraceCall204 → Option Goldilocks) :
+    ∀ (n : Nat) (f : Fin n → ToprfTraceProgram204 A),
+      evalOracleComp O (toprfTraceCollect204 n f) = fun i => evalOracleComp O (f i)
+  | 0, _ => by funext i; exact Fin.elim0 i
+  | n + 1, f => by
+    simp only [toprfTraceCollect204, evalOracleComp_bind, evalOracleComp_pure,
+      eval_toprfTraceCollect204 O n]
+    funext i
+    exact Fin.cases rfl (fun _ => rfl) i
+
+def toprfTraceMul204 (gate : List Nat) (x y : ToprfWire)
+    (mask : Fin 5 → Fin 5 → Goldilocks) : ToprfTraceProgram204 ToprfWire :=
+  (toprfTraceCollect204 5 (fun c => toprfTraceCollect204 5 (fun i =>
+    let term := if i = c then Goldilocks.mul (x i) (y c)
+      else Goldilocks.sub (Goldilocks.mul (x i) (y c)) (mask i c)
+    .query ⟨gate, i, c, term⟩ OracleComp.pure))).bind fun values =>
+    .pure (fun c => Goldilocks.add
+      (Goldilocks.add ((values c c).getD Goldilocks.zero)
+        (sumGoldList ((fin5Others c).map (fun j => mask c j))))
+      (sumGoldList ((fin5Others c).map (fun i => (values c i).getD Goldilocks.zero))))
+
+theorem eval_toprfTraceMul204 (cross : ToprfCross204) (gate : List Nat) (x y : ToprfWire)
+    (mask : Fin 5 → Fin 5 → Goldilocks) :
+    evalOracleComp (toprfTraceOracle204 cross) (toprfTraceMul204 gate x y mask) =
+      toprfActiveMul204 cross gate x y mask := by
+  simp only [toprfTraceMul204, evalOracleComp_bind, eval_toprfTraceCollect204,
+    evalOracleComp_query, evalOracleComp_pure, toprfTraceOracle204, ↓reduceIte]
+  funext c
+  unfold toprfActiveMul204
+  congr 1
+  congr 1
+  apply List.map_congr_left
+  intro i hi
+  have hn : i ≠ c := of_decide_eq_true (List.mem_filter.mp hi).2
+  simp only [hn, ↓reduceIte]
+
+def toprfTraceSbox204 (gate : List Nat) (w : ToprfWire)
+    (m1 m2 m3 m4 : Fin 5 → Fin 5 → Goldilocks) : ToprfTraceProgram204 ToprfWire :=
+  (toprfTraceMul204 (gate ++ [0]) w w m1).bind fun x2 =>
+  (toprfTraceMul204 (gate ++ [1]) x2 w m2).bind fun x3 =>
+  (toprfTraceMul204 (gate ++ [2]) x2 x2 m3).bind fun x4 =>
+    toprfTraceMul204 (gate ++ [3]) x3 x4 m4
+
+theorem eval_toprfTraceSbox204 (cross : ToprfCross204) (gate : List Nat) (w : ToprfWire)
+    (m1 m2 m3 m4 : Fin 5 → Fin 5 → Goldilocks) :
+    evalOracleComp (toprfTraceOracle204 cross) (toprfTraceSbox204 gate w m1 m2 m3 m4) =
+      toprfActiveSbox204 cross gate w m1 m2 m3 m4 := by
+  simp only [toprfTraceSbox204, evalOracleComp_bind, eval_toprfTraceMul204, toprfActiveSbox204]
+
+def toprfTraceExt204 (gate : List Nat) (m : Fin 12 → SboxMask4)
+    (rc : Poseidon2State12) (st : ToprfState12) : ToprfTraceProgram204 ToprfState12 :=
+  (toprfTraceCollect204 12 (fun i =>
+    toprfTraceSbox204 (gate ++ [i.val])
+      (fun c => toprfCoord204 i (toprfAddPublicState12 rc st c))
+      (m i).m1 (m i).m2 (m i).m3 (m i).m4)).bind fun y =>
+    .pure (fun c => applyME
+      ⟨⟨y 0 c, y 1 c, y 2 c, y 3 c⟩,
+       ⟨y 4 c, y 5 c, y 6 c, y 7 c⟩,
+       ⟨y 8 c, y 9 c, y 10 c, y 11 c⟩⟩)
+
+theorem eval_toprfTraceExt204 (cross : ToprfCross204) (gate : List Nat)
+    (m : Fin 12 → SboxMask4) (rc : Poseidon2State12) (st : ToprfState12) :
+    evalOracleComp (toprfTraceOracle204 cross) (toprfTraceExt204 gate m rc st) =
+      toprfActiveExtRound204 cross gate m rc st := by
+  simp only [toprfTraceExt204, evalOracleComp_bind, eval_toprfTraceCollect204,
+    eval_toprfTraceSbox204, evalOracleComp_pure, toprfCoord204, toprfActiveExtRound204]
+  rfl
+
+def toprfTraceInt204 (gate : List Nat) (m : SboxMask4)
+    (rc : Goldilocks) (st : ToprfState12) : ToprfTraceProgram204 ToprfState12 :=
+  (toprfTraceSbox204 (gate ++ [0])
+    (fun c => if c = 0 then Goldilocks.add (st 0).b0.x0 rc else (st c).b0.x0)
+    m.m1 m.m2 m.m3 m.m4).bind fun y =>
+    .pure (fun c => applyMI ⟨⟨y c, (st c).b0.x1, (st c).b0.x2, (st c).b0.x3⟩,
+      (st c).b1, (st c).b2⟩)
+
+theorem eval_toprfTraceInt204 (cross : ToprfCross204) (gate : List Nat)
+    (m : SboxMask4) (rc : Goldilocks) (st : ToprfState12) :
+    evalOracleComp (toprfTraceOracle204 cross) (toprfTraceInt204 gate m rc st) =
+      toprfActiveIntRound204 cross gate m rc st := by
+  simp only [toprfTraceInt204, evalOracleComp_bind, eval_toprfTraceSbox204,
+    evalOracleComp_pure, toprfActiveIntRound204]
+
+def toprfTraceRounds204 {A : Type} (round : Nat → A → ToprfState12 → ToprfTraceProgram204 ToprfState12) :
+    Nat → List A → ToprfState12 → ToprfTraceProgram204 ToprfState12
+  | _, [], st => .pure st
+  | r, a :: rest, st => (round r a st).bind fun next => toprfTraceRounds204 round (r + 1) rest next
+
+theorem eval_toprfTraceRounds204 {A : Type} (cross : ToprfCross204)
+    (round : Nat → A → ToprfState12 → ToprfTraceProgram204 ToprfState12)
+    (actual : Nat → A → ToprfState12 → ToprfState12)
+    (h : ∀ r a st, evalOracleComp (toprfTraceOracle204 cross) (round r a st) = actual r a st) :
+    ∀ (rounds : List A) (r : Nat) (st : ToprfState12),
+      evalOracleComp (toprfTraceOracle204 cross) (toprfTraceRounds204 round r rounds st) =
+        runToprfRoundsIdx actual r rounds st
+  | [], _, _ => by rw [toprfTraceRounds204, evalOracleComp_pure]; rfl
+  | a :: rest, r, st => by
+    rw [toprfTraceRounds204, evalOracleComp_bind, h, eval_toprfTraceRounds204 cross round actual h]
+    rfl
+
+def toprfTracePerm204 (m : ToprfPerm12Masks) (init : ToprfState12) :
+    ToprfTraceProgram204 ToprfState12 :=
+  (toprfTraceRounds204 (fun r rc st => toprfTraceExt204 [0, r] (m.initExt r) rc st)
+    0 poseidon2InitialExtConsts (fun c => applyME (init c))).bind fun s1 =>
+  (toprfTraceRounds204 (fun r rc st => toprfTraceInt204 [1, r] (m.internal r) rc st)
+    0 poseidon2InternalConsts s1).bind fun s2 =>
+    toprfTraceRounds204 (fun r rc st => toprfTraceExt204 [2, r] (m.termExt r) rc st)
+      0 poseidon2TerminalExtConsts s2
+
+theorem eval_toprfTracePerm204 (cross : ToprfCross204) (m : ToprfPerm12Masks) (init : ToprfState12) :
+    evalOracleComp (toprfTraceOracle204 cross) (toprfTracePerm204 m init) =
+      toprfActivePerm204 cross m init := by
+  simp only [toprfTracePerm204, evalOracleComp_bind,
+    eval_toprfTraceRounds204 cross _ _ (fun r rc st => eval_toprfTraceExt204 cross [0, r] (m.initExt r) rc st),
+    eval_toprfTraceRounds204 cross _ _ (fun r rc st => eval_toprfTraceInt204 cross [1, r] (m.internal r) rc st),
+    eval_toprfTraceRounds204 cross _ _ (fun r rc st => eval_toprfTraceExt204 cross [2, r] (m.termExt r) rc st),
+    toprfActivePerm204]
+
+/-- The two digest inputs associated with a consumed transport call: its received first
+value vector and its honest digest value. This finite overapproximation is independent of
+which comparison fails, and contains at most two inputs per consumed cross-term call. -/
+def toprfTraceCallInputs204 (ctx : List UInt8) (layer : UInt64) (bad : Fin 5)
+    (fault : ToprfVecFault204) (q : ToprfTraceCall204) : List (List UInt8) :=
+  let m0 := if (toprfHolders q.sender q.receiver).getD 0 0 = bad
+    then toprfBoundedVec204 (fault q.gate q.sender q.receiver q.term) else some [q.term]
+  [toprfGroupDigestPreimage ctx layer q.sender q.receiver (m0.getD []),
+   toprfGroupDigestPreimage ctx layer q.sender q.receiver [q.term]]
+
+structure ToprfObservedCollision204 (H : List UInt8 → List UInt8)
+    (inputs : List (List UInt8)) extends ToprfCollisionWitness204 H where
+  left_mem : left ∈ inputs
+  right_mem : right ∈ inputs
+
+def toprfDecodeObserved204
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (i j : Fin 5) (honest : List Goldilocks)
+    (m0 m1 : Option (List Goldilocks)) (md : Option (List UInt8))
+    (cert : decodeGroupLarge H ctx layer i j m0 m1 md = some honest ∨
+      ∃ forged, m0 = some forged ∧ forged ≠ honest ∧
+        toprfGroupDigestPreimage ctx layer i j forged ≠
+          toprfGroupDigestPreimage ctx layer i j honest ∧
+        H (toprfGroupDigestPreimage ctx layer i j forged) =
+          H (toprfGroupDigestPreimage ctx layer i j honest)) :
+    PSum (decodeGroupLarge H ctx layer i j m0 m1 md = some honest)
+      (ToprfObservedCollision204 H
+        [toprfGroupDigestPreimage ctx layer i j (m0.getD []),
+         toprfGroupDigestPreimage ctx layer i j honest]) :=
+  if h : decodeGroupLarge H ctx layer i j m0 m1 md = some honest then .inl h
+  else .inr {
+    left := toprfGroupDigestPreimage ctx layer i j (m0.getD [])
+    right := toprfGroupDigestPreimage ctx layer i j honest
+    distinct := by
+      rcases cert with ok | ⟨v, hv, _, hn, _⟩
+      · exact False.elim (h ok)
+      · simpa only [hv, Option.getD_some] using hn
+    sameDigest := by
+      rcases cert with ok | ⟨v, hv, _, _, he⟩
+      · exact False.elim (h ok)
+      · simpa only [hv, Option.getD_some] using he
+    left_mem := .head _
+    right_mem := .tail _ (.head _) }
+
+def toprfDigestCross204_extract_observed
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (hCtx : ctx.length < 2 ^ 20) (bad : Fin 5)
+    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204) (q : ToprfTraceCall204) :
+    PSum (toprfDigestCross204 H ctx layer bad fault faultDigest q.gate q.sender q.receiver q.term = some q.term)
+      (ToprfObservedCollision204 H (toprfTraceCallInputs204 ctx layer bad fault q)) := by
+  obtain ⟨h01, h02, h12⟩ := toprfThreeHoldersDistinct204 q.sender q.receiver
+  let message (p : Fin 5) :=
+    if p = bad then toprfBoundedVec204 (fault q.gate q.sender q.receiver q.term) else some [q.term]
+  have hm : ∀ p, p ≠ bad → message p = some [q.term] := fun p hp => ite_false_of hp _ _
+  have hb : ∀ v, message ((toprfHolders q.sender q.receiver).getD 0 0) = some v → v.length < 2 ^ 20 := by
+    intro v hv
+    if h : (toprfHolders q.sender q.receiver).getD 0 0 = bad then
+      have hv' : toprfBoundedVec204 (fault q.gate q.sender q.receiver q.term) = some v := by
+        simpa only [message, h, ↓reduceIte] using hv
+      exact toprfBoundedVec204_bound hv'
+    else
+      rw [hm _ h] at hv
+      cases hv
+      exact (by decide : (1 : Nat) < 2 ^ 20)
+  have cert := (toprf_2of5_corrects_one_malicious_server H ctx layer q.sender q.receiver hCtx bad).2.1
+    ((toprfHolders q.sender q.receiver).getD 0 0)
+    ((toprfHolders q.sender q.receiver).getD 1 0)
+    ((toprfHolders q.sender q.receiver).getD 2 0) [q.term] _ _
+    (if (toprfHolders q.sender q.receiver).getD 2 0 = bad then faultDigest q.gate q.sender q.receiver q.term
+      else some (toprfGroupDigest H ctx layer q.sender q.receiver [q.term]))
+    h01 h02 h12 (by decide : (1 : Nat) < 2 ^ 20) hb (hm _) (hm _) (fun hp => ite_false_of hp _ _)
+  match toprfDecodeObserved204 H ctx layer q.sender q.receiver [q.term] _ _ _ cert with
+  | .inl h => exact .inl (by unfold toprfDigestCross204; rw [h])
+  | .inr c => exact .inr c
+
+/-- Audit the consumed call log. A failure carries both concrete inputs and their membership
+in the full finite transport-input table, rather than an unrestricted hash-collision existential. -/
+def toprfAuditTrace204
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (hCtx : ctx.length < 2 ^ 20) (bad : Fin 5)
+    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204) :
+    (calls : List ToprfTraceCall204) →
+    PSum (∀ q ∈ calls,
+      toprfDigestCross204 H ctx layer bad fault faultDigest q.gate q.sender q.receiver q.term = some q.term)
+      (ToprfObservedCollision204 H (calls.flatMap (toprfTraceCallInputs204 ctx layer bad fault)))
+  | [] => .inl (fun _ h => False.elim (List.not_mem_nil h))
+  | q :: rest =>
+    match toprfDigestCross204_extract_observed H ctx layer hCtx bad fault faultDigest q with
+    | .inr c => .inr {
+        toToprfCollisionWitness204 := c.toToprfCollisionWitness204
+        left_mem := List.mem_flatMap.mpr ⟨q, .head _, c.left_mem⟩
+        right_mem := List.mem_flatMap.mpr ⟨q, .head _, c.right_mem⟩ }
+    | .inl hq =>
+      match toprfAuditTrace204 H ctx layer hCtx bad fault faultDigest rest with
+      | .inr c => .inr {
+          toToprfCollisionWitness204 := c.toToprfCollisionWitness204
+          left_mem := List.mem_append_right _ c.left_mem
+          right_mem := List.mem_append_right _ c.right_mem }
+      | .inl hs => .inl (fun t ht => by
+          rcases List.mem_cons.mp ht with he | he
+          · cases he; exact hq
+          · exact hs t he)
+
+def toprfDigestObservedInputs204 (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (bad : Fin 5) (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4) : List (List UInt8) :=
+  (queryLog (toprfTraceOracle204 (toprfDigestCross204 H ctx layer bad fault faultDigest))
+    (toprfTracePerm204 masks (toprfInitPrfState keys inputs))).flatMap
+      (toprfTraceCallInputs204 ctx layer bad fault)
+
+/-- Full 30-round client execution: either the output is correct, or the execution yields an
+explicit collision whose two inputs are in its finite observed transport-input table. -/
+def toprfDigestClient204_extract_observed
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (hCtx : ctx.length < 2 ^ 20) (bad : Fin 5)
+    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4)
+    (forgedFinal : Option (Fin 5 → Lane4)) :
+    PSum (toprfActiveClient204 bad (toprfDigestCross204 H ctx layer bad fault faultDigest)
+        masks keys inputs forgedFinal =
+      some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)))
+      (ToprfObservedCollision204 H
+        (toprfDigestObservedInputs204 H ctx layer bad fault faultDigest masks keys inputs)) := by
+  let actual := toprfDigestCross204 H ctx layer bad fault faultDigest
+  let ideal : ToprfCross204 := fun _ _ _ term => some term
+  let program := toprfTracePerm204 masks (toprfInitPrfState keys inputs)
+  match toprfAuditTrace204 H ctx layer hCtx bad fault faultDigest
+      (queryLog (toprfTraceOracle204 actual) program) with
+  | .inr c => exact .inr c
+  | .inl h =>
+    have hp := evalOracleComp_agree_on_queryLog (toprfTraceOracle204 actual)
+      (toprfTraceOracle204 ideal) program h
+    rw [eval_toprfTracePerm204, eval_toprfTracePerm204] at hp
+    have he := hp.trans (toprfActivePerm204_eq ideal (fun _ _ _ _ => rfl) masks _)
+    exact .inl (by
+      unfold toprfActiveClient204
+      rw [he]
+      exact (toprf_2of5_corrects_one_malicious_server id [] 0 0 1 (by decide) bad).2.2
+        masks keys inputs _ (fun p hp => ite_false_of hp _ _))
+
+theorem toprfDigestClient204_correct_of_collision_free
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (hCtx : ctx.length < 2 ^ 20) (bad : Fin 5)
+    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4)
+    (forgedFinal : Option (Fin 5 → Lane4))
+    (hFree : ∀ a ∈ toprfDigestObservedInputs204 H ctx layer bad fault faultDigest masks keys inputs,
+      ∀ b ∈ toprfDigestObservedInputs204 H ctx layer bad fault faultDigest masks keys inputs,
+      H a = H b → a = b) :
+    toprfActiveClient204 bad (toprfDigestCross204 H ctx layer bad fault faultDigest)
+        masks keys inputs forgedFinal =
+      some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)) := by
+  match toprfDigestClient204_extract_observed H ctx layer hCtx bad fault faultDigest masks keys inputs forgedFinal with
+  | .inl h => exact h
+  | .inr c => exact False.elim (c.distinct (hFree _ c.left_mem _ c.right_mem c.sameDigest))
+
+#verify_constructive toprfDigestClient204_correct_of_collision_free
+
+/-- There are two candidate digest inputs per cross-term call in the finite adaptive log. -/
+theorem toprfTraceInputs204_length (ctx : List UInt8) (layer : UInt64) (bad : Fin 5)
+    (fault : ToprfVecFault204) : ∀ calls : List ToprfTraceCall204,
+    (calls.flatMap (toprfTraceCallInputs204 ctx layer bad fault)).length = 2 * calls.length
+  | [] => rfl
+  | q :: rest => by
+    rw [List.flatMap_cons, List.length_append, toprfTraceInputs204_length ctx layer bad fault rest]
+    change 2 + 2 * rest.length = 2 * (rest.length + 1)
+    omega
+
+theorem toprfDigestObservedInputs204_length (H : List UInt8 → List UInt8) (ctx : List UInt8)
+    (layer : UInt64) (bad : Fin 5) (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4) :
+    (toprfDigestObservedInputs204 H ctx layer bad fault faultDigest masks keys inputs).length =
+      2 * (queryLog (toprfTraceOracle204 (toprfDigestCross204 H ctx layer bad fault faultDigest))
+        (toprfTracePerm204 masks (toprfInitPrfState keys inputs))).length :=
+  toprfTraceInputs204_length ctx layer bad fault _
 
 /-! ## Authenticated replicated shares and a masked rejection observation
 
@@ -14512,5 +14795,180 @@ def blindVcReachableBinding204
 #verify_constructive tooth_subsets2Of5_disjoint
 #verify_constructive toprfHolders_spec
 #verify_constructive blind_vc_zkboo_selective_disclosure_sound_and_hiding
+
+/-! ### Exports for lane cred-mig -/
+
+theorem Vec.toList_nil {α : Type} : (Vec.nil : Vec α 0).toList = [] := by rfl
+
+theorem Vec.toList_cons {α : Type} {n : Nat} (x : α) (xs : Vec α n) :
+    (Vec.cons x xs).toList = x :: xs.toList := by rfl
+
+theorem evalVcMerklePathBool_nil (epoch : UInt64) (layer : Nat) (cur : Lane6) :
+    evalVcMerklePathBool epoch layer cur [] = cur := by rfl
+
+theorem evalVcMerklePathBool_cons_false (epoch : UInt64) (layer : Nat) (cur sib : Lane6)
+    (rest : List (Bool × Lane6)) :
+    evalVcMerklePathBool epoch layer cur ((false, sib) :: rest) =
+      evalVcMerklePathBool epoch (layer + 1) (vcMerkleHashPair cur sib epoch layer) rest := by rfl
+
+theorem evalVcMerklePathBool_cons_true (epoch : UInt64) (layer : Nat) (cur sib : Lane6)
+    (rest : List (Bool × Lane6)) :
+    evalVcMerklePathBool epoch layer cur ((true, sib) :: rest) =
+      evalVcMerklePathBool epoch (layer + 1) (vcMerkleHashPair sib cur epoch layer) rest := by rfl
+
+theorem vcMerkleHashPair_eq (left right : Lane6) (epoch : UInt64) (layer : Nat) :
+    vcMerkleHashPair left right epoch layer =
+      state12Rate6 (absorbRate6Sponge3 (vcMerkleChunks left right epoch layer).1
+        (vcMerkleChunks left right epoch layer).2.1 (vcMerkleChunks left right epoch layer).2.2) := by
+  rfl
+
+/-- The two children are the first two rate chunks of a Merkle node preimage. -/
+theorem vcMerkleChunks_children_inj {l r l' r' : Lane6} {epoch : UInt64} {layer : Nat}
+    (h : vcMerkleChunks l r epoch layer = vcMerkleChunks l' r' epoch layer) : l = l' ∧ r = r' :=
+  ⟨congrArg Prod.fst h, congrArg (fun p => p.2.1) h⟩
+
+/-- An accepted opened repetition checked the disclosed-index list of the statement. -/
+theorem verifyOpenedBlindVcRep_disclosedStrictAsc
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {schema : VcSchema} {issuerEpoch : UInt64} {treeDepth : Nat}
+    {accRoot presCommit scopeTag : Lane6} {verifierScopeLimbs : Lane4}
+    {disclosed : List (Nat × Goldilocks)} {repIdx : Nat} {expectedE : Fin 3}
+    {o : OpenedBlindVcRep}
+    (h : verifyOpenedBlindVcRep prgExpand schema issuerEpoch treeDepth accRoot presCommit scopeTag
+      verifierScopeLimbs disclosed repIdx expectedE o = true) :
+    vcCheckDisclosedStrictAsc schema.arity disclosed = true := by
+  unfold verifyOpenedBlindVcRep at h; dsimp only at h
+  cases hG :
+      (decide (o.e = expectedE) &&
+       vcCheckDisclosedStrictAsc schema.arity disclosed &&
+       decide (o.viewE.attrShares.length = schema.arity) &&
+       decide (o.viewE1.attrShares.length = schema.arity) &&
+       decide (o.viewE.merkleLevels.length = treeDepth) &&
+       decide (o.viewE1.merkleLevels.length = treeDepth) &&
+       vcCheckPartyDisclosedShares o.e o.viewE.attrShares disclosed &&
+       vcCheckPartyDisclosedShares (vcNextParty3 o.e) o.viewE1.attrShares disclosed &&
+       checkPartyPrgTape prgExpand treeDepth repIdx o.e o.viewE &&
+       checkPartyPrgTape prgExpand treeDepth repIdx (vcNextParty3 o.e) o.viewE1) with
+  | false => rw [hG] at h; cases h
+  | true => simp only [Bool.and_eq_true] at hG; exact hG.1.1.1.1.1.1.1.1.2
+
+theorem blindVcWitnessValid_iff (stmt : BlindVcPublicStatement)
+    (wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth) :
+    BlindVcWitnessValid stmt wit ↔
+      (vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true ∧
+      (∀ p ∈ stmt.disclosedAttrs, wit.attrs.toList[p.1]? = some p.2) ∧
+      (∃ leaf : Lane6,
+        computeVcPoseidon2Commit stmt.schema wit.attrs.toList wit.holderBlind vcAttrCommitTag =
+          some leaf ∧
+        evalVcMerklePathBool stmt.issuerEpoch 0 leaf wit.merkleSteps.toList =
+          stmt.accumulatorRoot) ∧
+      computeVcPoseidon2Commit stmt.schema wit.attrs.toList wit.presBlind vcPresCommitTag =
+        some stmt.presCommit ∧
+      computeVcScopeTag stmt.schema.schemaId wit.holderBlind stmt.verifierScopeLimbs =
+        stmt.scopeTag) := Iff.rfl
+
+/-- The three openings of one honest repetition agree on every overlapping view. -/
+theorem vcRewoundCommitConflict_honest_table
+    (H : List UInt8 → List UInt8) (nonce : Vec UInt8 32) (idx : Nat)
+    (tr : BlindVcRepTriple) :
+    ¬ VcRewoundCommitConflict H nonce idx
+      (openBlindVcRep H nonce idx tr 0)
+      (openBlindVcRep H nonce idx tr 1)
+      (openBlindVcRep H nonce idx tr 2) := by
+  simp only [VcRewoundCommitConflict, openBlindVcRep, vcNextParty3,
+    ne_eq, not_true_eq_false, false_and, or_self, not_false_eq_true]
+/-- An accepting run of the wire verifier decodes a key and a signature that the algebraic
+core accepts at the FIPS 204 message representative of `(pk, ctx, msg)`. -/
+theorem mldsaVerifyBytes204_accepts_core {budget : Nat} {pk msg ctx sig : List UInt8}
+    (h : mldsaVerifyBytes204 budget pk msg ctx sig = true) :
+    ∃ (A : PolyMat4) (t1Scaled : PolyVec4) (c : Poly256) (decoded : DecodedSignature204),
+      decodeSignature204 sig = some decoded ∧
+      mldsaVerify mldsa44ChallengeHash (fun _ => c) A t1Scaled
+        (shake256Xof 64 (shake256Xof 64 pk ++ [0, UInt8.ofNat ctx.length] ++ ctx ++ msg))
+        decoded.challenge decoded.z decoded.hints = true := by
+  unfold mldsaVerifyBytes204 at h
+  split at h
+  · cases h
+  · cases ha : expandA204 budget (pk.take 32) with
+    | none => simp only [ha] at h; cases h
+    | some A =>
+      cases hd : decodeSignature204 sig with
+      | none => simp only [ha, hd] at h; cases h
+      | some decoded =>
+        rw [ha, hd] at h
+        dsimp only at h
+        cases hc : sampleInBall204 budget decoded.challenge with
+        | none => simp [hc] at h
+        | some c =>
+          rw [hc] at h
+          exact ⟨A, _, c, decoded, rfl, h⟩
+
+set_option exponentiation.threshold 1024 in
+/-- **Rate-6 / Capacity-6 Width-12 `sponge12` 6-Limb Coherence (`blindVc_sponge12_rate6_cap6_six_limb_coherence`)**:
+    Locks `BlindVcCollisionFinder` directly to `crates/qsag-cred/src/blind_vc.rs:149-268`:
+    1. `computeVcPoseidon2Commit` accepts iff `1 ≤ attrs.length = schema.arity ≤ 6`, absorbs `schema.arity`
+       at `c2.x0` and `10*` pad `1` at `c2.x1` into the 3-block rate-6 / capacity-6 `absorbRate6Sponge3`
+       (with 6 zero-initialized capacity lanes), and squeezes 6 limbs (`Lane6`, `> 2^383` states);
+    2. `computeVcScopeTag` absorbs two 6-limb blocks plus the full-block `10*` pad `⟨1, 0, 0, 0, 0, 0⟩`
+       (`N = 12` multiple of rate `6`) into `absorbRate6Sponge3` and squeezes 6 limbs (`Lane6`);
+    3. `vcMerkleHashPair` absorbs left/right 6-limb child digests plus 4 domain limbs and `10*` pad `1`
+       at `c2.x4` (`N = 16`) into `absorbRate6Sponge3` and squeezes 6 limbs (`Lane6`). -/
+theorem blindVc_sponge12_rate6_cap6_six_limb_coherence
+    (schema : VcSchema) (attrs : List Goldilocks) (blind scopeLimbs : Lane4)
+    (tag epoch : UInt64) (left right : Lane6) (layer : Nat) :
+    ((attrs.length = schema.arity →
+        (vcCommitChunks schema attrs blind tag).2.2 =
+          ⟨Goldilocks.ofNat schema.arity, Goldilocks.one,
+           Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ ∧
+        computeVcPoseidon2Commit schema attrs blind tag =
+          some (state12Rate6 (absorbRate6Sponge3
+            (vcCommitChunks schema attrs blind tag).1
+            (vcCommitChunks schema attrs blind tag).2.1
+            (vcCommitChunks schema attrs blind tag).2.2))) ∧
+     (attrs.length ≠ schema.arity → computeVcPoseidon2Commit schema attrs blind tag = none)) ∧
+    ((vcScopeChunks schema.schemaId blind scopeLimbs).2.2 =
+        ⟨Goldilocks.one, Goldilocks.zero, Goldilocks.zero,
+         Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ ∧
+     computeVcScopeTag schema.schemaId blind scopeLimbs =
+        state12Rate6 (absorbRate6Sponge3
+          (vcScopeChunks schema.schemaId blind scopeLimbs).1
+          (vcScopeChunks schema.schemaId blind scopeLimbs).2.1
+          (vcScopeChunks schema.schemaId blind scopeLimbs).2.2)) ∧
+    ((vcMerkleChunks left right epoch layer).2.2.x4 = Goldilocks.one ∧
+     (vcMerkleChunks left right epoch layer).2.2.x5 = Goldilocks.zero ∧
+     vcMerkleHashPair left right epoch layer =
+        state12Rate6 (absorbRate6Sponge3 left right
+          (vcMerkleChunks left right epoch layer).2.2)) ∧
+    state12Cap6 (mkState12Of6 (vcCommitChunks schema attrs blind tag).1 lane6Zero) = lane6Zero ∧
+    2 ^ 383 < goldilocksPrime ^ 6 := by
+  refine ⟨⟨fun hEq => ⟨rfl, ?_⟩, fun hNe => ?_⟩, ⟨rfl, rfl⟩, ⟨rfl, rfl, rfl⟩, rfl, by decide⟩
+  · unfold computeVcPoseidon2Commit; simp only [hEq, ↓reduceIte]
+  · unfold computeVcPoseidon2Commit; simp only [hNe, ↓reduceIte]
+
+-- (end exports for lane cred-mig)
+
+theorem rssMaskAddEquiv_toFun (target m : PolyVec4) :
+    (rssMaskAddEquiv target).toFun m = addVec4 target m := by unfold rssMaskAddEquiv; rfl
+
+theorem rssMaskAddEquiv_invFun (target m : PolyVec4) :
+    (rssMaskAddEquiv target).invFun m = subVec4 m target := by unfold rssMaskAddEquiv; rfl
+
+theorem sacGateError204_eq (g : SacGate204) :
+    sacGateError204 g = Fq204.sub g.z (Fq204.mul g.x g.y) := by unfold sacGateError204; rfl
+
+private theorem mkRssSignAttemptOutcome_nextState
+    (stBurned : RssMlDsaSignerState) (usedAttempt : Nat)
+    (cTilde : List UInt8) (w z u maskW maskZ maskLow : PolyVec4)
+    (w1 : Fin 4 → NatTree 8) (h : Fin 4 → HintTree 8) (accept : Bool) :
+    (mkRssSignAttemptOutcome stBurned usedAttempt cTilde w z u maskW maskZ maskLow w1 h accept).nextState = stBurned := by
+  cases accept <;> rfl
+
+theorem rssSignCore_nextState
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput) :
+    (rssSignCore chalHash st inp).nextState = st := by
+  unfold rssSignCore
+  dsimp only
+  exact mkRssSignAttemptOutcome_nextState _ _ _ _ _ _ _ _ _ _ _ _
 
 end Qsag

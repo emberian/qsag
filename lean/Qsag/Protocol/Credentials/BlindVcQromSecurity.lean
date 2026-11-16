@@ -1,42 +1,49 @@
 module
 /-
-# BlindVC 438-Repetition Multi-Round QROM Fiat-Shamir & Issuer-Binding Security
+# BlindVC ternary (3-party ZKBoo, 438 repetitions) model and issuer root attestation
 
-Constructive Lean 4.35 bounds for the collision-filtered, supplied-opening-table model
-of `BlindVC` (`Quantum128`, `438` ZKBoo repetitions). The language is actual credential
-witness validity. `VcRewoundCommitConflict` records an actual pair of conflicting committed
-views in the finite supplied table, and `blindVc_committed_acceptance_decomposition`
-accounts for the omitted event. Bounding that event computationally, constructing the
-three-opening table from a quantum prover, and linking measured-query mass to the output
-forgery event remain separate obligations. There is no global collision-freedom premise.
-1. **Interactive `438`-Repetition ZKBoo `PublicCoinIop` & `RbrStateFunction`
-   (`blindVcParallelRbr`, `blindVc_quantum128_interactive_rbr_bound`)**:
-   Ternary pigeonhole across `438` committed repetitions (`2^438 * 2^256 < 3^438`, `> 128` Grover
-   bits) composed with adaptive state-restoration (`rbr_implies_state_restoration_soundness`).
-2. **Multi-Round QROM Fiat-Shamir (`blindVcQromFsRound`, `blindVc_quantum128_qrom_fs_soundness`)**:
-   Exact `64`-bit modulo-`3` squeeze (`blindVcBadWord64 = 12297829382473034411` out of `2^64`),
-   proving `(2 * Q + 1)^2 * blindVcBadWord64^438 * 2^128 < (2^64)^438` for all `Q ≤ 2^60`.
-3. **Merkle Path Bridge & Issuer `ML-DSA` Root-Attestation Unforgeability
-   (`evalVcMerklePathBool_eq_merkleRootFromPath`, `blindVc_presentation_reduces_to_issuer_mldsa`)**:
-   Bridges `evalVcMerklePathBool` to `merkleRootFromPath`, proves `vcMerkleTree_opening_sound`,
-   and gives an issuer-attestation/collision/witness disjunction given three consistent
-   accepted openings. Fresh-message EUF-CMA and quantum extraction are separate games.
+`blind_vc.rs` uses 3-party ZKBoo with 438 repetitions for blind issuance; its presentations
+are the 256-party, 33-repetition protocol over `GF(p^5)`, modelled in
+`AdvancedMpcAndCreds` (seed tree, hidden-party opening) and counted in
+`RepetitionCutAndChoose`. The `BlindVcPresentation` / `BlindVcPublicStatement` relation of
+this module (disclosed attributes, Merkle membership, scope tag, proved by ternary openings) is
+the ZKBoo presentation that protocol replaced: sections 1 and 2 are statements about that
+ternary model, not about deployed presentations.
+
+1. **Ternary parallel repetition (`blindVcParallelRbr`,
+   `blindVc_quantum128_interactive_rbr_bound`)**: for the collision-filtered,
+   supplied-opening-table verifier, at most `2^438` of `3^438` challenge vectors accept a false
+   statement (`2^438 * 2^256 < 3^438`), composed with `rbr_implies_state_restoration_soundness`.
+   `VcRewoundCommitConflict` is the event the filter removes;
+   `blindVc_committed_acceptance_decomposition` accounts for it. Bounding that event, building
+   the three-opening table from a quantum prover and linking measured-query mass to forgery are
+   not done here.
+2. **Ternary QROM round (`blindVcQromFsRound`, `blindVc_quantum128_qrom_fs_soundness`)**:
+   exact `64`-bit modulo-`3` squeeze (`blindVcBadWord64` of `2^64`) and
+   `(2Q + 1)^2 * blindVcBadWord64^438 * 2^128 < (2^64)^438` for `Q ≤ 2^60`.
+3. **Merkle path bridge and issuer root attestation** (shared by both presentation protocols):
+   `evalVcMerklePathBool_eq_merkleRootFromPath`, `vcMerkleTree_opening_sound`; the attestation
+   message `IssuerRootAttestation::signing_message` (142 bytes, injective), the FIPS 204
+   message representative `μ = SHAKE256(SHAKE256(pk, 64) ‖ 0 ‖ |ctx| ‖ ctx ‖ M, 64)`
+   (`fips204MessageRepresentative`), the attestation check on the algebraic ML-DSA core at `μ`
+   (`verifyIssuerRootAttestation`) and on wire bytes (`verifyIssuerRootAttestationBytes`,
+   `verifyIssuerRootAttestationBytes_accepts_core`), and
+   `blindVc_presentation_reduces_to_issuer_mldsa` for the ternary model. EUF-CMA of ML-DSA and
+   quantum extraction are separate games.
+4. **Opening round of the 256-party presentation in the QROM**
+   (`credentialSd_opening_bad_count_le_one`, `credentialSd_opening_round_qrom_bound`): the
+   33-byte hidden-party challenge alone, conditional on a nonzero check value per repetition.
 -/
 
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
-import all Qsag.Math.Goldilocks
 
 public section
 namespace Qsag
 
 set_option autoImplicit false
+
 set_option exponentiation.threshold 2048
 
 private theorem nat_lt_of_mul_lt_mul_right {a b c : Nat} (h : a * c < b * c) : a < b :=
@@ -64,14 +71,15 @@ def Vec.get {α : Type} : {n : Nat} → Vec α n → Fin n → α
   | _ + 1, .cons x _, ⟨0, _⟩ => x
   | _ + 1, .cons _ xs, ⟨i + 1, hi⟩ => Vec.get xs ⟨i, Nat.lt_of_succ_lt_succ hi⟩
 
-private def vecOfListLen {α : Type} : (xs : List α) → {n : Nat} → xs.length = n → Vec α n
+def vecOfListLen {α : Type} : (xs : List α) → {n : Nat} → xs.length = n → Vec α n
   | [], 0, _ => .nil
   | x :: xs, _ + 1, h => .cons x (vecOfListLen xs (Nat.succ.inj h))
 
-private theorem vecOfListLen_toList {α : Type} : ∀ (xs : List α) {n : Nat} (h : xs.length = n),
+theorem vecOfListLen_toList {α : Type} : ∀ (xs : List α) {n : Nat} (h : xs.length = n),
     (vecOfListLen xs h).toList = xs
-  | [], 0, _ => rfl
-  | _ :: xs, _ + 1, h => by simp [vecOfListLen, Vec.toList, vecOfListLen_toList xs (Nat.succ.inj h)]
+  | [], 0, _ => by rw [vecOfListLen, Vec.toList_nil]
+  | _ :: xs, _ + 1, h => by
+    rw [vecOfListLen, Vec.toList_cons, vecOfListLen_toList xs (Nat.succ.inj h)]
 
 /-! ## §1. `438`-Repetition `BlindVC` ZKBoo `PublicCoinIop` & `RbrStateFunction` -/
 
@@ -81,7 +89,7 @@ theorem fin3_not_all_count_le_two (p : Fin 3 → Bool)
     (hNotAll : fin3AllTrue p = false) :
     qsum 3 (fun e => if p e = true then 1 else 0) ≤ 2 := by
   unfold fin3AllTrue at hNotAll
-  simp only [qsum, Nat.add_zero]
+  simp only [qsum_succ, qsum_zero, Nat.add_zero]
   change (if p 0 = true then 1 else 0) +
     ((if p 1 = true then 1 else 0) + (if p 2 = true then 1 else 0)) ≤ 2
   cases h0 : p 0 <;> cases h1 : p 1 <;> cases h2 : p 2 <;> simp_all
@@ -95,6 +103,19 @@ def verifyCommittedBlindVcRep
   verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
     stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
     stmt.disclosedAttrs repIdx e o
+
+theorem verifyCommittedBlindVcRep_eq_true_iff
+    {H : List UInt8 → List UInt8}
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {stmt : BlindVcPublicStatement} {repIdx : Nat}
+    {r1 : Triple3 (List UInt8) × VcRepFinalOuts3} {e : Fin 3} {o : OpenedBlindVcRep} :
+    verifyCommittedBlindVcRep H prgExpand stmt repIdx r1 e o = true ↔
+      (reconstructRepRound1 H stmt.presNonce repIdx o = r1 ∧
+       verifyOpenedBlindVcRep prgExpand stmt.schema stmt.issuerEpoch stmt.treeDepth
+         stmt.accumulatorRoot stmt.presCommit stmt.scopeTag stmt.verifierScopeLimbs
+         stmt.disclosedAttrs repIdx e o = true) := by
+  unfold verifyCommittedBlindVcRep
+  rw [Bool.and_eq_true, decide_eq_true_eq]
 
 /-- Excludes only a collision in this supplied three-opening table. The unfiltered
 verifier remains `verifyCommittedBlindVcRep`; the omitted event is accounted for below. -/
@@ -123,6 +144,26 @@ theorem blindVc_committed_acceptance_decomposition
   · exact Or.inr (by simp only [verifyCollisionFreeCommittedBlindVcRep, hc, decide_false,
       Bool.not_false, Bool.true_and, h])
 
+/-- The data extracted from three consistent openings is a valid witness of the statement. -/
+theorem blindVcWitnessValid_of_extraction {stmt : BlindVcPublicStatement}
+    {attrs : List Goldilocks} {hb pb : Lane4} {leaf : Lane6} {steps : List (Bool × Lane6)}
+    (hAsc : vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true)
+    (hAr : attrs.length = stmt.schema.arity) (hSLen : steps.length = stmt.treeDepth)
+    (hDisc : ∀ p ∈ stmt.disclosedAttrs, attrs[p.1]? = some p.2)
+    (hLeaf : computeVcPoseidon2Commit stmt.schema attrs hb vcAttrCommitTag = some leaf)
+    (hRoot : evalVcMerklePathBool stmt.issuerEpoch 0 leaf steps = stmt.accumulatorRoot)
+    (hPres : computeVcPoseidon2Commit stmt.schema attrs pb vcPresCommitTag = some stmt.presCommit)
+    (hScope : computeVcScopeTag stmt.schema.schemaId hb stmt.verifierScopeLimbs = stmt.scopeTag) :
+    ∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth, BlindVcWitnessValid stmt wit := by
+  refine ⟨{ attrs := vecOfListLen attrs hAr, holderBlind := hb, presBlind := pb,
+            merkleSteps := vecOfListLen steps hSLen }, ?_⟩
+  rw [blindVcWitnessValid_iff]
+  refine ⟨hAsc, fun p hp => ?_, ⟨leaf, ?_, ?_⟩, ?_, hScope⟩
+  · rw [vecOfListLen_toList attrs hAr]; exact hDisc p hp
+  · rw [vecOfListLen_toList attrs hAr]; exact hLeaf
+  · rw [vecOfListLen_toList steps hSLen]; exact hRoot
+  · rw [vecOfListLen_toList attrs hAr]; exact hPres
+
 /-- **Per-Repetition 3-Challenge Pigeonhole Soundness (`blindVc_rep_pigeonhole_le_two`)**:
     On a false statement, at most `2` of `3` collision-filtered challenges accept. -/
 private theorem blindVc_rep_pigeonhole_core
@@ -149,32 +190,9 @@ private theorem blindVc_rep_pigeonhole_core
         (hR0.trans hR1.symm) (hR1.trans hR2.symm) hV0 hV1 hV2 with hColl | hExt
     · exact False.elim (hNoColl hColl)
     · obtain ⟨attrs, hb, pb, leaf, steps, _, hAr, hDisc, hLeaf, hSLen, hRoot, hPres, hScope⟩ := hExt
-      have hAsc : vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true := by
-        unfold verifyOpenedBlindVcRep at hV0; dsimp only at hV0
-        cases hG :
-            (decide ((cand 0).e = 0) &&
-             vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs &&
-             decide ((cand 0).viewE.attrShares.length = stmt.schema.arity) &&
-             decide ((cand 0).viewE1.attrShares.length = stmt.schema.arity) &&
-             decide ((cand 0).viewE.merkleLevels.length = stmt.treeDepth) &&
-             decide ((cand 0).viewE1.merkleLevels.length = stmt.treeDepth) &&
-             vcCheckPartyDisclosedShares (cand 0).e (cand 0).viewE.attrShares stmt.disclosedAttrs &&
-             vcCheckPartyDisclosedShares (vcNextParty3 (cand 0).e) (cand 0).viewE1.attrShares stmt.disclosedAttrs &&
-             checkPartyPrgTape prgExpand stmt.treeDepth repIdx (cand 0).e (cand 0).viewE &&
-             checkPartyPrgTape prgExpand stmt.treeDepth repIdx (vcNextParty3 (cand 0).e) (cand 0).viewE1) with
-        | false => rw [hG] at hV0; cases hV0
-        | true => simp only [Bool.and_eq_true] at hG; exact hG.1.1.1.1.1.1.1.1.2
-      let wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth :=
-        { attrs := vecOfListLen attrs hAr, holderBlind := hb, presBlind := pb,
-          merkleSteps := vecOfListLen steps hSLen }
-      have hVal : BlindVcWitnessValid stmt wit := by
-        unfold BlindVcWitnessValid
-        refine ⟨hAsc, fun p hp => ?_, ⟨leaf, ?_, ?_⟩, ?_, hScope⟩
-        · rw [vecOfListLen_toList attrs hAr]; exact (hDisc p hp).2
-        · rw [vecOfListLen_toList attrs hAr]; exact hLeaf
-        · rw [vecOfListLen_toList steps hSLen]; exact hRoot
-        · rw [vecOfListLen_toList attrs hAr]; exact hPres
-      exact False.elim (hNoWit ⟨wit, hVal⟩)
+      exact False.elim (hNoWit (blindVcWitnessValid_of_extraction
+        (verifyOpenedBlindVcRep_disclosedStrictAsc hV0) hAr hSLen
+        (fun p hp => (hDisc p hp).2) hLeaf hRoot hPres hScope))
 
 theorem blindVc_rep_pigeonhole_le_two
     {H : List UInt8 → List UInt8} (hHLen : ∀ m, (H m).length < 256 ^ 8)
@@ -202,12 +220,12 @@ private theorem qsum_add_split_local :
       qsum (X + Y) g =
         qsum X (fun x => g ⟨x.1, by omega⟩) + qsum Y (fun y => g ⟨X + y.1, by omega⟩)
   | 0, Y, g => by
-    rw [qsum_cast (Nat.zero_add Y) g]; simp only [qsum, Nat.zero_add]
+    rw [qsum_cast (Nat.zero_add Y) g]; simp only [qsum_zero, Nat.zero_add]
   | X + 1, Y, g => by
     have hEq : X + 1 + Y = (X + Y) + 1 := by omega
     rw [qsum_cast hEq g]
     have ih := qsum_add_split_local X Y (fun z => g ⟨z.1 + 1, by omega⟩)
-    simp only [qsum]
+    simp only [qsum_succ]
     have hTail : qsum Y (fun y => g ⟨X + y.1 + 1, by omega⟩) =
         qsum Y (fun y => g ⟨X + 1 + y.1, by omega⟩) :=
       qsum_congr (fun y => by congr 1; apply Fin.ext; dsimp only; omega)
@@ -220,12 +238,12 @@ private theorem qsum_mul_factor :
           f ⟨i.1 * B + j.1, by
             have h1 : (i.1 + 1) * B ≤ A * B := Nat.mul_le_mul_right B i.isLt
             have hj := j.isLt; rw [Nat.add_mul, Nat.one_mul] at h1; omega⟩))
-  | 0, B, f => by rw [qsum_cast (Nat.zero_mul B) f]; rfl
+  | 0, B, f => by rw [qsum_cast (Nat.zero_mul B) f, qsum_zero, qsum_zero]
   | A + 1, B, f => by
     have hAB : (A + 1) * B = B + A * B := by rw [Nat.succ_mul, Nat.add_comm]
     rw [qsum_cast hAB f, qsum_add_split_local B (A * B),
         qsum_mul_factor A B (fun k => f ⟨B + k.1, by omega⟩)]
-    conv => rhs; unfold qsum
+    conv => rhs; rw [qsum_succ]
     congr 1
     · exact qsum_congr (fun j => by congr 1; apply Fin.ext; dsimp only; omega)
     · refine qsum_congr (fun i => qsum_congr (fun j => ?_))
@@ -240,10 +258,12 @@ theorem product_bad_count_le_pow (M B : Nat) :
         if (List.range k).all
             (fun idx => if hM : 0 < M then p idx ⟨(ch.1 / (M ^ idx)) % M, Nat.mod_lt _ hM⟩ else false) = true
         then 1 else 0) ≤ B ^ k
-  | 0, _, _ => Nat.le_refl 1
+  | 0, _, _ => by
+    rw [qsum_cast (Nat.pow_zero M), qsum_succ, qsum_zero]
+    exact Nat.le_refl 1
   | k + 1, p, hEach => by
     if hM0 : M = 0 then
-      subst hM0; rw [Nat.zero_pow (Nat.succ_pos k)]; exact Nat.zero_le _
+      subst hM0; rw [qsum_cast (Nat.zero_pow (Nat.succ_pos k)), qsum_zero]; exact Nat.zero_le _
     else
       have hM : 0 < M := Nat.pos_of_ne_zero hM0
       rw [qsum_cast (Nat.pow_succ M k), qsum_mul_factor (M ^ k) M]
@@ -414,7 +434,7 @@ theorem word64_mod3_bad_count_le (p : Fin 3 → Bool) (hNotAll : fin3AllTrue p =
   have hTailLe :
       qsum 1 (fun y =>
         if p ⟨(blindVcQuot64 * 3 + y.1) % 3, Nat.mod_lt _ (by decide)⟩ = true then 1 else 0) ≤ 1 := by
-    simp only [qsum, Nat.add_zero]
+    simp only [qsum_succ, qsum_zero, Nat.add_zero]
     cases p ⟨(blindVcQuot64 * 3 + 0) % 3, Nat.mod_lt _ (by decide)⟩ <;> decide
   have hSum := Nat.add_le_add hBlocksLe hTailLe
   unfold blindVcBadWord64 blindVcQuot64 at hSum ⊢; omega
@@ -461,6 +481,15 @@ def blindVcTableConflict {k : Nat} (H : List UInt8 → List UInt8)
       let cand := (Vec.get msg.openTable ⟨idx, hIdx⟩).get
       decide (VcRewoundCommitConflict H stmt.presNonce idx (cand 0) (cand 1) (cand 2))
     else false)
+
+theorem blindVcTableConflict_eq {k : Nat} (H : List UInt8 → List UInt8)
+    (stmt : BlindVcPublicStatement) (msg : BlindVcParallelMsg k) :
+    blindVcTableConflict H stmt msg =
+      (List.range k).any (fun idx =>
+        if hIdx : idx < k then
+          let cand := (Vec.get msg.openTable ⟨idx, hIdx⟩).get
+          decide (VcRewoundCommitConflict H stmt.presNonce idx (cand 0) (cand 1) (cand 2))
+        else false) := by rfl
 
 theorem blindVcTableConflict_extract {k : Nat}
     {H : List UInt8 → List UInt8} {stmt : BlindVcPublicStatement}
@@ -539,7 +568,7 @@ def blindVcQromFsRound
         | true =>
           have h3 : qsum 3 (fun e => if q3 e = true then 1 else 0) = 3 := by
             simp only [Bool.and_eq_true] at hAll; rcases hAll with ⟨⟨h0, h1⟩, h2⟩
-            simp only [qsum, Nat.add_zero]
+            simp only [qsum_succ, qsum_zero, Nat.add_zero]
             change (if q3 0 = true then 1 else 0) +
               ((if q3 1 = true then 1 else 0) + (if q3 2 = true then 1 else 0)) = 3
             rw [h0, h1, h2]; decide
@@ -560,7 +589,7 @@ def blindVcQromFsRound
     have hChLt : ch.1 < 2 ^ (64 * k) := by rw [hPowEq]; exact ch.isLt
     let chBv : BitVec (64 * k) := BitVec.ofFin ⟨ch.1, hChLt⟩
     have hReprog : (reprogramOracle O x chBv x).toNat = ch.1 := by
-      unfold reprogramOracle; rw [ite_true rfl]; rfl
+      rw [reprogramOracle_self]; rfl
     have hAllEq :
         blindVcFsLiveAfter H_hash prgExpand stmtAt msgAt (reprogramOracle O x chBv) x =
         (List.range k).all (fun idx =>
@@ -664,19 +693,22 @@ theorem evalVcMerklePathBool_eq_merkleRootFromPath (epoch : UInt64) :
       evalVcMerklePathBool epoch layer cur steps =
         merkleRootFromPath (fun lvl _ l r => vcMerkleHashPair l r epoch lvl)
           layer (vcBoolStepsIdx steps) cur (steps.map Prod.snd)
-  | _, _, [] => rfl
-  | layer, cur, (false, _) :: rest => by
-    simp only [evalVcMerklePathBool, vcBoolStepsIdx, List.map, merkleRootFromPath,
-      Bool.false_eq_true, ↓reduceIte]
+  | layer, cur, [] => by
+    rw [evalVcMerklePathBool_nil]
+    exact (merkleRootFromPath_nil _ layer 0 cur).symm
+  | layer, cur, (false, sib) :: rest => by
     have hMod : (0 + 2 * vcBoolStepsIdx rest) % 2 = 0 := by omega
     have hDiv : (0 + 2 * vcBoolStepsIdx rest) / 2 = vcBoolStepsIdx rest := by omega
-    rw [ite_true hMod, hDiv]
+    rw [evalVcMerklePathBool_cons_false]
+    show _ = merkleRootFromPath _ layer (0 + 2 * vcBoolStepsIdx rest) cur (sib :: rest.map Prod.snd)
+    rw [merkleRootFromPath_cons, ite_true hMod, hDiv]
     exact evalVcMerklePathBool_eq_merkleRootFromPath epoch (layer + 1) _ rest
-  | layer, cur, (true, _) :: rest => by
-    simp only [evalVcMerklePathBool, vcBoolStepsIdx, List.map, merkleRootFromPath, ↓reduceIte]
+  | layer, cur, (true, sib) :: rest => by
     have hMod : (1 + 2 * vcBoolStepsIdx rest) % 2 ≠ 0 := by omega
     have hDiv : (1 + 2 * vcBoolStepsIdx rest) / 2 = vcBoolStepsIdx rest := by omega
-    rw [ite_false hMod, hDiv]
+    rw [evalVcMerklePathBool_cons_true]
+    show _ = merkleRootFromPath _ layer (1 + 2 * vcBoolStepsIdx rest) cur (sib :: rest.map Prod.snd)
+    rw [merkleRootFromPath_cons, ite_false hMod, hDiv]
     exact evalVcMerklePathBool_eq_merkleRootFromPath epoch (layer + 1) _ rest
 
 inductive VcMerkleTree : Nat → Type where
@@ -704,10 +736,16 @@ private theorem evalVcMerklePathBool_append_singleton (epoch : UInt64) :
       evalVcMerklePathBool epoch layer cur (steps ++ [(b, sib)]) =
         (if b then vcMerkleHashPair sib (evalVcMerklePathBool epoch layer cur steps) epoch (layer + steps.length)
          else vcMerkleHashPair (evalVcMerklePathBool epoch layer cur steps) sib epoch (layer + steps.length))
-  | [], _, _, false, _ => by simp [evalVcMerklePathBool]
-  | [], _, _, true, _ => by simp [evalVcMerklePathBool]
+  | [], _, _, false, _ => by
+    simp only [List.nil_append, evalVcMerklePathBool_cons_false, evalVcMerklePathBool_nil,
+      Bool.false_eq_true, ↓reduceIte, List.length_nil, Nat.add_zero]
+  | [], _, _, true, _ => by
+    simp only [List.nil_append, evalVcMerklePathBool_cons_true, evalVcMerklePathBool_nil,
+      ↓reduceIte, List.length_nil, Nat.add_zero]
   | (b0, _) :: rest, layer, _, b, sib => by
-    cases b0 <;> dsimp only [List.cons_append, evalVcMerklePathBool, List.length_cons] <;>
+    cases b0 <;>
+      simp only [List.cons_append, evalVcMerklePathBool_cons_false, evalVcMerklePathBool_cons_true,
+        List.length_cons] <;>
       rw [evalVcMerklePathBool_append_singleton epoch rest (layer + 1) _ b sib] <;>
       rw [show layer + 1 + rest.length = layer + (rest.length + 1) by omega]
 
@@ -719,7 +757,9 @@ theorem vcMerkleTree_opening_sound (epoch : UInt64) :
       ∃ (c₁ c₂ : Lane6 × Lane6 × Lane6) (r : Fin 3),
         Poseidon2Perm12Sponge6Collision (spongeTrace204 c₁ r) (spongeTrace204 c₂ r)
   | 0, .leaf _, _, _, [], _, hEq =>
-    Or.inl (by dsimp [evalVcMerklePathBool, vcMerkleTreeRoot] at hEq; rw [hEq]; exact .head [])
+    Or.inl (by
+      rw [evalVcMerklePathBool_nil] at hEq; dsimp only [vcMerkleTreeRoot] at hEq
+      rw [hEq]; exact .head [])
   | 0, .leaf _, _, _, _ :: _, hLen, _ => by cases hLen
   | _ + 1, .branch _ _, _, _, [], hLen, _ => by cases hLen
   | d + 1, .branch lTree rTree, layer, leaf, s0 :: sRest, hLen, hEq => by
@@ -741,7 +781,8 @@ theorem vcMerkleTree_opening_sound (epoch : UInt64) :
       else
         have hChunksNe : vcMerkleChunks subRoot sibTop epoch (layer + d) ≠
             vcMerkleChunks lRoot rRoot epoch (layer + d) :=
-          fun hc => hChildren ⟨congrArg Prod.fst hc, congrArg (fun p => p.2.1) hc⟩
+          fun hc => hChildren (vcMerkleChunks_children_inj hc)
+        rw [vcMerkleHashPair_eq, vcMerkleHashPair_eq] at hEq
         obtain ⟨r, hCol⟩ := absorbRate6Sponge3_reachable_collision204 hChunksNe hEq
         exact Or.inr ⟨_, _, r, hCol⟩
     | true =>
@@ -753,27 +794,197 @@ theorem vcMerkleTree_opening_sound (epoch : UInt64) :
       else
         have hChunksNe : vcMerkleChunks sibTop subRoot epoch (layer + d) ≠
             vcMerkleChunks lRoot rRoot epoch (layer + d) :=
-          fun hc => hChildren ⟨congrArg Prod.fst hc, congrArg (fun p => p.2.1) hc⟩
+          fun hc => hChildren (vcMerkleChunks_children_inj hc)
+        rw [vcMerkleHashPair_eq, vcMerkleHashPair_eq] at hEq
         obtain ⟨r, hCol⟩ := absorbRate6Sponge3_reachable_collision204 hChunksNe hEq
         exact Or.inr ⟨_, _, r, hCol⟩
 
-def encodeIssuerRootAttestationMsg (issuerRootTag : Vec UInt8 32) (epoch : UInt64) (accRoot : Lane6) : List UInt8 :=
-  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x4F, 0x4F, 0x54] ++
-  issuerRootTag.toList ++ encodeNatLeBytes 8 epoch.toNat ++
-  encodeGoldilocksVecLe [accRoot.x0, accRoot.x1, accRoot.x2, accRoot.x3, accRoot.x4, accRoot.x5]
+/-! ### Issuer root attestation (`IssuerRootAttestation` of `blind_vc.rs`)
+
+The issuer signs `signing_message(issuer_pk_digest, issuer_epoch, accumulator_root, root_tag)`
+under the context `SIGNING_CONTEXT` with FIPS 204 ML-DSA. `ml_dsa_verify` does not hash the
+message into the challenge directly: it first forms the 64-byte message representative
+`μ = SHAKE256(SHAKE256(pk, 64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ M, 64)` (`compute_fips204_mu`). -/
+
+/-- ASCII `QSAG.VC.ROOT_ATTEST.V1`: the prefix of `IssuerRootAttestation::signing_message`. -/
+def issuerRootAttestationTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x56, 0x43, 0x2E, 0x52, 0x4F, 0x4F, 0x54, 0x5F,
+   0x41, 0x54, 0x54, 0x45, 0x53, 0x54, 0x2E, 0x56, 0x31]
+
+/-- ASCII `QSAG.VC.ROOT_ATTEST.CTX.V1`: `IssuerRootAttestation::SIGNING_CONTEXT`. -/
+def issuerRootAttestationCtx : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x56, 0x43, 0x2E, 0x52, 0x4F, 0x4F, 0x54, 0x5F,
+   0x41, 0x54, 0x54, 0x45, 0x53, 0x54, 0x2E, 0x43, 0x54, 0x58, 0x2E, 0x56, 0x31]
+
+theorem issuerRootAttestationCtx_length : issuerRootAttestationCtx.length = 26 := by rfl
+
+/-- The 142-byte message of `IssuerRootAttestation::signing_message`: 22-byte tag, 32-byte
+issuer key digest, 8-byte little-endian epoch, six 8-byte little-endian root limbs, 32-byte
+root tag. -/
+def encodeIssuerRootAttestationMsg (issuerPkDigest : Vec UInt8 32) (epoch : UInt64)
+    (accRoot : Lane6) (issuerRootTag : Vec UInt8 32) : List UInt8 :=
+  issuerRootAttestationTag ++
+  (issuerPkDigest.toList ++ (encodeNatLeBytes 8 epoch.toNat ++
+  (encodeGoldilocksVecLe [accRoot.x0, accRoot.x1, accRoot.x2, accRoot.x3, accRoot.x4, accRoot.x5] ++
+  issuerRootTag.toList)))
+
+theorem encodeIssuerRootAttestationMsg_length (issuerPkDigest : Vec UInt8 32) (epoch : UInt64)
+    (accRoot : Lane6) (issuerRootTag : Vec UInt8 32) :
+    (encodeIssuerRootAttestationMsg issuerPkDigest epoch accRoot issuerRootTag).length = 142 := by
+  unfold encodeIssuerRootAttestationMsg issuerRootAttestationTag
+  simp only [List.length_append, List.length_cons, List.length_nil, Vec.toList_length,
+    encodeNatLeBytes_length, encodeGoldilocksVecLe_length]
+
+/-- The message determines all four signed fields. -/
+theorem encodeIssuerRootAttestationMsg_injective
+    {dig₁ dig₂ tag₁ tag₂ : Vec UInt8 32} {ep₁ ep₂ : UInt64} {root₁ root₂ : Lane6}
+    (hEq : encodeIssuerRootAttestationMsg dig₁ ep₁ root₁ tag₁ =
+           encodeIssuerRootAttestationMsg dig₂ ep₂ root₂ tag₂) :
+    dig₁ = dig₂ ∧ ep₁ = ep₂ ∧ root₁ = root₂ ∧ tag₁ = tag₂ := by
+  unfold encodeIssuerRootAttestationMsg at hEq
+  obtain ⟨_, hRest1⟩ := List.append_inj hEq rfl
+  have hDigLen : dig₁.toList.length = dig₂.toList.length := by
+    rw [Vec.toList_length, Vec.toList_length]
+  obtain ⟨hDigBytes, hRest2⟩ := List.append_inj hRest1 hDigLen
+  have hEpLen : (encodeNatLeBytes 8 ep₁.toNat).length = (encodeNatLeBytes 8 ep₂.toNat).length := by
+    rw [encodeNatLeBytes_length, encodeNatLeBytes_length]
+  obtain ⟨hEpBytes, hRest3⟩ := List.append_inj hRest2 hEpLen
+  have hRootLen :
+      (encodeGoldilocksVecLe [root₁.x0, root₁.x1, root₁.x2, root₁.x3, root₁.x4, root₁.x5]).length =
+      (encodeGoldilocksVecLe [root₂.x0, root₂.x1, root₂.x2, root₂.x3, root₂.x4, root₂.x5]).length := by
+    rw [encodeGoldilocksVecLe_length, encodeGoldilocksVecLe_length]; rfl
+  obtain ⟨hRootBytes, hTagBytes⟩ := List.append_inj hRest3 hRootLen
+  have hEp1Lt : ep₁.toNat < 256 ^ 8 := by
+    have h := ep₁.toNat_lt_size; change ep₁.toNat < 18446744073709551616 at h; omega
+  have hEp2Lt : ep₂.toNat < 256 ^ 8 := by
+    have h := ep₂.toNat_lt_size; change ep₂.toNat < 18446744073709551616 at h; omega
+  have hEpNat : ep₁.toNat = ep₂.toNat := by
+    have hd := congrArg decodeNatLeBytes hEpBytes
+    rwa [decodeNatLeBytes_encodeNatLeBytes 8 ep₁.toNat hEp1Lt,
+         decodeNatLeBytes_encodeNatLeBytes 8 ep₂.toNat hEp2Lt] at hd
+  have hLimbs := encodeGoldilocksVecLe_injective hRootBytes
+  simp only [List.cons.injEq] at hLimbs
+  rcases hLimbs with ⟨e0, e1, e2, e3, e4, e5, _⟩
+  exact ⟨Vec.toList_injective hDigBytes, UInt64.toNat_inj.mp hEpNat,
+    Lane6.ext e0 e1 e2 e3 e4 e5, Vec.toList_injective hTagBytes⟩
+
+/-- FIPS 204 message representative
+`μ = SHAKE256(SHAKE256(pk, 64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ M, 64)` (`compute_fips204_mu`; the same
+expression appears inside `mldsaVerifyBytes204`). -/
+def fips204MessageRepresentative (pk ctx msg : List UInt8) : List UInt8 :=
+  shake256Xof 64 (shake256Xof 64 pk ++ [0, UInt8.ofNat ctx.length] ++ ctx ++ msg)
+
+theorem fips204MessageRepresentative_length (pk ctx msg : List UInt8) :
+    (fips204MessageRepresentative pk ctx msg).length = 64 :=
+  shake256Xof_length 64 _
+
+/-- The attested fields of one issuer root attestation. -/
+structure IssuerRootAttestationFields where
+  issuerPkDigest : Vec UInt8 32
+  issuerEpoch : UInt64
+  accumulatorRoot : Lane6
+  issuerRootTag : Vec UInt8 32
+  deriving DecidableEq
+
+def IssuerRootAttestationFields.message (f : IssuerRootAttestationFields) : List UInt8 :=
+  encodeIssuerRootAttestationMsg f.issuerPkDigest f.issuerEpoch f.accumulatorRoot f.issuerRootTag
+
+theorem IssuerRootAttestationFields.message_injective {f g : IssuerRootAttestationFields}
+    (h : f.message = g.message) : f = g := by
+  obtain ⟨h1, h2, h3, h4⟩ := encodeIssuerRootAttestationMsg_injective h
+  cases f; cases g; cases h1; cases h2; cases h3; cases h4; rfl
+
+/-- Root-attestation check on the algebraic ML-DSA core: the challenge hash is taken over the
+message representative of the attestation message under the issuer key bytes `issuerPk`, as in
+`IssuerRootAttestation::verify`. -/
+def verifyIssuerRootAttestation
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8) (sampleInBall : List UInt8 → Poly256)
+    (issuerA : PolyMat4) (issuerT1Scaled : PolyVec4) (issuerPk : List UInt8)
+    (f : IssuerRootAttestationFields) (rootSig : ThresholdSignSig) : Bool :=
+  mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
+    (fips204MessageRepresentative issuerPk issuerRootAttestationCtx f.message)
+    rootSig.cTilde rootSig.z rootSig.h
+
+/-- The same check on wire bytes: the standalone ML-DSA-44 verifier applied to the issuer key,
+the attestation message, the attestation context and the signature bytes. -/
+@[expose] def verifyIssuerRootAttestationBytes (byteBudget : Nat) (issuerPk : List UInt8)
+    (f : IssuerRootAttestationFields) (sig : List UInt8) : Bool :=
+  mldsaVerifyBytes204 byteBudget issuerPk f.message issuerRootAttestationCtx sig
+
+/-- An attestation accepted on wire bytes is accepted by the algebraic core, with the decoded
+key and signature, at the FIPS 204 message representative. -/
+theorem verifyIssuerRootAttestationBytes_accepts_core {byteBudget : Nat} {issuerPk : List UInt8}
+    {f : IssuerRootAttestationFields} {sig : List UInt8}
+    (h : verifyIssuerRootAttestationBytes byteBudget issuerPk f sig = true) :
+    ∃ (A : PolyMat4) (t1Scaled : PolyVec4) (c : Poly256) (decoded : DecodedSignature204),
+      decodeSignature204 sig = some decoded ∧
+      verifyIssuerRootAttestation mldsa44ChallengeHash (fun _ => c) A t1Scaled issuerPk f
+        ⟨decoded.challenge, decoded.z, decoded.hints, 0⟩ = true := by
+  obtain ⟨A, t1Scaled, c, decoded, hDec, hCore⟩ := mldsaVerifyBytes204_accepts_core h
+  exact ⟨A, t1Scaled, c, decoded, hDec, hCore⟩
+
+/-- A challenge hash that separates message representatives rejects, at the FIPS 204 message
+representative, every signature that verifies with the raw message in its place. The raw
+message is never a message representative of the attestation: it has 142 bytes, not 64. -/
+theorem verifyIssuerRootAttestation_rejects_raw_message_signature
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8} {sampleInBall : List UInt8 → Poly256}
+    {issuerA : PolyMat4} {issuerT1Scaled : PolyVec4} (issuerPk : List UInt8)
+    {f : IssuerRootAttestationFields} {rootSig : ThresholdSignSig}
+    (hSep : ∀ m m' w, chalHash m w = chalHash m' w → m = m')
+    (hRaw : mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled f.message
+      rootSig.cTilde rootSig.z rootSig.h = true) :
+    verifyIssuerRootAttestation chalHash sampleInBall issuerA issuerT1Scaled issuerPk f rootSig =
+      false := by
+  cases hNew : verifyIssuerRootAttestation chalHash sampleInBall issuerA issuerT1Scaled issuerPk
+      f rootSig with
+  | false => rfl
+  | true =>
+    unfold verifyIssuerRootAttestation at hNew
+    simp only [mldsaVerify, Bool.and_eq_true, decide_eq_true_eq] at hRaw hNew
+    have hEq := hSep _ _ _ (hRaw.2.symm.trans hNew.2)
+    have hLen := congrArg List.length hEq
+    rw [fips204MessageRepresentative_length] at hLen
+    have h142 : f.message.length = 142 := encodeIssuerRootAttestationMsg_length _ _ _ _
+    omega
+
+/-! ### Ternary presentation model with issuer attestation
+
+`BlindVcPresentation` and `verifyBlindVcPresentationTrusted` are the three-party ZKBoo
+presentation (438 repetitions). The deployed selective-disclosure presentation is the 256-party
+protocol of the last section; the attestation check is common to both. -/
+
+@[expose] def BlindVcTrustedContext.attestationFields (trusted : BlindVcTrustedContext)
+    (issuerPkDigest : Vec UInt8 32) : IssuerRootAttestationFields :=
+  ⟨issuerPkDigest, trusted.issuerEpoch, trusted.accumulatorRoot, trusted.issuerRootTag⟩
 
 def verifyBlindVcWithIssuerAttestation
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8) (sampleInBall : List UInt8 → Poly256)
-    (issuerA : PolyMat4) (issuerT1Scaled : PolyVec4) (H : List UInt8 → List UInt8)
+    (issuerA : PolyMat4) (issuerT1Scaled : PolyVec4) (issuerPk : List UInt8)
+    (issuerPkDigest : Vec UInt8 32) (H : List UInt8 → List UInt8)
     (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
     (trusted : BlindVcTrustedContext) (expectedSchema : VcSchema) (treeDepth : Nat)
     (verifierChallenge : List UInt8) (rootSig : ThresholdSignSig) (pres : BlindVcPresentation) : Bool :=
-  mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
-    (encodeIssuerRootAttestationMsg trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot)
-    rootSig.cTilde rootSig.z rootSig.h &&
+  verifyIssuerRootAttestation chalHash sampleInBall issuerA issuerT1Scaled issuerPk
+    (trusted.attestationFields issuerPkDigest) rootSig &&
   verifyBlindVcPresentationTrusted H prgExpand .quantum128 trusted expectedSchema treeDepth verifierChallenge pres
 
+theorem verifyBlindVcWithIssuerAttestation_eq_true_iff
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8} {sampleInBall : List UInt8 → Poly256}
+    {issuerA : PolyMat4} {issuerT1Scaled : PolyVec4} {issuerPk : List UInt8}
+    {issuerPkDigest : Vec UInt8 32} {H : List UInt8 → List UInt8}
+    {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
+    {trusted : BlindVcTrustedContext} {expectedSchema : VcSchema} {treeDepth : Nat}
+    {verifierChallenge : List UInt8} {rootSig : ThresholdSignSig} {pres : BlindVcPresentation} :
+    verifyBlindVcWithIssuerAttestation chalHash sampleInBall issuerA issuerT1Scaled issuerPk
+      issuerPkDigest H prgExpand trusted expectedSchema treeDepth verifierChallenge rootSig pres = true ↔
+    (verifyIssuerRootAttestation chalHash sampleInBall issuerA issuerT1Scaled issuerPk
+      (trusted.attestationFields issuerPkDigest) rootSig = true ∧
+     verifyBlindVcPresentationTrusted H prgExpand .quantum128 trusted expectedSchema treeDepth
+       verifierChallenge pres = true) := by
+  unfold verifyBlindVcWithIssuerAttestation; rw [Bool.and_eq_true]
+
 structure IssuerMintedEpoch (schema : VcSchema) (treeDepth : Nat) where
+  issuerPkDigest : Vec UInt8 32
   issuerRootTag : Vec UInt8 32
   epoch : UInt64
   tree : VcMerkleTree treeDepth
@@ -781,18 +992,30 @@ structure IssuerMintedEpoch (schema : VcSchema) (treeDepth : Nat) where
   hLeaves : ∀ leaf ∈ vcMerkleTreeLeaves tree,
     ∃ cred ∈ mintedCreds, computeVcPoseidon2Commit schema cred.1 cred.2 vcAttrCommitTag = some leaf
 
-/-- **End-to-End `BlindVC` -> Issuer `ML-DSA` Unforgeability & Collision Reduction
-    (`blindVc_presentation_reduces_to_issuer_mldsa`)**. -/
+/-- The fields the issuer signed for a minted epoch. -/
+@[expose] def IssuerMintedEpoch.attestationFields {schema : VcSchema} {treeDepth : Nat}
+    (ep : IssuerMintedEpoch schema treeDepth) : IssuerRootAttestationFields :=
+  ⟨ep.issuerPkDigest, ep.epoch, vcMerkleTreeRoot ep.epoch 0 ep.tree, ep.issuerRootTag⟩
+
+/-- **Ternary presentation with issuer attestation: attestation of unsigned fields, collision,
+or minted credential (`blindVc_presentation_reduces_to_issuer_mldsa`)**. Three consistent
+accepted openings of repetition 0 of an accepted `verifyBlindVcWithIssuerAttestation` run give
+one of: an accepted root attestation whose fields differ from those of the minted epoch
+`epochLog`; a collision of `H`; a reachable sponge collision; a credential minted in
+`epochLog` matching the disclosure. The three openings are a hypothesis: no rewinding of a
+classical or quantum prover is performed here. -/
 theorem blindVc_presentation_reduces_to_issuer_mldsa
     {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8} {sampleInBall : List UInt8 → Poly256}
-    {issuerA : PolyMat4} {issuerT1Scaled : PolyVec4} {H : List UInt8 → List UInt8}
+    {issuerA : PolyMat4} {issuerT1Scaled : PolyVec4} {issuerPk : List UInt8}
+    {issuerPkDigest : Vec UInt8 32} {H : List UInt8 → List UInt8}
     (hHLen : ∀ m, (H m).length < 256 ^ 8)
     {prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D}
     {trusted : BlindVcTrustedContext} {expectedSchema : VcSchema} {treeDepth : Nat}
     {verifierChallenge : List UInt8} {rootSig : ThresholdSignSig} {pres : BlindVcPresentation}
     (epochLog : IssuerMintedEpoch expectedSchema treeDepth) (o0 o1 o2 : OpenedBlindVcRep)
     (hVer : verifyBlindVcWithIssuerAttestation chalHash sampleInBall issuerA issuerT1Scaled
-      H prgExpand trusted expectedSchema treeDepth verifierChallenge rootSig pres = true)
+      issuerPk issuerPkDigest H prgExpand trusted expectedSchema treeDepth verifierChallenge
+      rootSig pres = true)
     (hRew01 : reconstructRepRound1 H pres.presentationNonce 0 o0 =
       reconstructRepRound1 H pres.presentationNonce 0 o1)
     (hRew12 : reconstructRepRound1 H pres.presentationNonce 0 o1 =
@@ -806,11 +1029,9 @@ theorem blindVc_presentation_reduces_to_issuer_mldsa
     (hRep2 : verifyOpenedBlindVcRep prgExpand expectedSchema pres.issuerEpoch treeDepth
       pres.accumulatorRoot pres.presCommit pres.scopeTag pres.verifierScopeLimbs
       pres.disclosedAttrs 0 2 o2 = true) :
-    (mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
-       (encodeIssuerRootAttestationMsg trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot)
-       rootSig.cTilde rootSig.z rootSig.h = true ∧
-     (trusted.issuerRootTag ≠ epochLog.issuerRootTag ∨ trusted.issuerEpoch ≠ epochLog.epoch ∨
-      trusted.accumulatorRoot ≠ vcMerkleTreeRoot epochLog.epoch 0 epochLog.tree)) ∨
+    (verifyIssuerRootAttestation chalHash sampleInBall issuerA issuerT1Scaled issuerPk
+       (trusted.attestationFields issuerPkDigest) rootSig = true ∧
+     trusted.attestationFields issuerPkDigest ≠ epochLog.attestationFields) ∨
     (∃ m₁ m₂ : List UInt8, m₁ ≠ m₂ ∧ H m₁ = H m₂) ∨
     (∃ (c₁ c₂ : Lane6 × Lane6 × Lane6) (r : Fin 3),
       Poseidon2Perm12Sponge6Collision (spongeTrace204 c₁ r) (spongeTrace204 c₂ r)) ∨
@@ -819,13 +1040,13 @@ theorem blindVc_presentation_reduces_to_issuer_mldsa
       (∀ p ∈ pres.disclosedAttrs, p.1 < expectedSchema.arity ∧ cred.1[p.1]? = some p.2) ∧
       computeVcPoseidon2Commit expectedSchema cred.1 presBlind vcPresCommitTag = some pres.presCommit ∧
       computeVcScopeTag expectedSchema.schemaId cred.2 trusted.verifierScopeLimbs = pres.scopeTag) := by
-  unfold verifyBlindVcWithIssuerAttestation at hVer
-  rw [Bool.and_eq_true] at hVer; obtain ⟨hSigOk, hTrustedOk⟩ := hVer
+  obtain ⟨hSigOk, hTrustedOk⟩ := verifyBlindVcWithIssuerAttestation_eq_true_iff.mp hVer
   obtain ⟨hRootEq, _, hEpEq, hScopeEq, _⟩ := verifyBlindVcPresentationTrusted_context hTrustedOk
-  if hAttestMatch :
-      trusted.issuerRootTag = epochLog.issuerRootTag ∧ trusted.issuerEpoch = epochLog.epoch ∧
-      trusted.accumulatorRoot = vcMerkleTreeRoot epochLog.epoch 0 epochLog.tree then
-    obtain ⟨_, hEpLog, hRootLog⟩ := hAttestMatch
+  if hAttestMatch : trusted.attestationFields issuerPkDigest = epochLog.attestationFields then
+    have hEpLog : trusted.issuerEpoch = epochLog.epoch :=
+      congrArg IssuerRootAttestationFields.issuerEpoch hAttestMatch
+    have hRootLog : trusted.accumulatorRoot = vcMerkleTreeRoot epochLog.epoch 0 epochLog.tree :=
+      congrArg IssuerRootAttestationFields.accumulatorRoot hAttestMatch
     rcases verifyOpenedBlindVcRep_extract3_from_rewound hHLen hRew01 hRew12 hRep0 hRep1 hRep2
       with hHColl | hWit
     · exact Or.inr (Or.inl hHColl)
@@ -847,62 +1068,121 @@ theorem blindVc_presentation_reduces_to_issuer_mldsa
           exact Or.inr (Or.inr (Or.inl ⟨_, _, r, hCol⟩))
       · exact Or.inr (Or.inr (Or.inl hMkColl))
   else
-    left; refine ⟨hSigOk, ?_⟩
-    if h1 : trusted.issuerRootTag = epochLog.issuerRootTag then
-      if h2 : trusted.issuerEpoch = epochLog.epoch then
-        exact Or.inr (Or.inr fun h3 => hAttestMatch ⟨h1, h2, h3⟩)
-      else exact Or.inr (Or.inl h2)
-    else exact Or.inl h1
+    exact Or.inl ⟨hSigOk, hAttestMatch⟩
 
-theorem tooth_blindVc_unsigned_issuer_root_rejected
-    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8) (sampleInBall : List UInt8 → Poly256)
-    (issuerA : PolyMat4) (issuerT1Scaled : PolyVec4) (H : List UInt8 → List UInt8)
-    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D)
-    (trusted : BlindVcTrustedContext) (expectedSchema : VcSchema) (treeDepth : Nat)
-    (verifierChallenge : List UInt8) (rootSig : ThresholdSignSig) (pres : BlindVcPresentation)
-    (hBadSig : mldsaVerify chalHash sampleInBall issuerA issuerT1Scaled
-      (encodeIssuerRootAttestationMsg trusted.issuerRootTag trusted.issuerEpoch trusted.accumulatorRoot)
-      rootSig.cTilde rootSig.z rootSig.h = false) :
-    verifyBlindVcWithIssuerAttestation chalHash sampleInBall issuerA issuerT1Scaled
-      H prgExpand trusted expectedSchema treeDepth verifierChallenge rootSig pres = false := by
-  unfold verifyBlindVcWithIssuerAttestation; rw [hBadSig, Bool.false_and]
+/-! ## §4. Opening round of the 256-party presentation in the QROM
 
-theorem tooth_single_rep_two_of_three_tight :
-    ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
-      qsum 3 (fun e => if p e = true then 1 else 0) = 2 ∧ ¬ (2 ^ 1 * 2 ^ 1 < 3 ^ 1) :=
-  ⟨fun e => decide (e.1 < 2), by decide, by decide, by decide⟩
+`verify_presentation` derives the hidden parties of all `τ` repetitions as `τ` bytes squeezed
+from the transcript (`VC_SD_LIMBO_OPEN`), one byte per repetition, with no modular reduction.
+This section bounds that last Fiat–Shamir round alone: for a query point whose check-value
+table has a nonzero entry in every repetition, at most one of the `256^τ` byte strings is
+accepted by the hidden-party check (`credentialGgmCheckDefects`), and the generic
+measure-and-reprogram bound `qrom_uniform_oracle_round_bound` applies with `badCard = 1`.
 
-theorem fin3_not_all_count_witness :
-    ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
-      qsum 3 (fun e => if p e = true then 1 else 0) ≤ 2 :=
-  ⟨fun e => decide (e.1 < 2), by decide, by decide⟩
+Scope. The nonzero check values are the hypothesis `hDefect` on doomed points; the two earlier
+Fiat–Shamir rounds (folding weights, evaluation points) and commitment binding are not part of
+this bound, and no claim is made about the composed three-round protocol in the QROM. The
+interactive three-round count is `CutAndChoose.limbo256_tau33_defect_check_soundness`. Byte
+`idx` of the challenge is digit `idx` of the challenge value in base `256`. -/
 
-theorem vcMerkleTree_opening_witness :
-    ∃ (epoch : UInt64) (tree : VcMerkleTree 0) (layer : Nat) (leaf : Lane6) (steps : List (Bool × Lane6)),
-      steps.length = 0 ∧ evalVcMerklePathBool epoch layer leaf steps = vcMerkleTreeRoot epoch layer tree :=
-  let z6 : Lane6 :=
-    ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
-  ⟨0, .leaf z6, 0, z6, [], rfl, rfl⟩
+/-- Hidden-party check of all `k` repetitions on the challenge value `ch`. -/
+def credentialSdOpeningAccepts (k : Nat) (defect : Nat → Fin 256 → CredentialFp5) (ch : Nat) : Bool :=
+  (List.range k).all (fun idx =>
+    credentialGgmCheckDefects (defect idx) ⟨(ch / 256 ^ idx) % 256, Nat.mod_lt _ (by decide)⟩)
 
-/-- The repaired language has false instances even for a constant hash. The previous
-collision-in-language disjunct made every statement true for that hash. -/
-theorem blindVcParallelIop_false_statement_witness
-    (H : List UInt8 → List UInt8)
-    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D) (k : Nat) :
-    ∃ stmt, ¬ (blindVcParallelIop H prgExpand k).inLang stmt := by
-  let z6 : Lane6 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero,
-    Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
-  let z4 : Lane4 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
-  let stmt : BlindVcPublicStatement :=
-    { schema := ⟨0, 1, by decide, by decide⟩, treeDepth := 0,
-      presNonce := Vec.replicate 32 0, issuerEpoch := 0, accumulatorRoot := z6,
-      presCommit := z6, scopeTag := z6, verifierScopeLimbs := z4,
-      disclosedAttrs := [(0, Goldilocks.zero), (0, Goldilocks.zero)] }
-  refine ⟨stmt, ?_⟩
-  rintro ⟨wit, hw⟩
-  have h := hw.1
-  change false = true at h
-  cases h
+/-- One repetition with a nonzero check value passes for at most one of the 256 bytes. -/
+theorem credentialSd_rep_bad_count_le_one (defect : Fin 256 → CredentialFp5)
+    (hBad : ∃ bad, defect bad ≠ credentialFp5Zero) :
+    qsum 256 (fun e => if credentialGgmCheckDefects defect e = true then 1 else 0) ≤ 1 := by
+  obtain ⟨bad, hBad⟩ := hBad
+  exact qsum_le_one_of_subsingleton _ (fun i j hi hj =>
+    (credentialGgmCheckDefects_unique defect bad hBad i hi).trans
+      (credentialGgmCheckDefects_unique defect bad hBad j hj).symm)
+
+/-- **Opening round, counting form.** With a nonzero check value in each of the `k`
+    repetitions, at most one of the `256^k` challenge values is accepted. -/
+theorem credentialSd_opening_bad_count_le_one (k : Nat) (defect : Nat → Fin 256 → CredentialFp5)
+    (hDefect : ∀ idx < k, ∃ bad, defect idx bad ≠ credentialFp5Zero) :
+    qsum (256 ^ k) (fun ch =>
+      if credentialSdOpeningAccepts k defect ch.val = true then 1 else 0) ≤ 1 := by
+  have h := product_bad_count_le_pow 256 1 k
+    (fun idx e => credentialGgmCheckDefects (defect idx) e)
+    (fun idx hlt => credentialSd_rep_bad_count_le_one (defect idx) (hDefect idx hlt))
+  rw [Nat.one_pow] at h
+  refine Nat.le_trans (qsum_le_qsum (fun ch => ?_)) h
+  have hp : credentialSdOpeningAccepts k defect ch.val =
+      (List.range k).all (fun idx =>
+        if hM : 0 < 256 then
+          credentialGgmCheckDefects (defect idx) ⟨(ch.val / 256 ^ idx) % 256, Nat.mod_lt _ hM⟩
+        else false) := by
+    unfold credentialSdOpeningAccepts
+    congr 1
+  rw [hp]
+  exact Nat.le_refl _
+
+/-- Acceptance of the opening round at query point `x` under oracle `O`. -/
+def credentialSdOpeningLiveAfter {cardX k : Nat}
+    (defect : Fin cardX → Nat → Fin 256 → CredentialFp5)
+    (O : Fin cardX → BitVec (8 * k)) (x : Fin cardX) : Bool :=
+  credentialSdOpeningAccepts k (defect x) (O x).toNat
+
+/-- The opening round as a `QromRbrRound` with one bad challenge per doomed point. -/
+def credentialSdOpeningQromRound {cardX k : Nat}
+    (defect : Fin cardX → Nat → Fin 256 → CredentialFp5) (doomed : Fin cardX → Bool)
+    (hDefect : ∀ x, doomed x = true → ∀ idx < k, ∃ bad, defect x idx bad ≠ credentialFp5Zero)
+    (O : Fin cardX → BitVec (8 * k)) : QromRbrRound cardX (8 * k) O where
+  proj := id
+  isDoomedAt := fun _ x => doomed x
+  isLiveAfter := credentialSdOpeningLiveAfter defect
+  badCard := 1
+  doomed_local := fun _ _ => rfl
+  flip_bound := fun x hx => by
+    have hPow : 2 ^ (8 * k) = 256 ^ k := Nat.pow_mul 2 8 k
+    rw [qsum_cast hPow]
+    refine Nat.le_trans (qsum_le_qsum (fun ch => ?_))
+      (credentialSd_opening_bad_count_le_one k (defect x) (hDefect x hx))
+    have hChLt : ch.1 < 2 ^ (8 * k) := by rw [hPow]; exact ch.isLt
+    have hReprog : (reprogramOracle O x (BitVec.ofFin ⟨ch.1, hChLt⟩) x).toNat = ch.1 := by
+      rw [reprogramOracle_self]; rfl
+    show (if credentialSdOpeningAccepts k (defect x)
+        (reprogramOracle O x (BitVec.ofFin ⟨ch.1, hChLt⟩) x).toNat = true then 1 else 0) ≤ _
+    rw [hReprog]
+    exact Nat.le_refl _
+
+/-- Query budget against the `33`-byte opening challenge: for `Q ≤ 2^60`,
+    `(2Q + 1)^2 · 2^128 < 256^33`. -/
+theorem credentialSd_opening_qrom_budget (Q : Nat) (hQ : Q ≤ 2 ^ 60) :
+    (2 * Q + 1) ^ 2 * 2 ^ 128 < (256 : Nat) ^ 33 := by
+  have hm := Nat.mul_le_mul_right (2 ^ 128)
+    (Nat.pow_le_pow_left (show 2 * Q + 1 ≤ 2 * 2 ^ 60 + 1 by omega) 2)
+  exact Nat.lt_of_le_of_lt hm (by decide +kernel)
+
+/-- **Opening round of the 33-repetition presentation, QROM query-mass bound
+    (`credentialSd_opening_round_qrom_bound`)**. For a `Q`-query quantum adversary and a uniform
+    oracle with `33`-byte outputs, the ordinary doomed-to-live flip mass of the opening round is
+    at most `(2Q + 1)^2 / 2^264`, where a point is doomed only if its check-value table has a
+    nonzero entry in every repetition (`hDefect`); for `Q ≤ 2^60` that is below `2^-128`. -/
+theorem credentialSd_opening_round_qrom_bound
+    {cardX cardAnc Q : Nat} (hQ : Q ≤ 2 ^ 60)
+    (A : QuantumAdv cardX (8 * 33) cardAnc Q)
+    (defect : Fin cardX → Nat → Fin 256 → CredentialFp5) (doomed : Fin cardX → Bool)
+    (hDefect : ∀ x, doomed x = true → ∀ idx < 33, ∃ bad, defect x idx bad ≠ credentialFp5Zero) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum (8 * 33) cardX
+         (fun O => qromOrdinaryFlipMass A O id (fun _ x => doomed x)
+           (credentialSdOpeningLiveAfter defect)),
+       (2 ^ (8 * 33)) ^ cardX * norm,
+       Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos _))
+         (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * 1, 2 ^ (8 * 33), Nat.two_pow_pos _⟩ ∧
+    (2 * Q + 1) ^ 2 * 2 ^ 128 < (256 : Nat) ^ 33 ∧
+    credentialSdRepetitions = 33 :=
+  ⟨qrom_uniform_oracle_round_bound A
+    (credentialSdOpeningQromRound defect doomed hDefect)
+    id (fun _ x => doomed x) (credentialSdOpeningLiveAfter defect)
+    1 (fun _ => rfl) (fun _ => rfl) (fun _ => rfl) (fun _ => rfl),
+    credentialSd_opening_qrom_budget Q hQ, credentialSdRepetitions_eq⟩
 
 /-- Consistent copies never trigger the finite collision event, for any hash. -/
 theorem vcRewoundCommitConflict_consistent_table
@@ -912,17 +1192,6 @@ theorem vcRewoundCommitConflict_consistent_table
   intro clean
   simp only [VcRewoundCommitConflict, clean, ne_eq, not_true_eq_false, false_and, or_self,
     not_false_eq_true]
-
-/-- The actual honest three-opening construction is never removed by the filter. -/
-theorem vcRewoundCommitConflict_honest_table
-    (H : List UInt8 → List UInt8) (nonce : Vec UInt8 32) (idx : Nat)
-    (tr : BlindVcRepTriple) :
-    ¬ VcRewoundCommitConflict H nonce idx
-      (openBlindVcRep H nonce idx tr 0)
-      (openBlindVcRep H nonce idx tr 1)
-      (openBlindVcRep H nonce idx tr 2) := by
-  simp only [VcRewoundCommitConflict, openBlindVcRep, vcNextParty3,
-    ne_eq, not_true_eq_false, false_and, or_self, not_false_eq_true]
 
 theorem blindVc_collision_filter_preserves_honest_openings
     (H : List UInt8 → List UInt8)
@@ -936,37 +1205,19 @@ theorem blindVc_collision_filter_preserves_honest_openings
   simp only [verifyCollisionFreeCommittedBlindVcRep,
     vcRewoundCommitConflict_honest_table, decide_false, Bool.not_false, Bool.true_and]
 
-/-- A constant hash and two concretely different views do trigger the event. The
-candidate table is retained, rather than replacing it by an unrelated global collision. -/
-theorem vcRewoundCommitConflict_constant_hash
-    (nonce : Vec UInt8 32) (idx : Nat) (o : OpenedBlindVcRep) :
-    let bad := { o with
-      viewE := { o.viewE with attrShares := [] }
-      viewE1 := { o.viewE with attrShares := [Goldilocks.zero] } }
-    VcRewoundCommitConflict (fun _ => []) nonce idx bad bad bad := by
-  intro bad
-  apply Or.inl
-  refine ⟨?_, rfl⟩
-  intro he
-  have hh := congrArg PartyVcRepView.attrShares he
-  change [Goldilocks.zero] = [] at hh
-  cases hh
-
-#verify_constructive blindVcParallelIop_false_statement_witness
-  vcRewoundCommitConflict_consistent_table vcRewoundCommitConflict_constant_hash
+#verify_constructive vcRewoundCommitConflict_consistent_table
   blindVc_committed_acceptance_decomposition blindVcTableConflict_extract
-  blindVc_fs_acceptance_decomposition vcRewoundCommitConflict_honest_table
-  blindVc_collision_filter_preserves_honest_openings
+  blindVc_fs_acceptance_decomposition
+  blindVc_collision_filter_preserves_honest_openings blindVcWitnessValid_of_extraction
 
 #verify_constructive blindVc_rep_pigeonhole_le_two blindVc_quantum128_interactive_rbr_bound
   word64_mod3_bad_count_le blindVc_qrom_fs_round_bound blindVc_quantum128_qrom_fs_soundness
   evalVcMerklePathBool_eq_merkleRootFromPath vcMerkleTree_opening_sound
+  encodeIssuerRootAttestationMsg_length encodeIssuerRootAttestationMsg_injective
+  credentialSd_rep_bad_count_le_one credentialSd_opening_bad_count_le_one
+  credentialSd_opening_qrom_budget credentialSd_opening_round_qrom_bound
+  IssuerRootAttestationFields.message_injective verifyIssuerRootAttestationBytes_accepts_core
+  verifyIssuerRootAttestation_rejects_raw_message_signature
   blindVc_presentation_reduces_to_issuer_mldsa
-#tooth_pair fin3_not_all_count_le_two vs tooth_single_rep_two_of_three_tight
-#verify_inhabited fin3_not_all_count_le_two fin3_not_all_count_witness
-#tooth_pair word64_mod3_bad_count_le vs tooth_single_rep_two_of_three_tight
-#verify_inhabited word64_mod3_bad_count_le fin3_not_all_count_witness
-#verify_inhabited vcMerkleTree_opening_sound vcMerkleTree_opening_witness
-#tooth_pair blindVc_presentation_reduces_to_issuer_mldsa vs tooth_blindVc_unsigned_issuer_root_rejected
 
 end Qsag
