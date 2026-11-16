@@ -21,7 +21,7 @@ import all Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import all Qsag.Coding.Cwyz26
-import all Qsag.Protocol.Aggregation.HemSlicedFoldBudget
+import all Qsag.Protocol.Aggregation.HemOpening
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -90,4 +90,45 @@ theorem inhabited_honest_opening_no_collision :
   Qsag.ClosedReductionTeeth.tooth_lying_opening_yields_collision
 
 end Qsag.ClosedReductionTeeth
+end
+
+public section
+namespace Qsag.ClosedWhir
+open Qsag.ClosedFs
+variable {F : Type} [Qsag.LawfulField F] [DecidableEq F]
+/-- The certificate type is inhabited at the stage-free schedule, whose verifier rejects. -/
+def emptyScheduleCert (env : WhirEnv F) (nv q : Nat) (hq : 0 < q) (w : Nat) :
+    WhirScheduleCert env ⟨nv, q, hq, []⟩ w where
+  cert :=
+    { state := fun _ _ => false
+      bad := fun r => Fin.elim0 r
+      init := fun _ _ => rfl
+      accept := fun x tr h => by
+        have hv : (decide (tr.length = 0) &&
+            whirVerdict env ⟨nv, q, hq, []⟩ x.claim
+              (tr.map (fun mc => ((⟨mc.1.poly, mc.1.answers⟩ : WhirPub F), mc.2)))
+              ((whirQueries env ⟨nv, q, hq, []⟩
+                (tr.map (fun mc => ((⟨mc.1.poly, mc.1.answers⟩ : WhirPub F), mc.2)))).map
+                (fun qq => whirTable ⟨nv, q, hq, []⟩ x (tr.map (fun mc => mc.1)) qq.1 qq.2))) =
+            true := h
+        rw [Bool.and_eq_true] at hv
+        have hLen : tr = [] := List.eq_nil_of_length_eq_zero (of_decide_eq_true hv.1)
+        rw [hLen] at hv
+        exact absurd hv.2 Bool.false_ne_true
+      flip := fun _ _ r _ _ _ _ => Fin.elim0 r }
+  covers := fun r => Fin.elim0 r
+
+/-- A stage-free certificate supplies no accepting transcript; it is only a negative control. -/
+theorem tooth_empty_schedule_rejects (env : WhirEnv F) (nv q w : Nat) (hq : 0 < q)
+    (x : WhirStmt F) (tr : List (WhirMsg F × Nat)) :
+    (whirOracleIop env ⟨nv, q, hq, []⟩ w).verify x tr = false := by
+  cases h : (whirOracleIop env ⟨nv, q, hq, []⟩ w).verify x tr
+  · rfl
+  · have bad := (emptyScheduleCert env nv q hq w).cert.accept x tr h
+    exact False.elim (Bool.false_ne_true bad)
+
+#verify_constructive Qsag.ClosedWhir.tooth_empty_schedule_rejects
+#tooth_pair Qsag.ClosedWhir.whir_exec_closed_qrom_soundness vs
+  Qsag.ClosedWhir.tooth_empty_schedule_rejects
+end Qsag.ClosedWhir
 end

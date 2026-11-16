@@ -61,7 +61,7 @@ aggregation engine (`crates/qsag-agg/src/`):
      `tooth_tampered_committed_row_breaks_gate_or_binding`);
    - `extractCanopyCollision`, a `Type`-valued extractor returning an explicit hash collision
      from two accepted multi-proof transcripts (`extractHashCollisionFromCanopyTranscripts`
-     for a byte-string hash, inhabited over the 32-byte digest `canopyPrefixHash`).
+     for a byte-string hash; an inhabited collision fixture lives in Tests/AggregationParityTeeth).
 
 Scope. Two row layouts appear. The row-committed layout of §4 is one row per signer (14
 boundary columns followed by a canonical cell stream of the structured witness block), and for
@@ -83,16 +83,12 @@ or `sqrt ρ` in the Johnson regime) is an input of the accounting.
 -/
 
 public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-import all Qsag.Math.Goldilocks
 public import Qsag.Oracle.Keccak
 public import Qsag.Oracle.Poseidon2
-import all Qsag.Oracle.Poseidon2
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Protocol.Aggregation.Aggregation
 
 public import Qsag.Tactic.AssuranceKit
 
@@ -344,7 +340,7 @@ def absorbPairsPoly {D S : Type} (perm1 : S → D → S) (perm2 : S → D → D 
   | e :: rest, st, none => absorbPairsPoly perm1 perm2 rest st (some e)
   | e1 :: rest, st, some e0 => absorbPairsPoly perm1 perm2 rest (perm2 st e0 e1) none
 
-private def absorbDigest4Pairs (st : Poseidon2State12) (xs : List Digest4) : Poseidon2State12 :=
+def absorbDigest4Pairs (st : Poseidon2State12) (xs : List Digest4) : Poseidon2State12 :=
   absorbPairsPoly
     (fun s e0 => poseidon2Perm12 ⟨lane4Add s.b0 e0, s.b1, s.b2⟩)
     (fun s e0 e1 => poseidon2Perm12 ⟨lane4Add s.b0 e0, lane4Add s.b1 e1, s.b2⟩)
@@ -388,7 +384,7 @@ def merkleNodeHash (domainTag : Goldilocks) (pkSeed : Digest4)
      st0.b1.x3⟩
   (poseidon2Perm12 ⟨b0', b1', st0.b2⟩).b0
 
-private def merkleWalkPoly {D : Type} (nodeHash : Nat → Nat → D → D → D) :
+def merkleWalkPoly {D : Type} (nodeHash : Nat → Nat → D → D → D) :
     List D → Nat → Nat → D → D
   | [], _, _, cur => cur
   | sib :: rest, lvl, idx, cur =>
@@ -991,6 +987,14 @@ def statelessXofSpongeState (pk : AggValidatorPk) (rRand : Digest4) (mu : Digest
   let muLow : Digest4 := ⟨mu.limb0, mu.limb1, mu.limb2, mu.limb3⟩
   poseidon2Perm12 ⟨lane4Add st0.b0 rRand, lane4Add st0.b1 muLow, st0.b2⟩
 
+/-- Source limb of a stateless FORS index; the fifth source supplies the final four bytes. -/
+def statelessForsSourceLimb (st : Poseidon2State12) : Nat → Nat
+  | 0 => st.b0.x0.val
+  | 1 => st.b0.x1.val
+  | 2 => st.b0.x2.val
+  | 3 => st.b0.x3.val
+  | _ => st.b1.x0.val
+
 /-- Stateless XOF deriving `leafGlobalIdx` and `forsTrees` leaf offsets (`derive_stateless_fors_and_leaf_checked`, `sig.rs:494`). -/
 def deriveStatelessLeafAndForsChecked (geom : AggSigGeometry) (pk : AggValidatorPk)
     (rRand : Digest4) (mu : Digest5) : Option (Nat × List Nat) :=
@@ -1002,12 +1006,7 @@ def deriveStatelessLeafAndForsChecked (geom : AggSigGeometry) (pk : AggValidator
     let leafGlobalIdx := rawLeaf % (2 ^ totalTreeBits)
     let treeMod := 2 ^ geom.forsHeight
     let indices := (List.range geom.forsTrees).map fun t =>
-      let limbVal := match t / 7 with
-        | 0 => st1.b0.x0.val
-        | 1 => st1.b0.x1.val
-        | 2 => st1.b0.x2.val
-        | 3 => st1.b0.x3.val
-        | _ => st1.b1.x0.val
+      let limbVal := statelessForsSourceLimb st1 (t / 7)
       (limbVal / (256 ^ (t % 7))) % treeMod
     some (leafGlobalIdx, indices)
   else
@@ -1056,7 +1055,7 @@ def honestForsPk (geom : AggSigGeometry) (skSeed pkSeed : Digest4) (leafGlobalId
   compressForsRootsSponge geom pkSeed leafGlobalIdx
     ((List.range geom.forsTrees).map (honestForsTreeRoot geom skSeed pkSeed leafGlobalIdx))
 
-private def recoverEndpointsPoly {D : Type} (walkFn : Nat → Nat → Nat → D → D) :
+def recoverEndpointsPoly {D : Type} (walkFn : Nat → Nat → Nat → D → D) :
     List Nat → List D → Nat → List D
   | [], _, _ => []
   | _, [], _ => []
@@ -1137,7 +1136,7 @@ def verifyWotsLayer (geom : AggSigGeometry) (pk : AggValidatorPk)
   else
     none
 
-private def verifyForsPoly {OP D : Type} (step : Nat → Nat → OP → Option D) :
+def verifyForsPoly {OP D : Type} (step : Nat → Nat → OP → Option D) :
     List Nat → List OP → Nat → Option (List D)
   | [], [], _ => some []
   | idx :: idxs, op :: ops, t =>
@@ -1305,7 +1304,7 @@ theorem tooth_fors_cross_tree_transplant_rejected (geom : AggSigGeometry) (pkSee
   rw [forsTreeNodeAddr_top, forsTreeNodeAddr_top]
   exact fun h => hNe (Nat.add_left_cancel h)
 
-private def verifyUpperPoly {LS D : Type} (step : Nat → Nat → D → LS → Option (Nat × D)) :
+def verifyUpperPoly {LS D : Type} (step : Nat → Nat → D → LS → Option (Nat × D)) :
     List LS → Nat → Nat → D → Option D
   | [], _, _, curRoot => some curRoot
   | lsig :: rest, layer, remTreeIdx, curRoot =>
@@ -1342,7 +1341,7 @@ def verifyAggNativeSigStateful (geom : AggSigGeometry) (pk : AggValidatorPk)
       | none => false
       | some topRoot => topRoot == pk.pkRoot
 
-private def evalStatelessFlow {Idx Ops FPk R0 Rt : Type}
+def evalStatelessFlow {Idx Ops FPk R0 Rt : Type}
     (statefulNz : Bool)
     (xofRes : Option (Idx × Ops))
     (verFors : Idx → Ops → Option FPk)
@@ -1363,7 +1362,7 @@ private def evalStatelessFlow {Idx Ops FPk R0 Rt : Type}
         | none => false
         | some top => checkTop top
 
-private theorem evalStatelessFlow_ok {Idx Ops FPk R0 Rt : Type}
+theorem evalStatelessFlow_ok {Idx Ops FPk R0 Rt : Type}
     (xofRes : Option (Idx × Ops))
     (verFors : Idx → Ops → Option FPk)
     (verLayer0 : Idx → FPk → Option R0)
@@ -3850,10 +3849,10 @@ private theorem roundsResidualsPoly_honest {RC ST SB RES : Type}
       (roundsResidualsPoly sboxFn nextFn diffFn badRes rcs
         (buildRoundsSboxPoly sboxFn nextFn rcs cur) cur).1 = runRounds roundFn rcs cur
   | [], cur => by
-    dsimp only [buildRoundsSboxPoly, roundsResidualsPoly, runRounds]
-    exact ⟨hNil, rfl⟩
+    simp only [buildRoundsSboxPoly, roundsResidualsPoly, runRounds_nil]
+    exact ⟨hNil, True.intro⟩
   | rc :: rcs, cur => by
-    dsimp only [buildRoundsSboxPoly, roundsResidualsPoly, runRounds]
+    simp only [buildRoundsSboxPoly, roundsResidualsPoly, runRounds_cons]
     rw [hRound rc cur]
     have ih := roundsResidualsPoly_honest sboxFn nextFn diffFn badRes roundFn hRound
       zeroPred hNil hAppend hDiffSelf rcs (roundFn rc cur)
@@ -3953,7 +3952,8 @@ private theorem state12Sub_toList_allZero_iff (a b : Poseidon2State12) :
     allZeroGoldilocks (state12Sub a b).toList = true ↔ a = b := by
   rcases a with ⟨⟨a0, a1, a2, a3⟩, ⟨a4, a5, a6, a7⟩, ⟨a8, a9, a10, a11⟩⟩
   rcases b with ⟨⟨b0, b1, b2, b3⟩, ⟨b4, b5, b6, b7⟩, ⟨b8, b9, b10, b11⟩⟩
-  unfold allZeroGoldilocks state12Sub lane4Sub Poseidon2State12.toList
+  unfold allZeroGoldilocks
+  simp only [state12Sub_eq, lane4Sub_eq, Poseidon2State12.toList_eq]
   simp only [List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true,
     sub_eq_zero_iff_goldilocks, Poseidon2State12.mk.injEq, Lane4.mk.injEq]
   constructor
@@ -3966,7 +3966,7 @@ private theorem extRoundsResiduals_honest (rcs : List Poseidon2State12) (cur : P
     allZeroGoldilocks (extRoundsResiduals rcs cur (buildExtRoundsSbox rcs cur)).2 = true ∧
     (extRoundsResiduals rcs cur (buildExtRoundsSbox rcs cur)).1 = runRounds externalRound rcs cur :=
   roundsResidualsPoly_honest extRoundSboxFn extRoundNextFn
-    (fun a b => (state12Sub a b).toList) [Goldilocks.one] externalRound (fun _ _ => rfl)
+    (fun a b => (state12Sub a b).toList) [Goldilocks.one] externalRound (fun rc cur => (externalRound_eq rc cur).symm)
     allZeroGoldilocks rfl allZeroGoldilocks_append
     (fun sb => (state12Sub_toList_allZero_iff sb sb).mpr rfl) rcs cur
 
@@ -3975,7 +3975,7 @@ private theorem extRoundsResiduals_allZero_iff
     allZeroGoldilocks (extRoundsResiduals rcs cur sbs).2 = true ↔
       sbs = buildExtRoundsSbox rcs cur :=
   roundsResidualsPoly_allZero_iff extRoundSboxFn extRoundNextFn
-    (fun a b => (state12Sub a b).toList) [Goldilocks.one] externalRound (fun _ _ => rfl)
+    (fun a b => (state12Sub a b).toList) [Goldilocks.one] externalRound (fun rc cur => (externalRound_eq rc cur).symm)
     allZeroGoldilocks rfl (by decide) allZeroGoldilocks_append state12Sub_toList_allZero_iff
     rcs sbs cur
 
@@ -3983,7 +3983,7 @@ private theorem intRoundsResiduals_honest (rcs : List Goldilocks) (cur : Poseido
     allZeroGoldilocks (intRoundsResiduals rcs cur (buildIntRoundsSbox rcs cur)).2 = true ∧
     (intRoundsResiduals rcs cur (buildIntRoundsSbox rcs cur)).1 = runRounds internalRound rcs cur :=
   roundsResidualsPoly_honest intRoundSboxFn intRoundNextFn
-    (fun a b => [Goldilocks.sub a b]) [Goldilocks.one] internalRound (fun _ _ => rfl)
+    (fun a b => [Goldilocks.sub a b]) [Goldilocks.one] internalRound (fun rc cur => (internalRound_eq rc cur).symm)
     allZeroGoldilocks rfl allZeroGoldilocks_append
     (fun sb => by
       change (Goldilocks.sub sb sb == Goldilocks.zero && true) = true
@@ -3995,7 +3995,7 @@ private theorem intRoundsResiduals_allZero_iff
     allZeroGoldilocks (intRoundsResiduals rcs cur sbs).2 = true ↔
       sbs = buildIntRoundsSbox rcs cur :=
   roundsResidualsPoly_allZero_iff intRoundSboxFn intRoundNextFn
-    (fun a b => [Goldilocks.sub a b]) [Goldilocks.one] internalRound (fun _ _ => rfl)
+    (fun a b => [Goldilocks.sub a b]) [Goldilocks.one] internalRound (fun rc cur => (internalRound_eq rc cur).symm)
     allZeroGoldilocks rfl (by decide) allZeroGoldilocks_append
     (fun a b => by
       change (Goldilocks.sub a b == Goldilocks.zero && true) = true ↔ a = b
@@ -4067,9 +4067,24 @@ def zeroPoseidon2PermWitness : Poseidon2PermWitness where
   termExtSbox := List.replicate 4 state12Zero
   output      := state12Zero
 
+private theorem first_external_zero_trace_rejected (output : Poseidon2State12) :
+    allZeroGoldilocks (poseidon2PermResiduals
+      { input := state12Zero, initExtSbox := List.replicate 4 state12Zero,
+        intSbox := List.replicate 22 Goldilocks.zero,
+        termExtSbox := List.replicate 4 state12Zero, output := output }) ≠ true := by
+  intro h
+  have he := congrArg (fun w : Poseidon2PermWitness => (w.initExtSbox.headD state12Zero).b0.x0)
+    ((poseidon2PermResiduals_allZero_iff _).mp h)
+  simp only [honestPoseidon2PermWitness, buildExtRoundsSbox, poseidon2InitialExtConsts_eq,
+    buildRoundsSboxPoly, List.replicate_succ, List.headD_cons] at he
+  have hz : state12Zero.b0.x0 = Goldilocks.zero := by rw [state12Zero_eq, lane4Zero_eq]
+  exact poseidon2_initial_sbox_zero_nonzero (he.symm.trans hz)
+
 theorem zeroPoseidon2PermWitness_rejected :
     allZeroGoldilocks (poseidon2PermResiduals zeroPoseidon2PermWitness) = false := by
-  decide +kernel
+  cases h : allZeroGoldilocks (poseidon2PermResiduals zeroPoseidon2PermWitness) with
+  | false => rfl
+  | true => exact False.elim (first_external_zero_trace_rejected state12Zero h)
 
 
 /-! ### Multilinear Inter-Row Shift Kernel Identities (`arithmetize.rs:63-106`) -/
@@ -4797,16 +4812,16 @@ private theorem wotsStepHash_eq_tweak4 (pkSeed cur : Digest4) (layer treeIdx kpI
     wotsStepHash pkSeed cur layer treeIdx kpIdx chainIdx stp =
       lane4Add (poseidon2Perm12 ⟨cur, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx stp⟩).b0
         (poseidon2WeightedFeedForward ⟨cur, pkSeed, wotsStepTweak4 layer treeIdx kpIdx chainIdx stp⟩) := by
-  unfold wotsStepHash poseidon2Compress12FF poseidon2CompressWeighted wotsStepTweak4
-  rfl
+  unfold wotsStepHash poseidon2Compress12FF wotsStepTweak4
+  rw [poseidon2CompressWeighted_eq]
 
-private theorem wotsChainWalk_zero_steps (pkSeed : Digest4) (layer treeIdx kpIdx chainIdx s : Nat)
+theorem wotsChainWalk_zero_steps (pkSeed : Digest4) (layer treeIdx kpIdx chainIdx s : Nat)
     (cur : Digest4) :
     wotsChainWalk pkSeed layer treeIdx kpIdx chainIdx s 0 cur = cur := by
   unfold wotsChainWalk
   rw [natIterAt]
 
-private theorem wotsChainWalk_succ_steps (pkSeed : Digest4) (layer treeIdx kpIdx chainIdx s n : Nat)
+theorem wotsChainWalk_succ_steps (pkSeed : Digest4) (layer treeIdx kpIdx chainIdx s n : Nat)
     (cur : Digest4) :
     wotsChainWalk pkSeed layer treeIdx kpIdx chainIdx s (n + 1) cur =
       wotsChainWalk pkSeed layer treeIdx kpIdx chainIdx (s + 1) n
@@ -4918,10 +4933,6 @@ theorem unaryWotsChainResiduals_allZero_iff
             rfl⟩, rfl⟩, (muxDigest4Residuals_allZero_iff hb1 _ _ _).mpr rfl⟩, rfl⟩, rfl⟩,
             (muxDigest4Residuals_allZero_iff hb2 _ _ _).mpr rfl⟩
 
-/-- The four limbs of a `Lane4` / `Digest4` as a residual list. -/
-def Lane4.toList (l : Lane4) : List Goldilocks :=
-  [l.x0, l.x1, l.x2, l.x3]
-
 /-! ### 2-Block Merkle, 2-Rate Sponge, `H_msg`, and Full `K`-Signer Trace Arithmetization -/
 
 /-- Witness for a single 2-block `merkleNodeHash` level (`MerkleLeft` + `MerkleRight` in `trace.rs:132-139`). -/
@@ -4997,7 +5008,8 @@ private theorem lane4Sub_toList_allZero_iff (a b : Digest4) :
     allZeroGoldilocks (lane4Sub a b).toList = true ↔ a = b := by
   rcases a with ⟨a0, a1, a2, a3⟩
   rcases b with ⟨b0, b1, b2, b3⟩
-  unfold allZeroGoldilocks lane4Sub Lane4.toList
+  unfold allZeroGoldilocks
+  simp only [lane4Sub_eq, Lane4.toList_eq]
   simp [gold_sub_eq_zero_iff, Lane4.mk.injEq]
 
 theorem honestMerkleLevelWitness_parent (domainTag : Goldilocks) (pkSeed : Digest4)
@@ -5432,18 +5444,18 @@ structure HmsgStatefulTraceWitness where
   outMsg : Digest5
   deriving DecidableEq, Repr
 
-private def hmsgStatefulIn0 (pk : AggValidatorPk) (mu : Digest5) (kpIdx tswCtr : Nat) : Poseidon2State12 :=
+def hmsgStatefulIn0 (pk : AggValidatorPk) (mu : Digest5) (kpIdx tswCtr : Nat) : Poseidon2State12 :=
   let kpCtr := Goldilocks.ofNat ((kpIdx % (2 ^ 32)) * (2 ^ 32) + (tswCtr % (2 ^ 32)))
   ⟨pk.pkSeed, pk.pkRoot, ⟨domainHMsgStateful, kpCtr, mu.limb4, poseidon2IvTag⟩⟩
 
-private def hmsgStatefulIn1 (st0 : Poseidon2State12) (rRand : Digest4) (mu : Digest5) : Poseidon2State12 :=
+def hmsgStatefulIn1 (st0 : Poseidon2State12) (rRand : Digest4) (mu : Digest5) : Poseidon2State12 :=
   let muLow : Digest4 := ⟨mu.limb0, mu.limb1, mu.limb2, mu.limb3⟩
   ⟨lane4Add st0.b0 rRand, lane4Add st0.b1 muLow, st0.b2⟩
 
-private def state12OutDigest5 (st : Poseidon2State12) : Digest5 :=
+def state12OutDigest5 (st : Poseidon2State12) : Digest5 :=
   { limb0 := st.b0.x0, limb1 := st.b0.x1, limb2 := st.b0.x2, limb3 := st.b0.x3, limb4 := st.b1.x0 }
 
-private theorem computeHmsgStateful_eq_states (pk : AggValidatorPk) (rRand : Digest4)
+theorem computeHmsgStateful_eq_states (pk : AggValidatorPk) (rRand : Digest4)
     (mu : Digest5) (kpIdx tswCtr : Nat) :
     computeHmsgStateful pk rRand mu kpIdx tswCtr =
       state12OutDigest5 (poseidon2Perm12 (spongePadOne
@@ -6144,8 +6156,8 @@ private theorem forsLeafHash_eq_perm (geom : AggSigGeometry) (pkSeed val : Diges
         ⟨val, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx j idx⟩).b0
         (poseidon2WeightedFeedForward
           ⟨val, pkSeed, forsLeafTweak4 domainForsLeaf geom leafGlobalIdx j idx⟩) := by
-  unfold forsLeafHash poseidon2Compress12FF poseidon2CompressWeighted
-  rfl
+  unfold forsLeafHash poseidon2Compress12FF
+  rw [poseidon2CompressWeighted_eq]
 
 structure ForsOpeningTraceWitness where
   secretVal : Digest4
@@ -6542,6 +6554,7 @@ theorem statelessXofTraceResiduals_sound (geom : AggSigGeometry) (pk : AggValida
         (fun l => decide (l.val < 2 ^ 63))) = true := by
     simp [c0, c1, c2, c3, c4, c5, c6]
   simp only [hAll63, ↓reduceIte]
+  rfl
 
 theorem statelessXofTraceResiduals_complete (geom : AggSigGeometry) (pk : AggValidatorPk)
     (rRand : Digest4) (mu : Digest5) (leafIdx : Nat) (indices : List Nat)
@@ -7317,27 +7330,27 @@ def stepOpNumCols : Nat := 256
 def stepOpNumStateLimbs : Nat := 44
 
 /-- `ST_CUR_ROOT` (4 limbs). -/
-def stCurRoot : Nat := 0
+abbrev stCurRoot : Nat := 0
 /-- `ST_KP_IDX`. -/
-def stKpIdx : Nat := 4
+abbrev stKpIdx : Nat := 4
 /-- `ST_TREE_LO`. -/
-def stTreeLo : Nat := 5
+abbrev stTreeLo : Nat := 5
 /-- `ST_TREE_HI`. -/
-def stTreeHi : Nat := 6
+abbrev stTreeHi : Nat := 6
 /-- `ST_REM_PACK` (6 limbs). -/
-def stRemPack : Nat := 7
+abbrev stRemPack : Nat := 7
 /-- `ST_MAIN_SPONGE` (12 limbs). -/
-def stMainSponge : Nat := 13
+abbrev stMainSponge : Nat := 13
 /-- `ST_SUB_SPONGE` (12 limbs). -/
-def stSubSponge : Nat := 25
+abbrev stSubSponge : Nat := 25
 /-- `ST_WORK` (4 limbs). -/
-def stWork : Nat := 37
+abbrev stWork : Nat := 37
 /-- `ST_CURSOR_IDX`. -/
-def stCursorIdx : Nat := 41
+abbrev stCursorIdx : Nat := 41
 /-- `ST_ACC_OR_U1`. -/
-def stAccOrU1 : Nat := 42
+abbrev stAccOrU1 : Nat := 42
 /-- `ST_WOTS_U2`. -/
-def stWotsU2 : Nat := 43
+abbrev stWotsU2 : Nat := 43
 
 /-- One row of the execution table, grouped by the column blocks of `trace.rs`:
     `COL_ST_IN = 0..12`, `COL_SBOX_OUT = 12..130` (4 external rounds of 12 lanes, 22 internal
@@ -7367,7 +7380,7 @@ private theorem flatMap_state12_length :
     ∀ (l : List Poseidon2State12), (l.flatMap Poseidon2State12.toList).length = 12 * l.length
   | [] => rfl
   | s :: l => by
-    have h12 : s.toList.length = 12 := rfl
+    have h12 : s.toList.length = 12 := Poseidon2State12.toList_length s
     rw [List.flatMap_cons, List.length_append, flatMap_state12_length l, List.length_cons, h12]
     omega
 
@@ -7377,7 +7390,7 @@ theorem StepOpRow.cells_length (r : StepOpRow) (h : r.wellShaped = true) :
   unfold StepOpRow.wellShaped at h
   simp only [Bool.and_eq_true, beq_iff_eq] at h
   obtain ⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
-  have h12 : r.stIn.toList.length = 12 := rfl
+  have h12 : r.stIn.toList.length = 12 := Poseidon2State12.toList_length r.stIn
   have hc : r.cells.length =
       r.stIn.toList.length + 12 * r.initExtSbox.length + r.intSbox.length +
         12 * r.termExtSbox.length + r.prevState.length + r.nextState.length + r.aux.length := by
@@ -7564,7 +7577,7 @@ def stepPlainSum (f : Nat → Goldilocks) (n : Nat) : Goldilocks :=
   (List.range n).foldl (fun acc i => acc +ₚ f i) Goldilocks.zero
 
 /-- `j` lies in the register block `[a, a + n)`. -/
-def stepInBlock (a n j : Nat) : Bool := decide (a ≤ j) && decide (j < a + n)
+@[expose] def stepInBlock (a n j : Nat) : Bool := decide (a ≤ j) && decide (j < a + n)
 
 /-- `check_carry_unchanged`: every state limb outside `changed` is carried, `next = prev`. -/
 def stepCarryUnchanged (x : StepOpRowInputs) (changed : Nat → Bool) : List Goldilocks :=
@@ -7610,11 +7623,13 @@ def stepStatelessDecompExpected (x : StepOpRowInputs) (l j : Nat) : Goldilocks :
   if l < 4 then stepForsPackExpected x (7 * l) 7 j
   else if l = 4 then stepForsPackExpected x 28 4 j
   else if l = 5 then
-    (if j = stKpIdx then x.aux 0 +ₚ (x.aux 1 *ₚ ‹4›)
+    (if j = stKpIdx then Goldilocks.add (x.aux 0) (Goldilocks.mul (x.aux 1) (Goldilocks.ofNat 4))
      else if j = stTreeLo then stepHi28 x
      else x.prev j)
   else if l = 6 then
-    (if j = stTreeLo then x.prev stTreeLo +ₚ ((x.aux 0 +ₚ (x.aux 1 *ₚ ‹4›)) *ₚ ‹2 ^ 28›)
+    (if j = stTreeLo then Goldilocks.add (x.prev stTreeLo)
+         (Goldilocks.mul (Goldilocks.add (x.aux 0) (Goldilocks.mul (x.aux 1) (Goldilocks.ofNat 4)))
+           (Goldilocks.ofNat (2 ^ 28)))
      else if j = stTreeHi then stepHi28 x
      else x.prev j)
   else x.prev j
@@ -7904,7 +7919,10 @@ def stepOpBoundaryResiduals (rowsPerSigner t : Nat) (row : StepOpRow) : List Gol
 abbrev StepOpSlot : Type := Option (AggValidatorPk × Digest5)
 
 /-- The values the opcode constraints of a row read. -/
-def stepOpRowInputs (pub : AggValidatorPk × Digest5) (row : StepOpRow) : StepOpRowInputs where
+theorem stepOpPermTrace_nextState (row : StepOpRow) (next : List Goldilocks) :
+    stepOpPermTrace { row with nextState := next } = stepOpPermTrace row := by rfl
+
+@[expose] def stepOpRowInputs (pub : AggValidatorPk × Digest5) (row : StepOpRow) : StepOpRowInputs where
   prev    := fun j => row.prevState.getD j Goldilocks.zero
   next    := fun j => row.nextState.getD j Goldilocks.zero
   aux     := fun i => row.aux.getD i Goldilocks.zero
@@ -8482,8 +8500,8 @@ theorem ext4_multiaffine_roots_le (S : List GoldilocksExt4) (hS : S.Nodup) :
       ((challengeVectors S w.length).filter (fun xs => decide (F xs = CommRingOps.zero))).length ≤
         w.length * S.length ^ (w.length - 1)
   | [], F, _, hn => by
-    simp only [List.length_nil, challengeVectors, List.filter_cons, decide_eq_false hn,
-      Bool.false_eq_true, ↓reduceIte, List.filter_nil, Nat.zero_mul]
+    rw [List.length_nil, challengeVectors_zero, List.filter_cons, decide_eq_false hn,
+      ite_eq_right Bool.false_ne_true, List.filter_nil, Nat.zero_mul]
     exact Nat.le_refl _
   | a :: w, F, hm, hn => by
     let b := fun r => decide (F (r :: w) = CommRingOps.zero)
@@ -8515,10 +8533,8 @@ theorem ext4_multiaffine_roots_le (S : List GoldilocksExt4) (hS : S.Nodup) :
         simp only [M, List.length_cons, Nat.add_sub_cancel, Nat.pow_succ]
         rw [Nat.mul_left_comm, Nat.mul_comm S.length (S.length ^ ws.length)]
         exact Nat.le_refl _
-    change ((S.flatMap (fun r => (challengeVectors S w.length).map (fun xs => r :: xs))).filter
-      (fun xs => decide (F xs = CommRingOps.zero))).length ≤ _
-    rw [filter_flatMap_eq]
-    simp only [List.length_cons, Nat.add_sub_cancel, Nat.add_mul, Nat.one_mul]
+    rw [List.length_cons, challengeVectors_succ, filter_flatMap_eq]
+    simp only [Nat.add_sub_cancel, Nat.add_mul, Nat.one_mul]
     exact Nat.le_trans hsplit (by omega)
 
 /-- A nonzero residual on the Boolean cube gives a nonzero multilinear equality-weighted
@@ -8744,7 +8760,7 @@ theorem stepOpShiftClaimExt4_random_tau_roots_le (ell u : Nat) (hu : u + 1 < 2 ^
 
 /-! #### `#tooth` rows -/
 
-private theorem getD_replicate_zero :
+theorem getD_replicate_zero :
     ∀ (n j : Nat),
       (List.replicate n Goldilocks.zero).getD j Goldilocks.zero = Goldilocks.zero
   | 0, _ => rfl
@@ -8878,11 +8894,21 @@ theorem tooth_stepOp256_state_splice_breaks_shift_constraint :
   · exact hSplice _ _ 0 (by decide)
       (fun h => (by decide : Goldilocks.zero ≠ Goldilocks.one) h)
 
+private theorem buildRoundsSboxPoly_length {RC ST SB : Type}
+    (sboxFn : RC → ST → SB) (nextFn : ST → SB → ST) :
+    ∀ (rcs : List RC) (cur : ST),
+      (buildRoundsSboxPoly sboxFn nextFn rcs cur).length = rcs.length
+  | [], _ => rfl
+  | rc :: rcs, cur => by
+    simp only [buildRoundsSboxPoly, List.length_cons, buildRoundsSboxPoly_length sboxFn nextFn rcs]
+
 private theorem honestZeroPerm_sbox_lengths :
     (honestPoseidon2PermWitness state12Zero).initExtSbox.length = 4 ∧
     (honestPoseidon2PermWitness state12Zero).intSbox.length = 22 ∧
     (honestPoseidon2PermWitness state12Zero).termExtSbox.length = 4 := by
-  decide +kernel
+  simp only [honestPoseidon2PermWitness, buildExtRoundsSbox, buildIntRoundsSbox,
+    buildRoundsSboxPoly_length, poseidon2InitialExtConsts_length,
+    poseidon2InternalConsts_length, poseidon2TerminalExtConsts_length] <;> simp
 
 /-- An `Idle` row with 44 carried limbs and 38 auxiliary cells has the 256-column shape. -/
 theorem stepOpIdleRow_wellShaped (prevState aux : List Goldilocks)
@@ -8958,7 +8984,19 @@ theorem stepOp256_inactive_table_complete (profile : AggSigProfile) (k : Nat) (h
 
 private theorem stepOpZeroRow_groupA :
     allZeroGoldilocks (stepOpPermTrace stepOpZeroRow).2 = false := by
-  decide +kernel
+  cases h : allZeroGoldilocks (stepOpPermTrace stepOpZeroRow).2 with
+  | false => rfl
+  | true =>
+    apply False.elim
+    apply first_external_zero_trace_rejected (stepOpPermTrace stepOpZeroRow).1
+    have he : poseidon2PermResiduals
+        { input := state12Zero, initExtSbox := List.replicate 4 state12Zero,
+          intSbox := List.replicate 22 Goldilocks.zero,
+          termExtSbox := List.replicate 4 state12Zero, output := (stepOpPermTrace stepOpZeroRow).1 } =
+        (stepOpPermTrace stepOpZeroRow).2 ++
+          (state12Sub (stepOpPermTrace stepOpZeroRow).1 (stepOpPermTrace stepOpZeroRow).1).toList := rfl
+    rw [he, allZeroGoldilocks_append, h]
+    exact (state12Sub_toList_allZero_iff _ _).mpr rfl
 
 /-- **`#tooth`: all-zero rows are rejected.** For every profile, every slot assignment and
     every row count `n`, the table of `n` all-zero rows is rejected: with `n = 0` the row count
@@ -9000,36 +9038,24 @@ structure WhirStageSpec where
   numQueries : Nat
   deriving DecidableEq, Repr
 
-/-- `pcs.rs:WhirSecurityRegime`: unconditional `[BCIKS20]` Johnson-radius query-accounting
-    regimes (`sqrt ρ + η` per query, with wire tags `2` and `4`; retired capacity wire tags
-    `0, 1, 3` are rejected on deserialization). -/
-inductive WhirSecurityRegime where
-  | bciksJohnsonClassical128
-  | bciksJohnsonQrom128
-  deriving DecidableEq, Repr
+/-- `pcs.rs:WhirSecurityRegime`: the six wire-decodable regimes, defined once in
+    `Aggregation.WhirSecurityRegime` (tags `2, 4, 5, 6, 7, 8`). -/
+abbrev WhirSecurityRegime := Aggregation.WhirSecurityRegime
 
-def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .bciksJohnsonQrom128
-
-def WhirSecurityRegime.tagByte : WhirSecurityRegime → UInt8
-  | .bciksJohnsonClassical128 => 2
-  | .bciksJohnsonQrom128 => 4
-
-def WhirSecurityRegime.decodeTag? : UInt8 → Option WhirSecurityRegime
-  | 2 => some .bciksJohnsonClassical128
-  | 4 => some .bciksJohnsonQrom128
-  | _ => none
-
-theorem WhirSecurityRegime.decodeTag?_tagByte (r : WhirSecurityRegime) :
-    WhirSecurityRegime.decodeTag? r.tagByte = some r := by
-  cases r <;> rfl
-
-/-- `#tooth`: retired capacity-proximity wire tags `0`, `1`, and `3` are rejected (`none`) by
-    `WhirSecurityRegime.decodeTag?`, matching `WhirSecurityRegime::from_u8` in `pcs.rs`. -/
-theorem tooth_iop_whirSecurityRegime_decodeTag_rejects_retired :
-    WhirSecurityRegime.decodeTag? 0 = none ∧
-    WhirSecurityRegime.decodeTag? 1 = none ∧
-    WhirSecurityRegime.decodeTag? 3 = none := by
-  decide
+namespace WhirSecurityRegime
+@[match_pattern] abbrev bciksJohnsonClassical128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.bciksJohnsonClassical128
+@[match_pattern] abbrev bciksJohnsonQrom128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.bciksJohnsonQrom128
+@[match_pattern] abbrev cdhz25JohnsonQrom128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.cdhz25JohnsonQrom128
+@[match_pattern] abbrev cdhz25ZeroPowQrom128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.cdhz25ZeroPowQrom128
+@[match_pattern] abbrev poseidon2Cdhz25JohnsonQrom128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.poseidon2Cdhz25JohnsonQrom128
+@[match_pattern] abbrev poseidon2Cdhz25ZeroPowQrom128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.poseidon2Cdhz25ZeroPowQrom128
+end WhirSecurityRegime
 
 /-- `pcs.rs:WhirSchedule`. -/
 structure WhirSchedule where
@@ -9041,10 +9067,10 @@ structure WhirSchedule where
 /-- `pcs.rs:PCS_POW_BITS`: per-stage transcript proof-of-work difficulty. -/
 def whirPowBits : Nat := 16
 
-/-- `pcs.rs:stage_geometry`, defined for `2 ≤ numVars ≤ 24`: blowups, folded variables and
+/-- `pcs.rs:stage_geometry`, defined for `2 ≤ numVars ≤ 28` (`MAX_PCS_NUM_VARS`): blowups, folded variables and
     early-stop count of every stage, carrying baseline counts `56 / 30 / 21 / 18` (`68` for a
     single stage) that `WhirSecurityRegime.schedule` overrides. -/
-def whirLegacyStageGeometry (numVars : Nat) : WhirSchedule :=
+@[expose] def whirLegacyStageGeometry (numVars : Nat) : WhirSchedule :=
   if numVars ≤ 6 then
     let es := if numVars ≤ 3 then 1 else 2
     ⟨.bciksJohnsonQrom128, es, [⟨16, numVars - es, 68⟩]⟩
@@ -9067,40 +9093,56 @@ def whirLegacyStageGeometry (numVars : Nat) : WhirSchedule :=
     ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 4, 30⟩, ⟨64, 4, 21⟩]⟩
   else if numVars = 23 then
     ⟨.bciksJohnsonQrom128, 7, [⟨4, 6, 56⟩, ⟨16, 4, 30⟩, ⟨64, 3, 21⟩, ⟨256, 3, 18⟩]⟩
-  else
+  else if numVars = 24 then
     ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 4, 30⟩, ⟨64, 3, 21⟩, ⟨256, 3, 18⟩]⟩
+  else if numVars = 25 then
+    ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 4, 30⟩, ⟨64, 4, 21⟩, ⟨256, 3, 18⟩]⟩
+  else if numVars = 26 then
+    ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 5, 30⟩, ⟨64, 4, 21⟩, ⟨256, 3, 18⟩]⟩
+  else if numVars = 27 then
+    ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 5, 30⟩, ⟨64, 4, 21⟩, ⟨256, 4, 18⟩]⟩
+  else
+    ⟨.bciksJohnsonQrom128, 8, [⟨4, 6, 56⟩, ⟨16, 6, 30⟩, ⟨64, 4, 21⟩, ⟨256, 4, 18⟩]⟩
 
 /-- `log2` of a supported blowup (`blowup.trailing_zeros()` on `4 | 16 | 64 | 256`). -/
-def whirLogBlowup : Nat → Nat
+@[expose] def whirLogBlowup : Nat → Nat
   | 4 => 2
   | 16 => 4
   | 64 => 6
   | 256 => 8
   | _ => 0
 
-/-- Query-exponent target of an unconditional Johnson regime in bits of `blowup ^ numQueries`:
-    `256` (`bciksJohnsonClassical128`) or `512` (`bciksJohnsonQrom128`), since agreement `sqrt ρ`
-    per query needs twice the exponent. -/
-def WhirSecurityRegime.queryExponentBits : WhirSecurityRegime → Nat
-  | .bciksJohnsonClassical128 => 256
-  | .bciksJohnsonQrom128 => 512
+/-- Query-exponent target of a regime in bits of `blowup ^ numQueries`: twice
+    `pureQueryTargetBits` (`256, 512, 400, 428, 400, 428` for tags `2, 4, 5, 6, 7, 8`), since
+    agreement `sqrt ρ` per query needs twice the exponent. -/
+def WhirSecurityRegime.queryExponentBits (r : WhirSecurityRegime) : Nat :=
+  2 * r.pureQueryTargetBits
+
+/-- `by_blowup` of `pcs.rs:WhirSecurityRegime::minimum_queries`: a table indexed by
+    `log2 blowup ∈ {0..2, 3..4, 5..6, 7..}`. -/
+@[expose] def whirQueryTable (t0 t1 t2 t3 logB : Nat) : Nat :=
+  if logB ≤ 2 then t0 else if logB ≤ 4 then t1 else if logB ≤ 6 then t2 else t3
 
 /-- Per-stage query count of `pcs.rs:WhirSecurityRegime::minimum_queries`:
-    `ceil(bits / log2 blowup)`, plus one classical or two QROM Johnson slack queries. -/
-def WhirSecurityRegime.numQueries (r : WhirSecurityRegime) (blowup : Nat) : Nat :=
-  let q := (r.queryExponentBits + whirLogBlowup blowup - 1) / whirLogBlowup blowup
+    `ceil(256 / log2 B) + 1` (tag `2`), `ceil(512 / log2 B) + 2` (tag `4`), the table
+    `(202, 102, 70, 52)` (tags `5, 7`) or `(216, 109, 74, 56)` (tags `6, 8`). -/
+@[expose] def WhirSecurityRegime.numQueries (r : WhirSecurityRegime) (blowup : Nat) : Nat :=
   match r with
-  | .bciksJohnsonClassical128 => q + 1
-  | .bciksJohnsonQrom128 => q + 2
+  | .bciksJohnsonClassical128 => (256 + whirLogBlowup blowup - 1) / whirLogBlowup blowup + 1
+  | .bciksJohnsonQrom128 => (512 + whirLogBlowup blowup - 1) / whirLogBlowup blowup + 2
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 =>
+    whirQueryTable 202 102 70 52 (whirLogBlowup blowup)
+  | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 =>
+    whirQueryTable 216 109 74 56 (whirLogBlowup blowup)
 
 /-- `pcs.rs:WhirSecurityRegime::schedule`: the stage geometry with the regime's query counts. -/
-def WhirSecurityRegime.schedule (r : WhirSecurityRegime) (numVars : Nat) : WhirSchedule :=
+@[expose] def WhirSecurityRegime.schedule (r : WhirSecurityRegime) (numVars : Nat) : WhirSchedule :=
   ⟨r, (whirLegacyStageGeometry numVars).earlyStopVars,
     (whirLegacyStageGeometry numVars).stages.map
       (fun st => ⟨st.blowup, st.stepVars, r.numQueries st.blowup⟩)⟩
 
 /-- `pcs.rs:whir_stage_schedule`: the default (`bciksJohnsonQrom128`) schedule. -/
-def whirStageSchedule (numVars : Nat) : WhirSchedule :=
+@[expose] def whirStageSchedule (numVars : Nat) : WhirSchedule :=
   WhirSecurityRegime.bciksJohnsonQrom128.schedule numVars
 
 /-- Denominator `blowup ^ numQueries` of the stage query error `ρ_i ^ q_i`: the error of `q_i`
@@ -9121,29 +9163,74 @@ def whirBlowupsEscalate : List Nat → Bool
 /-- Production maximum number of sampled fibers per stage. -/
 def whirMaxQueryCap : Nat := 512
 
+/-- The domain and step checks of `pcs.rs:WhirSchedule::validate_structural`, stage by stage
+    with `remaining` variables left: `step_vars < remaining` and the stage evaluation domain
+    `2^remaining * blowup` is at most `2^31`. Returns the variables left after the last stage. -/
+def whirStageDomainsOk : Nat → List WhirStageSpec → Option Nat
+  | remaining, [] => some remaining
+  | remaining, st :: tl =>
+    if st.stepVars < remaining ∧ 2 ^ remaining * st.blowup ≤ 2 ^ 31 then
+      whirStageDomainsOk (remaining - st.stepVars) tl
+    else none
+
 /-- Structural and accounting checks on `r.schedule numVars` (the conditions of
-    `pcs.rs:WhirSchedule::validate` together with the regime's query-exponent target). -/
+    `pcs.rs:WhirSchedule::validate_structural` together with the regime's query-exponent
+    target). -/
 def whirScheduleWellFormed (r : WhirSecurityRegime) (numVars : Nat) : Bool :=
   let s := r.schedule numVars
   decide (s.earlyStopVars + s.stages.foldl (fun acc st => acc + st.stepVars) 0 = numVars) &&
   decide (1 ≤ s.earlyStopVars) && decide (s.earlyStopVars ≤ 8) &&
   decide (1 ≤ s.stages.length) && decide (s.stages.length ≤ 4) &&
   whirBlowupsEscalate (s.stages.map (·.blowup)) &&
+  decide (whirStageDomainsOk numVars s.stages = some s.earlyStopVars) &&
   s.stages.all (fun st =>
     decide (1 ≤ st.stepVars) && decide (st.stepVars ≤ 6) && decide (st.numQueries ≤ whirMaxQueryCap) &&
     decide (2 ^ r.queryExponentBits ≤ st.queryErrorDenominator))
 
-/-- For every regime and every supported variable count the schedule consumes exactly `numVars`
-    variables, has `1..4` stages of `1..6` folded variables, stops with `1..8` variables,
-    escalates the rate by `4` per stage, opens at most `512` fibers per stage, and every stage
-    reaches the regime's query-exponent target `ρ_i^{-q_i} ≥ 2^bits`. -/
+/-- For every one of the six regimes and every supported variable count `2 ≤ numVars ≤ 28`
+    (`MAX_PCS_NUM_VARS`) the schedule consumes exactly `numVars` variables, has `1..4` stages of
+    `1..6` folded variables, stops with `1..8` variables, escalates the rate by `4` per stage,
+    keeps every stage domain within `2^31`, opens at most `512` fibers per stage, and every
+    stage reaches the regime's own query-exponent target `ρ_i^{-q_i} ≥ 2^(2 t)`,
+    `t = r.pureQueryTargetBits`. -/
 theorem whirSchedule_wellFormed (r : WhirSecurityRegime) (numVars : Nat)
-    (h2 : 2 ≤ numVars) (h24 : numVars ≤ 24) : whirScheduleWellFormed r numVars = true := by
-  have hAll : ∀ (r : WhirSecurityRegime) (k : Nat), k < 25 → 2 ≤ k →
+    (h2 : 2 ≤ numVars) (h28 : numVars ≤ 28) : whirScheduleWellFormed r numVars = true := by
+  have hAll : ∀ (r : WhirSecurityRegime) (k : Nat), k < 29 → 2 ≤ k →
       whirScheduleWellFormed r k = true := by
     intro r
     cases r <;> decide +kernel
-  exact hAll r numVars (Nat.lt_succ_of_le h24) h2
+  exact hAll r numVars (Nat.lt_succ_of_le h28) h2
+
+/-- `#tooth`: 29 variables are outside `MAX_PCS_NUM_VARS`; the Stage-0 domain would be `2^31`
+    and the schedule (the 28-variable geometry) no longer consumes the variables. -/
+theorem tooth_whirSchedule_29_vars_not_wellFormed :
+    ¬ (whirScheduleWellFormed .bciksJohnsonQrom128 29 = true) := by
+  decide +kernel
+
+/-- The deployed geometry at the cap `numVars = 28`: Stage-0 domain `2^30`. -/
+theorem whir_johnson_qrom_schedule_28 :
+    WhirSecurityRegime.bciksJohnsonQrom128.schedule 28 =
+      ⟨.bciksJohnsonQrom128, 8,
+        [⟨4, 6, 258⟩, ⟨16, 6, 130⟩, ⟨64, 4, 88⟩, ⟨256, 4, 66⟩]⟩ := by decide
+
+/-- Query counts of the CDHZ25 tables at blowups `4, 16, 64, 256`. -/
+theorem whir_cdhz25_regime_query_counts :
+    [4, 16, 64, 256].map WhirSecurityRegime.cdhz25JohnsonQrom128.numQueries =
+      [202, 102, 70, 52] ∧
+    [4, 16, 64, 256].map WhirSecurityRegime.poseidon2Cdhz25JohnsonQrom128.numQueries =
+      [202, 102, 70, 52] ∧
+    [4, 16, 64, 256].map WhirSecurityRegime.cdhz25ZeroPowQrom128.numQueries =
+      [216, 109, 74, 56] ∧
+    [4, 16, 64, 256].map WhirSecurityRegime.poseidon2Cdhz25ZeroPowQrom128.numQueries =
+      [216, 109, 74, 56] := by
+  decide
+
+/-- The schedule's query counts are the 4-stage table of `Aggregation.whirSchedule4Stage`, in
+    every regime. -/
+theorem whir_regime_numQueries_eq_schedule4Stage (r : WhirSecurityRegime) :
+    [4, 16, 64, 256].map r.numQueries =
+      (Aggregation.whirSchedule4Stage r).map (·.numQueries) := by
+  cases r <;> decide
 
 /-- Query counts of `bciksJohnsonClassical128` at the supported blowups `4, 16, 64, 256`. -/
 theorem whir_regime_query_counts :
@@ -9161,18 +9248,27 @@ theorem whir_johnson_qrom_schedule_deployed :
       ⟨.bciksJohnsonQrom128, 8,
         [⟨4, 6, 258⟩, ⟨16, 4, 130⟩, ⟨64, 3, 88⟩, ⟨256, 3, 66⟩]⟩ := by decide
 
-/-- Exact bijection from the IOP `WhirSecurityRegime` to `Qsag.WhirBudgetRegime`. -/
-def WhirSecurityRegime.toBudgetRegime : WhirSecurityRegime → Qsag.WhirBudgetRegime
-  | .bciksJohnsonClassical128 => .bciksJohnsonClassical128
-  | .bciksJohnsonQrom128 => .bciksJohnsonQrom128
+/-- The budget regime of a Johnson regime. `Qsag.WhirBudgetRegime` models tags `2` and `4`
+    only; the four CDHZ25 regimes have no budget-regime counterpart. -/
+def WhirSecurityRegime.toBudgetRegime? : WhirSecurityRegime → Option Qsag.WhirBudgetRegime
+  | .bciksJohnsonClassical128 => some .bciksJohnsonClassical128
+  | .bciksJohnsonQrom128 => some .bciksJohnsonQrom128
+  | _ => none
 
-/-- The IOP and concrete security budget use the same stage geometry and query counts in
-    every profile, including the deployed Johnson-QROM `(258,130,88,66)` schedule. -/
-theorem whir_iop_budget_schedule_agreement (r : WhirSecurityRegime) :
+/-- For the two Johnson regimes the IOP and the concrete security budget use the same stage
+    geometry and query counts at 24 variables, including the deployed `(258,130,88,66)`. -/
+theorem whir_iop_budget_schedule_agreement (r : WhirSecurityRegime)
+    (b : Qsag.WhirBudgetRegime) (hb : r.toBudgetRegime? = some b) :
     ((r.schedule 24).stages.map (fun st => (st.blowup, st.stepVars, st.numQueries))) =
-      ((Qsag.whirSchedule4Stage r.toBudgetRegime).map
+      ((Qsag.whirSchedule4Stage b).map
         (fun st => (st.sqrtBlowup ^ 2, st.stepVars, st.numQueries))) := by
-  cases r <;> decide +kernel
+  cases r
+  · cases Option.some.inj hb; decide +kernel
+  · cases Option.some.inj hb; decide +kernel
+  · cases hb
+  · cases hb
+  · cases hb
+  · cases hb
 
 /-- The default (`bciksJohnsonQrom128`) schedule at `numVars = 20` (the `K = 8` shard):
     `ρ = 1/4 → 1/16 → 1/64`, `q = (258, 130, 88)`, eight variables sent in the clear. -/
@@ -9218,9 +9314,9 @@ theorem whirStageSchedule_deployed_union_bound :
 /-- Every stage of every supported schedule of regime `r` has
     `ρ_i^{-q_i} ≥ 2 ^ r.queryExponentBits`. -/
 theorem whirSchedule_stage_query_ge (r : WhirSecurityRegime) (numVars : Nat) (h2 : 2 ≤ numVars)
-    (h24 : numVars ≤ 24) (st : WhirStageSpec) (hSt : st ∈ (r.schedule numVars).stages) :
+    (h28 : numVars ≤ 28) (st : WhirStageSpec) (hSt : st ∈ (r.schedule numVars).stages) :
     2 ^ r.queryExponentBits ≤ st.queryErrorDenominator := by
-  have hWf := whirSchedule_wellFormed r numVars h2 h24
+  have hWf := whirSchedule_wellFormed r numVars h2 h28
   unfold whirScheduleWellFormed at hWf
   simp only [Bool.and_eq_true] at hWf
   have hSt' := List.all_eq_true.mp hWf.2 st hSt
@@ -9230,9 +9326,9 @@ theorem whirSchedule_stage_query_ge (r : WhirSecurityRegime) (numVars : Nat) (h2
 /-- Every stage of the default (`bciksJohnsonQrom128`) schedule has `ρ_i^{-q_i} ≥ 2^512`
     (`(√ρ_i)^{-q_i} ≥ 2^256`) before any grinding credit. -/
 theorem whirStageSchedule_stage_query_ge (numVars : Nat) (h2 : 2 ≤ numVars)
-    (h24 : numVars ≤ 24) (st : WhirStageSpec) (hSt : st ∈ (whirStageSchedule numVars).stages) :
+    (h28 : numVars ≤ 28) (st : WhirStageSpec) (hSt : st ∈ (whirStageSchedule numVars).stages) :
     2 ^ 512 ≤ st.queryErrorDenominator :=
-  whirSchedule_stage_query_ge .bciksJohnsonQrom128 numVars h2 h24 st hSt
+  whirSchedule_stage_query_ge .bciksJohnsonQrom128 numVars h2 h28 st hSt
 
 /-- `|GoldilocksExt4| = p^4 > 2^255`. -/
 theorem goldilocksExt4_card_gt_two_pow_255 : 2 ^ 255 < goldilocksPrime ^ 4 := by decide
@@ -9294,6 +9390,204 @@ theorem ext4_roundPoly_roots_le (d : Nat) (cs S : List GoldilocksExt4)
     (hNe : ∃ x₀ : GoldilocksExt4, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero) :
     (S.filter (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero))).length ≤ d :=
   RoundPoly.roots_nodup_length_le d cs S hS hLen hNe
+
+/-! #### Squeezed challenges
+
+The root bounds above count over a duplicate-free list `S` of field elements: a uniform field
+challenge. `Aggregation.squeezeExt4Challenge` instead reduces four uniform 64-bit words mod `p`,
+which gives a field element up to 16 of the `2^256` word quadruples
+(`wordQuadPool_fiber_length`). The statements below are the same bounds over `wordQuadPool`,
+obtained through `Aggregation.squeezed_event_count_le`: every `d / p^4` becomes
+`16 * d / 2^256`, and a `2^-(255 - b)` accounting line becomes `2^-(252 - b)`. -/
+
+/-- Squeezed form of `ext4_roundPoly_roots_le`. -/
+theorem ext4_roundPoly_squeezed_roots_le (d : Nat) (cs : List GoldilocksExt4)
+    (hLen : cs.length ≤ d + 1)
+    (hNe : ∃ x₀ : GoldilocksExt4, RoundPoly.evalCoeffs cs x₀ ≠ CommRingOps.zero) :
+    (wordQuadPool.filter (fun q =>
+      decide (RoundPoly.evalCoeffs cs (ofWordQuad q) = CommRingOps.zero))).length ≤ 16 * d :=
+  Aggregation.squeezed_event_count_le
+    (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero)) d
+    (fun T hT => ext4_roundPoly_roots_le d cs T hT hLen hNe)
+
+/-- Squeezed form of `ext4_batched_roots_le`. -/
+theorem ext4_batched_squeezed_roots_le (cs : List GoldilocksExt4)
+    (h : ∃ c, c ∈ cs ∧ c ≠ CommRingOps.zero) :
+    (wordQuadPool.filter (fun q =>
+      decide (RoundPoly.evalCoeffs cs (ofWordQuad q) = CommRingOps.zero))).length ≤
+        16 * (cs.length - 1) :=
+  Aggregation.squeezed_event_count_le
+    (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero)) (cs.length - 1)
+    (fun T hT => ext4_batched_roots_le T hT cs h)
+
+/-- Squeezed form of `stepOp256_gamma_roots_le`. -/
+theorem stepOp256_gamma_squeezed_roots_le (ell : Nat) (tau : List GoldilocksExt4)
+    (constraints : List (Nat → GoldilocksExt4))
+    (hn : ∃ C, C ∈ constraints ∧ stepOpEqClaimExt4 ell tau C ≠ CommRingOps.zero) :
+    (wordQuadPool.filter (fun q => decide
+      (stepOpEqClaimExt4 ell tau (stepOpConstraintBatchExt4 (ofWordQuad q) constraints) =
+        CommRingOps.zero))).length ≤ 16 * (constraints.length - 1) :=
+  Aggregation.squeezed_event_count_le
+    (fun gamma => decide
+      (stepOpEqClaimExt4 ell tau (stepOpConstraintBatchExt4 gamma constraints) =
+        CommRingOps.zero)) (constraints.length - 1)
+    (fun T hT => stepOp256_gamma_roots_le ell tau constraints hn T hT)
+
+private theorem squeezed_step_arith (N l : Nat) :
+    N * (16 * l * N ^ (l - 1)) ≤ 16 * l * N ^ l := by
+  cases l with
+  | zero => simp only [Nat.mul_zero, Nat.zero_mul, Nat.le_refl]
+  | succ k =>
+    rw [Nat.add_sub_cancel, Nat.pow_succ, Nat.mul_left_comm, Nat.mul_comm N (N ^ k)]
+    exact Nat.le_refl _
+
+private theorem ext4_multiaffine_squeezed_roots_aux :
+    ∀ (w : List GoldilocksExt4) (F : List GoldilocksExt4 → GoldilocksExt4),
+      Ext4MultiAffine F → F w ≠ CommRingOps.zero →
+      ((challengeVectors wordQuadPool w.length).filter
+        (fun qs => decide (F (qs.map ofWordQuad) = CommRingOps.zero))).length ≤
+        16 * w.length * wordQuadPool.length ^ (w.length - 1)
+  | [], F, _, hn => by
+    have hd : decide (F (([] : List (Nat × Nat × Nat × Nat)).map ofWordQuad) =
+        CommRingOps.zero) = false := decide_eq_false hn
+    rw [List.length_nil, challengeVectors_zero]
+    rw [List.filter_cons, hd, ite_eq_right Bool.false_ne_true]
+    exact Nat.zero_le _
+  | a :: w, F, hm, hn => by
+    let b := fun q : Nat × Nat × Nat × Nat =>
+      decide (F (ofWordQuad q :: w) = CommRingOps.zero)
+    let M := 16 * w.length * wordQuadPool.length ^ (w.length - 1)
+    obtain ⟨cs, hc, he⟩ := hm [] w
+    have hb : (wordQuadPool.filter b).length ≤ 16 := by
+      have hn' : ∃ x, RoundPoly.evalCoeffs cs x ≠ CommRingOps.zero :=
+        ⟨a, fun hz => hn ((he a).symm.trans hz)⟩
+      exact Aggregation.squeezed_event_count_le
+        (fun r => decide (F (r :: w) = CommRingOps.zero)) 1
+        (fun T hT => by
+          have hr := RoundPoly.roots_nodup_length_le 1 cs T hT hc hn'
+          simpa only [he, List.nil_append] using hr)
+    have hEach : ∀ q ∈ wordQuadPool,
+        (((challengeVectors wordQuadPool w.length).map (fun qs => q :: qs)).filter
+          (fun qs => decide (F (qs.map ofWordQuad) = CommRingOps.zero))).length ≤
+            if b q = true then wordQuadPool.length ^ w.length else M := by
+      intro q _
+      rw [filter_map_length]
+      by_cases hz : F (ofWordQuad q :: w) = CommRingOps.zero
+      · rw [ite_eq_left (decide_eq_true hz)]
+        exact Nat.le_trans (filter_length_le_self _ _)
+          (Nat.le_of_eq (challengeVectors_length _ _))
+      · rw [ite_eq_right (fun hbq => hz (of_decide_eq_true hbq))]
+        exact ext4_multiaffine_squeezed_roots_aux w (fun xs => F (ofWordQuad q :: xs))
+          (fun pre post => hm (ofWordQuad q :: pre) post) hz
+    have hsplit := length_flatMap_le_split b (wordQuadPool.length ^ w.length) M _
+      wordQuadPool hEach
+    have hA := Nat.mul_le_mul_right (wordQuadPool.length ^ w.length) hb
+    have hB : wordQuadPool.length * M ≤ 16 * w.length * wordQuadPool.length ^ w.length :=
+      squeezed_step_arith wordQuadPool.length w.length
+    have e : 16 * (w.length + 1) * wordQuadPool.length ^ w.length =
+        16 * wordQuadPool.length ^ w.length + 16 * w.length * wordQuadPool.length ^ w.length := by
+      rw [Nat.mul_add, Nat.mul_one, Nat.add_mul, Nat.add_comm]
+    rw [List.length_cons, challengeVectors_succ]
+    rw [filter_flatMap_eq, Nat.add_sub_cancel, e]
+    exact Nat.le_trans hsplit (Nat.add_le_add hA hB)
+
+/-- Squeezed form of `ext4_multiaffine_roots_le`: a nonzero multilinear function of `n`
+    coordinates vanishes on the reduction of at most `16 * n * (2^256)^(n-1)` of the
+    `(2^256)^n` word-quadruple vectors. -/
+theorem ext4_multiaffine_squeezed_roots_le
+    (w : List GoldilocksExt4) (F : List GoldilocksExt4 → GoldilocksExt4)
+    (hm : Ext4MultiAffine F) (hn : F w ≠ CommRingOps.zero) :
+    ((challengeVectors wordQuadPool w.length).filter
+      (fun qs => decide (F (qs.map ofWordQuad) = CommRingOps.zero))).length ≤
+      16 * w.length * (2 ^ 256) ^ (w.length - 1) := by
+  have h := ext4_multiaffine_squeezed_roots_aux w F hm hn
+  rw [wordQuadPool_length] at h
+  exact h
+
+/-- Squeezed form of `stepOpEqClaimExt4_random_tau_roots_le`. -/
+theorem stepOpEqClaimExt4_squeezed_tau_roots_le (ell u : Nat) (hu : u < 2 ^ ell)
+    (C : Nat → GoldilocksExt4) (hn : C u ≠ CommRingOps.zero) :
+    ((challengeVectors wordQuadPool ell).filter
+      (fun qs => decide (stepOpEqClaimExt4 ell (qs.map ofWordQuad) C =
+        CommRingOps.zero))).length ≤ 16 * ell * (2 ^ 256) ^ (ell - 1) := by
+  have h := ext4_multiaffine_squeezed_roots_le (hypercubePointExt4 ell u)
+    (fun tau => stepOpEqClaimExt4 ell tau C) (stepOpEqClaimExt4_multiaffine ell C)
+    (fun hz => hn ((stepOpEqClaimExt4_hypercube ell u hu C).symm.trans hz))
+  rw [hypercubePointExt4_length] at h
+  exact h
+
+/-- Squeezed form of `stepOp256_random_tau_roots_le`. -/
+theorem stepOp256_squeezed_tau_roots_le (ell u : Nat) (hu : u < 2 ^ ell)
+    (constraints : List (Nat → GoldilocksExt4)) (gamma : GoldilocksExt4)
+    (hn : stepOpConstraintBatchExt4 gamma constraints u ≠ CommRingOps.zero) :
+    ((challengeVectors wordQuadPool ell).filter (fun qs => decide
+      (stepOpEqClaimExt4 ell (qs.map ofWordQuad) (stepOpConstraintBatchExt4 gamma constraints) =
+        CommRingOps.zero))).length ≤ 16 * ell * (2 ^ 256) ^ (ell - 1) :=
+  stepOpEqClaimExt4_squeezed_tau_roots_le ell u hu _ hn
+
+/-- Squeezed form of `stepOpShiftClaimExt4_random_tau_roots_le`. -/
+theorem stepOpShiftClaimExt4_squeezed_tau_roots_le (ell u : Nat) (hu : u + 1 < 2 ^ ell)
+    (N P : Nat → GoldilocksExt4)
+    (hn : CommRingOps.sub (N u) (P (u + 1)) ≠ CommRingOps.zero) :
+    ((challengeVectors wordQuadPool ell).filter
+      (fun qs => decide (stepOpShiftClaimExt4 ell (qs.map ofWordQuad) N P =
+        CommRingOps.zero))).length ≤ 16 * ell * (2 ^ 256) ^ (ell - 1) := by
+  have h := ext4_multiaffine_squeezed_roots_le (hypercubePointExt4 ell u)
+    (fun tau => stepOpShiftClaimExt4 ell tau N P) (stepOpShiftClaimExt4_multiaffine ell N P)
+    (fun hz => hn ((stepOpShiftClaimExt4_hypercube ell u hu N P).symm.trans hz))
+  rw [hypercubePointExt4_length] at h
+  exact h
+
+/-- Squeezed form of `stepOp256_ext4_random_tau_sound`: a violated row has at most
+    `16 * (length - 1)` cancelling `gamma` word quadruples, and for every other `gamma` at most
+    `16 * ell * (2^256)^(ell - 1)` word-quadruple vectors `tau` make the weighted claim vanish. -/
+theorem stepOp256_ext4_squeezed_tau_sound (ell u : Nat) (hu : u < 2 ^ ell)
+    (res : Nat → List Goldilocks) (hn : allZeroGoldilocks (res u) = false) :
+    (wordQuadPool.filter (fun q => decide (stepOpBatchedExt4 (ofWordQuad q) (res u) =
+      CommRingOps.zero))).length ≤ 16 * ((res u).length - 1) ∧
+    ∀ gamma, stepOpBatchedExt4 gamma (res u) ≠ CommRingOps.zero →
+      ((challengeVectors wordQuadPool ell).filter (fun qs => decide
+        (stepOpEqClaimExt4 ell (qs.map ofWordQuad) (fun v => stepOpBatchedExt4 gamma (res v)) =
+          CommRingOps.zero))).length ≤ 16 * ell * (2 ^ 256) ^ (ell - 1) :=
+  ⟨Aggregation.squeezed_event_count_le
+      (fun gamma => decide (stepOpBatchedExt4 gamma (res u) = CommRingOps.zero))
+      ((res u).length - 1)
+      (fun T hT => (stepOp256_ext4_random_tau_sound ell u hu res hn T hT).1),
+    fun _ hg => stepOpEqClaimExt4_squeezed_tau_roots_le ell u hu _ hg⟩
+
+/-- **Error denominators for squeezed challenges.** An event hit by `n ≤ 2^b` field elements is
+    hit by at most `16 * n` of the `2^256` word quadruples: error at most `2^-(252 - b)`,
+    three bits below the uniform-field figure of `ext4_error_denominator_bound`. -/
+theorem ext4_squeezed_error_denominator_bound (n b : Nat) (hb : b ≤ 252) (hn : n ≤ 2 ^ b) :
+    16 * n * 2 ^ (252 - b) ≤ 2 ^ 256 := by
+  have h1 : 16 * n * 2 ^ (252 - b) ≤ 16 * 2 ^ b * 2 ^ (252 - b) :=
+    Nat.mul_le_mul_right _ (Nat.mul_le_mul_left 16 hn)
+  have h2 : 16 * 2 ^ b * 2 ^ (252 - b) = 2 ^ 256 := by
+    rw [Nat.mul_assoc, ← Nat.pow_add, Nat.add_sub_of_le hb]
+  rw [h2] at h1
+  exact h1
+
+/-- Squeezed form of `ext4_sumcheck_schwartz_zippel_denominator`: total error at most
+    `2^-244`. -/
+theorem ext4_sumcheck_squeezed_denominator (rounds d : Nat) (h : rounds * d ≤ 2 ^ 8) :
+    16 * (rounds * d) * 2 ^ 244 ≤ 2 ^ 256 :=
+  ext4_squeezed_error_denominator_bound (rounds * d) 8 (by decide) h
+
+/-- Squeezed form of `ext4_row_sumcheck_denominator`. -/
+theorem ext4_row_sumcheck_squeezed_denominator (rounds : Nat) (h : rounds ≤ 32) :
+    16 * (rounds * 8) * 2 ^ 244 ≤ 2 ^ 256 :=
+  ext4_sumcheck_squeezed_denominator rounds 8 (Nat.mul_le_mul_right 8 h)
+
+/-- Squeezed form of `ext4_folding_denominator`: error at most `2^-167`. -/
+theorem ext4_folding_squeezed_denominator (logDomain c : Nat) (hD : logDomain ≤ 26)
+    (hc : c ≤ 2 ^ 33) :
+    16 * (2 ^ (2 * logDomain) * c) * 2 ^ 167 ≤ 2 ^ 256 := by
+  have h1 : 2 ^ (2 * logDomain) ≤ 2 ^ 52 :=
+    Nat.pow_le_pow_right (by decide) (Nat.mul_le_mul_left 2 hD)
+  have h2 : 2 ^ (2 * logDomain) * c ≤ 2 ^ 85 :=
+    Nat.le_trans (Nat.mul_le_mul h1 hc) (by decide)
+  exact ext4_squeezed_error_denominator_bound (2 ^ (2 * logDomain) * c) 85 (by decide) h2
+
 
 /-- Inhabitedness witness for the schedule and the extension-field accounting. -/
 theorem inhabited_whir_ext4_accounting :
@@ -10438,48 +10732,480 @@ def extractHashCollisionFromDistinctLeaves (H : ByteArray → ByteArray)
   extractHashCollisionFromCanopyTranscripts H hOut logLeaves commitment leaves₁ leaves₂
     proof₁ proof₂ hIdx hAcc₁ hAcc₂ (fun h => hNe (Prod.mk.inj h).1)
 
-/-- A concrete `ByteArray → ByteArray` digest with 32-byte output: the first 32 bytes of the
-    input, zero-padded. It is not collision resistant (it ignores every byte past the 32nd),
-    which is what makes the hypotheses of the extractor satisfiable. -/
-def canopyPrefixHash (x : ByteArray) : ByteArray :=
-  ⟨⟨(x.data.toList ++ List.replicate 32 (0 : UInt8)).take 32⟩⟩
+end Qsag
+end
 
-theorem canopyPrefixHash_length (x : ByteArray) :
-    (canopyPrefixHash x).data.toList.length = 32 := by
-  show ((x.data.toList ++ List.replicate 32 (0 : UInt8)).take 32).length = 32
-  rw [List.length_take, List.length_append, List.length_replicate]
-  omega
+public section
+namespace Qsag
+/-- Valid index ranges of parameterized `StepConstraintKind` constructors (`trace.rs`). -/
+def StepConstraintKind.validSlot : StepConstraintKind → Bool
+  | .statelessDecompLimb l => decide (l < 7)
+  | .forsLeafHash slot     => decide (slot < 6)
+  | .hmsgDecompLimb l      => decide (l < 5)
+  | .wotsChainStep0 slot   => decide (slot < 5)
+  | _                      => true
 
-/-- The 32-byte digest whose bytes all equal `b`. -/
-def canopyConstDigest (b : UInt8) : CanopyDigest32 :=
-  ⟨⟨⟨List.replicate 32 b⟩⟩, List.length_replicate⟩
+/-- Complete duplicate-free catalog of all 52 `StepConstraintKind` classes of the deployed machine. -/
+def allStepConstraintKinds : List StepConstraintKind :=
+  [.idle, .statefulHmsgBlock0, .statefulHmsgBlock1, .statefulHmsgSqueeze,
+   .statelessDeriveBlock0, .statelessDeriveBlock1] ++
+  (List.range 7).map StepConstraintKind.statelessDecompLimb ++
+  [.forsRootsSpongeInit] ++
+  (List.range 6).map StepConstraintKind.forsLeafHash ++
+  [.forsMerkleBlockA,
+   .forsMerkleBlockB false false, .forsMerkleBlockB false true,
+   .forsMerkleBlockB true false, .forsMerkleBlockB true true,
+   .forsRootsPairAbsorb false, .forsRootsPairAbsorb true,
+   .forsRootsFinalSqueeze,
+   .detTreeHmsgBlock0, .detTreeHmsgBlock1] ++
+  (List.range 5).map StepConstraintKind.hmsgDecompLimb ++
+  [.wotsTellInit] ++
+  (List.range 5).map StepConstraintKind.wotsChainStep0 ++
+  [.wotsChainStep1,
+   .wotsChainStep2 false, .wotsChainStep2 true,
+   .wotsTellPairAbsorb false, .wotsTellPairAbsorb true,
+   .wotsTellFinalSqueeze,
+   .xmssMerkleBlockA,
+   .xmssMerkleBlockB false false, .xmssMerkleBlockB false true,
+   .xmssMerkleBlockB true false, .xmssMerkleBlockB true true]
 
-/-- Commitment of the two-leaf tree with leaf `0` equal to `canopyConstDigest 5` under
-    `canopyPrefixHash`; the node frame keeps only 27 bytes of the left child, so the commitment
-    does not depend on the right child. -/
-def canopyAuditCommitment : CanopyDigest32 :=
-  canopyRootHashOf canopyPrefixHash canopyPrefixHash_length 1
-    (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length 1
-      (canopyConstDigest 5) (canopyConstDigest 7))
+theorem allStepConstraintKinds_nodup : allStepConstraintKinds.Nodup := by
+  decide +kernel
 
-/-- Inhabitedness witness for the transcript extractor over a `ByteArray → ByteArray` 32-byte
-    digest: under `canopyPrefixHash`, two `CanopyMultiProof` openings of leaf `0` with different
-    siblings are both accepted against `canopyAuditCommitment`, so the hypotheses of
-    `extractHashCollisionFromCanopyTranscripts` are jointly satisfiable, and the extractor
-    returns an explicit pair of distinct byte strings with equal digests. -/
-theorem inhabited_canopy_collision_extractor :
-    verifyCanopyMultiproof (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length)
-        (canopyRootHashOf canopyPrefixHash canopyPrefixHash_length) 1 canopyAuditCommitment
-        [(0, canopyConstDigest 5)] [canopyConstDigest 7] = true ∧
-    verifyCanopyMultiproof (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length)
-        (canopyRootHashOf canopyPrefixHash canopyPrefixHash_length) 1 canopyAuditCommitment
-        [(0, canopyConstDigest 5)] [canopyConstDigest 8] = true ∧
-    Nonempty (ExtractedHashCollision canopyPrefixHash) :=
-  ⟨by decide, by decide,
-    ⟨extractHashCollisionFromCanopyTranscripts canopyPrefixHash canopyPrefixHash_length 1
-      canopyAuditCommitment [(0, canopyConstDigest 5)] [(0, canopyConstDigest 5)]
-      [canopyConstDigest 7] [canopyConstDigest 8] rfl (by decide) (by decide) (by decide)⟩⟩
+theorem allStepConstraintKinds_validSlot :
+    ∀ k ∈ allStepConstraintKinds, k.validSlot = true := by
+  decide +kernel
 
+private theorem mem_allStepConstraintKinds_of_validSlot (k : StepConstraintKind)
+    (h : k.validSlot = true) : k ∈ allStepConstraintKinds := by
+  cases k with
+  | idle | statefulHmsgBlock0 | statefulHmsgBlock1 | statefulHmsgSqueeze
+  | statelessDeriveBlock0 | statelessDeriveBlock1 | forsRootsSpongeInit
+  | forsMerkleBlockA | forsRootsFinalSqueeze | detTreeHmsgBlock0 | detTreeHmsgBlock1
+  | wotsTellInit | wotsChainStep1 | wotsTellFinalSqueeze | xmssMerkleBlockA =>
+    decide +kernel
+  | forsMerkleBlockB a b => cases a <;> cases b <;> decide +kernel
+  | forsRootsPairAbsorb a => cases a <;> decide +kernel
+  | wotsChainStep2 a => cases a <;> decide +kernel
+  | wotsTellPairAbsorb a => cases a <;> decide +kernel
+  | xmssMerkleBlockB a b => cases a <;> cases b <;> decide +kernel
+  | statelessDecompLimb l =>
+    have hl : l < 7 := of_decide_eq_true h
+    rcases l with _ | _ | _ | _ | _ | _ | _ | l <;> first | decide +kernel | omega
+  | forsLeafHash slot =>
+    have hs : slot < 6 := of_decide_eq_true h
+    rcases slot with _ | _ | _ | _ | _ | _ | slot <;> first | decide +kernel | omega
+  | hmsgDecompLimb l =>
+    have hl : l < 5 := of_decide_eq_true h
+    rcases l with _ | _ | _ | _ | _ | l <;> first | decide +kernel | omega
+  | wotsChainStep0 slot =>
+    have hs : slot < 5 := of_decide_eq_true h
+    rcases slot with _ | _ | _ | _ | _ | slot <;> first | decide +kernel | omega
+
+theorem wotsPackSlot_lt_5 (chain : Nat) : wotsPackSlot chain < 5 := by
+  unfold wotsPackSlot
+  split <;> try decide
+  split <;> try decide
+  split <;> try decide
+  split <;> decide
+
+private theorem pushLayerWotsAndMerkle_validSlot (layer subHeight : Nat) (isTopFinal : Bool) :
+    ∀ op ∈ pushLayerWotsAndMerkle layer subHeight isTopFinal,
+      (stepOpKindAndC0 op).1.validSlot = true := by
+  intro op hMem
+  unfold pushLayerWotsAndMerkle at hMem
+  simp only [List.mem_append, List.mem_flatMap, List.mem_range,
+    List.mem_cons, List.not_mem_nil, or_false] at hMem
+  rcases hMem with ((rfl | ⟨pair, _, ⟨sub, _, rfl | rfl | rfl⟩ | rfl⟩) | rfl) | ⟨lvl, _, rfl | rfl⟩
+  · rfl
+  · unfold stepOpKindAndC0; exact decide_eq_true (wotsPackSlot_lt_5 _)
+  · rfl
+  · rfl
+  · rfl
+  · rfl
+  · rfl
+  · rfl
+
+private theorem signerProgramBody_validSlot (profile : AggSigProfile) :
+    ∀ op ∈ signerProgramBody profile, (stepOpKindAndC0 op).1.validSlot = true := by
+  intro op hMem
+  cases profile with
+  | xmssPoseidon2 =>
+    unfold signerProgramBody at hMem
+    simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
+      List.mem_map, List.mem_range] at hMem
+    rcases hMem with ((rfl | rfl | rfl) | ⟨l, hl, rfl⟩) | hPush
+    · rfl
+    · rfl
+    · rfl
+    · exact decide_eq_true hl
+    · exact pushLayerWotsAndMerkle_validSlot 0 6 true op hPush
+  | corduroyPoseidon2 =>
+    unfold signerProgramBody at hMem
+    simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
+      List.mem_map, List.mem_flatMap, List.mem_range] at hMem
+    rcases hMem with (((((rfl | rfl) | ⟨l, hl, rfl⟩) | rfl) | hFors) | rfl) | ⟨layer, _, hLayer⟩
+    · rfl
+    · rfl
+    · exact decide_eq_true hl
+    · rfl
+    · rcases hFors with ⟨pair, hPair, ⟨sub, hSub, rfl | ⟨lvl, _, rfl | rfl⟩⟩ | rfl⟩
+      · exact decide_eq_true (by omega : (2 * pair + sub) / 6 < 6)
+      · rfl
+      · rfl
+      · rfl
+    · rfl
+    · rcases hLayer with ((rfl | rfl) | ⟨l, hl, rfl⟩) | hPush
+      · rfl
+      · rfl
+      · exact decide_eq_true hl
+      · exact pushLayerWotsAndMerkle_validSlot layer 4 (layer + 1 == 16) op hPush
+
+theorem buildSignerProgram_kind_mem_and_valid (profile : AggSigProfile) (t : Nat) :
+    (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1 ∈ allStepConstraintKinds ∧
+    (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1.validSlot = true := by
+  have hVal : (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1.validSlot = true := by
+    by_cases ht : t < (buildSignerProgram profile).length
+    · rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem ht, Option.getD_some]
+      have hMem := List.getElem_mem ht
+      unfold buildSignerProgram at hMem
+      rcases List.mem_append.mp hMem with hBody | hRep
+      · exact signerProgramBody_validSlot profile _ hBody
+      · have hIdle : (buildSignerProgram profile)[t] = StepOp.idle :=
+          (List.mem_replicate.mp hRep).2
+        rw [hIdle]; rfl
+    · rw [List.getD_eq_getElem?_getD, List.getElem?_eq_none (Nat.le_of_not_lt ht), Option.getD_none]
+      rfl
+  exact ⟨mem_allStepConstraintKinds_of_validSlot _ hVal, hVal⟩
+
+
+end Qsag
+end
+
+public section
+namespace Qsag
+end Qsag
+end
+
+public section
+namespace Qsag
+theorem extractLimbBase4Digits_zero (v : Nat) : extractLimbBase4Digits 0 v = [] := by rfl
+theorem extractLimbBase4Digits_succ (n v : Nat) :
+    extractLimbBase4Digits (n + 1) v = v % 4 :: extractLimbBase4Digits n (v / 4) := by rfl
+theorem evalBase4Digits_nil : evalBase4Digits [] = 0 := by rfl
+theorem evalBase4Digits_cons (d : Nat) (ds : List Nat) :
+    evalBase4Digits (d :: ds) = d + 4 * evalBase4Digits ds := by rfl
+theorem evalGoldilocksBase4_nil : evalGoldilocksBase4 [] = Goldilocks.zero := by rfl
+theorem evalGoldilocksBase4_cons (d : Goldilocks) (ds : List Goldilocks) :
+    evalGoldilocksBase4 (d :: ds) = Goldilocks.add d
+      (Goldilocks.mul (Goldilocks.ofNat 4) (evalGoldilocksBase4 ds)) := by rfl
+end Qsag
+end
+
+public section
+namespace Qsag
+theorem stepBoolCheck_eq (b : Goldilocks) :
+    stepBoolCheck b = Goldilocks.mul b (Goldilocks.sub Goldilocks.one b) := by rfl
+theorem stepWeightedSum_eq (f : Nat → Goldilocks) (w : Nat → Nat) (n : Nat) :
+    stepWeightedSum f w n = (List.range n).foldl
+      (fun acc i => Goldilocks.add acc (Goldilocks.mul (f i) (Goldilocks.ofNat (w i))))
+      Goldilocks.zero := by rfl
+theorem allZeroGoldilocks_eq (rs : List Goldilocks) :
+    allZeroGoldilocks rs = rs.all (· == Goldilocks.zero) := by rfl
+theorem stepLimb63Decomp_eq (x : StepOpRowInputs) (l : Nat) :
+    stepLimb63Decomp x l = (List.range 31).map (fun i => quarticBase4 (x.aux i)) ++
+      [stepBoolCheck (x.aux 31), Goldilocks.sub (x.prev (stMainSponge + l))
+        (Goldilocks.add (stepWeightedSum x.aux (fun i => 4 ^ i) 31)
+          (Goldilocks.mul (x.aux 31) (Goldilocks.ofNat (2 ^ 62))))] := by rfl
+theorem stepByteVal_eq (x : StepOpRowInputs) (sub : Nat) :
+    stepByteVal x sub = Goldilocks.add
+      (Goldilocks.add (Goldilocks.add (x.aux (4 * sub))
+        (Goldilocks.mul (x.aux (4 * sub + 1)) (Goldilocks.ofNat 4)))
+        (Goldilocks.mul (x.aux (4 * sub + 2)) (Goldilocks.ofNat 16)))
+      (Goldilocks.mul (x.aux (4 * sub + 3)) (Goldilocks.ofNat 64)) := by rfl
+theorem stepHi28_def (x : StepOpRowInputs) :
+    stepHi28 x = stepWeightedSum (fun i => x.aux (2 + i)) (fun i => 4 ^ i) 14 := by rfl
+end Qsag
+end
+
+public section
+namespace Qsag
+/-! Selected computational equations consumed by the AIR-completeness proof. -/
+#export_eqns StepConstraintKind.validSlot
+#export_eqns StepOpRow.wellShaped
+#export_eqns buildSignerProgram
+#export_eqns checkDigest5Limbs63
+#export_eqns compressForsRootsSponge
+#export_eqns compressWotsEndpointsSponge
+#export_eqns corduroyPoseidon2Geom
+#export_eqns extractWotsDigitsChecked
+#export_eqns forsNodeAddr
+#export_eqns honestLimb63DecompWitness
+#export_eqns limb63DecompResiduals
+#export_eqns listNatSum
+#export_eqns merkleAddrNodeHash
+#export_eqns merkleNodeHash
+#export_eqns packWotsAddrLimb
+#export_eqns poseidon2Compress12FF
+#export_eqns signerProgramBody
+#export_eqns stAccOrU1
+#export_eqns stCurRoot
+#export_eqns stCursorIdx
+#export_eqns stKpIdx
+#export_eqns stMainSponge
+#export_eqns stRemPack
+#export_eqns stSubSponge
+#export_eqns stTreeHi
+#export_eqns stTreeLo
+#export_eqns stWork
+#export_eqns stWotsU2
+#export_eqns stepCarryUnchanged
+#export_eqns stepForsPackExpected
+#export_eqns stepHmsgDecompExpected
+#export_eqns stepInBlock
+#export_eqns stepMerkleBlockA
+#export_eqns stepMerkleBlockBInput
+#export_eqns stepNextIsPerm
+#export_eqns stepOp256IntraResidualsFrom
+#export_eqns stepOp256RowResiduals
+#export_eqns stepOp256TableOk
+#export_eqns stepOpConstraints
+#export_eqns stepOpKindAndC0
+#export_eqns stepOpRowInputs
+#export_eqns stepOpRowsPerSigner
+#export_eqns stepPlainSum
+#export_eqns stepSpongeAbsorbInput
+#export_eqns stepSqueezeInput
+#export_eqns stepStatelessDecompExpected
+#export_eqns stepWotsStepInput
+#export_eqns stepZeroElsewhere
+#export_eqns verifyAggNativeSig
+#export_eqns verifyAggNativeSigStateful
+#export_eqns verifyAggNativeSigStateless
+#export_eqns verifyAndRecoverForsPk
+#export_eqns verifyForsTreesAux
+#export_eqns verifySingleForsOpening
+#export_eqns verifyUpperLayers
+#export_eqns verifyWotsLayer
+#export_eqns wotsPackSlot
+#export_eqns wotsStepHash
+#export_eqns xmssNodeAddr
+#export_eqns xmssPoseidon2Geom
+#export_eqns honestPoseidon2PermWitness stepOpPermTrace stepOpBoundaryResiduals allStepConstraintKinds
+
+theorem honestPoseidon2PermWitness_lengths (input : Poseidon2State12) :
+    (honestPoseidon2PermWitness input).initExtSbox.length = 4 ∧
+    (honestPoseidon2PermWitness input).intSbox.length = 22 ∧
+    (honestPoseidon2PermWitness input).termExtSbox.length = 4 := by
+  simp only [honestPoseidon2PermWitness, buildExtRoundsSbox, buildIntRoundsSbox,
+    buildRoundsSboxPoly_length, poseidon2InitialExtConsts_length,
+    poseidon2InternalConsts_length, poseidon2TerminalExtConsts_length] <;> simp
+
+#export_eqns stepHi28 poseidon2PermResiduals
+
+theorem stepStatelessDecompExpected_congr_next (x : StepOpRowInputs)
+    (next' : Nat → Goldilocks) (l j : Nat) :
+    stepStatelessDecompExpected { x with next := next' } l j =
+      stepStatelessDecompExpected x l j := by rfl
+
+theorem stepHmsgDecompExpected_congr_next (x : StepOpRowInputs)
+    (next' : Nat → Goldilocks) (l j : Nat) :
+    stepHmsgDecompExpected { x with next := next' } l j =
+      stepHmsgDecompExpected x l j := by rfl
+
+#export_eqns absorbPairsPoly absorbDigest4Pairs verifyForsPoly verifyUpperPoly recoverAggWotsEndpoints recoverEndpointsPoly merkleWalkRoot merkleWalkPoly pushLayerWotsAndMerkle
+
+private theorem foldl_fixed_step {A B : Type} (f : A → B → A) (a : A)
+    (is : List B) (h : ∀ i ∈ is, f a i = a) : is.foldl f a = a := by
+  induction is with
+  | nil => rfl
+  | cons i is ih =>
+    rw [List.foldl_cons, h i (List.mem_cons_self ..)]
+    exact ih (fun j hj => h j (List.mem_cons_of_mem _ hj))
+
+/-- An Hmsg digit fold changes only its five remainder limbs and accumulator. -/
+theorem stepHmsgDecompExpected_frame (x : StepOpRowInputs) (l j : Nat)
+    (hj : j < 7 ∨ 12 ≤ j) (hacc : j ≠ 42) :
+    stepHmsgDecompExpected x l j = x.prev j := by
+  unfold stepHmsgDecompExpected
+  simp only [stAccOrU1, hacc, ↓reduceIte]
+  apply foldl_fixed_step
+  intro i _
+  have hs := wotsPackSlot_lt_5 (31 * l + i)
+  have hn : stRemPack + wotsPackSlot (31 * l + i) ≠ j := by
+    change 7 + wotsPackSlot (31 * l + i) ≠ j
+    omega
+  simp only [hn, ↓reduceIte]
+
+/-- Packing up to 32 FORS indices changes only the six remainder limbs. -/
+theorem stepForsPackExpected_frame (x : StepOpRowInputs) (firstJ count j : Nat)
+    (hcount : firstJ + count ≤ 32) (hj : j < 7 ∨ 13 ≤ j) :
+    stepForsPackExpected x firstJ count j = x.prev j := by
+  unfold stepForsPackExpected
+  apply foldl_fixed_step
+  intro sub hsub
+  have hs := List.mem_range.mp hsub
+  have hn : stRemPack + (firstJ + sub) / 6 ≠ j := by
+    change 7 + (firstJ + sub) / 6 ≠ j
+    omega
+  simp only [hn, ↓reduceIte]
+
+/-- Stateless unpacking preserves every register outside address and remainder limbs. -/
+theorem stepStatelessDecompExpected_frame (x : StepOpRowInputs) (l j : Nat)
+    (hj : j < 4 ∨ 13 ≤ j) :
+    stepStatelessDecompExpected x l j = x.prev j := by
+  unfold stepStatelessDecompExpected
+  by_cases hl : l < 4
+  · simp only [hl, ↓reduceIte]
+    exact stepForsPackExpected_frame x (7 * l) 7 j (by omega) (by omega)
+  · simp only [hl, ↓reduceIte]
+    by_cases h4 : l = 4
+    · simp only [h4, ↓reduceIte]
+      exact stepForsPackExpected_frame x 28 4 j (by decide) (by omega)
+    · have hkp : j ≠ stKpIdx := by change j ≠ 4; omega
+      have hlo : j ≠ stTreeLo := by change j ≠ 5; omega
+      have hhi : j ≠ stTreeHi := by change j ≠ 6; omega
+      simp only [h4, ↓reduceIte, hkp, hlo, hhi]
+      split <;> first | rfl | (split <;> rfl)
+
+
+/-! Exact finite accessors for the deployed padded signer program. -/
+theorem stepXmssProgram_pairs : ∀ p < 64,
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p) .idle =
+      .wotsChainStep0 0 (2 * p) (wotsPackSlot (2 * p)) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 1) .idle = .wotsChainStep1 0 (2 * p) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 2) .idle = .wotsChainStep2 0 (2 * p) false ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 3) .idle =
+      .wotsChainStep0 0 (2 * p + 1) (wotsPackSlot (2 * p + 1)) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 4) .idle = .wotsChainStep1 0 (2 * p + 1) ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 5) .idle = .wotsChainStep2 0 (2 * p + 1) true ∧
+    (buildSignerProgram .xmssPoseidon2).getD (9 + 7 * p + 6) .idle = .wotsTellPairAbsorb p := by
+  decide +kernel
+
+theorem buildSignerProgram_xmss_chains : ∀ c < 128,
+    (buildSignerProgram .xmssPoseidon2).getD (8 + 1 + 7 * (c / 2) + 3 * (c % 2)) .idle =
+      .wotsChainStep0 0 c (wotsPackSlot c) := by decide +kernel
+
+theorem stepXmssProgram_merkle : ∀ l < 6,
+    (buildSignerProgram .xmssPoseidon2).getD (458 + 2 * l) .idle = .xmssMerkleBlockA 0 l ∧
+    (buildSignerProgram .xmssPoseidon2).getD (458 + 2 * l + 1) .idle =
+      .xmssMerkleBlockB (l + 1 == 6) (l + 1 == 6) := by decide +kernel
+
+theorem stepXmssProgram_idle : ∀ t < 512, 470 ≤ t →
+    (buildSignerProgram .xmssPoseidon2).getD t .idle = .idle := by decide +kernel
+
+theorem stepForwardProgram_last (profile : AggSigProfile) :
+    (buildSignerProgram profile).getD (stepOpRowsPerSigner profile - 1) .idle = .idle := by
+  cases profile <;> decide +kernel
+
+theorem stepStatelessDecompExpected_five (x : StepOpRowInputs) (j : Nat) :
+    stepStatelessDecompExpected x 5 j =
+      (if j = stKpIdx then Goldilocks.add (x.aux 0) (Goldilocks.mul (x.aux 1) (Goldilocks.ofNat 4))
+       else if j = stTreeLo then stepHi28 x else x.prev j) := by rfl
+
+theorem stepStatelessDecompExpected_six (x : StepOpRowInputs) (j : Nat) :
+    stepStatelessDecompExpected x 6 j =
+      (if j = stTreeLo then Goldilocks.add (x.prev stTreeLo)
+         (Goldilocks.mul (Goldilocks.add (x.aux 0) (Goldilocks.mul (x.aux 1) (Goldilocks.ofNat 4)))
+           (Goldilocks.ofNat (2 ^ 28)))
+       else if j = stTreeHi then stepHi28 x else x.prev j) := by rfl
+
+#export_eqns statelessXofSpongeState
+
+theorem stepStatelessDecompExpected_pack_frame (x : StepOpRowInputs) (l j : Nat)
+    (hl : l < 5) (hj : j < 7 ∨ 13 ≤ j) :
+    stepStatelessDecompExpected x l j = x.prev j := by
+  unfold stepStatelessDecompExpected
+  by_cases h4 : l < 4
+  · simp only [h4, ↓reduceIte]
+    exact stepForsPackExpected_frame x (7 * l) 7 j (by omega) hj
+  · have he : l = 4 := by omega
+    simp only [he, ↓reduceIte]
+    exact stepForsPackExpected_frame x 28 4 j (by decide) hj
+
+theorem stepXmssProgram_decomp (l : Nat) (hl : l < 5) :
+    (buildSignerProgram .xmssPoseidon2).getD (3 + l) .idle = .hmsgDecompLimb l := by
+  rcases l with _ | _ | _ | _ | _ | l <;> first | rfl | omega
+
+#export_eqns computeHmsgStateful computeHmsgDetTree
+/-- Instruction classes used by the XMSS program. -/
+def stepXmssSupported : StepOp → Bool
+  | .idle | .statefulHmsgBlock0 | .statefulHmsgBlock1 | .statefulHmsgSqueeze
+  | .hmsgDecompLimb _ | .wotsTellInit _ | .wotsChainStep0 _ _ _
+  | .wotsChainStep1 _ _ | .wotsChainStep2 _ _ _ | .wotsTellPairAbsorb _
+  | .wotsTellFinalSqueeze | .xmssMerkleBlockA _ _
+  | .xmssMerkleBlockB false _ | .xmssMerkleBlockB true true => true
+  | _ => false
+
+theorem stepXmssProgram_supported :
+    (buildSignerProgram .xmssPoseidon2).all stepXmssSupported = true := by
+  decide +kernel
+
+
+theorem stepXmssProgram_at_0 :
+    (buildSignerProgram .xmssPoseidon2).getD 0 .idle = .statefulHmsgBlock0 := by rfl
+
+theorem stepXmssProgram_at_1 :
+    (buildSignerProgram .xmssPoseidon2).getD 1 .idle = .statefulHmsgBlock1 := by rfl
+
+theorem stepXmssProgram_at_2 :
+    (buildSignerProgram .xmssPoseidon2).getD 2 .idle = .statefulHmsgSqueeze := by rfl
+
+theorem stepXmssProgram_at_8 :
+    (buildSignerProgram .xmssPoseidon2).getD 8 .idle = .wotsTellInit 0 := by rfl
+
+theorem wotsPackSlot_range0 : ∀ c < 128,
+    wotsPackSlot c = 0 ↔ 0 ≤ c ∧ c < 0 + 26 := by decide +kernel
+
+theorem wotsPackSlot_range1 : ∀ c < 128,
+    wotsPackSlot c = 1 ↔ 26 ≤ c ∧ c < 26 + 26 := by decide +kernel
+
+theorem wotsPackSlot_range2 : ∀ c < 128,
+    wotsPackSlot c = 2 ↔ 52 ≤ c ∧ c < 52 + 26 := by decide +kernel
+
+theorem wotsPackSlot_range3 : ∀ c < 128,
+    wotsPackSlot c = 3 ↔ 78 ≤ c ∧ c < 78 + 25 := by decide +kernel
+
+theorem wotsPackSlot_range4 : ∀ c < 128,
+    wotsPackSlot c = 4 ↔ 103 ≤ c ∧ c < 103 + 25 := by decide +kernel
+
+theorem signerProgramBody_xmss_last :
+    (signerProgramBody .xmssPoseidon2)[469]? = some (.xmssMerkleBlockB true true) := by rfl
+
+#export_eqns forsLeafHash forsLeafAddr forsTreeNodeAddr
+
+set_option maxRecDepth 4096 in
+theorem pushLayerWotsAndMerkle_four_last (layer : Nat) (isTop : Bool) :
+    (pushLayerWotsAndMerkle layer 4 isTop)[457]? =
+      some (.xmssMerkleBlockB true isTop) := by rfl
+
+#export_eqns wotsPackSlotStart
+
+#export_eqns stepXmssSupported hmsgStatefulIn0 hmsgStatefulIn1 state12OutDigest5 spongePadOne
+#export_eqns forsKpIdx forsHyperTreeIdx forsLeafTweak4
+
+theorem stepXmssProgram_at_457 :
+    (buildSignerProgram .xmssPoseidon2).getD 457 .idle = .wotsTellFinalSqueeze := by rfl
+
+theorem stepXmssProgram_at_469 :
+    (buildSignerProgram .xmssPoseidon2).getD 469 .idle = .xmssMerkleBlockB true true := by rfl
+
+#export_eqns deriveStatelessLeafAndForsChecked
+
+/-- Guard-independent append structure of the row checker, including an unknown slot. -/
+theorem stepOp256RowResiduals_def (profile : AggSigProfile) (slot : StepOpSlot) (t : Nat)
+    (row : StepOpRow) :
+    stepOp256RowResiduals profile slot t row =
+      (stepOpPermTrace row).2 ++
+      stepOpBoundaryResiduals (stepOpRowsPerSigner profile) t row ++
+      (match slot with
+       | none => []
+       | some pub =>
+         stepOpConstraints (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).1
+           (Goldilocks.ofNat (stepOpKindAndC0 ((buildSignerProgram profile).getD t StepOp.idle)).2)
+           (stepOpRowInputs pub row)) := by rfl
+
+#export_eqns statelessForsSourceLimb
 
 end Qsag
 end

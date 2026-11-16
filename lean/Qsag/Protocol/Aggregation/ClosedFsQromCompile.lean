@@ -28,8 +28,7 @@ collision finder, not a number.
 public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
 public import Qsag.Oracle.Qrom
 public import Qsag.Spec.Assumptions
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
-import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
+import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -51,8 +50,9 @@ def merklePathRoot {D : Type} (H : Nat → Nat → D → D → D) : Nat → Nat 
 theorem merklePathRoot_eq_merkleRootFromPath {D : Type} (H : Nat → Nat → D → D → D) :
     ∀ (path : List D) (lvl idx : Nat) (cur : D),
       merklePathRoot H lvl idx cur path = merkleRootFromPath H lvl idx cur path
-  | [], _, _, _ => by rfl
+  | [], _, _, _ => by rw [merkleRootFromPath_nil]; rfl
   | sib :: rest, lvl, idx, cur => by
+    rw [merkleRootFromPath_cons]
     show merklePathRoot H (lvl + 1) (idx / 2) _ rest = merkleRootFromPath H (lvl + 1) (idx / 2) _ rest
     exact merklePathRoot_eq_merkleRootFromPath H rest _ _ _
 
@@ -263,24 +263,47 @@ def OracleIop.toPublicCoin (iop : OracleIop Stmt PStmt Msg Pub F k) : PublicCoin
   inLang := iop.inLang
   verify := iop.verify
 
-/-- Boolean round-by-round state function: false statements start doomed, acceptance implies
-    live, and from a doomed prefix at most `bad r` of the `2^w` challenges of round `r` lead to
-    a live prefix. -/
+/-- Boolean round-by-round state function for false statements: a false statement starts
+    doomed, acceptance implies live, and for a false statement at most `bad r` of the `2^w`
+    challenges of round `r` lead from a doomed prefix to a live one. Nothing is required of the
+    state on true statements. -/
 structure BoolRbrCert (iop : OracleIop Stmt PStmt Msg Pub F k) where
   state : Stmt → List (Msg × Nat) → Bool
   bad : Fin k → Nat
   init : ∀ x : Stmt, ¬ iop.inLang x → state x [] = false
   accept : ∀ (x : Stmt) (tr : List (Msg × Nat)), iop.verify x tr = true → state x tr = true
-  flip : ∀ (x : Stmt) (r : Fin k) (pref : List (Msg × Nat)) (m : Msg),
+  flip : ∀ (x : Stmt), ¬ iop.inLang x → ∀ (r : Fin k) (pref : List (Msg × Nat)) (m : Msg),
     pref.length = r.1 → state x pref = false →
     qsum (2 ^ iop.w) (fun ch => if state x (pref ++ [(m, ch.1)]) = true then 1 else 0) ≤ bad r
 
-/-- The certificate as an `RbrStateFunction`. -/
+/-- The certificate as an `RbrStateFunction`: a prefix is live when the statement is true or
+    the Boolean state is. -/
 def BoolRbrCert.toRbr {iop : OracleIop Stmt PStmt Msg Pub F k} (cert : BoolRbrCert iop) :
-    RbrStateFunction iop.toPublicCoin :=
-  RbrStateFunction.ofBoolState iop.toPublicCoin cert.state cert.bad cert.init
-    (fun x tr _ hv => cert.accept x tr hv)
-    (fun x r pref m hl hd => cert.flip x r pref m hl hd)
+    RbrStateFunction iop.toPublicCoin where
+  Live := fun x tr => iop.inLang x ∨ cert.state x tr = true
+  badCard := cert.bad
+  doomed_init := fun x hx hLive => by
+    rcases hLive with h | h
+    · exact hx h
+    · rw [cert.init x hx] at h
+      exact Bool.false_ne_true h
+  accept_implies_live := fun x tr _ hv => .inr (cert.accept x tr hv)
+  round_flip_bound := fun x r pref m hLen hDoomed L hNd hL => by
+    have hx : ¬ iop.inLang x := fun h => hDoomed (.inl h)
+    have hFalse : cert.state x pref = false := by
+      cases h : cert.state x pref
+      · rfl
+      · exact absurd (.inr h) hDoomed
+    have hSub : ∀ ch ∈ L, ch ∈ finFilterList (2 ^ iop.w)
+        (fun ch => cert.state x (pref ++ [(m, ch.1)])) :=
+      fun ch hch => finFilterList_complete _ _ ch
+        (Decidable.of_not_not (fun hN => hL ch hch (fun hLive => by
+          rcases hLive with h | h
+          · exact hx h
+          · exact hN h)))
+    have h1 := nodup_length_le_of_subset hNd hSub
+    exact Nat.le_trans (Nat.le_trans h1 (Nat.le_of_eq (finFilterList_length _ _)))
+      (cert.flip x hx r pref m hLen hFalse)
 
 /-- Classical adaptive state-restoration soundness of the certified IOP. -/
 theorem BoolRbrCert.state_restoration_soundness [DecidableEq Msg]
@@ -488,11 +511,11 @@ theorem split_last {α : Type} :
 
 theorem qsum_term_le : ∀ (n : Nat) (f : Fin n → Nat) (i : Fin n), f i ≤ qsum n f
   | 0, _, i => Fin.elim0 i
-  | _ + 1, _, ⟨0, _⟩ => Nat.le_add_right _ _
+  | _ + 1, _, ⟨0, _⟩ => by rw [qsum_succ]; exact Nat.le_add_right _ _
   | n + 1, f, ⟨j + 1, hj⟩ =>
     Nat.le_trans
       (qsum_term_le n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) ⟨j, Nat.lt_of_succ_lt_succ hj⟩)
-      (Nat.le_add_left _ _)
+      (by rw [qsum_succ]; exact Nat.le_add_left _ _)
 
 /-- Projection of an output to the address of its length-`r + 1` message prefix. -/
 def fsProj (c : FsCodec Msg k cardX) (r : Nat) (o : Fin cardX) : Fin cardX :=
@@ -527,8 +550,7 @@ theorem fs_reprogram_prefix (c : FsCodec Msg k cardX) (H : Fin cardX → BitVec 
       (c.dec_valid p) he'
     have h3 := congrArg List.length h2
     omega
-  unfold reprogramOracle
-  rw [ite_eq_right hne]
+  exact reprogramOracle_of_ne H p ch _ hne
 
 /-- The Fiat–Shamir round as a `QromRbrRound`. -/
 def fsRound {cardAnc : Nat} (c : FsCodec Msg k cardX) (st : List (Msg × Nat) → Bool)
@@ -576,8 +598,7 @@ def fsRound {cardAnc : Nat} (c : FsCodec Msg k cardX) (st : List (Msg × Nat) �
       rw [hSplit]
       unfold fsTranscript at hT ⊢
       rw [fsAux_append_single, hT, hAddr]
-      unfold reprogramOracle
-      rw [ite_eq_left rfl, BitVec.toNat_ofFin]
+      rw [reprogramOracle_self, BitVec.toNat_ofFin]
     rw [qsum_congr (fun j => by rw [hEach j])]
     rw [hTake] at hPre
     exact hFlip r (fsTranscript c H pre) m hPreLen hPre
@@ -599,7 +620,7 @@ theorem cover_mass {cardAnc : Nat} (ψ : QVec cardX w cardAnc) (acc : Fin cardX 
         qsum cardX (fun o => if p = proj r o then
           (if flag r (proj r o) = true then QVec.queryWeight ψ o else 0) else 0) := by
       intro p
-      unfold QVec.queryMassOn
+      rw [QVec.queryMassOn_def]
       cases hf : flag r p with
       | false =>
         rw [ite_eq_right Bool.false_ne_true]
@@ -623,8 +644,7 @@ theorem cover_mass {cardAnc : Nat} (ψ : QVec cardX w cardAnc) (acc : Fin cardX 
     apply qsum_congr
     intro o
     exact qsum_ite_eq cardX (proj r o) _
-  rw [qsum_congr key, qsum_comm]
-  unfold QVec.queryMassOn
+  rw [qsum_congr key, qsum_comm, QVec.queryMassOn_def]
   apply qsum_le_qsum
   intro o
   cases ha : acc o with
@@ -667,6 +687,7 @@ theorem fs_qrom_bool_rbr_soundness {cardAnc Q : Nat}
     (fun r => fsProj c r.1) (fun r => fsDoomed c st r.1) (fun _ => fsLive c st) bad
     (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl) ?_
   intro H
+  simp only [qromOrdinaryFlipMass_def]
   refine cover_mass (runQuantumAdv A H) (accept H) (fun r => fsProj c r.1)
     (fun r p => fsDoomed c st r.1 H p && fsLive c st H p) ?_
   intro o ho
@@ -758,7 +779,7 @@ theorem exec_fs_qrom_closed_soundness [DecidableEq D] [DecidableEq F] {cardAnc Q
   let noColl : (Fin cardX → BitVec iop.w) → Fin cardX → Bool := fun H o =>
     execFsAccept iop M c aux x H o && !(execFsCollision iop M c aux x H o).isSome
   have hNo := fs_qrom_bool_rbr_soundness A c (cert.state x) cert.bad (cert.init x hx)
-    (fun r pref m hl hd => cert.flip x r pref m hl hd) noColl
+    (fun r pref m hl hd => cert.flip x hx r pref m hl hd) noColl
     (by
       intro H o ho
       have ho' : (execFsAccept iop M c aux x H o &&
@@ -785,7 +806,7 @@ theorem exec_fs_qrom_closed_soundness [DecidableEq D] [DecidableEq F] {cardAnc Q
     intro H
     refine Nat.le_trans ?_ (queryMassOn_union_le (noColl H)
       (execFsCollisionEvent iop M c aux x H) (runQuantumAdv A H))
-    unfold QVec.queryMassOn
+    rw [QVec.queryMassOn_def, QVec.queryMassOn_def]
     apply qsum_le_qsum
     intro o
     cases ha : execFsAccept iop M c aux x H o with
