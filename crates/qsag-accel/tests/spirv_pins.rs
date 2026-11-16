@@ -41,7 +41,7 @@ const PINS: [(&str, &str); 10] = [
     ),
     (
         "whir_lde_merkle.comp",
-        "673ecc6efa16c81658e0ae49fa53dd5bba9ffb96c117508f84261c7bbc536acd",
+        "fe24dd768ebc637b1d3c14ee96aab5b9472cd355aca8535744238fbb6e6bb602",
     ),
     (
         "whir_fold_sumcheck.comp",

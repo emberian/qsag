@@ -6015,36 +6015,6 @@ impl RawVulkanEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn exec_prover_whir_commit_round0_with<F>(
-        &mut self,
-        num_polys: usize,
-        salt_seed: &[u8; 32],
-        num_vars: usize,
-        blowup: usize,
-        group_arity: usize,
-        max_stage1_domain_ext4: usize,
-        max_stage1_groups: usize,
-        extra_witness_words: usize,
-        fill_chunk: F,
-    ) -> Result<([u8; 32], u64), VulkanError>
-    where
-        F: FnMut(usize, usize, &mut [u64]),
-    {
-        self.exec_prover_whir_commit_round0_with_mode(
-            false,
-            num_polys,
-            salt_seed,
-            num_vars,
-            blowup,
-            group_arity,
-            max_stage1_domain_ext4,
-            max_stage1_groups,
-            extra_witness_words,
-            fill_chunk,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn exec_prover_whir_commit_round0_with_mode<F>(
         &mut self,
         turboshake_canopy: bool,
@@ -10246,7 +10216,8 @@ mod tests {
     fn commit_small_session(engine: &mut RawVulkanEngine) {
         let poly: std::vec::Vec<u64> = (0..4096u64).map(|i| i * 7 + 1).collect();
         engine
-            .exec_prover_whir_commit_round0_with(
+            .exec_prover_whir_commit_round0_with_mode(
+                false,
                 1,
                 &[7; 32],
                 12,
@@ -10264,7 +10235,8 @@ mod tests {
             engine.prover.session,
             Some(ProverSessionDims {
                 num_polys: 1,
-                num_vars: 12
+                num_vars: 12,
+                turboshake_canopy: false,
             })
         );
     }
@@ -10302,7 +10274,8 @@ mod tests {
         commit_small_session(&mut engine);
         let old_witness = engine.prover.vram_witness.buffer;
         engine.fail_alloc_countdown.set(Some(1));
-        let res = engine.exec_prover_whir_commit_round0_with(
+        let res = engine.exec_prover_whir_commit_round0_with_mode(
+            false,
             1,
             &[7; 32],
             13,
@@ -10420,7 +10393,8 @@ mod tests {
         const DOMAIN: usize = 1 << 16;
         const ARITY: usize = 4;
         engine
-            .exec_prover_whir_commit_round0_with(
+            .exec_prover_whir_commit_round0_with_mode(
+                false,
                 1,
                 &[7; 32],
                 12,
@@ -10855,12 +10829,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                "libvulkan.1.dylib",
                 "/opt/homebrew/lib/libvulkan.1.dylib",
                 "/opt/homebrew/lib/libMoltenVK.dylib",
-                "/usr/local/lib/libMoltenVK.dylib",
             ]
         );
+        assert!(names.iter().all(|p| p.starts_with('/')));
         assert_eq!(
             VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
             0x0000_0001
