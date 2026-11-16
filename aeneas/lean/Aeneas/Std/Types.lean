@@ -63,6 +63,12 @@ instance : Monad Result where
 def lift {α : Type u} (x : α) : Result α :=
   Result.ok x
 
+/-- Rust `assert!(b)`: `.ok ()` when `b` holds, `.fail .assertionFailure` otherwise
+    (upstream `Aeneas.Std.massert`). -/
+@[expose]
+def massert (b : Prop) [Decidable b] : Result Unit :=
+  if b then Result.ok () else Result.fail Error.assertionFailure
+
 /-- Loop step control flow (`cont` continues with updated state, `done` exits loop). -/
 inductive ControlFlow (α : Type u) (β : Type v) where
   | cont : α → ControlFlow α β

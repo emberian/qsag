@@ -522,7 +522,7 @@ theorem sponge_absorb_refines (sp : keccak.Shake256Sponge) (data : Slice Std.U8)
     · simpa only [Slice.len_val] using usize_lt_loopMaxFuel (Slice.len data)
     · exact hloop
   refine ⟨{ sp with state := a, buf := buf, buf_len := i }, ?_, And.intro hsq hQ, rfl⟩
-  simp only [keccak.Shake256Sponge.absorb, hsq, Bool.false_eq_true, ite_false,
+  simp only [keccak.Shake256Sponge.absorb, massert_not_of_eq_false hsq,
     hactual, bind_eq_result_bind, result_bind_ok]
 
 /-- A fresh SHAKE256 sponge has absorbed nothing and carries suffix `0x1f`. -/
