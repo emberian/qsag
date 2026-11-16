@@ -272,6 +272,53 @@ aborts immediately with
 `Err(Error::InvalidProof)` before any output share, view commitment, or view
 opens.
 
+### CoZK V4 tape contributions and commitments
+
+The default distributed prover uses the `COZKVW04` view envelope and
+`COZKRP04` repetition-root domain. The legacy verifier remains available for
+proofs without this envelope; the legacy shared-sponge parity and rejection
+sampling tests still exercise that format. Native local migration proofs retain
+their previous format.
+
+Each custodian derives an independent sub-seed and commitment salt for every
+(repetition, virtual head). All custodians commit to these sub-seeds and agree
+on the complete commitment vector before evaluating any batch. Sub-seeds are
+expanded locally using the existing canonical `Tape` sampler. Boolean tape
+contributions are combined by XOR, field contributions by modular addition.
+Pairwise PRSS masks (replicated backend) or authenticated preprocessing masks
+(threshold backend) conceal the individual contributions during sharing. A
+single custodian therefore never learns the combined tape of the hidden head.
+
+The replicated backend's V4 pairwise PRSS stream interleaves four independent
+full-24-round cSHAKE256 streams through the existing SIMD implementation, under
+`QSAG.OUTER.PADS.V4`. Partial reads preserve the stream position. The initial
+statement agreement includes the V4 magic, so interactive peers must use the
+same profile. This changes the online ceremony; verification of stored legacy
+proofs does not invoke the outer MPC and is unaffected.
+
+The view binds every custodian's sub-seed in quorum order. Only the two
+challenged heads' salted sub-seeds are revealed. Their Phase-0 commitments and
+their equality to the shared view's sub-seed wires are checked before returning
+a proof. The public verifier re-expands these tapes, checks the packed inputs,
+reconstructs the first opened head's multiplication messages, and authenticates
+both opened views. The second head's products remain explicit. Inputs are
+stored only for virtual head 2; field values and bits use a canonical packed
+encoding with checked trailing padding.
+
+Shared view commitments use eight length-framed product leaves and a
+length-framed root over the magic, repetition, head, ordered sub-seeds, inputs,
+product length, leaf digests and outputs. Leaves and roots have distinct suffix
+bytes (`0x0b` and `0x07`) and use the last 12 Keccak rounds. This is the crate's
+versioned tree construction, not the KangarooTwelve wire format. These hashes
+are still computed inside actively checked MPC; clear hashing of separate
+shares never substitutes for the shared permutation. All 438 repetitions,
+output-zero checks, multiplication checks and freeze/completion barriers remain.
+
+Local sub-seeds, salts, flat tape contribution buffers, shared views and
+unreleased decommitment buffers have wipe-on-drop owners, including error and
+unwind paths. The flat contribution arrays and packed V4 views are sized from
+the public circuit before filling them.
+
 ### Witness-independent canonical tape sampling (`C0-5`)
 
 Native Goldilocks tape sampling scans three consecutive words and selects the
@@ -283,7 +330,7 @@ three simultaneous rejections enter the fallback loop (probability less than
 2^-96 per independent uniform window). This is a source-level constant-work
 construction; it is not a claim of a compiler-level timing proof.
 
-Tape expansion first tries the fixed schedule (`QSAG.MIGRATE.TAPE.V3`),
+The retained legacy shared-sponge evaluator first tries the fixed schedule (`QSAG.MIGRATE.TAPE.V3`),
 followed by an upfront batched range check (`less_than_modulus_many` and
 `fold_valid_bits` in `evaluate_inner`). A noncanonical candidate triggers
 canonical rejection sampling instead of an honest `Error::InvalidTape` abort.

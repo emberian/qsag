@@ -1154,7 +1154,10 @@ fn replay_cozk_v4_with_scratch(
     }
     products_1.finish()?;
 
-    let mut outputs = view.pair.each_ref().map(|v| BitPackedReader::new(&v.outputs));
+    let mut outputs = view
+        .pair
+        .each_ref()
+        .map(|v| BitPackedReader::new(&v.outputs));
     let mut hidden = BitPackedReader::new(&view.hidden_outputs);
     let mut outputs_ok = true;
     for &w in &c.outputs {
@@ -1169,7 +1172,12 @@ fn replay_cozk_v4_with_scratch(
     for output in outputs.iter_mut().chain(core::iter::once(&mut hidden)) {
         output.finish()?;
     }
-    Ok((subseeds_0, subseeds_1, reconstructed_0.into_bytes(), outputs_ok))
+    Ok((
+        subseeds_0,
+        subseeds_1,
+        reconstructed_0.into_bytes(),
+        outputs_ok,
+    ))
 }
 
 pub(crate) fn verify_cozk_v4_proof_body(
@@ -1626,6 +1634,72 @@ pub(crate) mod tests {
             assert!(replay(&circuit, 0, &changed).is_err());
         }
     }
+    #[test]
+    fn cozk_v4_full_profile_replay_rejects_tampered_bindings_and_padding() {
+        let builder = crate::circuit::Builder::default();
+        let bit = builder.input(1);
+        for d in Domain::ALL_FIELDS {
+            let x = builder.lift(bit, d);
+            let product = builder.mul(x, builder.small(d, 27));
+            builder.output(builder.sub(product, builder.small(d, 27)));
+        }
+        let circuit = builder.finish();
+        let mut roots = Vec::with_capacity(32 * MIT_REPETITIONS);
+        let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
+        for rep in 0..MIT_REPETITIONS {
+            let seeds = core::array::from_fn(|h| {
+                (0..3)
+                    .map(|p| {
+                        cshake256_framed_32(
+                            b"QSAG.TEST.COZK.V4",
+                            &[&(rep as u64).to_le_bytes(), &[h as u8, p]],
+                        )
+                    })
+                    .collect()
+            });
+            let views = simulate_cozk_v4(&circuit, &seeds);
+            let commits = core::array::from_fn(|h| commit_cozk_v4(rep, h, &views[h]));
+            roots.extend_from_slice(&rep_root_cozk_v4(
+                rep,
+                &commits,
+                views.each_ref().map(|v| v.outputs.as_slice()),
+            ));
+            let e = rep % 3;
+            let mut pair = [views[e].clone(), views[(e + 1) % 3].clone()];
+            pair[0].products.clear();
+            repetitions.push(OpenedRepetitionView {
+                opened_e: e as u8,
+                pair,
+                hidden_party_commit: commits[(e + 2) % 3],
+                hidden_outputs: views[(e + 2) % 3].outputs.clone(),
+            });
+        }
+        let proof = MigrationZkProof {
+            views_merkle_root: cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]),
+            repetitions,
+        };
+        assert_eq!(verify_cozk_v4_proof_body(&circuit, &proof), Ok(()));
+        for mutation in 0..9 {
+            let mut changed = proof.clone();
+            let r = &mut changed.repetitions[1]; // opens virtual heads 1 and 2
+            match mutation {
+                0 => r.pair[0].seed[0] ^= 1,
+                1 => r.pair[0].inputs[9] ^= 1, // another custodian's sub-seed
+                2 => *r.pair[1].inputs.last_mut().unwrap() ^= 0x80, // nonzero input padding
+                3 => r.pair[1].products[0] ^= 1,
+                4 => r.pair[0].outputs[0] ^= 1,
+                5 => r.hidden_party_commit[0] ^= 1,
+                6 => r.hidden_outputs[0] ^= 1,
+                7 => r.pair[0].inputs[8] = 0, // invalid quorum framing
+                _ => r.pair[0].products.push(0), // first products must be reconstructed
+            }
+            assert!(
+                verify_cozk_v4_proof_body(&circuit, &changed).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "ownership proof throughput benchmark"]
     fn benchmark_ownership_proof() {

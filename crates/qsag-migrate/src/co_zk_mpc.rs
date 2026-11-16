@@ -746,7 +746,11 @@ impl CoZkCustodianShare {
     ) -> Result<MigrationZkProof, Error> {
         e.agree(cshake256_framed_32(
             b"QSAG.OUTER.STATEMENT.V1",
-            &[statement_bytes, &(children.len() as u64).to_le_bytes()],
+            &[
+                &COZK_VIEW_MAGIC_V4,
+                statement_bytes,
+                &(children.len() as u64).to_le_bytes(),
+            ],
         ))?;
 
         // Both replicated witness components this custodian holds are wiped on
@@ -831,14 +835,8 @@ impl CoZkCustodianShare {
         // Phase 1: Evaluate all batches using locally expanded sub-seed tapes (0 in-MPC
         // SHAKE permutations!), compute 8-leaf 12-round TurboSHAKE256 view commitments,
         // and run mandatory active multiplication checks on EVERY batch BEFORE opening.
-        let mut computed_batches = compute_batches(
-            e,
-            circuit,
-            witness,
-            &local_batches,
-            children,
-            &self.entropy,
-        )?;
+        let mut computed_batches =
+            compute_batches(e, circuit, witness, &local_batches, children, &self.entropy)?;
 
         // Cross-batch barrier: all custodians confirm every batch passed active
         // multiplication verification before ANY view commitment or output opens.
@@ -1062,7 +1060,11 @@ impl CoZkCustodianShare {
         };
         verify_fn(&proof)?;
         #[cfg(test)]
-        std::eprintln!("BENCH cozk repetitions={} proof_bytes={}", proof.repetitions.len(), crate::benchmarks::proof_bytes(&proof));
+        std::eprintln!(
+            "BENCH cozk repetitions={} proof_bytes={}",
+            proof.repetitions.len(),
+            crate::benchmarks::proof_bytes(&proof)
+        );
         e.agree(cshake256_framed_32(b"QSAG.OUTER.COMPLETE.V1", &[&root]))?;
         #[cfg(test)]
         e.audit(self, witness, &audit_inputs, &proof);
@@ -1341,14 +1343,19 @@ fn compute_batch<E: Core>(
     let empty: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
     let mut views = evaluate_inner_with_local(e, c, witness, &empty, true, Some(seeds))?;
     for (h, view) in views.iter_mut().enumerate() {
-        view.subseeds = shared[h * m * 256..(h + 1) * m * 256].iter().copied().collect();
+        view.subseeds = shared[h * m * 256..(h + 1) * m * 256]
+            .iter()
+            .copied()
+            .collect();
     }
     let commit_bits = compute_cozk_view_commit_bits(e, batch, &views)?;
     e.verify_all_pending()?;
     #[cfg(test)]
     let audit_witness_inputs = core::array::from_fn(|h| views[h].audit_inputs.clone());
     Ok(BatchComputed {
-        views, commit_bits, engine: None,
+        views,
+        commit_bits,
+        engine: None,
         #[cfg(test)]
         audit_witness_inputs,
     })
@@ -1876,13 +1883,21 @@ fn evaluate_wires<E: Core>(
                     let d0 = field_draws.len();
                     field_draws.push(FieldTapeDraw {
                         head: 0,
-                        start: if local.is_some() { 0 } else { cursors[0].next_field(d) },
+                        start: if local.is_some() {
+                            0
+                        } else {
+                            cursors[0].next_field(d)
+                        },
                         domain: d,
                     });
                     let d1 = field_draws.len();
                     field_draws.push(FieldTapeDraw {
                         head: 1,
-                        start: if local.is_some() { 0 } else { cursors[1].next_field(d) },
+                        start: if local.is_some() {
+                            0
+                        } else {
+                            cursors[1].next_field(d)
+                        },
                         domain: d,
                     });
                     (
@@ -1912,7 +1927,11 @@ fn evaluate_wires<E: Core>(
                         draws[h] = field_draws.len();
                         field_draws.push(FieldTapeDraw {
                             head: h,
-                            start: if local.is_some() { 0 } else { cursors[h].next_field(d) },
+                            start: if local.is_some() {
+                                0
+                            } else {
+                                cursors[h].next_field(d)
+                            },
                             domain: d,
                         });
                     }
@@ -1931,7 +1950,8 @@ fn evaluate_wires<E: Core>(
     let zero_bit = e.constant(0);
     let mut local_fields: Vec<Option<FieldWord>> = (0..field_draws.len()).map(|_| None).collect();
     let (squeezed, raw_draw_words) = if let Some(local) = local {
-        let mut own_bits: [SecretVec<u64>; 3] = core::array::from_fn(|h| vec![0; cursors[h].sponge_bits].into());
+        let mut own_bits: [SecretVec<u64>; 3] =
+            core::array::from_fn(|h| vec![0; cursors[h].sponge_bits].into());
         let mut own_fields: SecretVec<Value> = vec![ZERO; field_draws.len() * 64].into();
         for h in 0..3 {
             for (lane, seed) in local.subseeds[h].iter().enumerate() {
@@ -1968,16 +1988,32 @@ fn evaluate_wires<E: Core>(
         }
         let flat: SecretVec<u64> = positions.iter().map(|&(h, p)| own_bits[h][p]).collect();
         let shares = e.share_masked(&flat)?;
-        let mut streams: Vec<Word<E::Bit>> = cursors.iter().map(|c| vec![zero_bit; c.sponge_bits].into()).collect();
-        for ((h, p), share) in positions.into_iter().zip(shares.iter()) { streams[h][p] = *share; }
-        for d in Domain::ALL_FIELDS {
-            let indices: Vec<_> = field_draws.iter().enumerate().filter_map(|(i, f)| (f.domain == d).then_some(i)).collect();
-            let mut words = SecretVec::with_capacity(indices.len() * 64);
-            for &i in &indices { words.extend_from_slice(&own_fields[i * 64..(i + 1) * 64]); }
-            let shared = e.fshare_many(&words, d)?;
-            for (i, word) in indices.into_iter().zip(shared) { local_fields[i] = Some(word); }
+        let mut streams: Vec<Word<E::Bit>> = cursors
+            .iter()
+            .map(|c| vec![zero_bit; c.sponge_bits].into())
+            .collect();
+        for ((h, p), share) in positions.into_iter().zip(shares.iter()) {
+            streams[h][p] = *share;
         }
-        (streams, field_draws.iter().map(|_| SecretVec::new()).collect())
+        for d in Domain::ALL_FIELDS {
+            let indices: Vec<_> = field_draws
+                .iter()
+                .enumerate()
+                .filter_map(|(i, f)| (f.domain == d).then_some(i))
+                .collect();
+            let mut words = SecretVec::with_capacity(indices.len() * 64);
+            for &i in &indices {
+                words.extend_from_slice(&own_fields[i * 64..(i + 1) * 64]);
+            }
+            let shared = e.fshare_many(&words, d)?;
+            for (i, word) in indices.into_iter().zip(shared) {
+                local_fields[i] = Some(word);
+            }
+        }
+        (
+            streams,
+            field_draws.iter().map(|_| SecretVec::new()).collect(),
+        )
     } else if let Some(seeds) = seeds {
         let mut tape_sponges = Vec::with_capacity(3);
         for seed in seeds {
@@ -2095,7 +2131,9 @@ fn evaluate_wires<E: Core>(
         .iter()
         .map(|fd| seeds.is_none().then(|| e.fconstant(ZERO, fd.domain)))
         .collect();
-    if local.is_some() { draw_fields = local_fields; }
+    if local.is_some() {
+        draw_fields = local_fields;
+    }
     let converted_domains: &[Domain] = if seeds.is_some() && local.is_none() {
         &[Domain::Gold, Domain::Secp, Domain::Ed]
     } else {
@@ -2471,7 +2509,13 @@ fn evaluate_wires<E: Core>(
 }
 
 #[cfg(test)]
-fn evaluate_inner<E: Core>(e: &mut E, c: &Circuit, witness: &[E::Bit], seeds: &[Word<E::Bit>], verify_zero_outputs: bool) -> Result<Vec<SharedView<E::Bit>>, Error> {
+fn evaluate_inner<E: Core>(
+    e: &mut E,
+    c: &Circuit,
+    witness: &[E::Bit],
+    seeds: &[Word<E::Bit>],
+    verify_zero_outputs: bool,
+) -> Result<Vec<SharedView<E::Bit>>, Error> {
     evaluate_inner_with_local(e, c, witness, seeds, verify_zero_outputs, None)
 }
 
@@ -2506,11 +2550,12 @@ fn evaluate_inner_with_local<E: Core>(
             }
             match node.op {
                 Op::Input => {
-                    let heads = if local.is_some() || matches!(dom, Domain::PallasFp | Domain::BlsFp) {
-                        0..3
-                    } else {
-                        2..3
-                    };
+                    let heads =
+                        if local.is_some() || matches!(dom, Domain::PallasFp | Domain::BlsFp) {
+                            0..3
+                        } else {
+                            2..3
+                        };
                     for head in heads {
                         if encodings[idx][head].is_none() {
                             to_convert_pairs.push((idx, head));
@@ -2554,8 +2599,18 @@ fn evaluate_inner_with_local<E: Core>(
     }
 
     // 7. Assemble `SharedView<E::Bit>`s in exact `c.nodes` / `c.outputs` topological order.
-    let input_bits: usize = c.nodes.iter().filter(|n| matches!(n.op, Op::Input)).map(|n| n.domain.width()).sum();
-    let product_bits: usize = c.nodes.iter().filter(|n| matches!(n.op, Op::Mul(_, _))).map(|n| n.domain.width()).sum();
+    let input_bits: usize = c
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, Op::Input))
+        .map(|n| n.domain.width())
+        .sum();
+    let product_bits: usize = c
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, Op::Mul(_, _)))
+        .map(|n| n.domain.width())
+        .sum();
     let output_bits: usize = c.outputs.iter().map(|&i| c.nodes[i].domain.width()).sum();
     let mut views: Vec<SharedView<E::Bit>> = seeds
         .iter()
@@ -2579,12 +2634,18 @@ fn evaluate_inner_with_local<E: Core>(
                     let bits: &[E::Bit] = if node.domain == Domain::Bit {
                         bit = [wires[idx].as_ref().unwrap()[h].bit()];
                         &bit
-                    } else { &encodings[idx][h].as_ref().unwrap()[..node.domain.width()] };
+                    } else {
+                        &encodings[idx][h].as_ref().unwrap()[..node.domain.width()]
+                    };
                     if matches!(node.op, Op::Input) {
                         #[cfg(test)]
                         outer_mpc::encode(&mut views[h].audit_inputs, bits);
-                        if h == 2 { views[h].inputs.extend_from_slice(bits); }
-                    } else { views[h].products.extend_from_slice(bits); }
+                        if h == 2 {
+                            views[h].inputs.extend_from_slice(bits);
+                        }
+                    } else {
+                        views[h].products.extend_from_slice(bits);
+                    }
                 }
             }
         }
@@ -2593,11 +2654,17 @@ fn evaluate_inner_with_local<E: Core>(
                 if c.nodes[idx].domain == Domain::Bit {
                     views[h].outputs.push(wires[idx].as_ref().unwrap()[h].bit());
                 } else {
-                    views[h].outputs.extend_from_slice(&encodings[idx][h].as_ref().unwrap()[..c.nodes[idx].domain.width()]);
+                    views[h].outputs.extend_from_slice(
+                        &encodings[idx][h].as_ref().unwrap()[..c.nodes[idx].domain.width()],
+                    );
                 }
             }
         }
-        for view in &mut views { pad_byte(&mut view.inputs); pad_byte(&mut view.products); pad_byte(&mut view.outputs); }
+        for view in &mut views {
+            pad_byte(&mut view.inputs);
+            pad_byte(&mut view.products);
+            pad_byte(&mut view.outputs);
+        }
         return Ok(views);
     }
 
@@ -2677,64 +2744,142 @@ fn pad_byte<B: ShareBit>(bits: &mut Word<B>) {
 
 /// Hash borrowed streams in lockstep. All scheduling depends on public lengths;
 /// every permutation goes through the actively checked outer MPC.
-fn turbo_shared<E: Core>(e: &mut E, streams: &[Vec<&[E::Bit]>], suffix: u8) -> Result<Vec<Word<E::Bit>>, Error> {
-    let mut sponges: Vec<_> = streams.iter().map(|_| Sponge::from_public_midstate(e, &TURBOSHAKE_VIEW_MIDSTATE)).collect();
+fn turbo_shared<E: Core>(
+    e: &mut E,
+    streams: &[Vec<&[E::Bit]>],
+    suffix: u8,
+) -> Result<Vec<Word<E::Bit>>, Error> {
+    let mut sponges: Vec<_> = streams
+        .iter()
+        .map(|_| Sponge::from_public_midstate(e, &TURBOSHAKE_VIEW_MIDSTATE))
+        .collect();
     let mut cursor = vec![(0usize, 0usize); streams.len()];
     let mut done = vec![false; streams.len()];
-    let mut result: Vec<Word<E::Bit>> = streams.iter().map(|_| SecretVec::with_capacity(256)).collect();
+    let mut result: Vec<Word<E::Bit>> = streams
+        .iter()
+        .map(|_| SecretVec::with_capacity(256))
+        .collect();
     while done.iter().any(|&d| !d) {
         let mut finishing = vec![false; streams.len()];
         for i in 0..streams.len() {
-            if done[i] { continue; }
+            if done[i] {
+                continue;
+            }
             let sp = &mut sponges[i];
             sp.pos = 0;
             let (seg, offset) = &mut cursor[i];
             while sp.pos < 1088 && *seg < streams[i].len() {
                 let source = &streams[i][*seg][*offset..];
                 let take = (1088 - sp.pos).min(source.len());
-                for (dst, &src) in sp.state[sp.pos..sp.pos + take].iter_mut().zip(&source[..take]) { *dst = *dst ^ src; }
+                for (dst, &src) in sp.state[sp.pos..sp.pos + take]
+                    .iter_mut()
+                    .zip(&source[..take])
+                {
+                    *dst = *dst ^ src;
+                }
                 sp.pos += take;
                 *offset += take;
-                if *offset == streams[i][*seg].len() { *seg += 1; *offset = 0; }
+                if *offset == streams[i][*seg].len() {
+                    *seg += 1;
+                    *offset = 0;
+                }
             }
-            if sp.pos < 1088 { sp.pad_only(e, suffix); finishing[i] = true; }
+            if sp.pos < 1088 {
+                sp.pad_only(e, suffix);
+                finishing[i] = true;
+            }
         }
-        let mut refs: Vec<_> = sponges.iter_mut().enumerate().filter_map(|(i, s)| (!done[i]).then_some(s.state.as_mut_slice())).collect();
+        let mut refs: Vec<_> = sponges
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, s)| (!done[i]).then_some(s.state.as_mut_slice()))
+            .collect();
         e.permutations_12(&mut refs)?;
         for i in 0..streams.len() {
-            if finishing[i] { result[i].extend_from_slice(&sponges[i].state[..256]); done[i] = true; }
+            if finishing[i] {
+                result[i].extend_from_slice(&sponges[i].state[..256]);
+                done[i] = true;
+            }
         }
     }
     Ok(result)
 }
 
-fn compute_cozk_view_commit_bits<E: Core>(e: &mut E, batch: usize, views: &[SharedView<E::Bit>]) -> Result<[Word<E::Bit>; 3], Error> {
-    let headers: Vec<[Word<E::Bit>; 2]> = views.iter().flat_map(|v| (0..COZK_TREE_LEAVES).map(move |leaf| {
-        let (start, end) = cozk_product_leaf_range(v.products.len() / 8, leaf);
-        (leaf, start, end)
-    })).map(|(leaf, start, end)| [outer_mpc::public_bytes(e, &(leaf as u64).to_le_bytes()), outer_mpc::public_bytes(e, &((end-start) as u64).to_le_bytes())]).collect();
-    let streams: Vec<Vec<&[E::Bit]>> = headers.iter().enumerate().map(|(i, h)| {
-        let v = &views[i / COZK_TREE_LEAVES];
-        let (start, end) = cozk_product_leaf_range(v.products.len() / 8, i % COZK_TREE_LEAVES);
-        vec![&h[0], &h[1], &v.products[start * 8..end * 8]]
-    }).collect();
+fn compute_cozk_view_commit_bits<E: Core>(
+    e: &mut E,
+    batch: usize,
+    views: &[SharedView<E::Bit>],
+) -> Result<[Word<E::Bit>; 3], Error> {
+    let headers: Vec<[Word<E::Bit>; 2]> = views
+        .iter()
+        .flat_map(|v| {
+            (0..COZK_TREE_LEAVES).map(move |leaf| {
+                let (start, end) = cozk_product_leaf_range(v.products.len() / 8, leaf);
+                (leaf, start, end)
+            })
+        })
+        .map(|(leaf, start, end)| {
+            [
+                outer_mpc::public_bytes(e, &(leaf as u64).to_le_bytes()),
+                outer_mpc::public_bytes(e, &((end - start) as u64).to_le_bytes()),
+            ]
+        })
+        .collect();
+    let streams: Vec<Vec<&[E::Bit]>> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let v = &views[i / COZK_TREE_LEAVES];
+            let (start, end) = cozk_product_leaf_range(v.products.len() / 8, i % COZK_TREE_LEAVES);
+            vec![&h[0], &h[1], &v.products[start * 8..end * 8]]
+        })
+        .collect();
     let leaves = turbo_shared(e, &streams, TURBOSHAKE_LEAF_SUFFIX)?;
     let magic = outer_mpc::public_bytes(e, &COZK_VIEW_MAGIC_V4);
-    let rep: Word<E::Bit> = (0..64).map(|bit| e.constant((0..64).fold(0, |v, lane| v | ((((batch * 64 + lane) as u64 >> bit) & 1) << lane)))).collect();
-    let headers: Vec<[Word<E::Bit>; 5]> = views.iter().enumerate().map(|(h, v)| [
-        outer_mpc::public_bytes(e, &[h as u8]),
-        outer_mpc::public_bytes(e, &((v.subseeds.len() / 256) as u64).to_le_bytes()),
-        outer_mpc::public_bytes(e, &((v.inputs.len() / 8) as u64).to_le_bytes()),
-        outer_mpc::public_bytes(e, &((v.products.len() / 8) as u64).to_le_bytes()),
-        outer_mpc::public_bytes(e, &((v.outputs.len() / 8) as u64).to_le_bytes()),
-    ]).collect();
-    let streams: Vec<Vec<&[E::Bit]>> = views.iter().enumerate().map(|(i, v)| {
-        let h = &headers[i];
-        let mut pieces: Vec<&[E::Bit]> = vec![&magic, &rep, &h[0], &h[1], &v.subseeds, &h[2], &v.inputs, &h[3]];
-        pieces.extend(leaves[i * COZK_TREE_LEAVES..(i + 1) * COZK_TREE_LEAVES].iter().map(|w| w.as_slice()));
-        pieces.extend([h[4].as_slice(), v.outputs.as_slice()]);
-        pieces
-    }).collect();
+    let rep: Word<E::Bit> = (0..64)
+        .map(|bit| {
+            e.constant((0..64).fold(0, |v, lane| {
+                v | ((((batch * 64 + lane) as u64 >> bit) & 1) << lane)
+            }))
+        })
+        .collect();
+    let headers: Vec<[Word<E::Bit>; 5]> = views
+        .iter()
+        .enumerate()
+        .map(|(h, v)| {
+            [
+                outer_mpc::public_bytes(e, &[h as u8]),
+                outer_mpc::public_bytes(e, &((v.subseeds.len() / 256) as u64).to_le_bytes()),
+                outer_mpc::public_bytes(e, &((v.inputs.len() / 8) as u64).to_le_bytes()),
+                outer_mpc::public_bytes(e, &((v.products.len() / 8) as u64).to_le_bytes()),
+                outer_mpc::public_bytes(e, &((v.outputs.len() / 8) as u64).to_le_bytes()),
+            ]
+        })
+        .collect();
+    let streams: Vec<Vec<&[E::Bit]>> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let h = &headers[i];
+            let mut pieces: Vec<&[E::Bit]> = vec![
+                &magic,
+                &rep,
+                &h[0],
+                &h[1],
+                &v.subseeds,
+                &h[2],
+                &v.inputs,
+                &h[3],
+            ];
+            pieces.extend(
+                leaves[i * COZK_TREE_LEAVES..(i + 1) * COZK_TREE_LEAVES]
+                    .iter()
+                    .map(|w| w.as_slice()),
+            );
+            pieces.extend([h[4].as_slice(), v.outputs.as_slice()]);
+            pieces
+        })
+        .collect();
     let mut hashes = turbo_shared(e, &streams, TURBOSHAKE_ROOT_SUFFIX)?.into_iter();
     Ok(core::array::from_fn(|_| hashes.next().unwrap()))
 }
@@ -2885,7 +3030,9 @@ mod tests {
                     (0..256).map(|i| (input[i / 8] >> (i % 8)) & 1).collect()
                 } else {
                     let mut tape = zk_engine::MultiTape::new(&seeds);
-                    (0..256).map(|_| tape.sample(Domain::Bit)[0] as u8).collect()
+                    (0..256)
+                        .map(|_| tape.sample(Domain::Bit)[0] as u8)
+                        .collect()
                 }
             });
             let lane = rep % 64;
@@ -3142,30 +3289,62 @@ mod tests {
         let c = c.finish();
         let witness = e.share(&[if p == 0 { u64::MAX } else { 0 }]).unwrap();
         let seeds = LocalBatchSeeds {
-            subseeds: Secret(core::array::from_fn(|h| core::array::from_fn(|lane| [((p * 11 + h * 3 + lane) % 256) as u8; 32]))),
+            subseeds: Secret(core::array::from_fn(|h| {
+                core::array::from_fn(|lane| [((p * 11 + h * 3 + lane) % 256) as u8; 32])
+            })),
             salts: Secret([[[0; 32]; 64]; 3]),
         };
         let empty = core::array::from_fn::<_, 3, _>(|_| SecretVec::new());
-        let mut views = evaluate_inner_with_local(e, &c, &witness, &empty, false, Some(&seeds)).unwrap();
+        let mut views =
+            evaluate_inner_with_local(e, &c, &witness, &empty, false, Some(&seeds)).unwrap();
         for (h, view) in views.iter_mut().enumerate() {
-            let own: Vec<u64> = (0..m * 256).map(|i| {
-                if i / 256 != p { return 0; }
-                (0..64).fold(0, |v, lane| v | (u64::from((seeds.subseeds[h][lane][(i % 256) / 8] >> (i % 8)) & 1) << lane))
-            }).collect();
+            let own: Vec<u64> = (0..m * 256)
+                .map(|i| {
+                    if i / 256 != p {
+                        return 0;
+                    }
+                    (0..64).fold(0, |v, lane| {
+                        v | (u64::from((seeds.subseeds[h][lane][(i % 256) / 8] >> (i % 8)) & 1)
+                            << lane)
+                    })
+                })
+                .collect();
             view.subseeds = e.share_masked(&own).unwrap();
         }
         let commitments = compute_cozk_view_commit_bits(e, 0, &views).unwrap();
         let opened_commits: Vec<_> = commitments.iter().map(|w| e.open(w).unwrap()).collect();
-        let opened_views: Vec<_> = views.iter().map(|v| (e.open(&v.inputs).unwrap(), e.open(&v.products).unwrap(), e.open(&v.outputs).unwrap())).collect();
+        let opened_views: Vec<_> = views
+            .iter()
+            .map(|v| {
+                (
+                    e.open(&v.inputs).unwrap(),
+                    e.open(&v.products).unwrap(),
+                    e.open(&v.outputs).unwrap(),
+                )
+            })
+            .collect();
         for lane in [0, 17, 63] {
-            let all_seeds = core::array::from_fn(|h| (0..m).map(|p| [((p * 11 + h * 3 + lane) % 256) as u8; 32]).collect());
+            let all_seeds = core::array::from_fn(|h| {
+                (0..m)
+                    .map(|p| [((p * 11 + h * 3 + lane) % 256) as u8; 32])
+                    .collect()
+            });
             let native = zk_engine::simulate_cozk_v4(&c, &all_seeds);
             for h in 0..3 {
                 let (_, input) = zk_engine::parse_cozk_v4_inputs(&native[h]).unwrap();
                 assert_eq!(outer_mpc::lane_bytes(&opened_views[h].0, lane), input);
-                assert_eq!(outer_mpc::lane_bytes(&opened_views[h].1, lane), native[h].products);
-                assert_eq!(outer_mpc::lane_bytes(&opened_views[h].2, lane), native[h].outputs);
-                assert_eq!(outer_mpc::lane_bytes(&opened_commits[h], lane), zk_engine::commit_cozk_v4(lane, h, &native[h]));
+                assert_eq!(
+                    outer_mpc::lane_bytes(&opened_views[h].1, lane),
+                    native[h].products
+                );
+                assert_eq!(
+                    outer_mpc::lane_bytes(&opened_views[h].2, lane),
+                    native[h].outputs
+                );
+                assert_eq!(
+                    outer_mpc::lane_bytes(&opened_commits[h], lane),
+                    zk_engine::commit_cozk_v4(lane, h, &native[h])
+                );
             }
         }
     }
@@ -3179,7 +3358,9 @@ mod tests {
     fn cozk_v4_quorum_tapes_and_tree_match_native_all_domains() {
         use crate::threshold_mpc::tests as quorum;
         let config = ThresholdConfig::new(2, 3, vec![0, 2]).unwrap();
-        quorum::run(config.clone(), |p, mac, t| check_v4_batch(&mut quorum::engine(&config, p, mac, t)));
+        quorum::run(config.clone(), |p, mac, t| {
+            check_v4_batch(&mut quorum::engine(&config, p, mac, t))
+        });
     }
 
     #[test]
