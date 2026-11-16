@@ -2767,12 +2767,7 @@ pub fn prove_succinct_full_shard_aggregate(
     let mut statements = Vec::with_capacity(shards.len());
     let mut counts = Vec::with_capacity(shards.len());
     let mut minimums = Vec::with_capacity(shards.len());
-    for ((policy, witness), (_, message)) in statement
-        .policies
-        .iter()
-        .zip(witnesses)
-        .zip(&shards)
-    {
+    for ((policy, witness), (_, message)) in statement.policies.iter().zip(witnesses).zip(&shards) {
         statements.push(RecursiveShardStatement {
             keys: policy.quorum_keys.clone(),
             bitmap: witness.bitmap.clone(),
@@ -2799,23 +2794,25 @@ pub fn prove_succinct_full_shard_aggregate(
         )
     };
     #[cfg(feature = "std")]
-    let proofs: Vec<RecursiveShardProof> =
-        if statements.len() > 1 && crate::parallel_workers() > 1 {
-            let results: Vec<Result<RecursiveShardProof, FullShardError>> =
-                std::thread::scope(|scope| {
-                    let prove_ref = &prove_one;
-                    let tails: Vec<_> = (1..statements.len())
-                        .map(|index| crate::spawn_bounded(scope, move || prove_ref(index)))
-                        .collect();
-                    let mut out = Vec::with_capacity(statements.len());
-                    out.push(prove_ref(0));
-                    out.extend(tails.into_iter().map(crate::join_worker));
-                    out
-                });
-            results.into_iter().collect::<Result<Vec<_>, _>>()?
-        } else {
-            (0..statements.len()).map(prove_one).collect::<Result<Vec<_>, _>>()?
-        };
+    let proofs: Vec<RecursiveShardProof> = if statements.len() > 1 && crate::parallel_workers() > 1
+    {
+        let results: Vec<Result<RecursiveShardProof, FullShardError>> =
+            std::thread::scope(|scope| {
+                let prove_ref = &prove_one;
+                let tails: Vec<_> = (1..statements.len())
+                    .map(|index| crate::spawn_bounded(scope, move || prove_ref(index)))
+                    .collect();
+                let mut out = Vec::with_capacity(statements.len());
+                out.push(prove_ref(0));
+                out.extend(tails.into_iter().map(crate::join_worker));
+                out
+            });
+        results.into_iter().collect::<Result<Vec<_>, _>>()?
+    } else {
+        (0..statements.len())
+            .map(prove_one)
+            .collect::<Result<Vec<_>, _>>()?
+    };
     #[cfg(not(feature = "std"))]
     let proofs: Vec<RecursiveShardProof> = (0..statements.len())
         .map(prove_one)
@@ -2849,7 +2846,11 @@ pub fn verify_succinct_full_shard_aggregate(
     if aggregate.signer_counts.len() != shards.len() {
         return false;
     }
-    let counts: Vec<u64> = aggregate.signer_counts.iter().map(|&c| u64::from(c)).collect();
+    let counts: Vec<u64> = aggregate
+        .signer_counts
+        .iter()
+        .map(|&c| u64::from(c))
+        .collect();
     let minimums: Vec<u64> = statement
         .policies
         .iter()
@@ -2888,9 +2889,9 @@ pub fn verify_succinct_full_shard_aggregate(
 // Arbitrary-Depth `Merge -> Merge` Subtree Recursion (`SubtreePublic`, `QSAGSTA1`)
 // ============================================================================
 
-/// Constant number of public Goldilocks words per subtree node (`4 + 1 + 5 + 1 = 11`),
+/// Constant number of public Goldilocks words per subtree node (`4 + 1 + 5 + 1 + 3 = 14`),
 /// invariant across arbitrary tree depth and shard count.
-pub const SUBTREE_PUBLIC_WORDS: usize = 11;
+pub const SUBTREE_PUBLIC_WORDS: usize = 14;
 
 /// Canonical 8-byte wire magic for [`SuccinctSubtreeAggregate`].
 pub const SUCCINCT_SUBTREE_WIRE_MAGIC: &[u8; 8] = b"QSAGSTA1";
@@ -2901,7 +2902,7 @@ const T_SUBTREE_SIGN_MSG: u64 = 0x5354_5349_474E;
 const SUBTREE_REC_TAG: [u8; 32] = *b"QSAG.SUBTREE.RECURSIVE.NODE/v1\0\0";
 const SUBTREE_ROOT_LABEL: &[u8] = b"QSAG.SUBTREE.ROOT.HOLOGRAM/v1";
 
-/// Constant-11-word public statement of any Level-1 or Level-2+ subtree merge node.
+/// Constant-14-word public statement of any Level-1 or Level-2+ subtree merge node.
 ///
 /// Contains ZERO per-shard statement growth: individual shard committees, messages, and
 /// quorum thresholds are authenticated inside the binary Poseidon2 `subtree_registry_root`.
@@ -2911,6 +2912,11 @@ pub struct SubtreePublic {
     pub epoch_floor: Goldilocks,
     pub message_digest: [Goldilocks; 5],
     pub total_active_signers: Goldilocks,
+    /// Inclusive ordered directory indices (the registered shard IDs), bounded to 58 bits.
+    pub min_key_idx: u64,
+    pub max_key_idx: u64,
+    /// Sum of active signer weights, bounded to 62 bits. Legacy policies use unit weights.
+    pub total_active_weight: u64,
 }
 
 impl SubtreePublic {
@@ -2930,6 +2936,9 @@ impl SubtreePublic {
             m[3],
             m[4],
             self.total_active_signers,
+            Goldilocks::from_u64_reduced(self.min_key_idx),
+            Goldilocks::from_u64_reduced(self.max_key_idx),
+            Goldilocks::from_u64_reduced(self.total_active_weight),
         ]
     }
 }
@@ -2953,17 +2962,20 @@ fn subtree_policy_leaf_gadget<B: crate::zk_hem::recursive_whir::Backend>(
     custodian_limbs: &[B::W; 8],
     comm_digest: &[B::W; 4],
     min_quorums: &B::W,
+    weight: &B::W,
 ) -> [B::W; 4] {
     use crate::zk_hem::recursive_whir::{Transcript, bits};
     for limb in shard_id_limbs.iter().chain(custodian_limbs) {
         bits(b, limb, 32);
     }
     bits(b, min_quorums, 32);
+    bits(b, weight, 32);
     let mut msg = Vec::with_capacity(15);
     msg.extend_from_slice(shard_id_limbs);
     msg.extend_from_slice(custodian_limbs);
     msg.extend_from_slice(comm_digest);
     msg.push(min_quorums.clone());
+    msg.push(weight.clone());
     let mut tr = Transcript::new();
     tr.absorb(b, T_SUBTREE_POLICY_LEAF, &msg);
     core::array::from_fn(|i| b.pin(tr.state[i].clone()))
@@ -3038,6 +3050,17 @@ pub fn subtree_policy_leaf_digest(
     params: &FullShardParams,
     policy: &ShardHemPolicy,
 ) -> Option<[Goldilocks; 4]> {
+    subtree_weighted_policy_leaf_digest(params, policy, 1)
+}
+
+pub fn subtree_weighted_policy_leaf_digest(
+    params: &FullShardParams,
+    policy: &ShardHemPolicy,
+    weight_per_signer: u32,
+) -> Option<[Goldilocks; 4]> {
+    if weight_per_signer == 0 || policy.shard_id >= (1 << 58) {
+        return None;
+    }
     if policy.minimum_quorums == 0
         || policy.minimum_quorums > policy.quorum_keys.len()
         || u32::try_from(policy.minimum_quorums).is_err()
@@ -3046,10 +3069,7 @@ pub fn subtree_policy_leaf_digest(
     }
     let comm = committee_digest(params, &policy.quorum_keys)?;
     let f = crate::zk_hem::recursive_whir::f;
-    let id_limbs = [
-        f(policy.shard_id & 0xFFFF_FFFF),
-        f(policy.shard_id >> 32),
-    ];
+    let id_limbs = [f(policy.shard_id & 0xFFFF_FFFF), f(policy.shard_id >> 32)];
     let cust_limbs: [Goldilocks; 8] = core::array::from_fn(|i| {
         let chunk: [u8; 4] = policy.custodian_cluster[4 * i..4 * i + 4]
             .try_into()
@@ -3058,7 +3078,14 @@ pub fn subtree_policy_leaf_digest(
     });
     let min_q = f(policy.minimum_quorums as u64);
     let mut b = crate::zk_hem::recursive_whir::Native::default();
-    let out = subtree_policy_leaf_gadget(&mut b, &id_limbs, &cust_limbs, &comm, &min_q);
+    let out = subtree_policy_leaf_gadget(
+        &mut b,
+        &id_limbs,
+        &cust_limbs,
+        &comm,
+        &min_q,
+        &f(u64::from(weight_per_signer)),
+    );
     (!b.failed).then_some(out)
 }
 
@@ -3067,7 +3094,10 @@ pub fn subtree_registry_merkle_root(
     params: &FullShardParams,
     policies: &[ShardHemPolicy],
 ) -> Option<[Goldilocks; 4]> {
-    if !valid_policies(policies) || !policies.len().is_power_of_two() {
+    if !valid_policies(policies)
+        || !policies.len().is_power_of_two()
+        || policies.last()?.shard_id >= (1 << 58)
+    {
         return None;
     }
     let leaves: Vec<[Goldilocks; 4]> = policies
@@ -3087,10 +3117,21 @@ pub fn subtree_signing_message(
     epoch_floor: u64,
     message: impl AsRef<[u8]>,
 ) -> Option<[u8; 32]> {
+    subtree_weighted_signing_message(params, policy, 1, epoch_floor, message)
+}
+
+/// Signing message for a policy with a registered uniform per-signer weight.
+pub fn subtree_weighted_signing_message(
+    params: &FullShardParams,
+    policy: &ShardHemPolicy,
+    weight_per_signer: u32,
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+) -> Option<[u8; 32]> {
     if epoch_floor >= crate::field::GOLDILOCKS_PRIME {
         return None;
     }
-    let leaf = subtree_policy_leaf_digest(params, policy)?;
+    let leaf = subtree_weighted_policy_leaf_digest(params, policy, weight_per_signer)?;
     let msg_digest = subtree_message_digest(message.as_ref());
     let epoch_f = Goldilocks::from_u64_reduced(epoch_floor);
     let mut b = crate::zk_hem::recursive_whir::Native::default();
@@ -3107,6 +3148,8 @@ struct LeafChildWitness<'a> {
     comm_digest: [Goldilocks; 4],
     min_quorums: u32,
     signer_count: u32,
+    weight_per_signer: u32,
+    roster_siblings: Vec<[Goldilocks; 4]>,
     shard_witness: crate::zk_hem::full_shard::ShardWitness<'a>,
 }
 
@@ -3116,7 +3159,8 @@ fn subtree_leaf_child_gadget<B: crate::zk_hem::recursive_whir::Backend>(
     epoch_floor: &B::W,
     msg_digest: &[B::W; 5],
     w: &LeafChildWitness<'_>,
-) -> ([B::W; 4], B::W) {
+    sparse_height: Option<u8>,
+) -> ([B::W; 4], B::W, B::W, B::W) {
     use crate::zk_hem::recursive_whir::{Base as _, bits, f};
     let id_limbs = [
         b.alloc(f(w.shard_id & 0xFFFF_FFFF)),
@@ -3129,12 +3173,14 @@ fn subtree_leaf_child_gadget<B: crate::zk_hem::recursive_whir::Backend>(
     let comm_w: [B::W; 4] = w.comm_digest.map(|x| b.alloc(x));
     let min_q_w = b.alloc(f(u64::from(w.min_quorums)));
     let signers_w = b.alloc(f(u64::from(w.signer_count)));
+    let weight = b.alloc(f(u64::from(w.weight_per_signer)));
+    bits(b, &weight.minus(&B::W::constant(Goldilocks::ONE)), 32);
     bits(b, &signers_w, 32);
     // Enforce `signers >= min_quorums` (`signers - min_quorums in [0, 2^32)`).
     bits(b, &signers_w.minus(&min_q_w), 32);
 
     let leaf_digest =
-        subtree_policy_leaf_gadget(b, &id_limbs, &cust_limbs, &comm_w, &min_q_w);
+        subtree_policy_leaf_gadget(b, &id_limbs, &cust_limbs, &comm_w, &min_q_w, &weight);
     let msg_bytes = subtree_sign_msg_gadget(b, &leaf_digest, epoch_floor, msg_digest);
 
     let mut shard_pub = Vec::with_capacity(crate::zk_hem::full_shard::PUBLIC_WORDS);
@@ -3143,13 +3189,32 @@ fn subtree_leaf_child_gadget<B: crate::zk_hem::recursive_whir::Backend>(
     shard_pub.push(signers_w.clone());
     crate::zk_hem::full_shard::shard_gadget(b, params, &shard_pub, &w.shard_witness);
 
-    (leaf_digest, signers_w)
+    // Bound the integer before packing: a 64-bit ID must not alias `id - p`.
+    bits(b, &id_limbs[1], 26);
+    let key_idx = id_limbs[0].plus(&id_limbs[1].scale(f(1 << 32)));
+    bits(b, &key_idx, 58);
+    let active_weight = b.mul(&signers_w, &weight);
+    bits(b, &active_weight, 62);
+    let mut root = leaf_digest;
+    if let Some(height) = sparse_height {
+        let index_bits = bits(b, &key_idx, usize::from(height));
+        for (level, bit) in index_bits.iter().enumerate() {
+            let sibling = w.roster_siblings[level].map(|v| b.alloc(v));
+            let left = core::array::from_fn(|i| {
+                crate::zk_hem::recursive_whir::select(b, bit, &sibling[i], &root[i])
+            });
+            let right = core::array::from_fn(|i| root[i].plus(&sibling[i]).minus(&left[i]));
+            root = subtree_merkle_pair_gadget(b, level, &left, &right);
+        }
+    }
+    (root, signers_w, key_idx, active_weight)
 }
 
-/// Level-1 subtree relation merging `fan_in` (`1`, `2`, or `4`) [`RecursiveShardProof`]s into
-/// a constant-11-word [`SubtreePublic`].
+/// Level-1 subtree relation merging `fan_in` (`1`, `2`, `4`, `8`, or `16`) [`RecursiveShardProof`]s into
+/// a constant-14-word [`SubtreePublic`].
 #[derive(Clone)]
 pub struct SubtreeLeafMergeRelation {
+    sparse_roster_height: Option<u8>,
     params: FullShardParams,
     fan_in: usize,
     shape: crate::zk_hem::relation::Shape,
@@ -3159,7 +3224,24 @@ pub struct SubtreeLeafMergeRelation {
 
 impl SubtreeLeafMergeRelation {
     pub fn new(params: FullShardParams, fan_in: usize) -> Result<Self, FullShardError> {
-        if !matches!(fan_in, 1 | 2 | 4) {
+        Self::new_inner(params, fan_in, None)
+    }
+    pub fn with_sparse_roster(
+        params: FullShardParams,
+        fan_in: usize,
+        height: u8,
+    ) -> Result<Self, FullShardError> {
+        if !(1..=40).contains(&height) {
+            return Err(FullShardError::InvalidParameters);
+        }
+        Self::new_inner(params, fan_in, Some(height))
+    }
+    fn new_inner(
+        params: FullShardParams,
+        fan_in: usize,
+        sparse_roster_height: Option<u8>,
+    ) -> Result<Self, FullShardError> {
+        if !matches!(fan_in, 1 | 2 | 4 | 8 | 16) {
             return Err(FullShardError::InvalidParameters);
         }
         let placeholder = RecursiveShardProof::placeholder(&params);
@@ -3169,6 +3251,11 @@ impl SubtreeLeafMergeRelation {
             comm_digest: [Goldilocks::ZERO; 4],
             min_quorums: 1,
             signer_count: 1,
+            weight_per_signer: 1,
+            roster_siblings: vec![
+                [Goldilocks::ZERO; 4];
+                usize::from(sparse_roster_height.unwrap_or(0))
+            ],
             shard_witness: crate::zk_hem::full_shard::ShardWitness {
                 keys: vec![[Goldilocks::ZERO; 8]; params.slots()],
                 size: 0,
@@ -3178,16 +3265,23 @@ impl SubtreeLeafMergeRelation {
         };
         let mut cs = crate::zk_hem::relation::ConstraintSystem::new_hologram_aligned();
         let pub_words = [Goldilocks::ZERO; SUBTREE_PUBLIC_WORDS];
-        let pub_lc: Vec<crate::zk_hem::relation::Lc> =
-            pub_words.iter().map(|&x| cs.public_input(x).into()).collect();
+        let pub_lc: Vec<crate::zk_hem::relation::Lc> = pub_words
+            .iter()
+            .map(|&x| cs.public_input(x).into())
+            .collect();
         let children_refs: Vec<&LeafChildWitness<'_>> = (0..fan_in).map(|_| &dummy_child).collect();
-        populate_subtree_leaf(&mut cs, &params, &pub_lc, &children_refs);
+        populate_subtree_leaf(
+            &mut cs,
+            &params,
+            &pub_lc,
+            &children_refs,
+            sparse_roster_height,
+        );
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
         qsag_asm::volatile_fill(&mut z, Goldilocks::ZERO);
-        let hologram =
-            crate::zk_hem::protocol::ShapeHologram::compile(&shape, params.regime())
-                .map_err(|_| FullShardError::InvalidParameters)?;
+        let hologram = crate::zk_hem::protocol::ShapeHologram::compile(&shape, params.regime())
+            .map_err(|_| FullShardError::InvalidParameters)?;
         let stats = FullShardRelationStats {
             sbox_rows: shape.num_sbox,
             multiplication_rows: used - shape.num_sbox,
@@ -3195,6 +3289,7 @@ impl SubtreeLeafMergeRelation {
             variables: shape.num_vars,
         };
         Ok(Self {
+            sparse_roster_height,
             params,
             fan_in,
             shape,
@@ -3230,6 +3325,28 @@ impl SubtreeLeafMergeRelation {
         witnesses: &[ShardHemWitness<'_>],
         seed: &[u8; 32],
     ) -> Result<(SubtreePublic, Vec<Goldilocks>), FullShardError> {
+        self.build_roster_assignment(policies, epoch_floor, message, witnesses, seed, None)
+    }
+    fn build_roster_assignment(
+        &self,
+        policies: &[ShardHemPolicy],
+        epoch_floor: u64,
+        message: &[u8],
+        witnesses: &[ShardHemWitness<'_>],
+        seed: &[u8; 32],
+        openings: Option<&[SubtreeRosterOpening]>,
+    ) -> Result<(SubtreePublic, Vec<Goldilocks>), FullShardError> {
+        if self.sparse_roster_height.is_some() != openings.is_some()
+            || openings.is_some_and(|o| {
+                o.len() != self.fan_in
+                    || o.iter().any(|v| {
+                        v.siblings.len() != usize::from(self.sparse_roster_height.unwrap())
+                            || v.weight_per_signer == 0
+                    })
+            })
+        {
+            return Err(FullShardError::InvalidStatement);
+        }
         if policies.len() != self.fan_in
             || witnesses.len() != self.fan_in
             || epoch_floor >= crate::field::GOLDILOCKS_PRIME
@@ -3243,11 +3360,17 @@ impl SubtreeLeafMergeRelation {
         let mut statements = Vec::with_capacity(self.fan_in);
         let mut comm_digests = Vec::with_capacity(self.fan_in);
         let mut counts = Vec::with_capacity(self.fan_in);
-        for (p, w) in policies.iter().zip(witnesses) {
+        for (i, (p, w)) in policies.iter().zip(witnesses).enumerate() {
             let comm = committee_digest(&self.params, &p.quorum_keys)
                 .ok_or(FullShardError::InvalidStatement)?;
-            let sign_msg = subtree_signing_message(&self.params, p, epoch_floor, message)
-                .ok_or(FullShardError::InvalidStatement)?;
+            let sign_msg = subtree_weighted_signing_message(
+                &self.params,
+                p,
+                openings.map_or(1, |o| o[i].weight_per_signer),
+                epoch_floor,
+                message,
+            )
+            .ok_or(FullShardError::InvalidStatement)?;
             let active = w.bitmap.count_ones();
             if active < p.minimum_quorums || u32::try_from(active).is_err() {
                 return Err(FullShardError::InvalidStatement);
@@ -3266,7 +3389,12 @@ impl SubtreeLeafMergeRelation {
             blind_in[..32].copy_from_slice(seed);
             blind_in[32..].copy_from_slice(&(idx as u64).to_le_bytes());
             let blind = crate::sponge::cshake256_32(b"QSAG.SUBTREE.SHARD.BLIND/v1", &blind_in);
-            prove_recursive_shard(&self.params, &statements[idx], witnesses[idx].signatures, &blind)
+            prove_recursive_shard(
+                &self.params,
+                &statements[idx],
+                witnesses[idx].signatures,
+                &blind,
+            )
         };
         #[cfg(feature = "std")]
         let child_proofs: Vec<RecursiveShardProof> =
@@ -3284,25 +3412,51 @@ impl SubtreeLeafMergeRelation {
                     });
                 res.into_iter().collect::<Result<Vec<_>, _>>()?
             } else {
-                (0..self.fan_in).map(prove_one).collect::<Result<Vec<_>, _>>()?
+                (0..self.fan_in)
+                    .map(prove_one)
+                    .collect::<Result<Vec<_>, _>>()?
             };
         #[cfg(not(feature = "std"))]
-        let child_proofs: Vec<RecursiveShardProof> =
-            (0..self.fan_in).map(prove_one).collect::<Result<Vec<_>, _>>()?;
+        let child_proofs: Vec<RecursiveShardProof> = (0..self.fan_in)
+            .map(prove_one)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let subtree_root = subtree_registry_merkle_root(&self.params, policies)
-            .ok_or(FullShardError::InvalidStatement)?;
+        let subtree_root = if let Some(openings) = openings {
+            if openings
+                .iter()
+                .any(|o| o.roster_root != openings[0].roster_root)
+            {
+                return Err(FullShardError::InvalidStatement);
+            }
+            openings[0].roster_root
+        } else {
+            subtree_registry_merkle_root(&self.params, policies)
+                .ok_or(FullShardError::InvalidStatement)?
+        };
         let epoch_f = Goldilocks::from_u64_reduced(epoch_floor);
         let msg_digest = subtree_message_digest(message);
         let total_signers_u64: u64 = counts.iter().map(|&c| u64::from(c)).sum();
         if u32::try_from(total_signers_u64).is_err() {
             return Err(FullShardError::InvalidStatement);
         }
+        let total_weight = counts
+            .iter()
+            .enumerate()
+            .try_fold(0u64, |sum, (i, c)| {
+                sum.checked_add(
+                    u64::from(*c) * u64::from(openings.map_or(1, |o| o[i].weight_per_signer)),
+                )
+            })
+            .filter(|&v| v < (1 << 62))
+            .ok_or(FullShardError::InvalidStatement)?;
         let subtree_pub = SubtreePublic {
             subtree_registry_root: subtree_root,
             epoch_floor: epoch_f,
             message_digest: msg_digest,
             total_active_signers: Goldilocks::from_u64_reduced(total_signers_u64),
+            min_key_idx: policies[0].shard_id,
+            max_key_idx: policies[self.fan_in - 1].shard_id,
+            total_active_weight: total_weight,
         };
 
         let child_witnesses: Vec<LeafChildWitness<'_>> = (0..self.fan_in)
@@ -3312,6 +3466,8 @@ impl SubtreeLeafMergeRelation {
                 comm_digest: comm_digests[i],
                 min_quorums: policies[i].minimum_quorums as u32,
                 signer_count: counts[i],
+                weight_per_signer: openings.map_or(1, |o| o[i].weight_per_signer),
+                roster_siblings: openings.map_or_else(Vec::new, |o| o[i].siblings.clone()),
                 shard_witness: statements[i].witness(&self.params, &child_proofs[i]),
             })
             .collect();
@@ -3321,8 +3477,14 @@ impl SubtreeLeafMergeRelation {
         let mut leaf_digests = Vec::with_capacity(self.fan_in);
         for cw in &child_witnesses {
             let mut a = crate::zk_hem::recursive_whir::Assignment::hologram_aligned();
-            let (ld, _) =
-                subtree_leaf_child_gadget(&mut a, &self.params, &epoch_f, &msg_digest, cw);
+            let (ld, _, _, _) = subtree_leaf_child_gadget(
+                &mut a,
+                &self.params,
+                &epoch_f,
+                &msg_digest,
+                cw,
+                self.sparse_roster_height,
+            );
             leaf_digests.push(ld);
             all_p2.extend_from_slice(&a.p2_values);
             all_misc.extend_from_slice(&a.values);
@@ -3337,6 +3499,20 @@ impl SubtreeLeafMergeRelation {
                 .map(|&c| Goldilocks::from_u64_reduced(u64::from(c)))
                 .collect::<Vec<_>>(),
             &subtree_pub.words(),
+            &policies
+                .iter()
+                .map(|p| Goldilocks::from_u64_reduced(p.shard_id))
+                .collect::<Vec<_>>(),
+            &counts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    Goldilocks::from_u64_reduced(
+                        u64::from(*c) * u64::from(openings.map_or(1, |o| o[i].weight_per_signer)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            self.sparse_roster_height.is_some(),
         );
         all_p2.extend_from_slice(&tail_a.p2_values);
         all_misc.extend_from_slice(&tail_a.values);
@@ -3356,16 +3532,29 @@ impl SubtreeLeafMergeRelation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn subtree_leaf_tail_gadget<B: crate::zk_hem::recursive_whir::Backend>(
     b: &mut B,
     epoch_floor: &B::W,
     leaf_digests: &[[B::W; 4]],
     signer_counts: &[B::W],
     pub_words: &[B::W],
+    indices: &[B::W],
+    weights: &[B::W],
+    sparse: bool,
 ) {
     use crate::zk_hem::recursive_whir::{Base as _, bits};
     bits(b, epoch_floor, 64);
-    let computed_root = subtree_fold_merkle_gadget(b, 0, leaf_digests);
+    let computed_root = if sparse {
+        for root in leaf_digests {
+            for i in 0..4 {
+                b.equal(&root[i], &pub_words[i]);
+            }
+        }
+        leaf_digests[0].clone()
+    } else {
+        subtree_fold_merkle_gadget(b, 0, leaf_digests)
+    };
     for i in 0..4 {
         b.equal(&computed_root[i], &pub_words[i]);
     }
@@ -3374,6 +3563,13 @@ fn subtree_leaf_tail_gadget<B: crate::zk_hem::recursive_whir::Backend>(
         .fold(B::W::constant(Goldilocks::ZERO), |acc, c| acc.plus(c));
     bits(b, &total, 32);
     b.equal(&total, &pub_words[10]);
+    let mut weight_sum = B::W::constant(Goldilocks::ZERO);
+    for weight in weights {
+        weight_sum = weight_sum.plus(weight);
+        bits(b, &weight_sum, 62);
+    }
+    b.equal(&weight_sum, &pub_words[13]);
+    enforce_subtree_intervals(b, indices, indices, &pub_words[11], &pub_words[12]);
 }
 
 fn populate_subtree_leaf(
@@ -3381,17 +3577,32 @@ fn populate_subtree_leaf(
     params: &FullShardParams,
     pub_lc: &[crate::zk_hem::relation::Lc],
     children: &[&LeafChildWitness<'_>],
+    sparse_height: Option<u8>,
 ) {
     let epoch_lc = pub_lc[4].clone();
     let msg_lc: [crate::zk_hem::relation::Lc; 5] = core::array::from_fn(|i| pub_lc[5 + i].clone());
     let mut leaf_digests = Vec::with_capacity(children.len());
     let mut signer_counts = Vec::with_capacity(children.len());
+    let mut indices = Vec::with_capacity(children.len());
+    let mut weights = Vec::with_capacity(children.len());
     for cw in children {
-        let (ld, sc) = subtree_leaf_child_gadget(cs, params, &epoch_lc, &msg_lc, cw);
+        let (ld, sc, idx, weight) =
+            subtree_leaf_child_gadget(cs, params, &epoch_lc, &msg_lc, cw, sparse_height);
         leaf_digests.push(ld);
         signer_counts.push(sc);
+        indices.push(idx);
+        weights.push(weight);
     }
-    subtree_leaf_tail_gadget(cs, &epoch_lc, &leaf_digests, &signer_counts, pub_lc);
+    subtree_leaf_tail_gadget(
+        cs,
+        &epoch_lc,
+        &leaf_digests,
+        &signer_counts,
+        pub_lc,
+        &indices,
+        &weights,
+        sparse_height.is_some(),
+    );
 }
 
 /// Prove a Level-1 subtree leaf merge into a [`RecursivePublicHemProof`] for Level-2+ parents.
@@ -3402,7 +3613,13 @@ pub fn prove_subtree_leaf_merge_for_recursion(
     message: &[u8],
     witnesses: &[ShardHemWitness<'_>],
     seed: &[u8; 32],
-) -> Result<(SubtreePublic, crate::zk_hem::protocol::RecursivePublicHemProof), FullShardError> {
+) -> Result<
+    (
+        SubtreePublic,
+        crate::zk_hem::protocol::RecursivePublicHemProof,
+    ),
+    FullShardError,
+> {
     let (subtree_pub, z) =
         relation.build_assignment(policies, epoch_floor, message, witnesses, seed)?;
     let proof = crate::zk_hem::protocol::prove_public_for_recursion(
@@ -3436,6 +3653,9 @@ pub fn prove_subtree_leaf_aggregate(
     .map_err(|_| FullShardError::InvalidChild)?;
     Ok(SuccinctSubtreeAggregate {
         total_active_signers: subtree_pub.total_active_signers.to_canonical_u64(),
+        min_key_idx: subtree_pub.min_key_idx,
+        max_key_idx: subtree_pub.max_key_idx,
+        total_active_weight: subtree_pub.total_active_weight,
         proof,
     })
 }
@@ -3444,11 +3664,12 @@ pub fn prove_subtree_leaf_aggregate(
 // Level-2+ Internal Subtree Merge (`Merge -> Merge` Arbitrary Depth!)
 // ----------------------------------------------------------------------------
 
-/// Level-2+ internal subtree relation merging `fan_in` (`2` or `4`) child
-/// [`crate::zk_hem::protocol::RecursivePublicHemProof`]s into ONE constant-11-word
+/// Level-2+ internal subtree relation merging `fan_in` (`2`, `4`, `8`, or `16`) child
+/// [`crate::zk_hem::protocol::RecursivePublicHemProof`]s into ONE constant-14-word
 /// [`SubtreePublic`].
 #[derive(Clone)]
 pub struct SubtreeInternalMergeRelation {
+    shared_roster_root: bool,
     child_vk: crate::zk_hem::protocol::ShapeVerifierKey,
     fan_in: usize,
     base_merkle_level: usize,
@@ -3458,8 +3679,8 @@ pub struct SubtreeInternalMergeRelation {
 }
 
 impl SubtreeInternalMergeRelation {
-    /// Build an internal tree-merge relation for `fan_in` (`2` or `4`) children at
-    /// `base_merkle_level` (`>= 1`, equal to the binary Merkle height of each child's subtree,
+    /// Build an internal tree-merge relation for `fan_in` (`2`, `4`, `8`, or `16`) children at
+    /// `base_merkle_level` (the binary Merkle height of each child's subtree,
     /// e.g. `1` when Level-1 merged pairs of shards, `2` when Level-1 merged quads of shards).
     pub fn new(
         child_vk: crate::zk_hem::protocol::ShapeVerifierKey,
@@ -3467,8 +3688,25 @@ impl SubtreeInternalMergeRelation {
         base_merkle_level: usize,
         parent_regime: WhirSecurityRegime,
     ) -> Result<Self, FullShardError> {
-        if !matches!(fan_in, 2 | 4)
-            || base_merkle_level == 0
+        Self::new_inner(child_vk, fan_in, base_merkle_level, parent_regime, false)
+    }
+    /// Merge proofs of disjoint subsets authenticated under the same sparse directory root.
+    pub fn with_roster_root(
+        child_vk: crate::zk_hem::protocol::ShapeVerifierKey,
+        fan_in: usize,
+        parent_regime: WhirSecurityRegime,
+    ) -> Result<Self, FullShardError> {
+        Self::new_inner(child_vk, fan_in, 0, parent_regime, true)
+    }
+    fn new_inner(
+        child_vk: crate::zk_hem::protocol::ShapeVerifierKey,
+        fan_in: usize,
+        base_merkle_level: usize,
+        parent_regime: WhirSecurityRegime,
+        shared_roster_root: bool,
+    ) -> Result<Self, FullShardError> {
+        if !matches!(fan_in, 2 | 4 | 8 | 16)
+            || base_merkle_level > 58usize.saturating_sub(fan_in.trailing_zeros() as usize)
             || child_vk.num_public != SUBTREE_PUBLIC_WORDS
             || !child_vk.regime.uses_poseidon2_canopy()
             || !parent_regime.meets_qrom_128_floor()
@@ -3482,20 +3720,28 @@ impl SubtreeInternalMergeRelation {
             epoch_floor: Goldilocks::ZERO,
             message_digest: [Goldilocks::ZERO; 5],
             total_active_signers: Goldilocks::ONE,
+            min_key_idx: 0,
+            max_key_idx: 0,
+            total_active_weight: 1,
         };
-        let dummy_children: Vec<(SubtreePublic, &crate::zk_hem::protocol::RecursivePublicHemProof)> =
-            (0..fan_in).map(|_| (dummy_pub, &placeholder)).collect();
+        let dummy_children: Vec<(
+            SubtreePublic,
+            &crate::zk_hem::protocol::RecursivePublicHemProof,
+        )> = (0..fan_in).map(|_| (dummy_pub, &placeholder)).collect();
 
         let mut cs = crate::zk_hem::relation::ConstraintSystem::new_hologram_aligned();
         let pub_words = [Goldilocks::ZERO; SUBTREE_PUBLIC_WORDS];
-        let pub_lc: Vec<crate::zk_hem::relation::Lc> =
-            pub_words.iter().map(|&x| cs.public_input(x).into()).collect();
+        let pub_lc: Vec<crate::zk_hem::relation::Lc> = pub_words
+            .iter()
+            .map(|&x| cs.public_input(x).into())
+            .collect();
         internal_merge_gadget(
             &mut cs,
             &child_vk,
             base_merkle_level,
             &pub_lc,
             &dummy_children,
+            shared_roster_root,
         );
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
@@ -3509,6 +3755,7 @@ impl SubtreeInternalMergeRelation {
             variables: shape.num_vars,
         };
         Ok(Self {
+            shared_roster_root,
             child_vk,
             fan_in,
             base_merkle_level,
@@ -3542,7 +3789,10 @@ impl SubtreeInternalMergeRelation {
 
     fn build_assignment(
         &self,
-        children: &[(SubtreePublic, crate::zk_hem::protocol::RecursivePublicHemProof)],
+        children: &[(
+            SubtreePublic,
+            crate::zk_hem::protocol::RecursivePublicHemProof,
+        )],
     ) -> Result<(SubtreePublic, Vec<Goldilocks>), FullShardError> {
         if children.len() != self.fan_in {
             return Err(FullShardError::InvalidStatement);
@@ -3551,6 +3801,13 @@ impl SubtreeInternalMergeRelation {
         let message_digest = children[0].0.message_digest;
         let mut child_roots = Vec::with_capacity(self.fan_in);
         let mut total_u64 = 0u64;
+        let mut total_weight = 0u64;
+        if children
+            .windows(2)
+            .any(|c| c[0].0.max_key_idx >= c[1].0.min_key_idx)
+        {
+            return Err(FullShardError::InvalidStatement);
+        }
         for (cpub, cproof) in children {
             if cpub.epoch_floor != epoch_floor
                 || cpub.message_digest != message_digest
@@ -3558,8 +3815,18 @@ impl SubtreeInternalMergeRelation {
             {
                 return Err(FullShardError::InvalidChild);
             }
+            if cpub.min_key_idx > cpub.max_key_idx
+                || cpub.max_key_idx >= (1 << 58)
+                || cpub.total_active_weight >= (1 << 62)
+            {
+                return Err(FullShardError::InvalidStatement);
+            }
+            total_weight = total_weight
+                .checked_add(cpub.total_active_weight)
+                .filter(|&w| w < (1 << 62))
+                .ok_or(FullShardError::InvalidStatement)?;
             let c_signers = cpub.total_active_signers.to_canonical_u64();
-            if c_signers == 0 || u32::try_from(c_signers).is_err() {
+            if c_signers == 0 || c_signers >= (1 << 62) {
                 return Err(FullShardError::InvalidStatement);
             }
             total_u64 = total_u64
@@ -3567,21 +3834,32 @@ impl SubtreeInternalMergeRelation {
                 .ok_or(FullShardError::InvalidStatement)?;
             child_roots.push(cpub.subtree_registry_root);
         }
-        if u32::try_from(total_u64).is_err() {
+        if total_u64 >= (1 << 62) {
             return Err(FullShardError::InvalidStatement);
         }
         let mut nb = crate::zk_hem::recursive_whir::Native::default();
-        let merged_root =
-            subtree_fold_merkle_gadget(&mut nb, self.base_merkle_level, &child_roots);
+        let merged_root = if self.shared_roster_root {
+            if child_roots.iter().any(|r| *r != child_roots[0]) {
+                return Err(FullShardError::InvalidStatement);
+            }
+            child_roots[0]
+        } else {
+            subtree_fold_merkle_gadget(&mut nb, self.base_merkle_level, &child_roots)
+        };
         let parent_pub = SubtreePublic {
             subtree_registry_root: merged_root,
             epoch_floor,
             message_digest,
             total_active_signers: Goldilocks::from_u64_reduced(total_u64),
+            min_key_idx: children[0].0.min_key_idx,
+            max_key_idx: children[self.fan_in - 1].0.max_key_idx,
+            total_active_weight: total_weight,
         };
 
-        let child_refs: Vec<(SubtreePublic, &crate::zk_hem::protocol::RecursivePublicHemProof)> =
-            children.iter().map(|(p, pr)| (*p, pr)).collect();
+        let child_refs: Vec<(
+            SubtreePublic,
+            &crate::zk_hem::protocol::RecursivePublicHemProof,
+        )> = children.iter().map(|(p, pr)| (*p, pr)).collect();
         let mut a = crate::zk_hem::recursive_whir::Assignment::hologram_aligned();
         internal_merge_gadget(
             &mut a,
@@ -3589,6 +3867,7 @@ impl SubtreeInternalMergeRelation {
             self.base_merkle_level,
             &parent_pub.words(),
             &child_refs,
+            self.shared_roster_root,
         );
 
         let p2_var_base = 128 * self.shape.hologram_meta().pub_var_blocks;
@@ -3611,7 +3890,11 @@ fn internal_merge_gadget<B: crate::zk_hem::recursive_whir::Backend>(
     child_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
     base_merkle_level: usize,
     parent_pub: &[B::W],
-    children: &[(SubtreePublic, &crate::zk_hem::protocol::RecursivePublicHemProof)],
+    children: &[(
+        SubtreePublic,
+        &crate::zk_hem::protocol::RecursivePublicHemProof,
+    )],
+    shared_roster_root: bool,
 ) {
     use crate::zk_hem::recursive_whir::{Base as _, bits};
     assert_eq!(parent_pub.len(), SUBTREE_PUBLIC_WORDS);
@@ -3621,16 +3904,27 @@ fn internal_merge_gadget<B: crate::zk_hem::recursive_whir::Backend>(
 
     let mut child_roots = Vec::with_capacity(children.len());
     let mut child_signers = Vec::with_capacity(children.len());
+    let mut child_weights = Vec::with_capacity(children.len());
+    let mut mins = Vec::with_capacity(children.len());
+    let mut maxs = Vec::with_capacity(children.len());
     for (cpub, cproof) in children {
         let c_root: [B::W; 4] = cpub.subtree_registry_root.map(|x| b.alloc(x));
         let c_sig = b.alloc(cpub.total_active_signers);
-        bits(b, &c_sig, 32);
+        bits(b, &c_sig, 62);
+        let min = b.alloc(Goldilocks::from_u64_reduced(cpub.min_key_idx));
+        let max = b.alloc(Goldilocks::from_u64_reduced(cpub.max_key_idx));
+        let weight = b.alloc(Goldilocks::from_u64_reduced(cpub.total_active_weight));
+        bits(b, &weight, 62);
 
         let mut c_pub_wires = Vec::with_capacity(SUBTREE_PUBLIC_WORDS);
         c_pub_wires.extend_from_slice(&c_root);
         c_pub_wires.push(epoch_w.clone());
         c_pub_wires.extend_from_slice(msg_w);
         c_pub_wires.push(c_sig.clone());
+        c_pub_wires.extend([min.clone(), max.clone(), weight.clone()]);
+        mins.push(min);
+        maxs.push(max);
+        child_weights.push(weight);
 
         crate::zk_hem::protocol::verify_public_gadget(
             b,
@@ -3643,23 +3937,49 @@ fn internal_merge_gadget<B: crate::zk_hem::recursive_whir::Backend>(
         child_signers.push(c_sig);
     }
 
-    let computed_root = subtree_fold_merkle_gadget(b, base_merkle_level, &child_roots);
+    let computed_root = if shared_roster_root {
+        for root in &child_roots {
+            for i in 0..4 {
+                b.equal(&root[i], &parent_pub[i]);
+            }
+        }
+        child_roots[0].clone()
+    } else {
+        subtree_fold_merkle_gadget(b, base_merkle_level, &child_roots)
+    };
     for i in 0..4 {
         b.equal(&computed_root[i], &parent_pub[i]);
     }
-    let total = child_signers
-        .iter()
-        .fold(B::W::constant(Goldilocks::ZERO), |acc, c| acc.plus(c));
-    bits(b, &total, 32);
-    b.equal(&total, &parent_pub[10]);
+    for (values, want) in [
+        (&child_signers, &parent_pub[10]),
+        (&child_weights, &parent_pub[13]),
+    ] {
+        let mut sum = B::W::constant(Goldilocks::ZERO);
+        for value in values {
+            sum = sum.plus(value);
+            // Each addend and previous sum is < 2^62, so this addition cannot wrap in F.
+            bits(b, &sum, 62);
+        }
+        b.equal(&sum, want);
+    }
+    enforce_subtree_intervals(b, &mins, &maxs, &parent_pub[11], &parent_pub[12]);
 }
 
 /// Prove a Level-2+ internal subtree merge into another [`crate::zk_hem::protocol::RecursivePublicHemProof`]
 /// for Level-3+ arbitrary-depth recursion.
 pub fn prove_subtree_internal_merge_for_recursion(
     relation: &SubtreeInternalMergeRelation,
-    children: &[(SubtreePublic, crate::zk_hem::protocol::RecursivePublicHemProof)],
-) -> Result<(SubtreePublic, crate::zk_hem::protocol::RecursivePublicHemProof), FullShardError> {
+    children: &[(
+        SubtreePublic,
+        crate::zk_hem::protocol::RecursivePublicHemProof,
+    )],
+) -> Result<
+    (
+        SubtreePublic,
+        crate::zk_hem::protocol::RecursivePublicHemProof,
+    ),
+    FullShardError,
+> {
     let (parent_pub, z) = relation.build_assignment(children)?;
     let proof = crate::zk_hem::protocol::prove_public_for_recursion(
         &relation.shape,
@@ -3671,11 +3991,14 @@ pub fn prove_subtree_internal_merge_for_recursion(
     Ok((parent_pub, proof))
 }
 
-/// Prove a Level-2+ internal subtree merge into ONE constant-size (`~350 KB`) wire root proof
-/// [`SuccinctSubtreeAggregate`], verified in `< 15 ms` with zero child proofs!
+/// Prove an internal subtree merge into one root proof without carrying child proofs.
+/// Proof size and runtime depend on the compiled relation and security regime.
 pub fn prove_subtree_internal_aggregate(
     relation: &SubtreeInternalMergeRelation,
-    children: &[(SubtreePublic, crate::zk_hem::protocol::RecursivePublicHemProof)],
+    children: &[(
+        SubtreePublic,
+        crate::zk_hem::protocol::RecursivePublicHemProof,
+    )],
     seed: &[u8; 32],
 ) -> Result<SuccinctSubtreeAggregate, FullShardError> {
     let (parent_pub, z) = relation.build_assignment(children)?;
@@ -3689,6 +4012,9 @@ pub fn prove_subtree_internal_aggregate(
     .map_err(|_| FullShardError::InvalidChild)?;
     Ok(SuccinctSubtreeAggregate {
         total_active_signers: parent_pub.total_active_signers.to_canonical_u64(),
+        min_key_idx: parent_pub.min_key_idx,
+        max_key_idx: parent_pub.max_key_idx,
+        total_active_weight: parent_pub.total_active_weight,
         proof,
     })
 }
@@ -3702,22 +4028,28 @@ pub struct SubtreeAggregateStatement<'a> {
     pub minimum_global_quorums: usize,
 }
 
-/// Constant-size (`~350 KB`) root proof of an arbitrary-depth `Merge -> Merge` subtree tree.
-///
-/// Carries ONLY the global `total_active_signers` scalar and ONE outer [`crate::zk_hem::protocol::HologramPublicProof`]
-/// — zero child proofs, zero per-shard signer counts, zero linear statement growth.
+/// Root proof carrying one hologram proof, signer/weight totals and a directory interval.
+/// No child proofs or per-shard counts are carried. Further recursive levels require a
+/// supported compiled geometry; the current full-signature two-level prover exceeds the
+/// 16 GiB test budget. This format alone does not establish arbitrary-depth scalability.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuccinctSubtreeAggregate {
     pub total_active_signers: u64,
+    pub min_key_idx: u64,
+    pub max_key_idx: u64,
+    pub total_active_weight: u64,
     pub proof: crate::zk_hem::protocol::HologramPublicProof,
 }
 
 impl SuccinctSubtreeAggregate {
     pub fn to_bytes(&self) -> Vec<u8> {
         let proof_bytes = self.proof.to_bytes();
-        let mut out = Vec::with_capacity(16 + proof_bytes.len());
+        let mut out = Vec::with_capacity(40 + proof_bytes.len());
         out.extend_from_slice(SUCCINCT_SUBTREE_WIRE_MAGIC);
         out.extend_from_slice(&self.total_active_signers.to_le_bytes());
+        for v in [self.min_key_idx, self.max_key_idx, self.total_active_weight] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
         out.extend_from_slice(&proof_bytes);
         out
     }
@@ -3726,68 +4058,299 @@ impl SuccinctSubtreeAggregate {
         root_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
         bytes: &[u8],
     ) -> Option<Self> {
-        if bytes.get(..8)? != SUCCINCT_SUBTREE_WIRE_MAGIC || root_vk.num_public != SUBTREE_PUBLIC_WORDS
+        if bytes.get(..8)? != SUCCINCT_SUBTREE_WIRE_MAGIC
+            || root_vk.num_public != SUBTREE_PUBLIC_WORDS
         {
             return None;
         }
         let total_active_signers = u64::from_le_bytes(bytes.get(8..16)?.try_into().ok()?);
-        if total_active_signers == 0 || u32::try_from(total_active_signers).is_err() {
+        if total_active_signers == 0 || total_active_signers >= (1 << 62) {
             return None;
         }
-        let proof = crate::zk_hem::protocol::HologramPublicProof::from_bytes(
-            bytes.get(16..)?,
-            root_vk,
-        )?;
+        let min_key_idx = u64::from_le_bytes(bytes.get(16..24)?.try_into().ok()?);
+        let max_key_idx = u64::from_le_bytes(bytes.get(24..32)?.try_into().ok()?);
+        let total_active_weight = u64::from_le_bytes(bytes.get(32..40)?.try_into().ok()?);
+        if min_key_idx > max_key_idx
+            || max_key_idx >= (1 << 58)
+            || total_active_weight == 0
+            || total_active_weight >= (1 << 62)
+        {
+            return None;
+        }
+        let proof =
+            crate::zk_hem::protocol::HologramPublicProof::from_bytes(bytes.get(40..)?, root_vk)?;
         Some(Self {
             total_active_signers,
+            min_key_idx,
+            max_key_idx,
+            total_active_weight,
             proof,
         })
     }
 }
 
-/// Verify a root [`SuccinctSubtreeAggregate`] in `< 15 ms` from the `< 256`-byte `root_vk` and
-/// public policies alone, with ZERO child proofs!
+/// A private sparse-directory membership opening for one registered shard.
+#[derive(Clone, Debug)]
+pub struct SubtreeRosterOpening {
+    pub roster_root: [Goldilocks; 4],
+    pub weight_per_signer: u32,
+    pub siblings: Vec<[Goldilocks; 4]>,
+}
+
+/// Sparse roster with up to 2^40 directory slots, stored in O(registered shards * height).
+/// Each shard ID is its directory index. Distinct keys and positive uniform per-shard
+/// signer weights are validated at enrollment. Unoccupied slots carry the zero digest.
+pub struct SparseSubtreeRegistry {
+    height: u8,
+    levels: Vec<alloc::collections::BTreeMap<u64, [Goldilocks; 4]>>,
+    defaults: Vec<[Goldilocks; 4]>,
+    weights: alloc::collections::BTreeMap<u64, u32>,
+}
+impl SparseSubtreeRegistry {
+    pub fn new(
+        params: &FullShardParams,
+        policies: &[ShardHemPolicy],
+        weights: &[u32],
+        height: u8,
+    ) -> Option<Self> {
+        if !(1..=40).contains(&height)
+            || !valid_policies(policies)
+            || weights.len() != policies.len()
+            || weights.contains(&0)
+            || policies.last()?.shard_id >= (1u64 << height)
+        {
+            return None;
+        }
+        let mut leaves = alloc::collections::BTreeMap::new();
+        for (p, &weight) in policies.iter().zip(weights) {
+            leaves.insert(
+                p.shard_id,
+                subtree_weighted_policy_leaf_digest(params, p, weight)?,
+            );
+        }
+        let mut levels = vec![leaves];
+        let mut defaults = vec![[Goldilocks::ZERO; 4]];
+        let mut b = crate::zk_hem::recursive_whir::Native::default();
+        for level in 0..usize::from(height) {
+            let previous = &levels[level];
+            let parents: BTreeSet<u64> = previous.keys().map(|i| i >> 1).collect();
+            let mut next = alloc::collections::BTreeMap::new();
+            for index in parents {
+                let left = previous.get(&(2 * index)).unwrap_or(&defaults[level]);
+                let right = previous.get(&(2 * index + 1)).unwrap_or(&defaults[level]);
+                next.insert(
+                    index,
+                    subtree_merkle_pair_gadget(&mut b, level, left, right),
+                );
+            }
+            defaults.push(subtree_merkle_pair_gadget(
+                &mut b,
+                level,
+                &defaults[level],
+                &defaults[level],
+            ));
+            levels.push(next);
+        }
+        Some(Self {
+            height,
+            levels,
+            defaults,
+            weights: policies
+                .iter()
+                .zip(weights)
+                .map(|(p, &w)| (p.shard_id, w))
+                .collect(),
+        })
+    }
+    pub fn roster_root(&self) -> [u8; 32] {
+        crate::sponge::limbs4_to_le_bytes32(self.levels[usize::from(self.height)][&0])
+    }
+    pub fn opening(&self, key_idx: u64) -> Option<SubtreeRosterOpening> {
+        Some(SubtreeRosterOpening {
+            roster_root: self.levels[usize::from(self.height)][&0],
+            weight_per_signer: *self.weights.get(&key_idx)?,
+            siblings: (0..usize::from(self.height))
+                .map(|level| {
+                    *self.levels[level]
+                        .get(&((key_idx >> level) ^ 1))
+                        .unwrap_or(&self.defaults[level])
+                })
+                .collect(),
+        })
+    }
+}
+
+/// Prove selected ordered sparse roster shards. Higher merges use [`SubtreeInternalMergeRelation::with_roster_root`]
+/// to preserve the shared directory root and enforce disjoint child intervals.
+pub fn prove_subtree_roster_leaf_merge_for_recursion(
+    relation: &SubtreeLeafMergeRelation,
+    policies: &[ShardHemPolicy],
+    openings: &[SubtreeRosterOpening],
+    epoch_floor: u64,
+    message: &[u8],
+    witnesses: &[ShardHemWitness<'_>],
+    seed: &[u8; 32],
+) -> Result<
+    (
+        SubtreePublic,
+        crate::zk_hem::protocol::RecursivePublicHemProof,
+    ),
+    FullShardError,
+> {
+    let (public, z) = relation.build_roster_assignment(
+        policies,
+        epoch_floor,
+        message,
+        witnesses,
+        seed,
+        Some(openings),
+    )?;
+    let proof = crate::zk_hem::protocol::prove_public_for_recursion(
+        &relation.shape,
+        &relation.hologram,
+        z,
+        SUBTREE_REC_TAG,
+    )
+    .map_err(|_| FullShardError::InvalidChild)?;
+    Ok((public, proof))
+}
+
+/// Prepared, trusted registry commitment. Preparation validates distinct keys once;
+/// subsequent root verification performs no key hashing or directory scan.
+#[derive(Clone, Debug)]
+pub struct PreparedSubtreeRegistry {
+    pub roster_root: [u8; 32],
+    pub min_key_idx: u64,
+    pub max_key_idx: u64,
+    pub max_signers: u64,
+}
+impl PreparedSubtreeRegistry {
+    pub fn new(params: &FullShardParams, policies: &[ShardHemPolicy]) -> Option<Self> {
+        let root = subtree_registry_merkle_root(params, policies)?;
+        Some(Self {
+            roster_root: crate::sponge::limbs4_to_le_bytes32(root),
+            min_key_idx: policies.first()?.shard_id,
+            max_key_idx: policies.last()?.shard_id,
+            max_signers: policies
+                .iter()
+                .try_fold(0u64, |n, p| n.checked_add(p.quorum_keys.len() as u64))?,
+        })
+    }
+}
+
+/// Trusted roster commitment and expected scope. The root must come from the verifier's
+/// registry configuration, never from the untrusted aggregate. Indices name registered
+/// shards; registry enrollment must ensure keys are distinct across those shards.
+#[derive(Clone, Copy, Debug)]
+pub struct RosterRootStatement<'a> {
+    pub roster_root: [u8; 32],
+    pub epoch_floor: u64,
+    pub message: &'a [u8],
+    pub minimum_global_quorums: u64,
+    pub minimum_active_weight: u64,
+    pub min_key_idx: u64,
+    pub max_key_idx: u64,
+}
+
+/// Verify against a 32-byte roster commitment in O(1) directory size. Work depends only
+/// on the fixed root proof geometry and message length. No public keys are required.
+pub fn verify_succinct_subtree_aggregate_against_roster_root(
+    root_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
+    statement: &RosterRootStatement<'_>,
+    aggregate: &SuccinctSubtreeAggregate,
+) -> bool {
+    if root_vk.num_public != SUBTREE_PUBLIC_WORDS
+        || statement.minimum_global_quorums == 0
+        || statement.epoch_floor >= crate::field::GOLDILOCKS_PRIME
+        || aggregate.total_active_signers < statement.minimum_global_quorums
+        || aggregate.total_active_signers >= (1 << 62)
+        || aggregate.total_active_weight < statement.minimum_active_weight
+        || aggregate.total_active_weight == 0
+        || aggregate.total_active_weight >= (1 << 62)
+        || aggregate.min_key_idx != statement.min_key_idx
+        || aggregate.max_key_idx != statement.max_key_idx
+        || aggregate.min_key_idx > aggregate.max_key_idx
+        || aggregate.max_key_idx >= (1 << 58)
+    {
+        return false;
+    }
+    let mut root = [Goldilocks::ZERO; 4];
+    for (i, limb) in root.iter_mut().enumerate() {
+        let raw = u64::from_le_bytes(statement.roster_root[i * 8..i * 8 + 8].try_into().unwrap());
+        let Ok(value) = Goldilocks::from_canonical(raw) else {
+            return false;
+        };
+        *limb = value;
+    }
+    let public = SubtreePublic {
+        subtree_registry_root: root,
+        epoch_floor: Goldilocks::from_u64_reduced(statement.epoch_floor),
+        message_digest: subtree_message_digest(statement.message),
+        total_active_signers: Goldilocks::from_u64_reduced(aggregate.total_active_signers),
+        min_key_idx: aggregate.min_key_idx,
+        max_key_idx: aggregate.max_key_idx,
+        total_active_weight: aggregate.total_active_weight,
+    };
+    crate::zk_hem::protocol::verify_public_hologram(
+        root_vk,
+        &public.words(),
+        SUBTREE_ROOT_LABEL,
+        &aggregate.proof,
+    )
+}
+
+fn enforce_subtree_intervals<B: crate::zk_hem::recursive_whir::Backend>(
+    b: &mut B,
+    mins: &[B::W],
+    maxs: &[B::W],
+    parent_min: &B::W,
+    parent_max: &B::W,
+) {
+    use crate::zk_hem::recursive_whir::{Base as _, bits};
+    for i in 0..mins.len() {
+        bits(b, &mins[i], 58);
+        bits(b, &maxs[i], 58);
+        bits(b, &maxs[i].minus(&mins[i]), 58);
+        if i > 0 {
+            bits(
+                b,
+                &mins[i]
+                    .minus(&maxs[i - 1])
+                    .minus(&B::W::constant(Goldilocks::ONE)),
+                58,
+            );
+        }
+    }
+    b.equal(parent_min, &mins[0]);
+    b.equal(parent_max, &maxs[maxs.len() - 1]);
+}
+
+/// Convenience verifier that prepares a roster root by scanning the supplied policies.
+/// Cache a [`PreparedSubtreeRegistry`] and use the root verifier to avoid that scan.
 pub fn verify_succinct_subtree_aggregate(
     root_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
     params: &FullShardParams,
     statement: &SubtreeAggregateStatement<'_>,
     aggregate: &SuccinctSubtreeAggregate,
 ) -> bool {
-    if root_vk.num_public != SUBTREE_PUBLIC_WORDS
-        || statement.minimum_global_quorums == 0
-        || statement.epoch_floor >= crate::field::GOLDILOCKS_PRIME
-        || aggregate.total_active_signers < statement.minimum_global_quorums as u64
-        || u32::try_from(aggregate.total_active_signers).is_err()
-    {
+    let Some(registry) = PreparedSubtreeRegistry::new(params, statement.policies) else {
+        return false;
+    };
+    if aggregate.total_active_signers > registry.max_signers {
         return false;
     }
-    let Some(max_keys) = checked_sum_usize(
-        statement
-            .policies
-            .iter()
-            .map(|p| p.quorum_keys.len()),
-    ) else {
-        return false;
-    };
-    if aggregate.total_active_signers > max_keys as u64 {
-        return false;
-    }
-    let Some(subtree_registry_root) =
-        subtree_registry_merkle_root(params, statement.policies)
-    else {
-        return false;
-    };
-    let pub_stmt = SubtreePublic {
-        subtree_registry_root,
-        epoch_floor: Goldilocks::from_u64_reduced(statement.epoch_floor),
-        message_digest: subtree_message_digest(statement.message),
-        total_active_signers: Goldilocks::from_u64_reduced(aggregate.total_active_signers),
-    };
-    crate::zk_hem::protocol::verify_public_hologram(
+    verify_succinct_subtree_aggregate_against_roster_root(
         root_vk,
-        &pub_stmt.words(),
-        SUBTREE_ROOT_LABEL,
-        &aggregate.proof,
+        &RosterRootStatement {
+            roster_root: registry.roster_root,
+            epoch_floor: statement.epoch_floor,
+            message: statement.message,
+            minimum_global_quorums: statement.minimum_global_quorums as u64,
+            minimum_active_weight: statement.minimum_global_quorums as u64,
+            min_key_idx: registry.min_key_idx,
+            max_key_idx: registry.max_key_idx,
+        },
+        aggregate,
     )
 }
 
@@ -5463,20 +6026,337 @@ mod tests {
         );
     }
 
+    // A small fixture checks the native merge gadget and the roster-root wire API.
+    // Full signature-shard recursion has separate resource-intensive tests below.
     #[test]
+    fn roster_root_verifier_and_native_merge_binding() {
+        use crate::zk_hem::{
+            protocol,
+            relation::{ConstraintSystem, Lc},
+        };
+        let child_public = |index, weight| SubtreePublic {
+            subtree_registry_root: [Goldilocks::from_u64_reduced(index + 20); 4],
+            epoch_floor: Goldilocks::from_u64_reduced(7),
+            message_digest: subtree_message_digest(b"roster fixture"),
+            total_active_signers: Goldilocks::ONE,
+            min_key_idx: index,
+            max_key_idx: index,
+            total_active_weight: weight,
+        };
+        let publics = [child_public(1, 2), child_public(4, 3)];
+        let build = |public: SubtreePublic| {
+            let mut cs = ConstraintSystem::new_hologram_aligned();
+            let words: Vec<Lc> = public
+                .words()
+                .iter()
+                .map(|&v| cs.public_input(v).into())
+                .collect();
+            cs.enforce_equal(&words[10], &Lc::constant(Goldilocks::ONE));
+            cs.enforce_equal(&words[11], &words[12]);
+            cs.finish()
+        };
+        let (shape, left_z) = build(publics[0]);
+        let (right_shape, right_z) = build(publics[1]);
+        assert_eq!(shape, right_shape);
+        let hologram = protocol::ShapeHologram::compile(
+            &shape,
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+        )
+        .unwrap();
+        let left = protocol::prove_public_for_recursion(&shape, &hologram, left_z, SUBTREE_REC_TAG)
+            .unwrap();
+        let right =
+            protocol::prove_public_for_recursion(&shape, &hologram, right_z, SUBTREE_REC_TAG)
+                .unwrap();
+        let children = [(publics[0], left), (publics[1], right)];
+        let mut native = crate::zk_hem::recursive_whir::Native::default();
+        let root =
+            subtree_fold_merkle_gadget(&mut native, 0, &publics.map(|p| p.subtree_registry_root));
+        let parent = SubtreePublic {
+            subtree_registry_root: root,
+            total_active_signers: Goldilocks::from_u64_reduced(2),
+            min_key_idx: 1,
+            max_key_idx: 4,
+            total_active_weight: 5,
+            ..publics[0]
+        };
+        let refs: Vec<_> = children.iter().map(|(p, proof)| (*p, proof)).collect();
+        internal_merge_gadget(
+            &mut native,
+            hologram.verifier_key(),
+            0,
+            &parent.words(),
+            &refs,
+            false,
+        );
+        assert!(!native.failed);
+        let reversed = [refs[1], refs[0]];
+        let mut bad = crate::zk_hem::recursive_whir::Native::default();
+        internal_merge_gadget(
+            &mut bad,
+            hologram.verifier_key(),
+            0,
+            &parent.words(),
+            &reversed,
+            false,
+        );
+        assert!(bad.failed);
+
+        // A deliberately small pinned-statement relation isolates root-verifier and wire
+        // behavior. It is not a compiled recursive merge or a signature authorization proof.
+        let mut cs = ConstraintSystem::new_hologram_aligned();
+        for word in parent.words() {
+            let input: Lc = cs.public_input(word).into();
+            cs.enforce_equal(&input, &Lc::constant(word));
+        }
+        let (root_shape, root_z) = cs.finish();
+        let root_hologram = protocol::ShapeHologram::compile_native(
+            &root_shape,
+            WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
+        )
+        .unwrap();
+        let root_vk = root_hologram.verifier_key();
+        let start = std::time::Instant::now();
+        let proof = SuccinctSubtreeAggregate {
+            total_active_signers: 2,
+            min_key_idx: 1,
+            max_key_idx: 4,
+            total_active_weight: 5,
+            proof: protocol::prove_public_hologram(
+                &root_shape,
+                &root_hologram,
+                root_z,
+                SUBTREE_ROOT_LABEL,
+                &[64; 32],
+            )
+            .unwrap(),
+        };
+        let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let statement = RosterRootStatement {
+            roster_root: crate::sponge::limbs4_to_le_bytes32(root),
+            epoch_floor: 7,
+            message: b"roster fixture",
+            minimum_global_quorums: 2,
+            minimum_active_weight: 5,
+            min_key_idx: 1,
+            max_key_idx: 4,
+        };
+        let start = std::time::Instant::now();
+        assert!(verify_succinct_subtree_aggregate_against_roster_root(
+            root_vk, &statement, &proof
+        ));
+        let verify_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let wire = proof.to_bytes();
+        assert_eq!(
+            SuccinctSubtreeAggregate::from_bytes_canonical(root_vk, &wire),
+            Some(proof.clone())
+        );
+        for offset in [8, 16, 24, 32, 40] {
+            let mut bad = wire.clone();
+            bad[offset] ^= 1;
+            if let Some(bad) = SuccinctSubtreeAggregate::from_bytes_canonical(root_vk, &bad) {
+                assert!(!verify_succinct_subtree_aggregate_against_roster_root(
+                    root_vk, &statement, &bad
+                ));
+            }
+        }
+        let mut wrong = statement;
+        wrong.roster_root[0] ^= 1;
+        assert!(!verify_succinct_subtree_aggregate_against_roster_root(
+            root_vk, &wrong, &proof
+        ));
+        std::println!(
+            "ROSTER_ROOT_WIRE_FIXTURE rows={} proof_bytes={} prove_ms={prove_ms:.2} verify_ms={verify_ms:.2}",
+            root_shape.num_rows(),
+            wire.len()
+        );
+    }
+
+    #[test]
+    fn sparse_roster_openings_at_planetary_depths() {
+        let params =
+            FullShardParams::new(WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, 2).unwrap();
+        let keys: Vec<_> = (0..2)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[71; 32], i)
+                    .pk
+            })
+            .collect();
+        for height in [20, 37, 40] {
+            let policies: Vec<_> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, &key)| ShardHemPolicy {
+                    shard_id: if i == 0 { 7 } else { (1u64 << height) - 1 },
+                    custodian_cluster: [i as u8; 32],
+                    quorum_keys: vec![key],
+                    minimum_quorums: 1,
+                })
+                .collect();
+            let registry = SparseSubtreeRegistry::new(&params, &policies, &[2, 9], height).unwrap();
+            for policy in &policies {
+                let opening = registry.opening(policy.shard_id).unwrap();
+                let mut node =
+                    subtree_weighted_policy_leaf_digest(&params, policy, opening.weight_per_signer)
+                        .unwrap();
+                let mut native = crate::zk_hem::recursive_whir::Native::default();
+                for (level, sibling) in opening.siblings.iter().enumerate() {
+                    node = if (policy.shard_id >> level) & 1 == 0 {
+                        subtree_merkle_pair_gadget(&mut native, level, &node, sibling)
+                    } else {
+                        subtree_merkle_pair_gadget(&mut native, level, sibling, &node)
+                    };
+                }
+                assert_eq!(
+                    crate::sponge::limbs4_to_le_bytes32(node),
+                    registry.roster_root()
+                );
+                assert_ne!(
+                    subtree_weighted_policy_leaf_digest(
+                        &params,
+                        policy,
+                        opening.weight_per_signer + 1
+                    )
+                    .unwrap(),
+                    subtree_weighted_policy_leaf_digest(&params, policy, opening.weight_per_signer)
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_roster_native_signature_leaf_and_tampering() {
+        use crate::zk_hem::recursive_whir::{Native, f};
+        let params =
+            FullShardParams::new(WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, 2).unwrap();
+        let mut key =
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[72; 32], 0);
+        let policy = ShardHemPolicy {
+            shard_id: (1 << 36) + 9,
+            custodian_cluster: [13; 32],
+            quorum_keys: vec![key.pk],
+            minimum_quorums: 1,
+        };
+        let registry =
+            SparseSubtreeRegistry::new(&params, core::slice::from_ref(&policy), &[7], 37).unwrap();
+        let opening = registry.opening(policy.shard_id).unwrap();
+        let epoch = 3;
+        let message = b"sparse signature membership";
+        let signing_message =
+            subtree_weighted_signing_message(&params, &policy, 7, epoch, message).unwrap();
+        let signature = key
+            .sign_stateful_for_unit_test(&signing_message, 3)
+            .unwrap();
+        let statement = RecursiveShardStatement {
+            keys: policy.quorum_keys.clone(),
+            bitmap: SignerBitmap::from_active_indices(1, &[0]).unwrap(),
+            message: signing_message,
+        };
+        let proof = prove_recursive_shard(&params, &statement, &[signature], &[73; 32]).unwrap();
+        let mut witness = LeafChildWitness {
+            shard_id: policy.shard_id,
+            custodian_cluster: policy.custodian_cluster,
+            comm_digest: committee_digest(&params, &policy.quorum_keys).unwrap(),
+            min_quorums: 1,
+            signer_count: 1,
+            weight_per_signer: 7,
+            roster_siblings: opening.siblings.clone(),
+            shard_witness: statement.witness(&params, &proof),
+        };
+        let public = SubtreePublic {
+            subtree_registry_root: opening.roster_root,
+            epoch_floor: f(epoch),
+            message_digest: subtree_message_digest(message),
+            total_active_signers: f(1),
+            min_key_idx: policy.shard_id,
+            max_key_idx: policy.shard_id,
+            total_active_weight: 7,
+        };
+        let check = |w: &LeafChildWitness<'_>| {
+            let mut b = Native::default();
+            let (root, count, index, weight) = subtree_leaf_child_gadget(
+                &mut b,
+                &params,
+                &public.epoch_floor,
+                &public.message_digest,
+                w,
+                Some(37),
+            );
+            subtree_leaf_tail_gadget(
+                &mut b,
+                &public.epoch_floor,
+                &[root],
+                &[count],
+                &public.words(),
+                &[index],
+                &[weight],
+                true,
+            );
+            !b.failed
+        };
+        assert!(check(&witness));
+        witness.roster_siblings[10][0] += Goldilocks::ONE;
+        assert!(!check(&witness));
+        witness.roster_siblings[10][0] -= Goldilocks::ONE;
+        witness.weight_per_signer = 8;
+        assert!(!check(&witness));
+        witness.weight_per_signer = 7;
+        witness.shard_id += 1;
+        assert!(!check(&witness));
+    }
+
+    #[test]
+    fn subtree_interval_constraints_reject_overlap_and_field_wrap() {
+        use crate::zk_hem::recursive_whir::{Native, f};
+        for (mins, maxs, expected) in [
+            ([1, 9], [3, 12], true),
+            ([1, 3], [3, 12], false),
+            ([9, 1], [12, 3], false),
+            ([1, 2], [0, 3], false),
+            ([1, 1 << 58], [3, 1 << 58], false),
+        ] {
+            let mut b = Native::default();
+            enforce_subtree_intervals(&mut b, &mins.map(f), &maxs.map(f), &f(mins[0]), &f(maxs[1]));
+            assert_eq!(!b.failed, expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "full signature recursion resource gate: exceeds the 16 GiB build-host budget"]
     fn two_level_four_shard_subtree_recursion_and_tamper_suite() {
+        subtree_two_level(false, 2);
+    }
+    #[test]
+    #[ignore = "full signature recursion resource gate: exceeds the 16 GiB build-host budget"]
+    fn sparse_roster_depth37_weighted_two_level_recursion() {
+        subtree_two_level(true, 1);
+    }
+    #[test]
+    #[ignore = "full signature recursion resource gate: exceeds the 16 GiB build-host budget"]
+    fn two_level_two_shard_roster_root_recursion() {
+        subtree_two_level(false, 1);
+    }
+    fn subtree_two_level(sparse: bool, leaf_fan: usize) {
         use std::time::Instant;
 
-        let child_regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+        let child_regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
         let root_regime = WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128;
         let params = FullShardParams::new(child_regime, 2).unwrap();
 
+        let shard_count = 2 * leaf_fan;
+        let total_signers = 3 * leaf_fan as u64;
+        let total_weight = if sparse {
+            if leaf_fan == 1 { 7 } else { 20 }
+        } else {
+            total_signers
+        };
         let epoch_floor = 2026_1116u64;
         let message = b"two-level arbitrary-depth merge->merge root authorization";
 
-        let mut policies = Vec::with_capacity(4);
-        let mut all_keypairs = Vec::with_capacity(4);
-        for s in 0..4usize {
+        let mut policies = Vec::with_capacity(shard_count);
+        let mut all_keypairs = Vec::with_capacity(shard_count);
+        for s in 0..shard_count {
             let kps: Vec<ValidatorKeypair> = (0..2)
                 .map(|i| {
                     ValidatorKeypair::keygen_deterministic(
@@ -5487,7 +6367,11 @@ mod tests {
                 })
                 .collect();
             policies.push(ShardHemPolicy {
-                shard_id: 100 + s as u64,
+                shard_id: if sparse {
+                    (1u64 << 36) + (1u64 << 30) * s as u64
+                } else {
+                    100 + s as u64
+                },
                 custodian_cluster: [(0xA0 + s) as u8; 32],
                 quorum_keys: kps.iter().map(|k| k.pk).collect(),
                 minimum_quorums: 1,
@@ -5495,13 +6379,23 @@ mod tests {
             all_keypairs.push(kps);
         }
 
+        let weights = if sparse { [2, 3, 4, 5] } else { [1; 4] };
+        let registry = sparse.then(|| {
+            SparseSubtreeRegistry::new(&params, &policies, &weights[..shard_count], 37).unwrap()
+        });
         // Active signers per shard: [2, 1, 2, 1] -> total = 6 >= minimum_global_quorums (5).
         let active_sets: [&[usize]; 4] = [&[0, 1], &[1], &[0, 1], &[0]];
-        let mut bitmaps = Vec::with_capacity(4);
-        let mut sig_vecs = Vec::with_capacity(4);
-        for s in 0..4usize {
-            let sign_msg =
-                subtree_signing_message(&params, &policies[s], epoch_floor, message).unwrap();
+        let mut bitmaps = Vec::with_capacity(shard_count);
+        let mut sig_vecs = Vec::with_capacity(shard_count);
+        for s in 0..shard_count {
+            let sign_msg = subtree_weighted_signing_message(
+                &params,
+                &policies[s],
+                weights[s],
+                epoch_floor,
+                message,
+            )
+            .unwrap();
             let sigs: Vec<ValidatorSignature> = active_sets[s]
                 .iter()
                 .map(|&idx| {
@@ -5513,7 +6407,7 @@ mod tests {
             bitmaps.push(SignerBitmap::from_active_indices(2, active_sets[s]).unwrap());
             sig_vecs.push(sigs);
         }
-        let witnesses: Vec<ShardHemWitness<'_>> = (0..4)
+        let witnesses: Vec<ShardHemWitness<'_>> = (0..shard_count)
             .map(|s| ShardHemWitness {
                 bitmap: &bitmaps[s],
                 signatures: &sig_vecs[s],
@@ -5521,40 +6415,74 @@ mod tests {
             .collect();
 
         // Setup & prove Level-1 (`2` shards -> `1` SubtreePublic), then release `l1_rel` before
-        // constructing Level-2 (`2` Level-1s -> `1` Root) so peak RSS stays `< 14 GiB`.
+        // constructing Level-2. The full pipeline currently exceeds the 16 GiB test budget.
         let t_setup1 = Instant::now();
-        let l1_rel = SubtreeLeafMergeRelation::new(params.clone(), 2).unwrap();
+        let l1_rel = if sparse {
+            SubtreeLeafMergeRelation::with_sparse_roster(params.clone(), leaf_fan, 37)
+        } else {
+            SubtreeLeafMergeRelation::new(params.clone(), leaf_fan)
+        }
+        .unwrap();
         let setup1_ms = t_setup1.elapsed().as_secs_f64() * 1000.0;
+        std::println!("SUBTREE_SETUP1 ms={setup1_ms:.1}");
         let l1_rows = l1_rel.stats().padded_rows;
         let l1_vk = l1_rel.verifier_key().clone();
 
         // Level-1 merges (`[0, 1]` and `[2, 3]`).
         let t_l1 = Instant::now();
-        let (l1_left_pub, l1_left_proof) = prove_subtree_leaf_merge_for_recursion(
-            &l1_rel,
-            &policies[0..2],
-            epoch_floor,
-            message,
-            &witnesses[0..2],
-            &[0x11; 32],
-        )
-        .unwrap();
-        let (l1_right_pub, l1_right_proof) = prove_subtree_leaf_merge_for_recursion(
-            &l1_rel,
-            &policies[2..4],
-            epoch_floor,
-            message,
-            &witnesses[2..4],
-            &[0x22; 32],
-        )
-        .unwrap();
+        let prove_pair = |offset: usize, seed: &[u8; 32]| {
+            if let Some(registry) = &registry {
+                let openings: Vec<_> = policies[offset..offset + leaf_fan]
+                    .iter()
+                    .map(|p| registry.opening(p.shard_id).unwrap())
+                    .collect();
+                prove_subtree_roster_leaf_merge_for_recursion(
+                    &l1_rel,
+                    &policies[offset..offset + leaf_fan],
+                    &openings,
+                    epoch_floor,
+                    message,
+                    &witnesses[offset..offset + leaf_fan],
+                    seed,
+                )
+            } else {
+                prove_subtree_leaf_merge_for_recursion(
+                    &l1_rel,
+                    &policies[offset..offset + leaf_fan],
+                    epoch_floor,
+                    message,
+                    &witnesses[offset..offset + leaf_fan],
+                    seed,
+                )
+            }
+            .unwrap()
+        };
+        let (l1_left_pub, l1_left_proof) = prove_pair(0, &[0x11; 32]);
+        std::println!("SUBTREE_LEFT_PROVED");
+        let (l1_right_pub, l1_right_proof) = prove_pair(leaf_fan, &[0x22; 32]);
         let l1_ms = t_l1.elapsed().as_secs_f64() * 1000.0;
         drop(l1_rel);
-        assert_eq!(l1_left_pub.total_active_signers.to_canonical_u64(), 3);
-        assert_eq!(l1_right_pub.total_active_signers.to_canonical_u64(), 3);
+        assert_eq!(
+            l1_left_pub.total_active_signers.to_canonical_u64(),
+            if leaf_fan == 1 { 2 } else { 3 }
+        );
+        assert_eq!(
+            l1_right_pub.total_active_signers.to_canonical_u64(),
+            if leaf_fan == 1 { 1 } else { 3 }
+        );
 
         let t_setup2 = Instant::now();
-        let l2_rel = SubtreeInternalMergeRelation::new(l1_vk, 2, 1, root_regime).unwrap();
+        let l2_rel = if sparse {
+            SubtreeInternalMergeRelation::with_roster_root(l1_vk, 2, root_regime)
+        } else {
+            SubtreeInternalMergeRelation::new(
+                l1_vk,
+                2,
+                leaf_fan.trailing_zeros() as usize,
+                root_regime,
+            )
+        }
+        .unwrap();
         let setup_ms = setup1_ms + t_setup2.elapsed().as_secs_f64() * 1000.0;
         let root_vk = l2_rel.verifier_key();
         assert!(root_vk.to_bytes().len() < 256);
@@ -5568,7 +6496,7 @@ mod tests {
         )
         .unwrap();
         let l2_ms = t_l2.elapsed().as_secs_f64() * 1000.0;
-        assert_eq!(root_agg.total_active_signers, 6);
+        assert_eq!(root_agg.total_active_signers, total_signers);
 
         let root_bytes = root_agg.to_bytes();
         let decoded = SuccinctSubtreeAggregate::from_bytes_canonical(root_vk, &root_bytes).unwrap();
@@ -5578,15 +6506,33 @@ mod tests {
             policies: &policies,
             epoch_floor,
             message,
-            minimum_global_quorums: 5,
+            minimum_global_quorums: total_signers as usize,
+        };
+        let roster_stmt = RosterRootStatement {
+            roster_root: registry.as_ref().map_or_else(
+                || {
+                    PreparedSubtreeRegistry::new(&params, &policies)
+                        .unwrap()
+                        .roster_root
+                },
+                |r| r.roster_root(),
+            ),
+            epoch_floor,
+            message,
+            minimum_global_quorums: total_signers,
+            minimum_active_weight: total_weight,
+            min_key_idx: policies[0].shard_id,
+            max_key_idx: policies[shard_count - 1].shard_id,
         };
         let t_ver = Instant::now();
-        assert!(verify_succinct_subtree_aggregate(
-            root_vk, &params, &stmt, &decoded
+        assert!(verify_succinct_subtree_aggregate_against_roster_root(
+            root_vk,
+            &roster_stmt,
+            &decoded
         ));
         let ver_ms = t_ver.elapsed().as_secs_f64() * 1000.0;
         std::println!(
-            "SUBTREE_2LEVEL shards=4 signers=6 l1_rows={} l2_rows={} vk_bytes={} root_bytes={} setup_ms={setup_ms:.1} l1_prove_ms={l1_ms:.1} l2_prove_ms={l2_ms:.1} root_verify_ms={ver_ms:.2}",
+            "SUBTREE_2LEVEL sparse={sparse} shards={shard_count} signers={total_signers} l1_rows={} l2_rows={} vk_bytes={} root_bytes={} setup_ms={setup_ms:.1} l1_prove_ms={l1_ms:.1} l2_prove_ms={l2_ms:.1} root_verify_ms={ver_ms:.2}",
             l1_rows,
             l2_rel.stats().padded_rows,
             root_vk.to_bytes().len(),
@@ -5594,6 +6540,33 @@ mod tests {
         );
         assert!(ver_ms < 50.0, "root_verify_ms={ver_ms}");
 
+        for mutate in 0..6 {
+            let mut bad = roster_stmt;
+            match mutate {
+                0 => bad.roster_root[0] ^= 1,
+                1 => bad.min_key_idx += 1,
+                2 => bad.max_key_idx -= 1,
+                3 => bad.minimum_active_weight += 1,
+                4 => bad.epoch_floor += 1,
+                _ => bad.message = b"forged",
+            }
+            assert!(!verify_succinct_subtree_aggregate_against_roster_root(
+                root_vk, &bad, &decoded
+            ));
+        }
+        let mut bad = decoded.clone();
+        bad.total_active_weight += 1;
+        assert!(!verify_succinct_subtree_aggregate_against_roster_root(
+            root_vk,
+            &roster_stmt,
+            &bad
+        ));
+        if sparse {
+            return;
+        }
+        assert!(verify_succinct_subtree_aggregate(
+            root_vk, &params, &stmt, &decoded
+        ));
         // Tamper suite: every statement & proof mutation must reject!
         assert!(!verify_succinct_subtree_aggregate(
             root_vk,
@@ -5623,7 +6596,7 @@ mod tests {
             &root_agg
         ));
         let mut swapped_policies = policies.clone();
-        swapped_policies.swap(1, 2);
+        swapped_policies.swap(0, 1);
         assert!(!verify_succinct_subtree_aggregate(
             root_vk,
             &params,

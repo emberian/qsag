@@ -26,13 +26,15 @@ static STATE: Mutex<AdmissionState> = Mutex::new(AdmissionState {
     holders: alloc::vec::Vec::new(),
 });
 static READY: Condvar = Condvar::new();
-pub(crate) struct Permit;
+pub(crate) struct Permit {
+    owner: std::thread::ThreadId,
+}
 pub(crate) fn acquire() -> Permit {
     let tid = std::thread::current().id();
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, depth)) = state.holders.iter_mut().find(|(id, _)| *id == tid) {
         *depth += 1;
-        return Permit;
+        return Permit { owner: tid };
     }
     let limit = prover_parallel_jobs();
     while state.active_threads >= limit {
@@ -40,11 +42,12 @@ pub(crate) fn acquire() -> Permit {
     }
     state.active_threads += 1;
     state.holders.push((tid, 1));
-    Permit
+    Permit { owner: tid }
 }
 impl Drop for Permit {
     fn drop(&mut self) {
-        let tid = std::thread::current().id();
+        // A public PCS state can move to another thread together with its GPU lease.
+        let tid = self.owner;
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = state.holders.iter().position(|(id, _)| *id == tid) {
             if state.holders[pos].1 > 1 {
@@ -61,6 +64,14 @@ impl Drop for Permit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transferred_permit_releases_the_original_owner() {
+        let tid = std::thread::current().id();
+        let permit = acquire();
+        std::thread::spawn(move || drop(permit)).join().unwrap();
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!state.holders.iter().any(|(owner, _)| *owner == tid));
+    }
     #[test]
     fn admission_bounds_live_witnesses_and_releases_on_unwind() {
         use std::sync::atomic::{AtomicUsize, Ordering};
