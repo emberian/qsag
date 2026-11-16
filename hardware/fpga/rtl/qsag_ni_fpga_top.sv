@@ -18,7 +18,8 @@
 // Operations (X, Y are 64-bit lanes; Ext4 elements are 4 lanes in qsag limb order):
 //   0x01 P2_PERM      Y[0..11] = poseidon2_perm12(X[0..11])
 //   0x02 P2_JIVE      Y[0..3]  = weighted feed-forward node hash of X[0..11] = [l, r, t]
-//   0x03 CHAIN_CFG    tree key = X[0..2], expected top node = X[4..7]; arg0[0] clears DONE/OK
+//   0x03 CHAIN_CFG    tree key = X[0..2], expected top node = X[4..7] (skipped if arg0[1]);
+//                     arg0[0] clears DONE/OK
 //   0x04 CHAIN_START  slot arg0[4:0], arg1[5:0] sponge steps, leaf heap index ARG32,
 //                     initial state X[0..11]; the chain then runs in the background
 //   0x05 CHAIN_WAIT   completes when no chain is active; ok = every finished chain matched
@@ -31,6 +32,8 @@
 //   0x13 FOLD_ROUND   table[k] = table[2k] + X[0..3] * (table[2k+1] - table[2k]) over the
 //                     current length, which then halves; Y[0..3] = last entry written
 //   0x14 FOLD_SETLEN  log2 of the table length = arg0[5:0]
+//   0x15 FOLD_MULTI   arg0[3:0] = m (1..8) fold rounds back to back with challenges
+//                     X[4j..4j+3], j < m; if arg1[5:0] != 0 it first sets the table length
 //   0x20 KEC_LOAD     Keccak state = X[0..24]
 //   0x21 KEC_PERMUTE  state[0..16] ^= X[0..16] unless arg0[1]; permute, 12 rounds if arg0[0]
 //                     (TurboSHAKE256) else 24; Y[0..11] = state[0..11]
@@ -154,12 +157,14 @@ module qsag_ni_fpga_top #(
     logic         fold_start, fold_busy, fold_done, mac_valid, mac_done;
     logic [255:0] fold_res, mac_a, mac_b, mac_c, mac_y;
     logic [5:0]   fold_log2n_q;
+    logic [2:0]   fold_idx;
+    logic [3:0]   fold_left;
 
     qsag_ext4_mac_bfly #(.TAW(FOLD_TAW), .AW(AW), .BW(BW)) u_ext4 (
         .clk(clk), .rst(rst),
         .tw_en(stream_fire && stream_tbl), .tw_idx(stream_q[FOLD_TAW-1:0]),
         .tw_data(s_axis_tdata[255:0]),
-        .fold_start(fold_start), .fold_log2n(fold_log2n_q), .fold_r(x_q[3:0]),
+        .fold_start(fold_start), .fold_log2n(fold_log2n_q), .fold_r(x_q[{fold_idx, 2'b00} +: 4]),
         .fold_busy(fold_busy), .fold_done(fold_done), .fold_res(fold_res),
         .mac_valid(mac_valid), .mac_a(mac_a), .mac_b(mac_b), .mac_c(mac_c),
         .mac_done(mac_done), .mac_y(mac_y));
@@ -212,7 +217,7 @@ module qsag_ni_fpga_top #(
     // ------------------------------------------------------------------ operation FSM
     typedef enum logic [3:0] {
         O_IDLE, O_P2_OFFER, O_P2_WAIT, O_CH_START, O_CH_WAIT, O_CH_READ,
-        O_MAC, O_SC_SUM, O_SC_H, O_FOLD, O_KEC, O_GF, O_FIN
+        O_MAC, O_SC_SUM, O_SC_H, O_FOLD, O_FOLD_NEXT, O_KEC, O_GF, O_FIN
     } op_e;
     op_e        op_st;
     logic [1:0] sc_step;
@@ -314,8 +319,10 @@ module qsag_ni_fpga_top #(
                         case (s_axil_wdata[7:0])
                             8'h01, 8'h02: op_st <= O_P2_OFFER;
                             8'h03: begin
-                                tree_key_q <= x_q[2:0];
-                                expect_q   <= x_q[7:4];
+                                if (!s_axil_wdata[9]) begin
+                                    tree_key_q <= x_q[2:0];
+                                    expect_q   <= x_q[7:4];
+                                end
                                 eng_clr    <= s_axil_wdata[8];
                                 op_st      <= O_FIN;
                             end
@@ -337,7 +344,15 @@ module qsag_ni_fpga_top #(
                             8'h12: op_st <= O_SC_SUM;
                             8'h13: begin
                                 fold_start <= 1'b1;
+                                fold_idx   <= 3'd0;
+                                fold_left  <= 4'd1;
                                 op_st      <= O_FOLD;
+                            end
+                            8'h15: begin
+                                if (s_axil_wdata[21:16] != 6'd0) fold_log2n_q <= s_axil_wdata[21:16];
+                                fold_idx   <= 3'd0;
+                                fold_left  <= s_axil_wdata[11:8];
+                                op_st      <= O_FOLD_NEXT;
                             end
                             8'h14: begin
                                 fold_log2n_q <= s_axil_wdata[13:8];
@@ -423,8 +438,16 @@ module qsag_ni_fpga_top #(
                 end
                 O_FOLD: begin
                     if (fold_done) begin
-                        y_q[3:0] <= fold_res;
-                        op_st    <= O_FIN;
+                        y_q[3:0]  <= fold_res;
+                        fold_left <= fold_left - 4'd1;
+                        fold_idx  <= fold_idx + 3'd1;
+                        op_st     <= (fold_left == 4'd1) ? O_FIN : O_FOLD_NEXT;
+                    end
+                end
+                O_FOLD_NEXT: begin
+                    if (!fold_busy && !fold_start) begin
+                        fold_start <= 1'b1;
+                        op_st      <= O_FOLD;
                     end
                 end
                 O_KEC: begin
