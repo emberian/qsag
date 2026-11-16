@@ -1,28 +1,22 @@
-// QSAG-NI-180 GF(2^128) polynomial accumulator, modulus g(z) = z^128 + z^7 + z^2 + z + 1
-// (bit i of a word is the coefficient of z^i, as in qsag-asm).
+// Dregg-180 (QSAG-NI-180) GF(2^128) polynomial accumulator, g(z) = z^128 + z^7 + z^2 + z + 1.
 //
-//   acc <- (acc ^ in) * h        one Horner step of a polynomial MAC, 128/D clocks
-//
-// Digit-serial, most significant digit first: r <- r * z^D + h * digit, reduced each step.
-// D = 16 gives the 8-clock multiply; the chip uses D = 2 (64 clocks) to stay inside its area
-// budget, the multiply not being on any throughput-critical path.
+// Digit-serial Horner step: acc <- (acc ^ in) * h in 128/D clocks.
+// Uses clock-gated secret-cleared registers (qsag_ereg) to eliminate 256 recirculation muxes.
 `default_nettype none
 
-// One digit step: r * z^D + h * d  (mod g). Purely combinational; the unit proven in lec/.
 module qsag_gf128_step #(
     parameter int D = 4
 ) (
-    input  wire [127:0]  r,
-    input  wire [127:0]  h,
-    input  wire [D-1:0]  d,
-    output wire [127:0]  o
+    input  wire [127:0] r,
+    input  wire [127:0] h,
+    input  wire [D-1:0] d,
+    output wire [127:0] o
 );
     logic [127+D:0] t;
     logic [D+7:0]   f;
     always_comb begin
         t = {r, {D{1'b0}}};
         for (int i = 0; i < D; i++) if (d[i]) t = t ^ ({{D{1'b0}}, h} << i);
-        // fold the D overflow coefficients with z^128 = z^7 + z^2 + z + 1
         f = '0;
         for (int i = 0; i < D; i++) if (t[128+i]) f = f ^ ((D + 8)'(8'h87) << i);
     end
@@ -30,13 +24,13 @@ module qsag_gf128_step #(
 endmodule
 
 module qsag_gf128_clmul #(
-    parameter int D = 2
+    parameter int D = 4
 ) (
     input  wire          clk,
     input  wire          rst_n,   // control reset
     input  wire          srst_n,  // secret clear
     input  wire          clr,     // acc <- 0
-    input  wire          start,   // acc <- (acc ^ {in_hi, in_lo}) * h
+    input  wire          start,   // acc <- (acc ^ in) * h
     input  wire [127:0]  in,
     input  wire [127:0]  h,
     output wire          busy,
@@ -44,7 +38,7 @@ module qsag_gf128_clmul #(
     output wire [127:0]  acc
 );
     localparam int STEPS = 128 / D;
-    logic [127:0] x, r;
+    wire  [127:0] x, r;
     logic [7:0]   cnt;
     logic         run;
     wire  [127:0] step_o;
@@ -74,26 +68,18 @@ module qsag_gf128_clmul #(
         end
     end
 
-    always_ff @(posedge clk or negedge srst_n) begin
-        if (!srst_n) begin
-            x <= '0;
-            r <= '0;
-        end else if (clr) begin
-            r <= '0;
-        end else if (!run && start) begin
-            x <= r ^ in;
-            r <= '0;
-        end else if (run) begin
-            r <= step_o;
-            x <= {x[127-D:0], {D{1'b0}}};
-        end
-    end
+    wire         x_en = (!clr && !run && start) || (!clr && run);
+    wire [127:0] x_d  = (!run && start) ? (r ^ in) : {x[127-D:0], {D{1'b0}}};
+    wire         r_en = clr || (!run && start) || run;
+    wire [127:0] r_d  = (clr || (!run && start)) ? 128'd0 : step_o;
+
+    qsag_ereg #(.W(128)) u_x (.clk(clk), .rst_n(srst_n), .en(x_en), .d(x_d), .q(x));
+    qsag_ereg #(.W(128)) u_r (.clk(clk), .rst_n(srst_n), .en(r_en), .d(r_d), .q(r));
 endmodule
 
-// Bit-serial specification of the same field product, for the formal proofs only.
 module qsag_gf128_ref (
-    input  wire [127:0] a,
-    input  wire [127:0] b,
+    input  wire  [127:0] a,
+    input  wire  [127:0] b,
     output logic [127:0] p
 );
     logic [127:0] v;
