@@ -13,7 +13,10 @@
 
 use libfuzzer_sys::fuzz_target;
 use qsag_accel::CpuReferenceBackend;
-use qsag_addr::{HybridPinnedEnvelope, QsagAddress, decode_intent_128, encode_intent_128};
+use qsag_addr::{
+    HybridPinnedEnvelope, QsagAddress, decode_intent_128, decode_verified_intent_128,
+    encode_intent_128,
+};
 use qsag_core::fips205::{
     Fips205Params, SlhPublicKey, decode_slh_sig, slh_verify,
 };
@@ -124,10 +127,13 @@ fuzz_target!(init: {
         let wire = env.to_bytes().expect("valid HybridPinnedEnvelope must serialize");
         assert_eq!(wire.as_slice(), data);
     }
-    if let Ok(arr128) = <[u8; 128]>::try_from(data)
-        && let Some(intent) = decode_intent_128(&arr128)
-    {
-        assert_eq!(encode_intent_128(&intent), arr128);
+    if let Ok(arr128) = <[u8; 128]>::try_from(data) {
+        if let Some(intent) = decode_intent_128(&arr128) {
+            assert_eq!(encode_intent_128(&intent), arr128);
+        }
+        if let Some(v_intent) = decode_verified_intent_128(&arr128) {
+            assert_eq!(encode_intent_128(&v_intent), arr128);
+        }
     }
 
     // 2. `qsag-core`: FIPS 205 SLH-DSA public keys, SPKI DER, ADRS, and signature verification
