@@ -1,62 +1,74 @@
 // Compositional SMT-LIB2 Equivalence Wrappers for QSAG-NI Silicon (`0` Undecided Miters!).
-// Every arithmetic, carry-save, Karatsuba Ext4, Poseidon2 (M_4, M_E, M_I, Canopy FF),
-// GF(2^128) recursive Karatsuba CLMUL, 0x87 reducer, and Wiedemann T_7 basis isomorphism
+// Every arithmetic, carry-save, 2-level Tower Karatsuba Ext4, Poseidon2 (M_4, M_E, M_I, Canopy FF),
+// GF(2^128) recursive Karatsuba CLMUL, 0x87 reducer, and Cantor/Wiedemann T_7 ring isomorphism
 // sub-block has an exact `gold` vs `gate` miter AND a planted-fault `mut` wrapper.
 `default_nettype none
 `include "qsag_asic_gen_params.svh"
 
 // ============================================================================
-// 1. Goldilocks 64x64 Sliced Dadda Tree, CSA Fold, & Final Canonicalizers
+// 1. Goldilocks 64x64 4-Row Dadda Tree, CSA Fold, & Final Canonicalizers
 // ============================================================================
 
-// 1A. 64x8 partial-product slice: s + c == a * b
-module lec_mul_slice_gold (input wire [63:0] a, input wire [7:0] b, output wire [72:0] sum);
-  assign sum = {9'd0, a} * {65'd0, b};
+// 1A. 64x4 partial-product slice: s + c == a * b
+module lec_mul_slice_gold (input wire [63:0] a, input wire [3:0] b, output wire [68:0] sum);
+  assign sum = {5'd0, a} * {65'd0, b};
 endmodule
-module lec_mul_slice_gate (input wire [63:0] a, input wire [7:0] b, output wire [72:0] sum);
-  wire [71:0] s, c;
-  qsag_gl64_mul_slice64x8 u (.a(a), .b(b), .s(s), .c(c));
+module lec_mul_slice_gate (input wire [63:0] a, input wire [3:0] b, output wire [68:0] sum);
+  wire [67:0] s, c;
+  qsag_gl64_mul_slice64x4 u (.a(a), .b(b), .s(s), .c(c));
   assign sum = {1'b0, s} + {1'b0, c};
 endmodule
-module lec_mul_slice_mut (input wire [63:0] a, input wire [7:0] b, output wire [72:0] sum);
-  wire [71:0] s, c;
-  qsag_gl64_mul_slice64x8 u (.a(a), .b(b), .s(s), .c(c));
-  assign sum = ({1'b0, s} + {1'b0, c}) ^ {72'd0, a[63] & b[7]};
+module lec_mul_slice_mut (input wire [63:0] a, input wire [3:0] b, output wire [68:0] sum);
+  wire [67:0] s, c;
+  qsag_gl64_mul_slice64x4 u (.a(a), .b(b), .s(s), .c(c));
+  assign sum = ({1'b0, s} + {1'b0, c}) ^ {68'd0, a[63] & b[3]};
 endmodule
 
-// 1B. 8-slice Dadda combiner: (s + c) == sum_{k=0..7} ((sk + ck) << 8k) (masked to valid < 2^128 range)
-module lec_mul_comb8_gold (
-  input wire [71:0] s0, c0, s1, c1, s2, c2, s3, c3, s4, c4, s5, c5, s6, c6, s7, c7,
-  output wire [127:0] sum
+// 1B. Parameterized 4-row Dadda combiner levels L = 1..4:
+//   L=1: 68b + (68b << 4)  -> 72b
+//   L=2: 72b + (72b << 8)  -> 80b
+//   L=3: 80b + (80b << 16) -> 96b
+//   L=4: 96b + (96b << 32) -> 128b
+module lec_mul_comb_gold #(parameter int LVL = 1) (
+  input  wire [(LVL==1?68:(LVL==2?72:(LVL==3?80:96)))-1:0] s0, c0, s1, c1,
+  output wire [(LVL==1?72:(LVL==2?80:(LVL==3?96:128)))-1:0] sum
 );
-  wire [72:0] p0 = {1'b0,s0}+{1'b0,c0}, p1 = {1'b0,s1}+{1'b0,c1}, p2 = {1'b0,s2}+{1'b0,c2}, p3 = {1'b0,s3}+{1'b0,c3};
-  wire [72:0] p4 = {1'b0,s4}+{1'b0,c4}, p5 = {1'b0,s5}+{1'b0,c5}, p6 = {1'b0,s6}+{1'b0,c6}, p7 = {1'b0,s7}+{1'b0,c7};
-  wire valid = (p7[72:64] == 9'd0); // true for every 64b * 8b slice since (2^64-1)*(2^8-1) < 2^72
-  wire [128:0] tot = {56'd0,p0} + ({48'd0,p1}<<8) + ({40'd0,p2}<<16) + ({32'd0,p3}<<24)
-                   + ({24'd0,p4}<<32) + ({16'd0,p5}<<40) + ({8'd0,p6}<<48) + ({p7,56'd0});
-  assign sum = (valid && !tot[128]) ? tot[127:0] : 128'd0;
+  localparam int WIN  = (LVL==1) ? 68 : (LVL==2) ? 72 : (LVL==3) ? 80 : 96;
+  localparam int SH   = (LVL==1) ? 4  : (LVL==2) ? 8  : (LVL==3) ? 16 : 32;
+  localparam int WOUT = WIN + SH;
+  wire [WIN:0]  p0  = {1'b0, s0} + {1'b0, c0};
+  wire [WIN:0]  p1  = {1'b0, s1} + {1'b0, c1};
+  wire          ok  = (p1[WIN:WOUT-SH] == '0); // true for all partial-product subtree sums
+  wire [WOUT:0] tot = {{(WOUT-WIN){1'b0}}, p0} + ({{(WOUT-WIN){1'b0}}, p1} << SH);
+  assign sum = (ok && !tot[WOUT]) ? tot[WOUT-1:0] : '0;
 endmodule
-module lec_mul_comb8_gate (
-  input wire [71:0] s0, c0, s1, c1, s2, c2, s3, c3, s4, c4, s5, c5, s6, c6, s7, c7,
-  output wire [127:0] sum
+module lec_mul_comb_gate #(parameter int LVL = 1) (
+  input  wire [(LVL==1?68:(LVL==2?72:(LVL==3?80:96)))-1:0] s0, c0, s1, c1,
+  output wire [(LVL==1?72:(LVL==2?80:(LVL==3?96:128)))-1:0] sum
 );
-  wire [72:0] p0 = {1'b0,s0}+{1'b0,c0}, p1 = {1'b0,s1}+{1'b0,c1}, p2 = {1'b0,s2}+{1'b0,c2}, p3 = {1'b0,s3}+{1'b0,c3};
-  wire [72:0] p4 = {1'b0,s4}+{1'b0,c4}, p5 = {1'b0,s5}+{1'b0,c5}, p6 = {1'b0,s6}+{1'b0,c6}, p7 = {1'b0,s7}+{1'b0,c7};
-  wire valid = (p7[72:64] == 9'd0);
-  wire [128:0] tot = {56'd0,p0} + ({48'd0,p1}<<8) + ({40'd0,p2}<<16) + ({32'd0,p3}<<24)
-                   + ({24'd0,p4}<<32) + ({16'd0,p5}<<40) + ({8'd0,p6}<<48) + ({p7,56'd0});
-  wire [127:0] s, c;
-  qsag_gl64_mul_combine8 u (.*);
-  wire [128:0] g = {1'b0, s} + {1'b0, c};
-  assign sum = (valid && !tot[128]) ? g[127:0] : 128'd0;
+  localparam int WIN  = (LVL==1) ? 68 : (LVL==2) ? 72 : (LVL==3) ? 80 : 96;
+  localparam int SH   = (LVL==1) ? 4  : (LVL==2) ? 8  : (LVL==3) ? 16 : 32;
+  localparam int WOUT = WIN + SH;
+  wire [WIN:0]    p0  = {1'b0, s0} + {1'b0, c0};
+  wire [WIN:0]    p1  = {1'b0, s1} + {1'b0, c1};
+  wire            ok  = (p1[WIN:WOUT-SH] == '0);
+  wire [WOUT:0]   tot = {{(WOUT-WIN){1'b0}}, p0} + ({{(WOUT-WIN){1'b0}}, p1} << SH);
+  wire [WOUT-1:0] s, c;
+  if      (LVL == 1) begin : g1 qsag_gl64_mul_comb_l1 u (.*); end
+  else if (LVL == 2) begin : g2 qsag_gl64_mul_comb_l2 u (.*); end
+  else if (LVL == 3) begin : g3 qsag_gl64_mul_comb_l3 u (.*); end
+  else               begin : g4 qsag_gl64_mul_comb_l4 u (.*); end
+  wire [WOUT:0] g = {1'b0, s} + {1'b0, c};
+  assign sum = (ok && !tot[WOUT]) ? g[WOUT-1:0] : '0;
 endmodule
-module lec_mul_comb8_mut (
-  input wire [71:0] s0, c0, s1, c1, s2, c2, s3, c3, s4, c4, s5, c5, s6, c6, s7, c7,
-  output wire [127:0] sum
+module lec_mul_comb_mut #(parameter int LVL = 1) (
+  input  wire [(LVL==1?68:(LVL==2?72:(LVL==3?80:96)))-1:0] s0, c0, s1, c1,
+  output wire [(LVL==1?72:(LVL==2?80:(LVL==3?96:128)))-1:0] sum
 );
-  wire [127:0] g;
-  lec_mul_comb8_gate u (.*, .sum(g));
-  assign sum = g ^ {127'd0, s0[0]};
+  localparam int WOUT = (LVL==1) ? 72 : (LVL==2) ? 80 : (LVL==3) ? 96 : 128;
+  wire [WOUT-1:0] g;
+  lec_mul_comb_gate #(.LVL(LVL)) u (.*, .sum(g));
+  assign sum = g ^ {{(WOUT-1){1'b0}}, s0[0]};
 endmodule
 
 // 1C. 128-bit -> canonical reducer (against Obend emitted qsag_ni_gl_reduce128_spec)
@@ -75,31 +87,37 @@ module lec_reduce_mut (input wire [127:0] v, output wire [63:0] r);
   assign r = g ^ {46'b0, v == 128'h0123_4567_89AB_CDEF_FEDC_BA98_7654_3210, 17'b0};
 endmodule
 
-// 1D. Two-row CSA fold pair `qsag_gl64_fold_pair` (4 x W1 bits -> canonical == glAdd of two halves)
+// 1D. Two-row CSA fold pair `qsag_gl64_fold_pair`:
+// Verifies BOTH (x + y < NJ * P) AND ((x + y) mod P == (sx + sy + cx + cy) mod P)!
 module lec_fold_pair_gold (
   input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
-  output wire [63:0] r
+  output wire [64:0] out
 );
-  wire [63:0] rs, rc;
-  qsag_gl64_final_seq #(.W(`QSAG_FOLD_W1)) u_s (.x(sx), .y(sy), .r(rs));
-  qsag_gl64_final_seq #(.W(`QSAG_FOLD_W1)) u_c (.x(cx), .y(cy), .r(rc));
-  qsag_gl64_addsub u_a (.a(rs), .b(rc), .sub(1'b0), .r(r));
+  wire [`QSAG_FOLD_W1+1:0] s0 = {2'd0, sx} + {2'd0, sy};
+  wire [`QSAG_FOLD_W1+1:0] s1 = {2'd0, cx} + {2'd0, cy};
+  wire [63:0] r;
+  qsag_gl64_final_seq #(.W(`QSAG_FOLD_W1 + 2)) u (.x(s0), .y(s1), .r(r));
+  assign out = {1'b1, r};
 endmodule
 module lec_fold_pair_gate (
   input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
-  output wire [63:0] r
+  output wire [64:0] out
 );
   wire [`QSAG_FOLD_W-1:0] x, y;
   qsag_gl64_fold_pair u_fp (.sx(sx), .sy(sy), .cx(cx), .cy(cy), .x(x), .y(y));
-  qsag_gl64_final_par #(.W(`QSAG_FOLD_W), .NJ(`QSAG_FOLD_NJ)) u_p (.x(x), .y(y), .r(r));
+  wire [`QSAG_FOLD_W:0] tot = {1'b0, x} + {1'b0, y};
+  wire bound_ok = tot < (`QSAG_FOLD_W+1)'(`QSAG_FOLD_NJ) * (`QSAG_FOLD_W+1)'(64'hFFFF_FFFF_0000_0001);
+  wire [63:0] r;
+  qsag_gl64_final_seq #(.W(`QSAG_FOLD_W)) u_seq (.x(x), .y(y), .r(r));
+  assign out = {bound_ok, r};
 endmodule
 module lec_fold_pair_mut (
   input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
-  output wire [63:0] r
+  output wire [64:0] out
 );
-  wire [`QSAG_FOLD_W-1:0] x, y;
-  qsag_gl64_fold_pair u_fp (.sx(sx), .sy(sy), .cx(cx), .cy(cy), .x(x), .y(y));
-  qsag_gl64_final_par #(.W(`QSAG_FOLD_W), .NJ(`QSAG_FOLD_NJ - 1)) u_p (.x(x), .y(y), .r(r));
+  wire [64:0] g;
+  lec_fold_pair_gate u (.*, .out(g));
+  assign out = g ^ 65'd1;
 endmodule
 
 // 1E. Parallel compound final adder vs chained final adder
@@ -137,7 +155,7 @@ module lec_step_mut (input wire [70:0] t, input wire [63:0] x, output wire [63:0
 endmodule
 
 // ============================================================================
-// 2. 9-Product Tower Karatsuba `GoldilocksExt4` Sub-Blocks
+// 2. 2-Level 9-Product Tower Karatsuba `GoldilocksExt4` Sub-Blocks
 // ============================================================================
 module lec_kara_in_gold (input wire [255:0] a, output wire [575:0] q);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
@@ -151,9 +169,7 @@ module lec_kara_in_gold (input wire [255:0] a, output wire [575:0] q);
   qsag_gl64_final_seq #(.W(66)) u02 (.x({2'd0,c0}+{2'd0,c2}), .y(66'd0), .r(s02));
   qsag_gl64_final_seq #(.W(66)) u13 (.x({2'd0,c1}+{2'd0,c3}), .y(66'd0), .r(s13));
   qsag_gl64_final_seq #(.W(66)) ual (.x({2'd0,c0}+{2'd0,c1}+{2'd0,c2}+{2'd0,c3}), .y(66'd0), .r(sall));
-  wire [575:0] raw;
-  qsag_ext4_kara_inputs u_dut (.a({c3,c2,c1,c0}), .q(raw));
-  assign q = {sall, s13, s02, s23, c3, c2, s01, c1, c0} ^ (raw ^ raw);
+  assign q = {sall, s13, s02, s23, c3, c2, s01, c1, c0};
 endmodule
 module lec_kara_in_gate (input wire [255:0] a, output wire [575:0] q);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
@@ -169,182 +185,189 @@ module lec_kara_in_mut (input wire [255:0] a, output wire [575:0] q);
   assign q = g ^ {575'd0, 1'b1};
 endmodule
 
-// Full 9-product Karatsuba combiner against Obend emitted `qsag_ni_ext4_kara_comb_spec`!
-// To keep input width <= 384b per SMT query, verify each output limb j = 0..3 with only its active inputs!
-module lec_kara_c0_gold (input wire [63:0] p0, p1, p3, p4, p5, z0, output wire [63:0] r);
+// Level-1 F_{p^2} Karatsuba combiners: re = m0 + 7*m1, im = m2 - m0 - m1
+module lec_fp2_re_gold (input wire [63:0] m0, m1, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4, cp5=(p5>=P)?p5-P:p5, cz0=(z0>=P)?z0-P:z0;
-  wire [63:0] d1, d2, d3;
-  qsag_ni_ext4_kara_comb_spec u (.clk(1'b0), .rst(1'b0),
-    .p0(cp0), .p1(cp1), .p2(64'd0), .p3(cp3), .p4(cp4), .p5(cp5), .p6(64'd0), .p7(64'd0), .p8(64'd0),
-    .z0(cz0), .z1(64'd0), .z2(64'd0), .z3(64'd0), .r0(r), .r1(d1), .r2(d2), .r3(d3));
+  wire [63:0] c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
+  wire [68:0] sum = {5'd0, c0} + ({2'd0, c1, 3'd0} - {5'd0, c1});
+  qsag_gl64_final_seq #(.W(69)) u (.x(sum), .y(69'd0), .r(r));
 endmodule
-module lec_kara_c0_gate (input wire [63:0] p0, p1, p3, p4, p5, z0, output wire [63:0] r);
+module lec_fp2_re_gate (input wire [63:0] m0, m1, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4, cp5=(p5>=P)?p5-P:p5, cz0=(z0>=P)?z0-P:z0;
-  qsag_ext4_kara_r0 u (.p0(cp0), .p1(cp1), .p3(cp3), .p4(cp4), .p5(cp5), .z0(cz0), .r(r));
+  wire [63:0] c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
+  qsag_fp2_kara_re u (.m0(c0), .m1(c1), .r(r));
 endmodule
-module lec_kara_c0_mut (input wire [63:0] p0, p1, p3, p4, p5, z0, output wire [63:0] r);
+module lec_fp2_re_mut (input wire [63:0] m0, m1, output wire [63:0] r);
   wire [63:0] g;
-  lec_kara_c0_gate u (.*, .r(g));
+  lec_fp2_re_gate u (.*, .r(g));
   assign r = g ^ 64'd1;
 endmodule
 
-module lec_kara_c1_gold (input wire [63:0] p0, p1, p2, p3, p4, z1, output wire [63:0] r);
+module lec_fp2_im_gold (input wire [63:0] m2, m0, m1, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp2=(p2>=P)?p2-P:p2, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4, cz1=(z1>=P)?z1-P:z1;
-  wire [63:0] d0, d2, d3;
-  qsag_ni_ext4_kara_comb_spec u (.clk(1'b0), .rst(1'b0),
-    .p0(cp0), .p1(cp1), .p2(cp2), .p3(cp3), .p4(cp4), .p5(64'd0), .p6(64'd0), .p7(64'd0), .p8(64'd0),
-    .z0(64'd0), .z1(cz1), .z2(64'd0), .z3(64'd0), .r0(d0), .r1(r), .r2(d2), .r3(d3));
+  wire [63:0] c2=(m2>=P)?m2-P:m2, c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
+  wire [66:0] sum = {3'd0, c2} + {2'd0, P, 1'b0} - {3'd0, c0} - {3'd0, c1};
+  qsag_gl64_final_seq #(.W(67)) u (.x(sum), .y(67'd0), .r(r));
 endmodule
-module lec_kara_c1_gate (input wire [63:0] p0, p1, p2, p3, p4, z1, output wire [63:0] r);
+module lec_fp2_im_gate (input wire [63:0] m2, m0, m1, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp2=(p2>=P)?p2-P:p2, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4, cz1=(z1>=P)?z1-P:z1;
-  qsag_ext4_kara_r1 u (.p0(cp0), .p1(cp1), .p2(cp2), .p3(cp3), .p4(cp4), .z1(cz1), .r(r));
+  wire [63:0] c2=(m2>=P)?m2-P:m2, c0=(m0>=P)?m0-P:m0, c1=(m1>=P)?m1-P:m1;
+  qsag_fp2_kara_im u (.m2(c2), .m0(c0), .m1(c1), .r(r));
 endmodule
-module lec_kara_c1_mut (input wire [63:0] p0, p1, p2, p3, p4, z1, output wire [63:0] r);
+module lec_fp2_im_mut (input wire [63:0] m2, m0, m1, output wire [63:0] r);
   wire [63:0] g;
-  lec_kara_c1_gate u (.*, .r(g));
+  lec_fp2_im_gate u (.*, .r(g));
   assign r = g ^ 64'd1;
 endmodule
 
-module lec_kara_c2a_gold (input wire [63:0] p0, p1, p3, p4, output wire [63:0] r);
+// Level-2 Outer Ext4 Karatsuba combiners: r0..r3
+module lec_kara_r0_gold (input wire [63:0] re_a, im_b, z0, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4;
-  wire [63:0] d0, d1, d3;
-  qsag_ni_ext4_kara_comb_spec u (.clk(1'b0), .rst(1'b0),
-    .p0(cp0), .p1(cp1), .p2(64'd0), .p3(cp3), .p4(cp4), .p5(64'd0), .p6(64'd0), .p7(64'd0), .p8(64'd0),
-    .z0(64'd0), .z1(64'd0), .z2(64'd0), .z3(64'd0), .r0(d0), .r1(d1), .r2(r), .r3(d3));
+  wire [63:0] ca=(re_a>=P)?re_a-P:re_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z0>=P)?z0-P:z0;
+  wire [68:0] sum = {5'd0, ca} + ({2'd0, cb, 3'd0} - {5'd0, cb}) + {5'd0, cz};
+  qsag_gl64_final_seq #(.W(69)) u (.x(sum), .y(69'd0), .r(r));
 endmodule
-module lec_kara_c2a_gate (input wire [63:0] p0, p1, p3, p4, output wire [63:0] r);
+module lec_kara_r0_gate (input wire [63:0] re_a, im_b, z0, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4;
-  qsag_ext4_kara_r2a u (.p0(cp0), .p1(cp1), .p3(cp3), .p4(cp4), .r(r));
+  wire [63:0] ca=(re_a>=P)?re_a-P:re_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z0>=P)?z0-P:z0;
+  qsag_ext4_kara_r0 u (.re_a(ca), .im_b(cb), .z0(cz), .r(r));
 endmodule
-module lec_kara_c2a_mut (input wire [63:0] p0, p1, p3, p4, output wire [63:0] r);
+module lec_kara_r0_mut (input wire [63:0] re_a, im_b, z0, output wire [63:0] r);
   wire [63:0] g;
-  lec_kara_c2a_gate u (.*, .r(g));
+  lec_kara_r0_gate u (.*, .r(g));
   assign r = g ^ 64'd1;
 endmodule
 
-module lec_kara_c2b_gold (input wire [63:0] t, p6, p7, z2, output wire [63:0] r);
+module lec_kara_r1_gold (input wire [63:0] im_a, re_b, z1, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ct=(t>=P)?t-P:t, cp6=(p6>=P)?p6-P:p6, cp7=(p7>=P)?p7-P:p7, cz2=(z2>=P)?z2-P:z2;
-  wire [69:0] sum = {6'd0, ct} + {6'd0, cp6} + ({3'd0, cp7, 3'd0} - {6'd0, cp7}) + {6'd0, cz2};
-  qsag_gl64_final_seq #(.W(70)) u (.x(sum), .y(70'd0), .r(r));
+  wire [63:0] ca=(im_a>=P)?im_a-P:im_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z1>=P)?z1-P:z1;
+  wire [66:0] sum = {3'd0, ca} + {3'd0, cb} + {3'd0, cz};
+  qsag_gl64_final_seq #(.W(67)) u (.x(sum), .y(67'd0), .r(r));
 endmodule
-module lec_kara_c2b_gate (input wire [63:0] t, p6, p7, z2, output wire [63:0] r);
+module lec_kara_r1_gate (input wire [63:0] im_a, re_b, z1, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ct=(t>=P)?t-P:t, cp6=(p6>=P)?p6-P:p6, cp7=(p7>=P)?p7-P:p7, cz2=(z2>=P)?z2-P:z2;
-  qsag_ext4_kara_r2b u (.t(ct), .p6(cp6), .p7(cp7), .z2(cz2), .r(r));
+  wire [63:0] ca=(im_a>=P)?im_a-P:im_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z1>=P)?z1-P:z1;
+  qsag_ext4_kara_r1 u (.im_a(ca), .re_b(cb), .z1(cz), .r(r));
 endmodule
-module lec_kara_c2b_mut (input wire [63:0] t, p6, p7, z2, output wire [63:0] r);
+module lec_kara_r1_mut (input wire [63:0] im_a, re_b, z1, output wire [63:0] r);
   wire [63:0] g;
-  lec_kara_c2b_gate u (.*, .r(g));
+  lec_kara_r1_gate u (.*, .r(g));
   assign r = g ^ 64'd1;
 endmodule
 
-module lec_kara_c3a_gold (input wire [63:0] p0, p1, p2, p3, p4, p5, output wire [63:0] r);
+module lec_kara_r2_gold (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp2=(p2>=P)?p2-P:p2, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4, cp5=(p5>=P)?p5-P:p5;
-  wire [63:0] d0, d1, d2;
-  qsag_ni_ext4_kara_comb_spec u (.clk(1'b0), .rst(1'b0),
-    .p0(cp0), .p1(cp1), .p2(cp2), .p3(cp3), .p4(cp4), .p5(cp5), .p6(64'd0), .p7(64'd0), .p8(64'd0),
-    .z0(64'd0), .z1(64'd0), .z2(64'd0), .z3(64'd0), .r0(d0), .r1(d1), .r2(d2), .r3(r));
+  wire [63:0] cm=(re_m>=P)?re_m-P:re_m, ca=(re_a>=P)?re_a-P:re_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z2>=P)?z2-P:z2;
+  wire [67:0] sum = {4'd0, cm} + {3'd0, P, 1'b0} - {4'd0, ca} - {4'd0, cb} + {4'd0, cz};
+  qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
 endmodule
-module lec_kara_c3a_gate (input wire [63:0] p0, p1, p2, p3, p4, p5, output wire [63:0] r);
+module lec_kara_r2_gate (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cp0=(p0>=P)?p0-P:p0, cp1=(p1>=P)?p1-P:p1, cp2=(p2>=P)?p2-P:p2, cp3=(p3>=P)?p3-P:p3, cp4=(p4>=P)?p4-P:p4, cp5=(p5>=P)?p5-P:p5;
-  qsag_ext4_kara_r3a u (.p0(cp0), .p1(cp1), .p2(cp2), .p3(cp3), .p4(cp4), .p5(cp5), .r(r));
+  wire [63:0] cm=(re_m>=P)?re_m-P:re_m, ca=(re_a>=P)?re_a-P:re_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z2>=P)?z2-P:z2;
+  qsag_ext4_kara_r2 u (.re_m(cm), .re_a(ca), .re_b(cb), .z2(cz), .r(r));
 endmodule
-module lec_kara_c3a_mut (input wire [63:0] p0, p1, p2, p3, p4, p5, output wire [63:0] r);
+module lec_kara_r2_mut (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
   wire [63:0] g;
-  lec_kara_c3a_gate u (.*, .r(g));
+  lec_kara_r2_gate u (.*, .r(g));
   assign r = g ^ 64'd1;
 endmodule
 
-module lec_kara_c3b_gold (input wire [63:0] t, p6, p7, p8, z3, output wire [63:0] r);
+module lec_kara_r3_gold (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ct=(t>=P)?t-P:t, cp6=(p6>=P)?p6-P:p6, cp7=(p7>=P)?p7-P:p7, cp8=(p8>=P)?p8-P:p8, cz3=(z3>=P)?z3-P:z3;
-  wire [63:0] s1, s2, s3;
-  qsag_gl64_addsub u1 (.a(ct), .b(cp6), .sub(1'b1), .r(s1));
-  qsag_gl64_addsub u2 (.a(s1), .b(cp7), .sub(1'b1), .r(s2));
-  qsag_gl64_addsub u3 (.a(s2), .b(cp8), .sub(1'b0), .r(s3));
-  qsag_gl64_addsub u4 (.a(s3), .b(cz3), .sub(1'b0), .r(r));
+  wire [63:0] cm=(im_m>=P)?im_m-P:im_m, ca=(im_a>=P)?im_a-P:im_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z3>=P)?z3-P:z3;
+  wire [67:0] sum = {4'd0, cm} + {3'd0, P, 1'b0} - {4'd0, ca} - {4'd0, cb} + {4'd0, cz};
+  qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
 endmodule
-module lec_kara_c3b_gate (input wire [63:0] t, p6, p7, p8, z3, output wire [63:0] r);
+module lec_kara_r3_gate (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] ct=(t>=P)?t-P:t, cp6=(p6>=P)?p6-P:p6, cp7=(p7>=P)?p7-P:p7, cp8=(p8>=P)?p8-P:p8, cz3=(z3>=P)?z3-P:z3;
-  qsag_ext4_kara_r3b u (.t(ct), .p6(cp6), .p7(cp7), .p8(cp8), .z3(cz3), .r(r));
+  wire [63:0] cm=(im_m>=P)?im_m-P:im_m, ca=(im_a>=P)?im_a-P:im_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z3>=P)?z3-P:z3;
+  qsag_ext4_kara_r3 u (.im_m(cm), .im_a(ca), .im_b(cb), .z3(cz), .r(r));
 endmodule
-module lec_kara_c3b_mut (input wire [63:0] t, p6, p7, p8, z3, output wire [63:0] r);
+module lec_kara_r3_mut (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
   wire [63:0] g;
-  lec_kara_c3b_gate u (.*, .r(g));
+  lec_kara_r3_gate u (.*, .r(g));
   assign r = g ^ 64'd1;
 endmodule
 
 // ============================================================================
-// 3. Poseidon2 `M_4`, `M_E` Column, `sum6`, `M_I` Lanes 0..11, & Canopy FF
+// 3. Poseidon2 `csa3`, `csa4`, `M_4` Lane, `M_E` Col Lane, `sum4`, `M_I` Lanes 0..11, & Canopy FF
 // ============================================================================
-module lec_m4_gold (input wire [255:0] b, output wire [255:0] y);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0=(b[63:0]>=P)?b[63:0]-P:b[63:0], c1=(b[127:64]>=P)?b[127:64]-P:b[127:64];
-  wire [63:0] c2=(b[191:128]>=P)?b[191:128]-P:b[191:128], c3=(b[255:192]>=P)?b[255:192]-P:b[255:192];
-  qsag_ni_p2_m4_spec u (.clk(1'b0), .rst(1'b0), .b0(c0), .b1(c1), .b2(c2), .b3(c3),
-    .y0(y[63:0]), .y1(y[127:64]), .y2(y[191:128]), .y3(y[255:192]));
+module lec_csa3_gold (input wire [63:0] a0, a1, a2, output wire [66:0] sum);
+  assign sum = {3'd0, a0} + {3'd0, a1} + {3'd0, a2};
 endmodule
-module lec_m4_gate (input wire [255:0] b, output wire [255:0] y);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0=(b[63:0]>=P)?b[63:0]-P:b[63:0], c1=(b[127:64]>=P)?b[127:64]-P:b[127:64];
-  wire [63:0] c2=(b[191:128]>=P)?b[191:128]-P:b[191:128], c3=(b[255:192]>=P)?b[255:192]-P:b[255:192];
-  qsag_p2_m4 u (.b({c3,c2,c1,c0}), .y(y));
+module lec_csa3_gate (input wire [63:0] a0, a1, a2, output wire [66:0] sum);
+  wire [65:0] sx, sy;
+  qsag_gl64_csa3 u (.a0(a0), .a1(a1), .a2(a2), .sx(sx), .sy(sy));
+  assign sum = {1'b0, sx} + {1'b0, sy};
 endmodule
-module lec_m4_mut (input wire [255:0] b, output wire [255:0] y);
-  wire [255:0] g;
-  lec_m4_gate u (.b({b[255:128], b[63:0], b[127:64]}), .y(g));
-  assign y = g;
+module lec_csa3_mut (input wire [63:0] a0, a1, a2, output wire [66:0] sum);
+  wire [66:0] g;
+  lec_csa3_gate u (.*, .sum(g));
+  assign sum = g ^ 67'd1;
 endmodule
 
-module lec_me_col_gold (input wire [63:0] y0, y1, y2, rc0, rc1, rc2, output wire [191:0] o);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cy0=(y0>=P)?y0-P:y0, cy1=(y1>=P)?y1-P:y1, cy2=(y2>=P)?y2-P:y2;
-  wire [63:0] cr0=(rc0>=P)?rc0-P:rc0, cr1=(rc1>=P)?rc1-P:rc1, cr2=(rc2>=P)?rc2-P:rc2;
-  qsag_ni_p2_me_col_spec u (.clk(1'b0), .rst(1'b0), .y0(cy0), .y1(cy1), .y2(cy2),
-    .rc0(cr0), .rc1(cr1), .rc2(cr2), .o0(o[63:0]), .o1(o[127:64]), .o2(o[191:128]));
+module lec_csa4_gold (input wire [63:0] a0, a1, a2, a3, output wire [66:0] sum);
+  assign sum = {3'd0, a0} + {3'd0, a1} + {3'd0, a2} + {3'd0, a3};
 endmodule
-module lec_me_col_gate (input wire [63:0] y0, y1, y2, rc0, rc1, rc2, output wire [191:0] o);
-  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] cy0=(y0>=P)?y0-P:y0, cy1=(y1>=P)?y1-P:y1, cy2=(y2>=P)?y2-P:y2;
-  wire [63:0] cr0=(rc0>=P)?rc0-P:rc0, cr1=(rc1>=P)?rc1-P:rc1, cr2=(rc2>=P)?rc2-P:rc2;
-  qsag_p2_me_col u (.y0(cy0), .y1(cy1), .y2(cy2), .rc0(cr0), .rc1(cr1), .rc2(cr2),
-    .o0(o[63:0]), .o1(o[127:64]), .o2(o[191:128]));
+module lec_csa4_gate (input wire [63:0] a0, a1, a2, a3, output wire [66:0] sum);
+  wire [65:0] sx, sy;
+  qsag_gl64_csa4 u (.a0(a0), .a1(a1), .a2(a2), .a3(a3), .sx(sx), .sy(sy));
+  assign sum = {1'b0, sx} + {1'b0, sy};
 endmodule
-module lec_me_col_mut (input wire [63:0] y0, y1, y2, rc0, rc1, rc2, output wire [191:0] o);
-  wire [191:0] g;
-  lec_me_col_gate u (.y0(y1), .y1(y0), .y2(y2), .rc0(rc0), .rc1(rc1), .rc2(rc2), .o(g));
-  assign o = g;
+module lec_csa4_mut (input wire [63:0] a0, a1, a2, a3, output wire [66:0] sum);
+  wire [66:0] g;
+  lec_csa4_gate u (.*, .sum(g));
+  assign sum = g ^ 67'd1;
 endmodule
 
-module lec_sum6_gold (input wire [63:0] a0, a1, a2, a3, a4, a5, output wire [63:0] r);
+module lec_m4_lane_gold (input wire [65:0] sx, sy, input wire [63:0] bi, bj, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0=(a0>=P)?a0-P:a0, c1=(a1>=P)?a1-P:a1, c2=(a2>=P)?a2-P:a2;
-  wire [63:0] c3=(a3>=P)?a3-P:a3, c4=(a4>=P)?a4-P:a4, c5=(a5>=P)?a5-P:a5;
-  qsag_ni_gl_sum6_spec u (.clk(1'b0), .rst(1'b0), .a0(c0), .a1(c1), .a2(c2), .a3(c3), .a4(c4), .a5(c5), .r(r));
+  wire [63:0] cbi=(bi>=P)?bi-P:bi, cbj=(bj>=P)?bj-P:bj;
+  wire [67:0] sum = {2'd0, sx} + {2'd0, sy} + {4'd0, cbi} + {3'd0, cbj, 1'b0};
+  qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
 endmodule
-module lec_sum6_gate (input wire [63:0] a0, a1, a2, a3, a4, a5, output wire [63:0] r);
+module lec_m4_lane_gate (input wire [65:0] sx, sy, input wire [63:0] bi, bj, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
-  wire [63:0] c0=(a0>=P)?a0-P:a0, c1=(a1>=P)?a1-P:a1, c2=(a2>=P)?a2-P:a2;
-  wire [63:0] c3=(a3>=P)?a3-P:a3, c4=(a4>=P)?a4-P:a4, c5=(a5>=P)?a5-P:a5;
-  qsag_gl64_sum6 u (.a0(c0), .a1(c1), .a2(c2), .a3(c3), .a4(c4), .a5(c5), .r(r));
+  wire [63:0] cbi=(bi>=P)?bi-P:bi, cbj=(bj>=P)?bj-P:bj;
+  qsag_p2_m4_lane u (.sx(sx), .sy(sy), .bi(cbi), .bj(cbj), .r(r));
 endmodule
-module lec_sum6_mut (input wire [63:0] a0, a1, a2, a3, a4, a5, output wire [63:0] r);
+module lec_m4_lane_mut (input wire [65:0] sx, sy, input wire [63:0] bi, bj, output wire [63:0] r);
   wire [63:0] g;
-  lec_sum6_gate u (.*, .r(g));
+  lec_m4_lane_gate u (.*, .r(g));
   assign r = g ^ 64'd1;
 endmodule
 
-// Parameterized wrapper across all 12 M_I lanes (each has <= 4 64b inputs = 256b -> <1s SMT!)
+module lec_me_col_lane_gold (input wire [65:0] sx, sy, input wire [63:0] yb, rcb, output wire [63:0] r);
+  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
+  wire [63:0] cyb=(yb>=P)?yb-P:yb, crc=(rcb>=P)?rcb-P:rcb;
+  wire [67:0] sum = {2'd0, sx} + {2'd0, sy} + {4'd0, cyb} + {4'd0, crc};
+  qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
+endmodule
+module lec_me_col_lane_gate (input wire [65:0] sx, sy, input wire [63:0] yb, rcb, output wire [63:0] r);
+  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
+  wire [63:0] cyb=(yb>=P)?yb-P:yb, crc=(rcb>=P)?rcb-P:rcb;
+  qsag_p2_me_col_lane u (.sx(sx), .sy(sy), .yb(cyb), .rcb(crc), .r(r));
+endmodule
+module lec_me_col_lane_mut (input wire [65:0] sx, sy, input wire [63:0] yb, rcb, output wire [63:0] r);
+  wire [63:0] g;
+  lec_me_col_lane_gate u (.*, .r(g));
+  assign r = g ^ 64'd1;
+endmodule
+
+module lec_sum4_csa_gold (input wire [65:0] sx0, sy0, sx1, sy1, output wire [63:0] r);
+  wire [67:0] sum = {2'd0, sx0} + {2'd0, sy0} + {2'd0, sx1} + {2'd0, sy1};
+  qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
+endmodule
+module lec_sum4_csa_gate (input wire [65:0] sx0, sy0, sx1, sy1, output wire [63:0] r);
+  qsag_gl64_sum4_csa u (.sx0(sx0), .sy0(sy0), .sx1(sx1), .sy1(sy1), .r(r));
+endmodule
+module lec_sum4_csa_mut (input wire [65:0] sx0, sy0, sx1, sy1, output wire [63:0] r);
+  wire [63:0] g;
+  lec_sum4_csa_gate u (.*, .r(g));
+  assign r = g ^ 64'd1;
+endmodule
+
+// Parameterized wrapper across ALL 12 M_I lanes (each <= 4 64b inputs -> <2s Bitwuzla!)
 module lec_mi_lane_gold #(parameter int LANE = 0) (
   input wire [63:0] x0, xl, s_tail, rcl,
   output wire [63:0] y
@@ -352,22 +375,15 @@ module lec_mi_lane_gold #(parameter int LANE = 0) (
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
   wire [63:0] cx0=(x0>=P)?x0-P:x0, cxl=(xl>=P)?xl-P:xl, cst=(s_tail>=P)?s_tail-P:s_tail, crc=(rcl>=P)?rcl-P:rcl;
   if (LANE == 0) begin : g_l0
-    // Connect into Obend `qsag_ni_p2_mi_spec` with x1 = cst, x2..11 = 0, rc0 = crc!
-    wire [767:0] oy;
-    qsag_ni_p2_mi_spec u (.clk(1'b0), .rst(1'b0),
-      .x0(cx0), .x1(cst), .x2(64'd0), .x3(64'd0), .x4(64'd0), .x5(64'd0),
-      .x6(64'd0), .x7(64'd0), .x8(64'd0), .x9(64'd0), .x10(64'd0), .x11(64'd0),
-      .rc0(crc), .rc1(64'd0), .rc2(64'd0), .rc3(64'd0), .rc4(64'd0), .rc5(64'd0),
-      .rc6(64'd0), .rc7(64'd0), .rc8(64'd0), .rc9(64'd0), .rc10(64'd0), .rc11(64'd0),
-      .y0(oy[63:0]), .y1(oy[127:64]), .y2(oy[191:128]), .y3(oy[255:192]), .y4(oy[319:256]), .y5(oy[383:320]),
-      .y6(oy[447:384]), .y7(oy[511:448]), .y8(oy[575:512]), .y9(oy[639:576]), .y10(oy[703:640]), .y11(oy[767:704]));
-    assign y = oy[63:0] ^ (cxl ^ cxl);
+    wire [71:0] sum = {8'd0, cst} + {8'd0, crc} + {8'd0, cx0} + ({2'd0, P, 6'd0} - {2'd0, cx0, 6'd0});
+    wire [63:0] r0;
+    qsag_gl64_final_seq #(.W(72)) u (.x(sum), .y(72'd0), .r(r0));
+    assign y = r0 ^ (cxl ^ cxl);
   end else begin : g_lp
     wire [79:0] sum = {16'd0, cst} + {16'd0, crc} + {16'd0, cx0} + ({16'd0, cxl} << (LANE - 1));
     qsag_gl64_final_seq #(.W(80)) u (.x(sum), .y(80'd0), .r(y));
   end
 endmodule
-
 module lec_mi_lane_gate #(parameter int LANE = 0) (
   input wire [63:0] x0, xl, s_tail, rcl,
   output wire [63:0] y
@@ -387,7 +403,6 @@ module lec_mi_lane_gate #(parameter int LANE = 0) (
   else if (LANE == 10) begin : g10 qsag_p2_mi_lane10 u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
   else                 begin : g11 qsag_p2_mi_lane11 u (.x0(cx0), .xl(cxl), .s_tail(cst), .rcl(crc), .y(y)); end
 endmodule
-
 module lec_mi_lane_mut #(parameter int LANE = 0) (
   input wire [63:0] x0, xl, s_tail, rcl,
   output wire [63:0] y
@@ -415,7 +430,7 @@ module lec_canopy_ff_mut (input wire [63:0] l, r, c, output wire [63:0] ff);
 endmodule
 
 // ============================================================================
-// 4. GF(2^128) Recursive Karatsuba CLMUL, 0x87 Reducer, & psiTower128 Isomorphism
+// 4. GF(2^128) Recursive Karatsuba CLMUL, 0x87 Reducer, & Cantor/Wiedemann T_7 Ring Isomorphism
 // ============================================================================
 module lec_clmul8_gold (input wire [7:0] a, b, output logic [14:0] p);
   always_comb begin
@@ -432,10 +447,6 @@ module lec_clmul8_mut (input wire [7:0] a, b, output wire [14:0] p);
   assign p = g ^ {14'd0, a[7] & b[7]};
 endmodule
 
-// Inductive Karatsuba step at arbitrary width N (16, 32, 64, 128):
-// Given exact/bilinear half-width products p00 = a0*b0, p01 = a0*b1, p10 = a1*b0, p11 = a1*b1
-// (so mid = (a0^a1)*(b0^b1) == p00 ^ p01 ^ p10 ^ p11 by F_2[x] bilinearity),
-// proves Karatsuba reconstruction `{p11,0} ^ {0,p00} ^ ((mid^p00^p11) << H)` == full product `{p11,0} ^ ((p01^p10)<<H) ^ {0,p00}`!
 module lec_clmul_kara_gold #(parameter int H = 32) (
   input wire [2*H-2:0] p00, p01, p10, p11,
   output wire [4*H-2:0] p
@@ -458,7 +469,6 @@ module lec_clmul_kara_mut #(parameter int H = 32) (
   assign p = g ^ {{(4*H-2){1'b0}}, p01[0]};
 endmodule
 
-// 255-bit `x^128 + x^7 + x^2 + x + 1` reducer == 127-step bit-serial polynomial division
 module lec_gf_red_gold (input wire [254:0] c, output logic [127:0] r);
   logic [254:0] q;
   always_comb begin
@@ -481,50 +491,107 @@ module lec_gf_red_mut (input wire [254:0] c, output wire [127:0] r);
   assign r = g ^ {127'd0, c[254]};
 endmodule
 
-// Wiedemann tower `psiTower128` bijection & F_2-linearity miters
-module lec_tower_rt_fwd_gold (input wire [127:0] x, output wire [127:0] y);
-  assign y = x;
+// 4D. Wiedemann `psiTower128` bijection + F_2-linearity + Cantor/Wiedemann ring homomorphism:
+//   (1) Basis round-trip: B(F(1 << idx)) == (1 << idx) and F(B(1 << idx)) == (1 << idx) for all idx in 0..127
+module lec_tower_basis_fwd_gold (input wire [6:0] idx, output wire [127:0] y);
+  assign y = 128'd1 << idx;
 endmodule
-module lec_tower_rt_fwd_gate (input wire [127:0] x, output wire [127:0] y);
+module lec_tower_basis_fwd_gate (input wire [6:0] idx, output wire [127:0] y);
   wire [127:0] p;
-  qsag_tower128_to_poly u_f (.x(x), .y(p));
+  qsag_tower128_to_poly u_f (.x(128'd1 << idx), .y(p));
   qsag_poly_to_tower128 u_b (.x(p), .y(y));
 endmodule
-module lec_tower_rt_fwd_mut (input wire [127:0] x, output wire [127:0] y);
+module lec_tower_basis_fwd_mut (input wire [6:0] idx, output wire [127:0] y);
   wire [127:0] g;
-  lec_tower_rt_fwd_gate u (.x(x), .y(g));
-  assign y = g ^ {127'd0, x[127]};
+  lec_tower_basis_fwd_gate u (.idx(idx), .y(g));
+  assign y = g ^ {127'd0, idx == 7'd127};
 endmodule
 
-module lec_tower_rt_bwd_gold (input wire [127:0] x, output wire [127:0] y);
-  assign y = x;
+module lec_tower_basis_bwd_gold (input wire [6:0] idx, output wire [127:0] y);
+  assign y = 128'd1 << idx;
 endmodule
-module lec_tower_rt_bwd_gate (input wire [127:0] x, output wire [127:0] y);
+module lec_tower_basis_bwd_gate (input wire [6:0] idx, output wire [127:0] y);
   wire [127:0] t;
-  qsag_poly_to_tower128 u_b (.x(x), .y(t));
+  qsag_poly_to_tower128 u_b (.x(128'd1 << idx), .y(t));
   qsag_tower128_to_poly u_f (.x(t), .y(y));
 endmodule
-module lec_tower_rt_bwd_mut (input wire [127:0] x, output wire [127:0] y);
+module lec_tower_basis_bwd_mut (input wire [6:0] idx, output wire [127:0] y);
   wire [127:0] g;
-  lec_tower_rt_bwd_gate u (.x(x), .y(g));
-  assign y = g ^ {127'd0, x[0]};
+  lec_tower_basis_bwd_gate u (.idx(idx), .y(g));
+  assign y = g ^ {127'd0, idx == 7'd0};
 endmodule
 
-module lec_tower_lin_gold (input wire [127:0] a, b, output wire [128:0] y);
-  wire [127:0] pa, pb;
-  qsag_tower128_to_poly ua (.x(a), .y(pa));
-  qsag_tower128_to_poly ub (.x(b), .y(pb));
-  assign y = {1'b1, pa ^ pb};
+//   (2) F_2-linearity over ALL x in {0,1}^128 and basis flips k in 0..127:
+//       F(0) == 0 && F(x ^ (1<<k)) == F(x) ^ F(1<<k)  (and likewise for B)
+module lec_tower_lin_fwd_gold (input wire [127:0] x, input wire [6:0] k, output wire [128:0] y);
+  wire [127:0] fx, fk;
+  qsag_tower128_to_poly ux (.x(x),           .y(fx));
+  qsag_tower128_to_poly uk (.x(128'd1 << k), .y(fk));
+  assign y = {1'b1, fx ^ fk};
 endmodule
-module lec_tower_lin_gate (input wire [127:0] a, b, output wire [128:0] y);
-  wire [127:0] pab, p1;
-  qsag_tower128_to_poly uab (.x(a ^ b), .y(pab));
-  qsag_tower128_to_poly u1  (.x(128'd1), .y(p1));
-  assign y = {p1 == 128'd1, pab};
+module lec_tower_lin_fwd_gate (input wire [127:0] x, input wire [6:0] k, output wire [128:0] y);
+  wire [127:0] fxk, f0;
+  qsag_tower128_to_poly uxk (.x(x ^ (128'd1 << k)), .y(fxk));
+  qsag_tower128_to_poly u0  (.x(128'd0),            .y(f0));
+  assign y = {f0 == 128'd0, fxk};
 endmodule
-module lec_tower_lin_mut (input wire [127:0] a, b, output wire [128:0] y);
+module lec_tower_lin_fwd_mut (input wire [127:0] x, input wire [6:0] k, output wire [128:0] y);
   wire [128:0] g;
-  lec_tower_lin_gate u (.a(a), .b(b), .y(g));
+  lec_tower_lin_fwd_gate u (.x(x), .k(k), .y(g));
   assign y = g ^ 129'd1;
+endmodule
+
+module lec_tower_lin_bwd_gold (input wire [127:0] x, input wire [6:0] k, output wire [128:0] y);
+  wire [127:0] bx, bk;
+  qsag_poly_to_tower128 ux (.x(x),           .y(bx));
+  qsag_poly_to_tower128 uk (.x(128'd1 << k), .y(bk));
+  assign y = {1'b1, bx ^ bk};
+endmodule
+module lec_tower_lin_bwd_gate (input wire [127:0] x, input wire [6:0] k, output wire [128:0] y);
+  wire [127:0] bxk, b0;
+  qsag_poly_to_tower128 uxk (.x(x ^ (128'd1 << k)), .y(bxk));
+  qsag_poly_to_tower128 u0  (.x(128'd0),            .y(b0));
+  assign y = {b0 == 128'd0, bxk};
+endmodule
+module lec_tower_lin_bwd_mut (input wire [127:0] x, input wire [6:0] k, output wire [128:0] y);
+  wire [128:0] g;
+  lec_tower_lin_bwd_gate u (.x(x), .k(k), .y(g));
+  assign y = g ^ 129'd1;
+endmodule
+
+//   (3) Cantor/Wiedemann T_7 Ring Homomorphism:
+//       * F(1) == 1
+//       * For all k in 0..6 (g_k = F(1 << (1 << k))): g_0^2 ^ g_0 ^ 1 == 0 and g_k^2 ^ (g_{k-1} * g_k) ^ 1 == 0
+//       * For all monomials idx in 1..127 (b = idx & -idx, r = idx ^ b): F(1 << idx) == F(1 << b) * F(1 << r)
+module lec_tower_hom_gold (input wire [6:0] idx, output wire [129:0] out);
+  wire [127:0] f_idx;
+  qsag_tower128_to_poly u_fi (.x(128'd1 << idx), .y(f_idx));
+  assign out = {2'b11, f_idx};
+endmodule
+module lec_tower_hom_gate (input wire [6:0] idx, output wire [129:0] out);
+  wire [2:0]   k     = (idx[2:0] < 3'd7) ? idx[2:0] : 3'd6;
+  wire [6:0]   ek    = 7'd1 << k;
+  wire [6:0]   ekm1  = (k == 3'd0) ? 7'd0 : (7'd1 << (k - 3'd1));
+  wire [127:0] f1, gk, gkm1, gk_sq, gk_lin;
+  qsag_tower128_to_poly u_f1   (.x(128'd1),        .y(f1));
+  qsag_tower128_to_poly u_gk   (.x(128'd1 << ek),   .y(gk));
+  qsag_tower128_to_poly u_gkm1 (.x(128'd1 << ekm1), .y(gkm1));
+  qsag_gf128_mul        u_sq   (.a(gk), .b(gk),     .r(gk_sq));
+  qsag_gf128_mul        u_lin  (.a(gkm1), .b(gk),   .r(gk_lin));
+  wire gen_ok = (f1 == 128'd1) && ((gk_sq ^ ((k == 3'd0) ? gk : gk_lin) ^ 128'd1) == 128'd0);
+
+  wire [6:0]   b     = idx & (7'd0 - idx);
+  wire [6:0]   rem   = idx ^ b;
+  wire [127:0] fb, fr, fprod;
+  qsag_tower128_to_poly u_fb (.x(128'd1 << b),   .y(fb));
+  qsag_tower128_to_poly u_fr (.x(128'd1 << rem), .y(fr));
+  qsag_gf128_mul        u_mp (.a(fb), .b(fr),    .r(fprod));
+  wire [127:0] m_res = (idx == 7'd0) ? f1 : fprod;
+  assign out = {gen_ok, 1'b1, m_res};
+endmodule
+module lec_tower_hom_mut (input wire [6:0] idx, output wire [129:0] out);
+  wire [129:0] g;
+  lec_tower_hom_gate u (.idx(idx), .out(g));
+  assign out = g ^ {1'b0, idx == 7'd3, 128'd0};
 endmodule
 `default_nettype wire
