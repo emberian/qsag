@@ -7,6 +7,8 @@
 //! multilinear point-reduction sumcheck + correlated codeword combination into **at most one
 //! `FoldedLevelWhirProof` per tree level (`O(depth)` WHIR cascades instead of `O(N)` cascades)**,
 //! authenticated against every committed child Merkle root via Steiner-deduplicated multi-proofs.
+//! The cascade count is logarithmic in the leaf count; total proof bytes are not. The claim
+//! ledger and authenticated Stage-0 fibers still grow with the number of child commitments.
 
 mod codec;
 

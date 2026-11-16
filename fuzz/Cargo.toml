@@ -91,10 +91,3 @@ path = "fuzz_targets/fuzz_hologram_and_subtree_decode.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "fuzz_blind_vc_presentation"
-path = "fuzz_targets/fuzz_blind_vc_presentation.rs"
-test = false
-doc = false
-bench = false

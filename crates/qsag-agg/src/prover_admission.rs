@@ -46,7 +46,7 @@ pub(crate) fn acquire() -> Permit {
 }
 impl Drop for Permit {
     fn drop(&mut self) {
-        // A public PCS state can move to another thread together with its GPU lease.
+        // CPU-only work may transfer this permit; Vulkan arena leases remain thread-bound.
         let tid = self.owner;
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = state.holders.iter().position(|(id, _)| *id == tid) {

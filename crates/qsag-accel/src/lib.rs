@@ -2118,10 +2118,10 @@ mod tests {
         let children = [[7u64; 4]; 256];
         let mut parents = [[0u64; 4]; 128];
         merkle_layer_poseidon2_at_cpu(&children, &[1; 4], 0, 0, &mut parents).unwrap();
-        assert!(spot_check_merkle_layer(&children, &parents, &[1; 4], 0, 0, &[2; 32], 65));
+        assert!(spot_check_merkle_layer(&children, &[1; 4], 0, 0, &parents, &[2; 32], 65));
         for i in 0..parents.len() {
             parents[i][0] ^= 1;
-            assert!(!spot_check_merkle_layer(&children, &parents, &[1; 4], 0, 0, &[2; 32], 65));
+            assert!(!spot_check_merkle_layer(&children, &[1; 4], 0, 0, &parents, &[2; 32], 65));
             parents[i][0] ^= 1;
         }
     }

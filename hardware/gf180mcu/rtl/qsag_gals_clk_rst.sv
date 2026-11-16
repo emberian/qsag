@@ -88,26 +88,30 @@ module qsag_dcro (
     assign osc = s[0];
 endmodule
 
+// Glitch-free two-clock multiplexer. clk_b is the internal oscillator and is assumed to run
+// whenever the chip is powered; clk_a (the pad clock) may be absent.
+//   * Reset always selects clk_b, so the core has a clock without any edge on clk_a (R1 B4).
+//   * Handing over from a to b needs falling edges of clk_a to drop the a enable. If clk_a has
+//     stopped, `a_kill_n` (a flop of the clk_b domain, low while clk_a is seen dead) clears the a
+//     enable asynchronously instead; clk_a is static at that point, so no runt pulse results.
 module qsag_clk_mux_glitchfree (
     input  wire clk_a,
     input  wire clk_b,
     input  wire sel_a,
     input  wire arst_n,
+    input  wire a_kill_n,
     output wire clk_o,
     output wire a_on,
     output wire b_on
 );
     wire a_m, a_q, b_m, b_q, clk_an, clk_bn, ga, gb;
-    wire rn_a = arst_n | sel_a;
-    wire sn_a = arst_n | ~sel_a;
-    wire rn_b = arst_n | ~sel_a;
-    wire sn_b = arst_n | sel_a;
+    wire rn_a = arst_n & a_kill_n;
     qsag_clkinv u_ia (.a(clk_a), .y(clk_an));
     qsag_clkinv u_ib (.a(clk_b), .y(clk_bn));
-    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_a0 (.clk(clk_a),  .rn(rn_a), .sn(sn_a), .d(sel_a & ~b_q),  .q(a_m));
-    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_a1 (.clk(clk_an), .rn(rn_a), .sn(sn_a), .d(a_m),           .q(a_q));
-    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b0 (.clk(clk_b),  .rn(rn_b), .sn(sn_b), .d(~sel_a & ~a_q), .q(b_m));
-    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b1 (.clk(clk_bn), .rn(rn_b), .sn(sn_b), .d(b_m),           .q(b_q));
+    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_a0 (.clk(clk_a),  .rn(rn_a), .sn(1'b1),   .d(sel_a & ~b_q),  .q(a_m));
+    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_a1 (.clk(clk_an), .rn(rn_a), .sn(1'b1),   .d(a_m),           .q(a_q));
+    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b0 (.clk(clk_b),  .rn(1'b1), .sn(arst_n), .d(~sel_a & ~a_q), .q(b_m));
+    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b1 (.clk(clk_bn), .rn(1'b1), .sn(arst_n), .d(b_m),           .q(b_q));
     qsag_clkand2 u_ga (.a(clk_a), .b(a_q), .y(ga));
     qsag_clkand2 u_gb (.a(clk_b), .b(b_q), .y(gb));
     qsag_clkor2  u_o  (.a(ga),    .b(gb),  .y(clk_o));
@@ -190,10 +194,14 @@ module qsag_gals_clk_rst (
     wire        osc, pad_on, dcro_on;
     logic [4:0] tap_eff;
     logic [4:0] tap_gray_q;
-    wire        dcro_en = ~bypass | csr_force;
-    qsag_dcro u_dcro (.rst_n(rst_n_pad), .en(dcro_en), .tap_gray(tap_gray_q), .fine(csr_fine), .osc(osc));
+    // The oscillator runs whenever the chip is powered: it is the clock the chip boots on and the
+    // time base of the pad-clock watchdog below (R1 B4). EXT_CLK_BYPASS only asks for the pad
+    // clock; it is granted while the pad clock is seen alive.
+    logic       pad_alive;
+    wire        sel_pad = bypass & pad_alive;
+    qsag_dcro u_dcro (.rst_n(rst_n_pad), .en(1'b1), .tap_gray(tap_gray_q), .fine(csr_fine), .osc(osc));
     qsag_clk_mux_glitchfree u_mux (
-        .clk_a(clk_pad), .clk_b(osc), .sel_a(bypass), .arst_n(rst_n_pad),
+        .clk_a(clk_pad), .clk_b(osc), .sel_a(sel_pad), .arst_n(rst_n_pad), .a_kill_n(pad_alive),
         .clk_o(clk_core), .a_on(pad_on), .b_on(dcro_on)
     );
     wire rst_core_raw;
@@ -223,6 +231,30 @@ module qsag_gals_clk_rst (
                 ofreq <= ocnt;
                 ocnt  <= 16'd1;
             end else if (ocnt != 16'hFFFF) ocnt <= ocnt + 16'd1;
+        end
+
+    // ------------------------------------------------------------ pad-clock watchdog (osc domain)
+    // refdiv[3] toggles every 8 pad-clock cycles. An edge of it marks the pad clock alive; 4096
+    // oscillator cycles without one (about 100 us; a pad clock above roughly 100 kHz always
+    // qualifies) mark it dead. While dead the multiplexer is held on the oscillator, and a pad
+    // clock that appears later is picked up again without a reset.
+    localparam int WD_LOG2 = 12;
+    wire                pad_tick_s;
+    logic               pad_tick_q;
+    logic [WD_LOG2-1:0] wd_cnt;
+    qsag_sync2 u_pts (.clk(osc), .rst_n(osc_rst_n), .d(refdiv[3]), .q(pad_tick_s));
+    always_ff @(posedge osc or negedge osc_rst_n)
+        if (!osc_rst_n) begin
+            pad_tick_q <= 1'b0;
+            wd_cnt     <= '0;
+            pad_alive  <= 1'b0;
+        end else begin
+            pad_tick_q <= pad_tick_s;
+            if (pad_tick_s != pad_tick_q) begin
+                wd_cnt    <= '0;
+                pad_alive <= 1'b1;
+            end else if (&wd_cnt) pad_alive <= 1'b0;
+            else                  wd_cnt    <= wd_cnt + 1'b1;
         end
 
     wire         win_c;
@@ -322,8 +354,25 @@ module qsag_gals_clk_rst (
         end
 
     // ------------------------------------------------------------ tamper, canary, zeroize
+    // Boot blanking of the external tamper input (R1 B6). TAMPER_ZEROIZE_N has only the pad
+    // pull-up; with board capacitance it can still be below V_IH when the core reset releases, and
+    // the sticky latch would then put every cold boot into S_DEAD. For the first 4096 core clocks
+    // (82 us at 50 MHz, enough for the ~50 kOhm pull-up to charge about 1 nF) a low TAMPER_N holds
+    // the secret reset asserted, so no secret can exist, but does not set the latch. After that the
+    // latch is armed and works without a clock, as before.
+    logic [11:0] boot_cnt;
+    logic        tamp_armed;
+    always_ff @(posedge clk_core or negedge rst_core_n)
+        if (!rst_core_n) begin
+            boot_cnt   <= '0;
+            tamp_armed <= 1'b0;
+        end else if (!tamp_armed) begin
+            boot_cnt <= boot_cnt + 12'd1;
+            if (&boot_cnt) tamp_armed <= 1'b1;
+        end
+
     wire tamp_q;
-    wire tamp_sn = tamper_n | ~rst_n_pad;
+    wire tamp_sn = tamper_n | ~rst_n_pad | ~tamp_armed;
     qsag_srlatch u_tamp (.rn(rst_n_pad), .sn(tamp_sn), .q(tamp_q));
     wire tamp_s;
     qsag_sync2 u_ts (.clk(clk_core), .rst_n(rst_core_n), .d(tamp_q), .q(tamp_s));
@@ -342,7 +391,7 @@ module qsag_gals_clk_rst (
     assign fault_tamper = tamp_s;
 
     // Async secret zeroize assertion (works with stopped clock via u_tamp!) + 2-FF sync release
-    wire raw_srst_n = rst_n_pad & ~tamp_q & ~zero_q;
+    wire raw_srst_n = rst_n_pad & ~tamp_q & ~zero_q & (tamper_n | tamp_armed);
     wire srst_sync_w;
     qsag_rst_sync u_srs (.clk(clk_core), .arst_n(raw_srst_n), .rst_n(srst_sync_w));
     qsag_clkbuf   u_srb (.a(srst_sync_w), .y(srst_n));
@@ -355,7 +404,7 @@ module qsag_gals_clk_rst (
     assign clk_mon = csr_puf_mon ? puf_mon_clk : mon[3];
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, csr[63:53], csr[51], csr_shield_2c, csr[31:21], csr[19]};
+    wire unused = &{1'b0, csr[63:53], csr[51], csr_shield_2c, csr[31:21], csr[19], csr_force};
     /* verilator lint_on UNUSEDSIGNAL */
     assign tel = {2'd0, dcro_on, pad_on, l2_last, l1_last, tap_eff, tap_base, freq_cnt};
 endmodule

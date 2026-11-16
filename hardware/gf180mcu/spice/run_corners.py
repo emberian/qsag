@@ -69,6 +69,7 @@ def run_one(base: Path, output: Path, deck: str, corner: str, temp: int, seed: i
     case = output/label
     case.mkdir(parents=True, exist_ok=True)
     source = (base/(deck+'.sp')).read_text().replace('/spice/pdk', pdk)
+    source = re.sub(r'seed=\d+',f'seed={seed}',source)
     flavor, voltage, cap_factor = CORNER[corner]
     a, b = source.index('* __CORNER_BEGIN__'), source.index('* __CORNER_END__')
     block = source[a:b].replace(' typical', ' '+flavor)
@@ -79,7 +80,8 @@ def run_one(base: Path, output: Path, deck: str, corner: str, temp: int, seed: i
     block = re.sub(r'\.temp \S+', f'.temp {temp}', block)
     block = re.sub(r'slew_sel=\d', f'slew_sel={slew}', block)
     source = source[:a]+block+source[b:]
-    source = source.replace('"moscap_with_esr.inc"', '"'+str(base/'moscap_with_esr.inc')+'"')
+    shutil.copyfile(base/'moscap_with_esr.inc', case/'moscap_with_esr.inc')
+    source = source.replace('"moscap_with_esr.inc"', '"'+str(case/'moscap_with_esr.inc')+'"')
     (case/'deck.sp').write_text(source)
     init = (base/'.spiceinit').read_text()
     init = re.sub(r'setseed \d+', f'setseed {seed}', init)
@@ -130,6 +132,22 @@ def main() -> int:
         ap.error('--jobs must be 1..4 for shared-host resource control')
     base=Path(__file__).resolve().parent
     output=args.output.resolve();output.mkdir(parents=True,exist_ok=True)
+    executable = shutil.which(args.ngspice)
+    if executable is None:
+        ap.error('ngspice executable not found')
+    args.ngspice = executable
+    version = subprocess.run([executable,'-v'],capture_output=True,text=True,check=True)
+    manifest = {'executable':executable, 'version':version.stdout+version.stderr,
+                'executable_sha256':hashlib.sha256(Path(executable).read_bytes()).hexdigest(),
+                'pdk':args.pdk, 'files':{}}
+    for file in [base/'moscap_with_esr.inc', base/'.spiceinit',
+                 Path(args.pdk)/'ngspice/design.ngspice',
+                 Path(args.pdk)/'ngspice/sm141064.ngspice',
+                 Path(args.pdk)/'ngspice/sm141064.spice',
+                 Path(args.pdk)/'gf180mcu_fd_io.spice',
+                 Path(args.pdk)/'gf180mcu_fd_sc_mcu7t5v0.spice']:
+        manifest['files'][str(file)]=hashlib.sha256(file.read_bytes()).hexdigest()
+    (output/'toolchain.json').write_text(json.dumps(manifest,indent=2)+'\n')
     results=[]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures=[pool.submit(run_one,base,output,d,c,t,args.seed,args.timeout,s,args.ngspice,args.pdk)

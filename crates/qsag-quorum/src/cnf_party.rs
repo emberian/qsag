@@ -3182,13 +3182,15 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedSlhBackend for IsolatedCnfParty
 /// caller of this helper never touches a share, a seed or the MAC key: it only moves each
 /// party value into its thread. Party values are dropped after every thread has finished, so
 /// a party that returns early does not close links its peers still use.
+/// A panicking party aborts the ceremony after all threads are joined; it must never be
+/// silently omitted from the ordered outputs.
 #[cfg(any(test, feature = "std"))]
 pub fn run_isolated_cnf_ceremony<P: Send, R: Send>(
     parties: Vec<P>,
     job: impl Fn(usize, &mut P) -> R + Sync,
 ) -> Vec<R> {
     let job = &job;
-    let finished: Vec<Option<(R, P)>> = std::thread::scope(|scope| {
+    let finished: Vec<std::thread::Result<(R, P)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = parties
             .into_iter()
             .enumerate()
@@ -3199,11 +3201,11 @@ pub fn run_isolated_cnf_ceremony<P: Send, R: Send>(
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().ok()).collect()
+        handles.into_iter().map(|h| h.join()).collect()
     });
     finished
         .into_iter()
-        .flatten()
+        .map(|result| result.unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
         .map(|(out, _party)| out)
         .collect()
 }
@@ -3221,6 +3223,27 @@ mod tests {
     use std::time::{Duration, Instant};
 
     type Party = IsolatedCnfParty<InMemoryEndpoint, MemoryPoisonJournal>;
+
+    #[test]
+    fn ceremony_preserves_party_order_and_propagates_panics_after_joining() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let outputs = run_isolated_cnf_ceremony(vec![7, 11, 13], |index, value| {
+            (index, *value)
+        });
+        assert_eq!(outputs, vec![(0, 7), (1, 11), (2, 13)]);
+
+        let entered = AtomicUsize::new(0);
+        let result = std::panic::catch_unwind(|| {
+            run_isolated_cnf_ceremony(vec![7, 11, 13], |index, value| {
+                entered.fetch_add(1, Ordering::SeqCst);
+                assert_ne!(index, 1, "injected party failure");
+                *value
+            })
+        });
+        assert!(result.is_err(), "a missing party must not look like success");
+        assert_eq!(entered.load(Ordering::SeqCst), 3);
+    }
 
     /// Custody shares from the core dealerless DKG, loaded one custodian at a time.
     fn custody_keys(t: usize, n: usize, key_len: usize, tape: u8) -> Vec<CnfPartyKeys> {

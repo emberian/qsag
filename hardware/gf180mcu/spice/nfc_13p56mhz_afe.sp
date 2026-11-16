@@ -36,6 +36,7 @@ L_BAD BB VDD_BAD 1.8n
 C_HOT VDD_HOT 0 1p
 C_COLD VDD_COLD 0 1p
 C_BAD VDD_BAD 0 1p
+.subckt antenna tank rect
 V_EMF EMF 0 SIN(0 7.5 13.56meg)
 R_CU EMF LR {0.988*(1+0.00393*(temper-25))}
 L_COIL LR LD 1.4662u
@@ -47,11 +48,17 @@ C_STRAY TANK 0 3.2p
 R_BLEED TANK 0 12k
 * Rectifier is independent of ASIC VDD. Never join RECT to chip 5V directly.
 R_RECT TANK RECT_IN 220
-D_RECT RECT_IN RECT SCH
+V_IR RECT_IN RECT_D 0
+D_RECT RECT_D RECT SCH
 D_NEG 0 RECT_IN SCH
 C_RECT RECT 0 4.7n
 R_RECT_LOAD RECT 0 10k
 D_LIMIT 0 RECT Z47
+.ends antenna
+* Independent antennas: the unsafe witness cannot clamp the protected cases.
+X_TANK_HOT TANK RECT antenna
+X_TANK_COLD TANK_COLD RECT_COLD antenna
+X_TANK_BAD TANK_BAD RECT_BAD antenna
 * The RF gate has no conductive path to chip power. Gate-drain capacitance and
 * the MOS body diode are explicit, so cold isolation is not an ideal switch.
 .subckt isolated_rx tank pullrail pad rect
@@ -66,13 +73,16 @@ D_BODY 0 pad BODY
 R_PULL pullrail pad 470
 .ends isolated_rx
 X_HOT TANK MAIN PAD_HOT RECT isolated_rx
-X_COLD TANK 0 PAD_COLD RECT isolated_rx
+X_COLD TANK_COLD 0 PAD_COLD RECT_COLD isolated_rx
 * Unprotected witness retains the same 2.2k resistor: it alone cannot isolate.
-R_BAD TANK PAD_BAD 2.2k
+R_BAD TANK_BAD PAD_BAD 2.2k
 X_PAD_HOT 0 MAIN VDD_HOT 0 MAIN 0 PAD_HOT 0 0 MAIN MAIN 0 Y_HOT gf180mcu_fd_io__bi_24t
 X_PAD_COLD 0 0 VDD_COLD 0 0 0 PAD_COLD 0 0 0 VDD_COLD 0 Y_COLD gf180mcu_fd_io__bi_24t
 X_PAD_BAD 0 0 VDD_BAD 0 0 0 PAD_BAD 0 0 0 VDD_BAD 0 Y_BAD gf180mcu_fd_io__bi_24t
+.save v(X_TANK_HOT.RECT_IN) i(v.X_TANK_HOT.V_IR) v(TANK_COLD) v(TANK_BAD) v(RECT_COLD)
 .save v(TANK) v(RECT) v(PAD_HOT) v(PAD_COLD) v(PAD_BAD) v(Y_HOT) i(V_COLD) i(V_BAD) v(X_HOT.GATE)
+* par() measurements generate additional nodes; retain them as well.
+.save all
 .tran 1n 4u 0 1n
 .meas tran tank_pk MAX v(TANK) FROM=2u TO=4u
 .meas tran rect_max MAX v(RECT) FROM=2u TO=4u
@@ -93,7 +103,12 @@ X_PAD_BAD 0 0 VDD_BAD 0 0 0 PAD_BAD 0 0 0 VDD_BAD 0 Y_BAD gf180mcu_fd_io__bi_24t
 * [-0.3,VDD+0.3]. These are design goals, not foundry injection-current ratings.
 .meas tran pass_cold PARAM='(cold_inject_avg<1u)*(cold_inject_pk<100u)*(cold_max<0.3)*(cold_min> -0.3)'
 .meas tran pass_hot PARAM='(hot_max<vdd_val+0.3)*(hot_min> -0.3)*(logic_high>0.8*vdd_val)*(logic_low<0.2*vdd_val)*(clk_hz>13.4e6)*(clk_hz<13.7e6)'
-.meas tran pass_rect PARAM='(rect_max<5.5)*(gate_max<10)'
+.meas tran rect_current_pk MAX i(v.X_TANK_HOT.V_IR) FROM=0 TO=4u
+.meas tran rect_irms RMS par('v(TANK,X_TANK_HOT.RECT_IN)/220') FROM=2u TO=4u
+.meas tran rect_resistor_w PARAM='rect_irms*rect_irms*220'
+.meas tran gate_irms RMS par('v(TANK,X_HOT.GATE)/2200') FROM=2u TO=4u
+.meas tran gate_resistor_w PARAM='gate_irms*gate_irms*2200'
+.meas tran pass_rect PARAM='(rect_max<5.5)*(gate_max<10)*(rect_current_pk<70m)*(rect_resistor_w<0.25)*(gate_resistor_w<0.25)'
 .control
 run
 quit

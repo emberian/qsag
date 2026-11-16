@@ -60,6 +60,16 @@ endmodule
 // oscillator rate (one flop + one inverter in the loop), so the counter keeps up with a 5-stage
 // NAND2 ring (~1.5-3.5 ns period) where a synchronous 20-bit incrementer would not. The count is
 // only valid once the oscillator is stopped and the ripple has settled (20 stages).
+module dregg_tff (
+    input  wire  clk,
+    input  wire  rst_n,
+    output logic q
+);
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n) q <= 1'b0;
+        else        q <= ~q;
+endmodule
+
 module dregg_ripple_cnt #(
     parameter int N = 20
 ) (
@@ -67,19 +77,18 @@ module dregg_ripple_cnt #(
     input  wire         rst_n,
     output wire [N-1:0] q
 );
-    logic [N-1:0] r;
-    always_ff @(posedge clk or negedge rst_n)
-        if (!rst_n) r[0] <= 1'b0;
-        else        r[0] <= ~r[0];
     genvar k;
     generate
-        for (k = 1; k < N; k++) begin : g_bit
-            always_ff @(negedge r[k-1] or negedge rst_n)
-                if (!rst_n) r[k] <= 1'b0;
-                else        r[k] <= ~r[k];
+        for (k = 0; k < N; k++) begin : g_bit
+            wire ck;
+            if (k == 0) begin : g_first
+                assign ck = clk;
+            end else begin : g_next
+                assign ck = ~q[k-1];   // bit k toggles on the falling edge of bit k-1 (up-count)
+            end
+            dregg_tff u_t (.clk(ck), .rst_n(rst_n), .q(q[k]));
         end
     endgenerate
-    assign q = r;
 endmodule
 
 module dregg_ro_puf_bch (

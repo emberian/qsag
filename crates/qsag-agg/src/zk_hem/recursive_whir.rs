@@ -4230,12 +4230,19 @@ mod tests {
         for k in 0..polys.len() {
             let mut bad = proof.clone(); bad.stage0_fibers[k][0] += F::ONE; reject(&bad);
             let mut bad = proof.clone(); bad.stage0_siblings[k].push([F::ZERO; 4]); reject(&bad);
+            // Siblings are not absorbed into Fiat-Shamir. Changing one while keeping
+            // the shape and transcript fixed specifically exercises root authentication.
+            assert!(!proof.stage0_siblings[k].is_empty());
+            let mut bad = proof.clone(); bad.stage0_siblings[k][0][0] += F::ONE; reject(&bad);
             let mut bad = proof.clone(); bad.poly_evals[k] += E::ONE; reject(&bad);
         }
         for stage in 0..proof.later_fibers.len() {
             let mut bad = proof.clone(); bad.later_fibers[stage][0] += E::ONE; reject(&bad);
             let mut bad = proof.clone(); bad.later_stage_roots[stage][0] += F::ONE; reject(&bad);
             let mut bad = proof.clone(); bad.later_siblings[stage].push([F::ZERO; 4]); reject(&bad);
+            for sibling in 0..proof.later_siblings[stage].len() {
+                let mut bad = proof.clone(); bad.later_siblings[stage][sibling][0] += F::ONE; reject(&bad);
+            }
         }
         assert!(!proof.later_fibers.is_empty(), "fixture must exercise a multistage opening");
         for round in 0..proof.point_rounds.len() {
