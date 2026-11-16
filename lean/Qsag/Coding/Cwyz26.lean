@@ -1462,4 +1462,20 @@ public section
 #verify_constructive Qsag.sliced_stage_decomp_bound
 #verify_constructive Qsag.sliced_rest_exceeds_simple_budget
 
+namespace Qsag
+
+/-- Every deployed `nv = 24` QROM stage row has more than 256 bits of query soundness. -/
+theorem whirAffineStageWitnesses_24_query_rows_kat :
+    ∀ v ∈ whirAffineStageWitnesses 24 true,
+      affineFallingFactorial (v.A + v.sFolds) v.queries * 2 ^ 256 <
+        affineFallingFactorial v.n v.queries := by decide +kernel
+
+/-- The first deployed `nv = 24` QROM stage row. -/
+theorem whirAffineStageWitnesses_24_head_mem :
+    ({ n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
+       m := 64, D := 27164, queries := 258, queryTargetBits := 256 } : WhirAffineWitness) ∈
+      whirAffineStageWitnesses 24 true := List.mem_cons_self ..
+
+end Qsag
+
 end

@@ -2525,4 +2525,41 @@ public section
 #verify_constructive Qsag.Frac.of_injective
 #verify_constructive Qsag.UPoly.d5_split
 
+namespace Qsag
+
+/- Defining equations of the determinant and weighted-degree recursions. -/
+
+namespace Mat
+variable {R : Type} [LawfulCommRing R]
+
+theorem det_zero (M : Nat → Nat → R) : det 0 M = CommRingOps.one := by rfl
+
+theorem det_succ (k : Nat) (M : Nat → Nat → R) :
+    det (k + 1) M =
+      rangeSum (k + 1) (fun j => signed j (CommRingOps.mul (M 0 j) (det k (minor M 0 j)))) := by rfl
+
+omit [LawfulCommRing R] in
+theorem minor_apply (M : Nat → Nat → R) (r c i j : Nat) :
+    minor M r c i j = M (skipIdx r i) (skipIdx c j) := by rfl
+
+theorem signed_eq (j : Nat) (x : R) :
+    signed j x = if j % 2 = 0 then x else CommRingOps.neg x := by rfl
+
+theorem skipIdx_eq (r i : Nat) : skipIdx r i = if i < r then i else i + 1 := by rfl
+
+end Mat
+
+namespace UPoly
+variable {R : Type} [LawfulCommRing R] [DecidableEq R]
+
+theorem wdegFrom_nil (w : R → Nat) (s o : Nat) : wdegFrom w s o ([] : List R) = 0 := by rfl
+
+theorem wdegFrom_cons (w : R → Nat) (s o : Nat) (c : R) (cs : List R) :
+    wdegFrom w s o (c :: cs) =
+      max (if c = CommRingOps.zero then 0 else w c + s * o) (wdegFrom w s (o + 1) cs) := by rfl
+
+end UPoly
+
+end Qsag
+
 end

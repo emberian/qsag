@@ -1821,3 +1821,31 @@ theorem towerToRust_mdsA_tower_bits_ne :
   decide +kernel
 
 end Qsag
+
+/-! ### Exports for lane math -/
+public section
+
+namespace Qsag.MigrationExecution
+
+set_option maxRecDepth 4096 in
+/-- Basis KATs of the carry-less multiplier: `x · x = x²`, the reduction `x¹²⁷ · x = 0x87`, and
+    the limb order. -/
+theorem rustGf128_basis_kat :
+    rustGf128Mul 2#128 2#128 = 4#128 ∧
+    rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
+    rustGf128OfLimbs 0 1 = BitVec.ofNat 128 (2^64) := by
+  decide +kernel
+
+end Qsag.MigrationExecution
+
+namespace Qsag
+
+theorem psiTower128ToPoly_unpack_two_kat :
+    psiTower128ToPoly (unpackTower 7 2#128) = 0x295ac0b1f4731af9676aac9fa4b20b08#128 := by
+  decide +kernel
+
+theorem mulExec_seven_two_two_kat : mulExec 7 2#128 2#128 = 3#128 := by decide +kernel
+
+end Qsag
+
+end

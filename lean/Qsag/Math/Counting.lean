@@ -1341,4 +1341,23 @@ public section
 #verify_constructive Qsag.JohnsonBound.johnson_set_system_mul_le
 #verify_constructive Qsag.JohnsonBound.johnson_set_system_card_le
 
+namespace Qsag
+
+theorem JohnsonBound.elemBool_nil {α : Type} [DecidableEq α] (x : α) :
+    JohnsonBound.elemBool x [] = false := by rfl
+
+theorem JohnsonBound.elemBool_cons {α : Type} [DecidableEq α] (x y : α) (ys : List α) :
+    JohnsonBound.elemBool x (y :: ys) = (decide (x = y) || JohnsonBound.elemBool x ys) := by rfl
+
+end Qsag
+
+end
+
+/-! ### Exports for lane sig -/
+public section
+namespace Qsag
+
+theorem natAbsDiff_def (a b : Nat) : natAbsDiff a b = if a ≤ b then b - a else a - b := by rfl
+
+end Qsag
 end

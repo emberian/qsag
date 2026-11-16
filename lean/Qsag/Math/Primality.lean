@@ -1340,4 +1340,21 @@ public section
 #verify_constructive Qsag.goldilocks_seven_primitive_root
 #verify_constructive Qsag.checkLucasBlsCert_sound
 
+namespace Qsag
+
+/-- Public form: every base of the Goldilocks totient factorization is prime. -/
+theorem goldilocksTotientFactors_all_prime_export :
+    ∀ qe ∈ goldilocksTotientFactors, IsPrimeNat qe.1 := goldilocksTotientFactors_all_prime
+
+/-- A Pocklington chain ending in the Carmichael number `561` is rejected. -/
+theorem verifyPrimeCert_carmichael_561_kat :
+    verifyPrimeCert [⟨3, 2, [(2, 1)]⟩, ⟨11, 2, [(2, 1), (5, 1)]⟩, ⟨561, 2, [(17, 1), (11, 1)]⟩] 561 =
+      false := by decide +kernel
+
+/-- The one-step Pocklington chain for `3` is accepted. -/
+theorem verifyPrimeCert_three_kat : verifyPrimeCert [⟨3, 2, [(2, 1)]⟩] 3 = true := by
+  decide +kernel
+
+end Qsag
+
 end
