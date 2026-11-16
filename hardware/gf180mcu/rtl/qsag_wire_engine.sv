@@ -263,7 +263,8 @@ module qsag_wire_engine #(
     // ------------------------------------------------------------------ CapTP Vat Membrane
     logic [3:0]  kvat_we;
     logic        kvat_commit, zk_latch_we, zk_latch_set, zk_latch_clr;
-    logic        vat_pchk_clr, vat_pwe, vat_cchk_clr, vat_cwe, vat_commit_inv;
+    logic        vat_pchk_clr, vat_pwe, vat_cchk_clr, vat_cwe;
+    wire         vat_commit_inv;
     wire         vat_ready, zk_root_valid, vat_att_ok, vat_att_step_ok, vat_inv_ok, vat_need_fram;
     wire  [63:0] kvat_rdata;
     wire  [31:0] vat_spend_used;
@@ -510,7 +511,6 @@ module qsag_wire_engine #(
         vat_pwe        = 1'b0;
         vat_cchk_clr   = 1'b0;
         vat_cwe        = 1'b0;
-        vat_commit_inv = 1'b0;
         puf_start_blk  = 1'b0;
         db_load_r0     = 1'b0;
         db_load_r1     = 1'b0;
@@ -1091,9 +1091,7 @@ module qsag_wire_engine #(
                 emit_port = 1'b1;
                 e_rd      = (cnt2 < 5'd8) ? (6'd32 + {1'b0, cnt2}) : {1'b0, cnt2 - 5'd8};
             end
-            S_VZK: begin
-                vat_commit_inv = vat_inv_ok;
-            end
+            S_VZK: ;
             // ---------------------------------------------------------- Houyhnhnm DB + NCO (0x52)
             S_DB0: begin
                 cond             = in_valid;
@@ -1175,16 +1173,17 @@ module qsag_wire_engine #(
             end
             default: ;
         endcase
-        if (st == S_KSW && op == OP_PRFMSG && cap_mode && key_valid && !macdiff && vat_inv_ok)
-            vat_commit_inv = 1'b1;
-        if (st == S_CTD && cap_mode && key_valid && !macdiff && vat_inv_ok && (!stateful || pubgen))
-            vat_commit_inv = 1'b1;
-        if (st == S_CA3 && cap_mode && rcmp)
-            vat_commit_inv = 1'b1;
         if (st == S_IDLE && (in_data[15:8] == OP_FOLD || in_data[15:8] == OP_HEM))
             zk_latch_clr = 1'b1;
         if (emit && !emit_port) xsel = 3'd1;
     end
+
+    assign vat_commit_inv = fire && (
+        (st == S_VZK && vat_inv_ok) ||
+        (st == S_KSW && op == OP_PRFMSG && cap_mode && key_valid && !macdiff && vat_inv_ok) ||
+        (st == S_CTD && cap_mode && key_valid && !macdiff && vat_inv_ok && (!stateful || pubgen)) ||
+        (st == S_CA3 && cap_mode && rcmp)
+    );
 
     assign key_d    = (st == S_KLK || st == S_PF4 || st == S_PF5) ? port : in_data;
     assign an_tx    = (st == S_AW2) ? {32'd0, ctmp} : port;

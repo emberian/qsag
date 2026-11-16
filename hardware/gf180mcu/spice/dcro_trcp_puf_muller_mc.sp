@@ -290,7 +290,7 @@ C_PN4 PUF_N4 VSS 5.0f
 X_PUF_ND4  PUF_N4 PUF_N4 PUF_ND_OSC VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__nand2_1
 C_PN5 PUF_ND_OSC VSS 5.0f
 
-.tran 20p 220n
+.tran 25p 125n
 
 .param vmid='0.5*vdd_val'
 
