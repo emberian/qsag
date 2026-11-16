@@ -46,7 +46,7 @@ module qsag_sponge (
             end
             wire        we = wipe | ab_w | sc_we;
             wire [63:0] wd = wipe ? 64'd0 : (ab_w ? ab_d : wr_data);
-            qsag_ereg #(.W(64)) u_r (.clk(clk), .rst_n(srst_n), .en(we), .d(wd), .q(st[i]));
+            qsag_ereg_nr #(.W(64)) u_r (.clk(clk), .en(we), .d(wd), .q(st[i]));
         end
     endgenerate
 

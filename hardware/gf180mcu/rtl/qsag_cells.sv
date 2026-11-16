@@ -48,6 +48,27 @@ module qsag_clkgate_1 (
 `endif
 endmodule
 
+// Clock gate for a transparent-latch row that is fed by a posedge write-data hold register
+// (icgtp_1: the row is transparent during the high phase that follows the write strobe).
+// In silicon the gate and the hold register switch on the same clock edge and the row settles to
+// the new word. A zero-delay simulation would instead let every flop sampled on that edge see the
+// row momentarily holding the previous write word, so the behavioural gate opens with the
+// non-blocking update of that edge (together with the hold register) and closes on the falling edge.
+module qsag_latgate (
+    input  wire clk,
+    input  wire en,
+    output wire gclk
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__icgtp_1 u_icg (.CLK(clk), .E(en), .TE(1'b0), .Q(gclk));
+`else
+    logic open_q;
+    initial open_q = 1'b0;
+    always_ff @(posedge clk or negedge clk) open_q <= clk ? en : 1'b0;
+    assign gclk = open_q;
+`endif
+endmodule
+
 // Enable register with asynchronous active-low clear (secret-bearing state).
 module qsag_ereg #(
     parameter int W = 64
