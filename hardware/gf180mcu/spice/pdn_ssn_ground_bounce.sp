@@ -29,6 +29,8 @@ X_MCAP 2 1 2 2 nfet_06v0 w=c_width l=c_length dtemp=dtemp
 .include "/spice/pdk/gf180mcu_fd_sc_mcu7t5v0.spice"
 .include "/spice/pdk/gf180mcu_fd_io.spice"
 
+.options method=gear
+
 * ------------------------------------------------------------------------------
 * 1. External PCB 5V0 Plane + 4 x 100 nF 0402 X7R Decoupling Ring (ESL=0.4nH, ESR=30mOhm)
 * ------------------------------------------------------------------------------
