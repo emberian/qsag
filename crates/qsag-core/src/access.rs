@@ -48,6 +48,22 @@ impl MonotoneSpanProgram {
         self.num_cols
     }
 
+    /// Injective public encoding of the program: a `QMSP0001` frame with both dimensions,
+    /// then every row as its owner and its `num_cols` binary entries. Parties bind a
+    /// digest of these bytes into a ceremony so shares of one program are never
+    /// released against another.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(24 + self.row_owner.len() * (2 + self.num_cols));
+        out.extend_from_slice(b"QMSP0001");
+        out.extend_from_slice(&(self.num_cols as u64).to_be_bytes());
+        out.extend_from_slice(&(self.row_owner.len() as u64).to_be_bytes());
+        for (owner, row) in self.row_owner.iter().zip(&self.matrix_rows) {
+            out.extend_from_slice(&owner.to_be_bytes());
+            out.extend_from_slice(row);
+        }
+        out
+    }
+
     /// Universal OR-of-ANDs compiler. Every listed set is a sufficient coalition.
     /// Each branch uses independent masks and alternating +/- reconstruction weights.
     /// Exponential policies should use a manually supplied compact binary matrix.
@@ -240,5 +256,92 @@ mod tests {
                 .is_err()
         );
         assert!(MonotoneSpanProgram::new(vec![0], vec![vec![2]]).is_err());
+    }
+
+    #[test]
+    fn solver_handles_dependent_rows_empty_sets_and_distinct_encodings() {
+        // Dependent and duplicate rows: free variables stay zero and the weights verify.
+        let m = MonotoneSpanProgram::new(
+            vec![0, 0, 1, 2, 2],
+            vec![
+                vec![1, 1, 0],
+                vec![1, 1, 0],
+                vec![0, 1, 1],
+                vec![0, 0, 1],
+                vec![0, 0, 1],
+            ],
+        )
+        .unwrap();
+        let w = m
+            .solve_reconstruction_weights(&BTreeSet::from([0, 1, 2]))
+            .unwrap();
+        assert!(m.verify_reconstruction_weights(&w));
+        assert!(m.solve_reconstruction_weights(&BTreeSet::new()).is_none());
+        assert!(
+            m.solve_reconstruction_weights(&BTreeSet::from([0, 1]))
+                .is_none()
+        );
+        assert!(
+            m.solve_reconstruction_weights(&BTreeSet::from([7]))
+                .is_none()
+        );
+        // Weights that reconstruct but have the wrong length, or a wrong target, fail.
+        assert!(!m.verify_reconstruction_weights(&w[..4]));
+        let mut doubled = w.clone();
+        for x in &mut doubled {
+            *x += *x;
+        }
+        assert!(!m.verify_reconstruction_weights(&doubled));
+        // Shape errors.
+        assert!(MonotoneSpanProgram::new(vec![], vec![]).is_err());
+        assert!(MonotoneSpanProgram::new(vec![0], vec![vec![]]).is_err());
+        assert!(MonotoneSpanProgram::new(vec![0, 1], vec![vec![1, 0], vec![1]]).is_err());
+        assert!(MonotoneSpanProgram::new(vec![0], vec![vec![1], vec![1]]).is_err());
+        assert!(MonotoneSpanProgram::from_authorized_sets(&[]).is_err());
+        assert!(MonotoneSpanProgram::from_authorized_sets(&[BTreeSet::new()]).is_err());
+        assert!(m.share(&[F::ONE; 4], &[[F::ONE; 4]]).is_err());
+        // The cell bound refuses before allocating: 2,049 sets of 2 give 4,098 x 2,050 cells.
+        let wide: Vec<BTreeSet<u16>> = (0..2049u16).map(|i| BTreeSet::from([i, i + 1])).collect();
+        assert_eq!(
+            MonotoneSpanProgram::from_authorized_sets(&wide),
+            Err(AccessError::PolicyTooLarge)
+        );
+        // The encoding separates programs that differ only in shape or ownership.
+        let a = MonotoneSpanProgram::new(vec![0, 1], vec![vec![1, 0], vec![0, 1]]).unwrap();
+        let b = MonotoneSpanProgram::new(vec![1, 0], vec![vec![1, 0], vec![0, 1]]).unwrap();
+        let c = MonotoneSpanProgram::new(vec![0, 1, 0, 1], vec![vec![1]; 4]).unwrap();
+        assert_ne!(a.canonical_bytes(), b.canonical_bytes());
+        assert_ne!(a.canonical_bytes(), c.canonical_bytes());
+    }
+
+    #[test]
+    fn or_of_and_branches_hide_the_secret_from_every_unauthorized_set() {
+        // Two different secrets with suitably chosen masks give an unauthorized coalition
+        // identical rows; this is perfect privacy checked constructively. The coalition
+        // {0, 2, 3} misses party 1, which both branches need.
+        let sets = [BTreeSet::from([0, 1]), BTreeSet::from([1, 2, 3])];
+        let m = MonotoneSpanProgram::from_authorized_sets(&sets).unwrap();
+        let s0 = [F::from_u64_reduced(5); 4];
+        let s1 = [F::from_u64_reduced(9); 4];
+        let delta = F::from_u64_reduced(4);
+        let masks0 = vec![[F::from_u64_reduced(31); 4]; m.num_cols() - 1];
+        // Columns: 0 secret; 1 branch-one mask; 2, 3 branch-two masks. Party 0 holds
+        // `s + m1`, parties 2 and 3 hold `m2 + m3` and `m3`: moving `m1` by -delta
+        // compensates the secret in every row outside party 1.
+        let mut masks1 = masks0.clone();
+        for lane in &mut masks1[0] {
+            *lane -= delta;
+        }
+        let rows0 = m.share(&s0, &masks0).unwrap();
+        let rows1 = m.share(&s1, &masks1).unwrap();
+        let mut differs_for_party_one = false;
+        for ((owner, a), b) in m.row_owners().iter().zip(rows0.iter()).zip(rows1.iter()) {
+            if *owner == 1 {
+                differs_for_party_one |= a != b;
+            } else {
+                assert_eq!(a, b, "row of party {owner}");
+            }
+        }
+        assert!(differs_for_party_one);
     }
 }
