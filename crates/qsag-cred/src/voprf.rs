@@ -74,6 +74,8 @@ pub(crate) const SPONGE_DOMAIN: u64 = 0x544f50524631;
 /// Maximum forward step permitted per monotone counter reservation (`counter = u64::MAX` is
 /// unconditionally rejected so no single request can exhaust the 64-bit counter space).
 pub const MAX_COUNTER_WINDOW: u64 = 64;
+/// Default cumulative evaluation item quota per enrolled TOPRF key (`2^20 = 1,048,576` items).
+pub const MAX_EVALUATIONS_PER_KEY: u64 = 1 << 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     UnsupportedThreshold,

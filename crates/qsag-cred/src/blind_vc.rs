@@ -637,6 +637,27 @@ impl Drop for HolderCredentialSecret {
     }
 }
 
+impl HolderCredentialSecret {
+    /// Number of active Goldilocks attribute limbs (`<= MAX_VC_ATTRS`) committed by this credential.
+    #[inline]
+    pub const fn arity(&self) -> usize {
+        self.arity
+    }
+
+    /// Borrow the active Goldilocks attribute limbs (`&self.attrs[..self.arity]`) for cross-proof
+    /// (`BlindVC -> zk-Hem`) witness composition without copying secrets onto the stack.
+    #[inline]
+    pub fn attrs(&self) -> &[u64] {
+        &self.attrs[..self.arity]
+    }
+
+    /// Borrow the 4-limb Goldilocks holder blinding factor committed inside `attr_commit`.
+    #[inline]
+    pub const fn holder_blind(&self) -> &[u64; 4] {
+        &self.holder_blind
+    }
+}
+
 /// Issuance request proving an attested-attribute commitment while hiding its holder blind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlindIssuanceRequest {
@@ -1729,19 +1750,21 @@ fn ggm_expand_children(
     (left, right)
 }
 
-fn expand_ggm_tree_256(
+fn expand_ggm_tree_256_into(
     root_seed: &[u8; 32],
     presentation_nonce: &[u8; 32],
     rep: u32,
-) -> SecretBuffer<[[u8; 32]; 2 * VC_SD_LIMBO_PARTIES]> {
-    let mut tree = SecretBuffer([[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
-    tree.0[1] = *root_seed;
+    tree: &mut [[u8; 32]],
+) {
+    debug_assert_eq!(tree.len(), 2 * VC_SD_LIMBO_PARTIES);
+    tree[0] = [0u8; 32];
+    tree[1] = *root_seed;
     for depth in 0..VC_SD_GGM_DEPTH {
         let level_start = 1usize << depth;
         let level_width = 1usize << depth;
         for idx in 0..level_width {
             let parent_pos = level_start + idx;
-            let parent_seed = tree.0[parent_pos];
+            let parent_seed = tree[parent_pos];
             let (left, right) = ggm_expand_children(
                 &parent_seed,
                 presentation_nonce,
@@ -1749,19 +1772,18 @@ fn expand_ggm_tree_256(
                 depth as u8,
                 idx as u16,
             );
-            tree.0[2 * parent_pos] = left;
-            tree.0[2 * parent_pos + 1] = right;
+            tree[2 * parent_pos] = left;
+            tree[2 * parent_pos + 1] = right;
         }
     }
-    tree
 }
 
 fn extract_ggm_copath(
-    tree: &SecretBuffer<[[u8; 32]; 2 * VC_SD_LIMBO_PARTIES]>,
+    tree: &[[u8; 32]],
     hidden_party: u8,
 ) -> [[u8; 32]; VC_SD_GGM_DEPTH] {
     let leaf_pos = VC_SD_LIMBO_PARTIES + (hidden_party as usize);
-    core::array::from_fn(|step| tree.0[(leaf_pos >> step) ^ 1])
+    core::array::from_fn(|step| tree[(leaf_pos >> step) ^ 1])
 }
 
 fn reconstruct_ggm_leaves_256(
@@ -3206,31 +3228,46 @@ pub fn prove_selective_disclosure_with_profile(
     let total_party_limbs = PARTY_EXT_LIMBS + num_secret_wires + SD_TOTAL_GATES;
 
     struct R1RepState {
-        ggm_tree: SecretBuffer<[[u8; 32]; 2 * VC_SD_LIMBO_PARTIES]>,
-        com_1: [[u8; 32]; VC_SD_LIMBO_PARTIES],
+        ggm_tree: SecretBuffer<Vec<[u8; 32]>>,
+        com_1: Vec<[u8; 32]>,
         delta_w: SecretBuffer<Vec<u64>>,
         delta_z: SecretBuffer<Vec<u64>>,
         delta_c: Fp5,
-        u_sum: [Fp5; SD_GRID_L],
-        v_sum: [Fp5; SD_GRID_L],
+        u_sum: SecretBuffer<Vec<Fp5>>,
+        v_sum: SecretBuffer<Vec<Fp5>>,
         c_plain: Fp5,
-        m_sum: [Fp5; SD_RPOLY_COEFFS],
+        m_sum: SecretBuffer<Vec<Fp5>>,
+    }
+
+    impl R1RepState {
+        fn zeroed(num_secret_wires: usize) -> Self {
+            Self {
+                ggm_tree: SecretBuffer(vec![[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]),
+                com_1: vec![[0u8; 32]; VC_SD_LIMBO_PARTIES],
+                delta_w: SecretBuffer(Vec::with_capacity(num_secret_wires)),
+                delta_z: SecretBuffer(Vec::with_capacity(SD_TOTAL_GATES)),
+                delta_c: Fp5::ZERO,
+                u_sum: SecretBuffer(vec![Fp5::ZERO; SD_GRID_L]),
+                v_sum: SecretBuffer(vec![Fp5::ZERO; SD_GRID_L]),
+                c_plain: Fp5::ZERO,
+                m_sum: SecretBuffer(vec![Fp5::ZERO; SD_RPOLY_COEFFS]),
+            }
+        }
     }
 
     impl Drop for R1RepState {
         fn drop(&mut self) {
             self.delta_c.secret_wipe();
-            self.u_sum.secret_wipe();
-            self.v_sum.secret_wipe();
             self.c_plain.secret_wipe();
-            self.m_sum.secret_wipe();
         }
     }
 
-    // Round 1 (parallel across repetitions): expand GGM trees, stream 8-party SIMD tapes,
-    // accumulate mask sums, compute Party 255 `aux`, and commit all 256 parties.
+    // Round 1 (parallel across repetitions): expand GGM trees in place on the heap, stream
+    // 8-party SIMD tapes, accumulate mask sums, compute Party 255 `aux`, and commit all 256 parties
+    // without materializing 25+ KiB of secret seeds/masks on worker stacks.
     let r1_reps: Vec<alloc::boxed::Box<R1RepState>> = parallel_map_indexed(tau, |rep| {
         let rep_u32 = rep as u32;
+        let mut state = alloc::boxed::Box::new(R1RepState::zeroed(num_secret_wires));
         let root_seed = SecretBuffer(cshake256_framed_32(
             b"QSAG.VC.SD_GGM_ROOT.V1",
             &[
@@ -3240,15 +3277,16 @@ pub fn prove_selective_disclosure_with_profile(
                 &rep_u32.to_le_bytes(),
             ],
         ));
-        let ggm_tree = expand_ggm_tree_256(&root_seed, &presentation_nonce, rep_u32);
+        expand_ggm_tree_256_into(
+            &root_seed,
+            &presentation_nonce,
+            rep_u32,
+            &mut state.ggm_tree.0,
+        );
 
-        let mut u_sum = SecretBuffer([Fp5::ZERO; SD_GRID_L]);
-        let mut v_sum = SecretBuffer([Fp5::ZERO; SD_GRID_L]);
         let mut c_pad_sum = SecretBuffer(Fp5::ZERO);
-        let mut m_sum = SecretBuffer([Fp5::ZERO; SD_RPOLY_COEFFS]);
         let mut w_mask_sum = SecretBuffer(vec![0u64; num_secret_wires]);
         let mut z_mask_sum = SecretBuffer(vec![0u64; SD_TOTAL_GATES]);
-        let mut com_1 = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
         let mut salt_255 = [0u8; 32];
 
         let mut batch_tapes = SecretBuffer(core::array::from_fn::<_, 8, _>(|_| {
@@ -3257,7 +3295,7 @@ pub fn prove_selective_disclosure_with_profile(
         for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
             let base_p = batch * 8;
             let seeds_8 = SecretBuffer(core::array::from_fn::<_, 8, _>(|lane| {
-                ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]
+                state.ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]
             }));
             let mut prg = Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
             let salts = prg.extract_salts_1();
@@ -3267,13 +3305,19 @@ pub fn prove_selective_disclosure_with_profile(
                 let p = base_p + lane;
                 let party_masks = SecretBuffer(unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]));
                 let (u_p, v_p, c_p, m_p) = &*party_masks;
-                for l in 0..SD_GRID_L {
-                    u_sum[l] = u_sum[l].add(u_p[l]);
-                    v_sum[l] = v_sum[l].add(v_p[l]);
+                for ((u_acc, v_acc), (&u_val, &v_val)) in state
+                    .u_sum
+                    .0
+                    .iter_mut()
+                    .zip(state.v_sum.0.iter_mut())
+                    .zip(u_p.iter().zip(v_p.iter()))
+                {
+                    *u_acc = u_acc.add(u_val);
+                    *v_acc = v_acc.add(v_val);
                 }
                 *c_pad_sum = c_pad_sum.add(*c_p);
-                for d in 0..SD_RPOLY_COEFFS {
-                    m_sum[d] = m_sum[d].add(m_p[d]);
+                for (m_acc, &m_val) in state.m_sum.0.iter_mut().zip(m_p.iter()) {
+                    *m_acc = m_acc.add(m_val);
                 }
                 let w_slice = &tape[PARTY_EXT_LIMBS..PARTY_EXT_LIMBS + num_secret_wires];
                 for (acc, &wv) in w_mask_sum.0.iter_mut().zip(w_slice) {
@@ -3284,7 +3328,7 @@ pub fn prove_selective_disclosure_with_profile(
                     *acc = gl_add(*acc, zv);
                 }
                 if p < VC_SD_LIMBO_PARTIES - 1 {
-                    com_1[p] = commit_limbo_party_r1(
+                    state.com_1[p] = commit_limbo_party_r1(
                         &presentation_nonce,
                         rep_u32,
                         p as u16,
@@ -3299,42 +3343,29 @@ pub fn prove_selective_disclosure_with_profile(
             }
         }
 
-        let mut delta_w = SecretBuffer(Vec::with_capacity(num_secret_wires));
         for k in 0..num_secret_wires {
-            delta_w.0.push(gl_sub(secret_vals[k], w_mask_sum[k]));
+            state.delta_w.0.push(gl_sub(secret_vals[k], w_mask_sum[k]));
         }
-        let mut delta_z = SecretBuffer(Vec::with_capacity(SD_TOTAL_GATES));
         for g in 0..SD_TOTAL_GATES {
-            delta_z.0.push(gl_sub(trace.z[g], z_mask_sum[g]));
+            state.delta_z.0.push(gl_sub(trace.z[g], z_mask_sum[g]));
         }
-        let mut c_plain = SecretBuffer(Fp5::ZERO);
         for l in 0..SD_GRID_L {
-            *c_plain = c_plain.add(u_sum[l].mul(v_sum[l]));
+            state.c_plain = state.c_plain.add(state.u_sum.0[l].mul(state.v_sum.0[l]));
         }
-        let delta_c = c_plain.sub(*c_pad_sum);
+        state.delta_c = state.c_plain.sub(*c_pad_sum);
 
-        let aux_digest = digest_limbo_aux(&delta_w, &delta_z, &delta_c.to_limbs());
-        com_1[VC_SD_LIMBO_PARTIES - 1] = commit_limbo_party_r1(
+        let aux_digest = digest_limbo_aux(&state.delta_w, &state.delta_z, &state.delta_c.to_limbs());
+        state.com_1[VC_SD_LIMBO_PARTIES - 1] = commit_limbo_party_r1(
             &presentation_nonce,
             rep_u32,
             (VC_SD_LIMBO_PARTIES - 1) as u16,
-            &ggm_tree.0[VC_SD_LIMBO_PARTIES + VC_SD_LIMBO_PARTIES - 1],
+            &state.ggm_tree.0[VC_SD_LIMBO_PARTIES + VC_SD_LIMBO_PARTIES - 1],
             Some(&aux_digest),
             &salt_255,
         );
         ct_zeroize_bytes(&mut salt_255);
 
-        alloc::boxed::Box::new(R1RepState {
-            ggm_tree,
-            com_1,
-            delta_w,
-            delta_z,
-            delta_c,
-            u_sum: *u_sum,
-            v_sum: *v_sum,
-            c_plain: *c_plain,
-            m_sum: *m_sum,
-        })
+        state
     });
 
     ct_zeroize_bytes(&mut hedged_zk_seed);
@@ -4474,7 +4505,8 @@ mod tests {
     fn ggm_tree_256_roundtrip_and_hidden_leaf_isolation() {
         let root = [0x77u8; 32];
         let nonce = [0x21u8; 32];
-        let full = expand_ggm_tree_256(&root, &nonce, 3);
+        let mut full = SecretBuffer(vec![[0u8; 32]; 2 * VC_SD_LIMBO_PARTIES]);
+        expand_ggm_tree_256_into(&root, &nonce, 3, &mut full.0);
         for hidden in [0u8, 1, 127, 128, 254, 255] {
             let copath = extract_ggm_copath(&full, hidden);
             let rec = reconstruct_ggm_leaves_256(&copath, hidden, &nonce, 3);
@@ -5804,5 +5836,30 @@ mod tests {
                 want
             );
         }
+    }
+
+    #[test]
+    fn holder_credential_secret_accessors_match_attr_commit() {
+        let attrs = [101u64, 202, 303, 404];
+        let (req, holder) = holder_prepare_blind_issuance_with_profile(
+            0x77,
+            &attrs,
+            [0x11; 32],
+            5,
+            [0x22; 32],
+            [0x33; 32],
+            ZkSoundnessProfile::Classical128,
+        )
+        .unwrap();
+        assert_eq!(holder.arity(), 4);
+        assert_eq!(holder.attrs(), &attrs);
+        let recomputed = compute_vc_poseidon2_commit(
+            holder.schema_id,
+            holder.attrs(),
+            holder.holder_blind(),
+            VC_ATTR_COMMIT_TAG,
+        )
+        .unwrap();
+        assert_eq!(recomputed, req.attr_commit);
     }
 }

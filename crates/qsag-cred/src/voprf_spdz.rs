@@ -54,11 +54,10 @@
 //! clone/serialization prevent issuing the same tuple to two quorums. The legacy
 //! [`SpdzSession::begin`] remains a one-shot convenience entry point.
 //!
-//! Tuples are generated in chunks of `POW7_CHUNK` power tuples or `BEAVER_CHUNK`
-//! triples, one dealerless run each under its own session identifier. The MAC
-//! authentication inside a run costs time quadratic in the run's size, so many small
-//! runs are several times cheaper than one large run; each run keeps the full
-//! statistical parameter of the protocol.
+//! Preprocessing generates the full requested batch of `sboxes` power tuples and
+//! `triples` Beaver triples in a single dealerless `run_dealerless_pi_pow7_with_alpha`
+//! ceremony; `qsag_core::preprocessing` authenticates batches in linear `BLOCK = 32`
+//! flights while keeping the full statistical soundness of the protocol.
 //!
 //! A tuple is consumed by advancing a vault cursor before the tuple is read, so no
 //! path hands one out twice. A request the session refuses (wrong context, a
@@ -104,13 +103,6 @@ const SBOXES_PER_ITEM: usize = 118;
 /// Client mask triples per item: four input and four output limbs, two masks each.
 const MASKS_PER_ITEM: usize = 16;
 const LANES: usize = 4;
-/// Power tuples per dealerless run. A power tuple costs six triples and seven
-/// authenticated values. Measured for one item (118 tuples) on persvati, 2026-11-15:
-/// one run of 118 takes 11.7 s between two servers and 20.8 s among three; runs of 4
-/// take 1.5 s and 3.6 s; runs of 1 or 16 are slower again.
-const POW7_CHUNK: usize = 4;
-/// Plain triples per dealerless run.
-const BEAVER_CHUNK: usize = 32;
 const SERVER_BYTES: usize = 8 + 3 + 32 + 9 + 16 + LANES * 8 + LANES * 16;
 
 fn preprocess_error(error: PreprocessError) -> Error {
@@ -1369,37 +1361,25 @@ impl SpdzReservoir {
         // Each session copies the key shares it checks; none stay with idle tuples.
         this.key.secret_wipe();
 
-        // Bounded runs: authentication inside one run is quadratic in its size.
+        // Single unchunked ceremony: `qsag_core::preprocessing` authenticates in linear
+        // `BLOCK = 32` flights without quadratic whole-batch overhead.
         let triples = MASKS_PER_ITEM * items + LANES * sessions;
-        let runs = (0..sboxes)
-            .step_by(POW7_CHUNK)
-            .map(|at| (POW7_CHUNK.min(sboxes - at), 0))
-            .chain(
-                (0..triples)
-                    .step_by(BEAVER_CHUNK)
-                    .map(|at| (0, BEAVER_CHUNK.min(triples - at))),
-            );
-        for (index, (pow7, beaver)) in runs.enumerate() {
-            let run_sid = hash(
-                b"QSAG.TOPRF.SPDZ.CHUNK.V1",
-                &[&sid, &(index as u64).to_le_bytes()],
-            );
-            this.pool.chunks.push(
-                run_dealerless_pi_pow7_with_alpha(
-                    run_sid,
-                    threshold,
-                    &this.points,
-                    pow7,
-                    beaver,
-                    0,
-                    &alpha_contribs,
-                    &alpha_shares,
-                    &mut mesh,
-                    &mut this.rngs,
-                )
-                .map_err(preprocess_error)?,
-            );
-        }
+        let run_sid = hash(b"QSAG.TOPRF.SPDZ.CHUNK.V1", &[&sid, &0u64.to_le_bytes()]);
+        this.pool.chunks.push(
+            run_dealerless_pi_pow7_with_alpha(
+                run_sid,
+                threshold,
+                &this.points,
+                sboxes,
+                triples,
+                0,
+                &alpha_contribs,
+                &alpha_shares,
+                &mut mesh,
+                &mut this.rngs,
+            )
+            .map_err(preprocess_error)?,
+        );
         Ok(Self {
             state: this,
             sessions_remaining: sessions,
@@ -1562,7 +1542,10 @@ fn reserve_counters(
     items: usize,
 ) -> Result<(), Error> {
     let first = quorum.first().ok_or(Error::UnsupportedThreshold)?;
-    if quorum.len() < first.public.config.threshold
+    let cfg = first.public.config;
+    if quorum.len() < cfg.threshold
+        || quorum.len() > cfg.servers
+        || quorum.iter().any(|s| s.party >= cfg.servers)
         || quorum.windows(2).any(|pair| pair[0].party >= pair[1].party)
     {
         return Err(Error::UnsupportedThreshold);
@@ -1578,14 +1561,25 @@ fn reserve_counters(
         return Err(Error::Context);
     }
     let key = public.public_key().commitment();
+    // Pre-validate monotone counter admission across ALL servers before mutating `stores[0]`.
     for (server, store) in quorum.iter_mut().zip(stores.iter()) {
         admit_counter(&mut server.last_counter, &**store, counter)?;
     }
+    // Ratchet every server's in-memory `last_counter` monotonically even if an I/O failure on
+    // `stores[i]` (`i > 0`) aborts partway through durable reservation.
+    let mut persist_err = None;
     for (server, store) in quorum.iter_mut().zip(stores.iter_mut()) {
-        store.reserve(&key, server.party, counter, items)?;
-        server.last_counter = Some(counter);
+        if persist_err.is_none()
+            && let Err(err) = store.reserve(&key, server.party, counter, items)
+        {
+            persist_err = Some(err);
+        }
+        server.last_counter = Some(server.last_counter.map_or(counter, |last| last.max(counter)));
     }
-    Ok(())
+    match persist_err {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -2029,6 +2023,62 @@ mod tests {
                     started.elapsed()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn partial_store_failure_ratchets_in_memory_counters_and_prevalidates_quorum() {
+        struct FailOnReserveStore(Option<u64>);
+        impl CounterStore for FailOnReserveStore {
+            fn high_water(&self) -> Result<Option<u64>, Error> {
+                Ok(self.0)
+            }
+            fn reserve(&mut self, _: &[u8; 32], _: usize, _: u64, _: usize) -> Result<(), Error> {
+                Err(Error::Counter)
+            }
+        }
+
+        let config = SpdzConfig::new(2, 3).unwrap();
+        let mut servers = spdz_dkg(config, [0x91; 32], &entropy(3, 0x92)).unwrap();
+
+        // 1. Pre-validation catches `stores[1]` already at counter `5` BEFORE mutating `stores[0]`!
+        {
+            let mut quorum: Vec<&mut SpdzServer> = servers.iter_mut().take(2).collect();
+            let mut s0 = Store(None);
+            let mut s1 = Store(Some(5));
+            let mut refs: [&mut dyn CounterStore; 2] = [&mut s0, &mut s1];
+            assert_eq!(
+                reserve_counters(&mut quorum, &mut refs, 5, 1),
+                Err(Error::Counter)
+            );
+            assert_eq!(s0.0, None);
+        }
+
+        // 2. Partial store write failure on `stores[1]` after `stores[0]` persisted counter `6`
+        // still ratchets BOTH `servers[0].last_counter` and `servers[1].last_counter` to `Some(6)`!
+        {
+            let mut quorum: Vec<&mut SpdzServer> = servers.iter_mut().take(2).collect();
+            let mut s0 = Store(Some(5));
+            let mut s1_fail = FailOnReserveStore(Some(5));
+            let mut refs: [&mut dyn CounterStore; 2] = [&mut s0, &mut s1_fail];
+            assert_eq!(
+                reserve_counters(&mut quorum, &mut refs, 6, 1),
+                Err(Error::Counter)
+            );
+            assert_eq!(s0.0, Some(6));
+            assert_eq!(quorum[0].last_counter, Some(6));
+            assert_eq!(quorum[1].last_counter, Some(6));
+
+            // Replaying counter `6` against `servers[1]` now fails closed in memory!
+            let mut s1_recovered = Store(Some(5));
+            let mut refs_retry: [&mut dyn CounterStore; 2] = [&mut s0, &mut s1_recovered];
+            assert_eq!(
+                reserve_counters(&mut quorum, &mut refs_retry, 6, 1),
+                Err(Error::Counter)
+            );
+            reserve_counters(&mut quorum, &mut refs_retry, 7, 1).unwrap();
+            assert_eq!(s0.0, Some(7));
+            assert_eq!(s1_recovered.0, Some(7));
         }
     }
 }
