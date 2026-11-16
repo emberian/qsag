@@ -773,6 +773,12 @@ impl ProverJobDescriptor {
 /// backend identity, `ProverKernelSlot::algorithm_domain()`, [`CertifiedProverKernelPin`] SHA-256
 /// and Poseidon2 digests, [`VulkanDeviceInfo::audit_evidence_digest`], `transcript_anchor`, and
 /// host-visible `input_digest` / `output_digest`.
+///
+/// These receipts authenticate host-visible arguments and results, not a digest of the
+/// entire persistent VRAM arena. For a stateful sequence the caller must bind the preceding
+/// witness commitment and operations into `transcript_anchor`; verification authenticates
+/// that supplied anchor and does not reconstruct or validate the sequence. Operations with
+/// no host-visible result bind completion metadata in `output_digest`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProverExecutionReceipt {
     pub backend_id: [u8; 32],
@@ -1700,10 +1706,11 @@ pub fn spot_check_merkle_layer(
 mod tests {
     use super::*;
     use crate::gf2_128::{gf2_128_inv_or_zero, gf2_128_mul};
+    #[cfg(feature = "alloc")]
+    use crate::goldilocks::ext2_add;
     use crate::goldilocks::{
-        GOLDILOCKS_PRIME, ext2_add, ext2_inv_or_zero, ext2_mul, gl_add, gl_inv_or_zero, gl_mul,
-        gl_reduce128, goldilocks_primitive_root, pack_bytes32_to_limbs56,
-        unpack_limbs56_to_bytes32,
+        GOLDILOCKS_PRIME, ext2_inv_or_zero, ext2_mul, gl_add, gl_inv_or_zero, gl_mul, gl_reduce128,
+        goldilocks_primitive_root, pack_bytes32_to_limbs56, unpack_limbs56_to_bytes32,
     };
 
     #[test]

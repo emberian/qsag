@@ -42,7 +42,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::relation::Shape;
+use super::recursive_whir::{
+    Backend as RecBackend, Base as RecBase, Correlated3WhirProof, Digest as RecDigest,
+    Ext as RecExt, FixedPathWhirParams, Native as RecNative, PublicRecursionCommitment,
+    Transcript as RecTranscript, commit_for_recursion, f as rec_f, open_correlated3_for_recursion,
+    verify_correlated3_gadget,
+};
+use super::relation::{HologramMeta, Poseidon2InteriorTemplate, Shape};
 use super::{CornerPadBasis, LibraMask, NonzeroChallenge, PrimitiveChallenge, SeedStream, interp};
 use crate::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
 use crate::pcs::{
@@ -1685,6 +1691,2233 @@ pub fn verify_public(
     )
 }
 
+// ============================================================================
+// Spark Matrix Hologram + LogUp-GKR (`< 15 ms` Native & Succinct In-Circuit)
+// ============================================================================
+
+/// Wire magic for [`HologramPublicProof`].
+pub const HOLOGRAM_PUBLIC_WIRE_MAGIC: &[u8; 8] = b"QSAGHGP1";
+/// Wire magic for [`ShapeVerifierKey`].
+pub const SHAPE_VK_WIRE_MAGIC: &[u8; 8] = b"QSAGSVK1";
+
+/// Degree of the Spark sparse-matrix evaluation sumcheck (`e_x * e_y * V`).
+const SPARK_MAT_DEGREE: usize = 3;
+/// Degree of each LogUp-GKR fractional-tree layer sumcheck (`eq * (p_0 q_1 + p_1 q_0 + beta q_0 q_1)`).
+const GKR_LAYER_DEGREE: usize = 3;
+
+/// Compact (`< 256` bytes) sublinear verifier key for a compiled [`ShapeHologram`].
+///
+/// Replaces the multi-megabyte [`Shape`] CSR during native and recursive verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeVerifierKey {
+    pub shape_digest: [u8; 32],
+    pub log_rows: usize,
+    pub num_sbox: usize,
+    pub num_vars: usize,
+    pub num_public: usize,
+    pub var_bits: usize,
+    pub ell_nz: usize,
+    pub hologram_meta: HologramMeta,
+    pub regime: WhirSecurityRegime,
+    pub hologram_comm: CanopyCommitment,
+    pub rec_hologram_root: Option<RecDigest>,
+}
+
+impl ShapeVerifierKey {
+    /// Variable count of each 4-slice half in the 2-poly native hologram commitment (`ell_nz + 2`).
+    #[inline]
+    pub fn native_pack_vars(&self) -> usize {
+        self.ell_nz + 2
+    }
+
+    /// Variable count of the 8-slice single-poly recursive hologram commitment (`ell_nz + 3`).
+    #[inline]
+    pub fn pack_vars(&self) -> usize {
+        self.ell_nz + 3
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(160);
+        out.extend_from_slice(SHAPE_VK_WIRE_MAGIC);
+        out.extend_from_slice(&self.shape_digest);
+        out.push(self.log_rows as u8);
+        out.extend_from_slice(&(self.num_sbox as u64).to_le_bytes());
+        out.extend_from_slice(&(self.num_vars as u64).to_le_bytes());
+        out.extend_from_slice(&(self.num_public as u64).to_le_bytes());
+        out.push(self.var_bits as u8);
+        out.push(self.ell_nz as u8);
+        out.extend_from_slice(&(self.hologram_meta.poseidon2_perms as u64).to_le_bytes());
+        out.extend_from_slice(&(self.hologram_meta.pub_var_blocks as u64).to_le_bytes());
+        out.push(self.regime as u8);
+        out.extend_from_slice(&self.hologram_comm.to_bytes());
+        match self.rec_hologram_root {
+            Some(r) => {
+                out.push(1);
+                for limb in r {
+                    out.extend_from_slice(&limb.to_le_bytes());
+                }
+            }
+            None => out.push(0),
+        }
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.get(..8)? != SHAPE_VK_WIRE_MAGIC {
+            return None;
+        }
+        let shape_digest: [u8; 32] = bytes.get(8..40)?.try_into().ok()?;
+        let log_rows = *bytes.get(40)? as usize;
+        let num_sbox = usize::try_from(u64::from_le_bytes(bytes.get(41..49)?.try_into().ok()?)).ok()?;
+        let num_vars = usize::try_from(u64::from_le_bytes(bytes.get(49..57)?.try_into().ok()?)).ok()?;
+        let num_public =
+            usize::try_from(u64::from_le_bytes(bytes.get(57..65)?.try_into().ok()?)).ok()?;
+        let var_bits = *bytes.get(65)? as usize;
+        let ell_nz = *bytes.get(66)? as usize;
+        let poseidon2_perms =
+            usize::try_from(u64::from_le_bytes(bytes.get(67..75)?.try_into().ok()?)).ok()?;
+        let pub_var_blocks =
+            usize::try_from(u64::from_le_bytes(bytes.get(75..83)?.try_into().ok()?)).ok()?;
+        let regime = WhirSecurityRegime::from_u8(*bytes.get(83)?)?;
+        if !regime.meets_qrom_128_floor()
+            || !(4..=MAX_PCS_NUM_VARS).contains(&log_rows)
+            || !(2..=MAX_PCS_NUM_VARS).contains(&var_bits)
+            || ell_nz < log_rows.max(var_bits)
+            || ell_nz + 3 > MAX_PCS_NUM_VARS
+        {
+            return None;
+        }
+        let (hologram_comm, used) = CanopyCommitment::from_bytes_canonical(bytes.get(84..)?)?;
+        let mut pos = 84 + used;
+        let rec_tag = *bytes.get(pos)?;
+        pos += 1;
+        let rec_hologram_root = match rec_tag {
+            0 => None,
+            1 => {
+                let mut root = [F::ZERO; 4];
+                for slot in &mut root {
+                    let chunk: [u8; 8] = bytes.get(pos..pos + 8)?.try_into().ok()?;
+                    pos += 8;
+                    *slot = F::from_le_bytes_canonical(chunk).ok()?;
+                }
+                Some(root)
+            }
+            _ => return None,
+        };
+        if pos != bytes.len() {
+            return None;
+        }
+        Some(Self {
+            shape_digest,
+            log_rows,
+            num_sbox,
+            num_vars,
+            num_public,
+            var_bits,
+            ell_nz,
+            hologram_meta: HologramMeta {
+                poseidon2_perms,
+                pub_var_blocks,
+            },
+            regime,
+            hologram_comm,
+            rec_hologram_root,
+        })
+    }
+}
+
+/// Offline-compiled Spark matrix hologram for a fixed public [`Shape`].
+pub struct ShapeHologram {
+    vk: ShapeVerifierKey,
+    row_idx: Vec<u32>,
+    col_idx: Vec<u32>,
+    val_a: Vec<F>,
+    val_b: Vec<F>,
+    val_c: Vec<F>,
+    count_x: Vec<F>,
+    count_y: Vec<F>,
+    h_pair_monos: [Vec<F>; 2],
+    h_state: crate::pcs::HemWhirProverState,
+    rec_h: Option<PublicRecursionCommitment>,
+}
+
+impl Clone for ShapeHologram {
+    fn clone(&self) -> Self {
+        let schedule = self.vk.regime.schedule(self.vk.native_pack_vars());
+        let h_full = self.h_super_evals();
+        let half = h_full.len() / 2;
+        let polys = vec![h_full[..half].to_vec(), h_full[half..].to_vec()];
+        let (comm, h_state) =
+            crate::pcs::whir_commit_batch_owned_with_schedule(polys, &[0u8; 32], &schedule);
+        debug_assert_eq!(comm, self.vk.hologram_comm);
+        Self {
+            vk: self.vk.clone(),
+            row_idx: self.row_idx.clone(),
+            col_idx: self.col_idx.clone(),
+            val_a: self.val_a.clone(),
+            val_b: self.val_b.clone(),
+            val_c: self.val_c.clone(),
+            count_x: self.count_x.clone(),
+            count_y: self.count_y.clone(),
+            h_pair_monos: self.h_pair_monos.clone(),
+            h_state,
+            rec_h: self.rec_h.clone(),
+        }
+    }
+}
+
+impl core::fmt::Debug for ShapeHologram {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        fmt.debug_struct("ShapeHologram")
+            .field("vk", &self.vk)
+            .finish()
+    }
+}
+
+impl ShapeHologram {
+    /// Deterministically compile the residual sparse hologram of `shape` under `regime`.
+    pub fn compile(shape: &Shape, regime: WhirSecurityRegime) -> Result<Self, ZkHemError> {
+        let layout = public_layout(shape, regime).ok_or(ZkHemError::RelationTooLarge)?;
+        let var_bits = layout.var_bits;
+        let num_rows = shape.num_rows();
+
+        // Merge sorted `(col, val)` iterators across `(A, B, C)` on residual rows so each
+        // distinct `(row, col)` coordinate uses a single hologram slot.
+        let mut row_idx = Vec::new();
+        let mut col_idx = Vec::new();
+        let mut val_a = Vec::new();
+        let mut val_b = Vec::new();
+        let mut val_c = Vec::new();
+
+        for r in 0..num_rows {
+            if !shape.is_residual_row(r) {
+                continue;
+            }
+            let mut ia = shape.a.row(r).peekable();
+            let mut ib = shape.b.row(r).peekable();
+            let mut ic = shape.c.row(r).peekable();
+            loop {
+                let min_col = [
+                    ia.peek().map(|&(c, _)| c),
+                    ib.peek().map(|&(c, _)| c),
+                    ic.peek().map(|&(c, _)| c),
+                ]
+                .into_iter()
+                .flatten()
+                .min();
+                let Some(col) = min_col else {
+                    break;
+                };
+                let take_if = |it: &mut core::iter::Peekable<_>| -> F {
+                    if let Some(&(c, v)) = it.peek()
+                        && c == col
+                    {
+                        let _ = it.next();
+                        return v;
+                    }
+                    F::ZERO
+                };
+                let va = take_if(&mut ia);
+                let vb = take_if(&mut ib);
+                let vc = take_if(&mut ic);
+                if !(va.is_zero() && vb.is_zero() && vc.is_zero()) {
+                    row_idx.push(r as u32);
+                    col_idx.push(col as u32);
+                    val_a.push(va);
+                    val_b.push(vb);
+                    val_c.push(vc);
+                }
+            }
+        }
+
+        let min_entries = 1usize << shape.log_rows.max(var_bits).max(2);
+        let nz_cap = row_idx.len().max(min_entries).next_power_of_two();
+        let ell_nz = nz_cap.trailing_zeros() as usize;
+        let pack_vars = ell_nz + 3;
+        if pack_vars > MAX_PCS_NUM_VARS {
+            return Err(ZkHemError::RelationTooLarge);
+        }
+
+        // Pad unused slots with `(row = 0, col = 0, vals = 0)` and account their reads in `c_x[0], c_y[0]`.
+        row_idx.resize(nz_cap, 0);
+        col_idx.resize(nz_cap, 0);
+        val_a.resize(nz_cap, F::ZERO);
+        val_b.resize(nz_cap, F::ZERO);
+        val_c.resize(nz_cap, F::ZERO);
+
+        let mut cx_u64 = vec![0u64; nz_cap];
+        let mut cy_u64 = vec![0u64; nz_cap];
+        for k in 0..nz_cap {
+            cx_u64[row_idx[k] as usize] += 1;
+            cy_u64[col_idx[k] as usize] += 1;
+        }
+        let count_x: Vec<F> = cx_u64.into_iter().map(F::from_u64_reduced).collect();
+        let count_y: Vec<F> = cy_u64.into_iter().map(F::from_u64_reduced).collect();
+
+        let mut h_super = vec![F::ZERO; 8 * nz_cap];
+        for k in 0..nz_cap {
+            h_super[k] = F::from_u64_reduced(u64::from(row_idx[k]));
+            h_super[nz_cap + k] = F::from_u64_reduced(u64::from(col_idx[k]));
+        }
+        h_super[2 * nz_cap..3 * nz_cap].copy_from_slice(&val_a);
+        h_super[3 * nz_cap..4 * nz_cap].copy_from_slice(&val_b);
+        h_super[4 * nz_cap..5 * nz_cap].copy_from_slice(&val_c);
+        h_super[5 * nz_cap..6 * nz_cap].copy_from_slice(&count_x);
+        h_super[6 * nz_cap..7 * nz_cap].copy_from_slice(&count_y);
+
+        let rec_h = if regime.uses_poseidon2_canopy() {
+            let rec_params =
+                FixedPathWhirParams::new(regime, pack_vars).map_err(|_| ZkHemError::RelationTooLarge)?;
+            Some(
+                PublicRecursionCommitment::commit(&rec_params, &h_super)
+                    .map_err(|_| ZkHemError::RelationTooLarge)?,
+            )
+        } else {
+            None
+        };
+        let rec_hologram_root = rec_h.as_ref().map(PublicRecursionCommitment::root);
+
+        let half_h = 4 * nz_cap;
+        let h0 = h_super[..half_h].to_vec();
+        let h1 = h_super[half_h..].to_vec();
+        let h_pair_monos = [
+            hypercube_to_monomial_coeffs(&h0),
+            hypercube_to_monomial_coeffs(&h1),
+        ];
+        let h_schedule = regime.schedule(ell_nz + 2);
+        let (hologram_comm, h_state) = crate::pcs::whir_commit_batch_owned_with_schedule(
+            vec![h0, h1],
+            &[0u8; 32],
+            &h_schedule,
+        );
+
+        let vk = ShapeVerifierKey {
+            shape_digest: shape.digest(),
+            log_rows: shape.log_rows,
+            num_sbox: shape.num_sbox,
+            num_vars: shape.num_vars,
+            num_public: shape.num_public,
+            var_bits,
+            ell_nz,
+            hologram_meta: shape.hologram_meta(),
+            regime,
+            hologram_comm,
+            rec_hologram_root,
+        };
+        Ok(Self {
+            vk,
+            row_idx,
+            col_idx,
+            val_a,
+            val_b,
+            val_c,
+            count_x,
+            count_y,
+            h_pair_monos,
+            h_state,
+            rec_h,
+        })
+    }
+
+    #[inline]
+    pub fn verifier_key(&self) -> &ShapeVerifierKey {
+        &self.vk
+    }
+
+    fn h_super_evals(&self) -> Vec<F> {
+        let nz_cap = 1usize << self.vk.ell_nz;
+        let mut h_super = vec![F::ZERO; 8 * nz_cap];
+        for k in 0..nz_cap {
+            h_super[k] = F::from_u64_reduced(u64::from(self.row_idx[k]));
+            h_super[nz_cap + k] = F::from_u64_reduced(u64::from(self.col_idx[k]));
+        }
+        h_super[2 * nz_cap..3 * nz_cap].copy_from_slice(&self.val_a);
+        h_super[3 * nz_cap..4 * nz_cap].copy_from_slice(&self.val_b);
+        h_super[4 * nz_cap..5 * nz_cap].copy_from_slice(&self.val_c);
+        h_super[5 * nz_cap..6 * nz_cap].copy_from_slice(&self.count_x);
+        h_super[6 * nz_cap..7 * nz_cap].copy_from_slice(&self.count_y);
+        h_super
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Generic closed-form Poseidon2 `106 x 118` interior evaluator (`Native` & `ConstraintSystem`)
+// ----------------------------------------------------------------------------
+
+fn eq_table_gadget<B: RecBackend>(b: &mut B, point: &[RecExt<B::W>]) -> Vec<RecExt<B::W>> {
+    let one = RecExt::<B::W>::one();
+    let mut table = vec![one];
+    for r in point {
+        let mut lo = Vec::with_capacity(table.len());
+        let mut hi = Vec::with_capacity(table.len());
+        for v in &table {
+            let vh = v.mul(b, r);
+            lo.push(v.sub(&vh));
+            hi.push(vh);
+        }
+        lo.extend(hi);
+        table = lo;
+    }
+    table
+}
+
+fn eq_eval_gadget<B: RecBackend>(b: &mut B, x: &[RecExt<B::W>], y: &[RecExt<B::W>]) -> RecExt<B::W> {
+    assert_eq!(x.len(), y.len());
+    let one = RecExt::<B::W>::one();
+    let mut acc = one.clone();
+    for (xi, yi) in x.iter().zip(y) {
+        let xy = xi.mul(b, yi);
+        let factor = xy.add(&xy).add(&one).sub(xi).sub(yi);
+        acc = acc.mul(b, &factor);
+    }
+    acc
+}
+
+fn prefix_indicator_gadget<B: RecBackend>(
+    b: &mut B,
+    point: &[RecExt<B::W>],
+    count: usize,
+) -> RecExt<B::W> {
+    let one = RecExt::<B::W>::one();
+    if count == 0 {
+        return RecExt::zero();
+    }
+    if count >> point.len() != 0 {
+        return one;
+    }
+    let mut acc = RecExt::zero();
+    let mut prefix = one.clone();
+    for (j, r) in point.iter().enumerate().rev() {
+        if (count >> j) & 1 == 1 {
+            let term = prefix.mul(b, &one.sub(r));
+            acc = acc.add(&term);
+            prefix = prefix.mul(b, r);
+        } else {
+            prefix = prefix.mul(b, &one.sub(r));
+        }
+    }
+    acc
+}
+
+/// $\sum_{p=0}^{P-1} \text{eq}(u_x, p) \cdot \text{eq}(u_y, B_{\text{pub}} + p)$ in $O(\log P)$
+/// via a 4-state LSB-to-MSB `(carry_in, lt_P)` automaton with zero witness-dependent branches.
+fn prefix_diag_gadget<B: RecBackend>(
+    b: &mut B,
+    ux: &[RecExt<B::W>],
+    uy: &[RecExt<B::W>],
+    perms: usize,
+    pub_blocks: usize,
+) -> RecExt<B::W> {
+    if perms == 0 {
+        return RecExt::zero();
+    }
+    let mx = ux.len();
+    let my = uy.len();
+    let m = mx.max(my);
+    assert!(perms < (1usize << mx) && pub_blocks + perms <= (1usize << my));
+    let one = RecExt::<B::W>::one();
+    let mut dp = [
+        [one.clone(), RecExt::zero()],
+        [RecExt::zero(), RecExt::zero()],
+    ];
+    let mut live = [[true, false], [false, false]];
+
+    for k in 0..m {
+        let bk = (pub_blocks >> k) & 1;
+        let pk = (perms >> k) & 1;
+        let mut next_dp = [
+            [RecExt::zero(), RecExt::zero()],
+            [RecExt::zero(), RecExt::zero()],
+        ];
+        let mut next_live = [[false; 2]; 2];
+
+        for bp in 0..=1usize {
+            if k >= mx && bp == 1 {
+                continue;
+            }
+            for carry in 0..=1usize {
+                if !live[carry][0] && !live[carry][1] {
+                    continue;
+                }
+                let sum = bp + bk + carry;
+                let bq = sum & 1;
+                let nc = sum >> 1;
+                if k >= my && bq == 1 {
+                    continue;
+                }
+                let wx = if k < mx {
+                    if bp == 1 {
+                        Some(ux[k].clone())
+                    } else {
+                        Some(one.sub(&ux[k]))
+                    }
+                } else {
+                    None
+                };
+                let wy = if k < my {
+                    if bq == 1 {
+                        Some(uy[k].clone())
+                    } else {
+                        Some(one.sub(&uy[k]))
+                    }
+                } else {
+                    None
+                };
+                let w_step = match (wx, wy) {
+                    (Some(x), Some(y)) => Some(x.mul(b, &y)),
+                    (Some(x), None) => Some(x),
+                    (None, Some(y)) => Some(y),
+                    (None, None) => None,
+                };
+                for lt in 0..=1usize {
+                    if !live[carry][lt] {
+                        continue;
+                    }
+                    let nlt = if bp < pk {
+                        1
+                    } else if bp > pk {
+                        0
+                    } else {
+                        lt
+                    };
+                    let contrib = match &w_step {
+                        Some(w) => dp[carry][lt].mul(b, w),
+                        None => dp[carry][lt].clone(),
+                    };
+                    next_dp[nc][nlt] = if next_live[nc][nlt] {
+                        next_dp[nc][nlt].add(&contrib)
+                    } else {
+                        contrib
+                    };
+                    next_live[nc][nlt] = true;
+                }
+            }
+        }
+        dp = next_dp;
+        live = next_live;
+    }
+    if live[0][1] {
+        dp[0][1].clone()
+    } else {
+        RecExt::zero()
+    }
+}
+
+pub(crate) fn eval_poseidon2_interior_gadget<B: RecBackend>(
+    b: &mut B,
+    meta: HologramMeta,
+    rx: &[RecExt<B::W>],
+    ry: &[RecExt<B::W>],
+    combine: &[RecExt<B::W>; 3],
+) -> RecExt<B::W> {
+    if meta.poseidon2_perms == 0 {
+        return RecExt::zero();
+    }
+    assert!(rx.len() >= 7 && ry.len() >= 7);
+    let eq_rx_lo = eq_table_gadget(b, &rx[..7]);
+    let eq_ry_lo = eq_table_gadget(b, &ry[..7]);
+    let (sa, sc, ca) = Poseidon2InteriorTemplate::with(|tpl| {
+        let mut sa = RecExt::zero();
+        let mut sc = RecExt::zero();
+        let mut ca = RecExt::zero();
+        for r_off in 0..106 {
+            let r = 12 + r_off;
+            let mut row_lc = RecExt::zero();
+            for &(w, coeff) in &tpl.rows_a[r_off] {
+                row_lc = row_lc.add(&eq_ry_lo[w as usize].scale(coeff));
+            }
+            let term_a = eq_rx_lo[r].mul(b, &row_lc);
+            sa = sa.add(&term_a);
+            let term_c = eq_rx_lo[r].mul(b, &eq_ry_lo[r]);
+            sc = sc.add(&term_c);
+            if !tpl.const_a[r_off].is_zero() {
+                ca = ca.add(&eq_rx_lo[r].scale(tpl.const_a[r_off]));
+            }
+        }
+        (sa, sc, ca)
+    });
+    let u_wires = combine[0].mul(b, &sa).add(&combine[2].mul(b, &sc));
+    let u_const = combine[0].mul(b, &ca);
+    let diag = prefix_diag_gadget(
+        b,
+        &rx[7..],
+        &ry[7..],
+        meta.poseidon2_perms,
+        meta.pub_var_blocks,
+    );
+    let pref_p = prefix_indicator_gadget(b, &rx[7..], meta.poseidon2_perms);
+    let one = RecExt::<B::W>::one();
+    let mut eq_ry_zero = one.clone();
+    for r in ry {
+        eq_ry_zero = eq_ry_zero.mul(b, &one.sub(r));
+    }
+    let wire_part = diag.mul(b, &u_wires);
+    let const_factor = pref_p.mul(b, &eq_ry_zero);
+    let const_part = const_factor.mul(b, &u_const);
+    wire_part.add(&const_part)
+}
+
+pub(crate) fn eval_poseidon2_interior_native(
+    meta: HologramMeta,
+    rx: &[E],
+    ry: &[E],
+    combine: &[E; 3],
+) -> E {
+    if meta.poseidon2_perms == 0 {
+        return E::ZERO;
+    }
+    let mut b = RecNative::default();
+    let rx_c: Vec<_> = rx.iter().copied().map(RecExt::constant).collect();
+    let ry_c: Vec<_> = ry.iter().copied().map(RecExt::constant).collect();
+    let comb_c = combine.map(RecExt::constant);
+    eval_poseidon2_interior_gadget(&mut b, meta, &rx_c, &ry_c, &comb_c).value(&b)
+}
+
+// ----------------------------------------------------------------------------
+// LogUp-GKR Layer Prover & Verifier Helpers
+// ----------------------------------------------------------------------------
+
+/// One layer of the binary LogUp-GKR fractional sumcheck from root (`m = 0`) down to leaves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogUpGkrLayer {
+    /// `m` degree-3 sumcheck round polynomials (each of length `GKR_LAYER_DEGREE + 1 = 4`).
+    pub rounds: Vec<[E; GKR_LAYER_DEGREE + 1]>,
+    /// `[p_L, p_R, q_L, q_R]` at `(0, u*)` and `(1, u*)`.
+    pub split: [E; 4],
+}
+
+/// Build the `2^(ell_nz + 2)` leaf numerators and denominators of the 4-way LogUp-GKR tree.
+#[allow(clippy::too_many_arguments)]
+fn build_gkr_leaves(
+    holo: &ShapeHologram,
+    ex: &[E],
+    ey: &[E],
+    eq_rx: &[E],
+    eq_ry: &[E],
+    alpha_mem: E,
+    gamma_x: E,
+    gamma_y: E,
+    delta: E,
+) -> (Vec<E>, Vec<E>) {
+    let m = 1usize << holo.vk.ell_nz;
+    let total = 4 * m;
+    let mut p0 = vec![E::ZERO; total];
+    let mut q0 = vec![E::ZERO; total];
+    let chunk = par_chunk(m);
+
+    // Block 0: +1 / (gamma_x - (row[k] + alpha * ex[k]))
+    for_each_chunk_mut(&mut p0[..m], chunk, |_, part| part.fill(E::ONE));
+    for_each_chunk_mut(&mut q0[..m], chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            let k = base + off;
+            let row_f = F::from_u64_reduced(u64::from(holo.row_idx[k]));
+            *slot = gamma_x - (E::from_base(row_f) + alpha_mem * ex[k]);
+        }
+    });
+
+    // Block 1: -c_x[k] / (gamma_x - (k + alpha * eq_rx_padded[k]))
+    let rx_len = eq_rx.len();
+    for_each_chunk_mut(&mut p0[m..2 * m], chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = E::ZERO - E::from_base(holo.count_x[base + off]);
+        }
+    });
+    for_each_chunk_mut(&mut q0[m..2 * m], chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            let k = base + off;
+            let id_f = F::from_u64_reduced(k as u64);
+            let tbl_ex = eq_rx[k & (rx_len - 1)];
+            *slot = gamma_x - (E::from_base(id_f) + alpha_mem * tbl_ex);
+        }
+    });
+
+    // Block 2: +delta / (gamma_y - (col[k] + alpha * ey[k]))
+    for_each_chunk_mut(&mut p0[2 * m..3 * m], chunk, |_, part| part.fill(delta));
+    for_each_chunk_mut(&mut q0[2 * m..3 * m], chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            let k = base + off;
+            let col_f = F::from_u64_reduced(u64::from(holo.col_idx[k]));
+            *slot = gamma_y - (E::from_base(col_f) + alpha_mem * ey[k]);
+        }
+    });
+
+    // Block 3: -delta * c_y[k] / (gamma_y - (k + alpha * eq_ry_padded[k]))
+    let ry_len = eq_ry.len();
+    for_each_chunk_mut(&mut p0[3 * m..4 * m], chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = E::ZERO - delta.mul_base(holo.count_y[base + off]);
+        }
+    });
+    for_each_chunk_mut(&mut q0[3 * m..4 * m], chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            let k = base + off;
+            let id_f = F::from_u64_reduced(k as u64);
+            let tbl_ey = eq_ry[k & (ry_len - 1)];
+            *slot = gamma_y - (E::from_base(id_f) + alpha_mem * tbl_ey);
+        }
+    });
+
+    (p0, q0)
+}
+
+fn build_gkr_tree(p0: Vec<E>, q0: Vec<E>) -> Vec<(Vec<E>, Vec<E>)> {
+    let depth = p0.len().trailing_zeros() as usize;
+    let mut layers = Vec::with_capacity(depth + 1);
+    layers.push((p0, q0));
+    for d in 0..depth {
+        let (p_prev, q_prev) = &layers[d];
+        let half = p_prev.len() / 2;
+        let mut p_next = vec![E::ZERO; half];
+        let mut q_next = vec![E::ZERO; half];
+        let chunk = par_chunk(half);
+        let mut pairs: Vec<_> = p_next.chunks_mut(chunk).zip(q_next.chunks_mut(chunk)).collect();
+        for_each_chunk_mut(&mut pairs, 1, |c_idx, part| {
+            let (pn, qn) = &mut part[0];
+            let base = c_idx * chunk;
+            for (off, (ps, qs)) in pn.iter_mut().zip(qn.iter_mut()).enumerate() {
+                let u = base + off;
+                let (pl, pr) = (p_prev[2 * u], p_prev[2 * u + 1]);
+                let (ql, qr) = (q_prev[2 * u], q_prev[2 * u + 1]);
+                *ps = pl * qr + pr * ql;
+                *qs = ql * qr;
+            }
+        });
+        layers.push((p_next, q_next));
+    }
+    layers
+}
+
+/// Degree-3 sumcheck over `k in {0,1}^ell_nz` of `ex(k) * ey(k) * v(k)` using generic closures
+/// to drive either `FiatShamirTranscript` or Poseidon2 `RecTranscript`.
+fn run_cubic_triple_sumcheck(
+    mut ta: Vec<E>,
+    mut tb: Vec<E>,
+    mut tc: Vec<E>,
+    mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
+) -> (Vec<[E; 4]>, Vec<E>, [E; 3]) {
+    let n = ta.len().trailing_zeros() as usize;
+    let mut rounds = Vec::with_capacity(n);
+    let mut point = Vec::with_capacity(n);
+    for _ in 0..n {
+        let half = ta.len() / 2;
+        let evals = round_evals::<4>(0..half, |i| {
+            let (a0, da) = (ta[2 * i], ta[2 * i + 1] - ta[2 * i]);
+            let (b0, db) = (tb[2 * i], tb[2 * i + 1] - tb[2 * i]);
+            let (c0, dc) = (tc[2 * i], tc[2 * i + 1] - tc[2 * i]);
+            let mut a = a0;
+            let mut b = b0;
+            let mut c = c0;
+            core::array::from_fn(|_| {
+                let val = a * b * c;
+                a += da;
+                b += db;
+                c += dc;
+                val
+            })
+        });
+        let coeffs_vec = evals_to_coeffs(&evals);
+        let coeffs: [E; 4] = coeffs_vec.try_into().unwrap();
+        let chal = absorb_and_squeeze(coeffs);
+        rounds.push(coeffs);
+        point.push(chal);
+        fold_in_place(&mut ta, chal, false);
+        fold_in_place(&mut tb, chal, false);
+        fold_in_place(&mut tc, chal, false);
+    }
+    (rounds, point, [ta[0], tb[0], tc[0]])
+}
+
+/// Degree-3 sumcheck for one LogUp-GKR layer `eq(r_hi, u) * (p0*q1 + p1*q0 + beta*q0*q1)`.
+fn run_gkr_layer_sumcheck(
+    p_layer: &[E],
+    q_layer: &[E],
+    r_hi: &[E],
+    beta: E,
+    mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
+) -> (Vec<[E; 4]>, Vec<E>, [E; 4]) {
+    let m = r_hi.len();
+    let len = 1usize << m;
+    let mut eq_t = eq_table(r_hi);
+    let mut p0 = vec![E::ZERO; len];
+    let mut p1 = vec![E::ZERO; len];
+    let mut q0 = vec![E::ZERO; len];
+    let mut q1 = vec![E::ZERO; len];
+    for u in 0..len {
+        p0[u] = p_layer[2 * u];
+        p1[u] = p_layer[2 * u + 1];
+        q0[u] = q_layer[2 * u];
+        q1[u] = q_layer[2 * u + 1];
+    }
+    let mut rounds = Vec::with_capacity(m);
+    let mut u_star = Vec::with_capacity(m);
+    for _ in 0..m {
+        let half = eq_t.len() / 2;
+        let evals = round_evals::<4>(0..half, |i| {
+            let (e0, de) = (eq_t[2 * i], eq_t[2 * i + 1] - eq_t[2 * i]);
+            let (pl0, dpl) = (p0[2 * i], p0[2 * i + 1] - p0[2 * i]);
+            let (pr0, dpr) = (p1[2 * i], p1[2 * i + 1] - p1[2 * i]);
+            let (ql0, dql) = (q0[2 * i], q0[2 * i + 1] - q0[2 * i]);
+            let (qr0, dqr) = (q1[2 * i], q1[2 * i + 1] - q1[2 * i]);
+            let (mut e, mut pl, mut pr, mut ql, mut qr) = (e0, pl0, pr0, ql0, qr0);
+            core::array::from_fn(|_| {
+                let v = e * (pl * qr + pr * ql + beta * ql * qr);
+                e += de;
+                pl += dpl;
+                pr += dpr;
+                ql += dql;
+                qr += dqr;
+                v
+            })
+        });
+        let coeffs_vec = evals_to_coeffs(&evals);
+        let coeffs: [E; 4] = coeffs_vec.try_into().unwrap();
+        let chal = absorb_and_squeeze(coeffs);
+        rounds.push(coeffs);
+        u_star.push(chal);
+        fold_in_place(&mut eq_t, chal, false);
+        fold_in_place(&mut p0, chal, false);
+        fold_in_place(&mut p1, chal, false);
+        fold_in_place(&mut q0, chal, false);
+        fold_in_place(&mut q1, chal, false);
+    }
+    (rounds, u_star, [p0[0], p1[0], q0[0], q1[0]])
+}
+
+fn pack_e_super(ex: &[E], ey: &[E]) -> Vec<F> {
+    let m = ex.len();
+    debug_assert_eq!(ey.len(), m);
+    let mut out = vec![F::ZERO; 8 * m];
+    for k in 0..m {
+        let lx = ex[k].to_limbs();
+        let ly = ey[k].to_limbs();
+        for j in 0..4 {
+            out[j * m + k] = lx[j];
+            out[(4 + j) * m + k] = ly[j];
+        }
+    }
+    out
+}
+
+fn super8_blend2_claim(slices: &[E; 8], sel2: &[E; 2], eta: E) -> E {
+    let eq2 = build_eq_table_ext4(sel2);
+    let c0 = slices[..4]
+        .iter()
+        .zip(&eq2)
+        .fold(E::ZERO, |acc, (&v, &w)| acc + v * w);
+    let c1 = slices[4..]
+        .iter()
+        .zip(&eq2)
+        .fold(E::ZERO, |acc, (&v, &w)| acc + v * w);
+    c0 + eta * c1
+}
+
+// ----------------------------------------------------------------------------
+// Native Sublinear Hologram Proof (`HologramPublicProof`, `< 15 ms` Verify)
+// ----------------------------------------------------------------------------
+
+/// Non-hiding Hem proof verified in sublinear time (`< 15 ms`) against [`ShapeVerifierKey`]
+/// without scanning the relation's CSR matrices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HologramPublicProof {
+    pub comm_z: CanopyCommitment,
+    pub row_rounds: Vec<Vec<E>>,
+    pub row_values: [E; 3],
+    pub col_rounds: Vec<Vec<E>>,
+    pub eval_z: E,
+    pub comm_e: CanopyCommitment,
+    pub m_sparse_claim: E,
+    pub mat_rounds: Vec<[E; SPARK_MAT_DEGREE + 1]>,
+    pub h_at_mat: [E; 7],
+    pub e_limbs_at_mat: [E; 8],
+    pub q_root: E,
+    pub gkr_layers: Vec<LogUpGkrLayer>,
+    pub h_at_gkr: [E; 7],
+    pub e_limbs_at_gkr: [E; 8],
+    pub open_z: HemWhirOpeningProof,
+    pub open_h: HemWhirOpeningProof,
+    pub open_e: HemWhirOpeningProof,
+}
+
+impl HologramPublicProof {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = HOLOGRAM_PUBLIC_WIRE_MAGIC.to_vec();
+        out.extend_from_slice(&self.comm_z.to_bytes());
+        let push_e = |out: &mut Vec<u8>, v: &E| out.extend_from_slice(&v.to_le_bytes());
+        for v in self
+            .row_rounds
+            .iter()
+            .flatten()
+            .chain(&self.row_values)
+            .chain(self.col_rounds.iter().flatten())
+            .chain(core::iter::once(&self.eval_z))
+        {
+            push_e(&mut out, v);
+        }
+        out.extend_from_slice(&self.comm_e.to_bytes());
+        push_e(&mut out, &self.m_sparse_claim);
+        for v in self
+            .mat_rounds
+            .iter()
+            .flatten()
+            .chain(&self.h_at_mat)
+            .chain(&self.e_limbs_at_mat)
+            .chain(core::iter::once(&self.q_root))
+        {
+            push_e(&mut out, v);
+        }
+        for layer in &self.gkr_layers {
+            for v in layer.rounds.iter().flatten().chain(&layer.split) {
+                push_e(&mut out, v);
+            }
+        }
+        for v in self.h_at_gkr.iter().chain(&self.e_limbs_at_gkr) {
+            push_e(&mut out, v);
+        }
+        self.open_z.push_bytes(&mut out);
+        self.open_h.push_bytes(&mut out);
+        self.open_e.push_bytes(&mut out);
+        out
+    }
+
+    pub fn from_bytes(bytes: &[u8], vk: &ShapeVerifierKey) -> Option<Self> {
+        if bytes.get(..8)? != HOLOGRAM_PUBLIC_WIRE_MAGIC || !vk.regime.meets_qrom_128_floor() {
+            return None;
+        }
+        let mut pos = 8usize;
+        let (comm_z, used_z) = CanopyCommitment::from_bytes_canonical(bytes.get(pos..)?)?;
+        pos += used_z;
+        fn take_e(bytes: &[u8], pos: &mut usize) -> Option<E> {
+            let chunk: [u8; 32] = bytes.get(*pos..*pos + 32)?.try_into().ok()?;
+            *pos += 32;
+            E::from_le_bytes_canonical(chunk)
+        }
+        let row_rounds = (0..vk.log_rows)
+            .map(|_| (0..=ROW_DEGREE).map(|_| take_e(bytes, &mut pos)).collect())
+            .collect::<Option<Vec<Vec<E>>>>()?;
+        let row_values = [
+            take_e(bytes, &mut pos)?,
+            take_e(bytes, &mut pos)?,
+            take_e(bytes, &mut pos)?,
+        ];
+        let col_rounds = (0..vk.var_bits)
+            .map(|_| (0..=COL_DEGREE).map(|_| take_e(bytes, &mut pos)).collect())
+            .collect::<Option<Vec<Vec<E>>>>()?;
+        let eval_z = take_e(bytes, &mut pos)?;
+        let (comm_e, used_e) = CanopyCommitment::from_bytes_canonical(bytes.get(pos..)?)?;
+        pos += used_e;
+        let m_sparse_claim = take_e(bytes, &mut pos)?;
+        let mut mat_rounds = Vec::with_capacity(vk.ell_nz);
+        for _ in 0..vk.ell_nz {
+            mat_rounds.push([
+                take_e(bytes, &mut pos)?,
+                take_e(bytes, &mut pos)?,
+                take_e(bytes, &mut pos)?,
+                take_e(bytes, &mut pos)?,
+            ]);
+        }
+        let mut h_at_mat = [E::ZERO; 7];
+        for s in &mut h_at_mat {
+            *s = take_e(bytes, &mut pos)?;
+        }
+        let mut e_limbs_at_mat = [E::ZERO; 8];
+        for s in &mut e_limbs_at_mat {
+            *s = take_e(bytes, &mut pos)?;
+        }
+        let q_root = take_e(bytes, &mut pos)?;
+        let gkr_depth = vk.ell_nz + 2;
+        let mut gkr_layers = Vec::with_capacity(gkr_depth);
+        for m in 0..gkr_depth {
+            let mut rounds = Vec::with_capacity(m);
+            for _ in 0..m {
+                rounds.push([
+                    take_e(bytes, &mut pos)?,
+                    take_e(bytes, &mut pos)?,
+                    take_e(bytes, &mut pos)?,
+                    take_e(bytes, &mut pos)?,
+                ]);
+            }
+            let split = [
+                take_e(bytes, &mut pos)?,
+                take_e(bytes, &mut pos)?,
+                take_e(bytes, &mut pos)?,
+                take_e(bytes, &mut pos)?,
+            ];
+            gkr_layers.push(LogUpGkrLayer { rounds, split });
+        }
+        let mut h_at_gkr = [E::ZERO; 7];
+        for s in &mut h_at_gkr {
+            *s = take_e(bytes, &mut pos)?;
+        }
+        let mut e_limbs_at_gkr = [E::ZERO; 8];
+        for s in &mut e_limbs_at_gkr {
+            *s = take_e(bytes, &mut pos)?;
+        }
+        let (open_z, u1) = HemWhirOpeningProof::from_bytes_canonical(bytes.get(pos..)?)?;
+        pos += u1;
+        let (open_h, u2) = HemWhirOpeningProof::from_bytes_canonical(bytes.get(pos..)?)?;
+        pos += u2;
+        let (open_e, u3) = HemWhirOpeningProof::from_bytes_canonical(bytes.get(pos..)?)?;
+        pos += u3;
+        (pos == bytes.len()).then_some(Self {
+            comm_z,
+            row_rounds,
+            row_values,
+            col_rounds,
+            eval_z,
+            comm_e,
+            m_sparse_claim,
+            mat_rounds,
+            h_at_mat,
+            e_limbs_at_mat,
+            q_root,
+            gkr_layers,
+            h_at_gkr,
+            e_limbs_at_gkr,
+            open_z,
+            open_h,
+            open_e,
+        })
+    }
+}
+
+fn eval_h_and_e_limbs_at_point(
+    holo: &ShapeHologram,
+    e_super: &[F],
+    pt: &[E],
+) -> ([E; 7], [E; 8]) {
+    let eq_pt = eq_table(pt);
+    let m = eq_pt.len();
+    let evals = round_evals::<15>(0..m, |k| {
+        let w = eq_pt[k];
+        [
+            w.mul_base(F::from_u64_reduced(u64::from(holo.row_idx[k]))),
+            w.mul_base(F::from_u64_reduced(u64::from(holo.col_idx[k]))),
+            w.mul_base(holo.val_a[k]),
+            w.mul_base(holo.val_b[k]),
+            w.mul_base(holo.val_c[k]),
+            w.mul_base(holo.count_x[k]),
+            w.mul_base(holo.count_y[k]),
+            w.mul_base(e_super[k]),
+            w.mul_base(e_super[m + k]),
+            w.mul_base(e_super[2 * m + k]),
+            w.mul_base(e_super[3 * m + k]),
+            w.mul_base(e_super[4 * m + k]),
+            w.mul_base(e_super[5 * m + k]),
+            w.mul_base(e_super[6 * m + k]),
+            w.mul_base(e_super[7 * m + k]),
+        ]
+    });
+    let h: [E; 7] = evals[..7].try_into().unwrap();
+    let e_limbs: [E; 8] = evals[7..].try_into().unwrap();
+    (h, e_limbs)
+}
+
+fn recompose_ext4_from_limb_evals(limbs: &[E; 4]) -> E {
+    let basis = limb_basis();
+    limbs
+        .iter()
+        .zip(&basis)
+        .fold(E::ZERO, |acc, (&l, &b)| acc + l * b)
+}
+
+fn start_hologram_transcript(
+    vk: &ShapeVerifierKey,
+    statement: &[u8],
+    public: &[F],
+    comm_z: &CanopyCommitment,
+) -> FiatShamirTranscript<InstanceBound> {
+    let pub_bytes: Vec<u8> = public.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let vk_bytes = vk.to_bytes();
+    let z_schedule = vk.regime.schedule(vk.var_bits);
+    FiatShamirTranscript::new()
+        .bind_relation(b"QSAG.HEM.HOLOGRAM/v1", &vk_bytes, &z_schedule)
+        .bind_instance(&[statement, &pub_bytes, &comm_z.to_bytes()])
+}
+
+/// Prove a public relation using a precompiled [`ShapeHologram`] so native verification runs
+/// in `< 15 ms` against [`ShapeVerifierKey`] alone.
+pub fn prove_public_hologram(
+    shape: &Shape,
+    hologram: &ShapeHologram,
+    mut assignment: Vec<F>,
+    statement: &[u8],
+    seed: &[u8; 32],
+) -> Result<HologramPublicProof, ZkHemError> {
+    let vk = &hologram.vk;
+    if vk.shape_digest != shape.digest() || !vk.regime.meets_qrom_128_floor() {
+        return Err(ZkHemError::Unsatisfied);
+    }
+    if assignment.len() != shape.num_vars || assignment.first() != Some(&F::ONE) {
+        return Err(ZkHemError::Unsatisfied);
+    }
+    let public = assignment[1..=shape.num_public].to_vec();
+    let row_base = row_tables(shape, &assignment, true).ok_or(ZkHemError::Unsatisfied)?;
+    assignment.resize(1 << vk.var_bits, F::ZERO);
+    let z_schedule = vk.regime.schedule(vk.var_bits);
+    let (comm_z, state_z) = crate::pcs::whir_commit_owned_with_schedule(assignment, seed, &z_schedule);
+
+    let mut tr = start_hologram_transcript(vk, statement, &public, &comm_z);
+    let tau = squeeze_point(&mut tr, b"ZKHEM_TAU", vk.log_rows);
+    let (row_rounds, rx, row_values) = row_sumcheck(&mut tr, &tau, vk.num_sbox, row_base, None);
+    tr.absorb_ext4_slice(b"ZKHEM_ROW_VALUES", &row_values);
+    let combine_vec = squeeze_point(&mut tr, b"ZKHEM_COMBINE", 3);
+    let combine: [E; 3] = combine_vec.clone().try_into().unwrap();
+    let lambda = tr.squeeze_ext4(b"HEM_PUBLIC_CELLS");
+
+    let eq_rx = eq_table(&rx);
+    let mut tm = column_table(shape, &eq_rx, &combine_vec, 1 << vk.var_bits);
+    let mut weight = lambda;
+    for slot in tm.iter_mut().take(vk.num_public + 1) {
+        *slot += weight;
+        weight *= lambda;
+    }
+    let (col_rounds, ry, _, eval_z) =
+        column_sumcheck(&mut tr, tm, &state_z.hypercube_evals[0], None);
+
+    // Build `ex[k] = eq(rx, row[k])`, `ey[k] = eq(ry, col[k])`, and `V[k]`.
+    let eq_ry = eq_table(&ry);
+    let m_nz = 1usize << vk.ell_nz;
+    let mut ex = vec![E::ZERO; m_nz];
+    let mut ey = vec![E::ZERO; m_nz];
+    let mut val_comb = vec![E::ZERO; m_nz];
+    let chunk = par_chunk(m_nz);
+    for_each_chunk_mut(&mut ex, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = eq_rx[hologram.row_idx[base + off] as usize];
+        }
+    });
+    for_each_chunk_mut(&mut ey, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = eq_ry[hologram.col_idx[base + off] as usize];
+        }
+    });
+    for_each_chunk_mut(&mut val_comb, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            let k = base + off;
+            *slot = combine[0].mul_base(hologram.val_a[k])
+                + combine[1].mul_base(hologram.val_b[k])
+                + combine[2].mul_base(hologram.val_c[k]);
+        }
+    });
+    let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
+
+    let e_super = pack_e_super(&ex, &ey);
+    let half_e = 4 * m_nz;
+    let e0 = e_super[..half_e].to_vec();
+    let e1 = e_super[half_e..].to_vec();
+    let e_pair_monos = [
+        hypercube_to_monomial_coeffs(&e0),
+        hypercube_to_monomial_coeffs(&e1),
+    ];
+    let pack_schedule = vk.regime.schedule(vk.native_pack_vars());
+    let mut e_salt = [0u8; 32];
+    e_salt.copy_from_slice(&cshake256_32(b"QSAG.HEM.HOLOGRAM.ESALT/v1", seed));
+    let (comm_e, state_e) = crate::pcs::whir_commit_batch_owned_with_schedule(
+        vec![e0, e1],
+        &e_salt,
+        &pack_schedule,
+    );
+
+    tr.absorb(b"HOLO_COMM_E", &comm_e.to_bytes());
+    tr.absorb_ext4(b"HOLO_M_SPARSE", m_sparse_claim);
+    let alpha_mem = tr.squeeze_ext4(b"HOLO_ALPHA_MEM");
+    let gamma_x = tr.squeeze_ext4(b"HOLO_GAMMA_X");
+    let gamma_y = tr.squeeze_ext4(b"HOLO_GAMMA_Y");
+    let delta = tr.squeeze_ext4(b"HOLO_DELTA");
+
+    // 1. Spark cubic matrix sumcheck -> `r_mat`.
+    let (mat_rounds, r_mat, _) =
+        run_cubic_triple_sumcheck(ex.clone(), ey.clone(), val_comb, |coeffs| {
+            tr.absorb_ext4_slice(b"HOLO_MAT_ROUND", &coeffs);
+            tr.squeeze_ext4(b"HOLO_MAT_ROUND")
+        });
+    let (h_at_mat, e_limbs_at_mat) = eval_h_and_e_limbs_at_point(hologram, &e_super, &r_mat);
+    tr.absorb_ext4_slice(b"HOLO_AT_MAT_H", &h_at_mat);
+    tr.absorb_ext4_slice(b"HOLO_AT_MAT_E", &e_limbs_at_mat);
+
+    // 2. LogUp-GKR fractional binary tree -> `(r_gkr, b_gkr)`.
+    let (p0, q0) = build_gkr_leaves(
+        hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta,
+    );
+    let tree = build_gkr_tree(p0, q0);
+    let gkr_depth = vk.ell_nz + 2;
+    let (p_root, q_root) = (tree[gkr_depth].0[0], tree[gkr_depth].1[0]);
+    debug_assert_eq!(p_root, E::ZERO);
+    if q_root.is_zero() {
+        return Err(ZkHemError::MaskRankDeficient);
+    }
+    tr.absorb_ext4(b"HOLO_Q_ROOT", q_root);
+
+    let mut r_cur: Vec<E> = Vec::new();
+    let mut gkr_layers = Vec::with_capacity(gkr_depth);
+    for d in (0..gkr_depth).rev() {
+        let m_vars = gkr_depth - 1 - d;
+        let (rounds, u_star, split) = if m_vars == 0 {
+            (
+                Vec::new(),
+                Vec::new(),
+                [tree[d].0[0], tree[d].0[1], tree[d].1[0], tree[d].1[1]],
+            )
+        } else {
+            let beta = tr.squeeze_ext4(b"HOLO_GKR_BETA");
+            run_gkr_layer_sumcheck(&tree[d].0, &tree[d].1, &r_cur, beta, |coeffs| {
+                tr.absorb_ext4_slice(b"HOLO_GKR_ROUND", &coeffs);
+                tr.squeeze_ext4(b"HOLO_GKR_ROUND")
+            })
+        };
+        tr.absorb_ext4_slice(b"HOLO_GKR_SPLIT", &split);
+        let c_bit = tr.squeeze_ext4(b"HOLO_GKR_BIT");
+        let mut next_r = Vec::with_capacity(m_vars + 1);
+        next_r.push(c_bit);
+        next_r.extend_from_slice(&u_star);
+        r_cur = next_r;
+        gkr_layers.push(LogUpGkrLayer { rounds, split });
+    }
+    let r_gkr = &r_cur[..vk.ell_nz];
+    let (h_at_gkr, e_limbs_at_gkr) = eval_h_and_e_limbs_at_point(hologram, &e_super, r_gkr);
+    tr.absorb_ext4_slice(b"HOLO_AT_GKR_H", &h_at_gkr);
+    tr.absorb_ext4_slice(b"HOLO_AT_GKR_E", &e_limbs_at_gkr);
+
+    // 3. 2-poly 4-slice selector reduction + WHIR openings of `Z`, `H_pair`, `E_pair`.
+    let sel2_mat: [E; 2] = squeeze_point(&mut tr, b"HOLO_SEL_MAT", 2).try_into().unwrap();
+    let sel2_gkr: [E; 2] = squeeze_point(&mut tr, b"HOLO_SEL_GKR", 2).try_into().unwrap();
+    let eta_slice = tr.squeeze_ext4(b"HOLO_SLICE_ETA");
+    let lambda_open = tr.squeeze_ext4(b"HOLO_OPEN_COMB");
+
+    let open_z = crate::pcs::whir_open(&state_z, &ry, eval_z, &mut tr);
+
+    let mut pt_mat = r_mat;
+    pt_mat.extend_from_slice(&sel2_mat);
+    let mut pt_gkr = r_gkr.to_vec();
+    pt_gkr.extend_from_slice(&sel2_gkr);
+
+    let mut kernel_he = vec![E::ZERO; (1usize << vk.native_pack_vars()) + 2];
+    add_point_kernel(&mut kernel_he, E::ONE, &pt_mat);
+    add_point_kernel(&mut kernel_he, lambda_open, &pt_gkr);
+
+    let mut h_mat8 = [E::ZERO; 8];
+    h_mat8[..7].copy_from_slice(&h_at_mat);
+    let mut h_gkr8 = [E::ZERO; 8];
+    h_gkr8[..7].copy_from_slice(&h_at_gkr);
+    let claim_h = super8_blend2_claim(&h_mat8, &sel2_mat, eta_slice)
+        + lambda_open * super8_blend2_claim(&h_gkr8, &sel2_gkr, eta_slice);
+    let claim_e = super8_blend2_claim(&e_limbs_at_mat, &sel2_mat, eta_slice)
+        + lambda_open * super8_blend2_claim(&e_limbs_at_gkr, &sel2_gkr, eta_slice);
+
+    let scalars = [E::ONE, eta_slice];
+    let open_h = whir_open_blend(
+        &hologram.h_state,
+        &scalars,
+        &hologram.h_pair_monos,
+        kernel_he.clone(),
+        claim_h,
+        &mut tr,
+    );
+    let open_e = whir_open_blend(
+        &state_e,
+        &scalars,
+        &e_pair_monos,
+        kernel_he,
+        claim_e,
+        &mut tr,
+    );
+
+    Ok(HologramPublicProof {
+        comm_z,
+        row_rounds,
+        row_values,
+        col_rounds,
+        eval_z,
+        comm_e,
+        m_sparse_claim,
+        mat_rounds,
+        h_at_mat,
+        e_limbs_at_mat,
+        q_root,
+        gkr_layers,
+        h_at_gkr,
+        e_limbs_at_gkr,
+        open_z,
+        open_h,
+        open_e,
+    })
+}
+
+/// Sublinear native verifier (`< 15 ms`): requires ONLY the `< 256`-byte [`ShapeVerifierKey`].
+pub fn verify_public_hologram(
+    vk: &ShapeVerifierKey,
+    public: &[F],
+    statement: &[u8],
+    proof: &HologramPublicProof,
+) -> bool {
+    if !vk.regime.meets_qrom_128_floor()
+        || public.len() != vk.num_public
+        || proof.row_rounds.len() != vk.log_rows
+        || proof.col_rounds.len() != vk.var_bits
+        || proof.mat_rounds.len() != vk.ell_nz
+        || proof.gkr_layers.len() != vk.ell_nz + 2
+        || proof.q_root.is_zero()
+    {
+        return false;
+    }
+
+    let mut tr = start_hologram_transcript(vk, statement, public, &proof.comm_z);
+    let tau = squeeze_point(&mut tr, b"ZKHEM_TAU", vk.log_rows);
+    let Some((row_final, rx)) = verify_sumcheck(
+        &mut tr,
+        b"ZKHEM_ROW_ROUND",
+        &proof.row_rounds,
+        ROW_DEGREE,
+        E::ZERO,
+    ) else {
+        return false;
+    };
+    let [va, vb, vc] = proof.row_values;
+    if row_final != eq_eval(&tau, &rx) * row_gate(prefix_indicator(&rx, vk.num_sbox), va, vb, vc) {
+        return false;
+    }
+    tr.absorb_ext4_slice(b"ZKHEM_ROW_VALUES", &proof.row_values);
+    let combine_vec = squeeze_point(&mut tr, b"ZKHEM_COMBINE", 3);
+    let combine: [E; 3] = combine_vec.try_into().unwrap();
+    let lambda = tr.squeeze_ext4(b"HEM_PUBLIC_CELLS");
+
+    let mut col_claim = combine[0] * va + combine[1] * vb + combine[2] * vc;
+    let mut weight = lambda;
+    for v in core::iter::once(&F::ONE).chain(public) {
+        col_claim += weight.mul_base(*v);
+        weight *= lambda;
+    }
+    let Some((col_final, ry)) = verify_sumcheck(
+        &mut tr,
+        b"ZKHEM_COL_ROUND",
+        &proof.col_rounds,
+        COL_DEGREE,
+        col_claim,
+    ) else {
+        return false;
+    };
+
+    // Sublinear matrix check: O(log P) closed-form Poseidon2 interior + Spark claim.
+    let m_p2 = eval_poseidon2_interior_native(vk.hologram_meta, &rx, &ry, &combine);
+    let mut m_total = m_p2 + proof.m_sparse_claim;
+    let mut weight = lambda;
+    for cell in 0..=vk.num_public {
+        let eq = ry.iter().enumerate().fold(E::ONE, |acc, (bit, &r)| {
+            acc * if (cell >> bit) & 1 == 1 { r } else { E::ONE - r }
+        });
+        m_total += weight * eq;
+        weight *= lambda;
+    }
+    if col_final != m_total * proof.eval_z {
+        return false;
+    }
+
+    tr.absorb(b"HOLO_COMM_E", &proof.comm_e.to_bytes());
+    tr.absorb_ext4(b"HOLO_M_SPARSE", proof.m_sparse_claim);
+    let alpha_mem = tr.squeeze_ext4(b"HOLO_ALPHA_MEM");
+    let gamma_x = tr.squeeze_ext4(b"HOLO_GAMMA_X");
+    let gamma_y = tr.squeeze_ext4(b"HOLO_GAMMA_Y");
+    let delta = tr.squeeze_ext4(b"HOLO_DELTA");
+
+    // 1. Verify Spark cubic matrix sumcheck.
+    let mut mat_claim = proof.m_sparse_claim;
+    let mut r_mat = Vec::with_capacity(vk.ell_nz);
+    for round in &proof.mat_rounds {
+        let at_one = round.iter().fold(E::ZERO, |acc, &c| acc + c);
+        if round[0] + at_one != mat_claim {
+            return false;
+        }
+        tr.absorb_ext4_slice(b"HOLO_MAT_ROUND", round);
+        let c = tr.squeeze_ext4(b"HOLO_MAT_ROUND");
+        mat_claim = eval_poly(round, c);
+        r_mat.push(c);
+    }
+    tr.absorb_ext4_slice(b"HOLO_AT_MAT_H", &proof.h_at_mat);
+    tr.absorb_ext4_slice(b"HOLO_AT_MAT_E", &proof.e_limbs_at_mat);
+    let ex_mat = recompose_ext4_from_limb_evals(proof.e_limbs_at_mat[..4].try_into().unwrap());
+    let ey_mat = recompose_ext4_from_limb_evals(proof.e_limbs_at_mat[4..].try_into().unwrap());
+    let v_mat = combine[0] * proof.h_at_mat[2]
+        + combine[1] * proof.h_at_mat[3]
+        + combine[2] * proof.h_at_mat[4];
+    if mat_claim != ex_mat * ey_mat * v_mat {
+        return false;
+    }
+
+    // 2. Verify LogUp-GKR fractional binary tree.
+    tr.absorb_ext4(b"HOLO_Q_ROOT", proof.q_root);
+    let gkr_depth = vk.ell_nz + 2;
+    let mut p_claim = E::ZERO;
+    let mut q_claim = proof.q_root;
+    let mut r_cur: Vec<E> = Vec::new();
+    for (m_vars, layer) in proof.gkr_layers.iter().enumerate() {
+        if layer.rounds.len() != m_vars {
+            return false;
+        }
+        let [pl, pr, ql, qr] = layer.split;
+        if m_vars == 0 {
+            if pl * qr + pr * ql != p_claim || ql * qr != q_claim {
+                return false;
+            }
+        } else {
+            let beta = tr.squeeze_ext4(b"HOLO_GKR_BETA");
+            let mut sc_claim = p_claim + beta * q_claim;
+            let mut u_star = Vec::with_capacity(m_vars);
+            for round in &layer.rounds {
+                let at_one = round.iter().fold(E::ZERO, |acc, &c| acc + c);
+                if round[0] + at_one != sc_claim {
+                    return false;
+                }
+                tr.absorb_ext4_slice(b"HOLO_GKR_ROUND", round);
+                let c = tr.squeeze_ext4(b"HOLO_GKR_ROUND");
+                sc_claim = eval_poly(round, c);
+                u_star.push(c);
+            }
+            if sc_claim != eq_eval(&r_cur, &u_star) * (pl * qr + pr * ql + beta * ql * qr) {
+                return false;
+            }
+            r_cur = u_star;
+        }
+        tr.absorb_ext4_slice(b"HOLO_GKR_SPLIT", &layer.split);
+        let c_bit = tr.squeeze_ext4(b"HOLO_GKR_BIT");
+        p_claim = pl + c_bit * (pr - pl);
+        q_claim = ql + c_bit * (qr - ql);
+        let mut next_r = Vec::with_capacity(m_vars + 1);
+        next_r.push(c_bit);
+        next_r.extend_from_slice(&r_cur);
+        r_cur = next_r;
+    }
+    if r_cur.len() != gkr_depth {
+        return false;
+    }
+    let r_gkr = &r_cur[..vk.ell_nz];
+    let (b0, b1) = (r_cur[vk.ell_nz], r_cur[vk.ell_nz + 1]);
+    tr.absorb_ext4_slice(b"HOLO_AT_GKR_H", &proof.h_at_gkr);
+    tr.absorb_ext4_slice(b"HOLO_AT_GKR_E", &proof.e_limbs_at_gkr);
+
+    let ex_gkr = recompose_ext4_from_limb_evals(proof.e_limbs_at_gkr[..4].try_into().unwrap());
+    let ey_gkr = recompose_ext4_from_limb_evals(proof.e_limbs_at_gkr[4..].try_into().unwrap());
+    let id_eval = r_gkr
+        .iter()
+        .enumerate()
+        .fold(E::ZERO, |acc, (j, &rj)| acc + rj.mul_base(F::from_u64_reduced(1u64 << j)));
+    let tbl_ex = eq_eval(&rx, &r_gkr[..vk.log_rows]);
+    let tbl_ey = eq_eval(&ry, &r_gkr[..vk.var_bits]);
+
+    let w0 = (E::ONE - b0) * (E::ONE - b1);
+    let w1 = b0 * (E::ONE - b1);
+    let w2 = (E::ONE - b0) * b1;
+    let w3 = b0 * b1;
+    let p_exp = w0 - w1 * proof.h_at_gkr[5] + w2 * delta - w3 * delta * proof.h_at_gkr[6];
+    let q_exp = w0 * (gamma_x - proof.h_at_gkr[0] - alpha_mem * ex_gkr)
+        + w1 * (gamma_x - id_eval - alpha_mem * tbl_ex)
+        + w2 * (gamma_y - proof.h_at_gkr[1] - alpha_mem * ey_gkr)
+        + w3 * (gamma_y - id_eval - alpha_mem * tbl_ey);
+    if p_claim != p_exp || q_claim != q_exp {
+        return false;
+    }
+
+    // 3. Verify WHIR openings of `Z`, `H_pair`, `E_pair`.
+    let sel2_mat: [E; 2] = squeeze_point(&mut tr, b"HOLO_SEL_MAT", 2).try_into().unwrap();
+    let sel2_gkr: [E; 2] = squeeze_point(&mut tr, b"HOLO_SEL_GKR", 2).try_into().unwrap();
+    let eta_slice = tr.squeeze_ext4(b"HOLO_SLICE_ETA");
+    let lambda_open = tr.squeeze_ext4(b"HOLO_OPEN_COMB");
+
+    let z_schedule = vk.regime.schedule(vk.var_bits);
+    if !crate::pcs::whir_verify_with_schedule(
+        &proof.comm_z,
+        vk.var_bits,
+        &ry,
+        proof.eval_z,
+        &proof.open_z,
+        &mut tr,
+        &z_schedule,
+    ) {
+        return false;
+    }
+
+    let mut pt_mat = r_mat;
+    pt_mat.extend_from_slice(&sel2_mat);
+    let mut pt_gkr = r_gkr.to_vec();
+    pt_gkr.extend_from_slice(&sel2_gkr);
+    let terms_he = [
+        WeightedPoint {
+            weight: E::ONE,
+            point: pt_mat,
+        },
+        WeightedPoint {
+            weight: lambda_open,
+            point: pt_gkr,
+        },
+    ];
+    let mut h_mat8 = [E::ZERO; 8];
+    h_mat8[..7].copy_from_slice(&proof.h_at_mat);
+    let mut h_gkr8 = [E::ZERO; 8];
+    h_gkr8[..7].copy_from_slice(&proof.h_at_gkr);
+    let claim_h = super8_blend2_claim(&h_mat8, &sel2_mat, eta_slice)
+        + lambda_open * super8_blend2_claim(&h_gkr8, &sel2_gkr, eta_slice);
+    let claim_e = super8_blend2_claim(&proof.e_limbs_at_mat, &sel2_mat, eta_slice)
+        + lambda_open * super8_blend2_claim(&proof.e_limbs_at_gkr, &sel2_gkr, eta_slice);
+
+    let scalars = [E::ONE, eta_slice];
+    let pack_schedule = vk.regime.schedule(vk.native_pack_vars());
+    whir_verify_blend(
+        &vk.hologram_comm,
+        vk.native_pack_vars(),
+        &scalars,
+        &terms_he,
+        claim_h,
+        &proof.open_h,
+        &mut tr,
+        &pack_schedule,
+    ) && whir_verify_blend(
+        &proof.comm_e,
+        vk.native_pack_vars(),
+        &scalars,
+        &terms_he,
+        claim_e,
+        &proof.open_e,
+        &mut tr,
+        &pack_schedule,
+    )
+}
+
+// ----------------------------------------------------------------------------
+// In-Circuit Recursive Hologram Proof (`RecursivePublicHemProof` for `Merge -> Merge`)
+// ----------------------------------------------------------------------------
+
+const REC_HOLO_VERSION: u64 = 0x5248_4F4C_0000_0001;
+
+/// Field-native Poseidon2 recursive public proof for internal nodes of arbitrary-depth
+/// `Merge -> Merge` aggregation trees. Verified both natively ([`verify_public_for_recursion`])
+/// and inside a parent [`super::relation::ConstraintSystem`] ([`verify_public_gadget`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecursivePublicHemProof {
+    pub comm_z: RecDigest,
+    pub row_rounds: Vec<[E; ROW_DEGREE + 1]>,
+    pub row_values: [E; 3],
+    pub col_rounds: Vec<[E; COL_DEGREE + 1]>,
+    pub eval_z: E,
+    pub comm_e: RecDigest,
+    pub m_sparse_claim: E,
+    pub mat_rounds: Vec<[E; SPARK_MAT_DEGREE + 1]>,
+    pub h_at_mat: [E; 7],
+    pub e_limbs_at_mat: [E; 8],
+    pub q_root: E,
+    pub gkr_layers: Vec<LogUpGkrLayer>,
+    pub h_at_gkr: [E; 7],
+    pub e_limbs_at_gkr: [E; 8],
+    pub opening: Correlated3WhirProof,
+}
+
+impl RecursivePublicHemProof {
+    pub fn placeholder(vk: &ShapeVerifierKey) -> Option<Self> {
+        let params = FixedPathWhirParams::new(vk.regime, vk.pack_vars()).ok()?;
+        let gkr_depth = vk.ell_nz + 2;
+        Some(Self {
+            comm_z: [F::ZERO; 4],
+            row_rounds: vec![[E::ZERO; ROW_DEGREE + 1]; vk.log_rows],
+            row_values: [E::ZERO; 3],
+            col_rounds: vec![[E::ZERO; COL_DEGREE + 1]; vk.var_bits],
+            eval_z: E::ZERO,
+            comm_e: [F::ZERO; 4],
+            m_sparse_claim: E::ONE,
+            mat_rounds: vec![[E::ZERO; SPARK_MAT_DEGREE + 1]; vk.ell_nz],
+            h_at_mat: [E::ZERO; 7],
+            e_limbs_at_mat: [E::ZERO; 8],
+            q_root: E::ONE,
+            gkr_layers: (0..gkr_depth)
+                .map(|m| LogUpGkrLayer {
+                    rounds: vec![[E::ZERO; GKR_LAYER_DEGREE + 1]; m],
+                    split: [E::ZERO, E::ZERO, E::ONE, E::ONE],
+                })
+                .collect(),
+            h_at_gkr: [E::ZERO; 7],
+            e_limbs_at_gkr: [E::ZERO; 8],
+            opening: params.placeholder_correlated3(),
+        })
+    }
+
+    pub fn well_formed(&self, vk: &ShapeVerifierKey) -> bool {
+        let Ok(params) = FixedPathWhirParams::new(vk.regime, vk.pack_vars()) else {
+            return false;
+        };
+        let gkr_depth = vk.ell_nz + 2;
+        vk.rec_hologram_root.is_some()
+            && self.row_rounds.len() == vk.log_rows
+            && self.col_rounds.len() == vk.var_bits
+            && self.mat_rounds.len() == vk.ell_nz
+            && self.gkr_layers.len() == gkr_depth
+            && self
+                .gkr_layers
+                .iter()
+                .enumerate()
+                .all(|(m, l)| l.rounds.len() == m)
+            && params.well_formed_correlated3(&self.opening)
+    }
+}
+
+fn start_rec_hologram_transcript<B: RecBackend>(
+    b: &mut B,
+    vk: &ShapeVerifierKey,
+    statement_tag: [u8; 32],
+    public: &[B::W],
+    comm_z: &[B::W; 4],
+) -> RecTranscript<B::W> {
+    let rec_root = vk
+        .rec_hologram_root
+        .expect("Poseidon2 recursion verifier key");
+    let mut header = vec![
+        rec_f(REC_HOLO_VERSION),
+        rec_f(vk.log_rows as u64),
+        rec_f(vk.num_sbox as u64),
+        rec_f(vk.num_vars as u64),
+        rec_f(vk.num_public as u64),
+        rec_f(vk.var_bits as u64),
+        rec_f(vk.ell_nz as u64),
+        rec_f(vk.hologram_meta.poseidon2_perms as u64),
+        rec_f(vk.hologram_meta.pub_var_blocks as u64),
+        rec_f(vk.regime as u64),
+    ];
+    for chunk in vk.shape_digest.as_chunks::<4>().0 {
+        header.push(rec_f(u64::from(u32::from_le_bytes(*chunk))));
+    }
+    for chunk in statement_tag.as_chunks::<4>().0 {
+        header.push(rec_f(u64::from(u32::from_le_bytes(*chunk))));
+    }
+    header.extend_from_slice(&rec_root);
+    let mut tr = RecTranscript::new();
+    let header_w: Vec<B::W> = header.into_iter().map(B::W::constant).collect();
+    tr.absorb(b, 200, &header_w);
+    tr.absorb(b, 201, public);
+    tr.absorb(b, 202, comm_z);
+    tr
+}
+
+fn row_sumcheck_rec(
+    tr: &mut RecTranscript<F>,
+    b: &mut RecNative,
+    tau: &[E],
+    num_sbox: usize,
+    mut base: [Vec<F>; 3],
+) -> (Vec<[E; ROW_DEGREE + 1]>, Vec<E>, [E; 3]) {
+    let mut ext: [Vec<E>; 3] = core::array::from_fn(|_| Vec::new());
+    let mut selector = PrefixSelector::new(num_sbox);
+    let mut eq_rest = eq_table(&tau[1..]);
+    let mut eq_bound = E::ONE;
+    let bind = |c: E,
+                round: usize,
+                base: &mut [Vec<F>; 3],
+                ext: &mut [Vec<E>; 3],
+                selector: &mut PrefixSelector| {
+        if round == 1 {
+            for (e, bm) in ext.iter_mut().zip(base.iter_mut()) {
+                *e = fold_base(bm, c);
+                *bm = Vec::new();
+            }
+        } else {
+            for e in ext.iter_mut() {
+                fold_in_place(e, c, false);
+            }
+        }
+        selector.fold(c);
+    };
+    let mut rounds = Vec::with_capacity(tau.len());
+    let mut rx = Vec::with_capacity(tau.len());
+    for round in 0..tau.len() {
+        let h = if round == 0 {
+            row_round(base.each_ref().map(Vec::as_slice), &eq_rest, &selector, false)
+        } else {
+            row_round(ext.each_ref().map(Vec::as_slice), &eq_rest, &selector, false)
+        };
+        let l1 = eq_bound * (tau[round] + tau[round] - E::ONE);
+        let l0 = eq_bound * (E::ONE - tau[round]);
+        let mut coeffs = [E::ZERO; ROW_DEGREE + 1];
+        for (k, &hk) in h.iter().enumerate() {
+            coeffs[k] += l0 * hk;
+            coeffs[k + 1] += l1 * hk;
+        }
+        tr.absorb_exts(b, 204, &coeffs.map(RecExt::constant));
+        let c = tr.ext(b, 205).value(b);
+        rounds.push(coeffs);
+        rx.push(c);
+        bind(c, round + 1, &mut base, &mut ext, &mut selector);
+        if round + 1 < tau.len() {
+            let t = tau[round];
+            let tc = t * c;
+            eq_bound *= E::ONE - t - c + tc + tc;
+            fold_pairs(&mut eq_rest, false, |lo, hi| lo + hi);
+        }
+    }
+    (rounds, rx, [ext[0][0], ext[1][0], ext[2][0]])
+}
+
+fn col_sumcheck_rec(
+    tr: &mut RecTranscript<F>,
+    b: &mut RecNative,
+    mut tm: Vec<E>,
+    z: &[F],
+) -> (Vec<[E; COL_DEGREE + 1]>, Vec<E>, E) {
+    let n = tm.len().trailing_zeros() as usize;
+    let mut tz: Vec<E> = Vec::new();
+    let mut rounds = Vec::with_capacity(n);
+    let mut ry = Vec::with_capacity(n);
+    for round in 0..n {
+        let evals = if round == 0 {
+            round_evals(0..tm.len() / 2, |i| {
+                let (m0, m1) = (tm[2 * i], tm[2 * i + 1]);
+                let (z0, z1) = (z[2 * i], z[2 * i + 1]);
+                [
+                    m0.mul_base(z0),
+                    m1.mul_base(z1),
+                    (m1 + m1 - m0).mul_base(z1 + z1 - z0),
+                ]
+            })
+        } else {
+            let tz = &tz;
+            round_evals(0..tm.len() / 2, |i| {
+                let (m0, m1) = (tm[2 * i], tm[2 * i + 1]);
+                let (z0, z1) = (tz[2 * i], tz[2 * i + 1]);
+                [m0 * z0, m1 * z1, (m1 + m1 - m0) * (z1 + z1 - z0)]
+            })
+        };
+        let coeffs: [E; COL_DEGREE + 1] = evals_to_coeffs(&evals).try_into().unwrap();
+        tr.absorb_exts(b, 209, &coeffs.map(RecExt::constant));
+        let c = tr.ext(b, 210).value(b);
+        rounds.push(coeffs);
+        ry.push(c);
+        if round == 0 {
+            tz = fold_base(z, c);
+        } else {
+            fold_in_place(&mut tz, c, false);
+        }
+        fold_in_place(&mut tm, c, false);
+    }
+    (rounds, ry, tz[0])
+}
+
+/// Emit a recursive Poseidon2 public proof suitable for verification inside a parent
+/// [`ConstraintSystem`] via [`verify_public_gadget`].
+pub fn prove_public_for_recursion(
+    shape: &Shape,
+    hologram: &ShapeHologram,
+    mut assignment: Vec<F>,
+    statement_tag: [u8; 32],
+) -> Result<RecursivePublicHemProof, ZkHemError> {
+    let vk = &hologram.vk;
+    let rec_h = hologram.rec_h.as_ref().ok_or(ZkHemError::RelationTooLarge)?;
+    if vk.shape_digest != shape.digest() || !vk.regime.uses_poseidon2_canopy() {
+        return Err(ZkHemError::Unsatisfied);
+    }
+    if assignment.len() != shape.num_vars || assignment.first() != Some(&F::ONE) {
+        return Err(ZkHemError::Unsatisfied);
+    }
+    let public = assignment[1..=shape.num_public].to_vec();
+    let row_base = row_tables(shape, &assignment, true).ok_or(ZkHemError::Unsatisfied)?;
+
+    let pack_vars = vk.pack_vars();
+    let rec_params =
+        FixedPathWhirParams::new(vk.regime, pack_vars).map_err(|_| ZkHemError::RelationTooLarge)?;
+    assignment.resize(1 << pack_vars, F::ZERO);
+    let z_comm = commit_for_recursion(&rec_params, &assignment)
+        .map_err(|_| ZkHemError::RelationTooLarge)?;
+    let comm_z = z_comm.root();
+
+    let mut b = RecNative::default();
+    let mut tr = start_rec_hologram_transcript(&mut b, vk, statement_tag, &public, &comm_z);
+    let tau: Vec<E> = (0..vk.log_rows).map(|_| tr.ext(&mut b, 203).value(&b)).collect();
+    let (row_rounds, rx, row_values) = row_sumcheck_rec(&mut tr, &mut b, &tau, vk.num_sbox, row_base);
+    tr.absorb_exts(&mut b, 206, &row_values.map(RecExt::constant));
+    let combine: [E; 3] = core::array::from_fn(|_| tr.ext(&mut b, 207).value(&b));
+    let lambda = tr.ext(&mut b, 208).value(&b);
+
+    let eq_rx = eq_table(&rx);
+    let mut tm = column_table(shape, &eq_rx, &combine, 1 << vk.var_bits);
+    let mut weight = lambda;
+    for slot in tm.iter_mut().take(vk.num_public + 1) {
+        *slot += weight;
+        weight *= lambda;
+    }
+    let (col_rounds, ry, eval_z) =
+        col_sumcheck_rec(&mut tr, &mut b, tm, &assignment[..1 << vk.var_bits]);
+    tr.absorb_exts(&mut b, 211, &[RecExt::constant(eval_z)]);
+
+    let eq_ry = eq_table(&ry);
+    let m_nz = 1usize << vk.ell_nz;
+    let mut ex = vec![E::ZERO; m_nz];
+    let mut ey = vec![E::ZERO; m_nz];
+    let mut val_comb = vec![E::ZERO; m_nz];
+    let chunk = par_chunk(m_nz);
+    for_each_chunk_mut(&mut ex, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = eq_rx[hologram.row_idx[base + off] as usize];
+        }
+    });
+    for_each_chunk_mut(&mut ey, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = eq_ry[hologram.col_idx[base + off] as usize];
+        }
+    });
+    for_each_chunk_mut(&mut val_comb, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            let k = base + off;
+            *slot = combine[0].mul_base(hologram.val_a[k])
+                + combine[1].mul_base(hologram.val_b[k])
+                + combine[2].mul_base(hologram.val_c[k]);
+        }
+    });
+    let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
+
+    let e_super = pack_e_super(&ex, &ey);
+    let e_comm =
+        commit_for_recursion(&rec_params, &e_super).map_err(|_| ZkHemError::RelationTooLarge)?;
+    let comm_e = e_comm.root();
+
+    tr.absorb(&mut b, 212, &comm_e);
+    tr.absorb_exts(&mut b, 213, &[RecExt::constant(m_sparse_claim)]);
+    let alpha_mem = tr.ext(&mut b, 214).value(&b);
+    let gamma_x = tr.ext(&mut b, 215).value(&b);
+    let gamma_y = tr.ext(&mut b, 216).value(&b);
+    let delta = tr.ext(&mut b, 217).value(&b);
+
+    let (mat_rounds, r_mat, _) =
+        run_cubic_triple_sumcheck(ex.clone(), ey.clone(), val_comb, |coeffs| {
+            tr.absorb_exts(&mut b, 218, &coeffs.map(RecExt::constant));
+            tr.ext(&mut b, 219).value(&b)
+        });
+    let (h_at_mat, e_limbs_at_mat) = eval_h_and_e_limbs_at_point(hologram, &e_super, &r_mat);
+    tr.absorb_exts(&mut b, 220, &h_at_mat.map(RecExt::constant));
+    tr.absorb_exts(&mut b, 221, &e_limbs_at_mat.map(RecExt::constant));
+
+    let (p0, q0) = build_gkr_leaves(
+        hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta,
+    );
+    let tree = build_gkr_tree(p0, q0);
+    let gkr_depth = vk.ell_nz + 2;
+    let q_root = tree[gkr_depth].1[0];
+    debug_assert_eq!(tree[gkr_depth].0[0], E::ZERO);
+    if q_root.is_zero() {
+        return Err(ZkHemError::MaskRankDeficient);
+    }
+    tr.absorb_exts(&mut b, 222, &[RecExt::constant(q_root)]);
+
+    let mut r_cur: Vec<E> = Vec::new();
+    let mut gkr_layers = Vec::with_capacity(gkr_depth);
+    for d in (0..gkr_depth).rev() {
+        let m_vars = gkr_depth - 1 - d;
+        let (rounds, u_star, split) = if m_vars == 0 {
+            (
+                Vec::new(),
+                Vec::new(),
+                [tree[d].0[0], tree[d].0[1], tree[d].1[0], tree[d].1[1]],
+            )
+        } else {
+            let beta = tr.ext(&mut b, 223).value(&b);
+            run_gkr_layer_sumcheck(&tree[d].0, &tree[d].1, &r_cur, beta, |coeffs| {
+                tr.absorb_exts(&mut b, 224, &coeffs.map(RecExt::constant));
+                tr.ext(&mut b, 225).value(&b)
+            })
+        };
+        tr.absorb_exts(&mut b, 226, &split.map(RecExt::constant));
+        let c_bit = tr.ext(&mut b, 227).value(&b);
+        let mut next_r = Vec::with_capacity(m_vars + 1);
+        next_r.push(c_bit);
+        next_r.extend_from_slice(&u_star);
+        r_cur = next_r;
+        gkr_layers.push(LogUpGkrLayer { rounds, split });
+    }
+    let r_gkr = &r_cur[..vk.ell_nz];
+    let (h_at_gkr, e_limbs_at_gkr) = eval_h_and_e_limbs_at_point(hologram, &e_super, r_gkr);
+    tr.absorb_exts(&mut b, 228, &h_at_gkr.map(RecExt::constant));
+    tr.absorb_exts(&mut b, 229, &e_limbs_at_gkr.map(RecExt::constant));
+
+    let sel_mat: [E; 3] = core::array::from_fn(|_| tr.ext(&mut b, 230).value(&b));
+    let sel_gkr: [E; 3] = core::array::from_fn(|_| tr.ext(&mut b, 231).value(&b));
+
+    let mut p_z = ry;
+    p_z.resize(pack_vars, E::ZERO);
+    let mut p_mat = r_mat;
+    p_mat.extend_from_slice(&sel_mat);
+    let mut p_gkr = r_gkr.to_vec();
+    p_gkr.extend_from_slice(&sel_gkr);
+
+    let opening = open_correlated3_for_recursion(
+        &rec_params,
+        &mut tr,
+        z_comm,
+        rec_h,
+        e_comm,
+        &[p_z, p_mat, p_gkr],
+    )
+    .map_err(|_| ZkHemError::RelationTooLarge)?;
+    debug_assert!(!b.failed);
+
+    Ok(RecursivePublicHemProof {
+        comm_z,
+        row_rounds,
+        row_values,
+        col_rounds,
+        eval_z,
+        comm_e,
+        m_sparse_claim,
+        mat_rounds,
+        h_at_mat,
+        e_limbs_at_mat,
+        q_root,
+        gkr_layers,
+        h_at_gkr,
+        e_limbs_at_gkr,
+        opening,
+    })
+}
+
+fn eval_poly_gadget<B: RecBackend>(
+    b: &mut B,
+    coeffs: &[RecExt<B::W>],
+    x: &RecExt<B::W>,
+) -> RecExt<B::W> {
+    let (last, rest) = coeffs.split_last().expect("nonempty polynomial");
+    rest.iter()
+        .rev()
+        .fold(last.clone(), |acc, c| acc.mul(b, x).add(c))
+}
+
+fn verify_sumcheck_gadget<B: RecBackend>(
+    b: &mut B,
+    tr: &mut RecTranscript<B::W>,
+    absorb_tag: u64,
+    squeeze_tag: u64,
+    rounds: &[Vec<E>],
+    mut claim: RecExt<B::W>,
+) -> (RecExt<B::W>, Vec<RecExt<B::W>>) {
+    let mut point = Vec::with_capacity(rounds.len());
+    for round in rounds {
+        let rw: Vec<RecExt<B::W>> = round.iter().map(|&v| RecExt::alloc(b, v)).collect();
+        let at_one = rw
+            .iter()
+            .fold(RecExt::zero(), |acc, c| acc.add(c));
+        rw[0].add(&at_one).equal(b, &claim);
+        tr.absorb_exts(b, absorb_tag, &rw);
+        let c = tr.ext(b, squeeze_tag);
+        claim = eval_poly_gadget(b, &rw, &c);
+        point.push(c);
+    }
+    (claim, point)
+}
+
+fn recompose_ext4_gadget<W: RecBase>(limbs: &[RecExt<W>; 4]) -> RecExt<W> {
+    let basis = limb_basis();
+    let mut acc = RecExt::zero();
+    for (j, limb_ext) in limbs.iter().enumerate() {
+        let b_limbs = basis[j].to_limbs();
+        // `basis[j]` is the unit vector `e_j`, so multiplying `limb_ext` by `e_j` in the tower
+        // is a pure constant linear combination over `limb_ext.0` with ZERO multiplications!
+        // Specifically, in `E`, `x * e_j`: evaluate on unit vectors via native `E`!
+        let mut cols = [[F::ZERO; 4]; 4];
+        for i in 0..4 {
+            let mut u = [F::ZERO; 4];
+            u[i] = F::ONE;
+            cols[i] = (E::from_limbs(u) * E::from_limbs(b_limbs)).to_limbs();
+        }
+        let prod = RecExt(core::array::from_fn(|out_l| {
+            (0..4).fold(W::constant(F::ZERO), |s, in_l| {
+                s.plus(&limb_ext.0[in_l].scale(cols[in_l][out_l]))
+            })
+        }));
+        acc = acc.add(&prod);
+    }
+    acc
+}
+
+fn super8_claim_gadget<B: RecBackend>(
+    b: &mut B,
+    slices: &[RecExt<B::W>; 8],
+    sel: &[RecExt<B::W>; 3],
+) -> RecExt<B::W> {
+    let eq_s = eq_table_gadget(b, sel);
+    let mut acc = RecExt::zero();
+    for (v, w) in slices.iter().zip(&eq_s) {
+        let prod = v.mul(b, w);
+        acc = acc.add(&prod);
+    }
+    acc
+}
+
+/// Complete fixed-topology verifier for [`RecursivePublicHemProof`], executable natively
+/// (`RecNative`) and inside a parent [`super::relation::ConstraintSystem`].
+pub(crate) fn verify_public_gadget<B: RecBackend>(
+    b: &mut B,
+    vk: &ShapeVerifierKey,
+    statement_tag: [u8; 32],
+    public: &[B::W],
+    proof: &RecursivePublicHemProof,
+) {
+    assert_eq!(public.len(), vk.num_public);
+    let rec_root = vk
+        .rec_hologram_root
+        .expect("Poseidon2 recursion verifier key")
+        .map(B::W::constant);
+    let rec_params =
+        FixedPathWhirParams::new(vk.regime, vk.pack_vars()).expect("validated recursion params");
+
+    let comm_z: [B::W; 4] = proof.comm_z.map(|x| b.alloc(x));
+    let mut tr = start_rec_hologram_transcript(b, vk, statement_tag, public, &comm_z);
+    let tau: Vec<RecExt<B::W>> = (0..vk.log_rows).map(|_| tr.ext(b, 203)).collect();
+
+    let row_vecs: Vec<Vec<E>> = proof.row_rounds.iter().map(|r| r.to_vec()).collect();
+    let (row_final, rx) = verify_sumcheck_gadget(b, &mut tr, 204, 205, &row_vecs, RecExt::zero());
+    let row_vals: [RecExt<B::W>; 3] = proof.row_values.map(|v| RecExt::alloc(b, v));
+    let [va, vb, vc] = &row_vals;
+
+    // `row_final == eq(tau, rx) * (s * (va^7 - va*vb) + va*vb - vc)`.
+    let eq_tau_rx = eq_eval_gadget(b, &tau, &rx);
+    let sel_sbox = prefix_indicator_gadget(b, &rx, vk.num_sbox);
+    let va2 = va.mul(b, va);
+    let va4 = va2.mul(b, &va2);
+    let va6 = va4.mul(b, &va2);
+    let va7 = va6.mul(b, va);
+    let vab = va.mul(b, vb);
+    let gate_inner = sel_sbox.mul(b, &va7.sub(&vab)).add(&vab).sub(vc);
+    let expected_row = eq_tau_rx.mul(b, &gate_inner);
+    row_final.equal(b, &expected_row);
+
+    tr.absorb_exts(b, 206, &row_vals);
+    let combine: [RecExt<B::W>; 3] = core::array::from_fn(|_| tr.ext(b, 207));
+    let lambda = tr.ext(b, 208);
+
+    let mut col_claim = combine[0]
+        .mul(b, va)
+        .add(&combine[1].mul(b, vb))
+        .add(&combine[2].mul(b, vc));
+    let mut weight = lambda.clone();
+    col_claim = col_claim.add(&weight);
+    for pub_w in public {
+        weight = weight.mul(b, &lambda);
+        let term = weight.mul_base(b, pub_w);
+        col_claim = col_claim.add(&term);
+    }
+
+    let col_vecs: Vec<Vec<E>> = proof.col_rounds.iter().map(|r| r.to_vec()).collect();
+    let (col_final, ry) = verify_sumcheck_gadget(b, &mut tr, 209, 210, &col_vecs, col_claim);
+    let eval_z = RecExt::alloc(b, proof.eval_z);
+    tr.absorb_exts(b, 211, core::slice::from_ref(&eval_z));
+
+    let comm_e: [B::W; 4] = proof.comm_e.map(|x| b.alloc(x));
+    let m_sparse = RecExt::alloc(b, proof.m_sparse_claim);
+    tr.absorb(b, 212, &comm_e);
+    tr.absorb_exts(b, 213, core::slice::from_ref(&m_sparse));
+
+    // Closed-form Poseidon2 interior + public-input column weights + Spark sparse claim.
+    let m_p2 = eval_poseidon2_interior_gadget(b, vk.hologram_meta, &rx, &ry, &combine);
+    let mut m_total = m_p2.add(&m_sparse);
+    let one = RecExt::<B::W>::one();
+    let mut weight = lambda.clone();
+    for cell in 0..=vk.num_public {
+        let mut eq_cell = one.clone();
+        for (bit, r) in ry.iter().enumerate() {
+            let factor = if (cell >> bit) & 1 == 1 {
+                r.clone()
+            } else {
+                one.sub(r)
+            };
+            eq_cell = eq_cell.mul(b, &factor);
+        }
+        let term = weight.mul(b, &eq_cell);
+        m_total = m_total.add(&term);
+        if cell < vk.num_public {
+            weight = weight.mul(b, &lambda);
+        }
+    }
+    let expected_col = m_total.mul(b, &eval_z);
+    col_final.equal(b, &expected_col);
+
+    let alpha_mem = tr.ext(b, 214);
+    let gamma_x = tr.ext(b, 215);
+    let gamma_y = tr.ext(b, 216);
+    let delta = tr.ext(b, 217);
+
+    // 1. Spark cubic matrix sumcheck.
+    let mat_vecs: Vec<Vec<E>> = proof.mat_rounds.iter().map(|r| r.to_vec()).collect();
+    let (mat_final, r_mat) =
+        verify_sumcheck_gadget(b, &mut tr, 218, 219, &mat_vecs, m_sparse.clone());
+    let h_mat: [RecExt<B::W>; 7] = proof.h_at_mat.map(|v| RecExt::alloc(b, v));
+    let e_limbs_mat: [RecExt<B::W>; 8] = proof.e_limbs_at_mat.map(|v| RecExt::alloc(b, v));
+    tr.absorb_exts(b, 220, &h_mat);
+    tr.absorb_exts(b, 221, &e_limbs_mat);
+    let ex_mat = recompose_ext4_gadget(&core::array::from_fn(|j| e_limbs_mat[j].clone()));
+    let ey_mat = recompose_ext4_gadget(&core::array::from_fn(|j| e_limbs_mat[4 + j].clone()));
+    let v_mat = combine[0]
+        .mul(b, &h_mat[2])
+        .add(&combine[1].mul(b, &h_mat[3]))
+        .add(&combine[2].mul(b, &h_mat[4]));
+    let ex_ey_mat = ex_mat.mul(b, &ey_mat);
+    let expected_mat = ex_ey_mat.mul(b, &v_mat);
+    mat_final.equal(b, &expected_mat);
+
+    // 2. LogUp-GKR fractional binary tree + nonzero root check (`q_root * q_root_inv == 1`).
+    let q_root = RecExt::alloc(b, proof.q_root);
+    let q_root_inv = RecExt::alloc(b, q_root.value(b).inv());
+    q_root.mul(b, &q_root_inv).equal(b, &one);
+    tr.absorb_exts(b, 222, core::slice::from_ref(&q_root));
+
+    let gkr_depth = vk.ell_nz + 2;
+    let mut p_claim = RecExt::zero();
+    let mut q_claim = q_root;
+    let mut r_cur: Vec<RecExt<B::W>> = Vec::new();
+    for (m_vars, layer) in proof.gkr_layers.iter().enumerate() {
+        let split_w: [RecExt<B::W>; 4] = layer.split.map(|v| RecExt::alloc(b, v));
+        let [pl, pr, ql, qr] = &split_w;
+        let pl_qr = pl.mul(b, qr);
+        let pr_ql = pr.mul(b, ql);
+        let p_comb = pl_qr.add(&pr_ql);
+        let q_comb = ql.mul(b, qr);
+        if m_vars == 0 {
+            p_comb.equal(b, &p_claim);
+            q_comb.equal(b, &q_claim);
+        } else {
+            let beta = tr.ext(b, 223);
+            let sc_init = p_claim.add(&beta.mul(b, &q_claim));
+            let l_vecs: Vec<Vec<E>> = layer.rounds.iter().map(|r| r.to_vec()).collect();
+            let (sc_final, u_star) =
+                verify_sumcheck_gadget(b, &mut tr, 224, 225, &l_vecs, sc_init);
+            let eq_u = eq_eval_gadget(b, &r_cur, &u_star);
+            let inner = p_comb.add(&beta.mul(b, &q_comb));
+            let expected_sc = eq_u.mul(b, &inner);
+            sc_final.equal(b, &expected_sc);
+            r_cur = u_star;
+        }
+        tr.absorb_exts(b, 226, &split_w);
+        let c_bit = tr.ext(b, 227);
+        p_claim = pl.add(&c_bit.mul(b, &pr.sub(pl)));
+        q_claim = ql.add(&c_bit.mul(b, &qr.sub(ql)));
+        let mut next_r = Vec::with_capacity(m_vars + 1);
+        next_r.push(c_bit);
+        next_r.extend_from_slice(&r_cur);
+        r_cur = next_r;
+    }
+    assert_eq!(r_cur.len(), gkr_depth);
+    let r_gkr = &r_cur[..vk.ell_nz];
+    let b0 = &r_cur[vk.ell_nz];
+    let b1 = &r_cur[vk.ell_nz + 1];
+
+    let h_gkr: [RecExt<B::W>; 7] = proof.h_at_gkr.map(|v| RecExt::alloc(b, v));
+    let e_limbs_gkr: [RecExt<B::W>; 8] = proof.e_limbs_at_gkr.map(|v| RecExt::alloc(b, v));
+    tr.absorb_exts(b, 228, &h_gkr);
+    tr.absorb_exts(b, 229, &e_limbs_gkr);
+
+    let ex_gkr = recompose_ext4_gadget(&core::array::from_fn(|j| e_limbs_gkr[j].clone()));
+    let ey_gkr = recompose_ext4_gadget(&core::array::from_fn(|j| e_limbs_gkr[4 + j].clone()));
+    let id_eval = r_gkr
+        .iter()
+        .enumerate()
+        .fold(RecExt::zero(), |acc, (j, rj)| {
+            acc.add(&rj.scale(rec_f(1u64 << j)))
+        });
+    let tbl_ex = eq_eval_gadget(b, &rx, &r_gkr[..vk.log_rows]);
+    let tbl_ey = eq_eval_gadget(b, &ry, &r_gkr[..vk.var_bits]);
+
+    let one_m_b0 = one.sub(b0);
+    let one_m_b1 = one.sub(b1);
+    let w0 = one_m_b0.mul(b, &one_m_b1);
+    let w1 = b0.mul(b, &one_m_b1);
+    let w2 = one_m_b0.mul(b, b1);
+    let w3 = b0.mul(b, b1);
+
+    let t1_p = w1.mul(b, &h_gkr[5]);
+    let t2_p = w2.mul(b, &delta);
+    let w3_d = w3.mul(b, &delta);
+    let t3_p = w3_d.mul(b, &h_gkr[6]);
+    let p_exp = w0.sub(&t1_p).add(&t2_p).sub(&t3_p);
+    p_claim.equal(b, &p_exp);
+
+    let d0 = gamma_x.sub(&h_gkr[0]).sub(&alpha_mem.mul(b, &ex_gkr));
+    let d1 = gamma_x.sub(&id_eval).sub(&alpha_mem.mul(b, &tbl_ex));
+    let d2 = gamma_y.sub(&h_gkr[1]).sub(&alpha_mem.mul(b, &ey_gkr));
+    let d3 = gamma_y.sub(&id_eval).sub(&alpha_mem.mul(b, &tbl_ey));
+    let q_exp = w0
+        .mul(b, &d0)
+        .add(&w1.mul(b, &d1))
+        .add(&w2.mul(b, &d2))
+        .add(&w3.mul(b, &d3));
+    q_claim.equal(b, &q_exp);
+
+    // 3. Correlated 3-oracle WHIR opening of `(Z_pad, H_super, E_super)`.
+    let sel_mat: [RecExt<B::W>; 3] = core::array::from_fn(|_| tr.ext(b, 230));
+    let sel_gkr: [RecExt<B::W>; 3] = core::array::from_fn(|_| tr.ext(b, 231));
+
+    let zero_ext = RecExt::<B::W>::zero();
+    let mut p_z = ry;
+    p_z.resize(vk.pack_vars(), zero_ext.clone());
+    let mut p_mat = r_mat;
+    p_mat.extend_from_slice(&sel_mat);
+    let mut p_gkr = r_gkr.to_vec();
+    p_gkr.extend_from_slice(&sel_gkr);
+
+    let h_mat8: [RecExt<B::W>; 8] = core::array::from_fn(|i| {
+        if i < 7 {
+            h_mat[i].clone()
+        } else {
+            zero_ext.clone()
+        }
+    });
+    let h_gkr8: [RecExt<B::W>; 8] = core::array::from_fn(|i| {
+        if i < 7 {
+            h_gkr[i].clone()
+        } else {
+            zero_ext.clone()
+        }
+    });
+    let claim_h_mat = super8_claim_gadget(b, &h_mat8, &sel_mat);
+    let claim_h_gkr = super8_claim_gadget(b, &h_gkr8, &sel_gkr);
+    let claim_e_mat = super8_claim_gadget(b, &e_limbs_mat, &sel_mat);
+    let claim_e_gkr = super8_claim_gadget(b, &e_limbs_gkr, &sel_gkr);
+
+    let expected_claims = [
+        [Some(eval_z), None, None],
+        [None, Some(claim_h_mat), Some(claim_h_gkr)],
+        [None, Some(claim_e_mat), Some(claim_e_gkr)],
+    ];
+    verify_correlated3_gadget(
+        b,
+        &rec_params,
+        &mut tr,
+        &[comm_z, rec_root, comm_e],
+        &[p_z, p_mat, p_gkr],
+        &expected_claims,
+        &proof.opening,
+    );
+}
+
+/// Native verification of a [`RecursivePublicHemProof`].
+pub fn verify_public_for_recursion(
+    vk: &ShapeVerifierKey,
+    public: &[F],
+    statement_tag: [u8; 32],
+    proof: &RecursivePublicHemProof,
+) -> bool {
+    if !vk.regime.uses_poseidon2_canopy()
+        || public.len() != vk.num_public
+        || !proof.well_formed(vk)
+        || proof.q_root.is_zero()
+    {
+        return false;
+    }
+    let mut b = RecNative::default();
+    verify_public_gadget(&mut b, vk, statement_tag, public, proof);
+    !b.failed
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::super::relation::{ConstraintSystem, Lc, MASK_ROWS, sponge12, sponge12_native};
@@ -2282,5 +4515,146 @@ mod tests {
             let want = eq[..count].iter().fold(E::ZERO, |a, &b| a + b);
             assert_eq!(prefix_indicator(&point, count), want, "count {count}");
         }
+    }
+
+    #[test]
+    fn shape_hologram_poseidon2_factorization_and_tamper_rejection() {
+        // Build an aligned relation with multiple Poseidon2 permutations, public inputs, and muls.
+        let build = |secret_val: u64, pub_claim: Option<F>| {
+            let mut cs = ConstraintSystem::new_hologram_aligned();
+            let pub_x = cs.alloc(f(secret_val));
+            let mut st: [Lc; 12] = core::array::from_fn(|i| {
+                if i == 0 {
+                    pub_x.into()
+                } else {
+                    Lc::constant(f(10 + i as u64))
+                }
+            });
+            for _ in 0..5 {
+                super::super::relation::poseidon2_perm(&mut cs, &mut st);
+            }
+            let prod = cs.mul(&st[0], &st[1]);
+            let want = pub_claim.unwrap_or_else(|| cs.eval(&prod.into()));
+            // Rebuild with `want` as public input 1 so public_input comes first!
+            let mut cs2 = ConstraintSystem::new_hologram_aligned();
+            let p_in = cs2.public_input(want);
+            let w_x = cs2.alloc(f(secret_val));
+            let mut st2: [Lc; 12] = core::array::from_fn(|i| {
+                if i == 0 {
+                    w_x.into()
+                } else {
+                    Lc::constant(f(10 + i as u64))
+                }
+            });
+            for _ in 0..5 {
+                super::super::relation::poseidon2_perm(&mut cs2, &mut st2);
+            }
+            let prod2 = cs2.mul(&st2[0], &st2[1]);
+            cs2.enforce_equal(&p_in.into(), &prod2.into());
+            (cs2.finish(), want)
+        };
+        let ((shape, z), pub_val) = build(42, None);
+        assert!(shape.is_satisfied(&z));
+        assert_eq!(shape.hologram_meta().poseidon2_perms, 5);
+
+        let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+        let holo = ShapeHologram::compile(&shape, regime).unwrap();
+        let vk = holo.verifier_key();
+        let vk_bytes = vk.to_bytes();
+        assert!(vk_bytes.len() < 256, "vk_bytes={}", vk_bytes.len());
+        assert_eq!(ShapeVerifierKey::from_bytes(&vk_bytes).as_ref(), Some(vk));
+
+        // 1. Check exact identity: closed-form Poseidon2 interior + residual sparse sum == `matrix_at`.
+        let mut stream = SeedStream::new(b"QSAG.TEST.HOLO", &[77; 32]);
+        let rx: Vec<E> = (0..shape.log_rows).map(|_| stream.next_ext4()).collect();
+        let ry: Vec<E> = (0..vk.var_bits).map(|_| stream.next_ext4()).collect();
+        let combine: [E; 3] = core::array::from_fn(|_| stream.next_ext4());
+        let expected_m = matrix_at(&shape, &rx, &ry, &combine);
+        let p2_m = eval_poseidon2_interior_native(vk.hologram_meta, &rx, &ry, &combine);
+        let eq_rx = eq_table(&rx);
+        let eq_ry = eq_table(&ry);
+        let sparse_m = (0..1usize << vk.ell_nz).fold(E::ZERO, |acc, k| {
+            let v = combine[0].mul_base(holo.val_a[k])
+                + combine[1].mul_base(holo.val_b[k])
+                + combine[2].mul_base(holo.val_c[k]);
+            acc + eq_rx[holo.row_idx[k] as usize] * eq_ry[holo.col_idx[k] as usize] * v
+        });
+        assert_eq!(p2_m + sparse_m, expected_m);
+
+        // 2. Native `HologramPublicProof` round-trip + tamper tests across multiple regimes.
+        for reg in [
+            WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+            WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
+        ] {
+            let h = ShapeHologram::compile(&shape, reg).unwrap();
+            let proof =
+                prove_public_hologram(&shape, &h, z.clone(), b"HOLO_STMT", &[9; 32]).unwrap();
+            assert!(verify_public_hologram(
+                h.verifier_key(),
+                &[pub_val],
+                b"HOLO_STMT",
+                &proof
+            ));
+            let wire = proof.to_bytes();
+            let decoded = HologramPublicProof::from_bytes(&wire, h.verifier_key()).unwrap();
+            assert_eq!(decoded, proof);
+            assert!(!verify_public_hologram(
+                h.verifier_key(),
+                &[pub_val + F::ONE],
+                b"HOLO_STMT",
+                &proof
+            ));
+            assert!(!verify_public_hologram(
+                h.verifier_key(),
+                &[pub_val],
+                b"WRONG_STMT",
+                &proof
+            ));
+            let mut bad = proof.clone();
+            bad.m_sparse_claim += E::ONE;
+            assert!(!verify_public_hologram(
+                h.verifier_key(),
+                &[pub_val],
+                b"HOLO_STMT",
+                &bad
+            ));
+            let mut bad = proof.clone();
+            bad.e_limbs_at_mat[0] += E::ONE;
+            assert!(!verify_public_hologram(
+                h.verifier_key(),
+                &[pub_val],
+                b"HOLO_STMT",
+                &bad
+            ));
+            let mut bad = proof.clone();
+            bad.gkr_layers[2].split[0] += E::ONE;
+            assert!(!verify_public_hologram(
+                h.verifier_key(),
+                &[pub_val],
+                b"HOLO_STMT",
+                &bad
+            ));
+        }
+
+        // 3. In-circuit `RecursivePublicHemProof` + `verify_public_gadget` satisfaction & tamper!
+        let tag = [0xAB; 32];
+        let rec_proof = prove_public_for_recursion(&shape, &holo, z, tag).unwrap();
+        assert!(verify_public_for_recursion(vk, &[pub_val], tag, &rec_proof));
+
+        let mut parent_cs = ConstraintSystem::new_hologram_aligned();
+        let pub_w: Lc = parent_cs.public_input(pub_val).into();
+        verify_public_gadget(&mut parent_cs, vk, tag, &[pub_w], &rec_proof);
+        let (parent_shape, parent_z) = parent_cs.finish();
+        assert!(parent_shape.is_satisfied(&parent_z));
+
+        let mut bad_rec = rec_proof.clone();
+        bad_rec.h_at_gkr[0] += E::ONE;
+        assert!(!verify_public_for_recursion(vk, &[pub_val], tag, &bad_rec));
+        let mut bad_cs = ConstraintSystem::new_hologram_aligned();
+        let pub_w2: Lc = bad_cs.public_input(pub_val).into();
+        verify_public_gadget(&mut bad_cs, vk, tag, &[pub_w2], &bad_rec);
+        let (other_shape, bad_z) = bad_cs.finish();
+        assert_eq!(parent_shape, other_shape);
+        assert!(!other_shape.is_satisfied(&bad_z));
     }
 }

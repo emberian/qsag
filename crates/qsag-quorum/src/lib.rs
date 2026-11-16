@@ -36,6 +36,11 @@ pub use hem_quorum::{
     HemQuorumError, HemQuorumPublicDirectory, HemShamirCustodianShare, HemSpdzSeedQuorum,
     sign_from_shamir_share_slice,
 };
+pub use qsag_core::cnf_rss::{
+    CnfRssConfig, CnfRssError, CnfRssKeyShare256, CnfRssProjectedEngine, CnfRssSweep,
+    CnfRssTupleSource, StagedCnfRssBank, StreamingCnfRssSource, project_quorum_keys,
+    run_dealerless_cnf_rss_dkg,
+};
 
 #[cfg(feature = "std")]
 pub mod durable_custody;

@@ -524,23 +524,32 @@ pub fn verify_inventory_child_proof<B: AcceleratorBackend>(
     Ok(())
 }
 
+/// This custodian's position in a 2-of-3 committee, the only shape the replicated
+/// child projection supports.
+fn rss_2of3_position(seeds: &CustodianSeeds) -> Result<usize, HdError> {
+    let config = seeds.config();
+    if config.threshold() != 2 || config.members().len() != 3 {
+        return Err(HdError::UnsupportedCommittee);
+    }
+    config
+        .position(seeds.party_id())
+        .ok_or(HdError::InvalidThresholdParameters)
+}
+
 /// Derive this custodian's 2-of-3 replicated [`qsag_core::keccak_mpc::RssKeyShare256`]
 /// for hardened child `child_idx` (`SLH-DSA-SHAKE-128f`, `key_len = 16`) directly from its
-/// held subset seeds (`{pos, (pos + 2) % 3}` as primary, `{pos, (pos + 1) % 3}` as secondary)
-/// without assembling `SK.seed` or `SK.prf` in cleartext on any host.
+/// held subset seeds, without assembling `SK.seed` or `SK.prf` in cleartext on any host.
+///
+/// Additive share `s_i` is the PRF output under the seed of subset `{i, (i + 2) % 3}`.
+/// The custodian at position `i` returns `(s_i, s_{i+1})` as (primary, secondary), so its
+/// secondary is its successor's primary and the child secret is `s_0 ^ s_1 ^ s_2`.
 pub fn derive_rss_child_share_2of3(
     seeds: &CustodianSeeds,
     master_pk_seed: [u8; 32],
     child_idx: u32,
 ) -> Result<(qsag_core::keccak_mpc::RssKeyShare256, [u8; 16]), HdError> {
     let config = seeds.config();
-    if config.threshold() != 2 || config.members().len() != 3 {
-        return Err(HdError::UnsupportedCommittee);
-    }
-    let pos = config
-        .position(seeds.party_id())
-        .filter(|&pos| pos < 3)
-        .ok_or(HdError::InvalidThresholdParameters)?;
+    let pos = rss_2of3_position(seeds)?;
     let mut subset_primary = CustodianSet::default();
     subset_primary.insert(pos);
     subset_primary.insert((pos + 2) % 3);
@@ -560,13 +569,14 @@ pub fn derive_rss_child_share_2of3(
     let mut pk_seed_32 = [0u8; 32];
     pk_seed_32[..16].copy_from_slice(&pk_seed_16);
 
-    let derive_16 = |subset: CustodianSet, domain: &[u8]| -> Result<qsag_asm::wipe::SecretBytes<32>, HdError> {
-        let mut raw = seeds
-            .prf32(subset, domain, &[&master_pk_seed, &idx_be])
-            .ok_or(HdError::InvalidThresholdParameters)?;
-        qsag_asm::wipe::wipe(&mut raw[16..]);
-        Ok(raw)
-    };
+    let derive_16 =
+        |subset: CustodianSet, domain: &[u8]| -> Result<qsag_asm::wipe::SecretBytes<32>, HdError> {
+            let mut raw = seeds
+                .prf32(subset, domain, &[&master_pk_seed, &idx_be])
+                .ok_or(HdError::InvalidThresholdParameters)?;
+            qsag_asm::wipe::wipe(&mut raw[16..]);
+            Ok(raw)
+        };
     let sk_seed_pri = derive_16(subset_primary, b"QSAG.HD.INV.RSS.SKSEED.V1")?;
     let sk_seed_sec = derive_16(subset_secondary, b"QSAG.HD.INV.RSS.SKSEED.V1")?;
     let sk_prf_pri = derive_16(subset_primary, b"QSAG.HD.INV.RSS.SKPRF.V1")?;
@@ -627,6 +637,8 @@ pub fn derive_rss_child_share_2of3_budgeted(
     if !ct_eq_bytes(&budget.family_id(), &seeds.config().digest()) {
         return Err(HdError::BudgetStorageFailed);
     }
+    // A committee the projection can never serve must not cost a budget slot.
+    rss_2of3_position(seeds)?;
     budget.reserve()?;
     derive_rss_child_share_2of3(seeds, master_pk_seed, child_idx)
 }
@@ -870,8 +882,10 @@ mod signature_tests {
         }
         let unsupported = committee(2, 4);
         let seeds = run_seed_ceremony(&unsupported, 0x87);
-        assert_eq!(derive_rss_child_share_2of3(&seeds[0], [1; 32], 0).err(),
-            Some(HdError::UnsupportedCommittee));
+        assert_eq!(
+            derive_rss_child_share_2of3(&seeds[0], [1; 32], 0).err(),
+            Some(HdError::UnsupportedCommittee)
+        );
         // Party IDs need not equal their zero-based RSS positions.
         let config = CommitteeConfig::new(2, &[(7, 1), (42, 2), (u16::MAX, 3)], [2; 32]).unwrap();
         let seeds = run_seed_ceremony(&config, 0x89);
@@ -891,6 +905,93 @@ mod signature_tests {
         }
     }
 
+    /// `QSRSSK01` offsets of the (primary, secondary) pairs: `SK.seed`, `SK.prf`, PRG seed.
+    const RSS_PAIRS: [(usize, usize); 3] = [(44, 76), (108, 140), (172, 204)];
+
+    #[test]
+    fn rss_2of3_child_shares_are_consistently_replicated() {
+        let config = CommitteeConfig::new(2, &[(7, 1), (42, 2), (u16::MAX, 3)], [2; 32]).unwrap();
+        let seeds = run_seed_ceremony(&config, 0x8b);
+        for child in [0, 1, u32::MAX] {
+            let shares: Vec<_> = seeds
+                .iter()
+                .map(|party| {
+                    derive_rss_child_share_2of3(party, [3; 32], child)
+                        .unwrap()
+                        .0
+                        .to_secret_bytes()
+                })
+                .collect();
+            for (field, &(primary, secondary)) in RSS_PAIRS.iter().enumerate() {
+                let s: Vec<&[u8]> = shares.iter().map(|b| &b[primary..primary + 32]).collect();
+                for (pos, share) in shares.iter().enumerate() {
+                    assert_eq!(usize::from(share[8]), pos);
+                    // (s_i, s_{i+1}): each secondary is the successor's primary.
+                    assert_eq!(&share[secondary..secondary + 32], s[(pos + 1) % 3]);
+                }
+                assert!(s[0] != s[1] && s[1] != s[2] && s[0] != s[2]);
+                // Any two custodians hold all three additive shares, hence the same
+                // secret `s_0 ^ s_1 ^ s_2`; 128-bit key material leaves the top half zero.
+                let secret: Vec<u8> = (0..32).map(|i| s[0][i] ^ s[1][i] ^ s[2][i]).collect();
+                for pair in [[0, 1], [1, 2], [2, 0]] {
+                    let [a, b] = pair.map(|p| &shares[p]);
+                    let rebuilt: Vec<u8> = (0..32)
+                        .map(|i| a[primary + i] ^ a[secondary + i] ^ b[secondary + i])
+                        .collect();
+                    assert_eq!(rebuilt, secret);
+                }
+                if field < 2 {
+                    assert!(s.iter().all(|share| share[16..] == [0; 16]));
+                    assert_ne!(secret[..16], [0; 16]);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn budgeted_rss_projection_burns_only_for_supported_committees() {
+        use crate::budget::DurableQueryBudget;
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "qsag-hd-rss-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        for (name, config, supported) in [
+            ("two-of-three", committee(2, 3), true),
+            ("two-of-four", committee(2, 4), false),
+        ] {
+            let seeds = run_seed_ceremony(&config, 0x8d);
+            let mut budget =
+                DurableQueryBudget::create(dir.join(name), config.digest(), [9; 32]).unwrap();
+            let result = derive_rss_child_share_2of3_budgeted(&mut budget, &seeds[0], [3; 32], 5);
+            if supported {
+                let plain = derive_rss_child_share_2of3(&seeds[0], [3; 32], 5).unwrap();
+                let (share, pk_seed) = result.unwrap();
+                assert_eq!(pk_seed, plain.1);
+                assert_eq!(&*share.to_secret_bytes(), &*plain.0.to_secret_bytes());
+            } else {
+                assert_eq!(result.err(), Some(HdError::UnsupportedCommittee));
+            }
+            assert_eq!(budget.used(), u64::from(supported));
+        }
+        // A budget of another family is refused before anything is burned.
+        let config = committee(2, 3);
+        let seeds = run_seed_ceremony(&config, 0x8d);
+        let mut foreign = DurableQueryBudget::create(dir.join("foreign"), [0x77; 32], [9; 32]).unwrap();
+        assert_eq!(
+            derive_rss_child_share_2of3_budgeted(&mut foreign, &seeds[0], [3; 32], 5).err(),
+            Some(HdError::BudgetStorageFailed)
+        );
+        assert_eq!(foreign.used(), 0);
+        drop(foreign);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn rss_2of3_child_shares_sign_in_mpc_without_cleartext_sk() {
         use qsag_core::fips205::{slh_keygen_mpc, slh_sign_mpc};
@@ -907,8 +1008,7 @@ mod signature_tests {
         assert_eq!(pk_seed1, pk_seed2);
 
         let encoded0 = s0.to_secret_bytes();
-        let decoded0 =
-            qsag_core::keccak_mpc::RssKeyShare256::from_secret_bytes(&encoded0).unwrap();
+        let decoded0 = qsag_core::keccak_mpc::RssKeyShare256::from_secret_bytes(&encoded0).unwrap();
 
         let params = Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST;
         let rngs_kg = [
@@ -916,7 +1016,8 @@ mod signature_tests {
             PartyPrivateRng::from_seed([2; 32], b"hd-rss-kg"),
             PartyPrivateRng::from_seed([3; 32], b"hd-rss-kg"),
         ];
-        let mut cluster_kg = RssSlhMpcCluster::new([0xAA; 32], [decoded0, s1, s2], rngs_kg).unwrap();
+        let mut cluster_kg =
+            RssSlhMpcCluster::new([0xAA; 32], [decoded0, s1, s2], rngs_kg).unwrap();
         let pk = slh_keygen_mpc(&params, &mut cluster_kg, &pk_seed0).unwrap();
 
         // Re-derive fresh per-custodian shares for signing (no cleartext SK ever assembled).
@@ -929,7 +1030,8 @@ mod signature_tests {
             PartyPrivateRng::from_seed([6; 32], b"hd-rss-sig"),
         ];
         let mut cluster_sig = RssSlhMpcCluster::new([0xBB; 32], [s0, s1, s2], rngs_sig).unwrap();
-        let sig = slh_sign_mpc(&params, &mut cluster_sig, b"rss-hd-mpc-msg", b"", &pk, None).unwrap();
+        let sig =
+            slh_sign_mpc(&params, &mut cluster_sig, b"rss-hd-mpc-msg", b"", &pk, None).unwrap();
         assert!(slh_verify(&params, b"rss-hd-mpc-msg", &sig, b"", &pk));
     }
 }

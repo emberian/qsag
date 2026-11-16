@@ -81,8 +81,8 @@ use crate::{
     outer_mpc::Error,
     secret::{Secret, SecretVec},
     threshold_mpc::{
-        AuthWord, BooleanTriple, DaBitWord, FieldShare, FieldTriple, MacKeyShare, ThresholdConfig,
-        ThresholdField, mac_add, mac_scale, mac_sub, pack_macs,
+        AuthWord, BlindOtPeer, BooleanTriple, DaBitWord, FieldShare, FieldTriple, MacKeyShare,
+        ThresholdConfig, ThresholdField, mac_add, mac_scale, mac_sub, pack_macs,
     },
 };
 use alloc::{vec, vec::Vec};
@@ -97,11 +97,11 @@ use qsag_core::{
         OtMesh, PartyPrivateRng, run_commit_and_open_coin,
         run_dealerless_pi_triple_f2_with_transcript,
     },
-    wipe::{wipe_bytes, wipe_bytes32},
+    wipe::wipe_bytes,
 };
 
-const ZERO: Value = [0; 4];
-const ONE: Value = [1, 0, 0, 0];
+const ZERO: Value = [0; 6];
+const ONE: Value = [1, 0, 0, 0, 0, 0];
 
 /// Subset-parity repetitions of the cross-domain equality check.
 pub const CROSS_REPS: usize = 128;
@@ -134,19 +134,23 @@ const fn triple_inputs(field: ThresholdField) -> usize {
     3 + 2 * sacrifices(field)
 }
 
-/// Choice words of one base-OT batch: two Goldilocks keys, the secp256k1 key,
-/// the Ed25519 key (255 bits, one OT unused), the Boolean key, and one zero
-/// word. The holder receives the owner's first pad of every OT of the zero
-/// word, so the stream of such a pad is known to exactly that pair.
-const BASE_WORDS: usize = 13;
-const BOOLEAN_BASE: usize = 640;
+/// Choice words of one base-OT batch: two Goldilocks keys (`2` words), the
+/// secp256k1 key (`4` words), the Ed25519 key (`4` words, one OT unused), the
+/// Pallas key (`4` words, one OT unused), the BLS12-381 key (`6` words, three
+/// OTs unused), the Boolean key (`2` words), and one zero word. The holder
+/// receives the owner's first pad of every OT of the zero word, so the stream
+/// of such a pad is known to exactly that pair.
+const BASE_WORDS: usize = 23;
+const BOOLEAN_BASE: usize = 1280;
 /// The OT whose first pad seeds the pair's common mask stream.
-const SHARED_BASE: usize = 768;
+const SHARED_BASE: usize = 1408;
 const fn field_base(field: ThresholdField, key: usize) -> usize {
     match field {
         ThresholdField::Goldilocks => 64 * key,
         ThresholdField::Secp256k1 => 128,
         ThresholdField::Ed25519 => 384,
+        ThresholdField::Pallas => 640,
+        ThresholdField::Bls12_381 => 896,
     }
 }
 
@@ -329,8 +333,10 @@ fn parse_element(d: Domain, bytes: &[u8]) -> Value {
     for (limb, chunk) in value.iter_mut().zip(bytes.chunks_exact(8)) {
         *limb = u64::from_le_bytes(chunk.try_into().unwrap());
     }
-    if d == Domain::Ed {
+    if d == Domain::Ed || d == Domain::PallasFp {
         value[3] &= u64::MAX >> 1;
+    } else if d == Domain::BlsFp {
+        value[5] &= u64::MAX >> 3;
     }
     value
 }
@@ -338,32 +344,54 @@ fn parse_element(d: Domain, bytes: &[u8]) -> Value {
 /// Uniform canonical element by rejection from `fill`.
 fn element_from(d: Domain, mut fill: impl FnMut(&mut [u8])) -> Value {
     let size = 8 * limbs_of(d);
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0u8; 48];
     loop {
         fill(&mut bytes[..size]);
         let value = parse_element(d, &bytes[..size]);
         if d.canonical(value) {
-            wipe_bytes32(&mut bytes);
+            wipe_bytes(&mut bytes);
             return value;
         }
     }
 }
 
 /// Field element from one 48-byte random-OT pad. Candidates are read from
-/// the pad until one is canonical; the last is reduced. The result is within
-/// `2^-192` (Goldilocks: six 64-bit candidates, each rejected with
-/// probability `2^-32`), `2^-224` (secp256k1) and `2^-250` (Ed25519) of
-/// uniform.
+/// the pad until one is canonical; the last is reduced (or expanded via
+/// wide zero-rejection reduction for `PallasFp` and `BlsFp`). The result is
+/// within `2^-192` (Goldilocks), `2^-224` (secp256k1), `2^-250` (Ed25519),
+/// `2^-253.8` (Pallas), and `2^-379` (BLS12-381) of uniform.
 fn pad_element(d: Domain, pad: &[u8; 48]) -> Value {
     if d == Domain::Gold {
         let mut value = 0;
         for chunk in pad.chunks_exact(8) {
             value = u64::from_le_bytes(chunk.try_into().unwrap());
-            if d.canonical([value, 0, 0, 0]) {
-                return [value, 0, 0, 0];
+            if d.canonical([value, 0, 0, 0, 0, 0]) {
+                return [value, 0, 0, 0, 0, 0];
             }
         }
-        return [value.wrapping_sub(d.modulus()[0]), 0, 0, 0];
+        return [value.wrapping_sub(d.modulus()[0]), 0, 0, 0, 0, 0];
+    }
+    if d == Domain::PallasFp {
+        let mut sponge = xof(b"QSAG.MIGRATE.PREP.WIDE_PAD.V1", &[b"pallas", pad]);
+        let mut buf = [0u8; 64];
+        sponge.squeeze(&mut buf);
+        let mut lo = parse_element(d, &buf[..32]);
+        let mut hi = parse_element(d, &buf[32..64]);
+        lo[3] &= (1u64 << 62) - 1;
+        hi[3] &= (1u64 << 62) - 1;
+        wipe_bytes(&mut buf);
+        return d.add(lo, d.mul([0, 0, 0, 1u64 << 62, 0, 0], hi));
+    }
+    if d == Domain::BlsFp {
+        let mut sponge = xof(b"QSAG.MIGRATE.PREP.WIDE_PAD.V1", &[b"bls12_381", pad]);
+        let mut buf = [0u8; 96];
+        sponge.squeeze(&mut buf);
+        let mut lo = parse_element(d, &buf[..48]);
+        let mut hi = parse_element(d, &buf[48..96]);
+        lo[5] &= (1u64 << 60) - 1;
+        hi[5] &= (1u64 << 60) - 1;
+        wipe_bytes(&mut buf);
+        return d.add(lo, d.mul([0, 0, 0, 0, 0, 1u64 << 60], hi));
     }
     let value = parse_element(d, &pad[..32]);
     if d.canonical(value) {
@@ -455,7 +483,7 @@ impl Challenges {
 #[inline(always)]
 fn part(d: Domain, mac: Value, key: usize) -> Value {
     if d == Domain::Gold {
-        [mac[key], 0, 0, 0]
+        [mac[key], 0, 0, 0, 0, 0]
     } else {
         mac
     }
@@ -624,18 +652,18 @@ impl BooleanQueue {
 /// bits followed by [`CROSS_REPS`] parity masks, then the mask of the input
 /// check, then the mask of the key-consistency check.
 struct Layout {
-    retained: [usize; 3],
-    at: [usize; 3],
+    retained: [usize; 5],
+    at: [usize; 5],
     input_mask: usize,
     key_mask: usize,
     total: usize,
 }
 impl Layout {
     fn new(demand: &Demand) -> Self {
-        let mut at = [0; 3];
-        let mut retained = [0; 3];
+        let mut at = [0; 5];
+        let mut retained = [0; 5];
         let mut next = 0;
-        for i in 0..3 {
+        for i in 0..5 {
             at[i] = next;
             retained[i] = 64 * demand.dabits[i];
             if retained[i] != 0 {
@@ -674,10 +702,10 @@ struct Ceremony<'a> {
     /// Commit-then-open invocations started so far.
     commits: u64,
     boolean_keys: SecretVec<u128>,
-    field_keys: SecretVec<[Value; 3]>,
+    field_keys: SecretVec<[Value; 5]>,
     /// `[o][h]`: the keys `h` committed to in its base OTs with `o`.
     pair_boolean_keys: Vec<SecretVec<u128>>,
-    pair_field_keys: Vec<SecretVec<[Value; 3]>>,
+    pair_field_keys: Vec<SecretVec<[Value; 5]>>,
     pairs: Vec<Vec<Option<Pair>>>,
 }
 
@@ -813,7 +841,7 @@ impl<'a> Ceremony<'a> {
     /// Every party samples its field key shares (two for Goldilocks).
     fn sample_field_keys(&mut self) {
         for party in 0..self.parties {
-            self.field_keys.push([ZERO; 3]);
+            self.field_keys.push([ZERO; 5]);
             for field in ThresholdField::ALL {
                 let d = field.domain();
                 for key in 0..key_count(d) {
@@ -857,8 +885,10 @@ impl<'a> Ceremony<'a> {
                 }
                 let mut choices: SecretVec<u64> = SecretVec::with_capacity(BASE_WORDS);
                 choices.extend_from_slice(&fields[0][..2]);
-                choices.extend_from_slice(&fields[1]);
-                choices.extend_from_slice(&fields[2]);
+                choices.extend_from_slice(&fields[1][..4]);
+                choices.extend_from_slice(&fields[2][..4]);
+                choices.extend_from_slice(&fields[3][..4]);
+                choices.extend_from_slice(&fields[4][..6]);
                 choices.push(*boolean as u64);
                 choices.push((*boolean >> 64) as u64);
                 choices.push(0);
@@ -1077,7 +1107,7 @@ impl<'a> Ceremony<'a> {
         self.commit_then_open(b"input check sigma", &sigmas)?;
         for entry in 0..parties * keys {
             let sum = (0..parties).fold(ZERO, |sum, p| {
-                let share: Value = sigmas[p][4 * entry..4 * entry + 4].try_into().unwrap();
+                let share: Value = sigmas[p][6 * entry..6 * entry + 6].try_into().unwrap();
                 mac_add(d, sum, share)
             });
             if sum != ZERO {
@@ -1795,7 +1825,7 @@ impl<'a> Ceremony<'a> {
             if let Some(candidates) = candidates.filter(|_| retained != 0) {
                 let bits = &candidates.bits[owner];
                 for k in layout.at[index]..layout.at[index] + candidate_count {
-                    inputs[owner].push([(bits[k / 64] >> (k % 64)) & 1, 0, 0, 0]);
+                    inputs[owner].push([(bits[k / 64] >> (k % 64)) & 1, 0, 0, 0, 0, 0]);
                 }
                 (self.fault)(Fault::DaBitFieldInput {
                     field,
@@ -1879,7 +1909,7 @@ impl<'a> Ceremony<'a> {
         self.commit_then_open(b"key consistency sigma", &sigmas)?;
         for item in 0..keys {
             let sum = (0..parties).fold(ZERO, |sum, p| {
-                let share: Value = sigmas[p][4 * item..4 * item + 4].try_into().unwrap();
+                let share: Value = sigmas[p][6 * item..6 * item + 6].try_into().unwrap();
                 mac_add(d, sum, share)
             });
             if sum != ZERO {
@@ -1953,7 +1983,7 @@ impl<'a> Ceremony<'a> {
                 parities[owner][rep] = parity;
                 let half = weight.wrapping_sub(parity) >> 1;
                 for digit in 0..digits {
-                    values.push([(half >> digit) & 1, 0, 0, 0]);
+                    values.push([(half >> digit) & 1, 0, 0, 0, 0, 0]);
                 }
             }
             digit_inputs.push(values);
@@ -1984,11 +2014,11 @@ impl<'a> Ceremony<'a> {
                     let keyed = Secret(mac_scale(
                         d,
                         *self.field_key_for(field, Some(owner), p),
-                        [parity, 0, 0, 0],
+                        [parity, 0, 0, 0, 0, 0],
                     ));
                     sum = mac_sub(d, sum, *keyed);
                     for digit in 0..digits {
-                        let weight = [2u64 << digit, 0, 0, 0];
+                        let weight = [2u64 << digit, 0, 0, 0, 0, 0];
                         let mac = digit_shares[owner][p][rep * digits + digit][1];
                         sum = mac_sub(d, sum, mac_scale(d, mac, weight));
                     }

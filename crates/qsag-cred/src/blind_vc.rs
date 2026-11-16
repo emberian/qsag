@@ -166,7 +166,7 @@ pub fn compute_vc_poseidon2_commit(
         return Err(BlindVcError::AttributeCountExceeded { count: attrs.len() });
     }
     let arity = attrs.len() as u64;
-    let mut padded = [0; MAX_VC_ATTRS];
+    let mut padded = SecretBuffer([0; MAX_VC_ATTRS]);
     for (index, &value) in attrs.iter().enumerate() {
         if !gl_is_canonical(value) {
             return Err(BlindVcError::NonCanonicalGoldilocksAttribute { index });
@@ -175,8 +175,8 @@ pub fn compute_vc_poseidon2_commit(
     }
     // Keep the original six-slot padding for small credentials. Larger schemas
     // absorb every attribute into the same rate-six, capacity-six sponge.
-    let mut st = padded[..attrs.len().max(6)].to_vec();
-    ct_zeroize_u64s(&mut padded);
+    let mut st = SecretBuffer(Vec::with_capacity(attrs.len().max(6) + 7));
+    st.extend_from_slice(&padded[..attrs.len().max(6)]);
     st.extend_from_slice(blind_limbs);
     st.extend_from_slice(&[
         schema_id & 0xffff_ffff,
@@ -725,12 +725,13 @@ pub fn holder_prepare_blind_issuance_with_profile(
     session_id: [u8; 32],
     profile: ZkSoundnessProfile,
 ) -> Result<(BlindIssuanceRequest, HolderCredentialSecret), BlindVcError> {
+    let ent = qsag_accel::ct::RedactedSecret::new(holder_entropy);
     if !(1..=MAX_VC_ATTRS).contains(&issuer_attested_attrs.len()) {
         return Err(BlindVcError::AttributeCountExceeded {
             count: issuer_attested_attrs.len(),
         });
     }
-    let mut attrs = [0u64; MAX_VC_ATTRS];
+    let mut attrs = SecretBuffer([0u64; MAX_VC_ATTRS]);
     for (i, &v) in issuer_attested_attrs.iter().enumerate() {
         if !gl_is_canonical(v) {
             return Err(BlindVcError::NonCanonicalGoldilocksAttribute { index: i });
@@ -738,7 +739,6 @@ pub fn holder_prepare_blind_issuance_with_profile(
         attrs[i] = v;
     }
 
-    let ent = qsag_accel::ct::RedactedSecret::new(holder_entropy);
     let mut blind_ctx = Vec::with_capacity(60 + issuer_attested_attrs.len() * 8);
     blind_ctx.extend_from_slice(&session_id);
     blind_ctx.extend_from_slice(&schema_id.to_le_bytes());
@@ -973,7 +973,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
         HolderCredentialSecret {
             schema_id,
             arity: issuer_attested_attrs.len(),
-            attrs,
+            attrs: *attrs,
             holder_blind: final_holder_blind,
             seen_challenges: core::cell::RefCell::new(Vec::new()),
         },
@@ -1765,24 +1765,20 @@ fn expand_ggm_tree_256_into(
         let level_width = 1usize << depth;
         for idx in 0..level_width {
             let parent_pos = level_start + idx;
-            let parent_seed = tree[parent_pos];
-            let (left, right) = ggm_expand_children(
-                &parent_seed,
+            let children = SecretBuffer(ggm_expand_children(
+                &tree[parent_pos],
                 presentation_nonce,
                 rep,
                 depth as u8,
                 idx as u16,
-            );
-            tree[2 * parent_pos] = left;
-            tree[2 * parent_pos + 1] = right;
+            ));
+            tree[2 * parent_pos] = children.0.0;
+            tree[2 * parent_pos + 1] = children.0.1;
         }
     }
 }
 
-fn extract_ggm_copath(
-    tree: &[[u8; 32]],
-    hidden_party: u8,
-) -> [[u8; 32]; VC_SD_GGM_DEPTH] {
+fn extract_ggm_copath(tree: &[[u8; 32]], hidden_party: u8) -> [[u8; 32]; VC_SD_GGM_DEPTH] {
     let leaf_pos = VC_SD_LIMBO_PARTIES + (hidden_party as usize);
     core::array::from_fn(|step| tree[(leaf_pos >> step) ^ 1])
 }
@@ -1919,10 +1915,11 @@ impl Shake256PartyBatch8 {
         let mut done = [false; 8];
         let mut all_done = true;
         for inst in 0..8 {
+            outs[inst].secret_wipe();
+            outs[inst].clear();
             if !active_mask[inst] || count == 0 {
                 done[inst] = true;
             } else {
-                outs[inst].clear();
                 outs[inst].reserve(count);
                 all_done = false;
             }
@@ -2708,12 +2705,12 @@ fn eval_party_polynomial_shares(
     tables: &EvalTables,
 ) -> ([Fp5; SD_GRID_L], [Fp5; SD_GRID_L], Fp5) {
     const MASK64: u128 = 0xffff_ffff_ffff_ffff;
-    let mut x_lo = [[0u128; 5]; SD_GRID_L];
-    let mut x_hi = [[0u128; 5]; SD_GRID_L];
-    let mut y_lo = [[0u128; 5]; SD_GRID_L];
-    let mut y_hi = [[0u128; 5]; SD_GRID_L];
-    let mut z_lo = [[0u128; 5]; SD_GRID_L];
-    let mut z_hi = [[0u128; 5]; SD_GRID_L];
+    let mut x_lo = SecretBuffer([[0u128; 5]; SD_GRID_L]);
+    let mut x_hi = SecretBuffer([[0u128; 5]; SD_GRID_L]);
+    let mut y_lo = SecretBuffer([[0u128; 5]; SD_GRID_L]);
+    let mut y_hi = SecretBuffer([[0u128; 5]; SD_GRID_L]);
+    let mut z_lo = SecretBuffer([[0u128; 5]; SD_GRID_L]);
+    let mut z_hi = SecretBuffer([[0u128; 5]; SD_GRID_L]);
 
     for b in 0..SD_GRID_B {
         let row_off = b * SD_GRID_L;
@@ -3218,8 +3215,10 @@ pub fn prove_selective_disclosure_with_profile(
     inst_bytes.extend_from_slice(profile_tag);
 
     let statement_digest = cshake256_framed_32(b"QSAG.VC.SD_STMT_DIGEST.V2", &[&inst_bytes]);
-    let mut hedged_zk_seed = SecretBuffer(
-        cshake256_framed_32(b"QSAG.VC.SD_ZK_SEED.V2", &[&statement_digest, &ent[..]]));
+    let mut hedged_zk_seed = SecretBuffer(cshake256_framed_32(
+        b"QSAG.VC.SD_ZK_SEED.V2",
+        &[&statement_digest, &ent[..]],
+    ));
     ct_zeroize_bytes(&mut ent[..]);
 
     let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.SD_LIMBO.V1", &inst_bytes);
@@ -3358,7 +3357,8 @@ pub fn prove_selective_disclosure_with_profile(
         }
         state.delta_c = state.c_plain.sub(*c_pad_sum);
 
-        let aux_digest = digest_limbo_aux(&state.delta_w, &state.delta_z, &state.delta_c.to_limbs());
+        let aux_digest =
+            digest_limbo_aux(&state.delta_w, &state.delta_z, &state.delta_c.to_limbs());
         state.com_1[VC_SD_LIMBO_PARTIES - 1] = commit_limbo_party_r1(
             &presentation_nonce,
             rep_u32,
@@ -3500,7 +3500,9 @@ pub fn prove_selective_disclosure_with_profile(
         let mut sigma_sum = Fp5::ZERO;
         let mut h_online = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
 
-        let mut batch_tapes = SecretBuffer(core::array::from_fn::<_, 8, _>(|_| Vec::with_capacity(total_party_limbs)));
+        let mut batch_tapes = SecretBuffer(core::array::from_fn::<_, 8, _>(|_| {
+            Vec::with_capacity(total_party_limbs)
+        }));
         let mut x_grid = SecretBuffer(vec![0u64; SD_GRID_B * SD_GRID_L]);
         let mut y_grid = SecretBuffer(vec![0u64; SD_GRID_B * SD_GRID_L]);
         let mut z_grid = SecretBuffer(vec![0u64; SD_GRID_B * SD_GRID_L]);
@@ -3512,8 +3514,9 @@ pub fn prove_selective_disclosure_with_profile(
 
         for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
             let base_p = batch * 8;
-            let seeds_8 = SecretBuffer(core::array::from_fn::<_, 8, _>(|lane|
-                r1.ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]));
+            let seeds_8 = SecretBuffer(core::array::from_fn::<_, 8, _>(|lane| {
+                r1.ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]
+            }));
             let mut prg = Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
             let _ = prg.extract_salts_1();
             prg.squeeze_canonical_gl([true; 8], &mut batch_tapes, total_party_limbs);

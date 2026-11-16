@@ -1009,6 +1009,18 @@ impl FsExternalMountAnchor {
             };
             ensure_seal_state(&vmgen_seal_path, fresh, "VMGENID")?;
             let guarded_dir = resolve_custody_dir(config, custody_files, explicit_dirs)?;
+            let guarded_target = guarded_dir.join(format!(".qsag-{stem}.target"));
+            if fresh {
+                crate::cli::write_new(&guarded_target.to_string_lossy(), &domain_hash, true)?;
+            } else if !std::fs::symlink_metadata(&guarded_target)
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
+                return Err(CliError::state(format!(
+                    "ExternalAnchorUnavailableOrCorrupt (VMGENID {domain}): missing guarded custody target {}",
+                    guarded_target.display()
+                )));
+            }
             let policy = if config.vmgenid_strict {
                 VmGenPolicy::STRICT_HYPERVISOR
             } else {
@@ -1018,7 +1030,7 @@ impl FsExternalMountAnchor {
             let vmgen_anchor =
                 HypervisorGenerationAnchor::<LinuxSysfsVmGenSource>::open_or_create(
                     &vmgen_seal_path,
-                    &guarded_dir,
+                    &guarded_target,
                     vmgen_mac.0,
                     policy,
                 )

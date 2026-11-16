@@ -28,7 +28,7 @@ use core::fmt;
 use qsag_accel::AcceleratorBackend;
 use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::keccak::cshake256_framed_32;
-use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretVec, wipe};
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretVec};
 use qsag_fts::{
     FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
     FrontierFtsSignature, FrontierFtsSigningKey, FtsEpochWal, verify_frontier_fts,
@@ -106,7 +106,12 @@ fn authority_merkle_leaf_hash(
 ) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.BISCUIT.AUTH.LEAF.V1",
-        &[authority_id, pk_seed, &leaf_index.to_be_bytes(), leaf_pk_root],
+        &[
+            authority_id,
+            pk_seed,
+            &leaf_index.to_be_bytes(),
+            leaf_pk_root,
+        ],
     )
 }
 
@@ -236,24 +241,25 @@ fn seal_signing_message(
     )
 }
 
+/// Sign `msg` once with the `Compact1122` key of `(sk_seed, sk_prf, pk_seed)` and return
+/// its public root with the signature. The secrets are borrowed, so the only copies
+/// made here are the ones the signing key owns and erases.
 fn sign_one_shot_compact1122<B: AcceleratorBackend>(
-    mut sk_seed: [u8; 32],
-    mut sk_prf: [u8; 32],
+    sk_seed: &[u8; 32],
+    sk_prf: &[u8; 32],
     pk_seed: [u8; 32],
     dp: &FrontierDpTable,
     msg: &[u8],
     hedging_nonce: &[u8; 32],
     accel: &B,
 ) -> Result<([u8; 32], [u8; COMPACT1122_SIG_BYTES]), CapabilityError> {
-    let sk_seed = SecretBuffer(&mut sk_seed);
-    let sk_prf = SecretBuffer(&mut sk_prf);
     if dp.params != FrontierFtsProfile::Compact1122.params() {
         return Err(CapabilityError::Denied);
     }
     let key = FrontierFtsSigningKey::keygen(
         FrontierFtsProfile::Compact1122,
-        **sk_seed,
-        **sk_prf,
+        *sk_seed,
+        *sk_prf,
         pk_seed,
         false,
         accel,
@@ -275,8 +281,10 @@ fn sign_one_shot_compact1122<B: AcceleratorBackend>(
         .sign(dp, msg, hedging_nonce)
         .map_err(|_| CapabilityError::Denied)?;
     let raw = sig.to_bytes(FrontierFtsProfile::Compact1122);
-    let sig_arr: [u8; COMPACT1122_SIG_BYTES] =
-        raw.as_slice().try_into().map_err(|_| CapabilityError::Malformed)?;
+    let sig_arr: [u8; COMPACT1122_SIG_BYTES] = raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| CapabilityError::Malformed)?;
     Ok((pk_root, sig_arr))
 }
 
@@ -328,8 +336,12 @@ impl PqBiscuitAuthorityPublicKey {
             return Err(CapabilityError::Malformed);
         }
         Ok(Self {
-            authority_id: bytes[8..40].try_into().map_err(|_| CapabilityError::Malformed)?,
-            pk_seed: bytes[40..72].try_into().map_err(|_| CapabilityError::Malformed)?,
+            authority_id: bytes[8..40]
+                .try_into()
+                .map_err(|_| CapabilityError::Malformed)?,
+            pk_seed: bytes[40..72]
+                .try_into()
+                .map_err(|_| CapabilityError::Malformed)?,
             tree_height: bytes[72],
             merkle_root: bytes[73..105]
                 .try_into()
@@ -368,14 +380,14 @@ impl PqBiscuitAuthorityKey {
         tree_height: u8,
         accel: &B,
     ) -> Result<Self, CapabilityError> {
-        let input_seed = SecretBuffer(&mut master_seed);
+        // Erases the caller's by-value seed on every return, including the refusal below.
+        let master = SecretBuffer(&mut master_seed);
         if tree_height > MAX_AUTHORITY_TREE_HEIGHT {
             return Err(CapabilityError::Malformed);
         }
-        let master = SecretBuffer(**input_seed);
         let pk_seed = cshake256_framed_32(
             b"QSAG.BISCUIT.AUTH.PKSEED.V1",
-            &[&*master, &authority_id, &[tree_height]],
+            &[&**master, &authority_id, &[tree_height]],
         );
         let num_leaves = 1usize << tree_height;
         let mut leaf_roots = Vec::with_capacity(num_leaves);
@@ -397,7 +409,12 @@ impl PqBiscuitAuthorityKey {
                 .try_into()
                 .map_err(|_| CapabilityError::Malformed)?;
             leaf_roots.push(root);
-            level0.push(authority_merkle_leaf_hash(&authority_id, &pk_seed, idx, &root));
+            level0.push(authority_merkle_leaf_hash(
+                &authority_id,
+                &pk_seed,
+                idx,
+                &root,
+            ));
         }
         let mut merkle_layers = Vec::with_capacity(usize::from(tree_height) + 1);
         merkle_layers.push(level0);
@@ -416,7 +433,7 @@ impl PqBiscuitAuthorityKey {
         }
         let merkle_root = merkle_layers[usize::from(tree_height)][0];
         Ok(Self {
-            master_seed: master,
+            master_seed: SecretBuffer(**master),
             pk: PqBiscuitAuthorityPublicKey {
                 authority_id,
                 pk_seed,
@@ -475,7 +492,7 @@ impl PqBiscuitAuthorityKey {
         let leaf_idx = self.next_leaf;
         self.next_leaf += 1;
 
-        let step1 = PqBiscuitStepKey::derive(token_id, audience, 1, **next_step_entropy, accel)?;
+        let step1 = PqBiscuitStepKey::derive(token_id, audience, 1, &next_step_entropy, accel)?;
         let hop0_msg = hop_signing_message(
             &self.pk.authority_id,
             &token_id,
@@ -487,8 +504,8 @@ impl PqBiscuitAuthorityKey {
         let (sk_seed, sk_prf) =
             authority_leaf_seeds(&self.master_seed, &self.pk.authority_id, leaf_idx);
         let (computed_root, sig_bytes) = sign_one_shot_compact1122(
-            *sk_seed,
-            *sk_prf,
+            &sk_seed,
+            &sk_prf,
             self.pk.pk_seed,
             dp,
             &hop0_msg,
@@ -552,10 +569,8 @@ impl PqBiscuitAuthorityKey {
         if !ct_eq_bytes(&tag, &bytes[bytes.len() - 32..]) {
             return Err(CapabilityError::InvalidTag);
         }
-        let mut raw_seed = [0u8; 32];
-        raw_seed.copy_from_slice(&body[8..40]);
-        let master_seed = SecretBuffer(raw_seed);
-        wipe(&mut raw_seed);
+        let mut master_seed = SecretBytes::<32>::zeroed();
+        master_seed.copy_from_slice(&body[8..40]);
         let pk = PqBiscuitAuthorityPublicKey::from_bytes(&body[40..145])?;
         let expected_pk_seed = cshake256_framed_32(
             b"QSAG.BISCUIT.AUTH.PKSEED.V1",
@@ -595,7 +610,10 @@ impl PqBiscuitAuthorityKey {
             }
             merkle_layers.push(parents);
         }
-        if !ct_eq_bytes(&merkle_layers[usize::from(pk.tree_height)][0], &pk.merkle_root) {
+        if !ct_eq_bytes(
+            &merkle_layers[usize::from(pk.tree_height)][0],
+            &pk.merkle_root,
+        ) {
             return Err(CapabilityError::InvalidTag);
         }
         Ok(Self {
@@ -639,22 +657,20 @@ impl PqBiscuitStepKey {
         token_id: [u8; 32],
         audience: [u8; 32],
         hop_index: u16,
-        mut entropy: [u8; 32],
+        entropy: &[u8; 32],
         accel: &B,
     ) -> Result<Self, CapabilityError> {
         if hop_index == 0 || usize::from(hop_index) > MAX_BISCUIT_HOPS {
-            wipe(&mut entropy);
             return Err(CapabilityError::Denied);
         }
         let sk_seed = SecretBuffer(cshake256_framed_32(
             b"QSAG.BISCUIT.STEP.SKSEED.V1",
-            &[&entropy, &token_id, &audience, &hop_index.to_be_bytes()],
+            &[entropy, &token_id, &audience, &hop_index.to_be_bytes()],
         ));
         let sk_prf = SecretBuffer(cshake256_framed_32(
             b"QSAG.BISCUIT.STEP.SKPRF.V1",
-            &[&entropy, &token_id, &audience, &hop_index.to_be_bytes()],
+            &[entropy, &token_id, &audience, &hop_index.to_be_bytes()],
         ));
-        wipe(&mut entropy);
         let pk_seed = hop_pk_seed(&token_id, &audience, hop_index);
         let key = FrontierFtsSigningKey::keygen(
             FrontierFtsProfile::Compact1122,
@@ -728,8 +744,13 @@ impl PqBiscuitStepKey {
             .hop_index
             .checked_add(1)
             .ok_or(CapabilityError::Denied)?;
-        let next_step =
-            Self::derive(self.token_id, self.audience, next_hop, **next_step_entropy, accel)?;
+        let next_step = Self::derive(
+            self.token_id,
+            self.audience,
+            next_hop,
+            &next_step_entropy,
+            accel,
+        )?;
         let msg = hop_signing_message(
             &chain_digest,
             &self.token_id,
@@ -740,8 +761,8 @@ impl PqBiscuitStepKey {
         );
         let pk_seed = hop_pk_seed(&self.token_id, &self.audience, self.hop_index);
         let (computed_root, sig_bytes) = sign_one_shot_compact1122(
-            *self.sk_seed,
-            *self.sk_prf,
+            &self.sk_seed,
+            &self.sk_prf,
             pk_seed,
             dp,
             &msg,
@@ -792,8 +813,8 @@ impl PqBiscuitStepKey {
         let msg = seal_signing_message(&chain_digest, self.hop_index, req_digest.as_ref());
         let pk_seed = hop_pk_seed(&self.token_id, &self.audience, self.hop_index);
         let (computed_root, sig_bytes) = sign_one_shot_compact1122(
-            *self.sk_seed,
-            *self.sk_prf,
+            &self.sk_seed,
+            &self.sk_prf,
             pk_seed,
             dp,
             &msg,
@@ -841,14 +862,10 @@ impl PqBiscuitStepKey {
         if hop_index == 0 || usize::from(hop_index) > MAX_BISCUIT_HOPS {
             return Err(bad);
         }
-        let mut raw_seed = [0u8; 32];
-        let mut raw_prf = [0u8; 32];
-        raw_seed.copy_from_slice(&body[106..138]);
-        raw_prf.copy_from_slice(&body[138..170]);
-        let sk_seed = SecretBuffer(raw_seed);
-        let sk_prf = SecretBuffer(raw_prf);
-        wipe(&mut raw_seed);
-        wipe(&mut raw_prf);
+        let mut sk_seed = SecretBytes::<32>::zeroed();
+        let mut sk_prf = SecretBytes::<32>::zeroed();
+        sk_seed.copy_from_slice(&body[106..138]);
+        sk_prf.copy_from_slice(&body[138..170]);
         Ok(Self {
             token_id: body[8..40].try_into().map_err(|_| bad)?,
             audience: body[40..72].try_into().map_err(|_| bad)?,
@@ -980,9 +997,8 @@ impl PqBiscuit {
             return Err(CapabilityError::TooManyCaveats);
         }
 
-        // Cheap conjunctive refusals precede the hash-signature work. Passing
-        // these predicates grants nothing: the complete chain and seal below
-        // must still authenticate before success is returned.
+        // Caveats are checked first because they are cheap; success still requires
+        // every signature below.
         for block in &self.blocks {
             for caveat in &block.caveats {
                 if !evaluate_first_party_caveat(caveat, request) {
@@ -1069,7 +1085,9 @@ impl PqBiscuit {
             .last()
             .ok_or(CapabilityError::Malformed)?
             .next_pk_root;
-        let req_digest = seal.request_bound.then(|| capability_request_digest(request));
+        let req_digest = seal
+            .request_bound
+            .then(|| capability_request_digest(request));
         let seal_msg = seal_signing_message(&chain, seal_hop, req_digest.as_ref());
         verify_compact1122_bytes(seal_pk_seed, seal_pk_root, dp, &seal_msg, &seal.signature)?;
 
@@ -1125,9 +1143,12 @@ impl PqBiscuit {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CapabilityError> {
         let bad = CapabilityError::Malformed;
         if bytes.len() < 8 + 4 + 64 + 4 + 32 + 2 + PQ_BISCUIT_HOP_CRYPTO_BYTES
-            || bytes.len() > 112 + usize::from(MAX_AUTHORITY_TREE_HEIGHT) * 32
-                + MAX_BISCUIT_HOPS * (2 + PQ_BISCUIT_HOP_CRYPTO_BYTES)
-                + MAX_CAVEATS * 34 + COMPACT1122_SIG_BYTES
+            || bytes.len()
+                > 112
+                    + usize::from(MAX_AUTHORITY_TREE_HEIGHT) * 32
+                    + MAX_BISCUIT_HOPS * (2 + PQ_BISCUIT_HOP_CRYPTO_BYTES)
+                    + MAX_CAVEATS * 34
+                    + COMPACT1122_SIG_BYTES
             || &bytes[..8] != BISCUIT_WIRE_MAGIC
         {
             return Err(bad);
@@ -1152,9 +1173,7 @@ impl PqBiscuit {
         }
         let authority_leaf_pk_root: [u8; 32] = bytes[80..112].try_into().map_err(|_| bad)?;
         let mut pos = 112usize;
-        let sib_end = pos
-            .checked_add(usize::from(tree_height) * 32)
-            .ok_or(bad)?;
+        let sib_end = pos.checked_add(usize::from(tree_height) * 32).ok_or(bad)?;
         if sib_end > bytes.len() {
             return Err(bad);
         }
@@ -1192,9 +1211,8 @@ impl PqBiscuit {
                 .filter(|&e| e <= blocks_end)
                 .ok_or(bad)?;
             let next_pk_root: [u8; 32] = bytes[pos..pos + 32].try_into().map_err(|_| bad)?;
-            let signature: [u8; COMPACT1122_SIG_BYTES] = bytes[pos + 32..crypto_end]
-                .try_into()
-                .map_err(|_| bad)?;
+            let signature: [u8; COMPACT1122_SIG_BYTES] =
+                bytes[pos + 32..crypto_end].try_into().map_err(|_| bad)?;
             pos = crypto_end;
             blocks.push(PqBiscuitHopBlock {
                 caveats,
@@ -1208,9 +1226,8 @@ impl PqBiscuit {
         let seal = if seal_flag == 0 {
             None
         } else {
-            let signature: [u8; COMPACT1122_SIG_BYTES] = bytes[blocks_end..]
-                .try_into()
-                .map_err(|_| bad)?;
+            let signature: [u8; COMPACT1122_SIG_BYTES] =
+                bytes[blocks_end..].try_into().map_err(|_| bad)?;
             Some(PqBiscuitSeal {
                 request_bound: seal_flag == 2,
                 signature,
@@ -1246,12 +1263,17 @@ mod tests {
     #[test]
     fn codec_bounds_and_caveat_framing() {
         let mut token = PqBiscuit {
-            token_id: [1; 32], audience: [2; 32], authority_leaf_index: 0,
-            authority_leaf_pk_root: [3; 32], authority_merkle_siblings: vec![],
+            token_id: [1; 32],
+            audience: [2; 32],
+            authority_leaf_index: 0,
+            authority_leaf_pk_root: [3; 32],
+            authority_merkle_siblings: vec![],
             blocks: vec![PqBiscuitHopBlock {
                 caveats: vec![Caveat::Resource([4; 32]); MAX_CAVEATS],
-                next_pk_root: [5; 32], signature: [0; COMPACT1122_SIG_BYTES],
-            }], seal: None,
+                next_pk_root: [5; 32],
+                signature: [0; COMPACT1122_SIG_BYTES],
+            }],
+            seal: None,
         };
         let raw = token.to_bytes().unwrap();
         assert_eq!(PqBiscuit::from_bytes(&raw).unwrap(), token);
@@ -1260,8 +1282,13 @@ mod tests {
         token.blocks[0].caveats = vec![Caveat::ThirdParty([6; 32])];
         assert_eq!(token.to_bytes(), Err(CapabilityError::Denied));
         token.blocks[0].caveats.clear();
-        token.blocks.resize(MAX_BISCUIT_HOPS, token.blocks[0].clone());
-        assert_eq!(PqBiscuit::from_bytes(&token.to_bytes().unwrap()).unwrap(), token);
+        token
+            .blocks
+            .resize(MAX_BISCUIT_HOPS, token.blocks[0].clone());
+        assert_eq!(
+            PqBiscuit::from_bytes(&token.to_bytes().unwrap()).unwrap(),
+            token
+        );
         token.blocks.push(token.blocks[0].clone());
         assert_eq!(token.to_bytes(), Err(CapabilityError::Malformed));
     }
@@ -1333,7 +1360,10 @@ mod tests {
         decoded.verify(&authority_pk, &dp, &req).unwrap();
         let mut stripped_binding = decoded.clone();
         stripped_binding.seal.as_mut().unwrap().request_bound = false;
-        assert_eq!(stripped_binding.verify(&authority_pk, &dp, &req), Err(CapabilityError::InvalidTag));
+        assert_eq!(
+            stripped_binding.verify(&authority_pk, &dp, &req),
+            Err(CapabilityError::InvalidTag)
+        );
 
         // Canonical wire framing: every truncation, trailing byte, invalid flag,
         // oversized hop count, leaf index and caveat length is rejected.
@@ -1343,17 +1373,30 @@ mod tests {
         let mut malformed = wire.clone();
         malformed.push(0);
         assert!(PqBiscuit::from_bytes(&malformed).is_err());
-        for (offset, value) in [(8, 3), (9, 9), (10, 0xff), (76, 0xff), (178, 0xff), (179, 0)] {
+        for (offset, value) in [
+            (8, 3),
+            (9, 9),
+            (10, 0xff),
+            (76, 0xff),
+            (178, 0xff),
+            (179, 0),
+        ] {
             let mut malformed = wire.clone();
             malformed[offset] = value;
-            assert!(PqBiscuit::from_bytes(&malformed).is_err(), "offset={offset}");
+            assert!(
+                PqBiscuit::from_bytes(&malformed).is_err(),
+                "offset={offset}"
+            );
         }
         // Structurally valid substitutions must fail cryptographic verification.
         for offset in [8, 12, 44, 79, 80, 112, 144, 180, 235, wire.len() - 1] {
             let mut tampered = wire.clone();
             tampered[offset] ^= 1;
-            assert!(PqBiscuit::from_bytes(&tampered)
-                .map_or(true, |b| b.verify(&authority_pk, &dp, &req).is_err()), "offset={offset}");
+            assert!(
+                PqBiscuit::from_bytes(&tampered)
+                    .map_or(true, |b| b.verify(&authority_pk, &dp, &req).is_err()),
+                "offset={offset}"
+            );
         }
         for field in 0..5 {
             let mut changed = sample_request();
@@ -1387,8 +1430,14 @@ mod tests {
         let auth_bytes = authority.to_secret_bytes();
         let mut restored_auth = PqBiscuitAuthorityKey::from_secret_bytes(&auth_bytes).unwrap();
         assert_eq!(restored_auth.next_leaf(), 1);
-        assert_eq!(restored_auth.advance_next_leaf(0), Err(CapabilityError::Denied));
-        assert_eq!(restored_auth.advance_next_leaf(5), Err(CapabilityError::Denied));
+        assert_eq!(
+            restored_auth.advance_next_leaf(0),
+            Err(CapabilityError::Denied)
+        );
+        assert_eq!(
+            restored_auth.advance_next_leaf(5),
+            Err(CapabilityError::Denied)
+        );
         assert_eq!(restored_auth.next_leaf(), 1);
         // A valid digest cannot excuse malformed counters or inconsistent public seed.
         for (offset, value) in [(145, 0xff), (80, 0xff), (112, 9)] {
@@ -1418,19 +1467,43 @@ mod tests {
         );
         let mut small_req = sample_request();
         small_req.amount = 150;
-        bearer_sealed.verify(&authority_pk, &dp, &small_req).unwrap();
+        bearer_sealed
+            .verify(&authority_pk, &dp, &small_req)
+            .unwrap();
         // Every mint has a distinct authenticated leaf, including after restore.
         let mut indices = vec![tok0.authority_leaf_index(), tok_b.authority_leaf_index()];
         while restored_auth.remaining_mints() != 0 {
-            let (token, step) = restored_auth.mint(&dp, [0x46; 32], [0x22; 32], &[],
-                [0x72; 32], &[0x83; 32], &accel).unwrap();
+            let (token, step) = restored_auth
+                .mint(
+                    &dp,
+                    [0x46; 32],
+                    [0x22; 32],
+                    &[],
+                    [0x72; 32],
+                    &[0x83; 32],
+                    &accel,
+                )
+                .unwrap();
             assert!(!indices.contains(&token.authority_leaf_index()));
             indices.push(token.authority_leaf_index());
-            step.seal(&token, &dp, None, &[0x84; 32], &accel).unwrap()
-                .verify(&authority_pk, &dp, &small_req).unwrap();
+            step.seal(&token, &dp, None, &[0x84; 32], &accel)
+                .unwrap()
+                .verify(&authority_pk, &dp, &small_req)
+                .unwrap();
         }
         assert_eq!(indices, vec![0, 1, 2, 3]);
-        assert!(restored_auth.mint(&dp, [0x47; 32], [0x22; 32], &[],
-            [0x73; 32], &[0x85; 32], &accel).is_err());
+        assert!(
+            restored_auth
+                .mint(
+                    &dp,
+                    [0x47; 32],
+                    [0x22; 32],
+                    &[],
+                    [0x73; 32],
+                    &[0x85; 32],
+                    &accel
+                )
+                .is_err()
+        );
     }
 }

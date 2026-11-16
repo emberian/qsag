@@ -34,9 +34,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::goldilocks::{check_goldilocks_twiddles, coset_lde_shape, ntt_log2_len};
 use crate::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
-use crate::poseidon2::{
-    Poseidon2Merkle2BlockAddr, merkle_layer_2block_shape, merkle_layer_shape,
-};
+use crate::poseidon2::{Poseidon2Merkle2BlockAddr, merkle_layer_2block_shape, merkle_layer_shape};
 use crate::spirv_kernels::{
     canonical_prover_spirv_pin, canonical_prover_spirv_pins, canonical_spirv_pin,
     canonical_spirv_pins,
@@ -1120,12 +1118,7 @@ impl VulkanSpirvBackend {
                 .lock()
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
             let root = guard.exec_merkle_full_tree_2block(
-                leaves,
-                domain_tag,
-                pk_seed,
-                layer,
-                tree_idx,
-                base_level,
+                leaves, domain_tag, pk_seed, layer, tree_idx, base_level,
             )?;
             if leaves.len() > 1 {
                 self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
@@ -1155,7 +1148,10 @@ impl VulkanSpirvBackend {
         out_nodes: &mut [[u64; 4]],
     ) -> Result<[u64; 4], VulkanError> {
         let log_leaves = ntt_log2_len("Canopy tree leaves", leaves.len())? as u8;
-        let total_nodes = leaves.len().checked_mul(2).ok_or(AccelError::LengthOverflow)?;
+        let total_nodes = leaves
+            .len()
+            .checked_mul(2)
+            .ok_or(AccelError::LengthOverflow)?;
         if out_nodes.len() != total_nodes {
             return Err(AccelError::LengthMismatch {
                 what: "Canopy tree nodes",
@@ -1181,9 +1177,8 @@ impl VulkanSpirvBackend {
                 .engine
                 .lock()
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
-            let top_node = guard.exec_canopy_tree_poseidon2(
-                leaves, &tree_key, 0, 0, 0, 2, out_nodes,
-            )?;
+            let top_node =
+                guard.exec_canopy_tree_poseidon2(leaves, &tree_key, 0, 0, 0, 2, out_nodes)?;
             if leaves.len() > 1 {
                 self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             }
@@ -1214,7 +1209,10 @@ impl VulkanSpirvBackend {
         out_nodes: &mut [[u64; 4]],
     ) -> Result<[u64; 4], VulkanError> {
         ntt_log2_len("Canopy tree leaves", leaves.len())?;
-        let total_nodes = leaves.len().checked_mul(2).ok_or(AccelError::LengthOverflow)?;
+        let total_nodes = leaves
+            .len()
+            .checked_mul(2)
+            .ok_or(AccelError::LengthOverflow)?;
         if out_nodes.len() != total_nodes {
             return Err(AccelError::LengthMismatch {
                 what: "Canopy tree nodes",
@@ -1243,13 +1241,7 @@ impl VulkanSpirvBackend {
                 .lock()
                 .map_err(|_| VulkanError::WorkspacePoisoned)?;
             let top_node = guard.exec_canopy_tree_poseidon2(
-                leaves,
-                pk_seed,
-                layer,
-                domain_tag,
-                tree_idx,
-                1,
-                out_nodes,
+                leaves, pk_seed, layer, domain_tag, tree_idx, 1, out_nodes,
             )?;
             if leaves.len() > 1 {
                 self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
@@ -1593,8 +1585,11 @@ impl VulkanSpirvBackend {
                 0x01,
                 0,
                 &[
-                    salt_seed, &witness_digest,
-                    &capacity_args[0], &capacity_args[1], &capacity_args[2],
+                    salt_seed,
+                    &witness_digest,
+                    &capacity_args[0],
+                    &capacity_args[1],
+                    &capacity_args[2],
                 ],
             );
             let output_digest = prover_stage_io_digest(slot, 0x02, 0, &[&top_node]);
@@ -2240,8 +2235,7 @@ impl VulkanSpirvBackend {
                 }
                 .into());
             }
-            let wires =
-                self.prover_whir_fold_pass_b(pairs_c, c_base, k_src, k_half, k_dst, phi)?;
+            let wires = self.prover_whir_fold_pass_b(pairs_c, c_base, k_src, k_half, k_dst, phi)?;
             let slot = ProverKernelSlot::WhirFoldSumcheck;
             let phi_d = Self::hash_ext4_slice_for_prover(slot, &[phi]);
             let mut offsets = [0u8; 16];
@@ -4103,14 +4097,15 @@ mod tests {
 
     #[test]
     fn twiddle_check_accepts_exactly_primitive_root_power_tables() {
-        use crate::goldilocks::{
-            check_goldilocks_twiddles, gl_mul, goldilocks_primitive_root,
-            precompute_goldilocks_twiddles,
-        };
+        use crate::goldilocks::{check_goldilocks_twiddles, gl_mul, goldilocks_primitive_root};
 
         for log2_n in 0..=11u32 {
             let n = 1usize << log2_n;
-            let table = precompute_goldilocks_twiddles(n).expect("twiddles");
+            let mut table = std::vec![1; n / 2];
+            let root = goldilocks_primitive_root(log2_n).expect("root");
+            for i in 1..table.len() {
+                table[i] = gl_mul(table[i - 1], root);
+            }
             assert_eq!(check_goldilocks_twiddles(n, &table), Ok(()));
             // The inverse-root table is an equally valid primitive-root power table.
             if n >= 4 {
@@ -4598,6 +4593,85 @@ mod tests {
         let mut wave64_info = portability_info;
         wave64_info.pipelines[0].subgroup_size = Some(64);
         assert!(!wave64_info.wave32_subgroup_confirmed());
+    }
+
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    #[test]
+    fn portability_public_enablement_cannot_unlock_secrets_or_prover_receipts() {
+        let mut gpu = match VulkanSpirvBackend::try_new_portability() {
+            Ok(gpu) => gpu,
+            Err(VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound) => {
+                assert!(std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none());
+                return;
+            }
+            Err(e) => panic!("portability init: {e}"),
+        };
+        // Exercise the MoltenVK policy on the live device without fabricating telemetry.
+        gpu.secret_slots_audited = false;
+        gpu.portability_public_enabled = true;
+        let key = BackendAttestationKey::derive(&[7; 32], b"portability-gate-test");
+        let reject = |slot| VulkanError::Accel(AccelError::ProverSlotUnaudited { slot });
+        gpu.try_acquire_prover_session().unwrap();
+        assert_eq!(
+            gpu.prover_whir_commit_round0_with_receipt(
+                &key,
+                [0; 32],
+                1,
+                &[0; 32],
+                2,
+                4,
+                4,
+                0,
+                0,
+                0,
+                |_, _, _| panic!("unaudited receipt read a witness"),
+            ),
+            Err(reject(ProverKernelSlot::WhirLdeCommitment))
+        );
+        assert_eq!(
+            gpu.prover_whir_open_init_with_receipt(&key, [0; 32], 2, true, &[], &[]),
+            Err(reject(ProverKernelSlot::WhirFoldSumcheck))
+        );
+        assert_eq!(
+            gpu.prover_air_init_shard_with_receipt(&key, [0; 32], 0, 0, 2, &[], &[]),
+            Err(reject(ProverKernelSlot::AirRowGroupA))
+        );
+        assert_eq!(
+            gpu.prover_air_eval_round_with_receipt(
+                &key,
+                [0; 32],
+                true,
+                2,
+                2,
+                1,
+                false,
+                0,
+                0,
+                0,
+                &[],
+                0,
+                0,
+                0,
+                0,
+                0
+            ),
+            Err(reject(ProverKernelSlot::AirRowGroupA))
+        );
+        assert!(matches!(
+            gpu.bdoz_gf2_128_batch_dot(&[(1, 2)], &[(3, 4)]),
+            Err(AccelError::SecretSlotUnaudited { .. })
+        ));
+        assert_eq!(gpu.gpu_submission_count(), 0);
+        let mut states = [[1; 12]; 1];
+        let mut expected = states;
+        CpuReferenceBackend.batch_poseidon2_perm12(&mut expected);
+        gpu.try_batch_poseidon2_perm12_pinned(&mut states).unwrap();
+        assert_eq!(states, expected);
+        gpu.release_prover_session();
     }
 
     #[test]

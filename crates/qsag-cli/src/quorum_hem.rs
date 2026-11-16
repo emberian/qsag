@@ -43,10 +43,16 @@ use qsag_agg::{
     AggSigProfile, ValidatorPublicKey, ValidatorSignature, verify_individual_signature,
 };
 use qsag_core::preprocessing::PartyPrivateRng;
+use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use qsag_quorum::hem_quorum::{
     HEM_JORTS_MAX_LEAVES, HEM_JORTS_PK_BYTES, HEM_JORTS_SIG_BYTES, HemDynamicShamirQuorum,
     HemJortsPublicKey, HemJortsSignature, HemQuorumError, HemQuorumPublicDirectory,
-    HemShamirCustodianShare, verify_hem_jorts_signature,
+    HemShamirCustodianShare, MAX_HEM_QUORUM_PARTIES, verify_hem_jorts_signature,
+};
+
+use crate::anchor::{
+    ANCHOR_FLAG_OPTIONS, ANCHOR_NO_VAULT_VALUE_OPTIONS, AnchorConfig, FsExternalMountAnchor,
+    require_anchor_or_waiver,
 };
 
 use crate::cli::{
@@ -637,6 +643,23 @@ struct Meta {
     lock_id: (u64, u64),
     pending: Option<PendingReshare>,
     envelope: Option<HemEnvelopeMeta>,
+    anchor_info: Option<([u8; 24], [u8; 32])>,
+}
+
+const HEM_ANCHOR_DOMAIN: &str = "hem_quorum";
+
+fn hem_anchor_key_id(pk: &[u8; HEM_JORTS_PK_BYTES], lock_id: (u64, u64)) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.CLI.HEM.ANCHOR.KEYID.V1",
+        &[pk, &lock_id.0.to_le_bytes(), &lock_id.1.to_le_bytes()],
+    )
+}
+
+fn hem_anchor_mac(anchor_nonce: &[u8; 32], key_id: &[u8; 32]) -> Secret32 {
+    Secret32::new(cshake256_framed_32(
+        b"QSAG.CLI.HEM.ANCHOR.MAC.V1",
+        &[anchor_nonce, key_id],
+    ))
 }
 
 fn share_digest(party: usize, bytes: &[u8]) -> [u8; 32] {
@@ -669,6 +692,7 @@ impl Meta {
             lock_id,
             pending: None,
             envelope: None,
+            anchor_info: None,
         }
     }
 
@@ -746,12 +770,51 @@ impl Meta {
             frames.push(env.nonce.to_vec());
             frames.push(env.tag.to_vec());
         }
+        if let Some((seal, anchor_nonce)) = &self.anchor_info {
+            frames.push(b"QSAG.HEM.ANCHOR.V1".to_vec());
+            frames.push(seal.to_vec());
+            frames.push(anchor_nonce.to_vec());
+        }
         let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
         let digest = cshake256_framed_32(b"QSAG.CLI.HEM.META_DIGEST.V2", &refs);
         for frame in &mut frames {
             qsag_accel::ct::ct_zeroize_bytes(frame);
         }
         digest
+    }
+
+    fn checkpoint(&self) -> LedgerCheckpoint {
+        let mut flat_shares = Vec::with_capacity(self.share_digests.len() * 32);
+        for d in &self.share_digests {
+            flat_shares.extend_from_slice(d);
+        }
+        let (seal_bytes, nonce_bytes) = match &self.anchor_info {
+            Some((s, n)) => (&s[..], &n[..]),
+            None => (&[][..], &[][..]),
+        };
+        let tag = cshake256_framed_32(
+            b"QSAG.CLI.HEM.ANCHOR_CKPT.V1",
+            &[
+                &(self.t as u64).to_le_bytes(),
+                &(self.n as u64).to_le_bytes(),
+                &self.quorum_epoch.to_le_bytes(),
+                &(self.high_water_leaf as u64).to_le_bytes(),
+                &(self.active_leaves as u64).to_le_bytes(),
+                &[u8::from(self.invalidated)],
+                &self.pk,
+                &self.directory_digest,
+                &self.generation.to_le_bytes(),
+                &self.lock_id.0.to_le_bytes(),
+                &self.lock_id.1.to_le_bytes(),
+                &flat_shares,
+                seal_bytes,
+                nonce_bytes,
+            ],
+        );
+        LedgerCheckpoint {
+            generation: self.generation,
+            tag,
+        }
     }
 
     fn to_json(&self) -> Json {
@@ -775,6 +838,11 @@ impl Meta {
             ("vault_device", Json::num(self.lock_id.0)),
             ("vault_inode", Json::num(self.lock_id.1)),
         ];
+        if let Some((seal, anchor_nonce)) = &self.anchor_info {
+            members.push(("anchor_required", Json::Bool(true)));
+            members.push(("anchor_ceremony_seal", Json::hex(seal)));
+            members.push(("anchor_nonce", Json::hex(anchor_nonce)));
+        }
         if let Some(env) = &self.envelope {
             members.push(("envelope", Json::str(HEM_ENVELOPE_FORMAT)));
             members.push(("envelope_salt", Json::hex(&env.salt)));
@@ -836,6 +904,22 @@ impl Meta {
         } else {
             Secret32::new(latch_disk)
         };
+        let anchor_info = match json.get("anchor_required") {
+            None | Some(Json::Bool(false)) => None,
+            Some(Json::Bool(true)) => {
+                let seal: [u8; 24] = from_hex_exact(
+                    json.field_str("anchor_ceremony_seal")
+                        .map_err(|_| corrupt())?,
+                    "anchor_ceremony_seal",
+                )?;
+                let nonce: [u8; 32] = from_hex_exact(
+                    json.field_str("anchor_nonce").map_err(|_| corrupt())?,
+                    "anchor_nonce",
+                )?;
+                Some((seal, nonce))
+            }
+            Some(_) => return Err(corrupt()),
+        };
         let meta = Self {
             t: json.field_u64("threshold")? as usize,
             n: json.field_u64("parties")? as usize,
@@ -863,6 +947,7 @@ impl Meta {
             ),
             pending,
             envelope,
+            anchor_info,
         };
         let recorded: [u8; 32] = from_hex_exact(json.field_str("meta_digest")?, "meta_digest")?;
         if !qsag_accel::ct::ct_eq_bytes(&recorded, &meta.digest()) {
@@ -1003,6 +1088,18 @@ fn commit(
     fresh: bool,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
+    commit_anchored(vault_dir, quorum, meta, keys, None, fresh, hook)
+}
+
+fn commit_anchored(
+    vault_dir: &str,
+    quorum: &HemDynamicShamirQuorum,
+    meta: &mut Meta,
+    keys: Option<&HemEnvelopeKeys>,
+    anchor: Option<&FsExternalMountAnchor>,
+    fresh: bool,
+    hook: Hook<'_>,
+) -> Result<(), CliError> {
     let generation = meta
         .generation
         .checked_add(1)
@@ -1047,13 +1144,23 @@ fn commit(
         _ => None,
     };
     meta.write(vault_dir, fresh)?;
+    if let Some(ext_anchor) = anchor {
+        ext_anchor
+            .advance(meta.checkpoint())
+            .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))?;
+    }
     hook(Step::MetaCommitted)?;
     remove_stale(vault_dir, Keep::Generation(generation))?;
     hook(Step::StaleRemoved)
 }
 
-/// Retire the vault: the meta says so first, then every share file is wiped.
-fn retire(vault_dir: &str, meta: &mut Meta, hook: Hook<'_>) -> Result<(), CliError> {
+/// Retire the vault: the meta and external anchor say so first, then every share file is wiped.
+fn retire_anchored(
+    vault_dir: &str,
+    meta: &mut Meta,
+    anchor: Option<&FsExternalMountAnchor>,
+    hook: Hook<'_>,
+) -> Result<(), CliError> {
     meta.invalidated = true;
     meta.pending = None;
     meta.envelope = None;
@@ -1064,6 +1171,11 @@ fn retire(vault_dir: &str, meta: &mut Meta, hook: Hook<'_>) -> Result<(), CliErr
         .checked_add(1)
         .ok_or_else(|| CliError::state("HemQuorumGenerationExhausted"))?;
     meta.write(vault_dir, false)?;
+    if let Some(ext_anchor) = anchor {
+        ext_anchor
+            .advance(meta.checkpoint())
+            .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))?;
+    }
     hook(Step::MetaCommitted)?;
     remove_stale(vault_dir, Keep::Nothing)?;
     hook(Step::StaleRemoved)
@@ -1079,6 +1191,7 @@ struct OpenVault {
     quorum: HemDynamicShamirQuorum,
     meta: Meta,
     envelope_keys: Option<HemEnvelopeKeys>,
+    anchor: Option<FsExternalMountAnchor>,
 }
 
 fn read_directory(
@@ -1194,6 +1307,7 @@ fn load_generation(
 fn settle_interrupted_reshare(
     vault_dir: &str,
     meta: &mut Meta,
+    anchor: Option<&FsExternalMountAnchor>,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
     let Some(pending) = &meta.pending else {
@@ -1214,7 +1328,7 @@ fn settle_interrupted_reshare(
         if successor.pk != meta.pk || successor.quorum_epoch < pending.quorum_epoch {
             return Err(unknown("it holds a different vault"));
         }
-        retire(vault_dir, meta, hook)?;
+        retire_anchored(vault_dir, meta, anchor, hook)?;
         return Err(retired());
     }
     // Never committed. The staged shares are shares of this vault's key: wipe them.
@@ -1241,12 +1355,27 @@ fn settle_interrupted_reshare(
 /// Lock a vault and load its committed state, finishing whatever an interrupted command
 /// left: stale generations are wiped, an old-format vault is converted, an interrupted
 /// reshare is settled.
+#[cfg_attr(not(test), allow(dead_code))]
 fn open_vault(vault_dir: &str, pass: Option<&[u8]>, hook: Hook<'_>) -> Result<OpenVault, CliError> {
+    open_vault_anchored(vault_dir, pass, None, hook)
+}
+
+fn open_vault_anchored(
+    vault_dir: &str,
+    pass: Option<&[u8]>,
+    anchor_cfg: Option<&AnchorConfig>,
+    hook: Hook<'_>,
+) -> Result<OpenVault, CliError> {
     let (lock, lock_created) = lock_existing_vault(vault_dir)?;
     let lock_id = lock_identity(&lock)?;
     let json = Json::parse(&read_text(&meta_path(vault_dir))?)?;
 
     if json.field_str("format")? == HEM_META_FORMAT_V1 {
+        if anchor_cfg.is_some() {
+            return Err(CliError::state(
+                "legacy Hem quorum vault was not enrolled with an external monotone anchor",
+            ));
+        }
         if pass.is_some() {
             return Err(CliError::input(
                 "passphrase supplied for unencrypted Hem quorum vault",
@@ -1261,6 +1390,7 @@ fn open_vault(vault_dir: &str, pass: Option<&[u8]>, hook: Hook<'_>) -> Result<Op
             quorum,
             meta,
             envelope_keys: None,
+            anchor: None,
         });
     }
 
@@ -1268,12 +1398,55 @@ fn open_vault(vault_dir: &str, pass: Option<&[u8]>, hook: Hook<'_>) -> Result<Op
     if lock_created || meta.lock_id != lock_id {
         return Err(crate::vault::corrupt());
     }
+    let anchor = match (meta.anchor_info, anchor_cfg) {
+        (Some(_), None) => {
+            return Err(CliError::state(
+                "Hem quorum vault requires an external monotone anchor (--anchor-dir, --anchor-tpm-nv, or --anchor-vmgenid)",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(CliError::state(
+                "Hem quorum vault was not enrolled with an external monotone anchor",
+            ));
+        }
+        (None, None) => None,
+        (Some((expected_seal, anchor_nonce)), Some(cfg)) => {
+            let key_id = hem_anchor_key_id(&meta.pk, meta.lock_id);
+            let mac = hem_anchor_mac(&anchor_nonce, &key_id);
+            let ext_anchor = FsExternalMountAnchor::open_existing(
+                cfg,
+                &[&meta_path(vault_dir)],
+                &[vault_dir],
+                HEM_ANCHOR_DOMAIN,
+                key_id,
+                mac.0,
+            )?;
+            if !qsag_accel::ct::ct_eq_bytes(&ext_anchor.lock_identity_seal(), &expected_seal) {
+                return Err(CliError::state("ExternalAnchorIdentitySealMismatch"));
+            }
+            let ext_ckpt = ext_anchor
+                .load()
+                .map_err(|e| CliError::state(format!("ExternalAnchorRollbackOrCorrupt: {e}")))?
+                .ok_or_else(|| CliError::state("ExternalAnchorMissingFloorState"))?;
+            let local_ckpt = meta.checkpoint();
+            if local_ckpt.generation < ext_ckpt.generation
+                || (local_ckpt.generation == ext_ckpt.generation
+                    && !qsag_accel::ct::ct_eq_bytes(&local_ckpt.tag, &ext_ckpt.tag))
+            {
+                return Err(CliError::state(
+                    "ExternalAnchorDetectedRollback: Hem quorum vault rolled back behind external anchor",
+                ));
+            }
+            Some(ext_anchor)
+        }
+    };
+
     if meta.invalidated {
         remove_stale(vault_dir, Keep::Nothing)?;
         return Err(retired());
     }
     let envelope_keys = meta.unlock_with_passphrase(pass)?;
-    settle_interrupted_reshare(vault_dir, &mut meta, &mut *hook)?;
+    settle_interrupted_reshare(vault_dir, &mut meta, anchor.as_ref(), &mut *hook)?;
     let quorum = load_generation(vault_dir, &meta, envelope_keys.as_ref())?;
     remove_stale(vault_dir, Keep::Generation(meta.generation))?;
     Ok(OpenVault {
@@ -1281,6 +1454,7 @@ fn open_vault(vault_dir: &str, pass: Option<&[u8]>, hook: Hook<'_>) -> Result<Op
         quorum,
         meta,
         envelope_keys,
+        anchor,
     })
 }
 
@@ -1289,11 +1463,23 @@ fn open_vault(vault_dir: &str, pass: Option<&[u8]>, hook: Hook<'_>) -> Result<Op
 // ---------------------------------------------------------------------------------------
 
 /// Create a vault for a freshly staged quorum. The directory must hold no vault file.
+#[cfg_attr(not(test), allow(dead_code))]
 fn create_vault(
     vault_dir: &str,
     quorum: &HemDynamicShamirQuorum,
     latch_seed: Secret32,
     pass: Option<&[u8]>,
+    hook: Hook<'_>,
+) -> Result<(), CliError> {
+    create_vault_anchored(vault_dir, quorum, latch_seed, pass, None, hook)
+}
+
+fn create_vault_anchored(
+    vault_dir: &str,
+    quorum: &HemDynamicShamirQuorum,
+    latch_seed: Secret32,
+    pass: Option<&[u8]>,
+    anchor_cfg: Option<&AnchorConfig>,
     hook: Hook<'_>,
 ) -> Result<(), CliError> {
     let keys = match pass {
@@ -1304,13 +1490,40 @@ fn create_vault(
     private_dir(vault_dir, true)?;
     let lock = lock_new_vault(vault_dir)?;
     ensure_no_vault_files(vault_dir)?;
-    let mut meta = Meta::new(quorum, latch_seed, lock_identity(&lock)?);
+    let lock_id = lock_identity(&lock)?;
+    let mut meta = Meta::new(quorum, latch_seed, lock_id);
+    let anchor = match anchor_cfg {
+        Some(cfg) => {
+            let anchor_nonce = os_random_32()?;
+            let key_id = hem_anchor_key_id(&meta.pk, lock_id);
+            let mac = hem_anchor_mac(&anchor_nonce, &key_id);
+            let ext_anchor = FsExternalMountAnchor::provision_fresh(
+                cfg,
+                &[&meta_path(vault_dir)],
+                &[vault_dir],
+                HEM_ANCHOR_DOMAIN,
+                key_id,
+                mac.0,
+            )?;
+            meta.anchor_info = Some((ext_anchor.lock_identity_seal(), anchor_nonce));
+            Some(ext_anchor)
+        }
+        None => None,
+    };
     write_new(
         &directory_path(vault_dir),
         &quorum.public_directory().to_bytes(),
         false,
     )?;
-    commit(vault_dir, quorum, &mut meta, keys.as_ref(), true, hook)
+    commit_anchored(
+        vault_dir,
+        quorum,
+        &mut meta,
+        keys.as_ref(),
+        anchor.as_ref(),
+        true,
+        hook,
+    )
 }
 
 struct Signed {
@@ -1320,6 +1533,7 @@ struct Signed {
 }
 
 /// Sign `message`: reserve the leaf, commit the vault without it, then use it.
+#[cfg_attr(not(test), allow(dead_code))]
 fn sign_tx(
     vault_dir: &str,
     signers: Option<&str>,
@@ -1329,7 +1543,30 @@ fn sign_tx(
     pass: Option<&[u8]>,
     hook: Hook<'_>,
 ) -> Result<Signed, CliError> {
-    let mut vault = open_vault(vault_dir, pass, &mut *hook)?;
+    sign_tx_anchored(
+        vault_dir,
+        signers,
+        ackers,
+        requested_epoch,
+        message,
+        pass,
+        None,
+        hook,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_tx_anchored(
+    vault_dir: &str,
+    signers: Option<&str>,
+    ackers: Option<&str>,
+    requested_epoch: Option<u64>,
+    message: &[u8],
+    pass: Option<&[u8]>,
+    anchor_cfg: Option<&AnchorConfig>,
+    hook: Hook<'_>,
+) -> Result<Signed, CliError> {
+    let mut vault = open_vault_anchored(vault_dir, pass, anchor_cfg, &mut *hook)?;
     let (t, n) = vault.quorum.threshold_and_size();
     let signers = match signers {
         Some(s) => parse_party_list(s, "signers", n)?,
@@ -1352,11 +1589,12 @@ fn sign_tx(
         .quorum
         .reserve_leaf(&signers, &ackers, message)
         .map_err(map_quorum_err)?;
-    commit(
+    commit_anchored(
         vault_dir,
         &vault.quorum,
         &mut vault.meta,
         vault.envelope_keys.as_ref(),
+        vault.anchor.as_ref(),
         false,
         &mut *hook,
     )?;
@@ -1373,13 +1611,24 @@ fn sign_tx(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn refresh_tx(
     vault_dir: &str,
     deterministic: bool,
     pass: Option<&[u8]>,
     hook: Hook<'_>,
 ) -> Result<OpenVault, CliError> {
-    let mut vault = open_vault(vault_dir, pass, &mut *hook)?;
+    refresh_tx_anchored(vault_dir, deterministic, pass, None, hook)
+}
+
+fn refresh_tx_anchored(
+    vault_dir: &str,
+    deterministic: bool,
+    pass: Option<&[u8]>,
+    anchor_cfg: Option<&AnchorConfig>,
+    hook: Hook<'_>,
+) -> Result<OpenVault, CliError> {
+    let mut vault = open_vault_anchored(vault_dir, pass, anchor_cfg, &mut *hook)?;
     let pk_before = vault.quorum.public_key();
     let sid = if deterministic {
         cshake256_framed_32(
@@ -1404,11 +1653,12 @@ fn refresh_tx(
         ));
     }
     vault.meta.latch_seed = Secret32::new(os_random_32()?);
-    commit(
+    commit_anchored(
         vault_dir,
         &vault.quorum,
         &mut vault.meta,
         vault.envelope_keys.as_ref(),
+        vault.anchor.as_ref(),
         false,
         hook,
     )?;
@@ -1422,6 +1672,7 @@ struct Reshared {
 }
 
 /// Move custody from the vault in `old_vault_dir` to a new vault in `new_vault_dir`.
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 fn reshare_tx(
     old_vault_dir: &str,
@@ -1434,13 +1685,42 @@ fn reshare_tx(
     new_pass: Option<&[u8]>,
     hook: Hook<'_>,
 ) -> Result<Reshared, CliError> {
-    if new_t < 2 || new_t > new_n || new_n > 64 {
-        return Err(CliError::usage(
-            "--new-threshold must be >= 2 and <= --new-parties (<= 64)",
-        ));
+    reshare_tx_anchored(
+        old_vault_dir,
+        new_vault_dir,
+        signers,
+        new_t,
+        new_n,
+        deterministic,
+        old_pass,
+        new_pass,
+        None,
+        None,
+        hook,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reshare_tx_anchored(
+    old_vault_dir: &str,
+    new_vault_dir: &str,
+    signers: Option<&str>,
+    new_t: usize,
+    new_n: usize,
+    deterministic: bool,
+    old_pass: Option<&[u8]>,
+    new_pass: Option<&[u8]>,
+    old_anchor_cfg: Option<&AnchorConfig>,
+    new_anchor_cfg: Option<&AnchorConfig>,
+    hook: Hook<'_>,
+) -> Result<Reshared, CliError> {
+    if new_t < 2 || new_t > new_n || new_n > MAX_HEM_QUORUM_PARTIES {
+        return Err(CliError::usage(format!(
+            "--new-threshold must be >= 2 and <= --new-parties (<= {MAX_HEM_QUORUM_PARTIES})"
+        )));
     }
     ensure_no_vault_files(new_vault_dir)?;
-    let old = open_vault(old_vault_dir, old_pass, &mut *hook)?;
+    let old = open_vault_anchored(old_vault_dir, old_pass, old_anchor_cfg, &mut *hook)?;
     let effective_new_pass = new_pass.or(old_pass);
     let new_keys = match effective_new_pass {
         Some(p) => Some(HemEnvelopeKeys::derive_fresh(p)?),
@@ -1475,6 +1755,7 @@ fn reshare_tx(
         mut quorum,
         meta: mut old_meta,
         envelope_keys: _,
+        anchor: old_anchor,
     } = old;
     quorum
         .reshare_quorum(
@@ -1500,6 +1781,26 @@ fn reshare_tx(
         .to_owned();
     let new_lock = lock_new_vault(&target)?;
     ensure_no_vault_files(&target)?;
+    let new_lock_id = lock_identity(&new_lock)?;
+    let mut new_meta = Meta::new(&quorum, new_latch_seed, new_lock_id);
+    let new_anchor = match new_anchor_cfg {
+        Some(cfg) => {
+            let anchor_nonce = os_random_32()?;
+            let key_id = hem_anchor_key_id(&new_meta.pk, new_lock_id);
+            let mac = hem_anchor_mac(&anchor_nonce, &key_id);
+            let ext_anchor = FsExternalMountAnchor::provision_fresh(
+                cfg,
+                &[&meta_path(&target)],
+                &[&target],
+                HEM_ANCHOR_DOMAIN,
+                key_id,
+                mac.0,
+            )?;
+            new_meta.anchor_info = Some((ext_anchor.lock_identity_seal(), anchor_nonce));
+            Some(ext_anchor)
+        }
+        None => None,
+    };
     hook(Step::TargetPrepared)?;
 
     old_meta.pending = Some(PendingReshare {
@@ -1509,22 +1810,22 @@ fn reshare_tx(
     old_meta.write(old_vault_dir, false)?;
     hook(Step::IntentRecorded)?;
 
-    let mut new_meta = Meta::new(&quorum, new_latch_seed, lock_identity(&new_lock)?);
     write_new(
         &directory_path(&target),
         &quorum.public_directory().to_bytes(),
         false,
     )?;
-    commit(
+    commit_anchored(
         &target,
         &quorum,
         &mut new_meta,
         new_keys.as_ref(),
+        new_anchor.as_ref(),
         true,
         &mut *hook,
     )?;
 
-    retire(old_vault_dir, &mut old_meta, hook)?;
+    retire_anchored(old_vault_dir, &mut old_meta, old_anchor.as_ref(), hook)?;
     drop(old_lock);
     Ok(Reshared {
         old_t,
@@ -1541,15 +1842,21 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
     let passphrase = crate::envelope::passphrase(args)?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(args, vault_dir)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
     ensure_absent(public_out)?;
 
     let t = args.get_u64("threshold")?.unwrap_or(2) as usize;
     let n = args.get_u64("parties")?.unwrap_or(3) as usize;
     let active_leaves = args.get_u64("leaves")?.unwrap_or(8) as usize;
-    if t < 2 || t > n || n > 64 {
-        return Err(CliError::usage(
-            "--threshold must be >= 2 and <= --parties (<= 64)",
-        ));
+    if t < 2 || t > n || n > MAX_HEM_QUORUM_PARTIES {
+        return Err(CliError::usage(format!(
+            "--threshold must be >= 2 and <= --parties (<= {MAX_HEM_QUORUM_PARTIES})"
+        )));
     }
     if active_leaves == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {
         return Err(CliError::usage(format!(
@@ -1577,11 +1884,12 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
 
     let quorum = HemDynamicShamirQuorum::stage(ceremony_seed.0, t, n, active_leaves)
         .map_err(map_quorum_err)?;
-    create_vault(
+    create_vault_anchored(
         vault_dir,
         &quorum,
         latch_seed,
         passphrase.as_deref().map(Vec::as_slice),
+        anchor_cfg.as_ref(),
         &mut no_crash,
     )?;
 
@@ -1602,6 +1910,12 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
     let vault_dir = args.require("vault-dir")?;
     let out_path = args.require("out")?;
     let passphrase = crate::envelope::passphrase(args)?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(args, vault_dir)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
     ensure_absent(out_path)?;
     if args.get("in").is_some() && args.get("message").is_some() {
         return Err(CliError::usage("pass either --message or --in, not both"));
@@ -1616,13 +1930,14 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
         leaf_epoch,
         sig,
         vault,
-    } = sign_tx(
+    } = sign_tx_anchored(
         vault_dir,
         args.get("signers"),
         args.get("ackers"),
         args.get_u64("epoch")?,
         &message,
         passphrase.as_deref().map(Vec::as_slice),
+        anchor_cfg.as_ref(),
         &mut no_crash,
     )?;
     let quorum = &vault.quorum;
@@ -1677,22 +1992,29 @@ pub fn sign(args: &Args) -> Result<(), CliError> {
 }
 
 pub fn refresh(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &["vault-dir", "passphrase-env", "passphrase-file"],
-        &["deterministic", "json", "help"],
-    )?;
+    let mut opts = vec!["vault-dir", "passphrase-env", "passphrase-file"];
+    opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
+    let mut flags = vec!["deterministic", "json", "help"];
+    flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
+    let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         print!("{HEM_REFRESH_HELP}");
         return Ok(());
     }
     args.no_positionals()?;
     let vault_dir = args.require("vault-dir")?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
     let passphrase = crate::envelope::passphrase(&args)?;
-    let vault = refresh_tx(
+    let vault = refresh_tx_anchored(
         vault_dir,
         args.flag("deterministic"),
         passphrase.as_deref().map(Vec::as_slice),
+        anchor_cfg.as_ref(),
         &mut no_crash,
     )?;
     let quorum = &vault.quorum;
@@ -1721,22 +2043,29 @@ pub fn refresh(raw: &[String]) -> Result<(), CliError> {
 }
 
 pub fn reshare(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &[
-            "vault-dir",
-            "signers",
-            "new-threshold",
-            "new-parties",
-            "out-vault-dir",
-            "public-out",
-            "passphrase-env",
-            "passphrase-file",
-            "new-passphrase-env",
-            "new-passphrase-file",
-        ],
-        &["deterministic", "json", "help"],
-    )?;
+    let mut opts = vec![
+        "vault-dir",
+        "signers",
+        "new-threshold",
+        "new-parties",
+        "out-vault-dir",
+        "out-anchor-dir",
+        "public-out",
+        "passphrase-env",
+        "passphrase-file",
+        "new-passphrase-env",
+        "new-passphrase-file",
+    ];
+    opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
+    let mut flags = vec![
+        "deterministic",
+        "out-allow-single-disk-anchor",
+        "out-ephemeral-unanchored",
+        "json",
+        "help",
+    ];
+    flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
+    let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         print!("{HEM_RESHARE_HELP}");
         return Ok(());
@@ -1744,6 +2073,34 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
     args.no_positionals()?;
     let old_vault_dir = args.require("vault-dir")?;
     let new_vault_dir = args.require("out-vault-dir")?;
+    let old_anchor_cfg = AnchorConfig::from_quorum_args(&args, old_vault_dir)?;
+    require_anchor_or_waiver(
+        old_anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
+    let new_anchor_cfg = if args.get("out-anchor-dir").is_some()
+        || args.flag("out-allow-single-disk-anchor")
+        || args.flag("out-ephemeral-unanchored")
+    {
+        let cfg = AnchorConfig::for_vault(
+            &args,
+            new_vault_dir,
+            "out-anchor-dir",
+            "out-allow-single-disk-anchor",
+        )?;
+        require_anchor_or_waiver(
+            cfg.is_some(),
+            args.flag("out-ephemeral-unanchored"),
+            "out-anchor-dir",
+        )?;
+        cfg
+    } else {
+        old_anchor_cfg.clone().map(|mut cfg| {
+            cfg.vault_dir = Some(new_vault_dir.to_owned());
+            cfg
+        })
+    };
     let old_passphrase = crate::envelope::passphrase(&args)?;
     let new_passphrase =
         crate::envelope::passphrase_named(&args, "new-passphrase-env", "new-passphrase-file")?;
@@ -1763,7 +2120,7 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
         old_t,
         old_n,
         quorum,
-    } = reshare_tx(
+    } = reshare_tx_anchored(
         old_vault_dir,
         new_vault_dir,
         args.get("signers"),
@@ -1772,6 +2129,8 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
         args.flag("deterministic"),
         old_passphrase.as_deref().map(Vec::as_slice),
         new_passphrase.as_deref().map(Vec::as_slice),
+        old_anchor_cfg.as_ref(),
+        new_anchor_cfg.as_ref(),
         &mut no_crash,
     )?;
     let pk = quorum.public_key();

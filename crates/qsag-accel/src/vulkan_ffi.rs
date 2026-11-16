@@ -52,13 +52,21 @@
 //!   (`AirTables::validate_op_tables`, `exec_prover_whir_gather_queries`).
 //!
 //! A prover job that fails, including one rejected here, scrubs and ends its session.
+//!
+//! Shader index bounds: the device's `maxStorageBufferRange` is a `u32` byte count.
+//! Every checked buffer extent is at most that limit, so its `u64` word offsets are
+//! below 2^29 and its Ext4 offsets below 2^27. Thus the shaders' `idx * 4`, polynomial
+//! strides, and heap offsets fit `uint`; byte offsets stay in checked host `u64`.
+//! At nv=26 the fold arenas reserve 3 * 2^25 + 4 Ext4s (3 GiB + 128 bytes), including
+//! both trailing-zero pairs. Dispatch padding is at most 255 lanes, still far below
+//! 2^32 for these arenas. Same-buffer parallel reads and writes must also be disjoint.
 
 use core::ffi::{c_char, c_void};
 use core::mem::{MaybeUninit, size_of};
 use core::ptr::{null, null_mut};
 
 use crate::goldilocks::{
-    gl_add, gl_inv_or_zero, gl_mul, gl_neg, gl_pow_pub, gl_reduce_u64, goldilocks_primitive_root,
+    gl_inv_or_zero, gl_mul, gl_neg, gl_pow_pub, gl_reduce_u64, goldilocks_primitive_root,
 };
 use crate::spirv_kernels::{prover_spirv_kernel_words, spirv_kernel_words};
 use crate::vulkan::{VulkanDeviceInfo, VulkanError};
@@ -676,6 +684,7 @@ struct AirGroupBPushConsts {
 }
 const _: () = assert!(size_of::<AirGroupBPushConsts>() == 64);
 
+#[cfg(not(target_os = "macos"))]
 type PfnVkIcdNegotiateVersion = unsafe extern "C" fn(*mut u32) -> i32;
 
 type PfnVoid = Option<unsafe extern "C" fn()>;
@@ -1463,11 +1472,11 @@ impl RawVulkanEngine {
                     }
                 }
             }
-            return Err(if any_loaded {
+            Err(if any_loaded {
                 last_err
             } else {
                 VulkanError::LibraryLoadFailed
-            });
+            })
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -1493,8 +1502,7 @@ impl RawVulkanEngine {
                 }
             }
 
-            let lib_handle =
-                unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+            let lib_handle = unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
             if lib_handle.is_null() {
                 if let Some(e) = radv_err {
                     return Err(e);
@@ -5291,7 +5299,6 @@ impl RawVulkanEngine {
         }
         let (_, total_bytes) = self.kernel_extent(total_nodes, 4 * WORD_BYTES)?;
         let (_, leaf_bytes) = self.kernel_extent(num_leaves, 4 * WORD_BYTES)?;
-        out_nodes[0] = [0u64; 4];
         if num_leaves == 1 {
             let top = [
                 gl_reduce_u64(leaves[0][0]),
@@ -5299,6 +5306,7 @@ impl RawVulkanEngine {
                 gl_reduce_u64(leaves[0][2]),
                 gl_reduce_u64(leaves[0][3]),
             ];
+            out_nodes[0] = [0u64; 4];
             out_nodes[1] = top;
             return Ok(top);
         }
@@ -5395,6 +5403,7 @@ impl RawVulkanEngine {
                 (total_nodes - 1) * 4,
             );
             self.read_staging_u64s(32, flat_out);
+            out_nodes[0] = [0u64; 4];
             Ok(out_nodes[1])
         }
     }
@@ -5963,40 +5972,12 @@ impl RawVulkanEngine {
 
     #[inline]
     fn fp4_add_arr(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-        [
-            gl_add(a[0], b[0]),
-            gl_add(a[1], b[1]),
-            gl_add(a[2], b[2]),
-            gl_add(a[3], b[3]),
-        ]
+        crate::goldilocks::ext4_add(a, b)
     }
 
     #[inline]
     fn fp4_mul_arr(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-        let gl_sub = |x: u64, y: u64| gl_add(x, gl_neg(y));
-        let fp2_mul = |x: [u64; 2], y: [u64; 2]| -> [u64; 2] {
-            let v0 = gl_mul(x[0], y[0]);
-            let v1 = gl_mul(x[1], y[1]);
-            let mid = gl_sub(
-                gl_sub(gl_mul(gl_add(x[0], x[1]), gl_add(y[0], y[1])), v0),
-                v1,
-            );
-            [gl_add(v0, gl_mul(v1, 7)), mid]
-        };
-        let v0 = fp2_mul([a[0], a[1]], [b[0], b[1]]);
-        let v1 = fp2_mul([a[2], a[3]], [b[2], b[3]]);
-        let mid_raw = fp2_mul(
-            [gl_add(a[0], a[2]), gl_add(a[1], a[3])],
-            [gl_add(b[0], b[2]), gl_add(b[1], b[3])],
-        );
-        let mid0 = gl_sub(gl_sub(mid_raw[0], v0[0]), v1[0]);
-        let mid1 = gl_sub(gl_sub(mid_raw[1], v0[1]), v1[1]);
-        [
-            gl_add(v0[0], gl_mul(v1[1], 7)),
-            gl_add(v0[1], v1[0]),
-            mid0,
-            mid1,
-        ]
+        crate::goldilocks::ext4_mul(a, b)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7076,8 +7057,10 @@ impl RawVulkanEngine {
             let src_end = span_end(u64::from(src_base), np, len, EXT4_BYTES)?;
             let dst_end = span_end(u64::from(dst_base), np, to_u64(half), EXT4_BYTES)?;
             check_disjoint(
-                u64::from(src_base), cmul(np, len)?,
-                u64::from(dst_base), cmul(np, to_u64(half))?,
+                u64::from(src_base),
+                cmul(np, len)?,
+                u64::from(dst_base),
+                cmul(np, to_u64(half))?,
             )?;
             engine
                 .prover
@@ -7903,7 +7886,12 @@ impl RawVulkanEngine {
             // `c_base + 2 * gid (+ 1)` for `gid < min(pairs_c, k_half - 1)`, and writes
             // `k_dst + gid` for `gid <= k_half`.
             let kh = u64::from(k_half);
-            check_disjoint(u64::from(k_src), cmul(kh, 2)?, u64::from(k_dst), cadd(kh, 1)?)?;
+            check_disjoint(
+                u64::from(k_src),
+                cmul(kh, 2)?,
+                u64::from(k_dst),
+                cadd(kh, 1)?,
+            )?;
             engine.prover.vram_work_a.check_read(
                 "vram_work_a (fold kernel)",
                 span_end(u64::from(k_src), kh, 2, EXT4_BYTES)?,
@@ -8028,8 +8016,10 @@ impl RawVulkanEngine {
             to_u32(m)?;
             let total_wg = to_u32(cadd(to_u64(m), 1)?.div_ceil(256).max(1))?;
             check_disjoint(
-                u64::from(c_src), cmul(to_u64(m), 2)?,
-                u64::from(c_dst), cadd(to_u64(m), 1)?,
+                u64::from(c_src),
+                cmul(to_u64(m), 2)?,
+                u64::from(c_dst),
+                cadd(to_u64(m), 1)?,
             )?;
             // Mode 7 reads `c_src + 2 * gid (+ 1)` for `gid < m` and writes `c_dst + gid` for
             // `gid <= m`, both in `vram_work_b`.
@@ -8432,7 +8422,8 @@ impl RawVulkanEngine {
                 for (i, w) in top_words.into_iter().enumerate() {
                     top_node[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
                 }
-                engine.prover.committed_trees[1 + slot_idx] = Some((stage_idx, group_arity, num_groups));
+                engine.prover.committed_trees[1 + slot_idx] =
+                    Some((stage_idx, group_arity, num_groups));
                 Ok(top_node)
             }
         })
@@ -8633,8 +8624,14 @@ impl RawVulkanEngine {
             let out_bytes = cmul(expected_out, WORD_BYTES)?;
             let slot_idx = stage_idx & 1;
             let tree_slot = if is_ext4 { 1 + slot_idx } else { 0 };
-            if engine.prover.committed_trees[tree_slot] != Some((stage_idx, group_arity, num_groups))
-                || num_polys != if is_ext4 { 1 } else { engine.prover_session()?.num_polys }
+            if engine.prover.committed_trees[tree_slot]
+                != Some((stage_idx, group_arity, num_groups))
+                || num_polys
+                    != if is_ext4 {
+                        1
+                    } else {
+                        engine.prover_session()?.num_polys
+                    }
             {
                 return Err(length_overflow());
             }
@@ -8980,8 +8977,10 @@ impl RawVulkanEngine {
             let need_ab = cmul(sh_bytes, 2)?;
             let need_ain = cadd(gm_bytes, 4 * 1024 * 1024)?;
             check_disjoint(
-                u64::from(witness_word_offset), cmul(rows, 256)?,
-                u64::from(cols_base_word_offset), cmul(rows, 256)?,
+                u64::from(witness_word_offset),
+                cmul(rows, 256)?,
+                u64::from(cols_base_word_offset),
+                cmul(rows, 256)?,
             )?;
             // Mode 0 reads the row-major shard (`col_src + row * 256 + col`) and writes it
             // column-major (`col_dst + col * rows + row`), both in `vram_witness`. The witness
@@ -9444,9 +9443,19 @@ impl RawVulkanEngine {
             // Modes 3/4 read 256 columns of `cur_m` rows and write 256 columns of half as many
             // into `vram_work_a`; mode 5 does the same for the 3 shift tables in `vram_aux_b`.
             if !is_round0_base {
-                check_disjoint(u64::from(col_src), cmul(m, 256)?, u64::from(col_dst), cmul(hm, 256)?)?;
+                check_disjoint(
+                    u64::from(col_src),
+                    cmul(m, 256)?,
+                    u64::from(col_dst),
+                    cmul(hm, 256)?,
+                )?;
             }
-            check_disjoint(u64::from(sh_src), cmul(m, 3)?, u64::from(sh_dst), cmul(hm, 3)?)?;
+            check_disjoint(
+                u64::from(sh_src),
+                cmul(m, 3)?,
+                u64::from(sh_dst),
+                cmul(hm, 3)?,
+            )?;
             if is_round0_base {
                 engine.prover.vram_witness.check_read(
                     "vram_witness (AIR base columns)",
@@ -10150,6 +10159,147 @@ mod tests {
     }
 
     #[test]
+    fn canopy_submission_failure_preserves_all_caller_nodes() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        let leaves = [[1, 2, 3, 4]; 4];
+        for mode in [1, 2] {
+            for point in [
+                FaultPoint::BeginCmd,
+                FaultPoint::QueueSubmit,
+                FaultPoint::FenceWait,
+            ] {
+                let mut nodes = [[SECRET_WORD; 4]; 8];
+                inject(&engine, point, VK_ERROR_OUT_OF_HOST_MEMORY);
+                assert!(
+                    engine
+                        .exec_canopy_tree_poseidon2(&leaves, &[0; 4], 0, 0, 0, mode, &mut nodes,)
+                        .is_err()
+                );
+                assert_eq!(nodes, [[SECRET_WORD; 4]; 8], "mode={mode} point={point:?}");
+                assert_eq!(engine.exec_state, EngineExecState::Ready);
+            }
+        }
+    }
+
+    #[test]
+    fn partial_prover_resize_refreshes_bindings_on_smaller_retry() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        commit_small_session(&mut engine);
+        let old_witness = engine.prover.vram_witness.buffer;
+        engine.fail_alloc_countdown.set(Some(1));
+        let res = engine.exec_prover_whir_commit_round0_with(
+            1,
+            &[7; 32],
+            13,
+            4,
+            16,
+            0,
+            0,
+            4096,
+            |_, _, dst| dst.fill(1),
+        );
+        assert!(res.is_err());
+        assert_ne!(engine.prover.vram_witness.buffer, old_witness);
+        assert!(engine.prover.descriptors_dirty);
+        assert!(engine.prover.session.is_none());
+        let before = engine.mutation_counters.get();
+        // This smaller retry fits every allocation: a local `changed` flag alone misses
+        // the binding invalidated by the previous partially successful resize.
+        commit_small_session(&mut engine);
+        let after = engine.mutation_counters.get();
+        assert_eq!(after.0, before.0);
+        assert_eq!(after.1, before.1 + 1);
+        assert!(!engine.prover.descriptors_dirty);
+        let eq = [[1, 0, 0, 0]; 1024];
+        engine
+            .exec_prover_whir_batch_sumcheck_init(&eq, &[[1, 0, 0, 0]], 12)
+            .unwrap();
+        let (ev0, _) = engine
+            .exec_prover_whir_batch_sumcheck_eval(0, 4096, 1, 0)
+            .unwrap();
+        let expected: u64 = (0..2048u64).map(|i| 14 * i + 1).sum();
+        assert_eq!(ev0, [expected, 0, 0, 0]);
+    }
+
+    #[test]
+    fn failed_prover_submission_invalidates_before_idle_and_retries_scrub() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        commit_small_session(&mut engine);
+        inject(&engine, FaultPoint::FenceWait, VK_ERROR_OUT_OF_HOST_MEMORY);
+        inject(
+            &engine,
+            FaultPoint::DeviceWaitIdle,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        let mut out = [[u64::MAX; 4]; 1];
+        assert!(
+            engine
+                .exec_prover_whir_read_final_coeffs(0, &mut out)
+                .is_err()
+        );
+        assert_eq!(out, [[u64::MAX; 4]; 1]);
+        assert_eq!(engine.exec_state, EngineExecState::InFlightQuarantined);
+        assert!(engine.prover.session.is_none());
+        assert!(engine.prover.scrub_pending);
+        assert_eq!(engine.prover.salt_seed_words, [0; 4]);
+        // Recovery must scrub, and must not revive the failed session.
+        assert!(
+            engine
+                .exec_prover_whir_read_final_coeffs(0, &mut out)
+                .is_err()
+        );
+        assert_eq!(engine.exec_state, EngineExecState::Ready);
+        assert!(!engine.prover.scrub_pending);
+        assert!(buffer_snapshot(&engine)[2..].iter().all(|b| b.3 == 0));
+        commit_small_session(&mut engine);
+        // Both parity slots contain identifiable data before release.
+        engine.exec_prover_whir_commit_stage(1, 16, 64, 4).unwrap();
+        engine.exec_prover_whir_commit_stage(2, 16, 64, 4).unwrap();
+        engine.scrub_prover_session().unwrap();
+        for idx in 0..2 {
+            assert_eq!(engine.prover.vram_cw_stage[idx].used, 0);
+            assert_eq!(engine.prover.vram_tree_stage[idx].used, 0);
+            // Read the device allocations themselves, not just the host bookkeeping.
+            for buffer in [
+                engine.prover.vram_cw_stage[idx].buffer,
+                engine.prover.vram_tree_stage[idx].buffer,
+            ] {
+                unsafe {
+                    engine.reserve_job_staging(2048).unwrap();
+                    engine.begin_cmd().unwrap();
+                    let copy = VkBufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size: 2048,
+                    };
+                    (engine.fns.cmd_copy_buffer)(
+                        engine.cmd_buf,
+                        buffer,
+                        engine.staging.buffer,
+                        1,
+                        &copy,
+                    );
+                    engine.cmd_barrier(
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_HOST_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_HOST_READ_BIT,
+                    );
+                    engine.submit_and_wait().unwrap();
+                    assert!(staging_words(&engine, 256).iter().all(|&w| w == 0));
+                    engine.settle_staging();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn quarantined_engine_refuses_prover_growth_before_touching_any_buffer() {
         let Some(mut engine) = live_engine() else {
             return;
@@ -10554,17 +10704,38 @@ mod tests {
                 "/usr/local/lib/libMoltenVK.dylib",
             ]
         );
-        assert_eq!(VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR, 0x0000_0001);
+        assert_eq!(
+            VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+            0x0000_0001
+        );
         // Linux: accepts integrated & discrete hardware GPUs; rejects virtual & CPU ICDs (`llvmpipe = 4`).
-        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, false));
-        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, false));
-        assert!(!is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU, false));
+        assert!(is_accepted_gpu_device_type(
+            VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+            false
+        ));
+        assert!(is_accepted_gpu_device_type(
+            VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+            false
+        ));
+        assert!(!is_accepted_gpu_device_type(
+            VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU,
+            false
+        ));
         assert!(!is_accepted_gpu_device_type(4, false));
         assert!(!is_accepted_gpu_device_type(0, false));
         // macOS MoltenVK: accepts integrated, discrete, and virtualized Apple Silicon GPUs; still rejects CPU (`4`).
-        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, true));
-        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, true));
-        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU, true));
+        assert!(is_accepted_gpu_device_type(
+            VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+            true
+        ));
+        assert!(is_accepted_gpu_device_type(
+            VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+            true
+        ));
+        assert!(is_accepted_gpu_device_type(
+            VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU,
+            true
+        ));
         assert!(!is_accepted_gpu_device_type(4, true));
         assert!(!is_accepted_gpu_device_type(0, true));
     }

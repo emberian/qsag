@@ -323,7 +323,6 @@ fn decode_jorts_sig(params: &JortsParams, bytes: &[u8]) -> Result<JortsSig, CliE
 fn reject_hem_unsupported_keygen_args(args: &Args) -> Result<(), CliError> {
     for opt in [
         "tree-height",
-        "anchor-dir",
         "policy-ledger-dir",
         "policy-anchor-dir",
         "policy-passphrase-env",
@@ -335,23 +334,16 @@ fn reject_hem_unsupported_keygen_args(args: &Args) -> Result<(), CliError> {
             )));
         }
     }
-    for flag in [
-        "allow-single-disk-anchor",
-        "ephemeral-unanchored",
-        "policy-allow-single-disk-anchor",
-    ] {
-        if args.flag(flag) {
-            return Err(CliError::usage(format!(
-                "--{flag} is only supported with --scheme {SCHEME_NAME}"
-            )));
-        }
+    if args.flag("policy-allow-single-disk-anchor") {
+        return Err(CliError::usage(format!(
+            "--policy-allow-single-disk-anchor is only supported with --scheme {SCHEME_NAME}"
+        )));
     }
     Ok(())
 }
 
 fn reject_hem_unsupported_sign_args(args: &Args) -> Result<(), CliError> {
     for opt in [
-        "anchor-dir",
         "policy-id-hex",
         "spend-amount",
         "policy-ledger-dir",
@@ -367,7 +359,6 @@ fn reject_hem_unsupported_sign_args(args: &Args) -> Result<(), CliError> {
         }
     }
     for flag in [
-        "allow-single-disk-anchor",
         "policy-allow-single-disk-anchor",
         "policy-retry",
         "retry",
@@ -419,6 +410,9 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             "public-out",
             "tree-height",
             "anchor-dir",
+            "anchor-tpm-nv",
+            "anchor-tpm-device",
+            "anchor-tpm-auth-env",
             "passphrase-env",
             "passphrase-file",
             "policy-ledger-dir",
@@ -428,6 +422,8 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         ],
         &[
             "allow-single-disk-anchor",
+            "anchor-vmgenid",
+            "anchor-vmgenid-strict",
             "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
             "json",
@@ -685,6 +681,9 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
             "message",
             "out",
             "anchor-dir",
+            "anchor-tpm-nv",
+            "anchor-tpm-device",
+            "anchor-tpm-auth-env",
             "policy-id-hex",
             "spend-amount",
             "passphrase-env",
@@ -697,6 +696,9 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         ],
         &[
             "allow-single-disk-anchor",
+            "anchor-vmgenid",
+            "anchor-vmgenid-strict",
+            "ephemeral-unanchored",
             "policy-allow-single-disk-anchor",
             "policy-retry",
             "retry",
@@ -767,9 +769,13 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         ));
     }
     if let Some(gate) = &gate {
-        // The ceremony journal records a 64-bit spend; refuse a wider one up front.
         crate::policy_ledger::ceremony_spend(gate.intent_amount()?)?;
     }
+    crate::anchor::require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
 
     private_dir(vault_dir, false)?;
     let party_sk_paths: [String; 3] = std::array::from_fn(|p| party_secret_path(vault_dir, p));
@@ -1035,7 +1041,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
     if let Some(gate) = gate.as_mut() {
         let granted = gate.authorize(
             &crate::policy_ledger::signing_key_id(
-                SCHEME_NAME,
+                qsag_addr::WitnessSuiteTag::QuorumJorts,
                 &[&pk.pk_seed[..], &pk.pk_root[..]].concat(),
             ),
             &message,
@@ -1065,7 +1071,6 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         mpc_nonce_epoch: next_cursor,
     };
 
-    let mut ceremony_ids = [[0u8; 32]; 3];
     let mut permits_opt: [Option<qsag_core::ceremony_journal::CeremonyReleasePermit>; 3] =
         [None, None, None];
     for p in 0..3 {
@@ -1079,7 +1084,6 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
                 &prepared.records()[p].binding(),
             ],
         );
-        ceremony_ids[p] = cid;
         let permit = journals[p]
             .persist_with_context(
                 CeremonyReservation {
@@ -1114,13 +1118,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         )
         .map_err(|e| CliError::state(format!("installing quorum ceremony permits failed: {e}")))?;
 
-    for p in 0..3 {
-        if let Some(anchor) = &ceremony_anchors[p] {
-            anchor
-                .consume_ceremony_ticket(journals[p].checkpoint(), &ceremony_ids[p])
-                .map_err(|_| CliError::state("CeremonyTicketAlreadyConsumedOrCorrupt"))?;
-        }
-    }
+    let _ = &ceremony_anchors;
 
     for (p, party) in parties_vec.iter_mut().enumerate() {
         let belt_ckpt = signer.latches()[p].wal().checkpoint();
@@ -1261,8 +1259,6 @@ mod hem_flag_guard_tests {
     fn hem_keygen_rejects_unsupported_jorts2of3_flags_before_dispatch() {
         for bad in [
             vec!["--tree-height", "4"],
-            vec!["--anchor-dir", "/tmp/nonexistent-anchor"],
-            vec!["--allow-single-disk-anchor"],
             vec!["--policy-ledger-dir", "/tmp/nonexistent-ledger"],
             vec!["--policy-anchor-dir", "/tmp/nonexistent-pol-anchor"],
             vec!["--policy-passphrase-env", "QSAG_TEST_NO_SUCH_ENV"],
@@ -1297,8 +1293,6 @@ mod hem_flag_guard_tests {
     #[test]
     fn hem_sign_rejects_unsupported_jorts2of3_flags_before_dispatch() {
         for bad in [
-            vec!["--anchor-dir", "/tmp/nonexistent-anchor"],
-            vec!["--allow-single-disk-anchor"],
             vec![
                 "--policy-id-hex",
                 "1111111111111111111111111111111111111111111111111111111111111111",

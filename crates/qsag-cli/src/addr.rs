@@ -25,7 +25,11 @@ pub fn extract_suite_and_public_bytes(path: &str) -> Result<(WitnessSuiteTag, Ve
             let scheme = json.field_str("scheme")?;
             let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
             let bytes = if scheme.eq_ignore_ascii_case("hem-jorts-poseidon2") {
-                json.field_hex("public_key")?.0
+                if json.get("validator_public_key").is_some() {
+                    json.field_hex("validator_public_key")?.0
+                } else {
+                    json.field_hex("public_key")?.0
+                }
             } else {
                 let mut key = json.field_hex("pk_seed")?.0;
                 key.extend_from_slice(&json.field_hex("pk_root")?);

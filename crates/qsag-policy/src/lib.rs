@@ -1053,8 +1053,9 @@ pub struct AuthorizedSignReleaseToken {
     policy_digest: [u8; 32],
     intent_digest: [u8; 32],
     intent: TransactionIntent,
-    // A per-party token must never fan out again.
-    quorum_split: bool,
+    /// `Some(id)` on a per-party token from [`Self::into_quorum_party_tokens`];
+    /// `None` on the quorum token the barrier minted.
+    party: Option<u16>,
 }
 
 /// Run one committed sigma opening round through the extracted single-use guard. Each item
@@ -1087,6 +1088,9 @@ impl AuthorizedSignReleaseToken {
         intent_digest: [u8; 32],
         intent: TransactionIntent,
     ) -> Result<Self, PolicyViolation> {
+        // Both barriers already compare the intent's quorum with their sorted guard
+        // set. The split hands out one token per entry, so the invariant is restated
+        // at the only place a token is made.
         if intent.quorum_ids.is_empty()
             || !intent.quorum_ids.windows(2).all(|w| w[0] < w[1])
             || !ct_eq_bytes(&permit.session_id(), &session_id)
@@ -1098,10 +1102,13 @@ impl AuthorizedSignReleaseToken {
             policy_digest,
             intent_digest,
             intent,
-            quorum_split: false,
+            party: None,
         })
     }
 
+    /// True when this token releases exactly `(key_id, msg, ctx, quorum)`. It does not
+    /// say which quorum member may spend the token: a per-party signer checks
+    /// [`Self::matches_signing_party`] instead.
     pub fn matches_signing(
         &self,
         key_id: &[u8; 32],
@@ -1133,42 +1140,44 @@ impl AuthorizedSignReleaseToken {
     pub fn quorum_ids(&self) -> &[u16] {
         &self.intent.quorum_ids
     }
-    /// Split one in-process quorum release token into exactly one linear per-signer token
-    /// for each approved party in `self.intent.quorum_ids`, consuming `self`.
-    /// Calling this on an already split token returns only that token.
+    /// The quorum member this token was split off for, or `None` for an unsplit
+    /// quorum token.
+    pub const fn party_id(&self) -> Option<u16> {
+        self.party
+    }
+    /// [`Self::matches_signing`] for the holder of a per-party token: additionally
+    /// requires that this token was split off for `party_id`. One custodian holding
+    /// two of a quorum's tokens can therefore spend only its own, and an unsplit
+    /// quorum token satisfies no party.
+    pub fn matches_signing_party(
+        &self,
+        party_id: u16,
+        key_id: &[u8; 32],
+        msg: &[u8],
+        ctx: &[u8],
+        quorum: &[u16],
+    ) -> bool {
+        self.party == Some(party_id) && self.matches_signing(key_id, msg, ctx, quorum)
+    }
+    /// Split one quorum release into one move-only token per approved party, consuming
+    /// `self`. Token `i` is bound to `quorum_ids()[i]` (ascending party order) and
+    /// reports it from [`Self::party_id`]. A per-party token does not fan out again:
+    /// splitting it returns just that token.
     pub fn into_quorum_party_tokens(self) -> Vec<Self> {
-        let count = self.intent.quorum_ids.len();
-        if count == 0 || !self.intent.quorum_ids.windows(2).all(|w| w[0] < w[1]) {
-            return Vec::new();
-        }
-        if self.quorum_split {
+        if self.party.is_some() {
             return alloc::vec![self];
         }
-        let Self {
-            session_id,
-            policy_digest,
-            intent_digest,
-            intent,
-            quorum_split: _,
-        } = self;
-        let mut out = Vec::with_capacity(count);
-        for _ in 1..count {
-            out.push(Self {
-                session_id,
-                policy_digest,
-                intent_digest,
-                intent: intent.clone(),
-                quorum_split: true,
-            });
-        }
-        out.push(Self {
-            session_id,
-            policy_digest,
-            intent_digest,
-            intent,
-            quorum_split: true,
-        });
-        out
+        self.intent
+            .quorum_ids
+            .iter()
+            .map(|&party| Self {
+                session_id: self.session_id,
+                policy_digest: self.policy_digest,
+                intent_digest: self.intent_digest,
+                intent: self.intent.clone(),
+                party: Some(party),
+            })
+            .collect()
     }
 }
 
@@ -4743,6 +4752,37 @@ mod tests {
         assert!(!token.matches_signing(&[0; 32], b"other", b"context", &[1, 2, 4]));
         assert!(!token.matches_signing(&[0; 32], b"approved", b"other", &[1, 2, 4]));
         assert!(!token.matches_signing(&[0; 32], b"approved", b"context", &[1, 2, 3]));
+
+        // Each split token is bound to one quorum member, in ascending party order. A
+        // custodian handed a peer's token (or the unsplit one) cannot spend it, and a
+        // per-party token never fans out again.
+        let msg = good_intent.to_canonical_signing_bytes(&policy.canonical_digest());
+        assert_eq!(token.party_id(), None);
+        for party in [1, 2, 4] {
+            assert!(!token.matches_signing_party(party, &[0; 32], &msg, b"context", &[1, 2, 4]));
+        }
+        let party_tokens = token.into_quorum_party_tokens();
+        assert_eq!(
+            party_tokens
+                .iter()
+                .map(|t| t.party_id())
+                .collect::<Vec<_>>(),
+            [Some(1), Some(2), Some(4)]
+        );
+        for child in party_tokens {
+            let owner = child.party_id().unwrap();
+            for party in [0, 1, 2, 3, 4] {
+                assert_eq!(
+                    child.matches_signing_party(party, &[0; 32], &msg, b"context", &[1, 2, 4]),
+                    party == owner
+                );
+            }
+            assert!(!child.matches_signing_party(owner, &[0; 32], b"other", b"context", &[1, 2, 4]));
+            let again = child.into_quorum_party_tokens();
+            assert_eq!(again.len(), 1);
+            assert_eq!(again[0].party_id(), Some(owner));
+            assert!(again[0].matches_signing(&[0; 32], &msg, b"context", &[4, 1, 2]));
+        }
         let mut colluding = raw_test_guards([0x44; 32], &[1, 2]);
         assert_eq!(
             evaluate_policy_committed_barrier(
@@ -5522,23 +5562,6 @@ mod tests {
 mod cleanup_tests {
     use super::*;
     #[test]
-    fn malformed_quorums_never_fan_out() {
-        let (policy, intent) = super::tests::phase_fixture(&[1, 2]);
-        for ids in [alloc::vec![], alloc::vec![1, 1], alloc::vec![2, 1]] {
-            let mut intent = intent.clone();
-            intent.quorum_ids = ids;
-            let token = AuthorizedSignReleaseToken {
-                session_id: intent.session_id,
-                policy_digest: policy.canonical_digest(),
-                intent_digest: [0; 32],
-                intent,
-                quorum_split: false,
-            };
-            assert!(token.into_quorum_party_tokens().is_empty());
-        }
-    }
-
-    #[test]
     fn cust06_staging_pool_isolates_unauthenticated_spam_and_enforces_self_mac() {
         let recipient = QsagAddress::from_pubkey_cshake256(
             "qsp",
@@ -5779,17 +5802,10 @@ mod cleanup_tests {
             .unwrap();
         let party_tokens = release.into_quorum_party_tokens();
         assert_eq!(party_tokens.len(), 2);
-        // Splitting a child again cannot multiply a successful barrier's releases.
-        for token in party_tokens {
-            let mut tokens = token.into_quorum_party_tokens();
-            assert_eq!(tokens.len(), 1);
-            assert_eq!(tokens.pop().unwrap().into_quorum_party_tokens().len(), 1);
-        }
 
         // 2. Ephemeral Compact1122 PqBiscuit 2-hop delegation chain + PoP seal gates BDOZ barrier!
         let dp = qsag_fts::FrontierDpTable::build(qsag_fts::FrontierFtsProfile::Compact1122);
-        let mut auth =
-            PqBiscuitAuthorityKey::keygen([0xD1; 32], [0xD2; 32], 1, &accel).unwrap();
+        let mut auth = PqBiscuitAuthorityKey::keygen([0xD1; 32], [0xD2; 32], 1, &accel).unwrap();
         let auth_pk = *auth.public_key();
         let mut intent2 = intent.clone();
         intent2.session_id = [0x81; 32];

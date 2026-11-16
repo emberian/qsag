@@ -85,9 +85,9 @@ use qsag_core::field::goldilocks::{
     Goldilocks, GoldilocksExt2, eval_poly_goldilocks, lagrange_weights_zero_goldilocks,
 };
 use qsag_core::preprocessing::{
-    AuthenticatedPower7Share, GoldilocksBeaverShare, GoldilocksOpeningTables, OtMesh, PartyPrivateRng, PreprocessError,
-    PreprocessedPoseidonPartyVault, commit_and_open_spdz_goldilocks_batch_quorum_with_mesh,
-    run_dealerless_pi_pow7_with_alpha,
+    AuthenticatedPower7Share, GoldilocksBeaverShare, GoldilocksOpeningTables, OtMesh,
+    PartyPrivateRng, PreprocessError, PreprocessedPoseidonPartyVault,
+    commit_and_open_spdz_goldilocks_batch_quorum_with_mesh, run_dealerless_pi_pow7_with_alpha,
     spdz_authenticate_goldilocks_batch_ext2, spdz_setup_alpha_goldilocks,
 };
 use qsag_core::sponge::poseidon2::{
@@ -973,7 +973,7 @@ impl SpdzSession {
     ) -> Result<Vec<Vec<Wire>>, Error> {
         let m = inputs.len();
         let count = inputs[0].len();
-        let alphas = self.alphas();
+        let alphas = &self.alpha;
         let tuples = self.pool.take_pow7(count)?;
         let mut masked = SecretBuffer(vec![Vec::with_capacity(count); m]);
         for ((reserved, wires), out) in tuples.iter().zip(inputs).zip(masked.iter_mut()) {
@@ -992,7 +992,8 @@ impl SpdzSession {
             for (share, wires) in shares.iter_mut().zip(masked.iter()) {
                 *share = wires[gate].val;
             }
-            let y = self.opening_tables
+            let y = self
+                .opening_tables
                 .open(&shares, "toprf_spdz_sbox")
                 .map_err(preprocess_error)?;
             // powers[k] = y^(6 - k)
@@ -1027,7 +1028,6 @@ impl SpdzSession {
         states: &mut [Vec<[Wire; 12]>],
         pending: &mut Pending,
     ) -> Result<(), Error> {
-        let alphas = self.alphas();
         for state in states.iter_mut().flatten() {
             linear(state, true);
         }
@@ -1042,7 +1042,7 @@ impl SpdzSession {
                 let inputs: SecretBuffer<Vec<Vec<Wire>>> = SecretBuffer(
                     states
                         .iter()
-                        .zip(alphas.iter())
+                        .zip(self.alpha.iter())
                         .map(|(party, &alpha)| {
                             party
                                 .iter()
@@ -1586,7 +1586,11 @@ fn reserve_counters(
         {
             persist_err = Some(err);
         }
-        server.last_counter = Some(server.last_counter.map_or(counter, |last| last.max(counter)));
+        server.last_counter = Some(
+            server
+                .last_counter
+                .map_or(counter, |last| last.max(counter)),
+        );
     }
     match persist_err {
         Some(err) => Err(err),
@@ -2035,6 +2039,10 @@ mod tests {
                     spdz_blind(&public, &inputs, [0x85; 32], counter, &grants).unwrap();
                 let outputs = session.evaluate(&request).unwrap();
                 client.finalize(&outputs).unwrap();
+                assert!(
+                    pool.state.mesh.is_some(),
+                    "successful item {counter} lost its OT mesh"
+                );
                 std::println!(
                     "({t}, {n}) quorum {m}: online evaluation {counter} {:?}",
                     started.elapsed()

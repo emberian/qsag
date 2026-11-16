@@ -137,40 +137,32 @@ fn checkpoint_at_least(current: LedgerCheckpoint, minimum: LedgerCheckpoint) -> 
         || (current.generation == minimum.generation && ct_eq_bytes(&current.tag, &minimum.tag))
 }
 
-// Shared by live reservations and recovery immediately before any repair writes.
+/// The journal path and the held descriptor both still name the private regular
+/// file sealed at genesis, at exactly `expected_len` bytes. Metadata only: this is
+/// the whole per-`reserve` integrity check, and recovery repeats it around repairs.
 fn verify_data_identity(
     path: &Path,
     file: &File,
     data_seal: &[u8; 16],
     expected_len: u64,
 ) -> Result<(), HdError> {
-        let path_meta = storage(fs::symlink_metadata(path))?;
+    let sealed = |meta: fs::Metadata| {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if path_meta.permissions().mode() & 0o077 != 0 {
-                return Err(HdError::BudgetStorageFailed);
+            if meta.permissions().mode() & 0o077 != 0 {
+                return false;
             }
         }
-        if !path_meta.is_file() || !ct_eq_bytes(&file_identity(&path_meta), data_seal) {
-            return Err(HdError::BudgetStorageFailed);
-        }
-        let fd_meta = storage(file.metadata())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if fd_meta.permissions().mode() & 0o077 != 0 {
-                return Err(HdError::BudgetStorageFailed);
-            }
-        }
-        if !fd_meta.is_file()
-            || !ct_eq_bytes(&file_identity(&fd_meta), data_seal)
-            || path_meta.len() != expected_len
-            || fd_meta.len() != expected_len
-        {
-            return Err(HdError::BudgetStorageFailed);
-        }
+        meta.is_file()
+            && ct_eq_bytes(&file_identity(&meta), data_seal)
+            && meta.len() == expected_len
+    };
+    if sealed(storage(fs::symlink_metadata(path))?) && sealed(storage(file.metadata())?) {
         Ok(())
+    } else {
+        Err(HdError::BudgetStorageFailed)
+    }
 }
 
 impl DurableQueryBudget {
@@ -400,8 +392,8 @@ impl DurableQueryBudget {
         let slot_b =
             &payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES];
 
-        // The bounded reader opens its own descriptor; recheck the held descriptor,
-        // path, and permanent lock after reading, before healing either HWM slot.
+        // `read_bounded` used its own descriptor. Before any repair write, confirm the
+        // lock is still held and the path still names the descriptor held here.
         storage(record.verify_lock_identity(&record.lock_identity_seal()))?;
         verify_data_identity(&path_buf, &file, &data_seal, file_meta.len())?;
         // Rejects tail truncation and unexplained gaps; heals the crash states (record
@@ -429,8 +421,12 @@ impl DurableQueryBudget {
             storage(binding.with_hwm(|hwm| hwm.commit(&file, used, &prev_mac)))?;
         }
 
-        verify_data_identity(&path_buf, &file, &data_seal,
-            (FILE_PREFIX_BYTES + verified * RECORD) as u64)?;
+        verify_data_identity(
+            &path_buf,
+            &file,
+            &data_seal,
+            (FILE_PREFIX_BYTES + verified * RECORD) as u64,
+        )?;
         let lock_identity = record.lock_identity_seal();
         Ok(Self {
             path: path_buf,
@@ -962,7 +958,9 @@ mod tests {
     fn failed_reservation_stays_poisoned_before_and_after_append() {
         struct FailingAnchor;
         impl ExternalMonotoneAnchor for FailingAnchor {
-            fn load(&self) -> io::Result<Option<LedgerCheckpoint>> { Ok(None) }
+            fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
+                Ok(None)
+            }
             fn advance(&self, _: LedgerCheckpoint) -> io::Result<()> {
                 Err(io::Error::other("injected anchor failure"))
             }
@@ -974,7 +972,11 @@ mod tests {
         live.file = File::open(&fixture.path).unwrap();
         assert_eq!(live.reserve(), Err(HdError::BudgetStorageFailed));
         assert_eq!(live.used(), 2);
-        live.file = OpenOptions::new().read(true).write(true).open(&fixture.path).unwrap();
+        live.file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fixture.path)
+            .unwrap();
         assert_eq!(live.reserve(), Err(HdError::BudgetStorageFailed));
         assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.committed);
         drop(live);
@@ -1018,7 +1020,10 @@ mod tests {
             let mut bytes = advanced_twice.clone();
             bytes[HWM_PAGE_BYTES as usize..HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES].fill(0xa5);
             bytes[2 * HWM_PAGE_BYTES as usize..2 * HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES]
-                .copy_from_slice(&journal.committed[2 * HWM_PAGE_BYTES as usize..2 * HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES]);
+                .copy_from_slice(
+                    &journal.committed
+                        [2 * HWM_PAGE_BYTES as usize..2 * HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES],
+                );
             bytes.extend_from_slice(&junk(tail_len, 72));
             std::fs::write(&journal.path, &bytes).unwrap();
             journal.assert_fails_closed(&bytes);

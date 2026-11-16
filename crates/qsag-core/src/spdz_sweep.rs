@@ -885,6 +885,10 @@ impl BaggyRoute {
 }
 
 /// A committee engine chosen by [`BaggyRoute`], so one ceremony is written for both.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Preserves inline SpdzSweepEngine variant without extra heap indirection"
+)]
 pub enum RoutedEngine<'a> {
     Replicated2of3(alloc::boxed::Box<crate::rss256::Rss256Engine>),
     AuthenticatedShamir(SpdzSweepEngine<'a>),

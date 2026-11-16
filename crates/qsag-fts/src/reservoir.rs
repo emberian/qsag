@@ -66,9 +66,15 @@ impl ParallelSeededDkgReservoir {
             || !share.committee.windows(2).all(|w| w[0] < w[1])
             || !share.committee.contains(&share.party_id)
             || share.pairwise_zero_seeds.len() + 1 != share.committee.len()
-            || !share.pairwise_zero_seeds.iter().map(|(peer, _)| *peer).eq(
-                share.committee.iter().copied().filter(|&id| id != share.party_id)
-            )
+            || !share
+                .pairwise_zero_seeds
+                .iter()
+                .map(|(peer, _)| *peer)
+                .eq(share
+                    .committee
+                    .iter()
+                    .copied()
+                    .filter(|&id| id != share.party_id))
             || share.epoch_uses.iter().any(|&used| used > 1)
             || share.beaver_cursor > share.beaver_pool.len()
         {
@@ -164,9 +170,18 @@ impl ParallelSeededDkgReservoir {
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, ParallelSeededError> {
         let invalid = ParallelSeededError::InvalidThresholdParameters;
         // Maximum canonical snapshot: 255 parties, height 20, both bounded pools.
-        const MAX_WIRE_BYTES: usize = 68 + 255 * 2 + 256 + 2 + 254 * 34
-            + 4 + (1 << 20) + 4 + DEFAULT_BEAVER_TRIPLE_POOL * 336
-            + 4 + DEFAULT_BEAVER_TRIPLE_POOL * 144 + 32;
+        const MAX_WIRE_BYTES: usize = 68
+            + 255 * 2
+            + 256
+            + 2
+            + 254 * 34
+            + 4
+            + (1 << 20)
+            + 4
+            + DEFAULT_BEAVER_TRIPLE_POOL * 336
+            + 4
+            + DEFAULT_BEAVER_TRIPLE_POOL * 144
+            + 32;
         if bytes.len() > MAX_WIRE_BYTES
             || bytes.len() < 8 + 8 + 32 + 2 + 16 + 2 + 256 + 2 + 4 + 4 + 4 + 32
             || &bytes[..8] != b"QSFTSRS1"
@@ -235,14 +250,14 @@ impl ParallelSeededDkgReservoir {
         if !committee.windows(2).all(|w| w[0] < w[1]) || !committee.contains(&party_id) {
             return Err(invalid);
         }
-        // Install guards before reading any secret: a later `?` must wipe even a
-        // partially decoded array, rather than abandoning initializer temporaries.
+        // Guards first, then fill in place: a failed read erases whatever was decoded.
         let mut sk_seed_lanes = SecretBuffer([0u128; 2]);
         let mut sk_seed_macs = SecretBuffer([[0u128; 2]; 2]);
         let mut sk_prf_lanes = SecretBuffer([0u128; 2]);
         let mut sk_prf_macs = SecretBuffer([[0u128; 2]; 2]);
         let mut bdoz_alpha_share = SecretBuffer([0u128; 2]);
-        for dst in sk_seed_lanes.iter_mut()
+        for dst in sk_seed_lanes
+            .iter_mut()
             .chain(sk_seed_macs.iter_mut().flatten())
             .chain(sk_prf_lanes.iter_mut())
             .chain(sk_prf_macs.iter_mut().flatten())
@@ -255,8 +270,8 @@ impl ParallelSeededDkgReservoir {
         if pairwise_len + 1 != committee_len {
             return Err(invalid);
         }
-        // Verify the complete section before allocation, then guard every entry
-        // across all subsequent parsing failures (including truncation via `?`).
+        // Sized exactly, so the pushes below never reallocate and the guard erases the
+        // one heap buffer (elements and spare capacity) on every later failure.
         if pairwise_len > (body.len() - cursor) / 34 {
             return Err(invalid);
         }
@@ -517,11 +532,7 @@ mod tests {
             target_sum: 4,
         };
         let setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
-            params,
-            2,
-            [0x11; 32],
-            [0x22; 32],
-            &accel,
+            params, 2, [0x11; 32], [0x22; 32], &accel,
         )
         .unwrap();
         let pk = setup.pk;
@@ -550,7 +561,12 @@ mod tests {
         let original_powers = reservoirs[0].remaining_powers();
         reservoirs[0].output.share.beaver_cursor = 1;
         let unspent = reservoirs[0].to_secret_bytes().unwrap();
-        assert_eq!(ParallelSeededDkgReservoir::from_secret_bytes(&unspent).unwrap().remaining_powers(), original_powers - 1);
+        assert_eq!(
+            ParallelSeededDkgReservoir::from_secret_bytes(&unspent)
+                .unwrap()
+                .remaining_powers(),
+            original_powers - 1
+        );
         reservoirs[0].output.share.beaver_cursor = reservoirs[0].output.share.beaver_pool.len() + 1;
         assert!(reservoirs[0].to_secret_bytes().is_err());
         reservoirs[0].output.share.beaver_cursor = 0;
@@ -595,17 +611,108 @@ mod tests {
             params.signing_power_count() * 2
         );
 
-        let mut restored_setup = ParallelSeededThresholdSetup {
-            pk: pk.clone(),
-            shares: reservoirs.into_iter().map(|r| r.output.share).collect(),
-            public_tree_layers,
-            #[cfg(test)]
-            test_fault: None,
+        let setup_from = |reservoirs: Vec<ParallelSeededDkgReservoir>| {
+            ParallelSeededThresholdSetup {
+                pk: pk.clone(),
+                shares: reservoirs.into_iter().map(|r| r.output.share).collect(),
+                public_tree_layers: public_tree_layers.clone(),
+                test_fault: None,
+            }
         };
+        let mut restored_setup = setup_from(reservoirs);
         let mut log = InMemoryBurnLog::default();
         let sig = restored_setup
             .threshold_sign(0, b"persisted-reservoir-msg", [0x55; 32], &mut log, &accel)
             .unwrap();
         verify_parallel_seeded_fts(&pk, b"persisted-reservoir-msg", &sig, &accel).unwrap();
+
+        // save -> reload -> sign -> save -> reload: the second snapshot starts at the
+        // first unspent tuple, holds none of the spent ones, and keeps the leaf burn.
+        let mask = |tuple: &AuthenticatedPowerShare| tuple.powers[0].val_sh;
+        let spent = restored_setup.shares[0].beaver_cursor;
+        assert_eq!(spent, params.signing_power_count());
+        let pools: Vec<Vec<u128>> = restored_setup
+            .shares
+            .iter()
+            .map(|share| {
+                assert_eq!(share.beaver_cursor, spent);
+                share.beaver_pool.iter().map(mask).collect()
+            })
+            .collect();
+        let second: Vec<SecretVec<u8>> = restored_setup
+            .shares
+            .into_iter()
+            .map(|share| {
+                ParallelSeededDkgReservoir::new(ParallelSeededDkgOutput {
+                    pk_seed_bytes: share.key_seed,
+                    share,
+                    beaver_triples: Vec::new(),
+                })
+                .unwrap()
+                .to_secret_bytes()
+                .unwrap()
+            })
+            .collect();
+        let reload = || -> Vec<ParallelSeededDkgReservoir> {
+            second
+                .iter()
+                .map(|raw| ParallelSeededDkgReservoir::from_secret_bytes(raw).unwrap())
+                .collect()
+        };
+        for (reservoir, pool) in reload().iter().zip(&pools) {
+            let share = &reservoir.output.share;
+            assert_eq!(share.beaver_cursor, 0);
+            assert_eq!(
+                share.beaver_pool.iter().map(mask).collect::<Vec<_>>(),
+                pool[spent..]
+            );
+            assert!(pool[..spent].iter().all(|m| !pool[spent..].contains(m)));
+            assert_eq!(share.epoch_uses, [1, 0, 0, 0]);
+        }
+        // The reloaded burn state refuses the spent leaf even with an empty burn log.
+        assert_eq!(
+            setup_from(reload()).threshold_sign(
+                0,
+                b"replayed-leaf",
+                [0x56; 32],
+                &mut InMemoryBurnLog::default(),
+                &accel
+            ),
+            Err(ParallelSeededError::EpochUseBudgetExhausted)
+        );
+        // The remaining tuples sign one more leaf and are then gone for good.
+        let mut resumed = setup_from(reload());
+        let sig = resumed
+            .threshold_sign(1, b"second-leaf", [0x57; 32], &mut log, &accel)
+            .unwrap();
+        verify_parallel_seeded_fts(&pk, b"second-leaf", &sig, &accel).unwrap();
+        assert!(resumed.shares.iter().all(|share| {
+            share.beaver_cursor == share.beaver_pool.len() && share.epoch_uses == [1, 1, 0, 0]
+        }));
+        assert_eq!(
+            resumed.threshold_sign(2, b"third-leaf", [0x58; 32], &mut log, &accel),
+            Err(ParallelSeededError::BeaverPreprocessingExhausted)
+        );
+    }
+
+    /// The pairwise-seed table is a `Vec<(u16, [u8; 32])>`: the guard used while
+    /// decoding erases every element on the heap, not just the vector header, and
+    /// handing the table to the share leaves the guard nothing to erase.
+    #[test]
+    fn pairwise_seed_guard_erases_heap_elements() {
+        let mut table: Vec<(u16, [u8; 32])> = Vec::with_capacity(4);
+        table.extend([(7, [0xA5; 32]), (9, [0x5A; 32]), (11, [0xC3; 32])]);
+        qsag_asm::wipe::wipe(&mut table);
+        assert_eq!(table, [(0, [0; 32]); 3]);
+        assert_eq!(table.capacity(), 4);
+
+        let mut guard = SecretBuffer(Vec::with_capacity(2));
+        guard.push((7u16, [0xA5u8; 32]));
+        guard.push((9, [0x5A; 32]));
+        let heap = guard.as_ptr();
+        let moved = core::mem::take(&mut *guard);
+        drop(guard);
+        assert_eq!(moved.as_ptr(), heap);
+        assert_eq!(moved, [(7, [0xA5; 32]), (9, [0x5A; 32])]);
     }
 }

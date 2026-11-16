@@ -13,8 +13,8 @@
 use std::time::Instant;
 
 use qsag_accel::goldilocks::{
-    EXT4_ONE, EXT4_ZERO, GOLDILOCKS_PRIME, eq_kronecker_1024, ext4_add, ext4_mul, ext4_pow_pub,
-    ext4_sub, geometric_kronecker_1024, gl_add, gl_mul, gl_reduce_u64, gl_sub, mono_kronecker_1024,
+    EXT4_ONE, EXT4_ZERO, GOLDILOCKS_PRIME, eq_kronecker_1024, ext4_add, ext4_mul, ext4_sub,
+    geometric_kronecker_1024, gl_add, gl_mul, gl_reduce_u64, gl_sub, mono_kronecker_1024,
     pair_geometric_kronecker_2048,
 };
 use qsag_accel::poseidon2::{
@@ -48,6 +48,28 @@ fn rand_ext4(state: &mut u64) -> Ext4 {
     core::array::from_fn(|_| rand_gl(state))
 }
 
+// The witness is indexed by the Boolean cube, not by a roots-of-unity domain.
+// Evaluate its multilinear interpolation at (z, z^2, z^4, ...) directly, independently
+// of the GPU's Mobius conversion, NTT and Kronecker expansion.
+fn sparse_witness_ood(points: &[(usize, u64)], num_vars: usize, z: Ext4) -> Ext4 {
+    let mut sum = EXT4_ZERO;
+    for &(idx, value) in points {
+        let mut term = [value, 0, 0, 0];
+        let mut power = z;
+        for bit in 0..num_vars {
+            let basis = if idx & (1 << bit) == 0 {
+                ext4_sub(EXT4_ONE, power)
+            } else {
+                power
+            };
+            term = ext4_mul(term, basis);
+            power = ext4_mul(power, power);
+        }
+        sum = ext4_add(sum, term);
+    }
+    sum
+}
+
 fn backend() -> Option<VulkanSpirvBackend> {
     match VulkanSpirvBackend::try_new_audited() {
         Ok(gpu) => Some(gpu),
@@ -64,6 +86,131 @@ fn backend() -> Option<VulkanSpirvBackend> {
         }
         Err(other) => panic!("unexpected Vulkan initialization error: {other}"),
     }
+}
+
+#[test]
+fn merkle_shapes_singletons_and_last_layer_are_consistent() {
+    let Some(gpu) = backend() else {
+        return;
+    };
+    let seed = [1, 2, 3, 4];
+    let leaves = [[5, 6, 7, 8]; 4];
+    let addr = Poseidon2Merkle2BlockAddr {
+        layer: 0xFFFE,
+        tree_idx: u64::MAX,
+        level: 0xFFFF,
+        start_node_idx: u32::MAX as u64,
+    };
+    let mut parent = [[0; 4]; 1];
+    gpu.try_merkle_layer_poseidon2_2block_at(
+        &leaves[..2],
+        POSEIDON2_MERKLE_NODE_DOMAIN,
+        &seed,
+        addr,
+        &mut parent,
+    )
+    .unwrap();
+    let mut reference = [[0; 4]; 1];
+    merkle_layer_poseidon2_2block_at_cpu(
+        &leaves[..2],
+        POSEIDON2_MERKLE_NODE_DOMAIN,
+        &seed,
+        addr,
+        &mut reference,
+    )
+    .unwrap();
+    assert_eq!(parent, reference);
+    assert!(
+        gpu.try_merkle_layer_poseidon2_2block_at(
+            &leaves,
+            POSEIDON2_MERKLE_NODE_DOMAIN,
+            &seed,
+            addr,
+            &mut [[0; 4]; 2]
+        )
+        .is_err()
+    );
+    assert!(
+        gpu.try_merkle_layer_poseidon2_canopy_at(&leaves, &seed, u32::MAX as u64, &mut [[0; 4]; 2])
+            .is_err()
+    );
+    assert!(
+        gpu.try_merkle_layer_poseidon2_fixed_tweak(&leaves[..3], &seed, &mut parent)
+            .is_err()
+    );
+    for n in [0, 3] {
+        assert!(
+            gpu.build_merkle_tree_poseidon2(&leaves[..n], &seed, 0)
+                .is_err()
+        );
+        assert!(
+            gpu.build_merkle_tree_poseidon2_2block(
+                &leaves[..n],
+                POSEIDON2_MERKLE_NODE_DOMAIN,
+                &seed,
+                0,
+                0,
+                0
+            )
+            .is_err()
+        );
+        assert!(
+            gpu.build_canopy_tree_poseidon2(&leaves[..n], 0, seed, &mut vec![[0; 4]; 2 * n])
+                .is_err()
+        );
+        assert!(
+            gpu.build_canopy_tree_poseidon2_2block(
+                &leaves[..n],
+                POSEIDON2_MERKLE_NODE_DOMAIN,
+                &seed,
+                0,
+                0,
+                &mut vec![[0; 4]; 2 * n]
+            )
+            .is_err()
+        );
+    }
+    let last = gpu
+        .build_merkle_tree_poseidon2(&leaves[..2], &seed, u32::MAX)
+        .unwrap();
+    CpuReferenceBackend
+        .try_merkle_layer_poseidon2_at(&leaves[..2], &seed, u32::MAX, 0, &mut reference)
+        .unwrap();
+    assert_eq!(last, reference[0]);
+    assert!(
+        gpu.build_merkle_tree_poseidon2(&leaves, &seed, u32::MAX)
+            .is_err()
+    );
+    assert!(
+        gpu.build_merkle_tree_poseidon2_2block(
+            &leaves,
+            POSEIDON2_MERKLE_NODE_DOMAIN,
+            &seed,
+            0,
+            0,
+            0xFFFF
+        )
+        .is_err()
+    );
+    let mut nodes = [[u64::MAX; 4]; 2];
+    let root = gpu
+        .build_canopy_tree_poseidon2(&leaves[..1], 255, seed, &mut nodes)
+        .unwrap();
+    assert_eq!(nodes, [[0; 4], leaves[0]]);
+    assert_eq!(root, poseidon2_canopy_root_cpu(255, 0, seed, leaves[0]));
+    assert_eq!(
+        gpu.build_canopy_tree_poseidon2_2block(
+            &leaves[..1],
+            POSEIDON2_MERKLE_NODE_DOMAIN,
+            &seed,
+            0xFFFE,
+            u64::MAX,
+            &mut nodes
+        )
+        .unwrap(),
+        leaves[0]
+    );
+    assert_eq!(nodes, [[0; 4], leaves[0]]);
 }
 
 /// Standalone specification of `qsag_agg::sig::merkle_node_hash` (`paper/qsag.typ:220`):
@@ -162,8 +309,22 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
             0u64,
             1usize,
         ),
-        (POSEIDON2_MERKLE_NODE_DOMAIN, 3, 0xCAFE_BABE_0001, 7, 19, 257),
-        (POSEIDON2_FORS_NODE_DOMAIN, 0, 0xDEAD_BEEF_9999, 11, 512, 16_384),
+        (
+            POSEIDON2_MERKLE_NODE_DOMAIN,
+            3,
+            0xCAFE_BABE_0001,
+            7,
+            19,
+            257,
+        ),
+        (
+            POSEIDON2_FORS_NODE_DOMAIN,
+            0,
+            0xDEAD_BEEF_9999,
+            11,
+            512,
+            16_384,
+        ),
     ] {
         let children: Vec<Ext4> = (0..2 * num_parents).map(|_| rand_ext4(&mut rng)).collect();
         let addr = Poseidon2Merkle2BlockAddr {
@@ -304,7 +465,16 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
 
         assert_eq!(gpu_root, cpu_root, "WHIR Canopy commitment root mismatch");
         assert_eq!(gpu_nodes[1], cpu_nodes[1], "WHIR Canopy top_node mismatch");
-        for idx in [1usize, 2, 3, 511, 512, n_leaves - 1, n_leaves, 2 * n_leaves - 1] {
+        for idx in [
+            1usize,
+            2,
+            3,
+            511,
+            512,
+            n_leaves - 1,
+            n_leaves,
+            2 * n_leaves - 1,
+        ] {
             assert_eq!(gpu_nodes[idx], cpu_nodes[idx], "Canopy node {idx} mismatch");
         }
         assert_eq!(
@@ -342,7 +512,10 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
                 &children[2 * (num_parents - 1) + 1]
             )
         );
-        assert_eq!(CpuReferenceBackend.target_arch(), KernelTargetArch::CpuReference);
+        assert_eq!(
+            CpuReferenceBackend.target_arch(),
+            KernelTargetArch::CpuReference
+        );
     }
 }
 
@@ -378,7 +551,8 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
     let hw_digest = gpu.hardware_audit_digest();
     let mut rng = 0x2526_A11C_E5EE_D001u64;
 
-    gpu.try_acquire_prover_session().expect("acquire prover session");
+    gpu.try_acquire_prover_session()
+        .expect("acquire prover session");
 
     // =========================================================================
     // Part A: `num_vars = 25` (`K = 256` signers) — 100% Native VRAM + V5 Receipts
@@ -397,7 +571,7 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
         (0, rand_gl(&mut rng)),
         (3, rand_gl(&mut rng)),
         ((1usize << 24) + 14, rand_gl(&mut rng)), // even index -> contributes to ev0 with k3 == 1!
-        ((1usize << 25) - 1, rand_gl(&mut rng)),  // odd top index -> contributes to ev2 with k3 == 1!
+        ((1usize << 25) - 1, rand_gl(&mut rng)), // odd top index -> contributes to ev2 with k3 == 1!
     ];
 
     let t_r0 = Instant::now();
@@ -427,7 +601,10 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
     assert_ne!(top_r0, [0u8; 32]);
     assert_eq!(rec_r0.hardware_audit_digest, hw_digest);
     assert_eq!(reg.verify_prover_keyed_receipt(&rec_r0, &key), Ok(()));
-    assert_eq!(rec_r0.descriptor.slot(), ProverKernelSlot::WhirLdeCommitment);
+    assert_eq!(
+        rec_r0.descriptor.slot(),
+        ProverKernelSlot::WhirLdeCommitment
+    );
 
     let r_chal: Vec<Ext4> = (0..nv).map(|_| rand_ext4(&mut rng)).collect();
     let eq_1024 = eq_kronecker_1024(&r_chal);
@@ -463,17 +640,25 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
     }
     want_ev0 = ext4_mul(lambda[0], want_ev0);
     want_ev2 = ext4_mul(lambda[0], want_ev2);
-    assert_eq!(ev0, want_ev0, "nv=25 batch_sumcheck ev0 mismatch (byte-3 Kronecker)");
-    assert_eq!(ev2, want_ev2, "nv=25 batch_sumcheck ev2 mismatch (byte-3 Kronecker)");
+    assert_eq!(
+        ev0, want_ev0,
+        "nv=25 batch_sumcheck ev0 mismatch (byte-3 Kronecker)"
+    );
+    assert_eq!(
+        ev2, want_ev2,
+        "nv=25 batch_sumcheck ev2 mismatch (byte-3 Kronecker)"
+    );
 
     let z0 = rand_ext4(&mut rng);
     let z1 = rand_ext4(&mut rng);
     let z_ood_2048 = pair_geometric_kronecker_2048(EXT4_ONE, z0, EXT4_ONE, z1);
-    let z0_pows: Vec<Ext4> = (0..nv).scan(z0, |st, _| {
-        let cur = *st;
-        *st = ext4_mul(*st, *st);
-        Some(cur)
-    }).collect();
+    let z0_pows: Vec<Ext4> = (0..nv)
+        .scan(z0, |st, _| {
+            let cur = *st;
+            *st = ext4_mul(*st, *st);
+            Some(cur)
+        })
+        .collect();
     let mono_z0_1024 = mono_kronecker_1024(&z0_pows);
     let geom_z0_1024 = geometric_kronecker_1024(EXT4_ONE, z0);
     assert_eq!(&mono_z0_1024[..768], &geom_z0_1024[..768]);
@@ -491,7 +676,10 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
         evals_single[0], dot_z0[0],
         "nv=25 open_init vs expand_monomial_and_dot_1024 mismatch"
     );
-    assert_eq!(reg.verify_prover_keyed_receipt(&rec_open_single, &key), Ok(()));
+    assert_eq!(
+        reg.verify_prover_keyed_receipt(&rec_open_single, &key),
+        Ok(())
+    );
 
     let poly_w = rand_ext4(&mut rng);
     let mask_w = rand_ext4(&mut rng);
@@ -502,13 +690,21 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
         .expect("nv=25 open_init_with_receipt (weighted + mask at 2^25)");
     let open_ms = t_open.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(reg.verify_prover_keyed_receipt(&rec_open, &key), Ok(()));
-    assert_eq!(rec_open.descriptor.slot(), ProverKernelSlot::WhirFoldSumcheck);
+    assert_eq!(
+        rec_open.descriptor.slot(),
+        ProverKernelSlot::WhirFoldSumcheck
+    );
 
     // Algebraic check of `P(z) * (poly_w + mask_w * z)` across all `2^25 + 1` coefficients
     // (`0 <= gid <= 2^25`, exercising `k3 = 0, 1, 2` including the shifted top coefficient at `gid = 2^25`):
     for (t, z_t) in [(0usize, z0), (1usize, z1)] {
         let factor = ext4_add(poly_w, ext4_mul(mask_w, z_t));
-        let expected = ext4_mul(factor, evals_single[t]);
+        let single_expected = sparse_witness_ood(&sparse_eval_pts, nv, z_t);
+        assert_eq!(
+            evals_single[t], single_expected,
+            "nv=25 independent Mobius/OOD oracle"
+        );
+        let expected = ext4_mul(factor, single_expected);
         assert_eq!(
             evals_weighted[t], expected,
             "nv=25 weighted + shifted-X OOD evaluation {t} mismatch (gid = 0..=2^25, k3 = 0..=2)"
@@ -621,17 +817,14 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
         let cols_base = c_len as u32;
         let rec_air_init = gpu
             .prover_air_init_shard_with_receipt(
-                &key,
-                anchor,
-                c_len as u32,
-                cols_base,
-                air_rows,
-                &shifts,
-                &statics,
+                &key, anchor, 0, cols_base, air_rows, &shifts, &statics,
             )
             .expect("AIR init_shard_with_receipt");
         assert_eq!(reg.verify_prover_keyed_receipt(&rec_air_init, &key), Ok(()));
-        assert_eq!(rec_air_init.descriptor.slot(), ProverKernelSlot::AirRowGroupA);
+        assert_eq!(
+            rec_air_init.descriptor.slot(),
+            ProverKernelSlot::AirRowGroupA
+        );
 
         let dyn_ext4_off = 296u32;
         let sorted_u64_off = 294u32 * 4;
@@ -684,6 +877,35 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
         assert_eq!(reg.verify_prover_keyed_receipt(&rec_ga, &key), Ok(()));
         assert_eq!(reg.verify_prover_keyed_receipt(&rec_gb, &key), Ok(()));
 
+        // Even a dimension unused by this branch must be framed in each receipt:
+        // changing cur_s keeps Group A's descriptor and numerical result unchanged.
+        let (same_evals, [changed_ga, changed_gb]) = gpu
+            .prover_air_eval_round_with_receipt(
+                &key,
+                anchor,
+                true,
+                air_rows,
+                air_rows,
+                2,
+                false,
+                cols_base,
+                0,
+                dyn_ext4_off,
+                &dyn_words,
+                signers_off,
+                steps_off,
+                op_hdr_off,
+                op_ent_off,
+                sorted_u64_off,
+            )
+            .expect("AIR receipt with alternate signer dimension");
+        assert_eq!(same_evals, _air_evals);
+        assert_eq!(changed_ga.descriptor, rec_ga.descriptor);
+        assert_ne!(changed_ga.input_digest, rec_ga.input_digest);
+        assert_ne!(changed_ga.mac, rec_ga.mac);
+        assert_eq!(reg.verify_prover_keyed_receipt(&changed_ga, &key), Ok(()));
+        assert_eq!(reg.verify_prover_keyed_receipt(&changed_gb, &key), Ok(()));
+
         let rec_air_fold = gpu
             .prover_air_fold_round_with_receipt(
                 &key,
@@ -706,7 +928,8 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
 
     // Scrub `nv = 25` arena before allocating the `~9.9 GiB` `nv = 26` arena on 12 GiB RX 6750 XT.
     gpu.release_prover_session();
-    gpu.try_acquire_prover_session().expect("re-acquire for nv=26");
+    gpu.try_acquire_prover_session()
+        .expect("re-acquire for nv=26");
 
     // =========================================================================
     // Part B: `num_vars = 26` (`K = 512` signers, max buffer `3.00 GiB < 4 GiB`)
@@ -754,13 +977,23 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
                 )
                 .expect("nv=26 open_init weighted+masked");
             assert_eq!(reg.verify_prover_keyed_receipt(&rec26_open, &key), Ok(()));
+            let mut legacy_ood = [EXT4_ZERO; 1536];
+            legacy_ood[..768].copy_from_slice(&z_ood_2048[..768]);
+            legacy_ood[768..].copy_from_slice(&z_ood_2048[1024..1792]);
+            let legacy_evals = gpu
+                .prover_whir_eval_univariate_2((1 << nv26) + 2, 0, &legacy_ood)
+                .expect("nv=26 legacy geometric extension");
             for (t, z_t) in [(0usize, z0), (1usize, z1)] {
                 let factor = ext4_add(poly_w, ext4_mul(mask_w, z_t));
-                let expected = ext4_mul(factor, ev26_single[t]);
-                // Also verify explicitly against exact mathematical INTT of `[42, 0, ..., 0]`:
-                // `mono[i] = 42 * 2^{-26}` for ALL `0 <= i < 2^26`, so `P(z_t) = 42 * 2^{-26} * (z_t^{2^26} - 1) / (z_t - 1)`.
-                let z_pow_26 = ext4_pow_pub(z_t, 1u64 << 26);
-                assert_ne!(z_pow_26, EXT4_ONE);
+                // An impulse at Boolean index zero has coefficients
+                // 42 * (-1)^popcount(i), hence P(z) = 42 * product_j (1 - z^(2^j)).
+                let single_expected = sparse_witness_ood(&[(0, 42)], nv26, z_t);
+                assert_eq!(
+                    ev26_single[t], single_expected,
+                    "nv=26 independent Mobius/OOD oracle"
+                );
+                let expected = ext4_mul(factor, single_expected);
+                assert_eq!(legacy_evals[t], expected, "nv=26 legacy table parity");
                 assert_eq!(
                     ev26_masked[t], expected,
                     "nv=26 OOD evaluation {t} mismatch across gid=0..=2^26 (k3=0..=4)"
@@ -775,6 +1008,10 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
             op: "vkAllocateMemory",
             code: -2,
         }) => {
+            assert!(
+                std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(),
+                "mandatory nv=26 GPU audit cannot skip allocation failure"
+            );
             eprintln!(
                 "NOTE: nv=26 (`~9.9 GiB` VRAM) skipped due to concurrent VRAM usage on 12 GiB GPU"
             );

@@ -401,7 +401,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     fx.commit(&gpu);
     gpu.prover_whir_commit_stage(1, 16, 64, 4).expect("stage 1");
     gpu.prover_whir_commit_stage(3, 16, 64, 4).expect("stage 3");
-    gpu.prover_whir_gather_queries(3, 4, 1, 16, &[], &[1], &mut [0; 4]).expect("current stage");
+    gpu.prover_whir_gather_queries(3, 4, 1, 16, &[], &[1], &mut [0; 4])
+        .expect("current stage");
     assert_clean(gpu.prover_whir_gather_queries(1, 4, 1, 16, &[], &[1], &mut [0; 4]));
     reject!(gpu.prover_whir_accumulate_shift_claims(16, u32::MAX, &[1; 256], &[[0; 8]]));
     reject!(gpu.prover_whir_accumulate_shift_claims(usize::MAX, 0, &[1; 256], &[[0; 8]]));

@@ -52,6 +52,9 @@ pub mod poseidon2_mpc;
 pub mod rss256;
 
 #[forbid(unsafe_code)]
+pub mod cnf_rss;
+
+#[forbid(unsafe_code)]
 pub mod belt_latch;
 
 #[forbid(unsafe_code)]

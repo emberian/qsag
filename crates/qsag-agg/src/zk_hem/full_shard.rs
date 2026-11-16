@@ -31,7 +31,7 @@
 //! soundness of this transcript has not been mechanized, and the regimes keep their
 //! bounded-query assumptions. Recording the row constraints needs `std`.
 
-use super::protocol::{self, PublicHemProof};
+use super::protocol::{self, HologramPublicProof, ShapeHologram, ShapeVerifierKey};
 use super::recursive_whir::{
     Assignment, Backend, Base, ChildWhirStatement, Digest, Ext, FixedPathWhirParams,
     FixedPathWhirProof, Native, RecursiveWhirError, Transcript, bits, commit_for_recursion, f,
@@ -59,7 +59,7 @@ use core::cell::RefCell;
 /// Bytes of the message every signer of a recursive shard signs.
 pub const SHARD_MESSAGE_BYTES: usize = 32;
 /// Public words of one child: committee digest, message bytes, signer count.
-const PUBLIC_WORDS: usize = 4 + SHARD_MESSAGE_BYTES + 1;
+pub(crate) const PUBLIC_WORDS: usize = 4 + SHARD_MESSAGE_BYTES + 1;
 const PROOF_LABEL: &[u8] = b"QSAG.FULL.SHARD.MERGE/v1";
 
 // Transcript frame tags, disjoint from the opening transcript's (1..=31) and the leaf,
@@ -560,7 +560,7 @@ fn bind_statement<B: Backend>(
     let mut geometry = vec![
         f(VERSION),
         f(params.slots as u64),
-        f(AggSigProfile::JortsPoseidon2 as u64),
+        f(u64::from(params.profile.to_u8())),
         f(params.whir.domain_log2 as u64),
     ];
     geometry.extend(
@@ -591,18 +591,18 @@ fn bind_statement<B: Backend>(
 }
 
 /// Private inputs of one child.
-struct ShardWitness<'a> {
+pub(crate) struct ShardWitness<'a> {
     /// `slots` keys as `pk_seed ++ pk_root`; slots past `size` hold zeros.
-    keys: Vec<[F; 8]>,
-    size: usize,
+    pub(crate) keys: Vec<[F; 8]>,
+    pub(crate) size: usize,
     /// One flag per slot.
-    active: Vec<bool>,
-    proof: &'a RecursiveShardProof,
+    pub(crate) active: Vec<bool>,
+    pub(crate) proof: &'a RecursiveShardProof,
 }
 
 /// The whole verifier of one recursive shard proof. `public` is
 /// `committee digest ++ message bytes ++ signer count`.
-fn shard_gadget<B: Backend>(
+pub(crate) fn shard_gadget<B: Backend>(
     b: &mut B,
     params: &FullShardParams,
     public: &[B::W],
@@ -831,10 +831,11 @@ pub enum FullShardError {
     Whir(RecursiveWhirError),
 }
 
-/// Verifier geometry of recursive `JortsPoseidon2` shards with `slots` signer slots.
+/// Verifier geometry of recursive `JortsPoseidon2` shards (`height 6..=20`) with `slots` signer slots.
 #[derive(Clone)]
 pub struct FullShardParams {
     whir: FixedPathWhirParams,
+    profile: AggSigProfile,
     slots: usize,
     log_slots: usize,
     circuit: ShardCircuit,
@@ -843,10 +844,23 @@ pub struct FullShardParams {
 
 impl FullShardParams {
     /// `slots` is a power of two in `2..=max_shard_signers(JortsPoseidon2)`; `regime` must be
-    /// a Poseidon2 regime.
+    /// a Poseidon2 regime. Uses default height-6 [`AggSigProfile::JortsPoseidon2`].
     pub fn new(regime: WhirSecurityRegime, slots: usize) -> Result<Self, FullShardError> {
-        let profile = AggSigProfile::JortsPoseidon2;
-        if !slots.is_power_of_two() || slots < 2 || slots > crate::max_shard_signers(profile) {
+        Self::with_profile(regime, AggSigProfile::JortsPoseidon2, slots)
+    }
+
+    /// Construct recursive shard parameters for any configurable `JortsPoseidon2` XMSS height
+    /// (`6..=20`, up to $2^{20} = 1{,}048{,}576$ signatures per key at zero extra trace rows).
+    pub fn with_profile(
+        regime: WhirSecurityRegime,
+        profile: AggSigProfile,
+        slots: usize,
+    ) -> Result<Self, FullShardError> {
+        if !profile.is_jorts()
+            || !slots.is_power_of_two()
+            || slots < 2
+            || slots > crate::max_shard_signers(profile)
+        {
             return Err(FullShardError::InvalidParameters);
         }
         let circuit = ShardCircuit::new(profile, slots);
@@ -855,11 +869,16 @@ impl FullShardParams {
         let tape = AirTape::record(&circuit);
         Ok(Self {
             whir,
+            profile,
             slots,
             log_slots: slots.trailing_zeros() as usize,
             circuit,
             tape,
         })
+    }
+
+    pub fn profile(&self) -> AggSigProfile {
+        self.profile
     }
     pub fn slots(&self) -> usize {
         self.slots
@@ -883,17 +902,16 @@ fn key_limbs(key: &ValidatorPublicKey) -> [F; 8] {
     })
 }
 
-/// Digest naming an ordered committee of at most `params.slots()` distinct `JortsPoseidon2`
-/// keys. The relation counts committee slots, so a verifier that accepts a digest from
-/// elsewhere must know it names distinct keys.
+/// Digest naming an ordered committee of at most `params.slots()` distinct keys matching
+/// `params.profile()`. The relation counts committee slots, so a verifier that accepts a digest
+/// from elsewhere must know it names distinct keys.
 pub fn committee_digest(params: &FullShardParams, keys: &[ValidatorPublicKey]) -> Option<Digest> {
     let mut identities = alloc::collections::BTreeSet::new();
     if keys.is_empty()
         || keys.len() > params.slots
-        || keys.iter().any(|k| {
-            k.profile != AggSigProfile::JortsPoseidon2
-                || !identities.insert((k.pk_seed, k.pk_root))
-        })
+        || keys
+            .iter()
+            .any(|k| k.profile != params.profile || !identities.insert((k.pk_seed, k.pk_root)))
     {
         return None;
     }
@@ -945,7 +963,7 @@ impl RecursiveShardStatement {
             signers: self.bitmap.count_ones() as u32,
         })
     }
-    fn witness<'a>(
+    pub(crate) fn witness<'a>(
         &self,
         params: &FullShardParams,
         proof: &'a RecursiveShardProof,
@@ -977,7 +995,7 @@ pub struct RecursiveShardProof {
 pub const RECURSIVE_SHARD_WIRE_MAGIC: &[u8; 8] = b"QSAGRSP1";
 
 impl RecursiveShardProof {
-    fn placeholder(params: &FullShardParams) -> Self {
+    pub(crate) fn placeholder(params: &FullShardParams) -> Self {
         Self {
             commitment: [F::ZERO; 4],
             row_sumcheck_polys: vec![[E::ZERO; ROW_SUMCHECK_WIRE_COEFFS]; params.circuit.log_rows()],
@@ -985,7 +1003,7 @@ impl RecursiveShardProof {
             opening: params.whir.placeholder(),
         }
     }
-    fn well_formed(&self, params: &FullShardParams) -> bool {
+    pub(crate) fn well_formed(&self, params: &FullShardParams) -> bool {
         self.row_sumcheck_polys.len() == params.circuit.log_rows()
             && self.col_evals.len() == NUM_TRACE_COLS
             && params.whir.well_formed(
@@ -1120,7 +1138,7 @@ pub fn prove_recursive_shard(
         || !crate::sig::validate_unique_active_committee(
             &statement.keys,
             &statement.bitmap,
-            AggSigProfile::JortsPoseidon2,
+            params.profile,
         )
     {
         return Err(FullShardError::InvalidStatement);
@@ -1203,12 +1221,14 @@ pub struct FullShardRelationStats {
     pub variables: usize,
 }
 
-/// The relation "each of `children` recursive shard proofs verifies".
+/// The relation "each of `children` recursive shard proofs verifies", precompiled with a
+/// deterministic Spark [`ShapeHologram`] for `< 15 ms` sublinear verification.
 #[derive(Clone)]
 pub struct FullShardMergeRelation {
     params: FullShardParams,
     children: usize,
     shape: Shape,
+    hologram: ShapeHologram,
     stats: FullShardRelationStats,
 }
 
@@ -1229,11 +1249,13 @@ impl FullShardMergeRelation {
         };
         let publics = vec![vec![F::ZERO; PUBLIC_WORDS]; children];
         let witnesses: Vec<&ShardWitness<'_>> = (0..children).map(|_| &witness).collect();
-        let mut cs = ConstraintSystem::new();
+        let mut cs = ConstraintSystem::new_hologram_aligned();
         populate(&mut cs, &params, &publics, &witnesses);
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
         qsag_asm::volatile_fill(&mut z, F::ZERO);
+        let hologram = ShapeHologram::compile(&shape, params.regime())
+            .map_err(|_| FullShardError::InvalidParameters)?;
         let stats = FullShardRelationStats {
             sbox_rows: shape.num_sbox,
             multiplication_rows: used - shape.num_sbox,
@@ -1244,6 +1266,7 @@ impl FullShardMergeRelation {
             params,
             children,
             shape,
+            hologram,
             stats,
         })
     }
@@ -1255,6 +1278,12 @@ impl FullShardMergeRelation {
     }
     pub fn shape(&self) -> &Shape {
         &self.shape
+    }
+    pub fn hologram(&self) -> &ShapeHologram {
+        &self.hologram
+    }
+    pub fn verifier_key(&self) -> &ShapeVerifierKey {
+        self.hologram.verifier_key()
     }
     pub fn stats(&self) -> FullShardRelationStats {
         self.stats
@@ -1282,14 +1311,14 @@ impl FullShardMergeRelation {
             chunk
                 .iter()
                 .map(|(public, statement, proof)| {
-                    let mut assignment = Assignment::default();
+                    let mut assignment = Assignment::hologram_aligned();
                     shard_gadget(
                         &mut assignment,
                         &self.params,
                         public,
                         &statement.witness(&self.params, proof),
                     );
-                    assignment.values
+                    (assignment.p2_values, assignment.values)
                 })
                 .collect::<Vec<_>>()
         };
@@ -1300,11 +1329,16 @@ impl FullShardMergeRelation {
             .collect::<Vec<_>>();
         #[cfg(not(feature = "std"))]
         let assignments = build(&inputs);
+        let p2_var_base = 128 * self.shape.hologram_meta().pub_var_blocks;
         let mut z = Vec::with_capacity(self.shape.num_vars);
         z.push(F::ONE);
         z.extend(publics.iter().flatten());
-        for assignment in assignments {
-            z.extend(assignment);
+        z.resize(p2_var_base, F::ZERO);
+        for (p2_vals, _) in &assignments {
+            z.extend_from_slice(p2_vals);
+        }
+        for (_, misc_vals) in assignments {
+            z.extend(misc_vals);
         }
         if z.len() != self.shape.mask_var_base {
             return Err(FullShardError::InvalidParameters);
@@ -1348,10 +1382,11 @@ fn populate(
     }
 }
 
-/// One parent proof for the shards named by its statement.
+/// One parent proof for the shards named by its statement, verified in `< 15 ms` via Spark
+/// [`ShapeHologram`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FullShardMergeProof {
-    pub proof: PublicHemProof,
+    pub proof: HologramPublicProof,
 }
 impl FullShardMergeProof {
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -1364,11 +1399,18 @@ impl FullShardMergeProof {
         relation: &FullShardMergeRelation,
         regime: WhirSecurityRegime,
     ) -> Option<Self> {
-        if bytes.get(..8)? != b"QSAGFSM1" {
+        if bytes.get(..8)? != b"QSAGFSM1" || !regime.meets_qrom_128_floor() {
             return None;
         }
-        let proof = PublicHemProof::from_bytes(bytes.get(8..)?, &relation.shape, regime)?;
-        Some(Self { proof })
+        if regime == relation.verifier_key().regime {
+            let proof =
+                HologramPublicProof::from_bytes(bytes.get(8..)?, relation.verifier_key())?;
+            Some(Self { proof })
+        } else {
+            let alt = ShapeHologram::compile(&relation.shape, regime).ok()?;
+            let proof = HologramPublicProof::from_bytes(bytes.get(8..)?, alt.verifier_key())?;
+            Some(Self { proof })
+        }
     }
 }
 
@@ -1391,16 +1433,22 @@ pub fn prove_full_shard_merge(
         return Err(FullShardError::InvalidChild);
     }
     let z = relation.assignment(statements, proofs)?;
-    let proof = protocol::prove_public(&relation.shape, z, PROOF_LABEL, regime, seed).map_err(
-        |e| match e {
-            protocol::ZkHemError::Unsatisfied => FullShardError::InvalidChild,
-            _ => FullShardError::InvalidParameters,
-        },
-    )?;
+    let map_err = |e: protocol::ZkHemError| match e {
+        protocol::ZkHemError::Unsatisfied => FullShardError::InvalidChild,
+        _ => FullShardError::InvalidParameters,
+    };
+    let proof = if regime == relation.verifier_key().regime {
+        protocol::prove_public_hologram(&relation.shape, &relation.hologram, z, PROOF_LABEL, seed)
+            .map_err(map_err)?
+    } else {
+        let alt = ShapeHologram::compile(&relation.shape, regime).map_err(map_err)?;
+        protocol::prove_public_hologram(&relation.shape, &alt, z, PROOF_LABEL, seed)
+            .map_err(map_err)?
+    };
     Ok(FullShardMergeProof { proof })
 }
 
-/// Verify a parent proof against the shards' public statements alone.
+/// Verify a parent proof against the shards' public statements alone (`< 15 ms` sublinear!).
 pub fn verify_full_shard_merge(
     relation: &FullShardMergeRelation,
     shards: &[ShardPublic],
@@ -1411,7 +1459,14 @@ pub fn verify_full_shard_merge(
         return false;
     }
     let public: Vec<F> = shards.iter().flat_map(ShardPublic::words).collect();
-    protocol::verify_public(&relation.shape, &public, PROOF_LABEL, regime, &proof.proof)
+    if regime == relation.verifier_key().regime {
+        protocol::verify_public_hologram(relation.verifier_key(), &public, PROOF_LABEL, &proof.proof)
+    } else {
+        let Ok(alt) = ShapeHologram::compile(&relation.shape, regime) else {
+            return false;
+        };
+        protocol::verify_public_hologram(alt.verifier_key(), &public, PROOF_LABEL, &proof.proof)
+    }
 }
 
 #[cfg(test)]

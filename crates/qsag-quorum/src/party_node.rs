@@ -963,8 +963,8 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             party.states.push(SharePair {
                 party: party.party,
                 session_id: Some(party.session_id),
-                mine: (*shares).0,
-                next: (*shares).1,
+                mine: shares.0.0,
+                next: shares.0.1,
             });
             Ok(party.states.len() - 1)
         })
