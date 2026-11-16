@@ -1812,10 +1812,44 @@ impl RecursionCommitment {
     pub(super) fn levels(&self) -> &[Vec<Digest>] {
         &self.oracle.levels
     }
+}
 
-    pub(super) fn into_levels(mut self) -> Vec<Vec<Digest>> {
-        core::mem::take(&mut self.oracle.levels)
+/// Commit to a base-field evaluation table and return only its `(root, merkle_levels)`,
+/// encoding the RS codeword in place and erasing the monomial coefficients immediately so
+/// split subtree leaf/internal provers never retain `2 * 2^nv` redundant coefficient buffers!
+pub(super) fn commit_levels_for_recursion(
+    params: &FixedPathWhirParams,
+    evaluations: &[F],
+) -> Result<(Digest, Vec<Vec<Digest>>), RecursiveWhirError> {
+    let nv = params
+        .num_vars()
+        .ok_or(RecursiveWhirError::InvalidParameters)?;
+    if evaluations.len() != 1usize << nv {
+        return Err(RecursiveWhirError::InvalidParameters);
     }
+    let _phase = crate::profile::span("recursion_commit");
+    let spec = params.schedule.stages[0];
+    let arity = 1usize << spec.step_vars;
+    let mut cw = if evaluations.len() >= (1 << 20) {
+        let domain_len = evaluations
+            .len()
+            .checked_mul(spec.blowup)
+            .expect("RS domain overflow");
+        let mut buf = Vec::with_capacity(domain_len);
+        buf.extend_from_slice(evaluations);
+        crate::field::hypercube_to_monomial_in_place(&mut buf, 1 << 14);
+        crate::field::encode_rs_coset_goldilocks_owned_cpu(buf, spec.blowup)
+    } else {
+        let mut base = hypercube_to_monomial_coeffs(evaluations);
+        let out = crate::field::encode_rs_coset_goldilocks(&base, spec.blowup);
+        qsag_asm::volatile_fill(&mut base, F::ZERO);
+        out
+    };
+    let levels = build_merkle_levels_base(&cw, arity, 0);
+    qsag_asm::volatile_fill(&mut cw, F::ZERO);
+    drop(cw);
+    let root = levels.last().unwrap()[0];
+    Ok((root, levels))
 }
 
 /// Commit to a base-field evaluation table in the recursion format.
@@ -3724,31 +3758,54 @@ pub(crate) fn verify_folded_level(
         let mut shifted = Vec::with_capacity(count);
         if stage == 0 {
             let want_vals = uniq_q.len() * arity;
-            for (k, root_k) in roots0.iter().enumerate() {
+            if proof.stage0_fibers.iter().any(|f| f.len() != want_vals) {
+                return false;
+            }
+            let verify_tree = |k: usize, root_k: &Digest| -> bool {
                 let fibers = &proof.stage0_fibers[k];
-                if fibers.len() != want_vals {
-                    return false;
-                }
                 let mut leaf_digests = vec![[F::ZERO; 4]; uniq_q.len()];
-                crate::pcs::fill_indexed(&mut leaf_digests, |u_idx| {
+                for (u_idx, slot) in leaf_digests.iter_mut().enumerate() {
                     let g_idx = uniq_q[u_idx];
                     let vals = &fibers[u_idx * arity..(u_idx + 1) * arity];
                     let ext_fiber: Vec<Ext<F>> = vals
                         .iter()
                         .map(|&v| Ext::constant(E::from_base(v)))
                         .collect();
-                    leaf(&mut Native::default(), 0, &f(g_idx as u64), &ext_fiber)
-                });
-                if !verify_steiner_multiproof(
+                    *slot = leaf(&mut Native::default(), 0, &f(g_idx as u64), &ext_fiber);
+                }
+                verify_steiner_multiproof(
                     0,
                     path_depth,
                     root_k,
                     &uniq_q,
                     &leaf_digests,
                     &proof.stage0_siblings[k],
-                ) {
-                    return false;
-                }
+                )
+            };
+            #[cfg(feature = "std")]
+            let trees_ok = if crate::parallel_workers() > 1 && num_polys > 1 {
+                let verify_tree = &verify_tree;
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = roots0
+                        .iter()
+                        .enumerate()
+                        .map(|(k, root_k)| crate::spawn_bounded(scope, move || verify_tree(k, root_k)))
+                        .collect();
+                    handles.into_iter().all(crate::join_worker)
+                })
+            } else {
+                roots0
+                    .iter()
+                    .enumerate()
+                    .all(|(k, root_k)| verify_tree(k, root_k))
+            };
+            #[cfg(not(feature = "std"))]
+            let trees_ok = roots0
+                .iter()
+                .enumerate()
+                .all(|(k, root_k)| verify_tree(k, root_k));
+            if !trees_ok {
+                return false;
             }
             let mut combined_uniq = vec![vec![E::ZERO; arity]; uniq_q.len()];
             for (k, &mu_k) in mu_pows.iter().enumerate() {

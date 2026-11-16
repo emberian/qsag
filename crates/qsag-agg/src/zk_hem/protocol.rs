@@ -47,7 +47,7 @@ use super::recursive_whir::{
     Backend as RecBackend, Base as RecBase, Correlated3WhirProof, Digest as RecDigest,
     Ext as RecExt, FixedPathWhirParams, FoldedEdgeSpec, FoldedLevelWhirProof,
     Native as RecNative, PublicRecursionCommitment, Transcript as RecTranscript,
-    commit_for_recursion, f as rec_f, open_correlated3_for_recursion,
+    commit_for_recursion, commit_levels_for_recursion, f as rec_f, open_correlated3_for_recursion,
     prove_folded_level_for_recursion, verify_correlated3_gadget, verify_folded_level,
 };
 use super::relation::{HologramMeta, Poseidon2InteriorTemplate, Shape};
@@ -3925,9 +3925,15 @@ fn prove_public_for_recursion_inner(
     let rec_params =
         FixedPathWhirParams::new(vk.regime, pack_vars).map_err(|_| ZkHemError::RelationTooLarge)?;
     assignment.resize(1 << pack_vars, F::ZERO);
-    let z_comm =
-        commit_for_recursion(&rec_params, &assignment).map_err(|_| ZkHemError::RelationTooLarge)?;
-    let comm_z = z_comm.root();
+    let (comm_z, z_comm_opt, z_levels_opt) = if with_individual_opening {
+        let zc = commit_for_recursion(&rec_params, &assignment)
+            .map_err(|_| ZkHemError::RelationTooLarge)?;
+        (zc.root(), Some(zc), None)
+    } else {
+        let (r, lvls) = commit_levels_for_recursion(&rec_params, &assignment)
+            .map_err(|_| ZkHemError::RelationTooLarge)?;
+        (r, None, Some(lvls))
+    };
 
     let mut b = RecNative::default();
     let mut tr = start_rec_hologram_transcript(&mut b, vk, statement_tag, &public, &comm_z);
@@ -3960,9 +3966,15 @@ fn prove_public_for_recursion_inner(
     let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
 
     let mut e_super = pack_e_super(&ex, &ey);
-    let e_comm =
-        commit_for_recursion(&rec_params, &e_super).map_err(|_| ZkHemError::RelationTooLarge)?;
-    let comm_e = e_comm.root();
+    let (comm_e, e_comm_opt, e_levels_opt) = if with_individual_opening {
+        let ec = commit_for_recursion(&rec_params, &e_super)
+            .map_err(|_| ZkHemError::RelationTooLarge)?;
+        (ec.root(), Some(ec), None)
+    } else {
+        let (r, lvls) = commit_levels_for_recursion(&rec_params, &e_super)
+            .map_err(|_| ZkHemError::RelationTooLarge)?;
+        (r, None, Some(lvls))
+    };
 
     tr.absorb(&mut b, 212, &comm_e);
     tr.absorb_exts(&mut b, 213, &[RecExt::constant(m_sparse_claim)]);
@@ -4034,6 +4046,8 @@ fn prove_public_for_recursion_inner(
     let sel_gkr: [E; 3] = core::array::from_fn(|_| tr.ext(&mut b, 231).value(&b));
 
     let (opening, z_levels, e_levels) = if with_individual_opening {
+        let z_comm = z_comm_opt.expect("z_comm");
+        let e_comm = e_comm_opt.expect("e_comm");
         let z_lvls = z_comm.levels().to_vec();
         let e_lvls = e_comm.levels().to_vec();
         let mut p_z = ry.clone();
@@ -4055,8 +4069,8 @@ fn prove_public_for_recursion_inner(
     } else {
         (
             rec_params.placeholder_correlated3(),
-            z_comm.into_levels(),
-            e_comm.into_levels(),
+            z_levels_opt.expect("z_levels"),
+            e_levels_opt.expect("e_levels"),
         )
     };
     debug_assert!(!b.failed);
