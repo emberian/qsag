@@ -26,6 +26,7 @@ Layer-0 ideal specification for succinct post-quantum signature aggregation and 
 
 public import Qsag.Spec.Primitives
 public import Qsag.Spec.Parameters
+public import Qsag.Spec.Refines
 public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
 import Qsag.Tactic.AssuranceKit
@@ -305,6 +306,23 @@ theorem aggregateWitnessCheck_sound {PK Sig : Type} {w : Nat}
   | none => rw [hs] at hi; cases hi
   | some sig => rw [hs] at hi; exact hi
 
+theorem aggregateWitnessCheck_complete {PK Sig : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (stmt : AggregateStatement PK w) (sigs : Fin w → Option Sig)
+    (h : ValidAggregateWitness verifySingle stmt sigs) :
+    aggregateWitnessCheck verifySingle stmt sigs = true := by
+  apply List.all_eq_true.mpr
+  intro i _
+  cases hBit : stmt.bitmap.getLsbD i.val with
+  | false => rfl
+  | true =>
+    have hi := h i hBit
+    cases hs : sigs i with
+    | none => rw [hs] at hi; exact False.elim hi
+    | some sig =>
+      rw [hs] at hi
+      simp only [Bool.not_true, Bool.false_or, hi]
+
 /-- The challenger's recording oracle: the first `q` queries are answered by `H` and logged
     with their answers; later queries are answered `[]` and not logged. -/
 def recordingOracle (H : Bytes → Bytes) (q : Nat) (log : List (Bytes × Bytes)) :
@@ -440,8 +458,10 @@ def StraightLineExtractor {PK Sig Proof : Type} {w : Nat}
 
     The oracle family is an index. A family the prover can predict (a constant one) gives a
     contract only verifiers that need no oracle satisfy with small `ε`; the intended instance
-    is a family in which the answers at different queries are independent. No instance for the
-    deployed verifier is constructed in this library. -/
+    is a family in which the answers at different queries are independent. In `Qsag.Top.Aggregation`,
+    this contract is instantiated with `StraightLineExtractor` for the non-transparent 256-column
+    `StepOp` AIR committee verifier via `stepOp256TableOk_xmss_extract`, while succinct WHIR/Canopy
+    compilation factors through `Qsag.Top.ClosedProtocolReductions`. -/
 @[expose] def AggregateExtractorSound {PK Sig Proof : Type} {w nC : Nat}
     (ℰ : (List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) → Prop)
     (verifySingle : PK → Bytes → Sig → Bool)
@@ -678,6 +698,239 @@ theorem aggregateOutcome_rejects_unqueried_collision :
     exact Bool.noConfusion h
   · exact nomatch hb.1
 
+/-! ## §5. Canonical Ideal Aggregation State Machine & `DataRefines` Bridges -/
+
+/-- Ideal aggregation functionality `idealAggregateMachine`: maintains the monotonic list of
+    certified `AggregateStatement`s and accepts `(stmt, sigs)` iff `aggregateWitnessCheck` holds
+    for every active validator in `stmt.bitmap`. -/
+def idealAggregateMachine {PK Sig : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool) :
+    Machine (List (AggregateStatement PK w))
+      (AggregateStatement PK w × (Fin w → Option Sig)) Unit where
+  Init log := log = []
+  step log inp :=
+    if aggregateWitnessCheck verifySingle inp.1 inp.2 then
+      some (log ++ [inp.1], ())
+    else
+      none
+  errStep log _ := log
+
+/-- **Reachable-Trace Soundness of `idealAggregateMachine` (`idealAggregateMachine_all_certified_valid`)**:
+    Along every multi-turn trace from the empty log, every certified statement recorded in the ideal
+    state possesses a valid witness map supplying individual signatures for all active validators. -/
+theorem idealAggregateMachine_all_certified_valid {PK Sig : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    {tr : List ((AggregateStatement PK w × (Fin w → Option Sig)) × Unit)}
+    {log : List (AggregateStatement PK w)}
+    (hTrace : (idealAggregateMachine verifySingle).ValidTrace [] tr log) :
+    ∀ stmt ∈ log, ∃ sigs : Fin w → Option Sig, ValidAggregateWitness verifySingle stmt sigs := by
+  have hInv : ∀ {s₀ s : List (AggregateStatement PK w)}
+      {t : List ((AggregateStatement PK w × (Fin w → Option Sig)) × Unit)},
+      (idealAggregateMachine verifySingle).ValidTrace s₀ t s →
+      (∀ st ∈ s₀, ∃ sigs, ValidAggregateWitness verifySingle st sigs) →
+      ∀ st ∈ s, ∃ sigs, ValidAggregateWitness verifySingle st sigs := by
+    intro s₀ s t hT
+    induction hT with
+    | nil => exact fun h0 => h0
+    | accept hStep _ ih =>
+      intro h0
+      dsimp only [idealAggregateMachine] at hStep
+      cases hChk : aggregateWitnessCheck verifySingle _ _ with
+      | false => rw [hChk] at hStep; cases hStep
+      | true =>
+        rw [hChk] at hStep
+        injection hStep with hPair
+        obtain ⟨hNext, _⟩ := Prod.mk.inj hPair
+        subst hNext
+        refine ih (fun st hMem => ?_)
+        rcases List.mem_append.mp hMem with hOld | hSingle
+        · exact h0 st hOld
+        · rcases List.mem_cons.mp hSingle with rfl | hEmpty
+          · exact ⟨_, aggregateWitnessCheck_sound verifySingle _ _ hChk⟩
+          · exact nomatch hEmpty
+    | reject _ _ _ ih => exact ih
+  exact hInv hTrace (fun _ h => nomatch h)
+
+/-- Concrete verifier state tracking accepted statements alongside an audit counter of rejected
+    submissions (`abs s := s.accepted` is non-injective). -/
+structure VerifiedAggregateState (PK : Type) (w : Nat) where
+  accepted : List (AggregateStatement PK w)
+  rejectedCount : Nat
+
+/-- Submission to a concrete aggregate verifier carrying `(stmt, proof, log)`. -/
+structure AggregateSubmission (PK Proof : Type) (w : Nat) where
+  stmt : AggregateStatement PK w
+  proof : Proof
+  log : List (Bytes × Bytes)
+
+/-- Concrete succinct verifier machine guarded outside the explicitly bounded bad events
+    (`aggregateFailure` and `transcriptCollision`). -/
+def verifiedAggregateMachine {PK Sig Proof : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (H : Bytes → Bytes) :
+    Machine (VerifiedAggregateState PK w) (AggregateSubmission PK Proof w) Unit where
+  Init s := s.accepted = [] ∧ s.rejectedCount = 0
+  step s sub :=
+    if verifyAgg H sub.stmt sub.proof &&
+       !aggregateFailure verifySingle verifyAgg extract H ((sub.stmt, sub.proof), sub.log) &&
+       !transcriptCollision sub.log then
+      some ({ s with accepted := s.accepted ++ [sub.stmt] }, ())
+    else
+      none
+  errStep s _ := { s with rejectedCount := s.rejectedCount + 1 }
+
+/-- Visibility projection extracting `(stmt, extract log stmt proof)` for `idealAggregateMachine`. -/
+def verifiedAggregateVisIn {PK Sig Proof : Type} {w : Nat}
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (sub : AggregateSubmission PK Proof w) :
+    Option (AggregateStatement PK w × (Fin w → Option Sig)) :=
+  some (sub.stmt, extract sub.log sub.stmt sub.proof)
+
+/-- **Forward Simulation (`verifiedAggregate_dataRefines_ideal`)**:
+    Outside the bounded knowledge-extraction and transcript-collision bad events, any concrete
+    aggregate verifier `verifyAgg` refines `idealAggregateMachine verifySingle` via `DataRefines`
+    with non-identity state abstraction `VerifiedAggregateState.accepted`. -/
+def verifiedAggregate_dataRefines_ideal {PK Sig Proof : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (H : Bytes → Bytes) :
+    DataRefines
+      (verifiedAggregateMachine verifySingle verifyAgg extract H)
+      (idealAggregateMachine verifySingle)
+      (verifiedAggregateVisIn extract)
+      id where
+  Rel c a := c.accepted = a
+  absInit c₀ := c₀.accepted
+  init_ok {c₀} hInit := ⟨hInit.1, rfl⟩
+  sim_visible {c c' a sub out j} hRel hStepC hVis := by
+    subst hRel
+    injection hVis with hJ
+    subst hJ
+    dsimp only [verifiedAggregateMachine] at hStepC
+    cases hVer : verifyAgg H sub.stmt sub.proof with
+    | false => rw [hVer] at hStepC; cases hStepC
+    | true =>
+      cases hW : aggregateWitnessCheck verifySingle sub.stmt (extract sub.log sub.stmt sub.proof) with
+      | true =>
+        cases hColl : transcriptCollision sub.log with
+        | true =>
+          have hGuard :
+              (true && !aggregateFailure verifySingle verifyAgg extract H
+                ((sub.stmt, sub.proof), sub.log) && !true) = false := by
+            simp
+          rw [hVer, hColl] at hStepC
+          simp at hStepC
+        | false =>
+          have hFailFalse :
+              aggregateFailure verifySingle verifyAgg extract H ((sub.stmt, sub.proof), sub.log) = false := by
+            unfold aggregateFailure
+            rw [hVer, hW, hColl]
+            rfl
+          rw [hVer, hFailFalse, hColl] at hStepC
+          injection hStepC with hPair
+          obtain ⟨hC, hO⟩ := Prod.mk.inj hPair
+          subst hC; subst hO
+          refine ⟨c.accepted ++ [sub.stmt], ?_, rfl⟩
+          dsimp only [idealAggregateMachine]
+          rw [hW]
+          rfl
+      | false =>
+        cases hColl : transcriptCollision sub.log with
+        | true =>
+          rw [hVer, hColl] at hStepC
+          simp at hStepC
+        | false =>
+          have hFailTrue :
+              aggregateFailure verifySingle verifyAgg extract H ((sub.stmt, sub.proof), sub.log) = true := by
+            unfold aggregateFailure
+            rw [hVer, hW, hColl]
+            rfl
+          rw [hVer, hFailTrue] at hStepC
+          cases hStepC
+  sim_internal {_ _ _ _ _} _ _ hVis := by cases hVis
+  sim_reject {c a _} hRel _ := hRel
+
+/-- Unfiltered concrete aggregate verifier machine running `verifyAgg H sub.stmt sub.proof` directly. -/
+def rawAggregateVerifierMachine {PK Proof : Type} {w : Nat}
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (H : Bytes → Bytes) :
+    Machine (VerifiedAggregateState PK w) (AggregateSubmission PK Proof w) Unit where
+  Init s := s.accepted = [] ∧ s.rejectedCount = 0
+  step s sub :=
+    if verifyAgg H sub.stmt sub.proof then
+      some ({ s with accepted := s.accepted ++ [sub.stmt] }, ())
+    else
+      none
+  errStep s _ := { s with rejectedCount := s.rejectedCount + 1 }
+
+/-- **Unfiltered Forward Simulation (`unconditionalAggregate_dataRefines_ideal`)**:
+    Whenever `verifyAgg H stmt proof = true` unconditionally implies `ValidAggregateWitness` on
+    `extract log stmt proof` (as proved for the 256-column `StepOp` AIR verifier via
+    `stepOp256TableOk_xmss_extract`), `rawAggregateVerifierMachine verifyAgg H` refines
+    `idealAggregateMachine verifySingle` directly with zero bad-event filtering! -/
+def unconditionalAggregate_dataRefines_ideal {PK Sig Proof : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (H : Bytes → Bytes)
+    (hSound : ∀ (stmt : AggregateStatement PK w) (proof : Proof) (log : List (Bytes × Bytes)),
+      verifyAgg H stmt proof = true →
+      ValidAggregateWitness verifySingle stmt (extract log stmt proof)) :
+    DataRefines
+      (rawAggregateVerifierMachine verifyAgg H)
+      (idealAggregateMachine verifySingle)
+      (verifiedAggregateVisIn extract)
+      id where
+  Rel c a := c.accepted = a
+  absInit c₀ := c₀.accepted
+  init_ok {c₀} hInit := ⟨hInit.1, rfl⟩
+  sim_visible {c c' a sub out j} hRel hStepC hVis := by
+    subst hRel
+    injection hVis with hJ
+    subst hJ
+    dsimp only [rawAggregateVerifierMachine] at hStepC
+    cases hVer : verifyAgg H sub.stmt sub.proof with
+    | false => rw [hVer] at hStepC; cases hStepC
+    | true =>
+      rw [hVer] at hStepC
+      injection hStepC with hPair
+      obtain ⟨hC, hO⟩ := Prod.mk.inj hPair
+      subst hC; subst hO
+      have hChk : aggregateWitnessCheck verifySingle sub.stmt
+          (extract sub.log sub.stmt sub.proof) = true :=
+        aggregateWitnessCheck_complete verifySingle _ _ (hSound sub.stmt sub.proof sub.log hVer)
+      refine ⟨c.accepted ++ [sub.stmt], ?_, rfl⟩
+      dsimp only [idealAggregateMachine]
+      rw [hChk]
+      rfl
+  sim_internal {_ _ _ _ _} _ _ hVis := by cases hVis
+  sim_reject {c a _} hRel _ := hRel
+
+/-- **`#tooth` Unsound Verifier Breaks `idealAggregateMachine` (`tooth_unsound_verifier_breaks_idealAggregate`)**:
+    Running `rawAggregateVerifierMachine` with an accept-all verifier admits an unsatisfiable
+    1-validator statement into `accepted`, which no `ValidTrace` of `idealAggregateMachine` from `[]`
+    can ever reach! -/
+theorem tooth_unsound_verifier_breaks_idealAggregate :
+    ∃ (sub : AggregateSubmission Unit Unit 1) (s' : VerifiedAggregateState Unit 1),
+      (rawAggregateVerifierMachine (PK := Unit) (Proof := Unit) (w := 1)
+        (fun _ _ _ => true) (fun b => b)).Init ⟨[], 0⟩ ∧
+      (rawAggregateVerifierMachine (PK := Unit) (Proof := Unit) (w := 1)
+        (fun _ _ _ => true) (fun b => b)).step ⟨[], 0⟩ sub = some (s', ()) ∧
+      ¬ ∃ tr : List ((AggregateStatement Unit 1 × (Fin 1 → Option Unit)) × Unit),
+        (idealAggregateMachine (PK := Unit) (Sig := Unit) (fun _ _ _ => false)).ValidTrace
+          [] tr s'.accepted := by
+  let badStmt : AggregateStatement Unit 1 := ⟨fun _ => (), 1#1, []⟩
+  refine ⟨⟨badStmt, (), []⟩, ⟨[badStmt], 0⟩, ⟨rfl, rfl⟩, rfl, ?_⟩
+  rintro ⟨tr, hTr⟩
+  obtain ⟨sigs, hValid⟩ := idealAggregateMachine_all_certified_valid
+    (fun _ _ _ => false) hTr badStmt (.head _)
+  have hChk := aggregateWitnessCheck_complete (fun _ _ _ => false) badStmt sigs hValid
+  rw [rejectAll_statement_unsatisfiable sigs] at hChk
+  cases hChk
+
 #tooth_pair AggregateExtractorSound.failure_bound vs acceptAll_not_extractorSound
 #tooth_pair aggregateExtractorSound_one vs acceptAll_unit_not_extractorSound
 #tooth_pair transparentAggregate_extractorSound vs acceptAll_unit_not_extractorSound
@@ -685,6 +938,7 @@ theorem aggregateOutcome_rejects_unqueried_collision :
 #tooth_pair acceptAll_alwaysValid_unrestricted_extractorSound vs acceptAll_alwaysValid_not_straightLine_extractorSound
 #tooth_pair transparentAggregate_extractorSound vs acceptAll_not_straightLine_extractorSound
 #tooth_pair AggregateSoundnessOutcome.signer_trichotomy vs aggregateOutcome_rejects_unextracted_signer
+#tooth_pair idealAggregateMachine_all_certified_valid vs tooth_unsound_verifier_breaks_idealAggregate
 
 #verify_constructive Qsag.Spec.mergeWitnessMaps_valid
 #verify_constructive Qsag.Spec.HashCollision.validBreak
@@ -697,6 +951,7 @@ theorem aggregateOutcome_rejects_unqueried_collision :
 #verify_constructive Qsag.Spec.AggregateSoundnessOutcome.signer_trichotomy
 #verify_constructive Qsag.Spec.mergeSoundnessOutcome
 #verify_constructive Qsag.Spec.aggregateWitnessCheck_sound
+#verify_constructive Qsag.Spec.aggregateWitnessCheck_complete
 #verify_constructive Qsag.Spec.aggregateRun_log
 #verify_constructive Qsag.Spec.aggregateFailure_false_outcome
 #verify_constructive Qsag.Spec.aggregateFailure_of_no_outcome
@@ -712,6 +967,8 @@ theorem aggregateOutcome_rejects_unqueried_collision :
 #verify_constructive Qsag.Spec.acceptAll_alwaysValid_unrestricted_extractorSound
 #verify_constructive Qsag.Spec.acceptAll_not_straightLine_extractorSound
 #verify_constructive Qsag.Spec.acceptAll_alwaysValid_not_straightLine_extractorSound
+#verify_constructive Qsag.Spec.idealAggregateMachine_all_certified_valid
+#verify_constructive Qsag.Spec.tooth_unsound_verifier_breaks_idealAggregate
 
 end Qsag.Spec
 end
