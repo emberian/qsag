@@ -524,6 +524,112 @@ pub fn verify_inventory_child_proof<B: AcceleratorBackend>(
     Ok(())
 }
 
+/// Derive this custodian's 2-of-3 replicated [`qsag_core::keccak_mpc::RssKeyShare256`]
+/// for hardened child `child_idx` (`SLH-DSA-SHAKE-128f`, `key_len = 16`) directly from its
+/// held subset seeds (`{pos, (pos + 2) % 3}` as primary, `{pos, (pos + 1) % 3}` as secondary)
+/// without assembling `SK.seed` or `SK.prf` in cleartext on any host.
+pub fn derive_rss_child_share_2of3(
+    seeds: &CustodianSeeds,
+    master_pk_seed: [u8; 32],
+    child_idx: u32,
+) -> Result<(qsag_core::keccak_mpc::RssKeyShare256, [u8; 16]), HdError> {
+    let config = seeds.config();
+    if config.threshold() != 2 || config.members().len() != 3 {
+        return Err(HdError::UnsupportedCommittee);
+    }
+    let pos = config
+        .position(seeds.party_id())
+        .ok_or(HdError::InvalidThresholdParameters)?;
+    let mut subset_primary = CustodianSet::default();
+    subset_primary.insert(pos);
+    subset_primary.insert((pos + 2) % 3);
+
+    let mut subset_secondary = CustodianSet::default();
+    subset_secondary.insert(pos);
+    subset_secondary.insert((pos + 1) % 3);
+
+    let config_digest = config.digest();
+    let idx_be = child_idx.to_be_bytes();
+    let pk_seed_full = cshake256_framed_32(
+        b"QSAG.HD.INV.RSS.PKSEED.V1",
+        &[&config_digest, &master_pk_seed, &idx_be],
+    );
+    let mut pk_seed_16 = [0u8; 16];
+    pk_seed_16.copy_from_slice(&pk_seed_full[..16]);
+    let mut pk_seed_32 = [0u8; 32];
+    pk_seed_32[..16].copy_from_slice(&pk_seed_16);
+
+    let derive_16 = |subset: CustodianSet, domain: &[u8]| -> Result<qsag_asm::wipe::SecretBytes<32>, HdError> {
+        let mut raw = seeds
+            .prf32(subset, domain, &[&master_pk_seed, &idx_be])
+            .ok_or(HdError::InvalidThresholdParameters)?;
+        raw[16..].fill(0);
+        Ok(raw)
+    };
+    let sk_seed_pri = derive_16(subset_primary, b"QSAG.HD.INV.RSS.SKSEED.V1")?;
+    let sk_seed_sec = derive_16(subset_secondary, b"QSAG.HD.INV.RSS.SKSEED.V1")?;
+    let sk_prf_pri = derive_16(subset_primary, b"QSAG.HD.INV.RSS.SKPRF.V1")?;
+    let sk_prf_sec = derive_16(subset_secondary, b"QSAG.HD.INV.RSS.SKPRF.V1")?;
+    let prg_seed_pri = seeds
+        .prf32(
+            subset_primary,
+            b"QSAG.HD.INV.RSS.PRGSEED.V1",
+            &[&master_pk_seed, &idx_be],
+        )
+        .ok_or(HdError::InvalidThresholdParameters)?;
+    let prg_seed_sec = seeds
+        .prf32(
+            subset_secondary,
+            b"QSAG.HD.INV.RSS.PRGSEED.V1",
+            &[&master_pk_seed, &idx_be],
+        )
+        .ok_or(HdError::InvalidThresholdParameters)?;
+
+    let share = qsag_core::keccak_mpc::RssKeyShare256::from_replicated_shares(
+        pos,
+        16,
+        pk_seed_32,
+        (*sk_seed_pri, *sk_seed_sec),
+        (*sk_prf_pri, *sk_prf_sec),
+        (*prg_seed_pri, *prg_seed_sec),
+    )
+    .map_err(|_| HdError::InvalidThresholdParameters)?;
+    Ok((share, pk_seed_16))
+}
+
+/// Durable-budget-gated wrapper around [`recover_child_signing_seed`]: burns one irreversible
+/// [`crate::budget::DurableQueryBudget`] slot *before* reconstructing the child signing seed.
+#[cfg(feature = "std")]
+pub fn recover_child_signing_seed_budgeted(
+    budget: &mut crate::budget::DurableQueryBudget,
+    config: &CommitteeConfig,
+    vaults: &[&InventoryPartyShareVault],
+    child_idx: u32,
+    expected_child_pk: &[u8; 32],
+) -> Result<RedactedSecret<32>, HdError> {
+    if !ct_eq_bytes(&budget.family_id(), &config.digest()) {
+        return Err(HdError::BudgetStorageFailed);
+    }
+    budget.reserve()?;
+    recover_child_signing_seed(config, vaults, child_idx, Some(expected_child_pk))
+}
+
+/// Durable-budget-gated wrapper around [`derive_rss_child_share_2of3`]: burns one irreversible
+/// [`crate::budget::DurableQueryBudget`] slot *before* projecting this custodian's 2-of-3 RSS share.
+#[cfg(feature = "std")]
+pub fn derive_rss_child_share_2of3_budgeted(
+    budget: &mut crate::budget::DurableQueryBudget,
+    seeds: &CustodianSeeds,
+    master_pk_seed: [u8; 32],
+    child_idx: u32,
+) -> Result<(qsag_core::keccak_mpc::RssKeyShare256, [u8; 16]), HdError> {
+    if !ct_eq_bytes(&budget.family_id(), &seeds.config().digest()) {
+        return Err(HdError::BudgetStorageFailed);
+    }
+    budget.reserve()?;
+    derive_rss_child_share_2of3(seeds, master_pk_seed, child_idx)
+}
+
 impl core::fmt::Display for HdError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
@@ -754,5 +860,47 @@ mod signature_tests {
             derive_inventory_vault(&seeds[0], [5; 32], 3).err(),
             Some(HdError::InvalidBatchSize)
         );
+    }
+
+    #[test]
+    fn rss_2of3_child_shares_sign_in_mpc_without_cleartext_sk() {
+        use qsag_core::fips205::{slh_keygen_mpc, slh_sign_mpc};
+        use qsag_core::keccak_mpc::RssSlhMpcCluster;
+        use qsag_core::preprocessing::PartyPrivateRng;
+
+        let config = committee(2, 3);
+        let seeds = run_seed_ceremony(&config, 0x88);
+        let master_pk_seed = [0x44u8; 32];
+        let (s0, pk_seed0) = derive_rss_child_share_2of3(&seeds[0], master_pk_seed, 7).unwrap();
+        let (s1, pk_seed1) = derive_rss_child_share_2of3(&seeds[1], master_pk_seed, 7).unwrap();
+        let (s2, pk_seed2) = derive_rss_child_share_2of3(&seeds[2], master_pk_seed, 7).unwrap();
+        assert_eq!(pk_seed0, pk_seed1);
+        assert_eq!(pk_seed1, pk_seed2);
+
+        let encoded0 = s0.to_secret_bytes();
+        let decoded0 =
+            qsag_core::keccak_mpc::RssKeyShare256::from_secret_bytes(&encoded0).unwrap();
+
+        let params = Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST;
+        let rngs_kg = [
+            PartyPrivateRng::from_seed([1; 32], b"hd-rss-kg"),
+            PartyPrivateRng::from_seed([2; 32], b"hd-rss-kg"),
+            PartyPrivateRng::from_seed([3; 32], b"hd-rss-kg"),
+        ];
+        let mut cluster_kg = RssSlhMpcCluster::new([0xAA; 32], [decoded0, s1, s2], rngs_kg).unwrap();
+        let pk = slh_keygen_mpc(&params, &mut cluster_kg, &pk_seed0).unwrap();
+
+        // Re-derive fresh per-custodian shares for signing (no cleartext SK ever assembled).
+        let (s0, _) = derive_rss_child_share_2of3(&seeds[0], master_pk_seed, 7).unwrap();
+        let (s1, _) = derive_rss_child_share_2of3(&seeds[1], master_pk_seed, 7).unwrap();
+        let (s2, _) = derive_rss_child_share_2of3(&seeds[2], master_pk_seed, 7).unwrap();
+        let rngs_sig = [
+            PartyPrivateRng::from_seed([4; 32], b"hd-rss-sig"),
+            PartyPrivateRng::from_seed([5; 32], b"hd-rss-sig"),
+            PartyPrivateRng::from_seed([6; 32], b"hd-rss-sig"),
+        ];
+        let mut cluster_sig = RssSlhMpcCluster::new([0xBB; 32], [s0, s1, s2], rngs_sig).unwrap();
+        let sig = slh_sign_mpc(&params, &mut cluster_sig, b"rss-hd-mpc-msg", b"", &pk, None).unwrap();
+        assert!(slh_verify(&params, b"rss-hd-mpc-msg", &sig, b"", &pk));
     }
 }
