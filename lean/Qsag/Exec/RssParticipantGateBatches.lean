@@ -127,6 +127,7 @@ theorem group_bad_gate_weight_bound (depth : Nat) (hashes : List RssSigning.Hash
   have hi : ¬ gateTableValid (indexedTable depth gates) := by
     intro hv
     rcases hbad with ⟨i, hi, hbad⟩
+    rw [indexedTable.public_eq_1] at hv
     exact hbad ((tabulateGates_valid_iff depth _).mp hv i (by omega))
   have he : groupTable depth hashes = some (indexedTable depth gates) := by
     simp [groupTable, hextract, hcap]

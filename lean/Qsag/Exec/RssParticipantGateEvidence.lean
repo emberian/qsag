@@ -236,7 +236,7 @@ theorem honest_gate_records_aligned (s : RssKState) (r : Nat → RssPrfZeroSeeds
       (gateRecords ⟨s.s0, s.s1⟩ (mask0 r))
       (gateRecords ⟨s.s1, s.s2⟩ (mask1 r))
       (gateRecords ⟨s.s2, s.s0⟩ (mask2 r)) := by
-  unfold gateRecords
+  simp only [gateRecords.public_eq_1]
   repeat first
     | apply Aligned3.cons
     | apply And.intro
@@ -373,5 +373,11 @@ theorem validTable_weighted_claim_eq (depth : Nat) (t : GateTable depth)
   tabulateGates_valid_iff honest_gate_records_aligned answer_bad_gate_weight_bound
   extractRound_of_aligned extractRounds_of_aligned inconsistent_gate_replica_rejected
   triple_getD_valid indexedTable_valid weightEval_zeroCoeffs validTable_weighted_claim_eq
+end Qsag.RssParticipant.GateChecks
+end
+
+public section
+namespace Qsag.RssParticipant.GateChecks
+#export_eqns indexedTable roundLinked goodRound extractRounds extractHash extractHashes extractAnswer answerTable answerWeightAccept
 end Qsag.RssParticipant.GateChecks
 end

@@ -30,11 +30,12 @@ theorem producedRound_good (cursor : Nat) (s : RssKState) (rc : UInt64)
     (r : Nat → RssPrfZeroSeeds) :
     goodRound (producedRound cursor s rc r).1
       (producedRound cursor s rc r).2.1 (producedRound cursor s rc r).2.2 := by
+  rw [goodRound.public_eq_1]
   refine ⟨?_, ?_, ?_⟩
-  · simp [producedRound, roundLinked]
+  · simp [producedRound, roundLinked.public_eq_1]
   · exact honest_gate_records_aligned
       ⟨rhoPiS (thetaS s.s0), rhoPiS (thetaS s.s1), rhoPiS (thetaS s.s2)⟩ r
-  · rfl
+  · simp only [producedRound, gateRecords.public_eq_1]; rfl
 
 theorem honestRound_retains_produced (nodes : Nodes) (binding : List UInt8)
     (s : RssKState) (rc : UInt64) (rcs : List UInt64) (cursor : Nat)
@@ -70,12 +71,12 @@ theorem runHonestRounds_historyGood (rcs : List UInt64) (nodes : Nodes)
     (hg : HistoryGood nodes) :
     HistoryGood (runHonestRounds rcs.length nodes tape) := by
   induction rcs generalizing nodes s cursor with
-  | nil => exact hg
+  | nil => simpa only [List.length_nil, runHonestRounds.public_eqs] using hg
   | cons rc rcs ih =>
     have hc : nodes.n0.cursor = cursor := h.2.2.2.2.2.2.1
     have hr := honestRound_represents nodes binding s rc rcs cursor (tape cursor) h
     have hh := honestRound_historyGood nodes binding s rc rcs cursor (tape cursor) h hg
-    simpa only [List.length_cons, runHonestRounds, hc] using
+    simpa only [List.length_cons, runHonestRounds.public_eqs, hc] using
       ih (honestRound nodes (tape cursor)) (roundNetwork s rc (tape cursor)) (cursor + 1) hr hh
 
 theorem absorbNodes_historyGood (nodes : Nodes) (binding : List UInt8)
@@ -143,11 +144,11 @@ theorem extractHashes_of_historyGood (hs : List RssSigning.HashEvidence)
     ∃ gates, extractHashes hs = some gates ∧
       ∀ g ∈ gates, relation g.records.1 g.records.2.1 g.records.2.2 := by
   induction hs with
-  | nil => exact ⟨[], rfl, by simp⟩
+  | nil => exact ⟨[], by rw [extractHashes.public_eq_1], by simp⟩
   | cons h hs ih =>
     obtain ⟨head, hhead, hp⟩ := extractRounds_of_aligned h.cut h.subcall (hh h (by simp))
     obtain ⟨tail, htail, htp⟩ := ih (fun x hx => hh x (by simp [hx]))
-    refine ⟨head ++ tail, by simp [extractHashes, extractHash, hhead, htail], ?_⟩
+    refine ⟨head ++ tail, by simp [extractHashes.public_eqs, extractHash.public_eq_1, hhead, htail], ?_⟩
     intro g hg
     rcases List.mem_append.mp hg with hg | hg
     · exact hp g hg
@@ -159,6 +160,7 @@ theorem queryRun_gate_extraction (prepared : RssSigning.Prepared) (material : Rs
     (cut : Nat) (query : RssSigning.Query) (tape : RssSigning.ParticipantTape) :
     ∃ gates, extractAnswer (RssSigning.queryRun prepared material cut query tape) = some gates ∧
       ∀ g ∈ gates, relation g.records.1 g.records.2.1 g.records.2.2 := by
+  rw [extractAnswer.public_eq_1]
   exact extractHashes_of_historyGood _ (queryRun_historyGood prepared material cut query tape)
 
 /-- Every exact padded table compiled from an actual honest query passes the
@@ -174,7 +176,7 @@ theorem queryRun_weighted_complete (prepared : RssSigning.Prepared) (material : 
   have heq := Option.some.inj hp
   subst produced
   have ht := indexedTable_valid depth gates hv
-  simp [answerWeightAccept, answerTable, he, hcap,
+  simp [answerWeightAccept.public_eq_1, answerTable.public_eq_1, he, hcap,
     validTable_weighted_claim_eq depth (indexedTable depth gates) ht gs]
 
 #verify_constructive producedRound_good honestRound_retains_produced Aligned3.snoc

@@ -224,3 +224,9 @@ theorem authenticated_payload_is_not_product_validation (s : Node) (rc : UInt64)
 #verify_constructive initialNodes_represents honestRound_represents runHonestRounds_represents represents_output participant_keccak_refines_existing wrong_binding_aborts wrong_round_aborts wrong_sender_aborts receive_before_prepare_aborts authenticated_payload_is_not_product_validation
 
 end Qsag.RssParticipant
+
+public section
+namespace Qsag.RssParticipant
+#export_eqns runHonestRounds
+end Qsag.RssParticipant
+end
