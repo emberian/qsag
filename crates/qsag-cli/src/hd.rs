@@ -117,8 +117,10 @@ fn build_committee(
             "--parties must be in 1..={MAX_CUSTODIANS}"
         )));
     }
-    let members: Vec<(u16, u32)> = (0..parties).map(|i| (i as u16, (i + 1) as u32)).collect();
-    CommitteeConfig::new(threshold as u16, &members, label).map_err(|_| {
+    let parties_u16 =
+        u16::try_from(parties).map_err(|_| CliError::usage("--parties out of range"))?;
+    let members: Vec<(u16, u32)> = (0..parties_u16).map(|i| (i, u32::from(i) + 1)).collect();
+    CommitteeConfig::new(u16::try_from(threshold).map_err(|_| CliError::usage("--threshold out of range"))?, &members, label).map_err(|_| {
         CliError::usage(format!(
             "unsupported committee ({threshold}, {parties}): honest-majority requires n >= 2t - 1 and 1 <= t <= n <= {MAX_CUSTODIANS}"
         ))
@@ -162,23 +164,29 @@ fn run_dealerless_seed_ceremony(
         bytes.0.extend_from_slice(&entropies[index].0);
         for commit in &commits {
             bytes.0.extend_from_slice(&commit.party_id.to_be_bytes());
-            bytes
-                .0
-                .extend_from_slice(&(commit.digests.len() as u32).to_be_bytes());
+            bytes.0.extend_from_slice(
+                &(u32::try_from(commit.digests.len())
+                    .map_err(|_| CliError::input("HD transcript count out of range"))?)
+                .to_be_bytes(),
+            );
             for (subset, digest) in &commit.digests {
                 bytes.0.extend_from_slice(&subset.to_be_bytes());
                 bytes.0.extend_from_slice(digest);
             }
         }
-        bytes
-            .0
-            .extend_from_slice(&(inbox.len() as u32).to_be_bytes());
+        bytes.0.extend_from_slice(
+            &(u32::try_from(inbox.len())
+                .map_err(|_| CliError::input("HD transcript count out of range"))?)
+            .to_be_bytes(),
+        );
         for delivery in inbox {
             bytes.0.extend_from_slice(&delivery.from.to_be_bytes());
             bytes.0.extend_from_slice(&delivery.to.to_be_bytes());
-            bytes
-                .0
-                .extend_from_slice(&(delivery.openings.len() as u32).to_be_bytes());
+            bytes.0.extend_from_slice(
+                &(u32::try_from(delivery.openings.len())
+                    .map_err(|_| CliError::input("HD transcript count out of range"))?)
+                .to_be_bytes(),
+            );
             for opening in &delivery.openings {
                 bytes.0.extend_from_slice(&opening.subset.to_be_bytes());
                 bytes.0.extend_from_slice(&opening.contribution);
@@ -200,9 +208,11 @@ fn run_dealerless_seed_ceremony(
             bytes
                 .0
                 .extend_from_slice(&confirmation.party_id.to_be_bytes());
-            bytes
-                .0
-                .extend_from_slice(&(confirmation.tags.len() as u32).to_be_bytes());
+            bytes.0.extend_from_slice(
+                &(u32::try_from(confirmation.tags.len())
+                    .map_err(|_| CliError::input("HD transcript count out of range"))?)
+                .to_be_bytes(),
+            );
             for (subset, tag) in &confirmation.tags {
                 bytes.0.extend_from_slice(&subset.to_be_bytes());
                 bytes.0.extend_from_slice(tag);
@@ -243,7 +253,8 @@ fn restore_custodian(
                 .map_err(|_| CliError::input("invalid HD custody bundle"))
         }
         fn count(&mut self, width: usize) -> Result<usize, CliError> {
-            let count = u32::from_be_bytes(self.take()?) as usize;
+            let count = usize::try_from(u32::from_be_bytes(self.take()?))
+                .map_err(|_| CliError::input("HD index or count out of range"))?;
             if count > self.0.len() / width {
                 return Err(CliError::input("invalid HD custody count"));
             }
@@ -330,7 +341,8 @@ fn load_watch_table(path: &str) -> Result<WatchOnlyInventoryTable, CliError> {
     let json = load_json_checked(path, HD_WATCH_FORMAT, MAX_SIG_PROOF_BYTES)?;
     let expected_root = from_hex_exact::<32>(json.field_str("master_root_pk")?, "master_root_pk")?;
     let pk_seed = from_hex_exact::<32>(json.field_str("pk_seed")?, "pk_seed")?;
-    let batch_size = json.field_u64("batch_size")? as usize;
+    let batch_size = usize::try_from(json.field_u64("batch_size")?)
+        .map_err(|_| CliError::input("batch_size out of range"))?;
     let arr = json
         .get("child_pubkeys")
         .and_then(Json::as_array)
@@ -397,8 +409,7 @@ fn load_hd_custodian(
     if doc.field_u64("party")? != party as u64
         || from_hex_exact::<32>(doc.field_str("config_digest")?, "config_digest")?
             != config.digest()
-        || &from_hex_exact::<32>(doc.field_str("master_root_pk")?, "master_root_pk")?
-            != master_root
+        || &from_hex_exact::<32>(doc.field_str("master_root_pk")?, "master_root_pk")? != master_root
     {
         return Err(CliError::verify(
             "HD custody bundle does not match enrollment",
@@ -413,7 +424,11 @@ fn load_hd_custodian(
     }
     let budget_mac = Secret32::new(raw[8..40].try_into().unwrap());
     let anchor_mac = Secret32::new(raw[40..72].try_into().unwrap());
-    let seeds = restore_custodian(config, party as u16, &raw[72..])?;
+    let seeds = restore_custodian(
+        config,
+        u16::try_from(party).map_err(|_| CliError::input("HD index or count out of range"))?,
+        &raw[72..],
+    )?;
     Ok(OpenedHdCustodian {
         lock,
         budget_mac,
@@ -449,10 +464,8 @@ fn open_hd_budget(
             )
             .map_err(map_hd_err)
         }
-        None => {
-            DurableQueryBudget::open(hd_budget_path(vault_dir), family, budget_mac.0)
-                .map_err(map_hd_err)
-        }
+        None => DurableQueryBudget::open(hd_budget_path(vault_dir), family, budget_mac.0)
+            .map_err(map_hd_err),
     }
 }
 
@@ -485,9 +498,12 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         args.flag("ephemeral-unanchored"),
         "anchor-dir",
     )?;
-    let threshold = args.get_u64("threshold")?.unwrap_or(2) as usize;
-    let parties = args.get_u64("parties")?.unwrap_or(3) as usize;
-    let batch_size = args.get_u64("count")?.unwrap_or(16) as usize;
+    let threshold = usize::try_from(args.get_u64("threshold")?.unwrap_or(2))
+        .map_err(|_| CliError::usage("--threshold out of range"))?;
+    let parties = usize::try_from(args.get_u64("parties")?.unwrap_or(3))
+        .map_err(|_| CliError::usage("--parties out of range"))?;
+    let batch_size = usize::try_from(args.get_u64("count")?.unwrap_or(16))
+        .map_err(|_| CliError::usage("--count out of range"))?;
     if !batch_size.is_power_of_two() || !(2..=65_536).contains(&batch_size) {
         return Err(CliError::usage(
             "--count must be a power of two between 2 and 65536",
@@ -517,7 +533,8 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         cshake256_framed_32(
             b"QSAG.CLI.HD.DET.LABEL.V1",
             &[
-                &[threshold as u8, parties as u8],
+                &(threshold as u64).to_le_bytes(),
+                &(parties as u64).to_le_bytes(),
                 &(batch_size as u64).to_le_bytes(),
             ],
         )
@@ -530,6 +547,16 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         os_random_32()?
     };
     let config = build_committee(threshold, parties, label)?;
+    for idx in 0..parties {
+        let path = hd_share_path(vault_dir, idx);
+        ensure_absent(&path)?;
+        ensure_absent(&format!("{path}.vault.lock"))?;
+    }
+    ensure_absent(
+        hd_budget_path(vault_dir)
+            .to_str()
+            .ok_or_else(|| CliError::usage("budget path must be UTF-8"))?,
+    )?;
     let family = config.digest();
     let budget_mac = Secret32::new(if deterministic {
         cshake256_framed_32(b"QSAG.CLI.HD.DET.BUDGET_MAC.V1", &[&family, &pk_seed])
@@ -564,7 +591,9 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let vault_refs: Vec<&InventoryPartyShareVault> = vaults.iter().collect();
 
     let mut child_pubkeys = Vec::with_capacity(batch_size);
-    for idx in 0..batch_size as u32 {
+    for idx in 0..u32::try_from(batch_size)
+        .map_err(|_| CliError::input("HD index or count out of range"))?
+    {
         let (_seed, child_pk) =
             enroll_child_signing_seed_quorum(&config, &vault_refs, idx).map_err(map_hd_err)?;
         child_pubkeys.push(child_pk);
@@ -769,7 +798,8 @@ fn verify_child(raw: &[String]) -> Result<(), CliError> {
             watch_json.field_str("master_root_pk")?,
             "master_root_pk",
         )?,
-        batch_size: watch_json.field_u64("batch_size")? as u32,
+        batch_size: u32::try_from(watch_json.field_u64("batch_size")?)
+            .map_err(|_| CliError::input("batch_size out of range"))?,
         pk_seed_limbs: json_to_limbs4(watch_json.field_str("pk_seed_limbs")?, "pk_seed_limbs")?,
         poseidon2_root_limbs: json_to_limbs4(
             watch_json.field_str("poseidon2_root_limbs")?,
@@ -780,7 +810,8 @@ fn verify_child(raw: &[String]) -> Result<(), CliError> {
     let addr_str = proof_json.field_str("address")?;
     let addr = QsagAddress::decode(addr_str)
         .map_err(|e| CliError::verify(format!("invalid Bech32m child address: {e:?}")))?;
-    let child_idx = proof_json.field_u64("child_idx")? as u32;
+    let child_idx = u32::try_from(proof_json.field_u64("child_idx")?)
+        .map_err(|_| CliError::input("child_idx out of range"))?;
     let child_pk = from_hex_exact::<32>(proof_json.field_str("child_pk")?, "child_pk")?;
     let sib_arr = proof_json
         .get("poseidon2_siblings")
@@ -894,9 +925,12 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     enforce_anchor_requirement(&meta, anchor_cfg.as_ref())?;
     let proof_json = load_json_checked(proof_path, HD_PROOF_FORMAT, MAX_SIG_PROOF_BYTES)?;
 
-    let threshold = meta.field_u64("threshold")? as usize;
-    let parties = meta.field_u64("parties")? as usize;
-    let batch_size = meta.field_u64("batch_size")? as usize;
+    let threshold = usize::try_from(meta.field_u64("threshold")?)
+        .map_err(|_| CliError::input("threshold out of range"))?;
+    let parties = usize::try_from(meta.field_u64("parties")?)
+        .map_err(|_| CliError::input("parties out of range"))?;
+    let batch_size = usize::try_from(meta.field_u64("batch_size")?)
+        .map_err(|_| CliError::input("batch_size out of range"))?;
     let label = from_hex_exact::<32>(meta.field_str("ceremony_label")?, "ceremony_label")?;
     let pk_seed = from_hex_exact::<32>(meta.field_str("pk_seed")?, "pk_seed")?;
     let master_root = from_hex_exact::<32>(meta.field_str("master_root_pk")?, "master_root_pk")?;
@@ -910,7 +944,10 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
             "child proof master_root_pk does not match HD vault",
         ));
     }
-    if proof_json.field_u64("child_idx")? as u32 != child_idx {
+    if u32::try_from(proof_json.field_u64("child_idx")?)
+        .map_err(|_| CliError::input("child_idx out of range"))?
+        != child_idx
+    {
         return Err(CliError::usage(
             "--index does not match child_idx in --proof file",
         ));
@@ -926,7 +963,9 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     }
     let config = build_committee(threshold, parties, label)?;
 
-    if child_idx as usize >= batch_size {
+    if usize::try_from(child_idx).map_err(|_| CliError::input("HD index or count out of range"))?
+        >= batch_size
+    {
         return Err(CliError::usage("child index out of bounds"));
     }
     if meta.field_str("custody_format")? != HD_SHARE_FORMAT {
@@ -1110,7 +1149,11 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
                 ));
             }
             ensure_absent(out)?;
-            vec![(p as usize, out.to_owned())]
+            vec![(
+                usize::try_from(p)
+                    .map_err(|_| CliError::usage("HD index or count out of range"))?,
+                out.to_owned(),
+            )]
         }
         (None, None, Some(dir)) => {
             private_dir(dir, true)?;
@@ -1135,9 +1178,12 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
     private_dir(vault_dir, false)?;
     let meta = load_json_checked(&hd_meta_path(vault_dir), HD_META_FORMAT, MAX_KEY_FILE_BYTES)?;
     enforce_anchor_requirement(&meta, anchor_cfg.as_ref())?;
-    let threshold = meta.field_u64("threshold")? as usize;
-    let parties = meta.field_u64("parties")? as usize;
-    let batch_size = meta.field_u64("batch_size")? as usize;
+    let threshold = usize::try_from(meta.field_u64("threshold")?)
+        .map_err(|_| CliError::input("threshold out of range"))?;
+    let parties = usize::try_from(meta.field_u64("parties")?)
+        .map_err(|_| CliError::input("parties out of range"))?;
+    let batch_size = usize::try_from(meta.field_u64("batch_size")?)
+        .map_err(|_| CliError::input("batch_size out of range"))?;
     let label = from_hex_exact::<32>(meta.field_str("ceremony_label")?, "ceremony_label")?;
     let pk_seed = from_hex_exact::<32>(meta.field_str("pk_seed")?, "pk_seed")?;
     let master_root = from_hex_exact::<32>(meta.field_str("master_root_pk")?, "master_root_pk")?;
@@ -1146,7 +1192,9 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
             "hd export-rss requires a (2, 3) custodian inventory",
         ));
     }
-    if child_idx as usize >= batch_size {
+    if usize::try_from(child_idx).map_err(|_| CliError::input("HD index or count out of range"))?
+        >= batch_size
+    {
         return Err(CliError::usage("child index out of bounds"));
     }
     if meta.field_str("custody_format")? != HD_SHARE_FORMAT {
@@ -1164,12 +1212,18 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
                     "child proof master_root_pk does not match HD vault",
                 ));
             }
-            if proof_json.field_u64("child_idx")? as u32 != child_idx {
+            if u32::try_from(proof_json.field_u64("child_idx")?)
+                .map_err(|_| CliError::input("child_idx out of range"))?
+                != child_idx
+            {
                 return Err(CliError::usage(
                     "--index does not match child_idx in --proof file",
                 ));
             }
-            Some(from_hex_exact::<32>(proof_json.field_str("child_pk")?, "child_pk")?)
+            Some(from_hex_exact::<32>(
+                proof_json.field_str("child_pk")?,
+                "child_pk",
+            )?)
         }
         None => None,
     };

@@ -297,7 +297,10 @@ fn cred_pstate_path(
     domain: &str,
     key_id: &[u8; 32],
 ) -> PathBuf {
-    let digest = cshake256_framed_32(b"QSAG.CLI.CRED.PSTATE.SLOT.V1", &[domain.as_bytes(), key_id]);
+    let digest = cshake256_framed_32(
+        b"QSAG.CLI.CRED.PSTATE.SLOT.V1",
+        &[domain.as_bytes(), key_id],
+    );
     let hex_id = to_hex(&digest);
     match &anchor_cfg.anchor_dir {
         Some(dir) => Path::new(dir).join(format!("{domain}-{hex_id}.pstate")),
@@ -375,7 +378,9 @@ impl VaultPartyGenAnchor {
         )?;
         let pstate_path = cred_pstate_path(anchor_cfg, vault_dir, domain, &key_id);
         let pstate_record = LockedRecord::create_new(&pstate_path).map_err(|e| {
-            CliError::state(format!("enrolling external party-state ledger ({domain}): {e}"))
+            CliError::state(format!(
+                "enrolling external party-state ledger ({domain}): {e}"
+            ))
         })?;
         let domain_hash = cshake256_framed_32(b"QSAG.CLI.CRED.DOMAIN.V1", &[domain.as_bytes()]);
         let this = Self {
@@ -392,14 +397,16 @@ impl VaultPartyGenAnchor {
         };
         let encoded = this.encode_pstate();
         this.pstate_record.replace(&encoded).map_err(|e| {
-            CliError::state(format!("writing initial external party-state ({domain}): {e}"))
+            CliError::state(format!(
+                "writing initial external party-state ({domain}): {e}"
+            ))
         })?;
         let ckpt = this
             .checkpoint_for(&encoded)
             .map_err(|e| CliError::state(format!("computing initial anchor checkpoint: {e}")))?;
-        this.anchor
-            .advance(ckpt)
-            .map_err(|e| CliError::state(format!("initializing external anchor ({domain}): {e}")))?;
+        this.anchor.advance(ckpt).map_err(|e| {
+            CliError::state(format!("initializing external anchor ({domain}): {e}"))
+        })?;
         Ok(this.anchor.lock_identity_seal())
     }
 
@@ -427,16 +434,22 @@ impl VaultPartyGenAnchor {
         anchor.verify_expected_seal(meta, "anchor_ceremony_seal")?;
         let ckpt = anchor
             .load()
-            .map_err(|e| CliError::state(format!("ExternalAnchorRollbackOrCorrupt ({domain}): {e}")))?
+            .map_err(|e| {
+                CliError::state(format!("ExternalAnchorRollbackOrCorrupt ({domain}): {e}"))
+            })?
             .ok_or_else(|| CliError::state(format!("ExternalAnchorMissingState ({domain})")))?;
 
         let pstate_path = cred_pstate_path(anchor_cfg, vault_dir, domain, &key_id);
         let pstate_record = LockedRecord::open_existing(&pstate_path).map_err(|e| {
-            CliError::state(format!("ExternalAnchorUnavailableOrCorrupt ({domain} pstate): {e}"))
+            CliError::state(format!(
+                "ExternalAnchorUnavailableOrCorrupt ({domain} pstate): {e}"
+            ))
         })?;
         let expected_len = 8 + 32 + 32 + 8 + 8 + 1 + 8 + 8 * parties + 32;
         let bytes = pstate_record.read_bounded(expected_len).map_err(|e| {
-            CliError::state(format!("ExternalAnchorUnavailableOrCorrupt ({domain} pstate): {e}"))
+            CliError::state(format!(
+                "ExternalAnchorUnavailableOrCorrupt ({domain} pstate): {e}"
+            ))
         })?;
         if bytes.len() != expected_len {
             return Err(CliError::state("ExternalAnchorPartyStateLengthMismatch"));
@@ -457,7 +470,8 @@ impl VaultPartyGenAnchor {
         {
             return Err(CliError::state("ExternalAnchorPartyStateHeaderMismatch"));
         }
-        let stored_parties = u64::from_le_bytes(body[72..80].try_into().unwrap()) as usize;
+        let stored_parties = usize::try_from(u64::from_le_bytes(body[72..80].try_into().unwrap()))
+            .map_err(|_| CliError::input("party count out of range"))?;
         if stored_parties != parties {
             return Err(CliError::state("ExternalAnchorPartyCountMismatch"));
         }
@@ -506,7 +520,8 @@ impl VaultPartyGenAnchor {
         let expected_ckpt = this
             .checkpoint_for(&bytes)
             .map_err(|_| CliError::state("ExternalAnchorCheckpointOverflow"))?;
-        if ckpt.generation != expected_ckpt.generation || !ct_eq_bytes(&ckpt.tag, &expected_ckpt.tag)
+        if ckpt.generation != expected_ckpt.generation
+            || !ct_eq_bytes(&ckpt.tag, &expected_ckpt.tag)
         {
             return Err(CliError::state("ExternalAnchorDetectedRollback"));
         }
@@ -690,7 +705,8 @@ impl FsToprfCounterStore {
         {
             return Err(voprf::Error::Counter);
         }
-        let party = u64::from_le_bytes(body[40..48].try_into().unwrap()) as usize;
+        let party = usize::try_from(u64::from_le_bytes(body[40..48].try_into().unwrap()))
+            .map_err(|_| voprf::Error::Counter)?;
         if party != self.expected_party {
             return Err(voprf::Error::Counter);
         }
@@ -935,7 +951,9 @@ fn load_voprf_bundle(
     }
     let raw = opened.secret_key()?;
     if raw.len() < 72 || &raw[..8] != VOPRF_SHARE_MAGIC {
-        return Err(CliError::input("corrupt or unsupported TOPRF share payload"));
+        return Err(CliError::input(
+            "corrupt or unsupported TOPRF share payload",
+        ));
     }
     let counter_mac = Secret32::new(raw[8..40].try_into().unwrap());
     let vault_anchor_mac = Secret32::new(raw[40..72].try_into().unwrap());
@@ -980,7 +998,11 @@ fn voprf_spdz_keygen(
     vault_dir: &str,
     public_out: &str,
 ) -> Result<(), CliError> {
-    let config = SpdzConfig::new(threshold as usize, parties as usize).map_err(|_| {
+    let config = SpdzConfig::new(
+        usize::try_from(threshold).map_err(|_| CliError::usage("threshold out of range"))?,
+        usize::try_from(parties).map_err(|_| CliError::usage("parties out of range"))?,
+    )
+    .map_err(|_| {
         CliError::usage(
             "the Shamir-SPDZ TOPRF backend supports 2 <= --threshold <= --parties <= 64",
         )
@@ -2289,12 +2311,18 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     let session_id = if deterministic {
         cshake256_framed_32(
             b"QSAG.CLI.TMLDSA.DET.DKG_SESSION.V1",
-            &[level_name.as_bytes(), &[threshold as u8, parties as u8]],
+            &[
+                level_name.as_bytes(),
+                &(threshold as u64).to_le_bytes(),
+                &(parties as u64).to_le_bytes(),
+            ],
         )
     } else {
         os_random_32()?
     };
-    let party_ids: Vec<u16> = (1..=parties as u16).collect();
+    let party_ids: Vec<u16> = (1..=u16::try_from(parties)
+        .map_err(|_| CliError::usage("parties out of range"))?)
+        .collect();
     let dkg_cfg = ThresholdMlDsaDkgConfig {
         level,
         threshold,
@@ -2322,6 +2350,16 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         MLDSA_SHARE_FORMAT
     };
 
+    for idx in 0..parties {
+        let path = mldsa_share_path(vault_dir, idx);
+        ensure_absent(&path)?;
+        ensure_absent(&format!("{path}.vault.lock"))?;
+        ensure_absent(
+            mldsa_burn_path(vault_dir, idx)
+                .to_str()
+                .ok_or_else(|| CliError::usage("burn path must be UTF-8"))?,
+        )?;
+    }
     let mut entropies = Vec::with_capacity(parties);
     for idx in 0..parties {
         let seed = if deterministic {
@@ -2556,8 +2594,10 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
     enforce_anchor_requirement(&meta, anchor_cfg.as_ref())?;
     let scheme_str = meta.field_str("scheme")?;
     let (level, level_name) = parse_mldsa_level(Some(scheme_str))?;
-    let threshold = meta.field_u64("threshold")? as usize;
-    let parties = meta.field_u64("parties")? as usize;
+    let threshold = usize::try_from(meta.field_u64("threshold")?)
+        .map_err(|_| CliError::input("threshold out of range"))?;
+    let parties = usize::try_from(meta.field_u64("parties")?)
+        .map_err(|_| CliError::input("parties out of range"))?;
     let dkg_session_id = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
     let key_id = from_hex_exact::<32>(meta.field_str("key_id")?, "key_id")?;
     let expected_pk = meta.field_hex("public_key")?;
@@ -2629,7 +2669,9 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         let payload = opened.secret_key()?;
         if let Some(pack) = &shamir_pack {
             if payload.len() < 72 || &payload[..8] != MLDSA_SHAMIR_PAYLOAD_MAGIC {
-                return Err(CliError::input("corrupt or unsupported ML-DSA Shamir share"));
+                return Err(CliError::input(
+                    "corrupt or unsupported ML-DSA Shamir share",
+                ));
             }
             let mac = Secret32::new(payload[8..40].try_into().unwrap());
             let anchor_mac = Secret32::new(payload[40..72].try_into().unwrap());
@@ -2643,7 +2685,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
             let share = ThresholdMlDsaSignerShare::from_shamir_bytes(
                 &payload[72..],
                 pack.clone(),
-                (idx + 1) as u16,
+                u16::try_from(idx + 1).map_err(|_| CliError::input("party ID out of range"))?,
             )
             .map_err(|e| CliError::input(format!("invalid ML-DSA Shamir share: {e}")))?;
             loaded.push((idx, share, mac));
@@ -2667,9 +2709,13 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
             remaining: &payload[104..],
             parties,
         };
-        let share =
-            threshold_mldsa_dkg_party(&dkg_cfg, (idx + 1) as u16, &entropy.0, &mut restore)
-                .map_err(map_mldsa_err)?;
+        let share = threshold_mldsa_dkg_party(
+            &dkg_cfg,
+            u16::try_from(idx + 1).map_err(|_| CliError::input("party ID out of range"))?,
+            &entropy.0,
+            &mut restore,
+        )
+        .map_err(map_mldsa_err)?;
         if !restore.remaining.is_empty()
             || share.verification_pack().pk_bytes != expected_pk.0.as_slice()
             || share.verification_pack().policy_signing_key_id() != key_id
@@ -2710,7 +2756,10 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
     };
 
     // Filter to selected active signers (sorted ascending by party_id).
-    let quorum_ids: Vec<u16> = signer_indices.iter().map(|&idx| (idx + 1) as u16).collect();
+    let quorum_ids: Vec<u16> = signer_indices
+        .iter()
+        .map(|&idx| u16::try_from(idx + 1).map_err(|_| CliError::input("party ID out of range")))
+        .collect::<Result<_, _>>()?;
     let sign_session_id = cshake256_framed_32(
         b"QSAG.CLI.TMLDSA.SIGN_SESSION.V1",
         &[&key_id, &user_epoch.to_le_bytes()],
@@ -2721,8 +2770,12 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
     };
 
     let deterministic = args.flag("deterministic");
-    let mut selected: Vec<(usize, ThresholdMlDsaSignerShare, AnchoredNonceBurnStore, Secret32)> =
-        Vec::with_capacity(signer_indices.len());
+    let mut selected: Vec<(
+        usize,
+        ThresholdMlDsaSignerShare,
+        AnchoredNonceBurnStore,
+        Secret32,
+    )> = Vec::with_capacity(signer_indices.len());
     for (idx, mut share, mac_key) in loaded {
         let min_gen = match &vault_anchor {
             Some(va) => va
@@ -2755,7 +2808,7 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         let sign_ent = if deterministic {
             cshake256_framed_32(
                 b"QSAG.CLI.TMLDSA.DET.SIGN_ENT.V1",
-                &[&sign_session_id, &(idx as u64).to_le_bytes()],
+                &[&sign_session_id, &(idx as u64).to_le_bytes(), &mac_key.0],
             )
         } else {
             os_random_32()?
@@ -2885,14 +2938,14 @@ fn mldsa_verify(raw: &[String]) -> Result<(), CliError> {
     let sig_bytes = sig_json.field_hex("signature")?;
     let ctx = match args.get("context-hex") {
         Some(h) => from_hex(h)?,
-        None => sig_json
-            .get("context")
-            .and_then(Json::as_str)
-            .map(from_hex)
-            .transpose()?
-            .unwrap_or_else(|| ZeroizingBuf::new(Vec::new())),
+        None => ZeroizingBuf::new(Vec::new()),
     };
 
+    if sig_json.get("context").is_some() && sig_json.field_hex("context")?.0 != ctx.0 {
+        return Err(CliError::verify(
+            "signature context does not match --context-hex (default: empty)",
+        ));
+    }
     if !ml_dsa_verify(level, &pk_bytes, &msg.0, &ctx, &sig_bytes) {
         return Err(CliError::verify(
             "FIPS 204 ML-DSA signature verification failed",

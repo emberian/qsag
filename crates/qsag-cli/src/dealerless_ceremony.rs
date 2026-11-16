@@ -1,8 +1,8 @@
 //! Genuine dealerless ceremony drivers for `qsag-cli` and its runnable examples.
 //!
 //! Replaces `trusted_dealer_setup_for_testing` in default builds so `qsag-cli` ships
-//! with zero `test-dealer` feature dependencies while remaining deterministic from explicit
-//! ceremony seeds when restoring durable checkpoints or running known-answer checks.
+//! with zero `test-dealer` feature dependencies. Each ceremony draws fresh OS entropy
+//! for private protocol randomness; explicit seeds alone do not reproduce a ceremony.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,7 +19,8 @@ use qsag_fts::{
     ParallelSeededDkgSharePackage, ParallelSeededError, ParallelSeededGilboaProducts,
     ParallelSeededMerkleLayers, ParallelSeededParams, ParallelSeededPublicKey,
     ParallelSeededSignRequest, ParallelSeededSignResult, ParallelSeededSignSession,
-    ParallelSeededSignature, assemble_parallel_seeded_public_key, finalize_parallel_seeded_dkg_party,
+    ParallelSeededSignature, assemble_parallel_seeded_public_key,
+    finalize_parallel_seeded_dkg_party,
 };
 use qsag_policy::{
     PolicyGuardDkgRound1, PolicySignerGuardShare, PolicyViolation,
@@ -624,8 +625,7 @@ impl DealerlessThresholdFtsSetup {
             // Pre-populate at least one full signing power batch so the first `qsag sign`
             // executes directly from persisted reservoirs with zero DKG / zero OT!
             if reservoirs.iter().any(|r| r.remaining_powers() < per_sign) {
-                let topup_sid =
-                    cshake256_framed_32(b"QSAG.CLI.FTS.SIGN_TOPUP.V1", &[&dkg_session]);
+                let topup_sid = cshake256_framed_32(b"QSAG.CLI.FTS.SIGN_TOPUP.V1", &[&dkg_session]);
                 refill_reservoirs(&mut reservoirs, topup_sid, per_sign)?;
             }
             assemble_parallel_seeded_public_key(params, pk_seed_bytes, &leaves)?
@@ -695,7 +695,9 @@ impl DealerlessThresholdFtsSetup {
             reservoirs.push(r);
         }
         if !roster.windows(2).all(|w| w[0] < w[1])
-            || reservoirs.iter().any(|r| r.committee() != roster.as_slice())
+            || reservoirs
+                .iter()
+                .any(|r| r.committee() != roster.as_slice())
         {
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
@@ -872,7 +874,10 @@ mod tests {
         .unwrap();
         let (gen1, blobs1) = restored0.serialize_reservoirs().unwrap();
         let slices1: Vec<&[u8]> = blobs1.iter().map(|b| b.as_slice()).collect();
-        assert_eq!(gen1, gen0, "first sign consumed pre-populated reservoir without DKG");
+        assert_eq!(
+            gen1, gen0,
+            "first sign consumed pre-populated reservoir without DKG"
+        );
         drop(restored0);
 
         // Epoch 1 triggers automatic bounded `into_refill` because reservoir powers were spent.
@@ -894,7 +899,11 @@ mod tests {
         )
         .unwrap();
         let (gen2, _) = restored1.serialize_reservoirs().unwrap();
-        assert_eq!(gen2, gen1 + 1, "second sign automatically refilled reservoir");
+        assert_eq!(
+            gen2,
+            gen1 + 1,
+            "second sign automatically refilled reservoir"
+        );
     }
 
     #[test]

@@ -163,7 +163,16 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
             .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
         let json = Json::parse(text)?;
         if let Some(vals) = json.get("validators").and_then(Json::as_array) {
-            out.extend(load_committee(path).or_else(|_| committee_from_json(vals))?);
+            let committee = if json.get("format").is_some() || json.get("committee_root").is_some()
+            {
+                load_committee(path)?
+            } else {
+                if json.get("scheme").is_some() && scheme_of(&json)? != Scheme::AggCommittee {
+                    return Err(CliError::input("validator roster has the wrong scheme"));
+                }
+                committee_from_json(vals)?
+            };
+            out.extend(committee);
         } else if let Some(pk_hex) = json
             .get("validator_public_key")
             .or_else(|| json.get("public_key"))
@@ -182,6 +191,14 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
     }
     if out.is_empty() {
         return Err(CliError::usage("validator committee must not be empty"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for pk in &out {
+        if !seen.insert(pk.to_bytes()) {
+            return Err(CliError::input(
+                "committee contains duplicate validator public keys",
+            ));
+        }
     }
     Ok(out)
 }
@@ -304,6 +321,7 @@ Second form: merge two verified proofs over disjoint signer sets into one.
 
 Third form: committee-vault demo signing + aggregation backed by per-validator FsWalEpochSink.
 
+  --passphrase-env <VAR> / --passphrase-file <PATH>  unlock a sealed committee vault
   --deterministic     derive the proof blinding seed from the inputs instead of OS entropy
   --anchor-dir <dir>  verify and advance external monotone anchors before releasing proof
   --vault-dir <dir>   explicit local custody directory verified disjoint from --anchor-dir
@@ -507,7 +525,8 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         }
         crate::anchor::enforce_anchor_requirement(&secret, anchor_cfg.as_ref())?;
         let seed = opened.seed()?;
-        let size = secret.field_u64("validators")? as u32;
+        let size = u32::try_from(secret.field_u64("validators")?)
+            .map_err(|_| CliError::input("validators out of range"))?;
         let epoch = args
             .get_u64("epoch")?
             .ok_or_else(|| CliError::usage("missing required option --epoch"))?;
@@ -523,7 +542,11 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
                 .trim()
                 .parse()
                 .map_err(|_| CliError::usage("--signers must be comma-separated indices"))?;
-            if index >= size as usize || signers.last().is_some_and(|&last| index <= last) {
+            if index
+                >= usize::try_from(size)
+                    .map_err(|_| CliError::input("validator index or count out of range"))?
+                || signers.last().is_some_and(|&last| index <= last)
+            {
                 return Err(CliError::usage(
                     "--signers must be strictly ascending indices below the committee size",
                 ));
@@ -577,21 +600,36 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
 
         let mut prepared_validators = Vec::with_capacity(signers.len());
         for &index in &signers {
-            let mut keypair = validator(&seed, index as u32);
+            let mut keypair = validator(
+                &seed,
+                u32::try_from(index)
+                    .map_err(|_| CliError::input("validator index or count out of range"))?,
+            );
             let root = digest4_to_bytes(&keypair.pk.pk_root);
             let refused = |what: String| {
                 CliError::state(format!(
                     "validator {index} can not sign at epoch {epoch}: {what}"
                 ))
             };
-            let mac = Secret32::new(wal_mac_key(&seed, index as u32));
-            let (wal, recovered) =
-                FsWalEpochSink::open_or_recover(wal_path(wal_dir, index as u32), &root, mac.0)
-                    .map_err(|e| {
-                        refused(format!(
-                            "write-ahead log missing, locked, or not authentic: {e:?}"
-                        ))
-                    })?;
+            let mac = Secret32::new(wal_mac_key(
+                &seed,
+                u32::try_from(index)
+                    .map_err(|_| CliError::input("validator index or count out of range"))?,
+            ));
+            let (wal, recovered) = FsWalEpochSink::open_or_recover(
+                wal_path(
+                    wal_dir,
+                    u32::try_from(index)
+                        .map_err(|_| CliError::input("validator index or count out of range"))?,
+                ),
+                &root,
+                mac.0,
+            )
+            .map_err(|e| {
+                refused(format!(
+                    "write-ahead log missing, locked, or not authentic: {e:?}"
+                ))
+            })?;
             let val_anchor = if let Some(cfg) = &anchor_cfg {
                 let anchor_mac =
                     derive_secret(&seed, format!("agg validator anchor {index}").as_bytes());
@@ -621,7 +659,11 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         let cursor = ceremony_journal.checkpoint().generation;
         let mut signer_bytes = Vec::with_capacity(signers.len() * 4);
         for &idx in &signers {
-            signer_bytes.extend_from_slice(&(idx as u32).to_be_bytes());
+            signer_bytes.extend_from_slice(
+                &(u32::try_from(idx)
+                    .map_err(|_| CliError::input("validator index or count out of range"))?)
+                .to_be_bytes(),
+            );
         }
         let binding = cshake256_framed_32(
             b"QSAG.CLI.AGG.BINDING.V1",
@@ -779,6 +821,88 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn public_rosters_preserve_committee_validation_and_reject_duplicate_signers() {
+        let root =
+            std::env::temp_dir().join(format!("qsag-roster-{}", to_hex(&os_random_32().unwrap())));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("roster.json");
+        let path = path.to_str().unwrap();
+        let pk = validator(&[9; 32], 0).pk;
+        let roster =
+            |format: Option<&str>, scheme: &str, root: Option<[u8; 32]>, duplicate: bool| {
+                let mut fields = vec![
+                    ("scheme", Json::str(scheme)),
+                    (
+                        "validators",
+                        Json::Array(if duplicate {
+                            vec![Json::hex(&pk.to_bytes()), Json::hex(&pk.to_bytes())]
+                        } else {
+                            vec![Json::hex(&pk.to_bytes())]
+                        }),
+                    ),
+                ];
+                if let Some(format) = format {
+                    fields.push(("format", Json::str(format)));
+                }
+                if let Some(root) = root {
+                    fields.push(("committee_root", Json::hex(&root)));
+                }
+                Json::object(fields).to_pretty()
+            };
+        let scheme = "agg-jorts-poseidon2";
+        for (format, scheme, root_hash) in [
+            (Some(PUBLIC_FORMAT), scheme, Some([0; 32])),
+            (
+                Some(PUBLIC_FORMAT),
+                "fts-compact-1122",
+                Some(compute_committee_root(&[pk])),
+            ),
+            (
+                Some("wrong-format"),
+                scheme,
+                Some(compute_committee_root(&[pk])),
+            ),
+            (None, scheme, Some([0; 32])),
+            (None, "fts-compact-1122", None),
+        ] {
+            std::fs::write(path, roster(format, scheme, root_hash, false)).unwrap();
+            assert!(load_public_validators(path).is_err());
+        }
+        for (format, root_hash) in [
+            (None, None),
+            (Some(PUBLIC_FORMAT), Some(compute_committee_root(&[pk]))),
+        ] {
+            std::fs::write(path, roster(format, scheme, root_hash, false)).unwrap();
+            assert_eq!(load_public_validators(path).unwrap(), vec![pk]);
+        }
+        std::fs::write(path, roster(None, scheme, None, true)).unwrap();
+        let msg = root.join("message");
+        std::fs::write(&msg, b"test").unwrap();
+        let args: Vec<String> = [
+            "--pubkeys",
+            path,
+            "--signers",
+            "0,1",
+            "--sigs",
+            "unused-a,unused-b",
+            "--message",
+            msg.to_str().unwrap(),
+            "--out",
+            "unused-proof",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let err = aggregate(&args).unwrap_err();
+        assert!(
+            err.message.contains("duplicate validator"),
+            "{}",
+            err.message
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn indexed_authorship_requires_matching_verified_metadata() {
