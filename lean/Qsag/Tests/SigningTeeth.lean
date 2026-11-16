@@ -34,7 +34,9 @@ set_option autoImplicit false
 
 theorem tooth_slhDsaShake128s_m34_rejected :
     ({ slhDsaShake128s with m := 34 } : Fips205Params).wellFormed ≠ true := by
-  decide
+  intro h
+  rw [slhDsaShake128s_m34_wellFormed_false] at h
+  cases h
 
 /-- Adding even one byte as an extra WOTS element is rejected before hashing. -/
 theorem tooth_slh_trailing_wots_rejected (p : Fips205Params) (msg : List UInt8)
@@ -47,14 +49,15 @@ theorem tooth_slh_trailing_wots_rejected (p : Fips205Params) (msg : List UInt8)
   have hs := (slhVerifyInternal_shapes p msg _ pk h).2.2.2.2
   simp only [List.all_cons, Bool.and_eq_true] at hs
   have hc := hs.1
-  simp only [fipsXmssSigShape, Bool.and_eq_true, decide_eq_true_eq] at hc
+  simp only [fipsXmssSigShape_def, Bool.and_eq_true, decide_eq_true_eq] at hc
   have bad := hc.1.1.1
   simp only [List.length_append, List.length_cons, List.length_nil, hLen] at bad
   omega
 
 theorem tooth_sha3_256_category5_rejected (ctx digest : List UInt8) :
     encodePreHashMsgPrime slhDsaShake256f .sha3_256 ctx digest = none := by
-  simp [encodePreHashMsgPrime, preHashCompatible, slhDsaShake256f, FipsPreHashAlg.securityBytes]
+  simp [encodePreHashMsgPrime_def, preHashCompatible_def, slhDsaShake256f_n,
+    FipsPreHashAlg.securityBytes_sha3_256]
 
 #tooth_pair Qsag.accepted_preHash_category vs Qsag.tooth_sha3_256_category5_rejected
 
@@ -78,30 +81,30 @@ def compactTestParams        : PqHashParams := ⟨4, 8, 2, 2, 4, 2, 4, false⟩
 
 /-- Satisfiability witness: the checked signer succeeds on a concrete instance. -/
 theorem evalStatelessCheckedSign_inhabited :
-    (evalStatelessCheckedSign zeroToySuite zeroToyParams ⟨[], [], []⟩ [] [] 1).isSome = true := by
-  decide +kernel
+    (evalStatelessCheckedSign zeroToySuite zeroToyParams ⟨[], [], []⟩ [] [] 1).isSome = true :=
+  evalStatelessCheckedSign_zeroToy_isSome
 
 /-- `#tooth`: Toy 16-bit WOTS profiles (`ell1 = 8, w = 4`) pass permissive `wellFormed` for fast
     unit models, but are strictly rejected by `productionWellFormed`. -/
 theorem tooth_productionWellFormed_rejects_short_wots :
-    compactTestParams.wellFormed = true ∧ compactTestParams.productionWellFormed = false := by
-  decide +kernel
+    compactTestParams.wellFormed = true ∧ compactTestParams.productionWellFormed = false :=
+  PqHashParams.shortWots_wellFormed_not_production
 
 /-- `#tooth`: Zero subtree height (`subtreeHeight = 0`) is rejected by `productionWellFormed`. -/
 theorem tooth_productionWellFormed_rejects_zero_subtree_height :
-    (⟨4, 128, 0, 1, 0, 0, 1, true⟩ : PqHashParams).productionWellFormed = false := by
-  decide +kernel
+    (⟨4, 128, 0, 1, 0, 0, 1, true⟩ : PqHashParams).productionWellFormed = false :=
+  PqHashParams.zeroSubtreeHeight_not_production
 
 /-- `#tooth`: Stateful profiles carrying non-zero FORS trees are rejected by `productionWellFormed`. -/
 theorem tooth_productionWellFormed_rejects_stateful_with_fors :
-    (⟨4, 128, 4, 2, 8, 4, 4, true⟩ : PqHashParams).productionWellFormed = false := by
-  decide +kernel
+    (⟨4, 128, 4, 2, 8, 4, 4, true⟩ : PqHashParams).productionWellFormed = false :=
+  PqHashParams.statefulWithFors_not_production
 
 /-- `#tooth`: Budgets exceeding `numLayers * subtreeHeight` or equal to `0` are rejected. -/
 theorem tooth_productionWellFormed_rejects_invalid_budget :
     (⟨4, 128, 4, 2, 8, 4, 0, false⟩ : PqHashParams).productionWellFormed = false ∧
-    (⟨4, 128, 4, 2, 8, 4, 9, false⟩ : PqHashParams).productionWellFormed = false := by
-  decide +kernel
+    (⟨4, 128, 4, 2, 8, 4, 9, false⟩ : PqHashParams).productionWellFormed = false :=
+  PqHashParams.invalidBudget_not_production
 
 /-- `#tooth`: Relocating a stateless signature to a leaf other than the XOF-derived `derivedLeafIdx`
     is unconditionally rejected by `verifyProductionPqHashSig`. -/
@@ -149,20 +152,20 @@ theorem tooth_production_fors_merkle_binds_kp0
   exact hNe hKpEq
 
 theorem witness_production_parameter_profile : ∃ p, ProductionParameterProfile p :=
-  ⟨corduroyCustody128Params, corduroyCustody128_productionWellFormed⟩
+  ⟨corduroyCustody128Params,
+    (ProductionParameterProfile_iff _).mpr corduroyCustody128_productionWellFormed⟩
 
 theorem tooth_short_model_is_not_production : ¬ ProductionParameterProfile compactTestParams := by
   intro h
   have hf := tooth_productionWellFormed_rejects_short_wots.2
-  unfold ProductionParameterProfile at h
-  rw [hf] at h
+  rw [ProductionParameterProfile_iff, hf] at h
   cases h
 
 theorem tooth_production_stateless_rejects_stateful (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
     (h : params.statefulJorts = true) :
     verifyProductionStatelessChecked suite params pk msg sig = false := by
-  simp [verifyProductionStatelessChecked, h]
+  simp [verifyProductionStatelessChecked_def, h]
 
 #tooth_pair Qsag.verifyProductionStatelessChecked_sound vs Qsag.tooth_production_stateless_rejects_stateful
 

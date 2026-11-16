@@ -19,7 +19,9 @@ set_option maxRecDepth 10000
     in uniform superposition across both basis inputs! -/
 def concreteSuperpositionAdv : QuantumAdv 2 2 1 2 where
   init := fun x y _ => if x.1 == 0 && y.1 == 0 then ⟨1, 0⟩ else GaussInt.zero
-  h_init_pos := by decide
+  h_init_pos := by
+    simp only [QVec.stateNormSq_def, QVec.queryWeight_def, GaussInt.normSq_def, GaussInt.zero_def]
+    decide
   steps := fun i => if i.1 == 0 then hadamardQuery2 2 1 else ScaledUnitary.id 2 2 1
 
 /-- Concrete 2-query adaptive `OracleComp` decision tree branching on the LSB of its first
@@ -73,12 +75,35 @@ theorem inhabited_concrete_security_budget_roster :
         atLeastBits 128 entry.quantumBound) := by
   refine ⟨?_, ?_, ?_, ?_⟩
   · -- 1. Genuine superposition query weights on both `x = 0` and `x = 1`:
-    constructor <;> decide
+    have hψ : advStateAt concreteSuperpositionAdv (fun _ => BitVec.zero 2) 1 (by decide) =
+        (hadamardQuery2 2 1).apply
+          (oracleXor (fun _ => BitVec.zero 2) concreteSuperpositionAdv.init) := by
+      rw [advStateAt_succ, advStateAt_zero]
+      rfl
+    have hInit : concreteSuperpositionAdv.init =
+        fun x y _ => if x.1 == 0 && y.1 == 0 then ⟨1, 0⟩ else ⟨0, 0⟩ := by
+      funext x y _
+      show (if x.1 == 0 && y.1 == 0 then (⟨1, 0⟩ : GaussInt) else GaussInt.zero) = _
+      rw [GaussInt.zero_def]
+    constructor
+    · rw [hψ]
+      simp only [QVec.queryWeight_def, hadamardQuery2_apply, oracleXor_apply, xorFin_def,
+        GaussInt.normSq_def, GaussInt.add_def, GaussInt.sub_def, hInit]
+      decide
+    · rw [hψ]
+      simp only [QVec.queryWeight_def, hadamardQuery2_apply, oracleXor_apply, xorFin_def,
+        GaussInt.normSq_def, GaussInt.add_def, GaussInt.sub_def, hInit]
+      decide
   · -- 2. Adaptive 2-query `OracleComp` + `wotsCDibits128Bv` injectivity fiber bound:
     refine ⟨?_, fiberCard_le_one_of_injective 256 wotsCDibits128Bv
                   (fun _ _ h => wotsCDibits128Bv_injective h) _⟩
-    unfold concreteAdaptiveTwoQueryAdv QueryBounded
-    intro _ _
+    unfold concreteAdaptiveTwoQueryAdv
+    rw [QueryBounded_succ_query 1]
+    intro d₁
+    dsimp only
+    rw [QueryBounded_succ_query 0]
+    intro _
+    rw [QueryBounded_pure]
     exact trivial
   · -- 3. Non-scalar quadratic polynomial `X^2 - u` over `QuarticGoldilocks`:
     refine ⟨by decide, by decide, by decide⟩
@@ -89,22 +114,9 @@ theorem inhabited_concrete_security_budget_roster :
     intro entry hMem
     have hBits := hPort.2 entry hMem
       (Nat.le_trans (by decide : b₀.qHash + 1 ≤ 2 ^ 30)
-        (Nat.pow_le_pow_right (by decide) (roster_ceiling_ge_30 b₀ entry hMem)))
-    have hPos : 0 < entry.classicalBound.num ∧ 0 < entry.quantumBound.num := by
-      simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
-      rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+        (Nat.pow_le_pow_right (by decide) (qsagPq128PortfolioRoster_ceiling_ge_30 b₀ entry hMem)))
+    have hPos : 0 < entry.classicalBound.num ∧ 0 < entry.quantumBound.num :=
+      qsagPq128PortfolioRoster_num_pos_at_2pow30 entry hMem
     exact ⟨hPos.1, hPos.2, hBits.1, hBits.2⟩
 
 
