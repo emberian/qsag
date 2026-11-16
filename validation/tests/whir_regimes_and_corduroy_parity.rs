@@ -20,8 +20,10 @@
 //!    shard aggregation + disjoint `MergeNode::Branch` merging + tamper rejection.
 //! 5. Cross-checks `zk-Hem` 5-table hiding (`protocol::prove`/`verify`) vs 1-table public
 //!    (`protocol::prove_public`/`verify_public` with 3 independent `ZKHEM_COMBINE` challenges and
-//!    `HEM_PUBLIC_CELLS` batching) AND `zk_hem::full_shard` (`prove_recursive_shard`,
-//!    `prove_full_shard_merge`, `verify_full_shard_merge`, `QSAGFSM1`) + adversarial tamper rejection.
+//!    `HEM_PUBLIC_CELLS` batching) + adversarial tamper rejection.
+//! 6. `zk_hem::full_shard` recursion (`prove_recursive_shard`, `prove_full_shard_merge`,
+//!    `verify_full_shard_merge`, `QSAGFSM1`) with child, statement and wire tamper rejection. The
+//!    one-child parent runs by default; the two-child parent is `#[ignore]`d for its memory.
 
 use qsag_agg::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
 use qsag_agg::pcs::{
@@ -37,14 +39,17 @@ use qsag_agg::sig::{
 use qsag_agg::sponge::{FiatShamirTranscript, InstanceBound};
 use qsag_agg::zk_hem::full_shard::{
     FullShardError, FullShardMergeProof, FullShardMergeRelation, FullShardParams,
-    RecursiveShardStatement, prove_full_shard_merge, prove_recursive_shard, verify_full_shard_merge,
-    verify_recursive_shard,
+    RecursiveShardStatement, prove_full_shard_merge, prove_recursive_shard,
+    verify_full_shard_merge, verify_recursive_shard,
 };
 use qsag_agg::zk_hem::protocol::{
     Layout, PublicHemProof, ZkHemError, ZkHemProof, prove as zkhem_prove,
-    prove_public as zkhem_prove_public, verify as zkhem_verify, verify_public as zkhem_verify_public,
+    prove_public as zkhem_prove_public, verify as zkhem_verify,
+    verify_public as zkhem_verify_public,
 };
-use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, MASK_ROWS, Shape, sponge12, sponge12_native};
+use qsag_agg::zk_hem::relation::{
+    ConstraintSystem, Lc, MASK_ROWS, Shape, sponge12, sponge12_native,
+};
 use qsag_agg::{
     AggSigProfile, HemAggConfig, HemAggregatedProof, HemAggregator, SignerBitmap, SigningMode,
     ValidatorPublicKey, ValidatorSignature, verify_individual_signature,
@@ -84,6 +89,27 @@ fn multilinear_eval_p3_ref(evals: &[Goldilocks], point: &[[u64; 4]]) -> [u64; 4]
         acc = add_ext4(acc, term);
     }
     acc
+}
+
+/// Flips one bit at seven evenly spread positions of a proof wire. Every flip must be
+/// refused by the decoder or by the verifier, and at least one must get past the decoder
+/// so that the verifier itself is exercised.
+fn assert_wire_bit_flips_rejected<P>(
+    wire: &[u8],
+    decode: impl Fn(&[u8]) -> Option<P>,
+    verify: impl Fn(&P) -> bool,
+) {
+    let mut reached_verifier = 0;
+    for eighth in 1..8 {
+        let mut bad = wire.to_vec();
+        let pos = eighth * wire.len() / 8;
+        bad[pos] ^= 0x01;
+        if let Some(proof) = decode(&bad) {
+            reached_verifier += 1;
+            assert!(!verify(&proof), "bit flip at byte {pos} verified");
+        }
+    }
+    assert!(reached_verifier > 0, "no bit flip reached the verifier");
 }
 
 fn pcs_transcript(schedule: &WhirSchedule) -> FiatShamirTranscript<InstanceBound> {
@@ -247,7 +273,11 @@ fn whir_active_regimes_retired_tag_rejection_and_dual_ood_pinning() {
     // opened and verified across ALL active regimes, cross-checked against Plonky3 `GoldilocksExt4`!
     let nv = 12usize;
     let evals: Vec<Goldilocks> = (0..(1usize << nv))
-        .map(|i| gl((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(19)))
+        .map(|i| {
+            gl((i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(19))
+        })
         .collect();
     let point_limbs: Vec<[u64; 4]> = (0..nv)
         .map(|k| {
@@ -284,7 +314,11 @@ fn whir_active_regimes_retired_tag_rejection_and_dual_ood_pinning() {
 
         let sched28 = row.regime.schedule(28);
         let qs: [usize; 4] = core::array::from_fn(|i| sched28.stages[i].num_queries);
-        assert_eq!(qs, row.queries_4stage, "tag={} query schedule mismatch", row.tag);
+        assert_eq!(
+            qs, row.queries_4stage,
+            "tag={} query schedule mismatch",
+            row.tag
+        );
 
         let sched12 = row.regime.schedule(nv);
         assert_eq!(sched12.stages.len(), 3);
@@ -359,9 +393,19 @@ fn whir_active_regimes_retired_tag_rejection_and_dual_ood_pinning() {
                     .expect("OOD mutation remains canonically encoded");
                 assert_eq!(used, raw_bad.len());
                 let mut tr = pcs_transcript(&sched12);
-                assert!(!whir_verify_with_schedule(
-                    &comm, nv, &point, agg_claimed, &parsed_bad, &mut tr, &sched12,
-                ), "tag={} stage={stage} slot={slot}", row.tag);
+                assert!(
+                    !whir_verify_with_schedule(
+                        &comm,
+                        nv,
+                        &point,
+                        agg_claimed,
+                        &parsed_bad,
+                        &mut tr,
+                        &sched12,
+                    ),
+                    "tag={} stage={stage} slot={slot}",
+                    row.tag
+                );
             }
         }
     }
@@ -386,7 +430,10 @@ fn whir_stage_geometries_across_nv_2_to_28_and_bounds_rejection() {
         }
         // Stage-0 Reed-Solomon domain `2^nv * blowup_0` must fit inside `2^31`.
         let domain0_log2 = nv + sched.stages[0].blowup.trailing_zeros() as usize;
-        assert!(domain0_log2 <= 30, "nv={nv} Stage-0 domain 2^{domain0_log2} > 2^30");
+        assert!(
+            domain0_log2 <= 30,
+            "nv={nv} Stage-0 domain 2^{domain0_log2} > 2^30"
+        );
     }
 
     type StagePairs = &'static [(usize, usize)];
@@ -404,13 +451,20 @@ fn whir_stage_geometries_across_nv_2_to_28_and_bounds_rejection() {
 
     for &(nv, expected_es, expected_stages) in expected_high_cap {
         let sched = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128.schedule(nv);
-        assert_eq!(sched.early_stop_vars, expected_es, "nv={nv} early_stop_vars");
+        assert_eq!(
+            sched.early_stop_vars, expected_es,
+            "nv={nv} early_stop_vars"
+        );
         let got: Vec<(usize, usize)> = sched
             .stages
             .iter()
             .map(|s| (s.blowup, s.step_vars))
             .collect();
-        assert_eq!(got.as_slice(), expected_stages, "nv={nv} stage geometry mismatch");
+        assert_eq!(
+            got.as_slice(),
+            expected_stages,
+            "nv={nv} stage geometry mismatch"
+        );
     }
 
     // Out-of-bounds `nv` (`0, 1, 29, 30`) must be rejected.
@@ -431,7 +485,10 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     assert_eq!(AggSigProfile::from_u8(0), None);
     assert_eq!(AggSigProfile::from_u8(3), None);
     assert_eq!(AggSigProfile::JortsPoseidon2.raw_signature_bytes(), 4_328);
-    assert_eq!(AggSigProfile::CorduroyPoseidon2.raw_signature_bytes(), 76_896);
+    assert_eq!(
+        AggSigProfile::CorduroyPoseidon2.raw_signature_bytes(),
+        76_896
+    );
     assert_eq!(WOTS_CHAINS, 128);
     assert_eq!(WOTS_TARGET_SUM, 192);
     assert_eq!(JORTS_XMSS_HEIGHT, 6);
@@ -446,11 +503,7 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     //    and individual + batch verification.
     let mut kps: Vec<ValidatorKeypair> = (0..2u32)
         .map(|i| {
-            ValidatorKeypair::keygen_deterministic(
-                AggSigProfile::CorduroyPoseidon2,
-                &[0x61; 32],
-                i,
-            )
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::CorduroyPoseidon2, &[0x61; 32], i)
         })
         .collect();
     let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
@@ -463,8 +516,12 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     let msg = b"qsag-validation: stateless CorduroyPoseidon2 76,896B -> Hem WHIR shard merge";
     let mut wal0 = InMemStatelessWal::default();
     let mut wal1 = InMemStatelessWal::default();
-    let sig0 = kps[0].sign_stateless(msg, &mut wal0).expect("corduroy sign 0");
-    let sig1 = kps[1].sign_stateless(msg, &mut wal1).expect("corduroy sign 1");
+    let sig0 = kps[0]
+        .sign_stateless(msg, &mut wal0)
+        .expect("corduroy sign 0");
+    let sig1 = kps[1]
+        .sign_stateless(msg, &mut wal1)
+        .expect("corduroy sign 1");
     assert_eq!(kps[0].stateless_sigs_issued(), 1);
     assert_eq!(sig0.fors_openings.len(), 32);
     assert_eq!(sig0.layers.len(), 16);
@@ -522,16 +579,28 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     };
     let bm1 = SignerBitmap::from_active_indices(2, &[1]).unwrap();
 
-    let shard_a =
-        HemAggregator::aggregate_with_config(&pks, &bm0, &mode, core::slice::from_ref(&sig0), &cfg_a)
-            .expect("Corduroy shard A");
-    let shard_b =
-        HemAggregator::aggregate_with_config(&pks, &bm1, &mode, core::slice::from_ref(&sig1), &cfg_b)
-            .expect("Corduroy shard B");
+    let shard_a = HemAggregator::aggregate_with_config(
+        &pks,
+        &bm0,
+        &mode,
+        core::slice::from_ref(&sig0),
+        &cfg_a,
+    )
+    .expect("Corduroy shard A");
+    let shard_b = HemAggregator::aggregate_with_config(
+        &pks,
+        &bm1,
+        &mode,
+        core::slice::from_ref(&sig1),
+        &cfg_b,
+    )
+    .expect("Corduroy shard B");
 
     let merged = HemAggregator::merge(&pks, &mode, &shard_a, &shard_b)
         .expect("merge disjoint Corduroy shards");
-    assert!(HemAggregator::verify_with_regime(&pks, &mode, &merged, regime));
+    assert!(HemAggregator::verify_with_regime(
+        &pks, &mode, &merged, regime
+    ));
 
     // Overlapping signer sets (`shard_a` with `shard_a`) must be rejected by `merge`!
     assert!(HemAggregator::merge(&pks, &mode, &shard_a, &shard_a).is_err());
@@ -560,7 +629,11 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     ));
 }
 
-fn build_demo_zkhem_relation(pub_x: u64, secret_bit: u64, secret_preimage: u64) -> (Shape, Vec<Goldilocks>, [Goldilocks; 2]) {
+fn build_demo_zkhem_relation(
+    pub_x: u64,
+    secret_bit: u64,
+    secret_preimage: u64,
+) -> (Shape, Vec<Goldilocks>, [Goldilocks; 2]) {
     let expected_digest = sponge12_native(&[gl(secret_bit), gl(secret_preimage), gl(pub_x)])[0];
     let mut cs = ConstraintSystem::new();
     let p_in = cs.public_input(gl(pub_x));
@@ -578,7 +651,7 @@ fn build_demo_zkhem_relation(pub_x: u64, secret_bit: u64, secret_preimage: u64) 
 }
 
 #[test]
-fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejection() {
+fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
     let (shape, z, public_inputs) = build_demo_zkhem_relation(42, 1, 9_876_543);
     assert!(shape.is_satisfied(&z));
     assert_eq!(shape.num_public, 2);
@@ -623,7 +696,13 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
     let zk_bytes = zk_proof_1.to_bytes();
     let zk_decoded = ZkHemProof::from_bytes(&zk_bytes, &shape, regime).unwrap();
     assert_eq!(zk_decoded, zk_proof_1);
-    assert!(zkhem_verify(&shape, &public_inputs, stmt, regime, &zk_decoded));
+    assert!(zkhem_verify(
+        &shape,
+        &public_inputs,
+        stmt,
+        regime,
+        &zk_decoded
+    ));
 
     // Tamper checks on hiding proof: wrong public input, wrong statement, mutated companion claim.
     assert!(!zkhem_verify(
@@ -633,7 +712,13 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
         regime,
         &zk_decoded
     ));
-    assert!(!zkhem_verify(&shape, &public_inputs, b"other-stmt", regime, &zk_decoded));
+    assert!(!zkhem_verify(
+        &shape,
+        &public_inputs,
+        b"other-stmt",
+        regime,
+        &zk_decoded
+    ));
     let mut bad_zk = zk_decoded;
     bad_zk.companion_claims[2] += GoldilocksExt4::ONE;
     assert!(!zkhem_verify(&shape, &public_inputs, stmt, regime, &bad_zk));
@@ -670,10 +755,22 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
     ));
     let mut bad_pub = pub_decoded.clone();
     bad_pub.row_values[1] += GoldilocksExt4::ONE;
-    assert!(!zkhem_verify_public(&shape, &public_inputs, stmt, regime, &bad_pub));
+    assert!(!zkhem_verify_public(
+        &shape,
+        &public_inputs,
+        stmt,
+        regime,
+        &bad_pub
+    ));
     let mut bad_eval = pub_decoded;
     bad_eval.evaluation += GoldilocksExt4::ONE;
-    assert!(!zkhem_verify_public(&shape, &public_inputs, stmt, regime, &bad_eval));
+    assert!(!zkhem_verify_public(
+        &shape,
+        &public_inputs,
+        stmt,
+        regime,
+        &bad_eval
+    ));
 
     // Unsatisfied assignment (`secret_bit = 2`, non-Boolean) is refused by both provers.
     let mut bad_z = build_demo_zkhem_relation(42, 1, 9_876_543).1;
@@ -686,11 +783,12 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
         zkhem_prove_public(&shape, bad_z, stmt, regime, &[0x44; 32]),
         Err(ZkHemError::Unsatisfied)
     );
+}
 
-    // 3. `zk_hem::full_shard` end-to-end 2-shard recursive merge (`QSAGFSM1`) + tamper rejection!
-    // Use the production QROM-128 regime with PoW for the recursive parent;
-    // its smaller query schedule reduces the native verifier circuit's memory.
-    let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
+/// `zk_hem::full_shard` recursive merge (`QSAGFSM1`) of `children` two-slot shards under one
+/// parent, with child, statement and wire tamper rejection.
+fn full_shard_merge_and_tamper_rejection(children: usize) {
+    let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
     let fs_params = FullShardParams::new(regime, 2).expect("FullShardParams(slots=2)");
     assert_eq!(fs_params.slots(), 2);
 
@@ -725,41 +823,44 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
         (statement, child_proof)
     };
 
-    let (stmt0, child0) = make_child(0x11, &[0, 1], [0xA5; 32]);
-    let (stmt1, child1) = make_child(0x22, &[1], [0x5A; 32]);
-    let pub0 = stmt0.public(&fs_params).unwrap();
-    let pub1 = stmt1.public(&fs_params).unwrap();
-    assert_eq!(pub0.signers, 2);
-    assert_eq!(pub1.signers, 1);
+    // Shard 0 has one of its two slots signing; shard 1 (when present) has both.
+    let shards = [
+        (0x22u8, &[1usize][..], [0x5Au8; 32]),
+        (0x11, &[0, 1][..], [0xA5; 32]),
+    ];
+    let (statements, child_proofs): (Vec<_>, Vec<_>) = shards[..children]
+        .iter()
+        .map(|&(seed_tag, active, msg32)| make_child(seed_tag, active, msg32))
+        .unzip();
+    let publics: Vec<_> = statements
+        .iter()
+        .map(|statement| statement.public(&fs_params).unwrap())
+        .collect();
+    let signer_counts: Vec<_> = publics.iter().map(|p| p.signers).collect();
+    assert_eq!(signer_counts, [1, 2][..children]);
 
-    let relation = FullShardMergeRelation::new(fs_params.clone(), 2).expect("FullShardMergeRelation");
-    assert_eq!(relation.num_children(), 2);
+    let relation =
+        FullShardMergeRelation::new(fs_params.clone(), children).expect("FullShardMergeRelation");
+    assert_eq!(relation.num_children(), children);
 
-    // Tampered child proof must be refused by `prove_full_shard_merge` (`Err(FullShardError::InvalidChild)`)!
-    let mut corrupt_child1 = child1.clone();
-    corrupt_child1.col_evals[0] += GoldilocksExt4::ONE;
-    assert!(!verify_recursive_shard(&fs_params, &stmt1, &corrupt_child1));
+    // A tampered child proof is refused by the parent prover.
+    let last = children - 1;
+    let mut corrupt_proofs = child_proofs.clone();
+    corrupt_proofs[last].col_evals[0] += GoldilocksExt4::ONE;
+    assert!(!verify_recursive_shard(
+        &fs_params,
+        &statements[last],
+        &corrupt_proofs[last]
+    ));
     assert!(matches!(
-        prove_full_shard_merge(
-            &relation,
-            &[stmt0.clone(), stmt1.clone()],
-            &[child0.clone(), corrupt_child1],
-            regime,
-            &[0x77; 32],
-        ),
+        prove_full_shard_merge(&relation, &statements, &corrupt_proofs, regime, &[0x77; 32]),
         Err(FullShardError::InvalidChild)
     ));
 
-    // Honest parent merge proof verifies against `[pub0, pub1]` alone (`QSAGFSM1` wire roundtrip)!
-    let parent_proof = prove_full_shard_merge(
-        &relation,
-        &[stmt0, stmt1],
-        &[child0, child1],
-        regime,
-        &[0x88; 32],
-    )
-    .expect("prove_full_shard_merge");
-
+    // The honest parent proof verifies against the shards' public statements alone.
+    let parent_proof =
+        prove_full_shard_merge(&relation, &statements, &child_proofs, regime, &[0x88; 32])
+            .expect("prove_full_shard_merge");
     let parent_wire = parent_proof.to_bytes();
     assert_eq!(&parent_wire[..8], b"QSAGFSM1");
     let decoded_parent =
@@ -767,57 +868,59 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
     assert_eq!(decoded_parent, parent_proof);
     assert!(verify_full_shard_merge(
         &relation,
-        &[pub0.clone(), pub1.clone()],
+        &publics,
         regime,
-        &decoded_parent,
+        &decoded_parent
     ));
 
-    // Statement & wire tamper rejection on `verify_full_shard_merge`:
-    // (a) Claiming 2 signers instead of 1 on shard 1
-    let mut inflated_pub1 = pub1.clone();
-    inflated_pub1.signers = 2;
-    assert!(!verify_full_shard_merge(
-        &relation,
-        &[pub0.clone(), inflated_pub1],
-        regime,
-        &decoded_parent,
-    ));
-    // (b) Altering 1 byte of shard 0's signed 32-byte message
-    let mut wrong_msg_pub0 = pub0.clone();
-    wrong_msg_pub0.message[31] ^= 0x01;
-    assert!(!verify_full_shard_merge(
-        &relation,
-        &[wrong_msg_pub0, pub1.clone()],
-        regime,
-        &decoded_parent,
-    ));
-    // (c) Altering shard 1's committee digest
-    let mut wrong_comm_pub1 = pub1.clone();
-    wrong_comm_pub1.committee[0] += Goldilocks::ONE;
-    assert!(!verify_full_shard_merge(
-        &relation,
-        &[pub0.clone(), wrong_comm_pub1],
-        regime,
-        &decoded_parent,
-    ));
-    // (d) Wrong magic header or bit-flipped proof payload
+    // Statement tamper rejection: an inflated signer count, one flipped message bit, and an
+    // altered committee digest.
+    let mut inflated = publics.clone();
+    inflated[0].signers = 2;
+    let mut wrong_message = publics.clone();
+    wrong_message[last].message[31] ^= 0x01;
+    let mut wrong_committee = publics.clone();
+    wrong_committee[last].committee[0] += Goldilocks::ONE;
+    for tampered in [inflated, wrong_message, wrong_committee] {
+        assert!(!verify_full_shard_merge(
+            &relation,
+            &tampered,
+            regime,
+            &decoded_parent
+        ));
+    }
+    if children == 2 {
+        let swapped = [publics[1].clone(), publics[0].clone()];
+        assert!(!verify_full_shard_merge(
+            &relation,
+            &swapped,
+            regime,
+            &decoded_parent
+        ));
+    }
+
+    // Wire tamper rejection: wrong magic, then payload bit flips.
     let mut bad_magic = parent_wire.clone();
     bad_magic[7] = b'2';
     assert!(FullShardMergeProof::from_bytes(&bad_magic, &relation, regime).is_none());
+    assert_wire_bit_flips_rejected(
+        &parent_wire,
+        |bytes| FullShardMergeProof::from_bytes(bytes, &relation, regime),
+        |proof| verify_full_shard_merge(&relation, &publics, regime, proof),
+    );
+}
 
-    let mut flipped_wire = parent_wire;
-    let mid = flipped_wire.len() / 2;
-    flipped_wire[mid] ^= 0x01;
-    {
-        let bad_decoded = FullShardMergeProof::from_bytes(&flipped_wire, &relation, regime)
-            .expect("payload mutation must reach full-shard verification");
-        assert!(!verify_full_shard_merge(
-            &relation,
-            &[pub0, pub1],
-            regime,
-            &bad_decoded,
-        ));
-    }
+/// One child: a `2^21`-row parent relation, about 12 GiB at peak.
+#[test]
+fn full_shard_recursion_one_child_merge_and_tamper_rejection() {
+    full_shard_merge_and_tamper_rejection(1);
+}
+
+/// Two children: a `2^22`-row parent relation, which does not fit a 16 GiB memory cap.
+#[test]
+#[ignore = "needs more than 16 GiB: 2^22-row parent relation"]
+fn full_shard_recursion_two_child_merge_and_tamper_rejection() {
+    full_shard_merge_and_tamper_rejection(2);
 }
 
 #[test]
@@ -825,8 +928,8 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     use qsag_agg::zk_hem::capability::{
         BearerCapability, CAPABILITY_WIRE_MAGIC, CapCaveat, CapabilityBatchStatement,
         CapabilityIssuerDirectory, CapabilityParams, CapabilityPresentationInput,
-        CapabilityRelation, CapabilityRequest, CapabilityZkError, SENTINEL_MAX_ID,
-        SENTINEL_MIN_ID, SortedRevocationTree, ZkCapabilityBatchProof,
+        CapabilityRelation, CapabilityRequest, CapabilityZkError, SENTINEL_MAX_ID, SENTINEL_MIN_ID,
+        SortedRevocationTree, ZkCapabilityBatchProof,
     };
     use qsag_core::poseidon2_mpc::HemJortsPublicKey;
 
@@ -837,15 +940,18 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
         let prof = AggSigProfile::from_u8(h).expect("JortsPoseidon2H7..=H20");
         assert!(prof.is_jorts());
         assert_eq!(prof.jorts_xmss_height(), Some(usize::from(h)));
-        assert_eq!(prof.raw_signature_bytes(), 4_328 + 32 * (usize::from(h) - 6));
+        assert_eq!(
+            prof.raw_signature_bytes(),
+            4_328 + 32 * (usize::from(h) - 6)
+        );
     }
-    assert_eq!(AggSigProfile::JortsPoseidon2H20.raw_signature_bytes(), 4_776);
-
-    let mut kp6 = ValidatorKeypair::keygen_deterministic(
-        AggSigProfile::JortsPoseidon2,
-        &[0x91; 32],
-        0,
+    assert_eq!(
+        AggSigProfile::JortsPoseidon2H20.raw_signature_bytes(),
+        4_776
     );
+
+    let mut kp6 =
+        ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x91; 32], 0);
     let core_pk: HemJortsPublicKey = kp6.pk.into();
     assert_eq!(ValidatorPublicKey::from(core_pk), kp6.pk);
     assert_eq!(kp6.pk.to_hem_jorts().unwrap(), core_pk);
@@ -853,11 +959,8 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     assert_eq!(pk_h12.profile, AggSigProfile::JortsPoseidon2H12);
 
     // Height-8 (`256` epochs) stateful sign at boundary epoch `255` + wire roundtrip!
-    let mut kp8 = ValidatorKeypair::keygen_deterministic(
-        AggSigProfile::JortsPoseidon2H8,
-        &[0x92; 32],
-        0,
-    );
+    let mut kp8 =
+        ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2H8, &[0x92; 32], 0);
     let mut wal8 = InMemEpochWal::default();
     let msg8 = b"jorts-poseidon2-h8-configurable-xmss-validation";
     let sig8 = kp8
@@ -871,9 +974,11 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     );
     assert!(verify_individual_signature(&kp8.pk, msg8, &sig8));
 
-    let _ = kp6
+    let sig6 = kp6
         .sign_stateful(msg8, 0, &mut InMemEpochWal::default())
         .unwrap();
+    assert!(verify_individual_signature(&kp6.pk, msg8, &sig6));
+    assert!(!verify_individual_signature(&kp8.pk, msg8, &sig6));
 
     // 2. `zk-Hem` Batched Bearer Capabilities + `SortedRevocationTree` interval non-membership (`QSAGCAP1`).
     let params = CapabilityParams {
@@ -884,9 +989,24 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     };
     let cap_rel = CapabilityRelation::new(params).expect("CapabilityRelation::new");
     let gl = Goldilocks::from_u64_reduced;
-    let issuer_key = [gl(0x0A11_CE01), gl(0x0A11_CE02), gl(0x0A11_CE03), gl(0x0A11_CE04)];
-    let audience = [gl(0x000A_0D01), gl(0x000A_0D02), gl(0x000A_0D03), gl(0x000A_0D04)];
-    let resource = [gl(0x00BE_EF01), gl(0x00BE_EF02), gl(0x00BE_EF03), gl(0x00BE_EF04)];
+    let issuer_key = [
+        gl(0x0A11_CE01),
+        gl(0x0A11_CE02),
+        gl(0x0A11_CE03),
+        gl(0x0A11_CE04),
+    ];
+    let audience = [
+        gl(0x000A_0D01),
+        gl(0x000A_0D02),
+        gl(0x000A_0D03),
+        gl(0x000A_0D04),
+    ];
+    let resource = [
+        gl(0x00BE_EF01),
+        gl(0x00BE_EF02),
+        gl(0x00BE_EF03),
+        gl(0x00BE_EF04),
+    ];
 
     assert_eq!(
         BearerCapability::issue(&issuer_key, SENTINEL_MIN_ID, audience).err(),
@@ -914,7 +1034,11 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     let rev_tree = SortedRevocationTree::new(
         5,
         7,
-        &[[gl(0), gl(0), gl(0), gl(50)], tok_revoked, [gl(0), gl(0), gl(0), gl(500)]],
+        &[
+            [gl(0), gl(0), gl(0), gl(50)],
+            tok_revoked,
+            [gl(0), gl(0), gl(0), gl(500)],
+        ],
     )
     .unwrap();
     assert_eq!(
@@ -969,12 +1093,9 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     assert!(cap_rel.verify(&stmt, ctx, regime, &decoded));
     assert!(!cap_rel.verify(&stmt, b"wrong-context", regime, &decoded));
 
-    let mut bad_wire = wire;
-    let mid = bad_wire.len() / 2;
-    bad_wire[mid] ^= 0x01;
-    {
-        let bad_dec = ZkCapabilityBatchProof::from_bytes(&bad_wire, &cap_rel, regime)
-            .expect("payload mutation must reach capability verification");
-        assert!(!cap_rel.verify(&stmt, ctx, regime, &bad_dec));
-    }
+    assert_wire_bit_flips_rejected(
+        &wire,
+        |bytes| ZkCapabilityBatchProof::from_bytes(bytes, &cap_rel, regime),
+        |proof| cap_rel.verify(&stmt, ctx, regime, proof),
+    );
 }

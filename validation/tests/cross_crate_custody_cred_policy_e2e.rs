@@ -70,11 +70,11 @@ use qsag_fts::{FrontierDpTable, FrontierFtsProfile};
 use qsag_hd::HdError;
 use qsag_hd::budget::DurableQueryBudget;
 use qsag_policy::{
-    AuthorizedSignReleaseToken, CapabilityError, CapabilityGate, CapabilityRequest, Caveat, Discharge, MacaroonVerifier,
-    PQ_BISCUIT_HOP_CRYPTO_BYTES, PolicyAuthenticatedOt, PolicyEngine, PolicyGuardDkgRound1,
-    PolicySignerGuardShare, PolicyViolation, PqBiscuit, PqBiscuitAuthorityKey, QuorumTierRule,
-    SigningPayloadBinding, SpongeMacaroon, TransactionIntent, TransactionPolicy,
-    finalize_distributed_policy_guard,
+    AuthorizedSignReleaseToken, CapabilityError, CapabilityGate, CapabilityRequest, Caveat,
+    Discharge, MacaroonVerifier, PQ_BISCUIT_HOP_CRYPTO_BYTES, PolicyAuthenticatedOt, PolicyEngine,
+    PolicyGuardDkgRound1, PolicySignerGuardShare, PolicyViolation, PqBiscuit,
+    PqBiscuitAuthorityKey, QuorumTierRule, SigningPayloadBinding, SpongeMacaroon,
+    TransactionIntent, TransactionPolicy, finalize_distributed_policy_guard,
 };
 
 // ============================================================================
@@ -86,13 +86,11 @@ struct TempDirGuard(PathBuf);
 impl TempDirGuard {
     fn new(prefix: &str) -> Self {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        // Atomically claim a fresh path, including after PID reuse or an interrupted run.
-        // Neither policy timestamps nor test success depend on the wall clock.
+        // `create_dir` claims the path atomically; a leftover from a reused PID is skipped.
         let dir = loop {
             let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let candidate = std::env::temp_dir().join(format!(
-                "qsag-e7-{prefix}-{}-{seq}", std::process::id()
-            ));
+            let candidate =
+                std::env::temp_dir().join(format!("qsag-e7-{prefix}-{}-{seq}", std::process::id()));
             match fs::create_dir(&candidate) {
                 Ok(()) => break candidate,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -308,9 +306,14 @@ fn provision_dealerless_policy_guards(
     let mut inboxes_commits: BTreeMap<u16, Vec<_>> =
         party_ids.iter().map(|&id| (id, Vec::new())).collect();
     for (idx, &pid) in party_ids.iter().enumerate() {
-        let (st, commits) =
-            PolicyGuardDkgRound1::new_with_capacity(pid, party_ids, setup_id, [0x21 + idx as u8; 32], slots)
-                .expect("PolicyGuardDkgRound1");
+        let (st, commits) = PolicyGuardDkgRound1::new_with_capacity(
+            pid,
+            party_ids,
+            setup_id,
+            [0x21 + idx as u8; 32],
+            slots,
+        )
+        .expect("PolicyGuardDkgRound1");
         for c in commits {
             inboxes_commits.get_mut(&c.recipient).unwrap().push(c);
         }
@@ -364,8 +367,8 @@ fn provision_dealerless_policy_guards(
     })
 }
 
-/// Check the policy API independently of whether a downstream signer consumes the
-/// party binding. The consumer must call `matches_signing_party` too.
+/// Splits a quorum release into per-party tokens (quorum order) and checks the policy
+/// API's party binding: each token authorizes its owner and no other presenter.
 fn split_and_check_party_bindings(
     release: AuthorizedSignReleaseToken,
     key_id: &[u8; 32],
@@ -376,30 +379,36 @@ fn split_and_check_party_bindings(
     assert_eq!(release.party_id(), None);
     assert_eq!(release.quorum_ids(), quorum);
     for &party in quorum {
-        assert!(!release.matches_signing_party(party, key_id, msg, ctx, quorum),
-            "unsplit release must not authorize a single party");
+        assert!(
+            !release.matches_signing_party(party, key_id, msg, ctx, quorum),
+            "unsplit release must not authorize a single party"
+        );
     }
     let tokens = release.into_quorum_party_tokens();
     assert_eq!(tokens.len(), quorum.len());
-    tokens.into_iter().zip(quorum).map(|(token, &owner)| {
-        assert_eq!(token.party_id(), Some(owner));
-        for &presenting_party in quorum {
-            assert_eq!(
-                token.matches_signing_party(presenting_party, key_id, msg, ctx, quorum),
-                presenting_party == owner,
-                "party {presenting_party} must not spend party {owner}'s token"
-            );
-        }
-        assert!(!quorum.contains(&0));
-        assert!(!token.matches_signing_party(0, key_id, msg, ctx, quorum));
-        // A child token cannot be expanded back into the entire quorum's authority.
-        let mut again = token.into_quorum_party_tokens();
-        assert_eq!(again.len(), 1);
-        let child = again.remove(0);
-        assert_eq!(child.party_id(), Some(owner));
-        assert!(child.matches_signing_party(owner, key_id, msg, ctx, quorum));
-        child
-    }).collect()
+    tokens
+        .into_iter()
+        .zip(quorum)
+        .map(|(token, &owner)| {
+            assert_eq!(token.party_id(), Some(owner));
+            for &presenting_party in quorum {
+                assert_eq!(
+                    token.matches_signing_party(presenting_party, key_id, msg, ctx, quorum),
+                    presenting_party == owner,
+                    "party {presenting_party} must not spend party {owner}'s token"
+                );
+            }
+            assert!(!quorum.contains(&0));
+            assert!(!token.matches_signing_party(0, key_id, msg, ctx, quorum));
+            // A child token cannot be expanded back into the entire quorum's authority.
+            let mut again = token.into_quorum_party_tokens();
+            assert_eq!(again.len(), 1);
+            let child = again.remove(0);
+            assert_eq!(child.party_id(), Some(owner));
+            assert!(child.matches_signing_party(owner, key_id, msg, ctx, quorum));
+            child
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -464,8 +473,10 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
         let (s2, rest) = rest.split_at_mut(1);
         let (_, s4) = rest.split_at_mut(1);
         let mut quorum = [&mut s0[0], &mut s2[0], &mut s4[0]];
-        let mut store_refs: Vec<&mut dyn CounterStore> =
-            stores.iter_mut().map(|s| s as &mut dyn CounterStore).collect();
+        let mut store_refs: Vec<&mut dyn CounterStore> = stores
+            .iter_mut()
+            .map(|s| s as &mut dyn CounterStore)
+            .collect();
         let sess_ent = [[0x31; 32], [0x32; 32], [0x33; 32]];
         let (spdz_sess, grants) =
             SpdzSession::begin(&mut quorum, &mut store_refs, [0xE0; 32], 0, 1, &sess_ent)
@@ -495,8 +506,10 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
         let (s2, rest) = rest.split_at_mut(1);
         let (_, s4) = rest.split_at_mut(1);
         let mut quorum = [&mut s0[0], &mut s2[0], &mut s4[0]];
-        let mut store_refs: Vec<&mut dyn CounterStore> =
-            stores.iter_mut().map(|s| s as &mut dyn CounterStore).collect();
+        let mut store_refs: Vec<&mut dyn CounterStore> = stores
+            .iter_mut()
+            .map(|s| s as &mut dyn CounterStore)
+            .collect();
         let sess_ent = [[0x41; 32], [0x42; 32], [0x43; 32]];
         let (spdz_sess, grants) =
             SpdzSession::begin(&mut quorum, &mut store_refs, [0xE1; 32], 1, 1, &sess_ent)
@@ -521,7 +534,11 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     let (issuer_mldsa_pk, issuer_mldsa_sk) =
         ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x55; 32]);
     let root_attestation = accumulator
-        .attest_root_deterministic(MlDsaLevel::MlDsa44, &issuer_mldsa_sk, issuer_mldsa_pk.clone())
+        .attest_root_deterministic(
+            MlDsaLevel::MlDsa44,
+            &issuer_mldsa_sk,
+            issuer_mldsa_pk.clone(),
+        )
         .expect("attest_root_deterministic");
     assert!(root_attestation.verify(&issuer_mldsa_pk, &oprf_pk));
 
@@ -562,9 +579,7 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
 
     // Cross-crate Poseidon2 rate-6 parity check: `qsag-agg` derived root MUST equal `qsag-cred`
     // accumulator root limb-for-limb!
-    let agg_root_u64: [u64; 6] = zk_statement
-        .accumulator_root
-        .map(|x| x.to_canonical_u64());
+    let agg_root_u64: [u64; 6] = zk_statement.accumulator_root.map(|x| x.to_canonical_u64());
     assert_eq!(
         agg_root_u64,
         *root_attestation.accumulator_root(),
@@ -582,9 +597,14 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     // 5. Prove & verify succinct `~239 KiB` `zk-Hem` presentation!
     let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
     let verifier_ctx = b"qsag-e2e-verifier-challenge-nonce-v1";
-    let zk_proof =
-        prove_presentation(&zk_statement, &zk_witness, verifier_ctx, regime, &[0x7A; 32])
-            .expect("prove_presentation");
+    let zk_proof = prove_presentation(
+        &zk_statement,
+        &zk_witness,
+        verifier_ctx,
+        regime,
+        &[0x7A; 32],
+    )
+    .expect("prove_presentation");
 
     let proof_bytes = zk_proof.to_bytes();
     assert!(
@@ -592,7 +612,9 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
         "expected ~239 KiB succinct BlindVC zk-Hem proof, got {} B",
         proof_bytes.len()
     );
-    let shape = zk_statement.shape().expect("well-formed BlindVcStatement shape");
+    let shape = zk_statement
+        .shape()
+        .expect("well-formed BlindVcStatement shape");
     let decoded =
         ZkHemProof::from_bytes(&proof_bytes, &shape, regime).expect("ZkHemProof::from_bytes");
     assert_eq!(decoded, zk_proof);
@@ -629,11 +651,22 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     ));
     let mut forged_scope = zk_statement.clone();
     forged_scope.scope[0] += AggGoldilocks::ONE;
-    assert!(!verify_presentation(&forged_scope, verifier_ctx, regime, &decoded));
+    assert!(!verify_presentation(
+        &forged_scope,
+        verifier_ctx,
+        regime,
+        &decoded
+    ));
     let mut forged_witness = zk_witness;
     forged_witness.holder_blind[0] += AggGoldilocks::ONE;
     assert_eq!(
-        prove_presentation(&zk_statement, &forged_witness, verifier_ctx, regime, &[0x7B; 32]),
+        prove_presentation(
+            &zk_statement,
+            &forged_witness,
+            verifier_ctx,
+            regime,
+            &[0x7B; 32]
+        ),
         Err(ZkHemError::Unsatisfied)
     );
 }
@@ -749,28 +782,24 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     // Flow B1: `SpongeMacaroon` + 3rd-party `Discharge` -> `PolicyEngine` -> `ThresholdMlDsa`
     // ------------------------------------------------------------------------
     let session_b1 = [0x71; 32];
-    let (mut intent_b1, _) = TransactionIntent::builder(
-        2026,
-        WitnessSuiteTag::MlDsa44,
-        recipient.clone(),
-        4_500,
-    )
-    .window_id(0)
-    .timestamp_secs(2_500)
-    .initiator_and_approvers(10, &[20, 30, 40])
-    .bind_signing_payload(
-        &SigningPayloadBinding {
-            key_id: canonical_key_id,
-            payload: b"wire-transfer-001: 4500 units",
-            ctx: signing_ctx,
-            session_id: session_b1,
-            policy_revision: 1,
-            quorum: &quorum,
-            authority_pk,
-        },
-        &policy,
-    )
-    .expect("bind_signing_payload B1");
+    let (mut intent_b1, _) =
+        TransactionIntent::builder(2026, WitnessSuiteTag::MlDsa44, recipient.clone(), 4_500)
+            .window_id(0)
+            .timestamp_secs(2_500)
+            .initiator_and_approvers(10, &[20, 30, 40])
+            .bind_signing_payload(
+                &SigningPayloadBinding {
+                    key_id: canonical_key_id,
+                    payload: b"wire-transfer-001: 4500 units",
+                    ctx: signing_ctx,
+                    session_id: session_b1,
+                    policy_revision: 1,
+                    quorum: &quorum,
+                    authority_pk,
+                },
+                &policy,
+            )
+            .expect("bind_signing_payload B1");
     let signing_bytes_b1 = guards[0]
         .authenticate_initiated_intent(&policy, &mut intent_b1)
         .expect("authenticate_initiated_intent B1");
@@ -821,7 +850,11 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             CapabilityError::UnboundDischarge
         ))
     );
-    assert!(guards.iter().all(|g| !g.is_poisoned() && g.accumulated_window_spend() == 0));
+    assert!(
+        guards
+            .iter()
+            .all(|g| !g.is_poisoned() && g.accumulated_window_spend() == 0)
+    );
 
     // Bind discharge to parent macaroon and authorize through the 4-round BDOZ barrier!
     let mut bound_discharge = unbound_discharge;
@@ -847,10 +880,18 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
         )
         .expect("PolicyEngine authorize B1");
     assert_eq!(guards[0].accumulated_window_spend(), 0);
-    assert!(guards[1..4].iter().all(|g| g.accumulated_window_spend() == 4_500));
+    assert!(
+        guards[1..4]
+            .iter()
+            .all(|g| g.accumulated_window_spend() == 4_500)
+    );
 
     let party_tokens_b1 = split_and_check_party_bindings(
-        release_b1, &canonical_key_id, &signing_bytes_b1, signing_ctx, &quorum,
+        release_b1,
+        &canonical_key_id,
+        &signing_bytes_b1,
+        signing_ctx,
+        &quorum,
     );
 
     // Execute real policy-gated 3-of-4 (`2t - 1 = 3`) threshold ML-DSA signing across `[20, 30, 40]`!
@@ -934,7 +975,11 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             &dp_1122,
             [0xC1; 32],
             audience,
-            &[Caveat::NotBefore(2_000), Caveat::ExpiresAt(6_000), Caveat::MaxAmount(5_000)],
+            &[
+                Caveat::NotBefore(2_000),
+                Caveat::ExpiresAt(6_000),
+                Caveat::MaxAmount(5_000),
+            ],
             [0xC2; 32],
             &[0xC3; 32],
             &accel,
@@ -976,9 +1021,16 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             &accel,
         )
         .expect("PqBiscuit attenuate");
-    let bound_req = CapabilityRequest::from_policy_intent(&policy, &intent_b2, required_actions, 3_000);
+    let bound_req =
+        CapabilityRequest::from_policy_intent(&policy, &intent_b2, required_actions, 3_000);
     let sealed_biscuit = step2
-        .seal(&biscuit_hop1, &dp_1122, Some(&bound_req), &[0xC6; 32], &accel)
+        .seal(
+            &biscuit_hop1,
+            &dp_1122,
+            Some(&bound_req),
+            &[0xC6; 32],
+            &accel,
+        )
         .expect("PqBiscuit seal");
 
     let biscuit_wire = sealed_biscuit.to_bytes().expect("PqBiscuit::to_bytes");
@@ -993,7 +1045,9 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     // Replay at a different timestamp (`3_001 != 3_000`) fails PoP request-bound seal verification!
     assert_eq!(
         engine.verify_capability(&intent_b2, 3_001, &biscuit_gate),
-        Err(PolicyViolation::CapabilityDenied(CapabilityError::InvalidTag))
+        Err(PolicyViolation::CapabilityDenied(
+            CapabilityError::InvalidTag
+        ))
     );
 
     let release_b2 = engine
@@ -1006,10 +1060,18 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             &accel,
         )
         .expect("PolicyEngine authorize B2 via Compact1122 PqBiscuit");
-    assert!(guards[1..4].iter().all(|g| g.accumulated_window_spend() == 5_300));
+    assert!(
+        guards[1..4]
+            .iter()
+            .all(|g| g.accumulated_window_spend() == 5_300)
+    );
 
     let party_tokens_b2 = split_and_check_party_bindings(
-        release_b2, &canonical_key_id, &signing_bytes_b2, signing_ctx, &quorum,
+        release_b2,
+        &canonical_key_id,
+        &signing_bytes_b2,
+        signing_ctx,
+        &quorum,
     );
     let party_inputs_b2: Vec<_> = mldsa_shares[1..4]
         .iter_mut()
@@ -1042,38 +1104,46 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     // hijacked signing payload MUST be rejected by `threshold_sign_mldsa_party_policy_gated` with
     // `PolicyTokenDigestMismatch` before running any MPC round!
     let session_b3 = [0x73; 32];
-    let (mut intent_b3, _) = TransactionIntent::builder(
-        2026,
-        WitnessSuiteTag::MlDsa44,
-        recipient,
-        100,
-    )
-    .rolling_window(5_300, [0; 32])
-    .window_id(0)
-    .timestamp_secs(3_100)
-    .initiator_and_approvers(10, &[20, 30, 40])
-    .bind_signing_payload(
-        &SigningPayloadBinding {
-            key_id: canonical_key_id,
-            payload: b"wire-transfer-003: 100 units",
-            ctx: signing_ctx,
-            session_id: session_b3,
-            policy_revision: 1,
-            quorum: &quorum,
-            authority_pk,
-        },
-        &policy,
-    )
-    .expect("bind_signing_payload B3");
-    let _ = guards[0]
+    let (mut intent_b3, _) =
+        TransactionIntent::builder(2026, WitnessSuiteTag::MlDsa44, recipient, 100)
+            .rolling_window(5_300, [0; 32])
+            .window_id(0)
+            .timestamp_secs(3_100)
+            .initiator_and_approvers(10, &[20, 30, 40])
+            .bind_signing_payload(
+                &SigningPayloadBinding {
+                    key_id: canonical_key_id,
+                    payload: b"wire-transfer-003: 100 units",
+                    ctx: signing_ctx,
+                    session_id: session_b3,
+                    policy_revision: 1,
+                    quorum: &quorum,
+                    authority_pk,
+                },
+                &policy,
+            )
+            .expect("bind_signing_payload B3");
+    let signing_bytes_b3 = guards[0]
         .authenticate_initiated_intent(&policy, &mut intent_b3)
         .expect("authenticate_initiated_intent B3");
     let intent_digest_b3 = intent_b3.canonical_digest();
     let release_b3 = engine
-        .authorize_committed_barrier(&intent_b3, session_b3, 3_100, None, &mut guards[1..4], &accel)
+        .authorize_committed_barrier(
+            &intent_b3,
+            session_b3,
+            3_100,
+            None,
+            &mut guards[1..4],
+            &accel,
+        )
         .expect("PolicyEngine authorize B3");
     let mut party_tokens_b3 = release_b3.into_quorum_party_tokens();
     let tok0_b3 = party_tokens_b3.remove(0);
+    let tok1_b3 = party_tokens_b3.remove(0);
+    assert_eq!(
+        (tok0_b3.party_id(), tok1_b3.party_id()),
+        (Some(20), Some(30))
+    );
 
     let mut dummy_ep = MpcEndpoint {
         net: Arc::new(LocalMpcNet {
@@ -1087,6 +1157,8 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
         }),
         me: 0,
     };
+    let epoch_before_refusals = burn_stores[1].next_epoch(&canonical_key_id, 20);
+    assert!(epoch_before_refusals.is_ok());
     let bad_res = threshold_sign_mldsa_party_policy_gated(
         &mut mldsa_shares[1],
         ThresholdPolicyGate {
@@ -1103,6 +1175,30 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     assert_eq!(
         bad_res.err(),
         Some(ThresholdMlDsaError::PolicyTokenDigestMismatch)
+    );
+
+    // Custodian `20` presenting custodian `30`'s token for the authorized payload is refused
+    // the same way, and neither refusal burns a nonce epoch.
+    let swapped_res = threshold_sign_mldsa_party_policy_gated(
+        &mut mldsa_shares[1],
+        ThresholdPolicyGate {
+            token: tok1_b3,
+            expected_intent_digest: &intent_digest_b3,
+            quorum: &quorum,
+        },
+        &signing_bytes_b3,
+        signing_ctx,
+        &[0x9A; 32],
+        &mut burn_stores[1],
+        &mut dummy_ep,
+    );
+    assert_eq!(
+        swapped_res.err(),
+        Some(ThresholdMlDsaError::PolicyTokenDigestMismatch)
+    );
+    assert_eq!(
+        burn_stores[1].next_epoch(&canonical_key_id, 20),
+        epoch_before_refusals
     );
 }
 
@@ -1129,7 +1225,10 @@ fn e2e_nonce_burn_reopen_preserves_public_replay_contract() {
     // Reservations are scoped to the party, so another custodian may reserve its own tuple.
     assert_eq!(store.next_epoch(&key, 30), Ok(0));
     assert!(store.reserve(30, 0, &session, 0));
-    assert_eq!(store.next_epoch(&[0xff; 32], 20), Err(ThresholdMlDsaError::NoncePersistenceFailed));
+    assert_eq!(
+        store.next_epoch(&[0xff; 32], 20),
+        Err(ThresholdMlDsaError::NoncePersistenceFailed)
+    );
     drop(store);
 
     let mut reopened = FsNonceBurnStore::open(&path, key, mac_key).unwrap();
@@ -1195,15 +1294,19 @@ fn e2e_qsburn05_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         let raw = fs::read(&p).unwrap();
         let id = burn_file_identity_be(&p);
 
-        let expected_gen_mac = cshake256_framed_32_nist_ref(
-            b"QSAG.BURN.GENESIS.V4",
-            &[&mac_key, &id, &raw[..72]],
-        );
+        let expected_gen_mac =
+            cshake256_framed_32_nist_ref(b"QSAG.BURN.GENESIS.V4", &[&mac_key, &id, &raw[..72]]);
         assert_eq!(&raw[72..104], &expected_gen_mac);
 
         let expected_rec1_mac = cshake256_framed_32_nist_ref(
             b"QSAG.BURN.RECORD.V2",
-            &[&mac_key, &key, &genesis, &expected_gen_mac, &raw[HEADER_BYTES..HEADER_BYTES + 10]],
+            &[
+                &mac_key,
+                &key,
+                &genesis,
+                &expected_gen_mac,
+                &raw[HEADER_BYTES..HEADER_BYTES + 10],
+            ],
         );
         assert_eq!(tag1, expected_rec1_mac);
 
@@ -1320,7 +1423,10 @@ fn e2e_qsburn05_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         let mut recovered = DurableBurnJournal::open_existing(&p, key, mac_key).unwrap();
         assert_eq!(recovered.checkpoint().generation, 3);
         assert_eq!(recovered.checkpoint().tag, tag3);
-        assert!(recovered.reserve(&key, 2, 12).is_err(), "record 3 must stay burned");
+        assert!(
+            recovered.reserve(&key, 2, 12).is_err(),
+            "record 3 must stay burned"
+        );
         drop(recovered);
         let healed = fs::read(&p).unwrap();
         assert_eq!(healed.len(), HEADER_BYTES + 3 * QSBURN05_REC_BYTES);
@@ -1354,7 +1460,8 @@ fn e2e_qsburn05_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         // Truncating record #2 off disk while HWM slots hold `2` -> refused!
         let (p, _, _, _) = mk_two_burns("truncated_chain.burn");
         let f = OpenOptions::new().write(true).open(&p).unwrap();
-        f.set_len((HEADER_BYTES + QSBURN05_REC_BYTES) as u64).unwrap();
+        f.set_len((HEADER_BYTES + QSBURN05_REC_BYTES) as u64)
+            .unwrap();
         f.sync_all().unwrap();
         assert!(DurableBurnJournal::open_existing(&p, key, mac_key).is_err());
     }
@@ -1414,7 +1521,10 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         assert_eq!(&raw[0..8], b"QSAGREC1");
         let lock_seal: [u8; 8] = raw[8..16].try_into().unwrap();
         let data_seal = asm_file_identity(&fs::metadata(&p).unwrap());
-        assert_eq!(&raw[RECORD_HEADER_BYTES..RECORD_HEADER_BYTES + 16], &data_seal);
+        assert_eq!(
+            &raw[RECORD_HEADER_BYTES..RECORD_HEADER_BYTES + 16],
+            &data_seal
+        );
         (p, lock_seal, data_seal, mac1, mac2)
     };
 
@@ -1427,12 +1537,28 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
 
         let mac0 = cshake256_framed_32_nist_ref(
             b"QSAG.HD.QUERY_BUDGET.V3",
-            &[&key, &family, &lock_seal, &data_seal, &limit_le, &0u64.to_le_bytes(), &[0u8; 32]],
+            &[
+                &key,
+                &family,
+                &lock_seal,
+                &data_seal,
+                &limit_le,
+                &0u64.to_le_bytes(),
+                &[0u8; 32],
+            ],
         );
         assert_eq!(&raw[HEADER_BYTES + 8..HEADER_BYTES + 40], &mac0);
         let expected_mac1 = cshake256_framed_32_nist_ref(
             b"QSAG.HD.QUERY_BUDGET.V3",
-            &[&key, &family, &lock_seal, &data_seal, &limit_le, &1u64.to_le_bytes(), &mac0],
+            &[
+                &key,
+                &family,
+                &lock_seal,
+                &data_seal,
+                &limit_le,
+                &1u64.to_le_bytes(),
+                &mac0,
+            ],
         );
         assert_eq!(mac1, expected_mac1);
 
@@ -1504,7 +1630,17 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         let hwm_mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
             cshake256_framed_32_nist_ref(
                 b"QSAG.HD.QUERY_BUDGET.HWM.V4",
-                &[&key, &family, &lock_seal, &data_seal, &[slot], &limit_le, used, tip, res],
+                &[
+                    &key,
+                    &family,
+                    &lock_seal,
+                    &data_seal,
+                    &[slot],
+                    &limit_le,
+                    used,
+                    tip,
+                    res,
+                ],
             )
         };
         let hwm = TwoSlotHwm::paged(1, CounterOrder::Little, &hwm_mac);
@@ -1591,7 +1727,17 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
         let hwm_mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
             cshake256_framed_32_nist_ref(
                 b"QSAG.HD.QUERY_BUDGET.HWM.V4",
-                &[&key, &family, &lock_seal, &data_seal, &[slot], &limit_le, used, tip, res],
+                &[
+                    &key,
+                    &family,
+                    &lock_seal,
+                    &data_seal,
+                    &[slot],
+                    &limit_le,
+                    used,
+                    tip,
+                    res,
+                ],
             )
         };
         let hwm = TwoSlotHwm::paged(1, CounterOrder::Little, &hwm_mac);
@@ -1687,28 +1833,24 @@ fn e2e_shamir_17_custodian_committee_policy_gated_mldsa_signing() {
     let session_id = [0x9C; 32];
     let signing_ctx = b"qsag-shamir-17-policy-mldsa";
 
-    let (mut intent, _) = TransactionIntent::builder(
-        2026,
-        WitnessSuiteTag::MlDsa44,
-        recipient,
-        2_500,
-    )
-    .window_id(0)
-    .timestamp_secs(500)
-    .initiator_and_approvers(10, &quorum)
-    .bind_signing_payload(
-        &SigningPayloadBinding {
-            key_id: canonical_key_id,
-            payload: b"shamir-17-transfer: 2500 units",
-            ctx: signing_ctx,
-            session_id,
-            policy_revision: 1,
-            quorum: &quorum,
-            authority_pk: [0xAB; 32],
-        },
-        &policy,
-    )
-    .unwrap();
+    let (mut intent, _) =
+        TransactionIntent::builder(2026, WitnessSuiteTag::MlDsa44, recipient, 2_500)
+            .window_id(0)
+            .timestamp_secs(500)
+            .initiator_and_approvers(10, &quorum)
+            .bind_signing_payload(
+                &SigningPayloadBinding {
+                    key_id: canonical_key_id,
+                    payload: b"shamir-17-transfer: 2500 units",
+                    ctx: signing_ctx,
+                    session_id,
+                    policy_revision: 1,
+                    quorum: &quorum,
+                    authority_pk: [0xAB; 32],
+                },
+                &policy,
+            )
+            .unwrap();
     let signing_bytes = guards[0]
         .authenticate_initiated_intent(&policy, &mut intent)
         .unwrap();
@@ -1719,7 +1861,11 @@ fn e2e_shamir_17_custodian_committee_policy_gated_mldsa_signing() {
         .authorize_committed_barrier(&intent, session_id, 500, None, &mut guards[1..4], &accel)
         .expect("PolicyEngine authorize Shamir-17");
     let party_tokens = split_and_check_party_bindings(
-        release, &canonical_key_id, &signing_bytes, signing_ctx, &quorum,
+        release,
+        &canonical_key_id,
+        &signing_bytes,
+        signing_ctx,
+        &quorum,
     );
 
     // Extract shares for `[50, 110, 170]` (indices `4, 10, 16`) in ascending order!

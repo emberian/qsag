@@ -19,11 +19,7 @@ impl ExactNat {
     }
 
     pub fn from_u64(v: u64) -> Self {
-        if v == 0 {
-            Self::zero()
-        } else {
-            Self(vec![v])
-        }
+        if v == 0 { Self::zero() } else { Self(vec![v]) }
     }
 
     pub fn from_u64_limbs_le(limbs: &[u64]) -> Self {
@@ -169,7 +165,9 @@ impl ExactNat {
         let mut cur = self.clone();
         let mut chunks = Vec::new();
         while !cur.is_zero() {
-            let (q, r) = cur.div_rem_u32(1_000_000_000).expect("nonzero decimal radix");
+            let (q, r) = cur
+                .div_rem_u32(1_000_000_000)
+                .expect("nonzero decimal radix");
             chunks.push(r);
             cur = q;
         }
@@ -208,7 +206,7 @@ impl PartialOrd for ExactNat {
 /// Exact falling factorial `ffTop(n, k) = n * (n - 1) * ... * (n - k + 1)` matching
 /// `Qsag.PorsFpSecurity.ffTop` (`0` if `n < k`).
 pub fn ff_top_exact(n: u64, k: usize) -> ExactNat {
-    if (n as usize) < k {
+    if n < k as u64 {
         return ExactNat::zero();
     }
     let mut acc = ExactNat::from_u64(1);

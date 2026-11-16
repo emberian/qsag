@@ -3,9 +3,9 @@
 //! exhaustive sets/words, and RustCrypto rather than production QSAG helpers.
 
 use qsag_external_validation::spec_ref::{
-    ExactNat, cshake256_framed_32_nist_ref, cshake256_framed_nist_ref,
-    exact_neg_log2_floor_bits, exact_neg_log2_floor_millibits, ff_top_exact,
-    frontier_fts_cardinalities_ref, octopus_cover_ref, rational_at_least_bits,
+    ExactNat, cshake256_framed_32_nist_ref, cshake256_framed_nist_ref, exact_neg_log2_floor_bits,
+    exact_neg_log2_floor_millibits, ff_top_exact, frontier_fts_cardinalities_ref,
+    octopus_cover_ref, rational_at_least_bits,
 };
 use qsag_external_validation::{cshake256_nist_sp800_185_ref, nist_left_encode};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -19,9 +19,21 @@ fn exact_nat_normalization_carries_shifts_and_division() {
     assert_eq!(ExactNat::from_u64_limbs_le(&[0, 0, 0]), ExactNat::zero());
     assert_eq!(ExactNat::from_u64_limbs_le(&[7, 0, 0]), nat(7));
     assert_eq!(nat(0).bit_len(), 0);
-    for a in [0, 1, 2, u32::MAX as u64, 1 << 32, 1 << 63, u64::MAX - 1, u64::MAX] {
+    for a in [
+        0,
+        1,
+        2,
+        u32::MAX as u64,
+        1 << 32,
+        1 << 63,
+        u64::MAX - 1,
+        u64::MAX,
+    ] {
         for b in [0, 1, 3, 1 << 32, u64::MAX] {
-            assert_eq!(nat(a as u128).add(&nat(b as u128)), nat(a as u128 + b as u128));
+            assert_eq!(
+                nat(a as u128).add(&nat(b as u128)),
+                nat(a as u128 + b as u128)
+            );
             let product = nat(a as u128 * b as u128);
             assert_eq!(nat(a as u128).mul(&nat(b as u128)), product);
             assert_eq!(nat(a as u128).mul_u64(b), product);
@@ -31,7 +43,10 @@ fn exact_nat_normalization_carries_shifts_and_division() {
         assert_eq!(nat(a).to_decimal_string(), a.to_string());
         assert_eq!(nat(a).bit_len(), 128 - a.leading_zeros() as usize);
         for d in [1, 2, 3, 1_000_000_000, u32::MAX] {
-            assert_eq!(nat(a).div_rem_u32(d), Some((nat(a / d as u128), (a % d as u128) as u32)));
+            assert_eq!(
+                nat(a).div_rem_u32(d),
+                Some((nat(a / d as u128), (a % d as u128) as u32))
+            );
         }
         assert_eq!(nat(a).div_rem_u32(0), None);
     }
@@ -55,7 +70,10 @@ fn exact_nat_normalization_carries_shifts_and_division() {
     for shift in [0, 1, 63, 64, 65, 127, 128, 255] {
         let shifted = nat(3).shl_bits(shift);
         assert_eq!(shifted.bit_len(), shift + 2);
-        assert_eq!(shifted, nat(1).shl_bits(shift).add(&nat(1).shl_bits(shift + 1)));
+        assert_eq!(
+            shifted,
+            nat(1).shl_bits(shift).add(&nat(1).shl_bits(shift + 1))
+        );
         assert_eq!(nat(0).shl_bits(shift), nat(0));
     }
     assert_eq!(nat(0).pow_u32(0), nat(1));
@@ -78,7 +96,13 @@ fn rational_floors_are_sound_at_zero_and_power_boundaries() {
         assert_eq!(exact_neg_log2_floor_bits(&num, &den), Some(k));
         assert_eq!(exact_neg_log2_floor_millibits(&num, &den), Some(1000 * k));
     }
-    for (n, d, expected) in [(1, 3, 1584), (2, 3, 584), (5, 8, 678), (1023, 1024, 1), (1024, 1025, 1)] {
+    for (n, d, expected) in [
+        (1, 3, 1584),
+        (2, 3, 584),
+        (5, 8, 678),
+        (1023, 1024, 1),
+        (1024, 1025, 1),
+    ] {
         let (num, den) = (nat(n), nat(d));
         let m = exact_neg_log2_floor_millibits(&num, &den).unwrap();
         assert_eq!(m, expected);
@@ -90,8 +114,14 @@ fn rational_floors_are_sound_at_zero_and_power_boundaries() {
     }
     for k in [1, 63, 64, 127] {
         let boundary = 1u128 << k;
-        assert_eq!(exact_neg_log2_floor_bits(&nat(1), &nat(boundary - 1)), Some(k - 1));
-        assert_eq!(exact_neg_log2_floor_bits(&nat(1), &nat(boundary + 1)), Some(k));
+        assert_eq!(
+            exact_neg_log2_floor_bits(&nat(1), &nat(boundary - 1)),
+            Some(k - 1)
+        );
+        assert_eq!(
+            exact_neg_log2_floor_bits(&nat(1), &nat(boundary + 1)),
+            Some(k)
+        );
     }
 }
 
@@ -158,8 +188,11 @@ fn octopus_root_and_maximum_height_boundaries() {
 #[test]
 fn nist_integer_width_bytepad_and_framing_boundaries() {
     for (x, expected) in [
-        (0, vec![1, 0]), (255, vec![1, 255]), (256, vec![2, 1, 0]),
-        (65535, vec![2, 255, 255]), (65536, vec![3, 1, 0, 0]),
+        (0, vec![1, 0]),
+        (255, vec![1, 255]),
+        (256, vec![2, 1, 0]),
+        (65535, vec![2, 255, 255]),
+        (65536, vec![3, 1, 0, 0]),
     ] {
         assert_eq!(nist_left_encode(x), expected);
     }
@@ -184,7 +217,10 @@ fn nist_integer_width_bytepad_and_framing_boundaries() {
                 sponge.update(&framed);
                 sponge.finalize_xof().read(&mut expected);
             }
-            assert_eq!(cshake256_framed_nist_ref(&custom, &[b"a", b"bc"], out_len), expected);
+            assert_eq!(
+                cshake256_framed_nist_ref(&custom, &[b"a", b"bc"], out_len),
+                expected
+            );
         }
     }
     // Both name and customization contribute separate encode_string values.
@@ -192,17 +228,29 @@ fn nist_integer_width_bytepad_and_framing_boundaries() {
     let custom = vec![0x53; 129];
     for input_len in [0, 135, 136, 137, 272] {
         let input = vec![0x58; input_len];
-        let mut sponge = sha3::CShake256::from_core(
-            sha3::CShake256Core::new_with_function_name(&name, &custom),
-        );
+        let mut sponge =
+            sha3::CShake256::from_core(sha3::CShake256Core::new_with_function_name(&name, &custom));
         sponge.update(&input);
         let mut expected = [0; 273];
         sponge.finalize_xof().read(&mut expected);
-        assert_eq!(cshake256_nist_sp800_185_ref(&name, &custom, &input, 273), expected);
+        assert_eq!(
+            cshake256_nist_sp800_185_ref(&name, &custom, &input, 273),
+            expected
+        );
     }
     let custom = b"framing-boundaries";
-    let cases: &[&[&[u8]]] = &[&[], &[b""], &[b"", b""], &[b"a", b"bc"], &[b"ab", b"c"], &[b"abc"]];
-    let outputs: Vec<_> = cases.iter().map(|fields| cshake256_framed_32_nist_ref(custom, fields)).collect();
+    let cases: &[&[&[u8]]] = &[
+        &[],
+        &[b""],
+        &[b"", b""],
+        &[b"a", b"bc"],
+        &[b"ab", b"c"],
+        &[b"abc"],
+    ];
+    let outputs: Vec<_> = cases
+        .iter()
+        .map(|fields| cshake256_framed_32_nist_ref(custom, fields))
+        .collect();
     for i in 0..outputs.len() {
         for j in 0..i {
             assert_ne!(outputs[i], outputs[j], "field count/length must be bound");

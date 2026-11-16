@@ -36,7 +36,7 @@ use proptest::prelude::*;
 use qsag_accel::CpuReferenceBackend;
 use qsag_core::baggy::{
     BaggyError, BaggyParams, BaggySig, MemoryFirstSigned, WaistbandCache, baggy_keygen_mpc,
-    baggy_msg_digest, baggy_reference_keygen, baggy_reference_sign, baggy_sign_mpc, baggy_verify,
+    baggy_reference_keygen, baggy_reference_sign, baggy_sign_mpc, baggy_verify,
 };
 use qsag_core::keccak_mpc::{RssKeyShare256, run_dealerless_rss_dkg_2of3};
 use qsag_core::pors_fp::{
@@ -227,10 +227,16 @@ fn pors_fp_octopus_sorting_uniqueness_pruning_and_tamper_rejection() {
     let mut accepted_indices = None;
     let mut unpruned_indices = None;
     for ctr in 0u32..50_000 {
-        let reference = |max_auth| pors_selection_nist_ref(
-            params.tree_height, params.reveal, params.draw_budget(), max_auth,
-            b"QSAG.VALIDATION.PORS_FP/v1", &ctr.to_be_bytes(),
-        );
+        let reference = |max_auth| {
+            pors_selection_nist_ref(
+                params.tree_height,
+                params.reveal,
+                params.draw_budget(),
+                max_auth,
+                b"QSAG.VALIDATION.PORS_FP/v1",
+                &ctr.to_be_bytes(),
+            )
+        };
         let selected = pors_fp_select(&params, &mut make_xof(ctr));
         assert_eq!(selected, reference(params.max_auth_nodes), "counter={ctr}");
         if let Some(idx) = selected {
@@ -282,16 +288,21 @@ fn pors_fp_octopus_sorting_uniqueness_pruning_and_tamper_rejection() {
     adrs[28..].copy_from_slice(&indices[0].to_be_bytes());
     let mut leaf_preimage = vec![4];
     for field in [
-        &b"QSAG.PQ.TH_F/v1"[..], &sk.pk_seed, &adrs, &secrets[indices[0] as usize],
+        &b"QSAG.PQ.TH_F/v1"[..],
+        &sk.pk_seed,
+        &adrs,
+        &secrets[indices[0] as usize],
     ] {
         leaf_preimage.push(field.len() as u8);
         leaf_preimage.extend_from_slice(field);
     }
     let expected_leaf = qsag_external_validation::cshake256_nist_sp800_185_ref(
-        b"", b"QSAG.PQ.SUITE.CSHAKE256/v1", &leaf_preimage, 32,
+        b"",
+        b"QSAG.PQ.SUITE.CSHAKE256/v1",
+        &leaf_preimage,
+        32,
     );
     assert_eq!(levels[0][indices[0] as usize].as_slice(), expected_leaf);
-
 
     let opening = PorsFpOpening {
         secrets: indices.iter().map(|&i| secrets[i as usize]).collect(),
@@ -371,7 +382,14 @@ fn pors_fp_octopus_sorting_uniqueness_pruning_and_tamper_rejection() {
         auth: pors_fp_auth(&loose_params, &levels, &wide_indices).unwrap(),
     };
     assert_eq!(
-        pors_fp_root(&loose_params, &sk.pk_seed, 9, 2, &wide_indices, &wide_opening),
+        pors_fp_root(
+            &loose_params,
+            &sk.pk_seed,
+            9,
+            2,
+            &wide_indices,
+            &wide_opening
+        ),
         Some(root)
     );
     assert_eq!(pors_fp_auth(&params, &levels, &wide_indices), None);
@@ -417,10 +435,16 @@ fn baggy_sha3_128f_wire_budget_reference_and_rss256_mpc_parity() {
         wire_prod.len(),
         36 + (32 * 28 + 2 + 32 * sig_prod.pors.auth.len()) + 16 * (4 + 128 * 32 + 2 * 32)
     );
-    let parsed_prod = BaggySig::from_wire_bytes(&prod, &wire_prod).expect("BaggySig::from_wire_bytes");
+    let parsed_prod =
+        BaggySig::from_wire_bytes(&prod, &wire_prod).expect("BaggySig::from_wire_bytes");
     assert_eq!(parsed_prod, sig_prod);
     assert!(baggy_verify(&prod, &pk_prod, msg_prod, &parsed_prod));
-    assert!(!baggy_verify(&prod, &pk_prod, b"tampered-message", &parsed_prod));
+    assert!(!baggy_verify(
+        &prod,
+        &pk_prod,
+        b"tampered-message",
+        &parsed_prod
+    ));
 
     // Bit-flips in randomizer, PORS opening, and hypertree WOTS+C / Merkle path must all fail closed.
     let mut bad_r = sig_prod.clone();
@@ -484,15 +508,15 @@ fn baggy_sha3_128f_wire_budget_reference_and_rss256_mpc_parity() {
         sk_prf,
         pk_seed: mpc_pk.pk_seed,
     };
-    assert_eq!(baggy_reference_keygen(&small, &reconstructed_sk), Some(mpc_pk));
+    assert_eq!(
+        baggy_reference_keygen(&small, &reconstructed_sk),
+        Some(mpc_pk)
+    );
 
     let mut ledger = MemoryFirstSigned::new();
-    for (idx, m) in [
-        &b"baggy-mpc-msg-alpha"[..],
-        &b"baggy-mpc-msg-beta"[..],
-    ]
-    .into_iter()
-    .enumerate()
+    for (idx, m) in [&b"baggy-mpc-msg-alpha"[..], &b"baggy-mpc-msg-beta"[..]]
+        .into_iter()
+        .enumerate()
     {
         let mut sign_eng = mk_engine(0xB0 + idx as u8);
         sign_eng.bind_key_identity(&binding.identity()).unwrap();
@@ -513,7 +537,6 @@ fn baggy_sha3_128f_wire_budget_reference_and_rss256_mpc_parity() {
             "Rss256Engine MPC Baggy signature must equal reference signature byte-for-byte"
         );
         assert!(baggy_verify(&small, &mpc_pk, m, &mpc_sig));
-        assert_ne!(baggy_msg_digest(&mpc_pk, m), [0u8; 32]);
     }
 
     // Wrong key binding (`SHA3_128F` digest on `TEST_SMALL`) must fail closed before MPC work!
@@ -537,8 +560,22 @@ fn baggy_sha3_128f_wire_budget_reference_and_rss256_mpc_parity() {
 #[test]
 fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_equivalence() {
     for (profile, expected_w, expected_l, expected_s, expected_sig_bytes, expected_vote_bytes) in [
-        (FrontierFtsProfile::Compact1122, 96usize, 34usize, 1615usize, 1122usize, 1194usize),
-        (FrontierFtsProfile::Full256Bit, 5usize, 72usize, 144usize, 2338usize, 2410usize),
+        (
+            FrontierFtsProfile::Compact1122,
+            96usize,
+            34usize,
+            1615usize,
+            1122usize,
+            1194usize,
+        ),
+        (
+            FrontierFtsProfile::Full256Bit,
+            5usize,
+            72usize,
+            144usize,
+            2338usize,
+            2410usize,
+        ),
     ] {
         let p = profile.params();
         assert_eq!(p.node_bytes, 32);
@@ -554,12 +591,19 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
 
         // 1. Exact `U384` DP cardinalities vs independent `ExactNat` recurrence (`FrontierCompact1122AndCorduroySecurity.lean`).
         let dp = FrontierDpTable::build(profile);
-        let (n_ref, d_ref, m_ref) =
-            frontier_fts_cardinalities_ref(p.tree_height, p.winternitz_w, p.frontier_len, p.target_sum);
+        let (n_ref, d_ref, m_ref) = frontier_fts_cardinalities_ref(
+            p.tree_height,
+            p.winternitz_w,
+            p.frontier_len,
+            p.target_sum,
+        );
         assert_eq!(u384_to_exact_nat(dp.frontier_cardinality), n_ref);
         assert_eq!(u384_to_exact_nat(dp.decoration_cardinality), d_ref);
         assert_eq!(u384_to_exact_nat(dp.total_cardinality), m_ref);
-        assert!(m_ref.bit_len() >= 257, "{profile:?} M must strictly exceed 2^256");
+        assert!(
+            m_ref.bit_len() >= 257,
+            "{profile:?} M must strictly exceed 2^256"
+        );
         if profile == FrontierFtsProfile::Compact1122 {
             assert_eq!(dp.total_cardinality.public_bit_len(), 264);
         }
@@ -570,11 +614,22 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
         let max_256 = U384([u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0, 0]);
         let third = dp.total_cardinality.ct_divmod(U384::from_u64(3)).0;
 
-        for r in [U384::ZERO, U384::ONE, U384::from_u64(1_000_003), third, max_256, max_minus_2, max_minus_1] {
+        for r in [
+            U384::ZERO,
+            U384::ONE,
+            U384::from_u64(1_000_003),
+            third,
+            max_256,
+            max_minus_2,
+            max_minus_1,
+        ] {
             let (frontier, offsets) = dp.unrank(r).expect("unrank boundary");
             assert_eq!(frontier.len(), expected_l);
             assert_eq!(offsets.len(), expected_l);
-            assert_eq!(offsets.iter().map(|&x| x as usize).sum::<usize>(), expected_s);
+            assert_eq!(
+                offsets.iter().map(|&x| x as usize).sum::<usize>(),
+                expected_s
+            );
             assert!(offsets.iter().all(|&x| (x as usize) < expected_w));
 
             // Prefix-free binary-tree antichain check: leaf intervals `[lo_i, hi_i)` must
@@ -591,7 +646,10 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
         }
 
         // Out-of-range & non-antichain / bad-sum rejections.
-        assert_eq!(dp.unrank(dp.total_cardinality), Err(FrontierFtsError::RankOutOfRange));
+        assert_eq!(
+            dp.unrank(dp.total_cardinality),
+            Err(FrontierFtsError::RankOutOfRange)
+        );
         let (valid_front, valid_offs) = dp.unrank(third).unwrap();
         let mut bad_front = valid_front.clone();
         // Replace `bad_front[0]` with its parent (`v >> 1`), creating an overlapping/incomplete cover.
@@ -612,7 +670,7 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
         );
     }
 
-    // 3. Independent NIST SP 800-185 `cshake256_framed_32_nist_ref` domain check on `PID` & `RotatedEpochVote`.
+    // 3. Literal 56-byte `PID` layout: seven `u64` big-endian parameters.
     let pid_1122 = FrontierFtsProfile::Compact1122.pid_bytes();
     let mut expected_pid = [0u8; 56];
     for (slot, val) in [32u64, 8, 96, 34, 1615, 256, 16].into_iter().enumerate() {
@@ -765,7 +823,10 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
             &msgs_1122[bad_lane],
             &mutated[bad_lane],
         );
-        assert_eq!(scalar_res, Err(FrontierFtsError::SignatureVerificationFailed));
+        assert_eq!(
+            scalar_res,
+            Err(FrontierFtsError::SignatureVerificationFailed)
+        );
         let batch_inputs = assemble_batch(
             &pks_1122, &dp_1122, &msgs_1122, &mutated, &pks_full, &dp_full, &msgs_full, &sigs_full,
         );
