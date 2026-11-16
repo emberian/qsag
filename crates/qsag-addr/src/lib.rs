@@ -63,6 +63,11 @@ pub enum WitnessSuiteTag {
     SlhDsa192f = 0x0204,
     SlhDsa256s = 0x0205,
     SlhDsa256f = 0x0206,
+    Baggy = 0x0211,
+    Jorts = 0x0212,
+    QuorumJorts = 0x0213,
+    JortsPoseidon2 = 0x0214,
+    CorduroyPoseidon2 = 0x0215,
     FrontierSumFts = 0x0301,
     ParallelSeededFts = 0x0302,
     PiHdCommitInventory = 0x0401,
@@ -84,6 +89,11 @@ impl WitnessSuiteTag {
             0x0204 => Ok(Self::SlhDsa192f),
             0x0205 => Ok(Self::SlhDsa256s),
             0x0206 => Ok(Self::SlhDsa256f),
+            0x0211 => Ok(Self::Baggy),
+            0x0212 => Ok(Self::Jorts),
+            0x0213 => Ok(Self::QuorumJorts),
+            0x0214 => Ok(Self::JortsPoseidon2),
+            0x0215 => Ok(Self::CorduroyPoseidon2),
             0x0301 => Ok(Self::FrontierSumFts),
             0x0302 => Ok(Self::ParallelSeededFts),
             0x0401 => Ok(Self::PiHdCommitInventory),
@@ -111,6 +121,11 @@ impl WitnessSuiteTag {
             | Self::SlhDsa192f
             | Self::SlhDsa256s
             | Self::SlhDsa256f
+            | Self::Baggy
+            | Self::Jorts
+            | Self::QuorumJorts
+            | Self::JortsPoseidon2
+            | Self::CorduroyPoseidon2
             | Self::FrontierSumFts
             | Self::ParallelSeededFts
             | Self::PiHdCommitInventory
@@ -314,6 +329,15 @@ fn validate_commitment(version: AddressVersion, commitment: &[u8; 32]) -> Result
 /// Address HRPs are capped at 16 characters so every address stays within BIP-350's 90.
 fn normalize_hrp(hrp: &str) -> Result<String, AddrError> {
     bech32m::lowercase_hrp(hrp, 16)
+}
+
+/// Canonical 256-bit policy signing-key identifier binding `(suite as u16_be, public_key)`
+/// under `cSHAKE256("QSAG.POLICY.KEY.V1")`.
+pub fn policy_signing_key_id(suite: WitnessSuiteTag, public_key: &[u8]) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.POLICY.KEY.V1",
+        &[&(suite as u16).to_be_bytes(), public_key],
+    )
 }
 
 // ============================================================================
@@ -1762,6 +1786,53 @@ mod tests {
         let mut bad_suite = wire128;
         bad_suite[4] = 0xFF;
         assert!(decode_intent_128(&bad_suite).is_none());
+    }
+
+    #[test]
+    fn hash_signature_suite_tags_and_policy_signing_key_id_roundtrip() {
+        let suites = [
+            (WitnessSuiteTag::Baggy, 0x0211u16),
+            (WitnessSuiteTag::Jorts, 0x0212u16),
+            (WitnessSuiteTag::QuorumJorts, 0x0213u16),
+            (WitnessSuiteTag::JortsPoseidon2, 0x0214u16),
+            (WitnessSuiteTag::CorduroyPoseidon2, 0x0215u16),
+        ];
+        let pk = [0x5Au8; 64];
+        let mut seen_ids = Vec::new();
+        for (suite, raw) in suites {
+            assert_eq!(suite as u16, raw);
+            assert_eq!(WitnessSuiteTag::from_u16(raw), Ok(suite));
+            assert_eq!(
+                suite.expected_identity_kind(),
+                KeyIdentityKind::SingleOrThreshold
+            );
+            for addr in [
+                QsagAddress::from_pubkey_cshake256(
+                    "qsp",
+                    suite,
+                    KeyIdentityKind::SingleOrThreshold,
+                    &pk,
+                )
+                .unwrap(),
+                QsagAddress::from_pubkey_poseidon2(
+                    "qsp",
+                    suite,
+                    KeyIdentityKind::SingleOrThreshold,
+                    &pk,
+                )
+                .unwrap(),
+            ] {
+                let encoded = addr.encode().unwrap();
+                assert_eq!(QsagAddress::decode_for_hrp(&encoded, "qsp"), Ok(addr));
+            }
+            let key_id = policy_signing_key_id(suite, &pk);
+            assert!(!seen_ids.contains(&key_id));
+            seen_ids.push(key_id);
+        }
+        assert_ne!(
+            policy_signing_key_id(WitnessSuiteTag::MlDsa65, &[0x11; 32]),
+            policy_signing_key_id(WitnessSuiteTag::MlDsa65, &[0x12; 32]),
+        );
     }
 }
 

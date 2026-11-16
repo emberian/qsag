@@ -56,7 +56,7 @@ fn mac_hash(root: bool, fields: &[&[u8]]) -> [u8; 32] {
 }
 
 pub const CAV_BIND_TO_PARENT: u8 = 6;
-const MAX_CAVEATS: usize = 64;
+pub(crate) const MAX_CAVEATS: usize = 64;
 const MAGIC: &[u8; 8] = b"QSMAC001";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub enum Caveat {
     ThirdParty([u8; 32]),
 }
 impl Caveat {
-    fn encoded(&self) -> ([u8; 34], usize) {
+    pub(crate) fn encoded(&self) -> ([u8; 34], usize) {
         let mut out = [0; 34];
         let (kind, len) = match self {
             Self::ExpiresAt(v) | Self::NotBefore(v) | Self::Actions(v) => {
@@ -244,6 +244,12 @@ impl SpongeMacaroon {
     }
     pub fn identifier(&self) -> &[u8; 32] {
         &self.identifier
+    }
+    pub const fn audience(&self) -> &[u8; 32] {
+        &self.audience
+    }
+    pub const fn is_discharge(&self) -> bool {
+        self.discharge
     }
     pub fn caveats(&self) -> &[Caveat] {
         &self.caveats
