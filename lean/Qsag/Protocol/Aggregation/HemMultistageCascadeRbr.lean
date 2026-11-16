@@ -1899,3 +1899,39 @@ theorem linearTable_final_valid (D : List QuarticGoldilocks) (a b : QuarticGoldi
   linearVirtualFold_of linearStage_complete linearTable_final_valid
 
 end Qsag
+
+/-! ### Exports for lane agg -/
+public section
+namespace Qsag
+#export_eqns hemMultistageVerify hemMultistageRun linearOracle linearNextA linearNextB linearTable
+  hemFoldDom32 hemFoldWitnessStage1 hemFoldWitnessStage2 hemFoldWitnessStages
+  hemWelchBerlekampBudget hemFoldFalseInst hemFoldStageRoundBudgets
+
+theorem hemFoldCommitStep_cur_reject (dom : List QuarticGoldilocks) (deg agree : Nat)
+    (oracle : Nat → QuarticGoldilocks) (kernel : List QuarticGoldilocks)
+    (claim : QuarticGoldilocks) (table : List QuarticGoldilocks)
+    (h : hemTableMatchesOracle dom.length table oracle = false) :
+    hemFoldCommitStep (.cur dom deg agree oracle kernel claim) (.commit table) = .invalid := by
+  show hemFoldGuard (hemTableMatchesOracle dom.length table oracle) _ = _
+  rw [h, hemFoldGuard_false]
+
+theorem hemFoldCrossStep_invalid (S curDom : List QuarticGoldilocks) (curDeg curAgree : Nat)
+    (st : HemWhirStageSpec QuarticGoldilocks) (m : HemFoldIopMsg) (ch : Nat) :
+    hemFoldCrossStep S curDom curDeg curAgree st .invalid m ch = .invalid := by rfl
+
+theorem hemFoldShiftStep_invalid (S curDom : List QuarticGoldilocks)
+    (st : HemWhirStageSpec QuarticGoldilocks) (m : HemFoldIopMsg) (ch : Nat) :
+    hemFoldShiftStep S curDom st .invalid m ch = .invalid := by rfl
+
+theorem hemFoldCommitStep_invalid (m : HemFoldIopMsg) :
+    hemFoldCommitStep .invalid m = .invalid := by rfl
+
+theorem hemFoldFinalStep_invalid (m : HemFoldIopMsg) :
+    hemFoldFinalStep .invalid m = .invalid := by rfl
+
+theorem hemFoldStateAccepted_accepted : hemFoldStateAccepted .accepted = true := by rfl
+
+theorem hemFoldStateAccepted_invalid : hemFoldStateAccepted .invalid = false := by rfl
+
+end Qsag
+end
