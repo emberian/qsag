@@ -969,6 +969,7 @@ impl<B: IsolatedSlhBackend> SlhMpcOracles for IsolatedCnfSlhOracles<'_, B> {
 /// **Do not use in custodian deployments**: use `qsag_quorum::cnf_party::IsolatedCnfParty`
 /// so each custodian executes in its own isolated party state over encrypted wire channels.
 #[doc(hidden)]
+#[allow(deprecated)]
 pub mod legacy_coordinator_prototype {
     use super::*;
 
