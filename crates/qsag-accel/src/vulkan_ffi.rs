@@ -6708,7 +6708,7 @@ impl RawVulkanEngine {
     /// to a 4-byte (`1024`-entry) table `[..., z^(16777216*k3)]` in staging at `byte_offset`.
     /// Entry `768` (`k3 = 0`) is always `[1, 0, 0, 0]`, so arbitrary non-geometric test tables
     /// evaluated at `gid < 2^24` (`k3 = 0`) also remain bit-identical.
-    unsafe fn write_geometric_kronecker_as_1024(&self, byte_offset: usize, src: &[[u64; 4]]) {
+    unsafe fn write_geometric_kronecker_as_1024(&mut self, byte_offset: usize, src: &[[u64; 4]]) {
         debug_assert!(src.len() == 768 || src.len() == 1024);
         unsafe {
             if src.len() == 1024 {
