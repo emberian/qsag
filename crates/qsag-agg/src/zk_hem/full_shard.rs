@@ -835,3 +835,805 @@ fn key_limbs(key: &ValidatorPublicKey) -> [F; 8] {
 /// Digest naming an ordered committee of at most `params.slots()` distinct `JortsPoseidon2`
 /// keys. The relation counts committee slots, so a verifier that accepts a digest from
 /// elsewhere must know it names distinct keys.
+pub fn committee_digest(params: &FullShardParams, keys: &[ValidatorPublicKey]) -> Option<Digest> {
+    let mut identities = alloc::collections::BTreeSet::new();
+    if keys.is_empty()
+        || keys.len() > params.slots
+        || keys.iter().any(|k| {
+            k.profile != AggSigProfile::JortsPoseidon2
+                || !identities.insert((k.pk_seed, k.pk_root))
+        })
+    {
+        return None;
+    }
+    let mut padded: Vec<[F; 8]> = keys.iter().map(key_limbs).collect();
+    padded.resize(params.slots, [F::ZERO; 8]);
+    Some(committee_gadget(
+        &mut Native::default(),
+        &f(keys.len() as u64),
+        &padded,
+    ))
+}
+
+/// What a parent proof states about one shard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShardPublic {
+    /// [`committee_digest`] of the shard's committee.
+    pub committee: Digest,
+    /// The message every counted signer signed.
+    pub message: [u8; SHARD_MESSAGE_BYTES],
+    /// Number of distinct committee members that signed.
+    pub signers: u32,
+}
+impl ShardPublic {
+    fn words(&self) -> Vec<F> {
+        let mut out = self.committee.to_vec();
+        out.extend(self.message.iter().map(|&x| f(u64::from(x))));
+        out.push(f(u64::from(self.signers)));
+        out
+    }
+}
+
+/// A shard's committee, signer set and message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecursiveShardStatement {
+    pub keys: Vec<ValidatorPublicKey>,
+    pub bitmap: SignerBitmap,
+    pub message: [u8; SHARD_MESSAGE_BYTES],
+}
+impl RecursiveShardStatement {
+    /// The statement's public form, or `None` if it does not fit `params`.
+    pub fn public(&self, params: &FullShardParams) -> Option<ShardPublic> {
+        if self.bitmap.num_validators() as usize != self.keys.len() || self.bitmap.count_ones() == 0
+        {
+            return None;
+        }
+        Some(ShardPublic {
+            committee: committee_digest(params, &self.keys)?,
+            message: self.message,
+            signers: self.bitmap.count_ones() as u32,
+        })
+    }
+    fn witness<'a>(
+        &self,
+        params: &FullShardParams,
+        proof: &'a RecursiveShardProof,
+    ) -> ShardWitness<'a> {
+        let mut keys: Vec<[F; 8]> = self.keys.iter().map(key_limbs).collect();
+        keys.resize(params.slots, [F::ZERO; 8]);
+        ShardWitness {
+            keys,
+            size: self.keys.len(),
+            active: (0..params.slots)
+                .map(|i| self.bitmap.contains(i))
+                .collect(),
+            proof,
+        }
+    }
+}
+
+/// Proof that every signer of a [`RecursiveShardStatement`] signed its message, in the
+/// format the parent relation verifies. Not hiding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecursiveShardProof {
+    pub commitment: Digest,
+    pub row_sumcheck_polys: Vec<[E; ROW_SUMCHECK_WIRE_COEFFS]>,
+    pub col_evals: Vec<E>,
+    pub opening: FixedPathWhirProof,
+}
+
+impl RecursiveShardProof {
+    fn placeholder(params: &FullShardParams) -> Self {
+        Self {
+            commitment: [F::ZERO; 4],
+            row_sumcheck_polys: vec![[E::ZERO; ROW_SUMCHECK_WIRE_COEFFS]; params.circuit.log_rows()],
+            col_evals: vec![E::ZERO; NUM_TRACE_COLS],
+            opening: params.whir.placeholder(),
+        }
+    }
+    fn well_formed(&self, params: &FullShardParams) -> bool {
+        self.row_sumcheck_polys.len() == params.circuit.log_rows()
+            && self.col_evals.len() == NUM_TRACE_COLS
+            && params.whir.well_formed(
+                &ChildWhirStatement {
+                    shard_header: OPENING_HEADER,
+                    commitment: self.commitment,
+                    point: vec![E::ZERO; params.num_vars()],
+                    value: E::ZERO,
+                },
+                &self.opening,
+            )
+    }
+    /// Field-element count of the proof times eight: its size were it sent on its own.
+    pub fn encoded_len(&self) -> usize {
+        32 + 32 * ROW_SUMCHECK_WIRE_COEFFS * self.row_sumcheck_polys.len()
+            + 32 * self.col_evals.len()
+            + self.opening.to_bytes().len()
+    }
+}
+
+/// The native prover's view of the transcript.
+struct NativeRows {
+    b: Native,
+    tr: Transcript<F>,
+}
+impl RowTranscript for NativeRows {
+    fn row_tau(&mut self, count: usize) -> Vec<E> {
+        (0..count)
+            .map(|_| self.tr.ext(&mut self.b, T_TAU).value(&self.b))
+            .collect()
+    }
+    fn row_gamma(&mut self) -> E {
+        self.tr.ext(&mut self.b, T_GAMMA).value(&self.b)
+    }
+    fn row_round(&mut self, wire: &[E; ROW_SUMCHECK_WIRE_COEFFS]) -> E {
+        let wire: Vec<_> = wire.iter().copied().map(Ext::constant).collect();
+        self.tr.absorb_exts(&mut self.b, T_ROUND, &wire);
+        self.tr
+            .ext(&mut self.b, T_ROUND_CHALLENGE)
+            .value(&self.b)
+    }
+    fn row_col_evals(&mut self, col_evals: &[E]) {
+        let cols: Vec<_> = col_evals.iter().copied().map(Ext::constant).collect();
+        self.tr.absorb_exts(&mut self.b, T_COLUMNS, &cols);
+    }
+    fn row_rz(&mut self) -> E {
+        self.tr.ext(&mut self.b, T_COLUMN_POINT).value(&self.b)
+    }
+}
+
+/// Prove a recursive shard. `signatures` are those of the signers of `statement.bitmap`,
+/// in ascending index order, over `statement.message`. `blinding_seed` randomizes the idle
+/// trace rows.
+pub fn prove_recursive_shard(
+    params: &FullShardParams,
+    statement: &RecursiveShardStatement,
+    signatures: &[ValidatorSignature],
+    blinding_seed: &[u8; 32],
+) -> Result<RecursiveShardProof, FullShardError> {
+    let public = statement
+        .public(params)
+        .ok_or(FullShardError::InvalidStatement)?;
+    let indices = statement.bitmap.active_indices();
+    if signatures.len() != indices.len()
+        || !crate::sig::validate_unique_active_committee(
+            &statement.keys,
+            &statement.bitmap,
+            AggSigProfile::JortsPoseidon2,
+        )
+    {
+        return Err(FullShardError::InvalidStatement);
+    }
+    let signers: Vec<ShardSigner> = indices
+        .iter()
+        .map(|&i| {
+            let pk = statement.keys[i];
+            let (_, mu) = compute_message_mu(&pk, &statement.message);
+            ShardSigner { pk, mu }
+        })
+        .collect();
+    if !signers
+        .iter()
+        .zip(signatures)
+        .all(|(signer, sig)| verify_individual_signature_with_mu(&signer.pk, signer.mu, sig))
+    {
+        return Err(FullShardError::InvalidSignature);
+    }
+    let witness = build_shard_witness(&params.circuit, &signers, signatures, blinding_seed);
+    let committed = commit_for_recursion(&params.whir, &witness).map_err(FullShardError::Whir)?;
+    let commitment = committed.root();
+
+    let mut b = Native::default();
+    let signer_bits: Vec<F> = (0..params.slots)
+        .map(|i| f(u64::from(statement.bitmap.contains(i))))
+        .collect();
+    let tr = bind_statement(&mut b, params, &public.words(), &signer_bits, &commitment);
+    let mut rows = NativeRows { b, tr };
+    let (row_proof, point, value) = prove_shard_rows(&mut rows, &params.circuit, &signers, &witness);
+    drop(witness);
+    let (opened, opening) = open_for_recursion(&params.whir, OPENING_HEADER, committed, &point)
+        .map_err(FullShardError::Whir)?;
+    if opened.value != value {
+        return Err(FullShardError::InvalidChild);
+    }
+    Ok(RecursiveShardProof {
+        commitment,
+        row_sumcheck_polys: row_proof.row_sumcheck_polys,
+        col_evals: row_proof.col_evals,
+        opening,
+    })
+}
+
+/// Verify one recursive shard proof on its own, by the same gadget the parent relation
+/// records.
+pub fn verify_recursive_shard(
+    params: &FullShardParams,
+    statement: &RecursiveShardStatement,
+    proof: &RecursiveShardProof,
+) -> bool {
+    let Some(public) = statement.public(params) else {
+        return false;
+    };
+    if !proof.well_formed(params) {
+        return false;
+    }
+    let mut b = Native::default();
+    shard_gadget(
+        &mut b,
+        params,
+        &public.words(),
+        &statement.witness(params, proof),
+    );
+    !b.failed
+}
+
+// ============================================================================
+// The parent relation
+// ============================================================================
+
+/// Counts exclude padding and the masking rows of the outer protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FullShardRelationStats {
+    pub sbox_rows: usize,
+    pub multiplication_rows: usize,
+    pub padded_rows: usize,
+    pub variables: usize,
+}
+
+/// The relation "each of `children` recursive shard proofs verifies".
+#[derive(Clone)]
+pub struct FullShardMergeRelation {
+    params: FullShardParams,
+    children: usize,
+    shape: Shape,
+    stats: FullShardRelationStats,
+}
+
+/// Largest fan-in of one relation.
+pub const MAX_FULL_SHARD_CHILDREN: usize = 16;
+
+impl FullShardMergeRelation {
+    pub fn new(params: FullShardParams, children: usize) -> Result<Self, FullShardError> {
+        if !(1..=MAX_FULL_SHARD_CHILDREN).contains(&children) {
+            return Err(FullShardError::InvalidParameters);
+        }
+        let placeholder = RecursiveShardProof::placeholder(&params);
+        let witness = ShardWitness {
+            keys: vec![[F::ZERO; 8]; params.slots],
+            size: 0,
+            active: vec![false; params.slots],
+            proof: &placeholder,
+        };
+        let publics = vec![vec![F::ZERO; PUBLIC_WORDS]; children];
+        let witnesses: Vec<&ShardWitness<'_>> = (0..children).map(|_| &witness).collect();
+        let mut cs = ConstraintSystem::new();
+        populate(&mut cs, &params, &publics, &witnesses);
+        let used = cs.num_rows();
+        let (shape, mut z) = cs.finish();
+        qsag_asm::volatile_fill(&mut z, F::ZERO);
+        let stats = FullShardRelationStats {
+            sbox_rows: shape.num_sbox,
+            multiplication_rows: used - shape.num_sbox,
+            padded_rows: shape.num_rows(),
+            variables: shape.num_vars,
+        };
+        Ok(Self {
+            params,
+            children,
+            shape,
+            stats,
+        })
+    }
+    pub fn params(&self) -> &FullShardParams {
+        &self.params
+    }
+    pub fn num_children(&self) -> usize {
+        self.children
+    }
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+    pub fn stats(&self) -> FullShardRelationStats {
+        self.stats
+    }
+
+    /// The relation's assignment for these children. It satisfies the relation exactly when
+    /// every child verifies.
+    fn assignment(
+        &self,
+        statements: &[RecursiveShardStatement],
+        proofs: &[RecursiveShardProof],
+    ) -> Result<Vec<F>, FullShardError> {
+        let publics: Vec<Vec<F>> = statements
+            .iter()
+            .map(|s| s.public(&self.params).map(|p| p.words()))
+            .collect::<Option<_>>()
+            .ok_or(FullShardError::InvalidStatement)?;
+        let inputs: Vec<(&Vec<F>, &RecursiveShardStatement, &RecursiveShardProof)> = publics
+            .iter()
+            .zip(statements)
+            .zip(proofs)
+            .map(|((public, statement), proof)| (public, statement, proof))
+            .collect();
+        let build = |chunk: &[(&Vec<F>, &RecursiveShardStatement, &RecursiveShardProof)]| {
+            chunk
+                .iter()
+                .map(|(public, statement, proof)| {
+                    let mut assignment = Assignment::default();
+                    shard_gadget(
+                        &mut assignment,
+                        &self.params,
+                        public,
+                        &statement.witness(&self.params, proof),
+                    );
+                    assignment.values
+                })
+                .collect::<Vec<_>>()
+        };
+        let assignments = crate::map_chunks_bounded_with_limit(&inputs, self.children, build);
+        let mut z = Vec::with_capacity(self.shape.num_vars);
+        z.push(F::ONE);
+        z.extend(publics.iter().flatten());
+        for assignment in assignments.into_iter().flatten() {
+            z.extend(assignment);
+        }
+        if z.len() != self.shape.mask_var_base {
+            return Err(FullShardError::InvalidParameters);
+        }
+        z.resize(self.shape.num_vars, F::ZERO);
+        Ok(z)
+    }
+}
+
+fn populate(
+    cs: &mut ConstraintSystem,
+    params: &FullShardParams,
+    publics: &[Vec<F>],
+    witnesses: &[&ShardWitness<'_>],
+) {
+    let public: Vec<Vec<Lc>> = publics
+        .iter()
+        .map(|words| words.iter().map(|&x| cs.public_input(x).into()).collect())
+        .collect();
+    let inputs: Vec<(&Vec<Lc>, &ShardWitness<'_>)> =
+        public.iter().zip(witnesses.iter().copied()).collect();
+    let build = |chunk: &[(&Vec<Lc>, &ShardWitness<'_>)]| {
+        chunk
+            .iter()
+            .map(|(words, witness)| {
+                let mut child = cs.fork_public_inputs();
+                shard_gadget(&mut child, params, words, witness);
+                child
+            })
+            .collect::<Vec<_>>()
+    };
+    let circuits = crate::map_chunks_bounded_with_limit(&inputs, inputs.len(), build);
+    for circuit in circuits.into_iter().flatten() {
+        cs.append(circuit);
+    }
+}
+
+/// One parent proof for the shards named by its statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FullShardMergeProof {
+    pub proof: PublicHemProof,
+}
+impl FullShardMergeProof {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = b"QSAGFSM1".to_vec();
+        out.extend(self.proof.to_bytes());
+        out
+    }
+    pub fn from_bytes(
+        bytes: &[u8],
+        relation: &FullShardMergeRelation,
+        regime: WhirSecurityRegime,
+    ) -> Option<Self> {
+        if bytes.get(..8)? != b"QSAGFSM1" {
+            return None;
+        }
+        let proof = PublicHemProof::from_bytes(bytes.get(8..)?, &relation.shape, regime)?;
+        Some(Self { proof })
+    }
+}
+
+/// Prove that every child verifies. The children are witnesses: the result carries none of
+/// them. `regime` is the parent proof's own regime.
+pub fn prove_full_shard_merge(
+    relation: &FullShardMergeRelation,
+    statements: &[RecursiveShardStatement],
+    proofs: &[RecursiveShardProof],
+    regime: WhirSecurityRegime,
+    seed: &[u8; 32],
+) -> Result<FullShardMergeProof, FullShardError> {
+    if !regime.meets_qrom_128_floor()
+        || statements.len() != relation.children
+        || proofs.len() != relation.children
+    {
+        return Err(FullShardError::InvalidParameters);
+    }
+    if !proofs.iter().all(|p| p.well_formed(&relation.params)) {
+        return Err(FullShardError::InvalidChild);
+    }
+    let z = relation.assignment(statements, proofs)?;
+    let proof = protocol::prove_public(&relation.shape, z, PROOF_LABEL, regime, seed).map_err(
+        |e| match e {
+            protocol::ZkHemError::Unsatisfied => FullShardError::InvalidChild,
+            _ => FullShardError::InvalidParameters,
+        },
+    )?;
+    Ok(FullShardMergeProof { proof })
+}
+
+/// Verify a parent proof against the shards' public statements alone.
+pub fn verify_full_shard_merge(
+    relation: &FullShardMergeRelation,
+    shards: &[ShardPublic],
+    regime: WhirSecurityRegime,
+    proof: &FullShardMergeProof,
+) -> bool {
+    if !regime.meets_qrom_128_floor() || shards.len() != relation.children {
+        return false;
+    }
+    let public: Vec<F> = shards.iter().flat_map(ShardPublic::words).collect();
+    protocol::verify_public(&relation.shape, &public, PROOF_LABEL, regime, &proof.proof)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sig::ValidatorKeypair;
+    use crate::trace::{RowPublicEvalExt4, eval_batched_row_constraints_ext4};
+    use std::time::Instant;
+
+    const REGIME: WhirSecurityRegime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+
+    fn sample(i: usize) -> E {
+        E::from_limbs(core::array::from_fn(|j| {
+            f((0x9E37_79B9_7F4A_7C15u64)
+                .wrapping_mul(1 + i as u64)
+                .wrapping_add(0x1234_5678 * (j as u64 + 1)))
+        }))
+    }
+    fn keypairs(count: usize, tag: u8) -> Vec<ValidatorKeypair> {
+        (0..count)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(
+                    AggSigProfile::JortsPoseidon2,
+                    &[tag; 32],
+                    i as u32,
+                )
+            })
+            .collect()
+    }
+    /// A shard over a fresh committee of `size` keys in which `signing` sign `message`.
+    fn shard(
+        size: usize,
+        signing: &[usize],
+        message: [u8; 32],
+        tag: u8,
+    ) -> (RecursiveShardStatement, Vec<ValidatorSignature>) {
+        let mut keys = keypairs(size, tag);
+        let signatures = signing
+            .iter()
+            .map(|&i| {
+                keys[i]
+                    .sign_stateful_for_unit_test(&message, (i % 64) as u32)
+                    .unwrap()
+            })
+            .collect();
+        let statement = RecursiveShardStatement {
+            keys: keys.iter().map(|k| k.pk).collect(),
+            bitmap: SignerBitmap::from_active_indices(size as u32, signing).unwrap(),
+            message,
+        };
+        (statement, signatures)
+    }
+
+    #[test]
+    fn message_representative_gadget_matches_the_signature_scheme() {
+        for (tag, message) in [(3u8, [0u8; 32]), (9, [0xFF; 32]), (200, [0x5A; 32])] {
+            let mut message = message;
+            message[7] ^= tag;
+            for key in keypairs(3, tag) {
+                let mut b = Native::default();
+                let words: Vec<F> = message.iter().map(|&x| f(u64::from(x))).collect();
+                let mu = message_mu(&mut b, &key_limbs(&key.pk), &words);
+                assert!(!b.failed);
+                assert_eq!(mu, compute_message_mu(&key.pk, &message).1);
+            }
+        }
+    }
+
+    #[test]
+    fn recorded_row_constraints_equal_the_native_evaluator() {
+        let circuit = ShardCircuit::new(AggSigProfile::JortsPoseidon2, 2);
+        let tape = AirTape::record(&circuit);
+        let ops = circuit.unique_ops.len();
+        for round in 0..3 {
+            let mut next = 1000 * round;
+            let mut draw = || {
+                next += 1;
+                sample(next)
+            };
+            let cols: [E; NUM_TRACE_COLS] = core::array::from_fn(|_| draw());
+            let sels: Vec<E> = (0..ops).map(|_| draw()).collect();
+            let public = RowPublicEvalExt4 {
+                active_signer: draw(),
+                pk_seed: core::array::from_fn(|_| draw()),
+                pk_root: core::array::from_fn(|_| draw()),
+                mu: core::array::from_fn(|_| draw()),
+                gated_op_sels: &sels,
+                step_c0: draw(),
+                is_row_first: draw(),
+                is_row_last: draw(),
+                eq_tau: draw(),
+                eq_not_last: draw(),
+                shift_tau: draw(),
+            };
+            let gamma = draw();
+            let expected = eval_batched_row_constraints_ext4(&circuit.unique_ops, &cols, &public, gamma);
+            let lift = |v: E| Ext::<F>::constant(v);
+            let inputs = tape.inputs(
+                &cols.map(lift),
+                lift(public.active_signer),
+                public.pk_seed.map(lift),
+                public.pk_root.map(lift),
+                public.mu.map(lift),
+                lift(public.step_c0),
+                lift(public.is_row_first),
+                lift(public.is_row_last),
+                [
+                    lift(public.eq_tau),
+                    lift(public.eq_not_last),
+                    lift(public.shift_tau),
+                ],
+                lift(gamma),
+                sels.iter().copied().map(lift).collect(),
+            );
+            let mut b = Native::default();
+            assert_eq!(tape.run(&mut b, &inputs).value(&b), expected);
+            // The recorded code and the relation agree on the number of wires.
+            let mut assignment = Assignment::default();
+            let mut cs = ConstraintSystem::new();
+            let wires: Vec<Ext<Lc>> = inputs
+                .iter()
+                .map(|v| Ext::alloc(&mut cs, v.value(&b)))
+                .collect();
+            let recorded = tape.run(&mut cs, &wires);
+            assert_eq!(recorded.value(&cs), expected);
+            tape.run(&mut assignment, &inputs);
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            assert_eq!(
+                assignment.values.len() + 4 * inputs.len() + 1,
+                shape.mask_var_base
+            );
+        }
+    }
+
+    #[test]
+    fn committee_digest_binds_order_size_and_padding() {
+        let params = FullShardParams::new(REGIME, 4).unwrap();
+        let keys: Vec<_> = keypairs(4, 1).iter().map(|k| k.pk).collect();
+        let base = committee_digest(&params, &keys[..3]).unwrap();
+        assert_ne!(base, committee_digest(&params, &keys).unwrap());
+        assert_ne!(base, committee_digest(&params, &keys[..2]).unwrap());
+        let mut swapped = keys[..3].to_vec();
+        swapped.swap(0, 1);
+        assert_ne!(base, committee_digest(&params, &swapped).unwrap());
+        assert!(committee_digest(&params, &[]).is_none());
+        let mut five = keys.clone();
+        five.push(keys[0]);
+        assert!(committee_digest(&params, &five).is_none());
+        let mut repeated = keys[..3].to_vec();
+        repeated[2] = repeated[0];
+        assert!(committee_digest(&params, &repeated).is_none());
+        let mut other_profile = keys[..3].to_vec();
+        other_profile[1].profile = AggSigProfile::CorduroyPoseidon2;
+        assert!(committee_digest(&params, &other_profile).is_none());
+    }
+
+    /// Two real shards under one parent: the parent verifies from the public statements
+    /// alone, and every altered child, witness or statement is refused.
+    #[test]
+    fn full_shard_merge_end_to_end_and_tamper_rejection() {
+        let params = FullShardParams::new(REGIME, 2).unwrap();
+        let (first, first_sigs) = shard(2, &[0, 1], [0x11; 32], 21);
+        let (second, second_sigs) = shard(2, &[1], [0x22; 32], 22);
+        let proofs = vec![
+            prove_recursive_shard(&params, &first, &first_sigs, &[1; 32]).unwrap(),
+            prove_recursive_shard(&params, &second, &second_sigs, &[2; 32]).unwrap(),
+        ];
+        let statements = vec![first.clone(), second.clone()];
+        for (statement, proof) in statements.iter().zip(&proofs) {
+            assert!(verify_recursive_shard(&params, statement, proof));
+        }
+        // A signature over another message, or by another key, is refused by the prover.
+        let (_, wrong_sigs) = shard(2, &[0, 1], [0x12; 32], 21);
+        assert_eq!(
+            prove_recursive_shard(&params, &first, &wrong_sigs, &[1; 32]),
+            Err(FullShardError::InvalidSignature)
+        );
+        assert_eq!(
+            prove_recursive_shard(&params, &first, &first_sigs[..1], &[1; 32]),
+            Err(FullShardError::InvalidStatement)
+        );
+
+        let relation = FullShardMergeRelation::new(params.clone(), 2).unwrap();
+        let honest = relation.assignment(&statements, &proofs).unwrap();
+        assert!(relation.shape().is_satisfied(&honest));
+
+        // Child proofs: each altered field fails native verification and leaves the
+        // relation unsatisfied.
+        let mut tampered: Vec<(&str, RecursiveShardProof)> = Vec::new();
+        let mut t = proofs[0].clone();
+        t.col_evals[0] += E::ONE;
+        tampered.push(("column evaluation", t));
+        let mut t = proofs[0].clone();
+        t.col_evals[NUM_TRACE_COLS - 1] += E::ONE;
+        tampered.push(("last column evaluation", t));
+        let mut t = proofs[0].clone();
+        t.row_sumcheck_polys[0][0] += E::ONE;
+        tampered.push(("first round polynomial", t));
+        let mut t = proofs[0].clone();
+        let last = t.row_sumcheck_polys.len() - 1;
+        t.row_sumcheck_polys[last][7] += E::ONE;
+        tampered.push(("last round polynomial", t));
+        let mut t = proofs[0].clone();
+        t.commitment[2] += F::ONE;
+        tampered.push(("commitment", t));
+        let mut t = proofs[0].clone();
+        t.opening.final_coeffs[0] += E::ONE;
+        tampered.push(("opening", t));
+        tampered.push(("another shard's proof", proofs[1].clone()));
+        for (what, bad) in &tampered {
+            assert!(!verify_recursive_shard(&params, &first, bad), "{what}");
+            let z = relation
+                .assignment(&statements, &[bad.clone(), proofs[1].clone()])
+                .unwrap();
+            assert!(!relation.shape().is_satisfied(&z), "{what}");
+        }
+        assert_eq!(
+            prove_full_shard_merge(
+                &relation,
+                &statements,
+                &[tampered[0].1.clone(), proofs[1].clone()],
+                REGIME,
+                &[5; 32]
+            ),
+            Err(FullShardError::InvalidChild)
+        );
+
+        // Statements: a different message, key, signer set or committee size.
+        let mut forged: Vec<(&str, RecursiveShardStatement)> = Vec::new();
+        let mut s = second.clone();
+        s.message[31] ^= 1;
+        forged.push(("message", s));
+        let mut s = second.clone();
+        s.keys[1].pk_root[0] += F::ONE;
+        forged.push(("signer key", s));
+        let mut s = second.clone();
+        s.keys[0].pk_seed[3] += F::ONE;
+        forged.push(("non-signer key", s));
+        let mut s = second.clone();
+        s.bitmap = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
+        forged.push(("extra signer", s));
+        let mut s = second.clone();
+        s.bitmap = SignerBitmap::from_active_indices(2, &[0]).unwrap();
+        forged.push(("other signer", s));
+        for (what, bad) in &forged {
+            assert!(!verify_recursive_shard(&params, bad, &proofs[1]), "{what}");
+            let z = relation
+                .assignment(&[first.clone(), bad.clone()], &proofs)
+                .unwrap();
+            assert!(!relation.shape().is_satisfied(&z), "{what}");
+        }
+        // A wrong public count with the honest witness: the count is a public cell.
+        let mut miscounted = honest.clone();
+        let count_cell = 2 * PUBLIC_WORDS;
+        assert_eq!(miscounted[count_cell], F::ONE);
+        miscounted[count_cell] = F::TWO;
+        assert!(!relation.shape().is_satisfied(&miscounted));
+
+        // The parent proof.
+        let parent = prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[5; 32]).unwrap();
+        let publics: Vec<ShardPublic> = statements
+            .iter()
+            .map(|s| s.public(&params).unwrap())
+            .collect();
+        assert_eq!(publics[0].signers, 2);
+        assert_eq!(publics[1].signers, 1);
+        assert!(verify_full_shard_merge(&relation, &publics, REGIME, &parent));
+        let bytes = parent.to_bytes();
+        assert_eq!(
+            FullShardMergeProof::from_bytes(&bytes, &relation, REGIME).unwrap(),
+            parent
+        );
+        let alter = |edit: &dyn Fn(&mut Vec<ShardPublic>)| {
+            let mut bad = publics.clone();
+            edit(&mut bad);
+            assert!(!verify_full_shard_merge(&relation, &bad, REGIME, &parent));
+        };
+        alter(&|p| p[0].message[0] ^= 1);
+        alter(&|p| p[1].message[31] ^= 0x80);
+        alter(&|p| p[0].committee[0] += F::ONE);
+        alter(&|p| p[1].committee[3] += F::ONE);
+        alter(&|p| p[0].signers = 1);
+        alter(&|p| p[1].signers = 2);
+        alter(&|p| p.swap(0, 1));
+        alter(&|p| {
+            p.pop();
+        });
+        assert!(!verify_full_shard_merge(
+            &relation,
+            &publics,
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+            &parent
+        ));
+        let mut bad = parent.clone();
+        bad.proof.row_rounds[0][0] += E::ONE;
+        assert!(!verify_full_shard_merge(&relation, &publics, REGIME, &bad));
+    }
+
+    /// `QSAG_FULL_SHARD_SLOTS` signer slots per shard (all signing), `QSAG_FULL_SHARD_CHILDREN`
+    /// shards under one parent.
+    #[test]
+    #[ignore = "measurement: QSAG_FULL_SHARD_SLOTS, QSAG_FULL_SHARD_CHILDREN"]
+    fn bench_full_shard_merge() {
+        let env = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let slots = env("QSAG_FULL_SHARD_SLOTS", 128);
+        let children = env("QSAG_FULL_SHARD_CHILDREN", 2);
+        let start = Instant::now();
+        let params = FullShardParams::new(REGIME, slots).unwrap();
+        let relation = FullShardMergeRelation::new(params.clone(), children).unwrap();
+        let setup_ms = start.elapsed().as_secs_f64() * 1000.;
+        let stats = relation.stats();
+        std::println!(
+            "FULL_SHARD_RELATION slots={slots} children={children} child_nv={} sbox_rows={} multiplication_rows={} padded_rows={} variables={} setup_ms={setup_ms:.0}",
+            params.num_vars(),
+            stats.sbox_rows,
+            stats.multiplication_rows,
+            stats.padded_rows,
+            stats.variables
+        );
+        let signing: Vec<usize> = (0..slots).collect();
+        let mut statements = Vec::new();
+        let mut proofs = Vec::new();
+        for c in 0..children {
+            let (statement, signatures) = shard(slots, &signing, [c as u8 + 1; 32], c as u8 + 50);
+            let start = Instant::now();
+            let proof = prove_recursive_shard(&params, &statement, &signatures, &[7; 32]).unwrap();
+            let prove_ms = start.elapsed().as_secs_f64() * 1000.;
+            let start = Instant::now();
+            assert!(verify_recursive_shard(&params, &statement, &proof));
+            std::println!(
+                "FULL_SHARD_CHILD slots={slots} index={c} prove_ms={prove_ms:.0} verify_ms={:.1} bytes={}",
+                start.elapsed().as_secs_f64() * 1000.,
+                proof.encoded_len()
+            );
+            statements.push(statement);
+            proofs.push(proof);
+        }
+        let start = Instant::now();
+        let parent = prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[9; 32]).unwrap();
+        let prove_ms = start.elapsed().as_secs_f64() * 1000.;
+        let publics: Vec<ShardPublic> = statements
+            .iter()
+            .map(|s| s.public(&params).unwrap())
+            .collect();
+        let start = Instant::now();
+        assert!(verify_full_shard_merge(&relation, &publics, REGIME, &parent));
+        let verify_ms = start.elapsed().as_secs_f64() * 1000.;
+        std::println!(
+            "FULL_SHARD_MERGE slots={slots} children={children} signers={} parent_bytes={} prove_ms={prove_ms:.0} verify_ms={verify_ms:.1}",
+            slots * children,
+            parent.to_bytes().len()
+        );
+    }
+}
