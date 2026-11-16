@@ -14,6 +14,7 @@ modules.
 
 -- Qsag/Tactic
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.Tactic.AuditRegistry
 public import Qsag.Tactic.Prelude
 
 -- Qsag/Spec
@@ -67,6 +68,7 @@ public import Qsag.Coding.WhirProfiles
 
 -- Qsag/Oracle
 public import Qsag.Oracle.BlockCompressedOracle
+public import Qsag.Oracle.ByteFraming
 public import Qsag.Oracle.ConstructiveQuantumHilbert
 public import Qsag.Oracle.FiatShamir
 public import Qsag.Oracle.FrozenChallengeGame
@@ -110,6 +112,7 @@ public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 public import Qsag.Protocol.Credentials.BlindVcCollisionFinder
 public import Qsag.Protocol.Credentials.BlindVcQromSecurity
 public import Qsag.Protocol.Credentials.RepetitionCutAndChoose
+public import Qsag.Protocol.Credentials.ToprfMachine
 
 -- Qsag/Protocol/Migration
 public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
@@ -134,6 +137,7 @@ public import Qsag.Protocol.Threshold.BaggyAndRss256Security
 public import Qsag.Protocol.Threshold.DensePcgTaps
 public import Qsag.Protocol.Threshold.IdealTsig
 public import Qsag.Protocol.Threshold.LatticePreprocessingFull
+public import Qsag.Protocol.Threshold.MacBlind
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 public import Qsag.Protocol.Threshold.MlDsa44Parameters
 public import Qsag.Protocol.Threshold.ParametricThresholdAndUnlinkableQsa
@@ -201,6 +205,7 @@ public import Qsag.Exec.SimulationSpine
 public import Qsag.Exec.SpecOracle
 public import Qsag.Exec.ThresholdIdealDurableService
 public import Qsag.Exec.ThresholdIdealService
+public import Qsag.Exec.TwoSlotHwmBase
 public import Qsag.Exec.TwoSlotHwmCrashModel
 public import Qsag.Exec.WhirKernels
 
@@ -208,8 +213,16 @@ public import Qsag.Exec.WhirKernels
 public import Qsag.Exec.Tactic.SimulationKit
 
 -- Qsag/Machine
+public import Qsag.Machine.ArParse
+public import Qsag.Machine.Arm64AbsDomain
+public import Qsag.Machine.Arm64AbsTransfer
+public import Qsag.Machine.Arm64Semantics
+public import Qsag.Machine.Arm64Step
 public import Qsag.Machine.ClmulSimd
 public import Qsag.Machine.ConstantTimeIsa
+public import Qsag.Machine.Elf64Headers
+public import Qsag.Machine.Elf64Parse
+public import Qsag.Machine.ElfBytes
 public import Qsag.Machine.ElfFixtureVerify
 public import Qsag.Machine.ElfFixtures
 public import Qsag.Machine.ElfFunctionalEquiv
@@ -218,9 +231,15 @@ public import Qsag.Machine.ElfParse
 public import Qsag.Machine.ElfVerify
 public import Qsag.Machine.FaultAndSpeculativeSafety
 public import Qsag.Machine.Gf128ClmulLoopAgreement
+public import Qsag.Machine.IsaBanks
 public import Qsag.Machine.IsaCosim
 public import Qsag.Machine.IsaCt
+public import Qsag.Machine.IsaFetch
+public import Qsag.Machine.IsaOperational
+public import Qsag.Machine.IsaPcMap
+public import Qsag.Machine.IsaVectors
 public import Qsag.Machine.McRefine
+public import Qsag.Machine.McSymbols
 public import Qsag.Machine.MirSpecBridge
 public import Qsag.Machine.MirSpecBridgeCore
 public import Qsag.Machine.MirSpecBridgeWitnesses
@@ -228,6 +247,16 @@ public import Qsag.Machine.PlatformContractInstances
 public import Qsag.Machine.SpirvFixtures
 public import Qsag.Machine.SpirvSimt
 public import Qsag.Machine.SydTv
+public import Qsag.Machine.X86AbsDomain
+public import Qsag.Machine.X86AbsTransfer
+public import Qsag.Machine.X86AluEval
+public import Qsag.Machine.X86Decode
+public import Qsag.Machine.X86Memory
+public import Qsag.Machine.X86Policy
+public import Qsag.Machine.X86SimdArith
+public import Qsag.Machine.X86Step
+public import Qsag.Machine.X86Syntax
+public import Qsag.Machine.X86VectorEval
 
 -- Qsag/Machine/Tactic
 public import Qsag.Machine.Tactic.KernelRfl
@@ -263,6 +292,7 @@ public import Qsag.Tests.GuardedMachineSimInstance
 public import Qsag.Tests.HemExtractedOpeningBridgeTests
 public import Qsag.Tests.HemHighCapSlicedBudgetTeeth
 public import Qsag.Tests.HemMultistageCascadeTeeth
+public import Qsag.Tests.IsaRetPolicy
 public import Qsag.Tests.MathAndCoding
 public import Qsag.Tests.MigrationTeeth
 public import Qsag.Tests.OracleAndQrom

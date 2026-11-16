@@ -45,7 +45,7 @@ public import Qsag.Protocol.Aggregation.HemRbrSoundness
 public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 public import Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
-public import Qsag.Machine.SpirvSimtGpuEquiv
+public import Qsag.Machine.SpirvSimt
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -1036,16 +1036,16 @@ theorem stepXmssRows_roundTrip (pk : AggValidatorPk) (msg : List UInt8) (sig : A
 -- END COMPARATOR ROSTER
 
 /-- Public Hem's two honest sumchecks share one assignment table, with the column
-    claim equal to the random linear combination of the three revealed row operands. -/
+    claim equal to the random linear combination of the arithmetic operands and public-input binding terms. -/
 theorem hem_public_sumchecks_complete {F : Type} [LawfulField F]
     (shape : ZkHem.HemPublicShape F) (Z : List Bool → F) (hZ : shape.Satisfied Z)
-    (tau rx : List F) (nu : F) (rowChallenges colChallenges : Nat → F) :
+    (tau rx : List F) (nu : ZkHem.HemCombine F) (numPublic : Nat) (lam : F) (rowChallenges colChallenges : Nat → F) :
     (shape.rowProver Z tau rowChallenges).H = CommRingOps.zero ∧
     (shape.rowProver Z tau rowChallenges).Honest shape.rowBits 9 rowChallenges ∧
-    (shape.columnProver Z rx nu colChallenges).H = shape.columnClaim Z rx nu ∧
-    (shape.columnProver Z rx nu colChallenges).Honest shape.varBits 2 colChallenges := by
+    (shape.columnProver Z rx nu numPublic lam colChallenges).H = shape.columnClaim Z rx nu numPublic lam ∧
+    (shape.columnProver Z rx nu numPublic lam colChallenges).Honest shape.varBits 2 colChallenges := by
   have hr := ZkHem.publicHem_row_prover_correct shape Z hZ tau rowChallenges
-  have hc := ZkHem.publicHem_column_prover_correct shape Z rx nu colChallenges
+  have hc := ZkHem.publicHem_column_prover_correct shape Z rx nu numPublic lam colChallenges
   exact ⟨hr.1, hr.2.1, hc.1, hc.2.1⟩
 
 /-- Round-by-round soundness of the public row sumcheck on the single assignment table.
@@ -1063,10 +1063,11 @@ def hem_public_row_rbr {F : Type} [LawfulField F] [DecidableEq F]
 /-- The variable-subcube column sumcheck has the same executable soundness spine,
     with degree two and the matrix combination evaluated at the row point. -/
 def hem_public_column_rbr {F : Type} [LawfulField F] [DecidableEq F]
-    (s : ZkHem.HemPublicShape F) (Z : List Bool → F) (rx : List F) (nu : F)
+    (s : ZkHem.HemPublicShape F) (Z : List Bool → F) (rx : List F) (nu : ZkHem.HemCombine F)
+    (numPublic : Nat) (lam : F)
     (S : List F) (hS : S.Nodup) (hpos : 0 < S.length) :
     RbrStateFunction (ZkHem.cubeIop
-      (ZkHem.colLineRep s.varBits (s.columnMatrix rx nu) Z) s.varBits S hS hpos) :=
+      (ZkHem.colLineRep s.varBits (s.columnMatrix rx nu numPublic lam) Z) s.varBits S hS hpos) :=
   ZkHem.cubeRbr _ _ _ _ _
 
 
