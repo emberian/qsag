@@ -25,11 +25,12 @@ validator for which there is neither a collision of the oracle among the prover'
 (`Spec.TranscriptBreak`), nor a verifying signature in the extractor's output for that validator,
 nor quorum participation, is at most `ε`. Runs whose extractor output is a verifying signature
 of a non-participating validator are not bounded here: that is single-signature unforgeability.
-`xmssStepOpAggregate_straightLine_extractorSound` instantiates `Spec.AggregateExtractorSound`
-with `Spec.StraightLineExtractor` on the non-transparent 256-column `StepOp` AIR committee
-verifier (`List StepOpRow`, via `stepOp256TableOk_xmss_extract`) and lifts it to
-`Spec.DataRefines` against `Spec.idealAggregateMachine`; succinct WHIR/Canopy compilation
-factors through `Qsag.Top.ClosedProtocolReductions`.
+No instance of `Spec.AggregateExtractorSound` is constructed in this module. The per-slot
+extraction lemma for the 256-column `StepOp` AIR table is `stepOp256TableOk_xmss_extract`;
+packaging it as a `Spec.StraightLineExtractor` instance and a `Spec.DataRefines` against
+`Spec.idealAggregateMachine` needs introduction lemmas for `Spec.ValidAggregateWitness` and
+`Spec.AggregateSoundnessOutcome`, which `Spec.IdealAggregate` does not export. Succinct
+WHIR/Canopy compilation factors through `Qsag.Top.ClosedProtocolReductions`.
 -/
 
 public import Qsag.Protocol.Aggregation.FieldTransport
@@ -508,134 +509,11 @@ theorem aggregate_extractor_sound_valid_witness_of_injective
     ⟨(hFail ω hF).1, fun hOut =>
       (hFail ω hF).2 (hOut.witness_of_injective (hInj (π.chal ω)))⟩)
 
-/-- Active/inactive `StepOp` slot table derived from a `Spec.AggregateStatement` over `AggValidatorPk`. -/
-def xmssStepOpSlots {nVal : Nat} (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal) :
-    List Qsag.StepOpSlot :=
-  (List.finRange nVal).map (fun i =>
-    if stmt.bitmap.getLsbD i.val then
-      some (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message)
-    else none)
-
-/-- Non-transparent 256-column `StepOp` AIR committee aggregate verifier (`Proof := List StepOpRow`). -/
-def verifyXmssStepOpAggregate {nVal : Nat}
-    (_H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
-    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal)
-    (rows : List Qsag.StepOpRow) : Bool :=
-  decide (stmt.bitmap ≠ 0#nVal) &&
-  (List.finRange nVal).all (fun i =>
-    !stmt.bitmap.getLsbD i.val || decide ((stmt.roster i).profile = .xmssPoseidon2)) &&
-  Qsag.stepOp256TableOk .xmssPoseidon2 (xmssStepOpSlots stmt) rows
-
-/-- Straight-line committee signature extractor reading each active validator's `stepXmssSig`
-    from its 256-column `StepOp` AIR slot block (`stepOpSlotRow`). -/
-def extractXmssStepOpSigs {nVal : Nat}
-    (_log : List (Qsag.Spec.Bytes × Qsag.Spec.Bytes))
-    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal)
-    (rows : List Qsag.StepOpRow) (i : Fin nVal) : Option Qsag.AggNativeSignature :=
-  if stmt.bitmap.getLsbD i.val then
-    some (Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val))
-  else none
-
-/-- **Non-Transparent `StepOp` AIR `AggregateExtractorSound` Instance
-    (`xmssStepOpAggregate_straightLine_extractorSound`)**:
-    Instantiates `Spec.AggregateExtractorSound` with `Spec.StraightLineExtractor` (proof carrier
-    `List StepOpRow`, NOT a witness signature map!) via `stepOp256TableOk_xmss_extract`! -/
-theorem xmssStepOpAggregate_straightLine_extractorSound {nVal nC : Nat}
-    (oracle : Fin nC → Qsag.Spec.Bytes → Qsag.Spec.Bytes) (q : Nat) :
-    Qsag.Spec.AggregateExtractorSound
-      (Qsag.Spec.StraightLineExtractor (fun _ => none)
-        (fun rows : List Qsag.StepOpRow =>
-          (List.finRange nVal).map (fun i =>
-            Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val))))
-      (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom)
-      verifyXmssStepOpAggregate
-      extractXmssStepOpSigs
-      oracle q Qsag.Spec.RatBound.zero := by
-  refine Qsag.Spec.AggregateExtractorSound.of_deterministic _ _ _ _
-    (Qsag.Spec.StraightLineExtractor.of_proofSigs _ _ _ (fun _ stmt rows i sig hEx => ?_))
-    oracle q (fun H log stmt rows _ hAcc => ?_)
-  · unfold extractXmssStepOpSigs at hEx
-    cases hBit : stmt.bitmap.getLsbD i.val with
-    | false => rw [hBit] at hEx; cases hEx
-    | true =>
-      rw [hBit] at hEx
-      injection hEx with hSig
-      subst hSig
-      exact List.mem_map.mpr ⟨i, List.mem_finRange i, rfl⟩
-  · unfold verifyXmssStepOpAggregate at hAcc
-    obtain ⟨hRest, hTable⟩ := Bool.and_eq_true_iff.mp hAcc
-    obtain ⟨hNonEmpty, hProfAll⟩ := Bool.and_eq_true_iff.mp hRest
-    refine Or.inl ⟨of_decide_eq_true hNonEmpty, fun i hAct => ?_⟩
-    have hProfOr := List.all_eq_true.mp hProfAll i (List.mem_finRange i)
-    rw [hAct] at hProfOr
-    simp only [Bool.not_true, Bool.false_or] at hProfOr
-    have hProf : (stmt.roster i).profile = .xmssPoseidon2 := of_decide_eq_true hProfOr
-    have hSlot : (xmssStepOpSlots stmt)[i.val]? =
-        some (some (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message)) := by
-      unfold xmssStepOpSlots
-      rw [List.getElem?_map, List.getElem?_finRange i.isLt]
-      simp only [Option.map_some, hAct, ↓reduceIte]
-    have hVer := Qsag.stepOp256TableOk_xmss_extract (xmssStepOpSlots stmt) rows i.val
-      (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message)
-      stmt.message hTable hSlot hProf rfl
-    refine ⟨Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val), ?_, hVer⟩
-    unfold extractXmssStepOpSigs
-    rw [hAct]
-    rfl
-
-/-- **`StepOp` AIR Aggregate Verifier `DataRefines` `Spec.idealAggregateMachine`
-    (`xmssStepOpAggregate_dataRefines_ideal`)**:
-    Connects `verifyXmssStepOpAggregate` + `extractXmssStepOpSigs` directly into
-    `Spec.idealAggregateMachine (verifyAggNativeSig xmssPoseidon2Geom)` via
-    `Spec.unconditionalAggregate_dataRefines_ideal`! -/
-def xmssStepOpAggregate_dataRefines_ideal {nVal : Nat}
-    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes) :
-    Qsag.Spec.DataRefines
-      (Qsag.Spec.rawAggregateVerifierMachine (w := nVal) verifyXmssStepOpAggregate H)
-      (Qsag.Spec.idealAggregateMachine (w := nVal) (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom))
-      (fun p => some (p.1, extractXmssStepOpSigs [] p.1 p.2))
-      id :=
-  Qsag.Spec.unconditionalAggregate_dataRefines_ideal
-    (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom)
-    verifyXmssStepOpAggregate
-    (fun stmt rows => extractXmssStepOpSigs [] stmt rows)
-    H
-    (fun stmt rows hAcc => by
-      unfold verifyXmssStepOpAggregate at hAcc
-      obtain ⟨hRest, hTable⟩ := Bool.and_eq_true_iff.mp hAcc
-      obtain ⟨hNonEmpty, hProfAll⟩ := Bool.and_eq_true_iff.mp hRest
-      refine ⟨of_decide_eq_true hNonEmpty, fun i hAct => ?_⟩
-      have hProfOr := List.all_eq_true.mp hProfAll i (List.mem_finRange i)
-      rw [hAct] at hProfOr
-      simp only [Bool.not_true, Bool.false_or] at hProfOr
-      have hProf : (stmt.roster i).profile = .xmssPoseidon2 := of_decide_eq_true hProfOr
-      have hSlot : (xmssStepOpSlots stmt)[i.val]? =
-          some (some (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message)) := by
-        unfold xmssStepOpSlots
-        rw [List.getElem?_map, List.getElem?_finRange i.isLt]
-        simp only [Option.map_some, hAct, ↓reduceIte]
-      have hVer := Qsag.stepOp256TableOk_xmss_extract (xmssStepOpSlots stmt) rows i.val
-        (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message)
-        stmt.message hTable hSlot hProf rfl
-      refine ⟨Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val), ?_, hVer⟩
-      unfold extractXmssStepOpSigs
-      rw [hAct]
-      rfl)
-
-/-- **Non-Empty 2-Stage `HemMultistageCascadeRbr` State-Restoration Witness
-    (`multistage_hem_state_restoration_nonempty_witness`)**:
-    Exports the proved `64 → 32 → 16` (`stages.length = 2`) algebraic state-restoration RBR
-    witness from `HemMultistageCascadeRbr` into `Top.Aggregation`. -/
-theorem multistage_hem_state_restoration_nonempty_witness :=
-  Qsag.inhabited_hemMultistage_state_restoration
-
 #verify_constructive
   Qsag.Top.hemGoldilocksExt4Profile_basePrime_eq_goldilocksPrime
   Qsag.Top.aggregate_extractor_sound_quorum_reduction
   Qsag.Top.aggregate_extractor_sound_quorum_bound
   Qsag.Top.aggregate_extractor_sound_valid_witness_of_injective
-  Qsag.Top.xmssStepOpAggregate_straightLine_extractorSound
-  Qsag.Top.multistage_hem_state_restoration_nonempty_witness
   Qsag.Top.aggExt4_cwyz26_fold_and_point_reduction
   Qsag.Top.deployed_hem_stage_budget_and_aggExt4_transport
   Qsag.Top.qrom_hem_opening_and_invalid_coordinate_chain
