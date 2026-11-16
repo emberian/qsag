@@ -283,7 +283,10 @@ impl CoZkCustodianShare {
             None => {
                 let mut e = Engine::new(self.party, self.session, self.channel_keys, transport)?;
                 e.mix_entropy(&self.entropy);
-                Ok((CeremonyEngine::Replicated(alloc::boxed::Box::new(e)), children))
+                Ok((
+                    CeremonyEngine::Replicated(alloc::boxed::Box::new(e)),
+                    children,
+                ))
             }
         }
     }
@@ -459,11 +462,7 @@ impl CoZkCustodianShare {
         request: PallasMigrationRequest,
         transport: T,
     ) -> Result<(PallasMigrationStatement, MigrationZkProof), Error> {
-        self.prove_pallas_request_with_backend(
-            request,
-            transport,
-            &qsag_accel::CpuReferenceBackend,
-        )
+        self.prove_pallas_request_with_backend(request, transport, &qsag_accel::CpuReferenceBackend)
     }
 
     /// Backend-accelerated [`Self::prove_pallas_request`].
@@ -492,12 +491,8 @@ impl CoZkCustodianShare {
         let (engine, children) = self.start_ceremony(transport, &req_bytes)?;
         match engine {
             CeremonyEngine::Replicated(mut e) => {
-                statement.migration_nullifier = derive_nullifier_in_mpc(
-                    &mut *e,
-                    &pre_circuit,
-                    &own,
-                    &req_bytes,
-                )?;
+                statement.migration_nullifier =
+                    derive_nullifier_in_mpc(&mut *e, &pre_circuit, &own, &req_bytes)?;
                 let stmt_bytes = statement.to_transcript_bytes();
                 let circuit = pallas::build_pallas_ownership_circuit(
                     &statement,
@@ -527,12 +522,8 @@ impl CoZkCustodianShare {
                 Ok((statement, proof))
             }
             CeremonyEngine::Quorum(mut e) => {
-                statement.migration_nullifier = derive_nullifier_in_mpc(
-                    &mut *e,
-                    &pre_circuit,
-                    &own,
-                    &req_bytes,
-                )?;
+                statement.migration_nullifier =
+                    derive_nullifier_in_mpc(&mut *e, &pre_circuit, &own, &req_bytes)?;
                 let stmt_bytes = statement.to_transcript_bytes();
                 let circuit = pallas::build_pallas_ownership_circuit(
                     &statement,
@@ -684,12 +675,8 @@ impl CoZkCustodianShare {
         let (engine, children) = self.start_ceremony(transport, &req_bytes)?;
         match engine {
             CeremonyEngine::Replicated(mut e) => {
-                statement.migration_nullifier = derive_nullifier_in_mpc(
-                    &mut *e,
-                    &pre_circuit,
-                    &own,
-                    &req_bytes,
-                )?;
+                statement.migration_nullifier =
+                    derive_nullifier_in_mpc(&mut *e, &pre_circuit, &own, &req_bytes)?;
                 let stmt_bytes = statement.to_transcript_bytes();
                 let circuit =
                     bls12_381::build_bls_ownership_circuit(&statement, public_affine, &[0; 32]).0;
@@ -714,12 +701,8 @@ impl CoZkCustodianShare {
                 Ok((statement, proof))
             }
             CeremonyEngine::Quorum(mut e) => {
-                statement.migration_nullifier = derive_nullifier_in_mpc(
-                    &mut *e,
-                    &pre_circuit,
-                    &own,
-                    &req_bytes,
-                )?;
+                statement.migration_nullifier =
+                    derive_nullifier_in_mpc(&mut *e, &pre_circuit, &own, &req_bytes)?;
                 let stmt_bytes = statement.to_transcript_bytes();
                 let circuit =
                     bls12_381::build_bls_ownership_circuit(&statement, public_affine, &[0; 32]).0;
@@ -1078,7 +1061,10 @@ impl Drop for QuorumSeed {
         for k in &mut self.peer_keys {
             ct_zeroize_bytes(k);
         }
-        self.seed_slot.lock().unwrap_or_else(|e| e.into_inner()).wipe();
+        self.seed_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .wipe();
     }
 }
 impl<T: Transport> ProverEngine for SpdzEngine<T> {
@@ -1613,10 +1599,7 @@ fn derive_nullifier_in_mpc<E: Core>(
     if pre_circuit.outputs.len() < 4 {
         return Err(Error::InvalidConfiguration);
     }
-    e.agree(cshake256_framed_32(
-        b"QSAG.OUTER.REQUEST.V1",
-        &[req_bytes],
-    ))?;
+    e.agree(cshake256_framed_32(b"QSAG.OUTER.REQUEST.V1", &[req_bytes]))?;
     let witness = e.share_uniform_lanes(own_witness)?;
     // No virtual head of this evaluation is ever opened, so its tapes are
     // public zeros: the outer sharing alone hides every wire.
@@ -2185,8 +2168,7 @@ fn evaluate_wires<E: Core>(
                         SharedValue::Bit(e.constant(if value[0] == 0 { 0 } else { u64::MAX }))
                     } else {
                         SharedValue::Field(e.fconstant(value, d))
-                    }
-                    ,
+                    },
                     SharedValue::zero(d),
                     SharedValue::zero(d),
                 ],
@@ -3038,6 +3020,10 @@ mod tests {
         });
     }
 
+    // The six `complete_distributed_*` tests each run one full 438-repetition
+    // ceremony: 2,000 to 4,500 CPU-seconds and up to 10 GB. They are ignored by
+    // default and run one at a time by name with `--ignored`.
+    //
     // Bound concurrent ceremonies by the batch engines they run at once, so
     // the suite stays within the host's cores and the builder memory budget.
     // A full ceremony takes `parallel_batches()` units per custodian; a
@@ -3067,11 +3053,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full 438-repetition ceremony; run by name"]
     fn complete_distributed_bitcoin_proof_verifies() {
         complete_proof(false);
     }
 
     #[test]
+    #[ignore = "full 438-repetition ceremony; run by name"]
     fn complete_distributed_ed25519_proof_verifies() {
         complete_proof(true);
     }
@@ -3512,7 +3500,9 @@ mod tests {
         let seed = root.batch_seed(&[0x33; 32], cancelled.clone());
 
         let mut workers: Vec<_> = (0..4)
-            .map(|batch| SpdzEngine::for_batch(&seed, batch, DummyTransport, cancelled.clone()).unwrap())
+            .map(|batch| {
+                SpdzEngine::for_batch(&seed, batch, DummyTransport, cancelled.clone()).unwrap()
+            })
             .collect();
         // Root + QuorumSeed + 4 concurrent workers = 6 registered slots, all non-zero before abort.
         assert_eq!(seed.escrow.registered_count_and_all_wiped(), (6, false));
@@ -3574,9 +3564,9 @@ mod tests {
         ask_le[7] = 0xa3;
         ask_le[19] = 0x11;
         PallasFixture {
-            target: zk_engine::tests::request(
-                crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x42; 20]),
-            )
+            target: zk_engine::tests::request(crate::legacy::LegacyCommitmentKind::BitcoinHash160(
+                [0x42; 20],
+            ))
             .target,
             domain: cshake256_framed_32(b"QSAG.PALLAS.CAMPAIGN.V1", &[&77u64.to_le_bytes()]),
             ask_le,
@@ -3683,9 +3673,9 @@ mod tests {
         let scalar = witness.scalar().unwrap();
         let sk_le = scalar.to_le_bytes();
         BlsFixture {
-            target: zk_engine::tests::request(
-                crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x55; 20]),
-            )
+            target: zk_engine::tests::request(crate::legacy::LegacyCommitmentKind::BitcoinHash160(
+                [0x55; 20],
+            ))
             .target,
             domain,
             nullifier: scalar.compute_nullifier(&domain),
@@ -3737,7 +3727,10 @@ mod tests {
     #[ignore = "full 438-repetition ceremony; run by name"]
     fn complete_distributed_bls12_381_unrevealed_0x00_request_proof_verifies() {
         let fixture = bls_fixture();
-        let commitment = fixture.witness.compute_unrevealed_0x00_commitment().unwrap();
+        let commitment = fixture
+            .witness
+            .compute_unrevealed_0x00_commitment()
+            .unwrap();
         let BlsValidatorCommitment::UnrevealedBls0x00Credential(withdrawal_credentials) =
             commitment
         else {
@@ -3855,9 +3848,9 @@ mod tests {
         let sk_le = witness.scalar().unwrap().to_le_bytes();
         BlsFaultFixture {
             witness,
-            target: zk_engine::tests::request(
-                crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x66; 20]),
-            )
+            target: zk_engine::tests::request(crate::legacy::LegacyCommitmentKind::BitcoinHash160(
+                [0x66; 20],
+            ))
             .target,
             domain: [0x31; 32],
             shares: xor_shares(sk_le, [0x44; 32], [0x88; 32]),

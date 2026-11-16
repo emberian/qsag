@@ -1714,10 +1714,10 @@ fn reshare_tx_anchored(
     new_anchor_cfg: Option<&AnchorConfig>,
     hook: Hook<'_>,
 ) -> Result<Reshared, CliError> {
-    if new_t < 2 || new_t > new_n || new_n > MAX_HEM_QUORUM_PARTIES {
-        return Err(CliError::usage(format!(
-            "--new-threshold must be >= 2 and <= --new-parties (<= {MAX_HEM_QUORUM_PARTIES})"
-        )));
+    if new_t < 2 || new_t > new_n || new_n >= MAX_HEM_QUORUM_PARTIES {
+        return Err(CliError::usage(
+            "--new-threshold must be >= 2 and <= --new-parties (<= 255 nonzero GF(256) evaluation points)"
+        ));
     }
     ensure_no_vault_files(new_vault_dir)?;
     let old = open_vault_anchored(old_vault_dir, old_pass, old_anchor_cfg, &mut *hook)?;
@@ -1853,10 +1853,10 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
     let t = args.get_u64("threshold")?.unwrap_or(2) as usize;
     let n = args.get_u64("parties")?.unwrap_or(3) as usize;
     let active_leaves = args.get_u64("leaves")?.unwrap_or(8) as usize;
-    if t < 2 || t > n || n > MAX_HEM_QUORUM_PARTIES {
-        return Err(CliError::usage(format!(
-            "--threshold must be >= 2 and <= --parties (<= {MAX_HEM_QUORUM_PARTIES})"
-        )));
+    if t < 2 || t > n || n >= MAX_HEM_QUORUM_PARTIES {
+        return Err(CliError::usage(
+            "--threshold must be >= 2 and <= --parties (<= 255 nonzero GF(256) evaluation points)"
+        ));
     }
     if active_leaves == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {
         return Err(CliError::usage(format!(
@@ -2243,6 +2243,44 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn gf256_party_limit_rejects_256_before_keygen_or_reshare() {
+        let scratch = Scratch::new("party-limit");
+        // An occupied vault stops the accepted boundary before expensive key generation.
+        std::fs::write(meta_path(&scratch.0), b"occupied").unwrap();
+        for n in [255usize, 256, 257] {
+            let raw = vec![
+                "--vault-dir".into(), scratch.0.clone(),
+                "--public-out".into(), scratch.path("public"),
+                "--parties".into(), n.to_string(),
+                "--threshold".into(), "2".into(),
+                "--ephemeral-unanchored".into(),
+            ];
+            let args = Args::parse(
+                &raw,
+                &["vault-dir", "public-out", "parties", "threshold"],
+                &["ephemeral-unanchored"],
+            ).unwrap();
+            let keygen_error = keygen(&args).unwrap_err();
+            let reshare_error = match reshare_tx(
+                &scratch.path("missing"), &scratch.0, None, 2, n,
+                true, None, None, &mut no_crash,
+            ) {
+                Err(e) => e,
+                Ok(_) => panic!("occupied vault must reject"),
+            };
+            for error in [keygen_error, reshare_error] {
+                if n == 255 {
+                    assert!(error.message.contains("already exists"), "{error}");
+                } else {
+                    assert!(error.message.contains("<= 255 nonzero GF(256) evaluation points"), "{error}");
+                }
+            }
+            assert_eq!(std::fs::read(meta_path(&scratch.0)).unwrap(), b"occupied");
+            assert!(!std::path::Path::new(&scratch.path("public")).exists());
         }
     }
 
