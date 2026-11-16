@@ -2351,7 +2351,7 @@ end Qsag
 
 namespace Qsag
 /-- Compatibility spelling for the canonical coefficient pairing. -/
-def ringDot {R : Type} [CommRingOps R] : List R → List R → R := dotVec
+abbrev ringDot {R : Type} [CommRingOps R] : List R → List R → R := dotVec
 /-- Compatibility spelling for the canonical natural power. -/
 def ringPow {R : Type} [CommRingOps R] (x : R) : Nat → R := CRing.npow x
 
