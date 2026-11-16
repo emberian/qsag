@@ -332,12 +332,6 @@ impl WordSponge136 {
         }
     }
 
-    fn squeeze_u64(&mut self) -> u64 {
-        let mut w = [0u64; 1];
-        self.squeeze_u64s(&mut w);
-        w[0]
-    }
-
     fn squeeze_u128(&mut self) -> u128 {
         let mut w = [0u64; 2];
         self.squeeze_u64s(&mut w);

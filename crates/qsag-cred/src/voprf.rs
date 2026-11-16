@@ -1559,6 +1559,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn secret_output_equality_compares_every_limb() {
+        let context = Context::new([1; 32], [2; 32], 3, 2, [4; 32]);
+        let output = Output {
+            context: context.clone(),
+            components: vec![[[7; 5]; 4], [[8; 5]; 4]],
+        };
+        assert!(output == output.clone());
+        for (item, lane, limb) in [(0, 0, 0), (0, 3, 4), (1, 0, 0), (1, 3, 4)] {
+            let mut other = output.clone();
+            other.components[item][lane][limb] ^= 1 << 63;
+            assert!(output != other);
+        }
+        let mut other = output.clone();
+        other.components.pop();
+        assert!(output != other);
+        let mut other = output.clone();
+        other.context = Context::new([1; 32], [2; 32], 4, 2, [4; 32]);
+        assert!(output != other);
+
+        let evaluation = Evaluation {
+            values: vec![[5; 32], [6; 32]],
+            faulty_servers: vec![2],
+            key: [1; 32],
+            input_digests: vec![[9; 32], [10; 32]],
+            context,
+            receipt_tags: vec![[11; 32]],
+        };
+        assert!(evaluation == evaluation.clone());
+        let mutations: [fn(&mut Evaluation); 7] = [
+            |e| e.values[0][0] ^= 1,
+            |e| e.values[1][31] ^= 1,
+            |e| e.receipt_tags[0][17] ^= 1,
+            |e| e.receipt_tags.clear(),
+            |e| {
+                e.values.pop();
+            },
+            |e| e.faulty_servers.clear(),
+            |e| e.input_digests[1][0] ^= 1,
+        ];
+        for mutate in mutations {
+            let mut other = evaluation.clone();
+            mutate(&mut other);
+            assert!(evaluation != other);
+        }
+    }
+
     /// One server is offline: the start round still has four agreeing servers,
     /// the input confirmation finds its message missing. Nothing durable may
     /// have been spent by then, and the same counter must stay usable.
