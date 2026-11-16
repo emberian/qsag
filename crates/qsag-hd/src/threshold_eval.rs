@@ -174,6 +174,17 @@ impl AuthorizedHdProjection {
     }
 }
 
+/// The public statement of one opening: which key, among whom, which linear form,
+/// the value it must open to (when the form is a public relation coefficient), and
+/// the session.
+struct EvalRequest<'r> {
+    expected: &'r LinearModuleXPub,
+    roster: &'r [(u16, u32)],
+    form: &'r [RingPoly; MODULE_SECRET_L],
+    expected_value: Option<u32>,
+    session_id: [u8; 32],
+}
+
 impl<'a> HdThresholdEvalRound1Commit<'a> {
     /// Opens only an explicitly allowed coefficient of the public relation.
     pub fn begin(
@@ -192,11 +203,13 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         }
         Self::begin_inner_with_expected(
             share,
-            expected,
-            roster,
-            &form,
-            Some(expected.t_vec[row].coeffs[coefficient]),
-            session_id,
+            EvalRequest {
+                expected,
+                roster,
+                form: &form,
+                expected_value: Some(expected.t_vec[row].coeffs[coefficient]),
+                session_id,
+            },
             mask,
             private_entropy,
         )
@@ -219,11 +232,13 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         );
         Self::begin_inner_with_expected(
             share,
-            expected,
-            roster,
-            form,
-            inferred_expected,
-            session_id,
+            EvalRequest {
+                expected,
+                roster,
+                form,
+                expected_value: inferred_expected,
+                session_id,
+            },
             mask,
             private_entropy,
         )
@@ -232,17 +247,19 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
     /// Consumes an exclusive borrow of exactly one custodian. Fresh private entropy
     /// salts the commitments; it must never be a coordinator-supplied public coin.
     /// The form is a coefficient-wise scalar inner product across all eight polynomials.
-    #[allow(clippy::too_many_arguments)]
     fn begin_inner_with_expected(
         share: &'a mut LinearModulePartyShare,
-        expected: &LinearModuleXPub,
-        roster: &[(u16, u32)],
-        form: &[RingPoly; MODULE_SECRET_L],
-        expected_value: Option<u32>,
-        session_id: [u8; 32],
+        request: EvalRequest<'_>,
         mask: OpeningMask,
         mut private_entropy: [u8; 32],
     ) -> Result<Self, HdError> {
+        let EvalRequest {
+            expected,
+            roster,
+            form,
+            expected_value,
+            session_id,
+        } = request;
         let entropy = RedactedSecret::new(private_entropy);
         wipe(&mut private_entropy);
         share.require_poison_journal()?;
@@ -285,13 +302,17 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         {
             return Err(HdError::InvalidThresholdParameters);
         }
+        // A mask opens exactly one key: the digest it was derived under must be the
+        // key being opened. Only the `cfg(test)` trusted-dealer fixture is unbound.
         let expected_xpub_digest = hash_t_vec(&expected.seed_a, &expected.t_vec);
+        let mask_bound_to_key = match &mask.xpub_digest {
+            Some(digest) => ct_eq_bytes(digest, &expected_xpub_digest),
+            None => cfg!(test),
+        };
         if mask.party_id != share.party_id
             || mask.roster != roster
             || mask.session != session_id
-            || mask
-                .xpub_digest
-                .is_some_and(|d| !ct_eq_bytes(&d, &expected_xpub_digest))
+            || !mask_bound_to_key
         {
             return Err(HdError::InvalidThresholdParameters);
         }
@@ -399,7 +420,7 @@ impl<'a> HdThresholdEvalRound2OpenShareAndCommitMac<'a> {
         &mut self,
         openings: &[HdEvalShareOpening],
     ) -> Result<HdEvalCommitment, HdError> {
-        if self.0.share.is_poisoned()
+        if self.0.share.is_permanently_poisoned()
             || self.0.opened_value.is_some()
             || openings.len() != self.0.roster.len()
         {
@@ -460,7 +481,7 @@ impl<'a> HdThresholdEvalRound2OpenShareAndCommitMac<'a> {
         mut self,
         commitments: &[HdEvalCommitment],
     ) -> Result<HdThresholdEvalRound3VerifyMac<'a>, HdError> {
-        if self.0.share.is_poisoned() || self.0.opened_value.is_none() {
+        if self.0.share.is_permanently_poisoned() || self.0.opened_value.is_none() {
             return Err(HdError::MacCheckFailed);
         }
         freeze_commitments(&self.0, commitments, &self.mac_commitment())?;
@@ -580,6 +601,8 @@ pub struct OpeningMask {
     roster: Vec<(u16, u32)>,
     session: [u8; 32],
     projection: Option<AuthorizedHdProjection>,
+    /// `hash_t_vec(seed_a, t_vec)` of the key this mask was derived for. `None` only
+    /// for the `cfg(test)` trusted-dealer fixture; `begin` refuses it otherwise.
     xpub_digest: Option<[u8; 32]>,
     value: u32,
 }
@@ -598,23 +621,21 @@ impl Drop for OpeningMask {
 /// Dealerless opening mask: this custodian's share of a pseudorandom additive
 /// sharing of zero among `roster`, derived locally from the subset seeds.
 ///
-/// Note: `session` must be unique per `(LinearModuleXPub, opening)`. Callers that
-/// may reuse `session` across distinct keys under the same `CustodianSeeds` MUST
-/// call [`dealerless_opening_mask_for_xpub`], which cryptographically binds
-/// `expected`'s public key digest and derivation depth into the mask and enforces
-/// key equality inside [`HdThresholdEvalRound1Commit::begin`].
+/// For every other roster member the custodian adds (lower committee position) or
+/// subtracts (higher position) a PRF output under their pairwise key, bound to the
+/// session, the public key being opened (`hash_t_vec(seed_a, t_vec)` of `expected`),
+/// the roster and the projection. The shares sum to zero by construction, whatever
+/// a corrupt custodian does with its own. Any coalition of at most `t - 1`
+/// custodians misses the pairwise key of every pair of honest roster members, so
+/// the honest masks are jointly pseudorandom subject only to their sum.
+///
+/// Because the key digest is PRF input, repeating `session` for a different key of
+/// the same committee yields unrelated masks: the difference of two openings never
+/// cancels them. [`HdThresholdEvalRound1Commit::begin`] accepts a mask only for the
+/// exact `(key, session, roster, projection)` it was derived for; deriving it twice
+/// for the same tuple repeats the same broadcast and reveals nothing further. No
+/// private message and no dealer is involved.
 pub fn dealerless_opening_mask(
-    seeds: &CustodianSeeds,
-    roster: &[(u16, u32)],
-    session: [u8; 32],
-    projection: AuthorizedHdProjection,
-) -> Result<OpeningMask, HdError> {
-    dealerless_opening_mask_inner(seeds, roster, session, session, projection, None)
-}
-
-/// Key-bound dealerless opening mask binding `expected` (`seed_a`, `t_vec`, `depth_used`)
-/// into the pairwise PRF session so cross-key `session` reuse can never cancel masks.
-pub fn dealerless_opening_mask_for_xpub(
     seeds: &CustodianSeeds,
     expected: &LinearModuleXPub,
     roster: &[(u16, u32)],
@@ -625,28 +646,6 @@ pub fn dealerless_opening_mask_for_xpub(
         return Err(HdError::InvalidThresholdParameters);
     }
     let xpub_digest = hash_t_vec(&expected.seed_a, &expected.t_vec);
-    let prf_session = cshake256_framed_32(
-        b"QSAG.HD.EVAL.CONTEXT.V2",
-        &[&session, &xpub_digest, &expected.depth_used.to_be_bytes()],
-    );
-    dealerless_opening_mask_inner(
-        seeds,
-        roster,
-        session,
-        prf_session,
-        projection,
-        Some(xpub_digest),
-    )
-}
-
-fn dealerless_opening_mask_inner(
-    seeds: &CustodianSeeds,
-    roster: &[(u16, u32)],
-    session: [u8; 32],
-    prf_session: [u8; 32],
-    projection: AuthorizedHdProjection,
-    xpub_digest: Option<[u8; 32]>,
-) -> Result<OpeningMask, HdError> {
     let config = seeds.config();
     let party_id = seeds.party_id();
     if roster.len() < usize::from(config.threshold())
@@ -675,8 +674,8 @@ fn dealerless_opening_mask_inner(
         };
         let mut wide = SecretBuffer([0u8; 24]);
         cshake256_framed_xof(
-            b"QSAG.HD.OPENING_ZERO.DEALERLESS.V1",
-            &[&key[..], &prf_session, &context],
+            b"QSAG.HD.OPENING_ZERO.DEALERLESS.V2",
+            &[&key[..], &session, &xpub_digest, &context],
             &mut wide[..],
         );
         let mut term = reduce_wide_mod_q(&wide[..]);
@@ -692,7 +691,7 @@ fn dealerless_opening_mask_inner(
         roster: roster.to_vec(),
         session,
         projection: Some(projection),
-        xpub_digest,
+        xpub_digest: Some(xpub_digest),
         value,
     })
 }
@@ -1195,6 +1194,39 @@ mod tests {
     }
 
     #[test]
+    fn invalid_eval_points_are_refused_before_the_query_budget_is_burned() {
+        let (pk, mut shares) = setup_shamir_linear_module([4; 32], 2, &[1, 2, 3], 4).unwrap();
+        let own = shares[0].committee[0];
+        let peer_id = shares[0].committee[1].0;
+        // A committee entry that repeats this custodian's evaluation point passes every
+        // roster-membership check and is caught only by the Shamir point validation.
+        shares[0].committee[1].1 = own.1;
+        let roster = [own, (peer_id, own.1)];
+        let mask = OpeningMask {
+            party_id: own.0,
+            roster: roster.to_vec(),
+            session: [5; 32],
+            projection: None,
+            xpub_digest: None,
+            value: 0,
+        };
+        assert!(matches!(
+            HdThresholdEvalRound1Commit::begin_inner(
+                &mut shares[0],
+                &pk,
+                &roster,
+                &form(),
+                [5; 32],
+                mask,
+                [6; 32],
+            ),
+            Err(HdError::DuplicateOrZeroEvalPoint)
+        ));
+        assert_eq!(shares[0].evaluation_queries.load(Ordering::Acquire), 0);
+        assert!(!shares[0].is_poisoned());
+    }
+
+    #[test]
     fn public_projection_begin_aborts_wrong_opened_scalar_before_releasing_mac_tags() {
         use crate::linear_module::harness::{committee, honest};
         let config = committee(2, 3);
@@ -1209,7 +1241,9 @@ mod tests {
             coefficient: 17,
         };
         let masks: Vec<_> = (0..3)
-            .map(|p| dealerless_opening_mask(&seeds[p], &roster, [0x44; 32], projection).unwrap())
+            .map(|p| {
+                dealerless_opening_mask(&seeds[p], &pk, &roster, [0x44; 32], projection).unwrap()
+            })
             .collect();
         let mut round1: Vec<_> = shares
             .iter_mut()

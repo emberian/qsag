@@ -15,12 +15,14 @@ fn unsupported() -> PoisonJournalError {
     }
 }
 pub trait HdPoisonJournal: Send + Sync {
+    /// True while the family must not start another operation: it is permanently
+    /// quarantined, the journal is damaged, or a disclosure is in flight.
     fn is_poisoned(&self) -> JournalResult<bool>;
-    /// True iff the journal is permanently quarantined or damaged (as opposed to an
-    /// in-flight `begin_disclosure` held open by this process).
-    fn is_permanently_poisoned(&self) -> JournalResult<bool> {
-        self.is_poisoned()
-    }
+    /// True iff the family is permanently quarantined or the journal is damaged. A
+    /// disclosure this handle holds open between `begin_disclosure` and
+    /// `complete_disclosure` is NOT a quarantine and must report `false` here:
+    /// custody handles latch their key material dead on `true`.
+    fn is_permanently_poisoned(&self) -> JournalResult<bool>;
     fn poison(&self) -> JournalResult<()>;
     fn family_id(&self) -> [u8; 32];
     /// Persist quarantine before releasing MAC material. Unsupported journals fail closed.
@@ -157,30 +159,30 @@ mod filesystem {
             {
                 return Ok(true);
             }
-            let bytes = self.read_authenticated()?;
-            if bytes.len() != 33 || bytes[0] > 1 || !ct_eq_bytes(&bytes[1..], &self.tag(bytes[0])) {
-                self.failed
-                    .store(true, std::sync::atomic::Ordering::Release);
-                return Err(io::Error::other("invalid HD poison journal"));
-            }
-            Ok(bytes[0] != 0)
+            Ok(self.read_authenticated()?[0] != 0)
         }
         fn is_permanently_poisoned(&self) -> io::Result<bool> {
-            if self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            use std::sync::atomic::Ordering;
+            if self.failed.load(Ordering::Acquire) {
                 return Ok(true);
             }
             let active = self
                 .active
                 .lock()
                 .map_err(|_| io::Error::other("poison journal mutex"))?;
-            if active.is_some() {
-                // An in-flight disclosure in this process temporarily persists `1` on disk
-                // so a crash fails closed, without permanently latching live sibling handles.
-                let bytes = self.read_authenticated()?;
-                return Ok(bytes[0] != 1);
+            let flag = self.read_authenticated()?[0];
+            if active.is_none() {
+                return Ok(flag != 0);
             }
-            let bytes = self.read_authenticated()?;
-            Ok(bytes[0] != 0)
+            // A disclosure held open by this handle keeps `1` on disk so that losing the
+            // process fails closed. `poison()` clears `active`, so a real quarantine is
+            // never reported as in-flight. Any other flag under an open disclosure means
+            // the record changed behind the exclusive lock: treat the journal as failed.
+            if flag != 1 {
+                self.failed.store(true, Ordering::Release);
+                return Ok(true);
+            }
+            Ok(false)
         }
         fn disclosure_active(&self, session: [u8; 32]) -> io::Result<bool> {
             if self.failed.load(std::sync::atomic::Ordering::Acquire) {
@@ -262,6 +264,16 @@ mod filesystem {
             let journal = FsHdPoisonJournal::open_existing(&path, [1; 32], [2; 32]).unwrap();
             assert!(!journal.is_poisoned().unwrap());
             assert!(!journal.is_permanently_poisoned().unwrap());
+            // A real quarantine raised while a disclosure is open is permanent at once.
+            journal.begin_disclosure([7; 32]).unwrap();
+            assert!(!journal.is_permanently_poisoned().unwrap());
+            journal.poison().unwrap();
+            assert!(journal.is_permanently_poisoned().unwrap());
+            assert!(journal.complete_disclosure([7; 32]).is_err());
+            assert!(journal.is_permanently_poisoned().unwrap());
+            drop(journal);
+            let path = dir.join("crash.journal");
+            let journal = FsHdPoisonJournal::create_new(&path, [1; 32], [2; 32]).unwrap();
             journal.begin_disclosure([5; 32]).unwrap();
             drop(journal); // No abort handler: models loss of the process after disclosure.
             let journal = FsHdPoisonJournal::open_existing(&path, [1; 32], [2; 32]).unwrap();
@@ -270,6 +282,42 @@ mod filesystem {
             assert!(journal.begin_disclosure([6; 32]).is_err());
             drop(journal);
             std::fs::remove_dir_all(dir).unwrap();
+        }
+        #[test]
+        fn oversized_record_is_refused_by_length_before_it_is_read() {
+            // One byte, or a megabyte, over the 33-byte record: the bounded read rejects
+            // on the `fstat` length (`InvalidData`), where an unbounded read would first
+            // allocate and read the whole payload and only then fail the length check
+            // (`Other`).
+            for extra in [1u64, 1 << 20] {
+                let path = std::env::temp_dir().join(std::format!(
+                    "hd-poison-oversized-{}-{}-{extra}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let journal = FsHdPoisonJournal::create_new(&path, [1; 32], [2; 32]).unwrap();
+                assert!(!journal.is_poisoned().unwrap());
+                let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                let len = file.metadata().unwrap().len();
+                file.set_len(len + extra).unwrap();
+                drop(file);
+                assert_eq!(
+                    journal.read_authenticated().unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+                // The handle is failed for good: permanently poisoned, nothing can begin.
+                assert!(journal.is_poisoned().unwrap());
+                assert!(journal.is_permanently_poisoned().unwrap());
+                assert!(journal.begin_disclosure([9; 32]).is_err());
+                drop(journal);
+                std::fs::remove_file(&path).unwrap();
+                let mut lock = path.into_os_string();
+                lock.push(".lock");
+                std::fs::remove_file(lock).unwrap();
+            }
         }
         #[test]
         fn poison_survives_restart_and_rejects_wrong_family() {

@@ -1192,23 +1192,26 @@ impl RekeyRound5 {
         if inv_weight == 0 {
             return Err(HdError::InvalidThresholdParameters);
         }
+        let count = core.zero_count();
         let gates = core.zero_gates.as_mut().ok_or(HdError::MacCheckFailed)?;
         gates.freeze(peers)?;
-        let opened_residuals = gates.open()?;
-        let values: Vec<u32> = opened_residuals
-            .iter()
-            .map(|&r| mod_q_mul(inv_weight, r))
-            .collect();
+        // The quarantine is durable before any residual leaves its gate.
         if let Some(journal) = &core.lineage.poison_journal {
             journal
                 .begin_disclosure(core.session)
                 .map_err(|_| HdError::MacCheckFailed)?;
         }
-        let opening = RekeyZeroOpening {
+        // The broadcast shares are recovered from the residuals the frozen gates
+        // release, so what is disclosed is exactly what the gates then verify.
+        // `RekeyZeroOpening` wipes itself on every exit path.
+        let mut opening = RekeyZeroOpening {
             party_id: core.party_id,
-            values,
+            values: Vec::with_capacity(count),
             salt: core.zero_salt,
         };
+        for &residual in gates.open()? {
+            opening.values.push(mod_q_mul(inv_weight, residual));
+        }
         Ok((RekeyRound6(core), opening))
     }
 }
@@ -1237,7 +1240,9 @@ impl RekeyRound6 {
         let (public, mut share) = self.finish_inner(openings)?;
         if share.poison_journal.is_none() {
             share.attach_poison_journal(journal)?;
-        } else if journal.family_id() != share.family_id || journal.is_poisoned().unwrap_or(true) {
+        } else if journal.family_id() != share.family_id
+            || journal.is_permanently_poisoned().unwrap_or(true)
+        {
             share.poison();
             return Err(HdError::MacCheckFailed);
         }
@@ -1729,7 +1734,7 @@ mod tests {
         let mut states = Vec::new();
         for (p, share) in shares.iter_mut().enumerate() {
             if positions.contains(&p) {
-                let mask = dealerless_opening_mask(&seeds[p], &roster, session, projection)?;
+                let mask = dealerless_opening_mask(&seeds[p], pk, &roster, session, projection)?;
                 states.push(HdThresholdEvalRound1Commit::begin(
                     share,
                     pk,
@@ -1964,7 +1969,9 @@ mod tests {
                 .collect();
             let masks: Vec<_> = roster_positions
                 .iter()
-                .map(|&p| dealerless_opening_mask(&seeds[p], &roster, [6; 32], projection).unwrap())
+                .map(|&p| {
+                    dealerless_opening_mask(&seeds[p], &pk, &roster, [6; 32], projection).unwrap()
+                })
                 .collect();
             let total = masks
                 .iter()
@@ -1976,7 +1983,7 @@ mod tests {
                 row: 2,
                 coefficient: 42,
             };
-            let stray = dealerless_opening_mask(&seeds[0], &roster, [6; 32], wrong).unwrap();
+            let stray = dealerless_opening_mask(&seeds[0], &pk, &roster, [6; 32], wrong).unwrap();
             assert!(matches!(
                 HdThresholdEvalRound1Commit::begin(
                     &mut shares[0],
@@ -2027,17 +2034,34 @@ mod tests {
                 assert_eq!(state.verify(&mac_openings), Ok(pk.t_vec[2].coeffs[41]));
             }
         }
-        // Different sessions give unrelated masks; key-bound masks reject cross-key reuse.
+        // Different sessions give unrelated masks.
         let roster = config.members().to_vec();
-        let a = dealerless_opening_mask(&seeds[1], &roster, [6; 32], projection).unwrap();
-        let b = dealerless_opening_mask(&seeds[1], &roster, [7; 32], projection).unwrap();
+        let a = dealerless_opening_mask(&seeds[1], &pk, &roster, [6; 32], projection).unwrap();
+        let b = dealerless_opening_mask(&seeds[1], &pk, &roster, [7; 32], projection).unwrap();
         assert_ne!(a.test_value(), b.test_value());
-        let bound_root =
-            dealerless_opening_mask_for_xpub(&seeds[0], &root_pk, &roster, [8; 32], projection)
-                .unwrap();
-        let bound_child =
-            dealerless_opening_mask_for_xpub(&seeds[0], &pk, &roster, [8; 32], projection).unwrap();
-        assert_ne!(bound_root.test_value(), bound_child.test_value());
+        // M-08: the same (session, roster, projection) under a different key of the same
+        // committee gives an unrelated zero-sharing for every custodian, so the difference
+        // of two openings never cancels the masks...
+        let for_key = |key: &LinearModuleXPub| -> Vec<u32> {
+            (0..3)
+                .map(|p| {
+                    dealerless_opening_mask(&seeds[p], key, &roster, [8; 32], projection)
+                        .unwrap()
+                        .test_value()
+                })
+                .collect()
+        };
+        let (under_root, under_child) = (for_key(&root_pk), for_key(&pk));
+        for masks in [&under_root, &under_child] {
+            assert_eq!(masks.iter().fold(0, |sum, &m| mod_q_add(sum, m)), 0);
+        }
+        for (root_mask, child_mask) in under_root.iter().zip(&under_child) {
+            assert_ne!(root_mask, child_mask);
+        }
+        // ...and a mask derived for another key is refused before any budget is spent.
+        let queries_before = shares[0].evaluation_queries.load(Ordering::Acquire);
+        let for_root =
+            dealerless_opening_mask(&seeds[0], &root_pk, &roster, [8; 32], projection).unwrap();
         assert!(matches!(
             HdThresholdEvalRound1Commit::begin(
                 &mut shares[0],
@@ -2045,16 +2069,65 @@ mod tests {
                 &roster,
                 projection,
                 [8; 32],
-                bound_root,
+                for_root,
                 [3; 32],
             ),
             Err(HdError::InvalidThresholdParameters)
         ));
-        // A roster below the threshold or outside the committee is refused.
-        assert!(dealerless_opening_mask(&seeds[1], &roster[1..2], [6; 32], projection).is_err());
-        assert!(
-            dealerless_opening_mask(&seeds[1], &[(1, 2), (9, 9)], [6; 32], projection).is_err()
+        assert_eq!(
+            shares[0].evaluation_queries.load(Ordering::Acquire),
+            queries_before
         );
+        assert!(!shares[0].is_poisoned());
+        // A non-canonical key is refused.
+        let mut non_canonical = pk.clone();
+        non_canonical.t_vec[0].coeffs[0] += MODULE_Q;
+        assert!(
+            dealerless_opening_mask(&seeds[1], &non_canonical, &roster, [6; 32], projection)
+                .is_err()
+        );
+        // A roster below the threshold or outside the committee is refused.
+        assert!(
+            dealerless_opening_mask(&seeds[1], &pk, &roster[1..2], [6; 32], projection).is_err()
+        );
+        assert!(
+            dealerless_opening_mask(&seeds[1], &pk, &[(1, 2), (9, 9)], [6; 32], projection)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn zero_basis_gives_every_custodian_a_nonzero_weight_and_evaluates_at_zero() {
+        for (t, n) in [(1usize, 1usize), (1, 3), (2, 3), (2, 5), (3, 5), (5, 5), (3, 7)] {
+            let xs: Vec<u32> = (1..=n as u32).map(|x| x * 7 + 3).collect();
+            // f(x) = c_1 x + ... + c_{t-1} x^{t-1}: degree below `t` with f(0) = 0.
+            let coeffs: Vec<u32> = (1..t as u32).map(|k| 1000 + 37 * k).collect();
+            let values: Vec<u32> = xs
+                .iter()
+                .map(|&x| {
+                    coeffs
+                        .iter()
+                        .rev()
+                        .fold(0, |acc, &c| mod_q_mul(mod_q_add(acc, c), x))
+                })
+                .collect();
+            for position in 0..n {
+                let weights = zero_basis_weights(&xs, t, position);
+                assert_eq!(weights.len(), n);
+                assert_ne!(weights[position], 0, "t={t} n={n} position={position}");
+                assert_eq!(weights.iter().filter(|&&w| w != 0).count(), t);
+                assert_eq!(dot(&weights, &values), 0);
+                // This custodian's own share is in the test: moving it off the
+                // polynomial changes the sum.
+                let mut off = values.clone();
+                off[position] = mod_q_add(off[position], 1);
+                assert_ne!(dot(&weights, &off), 0);
+            }
+        }
+        // Degenerate requests give no weights at all, never a partial basis.
+        assert_eq!(zero_basis_weights(&[1, 2, 3], 0, 0), [0, 0, 0]);
+        assert_eq!(zero_basis_weights(&[1, 2, 3], 4, 0), [0, 0, 0]);
+        assert_eq!(zero_basis_weights(&[1, 2, 3], 2, 3), [0, 0, 0]);
     }
 
     #[test]
@@ -2169,6 +2242,24 @@ mod tests {
             Some(HdError::RekeyAborted(RekeyFault::CommitmentMismatch))
         );
         assert_eq!(errors[2], None);
+        // The same holds for a custodian outside the first `t` positions, whose gate
+        // used to hold all-zero residuals and whose own commitment went unchecked.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
+        let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
+            if let Stage::ZeroCommits(commits) = stage {
+                commits[2].digest[31] ^= 0x80;
+            }
+        });
+        let errors = outcome.expect_err("substituted own zero-commit must abort in Round 5");
+        assert_eq!(
+            errors,
+            [
+                None,
+                None,
+                Some(HdError::RekeyAborted(RekeyFault::CommitmentMismatch))
+            ]
+        );
         // When corrupt custodian 1 equivocates so peers reach Round 6, every honest peer
         // rejects the mismatched opening.
         let (root_pk, root) = honest(&seeds, None, 0, false, 1);
@@ -2470,9 +2561,10 @@ mod tests {
             row: 2,
             coefficient: 41,
         };
-        let mask = dealerless_opening_mask(&seeds[1], config.members(), [6; 32], projection)
-            .unwrap()
-            .test_value();
+        let mask =
+            dealerless_opening_mask(&seeds[1], &soft_pk, config.members(), [6; 32], projection)
+                .unwrap()
+                .test_value();
         let digest = |pk: &LinearModuleXPub| hash_t_vec(&pk.seed_a, &pk.t_vec);
         let pinned = cshake256_framed_32(
             b"QSAG.HD.TEST.PIN",
@@ -2488,9 +2580,12 @@ mod tests {
         );
         assert_eq!(pinned, PINNED_DEALERLESS_DIGEST, "{pinned:?}");
     }
+    // Re-pinned for `QSAG.HD.OPENING_ZERO.DEALERLESS.V2` (the mask binds the key digest).
+    // With the V1 mask derivation the previous pin still reproduces, so the ceremony
+    // digest, the three key digests and the chain codes are unchanged.
     const PINNED_DEALERLESS_DIGEST: [u8; 32] = [
-        215, 123, 87, 236, 184, 105, 194, 91, 72, 31, 153, 241, 54, 126, 189, 139, 59, 32, 144, 5,
-        218, 188, 74, 46, 138, 48, 88, 179, 146, 78, 80, 123,
+        11, 235, 197, 6, 100, 115, 193, 216, 114, 212, 96, 192, 81, 9, 94, 89, 124, 36, 135, 49,
+        56, 176, 100, 196, 186, 178, 233, 14, 63, 94, 55, 186,
     ];
 
     #[test]
@@ -2602,7 +2697,11 @@ mod tests {
             .map(|i| {
                 let path = dir.join(alloc::format!("poison_{i}.journal"));
                 Arc::new(
-                    crate::poison::FsHdPoisonJournal::open(&path, family_id, [0x70 + i as u8; 32])
+                    crate::poison::FsHdPoisonJournal::create_new(
+                        &path,
+                        family_id,
+                        [0x70 + i as u8; 32],
+                    )
                         .unwrap(),
                 ) as Arc<dyn crate::poison::HdPoisonJournal>
             })

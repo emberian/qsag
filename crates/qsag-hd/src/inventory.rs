@@ -551,12 +551,14 @@ pub fn derive_rss_child_share_2of3(
     let config = seeds.config();
     let pos = rss_2of3_position(seeds)?;
     let mut subset_primary = CustodianSet::default();
-    subset_primary.insert(pos);
-    subset_primary.insert((pos + 2) % 3);
-
     let mut subset_secondary = CustodianSet::default();
-    subset_secondary.insert(pos);
-    subset_secondary.insert((pos + 1) % 3);
+    if !(subset_primary.insert(pos)
+        && subset_primary.insert((pos + 2) % 3)
+        && subset_secondary.insert(pos)
+        && subset_secondary.insert((pos + 1) % 3))
+    {
+        return Err(HdError::InvalidThresholdParameters);
+    }
 
     let config_digest = config.digest();
     let idx_be = child_idx.to_be_bytes();
@@ -962,6 +964,90 @@ mod signature_tests {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn budgeted_recovery_validates_vaults_and_index_before_burning() {
+        use crate::budget::DurableQueryBudget;
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "qsag-hd-recover-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let config = committee(2, 3);
+        let seeds = run_seed_ceremony(&config, 0x21);
+        let vaults: Vec<_> = seeds
+            .iter()
+            .map(|s| derive_inventory_vault(s, [2; 32], 2).unwrap())
+            .collect();
+        let all: Vec<&InventoryPartyShareVault> = vaults.iter().collect();
+        let (_, child_pk) = enroll_child_signing_seed_quorum(&config, &all, 0).unwrap();
+        let other = committee(2, 4);
+        let foreign_vault =
+            derive_inventory_vault(&run_seed_ceremony(&other, 0x22)[0], [2; 32], 2).unwrap();
+        let mut budget =
+            DurableQueryBudget::create(dir.join("budget"), config.digest(), [9; 32]).unwrap();
+        for (vaults, child_idx, expected) in [
+            (&[][..], 0, HdError::InvalidThresholdParameters),
+            (
+                &[&vaults[0], &vaults[0]][..],
+                0,
+                HdError::InvalidThresholdParameters,
+            ),
+            (
+                &[&vaults[0], &foreign_vault][..],
+                0,
+                HdError::InvalidThresholdParameters,
+            ),
+            (
+                &[&vaults[0], &vaults[1]][..],
+                2,
+                HdError::ChildIndexOutOfBounds,
+            ),
+        ] {
+            assert_eq!(
+                recover_child_signing_seed_budgeted(
+                    &mut budget,
+                    &config,
+                    vaults,
+                    child_idx,
+                    &child_pk
+                )
+                .err(),
+                Some(expected)
+            );
+            assert_eq!(budget.used(), 0);
+        }
+        // A well-formed attempt burns exactly one slot, and so does a well-formed
+        // attempt that then fails the key check: the disclosure was attempted.
+        recover_child_signing_seed_budgeted(
+            &mut budget,
+            &config,
+            &[&vaults[1], &vaults[2]],
+            0,
+            &child_pk,
+        )
+        .unwrap();
+        assert_eq!(budget.used(), 1);
+        assert_eq!(
+            recover_child_signing_seed_budgeted(
+                &mut budget,
+                &config,
+                &[&vaults[1], &vaults[2]],
+                0,
+                &[0xEE; 32],
+            )
+            .err(),
+            Some(HdError::InvalidSignatureKey)
+        );
+        assert_eq!(budget.used(), 2);
+        drop(budget);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(feature = "std")]
