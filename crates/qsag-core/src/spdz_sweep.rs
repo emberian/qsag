@@ -80,7 +80,8 @@ pub trait SpdzTripleSource {
 /// ([`run_dealerless_pcg_keccak_vaults_with_alpha`]) under an existing MAC key. The
 /// generator runs among all the parties that hold the MAC key (`eval_points`, with their
 /// own preprocessing RNGs); the vaults of the signing quorum are handed to the engine and
-/// the others are dropped, which wipes them.
+/// the others are dropped, which wipes them. Any failed request permanently poisons this
+/// source and wipes the caller's borrowed MAC-key buffers.
 pub struct DealerlessPcgTripleSource<'a> {
     pub session_id: [u8; 32],
     pub t: usize,
@@ -89,16 +90,42 @@ pub struct DealerlessPcgTripleSource<'a> {
     /// of the engine's key shares.
     pub quorum: &'a [usize],
     pub tree_depth: usize,
-    pub alpha_contribs: &'a [[Tower128; 2]],
-    pub alpha_shamir: &'a [[Tower128; 2]],
+    /// Borrowed mutably so failure can wipe the caller's contribution buffers.
+    pub alpha_contribs: &'a mut [[Tower128; 2]],
+    /// Matching Shamir MAC-key shares, also wiped on failure.
+    pub alpha_shamir: &'a mut [[Tower128; 2]],
     pub ot_mesh: &'a mut OtMesh,
     pub party_rngs: &'a mut [PartyPrivateRng],
-    /// Requests served so far; separates their sessions.
+    /// Requests served so far; separates their sessions. `u64::MAX` is terminal:
+    /// a failed request wipes both borrowed MAC-key buffers and poisons this source.
     pub requests: u64,
 }
 
 impl SpdzTripleSource for DealerlessPcgTripleSource<'_> {
     fn vaults(
+        &mut self,
+        words: usize,
+    ) -> Result<Vec<PreprocessedKeccakPartyVault>, KeccakMpcError> {
+        if self.requests == u64::MAX {
+            return Err(KeccakMpcError::Poisoned);
+        }
+        let result = self.try_vaults(words);
+        if result.is_err() {
+            self.requests = u64::MAX;
+            for key in self
+                .alpha_contribs
+                .iter_mut()
+                .chain(self.alpha_shamir.iter_mut())
+            {
+                crate::field::tower::wipe_tower128(key);
+            }
+        }
+        result
+    }
+}
+
+impl DealerlessPcgTripleSource<'_> {
+    fn try_vaults(
         &mut self,
         words: usize,
     ) -> Result<Vec<PreprocessedKeccakPartyVault>, KeccakMpcError> {
@@ -1007,6 +1034,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn dealerless_source_error_wipes_keys_and_refuses_retry() {
+        let sid = [0xe2; 32];
+        let points = [TowerGf256(1), TowerGf256(2)];
+        let mut rngs: Vec<_> = (0..2)
+            .map(|p| PartyPrivateRng::from_seed([0x61 + p; 32], b"source-poison"))
+            .collect();
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+        let mut alpha = [[Tower128(19), Tower128(23)]; 2];
+        let mut shamir = [[Tower128(29), Tower128(31)]; 2];
+        let mut source = DealerlessPcgTripleSource {
+            session_id: sid,
+            t: 0, // Reaches the generator and induces InvalidThreshold.
+            eval_points: &points,
+            quorum: &[0, 1],
+            tree_depth: 1,
+            alpha_contribs: &mut alpha,
+            alpha_shamir: &mut shamir,
+            ot_mesh: &mut mesh,
+            party_rngs: &mut rngs,
+            requests: 0,
+        };
+        assert!(matches!(
+            source.vaults(1),
+            Err(KeccakMpcError::Preprocess(
+                crate::preprocessing::PreprocessError::InvalidThreshold { .. }
+            ))
+        ));
+        assert_eq!(source.requests, u64::MAX);
+        assert!(
+            source
+                .alpha_contribs
+                .iter()
+                .chain(source.alpha_shamir.iter())
+                .flatten()
+                .all(|x| *x == Tower128::ZERO)
+        );
+        // Repairing the initial parameter cannot revive a failed source.
+        source.t = 2;
+        let before = source.ot_mesh.transcript_digest();
+        assert!(matches!(source.vaults(1), Err(KeccakMpcError::Poisoned)));
+        assert_eq!(source.ot_mesh.transcript_digest(), before);
+        assert_eq!(alpha, [[Tower128::ZERO; 2]; 2]);
+        assert_eq!(shamir, [[Tower128::ZERO; 2]; 2]);
+    }
+
+    #[test]
     fn sweep_openings_match_the_reference_and_reveal_only_the_picks() {
         // 3-of-5 with the non-prefix quorum {1, 2, 4}.
         let mut s = setup(3, 5, &[1, 2, 4], 0x11);
@@ -1260,7 +1333,8 @@ pub(crate) mod tests {
             run_dealerless_dkg_seed32_gf256([0xc1; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
         let (prf_shares, _) =
             run_dealerless_dkg_seed32_gf256([0xc2; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
-        let (alpha_c, alpha_sh) = spdz_setup_alpha_gf256(&[0xc3; 32], t, &pts, &mut rngs).unwrap();
+        let (mut alpha_c, mut alpha_sh) =
+            spdz_setup_alpha_gf256(&[0xc3; 32], t, &pts, &mut rngs).unwrap();
         let mut keys = authenticate_dkg_seed_shares_for_spdz(
             &[0xc4; 32],
             t,
@@ -1299,8 +1373,8 @@ pub(crate) mod tests {
             eval_points: &pts,
             quorum: &quorum,
             tree_depth: PCG_DEFAULT_TREE_DEPTH,
-            alpha_contribs: &alpha_c,
-            alpha_shamir: &alpha_sh,
+            alpha_contribs: &mut alpha_c,
+            alpha_shamir: &mut alpha_sh,
             ot_mesh: &mut mesh,
             party_rngs: &mut rngs,
             requests: 0,
@@ -1338,7 +1412,8 @@ pub(crate) mod tests {
             run_dealerless_dkg_seed32_gf256([0xc1; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
         let (prf_shares, _) =
             run_dealerless_dkg_seed32_gf256([0xc2; 32], t, &pts, &mut mesh, &mut rngs).unwrap();
-        let (alpha_c, alpha_sh) = spdz_setup_alpha_gf256(&[0xc3; 32], t, &pts, &mut rngs).unwrap();
+        let (mut alpha_c, mut alpha_sh) =
+            spdz_setup_alpha_gf256(&[0xc3; 32], t, &pts, &mut rngs).unwrap();
         let keys = authenticate_dkg_seed_shares_for_spdz(
             &[0xc4; 32],
             t,
@@ -1376,8 +1451,8 @@ pub(crate) mod tests {
             eval_points: &pts,
             quorum: &quorum,
             tree_depth: PCG_DEFAULT_TREE_DEPTH,
-            alpha_contribs: &alpha_c,
-            alpha_shamir: &alpha_sh,
+            alpha_contribs: &mut alpha_c,
+            alpha_shamir: &mut alpha_sh,
             ot_mesh: &mut mesh,
             party_rngs: &mut rngs,
             requests: 0,

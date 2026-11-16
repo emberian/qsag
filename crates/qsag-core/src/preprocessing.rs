@@ -11479,7 +11479,7 @@ mod legacy_sparse_pcg {
             let coin = run_commit_and_open_coin(
                 &session_id,
                 b"PCG_TOW_TRIPLE_SAC",
-                &[0x5A; 32],
+                &ot_mesh.transcript_digest(),
                 party_rngs,
             )?;
             let rho_tow = Tower128(
@@ -12561,8 +12561,9 @@ pub fn run_dealerless_pcg_keccak_vaults_with_alpha(
 pub const SILENT_PCG_KECCAK_CHUNK_WORDS: usize = 5;
 
 /// Convert two locally expanded [`crate::pcg_dense::DensePcgExpandedVault`] lanes per party
-/// directly into authenticated threshold Shamir-SPDZ [`PreprocessedKeccakPartyVault`]s without
-/// running interactive `KosOtExtension`.
+/// directly into authenticated threshold Shamir-SPDZ [`PreprocessedKeccakPartyVault`]s.
+/// Triple generation uses the silent vaults; additive MAC openings share one fresh OT mesh
+/// for this standalone materialization.
 ///
 /// Consumes silent Boolean Beaver triples from `vaults_lane0` and silent Subfield-VOLEs from
 /// `(vaults_lane0, vaults_lane1)`, executes the two-instance recursive inner-product sacrifice
@@ -12631,6 +12632,34 @@ pub fn materialize_silent_pcg_keccak_vaults_with_alpha(
     vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    materialize_silent_pcg_keccak_vaults_on_mesh(
+        session_id,
+        t,
+        eval_points,
+        num_triples,
+        alpha_shamir,
+        vaults_lane0,
+        vaults_lane1,
+        None,
+        party_rngs,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Silent vaults and an optional existing OT mesh are distinct inputs"
+)]
+fn materialize_silent_pcg_keccak_vaults_on_mesh(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    num_triples: usize,
+    alpha_shamir: &[[Tower128; 2]],
+    vaults_lane0: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    mesh: Option<&mut OtMesh>,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
     let n = eval_points.len();
     if t == 0
         || t > n
@@ -12668,6 +12697,7 @@ pub fn materialize_silent_pcg_keccak_vaults_with_alpha(
         alpha_shamir,
         vaults_lane0,
         vaults_lane1,
+        mesh,
         party_rngs,
         &mut triple_f2::PiTripleF2Faults::default(),
     )
@@ -12675,7 +12705,7 @@ pub fn materialize_silent_pcg_keccak_vaults_with_alpha(
 
 /// Burn and locally expand two compact [`crate::pcg_dense::DensePcgPartySeed`] lanes per party
 /// against `burn_tracker`, then materialize authenticated [`PreprocessedKeccakPartyVault`]s
-/// with zero `KosOtExtension` traffic.
+/// with OT traffic confined to blinded MAC checks.
 #[expect(
     clippy::too_many_arguments,
     reason = "Two seed lanes, burn tracker, threshold points and RNGs are distinct ceremony inputs"
@@ -12847,7 +12877,7 @@ pub fn run_silent_pcg_keccak_vaults_with_alpha<T: crate::pcg_dense::SeedBurnTrac
         for seed in seeds1 {
             vaults1.push(seed.expand_local(burn_tracker)?);
         }
-        let mut chunk_vaults = materialize_silent_pcg_keccak_vaults_with_alpha(
+        let mut chunk_vaults = materialize_silent_pcg_keccak_vaults_on_mesh(
             sid_mat,
             t,
             eval_points,
@@ -12855,6 +12885,7 @@ pub fn run_silent_pcg_keccak_vaults_with_alpha<T: crate::pcg_dense::SeedBurnTrac
             alpha_shamir,
             &mut vaults0,
             &mut vaults1,
+            Some(&mut *ot_mesh),
             party_rngs,
         )?;
         for p in 0..n {
@@ -14415,7 +14446,7 @@ mod silent_pcg_vault_integration_tests {
 
     #[test]
     fn silent_pcg_keccak_vaults_honest_2p_3p_and_tamper_rejection() {
-        // 1. 2-of-2 silent seed burn + local expansion + KosOtExtension-free materialization.
+        // 1. 2-of-2 silent seed burn + local expansion + blinded-check materialization.
         let sid0 = [0x71; 32];
         let sid1 = [0x72; 32];
         let mut rngs = make_rngs(2, 0x22);
