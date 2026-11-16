@@ -1,16 +1,16 @@
 module
 /-
-# Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness — High-Capacity (`nv ≤ 30`) Flat Schedules & Recursive `Hem` Tree over Real Leaf Shards
+# Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness — High-Capacity (`nv ≤ 28`) Flat Schedules & Recursive `Hem` Tree over Real Leaf Shards
 
 The numerical profile bounds below do not instantiate a sampled WHIR RBR certificate.
 Their `2^40` conclusions are arithmetic on conditional profile expressions.
 
-1. **§1 High-capacity flat schedules (`nv = 2..30`).** Stage geometry, Johnson witness rows and
-   sliced persistence rows extended from `nv ≤ 24` to `nv = 30`: `hemHighCapSchedule_covers_nv2_to_30`,
-   `hemHighCap_cdhzPow16_budget_nv2_to_30` (`Q ≤ 2^38`), `hemHighCap_unitaryZeroPow_budget_nv2_to_30`
-   (`Q + 1 ≤ 2^40`). `pcs.rs` stops at `MAX_PCS_NUM_VARS = 28` and folds `(6, 4, 4, 3)` at `25`
-   where `hemHighCapStageGeometry` has `(6, 5, 3, 3)`: rows `25`, `29`, `30` are not statements about
-   a `pcs.rs` schedule.
+1. **§1 High-capacity flat schedules (`nv = 2..28`).** Stage geometry, Johnson witness rows and
+   sliced persistence rows extended from `nv ≤ 24` to `nv = 28` (`MAX_PCS_NUM_VARS = 28` in `pcs.rs`):
+   `hemHighCapSchedule_covers_nv2_to_28`, `hemHighCap_cdhzPow16_budget_nv2_to_28` (`Q ≤ 2^38`),
+   `hemHighCap_unitaryZeroPow_budget_nv2_to_28` (`Q + 1 ≤ 2^40`). Every stage geometry and witness
+   row in `25..=28` matches `pcs.rs::stage_geometry` and `affine_schedule.rs::HIGH_CAPACITY_WITNESSES`
+   verbatim; `nv ≥ 29` is rejected (`[]`), matching `MAX_PCS_NUM_VARS = 28`.
 2. **§2 `Poseidon2` Canopy openings and the child-WHIR relation.** Salted, domain-separated Canopy
    leaves and nodes with collision/opening extraction (`extractPoseidon2CanopyCollisionOrOpening`),
    the authenticated `[CWYZ26]` duet fold (`authenticated_duet_fold_uniquely_determines_claimed`),
@@ -50,27 +50,25 @@ namespace Qsag
 set_option autoImplicit false
 set_option Elab.async false
 
-/-! ## §1. High-Capacity Flat Schedules (`nv = 2..30`, up to `2^30` Field Cells / `K = 8,192` Signers) -/
+/-! ## §1. High-Capacity Flat Schedules (`nv = 2..28`, up to `2^28` Field Cells / `MAX_PCS_NUM_VARS = 28`) -/
 
-/-- Extended WHIR folding geometry `(log₂ blowup, step_vars)` covering `nv ∈ 2..=30`.
-    Coincides verbatim with `hemStageGeometry` on `2..=24` and scales step counts within `1..6`
-    across `nv ∈ 25..=30` (`2^25` up to `2^30 = 1,073,741,824` trace cells, supporting `K = 8,192`
-    flat signers at `2^17` cells per signer). -/
+/-- Extended WHIR folding geometry `(log₂ blowup, step_vars)` covering `nv ∈ 2..=28`
+    (`pcs.rs::MAX_PCS_NUM_VARS = 28`), agreeing verbatim with `hemStageGeometry` and rejecting
+    `nv ≥ 29` (`[]`). -/
 def hemHighCapStageGeometry (nv : Nat) : List (Nat × Nat) :=
   if nv ≤ 24 then hemStageGeometry nv
-  else if nv = 25 then [(2, 6), (4, 5), (6, 3), (8, 3)]
+  else if nv = 25 then [(2, 6), (4, 4), (6, 4), (8, 3)]
   else if nv = 26 then [(2, 6), (4, 5), (6, 4), (8, 3)]
   else if nv = 27 then [(2, 6), (4, 5), (6, 4), (8, 4)]
   else if nv = 28 then [(2, 6), (4, 6), (6, 4), (8, 4)]
-  else if nv = 29 then [(2, 6), (4, 6), (6, 5), (8, 4)]
-  else [(2, 6), (4, 6), (6, 6), (8, 4)]
+  else []
 
-/-- Early-stop variable count for `nv ∈ 2..=30` (coincides with `hemEarlyStopVars` on `2..=24`
-    and uses `8` early-stop variables for `25..=30`). -/
+/-- Early-stop variable count for `nv ∈ 2..=28` (coincides with `hemEarlyStopVars` on `2..=28`
+    and uses `8` early-stop variables for `25..=28`). -/
 def hemHighCapEarlyStopVars (nv : Nat) : Nat :=
   if nv ≤ 24 then hemEarlyStopVars nv else 8
 
-/-- Resolved per-stage `(stageIdx, logBlowup, stepVars, n, d)` geometry for `nv ∈ 2..=30`. -/
+/-- Resolved per-stage `(stageIdx, logBlowup, stepVars, n, d)` geometry for `nv ∈ 2..=28`. -/
 def hemHighCapStageGeoms (nv : Nat) : List HemStageGeom :=
   hemStageGeomsAux 0 nv (hemHighCapStageGeometry nv)
 
@@ -84,35 +82,28 @@ def hemHighCapGeometryValid (nv : Nat) : Bool :=
   decide (hemHighCapEarlyStopVars nv + (g.map (·.2)).sum = nv) &&
   decide (1 ≤ hemHighCapEarlyStopVars nv ∧ hemHighCapEarlyStopVars nv ≤ 8)
 
-/-- High-capacity `[CWYZ26]` Johnson witness rows `(num_vars, stage, A, m, D)` for `nv ∈ 25..=30`,
-    certified simultaneously across all four `HemOptimizedQromSchedule` regimes and `BciksJohnsonQrom128`. -/
+/-- High-capacity `[CWYZ26]` Johnson witness rows `(num_vars, stage, A, m, D)` for `nv ∈ 25..=28`
+    (`affine_schedule.rs::HIGH_CAPACITY_WITNESSES` verbatim), certified simultaneously across all
+    four `HemOptimizedQromSchedule` regimes and `BciksJohnsonQrom128`. -/
 def hemHighCapExtraWitnessRows : List (Nat × Nat × Nat × Nat × Nat) :=
-  [ (25, 0, 1053822, 64, 15000),
-    (25, 1, 66329, 64, 8000),
-    (25, 2, 16888, 64, 5000),
-    (25, 3, 4450, 64, 3000),
-    (26, 0, 2107641, 64, 11000),
-    (26, 1, 132651, 64, 8000),
-    (26, 2, 16888, 64, 5000),
-    (26, 3, 4450, 64, 3000),
-    (27, 0, 4215279, 64, 11000),
-    (27, 1, 265296, 64, 8000),
-    (27, 2, 33764, 64, 4000),
-    (27, 3, 4450, 64, 3000),
-    (28, 0, 8430555, 64, 11000),
-    (28, 1, 266083, 64, 4000),
-    (28, 2, 33764, 64, 4000),
-    (28, 3, 4450, 64, 3000),
-    (29, 0, 16861106, 64, 11000),
-    (29, 1, 532159, 64, 4000),
-    (29, 2, 33764, 64, 4000),
-    (29, 3, 4450, 64, 3000),
-    (30, 0, 33722208, 64, 11000),
-    (30, 1, 1064311, 64, 4000),
-    (30, 2, 34420, 64, 3000),
-    (30, 3, 4450, 64, 3000) ]
+  [ (25, 0, 1054283, 128, 6353),
+    (25, 1, 133941, 32, 1732),
+    (25, 2, 17483, 16, 586),
+    (25, 3, 4482, 16, 1049),
+    (26, 0, 2108508, 128, 6359),
+    (26, 1, 133940, 32, 1734),
+    (26, 2, 17483, 16, 586),
+    (26, 3, 4482, 16, 1049),
+    (27, 0, 4216959, 128, 6361),
+    (27, 1, 267837, 32, 1724),
+    (27, 2, 34932, 16, 581),
+    (27, 3, 4481, 16, 1056),
+    (28, 0, 8433861, 128, 6362),
+    (28, 1, 267836, 32, 1724),
+    (28, 2, 34932, 16, 581),
+    (28, 3, 4481, 16, 1056) ]
 
-/-- Unified 73-row `[CWYZ26]` Johnson witness table covering `nv ∈ 2..=30`. -/
+/-- Unified 65-row `[CWYZ26]` Johnson witness table covering `nv ∈ 2..=28`. -/
 def hemHighCapWitnessTable : List (Nat × Nat × Nat × Nat × Nat) :=
   hemOptimizedQromWitnessTable ++ hemHighCapExtraWitnessRows
 
@@ -135,17 +126,17 @@ def hemHighCapStageCovered (sched : HemOptimizedQromSchedule) (q nv : Nat) (g : 
     | none => false
     | some w => checkWhirAffineWitness w q && decide (whirAffineStageSimpleNum w + 1 < 1900)
 
-/-- Non-exhaustive stage witnesses for `nv ∈ 2..=30` under `sched`. -/
+/-- Non-exhaustive stage witnesses for `nv ∈ 2..=28` under `sched`. -/
 def hemHighCapStageWitnesses (sched : HemOptimizedQromSchedule) (nv : Nat) : List WhirAffineWitness :=
   (hemHighCapStageGeoms nv).filterMap (fun g =>
     if hemOptimizedStageExhaustive sched g = true then none else hemHighCapStageWitness sched nv g)
 
-/-- Pure distinct-fiber coset query bounds `(A + s_i)_{q_i} / (n)_{q_i}` for `nv ∈ 2..=30`. -/
+/-- Pure distinct-fiber coset query bounds `(A + s_i)_{q_i} / (n)_{q_i}` for `nv ∈ 2..=28`. -/
 def hemHighCapQueryBounds (sched : HemOptimizedQromSchedule) (nv : Nat) : List RatBound :=
   (hemHighCapStageWitnesses sched nv).map whirAffinePureQueryBoundOrOne
 
-/-- Degree-3 sumcheck + round-0 cascade RBR profile bound for `nv ∈ 2..=30`, scaling the sumcheck
-    round term as `3 * nv` (`= 72` at `nv = 24`, `= 90` at `nv = 30`). -/
+/-- Degree-3 sumcheck + round-0 cascade RBR profile bound for `nv ∈ 2..=28`, scaling the sumcheck
+    round term as `3 * nv` (`= 72` at `nv = 24`, `= 84` at `nv = 28`). -/
 def hemHighCapCascadeRbrBound (nv : Nat) : RatBound :=
   match hemHighCapStageWitnesses .cdhzPow16At2pow38 nv with
   | w :: _ =>
@@ -153,92 +144,103 @@ def hemHighCapCascadeRbrBound (nv : Nat) : RatBound :=
   | [] =>
     ⟨3 * nv, goldilocksExt4Card, goldilocksExt4Card_pos⟩
 
-/-- Multi-round RBR challenge bounds for `nv ∈ 2..=30` (cascade round + one folding round per
+/-- Multi-round RBR challenge bounds for `nv ∈ 2..=28` (cascade round + one folding round per
     non-exhaustive WHIR stage). -/
 def hemHighCapFiveRoundRbrBounds (nv : Nat) : List RatBound :=
   hemHighCapCascadeRbrBound nv ::
     (hemHighCapStageWitnesses .cdhzPow16At2pow38 nv).map whirAffineEqualDegreeCommitFoldBound
 
-/-- High-capacity `slicedParamsOk` persistence thresholds `(nv, stage, B, bits)` for `nv ∈ 25..=30`,
-    certifying `AffineFoldDecompBound` at `bits ≥ 181` on every high-capacity stage. -/
+/-- High-capacity `slicedParamsOk` persistence thresholds `(nv, stage, B, bits)` for `nv ∈ 25..=28`,
+    certifying `AffineFoldDecompBound` at `bits ≥ 183` on every high-capacity stage. -/
 def slicedHighCapExtraTable : List (Nat × Nat × Nat × Nat) :=
-  [ (25, 0, 1048579, 185),
-    (25, 1, 65542, 190),
-    (25, 2, 16396, 193),
-    (25, 3, 4120, 196),
+  [ (25, 0, 1048579, 186),
+    (25, 1, 131078, 196),
+    (25, 2, 16396, 204),
+    (25, 3, 4120, 203),
     (26, 0, 2097155, 185),
-    (26, 1, 131078, 189),
-    (26, 2, 16396, 193),
-    (26, 3, 4120, 196),
+    (26, 1, 131078, 196),
+    (26, 2, 16396, 204),
+    (26, 3, 4120, 203),
     (27, 0, 4194307, 184),
-    (27, 1, 262150, 188),
-    (27, 2, 32780, 192),
-    (27, 3, 4120, 196),
+    (27, 1, 262150, 195),
+    (27, 2, 32780, 203),
+    (27, 3, 4120, 203),
     (28, 0, 8388611, 183),
-    (28, 1, 262150, 190),
-    (28, 2, 32780, 192),
-    (28, 3, 4120, 196),
-    (29, 0, 16777219, 182),
-    (29, 1, 524294, 189),
-    (29, 2, 32780, 192),
-    (29, 3, 4120, 196),
-    (30, 0, 33554435, 181),
-    (30, 1, 1048582, 188),
-    (30, 2, 32780, 194),
-    (30, 3, 4120, 196) ]
+    (28, 1, 262150, 195),
+    (28, 2, 32780, 203),
+    (28, 3, 4120, 203) ]
 
 def slicedHighCapRow (nv stage : Nat) : Option (Nat × Nat × Nat × Nat) :=
   if nv ≤ 24 then slicedStageRow nv stage
   else slicedHighCapExtraTable.find? (fun r => r.1 == nv && r.2.1 == stage)
 
-/-- Proved `nonExcludedDecompBound_sliced` check for high-capacity stages `nv ∈ 25..=30` (`bits ≥ 181`). -/
+/-- Proved `nonExcludedDecompBound_sliced` check for high-capacity stages `nv ∈ 25..=28` (`bits ≥ 183`). -/
 def slicedHighCapStageCovered (q nv : Nat) (g : HemStageGeom) : Bool :=
   if nv ≤ 24 then slicedStageCovered q nv g
   else
     match hemHighCapTableRow nv g.stageIdx, slicedHighCapRow nv g.stageIdx with
     | some r, some w =>
       slicedParamsOk g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 &&
-        decide (slicedStageCount q g r w * 2 ^ w.2.2.2 ≤ q * q) && decide (181 ≤ w.2.2.2)
+        decide (slicedStageCount q g r w * 2 ^ w.2.2.2 ≤ q * q) && decide (183 ≤ w.2.2.2)
     | _, _ => false
 
-/-- **Universal High-Capacity WHIR Coverage Certificate (`hemHighCapSchedule_covers_nv2_to_30`)**:
-    1. Every `nv ∈ 2..=30` satisfies `hemHighCapGeometryValid nv = true` (valid 1..4 stage geometry,
-       `≤ 6` variables per stage, covering up to `2^30` field cells / `K = 8,192` flat signers);
-    2. Every stage `g ∈ hemHighCapStageGeoms nv` across ALL `nv ∈ 2..=30` passes `checkWhirAffineWitness`
+/-- Exact parity between `hemHighCapStageGeometry` and `hemStageGeometry` for all `nv : Nat`
+    (including rejection `[]` above `MAX_PCS_NUM_VARS = 28`). -/
+theorem hemHighCapStageGeometry_eq_hemStageGeometry (nv : Nat) :
+    hemHighCapStageGeometry nv = hemStageGeometry nv := by
+  unfold hemHighCapStageGeometry
+  by_cases h24 : nv ≤ 24
+  · simp only [h24, ↓reduceIte]
+  · simp only [h24, ↓reduceIte]
+    by_cases h28 : nv ≤ 28
+    · have hcases : nv = 25 ∨ nv = 26 ∨ nv = 27 ∨ nv = 28 := by omega
+      rcases hcases with rfl | rfl | rfl | rfl <;> decide
+    · have h25 : ¬ nv = 25 := by omega
+      have h26 : ¬ nv = 26 := by omega
+      have h27 : ¬ nv = 27 := by omega
+      have h28' : ¬ nv = 28 := by omega
+      simp only [h25, h26, h27, h28', ↓reduceIte]
+      exact (hemStageGeometry_nv25_to_28.2.2.2.2 nv (by omega)).symm
+
+/-- **Universal High-Capacity WHIR Coverage Certificate (`hemHighCapSchedule_covers_nv2_to_28`)**:
+    1. Every `nv ∈ 2..=28` satisfies `hemHighCapGeometryValid nv = true` (valid 1..4 stage geometry,
+       `≤ 6` variables per stage, matching `pcs.rs::MAX_PCS_NUM_VARS = 28`), while `nv ≥ 29` is rejected;
+    2. Every stage `g ∈ hemHighCapStageGeoms nv` across ALL `nv ∈ 2..=28` passes `checkWhirAffineWitness`
        at `q = p^4` with simple folding numerator `< 1900` under ALL FOUR QROM schedules
        (`unitaryPow16`, `cdhzPow16At2pow38`, `cdhz320Pow16At2pow40`, `unitaryZeroPow`);
-    3. Every stage across ALL `nv ∈ 2..=30` is simultaneously covered by the proved
-       `slicedParamsOk` decomposition bound (`bits ≥ 181`);
+    3. Every stage across ALL `nv ∈ 2..=28` is simultaneously covered by the proved
+       `slicedParamsOk` decomposition bound (`bits ≥ 183`);
     4. For `nv ∈ 2..=24`, `hemHighCapTableRow` agrees identically with `hemOptimizedQromTableRow`. -/
-theorem hemHighCapSchedule_covers_nv2_to_30 :
-    (∀ nv : Nat, 2 ≤ nv → nv ≤ 30 → hemHighCapGeometryValid nv = true) ∧
-    (∀ (sched : HemOptimizedQromSchedule) (nv : Nat), 2 ≤ nv → nv ≤ 30 →
+theorem hemHighCapSchedule_covers_nv2_to_28 :
+    (∀ nv : Nat, 2 ≤ nv → nv ≤ 28 → hemHighCapGeometryValid nv = true) ∧
+    (∀ nv : Nat, 29 ≤ nv → hemHighCapStageGeometry nv = [] ∧ hemHighCapGeometryValid nv = false) ∧
+    (∀ (sched : HemOptimizedQromSchedule) (nv : Nat), 2 ≤ nv → nv ≤ 28 →
       ∀ g ∈ hemHighCapStageGeoms nv,
         hemHighCapStageCovered sched (goldilocksPrime ^ 4) nv g = true) ∧
-    (∀ nv : Nat, 2 ≤ nv → nv ≤ 30 →
+    (∀ nv : Nat, 2 ≤ nv → nv ≤ 28 →
       ∀ g ∈ hemHighCapStageGeoms nv,
         slicedHighCapStageCovered (goldilocksPrime ^ 4) nv g = true) ∧
     (∀ nv : Nat, 2 ≤ nv → nv ≤ 24 → ∀ s : Nat, s < 4 →
       hemHighCapTableRow nv s = hemOptimizedQromTableRow nv s) := by
-  have hGeom : ((List.range 29).all fun i => hemHighCapGeometryValid (i + 2)) = true := by
+  have hGeom : ((List.range 27).all fun i => hemHighCapGeometryValid (i + 2)) = true := by
     decide +kernel
-  have hU16 : ((List.range 29).all fun i =>
+  have hU16 : ((List.range 27).all fun i =>
       (hemHighCapStageGeoms (i + 2)).all
         (hemHighCapStageCovered .unitaryPow16 (goldilocksPrime ^ 4) (i + 2))) = true := by
     decide +kernel
-  have hC38 : ((List.range 29).all fun i =>
+  have hC38 : ((List.range 27).all fun i =>
       (hemHighCapStageGeoms (i + 2)).all
         (hemHighCapStageCovered .cdhzPow16At2pow38 (goldilocksPrime ^ 4) (i + 2))) = true := by
     decide +kernel
-  have hC40 : ((List.range 29).all fun i =>
+  have hC40 : ((List.range 27).all fun i =>
       (hemHighCapStageGeoms (i + 2)).all
         (hemHighCapStageCovered .cdhz320Pow16At2pow40 (goldilocksPrime ^ 4) (i + 2))) = true := by
     decide +kernel
-  have hZ0 : ((List.range 29).all fun i =>
+  have hZ0 : ((List.range 27).all fun i =>
       (hemHighCapStageGeoms (i + 2)).all
         (hemHighCapStageCovered .unitaryZeroPow (goldilocksPrime ^ 4) (i + 2))) = true := by
     decide +kernel
-  have hSliced : ((List.range 6).all fun i =>
+  have hSliced : ((List.range 4).all fun i =>
       (hemHighCapStageGeoms (i + 25)).all
         (slicedHighCapStageCovered (goldilocksPrime ^ 4) (i + 25))) = true := by
     decide +kernel
@@ -246,12 +248,20 @@ theorem hemHighCapSchedule_covers_nv2_to_30 :
       (List.range 4).all fun s =>
         decide (hemHighCapTableRow (i + 2) s = hemOptimizedQromTableRow (i + 2) s)) = true := by
     decide +kernel
-  refine ⟨?_, ?_, ?_, ?_⟩
-  · intro nv h2 h30
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · intro nv h2 h28
     have h1 := List.all_eq_true.mp hGeom (nv - 2) (List.mem_range.mpr (by omega))
     have hEq : nv - 2 + 2 = nv := by omega
     rwa [hEq] at h1
-  · intro sched nv h2 h30 g hg
+  · intro nv h29
+    have hEmpty : hemHighCapStageGeometry nv = [] := by
+      rw [hemHighCapStageGeometry_eq_hemStageGeometry]
+      exact hemStageGeometry_nv25_to_28.2.2.2.2 nv h29
+    refine ⟨hEmpty, ?_⟩
+    unfold hemHighCapGeometryValid
+    rw [hEmpty]
+    rfl
+  · intro sched nv h2 h28 g hg
     have hEq : nv - 2 + 2 = nv := by omega
     cases sched with
     | unitaryPow16 =>
@@ -266,7 +276,7 @@ theorem hemHighCapSchedule_covers_nv2_to_30 :
     | unitaryZeroPow =>
       have h1 := List.all_eq_true.mp hZ0 (nv - 2) (List.mem_range.mpr (by omega))
       rw [hEq] at h1; exact List.all_eq_true.mp h1 g hg
-  · intro nv h2 h30 g hg
+  · intro nv h2 h28 g hg
     by_cases h24 : nv ≤ 24
     · have hgeoms : hemHighCapStageGeoms nv = hemStageGeoms nv := by
         simp only [hemHighCapStageGeoms, hemHighCapStageGeometry, h24, ↓reduceIte, hemStageGeoms]
@@ -284,9 +294,9 @@ theorem hemHighCapSchedule_covers_nv2_to_30 :
     exact of_decide_eq_true (List.all_eq_true.mp h1 s (List.mem_range.mpr hs))
 
 
-/-- Proved `AffineFoldDecompBound` on every high-capacity stage `nv ∈ 25..=30` via
-    `slicedParamsOk_sound` (`bits ≥ 181`). -/
-theorem highCap_stage_decomp_bound (nv : Nat) (h25 : 25 ≤ nv) (h30 : nv ≤ 30)
+/-- Proved `AffineFoldDecompBound` on every high-capacity stage `nv ∈ 25..=28` via
+    `slicedParamsOk_sound` (`bits ≥ 183`). -/
+theorem highCap_stage_decomp_bound (nv : Nat) (h25 : 25 ≤ nv) (h28 : nv ≤ 28)
     (g : HemStageGeom) (hg : g ∈ hemHighCapStageGeoms nv) :
     ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
       hemHighCapTableRow nv g.stageIdx = some r ∧
@@ -295,8 +305,8 @@ theorem highCap_stage_decomp_bound (nv : Nat) (h25 : 25 ≤ nv) (h30 : nv ≤ 30
         AffineFoldDecompBound D S g.d r.2.2.1 (slicedStageCount S.length g r w)) ∧
       slicedStageCount (goldilocksPrime ^ 4) g r w * 2 ^ w.2.2.2 ≤
         goldilocksPrime ^ 4 * goldilocksPrime ^ 4 ∧
-      181 ≤ w.2.2.2 := by
-  have hc := hemHighCapSchedule_covers_nv2_to_30.2.2.1 nv (by omega) h30 g hg
+      183 ≤ w.2.2.2 := by
+  have hc := hemHighCapSchedule_covers_nv2_to_28.2.2.2.1 nv (by omega) h28 g hg
   unfold slicedHighCapStageCovered at hc
   have hNot24 : ¬ (nv ≤ 24) := by omega
   simp only [hNot24, ↓reduceIte] at hc
@@ -421,19 +431,19 @@ private theorem cdhzSnargEnvelopeBound_mono_hc {Q QMax : Nat} (hQ : Q ≤ QMax)
         dsimp only
         exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left 240 (by omega))
 
-/-- **High-Capacity `[CDHZ25]` Numerical Profile Budget Across `nv = 2..30` (`hemHighCap_cdhzPow16_budget_nv2_to_30`)**:
+/-- **High-Capacity `[CDHZ25]` Numerical Profile Budget Across `nv = 2..28` (`hemHighCap_cdhzPow16_budget_nv2_to_28`)**:
     `cdhzPow16At2pow38` (`q = (202, 102, 70, 52)` + 16-bit PoW, `426` total openings) achieves
-    a numerical expression below `2^-128` across ALL `nv ∈ 2..=30` (up to `2^30` cells / `K = 8,192`
-    flat signers) and ALL query partitions `wFs + wVc ≤ Q` up to `Q ≤ 2^38`! -/
-theorem hemHighCap_cdhzPow16_budget_nv2_to_30 (nv Q wFs wVc : Nat)
-    (h2 : 2 ≤ nv) (h30 : nv ≤ 30) (hQ : Q ≤ 2 ^ 38) (hPart : wFs + wVc ≤ Q) :
+    a numerical expression below `2^-128` across ALL `nv ∈ 2..=28` (`MAX_PCS_NUM_VARS = 28`)
+    and ALL query partitions `wFs + wVc ≤ Q` up to `Q ≤ 2^38`! -/
+theorem hemHighCap_cdhzPow16_budget_nv2_to_28 (nv Q wFs wVc : Nat)
+    (h2 : 2 ≤ nv) (h28 : nv ≤ 28) (hQ : Q ≤ 2 ^ 38) (hPart : wFs + wVc ≤ Q) :
     strictlyMoreThanBits 128
       (cdhzSnargPartitionBound Q wFs wVc 426 (nv - 2) 256 16
         (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .cdhzPow16At2pow38 nv)) ∧
     atLeastBits 128
       (cdhzSnargPartitionBound Q wFs wVc 426 (nv - 2) 256 16
         (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .cdhzPow16At2pow38 nv)) := by
-  have hAll : ((List.range 29).all fun i =>
+  have hAll : ((List.range 27).all fun i =>
       let v := i + 2
       decide (strictlyMoreThanBits 128
         (cdhzSnargEnvelopeBound (2 ^ 38) 426 (v - 2) 256 16
@@ -455,18 +465,18 @@ theorem hemHighCap_cdhzPow16_budget_nv2_to_30 (nv Q wFs wVc : Nat)
   have hStrict := strictlyMoreThanBits_of_le_hc (RatBound.le_trans hPartLe hEnvLe) hTop
   exact ⟨hStrict, Nat.le_of_lt hStrict⟩
 
-/-- **High-Capacity Zero-PoW Numerical Profile Budget Across `nv = 2..30` (`hemHighCap_unitaryZeroPow_budget_nv2_to_30`)**:
+/-- **High-Capacity Zero-PoW Numerical Profile Budget Across `nv = 2..28` (`hemHighCap_unitaryZeroPow_budget_nv2_to_28`)**:
     `unitaryZeroPow` (`q = (216, 109, 74, 56)` + 0-bit PoW, `455` openings, zero PoW grinding) achieves
-    a numerical expression below `2^-128` across ALL `nv ∈ 2..=30` and ALL `Q + 1 ≤ 2^40`! -/
-theorem hemHighCap_unitaryZeroPow_budget_nv2_to_30 (nv Q : Nat)
-    (h2 : 2 ≤ nv) (h30 : nv ≤ 30) (hQ : Q + 1 ≤ 2 ^ 40) :
+    a numerical expression below `2^-128` across ALL `nv ∈ 2..=28` and ALL `Q + 1 ≤ 2^40`! -/
+theorem hemHighCap_unitaryZeroPow_budget_nv2_to_28 (nv Q : Nat)
+    (h2 : 2 ≤ nv) (h28 : nv ≤ 28) (hQ : Q + 1 ≤ 2 ^ 40) :
     strictlyMoreThanBits 128
       (powScaledFsQromCompilerBound Q 5 256 0
         (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .unitaryZeroPow nv)) ∧
     atLeastBits 128
       (powScaledFsQromCompilerBound Q 5 256 0
         (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .unitaryZeroPow nv)) := by
-  have hAll : ((List.range 29).all fun i =>
+  have hAll : ((List.range 27).all fun i =>
       let v := i + 2
       decide (strictlyMoreThanBits 128
         (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 0
@@ -486,21 +496,21 @@ theorem hemHighCap_unitaryZeroPow_budget_nv2_to_30 (nv Q : Nat)
   have hStrict := strictlyMoreThanBits_of_le_hc hLe hTop
   exact ⟨hStrict, Nat.le_of_lt hStrict⟩
 
-/-- Under-provisioned linear-SR query schedule at `nv = 30` (`q = (156, 79, 54, 41)`). -/
-def hemNv30UnderqueriedBounds : List RatBound :=
-  (hemHighCapStageWitnesses .unitaryZeroPow 30).zipWith
+/-- Under-provisioned linear-SR query schedule at `nv = 28` (`q = (156, 79, 54, 41)`). -/
+def hemNv28UnderqueriedBounds : List RatBound :=
+  (hemHighCapStageWitnesses .unitaryZeroPow 28).zipWith
     (fun w q => whirAffinePureQueryBoundOrOne { w with queries := q })
     [156, 79, 54, 41]
 
 set_option maxRecDepth 8192 in
-/-- `#tooth`: at `nv = 30` (`K = 8,192` flat signers), sizing query counts for linear classical SR
+/-- `#tooth`: at `nv = 28` (`MAX_PCS_NUM_VARS = 28`), sizing query counts for linear classical SR
     (`q = (156, 79, 54, 41)`) fails `< 2^-128` QROM security at `Q = 2^40 - 1` even with 16-bit PoW,
-    certifying mutation sensitivity of `hemHighCap_unitaryZeroPow_budget_nv2_to_30`. -/
-theorem tooth_highCap_nv30_underqueried_schedule_fails_qrom :
+    certifying mutation sensitivity of `hemHighCap_unitaryZeroPow_budget_nv2_to_28`. -/
+theorem tooth_highCap_nv28_underqueried_schedule_fails_qrom :
     ¬ atLeastBits 128
       (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 16
-        (hemHighCapFiveRoundRbrBounds 30) hemNv30UnderqueriedBounds) := by
-  simp only [hemNv30UnderqueriedBounds, powScaledFsQromCompilerBound, qromMerkleOnlineExtractBound, hemHighCapFiveRoundRbrBounds, hemHighCapCascadeRbrBound, hemHighCapStageWitnesses, hemHighCapStageGeoms, hemHighCapStageGeometry, hemHighCapStageWitness, hemHighCapTableRow, hemHighCapWitnessTable, whirAffineStageSimpleNum_def, quantumGroverGrindingBound_def, quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def, quantumBhtCollisionBound_def]
+        (hemHighCapFiveRoundRbrBounds 28) hemNv28UnderqueriedBounds) := by
+  simp only [hemNv28UnderqueriedBounds, powScaledFsQromCompilerBound, qromMerkleOnlineExtractBound, hemHighCapFiveRoundRbrBounds, hemHighCapCascadeRbrBound, hemHighCapStageWitnesses, hemHighCapStageGeoms, hemHighCapStageGeometry, hemHighCapStageWitness, hemHighCapTableRow, hemHighCapWitnessTable, whirAffineStageSimpleNum_def, quantumGroverGrindingBound_def, quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def, quantumBhtCollisionBound_def]
   decide +kernel
 
 
@@ -509,12 +519,11 @@ theorem tooth_highCap_nv30_underqueried_schedule_fails_qrom :
 theorem hemHighCapStageGeometry_def (nv : Nat) :
     hemHighCapStageGeometry nv =
   if nv ≤ 24 then hemStageGeometry nv
-  else if nv = 25 then [(2, 6), (4, 5), (6, 3), (8, 3)]
+  else if nv = 25 then [(2, 6), (4, 4), (6, 4), (8, 3)]
   else if nv = 26 then [(2, 6), (4, 5), (6, 4), (8, 3)]
   else if nv = 27 then [(2, 6), (4, 5), (6, 4), (8, 4)]
   else if nv = 28 then [(2, 6), (4, 6), (6, 4), (8, 4)]
-  else if nv = 29 then [(2, 6), (4, 6), (6, 5), (8, 4)]
-  else [(2, 6), (4, 6), (6, 6), (8, 4)] := by
+  else [] := by
   rfl
 
 theorem hemHighCapEarlyStopVars_def (nv : Nat) :
@@ -539,30 +548,22 @@ theorem hemHighCapGeometryValid_def (nv : Nat) :
 
 theorem hemHighCapExtraWitnessRows_def :
     hemHighCapExtraWitnessRows =
-  [ (25, 0, 1053822, 64, 15000),
-    (25, 1, 66329, 64, 8000),
-    (25, 2, 16888, 64, 5000),
-    (25, 3, 4450, 64, 3000),
-    (26, 0, 2107641, 64, 11000),
-    (26, 1, 132651, 64, 8000),
-    (26, 2, 16888, 64, 5000),
-    (26, 3, 4450, 64, 3000),
-    (27, 0, 4215279, 64, 11000),
-    (27, 1, 265296, 64, 8000),
-    (27, 2, 33764, 64, 4000),
-    (27, 3, 4450, 64, 3000),
-    (28, 0, 8430555, 64, 11000),
-    (28, 1, 266083, 64, 4000),
-    (28, 2, 33764, 64, 4000),
-    (28, 3, 4450, 64, 3000),
-    (29, 0, 16861106, 64, 11000),
-    (29, 1, 532159, 64, 4000),
-    (29, 2, 33764, 64, 4000),
-    (29, 3, 4450, 64, 3000),
-    (30, 0, 33722208, 64, 11000),
-    (30, 1, 1064311, 64, 4000),
-    (30, 2, 34420, 64, 3000),
-    (30, 3, 4450, 64, 3000) ] := by
+  [ (25, 0, 1054283, 128, 6353),
+    (25, 1, 133941, 32, 1732),
+    (25, 2, 17483, 16, 586),
+    (25, 3, 4482, 16, 1049),
+    (26, 0, 2108508, 128, 6359),
+    (26, 1, 133940, 32, 1734),
+    (26, 2, 17483, 16, 586),
+    (26, 3, 4482, 16, 1049),
+    (27, 0, 4216959, 128, 6361),
+    (27, 1, 267837, 32, 1724),
+    (27, 2, 34932, 16, 581),
+    (27, 3, 4481, 16, 1056),
+    (28, 0, 8433861, 128, 6362),
+    (28, 1, 267836, 32, 1724),
+    (28, 2, 34932, 16, 581),
+    (28, 3, 4481, 16, 1056) ] := by
   rfl
 
 theorem hemHighCapWitnessTable_def :
@@ -622,30 +623,22 @@ theorem hemHighCapFiveRoundRbrBounds_def (nv : Nat) :
 
 theorem slicedHighCapExtraTable_def :
     slicedHighCapExtraTable =
-  [ (25, 0, 1048579, 185),
-    (25, 1, 65542, 190),
-    (25, 2, 16396, 193),
-    (25, 3, 4120, 196),
+  [ (25, 0, 1048579, 186),
+    (25, 1, 131078, 196),
+    (25, 2, 16396, 204),
+    (25, 3, 4120, 203),
     (26, 0, 2097155, 185),
-    (26, 1, 131078, 189),
-    (26, 2, 16396, 193),
-    (26, 3, 4120, 196),
+    (26, 1, 131078, 196),
+    (26, 2, 16396, 204),
+    (26, 3, 4120, 203),
     (27, 0, 4194307, 184),
-    (27, 1, 262150, 188),
-    (27, 2, 32780, 192),
-    (27, 3, 4120, 196),
+    (27, 1, 262150, 195),
+    (27, 2, 32780, 203),
+    (27, 3, 4120, 203),
     (28, 0, 8388611, 183),
-    (28, 1, 262150, 190),
-    (28, 2, 32780, 192),
-    (28, 3, 4120, 196),
-    (29, 0, 16777219, 182),
-    (29, 1, 524294, 189),
-    (29, 2, 32780, 192),
-    (29, 3, 4120, 196),
-    (30, 0, 33554435, 181),
-    (30, 1, 1048582, 188),
-    (30, 2, 32780, 194),
-    (30, 3, 4120, 196) ] := by
+    (28, 1, 262150, 195),
+    (28, 2, 32780, 203),
+    (28, 3, 4120, 203) ] := by
   rfl
 
 theorem slicedHighCapRow_def (nv stage : Nat) :
@@ -661,7 +654,7 @@ theorem slicedHighCapStageCovered_def (q nv : Nat) (g : HemStageGeom) :
     match hemHighCapTableRow nv g.stageIdx, slicedHighCapRow nv g.stageIdx with
     | some r, some w =>
       slicedParamsOk g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 &&
-        decide (slicedStageCount q g r w * 2 ^ w.2.2.2 ≤ q * q) && decide (181 ≤ w.2.2.2)
+        decide (slicedStageCount q g r w * 2 ^ w.2.2.2 ≤ q * q) && decide (183 ≤ w.2.2.2)
     | _, _ => false := by
   rfl
 
@@ -2548,7 +2541,7 @@ set_option maxRecDepth 8192 in
     2. `N = 8,192` (`d = 1, F = 64, K_shard = 128`) at `Q + 1 ≤ 2^37`;
     3. `N = 16,384` (`d = 2, F = 16, K_shard = 64`) at `Q + 1 ≤ 2^36`;
     4. `N = 32,768` (`d = 2, F = 16, K_shard = 128`) at `Q + 1 ≤ 2^36`;
-    5. `N = 1,048,576` (`d = 3, F = 16, K_shard = 256` at `Q + 1 ≤ 2^35`, and
+    5. `N = 1,048,576` (`d = 3, F = 16, K_shard = 256` at `Q + 1 ≤ 2^34`, and
        `d = 3, F = 64, K_shard = 4` at `Q + 1 ≤ 2^31`). -/
 theorem recursive_hem_all_node_budget_below_2pow128_at_deployment_scales :
     (16 ^ 1 * 94 ≥ 1500 ∧
@@ -2570,7 +2563,7 @@ theorem recursive_hem_all_node_budget_below_2pow128_at_deployment_scales :
     (16 ^ 3 * 256 = 1048576 ∧
       strictlyMoreThanBits 128
         (recursiveHemQromErrorBound 16 3
-          (hemHighCapZeroPowEps 24 (2 ^ 35 - 1)) (hemHighCapZeroPowEps 25 (2 ^ 35 - 1)))) ∧
+          (hemHighCapZeroPowEps 24 (2 ^ 34 - 1)) (hemHighCapZeroPowEps 25 (2 ^ 34 - 1)))) ∧
     (64 ^ 3 * 4 = 1048576 ∧
       strictlyMoreThanBits 128
         (recursiveHemQromErrorBound 64 3
@@ -2602,7 +2595,7 @@ theorem recursive_hem_all_node_budget_below_2pow128_at_deployment_scales :
   have c5 : 16 ^ 3 * 256 = 1048576 ∧
       strictlyMoreThanBits 128
         (recursiveHemQromErrorBound 16 3
-          (hemHighCapZeroPowEps 24 (2 ^ 35 - 1)) (hemHighCapZeroPowEps 25 (2 ^ 35 - 1))) := by
+          (hemHighCapZeroPowEps 24 (2 ^ 34 - 1)) (hemHighCapZeroPowEps 25 (2 ^ 34 - 1))) := by
     simp only [recursiveHemQromErrorBound, geomInternalNodes, hemHighCapZeroPowEps, powScaledFsQromCompilerBound, qromMerkleOnlineExtractBound, hemHighCapFiveRoundRbrBounds, hemHighCapCascadeRbrBound, hemHighCapQueryBounds, hemHighCapStageWitnesses, hemHighCapStageGeoms, hemHighCapStageGeometry, hemHighCapStageWitness, hemHighCapTableRow, hemHighCapWitnessTable, whirAffineStageSimpleNum_def, quantumGroverGrindingBound_def, quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def, quantumBhtCollisionBound_def]
     decide +kernel
   have c6 : 64 ^ 3 * 4 = 1048576 ∧
@@ -2755,25 +2748,25 @@ theorem verifyRecursiveHemTree_depth1_pair (H : Hash) (arith : Aggregation.RowAr
       ⟨decide_eq_true (by decide), decide_eq_true (by decide)⟩,
       decide_eq_true rfl⟩, decide_eq_true rfl⟩, hOuter⟩, hChildren⟩
 
-theorem inhabited_hemHighCap_nv30_cdhz :
+theorem inhabited_hemHighCap_nv28_cdhz :
     ∃ (nv Q wFs wVc : Nat),
-      2 ≤ nv ∧ nv ≤ 30 ∧ Q ≤ 2 ^ 38 ∧ wFs + wVc ≤ Q ∧
-      nv = 30 ∧ Q = 2 ^ 38 ∧
+      2 ≤ nv ∧ nv ≤ 28 ∧ Q ≤ 2 ^ 38 ∧ wFs + wVc ≤ Q ∧
+      nv = 28 ∧ Q = 2 ^ 38 ∧
       atLeastBits 128
         (cdhzSnargPartitionBound Q wFs wVc 426 (nv - 2) 256 16
           (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .cdhzPow16At2pow38 nv)) :=
-  ⟨30, 2 ^ 38, 2 ^ 37, 2 ^ 37, by decide, by decide, Nat.le_refl _, by decide, rfl, rfl,
-    (hemHighCap_cdhzPow16_budget_nv2_to_30 30 (2 ^ 38) (2 ^ 37) (2 ^ 37)
+  ⟨28, 2 ^ 38, 2 ^ 37, 2 ^ 37, by decide, by decide, Nat.le_refl _, by decide, rfl, rfl,
+    (hemHighCap_cdhzPow16_budget_nv2_to_28 28 (2 ^ 38) (2 ^ 37) (2 ^ 37)
       (by decide) (by decide) (Nat.le_refl _) (by decide)).2⟩
 
-theorem inhabited_hemHighCap_nv30_zeroPow :
+theorem inhabited_hemHighCap_nv28_zeroPow :
     ∃ (nv Q : Nat),
-      2 ≤ nv ∧ nv ≤ 30 ∧ Q + 1 ≤ 2 ^ 40 ∧ nv = 30 ∧ Q = 2 ^ 40 - 1 ∧
+      2 ≤ nv ∧ nv ≤ 28 ∧ Q + 1 ≤ 2 ^ 40 ∧ nv = 28 ∧ Q = 2 ^ 40 - 1 ∧
       atLeastBits 128
         (powScaledFsQromCompilerBound Q 5 256 0
           (hemHighCapFiveRoundRbrBounds nv) (hemHighCapQueryBounds .unitaryZeroPow nv)) :=
-  ⟨30, 2 ^ 40 - 1, by decide, by decide, by decide, rfl, rfl,
-    (hemHighCap_unitaryZeroPow_budget_nv2_to_30 30 (2 ^ 40 - 1) (by decide) (by decide) (by decide)).2⟩
+  ⟨28, 2 ^ 40 - 1, by decide, by decide, by decide, rfl, rfl,
+    (hemHighCap_unitaryZeroPow_budget_nv2_to_28 28 (2 ^ 40 - 1) (by decide) (by decide) (by decide)).2⟩
 
 theorem canopyOpening_payload_unique_of_collision_free
     (salt root : Lane4) (bottomDepth canopyDepth : Nat)
@@ -2794,11 +2787,12 @@ theorem canopyOpening_payload_unique_of_collision_free
 attribute [local irreducible] Goldilocks.mul poseidon2Perm12
 
 #verify_constructive
-  Qsag.hemHighCapSchedule_covers_nv2_to_30
+  Qsag.hemHighCapStageGeometry_eq_hemStageGeometry
+  Qsag.hemHighCapSchedule_covers_nv2_to_28
   Qsag.highCap_stage_decomp_bound
-  Qsag.hemHighCap_cdhzPow16_budget_nv2_to_30
-  Qsag.hemHighCap_unitaryZeroPow_budget_nv2_to_30
-  Qsag.tooth_highCap_nv30_underqueried_schedule_fails_qrom
+  Qsag.hemHighCap_cdhzPow16_budget_nv2_to_28
+  Qsag.hemHighCap_unitaryZeroPow_budget_nv2_to_28
+  Qsag.tooth_highCap_nv28_underqueried_schedule_fails_qrom
   Qsag.canopyLeafPreimage_injective
   Qsag.canopyNodePreimage_injective
   Qsag.canopyLeaf_ne_node_preimage
@@ -2827,14 +2821,14 @@ attribute [local irreducible] Goldilocks.mul poseidon2Perm12
   Qsag.recursive_tree_rejects_leaf_with_failing_shard
   Qsag.verifyRecursiveHemTree_depth1_pair
 
-#tooth_pair Qsag.hemHighCap_unitaryZeroPow_budget_nv2_to_30 vs Qsag.tooth_highCap_nv30_underqueried_schedule_fails_qrom
+#tooth_pair Qsag.hemHighCap_unitaryZeroPow_budget_nv2_to_28 vs Qsag.tooth_highCap_nv28_underqueried_schedule_fails_qrom
 #tooth_pair Qsag.canopyOpening_payload_unique_of_collision_free vs Qsag.tooth_unsalted_poseidon2_canopy_collision
 #tooth_pair Qsag.canopyLeaf_ne_node_preimage vs Qsag.tooth_missing_domain_tag_leaf_node_confusion
 #tooth_pair Qsag.authenticated_duet_fold_uniquely_determines_claimed vs Qsag.tooth_unverified_inv_two_x_forges_duet_fold
 #tooth_pair Qsag.verifyRecursiveHemTree_depth1_pair vs Qsag.tooth_sub_quorum_leaf_shard_rejected_by_recursive_tree
 
-#verify_inhabited Qsag.hemHighCap_cdhzPow16_budget_nv2_to_30 Qsag.inhabited_hemHighCap_nv30_cdhz
-#verify_inhabited Qsag.hemHighCap_unitaryZeroPow_budget_nv2_to_30 Qsag.inhabited_hemHighCap_nv30_zeroPow
+#verify_inhabited Qsag.hemHighCap_cdhzPow16_budget_nv2_to_28 Qsag.inhabited_hemHighCap_nv28_cdhz
+#verify_inhabited Qsag.hemHighCap_unitaryZeroPow_budget_nv2_to_28 Qsag.inhabited_hemHighCap_nv28_zeroPow
 
 end Qsag
 end

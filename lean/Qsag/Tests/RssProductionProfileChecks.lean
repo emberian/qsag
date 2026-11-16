@@ -1,8 +1,7 @@
 module
 public import Qsag.Exec.RssProductionProfile
-import all Qsag.Exec.RssProductionProfile
-import all Qsag.Protocol.Signing.HashSigs
-import all Qsag.Protocol.Threshold.ThresholdMpc
+public import Qsag.Protocol.Signing.HashSigs
+public import Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-! Executable construction checks, not a hardness benchmark. Full-width production
@@ -27,7 +26,10 @@ def profile : Profile :=
 def request : SessionScheduleReq :=
   ⟨17, 0, List.replicate 32 0x55 ++ [1], List.replicate 32 0x08, [0, 1]⟩
 
-theorem production_profile : profile.params.productionWellFormed = true := by decide
+theorem production_profile : profile.params.productionWellFormed = true := by
+  dsimp only [profile]
+  rw [PqHashParams.productionWellFormed.public_eq_1, compactJortsProdParams.public_eq_1]
+  decide
 
 theorem nonzero_distinct_material :
     reconstructRssBytes seed = List.replicate 32 0x17 ∧
@@ -38,7 +40,10 @@ theorem nonzero_distinct_material :
     outside this valid four-leaf profile. -/
 theorem exhausted_leaf_is_failure :
     partialOutput profile { request with reqEpoch := 4 } = .error .signingUnavailable := by
-  exact partialOutput_outOfRange profile _ (by decide) (by decide)
+  refine partialOutput_outOfRange profile _ (by dsimp only [profile]; rw [compactJortsProdParams.public_eq_1]) ?_
+  dsimp only [profile, request]
+  rw [PqHashParams.productionLeafIdxInRange.public_eq_1, compactJortsProdParams.public_eq_1]
+  decide
 
 /-- Full request binding retains the same-prefix regression for this actual profile. -/
 theorem changed_suffix_binding :

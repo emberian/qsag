@@ -40,11 +40,13 @@ pub fn extract_suite_and_public_bytes(path: &str) -> Result<(WitnessSuiteTag, Ve
         "qsag-quorum-coupon-root-v1" => {
             let scheme = json.field_str("scheme")?;
             let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
-            Ok((tag, json.field_hex("public_key")?.0))
+            let mut key = json.field_hex("pk_seed")?.0;
+            key.extend_from_slice(&json.field_hex("pk_root")?);
+            Ok((tag, key))
         }
         "qsag-cred-mldsa-public-v1" => {
-            let param = json.field_str("parameter_set")?;
-            let tag = crate::schemes::suite_tag_for_cli_scheme(param)?;
+            let scheme = json.field_str("scheme")?;
+            let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
             Ok((tag, json.field_hex("public_key")?.0))
         }
         _ => Err(CliError::input(format!("{path} is not a public key file"))),

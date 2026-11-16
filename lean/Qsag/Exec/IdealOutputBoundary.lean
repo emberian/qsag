@@ -34,6 +34,7 @@ private theorem ucLeb128_list_injective : ∀ {xs ys : List Nat},
 
 theorem encodeUcSigningRequest_injective {a b : SessionScheduleReq}
     (h : encodeUcSigningRequest a = encodeUcSigningRequest b) : a = b := by
+  rw [encodeUcSigningRequest.public_eq_1, encodeUcSigningRequest.public_eq_1] at h
   have hf := encodeMultiFrame_injective h
   simp only [List.cons.injEq] at hf
   rcases hf with ⟨_, hs, he, hm, hr, ha, _⟩
@@ -48,6 +49,7 @@ theorem encodeUcSigningRequest_injective {a b : SessionScheduleReq}
 
 theorem encodeUcPqPublicKey_injective {a b : PqPublicKey}
     (h : encodeUcPqPublicKey a = encodeUcPqPublicKey b) : a = b := by
+  rw [encodeUcPqPublicKey.public_eq_1, encodeUcPqPublicKey.public_eq_1] at h
   have hf := encodeMultiFrame_injective h
   simp only [List.cons.injEq] at hf
   cases a
@@ -58,7 +60,7 @@ theorem encodeUcPqPublicKey_injective {a b : PqPublicKey}
 
 theorem ucPqPublicKeyDigest_length (pk : PqPublicKey) :
     (ucPqPublicKeyDigest pk).length = 32 :=
-  shake256Xof_length 32 (encodeUcPqPublicKey pk)
+  by rw [ucPqPublicKeyDigest.public_eq_1]; exact shake256Xof_length 32 (encodeUcPqPublicKey pk)
 
 def ucPqPublicKeyDigest_collision_or_eq (a b : PqPublicKey)
     (h : ucPqPublicKeyDigest a = ucPqPublicKeyDigest b) :
@@ -66,7 +68,8 @@ def ucPqPublicKeyDigest_collision_or_eq (a b : PqPublicKey)
   if hab : a = b then exact .inl hab
   else
     exact .inr ⟨encodeUcPqPublicKey a, encodeUcPqPublicKey b,
-      fun heq => hab (encodeUcPqPublicKey_injective heq), h⟩
+      fun heq => hab (encodeUcPqPublicKey_injective heq),
+      by simpa only [ucPqPublicKeyDigest.public_eq_1] using h⟩
 
 /-- A fresh successful ideal release is the oracle output. Replay is excluded by
     its explicit fresh-grant premise, rather than assuming the initial cache honest. -/
@@ -81,7 +84,7 @@ theorem execIdealSession_fresh_output
       .ok wal (.authorizedFresh ep))
     (hOut : (execIdealSession oracle sim A cl adv tape).2.2.outcome = .signOk sig) :
     sig = oracle (A.scheduleSession adv).1 := by
-  unfold execIdealSession at hOut
+  rw [execIdealSession.public_eq_1] at hOut
   dsimp only at hOut
   cases hApproval : validThresholdApproval cl.tsig (A.scheduleSession adv).1.honestApprovers
   · simp only [hApproval, Bool.not_false, ↓reduceIte] at hOut
@@ -118,10 +121,10 @@ theorem ucWal_exact_retry_and_conflict (key : List UInt8) (sig : ByteArray)
       .err committed .staleOrOutOfOrderEpoch := by
   have hNe : encodeUcSigningRequest changed ≠ encodeUcSigningRequest req :=
     fun heq => hDifferent (encodeUcSigningRequest_injective heq)
-  simp only [walCommitBeforeRelease, walPreSignStep, walCommitAuthorized, initWalLatchState,
+  simp only [walCommitBeforeRelease.public_eq_1, walPreSignStep.public_eq_1, walCommitAuthorized, initWalLatchState,
     hEpoch, hChangedEpoch, hNe, decide_false, decide_true, Bool.not_true,
-    Bool.false_eq_true, ↓reduceIte, Bool.and_false, Bool.and_true, Nat.reduceBEq]
-  exact ⟨trivial, trivial, rfl⟩
+    Bool.false_eq_true, ↓reduceIte, Bool.and_false, Bool.and_true, Nat.reduceBEq, true_and]
+  rfl
 
 /-- The old truncation aliases these requests; the complete intent rejects the
     same-prefix/different-suffix replay and still permits an exact retry. -/
@@ -166,7 +169,8 @@ theorem tooth_activeShamir_suffix_binding
     proto.msgDigestOf a ≠ proto.msgDigestOf b ∧
     sim.msgDigestOf a ≠ sim.msgDigestOf b := by
   intro proto sim a b
-  dsimp only [proto, sim, activeShamirThresholdProtocol, activeShamirBlackBoxSimulator]
+  dsimp only [proto, sim]
+  rw [activeShamirThresholdProtocol.public_eq_1, activeShamirBlackBoxSimulator.public_eq_1]
   exact ⟨tooth_uc_request_suffix_binding.2, tooth_uc_request_suffix_binding.2⟩
 
 /-- Both constructors pin the full key encoding's digest. Equality for distinct
@@ -180,7 +184,7 @@ theorem activeShamir_full_key_binding
       suite params o pkSeed grindLimit ser).pkDigestOf = ucPqPublicKeyDigest ∧
     (activeShamirBlackBoxSimulator t corruptPts checkPts maxGates).pkDigestOf =
       ucPqPublicKeyDigest := by
-  dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator]
+  rw [activeShamirThresholdProtocol.public_eq_1, activeShamirBlackBoxSimulator.public_eq_1]
   exact ⟨rfl, rfl⟩
 
 /-- Engine-policy fixture, not a signature security instance. Deliberately proposes
@@ -217,7 +221,9 @@ theorem tooth_ideal_substitution_blocked :
     (substitutionSimulator (packWire [9]) false).finalizeIdealCut () substitutionRequest ()
       (packWire [7]) [] [] = .inr (packWire [7]) ∧
     packWire [9] ≠ packWire [7] := by
-  exact ⟨rfl, rfl, by decide⟩
+  refine ⟨by simp [substitutionSimulator], ?_, by decide⟩
+  rw [BlackBoxUcSimulator.finalizeIdealCut.public_eq_1]
+  simp [substitutionSimulator]
 
 /-- A complete three-round successful run releases and caches the oracle bytes,
     even when the simulator proposes different bytes. -/
@@ -228,7 +234,12 @@ theorem witness_ideal_release_uses_oracle (sig proposal : ByteArray) :
     run.2.2.honestRound3 = [(0, sig)] ∧
     run.1.honestWal.latchedRecord = some (0, encodeUcSigningRequest substitutionRequest, sig) ∧
     run.1.maskSessionCursor = 1 := by
-  exact ⟨rfl, rfl, rfl, rfl⟩
+  intro run
+  dsimp only [run]
+  rw [execIdealSession.public_eq_1]
+  simp [substitutionAdversary, substitutionInitial, substitutionRequest, substitutionSimulator,
+    validThresholdApproval, walPreSignStep.public_eq_1, initWalLatchState,
+    BlackBoxUcSimulator.finalizeIdealCut.public_eq_1, walCommitAuthorized]
 
 /-- The same reachable setup also permits selective abort after exposing the
     ideal output; it records the query and does not cache a successful release. -/
@@ -240,7 +251,12 @@ theorem witness_ideal_abort_retains_query (sig proposal : ByteArray) :
     run.1.tsig.approvedMsgs = [substitutionRequest.msg] ∧
     run.1.honestWal.latchedRecord = none ∧
     run.1.honestWal.poisoned = true := by
-  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+  intro run
+  dsimp only [run]
+  rw [execIdealSession.public_eq_1]
+  simp [substitutionAdversary, substitutionInitial, substitutionRequest, substitutionSimulator,
+    validThresholdApproval, walPreSignStep.public_eq_1, initWalLatchState,
+    BlackBoxUcSimulator.finalizeIdealCut.public_eq_1, poisonIdealCluster.public_eq_1, walQuarantine]
 
 #verify_constructive encodeUcSigningRequest_injective encodeUcPqPublicKey_injective
   ucPqPublicKeyDigest_length

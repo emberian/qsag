@@ -1115,7 +1115,12 @@ theorem hemStageGeometry_def (nv : Nat) :
       else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
       else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
       else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
-      else [(2, 6), (4, 4), (6, 3), (8, 3)]) := by rfl
+      else if nv ≤ 24 then [(2, 6), (4, 4), (6, 3), (8, 3)]
+      else if nv = 25 then [(2, 6), (4, 4), (6, 4), (8, 3)]
+      else if nv = 26 then [(2, 6), (4, 5), (6, 4), (8, 3)]
+      else if nv = 27 then [(2, 6), (4, 5), (6, 4), (8, 4)]
+      else if nv = 28 then [(2, 6), (4, 6), (6, 4), (8, 4)]
+      else []) := by rfl
 
 theorem hemJohnsonQromTableRow_def (nv stage : Nat) :
     hemJohnsonQromTableRow nv stage =
@@ -1223,6 +1228,51 @@ theorem sliced_three_challenge_table_certificate
     exact ⟨r, w, hr, hw, of_decide_eq_true hc.1.1.1, of_decide_eq_true hc.1.1.2, hc.1.2,
       of_decide_eq_true hc.2⟩
   · exact absurd hc Bool.false_ne_true
+
+set_option maxRecDepth 100000 in
+set_option maxHeartbeats 2000000 in
+/-- Kernel-decided bivariate Hasse Guruswami–Sudan interpolation dimensions at both `(g.d - 1,
+    r.A - 1)` and `(g.d, r.A)` across all non-exhaustive stages of `nv ∈ 2..=24`. -/
+theorem hem_gs_stage_row_dimensions_nv2_to_24
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ r : Nat × Nat × Nat × Nat × Nat,
+      hemJohnsonQromTableRow nv g.stageIdx = some r ∧
+      r.2.2.1 ≤ g.n ∧
+      g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+        gsMonomialCount (r.2.2.2.1 * (r.2.2.1 - 1)) (g.d - 1)
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * (r.2.2.1 - 1) - 1) / (g.d - 1))) ∧
+      g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+        gsMonomialCount (r.2.2.2.1 * r.2.2.1) g.d
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d)) := by
+  have hAll : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all (fun g =>
+        if hemJohnsonQromStageExhaustive g = true then true
+        else
+          match hemJohnsonQromTableRow (i + 2) g.stageIdx with
+          | some r =>
+            decide (r.2.2.1 ≤ g.n) &&
+            decide (g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+              gsMonomialCount (r.2.2.2.1 * (r.2.2.1 - 1)) (g.d - 1)
+                (Nat.min r.2.2.2.2 ((r.2.2.2.1 * (r.2.2.1 - 1) - 1) / (g.d - 1)))) &&
+            decide (g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+              gsMonomialCount (r.2.2.2.1 * r.2.2.1) g.d
+                (Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d)))
+          | none => false)) = true := by
+    decide +kernel
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq] at h1
+  have hc := List.all_eq_true.mp h1 g hg
+  simp only [hne, Bool.false_eq_true, ↓reduceIte] at hc
+  cases hr : hemJohnsonQromTableRow nv g.stageIdx with
+  | none => rw [hr] at hc; exact absurd hc Bool.false_ne_true
+  | some r =>
+    rw [hr] at hc
+    dsimp only at hc
+    rw [Bool.and_eq_true, Bool.and_eq_true] at hc
+    exact ⟨r, rfl, of_decide_eq_true hc.1.1, of_decide_eq_true hc.1.2, of_decide_eq_true hc.2⟩
 
 /-- **Multi-fold table certificate.** Kernel-decided over the deployed tables: every
     non-exhaustive canonical `BciksJohnsonQrom128` stage (`num_vars ∈ 2..=24`) has `1..6` binary

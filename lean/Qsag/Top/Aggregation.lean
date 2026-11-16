@@ -45,7 +45,7 @@ public import Qsag.Protocol.Aggregation.HemRbrSoundness
 public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 public import Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
-public import Qsag.Machine.SpirvSimt
+public import Qsag.Machine.SpirvSimtGpuEquiv
 import Qsag.Tactic.AssuranceKit
 
 public section

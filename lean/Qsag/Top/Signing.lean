@@ -50,7 +50,7 @@ public import Qsag.Protocol.Signing.SignatureOutputAndCacheLaws
 public import Qsag.Machine.ElfFunctionalEquiv
 public import Qsag.Machine.ConstantTimeIsa
 public import Qsag.Machine.IsaCosim
-public import Qsag.Machine.SydTv
+public import Qsag.Machine.SydTvTranslationValidation
 public import Qsag.Machine.FaultAndSpeculativeSafety
 import Qsag.Tactic.AssuranceKit
 
@@ -189,7 +189,7 @@ theorem waistbandCache_preserves_multiturn_traces
 
 /-- **Customization-Tag Encoding Separation + Polynomial-Basis SPN + Five-Way `𝔽_{2^{128}}`
     Agreement (`sponge_and_spn_poly_basis_composition`)**:
-    Connects `Qsag.qsag_tags_sponge_encodings_ne` (`Oracle.Sponge`),
+    Connects `Qsag.qsag_tags_sponge_domains_disjoint` (`Oracle.Sponge`),
     `Qsag.rustParallelChainStep_eq_tower` (`Oracle.Spn`), and
     `Math.gf2Pow128_five_way_mul_agreement`. The first two conjuncts say that the complete
     padded `cSHAKE256` block sequences absorbed under the `CANOPY.LEAF`, `CANOPY.NODE` and
@@ -214,7 +214,7 @@ theorem sponge_and_spn_poly_basis_composition
           (Qsag.polyToTower128Pair (Qsag.rustBytes32ToLanes cur)))) ∧
     (Qsag.Math.Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits =
       Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pclmulqdqFourProduct256 a b) := by
-  obtain ⟨hD1, hD2, _⟩ := Qsag.qsag_tags_sponge_encodings_ne m₁ m₂
+  obtain ⟨hD1, hD2, _⟩ := Qsag.qsag_tags_sponge_domains_disjoint m₁ m₂
   have hSpn := Qsag.rustParallelChainStep_eq_tower hash32 pkSeed epoch chainIdx step cur
   obtain ⟨_, _, _, hClmul, _⟩ := Qsag.Math.gf2Pow128_five_way_mul_agreement a b
   exact ⟨hD1, hD2, hSpn, hClmul⟩
@@ -237,28 +237,6 @@ theorem isa_zeroize_and_ret_ct_composition
       (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₂).2 :=
   ⟨Qsag.SydTv.ctMemzeroX86PosCert_flattened sLoop n hn hbound,
    (Qsag.ConstantTimeIsa.checkX86RetStackPop_sound memPol τ τ' pc hCheck s₁ s₂ hLow hRetPub).1⟩
-
-/-- ISA zeroization/return composition with an explicit hardware timing contract.
-The operation trace is the platform interface: identifying it with a dispatch trace remains
-the caller's obligation, rather than an unstated hardware timing assumption. -/
-theorem isa_zeroize_ret_and_hardware_ct
-    (sLoop : Qsag.X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
-    (memPol : BitVec 64 → Qsag.ConstantTimeIsa.SecLabel)
-    (τ τ' : Qsag.ConstantTimeIsa.X86TaintState) (pc : Nat)
-    (hCheck : Qsag.ConstantTimeIsa.checkX86RetStackPop τ = some τ')
-    (s₁ s₂ : Qsag.ConstantTimeIsa.X86State)
-    (hLow : Qsag.ConstantTimeIsa.X86LowEq memPol τ s₁ s₂)
-    (hRetPub : memPol (s₁.gpr .rsp) = .pub)
-    {Op Data Obs : Type} (hardware : Qsag.Spec.DitHardwareContract Op Data Obs)
-    (tr₁ tr₂ : List (Op × Data)) (hOps : tr₁.map Prod.fst = tr₂.map Prod.fst) :
-    Qsag.SydTv.FlattenedLoopRefines (Qsag.SydTv.ctMemzeroX86PosCert sLoop n hn hbound) ∧
-    (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₁).2 =
-      (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₂).2 ∧
-    tr₁.map (fun e => hardware.observe Qsag.Spec.ExecMode.constantTimeSafe e.1 e.2) =
-      tr₂.map (fun e => hardware.observe Qsag.Spec.ExecMode.constantTimeSafe e.1 e.2) := by
-  obtain ⟨hz, hr⟩ := isa_zeroize_and_ret_ct_composition
-    sLoop n hn hbound memPol τ τ' pc hCheck s₁ s₂ hLow hRetPub
-  exact ⟨hz, hr, hardware.trace_data_independent _ rfl tr₁ tr₂ hOps⟩
 
 /-! ## 4. Adaptive Tree Query Budgets, Prefix-Free Frontier FTS, and Production Coin Toss -/
 
@@ -551,66 +529,81 @@ theorem extractAllRlibFuncs_provenance (rlib : Bytes) (slice : ElfFuncSlice)
         rlib.slice (m.payloadOffset + (slice.textFileOffset + slice.symValue)) slice.symSize :=
   _root_.Qsag.extractAllRlibFuncs_provenance rlib slice hMem
 
-theorem currentX86_rlib_extracted_slices :
-    extractAllRlibFuncs currentX86RlibArchiveBytes = currentX86ExtractedSlices :=
-  _root_.Qsag.currentX86_rlib_extracted_slices
+theorem x86_rlib_extracted_slices :
+    extractAllRlibFuncs x86RlibArchiveBytes = x86ExtractedSlices :=
+  _root_.Qsag.x86_rlib_extracted_slices
 
-theorem currentAarch64_rlib_extracted_slices :
-    extractAllRlibFuncs currentAarch64RlibArchiveBytes = currentAarch64ExtractedSlices :=
-  _root_.Qsag.currentAarch64_rlib_extracted_slices
+theorem aarch64_rlib_extracted_slices :
+    extractAllRlibFuncs aarch64RlibArchiveBytes = aarch64ExtractedSlices :=
+  _root_.Qsag.aarch64_rlib_extracted_slices
 
-theorem currentX86_rlib_extraction_detects_code_flip :
+theorem x86_rlib_extraction_detects_code_flip :
     (extractAllRlibFuncs
-        (Bytes.ofNat currentX86RlibLiteral.1 (currentX86RlibLiteral.2 ^^^ (1 <<< (8 * 400))))).map
+        (Bytes.ofNat x86RlibArchiveLen (x86RlibArchiveNat ^^^ (1 <<< (8 * 400))))).map
         ElfFuncSlice.code ≠
-      currentX86ExtractedSlices.map ElfFuncSlice.code :=
-  _root_.Qsag.currentX86_rlib_extraction_detects_code_flip
+      x86ExtractedSlices.map ElfFuncSlice.code :=
+  _root_.Qsag.x86_rlib_extraction_detects_code_flip
 
 theorem checkElfSliceWithCert_sound {slice : ElfFuncSlice} {c : FuncContract} {cert : InvCert}
     (hCheck : checkElfSliceWithCert slice c cert = true) :
     ElfSliceThreeWayNISafe slice c :=
   _root_.Qsag.checkElfSliceWithCert_sound hCheck
 
-theorem currentX86_rlib_every_symbol_three_way_ni_sound :
-    (extractAllRlibFuncs currentX86RlibArchiveBytes).length = currentX86SymbolContracts.length ∧
-    ∀ i : Nat, (hs : i < (extractAllRlibFuncs currentX86RlibArchiveBytes).length) →
-      (hc : i < currentX86SymbolContracts.length) →
-      ((extractAllRlibFuncs currentX86RlibArchiveBytes)[i]'hs).name =
-        (currentX86SymbolContracts[i]'hc).symName ∧
-      ElfSliceThreeWayNISafe ((extractAllRlibFuncs currentX86RlibArchiveBytes)[i]'hs)
-        (currentX86SymbolContracts[i]'hc) :=
-  _root_.Qsag.currentX86_rlib_every_symbol_three_way_ni_sound
+theorem mutant_secret_branch_rejected :
+    checkX86ThreeWayNI
+      [0x48, 0x89, 0xF8, 0x48, 0x29, 0xF0, 0x74, 0x01, 0x90, 0xC3]
+      (mkContract "mutant_secret_branch" [4]) = false :=
+  _root_.Qsag.mutant_secret_branch_rejected
 
-theorem currentAarch64_rlib_every_symbol_three_way_ni_sound :
-    (extractAllRlibFuncs currentAarch64RlibArchiveBytes).length = currentAarch64SymbolContracts.length ∧
-    ∀ i : Nat, (hs : i < (extractAllRlibFuncs currentAarch64RlibArchiveBytes).length) →
-      (hc : i < currentAarch64SymbolContracts.length) →
-      ((extractAllRlibFuncs currentAarch64RlibArchiveBytes)[i]'hs).name =
-        (currentAarch64SymbolContracts[i]'hc).symName ∧
-      ElfSliceThreeWayNISafe ((extractAllRlibFuncs currentAarch64RlibArchiveBytes)[i]'hs)
-        (currentAarch64SymbolContracts[i]'hc) :=
-  _root_.Qsag.currentAarch64_rlib_every_symbol_three_way_ni_sound
+theorem mutant_secret_lut_rejected :
+    checkX86ThreeWayNI
+      [0x0F, 0xB6, 0x04, 0x37, 0xC3]
+      (mkContract "mutant_secret_lut" [4, 7]) = false :=
+  _root_.Qsag.mutant_secret_lut_rejected
 
-theorem mutant_unwiped_neon_reg_rejected :
-    (match findSliceByNameBytes (extractAllRlibFuncs currentAarch64RlibArchiveBytes)
-             [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x74, 0x6f, 0x77, 0x65, 0x72,
-              0x31, 0x32, 0x38, 0x5f, 0x62, 0x64, 0x6f, 0x7a, 0x5f, 0x6d, 0x61, 0x63, 0x5f, 0x70,
-              0x6d, 0x75, 0x6c, 0x6c] with
+theorem mutant_variable_shift_rejected :
+    checkX86ThreeWayNI [0x48, 0xD3, 0xE0, 0xC3] (mkContract "mutant_shl_cl" [4]) = false ∧
+    checkArm64ThreeWayNI
+      [0x00, 0x20, 0xC1, 0x9A, 0xC0, 0x03, 0x5F, 0xD6]
+      (mkContract "mutant_lslv" []) = false :=
+  _root_.Qsag.mutant_variable_shift_rejected
+
+theorem rlib_x86_every_symbol_three_way_ni_sound :
+    (extractAllRlibFuncs x86RlibArchiveBytes).length = x86SymbolContracts.length ∧
+    ∀ i : Nat, (hs : i < (extractAllRlibFuncs x86RlibArchiveBytes).length) →
+      (hc : i < x86SymbolContracts.length) →
+      ((extractAllRlibFuncs x86RlibArchiveBytes)[i]'hs).name =
+        (x86SymbolContracts[i]'hc).symName ∧
+      ElfSliceThreeWayNISafe ((extractAllRlibFuncs x86RlibArchiveBytes)[i]'hs)
+        (x86SymbolContracts[i]'hc) :=
+  _root_.Qsag.rlib_x86_every_symbol_three_way_ni_sound
+
+theorem rlib_aarch64_every_symbol_three_way_ni_sound :
+    (extractAllRlibFuncs aarch64RlibArchiveBytes).length = aarch64SymbolContracts.length ∧
+    ∀ i : Nat, (hs : i < (extractAllRlibFuncs aarch64RlibArchiveBytes).length) →
+      (hc : i < aarch64SymbolContracts.length) →
+      ((extractAllRlibFuncs aarch64RlibArchiveBytes)[i]'hs).name =
+        (aarch64SymbolContracts[i]'hc).symName ∧
+      ElfSliceThreeWayNISafe ((extractAllRlibFuncs aarch64RlibArchiveBytes)[i]'hs)
+        (aarch64SymbolContracts[i]'hc) :=
+  _root_.Qsag.rlib_aarch64_every_symbol_three_way_ni_sound
+
+theorem genuine_certificate_rejects_unwiped_neon_mutant :
+    (match aarch64ExtractedSlices[3]? with
      | none => true
      | some slice =>
-       let mutated := patchBytesAt slice.code 0x104 [0x1F, 0x20, 0x03, 0xD5]
-       checkArm64ThreeWayNI mutated (mkContract "qsag_asm_tower128_bdoz_mac_pmull" [0, 1, 2, 3])) =
-    false :=
-  _root_.Qsag.mutant_unwiped_neon_reg_rejected
+       checkArm64WithInv (patchBytesAt slice.code 0x104 [0x1F, 0x20, 0x03, 0xD5])
+         (mkContract "qsag_asm_tower128_bdoz_mac_pmull" [0, 1, 2, 3]) aarch64InvCert03) = false :=
+  _root_.Qsag.genuine_certificate_rejects_unwiped_neon_mutant
 
 theorem certificate_not_transferable :
-    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts (currentX86InvCerts.drop 1) 0 = false :=
+    certSliceAt x86ExtractedSlices x86SymbolContracts (x86InvCerts.drop 1) 0 = false :=
   _root_.Qsag.certificate_not_transferable
 
-theorem current_ct_eq_32_x86_64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name = some slice ∧
+theorem ct_eq_32_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctEq32X86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 28 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 20 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         (runX86 prog fuel s).1.gpr.get 0 =
           (if ∀ i : Nat, i < 32 →
@@ -619,10 +612,10 @@ theorem current_ct_eq_32_x86_64_mc_refines :
         (runX86 prog fuel s).1.mem = s.mem ∧
         (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 2 = 0 ∧
         (runX86 prog fuel s).1.gpr.get 8 = 0 :=
-  _root_.Qsag.current_ct_eq_32_x86_64_mc_refines
+  _root_.Qsag.ct_eq_32_x86_64_mc_refines
 
-theorem current_ct_eq_32_aarch64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices ctEq32ArmName = some slice ∧
+theorem ct_eq_32_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices ctEq32ArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
       ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 22 ≤ fuel →
         (runArm64 prog fuel s).1.halted = true ∧
@@ -632,22 +625,22 @@ theorem current_ct_eq_32_aarch64_mc_refines :
             then 1 else 0) ∧
         (runArm64 prog fuel s).1.mem = s.mem ∧
         (∀ r : Nat, 2 ≤ r → r ≤ 7 → (runArm64 prog fuel s).1.gpr.get r = 0) :=
-  _root_.Qsag.current_ct_eq_32_aarch64_mc_refines
+  _root_.Qsag.ct_eq_32_aarch64_mc_refines
 
-theorem current_ct_memzero_x86_64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctMemzeroX86Name = some slice ∧
+theorem ct_memzero_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctMemzeroX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
       ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 6).toNat →
-        4 * (s.gpr.get 6).toNat + 13 ≤ fuel →
+        4 * (s.gpr.get 6).toNat + 4 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         (∀ i : Nat, i < (s.gpr.get 6).toNat →
           (runX86 prog fuel s).1.mem (s.gpr.get 7 + UInt64.ofNat i) = 0) ∧
         (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 6).toNat → a ≠ s.gpr.get 7 + UInt64.ofNat i) →
           (runX86 prog fuel s).1.mem a = s.mem a) :=
-  _root_.Qsag.current_ct_memzero_x86_64_mc_refines
+  _root_.Qsag.ct_memzero_x86_64_mc_refines
 
-theorem current_ct_memzero_aarch64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices ctMemzeroArmName = some slice ∧
+theorem ct_memzero_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices ctMemzeroArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
       ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 1).toNat →
         3 * (s.gpr.get 1).toNat + 2 ≤ fuel →
@@ -656,13 +649,13 @@ theorem current_ct_memzero_aarch64_mc_refines :
           (runArm64 prog fuel s).1.mem (s.gpr.get 0 + UInt64.ofNat i) = 0) ∧
         (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 1).toNat → a ≠ s.gpr.get 0 + UInt64.ofNat i) →
           (runArm64 prog fuel s).1.mem a = s.mem a) :=
-  _root_.Qsag.current_ct_memzero_aarch64_mc_refines
+  _root_.Qsag.ct_memzero_aarch64_mc_refines
 
-theorem current_ct_eq_bytes_x86_64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctEqBytesX86Name = some slice ∧
+theorem ct_eq_bytes_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctEqBytesX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
       ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 2).toNat →
-        8 * (s.gpr.get 2).toNat + 15 ≤ fuel →
+        8 * (s.gpr.get 2).toNat + 7 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         (runX86 prog fuel s).1.gpr.get 0 =
           (if ∀ i : Nat, i < (s.gpr.get 2).toNat →
@@ -670,24 +663,24 @@ theorem current_ct_eq_bytes_x86_64_mc_refines :
             then 1 else 0) ∧
         (runX86 prog fuel s).1.mem = s.mem ∧
         (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 :=
-  _root_.Qsag.current_ct_eq_bytes_x86_64_mc_refines
+  _root_.Qsag.ct_eq_bytes_x86_64_mc_refines
 
-theorem current_goldilocks_add_ct_x86_64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldAddX86Name = some slice ∧
+theorem goldilocks_add_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldAddX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 25 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 17 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         ((runX86 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 7).toNat + (s.gpr.get 6).toNat) % goldilocksPrime ∧
         (runX86 prog fuel s).1.mem = s.mem ∧
         (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 8 = 0 ∧
         (runX86 prog fuel s).1.gpr.get 9 = 0 ∧ (runX86 prog fuel s).1.gpr.get 10 = 0 :=
-  _root_.Qsag.current_goldilocks_add_ct_x86_64_mc_refines
+  _root_.Qsag.goldilocks_add_ct_x86_64_mc_refines
 
-theorem current_goldilocks_sub_ct_x86_64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldSubX86Name = some slice ∧
+theorem goldilocks_sub_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldSubX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 31 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 23 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         ((runX86 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 7).toNat + goldilocksPrime - (s.gpr.get 6).toNat % goldilocksPrime) %
@@ -696,43 +689,43 @@ theorem current_goldilocks_sub_ct_x86_64_mc_refines :
         (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 6 = 0 ∧
         (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 ∧
         (runX86 prog fuel s).1.gpr.get 10 = 0 :=
-  _root_.Qsag.current_goldilocks_sub_ct_x86_64_mc_refines
+  _root_.Qsag.goldilocks_sub_ct_x86_64_mc_refines
 
-theorem current_goldilocks_mul_ct_x86_64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldMulX86Name = some slice ∧
+theorem goldilocks_mul_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldMulX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 33 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 25 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         ((runX86 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 7).toNat * (s.gpr.get 6).toNat) % goldilocksPrime ∧
         (runX86 prog fuel s).1.mem = s.mem ∧
         (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 2 = 0 ∧
         (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 :=
-  _root_.Qsag.current_goldilocks_mul_ct_x86_64_mc_refines
+  _root_.Qsag.goldilocks_mul_ct_x86_64_mc_refines
 
-theorem current_goldilocks_mul_ct_aarch64_mc_refines :
-    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices goldMulArmName = some slice ∧
+theorem goldilocks_mul_ct_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices goldMulArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
-      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 30 ≤ fuel →
+      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 29 ≤ fuel →
         (runArm64 prog fuel s).1.halted = true ∧
         ((runArm64 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 0).toNat * (s.gpr.get 1).toNat) % goldilocksPrime ∧
         (runArm64 prog fuel s).1.mem = s.mem ∧
         (∀ r : Nat, 2 ≤ r → r ≤ 8 → (runArm64 prog fuel s).1.gpr.get r = 0) :=
-  _root_.Qsag.current_goldilocks_mul_ct_aarch64_mc_refines
+  _root_.Qsag.goldilocks_mul_ct_aarch64_mc_refines
 
 theorem ct_eq_32_x86_64_mutant_refuted :
-    ((findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name).bind
+    ((findSliceByNameBytes x86ExtractedSlices ctEq32X86Name).bind
         (fun sl => decodeX86Stream (patchBytesAt sl.code 52 [0x83, 0xF0, 0x00]))).any
-      (fun p => (runX86 p 28 (x86Init 0 64 0 0 0)).1.halted &&
-        (runX86 p 28 (x86Init 0 64 0 0 0)).1.gpr.get 0 == 0) = true ∧
+      (fun p => (runX86 p 20 (x86Init 0 64 0 0 0)).1.halted &&
+        (runX86 p 20 (x86Init 0 64 0 0 0)).1.gpr.get 0 == 0) = true ∧
     (∀ i : Nat, i < 32 →
       (x86Init 0 64 0 0 0).mem ((x86Init 0 64 0 0 0).gpr.get 7 + UInt64.ofNat i) =
       (x86Init 0 64 0 0 0).mem ((x86Init 0 64 0 0 0).gpr.get 6 + UInt64.ofNat i)) :=
   _root_.Qsag.ct_eq_32_x86_64_mutant_refuted
 
 theorem ct_eq_32_x86_64_secret_branch_rejected :
-    (findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name).map
+    (findSliceByNameBytes x86ExtractedSlices ctEq32X86Name).map
         (fun sl => (checkX86ThreeWayNI sl.code
             (mkContract "qsag_asm_ct_eq_32_x86_64" [4, 7, 6] [] [1, 2, 8]),
           checkX86ThreeWayNI (patchBytesAt sl.code 30 [0x74, 0x01, 0x90])
@@ -741,22 +734,20 @@ theorem ct_eq_32_x86_64_secret_branch_rejected :
   _root_.Qsag.ct_eq_32_x86_64_secret_branch_rejected
 
 theorem goldilocks_mul_ct_x86_64_mutant_refuted :
-    ((findSliceByNameBytes currentX86ExtractedSlices goldMulX86Name).bind
+    ((findSliceByNameBytes x86ExtractedSlices goldMulX86Name).bind
         (fun sl => decodeX86Stream (patchBytesAt sl.code 11 [0x48, 0xC1, 0xE9, 0x1F]))).any
-      (fun p => (runX86 p 33 (x86Init 0xFFFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 0 0 0)).1.halted &&
-        ((runX86 p 33 (x86Init 0xFFFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 0 0 0)).1.gpr.get 0).toNat !=
+      (fun p => (runX86 p 25 (x86Init 0xFFFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 0 0 0)).1.halted &&
+        ((runX86 p 25 (x86Init 0xFFFFFFFFFFFFFFFF 0xFFFFFFFFFFFFFFFF 0 0 0)).1.gpr.get 0).toNat !=
           (0xFFFFFFFFFFFFFFFF * 0xFFFFFFFFFFFFFFFF) % goldilocksPrime) = true :=
   _root_.Qsag.goldilocks_mul_ct_x86_64_mutant_refuted
 
 theorem goldilocks_mul_ct_aarch64_secret_branch_rejected :
-    (findSliceByNameBytes currentAarch64ExtractedSlices goldMulArmName).map
+    (findSliceByNameBytes aarch64ExtractedSlices goldMulArmName).map
         (fun sl => (checkArm64ThreeWayNI sl.code (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" []),
           checkArm64ThreeWayNI (patchBytesAt sl.code 24 [0x42, 0x00, 0x00, 0x54])
             (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" [])))
       = some (true, false) :=
   _root_.Qsag.goldilocks_mul_ct_aarch64_secret_branch_rejected
-
-/-! ## Tier 7. Production hypertree verifier, UC threshold bridge, StepOp256 extraction, TOPRF & crash-durable WAL -/
 
 theorem production_stateless_forgery_break (suite : TweakableHashSuite) (params : PqHashParams)
     (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)

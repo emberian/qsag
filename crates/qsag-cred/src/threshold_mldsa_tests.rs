@@ -1664,10 +1664,9 @@ fn parametric_two_of_six_keygen_and_nonprefix_session_sign() {
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn compact_fs_nonce_burn_store_updates_rejection_attempts_in_place() {
+fn nonce_test_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(std::format!(
-        "qsag-cred-nonce-compact-{}-{}",
+        "qsag-cred-nonce-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1675,169 +1674,428 @@ fn compact_fs_nonce_burn_store_updates_rejection_attempts_in_place() {
             .as_nanos()
     ));
     std::fs::create_dir(&dir).unwrap();
+    dir
+}
+
+/// Writes `magic || header || payload` under a fresh tag for `store`'s lock.
+#[cfg(feature = "std")]
+fn write_nonce_record(
+    store: &FsNonceBurnStore,
+    magic: &[u8; 8],
+    mac: &[u8; 32],
+    generation: u64,
+    count: u64,
+    payload: &[u8],
+) {
+    let mut bytes = store.encode();
+    bytes.truncate(BURN_HEADER_BYTES);
+    bytes[..8].copy_from_slice(magic);
+    bytes[48..56].copy_from_slice(&generation.to_le_bytes());
+    bytes[56..64].copy_from_slice(&count.to_le_bytes());
+    bytes.extend_from_slice(payload);
+    let tag = cshake256_framed_32(b"QSAG.MLDSA.NONCE_BURN.V2", &[mac, &store.lock_id, &bytes]);
+    bytes.extend_from_slice(&tag);
+    store.record.replace(&bytes).unwrap();
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn nonce_ledger_keeps_every_session_in_33_bytes() {
+    let dir = nonce_test_dir("compact");
     let path = dir.join("burns");
     let key_id = [0x42; 32];
     let mac_key = [0x99; 32];
     let mut store = FsNonceBurnStore::create(&path, key_id, mac_key).unwrap();
+    let empty_len = std::fs::metadata(&path).unwrap().len();
 
-    // 100 rejection-sampling attempts within the SAME session must incur ZERO file-size growth!
+    // Consecutive attempts of one session never grow the record.
     let sess = [0xAA; 32];
     assert!(store.reserve(1, 0, &sess, 0));
     let len_after_first = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(
+        len_after_first,
+        empty_len + (BURN_PARTY_HEADER_BYTES + BURN_SESSION_MIN_BYTES) as u64
+    );
     for att in 1..100u32 {
         assert!(store.reserve(1, u64::from(att), &sess, att));
         assert!(!store.reserve(1, u64::from(att) + 1, &sess, att));
     }
     assert_eq!(std::fs::metadata(&path).unwrap().len(), len_after_first);
 
-    // 200 distinct sessions remain strictly bounded by `MAX_RETAINED_SESSIONS_PER_PARTY` (`64`).
-    for idx in 0..200u32 {
+    // Each further session costs exactly 33 bytes and none is ever dropped.
+    let session = |idx: u32| {
         let mut s = [0u8; 32];
-        s[..4].copy_from_slice(&idx.to_be_bytes());
-        assert!(store.reserve(1, 100 + u64::from(idx), &s, 0));
+        // Descending IDs: every insertion lands at the front of the sorted index.
+        s[..4].copy_from_slice(&(u32::MAX - idx).to_be_bytes());
+        s
+    };
+    for idx in 0..200u32 {
+        assert!(store.reserve(1, 100 + u64::from(idx), &session(idx), 0));
     }
-    let bounded_len = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        len_after_first + 200 * BURN_SESSION_MIN_BYTES as u64
+    );
     assert!(
-        bounded_len <= (RETIRED_BURN_FILTER_BYTES + 4096) as u64,
-        "bounded_len={bounded_len}"
+        store.parties[0]
+            .sessions
+            .is_sorted_by(|a, b| a.session_id < b.session_id)
     );
     assert_eq!(store.next_epoch(&key_id, 1).unwrap(), 300);
-    // The old epoch and a fresh epoch must both refuse an evicted attempt.
-    assert!(!store.reserve(1, 0, &sess, 0));
-    assert!(!store.reserve(1, 300, &sess, 0));
-    assert!(!store.reserve(1, 300, &sess, 99));
     assert_eq!(store.generation(), 300);
     drop(store);
 
     let mut reopened = FsNonceBurnStore::open_at_least(&path, key_id, mac_key, 300).unwrap();
     assert_eq!(reopened.next_epoch(&key_id, 1).unwrap(), 300);
-    assert!(!reopened.reserve(1, 300, &sess, 0));
-    assert!(!reopened.reserve(1, 300, &sess, 99));
-    // Another attempt in that old session remains usable; reentering the ring
-    // must still not forget its retired attempts.
+    // Every burn of every session is refused at the old epoch and at a fresh one.
+    assert!(!reopened.reserve(1, 0, &sess, 0));
+    for att in 0..100u32 {
+        assert!(!reopened.reserve(1, 300, &sess, att));
+    }
+    for idx in 0..200u32 {
+        assert!(!reopened.reserve(1, 300, &session(idx), 0));
+    }
+    assert_eq!(reopened.generation(), 300);
+    // Unburned attempts of the oldest sessions stay usable.
     assert!(reopened.reserve(1, 300, &sess, 100));
-    assert!(!reopened.reserve(1, 301, &sess, 0));
+    assert!(reopened.reserve(1, 301, &session(0), 1));
+    assert!(!reopened.reserve(1, 302, &session(0), 1));
+    // A second party has its own epochs and sessions.
+    assert!(reopened.reserve(0, 0, &sess, 0));
+    assert!(!reopened.reserve(0, 1, &sess, 0));
+    assert_eq!(reopened.generation(), 303);
     drop(reopened);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[cfg(feature = "std")]
 #[test]
-fn nonce_attempt_boundaries_and_retired_high_attempts_survive_restart() {
-    let dir = std::env::temp_dir().join(std::format!(
-        "qsag-cred-nonce-bounds-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&dir).unwrap();
+fn nonce_attempt_boundaries_and_sparse_attempts_survive_restart() {
+    let dir = nonce_test_dir("bounds");
     let path = dir.join("burns");
     let key = [0x31; 32];
     let mac = [0x32; 32];
     let session = [0x33; 32];
     let mut store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+    let mut epoch = 0u64;
+    let mut burn = |store: &mut FsNonceBurnStore, session: &[u8; 32], attempt: u32| {
+        let reserved = store.reserve(1, epoch, session, attempt);
+        epoch += u64::from(reserved);
+        reserved
+    };
+    // The full default rejection budget of one session.
     for attempt in 0..DEFAULT_MAX_REJECTION_ATTEMPTS {
-        assert!(store.reserve(1, u64::from(attempt), &session, attempt));
-        assert!(!store.reserve(1, u64::from(attempt) + 1, &session, attempt));
+        assert!(burn(&mut store, &session, attempt));
+        assert!(!burn(&mut store, &session, attempt));
+        if attempt == 127 {
+            assert_eq!(store.parties[0].sessions[0].prefix_len(), Some(128));
+        }
     }
-    // Full high-attempt storage fails closed without shifting or mutating state.
-    assert!(!store.reserve(1, 256, &session, u32::MAX));
-    assert_eq!(store.generation(), 256);
-    let other = [0x34; 32];
-    assert!(store.reserve(1, 256, &other, u32::MAX));
-    assert!(!store.reserve(1, 257, &other, u32::MAX));
-    for index in 0..64u8 {
-        let mut fresh = [0x99; 32];
-        fresh[0] = index;
-        assert!(store.reserve(1, 257 + u64::from(index), &fresh, 127));
+    assert_eq!(store.parties[0].sessions[0].prefix_len(), None);
+    // Arbitrary attempt numbers, until the per-session list of attempts >= 128 is full.
+    assert!(burn(&mut store, &session, u32::MAX));
+    for attempt in 256..383 {
+        assert!(burn(&mut store, &session, attempt));
     }
+    assert_eq!(
+        store.parties[0].sessions[0].high_attempts.len(),
+        MAX_HIGH_ATTEMPTS_PER_SESSION
+    );
+    let full = store.generation();
+    assert!(!burn(&mut store, &session, 383));
+    assert_eq!(store.generation(), full);
+    // Sparse sets: a lone high attempt, a lone low attempt, and a gap.
+    let lone_high = [0x34; 32];
+    let lone_low = [0x35; 32];
+    let gap = [0x36; 32];
+    assert!(burn(&mut store, &lone_high, u32::MAX));
+    assert!(burn(&mut store, &lone_low, 127));
+    assert!(burn(&mut store, &gap, 0));
+    assert!(burn(&mut store, &gap, 2));
+    let generation = store.generation();
+    assert_eq!(generation, full + 4);
     drop(store);
-    let mut store = FsNonceBurnStore::open_at_least(&path, key, mac, 321).unwrap();
-    for attempt in [0, 127, 128, 255] {
-        assert!(!store.reserve(1, 321, &session, attempt));
+
+    let mut store = FsNonceBurnStore::open_at_least(&path, key, mac, generation).unwrap();
+    for attempt in [0, 127, 128, 255, 256, 382, u32::MAX] {
+        assert!(!burn(&mut store, &session, attempt));
     }
-    assert!(!store.reserve(1, 321, &other, u32::MAX));
+    assert!(!burn(&mut store, &lone_high, u32::MAX));
+    assert!(!burn(&mut store, &lone_low, 127));
+    assert!(!burn(&mut store, &gap, 0));
+    assert!(!burn(&mut store, &gap, 2));
     assert!(!store.reserve(1, u64::MAX, &[0xfe; 32], 0));
-    assert_eq!(store.generation(), 321);
+    assert_eq!(store.generation(), generation);
+    // Filling the gap returns the entry to its 33-byte form.
+    let before = std::fs::metadata(&path).unwrap().len();
+    assert!(burn(&mut store, &gap, 1));
+    assert_eq!(store.parties[0].sessions[3].prefix_len(), Some(3));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), before - 18);
+    assert!(burn(&mut store, &lone_low, 0));
+    assert!(burn(&mut store, &lone_high, 128));
+    drop(store);
+    assert!(FsNonceBurnStore::open_at_least(&path, key, mac, generation + 3).is_ok());
+    assert!(FsNonceBurnStore::open_at_least(&path, key, mac, generation + 4).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn nonce_session_capacity_refuses_new_sessions_only() {
+    let dir = nonce_test_dir("capacity");
+    let mut store = FsNonceBurnStore::create(dir.join("burns"), [1; 32], [2; 32]).unwrap();
+    let session = |idx: u32| {
+        let mut s = [0u8; 32];
+        s[..4].copy_from_slice(&idx.to_be_bytes());
+        s
+    };
+    store.parties.push(PartyBurnState {
+        party_id: 3,
+        max_epoch: 9,
+        sessions: (0..MAX_TRACKED_SESSIONS_PER_PARTY as u32)
+            .map(|idx| SessionBurnEntry {
+                session_id: session(idx),
+                low_mask: 1,
+                high_attempts: Vec::new(),
+            })
+            .collect(),
+    });
+    assert!(!store.available(3, 10, &session(u32::MAX), 0));
+    assert!(!store.available(3, 10, &session(7), 0));
+    assert!(store.available(3, 10, &session(7), 1));
+    assert!(store.available(4, 0, &session(u32::MAX), 0));
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[cfg(feature = "std")]
 #[test]
-fn nonce_legacy_upgrade_and_live_snapshot_substitution() {
-    let dir = std::env::temp_dir().join(std::format!(
-        "qsag-cred-nonce-legacy-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&dir).unwrap();
+fn nonce_v2_ledger_migrates_every_burn_and_live_snapshot_substitution_fails() {
+    let dir = nonce_test_dir("legacy");
+    let path = dir.join("burns");
     let key = [0x41; 32];
     let mac = [0x42; 32];
-    for version in [2, 3] {
-        let path = dir.join(std::format!("burns-v{version}"));
-        let mut store = FsNonceBurnStore::create(&path, key, mac).unwrap();
-        assert!(store.reserve(7, 10, &[5; 32], 128));
-        let mut legacy = store.encode();
-        legacy.truncate(64);
-        legacy[..8].copy_from_slice(if version == 2 {
-            b"QSCBURN2"
-        } else {
-            b"QSCBURN3"
-        });
-        if version == 2 {
-            legacy.extend_from_slice(&7u16.to_le_bytes());
-            legacy.extend_from_slice(&10u64.to_le_bytes());
-            legacy.extend_from_slice(&[5; 32]);
-            legacy.extend_from_slice(&128u32.to_le_bytes());
-        } else {
-            let encoded = store.encode();
-            legacy.extend_from_slice(&encoded[64..encoded.len() - 32 - RETIRED_BURN_FILTER_BYTES]);
-        }
-        let domain: &[u8] = if version == 2 {
-            b"QSAG.MLDSA.NONCE_BURN.V2"
-        } else {
-            b"QSAG.MLDSA.NONCE_BURN.V3"
-        };
-        let tag = cshake256_framed_32(domain, &[&mac, &store.lock_id, &legacy]);
-        legacy.extend_from_slice(&tag);
-        store.record.replace(&legacy).unwrap();
+    // (party, epoch, session, attempt) rows in reservation order, covering two
+    // parties, interleaved sessions, a skipped attempt and attempts >= 128.
+    let rows: [(u16, u64, [u8; 32], u32); 9] = [
+        (7, 10, [5; 32], 0),
+        (7, 11, [5; 32], 1),
+        (2, 0, [5; 32], 0),
+        (7, 12, [9; 32], 128),
+        (7, 13, [5; 32], 2),
+        (7, 20, [1; 32], 0),
+        (2, 4, [8; 32], 3),
+        (7, 21, [1; 32], 2),
+        (7, 22, [9; 32], u32::MAX),
+    ];
+    let mut payload = Vec::new();
+    for (party, epoch, session, attempt) in &rows {
+        payload.extend_from_slice(&party.to_le_bytes());
+        payload.extend_from_slice(&epoch.to_le_bytes());
+        payload.extend_from_slice(session);
+        payload.extend_from_slice(&attempt.to_le_bytes());
+    }
+    let store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+    write_nonce_record(&store, b"QSCBURN2", &mac, 9, 9, &payload);
+    drop(store);
+    let v2_disk = std::fs::read(&path).unwrap();
+    assert!(FsNonceBurnStore::open_at_least(&path, key, mac, 10).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), v2_disk);
+
+    let mut store = FsNonceBurnStore::open_at_least(&path, key, mac, 9).unwrap();
+    assert_eq!(&store.record.read().unwrap()[..8], b"QSCBURN3");
+    assert_eq!(store.generation(), 9);
+    assert_eq!(store.next_epoch(&key, 7).unwrap(), 23);
+    assert_eq!(store.next_epoch(&key, 2).unwrap(), 5);
+    assert_eq!(store.next_epoch(&key, 3).unwrap(), 0);
+    for (party, _, session, attempt) in &rows {
+        assert!(!store.reserve(*party, 100, session, *attempt));
+    }
+    assert_eq!(store.generation(), 9);
+    assert!(store.reserve(7, 23, &[1; 32], 1));
+    assert!(store.reserve(2, 5, &[9; 32], 128));
+    drop(store);
+    let mut store = FsNonceBurnStore::open_at_least(&path, key, mac, 11).unwrap();
+    for (party, _, session, attempt) in &rows {
+        assert!(!store.reserve(*party, 100, session, *attempt));
+    }
+    // An authentic historical snapshot must not pass for the live record.
+    std::fs::write(&path, &v2_disk).unwrap();
+    assert_eq!(
+        store.next_epoch(&key, 7),
+        Err(ThresholdMlDsaError::NoncePersistenceFailed)
+    );
+    drop(store);
+
+    // A row ledger that repeats an epoch or an attempt is refused, unmodified.
+    for (epoch, attempt) in [(13, 3), (14, 2)] {
+        let path = dir.join(std::format!("bad-{epoch}"));
+        let store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+        let mut bad = payload[..5 * BURN_V2_ROW_BYTES].to_vec();
+        bad.extend_from_slice(&7u16.to_le_bytes());
+        bad.extend_from_slice(&u64::to_le_bytes(epoch));
+        bad.extend_from_slice(&[5; 32]);
+        bad.extend_from_slice(&u32::to_le_bytes(attempt));
+        write_nonce_record(&store, b"QSCBURN2", &mac, 6, 6, &bad);
         drop(store);
-        let old_disk = std::fs::read(&path).unwrap();
-        let mut store = FsNonceBurnStore::open_at_least(&path, key, mac, 1).unwrap();
-        assert_eq!(store.next_epoch(&key, 7).unwrap(), 11);
-        assert_eq!(&store.record.read().unwrap()[..8], b"QSCBURN4");
-        assert!(!store.reserve(7, 11, &[5; 32], 128));
-        assert!(store.reserve(7, 11, &[5; 32], 129));
-        // An authentic historical V2 snapshot must not bypass live validation.
-        std::fs::write(&path, &old_disk).unwrap();
-        assert_eq!(
-            store.next_epoch(&key, 7),
-            Err(ThresholdMlDsaError::NoncePersistenceFailed)
-        );
-        drop(store);
-        std::fs::remove_file(&path).unwrap();
+        let disk = std::fs::read(&path).unwrap();
+        assert!(FsNonceBurnStore::open(&path, key, mac).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[cfg(feature = "std")]
 #[test]
-fn nonce_v3_with_evicted_history_fails_closed() {
-    let dir = std::env::temp_dir().join(std::format!(
-        "qsag-cred-nonce-v3-loss-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&dir).unwrap();
+fn nonce_malformed_or_noncanonical_records_fail_closed() {
+    let dir = nonce_test_dir("malformed");
     let path = dir.join("burns");
     let key = [0x51; 32];
     let mac = [0x52; 32];
-    let mut store = FsNonceBurnStore::create(&path, key, mac).unwrap();
-    assert!(store.reserve(1, 2, &[3; 32], 0));
-    let mut bytes = store.encode();
-    bytes.truncate(bytes.len() - 32 - RETIRED_BURN_FILTER_BYTES);
-    bytes[..8].copy_from_slice(b"QSCBURN3");
-    bytes[48..56].copy_from_slice(&2u64.to_le_bytes()); // one earlier burn was evicted
-    let tag = cshake256_framed_32(b"QSAG.MLDSA.NONCE_BURN.V3", &[&mac, &store.lock_id, &bytes]);
-    bytes.extend_from_slice(&tag);
-    store.record.replace(&bytes).unwrap();
+    let party = |sessions: u32, entries: &[&[u8]]| {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u16.to_le_bytes());
+        payload.extend_from_slice(&2u64.to_le_bytes());
+        payload.extend_from_slice(&sessions.to_le_bytes());
+        for entry in entries {
+            payload.extend_from_slice(entry);
+        }
+        payload
+    };
+    let prefix = |id: u8, tag: u8| {
+        let mut entry = [id; 33];
+        entry[32] = tag;
+        entry
+    };
+    let explicit = |id: u8, low_mask: u128, high: &[u32]| {
+        let mut entry = prefix(id, BURN_EXPLICIT_TAG).to_vec();
+        entry.extend_from_slice(&low_mask.to_le_bytes());
+        entry.extend_from_slice(&(high.len() as u16).to_le_bytes());
+        for attempt in high {
+            entry.extend_from_slice(&attempt.to_le_bytes());
+        }
+        entry
+    };
+    let store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+    let opens = |magic: &[u8; 8], generation: u64, count: u64, payload: &[u8]| {
+        let copy = dir.join("copy");
+        let fresh = FsNonceBurnStore::create(&copy, key, mac).unwrap();
+        write_nonce_record(&fresh, magic, &mac, generation, count, payload);
+        drop(fresh);
+        let result = FsNonceBurnStore::open(&copy, key, mac).map(|s| s.generation());
+        std::fs::remove_file(&copy).unwrap();
+        std::fs::remove_file(dir.join("copy.lock")).unwrap();
+        result.ok()
+    };
+    // Well-formed controls.
+    assert_eq!(opens(b"QSCBURN3", 0, 0, &[]), Some(0));
+    assert_eq!(
+        opens(b"QSCBURN3", 2, 1, &party(1, &[&prefix(4, 2)])),
+        Some(2)
+    );
+    assert_eq!(
+        opens(
+            b"QSCBURN3",
+            131,
+            1,
+            &party(2, &[&prefix(4, 128), &explicit(5, 0b101, &[200])])
+        ),
+        Some(131)
+    );
+    // The generation must equal the number of burns recorded.
+    assert_eq!(opens(b"QSCBURN3", 3, 1, &party(1, &[&prefix(4, 2)])), None);
+    assert_eq!(opens(b"QSCBURN3", 1, 1, &party(1, &[&prefix(4, 2)])), None);
+    assert_eq!(opens(b"QSCBURN3", 1, 0, &[]), None);
+    // Unknown magic and unknown or empty entry tags.
+    assert_eq!(opens(b"QSCBURN1", 2, 1, &party(1, &[&prefix(4, 2)])), None);
+    assert_eq!(opens(b"QSCBURN3", 0, 1, &party(1, &[&prefix(4, 0)])), None);
+    assert_eq!(
+        opens(b"QSCBURN3", 129, 1, &party(1, &[&prefix(4, 129)])),
+        None
+    );
+    // Explicit entries: empty, expressible as a prefix, unsorted, below 128, over-long.
+    assert_eq!(
+        opens(b"QSCBURN3", 0, 1, &party(1, &[&explicit(4, 0, &[])])),
+        None
+    );
+    assert_eq!(
+        opens(b"QSCBURN3", 2, 1, &party(1, &[&explicit(4, 0b11, &[])])),
+        None
+    );
+    assert_eq!(
+        opens(
+            b"QSCBURN3",
+            2,
+            1,
+            &party(1, &[&explicit(4, 0, &[300, 200])])
+        ),
+        None
+    );
+    assert_eq!(
+        opens(b"QSCBURN3", 1, 1, &party(1, &[&explicit(4, 0, &[127])])),
+        None
+    );
+    let too_many: Vec<u32> = (128..128 + MAX_HIGH_ATTEMPTS_PER_SESSION as u32 + 1).collect();
+    assert_eq!(
+        opens(
+            b"QSCBURN3",
+            too_many.len() as u64,
+            1,
+            &party(1, &[&explicit(4, 0, &too_many)])
+        ),
+        None
+    );
+    // Sessions out of order or repeated; trailing bytes; a party without sessions.
+    assert_eq!(
+        opens(
+            b"QSCBURN3",
+            2,
+            1,
+            &party(2, &[&prefix(5, 1), &prefix(4, 1)])
+        ),
+        None
+    );
+    assert_eq!(
+        opens(
+            b"QSCBURN3",
+            2,
+            1,
+            &party(2, &[&prefix(4, 1), &prefix(4, 1)])
+        ),
+        None
+    );
+    assert_eq!(
+        opens(b"QSCBURN3", 1, 1, &party(1, &[&prefix(4, 1), &[0]])),
+        None
+    );
+    assert_eq!(opens(b"QSCBURN3", 0, 1, &party(0, &[])), None);
+    // Parties out of order or repeated.
+    let twice = [party(1, &[&prefix(4, 1)]), party(1, &[&prefix(4, 1)])].concat();
+    assert_eq!(opens(b"QSCBURN3", 2, 2, &twice), None);
+    // Counts far beyond the bytes present are refused before any allocation.
+    assert_eq!(
+        opens(
+            b"QSCBURN3",
+            1,
+            1,
+            &party(MAX_TRACKED_SESSIONS_PER_PARTY as u32, &[&prefix(4, 1)])
+        ),
+        None
+    );
+    assert_eq!(
+        opens(b"QSCBURN3", 1, 1, &party(u32::MAX, &[&prefix(4, 1)])),
+        None
+    );
+    assert_eq!(
+        opens(b"QSCBURN3", 1, u64::MAX, &party(1, &[&prefix(4, 1)])),
+        None
+    );
+    // A tag made for one format does not carry over to the other.
+    let v3 = party(1, &[&prefix(4, 2)]);
+    write_nonce_record(&store, b"QSCBURN3", &mac, 2, 1, &v3);
+    let mut relabelled = store.record.read().unwrap();
+    relabelled[..8].copy_from_slice(b"QSCBURN2");
+    store.record.replace(&relabelled).unwrap();
     drop(store);
     assert!(FsNonceBurnStore::open(&path, key, mac).is_err());
     std::fs::remove_dir_all(dir).unwrap();

@@ -12,7 +12,7 @@ namespace Std
 
 open Result ControlFlow Error
 
-def Usize.max : Nat := 18446744073709551615
+abbrev Usize.max : Nat := 18446744073709551615
 
 theorem Usize.val_le_max (x : Usize) : x.val ≤ Usize.max := by
   have hlt : x.bv.toNat < 18446744073709551616 := x.bv.isLt

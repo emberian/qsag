@@ -2126,10 +2126,61 @@ impl<'a> Ceremony<'a> {
             self.check_boolean_keys(candidates, &layout, &spare)?;
         }
 
+        // Establish per-peer 128-column active KOS15 + OLE correlation seeds for
+        // multiplicatively blinding online `SpdzEngine::check()` MAC openings.
+        let slot_of = |owner: usize, peer: usize| -> usize {
+            if peer < owner { peer } else { peer - 1 }
+        };
+        let mut blind_ot: Vec<Vec<BlindOtPeer>> = (0..parties)
+            .map(|_| {
+                (0..parties.saturating_sub(1))
+                    .map(|_| BlindOtPeer {
+                        sender_delta: 0,
+                        sender_seeds: [[0u8; 32]; 128],
+                        receiver_seeds: [[[0u8; 32]; 2]; 128],
+                        counter: 0,
+                    })
+                    .collect()
+            })
+            .collect();
+        for sender in 0..parties {
+            for receiver in 0..parties {
+                if sender == receiver {
+                    continue;
+                }
+                let delta = Secret(self.rngs[sender].next_u128());
+                let choices = Secret([*delta as u64, (*delta >> 64) as u64]);
+                let (send, receive) = self
+                    .mesh
+                    .run_correlated_ot_words(receiver, sender, &*choices, self.rngs)
+                    .map_err(|_| Check::Ot)?;
+                let hash_pad = |pad: &[u8; 48], col: usize| -> [u8; 32] {
+                    cshake256_framed_32(
+                        b"QSAG.MIGRATE.PREP.BLIND_OT.V1",
+                        &[
+                            &self.session,
+                            &[sender as u8, receiver as u8],
+                            &(col as u64).to_le_bytes(),
+                            pad,
+                        ],
+                    )
+                };
+                let s_slot = slot_of(sender, receiver);
+                let r_slot = slot_of(receiver, sender);
+                blind_ot[sender][s_slot].sender_delta = *delta;
+                for col in 0..128 {
+                    let (ref zero, ref one) = send[col];
+                    blind_ot[receiver][r_slot].receiver_seeds[col] =
+                        [hash_pad(zero, col), hash_pad(one, col)];
+                    blind_ot[sender][s_slot].sender_seeds[col] = hash_pad(&receive[col], col);
+                }
+            }
+        }
+
         // Boolean triples first; then both uniform inputs of further triples
         // as authenticated words, their products discarded.
         let mut out = Vec::with_capacity(parties);
-        for (p, mut store) in stores.into_iter().enumerate() {
+        for ((p, mut store), peer_blind_ot) in stores.into_iter().enumerate().zip(blind_ot) {
             let mut words = Vec::with_capacity(2 * word_triples);
             let mut row = core::mem::take(&mut boolean[p]).into_iter();
             store.add_boolean_triples(
@@ -2147,6 +2198,7 @@ impl<'a> Ceremony<'a> {
                 MacKeyShare {
                     boolean: self.boolean_keys[p],
                     field: self.field_keys[p],
+                    blind_ot: peer_blind_ot,
                 },
                 store,
             ));
@@ -2166,7 +2218,7 @@ fn ceremony(
     if rngs.len() != config.quorum().len() {
         return Err(Abort::Config);
     }
-    let mut encoded = Vec::with_capacity(8 * 11);
+    let mut encoded = Vec::with_capacity(8 * 17);
     for count in [demand.boolean_triples, demand.auth_words]
         .into_iter()
         .chain(demand.field_triples)
@@ -2257,6 +2309,25 @@ mod tests {
             })
         };
         let field_keys = ThresholdField::ALL.map(field_key);
+        let n_parties = parties.len();
+        for sender in 0..n_parties {
+            assert_eq!(parties[sender].0.blind_ot.len(), n_parties - 1);
+            for receiver in 0..n_parties {
+                if sender == receiver {
+                    continue;
+                }
+                let s_slot = if receiver < sender { receiver } else { receiver - 1 };
+                let r_slot = if sender < receiver { sender } else { sender - 1 };
+                let delta = parties[sender].0.blind_ot[s_slot].sender_delta;
+                for col in 0..128 {
+                    let bit = ((delta >> col) & 1) as usize;
+                    assert_eq!(
+                        parties[sender].0.blind_ot[s_slot].sender_seeds[col],
+                        parties[receiver].0.blind_ot[r_slot].receiver_seeds[col][bit]
+                    );
+                }
+            }
+        }
         for (_, store) in parties.iter() {
             assert_eq!(store.remaining(), *demand);
         }
@@ -2373,7 +2444,7 @@ mod tests {
                     );
                     assert_eq!(
                         value,
-                        [(bits >> lane) & 1, 0, 0, 0],
+                        [(bits >> lane) & 1, 0, 0, 0, 0, 0],
                         "{field:?} daBit lane {lane}"
                     );
                 }
@@ -2423,7 +2494,7 @@ mod tests {
         *value = mac_add(
             d,
             *value,
-            if d == Domain::Gold { [1, 1, 0, 0] } else { ONE },
+            if d == Domain::Gold { [1, 1, 0, 0, 0, 0] } else { ONE },
         );
     }
 
@@ -2447,7 +2518,7 @@ mod tests {
 
     #[test]
     fn pad_elements_are_canonical() {
-        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+        for d in Domain::ALL_FIELDS {
             assert!(d.canonical(pad_element(d, &[0xff; 48])));
             assert!(d.canonical(pad_element(d, &[0; 48])));
             let mut pad = [0xff; 48];
@@ -2455,7 +2526,7 @@ mod tests {
             let value = pad_element(d, &pad);
             assert!(d.canonical(value));
             if d == Domain::Gold {
-                assert_eq!(value, [5, 0, 0, 0]);
+                assert_eq!(value, [5, 0, 0, 0, 0, 0]);
             }
         }
     }
@@ -2479,7 +2550,7 @@ mod tests {
             let inputs: Vec<SecretVec<Value>> = (0..3)
                 .map(|owner| {
                     let mut values: SecretVec<Value> =
-                        [ZERO, ONE, top, [owner as u64 + 2, 0, 0, 0], ONE, ZERO]
+                        [ZERO, ONE, top, [owner as u64 + 2, 0, 0, 0, 0, 0], ONE, ZERO]
                             .into_iter()
                             .collect();
                     values.push(ceremony.sample(owner, d));
@@ -2514,7 +2585,7 @@ mod tests {
     fn inconsistent_owner_and_wrong_holder_share_are_caught() {
         let (mut mesh, mut rngs) = setup(2);
         let demand = Demand {
-            field_randoms: [2, 1, 1],
+            field_randoms: [2, 1, 1, 1, 1],
             ..Demand::default()
         };
         for target in ThresholdField::ALL {
@@ -2587,7 +2658,7 @@ mod tests {
     fn a_holder_cannot_cancel_its_key_inconsistency_from_what_the_owner_sent() {
         let (mut mesh, mut rngs) = setup(12);
         let demand = Demand {
-            field_randoms: [2, 1, 1],
+            field_randoms: [2, 1, 1, 1, 1],
             ..Demand::default()
         };
         for target in ThresholdField::ALL {
@@ -2802,8 +2873,8 @@ mod tests {
     fn field_triples_and_randoms_satisfy_the_oracle() {
         let (mut mesh, mut rngs) = setup(3);
         let demand = Demand {
-            field_triples: [3, 2, 2],
-            field_randoms: [3, 2, 1],
+            field_triples: [3, 2, 2, 1, 1],
+            field_randoms: [3, 2, 1, 1, 1],
             ..Demand::default()
         };
         let started = Instant::now();
@@ -2818,7 +2889,7 @@ mod tests {
     fn wrong_triple_correlation_and_product_are_caught() {
         let (mut mesh, mut rngs) = setup(4);
         let demand = Demand {
-            field_triples: [1, 0, 0],
+            field_triples: [1, 0, 0, 0, 0],
             ..Demand::default()
         };
         // One wrong correlation in one OT changes the product only if the
@@ -2857,9 +2928,14 @@ mod tests {
         }
         println!("single wrong correlations caught: {caught} of 8");
         assert!(caught >= 1);
-        for target in [ThresholdField::Goldilocks, ThresholdField::Ed25519] {
+        for target in [
+            ThresholdField::Goldilocks,
+            ThresholdField::Ed25519,
+            ThresholdField::Pallas,
+            ThresholdField::Bls12_381,
+        ] {
             let demand = Demand {
-                field_triples: [1, 0, 1],
+                field_triples: [1, 0, 1, 1, 1],
                 ..Demand::default()
             };
             let outcome = deviate(50, &demand, &mut mesh, &mut rngs, |point| match point {
@@ -2901,7 +2977,7 @@ mod tests {
         let demand = Demand {
             boolean_triples: 1,
             auth_words: 1,
-            dabits: [2, 1, 1],
+            dabits: [2, 1, 1, 1, 1],
             ..Demand::default()
         };
         let started = Instant::now();
@@ -2916,7 +2992,7 @@ mod tests {
     fn dabit_deviations_are_caught() {
         let (mut mesh, mut rngs) = setup(7);
         let demand = Demand {
-            dabits: [1, 0, 0],
+            dabits: [1, 0, 0, 0, 0],
             ..Demand::default()
         };
         let cases: [(&str, Check, fn(Fault<'_>) -> bool); 7] = [
@@ -3050,8 +3126,8 @@ mod tests {
         let pair = ThresholdConfig::new(2, 2, vec![0, 1]).unwrap();
         let demand = Demand {
             boolean_triples: 1,
-            field_triples: [1, 0, 0],
-            dabits: [1, 0, 0],
+            field_triples: [1, 0, 0, 0, 0],
+            dabits: [1, 0, 0, 0, 0],
             ..Demand::default()
         };
         let mut out =
@@ -3069,9 +3145,9 @@ mod tests {
         let demand = Demand {
             boolean_triples: 1 + if encode { 256 } else { 0 },
             auth_words: 3,
-            field_triples: [64, 64, 0],
-            field_randoms: [128, 128, 0],
-            dabits: [1 + if encode { 64 } else { 0 }, 1, 0],
+            field_triples: [64, 64, 0, 64, 64],
+            field_randoms: [128, 128, 0, 128, 128],
+            dabits: [1 + if encode { 64 } else { 0 }, 1, 0, 1, 1],
         };
         let started = Instant::now();
         let parties =
@@ -3102,7 +3178,7 @@ mod tests {
                 engine.open_lanes(&[b[0]], mask).unwrap(),
                 vec![total(0x81f0_4321) & mask]
             );
-            for d in [Domain::Gold, Domain::Secp] {
+            for d in [Domain::Gold, Domain::Secp, Domain::PallasFp, Domain::BlsFp] {
                 let r = engine.frandom(d).unwrap();
                 let s = engine.frandom(d).unwrap();
                 let p = engine.fmul(&r, &s, d).unwrap();
@@ -3111,7 +3187,7 @@ mod tests {
                 for lane in 0..64 {
                     assert_eq!(opened[0][lane], d.mul(opened[1][lane], opened[2][lane]));
                     assert_ne!(opened[1][lane], opened[2][lane]);
-                    assert_eq!(opened[3][lane], [(product >> lane) & 1, 0, 0, 0]);
+                    assert_eq!(opened[3][lane], [(product >> lane) & 1, 0, 0, 0, 0, 0]);
                 }
                 if encode && d == Domain::Gold {
                     let bits = engine.field_to_bits(&r, d).unwrap();
@@ -3162,12 +3238,12 @@ mod tests {
         run(
             "fixed cost (one Goldilocks random)",
             Demand {
-                field_randoms: [1, 0, 0],
+                field_randoms: [1, 0, 0, 0, 0],
                 ..Demand::default()
             },
             1,
         );
-        for (i, name) in ["Goldilocks", "secp256k1", "Ed25519"]
+        for (i, name) in ["Goldilocks", "secp256k1", "Ed25519", "Pallas", "BLS12-381"]
             .into_iter()
             .enumerate()
         {

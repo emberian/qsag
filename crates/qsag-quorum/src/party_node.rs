@@ -51,7 +51,9 @@ use qsag_asm::{KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS};
 use qsag_core::belt_latch::DurableWal;
 use qsag_core::keccak_mpc::RssKeyShare256;
 use qsag_core::rss256::Shake256Prg256;
-use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes, ct_eq_bytes32};
+use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes};
+#[cfg(any(test, feature = "testing-ephemeral"))]
+use qsag_core::wipe::ct_eq_bytes32;
 
 use crate::dzk::{
     DzkShape, Gf128, NodeBasis, challenge_points, data_node_sum, decode_elements, derive_weights,
@@ -609,6 +611,20 @@ pub struct SharePair {
     session_id: Option<[u8; 32]>,
     mine: [u64; 25],
     next: [u64; 25],
+}
+
+impl SharePair {
+    /// Custodian party index (`0..3`) bound to this state share pair.
+    #[inline]
+    pub const fn party(&self) -> usize {
+        self.party
+    }
+
+    /// Optional session identifier bound to this state share pair.
+    #[inline]
+    pub const fn session_id(&self) -> Option<&[u8; 32]> {
+        self.session_id.as_ref()
+    }
 }
 
 /// The secrets of one party of the replicated engine.

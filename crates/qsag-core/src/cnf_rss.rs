@@ -1501,6 +1501,11 @@ struct PendingWaveVerification {
     residual_shares: SecretVec<[u128; 2]>,
 }
 
+type SweepJobOutcome = Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError>;
+type SlhChainChunk<'a> = &'a [(Fips205Adrs, Vec<Fips205Adrs>)];
+type SlhJobInput<'a> = (SlhChainChunk<'a>, usize, usize, Vec<ProjectedWaveTuple>);
+type SlhJobOutcome = Result<(CnfRssSharedDigests, Vec<PendingWaveVerification>), CnfRssError>;
+
 /// Fault-injection hook for adversarial active-abort tests.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
@@ -1633,7 +1638,7 @@ fn verify_and_fold_round_gfni(
         }
         qsag_asm::gf256_shamir_mul(tmp_mul, vstar_open, lambda_tile);
         let mut folded_c2 = [0u8; MINIMAC_CODE_N];
-        for chunk in tmp_mul.chunks_exact(MINIMAC_CODE_N) {
+        for chunk in tmp_mul.as_chunks::<MINIMAC_CODE_N>().0 {
             for j in 0..MINIMAC_CODE_N {
                 folded_c2[j] ^= chunk[j];
             }
@@ -1736,7 +1741,7 @@ fn eval_minimac_wave_perm(
         (0..t)
             .map(|u| {
                 let mut tile = vec![0u8; STATE_CODE_BYTES];
-                for c in tile.chunks_exact_mut(MINIMAC_CODE_N) {
+                for c in tile.as_chunks_mut::<MINIMAC_CODE_N>().0 {
                     c.copy_from_slice(&tuple.delta_shares[u]);
                 }
                 tile
@@ -2184,10 +2189,10 @@ impl<'a> CnfRssProjectedEngine<'a> {
             let src_off = bit * MINIMAC_CODE_N;
             let dst_off = (8 * secret_byte_offset + bit) * MINIMAC_CODE_N;
             cur_cw.fill(0);
-            for u in 0..t {
+            for (sh_u, prev_u) in sh.iter_mut().zip(prev.sh.iter()).take(t) {
                 for j in 0..MINIMAC_CODE_N {
-                    let v = prev.sh[u][src_off + j];
-                    sh[u][dst_off + j] ^= v;
+                    let v = prev_u[src_off + j];
+                    sh_u[dst_off + j] ^= v;
                     cur_cw[j] ^= v;
                 }
             }
@@ -2360,7 +2365,7 @@ impl<'a> CnfRssProjectedEngine<'a> {
             let mut m_pub_cw = [0u8; MINIMAC_CODE_N];
             self.tables.encode_public_bits56(mask56, &mut m_pub_cw);
             let mut m_pub_tile = vec![0u8; group_bytes];
-            for chunk in m_pub_tile.chunks_exact_mut(MINIMAC_CODE_N) {
+            for chunk in m_pub_tile.as_chunks_mut::<MINIMAC_CODE_N>().0 {
                 chunk.copy_from_slice(&m_pub_cw);
             }
 
@@ -2378,7 +2383,7 @@ impl<'a> CnfRssProjectedEngine<'a> {
                 }
             }
             let mut d_tile = SecretBuffer(vec![0u8; group_bytes]);
-            for chunk in d_tile.chunks_exact_mut(MINIMAC_CODE_N) {
+            for chunk in d_tile.as_chunks_mut::<MINIMAC_CODE_N>().0 {
                 chunk.copy_from_slice(&*dig_delta_sum);
             }
             let mut rstar_mac_aligned_sum = SecretBuffer(vec![0u8; group_bytes]);
@@ -2741,19 +2746,11 @@ impl BaggyEngine for CnfRssProjectedEngine<'_> {
                 Ok((wave_digs, pends))
             };
 
-            let outcomes: Vec<
-                Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError>,
-            > = {
+            let outcomes: Vec<SweepJobOutcome> = {
                 #[cfg(feature = "std")]
                 {
-                    let mut results: Vec<
-                        Option<
-                            Result<
-                                (Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>),
-                                CnfRssError,
-                            >,
-                        >,
-                    > = (0..chunk_jobs.len()).map(|_| None).collect();
+                    let mut results: Vec<Option<SweepJobOutcome>> =
+                        (0..chunk_jobs.len()).map(|_| None).collect();
                     let eval_ref = &eval_one;
                     std::thread::scope(|scope| {
                         let mut handles = Vec::new();
@@ -2874,10 +2871,10 @@ impl CnfRssProjectedEngine<'_> {
             let src_off = bit * MINIMAC_CODE_N;
             let dst_off = (8 * secret_byte_offset + bit) * MINIMAC_CODE_N;
             cur_cw.fill(0);
-            for u in 0..t {
+            for (sh_u, prev_u) in sh.iter_mut().zip(prev.sh.iter()).take(t) {
                 for j in 0..MINIMAC_CODE_N {
-                    let v = prev.sh[u][src_off + j];
-                    sh[u][dst_off + j] ^= v;
+                    let v = prev_u[src_off + j];
+                    sh_u[dst_off + j] ^= v;
                     cur_cw[j] ^= v;
                 }
             }
@@ -2952,13 +2949,8 @@ impl CnfRssProjectedEngine<'_> {
             }
             self.wave_ctr = base_w;
 
-            let run_job = |(chunk, max_s, start_w, mut c_tuples): (
-                &[(Fips205Adrs, Vec<Fips205Adrs>)],
-                usize,
-                usize,
-                Vec<ProjectedWaveTuple>,
-            )|
-             -> Result<(CnfRssSharedDigests, Vec<PendingWaveVerification>), CnfRssError> {
+            let run_job = |(chunk, max_s, start_w, mut c_tuples): SlhJobInput<'_>|
+             -> SlhJobOutcome {
                 let tup0 = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
                 let frames0: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
                     .iter()
@@ -3035,10 +3027,12 @@ impl CnfRssProjectedEngine<'_> {
                         for bit in 0..(8 * n) {
                             let off = bit * MINIMAC_CODE_N;
                             let mut full_bits56 = 0u64;
-                            for lane in 0..chunk.len() {
+                            for (lane, &is_act) in
+                                active_step_mask.iter().enumerate().take(chunk.len())
+                            {
                                 let mut b_val = 0u8;
                                 for u in 0..t {
-                                    b_val ^= if active_step_mask[lane] {
+                                    b_val ^= if is_act {
                                         next_dig.sh[u][off + lane]
                                     } else {
                                         cur_dig.sh[u][off + lane]
@@ -3085,19 +3079,11 @@ impl CnfRssProjectedEngine<'_> {
                 Ok((cur_dig, pends))
             };
 
-            let outcomes: Vec<
-                Result<(CnfRssSharedDigests, Vec<PendingWaveVerification>), CnfRssError>,
-            > = {
+            let outcomes: Vec<SlhJobOutcome> = {
                 #[cfg(feature = "std")]
                 {
-                    let mut results: Vec<
-                        Option<
-                            Result<
-                                (CnfRssSharedDigests, Vec<PendingWaveVerification>),
-                                CnfRssError,
-                            >,
-                        >,
-                    > = (0..jobs.len()).map(|_| None).collect();
+                    let mut results: Vec<Option<SlhJobOutcome>> =
+                        (0..jobs.len()).map(|_| None).collect();
                     let run_ref = &run_job;
                     std::thread::scope(|scope| {
                         let mut handles = Vec::new();
@@ -3223,7 +3209,7 @@ impl SlhMpcOracles for CnfRssProjectedEngine<'_> {
                     }
                 }
                 let mut d_tile = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
-                for c in d_tile.chunks_exact_mut(MINIMAC_CODE_N) {
+                for c in d_tile.as_chunks_mut::<MINIMAC_CODE_N>().0 {
                     c.copy_from_slice(&*d_sum);
                 }
                 let mut full_state = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
@@ -3521,7 +3507,9 @@ mod tests {
         let (pk, binding) = {
             let mut src =
                 StreamingCnfRssSource::establish([0xA2; 32], &cfg35, &shares, &[0, 2, 4]).unwrap();
-            let [s0, _, s2, _, s4] = shares.each_mut();
+            let [s0, _, s2, _, s4] = shares.as_mut_slice() else {
+                unreachable!()
+            };
             let mut rngs = make_rngs(3, 0x30);
             let mut eng =
                 CnfRssProjectedEngine::new([0xA2; 32], vec![s0, s2, s4], &mut rngs, &mut src)
@@ -3541,7 +3529,9 @@ mod tests {
         )
         .unwrap();
         let sig = {
-            let [_, s1, s2, s3, _] = shares.each_mut();
+            let [_, s1, s2, s3, _] = shares.as_mut_slice() else {
+                unreachable!()
+            };
             let mut rngs = make_rngs(3, 0x40);
             let mut eng =
                 CnfRssProjectedEngine::new([0xA3; 32], vec![s1, s2, s3], &mut rngs, &mut bank)
@@ -3582,7 +3572,9 @@ mod tests {
         ] {
             let mut src =
                 StreamingCnfRssSource::establish([0xA4; 32], &cfg35, &shares, &[0, 1, 4]).unwrap();
-            let [s0, s1, _, _, s4] = shares.each_mut();
+            let [s0, s1, _, _, s4] = shares.as_mut_slice() else {
+                unreachable!()
+            };
             let mut rngs = make_rngs(3, 0x50);
             let mut eng =
                 CnfRssProjectedEngine::new([0xA4; 32], vec![s0, s1, s4], &mut rngs, &mut src)
@@ -3612,7 +3604,9 @@ mod tests {
             run_dealerless_cnf_rss_dkg([0xB1; 32], &cfg46, 32, &mut rngs46).unwrap();
         let mut src46 =
             StreamingCnfRssSource::establish([0xB2; 32], &cfg46, &shares46, &[0, 2, 3, 5]).unwrap();
-        let [p0, _, p2, p3, _, p5] = shares46.each_mut();
+        let [p0, _, p2, p3, _, p5] = shares46.as_mut_slice() else {
+            unreachable!()
+        };
         let mut r4 = make_rngs(4, 0x70);
         let mut eng46 =
             CnfRssProjectedEngine::new([0xB2; 32], vec![p0, p2, p3, p5], &mut r4, &mut src46)
@@ -3645,7 +3639,9 @@ mod tests {
         let pk = {
             let mut src =
                 StreamingCnfRssSource::establish([0xC2; 32], &cfg35, &shares, &[0, 1, 2]).unwrap();
-            let [s0, s1, s2, _, _] = shares.each_mut();
+            let [s0, s1, s2, _, _] = shares.as_mut_slice() else {
+                unreachable!()
+            };
             let mut rngs = make_rngs(3, 0x85);
             let mut eng =
                 CnfRssProjectedEngine::new([0xC2; 32], vec![s0, s1, s2], &mut rngs, &mut src)
@@ -3662,27 +3658,31 @@ mod tests {
         let sig = {
             let mut src =
                 StreamingCnfRssSource::establish([0xC3; 32], &cfg35, &shares, &[0, 3, 4]).unwrap();
-            let [s0, _, _, s3, s4] = shares.each_mut();
+            let [s0, _, _, s3, s4] = shares.as_mut_slice() else {
+                unreachable!()
+            };
             let mut rngs = make_rngs(3, 0x90);
             let mut eng =
                 CnfRssProjectedEngine::new([0xC3; 32], vec![s0, s3, s4], &mut rngs, &mut src)
                     .unwrap();
-            slh_sign_mpc(&params, msg, ctx, &mut eng, &pk, None).unwrap()
+            slh_sign_mpc(&params, &mut eng, msg, ctx, &pk, None).unwrap()
         };
         assert_eq!(sig.len(), params.sig_bytes());
-        assert!(slh_verify(&params, msg, &sig, ctx, &pk).unwrap());
+        assert!(slh_verify(&params, msg, &sig, ctx, &pk));
 
         // Active fault during `SLH-DSA` signing aborts cleanly with `MpcActiveTamperDetected`!
         let mut bad_src =
             StreamingCnfRssSource::establish([0xC4; 32], &cfg35, &shares, &[1, 2, 4]).unwrap();
         bad_src.corrupt_wave = Some((3, 10));
-        let [_, s1, s2, _, s4] = shares.each_mut();
+        let [_, s1, s2, _, s4] = shares.as_mut_slice() else {
+            unreachable!()
+        };
         let mut rngs = make_rngs(3, 0x95);
         let mut bad_eng =
             CnfRssProjectedEngine::new([0xC4; 32], vec![s1, s2, s4], &mut rngs, &mut bad_src)
                 .unwrap();
         assert_eq!(
-            slh_sign_mpc(&params, msg, ctx, &mut bad_eng, &pk, None),
+            slh_sign_mpc(&params, &mut bad_eng, msg, ctx, &pk, None),
             Err(Fips205Error::MpcActiveTamperDetected)
         );
         assert!(bad_eng.is_poisoned());
@@ -3711,7 +3711,9 @@ mod tests {
                 &[0, 1, 2],
             )
             .unwrap();
-            let [s0, s1, s2, _, _] = shares_b.each_mut();
+            let [s0, s1, s2, _, _] = shares_b.as_mut_slice() else {
+                unreachable!()
+            };
             let mut r = make_rngs(3, 0xA5);
             let mut eng =
                 CnfRssProjectedEngine::new([0xD2; 32], vec![s0, s1, s2], &mut r, &mut src).unwrap();
@@ -3722,10 +3724,7 @@ mod tests {
         }
         // Measure streaming bounded-memory `3-of-5` `BaggyParams::SHA3_128F` release
         // AND pre-staged `StagedCnfRssBank` online release (`< 3.5 GB` RAM)!
-        let mut staged_small = StagedCnfRssBank::stage_for_quorum(
-            [0xD0; 32], &cfg35, &shares_b, &[1, 2, 3], 118, 8,
-        )
-        .unwrap();
+        let mut staged_small;
         let small_params = BaggyParams::TEST_SMALL;
         let mut small_shares = {
             let mut r = make_rngs(5, 0xAF);
@@ -3739,7 +3738,9 @@ mod tests {
                 &[0, 1, 2],
             )
             .unwrap();
-            let [s0, s1, s2, _, _] = small_shares.each_mut();
+            let [s0, s1, s2, _, _] = small_shares.as_mut_slice() else {
+                unreachable!()
+            };
             let mut r = make_rngs(3, 0xAE);
             let mut eng =
                 CnfRssProjectedEngine::new([0xCE; 32], vec![s0, s1, s2], &mut r, &mut src).unwrap();
@@ -3754,7 +3755,9 @@ mod tests {
         .unwrap();
         let t_staged_online = std::time::Instant::now();
         let sig_sm = {
-            let [_, s1, _, s3, s4] = small_shares.each_mut();
+            let [_, s1, _, s3, s4] = small_shares.as_mut_slice() else {
+                unreachable!()
+            };
             let mut r = make_rngs(3, 0xAD);
             let mut eng = CnfRssProjectedEngine::new(
                 [0xCD; 32],
@@ -3792,7 +3795,9 @@ mod tests {
                 &[1, 3, 4],
             )
             .unwrap();
-            let [_, s1, _, s3, s4] = shares_b.each_mut();
+            let [_, s1, _, s3, s4] = shares_b.as_mut_slice() else {
+                unreachable!()
+            };
             let mut r = make_rngs(3, 0xB5);
             let mut eng =
                 CnfRssProjectedEngine::new([0xD4; 32], vec![s1, s3, s4], &mut r, &mut src).unwrap();
@@ -3831,7 +3836,9 @@ mod tests {
                 &[0, 1, 2],
             )
             .unwrap();
-            let [s0, s1, s2, _, _] = shares_s.each_mut();
+            let [s0, s1, s2, _, _] = shares_s.as_mut_slice() else {
+                unreachable!()
+            };
             let mut r = make_rngs(3, 0xC5);
             let mut eng =
                 CnfRssProjectedEngine::new([0xE2; 32], vec![s0, s1, s2], &mut r, &mut src).unwrap();
@@ -3849,16 +3856,18 @@ mod tests {
                 &[0, 2, 3],
             )
             .unwrap();
-            let [s0, _, s2, s3, _] = shares_s.each_mut();
+            let [s0, _, s2, s3, _] = shares_s.as_mut_slice() else {
+                unreachable!()
+            };
             let mut r = make_rngs(3, 0xD0);
             let mut eng =
                 CnfRssProjectedEngine::new([0xE3; 32], vec![s0, s2, s3], &mut r, &mut src_s)
                     .unwrap();
             slh_sign_mpc(
                 &slh_params,
+                &mut eng,
                 b"timed 3-of-5 SLH-DSA-SHAKE-128f release",
                 b"bench",
-                &mut eng,
                 &pk_s,
                 None,
             )
@@ -3871,8 +3880,7 @@ mod tests {
             &sig_s,
             b"bench",
             &pk_s
-        )
-        .unwrap());
+        ));
 
         std::eprintln!(
             "[BENCH 3-of-5 CNF-RSS -> t-of-t MiniMAC] Baggy staged online = {baggy_staged_online_ms:.2} ms | Baggy SHA3_128F full stream = {baggy_full_ms:.2} ms | SLH-DSA-SHAKE-128f full stream = {slh_online_ms:.2} ms"

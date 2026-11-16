@@ -468,14 +468,19 @@ fn le_bytes<B: Backend>(b: &mut B, limb: &B::W) -> [B::W; 8] {
 }
 
 /// `mu` of one key for the shard message: the gadget form of
-/// [`crate::sig::compute_message_mu`] for a `JortsPoseidon2` key and a 32-byte message.
-fn message_mu<B: Backend>(b: &mut B, key: &[B::W; 8], message: &[B::W]) -> [B::W; 5] {
+/// [`crate::sig::compute_message_mu`] for a `JortsPoseidon2` key (any height `6..=20`) and a 32-byte message.
+fn message_mu<B: Backend>(
+    b: &mut B,
+    profile: AggSigProfile,
+    key: &[B::W; 8],
+    message: &[B::W],
+) -> [B::W; 5] {
     assert_eq!(message.len(), SHARD_MESSAGE_BYTES);
     let byte = |v: u8| B::W::constant(f(u64::from(v)));
     // `encode_multi_frame(&[b"QSAG.MU/v2", &pk.to_bytes(), message])`.
     let mut frame = vec![byte(3), byte(10)];
     frame.extend(b"QSAG.MU/v2".iter().map(|&c| byte(c)));
-    frame.extend([byte(65), byte(AggSigProfile::JortsPoseidon2 as u8)]);
+    frame.extend([byte(65), byte(profile.to_u8())]);
     for limb in key {
         frame.extend(le_bytes(b, limb));
     }
@@ -657,7 +662,10 @@ pub(crate) fn shard_gadget<B: Backend>(
 
     // 3. Every member's message representative.
     let message = &public[4..4 + SHARD_MESSAGE_BYTES];
-    let mus: Vec<[B::W; 5]> = keys.iter().map(|key| message_mu(b, key, message)).collect();
+    let mus: Vec<[B::W; 5]> = keys
+        .iter()
+        .map(|key| message_mu(b, params.profile, key, message))
+        .collect();
 
     // 4. Statement and commitment, then the row-sumcheck challenges.
     let commitment: [B::W; 4] = w.proof.commitment.map(|v| b.alloc(v));
@@ -1254,7 +1262,7 @@ impl FullShardMergeRelation {
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
         qsag_asm::volatile_fill(&mut z, F::ZERO);
-        let hologram = ShapeHologram::compile(&shape, params.regime())
+        let hologram = ShapeHologram::compile_native(&shape, params.regime())
             .map_err(|_| FullShardError::InvalidParameters)?;
         let stats = FullShardRelationStats {
             sbox_rows: shape.num_sbox,
@@ -1522,15 +1530,22 @@ mod tests {
 
     #[test]
     fn message_representative_gadget_matches_the_signature_scheme() {
-        for (tag, message) in [(3u8, [0u8; 32]), (9, [0xFF; 32]), (200, [0x5A; 32])] {
-            let mut message = message;
-            message[7] ^= tag;
-            for key in keypairs(3, tag) {
-                let mut b = Native::default();
-                let words: Vec<F> = message.iter().map(|&x| f(u64::from(x))).collect();
-                let mu = message_mu(&mut b, &key_limbs(&key.pk), &words);
-                assert!(!b.failed);
-                assert_eq!(mu, compute_message_mu(&key.pk, &message).1);
+        for profile in [
+            AggSigProfile::JortsPoseidon2,
+            AggSigProfile::jorts_with_height(10).unwrap(),
+            AggSigProfile::jorts_with_height(20).unwrap(),
+        ] {
+            for (tag, message) in [(3u8, [0u8; 32]), (9, [0xFF; 32]), (200, [0x5A; 32])] {
+                let mut message = message;
+                message[7] ^= tag;
+                for i in 0..3 {
+                    let key = ValidatorKeypair::keygen_deterministic(profile, &[tag; 32], i);
+                    let mut b = Native::default();
+                    let words: Vec<F> = message.iter().map(|&x| f(u64::from(x))).collect();
+                    let mu = message_mu(&mut b, key.pk.profile, &key_limbs(&key.pk), &words);
+                    assert!(!b.failed);
+                    assert_eq!(mu, compute_message_mu(&key.pk, &message).1);
+                }
             }
         }
     }
@@ -1764,6 +1779,52 @@ mod tests {
         let mut bad = parent.clone();
         bad.proof.row_rounds[0][0] += E::ONE;
         assert!(!verify_full_shard_merge(&relation, &publics, REGIME, &bad));
+    }
+
+    #[test]
+    fn variable_height_jorts_recursive_shard_and_sublinear_hologram_merge() {
+        let profile = AggSigProfile::jorts_with_height(10).unwrap();
+        let params = FullShardParams::with_profile(REGIME, profile, 2).unwrap();
+        assert_eq!(params.profile(), profile);
+        let mut keys: Vec<ValidatorKeypair> = (0..2)
+            .map(|i| ValidatorKeypair::keygen_deterministic(profile, &[0x7A; 32], i))
+            .collect();
+        let msg = [0x3C; 32];
+        // Sign at epoch 777 > 64 to exercise `StatefulHmsgBlock0Var { height: 10 }` inside `AirTape`!
+        let sig0 = keys[0].sign_stateful_for_unit_test(&msg, 777).unwrap();
+        let sig1 = keys[1].sign_stateful_for_unit_test(&msg, 999).unwrap();
+        let stmt = RecursiveShardStatement {
+            keys: keys.iter().map(|k| k.pk).collect(),
+            bitmap: SignerBitmap::from_active_indices(2, &[0, 1]).unwrap(),
+            message: msg,
+        };
+        let child_proof = prove_recursive_shard(&params, &stmt, &[sig0, sig1], &[0x55; 32]).unwrap();
+        assert!(verify_recursive_shard(&params, &stmt, &child_proof));
+        let wire = child_proof.to_bytes();
+        assert_eq!(
+            RecursiveShardProof::from_bytes(&params, &wire).as_ref(),
+            Some(&child_proof)
+        );
+
+        let relation = FullShardMergeRelation::new(params.clone(), 1).unwrap();
+        let parent = prove_full_shard_merge(
+            &relation,
+            core::slice::from_ref(&stmt),
+            core::slice::from_ref(&child_proof),
+            REGIME,
+            &[0x66; 32],
+        )
+        .unwrap();
+        let pub_shard = stmt.public(&params).unwrap();
+        let t0 = Instant::now();
+        assert!(verify_full_shard_merge(
+            &relation,
+            core::slice::from_ref(&pub_shard),
+            REGIME,
+            &parent
+        ));
+        let ver_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(ver_ms < 25.0, "verify_ms={ver_ms}");
     }
 
     /// `QSAG_FULL_SHARD_SLOTS` signer slots per shard (all signing), `QSAG_FULL_SHARD_CHILDREN`

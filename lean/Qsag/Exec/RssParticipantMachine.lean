@@ -15,8 +15,8 @@ public section
 namespace Qsag.RssParticipant
 set_option autoImplicit false
 
-def nextParty (p : Fin 3) : Fin 3 := ⟨(p.val + 1) % 3, Nat.mod_lt _ (by decide)⟩
-def previousParty (p : Fin 3) : Fin 3 := ⟨(p.val + 2) % 3, Nat.mod_lt _ (by decide)⟩
+@[expose] def nextParty (p : Fin 3) : Fin 3 := ⟨(p.val + 1) % 3, Nat.mod_lt _ (by decide)⟩
+@[expose] def previousParty (p : Fin 3) : Fin 3 := ⟨(p.val + 2) % 3, Nat.mod_lt _ (by decide)⟩
 
 structure Envelope where
   sender : Fin 3
@@ -57,16 +57,16 @@ structure Node where
   evidence : List RoundEvidence
   deriving DecidableEq, Repr
 
-def initialNode (party : Fin 3) (binding : List UInt8) (view : LocalView)
+@[expose] def initialNode (party : Fin 3) (binding : List UInt8) (view : LocalView)
     (rcs : List UInt64 := keccakRoundConstants) (cursor : Nat := 0) : Node :=
   ⟨party, binding, cursor, rcs, .ready view, []⟩
 
 /-- Abort erases live shares and private gate witnesses. Already emitted network
 messages are external history and cannot be erased by this local transition. -/
-def abortNode (s : Node) : Node := { s with phase := .aborted, evidence := [] }
+@[expose] def abortNode (s : Node) : Node := { s with phase := .aborted, evidence := [] }
 
 /-- One local computation and one outgoing message. No other party's state is an input. -/
-def prepare (s : Node) (masks : LocalMasks) : Node × Option Envelope :=
+@[expose] def prepare (s : Node) (masks : LocalMasks) : Node × Option Envelope :=
   match s.phase, s.remaining with
   | .ready v, rc :: rcs =>
       let own := roundLocal s.party v rc masks
@@ -78,7 +78,7 @@ def prepare (s : Node) (masks : LocalMasks) : Node × Option Envelope :=
 
 /-- This is an authenticated-channel receive port: the resource must ensure that
 `sender` identifies the party that emitted the payload. Tag checks alone do not. -/
-def receive (s : Node) (message : Envelope) : Node :=
+@[expose] def receive (s : Node) (message : Envelope) : Node :=
   match s.phase with
   | .awaiting rc pending =>
       if message.sender = nextParty s.party ∧ message.receiver = s.party ∧
@@ -91,7 +91,7 @@ def receive (s : Node) (message : Envelope) : Node :=
       else abortNode s
   | _ => abortNode s
 
-def receiveOptional (s : Node) (message : Option Envelope) : Node :=
+@[expose] def receiveOptional (s : Node) (message : Option Envelope) : Node :=
   match message with
   | none => abortNode s
   | some message => receive s message
@@ -103,14 +103,14 @@ structure Nodes where
   n2 : Node
   deriving DecidableEq, Repr
 
-def initialNodes (binding : List UInt8) (s : RssKState) (rcs : List UInt64)
+@[expose] def initialNodes (binding : List UInt8) (s : RssKState) (rcs : List UInt64)
     (cursor : Nat) : Nodes :=
   ⟨initialNode 0 binding ⟨s.s0, s.s1⟩ rcs cursor,
    initialNode 1 binding ⟨s.s1, s.s2⟩ rcs cursor,
    initialNode 2 binding ⟨s.s2, s.s0⟩ rcs cursor⟩
 
 /-- An honest routed round; adversarial schedules use `prepare`/`receive` separately. -/
-def honestRound (nodes : Nodes) (r : Nat → RssPrfZeroSeeds) : Nodes :=
+@[expose] def honestRound (nodes : Nodes) (r : Nat → RssPrfZeroSeeds) : Nodes :=
   let a := prepare nodes.n0 (mask0 r)
   let b := prepare nodes.n1 (mask1 r)
   let c := prepare nodes.n2 (mask2 r)
@@ -118,7 +118,7 @@ def honestRound (nodes : Nodes) (r : Nat → RssPrfZeroSeeds) : Nodes :=
 
 /-- Histories may be arbitrarily long: the local state invariant concerns live
 views and cursors, and does not erase accumulated gate evidence between rounds. -/
-def Represents (nodes : Nodes) (binding : List UInt8) (s : RssKState)
+@[expose] def Represents (nodes : Nodes) (binding : List UInt8) (s : RssKState)
     (rcs : List UInt64) (cursor : Nat) : Prop :=
   nodes.n0.party = 0 ∧ nodes.n1.party = 1 ∧ nodes.n2.party = 2 ∧
   nodes.n0.binding = binding ∧ nodes.n1.binding = binding ∧ nodes.n2.binding = binding ∧
@@ -182,7 +182,7 @@ theorem represents_output (nodes : Nodes) (binding : List UInt8) (s : RssKState)
     (rcs : List UInt64) (cursor : Nat) (h : Represents nodes binding s rcs cursor) :
     reconstructedOutput nodes = some (reconstructRssKState s) := by
   rcases h with ⟨_, _, _, _, _, _, _, _, _, _, _, _, hp0, hp1, hp2⟩
-  simp [reconstructedOutput, primaryOutput, hp0, hp1, hp2, reconstructRssKState]
+  simp [reconstructedOutput, primaryOutput, hp0, hp1, hp2, reconstructRssKState.public_eq_1]
 
 /-- Complete24-round participant execution refines the existing shared evaluator.
 This correctness observer is not an authorized public opening operation. -/

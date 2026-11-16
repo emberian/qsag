@@ -75,14 +75,10 @@ struct ExternalOracleRoot {
     ed25519_clamp_slip0010: Vec<Ed25519ClampVec>,
     fips205_slh_dsa_shake_128s_hmsg: LeanFips205HMsg128sVec,
     fips205_slh_dsa_shake_128f: LeanFips205FullSigVec,
-    #[serde(default)]
-    pors_fp_and_baggy: Option<LeanPorsFpAndBaggyVec>,
-    #[serde(default)]
-    frontier_sum_fts: Option<Vec<LeanFrontierFtsVec>>,
-    #[serde(default)]
-    whir_high_cap_and_regimes: Option<LeanWhirHighCapVec>,
-    #[serde(default)]
-    agg_sig_profiles: Option<LeanAggSigProfilesVec>,
+    pors_fp_and_baggy: LeanPorsFpAndBaggyVec,
+    frontier_sum_fts: Vec<LeanFrontierFtsVec>,
+    whir_high_cap_and_regimes: LeanWhirHighCapVec,
+    agg_sig_profiles: LeanAggSigProfilesVec,
 }
 
 #[derive(Deserialize)]
@@ -268,12 +264,9 @@ struct LeanFrontierFtsVec {
     counter_bits: usize,
     signature_bytes: usize,
     rotated_epoch_vote_bytes: usize,
-    #[serde(default)]
-    frontier_cardinality_dec: Option<String>,
-    #[serde(default)]
-    decoration_cardinality_dec: Option<String>,
-    #[serde(default)]
-    total_cardinality_dec: Option<String>,
+    frontier_cardinality_dec: String,
+    decoration_cardinality_dec: String,
+    total_cardinality_dec: String,
     pid_56_hex: String,
     pk_seed_hex: String,
     pk_root_hex: String,
@@ -1174,7 +1167,8 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     let oracle = load_external_oracle();
 
     // 1. PORS+FP & Baggy SHA3_128F Lean <-> Rust parity
-    if let Some(pors) = &oracle.pors_fp_and_baggy {
+    {
+        let pors = &oracle.pors_fp_and_baggy;
         let p = PorsFpParams::SHA3_128F;
         assert_eq!(pors.tree_height, p.tree_height);
         assert_eq!(pors.reveal, p.reveal);
@@ -1191,6 +1185,7 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
                 Some(pors.forgery_bits_milli[r - 1])
             );
         }
+        assert!(!pors.adrs_vectors.is_empty());
         for av in &pors.adrs_vectors {
             let kind = match (av.kind_name.as_str(), av.kind_code) {
                 ("pors_prf", 7) => AdrsKind::PorsPrf,
@@ -1208,11 +1203,13 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             };
             assert_eq!(hex::encode(adrs.to_bytes()), av.adrs_32_hex);
         }
+        assert!(!pors.octopus_vectors.is_empty());
         for ov in &pors.octopus_vectors {
             let got = octopus_positions(ov.tree_height, &ov.indices).expect("octopus_positions");
             let got_arr: Vec<[u32; 2]> = got.into_iter().map(|(h, idx)| [h, idx]).collect();
             assert_eq!(got_arr, ov.positions);
         }
+        assert!(!pors.select_vectors.is_empty());
         for sv in &pors.select_vectors {
             let seed = hex::decode(&sv.seed_hex).unwrap();
             let mut xof = Cshake256Xof::new(sv.custom_ascii.as_bytes());
@@ -1227,8 +1224,9 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     }
 
     // 2. FrontierSumFts (`Compact1122` & `Full256Bit`) Lean <-> Rust <-> NIST SP 800-185 parity
-    if let Some(fts_rows) = &oracle.frontier_sum_fts {
-        for row in fts_rows {
+    {
+        assert_eq!(oracle.frontier_sum_fts.len(), 2);
+        for row in &oracle.frontier_sum_fts {
             let profile = match row.profile.as_str() {
                 "Compact1122" => FrontierFtsProfile::Compact1122,
                 "Full256Bit" => FrontierFtsProfile::Full256Bit,
@@ -1249,24 +1247,18 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             assert_eq!(hex::encode(pid), row.pid_56_hex);
 
             let dp = FrontierDpTable::build(profile);
-            if let Some(f_dec) = &row.frontier_cardinality_dec {
-                assert_eq!(
-                    ExactNat::from_u64_limbs_le(&dp.frontier_cardinality.0).to_decimal_string(),
-                    *f_dec
-                );
-            }
-            if let Some(d_dec) = &row.decoration_cardinality_dec {
-                assert_eq!(
-                    ExactNat::from_u64_limbs_le(&dp.decoration_cardinality.0).to_decimal_string(),
-                    *d_dec
-                );
-            }
-            if let Some(m_dec) = &row.total_cardinality_dec {
-                assert_eq!(
-                    ExactNat::from_u64_limbs_le(&dp.total_cardinality.0).to_decimal_string(),
-                    *m_dec
-                );
-            }
+            assert_eq!(
+                ExactNat::from_u64_limbs_le(&dp.frontier_cardinality.0).to_decimal_string(),
+                row.frontier_cardinality_dec
+            );
+            assert_eq!(
+                ExactNat::from_u64_limbs_le(&dp.decoration_cardinality.0).to_decimal_string(),
+                row.decoration_cardinality_dec
+            );
+            assert_eq!(
+                ExactNat::from_u64_limbs_le(&dp.total_cardinality.0).to_decimal_string(),
+                row.total_cardinality_dec
+            );
 
             let pk_seed = hex::decode(&row.pk_seed_hex).unwrap();
             let pk_root = hex::decode(&row.pk_root_hex).unwrap();
@@ -1323,13 +1315,15 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     }
 
     // 3. WHIR high-capacity geometries (`nv <= 28`) & security regimes
-    if let Some(whir) = &oracle.whir_high_cap_and_regimes {
+    {
+        let whir = &oracle.whir_high_cap_and_regimes;
         assert_eq!(whir.max_pcs_num_vars, MAX_PCS_NUM_VARS);
         assert_eq!(whir.max_batch_polys, MAX_BATCH_POLYS);
         assert_eq!(whir.ood_samples, 2);
         for &bad_tag in &whir.retired_wire_tags {
             assert_eq!(WhirSecurityRegime::from_u8(bad_tag), None);
         }
+        assert_eq!(whir.stage_geometries.len(), 10);
         for geom in &whir.stage_geometries {
             let sched = WhirSecurityRegime::BciksJohnsonQrom128.schedule(geom.nv);
             let rust_stages: Vec<[usize; 2]> = sched
@@ -1342,6 +1336,7 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             assert_eq!(sum, geom.folding_sum);
             assert_eq!(sum + sched.early_stop_vars, geom.nv);
         }
+        assert_eq!(whir.regimes.len(), 6);
         for reg in &whir.regimes {
             let r = WhirSecurityRegime::from_u8(reg.wire_tag).expect("active Lean WHIR regime");
             assert_eq!(r.pow_bits(), u32::from(reg.pow_bits));
@@ -1352,7 +1347,8 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     }
 
     // 4. Aggregation signature profiles (`JortsPoseidon2` & `CorduroyPoseidon2`)
-    if let Some(agg) = &oracle.agg_sig_profiles {
+    {
+        let agg = &oracle.agg_sig_profiles;
         let jp = &agg.jorts_poseidon2;
         assert_eq!(jp.wire_tag, AggSigProfile::JortsPoseidon2 as u8);
         assert_eq!(jp.wots_chains, WOTS_CHAINS);

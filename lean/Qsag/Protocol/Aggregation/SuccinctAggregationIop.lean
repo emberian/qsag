@@ -49,7 +49,7 @@ aggregation engine (`crates/qsag-agg/src/`):
 5. **§4 (`field.rs`, `pcs.rs`)**:
    - the canonical 32-byte encoding of `GoldilocksExt4` (`decodeExt4Bytes32_encode`,
      `decodeExt4Bytes32_canonical`);
-   - the rate-escalation schedule `whirStageSchedule` (stage geometry `whirLegacyStageGeometry`
+   - the rate-escalation schedule `whirStageSchedule` (stage geometry `whirBaseStageGeometry`
      with the query counts of a `WhirSecurityRegime`), its per-stage query and proof-of-work
      denominators, and error denominators over `p^4 > 2^255`
      (`ext4_error_denominator_bound`, against `ext2_error_denominator_cliff`);
@@ -115,6 +115,10 @@ inductive AggSigProfile where
   | corduroyPoseidon2
   deriving DecidableEq, Repr
 
+/-- Production stateful `JortsPoseidon2` (`AggSigProfile::JortsPoseidon2 = 1` in `sig.rs:71`)
+    constructor alias for `.xmssPoseidon2`. -/
+@[match_pattern] abbrev AggSigProfile.jortsPoseidon2 : AggSigProfile := .xmssPoseidon2
+
 /-- Exact 64-bit ASCII domain-separation tags from `crates/qsag-agg/src/sig.rs`. -/
 def domainPrfWots : Goldilocks := Goldilocks.ofNat 0x5153414757505246
 def domainWotsStep : Goldilocks := Goldilocks.ofNat 0x5153414757535450
@@ -123,6 +127,7 @@ def domainMerkleNode : Goldilocks := Goldilocks.ofNat 0x515341474D524B4C
 def domainHMsgStateful : Goldilocks := Goldilocks.ofNat 0x51534147484D5331
 def domainHMsgDetTree : Goldilocks := Goldilocks.ofNat 0x5153414748445452
 def domainHMsgStateless : Goldilocks := Goldilocks.ofNat 0x515341474853544C
+def domainPrfMsg : Goldilocks := Goldilocks.ofNat 0x515341475052464d
 def domainForsPrf : Goldilocks := Goldilocks.ofNat 0x5153414746505246
 def domainForsLeaf : Goldilocks := Goldilocks.ofNat 0x51534147464C4546
 def domainForsNode : Goldilocks := Goldilocks.ofNat 0x51534147464E4F44
@@ -136,7 +141,9 @@ theorem aggSigDomains_nonzero_and_distinct :
     domainMerkleNode ≠ Goldilocks.zero ∧
     domainHMsgStateful ≠ Goldilocks.zero ∧
     domainHMsgDetTree ≠ Goldilocks.zero ∧
+    domainPrfMsg ≠ Goldilocks.zero ∧
     domainPrfWots ≠ domainWotsStep ∧
+    domainPrfMsg ≠ domainPrfWots ∧
     domainMerkleNode ≠ domainForsNode ∧
     domainHMsgStateful ≠ domainHMsgDetTree := by
   decide +kernel
@@ -165,7 +172,7 @@ structure AggSigGeometry where
   (if g.forsTrees == 0 then g.forsHeight == 0
    else (g.forsTrees % 2 == 0) && (g.forsTrees ≤ 32) && (0 < g.forsHeight) && (g.forsHeight ≤ 8))
 
-/-- Deployed stateful `XmssPoseidon2` geometry (`ell1 = 128, targetSum = 192, d = 1, h' = 6`). -/
+/-- Deployed stateful `JortsPoseidon2` / `XmssPoseidon2` geometry (`ell1 = 128, targetSum = 192, d = 1, h' = 6`). -/
 def xmssPoseidon2Geom : AggSigGeometry where
   profile       := .xmssPoseidon2
   wotsChains    := 128
@@ -174,6 +181,32 @@ def xmssPoseidon2Geom : AggSigGeometry where
   subtreeHeight := 6
   forsTrees     := 0
   forsHeight    := 0
+
+/-- Alias of `xmssPoseidon2Geom` matching `AggSigProfile::JortsPoseidon2` in `sig.rs`. -/
+abbrev jortsPoseidon2Geom : AggSigGeometry := xmssPoseidon2Geom
+
+/-- Exact raw serialized byte length of an `AggSigGeometry` (`AggSigProfile::raw_signature_bytes`
+    in `sig.rs:183-195`). -/
+def AggSigGeometry.rawSignatureBytes (g : AggSigGeometry) : Nat :=
+  if g.forsTrees == 0 then
+    32 + 4 + 4 + g.wotsChains * 32 + g.subtreeHeight * 32
+  else
+    32 + g.forsTrees * (1 + g.forsHeight) * 32 +
+      g.numLayers * (4 + g.wotsChains * 32 + g.subtreeHeight * 32)
+
+/-- Raw serialized signature size (`4,328` bytes) of `JortsPoseidon2` (`32B r_rand + 4B leaf_idx +
+    4B tsw_ctr + 128*32B WOTS + 6*32B XMSS`, `sig.rs:187`). -/
+def jortsPoseidon2RawSigBytes : Nat :=
+  32 + 4 + 4 + 128 * 32 + 6 * 32
+
+/-- Raw serialized signature size (`76,896` bytes) of `CorduroyPoseidon2` (`sig.rs:191-192`). -/
+def aggCorduroyPoseidon2RawSigBytes : Nat :=
+  32 + 32 * (1 + 8) * 32 + 16 * (4 + 128 * 32 + 4 * 32)
+
+/-- Raw serialized byte length per `AggSigProfile` (`sig.rs:183`). -/
+def AggSigProfile.rawSignatureBytes : AggSigProfile → Nat
+  | .xmssPoseidon2 => jortsPoseidon2RawSigBytes
+  | .corduroyPoseidon2 => aggCorduroyPoseidon2RawSigBytes
 
 /-- Deployed stateless `CorduroyPoseidon2` geometry (`ell1 = 128, targetSum = 192, k = 32, a = 8, d = 16, h' = 4`). -/
 def corduroyPoseidon2Geom : AggSigGeometry where
@@ -184,6 +217,15 @@ def corduroyPoseidon2Geom : AggSigGeometry where
   subtreeHeight := 4
   forsTrees     := 32
   forsHeight    := 8
+
+theorem jortsPoseidon2RawSigBytes_eq :
+    jortsPoseidon2RawSigBytes = 4328 ∧
+    jortsPoseidon2Geom.rawSignatureBytes = 4328 ∧
+    AggSigProfile.jortsPoseidon2.rawSignatureBytes = 4328 ∧
+    aggCorduroyPoseidon2RawSigBytes = 76896 ∧
+    corduroyPoseidon2Geom.rawSignatureBytes = 76896 ∧
+    AggSigProfile.corduroyPoseidon2.rawSignatureBytes = 76896 := by
+  decide
 
 /-- Compact kernel-computable audit geometry (`ell1 = 2, targetSum = 3, d = 1, h' = 1`) for build-time `#tooth` tests. -/
 def compactAuditGeom : AggSigGeometry where
@@ -837,12 +879,12 @@ def encodeAggValidatorPkBytes (pk : AggValidatorPk) : List UInt8 :=
     be 8 pk.pkRoot.x0.val ++ be 8 pk.pkRoot.x1.val ++ be 8 pk.pkRoot.x2.val ++ be 8 pk.pkRoot.x3.val
 
 /-- ASCII byte tag `"QSAG.MU/v2"` (`0x51 0x53 0x41 0x47 0x2e 0x4d 0x55 0x2f 0x76 0x32`). -/
-def qsagMuV2TagBytes : List UInt8 :=
+def qsagMuTagBytes : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2e, 0x4d, 0x55, 0x2f, 0x76, 0x32]
 
 /-- Domain-framed 5-limb message representative `mu` (`compute_message_mu` in `sig.rs:260`). -/
 def computeMessageMu (pk : AggValidatorPk) (msg : List UInt8) : Digest5 :=
-  let framed := encodeMultiFrame [qsagMuV2TagBytes, encodeAggValidatorPkBytes pk, msg]
+  let framed := encodeMultiFrame [qsagMuTagBytes, encodeAggValidatorPkBytes pk, msg]
   bytes32ToDigest5 (poseidon2Hash32 framed)
 
 /-- Stateful layer-0 randomized message hash `compute_hmsg_stateful` (`sig.rs:396`). -/
@@ -3058,8 +3100,8 @@ def extractAggNativeForgeryBreak
                   have hMsgNe : msg ≠ entry0.queriedMsg := fun hEq => hFreshMsg (hEq ▸ hMsgInQ)
                   let muQ := computeMessageMu pk entry0.queriedMsg
                   if hMuEq : mu = muQ then
-                    let f1 := encodeMultiFrame [qsagMuV2TagBytes, encodeAggValidatorPkBytes pk, msg]
-                    let f2 := encodeMultiFrame [qsagMuV2TagBytes, encodeAggValidatorPkBytes pk, entry0.queriedMsg]
+                    let f1 := encodeMultiFrame [qsagMuTagBytes, encodeAggValidatorPkBytes pk, msg]
+                    let f2 := encodeMultiFrame [qsagMuTagBytes, encodeAggValidatorPkBytes pk, entry0.queriedMsg]
                     have hFrameNe : f1 ≠ f2 := fun hFEq => by
                       have hListEq := encodeMultiFrame_injective hFEq
                       simp only [List.cons.injEq, and_true, true_and] at hListEq
@@ -9070,7 +9112,7 @@ def whirPowBits : Nat := 16
 /-- `pcs.rs:stage_geometry`, defined for `2 ≤ numVars ≤ 28` (`MAX_PCS_NUM_VARS`): blowups, folded variables and
     early-stop count of every stage, carrying baseline counts `56 / 30 / 21 / 18` (`68` for a
     single stage) that `WhirSecurityRegime.schedule` overrides. -/
-@[expose] def whirLegacyStageGeometry (numVars : Nat) : WhirSchedule :=
+@[expose] def whirBaseStageGeometry (numVars : Nat) : WhirSchedule :=
   if numVars ≤ 6 then
     let es := if numVars ≤ 3 then 1 else 2
     ⟨.bciksJohnsonQrom128, es, [⟨16, numVars - es, 68⟩]⟩
@@ -9137,8 +9179,8 @@ def WhirSecurityRegime.queryExponentBits (r : WhirSecurityRegime) : Nat :=
 
 /-- `pcs.rs:WhirSecurityRegime::schedule`: the stage geometry with the regime's query counts. -/
 @[expose] def WhirSecurityRegime.schedule (r : WhirSecurityRegime) (numVars : Nat) : WhirSchedule :=
-  ⟨r, (whirLegacyStageGeometry numVars).earlyStopVars,
-    (whirLegacyStageGeometry numVars).stages.map
+  ⟨r, (whirBaseStageGeometry numVars).earlyStopVars,
+    (whirBaseStageGeometry numVars).stages.map
       (fun st => ⟨st.blowup, st.stepVars, r.numQueries st.blowup⟩)⟩
 
 /-- `pcs.rs:whir_stage_schedule`: the default (`bciksJohnsonQrom128`) schedule. -/
@@ -9284,24 +9326,24 @@ theorem whirStageSchedule_deployed_denominators :
 
 /-- The baseline geometry template at `numVars = 20`: `ρ = 1/4 → 1/16 → 1/64` with
     `q = (56, 30, 21)`. -/
-theorem whirLegacyStageGeometry_k8 :
-    whirLegacyStageGeometry 20 =
+theorem whirBaseStageGeometry_k8 :
+    whirBaseStageGeometry 20 =
       ⟨.bciksJohnsonQrom128, 8, [⟨4, 5, 56⟩, ⟨16, 3, 30⟩, ⟨64, 4, 21⟩]⟩ := by decide
 
 /-- Stage denominators of the `q = (56, 30, 21)` geometry: query errors `2^-112, 2^-120, 2^-126`;
     `2^-128, 2^-136, 2^-142` with the full 16-bit classical grinding credit; and
     `2^-120, 2^-128, 2^-134` with the 8-bit credit left by a quantum nonce search. -/
-theorem whir_legacy_k8_stage_denominators :
-    (whirLegacyStageGeometry 20).stages.map (·.queryErrorDenominator) =
+theorem whir_base_k8_stage_denominators :
+    (whirBaseStageGeometry 20).stages.map (·.queryErrorDenominator) =
       [2 ^ 112, 2 ^ 120, 2 ^ 126] ∧
-    (whirLegacyStageGeometry 20).stages.map (·.fiatShamirDenominator) =
+    (whirBaseStageGeometry 20).stages.map (·.fiatShamirDenominator) =
       [2 ^ 128, 2 ^ 136, 2 ^ 142] ∧
-    (whirLegacyStageGeometry 20).stages.map (fun st => 2 ^ (whirPowBits / 2) * st.queryErrorDenominator) =
+    (whirBaseStageGeometry 20).stages.map (fun st => 2 ^ (whirPowBits / 2) * st.queryErrorDenominator) =
       [2 ^ 120, 2 ^ 128, 2 ^ 134] := by decide
 
 /-- Union bound over the three stages of the `q = (56, 30, 21)` geometry with 16-bit grinding:
     `1/D_0 + 1/D_1 + 1/D_2 ≤ 2^-127` for the Fiat-Shamir denominators `D_i`. -/
-theorem whir_legacy_k8_stage_union_bound :
+theorem whir_base_k8_stage_union_bound :
     2 ^ 127 * (2 ^ 136 * 2 ^ 142 + 2 ^ 128 * 2 ^ 142 + 2 ^ 128 * 2 ^ 136) ≤
       2 ^ 128 * 2 ^ 136 * 2 ^ 142 := by decide
 

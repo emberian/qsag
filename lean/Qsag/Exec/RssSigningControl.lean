@@ -25,7 +25,7 @@ def forsPk (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
     evaluate o (forsPk suite params pkSeed tree kp) =
       mpcComputeProductionForsPk suite params o pkSeed tree kp := by
   simp only [forsPk, evaluate_bind, evaluate_mapProgram, evaluate_merkleKp,
-    evaluate_ask, answer, evaluate_pure, mpcComputeProductionForsPk]
+    evaluate_ask, answer, evaluate_pure, mpcComputeProductionForsPk.public_eq_1]
 
 def forsOpenings (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : Bytes)
     (tree : UInt64) (kp : Nat) (indices : List Nat) : Program (List ForsTreeOpening) :=
@@ -41,7 +41,7 @@ def forsOpenings (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : 
     evaluate o (forsOpenings suite params pkSeed tree kp indices) =
       mpcBuildProductionForsOpenings suite params o pkSeed tree kp indices := by
   simp only [forsOpenings, evaluate_mapProgram, evaluate_bind, evaluate_ask,
-    evaluate_authPath, answer, evaluate_pure, mpcBuildProductionForsOpenings]
+    evaluate_authPath, answer, evaluate_pure, mpcBuildProductionForsOpenings.public_eq_1]
 
 def layers (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed pkRoot rRand : Bytes) (maxGrind : Nat) :
@@ -145,7 +145,7 @@ theorem evaluate_stateful (o : ProductionPqHashMpcOracles) (suite : TweakableHas
     (params : PqHashParams) (pkSeed msg optRand : Bytes) (epoch maxGrind : Nat) :
     evaluate o (stateful suite params pkSeed msg optRand epoch maxGrind) =
       mpcEvalProductionStatefulSign suite params o pkSeed msg optRand epoch maxGrind := by
-  simp only [stateful, mpcEvalProductionStatefulSign]
+  simp only [stateful, mpcEvalProductionStatefulSign.public_eq_1]
   split
   · rfl
   · simp only [evaluate_bind, evaluate_publicKey, evaluate_ask, answer, evaluate_core]
@@ -154,7 +154,7 @@ theorem evaluate_stateless (o : ProductionPqHashMpcOracles) (suite : TweakableHa
     (params : PqHashParams) (pkSeed msg optRand : Bytes) (maxGrind : Nat) :
     evaluate o (stateless suite params pkSeed msg optRand maxGrind) =
       mpcEvalProductionStatelessSign suite params o pkSeed msg optRand maxGrind := by
-  simp only [stateless, mpcEvalProductionStatelessSign]
+  simp only [stateless, mpcEvalProductionStatelessSign.public_eq_1]
   split
   · rfl
   · simp only [evaluate_bind, evaluate_publicKey, evaluate_ask, answer]

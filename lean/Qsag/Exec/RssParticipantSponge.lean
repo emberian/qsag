@@ -38,7 +38,7 @@ theorem absorbNodes_represents (nodes : Nodes) (binding : List UInt8)
   rcases h with ⟨h0, h1, h2, hb0, hb1, hb2, hc0, hc1, hc2,
     hr0, hr1, hr2, hp0, hp1, hp2⟩
   simp [absorbNodes, absorbNode, h0, h1, h2, hb0, hb1, hb2, hc0, hc1, hc2,
-    hr0, hr1, hr2, hp0, hp1, hp2, Represents, mpcXorRate136Rss]
+    hr0, hr1, hr2, hp0, hp1, hp2, Represents, mpcXorRate136Rss.public_eq_1]
 
 def absorbParticipantBlocks : Nat → Nodes → RssByteShares →
     (Nat → Nat → RssPrfZeroSeeds) → Nodes
@@ -84,17 +84,17 @@ theorem absorbArithmetic_simulates (n cursor : Nat) (s : RssKState) (rest : RssB
   | zero => rw [absorbBlocks_zero]; rfl
   | succ n ih =>
     have hTakeWf : (rssTakeShares shake256RateBytes rest).WellFormed :=
-      ⟨by simp [rssTakeShares, hWf.1], by simp [rssTakeShares, hWf.2]⟩
+      ⟨by simp [rssTakeShares.public_eq_1, hWf.1], by simp [rssTakeShares.public_eq_1, hWf.2]⟩
     have hDropWf : (rssDropShares shake256RateBytes rest).WellFormed :=
-      ⟨by simp [rssDropShares, hWf.1], by simp [rssDropShares, hWf.2]⟩
+      ⟨by simp [rssDropShares.public_eq_1, hWf.1], by simp [rssDropShares.public_eq_1, hWf.2]⟩
     have hTakeRec : reconstructRssBytes (rssTakeShares shake256RateBytes rest) =
         (reconstructRssBytes rest).take shake256RateBytes := by
-      unfold reconstructRssBytes rssTakeShares
+      rw [rssTakeShares.public_eq_1]; unfold reconstructRssBytes
       dsimp only
       rw [zipXor_take, zipXor_take]
     have hDropRec : reconstructRssBytes (rssDropShares shake256RateBytes rest) =
         (reconstructRssBytes rest).drop shake256RateBytes := by
-      unfold reconstructRssBytes rssDropShares
+      rw [rssDropShares.public_eq_1]; unfold reconstructRssBytes
       dsimp only
       rw [zipXor_drop, zipXor_drop]
     simp only [absorbArithmetic]
@@ -119,13 +119,13 @@ theorem rateOutputShares_represents (nodes : Nodes) (binding : List UInt8)
     rateOutputShares nodes outLen = some (rssTakeShares outLen
       ⟨rateBlockBytes s.s0, rateBlockBytes s.s1, rateBlockBytes s.s2⟩) := by
   rcases h with ⟨_, _, _, _, _, _, _, _, _, _, _, _, hp0, hp1, hp2⟩
-  simp [rateOutputShares, localRateOutput, primaryOutput, hp0, hp1, hp2, rssTakeShares]
+  simp [rateOutputShares, localRateOutput, primaryOutput, hp0, hp1, hp2, rssTakeShares.public_eq_1]
 
 theorem reconstruct_rateOutput (s : RssKState) (outLen : Nat) :
     reconstructRssBytes (rssTakeShares outLen
       ⟨rateBlockBytes s.s0, rateBlockBytes s.s1, rateBlockBytes s.s2⟩) =
       (rateBlockBytes (reconstructRssKState s)).take outLen := by
-  unfold rssTakeShares reconstructRssBytes reconstructRssKState
+  rw [rssTakeShares.public_eq_1, reconstructRssKState.public_eq_1]; unfold reconstructRssBytes
   dsimp only
   rw [zipXor_take, zipXor_take, rateBlockBytes_xor, rateBlockBytes_xor]
 
@@ -174,7 +174,7 @@ theorem cshakeNodes_refines_absorption (binding customization : List UInt8)
   rw [represents_output _ _ _ _ _ h]
   congr 1
   rw [absorbArithmetic_simulates _ _ _ _ _ hp]
-  unfold mpcAbsorbPaddedRss
+  rw [mpcAbsorbPaddedRss.public_eq_1]
   rw [mpcAbsorbBlocksRss_simulates _ _ _ _ _ hp]
 
 theorem small_squeeze_reconstruction (outLen : Nat) (s : RssKState)
@@ -182,9 +182,9 @@ theorem small_squeeze_reconstruction (outLen : Nat) (s : RssKState)
     reconstructRssBytes (mpcSqueezeFuelSharedRss outLen outLen 0 s tape) =
       (rateBlockBytes (reconstructRssKState s)).take outLen := by
   cases outLen with
-  | zero => simp [mpcSqueezeFuelSharedRss, reconstructRssBytes]
+  | zero => simp [mpcSqueezeFuelSharedRss.public_eq_2, reconstructRssBytes]
   | succ n =>
-    simp only [mpcSqueezeFuelSharedRss, h, ↓reduceIte]
+    simp only [mpcSqueezeFuelSharedRss.public_eq_2, h, ↓reduceIte]
     exact reconstruct_rateOutput s (n + 1)
 
 /-- Actual participant execution, with its retained local gate witnesses, has the
@@ -212,7 +212,7 @@ theorem cshakeParticipant_refines_existing (outLen : Nat) (binding customization
   simp only [cshakeParticipant, hLen, ↓reduceIte, cshakeNodes]
   rw [rateOutputShares_represents _ _ _ _ _ h]
   simp only [Option.map_some, reconstruct_rateOutput]
-  unfold mpcCshake256SharedRss
+  rw [mpcCshake256SharedRss.public_eq_1]
   change some ((rateBlockBytes (reconstructRssKState
     (absorbArithmetic ((paddedInput customization input).b0.length / shake256RateBytes)
       0 zeroRssKState (paddedInput customization input) localTape))).take outLen) =
@@ -221,7 +221,7 @@ theorem cshakeParticipant_refines_existing (outLen : Nat) (binding customization
       (fun q => oldTape (2 * q + 1))))
   rw [small_squeeze_reconstruction _ _ _ (by simpa only [shake256RateBytes_eq] using hLen)]
   rw [absorbArithmetic_simulates _ _ _ _ _ hp]
-  unfold mpcAbsorbPaddedRss
+  rw [mpcAbsorbPaddedRss.public_eq_1]
   rw [mpcAbsorbBlocksRss_simulates _ _ _ _ _ hp]
 
 #verify_constructive absorbNodes_represents absorbParticipantBlocks_represents

@@ -485,7 +485,7 @@ def CorduroyParams.toAggGeometry (cfg : CorduroyParams) : AggSigGeometry :=
 def aggregationCorduroyParams : CorduroyParams :=
   { totalHeight := 64, numLayers := 16, subtreeHeight := 4, winternitzW := 4,
     wotsChains := 128, targetSum := 192, forsTrees := 32, forsHeight := 8,
-    maxSigsLog2 := 12, stateful := false }
+    maxSigsLog2 := 20, stateful := false }
 
 theorem aggregationCorduroyParams_projection :
     aggregationCorduroyParams.toAggGeometry = corduroyPoseidon2Geom ∧

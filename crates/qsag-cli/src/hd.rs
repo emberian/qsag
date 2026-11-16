@@ -3,27 +3,36 @@
 //!
 //! Subcommands:
 //! - `keygen` — 3-round dealerless subset-seed ceremony (`SeedCeremonyRound1..3`) +
-//!   corroborated `SLH-DSA-SHAKE-128f` batch inventory commitment.
+//!   corroborated `SLH-DSA-SHAKE-128f` batch inventory commitment + `QSHDQB04` durable budget.
 //! - `derive` — `0`-round watch-only Bech32m deposit address + Poseidon2 Merkle proof
 //!   derivation (`0` secret keys touched).
 //! - `verify-child` — Verify an [`InventoryChildProof`] against the watch-only master root.
-//! - `recover` — Threshold `t`-of-`n` custodian child seed recovery verified against the
-//!   enrolled child public key, outputting a `qsag sign`-ready secret key file.
+//! - `recover` — Budget-gated threshold `t`-of-`n` custodian child seed recovery verified against
+//!   the enrolled child public key, outputting a `qsag sign`-ready secret key file.
+//! - `export-rss` — Budget-gated 2-of-3 replicated [`qsag_core::keccak_mpc::RssKeyShare256`]
+//!   (`QSRSSK01`, 268 B) child share projection (`0` cleartext SLH-DSA secret keys assembled).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use qsag_accel::CpuReferenceBackend;
+use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::QsagAddress;
 use qsag_core::fips205::{Fips205Params, slh_keygen_from_seed};
+use qsag_hd::budget::DurableQueryBudget;
 use qsag_hd::{
     CommitteeConfig, CustodianSeeds, CustodianSet, HdError, InventoryChildProof,
     InventoryMasterPublicKey, InventoryPartyShareVault, MAX_CUSTODIANS, SeedCeremonyRound1,
     SeedConfirmation, SeedContributionCommit, SeedPrivateDelivery, WatchOnlyInventoryTable,
-    commit_inventory_public_keys, derive_inventory_vault, enroll_child_signing_seed_quorum,
-    recover_child_signing_seed, verify_inventory_child_proof,
+    commit_inventory_public_keys, derive_inventory_vault, derive_rss_child_share_2of3_budgeted,
+    enroll_child_signing_seed_quorum, recover_child_signing_seed_budgeted,
+    verify_inventory_child_proof,
 };
 
+use crate::anchor::{
+    ANCHOR_FLAG_OPTIONS, ANCHOR_NO_VAULT_VALUE_OPTIONS, AnchorConfig, FsExternalMountAnchor,
+    enforce_anchor_requirement, require_anchor_or_waiver,
+};
 use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, ZeroizingBuf, os_random_32,
     private_dir, read_bounded_file, write_new,
@@ -38,12 +47,15 @@ Dealerless post-quantum SLH-DSA-SHAKE-128f HD inventory & 0-round watch-only der
   keygen        run 3-round dealerless subset-seed ceremony and emit watch-only inventory
   derive        derive a watch-only Bech32m child address + Poseidon2 Merkle opening (0 secrets)
   verify-child  verify a derived child address and Poseidon2 opening against the watch-only file
-  recover       reconstruct a child SLH-DSA-SHAKE-128f signing key from >= t custodian shares
+  recover       budget-gated child SLH-DSA-SHAKE-128f signing key recovery from >= t custodians
+  export-rss    budget-gated 2-of-3 RssKeyShare256 child share export (0 cleartext secret keys)
 ";
 
 const HD_META_FORMAT: &str = "qsag-hd-vault-meta-v1";
 const HD_WATCH_FORMAT: &str = "qsag-hd-watch-inventory-v1";
 const HD_PROOF_FORMAT: &str = "qsag-hd-child-proof-v1";
+const HD_RSS_CHILD_FORMAT: &str = "qsag-hd-rss-child-share-v1";
+const HD_CUSTODY_PAYLOAD_MAGIC: &[u8; 8] = b"QSAGHDL2";
 
 fn ensure_absent(path: &str) -> Result<(), CliError> {
     match std::fs::symlink_metadata(path) {
@@ -73,11 +85,8 @@ fn hd_meta_path(vault_dir: &str) -> String {
         .into_owned()
 }
 
-fn hd_seed_path(vault_dir: &str, party: usize) -> String {
-    Path::new(vault_dir)
-        .join(format!("hd-custodian-{party}.seed"))
-        .to_string_lossy()
-        .into_owned()
+fn hd_budget_path(vault_dir: &str) -> PathBuf {
+    Path::new(vault_dir).join("hd-query.budget")
 }
 
 fn map_hd_err(err: HdError) -> CliError {
@@ -348,27 +357,134 @@ fn load_watch_table(path: &str) -> Result<WatchOnlyInventoryTable, CliError> {
     Ok(table)
 }
 
+fn write_hd_custody_bundle(
+    path: &str,
+    mut doc: Json,
+    passphrase: Option<&[u8]>,
+) -> Result<(), CliError> {
+    if let Some(pass) = passphrase {
+        crate::envelope::seal(&mut doc, pass)?;
+    }
+    let mut lock = crate::vault::Vault::acquire(path, true)?;
+    let opened = crate::envelope::open(&doc, passphrase)?;
+    lock.set_key_material(&opened);
+    lock.bind(&mut doc)?;
+    lock.seal(&mut doc)?;
+    let encoded = ZeroizingBuf::new(doc.to_pretty().into_bytes());
+    if encoded.len() as u64 > MAX_SIG_PROOF_BYTES {
+        return Err(CliError::input("HD custody bundle exceeds file bound"));
+    }
+    write_new(path, &encoded, true)
+}
+
+struct OpenedHdCustodian {
+    lock: crate::vault::Vault,
+    budget_mac: Secret32,
+    anchor_mac: Secret32,
+    seeds: CustodianSeeds,
+}
+
+fn load_hd_custodian(
+    vault_dir: &str,
+    party: usize,
+    config: &CommitteeConfig,
+    master_root: &[u8; 32],
+    passphrase: Option<&[u8]>,
+) -> Result<OpenedHdCustodian, CliError> {
+    let path = hd_share_path(vault_dir, party);
+    let mut lock = crate::vault::Vault::acquire(&path, false)?;
+    let doc = load_json_checked(&path, HD_SHARE_FORMAT, MAX_SIG_PROOF_BYTES)?;
+    if doc.field_u64("party")? != party as u64
+        || from_hex_exact::<32>(doc.field_str("config_digest")?, "config_digest")?
+            != config.digest()
+        || &from_hex_exact::<32>(doc.field_str("master_root_pk")?, "master_root_pk")?
+            != master_root
+    {
+        return Err(CliError::verify(
+            "HD custody bundle does not match enrollment",
+        ));
+    }
+    let opened = crate::envelope::open(&doc, passphrase)?;
+    lock.set_key_material(&opened);
+    lock.authenticate(&doc)?;
+    let raw = opened.secret_key()?;
+    if raw.len() < 72 || &raw[..8] != HD_CUSTODY_PAYLOAD_MAGIC {
+        return Err(CliError::input("corrupt or unsupported HD custody payload"));
+    }
+    let budget_mac = Secret32::new(raw[8..40].try_into().unwrap());
+    let anchor_mac = Secret32::new(raw[40..72].try_into().unwrap());
+    let seeds = restore_custodian(config, party as u16, &raw[72..])?;
+    Ok(OpenedHdCustodian {
+        lock,
+        budget_mac,
+        anchor_mac,
+        seeds,
+    })
+}
+
+fn open_hd_budget(
+    vault_dir: &str,
+    meta: &Json,
+    anchor_cfg: Option<&AnchorConfig>,
+    family: [u8; 32],
+    budget_mac: &Secret32,
+    anchor_mac: &Secret32,
+) -> Result<DurableQueryBudget, CliError> {
+    match anchor_cfg {
+        Some(cfg) => {
+            let anchor = FsExternalMountAnchor::open_existing(
+                cfg,
+                &[],
+                &[vault_dir],
+                "hd_budget",
+                family,
+                anchor_mac.0,
+            )?;
+            anchor.verify_expected_seal(meta, "anchor_ceremony_seal")?;
+            DurableQueryBudget::open_anchored(
+                hd_budget_path(vault_dir),
+                family,
+                budget_mac.0,
+                Box::new(anchor),
+            )
+            .map_err(map_hd_err)
+        }
+        None => {
+            DurableQueryBudget::open(hd_budget_path(vault_dir), family, budget_mac.0)
+                .map_err(map_hd_err)
+        }
+    }
+}
+
 fn keygen(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &[
-            "threshold",
-            "parties",
-            "count",
-            "vault-dir",
-            "watch-out",
-            "passphrase-env",
-            "passphrase-file",
-        ],
-        &["deterministic", "allow-unencrypted", "json", "help"],
-    )?;
+    let mut opts = vec![
+        "threshold",
+        "parties",
+        "count",
+        "vault-dir",
+        "watch-out",
+        "passphrase-env",
+        "passphrase-file",
+    ];
+    opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
+    let mut flags = vec!["deterministic", "allow-unencrypted", "json", "help"];
+    flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
+    let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag hd keygen [--threshold <t>] [--parties <n>] [--count <pow2>] --vault-dir <dir> --watch-out <path> [--passphrase-env <VAR> | --passphrase-file <path>] [--allow-unencrypted] [--deterministic] [--json]"
+            "qsag hd keygen [--threshold <t>] [--parties <n>] [--count <pow2>] --vault-dir <dir> --watch-out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--allow-unencrypted] [--deterministic] [--json]"
         );
         return Ok(());
     }
     args.no_positionals()?;
+    let vault_dir = args.require("vault-dir")?;
+    let watch_out = args.require("watch-out")?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
     let threshold = args.get_u64("threshold")?.unwrap_or(2) as usize;
     let parties = args.get_u64("parties")?.unwrap_or(3) as usize;
     let batch_size = args.get_u64("count")?.unwrap_or(16) as usize;
@@ -392,8 +508,6 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             "HD custody requires --passphrase-env or --passphrase-file (or explicit --allow-unencrypted)",
         ));
     }
-    let vault_dir = args.require("vault-dir")?;
-    let watch_out = args.require("watch-out")?;
     ensure_absent(&hd_meta_path(vault_dir))?;
     ensure_absent(watch_out)?;
     private_dir(vault_dir, true)?;
@@ -416,6 +530,17 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         os_random_32()?
     };
     let config = build_committee(threshold, parties, label)?;
+    let family = config.digest();
+    let budget_mac = Secret32::new(if deterministic {
+        cshake256_framed_32(b"QSAG.CLI.HD.DET.BUDGET_MAC.V1", &[&family, &pk_seed])
+    } else {
+        os_random_32()?
+    });
+    let anchor_mac = Secret32::new(if deterministic {
+        cshake256_framed_32(b"QSAG.CLI.HD.DET.ANCHOR_MAC.V1", &[&family, &pk_seed])
+    } else {
+        os_random_32()?
+    });
 
     let mut entropies = Vec::with_capacity(parties);
     for idx in 0..parties {
@@ -449,23 +574,57 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         commit_inventory_public_keys(pk_seed, child_pubkeys.clone(), &CpuReferenceBackend::new())
             .map_err(map_hd_err)?;
 
+    let anchor_seal = match &anchor_cfg {
+        Some(cfg) => {
+            let anchor = FsExternalMountAnchor::provision_fresh(
+                cfg,
+                &[],
+                &[vault_dir],
+                "hd_budget",
+                family,
+                anchor_mac.0,
+            )?;
+            let seal = anchor.lock_identity_seal();
+            DurableQueryBudget::create_anchored(
+                hd_budget_path(vault_dir),
+                family,
+                budget_mac.0,
+                Box::new(anchor),
+            )
+            .map_err(map_hd_err)?;
+            Some(seal)
+        }
+        None => {
+            DurableQueryBudget::create(hd_budget_path(vault_dir), family, budget_mac.0)
+                .map_err(map_hd_err)?;
+            None
+        }
+    };
+
     for (idx, bundle) in bundles.iter().enumerate() {
-        let mut doc = Json::object(vec![
+        let mut payload = ZeroizingBuf::new(Vec::with_capacity(72 + bundle.len()));
+        payload.0.extend_from_slice(HD_CUSTODY_PAYLOAD_MAGIC);
+        payload.0.extend_from_slice(&budget_mac.0);
+        payload.0.extend_from_slice(&anchor_mac.0);
+        payload.0.extend_from_slice(&bundle.0);
+        let enrollment_nonce = Secret32::new(os_random_32()?);
+        let doc = Json::object(vec![
             ("format", Json::str(HD_SHARE_FORMAT)),
+            ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
             ("scheme", Json::str("hd-local-custody")),
             ("party", Json::num(idx)),
-            ("config_digest", Json::hex(&config.digest())),
+            ("config_digest", Json::hex(&family)),
             ("master_root_pk", Json::hex(&table.master_pk.master_root_pk)),
-            ("secret_key", Json::hex(bundle)),
+            ("secret_key", Json::hex(&payload)),
         ]);
-        if let Some(pass) = &passphrase {
-            crate::envelope::seal(&mut doc, pass)?;
-        }
-        let encoded = ZeroizingBuf::new(doc.to_pretty().into_bytes());
-        write_new(&hd_share_path(vault_dir, idx), &encoded, true)?;
+        write_hd_custody_bundle(
+            &hd_share_path(vault_dir, idx),
+            doc,
+            passphrase.as_deref().map(Vec::as_slice),
+        )?;
     }
 
-    let meta = Json::object(vec![
+    let mut meta_fields = vec![
         ("format", Json::str(HD_META_FORMAT)),
         ("custody_format", Json::str(HD_SHARE_FORMAT)),
         ("threshold", Json::num(threshold)),
@@ -474,7 +633,12 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         ("ceremony_label", Json::hex(&label)),
         ("pk_seed", Json::hex(&pk_seed)),
         ("master_root_pk", Json::hex(&table.master_pk.master_root_pk)),
-    ]);
+    ];
+    if let Some(seal) = anchor_seal {
+        meta_fields.push(("anchor_required", Json::Bool(true)));
+        meta_fields.push(("anchor_ceremony_seal", Json::hex(&seal)));
+    }
+    let meta = Json::object(meta_fields);
     write_new(&hd_meta_path(vault_dir), meta.to_pretty().as_bytes(), true)?;
 
     let watch_doc = Json::object(vec![
@@ -686,28 +850,34 @@ fn parse_recover_signers(
 }
 
 fn recover(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &[
-            "vault-dir",
-            "signers",
-            "index",
-            "proof",
-            "secret-out",
-            "public-out",
-            "passphrase-env",
-            "passphrase-file",
-        ],
-        &["json", "help"],
-    )?;
+    let mut opts = vec![
+        "vault-dir",
+        "signers",
+        "index",
+        "proof",
+        "secret-out",
+        "public-out",
+        "passphrase-env",
+        "passphrase-file",
+    ];
+    opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
+    let mut flags = vec!["json", "help"];
+    flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
+    let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag hd recover --vault-dir <dir> [--signers <i,j,..>] --index <child_idx> --proof <child.json> --secret-out <path> [--public-out <path>] [--passphrase-env <VAR> | --passphrase-file <path>] [--json]"
+            "qsag hd recover --vault-dir <dir> [--signers <i,j,..>] --index <child_idx> --proof <child.json> --secret-out <path> [--public-out <path>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--json]"
         );
         return Ok(());
     }
     args.no_positionals()?;
     let vault_dir = args.require("vault-dir")?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
     let index = args
         .get_u64("index")?
         .ok_or_else(|| CliError::usage("missing required option --index <n>"))?;
@@ -721,6 +891,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     private_dir(vault_dir, false)?;
 
     let meta = load_json_checked(&hd_meta_path(vault_dir), HD_META_FORMAT, MAX_KEY_FILE_BYTES)?;
+    enforce_anchor_requirement(&meta, anchor_cfg.as_ref())?;
     let proof_json = load_json_checked(proof_path, HD_PROOF_FORMAT, MAX_SIG_PROOF_BYTES)?;
 
     let threshold = meta.field_u64("threshold")? as usize;
@@ -747,67 +918,83 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     let expected_child_pk = from_hex_exact::<32>(proof_json.field_str("child_pk")?, "child_pk")?;
 
     let signers = parse_recover_signers(args.get("signers"), parties, threshold)?;
+    if signers.len() < threshold {
+        return Err(CliError::state(format!(
+            "HD recovery requires >= {threshold} custodians; only {} selected",
+            signers.len()
+        )));
+    }
     let config = build_committee(threshold, parties, label)?;
 
     if child_idx as usize >= batch_size {
         return Err(CliError::usage("child index out of bounds"));
     }
+    if meta.field_str("custody_format")? != HD_SHARE_FORMAT {
+        return Err(CliError::input("unknown HD custody format"));
+    }
     let passphrase = crate::envelope::passphrase(&args)?;
-    let custodian_seeds = if meta.get("custody_format").is_some() {
-        if meta.field_str("custody_format")? != HD_SHARE_FORMAT {
-            return Err(CliError::input("unknown HD custody format"));
-        }
-        let mut selected = Vec::with_capacity(signers.len());
-        for &idx in &signers {
-            let doc = load_json_checked(
-                &hd_share_path(vault_dir, idx),
-                HD_SHARE_FORMAT,
-                MAX_SIG_PROOF_BYTES,
-            )?;
-            if doc.field_u64("party")? != idx as u64
-                || from_hex_exact::<32>(doc.field_str("config_digest")?, "config_digest")?
-                    != config.digest()
-                || from_hex_exact::<32>(doc.field_str("master_root_pk")?, "master_root_pk")?
-                    != master_root
-            {
-                return Err(CliError::verify(
-                    "HD custody bundle does not match enrollment",
-                ));
+    let mut locks = Vec::with_capacity(signers.len());
+    let mut custodian_seeds = Vec::with_capacity(signers.len());
+    let mut agreed_budget_mac: Option<Secret32> = None;
+    let mut agreed_anchor_mac: Option<Secret32> = None;
+    for &idx in &signers {
+        let opened = load_hd_custodian(
+            vault_dir,
+            idx,
+            &config,
+            &master_root,
+            passphrase.as_deref().map(Vec::as_slice),
+        )?;
+        if let Some(prev) = &agreed_budget_mac {
+            if !ct_eq_bytes(&prev.0, &opened.budget_mac.0) {
+                return Err(CliError::state("HD custodian budget MAC mismatch"));
             }
-            let opened = crate::envelope::open(&doc, passphrase.as_deref().map(Vec::as_slice))?;
-            selected.push(restore_custodian(
-                &config,
-                idx as u16,
-                opened.secret_key()?,
-            )?);
+        } else {
+            agreed_budget_mac = Some(opened.budget_mac);
         }
-        selected
-    } else {
-        // Explicit compatibility for v1 inventories; newly enrolled vaults never persist these seeds.
-        let mut entropies = Vec::with_capacity(parties);
-        for idx in 0..parties {
-            let raw = read_bounded_file(&hd_seed_path(vault_dir, idx), 32)?;
-            entropies.push(Secret32::new(
-                raw.0
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| CliError::input("corrupt HD seed"))?,
-            ));
+        if let Some(prev) = &agreed_anchor_mac {
+            if !ct_eq_bytes(&prev.0, &opened.anchor_mac.0) {
+                return Err(CliError::state("HD custodian anchor MAC mismatch"));
+            }
+        } else {
+            agreed_anchor_mac = Some(opened.anchor_mac);
         }
-        let (all, _) = run_dealerless_seed_ceremony(&config, &entropies)?;
-        all.into_iter()
-            .filter(|s| signers.contains(&(s.party_id() as usize)))
-            .collect()
-    };
+        locks.push(opened.lock);
+        custodian_seeds.push(opened.seeds);
+    }
+
+    let budget_mac = agreed_budget_mac
+        .as_ref()
+        .ok_or_else(|| CliError::state("missing HD budget MAC"))?;
+    let anchor_mac = agreed_anchor_mac
+        .as_ref()
+        .ok_or_else(|| CliError::state("missing HD anchor MAC"))?;
+    let mut budget = open_hd_budget(
+        vault_dir,
+        &meta,
+        anchor_cfg.as_ref(),
+        config.digest(),
+        budget_mac,
+        anchor_mac,
+    )?;
+
     let selected_vaults = custodian_seeds
         .iter()
         .map(|cs| derive_inventory_vault(cs, pk_seed, batch_size).map_err(map_hd_err))
         .collect::<Result<Vec<_>, _>>()?;
     let selected_refs: Vec<_> = selected_vaults.iter().collect();
 
-    let recovered_seed =
-        recover_child_signing_seed(&config, &selected_refs, child_idx, Some(&expected_child_pk))
-            .map_err(map_hd_err)?;
+    let recovered_seed = recover_child_signing_seed_budgeted(
+        &mut budget,
+        &config,
+        &selected_refs,
+        child_idx,
+        &expected_child_pk,
+    )
+    .map_err(map_hd_err)?;
+    drop(budget);
+    drop(locks);
+
     let (sk, pk) =
         slh_keygen_from_seed(&Fips205Params::SLH_DSA_SHAKE_128F, recovered_seed.expose()).map_err(
             |_| CliError::verify("SLH-DSA-SHAKE-128f keygen from recovered seed failed"),
@@ -820,10 +1007,6 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
 
     // Emit a vault-enrolled `qsag-secret-key-v1` SLH-DSA-SHAKE-128f key file usable directly by `qsag sign`.
     let mut vault = crate::vault::Vault::acquire(secret_out, true)?;
-    // Same enrollment sequence as `qsag keygen`. The vault state MAC covers a fresh 16-byte
-    // `enrollment_nonce` (`vault::tag` refuses a secret file without one), so recovering the same
-    // child twice yields two enrollments whose lock files are not interchangeable. The nonce is
-    // not mixed into the key: an SLH-DSA child is fully determined by the recovered seed.
     let enrollment_entropy = Secret32::new(os_random_32()?);
     let mut secret_doc = Json::object(vec![
         ("format", Json::str(SECRET_FORMAT)),
@@ -840,9 +1023,8 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
         crate::envelope::seal(&mut secret_doc, pass)?;
     }
     vault.bind(&mut secret_doc)?;
-    vault.prepare(&mut secret_doc)?;
-    let encoded_secret = crate::cli::ZeroizingBuf::new(secret_doc.to_pretty().into_bytes());
     vault.seal(&mut secret_doc)?;
+    let encoded_secret = crate::cli::ZeroizingBuf::new(secret_doc.to_pretty().into_bytes());
     write_new(secret_out, &encoded_secret.0, true)?;
 
     if let Some(pub_out) = args.get("public-out") {
@@ -880,6 +1062,239 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn export_rss(raw: &[String]) -> Result<(), CliError> {
+    let mut opts = vec![
+        "vault-dir",
+        "index",
+        "proof",
+        "party",
+        "secret-out",
+        "out-dir",
+        "passphrase-env",
+        "passphrase-file",
+        "out-passphrase-env",
+        "out-passphrase-file",
+    ];
+    opts.extend_from_slice(ANCHOR_NO_VAULT_VALUE_OPTIONS);
+    let mut flags = vec!["allow-unencrypted", "json", "help"];
+    flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
+    let args = Args::parse(raw, &opts, &flags)?;
+    if args.flag("help") {
+        println!(
+            "qsag hd export-rss --vault-dir <dir> --index <child_idx> [--proof <child.json>] [--party <0|1|2> --secret-out <path> | --out-dir <dir>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--out-passphrase-env <VAR> | --out-passphrase-file <path> | --allow-unencrypted] [--json]"
+        );
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let vault_dir = args.require("vault-dir")?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
+    let index = args
+        .get_u64("index")?
+        .ok_or_else(|| CliError::usage("missing required option --index <n>"))?;
+    let child_idx = u32::try_from(index).map_err(|_| CliError::usage("--index must fit in u32"))?;
+
+    let targets: Vec<(usize, String)> = match (
+        args.get_u64("party")?,
+        args.get("secret-out"),
+        args.get("out-dir"),
+    ) {
+        (Some(p), Some(out), None) => {
+            if p >= 3 {
+                return Err(CliError::usage(
+                    "--party must be 0, 1, or 2 for 2-of-3 RSS projection",
+                ));
+            }
+            ensure_absent(out)?;
+            vec![(p as usize, out.to_owned())]
+        }
+        (None, None, Some(dir)) => {
+            private_dir(dir, true)?;
+            let mut list = Vec::with_capacity(3);
+            for p in 0..3 {
+                let path = Path::new(dir)
+                    .join(format!("child-{child_idx}-party-{p}.rss.json"))
+                    .to_string_lossy()
+                    .into_owned();
+                ensure_absent(&path)?;
+                list.push((p, path));
+            }
+            list
+        }
+        _ => {
+            return Err(CliError::usage(
+                "specify either (--party <0|1|2> --secret-out <path>) or --out-dir <dir>",
+            ));
+        }
+    };
+
+    private_dir(vault_dir, false)?;
+    let meta = load_json_checked(&hd_meta_path(vault_dir), HD_META_FORMAT, MAX_KEY_FILE_BYTES)?;
+    enforce_anchor_requirement(&meta, anchor_cfg.as_ref())?;
+    let threshold = meta.field_u64("threshold")? as usize;
+    let parties = meta.field_u64("parties")? as usize;
+    let batch_size = meta.field_u64("batch_size")? as usize;
+    let label = from_hex_exact::<32>(meta.field_str("ceremony_label")?, "ceremony_label")?;
+    let pk_seed = from_hex_exact::<32>(meta.field_str("pk_seed")?, "pk_seed")?;
+    let master_root = from_hex_exact::<32>(meta.field_str("master_root_pk")?, "master_root_pk")?;
+    if threshold != 2 || parties != 3 {
+        return Err(CliError::usage(
+            "hd export-rss requires a (2, 3) custodian inventory",
+        ));
+    }
+    if child_idx as usize >= batch_size {
+        return Err(CliError::usage("child index out of bounds"));
+    }
+    if meta.field_str("custody_format")? != HD_SHARE_FORMAT {
+        return Err(CliError::input("unknown HD custody format"));
+    }
+    let child_pk_opt = match args.get("proof") {
+        Some(proof_path) => {
+            let proof_json = load_json_checked(proof_path, HD_PROOF_FORMAT, MAX_SIG_PROOF_BYTES)?;
+            let proof_root = from_hex_exact::<32>(
+                proof_json.field_str("master_root_pk")?,
+                "proof master_root_pk",
+            )?;
+            if master_root != proof_root {
+                return Err(CliError::verify(
+                    "child proof master_root_pk does not match HD vault",
+                ));
+            }
+            if proof_json.field_u64("child_idx")? as u32 != child_idx {
+                return Err(CliError::usage(
+                    "--index does not match child_idx in --proof file",
+                ));
+            }
+            Some(from_hex_exact::<32>(proof_json.field_str("child_pk")?, "child_pk")?)
+        }
+        None => None,
+    };
+
+    let vault_pass = crate::envelope::passphrase(&args)?;
+    let explicit_out_pass =
+        crate::envelope::passphrase_named(&args, "out-passphrase-env", "out-passphrase-file")?;
+    let out_pass = explicit_out_pass.as_ref().or(vault_pass.as_ref());
+    if out_pass.is_none() && !args.flag("allow-unencrypted") {
+        return Err(CliError::usage(
+            "RSS share export requires --out-passphrase-env/--out-passphrase-file, vault passphrase, or --allow-unencrypted",
+        ));
+    }
+
+    let config = build_committee(threshold, parties, label)?;
+    let mut locks = Vec::with_capacity(targets.len());
+    let mut opened_parties = Vec::with_capacity(targets.len());
+    let mut agreed_budget_mac: Option<Secret32> = None;
+    let mut agreed_anchor_mac: Option<Secret32> = None;
+    for &(party, _) in &targets {
+        let opened = load_hd_custodian(
+            vault_dir,
+            party,
+            &config,
+            &master_root,
+            vault_pass.as_deref().map(Vec::as_slice),
+        )?;
+        if let Some(prev) = &agreed_budget_mac {
+            if !ct_eq_bytes(&prev.0, &opened.budget_mac.0) {
+                return Err(CliError::state("HD custodian budget MAC mismatch"));
+            }
+        } else {
+            agreed_budget_mac = Some(opened.budget_mac);
+        }
+        if let Some(prev) = &agreed_anchor_mac {
+            if !ct_eq_bytes(&prev.0, &opened.anchor_mac.0) {
+                return Err(CliError::state("HD custodian anchor MAC mismatch"));
+            }
+        } else {
+            agreed_anchor_mac = Some(opened.anchor_mac);
+        }
+        locks.push(opened.lock);
+        opened_parties.push((party, opened.seeds));
+    }
+
+    let budget_mac = agreed_budget_mac
+        .as_ref()
+        .ok_or_else(|| CliError::state("missing HD budget MAC"))?;
+    let anchor_mac = agreed_anchor_mac
+        .as_ref()
+        .ok_or_else(|| CliError::state("missing HD anchor MAC"))?;
+    let mut budget = open_hd_budget(
+        vault_dir,
+        &meta,
+        anchor_cfg.as_ref(),
+        config.digest(),
+        budget_mac,
+        anchor_mac,
+    )?;
+
+    let mut exported_files = Vec::with_capacity(targets.len());
+    let mut child_pk_seed_hex = String::new();
+    for ((party, seeds), (_, out_path)) in opened_parties.iter().zip(&targets) {
+        let (rss_share, child_pk_seed) =
+            derive_rss_child_share_2of3_budgeted(&mut budget, seeds, pk_seed, child_idx)
+                .map_err(map_hd_err)?;
+        if child_pk_seed_hex.is_empty() {
+            child_pk_seed_hex = to_hex(&child_pk_seed);
+        }
+        let share_bytes = rss_share.to_secret_bytes();
+        let share_hex = to_hex_zeroizing(&share_bytes[..]);
+        let share_hex_str = std::str::from_utf8(&share_hex.0)
+            .map_err(|_| CliError::input("internal hex encoding error"))?;
+        let enrollment_nonce = Secret32::new(os_random_32()?);
+        let mut fields = vec![
+            ("format", Json::str(HD_RSS_CHILD_FORMAT)),
+            ("scheme", Json::str("slh-dsa-shake-128f-rss-2of3")),
+            ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
+            ("party_id", Json::num(*party)),
+            ("child_idx", Json::num(child_idx)),
+            ("master_root_pk", Json::hex(&master_root)),
+            ("child_pk_seed", Json::hex(&child_pk_seed)),
+            ("secret_key", Json::str(share_hex_str)),
+        ];
+        if let Some(cpk) = child_pk_opt {
+            fields.push(("child_pk", Json::hex(&cpk)));
+        }
+        let mut doc = Json::object(fields);
+        let mut out_vault = crate::vault::Vault::acquire(out_path, true)?;
+        out_vault.set_key_material(&crate::envelope::open(&doc, None)?);
+        if let Some(pass) = out_pass {
+            crate::envelope::seal(&mut doc, pass)?;
+        }
+        out_vault.bind(&mut doc)?;
+        out_vault.seal(&mut doc)?;
+        let encoded = ZeroizingBuf::new(doc.to_pretty().into_bytes());
+        write_new(out_path, &encoded.0, true)?;
+        exported_files.push(out_path.clone());
+    }
+    let used_queries = budget.used();
+    drop(budget);
+    drop(locks);
+
+    if args.flag("json") {
+        let report = Json::object(vec![
+            ("operation", Json::str("hd-export-rss")),
+            ("scheme", Json::str("slh-dsa-shake-128f-rss-2of3")),
+            ("child_idx", Json::num(child_idx)),
+            ("child_pk_seed", Json::str(&child_pk_seed_hex)),
+            ("budget_used", Json::num(used_queries)),
+            (
+                "share_files",
+                Json::Array(exported_files.iter().map(|p| Json::str(p)).collect()),
+            ),
+        ]);
+        print!("{}", report.to_pretty());
+    } else {
+        println!(
+            "exported {} 2-of-3 RssKeyShare256 share(s) for child #{child_idx} (budget used: {used_queries})",
+            exported_files.len()
+        );
+    }
+    Ok(())
+}
+
 pub fn run(raw: &[String]) -> Result<(), CliError> {
     let Some((sub, rest)) = raw.split_first() else {
         print!("{HD_HELP}");
@@ -894,8 +1309,9 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         "derive" => derive(rest),
         "verify-child" => verify_child(rest),
         "recover" => recover(rest),
+        "export-rss" => export_rss(rest),
         other => Err(CliError::usage(format!(
-            "unknown hd subcommand '{other}' (expected keygen, derive, verify-child, or recover)"
+            "unknown hd subcommand '{other}' (expected keygen, derive, verify-child, recover, or export-rss)"
         ))),
     }
 }

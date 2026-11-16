@@ -2065,7 +2065,7 @@ def BurnRecordMacCollision (macKey : BurnBytes32) (lockId : BurnBytes16)
   computeBurnRecordMac macKey lockId body1 = computeBurnRecordMac macKey lockId body2
 
 /-- Framed key-bound masking-nonce derivation preimage binding `(keyId, partyId, epoch, sessionId, attempt)`
-    prior to domain-separated `"QSAG.MLDSA.MASK_NONCE.V1"` PRF evaluation. -/
+    prior to domain-separated `"QSAG.MLDSA.NONCE_BURN.V2"` PRF evaluation. -/
 def encodeMaskNonceTuple (keyId : List UInt8) (ev : PersistentNonceEvent) : List UInt8 :=
   burnLeBytes 8 keyId.length ++ keyId ++
   burnLeBytes 2 ev.partyId.toNat ++
@@ -2075,7 +2075,7 @@ def encodeMaskNonceTuple (keyId : List UInt8) (ev : PersistentNonceEvent) : List
 
 def deriveAttemptMaskNonceSeed (secretKeySeed : BurnBytes32)
     (keyId : List UInt8) (ev : PersistentNonceEvent) : BurnBytes32 :=
-  ⟨cshake256Bytes ("QSAG.MLDSA.MASK_NONCE.V1".toUTF8.toList)
+  ⟨cshake256Bytes ("QSAG.MLDSA.NONCE_BURN.V2".toUTF8.toList)
      (secretKeySeed.val ++ encodeMaskNonceTuple keyId ev),
    cshake256Bytes_length _ _⟩
 
@@ -4059,7 +4059,7 @@ def Profile.repetitions : Profile → Nat
 def sdTranscript (s : SdInstance) (challenge : Bytes32) (profile : Profile) : Transcript :=
   let instanceBytes := sdBytes s ++ challenge.val ++
     if profile = .grinding438 then ascii "QSAG.VC.PROFILE.Quantum128:438" else []
-  let tr := init "QSAG.BLIND_VC.SD_ZK.V1" instanceBytes
+  let tr := init "QSAG.BVC.SD.LIMBO256.V2\x00" instanceBytes
   if profile = .grinding438 then
     absorbMessage tr "VC_SOUNDNESS_PROFILE" (ascii "Quantum128:438") else tr
 

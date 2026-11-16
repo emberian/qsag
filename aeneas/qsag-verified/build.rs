@@ -98,25 +98,91 @@ fn main() {
         ));
     }
 
-    // Production core delegates arithmetic, comparisons and SHA-2 to qsag-accel.
-    // Mirror that dependency too, keeping the extracted no_std library dependency-free.
-    let accel_src = core_src.join("../../qsag-accel/src").canonicalize()
+    // Production core delegates arithmetic, comparisons and SHA-2 to pure `qsag-accel` CPU modules.
+    // Mirror those pure modules directly (skipping Vulkan/SPIR-V driver FFI) so the extracted
+    // `no_std` library stays dependency-free and differential parity builds warning-free.
+    let accel_src = core_src
+        .join("../../qsag-accel/src")
+        .canonicalize()
         .expect("locate qsag-accel for production parity");
     let accel_mirror = out_dir.join("qsag_accel_mirror");
     fs::create_dir_all(&accel_mirror).expect("create qsag-accel mirror");
-    for entry in fs::read_dir(&accel_src).expect("read qsag-accel sources") {
-        let entry = entry.expect("read qsag-accel entry");
-        if !entry.file_type().expect("qsag-accel file type").is_file() ||
-           entry.path().extension().and_then(|x| x.to_str()) != Some("rs") { continue; }
-        println!("cargo:rerun-if-changed={}", entry.path().display());
-        let raw = fs::read_to_string(entry.path()).expect("read qsag-accel source");
-        let adapted = raw.replace("#![no_std]", "")
-            .replace("crate::", "crate::qsag_accel::") + "\n#[allow(unused_imports)]\nuse crate::qsag_asm;\n";
-        fs::write(accel_mirror.join(entry.file_name()), adapted).expect("write accel mirror");
+    for accel_rel in ["ct.rs", "goldilocks.rs", "keccak.rs", "poseidon2.rs", "sha2.rs"] {
+        let entry_path = accel_src.join(accel_rel);
+        println!("cargo:rerun-if-changed={}", entry_path.display());
+        let raw = fs::read_to_string(&entry_path).expect("read qsag-accel source");
+        let adapted = raw
+            .replace("#![no_std]", "")
+            .replace("crate::", "crate::qsag_accel::")
+            .replace("feature = \"alloc\"", "all()")
+            + "\n#[allow(unused_imports)]\nuse crate::qsag_asm;\n";
+        fs::write(accel_mirror.join(accel_rel), adapted).expect("write accel mirror");
     }
+    let accel_mod = r#"extern crate alloc;
+pub mod ct;
+pub mod goldilocks;
+pub mod keccak;
+pub mod poseidon2;
+pub mod sha2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AccelError {
+    LengthMismatch { what: &'static str, expected: usize, actual: usize },
+    NotPowerOfTwo { what: &'static str, len: usize },
+    DomainTooLarge { log2_len: u32 },
+    LengthOverflow,
+    InvalidTwiddles,
+    BackendFailure,
+}
+
+fn cpu_workers(len: usize, min_chunk: usize) -> usize {
+    if len / min_chunk < 2 {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(len / min_chunk)
+}
+
+fn cpu_drain<J: Send>(workers: usize, jobs: impl Iterator<Item = J> + Send, run: impl Fn(J) + Sync) {
+    let jobs = std::sync::Mutex::new(jobs);
+    let drain = || {
+        while let Some(job) = jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next()
+        {
+            run(job);
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            if std::thread::Builder::new().spawn_scoped(scope, drain).is_err() {
+                break;
+            }
+        }
+        drain();
+    });
+}
+
+fn cpu_chunks_mut<T: Send>(items: &mut [T], min_chunk: usize, run: impl Fn(usize, &mut [T]) + Sync) {
+    let workers = cpu_workers(items.len(), min_chunk);
+    if workers > 1 {
+        let chunk_len = items.len().div_ceil(workers);
+        cpu_drain(
+            workers,
+            items.chunks_mut(chunk_len).enumerate(),
+            |(i, chunk)| run(i * chunk_len, chunk),
+        );
+        return;
+    }
+    run(0, items);
+}
+"#;
+    fs::write(accel_mirror.join("mod.rs"), accel_mod).expect("write accel mirror mod.rs");
     modules.push_str(&format!(
         "#[allow(dead_code, unused_imports, clippy::all)]\n#[path = {:?}]\nmod qsag_accel;\n",
-        accel_mirror.join("lib.rs")
+        accel_mirror.join("mod.rs")
     ));
 
     let mirror_root = out_dir.join("qsag_core_mirror");
@@ -152,7 +218,9 @@ fn main() {
             };
             let patched = if patched.contains("qsag_accel::") {
                 patched + "\n#[allow(unused_imports)]\nuse crate::qsag_accel;\n"
-            } else { patched };
+            } else {
+                patched
+            };
             fs::write(&dst_file, patched).expect("write mirrored qsag-core source file");
         }
     }

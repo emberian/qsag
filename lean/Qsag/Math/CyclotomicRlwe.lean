@@ -21,8 +21,8 @@ theorem rlweCyclotomicN_eq_1024 : rlweCyclotomicN = 1024 := by
 /-- Production Ring-LWE odd prime modulus $q = 12289$ (`RLWE_Q` in `preprocessing.rs`). -/
 abbrev rlweProductionQ : Nat := 12289
 
-/-- Production parallel OR-Sigma repetition count `RLWE_ZKPOK_REPS = 13`. -/
-abbrev rlweOrSigmaParallelReps : Nat := 13
+/-- Production parallel OR-Sigma repetition count `RLWE_ZKPOK_REPS = 24` (`preprocessing.rs:1083`). -/
+abbrev rlweOrSigmaParallelReps : Nat := 24
 
 /-- Production response-box half-width `RLWE_ZKPOK_Z_BOUND = 3070`. `RlweReceiverZkPok::verify`
     accepts every coefficient of the half-open box `-3070 ≤ z_i < 3070`
@@ -2238,6 +2238,9 @@ theorem verifyRlweOrSigma_iff (R nu q : Nat) [NeZero q]
   exact cycAllFin_eq_true_iff _
 
 abbrev verifyRlweOrSigma13 (nu q : Nat) [NeZero q] :=
+  verifyRlweOrSigma 13 nu q
+
+abbrev verifyRlweOrSigma24 (nu q : Nat) [NeZero q] :=
   verifyRlweOrSigma rlweOrSigmaParallelReps nu q
 
 /-- Honest masked OR-Sigma prover on active branch `branch : Bool` with short secret `(s, e)`
@@ -4890,6 +4893,43 @@ theorem cycIntL2Sq_sub_le {N : Nat} (p r : NegacyclicPolyInt N) :
   intro i; unfold cycIntSub
   exact int_sub_natAbs_sq_le (p i) (r i)
 
+theorem cycIntL2Sq_add_le {N : Nat} (p r : NegacyclicPolyInt N) :
+    cycIntL2Sq (cycIntAdd p r) ≤ 2 * cycIntL2Sq p + 2 * cycIntL2Sq r := by
+  unfold cycIntL2Sq
+  rw [← cycNatFinSum_mul_left, ← cycNatFinSum_mul_left, ← cycNatFinSum_add]
+  apply cycNatFinSum_le
+  intro i; unfold cycIntAdd
+  have hSub := int_sub_natAbs_sq_le (p i) (-r i)
+  have hEq : p i - -r i = p i + r i := by omega
+  have hAbs : (-r i).natAbs = (r i).natAbs := Int.natAbs_neg (r i)
+  rw [hEq, hAbs] at hSub
+  exact hSub
+
+theorem cycIntL2Sq_const {N : Nat} (c : Int) :
+    cycIntL2Sq (fun _ : Fin N => c) = N * (c.natAbs * c.natAbs) := by
+  unfold cycIntL2Sq
+  exact cycNatFinSum_const N (c.natAbs * c.natAbs)
+
+theorem cycIntL2Sq_le_of_coeff_le {N B : Nat} {p : NegacyclicPolyInt N}
+    (h : ∀ i : Fin N, (p i).natAbs ≤ B) :
+    cycIntL2Sq p ≤ N * (B * B) := by
+  unfold cycIntL2Sq
+  rw [← cycNatFinSum_const N (B * B)]
+  exact cycNatFinSum_le (fun i => Nat.mul_le_mul (h i) (h i))
+
+theorem cycIntL2Sq_zero {N : Nat} :
+    cycIntL2Sq (fun _ : Fin N => (0 : Int)) = 0 := by
+  simpa using cycIntL2Sq_const (N := N) 0
+
+theorem cycIntL2Sq_unit0 :
+    cycIntL2Sq (fun k : Fin 1024 => if k.val = 0 then (1 : Int) else 0) = 1 := by
+  unfold cycIntL2Sq
+  rw [cycNatFinSum_eq_single ⟨0, by decide⟩]
+  · decide
+  · intro i hi
+    have hv : i.val ≠ 0 := fun h => hi (Fin.ext h)
+    simp [hv]
+
 theorem cycIntL2Sq_weighted_sub_100 {N : Nat} (p r : NegacyclicPolyInt N) :
     100 * cycIntL2Sq (cycIntSub p r) ≤ 101 * cycIntL2Sq p + 10100 * cycIntL2Sq r := by
   unfold cycIntL2Sq
@@ -5399,7 +5439,11 @@ theorem cycZqMul_eq {N q : Nat} [NeZero q] (a b : NegacyclicPolyZq N q) :
 theorem rlweProductionBz_eq : rlweProductionBz = 3070 := by rfl
 theorem rlweProductionQ_eq : rlweProductionQ = 12289 := by rfl
 theorem rlweCyclotomicN_eq : rlweCyclotomicN = 1024 := rlweCyclotomicN_eq_1024
-theorem rlweOrSigmaParallelReps_eq : rlweOrSigmaParallelReps = 13 := by rfl
+theorem rlweOrSigmaParallelReps_eq : rlweOrSigmaParallelReps = 24 := by rfl
+theorem rlweZkpokPairL2SqBound_eq : rlweZkpokPairL2SqBound = 1500000000 := by rfl
+theorem rlweExtractedSisL2SqBound_eq : rlweExtractedSisL2SqBound = 6060827392 := by rfl
+theorem cycIntL2Sq_eq {N : Nat} (p : NegacyclicPolyInt N) :
+    cycIntL2Sq p = cycNatFinSum N (fun i => (p i).natAbs * (p i).natAbs) := by rfl
 
 theorem SignedMonomialChal.toIntPoly_eq {nu : Nat} (c : SignedMonomialChal nu) :
     c.toIntPoly = signedMonomial nu c.sign c.deg := by rfl

@@ -34,8 +34,8 @@ structure GateRecord where
   product : UInt64
   deriving DecidableEq, Repr
 
-def productGate (b bn c cn : UInt64) (m : UInt64 × UInt64) : GateRecord :=
-  ⟨b, bn, c, cn, rssPartyAndLocal b bn c cn m.1 m.2⟩
+@[expose] def productGate (b bn c cn : UInt64) (m : UInt64 × UInt64) : GateRecord :=
+  ⟨b, bn, c, cn, (b &&& c) ^^^ (b &&& cn) ^^^ (bn &&& c) ^^^ (m.1 ^^^ m.2)⟩
 
 /-- Algebraic normalization of the unmasked multiplication expression appearing
 in `eval_rss_keccak_f1600_batch64_record`. Packing and `activeMask` are separate
@@ -46,17 +46,17 @@ theorem productGate_matches_unmasked_rust_formula (b bn c cn r rn : UInt64) :
   apply UInt64.eq_of_toBitVec_eq
   apply BitVec.eq_of_getLsbD_eq
   intro i _
-  simp only [productGate, rssPartyAndLocal, UInt64.toBitVec_xor, UInt64.toBitVec_and,
+  simp only [productGate, UInt64.toBitVec_xor, UInt64.toBitVec_and,
     BitVec.getLsbD_xor, BitVec.getLsbD_and]
   cases b.toBitVec.getLsbD i <;> cases bn.toBitVec.getLsbD i <;>
     cases c.toBitVec.getLsbD i <;> cases cn.toBitVec.getLsbD i <;>
     cases r.toBitVec.getLsbD i <;> cases rn.toBitVec.getLsbD i <;> rfl
 
-def chiLane (a b bn c cn : UInt64) (m : UInt64 × UInt64) : UInt64 :=
+@[expose] def chiLane (a b bn c cn : UInt64) (m : UInt64 × UInt64) : UInt64 :=
   a ^^^ c ^^^ (productGate b bn c cn m).product
 
 /-- This follows Rust's `a_i XOR c_i XOR product(b,c)` convention. -/
-def chiLocal (v : LocalView) (m : LocalMasks) : KState :=
+@[expose] def chiLocal (v : LocalView) (m : LocalMasks) : KState :=
   ⟨chiLane v.own.a0 v.own.a1 v.next.a1 v.own.a2 v.next.a2 (m 0),
    chiLane v.own.a1 v.own.a2 v.next.a2 v.own.a3 v.next.a3 (m 1),
    chiLane v.own.a2 v.own.a3 v.next.a3 v.own.a4 v.next.a4 (m 2),
@@ -110,9 +110,9 @@ def gateRecords (v : LocalView) (m : LocalMasks) : List GateRecord :=
    productGate v.own.a24 v.next.a24 v.own.a20 v.next.a20 (m 23),
    productGate v.own.a20 v.next.a20 v.own.a21 v.next.a21 (m 24)]
 
-def mask0 (r : Nat → RssPrfZeroSeeds) : LocalMasks := fun i => ((r i).r0, (r i).r1)
-def mask1 (r : Nat → RssPrfZeroSeeds) : LocalMasks := fun i => ((r i).r1, (r i).r2)
-def mask2 (r : Nat → RssPrfZeroSeeds) : LocalMasks := fun i => ((r i).r2, (r i).r0)
+@[expose] def mask0 (r : Nat → RssPrfZeroSeeds) : LocalMasks := fun i => ((r i).r0, (r i).r1)
+@[expose] def mask1 (r : Nat → RssPrfZeroSeeds) : LocalMasks := fun i => ((r i).r1, (r i).r2)
+@[expose] def mask2 (r : Nat → RssPrfZeroSeeds) : LocalMasks := fun i => ((r i).r2, (r i).r0)
 
 /-- Central mathematical assembly, used only to specify the product network. -/
 def chiNetwork (s : RssKState) (r : Nat → RssPrfZeroSeeds) : RssKState :=
@@ -126,45 +126,39 @@ theorem chiLane_reconstruct (a0 a1 a2 b0 b1 b2 c0 c1 c2 : UInt64)
        chiLane a2 b2 b0 c2 c0 (s.r2, s.r0)) =
       (a0 ^^^ (a1 ^^^ a2)) ^^^ ((~~~(b0 ^^^ (b1 ^^^ b2))) &&&
         (c0 ^^^ (c1 ^^^ c2))) := by
-  have hAnd := reconstructRssWord_rssWordAnd ⟨b0, b1, b2⟩ ⟨c0, c1, c2⟩ s
-  unfold reconstructRssWord rssWordAnd at hAnd
-  dsimp only at hAnd
   unfold chiLane productGate
   dsimp only
-  have hRearr : ∀ (x0 x1 x2 y0 y1 y2 z0 z1 z2 : UInt64),
-      (x0 ^^^ y0 ^^^ z0) ^^^ ((x1 ^^^ y1 ^^^ z1) ^^^ (x2 ^^^ y2 ^^^ z2)) =
-        (x0 ^^^ (x1 ^^^ x2)) ^^^ ((y0 ^^^ y1 ^^^ y2) ^^^ (z0 ^^^ z1 ^^^ z2)) := by
-    intros
-    ac_rfl
-  rw [hRearr, hAnd]
   apply UInt64.eq_of_toBitVec_eq
   apply BitVec.eq_of_getLsbD_eq
   intro i hi
   simp only [UInt64.toBitVec_xor, UInt64.toBitVec_and, UInt64.toBitVec_not,
     BitVec.getLsbD_xor, BitVec.getLsbD_and, Constructive.getLsbD_not, hi,
     decide_true, Bool.true_and]
-  congr 1
-  cases b0.toBitVec.getLsbD i <;> cases b1.toBitVec.getLsbD i <;>
-    cases b2.toBitVec.getLsbD i <;> cases c0.toBitVec.getLsbD i <;>
-    cases c1.toBitVec.getLsbD i <;> cases c2.toBitVec.getLsbD i <;> rfl
+  cases a0.toBitVec.getLsbD i <;> cases a1.toBitVec.getLsbD i <;>
+    cases a2.toBitVec.getLsbD i <;> cases b0.toBitVec.getLsbD i <;>
+    cases b1.toBitVec.getLsbD i <;> cases b2.toBitVec.getLsbD i <;>
+    cases c0.toBitVec.getLsbD i <;> cases c1.toBitVec.getLsbD i <;>
+    cases c2.toBitVec.getLsbD i <;> cases s.r0.toBitVec.getLsbD i <;>
+    cases s.r1.toBitVec.getLsbD i <;> cases s.r2.toBitVec.getLsbD i <;> rfl
 
 theorem reconstruct_chiNetwork (s : RssKState) (r : Nat → RssPrfZeroSeeds) :
     reconstructRssKState (chiNetwork s r) = chiS (reconstructRssKState s) := by
-  unfold reconstructRssKState chiNetwork chiLocal mask0 mask1 mask2
+  rw [reconstructRssKState.public_eq_1, reconstructRssKState.public_eq_1]
+  unfold chiNetwork chiLocal mask0 mask1 mask2
   rw [xorKState_eq, xorKState_eq, xorKState_eq, xorKState_eq, chiS_eq]
   dsimp only
   simp only [chiLane_reconstruct]
 
-def linearLocal (v : LocalView) : LocalView :=
+@[expose] def linearLocal (v : LocalView) : LocalView :=
   ⟨rhoPiS (thetaS v.own), rhoPiS (thetaS v.next)⟩
 
-def addIota (party : Fin 3) (rc : UInt64) (s : KState) : KState :=
+@[expose] def addIota (party : Fin 3) (rc : UInt64) (s : KState) : KState :=
   if party.val = 0 then { s with a0 := s.a0 ^^^ rc } else s
 
-def roundLocal (party : Fin 3) (v : LocalView) (rc : UInt64) (m : LocalMasks) : KState :=
+@[expose] def roundLocal (party : Fin 3) (v : LocalView) (rc : UInt64) (m : LocalMasks) : KState :=
   addIota party rc (chiLocal (linearLocal v) m)
 
-def roundNetwork (s : RssKState) (rc : UInt64) (r : Nat → RssPrfZeroSeeds) : RssKState :=
+@[expose] def roundNetwork (s : RssKState) (rc : UInt64) (r : Nat → RssPrfZeroSeeds) : RssKState :=
   ⟨roundLocal 0 ⟨s.s0, s.s1⟩ rc (mask0 r),
    roundLocal 1 ⟨s.s1, s.s2⟩ rc (mask1 r),
    roundLocal 2 ⟨s.s2, s.s0⟩ rc (mask2 r)⟩
@@ -173,11 +167,11 @@ theorem reconstruct_roundNetwork (s : RssKState) (rc : UInt64)
     (r : Nat → RssPrfZeroSeeds) :
     reconstructRssKState (roundNetwork s rc r) = roundS (reconstructRssKState s) rc := by
   have hTheta : reconstructRssKState (mpcThetaRss s) = thetaS (reconstructRssKState s) := by
-    unfold reconstructRssKState mpcThetaRss
+    rw [reconstructRssKState.public_eq_1, reconstructRssKState.public_eq_1, mpcThetaRss.public_eq_1]
     rw [thetaS_xorKState, thetaS_xorKState]
   have hRho : ∀ u : RssKState, reconstructRssKState (mpcRhoPiRss u) = rhoPiS (reconstructRssKState u) := by
     intro u
-    unfold reconstructRssKState mpcRhoPiRss
+    rw [reconstructRssKState.public_eq_1, reconstructRssKState.public_eq_1, mpcRhoPiRss.public_eq_1]
     rw [rhoPiS_xorKState, rhoPiS_xorKState]
   let m := chiNetwork (mpcRhoPiRss (mpcThetaRss s)) r
   have hMid : reconstructRssKState m = chiS (rhoPiS (thetaS (reconstructRssKState s))) :=
@@ -185,12 +179,18 @@ theorem reconstruct_roundNetwork (s : RssKState) (rc : UInt64)
       (congrArg chiS ((hRho _).trans (congrArg rhoPiS hTheta)))
   have hIota : (m.s0.a0 ^^^ rc) ^^^ (m.s1.a0 ^^^ m.s2.a0) =
       (m.s0.a0 ^^^ (m.s1.a0 ^^^ m.s2.a0)) ^^^ rc := by ac_rfl
-  rw [roundS_eq]
-  change xorKState { m.s0 with a0 := m.s0.a0 ^^^ rc } (xorKState m.s1 m.s2) =
-    { chiS (rhoPiS (thetaS (reconstructRssKState s))) with
-      a0 := (chiS (rhoPiS (thetaS (reconstructRssKState s)))).a0 ^^^ rc }
-  rw [← hMid]
-  unfold reconstructRssKState
+  have hM : m = ⟨chiLocal (linearLocal ⟨s.s0, s.s1⟩) (mask0 r),
+      chiLocal (linearLocal ⟨s.s1, s.s2⟩) (mask1 r),
+      chiLocal (linearLocal ⟨s.s2, s.s0⟩) (mask2 r)⟩ := by
+    dsimp only [m]
+    rw [mpcThetaRss.public_eq_1, mpcRhoPiRss.public_eq_1]
+    rfl
+  have hRN : roundNetwork s rc r =
+      ⟨{ m.s0 with a0 := m.s0.a0 ^^^ rc }, m.s1, m.s2⟩ := by
+    rw [hM]
+    rfl
+  rw [hRN, roundS_eq, ← hMid, reconstructRssKState.public_eq_1, reconstructRssKState.public_eq_1]
+  dsimp only
   rw [xorKState_eq]
   dsimp only
   rw [xorKState_eq, xorKState_eq]
@@ -204,7 +204,7 @@ theorem round_refines_existing (s : RssKState) (rc : UInt64)
       reconstructRssKState (mpcRoundSRss s rc r) := by
   rw [reconstruct_roundNetwork, reconstructRssKState_mpcRoundSRss]
 
-def roundsNetwork : List UInt64 → Nat → RssKState →
+@[expose] def roundsNetwork : List UInt64 → Nat → RssKState →
     (Nat → Nat → RssPrfZeroSeeds) → RssKState
   | [], _, s, _ => s
   | rc :: rcs, i, s, tape => roundsNetwork rcs (i + 1) (roundNetwork s rc (tape i)) tape

@@ -39,7 +39,13 @@ theorem honest_relation (a b : RssWord64) (r : RssPrfZeroSeeds) :
     relation (productGate a.x0 a.x1 b.x0 b.x1 (r.r0, r.r1))
       (productGate a.x1 a.x2 b.x1 b.x2 (r.r1, r.r2))
       (productGate a.x2 a.x0 b.x2 b.x0 (r.r2, r.r0)) := by
-  exact reconstructRssWord_rssWordAnd a b r
+  unfold relation productGate
+  dsimp only
+  apply UInt64.eq_of_toBitVec_eq
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  simp only [UInt64.toBitVec_xor, UInt64.toBitVec_and, BitVec.getLsbD_xor, BitVec.getLsbD_and]
+  exact rssBoolAnd_identity _ _ _ _ _ _ _ _ _
 
 /-- A tampered product is not hidden by the local record type. -/
 theorem tampered_zero_gate_rejected :

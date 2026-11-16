@@ -56,8 +56,9 @@ theorem sharedOracle_matches (p : Profile) :
 theorem enrollment_from_shared_computation (p : Profile) :
     derivePublicKeyMpc cshake256Suite p.params (sharedOracle p).toPqHashMpcOracles
       p.material.pkSeed = enrolledKey p := by
-  unfold derivePublicKeyMpc enrolledKey
-  dsimp only
+  rw [derivePublicKeyMpc.public_eq_1]
+  unfold enrolledKey
+  rw [derivePublicKey.public_eq_1]
   have h := mpcComputeXmssSubtreeRoot_eq cshake256Suite p.params
     (sharedOracle p).toPqHashMpcOracles (referenceKey p) (sharedOracle_matches p).1
   dsimp only [referenceKey] at h

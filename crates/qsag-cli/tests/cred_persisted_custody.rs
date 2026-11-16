@@ -24,8 +24,29 @@ impl Drop for Scratch {
     }
 }
 fn run(args: &[&str], pass: &str) -> Output {
+    let mut args = args.to_vec();
+    let stateful = matches!(
+        (args.first(), args.get(1)),
+        (
+            Some(&"cred"),
+            Some(&"mldsa-keygen" | &"mldsa-sign" | &"voprf-keygen" | &"voprf-eval")
+        )
+    );
+    let has_anchor = args.iter().any(|a| {
+        matches!(
+            *a,
+            "--anchor-dir"
+                | "--anchor-tpm-nv"
+                | "--anchor-vmgenid"
+                | "--ephemeral-unanchored"
+                | "--help"
+        )
+    });
+    if stateful && !has_anchor {
+        args.push("--ephemeral-unanchored");
+    }
     Command::new(env!("CARGO_BIN_EXE_qsag"))
-        .args(args)
+        .args(&args)
         .env("QSAG_CUSTODY_TEST_PASS", pass)
         .output()
         .unwrap()
@@ -139,6 +160,123 @@ fn mldsa_selected_encrypted_bundles_survive_absent_custodians() {
     );
     assert_eq!(refused.status.code(), Some(4));
     assert!(String::from_utf8_lossy(&refused.stderr).contains("quorum too small"));
+}
+
+#[cfg(unix)]
+#[test]
+fn anchored_mldsa_enforces_open_at_least_and_rejects_snapshot_rollback() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Scratch::named("anchored");
+    let anchor = dir.0.join("anchor");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&anchor)
+        .unwrap();
+    let anchor_s = anchor.to_str().unwrap();
+    let vault = dir.path("vault");
+    let public = dir.path("public");
+    let message = dir.path("message");
+    std::fs::write(&message, b"anchored threshold ML-DSA").unwrap();
+
+    success(&[
+        "cred",
+        "mldsa-keygen",
+        "--threshold",
+        "2",
+        "--parties",
+        "3",
+        "--vault-dir",
+        &vault,
+        "--public-out",
+        &public,
+        "--anchor-dir",
+        anchor_s,
+        "--allow-single-disk-anchor",
+        "--deterministic",
+        "--passphrase-env",
+        "QSAG_CUSTODY_TEST_PASS",
+    ]);
+
+    let snap_burns: Vec<Vec<u8>> = (0..3)
+        .map(|p| std::fs::read(format!("{vault}/mldsa-party-{p}.burn")).unwrap())
+        .collect();
+
+    let sig0 = dir.path("sig0");
+    success(&[
+        "cred",
+        "mldsa-sign",
+        "--vault-dir",
+        &vault,
+        "--epoch",
+        "0",
+        "--in",
+        &message,
+        "--out",
+        &sig0,
+        "--anchor-dir",
+        anchor_s,
+        "--allow-single-disk-anchor",
+        "--deterministic",
+        "--passphrase-env",
+        "QSAG_CUSTODY_TEST_PASS",
+    ]);
+    success(&[
+        "cred",
+        "mldsa-verify",
+        "--public",
+        &public,
+        "--in",
+        &message,
+        "--sig",
+        &sig0,
+    ]);
+
+    // Omitting --anchor-dir is refused.
+    let no_anchor = run(
+        &[
+            "cred",
+            "mldsa-sign",
+            "--vault-dir",
+            &vault,
+            "--epoch",
+            "1",
+            "--in",
+            &message,
+            "--out",
+            &dir.path("no-anchor.sig"),
+            "--passphrase-env",
+            "QSAG_CUSTODY_TEST_PASS",
+        ],
+        "custody test passphrase",
+    );
+    assert_eq!(no_anchor.status.code(), Some(4));
+
+    // Roll back all burn ledgers in place to genesis; FsNonceBurnStore::open_at_least rejects!
+    for (p, bytes) in snap_burns.iter().enumerate() {
+        std::fs::write(format!("{vault}/mldsa-party-{p}.burn"), bytes).unwrap();
+    }
+    let rb = run(
+        &[
+            "cred",
+            "mldsa-sign",
+            "--vault-dir",
+            &vault,
+            "--epoch",
+            "1",
+            "--in",
+            &message,
+            "--out",
+            &dir.path("rollback.sig"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--passphrase-env",
+            "QSAG_CUSTODY_TEST_PASS",
+        ],
+        "custody test passphrase",
+    );
+    assert_eq!(rb.status.code(), Some(4));
+    assert!(!PathBuf::from(dir.path("rollback.sig")).exists());
 }
 
 /// Seventeen custodians are above the replicated bound: each holds one Shamir share,

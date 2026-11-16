@@ -44,12 +44,12 @@ def laneWord (s : KState) : Nat → UInt64
   | 24 => s.a24
   | _ => 0
 
-def roundMasks (known0 known1 hidden : KState) : Nat → RssPrfZeroSeeds :=
+@[expose] def roundMasks (known0 known1 hidden : KState) : Nat → RssPrfZeroSeeds :=
   fun lane => ⟨laneWord known0 lane, laneWord known1 lane, laneWord hidden lane⟩
 
 theorem chiLane_hidden_xor (a b bn c cn known hidden : UInt64) :
     chiLane a b bn c cn (known, hidden) = chiLane a b bn c cn (known, 0) ^^^ hidden := by
-  simp only [chiLane, productGate, rssPartyAndLocal, UInt64.xor_zero]
+  simp only [chiLane, productGate, UInt64.xor_zero]
   ac_rfl
 
 def chiOffset (view : LocalView) (known : KState) : KState :=
@@ -66,14 +66,14 @@ theorem xorKState_involution (offset state : KState) :
   rw [xorKState_eq, xorKState_eq]
   simp only [← UInt64.xor_assoc, UInt64.xor_self, UInt64.zero_xor]
 
-def maskTranslation (offset : KState) : SimpleEquiv KState KState where
+@[expose] def maskTranslation (offset : KState) : SimpleEquiv KState KState where
   toFun := xorKState offset
   invFun := xorKState offset
   left_inv := xorKState_involution offset
   right_inv := xorKState_involution offset
 
 /-- Party0 receives party1's own output. The latter's unknown mask is r2. -/
-def receiveOffset (state : RssKState) (known1 : KState) : KState :=
+@[expose] def receiveOffset (state : RssKState) (known1 : KState) : KState :=
   chiOffset (linearLocal ⟨state.s1, state.s2⟩) known1
 
 theorem received_share_translation (state : RssKState) (rc : UInt64)
@@ -87,7 +87,7 @@ theorem received_share_translation (state : RssKState) (rc : UInt64)
 
 /-- This simulator consumes only party0's local state, its own two mask words,
 and a fresh sampled incoming share. It has no key, third share, or ideal signature. -/
-def simulateLocalRound (node : Node) (masks : LocalMasks) (sample : KState) : Node :=
+@[expose] def simulateLocalRound (node : Node) (masks : LocalMasks) (sample : KState) : Node :=
   let prepared := prepare node masks
   receive prepared.1 ⟨nextParty node.party, node.party, node.binding, node.cursor, sample⟩
 

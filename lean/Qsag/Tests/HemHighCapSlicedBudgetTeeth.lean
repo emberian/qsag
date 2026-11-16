@@ -9,13 +9,14 @@ Fixtures and teeth for `Qsag.Protocol.Aggregation.HemHighCapSlicedBudget`.
 * `nv = 29` has no stage and no rows.
 * The `25..=28` rows pass the Johnson witness check of `checkWhirAffineWitness` at the query
   counts and targets of `affine_schedule.rs::finite_johnson_witnesses_cover_every_canonical_stage`.
-* Relation to `hemHighCapStageGeometry` (`RecursivePoseidon2WhirSoundness`): equal on `2..=24`
-  and `26..=28`; at `25` that table folds `(6, 5, 3, 3)` where `pcs.rs::stage_geometry` folds
-  `(6, 4, 4, 3)`, and it has schedules at `29` and `30`.
+* Constructive `[CWYZ26]` cylinder-sliced Johnson cascade certificates (`HemCascadeRbrCert`),
+  bivariate Hasse Guruswami–Sudan interpolation dimensions, and 3-challenge `(θ, α, β)`
+  equal-degree fold budgets across `nv ∈ 2..=28` (`183` bits and not `184` at `nv = 28, stage 0`;
+  multiplicity-`1` Sudan fails the interpolation dimension bound at `nv = 28, stage 0`).
+* Full parity of `hemStageGeometry`, `hemPcsHighCapStageGeometry`, and `hemHighCapStageGeometry`
+  across every `nv : Nat` (matching `pcs.rs::stage_geometry` on `2..=28` and empty for `nv ≥ 29`).
 -/
 public import Qsag.Protocol.Aggregation.HemHighCapSlicedBudget
-public import Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
-public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 public import Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
 public import Qsag.Protocol.Aggregation.HemOpening
 public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
@@ -29,6 +30,7 @@ namespace Qsag
 namespace HemHighCapSlicedBudgetTests
 
 set_option autoImplicit false
+attribute [-instance] Fin.instLinearOrderPackage
 
 /-! ### Positive witnesses -/
 
@@ -193,48 +195,91 @@ theorem tooth_highCap_johnson_check_rejects_low_agreement :
   ⟨(hemPcsHighCapStageGeoms 28).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
     by decide +kernel, by decide +kernel⟩
 
-/-! ### Relation to `hemHighCapStageGeometry` -/
+/-! ### Constructive `[CWYZ26]` Johnson certificates, GS list bounds, and 3-challenge fold teeth -/
 
-/-- `hemPcsHighCapStageGeometry` and `hemHighCapStageGeometry` agree on `2..=24` and `26..=28`. -/
-theorem hemPcsHighCapStageGeometry_eq_hemHighCapStageGeometry (nv : Nat) (h28 : nv ≤ 28)
-    (h25 : ¬ (nv = 25)) : hemPcsHighCapStageGeometry nv = hemHighCapStageGeometry nv := by
-  cases Nat.lt_or_ge 24 nv with
-  | inr h24 =>
-    unfold hemPcsHighCapStageGeometry hemHighCapStageGeometry
-    simp only [h24, ↓reduceIte]
-  | inl hgt =>
-    have hcases : nv = 26 ∨ nv = 27 ∨ nv = 28 := by omega
-    rcases hcases with rfl | rfl | rfl <;> decide
+/-- Premises of `highCap_cwyz26_johnson_cascade_cert_nv2_to_28`,
+    `highCap_gs_interpolation_dimensions_nv2_to_28`, and
+    `highCap_sliced_three_challenge_stage_supported_budget` are met at `nv = 28`, stage `0`. -/
+theorem inhabited_highCap_cwyz26_johnson_cert_nv28 :
+    ∃ (nv : Nat) (g : HemStageGeom),
+      2 ≤ nv ∧ nv ≤ 28 ∧ g ∈ hemStageGeoms nv ∧
+        hemJohnsonQromStageExhaustive g = false :=
+  ⟨28, (hemStageGeoms 28).get ⟨0, by decide +kernel⟩,
+    by decide, by decide, list_get_mem _ _, by decide +kernel⟩
 
-/-- At `25` variables `hemHighCapStageGeometry` is not `pcs.rs::stage_geometry`: it folds
-    `(6, 5, 3, 3)`, Rust and `hemPcsHighCapStageGeometry` fold `(6, 4, 4, 3)`. -/
-theorem tooth_hemHighCapStageGeometry_nv25_is_not_pcs_rs :
-    hemPcsHighCapStageGeometry 25 = [(2, 6), (4, 4), (6, 4), (8, 3)] ∧
-    hemHighCapStageGeometry 25 = [(2, 6), (4, 5), (6, 3), (8, 3)] ∧
-    ¬ (hemHighCapStageGeometry 25 = hemPcsHighCapStageGeometry 25) := by
-  decide
+/-- Premises of `highCap_cwyz26_johnson_cascade_cert_nv2_to_28` are met at `nv = 25`, stage `1`
+    (`stepVars = 4`, matching `pcs.rs::stage_geometry(25)`). -/
+theorem inhabited_highCap_cwyz26_johnson_cert_nv25 :
+    ∃ (nv : Nat) (g : HemStageGeom),
+      2 ≤ nv ∧ nv ≤ 28 ∧ g ∈ hemStageGeoms nv ∧
+        hemJohnsonQromStageExhaustive g = false :=
+  ⟨25, (hemStageGeoms 25).get ⟨1, by decide +kernel⟩,
+    by decide, by decide, list_get_mem _ _, by decide +kernel⟩
 
-/-- `hemHighCapStageGeometry` has schedules at `29` and `30`, which `pcs.rs::stage_geometry`
-    and `hemPcsHighCapStageGeometry` reject. -/
-theorem tooth_hemHighCapStageGeometry_accepts_nv29_nv30 :
-    hemPcsHighCapStageGeometry 29 = [] ∧ hemPcsHighCapStageGeometry 30 = [] ∧
-    ¬ (hemHighCapStageGeometry 29 = []) ∧ ¬ (hemHighCapStageGeometry 30 = []) := by
-  decide
+/-- 3-challenge equal-degree fold bound of a stage, `RatBound.one` when a row is missing. -/
+def threeChallengeProfile (nv : Nat) (g : HemStageGeom) : RatBound :=
+  match hemPcsHighCapTableRow nv g.stageIdx, slicedPcsHighCapRow nv g.stageIdx with
+  | some r, some w => highCapSlicedThreeChallengeStageBound g r w
+  | _, _ => RatBound.one
+
+/-- At `nv = 28`, stage `0`, the 3-challenge `(θ, α, β)` equal-degree fold bound has `183` bits
+    and not `184`, and fails `128` bits under `dfmRoundScale` at `Q + 1 = 2^27`. -/
+theorem tooth_highCap_nv28_three_challenge_at_183_bits :
+    ∃ g : HemStageGeom,
+      g ∈ hemStageGeoms 28 ∧
+      atLeastBits 183 (threeChallengeProfile 28 g) ∧
+      ¬ atLeastBits 184 (threeChallengeProfile 28 g) ∧
+      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (threeChallengeProfile 28 g)) :=
+  ⟨(hemStageGeoms 28).get ⟨0, by decide +kernel⟩, list_get_mem _ _,
+    by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+set_option maxRecDepth 1000000 in
+/-- At `nv = 28`, stage `0`, multiplicity `m = 1` (Sudan) fails the bivariate Hasse interpolation
+    dimension inequality `g.n * (m*(m+1)/2) < gsMonomialCount (m*A₀) d₀ listG₀`, whereas the
+    deployed multiplicity `m = 128` strictly clears it. -/
+theorem tooth_highCap_nv28_gs_dim_rejects_sudan_m1 :
+    let g := (hemStageGeoms 28).get ⟨0, by decide +kernel⟩
+    let d₀ := g.d - 1
+    let A₀ := 8433861 - 1
+    let listG_m1 := Nat.min 6362 ((1 * A₀ - 1) / d₀)
+    let listG_m128 := Nat.min 6362 ((128 * A₀ - 1) / d₀)
+    ¬ (g.n * (1 * (1 + 1) / 2) < gsMonomialCount (1 * A₀) d₀ listG_m1) ∧
+    g.n * (128 * (128 + 1) / 2) < gsMonomialCount (128 * A₀) d₀ listG_m128 := by
+  decide +kernel
+
+/-- `hemStageGeoms 29` is empty (`MAX_PCS_NUM_VARS = 28`). -/
+theorem tooth_highCap_hemStageGeoms_nv29_empty :
+    ¬ (∃ g : HemStageGeom, g ∈ hemStageGeoms 29) := by
+  rw [← hemPcsHighCapStageGeoms_eq_hemStageGeoms, hemPcsHighCapStageGeoms_of_ge_29 29 (by decide)]
+  exact fun ⟨_, hg⟩ => nomatch hg
+
+/-! ### Exact lockstep parity with `hemStageGeometry` and `hemHighCapStageGeometry` -/
+
+/-- `hemPcsHighCapStageGeometry` and `hemStageGeometry` agree across every `nv : Nat`
+    (`2..=28` match `pcs.rs::stage_geometry`, and `nv ≥ 29` is `[]`). -/
+theorem hemPcsHighCapStageGeometry_eq_hemStageGeometry_all (nv : Nat) :
+    hemPcsHighCapStageGeometry nv = hemStageGeometry nv ∧
+    hemPcsHighCapStageGeoms nv = hemStageGeoms nv :=
+  ⟨hemPcsHighCapStageGeometry_eq_hemStageGeometry nv,
+   hemPcsHighCapStageGeoms_eq_hemStageGeoms nv⟩
 
 #verify_constructive
   inhabited_highCap_sliced_budget_nv28
   inhabited_highCap_sliced_budget_nv27
   inhabited_highCap_sliced_budget_fixture_shape
+  inhabited_highCap_cwyz26_johnson_cert_nv28
+  inhabited_highCap_cwyz26_johnson_cert_nv25
   tooth_highCap_nv28_binary_at_183_bits
   tooth_highCap_nv28_multifold_at_177_bits
   tooth_highCap_nv25_stage1_multifold_at_193_bits
+  tooth_highCap_nv28_three_challenge_at_183_bits
+  tooth_highCap_nv28_gs_dim_rejects_sudan_m1
   tooth_highCap_nv29_has_no_stage
+  tooth_highCap_hemStageGeoms_nv29_empty
   highCap_nv29_has_no_row
   highCap_witness_rows_pass_johnson_check
   tooth_highCap_johnson_check_rejects_low_agreement
-  hemPcsHighCapStageGeometry_eq_hemHighCapStageGeometry
-  tooth_hemHighCapStageGeometry_nv25_is_not_pcs_rs
-  tooth_hemHighCapStageGeometry_accepts_nv29_nv30
+  hemPcsHighCapStageGeometry_eq_hemStageGeometry_all
 
 #verify_inhabited Qsag.highCap_sliced_stage_supported_budget inhabited_highCap_sliced_budget_nv28
 #verify_inhabited Qsag.highCap_sliced_stage_supported_budget inhabited_highCap_sliced_budget_nv27
@@ -245,6 +290,17 @@ theorem tooth_hemHighCapStageGeometry_accepts_nv29_nv30 :
 #verify_inhabited Qsag.highCap_sliced_multifold_stage_supported_budget inhabited_highCap_sliced_budget_nv27
 #tooth_pair Qsag.highCap_sliced_multifold_stage_supported_budget vs tooth_highCap_nv28_multifold_at_177_bits
 #tooth_pair Qsag.highCap_sliced_multifold_stage_supported_budget vs tooth_highCap_nv25_stage1_multifold_at_193_bits
+
+#verify_inhabited Qsag.highCap_cwyz26_johnson_cascade_cert_nv2_to_28 inhabited_highCap_cwyz26_johnson_cert_nv28
+#verify_inhabited Qsag.highCap_cwyz26_johnson_cascade_cert_nv2_to_28 inhabited_highCap_cwyz26_johnson_cert_nv25
+#tooth_pair Qsag.highCap_cwyz26_johnson_cascade_cert_nv2_to_28 vs tooth_highCap_nv28_gs_dim_rejects_sudan_m1
+#tooth_pair Qsag.highCap_cwyz26_johnson_cascade_cert_nv2_to_28 vs tooth_highCap_hemStageGeoms_nv29_empty
+
+#verify_inhabited Qsag.highCap_gs_interpolation_dimensions_nv2_to_28 inhabited_highCap_cwyz26_johnson_cert_nv28
+#tooth_pair Qsag.highCap_gs_interpolation_dimensions_nv2_to_28 vs tooth_highCap_nv28_gs_dim_rejects_sudan_m1
+
+#verify_inhabited Qsag.highCap_sliced_three_challenge_stage_supported_budget inhabited_highCap_cwyz26_johnson_cert_nv28
+#tooth_pair Qsag.highCap_sliced_three_challenge_stage_supported_budget vs tooth_highCap_nv28_three_challenge_at_183_bits
 
 #tooth_pair highCap_witness_rows_pass_johnson_check vs tooth_highCap_johnson_check_rejects_low_agreement
 
