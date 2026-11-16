@@ -110,12 +110,10 @@ pub fn unix_now() -> Result<u64, CliError> {
         .map_err(|_| CliError::state("system clock is before the Unix epoch"))
 }
 
-/// The identifier an intent binds a signing key by: the scheme name and the public key bytes.
-pub fn signing_key_id(scheme: &str, public_key: &[u8]) -> [u8; 32] {
-    cshake256_framed_32(
-        b"QSAG.CLI.POLICY.KEY_ID.V1",
-        &[scheme.as_bytes(), public_key],
-    )
+/// Canonical cross-crate signing key identifier (`QSAG.POLICY.KEY.V1`) shared by `qsag-addr`,
+/// `qsag-policy`, `qsag-cred`, and `qsag-cli`.
+pub fn signing_key_id(suite: WitnessSuiteTag, public_key: &[u8]) -> [u8; 32] {
+    qsag_policy::policy_signing_key_id(suite, public_key)
 }
 
 fn join(dir: &str, parts: &[&str]) -> Result<String, CliError> {
@@ -1405,33 +1403,23 @@ pub fn key_pin_from_args(args: &Args) -> Result<Option<[u8; 32]>, CliError> {
     Ok(Gate::from_args(args, false)?.map(|gate| *gate.ledger_id()))
 }
 
-/// The policy identifier and spend a gated stateful ceremony commits into its journal.
-pub fn ceremony_spend(amount_units: u128) -> Result<u64, CliError> {
-    u64::try_from(amount_units).map_err(|_| {
-        CliError::usage(
-            "intent amount exceeds the 64-bit spend a stateful ceremony journal records",
-        )
-    })
+/// Full-width 128-bit spend amount committed into a gated stateful `CeremonyContext`.
+pub fn ceremony_spend(amount_units: u128) -> Result<u128, CliError> {
+    Ok(amount_units)
 }
 
 fn public_key_id(path: &str) -> Result<[u8; 32], CliError> {
-    let text = read_text(path)?;
-    let json = Json::parse(&text)?;
-    let scheme = json.field_str("scheme")?;
-    match json.field_str("format")? {
-        crate::keys::PUBLIC_FORMAT => {
-            let key = json.field_hex("public_key").map_err(|_| {
-                CliError::usage("this public key has no single signing key to bind an intent to")
-            })?;
-            Ok(signing_key_id(scheme, &key))
+    let (suite, public_key) = crate::addr::extract_suite_and_public_bytes(path).map_err(|e| {
+        if e.message.contains("has no address encoding")
+            || e.message.contains("missing")
+            || e.message.contains("public_key")
+        {
+            CliError::usage("this public key has no single signing key to bind an intent to")
+        } else {
+            e
         }
-        crate::quorum::PUBLIC_FORMAT => {
-            let mut key = json.field_hex("pk_seed")?.0.clone();
-            key.extend_from_slice(&json.field_hex("pk_root")?);
-            Ok(signing_key_id(scheme, &key))
-        }
-        _ => Err(CliError::input(format!("{path} is not a public key file"))),
-    }
+    })?;
+    Ok(signing_key_id(suite, &public_key))
 }
 
 const INIT_HELP: &str = "\
@@ -1465,12 +1453,17 @@ fn init(raw: &[String]) -> Result<(), CliError> {
             "ledger-dir",
             "policy",
             "anchor-dir",
+            "anchor-tpm-nv",
+            "anchor-tpm-device",
+            "anchor-tpm-auth-env",
             "passphrase-env",
             "passphrase-file",
         ],
         &[
             "accept-single-host-custody",
             "allow-single-disk-anchor",
+            "anchor-vmgenid",
+            "anchor-vmgenid-strict",
             "ephemeral-unanchored",
             "json",
             "help",
@@ -1599,11 +1592,22 @@ fn init(raw: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-const LEDGER_OPTIONS: [&str; 4] = [
+const LEDGER_OPTIONS: &[&str] = &[
     "ledger-dir",
     "anchor-dir",
+    "anchor-tpm-nv",
+    "anchor-tpm-device",
+    "anchor-tpm-auth-env",
     "passphrase-env",
     "passphrase-file",
+];
+
+const LEDGER_FLAGS: &[&str] = &[
+    "allow-single-disk-anchor",
+    "anchor-vmgenid",
+    "anchor-vmgenid-strict",
+    "json",
+    "help",
 ];
 
 fn open_from_args(args: &Args, access: Access) -> Result<OpenLedger, CliError> {
@@ -1651,7 +1655,7 @@ fn propose(raw: &[String]) -> Result<(), CliError> {
         "message-out",
         "ctx-hex",
     ]);
-    let args = Args::parse(raw, &options, &["allow-single-disk-anchor", "json", "help"])?;
+    let args = Args::parse(raw, &options, LEDGER_FLAGS)?;
     if args.flag("help") {
         print!("{PROPOSE_HELP}{LEDGER_HELP}");
         return Ok(());
@@ -1725,7 +1729,7 @@ of the intent, the intent was already released, or the policy no longer accepts 
 fn approve(raw: &[String]) -> Result<(), CliError> {
     let mut options = LEDGER_OPTIONS.to_vec();
     options.extend(["intent", "party"]);
-    let args = Args::parse(raw, &options, &["allow-single-disk-anchor", "json", "help"])?;
+    let args = Args::parse(raw, &options, LEDGER_FLAGS)?;
     if args.flag("help") {
         print!("{APPROVE_HELP}{LEDGER_HELP}");
         return Ok(());
@@ -1749,11 +1753,7 @@ per-party spend and checkpoint generation, and its recorded intents. Writes noth
 ";
 
 fn status(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &LEDGER_OPTIONS,
-        &["allow-single-disk-anchor", "json", "help"],
-    )?;
+    let args = Args::parse(raw, LEDGER_OPTIONS, LEDGER_FLAGS)?;
     if args.flag("help") {
         print!("{STATUS_HELP}{LEDGER_HELP}");
         return Ok(());
