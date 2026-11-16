@@ -43,6 +43,13 @@ ready quorum on a fresh intent within budget releases the dealt key's signature.
 about message delivery. The interface map forgets the share that a corruption reveals, so the
 refinement does not speak about key secrecy; `corrupt_shares_independent_of_secret` is the secrecy
 statement, and it is information-theoretic about the dealt shares only.
+
+Section 9 drops the authenticated channel that `inject` assumes above. Its machine `authMachine`
+has a `Fin n` family of custodians with WAL records in the `FsBeltWal` format and an external
+anchor, acknowledgements tagged with `custodianAckTag`, and an adversary that writes the wire and
+the disks freely. The refinement there is stated for the machine with two decidable violation
+events refused, together with the proof that the unguarded machine runs identically until one of
+them occurs and a classification of each event as a tag forgery or a collision.
 -/
 
 public import Qsag.Spec.IdealCustody
@@ -3630,7 +3637,225 @@ theorem authRun_unsafe_release_violation (dep : AuthDeployment F C PK D Sig)
     rw [hAny] at hb
     cases hb
 
+/-- **A ready quorum on a fresh intent releases.** In a state the guarded network reaches, if the
+    wire holds validly tagged acknowledgements, with shares that open the commitments, from at
+    least `threshold` distinct enrolled custodians for exactly `i`, the ledger is not quarantined,
+    has no committed record at `i.epoch`, the epoch and session are fresh and `i.spend` fits the
+    budget, then `execute` releases the dealt key's signature on `digest deploymentId i`. This is
+    the only liveness statement of this section. -/
+theorem authExecute_ready_fresh_releases (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
+    {st : AuthState F PK D Sig dep.core.quorum.numParties}
+    (hReach : (authGuardedMachine dep).Reachable st) (approvers : List Nat) (i : CustodyIntent)
+    (hReady : quorumReady dep.core (dep.verified st.wire) approvers i = true)
+    (hP : st.ledger.poisoned = false)
+    (hF : findReleasedEpoch st.ledger.releasedHistory i.epoch = none)
+    (hEp : st.ledger.nextFreshEpoch ≤ i.epoch) (hSess : i.sessionId ∉ st.ledger.usedSessions)
+    (hCap : st.ledger.spent + i.spend ≤ dep.core.quorum.spendCap) :
+    (authStep dep st (.execute dep.core.deploymentId approvers i false)).map
+        (fun r => authVisOut r.2) =
+      some (.released (dep.core.signWith dep.core.secret
+        (dep.core.digests.digest dep.core.deploymentId i))) := by
+  obtain ⟨a, _, hRel⟩ := (authCustody_refines_ideal dep hWf).reachable_rel hReach
+  have hRel' : AuthRel dep st a := hRel
+  have hD := execute_ready_fresh_releases dep.core hWf.core (st := dep.view st) hRel'.rel.inv
+    approvers i hReady hP hF hEp hSess hCap
+  have hD' : (((custodyLedgerSign dep.core.digests
+        (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
+        (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+        dep.core.deploymentId i false).map
+        (fun r => (({ dep.view st with ledger := r.1 } : State F PK D Sig), r.2))).map
+        (fun r => (r.1, Event.custody (F := F) r.2))).map Prod.snd =
+      some (Event.custody (.released (dep.core.signWith dep.core.secret
+        (dep.core.digests.digest dep.core.deploymentId i)))) := hD
+  show ((custodyLedgerSign dep.core.digests
+      (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
+      (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+      dep.core.deploymentId i false).map
+      (fun r => (({ st with ledger := r.1 } : AuthState F PK D Sig dep.core.quorum.numParties),
+        AuthEvent.custody (F := F) r.2))).map (fun r => authVisOut r.2) = _
+  cases hS : custodyLedgerSign dep.core.digests
+      (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
+      (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+      dep.core.deploymentId i false with
+  | none => rw [hS] at hD'; cases hD'
+  | some r =>
+    rw [hS] at hD'
+    have hOut : Event.custody (F := F) r.2 = Event.custody (.released
+        (dep.core.signWith dep.core.secret
+          (dep.core.digests.digest dep.core.deploymentId i))) := Option.some.inj hD'
+    have hOut' : r.2 = .released (dep.core.signWith dep.core.secret
+        (dep.core.digests.digest dep.core.deploymentId i)) := by
+      injection hOut
+    show some (authVisOut (AuthEvent.custody (F := F) r.2)) = _
+    rw [hOut']
+    rfl
+
 end Authenticated
+
+/-! ### A state codec that satisfies the round trip
+
+`AuthDeployment.WellFormed.parse_stateBytes` asks for a codec with
+`parseState (stateBytes l L) = some (l, L)`. The unary codec below is one. It is not the encoding
+of `BeltLatchState::to_bytes`; it is here so that the hypothesis is known to be satisfiable. -/
+
+section UnaryCodec
+
+/-- `n` as `n` bytes `1` followed by a byte `0`. -/
+def unaryNat (n : Nat) : List UInt8 :=
+  List.replicate n 1 ++ [0]
+
+def parseUnaryNat : List UInt8 → Option (Nat × List UInt8)
+  | [] => none
+  | b :: bs =>
+    if b = 0 then some (0, bs)
+    else
+      match parseUnaryNat bs with
+      | some r => some (r.1 + 1, r.2)
+      | none => none
+
+private theorem uc_if_pos {α : Type} {p : Prop} [Decidable p] (hp : p) (a b : α) :
+    (if p then a else b) = a := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem uc_if_neg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (a b : α) :
+    (if p then a else b) = b := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+theorem parseUnaryNat_unaryNat : ∀ (n : Nat) (rest : List UInt8),
+    parseUnaryNat (unaryNat n ++ rest) = some (n, rest)
+  | 0, rest => by
+    show parseUnaryNat (0 :: rest) = some (0, rest)
+    unfold parseUnaryNat
+    exact uc_if_pos rfl _ _
+  | n + 1, rest => by
+    have hCons : unaryNat (n + 1) ++ rest = 1 :: (unaryNat n ++ rest) := by
+      unfold unaryNat
+      rw [List.replicate_succ]
+      rfl
+    rw [hCons]
+    unfold parseUnaryNat
+    rw [uc_if_neg (by decide : ¬ ((1 : UInt8) = 0)), parseUnaryNat_unaryNat n rest]
+
+/-- The four counters in unary, then the payload with its length in unary. -/
+def unaryIntent (i : CustodyIntent) : List UInt8 :=
+  unaryNat i.sessionId ++ (unaryNat i.round ++ (unaryNat i.epoch ++ (unaryNat i.spend ++
+    (unaryNat i.payload.length ++ i.payload))))
+
+def parseUnaryIntent (bs : List UInt8) : Option (CustodyIntent × List UInt8) :=
+  match parseUnaryNat bs with
+  | none => none
+  | some a =>
+    match parseUnaryNat a.2 with
+    | none => none
+    | some b =>
+      match parseUnaryNat b.2 with
+      | none => none
+      | some c =>
+        match parseUnaryNat c.2 with
+        | none => none
+        | some d =>
+          match parseUnaryNat d.2 with
+          | none => none
+          | some e =>
+            some ({ sessionId := a.1, round := b.1, epoch := c.1, spend := d.1,
+                    payload := e.2.take e.1 }, e.2.drop e.1)
+
+theorem parseUnaryIntent_unaryIntent (i : CustodyIntent) (rest : List UInt8) :
+    parseUnaryIntent (unaryIntent i ++ rest) = some (i, rest) := by
+  have hAssoc : unaryIntent i ++ rest =
+      unaryNat i.sessionId ++ (unaryNat i.round ++ (unaryNat i.epoch ++ (unaryNat i.spend ++
+        (unaryNat i.payload.length ++ (i.payload ++ rest))))) := by
+    unfold unaryIntent
+    rw [List.append_assoc, List.append_assoc, List.append_assoc, List.append_assoc,
+      List.append_assoc]
+  rw [hAssoc]
+  unfold parseUnaryIntent
+  rw [parseUnaryNat_unaryNat]
+  dsimp only
+  rw [parseUnaryNat_unaryNat]
+  dsimp only
+  rw [parseUnaryNat_unaryNat]
+  dsimp only
+  rw [parseUnaryNat_unaryNat]
+  dsimp only
+  rw [parseUnaryNat_unaryNat]
+  dsimp only
+  rw [List.take_left' rfl, List.drop_left' rfl]
+
+def unaryIntents : List CustodyIntent → List UInt8
+  | [] => []
+  | i :: L => unaryIntent i ++ unaryIntents L
+
+def parseUnaryIntents : Nat → List UInt8 → Option (List CustodyIntent × List UInt8)
+  | 0, bs => some ([], bs)
+  | k + 1, bs =>
+    match parseUnaryIntent bs with
+    | none => none
+    | some a =>
+      match parseUnaryIntents k a.2 with
+      | none => none
+      | some b => some (a.1 :: b.1, b.2)
+
+theorem parseUnaryIntents_unaryIntents : ∀ (L : List CustodyIntent) (rest : List UInt8),
+    parseUnaryIntents L.length (unaryIntents L ++ rest) = some (L, rest)
+  | [], _ => rfl
+  | i :: L, rest => by
+    have hAssoc : unaryIntents (i :: L) ++ rest = unaryIntent i ++ (unaryIntents L ++ rest) := by
+      show (unaryIntent i ++ unaryIntents L) ++ rest = _
+      rw [List.append_assoc]
+    rw [hAssoc]
+    show parseUnaryIntents (L.length + 1) _ = _
+    unfold parseUnaryIntents
+    rw [parseUnaryIntent_unaryIntent]
+    dsimp only
+    rw [parseUnaryIntents_unaryIntents L rest]
+
+/-- Latch, log length and log, in unary. -/
+def unaryStateBytes (l : Nat) (L : List CustodyIntent) : List UInt8 :=
+  unaryNat l ++ (unaryNat L.length ++ unaryIntents L)
+
+def unaryParseState (bs : List UInt8) : Option (Nat × List CustodyIntent) :=
+  match parseUnaryNat bs with
+  | none => none
+  | some a =>
+    match parseUnaryNat a.2 with
+    | none => none
+    | some b =>
+      match parseUnaryIntents b.1 b.2 with
+      | none => none
+      | some c => some (a.1, c.1)
+
+/-- The unary codec round-trips. -/
+theorem unaryParseState_unaryStateBytes (l : Nat) (L : List CustodyIntent) :
+    unaryParseState (unaryStateBytes l L) = some (l, L) := by
+  unfold unaryParseState unaryStateBytes
+  rw [parseUnaryNat_unaryNat]
+  dsimp only
+  rw [parseUnaryNat_unaryNat]
+  dsimp only
+  have hNil : unaryIntents L = unaryIntents L ++ [] := (List.append_nil _).symm
+  rw [hNil, parseUnaryIntents_unaryIntents L []]
+
+/-- **`AuthDeployment.WellFormed` is satisfiable over any well-formed Shamir deployment.** With the
+    unary codec, the authenticated deployment is well formed for every choice of hash, keys,
+    guard-key commitment, message tag and tickets. -/
+theorem AuthDeployment.wellFormed_unary {F C PK D Sig : Type} [LawfulField F]
+    (core : Deployment F C PK D Sig) (hCore : core.WellFormed)
+    (hash : List UInt8 → Digest256) (ackKey : Nat → Digest256) (guardKeyCommit : Digest256)
+    (msgTag : Nat → CustodyIntent → Digest256) (walKey : Nat → Digest256)
+    (lockSeal : Nat → List UInt8) (ticket : Nat → UInt64 → Digest256 × Digest256) :
+    AuthDeployment.WellFormed
+      { core := core, hash := hash, ackKey := ackKey, guardKeyCommit := guardKeyCommit,
+        msgTag := msgTag, walKey := walKey, lockSeal := lockSeal, ticket := ticket,
+        stateBytes := unaryStateBytes, parseState := unaryParseState } where
+  core := hCore
+  parse_stateBytes := unaryParseState_unaryStateBytes
+
+end UnaryCodec
 
 #verify_constructive
   Qsag.DistCustody.AuthDeployment.recover_some
@@ -3643,6 +3868,9 @@ end Authenticated
   Qsag.DistCustody.authRun_violation_split
   Qsag.DistCustody.authRun_guarded
   Qsag.DistCustody.authRun_unsafe_release_violation
+  Qsag.DistCustody.authExecute_ready_fresh_releases
+  Qsag.DistCustody.unaryParseState_unaryStateBytes
+  Qsag.DistCustody.AuthDeployment.wellFormed_unary
 
 #verify_constructive
   Qsag.DistCustody.Deployment.WellFormed.point_inj
