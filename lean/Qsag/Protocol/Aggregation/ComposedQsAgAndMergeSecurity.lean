@@ -12,7 +12,7 @@ explicit reduction interfaces: acceptance alone does not prove that a human appr
 The privacy theorem concerns independent, private epoch polynomials and erased prior shares,
 not public commitments, network packets, or deterministic publicly seeded dealer randomness. -/
 open Aggregation
-def weight {n : Nat} (b : BitVec n) : Nat :=
+@[expose] def weight {n : Nat} (b : BitVec n) : Nat :=
   qsum n fun i => if b.getLsbD i.val then 1 else 0
 theorem weight_union {n : Nat} (a b : BitVec n) (h : a &&& b = 0#n) :
     weight (a ||| b) = weight a + weight b := by
@@ -58,7 +58,7 @@ def firstActive {n : Nat} (b : BitVec n) : Nat :=
   ((List.range n).find? b.getLsbD).getD n
 /-- The budget counts branches, as in Rust; a leaf is permitted at remaining depth zero.
 Header equality pins both supported regimes; classical acceptance is never promoted to QROM. -/
-def checkTree {n : Nat} (root : Header) (verify : Shard n → Bool) :
+@[expose] def checkTree {n : Nat} (root : Header) (verify : Shard n → Bool) :
     Nat → MergeTree n → Bool
   | _, .leaf s => decide (s.header = root) &&
     decide (2 ≤ s.numVars ∧ s.numVars ≤ 28 ∧ s.schedule = root.regime.schedule s.numVars) &&
@@ -628,9 +628,9 @@ theorem schedule_floor {n : Nat} (root : Header) (verify : Shard n → Bool)
 (`inhabited_tree`, `tooth_overlap`, `inhabited_reduction`, `inhabited_shard_bound`) and their
 audits are in `Tests/CompositionInstances.lean`. The leaf-verifier fixture tests the structural layer;
 it is deliberately not represented as a deployed WHIR proof. -/
-def exampleHeader : Header := ⟨[0], .xmssPoseidon2, .bciksJohnsonQrom128, .shared [1]⟩
-def exampleShard (b : BitVec 2) : Shard 2 := ⟨exampleHeader, b, [1], 2, (Qsag.WhirSecurityRegime.bciksJohnsonQrom128).schedule 2⟩
-def exampleVerifier (s : Shard 2) : Bool := s.proof == [1]
+@[expose] def exampleHeader : Header := ⟨[0], .xmssPoseidon2, .bciksJohnsonQrom128, .shared [1]⟩
+@[expose] def exampleShard (b : BitVec 2) : Shard 2 := ⟨exampleHeader, b, [1], 2, (Qsag.WhirSecurityRegime.bciksJohnsonQrom128).schedule 2⟩
+@[expose] def exampleVerifier (s : Shard 2) : Bool := s.proof == [1]
 def exampleTree : MergeTree 2 := .branch (.leaf (exampleShard 1#2))
   (.leaf (exampleShard 2#2)) 3#2
 theorem tooth_downgrade : ∃ s : Shard 2,

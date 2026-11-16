@@ -89,7 +89,7 @@ theorem digest5_vs_modular_tooth :
   · simp [naiveLimb]
 
 /-- Exact UTF-8 bytes; all audited Rust byte literals below are ASCII. -/
-def bytes (s : String) : List UInt8 := s.toUTF8.data.toList
+@[expose] def bytes (s : String) : List UInt8 := s.toUTF8.data.toList
 
 /-- Twelve agg/sig.rs IVs, in source order (including all four FORS roles). -/
 def aggTags : List Nat :=
@@ -221,7 +221,7 @@ theorem unframed_partition_tooth : ∃ a b x y : List UInt8,
     Includes wire magics, transcript labels and label fragments completed by `format!`
     (`"QSAG.OT."`, `"QSAG.RNG"`, `"QSAG.PRG"`); membership alone does not imply that a label is
     a cSHAKE customization. Shared labels retain every owning crate. -/
-def auditedByteLabels : List (String × List String) := [
+@[expose] def auditedByteLabels : List (String × List String) := [
   ("qsag-accel", [
     "QSAG.ACCEL.ALG.BDOZ_GF2_128_DOT.V1", "QSAG.ACCEL.ALG.COSET_LDE_EXT2.V1", "QSAG.ACCEL.ALG.GOLDILOCKS_NTT.V1", "QSAG.ACCEL.ALG.KECCAK_F1600.V1", "QSAG.ACCEL.ALG.MERKLE_POSEIDON2.V1", "QSAG.ACCEL.ALG.POSEIDON2_PERM12.V1",
     "QSAG.ACCEL.BACKEND_ATTESTATION_KEY.V1", "QSAG.ACCEL.BACKEND_ID.V1", "QSAG.ACCEL.BDOZ_IN.V1", "QSAG.ACCEL.BDOZ_OUT.V1", "QSAG.ACCEL.KECCAK_IN.V1", "QSAG.ACCEL.KECCAK_OUT.V1",
@@ -395,7 +395,7 @@ def auditedByteLabels : List (String × List String) := [
 ]
 
 /-- The inventoried labels of one crate (empty for an unknown crate name). -/
-def auditedLabelsOf (crate : String) : List String :=
+@[expose] def auditedLabelsOf (crate : String) : List String :=
   (auditedByteLabels.filter (fun c => c.1 == crate)).flatMap (·.2)
 
 /-- The inventory covers the twelve crates, in order. -/
@@ -414,6 +414,8 @@ theorem auditedByteLabels_nodup : ∀ c ∈ auditedByteLabels, c.2.Nodup := by
 theorem auditedByteLabels_bytes_ok :
     ∀ c ∈ auditedByteLabels,
       (c.2.map bytes).Nodup ∧ ∀ l ∈ c.2, bytes l ≠ [] ∧ (bytes l).length ≤ 64 := by
+  unfold bytes
+  simp only [String.toUTF8_eq_toByteArray]
   decide +kernel
 
 private theorem nodup_map_inj_on {α β : Type} {f : α → β} :
