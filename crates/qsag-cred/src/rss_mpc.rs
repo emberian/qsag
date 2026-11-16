@@ -2632,22 +2632,32 @@ pub(crate) mod test_support {
     fn malformed_public_structures_fail_before_transport() {
         struct NoTransport;
         impl MpcTransport for NoTransport {
-            fn exchange(&mut self, _: RoundInfo, _: Vec<Vec<u8>>, _: Vec<u8>)
-                -> Result<RoundInbox, MpcTransportError> {
+            fn exchange(
+                &mut self,
+                _: RoundInfo,
+                _: Vec<Vec<u8>>,
+                _: Vec<u8>,
+            ) -> Result<RoundInbox, MpcTransportError> {
                 panic!("invalid structure must fail before entropy or transport is used")
             }
         }
         let valid = Structure::new(3, 2).unwrap();
-        assert!(matches!(Engine::setup(&mut NoTransport, valid.clone(), 3, &[0; 32], &[1; 32]),
-            Err(MpcError::UnsupportedStructure { .. })));
+        assert!(matches!(
+            Engine::setup(&mut NoTransport, valid.clone(), 3, &[0; 32], &[1; 32]),
+            Err(MpcError::UnsupportedStructure { .. })
+        ));
         let mut invalid = valid;
         invalid.subsets.pop();
-        assert!(matches!(Engine::setup(&mut NoTransport, invalid, 0, &[0; 32], &[1; 32]),
-            Err(MpcError::UnsupportedStructure { .. })));
+        assert!(matches!(
+            Engine::setup(&mut NoTransport, invalid, 0, &[0; 32], &[1; 32]),
+            Err(MpcError::UnsupportedStructure { .. })
+        ));
         let mut invalid = Structure::new(3, 2).unwrap();
         invalid.subsets[0][0] = usize::MAX;
-        assert!(matches!(Engine::setup(&mut NoTransport, invalid, 0, &[0; 32], &[1; 32]),
-            Err(MpcError::UnsupportedStructure { .. })));
+        assert!(matches!(
+            Engine::setup(&mut NoTransport, invalid, 0, &[0; 32], &[1; 32]),
+            Err(MpcError::UnsupportedStructure { .. })
+        ));
     }
 
     #[test]

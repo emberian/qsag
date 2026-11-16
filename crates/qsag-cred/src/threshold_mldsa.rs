@@ -295,7 +295,11 @@ impl FsNonceBurnStore {
         if &body[..8] == b"QSCBURN3" || &body[..8] == b"QSCBURN4" {
             let legacy = &body[..8] == b"QSCBURN3";
             let expected_tag = cshake256_framed_32(
-                if legacy { b"QSAG.MLDSA.NONCE_BURN.V3" } else { b"QSAG.MLDSA.NONCE_BURN.V4" },
+                if legacy {
+                    b"QSAG.MLDSA.NONCE_BURN.V3"
+                } else {
+                    b"QSAG.MLDSA.NONCE_BURN.V4"
+                },
                 &[mac_key.expose(), &lock_id, body],
             );
             if !qsag_accel::ct::ct_eq_bytes(&expected_tag, tag)
@@ -320,8 +324,7 @@ impl FsNonceBurnStore {
                 let hdr = body.get(cursor..cursor + 12).ok_or_else(invalid)?;
                 cursor += 12;
                 let party_id = u16::from_le_bytes([hdr[0], hdr[1]]);
-                let max_epoch =
-                    u64::from_le_bytes(hdr[2..10].try_into().map_err(|_| invalid())?);
+                let max_epoch = u64::from_le_bytes(hdr[2..10].try_into().map_err(|_| invalid())?);
                 let sess_count = u16::from_le_bytes([hdr[10], hdr[11]]) as usize;
                 if max_epoch == u64::MAX
                     || sess_count == 0
@@ -351,9 +354,7 @@ impl FsNonceBurnStore {
                     let mut high_attempts = Vec::with_capacity(high_len);
                     for chunk in high_bytes.as_chunks::<4>().0 {
                         let att = u32::from_le_bytes(*chunk);
-                        if att < 128
-                            || high_attempts.last().is_some_and(|&prev| prev >= att)
-                        {
+                        if att < 128 || high_attempts.last().is_some_and(|&prev| prev >= att) {
                             return Err(invalid());
                         }
                         high_attempts.push(att);
@@ -370,18 +371,26 @@ impl FsNonceBurnStore {
                     sessions,
                 });
             }
-            let retained: u64 = parties.iter().flat_map(|p| &p.sessions)
+            let retained: u64 = parties
+                .iter()
+                .flat_map(|p| &p.sessions)
                 .map(|s| u64::from(s.low_mask.count_ones()) + s.high_attempts.len() as u64)
                 .sum();
-            if retained > generation || (legacy && retained != generation) {
-                // V3 forgot evicted sessions. An epoch floor cannot recover the
-                // independent session/attempt replay history: refuse that upgrade.
+            if retained > generation {
                 return Err(invalid());
+            }
+            if legacy && retained != generation {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "QSCBURN3 discarded nonce burn history; cannot migrate safely",
+                ));
             }
             let retired_burns = if legacy {
                 vec![0; RETIRED_BURN_FILTER_BYTES]
             } else {
-                let filter = body.get(cursor..cursor + RETIRED_BURN_FILTER_BYTES).ok_or_else(invalid)?;
+                let filter = body
+                    .get(cursor..cursor + RETIRED_BURN_FILTER_BYTES)
+                    .ok_or_else(invalid)?;
                 cursor += RETIRED_BURN_FILTER_BYTES;
                 if generation == 0 && filter.iter().any(|&byte| byte != 0) {
                     return Err(invalid());
@@ -421,7 +430,7 @@ impl FsNonceBurnStore {
             if generation < min_expected_generation
                 || !(body.len() - 64).is_multiple_of(46)
                 || count != ((body.len() - 64) / 46) as u64
-                || generation < count
+                || generation != count
             {
                 return Err(invalid());
             }
@@ -457,9 +466,19 @@ impl FsNonceBurnStore {
     }
 
     fn encode(&self) -> Vec<u8> {
-        let encoded_len = 96 + RETIRED_BURN_FILTER_BYTES + self.parties.iter()
-            .map(|p| 12 + p.sessions.iter().map(|s| 50 + 4 * s.high_attempts.len()).sum::<usize>())
-            .sum::<usize>();
+        let encoded_len = 96
+            + RETIRED_BURN_FILTER_BYTES
+            + self
+                .parties
+                .iter()
+                .map(|p| {
+                    12 + p
+                        .sessions
+                        .iter()
+                        .map(|s| 50 + 4 * s.high_attempts.len())
+                        .sum::<usize>()
+                })
+                .sum::<usize>();
         let mut bytes = Vec::with_capacity(encoded_len);
         bytes.extend_from_slice(b"QSCBURN4");
         bytes.extend_from_slice(&self.record.lock_seal());
@@ -492,7 +511,8 @@ impl FsNonceBurnStore {
         if self.poisoned || epoch == u64::MAX {
             return false;
         }
-        if Self::retired_positions(party, session, attempt).iter()
+        if Self::retired_positions(party, session, attempt)
+            .iter()
             .all(|&bit| self.retired_burns[bit / 8] & (1 << (bit % 8)) != 0)
         {
             return false;
@@ -519,8 +539,10 @@ impl FsNonceBurnStore {
     }
 
     fn retired_positions(party: u16, session: &[u8; 32], attempt: u32) -> [usize; 7] {
-        let digest = cshake256_framed_32(b"QSAG.MLDSA.RETIRED_BURN.V1",
-            &[&party.to_le_bytes(), session, &attempt.to_le_bytes()]);
+        let digest = cshake256_framed_32(
+            b"QSAG.MLDSA.RETIRED_BURN.V1",
+            &[&party.to_le_bytes(), session, &attempt.to_le_bytes()],
+        );
         core::array::from_fn(|i| {
             let offset = 4 * i;
             let word = u32::from_le_bytes(digest[offset..offset + 4].try_into().unwrap());
@@ -528,13 +550,7 @@ impl FsNonceBurnStore {
         })
     }
 
-    fn apply_burn_in_memory(
-        &mut self,
-        party: u16,
-        epoch: u64,
-        session: [u8; 32],
-        attempt: u32,
-    ) {
+    fn apply_burn_in_memory(&mut self, party: u16, epoch: u64, session: [u8; 32], attempt: u32) {
         let p_idx = match self.parties.binary_search_by_key(&party, |p| p.party_id) {
             Ok(idx) => {
                 self.parties[idx].max_epoch = epoch;
@@ -562,7 +578,8 @@ impl FsNonceBurnStore {
         } else {
             if state.sessions.len() >= MAX_RETAINED_SESSIONS_PER_PARTY {
                 let retired = state.sessions.remove(0);
-                let attempts = (0..128u32).filter(|&a| retired.low_mask & (1u128 << a) != 0)
+                let attempts = (0..128u32)
+                    .filter(|&a| retired.low_mask & (1u128 << a) != 0)
                     .chain(retired.high_attempts.iter().copied());
                 for attempt in attempts {
                     for bit in Self::retired_positions(party, &retired.session_id, attempt) {
@@ -842,15 +859,18 @@ pub(crate) fn to_polys(flat: &[u32]) -> Vec<Poly256> {
 }
 
 pub(crate) fn flatten(polys: &[Poly256]) -> Vec<u32> {
-    polys
-        .iter()
-        .flat_map(|p| p.coeffs.iter().copied())
-        .collect()
+    flatten_key(polys, &[]).into_inner()
 }
 
 /// Flatten both secret vectors into one allocation, with no unwiped intermediates.
 pub(crate) fn flatten_key(s1: &[Poly256], s2: &[Poly256]) -> SecretBuffer<Vec<u32>> {
-    SecretBuffer(s1.iter().chain(s2).flat_map(|p| p.coeffs.iter().copied()).collect())
+    // FlatMap::collect does not promise an exact size hint: preallocate explicitly
+    // so copying a secret polynomial never abandons an unerased old allocation.
+    let mut out = SecretBuffer(Vec::with_capacity((s1.len() + s2.len()) * MLDSA_N));
+    for poly in s1.iter().chain(s2) {
+        out.extend_from_slice(&poly.coeffs);
+    }
+    out
 }
 
 fn ntt_all(mut polys: Vec<Poly256>) -> Vec<Poly256> {

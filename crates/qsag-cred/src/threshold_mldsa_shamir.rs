@@ -50,8 +50,8 @@ use crate::rss_mpc::{
 };
 use crate::threshold_mldsa::{
     PHASE_DKG_SHAMIR, ShamirShare, ThresholdMlDsaDkgConfig, ThresholdMlDsaError,
-    ThresholdMlDsaSignerShare, ThresholdVerificationPack, check_parameters, flatten, flatten_key, ids_bytes,
-    inv_ntt_all, lagrange_weights, sorted_distinct, to_polys,
+    ThresholdMlDsaSignerShare, ThresholdVerificationPack, check_parameters, flatten, flatten_key,
+    ids_bytes, inv_ntt_all, lagrange_weights, sorted_distinct, to_polys,
 };
 use alloc::vec;
 use alloc::vec::Vec;
