@@ -52,22 +52,25 @@ module qsag_p2_linear #(
                     .x(t5), .s(m4_s[LW*(4*c + k) +: LW]), .c(m4_c[LW*(4*c + k) +: LW]));
             end
         end
-        // me[3*k + c] + addend = 2*m4[c,k] + m4[c1,k] + m4[c2,k] + addend (7 vectors -> 2 vectors).
+        // Share row sum tk = m4[0,k] + m4[1,k] + m4[2,k] across the 3 columns, then add m4[c,k] + addend.
         for (genvar k = 0; k < 4; k++) begin : g_row
+            logic [LW-1:0] tk_s, tk_c;
+            wire [6*LW-1:0] t6 = {
+                m4_c[LW*(8 + k) +: LW], m4_s[LW*(8 + k) +: LW],
+                m4_c[LW*(4 + k) +: LW], m4_s[LW*(4 + k) +: LW],
+                m4_c[LW*(0 + k) +: LW], m4_s[LW*(0 + k) +: LW]
+            };
+            qsag_csa_reduce2 #(.W(LW), .N(6)) u_tk_csa (.x(t6), .s(tk_s), .c(tk_c));
             for (genvar c = 0; c < 3; c++) begin : g_out
-                localparam int C1 = (c + 1) % 3;
-                localparam int C2 = (c + 2) % 3;
-                wire [7*LW-1:0] t7 = {
+                wire [5*LW-1:0] t5_out = {
                     LW'(addend[67*(3*k + c) +: 67]),
-                    m4_c[LW*(4*C2 + k) +: LW],
-                    m4_s[LW*(4*C2 + k) +: LW],
-                    m4_c[LW*(4*C1 + k) +: LW],
-                    m4_s[LW*(4*C1 + k) +: LW],
-                    m4_c[LW*(4*c + k) +: LW] << 1,
-                    m4_s[LW*(4*c + k) +: LW] << 1
+                    m4_c[LW*(4*c + k) +: LW],
+                    m4_s[LW*(4*c + k) +: LW],
+                    tk_c,
+                    tk_s
                 };
-                qsag_csa_reduce2 #(.W(LW), .N(7)) u_me_csa (
-                    .x(t7), .s(me_s[LW*(3*k + c) +: LW]), .c(me_c[LW*(3*k + c) +: LW]));
+                qsag_csa_reduce2 #(.W(LW), .N(5)) u_me_csa (
+                    .x(t5_out), .s(me_s[LW*(3*k + c) +: LW]), .c(me_c[LW*(3*k + c) +: LW]));
             end
         end
     end
@@ -82,10 +85,11 @@ module qsag_p2_linear #(
         qsag_csa_reduce2 #(.W(LW), .N(12)) u_sum12 (.x(x_ext), .s(sum_s), .c(sum_c));
 
         // Lane 0: sum + 64*(~x0) + MI0_BIAS + addend[0] (5 vectors -> 2 vectors).
+        // Self-determined 64-bit ~x[63:0] zero-extended to LW=76 bits!
         wire [5*LW-1:0] t0 = {
             LW'(addend[0 +: 67]),
             MI0_BIAS,
-            LW'(~x[63:0]) << 6,
+            {12'b0, ~x[63:0]} << 6,
             sum_c,
             sum_s
         };
@@ -120,7 +124,7 @@ module qsag_p2_linear #(
     logic [12*LW-1:0] lazy_q;
     for (genvar i = 0; i < 12; i++) begin : g_red
         logic [LW-1:0] lazy_d;
-        qsag_add_split #(.W(LW), .CHUNK(20)) u_add1 (
+        qsag_add_split #(.W(LW), .CHUNK(16)) u_add1 (
             .a(sel_s[LW*i +: LW]), .b(sel_c[LW*i +: LW]), .y(lazy_d));
         always_ff @(posedge clk) lazy_q[LW*i +: LW] <= lazy_d;
 

@@ -51,31 +51,40 @@ module qsag_poseidon2_12_fpga #(
         m_sr <= {m_sr[(DL-1)*MW-1:0], e_meta};
     end
 
-    // Controls at the S-box / linear boundary.
-    logic [MW-1:0]    mid_meta;
-    logic [4:0]       mid_pass;
-    logic             mid_jive;
-    logic [FFW-1:0]   mid_ff;
-    assign mid_meta = m_sr[(P2_SBOX_LAT-1)*MW +: MW];
-    assign mid_pass = mid_meta[MW-1 -: 5];
-    assign mid_jive = mid_meta[MW-6];
-    assign mid_ff   = mid_meta[FFW-1:0];
+    // Precompute linear-layer controls one clock before the S-box / linear boundary
+    // (`m_sr[(P2_SBOX_LAT-2)*MW +: MW]`, since P2_SBOX_LAT = 13 >= 2) and register them so
+    // the 31-entry round-constant ROM and muxes never add depth to `qsag_p2_linear` Stage 1.
+    logic [MW-1:0]    pre_meta;
+    logic [4:0]       pre_pass;
+    logic             pre_jive;
+    logic [FFW-1:0]   pre_ff;
+    assign pre_meta = m_sr[(P2_SBOX_LAT-2)*MW +: MW];
+    assign pre_pass = pre_meta[MW-1 -: 5];
+    assign pre_jive = pre_meta[MW-6];
+    assign pre_ff   = pre_meta[FFW-1:0];
 
-    logic [1:0] mid_sel;
-    logic       lin_mi;
-    assign lin_mi  = (mid_pass >= 5'd5) && (mid_pass <= 5'd26);
-    assign mid_sel = (mid_pass == 5'd0) ? 2'd0 : (lin_mi ? 2'd1 : 2'd2);
+    logic             pre_mi;
+    logic [1:0]       pre_sel, mid_sel;
+    logic             lin_mi;
+    assign pre_mi  = (pre_pass >= 5'd5) && (pre_pass <= 5'd26);
+    assign pre_sel = (pre_pass == 5'd0) ? 2'd0 : (pre_mi ? 2'd1 : 2'd2);
 
     logic [767:0] rc;
-    qsag_p2_rc u_rc (.pass(mid_pass), .rc(rc));
+    qsag_p2_rc u_rc (.pass(pre_pass), .rc(rc));
 
-    logic [12*67-1:0] lin_addend;
+    logic [12*67-1:0] pre_addend, lin_addend;
     always_comb begin
-        for (int i = 0; i < 12; i++) lin_addend[67*i +: 67] = 67'(rc[64*i +: 64]);
-        if (mid_pass == 5'd30) begin
-            lin_addend = '0;
-            if (mid_jive) lin_addend[FFW-1:0] = mid_ff;
+        for (int i = 0; i < 12; i++) pre_addend[67*i +: 67] = 67'(rc[64*i +: 64]);
+        if (pre_pass == 5'd30) begin
+            pre_addend = '0;
+            if (pre_jive) pre_addend[FFW-1:0] = pre_ff;
         end
+    end
+
+    always_ff @(posedge clk) begin
+        mid_sel    <= pre_sel;
+        lin_mi     <= pre_mi;
+        lin_addend <= pre_addend;
     end
 
     logic [767:0] r_state;
@@ -94,12 +103,16 @@ module qsag_poseidon2_12_fpga #(
     assign recirc  = r_valid && (r_pass != 5'd30);
     assign in_ready = !recirc && !rst;
 
-    // Weighted feed-forward of a new job: l + 2r + 4t, below 7 * 2^64.
+    // Shallow CSA + split-add feed-forward of a new job: l + 2r + 4t, below 7 * 2^64.
     logic [FFW-1:0] in_ff;
     for (genvar i = 0; i < 4; i++) begin : g_ff
-        assign in_ff[67*i +: 67] = 67'(in_state[64*i +: 64])
-                                 + (67'(in_state[64*(4 + i) +: 64]) << 1)
-                                 + (67'(in_state[64*(8 + i) +: 64]) << 2);
+        wire [3*67-1:0] ff_terms = {
+            67'(in_state[64*(8 + i) +: 64]) << 2,
+            67'(in_state[64*(4 + i) +: 64]) << 1,
+            67'(in_state[64*i       +: 64])
+        };
+        qsag_sum_csa #(.W(67), .N(3), .CHUNK(24)) u_ff (
+            .x(ff_terms), .y(in_ff[67*i +: 67]));
     end
 
     always_ff @(posedge clk) begin

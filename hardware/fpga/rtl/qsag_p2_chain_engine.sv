@@ -46,7 +46,6 @@ module qsag_p2_chain_engine #(
     output logic [(1<<SLOTW)-1:0]  done_map,
     output logic [(1<<SLOTW)-1:0]  ok_map
 );
-    localparam logic [63:0] GL_P   = qsag_ni_pkg::GL_P;
     localparam logic [65:0] NEG_1P = 66'h3_0000_0000_FFFF_FFFF; // 2^66 - GL_P
     localparam int SLOTS = 1 << SLOTW;
     localparam int METAW = 6 + STEPW + 32;
@@ -59,11 +58,21 @@ module qsag_p2_chain_engine #(
     // Balanced binary-tree find-first-one over pend_hi (slots >= rr) and pend (all slots).
     logic [SLOTS-1:0] pend_hi;
     for (genvar i = 0; i < SLOTS; i++) begin : g_mask
-        assign pend_hi[i] = pend[i] && (SLOTW'(i) >= rr);
+        if (i == 0) begin : g_zero_slot
+            assign pend_hi[i] = pend[i] && (rr == '0);
+        end else if (i == SLOTS - 1) begin : g_top_slot
+            assign pend_hi[i] = pend[i];
+        end else begin : g_lo_slot
+            assign pend_hi[i] = pend[i] && (SLOTW'(i) >= rr);
+        end
     end
 
     logic [2*SLOTS-1:0]        v_lo, v_hi;
     logic [2*SLOTS*SLOTW-1:0]  idx_lo, idx_hi;
+    assign v_lo[0]              = 1'b0;
+    assign v_hi[0]              = 1'b0;
+    assign idx_lo[SLOTW-1:0]    = '0;
+    assign idx_hi[SLOTW-1:0]    = '0;
     for (genvar i = 0; i < SLOTS; i++) begin : g_leaf
         assign v_lo[SLOTS + i]                   = pend[i];
         assign idx_lo[(SLOTS + i)*SLOTW +: SLOTW] = SLOTW'(i);
@@ -123,9 +132,9 @@ module qsag_p2_chain_engine #(
         logic [64:0] s0;
         logic [65:0] s1;
         /* verilator lint_on UNUSEDSIGNAL */
-        qsag_add_split #(.W(65), .CHUNK(16)) u_s0 (
+        qsag_add_split #(.W(65), .CHUNK(24)) u_s0 (
             .a({1'b0, c_i}), .b({1'b0, b_i}), .y(s0));
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(16)) u_s1 (
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(24)) u_s1 (
             .x({NEG_1P, {2'b0, b_i}, {2'b0, c_i}}), .y(s1));
         assign absorbed[64*i +: 64] = !s1[65] ? s1[63:0] : s0[63:0];
     end
