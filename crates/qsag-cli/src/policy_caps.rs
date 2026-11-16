@@ -481,3 +481,488 @@ fn macaroon_verify(raw: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+pub fn run_biscuit(raw: &[String]) -> Result<(), CliError> {
+    let Some((sub, rest)) = raw.split_first() else {
+        print!("{BISCUIT_HELP}");
+        return Err(CliError::usage(
+            "biscuit requires keygen, mint, attenuate, seal, or verify",
+        ));
+    };
+    if sub == "--help" || sub == "-h" || sub == "help" {
+        print!("{BISCUIT_HELP}");
+        return Ok(());
+    }
+    match sub.as_str() {
+        "keygen" => biscuit_keygen(rest),
+        "mint" => biscuit_mint(rest),
+        "attenuate" => biscuit_attenuate(rest),
+        "seal" => biscuit_seal(rest),
+        "verify" => biscuit_verify(rest),
+        other => Err(CliError::usage(format!(
+            "unknown biscuit subcommand '{other}' (try `qsag policy biscuit --help`)"
+        ))),
+    }
+}
+
+fn save_step_key(path: &str, step: &PqBiscuitStepKey) -> Result<(), CliError> {
+    let raw = step.to_secret_bytes();
+    let hex = crate::codec::to_hex_zeroizing(&raw);
+    let hex_str = String::from_utf8(hex.0.clone())
+        .map_err(|_| CliError::state("encoding step key hex failed"))?;
+    let doc = Json::object(vec![
+        ("format", Json::str(BISCUIT_STEP_SK_FORMAT)),
+        ("spent", Json::Bool(false)),
+        ("hop_index", Json::num(step.hop_index())),
+        ("pk_root", Json::hex(step.pk_root())),
+        ("secret_key", Json::Str(hex_str)),
+    ]);
+    let bytes = ZeroizingBuf::new(doc.to_pretty().into_bytes());
+    write_new(path, &bytes, true)
+}
+
+fn consume_step_key(path: &str) -> Result<PqBiscuitStepKey, CliError> {
+    let doc = load_json_checked(path, BISCUIT_STEP_SK_FORMAT)?;
+    if matches!(doc.get("spent"), Some(Json::Bool(true))) {
+        return Err(CliError::state(
+            "PqBiscuit step key was already spent (one-time Compact1122 key cannot be reused)",
+        ));
+    }
+    let raw = from_hex(doc.field_str("secret_key")?)?;
+    let step = PqBiscuitStepKey::from_secret_bytes(&raw).map_err(map_cap_err)?;
+    // Retire and wipe the one-time step key on disk BEFORE signing/releasing the hop!
+    let tombstone = Json::object(vec![
+        ("format", Json::str(BISCUIT_STEP_SK_FORMAT)),
+        ("spent", Json::Bool(true)),
+        ("hop_index", Json::num(step.hop_index())),
+        ("pk_root", Json::hex(step.pk_root())),
+    ]);
+    replace(Path::new(path), tombstone.to_pretty().as_bytes(), || Ok(()))
+        .map_err(|e| CliError::io("retiring one-time biscuit step key", e))?;
+    Ok(step)
+}
+
+fn save_biscuit_token(path: &str, token: &PqBiscuit) -> Result<Json, CliError> {
+    let wire = token.to_bytes().map_err(map_cap_err)?;
+    let doc = Json::object(vec![
+        ("format", Json::str(BISCUIT_TOKEN_FORMAT)),
+        ("token_id", Json::hex(token.token_id())),
+        ("audience", Json::hex(token.audience())),
+        ("authority_leaf_index", Json::num(token.authority_leaf_index())),
+        ("hops", Json::num(token.blocks().len())),
+        ("sealed", Json::Bool(token.is_sealed())),
+        ("request_bound", Json::Bool(token.is_request_bound())),
+        ("token_bytes", Json::num(wire.len())),
+        ("token", Json::hex(&wire)),
+    ]);
+    write_new(path, doc.to_pretty().as_bytes(), false)?;
+    Ok(doc)
+}
+
+fn load_biscuit_token(path: &str) -> Result<PqBiscuit, CliError> {
+    let doc = load_json_checked(path, BISCUIT_TOKEN_FORMAT)?;
+    let raw = doc.field_hex("token")?;
+    PqBiscuit::from_bytes(&raw).map_err(map_cap_err)
+}
+
+fn biscuit_anchor_mac(authority_sk_bytes: &[u8], authority_id: &[u8; 32]) -> Secret32 {
+    // Derive from the master_seed bytes [8..40] inside `AUTHORITY_SK_MAGIC || master_seed || ...`
+    Secret32::new(cshake256_framed_32(
+        b"QSAG.CLI.BISCUIT.ANCHOR.MAC.V1",
+        &[&authority_sk_bytes[8..40], authority_id],
+    ))
+}
+
+fn biscuit_keygen(raw: &[String]) -> Result<(), CliError> {
+    let mut opts = vec![
+        "secret-out",
+        "public-out",
+        "tree-height",
+        "authority-id-hex",
+        "passphrase-env",
+        "passphrase-file",
+    ];
+    opts.extend_from_slice(ANCHOR_VALUE_OPTIONS);
+    let mut flags = vec!["json", "help"];
+    flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
+    let args = Args::parse(raw, &opts, &flags)?;
+    if args.flag("help") {
+        print!("{BISCUIT_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let anchor_cfg = AnchorConfig::from_args(&args)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
+    let secret_out = args.require("secret-out")?;
+    let public_out = args.require("public-out")?;
+    let tree_height_u64 = args.get_u64("tree-height")?.unwrap_or(4);
+    let tree_height = u8::try_from(tree_height_u64)
+        .ok()
+        .filter(|&h| h <= qsag_policy::MAX_AUTHORITY_TREE_HEIGHT)
+        .ok_or_else(|| CliError::usage("--tree-height must be between 0 and 8"))?;
+    let authority_id: [u8; 32] = match args.get("authority-id-hex") {
+        Some(hex) => from_hex_exact(hex, "--authority-id-hex")?,
+        None => os_random_32()?,
+    };
+    let passphrase = crate::envelope::passphrase(&args)?;
+    if let Some(cfg) = &anchor_cfg {
+        cfg.validate_isolation(&[secret_out], &[], true)?;
+    }
+
+    let mut vault = Vault::acquire(secret_out, true)?;
+    let master_seed = Secret32::new(os_random_32()?);
+    let nonce = Secret32::new(os_random_32()?);
+    let auth_sk = PqBiscuitAuthorityKey::keygen(
+        master_seed.0,
+        authority_id,
+        tree_height,
+        &CpuReferenceBackend,
+    )
+    .map_err(map_cap_err)?;
+    let pk = *auth_sk.public_key();
+    let sk_bytes = auth_sk.to_secret_bytes();
+
+    let anchor_seal = match &anchor_cfg {
+        Some(cfg) => {
+            let mac = biscuit_anchor_mac(&sk_bytes, &pk.authority_id);
+            let anchor = FsExternalMountAnchor::provision_fresh(
+                cfg,
+                &[secret_out],
+                &[],
+                BISCUIT_ANCHOR_DOMAIN,
+                pk.authority_id,
+                mac.0,
+            )?;
+            anchor.advance_floor(BISCUIT_ANCHOR_DOMAIN.as_bytes(), 0)?;
+            Some(anchor.lock_identity_seal())
+        }
+        None => None,
+    };
+
+    let sk_hex = crate::codec::to_hex_zeroizing(&sk_bytes);
+    let sk_hex_str = String::from_utf8(sk_hex.0.clone())
+        .map_err(|_| CliError::state("encoding biscuit authority secret key failed"))?;
+    let mut secret_fields = vec![
+        ("format", Json::str(BISCUIT_AUTH_SK_FORMAT)),
+        ("scheme", Json::str("pq-biscuit-compact1122")),
+        ("enrollment_nonce", Json::hex(&nonce.0[..16])),
+        ("authority_id", Json::hex(&pk.authority_id)),
+        ("tree_height", Json::num(pk.tree_height)),
+        ("uses_completed", Json::num(0u32)),
+    ];
+    if let Some(seal) = &anchor_seal {
+        secret_fields.push(("anchor_required", Json::Bool(true)));
+        secret_fields.push(("anchor_ceremony_seal", Json::hex(seal)));
+    }
+    secret_fields.push(("secret_key", Json::Str(sk_hex_str)));
+    let mut secret_doc = Json::object(secret_fields);
+
+    vault.set_key_material(&crate::envelope::open(&secret_doc, None)?);
+    if let Some(pass) = &passphrase {
+        crate::envelope::seal(&mut secret_doc, pass)?;
+    }
+    vault.bind(&mut secret_doc)?;
+    vault.seal(&mut secret_doc)?;
+    let secret_raw = ZeroizingBuf::new(secret_doc.to_pretty().into_bytes());
+    write_new(secret_out, &secret_raw, true)?;
+
+    let pk_doc = Json::object(vec![
+        ("format", Json::str(BISCUIT_AUTH_PK_FORMAT)),
+        ("scheme", Json::str("pq-biscuit-compact1122")),
+        ("authority_id", Json::hex(&pk.authority_id)),
+        ("tree_height", Json::num(pk.tree_height)),
+        ("max_mints", Json::num(1u32 << pk.tree_height)),
+        ("merkle_root", Json::hex(&pk.merkle_root)),
+        ("public_key", Json::hex(&pk.to_bytes())),
+    ]);
+    write_new(public_out, pk_doc.to_pretty().as_bytes(), false)?;
+
+    if args.flag("json") {
+        print!("{}", pk_doc.to_pretty());
+    } else {
+        println!(
+            "wrote PqBiscuit authority {} ({} max mints)",
+            public_out,
+            1u32 << pk.tree_height
+        );
+    }
+    Ok(())
+}
+
+fn biscuit_mint(raw: &[String]) -> Result<(), CliError> {
+    let mut opts = vec![
+        "secret",
+        "audience-hex",
+        "token-id-hex",
+        "token-out",
+        "step-key-out",
+        "passphrase-env",
+        "passphrase-file",
+    ];
+    opts.extend_from_slice(&CAVEAT_OPTIONS[..5]); // first-party caveats only
+    opts.extend_from_slice(ANCHOR_VALUE_OPTIONS);
+    let mut flags = vec!["json", "help"];
+    flags.extend_from_slice(ANCHOR_FLAG_OPTIONS);
+    let args = Args::parse(raw, &opts, &flags)?;
+    if args.flag("help") {
+        print!("{BISCUIT_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let anchor_cfg = AnchorConfig::from_args(&args)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
+    let secret_path = args.require("secret")?;
+    let token_out = args.require("token-out")?;
+    let step_out = args.require("step-key-out")?;
+    let audience: [u8; 32] = from_hex_exact(args.require("audience-hex")?, "--audience-hex")?;
+    let token_id: [u8; 32] = match args.get("token-id-hex") {
+        Some(hex) => from_hex_exact(hex, "--token-id-hex")?,
+        None => os_random_32()?,
+    };
+    let caveats = parse_caveats(&args, false)?;
+    let passphrase = crate::envelope::passphrase(&args)?;
+
+    let mut vault = Vault::acquire(secret_path, false)?;
+    let mut secret_doc = load_json_checked(secret_path, BISCUIT_AUTH_SK_FORMAT)?;
+    enforce_anchor_requirement(&secret_doc, anchor_cfg.as_ref())?;
+    let opened = crate::envelope::open(&secret_doc, passphrase.as_deref().map(Vec::as_slice))?;
+    vault.set_key_material(&opened);
+    vault.authenticate(&secret_doc)?;
+
+    let sk_raw = opened.secret_key()?;
+    let mut auth_sk = PqBiscuitAuthorityKey::from_secret_bytes(sk_raw).map_err(map_cap_err)?;
+    let recorded_uses = u32::try_from(secret_doc.field_u64("uses_completed")?)
+        .map_err(|_| CliError::state("uses_completed overflow"))?;
+    if auth_sk.next_leaf() < recorded_uses {
+        auth_sk
+            .advance_next_leaf(recorded_uses)
+            .map_err(map_cap_err)?;
+    }
+
+    let anchor_opt = match &anchor_cfg {
+        Some(cfg) => {
+            let mac = biscuit_anchor_mac(sk_raw, &auth_sk.public_key().authority_id);
+            let anchor = FsExternalMountAnchor::open_existing(
+                cfg,
+                &[secret_path],
+                &[],
+                BISCUIT_ANCHOR_DOMAIN,
+                auth_sk.public_key().authority_id,
+                mac.0,
+            )?;
+            anchor.verify_expected_seal(&secret_doc, "anchor_ceremony_seal")?;
+            anchor.verify_floor_at_least(
+                BISCUIT_ANCHOR_DOMAIN.as_bytes(),
+                u64::from(auth_sk.next_leaf()),
+            )?;
+            Some(anchor)
+        }
+        None => None,
+    };
+
+    if auth_sk.remaining_mints() == 0 {
+        return Err(CliError::state("PqBiscuit authority leaf budget exhausted"));
+    }
+
+    let step_entropy = Secret32::new(os_random_32()?);
+    let hedge = Secret32::new(os_random_32()?);
+    let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+    let (token, step1) = auth_sk
+        .mint(
+            &dp,
+            token_id,
+            audience,
+            &caveats,
+            step_entropy.0,
+            &hedge.0,
+            &CpuReferenceBackend,
+        )
+        .map_err(map_cap_err)?;
+
+    // Ratchet external anchor AND durable vault state BEFORE releasing the minted token or step key!
+    if let Some(anchor) = &anchor_opt {
+        anchor.advance_floor(
+            BISCUIT_ANCHOR_DOMAIN.as_bytes(),
+            u64::from(auth_sk.next_leaf()),
+        )?;
+    }
+    let updated_sk = auth_sk.to_secret_bytes();
+    let updated_hex = crate::codec::to_hex_zeroizing(&updated_sk);
+    let updated_str = String::from_utf8(updated_hex.0.clone())
+        .map_err(|_| CliError::state("encoding updated biscuit authority key failed"))?;
+    if let Json::Object(fields) = &mut secret_doc {
+        fields.retain(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "uses_completed" | "secret_key" | "envelope" | "state_mac"
+            )
+        });
+        fields.push(("uses_completed".into(), Json::num(auth_sk.next_leaf())));
+        fields.push(("secret_key".into(), Json::Str(updated_str)));
+    }
+    vault.set_key_material(&crate::envelope::open(&secret_doc, None)?);
+    if let Some(pass) = &passphrase {
+        crate::envelope::seal(&mut secret_doc, pass)?;
+    }
+    vault.seal(&mut secret_doc)?;
+    let updated_bytes = ZeroizingBuf::new(secret_doc.to_pretty().into_bytes());
+    replace(Path::new(secret_path), &updated_bytes, || Ok(()))
+        .map_err(|e| CliError::io("persisting advanced biscuit authority vault", e))?;
+
+    save_step_key(step_out, &step1)?;
+    let doc = save_biscuit_token(token_out, &token)?;
+    if args.flag("json") {
+        print!("{}", doc.to_pretty());
+    } else {
+        println!(
+            "minted PqBiscuit {token_out} (leaf {}, remaining {}) and step key {step_out}",
+            token.authority_leaf_index(),
+            auth_sk.remaining_mints()
+        );
+    }
+    Ok(())
+}
+
+fn biscuit_attenuate(raw: &[String]) -> Result<(), CliError> {
+    let mut opts = vec!["in", "step-key", "token-out", "step-key-out"];
+    opts.extend_from_slice(&CAVEAT_OPTIONS[..5]);
+    let args = Args::parse(raw, &opts, &["json", "help"])?;
+    if args.flag("help") {
+        print!("{BISCUIT_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let token = load_biscuit_token(args.require("in")?)?;
+    let token_out = args.require("token-out")?;
+    let step_out = args.require("step-key-out")?;
+    let caveats = parse_caveats(&args, false)?;
+    let step = consume_step_key(args.require("step-key")?)?;
+    let next_entropy = Secret32::new(os_random_32()?);
+    let hedge = Secret32::new(os_random_32()?);
+    let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+    let (attenuated, next_step) = step
+        .attenuate(
+            &token,
+            &dp,
+            &caveats,
+            next_entropy.0,
+            &hedge.0,
+            &CpuReferenceBackend,
+        )
+        .map_err(map_cap_err)?;
+    save_step_key(step_out, &next_step)?;
+    let doc = save_biscuit_token(token_out, &attenuated)?;
+    if args.flag("json") {
+        print!("{}", doc.to_pretty());
+    } else {
+        println!(
+            "attenuated PqBiscuit {token_out} (hops {}) and next step key {step_out}",
+            attenuated.blocks().len()
+        );
+    }
+    Ok(())
+}
+
+fn biscuit_seal(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &[
+            "in",
+            "step-key",
+            "out",
+            "audience-hex",
+            "resource-hex",
+            "actions",
+            "amount",
+            "now",
+        ],
+        &["bind-request", "json", "help"],
+    )?;
+    if args.flag("help") {
+        print!("{BISCUIT_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let token = load_biscuit_token(args.require("in")?)?;
+    let out_path = args.require("out")?;
+    let bound_req = if args.flag("bind-request") {
+        Some(parse_capability_request(&args)?)
+    } else {
+        None
+    };
+    let step = consume_step_key(args.require("step-key")?)?;
+    let hedge = Secret32::new(os_random_32()?);
+    let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+    let sealed = step
+        .seal(
+            &token,
+            &dp,
+            bound_req.as_ref(),
+            &hedge.0,
+            &CpuReferenceBackend,
+        )
+        .map_err(map_cap_err)?;
+    let doc = save_biscuit_token(out_path, &sealed)?;
+    if args.flag("json") {
+        print!("{}", doc.to_pretty());
+    } else {
+        println!(
+            "sealed PqBiscuit {out_path} ({} hops, request_bound={})",
+            sealed.blocks().len(),
+            sealed.is_request_bound()
+        );
+    }
+    Ok(())
+}
+
+fn biscuit_verify(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &[
+            "public",
+            "in",
+            "audience-hex",
+            "resource-hex",
+            "actions",
+            "amount",
+            "now",
+        ],
+        &["json", "help"],
+    )?;
+    if args.flag("help") {
+        print!("{BISCUIT_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let pk_doc = load_json_checked(args.require("public")?, BISCUIT_AUTH_PK_FORMAT)?;
+    let pk = PqBiscuitAuthorityPublicKey::from_bytes(&pk_doc.field_hex("public_key")?)
+        .map_err(map_cap_err)?;
+    let token = load_biscuit_token(args.require("in")?)?;
+    let req = parse_capability_request(&args)?;
+    let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+    token.verify(&pk, &dp, &req).map_err(map_cap_err)?;
+    let summary = Json::object(vec![
+        ("valid", Json::Bool(true)),
+        ("token_id", Json::hex(token.token_id())),
+        ("authority_id", Json::hex(&pk.authority_id)),
+        ("hops", Json::num(token.blocks().len())),
+        ("request_bound", Json::Bool(token.is_request_bound())),
+    ]);
+    if args.flag("json") {
+        print!("{}", summary.to_pretty());
+    } else {
+        println!(
+            "valid PqBiscuit {} ({} hops)",
+            to_hex(token.token_id()),
+            token.blocks().len()
+        );
+    }
+    Ok(())
+}
