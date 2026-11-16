@@ -4021,7 +4021,11 @@ fn whir_open_core(
     mut cur_sum_claim: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> HemWhirOpeningProof {
-    let lazy_cpu_r0: Option<CpuRound0Artifacts> = state.codewords_0.is_empty().then(|| {
+    // A state without its Stage-0 Reed-Solomon cache re-encodes it, but only once the
+    // Stage-0 queries need it: by then the coefficient and kernel tables have been folded
+    // `2^step_vars`-fold, so the codewords never coexist with the full-size tables.
+    let mut lazy_cpu_r0: Option<CpuRound0Artifacts> = None;
+    let rebuild_round0 = || {
         build_cpu_round0(
             &state.hypercube_evals,
             &state.salt_seed,
@@ -4030,18 +4034,15 @@ fn whir_open_core(
             state.group_arity_0,
             state.secret,
         )
-    });
-    let (lazy_monos, codewords_0, tree_0): (
-        &[Vec<Goldilocks>],
-        &[Vec<Goldilocks>],
-        &MerkleCanopyTree,
-    ) = match &lazy_cpu_r0 {
-        Some((monos, cws, tr)) => (monos.as_slice(), cws.as_slice(), tr),
-        None => (
-            state.monomial_coeffs_0.as_slice(),
-            state.codewords_0.as_slice(),
-            &state.tree_0,
-        ),
+    };
+    let release_round0 = |lazy: &mut Option<CpuRound0Artifacts>| {
+        if let Some((mut monos, mut cws, _)) = lazy.take()
+            && state.secret
+        {
+            for secret_vec in monos.iter_mut().chain(cws.iter_mut()) {
+                qsag_asm::volatile_fill(secret_vec, Goldilocks::ZERO);
+            }
+        }
     };
 
     let num_polys = state.num_polys();
@@ -4054,8 +4055,8 @@ fn whir_open_core(
     let fold_vars = state.num_vars - early_stop;
     absorb_whir_schedule(transcript, sched);
     let core_len = 1usize << state.num_vars;
-    let pre_monos =
-        precomputed_monomial_polys.or((lazy_monos.len() == num_polys).then_some(lazy_monos));
+    let pre_monos = precomputed_monomial_polys.or((state.monomial_coeffs_0.len() == num_polys)
+        .then_some(state.monomial_coeffs_0.as_slice()));
 
     let direct_unit_base =
         !state.secret && single && weights[0] == [GoldilocksExt4::ONE, GoldilocksExt4::ZERO];
@@ -4158,6 +4159,7 @@ fn whir_open_core(
 
     for (stage_idx, st) in sched.stages.iter().enumerate() {
         let arity = 1usize << st.step_vars;
+        release_round0(&mut lazy_cpu_r0);
 
         let mut stage_chals = [[GoldilocksExt4::ZERO; 3]; MAX_FOLD_STEP_VARS];
         for (fold_in_stage, slot) in stage_chals.iter_mut().take(st.step_vars).enumerate() {
@@ -4224,6 +4226,14 @@ fn whir_open_core(
 
             let shift_claims = if stage_idx == 0 {
                 stage_pow_nonce_0 = pow_nonce;
+                if state.codewords_0.is_empty() {
+                    lazy_cpu_r0 = Some(rebuild_round0());
+                }
+                let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) =
+                    match &lazy_cpu_r0 {
+                        Some((_, codewords, tree)) => (codewords.as_slice(), tree),
+                        None => (state.codewords_0.as_slice(), &state.tree_0),
+                    };
                 let num_groups_0 = state.num_groups_0();
                 let domain_0 = codewords_0[0].len();
                 let log_d0 = domain_0.trailing_zeros() as usize;
@@ -4369,6 +4379,14 @@ fn whir_open_core(
 
             if stage_idx == 0 {
                 stage_pow_nonce_0 = pow_nonce;
+                if state.codewords_0.is_empty() {
+                    lazy_cpu_r0 = Some(rebuild_round0());
+                }
+                let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) =
+                    match &lazy_cpu_r0 {
+                        Some((_, codewords, tree)) => (codewords.as_slice(), tree),
+                        None => (state.codewords_0.as_slice(), &state.tree_0),
+                    };
                 let num_groups_0 = state.num_groups_0();
                 let domain_0 = codewords_0[0].len();
                 let log_d0 = domain_0.trailing_zeros() as usize;
@@ -4469,13 +4487,9 @@ fn whir_open_core(
         }
     }
 
+    release_round0(&mut lazy_cpu_r0);
     if state.secret {
         qsag_asm::volatile_fill(&mut c_scratch, GoldilocksExt4::ZERO);
-        if let Some((mut monos, mut cws, _)) = lazy_cpu_r0 {
-            for secret_vec in monos.iter_mut().chain(cws.iter_mut()) {
-                qsag_asm::volatile_fill(secret_vec, Goldilocks::ZERO);
-            }
-        }
     }
 
     HemWhirOpeningProof {
@@ -5603,6 +5617,30 @@ pub fn whir_open_blend(
         claim,
         transcript,
     )
+}
+
+/// [`whir_open_blend`] taking the monomial coefficients from `state`: its cache when it has
+/// one, otherwise one polynomial at a time from the hypercube evaluations.
+pub(crate) fn whir_open_blend_from_state(
+    state: &HemWhirProverState,
+    scalars: &[GoldilocksExt4],
+    kernel: Vec<GoldilocksExt4>,
+    claim: GoldilocksExt4,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> HemWhirOpeningProof {
+    assert!(state.num_polys() >= 2 && scalars.len() == state.num_polys());
+    assert_eq!(kernel.len(), (1usize << state.num_vars) + 2);
+    let weights: Vec<[GoldilocksExt4; 2]> =
+        scalars.iter().map(|&s| [s, GoldilocksExt4::ZERO]).collect();
+    whir_open_core(state, None, &weights, kernel, claim, transcript)
+}
+
+/// Drop the Stage-0 Reed-Solomon cache of a public CPU commitment. An opening re-encodes
+/// it from the retained evaluations, so the proof is unchanged and the opening is slower.
+pub(crate) fn release_round0_cache(state: &mut HemWhirProverState) {
+    debug_assert!(!state.secret);
+    state.codewords_0 = Vec::new();
+    state.monomial_coeffs_0 = Vec::new();
 }
 
 /// Verify a [`whir_open_blend`] proof for the functional

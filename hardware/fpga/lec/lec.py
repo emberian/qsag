@@ -232,18 +232,45 @@ def gf_mul_spec(a, b):
         prev = f"g{n}"
     return "".join(f"(let ({l}) " for l in lets) + prev + ")" * len(lets)
 
-def check_gf_mul(tag, files, expect, onehot=None, required=True, secs=None):
+def check_gf_mul(tag, files, expect, required=True, secs=None):
     ys = yosys_smt2(tag, "qsag_gf128_clmul", files)
     a, b = acc("a", "s0"), acc("b", "s0")
-    body = ys + unroll(3)
-    if onehot is None:
-        stmt = "qsag_gf128_clmul: for all 2^256 inputs, r (3 clocks later) = a*b in GF(2^128) (bit-serial spec)"
-    else:
-        body += f"(declare-const j (_ BitVec 128))\n(assert (bvult j {bv(128, 128)}))\n" \
-                f"(assert (= {b} (bvshl {bv(1, 128)} j)))\n"
-        stmt = "qsag_gf128_clmul: for all a and every basis element b = x^j, r = a * x^j in GF(2^128)"
-    return record(tag, stmt, expect, body + f"(assert (not (= {acc('r', 's3')} {gf_mul_spec(a, b)})))\n(check-sat)\n",
+    stmt = "qsag_gf128_clmul: for all 2^256 inputs, r (3 clocks later) = a*b in GF(2^128) (bit-serial spec)"
+    return record(tag, stmt, expect, ys + unroll(3) + f"(assert (not (= {acc('r', 's3')} {gf_mul_spec(a, b)})))\n(check-sat)\n",
                   required=required, secs=secs)
+
+def check_gf_mul_basis(tag, files, expect):
+    """For each of the 128 basis elements b = x^j separately: for all a, r = a * x^j.
+    With the multiplier's bilinearity (anf_check.py) this is the whole function; on its own it
+    is 128 universally quantified statements, one incremental z3 query each."""
+    ys = yosys_smt2(tag, "qsag_gf128_clmul", files)
+    a, b = acc("a", "s0"), acc("b", "s0")
+    xp = gf_xpow()
+    text = ys + unroll(3)
+    for j in range(128):
+        # a * x^j = XOR over the set bits a_i of the constants x^(i+j) mod P
+        e = bv(0, 128)
+        for i in range(128):
+            e = f"(bvxor {e} (ite (= ((_ extract {i} {i}) {a}) #b1) {bv(xp[i + j], 128)} {bv(0, 128)}))"
+        text += f"(push 1)\n(assert (= {b} {bv(1 << j, 128)}))\n(assert (not (= {acc('r', 's3')} {e})))\n(check-sat)\n(pop 1)\n"
+    path = os.path.join(OUT, tag + ".smt2")
+    open(path, "w").write(text)
+    t0 = time.time()
+    try:
+        r = subprocess.run(["z3", f"-T:{Z3_SECS * 2}", path], capture_output=True, text=True, timeout=Z3_SECS * 2 + 30)
+        answers = r.stdout.split()
+    except subprocess.TimeoutExpired:
+        answers = ["timeout"]
+    dt = time.time() - t0
+    n_unsat, n_sat = answers.count("unsat"), answers.count("sat")
+    got = "unsat" if n_unsat == 128 else ("sat" if n_sat else "undecided")
+    ok = got == expect
+    tagr = "PASS" if ok else "FAIL"
+    stmt = (f"qsag_gf128_clmul: for all a and each basis element b = x^j (128 queries), r (3 clocks later) = a * x^j; "
+            f"{n_unsat} unsat, {n_sat} sat")
+    results.append((tagr, tag, stmt, expect, got, dt))
+    print(f"[{tagr}] {tag}: z3 {got} in {dt:.1f}s (expected {expect}) -- {stmt}", flush=True)
+    return ok
 
 def group_gl():
     check_reduce_algebra()
@@ -265,12 +292,12 @@ def group_glmut():
 
 def group_gf():
     check_gf_reduce("gf128_reduce", [GFRED], "unsat")
-    check_gf_mul("gf128_clmul_basis", [KARA, GFRED, GFMUL], "unsat", onehot=True)
+    check_gf_mul_basis("gf128_clmul_basis", [KARA, GFRED, GFMUL], "unsat")
     m5 = mutate(GFRED, "(134'(hi) << 7)", "(134'(hi) << 6)", "mut_gf_reduce.sv")
     check_gf_reduce("mut_gf128_reduce_tap", [m5], "sat")
     m6 = mutate(KARA, "assign xmid = mid ^ hi ^ (2*HH-1)'(lo);", "assign xmid = mid ^ hi;", "mut_kara.sv")
     check_gf_mul("mut_gf128_clmul_kara", [m6, GFRED, GFMUL], "sat")
-    check_gf_mul("mut_gf128_clmul_basis", [m6, GFRED, GFMUL], "sat", onehot=True)
+    check_gf_mul_basis("mut_gf128_clmul_basis", [m6, GFRED, GFMUL], "sat")
 
 def group_try():
     # attempts that are recorded, not required: bit-precise multiplier miters
