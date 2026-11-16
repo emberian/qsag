@@ -96,5 +96,5 @@ def hostileTranscriptCheck : IO Unit := do
   IO.println "RSS hostile transcripts:wrong binding/round/sender and replay abort; forged sender blocked; authenticated wrong value remains pending and requires active gate check"
 
 
-  only_corrupt_sender_can_inject visible_payload_incident networkStep_preserves_addresses
+-- Network invariants are audited at their definition site in RssParticipantNetwork.
 end Qsag.RssParticipant.Checks

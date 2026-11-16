@@ -34,7 +34,9 @@ theorem selectedLeaf_from_actual_cut (profile : RssProduction.Profile)
       (selectedValues profile layer tree kp digits) =
       mpcComputeWotsPk cshake256Suite profile.params (RssProduction.sharedOracle profile).toPqHashMpcOracles
         profile.material.pkSeed layer tree kp := by
-  have hm := (RssProduction.sharedOracle_matches profile).1
+  have hmKey := (RssProduction.sharedOracle_matches profile).1
+  have hm := hmKey
+  rw [PqHashMpcOracles.MatchesKey.public_eq_1] at hm
   unfold completeSelectedLeaf selectedValues
   simp only [hm.2.1]
   have h := recoverWotsPkFromSig_eq_computeWotsPk cshake256Suite profile.params
@@ -43,7 +45,7 @@ theorem selectedLeaf_from_actual_cut (profile : RssProduction.Profile)
   rw [h]
   exact (mpcComputeWotsPk_eq cshake256Suite profile.params
     (RssProduction.sharedOracle profile).toPqHashMpcOracles (RssProduction.referenceKey profile)
-    hm layer tree kp).symm
+    hmKey layer tree kp).symm
 
 /-- The digit check needed for public completion is obtained from the actual
 public grinding branch, rather than asserted by a successful-signature premise. -/
