@@ -1,8 +1,8 @@
 module
-import all Qsag.Oracle.Keccak
+public import Qsag.Oracle.Keccak
 import Qsag.Protocol.Threshold.ProductionCoinReduction
-import all Qsag.Protocol.Threshold.ProductionCoinReduction
-import all Qsag.Protocol.Threshold.RssSlhFullSecurity
+public import Qsag.Protocol.Threshold.ProductionCoinReduction
+public import Qsag.Protocol.Threshold.RssSlhFullSecurity
 
 open Qsag Qsag.ProductionCoinReduction
 

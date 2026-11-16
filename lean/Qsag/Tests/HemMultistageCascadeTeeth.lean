@@ -1,5 +1,5 @@
 module
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Math.GoldilocksBase
 /-
 Teeth and acceptance witnesses for the multi-stage Hem cascade IOP
 (`Qsag.Protocol.Aggregation.HemMultistageCascadeRbr`), on the 64 → 32 → 16 point witness chain.
@@ -15,13 +15,12 @@ Teeth and acceptance witnesses for the multi-stage Hem cascade IOP
   the verifier of the sound theorem is satisfiable through both fold stages.
 -/
 public import Qsag.Protocol.Aggregation.HemMultistageCascadeRbr
-import all Qsag.Protocol.Aggregation.HemMultistageCascadeRbr
-import all Qsag.Protocol.Aggregation.HemRbrSoundness
-import all Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
-import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
-import all Qsag.Coding.Cwyz26
-import all Qsag.Math.Goldilocks
+public import Qsag.Protocol.Aggregation.HemRbrSoundness
+public import Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
+public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
+public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
+public import Qsag.Coding.Cwyz26
+public import Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

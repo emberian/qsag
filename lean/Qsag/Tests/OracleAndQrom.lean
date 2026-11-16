@@ -1,22 +1,17 @@
 module
-import all Qsag.Math.GoldilocksBase
-import all Qsag.Math.Counting
-import all Qsag.Oracle.FiatShamir
-import all Qsag.Math.Goldilocks
-import all Qsag.Oracle.Keccak
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Oracle.Sponge
-public import Qsag.Tactic.Prelude
+public import Qsag.Math.GoldilocksBase
+public import Qsag.Math.Counting
+public import Qsag.Oracle.FiatShamir
+public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Keccak
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Oracle.Sponge
+public import Qsag.Tactic.Prelude
 public import Qsag.Oracle.Spn
-import all Qsag.Oracle.Spn
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Spec.Bounds
-import all Qsag.Spec.Encoding
+public import Qsag.Math.Gf2Pow128
+public import Qsag.Spec.Bounds
+public import Qsag.Spec.Encoding
 public import Qsag.Oracle.Qrom
-import all Qsag.Oracle.Qrom
 public section
 set_option exponentiation.threshold 8192
 namespace Qsag
@@ -142,13 +137,13 @@ theorem witness_keccak_midstate_canopy :
   ⟨qsagTagCanopyLeaf, [0xde, 0xad, 0xbe, 0xef], 32, by decide, by decide, by simp⟩
 
 #verify_constructive Qsag.pad10star1_joint_injective Qsag.pad10star1_injective
-  Qsag.absorbPayload_cross_domain_disjoint Qsag.evalSponge_keccak_eq_shake256Xof
+  Qsag.absorbPayload_cross_domain_encodings_ne Qsag.evalSponge_keccak_eq_shake256Xof
   Qsag.leftEncode_prefix_inj Qsag.encodeString_prefix_inj Qsag.cshakePrefix_prefix_free
-  Qsag.cshakePrefix_injective Qsag.cshake256_domains_disjoint
+  Qsag.cshakePrefix_injective Qsag.cshake256_encodings_ne
   Qsag.cshake_precomputed_midstate_eq Qsag.keccak_cshake256_precomputed_midstate_eq
 
 #verify_inhabited Qsag.pad10star1_injective Qsag.witness_pad10star1_valid_domain
-#verify_inhabited Qsag.absorbPayload_cross_domain_disjoint Qsag.witness_cross_domain_pair
+#verify_inhabited Qsag.absorbPayload_cross_domain_encodings_ne Qsag.witness_cross_domain_pair
 #verify_constructive Qsag.witness_cshakePrefix_canopy
 #verify_inhabited Qsag.keccak_cshake256_precomputed_midstate_eq Qsag.witness_keccak_midstate_canopy
 
