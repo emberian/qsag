@@ -321,8 +321,8 @@ impl RssKeyShare256 {
             let mut n8 = [0u8; 8];
             m8.copy_from_slice(&mine_bytes[8 * i..8 * i + 8]);
             n8.copy_from_slice(&next_bytes[8 * i..8 * i + 8]);
-            pair.0[i] = u64::from_le_bytes(m8);
-            pair.1[i] = u64::from_le_bytes(n8);
+            (*pair).0[i] = u64::from_le_bytes(m8);
+            (*pair).1[i] = u64::from_le_bytes(n8);
         }
         Ok(pair)
     }

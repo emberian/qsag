@@ -2891,3 +2891,1269 @@ impl BaggyEngine for CnfRssProjectedEngine<'_> {
 
 // ============================================================================
 // 5. Sealed `SlhMpcOracles` Implementation for NIST FIPS 205 `SLH-DSA-SHAKE-*`
+// ============================================================================
+
+fn fips205_prf_frame(n: usize, pk_seed: &[u8], adrs: &Fips205Adrs) -> [u8; SHAKE256_RATE_BYTES] {
+    let mut frame = [0u8; SHAKE256_RATE_BYTES];
+    frame[..n].copy_from_slice(&pk_seed[..n]);
+    frame[n..n + 32].copy_from_slice(&adrs.to_bytes());
+    frame[2 * n + 32] = 0x1f;
+    frame[SHAKE256_RATE_BYTES - 1] ^= 0x80;
+    frame
+}
+
+impl CnfRssProjectedEngine<'_> {
+    fn absorb_shared_digests_prefix(
+        &self,
+        n: usize,
+        prev: &CnfRssSharedDigests,
+        secret_byte_offset: usize,
+        sh: &mut [Vec<u8>],
+        mac: &mut [Vec<u8>],
+        new_delta_shares: &[[u8; MINIMAC_CODE_N]],
+    ) {
+        let t = self.projected.quorum.len();
+        let mut new_delta_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+        for d in new_delta_shares {
+            for j in 0..MINIMAC_CODE_N {
+                new_delta_sum[j] ^= d[j];
+            }
+        }
+        let mut cur_cw = SecretBuffer([0u8; MINIMAC_CODE_N]);
+        let mut new_mac_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+        for bit in 0..(8 * n) {
+            let src_off = bit * MINIMAC_CODE_N;
+            let dst_off = (8 * secret_byte_offset + bit) * MINIMAC_CODE_N;
+            cur_cw.fill(0);
+            for u in 0..t {
+                for j in 0..MINIMAC_CODE_N {
+                    let v = prev.sh[u][src_off + j];
+                    sh[u][dst_off + j] ^= v;
+                    cur_cw[j] ^= v;
+                }
+            }
+            qsag_asm::gf256_shamir_mul(&mut *new_mac_sum, &*cur_cw, &*new_delta_sum);
+            for u in 0..(t - 1) {
+                let qu = self.projected.quorum[u];
+                let qt = self.projected.quorum[t - 1];
+                let mut xof = Cshake256Xof::new(b"QSAG.CNF_RSS.SLH_CHAIN_MAC/v1");
+                xof.absorb(&self.quorum_shares[u].pair_prf_keys[qt]);
+                xof.absorb(&self.session_id);
+                xof.absorb(&new_delta_shares[u]);
+                xof.absorb(&(bit as u64).to_be_bytes());
+                let mut mu = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                xof.squeeze(&mut *mu);
+                for j in 0..MINIMAC_CODE_N {
+                    mac[u][dst_off + j] ^= mu[j];
+                    new_mac_sum[j] ^= mu[j];
+                }
+            }
+            for j in 0..MINIMAC_CODE_N {
+                mac[t - 1][dst_off + j] ^= new_mac_sum[j];
+            }
+        }
+    }
+
+    /// Evaluate a batch of FIPS 205 `PRF -> F^{target_steps}` chains in parallel 56-lane `MiniMAC` waves.
+    fn eval_slh_chains_parallel(
+        &mut self,
+        n: usize,
+        pk_seed: &[u8],
+        chains: &[(Fips205Adrs, Vec<Fips205Adrs>)],
+    ) -> Result<Vec<SlhBlock>, Fips205Error> {
+        if chains.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chunks: Vec<&[(Fips205Adrs, Vec<Fips205Adrs>)]> =
+            chains.chunks(MINIMAC_DATA_K).collect();
+        let max_steps_per_chunk: Vec<usize> = chunks
+            .iter()
+            .map(|c| c.iter().map(|(_, s)| s.len()).max().unwrap_or(0))
+            .collect();
+        let total_perms: usize = max_steps_per_chunk.iter().map(|&ms| 1 + ms).sum();
+        let mut all_tuples = self
+            .source
+            .next_wave_tuples(total_perms)
+            .map_err(|_| Fips205Error::MpcActiveTamperDetected)?;
+
+        let mut jobs = Vec::with_capacity(chunks.len());
+        let mut base_w = self.wave_ctr;
+        for (&chunk, &max_s) in chunks.iter().zip(max_steps_per_chunk.iter()) {
+            let need = 1 + max_s;
+            let split = all_tuples.len() - need;
+            let c_tuples = all_tuples.split_off(split);
+            jobs.push((chunk, max_s, base_w, c_tuples));
+            base_w += need;
+        }
+        self.wave_ctr = base_w;
+
+        let zero_mid = [0u64; 25];
+        let run_job = |(chunk, max_s, start_w, mut c_tuples): (
+            &[(Fips205Adrs, Vec<Fips205Adrs>)],
+            usize,
+            usize,
+            Vec<ProjectedWaveTuple>,
+        )|
+         -> Result<(CnfRssSharedDigests, Vec<PendingWaveVerification>), CnfRssError> {
+            let tup0 = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
+            let frames0: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
+                .iter()
+                .map(|(prf_a, _)| fips205_prf_frame(n, pk_seed, prf_a))
+                .collect();
+            let (mut sh0, mut mac0) =
+                self.init_public_states(&zero_mid, &frames0, &tup0.delta_shares);
+            self.absorb_projected_key(false, n + 32, &mut sh0, &mut mac0, &tup0.delta_shares);
+            let (mut cur_dig, pend0) = eval_minimac_wave_perm(
+                &self.tables,
+                &self.session_id,
+                start_w,
+                chunk.len(),
+                sh0,
+                mac0,
+                tup0,
+                #[cfg(test)]
+                self.fault,
+            )?;
+            let mut pends = vec![pend0];
+
+            for step in 0..max_s {
+                let mut frames_s = Vec::with_capacity(chunk.len());
+                let mut active_step_mask = [false; MINIMAC_DATA_K];
+                for (lane, (_, steps_a)) in chunk.iter().enumerate() {
+                    if let Some(a) = steps_a.get(step) {
+                        frames_s.push(fips205_prf_frame(n, pk_seed, a));
+                        active_step_mask[lane] = true;
+                    } else {
+                        frames_s.push(fips205_prf_frame(n, pk_seed, &Fips205Adrs::ZERO));
+                    }
+                }
+                let tup_s = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
+                let (mut sh_s, mut mac_s) =
+                    self.init_public_states(&zero_mid, &frames_s, &tup_s.delta_shares);
+                self.absorb_shared_digests_prefix(
+                    n,
+                    &cur_dig,
+                    n + 32,
+                    &mut sh_s,
+                    &mut mac_s,
+                    &tup_s.delta_shares,
+                );
+                let (next_dig, pend_s) = eval_minimac_wave_perm(
+                    &self.tables,
+                    &self.session_id,
+                    start_w + 1 + step,
+                    chunk.len(),
+                    sh_s,
+                    mac_s,
+                    tup_s,
+                    #[cfg(test)]
+                    self.fault,
+                )?;
+                pends.push(pend_s);
+
+                // Selectively advance ONLY lanes with `active_step_mask[lane] == true` (`< target_steps`)!
+                let all_active = active_step_mask[..chunk.len()].iter().all(|&b| b);
+                if all_active {
+                    cur_dig = next_dig;
+                } else {
+                    // Multiplex `cur_dig` and `next_dig` bit-by-bit onto `next_dig.delta_shares`
+                    let t = self.projected.quorum.len();
+                    let mut next_delta_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                    for d in next_dig.delta_shares.iter() {
+                        for j in 0..MINIMAC_CODE_N {
+                            next_delta_sum[j] ^= d[j];
+                        }
+                    }
+                    let mut merged_sh = SecretBuffer(vec![vec![0u8; DIGEST_BITS * MINIMAC_CODE_N]; t]);
+                    let mut merged_mac = SecretBuffer(vec![vec![0u8; DIGEST_BITS * MINIMAC_CODE_N]; t]);
+                    for bit in 0..(8 * n) {
+                        let off = bit * MINIMAC_CODE_N;
+                        let mut full_bits56 = 0u64;
+                        for lane in 0..chunk.len() {
+                            let mut b_val = 0u8;
+                            for u in 0..t {
+                                b_val ^= if active_step_mask[lane] {
+                                    next_dig.sh[u][off + lane]
+                                } else {
+                                    cur_dig.sh[u][off + lane]
+                                };
+                            }
+                            full_bits56 |= u64::from(b_val & 1) << lane;
+                        }
+                        let mut full_cw = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                        self.tables.encode_secret_bits56(full_bits56, &mut full_cw);
+                        let mut full_mac = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                        qsag_asm::gf256_shamir_mul(&mut *full_mac, &*full_cw, &*next_delta_sum);
+                        let mut rem_cw = *full_cw;
+                        let mut rem_mac = *full_mac;
+                        for u in 0..(t - 1) {
+                            let qu = self.projected.quorum[u];
+                            let qt = self.projected.quorum[t - 1];
+                            let mut xof = Cshake256Xof::new(b"QSAG.CNF_RSS.SLH_MUX/v1");
+                            xof.absorb(&self.quorum_shares[u].pair_prf_keys[qt]);
+                            xof.absorb(&self.session_id);
+                            xof.absorb(&next_dig.delta_shares[u]);
+                            xof.absorb(&((step as u64) << 16 | bit as u64).to_be_bytes());
+                            let mut m_sh = SecretBuffer([0u8; 2 * MINIMAC_CODE_N]);
+                            xof.squeeze(&mut *m_sh);
+                            for j in 0..MINIMAC_CODE_N {
+                                merged_sh[u][off + j] = m_sh[j];
+                                rem_cw[j] ^= m_sh[j];
+                                merged_mac[u][off + j] = m_sh[MINIMAC_CODE_N + j];
+                                rem_mac[j] ^= m_sh[MINIMAC_CODE_N + j];
+                            }
+                        }
+                        merged_sh[t - 1][off..off + MINIMAC_CODE_N].copy_from_slice(&rem_cw);
+                        merged_mac[t - 1][off..off + MINIMAC_CODE_N].copy_from_slice(&rem_mac);
+                    }
+                    cur_dig = CnfRssSharedDigests {
+                        delta_shares: next_dig.delta_shares,
+                        sh: merged_sh,
+                        mac: merged_mac,
+                        active_lanes: chunk.len(),
+                    };
+                }
+            }
+            Ok((cur_dig, pends))
+        };
+
+        let outcomes: Vec<Result<(CnfRssSharedDigests, Vec<PendingWaveVerification>), CnfRssError>> = {
+            #[cfg(feature = "std")]
+            {
+                let workers = std::thread::available_parallelism()
+                    .map_or(1, usize::from)
+                    .min(12);
+                let batch_sz = jobs.len().div_ceil(workers).max(1);
+                let mut results: Vec<
+                    Option<Result<(CnfRssSharedDigests, Vec<PendingWaveVerification>), CnfRssError>>,
+                > = (0..jobs.len()).map(|_| None).collect();
+                let run_ref = &run_job;
+                std::thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    for (j_slice, r_slice) in
+                        jobs.chunks_mut(batch_sz).zip(results.chunks_mut(batch_sz))
+                    {
+                        handles.push(scope.spawn(move || {
+                            for (job, dst) in j_slice.iter_mut().zip(r_slice.iter_mut()) {
+                                let taken = (job.0, job.1, job.2, core::mem::take(&mut job.3));
+                                *dst = Some(run_ref(taken));
+                            }
+                        }));
+                    }
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                });
+                results.into_iter().flatten().collect()
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                jobs.into_iter().map(run_job).collect()
+            }
+        };
+
+        let mut final_digs = Vec::with_capacity(outcomes.len());
+        for outcome in outcomes {
+            match outcome {
+                Ok((dig, pends)) => {
+                    self.pending.extend(pends);
+                    final_digs.push(dig);
+                }
+                Err(e) => {
+                    let _ = self.fail::<()>(e);
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+            }
+        }
+
+        let groups: Vec<(&CnfRssSharedDigests, u64)> = final_digs
+            .iter()
+            .map(|d| (d, (1u64 << d.active_lanes) - 1))
+            .collect();
+        let opened = self
+            .open_masked_groups(&groups)
+            .map_err(|_| Fips205Error::MpcActiveTamperDetected)?;
+
+        let mut out = Vec::with_capacity(chains.len());
+        for (dig, g_nodes) in final_digs.iter().zip(opened.iter()) {
+            for node in g_nodes.iter().take(dig.active_lanes) {
+                let mut blk = SlhBlock::zero(n);
+                blk.bytes[..n].copy_from_slice(&node[..n]);
+                out.push(blk);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl sealed_mpc_oracles::Sealed for CnfRssProjectedEngine<'_> {}
+
+impl SlhMpcOracles for CnfRssProjectedEngine<'_> {
+    fn bind_key_params(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+    ) -> Result<(), Fips205Error> {
+        if self.is_poisoned() {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        for s in &mut self.quorum_shares {
+            s.bind_slh_params(params, pk_seed)?;
+        }
+        Ok(())
+    }
+
+    fn eval_prf_msg_mpc(
+        &mut self,
+        n: usize,
+        opt_rand: &[u8],
+        m_prime: &[u8],
+    ) -> Result<(SlhBlock, CutBoundaryMacToken), Fips205Error> {
+        if self.is_poisoned() {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        if n != self.projected.key_len
+            || opt_rand.len() != n
+            || self.quorum_shares.iter().any(|s| s.scheme_identity().is_some())
+        {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let total_len = 2 * n + m_prime.len();
+        let num_blocks = (total_len / SHAKE256_RATE_BYTES) + 1;
+        let mut padded_pub = vec![0u8; num_blocks * SHAKE256_RATE_BYTES];
+        padded_pub[n..2 * n].copy_from_slice(opt_rand);
+        padded_pub[2 * n..2 * n + m_prime.len()].copy_from_slice(m_prime);
+        padded_pub[total_len] ^= 0x1f;
+        padded_pub[num_blocks * SHAKE256_RATE_BYTES - 1] ^= 0x80;
+
+        let zero_mid = [0u64; 25];
+        let t = self.projected.quorum.len();
+        let mut sponge_sh: Option<SecretVec<Vec<u8>>> = None;
+        let mut sponge_mac: Option<SecretVec<Vec<u8>>> = None;
+        let mut sponge_deltas: Option<SecretVec<[u8; MINIMAC_CODE_N]>> = None;
+
+        for blk_idx in 0..num_blocks {
+            let mut blk = [0u8; SHAKE256_RATE_BYTES];
+            blk.copy_from_slice(
+                &padded_pub[blk_idx * SHAKE256_RATE_BYTES..(blk_idx + 1) * SHAKE256_RATE_BYTES],
+            );
+            let mut tuples = self
+                .source
+                .next_wave_tuples(1)
+                .map_err(|_| Fips205Error::MpcActiveTamperDetected)?;
+            let tuple = tuples.pop().ok_or(Fips205Error::MpcActiveTamperDetected)?;
+            let (mut pub_sh, mut pub_mac) =
+                self.init_public_states(&zero_mid, &[blk], &tuple.delta_shares);
+
+            if blk_idx == 0 {
+                self.absorb_projected_key(true, 0, &mut pub_sh, &mut pub_mac, &tuple.delta_shares);
+            } else if let Some(prev_sh) = &sponge_sh {
+                // Re-authenticate full 1600-bit sponge state onto `tuple.delta_shares`
+                let mut d_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                for d in tuple.delta_shares.iter() {
+                    for j in 0..MINIMAC_CODE_N {
+                        d_sum[j] ^= d[j];
+                    }
+                }
+                let mut d_tile = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
+                for c in d_tile.chunks_exact_mut(MINIMAC_CODE_N) {
+                    c.copy_from_slice(&*d_sum);
+                }
+                let mut full_state = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
+                for u in 0..t {
+                    for i in 0..STATE_CODE_BYTES {
+                        pub_sh[u][i] ^= prev_sh[u][i];
+                        full_state[i] ^= prev_sh[u][i];
+                    }
+                }
+                let mut m_sum = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
+                qsag_asm::gf256_shamir_mul(&mut m_sum, &full_state, &d_tile);
+                for i in 0..STATE_CODE_BYTES {
+                    pub_mac[0][i] ^= m_sum[i];
+                }
+            }
+
+            let w_idx = self.wave_ctr;
+            self.wave_ctr += 1;
+            // Preserve full 1600-bit state if more blocks follow!
+            if blk_idx + 1 < num_blocks {
+                // Run full 24 rounds keeping 1600 bits:
+                let (dig, pend) = {
+                    // Temporarily clone not needed: `eval_minimac_wave_perm` truncates only at end;
+                    // for multi-block `M'` (`rare`, `> 104` bytes), evaluate 1 block cleanly:
+                    let mut full_sh = SecretBuffer(pub_sh.to_vec());
+                    let mut full_mac = SecretBuffer(pub_mac.to_vec());
+                    let (_, pend) = eval_minimac_wave_perm_keep_full(
+                        &self.tables,
+                        &self.session_id,
+                        w_idx,
+                        &mut full_sh,
+                        &mut full_mac,
+                        tuple,
+                    )
+                    .map_err(|e| {
+                        let _ = self.fail::<()>(e);
+                        Fips205Error::MpcActiveTamperDetected
+                    })?;
+                    (full_sh, pend)
+                };
+                self.pending.push(pend);
+                sponge_sh = Some(dig);
+            } else {
+                let (dig, pend) = eval_minimac_wave_perm(
+                    &self.tables,
+                    &self.session_id,
+                    w_idx,
+                    1,
+                    pub_sh,
+                    pub_mac,
+                    tuple,
+                    #[cfg(test)]
+                    self.fault,
+                )
+                .map_err(|e| {
+                    let _ = self.fail::<()>(e);
+                    Fips205Error::MpcActiveTamperDetected
+                })?;
+                self.pending.push(pend);
+                sponge_deltas = Some(dig.delta_shares);
+                sponge_sh = Some(dig.sh);
+                sponge_mac = Some(dig.mac);
+            }
+        }
+
+        let final_dig = CnfRssSharedDigests {
+            delta_shares: sponge_deltas.ok_or(Fips205Error::MpcActiveTamperDetected)?,
+            sh: sponge_sh.ok_or(Fips205Error::MpcActiveTamperDetected)?,
+            mac: sponge_mac.ok_or(Fips205Error::MpcActiveTamperDetected)?,
+            active_lanes: 1,
+        };
+        let opened = self
+            .open_masked_groups(&[(&final_dig, 1)])
+            .map_err(|_| Fips205Error::MpcActiveTamperDetected)?;
+        let mut blk = SlhBlock::zero(n);
+        blk.bytes[..n].copy_from_slice(&opened[0][0][..n]);
+        Ok((blk, CutBoundaryMacToken::mint_verified()))
+    }
+
+    fn eval_fors_trees_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        base_adrs: Fips205Adrs,
+        fors_indices: &[u32],
+    ) -> Result<ForsMpcOutput, Fips205Error> {
+        self.bind_key_params(params, pk_seed)?;
+        let n = params.n;
+        if fors_indices.len() != params.k {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let t_leaves = 1usize << params.a;
+        let total_leaves = params.k * t_leaves;
+
+        let mut chains = Vec::with_capacity(params.k + total_leaves);
+        for (i, &idx_u32) in fors_indices.iter().enumerate() {
+            let idx = idx_u32 as usize;
+            if idx >= t_leaves {
+                return Err(Fips205Error::MpcActiveTamperDetected);
+            }
+            let mut prf_a = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+            prf_a.key_pair = base_adrs.key_pair;
+            prf_a.f6 = (i * t_leaves + idx) as u32;
+            chains.push((prf_a, Vec::new()));
+        }
+        for flat in 0..total_leaves {
+            let mut prf_a = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+            prf_a.key_pair = base_adrs.key_pair;
+            prf_a.f6 = flat as u32;
+            let mut leaf_a = base_adrs;
+            leaf_a.adrs_type = Fips205AdrsType::ForsTree;
+            leaf_a.f5 = 0;
+            leaf_a.f6 = flat as u32;
+            chains.push((prf_a, vec![leaf_a]));
+        }
+
+        let mut all_out = self.eval_slh_chains_parallel(n, pk_seed, &chains)?;
+        let flat_leaves = all_out.split_off(params.k);
+        let revealed_sks = all_out;
+        let mut fors_all_leaves = Vec::with_capacity(params.k);
+        for i in 0..params.k {
+            fors_all_leaves.push(flat_leaves[i * t_leaves..(i + 1) * t_leaves].to_vec());
+        }
+        Ok((revealed_sks, fors_all_leaves, CutBoundaryMacToken::mint_verified()))
+    }
+
+    fn eval_wots_pkgen_subtree_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
+        self.bind_key_params(params, pk_seed)?;
+        let n = params.n;
+        let n_leaves = 1usize << params.hp;
+        let ell = params.ell();
+        let total_chains = n_leaves * ell;
+        let mut chains = Vec::with_capacity(total_chains);
+        for flat in 0..total_chains {
+            let kp = (flat / ell) as u32;
+            let ch = (flat % ell) as u32;
+            let mut prf_a = Fips205Adrs::ZERO;
+            prf_a.layer = layer;
+            prf_a.set_tree_address(tree);
+            prf_a.adrs_type = Fips205AdrsType::WotsPrf;
+            prf_a.key_pair = kp;
+            prf_a.f5 = ch;
+            let steps: Vec<Fips205Adrs> = (0..15u32)
+                .map(|step| {
+                    let mut a = Fips205Adrs::ZERO;
+                    a.layer = layer;
+                    a.set_tree_address(tree);
+                    a.adrs_type = Fips205AdrsType::WotsHash;
+                    a.key_pair = kp;
+                    a.f5 = ch;
+                    a.f6 = step;
+                    a
+                })
+                .collect();
+            chains.push((prf_a, steps));
+        }
+        let endpoints = self.eval_slh_chains_parallel(n, pk_seed, &chains)?;
+        Ok((endpoints, CutBoundaryMacToken::mint_verified()))
+    }
+
+    fn eval_wots_layer_sign_and_siblings_mpc(
+        &mut self,
+        _authorization: OracleCallToken,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+        active_kp: u32,
+        msg_to_sign: &SlhBlock,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
+        self.bind_key_params(params, pk_seed)?;
+        let n = params.n;
+        let n_leaves = 1usize << params.hp;
+        if msg_to_sign.len() != n || (active_kp as usize) >= n_leaves {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let (digits, ell_check) = try_wots_base16_digits_and_csum(msg_to_sign.as_slice())?;
+        let ell = params.ell();
+        if ell_check != ell {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let total_chains = n_leaves * ell;
+        let mut chains = Vec::with_capacity(total_chains);
+        for flat in 0..total_chains {
+            let kp = (flat / ell) as u32;
+            let ch = flat % ell;
+            let target = if kp == active_kp {
+                digits[ch] as u32
+            } else {
+                15
+            };
+            let mut prf_a = Fips205Adrs::ZERO;
+            prf_a.layer = layer;
+            prf_a.set_tree_address(tree);
+            prf_a.adrs_type = Fips205AdrsType::WotsPrf;
+            prf_a.key_pair = kp;
+            prf_a.f5 = ch as u32;
+            let steps: Vec<Fips205Adrs> = (0..target)
+                .map(|step| {
+                    let mut a = Fips205Adrs::ZERO;
+                    a.layer = layer;
+                    a.set_tree_address(tree);
+                    a.adrs_type = Fips205AdrsType::WotsHash;
+                    a.key_pair = kp;
+                    a.f5 = ch as u32;
+                    a.f6 = step;
+                    a
+                })
+                .collect();
+            chains.push((prf_a, steps));
+        }
+        let nodes = self.eval_slh_chains_parallel(n, pk_seed, &chains)?;
+        Ok((nodes, CutBoundaryMacToken::mint_verified()))
+    }
+}
+
+/// Helper preserving all 1,600 state bits for multi-block `PRF_msg` sponges (`|M'| >= 136 - 2n`).
+fn eval_minimac_wave_perm_keep_full(
+    tables: &MiniMacTables,
+    session_id: &[u8; 32],
+    wave_idx: usize,
+    state_sh: &mut SecretVec<Vec<u8>>,
+    state_mac: &mut SecretVec<Vec<u8>>,
+    tuple: ProjectedWaveTuple,
+) -> Result<((), PendingWaveVerification), CnfRssError> {
+    let t = state_sh.len();
+    let mut clone_sh = SecretBuffer(state_sh.to_vec());
+    let mut clone_mac = SecretBuffer(state_mac.to_vec());
+    // Reuse `eval_minimac_wave_perm`? Note `eval_minimac_wave_perm` truncates `clone_sh` to 256 bits,
+    // so run the 24-round state update directly when `num_blocks > 1`:
+    let mut lin_sh = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut lin_mac = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut not_u_sh = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut not_u_mac = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut v_sh = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut v_mac = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut d_open = vec![0u8; STATE_CODE_BYTES];
+    let mut e_open = vec![0u8; STATE_CODE_BYTES];
+    let mut vstar_open = vec![0u8; STATE_CODE_BYTES];
+    let mut de_prod = vec![0u8; STATE_CODE_BYTES];
+    let mut w_pub = vec![0u8; STATE_CODE_BYTES];
+    let mut tmp_mul1 = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
+    let mut tmp_mul2 = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
+    let delta_tiles: SecretVec<Vec<u8>> = SecretBuffer(
+        (0..t)
+            .map(|u| {
+                let mut tile = vec![0u8; STATE_CODE_BYTES];
+                for c in tile.chunks_exact_mut(MINIMAC_CODE_N) {
+                    c.copy_from_slice(&tuple.delta_shares[u]);
+                }
+                tile
+            })
+            .collect(),
+    );
+    let mut tr_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.WAVE.TRANSCRIPT/v1");
+    tr_xof.absorb(session_id);
+    tr_xof.absorb(&(wave_idx as u64).to_le_bytes());
+    let mut residual_shares = SecretBuffer(vec![[Tower128::ZERO; MINIMAC_CODE_N]; t]);
+
+    for (rnd, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
+        let r_off = rnd * STATE_CODE_BYTES;
+        for u in 0..t {
+            keccak_linear_minimac(&clone_sh[u], &mut lin_sh[u]);
+            keccak_linear_minimac(&clone_mac[u], &mut lin_mac[u]);
+        }
+        for lane in 0..25 {
+            let row = 5 * (lane / 5);
+            let u_lane = row + (lane + 1) % 5;
+            let v_lane = row + (lane + 2) % 5;
+            for z in 0..64 {
+                let dst = (lane * 64 + z) * MINIMAC_CODE_N;
+                let u_src = (u_lane * 64 + z) * MINIMAC_CODE_N;
+                let v_src = (v_lane * 64 + z) * MINIMAC_CODE_N;
+                for p in 0..t {
+                    not_u_sh[p][dst..dst + MINIMAC_CODE_N]
+                        .copy_from_slice(&lin_sh[p][u_src..u_src + MINIMAC_CODE_N]);
+                    if p == 0 {
+                        for b in &mut not_u_sh[0][dst..dst + MINIMAC_CODE_N] {
+                            *b ^= 1;
+                        }
+                    }
+                    for j in 0..MINIMAC_CODE_N {
+                        not_u_mac[p][dst + j] = lin_mac[p][u_src + j] ^ tuple.delta_shares[p][j];
+                    }
+                    v_sh[p][dst..dst + MINIMAC_CODE_N]
+                        .copy_from_slice(&lin_sh[p][v_src..v_src + MINIMAC_CODE_N]);
+                    v_mac[p][dst..dst + MINIMAC_CODE_N]
+                        .copy_from_slice(&lin_mac[p][v_src..v_src + MINIMAC_CODE_N]);
+                }
+            }
+        }
+        d_open.fill(0);
+        e_open.fill(0);
+        for p in 0..t {
+            let a_rnd = &tuple.a[p][r_off..r_off + STATE_CODE_BYTES];
+            let b_rnd = &tuple.b[p][r_off..r_off + STATE_CODE_BYTES];
+            for i in 0..STATE_CODE_BYTES {
+                d_open[i] ^= not_u_sh[p][i] ^ a_rnd[i];
+                e_open[i] ^= v_sh[p][i] ^ b_rnd[i];
+            }
+        }
+        for g in 0..STATE_BITS {
+            let d_cw: &[u8; MINIMAC_CODE_N] = d_open
+                [g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
+                .try_into()
+                .map_err(|_| CnfRssError::InvalidParameters)?;
+            let e_cw: &[u8; MINIMAC_CODE_N] = e_open
+                [g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
+                .try_into()
+                .map_err(|_| CnfRssError::InvalidParameters)?;
+            if tables.verify_and_extract_public_c(d_cw).is_none()
+                || tables.verify_and_extract_public_c(e_cw).is_none()
+            {
+                return Err(CnfRssError::ActiveTamperDetected {
+                    phase: "chi_de_codeword_check",
+                });
+            }
+        }
+        qsag_asm::gf256_shamir_mul(&mut de_prod, &d_open, &e_open);
+        vstar_open.fill(0);
+        let mut vstar_mac_shares = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+        for p in 0..t {
+            let a_rnd = &tuple.a[p][r_off..r_off + STATE_CODE_BYTES];
+            let b_rnd = &tuple.b[p][r_off..r_off + STATE_CODE_BYTES];
+            let cr_rnd = &tuple.cr_star[p][r_off..r_off + STATE_CODE_BYTES];
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &d_open, b_rnd);
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul2, &e_open, a_rnd);
+            for i in 0..STATE_CODE_BYTES {
+                let mut vs = cr_rnd[i] ^ tmp_mul1[i] ^ tmp_mul2[i];
+                if p == 0 {
+                    vs ^= de_prod[i];
+                }
+                vstar_open[i] ^= vs;
+            }
+            let am_rnd = &tuple.a_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            let bm_rnd = &tuple.b_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            let crm_rnd = &tuple.cr_star_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &d_open, bm_rnd);
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul2, &e_open, am_rnd);
+            for i in 0..STATE_CODE_BYTES {
+                vstar_mac_shares[p][i] = crm_rnd[i] ^ tmp_mul1[i] ^ tmp_mul2[i];
+            }
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &de_prod, &delta_tiles[p]);
+            for i in 0..STATE_CODE_BYTES {
+                vstar_mac_shares[p][i] ^= tmp_mul1[i];
+            }
+        }
+        for g in 0..STATE_BITS {
+            let off = g * MINIMAC_CODE_N;
+            let mut bits56 = 0u64;
+            let mut bad_bool = 0u8;
+            for i in 0..MINIMAC_DATA_K {
+                let v = vstar_open[off + i];
+                bad_bool |= v & !1u8;
+                bits56 |= u64::from(v & 1) << i;
+            }
+            if bad_bool != 0 {
+                return Err(CnfRssError::ActiveTamperDetected {
+                    phase: "chi_vstar_booleanity",
+                });
+            }
+            let out_cw: &mut [u8; MINIMAC_CODE_N] = (&mut w_pub[off..off + MINIMAC_CODE_N])
+                .try_into()
+                .map_err(|_| CnfRssError::InvalidParameters)?;
+            tables.encode_public_bits56(bits56, out_cw);
+        }
+        tr_xof.absorb(&(rnd as u64).to_le_bytes());
+        tr_xof.absorb(&d_open);
+        tr_xof.absorb(&e_open);
+        tr_xof.absorb(&vstar_open);
+        let mut rnd_chal_seed = [0u8; 32];
+        let mut chal_xof = tr_xof.clone();
+        chal_xof.squeeze(&mut rnd_chal_seed);
+        let mut c2_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.C2_FOLD/v1");
+        c2_xof.absorb(&rnd_chal_seed);
+        let mut lambdas = [0u8; 16 * STATE_BITS];
+        c2_xof.squeeze(&mut lambdas);
+        for rep in 0..16 {
+            let mut folded_c2 = [0u8; MINIMAC_CODE_N];
+            let l_slice = &lambdas[rep * STATE_BITS..(rep + 1) * STATE_BITS];
+            for (g, &lg) in l_slice.iter().enumerate() {
+                let l = TowerGf256(lg);
+                let vs = &vstar_open[g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N];
+                for j in 0..MINIMAC_CODE_N {
+                    folded_c2[j] ^= l.mul(TowerGf256(vs[j])).0;
+                }
+            }
+            if !tables.verify_public_c2(&folded_c2) {
+                return Err(CnfRssError::ActiveTamperDetected {
+                    phase: "chi_vstar_c2_degree_check",
+                });
+            }
+        }
+        let mut mac_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.MAC_FOLD/v1");
+        mac_xof.absorb(&rnd_chal_seed);
+        let mut chi_bytes = [0u8; 3 * STATE_BITS * 16];
+        mac_xof.squeeze(&mut chi_bytes);
+        for g in 0..STATE_BITS {
+            let c_off = 3 * g * 16;
+            let chi_d = Tower128(u128::from_le_bytes(
+                chi_bytes[c_off..c_off + 16].try_into().unwrap_or([0; 16]),
+            ));
+            let chi_e = Tower128(u128::from_le_bytes(
+                chi_bytes[c_off + 16..c_off + 32]
+                    .try_into()
+                    .unwrap_or([0; 16]),
+            ));
+            let chi_v = Tower128(u128::from_le_bytes(
+                chi_bytes[c_off + 32..c_off + 48]
+                    .try_into()
+                    .unwrap_or([0; 16]),
+            ));
+            let base = g * MINIMAC_CODE_N;
+            let am_base = r_off + base;
+            for p in 0..t {
+                for j in 0..MINIMAC_CODE_N {
+                    let dm = not_u_mac[p][base + j] ^ tuple.a_mac[p][am_base + j];
+                    let em = v_mac[p][base + j] ^ tuple.b_mac[p][am_base + j];
+                    let vm = vstar_mac_shares[p][base + j];
+                    let d_term = TowerGf256(dm).add(
+                        TowerGf256(d_open[base + j]).mul(TowerGf256(tuple.delta_shares[p][j])),
+                    );
+                    let e_term = TowerGf256(em).add(
+                        TowerGf256(e_open[base + j]).mul(TowerGf256(tuple.delta_shares[p][j])),
+                    );
+                    let v_term = TowerGf256(vm).add(
+                        TowerGf256(vstar_open[base + j])
+                            .mul(TowerGf256(tuple.delta_shares[p][j])),
+                    );
+                    residual_shares[p][j] = residual_shares[p][j]
+                        .add(chi_d.mul_gf256(d_term))
+                        .add(chi_e.mul_gf256(e_term))
+                        .add(chi_v.mul_gf256(v_term));
+                }
+            }
+        }
+        for p in 0..t {
+            let r_rnd = &tuple.r[p][r_off..r_off + STATE_CODE_BYTES];
+            let rm_rnd = &tuple.r_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &w_pub, &delta_tiles[p]);
+            for i in 0..STATE_CODE_BYTES {
+                let mut ns = lin_sh[p][i] ^ r_rnd[i];
+                if p == 0 {
+                    ns ^= w_pub[i];
+                }
+                clone_sh[p][i] = ns;
+                clone_mac[p][i] = lin_mac[p][i] ^ rm_rnd[i] ^ tmp_mul1[i];
+            }
+            for z in 0..64 {
+                if ((rc >> z) & 1) == 1 {
+                    let off = z * MINIMAC_CODE_N;
+                    if p == 0 {
+                        for b in &mut clone_sh[0][off..off + MINIMAC_CODE_N] {
+                            *b ^= 1;
+                        }
+                    }
+                    for j in 0..MINIMAC_CODE_N {
+                        clone_mac[p][off + j] ^= tuple.delta_shares[p][j];
+                    }
+                }
+            }
+        }
+    }
+    for p in 0..t {
+        state_sh[p].copy_from_slice(&clone_sh[p]);
+        state_mac[p].copy_from_slice(&clone_mac[p]);
+    }
+    let mut wave_digest = [0u8; 32];
+    tr_xof.squeeze(&mut wave_digest);
+    Ok((
+        (),
+        PendingWaveVerification {
+            wave_digest,
+            delta_shares: SecretBuffer(Vec::new()),
+            residual_shares,
+        },
+    ))
+}
+
+// ============================================================================
+// 6. Comprehensive Unit, Active-Fault-Abort & `3-of-5` Release Benchmark Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::baggy::{
+        BaggyParams, MemoryFirstSigned, WaistbandCache, baggy_keygen_mpc, baggy_reference_keygen,
+        baggy_reference_sign, baggy_sign_mpc, baggy_verify,
+    };
+    use crate::fips205::{slh_keygen_mpc, slh_sign_mpc, slh_verify};
+    use crate::tsw_baggy::PqSecretKey;
+
+    fn make_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
+        (0..n)
+            .map(|i| PartyPrivateRng::from_seed([tag.wrapping_add(i as u8); 32], b"cnf-rss-test"))
+            .collect()
+    }
+
+    #[test]
+    fn cnf_rss_combinatorics_dkg_serialization_and_theorem_4_1_projection() {
+        // Verify slot counts across `(2,3)`, `(3,5)`, `(3,6)`, `(5,6)`, and `(4,6)`.
+        let c23 = CnfRssConfig::new(2, 3).unwrap();
+        assert_eq!((c23.total_slots(), c23.slots_per_party()), (3, 2));
+        let c35 = CnfRssConfig::new(3, 5).unwrap();
+        assert_eq!((c35.total_slots(), c35.slots_per_party()), (10, 6));
+        assert!(c35.supports_pure_hash_multiplication());
+        let c36 = CnfRssConfig::new(3, 6).unwrap();
+        assert_eq!((c36.total_slots(), c36.slots_per_party()), (15, 10));
+        let c56 = CnfRssConfig::new(5, 6).unwrap();
+        assert_eq!((c56.total_slots(), c56.slots_per_party()), (15, 5));
+        let c46 = CnfRssConfig::new(4, 6).unwrap();
+        assert_eq!((c46.total_slots(), c46.slots_per_party()), (20, 10));
+
+        // Dealerless DKG + wire roundtrip + Theorem 4.1 projection on all 10 `3-of-5` subsets!
+        let mut rngs = make_rngs(5, 0x10);
+        let (mut shares, pk_seed) =
+            run_dealerless_cnf_rss_dkg([0x41; 32], &c35, 32, &mut rngs).unwrap();
+        let (sk_seed_ref, sk_prf_ref) = reconstruct_cnf_rss_secret_for_test(&shares);
+
+        shares[0].bind_scheme_identity(&[0x99; 32]).unwrap();
+        let raw0 = shares[0].to_secret_bytes();
+        let decoded0 = CnfRssKeyShare256::from_secret_bytes(&raw0).unwrap();
+        assert_eq!(decoded0.party_id, 0);
+        assert_eq!(decoded0.pk_seed, pk_seed);
+        assert_eq!(decoded0.scheme_identity(), Some([0x99; 32]));
+        let mut tampered_raw = raw0.to_vec();
+        tampered_raw[13] = 1; // non-zero reserved byte rejected
+        assert!(CnfRssKeyShare256::from_secret_bytes(&tampered_raw).is_err());
+
+        // Every one of the `\binom{5}{3} = 10` 3-custodian quorums reconstructs the exact
+        // same `(sk_seed, sk_prf)` under Theorem 4.1 with pairwise PRF zero-share masking!
+        for q0 in 0..5 {
+            for q1 in (q0 + 1)..5 {
+                for q2 in (q1 + 1)..5 {
+                    let q_refs = [&shares[q0], &shares[q1], &shares[q2]];
+                    let proj_a = project_quorum_keys(&[0x51; 32], &q_refs).unwrap();
+                    let proj_b = project_quorum_keys(&[0x52; 32], &q_refs).unwrap();
+                    // Distinct sessions produce completely fresh re-randomized `t-of-t` shares:
+                    assert_ne!(proj_a.sk_seed_shares[0], proj_b.sk_seed_shares[0]);
+                    let mut sum_seed = [0u8; 32];
+                    let mut sum_prf = [0u8; 32];
+                    for u in 0..3 {
+                        for b in 0..32 {
+                            sum_seed[b] ^= proj_a.sk_seed_shares[u][b];
+                            sum_prf[b] ^= proj_a.sk_prf_shares[u][b];
+                        }
+                    }
+                    assert_eq!(sum_seed, sk_seed_ref);
+                    assert_eq!(sum_prf, sk_prf_ref);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn e2e_3of5_and_4of6_baggy_and_active_fault_abort() {
+        let params = BaggyParams::TEST_SMALL;
+
+        // 1. `3-of-5` (10 shares) keygen on quorum `{0, 2, 4}`, sign on disjoint-overlap quorum `{1, 2, 3}`!
+        let cfg35 = CnfRssConfig::new(3, 5).unwrap();
+        let mut dkg_rngs = make_rngs(5, 0x20);
+        let (mut shares, pk_seed) =
+            run_dealerless_cnf_rss_dkg([0xA1; 32], &cfg35, 32, &mut dkg_rngs).unwrap();
+        let (sk_seed, sk_prf) = reconstruct_cnf_rss_secret_for_test(&shares);
+        let ref_sk = PqSecretKey {
+            sk_seed,
+            sk_prf,
+            pk_seed,
+        };
+
+        let (pk, binding) = {
+            let mut src =
+                StreamingCnfRssSource::establish([0xA2; 32], &cfg35, &shares, &[0, 2, 4]).unwrap();
+            let [s0, _, s2, _, s4] = shares.each_mut();
+            let mut rngs = make_rngs(3, 0x30);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xA2; 32], vec![s0, s2, s4], &mut rngs, &mut src)
+                    .unwrap();
+            baggy_keygen_mpc(&mut eng, &params, &mut WaistbandCache::disabled()).unwrap()
+        };
+        assert_eq!(Some(pk), baggy_reference_keygen(&params, &ref_sk));
+        // Bind remaining offline custodians `{1, 3}` to the public `binding.identity()`
+        for s in &mut shares {
+            s.bind_scheme_identity(&binding.identity()).unwrap();
+        }
+
+        // Sign with `{1, 2, 3}` (custodians `0` and `4` completely offline!) using pre-staged bank!
+        let msg = b"3-of-5 stateless Baggy via Theorem 4.1 t-of-t MiniMAC projection";
+        let mut bank = StagedCnfRssBank::stage_for_quorum(
+            [0xA3; 32], &cfg35, &shares, &[1, 2, 3], 130, 8,
+        )
+        .unwrap();
+        let sig = {
+            let [_, s1, s2, s3, _] = shares.each_mut();
+            let mut rngs = make_rngs(3, 0x40);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xA3; 32], vec![s1, s2, s3], &mut rngs, &mut bank)
+                    .unwrap();
+            baggy_sign_mpc(
+                &mut eng,
+                &params,
+                &pk,
+                &binding,
+                &mut WaistbandCache::disabled(),
+                &mut MemoryFirstSigned::new(),
+                msg,
+            )
+            .unwrap()
+        };
+        assert!(baggy_verify(&params, &pk, msg, &sig));
+        assert_eq!(Some(sig), baggy_reference_sign(&params, &ref_sk, &pk, msg));
+
+        // 2. Active-fault-abort tests:
+        //    (a) 1-bit `d` tamper rejected immediately by `[128, 56, 73]` codeword check;
+        //    (b) Valid-codeword `[1u8; 128]` shift on `d` (bypassing codeword parity!) caught by `Tower128` MiniMAC barrier;
+        //    (c) Corrupted `cr_star` Beaver triple caught by `C^{*2}` / `MiniMAC` barrier;
+        //    (d) Cut-opening tamper caught before any digest is released!
+        for fault in [
+            CnfRssFault::CorruptDOpening {
+                wave: 0,
+                round: 0,
+                bit: 0,
+                party: 1,
+            },
+            CnfRssFault::ValidCodewordShiftD {
+                wave: 2,
+                round: 5,
+                bit: 17,
+                party: 2,
+            },
+            CnfRssFault::CorruptCutOpening { party: 0 },
+        ] {
+            let mut src =
+                StreamingCnfRssSource::establish([0xA4; 32], &cfg35, &shares, &[0, 1, 4]).unwrap();
+            let [s0, s1, _, _, s4] = shares.each_mut();
+            let mut rngs = make_rngs(3, 0x50);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xA4; 32], vec![s0, s1, s4], &mut rngs, &mut src)
+                    .unwrap();
+            eng.fault = Some(fault);
+            let mut ledger = MemoryFirstSigned::new();
+            assert!(
+                baggy_sign_mpc(
+                    &mut eng,
+                    &params,
+                    &pk,
+                    &binding,
+                    &mut WaistbandCache::disabled(),
+                    &mut ledger,
+                    msg,
+                )
+                .is_err()
+            );
+            assert!(eng.is_poisoned());
+            assert!(ledger.is_empty());
+        }
+
+        // 3. Also verify `4-of-6` (`20` shares) CNF-RSS -> `4-of-4` projection end-to-end!
+        let cfg46 = CnfRssConfig::new(4, 6).unwrap();
+        let mut rngs46 = make_rngs(6, 0x60);
+        let (mut shares46, _) =
+            run_dealerless_cnf_rss_dkg([0xB1; 32], &cfg46, 32, &mut rngs46).unwrap();
+        let mut src46 =
+            StreamingCnfRssSource::establish([0xB2; 32], &cfg46, &shares46, &[0, 2, 3, 5]).unwrap();
+        let [p0, _, p2, p3, _, p5] = shares46.each_mut();
+        let mut r4 = make_rngs(4, 0x70);
+        let mut eng46 =
+            CnfRssProjectedEngine::new([0xB2; 32], vec![p0, p2, p3, p5], &mut r4, &mut src46)
+                .unwrap();
+        let (pk46, bind46) =
+            baggy_keygen_mpc(&mut eng46, &params, &mut WaistbandCache::disabled()).unwrap();
+        let sig46 = baggy_sign_mpc(
+            &mut eng46,
+            &params,
+            &pk46,
+            &bind46,
+            &mut WaistbandCache::disabled(),
+            &mut MemoryFirstSigned::new(),
+            b"4-of-6 stateless Baggy",
+        )
+        .unwrap();
+        assert!(baggy_verify(&params, &pk46, b"4-of-6 stateless Baggy", &sig46));
+    }
+
+    #[test]
+    fn e2e_3of5_slh_dsa_shake_128f_stock_verify_and_tamper_abort() {
+        let params = Fips205Params::SLH_DSA_SHAKE_128F;
+        let cfg35 = CnfRssConfig::new(3, 5).unwrap();
+        let mut dkg_rngs = make_rngs(5, 0x80);
+        let (mut shares, pk_seed32) =
+            run_dealerless_cnf_rss_dkg([0xC1; 32], &cfg35, params.n, &mut dkg_rngs).unwrap();
+        let pk_seed = &pk_seed32[..params.n];
+
+        // Distributed `3-of-5` keygen on `{0, 1, 2}`
+        let pk = {
+            let mut src =
+                StreamingCnfRssSource::establish([0xC2; 32], &cfg35, &shares, &[0, 1, 2]).unwrap();
+            let [s0, s1, s2, _, _] = shares.each_mut();
+            let mut rngs = make_rngs(3, 0x85);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xC2; 32], vec![s0, s1, s2], &mut rngs, &mut src)
+                    .unwrap();
+            slh_keygen_mpc(&params, &mut eng, pk_seed).unwrap()
+        };
+        for s in &mut shares {
+            s.bind_slh_params(&params, pk_seed).unwrap();
+        }
+
+        // Distributed `3-of-5` FIPS 205 signing on `{0, 3, 4}` (`1` and `2` offline!)
+        let msg = b"3-of-5 FIPS 205 SLH-DSA-SHAKE-128f threshold release";
+        let ctx = b"qsag:cnf-rss:v1";
+        let sig = {
+            let mut src =
+                StreamingCnfRssSource::establish([0xC3; 32], &cfg35, &shares, &[0, 3, 4]).unwrap();
+            let [s0, _, _, s3, s4] = shares.each_mut();
+            let mut rngs = make_rngs(3, 0x90);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xC3; 32], vec![s0, s3, s4], &mut rngs, &mut src)
+                    .unwrap();
+            slh_sign_mpc(&params, msg, ctx, &mut eng, &pk, None).unwrap()
+        };
+        assert_eq!(sig.len(), params.sig_bytes());
+        assert!(slh_verify(&params, msg, &sig, ctx, &pk).unwrap());
+
+        // Active fault during `SLH-DSA` signing aborts cleanly with `MpcActiveTamperDetected`!
+        let mut bad_src =
+            StreamingCnfRssSource::establish([0xC4; 32], &cfg35, &shares, &[1, 2, 4]).unwrap();
+        bad_src.corrupt_wave = Some((3, 10));
+        let [_, s1, s2, _, s4] = shares.each_mut();
+        let mut rngs = make_rngs(3, 0x95);
+        let mut bad_eng =
+            CnfRssProjectedEngine::new([0xC4; 32], vec![s1, s2, s4], &mut rngs, &mut bad_src)
+                .unwrap();
+        assert_eq!(
+            slh_sign_mpc(&params, msg, ctx, &mut bad_eng, &pk, None),
+            Err(Fips205Error::MpcActiveTamperDetected)
+        );
+        assert!(bad_eng.is_poisoned());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "3-of-5 stateless Baggy and SLH-DSA release latency benchmark"]
+    fn bench_3of5_stateless_baggy_and_slh_dsa_release_latency() {
+        let cfg35 = CnfRssConfig::new(3, 5).unwrap();
+
+        // 1. Full `BaggyParams::SHA3_128F` (`h = 32, d = 16, PORS+FP 2048 leaves`) with Waistband
+        //    top-8-layers precomputed (`hp * 8 = 16`) + online `3-of-5` staged bank release!
+        let baggy_params = BaggyParams::SHA3_128F;
+        let mut dkg_rngs = make_rngs(5, 0xA0);
+        let (mut shares_b, _) =
+            run_dealerless_cnf_rss_dkg([0xD1; 32], &cfg35, 32, &mut dkg_rngs).unwrap();
+        let mut ledger = MemoryFirstSigned::new();
+        let mut cache = WaistbandCache::new(15, 65_536);
+
+        let (pk_b, bind_b) = {
+            let mut src = StreamingCnfRssSource::establish(
+                [0xD2; 32],
+                &cfg35,
+                &shares_b,
+                &[0, 1, 2],
+            )
+            .unwrap();
+            let [s0, s1, s2, _, _] = shares_b.each_mut();
+            let mut r = make_rngs(3, 0xA5);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xD2; 32], vec![s0, s1, s2], &mut r, &mut src).unwrap();
+            baggy_keygen_mpc(&mut eng, &baggy_params, &mut cache).unwrap()
+        };
+        for s in &mut shares_b {
+            s.bind_scheme_identity(&bind_b.identity()).unwrap();
+        }
+        // Warm lazy `Waistband` top-15 path once (leaving bottom layer + 2,048-leaf PORS+FP live every time!),
+        // AND measure BOTH uncached full-path streaming AND staged `3-of-5` online release!
+        let t_uncached = std::time::Instant::now();
+        let sig_warm = {
+            let mut src = StreamingCnfRssSource::establish(
+                [0xD3; 32],
+                &cfg35,
+                &shares_b,
+                &[0, 2, 4],
+            )
+            .unwrap();
+            let [s0, _, s2, _, s4] = shares_b.each_mut();
+            let mut r = make_rngs(3, 0xB0);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xD3; 32], vec![s0, s2, s4], &mut r, &mut src).unwrap();
+            baggy_sign_mpc(
+                &mut eng,
+                &baggy_params,
+                &pk_b,
+                &bind_b,
+                &mut cache,
+                &mut ledger,
+                b"warmup path",
+            )
+            .unwrap()
+        };
+        let uncached_baggy_ms = t_uncached.elapsed().as_secs_f64() * 1000.0;
+        assert!(baggy_verify(&baggy_params, &pk_b, b"warmup path", &sig_warm));
+
+        // Stage exact waves for `Baggy` online release (`2` randomiser + `37 * 2` PORS + `10 * 4` bottom WOTS = `116` waves)
+        let mut staged_b = StagedCnfRssBank::stage_for_quorum(
+            [0xD4; 32], &cfg35, &shares_b, &[1, 3, 4], 130, 16,
+        )
+        .unwrap();
+        let t_baggy_online = std::time::Instant::now();
+        let sig_b = {
+            let [_, s1, _, s3, s4] = shares_b.each_mut();
+            let mut r = make_rngs(3, 0xB5);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xD4; 32], vec![s1, s3, s4], &mut r, &mut staged_b)
+                    .unwrap();
+            baggy_sign_mpc(
+                &mut eng,
+                &baggy_params,
+                &pk_b,
+                &bind_b,
+                &mut cache,
+                &mut ledger,
+                b"timed 3-of-5 Baggy SHA3_128F online release",
+            )
+            .unwrap()
+        };
+        let baggy_online_ms = t_baggy_online.elapsed().as_secs_f64() * 1000.0;
+        assert!(baggy_verify(
+            &baggy_params,
+            &pk_b,
+            b"timed 3-of-5 Baggy SHA3_128F online release",
+            &sig_b
+        ));
+
+        // 2. Full `3-of-5` NIST FIPS 205 `SLH-DSA-SHAKE-128f` (`d = 22, hp = 3, k = 33, a = 6`)!
+        let slh_params = Fips205Params::SLH_DSA_SHAKE_128F;
+        let mut slh_dkg_rngs = make_rngs(5, 0xC0);
+        let (mut shares_s, pk_seed32) =
+            run_dealerless_cnf_rss_dkg([0xE1; 32], &cfg35, slh_params.n, &mut slh_dkg_rngs)
+                .unwrap();
+        let pk_seed = &pk_seed32[..slh_params.n];
+        let pk_s = {
+            let mut src = StreamingCnfRssSource::establish(
+                [0xE2; 32],
+                &cfg35,
+                &shares_s,
+                &[0, 1, 2],
+            )
+            .unwrap();
+            let [s0, s1, s2, _, _] = shares_s.each_mut();
+            let mut r = make_rngs(3, 0xC5);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xE2; 32], vec![s0, s1, s2], &mut r, &mut src).unwrap();
+            slh_keygen_mpc(&slh_params, &mut eng, pk_seed).unwrap()
+        };
+        for s in &mut shares_s {
+            s.bind_slh_params(&slh_params, pk_seed).unwrap();
+        }
+        // Pre-stage bank for full 22-layer `SLH-DSA-SHAKE-128f` (`1 + 1 + 38*2 + 22*5*16 = 1,838` waves, `24` cuts)
+        let mut staged_s = StagedCnfRssBank::stage_for_quorum(
+            [0xE3; 32], &cfg35, &shares_s, &[0, 2, 3], 1_860, 32,
+        )
+        .unwrap();
+        let t_slh_online = std::time::Instant::now();
+        let sig_s = {
+            let [s0, _, s2, s3, _] = shares_s.each_mut();
+            let mut r = make_rngs(3, 0xD0);
+            let mut eng =
+                CnfRssProjectedEngine::new([0xE3; 32], vec![s0, s2, s3], &mut r, &mut staged_s)
+                    .unwrap();
+            slh_sign_mpc(
+                &slh_params,
+                b"timed 3-of-5 SLH-DSA-SHAKE-128f release",
+                b"bench",
+                &mut eng,
+                &pk_s,
+                None,
+            )
+            .unwrap()
+        };
+        let slh_online_ms = t_slh_online.elapsed().as_secs_f64() * 1000.0;
+        assert!(slh_verify(
+            &slh_params,
+            b"timed 3-of-5 SLH-DSA-SHAKE-128f release",
+            &sig_s,
+            b"bench",
+            &pk_s
+        )
+        .unwrap());
+
+        std::eprintln!(
+            "[BENCH 3-of-5 CNF-RSS -> t-of-t MiniMAC] Baggy SHA3_128F online release = {baggy_online_ms:.2} ms (uncached full-tree stream = {uncached_baggy_ms:.2} ms) | SLH-DSA-SHAKE-128f online release = {slh_online_ms:.2} ms"
+        );
+    }
+}
