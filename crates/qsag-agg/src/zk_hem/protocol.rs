@@ -54,7 +54,8 @@ use crate::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
 use crate::pcs::{
     CanopyCommitment, HemWhirOpeningProof, MAX_PCS_NUM_VARS, WeightedPoint, WhirSchedule,
     WhirSecurityRegime, add_point_kernel, hypercube_to_monomial_coeffs,
-    whir_commit_batch_secret_with_schedule, whir_open_blend, whir_verify_blend,
+    whir_commit_batch_secret_with_schedule, whir_open_blend, whir_open_blend_from_state,
+    whir_verify_blend,
 };
 use crate::sponge::{FiatShamirTranscript, InstanceBound, cshake256_32};
 
@@ -1850,6 +1851,11 @@ impl ShapeVerifierKey {
     }
 }
 
+/// Largest native hologram commitment (`ell_nz + 2` variables per polynomial) whose Stage-0
+/// Reed-Solomon codewords stay cached between proofs: 256 MiB at this size. Above it each
+/// opening re-encodes them, trading seconds per proof for gigabytes of resident memory.
+const HOLOGRAM_ROUND0_CACHE_MAX_VARS: usize = 22;
+
 /// Offline-compiled Spark matrix hologram for a fixed public [`Shape`].
 pub struct ShapeHologram {
     vk: ShapeVerifierKey,
@@ -1869,9 +1875,12 @@ impl Clone for ShapeHologram {
         let schedule = self.vk.regime.schedule(self.vk.native_pack_vars());
         let mut h0 = self.h_super_evals();
         let h1 = h0.split_off(h0.len() / 2);
-        let (comm, h_state) =
+        let (comm, mut h_state) =
             crate::pcs::whir_commit_batch_owned_with_schedule(vec![h0, h1], &[0u8; 32], &schedule);
         debug_assert_eq!(comm, self.vk.hologram_comm);
+        if self.h_state.codewords_0.is_empty() {
+            crate::pcs::release_round0_cache(&mut h_state);
+        }
         Self {
             vk: self.vk.clone(),
             row_idx: self.row_idx.clone(),
@@ -1972,10 +1981,19 @@ impl ShapeHologram {
         let pack_vars = ell_nz + 3;
         #[cfg(feature = "std")]
         if std::env::var_os("QSAG_PROFILE").is_some() {
+            let sbox_slots = row_idx
+                .iter()
+                .filter(|&&r| (r as usize) < shape.num_sbox)
+                .count();
             std::eprintln!(
-                "hologram_geometry rows={} vars={} nz_cap={} pack_vars={} recursive={}",
+                "hologram_geometry rows={} sbox_rows={} vars={} slots={} sbox_slots={} mul_slots={} csr_nnz={} nz_cap={} pack_vars={} recursive={}",
                 num_rows,
+                shape.num_sbox,
                 shape.num_vars,
+                row_idx.len(),
+                sbox_slots,
+                row_idx.len() - sbox_slots,
+                shape.a.nnz() + shape.b.nnz() + shape.c.nnz(),
                 nz_cap,
                 pack_vars,
                 include_recursive
@@ -2028,11 +2046,13 @@ impl ShapeHologram {
             &h_schedule,
         );
 
-        // Recursive parents need the recursive oracle, not duplicate native RS caches.
-        // Keep the evaluations so a later native root opening can regenerate its cache.
-        if include_recursive && regime.uses_poseidon2_canopy() {
-            h_state.codewords_0.clear();
-            h_state.monomial_coeffs_0.clear();
+        // Recursive parents need the recursive oracle, not duplicate native RS caches, and
+        // a large native hologram would hold gigabytes of them between proofs. The retained
+        // evaluations let an opening regenerate the cache.
+        if (include_recursive && regime.uses_poseidon2_canopy())
+            || ell_nz + 2 > HOLOGRAM_ROUND0_CACHE_MAX_VARS
+        {
+            crate::pcs::release_round0_cache(&mut h_state);
         }
         let h_super = if include_recursive && regime.uses_poseidon2_canopy() {
             h_state.hypercube_evals.concat()
@@ -2083,6 +2103,13 @@ impl ShapeHologram {
     #[inline]
     pub fn verifier_key(&self) -> &ShapeVerifierKey {
         &self.vk
+    }
+
+    /// Give up the Reed-Solomon cache as a large hologram does, whatever this one's size.
+    #[cfg(test)]
+    fn without_round0_cache(mut self) -> Self {
+        crate::pcs::release_round0_cache(&mut self.h_state);
+        self
     }
 
     fn h_super_evals(&self) -> Vec<F> {
@@ -2352,7 +2379,7 @@ pub struct LogUpGkrLayer {
 }
 
 /// Evaluate leaf `idx in 0..4*2^ell_nz` of the 4-way LogUp-GKR fractional tree on the fly
-/// without materializing the `2.15 GiB` leaf arrays in memory.
+/// without materializing the leaf arrays.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn eval_gkr_leaf(
@@ -2398,64 +2425,44 @@ fn eval_gkr_leaf(
     }
 }
 
-/// Build GKR layers `1..=gkr_depth` (`upper[d - 1]` = GKR layer `d`), streaming layer `0`
-/// directly into layer `1` so peak tree memory is cut by `50%`.
-#[allow(clippy::too_many_arguments)]
+/// Fraction `(p, q)` of node `u` of the layer above the leaves: the sum of leaves `2u` and
+/// `2u + 1` as fractions.
+#[inline]
+fn gkr_layer1_node(leaf: &(impl Fn(usize) -> (E, E) + Sync), u: usize) -> (E, E) {
+    let (pl, ql) = leaf(2 * u);
+    let (pr, qr) = leaf(2 * u + 1);
+    (pl * qr + pr * ql, ql * qr)
+}
+
+/// GKR layers `2..=ell_nz + 2` above `4 * 2^ell_nz` leaves, bottom first. Layer `d` holds one
+/// fraction per node, node `u` summing nodes `2u` and `2u + 1` of layer `d - 1`. The leaf
+/// layer and layer `1` are never stored: the prover recomputes their nodes from `leaf`.
 fn build_gkr_upper_tree(
-    holo: &ShapeHologram,
-    ex: &[E],
-    ey: &[E],
-    eq_rx: &[E],
-    eq_ry: &[E],
-    alpha_mem: E,
-    gamma_x: E,
-    gamma_y: E,
-    delta: E,
+    leaf: &(impl Fn(usize) -> (E, E) + Sync),
+    ell_nz: usize,
 ) -> Vec<(Vec<E>, Vec<E>)> {
-    let m = 1usize << holo.vk.ell_nz;
-    let half0 = 2 * m;
-    let gkr_depth = holo.vk.ell_nz + 2;
-    let mut p1 = vec![E::ZERO; half0];
-    let mut q1 = vec![E::ZERO; half0];
-    let chunk0 = par_chunk(half0);
-    let mut pairs0: Vec<_> = p1.chunks_mut(chunk0).zip(q1.chunks_mut(chunk0)).collect();
+    let _phase = crate::profile::span("hologram_gkr_tree");
+    let gkr_depth = ell_nz + 2;
+    let len2 = 1usize << ell_nz;
+    let mut p2 = vec![E::ZERO; len2];
+    let mut q2 = vec![E::ZERO; len2];
+    let chunk0 = par_chunk(len2);
+    let mut pairs0: Vec<_> = p2.chunks_mut(chunk0).zip(q2.chunks_mut(chunk0)).collect();
     for_each_chunk_mut(&mut pairs0, 1, |c_idx, part| {
         let (pn, qn) = &mut part[0];
         let base = c_idx * chunk0;
         for (off, (ps, qs)) in pn.iter_mut().zip(qn.iter_mut()).enumerate() {
             let u = base + off;
-            let (pl, ql) = eval_gkr_leaf(
-                holo,
-                ex,
-                ey,
-                eq_rx,
-                eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                2 * u,
-            );
-            let (pr, qr) = eval_gkr_leaf(
-                holo,
-                ex,
-                ey,
-                eq_rx,
-                eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                2 * u + 1,
-            );
+            let (pl, ql) = gkr_layer1_node(leaf, 2 * u);
+            let (pr, qr) = gkr_layer1_node(leaf, 2 * u + 1);
             *ps = pl * qr + pr * ql;
             *qs = ql * qr;
         }
     });
 
-    let mut upper = Vec::with_capacity(gkr_depth);
-    upper.push((p1, q1));
-    for idx in 0..(gkr_depth - 1) {
+    let mut upper = Vec::with_capacity(gkr_depth - 1);
+    upper.push((p2, q2));
+    for idx in 0..(gkr_depth - 2) {
         let (p_prev, q_prev) = &upper[idx];
         let half = p_prev.len() / 2;
         let mut p_next = vec![E::ZERO; half];
@@ -2601,11 +2608,11 @@ fn finish_gkr_folded_rounds(
     (rounds, u_star, [p0[0], p1[0], q0[0], q1[0]])
 }
 
-/// Degree-3 sumcheck for one LogUp-GKR layer `d >= 1`, folding round 0 directly from
-/// `(p_layer, q_layer)` into `len / 2` buffers without duplicating full-width arrays.
+/// Degree-3 sumcheck reducing the claims on one GKR layer to claims on the layer below,
+/// whose fraction at node `u` is `node(u)`. Round 0 reads the nodes and folds them into
+/// half-length tables, so the layer below is never needed as a whole.
 fn run_gkr_layer_sumcheck(
-    p_layer: &[E],
-    q_layer: &[E],
+    node: impl Fn(usize) -> (E, E) + Sync,
     r_hi: &[E],
     beta: E,
     mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
@@ -2621,141 +2628,10 @@ fn run_gkr_layer_sumcheck(
     let evals0 = round_evals::<4>(0..half0, |i| {
         let eh = eq_hi[i];
         let (e0, de) = (eh * w0, eh * (w1 - w0));
-        let (pl0, dpl) = (p_layer[4 * i], p_layer[4 * i + 2] - p_layer[4 * i]);
-        let (pr0, dpr) = (p_layer[4 * i + 1], p_layer[4 * i + 3] - p_layer[4 * i + 1]);
-        let (ql0, dql) = (q_layer[4 * i], q_layer[4 * i + 2] - q_layer[4 * i]);
-        let (qr0, dqr) = (q_layer[4 * i + 1], q_layer[4 * i + 3] - q_layer[4 * i + 1]);
-        let (mut e, mut pl, mut pr, mut ql, mut qr) = (e0, pl0, pr0, ql0, qr0);
-        core::array::from_fn(|_| {
-            let v = e * (pl * qr + pr * ql + beta * ql * qr);
-            e += de;
-            pl += dpl;
-            pr += dpr;
-            ql += dql;
-            qr += dqr;
-            v
-        })
-    });
-    let coeffs0: [E; 4] = evals_to_coeffs(&evals0).try_into().unwrap();
-    let chal0 = absorb_and_squeeze(coeffs0);
-    let mut rounds = Vec::with_capacity(m);
-    let mut u_star = Vec::with_capacity(m);
-    rounds.push(coeffs0);
-    u_star.push(chal0);
-
-    let eq_fold_factor = w0 + chal0 * (w1 - w0);
-    let eq_t: Vec<E> = eq_hi.into_iter().map(|eh| eh * eq_fold_factor).collect();
-    let mut p0 = vec![E::ZERO; half0];
-    let mut p1 = vec![E::ZERO; half0];
-    let mut q0 = vec![E::ZERO; half0];
-    let mut q1 = vec![E::ZERO; half0];
-    let chunk = par_chunk(half0);
-    let mut quads: Vec<_> = p0
-        .chunks_mut(chunk)
-        .zip(p1.chunks_mut(chunk))
-        .zip(q0.chunks_mut(chunk))
-        .zip(q1.chunks_mut(chunk))
-        .collect();
-    for_each_chunk_mut(&mut quads, 1, |c_idx, part| {
-        let (((fp0, fp1), fq0), fq1) = &mut part[0];
-        let base = c_idx * chunk;
-        for j in 0..fp0.len() {
-            let i = base + j;
-            fp0[j] = p_layer[4 * i] + chal0 * (p_layer[4 * i + 2] - p_layer[4 * i]);
-            fp1[j] = p_layer[4 * i + 1] + chal0 * (p_layer[4 * i + 3] - p_layer[4 * i + 1]);
-            fq0[j] = q_layer[4 * i] + chal0 * (q_layer[4 * i + 2] - q_layer[4 * i]);
-            fq1[j] = q_layer[4 * i + 1] + chal0 * (q_layer[4 * i + 3] - q_layer[4 * i + 1]);
-        }
-    });
-
-    finish_gkr_folded_rounds(
-        eq_t,
-        p0,
-        p1,
-        q0,
-        q1,
-        beta,
-        rounds,
-        u_star,
-        absorb_and_squeeze,
-    )
-}
-
-/// Degree-3 sumcheck for GKR leaf layer `d = 0`, evaluating `eval_gkr_leaf` on the fly in
-/// round 0 and folding directly into `m = 2^ell_nz` buffers.
-#[allow(clippy::too_many_arguments)]
-fn run_gkr_leaf_layer_sumcheck(
-    holo: &ShapeHologram,
-    ex: &[E],
-    ey: &[E],
-    eq_rx: &[E],
-    eq_ry: &[E],
-    alpha_mem: E,
-    gamma_x: E,
-    gamma_y: E,
-    delta: E,
-    r_hi: &[E],
-    beta: E,
-    mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
-) -> (Vec<[E; 4]>, Vec<E>, [E; 4]) {
-    let m = r_hi.len();
-    let half0 = 1usize << (m - 1);
-    let eq_hi = eq_table(&r_hi[1..]);
-    let r0 = r_hi[0];
-    let w0 = E::ONE - r0;
-    let w1 = r0;
-
-    let evals0 = round_evals::<4>(0..half0, |i| {
-        let eh = eq_hi[i];
-        let (e0, de) = (eh * w0, eh * (w1 - w0));
-        let (pl_a, ql_a) = eval_gkr_leaf(
-            holo,
-            ex,
-            ey,
-            eq_rx,
-            eq_ry,
-            alpha_mem,
-            gamma_x,
-            gamma_y,
-            delta,
-            4 * i,
-        );
-        let (pr_a, qr_a) = eval_gkr_leaf(
-            holo,
-            ex,
-            ey,
-            eq_rx,
-            eq_ry,
-            alpha_mem,
-            gamma_x,
-            gamma_y,
-            delta,
-            4 * i + 1,
-        );
-        let (pl_b, ql_b) = eval_gkr_leaf(
-            holo,
-            ex,
-            ey,
-            eq_rx,
-            eq_ry,
-            alpha_mem,
-            gamma_x,
-            gamma_y,
-            delta,
-            4 * i + 2,
-        );
-        let (pr_b, qr_b) = eval_gkr_leaf(
-            holo,
-            ex,
-            ey,
-            eq_rx,
-            eq_ry,
-            alpha_mem,
-            gamma_x,
-            gamma_y,
-            delta,
-            4 * i + 3,
-        );
+        let (pl_a, ql_a) = node(4 * i);
+        let (pr_a, qr_a) = node(4 * i + 1);
+        let (pl_b, ql_b) = node(4 * i + 2);
+        let (pr_b, qr_b) = node(4 * i + 3);
         let (dpl, dpr, dql, dqr) = (pl_b - pl_a, pr_b - pr_a, ql_b - ql_a, qr_b - qr_a);
         let (mut e, mut pl, mut pr, mut ql, mut qr) = (e0, pl_a, pr_a, ql_a, qr_a);
         core::array::from_fn(|_| {
@@ -2776,7 +2652,12 @@ fn run_gkr_leaf_layer_sumcheck(
     u_star.push(chal0);
 
     let eq_fold_factor = w0 + chal0 * (w1 - w0);
-    let eq_t: Vec<E> = eq_hi.into_iter().map(|eh| eh * eq_fold_factor).collect();
+    let mut eq_t = eq_hi;
+    for_each_chunk_mut(&mut eq_t, par_chunk(half0), |_, part| {
+        for eh in part {
+            *eh *= eq_fold_factor;
+        }
+    });
     let mut p0 = vec![E::ZERO; half0];
     let mut p1 = vec![E::ZERO; half0];
     let mut q0 = vec![E::ZERO; half0];
@@ -2793,60 +2674,17 @@ fn run_gkr_leaf_layer_sumcheck(
         let base = c_idx * chunk;
         for j in 0..fp0.len() {
             let i = base + j;
-            let (pl_a, ql_a) = eval_gkr_leaf(
-                holo,
-                ex,
-                ey,
-                eq_rx,
-                eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                4 * i,
-            );
-            let (pr_a, qr_a) = eval_gkr_leaf(
-                holo,
-                ex,
-                ey,
-                eq_rx,
-                eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                4 * i + 1,
-            );
-            let (pl_b, ql_b) = eval_gkr_leaf(
-                holo,
-                ex,
-                ey,
-                eq_rx,
-                eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                4 * i + 2,
-            );
-            let (pr_b, qr_b) = eval_gkr_leaf(
-                holo,
-                ex,
-                ey,
-                eq_rx,
-                eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                4 * i + 3,
-            );
+            let (pl_a, ql_a) = node(4 * i);
+            let (pr_a, qr_a) = node(4 * i + 1);
+            let (pl_b, ql_b) = node(4 * i + 2);
+            let (pr_b, qr_b) = node(4 * i + 3);
             fp0[j] = pl_a + chal0 * (pl_b - pl_a);
             fp1[j] = pr_a + chal0 * (pr_b - pr_a);
             fq0[j] = ql_a + chal0 * (ql_b - ql_a);
             fq1[j] = qr_a + chal0 * (qr_b - qr_a);
         }
     });
+    drop(quads);
 
     finish_gkr_folded_rounds(
         eq_t,
@@ -2859,6 +2697,114 @@ fn run_gkr_leaf_layer_sumcheck(
         u_star,
         absorb_and_squeeze,
     )
+}
+
+/// The whole LogUp-GKR reduction, root to leaves, over fractions given by `leaf`. Returns
+/// `q_root`, the per-layer messages and the final point, or `None` when `q_root` is zero.
+///
+/// `on_root` absorbs `q_root`; `beta` squeezes a layer's batching challenge; `round` absorbs
+/// a round polynomial and squeezes its challenge; `split` absorbs a layer's four end values
+/// and squeezes the bit that selects between them.
+fn prove_logup_gkr(
+    leaf: impl Fn(usize) -> (E, E) + Sync,
+    ell_nz: usize,
+    mut on_root: impl FnMut(E),
+    mut beta: impl FnMut() -> E,
+    mut round: impl FnMut([E; 4]) -> E,
+    mut split: impl FnMut([E; 4]) -> E,
+) -> Option<(E, Vec<LogUpGkrLayer>, Vec<E>)> {
+    let mut upper = build_gkr_upper_tree(&leaf, ell_nz);
+    let gkr_depth = ell_nz + 2;
+    let (p_root, q_root) = {
+        let (pr, qr) = upper.pop().expect("nonempty GKR root");
+        (pr[0], qr[0])
+    };
+    debug_assert_eq!(p_root, E::ZERO);
+    if q_root.is_zero() {
+        return None;
+    }
+    on_root(q_root);
+
+    let _phase = crate::profile::span("hologram_gkr_rounds");
+    let mut r_cur: Vec<E> = Vec::new();
+    let mut gkr_layers = Vec::with_capacity(gkr_depth);
+    for d in (0..gkr_depth).rev() {
+        let m_vars = gkr_depth - 1 - d;
+        let (rounds, u_star, ends) = if m_vars == 0 {
+            let (p_top, q_top) = upper.pop().expect("GKR top split");
+            (
+                Vec::new(),
+                Vec::new(),
+                [p_top[0], p_top[1], q_top[0], q_top[1]],
+            )
+        } else {
+            let beta = beta();
+            match d {
+                0 => run_gkr_layer_sumcheck(&leaf, &r_cur, beta, &mut round),
+                1 => {
+                    debug_assert!(upper.is_empty());
+                    run_gkr_layer_sumcheck(
+                        |u| gkr_layer1_node(&leaf, u),
+                        &r_cur,
+                        beta,
+                        &mut round,
+                    )
+                }
+                _ => {
+                    let (p_d, q_d) = upper.pop().expect("GKR internal layer");
+                    run_gkr_layer_sumcheck(|u| (p_d[u], q_d[u]), &r_cur, beta, &mut round)
+                }
+            }
+        };
+        let c_bit = split(ends);
+        let mut next_r = Vec::with_capacity(m_vars + 1);
+        next_r.push(c_bit);
+        next_r.extend_from_slice(&u_star);
+        r_cur = next_r;
+        gkr_layers.push(LogUpGkrLayer {
+            rounds,
+            split: ends,
+        });
+    }
+    Some((q_root, gkr_layers, r_cur))
+}
+
+/// `(eq(rx, row[k]), eq(ry, col[k]))` over the hologram's slots `k`.
+fn spark_read_tables(hologram: &ShapeHologram, eq_rx: &[E], eq_ry: &[E]) -> (Vec<E>, Vec<E>) {
+    let m_nz = 1usize << hologram.vk.ell_nz;
+    let mut ex = vec![E::ZERO; m_nz];
+    let mut ey = vec![E::ZERO; m_nz];
+    let chunk = par_chunk(m_nz);
+    for_each_chunk_mut(&mut ex, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = eq_rx[hologram.row_idx[base + off] as usize];
+        }
+    });
+    for_each_chunk_mut(&mut ey, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            *slot = eq_ry[hologram.col_idx[base + off] as usize];
+        }
+    });
+    (ex, ey)
+}
+
+/// `combine[0] A + combine[1] B + combine[2] C` over the hologram's slots.
+fn spark_value_table(hologram: &ShapeHologram, combine: &[E; 3]) -> Vec<E> {
+    let m_nz = 1usize << hologram.vk.ell_nz;
+    let mut val_comb = vec![E::ZERO; m_nz];
+    let chunk = par_chunk(m_nz);
+    for_each_chunk_mut(&mut val_comb, chunk, |c_idx, part| {
+        let base = c_idx * chunk;
+        for (off, slot) in part.iter_mut().enumerate() {
+            let k = base + off;
+            *slot = combine[0].mul_base(hologram.val_a[k])
+                + combine[1].mul_base(hologram.val_b[k])
+                + combine[2].mul_base(hologram.val_c[k]);
+        }
+    });
+    val_comb
 }
 
 fn pack_e_super(ex: &[E], ey: &[E]) -> Vec<F> {
@@ -3091,17 +3037,6 @@ fn eval_h_and_e_limbs_at_point(
     (h, e_limbs)
 }
 
-fn state_pair_monos(state: &crate::pcs::HemWhirProverState) -> alloc::borrow::Cow<'_, [Vec<F>]> {
-    if state.monomial_coeffs_0.len() == 2 {
-        alloc::borrow::Cow::Borrowed(&state.monomial_coeffs_0)
-    } else {
-        alloc::borrow::Cow::Owned(vec![
-            hypercube_to_monomial_coeffs(&state.hypercube_evals[0]),
-            hypercube_to_monomial_coeffs(&state.hypercube_evals[1]),
-        ])
-    }
-}
-
 fn recompose_ext4_from_limb_evals(limbs: &[E; 4]) -> E {
     let basis = limb_basis();
     limbs
@@ -3140,6 +3075,9 @@ pub fn prove_public_hologram(
     if assignment.len() != shape.num_vars || assignment.first() != Some(&F::ONE) {
         return Err(ZkHemError::Unsatisfied);
     }
+    // A hologram compiled without its Reed-Solomon cache marks a relation large enough that
+    // this proof's own `E` commitment gives its cache up as well.
+    let release_caches = hologram.h_state.codewords_0.is_empty();
     let public = assignment[1..=shape.num_public].to_vec();
     let row_base = row_tables(shape, &assignment, true).ok_or(ZkHemError::Unsatisfied)?;
     assignment.resize(1 << vk.var_bits, F::ZERO);
@@ -3165,43 +3103,33 @@ pub fn prove_public_hologram(
     let (col_rounds, ry, _, eval_z) =
         column_sumcheck(&mut tr, tm, &state_z.hypercube_evals[0], None);
 
-    // Build `ex[k] = eq(rx, row[k])`, `ey[k] = eq(ry, col[k])`, and `V[k]`.
+    // `ex[k] = eq(rx, row[k])`, `ey[k] = eq(ry, col[k])` and `V[k]` are gathers from small
+    // tables: they are released across the commitment to `E` and rebuilt after it.
     let eq_ry = eq_table(&ry);
     let m_nz = 1usize << vk.ell_nz;
-    let mut ex = vec![E::ZERO; m_nz];
-    let mut ey = vec![E::ZERO; m_nz];
-    let mut val_comb = vec![E::ZERO; m_nz];
-    let chunk = par_chunk(m_nz);
-    for_each_chunk_mut(&mut ex, chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            *slot = eq_rx[hologram.row_idx[base + off] as usize];
+    let (comm_e, state_e, m_sparse_claim) = {
+        let (ex, ey) = spark_read_tables(hologram, &eq_rx, &eq_ry);
+        let val_comb = spark_value_table(hologram, &combine);
+        let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
+        drop(val_comb);
+        let mut e0 = pack_e_super(&ex, &ey);
+        drop(ex);
+        drop(ey);
+        let e1 = e0.split_off(4 * m_nz);
+        let pack_schedule = vk.regime.schedule(vk.native_pack_vars());
+        let mut e_salt = [0u8; 32];
+        e_salt.copy_from_slice(&cshake256_32(b"QSAG.HEM.HOLOGRAM.ESALT/v1", seed));
+        let _phase = crate::profile::span("hologram_commit_e");
+        let (comm_e, mut state_e) = crate::pcs::whir_commit_batch_owned_with_schedule(
+            vec![e0, e1],
+            &e_salt,
+            &pack_schedule,
+        );
+        if release_caches {
+            crate::pcs::release_round0_cache(&mut state_e);
         }
-    });
-    for_each_chunk_mut(&mut ey, chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            *slot = eq_ry[hologram.col_idx[base + off] as usize];
-        }
-    });
-    for_each_chunk_mut(&mut val_comb, chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            let k = base + off;
-            *slot = combine[0].mul_base(hologram.val_a[k])
-                + combine[1].mul_base(hologram.val_b[k])
-                + combine[2].mul_base(hologram.val_c[k]);
-        }
-    });
-    let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
-
-    let mut e0 = pack_e_super(&ex, &ey);
-    let e1 = e0.split_off(4 * m_nz);
-    let pack_schedule = vk.regime.schedule(vk.native_pack_vars());
-    let mut e_salt = [0u8; 32];
-    e_salt.copy_from_slice(&cshake256_32(b"QSAG.HEM.HOLOGRAM.ESALT/v1", seed));
-    let (comm_e, state_e) =
-        crate::pcs::whir_commit_batch_owned_with_schedule(vec![e0, e1], &e_salt, &pack_schedule);
+        (comm_e, state_e, m_sparse_claim)
+    };
 
     tr.absorb(b"HOLO_COMM_E", &comm_e.to_bytes());
     tr.absorb_ext4(b"HOLO_M_SPARSE", m_sparse_claim);
@@ -3211,11 +3139,17 @@ pub fn prove_public_hologram(
     let delta = tr.squeeze_ext4(b"HOLO_DELTA");
 
     // 1. Spark cubic matrix sumcheck -> `r_mat`.
-    let (mat_rounds, r_mat, _) = run_cubic_triple_sumcheck_slices(&ex, &ey, &val_comb, |coeffs| {
-        tr.absorb_ext4_slice(b"HOLO_MAT_ROUND", &coeffs);
-        tr.squeeze_ext4(b"HOLO_MAT_ROUND")
-    });
-    drop(val_comb);
+    let (ex, ey) = spark_read_tables(hologram, &eq_rx, &eq_ry);
+    let (mat_rounds, r_mat) = {
+        let val_comb = spark_value_table(hologram, &combine);
+        let _phase = crate::profile::span("hologram_mat_sumcheck");
+        let (mat_rounds, r_mat, _) =
+            run_cubic_triple_sumcheck_slices(&ex, &ey, &val_comb, |coeffs| {
+                tr.absorb_ext4_slice(b"HOLO_MAT_ROUND", &coeffs);
+                tr.squeeze_ext4(b"HOLO_MAT_ROUND")
+            });
+        (mat_rounds, r_mat)
+    };
     let (h_at_mat, e_limbs_at_mat) = eval_h_and_e_limbs_at_point(
         hologram,
         &state_e.hypercube_evals[0],
@@ -3225,69 +3159,32 @@ pub fn prove_public_hologram(
     tr.absorb_ext4_slice(b"HOLO_AT_MAT_H", &h_at_mat);
     tr.absorb_ext4_slice(b"HOLO_AT_MAT_E", &e_limbs_at_mat);
 
-    // 2. LogUp-GKR fractional binary tree -> `(r_gkr, b_gkr)` (streaming layer 0).
-    let mut upper = build_gkr_upper_tree(
-        hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta,
-    );
-    let gkr_depth = vk.ell_nz + 2;
-    let (p_root, q_root) = {
-        let (pr, qr) = upper.pop().expect("nonempty GKR root");
-        (pr[0], qr[0])
-    };
-    debug_assert_eq!(p_root, E::ZERO);
-    if q_root.is_zero() {
-        return Err(ZkHemError::MaskRankDeficient);
-    }
-    tr.absorb_ext4(b"HOLO_Q_ROOT", q_root);
-
-    let mut r_cur: Vec<E> = Vec::new();
-    let mut gkr_layers = Vec::with_capacity(gkr_depth);
-    for d in (0..gkr_depth).rev() {
-        let m_vars = gkr_depth - 1 - d;
-        let (rounds, u_star, split) = if m_vars == 0 {
-            let (p_top, q_top) = upper.pop().expect("GKR top split");
-            (
-                Vec::new(),
-                Vec::new(),
-                [p_top[0], p_top[1], q_top[0], q_top[1]],
-            )
-        } else if d >= 1 {
-            let (p_d, q_d) = upper.pop().expect("GKR internal layer");
-            let beta = tr.squeeze_ext4(b"HOLO_GKR_BETA");
-            run_gkr_layer_sumcheck(&p_d, &q_d, &r_cur, beta, |coeffs| {
+    // 2. LogUp-GKR fractional binary tree -> `(r_gkr, b_gkr)`.
+    let (q_root, gkr_layers, r_cur) = {
+        // The four closures take turns on the one transcript.
+        let tr = core::cell::RefCell::new(&mut tr);
+        prove_logup_gkr(
+            |idx| {
+                eval_gkr_leaf(
+                    hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta, idx,
+                )
+            },
+            vk.ell_nz,
+            |q_root| tr.borrow_mut().absorb_ext4(b"HOLO_Q_ROOT", q_root),
+            || tr.borrow_mut().squeeze_ext4(b"HOLO_GKR_BETA"),
+            |coeffs| {
+                let mut tr = tr.borrow_mut();
                 tr.absorb_ext4_slice(b"HOLO_GKR_ROUND", &coeffs);
                 tr.squeeze_ext4(b"HOLO_GKR_ROUND")
-            })
-        } else {
-            debug_assert!(upper.is_empty());
-            let beta = tr.squeeze_ext4(b"HOLO_GKR_BETA");
-            run_gkr_leaf_layer_sumcheck(
-                hologram,
-                &ex,
-                &ey,
-                &eq_rx,
-                &eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                &r_cur,
-                beta,
-                |coeffs| {
-                    tr.absorb_ext4_slice(b"HOLO_GKR_ROUND", &coeffs);
-                    tr.squeeze_ext4(b"HOLO_GKR_ROUND")
-                },
-            )
-        };
-        tr.absorb_ext4_slice(b"HOLO_GKR_SPLIT", &split);
-        let c_bit = tr.squeeze_ext4(b"HOLO_GKR_BIT");
-        let mut next_r = Vec::with_capacity(m_vars + 1);
-        next_r.push(c_bit);
-        next_r.extend_from_slice(&u_star);
-        r_cur = next_r;
-        gkr_layers.push(LogUpGkrLayer { rounds, split });
-    }
-    drop(upper);
+            },
+            |ends| {
+                let mut tr = tr.borrow_mut();
+                tr.absorb_ext4_slice(b"HOLO_GKR_SPLIT", &ends);
+                tr.squeeze_ext4(b"HOLO_GKR_BIT")
+            },
+        )
+        .ok_or(ZkHemError::MaskRankDeficient)?
+    };
     drop(ex);
     drop(ey);
     drop(eq_rx);
@@ -3338,25 +3235,20 @@ pub fn prove_public_hologram(
         + lambda_open * super8_blend2_claim(&e_limbs_at_gkr, &sel2_gkr, eta_slice);
 
     let scalars = [E::ONE, eta_slice];
-    let h_monos = state_pair_monos(&hologram.h_state);
-    let open_h = whir_open_blend(
-        &hologram.h_state,
-        &scalars,
-        &h_monos,
-        build_kernel_he(),
-        claim_h,
-        &mut tr,
-    );
-    drop(h_monos);
-    let e_monos = state_pair_monos(&state_e);
-    let open_e = whir_open_blend(
-        &state_e,
-        &scalars,
-        &e_monos,
-        build_kernel_he(),
-        claim_e,
-        &mut tr,
-    );
+    let open_h = {
+        let _phase = crate::profile::span("hologram_open_h");
+        whir_open_blend_from_state(
+            &hologram.h_state,
+            &scalars,
+            build_kernel_he(),
+            claim_h,
+            &mut tr,
+        )
+    };
+    let open_e = {
+        let _phase = crate::profile::span("hologram_open_e");
+        whir_open_blend_from_state(&state_e, &scalars, build_kernel_he(), claim_e, &mut tr)
+    };
 
     Ok(HologramPublicProof {
         comm_z,
@@ -3909,31 +3801,8 @@ pub fn prove_public_for_recursion(
 
     let eq_ry = eq_table(&ry);
     let m_nz = 1usize << vk.ell_nz;
-    let mut ex = vec![E::ZERO; m_nz];
-    let mut ey = vec![E::ZERO; m_nz];
-    let mut val_comb = vec![E::ZERO; m_nz];
-    let chunk = par_chunk(m_nz);
-    for_each_chunk_mut(&mut ex, chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            *slot = eq_rx[hologram.row_idx[base + off] as usize];
-        }
-    });
-    for_each_chunk_mut(&mut ey, chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            *slot = eq_ry[hologram.col_idx[base + off] as usize];
-        }
-    });
-    for_each_chunk_mut(&mut val_comb, chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            let k = base + off;
-            *slot = combine[0].mul_base(hologram.val_a[k])
-                + combine[1].mul_base(hologram.val_b[k])
-                + combine[2].mul_base(hologram.val_c[k]);
-        }
-    });
+    let (ex, ey) = spark_read_tables(hologram, &eq_rx, &eq_ry);
+    let val_comb = spark_value_table(hologram, &combine);
     let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
 
     let e_super = pack_e_super(&ex, &ey);
@@ -3959,68 +3828,41 @@ pub fn prove_public_for_recursion(
     tr.absorb_exts(&mut b, 220, &h_at_mat.map(RecExt::constant));
     tr.absorb_exts(&mut b, 221, &e_limbs_at_mat.map(RecExt::constant));
 
-    let mut upper = build_gkr_upper_tree(
-        hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta,
-    );
-    let gkr_depth = vk.ell_nz + 2;
-    let (p_root, q_root) = {
-        let (pr, qr) = upper.pop().expect("nonempty GKR root");
-        (pr[0], qr[0])
+    let (q_root, gkr_layers, r_cur) = {
+        // The four closures take turns on the one transcript.
+        let shared = core::cell::RefCell::new((&mut tr, &mut b));
+        prove_logup_gkr(
+            |idx| {
+                eval_gkr_leaf(
+                    hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta, idx,
+                )
+            },
+            vk.ell_nz,
+            |q_root| {
+                let (tr, b) = &mut *shared.borrow_mut();
+                let (tr, b) = (&mut **tr, &mut **b);
+                tr.absorb_exts(b, 222, &[RecExt::constant(q_root)]);
+            },
+            || {
+                let (tr, b) = &mut *shared.borrow_mut();
+                let (tr, b) = (&mut **tr, &mut **b);
+                tr.ext(b, 223).value(&*b)
+            },
+            |coeffs| {
+                let (tr, b) = &mut *shared.borrow_mut();
+                let (tr, b) = (&mut **tr, &mut **b);
+                tr.absorb_exts(b, 224, &coeffs.map(RecExt::constant));
+                tr.ext(b, 225).value(&*b)
+            },
+            |ends| {
+                let (tr, b) = &mut *shared.borrow_mut();
+                let (tr, b) = (&mut **tr, &mut **b);
+                tr.absorb_exts(b, 226, &ends.map(RecExt::constant));
+                tr.ext(b, 227).value(&*b)
+            },
+        )
+        .ok_or(ZkHemError::MaskRankDeficient)?
     };
-    debug_assert_eq!(p_root, E::ZERO);
-    if q_root.is_zero() {
-        return Err(ZkHemError::MaskRankDeficient);
-    }
-    tr.absorb_exts(&mut b, 222, &[RecExt::constant(q_root)]);
-
-    let mut r_cur: Vec<E> = Vec::new();
-    let mut gkr_layers = Vec::with_capacity(gkr_depth);
-    for d in (0..gkr_depth).rev() {
-        let m_vars = gkr_depth - 1 - d;
-        let (rounds, u_star, split) = if m_vars == 0 {
-            let (p_top, q_top) = upper.pop().expect("GKR top split");
-            (
-                Vec::new(),
-                Vec::new(),
-                [p_top[0], p_top[1], q_top[0], q_top[1]],
-            )
-        } else if d >= 1 {
-            let (p_d, q_d) = upper.pop().expect("GKR internal layer");
-            let beta = tr.ext(&mut b, 223).value(&b);
-            run_gkr_layer_sumcheck(&p_d, &q_d, &r_cur, beta, |coeffs| {
-                tr.absorb_exts(&mut b, 224, &coeffs.map(RecExt::constant));
-                tr.ext(&mut b, 225).value(&b)
-            })
-        } else {
-            debug_assert!(upper.is_empty());
-            let beta = tr.ext(&mut b, 223).value(&b);
-            run_gkr_leaf_layer_sumcheck(
-                hologram,
-                &ex,
-                &ey,
-                &eq_rx,
-                &eq_ry,
-                alpha_mem,
-                gamma_x,
-                gamma_y,
-                delta,
-                &r_cur,
-                beta,
-                |coeffs| {
-                    tr.absorb_exts(&mut b, 224, &coeffs.map(RecExt::constant));
-                    tr.ext(&mut b, 225).value(&b)
-                },
-            )
-        };
-        tr.absorb_exts(&mut b, 226, &split.map(RecExt::constant));
-        let c_bit = tr.ext(&mut b, 227).value(&b);
-        let mut next_r = Vec::with_capacity(m_vars + 1);
-        next_r.push(c_bit);
-        next_r.extend_from_slice(&u_star);
-        r_cur = next_r;
-        gkr_layers.push(LogUpGkrLayer { rounds, split });
-    }
-    drop(upper);
     drop(ex);
     drop(ey);
     drop(eq_rx);
@@ -5004,6 +4846,42 @@ mod tests {
         for count in 0..=32 {
             let want = eq[..count].iter().fold(E::ZERO, |a, &b| a + b);
             assert_eq!(prefix_indicator(&point, count), want, "count {count}");
+        }
+    }
+
+    /// Releasing the Reed-Solomon caches (the large-relation path) changes no proof byte.
+    #[test]
+    fn hologram_proof_is_identical_without_round0_caches() {
+        for regime in [
+            WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
+            WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+        ] {
+            let mut cs = ConstraintSystem::new_hologram_aligned();
+            let claim = cs.public_input(f(0));
+            let mut st: [Lc; 12] = core::array::from_fn(|i| cs.alloc(f(3 + i as u64)).into());
+            for _ in 0..9 {
+                super::super::relation::poseidon2_perm(&mut cs, &mut st);
+            }
+            let prod = cs.mul(&st[0], &st[5]);
+            cs.enforce_equal(&prod.into(), &Lc::constant(cs.eval(&prod.into())));
+            cs.enforce_equal(&claim.into(), &Lc::zero());
+            let (shape, z) = cs.finish();
+            let cached = ShapeHologram::compile_native(&shape, regime).unwrap();
+            assert!(!cached.h_state.codewords_0.is_empty());
+            let lean = cached.clone().without_round0_cache();
+            let with_cache =
+                prove_public_hologram(&shape, &cached, z.clone(), b"cache", &[5; 32]).unwrap();
+            let without =
+                prove_public_hologram(&shape, &lean, z.clone(), b"cache", &[5; 32]).unwrap();
+            assert_eq!(with_cache.to_bytes(), without.to_bytes());
+            assert!(verify_public_hologram(
+                lean.verifier_key(),
+                &z[1..=shape.num_public],
+                b"cache",
+                &without
+            ));
+            // A clone keeps the choice its source made.
+            assert!(lean.clone().h_state.codewords_0.is_empty());
         }
     }
 
