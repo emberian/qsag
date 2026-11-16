@@ -15,7 +15,7 @@ fn monomial_table_core(point: &[E]) -> Vec<E> {
     out
 }
 
-pub(super) fn monomial_table(point: &[E]) -> Vec<E> {
+pub(crate) fn monomial_table(point: &[E]) -> Vec<E> {
     let _phase = crate::profile::span("monomial_table");
     #[cfg(feature = "std")]
     if point.len() >= 14 {
@@ -74,7 +74,7 @@ fn add_geometric_chunk(dst: &mut [E], initial: E, z: E) {
 }
 
 /// Zero-allocation streaming accumulation `dst[i] += xi * z^i` for `i in 0..dst.len()`.
-pub(super) fn add_geometric_scaled_in_place(dst: &mut [E], xi: E, z: E) {
+pub(crate) fn add_geometric_scaled_in_place(dst: &mut [E], xi: E, z: E) {
     let _phase = crate::profile::span("add_geometric_scaled");
     if dst.is_empty() {
         return;

@@ -2966,7 +2966,7 @@ fn pow2_iter_base(mut y0: Goldilocks, steps: usize) -> Goldilocks {
     y0
 }
 
-fn fill_indexed<T, F>(out: &mut [T], f: F)
+pub(crate) fn fill_indexed<T, F>(out: &mut [T], f: F)
 where
     T: Send,
     F: Fn(usize) -> T + Sync,
