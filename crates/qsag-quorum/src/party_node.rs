@@ -35,8 +35,9 @@
 //! ### Limits
 //! * Share pairs, pad keys and MAC keys come from a dealer in the tests and the benchmark
 //!   (`deal_rss256_keys`, `deal_keccak_shares`, compiled only for tests and with the
-//!   `testing-ephemeral` feature); this module has no key agreement, and without that
-//!   feature no share pair can be created or loaded.
+//!   `testing-ephemeral` feature). Production callers can import enrolled custody
+//!   using the key-share codec; this module does not establish the enrollment or
+//!   authenticated key agreement itself.
 //! * The engine evaluates plain `Keccak-f[1600]` states one 64-bit word per lane. It is not
 //!   bitsliced across signatures and is not a replacement for the 256-lane engine of
 //!   `qsag_core::rss256`; it exists to run the protocol with separated parties.
@@ -51,9 +52,9 @@ use qsag_asm::{KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS};
 use qsag_core::belt_latch::DurableWal;
 use qsag_core::keccak_mpc::RssKeyShare256;
 use qsag_core::rss256::Shake256Prg256;
-use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes};
 #[cfg(any(test, feature = "testing-ephemeral"))]
 use qsag_core::wipe::ct_eq_bytes32;
+use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes};
 
 use crate::dzk::{
     DzkShape, Gf128, NodeBasis, challenge_points, data_node_sum, decode_elements, derive_weights,
@@ -1809,8 +1810,11 @@ mod tests {
         let (endpoints, stats) = InMemoryWireMesh::connect(3, SESSION);
         let keys = deal_rss256_keys(&SEED);
         let mut rng = SeedRng::new(&SEED, b"shares");
-        let mut per_party_shares: [Vec<SharePair>; 3] =
-            [Vec::with_capacity(secrets.len()), Vec::with_capacity(secrets.len()), Vec::with_capacity(secrets.len())];
+        let mut per_party_shares: [Vec<SharePair>; 3] = [
+            Vec::with_capacity(secrets.len()),
+            Vec::with_capacity(secrets.len()),
+            Vec::with_capacity(secrets.len()),
+        ];
         for s in secrets {
             let [s0, s1, s2] = deal_keccak_shares_for_session(SESSION, s, &mut rng);
             per_party_shares[0].push(s0);
@@ -2723,5 +2727,67 @@ mod tests {
             reference.custodians[0].ack(0, b"M2").unwrap_err(),
             QuorumError::Latch(BeltLatchError::EpochAlreadyBound)
         );
+    }
+}
+
+/// One party's single-use MSP input at a certified Cut-the-Hash boundary.
+/// Rows stay secret and wipe on every success/error path. The caller must enroll
+/// this matrix and bind the active committee into the ceremony's message record.
+/// This adapter changes only the input sharing, never any MPC gate or MAC check.
+pub struct PersonalMspInput {
+    party: u16,
+    program: crate::access::MonotoneSpanProgram,
+    rows: SecretBuffer<Vec<[qsag_core::field::goldilocks::Goldilocks; 4]>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PersonalMspInputError {
+    Policy(crate::access::QuorumPolicyError),
+    Access(crate::access::AccessError),
+}
+impl PersonalMspInput {
+    pub fn new(
+        party: u16,
+        program: crate::access::MonotoneSpanProgram,
+        rows: SecretBuffer<Vec<[qsag_core::field::goldilocks::Goldilocks; 4]>>,
+    ) -> Result<Self, PersonalMspInputError> {
+        if rows.len() != program.row_owners().iter().filter(|&&p| p == party).count() {
+            return Err(PersonalMspInputError::Access(
+                crate::access::AccessError::InvalidShares,
+            ));
+        }
+        Ok(Self {
+            party,
+            program,
+            rows,
+        })
+    }
+
+    /// Consume one input only after the personal BeltLatch authorizes the exact
+    /// record. The returned four additive field lanes feed Cut-the-Hash inputs.
+    pub fn release<W: DurableWal>(
+        self,
+        latch: &mut crate::access::PersonalBeltLatch<W>,
+        record: &qsag_core::belt_latch::BeltLatchRecord,
+        certificate: &crate::access::PersonalLatchCertificate,
+    ) -> Result<SecretBuffer<[qsag_core::field::goldilocks::Goldilocks; 4]>, PersonalMspInputError>
+    {
+        let permit = latch
+            .authorize(record, certificate)
+            .map_err(PersonalMspInputError::Policy)?;
+        if permit.party() != self.party || !permit.signers().contains(&self.party) {
+            return Err(PersonalMspInputError::Access(
+                crate::access::AccessError::Unauthorized,
+            ));
+        }
+        let weights = self
+            .program
+            .solve_reconstruction_weights(permit.signers())
+            .ok_or(PersonalMspInputError::Access(
+                crate::access::AccessError::Unauthorized,
+            ))?;
+        self.program
+            .collapse_to_additive_share(self.party, &weights, &self.rows)
+            .map_err(PersonalMspInputError::Access)
     }
 }

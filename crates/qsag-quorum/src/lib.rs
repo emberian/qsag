@@ -17,6 +17,9 @@
 
 extern crate alloc;
 
+pub mod access;
+pub use access::{AsymmetricQuorumSystem, MonotoneSpanProgram, PersonalQuorumSlice};
+
 pub mod dealerless_staging;
 pub mod dzk;
 pub mod hash;
