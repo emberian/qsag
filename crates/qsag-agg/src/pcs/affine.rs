@@ -1104,3 +1104,100 @@ mod tests {
         }
     }
 }
+
+/// Fold large recursive tables in their own storage, then compact the independently
+/// processed chunks. This avoids a second full-size scratch arena at the first fold.
+fn fold_pairs_compact(values: &mut Vec<E>, pair: impl Fn(usize, E, E) -> E + Sync, secret: bool) {
+    let pairs = values.len() / 2;
+    let workers = {
+        #[cfg(feature = "std")]
+        {
+            crate::parallel_workers()
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            1usize
+        }
+    };
+    let chunk_pairs = pairs.div_ceil(workers).max(1);
+    let chunk_len = 2 * chunk_pairs;
+    let fold = |chunk_index: usize, part: &mut [E]| {
+        for i in 0..part.len() / 2 {
+            part[i] = pair(chunk_index * chunk_pairs + i, part[2 * i], part[2 * i + 1]);
+        }
+    };
+    #[cfg(feature = "std")]
+    std::thread::scope(|scope| {
+        for (i, part) in values[..2 * pairs].chunks_mut(chunk_len).enumerate() {
+            let fold = &fold;
+            crate::spawn_bounded(scope, move || fold(i, part));
+        }
+    });
+    #[cfg(not(feature = "std"))]
+    for (i, part) in values[..2 * pairs].chunks_mut(chunk_len).enumerate() {
+        fold(i, part);
+    }
+    for start in (0..pairs).step_by(chunk_pairs) {
+        let count = chunk_pairs.min(pairs - start);
+        values.copy_within(2 * start..2 * start + count, start);
+    }
+    if secret {
+        qsag_asm::volatile_fill(&mut values[pairs..], E::ZERO);
+    }
+    values.truncate(pairs + 1);
+    values[pairs] = E::ZERO;
+    values.shrink_to_fit();
+}
+
+pub(crate) fn fold_kernel_in_place(k: &mut Vec<E>, phi: E) {
+    fold_pairs_compact(k, |_, even, odd| even + phi * odd, false);
+}
+
+pub(crate) fn fold_coeffs_in_place(c: &mut Vec<E>, [theta, alpha, beta]: [E; 3]) {
+    let pairs = c.len() / 2;
+    // Carry the previous pair's contribution to the affine shift in one word.
+    // A forward pass never overwrites a pair before it is read.
+    let mut previous = E::ZERO;
+    for i in 0..pairs {
+        let mix = c[2 * i] + theta * c[2 * i + 1];
+        c[i] = c[2 * i + 1] + alpha * mix + beta * previous;
+        previous = mix;
+    }
+    if pairs == 0 {
+        c.clear();
+        c.push(E::ZERO);
+        return;
+    }
+    qsag_asm::volatile_fill(&mut c[pairs..], E::ZERO);
+    c[pairs] = beta * previous;
+    c.truncate(pairs + 1);
+    c.shrink_to_fit();
+}
+
+#[cfg(test)]
+mod in_place_tests {
+    use super::*;
+    #[test]
+    fn in_place_folds_match_independent_buffer_folds() {
+        for len in [2, 3, 4, 6, 18, 258, 4098] {
+            let source: Vec<E> = (0..len)
+                .map(|i| {
+                    E::from_limbs(core::array::from_fn(|j| {
+                        crate::field::Goldilocks::from_u64_reduced((17 * i + 31 * j + 1) as u64)
+                    }))
+                })
+                .collect();
+            let phi = source[0];
+            let challenges = [source[0], source[1], source[len - 1]];
+            let mut expected = Vec::new();
+            fold_kernel_into(&source, phi, &mut expected);
+            let mut actual = source.clone();
+            fold_kernel_in_place(&mut actual, phi);
+            assert_eq!(actual, expected);
+            fold_coeffs_into(&source, challenges, &mut expected);
+            let mut actual = source;
+            fold_coeffs_in_place(&mut actual, challenges);
+            assert_eq!(actual, expected);
+        }
+    }
+}

@@ -770,8 +770,12 @@ impl MerkleCanopyTree {
                 }
             }
             for idx in (1..4.min(n)).rev() {
-                nodes[idx] =
-                    hash_merkle_internal_mode(turbo, idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                nodes[idx] = hash_merkle_internal_mode(
+                    turbo,
+                    idx as u32,
+                    &nodes[2 * idx],
+                    &nodes[2 * idx + 1],
+                );
             }
             let root = hash_tree_root_mode(turbo, log_leaves as u8, &nodes[1]);
             return Self {
@@ -1566,11 +1570,7 @@ fn derive_round0_salt(salt_seed: &[u8; 32], group_idx: u32) -> [u8; 16] {
 
 /// 4-way SIMD Round-0 salt derivation for fibers `base_group .. base_group + 4`.
 #[inline]
-fn derive_round0_salt_x4_mode(
-    turbo: bool,
-    salt_seed: &[u8; 32],
-    base_group: u32,
-) -> [[u8; 16]; 4] {
+fn derive_round0_salt_x4_mode(turbo: bool, salt_seed: &[u8; 32], base_group: u32) -> [[u8; 16]; 4] {
     let mut bufs = [[0u8; 37]; 4];
     for (k, buf) in bufs.iter_mut().enumerate() {
         buf[0] = TAG_ROUND0_SALT;
@@ -1582,11 +1582,7 @@ fn derive_round0_salt_x4_mode(
 
 /// 8-way SIMD Round-0 salt derivation for fibers `base_group .. base_group + 8`.
 #[inline]
-fn derive_round0_salt_x8_mode(
-    turbo: bool,
-    salt_seed: &[u8; 32],
-    base_group: u32,
-) -> [[u8; 16]; 8] {
+fn derive_round0_salt_x8_mode(turbo: bool, salt_seed: &[u8; 32], base_group: u32) -> [[u8; 16]; 8] {
     let mut bufs = [[0u8; 37]; 8];
     for (k, buf) in bufs.iter_mut().enumerate() {
         buf[0] = TAG_ROUND0_SALT;
@@ -2404,6 +2400,22 @@ pub struct HemWhirProverState {
     pub tree_0: MerkleCanopyTree,
     #[cfg(feature = "vulkan")]
     pub(crate) gpu_session: Option<crate::acceleration::GpuWhirSession>,
+}
+
+impl Drop for HemWhirProverState {
+    fn drop(&mut self) {
+        if self.secret {
+            for values in self
+                .hypercube_evals
+                .iter_mut()
+                .chain(&mut self.codewords_0)
+                .chain(&mut self.monomial_coeffs_0)
+            {
+                qsag_asm::volatile_fill(values, Goldilocks::ZERO);
+            }
+            qsag_asm::volatile_fill(&mut self.salt_seed, 0);
+        }
+    }
 }
 
 impl HemWhirProverState {
@@ -4009,17 +4021,16 @@ fn whir_open_core(
     mut cur_sum_claim: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> HemWhirOpeningProof {
-    let lazy_cpu_r0: Option<CpuRound0Artifacts> =
-        state.codewords_0.is_empty().then(|| {
-            build_cpu_round0(
-                &state.hypercube_evals,
-                &state.salt_seed,
-                state.schedule.regime,
-                state.schedule.stages[0].blowup,
-                state.group_arity_0,
-                state.secret,
-            )
-        });
+    let lazy_cpu_r0: Option<CpuRound0Artifacts> = state.codewords_0.is_empty().then(|| {
+        build_cpu_round0(
+            &state.hypercube_evals,
+            &state.salt_seed,
+            state.schedule.regime,
+            state.schedule.stages[0].blowup,
+            state.group_arity_0,
+            state.secret,
+        )
+    });
     let (lazy_monos, codewords_0, tree_0): (
         &[Vec<Goldilocks>],
         &[Vec<Goldilocks>],
@@ -4043,11 +4054,11 @@ fn whir_open_core(
     let fold_vars = state.num_vars - early_stop;
     absorb_whir_schedule(transcript, sched);
     let core_len = 1usize << state.num_vars;
-    let pre_monos = precomputed_monomial_polys.or((lazy_monos.len() == num_polys).then_some(lazy_monos));
+    let pre_monos =
+        precomputed_monomial_polys.or((lazy_monos.len() == num_polys).then_some(lazy_monos));
 
-    let direct_unit_base = !state.secret
-        && single
-        && weights[0] == [GoldilocksExt4::ONE, GoldilocksExt4::ZERO];
+    let direct_unit_base =
+        !state.secret && single && weights[0] == [GoldilocksExt4::ONE, GoldilocksExt4::ZERO];
     let owned_unit_c: Vec<Goldilocks>;
     let unit_c0: Option<&[Goldilocks]> = if direct_unit_base {
         if let Some(pre) = pre_monos {
@@ -4259,7 +4270,14 @@ fn whir_open_core(
                     claims.push((z_u, v_shift));
                 }
                 round0_multiproof = tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
-                    round0_leaf_hash_mode(turbo, codewords_0, &state.salt_seed, g, num_groups_0, arity)
+                    round0_leaf_hash_mode(
+                        turbo,
+                        codewords_0,
+                        &state.salt_seed,
+                        g,
+                        num_groups_0,
+                        arity,
+                    )
                 });
                 claims
             } else {
@@ -4397,7 +4415,14 @@ fn whir_open_core(
                     );
                 }
                 round0_multiproof = tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
-                    round0_leaf_hash_mode(turbo, codewords_0, &state.salt_seed, g, num_groups_0, arity)
+                    round0_leaf_hash_mode(
+                        turbo,
+                        codewords_0,
+                        &state.salt_seed,
+                        g,
+                        num_groups_0,
+                        arity,
+                    )
                 });
             } else {
                 let (prev_cw, prev_tree, prev_ood) = match active_stage_oracle.take() {
@@ -4584,9 +4609,12 @@ fn whir_open_single_gpu(
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Result<HemWhirOpeningProof, qsag_accel::VulkanError> {
     let mono_kron = mono_kronecker_1024(point);
-    session
-        .raw()
-        .prover_whir_expand_monomial_and_dot_1024(&mono_kron, state.num_vars, 1, &mut [])?;
+    session.raw().prover_whir_expand_monomial_and_dot_1024(
+        &mono_kron,
+        state.num_vars,
+        1,
+        &mut [],
+    )?;
     whir_open_core_gpu(
         state,
         session,
@@ -5511,18 +5539,39 @@ pub fn add_point_kernel(
     weight: GoldilocksExt4,
     point: &[GoldilocksExt4],
 ) {
-    assert!(kernel.len() >= 1usize << point.len());
-    let mut table = Vec::with_capacity(1usize << point.len());
-    table.push(weight);
-    for &r in point {
-        for i in 0..table.len() {
-            let v = table[i] * r;
-            table.push(v);
+    let n = 1usize << point.len();
+    assert!(kernel.len() >= n);
+    let (lo, hi) = split_monomial_table(point);
+    let add = |base: usize, part: &mut [GoldilocksExt4]| {
+        for (offset, dst) in part.iter_mut().enumerate() {
+            let index = base + offset;
+            *dst += weight * lo[index % lo.len()] * hi[index / lo.len()];
         }
+    };
+    #[cfg(feature = "std")]
+    if n >= 16_384 && crate::parallel_workers() > 1 {
+        let chunk = n.div_ceil(crate::parallel_workers());
+        std::thread::scope(|scope| {
+            let add = &add;
+            for (i, part) in kernel[..n].chunks_mut(chunk).enumerate() {
+                crate::spawn_bounded(scope, move || add(i * chunk, part));
+            }
+        });
+        return;
     }
-    for (dst, src) in kernel.iter_mut().zip(table) {
-        *dst += src;
-    }
+    add(0, &mut kernel[..n]);
+}
+
+/// Square-root-sized Kronecker factors for a monomial evaluation functional.
+pub(crate) fn split_monomial_table(
+    point: &[GoldilocksExt4],
+) -> (Vec<GoldilocksExt4>, Vec<GoldilocksExt4>) {
+    let split = point.len() / 2;
+    let mut lo = affine::monomial_table(&point[..split]);
+    let mut hi = affine::monomial_table(&point[split..]);
+    lo.truncate(1 << split);
+    hi.truncate(1 << (point.len() - split));
+    (lo, hi)
 }
 
 /// Open the scalar blend $U = \sum_i \text{scalars}[i] \cdot W_i$ of a batch commitment against
@@ -6170,7 +6219,8 @@ fn verify_and_fold_ext4_stage_fibers(
         if indices.len() == 4
             && let Some(turbo) = hash.byte_turbo_mode()
         {
-            let hashes = queried_ext4_hash_x4_mode(turbo, stage_u8, indices, &page[page_off..], arity);
+            let hashes =
+                queried_ext4_hash_x4_mode(turbo, stage_u8, indices, &page[page_off..], arity);
             for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
                 *slot = (index, hash);
             }
@@ -7229,6 +7279,53 @@ mod pcs_unit_tests {
         assert_eq!(transcript.pow_bits(), 16);
         assert!((0..nonce).all(|n| poseidon2_pow_word(chain, n) & mask != 0));
         assert!((0..nonce).all(|n| !verify_pcs_pow(&transcript, n)));
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "large RX 6750 XT GPU gate; QSAG_ACCEL=vulkan"]
+    fn gpu_nv25_nv26_native_openings() {
+        use std::time::Instant;
+        assert!(crate::acceleration::vulkan_execution_counts().is_some());
+        for nv in [25, 26] {
+            let schedule = whir_stage_schedule(nv);
+            let evals = regime_test_poly(nv, 77);
+            let point = regime_test_point(nv, 78);
+            let value = crate::field::mle_eval_base_at_ext4(&evals, &point);
+            let before = crate::acceleration::vulkan_execution_counts().unwrap();
+            let start = Instant::now();
+            let (comm, state) = whir_commit_owned_with_schedule(evals, &[5; 32], &schedule);
+            let commit_ms = start.elapsed().as_secs_f64() * 1000.0;
+            assert!(state.gpu_session.is_some(), "nv={nv} CPU fallback");
+            let start = Instant::now();
+            let proof = whir_open(
+                &state,
+                &point,
+                value,
+                &mut regime_transcript(&schedule, b"large-gpu"),
+            );
+            let open_ms = start.elapsed().as_secs_f64() * 1000.0;
+            drop(state);
+            let after = crate::acceleration::vulkan_execution_counts().unwrap();
+            assert!(after.0 > before.0 && after.1 > before.1);
+            assert_eq!(after.2, before.2, "GPU fallback at nv={nv}");
+            let start = Instant::now();
+            assert!(whir_verify_with_schedule(
+                &comm,
+                nv,
+                &point,
+                value,
+                &proof,
+                &mut regime_transcript(&schedule, b"large-gpu"),
+                &schedule
+            ));
+            std::println!(
+                "GPU_LARGE nv={nv} commit_ms={commit_ms:.2} open_ms={open_ms:.2} verify_ms={:.2} submissions={} stages={}",
+                start.elapsed().as_secs_f64() * 1000.0,
+                after.0 - before.0,
+                after.1 - before.1
+            );
+        }
     }
 
     /// One flat opening above the former `nv = 24` ceiling under the default regime.
