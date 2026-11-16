@@ -1,61 +1,107 @@
 module
 /-
-# Qsag.Exec.Tactic.SimulationKit — `compose_forward_sim` and `mir_sim_step`
+# Qsag.Exec.Tactic.SimulationKit — Simulation Spine Synthesis, `DataRefinement`, `LawfulFramedCodec` & `frame_prefix_inj`
 
-**`by compose_forward_sim` / `by compose_forward_sim [h₁, ...]`**: goal-directed `TacticM` spine
-synthesizer chaining `ForwardSim.refl`, `ForwardSim.trans`, and `LockstepSim.toForwardSim` across
-multi-layer protocol state machines (`Qsag.Exec.SimulationSpine`).
-**`by mir_sim_step`**: symbolic case split of monadic `Option` / `Except` results, closing
-simulation links with `compose_forward_sim`.
+Zero-`Classical.choice` proof-automation and refinement combinator kit for `Spec ↔ Exec ↔ MIR`:
+1. **`by compose_forward_sim` / `by compose_refines`**: Goal-directed `TacticM` DFS synthesizer
+   chaining `ForwardSim.refl`/`ForwardSim.trans`/`LockstepSim.toForwardSim` AND
+   `Spec.Refines.refl`/`Spec.Refines.trans`/`Spec.LockstepSim.toRefines` with `0` `partial` / `!` / `Classical.choice`.
+2. **`by mir_sim_step`**: Bounded structural symbolic splitter over `Option` and `Except`.
+3. **`DataRefinement α_spec α_exec` (`Rel1`, `Rel2`, `option_rel`, `list_rel`, `vec_rel`, carrier bridges)**:
+   Composable relational & functional data-refinement combinators connecting `List UInt8`, `Nat`,
+   `BitVec`, `Digest256` specs to `ByteArray`, `UInt64`, `UInt32`, and length-indexed byte slices.
+4. **`LawfulFramedCodec`, `FramedField`, `framePair_inj`, `frameList_inj` & `by frame_prefix_inj`**:
+   Composable prefix-free byte-framing combinators + automatic prefix-peeling tactic collapsing
+   multi-field Merkle/transcript/intent preimage injectivity proofs to 1 line!
 -/
 
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Tactic.MaskBijection
+public import Qsag.Spec.Encoding
 public import Qsag.Exec.SimulationSpine
+public import Qsag.Exec.RefinesBridges
 public meta import Lean
 
 public section
 
 namespace Qsag.Tactic.AssuranceKit
 open Lean Meta Elab Tactic Command
-/-! ### `by compose_forward_sim` — Compositional `ForwardSim` & `LockstepSim` Spine Synthesizer -/
+
+/-! ## 1. Constructive `compose_forward_sim` / `compose_refines` & `mir_sim_step` (`0 Classical.choice`) -/
+
+/-- Extract the last two arguments `(src, dst)` of an application without `!` (`0 Inhabited`). -/
+private meta def lastTwoArgs? (args : Array Expr) : Option (Expr × Expr) :=
+  if args.size >= 2 then
+    match args[args.size - 2]?, args[args.size - 1]? with
+    | some src, some dst => some (src, dst)
+    | _, _ => none
+  else
+    none
 
 /-- Coerce a `ForwardSim` or `LockstepSim` expression into `(srcMachine, dstMachine, forwardSimExpr)`. -/
 private meta def asForwardSimLink? (e : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
   let ty := stripMData (← instantiateMVars (← inferType e))
   let fn := stripMData ty.getAppFn
   let args := ty.getAppArgs
-  if fn.isConstOf ``Qsag.ForwardSim && args.size >= 2 then
-    return some (args[args.size - 2]!, args[args.size - 1]!, e)
-  if fn.isConstOf ``Qsag.LockstepSim && args.size >= 2 then
-    let fsExpr ← mkAppM ``Qsag.LockstepSim.toForwardSim #[e]
-    return some (args[args.size - 2]!, args[args.size - 1]!, fsExpr)
+  if fn.isConstOf ``Qsag.ForwardSim then
+    if let some (src, dst) := lastTwoArgs? args then
+      return some (src, dst, e)
+  if fn.isConstOf ``Qsag.LockstepSim then
+    if let some (src, dst) := lastTwoArgs? args then
+      let fsExpr ← mkAppM ``Qsag.LockstepSim.toForwardSim #[e]
+      return some (src, dst, fsExpr)
   return none
 
-/-- Bounded DFS search over local `ForwardSim` / `LockstepSim` links to connect `curM` to `endM`. -/
-private meta partial def searchForwardSimPath (fuel : Nat) (used : Array FVarId)
-    (links : Array (FVarId × Expr × Expr × Expr)) (curM endM : Expr) : MetaM (Option Expr) := do
-  if ← withoutModifyingState (isDefEq curM endM) then
-    let _ ← isDefEq curM endM
-    return some (← mkAppM ``Qsag.ForwardSim.refl #[curM])
-  match fuel with
-  | 0 => return none
-  | fuel' + 1 =>
-    for (fid, srcM, dstM, linkExpr) in links do
-      if used.contains fid then continue
-      if ← withoutModifyingState (isDefEq curM srcM) then
-        if ← withoutModifyingState (isDefEq dstM endM) then
-          let _ ← isDefEq curM srcM
-          let _ ← isDefEq dstM endM
-          return some linkExpr
-        let tail? ← withoutModifyingState do
-          let _ ← isDefEq curM srcM
-          searchForwardSimPath fuel' (used.push fid) links dstM endM
-        if tail?.isSome then
-          let _ ← isDefEq curM srcM
-          if let some tailExpr ← searchForwardSimPath fuel' (used.push fid) links dstM endM then
-            return some (← mkAppM ``Qsag.ForwardSim.trans #[linkExpr, tailExpr])
+/-- Coerce a `Spec.Refines` or `Spec.LockstepSim` expression into `(srcMachine, dstMachine, refinesExpr)`. -/
+private meta def asSpecRefinesLink? (e : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
+  let ty := stripMData (← instantiateMVars (← inferType e))
+  let fn := stripMData ty.getAppFn
+  let args := ty.getAppArgs
+  if fn.isConstOf ``Qsag.Spec.Refines then
+    if let some (src, dst) := lastTwoArgs? args then
+      return some (src, dst, e)
+  if fn.isConstOf ``Qsag.Spec.LockstepSim then
+    if let some (src, dst) := lastTwoArgs? args then
+      let refExpr ← mkAppM ``Qsag.Spec.LockstepSim.toRefines #[e]
+      return some (src, dst, refExpr)
+  return none
+
+/-- Structurally recursive DFS search (`0 partial`, `0 Classical.choice`) over simulation links. -/
+private meta def searchSimPath (reflConst transConst : Name) :
+    Nat → Array FVarId → List (FVarId × Expr × Expr × Expr) → Expr → Expr → MetaM (Option Expr)
+  | 0, _, _, curM, endM => do
+    if ← withoutModifyingState (isDefEq curM endM) then
+      let _ ← isDefEq curM endM
+      return some (← mkAppM reflConst #[curM])
     return none
+  | fuel' + 1, used, links, curM, endM => do
+    if ← withoutModifyingState (isDefEq curM endM) then
+      let _ ← isDefEq curM endM
+      return some (← mkAppM reflConst #[curM])
+    let rec tryLinks : List (FVarId × Expr × Expr × Expr) → MetaM (Option Expr)
+      | [] => return none
+      | (fid, srcM, dstM, linkExpr) :: rest => do
+        if used.contains fid then
+          tryLinks rest
+        else if ← withoutModifyingState (isDefEq curM srcM) then
+          if ← withoutModifyingState (isDefEq dstM endM) then
+            let _ ← isDefEq curM srcM
+            let _ ← isDefEq dstM endM
+            return some linkExpr
+          let tail? ← withoutModifyingState do
+            let _ ← isDefEq curM srcM
+            searchSimPath reflConst transConst fuel' (used.push fid) links dstM endM
+          match tail? with
+          | some _ =>
+            let _ ← isDefEq curM srcM
+            if let some tailExpr ← searchSimPath reflConst transConst fuel' (used.push fid) links dstM endM then
+              return some (← mkAppM transConst #[linkExpr, tailExpr])
+            else
+              tryLinks rest
+          | none => tryLinks rest
+        else
+          tryLinks rest
+    tryLinks links
 
 syntax "compose_forward_sim" (" [" term,* "]")? : tactic
 
@@ -64,12 +110,17 @@ elab_rules : tactic
     let goal ← getMainGoal
     goal.withContext do
       let tgt := stripMData (← instantiateMVars (← goal.getType))
-      let args := tgt.getAppArgs
-      unless (stripMData tgt.getAppFn).isConstOf ``Qsag.ForwardSim && args.size >= 2 do
-        throwError "compose_forward_sim: goal `{tgt}` is not a `Qsag.ForwardSim C A`"
-      let startM := args[args.size - 2]!
+      let fn := stripMData tgt.getAppFn
+      let isParty := fn.isConstOf ``Qsag.ForwardSim
+      let isSpec := fn.isConstOf ``Qsag.Spec.Refines
+      unless isParty || isSpec do
+        throwError "compose_forward_sim: goal `{tgt}` is neither `Qsag.ForwardSim C A` nor `Qsag.Spec.Refines C A`"
+      let some (startM, _) := lastTwoArgs? tgt.getAppArgs
+        | throwError "compose_forward_sim: malformed simulation target `{tgt}`"
+      let reflConst := if isParty then ``Qsag.ForwardSim.refl else ``Qsag.Spec.Refines.refl
+      let transConst := if isParty then ``Qsag.ForwardSim.trans else ``Qsag.Spec.Refines.trans
       if ts.isEmpty then
-        let reflExpr ← mkAppM ``Qsag.ForwardSim.refl #[startM]
+        let reflExpr ← mkAppM reflConst #[startM]
         unless ← isDefEq (← goal.getType) (← inferType reflExpr) do
           throwError "compose_forward_sim []: machines are not definitionally equal"
         goal.assign reflExpr
@@ -78,12 +129,14 @@ elab_rules : tactic
         let mut chainExpr? : Option Expr := none
         for t in ts do
           let raw ← Tactic.elabTerm t none
-          let some (_, _, fsLink) ← asForwardSimLink? raw
-            | throwErrorAt t "compose_forward_sim: `{t}` has type `{← inferType raw}`, expected `ForwardSim` or `LockstepSim`"
+          let linkOpt ← if isParty then asForwardSimLink? raw else asSpecRefinesLink? raw
+          let some (_, _, fsLink) := linkOpt
+            | throwErrorAt t "compose_forward_sim: `{t}` is not a compatible simulation link"
           match chainExpr? with
           | none => chainExpr? := some fsLink
-          | some prev => chainExpr? := some (← mkAppM ``Qsag.ForwardSim.trans #[prev, fsLink])
-        let some finalChain := chainExpr? | unreachable!
+          | some prev => chainExpr? := some (← mkAppM transConst #[prev, fsLink])
+        let some finalChain := chainExpr?
+          | throwError "compose_forward_sim: empty link chain"
         unless ← isDefEq (← goal.getType) (← inferType finalChain) do
           throwError "compose_forward_sim: composed spine has type `{← inferType finalChain}`, expected `{← goal.getType}`"
         goal.assign finalChain
@@ -92,45 +145,434 @@ elab_rules : tactic
     let goal ← getMainGoal
     goal.withContext do
       let tgt := stripMData (← instantiateMVars (← goal.getType))
-      let args := tgt.getAppArgs
-      unless (stripMData tgt.getAppFn).isConstOf ``Qsag.ForwardSim && args.size >= 2 do
-        throwError "compose_forward_sim: goal `{tgt}` is not a `Qsag.ForwardSim C A`"
-      let startM := args[args.size - 2]!
-      let endM := args[args.size - 1]!
-      let mut links : Array (FVarId × Expr × Expr × Expr) := #[]
+      let fn := stripMData tgt.getAppFn
+      let isParty := fn.isConstOf ``Qsag.ForwardSim
+      let isSpec := fn.isConstOf ``Qsag.Spec.Refines
+      unless isParty || isSpec do
+        throwError "compose_forward_sim: goal `{tgt}` is neither `Qsag.ForwardSim C A` nor `Qsag.Spec.Refines C A`"
+      let some (startM, endM) := lastTwoArgs? tgt.getAppArgs
+        | throwError "compose_forward_sim: malformed simulation target `{tgt}`"
+      let reflConst := if isParty then ``Qsag.ForwardSim.refl else ``Qsag.Spec.Refines.refl
+      let transConst := if isParty then ``Qsag.ForwardSim.trans else ``Qsag.Spec.Refines.trans
+      let mut links : List (FVarId × Expr × Expr × Expr) := []
       for ldecl in ← getLCtx do
         if ldecl.isImplementationDetail then continue
-        if let some (srcM, dstM, fsExpr) ← asForwardSimLink? ldecl.toExpr then
-          links := links.push (ldecl.fvarId, srcM, dstM, fsExpr)
-      let some proof ← searchForwardSimPath (links.size + 1) #[] links startM endM
-        | throwError "compose_forward_sim: could not find a `ForwardSim`/`LockstepSim` path from `{startM}` to `{endM}` in local context"
+        let linkOpt ← if isParty then asForwardSimLink? ldecl.toExpr else asSpecRefinesLink? ldecl.toExpr
+        if let some (srcM, dstM, fsExpr) := linkOpt then
+          links := links ++ [(ldecl.fvarId, srcM, dstM, fsExpr)]
+      let some proof ← searchSimPath reflConst transConst (links.length + 1) #[] links startM endM
+        | throwError "compose_forward_sim: could not find a simulation path from `{startM}` to `{endM}` in local context"
       unless ← isDefEq (← goal.getType) (← inferType proof) do
         throwError "compose_forward_sim: synthesized proof type mismatch"
       goal.assign proof
       replaceMainGoal []
 
-/-- Symbolically split monadic results, retaining equations for each branch. -/
-private meta partial def mirStep (goal : MVarId) : TacticM (List MVarId) := do
-  let rem ← evalTacticAt (← `(tactic| first
-    | compose_forward_sim
-    | (solve | simp_all)
-    | skip)) goal
-  if rem.isEmpty then return []
-  goal.withContext do
-    for decl in ← getLCtx do
-      if decl.isImplementationDetail then continue
-      let ty ← whnf decl.type
-      if ty.getAppFn.isConstOf ``Option || ty.getAppFn.isConstOf ``Except then
-        let cases ← goal.cases decl.fvarId
+/-- Alias for `compose_forward_sim` on `Spec.Refines` (`C ⊑ A`) goals. -/
+macro "compose_refines" : tactic => `(tactic| compose_forward_sim)
+macro "compose_refines" "[" ts:term,* "]" : tactic => `(tactic| compose_forward_sim [$ts,*])
+
+/-- Structurally fuel-bounded symbolic splitter over `Option` and `Except` (`0 partial`). -/
+private meta def mirStep : Nat → MVarId → TacticM (List MVarId)
+  | 0, goal => return [goal]
+  | fuel + 1, goal => do
+    let rem ← evalTacticAt (← `(tactic| first
+      | compose_forward_sim
+      | (solve | simp_all)
+      | skip)) goal
+    if rem.isEmpty then return []
+    goal.withContext do
+      let rec scanCtx : List LocalDecl → TacticM (Option FVarId)
+        | [] => return none
+        | decl :: rest => do
+          if decl.isImplementationDetail then
+            scanCtx rest
+          else
+            let ty ← whnf decl.type
+            if ty.getAppFn.isConstOf ``Option || ty.getAppFn.isConstOf ``Except then
+              return some decl.fvarId
+            else
+              scanCtx rest
+      if let some fid ← scanCtx (← getLCtx).decls.toList.reduceOption then
+        let cases ← goal.cases fid
         let mut out := []
-        for c in cases do out := out ++ (← mirStep c.mvarId)
+        for c in cases do
+          out := out ++ (← mirStep fuel c.mvarId)
         return out
-    return ← evalTacticAt (← `(tactic| simp_all [Bind.bind, Option.bind, Except.bind])) goal
+      return ← evalTacticAt (← `(tactic| simp_all [Bind.bind, Option.bind, Except.bind])) goal
 
 elab "mir_sim_step" : tactic => do
-  replaceMainGoal (← mirStep (← getMainGoal))
+  replaceMainGoal (← mirStep 32 (← getMainGoal))
 
 end Qsag.Tactic.AssuranceKit
+
+/-! ## 2. Composable `Spec ↔ Exec` Data-Refinement Combinators (`DataRefinement`, `Rel1`, `Rel2`) -/
+
+namespace Qsag
+
+set_option autoImplicit false
+
+/-- Constructive pointwise list relation (`0 Mathlib`, `0 Classical.choice`). -/
+inductive ListRel {α β : Type} (R : α → β → Prop) : List α → List β → Prop where
+  | nil : ListRel R [] []
+  | cons {a : α} {b : β} {xs : List α} {ys : List β} :
+      R a b → ListRel R xs ys → ListRel R (a :: xs) (b :: ys)
+
+/-- Relational data refinement from abstract specification carrier `α` to executable carrier `β`. -/
+structure DataRefinement (α β : Type) where
+  Rel : α → β → Prop
+
+/-- Functional representation refinement (`abs : β → α` under concrete well-formedness `Inv`). -/
+structure FuncRefinement (α β : Type) where
+  abs : β → α
+  Inv : β → Prop := fun _ => True
+
+/-- Every `FuncRefinement` canonically induces a `DataRefinement` (`a = F.abs x ∧ F.Inv x`). -/
+@[expose] def FuncRefinement.toDataRefinement {α β : Type}
+    (F : FuncRefinement α β) : DataRefinement α β where
+  Rel a x := a = F.abs x ∧ F.Inv x
+
+namespace DataRefinement
+
+/-- Identity refinement (`Eq`). -/
+def refl (α : Type) : DataRefinement α α where
+  Rel := Eq
+
+/-- Sequential relational composition across an intermediate carrier `β`. -/
+def comp {α β γ : Type} (R₁ : DataRefinement α β) (R₂ : DataRefinement β γ) :
+    DataRefinement α γ where
+  Rel a c := ∃ b : β, R₁.Rel a b ∧ R₂.Rel b c
+
+/-- Product refinement (`prod_rel`). -/
+def prod {α₁ β₁ α₂ β₂ : Type}
+    (R₁ : DataRefinement α₁ β₁) (R₂ : DataRefinement α₂ β₂) :
+    DataRefinement (α₁ × α₂) (β₁ × β₂) where
+  Rel p q := R₁.Rel p.1 q.1 ∧ R₂.Rel p.2 q.2
+
+/-- `Option` relator (`option_rel`). -/
+@[expose] def option {α β : Type} (R : DataRefinement α β) :
+    DataRefinement (Option α) (Option β) where
+  Rel
+    | none, none => True
+    | some a, some b => R.Rel a b
+    | _, _ => False
+
+/-- `Except` relator (`except_rel`). -/
+def except {ε₁ ε₂ α β : Type}
+    (Re : DataRefinement ε₁ ε₂) (Ra : DataRefinement α β) :
+    DataRefinement (Except ε₁ α) (Except ε₂ β) where
+  Rel
+    | .error e₁, .error e₂ => Re.Rel e₁ e₂
+    | .ok a, .ok b => Ra.Rel a b
+    | _, _ => False
+
+/-- Pointwise `List` relator (`list_rel` via `ListRel`). -/
+@[expose] def list {α β : Type} (R : DataRefinement α β) :
+    DataRefinement (List α) (List β) where
+  Rel xs ys := ListRel R.Rel xs ys
+
+/-- Length-indexed vector relator (`vec_rel`). -/
+def vec {α β : Type} (n : Nat) (R : DataRefinement α β) :
+    DataRefinement { xs : List α // xs.length = n } { ys : List β // ys.length = n } where
+  Rel u v := ListRel R.Rel u.val v.val
+
+/-- `ByteArray` refines `List UInt8` (`ba.toList`). -/
+def byteArray : DataRefinement (List UInt8) ByteArray where
+  Rel xs ba := xs = ba.toList
+
+/-- `UInt64` refines bounded `Nat` (`w.toNat`). -/
+def uint64Nat : DataRefinement Nat UInt64 where
+  Rel n w := n = w.toNat
+
+/-- `UInt32` refines bounded `Nat` (`w.toNat`). -/
+def uint32Nat : DataRefinement Nat UInt32 where
+  Rel n w := n = w.toNat
+
+/-- `UInt64` refines `BitVec 64` (`w.toBitVec`). -/
+def bitVec64UInt64 : DataRefinement (BitVec 64) UInt64 where
+  Rel bv w := bv = w.toBitVec
+
+/-- 32-byte slice `{ bs : List UInt8 // bs.length = 32 }` refines `Digest256` (`BitVec 256`) big-endian. -/
+def digest256Bytes32 : DataRefinement Digest256 { bs : List UInt8 // bs.length = 32 } where
+  Rel d bs := d = BitVec.ofNat 256 (ofBE bs.val)
+
+theorem digest256Bytes32_injective {d : Digest256}
+    {b₁ b₂ : { bs : List UInt8 // bs.length = 32 }}
+    (h₁ : digest256Bytes32.Rel d b₁) (h₂ : digest256Bytes32.Rel d b₂) : b₁ = b₂ := by
+  have hEqBv : BitVec.ofNat 256 (ofBE b₁.val) = BitVec.ofNat 256 (ofBE b₂.val) := h₁.symm.trans h₂
+  have hLt₁ : ofBE b₁.val < 2 ^ 256 := by
+    have h := ofBE_lt b₁.val
+    rw [b₁.property] at h
+    exact h
+  have hLt₂ : ofBE b₂.val < 2 ^ 256 := by
+    have h := ofBE_lt b₂.val
+    rw [b₂.property] at h
+    exact h
+  have hNatEq : ofBE b₁.val = ofBE b₂.val := by
+    have hToNat := congrArg BitVec.toNat hEqBv
+    rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat,
+        Nat.mod_eq_of_lt hLt₁, Nat.mod_eq_of_lt hLt₂] at hToNat
+    exact hToNat
+  apply Subtype.ext
+  have hBe₁ := be_ofBE b₁.val
+  have hBe₂ := be_ofBE b₂.val
+  rw [b₁.property] at hBe₁
+  rw [b₂.property, ← hNatEq] at hBe₂
+  exact hBe₁.symm.trans hBe₂
+
+end DataRefinement
+
+/-- Unary operator relational refinement (`R₁.Rel a x → R₂.Rel (f a) (g x)`). -/
+@[expose] def Rel1 {α₁ β₁ α₂ β₂ : Type}
+    (R₁ : DataRefinement α₁ β₁) (R₂ : DataRefinement α₂ β₂)
+    (f : α₁ → α₂) (g : β₁ → β₂) : Prop :=
+  ∀ {a : α₁} {x : β₁}, R₁.Rel a x → R₂.Rel (f a) (g x)
+
+/-- Binary operator relational refinement (`R₁.Rel a x → R₂.Rel b y → R₃.Rel (f a b) (g x y)`). -/
+@[expose] def Rel2 {α₁ β₁ α₂ β₂ α₃ β₃ : Type}
+    (R₁ : DataRefinement α₁ β₁) (R₂ : DataRefinement α₂ β₂) (R₃ : DataRefinement α₃ β₃)
+    (f : α₁ → α₂ → α₃) (g : β₁ → β₂ → β₃) : Prop :=
+  ∀ {a : α₁} {x : β₁} {b : α₂} {y : β₂},
+    R₁.Rel a x → R₂.Rel b y → R₃.Rel (f a b) (g x y)
+
+theorem Rel1.comp {α₁ β₁ α₂ β₂ α₃ β₃ : Type}
+    {R₁ : DataRefinement α₁ β₁} {R₂ : DataRefinement α₂ β₂} {R₃ : DataRefinement α₃ β₃}
+    {f₁ : α₁ → α₂} {g₁ : β₁ → β₂} {f₂ : α₂ → α₃} {g₂ : β₂ → β₃}
+    (h₁ : Rel1 R₁ R₂ f₁ g₁) (h₂ : Rel1 R₂ R₃ f₂ g₂) :
+    Rel1 R₁ R₃ (f₂ ∘ f₁) (g₂ ∘ g₁) :=
+  fun hR => h₂ (h₁ hR)
+
+theorem Rel1.map_option {α₁ β₁ α₂ β₂ : Type}
+    {R₁ : DataRefinement α₁ β₁} {R₂ : DataRefinement α₂ β₂}
+    {f : α₁ → α₂} {g : β₁ → β₂} (h : Rel1 R₁ R₂ f g) :
+    Rel1 R₁.option R₂.option (Option.map f) (Option.map g) := by
+  intro oa ox hR
+  cases oa <;> cases ox
+  · exact trivial
+  · exact False.elim hR
+  · exact False.elim hR
+  · exact h hR
+
+theorem Rel1.map_list {α₁ β₁ α₂ β₂ : Type}
+    {R₁ : DataRefinement α₁ β₁} {R₂ : DataRefinement α₂ β₂}
+    {f : α₁ → α₂} {g : β₁ → β₂} (h : Rel1 R₁ R₂ f g) :
+    Rel1 R₁.list R₂.list (List.map f) (List.map g) := by
+  intro xs ys hForall
+  induction hForall with
+  | nil => exact .nil
+  | cons hHead _ ih => exact .cons (h hHead) ih
+
+/-! ## 3. Prefix-Free Length-Framed Codecs (`LawfulFramedCodec`) & `by frame_prefix_inj` -/
+
+/-- **Composable Prefix-Free Encoder (`LawfulFramedCodec`)**:
+    An encoder `encode : α → List UInt8` whose image is prefix-free, so `encode x ++ r₁ = encode y ++ r₂`
+    uniquely determines both `x = y` and `r₁ = r₂` for **arbitrary** trailing byte suffixes `r₁, r₂`. -/
+structure LawfulFramedCodec (α : Type) where
+  encode : α → List UInt8
+  prefix_inj : ∀ {x y : α} {r₁ r₂ : List UInt8},
+    encode x ++ r₁ = encode y ++ r₂ → x = y ∧ r₁ = r₂
+
+namespace LawfulFramedCodec
+
+/-- Standalone injectivity of any `LawfulFramedCodec`. -/
+theorem encode_injective {α : Type} (c : LawfulFramedCodec α) {x y : α}
+    (h : c.encode x = c.encode y) : x = y := by
+  have hApp : c.encode x ++ [] = c.encode y ++ [] := by simpa using h
+  exact (c.prefix_inj hApp).1
+
+/-- Every `FixedCodec α w` is canonically a `LawfulFramedCodec α`. -/
+@[expose] def ofFixedCodec {α : Type} {w : Nat} (c : FixedCodec α w) : LawfulFramedCodec α where
+  encode := c.encode
+  prefix_inj h := c.prefix_injective h
+
+/-- **`FramedField` (`u32be_len || enc x`)**:
+    Lifts any injective bounded encoder (`(enc x).length < 2 ^ 32`) into a prefix-free
+    `LawfulFramedCodec α` via `frameBytes`. -/
+@[expose] def framedField {α : Type} (enc : α → List UInt8)
+    (hBound : ∀ x : α, (enc x).length < 2 ^ 32)
+    (hInj : ∀ {x y : α}, enc x = enc y → x = y) : LawfulFramedCodec α where
+  encode x := frameBytes (enc x)
+  prefix_inj {x y r₁ r₂} h := by
+    obtain ⟨hEnc, hRest⟩ := (FramedBytesCodec.prefix_free_injective (hBound x) (hBound y)).mp h
+    exact ⟨hInj hEnc, hRest⟩
+
+/-- Raw bounded byte-list field `{ bs : List UInt8 // bs.length < 2 ^ 32 }` framed by `frameBytes`. -/
+def boundedBytes : LawfulFramedCodec { bs : List UInt8 // bs.length < 2 ^ 32 } :=
+  framedField Subtype.val (fun x => x.property) (fun h => Subtype.ext h)
+
+/-- **Product Combinator (`LawfulFramedCodec.pair`)**:
+    Concatenating two prefix-free codecs `c₁.encode p.1 ++ c₂.encode p.2` is prefix-free! -/
+@[expose] def pair {α β : Type} (c₁ : LawfulFramedCodec α) (c₂ : LawfulFramedCodec β) :
+    LawfulFramedCodec (α × β) where
+  encode p := c₁.encode p.1 ++ c₂.encode p.2
+  prefix_inj {p₁ p₂ r₁ r₂} h := by
+    rcases p₁ with ⟨a₁, b₁⟩
+    rcases p₂ with ⟨a₂, b₂⟩
+    dsimp only at h
+    rw [List.append_assoc, List.append_assoc] at h
+    obtain ⟨rfl, hTail⟩ := c₁.prefix_inj h
+    obtain ⟨rfl, hRest⟩ := c₂.prefix_inj hTail
+    exact ⟨rfl, hRest⟩
+
+theorem pair_encode_eq {α β : Type} (c₁ : LawfulFramedCodec α) (c₂ : LawfulFramedCodec β)
+    (a : α) (b : β) : (c₁.pair c₂).encode (a, b) = c₁.encode a ++ c₂.encode b := rfl
+
+theorem framePair_inj {α β : Type} (c₁ : LawfulFramedCodec α) (c₂ : LawfulFramedCodec β)
+    {a₁ a₂ : α} {b₁ b₂ : β} {r₁ r₂ : List UInt8}
+    (h : c₁.encode a₁ ++ (c₂.encode b₁ ++ r₁) = c₁.encode a₂ ++ (c₂.encode b₂ ++ r₂)) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ r₁ = r₂ := by
+  obtain ⟨hA, hTail⟩ := c₁.prefix_inj h
+  obtain ⟨hB, hR⟩ := c₂.prefix_inj hTail
+  exact ⟨hA, hB, hR⟩
+
+/-- 1-byte domain-tag prefix on a `LawfulFramedCodec`. -/
+@[expose] def tagged (tag : UInt8) {α : Type} (c : LawfulFramedCodec α) : LawfulFramedCodec α where
+  encode x := tag :: c.encode x
+  prefix_inj h := by
+    obtain ⟨_, hTail⟩ := List.cons.inj h
+    exact c.prefix_inj hTail
+
+theorem tagged_disjoint {t₁ t₂ : UInt8} (hNe : t₁ ≠ t₂)
+    {α β : Type} (c₁ : LawfulFramedCodec α) (c₂ : LawfulFramedCodec β)
+    (x : α) (y : β) (r₁ r₂ : List UInt8) :
+    (c₁.tagged t₁).encode x ++ r₁ ≠ (c₂.tagged t₂).encode y ++ r₂ := by
+  intro hEq
+  obtain ⟨hTag, _⟩ := List.cons.inj hEq
+  exact hNe hTag
+
+private theorem flatMap_prefix_inj_of_len_eq {α : Type} (c : LawfulFramedCodec α) :
+    ∀ {xs ys : List α} {r₁ r₂ : List UInt8},
+      xs.length = ys.length →
+      xs.flatMap c.encode ++ r₁ = ys.flatMap c.encode ++ r₂ →
+      xs = ys ∧ r₁ = r₂
+  | [], [], _, _, _, h => ⟨rfl, h⟩
+  | [], _ :: _, _, _, hLen, _ => nomatch hLen
+  | _ :: _, [], _, _, hLen, _ => nomatch hLen
+  | x :: xs, y :: ys, r₁, r₂, hLen, h => by
+    simp only [List.flatMap_cons, List.append_assoc] at h
+    obtain ⟨rfl, hTail⟩ := c.prefix_inj h
+    have hLenTail : xs.length = ys.length := Nat.succ.inj hLen
+    obtain ⟨rfl, hRest⟩ := flatMap_prefix_inj_of_len_eq c hLenTail hTail
+    exact ⟨rfl, hRest⟩
+
+/-- **Variable-Length Count-Prefixed List Combinator (`LawfulFramedCodec.boundedList` / `frameList_inj`)**:
+    Encodes `{ xs : List α // xs.length < 2 ^ 32 }` as `u32be(xs.length) || flatMap c.encode xs`.
+    Note that ONLY the element count needs `< 2 ^ 32` — total payload byte length is unrestricted! -/
+@[expose] def boundedList {α : Type} (c : LawfulFramedCodec α) :
+    LawfulFramedCodec { xs : List α // xs.length < 2 ^ 32 } where
+  encode xs := encodeU32BeNat xs.val.length ++ xs.val.flatMap c.encode
+  prefix_inj {xs ys r₁ r₂} h := by
+    rw [List.append_assoc, List.append_assoc] at h
+    have hLen4 : (encodeU32BeNat xs.val.length).length = (encodeU32BeNat ys.val.length).length := by
+      rw [encodeU32BeNat_length, encodeU32BeNat_length]
+    obtain ⟨hCntBytes, hTail⟩ := append_inj_of_len_eq hLen4 h
+    have hDec := congrArg decodeU32BeNat hCntBytes
+    rw [decodeU32BeNat_encodeU32BeNat xs.property,
+        decodeU32BeNat_encodeU32BeNat ys.property] at hDec
+    have hCntEq : xs.val.length = ys.val.length := Option.some.inj hDec
+    obtain ⟨hListEq, hRest⟩ := flatMap_prefix_inj_of_len_eq c hCntEq hTail
+    exact ⟨Subtype.ext hListEq, hRest⟩
+
+theorem frameList_inj {α : Type} (c : LawfulFramedCodec α)
+    {xs ys : List α} {r₁ r₂ : List UInt8}
+    (hx : xs.length < 2 ^ 32) (hy : ys.length < 2 ^ 32)
+    (h : (encodeU32BeNat xs.length ++ xs.flatMap c.encode) ++ r₁ =
+         (encodeU32BeNat ys.length ++ ys.flatMap c.encode) ++ r₂) :
+    xs = ys ∧ r₁ = r₂ := by
+  obtain ⟨hSub, hRest⟩ := (c.boundedList).prefix_inj (x := ⟨xs, hx⟩) (y := ⟨ys, hy⟩) h
+  exact ⟨congrArg Subtype.val hSub, hRest⟩
+
+end LawfulFramedCodec
+
+end Qsag
+
+/-! ## 4. `by frame_prefix_inj` — 1-Line Multi-Field Byte-Framing Injectivity Tactic -/
+
+namespace Qsag.Tactic.AssuranceKit
+open Lean Meta Elab Tactic
+
+/-- Try running `stx` without error recovery; returns `true` iff it succeeded cleanly. -/
+private meta def tryRunTactic (stx : Syntax) : TacticM Bool := do
+  let s ← saveState
+  try
+    withoutRecover (evalTactic stx)
+    return true
+  catch _ =>
+    s.restore
+    return false
+
+/-- Structurally fuel-bounded prefix-peeling loop on a `List UInt8` equality hypothesis `hId`. -/
+private meta def peelFramedHyp : Nat → Ident → TacticM Unit
+  | 0, _ => pure ()
+  | fuel + 1, hId => do
+    let _ ← tryRunTactic (← `(tactic|
+      simp only [List.append_assoc, Qsag.LawfulFramedCodec.pair_encode_eq,
+        Qsag.domainFrame, Qsag.concatFramed] at $hId:ident))
+    if ← tryRunTactic (← `(tactic| first
+        | replace $hId:ident := Qsag.LawfulFramedCodec.encode_injective _ $hId:ident
+        | replace $hId:ident := Qsag.FixedCodec.encode_injective _ $hId:ident
+        | replace $hId:ident := Qsag.FramedBytesCodec.frameBytes_injective
+            (by first | assumption | decide | omega)
+            (by first | assumption | decide | omega) $hId:ident)) then
+      pure ()
+    else if ← tryRunTactic (← `(tactic| first
+        | (replace $hId:ident := Qsag.LawfulFramedCodec.prefix_inj _ $hId:ident;
+           rcases $hId:ident with ⟨_, $hId:ident⟩)
+        | (replace $hId:ident := Qsag.FixedCodec.prefix_injective _ $hId:ident;
+           rcases $hId:ident with ⟨_, $hId:ident⟩)
+        | (replace $hId:ident := (Qsag.FramedBytesCodec.prefix_free_injective
+             (by first | assumption | decide | omega)
+             (by first | assumption | decide | omega)).mp $hId:ident;
+           rcases $hId:ident with ⟨_, $hId:ident⟩)
+        | (simp only [List.cons_append, List.nil_append] at $hId:ident;
+           replace $hId:ident := List.cons.inj $hId:ident;
+           rcases $hId:ident with ⟨_, $hId:ident⟩))) then
+      peelFramedHyp fuel hId
+    else
+      pure ()
+
+private meta def finishFramedGoal : TacticM Unit := do
+  let _ ← tryRunTactic (← `(tactic| subst_vars))
+  let _ ← tryRunTactic (← `(tactic| simp only [and_self, true_and, and_true]))
+  let _ ← tryRunTactic (← `(tactic| rfl))
+  let _ ← tryRunTactic (← `(tactic| assumption))
+
+elab "frame_prefix_inj" h?:(ppSpace colGt ident)? : tactic => do
+  match h? with
+  | some h =>
+    peelFramedHyp 32 h
+    finishFramedGoal
+  | none => do
+    let listU8 := mkApp (mkConst ``List [Level.zero]) (mkConst ``UInt8)
+    let autoId := mkIdent `hFrameAuto
+    let goal0 ← getMainGoal
+    let introArrow ← goal0.withContext do
+      let tgt ← instantiateMVars (← goal0.getType)
+      pure tgt.isForall
+    if introArrow then
+      let _ ← evalTactic (← `(tactic| intro $autoId:ident))
+      peelFramedHyp 32 autoId
+      finishFramedGoal
+    else
+      let goal ← getMainGoal
+      let found? ← goal.withContext do
+        let mut hit : Option Name := none
+        for decl in ← getLCtx do
+          if decl.isImplementationDetail || decl.userName.hasMacroScopes then continue
+          let ty ← instantiateMVars decl.type
+          if ty.isAppOfArity ``Eq 3 then
+            if let some et := ty.getAppArgs[0]? then
+              if (← withTransparency .default <| isDefEq et listU8) then
+                hit := some decl.userName
+        pure hit
+      if let some hName := found? then
+        peelFramedHyp 32 (mkIdent hName)
+        finishFramedGoal
+      else
+        throwError "frame_prefix_inj: no `List UInt8` equality hypothesis found in local context"
+
+end Qsag.Tactic.AssuranceKit
+
+/-! ## 5. Regression & Constructive Soundness Checks (`0 Classical.choice`) -/
 
 namespace Qsag
 
@@ -145,11 +587,52 @@ theorem mir_except_test (x : Except String Nat) (f g : Nat → Except String Nat
   mir_sim_step
 
 def mir_compose_test {S₁ S₂ S₃ In Out : Type}
-    {C : PartyMachine S₁ In Out} {A : PartyMachine S₂ In Out} {B : PartyMachine S₃ In Out} (ca : ForwardSim C A)
-    (ab : ForwardSim A B) : ForwardSim C B := by
+    {C : PartyMachine S₁ In Out} {A : PartyMachine S₂ In Out} {B : PartyMachine S₃ In Out}
+    (ca : ForwardSim C A) (ab : ForwardSim A B) : ForwardSim C B := by
   mir_sim_step
 
-#verify_constructive mir_option_test mir_except_test
+def spec_compose_refines_test {S₁ S₂ S₃ In Out : Type}
+    {M₁ : Spec.Machine S₁ In Out} {M₂ : Spec.Machine S₂ In Out} {M₃ : Spec.Machine S₃ In Out}
+    (r₁₂ : Spec.Refines M₁ M₂) (r₂₃ : Spec.Refines M₂ M₃) : Spec.Refines M₁ M₃ := by
+  compose_refines
+
+/-- 4-field mixed fixed-width + variable-length framed transcript message:
+    injectivity collapses to a single `by frame_prefix_inj [hEq]` line! -/
+theorem frame_prefix_inj_four_field_exemplar
+    (tag₁ tag₂ : List UInt8) (ep₁ ep₂ : UInt64) (role₁ role₂ : UInt8) (msg₁ msg₂ : List UInt8)
+    (ht₁ : tag₁.length < 2 ^ 32) (ht₂ : tag₂.length < 2 ^ 32)
+    (hm₁ : msg₁.length < 2 ^ 32) (hm₂ : msg₂.length < 2 ^ 32)
+    (hEq : frameBytes tag₁ ++ FixedCodec.u64le.encode ep₁ ++
+             FixedCodec.u8.encode role₁ ++ frameBytes msg₁ =
+           frameBytes tag₂ ++ FixedCodec.u64le.encode ep₂ ++
+             FixedCodec.u8.encode role₂ ++ frameBytes msg₂) :
+    tag₁ = tag₂ ∧ ep₁ = ep₂ ∧ role₁ = role₂ ∧ msg₁ = msg₂ := by
+  frame_prefix_inj hEq
+
+/-- Automatic context discovery (`by frame_prefix_inj` with zero arguments) on a 5-field
+    domain-separated framed message! -/
+theorem frame_prefix_inj_auto_ctx_exemplar
+    (d₁ d₂ : List UInt8) (w₁ w₂ : UInt32) (ep₁ ep₂ : UInt64) (p₁ p₂ : List UInt8)
+    (hd₁ : d₁.length < 2 ^ 32) (hd₂ : d₂.length < 2 ^ 32)
+    (hp₁ : p₁.length < 2 ^ 32) (hp₂ : p₂.length < 2 ^ 32) :
+    frameBytes d₁ ++ FixedCodec.u32be.encode w₁ ++ FixedCodec.u64be.encode ep₁ ++ frameBytes p₁ =
+      frameBytes d₂ ++ FixedCodec.u32be.encode w₂ ++ FixedCodec.u64be.encode ep₂ ++ frameBytes p₂ →
+    d₁ = d₂ ∧ w₁ = w₂ ∧ ep₁ = ep₂ ∧ p₁ = p₂ := by
+  frame_prefix_inj
+
+#verify_constructive
+  mir_option_test
+  mir_except_test
+  DataRefinement.digest256Bytes32_injective
+  Rel1.comp
+  Rel1.map_option
+  Rel1.map_list
+  LawfulFramedCodec.encode_injective
+  LawfulFramedCodec.framePair_inj
+  LawfulFramedCodec.tagged_disjoint
+  LawfulFramedCodec.frameList_inj
+  frame_prefix_inj_four_field_exemplar
+  frame_prefix_inj_auto_ctx_exemplar
 
 end Qsag
 end

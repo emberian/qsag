@@ -499,7 +499,7 @@ theorem FinGame.winCount_of_forall_lose {n : Nat} (G : FinGame n)
   Qsag.Spec.event_le_reduction_win
   Qsag.Spec.event_le_two_reductions
 
-/-! ### Exports for lane zkhem -/
+/-! ### Sample-Sum & Random-Oracle Coin-Space Equations -/
 
 theorem sampleSum_zero (f : Fin 0 → Nat) : sampleSum 0 f = 0 := by rfl
 
