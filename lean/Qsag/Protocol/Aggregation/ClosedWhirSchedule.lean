@@ -952,35 +952,36 @@ private theorem sampledQuery_verify_length (w : Nat) (x : WhirStmt Goldilocks)
   rw [OracleIop.verify_eq] at h
   exact of_decide_eq_true (Bool.and_eq_true_iff.mp h).1
 
-private def bit (b : Bool) : Nat := if b = true then 1 else 0
+/-- `1` for an accepted challenge, `0` otherwise. -/
+def acceptBit (b : Bool) : Nat := if b = true then 1 else 0
 
 private theorem bit_filter4 (p : Nat → Bool) :
-    (([0, 1, 2, 3] : List Nat).filter p).length = bit (p 0) + bit (p 1) + bit (p 2) + bit (p 3) := by
+    (([0, 1, 2, 3] : List Nat).filter p).length = acceptBit (p 0) + acceptBit (p 1) + acceptBit (p 2) + acceptBit (p 3) := by
   cases h0 : p 0 <;> cases h1 : p 1 <;> cases h2 : p 2 <;> cases h3 : p 3 <;>
     simp only [List.filter_cons, List.filter_nil, h0, h1, h2, h3, ↓reduceIte, Bool.false_eq_true,
-      List.length_cons, List.length_nil, bit] <;> rfl
+      List.length_cons, List.length_nil, acceptBit] <;> rfl
 
 /-- Agreement of `P` with the table over the stage's four points, as a sum of four bits. -/
 private theorem sampledQuery_agreeCount (table P : List Goldilocks) :
     agreeCount sampledQueryEnv (2 ^ sampledQueryStage.foldK * sampledQueryStage.domainSize)
         table P =
-      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 0) = table.getD 0 CommRingOps.zero)) +
-      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 1) = table.getD 1 CommRingOps.zero)) +
-      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 2) = table.getD 2 CommRingOps.zero)) +
-      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 3) = table.getD 3 CommRingOps.zero)) := by
+      acceptBit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 0) = table.getD 0 CommRingOps.zero)) +
+      acceptBit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 1) = table.getD 1 CommRingOps.zero)) +
+      acceptBit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 2) = table.getD 2 CommRingOps.zero)) +
+      acceptBit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 3) = table.getD 3 CommRingOps.zero)) := by
   have hRange : List.range (2 ^ sampledQueryStage.foldK * sampledQueryStage.domainSize) =
       [0, 1, 2, 3] := by decide
   unfold agreeCount
   rw [hRange]
   exact bit_filter4 _
 
-/-- If each accepted challenge needs the gate `g` and its own agreement bit, and the gate with
+/-- If each accepted challenge needs the gate `g` and its own agreement acceptBit, and the gate with
     three agreements is impossible, at most two of the four challenges are accepted. -/
 private theorem at_most_two_of_four (g a0 a1 a2 a3 v0 v1 v2 v3 : Bool)
     (h0 : v0 = true → g = true ∧ a0 = true) (h1 : v1 = true → g = true ∧ a1 = true)
     (h2 : v2 = true → g = true ∧ a2 = true) (h3 : v3 = true → g = true ∧ a3 = true)
-    (hN : ¬ (g = true ∧ 3 ≤ bit a0 + bit a1 + bit a2 + bit a3)) :
-    bit v0 + (bit v1 + (bit v2 + (bit v3 + 0))) ≤ 2 := by
+    (hN : ¬ (g = true ∧ 3 ≤ acceptBit a0 + acceptBit a1 + acceptBit a2 + acceptBit a3)) :
+    acceptBit v0 + (acceptBit v1 + (acceptBit v2 + (acceptBit v3 + 0))) ≤ 2 := by
   cases g <;> cases a0 <;> cases a1 <;> cases a2 <;> cases a3 <;>
     cases v0 <;> cases v1 <;> cases v2 <;> cases v3 <;>
     first
@@ -1000,10 +1001,10 @@ private theorem at_most_two_of_four (g a0 a1 a2 a3 v0 v1 v2 v3 : Bool)
 theorem sampledQuery_query_round_flips (x : WhirStmt Goldilocks)
     (hx : ¬ whirInLang sampledQueryEnv sampledQuerySched x)
     (m0 m1 : WhirMsg Goldilocks) (c0 : Nat) :
-    bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 0)]) +
-    (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 1)]) +
-    (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 2)]) +
-    (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 3)]) +
+    acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 0)]) +
+    (acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 1)]) +
+    (acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 2)]) +
+    (acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 3)]) +
       0))) ≤ 2 := by
   have hGate : ∀ c1 : Nat,
       (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, c1)] = true →
@@ -1041,10 +1042,10 @@ def sampledQueryCert : WhirScheduleCert sampledQueryEnv sampledQuerySched 2 wher
             | false => rfl
             | true =>
               exact absurd (sampledQuery_verify_length 2 x _ hv) (show ¬ (1 : Nat) = 2 by decide)
-        show bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 0)]) +
-          (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 1)]) +
-          (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 2)]) +
-          (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 3)]) + 0))) ≤ 0
+        show acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 0)]) +
+          (acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 1)]) +
+          (acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 2)]) +
+          (acceptBit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 3)]) + 0))) ≤ 0
         rw [hZero 0, hZero 1, hZero 2, hZero 3]
         exact Nat.le_refl 0
       | ⟨1, _⟩, [(m0, c0)], _ => exact sampledQuery_query_round_flips x hx m0 m c0
@@ -1115,7 +1116,7 @@ theorem sampledQuery_false_not_inLang :
     decide
   rw [hA0] at hAgree
   have hBoth : ∀ a1 a2 a3 : Bool, 2 ^ sampledQueryStage.foldK * sampledQueryStage.agree ≤
-      bit false + bit a1 + bit a2 + bit a3 → a1 = true ∧ a2 = true := by
+      acceptBit false + acceptBit a1 + acceptBit a2 + acceptBit a3 → a1 = true ∧ a2 = true := by
     intro a1 a2 a3
     cases a1 <;> cases a2 <;> cases a3 <;> decide
   obtain ⟨h1, h2⟩ := hBoth _ _ _ hAgree

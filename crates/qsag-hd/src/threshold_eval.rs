@@ -768,6 +768,81 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
+    fn sibling_disclosure_delays_an_opening_without_quarantining_the_family() {
+        use crate::poison::{FsHdPoisonJournal, HdPoisonJournal};
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "hd-eval-sibling-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let (pk, mut shares) = setup_shamir_linear_module([61; 32], 1, &[1], 4).unwrap();
+        let family = shares[0].family_id();
+        let journal =
+            Arc::new(FsHdPoisonJournal::create_new(dir.join("journal"), family, [9; 32]).unwrap());
+        shares[0].testing_poison_journal = false;
+        shares[0]
+            .attach_poison_journal(Arc::clone(&journal) as Arc<dyn HdPoisonJournal>)
+            .unwrap();
+        let roster = [(shares[0].party_id, 1)];
+        let mask = trusted_dealer_opening_masks(&roster, [1; 32], [9; 32])
+            .unwrap()
+            .remove(0);
+        let round1 = HdThresholdEvalRound1Commit::begin_inner(
+            &mut shares[0],
+            &pk,
+            &roster,
+            &form(),
+            [1; 32],
+            mask,
+            [2; 32],
+        )
+        .unwrap();
+        let commitment = round1.commitment();
+        let mut round2 = round1.freeze(&[commitment]).unwrap();
+        // Another handle of the same family (a derived child, say) opens its
+        // disclosure while this session is between rounds.
+        journal.begin_disclosure([0xAA; 32]).unwrap();
+        // Committing to the MAC residuals releases nothing and stays allowed...
+        let mac_commitment = round2.commit_mac(&[round2.share_opening()]).unwrap();
+        let mut round3 = round2.freeze_mac(&[mac_commitment]).unwrap();
+        // ...but no residual leaves while that disclosure is open. The refusal is a
+        // wait, not a fault: nothing is quarantined and the session stays usable.
+        assert!(matches!(round3.mac_opening(), Err(HdError::MacCheckFailed)));
+        assert!(matches!(round3.mac_opening(), Err(HdError::MacCheckFailed)));
+        assert!(!journal.is_permanently_poisoned().unwrap());
+        journal.complete_disclosure([0xAA; 32]).unwrap();
+        let mac_opening = round3.mac_opening().unwrap();
+        assert!(journal.is_poisoned().unwrap());
+        assert!(!journal.is_permanently_poisoned().unwrap());
+        round3.verify(&[mac_opening]).unwrap();
+        assert!(!journal.is_poisoned().unwrap());
+        assert!(!shares[0].is_poisoned());
+        // A second opening on the same share still works.
+        let mask = trusted_dealer_opening_masks(&roster, [3; 32], [9; 32])
+            .unwrap()
+            .remove(0);
+        assert!(
+            HdThresholdEvalRound1Commit::begin_inner(
+                &mut shares[0],
+                &pk,
+                &roster,
+                &form(),
+                [3; 32],
+                mask,
+                [4; 32],
+            )
+            .is_ok()
+        );
+        drop(shares);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(feature = "std")]
+    #[test]
     fn mac_disclosing_abort_quarantines_recovered_family() {
         use crate::poison::{FsHdPoisonJournal, HdPoisonJournal};
         let dir = std::env::temp_dir().join(alloc::format!(

@@ -1685,7 +1685,11 @@ mod tests {
             };
             assert_eq!(
                 server
-                    .evaluate(request().into_iter().next().unwrap(), &mut store, &mut transport)
+                    .evaluate(
+                        request().into_iter().next().unwrap(),
+                        &mut store,
+                        &mut transport
+                    )
                     .unwrap_err(),
                 Error::BadDelivery { party: absent }
             );
@@ -1704,7 +1708,11 @@ mod tests {
         };
         assert_eq!(
             server
-                .evaluate(request().into_iter().next().unwrap(), &mut store, &mut transport)
+                .evaluate(
+                    request().into_iter().next().unwrap(),
+                    &mut store,
+                    &mut transport
+                )
                 .unwrap_err(),
             Error::Transport
         );

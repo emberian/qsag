@@ -164,10 +164,7 @@ fn zero_basis_weights(xs: &[u32], threshold: usize, position: usize) -> Vec<u32>
         basis_positions.push(position);
     }
     let basis_xs: Vec<u32> = basis_positions.iter().map(|&p| xs[p]).collect();
-    for (&pos, w) in basis_positions
-        .iter()
-        .zip(lagrange_weights(&basis_xs, 0))
-    {
+    for (&pos, w) in basis_positions.iter().zip(lagrange_weights(&basis_xs, 0)) {
         out[pos] = w;
     }
     out
@@ -1145,16 +1142,11 @@ impl RekeyRound4 {
             }
         }
         let zero_shares = SecretBuffer(zero_shares);
-        let own_zero_commit =
-            core.zero_commitment(core.party_id, &zero_shares, &core.zero_salt);
+        let own_zero_commit = core.zero_commitment(core.party_id, &zero_shares, &core.zero_salt);
         core.own_zero_commit = own_zero_commit;
-        let weights =
-            zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
+        let weights = zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
         let weight = weights[core.position];
-        let mut residuals: Vec<u32> = zero_shares
-            .iter()
-            .map(|&v| mod_q_mul(weight, v))
-            .collect();
+        let mut residuals: Vec<u32> = zero_shares.iter().map(|&v| mod_q_mul(weight, v)).collect();
         drop(zero_shares);
         core.zero_gates = Some(crate::zero_gate::CommittedZeroGates::hold(
             core.session,
@@ -1186,8 +1178,7 @@ impl RekeyRound5 {
             core.party_id,
             commits.iter().map(|c| (c.party_id, c.digest)),
         );
-        let weights =
-            zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
+        let weights = zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
         let inv_weight = mod_q_inv_or_zero(weights[core.position]);
         if inv_weight == 0 {
             return Err(HdError::InvalidThresholdParameters);
@@ -1293,8 +1284,7 @@ impl RekeyRound6 {
             core.party_id,
             core.zero_commits.iter().map(|c| (c.party_id, c.digest)),
         );
-        let weights =
-            zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
+        let weights = zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
         let mut peer_sums = SecretBuffer(Vec::with_capacity(count));
         for index in 0..count {
             let sum = openings
@@ -2098,7 +2088,15 @@ mod tests {
 
     #[test]
     fn zero_basis_gives_every_custodian_a_nonzero_weight_and_evaluates_at_zero() {
-        for (t, n) in [(1usize, 1usize), (1, 3), (2, 3), (2, 5), (3, 5), (5, 5), (3, 7)] {
+        for (t, n) in [
+            (1usize, 1usize),
+            (1, 3),
+            (2, 3),
+            (2, 5),
+            (3, 5),
+            (5, 5),
+            (3, 7),
+        ] {
             let xs: Vec<u32> = (1..=n as u32).map(|x| x * 7 + 3).collect();
             // f(x) = c_1 x + ... + c_{t-1} x^{t-1}: degree below `t` with f(0) = 0.
             let coeffs: Vec<u32> = (1..t as u32).map(|k| 1000 + 37 * k).collect();
@@ -2677,21 +2675,39 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                RekeyRound1::begin_root(c, 0, false, 4, [0x11; 32], [0x20 + i as u8; 32], &[0xAA; 32])
-                    .unwrap()
+                RekeyRound1::begin_root(
+                    c,
+                    0,
+                    false,
+                    4,
+                    [0x11; 32],
+                    [0x20 + i as u8; 32],
+                    &[0xAA; 32],
+                )
+                .unwrap()
             })
             .collect();
         let (s1, hellos): (Vec<_>, Vec<_>) = r1.into_iter().unzip();
-        let (s2, products): (Vec<_>, Vec<_>) =
-            s1.into_iter().map(|s| s.open_products(&hellos).unwrap()).unzip();
-        let (s3, coins): (Vec<_>, Vec<_>) =
-            s2.into_iter().map(|s| s.open_coin(&products).unwrap()).unzip();
-        let (s4, masked): (Vec<_>, Vec<_>) =
-            s3.into_iter().map(|s| s.open_masked(&coins).unwrap()).unzip();
-        let (s5, commits): (Vec<_>, Vec<_>) =
-            s4.into_iter().map(|s| s.commit_zero_test(&masked).unwrap()).unzip();
-        let (s6, openings): (Vec<_>, Vec<_>) =
-            s5.into_iter().map(|s| s.open_zero_test(&commits).unwrap()).unzip();
+        let (s2, products): (Vec<_>, Vec<_>) = s1
+            .into_iter()
+            .map(|s| s.open_products(&hellos).unwrap())
+            .unzip();
+        let (s3, coins): (Vec<_>, Vec<_>) = s2
+            .into_iter()
+            .map(|s| s.open_coin(&products).unwrap())
+            .unzip();
+        let (s4, masked): (Vec<_>, Vec<_>) = s3
+            .into_iter()
+            .map(|s| s.open_masked(&coins).unwrap())
+            .unzip();
+        let (s5, commits): (Vec<_>, Vec<_>) = s4
+            .into_iter()
+            .map(|s| s.commit_zero_test(&masked).unwrap())
+            .unzip();
+        let (s6, openings): (Vec<_>, Vec<_>) = s5
+            .into_iter()
+            .map(|s| s.open_zero_test(&commits).unwrap())
+            .unzip();
         let family_id = s6[0].family_id().unwrap();
         let journals: Vec<Arc<dyn crate::poison::HdPoisonJournal>> = (0..3)
             .map(|i| {
@@ -2702,7 +2718,7 @@ mod tests {
                         family_id,
                         [0x70 + i as u8; 32],
                     )
-                        .unwrap(),
+                    .unwrap(),
                 ) as Arc<dyn crate::poison::HdPoisonJournal>
             })
             .collect();

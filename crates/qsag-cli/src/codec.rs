@@ -85,7 +85,12 @@ impl std::fmt::Debug for Json {
                 for (key, value) in members {
                     if matches!(
                         key.as_str(),
-                        "seed" | "secret_key" | "salt" | "envelope_tag"
+                        "seed"
+                            | "secret_key"
+                            | "salt"
+                            | "envelope_tag"
+                            | "envelope_salt"
+                            | "envelope_nonce"
                     ) {
                         map.entry(key, &format_args!("<redacted>"));
                     } else {

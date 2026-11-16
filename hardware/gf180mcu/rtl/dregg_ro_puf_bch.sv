@@ -191,8 +191,9 @@ module dregg_ro_puf_bch (
 
     wire [3:0] even_src_idx = (sub_k == 3'd0) ? 4'd0 : (sub_k == 3'd1) ? 4'd1 :
                               (sub_k == 3'd2) ? 4'd2 : (sub_k == 3'd3) ? 4'd3 : 4'd4;
-    wire [5:0] lam_cur = lam_v[6 * int'(sub_k) +: 6];
-    wire [5:0] bsh_cur = bsh[6 * int'(sub_k) +: 6];
+    wire [5:0] lam_cur   = lam_v[6 * int'(sub_k) +: 6];
+    wire [5:0] bsh_cur   = bsh[6 * int'(sub_k) +: 6];
+    wire [5:0] bmd_sdiff = sub_idx - {3'd0, sub_k} - 6'd1;
 
     always_comb begin
         ma = 6'd0;
@@ -208,11 +209,8 @@ module dregg_ro_puf_bch (
             end
             S_BMD: begin
                 ma = lam_cur;
-                if ((sub_idx >= {3'd0, sub_k} + 6'd1) && (sub_idx <= {3'd0, sub_k} + 6'd10)) begin
-                    logic [5:0] sdiff;
-                    sdiff = sub_idx - {3'd0, sub_k} - 6'd1;
-                    mb    = syn_v[6 * int'(sdiff) +: 6];
-                end
+                if ((sub_idx >= {3'd0, sub_k} + 6'd1) && (sub_idx <= {3'd0, sub_k} + 6'd10))
+                    mb = syn_v[6 * int'(bmd_sdiff) +: 6];
             end
             S_BMU: begin
                 ma = sub_ph ? delta_q : gamma;

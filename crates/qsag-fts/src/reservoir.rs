@@ -232,9 +232,7 @@ impl ParallelSeededDkgReservoir {
 
         let generation = read_u64(&mut cursor)?;
         // Public key seed.
-        let pk_seed_bytes: [u8; 32] = take(&mut cursor, 32)?
-            .try_into()
-            .map_err(|_| invalid)?;
+        let pk_seed_bytes: [u8; 32] = take(&mut cursor, 32)?.try_into().map_err(|_| invalid)?;
         let party_id = read_u16(&mut cursor)?;
         let params = ParallelSeededParams {
             tree_height: read_u32(&mut cursor)? as usize,

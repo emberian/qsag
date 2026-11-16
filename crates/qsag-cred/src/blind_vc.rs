@@ -109,11 +109,21 @@ const VC_MERKLE_NODE_TAG: u64 = 0x5643_4D4B_4C45_5631; // "VCMKLEV1"
 /// Errors returned by `PiBlindVc` issuance, accumulator enrollment, or selective disclosure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlindVcError {
-    AttributeCountExceeded { count: usize },
-    NonCanonicalGoldilocksAttribute { index: usize },
-    InvalidDisclosedAttributeIndex { index: usize },
-    DuplicateDisclosedAttributeIndex { index: usize },
-    DisclosedAttributeValueMismatch { index: usize },
+    AttributeCountExceeded {
+        count: usize,
+    },
+    NonCanonicalGoldilocksAttribute {
+        index: usize,
+    },
+    InvalidDisclosedAttributeIndex {
+        index: usize,
+    },
+    DuplicateDisclosedAttributeIndex {
+        index: usize,
+    },
+    DisclosedAttributeValueMismatch {
+        index: usize,
+    },
     BlindIssuanceProofInvalid,
     InvalidOprfEvaluation,
     ReplayedVerifierChallenge,
@@ -1462,7 +1472,12 @@ impl fmt::Debug for IssuerCredentialAccumulator {
 /// duplicate-issuance set holds no token.
 fn issued_token_index(attr_commit: &[u64; 6], issuance_token: &[u8; 32]) -> [u8; 32] {
     let mut commit_bytes = [0u8; 48];
-    for (chunk, limb) in commit_bytes.as_chunks_mut::<8>().0.iter_mut().zip(attr_commit) {
+    for (chunk, limb) in commit_bytes
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(attr_commit)
+    {
         *chunk = limb.to_le_bytes();
     }
     cshake256_framed_32(
@@ -2395,18 +2410,20 @@ fn eval_sd_plaintext_circuit(
         cursor += 1;
         v
     }));
-    let bit_wires: SecretBuffer<[u64; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
-        let v = secret_vals[cursor];
-        cursor += 1;
-        v
-    }));
-    let sib_wires: SecretBuffer<[[u64; 6]; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
-        core::array::from_fn(|_| {
+    let bit_wires: SecretBuffer<[u64; VC_ACCUMULATOR_DEPTH]> =
+        SecretBuffer(core::array::from_fn(|_| {
             let v = secret_vals[cursor];
             cursor += 1;
             v
-        })
-    }));
+        }));
+    let sib_wires: SecretBuffer<[[u64; 6]; VC_ACCUMULATOR_DEPTH]> =
+        SecretBuffer(core::array::from_fn(|_| {
+            core::array::from_fn(|_| {
+                let v = secret_vals[cursor];
+                cursor += 1;
+                v
+            })
+        }));
     debug_assert_eq!(cursor, secret_vals.len());
 
     // Sized once: growing a `to_vec` copy would leave the wires in freed heap blocks.
@@ -2667,18 +2684,20 @@ fn eval_sd_party_shares(
         cursor += 1;
         v
     }));
-    let bit_wires: SecretBuffer<[u64; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
-        let v = w_shares[cursor];
-        cursor += 1;
-        v
-    }));
-    let sib_wires: SecretBuffer<[[u64; 6]; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
-        core::array::from_fn(|_| {
+    let bit_wires: SecretBuffer<[u64; VC_ACCUMULATOR_DEPTH]> =
+        SecretBuffer(core::array::from_fn(|_| {
             let v = w_shares[cursor];
             cursor += 1;
             v
-        })
-    }));
+        }));
+    let sib_wires: SecretBuffer<[[u64; 6]; VC_ACCUMULATOR_DEPTH]> =
+        SecretBuffer(core::array::from_fn(|_| {
+            core::array::from_fn(|_| {
+                let v = w_shares[cursor];
+                cursor += 1;
+                v
+            })
+        }));
     debug_assert_eq!(cursor, w_shares.len());
 
     // Sized once: growing a `to_vec` copy would leave the wires in freed heap blocks.
@@ -4807,8 +4826,16 @@ mod tests {
         assert_eq!(quantum.issuance_transcript_tag(), b"Quantum128:438");
         for profile in [classical, quantum] {
             let suffix = std::format!(":{}", profile.repetitions());
-            assert!(profile.issuance_statement_tag().ends_with(suffix.as_bytes()));
-            assert!(profile.issuance_transcript_tag().ends_with(suffix.as_bytes()));
+            assert!(
+                profile
+                    .issuance_statement_tag()
+                    .ends_with(suffix.as_bytes())
+            );
+            assert!(
+                profile
+                    .issuance_transcript_tag()
+                    .ends_with(suffix.as_bytes())
+            );
         }
         // The tagged classical statement still proves and verifies, under its
         // own profile only.
@@ -4823,8 +4850,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(req.opened_reps.len(), 219);
-        assert!(verify_blind_issuance_request_with_profile(&req, &[1, 2], 42, classical));
-        assert!(!verify_blind_issuance_request_with_profile(&req, &[1, 2], 42, quantum));
+        assert!(verify_blind_issuance_request_with_profile(
+            &req,
+            &[1, 2],
+            42,
+            classical
+        ));
+        assert!(!verify_blind_issuance_request_with_profile(
+            &req,
+            &[1, 2],
+            42,
+            quantum
+        ));
     }
 
     #[test]

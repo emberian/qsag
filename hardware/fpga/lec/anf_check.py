@@ -166,9 +166,30 @@ def main():
     mut_t = os.path.join(OUT, "mut_tmap_anf.sv")
     open(mut_t, "w").write(tmap_txt.replace(old_t, "128'hd353a5afc268871ad268eb72003a04ac", 1))
     ok4, l4 = run("mut_gf128_tower_mul_anf", "qsag_gf128_tower_mul", rtl + [mut_t, tmul], tower_spec, False)
+
+    # Also verify universal 2^128 canonical Reed-Muller ANF bijection of composed qsag_tower_rt (`inv(fwd(x)) == x` and `fwd(inv(x)) == x`).
+    rt_sv = os.path.join(OUT, "anf_tower_rt.sv")
+    open(rt_sv, "w").write("""
+module qsag_anf_tower_rt (input logic [127:0] a, input logic [127:0] b, output logic [127:0] r);
+    logic [127:0] m0, y01, m1, y10;
+    qsag_gf128_tower_map #(.INVERSE(0)) u_f0 (.x(a),  .y(m0));
+    qsag_gf128_tower_map #(.INVERSE(1)) u_i0 (.x(m0), .y(y01));
+    qsag_gf128_tower_map #(.INVERSE(1)) u_i1 (.x(b),  .y(m1));
+    qsag_gf128_tower_map #(.INVERSE(0)) u_f1 (.x(m1), .y(y10));
+    assign r = y01 ^ y10;
+endmodule
+""")
+    got_rt, st_rt, nc_rt, gt_rt = anf_outputs(netlist("gf128_tower_rt_anf", "qsag_anf_tower_rt", [tmap, rt_sv]))
+    ref_rt = [frozenset([1 + i, 129 + i]) for i in range(128)]
+    diff_rt = sum(g != s for g, s in zip(got_rt, ref_rt))
+    ok5 = (diff_rt == 0 and st_rt == {0})
+    print(f"[{'PASS' if ok5 else 'FAIL'}] gf128_tower_rt_anf: {nc_rt} cells ({', '.join(gt_rt)}), "
+          f"inv(fwd(a)) ^ fwd(inv(b)) == a ^ b over all 2^256 (a,b), {diff_rt}/128 bits differ")
+    l5 = f"{'PASS' if ok5 else 'FAIL'}\tanf_gf128_tower_rt\tequal\t{'equal' if ok5 else 'different'}\t{diff_rt}/128 bits differ, universal 2^256 bijection"
+
     with open(os.path.join(OUT, "results_anf.txt"), "w") as f:
-        f.write("\n".join([l1, l2, l3, l4]) + "\n")
-    sys.exit(0 if (ok1 and ok2 and ok3 and ok4) else 1)
+        f.write("\n".join([l1, l2, l3, l4, l5]) + "\n")
+    sys.exit(0 if (ok1 and ok2 and ok3 and ok4 and ok5) else 1)
 
 if __name__ == "__main__":
     main()

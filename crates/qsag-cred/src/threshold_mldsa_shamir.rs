@@ -41,8 +41,8 @@
 //! hold shares of a different key, and it learns nothing beyond its own shares.
 
 use crate::fips204_ntt::{
-    MLDSA_N, MLDSA_Q, MlDsaLevel, Poly256, expand_a_ntt, fq_add, fq_mul, fq_sub, mat_vec_mul_ntt, pk_encode,
-    power2round,
+    MLDSA_N, MLDSA_Q, MlDsaLevel, Poly256, expand_a_ntt, fq_add, fq_mul, fq_sub, mat_vec_mul_ntt,
+    pk_encode, power2round,
 };
 use crate::rss_mpc::{
     K_ZERO, Kx, MAX_MPC_PARTIES, MpcError, MpcTransport, Prss, RoundInbox, RoundInfo, RoundKind,

@@ -120,12 +120,11 @@ foreach inst [$block getInsts] {{
 puts "Placed $bi SRAM macro banks"
 
 place_pins -hor_layers {cfg['hor_layer']} -ver_layers {cfg['ver_layer']}
-global_placement -density 0.52
+global_placement -density 0.52 -overflow 0.15
 
 source {PDK / cfg['set_rc']}
 estimate_parasitics -placement
 repair_design
-repair_timing -setup -max_passes 15
 detailed_placement
 check_placement -verbose
 estimate_parasitics -placement
@@ -135,7 +134,7 @@ report_clock_min_period -digits 4
 report_worst_slack -max -digits 4
 report_worst_slack -min -digits 4
 report_tns -digits 4
-report_checks -path_delay max -group_path_count 3 -format summary -digits 4
+report_checks -path_delay max -group_count 3 -format summary -digits 4
 set_power_activity -global -activity 0.15 -duty 0.5
 report_power -digits 4
 exit

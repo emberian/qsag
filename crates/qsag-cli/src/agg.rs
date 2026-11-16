@@ -162,11 +162,15 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
         let text = std::str::from_utf8(&raw.0)
             .map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
         let json = Json::parse(text)?;
-        if let Some(vals) = json.get("validators").and_then(Json::as_array) {
+        if json.get("committee_root").is_some() || json.get("validators").is_some() {
             let committee = if json.get("format").is_some() || json.get("committee_root").is_some()
             {
                 load_committee(path)?
             } else {
+                let vals = json
+                    .get("validators")
+                    .and_then(Json::as_array)
+                    .ok_or_else(|| CliError::input("missing validators"))?;
                 if json.get("scheme").is_some() && scheme_of(&json)? != Scheme::AggCommittee {
                     return Err(CliError::input("validator roster has the wrong scheme"));
                 }
@@ -178,6 +182,26 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
             .or_else(|| json.get("public_key"))
             .and_then(Json::as_str)
         {
+            if let Some(fmt) = json.get("format")
+                && fmt.as_str() != Some(PUBLIC_FORMAT)
+            {
+                return Err(CliError::input(format!(
+                    "{path} is not a {PUBLIC_FORMAT} validator public key file"
+                )));
+            }
+            if let Some(scheme_val) = json.get("scheme") {
+                let Some(scheme_str) = scheme_val.as_str() else {
+                    return Err(CliError::input("validator public key scheme must be a string"));
+                };
+                if !matches!(
+                    scheme_str,
+                    crate::quorum_hem::HEM_SCHEME_NAME | "agg-jorts-poseidon2" | "jorts-poseidon2"
+                ) {
+                    return Err(CliError::input(format!(
+                        "{path}: unsupported validator public key scheme '{scheme_str}'"
+                    )));
+                }
+            }
             let bytes: [u8; 65] = from_hex_exact(pk_hex, "validator_public_key")?;
             let pk = ValidatorPublicKey::from_bytes_canonical(&bytes).ok_or_else(|| {
                 CliError::input(format!("{path}: validator public key is not canonical"))
@@ -820,6 +844,7 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::codec::to_hex;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -868,6 +893,27 @@ mod tests {
             (None, "fts-compact-1122", None),
         ] {
             std::fs::write(path, roster(format, scheme, root_hash, false)).unwrap();
+            assert!(load_public_validators(path).is_err());
+        }
+        // Single-validator JSON with wrong scheme, wrong format, or stray committee_root fails.
+        for bad_single in [
+            Json::object(vec![
+                ("format", Json::str(PUBLIC_FORMAT)),
+                ("scheme", Json::str("fts-compact-1122")),
+                ("validator_public_key", Json::hex(&pk.to_bytes())),
+            ]),
+            Json::object(vec![
+                ("format", Json::str("wrong-format")),
+                ("scheme", Json::str(crate::quorum_hem::HEM_SCHEME_NAME)),
+                ("validator_public_key", Json::hex(&pk.to_bytes())),
+            ]),
+            Json::object(vec![
+                ("scheme", Json::str(scheme)),
+                ("committee_root", Json::hex(&[0; 32])),
+                ("validator_public_key", Json::hex(&pk.to_bytes())),
+            ]),
+        ] {
+            std::fs::write(path, bad_single.to_pretty()).unwrap();
             assert!(load_public_validators(path).is_err());
         }
         for (format, root_hash) in [

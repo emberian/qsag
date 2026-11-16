@@ -2685,7 +2685,7 @@ private theorem dc_dif_neg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (a 
   | isTrue hp => exact False.elim (hnp hp)
   | isFalse _ => rfl
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+omit [LawfulField F] [DecidableEq F] [DecidableEq D] in
 private theorem state_ext {a b : State F PK D Sig} (hN : a.nodes = b.nodes)
     (hB : a.buffer = b.buffer) (hC : a.corrupt = b.corrupt) (hL : a.ledger = b.ledger) :
     a = b := by
@@ -2694,7 +2694,7 @@ private theorem state_ext {a b : State F PK D Sig} (hN : a.nodes = b.nodes)
   subst hN hB hC hL
   rfl
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
 private theorem viewNodes_enrolled (dep : AuthDeployment F C PK D Sig)
     (parties : Fin dep.core.quorum.numParties → AuthParty F)
     (p : Fin dep.core.quorum.numParties) :
@@ -2702,7 +2702,7 @@ private theorem viewNodes_enrolled (dep : AuthDeployment F C PK D Sig)
   unfold viewNodes
   exact dc_dif_pos p.isLt _ _
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
 private theorem viewNodes_setParty (dep : AuthDeployment F C PK D Sig)
     (parties : Fin dep.core.quorum.numParties → AuthParty F)
     (p : Fin dep.core.quorum.numParties) (P : AuthParty F) :
@@ -2757,7 +2757,7 @@ private theorem verified_subset (dep : AuthDeployment F C PK D Sig) {w' w : List
   obtain ⟨hmW, hV⟩ := List.mem_filter.mp hm
   exact List.mem_map.mpr ⟨m, List.mem_filter.mpr ⟨hSub m hmW, hV⟩, hEq⟩
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
 /-- Replacing the buffer by one whose messages for this deployment are all backed by a recorded
     permit preserves the Section 1 relation. -/
 private theorem rel_of_buffer (dep : Deployment F C PK D Sig) {c : State F PK D Sig}
@@ -2828,11 +2828,11 @@ theorem AuthDeployment.recover_some (dep : AuthDeployment F C PK D Sig) {p : Nat
         obtain ⟨l', L'⟩ := s
         rw [hP] at h
         cases h
-        exact ⟨bytes, rfl, hA, rfl⟩
+        exact ⟨bytes, rfl, hA, hP⟩
     · rw [dc_if_neg hA] at h
       cases h
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
 /-- **An untampered record recovers.** The record a custodian seals at a nonzero generation,
     checked against the anchor it committed, returns the sealed latch and log. -/
 theorem AuthDeployment.recover_sealed (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
@@ -2859,7 +2859,6 @@ structure AuthRel (dep : AuthDeployment F C PK D Sig)
     dep.core.quorum
   wal : AuthPartiesInv dep c.parties
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
 private theorem guarded_step_some (dep : AuthDeployment F C PK D Sig)
     {c c' : AuthState F PK D Sig dep.core.quorum.numParties}
     {t : AuthTurn F dep.core.quorum.numParties} {ev : AuthEvent F Sig}
@@ -2872,7 +2871,6 @@ private theorem guarded_step_some (dep : AuthDeployment F C PK D Sig)
     rw [hV, dc_if_neg Bool.false_ne_true] at h'
     exact ⟨rfl, h'⟩
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
 private theorem guarded_step_of_no_violation (dep : AuthDeployment F C PK D Sig)
     (c : AuthState F PK D Sig dep.core.quorum.numParties)
     (t : AuthTurn F dep.core.quorum.numParties) (hV : authViolation dep c t = false) :
@@ -2880,6 +2878,7 @@ private theorem guarded_step_of_no_violation (dep : AuthDeployment F C PK D Sig)
   show (if authViolation dep c t = true then none else authStep dep c t) = authStep dep c t
   rw [hV, dc_if_neg Bool.false_ne_true]
 
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
 /-- A delivered message that is not a violation, has a valid tag and is for this deployment is
     backed by a permit recorded through its sender's own port. -/
 private theorem deliver_backed (dep : AuthDeployment F C PK D Sig)
@@ -3243,7 +3242,8 @@ private theorem auth_sim_internal (dep : AuthDeployment F C PK D Sig)
     · exact List.mem_of_mem_drop hDr
   | execute d approvers i ab => cases hInt
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+omit [DecidableEq C] in
+omit [DecidableEq F] [DecidableEq D] in
 private theorem auth_init_rel (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed) :
     AuthRel dep (AuthState.init dep)
       (IdealCustodyState.init dep.core.deploymentId dep.core.pk dep.core.quorum) where
@@ -3374,37 +3374,37 @@ theorem crash_violation_collision (dep : AuthDeployment F C PK D Sig)
 
 /-! ### The unguarded machine -/
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
 /-- **Identical until the first violation.** Every execution of `authMachine` is an execution of
     the guarded machine, or has a prefix that the guarded machine also runs and that ends in a
     state where the next turn is a violation. -/
-theorem authMachine_trace_guarded_or_violation (dep : AuthDeployment F C PK D Sig) :
-    ∀ {s s' : AuthState F PK D Sig dep.core.quorum.numParties}
-      {tr : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig)},
-      (authMachine dep).ValidTrace s tr s' →
-      (authGuardedMachine dep).ValidTrace s tr s' ∨
-        ∃ (tr₀ : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig))
-          (st : AuthState F PK D Sig dep.core.quorum.numParties)
-          (t : AuthTurn F dep.core.quorum.numParties),
-          (authGuardedMachine dep).ValidTrace s tr₀ st ∧ authViolation dep st t = true
-  | s, _, _, .nil _ => .inl (.nil s)
-  | s, _, _, .accept (inp := inp) (out := out) hStep hRest => by
+theorem authMachine_trace_guarded_or_violation (dep : AuthDeployment F C PK D Sig)
+    {s s' : AuthState F PK D Sig dep.core.quorum.numParties}
+    {tr : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig)}
+    (hTr : (authMachine dep).ValidTrace s tr s') :
+    (authGuardedMachine dep).ValidTrace s tr s' ∨
+      ∃ (tr₀ : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig))
+        (st : AuthState F PK D Sig dep.core.quorum.numParties)
+        (t : AuthTurn F dep.core.quorum.numParties),
+        (authGuardedMachine dep).ValidTrace s tr₀ st ∧ authViolation dep st t = true := by
+  induction hTr with
+  | nil s => exact .inl (.nil s)
+  | @accept s s₁ sF inp out rest hStep _ ih =>
     cases hV : authViolation dep s inp with
     | true => exact .inr ⟨[], s, inp, .nil s, hV⟩
     | false =>
-      have hG : (authGuardedMachine dep).step s inp = some (_, out) :=
+      have hG : (authGuardedMachine dep).step s inp = some (s₁, out) :=
         (guarded_step_of_no_violation dep s inp hV).trans hStep
-      rcases authMachine_trace_guarded_or_violation dep hRest with hT | ⟨tr₀, st, t, hT, hVt⟩
+      rcases ih with hT | ⟨tr₀, st, t, hT, hVt⟩
       · exact .inl (.accept hG hT)
-      · exact .inr ⟨_, st, t, .accept hG hT, hVt⟩
-  | s, _, _, .reject inp hNone hRest => by
+      · exact .inr ⟨(inp, out) :: tr₀, st, t, .accept hG hT, hVt⟩
+  | @reject s sF inp rest hNone _ ih =>
     have hG : (authGuardedMachine dep).step s inp = none := by
       cases hV : authViolation dep s inp with
       | true =>
         show (if authViolation dep s inp = true then none else authStep dep s inp) = none
         rw [hV, dc_if_pos rfl]
       | false => exact (guarded_step_of_no_violation dep s inp hV).trans hNone
-    rcases authMachine_trace_guarded_or_violation dep hRest with hT | ⟨tr₀, st, t, hT, hVt⟩
+    rcases ih with hT | ⟨tr₀, st, t, hT, hVt⟩
     · exact .inl (.reject inp hG hT)
     · exact .inr ⟨tr₀, st, t, .reject inp hG hT, hVt⟩
 
@@ -3535,7 +3535,6 @@ theorem authViolation_split (dep : AuthDeployment F C PK D Sig)
   | dropMsg idx => rfl
   | execute d approvers i ab => rfl
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
 /-- The final state of a run does not depend on the event that is tracked. -/
 theorem authRun_state (dep : AuthDeployment F C PK D Sig)
     (ev ev' : AuthState F PK D Sig dep.core.quorum.numParties →
@@ -3544,9 +3543,8 @@ theorem authRun_state (dep : AuthDeployment F C PK D Sig)
       (st : AuthState F PK D Sig dep.core.quorum.numParties),
       (authRun dep ev st ts).1 = (authRun dep ev' st ts).1
   | [], _ => rfl
-  | t :: ts, st => authRun_state dep ev ev' ts _
+  | _ :: ts, _ => authRun_state dep ev ev' ts _
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
 /-- A run flags a violation exactly when it flags one of the two kinds. -/
 theorem authRun_violation_split (dep : AuthDeployment F C PK D Sig) :
     ∀ (ts : List (AuthTurn F dep.core.quorum.numParties))
@@ -3567,20 +3565,21 @@ theorem authRun_violation_split (dep : AuthDeployment F C PK D Sig) :
       cases (authRun dep (authAckViolation dep) ((authMachine dep).runStep st t).1 ts).2 <;>
       cases (authRun dep (authWalViolation dep) ((authMachine dep).runStep st t).1 ts).2 <;> rfl
 
-omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
 /-- A run without a violation is an execution of the guarded machine. -/
-theorem authRun_guarded (dep : AuthDeployment F C PK D Sig) :
-    ∀ (ts : List (AuthTurn F dep.core.quorum.numParties))
-      (st : AuthState F PK D Sig dep.core.quorum.numParties),
+theorem authRun_guarded (dep : AuthDeployment F C PK D Sig)
+    (ts : List (AuthTurn F dep.core.quorum.numParties)) :
+    ∀ (st : AuthState F PK D Sig dep.core.quorum.numParties),
       (authRun dep (authViolation dep) st ts).2 = false →
       ∃ tr : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig),
-        (authGuardedMachine dep).ValidTrace st tr (authRun dep (authViolation dep) st ts).1
-  | [], st, _ => ⟨[], .nil st⟩
-  | t :: ts, st, h => by
+        (authGuardedMachine dep).ValidTrace st tr (authRun dep (authViolation dep) st ts).1 := by
+  induction ts with
+  | nil => exact fun st _ => ⟨[], .nil st⟩
+  | cons t ts ih =>
+    intro st h
     have h' : (authViolation dep st t ||
         (authRun dep (authViolation dep) ((authMachine dep).runStep st t).1 ts).2) = false := h
     obtain ⟨hV, hRest⟩ := Bool.or_eq_false_iff.mp h'
-    obtain ⟨tr, hTr⟩ := authRun_guarded dep ts _ hRest
+    obtain ⟨tr, hTr⟩ := ih ((authMachine dep).runStep st t).1 hRest
     have hTr' : (authGuardedMachine dep).ValidTrace ((authMachine dep).runStep st t).1 tr
         (authRun dep (authViolation dep) st (t :: ts)).1 := hTr
     cases hS : authStep dep st t with

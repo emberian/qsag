@@ -43,14 +43,15 @@ def burn : Burn := ⟨request, roundCommitment dep request, [opening]⟩
 
 /-! ### Deployment binding (BACKLOG-62)
 
-`legacyPayload` is the approval encoding before the deployment frame was added (tag `v2`, no
-deployment identifier); `legacySign`/`legacyVerify` are the production signer and verifier on it.
+`legacyPayload` is `Custody.payload` with the deployment frame removed and nothing else changed
+(same `"QSAG.CUSTODY.APPROVAL/v3"` tag): the shape the approval bytes had before the deployment
+identifier was framed in. `legacySign`/`legacyVerify` are the production signer and verifier on it.
 They take a deployment argument and ignore it, which is the old shape: the vault and the permit
 named no deployment. The teeth below show that in that shape a released approval is an approval
 for every deployment, and that release served any caller. -/
 
 def legacyPayload (_deploymentId party : Nat) (r : Intent) : List UInt8 :=
-  encodeMultiFrame ["QSAG.CUSTODY.APPROVAL/v2".toUTF8.toList, leb128 party,
+  encodeMultiFrame ["QSAG.CUSTODY.APPROVAL/v3".toUTF8.toList, leb128 party,
     leb128 r.session, leb128 r.round, leb128 r.leaf, leb128 r.spend, r.message]
 
 def legacySign (cfg : SigningConfig) (sk : PqSecretKey) (dep party : Nat) (r : Intent) :

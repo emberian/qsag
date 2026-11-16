@@ -44,17 +44,16 @@ module qsag_p2_compact #(
 
     assign busy     = (st != IDLE) || out_valid;
     assign in_ready = !rst && (st == IDLE);
-    assign mi       = (pass >= 5'd5) && (pass <= 5'd26);
 
     // Single-lane feed-forward adder: during pass 0 LIN_PREP p_cnt=0..3, x[0], x[4], x[8] present
     // lanes (i, i+4, i+8) as `x` rotates.
     logic [66:0] ff_one;
-    qsag_sum_csa #(.W(67), .N(3), .CHUNK(22)) u_ff1 (
+    qsag_sum_csa #(.W(67), .N(3), .CHUNK(34)) u_ff1 (
         .x({67'(x[64*8 +: 64]) << 2, 67'(x[64*4 +: 64]) << 1, 67'(x[0 +: 64])}),
         .y(ff_one));
 
     // Sequential 12-lane accumulator during LIN_PREP (p_cnt = 0..11).
-    qsag_add_split #(.W(68), .CHUNK(22)) u_sum_acc (
+    qsag_add_split #(.W(68), .CHUNK(34)) u_sum_acc (
         .a(sum12_q), .b(68'(x[63:0])), .y(sum12_next));
 
     // Hardwired column M4 on x[0], x[3], x[6], x[9].
@@ -73,7 +72,7 @@ module qsag_p2_compact #(
             mb[(k + 1) % 4] << 1,
             mb[k] << 1
         };
-        qsag_sum_csa #(.W(67), .N(5), .CHUNK(22)) u_m4 (
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(34)) u_m4 (
             .x(m4_terms), .y(m4_d[67*k +: 67]));
     end
 
@@ -121,7 +120,7 @@ module qsag_p2_compact #(
         end
     end
 
-    qsag_sum_csa #(.W(LW), .N(5), .CHUNK(22)) u_lin_s1 (.x(lin_terms), .y(lazy_d));
+    qsag_sum_csa #(.W(LW), .N(5), .CHUNK(26)) u_lin_s1 (.x(lin_terms), .y(lazy_d));
 
     logic [63:0] lo;
     logic [11:0] t_hi;
@@ -131,8 +130,8 @@ module qsag_p2_compact #(
     /* verilator lint_on UNUSEDSIGNAL */
     wire [4*66-1:0] tr0 = {66'd1,            ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
     wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_lin_r0 (.x(tr0), .y(r0));
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_lin_r1 (.x(tr1), .y(r1));
+    qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_lin_r0 (.x(tr0), .y(r0));
+    qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_lin_r1 (.x(tr1), .y(r1));
     wire [63:0] red_y_d = r1[65] ? r0[63:0] : r1[63:0];
 
     // Single shared Goldilocks DSP multiplier across all 4 S-box stages (`x^2, x^3, x^6, x^7`).
@@ -202,6 +201,7 @@ module qsag_p2_compact #(
             case (st)
                 IDLE: if (in_valid) begin
                     pass  <= 5'd0;
+                    mi    <= 1'b0;
                     p_cnt <= 4'd0;
                     st    <= LIN_PREP;
                 end
@@ -222,6 +222,7 @@ module qsag_p2_compact #(
                             st        <= IDLE;
                         end else begin
                             pass     <= pass + 5'd1;
+                            mi       <= (pass >= 5'd4) && (pass <= 5'd25);
                             sb_stage <= 2'd0;
                             sb_cnt   <= 5'd0;
                             st       <= SBOX;
