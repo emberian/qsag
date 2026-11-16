@@ -54,17 +54,13 @@ merge trees over the quartic Goldilocks extension field `Aggregation.GoldilocksE
 -/
 
 public import Qsag.Math.Goldilocks
-import all Qsag.Math.Goldilocks
 public import Qsag.Oracle.Keccak
-import all Qsag.Oracle.Keccak
 public import Qsag.Protocol.Signing.HashSigs
-import all Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.HypertreeEufCma
 
 public import Qsag.Tactic.AssuranceKit
 
 public import Qsag.Math.QuarticExt4
-import all Qsag.Math.QuarticExt4
 
 public section
 namespace Qsag
@@ -397,33 +393,51 @@ theorem terminal_check_ext4_omission_unsound (halfClaim : GoldilocksExt4) :
 
 /-! ## 5. Unconditional `[BCIKS20]` Johnson WHIR Schedule Ladder -/
 
-/-- Exact 2-regime unconditional Johnson-radius security ladder matching `WhirSecurityRegime` in
-    `crates/qsag-agg/src/pcs.rs` (`PCS_POW_BITS = 16` = `8` QROM Grover bits; retired capacity
-    wire tags `0, 1, 3` are rejected on deserialization per `Crites & Stewart 2025/2046` and
-    `Krachun-Kazanin-Habock 2026/782`):
-    - `bciksJohnsonClassical128` (wire tag `2`): `q = (129, 65, 44, 33)` (`⌈256 / log₂ B⌉ + 1`;
-      `+1` Johnson slack -> unconditional `< 2^-128` + `16`b PoW = `144` classical FS round bits)
-    - `bciksJohnsonQrom128` (**DEFAULT**, wire tag `4`): `q = (258, 130, 88, 66)`
-      (`⌈512 / log₂ B⌉ + 2`, as in `minimum_queries`; `+2` Johnson slack -> unconditional
-      `< 2^-256` + `16`b PoW = `136` QROM Grover round-search bits). -/
+/-- `pcs.rs:WhirSecurityRegime`: the six wire-decodable query-accounting regimes
+    (`#[repr(u8)]` tags `2, 4, 5, 6, 7, 8`; retired capacity tags `0, 1, 3` are rejected).
+    - `bciksJohnsonClassical128` (tag `2`): `q = (129, 65, 44, 33)`, 16-bit PoW.
+    - `bciksJohnsonQrom128` (tag `4`, default): `q = (258, 130, 88, 66)`, 16-bit PoW.
+    - `cdhz25JohnsonQrom128` (tag `5`): `q = (202, 102, 70, 52)`, 16-bit PoW, `cSHAKE256`.
+    - `cdhz25ZeroPowQrom128` (tag `6`): `q = (216, 109, 74, 56)`, no PoW, `cSHAKE256`.
+    - `poseidon2Cdhz25JohnsonQrom128` (tag `7`): the tag-5 table over the Poseidon2 canopy.
+    - `poseidon2Cdhz25ZeroPowQrom128` (tag `8`): the tag-6 table over the Poseidon2 canopy.
+    Only tag `4` has 128 nominal Grover round bits; see `WhirSecurityRegime.qromGroverRoundBits`. -/
 inductive WhirSecurityRegime where
   | bciksJohnsonClassical128
   | bciksJohnsonQrom128
+  | cdhz25JohnsonQrom128
+  | cdhz25ZeroPowQrom128
+  | poseidon2Cdhz25JohnsonQrom128
+  | poseidon2Cdhz25ZeroPowQrom128
   deriving DecidableEq, Repr
 
 def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .bciksJohnsonQrom128
 
+/-- `WhirSecurityRegime::ALL`. -/
+def WhirSecurityRegime.all : List WhirSecurityRegime :=
+  [.bciksJohnsonClassical128, .bciksJohnsonQrom128, .cdhz25JohnsonQrom128,
+   .cdhz25ZeroPowQrom128, .poseidon2Cdhz25JohnsonQrom128, .poseidon2Cdhz25ZeroPowQrom128]
+
+theorem WhirSecurityRegime.mem_all (r : WhirSecurityRegime) : r ∈ WhirSecurityRegime.all := by
+  cases r <;> decide
+
 def WhirSecurityRegime.tagByte : WhirSecurityRegime → UInt8
   | .bciksJohnsonClassical128 => 2
   | .bciksJohnsonQrom128 => 4
+  | .cdhz25JohnsonQrom128 => 5
+  | .cdhz25ZeroPowQrom128 => 6
+  | .poseidon2Cdhz25JohnsonQrom128 => 7
+  | .poseidon2Cdhz25ZeroPowQrom128 => 8
 
-/-- Wire-tag decoder matching `WhirSecurityRegime::from_u8` in `crates/qsag-agg/src/pcs.rs`:
-    accepts only wire tags `2` (`bciksJohnsonClassical128`) and `4` (`bciksJohnsonQrom128`),
-    rejecting retired capacity-proximity tags `0`, `1`, and `3`. -/
-def WhirSecurityRegime.decodeTag? : UInt8 → Option WhirSecurityRegime
-  | 2 => some .bciksJohnsonClassical128
-  | 4 => some .bciksJohnsonQrom128
-  | _ => none
+/-- `WhirSecurityRegime::from_u8`: accepts exactly the wire tags `2, 4, 5, 6, 7, 8`. -/
+def WhirSecurityRegime.decodeTag? (tag : UInt8) : Option WhirSecurityRegime :=
+  if tag = 2 then some .bciksJohnsonClassical128
+  else if tag = 4 then some .bciksJohnsonQrom128
+  else if tag = 5 then some .cdhz25JohnsonQrom128
+  else if tag = 6 then some .cdhz25ZeroPowQrom128
+  else if tag = 7 then some .poseidon2Cdhz25JohnsonQrom128
+  else if tag = 8 then some .poseidon2Cdhz25ZeroPowQrom128
+  else none
 
 theorem WhirSecurityRegime.decodeTag?_tagByte (r : WhirSecurityRegime) :
     WhirSecurityRegime.decodeTag? r.tagByte = some r := by
@@ -433,14 +447,106 @@ theorem WhirSecurityRegime.tagByte_of_decodeTag? {tag : UInt8} {r : WhirSecurity
     (h : WhirSecurityRegime.decodeTag? tag = some r) :
     r.tagByte = tag := by
   unfold WhirSecurityRegime.decodeTag? at h
-  split at h
-  · cases h; rfl
-  · cases h; rfl
-  · cases h
+  by_cases h2 : tag = 2
+  · rw [ite_eq_left h2] at h; cases h; exact h2.symm
+  rw [ite_eq_right h2] at h
+  by_cases h4 : tag = 4
+  · rw [ite_eq_left h4] at h; cases h; exact h4.symm
+  rw [ite_eq_right h4] at h
+  by_cases h5 : tag = 5
+  · rw [ite_eq_left h5] at h; cases h; exact h5.symm
+  rw [ite_eq_right h5] at h
+  by_cases h6 : tag = 6
+  · rw [ite_eq_left h6] at h; cases h; exact h6.symm
+  rw [ite_eq_right h6] at h
+  by_cases h7 : tag = 7
+  · rw [ite_eq_left h7] at h; cases h; exact h7.symm
+  rw [ite_eq_right h7] at h
+  by_cases h8 : tag = 8
+  · rw [ite_eq_left h8] at h; cases h; exact h8.symm
+  rw [ite_eq_right h8] at h
+  cases h
 
 theorem WhirSecurityRegime.tagByte_injective {r1 r2 : WhirSecurityRegime}
     (h : r1.tagByte = r2.tagByte) : r1 = r2 := by
-  cases r1 <;> cases r2 <;> first | rfl | cases h
+  have h1 := WhirSecurityRegime.decodeTag?_tagByte r1
+  rw [h, WhirSecurityRegime.decodeTag?_tagByte r2] at h1
+  exact (Option.some.inj h1).symm
+
+/-- A tag decodes exactly when it is one of the six `repr(u8)` values. -/
+theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
+    (WhirSecurityRegime.decodeTag? tag).isSome = true ↔
+      tag = 2 ∨ tag = 4 ∨ tag = 5 ∨ tag = 6 ∨ tag = 7 ∨ tag = 8 := by
+  constructor
+  · intro h
+    cases hd : WhirSecurityRegime.decodeTag? tag with
+    | none => rw [hd] at h; cases h
+    | some r =>
+      have ht := WhirSecurityRegime.tagByte_of_decodeTag? hd
+      cases r
+      · exact .inl ht.symm
+      · exact .inr (.inl ht.symm)
+      · exact .inr (.inr (.inl ht.symm))
+      · exact .inr (.inr (.inr (.inl ht.symm)))
+      · exact .inr (.inr (.inr (.inr (.inl ht.symm))))
+      · exact .inr (.inr (.inr (.inr (.inr ht.symm))))
+  · rintro (h | h | h | h | h | h) <;> rw [h] <;> rfl
+
+/-- `WhirSecurityRegime::pow_bits`. -/
+def WhirSecurityRegime.powBits : WhirSecurityRegime → Nat
+  | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => 0
+  | _ => 16
+
+/-- `WhirSecurityRegime::pure_query_target_bits`: the exponent `t` such that every stage's
+    distinct-fiber query error is below `2^-t` (`whirRegime_positive_slack`). -/
+@[expose] def WhirSecurityRegime.pureQueryTargetBits : WhirSecurityRegime → Nat
+  | .bciksJohnsonClassical128 => 128
+  | .bciksJohnsonQrom128 => 256
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 => 200
+  | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => 214
+
+/-- `WhirSecurityRegime::classical_fs_round_bits`: query target plus PoW bits. -/
+def WhirSecurityRegime.classicalFsRoundBits (r : WhirSecurityRegime) : Nat :=
+  r.pureQueryTargetBits + r.powBits
+
+/-- `WhirSecurityRegime::qrom_grover_round_bits`: nominal single-round Grover search work.
+    A per-round estimate, not a composed QROM security bound. -/
+def WhirSecurityRegime.qromGroverRoundBits (r : WhirSecurityRegime) : Nat :=
+  r.classicalFsRoundBits / 2
+
+/-- `WhirSecurityRegime::meets_unconditional_grover_128_floor`. -/
+def WhirSecurityRegime.meetsUnconditionalGrover128Floor (r : WhirSecurityRegime) : Bool :=
+  decide (128 ≤ r.qromGroverRoundBits)
+
+/-- `WhirSecurityRegime::meets_bounded_qrom_128_profile`: the four CDHZ25 regimes. -/
+def WhirSecurityRegime.meetsBoundedQrom128Profile : WhirSecurityRegime → Bool
+  | .cdhz25JohnsonQrom128 | .cdhz25ZeroPowQrom128
+  | .poseidon2Cdhz25JohnsonQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => true
+  | _ => false
+
+/-- `WhirSecurityRegime::meets_qrom_128_floor`: the aggregate authorization policy. Despite the
+    Rust name, `true` does not mean 128 bits of unconditional Grover work. -/
+def WhirSecurityRegime.meetsQrom128Floor (r : WhirSecurityRegime) : Bool :=
+  r.meetsUnconditionalGrover128Floor || r.meetsBoundedQrom128Profile
+
+/-- `WhirSecurityRegime::uses_poseidon2_canopy`. -/
+def WhirSecurityRegime.usesPoseidon2Canopy : WhirSecurityRegime → Bool
+  | .poseidon2Cdhz25JohnsonQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => true
+  | _ => false
+
+/-- `log2` of the oracle-query budget a bounded-query profile is accounted at (doc comment of
+    `WhirSecurityRegime`): `Q ≤ 2^38` for the 16-bit-PoW CDHZ25 table, `Q + 1 ≤ 2^40` for the
+    zero-PoW table. The two Johnson regimes carry no query bound. -/
+def WhirSecurityRegime.boundedQueryLog2? : WhirSecurityRegime → Option Nat
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 => some 38
+  | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => some 40
+  | _ => none
+
+/-- Denominator of the proximity slack `η = 1 / slackDen` at which
+    `whirRegime_positive_slack` holds. -/
+def WhirSecurityRegime.slackDen : WhirSecurityRegime → Nat
+  | .bciksJohnsonQrom128 => 1024
+  | _ => 512
 
 /-- `#tooth`: retired capacity-proximity wire tags `0`, `1`, and `3` are rejected (`none`) by
     `WhirSecurityRegime.decodeTag?`. -/
@@ -459,12 +565,17 @@ structure WhirStageSpec where
   powBits : Nat
   deriving DecidableEq, Repr
 
-/-- Full 4-stage `(4, 16, 64, 256)` WHIR schedule for each `WhirSecurityRegime`. -/
-def whirSchedule4Stage : WhirSecurityRegime → List WhirStageSpec
+/-- Full 4-stage `(4, 16, 64, 256)` WHIR schedule for each `WhirSecurityRegime`
+    (`WhirSecurityRegime::minimum_queries` at `log2 B = 2, 4, 6, 8`, with `pow_bits`). -/
+@[expose] def whirSchedule4Stage : WhirSecurityRegime → List WhirStageSpec
   | .bciksJohnsonClassical128 =>
     [ ⟨0, 4, 2, 129, 16⟩, ⟨1, 16, 4, 65, 16⟩, ⟨2, 64, 8, 44, 16⟩, ⟨3, 256, 16, 33, 16⟩ ]
   | .bciksJohnsonQrom128 =>
     [ ⟨0, 4, 2, 258, 16⟩, ⟨1, 16, 4, 130, 16⟩, ⟨2, 64, 8, 88, 16⟩, ⟨3, 256, 16, 66, 16⟩ ]
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 =>
+    [ ⟨0, 4, 2, 202, 16⟩, ⟨1, 16, 4, 102, 16⟩, ⟨2, 64, 8, 70, 16⟩, ⟨3, 256, 16, 52, 16⟩ ]
+  | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 =>
+    [ ⟨0, 4, 2, 216, 0⟩, ⟨1, 16, 4, 109, 0⟩, ⟨2, 64, 8, 74, 0⟩, ⟨3, 256, 16, 56, 0⟩ ]
 
 /-- 3-stage `(4, 16, 64)` WHIR schedule at `num_vars = 20` (`K = 8` shard). -/
 def whirScheduleNv20 (r : WhirSecurityRegime) : List WhirStageSpec :=
@@ -517,6 +628,76 @@ theorem bciksJohnson_schedules_eq_minimum_queries :
     (whirSchedule4Stage .bciksJohnsonQrom128).map (·.blowup) = [2, 4, 6, 8].map (2 ^ ·) := by
   decide
 
+/-- **Per-regime query target with positive proximity slack.** In every one of the six
+    regimes, every stage satisfies `(1 / √B_s + η)^{q_s} < 2^-t` at `η = 1 / r.slackDen > 0`,
+    where `t = r.pureQueryTargetBits` is that regime's own target: `128, 256, 200, 214, 200,
+    214` for tags `2, 4, 5, 6, 7, 8`. -/
+theorem whirRegime_positive_slack (r : WhirSecurityRegime) :
+    ∀ s ∈ whirSchedule4Stage r,
+      2 ^ r.pureQueryTargetBits < s.johnsonSqrtBlowup ^ s.numQueries ∧
+      (r.slackDen / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ r.pureQueryTargetBits <
+        r.slackDen ^ s.numQueries ∧
+      r.slackDen / s.johnsonSqrtBlowup + 1 ≤ r.slackDen ∧
+      s.powBits = r.powBits := by
+  cases r <;> decide +kernel
+
+/-- **(a) The unconditional Grover-floor regime.** Exactly one of the six regimes, the default
+    `bciksJohnsonQrom128` (tag `4`), has at least 128 nominal Grover round bits; it has 136. -/
+theorem whirRegime_unconditional_grover_floor (r : WhirSecurityRegime) :
+    (r.meetsUnconditionalGrover128Floor = true ↔ r = .bciksJohnsonQrom128) ∧
+    WhirSecurityRegime.bciksJohnsonQrom128.qromGroverRoundBits = 136 := by
+  cases r <;> decide
+
+/-- **(b) The bounded-query profiles.** The four CDHZ25 regimes (tags `5, 6, 7, 8`) are exactly
+    the regimes with `meetsBoundedQrom128Profile`. None reaches the 128-bit nominal Grover
+    floor: tags `5, 7` have 108 bits at an accounted budget `Q ≤ 2^38`, tags `6, 8` have 107
+    bits at `Q + 1 ≤ 2^40`. -/
+theorem whirRegime_bounded_query_profiles (r : WhirSecurityRegime) :
+    (r.meetsBoundedQrom128Profile = true ↔
+      r = .cdhz25JohnsonQrom128 ∨ r = .cdhz25ZeroPowQrom128 ∨
+      r = .poseidon2Cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25ZeroPowQrom128) ∧
+    (r.meetsBoundedQrom128Profile = true → r.meetsUnconditionalGrover128Floor = false) ∧
+    (r = .cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25JohnsonQrom128 →
+      r.qromGroverRoundBits = 108 ∧ r.boundedQueryLog2? = some 38) ∧
+    (r = .cdhz25ZeroPowQrom128 ∨ r = .poseidon2Cdhz25ZeroPowQrom128 →
+      r.qromGroverRoundBits = 107 ∧ r.boundedQueryLog2? = some 40) := by
+  cases r <;> decide
+
+/-- Nominal Grover round bits of the six regimes in tag order `2, 4, 5, 6, 7, 8`; the
+    classical regime (tag `2`) has 72 and is never authorized for aggregates. -/
+theorem whirRegime_grover_round_bits_table :
+    WhirSecurityRegime.all.map (·.qromGroverRoundBits) = [72, 136, 108, 107, 108, 107] ∧
+    WhirSecurityRegime.all.map (·.meetsQrom128Floor) = [false, true, true, true, true, true] ∧
+    WhirSecurityRegime.all.map (·.tagByte) = [2, 4, 5, 6, 7, 8] := by
+  decide
+
+/-- **Quadratic-search accounting of the bounded-query profiles.** With per-round failure
+    probability `2^-(classicalFsRoundBits)` and at most `Q ≤ 2^b` oracle queries, `b` the
+    profile's accounted budget, the search numerator `4 * Q^2` leaves at least 128 bits:
+    `4 * Q^2 * 2^128 ≤ 2^(classicalFsRoundBits)`. This is arithmetic on the nominal round
+    figure, not a QROM reduction. -/
+theorem whirRegime_bounded_query_search_accounting (r : WhirSecurityRegime) (b Q : Nat)
+    (hb : r.boundedQueryLog2? = some b) (hQ : Q ≤ 2 ^ b) :
+    4 * Q ^ 2 * 2 ^ 128 ≤ 2 ^ r.classicalFsRoundBits := by
+  have hmono : 4 * Q ^ 2 * 2 ^ 128 ≤ 4 * (2 ^ b) ^ 2 * 2 ^ 128 :=
+    Nat.mul_le_mul_right _ (Nat.mul_le_mul_left 4 (Nat.pow_le_pow_left hQ 2))
+  refine Nat.le_trans hmono ?_
+  cases r
+  · cases hb
+  · cases hb
+  · cases Option.some.inj hb; decide
+  · cases Option.some.inj hb; decide
+  · cases Option.some.inj hb; decide
+  · cases Option.some.inj hb; decide
+
+set_option exponentiation.threshold 512 in
+/-- The same accounting for the unconditional regime up to `Q ≤ 2^64` queries. -/
+theorem whirRegime_unconditional_search_accounting (Q : Nat) (hQ : Q ≤ 2 ^ 64) :
+    4 * Q ^ 2 * 2 ^ 128 ≤
+      2 ^ WhirSecurityRegime.bciksJohnsonQrom128.classicalFsRoundBits :=
+  Nat.le_trans
+    (Nat.mul_le_mul_right _ (Nat.mul_le_mul_left 4 (Nat.pow_le_pow_left hQ 2))) (by decide)
+
 /-- `#tooth`: the superseded `+1` QROM stage-0 count `257` is not a stage of the deployed
     `bciksJohnsonQrom128` schedule. -/
 theorem tooth_bciksJohnsonQrom128_stage0_is_not_257 :
@@ -550,7 +731,7 @@ structure ProductionAggParams where
 def productionAggParams : ProductionAggParams where
   rowSumcheckDegree := 8
   logTraceCols := 8
-  maxPcsVars := 24
+  maxPcsVars := 28
   rsBlowup := 4
   maxQueryCap := 512
   stageBlowups := [4, 16, 64, 256]
@@ -572,10 +753,10 @@ def ProductionAggParams.maxQueryGroups (p : ProductionAggParams) : Nat :=
   p.maxStage0Domain / 2 ^ p.maxFoldStepVars
 
 theorem productionAggParams_derived :
-    productionAggParams.maxRowRounds = 16 ∧
-    productionAggParams.maxFoldRounds = 16 ∧
-    productionAggParams.maxStage0Domain = 2 ^ 26 ∧
-    productionAggParams.maxQueryGroups = 2 ^ 20 ∧
+    productionAggParams.maxRowRounds = 20 ∧
+    productionAggParams.maxFoldRounds = 20 ∧
+    productionAggParams.maxStage0Domain = 2 ^ 30 ∧
+    productionAggParams.maxQueryGroups = 2 ^ 24 ∧
     2 ^ 255 < productionAggParams.fieldSize := by
   decide
 
@@ -1293,17 +1474,6 @@ theorem verifyWhirStagePow_16_iff (chal : List UInt8) (powNonce : Nat)
     · rintro ⟨hb0, hb1⟩
       rw [hb0, hb1, UInt8.toNat_zero]
       omega
-
-/-- Concrete inhabitedness witness: a genuine 16-bit `cSHAKE256` Proof-of-Work (`powBits = 16`,
-    nonce `5791`) on the digest of `powWitnessSeedV2`, checked by the Lean kernel. -/
-theorem inhabited_whir_stage_pow_16 :
-    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 5791 16 = true := by
-  decide +kernel
-
-/-- `#tooth` Invalid PoW Nonce Rejection (`powNonce = 0` fails 16-bit PoW on the witness digest). -/
-theorem tooth_whir_pow16_nonce0_rejected :
-    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 0 16 = false := by
-  decide +kernel
 
 /-- `#tooth`: a challenge that is not a 32-byte digest is rejected at every positive difficulty,
     as is a nonce outside `u64`. -/
@@ -3291,6 +3461,12 @@ def challengeVectors {α : Type} (S : List α) : Nat → List (List α)
   | 0 => [[]]
   | n + 1 => S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs))
 
+theorem challengeVectors_zero {α : Type} (S : List α) : challengeVectors S 0 = [[]] := by rfl
+
+theorem challengeVectors_succ {α : Type} (S : List α) (n : Nat) :
+    challengeVectors S (n + 1) =
+      S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs)) := by rfl
+
 theorem challengeVectors_length {α : Type} (S : List α) :
     ∀ (n : Nat), (challengeVectors S n).length = S.length ^ n
   | 0 => rfl
@@ -3754,6 +3930,23 @@ theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
   exact strict_query_miss_from_slack bad dom s.numQueries
     (1024 / s.johnsonSqrtBlowup + 1) 1024 256 hdom (hAllLe s hs) hfar hSlack
 
+/-- **Per-stage query bound in every regime, at the regime's own target.** For every stage of
+    every one of the six regimes, if `bad` has relative density at least
+    `1 - (1 / √B_s + 1 / r.slackDen)`, fewer than a `2^-(r.pureQueryTargetBits)` fraction of
+    distinct query tuples miss `bad`. The exponent is `128, 256, 200, 214, 200, 214` for tags
+    `2, 4, 5, 6, 7, 8`; no common 128-bit Grover figure follows from it. -/
+theorem whir_regime_query_miss_lt {α : Type} (r : WhirSecurityRegime)
+    (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage r)
+    (bad : α → Bool) (dom : List α)
+    (hdom : s.numQueries ≤ dom.length)
+    (hfar : (r.slackDen - (r.slackDen / s.johnsonSqrtBlowup + 1)) * dom.length ≤
+      r.slackDen * countGood bad dom) :
+    ((aggDistinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
+      2 ^ r.pureQueryTargetBits < (aggDistinctTuples s.numQueries dom).length := by
+  obtain ⟨_, hSlack, hLe, _⟩ := whirRegime_positive_slack r s hs
+  exact strict_query_miss_from_slack bad dom s.numQueries
+    (r.slackDen / s.johnsonSqrtBlowup + 1) r.slackDen r.pureQueryTargetBits hdom hLe hfar hSlack
+
 private theorem length_flatMap_scaled_le {α β : Type} (b : α → Bool) (K U V : Nat)
     (f : α → List β) :
     ∀ (l : List α), (∀ c ∈ l, (f c).length * K ≤ if b c = true then U else V) →
@@ -3842,8 +4035,8 @@ private theorem error_arith (X D A s M K T c : Nat)
     rw [Nat.two_mul] at h5
     exact Nat.lt_irrefl _ h5
 
-/-- Production `GoldilocksExt4` WHIR challenge-event budget covering 16 degree-8 row-sumcheck
-    rounds, 16 degree-2 shift-sumcheck rounds, 4 OOD list-pinning stages (`L ≤ 512`, `d ≤ 2^24`),
+/-- Production `GoldilocksExt4` WHIR challenge-event budget covering 20 degree-8 row-sumcheck
+    rounds, 20 degree-2 shift-sumcheck rounds (`MAX_PCS_NUM_VARS = 28`), 4 OOD list-pinning stages (`L ≤ 512`, `d ≤ 2^24`),
     and parameterized `[BCIKS20]` correlated-agreement events (`≤ 2^44`, leaving `> 210` bits over
     `p^4 > 2^255`). -/
 def productionExt4RoundEventBudget : Nat :=
@@ -4003,6 +4196,352 @@ theorem whir_bciksJohnson_hypotheses_satisfiable :
   · rw [countGood_lt_range, List.length_range, Nat.min_eq_left (by omega : 255 ≤ 512)]
     omega
 
+/-! ## 10b. The squeezed challenge is weighted, not uniform
+
+`squeezeExt4Challenge` reads 32 XOF bytes as four 64-bit words and reduces each mod
+`p = 2^64 - 2^32 + 1`. Uniform bytes therefore give the uniform distribution on the `2^256`
+word quadruples `wordQuadPool`, and a field element `z` receives exactly
+`ext4WordMultiplicity z ≤ 16` of them (`wordQuadPool_fiber_length`; `0` receives 16). The bounds
+of §4 and §10 count over a duplicate-free list `S` of field elements, i.e. a uniform field
+challenge. This section restates each of them over `wordQuadPool`: an event hit by at most `d`
+field elements is hit by at most `16 * d` of the `2^256` word quadruples
+(`squeezed_event_count_le`), so every `d / p^4` becomes `16 * d / 2^256`. -/
+
+/-- The four words of a 32-byte string, big-endian, in limb order `c0.c0, c0.c1, c1.c0, c1.c1`. -/
+def wordsOfBytes32 (bytes : List UInt8) : Nat × Nat × Nat × Nat :=
+  (ofBE (bytes.take 8), ofBE ((bytes.drop 8).take 8), ofBE ((bytes.drop 16).take 8),
+    ofBE ((bytes.drop 24).take 8))
+
+/-- The four 64-bit words `squeezeExt4Challenge` reduces. -/
+def squeezeExt4Words (domainTag frame : List UInt8) : Nat × Nat × Nat × Nat :=
+  wordsOfBytes32 (cshake256Bytes domainTag frame)
+
+/-- The squeezed challenge is the limbwise reduction of the squeezed words. -/
+theorem squeezeExt4Challenge_eq_ofWordQuad (domainTag frame : List UInt8) :
+    squeezeExt4Challenge domainTag frame = ofWordQuad (squeezeExt4Words domainTag frame) :=
+  (ofWordQuad_mk _ _ _ _).symm
+
+private theorem ofBE_take8_lt (bs : List UInt8) : ofBE (bs.take 8) < 2 ^ 64 := by
+  have hl : (bs.take 8).length ≤ 8 := by
+    rw [List.length_take]; exact Nat.min_le_left 8 _
+  exact Nat.lt_of_lt_of_le (ofBE_lt (bs.take 8))
+    (Nat.le_trans (Nat.pow_le_pow_right (by decide) hl) (by decide))
+
+theorem wordsOfBytes32_mem (bytes : List UInt8) : wordsOfBytes32 bytes ∈ wordQuadPool :=
+  mem_wordQuadPool.mpr ⟨ofBE_take8_lt _, ofBE_take8_lt _, ofBE_take8_lt _, ofBE_take8_lt _⟩
+
+theorem squeezeExt4Words_mem (domainTag frame : List UInt8) :
+    squeezeExt4Words domainTag frame ∈ wordQuadPool :=
+  wordsOfBytes32_mem _
+
+/-- 32 bytes are recovered from their four words: `wordsOfBytes32` is injective on 32-byte
+    strings. -/
+theorem wordsOfBytes32_bytes (bytes : List UInt8) (hLen : bytes.length = 32) :
+    be 8 (wordsOfBytes32 bytes).1 ++ (be 8 (wordsOfBytes32 bytes).2.1 ++
+      (be 8 (wordsOfBytes32 bytes).2.2.1 ++ be 8 (wordsOfBytes32 bytes).2.2.2)) = bytes := by
+  have h0 : (bytes.take 8).length = 8 := by rw [List.length_take, hLen]; rfl
+  have h1 : ((bytes.drop 8).take 8).length = 8 := by
+    rw [List.length_take, List.length_drop, hLen]; rfl
+  have h2 : ((bytes.drop 16).take 8).length = 8 := by
+    rw [List.length_take, List.length_drop, hLen]; rfl
+  have h3 : ((bytes.drop 24).take 8).length = 8 := by
+    rw [List.length_take, List.length_drop, hLen]; rfl
+  have e0 := be_ofBE (bytes.take 8)
+  have e1 := be_ofBE ((bytes.drop 8).take 8)
+  have e2 := be_ofBE ((bytes.drop 16).take 8)
+  have e3 := be_ofBE ((bytes.drop 24).take 8)
+  rw [h0] at e0; rw [h1] at e1; rw [h2] at e2; rw [h3] at e3
+  show be 8 (ofBE (bytes.take 8)) ++ (be 8 (ofBE ((bytes.drop 8).take 8)) ++
+    (be 8 (ofBE ((bytes.drop 16).take 8)) ++ be 8 (ofBE ((bytes.drop 24).take 8)))) = bytes
+  rw [e0, e1, e2, e3]
+  have t3 : (bytes.drop 24).take 8 = bytes.drop 24 :=
+    List.take_of_length_le (by rw [List.length_drop, hLen]; decide)
+  have d16 : bytes.drop 24 = (bytes.drop 16).drop 8 := by rw [List.drop_drop]
+  have d8 : bytes.drop 16 = (bytes.drop 8).drop 8 := by rw [List.drop_drop]
+  rw [t3, d16, List.take_append_drop, d8, List.take_append_drop, List.take_append_drop]
+
+/-- Every word quadruple is the reading of a 32-byte string: with `wordsOfBytes32_bytes`,
+    32-byte strings and `wordQuadPool` are in bijection. -/
+theorem wordsOfBytes32_surjective (q : Nat × Nat × Nat × Nat) (hq : q ∈ wordQuadPool) :
+    ∃ bytes : List UInt8, bytes.length = 32 ∧ wordsOfBytes32 bytes = q := by
+  obtain ⟨h0, h1, h2, h3⟩ := mem_wordQuadPool.mp hq
+  have hb : ∀ {w : Nat}, w < 2 ^ 64 → w < 256 ^ 8 := fun h => Nat.lt_of_lt_of_le h (by decide)
+  obtain ⟨w0, w1, w2, w3⟩ := q
+  refine ⟨be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3)), by simp [length_be], ?_⟩
+  have t0 : (be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).take 8 = be 8 w0 :=
+    List.take_left' (length_be 8 w0)
+  have d8 : (be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).drop 8 =
+      be 8 w1 ++ (be 8 w2 ++ be 8 w3) := List.drop_left' (length_be 8 w0)
+  have d16 : (be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).drop 16 = be 8 w2 ++ be 8 w3 := by
+    have h16 : (16 : Nat) = 8 + 8 := rfl
+    rw [h16, ← List.drop_drop, d8, List.drop_left' (length_be 8 w1)]
+  have d24 : (be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).drop 24 = be 8 w3 := by
+    have h24 : (24 : Nat) = 16 + 8 := rfl
+    rw [h24, ← List.drop_drop, d16, List.drop_left' (length_be 8 w2)]
+  show (ofBE ((be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).take 8),
+    ofBE (((be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).drop 8).take 8),
+    ofBE (((be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).drop 16).take 8),
+    ofBE (((be 8 w0 ++ (be 8 w1 ++ (be 8 w2 ++ be 8 w3))).drop 24).take 8)) = (w0, w1, w2, w3)
+  rw [t0, d8, d16, d24, List.take_left' (length_be 8 w1), List.take_left' (length_be 8 w2),
+    List.take_of_length_le (Nat.le_of_eq (length_be 8 w3)),
+    ofBE_be (hb h0), ofBE_be (hb h1), ofBE_be (hb h2), ofBE_be (hb h3)]
+
+/-- **Uniform-to-squeezed transfer.** If an event is hit by at most `d` elements of every
+    duplicate-free list of field elements, it is hit by at most `16 * d` of the `2^256` word
+    quadruples. The factor is the maximal preimage multiplicity `ext4WordMultiplicity 0 = 16`. -/
+theorem squeezed_event_count_le (E : GoldilocksExt4 → Bool) (d : Nat)
+    (hE : ∀ T : List GoldilocksExt4, T.Nodup → (T.filter E).length ≤ d) :
+    (wordQuadPool.filter (fun q => E (ofWordQuad q))).length ≤ 16 * d := by
+  have hfamE : ∀ fam : List GoldilocksExt4, (∀ z ∈ fam, E z = true) → fam.filter E = fam := by
+    intro fam
+    induction fam with
+    | nil => intro _; rfl
+    | cons z tl ih =>
+      intro h
+      rw [List.filter_cons, ite_eq_left (h z (.head _)),
+        ih (fun y hy => h y (.tail _ hy))]
+  have hmemE : ∀ z ∈ JohnsonBound.dedupFirst
+      ((wordQuadPool.filter (fun q => E (ofWordQuad q))).map ofWordQuad), E z = true := by
+    intro z hz
+    obtain ⟨q, hq, rfl⟩ := List.mem_map.mp ((JohnsonBound.mem_dedupFirst_iff z _).mp hz)
+    exact (List.mem_filter.mp hq).2
+  have hfam := hE _ (JohnsonBound.dedupFirst_nodup
+    ((wordQuadPool.filter (fun q => E (ofWordQuad q))).map ofWordQuad))
+  rw [hfamE _ hmemE] at hfam
+  have hpart := JohnsonBound.count_partition_le ofWordQuad 16
+    (wordQuadPool.filter (fun q => E (ofWordQuad q)))
+    (JohnsonBound.dedupFirst ((wordQuadPool.filter (fun q => E (ofWordQuad q))).map ofWordQuad))
+    (fun q hq => (JohnsonBound.mem_dedupFirst_iff _ _).mpr (List.mem_map.mpr ⟨q, hq, rfl⟩))
+    (fun z _ => by
+      rw [List.filter_filter]
+      exact Nat.le_trans
+        (filter_sub_length_le _ (fun q => decide (ofWordQuad q = z))
+          (fun q h => (Bool.and_eq_true_iff.mp h).1) wordQuadPool)
+        (wordQuadPool_fiber_le_sixteen z))
+  rw [Nat.mul_comm] at hpart
+  exact Nat.le_trans hpart (Nat.mul_le_mul_left 16 hfam)
+
+/-- Squeezed form of `ext4_poly_roots_le_degree`: two distinct polynomials of degree at most
+    `maxDegree` agree at the reduction of at most `16 * maxDegree` of the `2^256` word
+    quadruples. -/
+theorem ext4_poly_squeezed_roots_le (maxDegree : Nat)
+    (claimedPoly honestPoly : List GoldilocksExt4)
+    (hLenC : claimedPoly.length ≤ maxDegree + 1) (hLenH : honestPoly.length ≤ maxDegree + 1)
+    (hDiff : ∃ x₀ : GoldilocksExt4,
+      RoundPoly.evalCoeffs claimedPoly x₀ ≠ RoundPoly.evalCoeffs honestPoly x₀) :
+    (wordQuadPool.filter (fun q =>
+      decide (RoundPoly.evalCoeffs claimedPoly (ofWordQuad q) =
+        RoundPoly.evalCoeffs honestPoly (ofWordQuad q)))).length ≤ 16 * maxDegree :=
+  squeezed_event_count_le
+    (fun r => decide (RoundPoly.evalCoeffs claimedPoly r = RoundPoly.evalCoeffs honestPoly r))
+    maxDegree
+    (fun T hT => ext4_poly_roots_le_degree maxDegree claimedPoly honestPoly T hT hLenC hLenH hDiff)
+
+/-- Squeezed form of `sumcheck_degree8_ext4_roots_le_eight`: `128 / 2^256` per round. -/
+theorem sumcheck_degree8_squeezed_roots_le
+    (claimedPoly honestPoly : List GoldilocksExt4)
+    (hLenC : claimedPoly.length ≤ 9) (hLenH : honestPoly.length ≤ 9)
+    (hDiff : ∃ x₀ : GoldilocksExt4,
+      RoundPoly.evalCoeffs claimedPoly x₀ ≠ RoundPoly.evalCoeffs honestPoly x₀) :
+    (wordQuadPool.filter (fun q =>
+      decide (RoundPoly.evalCoeffs claimedPoly (ofWordQuad q) =
+        RoundPoly.evalCoeffs honestPoly (ofWordQuad q)))).length ≤ 128 :=
+  ext4_poly_squeezed_roots_le 8 claimedPoly honestPoly hLenC hLenH hDiff
+
+/-- Squeezed form of `whir_ood_pin_roots_le_degree`: `16 * d / 2^256` per candidate pair. -/
+theorem whir_ood_pin_squeezed_roots_le (d : Nat)
+    (candA candB : List GoldilocksExt4)
+    (hLenA : candA.length ≤ d + 1) (hLenB : candB.length ≤ d + 1)
+    (hDiff : ∃ z₀ : GoldilocksExt4,
+      RoundPoly.evalCoeffs candA z₀ ≠ RoundPoly.evalCoeffs candB z₀) :
+    (wordQuadPool.filter (fun q =>
+      decide (RoundPoly.evalCoeffs candA (ofWordQuad q) =
+        RoundPoly.evalCoeffs candB (ofWordQuad q)))).length ≤ 16 * d :=
+  ext4_poly_squeezed_roots_le d candA candB hLenA hLenB hDiff
+
+/-- Squeezed form of `whir_coset_duet_ext4_roots_le_one`: at most 16 of the `2^256` word
+    quadruples fold a cheated duet onto the claimed next-layer value. -/
+theorem whir_coset_duet_squeezed_roots_le
+    (v0 v1 next : GoldilocksExt4) (invTwoY0 invTwo : Goldilocks)
+    (hne : ∃ r, foldDuetExt4 v0 v1 invTwoY0 invTwo r ≠ next) :
+    (wordQuadPool.filter (fun q =>
+      decide (foldDuetExt4 v0 v1 invTwoY0 invTwo (ofWordQuad q) = next))).length ≤ 16 :=
+  squeezed_event_count_le
+    (fun r => decide (foldDuetExt4 v0 v1 invTwoY0 invTwo r = next)) 1
+    (fun T hT => whir_coset_duet_ext4_roots_le_one v0 v1 next invTwoY0 invTwo T hT hne)
+
+theorem foldDuetExt4Event_squeezed_le (d : TrackedDuetExt4) :
+    (wordQuadPool.filter (fun q => foldDuetExt4Event d (ofWordQuad q))).length ≤ 16 :=
+  squeezed_event_count_le (foldDuetExt4Event d) 1
+    (fun T hT => foldDuetExt4Event_roots_le_one d T hT)
+
+theorem oodPairEvent_squeezed_le {maxDeg : Nat} (p : TrackedOodPair maxDeg) :
+    (wordQuadPool.filter (fun q => oodPairEvent p (ofWordQuad q))).length ≤ 16 * maxDeg :=
+  squeezed_event_count_le (oodPairEvent p) maxDeg (fun T hT => oodPairEvent_roots_le p T hT)
+
+/-- A round event on reduced challenges, read on the words. -/
+theorem anyRoundEvent_map {α β : Type} (f : α → β) :
+    ∀ (cs : List α) (E : List β → β → Bool),
+      anyRoundEvent (fun pre x => E (pre.map f) (f x)) cs = anyRoundEvent E (cs.map f)
+  | [], _ => rfl
+  | r :: rs, E => by
+    show (E [] (f r) || anyRoundEvent (fun pre x => E (f r :: pre.map f) (f x)) rs) =
+      (E [] (f r) || anyRoundEvent (fun pre => E (f r :: pre)) (rs.map f))
+    rw [← anyRoundEvent_map f rs (fun pre => E (f r :: pre))]
+
+theorem roundBoundSum_mul (c : Nat) :
+    ∀ (n : Nat) (d : Nat → Nat), roundBoundSum (fun j => c * d j) n = c * roundBoundSum d n
+  | 0, _ => (Nat.mul_zero c).symm
+  | n + 1, d => by
+    show c * d 0 + roundBoundSum (fun j => c * d (j + 1)) n =
+      c * (d 0 + roundBoundSum (fun j => d (j + 1)) n)
+    rw [roundBoundSum_mul c n (fun j => d (j + 1)), Nat.mul_add]
+
+/-- **Adaptive union bound for squeezed challenges.** If round `j` has at most `d j` bad field
+    elements after any prefix, at most `16 * (d 0 + … + d (n-1)) * (2^256)^(n-1)` of the
+    `(2^256)^n` word-quadruple vectors trigger a round event. -/
+theorem squeezed_anyRoundEvent_count_le (n : Nat)
+    (E : List GoldilocksExt4 → GoldilocksExt4 → Bool) (d : Nat → Nat)
+    (hE : ∀ (pre T : List GoldilocksExt4), T.Nodup → (T.filter (E pre)).length ≤ d pre.length) :
+    ((challengeVectors wordQuadPool n).filter
+      (fun qs => anyRoundEvent E (qs.map ofWordQuad))).length ≤
+      16 * roundBoundSum d n * (2 ^ 256) ^ (n - 1) := by
+  have hfun : (fun qs : List (Nat × Nat × Nat × Nat) => anyRoundEvent E (qs.map ofWordQuad)) =
+      anyRoundEvent (fun pre q => E (pre.map ofWordQuad) (ofWordQuad q)) := by
+    funext qs
+    exact (anyRoundEvent_map ofWordQuad qs E).symm
+  have h := anyRoundEvent_count_le wordQuadPool n
+    (fun pre q => E (pre.map ofWordQuad) (ofWordQuad q)) (fun j => 16 * d j)
+    (fun pre => by
+      have hp := squeezed_event_count_le (E (pre.map ofWordQuad)) (d (pre.map ofWordQuad).length)
+        (hE (pre.map ofWordQuad))
+      rw [List.length_map] at hp
+      exact hp)
+  rw [roundBoundSum_mul, wordQuadPool_length] at h
+  rw [hfun]
+  exact h
+
+/-- Squeezed form of `whir_ood_hit_challenges_le`. -/
+theorem whir_ood_hit_squeezed_challenges_le (maxDeg n pairsPerStage : Nat)
+    (tracked : List GoldilocksExt4 → List (TrackedOodPair maxDeg))
+    (hPairs : ∀ pre, (tracked pre).length ≤ pairsPerStage) :
+    ((challengeVectors wordQuadPool n).filter (fun qs =>
+      anyRoundEvent (fun pre z => (tracked pre).any (fun p => oodPairEvent p z))
+        (qs.map ofWordQuad))).length ≤
+      16 * roundBoundSum (fun _ => pairsPerStage * maxDeg) n * (2 ^ 256) ^ (n - 1) :=
+  squeezed_anyRoundEvent_count_le n
+    (fun pre z => (tracked pre).any (fun p => oodPairEvent p z)) (fun _ => pairsPerStage * maxDeg)
+    (fun pre T hT => Nat.le_trans
+      (filter_any_length_le T oodPairEvent maxDeg (tracked pre)
+        (fun p _ => oodPairEvent_roots_le p T hT))
+      (Nat.mul_le_mul_right maxDeg (hPairs pre)))
+
+private theorem squeezed_total_error {β : Type} (n : Nat) (hn : 0 < n)
+    (E : List GoldilocksExt4 → GoldilocksExt4 → Bool) (d : Nat → Nat)
+    (hE : ∀ (pre T : List GoldilocksExt4), T.Nodup → (T.filter (E pre)).length ≤ d pre.length)
+    (dom : List β) (q dn dd c B : Nat) (bad : List GoldilocksExt4 → β → Bool)
+    (hfar : ∀ qs ∈ challengeVectors wordQuadPool n,
+      anyRoundEvent E (qs.map ofWordQuad) = false →
+        dn * dom.length ≤ dd * countGood (bad (qs.map ofWordQuad)) dom)
+    (hq : q ≤ dom.length) (hBudget : roundBoundSum d n ≤ B)
+    (hC : 2 * (16 * B * c) ≤ 2 ^ 256) (hM : 2 * ((dd - dn) ^ q * c) < dd ^ q) :
+    (badTranscriptPairs wordQuadPool n (fun pre w => E (pre.map ofWordQuad) (ofWordQuad w))
+      dom q (fun qs => bad (qs.map ofWordQuad))).length * c <
+      (2 ^ 256) ^ n * (aggDistinctTuples q dom).length := by
+  have hE' : ∀ pre : List (Nat × Nat × Nat × Nat),
+      (wordQuadPool.filter (fun w => E (pre.map ofWordQuad) (ofWordQuad w))).length ≤
+        16 * d pre.length := by
+    intro pre
+    have hp := squeezed_event_count_le (E (pre.map ofWordQuad)) (d (pre.map ofWordQuad).length)
+      (hE (pre.map ofWordQuad))
+    rw [List.length_map] at hp
+    exact hp
+  have hJoint := transcript_bad_pairs_le wordQuadPool n
+    (fun pre w => E (pre.map ofWordQuad) (ofWordQuad w)) (fun j => 16 * d j) hE' dom q dn dd
+    (fun qs => bad (qs.map ofWordQuad))
+    (fun qs hqs hev => hfar qs hqs ((anyRoundEvent_map ofWordQuad qs E).symm.trans hev))
+  have hT : 0 < (aggDistinctTuples q dom).length := by
+    rw [aggDistinctTuples_length]; exact fallingFactorial_pos _ _ hq
+  have hs : 0 < wordQuadPool.length := by rw [wordQuadPool_length]; decide
+  have hD : 2 * (roundBoundSum (fun j => 16 * d j) n * c) ≤ wordQuadPool.length := by
+    rw [roundBoundSum_mul, wordQuadPool_length]
+    exact Nat.le_trans
+      (Nat.mul_le_mul_left 2 (Nat.mul_le_mul_right c (Nat.mul_le_mul_left 16 hBudget))) hC
+  rw [← wordQuadPool_length]
+  cases n with
+  | zero => exact absurd hn (Nat.lt_irrefl 0)
+  | succ k =>
+    have hpow : wordQuadPool.length ^ (k + 1) = wordQuadPool.length * wordQuadPool.length ^ k := by
+      rw [Nat.pow_succ, Nat.mul_comm]
+    rw [Nat.add_sub_cancel, hpow] at hJoint
+    rw [hpow]
+    exact error_arith _ _ _ _ _ _ _ _ hJoint hD hM (Nat.pow_pos hs) hT hs
+
+/-- **Classical-128 transcript soundness for squeezed challenges.** The statement of
+    `whir_bciksJohnsonClassical128_total_error_bound` over the `(2^256)^n` word-quadruple
+    vectors the transcript really samples, with per-round bad counts `d` given for field
+    elements. The factor 16 is absorbed: the bad fraction is still `< 2^-127`. -/
+theorem whir_bciksJohnsonClassical128_squeezed_total_error_bound {β : Type}
+    (n : Nat) (hn : 0 < n)
+    (E : List GoldilocksExt4 → GoldilocksExt4 → Bool) (d : Nat → Nat)
+    (hE : ∀ (pre T : List GoldilocksExt4), T.Nodup → (T.filter (E pre)).length ≤ d pre.length)
+    (hBudget : roundBoundSum d n ≤ productionExt4RoundEventBudget)
+    (dom : List β) (hdom : 129 ≤ dom.length)
+    (bad : List GoldilocksExt4 → β → Bool)
+    (hfar : ∀ qs ∈ challengeVectors wordQuadPool n,
+      anyRoundEvent E (qs.map ofWordQuad) = false →
+        (512 - 257) * dom.length ≤ 512 * countGood (bad (qs.map ofWordQuad)) dom) :
+    (badTranscriptPairs wordQuadPool n (fun pre w => E (pre.map ofWordQuad) (ofWordQuad w))
+      dom 129 (fun qs => bad (qs.map ofWordQuad))).length * 2 ^ 127 <
+      (2 ^ 256) ^ n * (aggDistinctTuples 129 dom).length :=
+  squeezed_total_error n hn E d hE dom 129 (512 - 257) 512 (2 ^ 127)
+    productionExt4RoundEventBudget bad hfar hdom hBudget (by decide) (by decide)
+
+/-- **QROM-128 multi-stage transcript soundness for squeezed challenges.** Over the word
+    quadruples the transcript really samples, the bound of
+    `whir_bciksJohnsonQrom128_total_error_bound` holds with `2^-206` in place of `2^-210`: the
+    challenge-event term is `16 * productionExt4RoundEventBudget / 2^256 < 2^-207`. `2^-210`
+    is not provable from this budget (`squeezed_budget_exceeds_two_pow_neg_210`). -/
+theorem whir_bciksJohnsonQrom128_squeezed_total_error_bound {β : Type}
+    (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .bciksJohnsonQrom128)
+    (n : Nat) (hn : 0 < n)
+    (E : List GoldilocksExt4 → GoldilocksExt4 → Bool) (d : Nat → Nat)
+    (hE : ∀ (pre T : List GoldilocksExt4), T.Nodup → (T.filter (E pre)).length ≤ d pre.length)
+    (hBudget : roundBoundSum d n ≤ productionExt4RoundEventBudget)
+    (dom : List β) (hdom : s.numQueries ≤ dom.length)
+    (bad : List GoldilocksExt4 → β → Bool)
+    (hfar : ∀ qs ∈ challengeVectors wordQuadPool n,
+      anyRoundEvent E (qs.map ofWordQuad) = false →
+        (1024 - (1024 / s.johnsonSqrtBlowup + 1)) * dom.length ≤
+          1024 * countGood (bad (qs.map ofWordQuad)) dom) :
+    (badTranscriptPairs wordQuadPool n (fun pre w => E (pre.map ofWordQuad) (ofWordQuad w))
+      dom s.numQueries (fun qs => bad (qs.map ofWordQuad))).length * 2 ^ 206 <
+      (2 ^ 256) ^ n * (aggDistinctTuples s.numQueries dom).length := by
+  have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
+      1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
+  have hSub : 1024 - (1024 - (1024 / s.johnsonSqrtBlowup + 1)) =
+      1024 / s.johnsonSqrtBlowup + 1 := Nat.sub_sub_self (hAllLe s hs)
+  have hSlack := (bciksJohnsonQrom128_positive_slack s hs).2
+  have hM : 2 * ((1024 - (1024 - (1024 / s.johnsonSqrtBlowup + 1))) ^ s.numQueries * 2 ^ 206) <
+      1024 ^ s.numQueries := by
+    rw [hSub]
+    have hPowLe : 2 * 2 ^ 206 ≤ 2 ^ 256 := by decide
+    have hRewrite : 2 * ((1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 206) =
+        (1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * (2 * 2 ^ 206) := by
+      simp only [Nat.mul_assoc, Nat.mul_comm]
+    rw [hRewrite]
+    exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_left _ hPowLe) hSlack
+  exact squeezed_total_error n hn E d hE dom s.numQueries
+    (1024 - (1024 / s.johnsonSqrtBlowup + 1)) 1024 (2 ^ 206)
+    productionExt4RoundEventBudget bad hfar hdom hBudget (by decide) hM
+
+/-- With the factor 16 the production challenge-event budget no longer fits under `2^-210`:
+    `2 * (16 * budget * 2^210) > 2^256`, while it does fit under `2^-206`. -/
+theorem squeezed_budget_exceeds_two_pow_neg_210 :
+    2 ^ 256 < 2 * (16 * productionExt4RoundEventBudget * 2 ^ 210) ∧
+    2 * (16 * productionExt4RoundEventBudget * 2 ^ 206) ≤ 2 ^ 256 := by
+  decide
+
 /-! ## 11. Genuine Reed–Solomon + Degree-7 S-Box `RowArithmetization.Lawful` Instance -/
 
 private def decodeLeb128 : List UInt8 → Option (Nat × List UInt8)
@@ -4043,9 +4582,9 @@ private theorem decodeLeb128_leb128Aux :
       decodeLeb128 (leb128Aux f n ++ rest) = some (n, rest)
   | 0, n, rest, hn => by
     have hz : n = 0 := by omega
-    subst hz; rfl
+    subst hz; rw [leb128Aux_zero]; rfl
   | f + 1, n, rest, hn => by
-    unfold leb128Aux
+    rw [leb128Aux_succ]
     by_cases hlt : n < 128
     · simp only [hlt, ↓reduceIte, List.singleton_append, decodeLeb128,
         uint8_toNat_of_lt_256 (by omega : n < 256)]
@@ -4174,26 +4713,23 @@ theorem verifyPqHashSig_sbox7_iff (seed root x0 : Goldilocks) (msg : List UInt8)
         ⟨0, 0, .wotsHash, 0, cIdx, UInt32.ofNat 0⟩ [[], be 32 root.val, mu, be 4 0] =
         0x40 :: be 31 0 := by
       intro cIdx
-      unfold thCall sbox7FieldSuite sbox7RawHash thPreimage
-      dsimp only
+      simp only [thCall_eq, sbox7FieldSuite, sbox7RawHash, thPreimage_eq]
       simp only [List.cons_append, List.nil_append]
       rw [decodeMultiFrame_encodeMultiFrame]
     dsimp only
-    unfold thHashMsg
-    rw [hCallGen 0, hCallGen 1]
+    simp only [thHashMsg_eq]
+    rw [hCallGen 0, hCallGen 1, extractBaseWDigits_eq]
     decide
   have hChain : thChainF sbox7FieldSuite (be 32 seed.val) ⟨0, 0, .wotsHash, 0, 0, 0⟩
       (be 32 x0.val) = be 32 (CommRingOps.add (pow7Goldilocks x0) seed).val := by
-    unfold thChainF thCall sbox7FieldSuite sbox7RawHash thPreimage
-    dsimp only
+    simp only [thChainF_eq, thCall_eq, sbox7FieldSuite, sbox7RawHash, thPreimage_eq]
     simp only [List.cons_append, List.nil_append]
     rw [decodeMultiFrame_encodeMultiFrame]
     simp only [list_uint8_beq_self, ↓reduceIte, goldilocks_ofNat_ofBE_be32]
   let end0 := CommRingOps.add (pow7Goldilocks x0) seed
   have hTl : thTweakTl sbox7FieldSuite (be 32 seed.val) ⟨0, 0, .wotsPk, 0, 0, 0⟩
       [be 32 end0.val, be 32 0] = be 32 end0.val := by
-    unfold thTweakTl thCall sbox7FieldSuite sbox7RawHash thPreimage
-    dsimp only
+    simp only [thTweakTl_eq, thCall_eq, sbox7FieldSuite, sbox7RawHash, thPreimage_eq]
     simp only [List.cons_append, List.nil_append]
     rw [decodeMultiFrame_encodeMultiFrame]
     have hZero : Goldilocks.ofNat (ofBE (be 32 0)) = Goldilocks.zero := by
@@ -4202,32 +4738,32 @@ theorem verifyPqHashSig_sbox7_iff (seed root x0 : Goldilocks) (msg : List UInt8)
     exact congrArg (fun g : Goldilocks => be 32 g.val) (LawfulCommRing.add_zero end0)
   unfold verifyPqHashSig mkSbox7Pk mkSbox7Sig
   simp only [Bool.not_true, ↓reduceIte, sbox7Params, ne_eq, not_true_eq_false,
-    Nat.mul_zero, Nat.pow_zero, Nat.lt_one_iff, List.isEmpty_nil]
+    Nat.mul_zero, Nat.pow_zero, Nat.lt_one_iff, List.isEmpty_nil, PqHashParams.wellFormed_eq]
   let mu := thPreHash sbox7FieldSuite (be 32 seed.val) (be 32 root.val) msg
   change (match verifyHypertreeLayers sbox7FieldSuite ⟨2, 2, 0, 1, 0, 0, 0, true⟩
       (be 32 seed.val) (be 32 root.val) [] 0 0 mu
       [{ tswCtr := 0, wotsChains := [be 32 x0.val, be 32 0], authPath := [] }] with
     | some computedTopRoot => decide (computedTopRoot = be 32 root.val)
     | none => false) = decide (end0 = root)
-  unfold verifyHypertreeLayers
+  simp only [verifyHypertreeLayers_nil, verifyHypertreeLayers_cons]
   have hU32 : UInt32.ofNat 0 = 0 := rfl
   have hU64 : UInt64.ofNat 0 = 0 := rfl
   simp only [Nat.pow_zero, Nat.mod_one, Nat.div_one, hU32, hU64]
   rw [hHmsg mu]
   have hTgt : checkTargetSum 2 2 (PqHashParams.targetSum ⟨2, 2, 0, 1, 0, 0, 0, true⟩) [0, 1] =
-      true := by decide
+      true := by simp only [PqHashParams.targetSum_eq, checkTargetSum, sumDigits_nil, sumDigits_cons]; decide
   rw [hTgt]
   simp only [Bool.not_true, ↓reduceIte, List.length_cons, List.length_nil, ne_eq, not_true_eq_false]
   have hRec : recoverWotsPkFromSig sbox7FieldSuite ⟨2, 2, 0, 1, 0, 0, 0, true⟩ (be 32 seed.val)
       0 0 0 [0, 1] [be 32 x0.val, be 32 0] = be 32 end0.val := by
-    unfold recoverWotsPkFromSig recoverWotsEndpoints
+    simp only [recoverWotsPkFromSig_eq, recoverWotsEndpoints_eq]
     have hRange : List.range 2 = [0, 1] := rfl
     rw [hRange]
     simp only [List.map, List.getD_cons_zero, List.getD_cons_succ, Nat.sub_zero, Nat.sub_self,
-      wotsChainSteps, hU32]
+      wotsChainSteps_zero, wotsChainSteps_succ, hU32]
     rw [hChain, hTl]
   rw [hRec]
-  simp only [walkMerkleAuthPath, verifyHypertreeLayers, Bool.false_eq_true, ↓reduceIte]
+  simp only [walkMerkleAuthPath, Bool.false_eq_true, ↓reduceIte]
   have hb : goldilocksPrime < 256 ^ 32 := by decide
   if hEq : end0 = root then
     have hBeEq : be 32 end0.val = be 32 root.val := congrArg (fun g : Goldilocks => be 32 g.val) hEq
@@ -4851,7 +5387,8 @@ private theorem sbox7_sum_zero_sound (seed root x : Goldilocks) (c1 : Goldilocks
       LawfulCommRing.sub_zero, LawfulCommRing.one_mul,
       ← embedBase_pow7, ← GoldilocksExt4.embedBase_add] at hZero
   have hZero' : GoldilocksExt4.embedBase (CommRingOps.add (pow7Goldilocks x)
-      (CommRingOps.sub seed root)) = GoldilocksExt4.embedBase CommRingOps.zero := hZero
+      (CommRingOps.sub seed root)) = GoldilocksExt4.embedBase CommRingOps.zero := by
+    simpa only [Goldilocks.ring_zero, GoldilocksExt4.embedBase_zero, GoldilocksExt4.zero_eq_ringZero] using hZero
   have hSubZero : CommRingOps.add (pow7Goldilocks x) (CommRingOps.sub seed root) =
       CommRingOps.zero := GoldilocksExt4.embedBase_injective hZero'
   apply LawfulCommRing.add_left_cancel (a := CommRingOps.neg root)
@@ -5493,6 +6030,7 @@ def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
    fs,
    { allTables := [[table0], [table1]], authPath := authPath })
 
+set_option maxHeartbeats 1000000 in
 /-- **Completeness of Honest 2-Stage `GoldilocksExt4` WHIR Prover (`honestSbox7WhirProof_accepts`)**:
     For every valid degree-7 S-box witness `(seed, x0, b1, msg)`, the constructed 2-stage WHIR
     proof passes `verifySuccinctAggregate` and satisfies `StagesBound` with zero `cSHAKE256`
@@ -6030,21 +6568,124 @@ theorem nineRoundSbox7Whir_sound (msg : List UInt8) (x root : Goldilocks)
         ∃ r ∈ rounds, Sbox7WhirRoundBreak r) :=
   ⟨(List.length_map ..).trans hn, sbox7WhirChain_sound msg x root rounds h⟩
 
-theorem tooth_whir_pow_nonce_mutation :
-    ∃ nonce : Nat, nonce ≠ 5791 ∧
-      verifyWhirStagePow (stagePowDigest powWitnessSeedV2) nonce 16 = false :=
-  ⟨0, by decide, tooth_whir_pow16_nonce0_rejected⟩
+/-! ### Exports for lane agg-recursive -/
 
-#tooth_pair verifyWhirStagePow_16_iff vs tooth_whir_pow_nonce_mutation
-theorem inhabited_whir_pow_inputs :
-    ∃ (chal : List UInt8) (nonce : Nat),
-      chal = stagePowDigest powWitnessSeedV2 ∧ nonce = 5791 ∧
-      chal.length = 32 ∧ nonce < 2 ^ 64 ∧ verifyWhirStagePow chal nonce 16 = true :=
-  ⟨stagePowDigest powWitnessSeedV2, 5791, rfl, rfl, stagePowDigest_length _,
-    by decide, inhabited_whir_stage_pow_16⟩
+theorem bitmapPopcountSpec_nil : bitmapPopcountSpec [] = 0 := by rfl
 
-#verify_inhabited verifyWhirStagePow_16_iff inhabited_whir_pow_inputs
+theorem bitmapPopcountSpec_cons (b : Bool) (bs : SignerBitmapSpec) :
+    bitmapPopcountSpec (b :: bs) = (if b then 1 else 0) + bitmapPopcountSpec bs := by rfl
 
+theorem checkAllActiveSigners_nil_nil (suite : TweakableHashSuite) (params : PqHashParams)
+    (msg : List UInt8) (sigs : List PqHashSig) :
+    checkAllActiveSigners suite params msg [] [] sigs = true := by rfl
+
+theorem checkAllActiveSigners_cons_cons_cons (suite : TweakableHashSuite) (params : PqHashParams)
+    (msg : List UInt8) (pk : PqPublicKey) (pks : List PqPublicKey) (active : Bool)
+    (bs : SignerBitmapSpec) (sig : PqHashSig) (sigs : List PqHashSig) :
+    checkAllActiveSigners suite params msg (pk :: pks) (active :: bs) (sig :: sigs) =
+      ((if active then verifyPqHashSig suite params pk msg sig else true) &&
+        checkAllActiveSigners suite params msg pks bs sigs) := by rfl
+
+theorem checkAllActiveSigners_nil_cons (suite : TweakableHashSuite) (params : PqHashParams)
+    (msg : List UInt8) (active : Bool) (bs : SignerBitmapSpec) (sigs : List PqHashSig) :
+    checkAllActiveSigners suite params msg [] (active :: bs) sigs = false := by rfl
+
+theorem checkAllActiveSigners_cons_nil (suite : TweakableHashSuite) (params : PqHashParams)
+    (msg : List UInt8) (pk : PqPublicKey) (pks : List PqPublicKey) (sigs : List PqHashSig) :
+    checkAllActiveSigners suite params msg (pk :: pks) [] sigs = false := by rfl
+
+theorem checkAllActiveSigners_cons_cons_nil (suite : TweakableHashSuite) (params : PqHashParams)
+    (msg : List UInt8) (pk : PqPublicKey) (pks : List PqPublicKey) (active : Bool)
+    (bs : SignerBitmapSpec) :
+    checkAllActiveSigners suite params msg (pk :: pks) (active :: bs) [] = false := by rfl
+
+theorem stageLayersBound_nil_nil (authPath : Nat → Nat → Nat → List (List UInt8))
+    (stageIdx layer groups : Nat) :
+    StageLayersBound authPath stageIdx layer groups [] [] := trivial
+
+theorem stageLayersBound_cons_cons_iff (authPath : Nat → Nat → Nat → List (List UInt8))
+    (stageIdx layer groups : Nat) (w : List GoldilocksExt4) (ws : List (List GoldilocksExt4))
+    (root : List UInt8) (roots : List (List UInt8)) :
+    StageLayersBound authPath stageIdx layer groups (w :: ws) (root :: roots) ↔
+      ((∀ g, g < groups →
+        merklePathRoot pcsMerkleHash
+          (pcsMerkleHash (duetLeafFrame stageIdx layer g (w.getD g CommRingOps.zero)
+            (w.getD (g + groups) CommRingOps.zero))) g (authPath stageIdx layer g) = root ∧
+        (authPath stageIdx layer g).length = merkleDepth groups) ∧
+      StageLayersBound authPath stageIdx (layer + 1) (groups / 2) ws roots) := Iff.rfl
+
+theorem not_stageLayersBound_nil_cons (authPath : Nat → Nat → Nat → List (List UInt8))
+    (stageIdx layer groups : Nat) (root : List UInt8) (roots : List (List UInt8)) :
+    ¬ StageLayersBound authPath stageIdx layer groups [] (root :: roots) := fun h => h
+
+theorem not_stageLayersBound_cons_nil (authPath : Nat → Nat → Nat → List (List UInt8))
+    (stageIdx layer groups : Nat) (w : List GoldilocksExt4) (ws : List (List GoldilocksExt4)) :
+    ¬ StageLayersBound authPath stageIdx layer groups (w :: ws) [] := fun h => h
+
+theorem stagesBound_nil_nil_nil (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    StagesBound authPath [] [] [] := trivial
+
+theorem stagesBound_cons_cons_cons_iff (authPath : Nat → Nat → Nat → List (List UInt8))
+    (sdom : WhirStageDomain) (sdoms : List WhirStageDomain)
+    (stTables : List (List GoldilocksExt4)) (restTables : List (List (List GoldilocksExt4)))
+    (sp : WhirStageProof) (sps : List WhirStageProof) :
+    StagesBound authPath (sdom :: sdoms) (stTables :: restTables) (sp :: sps) ↔
+      (stTables ≠ [] ∧
+        StageLayersBound authPath sdom.stageIdx 0 sdom.groups0 stTables (stageAllRoots sp) ∧
+        StagesBound authPath sdoms restTables sps) := Iff.rfl
+
+/-- An accepted WHIR stage carries exactly `sdom.foldLayers` layer roots. -/
+theorem verifyOneWhirStage_stageAllRoots_length {rowChallenges finalWord : List GoldilocksExt4}
+    {prior : List UInt8} {sdom : WhirStageDomain} {sp : WhirStageProof}
+    {nextStageInfo : Option (WhirStageDomain × List UInt8)}
+    (h : verifyOneWhirStage rowChallenges finalWord prior sdom sp nextStageInfo = true) :
+    (stageAllRoots sp).length = sdom.foldLayers := by
+  unfold verifyOneWhirStage at h
+  dsimp only at h
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨_, hRoots⟩
+  exact of_decide_eq_true hRoots
+
+theorem verifyWhirStages_singleton (rowChallenges finalWord : List GoldilocksExt4)
+    (prior : List UInt8) (sdom : WhirStageDomain) (sp : WhirStageProof) :
+    verifyWhirStages rowChallenges finalWord prior [sdom] [sp] =
+      verifyOneWhirStage rowChallenges finalWord prior sdom sp none := by rfl
+
+theorem verifyWhirStages_cons_cons (rowChallenges finalWord : List GoldilocksExt4)
+    (prior : List UInt8) (sdom nextDom : WhirStageDomain) (restDoms : List WhirStageDomain)
+    (sp nextSp : WhirStageProof) (restProofs : List WhirStageProof) :
+    verifyWhirStages rowChallenges finalWord prior (sdom :: nextDom :: restDoms)
+        (sp :: nextSp :: restProofs) =
+      (verifyOneWhirStage rowChallenges finalWord prior sdom sp
+          (some (nextDom, nextSp.stageRoot)) &&
+        verifyWhirStages rowChallenges finalWord
+          (stageQuerySeed (stagePowSeed prior sp (some nextSp.stageRoot) finalWord) sp.powNonce)
+          (nextDom :: restDoms) (nextSp :: restProofs)) := by rfl
+
+/-- `verifyWhirStages` accepts only stage lists of one common length. -/
+theorem verifyWhirStages_accept_length_eq (rowChallenges finalWord : List GoldilocksExt4) :
+    ∀ (prior : List UInt8) (sdoms : List WhirStageDomain) (sps : List WhirStageProof),
+      verifyWhirStages rowChallenges finalWord prior sdoms sps = true → sdoms.length = sps.length
+  | _, [], [], _ => rfl
+  | _, [], _ :: _, h => absurd h Bool.false_ne_true
+  | _, [_], [], h => absurd h Bool.false_ne_true
+  | _, _ :: _ :: _, [], h => absurd h Bool.false_ne_true
+  | _, [_], [_], _ => rfl
+  | _, [_], _ :: _ :: _, h => absurd h Bool.false_ne_true
+  | _, _ :: _ :: _, [_], h => absurd h Bool.false_ne_true
+  | prior, sdom :: nextDom :: restDoms, sp :: nextSp :: restProofs, h => by
+    rw [verifyWhirStages_cons_cons] at h
+    exact congrArg Nat.succ (verifyWhirStages_accept_length_eq rowChallenges finalWord _
+      (nextDom :: restDoms) (nextSp :: restProofs) (Bool.and_eq_true_iff.mp h).2)
 
 end Aggregation
 

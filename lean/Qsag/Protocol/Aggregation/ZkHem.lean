@@ -2855,3 +2855,959 @@ theorem saltVector_bad_probability {N : Nat} (hN : 0 < N)
 
 
 
+/-! ## Five-table companion word together with all four announced kernel claims
+
+This is the linear-opening part of the private protocol. The reference assignment is fixed
+public data with the same public kernel claim. Raw assignment openings and the two sumcheck
+views are not included in this lemma; composing their masking coins remains necessary. -/
+
+theorem embed_mul (a b : Fp) : embed (mul a b) = mul (embed a) (embed b) :=
+  GoldilocksField.GoldilocksExt4.embedBase_mul a b
+
+def padAdd (a b : Pad) : Pad :=
+  ⟨add a.r0 b.r0, add a.r1 b.r1, add a.r2 b.r2, add a.r3 b.r3⟩
+
+def padScale (a : Fp) (r : Pad) : Pad :=
+  ⟨mul a r.r0, mul a r.r1, mul a r.r2, mul a r.r3⟩
+
+theorem padMap_add (z : Fp4) (a b : Pad) :
+    padMap z (padAdd a b) = add (padMap z a) (padMap z b) := by
+  simp only [padMap, padAdd, embed_add]
+  constructive_ring
+
+theorem padMap_scale (z : Fp4) (a : Fp) (r : Pad) :
+    padMap z (padScale a r) = mul (embed a) (padMap z r) := by
+  simp only [padMap, padScale, embed_mul]
+  constructive_ring
+
+/-- The five committed base-field tables, packed as one assignment and four companions. -/
+def privateBatchWord {ι : Type} (β : Fp4) (Z : ι → Fp) (C : ι → Pad) : ι → Fp4 :=
+  fun i => add (embed (Z i)) (mul β (padMap β (C i)))
+
+theorem privateBatchWord_five_terms {ι : Type} (β : Fp4) (Z : ι → Fp) (C : ι → Pad) (i : ι) :
+    privateBatchWord β Z C i =
+      add (add (add (add (embed (Z i)) (mul β (embed (C i).r0)))
+        (mul (mul β β) (embed (C i).r1)))
+        (mul (mul β (mul β β)) (embed (C i).r2)))
+        (mul (mul β (mul β (mul β β))) (embed (C i).r3)) := by
+  simp only [privateBatchWord, padMap]
+  constructive_ring
+
+structure CompanionClaims where
+  sigma0 : Fp4
+  sigma1 : Fp4
+  sigma2 : Fp4
+  sigma3 : Fp4
+
+theorem CompanionClaims.ext {x y : CompanionClaims}
+    (h0 : x.sigma0 = y.sigma0) (h1 : x.sigma1 = y.sigma1)
+    (h2 : x.sigma2 = y.sigma2) (h3 : x.sigma3 = y.sigma3) : x = y := by
+  cases x; cases y; cases h0; cases h1; cases h2; cases h3; rfl
+
+def companionClaims {ι : Type} (K : LinForm ι Fp4) (C : ι → Pad) : CompanionClaims :=
+  ⟨K.app (fun i => embed (C i).r0), K.app (fun i => embed (C i).r1),
+   K.app (fun i => embed (C i).r2), K.app (fun i => embed (C i).r3)⟩
+
+def privateCompanionView {ι : Type} (β : Fp4) (K : LinForm ι Fp4)
+    (Z : ι → Fp) (C : ι → Pad) : (ι → Fp4) × CompanionClaims :=
+  (privateBatchWord β Z C, companionClaims K C)
+
+def companionCancelPad (β : Fp4) : Pad := padInv β (LawfulField.inv β)
+
+theorem companionCancelPad_sound (β : Fp4) (hβ : β.c1 ≠ zero) :
+    mul β (padMap β (companionCancelPad β)) = one := by
+  unfold companionCancelPad
+  rw [padMap_padInv β hβ]
+  apply LawfulField.mul_inv_cancel
+  intro heq
+  exact hβ ((congrArg GoldilocksField.GoldilocksExt4.c1 heq).trans fp4_zero_c1)
+
+/-- Translating all four companion tables by fixed multiples of the base-field
+    assignment difference preserves their uniform distribution. -/
+def companionTranslate {ι : Type} (β : Fp4) (delta : ι → Fp) (C : ι → Pad) : ι → Pad :=
+  fun i => padAdd (C i) (padScale (delta i) (companionCancelPad β))
+
+def companionTranslateBij {ι : Type} (β : Fp4) (delta : ι → Fp) :
+    SimpleEquiv (ι → Pad) (ι → Pad) where
+  toFun := companionTranslate β delta
+  invFun := companionTranslate β (fun i => neg (delta i))
+  left_inv C := by
+    funext i
+    apply Pad.ext <;> dsimp [companionTranslate, padAdd, padScale] <;> constructive_ring
+  right_inv C := by
+    funext i
+    apply Pad.ext <;> dsimp [companionTranslate, padAdd, padScale] <;> constructive_ring
+
+theorem privateBatchWord_translate {ι : Type} (β : Fp4) (hβ : β.c1 ≠ zero)
+    (Z Z0 : ι → Fp) (C : ι → Pad) :
+    privateBatchWord β Z0 (companionTranslate β (fun i => sub (Z i) (Z0 i)) C) =
+      privateBatchWord β Z C := by
+  funext i
+  have hc := companionCancelPad_sound β hβ
+  simp only [privateBatchWord, companionTranslate, padMap_add, padMap_scale, embed_sub]
+  calc
+    _ = add (embed (Z0 i)) (add (mul β (padMap β (C i)))
+        (mul (sub (embed (Z i)) (embed (Z0 i))) (mul β (padMap β (companionCancelPad β))))) := by
+      constructive_ring
+    _ = _ := by rw [hc]; constructive_ring
+
+theorem kernel_base_difference_zero {ι : Type} (K : LinForm ι Fp4)
+    (Z Z0 : ι → Fp) (hK : K.app (fun i => embed (Z i)) = K.app (fun i => embed (Z0 i))) :
+    K.app (fun i => embed (sub (Z i) (Z0 i))) = zero := by
+  have he : (fun i => embed (sub (Z i) (Z0 i))) =
+      (fun i => add (mul (one : Fp4) (embed (Z i))) (mul (neg one) (embed (Z0 i)))) := by
+    funext i
+    rw [embed_sub]
+    constructive_ring
+  rw [he, K.lin, hK]
+  constructive_ring
+
+theorem kernel_base_shift {ι : Type} (K : LinForm ι Fp4) (V delta : ι → Fp)
+    (r : Fp) (hd : K.app (fun i => embed (delta i)) = zero) :
+    K.app (fun i => embed (add (V i) (mul (delta i) r))) = K.app (fun i => embed (V i)) := by
+  have he : (fun i => embed (add (V i) (mul (delta i) r))) =
+      (fun i => add (mul (one : Fp4) (embed (V i))) (mul (embed r) (embed (delta i)))) := by
+    funext i
+    rw [embed_add, embed_mul]
+    constructive_ring
+  rw [he, K.lin, hd]
+  constructive_ring
+
+theorem companionClaims_translate {ι : Type} (K : LinForm ι Fp4) (β : Fp4)
+    (delta : ι → Fp) (C : ι → Pad) (hd : K.app (fun i => embed (delta i)) = zero) :
+    companionClaims K (companionTranslate β delta C) = companionClaims K C := by
+  apply CompanionClaims.ext <;>
+    dsimp [companionClaims, companionTranslate, padAdd, padScale] <;>
+    apply kernel_base_shift K _ delta _ hd
+
+/-- Joint simulation of the full blended word AND all four companion claims, for any
+    number of cells and any extension-field-valued linear functional. The simulator uses
+    the fixed public reference assignment, never the private assignment. -/
+theorem five_table_kernel_view_perfectly_simulated {ι : Type} (β : Fp4) (hβ : β.c1 ≠ zero)
+    (K : LinForm ι Fp4) (Z0 : ι → Fp) :
+    PerfectlySimulated
+      (fun (Z : {Z : ι → Fp // K.app (fun i => embed (Z i)) = K.app (fun i => embed (Z0 i))})
+        (C : ι → Pad) => privateCompanionView β K Z.val C)
+      (fun (C : ι → Pad) => privateCompanionView β K Z0 C) := by
+  intro Z
+  refine ⟨companionTranslateBij β (fun i => sub (Z.val i) (Z0 i)), ?_⟩
+  intro C
+  apply Prod.ext
+  · exact (privateBatchWord_translate β hβ Z.val Z0 C).symm
+  · exact (companionClaims_translate K β (fun i => sub (Z.val i) (Z0 i)) C
+      (kernel_base_difference_zero K Z.val Z0 Z.property)).symm
+
+#verify_constructive Qsag.ZkHem.privateBatchWord_five_terms
+  Qsag.ZkHem.five_table_kernel_view_perfectly_simulated
+
+
+
+/-! ## The column transcript does not reveal `Z(ry)` or `g₂(ry)` separately -/
+section HiddenColumnTerminal
+variable {F : Type} [LawfulField F]
+
+/-- The public mask sum and masked round polynomials. The verifier obtains the final
+    combined value by evaluating the last polynomial; neither individual terminal operand
+    is a field in this view. -/
+def libraPublicTranscript (v : LibraView F) : F × List (List F) := (v.G, v.msgs)
+
+def libraPublicSim (n d : Nat) (c : Nat → F) (ρ H : F) (s : LibraCoins F) :
+    F × List (List F) := (s.G, (List.range n).map (simMsg H ρ d c s))
+
+/-- Unlike the full Libra view, the column transcript is simulatable from its public
+    initial claim alone. No hypothesis makes the private terminal operand public. -/
+theorem libra_public_transcript_perfectly_simulated [DecidableEq F]
+    (h2 : add (one : F) one ≠ zero) (n d : Nat) (c : Nat → F)
+    (ρ : F) (hρ : ρ ≠ zero) (H : F) :
+    PerfectlySimulated
+      (fun (w : {w : WitnessRounds F // w.Honest n d c ∧ w.H = H}) (m : LibraMask F) =>
+        libraPublicTranscript (libraReal n d c ρ w.val m))
+      (libraPublicSim n d c ρ H) := by
+  rintro ⟨w, hw, hH⟩
+  refine ⟨libraCoinBij h2 n d ρ hρ w, fun m => ?_⟩
+  change libraPublicTranscript (libraReal n d c ρ w m) =
+    libraPublicSim n d c ρ H (libraCoinsOf n d ρ w m)
+  rw [libra_real_eq_sim h2 n d c ρ hρ w hw m, hH]
+  rfl
+end HiddenColumnTerminal
+
+#verify_constructive Qsag.ZkHem.libra_public_transcript_perfectly_simulated
+
+
+/-! ## Raw base-field openings of all five tables
+
+Companion translation preserves every linear observation on which the two assignments
+agree. This includes raw RS symbols once their base-field linear evaluation maps are
+instantiated. It does not construct the public reference assignment or the layout masks.
+-/
+
+def rawFiveTableView {ι κ : Type} (R : κ → LinForm ι Fp)
+    (Z : ι → Fp) (C : ι → Pad) : κ → Fp × Pad :=
+  fun j => ((R j).app Z,
+    ⟨(R j).app (fun i => (C i).r0), (R j).app (fun i => (C i).r1),
+     (R j).app (fun i => (C i).r2), (R j).app (fun i => (C i).r3)⟩)
+
+theorem base_difference_zero {ι : Type} (R : LinForm ι Fp) (Z Z0 : ι → Fp)
+    (h : R.app Z = R.app Z0) : R.app (fun i => sub (Z i) (Z0 i)) = zero := by
+  have he : (fun i => sub (Z i) (Z0 i)) =
+      (fun i => add (mul (one : Fp) (Z i)) (mul (neg one) (Z0 i))) := by
+    funext i; constructive_ring
+  rw [he, R.lin, h]
+  constructive_ring
+
+theorem base_shift {ι : Type} (R : LinForm ι Fp) (V delta : ι → Fp) (r : Fp)
+    (hd : R.app delta = zero) :
+    R.app (fun i => add (V i) (mul (delta i) r)) = R.app V := by
+  have he : (fun i => add (V i) (mul (delta i) r)) =
+      (fun i => add (mul (one : Fp) (V i)) (mul r (delta i))) := by
+    funext i; constructive_ring
+  rw [he, R.lin, hd]
+  constructive_ring
+
+theorem rawFiveTableView_translate {ι κ : Type} (R : κ → LinForm ι Fp)
+    (β : Fp4) (Z Z0 : ι → Fp) (C : ι → Pad)
+    (hR : ∀ j, (R j).app Z = (R j).app Z0) :
+    rawFiveTableView R Z0 (companionTranslate β (fun i => sub (Z i) (Z0 i)) C) =
+      rawFiveTableView R Z C := by
+  funext j
+  apply Prod.ext
+  · exact (hR j).symm
+  · apply Pad.ext <;>
+      dsimp [rawFiveTableView, companionTranslate, padAdd, padScale] <;>
+      exact base_shift (R j) _ _ _ (base_difference_zero (R j) Z Z0 (hR j))
+
+/-- The single companion-coin bijection hides the blended word, all four announced kernel
+    claims, and raw symbols of ALL FIVE tables jointly. The public reference must satisfy
+    the same raw observations and kernel claim; obtaining it from layout simulation is a
+    separate obligation. -/
+theorem five_table_opening_view_perfectly_simulated {ι κ : Type}
+    (β : Fp4) (hβ : β.c1 ≠ zero) (K : LinForm ι Fp4)
+    (R : κ → LinForm ι Fp) (Z0 : ι → Fp) :
+    PerfectlySimulated
+      (fun (Z : {Z : ι → Fp //
+          K.app (fun i => embed (Z i)) = K.app (fun i => embed (Z0 i)) ∧
+          ∀ j, (R j).app Z = (R j).app Z0}) (C : ι → Pad) =>
+        (privateCompanionView β K Z.val C, rawFiveTableView R Z.val C))
+      (fun C => (privateCompanionView β K Z0 C, rawFiveTableView R Z0 C)) := by
+  intro Z
+  refine ⟨companionTranslateBij β (fun i => sub (Z.val i) (Z0 i)), ?_⟩
+  intro C
+  apply Prod.ext
+  · apply Prod.ext
+    · exact (privateBatchWord_translate β hβ Z.val Z0 C).symm
+    · exact (companionClaims_translate K β (fun i => sub (Z.val i) (Z0 i)) C
+        (kernel_base_difference_zero K Z.val Z0 Z.property.1)).symm
+  · exact (rawFiveTableView_translate R β Z.val Z0 C Z.property.2).symm
+
+#verify_constructive Qsag.ZkHem.rawFiveTableView_translate
+  Qsag.ZkHem.five_table_opening_view_perfectly_simulated
+
+/-! ## Public finite reference assignment and joint five-table linear observations -/
+
+open RoundPoly
+
+/-- A finite public weight vector, interpreted on the actual finite table carrier. -/
+def finiteWeightedForm {F : Type} [LawfulField F] (n : Nat) (weights : List F) :
+    LinForm (Fin n) F := LinForm.dot ((List.finRange n).zip weights)
+
+private theorem dotAt_zip {ι F : Type} [LawfulField F] (u : ι → F) :
+    ∀ (is : List ι) (ws : List F), dotAt (is.zip ws) u = dotVec ws (is.map u)
+  | [], [] => rfl
+  | [], _ :: _ => by simp only [List.zip_nil_left, List.map_nil, dotAt, dotVec_nil_right]
+  | _ :: _, [] => by simp only [List.zip_nil_right, dotAt, dotVec_nil_left]
+  | i :: is, w :: ws => by
+    simp only [List.zip_cons_cons, List.map_cons, dotAt, dotVec_cons, dotAt_zip u is ws]
+
+def finiteTable {F : Type} {n : Nat} (u : Fin n → F) : List F :=
+  (List.finRange n).map u
+
+theorem finiteTable_length {F : Type} {n : Nat} (u : Fin n → F) :
+    (finiteTable u).length = n := by
+  simp only [finiteTable, List.length_map, List.length_finRange]
+
+theorem finiteWeightedForm_app {F : Type} [LawfulField F] {n : Nat}
+    (weights : List F) (u : Fin n → F) :
+    (finiteWeightedForm n weights).app u = dotVec weights (finiteTable u) :=
+  dotAt_zip u _ _
+
+def finiteTableRead {F : Type} [CommRingOps F] (n : Nat) (v : List F) : Fin n → F :=
+  fun i => v.getD i.val zero
+
+private theorem finiteTable_ofFn {F : Type} {n : Nat} (u : Fin n → F) :
+    finiteTable u = List.ofFn u := by
+  simp only [finiteTable, List.finRange, List.map_ofFn, Function.comp_def]
+
+theorem finiteTable_read {F : Type} [CommRingOps F] {n : Nat} (v : List F)
+    (hlen : v.length = n) : finiteTable (finiteTableRead n v) = v := by
+  rw [finiteTable_ofFn]
+  apply List.ext_getElem
+  · simpa only [List.length_ofFn] using hlen.symm
+  · intro i hi hv
+    simp only [List.getElem_ofFn, finiteTableRead, List.getD_eq_getElem?_getD,
+      List.getElem?_eq_getElem hv, Option.getD_some]
+
+/-- Augmentation uses the negative public right-hand side. -/
+def affineObservationRow {F : Type} [CommRingOps F] (weights : List F) (value : F) : List F :=
+  weights ++ [neg value]
+
+theorem affineObservationRow_dot {F : Type} [LawfulCommRing F]
+    (weights v : List F) (value : F) (hlen : weights.length = v.length) :
+    dotVec (affineObservationRow weights value) (v ++ [one]) =
+      sub (dotVec weights v) value := by
+  rw [affineObservationRow, dotVec_append_eq _ _ _ _ hlen]
+  simp only [dotVec_cons, dotVec_nil_left, LawfulCommRing.mul_one, LawfulCommRing.add_zero]
+  constructive_ring
+
+/-- Tower-coordinate order `[1,u,v,uv]`, used consistently in public augmented rows. -/
+def baseCoordinate (j : Fin 4) (x : Fp4) : Fp :=
+  match j.val with
+  | 0 => x.c0.c0
+  | 1 => x.c0.c1
+  | 2 => x.c1.c0
+  | _ => x.c1.c1
+
+theorem baseCoordinate_ext (x y : Fp4)
+    (h : ∀ j, baseCoordinate j x = baseCoordinate j y) : x = y := by
+  apply GoldilocksField.GoldilocksExt4.ext
+  · exact GoldilocksExt2.ext (by simpa only [baseCoordinate] using h ⟨0, by decide⟩)
+      (by simpa only [baseCoordinate] using h ⟨1, by decide⟩)
+  · exact GoldilocksExt2.ext (by simpa only [baseCoordinate] using h ⟨2, by decide⟩)
+      (by simpa only [baseCoordinate] using h ⟨3, by decide⟩)
+
+theorem baseCoordinate_add (j : Fin 4) (x y : Fp4) :
+    baseCoordinate j (add x y) = add (baseCoordinate j x) (baseCoordinate j y) := by
+  rcases j with ⟨j, hj⟩
+  rcases j with _ | _ | _ | _ | j
+  · simp only [baseCoordinate, fp4_add_c0, fp2_add_c0]
+  · simp only [baseCoordinate, fp4_add_c0, fp2_add_c1]
+  · simp only [baseCoordinate, fp4_add_c1, fp2_add_c0]
+  · simp only [baseCoordinate, fp4_add_c1, fp2_add_c1]
+  · omega
+
+theorem baseCoordinate_zero (j : Fin 4) : baseCoordinate j zero = zero := by
+  rcases j with ⟨j, hj⟩
+  rcases j with _ | _ | _ | _ | j
+  · simp only [baseCoordinate, fp4_zero_c0, fp2_zero_c0]
+  · simp only [baseCoordinate, fp4_zero_c0, fp2_zero_c1]
+  · simp only [baseCoordinate, fp4_zero_c1, fp2_zero_c0]
+  · simp only [baseCoordinate, fp4_zero_c1, fp2_zero_c1]
+  · omega
+
+private theorem embed_scale_c0 (a : Fp) (x : Fp4) :
+    (mul (embed a) x).c0 = mul (GoldilocksExt2.ofBase a) x.c0 := by
+  change add (mul (GoldilocksExt2.ofBase a) x.c0)
+    (mul GoldilocksExt2.uBasis (mul zero x.c1)) = _
+  rw [LawfulCommRing.zero_mul, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+
+private theorem embed_scale_c1 (a : Fp) (x : Fp4) :
+    (mul (embed a) x).c1 = mul (GoldilocksExt2.ofBase a) x.c1 := by
+  change add (mul (GoldilocksExt2.ofBase a) x.c1) (mul zero x.c0) = _
+  rw [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+
+theorem baseCoordinate_mul_embed (j : Fin 4) (x : Fp4) (a : Fp) :
+    baseCoordinate j (mul x (embed a)) = mul (baseCoordinate j x) a := by
+  rw [LawfulCommRing.mul_comm x (embed a)]
+  rcases j with ⟨j, hj⟩
+  rcases j with _ | _ | _ | _ | j
+  · simp only [baseCoordinate, embed_scale_c0, ofBase_mul_c0]
+    exact LawfulCommRing.mul_comm _ _
+  · simp only [baseCoordinate, embed_scale_c0, ofBase_mul_c1]
+    exact LawfulCommRing.mul_comm _ _
+  · simp only [baseCoordinate, embed_scale_c1, ofBase_mul_c0]
+    exact LawfulCommRing.mul_comm _ _
+  · simp only [baseCoordinate, embed_scale_c1, ofBase_mul_c1]
+    exact LawfulCommRing.mul_comm _ _
+  · omega
+
+theorem baseCoordinate_dot (j : Fin 4) : ∀ (weights : List Fp4) (v : List Fp),
+    baseCoordinate j (dotVec weights (v.map embed)) = dotVec (weights.map (baseCoordinate j)) v
+  | [], _ => by simp only [dotVec_nil_left, List.map_nil, baseCoordinate_zero]
+  | _ :: _, [] => by simp only [List.map_nil, dotVec_nil_right, baseCoordinate_zero]
+  | w :: ws, a :: v => by
+    simp only [List.map_cons, dotVec_cons, baseCoordinate_add, baseCoordinate_mul_embed,
+      baseCoordinate_dot j ws v]
+
+structure PublicOpeningMatrix (n q : Nat) where
+  kernel : List Fp4
+  raw : Fin q → List Fp
+  kernel_length : kernel.length = n
+  raw_length : ∀ j, (raw j).length = n
+
+structure PublicOpeningClaims (q : Nat) where
+  kernel : Fp4
+  raw : Fin q → Fp
+
+def PublicOpeningMatrix.kernelForm {n q : Nat} (M : PublicOpeningMatrix n q) :
+    LinForm (Fin n) Fp4 := finiteWeightedForm n M.kernel
+
+def PublicOpeningMatrix.rawForm {n q : Nat} (M : PublicOpeningMatrix n q) (j : Fin q) :
+    LinForm (Fin n) Fp := finiteWeightedForm n (M.raw j)
+
+def publicOpeningMatches {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) (Z : Fin n → Fp) : Prop :=
+  M.kernelForm.app (fun i => embed (Z i)) = V.kernel ∧
+    ∀ j, (M.rawForm j).app Z = V.raw j
+
+/-- Four base-field equations encode the extension-field kernel claim; all raw-symbol
+constraints share exactly the same assignment variables. -/
+def publicOpeningRows {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) : List (List Fp) :=
+  (List.finRange 4).map (fun j =>
+    affineObservationRow (M.kernel.map (baseCoordinate j)) (baseCoordinate j V.kernel)) ++
+  (List.finRange q).map (fun j => affineObservationRow (M.raw j) (V.raw j))
+
+theorem publicOpeningRows_length {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) : (publicOpeningRows M V).length = 4 + q := by
+  simp only [publicOpeningRows, List.length_append, List.length_map, List.length_finRange]
+
+theorem publicOpeningRows_width {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) : ∀ r ∈ publicOpeningRows M V, r.length = n + 1 := by
+  intro r hr
+  rcases List.mem_append.mp hr with hr | hr
+  · obtain ⟨j, _, rfl⟩ := List.mem_map.mp hr
+    simp only [affineObservationRow, List.length_append, List.length_map,
+      M.kernel_length, List.length_cons, List.length_nil]
+  · obtain ⟨j, _, rfl⟩ := List.mem_map.mp hr
+    simp only [affineObservationRow, List.length_append, M.raw_length j,
+      List.length_cons, List.length_nil]
+
+private theorem kernelForm_coordinate {n q : Nat} (M : PublicOpeningMatrix n q)
+    (Z : Fin n → Fp) (j : Fin 4) :
+    baseCoordinate j (M.kernelForm.app (fun i => embed (Z i))) =
+      dotVec (M.kernel.map (baseCoordinate j)) (finiteTable Z) := by
+  rw [PublicOpeningMatrix.kernelForm, finiteWeightedForm_app]
+  have he : finiteTable (fun i => embed (Z i)) = (finiteTable Z).map embed := by
+    simp only [finiteTable, List.map_map, Function.comp_def]
+  rw [he, baseCoordinate_dot]
+
+/-- Every actual finite word supplies consistency, solely in the proof. -/
+theorem publicOpeningRows_consistent {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) (Z : Fin n → Fp) (hZ : publicOpeningMatches M V Z) :
+    WelchBerlekamp.AffineConsistent n (publicOpeningRows M V) := by
+  apply (WelchBerlekamp.affineConsistent_iff n _).mpr
+  refine ⟨finiteTable Z, finiteTable_length Z, ?_⟩
+  intro r hr
+  rcases List.mem_append.mp hr with hr | hr
+  · obtain ⟨j, _, rfl⟩ := List.mem_map.mp hr
+    rw [affineObservationRow_dot _ _ _ (by rw [List.length_map, M.kernel_length, finiteTable_length])]
+    rw [← kernelForm_coordinate M Z j, hZ.1, LawfulCommRing.sub_self]
+  · obtain ⟨j, _, rfl⟩ := List.mem_map.mp hr
+    rw [affineObservationRow_dot _ _ _ (by rw [M.raw_length, finiteTable_length])]
+    have he := hZ.2 j
+    change (finiteWeightedForm n (M.raw j)).app Z = V.raw j at he
+    rw [finiteWeightedForm_app] at he
+    rw [he, LawfulCommRing.sub_self]
+
+/-- The public reference assignment is computed from the public matrix and public claims.
+Its inputs contain no witness, secret key, original word, or consistency proof. -/
+def publicReferenceAssignment {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) : Fin n → Fp :=
+  finiteTableRead n (WelchBerlekamp.solveAffine n (publicOpeningRows M V))
+
+theorem publicReferenceAssignment_matches {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) (hconsistent : WelchBerlekamp.AffineConsistent n
+      (publicOpeningRows M V)) : publicOpeningMatches M V (publicReferenceAssignment M V) := by
+  let v := WelchBerlekamp.solveAffine n (publicOpeningRows M V)
+  have hlen : v.length = n := WelchBerlekamp.solveAffine_length n _
+  have ht : finiteTable (publicReferenceAssignment M V) = v := finiteTable_read v hlen
+  have hs := WelchBerlekamp.solveAffine_spec n (publicOpeningRows M V)
+    (publicOpeningRows_width M V) hconsistent
+  constructor
+  · apply baseCoordinate_ext
+    intro j
+    have hr : affineObservationRow (M.kernel.map (baseCoordinate j)) (baseCoordinate j V.kernel)
+        ∈ publicOpeningRows M V :=
+      List.mem_append_left _ (List.mem_map.mpr ⟨j, List.mem_finRange j, rfl⟩)
+    have he := hs _ hr
+    rw [affineObservationRow_dot _ _ _ (by rw [List.length_map, M.kernel_length, hlen])] at he
+    rw [kernelForm_coordinate M (publicReferenceAssignment M V) j, ht]
+    exact LawfulCommRing.sub_eq_zero_iff.mp he
+  · intro j
+    have hr : affineObservationRow (M.raw j) (V.raw j) ∈ publicOpeningRows M V :=
+      List.mem_append_right _ (List.mem_map.mpr ⟨j, List.mem_finRange j, rfl⟩)
+    have he := hs _ hr
+    rw [affineObservationRow_dot _ _ _ (by rw [M.raw_length, hlen])] at he
+    rw [PublicOpeningMatrix.rawForm, finiteWeightedForm_app, ht]
+    exact LawfulCommRing.sub_eq_zero_iff.mp he
+
+theorem publicReferenceAssignment_cost {n q : Nat} (M : PublicOpeningMatrix n q)
+    (V : PublicOpeningClaims q) :
+    (WelchBerlekamp.solveAffineT n (publicOpeningRows M V)).cost ≤
+      n * ((4 + q) * (2 * n + 4) + 2 * n + 5) := by
+  have h := WelchBerlekamp.solveAffine_ops_poly n (publicOpeningRows M V)
+    (fun r hr => Nat.le_of_eq (publicOpeningRows_width M V r hr))
+  simpa only [publicOpeningRows_length] using h
+
+/-- Joint linear-opening simulation using a reference computed solely from public data.
+This includes the entire blended word, all four companion claims, and raw observations of
+all five finite tables. It does not yet include row/column mask coins or salt queries. -/
+theorem five_table_public_reference_linear_simulation {n q : Nat}
+    (M : PublicOpeningMatrix n q) (V : PublicOpeningClaims q)
+    (hpossible : ∃ Z, publicOpeningMatches M V Z) (β : Fp4) (hβ : β.c1 ≠ zero) :
+    PerfectlySimulated
+      (fun (Z : {Z : Fin n → Fp // publicOpeningMatches M V Z}) (C : Fin n → Pad) =>
+        (privateCompanionView β M.kernelForm Z.val C, rawFiveTableView M.rawForm Z.val C))
+      (fun C =>
+        (privateCompanionView β M.kernelForm (publicReferenceAssignment M V) C,
+         rawFiveTableView M.rawForm (publicReferenceAssignment M V) C)) := by
+  obtain ⟨Zexist, hZexist⟩ := hpossible
+  have hr := publicReferenceAssignment_matches M V
+    (publicOpeningRows_consistent M V Zexist hZexist)
+  intro Z
+  let Z0 := publicReferenceAssignment M V
+  have hK : M.kernelForm.app (fun i => embed (Z.val i)) =
+      M.kernelForm.app (fun i => embed (Z0 i)) := Z.property.1.trans hr.1.symm
+  have hR : ∀ j, (M.rawForm j).app Z.val = (M.rawForm j).app Z0 :=
+    fun j => (Z.property.2 j).trans (hr.2 j).symm
+  refine ⟨companionTranslateBij β (fun i => sub (Z.val i) (Z0 i)), ?_⟩
+  intro C
+  apply Prod.ext
+  · apply Prod.ext
+    · exact (privateBatchWord_translate β hβ Z.val Z0 C).symm
+    · exact (companionClaims_translate M.kernelForm β (fun i => sub (Z.val i) (Z0 i)) C
+        (kernel_base_difference_zero M.kernelForm Z.val Z0 hK)).symm
+  · exact (rawFiveTableView_translate M.rawForm β Z.val Z0 C hR).symm
+
+#verify_constructive finiteWeightedForm_app finiteTable_read affineObservationRow_dot
+  baseCoordinate_ext baseCoordinate_add baseCoordinate_zero baseCoordinate_mul_embed baseCoordinate_dot
+  publicOpeningRows_consistent publicReferenceAssignment_matches publicReferenceAssignment_cost
+  five_table_public_reference_linear_simulation
+
+/-! ## Computed arbitrary-point corner rank and the public abort branch -/
+
+def padUnit (j : Fin 4) : Pad :=
+  ⟨if j.val = 0 then one else zero, if j.val = 1 then one else zero,
+    if j.val = 2 then one else zero, if j.val = 3 then one else zero⟩
+
+def padCoordinates (x : Fp4) : Pad := ⟨x.c0.c0, x.c0.c1, x.c1.c0, x.c1.c1⟩
+def padAssemble (r : Pad) : Fp4 := ⟨⟨r.r0, r.r1⟩, ⟨r.r2, r.r3⟩⟩
+
+theorem padCoordinates_assemble (r : Pad) : padCoordinates (padAssemble r) = r := by
+  cases r; rfl
+
+theorem padAssemble_coordinates (x : Fp4) : padAssemble (padCoordinates x) = x := by
+  cases x with | mk a b => cases a; cases b; rfl
+
+theorem padCoordinates_add (x y : Fp4) :
+    padCoordinates (add x y) = padAdd (padCoordinates x) (padCoordinates y) := by
+  apply Pad.ext <;> simp only [padCoordinates, padAdd, fp4_add_c0, fp4_add_c1,
+    fp2_add_c0, fp2_add_c1]
+
+theorem padCoordinates_scale (a : Fp) (x : Fp4) :
+    padCoordinates (mul x (embed a)) = padScale a (padCoordinates x) := by
+  apply Pad.ext
+  all_goals first
+    | exact (baseCoordinate_mul_embed ⟨0, by decide⟩ x a).trans (LawfulCommRing.mul_comm _ _)
+    | exact (baseCoordinate_mul_embed ⟨1, by decide⟩ x a).trans (LawfulCommRing.mul_comm _ _)
+    | exact (baseCoordinate_mul_embed ⟨2, by decide⟩ x a).trans (LawfulCommRing.mul_comm _ _)
+    | exact (baseCoordinate_mul_embed ⟨3, by decide⟩ x a).trans (LawfulCommRing.mul_comm _ _)
+
+structure LinearPadMap where
+  app : Pad → Pad
+  map_add : ∀ x y, app (padAdd x y) = padAdd (app x) (app y)
+  map_scale : ∀ a x, app (padScale a x) = padScale a (app x)
+
+def LinearPadMap.id : LinearPadMap := ⟨fun x => x, fun _ _ => rfl, fun _ _ => rfl⟩
+def LinearPadMap.comp (f g : LinearPadMap) : LinearPadMap where
+  app x := f.app (g.app x)
+  map_add x y := by rw [g.map_add, f.map_add]
+  map_scale a x := by rw [g.map_scale, f.map_scale]
+
+def padCombine (cols : Fin 4 → Pad) (r : Pad) : Pad :=
+  padAdd (padAdd (padAdd (padScale r.r0 (cols ⟨0, by decide⟩))
+    (padScale r.r1 (cols ⟨1, by decide⟩)))
+    (padScale r.r2 (cols ⟨2, by decide⟩))) (padScale r.r3 (cols ⟨3, by decide⟩))
+
+theorem padCombine_units (r : Pad) : padCombine padUnit r = r := by
+  apply Pad.ext <;> simp only [padCombine, padAdd, padScale, padUnit, ite_true,
+    ite_false, Nat.reduceEqDiff, LawfulCommRing.mul_one, LawfulCommRing.mul_zero,
+    LawfulCommRing.add_zero, LawfulCommRing.zero_add]
+
+def linearPadColumns (cols : Fin 4 → Pad) : LinearPadMap where
+  app := padCombine cols
+  map_add x y := by apply Pad.ext <;> dsimp [padCombine, padAdd, padScale] <;> constructive_ring
+  map_scale a x := by apply Pad.ext <;> dsimp [padCombine, padAdd, padScale] <;> constructive_ring
+
+theorem LinearPadMap.expand (L : LinearPadMap) (r : Pad) :
+    L.app r = padCombine (fun j => L.app (padUnit j)) r := by
+  calc
+    _ = L.app (padCombine padUnit r) := congrArg L.app (padCombine_units r).symm
+    _ = _ := by simp only [padCombine, L.map_add, L.map_scale]
+
+theorem LinearPadMap.ext_app (L M : LinearPadMap)
+    (h : ∀ j, L.app (padUnit j) = M.app (padUnit j)) : ∀ r, L.app r = M.app r := by
+  intro r
+  rw [L.expand, M.expand]
+  exact congrArg (fun cs => padCombine cs r) (funext h)
+
+theorem cornerPad_add (a b : Fp4) (r s : Pad) :
+    cornerPad a b (padAdd r s) = add (cornerPad a b r) (cornerPad a b s) := by
+  simp only [cornerPad, padAdd, embed_add]
+  constructive_ring
+
+theorem cornerPad_scale (a b : Fp4) (r : Pad) (c : Fp) :
+    cornerPad a b (padScale c r) = mul (cornerPad a b r) (embed c) := by
+  simp only [cornerPad, padScale, embed_mul]
+  constructive_ring
+
+def cornerLinear (a b : Fp4) : LinearPadMap where
+  app r := padCoordinates (cornerPad a b r)
+  map_add r s := by rw [cornerPad_add, padCoordinates_add]
+  map_scale c r := by rw [cornerPad_scale, padCoordinates_scale]
+
+/-- This public rank guard checks both compositions on the four base-coordinate vectors. -/
+def cornerInverseGuard (a b : Fp4) (cols : Fin 4 → Pad) : Prop :=
+  ∀ j : Fin 4,
+    (linearPadColumns cols).app ((cornerLinear a b).app (padUnit j)) = padUnit j ∧
+    (cornerLinear a b).app ((linearPadColumns cols).app (padUnit j)) = padUnit j
+
+instance (a b : Fp4) (cols : Fin 4 → Pad) : Decidable (cornerInverseGuard a b cols) :=
+  inferInstanceAs (Decidable (∀ j : Fin 4,
+    (linearPadColumns cols).app ((cornerLinear a b).app (padUnit j)) = padUnit j ∧
+    (cornerLinear a b).app ((linearPadColumns cols).app (padUnit j)) = padUnit j))
+
+def checkedCornerPadBasis (a b : Fp4) (cols : Fin 4 → Pad) : Option (CornerPadBasis a b) :=
+  if h : cornerInverseGuard a b cols then
+    some {
+      invert v := (linearPadColumns cols).app (padCoordinates v)
+      left_inv r := by
+        exact LinearPadMap.ext_app ((linearPadColumns cols).comp (cornerLinear a b))
+          LinearPadMap.id (fun j => (h j).1) r
+      right_inv v := by
+        have he := LinearPadMap.ext_app ((cornerLinear a b).comp (linearPadColumns cols))
+          LinearPadMap.id (fun j => (h j).2) (padCoordinates v)
+        have hr := congrArg padAssemble he
+        simpa only [LinearPadMap.comp, LinearPadMap.id, cornerLinear,
+          padAssemble_coordinates] using hr }
+  else none
+
+theorem checkedCornerPadBasis_some_iff (a b : Fp4) (cols : Fin 4 → Pad) :
+    (checkedCornerPadBasis a b cols).isSome = true ↔ cornerInverseGuard a b cols := by
+  unfold checkedCornerPadBasis
+  split <;> simp_all only [Option.isSome_some, Option.isSome_none, Bool.false_eq_true]
+
+theorem linearPadColumns_unit (cols : Fin 4 → Pad) (j : Fin 4) :
+    (linearPadColumns cols).app (padUnit j) = cols j := by
+  rcases j with ⟨j, hj⟩
+  rcases j with _ | _ | _ | _ | j
+  all_goals first
+    | omega
+    | (apply Pad.ext <;> simp only [linearPadColumns, padCombine, padAdd, padScale,
+        padUnit, Nat.reduceEqDiff, ite_true, ite_false, LawfulCommRing.one_mul,
+        LawfulCommRing.zero_mul, LawfulCommRing.add_zero, LawfulCommRing.zero_add])
+
+/-- The actual corner weights, as one public four-variable extension-field equation. -/
+def cornerOpeningMatrix (a b : Fp4) : PublicOpeningMatrix 4 0 where
+  kernel := [mul (sub one a) (sub one b), mul a (sub one b), mul (sub one a) b, mul a b]
+  raw j := Fin.elim0 j
+  kernel_length := rfl
+  raw_length j := Fin.elim0 j
+
+def cornerOpeningClaims (v : Fp4) : PublicOpeningClaims 0 where
+  kernel := v
+  raw j := Fin.elim0 j
+
+def padAssignment (r : Pad) (j : Fin 4) : Fp :=
+  match j.val with | 0 => r.r0 | 1 => r.r1 | 2 => r.r2 | _ => r.r3
+
+def assignmentPad (u : Fin 4 → Fp) : Pad :=
+  ⟨u ⟨0, by decide⟩, u ⟨1, by decide⟩, u ⟨2, by decide⟩, u ⟨3, by decide⟩⟩
+
+theorem padAssignment_assignmentPad (u : Fin 4 → Fp) : padAssignment (assignmentPad u) = u := by
+  funext j
+  rcases j with ⟨j, hj⟩
+  rcases j with _ | _ | _ | _ | j
+  all_goals first | omega | rfl
+
+theorem cornerOpeningMatrix_app (a b : Fp4) (u : Fin 4 → Fp) :
+    (cornerOpeningMatrix a b).kernelForm.app (fun i => embed (u i)) =
+      cornerPad a b (assignmentPad u) := by
+  rw [PublicOpeningMatrix.kernelForm, finiteWeightedForm_app]
+  simp only [cornerOpeningMatrix, finiteTable, List.finRange, List.map_ofFn]
+  change add (mul (mul (sub one a) (sub one b)) (embed (u ⟨0, by decide⟩)))
+    (add (mul (mul a (sub one b)) (embed (u ⟨1, by decide⟩)))
+      (add (mul (mul (sub one a) b) (embed (u ⟨2, by decide⟩)))
+        (add (mul (mul a b) (embed (u ⟨3, by decide⟩))) zero))) = _
+  simp only [cornerPad, assignmentPad]
+  constructive_ring
+
+/-- Four independent public affine solves; no row witness enters the algorithm. -/
+def cornerColumnCandidates (a b : Fp4) (j : Fin 4) : Pad :=
+  assignmentPad (publicReferenceAssignment (cornerOpeningMatrix a b)
+    (cornerOpeningClaims (padAssemble (padUnit j))))
+
+theorem cornerColumnCandidates_correct (a b : Fp4) (basis : CornerPadBasis a b)
+    (j : Fin 4) : cornerPad a b (cornerColumnCandidates a b j) = padAssemble (padUnit j) := by
+  let v := padAssemble (padUnit j)
+  have hp : publicOpeningMatches (cornerOpeningMatrix a b) (cornerOpeningClaims v)
+      (padAssignment (basis.invert v)) := by
+    constructor
+    · rw [cornerOpeningMatrix_app]
+      have h : assignmentPad (padAssignment (basis.invert v)) = basis.invert v := by
+        cases basis.invert v; rfl
+      rw [h]
+      exact basis.right_inv v
+    · intro k; exact Fin.elim0 k
+  have he := publicReferenceAssignment_matches (cornerOpeningMatrix a b) (cornerOpeningClaims v)
+    (publicOpeningRows_consistent _ _ _ hp)
+  have heK := he.1
+  rw [cornerOpeningMatrix_app] at heK
+  exact heK
+
+private theorem cornerInverseGuard_of_right (a b : Fp4) (cols : Fin 4 → Pad)
+    (basis : CornerPadBasis a b)
+    (hc : ∀ j, cornerPad a b (cols j) = padAssemble (padUnit j)) :
+    cornerInverseGuard a b cols := by
+  have hr : ∀ r, (cornerLinear a b).app ((linearPadColumns cols).app r) = r := by
+    apply LinearPadMap.ext_app ((cornerLinear a b).comp (linearPadColumns cols)) LinearPadMap.id
+    intro j
+    change padCoordinates (cornerPad a b ((linearPadColumns cols).app (padUnit j))) = padUnit j
+    rw [linearPadColumns_unit, hc, padCoordinates_assemble]
+  intro j
+  refine ⟨?_, hr (padUnit j)⟩
+  have he := hr ((cornerLinear a b).app (padUnit j))
+  have ht := congrArg (fun r => basis.invert (padAssemble r)) he
+  simpa only [cornerLinear, padAssemble_coordinates, basis.left_inv] using ht
+
+/-- A witness-free, checked Gaussian rank constructor for arbitrary public row points. -/
+def makeCornerPadBasis (a b : Fp4) : Option (CornerPadBasis a b) :=
+  checkedCornerPadBasis a b (cornerColumnCandidates a b)
+
+/-- The computed constructor succeeds exactly when the corner map is invertible. -/
+theorem makeCornerPadBasis_success_iff (a b : Fp4) :
+    (makeCornerPadBasis a b).isSome = true ↔ Nonempty (CornerPadBasis a b) := by
+  constructor
+  · intro h
+    cases hb : makeCornerPadBasis a b with
+    | none => simp only [hb, Option.isSome_none, Bool.false_eq_true] at h
+    | some basis => exact ⟨basis⟩
+  · rintro ⟨basis⟩
+    apply (checkedCornerPadBasis_some_iff a b _).mpr
+    exact cornerInverseGuard_of_right a b _ basis (cornerColumnCandidates_correct a b basis)
+
+structure RowRankCertificate (a b k₁ k₂ k₃ : Fp4) where
+  basis : CornerPadBasis a b
+  first_nonzero : k₁ ≠ zero
+  second_nonzero : k₂ ≠ zero
+  third_nonzero : k₃ ≠ zero
+
+/-- Exactly the public four-corner rank check and three nonzero corner factors. -/
+def checkRowRank (a b k₁ k₂ k₃ : Fp4) : Option (RowRankCertificate a b k₁ k₂ k₃) :=
+  (makeCornerPadBasis a b).bind fun basis =>
+    if h₁ : k₁ ≠ zero then
+      if h₂ : k₂ ≠ zero then
+        if h₃ : k₃ ≠ zero then some ⟨basis, h₁, h₂, h₃⟩ else none
+      else none
+    else none
+
+def rowCellsCoordinatesBij : SimpleEquiv RowMaskCells RowTriple where
+  toFun r := ⟨padAssemble r.first, padAssemble r.second, padAssemble r.third⟩
+  invFun v := ⟨padCoordinates v.a, padCoordinates v.b, padCoordinates v.c⟩
+  left_inv r := by
+    simp only [padCoordinates_assemble]
+  right_inv v := by
+    simp only [padAssemble_coordinates]
+
+def rankCheckedRowView (a b k₁ k₂ k₃ : Fp4) (w : RowTriple) (r : RowMaskCells) :
+    Option RowTriple :=
+  (checkRowRank a b k₁ k₂ k₃).map fun cert =>
+    rowTripleAdd w (rowMaskCellsMap cert.basis k₁ k₂ k₃ r)
+
+def rankCheckedRowSim (a b k₁ k₂ k₃ : Fp4) (v : RowTriple) : Option RowTriple :=
+  (checkRowRank a b k₁ k₂ k₃).map (fun _ => v)
+
+/-- The rank-failure abort is part of the view. Accepted views jointly simulate the three
+row operands from twelve base-field cells; rejected views are the same public abort. -/
+theorem rank_checked_masking_rows_perfectly_simulated (a b k₁ k₂ k₃ : Fp4) :
+    PerfectlySimulated (rankCheckedRowView a b k₁ k₂ k₃) (rankCheckedRowSim a b k₁ k₂ k₃) := by
+  intro w
+  cases hc : checkRowRank a b k₁ k₂ k₃ with
+  | none =>
+    refine ⟨rowCellsCoordinatesBij, ?_⟩
+    intro r
+    simp only [rankCheckedRowView, rankCheckedRowSim, hc, Option.map_none]
+  | some cert =>
+    obtain ⟨e, he⟩ := masking_rows_joint_perfectly_simulated cert.basis k₁ k₂ k₃
+      cert.first_nonzero cert.second_nonzero cert.third_nonzero w
+    refine ⟨e, ?_⟩
+    intro r
+    simp only [rankCheckedRowView, rankCheckedRowSim, hc, Option.map_some]
+    exact congrArg some (he r)
+
+#verify_constructive padCoordinates_scale LinearPadMap.ext_app cornerPad_add cornerPad_scale
+  checkedCornerPadBasis_some_iff cornerColumnCandidates_correct makeCornerPadBasis_success_iff
+  rank_checked_masking_rows_perfectly_simulated
+
+section CubeSumcheckSoundness
+variable {F : Type} [LawfulField F] [DecidableEq F]
+
+/-- A running unmasked sumcheck: the bound prefix and the current claimed Boolean sum. -/
+abbrev CubeState (F : Type) := Option (List F × F)
+
+@[expose] def cubeLive (g : List F → F) (n : Nat) (_ : F) : CubeState F → Prop
+  | none => False
+  | some (cs, claim) => claim = cubeClaim g n cs
+
+instance cubeLiveDecidable (g : List F → F) (n : Nat) (x : F) (st : CubeState F) :
+    Decidable (cubeLive g n x st) := by
+  cases st with
+  | none => unfold cubeLive; exact isFalse id
+  | some p => exact inferInstanceAs (Decidable (p.2 = cubeClaim g n p.1))
+
+def cubeStep (n d : Nat) (S : List F) : CubeState F → List F → Nat → CubeState F
+  | none, _, _ => none
+  | some (cs, claim), p, ch =>
+    if cs.length < n ∧ p.length ≤ d + 1 ∧
+        add (RoundPoly.evalCoeffs p zero) (RoundPoly.evalCoeffs p one) = claim then
+      some (cs ++ [S.getD ch zero], RoundPoly.evalCoeffs p (S.getD ch zero))
+    else none
+
+private theorem cubeStep_flip_bound {g : List F → F} {d : Nat} (R : LineRep g d)
+    (n : Nat) (S : List F) (hS : S.Nodup)
+    (x : F) (st : CubeState F) (p : List F)
+    (hDoomed : ¬ cubeLive g n x st) (L : List (Fin S.length)) (hL : L.Nodup)
+    (hLive : ∀ ch ∈ L, ¬¬ cubeLive g n x (cubeStep n d S st p ch.1)) : L.length ≤ d := by
+  cases st with
+  | none =>
+    have hempty : L = [] := by
+      cases L with
+      | nil => rfl
+      | cons ch tail => exact False.elim (hLive ch (.head tail) id)
+    rw [hempty]; exact Nat.zero_le _
+  | some st =>
+    rcases st with ⟨cs, claim⟩
+    by_cases hcheck : cs.length < n ∧ p.length ≤ d + 1 ∧
+        add (RoundPoly.evalCoeffs p zero) (RoundPoly.evalCoeffs p one) = claim
+    · have hWrong : add (RoundPoly.evalCoeffs p zero) (RoundPoly.evalCoeffs p one) ≠
+          cubeClaim g n cs := by
+        rw [hcheck.2.2]; exact hDoomed
+      let vals := L.map (fun ch => S.getD ch.val zero)
+      have hNd : vals.Nodup := List.Pairwise.map _
+        (fun a b hab h => hab (Fin.ext (getD_inj_of_nodup zero S hS a.val b.val a.isLt b.isLt h))) hL
+      have hBound := cubeProver_round_flip_bound R n cs hcheck.1 p hcheck.2.1 hWrong vals hNd
+      have hAll : vals.filter (fun z => decide (RoundPoly.evalCoeffs p z = cubeRound g n cs z)) = vals := by
+        apply List.filter_eq_self.mpr
+        intro z hz
+        rcases List.mem_map.mp hz with ⟨ch, hch, rfl⟩
+        have h := Decidable.of_not_not (hLive ch hch)
+        change cubeLive g n x
+          (if _ then some (cs ++ [S.getD ch.val zero], RoundPoly.evalCoeffs p (S.getD ch.val zero)) else none) at h
+        rw [ite_eq_left hcheck] at h
+        change RoundPoly.evalCoeffs p (S.getD ch.val zero) =
+          cubeClaim g n (cs ++ [S.getD ch.val zero]) at h
+        rw [← cubeRound_eq_claim] at h
+        exact decide_eq_true h
+      rw [hAll, List.length_map] at hBound
+      exact hBound
+    · have hempty : L = [] := by
+        cases L with
+        | nil => rfl
+        | cons ch tail =>
+          have h := Decidable.of_not_not (hLive ch (.head tail))
+          change cubeLive g n x (if _ then _ else none) at h
+          rw [ite_eq_right hcheck] at h
+          exact False.elim h
+      rw [hempty]; exact Nat.zero_le _
+
+/-- Every round checks the degree and telescoping equation before the random challenge.
+    A wrong running claim can become correct at at most `d` challenge values. -/
+def cubeRoundSpec {g : List F → F} {d : Nat} (R : LineRep g d)
+    (n : Nat) (S : List F) (hS : S.Nodup) (hpos : 0 < S.length) :
+    SeqRoundSpec F (CubeState F) (List F) (cubeLive g n) where
+  chalCard := S.length
+  h_pos := hpos
+  bad := d
+  step := fun _ => cubeStep n d S
+  flip_bound := cubeStep_flip_bound R n S hS
+
+def cubeRoundSpecs {g : List F → F} {d : Nat} (R : LineRep g d)
+    (n : Nat) (S : List F) (hS : S.Nodup) (hpos : 0 < S.length) :=
+  List.replicate n (cubeRoundSpec R n S hS hpos)
+
+/-- The terminal check evaluates the actual committed summand at the full challenge point. -/
+def cubeVerify {g : List F → F} {d : Nat} (R : LineRep g d)
+    (n : Nat) (S : List F) (hS : S.Nodup) (hpos : 0 < S.length)
+    (x : F) (tr : List (List F × Nat)) : Bool :=
+  match runSeqSpecs (cubeRoundSpecs R n S hS hpos) x (some ([], x)) tr with
+  | none => false
+  | some (cs, claim) => decide (cs.length = n ∧ claim = g cs)
+
+def cubeIop {g : List F → F} {d : Nat} (R : LineRep g d)
+    (n : Nat) (S : List F) (hS : S.Nodup) (hpos : 0 < S.length) :=
+  seqSpecsIop (cubeRoundSpecs R n S hS hpos) (fun x => x = cubeClaim g n [])
+    (cubeVerify R n S hS hpos)
+
+/-- Round-by-round soundness of the executable Boolean-cube sumcheck, for arbitrary
+    positive row/column dimensions. Its terminal check refers to the true summand. -/
+def cubeRbr {g : List F → F} {d : Nat} (R : LineRep g d)
+    (n : Nat) (S : List F) (hS : S.Nodup) (hpos : 0 < S.length) :
+    RbrStateFunction (cubeIop R n S hS hpos) :=
+  seqSpecsRbr (cubeRoundSpecs R n S hS hpos) (fun x => some ([], x))
+    (fun x => x = cubeClaim g n []) (cubeVerify R n S hS hpos)
+    (fun _ hx => hx) (fun x tr _ hv => by
+      unfold cubeVerify at hv
+      generalize runSeqSpecs (cubeRoundSpecs R n S hS hpos) x (some ([], x)) tr = st at hv ⊢
+      cases st with
+      | none => exact Bool.noConfusion hv
+      | some st =>
+        rcases st with ⟨cs, claim⟩
+        have h : cs.length = n ∧ claim = g cs := of_decide_eq_true hv
+        change claim = cubeClaim g n cs
+        rw [cubeClaim_full g n cs h.1]
+        exact h.2)
+
+/-- State-restoration soundness against an adaptive rewinding tree, not just a fixed
+    round polynomial. Rows instantiate `d=9`; columns instantiate `d=2`. -/
+theorem cube_sumcheck_state_restoration_soundness {g : List F → F} {d : Nat}
+    (R : LineRep g d) (n : Nat) (S : List F) (hS : S.Nodup) (hpos : 0 < S.length)
+    (x : F) (hx : x ≠ cubeClaim g n [])
+    (sched : List (Fin (cubeRoundSpecs R n S hS hpos).length))
+    (tree : SrScheduleTree (cubeIop R n S hS hpos) sched) :
+    RatBound.le (srTreeAcceptProb (cubeIop R n S hS hpos) tree x)
+      (srScheduleErrorSum (cubeRbr R n S hS hpos) sched) :=
+  rbr_implies_state_restoration_soundness (cubeRbr R n S hS hpos) x
+    (by simpa only [cubeIop, seqSpecsIop_inLang] using hx) sched tree
+
+#verify_constructive Qsag.ZkHem.cube_sumcheck_state_restoration_soundness
+end CubeSumcheckSoundness
+
+/-! ## §12. Audit gates -/
+
+#verify_constructive Qsag.ZkHem.quartic_primitive_pad_bijection Qsag.ZkHem.pad_full_rank_iff
+  Qsag.ZkHem.padded_evaluation_perfectly_simulated
+  Qsag.ZkHem.libra_real_eq_sim Qsag.ZkHem.libra_sumcheck_perfectly_simulated
+  Qsag.ZkHem.salted_leaves_identical_until_bad Qsag.ZkHem.salted_leaf_digest_simulated
+  Qsag.ZkHem.companion_blend_perfectly_simulated
+  Qsag.ZkHem.blended_terminal_fold_perfectly_simulated
+  Qsag.ZkHem.opened_symbols_perfectly_simulated
+  Qsag.ZkHem.zkHem_perfect_hvzk_simulation Qsag.ZkHem.zkHem_witness_indistinguishable
+  Qsag.ZkHem.honest_linear_round
+  Qsag.ZkHem.batched_base_companion_perfectly_simulated
+  Qsag.ZkHem.libra_special_soundness Qsag.ZkHem.companion_special_soundness
+  Qsag.ZkHem.zkHem_mask_rounds_state_restoration_soundness Qsag.ZkHem.maskIop_honest_accepts
+  Qsag.ZkHem.masked_sumcheck_round_flip_le_degree
+  Qsag.ZkHem.zkHem_mask_discrepancy_below_2_pow_neg_240
+
+#tooth_pair Qsag.ZkHem.quartic_primitive_pad_bijection vs
+  Qsag.ZkHem.tooth_quadratic_subfield_pad_rank_deficient
+#tooth_pair Qsag.ZkHem.padded_evaluation_perfectly_simulated vs
+  Qsag.ZkHem.tooth_subfield_challenge_leaks_odd_coordinates
+#tooth_pair Qsag.ZkHem.batched_base_companion_perfectly_simulated vs
+  Qsag.ZkHem.tooth_quadratic_subfield_pad_rank_deficient
+#tooth_pair Qsag.ZkHem.libra_sumcheck_perfectly_simulated vs
+  Qsag.ZkHem.tooth_unmasked_sumcheck_round_leaks
+#tooth_pair Qsag.ZkHem.blended_terminal_fold_perfectly_simulated vs
+  Qsag.ZkHem.tooth_stage0_only_blinding_leaks_via_early_stop
+#tooth_pair Qsag.ZkHem.blended_terminal_fold_perfectly_simulated vs
+  Qsag.ZkHem.tooth_stage0_only_blinding_leaks_via_ood
+#tooth_pair Qsag.ZkHem.salted_leaves_identical_until_bad vs
+  Qsag.ZkHem.tooth_unsalted_leaf_confirms_guess
+#tooth_pair Qsag.ZkHem.zkHem_perfect_hvzk_simulation vs
+  Qsag.ZkHem.tooth_zero_blend_challenge_reveals_word
+#tooth_pair Qsag.ZkHem.zkHem_mask_rounds_state_restoration_soundness vs
+  Qsag.ZkHem.tooth_uncommitted_companion_forges_arbitrary_statement
+#tooth_pair Qsag.ZkHem.zkHem_mask_rounds_state_restoration_soundness vs
+  Qsag.ZkHem.tooth_uncommitted_mask_sum_forges_arbitrary_claim
+
+end Qsag.ZkHem
+end
