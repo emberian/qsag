@@ -460,12 +460,43 @@ def is_rust_non_crypto_helper(sym: str) -> bool:
     # Destructors are storage management, except those of the secret-erasing guards: their
     # glue is the code that walks and wipes the secret, so it is screened like a kernel.
     if "drop_in_place" in sym or "drop_glue" in sym:
-        return not is_secret_guard_drop(sym)
+        return secret_guard_drop_kind(sym) != "flat"
     return False
 
 
-def is_secret_guard_drop(sym: str) -> bool:
-    return bool(re.search(r"drop_(?:in_place|glue)::<qsag_asm::wipe::Secret", sym))
+_GUARD_DROP = re.compile(r"drop_(?:in_place|glue)::<qsag_asm::wipe::(SecretBuffer|SecretScratch)<(.*)$")
+
+
+def secret_guard_drop_kind(sym: str) -> str | None:
+    """Classify the destructor of a `qsag_asm::wipe` guard, or `None` for any other symbol.
+
+    `flat`: the guard holds its secret inline, or in one `Vec` of plain elements; the taint
+    screen can state its layout. `nested`: the payload owns further heap buffers, whose own
+    headers (public lengths and capacities) sit inside secret-classified memory; this screen
+    cannot tell them from secret words, so those destructors are counted and reported, not
+    checked.
+    """
+    match = _GUARD_DROP.search(sym)
+    if not match:
+        return None
+    guard, payload = match.groups()
+    if guard == "SecretBuffer" and payload.startswith("alloc::vec::Vec<"):
+        payload = payload[len("alloc::vec::Vec<"):]
+    return "nested" if "alloc::" in payload else "flat"
+
+
+def has_public_vec_header_argument(sym: str) -> bool:
+    """First argument points at a `Vec` header (capacity, pointer, length), which is public.
+
+    True for the destructor of a flat `SecretVec` / `SecretScratch` and for the
+    `secret_vec_*` growth helpers, whose first parameter is `&mut Vec<T>`. Reallocation and
+    freeing depend on that header; the elements the pointer leads to stay secret.
+    """
+    if "qsag_asm::wipe::secret_vec_" in sym:
+        return True
+    match = _GUARD_DROP.search(sym)
+    return bool(match) and secret_guard_drop_kind(sym) == "flat" and (
+        match[1] == "SecretScratch" or match[2].startswith("alloc::vec::Vec<"))
 
 
 def is_branchless_portable_primitive(sym: str) -> bool:
@@ -1436,9 +1467,7 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
         # Documented `bitslice.rs` contract: `rows` (`rdi`/`x0`) is secret; `pattern` (`rsi`/`x1`)
         # is the public subset-XOR nibble selector matrix.
         public_pointer.add('x1' if arm else 'rsi')
-    if re.search(r'drop_(?:in_place|glue)::<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<', symbol):
-        # The guard is exactly a `Vec` header: capacity, pointer and length are public, and
-        # freeing depends on the capacity. What the pointer leads to stays secret.
+    if has_public_vec_header_argument(symbol):
         public_pointer.add('x0' if arm else 'rdi')
     flags = True
     errors = []
@@ -1910,8 +1939,21 @@ def self_tests():
     # Guard destructors are screened; other drop glue is storage management.
     vec_guard = 'core::ptr::drop_glue::<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<u8>>>'
     array_guard = 'core::ptr::drop_glue::<qsag_asm::wipe::SecretBuffer<[u8; 32]>>'
+    nested_guard = ('core::ptr::drop_glue::<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<'
+                    'alloc::vec::Vec<u8>>>>')
+    scratch_guard = 'core::ptr::drop_glue::<qsag_asm::wipe::SecretScratch<[u64; 25]>>'
     assert is_rust_crypto_symbol(vec_guard) and is_rust_crypto_symbol(array_guard)
+    assert is_rust_crypto_symbol(scratch_guard)
     assert not is_rust_crypto_symbol('core::ptr::drop_glue::<qsag_asm::durable::LockedRecord>')
+    assert [secret_guard_drop_kind(s) for s in (vec_guard, array_guard, scratch_guard, nested_guard,
+            'core::ptr::drop_glue::<qsag_asm::wipe::SecretBuffer<[alloc::vec::Vec<u64>; 25]>>',
+            'qsag_asm::wipe::secret_vec_reserve::<u64>')] == [
+                'flat', 'flat', 'flat', 'nested', 'nested', None]
+    assert not is_rust_crypto_symbol(nested_guard)
+    assert [has_public_vec_header_argument(s) for s in (
+        vec_guard, scratch_guard, 'qsag_asm::wipe::secret_vec_reserve::<u64>',
+        array_guard, nested_guard, 'qsag_asm::wipe::volatile_fill::<u8>')] == [
+            True, True, True, False, False, False]
     capacity_branch = [('mov', 'rbx, rdi'), ('mov', 'rsi, qword ptr [rbx]'),
                        ('test', 'rsi, rsi'), ('je', '0x40')]
     content_branch = [('mov', 'r14, qword ptr [rdi + 0x8]'), ('mov', 'al, byte ptr [r14]'),
@@ -2000,6 +2042,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
     errors, audited = [], []
     branches = 0
     wiped_kernels, unenforced_vector_writers = [], []
+    nested_guard_drops = sum(secret_guard_drop_kind(symbol) == 'nested' for symbol in functions)
     for symbol, instructions in functions.items():
         # Test/benchmark timing and assertion code is not a cryptographic kernel.
         if re.search(r'::(?:tests|[A-Za-z0-9_]+_tests)::', symbol):
@@ -2045,6 +2088,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
     print(f'  vector-register wipe at exit enforced on {len(wiped_kernels)} compiled SIMD kernels; '
           f'{len(unenforced_vector_writers)} other compiled functions write vector registers '
           'without that check (compiler-vectorized portable code)')
+    print(f'  {nested_guard_drops} secret-guard destructors own nested heap buffers and are not screened')
     for error in errors:
         print(f'  FAIL: {error}', file=sys.stderr)
     present = sum(any(module in symbol for symbol in audited) for module in RUST_MODULES)

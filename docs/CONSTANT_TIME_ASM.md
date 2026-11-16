@@ -2,8 +2,8 @@
 
 This document specifies **Pillar 3** of qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation:
 
-1. **`crates/qsag-asm`**: Zero-dependency `#![no_std]` crate with 19 `x86_64` and 9 `aarch64` hand-written assembly kernels (`AVX2`, `GFNI`, `VPCLMULQDQ`/`PCLMULQDQ`, `BMI2`/`ADX`; `ARMv8.2-SHA3`, `PMULL`, `NEON`, `ARMv8.4-DIT`), compiled-Rust intrinsic modules for `AVX-512`, `SHA-NI`, `vpshufb` and `NEON` (Section 2.3), runtime `CPUID`/`XGETBV`/`AT_HWCAP`/`sysctlbyname` capability probing across five backend tiers, and a branchless portable fallback with no secret-indexed table.
-2. **`scripts/audit_elf_ct.py`**: Automated static binary disassembly verifier auditing every assembly symbol, compiled Rust crypto functions in native `.o` or `.rlib`, and both Linux ELF and Apple Mach-O `aarch64` assembly kernels, with negative `#tooth` self-tests. `crates/qsag-asm/scripts/audit_elf_ct.py` is a seven-line compatibility entry point that runs the repository-root script.
+1. **`crates/qsag-asm`**: Zero-dependency `#![no_std]` crate with 19 `x86_64` and 9 `aarch64` hand-written assembly kernels (`AVX2`, `GFNI`, `VPCLMULQDQ`/`PCLMULQDQ`, `BMI2`/`ADX`; `ARMv8.2-SHA3`, `PMULL`, `NEON`, `ARMv8.4-DIT`), compiled-Rust SIMD modules for `AVX-512`, `SHA-NI`, `vpshufb` and `NEON` (Section 2.3), runtime `CPUID`/`XGETBV`/`AT_HWCAP`/`sysctlbyname` capability probing across five backend tiers, and a branchless portable fallback with no secret-indexed table.
+2. **`scripts/audit_elf_ct.py`**: Automated static binary disassembly verifier auditing every required assembly symbol and selected compiled Rust SIMD/wipe functions in native `.o` or `.rlib`, and both Linux ELF and Apple Mach-O `aarch64` assembly kernels, with negative `#tooth` self-tests. `crates/qsag-asm/scripts/audit_elf_ct.py` is a seven-line compatibility entry point that runs the repository-root script.
 3. **`lean/Qsag/Machine/`**: Lean 4.35 leakage semantics and taint-noninterference checkers (`0 sorry`, `0 axiom`, `0 native_decide`). `ConstantTimeIsa.lean` is the checker over a hand-written instruction AST and models no `qsag-asm` kernel; the kernels are proved on their **decoded bytes** in `IsaCt.lean`, `ElfVerify.lean`, `ElfFixtureVerify.lean`, `McRefine.lean`, `ElfFunctionalEquiv.lean`, `SydTv.lean` and `ClmulSimd.lean` (Section 6).
 4. **`crates/qsag-asm/{examples,tests}/ct_dudect.rs`**: Empirical Welch's $t$-test constant-time harness (`1,000,192` cycle-counter traces per kernel in deep mode; `25,600`-trace sub-second CI gate via `QSAG_DUDECT_SAMPLES`), validated on both **Intel Core i9-12900 (`Alder Lake`, `AVX2+GFNI+VPCLMULQDQ`)** and **AMD EPYC-Milan (`Zen 3`, `AVX2+PCLMULQDQ`)**.
 
@@ -22,9 +22,9 @@ The binary auditor covers the 16 x86 kernels of `x86_64_asm.rs` (ELF, Windows CO
 Mach-O), the 7 AArch64 kernels of `aarch64_kernels.s` / `aarch64_asm.rs` (ELF and Mach-O), the
 5 `bitslice.rs` kernels (3 x86, 2 AArch64; in the compiled ELF, and the two AArch64 bodies by
 cross-assembly), and emitted Rust crypto functions: 19 x86-64 and 9 AArch64 assembly symbols
-in all. Compiled Rust checks
-are instruction-rule checks, with stricter branch checks on named straight-line primitives;
-they are not whole-program taint proofs. The empirical harness exercises **10 dispatched
+in all. Compiled Rust checks select the `target_feature` SIMD entries, bitslice/linear-map functions
+and wipe helpers for control-flow/dataflow screening. Other compiled Rust functions are
+counted and reported without being checked. This is not a whole-program taint proof. The empirical harness exercises **10 dispatched
 operations**, including `qsag_asm_goldilocks_mul_ct`; backend selection determines which
 assembly implementation runs. A passing timing sample is evidence, not universal timing proof.
 
@@ -83,7 +83,7 @@ The implementation is designed around the following disciplines. The Lean proofs
 
 ### 2.1 Explicit `extern "sysv64"` Calling Convention (`x86_64`)
 
-All 19 `x86_64` `global_asm!` kernels (16 in `crates/qsag-asm/src/x86_64_asm.rs`, 3 in `crates/qsag-asm/src/bitslice.rs`) follow the System V AMD64 register convention (`rdi, rsi, rdx, rcx, r8, r9`; `rbx, rbp, r12..r15` callee-saved). Every `x86_64` FFI declaration in `x86_64_asm.rs` and `bitslice.rs` is in an `unsafe extern "sysv64"` block rather than `extern "C"` (the `aarch64` declarations use `extern "C"`), guaranteeing that on `x86_64-pc-windows-msvc` / `x86_64-pc-windows-gnu` LLVM automatically bridges Windows x64 arguments (`rcx, rdx, r8, r9`) and preserves Windows non-volatile registers (`rdi, rsi, xmm6..xmm15`). Stack pointers remain 16-byte aligned with zero red-zone (`[rsp - disp]`) accesses.
+All 19 `x86_64` `global_asm!` kernels (16 in `crates/qsag-asm/src/x86_64_asm.rs`, 3 in `crates/qsag-asm/src/bitslice.rs`) follow the System V AMD64 register convention (`rdi, rsi, rdx, rcx, r8, r9`; `rbx, rbp, r12..r15` callee-saved). Every `x86_64` FFI declaration in `x86_64_asm.rs` and `bitslice.rs` is in an `unsafe extern "sysv64"` block rather than `extern "C"` (the `aarch64` declarations use `extern "C"`), guaranteeing that on `x86_64-pc-windows-msvc` / `x86_64-pc-windows-gnu` LLVM automatically bridges Windows x64 arguments (`rcx, rdx, r8, r9`) and preserves Windows non-volatile registers (`rdi, rsi, xmm6..xmm15`). The Keccak scratch frame is explicitly aligned to 32 bytes; entry/return stack alignment follows the calling convention. These global kernels avoid red-zone (`[rsp - disp]`) accesses.
 
 ### 2.2 Lock-Free Runtime Backend Selection
 
@@ -122,8 +122,8 @@ runs `avx512::gf256_shamir_*_avx512_gfni` on 64-byte blocks and the GFNI assembl
 These 28 symbols are the ones named by `currentX86SymbolContracts` and
 `currentAarch64SymbolContracts` in `lean/Qsag/Machine/ElfVerify.lean`.
 
-**Compiled Rust SIMD modules.** These are `#[target_feature]` intrinsic functions, not
-assembly. They are compiled by rustc/LLVM, so their machine code is covered by the
+**Compiled Rust SIMD modules.** These are Rust `#[target_feature]` functions using intrinsics and, in some modules
+such as `gf256_simd.rs`, inline assembly. They are compiled by rustc/LLVM, so their machine code is covered by the
 instruction-rule audit of the release archive (`REQUIRED_SIMD_SYMBOLS` in
 `scripts/audit_elf_ct.py` names each entry point so that a missing kernel fails the audit) and
 not by the Lean symbol contracts above.
@@ -189,7 +189,7 @@ archive and in the audited and Lean-contracted symbol set, but the dispatcher ne
 them. They are reachable only through the explicit wrappers
 `gf256_shamir_mul_avx2_russian_peasant` and `gf256_shamir_mac_avx2_russian_peasant`.
 
-`gf256_simd.rs` works in the tower directly. A byte $a = a_0 + a_1\alpha \in \mathcal{T}_3$ splits into two nibbles in $\mathcal{T}_2 = \mathbb{F}_{16}$; since $\mathcal{T}_2^\times \cong C_{15}$, its logarithm and exponential tables are 16 bytes each and fit one `vpshufb` lane. The constants (`T3_VPSHUFB_CONSTS`) are loaded into `ymm` registers once per call; each `vpshufb` then indexes a register by a secret nibble and reads no memory. Setting `LOG_T2[0] = 0x80` with saturating `vpaddusb` makes bit 7 flag a zero operand, so `vpshufb` zeroes the product without a branch. A `const` block checks all $256 \times 256 = 65{,}536$ byte pairs against `portable::wiedemann_mul_t3_u8` at compile time. On `aarch64` the same split-nibble method uses `vqtbl1q_u8` (`tbl`) with `vmull_p8` (`PMULL`).
+`gf256_simd.rs` works in the tower directly. A byte $a = a_0 + a_1\alpha \in \mathcal{T}_3$ splits into two nibbles in $\mathcal{T}_2 = \mathbb{F}_{16}$; since $\mathcal{T}_2^\times \cong C_{15}$, its logarithm and exponential tables are 16 bytes each and fit one `vpshufb` lane. The constants (`T3_VPSHUFB_CONSTS`) are loaded into `ymm` registers once per call; each `vpshufb` then indexes a register by a secret nibble and reads no memory. Setting `LOG_T2[0] = 0x80` with saturating `vpaddusb` makes bit 7 flag a zero operand, so `vpshufb` zeroes the product without a branch. A `const` block checks all $16 \times 16 = 256$ nibble pairs for the modeled table instructions against `tower_mul_t2` and the scaled product. Full $256 \times 256$ byte-pair parity is a separate runtime test, not this compile-time check. On `aarch64` the same split-nibble method uses `vqtbl1q_u8` (`tbl`) with `vmull_p8` (`PMULL`).
 
 Recorded throughput speedups over the portable code are **505.2×** (`mul`) and **517.0×** (`mac`) on the GFNI path (Intel Core i9-12900) and **51.3×** (`mul`) and **365.0×** (`mac`) on the non-GFNI AVX2 path (AMD EPYC-Milan). These are historical measurements (Section 5.3); they have not been re-taken against the current dispatch.
 
