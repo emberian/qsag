@@ -2,19 +2,24 @@ module
 /-
 # Qsag.Tests.ClosedReductionTeeth — mutation teeth for `Qsag.Top.ClosedProtocolReductions`
 
-* `tooth_omitting_list_size_factor_underestimates_error`: the deployed schedule with every
-  list size set to `1` has a strictly smaller `scheduleQromError`, and
-  `tooth_omitting_list_size_fails_johnson_check`: that schedule is rejected by `johnsonOk`.
-* `tooth_beyond_johnson_radius_invalidates_certificate`: the first deployed stage with its
-  agreement lowered to `n / 2` (`A² ≤ n·d`) fails `johnsonOk` for every slack and list size.
+* `inhabited_whir_exec_closed_qrom_soundness_hypotheses`: the hypotheses of
+  `Top.whir_exec_closed_qrom_soundness` are jointly satisfiable at a schedule with one stage
+  (`ClosedWhir.sampledQueryCert`), with a statement outside the language.
+* `tooth_sampled_query_cert_state_not_constantly_false`,
+  `tooth_sampled_query_zero_flip_claim_is_false`: that certificate's verifier accepts an honest
+  transcript, and accepts the false statement on one challenge, so neither "always rejects" nor
+  "never errs" holds for it.
+* Pairs with the negative controls proved in `Qsag.Protocol.Aggregation.ClosedWhirSchedule`
+  (they evaluate that module's definitions, so they are proved there): list sizes dropped from
+  the deployed stages, a stage beyond the Johnson radius, the stage-free schedule.
 * `tooth_lying_opening_yields_collision`: under a leaf hash that only keeps the parity, an
   accepted opening of `5` against a committed `7` makes `findCollision` return a witness;
-  `inhabited_honest_opening_no_collision`: the honest opening returns none.
+  `inhabited_honest_opening_no_collision`: the honest opening returns none. These two evaluate
+  `ClosedFs.findCollision`, whose body is not exported by `ClosedFsQromCompile`.
 * The epoch-latch tooth lives in `Qsag.Tests.ClosedEufCmaTeeth`.
 -/
 
 public import Qsag.Top.ClosedProtocolReductions
-public import Qsag.Tests.ClosedEufCmaTeeth
 public import Qsag.Protocol.Aggregation.ClosedWhirSchedule
 public import Qsag.Protocol.Aggregation.ClosedFsQromCompile
 public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
@@ -27,41 +32,10 @@ import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag.ClosedReductionTeeth
 
-open Qsag.ClosedWhir Qsag.ClosedFs
+open Qsag Qsag.ClosedWhir Qsag.ClosedFs
 
 set_option autoImplicit false
 set_option exponentiation.threshold 100000
-
-def dropListSize (s : WhirStage) : WhirStage := { s with listSize := 1 }
-
-/-- The deployed schedule with the Johnson list-size multipliers omitted. -/
-def deployedNoList : WhirVerifierSchedule :=
-  ⟨24, goldilocksExt4Card, goldilocksExt4Card_pos, deployedStages.map dropListSize⟩
-
-theorem tooth_omitting_list_size_factor_underestimates_error :
-    ¬ (RatBound.le (scheduleQromError deployedSched (2 ^ 40))
-        (scheduleQromError deployedNoList (2 ^ 40))) := by
-  unfold RatBound.le
-  decide +kernel
-
-theorem tooth_omitting_list_size_fails_johnson_check :
-    ¬ (deployedNoList.johnsonOk = true) := by
-  decide +kernel
-
-/-- First deployed stage with agreement `n / 2`, any slack `e / E` and any list size `L`. -/
-def beyondRadiusStage (e E L : Nat) : WhirStage :=
-  { foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216,
-    degBound := 262146, agree := 524288, etaNum := e, etaDen := E, listSize := L,
-    sumcheckDeg := 3, mcaNum := 0 }
-
-theorem tooth_beyond_johnson_radius_invalidates_certificate (e E L : Nat) :
-    ¬ ((beyondRadiusStage e E L).johnsonOk = true) := by
-  have h : (beyondRadiusStage e E L).johnsonOk = false :=
-    WhirStage.johnsonOk_false_of_beyond_radius _ (by
-      show (524288 : Nat) * 524288 ≤ 2 ^ 20 * 262146
-      decide +kernel)
-  rw [h]
-  exact Bool.false_ne_true
 
 /-- Node hash keeping the left child, leaf hash keeping the parity of the value. -/
 def parityLeafSetup : MerkleSetup Nat Nat := ⟨fun _ _ a _ => a, fun _ _ v => v % 2⟩
@@ -74,61 +48,64 @@ theorem inhabited_honest_opening_no_collision :
     findCollision parityLeafSetup (fun _ => 0) (fun _ _ => 7) [(0, 0)] [(7, [])] = none := by
   decide +kernel
 
-#verify_constructive Qsag.ClosedReductionTeeth.tooth_omitting_list_size_factor_underestimates_error
-#verify_constructive Qsag.ClosedReductionTeeth.tooth_omitting_list_size_fails_johnson_check
-#verify_constructive Qsag.ClosedReductionTeeth.tooth_beyond_johnson_radius_invalidates_certificate
 #verify_constructive Qsag.ClosedReductionTeeth.tooth_lying_opening_yields_collision
 #verify_constructive Qsag.ClosedReductionTeeth.inhabited_honest_opening_no_collision
 
-#tooth_pair Qsag.ClosedWhir.deployedSched_error_at_2pow40 vs
-  Qsag.ClosedReductionTeeth.tooth_omitting_list_size_factor_underestimates_error
-#tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
-  Qsag.ClosedReductionTeeth.tooth_omitting_list_size_fails_johnson_check
-#tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
-  Qsag.ClosedReductionTeeth.tooth_beyond_johnson_radius_invalidates_certificate
+/-! ### The constructed `WhirScheduleCert` -/
+
+/-- **Inhabitedness of the hypotheses of `Top.whir_exec_closed_qrom_soundness`** at a schedule
+    with a stage: an environment, a schedule passing the Johnson check, a certificate, and a
+    statement outside the language. Only the Merkle setup, the codec and the adversary are left
+    to the caller. -/
+theorem inhabited_whir_exec_closed_qrom_soundness_hypotheses :
+    ∃ (env : WhirEnv Goldilocks) (sched : WhirVerifierSchedule)
+      (_ : WhirScheduleCert env sched 2) (x : WhirStmt Goldilocks),
+      sched.stages.length = 1 ∧ sched.johnsonOk = true ∧ ¬ whirInLang env sched x :=
+  ⟨sampledQueryEnv, sampledQuerySched, sampledQueryCert,
+    ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.zero⟩,
+    sampledQuerySched_shape.1, sampledQuerySched_shape.2.1, sampledQuery_false_not_inLang⟩
+
+/-- `#tooth` The constructed certificate is not the all-rejecting one: its verifier accepts the
+    honest transcript, so "the state function is constantly false" is refuted for it. -/
+theorem tooth_sampled_query_cert_state_not_constantly_false :
+    ¬ (∀ (x : WhirStmt Goldilocks) (tr : List (WhirMsg Goldilocks × Nat)),
+        sampledQueryCert.cert.state x tr = false) := by
+  intro h
+  have hAcc := sampledQueryCert.cert.accept _ _ sampledQuery_honest_accepts.1
+  rw [h] at hAcc
+  exact Bool.false_ne_true hAcc
+
+/-- `#tooth` Soundness of the one-stage verifier is not perfect: the false statement is accepted
+    on a query challenge, so a certificate claiming zero flips in the query round would be
+    wrong. -/
+theorem tooth_sampled_query_zero_flip_claim_is_false :
+    ¬ (∀ (m0 m1 : WhirMsg Goldilocks) (c0 c1 : Nat),
+        (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+          ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.zero⟩
+          [(m0, c0), (m1, c1)] = false) := by
+  intro h
+  have hAcc := sampledQuery_false_statement_accepted_once.1
+  rw [h] at hAcc
+  exact Bool.false_ne_true hAcc
+
+#verify_constructive Qsag.ClosedReductionTeeth.inhabited_whir_exec_closed_qrom_soundness_hypotheses
+#verify_constructive Qsag.ClosedReductionTeeth.tooth_sampled_query_cert_state_not_constantly_false
+#verify_constructive Qsag.ClosedReductionTeeth.tooth_sampled_query_zero_flip_claim_is_false
+
+#tooth_pair Qsag.Top.sampledQueryWhir_closed_qrom_soundness vs
+  Qsag.ClosedReductionTeeth.tooth_sampled_query_cert_state_not_constantly_false
+#tooth_pair Qsag.ClosedWhir.sampledQuery_query_round_flips vs
+  Qsag.ClosedReductionTeeth.tooth_sampled_query_zero_flip_claim_is_false
+#tooth_pair Qsag.Top.whir_exec_closed_qrom_soundness vs
+  Qsag.ClosedWhir.tooth_empty_schedule_rejects
+#tooth_pair Qsag.Top.deployed_whir_exec_closed_qrom_128 vs
+  Qsag.ClosedWhir.tooth_omitting_list_size_lowers_every_fold_bound
+#tooth_pair Qsag.Top.deployed_whir_exec_closed_qrom_128 vs
+  Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
+#tooth_pair Qsag.Top.deployed_whir_exec_closed_qrom_128 vs
+  Qsag.ClosedWhir.tooth_beyond_johnson_radius_invalidates_certificate
 #tooth_pair Qsag.ClosedFs.openings_agree vs
   Qsag.ClosedReductionTeeth.tooth_lying_opening_yields_collision
 
 end Qsag.ClosedReductionTeeth
-end
-
-public section
-namespace Qsag.ClosedWhir
-open Qsag.ClosedFs
-variable {F : Type} [Qsag.LawfulField F] [DecidableEq F]
-/-- The certificate type is inhabited at the stage-free schedule, whose verifier rejects. -/
-def emptyScheduleCert (env : WhirEnv F) (nv q : Nat) (hq : 0 < q) (w : Nat) :
-    WhirScheduleCert env ⟨nv, q, hq, []⟩ w where
-  cert :=
-    { state := fun _ _ => false
-      bad := fun r => Fin.elim0 r
-      init := fun _ _ => rfl
-      accept := fun x tr h => by
-        have hv : (decide (tr.length = 0) &&
-            whirVerdict env ⟨nv, q, hq, []⟩ x.claim
-              (tr.map (fun mc => ((⟨mc.1.poly, mc.1.answers⟩ : WhirPub F), mc.2)))
-              ((whirQueries env ⟨nv, q, hq, []⟩
-                (tr.map (fun mc => ((⟨mc.1.poly, mc.1.answers⟩ : WhirPub F), mc.2)))).map
-                (fun qq => whirTable ⟨nv, q, hq, []⟩ x (tr.map (fun mc => mc.1)) qq.1 qq.2))) =
-            true := h
-        rw [Bool.and_eq_true] at hv
-        have hLen : tr = [] := List.eq_nil_of_length_eq_zero (of_decide_eq_true hv.1)
-        rw [hLen] at hv
-        exact absurd hv.2 Bool.false_ne_true
-      flip := fun _ _ r _ _ _ _ => Fin.elim0 r }
-  covers := fun r => Fin.elim0 r
-
-/-- A stage-free certificate supplies no accepting transcript; it is only a negative control. -/
-theorem tooth_empty_schedule_rejects (env : WhirEnv F) (nv q w : Nat) (hq : 0 < q)
-    (x : WhirStmt F) (tr : List (WhirMsg F × Nat)) :
-    (whirOracleIop env ⟨nv, q, hq, []⟩ w).verify x tr = false := by
-  cases h : (whirOracleIop env ⟨nv, q, hq, []⟩ w).verify x tr
-  · rfl
-  · have bad := (emptyScheduleCert env nv q hq w).cert.accept x tr h
-    exact False.elim (Bool.false_ne_true bad)
-
-#verify_constructive Qsag.ClosedWhir.tooth_empty_schedule_rejects
-#tooth_pair Qsag.ClosedWhir.whir_exec_closed_qrom_soundness vs
-  Qsag.ClosedWhir.tooth_empty_schedule_rejects
-end Qsag.ClosedWhir
 end
