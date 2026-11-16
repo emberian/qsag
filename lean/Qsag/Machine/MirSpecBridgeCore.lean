@@ -8443,3 +8443,34 @@ end Qsag
 #tooth_pair Qsag.isa_to_ideal_preserves_multiturn_safety vs Qsag.tooth_forged_quorum_cert_refused
 #tooth_pair Qsag.shamirSubset_preserves_multiturn_safety vs Qsag.tooth_stateless_policy_breaks_four_layer_safety
 #verify_constructive Qsag.inhabited_four_layer_chain
+
+/-! ### Exports for lane aeneas -/
+
+public section
+namespace Qsag
+#export_eqns mirVelocityAuthorizeSpend mirVelocityMachine
+#export_eqns abortMirMlDsaGate mirMlDsaTryReleaseZShare mirMlDsaReleaseMachine
+#export_eqns MirBeltLatchKernel.WellFormed mirBeltMaxEpochJump mirBeltLatchKernelBind mirBeltLatchKernelMachine
+#export_eqns u64MemBool
+
+/-- Defining equation of `mirPolicyStep`. -/
+theorem mirPolicyStep_eq (m : MirPolicyGuardState) (req : MirTxIntent) :
+    mirPolicyStep m req =
+      if req.windowId != m.windowId then none
+      else if req.policyDigest != m.pinnedPolicyDigest then none
+      else if req.authorityDigest != m.pinnedAuthorityDigest then none
+      else if ¬ (req.recipient ∈ m.allowedRecipients) then none
+      else if ¬ (req.amountUnits.toNat ≤ m.perTxCap.toNat) then none
+      else if ¬ (req.amountUnits.toNat ≤ (m.velocityWindowCap - m.accumulatedSpend).toNat) then none
+      else if u64MemBool req.nonce m.burnedNonces then none
+      else
+        let m' : MirPolicyGuardState :=
+          { m with
+            accumulatedSpend := m.accumulatedSpend + req.amountUnits
+            burnedNonces := req.nonce :: m.burnedNonces }
+        let tx := req.toTransactionIntent
+        some (m', { intent := tx, canonicalBytes := encodeTransactionIntent tx }) := by
+  unfold mirPolicyStep
+  rfl
+end Qsag
+end
