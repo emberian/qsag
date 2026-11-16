@@ -18,9 +18,9 @@ pub struct Demand {
     pub boolean_triples: usize,
     pub auth_words: usize,
     /// Indexed by [`ThresholdField`] discriminant.
-    pub field_triples: [usize; 3],
-    pub field_randoms: [usize; 3],
-    pub dabits: [usize; 3],
+    pub field_triples: [usize; 5],
+    pub field_randoms: [usize; 5],
+    pub dabits: [usize; 5],
 }
 
 /// One quorum member's one-use material for one stream. A transport serves
@@ -30,9 +30,9 @@ pub struct Demand {
 pub struct PartyPreprocessing {
     boolean_triples: VecDeque<BooleanTriple>,
     auth_words: VecDeque<AuthWord>,
-    field_triples: [VecDeque<FieldTriple>; 3],
-    field_randoms: [VecDeque<FieldShare>; 3],
-    dabits: [VecDeque<DaBitWord>; 3],
+    field_triples: [VecDeque<FieldTriple>; 5],
+    field_randoms: [VecDeque<FieldShare>; 5],
+    dabits: [VecDeque<DaBitWord>; 5],
 }
 
 fn take<V>(queue: &mut VecDeque<V>, count: usize) -> Result<Vec<V>, Error> {
@@ -118,8 +118,8 @@ pub use fixture::FixtureDealer;
 mod fixture {
     use super::*;
     use crate::{
-        circuit::{Domain, Value},
-        threshold_mpc::{MacKeyShare, ThresholdConfig, mac_scale, mac_sub},
+        circuit::{Domain, Value, ZERO},
+        threshold_mpc::{BlindOtPeer, MacKeyShare, ThresholdConfig, mac_scale, mac_sub},
     };
     use qsag_accel::keccak::Shake256;
 
@@ -133,7 +133,8 @@ mod fixture {
         state: [u64; 4],
         members: usize,
         boolean_keys: Vec<u128>,
-        field_keys: Vec<[Value; 3]>,
+        field_keys: Vec<[Value; 5]>,
+        blind_ot: Vec<Vec<BlindOtPeer>>,
     }
 
     impl FixtureDealer {
@@ -154,6 +155,7 @@ mod fixture {
                 members,
                 boolean_keys: Vec::new(),
                 field_keys: Vec::new(),
+                blind_ot: Vec::new(),
             };
             for _ in 0..members {
                 let boolean = dealer.u128();
@@ -161,6 +163,43 @@ mod fixture {
                 dealer.boolean_keys.push(boolean);
                 dealer.field_keys.push(field);
             }
+            let slot_of = |owner: usize, peer: usize| -> usize {
+                if peer < owner { peer } else { peer - 1 }
+            };
+            let mut blind_ot: Vec<Vec<BlindOtPeer>> = (0..members)
+                .map(|_| {
+                    (0..members.saturating_sub(1))
+                        .map(|_| BlindOtPeer {
+                            sender_delta: 0,
+                            sender_seeds: [[0u8; 32]; 128],
+                            receiver_seeds: [[[0u8; 32]; 2]; 128],
+                            counter: 0,
+                        })
+                        .collect()
+                })
+                .collect();
+            for sender in 0..members {
+                for receiver in 0..members {
+                    if sender == receiver {
+                        continue;
+                    }
+                    let delta = dealer.u128();
+                    let mut chosen = [[0u8; 32]; 128];
+                    let mut pairs = [[[0u8; 32]; 2]; 128];
+                    for col in 0..128 {
+                        let s0 = dealer.bytes32();
+                        let s1 = dealer.bytes32();
+                        pairs[col] = [s0, s1];
+                        chosen[col] = if ((delta >> col) & 1) != 0 { s1 } else { s0 };
+                    }
+                    let s_slot = slot_of(sender, receiver);
+                    let r_slot = slot_of(receiver, sender);
+                    blind_ot[sender][s_slot].sender_delta = delta;
+                    blind_ot[sender][s_slot].sender_seeds = chosen;
+                    blind_ot[receiver][r_slot].receiver_seeds = pairs;
+                }
+            }
+            dealer.blind_ot = blind_ot;
             dealer
         }
 
@@ -169,7 +208,12 @@ mod fixture {
             self.boolean_keys
                 .iter()
                 .zip(&self.field_keys)
-                .map(|(&boolean, &field)| MacKeyShare { boolean, field })
+                .zip(&self.blind_ot)
+                .map(|((&boolean, &field), blind_ot)| MacKeyShare {
+                    boolean,
+                    field,
+                    blind_ot: blind_ot.clone(),
+                })
                 .collect()
         }
 
@@ -189,14 +233,23 @@ mod fixture {
         fn u128(&mut self) -> u128 {
             (self.u64() as u128) | ((self.u64() as u128) << 64)
         }
+        fn bytes32(&mut self) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for chunk in out.chunks_exact_mut(8) {
+                chunk.copy_from_slice(&self.u64().to_le_bytes());
+            }
+            out
+        }
         fn field(&mut self, d: Domain) -> Value {
             loop {
-                let mut v = [0u64; 4];
-                for limb in &mut v[..d.width().div_ceil(64)] {
+                let mut v = ZERO;
+                for limb in &mut v[..d.limbs_len()] {
                     *limb = self.u64();
                 }
-                if d == Domain::Ed {
+                if d == Domain::Ed || d == Domain::PallasFp {
                     v[3] &= 0x7fff_ffff_ffff_ffff;
+                } else if d == Domain::BlsFp {
+                    v[5] &= 0x1fff_ffff_ffff_ffff;
                 }
                 if d.canonical(v) {
                     return v;
@@ -205,7 +258,7 @@ mod fixture {
         }
         fn mac(&mut self, d: Domain) -> Value {
             if d == Domain::Gold {
-                [self.field(d)[0], self.field(d)[0], 0, 0]
+                [self.field(d)[0], self.field(d)[0], 0, 0, 0, 0]
             } else {
                 self.field(d)
             }
@@ -215,7 +268,7 @@ mod fixture {
         }
         fn field_key(&self, field: ThresholdField) -> Value {
             let d = field.domain();
-            self.field_keys.iter().fold([0; 4], |a, k| {
+            self.field_keys.iter().fold(ZERO, |a, k| {
                 crate::threshold_mpc::mac_add(d, a, k[field.index()])
             })
         }
@@ -353,7 +406,7 @@ mod fixture {
                 let bits = self.share_word(word, boolean_key);
                 let mut lanes: Vec<Vec<FieldShare>> = self.rows(64);
                 for lane in 0..64 {
-                    let value = [(word >> lane) & 1, 0, 0, 0];
+                    let value = [(word >> lane) & 1, 0, 0, 0, 0, 0];
                     Self::push(&mut lanes, self.share_field(value, field, key));
                 }
                 let dabits = bits
