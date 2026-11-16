@@ -3,7 +3,7 @@
 //!
 //! Subcommands:
 //! - `keygen` — 3-round dealerless subset-seed ceremony (`SeedCeremonyRound1..3`) +
-//!   corroborated `SLH-DSA-SHAKE-128f` batch inventory commitment + `QSHDQB04` durable budget.
+//!   corroborated `SLH-DSA-SHAKE-128f` batch inventory commitment + `QSHDQB05` durable budget.
 //! - `derive` — `0`-round watch-only Bech32m deposit address + Poseidon2 Merkle proof
 //!   derivation (`0` secret keys touched).
 //! - `verify-child` — Verify an [`InventoryChildProof`] against the watch-only master root.

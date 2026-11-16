@@ -54,7 +54,9 @@ const PROOF_WIRE_MAGIC: &[u8; 8] = b"QSAGMIGP";
 const WIRE_HEADER_BYTES: u64 = 8 + 32 + 4;
 const WIRE_REP_FIXED_BYTES: u64 = 1 + 2 * 32 + 32;
 const WIRE_LEN_PREFIX_BYTES: u64 = 4;
-const MAX_VIEW_INPUT_BYTES: usize = 1024;
+// CoZK V4/V5 packs `8 + 1 + (m - 1) * 32 + head_inputs` into `PartyView.inputs` for up to
+// `MAX_COZK_CUSTODIANS = 64` custodians (`9 + 63 * 32 + 288 = 2313` bytes worst-case).
+const MAX_VIEW_INPUT_BYTES: usize = 4096;
 const MAX_VIEW_PRODUCT_BYTES: usize = 128 * 1024;
 const MAX_VIEW_OUTPUT_BYTES: usize = 1024;
 
@@ -864,5 +866,10 @@ mod tests {
             reps[40..44].copy_from_slice(&count.to_le_bytes());
             rejects(&reps, "invalid repetition count");
         }
+
+        // 64-custodian CoZK V5 `PartyView.inputs` (`9 + 63 * 32 + 64 = 2089` bytes) roundtrips cleanly.
+        let cozk_64 = proof(9 + 63 * 32 + 64, 64, 32);
+        let cozk_64_wire = encode_zk_proof_wire(&cozk_64).unwrap();
+        assert!(decode_zk_proof_wire(&cozk_64_wire).unwrap() == cozk_64);
     }
 }

@@ -268,7 +268,7 @@ fn anchored_hd_enforces_budget_export_rss_and_rejects_rollback() {
     // "QSRSSK01" in hex is 51535253534b3031 (first 8 bytes of 268-byte RssKeyShare256).
     assert!(unenc.contains("51535253534b3031"), "{unenc}");
 
-    // Roll back QSHDQB04 budget file in place; external anchor detects rollback and fails closed!
+    // Roll back QSHDQB05 budget file in place; external anchor detects rollback and fails closed!
     fs::write(PathBuf::from(&vault).join("hd-query.budget"), &snap_budget).unwrap();
     run(
         &[

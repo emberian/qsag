@@ -77,28 +77,41 @@ mod linux {
     const MAX_WAISTBAND_LAYERS: u64 = 4;
     const WAISTBAND_ENTRIES: usize = 1024;
     const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
+    const MAX_DISCARD_TAIL_BYTES: usize = 16 * MAX_REQUEST_LINE_BYTES;
 
     /// Read one request frame, buffering at most `MAX_REQUEST_LINE_BYTES + 2` bytes of it.
     fn read_request_line(input: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<usize> {
         std::io::Read::take(input, (MAX_REQUEST_LINE_BYTES + 2) as u64).read_until(b'\n', line)
     }
 
-    /// Consume the unread remainder of an oversized frame, through its newline or the end of
-    /// input, without buffering it, so that the remainder is never parsed as a request.
-    fn discard_request_tail(input: &mut impl BufRead) -> std::io::Result<()> {
+    /// Consume up to `MAX_DISCARD_TAIL_BYTES` of the unread remainder of an oversized frame,
+    /// returning `Ok(true)` if the frame's newline or EOF was reached within bound, or `Ok(false)`
+    /// if the sender streams unbounded newline-free bytes (so the `mlock`ed daemon terminates
+    /// cleanly instead of spinning forever on an unterminated pipe).
+    fn discard_request_tail(input: &mut impl BufRead) -> std::io::Result<bool> {
+        let mut total_skipped = 0usize;
         loop {
             let buffered = input.fill_buf()?;
             if buffered.is_empty() {
-                return Ok(());
+                return Ok(true);
             }
-            match buffered.iter().position(|&byte| byte == b'\n') {
+            let remaining_budget = MAX_DISCARD_TAIL_BYTES.saturating_sub(total_skipped);
+            if remaining_budget == 0 {
+                return Ok(false);
+            }
+            let window = &buffered[..buffered.len().min(remaining_budget)];
+            match window.iter().position(|&byte| byte == b'\n') {
                 Some(newline) => {
                     input.consume(newline + 1);
-                    return Ok(());
+                    return Ok(true);
                 }
                 None => {
-                    let skipped = buffered.len();
+                    let skipped = window.len();
                     input.consume(skipped);
+                    total_skipped += skipped;
+                    if total_skipped >= MAX_DISCARD_TAIL_BYTES {
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -752,8 +765,9 @@ signature stops verifying when its coupon expires.
                 break;
             }
             let oversized = line.len() > MAX_REQUEST_LINE_BYTES;
+            let mut framing_lost = false;
             if oversized && line.last() != Some(&b'\n') {
-                discard_request_tail(&mut stdin)
+                framing_lost = !discard_request_tail(&mut stdin)
                     .map_err(|e| CliError::io("reading a request from standard input", e))?;
             }
             let text = std::str::from_utf8(&line);
@@ -783,6 +797,9 @@ signature stops verifying when its coupon expires.
                 }
             }
             emit(&mut stdout, &Json::object(fields))?;
+            if framing_lost {
+                break;
+            }
         }
         match first_refusal {
             Some(error) => Err(error),
@@ -905,7 +922,7 @@ signature stops verifying when its coupon expires.
             read_request_line(&mut input, &mut line).unwrap();
             assert_eq!(line.len(), MAX_REQUEST_LINE_BYTES + 2);
             assert_ne!(line.last(), Some(&b'\n'));
-            discard_request_tail(&mut input).unwrap();
+            assert!(discard_request_tail(&mut input).unwrap());
             line.clear();
             read_request_line(&mut input, &mut line).unwrap();
             assert_eq!(line, b"next\n");
@@ -913,9 +930,12 @@ signature stops verifying when its coupon expires.
             let mut input = std::io::Cursor::new(vec![b'a'; MAX_REQUEST_LINE_BYTES * 2]);
             line.clear();
             read_request_line(&mut input, &mut line).unwrap();
-            discard_request_tail(&mut input).unwrap();
+            assert!(discard_request_tail(&mut input).unwrap());
             line.clear();
             assert_eq!(read_request_line(&mut input, &mut line).unwrap(), 0);
+            // An infinite newline-free stream terminates deterministically once the tail budget is hit.
+            let mut infinite = std::io::BufReader::new(std::io::repeat(b'a'));
+            assert!(!discard_request_tail(&mut infinite).unwrap());
         }
 
         #[test]
