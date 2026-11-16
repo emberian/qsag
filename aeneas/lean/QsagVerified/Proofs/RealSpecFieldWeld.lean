@@ -137,8 +137,12 @@ theorem ExtractedStepRefines.step_none {M I O E S I' O' : Type}
 /-! ## 2. Goldilocks field kernels against `Qsag.Goldilocks` -/
 
 /-- The canonical field element denoted by an extracted `u64` Goldilocks word. -/
-def goldilocksAbs (x : goldilocks.Goldilocks) : Qsag.Goldilocks :=
+@[expose] def goldilocksAbs (x : goldilocks.Goldilocks) : Qsag.Goldilocks :=
   Qsag.Goldilocks.ofNat x.val
+
+/-- Public value equation for consumers composing field refinements. -/
+theorem goldilocksAbs_val (x : goldilocks.Goldilocks) :
+    (goldilocksAbs x).val = x.val % Qsag.goldilocksPrime := rfl
 
 private theorem goldilocksP_eq : GoldilocksP = Qsag.goldilocksPrime := rfl
 

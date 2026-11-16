@@ -218,8 +218,8 @@ macro "mir_wp" : tactic =>
 macro "mir_sim_step" : tactic =>
   `(tactic| (mir_wp; try dsimp only))
 
-/-- Exemplar: 3-bind Rust-style checked `U64` + `massert` pipeline verified in 2 lines via `mir_sim_step`
-    with ZERO `cases` splits! -/
+/-- Exemplar: 3-bind Rust-style checked `U64` + `massert` pipeline verified in 2 lines via the
+    mir_sim_step tactic macro with ZERO `cases` splits! -/
 def mirCheckedDeltaCheck (base delta cap : Std.U64) : Result Std.U64 := do
   let next ← base + delta
   massert (next.val ≤ cap.val)

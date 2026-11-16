@@ -7,7 +7,8 @@ public import Qsag.Oracle.Keccak
 The universal theorem here covers the extracted 24-round permutation. The phase laws
 below cover actual streaming entry points, but do not yet identify emitted bytes with
 `Qsag.shake256Xof`: rate-block XOR, padding, and arbitrary squeeze-loop invariants remain
-necessary. In particular absorption after squeezing is a no-op in the generated API.
+necessary. Absorption after squeezing fails with `.fail .assertionFailure` in the
+generated API; repeated finalization after squeezing leaves the state unchanged.
 -/
 
 public section
