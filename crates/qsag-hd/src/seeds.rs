@@ -63,9 +63,17 @@ impl CustodianSet {
     pub fn contains(self, position: usize) -> bool {
         position < MAX_CUSTODIANS && (self.0[position / 64] >> (position % 64)) & 1 != 0
     }
-    pub fn insert(&mut self, position: usize) {
-        assert!(position < MAX_CUSTODIANS);
+    /// Insert `position` (`< MAX_CUSTODIANS`), returning `false` without panicking if out of range.
+    pub fn try_insert(&mut self, position: usize) -> bool {
+        if position >= MAX_CUSTODIANS {
+            return false;
+        }
         self.0[position / 64] |= 1u64 << (position % 64);
+        true
+    }
+    /// Insert `position` when `< MAX_CUSTODIANS` (no-op if `position >= MAX_CUSTODIANS`).
+    pub fn insert(&mut self, position: usize) {
+        let _ = self.try_insert(position);
     }
     pub fn to_be_bytes(self) -> [u8; 32] {
         let mut bytes = [0; 32];
@@ -647,7 +655,10 @@ impl CustodianSeeds {
     /// both, and one of those subsets avoids any such coalition when `t >= 2`.
     /// Returns `None` for `t = 1`, where every custodian holds every seed.
     pub(crate) fn pairwise_key(&self, other: usize, domain: &[u8]) -> Option<SecretBytes<32>> {
-        if self.config.threshold < 2 || other == self.position {
+        if self.config.threshold < 2
+            || other == self.position
+            || other >= self.config.members().len()
+        {
             return None;
         }
         let low = (self.position.min(other) as u16).to_be_bytes();

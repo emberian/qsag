@@ -143,7 +143,7 @@ module qsag_p2_chain_engine #(
     logic [31:0]  parent;
     logic [255:0] dg, sib;
     assign sponge = (m_ns != 6'd0);
-    assign parent = {1'b0, m_heap[31:1]};
+    assign parent = m_heap[31] ? {2'b0, m_heap[30:1]} : {1'b0, m_heap[31:1]};
     assign dg     = cur_rd[255:0];
     assign sib    = blk_rd[255:0];
 
@@ -181,7 +181,7 @@ module qsag_p2_chain_engine #(
                 end else begin
                     job_state <= {tree_key, CANOPY_NODE_HI, parent,
                                   m_heap[0] ? dg : sib, m_heap[0] ? sib : dg};
-                    job_last  <= (parent == 32'd1);
+                    job_last  <= m_heap[31] || (parent == 32'd1);
                 end
                 a_valid <= do_pick;
                 a_s     <= pick;

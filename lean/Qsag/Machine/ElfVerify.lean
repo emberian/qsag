@@ -200,4 +200,6 @@ theorem certSliceAt_sound {slices : List ElfFuncSlice} {contracts : List FuncCon
     simp only [Bool.and_eq_true, beq_iff_eq] at h
     exact ⟨h.1, checkElfSliceWithCert_sound h.2⟩
 
+#export_eqns ElfSliceThreeWayNISafe
+
 end Qsag

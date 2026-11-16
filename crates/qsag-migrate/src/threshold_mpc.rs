@@ -1887,6 +1887,17 @@ impl<T: Transport> Core for SpdzEngine<T> {
     type Bit = ABit;
 
     #[inline]
+    fn quorum_position(&self) -> (usize, usize) {
+        let pos = self
+            .config
+            .quorum
+            .iter()
+            .position(|&p| p == self.party)
+            .unwrap_or(0);
+        (pos, self.config.quorum.len())
+    }
+
+    #[inline]
     fn constant(&self, x: u64) -> ABit {
         self.public_bit(x)
     }
@@ -1895,11 +1906,105 @@ impl<T: Transport> Core for SpdzEngine<T> {
         self.input(own, false)
     }
 
+    fn share_masked(&mut self, own: &[u64]) -> Result<Word<ABit>, Error> {
+        self.input(own, false)
+    }
+
     fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word<ABit>, Error> {
         if own.iter().any(|&w| w != 0 && w != u64::MAX) {
             return Err(Error::InvalidConfiguration);
         }
         self.input(own, true)
+    }
+
+    fn fshare_many(
+        &mut self,
+        own_words: &[SecretVec<Value>],
+        d: Domain,
+    ) -> Result<Vec<FieldWord>, Error> {
+        if self.is_failed() {
+            return Err(Error::MultiplicationCheck);
+        }
+        if own_words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let k = own_words.len();
+        let count = k * 64;
+        let taken = self
+            .transport
+            .take_field_randoms(ThresholdField::from_domain(d), count);
+        let randoms = self.take(taken, count)?;
+        if randoms.iter().any(|r| !Self::field_share_valid(d, r)) {
+            return self.fail(Error::InvalidConfiguration);
+        }
+        let wlen = d.limbs_len();
+        let mut masked_flat: SecretVec<u64> = SecretVec::with_capacity(count * wlen);
+        let mut rand_iter = randoms.iter();
+        for word in own_words {
+            if word.len() != 64 {
+                return self.fail(Error::InvalidConfiguration);
+            }
+            for &val in word.iter() {
+                if !d.canonical(val) {
+                    return self.fail(Error::InvalidConfiguration);
+                }
+                let r = rand_iter.next().unwrap();
+                let diff = Secret(d.sub(val, r.0[0]));
+                masked_flat.extend_from_slice(&diff[..wlen]);
+            }
+        }
+        let received = self.broadcast(&masked_flat)?;
+        let mut public_sums = vec![ZERO; count];
+        for (pos, row) in received.iter().enumerate() {
+            for (acc, limbs) in public_sums.iter_mut().zip(row.chunks_exact(wlen)) {
+                let mut v = ZERO;
+                v[..wlen].copy_from_slice(limbs);
+                if !d.canonical(v) {
+                    let culprit = self.config.quorum[pos];
+                    return self.fail(Error::Disagreement(culprit));
+                }
+                *acc = d.add(*acc, v);
+            }
+        }
+        let mut out = Vec::with_capacity(k);
+        for (r_chunk, pub_chunk) in randoms.chunks_exact(64).zip(public_sums.chunks_exact(64)) {
+            let mut fw = FieldWord::with_capacity(64);
+            for (r, &p_val) in r_chunk.iter().zip(pub_chunk) {
+                let pub_sh = self.public_field(p_val, d);
+                fw.push([d.add(r.0[0], pub_sh[0]), mac_add(d, r.0[1], pub_sh[1])]);
+            }
+            out.push(fw);
+        }
+        Ok(out)
+    }
+
+    fn broadcast_bytes(&mut self, own: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+        self.check()?;
+        let word_len = 1 + own.len().div_ceil(8);
+        let mut words: SecretVec<u64> = SecretVec::with_capacity(word_len);
+        words.push(own.len() as u64);
+        for chunk in own.chunks(8) {
+            let mut buf = [0u8; 8];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            words.push(u64::from_le_bytes(buf));
+            ct_zeroize_bytes(&mut buf);
+        }
+        let received = self.broadcast(&words)?;
+        let mut out = Vec::with_capacity(received.len());
+        for row in &received {
+            if row.len() != word_len || row[0] != own.len() as u64 {
+                return self.fail(Error::InvalidConfiguration);
+            }
+            let n = row[0] as usize;
+            let mut bytes = Vec::with_capacity(n);
+            for &w in &row[1..] {
+                let b = w.to_le_bytes();
+                let take = (n - bytes.len()).min(8);
+                bytes.extend_from_slice(&b[..take]);
+            }
+            out.push(bytes);
+        }
+        Ok(out)
     }
 
     fn and_into(&mut self, pairs: &[(ABit, ABit)], out: &mut Word<ABit>) -> Result<(), Error> {

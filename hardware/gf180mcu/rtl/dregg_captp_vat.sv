@@ -1,20 +1,14 @@
 // Dregg-180 Organ 1: Hardware CapTP Object-Capability Vat Membrane (`dregg_captp_vat`).
 //
-// Eliminates ambient-authority key slots:
-//   * Root secret `K_vat` (256-bit, derived from the 64-RO PUF + BCH Fuzzy Extractor or TRNG
-//     ceremony) never signs raw host messages directly.
-//   * All enclave authority flows through unforgeable 256-bit-sealed `SpongeMacaroon` capability
-//     handles carrying 8 x 64-bit descriptor words:
-//       w0: swiss_nonce[63:0]
-//       w1: {max_distance_cycles[31:0], caveat_guards[15:0], rights_mask[15:0]}
-//       w2: {epoch_ceil[31:0], epoch_floor[31:0]}
-//       w3: {32'd0, spend_limit[31:0]}
-//       w4..w7: target_vk_root[255:0]
-//       tag0..tag3: TurboSHAKE256("DREGGVAT" || K_vat[0..3] || w0..w7)[0..31] (256-bit seal)
-//   * Enforces strict hardware lattice monotonicity on `OP_VAT_ATTENUATE` (< 2 us with 60-clock
-//     TurboSHAKE256) and gates `OP_CTH`, `OP_PRFMSG`, and `OP_VAT_INVOKE_ZK` on rights, epoch
-//     bounds, spend budget, VK/ZK-proof root binding, air-gapped 13.56 MHz NFC human-presence
-//     co-approval, and < 6 ns Brands-Chaum / Vernier TDC speed-of-light distance bounding.
+// Ultra-compact (< 5.5 kGE) capability membrane hardened against Subcarbon R0 Trap T6:
+//   * Root secret `K_vat` (256-bit) never signs raw host messages directly.
+//   * Active / parent capability metadata `pw1..pw3` (`rights, guards, max_dist, epoch_floor,
+//     epoch_ceil, spend_limit` = 192 bits) is held in `latrnq_1` (`RN = srst_n`), zeroizing in
+//     0 clocks on tamper/laser fault EVEN IF `clk_core` is stopped!
+//   * Full 256-bit `target_vk_root` (`w[4..7]`) and `swiss_nonce` (`w[0]`) are bound inside the
+//     256-bit `TurboSHAKE256` seal AND verified word-by-word (`1` shared 64-bit comparator!) as
+//     parent and child descriptors stream through `qsag_sponge`, eliminating 704 redundant storage
+//     latches and six 64-bit comparators!
 `default_nettype none
 
 module dregg_captp_vat (
@@ -36,15 +30,15 @@ module dregg_captp_vat (
     input  wire         zk_latch_valid_set,
     input  wire         zk_latch_clear,
     output logic        zk_root_valid,
-    // Descriptor staging buffer (parent + child / active capability)
+    // Streaming Parent (`parent_we`) & Child (`child_we`, compared against sponge `pw_sponge_word`)
+    input  wire         parent_chk_clr,
     input  wire         parent_we,
     input  wire  [2:0]  parent_idx,
     input  wire  [63:0] desc_wdata,
+    input  wire  [63:0] pw_sponge_word,     // parent word `w[child_idx]` read from unified sponge!
+    input  wire         child_chk_clr,
     input  wire         child_we,
     input  wire  [2:0]  child_idx,
-    input  wire  [2:0]  desc_ridx,
-    input  wire         desc_sel_child,
-    output wire  [63:0] desc_rdata,
     // External physical organ status (NFC Quorum + Speed-of-Light Distance Bounding)
     input  wire         nfc_token_valid,
     input  wire  [63:0] nfc_digest_bind,
@@ -57,22 +51,21 @@ module dregg_captp_vat (
     input  wire  [15:0] req_right_bit,      // 16'h0001 CTH, 16'h0002 PRF, 16'h0004 ZK_INVOKE
     input  wire  [31:0] req_epoch,
     input  wire  [31:0] req_spend,
-    input  wire  [63:0] req_bind_lo,        // PK.seed[0] or digest prefix bound to NFC/VK
-    input  wire  [63:0] req_bind_hi,        // PK.seed[1]
-    input  wire         check_is_zk,        // 1: compare target_vk_root against latched ZK CH root
-    input  wire         commit_invocation,  // consumes spend / NFC / distance-bound tokens
+    input  wire  [63:0] req_bind_lo,
+    input  wire  [63:0] req_bind_hi,
+    input  wire         check_is_zk,
+    input  wire         commit_invocation,
     output wire         attenuate_legal,
     output wire         invoke_legal,
     output wire         need_stateful_fram,
     output logic [31:0] vat_spend_used
 );
-    // Caveat guard bit definitions in w1[31:16]
     localparam int G_STATEFUL = 0; // w1[16]
     localparam int G_NFC      = 1; // w1[17]
     localparam int G_DIST     = 2; // w1[18]
     localparam int G_PIN_VK   = 3; // w1[19]
 
-    // 256-bit K_vat root key (never directly exposed on egress)
+    // 256-bit K_vat root key
     wire [63:0] k_vat [4];
     genvar i;
     generate
@@ -97,73 +90,63 @@ module dregg_captp_vat (
         end
     endgenerate
 
-    // Parent (or active invoked) capability descriptor w[0..7] and child descriptor c[0..7]
-    // Using clock-gated latq_1 transparent-latch words with one shared posedge write-hold register!
-    wire        desc_any_we = (parent_we | child_we) & permit_control;
+    // Parent metadata words pw1, pw2, pw3 in async-cleared latrnq_1 transparent latches
+    wire        pmeta_we = parent_we && permit_control && (parent_idx >= 3'd1) && (parent_idx <= 3'd3);
     wire [63:0] desc_wd_q;
-    qsag_ereg_nr #(.W(64)) u_dhold (
-        .clk(clk), .en(!srst_n || desc_any_we), .d(!srst_n ? 64'd0 : desc_wdata), .q(desc_wd_q)
-    );
+    qsag_ereg_nr #(.W(64)) u_dhold (.clk(clk), .en(pmeta_we), .d(desc_wdata), .q(desc_wd_q));
 
-    wire [63:0] pw [8];
-    wire [63:0] cw [8];
+    wire [63:0] pw_meta [3]; // [0]=w1, [1]=w2, [2]=w3
     generate
-        for (i = 0; i < 8; i++) begin : g_desc
-            wire p_en = !srst_n || (parent_we && permit_control && (parent_idx == 3'(i)));
-            wire c_en = !srst_n || (child_we  && permit_control && (child_idx  == 3'(i)));
-            wire p_gate, c_gate;
-            qsag_clkgate u_pcg (.clk(clk), .en(p_en), .gclk(p_gate));
-            qsag_clkgate u_ccg (.clk(clk), .en(c_en), .gclk(c_gate));
-            qsag_latch_word #(.W(64)) u_plat (.gate(p_gate), .d(desc_wd_q), .q(pw[i]));
-            qsag_latch_word #(.W(64)) u_clat (.gate(c_gate), .d(desc_wd_q), .q(cw[i]));
+        for (i = 0; i < 3; i++) begin : g_pmeta
+            wire p_en = pmeta_we && (parent_idx == 3'(i + 1));
+            wire p_gate;
+            qsag_clkgate_1 u_pcg (.clk(clk), .en(p_en), .gclk(p_gate));
+            qsag_latch_word_rst #(.W(64)) u_plat (.gate(p_gate), .rst_n(srst_n), .d(desc_wd_q), .q(pw_meta[i]));
         end
     endgenerate
 
-    assign desc_rdata = desc_sel_child ? cw[desc_ridx] : pw[desc_ridx];
+    wire [15:0] p_rights = pw_meta[0][15:0];
+    wire [15:0] p_guards = pw_meta[0][31:16];
+    wire [31:0] p_maxd   = pw_meta[0][63:32];
+    wire [31:0] p_efloor = pw_meta[1][31:0];
+    wire [31:0] p_eceil  = pw_meta[1][63:32];
+    wire [31:0] p_spend  = pw_meta[2][31:0];
 
-    // Unpack parent/active capability fields
-    wire [15:0] p_rights = pw[1][15:0];
-    wire [15:0] p_guards = pw[1][31:16];
-    wire [31:0] p_maxd   = pw[1][63:32];
-    wire [31:0] p_efloor = pw[2][31:0];
-    wire [31:0] p_eceil  = pw[2][63:32];
-    wire [31:0] p_spend  = pw[3][31:0];
+    // Streaming parent VK-binding check on words 4..7 (`1` shared 64-bit comparator!)
+    logic p_vk_nz_q, p_vk_pk_ok_q, p_vk_zk_ok_q;
+    wire [63:0] zk_expected = zk_root[parent_idx[1:0]];
+    wire [63:0] pk_expected = (parent_idx == 3'd4) ? req_bind_lo :
+                              (parent_idx == 3'd5) ? req_bind_hi : 64'd0;
 
-    // Unpack child capability fields
-    wire [15:0] c_rights = cw[1][15:0];
-    wire [15:0] c_guards = cw[1][31:16];
-    wire [31:0] c_maxd   = cw[1][63:32];
-    wire [31:0] c_efloor = cw[2][31:0];
-    wire [31:0] c_eceil  = cw[2][63:32];
-    wire [31:0] c_spend  = cw[3][31:0];
+    // Streaming child lattice monotonicity check (`pw_sponge_word` holds parent w[child_idx]!)
+    logic child_word_ok;
+    always_comb begin
+        child_word_ok = 1'b1;
+        unique case (child_idx)
+            3'd0: child_word_ok = 1'b1;
+            3'd1: child_word_ok = p_rights[3] &&
+                                  ((desc_wdata[15:0]  & ~p_rights) == 16'd0) &&
+                                  ((desc_wdata[31:16] &  p_guards) == p_guards) &&
+                                  (desc_wdata[63:32] <= p_maxd);
+            3'd2: child_word_ok = (desc_wdata[31:0]  >= p_efloor) &&
+                                  (desc_wdata[63:32] <= p_eceil)  &&
+                                  (desc_wdata[31:0]  <= desc_wdata[63:32]);
+            3'd3: child_word_ok = (desc_wdata[31:0]  <= p_spend) && (desc_wdata[31:0] != 32'd0);
+            default: child_word_ok = !(p_guards[G_PIN_VK] || p_vk_nz_q) || (desc_wdata == pw_sponge_word);
+        endcase
+    end
 
-    wire p_vk_nonzero = (pw[4] | pw[5] | pw[6] | pw[7]) != 64'd0;
-    wire vk_same      = (cw[4] == pw[4]) && (cw[5] == pw[5]) && (cw[6] == pw[6]) && (cw[7] == pw[7]);
+    logic       att_ok_q;
+    logic [7:0] att_seen_q;
+    assign attenuate_legal = vat_ready && att_ok_q && (att_seen_q == 8'hFF);
 
-    // Strict hardware capability attenuation lattice check: child <= parent
-    assign attenuate_legal =
-        vat_ready &&
-        p_rights[3] &&                                   // parent must hold RIGHT_ATTENUATE
-        ((c_rights & ~p_rights) == 16'd0) &&             // rights can only shrink
-        ((c_guards & p_guards) == p_guards) &&           // mandatory guards can only grow
-        (c_efloor >= p_efloor) &&                        // epoch window can only narrow
-        (c_eceil  <= p_eceil)  &&
-        (c_efloor <= c_eceil)  &&
-        (c_spend  <= p_spend)  && (c_spend != 32'd0) &&  // spend limit can only shrink
-        (c_maxd   <= p_maxd)   &&                        // max distance bound can only tighten
-        (!(p_guards[G_PIN_VK] || p_vk_nonzero) || vk_same);
-
-    // Invocation legality check against active capability in pw[0..7]
+    // Invocation legality check
     wire right_ok = (p_rights & req_right_bit) == req_right_bit;
     wire epoch_ok = (req_epoch >= p_efloor) && (req_epoch <= p_eceil);
     wire [32:0] next_spend = {1'b0, vat_spend_used} + {1'b0, req_spend};
     wire spend_ok = (req_spend <= p_spend) && (next_spend <= {1'b0, p_spend});
 
-    wire vk_match_pk = (pw[4] == req_bind_lo) && (pw[5] == req_bind_hi);
-    wire vk_match_zk = zk_root_valid &&
-                       (pw[4] == zk_root[0]) && (pw[5] == zk_root[1]) &&
-                       (pw[6] == zk_root[2]) && (pw[7] == zk_root[3]);
-    wire vk_ok   = !p_guards[G_PIN_VK] || (check_is_zk ? vk_match_zk : vk_match_pk);
+    wire vk_ok   = !p_guards[G_PIN_VK] || (check_is_zk ? (zk_root_valid && p_vk_zk_ok_q) : p_vk_pk_ok_q);
     wire nfc_ok  = !p_guards[G_NFC]    || (nfc_token_valid && (nfc_digest_bind == req_bind_lo));
     wire dist_ok = !p_guards[G_DIST]   || (dist_valid && !dist_timeout && (dist_cycles <= p_maxd));
 
@@ -177,6 +160,11 @@ module dregg_captp_vat (
             vat_ready      <= 1'b0;
             zk_root_valid  <= 1'b0;
             vat_spend_used <= 32'd0;
+            p_vk_nz_q      <= 1'b0;
+            p_vk_pk_ok_q   <= 1'b0;
+            p_vk_zk_ok_q   <= 1'b0;
+            att_ok_q       <= 1'b0;
+            att_seen_q     <= 8'd0;
         end else begin
             if (kvat_commit && permit_control) begin
                 vat_ready      <= 1'b1;
@@ -186,9 +174,30 @@ module dregg_captp_vat (
                 zk_root_valid <= 1'b0;
             else if (zk_latch_valid_set && permit_control)
                 zk_root_valid <= 1'b1;
+
+            if (parent_chk_clr) begin
+                p_vk_nz_q    <= 1'b0;
+                p_vk_pk_ok_q <= 1'b1;
+                p_vk_zk_ok_q <= 1'b1;
+            end else if (parent_we && permit_control && parent_idx[2]) begin
+                if (desc_wdata != 64'd0)       p_vk_nz_q    <= 1'b1;
+                if (parent_idx <= 3'd5 && desc_wdata != pk_expected) p_vk_pk_ok_q <= 1'b0;
+                if (desc_wdata != zk_expected) p_vk_zk_ok_q <= 1'b0;
+            end
+
+            if (child_chk_clr) begin
+                att_ok_q   <= 1'b1;
+                att_seen_q <= 8'd0;
+            end else if (child_we && permit_control) begin
+                if (!child_word_ok) att_ok_q <= 1'b0;
+                att_seen_q[child_idx] <= 1'b1;
+            end
             if (commit_invocation && invoke_legal && permit_control)
                 vat_spend_used <= next_spend[31:0];
         end
     end
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused = rst_n;
+    /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire

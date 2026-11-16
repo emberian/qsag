@@ -362,6 +362,32 @@ pub struct PersonalLatchAck {
     pub binding: [u8; 32],
     pub tag: [u8; 32],
 }
+impl PersonalLatchAck {
+    pub const WIRE_BYTES: usize = 2 + 2 + 8 + 32 + 32;
+
+    pub fn to_bytes(&self) -> [u8; Self::WIRE_BYTES] {
+        let mut out = [0u8; Self::WIRE_BYTES];
+        out[0..2].copy_from_slice(&self.from.to_be_bytes());
+        out[2..4].copy_from_slice(&self.to.to_be_bytes());
+        out[4..12].copy_from_slice(&self.epoch.to_be_bytes());
+        out[12..44].copy_from_slice(&self.binding);
+        out[44..76].copy_from_slice(&self.tag);
+        out
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        if raw.len() != Self::WIRE_BYTES {
+            return None;
+        }
+        Some(Self {
+            from: u16::from_be_bytes([raw[0], raw[1]]),
+            to: u16::from_be_bytes([raw[2], raw[3]]),
+            epoch: u64::from_be_bytes(raw[4..12].try_into().ok()?),
+            binding: raw[12..44].try_into().ok()?,
+            tag: raw[44..76].try_into().ok()?,
+        })
+    }
+}
 /// Receiver-specific authenticated release certificate. It is not a public signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersonalLatchCertificate {
@@ -524,6 +550,16 @@ impl<W: DurableWal> PersonalBeltLatch<W> {
     }
     pub fn key_epoch_context(&self) -> &[u8; 32] {
         &self.context
+    }
+    pub(crate) fn derive_wire_link_key(&self, session_id: &[u8; 32], peer: u16) -> Option<[u8; 32]> {
+        let key = self.keys.get(&peer)?;
+        let low = self.party.min(peer).to_be_bytes();
+        let high = self.party.max(peer).to_be_bytes();
+        Some(crate::hash::mac32(
+            &key.0,
+            b"personal-release/wire-link",
+            &[&self.context, session_id, &low, &high],
+        ))
     }
     pub fn into_latch(self) -> BeltLatch<W> {
         self.latch

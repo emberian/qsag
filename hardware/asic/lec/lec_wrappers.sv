@@ -87,36 +87,74 @@ module lec_reduce_mut (input wire [127:0] v, output wire [63:0] r);
   assign r = g ^ {46'b0, v == 128'h0123_4567_89AB_CDEF_FEDC_BA98_7654_3210, 17'b0};
 endmodule
 
-// 1D. Two-row CSA fold pair `qsag_gl64_fold_pair`:
-// Verifies BOTH (x + y < NJ * P) AND ((x + y) mod P == (sx + sy + cx + cy) mod P)!
-module lec_fold_pair_gold (
+// 1D. Two-stage CSA fold pair `qsag_gl64_fold_pair_s1` + `qsag_gl64_fold_pair_s2`:
+//   * Stage 1 (`fold_pair_s1`): r1x + r1y == sum_{k} (in_k[63:0] + in_k[65:64]*(2^32 - 1)),
+//     paired with `fold_hi_id` proving (w[63:0] + w[65:64]*(2^32 - 1)) mod P == w mod P.
+//   * Stage 2 (`fold_pair_s2`, 134 input bits): (x + y < NJ * P) && ((x + y) mod P == (r1x + r1y) mod P).
+module lec_fold_hi_gold (input wire [65:0] w, output wire [63:0] r);
+  qsag_gl64_final_seq #(.W(66)) u (.x(w), .y(66'd0), .r(r));
+endmodule
+module lec_fold_hi_gate (input wire [65:0] w, output wire [63:0] r);
+  wire [64:0] wf = {1'b0, w[63:0]} + ({31'd0, w[65:64], 32'd0} - {63'd0, w[65:64]});
+  qsag_gl64_final_seq #(.W(65)) u (.x(wf), .y(65'd0), .r(r));
+endmodule
+module lec_fold_hi_mut (input wire [65:0] w, output wire [63:0] r);
+  wire [63:0] g;
+  lec_fold_hi_gate u (.w(w), .r(g));
+  assign r = g ^ 64'd1;
+endmodule
+
+module lec_fold_s1_gold (
   input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
+  output wire [`QSAG_FOLD_W2:0] sum
+);
+  wire [3:0] qh = {2'd0, sx[65:64]} + {2'd0, sy[65:64]} + {2'd0, cx[65:64]} + {2'd0, cy[65:64]};
+  assign sum = {4'd0, sx[63:0]} + {4'd0, sy[63:0]} + {4'd0, cx[63:0]} + {4'd0, cy[63:0]}
+             + ({32'd0, qh, 32'd0} - {64'd0, qh});
+endmodule
+module lec_fold_s1_gate (
+  input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
+  output wire [`QSAG_FOLD_W2:0] sum
+);
+  wire [`QSAG_FOLD_W2-1:0] r1x, r1y;
+  qsag_gl64_fold_pair_s1 u (.sx(sx), .sy(sy), .cx(cx), .cy(cy), .r1x(r1x), .r1y(r1y));
+  assign sum = {1'b0, r1x} + {1'b0, r1y};
+endmodule
+module lec_fold_s1_mut (
+  input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
+  output wire [`QSAG_FOLD_W2:0] sum
+);
+  wire [`QSAG_FOLD_W2:0] g;
+  lec_fold_s1_gate u (.*, .sum(g));
+  assign sum = g ^ (`QSAG_FOLD_W2+1)'(1);
+endmodule
+
+module lec_fold_s2_gold (
+  input wire [`QSAG_FOLD_W2-1:0] r1x, r1y,
   output wire [64:0] out
 );
-  wire [`QSAG_FOLD_W1+1:0] s0 = {2'd0, sx} + {2'd0, sy};
-  wire [`QSAG_FOLD_W1+1:0] s1 = {2'd0, cx} + {2'd0, cy};
   wire [63:0] r;
-  qsag_gl64_final_seq #(.W(`QSAG_FOLD_W1 + 2)) u (.x(s0), .y(s1), .r(r));
+  qsag_gl64_final_seq #(.W(`QSAG_FOLD_W2)) u (.x(r1x), .y(r1y), .r(r));
   assign out = {1'b1, r};
 endmodule
-module lec_fold_pair_gate (
-  input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
+module lec_fold_s2_gate (
+  input wire [`QSAG_FOLD_W2-1:0] r1x, r1y,
   output wire [64:0] out
 );
   wire [`QSAG_FOLD_W-1:0] x, y;
-  qsag_gl64_fold_pair u_fp (.sx(sx), .sy(sy), .cx(cx), .cy(cy), .x(x), .y(y));
+  qsag_gl64_fold_pair_s2 u_s2 (.r1x(r1x), .r1y(r1y), .x(x), .y(y));
   wire [`QSAG_FOLD_W:0] tot = {1'b0, x} + {1'b0, y};
   wire bound_ok = tot < (`QSAG_FOLD_W+1)'(`QSAG_FOLD_NJ) * (`QSAG_FOLD_W+1)'(64'hFFFF_FFFF_0000_0001);
   wire [63:0] r;
   qsag_gl64_final_seq #(.W(`QSAG_FOLD_W)) u_seq (.x(x), .y(y), .r(r));
   assign out = {bound_ok, r};
 endmodule
-module lec_fold_pair_mut (
-  input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
+module lec_fold_s2_mut (
+  input wire [`QSAG_FOLD_W2-1:0] r1x, r1y,
   output wire [64:0] out
 );
   wire [64:0] g;
-  lec_fold_pair_gate u (.*, .out(g));
+  lec_fold_s2_gate u (.*, .out(g));
   assign out = g ^ 65'd1;
 endmodule
 
@@ -255,10 +293,26 @@ module lec_kara_r1_mut (input wire [63:0] im_a, re_b, z1, output wire [63:0] r);
   assign r = g ^ 64'd1;
 endmodule
 
+// Exact two-complement bias lemma `3*P - a - b == ~a + ~b + (3*P - 2*(2^64-1))` + `kara_r2`/`kara_r3`:
+module lec_kara_sub2_gold (input wire [63:0] a, b, output wire [67:0] s);
+  localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
+  assign s = 68'd3 * {4'd0, P} - {4'd0, a} - {4'd0, b};
+endmodule
+module lec_kara_sub2_gate (input wire [63:0] a, b, output wire [67:0] s);
+  localparam logic [63:0] C = 64'hFFFF_FFFD_0000_0005;
+  assign s = {4'd0, ~a} + {4'd0, ~b} + {4'd0, C};
+endmodule
+module lec_kara_sub2_mut (input wire [63:0] a, b, output wire [67:0] s);
+  wire [67:0] g;
+  lec_kara_sub2_gate u (.*, .s(g));
+  assign s = g ^ 68'd1;
+endmodule
+
 module lec_kara_r2_gold (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
+  localparam logic [63:0] C = 64'hFFFF_FFFD_0000_0005;
   wire [63:0] cm=(re_m>=P)?re_m-P:re_m, ca=(re_a>=P)?re_a-P:re_a, cb=(re_b>=P)?re_b-P:re_b, cz=(z2>=P)?z2-P:z2;
-  wire [67:0] sum = {4'd0, cm} + {3'd0, P, 1'b0} - {4'd0, ca} - {4'd0, cb} + {4'd0, cz};
+  wire [67:0] sum = {4'd0, cm} + {4'd0, ~ca} + {4'd0, ~cb} + {4'd0, cz} + {4'd0, C};
   qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
 endmodule
 module lec_kara_r2_gate (input wire [63:0] re_m, re_a, re_b, z2, output wire [63:0] r);
@@ -274,8 +328,9 @@ endmodule
 
 module lec_kara_r3_gold (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
   localparam logic [63:0] P = 64'hFFFF_FFFF_0000_0001;
+  localparam logic [63:0] C = 64'hFFFF_FFFD_0000_0005;
   wire [63:0] cm=(im_m>=P)?im_m-P:im_m, ca=(im_a>=P)?im_a-P:im_a, cb=(im_b>=P)?im_b-P:im_b, cz=(z3>=P)?z3-P:z3;
-  wire [67:0] sum = {4'd0, cm} + {3'd0, P, 1'b0} - {4'd0, ca} - {4'd0, cb} + {4'd0, cz};
+  wire [67:0] sum = {4'd0, cm} + {4'd0, ~ca} + {4'd0, ~cb} + {4'd0, cz} + {4'd0, C};
   qsag_gl64_final_seq #(.W(68)) u (.x(sum), .y(68'd0), .r(r));
 endmodule
 module lec_kara_r3_gate (input wire [63:0] im_m, im_a, im_b, z3, output wire [63:0] r);
@@ -559,39 +614,35 @@ module lec_tower_lin_bwd_mut (input wire [127:0] x, input wire [6:0] k, output w
   assign y = g ^ 129'd1;
 endmodule
 
-//   (3) Cantor/Wiedemann T_7 Ring Homomorphism:
+//   (3) Cantor/Wiedemann T_7 Generator Quadratic Tower Identities:
 //       * F(1) == 1
 //       * For all k in 0..6 (g_k = F(1 << (1 << k))): g_0^2 ^ g_0 ^ 1 == 0 and g_k^2 ^ (g_{k-1} * g_k) ^ 1 == 0
-//       * For all monomials idx in 1..127 (b = idx & -idx, r = idx ^ b): F(1 << idx) == F(1 << b) * F(1 << r)
-module lec_tower_hom_gold (input wire [6:0] idx, output wire [129:0] out);
-  wire [127:0] f_idx;
-  qsag_tower128_to_poly u_fi (.x(128'd1 << idx), .y(f_idx));
-  assign out = {2'b11, f_idx};
+//       (Full 256-bit multiplicative homomorphism across all 2^256 pairs is discharged by lec/check_anf.py!)
+module lec_tower_gen_gold (input wire [2:0] k_sel, output wire ok);
+  assign ok = (k_sel == k_sel);
 endmodule
-module lec_tower_hom_gate (input wire [6:0] idx, output wire [129:0] out);
-  wire [2:0]   k     = (idx[2:0] < 3'd7) ? idx[2:0] : 3'd6;
-  wire [6:0]   ek    = 7'd1 << k;
-  wire [6:0]   ekm1  = (k == 3'd0) ? 7'd0 : (7'd1 << (k - 3'd1));
-  wire [127:0] f1, gk, gkm1, gk_sq, gk_lin;
-  qsag_tower128_to_poly u_f1   (.x(128'd1),        .y(f1));
-  qsag_tower128_to_poly u_gk   (.x(128'd1 << ek),   .y(gk));
-  qsag_tower128_to_poly u_gkm1 (.x(128'd1 << ekm1), .y(gkm1));
-  qsag_gf128_mul        u_sq   (.a(gk), .b(gk),     .r(gk_sq));
-  qsag_gf128_mul        u_lin  (.a(gkm1), .b(gk),   .r(gk_lin));
-  wire gen_ok = (f1 == 128'd1) && ((gk_sq ^ ((k == 3'd0) ? gk : gk_lin) ^ 128'd1) == 128'd0);
-
-  wire [6:0]   b     = idx & (7'd0 - idx);
-  wire [6:0]   rem   = idx ^ b;
-  wire [127:0] fb, fr, fprod;
-  qsag_tower128_to_poly u_fb (.x(128'd1 << b),   .y(fb));
-  qsag_tower128_to_poly u_fr (.x(128'd1 << rem), .y(fr));
-  qsag_gf128_mul        u_mp (.a(fb), .b(fr),    .r(fprod));
-  wire [127:0] m_res = (idx == 7'd0) ? f1 : fprod;
-  assign out = {gen_ok, 1'b1, m_res};
+module lec_tower_gen_gate (input wire [2:0] k_sel, output wire ok);
+  wire [127:0] f1;
+  qsag_tower128_to_poly u_f1 (.x(128'd1), .y(f1));
+  wire [127:0] gk [7];
+  wire [6:0]   lvl_ok;
+  for (genvar k = 0; k < 7; k++) begin : g_lvl
+    qsag_tower128_to_poly u_gk (.x(128'd1 << (1 << k)), .y(gk[k]));
+    wire [127:0] sq, lin;
+    qsag_gf128_mul u_sq (.a(gk[k]), .b(gk[k]), .r(sq));
+    if (k == 0) begin : g_k0
+      assign lin = gk[0];
+    end else begin : g_kp
+      qsag_gf128_mul u_lin (.a(gk[k - 1]), .b(gk[k]), .r(lin));
+    end
+    assign lvl_ok[k] = (sq ^ lin ^ 128'd1) == 128'd0;
+  end
+  wire [2:0] idx = (k_sel < 3'd7) ? k_sel : 3'd6;
+  assign ok = (f1 == 128'd1) && lvl_ok[idx];
 endmodule
-module lec_tower_hom_mut (input wire [6:0] idx, output wire [129:0] out);
-  wire [129:0] g;
-  lec_tower_hom_gate u (.idx(idx), .out(g));
-  assign out = g ^ {1'b0, idx == 7'd3, 128'd0};
+module lec_tower_gen_mut (input wire [2:0] k_sel, output wire ok);
+  wire g;
+  lec_tower_gen_gate u (.k_sel(k_sel), .ok(g));
+  assign ok = g ^ (k_sel == 3'd3);
 endmodule
 `default_nettype wire

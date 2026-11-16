@@ -148,6 +148,31 @@ fn lagrange_weights(xs: &[u32], target: u32) -> Vec<u32> {
         .collect()
 }
 
+/// Full-committee Lagrange basis weights for evaluating a degree `< threshold` polynomial
+/// at `0`, choosing a `threshold`-element subset of `xs` that ALWAYS includes `position`
+/// so `weights[position] != 0` for every custodian `0..xs.len()`.
+fn zero_basis_weights(xs: &[u32], threshold: usize, position: usize) -> Vec<u32> {
+    let mut out = alloc::vec![0u32; xs.len()];
+    if threshold == 0 || position >= xs.len() || threshold > xs.len() {
+        return out;
+    }
+    let mut basis_positions = Vec::with_capacity(threshold);
+    if position < threshold {
+        basis_positions.extend(0..threshold);
+    } else {
+        basis_positions.extend(0..threshold - 1);
+        basis_positions.push(position);
+    }
+    let basis_xs: Vec<u32> = basis_positions.iter().map(|&p| xs[p]).collect();
+    for (&pos, w) in basis_positions
+        .iter()
+        .zip(lagrange_weights(&basis_xs, 0))
+    {
+        out[pos] = w;
+    }
+    out
+}
+
 fn dot(weights: &[u32], values: &[u32]) -> u32 {
     weights
         .iter()
@@ -255,6 +280,13 @@ pub struct RekeyZeroOpening {
     pub party_id: u16,
     pub values: Vec<u32>,
     pub salt: [u8; 32],
+}
+
+impl Drop for RekeyZeroOpening {
+    fn drop(&mut self) {
+        wipe(&mut self.values);
+        wipe(&mut self.salt);
+    }
 }
 
 impl RekeyHello {
@@ -390,7 +422,7 @@ struct Core {
     products_digest: [u8; 32],
     combined_macs: Vec<u32>,
     combined_parent_macs: Vec<u32>,
-    zero_shares: Vec<u32>,
+    own_zero_commit: [u8; 32],
     zero_gates: Option<crate::zero_gate::CommittedZeroGates>,
     zero_salt: [u8; 32],
     zero_commits: Vec<RekeyZeroCommit>,
@@ -417,7 +449,6 @@ impl Drop for Core {
             &mut self.macs,
             &mut self.combined_macs,
             &mut self.combined_parent_macs,
-            &mut self.zero_shares,
         ] {
             wipe(secret);
         }
@@ -564,7 +595,7 @@ impl<'a> RekeyRound1<'a> {
                     },
                     core::array::from_fn(|_| RingPoly::zero()),
                     cshake256_framed_32(b"QSAG.HD.DEALERLESS.ROOT.V1", &[&ceremony, &seed_a]),
-                    alloc::vec![0u32; COEFFS],
+                    SecretBuffer(alloc::vec![0u32; COEFFS]),
                     None,
                     root_cc,
                 )
@@ -593,14 +624,20 @@ impl<'a> RekeyRound1<'a> {
                     || !valid_scheme
                     || share.party_id != party_id
                     || share.committee != members
-                    || expected.seed_a != expected.matrix.seed
+                    || !expected.is_canonical()
                     || share.seed_a != expected.seed_a
                     || share.t_vec != expected.t_vec
                     || share.depth_used != expected.depth_used
                     || share.max_depth != expected.max_depth
-                    || expected
-                        .chain_code
-                        .is_some_and(|cc| share.chain_code.expose() != &cc)
+                {
+                    return Err(HdError::InvalidThresholdParameters);
+                }
+                if share.hardened && (expected.chain_code.is_some() || !request.hardened) {
+                    return Err(HdError::HardenedDerivationRequired);
+                }
+                if expected
+                    .chain_code
+                    .is_some_and(|cc| !ct_eq_bytes(share.chain_code.expose(), &cc))
                 {
                     return Err(HdError::InvalidThresholdParameters);
                 }
@@ -610,26 +647,26 @@ impl<'a> RekeyRound1<'a> {
                         max: expected.max_depth,
                     });
                 }
-                if share.hardened && (expected.chain_code.is_some() || !request.hardened) {
-                    return Err(HdError::HardenedDerivationRequired);
-                }
                 if expected.chain_code.is_none() && !request.hardened {
                     return Err(HdError::HardenedDerivationRequired);
                 }
-                let parent_s: Vec<u32> = share
-                    .s_shares
-                    .iter()
-                    .flat_map(|poly| poly.expose().coeffs)
-                    .map(|value| mod_q_mul(value, normalization))
-                    .collect();
+                let mut parent_s = SecretBuffer(Vec::with_capacity(COEFFS));
+                for poly in &share.s_shares {
+                    for &value in &poly.expose().coeffs {
+                        parent_s.0.push(mod_q_mul(value, normalization));
+                    }
+                }
+                let mut parent_macs = SecretBuffer(Vec::with_capacity(SPDZ_LANES * COEFFS));
+                for lane in &share.spdz_macs {
+                    for poly in lane {
+                        for &value in &poly.expose().coeffs {
+                            parent_macs.0.push(mod_q_mul(value, normalization));
+                        }
+                    }
+                }
                 let auth = ParentAuth {
-                    s: parent_s.clone(),
-                    macs: share
-                        .spdz_macs
-                        .iter()
-                        .flat_map(|lane| lane.iter().flat_map(|poly| poly.expose().coeffs))
-                        .map(|value| mod_q_mul(value, normalization))
-                        .collect(),
+                    s: parent_s.0.clone(),
+                    macs: core::mem::take(&mut parent_macs.0),
                     alpha: share
                         .spdz_alpha_shares
                         .map(|value| mod_q_mul(value, normalization)),
@@ -750,13 +787,24 @@ impl<'a> RekeyRound1<'a> {
         // Local randomness also binds this custodian's secret input, so a caller
         // that wrongly repeats `private_entropy` over different parent state
         // still gets a different nonce, and with it a different session key.
-        let mut state_bytes: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
-        if let Some(auth) = &parent {
-            state_bytes.extend(auth.alpha.iter().flat_map(|v| v.to_le_bytes()));
-            state_bytes.extend(auth.macs.iter().flat_map(|v| v.to_le_bytes()));
+        let state_cap = s.len() * 4
+            + parent
+                .as_ref()
+                .map_or(0, |auth| (auth.alpha.len() + auth.macs.len()) * 4);
+        let mut state_bytes = SecretBuffer(Vec::with_capacity(state_cap));
+        for &v in s.iter() {
+            state_bytes.0.extend_from_slice(&v.to_le_bytes());
         }
-        let mut state_binding = cshake256_framed_32(b"QSAG.HD.REKEY.STATE.V1", &[&state_bytes]);
-        wipe(&mut state_bytes);
+        if let Some(auth) = &parent {
+            for &v in &auth.alpha {
+                state_bytes.0.extend_from_slice(&v.to_le_bytes());
+            }
+            for &v in &auth.macs {
+                state_bytes.0.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut state_binding = cshake256_framed_32(b"QSAG.HD.REKEY.STATE.V1", &[&state_bytes.0]);
+        drop(state_bytes);
         let local = RedactedSecret::new(cshake256_framed_32(
             b"QSAG.HD.REKEY.LOCAL.V1",
             &[entropy.expose(), &request_digest, &state_binding],
@@ -795,7 +843,7 @@ impl<'a> RekeyRound1<'a> {
             hellos: Vec::new(),
             coin_seed,
             coin_salt,
-            s,
+            s: core::mem::take(&mut s.0),
             parent,
             alpha: [0; SPDZ_LANES],
             b: Vec::new(),
@@ -805,7 +853,7 @@ impl<'a> RekeyRound1<'a> {
             products_digest: [0; 32],
             combined_macs: Vec::new(),
             combined_parent_macs: Vec::new(),
-            zero_shares: Vec::new(),
+            own_zero_commit: [0; 32],
             zero_gates: None,
             zero_salt: secret(b"QSAG.HD.REKEY.ZERO_SALT.V1"),
             zero_commits: Vec::new(),
@@ -1096,14 +1144,18 @@ impl RekeyRound4 {
                 }
             }
         }
-        core.zero_shares = zero_shares;
-        let plan = OpenPlan::new(&core.xs(), usize::from(core.threshold) - 1);
-        let weight = plan.to_zero.get(core.position).copied().unwrap_or(0);
-        let mut residuals: Vec<u32> = core
-            .zero_shares
+        let zero_shares = SecretBuffer(zero_shares);
+        let own_zero_commit =
+            core.zero_commitment(core.party_id, &zero_shares, &core.zero_salt);
+        core.own_zero_commit = own_zero_commit;
+        let weights =
+            zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
+        let weight = weights[core.position];
+        let mut residuals: Vec<u32> = zero_shares
             .iter()
             .map(|&v| mod_q_mul(weight, v))
             .collect();
+        drop(zero_shares);
         core.zero_gates = Some(crate::zero_gate::CommittedZeroGates::hold(
             core.session,
             MODULE_Q,
@@ -1111,7 +1163,7 @@ impl RekeyRound4 {
         ));
         let commit = RekeyZeroCommit {
             party_id: core.party_id,
-            digest: core.zero_commitment(core.party_id, &core.zero_shares, &core.zero_salt),
+            digest: own_zero_commit,
         };
         Ok((RekeyRound5(core), commit))
     }
@@ -1125,15 +1177,28 @@ impl RekeyRound5 {
     ) -> Result<(RekeyRound6, RekeyZeroOpening), HdError> {
         let mut core = self.0;
         ordered(&core.members, commits, |commit| commit.party_id)?;
+        if !ct_eq_bytes(&commits[core.position].digest, &core.own_zero_commit) {
+            return abort(RekeyFault::CommitmentMismatch);
+        }
         core.zero_commits = commits.to_vec();
         let peers = crate::zero_gate::peer_transcript(
             &core.session,
             core.party_id,
             commits.iter().map(|c| (c.party_id, c.digest)),
         );
+        let weights =
+            zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
+        let inv_weight = mod_q_inv_or_zero(weights[core.position]);
+        if inv_weight == 0 {
+            return Err(HdError::InvalidThresholdParameters);
+        }
         let gates = core.zero_gates.as_mut().ok_or(HdError::MacCheckFailed)?;
         gates.freeze(peers)?;
-        gates.open()?;
+        let opened_residuals = gates.open()?;
+        let values: Vec<u32> = opened_residuals
+            .iter()
+            .map(|&r| mod_q_mul(inv_weight, r))
+            .collect();
         if let Some(journal) = &core.lineage.poison_journal {
             journal
                 .begin_disclosure(core.session)
@@ -1141,7 +1206,7 @@ impl RekeyRound5 {
         }
         let opening = RekeyZeroOpening {
             party_id: core.party_id,
-            values: core.zero_shares.clone(),
+            values,
             salt: core.zero_salt,
         };
         Ok((RekeyRound6(core), opening))
@@ -1162,7 +1227,8 @@ impl RekeyRound6 {
 
     /// Releases the authenticated share and its public descriptor only when
     /// every zero-test opens to zero on a consistent degree `t - 1` sharing.
-    /// Complete provisioning with a durable journal bound to the resulting family.
+    /// For root ceremonies, attaches `journal` to the new family; for child ceremonies,
+    /// verifies `journal` matches the inherited family journal and poisons on mismatch.
     pub fn finish(
         self,
         openings: &[RekeyZeroOpening],
@@ -1172,6 +1238,7 @@ impl RekeyRound6 {
         if share.poison_journal.is_none() {
             share.attach_poison_journal(journal)?;
         } else if journal.family_id() != share.family_id || journal.is_poisoned().unwrap_or(true) {
+            share.poison();
             return Err(HdError::MacCheckFailed);
         }
         share.require_poison_journal()?;
@@ -1221,27 +1288,24 @@ impl RekeyRound6 {
             core.party_id,
             core.zero_commits.iter().map(|c| (c.party_id, c.digest)),
         );
-        let peer_sums: Vec<u32> = (0..count)
-            .map(|index| {
-                openings
-                    .iter()
-                    .enumerate()
-                    .filter(|(position, _)| *position != core.position)
-                    .fold(0, |sum, (position, opening)| {
-                        mod_q_add(
-                            sum,
-                            mod_q_mul(
-                                plan.to_zero.get(position).copied().unwrap_or(0),
-                                opening.values[index],
-                            ),
-                        )
-                    })
-            })
-            .collect();
+        let weights =
+            zero_basis_weights(&core.xs(), usize::from(core.threshold), core.position);
+        let mut peer_sums = SecretBuffer(Vec::with_capacity(count));
+        for index in 0..count {
+            let sum = openings
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| *position != core.position)
+                .fold(0, |sum, (position, opening)| {
+                    mod_q_add(sum, mod_q_mul(weights[position], opening.values[index]))
+                });
+            peer_sums.0.push(sum);
+        }
         core.zero_gates
             .as_mut()
             .ok_or(HdError::MacCheckFailed)?
-            .verify(peers, &peer_sums)?;
+            .verify(peers, &peer_sums.0)?;
+        drop(peer_sums);
         if core
             .lineage
             .poison_journal
@@ -1884,11 +1948,29 @@ mod tests {
                 assert_eq!(state.verify(&mac_openings), Ok(pk.t_vec[2].coeffs[41]));
             }
         }
-        // Different sessions give unrelated masks.
+        // Different sessions give unrelated masks; key-bound masks reject cross-key reuse.
         let roster = config.members().to_vec();
         let a = dealerless_opening_mask(&seeds[1], &roster, [6; 32], projection).unwrap();
         let b = dealerless_opening_mask(&seeds[1], &roster, [7; 32], projection).unwrap();
         assert_ne!(a.test_value(), b.test_value());
+        let bound_root =
+            dealerless_opening_mask_for_xpub(&seeds[0], &root_pk, &roster, [8; 32], projection)
+                .unwrap();
+        let bound_child =
+            dealerless_opening_mask_for_xpub(&seeds[0], &pk, &roster, [8; 32], projection).unwrap();
+        assert_ne!(bound_root.test_value(), bound_child.test_value());
+        assert!(matches!(
+            HdThresholdEvalRound1Commit::begin(
+                &mut shares[0],
+                &pk,
+                &roster,
+                projection,
+                [8; 32],
+                bound_root,
+                [3; 32],
+            ),
+            Err(HdError::InvalidThresholdParameters)
+        ));
         // A roster below the threshold or outside the committee is refused.
         assert!(dealerless_opening_mask(&seeds[1], &roster[1..2], [6; 32], projection).is_err());
         assert!(

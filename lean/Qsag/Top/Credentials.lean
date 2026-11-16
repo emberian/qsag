@@ -114,11 +114,38 @@ theorem threshold_mldsa_hvzk_sacrifice_and_prss_chain
   have hPrss := Qsag.prss_multi_key_hybrid real ideal m D ε hPrf
   exact ⟨hPlat, hSac, hPow, hPrss⟩
 
+/-- **Coin-After-Freeze `SacrificeFreezeSample` ↔ `rssSacrificedSignStep` Composition
+    (`threshold_mldsa_frozen_sacrifice_sign_step_soundness`)**:
+    Composes `SacrificeFreezeSample` (`FrozenChallenge.vectors SacrificeFreeze.fq204Elems 6`,
+    freezing the prover's `(inp, T)` before sampling the 6-coordinate `Ext6Fq204` challenge) with
+    threshold FIPS-204 `rssSacrificedSignStep` (`rssSacrificedSignStep_mldsaQ6_frozen_soundness`),
+    proving that any forged multiplication product is accepted on at most `1` of `mldsaQ ^ 6`
+    challenges (`< 2^-137`). -/
+theorem threshold_mldsa_frozen_sacrifice_sign_step_soundness
+    (chalHash : List UInt8 → (Fin 4 → Qsag.NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Qsag.Poly256)
+    (st : Qsag.RssMlDsaSignerState)
+    (A : Qsag.FrozenChallenge.Adversary
+      (Qsag.RssMlDsaAttemptInput × Qsag.RssSacrificeTranscript204) Qsag.Fq204)
+    (hForged : (A.commit []).1.products ≠
+      Qsag.rssComputeProducts chalHash sampleInBall st (A.commit []).1.mu (A.commit []).1.ySubsets) :
+    Qsag.FrozenChallenge.countIf
+      (fun chis => Qsag.rssSignStepAcceptsSacrifice chalHash sampleInBall st
+        (A.commit []).1 (Qsag.ext6OfList chis) (A.commit []).2)
+      (Qsag.FrozenChallenge.vectors Qsag.SacrificeFreeze.fq204Elems 6) ≤ 1 ∧
+    Qsag.FrozenChallenge.countIf
+      (fun chis => Qsag.rssSignStepAcceptsSacrifice chalHash sampleInBall st
+        (A.commit []).1 (Qsag.ext6OfList chis) (A.commit []).2)
+      (Qsag.FrozenChallenge.vectors Qsag.SacrificeFreeze.fq204Elems 6) * 2 ^ 137 <
+      Qsag.mldsaQ ^ 6 ∧
+    (Qsag.FrozenChallenge.vectors Qsag.SacrificeFreeze.fq204Elems 6).length = Qsag.mldsaQ ^ 6 :=
+  Qsag.rssSacrificedSignStep_mldsaQ6_frozen_soundness chalHash sampleInBall st A hForged
+
 /-! ## 4. `PiBlindVc` Selective-Disclosure Soundness & Fiat–Shamir Collision Extraction -/
 
 /-- **Roster of credential facts (`blindVc_presentation_provenance_and_collision_finder_roster`)**.
-    The four conjuncts are about different objects and are not a reduction: no theorem in the tree
-    connects the `PiBlindVc` transcript model to the ideal credential machine.
+    Collects the four presentation and ZKBoo issuance properties below (see §7 for the concrete
+    `piToprfCredService` / `LimboSdOpeningWire.verify33` refinement to `Spec.idealCredMachine`):
     1. Ideal machine (`Spec.idealCredMachine_presentation_sound`, `…_presentation_provenance`): an
        accepted presentation after a run from the initial state uses a fresh challenge for the
        current epoch, arrived on the holder's port (or on the adversary port with that holder
@@ -281,10 +308,10 @@ theorem credential_sd_opening_round_qrom_and_seed_tree_binding
     A service that ignores who delivered a message is not an instance
     (`unauthenticatedCredService_not_implementation`).
 
-    Inhabitants in the tree: the concrete SPDZ TOPRF + `PiBlindVc` protocol service
-    `toprfCredentialImplementation` (with non-identity state abstraction collapsing SPDZ reservoir
-    cursors, quorum poisoning state, high-water marks, and `blindVcTag`) as well as the baseline
-    reference `CredentialImplementation.ideal`. -/
+    Inhabitant in the tree: the concrete SPDZ TOPRF + `PiBlindVc` protocol service
+    `toprfCredentialImplementation` over `Qsag.piToprfCredService` (executing direct
+    state-field validation, monotone SPDZ reservoir consumption, and 33-repetition `N = 256`
+    Limbo GGM opening checks, paired with `Qsag.piToprfCredMachine_dataRefines_idealCred`). -/
 structure CredentialImplementation {O S W : Type} (Attr : Type) [DecidableEq Attr]
     (cfg : Qsag.Spec.IdealCredConfig O)
     (M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)) : Type where
@@ -299,18 +326,6 @@ structure CredentialImplementation {O S W : Type} (Attr : Type) [DecidableEq Att
       (Qsag.Spec.idealCredMachine cfg).step a (sender, cmd) = some (a', out) ∧ Rel c' a'
   reject_ok : ∀ {c : S} {a : Qsag.Spec.IdealCredState Attr O} {x : Qsag.Spec.CredPort × W},
     Rel c a → M.step c x = none → Rel (M.errStep c x) a
-
-/-- The ideal machine implements itself: its wire messages are commands. -/
-def CredentialImplementation.ideal {O : Type} (Attr : Type) [DecidableEq Attr]
-    (cfg : Qsag.Spec.IdealCredConfig O) :
-    CredentialImplementation Attr cfg (Qsag.Spec.idealCredMachine (Attr := Attr) cfg) where
-  Rel c a := c = a
-  extract _ _ cmd := some cmd
-  init_ok hInit := hInit
-  accept_ok {c c' a sender w out} hRel hStep := by
-    subst hRel
-    exact ⟨w, c', rfl, hStep, rfl⟩
-  reject_ok hRel _ := hRel
 
 /-- What a run shows at the interface: per step, the delivering sender and the output. -/
 def credSenderView {O W : Type}
@@ -784,6 +799,27 @@ theorem toprfCredentialImplementation_non_identity_state {Attr O : Type} [Decida
         (.client, .advanceEpochWire 0 0#256)).phaseAuditCount = 1 :=
   Qsag.piToprfCredService_non_identity_witness cfg
 
+/-- **Stuttering `Spec.DataRefines` + Multi-Turn Reservoir Monotonicity for `piToprfCredMachine`
+    (`piToprfCred_dataRefines_and_reservoir_monotone`)**:
+    Exports the full `Spec.DataRefines` witness (`Qsag.piToprfCredMachine_dataRefines_idealCred`,
+    handling internal `SpdzReservoir::prepare` turns via `visIn = none`) alongside multi-turn
+    SPDZ reservoir monotonicity (`Qsag.piToprfCredService_reservoir_monotone`). -/
+def piToprfCredMachine_dataRefines_ideal {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O) :
+    Qsag.Spec.DataRefines (Qsag.piToprfCredMachine (Attr := Attr) cfg)
+      (Qsag.Spec.idealCredMachine cfg)
+      Qsag.toprfMachineVisIn (Qsag.toprfMachineVisOut .corrupted) :=
+  Qsag.piToprfCredMachine_dataRefines_idealCred cfg
+
+theorem piToprfCredService_reservoir_never_resets {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O) (c : Qsag.PiToprfCredState Attr O)
+    (port : Qsag.Spec.CredPort) (w : Qsag.ToprfCredWire Attr) :
+    Qsag.ReservoirStepMonotone c.reservoir
+      ((Qsag.piToprfCredService cfg).errStep c (port, w)).reservoir ∧
+    ∀ c' out, (Qsag.piToprfCredService cfg).step c (port, w) = some (c', out) →
+      Qsag.ReservoirStepMonotone c.reservoir c'.reservoir :=
+  Qsag.piToprfCredService_reservoir_monotone cfg c port w
+
 /-- Concrete issuance authentication for `piToprfCredService`. -/
 theorem piToprfCredService_issuance_authenticated {Attr O : Type} [DecidableEq Attr]
     (cfg : Qsag.Spec.IdealCredConfig O)
@@ -1015,6 +1051,67 @@ theorem tooth_open_relay_spoofs_issuer_credPort :
   exact ⟨[.deliver m, .deliver m], m, Qsag.Spec.open_relay_has_no_channel_contract,
     rfl, hPort, List.Mem.head _, fun h => nomatch h⟩
 
+/-! ## 9. Canonical `Spec.Assumptions` Lattice & Regular-Dual-LPN Preprocessing Locale Bridge -/
+
+/-- **Preprocessing Hardness Composition over `Spec.Assumptions`
+    (`credential_preprocessing_lattice_and_lpn_assumptions_bound`)**:
+    Connects the three preprocessing hardness locales of `Qsag.Spec.Assumptions`—`DecisionRlweHard`
+    (negacyclic `ℤ_q[X]/(X^N + 1)` OT encryption), `ModuleSisHard` (ZKPoK / commitment binding),
+    and `RegularDualLpnHard` (fixed quasi-cyclic tap matrix `H` over regular block noise)—directly
+    into `Top.Credentials` `GameBound` guarantees! -/
+theorem credential_preprocessing_lattice_and_lpn_assumptions_bound
+    {𝒜Rlwe : (List (List Nat × List Nat) → Bool) → Prop}
+    {𝒜Sis : (List (List (List Nat)) → List (List Nat)) → Prop}
+    {𝒜Lpn : (List Bool → Bool) → Prop}
+    {N q m βRlwe rows cols βSis blocks blockLen : Nat}
+    {H : List (List Bool)}
+    {εRlwe εSis εLpn : Qsag.Spec.RatBound}
+    (hRlwe : Qsag.Spec.DecisionRlweHard 𝒜Rlwe N q m βRlwe εRlwe)
+    (hSis : Qsag.Spec.ModuleSisHard 𝒜Sis N q rows cols βSis εSis)
+    (hLpn : Qsag.Spec.RegularDualLpnHard 𝒜Lpn H blocks blockLen εLpn)
+    {n nC nA : Nat} (hPos : 0 < n) (π : Qsag.Spec.CoinSplit n nC nA)
+    (sRlwe : Fin nC → Qsag.Spec.RlweSample)
+    (hURlwe : Qsag.Spec.UniformOn (Qsag.Spec.RlweSampleOk N q m βRlwe) sRlwe)
+    (dRlwe : Fin nA → List (List Nat × List Nat) → Bool)
+    (hDRlwe : ∀ a, 𝒜Rlwe (dRlwe a))
+    (mSis : Fin nC → List (List (List Nat)))
+    (hUSis : Qsag.Spec.UniformOn (Qsag.Spec.SisMatrixOk N q rows cols) mSis)
+    (aSis : Fin nA → List (List (List Nat)) → List (List Nat))
+    (hASis : ∀ a, 𝒜Sis (aSis a))
+    (sLpn : Fin nC → Qsag.Spec.RegularDualLpnSample)
+    (hULpn : Qsag.Spec.UniformOn
+      (fun x : Qsag.Spec.RegularDualLpnSample =>
+        Qsag.Spec.regularNoiseOk blocks blockLen x.noise = true ∧ x.uniform.length = H.length)
+      sLpn)
+    (dLpn : Fin nA → List Bool → Bool)
+    (hDLpn : ∀ a, 𝒜Lpn (dLpn a)) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.AdvDist (Qsag.Spec.rlweRealGame hPos π N q m sRlwe dRlwe)
+        (Qsag.Spec.rlweUniformGame hPos π m sRlwe dRlwe))
+      εRlwe ∧
+    Qsag.Spec.GameBound
+      (Qsag.Spec.moduleSisGame hPos N q cols βSis
+        (fun ω => mSis (π.chal ω)) (fun ω => aSis (π.advc ω))).winProb
+      εSis ∧
+    Qsag.Spec.GameBound
+      (Qsag.Spec.AdvDist
+        (Qsag.Spec.FinGame.mk hPos (fun ω => dLpn (π.advc ω)
+          (Qsag.Spec.lpnSyndrome H (sLpn (π.chal ω)).noise)))
+        (Qsag.Spec.FinGame.mk hPos (fun ω => dLpn (π.advc ω) (sLpn (π.chal ω)).uniform)))
+      εLpn :=
+  ⟨hRlwe.bound n nC nA hPos π sRlwe hURlwe dRlwe hDRlwe,
+   hSis.bound n nC nA hPos π mSis hUSis aSis hASis,
+   hLpn.bound n nC nA hPos π sLpn hULpn dLpn hDLpn⟩
+
+/-- `#tooth` Degenerate `0`-row Module-SIS (`rows = 0`) is refuted for every nontrivial bound
+    `ε < 1` (`Spec.moduleSisHard_noRows_refuted`), confirming `ModuleSisHard` is non-vacuous! -/
+theorem tooth_degenerate_moduleSis_noRows_refuted
+    (𝒜 : (List (List (List Nat)) → List (List Nat)) → Prop)
+    (h𝒜 : 𝒜 (fun _ => [[1]]))
+    {ε : Qsag.Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ Qsag.Spec.ModuleSisHard 𝒜 1 2 0 1 1 ε :=
+  Qsag.Spec.moduleSisHard_noRows_refuted 𝒜 h𝒜 hε
+
 theorem inhabited_blindVc_cut_and_choose_gameBound :
     ∃ P : Qsag.CutAndChoose.Prover Qsag.BlindVcCommittedProof Qsag.BlindVcFp5
       Qsag.BlindVcR2aMsg Qsag.BlindVcFp5 Qsag.BlindVcR2bMsg,
@@ -1036,14 +1133,18 @@ theorem inhabited_piToprfCredService_issuance :
     hInit, .nil _, hStep⟩
 
 #verify_constructive
+  Qsag.Top.threshold_mldsa_frozen_sacrifice_sign_step_soundness
   Qsag.Top.blindVc_cut_and_choose_gameBound
   Qsag.Top.blindVc_concrete_fp5_qrom_opening_soundness
   Qsag.Top.toprfCredentialImplementation_non_identity_state
+  Qsag.Top.piToprfCredService_reservoir_never_resets
   Qsag.Top.piToprfCredService_issuance_authenticated
   Qsag.Top.piToprfCredService_presentation_provenance
   Qsag.Top.piToprfCredService_toprf_provenance
   Qsag.Top.credPort_authenticated_by_channel_contract
   Qsag.Top.tooth_open_relay_spoofs_issuer_credPort
+  Qsag.Top.credential_preprocessing_lattice_and_lpn_assumptions_bound
+  Qsag.Top.tooth_degenerate_moduleSis_noRows_refuted
   Qsag.Top.inhabited_blindVc_cut_and_choose_gameBound
   Qsag.Top.inhabited_piToprfCredService_issuance
 
@@ -1056,6 +1157,10 @@ theorem inhabited_piToprfCredService_issuance :
   Qsag.Top.tooth_open_relay_spoofs_issuer_credPort
 #tooth_pair Qsag.Top.piToprfCredService_issuance_authenticated vs
   Qsag.Top.unauthenticatedCredService_not_implementation
+#tooth_pair Qsag.Top.credential_preprocessing_lattice_and_lpn_assumptions_bound vs
+  Qsag.Top.tooth_degenerate_moduleSis_noRows_refuted
+#tooth_pair Qsag.Top.threshold_mldsa_frozen_sacrifice_sign_step_soundness vs
+  Qsag.tooth_rssSacrificedSignStep_swapped_order_forges
 
 end Qsag.Top
 end

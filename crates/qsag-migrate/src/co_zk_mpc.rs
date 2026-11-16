@@ -22,10 +22,14 @@ use crate::secret::{SecretVec, Wipe};
 #[cfg(any(feature = "std", test))]
 use crate::threshold_mpc::QuorumKeyEscrow;
 use crate::{
+    batch_hash::{
+        COZK_TREE_LEAVES, COZK_VIEW_MAGIC_V4, TURBOSHAKE_LEAF_SUFFIX, TURBOSHAKE_ROOT_SUFFIX,
+        TURBOSHAKE_VIEW_MIDSTATE, cozk_product_leaf_range,
+    },
     bls12_381::{
         self, BlsG1Point, BlsMigrationRequest, BlsMigrationStatement, BlsValidatorCommitment,
     },
-    circuit::{Circuit, Domain, Op, ZERO},
+    circuit::{Circuit, Domain, Op, Value, ZERO},
     outer_mpc::{self, Core, Engine, FieldWord, Gadgets, ShareBit, Sponge, Word},
     pallas::{self, PallasMigrationRequest, PallasMigrationStatement, PallasPoint},
     threshold_mpc::{MacKeyShare, SpdzEngine, ThresholdConfig},
@@ -36,8 +40,8 @@ use crate::{
 };
 use alloc::{vec, vec::Vec};
 use qsag_accel::{
-    ct::{ct_zeroize_bytes, ct_zeroize_u64s},
-    keccak::{InterleavedTranscript, cshake256_framed_32},
+    ct::{ct_eq_bytes_mask, ct_zeroize_bytes, ct_zeroize_u64s},
+    keccak::{InterleavedTranscript, commit_mpc_broadcast, cshake256_framed_32},
 };
 
 /// General-quorum custody: the active quorum, one channel key per other
@@ -746,55 +750,97 @@ impl CoZkCustodianShare {
         ))?;
 
         // Both replicated witness components this custodian holds are wiped on
-        // every exit path, as are its shares of all virtual-head tape seeds.
+        // every exit path, as are its local sub-seeds and commitment salts.
         let witness = e.share_uniform_lanes(own_witness)?;
         let witness: &[E::Bit] = &witness;
 
+        let (quorum_pos, quorum_m) = e.quorum_position();
         let num_batches = MIT_REPETITIONS.div_ceil(64);
-        let mut seeds = Vec::with_capacity(num_batches);
+        let mut local_batches = Vec::with_capacity(num_batches);
+        let mut own_commits_flat = Vec::with_capacity(MIT_REPETITIONS * 3 * 32);
         for batch in 0..num_batches {
-            let mut heads = Vec::with_capacity(3);
-            for head in 0..3 {
-                let mut lane_seeds: Vec<_> = (0..64)
-                    .map(|lane| {
-                        cshake256_framed_32(
-                            b"QSAG.OUTER.SEED.V1",
-                            &[
-                                &self.entropy,
-                                &self.session,
-                                statement_bytes,
-                                &((batch * 64 + lane) as u64).to_le_bytes(),
-                                &[head],
-                            ],
-                        )
-                    })
-                    .collect();
-                let mut own_seed: Vec<_> = (0..256)
-                    .map(|i| {
-                        lane_seeds.iter().enumerate().fold(0, |v, (lane, s)| {
-                            v | (((s[i / 8] >> (i % 8)) & 1) as u64) << lane
-                        })
-                    })
-                    .collect();
-                for seed in &mut lane_seeds {
-                    ct_zeroize_bytes(seed);
+            let mut subseeds = [[[0u8; 32]; 64]; 3];
+            let mut salts = [[[0u8; 32]; 64]; 3];
+            for (head, (head_seeds, head_salts)) in
+                subseeds.iter_mut().zip(salts.iter_mut()).enumerate()
+            {
+                for lane in 0..64 {
+                    let rep = batch * 64 + lane;
+                    head_seeds[lane] = cshake256_framed_32(
+                        b"QSAG.OUTER.SEED.V1",
+                        &[
+                            &self.entropy,
+                            &self.session,
+                            statement_bytes,
+                            &(rep as u64).to_le_bytes(),
+                            &[head as u8, quorum_pos as u8, 0],
+                        ],
+                    );
+                    head_salts[lane] = cshake256_framed_32(
+                        b"QSAG.OUTER.SEED.V1",
+                        &[
+                            &self.entropy,
+                            &self.session,
+                            statement_bytes,
+                            &(rep as u64).to_le_bytes(),
+                            &[head as u8, quorum_pos as u8, 1],
+                        ],
+                    );
                 }
-                let shared = e.share(&own_seed);
-                ct_zeroize_u64s(&mut own_seed);
-                heads.push(shared?);
             }
-            seeds.push(heads);
+            let count = core::cmp::min(64, MIT_REPETITIONS - batch * 64);
+            for lane in 0..count {
+                let rep = batch * 64 + lane;
+                for head in 0..3 {
+                    let com = commit_mpc_broadcast(
+                        &self.session,
+                        rep as u32,
+                        (quorum_pos * 3 + head) as u16,
+                        &subseeds[head][lane],
+                        &salts[head][lane],
+                    );
+                    own_commits_flat.extend_from_slice(&com);
+                }
+            }
+            local_batches.push(LocalBatchSeeds { subseeds, salts });
         }
 
-        // Settle the root input rounds before any batch engine opens a value
-        // derived from the witness or the seeds.
-        e.verify_all_pending()?;
+        // Phase 0: Commit-before-execute binding of every custodian's per-(rep, head)
+        // sub-seeds before any tape share, witness conversion, or circuit gate executes.
+        let peer_commits = e.broadcast_bytes(&own_commits_flat)?;
+        if peer_commits.len() != quorum_m
+            || peer_commits
+                .iter()
+                .any(|c| c.len() != MIT_REPETITIONS * 3 * 32)
+        {
+            e.poison();
+            return Err(Error::InvalidConfiguration);
+        }
+        {
+            let mut commit_frames: Vec<&[u8]> = Vec::with_capacity(1 + quorum_m);
+            commit_frames.push(statement_bytes);
+            for c in &peer_commits {
+                commit_frames.push(c.as_slice());
+            }
+            e.agree(cshake256_framed_32(
+                b"QSAG.OUTER.STATEMENT.V1",
+                &commit_frames,
+            ))?;
+        }
 
-        // Phase 1: Evaluate all batches, compute shared view commitments, and run
-        // mandatory active multiplication checks on EVERY batch BEFORE opening any
-        // commitment, public circuit output, or ZKBoo view.
-        let mut computed_batches =
-            compute_batches(e, circuit, witness, &seeds, children, &self.entropy)?;
+        // Phase 1: Evaluate all batches using locally expanded sub-seed tapes (0 in-MPC
+        // SHAKE permutations!), compute 8-leaf 12-round TurboSHAKE256 view commitments,
+        // and run mandatory active multiplication checks on EVERY batch BEFORE opening.
+        let mut computed_batches = compute_batches(
+            e,
+            circuit,
+            witness,
+            &local_batches,
+            quorum_pos,
+            quorum_m,
+            children,
+            &self.entropy,
+        )?;
 
         // Cross-batch barrier: all custodians confirm every batch passed active
         // multiplication verification before ANY view commitment or output opens.
@@ -816,7 +862,11 @@ impl CoZkCustodianShare {
             .iter()
             .enumerate()
             .flat_map(|(rep, r)| {
-                zk_engine::rep_root(rep, &r.commits, r.outputs.each_ref().map(Vec::as_slice))
+                zk_engine::rep_root_cozk_v4(
+                    rep,
+                    &r.commits,
+                    r.outputs.each_ref().map(Vec::as_slice),
+                )
             })
             .collect();
         let root = cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]);
@@ -829,12 +879,78 @@ impl CoZkCustodianShare {
 
         let mut t = transcript_fn(&root);
         let challenges = zk_engine::challenges(&mut t);
+
+        // Phase 3a: Reveal salted sub-seeds ONLY for the two challenged heads of each
+        // repetition (`(e_r, (e_r + 1) % 3)`); the hidden third head's sub-seeds and salts
+        // are NEVER transmitted. Verify every peer's Phase-0 commitment in constant time.
+        let mut own_decommits = Vec::with_capacity(MIT_REPETITIONS * 2 * 64);
+        for (rep, &ch_byte) in challenges.iter().enumerate() {
+            let batch = rep / 64;
+            let lane = rep % 64;
+            let ch = ch_byte as usize;
+            for head in [ch, (ch + 1) % 3] {
+                own_decommits.extend_from_slice(&local_batches[batch].subseeds[head][lane]);
+                own_decommits.extend_from_slice(&local_batches[batch].salts[head][lane]);
+            }
+        }
+        drop(local_batches);
+
+        #[cfg(test)]
+        e.on_public_or_view_open();
+        let mut peer_decommits = e.broadcast_bytes(&own_decommits)?;
+        ct_zeroize_bytes(&mut own_decommits);
+        if peer_decommits.len() != quorum_m
+            || peer_decommits
+                .iter()
+                .any(|d| d.len() != MIT_REPETITIONS * 2 * 64)
+        {
+            for d in &mut peer_decommits {
+                ct_zeroize_bytes(d);
+            }
+            e.poison();
+            return Err(Error::InvalidConfiguration);
+        }
+        for (pos, decommit_buf) in peer_decommits.iter().enumerate() {
+            let commit_buf = &peer_commits[pos];
+            let mut all_ok = u64::MAX;
+            for (rep, &ch_byte) in challenges.iter().enumerate() {
+                let ch = ch_byte as usize;
+                for (pair_idx, head) in [ch, (ch + 1) % 3].into_iter().enumerate() {
+                    let dec_off = (rep * 2 + pair_idx) * 64;
+                    let subseed: &[u8; 32] =
+                        decommit_buf[dec_off..dec_off + 32].try_into().unwrap();
+                    let salt: &[u8; 32] =
+                        decommit_buf[dec_off + 32..dec_off + 64].try_into().unwrap();
+                    let actual = commit_mpc_broadcast(
+                        &self.session,
+                        rep as u32,
+                        (pos * 3 + head) as u16,
+                        subseed,
+                        salt,
+                    );
+                    let com_off = (rep * 3 + head) * 32;
+                    let expected: &[u8; 32] = commit_buf[com_off..com_off + 32].try_into().unwrap();
+                    all_ok &= ct_eq_bytes_mask(&actual, expected);
+                }
+            }
+            if all_ok != u64::MAX {
+                for d in &mut peer_decommits {
+                    ct_zeroize_bytes(d);
+                }
+                e.poison();
+                return Err(Error::Disagreement(pos));
+            }
+        }
+
+        // Phase 3b: Open challenged ZKBoo view wires (`pair[0]` omits `products` via KKW
+        // deterministic replay reconstruction; `head_inputs` exists only on head 2) and
+        // verify consistency between MPC-committed sub-seed bits and Phase-0 decommitments.
         let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
 
         #[cfg(test)]
         let audit_inputs: Vec<[Word<E::Bit>; 3]> = computed_batches
             .iter()
-            .map(|batch| core::array::from_fn(|head| batch.views[head].inputs.clone()))
+            .map(|batch| batch.audit_witness_inputs.clone())
             .collect();
 
         for (batch, mut result) in computed_batches.into_iter().enumerate() {
@@ -843,37 +959,81 @@ impl CoZkCustodianShare {
             let count = core::cmp::min(64, MIT_REPETITIONS - batch * 64);
             let mut opened: Vec<Vec<PartyView>> = Vec::with_capacity(3);
             for (head, view) in views.iter().enumerate() {
-                let mask = (0..count).fold(0, |mask, lane| {
-                    if (challenges[batch * 64 + lane] as usize + 2) % 3 != head {
-                        mask | (1u64 << lane)
-                    } else {
-                        mask
+                let mut mask_both = 0u64;
+                let mut mask_second = 0u64;
+                for lane in 0..count {
+                    let ch = challenges[batch * 64 + lane] as usize;
+                    if (ch + 2) % 3 != head {
+                        mask_both |= 1u64 << lane;
                     }
-                });
-                let total_bits =
-                    view.seed.len() + view.inputs.len() + view.products.len() + view.outputs.len();
-                let mut flat: Word<E::Bit> = SecretVec::with_capacity(total_bits);
-                for part in [&view.seed, &view.inputs, &view.products, &view.outputs] {
-                    flat.extend_from_slice(part);
+                    if (ch + 1) % 3 == head {
+                        mask_second |= 1u64 << lane;
+                    }
                 }
+                let meta_bits = view.subseeds.len() + view.inputs.len();
+                let mut flat_meta: Word<E::Bit> = SecretVec::with_capacity(meta_bits);
+                flat_meta.extend_from_slice(&view.subseeds);
+                flat_meta.extend_from_slice(&view.inputs);
+
                 #[cfg(test)]
                 opening_engine.on_public_or_view_open();
-                // Only the two challenged heads of each repetition open; the
-                // third head's lanes stay hidden.
-                let clear = opening_engine.open_lanes(&flat, mask)?;
-                let head_views = (0..count)
-                    .map(|lane| {
-                        let bytes = outer_mpc::lane_bytes(&clear, lane);
-                        let inputs_end = 32 + view.inputs.len() / 8;
-                        let products_end = inputs_end + view.products.len() / 8;
-                        PartyView {
-                            seed: bytes[..32].try_into().unwrap(),
-                            inputs: bytes[32..inputs_end].to_vec(),
-                            products: bytes[inputs_end..products_end].to_vec(),
-                            outputs: bytes[products_end..].to_vec(),
-                        }
-                    })
-                    .collect();
+                let clear_meta = opening_engine.open_lanes(&flat_meta, mask_both)?;
+                let clear_prods = opening_engine.open_lanes(&view.products, mask_second)?;
+
+                let subseeds_bytes_len = view.subseeds.len() / 8;
+                let mut subseed_match_mask = u64::MAX;
+                let mut head_views = Vec::with_capacity(count);
+                for lane in 0..count {
+                    let rep = batch * 64 + lane;
+                    let ch = challenges[rep] as usize;
+                    if (ch + 2) % 3 == head {
+                        head_views.push(PartyView {
+                            seed: [0u8; 32],
+                            inputs: Vec::new(),
+                            products: Vec::new(),
+                            outputs: Vec::new(),
+                        });
+                        continue;
+                    }
+                    let pair_idx = usize::from(head != ch);
+                    let mut meta_bytes = outer_mpc::lane_bytes(&clear_meta, lane);
+                    let mut decommitted_subseeds = Vec::with_capacity(quorum_m);
+                    for (pos, decommit_buf) in peer_decommits.iter().enumerate() {
+                        let dec_off = (rep * 2 + pair_idx) * 64;
+                        let mut s = [0u8; 32];
+                        s.copy_from_slice(&decommit_buf[dec_off..dec_off + 32]);
+                        let mpc_slice: &[u8; 32] =
+                            meta_bytes[pos * 32..(pos + 1) * 32].try_into().unwrap();
+                        subseed_match_mask &= ct_eq_bytes_mask(mpc_slice, &s);
+                        decommitted_subseeds.push(s);
+                    }
+                    let head_in_slice = &meta_bytes[subseeds_bytes_len..];
+                    let (seed, inputs) =
+                        zk_engine::encode_cozk_v4_inputs(&decommitted_subseeds, head_in_slice);
+                    ct_zeroize_bytes(&mut meta_bytes);
+                    for s in &mut decommitted_subseeds {
+                        ct_zeroize_bytes(s);
+                    }
+                    let products = if pair_idx == 1 {
+                        outer_mpc::lane_bytes(&clear_prods, lane)
+                    } else {
+                        Vec::new()
+                    };
+                    head_views.push(PartyView {
+                        seed,
+                        inputs,
+                        products,
+                        outputs: public[rep].outputs[head].clone(),
+                    });
+                }
+                if subseed_match_mask != u64::MAX {
+                    for d in &mut peer_decommits {
+                        ct_zeroize_bytes(d);
+                    }
+                    opening_engine.poison();
+                    e.poison();
+                    return Err(Error::InvalidProof);
+                }
                 opened.push(head_views);
             }
             for (lane, &ch_byte) in challenges[batch * 64..batch * 64 + count]
@@ -893,6 +1053,9 @@ impl CoZkCustodianShare {
                     hidden_outputs: public[rep].outputs[hidden].clone(),
                 });
             }
+        }
+        for d in &mut peer_decommits {
+            ct_zeroize_bytes(d);
         }
 
         let proof = MigrationZkProof {

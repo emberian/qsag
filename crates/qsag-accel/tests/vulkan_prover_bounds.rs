@@ -643,3 +643,90 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
         Err(VulkanError::WorkspacePoisoned)
     ));
 }
+
+#[test]
+fn audit_hardening_bounds_receipts_and_turboshake_canopy() {
+    let Some(gpu) = backend() else {
+        return;
+    };
+    let fx = Fixture::new();
+
+    // H3: Audited discrete backend exposes `is_secret_slots_audited() == true` and acquires a
+    // secret prover session cleanly.
+    assert!(gpu.is_secret_slots_audited());
+    gpu.try_acquire_secret_prover_session()
+        .expect("secret prover session");
+
+    // H1: Canopy leaf header 8-bit field bounds (`arity >= 256`, `num_polys >= 256`, `stage_idx >= 256`)
+    // must be rejected cleanly on the host before any shader dispatch.
+    let refs: Vec<&[u64]> = fx.polys.iter().map(Vec::as_slice).collect();
+    assert_clean(gpu.prover_whir_commit_round0(
+        &refs,
+        &[0x42; 32],
+        NUM_VARS,
+        4,
+        256,
+        0,
+        0,
+        EXTRA_WITNESS_WORDS,
+    ));
+    let many_polys: Vec<&[u64]> = (0..256).map(|_| fx.polys[0].as_slice()).collect();
+    assert_clean(gpu.prover_whir_commit_round0(
+        &many_polys,
+        &[0x42; 32],
+        NUM_VARS,
+        4,
+        16,
+        0,
+        0,
+        EXTRA_WITNESS_WORDS,
+    ));
+    let top_cshake = fx.commit(&gpu);
+    assert_clean(gpu.prover_whir_commit_stage(256, 16, 64, 4));
+    fx.commit(&gpu);
+    assert_clean(gpu.prover_whir_commit_stage(1, 16, 512, 256));
+    fx.commit(&gpu);
+    assert_clean(gpu.prover_whir_gather_queries(256, 4, 1, 16, &[], &[1], &mut [0; 4]));
+
+    // H2: `prover_whir_expand_monomial_and_dot` rejects 768-entry multilinear tables at `num_vars = 25`
+    // (`mono_kronecker.len() == 768` only encodes 24 variables; `nv = 25..=26` requires `1536`).
+    let poly25 = vec![1u64; 1 << 25];
+    gpu.prover_whir_commit_round0(&[poly25.as_slice()], &[0x11; 32], 25, 4, 64, 0, 0, 0)
+        .expect("nv=25 round0 commit");
+    let kron768 = [[1u64, 0, 0, 0]; 768];
+    assert_clean(gpu.prover_whir_expand_monomial_and_dot(&kron768, 25, 1, &mut []));
+    drop(poly25);
+
+    // H5: An out-of-range batch `run_job` call must NOT wipe or poison an active `ProverArena`!
+    let top_before = fx.commit(&gpu);
+    assert_eq!(top_before, top_cshake);
+    let mut bad_ntt = vec![0u64; 3]; // Not a supported NTT power-of-two batch size
+    assert!(gpu.goldilocks_ntt_canonical_inplace(&mut bad_ntt, false).is_err());
+    gpu.prover_whir_batch_sumcheck_init(&fx.eq_tables, &fx.lambdas, NUM_VARS)
+        .expect("active ProverArena must survive unrelated batch error");
+
+    // TurboSHAKE256 Canopy GPU commitment (`turboshake_canopy = true`) succeeds and domain-separates
+    // cleanly from 24-round `cSHAKE256` (`turboshake_canopy = false`).
+    let top_turbo = gpu
+        .prover_whir_commit_round0_with_mode(
+            true,
+            NUM_POLYS,
+            &[0x42; 32],
+            NUM_VARS,
+            4,
+            16,
+            0,
+            0,
+            EXTRA_WITNESS_WORDS,
+            |poly_idx, pos, dst| {
+                dst.copy_from_slice(&fx.polys[poly_idx][pos..pos + dst.len()]);
+            },
+        )
+        .expect("TurboSHAKE256 round0 commit");
+    assert_ne!(top_turbo, top_cshake);
+    let mut raw_q = vec![0u64; 2 + NUM_POLYS * 16 + 4];
+    gpu.prover_whir_gather_queries(0, 16, NUM_POLYS, 1024, &[0], &[1], &mut raw_q)
+        .expect("TurboSHAKE256 round0 gather");
+
+    gpu.release_prover_session();
+}

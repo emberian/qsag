@@ -2,6 +2,7 @@ module
 import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.MirRefinementKit
+public import QsagVerified.Proofs.MirWpKit
 public import QsagVerified.Proofs.PolicyAndAddr
 public import QsagVerified.Proofs.CredAndHdGuards
 public import QsagVerified.Proofs.RssCutSession

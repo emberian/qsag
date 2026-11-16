@@ -28,6 +28,7 @@ import all QsagVerified.Proofs.KeccakWitness.Group6
 import all QsagVerified.Proofs.KeccakWitness.Group7
 import all QsagVerified.Proofs.KeccakWitness.States
 import all QsagVerified.Proofs.MirRefinementKit
+import all QsagVerified.Proofs.MirWpKit
 import all QsagVerified.Proofs.PantsAndQuorumGuards
 import all QsagVerified.Proofs.PolicyAndAddr
 import all QsagVerified.Proofs.RssCutSession

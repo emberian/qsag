@@ -22,12 +22,14 @@ module qsag_ring_osc #(
     /* verilator lint_off UNOPTFLAT */
     wire [N:0] n;
     /* verilator lint_on UNOPTFLAT */
+    wire en_iso;
+    qsag_iso_buf u_en_iso (.a(en), .y(en_iso));
     assign n[0] = n[N];
     genvar i;
     generate
         for (i = 0; i < N; i++) begin : g_st
             // only the first stage is gated; the others are the same gate used as an inverter
-            wire g = (i == 0) ? en : n[i];
+            wire g = (i == 0) ? en_iso : n[i];
 `ifdef QSAG_GF180_CELLS
             (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand2_1 u_n (.A1(n[i]), .A2(g), .ZN(n[i+1]));
 `elsif QSAG_SIM_DELAYS

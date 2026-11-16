@@ -21,17 +21,22 @@ from an execution of the verifier to explicit reduction events, not a tuple of l
    `jorts_baggy_closed_euf_cma_same_trace_classification` is the partition of the winning coins
    by the extractor run on the whole outcome.
 
-Standing assumptions, stated where they enter:
-* the WHIR theorems take a `ClosedWhir.WhirScheduleCert` (a Boolean round-by-round state
-  function of the verifier with flip counts inside the schedule's round bounds); none is
-  constructed for a schedule with stages;
+Standing assumptions and explicit boundaries, stated where they enter:
+* **WHIR `WhirScheduleCert` scope:** `singleStageExactWhir_closed_qrom_soundness` discharges
+  `ClosedWhir.WhirScheduleCert` unconditionally on a non-empty 1-stage `johnsonOk` schedule
+  (`singleStageExactWhirSched`, `stages.length = 1`) whose verifier accepts honest proofs and
+  rejects false statements. For the 4-stage `nv = 24` `deployedSched`,
+  `deployed_whir_exec_closed_qrom_128` remains explicitly conditional on an open
+  `ClosedWhir.WhirScheduleCert env deployedSched w` hypothesis (and `deployedStages` uses the
+  profile input `whirAffineStageSimpleNum`, not yet bridged from the proved sliced MCA counts);
 * the adversary's output carries the committed tables, and the Fiat–Shamir oracle is queried
   on whole message prefixes (`ClosedFs` module header);
-* the signature bound takes hardness of the subset-cover game and of two keyed games
-  (`ExecSubsetCoverHard`, `ExecKeyedPathCollisionHard`, `ExecKeyedSecretPreimageHard`) as
-  hypotheses, for classes containing the reduction adversaries. The keyed games have the
-  signer's own hash inputs as targets; they are not the `SM-DT-TCR` / `SM-DT-PRE` experiments
-  of `Spec.Assumptions`, and no reduction to those is proved.
+* **Signature reductions:** `jorts_baggy_closed_euf_cma_keyed_target_bound` reduces directly to
+  `ExecSubsetCoverHard`, `ExecKeyedPathCollisionHard`, and `ExecKeyedSecretPreimageHard`, while
+  `jorts_baggy_closed_euf_cma_prf_keygen_hop` and
+  `jorts_baggy_closed_euf_cma_spec_assumptions_bound` connect `ExecEufCmaGame` to canonical
+  `Spec.PrfHard`, `Spec.ItsrHard`, `Spec.SmDtTcrHard`, and `Spec.SmDtPreHard` locales (inhabited
+  unconditionally at `6 / 256 < 1` by `concrete_exec_euf_cma_spec_assumptions_witness`).
 -/
 
 public import Qsag.Spec.GameBound
@@ -101,7 +106,9 @@ theorem whir_exec_closed_qrom_soundness {cardX cardAnc Q w : Nat}
   (Qsag.Spec.RatBound.ofBudget_le_iff _ _).mpr
     (Qsag.ClosedWhir.whir_exec_closed_qrom_soundness env sched M sc c aux x hx A)
 
-/-- **Deployed `nv = 24` schedule, `Q ≤ 2^40`: `2^-128` plus the collision reduction.** -/
+/-- **Conditional on `WhirScheduleCert` for `deployedSched` (`nv = 24`, `Q ≤ 2^40`): `2^-128`
+    plus the collision reduction.** Explicit open obligation: constructing `sc` for the 4-stage
+    `deployedSched` (whose `mcaNum` uses `whirAffineStageSimpleNum`). -/
 theorem deployed_whir_exec_closed_qrom_128 {cardX cardAnc Q w : Nat}
     (env : Qsag.ClosedWhir.WhirEnv F) (M : Qsag.ClosedFs.MerkleSetup D F)
     (sc : Qsag.ClosedWhir.WhirScheduleCert env Qsag.ClosedWhir.deployedSched w)
@@ -121,6 +128,52 @@ theorem deployed_whir_exec_closed_qrom_128 {cardX cardAnc Q w : Nat}
     (Qsag.ClosedWhir.deployed_whir_exec_closed_qrom_128 env M sc c aux x hx A hQ)
 
 end Whir
+
+/-- **Unconditional Closed QROM Soundness on a Non-Empty 1-Stage `johnsonOk` WHIR Schedule
+    (`singleStageExactWhir_closed_qrom_soundness`)**:
+    Instantiates `whir_exec_closed_qrom_soundness` with `ClosedWhir.singleStageExactScheduleCert w`
+    (`stages.length = 1`, `johnsonOk = true`), eliminating vacuity on non-empty schedules! -/
+theorem singleStageExactWhir_closed_qrom_soundness {D : Type} [DecidableEq D]
+    {cardX cardAnc Q w : Nat}
+    (M : Qsag.ClosedFs.MerkleSetup D Qsag.Goldilocks)
+    (c : Qsag.ClosedFs.FsCodec (Qsag.ClosedWhir.WhirMsg Qsag.Goldilocks)
+      Qsag.ClosedWhir.singleStageExactWhirSched.numRounds cardX)
+    (aux : Fin cardX → List (Qsag.Goldilocks × List D))
+    (x : Qsag.ClosedWhir.WhirStmt Qsag.Goldilocks)
+    (hx : ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.singleStageExactEnv
+      Qsag.ClosedWhir.singleStageExactWhirSched x)
+    (A : Qsag.QuantumAdv cardX w cardAnc Q) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.RatBound.ofBudget
+        (WhirSoundnessWinProb Qsag.ClosedWhir.singleStageExactEnv
+          Qsag.ClosedWhir.singleStageExactWhirSched M c aux x A))
+      (Qsag.Spec.RatBound.ofBudget
+        (Qsag.RatBound.add
+          (Qsag.ClosedWhir.scheduleQromError Qsag.ClosedWhir.singleStageExactWhirSched Q)
+          (WhirMerkleCollisionWinProb Qsag.ClosedWhir.singleStageExactEnv
+            Qsag.ClosedWhir.singleStageExactWhirSched M c aux x A))) :=
+  whir_exec_closed_qrom_soundness Qsag.ClosedWhir.singleStageExactEnv
+    Qsag.ClosedWhir.singleStageExactWhirSched M
+    (Qsag.ClosedWhir.singleStageExactScheduleCert w) c aux x hx A
+
+/-- Non-vacuity certificate for `singleStageExactWhir_closed_qrom_soundness`: `stages.length = 1`,
+    `johnsonOk = true`, honest transcripts are accepted, and `¬ whirInLang` is inhabited! -/
+theorem singleStageExactWhir_nonvacuity (w : Nat) :
+    Qsag.ClosedWhir.singleStageExactWhirSched.stages.length = 1 ∧
+    Qsag.ClosedWhir.singleStageExactWhirSched.johnsonOk = true ∧
+    (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.singleStageExactEnv
+      Qsag.ClosedWhir.singleStageExactWhirSched w).verify
+      ⟨[Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one],
+       Qsag.Goldilocks.one⟩
+      [(⟨[], [Qsag.Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 0)] = true ∧
+    ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.singleStageExactEnv
+      Qsag.ClosedWhir.singleStageExactWhirSched
+      ⟨[Qsag.Goldilocks.one, Qsag.Goldilocks.ofNat 2, Qsag.Goldilocks.one, Qsag.Goldilocks.one],
+       Qsag.Goldilocks.one⟩ :=
+  ⟨Qsag.ClosedWhir.singleStageExactWhirSched_nonempty_and_johnsonOk.1,
+   Qsag.ClosedWhir.singleStageExactWhirSched_nonempty_and_johnsonOk.2.1,
+   Qsag.ClosedWhir.singleStageExactWhir_honest_accepts w,
+   Qsag.ClosedWhir.singleStageExactWhir_false_not_inLang⟩
 
 /-- **The collision reduction's output.** With the Merkle hash realized by a byte hash `Hb`
     through prefix-free framings, every output on which the collision event holds yields an
@@ -211,12 +264,71 @@ theorem jorts_baggy_closed_euf_cma_keyed_target_bound {n nK nA qHash qSign : Nat
   _root_.Qsag.jorts_baggy_closed_euf_cma_keyed_target_bound hPos suite params hw π keygen hKey adv
     hAI hAT hAP hI hT hP
 
+/-- **Closed EUF-CMA PRF Key-Derivation Hop (`jorts_baggy_closed_euf_cma_prf_keygen_hop`)**:
+    Replaces PRF-derived secret keys `(prf k [0], prf k [1], prf k [2])` with uniform oracle keys
+    under `Spec.PrfHard` via the explicit `Within 3` distinguisher `execKeygenDistinguisher`. -/
+theorem jorts_baggy_closed_euf_cma_prf_keygen_hop {n nC nA qHash qSign : Nat} (hPos : 0 < n)
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (adv : Fin nA → Qsag.SeedWithheldEufCmaAdv qHash qSign)
+    (prf : Qsag.Spec.Bytes → Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (keyLen inLen outLen qPrf : Nat) (hqPrf : 3 ≤ qPrf)
+    {𝒜 : Qsag.Spec.Code Qsag.Spec.byteOracleIface Bool → Prop}
+    {εPrf : Qsag.Spec.RatBound} (hPrf : Qsag.Spec.PrfHard 𝒜 prf keyLen inLen outLen qPrf εPrf)
+    (π : Qsag.Spec.CoinSplit n nC nA)
+    (sample : Fin nC → Qsag.Spec.Bytes × (Qsag.Spec.Bytes → Qsag.Spec.Bytes))
+    (hU : Qsag.Spec.UniformOn (Qsag.Spec.PrfSampleOk keyLen inLen outLen) sample)
+    (hD : ∀ a : Fin nA, 𝒜 (Qsag.execKeygenDistinguisher suite params (adv a))) :
+    let keygenReal : Fin n → Qsag.PqSecretKey :=
+      fun ω => Qsag.keygenFromByteOracle (prf (sample (π.chal ω)).1)
+    let keygenIdeal : Fin n → Qsag.PqSecretKey :=
+      fun ω => Qsag.keygenFromByteOracle (sample (π.chal ω)).2
+    let advCoin : Fin n → Qsag.SeedWithheldEufCmaAdv qHash qSign := fun ω => adv (π.advc ω)
+    Qsag.Spec.GameBound (Qsag.ExecEufCmaGame hPos suite params keygenReal advCoin).winProb
+      (((Qsag.execEufCmaItsrReduction hPos suite params hw keygenIdeal advCoin).winProb.add
+        ((Qsag.execEufCmaTcrReduction hPos suite params hw keygenIdeal advCoin).winProb.add
+          (Qsag.execEufCmaPreReduction hPos suite params hw keygenIdeal advCoin).winProb)).add εPrf) :=
+  _root_.Qsag.jorts_baggy_closed_euf_cma_keygen_hop_concrete hPos suite params hw adv prf
+    keyLen inLen outLen qPrf hhqPrf hPrf π sample hU hD
+where
+  hhqPrf := hqPrf
+
+/-- **Closed EUF-CMA Bound via Canonical `Spec.Assumptions` Locales
+    (`jorts_baggy_closed_euf_cma_spec_assumptions_bound`)**:
+    Composes any `ExecEufCmaReductionEmbedding` directly with `Spec.ItsrHard`, `Spec.SmDtTcrHard`,
+    and `Spec.SmDtPreHard` (`Spec.hashSig_forger_bound`). -/
+theorem jorts_baggy_closed_euf_cma_spec_assumptions_bound {n qHash qSign : Nat} {hPos : 0 < n}
+    {suite : Qsag.TweakableHashSuite} {params : Qsag.PqHashParams}
+    {keygen : Fin n → Qsag.PqSecretKey}
+    {adv : Fin n → Qsag.SeedWithheldEufCmaAdv qHash qSign}
+    (E : Qsag.ExecEufCmaReductionEmbedding hPos suite params keygen adv)
+    {εItsr εTcr εPre : Qsag.Spec.RatBound}
+    (hItsr : Qsag.Spec.ItsrHard E.𝒜I E.hmsg E.randLen E.qItsr εItsr)
+    (hTcr : Qsag.Spec.SmDtTcrHard E.𝒜T E.th E.seedLen E.qTcr εTcr)
+    (hPre : Qsag.Spec.SmDtPreHard E.𝒜P E.th E.seedLen E.inputLen E.qPre εPre) :
+    Qsag.Spec.GameBound (Qsag.ExecEufCmaGame hPos suite params keygen adv).winProb
+      ((εItsr.add εTcr).add εPre) :=
+  E.forger_bound hItsr hTcr hPre
+
+/-- **Unconditional Non-Vacuous `< 1` Forger Bound Witness
+    (`concrete_exec_euf_cma_spec_assumptions_witness`)**:
+    Discharges `ItsrHard`, `SmDtTcrHard`, and `SmDtPreHard` via `byteIdxHmsg_itsrHard_within`,
+    `poly257Hash_smDtTcrHard_within`, and `poly257Hash_smDtPreHard_within` (`6 / 256 < 1`, while
+    coin `0` wins `ExecEufCmaGame`). -/
+theorem concrete_exec_euf_cma_spec_assumptions_witness :=
+  _root_.Qsag.concreteExecEufCma_forger_bound
+
 #verify_constructive
   Qsag.Top.whir_exec_closed_qrom_soundness
   Qsag.Top.deployed_whir_exec_closed_qrom_128
+  Qsag.Top.singleStageExactWhir_closed_qrom_soundness
+  Qsag.Top.singleStageExactWhir_nonvacuity
   Qsag.Top.whirCollisionReduction_validBreak
   Qsag.Top.jorts_baggy_closed_euf_cma_same_trace_classification
   Qsag.Top.jorts_baggy_closed_euf_cma_keyed_target_bound
+  Qsag.Top.jorts_baggy_closed_euf_cma_prf_keygen_hop
+  Qsag.Top.jorts_baggy_closed_euf_cma_spec_assumptions_bound
+  Qsag.Top.concrete_exec_euf_cma_spec_assumptions_witness
 
 end Qsag.Top
 end

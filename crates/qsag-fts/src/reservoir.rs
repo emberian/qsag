@@ -228,6 +228,15 @@ impl ParallelSeededDkgReservoir {
             arr.copy_from_slice(b);
             Ok(arr)
         };
+        let read_secret_bytes32 =
+            |cursor: &mut usize| -> Result<SecretBytes<32>, ParallelSeededError> {
+                let b = take(cursor, 32)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(b);
+                let guarded = SecretBytes::new(arr);
+                ct_zeroize_bytes(&mut arr);
+                Ok(guarded)
+            };
 
         let generation = read_u64(&mut cursor)?;
         let pk_seed_bytes = read_bytes32(&mut cursor)?;
@@ -265,7 +274,7 @@ impl ParallelSeededDkgReservoir {
         {
             *dst = read_u128_le(&mut cursor)?;
         }
-        let local_salt_seed = SecretBytes::new(read_bytes32(&mut cursor)?);
+        let local_salt_seed = read_secret_bytes32(&mut cursor)?;
         let pairwise_len = read_u16(&mut cursor)? as usize;
         if pairwise_len + 1 != committee_len {
             return Err(invalid);
@@ -282,7 +291,7 @@ impl ParallelSeededDkgReservoir {
             if expected_peers.next() != Some(peer) {
                 return Err(invalid);
             }
-            let seed = SecretBytes::new(read_bytes32(&mut cursor)?);
+            let seed = read_secret_bytes32(&mut cursor)?;
             pairwise_zero_seeds.push((peer, *seed));
         }
         let epoch_uses_len = read_u32(&mut cursor)? as usize;

@@ -54,7 +54,28 @@ impl CommittedZeroGates {
         }
     }
 
-    fn step<T>(
+    fn step_void<E>(
+        &mut self,
+        mut transition: impl FnMut(HdCommittedZeroTest) -> (HdCommittedZeroTest, Result<E, qsag_verified::CredHdGuardError>),
+    ) -> Result<(), HdError> {
+        let mut failed = self.gates.is_empty();
+        let old = core::mem::take(&mut self.gates);
+        self.gates.reserve_exact(old.len());
+        for gate in old {
+            let (next, result) = transition(gate);
+            if result.is_err() {
+                failed = true;
+            }
+            self.gates.push(next);
+        }
+        if failed {
+            self.quarantine();
+            return Err(HdError::MacCheckFailed);
+        }
+        Ok(())
+    }
+
+    fn step_wiping<T: qsag_asm::wipe::SecretWipe>(
         &mut self,
         mut transition: impl FnMut(
             HdCommittedZeroTest,
@@ -63,9 +84,11 @@ impl CommittedZeroGates {
             Result<T, qsag_verified::CredHdGuardError>,
         ),
     ) -> Result<Vec<T>, HdError> {
-        let mut outputs = Vec::with_capacity(self.gates.len());
+        let mut outputs = qsag_asm::wipe::SecretBuffer(Vec::with_capacity(self.gates.len()));
         let mut failed = self.gates.is_empty();
-        for gate in core::mem::take(&mut self.gates) {
+        let old = core::mem::take(&mut self.gates);
+        self.gates.reserve_exact(old.len());
+        for gate in old {
             let (next, result) = transition(gate);
             match result {
                 Ok(output) => outputs.push(output),
@@ -77,13 +100,15 @@ impl CommittedZeroGates {
             self.quarantine();
             return Err(HdError::MacCheckFailed);
         }
-        Ok(outputs)
+        Ok(core::mem::take(&mut outputs.0))
     }
 
     /// Drives every gate into the verified quarantine state, which zeroes its residual.
     fn quarantine(&mut self) {
         let mismatched = self.session.map(|byte| !byte);
-        for gate in core::mem::take(&mut self.gates) {
+        let old = core::mem::take(&mut self.gates);
+        self.gates.reserve_exact(old.len());
+        for gate in old {
             let (next, _) = gate.open_local_residual(mismatched);
             self.gates.push(next);
         }
@@ -95,15 +120,14 @@ impl CommittedZeroGates {
 
     pub(crate) fn freeze(&mut self, peers: [u8; 32]) -> Result<(), HdError> {
         let session = self.session;
-        self.step(|gate| gate.freeze_peer_commitment(session, peers))
-            .map(|_| ())
+        self.step_void(|gate| gate.freeze_peer_commitment(session, peers))
     }
 
     /// The local residuals. Refused until the peer transcript is frozen.
     pub(crate) fn open(&mut self) -> Result<&[u32], HdError> {
         if self.opened.is_none() {
             let session = self.session;
-            self.opened = Some(self.step(|gate| gate.open_local_residual(session))?);
+            self.opened = Some(self.step_wiping(|gate| gate.open_local_residual(session))?);
         }
         self.opened.as_deref().ok_or(HdError::MacCheckFailed)
     }
@@ -116,12 +140,11 @@ impl CommittedZeroGates {
         }
         let session = self.session;
         let mut lane = 0;
-        self.step(|gate| {
+        self.step_void(|gate| {
             let sum = peer_sums[lane];
             lane += 1;
             gate.verify_peer_opening(session, peers, sum)
         })
-        .map(|_| ())
     }
 }
 

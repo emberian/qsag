@@ -77,8 +77,12 @@ module qsag_async_fifo_gray #(
     assign rempty = (wgray_r == rgray);
 
     always_comb begin
-        rdata = mem[0];
-        for (int k = 0; k < DEPTH; k++) if (rbin[AW-1:0] == AW'(k)) rdata = mem[k];
+        if (rempty) begin
+            rdata = '0;
+        end else begin
+            rdata = mem[0];
+            for (int k = 0; k < DEPTH; k++) if (rbin[AW-1:0] == AW'(k)) rdata = mem[k];
+        end
     end
 endmodule
 `default_nettype wire

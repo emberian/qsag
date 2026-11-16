@@ -379,16 +379,29 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
         let mut channels: BTreeMap<u16, _> =
             self.peers.iter_mut().map(|(&id, c)| (id, c)).collect();
         let mut sessions = Vec::with_capacity(peers.len());
+        let mut choice_word_caps = Vec::with_capacity(peers.len());
+        let mut expected_col_lens = Vec::with_capacity(peers.len());
         for session in peers {
+            choice_word_caps.push(session.choices.len().checked_mul(2).ok_or_else(invalid)?);
+            expected_col_lens.push(
+                session
+                    .send_words
+                    .checked_mul(2)
+                    .and_then(|w| w.checked_add(4))
+                    .ok_or_else(invalid)?,
+            );
             sessions.push((session, channels.remove(&session.peer).ok_or_else(invalid)?));
         }
-        let started = in_parallel(sessions.iter_mut().collect(), |(session, channel)| {
-            let mut words = SecretBuffer(Vec::with_capacity(session.choices.len() * 2));
-            for &choice in session.choices {
-                words.extend_from_slice(&[choice as u64, (choice >> 64) as u64]);
-            }
-            (!words.is_empty()).then(|| channel.1.round1_send_u_cols(&words, &mut channel.2))
-        });
+        let started = in_parallel(
+            sessions.iter_mut().zip(choice_word_caps).collect(),
+            |((session, channel), cap)| {
+                let mut words = SecretBuffer(Vec::with_capacity(cap));
+                for &choice in session.choices {
+                    words.extend_from_slice(&[choice as u64, (choice >> 64) as u64]);
+                }
+                (!words.is_empty()).then(|| channel.1.round1_send_u_cols(&words, &mut channel.2))
+            },
+        );
         let mut receiving = Vec::with_capacity(peers.len());
         for (session, started) in peers.iter().zip(started) {
             receiving.push(match started {
@@ -400,17 +413,14 @@ impl<W: AuthenticatedOtWire> CommittedCorrelatedOt<W> {
             });
         }
         let mut columns = Vec::with_capacity(peers.len());
-        for session in peers {
+        for (session, expected_len) in peers.iter().zip(expected_col_lens) {
             columns.push(if session.send_words == 0 {
                 None
             } else {
                 match wire.receive(session.peer, context)? {
                     CommittedOtMessage::Columns(columns)
                         if columns.u_cols.len() == 128
-                            && columns
-                                .u_cols
-                                .iter()
-                                .all(|c| c.len() == session.send_words * 2 + 4) =>
+                            && columns.u_cols.iter().all(|c| c.len() == expected_len) =>
                     {
                         Some(columns)
                     }
@@ -503,12 +513,29 @@ impl<W: AuthenticatedOtWire> ParallelSeededDkgOt for CommittedCorrelatedOt<W> {
         context: [u8; 32],
         peers: &[ParallelSeededDkgOtPeer<'_>],
     ) -> Result<Vec<ParallelSeededDkgOtPads>, ParallelSeededError> {
+        if self.failed {
+            return Err(invalid());
+        }
         for session in peers {
             if session.send_words != 0 {
-                self.begin(session.peer, context, true, session.send_words * 128)?;
+                let count = match session.send_words.checked_mul(128) {
+                    Some(c) => c,
+                    None => {
+                        self.failed = true;
+                        return Err(invalid());
+                    }
+                };
+                self.begin(session.peer, context, true, count)?;
             }
             if !session.choices.is_empty() {
-                self.begin(session.peer, context, false, session.choices.len() * 128)?;
+                let count = match session.choices.len().checked_mul(128) {
+                    Some(c) => c,
+                    None => {
+                        self.failed = true;
+                        return Err(invalid());
+                    }
+                };
+                self.begin(session.peer, context, false, count)?;
             }
         }
         let result = self.random_ot_flights(context, peers);
@@ -766,6 +793,39 @@ mod tests {
         );
         assert!(right.receive_values(0, [7; 32], &choices).is_err());
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn random_ots_rejects_overflow_and_poisoned_zero_work_calls() {
+        let (mut left, mut right) = engine_pair();
+        // Arithmetic overflow on `send_words * 128` must fail cleanly without wrapping or panicking.
+        let overflow_words = (1usize << (usize::BITS - 1)) + 1;
+        let overflow_plan = [ParallelSeededDkgOtPeer {
+            peer: 1,
+            send_words: overflow_words,
+            choices: &[],
+        }];
+        assert_eq!(
+            left.random_ots([91; 32], &overflow_plan).err(),
+            Some(ParallelSeededError::InvalidThresholdParameters)
+        );
+        // Once poisoned, even empty or zero-work `random_ots` calls must fail closed!
+        assert_eq!(
+            left.random_ots([92; 32], &[]).err(),
+            Some(ParallelSeededError::InvalidThresholdParameters)
+        );
+        let zero_plan = [ParallelSeededDkgOtPeer {
+            peer: 1,
+            send_words: 0,
+            choices: &[],
+        }];
+        assert_eq!(
+            left.random_ots([93; 32], &zero_plan).err(),
+            Some(ParallelSeededError::InvalidThresholdParameters)
+        );
+        // Also poison `right` via out-of-range peer and verify empty/zero-work refusal.
+        assert!(right.send_words(99, [94; 32], Vec::new()).is_err());
+        assert!(right.random_ots([95; 32], &[]).is_err());
     }
 }
 

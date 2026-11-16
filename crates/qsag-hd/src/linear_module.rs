@@ -57,8 +57,17 @@ pub fn ct_reduce_mod_q_u64(x: u64) -> u32 {
     const MU: u128 = (1u128 << 64) / MODULE_Q as u128;
     let quotient = ((x as u128 * MU) >> 64) as u64;
     let r = x - quotient * MODULE_Q as u64;
-    let mask = core::hint::black_box(0u64.wrapping_sub((r >= MODULE_Q as u64) as u64));
+    let mask = core::hint::black_box(!qsag_accel::ct::ct_lt_mask_u64(r, MODULE_Q as u64));
     (r.wrapping_sub((MODULE_Q as u64) & mask)) as u32
+}
+
+#[inline]
+const fn const_reduce_mod_q_u64(x: u64) -> u32 {
+    const MU: u128 = (1u128 << 64) / MODULE_Q as u128;
+    let quotient = ((x as u128 * MU) >> 64) as u64;
+    let r = x - quotient * MODULE_Q as u64;
+    let over = !ct_lt_u64(r, MODULE_Q as u64);
+    ct_select_u64(over, r.wrapping_sub(MODULE_Q as u64), r) as u32
 }
 
 /// Full-width reduction using four fixed base-2^32 Horner steps. Each
@@ -74,16 +83,20 @@ pub fn ct_reduce_mod_q_u128(x: u128) -> u32 {
 
 #[inline]
 pub const fn mod_q_add(a: u32, b: u32) -> u32 {
-    let s = a + b;
-    let over = !ct_lt_u64(s as u64, MODULE_Q as u64);
-    ct_select_u64(over, s.wrapping_sub(MODULE_Q) as u64, s as u64) as u32
+    let a_c = const_reduce_mod_q_u64(a as u64) as u64;
+    let b_c = const_reduce_mod_q_u64(b as u64) as u64;
+    let s = a_c + b_c;
+    let over = !ct_lt_u64(s, MODULE_Q as u64);
+    ct_select_u64(over, s.wrapping_sub(MODULE_Q as u64), s) as u32
 }
 
 #[inline]
 pub const fn mod_q_sub(a: u32, b: u32) -> u32 {
-    let lt = ct_lt_u64(a as u64, b as u64);
-    let diff = a.wrapping_sub(b);
-    ct_select_u64(lt, diff.wrapping_add(MODULE_Q) as u64, diff as u64) as u32
+    let a_c = const_reduce_mod_q_u64(a as u64) as u64;
+    let b_c = const_reduce_mod_q_u64(b as u64) as u64;
+    let lt = ct_lt_u64(a_c, b_c);
+    let diff = a_c.wrapping_sub(b_c);
+    ct_select_u64(lt, diff.wrapping_add(MODULE_Q as u64), diff) as u32
 }
 
 #[inline]
@@ -178,14 +191,16 @@ impl RingPoly {
     }
 
     /// Exact integer squared Euclidean norm $\sum_{m=0}^{255} c_m^2$ of centered representatives
-    /// in $[-(q-1)/2, (q-1)/2]$ (`0` floating-point instructions!).
+    /// in $[-(q-1)/2, (q-1)/2]$ (`0` floating-point instructions!). Non-canonical coefficients
+    /// are reduced modulo `MODULE_Q` in constant time before centering so public callers can
+    /// never trigger subtraction underflow.
     pub fn centered_l2_norm_sq(&self) -> u64 {
         let half_q = (MODULE_Q / 2) as u64;
         let mut sum_sq = 0u64;
         for &c in &self.coeffs {
-            let c64 = c as u64;
+            let c64 = ct_reduce_mod_q_u64(c as u64) as u64;
             let gt_half = ct_lt_u64(half_q, c64);
-            let abs_val = ct_select_u64(gt_half, (MODULE_Q as u64) - c64, c64);
+            let abs_val = ct_select_u64(gt_half, (MODULE_Q as u64).wrapping_sub(c64), c64);
             sum_sq = sum_sq.saturating_add(abs_val * abs_val);
         }
         sum_sq
@@ -476,15 +491,17 @@ impl LinearModulePartyShare {
         Ok(())
     }
     pub fn is_poisoned(&self) -> bool {
-        if self
-            .poison_journal
-            .as_ref()
-            .is_some_and(|j| j.is_poisoned().unwrap_or(true))
-        {
-            self.poisoned.store(true, Ordering::Release);
+        if self.poisoned.load(Ordering::Acquire) {
             return true;
         }
-        self.poisoned.load(Ordering::Acquire)
+        if let Some(j) = &self.poison_journal {
+            if j.is_permanently_poisoned().unwrap_or(true) {
+                self.poisoned.store(true, Ordering::Release);
+                return true;
+            }
+            return j.is_poisoned().unwrap_or(true);
+        }
+        false
     }
     fn poison(&mut self) {
         self.poisoned.store(true, Ordering::Release);
@@ -541,13 +558,22 @@ fn expand_linear_tweak(
 }
 
 impl LinearModuleXPub {
+    /// True iff `seed_a` matches the expanded matrix and every `t_vec` coefficient lies in `[0, MODULE_Q)`.
+    pub fn is_canonical(&self) -> bool {
+        self.seed_a == self.matrix.seed
+            && self
+                .t_vec
+                .iter()
+                .all(|p| p.coeffs.iter().all(|&c| c < MODULE_Q))
+    }
+
     /// Derive non-hardened watch-only child `XPub` in **`0` online MPC rounds**:
     /// $\mathbf{t}^{(i)} = \mathbf{t} + \mathbf{A}\Delta s_1 + \Delta s_2 \bmod q$, enforcing $d + 1 \le D_{\max}$.
     pub fn derive_child(&self, child_index: u32) -> Result<Self, HdError> {
         if child_index & (1 << 31) != 0 {
             return Err(HdError::HardenedDerivationRequired);
         }
-        if self.seed_a != self.matrix.seed {
+        if !self.is_canonical() {
             return Err(HdError::InvalidThresholdParameters);
         }
         if self.depth_used >= self.max_depth {
@@ -582,6 +608,9 @@ impl LinearModuleXPub {
     }
 
     pub fn to_address(&self, hrp: &str) -> Result<QsagAddress, HdError> {
+        if !self.is_canonical() {
+            return Err(HdError::InvalidThresholdParameters);
+        }
         let pk_digest = hash_t_vec(&self.seed_a, &self.t_vec);
         Ok(QsagAddress::from_pubkey_cshake256(
             hrp,
@@ -882,13 +911,14 @@ fn quorum_weights(
     let mut xs = Vec::with_capacity(quorum.len());
     for (i, sh) in quorum.iter().enumerate() {
         if sh.is_poisoned()
+            || (sh.hardened && expected.chain_code.is_some())
             || sh.seed_a != expected.seed_a
             || sh.t_vec != expected.t_vec
             || sh.depth_used != expected.depth_used
             || sh.max_depth != expected.max_depth
             || expected
                 .chain_code
-                .is_some_and(|cc| sh.chain_code.expose() != &cc)
+                .is_some_and(|cc| !qsag_accel::ct::ct_eq_bytes(sh.chain_code.expose(), &cc))
             || quorum[..i]
                 .iter()
                 .any(|prior| prior.party_id == sh.party_id)

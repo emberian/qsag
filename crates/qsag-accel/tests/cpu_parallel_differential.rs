@@ -207,7 +207,7 @@ fn canonical_spirv_pin_digests_are_frozen() {
     let prover = [
         (
             ProverKernelSlot::WhirLdeCommitment,
-            "25fd8ffe3b4b4b7327aac2e620c3b039b3fba5dad760e7ef17fa470bf8ab5d94",
+            "2b82b1f8f14762b5973de0664f0ba934580665ce268a1a3cd79ee84e0123a070",
         ),
         (
             ProverKernelSlot::WhirFoldSumcheck,

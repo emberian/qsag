@@ -936,6 +936,40 @@ theorem SmDtTcrHard.mono {𝒜 : Code targetIface TargetBreak → Prop}
     SmDtTcrHard 𝒜 th seedLen q ε' :=
   fun n nC nA hPos π seed hU adv hA => GameBound.trans (h n nC nA hPos π seed hU adv hA) hLe
 
+theorem DecisionRlweHard.bound {𝒜 : (List (List Nat × List Nat) → Bool) → Prop}
+    {N q m β : Nat} {ε : RatBound} (h : DecisionRlweHard 𝒜 N q m β ε)
+    (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA) (sample : Fin nC → RlweSample)
+    (hU : UniformOn (RlweSampleOk N q m β) sample)
+    (dist : Fin nA → List (List Nat × List Nat) → Bool) (hD : ∀ a : Fin nA, 𝒜 (dist a)) :
+    GameBound (AdvDist (rlweRealGame hPos π N q m sample dist)
+      (rlweUniformGame hPos π m sample dist)) ε :=
+  h n nC nA hPos π sample hU dist hD
+
+theorem ModuleSisHard.bound {𝒜 : (List (List (List Nat)) → List (List Nat)) → Prop}
+    {N q rows cols β : Nat} {ε : RatBound} (h : ModuleSisHard 𝒜 N q rows cols β ε)
+    (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA)
+    (matrix : Fin nC → List (List (List Nat)))
+    (hU : UniformOn (SisMatrixOk N q rows cols) matrix)
+    (adv : Fin nA → List (List (List Nat)) → List (List Nat)) (hA : ∀ a : Fin nA, 𝒜 (adv a)) :
+    GameBound (moduleSisGame hPos N q cols β (fun ω => matrix (π.chal ω))
+      (fun ω => adv (π.advc ω))).winProb ε :=
+  h n nC nA hPos π matrix hU adv hA
+
+theorem RegularDualLpnHard.bound {𝒜 : (List Bool → Bool) → Prop}
+    {H : List (List Bool)} {blocks blockLen : Nat} {ε : RatBound}
+    (h : RegularDualLpnHard 𝒜 H blocks blockLen ε)
+    (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA)
+    (sample : Fin nC → RegularDualLpnSample)
+    (hU : UniformOn (fun x : RegularDualLpnSample =>
+      regularNoiseOk blocks blockLen x.noise = true ∧ x.uniform.length = H.length) sample)
+    (dist : Fin nA → List Bool → Bool) (hD : ∀ a : Fin nA, 𝒜 (dist a)) :
+    GameBound
+      (AdvDist
+        (FinGame.mk hPos (fun ω => dist (π.advc ω)
+          (lpnSyndrome H (sample (π.chal ω)).noise)))
+        (FinGame.mk hPos (fun ω => dist (π.advc ω) (sample (π.chal ω)).uniform))) ε :=
+  h n nC nA hPos π sample hU dist hD
+
 theorem SmDtPreHard.mono {𝒜 : Code targetIface TargetBreak → Prop}
     {th : Bytes → Bytes → Bytes → Bytes} {seedLen inputLen q : Nat}
     {ε ε' : RatBound} (h : SmDtPreHard 𝒜 th seedLen inputLen q ε) (hLe : ε.le ε') :

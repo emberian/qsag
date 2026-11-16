@@ -16,15 +16,17 @@
 module qsag_dcro (
     input  wire       rst_n,
     input  wire       en,
-    input  wire [4:0] tap,
+    input  wire [4:0] tap_gray,
     input  wire [1:0] fine,
     output wire       osc
 );
+    wire en_iso;
+    qsag_iso_buf u_en_iso (.a(en), .y(en_iso));
     /* verilator lint_off UNOPTFLAT */
     wire [32:0] s;
     wire        fb;
     /* verilator lint_on UNOPTFLAT */
-    qsag_osc_nand #(.TD(180)) u_nand (.a(fb), .en(en), .y(s[0]));
+    qsag_osc_nand #(.TD(180)) u_nand (.a(fb), .en(en_iso), .y(s[0]));
     genvar i;
     generate
         for (i = 0; i < 32; i++) begin : g_stage
@@ -32,20 +34,31 @@ module qsag_dcro (
         end
     endgenerate
 
-    logic [4:0]  tap_m, tap_q;
+    // 2-FF Gray-coded synchronizer from clk_core -> osc domain (prevents multi-bit CDC tearing!)
+    logic [4:0]  tg_m, tg_s, tap_q;
     logic [31:0] oh;
     logic [1:0]  fine_m, fine_q;
+    logic [4:0]  tap_m;
+    always_comb begin
+        tap_m[4] = tg_s[4];
+        tap_m[3] = tap_m[4] ^ tg_s[3];
+        tap_m[2] = tap_m[3] ^ tg_s[2];
+        tap_m[1] = tap_m[2] ^ tg_s[1];
+        tap_m[0] = tap_m[1] ^ tg_s[0];
+    end
     wire  [4:0]  tap_lim = (tap_m < 5'd3) ? 5'd3 : tap_m;
     wire  [4:0]  tap_n   = (tap_lim > tap_q) ? tap_q + 5'd1 : tap_lim;
     always_ff @(posedge s[0] or negedge rst_n)
         if (!rst_n) begin
-            tap_m  <= 5'd31;
+            tg_m   <= 5'b10000; // Gray(31) = 31 ^ 15 = 16
+            tg_s   <= 5'b10000;
             tap_q  <= 5'd31;
             oh     <= 32'h8000_0000;
             fine_m <= 2'd0;
             fine_q <= 2'd0;
         end else begin
-            tap_m  <= tap;
+            tg_m   <= tap_gray;
+            tg_s   <= tg_m;
             tap_q  <= tap_n;
             oh     <= 32'd1 << tap_n;
             fine_m <= fine;
@@ -102,9 +115,9 @@ module qsag_clk_mux_glitchfree (
     assign b_on = b_q;
 endmodule
 
-// True mixed-cell critical-path replica: each stage = NAND2 (150 ps) -> AOI21 (210 ps) -> XOR2 (0 ps
-// in even stages / 250 ps in odd, calibrated to 360 ps per stage = identical nominal 8.64 ns at tap 5
-// while tracking stacked AOI21/XOR2/NAND2 slow-down at SS/125C/4.50V!).
+// True mixed-cell critical-path replica: each stage = OAI21 (series PMOS + NMOS) -> AOI21 -> XOR2
+// calibrated to 360 ps per stage = identical nominal 8.64 ns at tap 5 while accurately tracking
+// series-stacked AOI21/OAI21/XOR2 slow-down at SS/125C/4.50V!
 module qsag_trcp_chain (
     input  wire       launch,
     input  wire [3:0] len,
@@ -112,13 +125,15 @@ module qsag_trcp_chain (
     output wire       d1,
     output wire       d2
 );
+    wire launch_iso;
+    qsag_iso_buf u_liso (.a(launch), .y(launch_iso));
     wire [72:0] c;
     wire [71:0] m1, m2;
-    assign c[0] = launch;
+    assign c[0] = launch_iso;
     genvar i;
     generate
         for (i = 0; i < 72; i++) begin : g_st
-            qsag_dly_inv   #(.TD(110)) u_n (.a(c[i]),  .y(m1[i]));
+            qsag_dly_oai21 #(.TD(110)) u_n (.a(c[i]),  .y(m1[i]));
             qsag_dly_aoi21 #(.TD(130)) u_a (.a(m1[i]), .y(m2[i]));
             qsag_dly_xor2  #(.TD(120)) u_x (.a(m2[i]), .y(c[i+1]));
         end
@@ -166,15 +181,17 @@ module qsag_gals_clk_rst (
     wire        csr_force     = csr[18];
     wire        csr_zero      = csr[20];
     wire [15:0] csr_fll       = csr[47:32];
-    wire        csr_shield_en = ~csr[49]; // active by default out of reset (`csr[49] == 0`)!
+    wire        csr_shield_2c = csr[48]; // optional 2-cycle shield propagation window for >65 MHz
+    wire        csr_shield_en = csr[49]; // 0 at cold reset (never bricks bring-up!); 1 arms M5 shield
     wire        csr_puf_mon   = csr[50];
     wire        csr_fib_inj   = csr[52];
 
     // ------------------------------------------------------------ oscillator and clock select
     wire        osc, pad_on, dcro_on;
     logic [4:0] tap_eff;
+    logic [4:0] tap_gray_q;
     wire        dcro_en = ~bypass | csr_force;
-    qsag_dcro u_dcro (.rst_n(rst_n_pad), .en(dcro_en), .tap(tap_eff), .fine(csr_fine), .osc(osc));
+    qsag_dcro u_dcro (.rst_n(rst_n_pad), .en(dcro_en), .tap_gray(tap_gray_q), .fine(csr_fine), .osc(osc));
     qsag_clk_mux_glitchfree u_mux (
         .clk_a(clk_pad), .clk_b(osc), .sel_a(bypass), .arst_n(rst_n_pad),
         .clk_o(clk_core), .a_on(pad_on), .b_on(dcro_on)
@@ -258,20 +275,24 @@ module qsag_gals_clk_rst (
 
     always_ff @(posedge clk_core or negedge rst_core_n)
         if (!rst_core_n) begin
-            tap_base <= 5'd31;
-            tap_eff  <= 5'd31;
-            wcnt     <= '0;
-            l1_any   <= 1'b0;
-            l2_any   <= 1'b0;
-            l1_last  <= 1'b0;
-            l2_last  <= 1'b0;
-            lfsr     <= 16'hACE1;
-            win_cq   <= 1'b0;
-            fnew     <= 1'b0;
-            freq_cnt <= '0;
+            tap_base   <= 5'd31;
+            tap_eff    <= 5'd31;
+            tap_gray_q <= 5'b10000;
+            wcnt       <= '0;
+            l1_any     <= 1'b0;
+            l2_any     <= 1'b0;
+            l1_last    <= 1'b0;
+            l2_last    <= 1'b0;
+            lfsr       <= 16'hACE1;
+            win_cq     <= 1'b0;
+            fnew       <= 1'b0;
+            freq_cnt   <= '0;
         end else begin
-            lfsr    <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10] ^ trng_bit};
-            tap_eff <= tap_sum[5] ? 5'd31 : tap_sum[4:0];
+            logic [4:0] tnext;
+            tnext      = tap_sum[5] ? 5'd31 : tap_sum[4:0];
+            lfsr       <= {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10] ^ trng_bit};
+            tap_eff    <= tnext;
+            tap_gray_q <= tnext ^ {1'b0, tnext[4:1]};
             win_cq  <= win_c;
             fnew    <= 1'b0;
             if (!win_c && win_cq) begin
@@ -315,7 +336,7 @@ module qsag_gals_clk_rst (
             zero_q       <= 1'b0;
         end else begin
             if (any_glitch) fault_glitch <= 1'b1;
-            zero_q <= tamp_s | fault_glitch | any_glitch | fault_shield | ext_zeroize_req | csr_zero;
+            zero_q <= tamp_s | fault_glitch | any_glitch | (fault_shield & csr_shield_en) | ext_zeroize_req | csr_zero;
         end
     assign zeroize      = zero_q;
     assign fault_tamper = tamp_s;
@@ -334,7 +355,7 @@ module qsag_gals_clk_rst (
     assign clk_mon = csr_puf_mon ? puf_mon_clk : mon[3];
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, csr[63:53], csr[51], csr[48], csr[31:21], csr[19]};
+    wire unused = &{1'b0, csr[63:53], csr[51], csr_shield_2c, csr[31:21], csr[19]};
     /* verilator lint_on UNUSEDSIGNAL */
     assign tel = {2'd0, dcro_on, pad_on, l2_last, l1_last, tap_eff, tap_base, freq_cnt};
 endmodule

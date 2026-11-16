@@ -1090,6 +1090,24 @@ def credentialSdOpeningAccepts (k : Nat) (defect : Nat → Fin 256 → Credentia
   (List.range k).all (fun idx =>
     credentialGgmCheckDefects (defect idx) ⟨(ch / 256 ^ idx) % 256, Nat.mod_lt _ (by decide)⟩)
 
+theorem credentialSdOpeningAccepts_zero (k ch : Nat) :
+    credentialSdOpeningAccepts k (fun _ _ => credentialFp5Zero) ch = true := by
+  unfold credentialSdOpeningAccepts
+  exact List.all_eq_true.mpr (fun _ _ => credentialGgmCheckDefects_zero _)
+
+theorem credentialSdOpeningAccepts_false_of_opened_defect {k ch idx : Nat}
+    {defect : Nat → Fin 256 → CredentialFp5} {bad : Fin 256}
+    (hIdx : idx < k) (hBad : defect idx bad ≠ credentialFp5Zero)
+    (hOpen : (ch / 256 ^ idx) % 256 ≠ bad.val) :
+    credentialSdOpeningAccepts k defect ch = false := by
+  cases hAcc : credentialSdOpeningAccepts k defect ch with
+  | false => rfl
+  | true =>
+    unfold credentialSdOpeningAccepts at hAcc
+    have hRep := List.all_eq_true.mp hAcc idx (List.mem_range.mpr hIdx)
+    have hEq := credentialGgmCheckDefects_unique (defect idx) bad hBad _ hRep
+    exact absurd (congrArg Fin.val hEq) hOpen
+
 /-- One repetition with a nonzero check value passes for at most one of the 256 bytes. -/
 theorem credentialSd_rep_bad_count_le_one (defect : Fin 256 → CredentialFp5)
     (hBad : ∃ bad, defect bad ≠ credentialFp5Zero) :

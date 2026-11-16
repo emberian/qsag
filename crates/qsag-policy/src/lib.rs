@@ -76,6 +76,8 @@ pub struct TransactionPolicy {
     /// Maximum value transferable in a single transaction.
     pub max_single_tx_amount: u128,
     /// Maximum cumulative spend (`rolling_window_spent + amount_units`) inside the velocity window.
+    /// Setting `u128::MAX` selects an uncapped velocity window (exempt from cross-quorum
+    /// `SharedWindowSpendLedger` intersection, while per-signer `u128` overflow bounds still hold).
     pub velocity_window_cap: u128,
     pub valid_not_before_secs: u64,
     pub valid_not_after_secs: u64,
@@ -248,14 +250,29 @@ impl TransactionPolicy {
         )
         .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
 
-        // Validate distinctness of approvers + anti-self-approval rule!
-        for (i, &p_i) in intent.approver_parties.iter().enumerate() {
-            if self.forbid_initiator_self_approval && p_i == intent.initiator_party {
-                return Err(PolicyViolation::InitiatorSelfApprovalForbidden);
-            }
-            for &p_j in &intent.approver_parties[i + 1..] {
-                if p_i == p_j {
+        // Validate distinctness of approvers + anti-self-approval rule in O(N) time!
+        if intent.approver_parties.len() > 32 {
+            let mut seen = alloc::vec![0u64; 1024];
+            for &p_i in &intent.approver_parties {
+                if self.forbid_initiator_self_approval && p_i == intent.initiator_party {
+                    return Err(PolicyViolation::InitiatorSelfApprovalForbidden);
+                }
+                let word = usize::from(p_i >> 6);
+                let bit = 1u64 << (p_i & 63);
+                if (seen[word] & bit) != 0 {
                     return Err(PolicyViolation::DuplicateApproverInQuorum);
+                }
+                seen[word] |= bit;
+            }
+        } else {
+            for (i, &p_i) in intent.approver_parties.iter().enumerate() {
+                if self.forbid_initiator_self_approval && p_i == intent.initiator_party {
+                    return Err(PolicyViolation::InitiatorSelfApprovalForbidden);
+                }
+                for &p_j in &intent.approver_parties[i + 1..] {
+                    if p_i == p_j {
+                        return Err(PolicyViolation::DuplicateApproverInQuorum);
+                    }
                 }
             }
         }
@@ -268,7 +285,7 @@ impl TransactionPolicy {
             .find(|t| intent.amount_units <= t.max_amount_units)
             .ok_or(PolicyViolation::NoMatchingQuorumTier)?;
 
-        let have = intent.approver_parties.len() as u16;
+        let have = u16::try_from(intent.approver_parties.len()).unwrap_or(u16::MAX);
         if have < matched_tier.min_approvers {
             return Err(PolicyViolation::InsufficientTierApprovers {
                 have,
@@ -475,7 +492,7 @@ impl Drop for WindowAuthority {
 /// - Preprocessed pairwise BDOZ correlations $(r_{i, s}, M_{i \to j, s}, K_{i \leftarrow j, s})$
 ///   with monotonic single-use slot latch (`Cell<usize>`),
 /// - Durable authoritative velocity ledger (`current_window_id`, `accumulated_window_spend`,
-///   bounded `burned_intent_nonces` & `burned_sessions` rings),
+///   non-evicting monotone-watermarked `burned_intent_nonces` & `burned_sessions` sets),
 /// - `<REDACTED>` `fmt::Debug` and `write_volatile` `Drop`.
 pub struct PolicySignerGuardShare {
     pub party_id: u16,
@@ -1944,6 +1961,25 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
     };
 
     let global_projected = projected_spends.iter().copied().max().unwrap_or(0);
+    // Pre-validate every quorum guard's replay/generation headroom BEFORE mutating `shared_ledger`
+    // so a guard capacity or generation refusal never leaves `shared_ledger` partially advanced.
+    for (idx, g) in quorum_guards.iter().enumerate() {
+        let nonce = per_party_intents[idx].nonce;
+        if g.is_nonce_burned(&nonce) || g.is_session_burned(&session_id) {
+            abort_all(quorum_guards);
+            return Err(PolicyViolation::DuplicateIntentNonce);
+        }
+        if g.burned_intent_nonces.len() >= g.replay_capacity
+            || g.burned_sessions.len() >= g.replay_capacity
+        {
+            abort_all(quorum_guards);
+            return Err(PolicyViolation::ReplayWindowExhausted);
+        }
+        if g.velocity_generation == u64::MAX {
+            abort_all(quorum_guards);
+            return Err(PolicyViolation::LedgerPersistenceFailed);
+        }
+    }
     if let Some(ledger) = shared_ledger.as_deref_mut()
         && let Err(err) =
             ledger.record_approved_intent(global_projected, per_party_intents[0].nonce, session_id)
@@ -1977,6 +2013,9 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         }
     }
     if let Some(err) = record_failure {
+        if let Some(ledger) = shared_ledger {
+            ledger.failed = true;
+        }
         abort_all(quorum_guards);
         return Err(err);
     }
@@ -2220,7 +2259,8 @@ pub fn evaluate_policy_committed_barrier_authenticated<B: AcceleratorBackend>(
 /// Implementations must bind both authenticated endpoint IDs, the domain and vector length,
 /// reject replay, and hide sender alternatives and receiver choices. An ordinary channel
 /// cannot implement this contract. Base OT and its security parameters belong to the provider.
-/// Calls exchange both directions concurrently, avoiding ordering dependencies between peers.
+/// Implementations must avoid deadlocks on bidirectional peer exchanges (e.g., via canonical
+/// `local_party < peer` flight ordering on synchronous transports or concurrent channels).
 pub trait PolicyAuthenticatedOt {
     fn exchange(
         &mut self,
@@ -3203,6 +3243,7 @@ impl PartyPolicyRound2State {
     ) -> Result<(PartyPolicyRound3State, PartyPolicySigmaCommitMsg), PolicyViolation> {
         guard.check_phase(&self.context, 2)?;
         let own_slot = self.context.own.slot;
+        let peer_slots = self.context.peer_slots.clone();
         let result = (|| {
             let mut opens = openings.to_vec();
             opens.sort_by_key(|o| o.party_id);
@@ -3223,7 +3264,7 @@ impl PartyPolicyRound2State {
                 msg,
             ))
         })();
-        policy_phase_result(guard, own_slot, &[], result)
+        policy_phase_result(guard, own_slot, &peer_slots, result)
     }
 }
 
@@ -5186,6 +5227,18 @@ mod tests {
                 Err(PolicyViolation::BarrierCommitmentMismatch { party_id: 2 })
             ));
             assert_slot_aborted_not_bricked(g, 1);
+            for peer in [1u16, 2, 4] {
+                if peer != g.party_id {
+                    assert!(
+                        g.is_peer_slot_consumed(peer, 1),
+                        "peer {peer} slot 1 must be retired on Round-3 abort"
+                    );
+                    assert!(
+                        g.incoming_key(peer, 1).is_err(),
+                        "peer {peer} slot 1 incoming BDOZ key must be wiped on Round-3 abort"
+                    );
+                }
+            }
             assert_eq!(g.accumulated_window_spend(), 30);
         }
 

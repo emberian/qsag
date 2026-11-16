@@ -4640,6 +4640,7 @@ theorem evalVecShift256_left8 (v : Vec256) : evalVecShift256 .vpslldq v 8 =
     ⟨0, v.w0 <<< 0, 0, v.w2 <<< 0⟩ := by rfl
 theorem evalVecShift256_right8 (v : Vec256) : evalVecShift256 .vpsrldq v 8 =
     ⟨v.w1 >>> 0, 0, v.w3 >>> 0, 0⟩ := by rfl
+#export_eqns X86FramePrecond X86ContractInit Arm64ContractInit
 end Qsag
 namespace Qsag.SydTv
 open Qsag

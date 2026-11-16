@@ -222,8 +222,8 @@ module qsag_ni_fpga_top #(
     // ------------------------------------------------------------------ registers & AXI4-Lite
     logic [31:0][63:0] x_q;
     logic [11:0][63:0] y_q;
-    logic [31:0]       arg32_q, stream_q, op_cycles_q, perms_q;
-    logic [63:0]       total_q;
+    logic [31:0]       arg32_q, stream_q, op_cycles_q, perms_q, total_lo_q, total_hi_q;
+    logic              total_cy_q;
     logic              op_busy, op_done, op_ok, err_noncanon, err_cmd;
 
     logic        wr_fire, rd_fire, cmd_fire;
@@ -405,36 +405,26 @@ module qsag_ni_fpga_top #(
     logic [2:0]   fold_idx;
     logic [3:0]   fold_left;
 
-    // Streamed EXT4_BATCH state
+    // Streamed EXT4_BATCH state (inputs registered via mac_valid_fsm so s_axis_tready never drives u_ext4)
     logic         eb_half, eb_wait_cmp, eb_fail_q;
     logic [15:0]  eb_rem, eb_ret_rem;
     logic [255:0] eb_a_q, eb_b_q, eb_exp_cmp_q, eb_exp_cmp_val;
     if (PROFILE_COMPACT) begin : g_eb_cmp
         assign eb_exp_cmp_val = eb_exp_cmp_q;
     end else begin : g_eb_sr
-        logic [EXT_LAT*256-1:0] eb_exp_sr;
+        logic [(EXT_LAT+1)*256-1:0] eb_exp_sr;
         always_ff @(posedge clk)
-            eb_exp_sr <= {eb_exp_sr[(EXT_LAT-1)*256-1:0], s_axis_tdata[511:256]};
-        assign eb_exp_cmp_val = eb_exp_sr[(EXT_LAT-1)*256 +: 256];
+            eb_exp_sr <= {eb_exp_sr[EXT_LAT*256-1:0], s_axis_tdata[511:256]};
+        assign eb_exp_cmp_val = eb_exp_sr[EXT_LAT*256 +: 256];
         /* verilator lint_off UNUSEDSIGNAL */
         wire unused_eb = &{1'b0, eb_exp_cmp_q};
         /* verilator lint_on UNUSEDSIGNAL */
     end
 
-    wire eb_beat1_fire = (op_st == O_EBATCH) && eb_half && stream_fire;
-    always_comb begin
-        if (eb_beat1_fire) begin
-            mac_valid = 1'b1;
-            mac_a     = eb_a_q;
-            mac_b     = eb_b_q;
-            mac_c     = s_axis_tdata[255:0];
-        end else begin
-            mac_valid = mac_valid_fsm;
-            mac_a     = mac_a_fsm;
-            mac_b     = mac_b_fsm;
-            mac_c     = mac_c_fsm;
-        end
-    end
+    assign mac_valid = mac_valid_fsm;
+    assign mac_a     = mac_a_fsm;
+    assign mac_b     = mac_b_fsm;
+    assign mac_c     = mac_c_fsm;
 
     if (PROFILE_COMPACT) begin : g_compact_ext4
         qsag_ext4_compact_bfly #(.TAW(FOLD_TAW), .AW(AW), .BW(BW)) u_ext4 (
@@ -489,7 +479,7 @@ module qsag_ni_fpga_top #(
     for (genvar i = 0; i < 4; i++) begin : g_sc_pipe
         wire [63:0] a_l = sc_sum_q[64*i +: 64];
         wire [63:0] b_l = sc_add_b[64*i +: 64];
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(24)) u_s1 (
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(34)) u_s1 (
             .x({sc_add_c0 ? {2'b0, b_l} : 66'd0, {2'b0, b_l}, {2'b0, a_l}}),
             .y(sc_raw_d[66*i +: 66]));
 
@@ -500,8 +490,8 @@ module qsag_ni_fpga_top #(
         /* verilator lint_on UNUSEDSIGNAL */
         wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
         wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(24)) u_r0 (.x(tr0), .y(r0));
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(24)) u_r1 (.x(tr1), .y(r1));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r0 (.x(tr0), .y(r0));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r1 (.x(tr1), .y(r1));
         assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
     end
 
@@ -567,7 +557,7 @@ module qsag_ni_fpga_top #(
                 O_KSP_CMP_XOR: begin
                     top_kcmd_valid = 1'b1;
                     top_kcmd_op    = 2'd1;
-                    top_kcmd_wdata = (kcmp_idx < 5'd16) ? ksp_buf_q[64*kcmp_idx[3:0] +: 64] : ksp_lane16_q;
+                    top_kcmd_wdata = (kcmp_idx < 5'd16) ? ksp_buf_q[63:0] : ksp_lane16_q;
                 end
                 O_KSP_CMP_PERM: begin
                     top_kcmd_valid = 1'b1;
@@ -726,7 +716,9 @@ module qsag_ni_fpga_top #(
             err_noncanon  <= 1'b0;
             err_cmd       <= 1'b0;
             op_cycles_q   <= '0;
-            total_q       <= '0;
+            total_lo_q    <= '0;
+            total_hi_q    <= '0;
+            total_cy_q    <= 1'b0;
             perms_q       <= '0;
             sc_fail_q     <= 1'b0;
             sc_s2_en      <= 1'b0;
@@ -765,8 +757,8 @@ module qsag_ni_fpga_top #(
                     10'h001: s_axil_rdata <= {26'd0, engines_busy, err_cmd, err_noncanon,
                                               op_ok, op_done, op_busy};
                     10'h002: s_axil_rdata <= op_cycles_q;
-                    10'h003: s_axil_rdata <= total_q[31:0];
-                    10'h004: s_axil_rdata <= total_q[63:32];
+                    10'h003: s_axil_rdata <= total_lo_q;
+                    10'h004: s_axil_rdata <= total_hi_q + {31'd0, total_cy_q};
                     10'h005: s_axil_rdata <= arg32_q;
                     10'h006: s_axil_rdata <= chain_done32;
                     10'h007: s_axil_rdata <= chain_ok32;
@@ -791,10 +783,12 @@ module qsag_ni_fpga_top #(
                 if (stream_check_en && stream_bad) err_noncanon <= 1'b1;
             end
 
-            // ---- Counters
-            if (op_busy)      op_cycles_q <= op_cycles_q + 32'd1;
-            if (engines_busy) total_q     <= total_q + 64'd1;
-            if (p2_out_valid) perms_q     <= perms_q + 32'd1;
+            // ---- Counters (64-bit total counter pipelined into two 32-bit halves)
+            total_cy_q <= engines_busy && (total_lo_q == 32'hFFFF_FFFF);
+            if (total_cy_q)   total_hi_q   <= total_hi_q + 32'd1;
+            if (engines_busy) total_lo_q   <= total_lo_q + 32'd1;
+            if (op_busy)      op_cycles_q  <= op_cycles_q + 32'd1;
+            if (p2_out_valid) perms_q      <= perms_q + 32'd1;
             if (fold_done)    fold_log2n_q <= fold_log2n_q - 6'd1;
 
             // ---- Background retirement for EXT4_BATCH
@@ -927,7 +921,9 @@ module qsag_ni_fpga_top #(
                             8'h3F: begin
                                 err_noncanon <= 1'b0;
                                 err_cmd      <= 1'b0;
-                                total_q      <= '0;
+                                total_lo_q   <= '0;
+                                total_hi_q   <= '0;
+                                total_cy_q   <= 1'b0;
                                 perms_q      <= '0;
                                 op_st        <= O_FIN;
                             end
@@ -1065,8 +1061,12 @@ module qsag_ni_fpga_top #(
                             eb_b_q  <= s_axis_tdata[511:256];
                             eb_half <= 1'b1;
                         end else begin
-                            eb_half      <= 1'b0;
-                            eb_exp_cmp_q <= s_axis_tdata[511:256];
+                            eb_half       <= 1'b0;
+                            eb_exp_cmp_q  <= s_axis_tdata[511:256];
+                            mac_valid_fsm <= 1'b1;
+                            mac_a_fsm     <= eb_a_q;
+                            mac_b_fsm     <= eb_b_q;
+                            mac_c_fsm     <= s_axis_tdata[255:0];
                             if (PROFILE_COMPACT) eb_wait_cmp <= 1'b1;
                             if (eb_rem == 16'd1) begin
                                 eb_rem <= 16'd0;
@@ -1114,7 +1114,7 @@ module qsag_ni_fpga_top #(
                 O_KCMP_RD: begin
                     if (kcmd_ready && kcmp_idx < 5'd12) kcmp_idx <= kcmp_idx + 5'd1;
                     if (kcmd_rd_valid) begin
-                        y_q[rd_cnt] <= kcmd_rd_data;
+                        y_q <= {kcmd_rd_data, y_q[11:1]};
                         if (rd_cnt == 4'd11) op_st <= O_FIN;
                         else                 rd_cnt <= rd_cnt + 4'd1;
                     end
@@ -1168,6 +1168,7 @@ module qsag_ni_fpga_top #(
                 end
                 O_KSP_CMP_XOR: begin
                     if (kcmd_ready) begin
+                        if (kcmp_idx < 5'd16) ksp_buf_q <= {64'd0, ksp_buf_q[1023:64]};
                         if (kcmp_idx == 5'd16) op_st <= O_KSP_CMP_PERM;
                         else                   kcmp_idx <= kcmp_idx + 5'd1;
                     end

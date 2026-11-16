@@ -517,6 +517,44 @@ theorem AggregateExtractorSound.mono {ε' : RatBound}
 
 end Contract
 
+/-- Construct `StraightLineExtractor` from a proof-carried witness list `proofSigs`. -/
+theorem StraightLineExtractor.of_proofSigs {PK Sig Proof : Type} {w : Nat}
+    (decode : Bytes → Option Sig) (proofSigs : Proof → List Sig)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (hMem : ∀ log stmt proof i sig, extract log stmt proof i = some sig → sig ∈ proofSigs proof) :
+    StraightLineExtractor decode proofSigs extract :=
+  fun log stmt proof i sig hs => .inl (hMem log stmt proof i sig hs)
+
+/-- Construct zero-error `AggregateExtractorSound` from deterministic extraction soundness on
+    every accepted proof (or recorded transcript collision). -/
+theorem AggregateExtractorSound.of_deterministic {PK Sig Proof : Type} {w nC : Nat}
+    (ℰ : (List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) → Prop)
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (verifyAgg : (Bytes → Bytes) → AggregateStatement PK w → Proof → Bool)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig)
+    (hℰ : ℰ extract) (oracle : Fin nC → Bytes → Bytes) (q : Nat)
+    (hSound : ∀ (H : Bytes → Bytes) (log : List (Bytes × Bytes))
+      (stmt : AggregateStatement PK w) (proof : Proof),
+      (∀ e ∈ log, e.2 = H e.1) →
+      verifyAgg H stmt proof = true →
+      AggregateSoundnessOutcome verifySingle H log stmt (extract log stmt proof)) :
+    AggregateExtractorSound ℰ verifySingle verifyAgg extract oracle q RatBound.zero := by
+  refine ⟨hℰ, fun n nA hPos π prover => FinGame.bound_zero_of_forall_lose _ (fun ω => ?_)⟩
+  let H := oracle (π.chal ω)
+  let r := aggregateRun H q (prover (π.advc ω))
+  show aggregateFailure verifySingle verifyAgg extract H r = false
+  unfold aggregateFailure
+  cases hAcc : verifyAgg H r.1.1 r.1.2 with
+  | false => rfl
+  | true =>
+    rw [Bool.true_and]
+    rcases hSound H r.2 r.1.1 r.1.2 (aggregateRun_log H q (prover (π.advc ω))).1 hAcc with
+      hWit | ⟨b, hb⟩
+    · rw [aggregateWitnessCheck_complete verifySingle r.1.1 _ hWit]
+      rfl
+    · rw [transcriptCollision_complete H r.2 (aggregateRun_log H q (prover (π.advc ω))).1 hb,
+        Bool.not_true, Bool.and_false]
+
 /-- With `ε = 1` the contract holds for every verifier, every extractor of the class and every
     oracle family: it carries no information. -/
 theorem aggregateExtractorSound_one {PK Sig Proof : Type} {w nC : Nat}

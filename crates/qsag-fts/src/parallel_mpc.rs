@@ -22,6 +22,9 @@ const GF128_MDS_B: u128 = 0xBF58_476D_1CE4_E5B9_94D0_49BB_1331_11EB;
 
 /// Maximum default allocation of single-use authenticated power tuples per party.
 pub const DEFAULT_BEAVER_TRIPLE_POOL: usize = 131_072;
+/// Upper bound on public `grind_counter` trials enforced symmetrically by signing, canonical
+/// wire decoding, and verification.
+pub const MAX_GRIND_COUNTER: u32 = 1_000_000;
 const SPN_ROUNDS: usize = 48;
 
 /// Configuration for `ParallelSeededFts`.
@@ -267,7 +270,7 @@ impl ParallelSeededPartyShare {
         self.poisoned = true;
         self.clear_pending_openings();
     }
-    fn clear_pending_openings(&mut self) {
+    pub(crate) fn clear_pending_openings(&mut self) {
         // The authenticated wire wipes itself when dropped.
         for (opened, _) in &mut self.pending_openings {
             ct_zeroize_u128s(core::slice::from_mut(opened));
@@ -362,10 +365,14 @@ impl ParallelSeededSignature {
             }
             merkle_siblings.push(limbs);
         }
+        let grind_counter = word(36);
+        if grind_counter >= MAX_GRIND_COUNTER {
+            return Err(malformed);
+        }
         Ok(Self {
             epoch,
             randomizer,
-            grind_counter: word(36),
+            grind_counter,
             chain_nodes,
             merkle_siblings,
         })
@@ -1586,7 +1593,9 @@ pub fn verify_parallel_seeded_fts<B: AcceleratorBackend>(
     if (sig.epoch as usize) >= (1usize << params.tree_height) {
         return Err(ParallelSeededError::EpochOutOfRange);
     }
-    if sig.chain_nodes.len() != params.num_chains || sig.merkle_siblings.len() != params.tree_height
+    if sig.chain_nodes.len() != params.num_chains
+        || sig.merkle_siblings.len() != params.tree_height
+        || sig.grind_counter >= MAX_GRIND_COUNTER
     {
         return Err(ParallelSeededError::SignatureVerificationFailed);
     }
@@ -1601,8 +1610,6 @@ pub fn verify_parallel_seeded_fts<B: AcceleratorBackend>(
         sig.grind_counter,
     )
     .ok_or(ParallelSeededError::SignatureVerificationFailed)?;
-
-    verify_canonical_minimal_grind_counter(pk, msg, sig)?;
 
     let mut endpoints = Vec::with_capacity(params.num_chains);
     for (ch, (&start_node, &a_pos)) in sig.chain_nodes.iter().zip(offsets.iter()).enumerate() {
@@ -1638,6 +1645,7 @@ pub fn verify_parallel_seeded_fts<B: AcceleratorBackend>(
     if cur_hash != pk.merkle_root {
         return Err(ParallelSeededError::SignatureVerificationFailed);
     }
+    verify_canonical_minimal_grind_counter(pk, msg, sig)?;
     Ok(())
 }
 
@@ -2151,5 +2159,42 @@ mod secret_guard_tests {
             Err(ParallelSeededError::BdozMacCheckFailed)
         );
         assert!(setup.shares.iter().all(|s| s.pending_openings.is_empty()));
+    }
+
+    #[test]
+    fn verifier_and_decoder_reject_excessive_grind_counter_in_o1() {
+        let accel = qsag_accel::CpuReferenceBackend::new();
+        let params = ParallelSeededParams {
+            tree_height: 1,
+            winternitz_w: 2,
+            num_chains: 2,
+            target_sum: 1,
+        };
+        let setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            params,
+            2,
+            [71; 32],
+            [72; 32],
+            &accel,
+        )
+        .unwrap();
+        for bad_ctr in [MAX_GRIND_COUNTER, u32::MAX] {
+            let sig = ParallelSeededSignature {
+                epoch: 0,
+                randomizer: [0x55; 32],
+                grind_counter: bad_ctr,
+                chain_nodes: vec![[0u8; 32]; params.num_chains],
+                merkle_siblings: vec![[0u64; 4]; params.tree_height],
+            };
+            let wire = sig.to_bytes();
+            assert_eq!(
+                ParallelSeededSignature::from_bytes_canonical(&params, &wire).err(),
+                Some(ParallelSeededError::SignatureVerificationFailed)
+            );
+            assert_eq!(
+                verify_parallel_seeded_fts(&setup.pk, b"dos-probe", &sig, &accel).err(),
+                Some(ParallelSeededError::SignatureVerificationFailed)
+            );
+        }
     }
 }

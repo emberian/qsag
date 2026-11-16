@@ -50,10 +50,11 @@ def unroll(steps):
     s += "".join(f"(assert (|lec_top_t| s{k} s{k+1}))\n" for k in range(steps))
     return s
 
-def solve(name, text, secs, prefer_bitwuzla=False):
+def solve(name, text, secs, prefer_bitwuzla=True):
     path = os.path.join(OUT, name + ".smt2")
-    if prefer_bitwuzla and BITWUZLA:
-        bw_text = "(set-logic QF_BV)\n" + text
+    is_bv_only = (" Int)" not in text) and ("(mod " not in text)
+    if prefer_bitwuzla and is_bv_only and BITWUZLA:
+        bw_text = "(set-logic QF_UFBV)\n" + text
         open(path, "w").write(bw_text)
         t0 = time.time()
         try:
@@ -73,7 +74,7 @@ def solve(name, text, secs, prefer_bitwuzla=False):
         ans = "timeout"
     return ans, time.time() - t0
 
-def record(name, statement, expect, text, secs=None, required=True, prefer_bitwuzla=False):
+def record(name, statement, expect, text, secs=None, required=True, prefer_bitwuzla=True):
     ans, dt = solve(name, text, secs or Z3_SECS, prefer_bitwuzla=prefer_bitwuzla)
     ok = ans == expect
     tag = "PASS" if ok else ("FAIL" if required else "open")
@@ -114,41 +115,75 @@ def check_reduce_algebra():
 def check_ext4_karatsuba_algebra():
     """Prove 9-multiply Tower Karatsuba recombination over F_p[v]/(v^4 - 7) is exact mod p
     and strictly fits in (0, 2^136) without overflow or negative wraparound."""
-    vars_ab = [f"a{i}" for i in range(4)] + [f"b{i}" for i in range(4)] + [f"c{i}" for i in range(4)]
-    decl = "".join(f"(declare-const {v} Int)\n" for v in vars_ab)
-    rng = "(assert (and " + " ".join(f"(>= {v} 0) (< {v} {P})" for v in vars_ab) + "))\n"
-    def modp(e): return f"(mod {e} {P})"
-    sa01, sa23 = modp("(+ a0 a1)"), modp("(+ a2 a3)")
-    sa02, sa13 = modp("(+ a0 a2)"), modp("(+ a1 a3)")
-    saa = modp("(+ a0 a1 a2 a3)")
-    sb01, sb23 = modp("(+ b0 b1)"), modp("(+ b2 b3)")
-    sb02, sb13 = modp("(+ b0 b2)"), modp("(+ b1 b3)")
-    sbb = modp("(+ b0 b1 b2 b3)")
-    ms = [
-        "(* a0 b0)", "(* a1 b1)", f"(* {sa01} {sb01})",
-        "(* a2 b2)", "(* a3 b3)", f"(* {sa23} {sb23})",
-        f"(* {sa02} {sb02})", f"(* {sa13} {sb13})", f"(* {saa} {sbb})"
-    ]
     M128 = 2**128 - 1
     C1 = 2**32 + 1
-    lets = "".join(f"(let ((m{i} {e})) " for i, e in enumerate(ms))
-    lets_n = "".join(f"(let ((nm{i} (- {M128} m{i}))) " for i in range(8))
-    acc0 = f"(+ (* 14 {C1}) c0 m0 (* 7 m1) (* 7 m5) (* 7 nm3) (* 7 nm4))"
-    acc1 = f"(+ (* 2 {C1}) c1 m2 m3 (* 7 m4) nm0 nm1)"
-    acc2 = f"(+ (* 16 {C1}) c2 m6 (* 7 m7) nm0 (* 7 nm1) nm3 (* 7 nm4))"
-    acc3 = f"(+ (* 4 {C1}) c3 m8 m0 m1 m3 m4 nm6 nm7 nm2 nm5)"
-    # Schoolbook F_p[v]/(v^4 - 7) in qsag limb order [1, v^2, v, v^3]:
-    # poly order A = [a0, a2, a1, a3], B = [b0, b2, b1, b3]
-    sb_y0 = "(+ c0 (* a0 b0) (* 7 (+ (* a2 b3) (* a1 b1) (* a3 b2))))"
-    sb_y1 = "(+ c1 (* a0 b1) (* a2 b2) (* a1 b0) (* 7 (* a3 b3)))"
-    sb_y2 = "(+ c2 (* a0 b2) (* a2 b0) (* 7 (+ (* a1 b3) (* a3 b1))))"
-    sb_y3 = "(+ c3 (* a0 b3) (* a2 b1) (* a1 b2) (* a3 b0))"
-    close = ")" * (len(ms) + 8)
-    for k, (acc, sb) in enumerate([(acc0, sb_y0), (acc1, sb_y1), (acc2, sb_y2), (acc3, sb_y3)]):
-        q = (decl + rng + lets + lets_n +
-             f"(assert (not (and (> {acc} 0) (< {acc} {2**136}) (= (mod {acc} {P}) (mod {sb} {P}))))){close}\n(check-sat)\n")
-        if not record(f"ext4_karatsuba_limb{k}", f"9-mul Tower Karatsuba limb {k}: 0 < acc < 2^136 and acc == schoolbook (mod p)", "unsat", q):
-            raise SystemExit("failed Ext4 Karatsuba proof")
+    KP = 2**64 + 2**32  # exact integer: M128 + C1 = 2^128 + 2^32 = P * (2^64 + 2^32)
+
+    # 1. Range proof over all 64-bit c_i and 128-bit unsigned multiplier outputs m_0..m_8:
+    r_vars = [f"c{i}" for i in range(4)] + [f"m{i}" for i in range(9)]
+    r_decl = "".join(f"(declare-const {v} Int)\n" for v in r_vars)
+    r_rng = ("(assert (and "
+             + " ".join(f"(>= c{i} 0) (< c{i} {2**64})" for i in range(4)) + " "
+             + " ".join(f"(>= m{i} 0) (< m{i} {2**128})" for i in range(9)) + "))\n")
+    nm = [f"(- {M128} m{i})" for i in range(8)]
+    accs_r = [
+        f"(+ (* 14 {C1}) c0 m0 (* 7 m1) (* 7 m5) (* 7 {nm[3]}) (* 7 {nm[4]}))",
+        f"(+ (* 2 {C1}) c1 m2 m3 (* 7 m4) {nm[0]} {nm[1]})",
+        f"(+ (* 16 {C1}) c2 m6 (* 7 m7) {nm[0]} (* 7 {nm[1]}) {nm[3]} (* 7 {nm[4]}))",
+        f"(+ (* 4 {C1}) c3 m8 m0 m1 m3 m4 {nm[6]} {nm[7]} {nm[2]} {nm[5]})",
+    ]
+    for k, acc in enumerate(accs_r):
+        if not record(f"ext4_karatsuba_range_limb{k}",
+                      f"9-mul Tower Karatsuba limb {k}: 0 < acc < 2^136 for all 2^128 products and 64-bit c",
+                      "unsat", r_decl + r_rng + f"(assert (not (and (> {acc} 0) (< {acc} {2**136}))))\n(check-sat)\n"):
+            raise SystemExit("failed Ext4 Karatsuba range proof")
+
+    # 2. Universal modular congruence proof over all a_i, b_i, c_i and modular pre-sum quotients ka_*, kb_*:
+    k_names = ["ka01", "ka23", "ka02", "ka13", "kaa", "kb01", "kb23", "kb02", "kb13", "kbb"]
+    all_v = [f"a{i}" for i in range(4)] + [f"b{i}" for i in range(4)] + [f"c{i}" for i in range(4)] + k_names
+    decl = "".join(f"(declare-const {v} Int)\n" for v in all_v)
+    def subp(s, kv): return f"(- {s} (* {P} {kv}))"
+    def qmul(sa, sb, ka, kb): return f"(- (+ (* {ka} {sb}) (* {kb} {sa})) (* {P} (* {ka} {kb})))"
+    S = {
+        "a01": "(+ a0 a1)", "a23": "(+ a2 a3)", "a02": "(+ a0 a2)", "a13": "(+ a1 a3)", "aa": "(+ a0 a1 a2 a3)",
+        "b01": "(+ b0 b1)", "b23": "(+ b2 b3)", "b02": "(+ b0 b2)", "b13": "(+ b1 b3)", "bb": "(+ b0 b1 b2 b3)",
+    }
+    ms = [
+        "(* a0 b0)", "(* a1 b1)", f"(* {subp(S['a01'],'ka01')} {subp(S['b01'],'kb01')})",
+        "(* a2 b2)", "(* a3 b3)", f"(* {subp(S['a23'],'ka23')} {subp(S['b23'],'kb23')})",
+        f"(* {subp(S['a02'],'ka02')} {subp(S['b02'],'kb02')})",
+        f"(* {subp(S['a13'],'ka13')} {subp(S['b13'],'kb13')})",
+        f"(* {subp(S['aa'],'kaa')} {subp(S['bb'],'kbb')})",
+    ]
+    qm2 = qmul(S["a01"], S["b01"], "ka01", "kb01")
+    qm5 = qmul(S["a23"], S["b23"], "ka23", "kb23")
+    qm6 = qmul(S["a02"], S["b02"], "ka02", "kb02")
+    qm7 = qmul(S["a13"], S["b13"], "ka13", "kb13")
+    qm8 = qmul(S["aa"],  S["bb"],  "kaa",  "kbb")
+    nmi = [f"(- {M128} {ms[i]})" for i in range(8)]
+    accs = [
+        f"(+ (* 14 {C1}) c0 {ms[0]} (* 7 {ms[1]}) (* 7 {ms[5]}) (* 7 {nmi[3]}) (* 7 {nmi[4]}))",
+        f"(+ (* 2 {C1}) c1 {ms[2]} {ms[3]} (* 7 {ms[4]}) {nmi[0]} {nmi[1]})",
+        f"(+ (* 16 {C1}) c2 {ms[6]} (* 7 {ms[7]}) {nmi[0]} (* 7 {nmi[1]}) {nmi[3]} (* 7 {nmi[4]}))",
+        f"(+ (* 4 {C1}) c3 {ms[8]} {ms[0]} {ms[1]} {ms[3]} {ms[4]} {nmi[6]} {nmi[7]} {nmi[2]} {nmi[5]})",
+    ]
+    sbs = [
+        "(+ c0 (* a0 b0) (* 7 (+ (* a2 b3) (* a1 b1) (* a3 b2))))",
+        "(+ c1 (* a0 b1) (* a2 b2) (* a1 b0) (* 7 (* a3 b3)))",
+        "(+ c2 (* a0 b2) (* a2 b0) (* 7 (+ (* a1 b3) (* a3 b1))))",
+        "(+ c3 (* a0 b3) (* a2 b1) (* a1 b2) (* a3 b0))",
+    ]
+    qs = [
+        f"(- (* 14 {KP}) (* 7 {qm5}))",
+        f"(- (* 2 {KP}) {qm2})",
+        f"(- (* 16 {KP}) {qm6} (* 7 {qm7}))",
+        f"(+ (- (* 4 {KP}) {qm8}) {qm6} {qm7} {qm2} {qm5})",
+    ]
+    for k in range(4):
+        if not record(f"ext4_karatsuba_modp_limb{k}",
+                      f"9-mul Tower Karatsuba limb {k}: exact congruence acc - schoolbook == p * Q_k over F_p[v]/(v^4 - 7)",
+                      "unsat", decl + f"(assert (not (= (- {accs[k]} {sbs[k]}) (* {P} {qs[k]}))))\n(check-sat)\n"):
+            raise SystemExit("failed Ext4 Karatsuba congruence proof")
 
 def mutate(src, old, new, name):
     text = open(src).read()
@@ -231,11 +266,10 @@ endmodule
         if wb < bw: hi_cond.append(f"(= ((_ extract {bw-1} {wb}) {b0}) {bv(0, bw - wb)})")
         pre = f"(assert (and {' '.join(hi_cond)}))\n" if hi_cond else ""
         exact_mul = f"(bvmul {zext(a0, aw, tw)} {zext(b0, bw, tw)})"
-        bound = bv((2**wa - 1) * (2**wb - 1), tw)
         q = (ys + unroll(2) + pre +
-             f"(assert (not (and (= {acc('tq', 's2')} {exact_mul}) (bvule {acc('tq', 's2')} {bound}))))\n(check-sat)\n")
+             f"(assert (not (= {acc('tq', 's2')} {exact_mul})))\n(check-sat)\n")
         if not record(f"dsp_tile_exact_{aw}x{bw}_{wa}x{wb}",
-                      f"bit-precise 2-stage DSP tile ({wa}x{wb} in {aw}x{bw}): tq == a*b and tq <= (2^{wa}-1)(2^{wb}-1) for all 2^{wa+wb} inputs",
+                      f"bit-precise 2-stage DSP tile ({wa}x{wb} in {aw}x{bw}): tq == zext(a)*zext(b) (mod 2^{tw}, non-wrapping by tile_bound_{wa}x{wb}) for all 2^{wa+wb} inputs",
                       "unsat", q, prefer_bitwuzla=True):
             raise SystemExit("failed bit-precise DSP tile glue")
 
@@ -361,7 +395,7 @@ def check_adder_contracts():
     check_csa_inductive(128, 8)
 
     # 2. Parallel-prefix split carry-select adder: y == a + b (mod 2^W) for all 2^(2W) inputs.
-    for w, chk in [(67, 16), (66, 16), (128, 16), (128, 24), (136, 24)]:
+    for w, chk in [(67, 16), (67, 24), (66, 16), (66, 24), (128, 16), (128, 24), (136, 24)]:
         ys = yosys_smt2(f"contract_split_{w}_{chk}", "qsag_add_split", [], f"-chparam W {w} -chparam CHUNK {chk}", use_contracts=False)
         spec = f"(bvadd {acc('a', 's0')} {acc('b', 's0')})"
         body = ys + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
@@ -371,7 +405,7 @@ def check_adder_contracts():
 
     # 3. Combined `qsag_sum_csa` RTL glue over universally proved `qsag_csa_reduce2` + `qsag_add_split`.
     scsa_src = open(SCSA).read().replace("(* flatten *)", "")
-    for w, n, chk in [(66, 6, 16), (128, 8, 16), (128, 8, 24)]:
+    for w, n, chk in [(66, 6, 16), (66, 6, 24), (128, 8, 16), (128, 8, 24)]:
         glue_sv = os.path.join(OUT, f"sum_csa_glue_{w}_{n}_{chk}.sv")
         gtxt = scsa_src.replace("input  logic [N*W-1:0] x,",
                                 f"input logic [N*W-1:0] x, input logic [{w-1}:0] free_s,", 1)
