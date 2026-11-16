@@ -35,23 +35,15 @@ end-to-end active security of the Rust preprocessing protocol.
 -/
 
 public import Qsag.Tactic.Prelude
-import all Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-import all Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
-import all Qsag.Math.Gf2Pow128
 public import Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Aggregation.UcGames
-public import Qsag.Exec.SimulationSpine
-import all Qsag.Exec.SimulationSpine
-import all Qsag.Oracle.Keccak
-import all Qsag.Oracle.Poseidon2
-public import Qsag.Protocol.Threshold.RlweCyclotomicExtraction
-import all Qsag.Protocol.Threshold.RlweCyclotomicExtraction
+public import Qsag.Spec.Refines
+import Qsag.Oracle.Keccak
+import Qsag.Oracle.Poseidon2
+public import Qsag.Protocol.Threshold.RlweExtraction
 public import Qsag.Protocol.Threshold.Preprocessing
-import all Qsag.Protocol.Threshold.Preprocessing
 public import Qsag.Math.Lattices
-import all Qsag.Math.Lattices
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -1295,7 +1287,7 @@ def rlweZkpokZBound : Nat := 3070
 theorem rlwe_production_constants_agree :
     rlweZkpokZBound = rlweProductionBz ∧ rlweQ = rlweProductionQ ∧ rlweN1024 = rlweCyclotomicN ∧
     rlweZkpokReps = rlweOrSigmaParallelReps ∧ 2 ^ rlweZkpokChalBits = 2 * rlweCyclotomicN :=
-  ⟨rfl, rfl, rfl, rfl, rfl⟩
+  by simp only [rlweProductionBz_eq, rlweProductionQ_eq, rlweCyclotomicN_eq_1024, rlweOrSigmaParallelReps_eq]; decide
 
 /-- Exact response box of `RlweReceiverZkPok::verify`: every coefficient lies in the half-open
     interval `-3070 ≤ z_i < 3070` (`(-RLWE_ZKPOK_Z_BOUND..RLWE_ZKPOK_Z_BOUND).contains(&v)`). The box is
@@ -1586,13 +1578,14 @@ theorem chal20_diff_nonzero_and_short {u u' : BitVec 20} (hNe : u ≠ u') :
 
 private theorem intFinSum_eq_cycIntFinSum : ∀ (n : Nat) (f : Fin n → Int),
     intFinSum n f = cycIntFinSum n f
-  | 0, _ => rfl
+  | 0, _ => by rw [cycIntFinSum_nil]; rfl
   | n + 1, f => by
-    simp only [intFinSum, cycIntFinSum, intFinSum_eq_cycIntFinSum n]
+    simp only [intFinSum, cycIntFinSum_succ, intFinSum_eq_cycIntFinSum n]
 
 /-- The two negacyclic convolutions agree. -/
 theorem polyIntMul_eq_cycIntMul {N : Nat} (a b : PolyInt N) : polyIntMul a b = cycIntMul a b := by
   funext k
+  rw [cycIntMul_eq]
   show intFinSum N (fun i => intFinSum N (fun j => negacyclicKernel N k.val i.val j.val (a i * b j))) =
     cycIntFinSum N (fun i => cycIntFinSum N (fun j =>
       cycNegacyclicKernel N k.val i.val j.val (a i * b j)))
@@ -1600,14 +1593,14 @@ theorem polyIntMul_eq_cycIntMul {N : Nat} (a b : PolyInt N) : polyIntMul a b = c
   apply cycIntFinSum_congr; intro i
   refine (intFinSum_eq_cycIntFinSum N _).trans ?_
   apply cycIntFinSum_congr; intro j
-  rfl
+  rw [cycNegacyclicKernel_eq]; rfl
 
 /-- The two $\ell_\infty$ norms agree. -/
 theorem polyIntInfNorm_eq_cycIntInfNorm : ∀ {N : Nat} (p : PolyInt N),
     polyIntInfNorm p = cycIntInfNorm p
-  | 0, _ => rfl
+  | 0, _ => by rw [cycIntInfNorm_zero]; rfl
   | n + 1, p => by
-    simp only [polyIntInfNorm, cycIntInfNorm, polyIntInfNorm_eq_cycIntInfNorm (N := n)]
+    simp only [polyIntInfNorm, cycIntInfNorm_succ, polyIntInfNorm_eq_cycIntInfNorm (N := n)]
 
 /-- Coefficient identification $\mathbb{Z}_{12289} \to$ `ModZq 12289`. -/
 def zqToModZq (a : Zq12289) : ModZq 12289 := ⟨a.val, a.isLt⟩
@@ -1625,7 +1618,8 @@ def polyRqToCyc (p : PolyRq1024) : CycPolyZq 10 12289 := fun k => zqToModZq (p k
 def cycToPolyRq (p : CycPolyZq 10 12289) : PolyRq1024 := fun k => modZqToZq (p k)
 
 theorem polyRqToCyc_cycToPolyRq (p : CycPolyZq 10 12289) : polyRqToCyc (cycToPolyRq p) = p := by
-  funext k; apply ModZq.ext; rfl
+  funext k; apply ModZq.ext
+  rfl
 
 theorem cycToPolyRq_polyRqToCyc (p : PolyRq1024) : cycToPolyRq (polyRqToCyc p) = p := by
   funext k; apply Zq12289.ext; rfl
@@ -1641,14 +1635,20 @@ theorem polyRqToCyc_polyIntToRq (p : PolyInt 1024) :
 
 theorem polyRqToCyc_add (a b : PolyRq1024) :
     polyRqToCyc (CommRingOps.add a b) = cycZqAdd (polyRqToCyc a) (polyRqToCyc b) := by
-  funext k; apply ModZq.ext; rfl
+  funext k; apply ModZq.ext
+  simp only [cycZqAdd, ModZq.add_eq]
+  rfl
 
 theorem polyRqToCyc_sub (a b : PolyRq1024) :
     polyRqToCyc (CommRingOps.sub a b) = cycZqSub (polyRqToCyc a) (polyRqToCyc b) := by
-  funext k; apply ModZq.ext; rfl
+  funext k; apply ModZq.ext
+  simp only [cycZqSub, ModZq.sub_eq]
+  rfl
 
 theorem polyRqToCyc_zero : polyRqToCyc (CommRingOps.zero : PolyRq1024) = cycZqZero := by
-  funext k; apply ModZq.ext; rfl
+  funext k; apply ModZq.ext
+  simp only [cycZqZero, ModZq.zero_eq]
+  rfl
 
 theorem polyRqToCyc_one : polyRqToCyc (CommRingOps.one : PolyRq1024) = cycZqOne := by
   funext k
@@ -1656,11 +1656,12 @@ theorem polyRqToCyc_one : polyRqToCyc (CommRingOps.one : PolyRq1024) = cycZqOne 
   show ((if k.val = 0 then (CommRingOps.one : Zq12289) else CommRingOps.zero) : Zq12289).val =
     ((if k.val = 0 then ModZq.one 12289 else ModZq.zero 12289) : ModZq 12289).val
   by_cases hk : k.val = 0
-  · simp only [hk, ↓reduceIte]; rfl
-  · simp only [hk, ↓reduceIte]; rfl
+  · simp only [hk, ↓reduceIte, ModZq.one_eq]; rfl
+  · simp only [hk, ↓reduceIte, ModZq.zero_eq]; rfl
 
 theorem polyRqToCyc_mul (a b : PolyRq1024) :
     polyRqToCyc (CommRingOps.mul a b) = cycZqMul (polyRqToCyc a) (polyRqToCyc b) := by
+  rw [cycZqMul_eq, cycZqToNatInt_eq, cycZqToNatInt_eq]
   show polyRqToCyc (polyIntToRq (polyIntMul (polyRqToNatInt a) (polyRqToNatInt b))) =
     cycIntToZq 12289 (cycIntMul (polyRqToNatInt a) (polyRqToNatInt b))
   rw [polyRqToCyc_polyIntToRq, polyIntMul_eq_cycIntMul]
@@ -1690,26 +1691,27 @@ theorem polyIntFromChal11_infNorm_eq_one (u : BitVec 11) :
     polyIntInfNorm (polyIntFromChal11 u) = 1 := by
   have hLe : polyIntInfNorm (polyIntFromChal11 u) ≤ 1 := by
     rw [polyIntInfNorm_le_iff]; intro k
-    unfold polyIntFromChal11 SignedMonomialChal.toIntPoly signedMonomial negacyclicSignedMonomial signBitToInt
+    simp only [polyIntFromChal11, SignedMonomialChal.toIntPoly_eq, signedMonomial, negacyclicSignedMonomial_eq, signBitToInt_eq]
     split
     · cases (chal11ToSignedMonomial u).sign <;> decide
     · decide
   have hGe : 1 ≤ polyIntInfNorm (polyIntFromChal11 u) := by
     have hk := coeff_natAbs_le_infNorm (polyIntFromChal11 u) (chal11ToSignedMonomial u).deg
-    unfold polyIntFromChal11 SignedMonomialChal.toIntPoly signedMonomial negacyclicSignedMonomial signBitToInt at hk
+    simp only [polyIntFromChal11, SignedMonomialChal.toIntPoly_eq, signedMonomial, negacyclicSignedMonomial_eq, signBitToInt_eq] at hk
     simp only [↓reduceIte] at hk
     have hAbs : (if (chal11ToSignedMonomial u).sign = true then (-1 : Int) else 1).natAbs = 1 := by
       cases (chal11ToSignedMonomial u).sign <;> decide
     rw [hAbs] at hk
-    exact hk
+    simpa only [polyIntFromChal11, SignedMonomialChal.toIntPoly_eq, signedMonomial,
+      negacyclicSignedMonomial_eq, signBitToInt_eq] using hk
   omega
 
 /-- Exact $\ell_1$ norm $\|d(u)\|_1 = 1$ (single signed monomial) for every 11-bit challenge $u$. -/
 theorem polyIntFromChal11_l1Norm_eq_one (u : BitVec 11) :
     polyIntL1Norm (polyIntFromChal11 u) = 1 := by
-  unfold polyIntL1Norm polyIntFromChal11 SignedMonomialChal.toIntPoly signedMonomial negacyclicSignedMonomial
+  simp only [polyIntL1Norm, polyIntFromChal11, SignedMonomialChal.toIntPoly_eq, signedMonomial, negacyclicSignedMonomial_eq]
   rw [natFinSum_eq_single (chal11ToSignedMonomial u).deg]
-  · unfold signBitToInt; cases (chal11ToSignedMonomial u).sign <;> simp
+  · simp only [signBitToInt_eq]; cases (chal11ToSignedMonomial u).sign <;> simp
   · intro i hiNe; simp only [hiNe, ↓reduceIte]; rfl
 
 /-- **Signed-Monomial $\ell_\infty$ Isometry (`polyIntInfNorm_mul_chal11_eq`, `H2`)**:
@@ -1748,7 +1750,7 @@ theorem chal11_diff_nonzero_short_and_invertible {u u' : BitVec 11} (hNe : u ≠
     unfold polyRqFromChal11 polyIntFromChal11
     rw [polyRqToCyc_mul, polyRqToCyc_sub, polyRqToCyc_one, polyRqToCyc_cycToPolyRq,
         polyRqToCyc_polyIntToRq, polyRqToCyc_polyIntToRq]
-    exact hInvCyc.2.2.1
+    simpa only [SignedMonomialChal.toZqPoly_eq] using hInvCyc.2.2.1
   refine ⟨?_, ?_, ?_, ⟨_, hInvRq⟩⟩
   · intro hZero
     have hEq : polyRqFromChal11 u = polyRqFromChal11 u' := by
@@ -1765,7 +1767,7 @@ theorem chal11_diff_nonzero_short_and_invertible {u u' : BitVec 11} (hNe : u ≠
     apply signedMonomial_toZq_injective (q := 12289) (by decide)
     have h := congrArg polyRqToCyc hEq
     simpa only [polyRqFromChal11, polyRqToCyc_polyIntToRq, polyIntFromChal11,
-      chal11ToSignedMonomial, SignedMonomialChal.toZqPoly] using h
+      chal11ToSignedMonomial, SignedMonomialChal.toZqPoly_eq] using h
   · have hInf := polyIntInfNorm_sub_le (polyIntFromChal11 u) (polyIntFromChal11 u')
     rw [polyIntFromChal11_infNorm_eq_one, polyIntFromChal11_infNorm_eq_one] at hInf
     exact hInf
@@ -1781,15 +1783,15 @@ theorem polyRqFromChal11_injective {u u' : BitVec 11}
   apply signedMonomial_toZq_injective (q := 12289) (by decide)
   have h := congrArg polyRqToCyc hEq
   simpa only [polyRqFromChal11, polyRqToCyc_polyIntToRq, polyIntFromChal11,
-      chal11ToSignedMonomial, SignedMonomialChal.toZqPoly] using h
+      chal11ToSignedMonomial, SignedMonomialChal.toZqPoly_eq] using h
 
 /-- Every 11-bit signed-monomial challenge polynomial is non-zero in $R_{12289}$. -/
 theorem polyRqFromChal11_ne_zero (u : BitVec 11) :
     polyRqFromChal11 u ≠ CommRingOps.zero := by
   intro hZero
   have hAt := congrFun hZero (chal11ToSignedMonomial u).deg
-  unfold polyRqFromChal11 polyIntToRq polyIntFromChal11 SignedMonomialChal.toIntPoly
-    signedMonomial negacyclicSignedMonomial signBitToInt at hAt
+  simp only [polyRqFromChal11, polyIntToRq, polyIntFromChal11, SignedMonomialChal.toIntPoly_eq,
+    signedMonomial, negacyclicSignedMonomial_eq, signBitToInt_eq] at hAt
   simp only [↓reduceIte] at hAt
   exact zq_signed_unit_ne_zero (chal11ToSignedMonomial u).sign hAt
 
@@ -2295,11 +2297,10 @@ def chal20Mono1 (u : BitVec 20) : SignedMonomialChal 10 := ⟨chal20Sign1 u, cha
 theorem polyIntFromChal20_eq_two_monomials (u : BitVec 20) :
     polyIntFromChal20 u = cycIntAdd (chal20Mono0 u).toIntPoly (chal20Mono1 u).toIntPoly := by
   funext k
-  have hV0 : chal20Val0 u = signBitToInt (chal20Sign0 u) := rfl
-  have hV1 : chal20Val1 u = signBitToInt (chal20Sign1 u) := rfl
-  unfold polyIntFromChal20 cycIntAdd SignedMonomialChal.toIntPoly signedMonomial
-    negacyclicSignedMonomial chal20Mono0 chal20Mono1
-  dsimp only
+  have hV0 : chal20Val0 u = signBitToInt (chal20Sign0 u) := by rw [signBitToInt_eq]; rfl
+  have hV1 : chal20Val1 u = signBitToInt (chal20Sign1 u) := by rw [signBitToInt_eq]; rfl
+  simp only [polyIntFromChal20, cycIntAdd, SignedMonomialChal.toIntPoly_eq, signedMonomial,
+    negacyclicSignedMonomial_eq, chal20Mono0, chal20Mono1]
   by_cases h0 : k = chal20Pos0 u
   · simp only [h0, chal20Pos0_ne_pos1 u, ↓reduceIte, hV0, Int.add_zero]
   · by_cases h1 : k = chal20Pos1 u
@@ -2321,10 +2322,11 @@ def RlweOrStatement.toCyclotomic (stmt : RlweOrStatement) : RlweOrSigmaStatement
 theorem RlweOrStatement.toCyclotomic_branchU (stmt : RlweOrStatement) (b : Bool) :
     stmt.toCyclotomic.branchU b = polyRqToCyc (stmt.branchPk b) := by
   cases b
-  · rfl
-  · show cycZqAdd (polyRqToCyc stmt.pk0) (polyRqToCyc stmt.tCrs) =
-      polyRqToCyc (CommRingOps.add stmt.pk0 stmt.tCrs)
-    rw [polyRqToCyc_add]
+  · simp only [RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq,
+      RlweOrSigmaStatement.branchU_eq, RlweOrStatement.branchPk, Bool.false_eq_true, ↓reduceIte]
+  · simpa only [RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq,
+      RlweOrSigmaStatement.branchU_eq, RlweOrStatement.branchPk, ↓reduceIte] using
+      (polyRqToCyc_add stmt.pk0 stmt.tCrs).symm
 
 /-- **The production fork difference in the cyclotomic ring
     (`jointOrSigma_fork_difference_cyclotomic`)**:
@@ -2345,7 +2347,7 @@ theorem jointOrSigma_fork_difference_cyclotomic {R : Nat} {stmt : RlweOrStatemen
     rw [polyRqToCyc_add, polyRqToCyc_mul, polyRqToCyc_mul, polyRqToCyc_polyIntToRq,
         polyRqToCyc_polyIntToRq, polyRqToCyc_polyIntToRq] at hRel
     rw [RlweOrStatement.toCyclotomic_branchU]
-    exact hRel
+    simpa only [RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq] using hRel
   · apply rlwe_fork_difference_zero_modular_wraparound_production
     have hS := w.s_short
     rw [polyIntInfNorm_eq_cycIntInfNorm] at hS
@@ -2373,8 +2375,8 @@ def ExtractedJointOrWitnessGen.cofactorLift {R : Nat} {stmt : RlweOrStatement}
     (chal11ToSignedMonomial w.uChal) (chal11ToSignedMonomial w.uChal')
     (fun h => w.branch_chal_diff (SignedMonomialChal.ofBitVec_injective h))
     w.sWit w.eWit
-    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.s_short)
-    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.e_short)
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq] using w.s_short)
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq] using w.e_short)
     (by
       have hDelta : w.deltaChal = cycIntSub
           (chal11ToSignedMonomial w.uChal).toIntPoly
@@ -2402,8 +2404,8 @@ def ExtractedJointOrWitnessGen.toShortMonomialWitness {R : Nat} {stmt : RlweOrSt
     (chal11ToSignedMonomial w.uChal) (chal11ToSignedMonomial w.uChal')
     (fun h => w.branch_chal_diff (SignedMonomialChal.ofBitVec_injective h))
     w.sWit w.eWit
-    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.s_short)
-    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt] using w.e_short)
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq] using w.s_short)
+    (by simpa only [← polyIntInfNorm_eq_cycIntInfNorm, RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq] using w.e_short)
     (by
       have hDelta : w.deltaChal = cycIntSub
           (chal11ToSignedMonomial w.uChal).toIntPoly
@@ -2437,13 +2439,15 @@ theorem jointOrSigma_cofactor_witness_sound {R : Nat} (stmt : RlweOrStatement)
       polyRqToCyc (stmt.branchPk cw.branch) ∧
     cycZqMul (cycZqSub (cw.chal.toZqPoly 12289) (cw.chal'.toZqPoly 12289))
       (signedMonomialDiffInvZq 10 12289 cw.chal cw.chal') = cycZqOne := by
-  have hS : cycIntInfNorm cw.s2 ≤ 6287360 := cw.s2_infNorm_le
-  have hE : cycIntInfNorm cw.e2 ≤ 6287360 := cw.e2_infNorm_le
+  have hS : cycIntInfNorm cw.s2 ≤ 6287360 := by simpa only [RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq, rlweZkpokZBound] using cw.s2_infNorm_le
+  have hE : cycIntInfNorm cw.e2 ≤ 6287360 := by simpa only [RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq, rlweZkpokZBound] using cw.e2_infNorm_le
   have hRel := cw.relaxed_rlwe_mod_q
   rw [RlweOrStatement.toCyclotomic_branchU] at hRel
+  simp only [RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq] at hRel
   have hUn := extracted_witness_unrelaxed_odd_q (by decide : 12289 % 2 = 1) cw
   dsimp only at hUn
   rw [RlweOrStatement.toCyclotomic_branchU] at hUn
+  simp only [RlweOrStatement.toCyclotomic, RlweOrSigmaStatement.fromBaseOt_eq] at hUn
   exact ⟨hS, hE, hRel, hUn,
     (signedMonomial_1024_challenge_set_2048_pairwise_invertible 12289 (by decide) (by decide)
       cw.chal cw.chal' cw.chal_ne).2.2.1⟩
@@ -2460,14 +2464,26 @@ theorem tooth_chal20_difference_not_invertible :
     (∀ inv : PolyRq1024,
       CommRingOps.mul (CommRingOps.sub (polyRqFromChal20 108#20) (polyRqFromChal20 1026#20)) inv ≠
         CommRingOps.one) := by
-  refine ⟨by decide, by decide, by decide, ?_⟩
+  refine ⟨by decide, ?_, ?_, ?_⟩
+  · intro h; have hv := congrArg (fun c => c.deg.val) h; change 108 = 2 at hv; omega
+  · intro h; have hv := congrArg (fun c => c.deg.val) h; change 512 = 513 at hv; omega
   intro inv hInv
   have hCyc := congrArg polyRqToCyc hInv
   unfold polyRqFromChal20 at hCyc
   rw [polyRqToCyc_mul, polyRqToCyc_sub, polyRqToCyc_polyIntToRq, polyRqToCyc_polyIntToRq,
       polyRqToCyc_one, polyIntFromChal20_eq_two_monomials, polyIntFromChal20_eq_two_monomials,
       ← cycIntToZq_sub] at hCyc
-  exact tooth_two_term_challenge_difference_zero_divisor_12289.2.2 (polyRqToCyc inv) hCyc
+  have h00 : chal20Mono0 108#20 = (⟨false, ⟨108, by decide⟩⟩ : SignedMonomialChal 10) := by
+    apply SignedMonomialChal.ext <;> decide
+  have h01 : chal20Mono1 108#20 = (⟨false, ⟨512, by decide⟩⟩ : SignedMonomialChal 10) := by
+    apply SignedMonomialChal.ext <;> decide
+  have h10 : chal20Mono0 1026#20 = (⟨false, ⟨2, by decide⟩⟩ : SignedMonomialChal 10) := by
+    apply SignedMonomialChal.ext <;> decide
+  have h11 : chal20Mono1 1026#20 = (⟨false, ⟨513, by decide⟩⟩ : SignedMonomialChal 10) := by
+    apply SignedMonomialChal.ext <;> decide
+  rw [h00, h01, h10, h11] at hCyc
+  apply tooth_two_term_challenge_difference_zero_divisor_12289.2.2 (polyRqToCyc inv)
+  simpa only [SignedMonomialChal.toIntPoly_eq] using hCyc
 
 /-- Masked honest OR-Sigma prover parameterized by XOF oracle `ro`, mirroring `RlweReceiverZkPok::prove_ct`
     (`preprocessing.rs:1040-1114`): computes real masked commitment `wReal = a * ysMask + yeMask ≠ 0`,
@@ -3217,7 +3233,7 @@ structure RlweFoSenderMsg where
   u1 : PolyRq1024
   v1 : PolyRq1024
 
-/-- Deterministic FO-checked Base-OT Receiver transition wrapped as a `SimulationSpine.PartyMachine`. -/
+/-- Deterministic FO-checked Base-OT Receiver transition wrapped as a `PartyMachine`. -/
 def rlweFoReceiverMachine (deriveCoins : Bool → (Fin 512 → Bool) → RlweFoCoins) :
     PartyMachine RlweFoReceiverState RlweFoSenderMsg (Fin 512 → Bool) :=
   PartyMachine.ofOption fun st msg =>
@@ -5667,7 +5683,7 @@ structure PcgSeedMachineState where
   consumed : Bool
   deriving DecidableEq, Repr
 
-/-- `SimulationSpine.PartyMachine` enforcing single-use consumption + `P1-06` bounds + `LSB(alpha) == 1`
+/-- `PartyMachine` enforcing single-use consumption + `P1-06` bounds + `LSB(alpha) == 1`
     + active `computeSpcotCheckTag` recomputation! -/
 def pcgSeedExpandMachine (prg : GgmPrg) :
     PartyMachine PcgSeedMachineState ValidatedPcgSeedHeader ValidatedPcgSeedHeader :=
@@ -7229,8 +7245,7 @@ theorem rlwe_pq24_grover_and_box_bridge {N : Nat} (z : PolyInt N) :
     (polyIntInZkpokBox z = true ↔ ∀ k : Fin N, inHalfOpenBox rlweAcceptHalfWidth (z k) = true) := by
   refine ⟨rfl, rfl, by decide, ?_⟩
   rw [polyIntInZkpokBox_iff]
-  unfold inHalfOpenBox rlweAcceptHalfWidth rlweZkpokZBound
-  simp only [decide_eq_true_eq]
+  simp only [inHalfOpenBox_eq, rlweAcceptHalfWidth, rlweZkpokZBound, decide_eq_true_eq]
 
 end Qsag
 end

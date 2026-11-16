@@ -1,7 +1,6 @@
 module
-public import Qsag.Protocol.Aggregation.HemWhirRbrSoundness
+public import Qsag.Protocol.Aggregation.HemRbrSoundness
 public import Qsag.Coding.Cwyz26
-import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
 public section
 namespace Qsag
 open CommRingOps RoundPoly UPoly Poly3

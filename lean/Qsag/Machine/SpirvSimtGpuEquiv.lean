@@ -1,4 +1,5 @@
 module
+import all Qsag.Math.GoldilocksBase
 /-
 # Qsag.Machine.SpirvSimtGpuEquiv — Binary SPIR-V 1.5/1.6 Compute, Multi-Wave Wave32 SIMT, Faial DRF & SIMT-CT
 

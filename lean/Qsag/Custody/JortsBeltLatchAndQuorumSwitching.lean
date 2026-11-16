@@ -43,14 +43,13 @@ Shamir `WOTS+C` evaluation tables over `TowerElem 7` ($\mathbb{F}_{2^{128}}$) an
 
 public import Qsag.Spec.Encoding
 public import Qsag.Tactic.Prelude
-public import Qsag.Exec.SimulationSpine
+public import Qsag.Spec.Refines
+public import Qsag.Math.CommitteeMasks
 public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.BaggyAndRss256Security
 public import Qsag.Custody.CustodySuiteFull
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Threshold.BaggyAndRss256Security
 
 import Qsag.Tactic.AssuranceKit
 
@@ -59,274 +58,15 @@ namespace Qsag
 
 set_option autoImplicit false
 
-/-! ## §0. Constructive `0-Classical` Finite Bitmask Calculus & Pigeonhole Extractors -/
-
-/-- Constructive bitmask subset of `Fin n` (`0 Classical.choice`). -/
-structure CustodiansMask (n : Nat) where
-  mem : Fin n → Bool
-
-/-- Recursive head-prepending constructor on `CustodiansMask`. -/
-def consMask (b : Bool) {n : Nat} (m : CustodiansMask n) : CustodiansMask (n + 1) where
-  mem i :=
-    match i with
-    | ⟨0, _⟩ => b
-    | ⟨k + 1, hk⟩ => m.mem ⟨k, Nat.lt_of_succ_lt_succ hk⟩
-
-/-- Tail projection dropping index `0` from `CustodiansMask (n + 1)`. -/
-def tailMask {n : Nat} (m : CustodiansMask (n + 1)) : CustodiansMask n where
-  mem i := m.mem ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩
-
-theorem consMask_head_tail {n : Nat} (m : CustodiansMask (n + 1)) :
-    consMask (m.mem ⟨0, Nat.zero_lt_succ n⟩) (tailMask m) = m := by
-  cases m with
-  | mk f =>
-    apply congrArg CustodiansMask.mk
-    funext i
-    cases i with
-    | mk val isLt =>
-      cases val <;> rfl
-
-theorem consMask_inj {n : Nat} {b₁ b₂ : Bool} {m₁ m₂ : CustodiansMask n}
-    (h : consMask b₁ m₁ = consMask b₂ m₂) : b₁ = b₂ ∧ m₁ = m₂ := by
-  have hb : b₁ = b₂ := congrArg (fun x => x.mem ⟨0, Nat.zero_lt_succ n⟩) h
-  have hm : m₁ = m₂ := by
-    cases m₁ with
-    | mk f₁ =>
-      cases m₂ with
-      | mk f₂ =>
-        apply congrArg CustodiansMask.mk
-        funext i
-        exact congrArg (fun x => x.mem ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) h
-  exact ⟨hb, hm⟩
-
-def maskEqDec : {n : Nat} → CustodiansMask n → CustodiansMask n → Bool
-  | 0, _, _ => true
-  | n + 1, a, b =>
-    (a.mem ⟨0, Nat.zero_lt_succ n⟩ == b.mem ⟨0, Nat.zero_lt_succ n⟩) &&
-      maskEqDec (tailMask a) (tailMask b)
-
-theorem maskEqDec_iff_eq :
-    ∀ {n : Nat} (a b : CustodiansMask n), maskEqDec a b = true ↔ a = b
-  | 0, ⟨f⟩, ⟨g⟩ => by
-    simp only [maskEqDec, true_iff]
-    apply congrArg CustodiansMask.mk
-    funext i
-    exact Fin.elim0 i
-  | n + 1, a, b => by
-    simp only [maskEqDec, Bool.and_eq_true, beq_iff_eq, maskEqDec_iff_eq (tailMask a) (tailMask b)]
-    constructor
-    · rintro ⟨h0, hTail⟩
-      rw [← consMask_head_tail a, ← consMask_head_tail b, h0, hTail]
-    · rintro rfl
-      exact ⟨rfl, rfl⟩
-
-/-- Constructive `DecidableEq` on `CustodiansMask n` using zero `Classical.choice`. -/
-instance constructiveCustodiansMaskDecidableEq (n : Nat) : DecidableEq (CustodiansMask n) :=
-  fun a b =>
-    if h : maskEqDec a b = true then
-      .isTrue ((maskEqDec_iff_eq a b).mp h)
-    else
-      .isFalse (fun hEq => h ((maskEqDec_iff_eq a b).mpr hEq))
-
-/-- Exact cardinality of a finite custodian bitmask. -/
-@[expose] def maskCard : {n : Nat} → CustodiansMask n → Nat
-  | 0, _ => 0
-  | n + 1, S => (if S.mem ⟨0, Nat.zero_lt_succ n⟩ then 1 else 0) + maskCard (tailMask S)
-
-/-- Intersection `A ∩ B` of two custodian bitmasks. -/
-@[expose] def maskInter {n : Nat} (A B : CustodiansMask n) : CustodiansMask n where
-  mem i := A.mem i && B.mem i
-
-/-- Set difference `A \ B` of two custodian bitmasks. -/
-@[expose] def maskDiff {n : Nat} (A B : CustodiansMask n) : CustodiansMask n where
-  mem i := A.mem i && !B.mem i
-
-/-- Subset predicate `A ⊆ B` on custodian bitmasks. -/
-@[expose] def maskSub {n : Nat} (A B : CustodiansMask n) : Prop :=
-  ∀ i : Fin n, A.mem i = true → B.mem i = true
-
-def emptyMask (n : Nat) : CustodiansMask n := ⟨fun _ => false⟩
-
-@[simp] theorem maskCard_zero (S : CustodiansMask 0) : maskCard S = 0 := rfl
-
-@[simp] theorem maskCard_succ {n : Nat} (S : CustodiansMask (n + 1)) :
-    maskCard S = (if S.mem ⟨0, Nat.zero_lt_succ n⟩ then 1 else 0) + maskCard (tailMask S) := rfl
-
-@[simp] theorem tailMask_consMask {n : Nat} (b : Bool) (m : CustodiansMask n) :
-    tailMask (consMask b m) = m := by
-  cases m; rfl
-
-@[simp] theorem maskCard_consMask {n : Nat} (b : Bool) (m : CustodiansMask n) :
-    maskCard (consMask b m) = (if b then 1 else 0) + maskCard m := by
-  simp only [maskCard_succ, tailMask_consMask]
-  rfl
-
-theorem maskCard_empty (n : Nat) : maskCard (emptyMask n) = 0 := by
-  induction n with
-  | zero => rfl
-  | succ n ih =>
-    simp only [maskCard_succ, emptyMask, Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
-    exact ih
-
-theorem maskCard_le_n : ∀ {n : Nat} (S : CustodiansMask n), maskCard S ≤ n
-  | 0, _ => Nat.le_refl 0
-  | n + 1, S => by
-    simp only [maskCard_succ]
-    have ih := maskCard_le_n (tailMask S)
-    cases S.mem ⟨0, Nat.zero_lt_succ n⟩ <;> simp <;> omega
-
-theorem maskCard_mono : ∀ {n : Nat} {A B : CustodiansMask n},
-    maskSub A B → maskCard A ≤ maskCard B
-  | 0, _, _, _ => Nat.le_refl 0
-  | n + 1, A, B, hSub => by
-    simp only [maskCard_succ]
-    have hTail : maskSub (tailMask A) (tailMask B) :=
-      fun i hi => hSub ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ hi
-    have ih := maskCard_mono hTail
-    have h0 := hSub ⟨0, Nat.zero_lt_succ n⟩
-    cases ha : A.mem ⟨0, Nat.zero_lt_succ n⟩
-    · cases B.mem ⟨0, Nat.zero_lt_succ n⟩ <;> simp <;> omega
-    · rw [h0 ha]
-      simp only [↓reduceIte]
-      omega
-
-theorem maskCard_union_inter : ∀ {n : Nat} (A B : CustodiansMask n),
-    maskCard ⟨fun i => A.mem i || B.mem i⟩ + maskCard (maskInter A B) =
-      maskCard A + maskCard B
-  | 0, _, _ => rfl
-  | n + 1, A, B => by
-    simp only [maskCard_succ]
-    have ih := maskCard_union_inter (tailMask A) (tailMask B)
-    have hU : tailMask ⟨fun i => A.mem i || B.mem i⟩ =
-        ⟨fun i => (tailMask A).mem i || (tailMask B).mem i⟩ := rfl
-    have hI : tailMask (maskInter A B) = maskInter (tailMask A) (tailMask B) := rfl
-    have hInter0 : (maskInter A B).mem ⟨0, Nat.zero_lt_succ n⟩ =
-        (A.mem ⟨0, Nat.zero_lt_succ n⟩ && B.mem ⟨0, Nat.zero_lt_succ n⟩) := rfl
-    rw [hU, hI, hInter0]
-    by_cases ha : A.mem ⟨0, Nat.zero_lt_succ n⟩ = true <;>
-      by_cases hb : B.mem ⟨0, Nat.zero_lt_succ n⟩ = true
-    · simp only [ha, hb, Bool.or_self, Bool.and_self, ↓reduceIte]; omega
-    · have hbf : B.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp hb
-      simp only [ha, hbf, Bool.true_or, Bool.true_and, Bool.false_eq_true, ↓reduceIte]; omega
-    · have haf : A.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp ha
-      simp only [haf, hb, Bool.false_or, Bool.false_and, Bool.false_eq_true, ↓reduceIte]; omega
-    · have haf : A.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp ha
-      have hbf : B.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp hb
-      simp only [haf, hbf, Bool.or_self, Bool.and_self, Bool.false_eq_true, ↓reduceIte]; omega
-
-/-- Constructive inclusion-exclusion lower bound: `|A| + |B| ≤ n + |A ∩ B|`. -/
-theorem maskCard_inter_add_n_ge {n : Nat} (A B : CustodiansMask n) :
-    maskCard A + maskCard B ≤ n + maskCard (maskInter A B) := by
-  have hUI := maskCard_union_inter A B
-  have hLe := maskCard_le_n ⟨fun i => A.mem i || B.mem i⟩
-  omega
-
-theorem maskCard_diff_add_inter : ∀ {n : Nat} (A B : CustodiansMask n),
-    maskCard (maskDiff A B) + maskCard (maskInter A B) = maskCard A
-  | 0, _, _ => rfl
-  | n + 1, A, B => by
-    simp only [maskCard_succ]
-    have ih := maskCard_diff_add_inter (tailMask A) (tailMask B)
-    have hD : tailMask (maskDiff A B) = maskDiff (tailMask A) (tailMask B) := rfl
-    have hI : tailMask (maskInter A B) = maskInter (tailMask A) (tailMask B) := rfl
-    have hDiff0 : (maskDiff A B).mem ⟨0, Nat.zero_lt_succ n⟩ =
-        (A.mem ⟨0, Nat.zero_lt_succ n⟩ && !B.mem ⟨0, Nat.zero_lt_succ n⟩) := rfl
-    have hInter0 : (maskInter A B).mem ⟨0, Nat.zero_lt_succ n⟩ =
-        (A.mem ⟨0, Nat.zero_lt_succ n⟩ && B.mem ⟨0, Nat.zero_lt_succ n⟩) := rfl
-    rw [hD, hI, hDiff0, hInter0]
-    by_cases ha : A.mem ⟨0, Nat.zero_lt_succ n⟩ = true <;>
-      by_cases hb : B.mem ⟨0, Nat.zero_lt_succ n⟩ = true
-    · simp only [ha, hb, Bool.not_true, Bool.and_false, Bool.and_self, Bool.false_eq_true, ↓reduceIte]; omega
-    · have hbf : B.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp hb
-      simp only [ha, hbf, Bool.not_false, Bool.and_true, Bool.and_false, Bool.false_eq_true, ↓reduceIte]; omega
-    · have haf : A.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp ha
-      simp only [haf, hb, Bool.false_and, Bool.false_eq_true, ↓reduceIte]; omega
-    · have haf : A.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp ha
-      have hbf : B.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp hb
-      simp only [haf, hbf, Bool.false_and, Bool.false_eq_true, ↓reduceIte]; omega
-
-theorem maskCard_diff_ge {n : Nat} (A B : CustodiansMask n) :
-    maskCard A ≤ maskCard (maskDiff A B) + maskCard B := by
-  have hSplit := maskCard_diff_add_inter A B
-  have hSub : maskSub (maskInter A B) B := by
-    intro i hi
-    simp only [maskInter, Bool.and_eq_true] at hi
-    exact hi.2
-  have hMono := maskCard_mono hSub
-  omega
-
-theorem maskCard_singleton : ∀ {n : Nat} (target : Fin n),
-    maskCard ⟨fun j => decide (j = target)⟩ = 1
-  | 0, target => Fin.elim0 target
-  | n + 1, ⟨0, _⟩ => by
-    simp only [maskCard_succ, decide_true, ↓reduceIte]
-    have hTailEmpty : tailMask ⟨fun j : Fin (n + 1) => decide (j = ⟨0, Nat.zero_lt_succ n⟩)⟩ =
-        emptyMask n := by
-      apply congrArg CustodiansMask.mk
-      funext j
-      dsimp only [tailMask, emptyMask]
-      simp only [decide_eq_false_iff_not]
-      intro hEq
-      cases congrArg Fin.val hEq
-    rw [hTailEmpty, maskCard_empty]
-  | n + 1, ⟨k + 1, hk⟩ => by
-    have h0Ne : (⟨0, Nat.zero_lt_succ n⟩ : Fin (n + 1)) ≠ ⟨k + 1, hk⟩ :=
-      fun hEq => by cases congrArg Fin.val hEq
-    simp only [maskCard_succ, decide_eq_false h0Ne, Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
-    have hTailShift :
-        tailMask ⟨fun j : Fin (n + 1) => decide (j = ⟨k + 1, hk⟩)⟩ =
-        ⟨fun j : Fin n => decide (j = ⟨k, Nat.lt_of_succ_lt_succ hk⟩)⟩ := by
-      apply congrArg CustodiansMask.mk
-      funext j
-      dsimp only [tailMask]
-      by_cases hjk : j.val = k
-      · have h2 : j = ⟨k, Nat.lt_of_succ_lt_succ hk⟩ := Fin.ext hjk
-        subst h2
-        simp
-      · have h1 : (⟨j.val + 1, Nat.succ_lt_succ j.2⟩ : Fin (n + 1)) ≠ ⟨k + 1, hk⟩ :=
-          fun he => hjk (Nat.succ.inj (congrArg Fin.val he))
-        have h2 : j ≠ ⟨k, Nat.lt_of_succ_lt_succ hk⟩ :=
-          fun he => hjk (congrArg Fin.val he)
-        simp [h1, h2]
-    rw [hTailShift]
-    exact maskCard_singleton ⟨k, Nat.lt_of_succ_lt_succ hk⟩
-
-/-- Constructive executable witness extractor: given `0 < maskCard S`, computes the smallest-index
-    custodian `p : Fin n` with `S.mem p = true` using **zero `Classical.choice`**. -/
-def extractMaskMember : {n : Nat} → (S : CustodiansMask n) → 0 < maskCard S →
-    { p : Fin n // S.mem p = true }
-  | 0, _, hPos => False.elim (Nat.lt_irrefl 0 hPos)
-  | n + 1, S, hPos =>
-    if h0 : S.mem ⟨0, Nat.zero_lt_succ n⟩ = true then
-      ⟨⟨0, Nat.zero_lt_succ n⟩, h0⟩
-    else
-      have h0f : S.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.eq_false_iff.mpr h0
-      have hTailPos : 0 < maskCard (tailMask S) := by
-        simp only [maskCard_succ, h0f, Bool.false_eq_true, ↓reduceIte, Nat.zero_add] at hPos
-        exact hPos
-      let ⟨pTail, hpTail⟩ := extractMaskMember (tailMask S) hTailPos
-      ⟨⟨pTail.1 + 1, Nat.succ_lt_succ pTail.2⟩, hpTail⟩
-
-/-- Constructive BFT Quorum-Intersection Honest Custodian Extractor (`0 Classical.choice`):
-    Whenever `2 * q > n + f`, `|Q1| ≥ q`, `|Q2| ≥ q`, and `|Corrupt| ≤ f`, computes an explicit
-    honest custodian `p : Fin n` in `(Q1 ∩ Q2) \ Corrupt`. -/
-def extractBeltHonestQuorumWitness {n q f : Nat}
-    (Q1 Q2 Corrupt : CustodiansMask n)
-    (hQuorum : 2 * q > n + f)
-    (hQ1 : q ≤ maskCard Q1)
-    (hQ2 : q ≤ maskCard Q2)
-    (hCorrupt : maskCard Corrupt ≤ f) :
-    { p : Fin n // Q1.mem p = true ∧ Q2.mem p = true ∧ Corrupt.mem p = false } :=
-  have hInterLb : f + 1 ≤ maskCard (maskInter Q1 Q2) := by
-    have hIE := maskCard_inter_add_n_ge Q1 Q2
-    omega
-  have hHonestPos : 0 < maskCard (maskDiff (maskInter Q1 Q2) Corrupt) := by
-    have hDiff := maskCard_diff_ge (maskInter Q1 Q2) Corrupt
-    omega
-  let ⟨p, hp⟩ := extractMaskMember (maskDiff (maskInter Q1 Q2) Corrupt) hHonestPos
-  ⟨p, by
-    simp only [maskDiff, maskInter, Bool.and_eq_true, Bool.not_eq_true'] at hp
-    exact ⟨hp.1.1, hp.1.2, hp.2⟩⟩
+/-- `ringDot` against powers, restated over `dotVec` and `CRing.npow`. -/
+private theorem ringDot_pow_to_dotVec {R : Type} [CommRingOps R] {lambdas pts : List R}
+    {deg : Nat} {z : R}
+    (h : ringDot lambdas (pts.map (fun x => ringPow x deg)) = z) :
+    dotVec lambdas (pts.map (fun x => CRing.npow x deg)) = z := by
+  have hMap : pts.map (fun x => CRing.npow x deg) = pts.map (fun x => ringPow x deg) :=
+    List.map_congr_left (fun x _ => (ringPow_eq x deg).symm)
+  rw [hMap, ← ringDot_eq]
+  exact h
 
 /-! ## §1. Open-World Multi-Turn `(t, n, f)` `BeltLatch` & `Jorts` Modes 3A/3B Network -/
 
@@ -2320,155 +2060,6 @@ theorem tooth_unbounded_epoch_jump_exhausts_tree
 
 /-! ## §2. Committee-Partitioned `t`-of-`t` Subtree Escape (`2f + 1` Safe & Live!) -/
 
-private theorem nodup_map_inj {α β : Type} {f : α → β}
-    (hf : ∀ x y, f x = f y → x = y) : ∀ {l : List α}, l.Nodup → (l.map f).Nodup
-  | [], _ => .nil
-  | a :: l, h => by
-    obtain ⟨hNotMem, hTail⟩ := List.nodup_cons.mp h
-    refine List.Pairwise.cons ?_ (nodup_map_inj hf hTail)
-    intro y hy hEq
-    obtain ⟨x, hx, rfl⟩ := List.mem_map.mp hy
-    have hax := hf a x hEq
-    subst hax
-    exact hNotMem hx
-
-/-- Constructive enumeration of all `t`-custodian subcommittees of `Fin n` (`0 Classical.choice`). -/
-def chooseMasks : (n t : Nat) → List (CustodiansMask n)
-  | 0, 0 => [⟨fun i => Fin.elim0 i⟩]
-  | 0, _ + 1 => []
-  | n + 1, 0 => (chooseMasks n 0).map (consMask false)
-  | n + 1, t + 1 =>
-    (chooseMasks n t).map (consMask true) ++ (chooseMasks n (t + 1)).map (consMask false)
-
-theorem chooseMasks_card :
-    ∀ (n t : Nat) {Q : CustodiansMask n}, Q ∈ chooseMasks n t → maskCard Q = t
-  | 0, 0, _, _ => rfl
-  | 0, _ + 1, _, h => by cases h
-  | n + 1, 0, Q, h => by
-    obtain ⟨m, hm, rfl⟩ := List.mem_map.mp h
-    rw [maskCard_consMask, chooseMasks_card n 0 hm]
-    rfl
-  | n + 1, t + 1, Q, h => by
-    rcases List.mem_append.mp h with hT | hF
-    · obtain ⟨m, hm, rfl⟩ := List.mem_map.mp hT
-      rw [maskCard_consMask, chooseMasks_card n t hm]
-      simp [Nat.add_comm]
-    · obtain ⟨m, hm, rfl⟩ := List.mem_map.mp hF
-      rw [maskCard_consMask, chooseMasks_card n (t + 1) hm]
-      simp
-
-theorem mem_chooseMasks_of_card :
-    ∀ (n : Nat) (Q : CustodiansMask n), Q ∈ chooseMasks n (maskCard Q)
-  | 0, Q => by
-    simp only [maskCard_zero, chooseMasks, List.mem_singleton]
-    apply congrArg CustodiansMask.mk
-    funext i; exact Fin.elim0 i
-  | n + 1, Q => by
-    have ih := mem_chooseMasks_of_card n (tailMask Q)
-    have hEta := consMask_head_tail Q
-    cases h0 : Q.mem ⟨0, Nat.zero_lt_succ n⟩
-    · rw [h0] at hEta
-      have hCardEq : maskCard Q = maskCard (tailMask Q) := by
-        rw [maskCard_succ, h0]; simp
-      cases htc : maskCard (tailMask Q) with
-      | zero =>
-        rw [htc] at ih hCardEq
-        rw [hCardEq, ← hEta]
-        exact List.mem_map.mpr ⟨tailMask Q, ih, rfl⟩
-      | succ k =>
-        rw [htc] at ih hCardEq
-        rw [hCardEq, ← hEta]
-        exact List.mem_append.mpr (.inr (List.mem_map.mpr ⟨tailMask Q, ih, rfl⟩))
-    · rw [h0] at hEta
-      have hCardEq : maskCard Q = maskCard (tailMask Q) + 1 := by
-        rw [maskCard_succ, h0]
-        simp [Nat.add_comm]
-      rw [hCardEq, ← hEta]
-      exact List.mem_append.mpr (.inl (List.mem_map.mpr ⟨tailMask Q, ih, rfl⟩))
-
-theorem chooseMasks_nodup : ∀ (n t : Nat), (chooseMasks n t).Nodup
-  | 0, 0 => List.Pairwise.cons (fun _ h => by cases h) .nil
-  | 0, _ + 1 => .nil
-  | n + 1, 0 =>
-    nodup_map_inj (fun _ _ h => (consMask_inj h).2) (chooseMasks_nodup n 0)
-  | n + 1, t + 1 => by
-    rw [chooseMasks, List.nodup_append]
-    refine ⟨nodup_map_inj (fun _ _ h => (consMask_inj h).2) (chooseMasks_nodup n t),
-            nodup_map_inj (fun _ _ h => (consMask_inj h).2) (chooseMasks_nodup n (t + 1)), ?_⟩
-    intro a ha b hb hEq
-    obtain ⟨ma, _, rfl⟩ := List.mem_map.mp ha
-    obtain ⟨mb, _, rfl⟩ := List.mem_map.mp hb
-    have hbEq := (consMask_inj hEq).1
-    cases hbEq
-
-/-- Deployed committee counts: `(2, 3)` yields `3` subtrees; `(3, 5)` yields `10` subtrees. -/
-theorem chooseMasks_deployed_counts :
-    (chooseMasks 3 2).length = 3 ∧ (chooseMasks 5 3).length = 10 := by
-  decide
-
-/-- Constructive subcommittee selector (`0 Classical.choice`): given `t ≤ maskCard avail`,
-    computes an explicit `t`-member committee `Q ⊆ avail`. -/
-def selectSubcommittee : {n : Nat} → (t : Nat) → (avail : CustodiansMask n) →
-    t ≤ maskCard avail →
-    { Q : CustodiansMask n // maskCard Q = t ∧ maskSub Q avail }
-  | n, 0, _, _ => ⟨emptyMask n, maskCard_empty n, fun _ h => by cases h⟩
-  | 0, _ + 1, _, hLe => False.elim (by simp [maskCard_zero] at hLe)
-  | n + 1, t + 1, avail, hLe =>
-    if h0 : avail.mem ⟨0, Nat.zero_lt_succ n⟩ = true then
-      have hTailLe : t ≤ maskCard (tailMask avail) := by
-        simp only [maskCard_succ, h0, ↓reduceIte] at hLe
-        omega
-      let ⟨Qt, hCardQt, hSubQt⟩ := selectSubcommittee t (tailMask avail) hTailLe
-      ⟨consMask true Qt,
-       by rw [maskCard_consMask, hCardQt]; simp [Nat.add_comm],
-       by
-         intro i hi
-         cases i with
-         | mk val isLt =>
-           cases val with
-           | zero => exact h0
-           | succ k => exact hSubQt ⟨k, Nat.lt_of_succ_lt_succ isLt⟩ hi⟩
-    else
-      have h0f : avail.mem ⟨0, Nat.zero_lt_succ n⟩ = false := Bool.not_eq_true _ |>.mp h0
-      have hTailLe : t + 1 ≤ maskCard (tailMask avail) := by
-        simp only [maskCard_succ, h0f, Bool.false_eq_true, ↓reduceIte, Nat.zero_add] at hLe
-        exact hLe
-      let ⟨Qt, hCardQt, hSubQt⟩ := selectSubcommittee (t + 1) (tailMask avail) hTailLe
-      ⟨consMask false Qt,
-       by rw [maskCard_consMask, hCardQt]; simp,
-       by
-         intro i hi
-         cases i with
-         | mk val isLt =>
-           cases val with
-           | zero => cases hi
-           | succ k => exact hSubQt ⟨k, Nat.lt_of_succ_lt_succ isLt⟩ hi⟩
-
-/-- Global Merkle leaf index assigned to `(committeeIdx, localEpoch)` under disjoint partitioning. -/
-@[expose] def committeeGlobalLeaf (leavesPerCommittee committeeIdx localEpoch : Nat) : Nat :=
-  committeeIdx * leavesPerCommittee + localEpoch
-
-theorem committee_leaf_ranges_disjoint {leavesPerCommittee c₁ c₂ e₁ e₂ : Nat}
-    (he₁ : e₁ < leavesPerCommittee) (he₂ : e₂ < leavesPerCommittee)
-    (hEq : committeeGlobalLeaf leavesPerCommittee c₁ e₁ =
-           committeeGlobalLeaf leavesPerCommittee c₂ e₂) :
-    c₁ = c₂ ∧ e₁ = e₂ := by
-  unfold committeeGlobalLeaf at hEq
-  have hc : c₁ = c₂ := by
-    by_cases hlt : c₁ < c₂
-    · have hMul : (c₁ + 1) * leavesPerCommittee ≤ c₂ * leavesPerCommittee :=
-        Nat.mul_le_mul_right leavesPerCommittee hlt
-      rw [Nat.add_mul, Nat.one_mul] at hMul
-      omega
-    · by_cases hgt : c₂ < c₁
-      · have hMul : (c₂ + 1) * leavesPerCommittee ≤ c₁ * leavesPerCommittee :=
-          Nat.mul_le_mul_right leavesPerCommittee hgt
-        rw [Nat.add_mul, Nat.one_mul] at hMul
-        omega
-      · omega
-  subst hc
-  exact ⟨rfl, by omega⟩
-
 /-- Canonical ordered list of member indices `i : Fin n` of `Q` (`length = maskCard Q`). -/
 def maskMembers : {n : Nat} → (Q : CustodiansMask n) → List (Fin n)
   | 0, _ => []
@@ -2527,7 +2118,7 @@ theorem maskMembers_nodup : ∀ {n : Nat} (Q : CustodiansMask n), (maskMembers Q
     simp only [maskMembers]
     have hMapNodup :
         ((maskMembers (tailMask Q)).map (fun i : Fin n => (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (n + 1)))).Nodup :=
-      nodup_map_inj (fun a b h => Fin.ext (Nat.succ.inj (congrArg Fin.val h)))
+      committeeMasks_nodup_map_inj (fun a b h => Fin.ext (Nat.succ.inj (congrArg Fin.val h)))
         (maskMembers_nodup (tailMask Q))
     cases Q.mem ⟨0, Nat.zero_lt_succ n⟩
     · exact hMapNodup
@@ -4425,7 +4016,7 @@ def committeeOfSignature (n t subtreeHeight : Nat) (sig : QuorumJortsSig) : Opti
 
 /-- Canonical single-signer `QuorumJorts` reference function parameterized by an explicit scheduled
     global leaf `gLeaf` (`quorumStagePkSeed`, `quorumStageChainSk`, `quorumChainStep`). -/
-def quorumJortsReferenceSign
+@[expose] def quorumJortsReferenceSign
     (H : List UInt8 → Digest256)
     (masterSeed : Digest256)
     (gLeaf : UInt64)
@@ -4688,11 +4279,15 @@ theorem qs_a_leaf_index_identifies_committee
           simp [(polyTape idx).2.2]
         have hLo : ringDot lambdas (pts.map (fun x =>
             RoundPoly.evalCoeffs (lo :: (polyTape idx).1.1) x)) = lo := by
-          rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenLo hZ hH]
+          rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenLo
+            ((ringDot_eq _ _).symm.trans hZ)
+            (fun deg h1 h2 => ringDot_pow_to_dotVec (hH deg h1 h2))]
           simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
         have hHi : ringDot lambdas (pts.map (fun x =>
             RoundPoly.evalCoeffs (hi :: (polyTape idx).2.1) x)) = hi := by
-          rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenHi hZ hH]
+          rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLenHi
+            ((ringDot_eq _ _).symm.trans hZ)
+            (fun deg h1 h2 => ringDot_pow_to_dotVec (hH deg h1 h2))]
           simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
         rw [hLo, hHi, ← hUnp]
         exact packTower_unpackTower 8 trueNode
@@ -4913,7 +4508,7 @@ theorem quorumJortsSignMessage_schedule (H : List UInt8 → Digest256) (masterSe
       (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter) i.val = d.digits (quorumWotsIndex i) := by
   refine ⟨by simp only [quorumJortsSignMessage, h], ?_⟩
   intro i
-  rw [wotsC256DecodeValidDigest_some_digits h]
+  rw [wotsC256DecodeValidDigest_some_digits h, ← wotsCDibits128_eq_digitOfDigest]
   exact quorumDigitAt_eq_wotsCDibits128 _ i
 
 /-- Rejected target sums never reach chain signing. -/
@@ -5374,7 +4969,9 @@ theorem preStepped_shamir_mac_free_self_verification
       · simp only [hd, ↓reduceIte, honestSubmitted, ↓reduceDIte]
         have hLen : (trueNodes i :: (tape i ⟨(digits i).val, hd⟩).1).length ≤ d + 1 := by
           simp [(tape i ⟨(digits i).val, hd⟩).2]
-        rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLen hZero hHigher]
+        rw [ringDot_eq, lagrangeAtZero_evalCoeffs lambdas pts _ (d + 1) hLen
+          ((ringDot_eq _ _).symm.trans hZero)
+          (fun deg h1 h2 => ringDot_pow_to_dotVec (hHigher deg h1 h2))]
         simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
       · have hdEq3 : (digits i).val = 3 := by have := (digits i).isLt; omega
         simp only [hd, ↓reduceIte]
@@ -5796,9 +5393,10 @@ theorem preStepped_tower128_digest256_self_verification {d L : Nat}
 
 /-! ## §4. Explicit `inhabited_*` Non-Vacuity Witnesses & `SimulationSpine` Exports -/
 
-/-- Compositional `SimulationSpine` `PartyMachine` packaging `beltLatchBindStep`. -/
-def beltLatchPartyMachine : PartyMachine BeltLatchNodeState BeltLatchRecord BeltBindOutcome :=
-  PartyMachine.ofCustodyStep beltLatchBindStep
+/-- `Spec.Machine` packaging of `beltLatchBindStep`; every node state is admitted as a starting
+    state. -/
+def beltLatchMachine : Spec.Machine BeltLatchNodeState BeltLatchRecord BeltBindOutcome :=
+  custodyStepMachine (fun _ => True) beltLatchBindStep
 
 /-- Inhabitedness witness 1 (`inhabited_beltLatch_quorum_network_3f_plus_1`):
     Concrete `(t = 3, n = 7, f = 2, q = 5)` multi-turn network trace executing fresh binds,
@@ -6729,9 +6327,749 @@ theorem tooth_used_quorum_permit_cannot_release {n : Nat} (H : List UInt8 → Di
   intro bad
   cases bad
 
+/-! ## §4b. Exported facts about the `BeltLatch` network trace and echo certificates -/
+
+theorem runBeltNetworkTrace_nil {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n) (q : Nat)
+    (initNet : BeltLatchNetworkState n) :
+    runBeltNetworkTrace H MAC macKeys Corrupt q initNet [] = initNet := by
+  rfl
+
+/-- Running a trace extended by one turn is one more network step. -/
+theorem runBeltNetworkTrace_append_singleton {n : Nat}
+    (H : List UInt8 → Digest256)
+    (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256)
+    (Corrupt : CustodiansMask n) (q : Nat)
+    (initNet : BeltLatchNetworkState n)
+    (tr : List (BeltNetworkTurn n)) (turn : BeltNetworkTurn n) :
+    runBeltNetworkTrace H MAC macKeys Corrupt q initNet (tr ++ [turn]) =
+      stepBeltNetwork H MAC macKeys Corrupt q
+        (runBeltNetworkTrace H MAC macKeys Corrupt q initNet tr) turn := by
+  induction tr generalizing initNet with
+  | nil => rfl
+  | cons t ts ih => exact ih _
+
+/-- An accepted echo certificate names a quorum of at least `q` custodians. -/
+theorem verifyQuorumEchoCertificate_quorum_card {n : Nat}
+    {H : List UInt8 → Digest256}
+    {MAC : Digest256 → List UInt8 → Digest256}
+    {macKeys : Fin n → Fin n → Digest256}
+    {q : Nat} {verifier : Fin n} {Q : CustodiansMask n}
+    {rec : BeltLatchRecord} {echoes : List (AuthenticatedBeltEcho n)}
+    (h : verifyQuorumEchoCertificate H MAC macKeys q verifier Q rec echoes = true) :
+    q ≤ maskCard Q :=
+  of_decide_eq_true (Bool.and_eq_true_iff.mp h).1
+
+/-! ## §5. Single-Validator `QuorumPublicKey` Merkle Enrolment, Verification & Collision Extraction -/
+
+/-- Public WOTS+C chain endpoints (`3` steps from `quorumStageChainSk`) across `L` chains for
+    scheduled leaf `leaf` under `masterSeed`. -/
+def quorumHonestChainEnds (L : Nat) (H : List UInt8 → Digest256)
+    (masterSeed : Digest256) (leaf : UInt64) : List Digest256 :=
+  let pkSeed := quorumStagePkSeed H masterSeed
+  (List.finRange L).map (fun idx =>
+    let sk₀ := quorumStageChainSk H masterSeed leaf (UInt32.ofNat idx.1)
+    wotsChainIter (quorumChainStep H pkSeed leaf) idx.1 0 3 sk₀)
+
+theorem quorumHonestChainEnds_length (L : Nat) (H : List UInt8 → Digest256)
+    (masterSeed : Digest256) (leaf : UInt64) :
+    (quorumHonestChainEnds L H masterSeed leaf).length = L := by
+  simp [quorumHonestChainEnds]
+
+/-- Honest Merkle leaf digest at `leaf` committing to all `L` WOTS+C chain endpoints. -/
+def quorumHonestLeafDigest (L : Nat) (H : List UInt8 → Digest256)
+    (masterSeed : Digest256) (leaf : UInt64) : Digest256 :=
+  let pkSeed := quorumStagePkSeed H masterSeed
+  quorumLeafHash H pkSeed leaf (quorumHonestChainEnds L H masterSeed leaf)
+
+/-- Binary Merkle tree node at `(level, idx)` over leaf family `leafFn : UInt64 → Digest256`. -/
+def quorumTreeNode (H : List UInt8 → Digest256) (pkSeed : Digest256)
+    (leafFn : UInt64 → Digest256) : Nat → Nat → Digest256
+  | 0, idx => leafFn (UInt64.ofNat idx)
+  | level + 1, idx =>
+    let left := quorumTreeNode H pkSeed leafFn level (2 * idx)
+    let right := quorumTreeNode H pkSeed leafFn level (2 * idx + 1)
+    quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat idx) left right
+
+/-- Sibling authentication path of length `rem` starting from `(level, idx)`. -/
+def quorumAuthPath (H : List UInt8 → Digest256) (pkSeed : Digest256)
+    (leafFn : UInt64 → Digest256) : Nat → Nat → Nat → List Digest256
+  | 0, _, _ => []
+  | rem + 1, level, idx =>
+    let sibIdx := if idx % 2 = 0 then idx + 1 else idx - 1
+    quorumTreeNode H pkSeed leafFn level sibIdx ::
+      quorumAuthPath H pkSeed leafFn rem (level + 1) (idx / 2)
+
+theorem quorumAuthPath_length (H : List UInt8 → Digest256) (pkSeed : Digest256)
+    (leafFn : UInt64 → Digest256) :
+    ∀ (rem level idx : Nat), (quorumAuthPath H pkSeed leafFn rem level idx).length = rem
+  | 0, _, _ => rfl
+  | rem + 1, level, idx => by
+    simp [quorumAuthPath, quorumAuthPath_length H pkSeed leafFn rem (level + 1) (idx / 2)]
+
+/-- Walk a Merkle authentication path upward from `(level, idx, cur)`. -/
+def quorumWalkMerklePath (H : List UInt8 → Digest256) (pkSeed : Digest256) :
+    Nat → Nat → Digest256 → List Digest256 → Digest256
+  | _, _, cur, [] => cur
+  | level, idx, cur, sib :: rest =>
+    let parentIdx := idx / 2
+    let parent :=
+      if idx % 2 = 0 then
+        quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat parentIdx) cur sib
+      else
+        quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat parentIdx) sib cur
+    quorumWalkMerklePath H pkSeed (level + 1) parentIdx parent rest
+
+theorem quorumWalkMerklePath_authPath (H : List UInt8 → Digest256) (pkSeed : Digest256)
+    (leafFn : UInt64 → Digest256) :
+    ∀ (rem level idx : Nat),
+      quorumWalkMerklePath H pkSeed level idx
+        (quorumTreeNode H pkSeed leafFn level idx)
+        (quorumAuthPath H pkSeed leafFn rem level idx) =
+      quorumTreeNode H pkSeed leafFn (level + rem) (idx / 2 ^ rem)
+  | 0, level, idx => by
+    simp [quorumWalkMerklePath, quorumAuthPath]
+  | rem + 1, level, idx => by
+    unfold quorumAuthPath quorumWalkMerklePath
+    dsimp only
+    have hParent :
+        (if idx % 2 = 0 then
+          quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat (idx / 2))
+            (quorumTreeNode H pkSeed leafFn level idx)
+            (quorumTreeNode H pkSeed leafFn level (if idx % 2 = 0 then idx + 1 else idx - 1))
+        else
+          quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat (idx / 2))
+            (quorumTreeNode H pkSeed leafFn level (if idx % 2 = 0 then idx + 1 else idx - 1))
+            (quorumTreeNode H pkSeed leafFn level idx)) =
+        quorumTreeNode H pkSeed leafFn (level + 1) (idx / 2) := by
+      by_cases hEven : idx % 2 = 0
+      · simp only [hEven, ↓reduceIte]
+        conv => rhs; unfold quorumTreeNode
+        have hL : idx = 2 * (idx / 2) := by omega
+        rw [← hL]
+      · simp only [hEven, ↓reduceIte]
+        conv => rhs; unfold quorumTreeNode
+        have hL : idx - 1 = 2 * (idx / 2) := by omega
+        have hR : idx - 1 + 1 = idx := by omega
+        rw [← hL, hR]
+    rw [hParent, quorumWalkMerklePath_authPath H pkSeed leafFn rem (level + 1) (idx / 2)]
+    have hLvl : level + 1 + rem = level + (rem + 1) := by omega
+    have hDiv : idx / 2 / 2 ^ rem = idx / 2 ^ (rem + 1) := by
+      rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm]
+    rw [hLvl, hDiv]
+
+/-- Enrolled single-validator `QuorumPublicKey` of tree height `height` over `L` chains. -/
+@[expose] def deriveQuorumValidatorPublicKey (L height : Nat) (H : List UInt8 → Digest256)
+    (masterSeed : Digest256) : QuorumPublicKey :=
+  let pkSeed := quorumStagePkSeed H masterSeed
+  { pkSeed := pkSeed
+    root := quorumTreeNode H pkSeed (quorumHonestLeafDigest L H masterSeed) height 0
+    height := UInt8.ofNat height }
+
+/-- Step `L` signature chain values forward `3 - d_i` steps to recover candidate chain endpoints. -/
+def quorumSigChainEnds (L : Nat) (H : List UInt8 → Digest256)
+    (pkSeed : Digest256) (leaf : UInt64) (digits : List (Fin 4))
+    (nodes : List Digest256) : List Digest256 :=
+  (List.finRange L).map (fun idx =>
+    let d := digits.getD idx.1 ⟨0, by decide⟩
+    let node := nodes.getD idx.1 0#256
+    wotsChainIter (quorumChainStep H pkSeed leaf) idx.1 d.val (3 - d.val) node)
+
+theorem quorumSigChainEnds_length (L : Nat) (H : List UInt8 → Digest256)
+    (pkSeed : Digest256) (leaf : UInt64) (digits : List (Fin 4)) (nodes : List Digest256) :
+    (quorumSigChainEnds L H pkSeed leaf digits nodes).length = L := by
+  simp [quorumSigChainEnds]
+
+/-- Single-validator `QuorumJortsSig` verifier parameterized by `(L, targetSum, digitsOf)`. -/
+def verifyQuorumJortsSigAt (L targetSum : Nat) (H : List UInt8 → Digest256)
+    (pk : QuorumPublicKey) (digitsOf : Digest256 → List (Fin 4))
+    (msg : List UInt8) (sig : QuorumJortsSig) : Bool :=
+  let h := pk.height.toNat
+  let msgHash := quorumMessageHash H pk sig.leaf msg
+  let dig := quorumCounterDigest H msgHash sig.counter
+  let digits := digitsOf dig
+  decide (sig.leaf.toNat < 2 ^ h) &&
+  decide (sig.authPath.length = h) &&
+  decide (sig.nodes.length = L) &&
+  decide (digits.length = L) &&
+  decide (sig.counter.toNat < 2 ^ 16) &&
+  decide (((digits.map Fin.val).foldr (· + ·) 0) = targetSum) &&
+  let ends := quorumSigChainEnds L H pk.pkSeed sig.leaf digits sig.nodes
+  let leafDig := quorumLeafHash H pk.pkSeed sig.leaf ends
+  decide (quorumWalkMerklePath H pk.pkSeed 0 sig.leaf.toNat leafDig sig.authPath = pk.root)
+
+/-- Full production 256-bit `QuorumJortsSig` verifier (`v = 128` chains, target sum `S = 192`). -/
+def verifyQuorumJortsSig (H : List UInt8 → Digest256)
+    (pk : QuorumPublicKey) (msg : List UInt8) (sig : QuorumJortsSig) : Bool :=
+  verifyQuorumJortsSigAt quorumWotsChains quorumWotsTargetSum H pk quorumDigitsFromDigest msg sig
+
+private theorem list_getD_eq_getElem_local {α : Type} (xs : List α) (d : α) {i : Nat}
+    (hi : i < xs.length) : xs.getD i d = xs[i] := by
+  induction xs generalizing i with
+  | nil => cases hi
+  | cons x rest ih =>
+    cases i with
+    | zero => rfl
+    | succ k => exact ih (Nat.lt_of_succ_lt_succ hi)
+
+private theorem uint8_ofNat_toNat_of_lt {h : Nat} (hLt : h < 256) :
+    (UInt8.ofNat h).toNat = h := by
+  change (BitVec.ofNat 8 h).toNat = h
+  rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hLt]
+
+private theorem uint64_ofNat_toNat_self (x : UInt64) :
+    UInt64.ofNat x.toNat = x := by
+  apply UInt64.eq_of_toBitVec_eq
+  change BitVec.ofNat 64 x.toBitVec.toNat = x.toBitVec
+  rw [BitVec.ofNat_toNat, BitVec.setWidth_eq]
+
+theorem quorumSigChainEnds_reference (L : Nat) (H : List UInt8 → Digest256)
+    (masterSeed : Digest256) (gLeaf : UInt64) (counter : UInt32)
+    (digits : List (Fin 4)) (authPath : List Digest256)
+    (hDigLen : digits.length = L) :
+    quorumSigChainEnds L H (quorumStagePkSeed H masterSeed) gLeaf digits
+      (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes =
+    quorumHonestChainEnds L H masterSeed gLeaf := by
+  subst hDigLen
+  unfold quorumSigChainEnds quorumHonestChainEnds quorumJortsReferenceSign
+  dsimp only
+  apply List.map_congr_left
+  intro idx _
+  let refNodes := (List.finRange digits.length).map (fun j : Fin digits.length =>
+    wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) j.1 0
+      (digits[j.1]'(j.2)).val
+      (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat j.1)))
+  have hkRef : idx.1 < refNodes.length := by simp [refNodes, idx.2]
+  change wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) idx.1
+      (digits.getD idx.1 ⟨0, by decide⟩).val (3 - (digits.getD idx.1 ⟨0, by decide⟩).val)
+      (refNodes.getD idx.1 0#256) =
+    wotsChainIter (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf) idx.1 0 3
+      (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1))
+  rw [list_getD_eq_getElem_local refNodes 0#256 hkRef,
+      list_getD_eq_getElem_local digits _ idx.2]
+  simp only [refNodes, List.getElem_map, List.getElem_finRange, Fin.cast_mk]
+  let d := digits[idx.1]'(idx.2)
+  have hAdd : d.val + (3 - d.val) = 3 := by have := d.isLt; omega
+  have hComp := wotsChainIter_add (quorumChainStep H (quorumStagePkSeed H masterSeed) gLeaf)
+    idx.1 0 d.val (3 - d.val) (quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1))
+  simp only [Nat.zero_add, hAdd] at hComp
+  exact hComp.symm
+
+/-- Honest single-validator `quorumJortsReferenceSign` signatures pass `verifyQuorumJortsSigAt`
+    under `deriveQuorumValidatorPublicKey`. -/
+theorem quorumJortsReferenceSign_verifies (L targetSum height : Nat)
+    (hHeightLt : height < 256)
+    (H : List UInt8 → Digest256) (masterSeed : Digest256)
+    (digitsOf : Digest256 → List (Fin 4))
+    (gLeaf : UInt64) (counter : UInt32) (msg : List UInt8)
+    (hLeafLt : gLeaf.toNat < 2 ^ height)
+    (hCtrLt : counter.toNat < 2 ^ 16)
+    (hDigLen : (digitsOf (quorumCounterDigest H
+      (quorumMessageHash H (deriveQuorumValidatorPublicKey L height H masterSeed) gLeaf msg)
+      counter)).length = L)
+    (hSum : (((digitsOf (quorumCounterDigest H
+      (quorumMessageHash H (deriveQuorumValidatorPublicKey L height H masterSeed) gLeaf msg)
+      counter)).map Fin.val).foldr (· + ·) 0) = targetSum) :
+    let pk := deriveQuorumValidatorPublicKey L height H masterSeed
+    let digits := digitsOf (quorumCounterDigest H (quorumMessageHash H pk gLeaf msg) counter)
+    let authPath := quorumAuthPath H pk.pkSeed (quorumHonestLeafDigest L H masterSeed) height 0 gLeaf.toNat
+    verifyQuorumJortsSigAt L targetSum H pk digitsOf msg
+      (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath) = true := by
+  intro pk digits authPath
+  have hDigLen' : digits.length = L := hDigLen
+  have hPkH : pk.height.toNat = height := uint8_ofNat_toNat_of_lt hHeightLt
+  have hPkS : pk.pkSeed = quorumStagePkSeed H masterSeed := rfl
+  have hPathLen : authPath.length = height :=
+    quorumAuthPath_length H pk.pkSeed (quorumHonestLeafDigest L H masterSeed) height 0 gLeaf.toNat
+  have hNodesLen :
+      (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes.length = L := by
+    simp [quorumJortsReferenceSign, hDigLen']
+  unfold verifyQuorumJortsSigAt
+  dsimp only [quorumJortsReferenceSign]
+  rw [hPkH]
+  have hEnds :
+      quorumSigChainEnds L H pk.pkSeed gLeaf digits
+        (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes =
+      quorumHonestChainEnds L H masterSeed gLeaf := by
+    rw [hPkS]
+    exact quorumSigChainEnds_reference L H masterSeed gLeaf counter digits authPath hDigLen
+  have hWalk :
+      quorumWalkMerklePath H pk.pkSeed 0 gLeaf.toNat
+        (quorumLeafHash H pk.pkSeed gLeaf
+          (quorumSigChainEnds L H pk.pkSeed gLeaf digits
+            (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes))
+        authPath = pk.root := by
+    rw [hEnds]
+    have hLeafNode :
+        quorumLeafHash H pk.pkSeed gLeaf (quorumHonestChainEnds L H masterSeed gLeaf) =
+        quorumTreeNode H pk.pkSeed (quorumHonestLeafDigest L H masterSeed) 0 gLeaf.toNat := by
+      unfold quorumTreeNode quorumHonestLeafDigest
+      rw [uint64_ofNat_toNat_self, hPkS]
+    rw [hLeafNode, quorumWalkMerklePath_authPath]
+    simp [Nat.zero_add, Nat.div_eq_of_lt hLeafLt, pk, deriveQuorumValidatorPublicKey]
+  have hLeafCheck : decide (gLeaf.toNat < 2 ^ height) = true := decide_eq_true hLeafLt
+  have hPathCheck : decide (authPath.length = height) = true := decide_eq_true hPathLen
+  have hNodesCheck :
+      decide ((quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes.length = L) =
+        true := decide_eq_true hNodesLen
+  have hDigCheck : decide (digits.length = L) = true := decide_eq_true hDigLen
+  have hCtrCheck : decide (counter.toNat < 2 ^ 16) = true := decide_eq_true hCtrLt
+  have hSumCheck : decide (((digits.map Fin.val).foldr (· + ·) 0) = targetSum) = true :=
+    decide_eq_true hSum
+  have hWalkCheck :
+      decide (quorumWalkMerklePath H pk.pkSeed 0 gLeaf.toNat
+        (quorumLeafHash H pk.pkSeed gLeaf
+          (quorumSigChainEnds L H pk.pkSeed gLeaf digits
+            (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes))
+        authPath = pk.root) = true := decide_eq_true hWalk
+  change (decide (gLeaf.toNat < 2 ^ height) &&
+    decide (authPath.length = height) &&
+    decide ((quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes.length = L) &&
+    decide (digits.length = L) &&
+    decide (counter.toNat < 2 ^ 16) &&
+    decide (((digits.map Fin.val).foldr (· + ·) 0) = targetSum) &&
+    decide (quorumWalkMerklePath H pk.pkSeed 0 gLeaf.toNat
+      (quorumLeafHash H pk.pkSeed gLeaf
+        (quorumSigChainEnds L H pk.pkSeed gLeaf digits
+          (quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath).nodes))
+      authPath = pk.root)) = true
+  rw [hLeafCheck, hPathCheck, hNodesCheck, hDigCheck, hCtrCheck, hSumCheck, hWalkCheck]
+  rfl
+
+/-! ### Constructive `PSum` Collision Extractors for Chain, Leaf & Merkle Verification -/
+
+private theorem pow256_8_gt_64_local : 64 < 256 ^ 8 :=
+  calc 64 < 256 ^ 1 := by decide
+    _ ≤ 256 ^ 8 := Nat.pow_le_pow_right (by decide) (by decide)
+
+private theorem quorumEncodeFramed3_injective
+    (domain : ByteArray) (hd : domain.data.toList.length < 256 ^ 8)
+    {a₁ b₁ c₁ a₂ b₂ c₂ : List UInt8}
+    (ha₁ : a₁.length < 256 ^ 8) (hb₁ : b₁.length < 256 ^ 8) (hc₁ : c₁.length < 256 ^ 8)
+    (ha₂ : a₂.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8) (hc₂ : c₂.length < 256 ^ 8)
+    (hEq : quorumEncodeFramed domain [a₁, b₁, c₁] =
+           quorumEncodeFramed domain [a₂, b₂, c₂]) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ := by
+  simp only [quorumEncodeFramed, quorumFrameFields] at hEq
+  obtain ⟨_, r1⟩ := quorumFrameField_prefix_inj hd hd hEq
+  obtain ⟨ea, r2⟩ := quorumFrameField_prefix_inj ha₁ ha₂ r1
+  obtain ⟨eb, r3⟩ := quorumFrameField_prefix_inj hb₁ hb₂ r2
+  obtain ⟨ec, _⟩ := quorumFrameField_prefix_inj hc₁ hc₂ r3
+  exact ⟨ea, eb, ec⟩
+
+private theorem quorumEncodeFramed5_injective
+    (domain : ByteArray) (hd : domain.data.toList.length < 256 ^ 8)
+    {a₁ b₁ c₁ d₁ e₁ a₂ b₂ c₂ d₂ e₂ : List UInt8}
+    (ha₁ : a₁.length < 256 ^ 8) (hb₁ : b₁.length < 256 ^ 8) (hc₁ : c₁.length < 256 ^ 8)
+    (hd₁ : d₁.length < 256 ^ 8) (he₁ : e₁.length < 256 ^ 8)
+    (ha₂ : a₂.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8) (hc₂ : c₂.length < 256 ^ 8)
+    (hd₂ : d₂.length < 256 ^ 8) (he₂ : e₂.length < 256 ^ 8)
+    (hEq : quorumEncodeFramed domain [a₁, b₁, c₁, d₁, e₁] =
+           quorumEncodeFramed domain [a₂, b₂, c₂, d₂, e₂]) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ ∧ d₁ = d₂ ∧ e₁ = e₂ := by
+  simp only [quorumEncodeFramed, quorumFrameFields] at hEq
+  obtain ⟨_, r1⟩ := quorumFrameField_prefix_inj hd hd hEq
+  obtain ⟨ea, r2⟩ := quorumFrameField_prefix_inj ha₁ ha₂ r1
+  obtain ⟨eb, r3⟩ := quorumFrameField_prefix_inj hb₁ hb₂ r2
+  obtain ⟨ec, r4⟩ := quorumFrameField_prefix_inj hc₁ hc₂ r3
+  obtain ⟨ed, r5⟩ := quorumFrameField_prefix_inj hd₁ hd₂ r4
+  obtain ⟨ee, _⟩ := quorumFrameField_prefix_inj he₁ he₂ r5
+  exact ⟨ea, eb, ec, ed, ee⟩
+
+private theorem quorumChainPreimage_ne
+    (pkSeed : Digest256) (adrs : List UInt8) (nodeA nodeB : Digest256)
+    (hAdrs : adrs.length = 16) (hNe : nodeA ≠ nodeB) :
+    quorumEncodeFramed quorumChainTag [encodeDigest256 pkSeed, adrs, encodeDigest256 nodeA] ≠
+      quorumEncodeFramed quorumChainTag [encodeDigest256 pkSeed, adrs, encodeDigest256 nodeB] := by
+  intro hEq
+  have hTagLt : quorumChainTag.data.toList.length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : quorumChainTag.data.toList.length < 64) pow256_8_gt_64_local
+  have hLen32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
+    rw [encodeDigest256_length]
+    exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
+  have hAdrsLt : adrs.length < 256 ^ 8 := by
+    rw [hAdrs]
+    exact Nat.lt_trans (by decide : 16 < 64) pow256_8_gt_64_local
+  obtain ⟨_, _, hNodeEnc⟩ :=
+    quorumEncodeFramed3_injective quorumChainTag hTagLt
+      (hLen32 pkSeed) hAdrsLt (hLen32 nodeA)
+      (hLen32 pkSeed) hAdrsLt (hLen32 nodeB) hEq
+  exact hNe (encodeDigest256_injective hNodeEnc)
+
+/-- Convert any `WotsChainCollisionWitness (quorumChainStep H pkSeed leaf) 4` into an explicit
+    framed byte-level `HashCollision256 H` (`0 Classical.choice`). -/
+def wotsChainCollision_to_hashCollision256 (H : List UInt8 → Digest256)
+    (pkSeed : Digest256) (leaf : UInt64)
+    (w : WotsChainCollisionWitness (quorumChainStep H pkSeed leaf) 4) :
+    HashCollision256 H :=
+  { preA := quorumEncodeFramed quorumChainTag
+      [encodeDigest256 pkSeed,
+       encodeNatBeBytes 8 leaf.toNat ++ encodeNatBeBytes 4 w.chainIdx ++ encodeNatBeBytes 4 w.stepPos,
+       encodeDigest256 w.nodeA]
+    preB := quorumEncodeFramed quorumChainTag
+      [encodeDigest256 pkSeed,
+       encodeNatBeBytes 8 leaf.toNat ++ encodeNatBeBytes 4 w.chainIdx ++ encodeNatBeBytes 4 w.stepPos,
+       encodeDigest256 w.nodeB]
+    distinct := quorumChainPreimage_ne pkSeed
+      (encodeNatBeBytes 8 leaf.toNat ++ encodeNatBeBytes 4 w.chainIdx ++ encodeNatBeBytes 4 w.stepPos)
+      w.nodeA w.nodeB (by simp [encodeNatBeBytes_length]) w.nodes_ne
+    same_digest := w.step_eq }
+
+private theorem flatMap_encodeDigest256_injective :
+    ∀ {xs ys : List Digest256},
+      xs.length = ys.length →
+      xs.flatMap encodeDigest256 = ys.flatMap encodeDigest256 →
+      xs = ys
+  | [], [], _, _ => rfl
+  | x :: xs, y :: ys, hLen, hEq => by
+    simp only [List.length_cons, Nat.add_right_cancel_iff] at hLen
+    simp only [List.flatMap_cons] at hEq
+    have h32 : (encodeDigest256 x).length = (encodeDigest256 y).length := by
+      rw [encodeDigest256_length, encodeDigest256_length]
+    obtain ⟨hHead, hTail⟩ := List.append_inj hEq h32
+    rw [encodeDigest256_injective hHead, flatMap_encodeDigest256_injective hLen hTail]
+
+private theorem quorumLeafPreimage_ne
+    (pkSeed : Digest256) (leaf : UInt64) (ends₁ ends₂ : List Digest256)
+    (hLenEq : ends₁.length = ends₂.length)
+    (hLenBound : 32 * ends₁.length < 256 ^ 8)
+    (hNe : ends₁ ≠ ends₂) :
+    quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₁.flatMap encodeDigest256] ≠
+    quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₂.flatMap encodeDigest256] := by
+  intro hPreEq
+  have hFlatLen : ∀ zs : List Digest256, (zs.flatMap encodeDigest256).length = 32 * zs.length := by
+    intro zs
+    induction zs with
+    | nil => simp
+    | cons z rest ih =>
+      simp only [List.flatMap_cons, List.length_append, encodeDigest256_length, ih, List.length_cons]
+      omega
+  have hTagLt : quorumLeafTag.data.toList.length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : quorumLeafTag.data.toList.length < 64) pow256_8_gt_64_local
+  have h32 : (encodeDigest256 pkSeed).length < 256 ^ 8 := by
+    rw [encodeDigest256_length]
+    exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
+  have h8 : (encodeNatBeBytes 8 leaf.toNat).length < 256 ^ 8 := by
+    rw [encodeNatBeBytes_length]
+    exact Nat.lt_trans (by decide : 8 < 64) pow256_8_gt_64_local
+  have hFl1 : (ends₁.flatMap encodeDigest256).length < 256 ^ 8 := by
+    rw [hFlatLen]; exact hLenBound
+  have hFl2 : (ends₂.flatMap encodeDigest256).length < 256 ^ 8 := by
+    rw [hFlatLen, ← hLenEq]; exact hLenBound
+  obtain ⟨_, _, hEndsEnc⟩ :=
+    quorumEncodeFramed3_injective quorumLeafTag hTagLt
+      h32 h8 hFl1 h32 h8 hFl2 hPreEq
+  exact hNe (flatMap_encodeDigest256_injective hLenEq hEndsEnc)
+
+/-- Constructive leaf-hash collision extractor when `ends₁ ≠ ends₂` of equal length `L < 2^56`
+    hash to the same `quorumLeafHash`. -/
+def extractQuorumLeafHashCollision (H : List UInt8 → Digest256)
+    (pkSeed : Digest256) (leaf : UInt64) (ends₁ ends₂ : List Digest256)
+    (hLenEq : ends₁.length = ends₂.length)
+    (hLenBound : 32 * ends₁.length < 256 ^ 8)
+    (hNe : ends₁ ≠ ends₂)
+    (hHash : quorumLeafHash H pkSeed leaf ends₁ = quorumLeafHash H pkSeed leaf ends₂) :
+    HashCollision256 H :=
+  { preA := quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₁.flatMap encodeDigest256]
+    preB := quorumEncodeFramed quorumLeafTag
+      [encodeDigest256 pkSeed, encodeNatBeBytes 8 leaf.toNat, ends₂.flatMap encodeDigest256]
+    distinct := quorumLeafPreimage_ne pkSeed leaf ends₁ ends₂ hLenEq hLenBound hNe
+    same_digest := hHash }
+
+private theorem quorumNodePreimage_ne
+    (pkSeed : Digest256) (lvl : UInt8) (idx : UInt64)
+    (l₁ r₁ l₂ r₂ : Digest256)
+    (hNe : l₁ ≠ l₂ ∨ r₁ ≠ r₂) :
+    quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₁, encodeDigest256 r₁] ≠
+    quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₂, encodeDigest256 r₂] := by
+  intro hPreEq
+  have hTagLt : quorumNodeTag.data.toList.length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : quorumNodeTag.data.toList.length < 64) pow256_8_gt_64_local
+  have h32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
+    rw [encodeDigest256_length]
+    exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64_local
+  have h1 : ([lvl] : List UInt8).length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : 1 < 64) pow256_8_gt_64_local
+  have h8 : (encodeNatBeBytes 8 idx.toNat).length < 256 ^ 8 := by
+    rw [encodeNatBeBytes_length]
+    exact Nat.lt_trans (by decide : 8 < 64) pow256_8_gt_64_local
+  obtain ⟨_, _, _, hL_enc, hR_enc⟩ :=
+    quorumEncodeFramed5_injective quorumNodeTag hTagLt
+      (h32 pkSeed) h1 h8 (h32 l₁) (h32 r₁)
+      (h32 pkSeed) h1 h8 (h32 l₂) (h32 r₂) hPreEq
+  rcases hNe with hL | hR
+  · exact hL (encodeDigest256_injective hL_enc)
+  · exact hR (encodeDigest256_injective hR_enc)
+
+/-- Constructive internal Merkle node collision extractor (`(l₁, r₁) ≠ (l₂, r₂)`). -/
+def extractQuorumNodeHashCollision (H : List UInt8 → Digest256)
+    (pkSeed : Digest256) (lvl : UInt8) (idx : UInt64)
+    (l₁ r₁ l₂ r₂ : Digest256)
+    (hNe : l₁ ≠ l₂ ∨ r₁ ≠ r₂)
+    (hHash : quorumMerkleNodeHash H pkSeed lvl idx l₁ r₁ =
+             quorumMerkleNodeHash H pkSeed lvl idx l₂ r₂) :
+    HashCollision256 H :=
+  { preA := quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₁, encodeDigest256 r₁]
+    preB := quorumEncodeFramed quorumNodeTag
+      [encodeDigest256 pkSeed, [lvl], encodeNatBeBytes 8 idx.toNat,
+       encodeDigest256 l₂, encodeDigest256 r₂]
+    distinct := quorumNodePreimage_ne pkSeed lvl idx l₁ r₁ l₂ r₂ hNe
+    same_digest := hHash }
+
+/-- Constructive Merkle path collision extractor (`0 Classical.choice`):
+    Whenever `cur ≠ quorumTreeNode H pkSeed leafFn level idx` walks `path` (`path.length = rem`)
+    to `quorumTreeNode H pkSeed leafFn (level + rem) (idx / 2 ^ rem)`, extracts the exact level
+    where `quorumMerkleNodeHash` collided! -/
+def extractQuorumMerkleWalkCollision (H : List UInt8 → Digest256) (pkSeed : Digest256)
+    (leafFn : UInt64 → Digest256) :
+    ∀ (path : List Digest256) (level idx : Nat) (cur : Digest256),
+      cur ≠ quorumTreeNode H pkSeed leafFn level idx →
+      quorumWalkMerklePath H pkSeed level idx cur path =
+        quorumTreeNode H pkSeed leafFn (level + path.length) (idx / 2 ^ path.length) →
+      HashCollision256 H
+  | [], level, idx, cur, hNe, hWalk => by
+    simp only [quorumWalkMerklePath, List.length_nil, Nat.add_zero, Nat.pow_zero, Nat.div_one] at hWalk
+    exact False.elim (hNe hWalk)
+  | sib :: rest, level, idx, cur, hNe, hWalk =>
+    let parentIdx := idx / 2
+    let parent :=
+      if idx % 2 = 0 then
+        quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat parentIdx) cur sib
+      else
+        quorumMerkleNodeHash H pkSeed (UInt8.ofNat level) (UInt64.ofNat parentIdx) sib cur
+    let honestParent := quorumTreeNode H pkSeed leafFn (level + 1) parentIdx
+    if hParEq : parent = honestParent then
+      if hEven : idx % 2 = 0 then
+        extractQuorumNodeHashCollision H pkSeed (UInt8.ofNat level) (UInt64.ofNat parentIdx)
+          cur sib
+          (quorumTreeNode H pkSeed leafFn level (2 * parentIdx))
+          (quorumTreeNode H pkSeed leafFn level (2 * parentIdx + 1))
+          (.inl (by
+            have hIdx : 2 * parentIdx = idx := by omega
+            rw [hIdx]; exact hNe))
+          (by
+            have hP : parent = quorumMerkleNodeHash H pkSeed (UInt8.ofNat level)
+                (UInt64.ofNat parentIdx) cur sib := by simp [parent, hEven]
+            rw [← hP]; exact hParEq)
+      else
+        extractQuorumNodeHashCollision H pkSeed (UInt8.ofNat level) (UInt64.ofNat parentIdx)
+          sib cur
+          (quorumTreeNode H pkSeed leafFn level (2 * parentIdx))
+          (quorumTreeNode H pkSeed leafFn level (2 * parentIdx + 1))
+          (.inr (by
+            have hIdx : 2 * parentIdx + 1 = idx := by omega
+            rw [hIdx]; exact hNe))
+          (by
+            have hP : parent = quorumMerkleNodeHash H pkSeed (UInt8.ofNat level)
+                (UInt64.ofNat parentIdx) sib cur := by simp [parent, hEven]
+            rw [← hP]; exact hParEq)
+    else
+      extractQuorumMerkleWalkCollision H pkSeed leafFn rest (level + 1) parentIdx parent hParEq
+        (by
+          have hW := hWalk
+          unfold quorumWalkMerklePath at hW
+          dsimp only [List.length_cons] at hW
+          have hLvl : level + (rest.length + 1) = level + 1 + rest.length := by omega
+          have hDiv : idx / 2 ^ (rest.length + 1) = parentIdx / 2 ^ rest.length := by
+            dsimp only [parentIdx]
+            rw [Nat.div_div_eq_div_mul, Nat.pow_succ, Nat.mul_comm]
+          rw [hLvl, hDiv] at hW
+          exact hW)
+
+private def extractChainClawLocal (F : Nat → Nat → Digest256 → Digest256) (chainIdx : Nat) :
+    (start rem : Nat) → (a b : Digest256) →
+    start + rem = 3 →
+    a ≠ b →
+    wotsChainIter F chainIdx start rem a = wotsChainIter F chainIdx start rem b →
+    WotsChainCollisionWitness F 4
+  | _, 0, _, _, _, hNe, hEq => False.elim (hNe hEq)
+  | start, rem + 1, a, b, hBound, hNe, hEq =>
+    if hStep : F chainIdx start a = F chainIdx start b then
+      { chainIdx := chainIdx
+        stepPos := start
+        step_lt := by omega
+        nodeA := a
+        nodeB := b
+        nodes_ne := hNe
+        step_eq := hStep }
+    else
+      extractChainClawLocal F chainIdx (start + 1) rem
+        (F chainIdx start a) (F chainIdx start b) (by omega) hStep hEq
+
+private def findListDiffAt :
+    (xs ys : List Digest256) → (off : Nat) →
+    xs.length = ys.length →
+    PSum (xs = ys) { k : Nat // k < xs.length ∧ xs.getD k 0#256 ≠ ys.getD k 0#256 }
+  | [], [], _, _ => .inl rfl
+  | x :: xs, y :: ys, off, hLen =>
+    if hxy : x = y then
+      match findListDiffAt xs ys (off + 1) (Nat.succ.inj hLen) with
+      | .inl hRest => .inl (by subst hxy hRest; rfl)
+      | .inr ⟨k, hkLt, hkNe⟩ =>
+        .inr ⟨k + 1, Nat.succ_lt_succ hkLt, hkNe⟩
+    else
+      .inr ⟨0, Nat.zero_lt_succ _, hxy⟩
+
+/-- **Constructive Single-Validator Verification Extractor
+    (`verifyQuorumJortsSigAt_extract_reference_or_collision`, `0 Classical.choice`)**:
+    For ANY signature `sig` accepted by `verifyQuorumJortsSigAt` under the enrolled
+    single-validator key `deriveQuorumValidatorPublicKey L height H masterSeed`
+    (`height < 256`, `32 * L < 256 ^ 8`), constructively returns EITHER:
+    - `.inl`: `sig.nodes` equals the exact single-validator reference chain vector
+      `(quorumJortsReferenceSign H masterSeed sig.leaf sig.counter digits sig.authPath).nodes`, OR
+    - `.inr (.inl w)`: an explicit WOTS+C step collision `WotsChainCollisionWitness`, OR
+    - `.inr (.inr c)`: an explicit Merkle/leaf 256-bit `HashCollision256 H`! -/
+def verifyQuorumJortsSigAt_extract_reference_or_collision (L targetSum height : Nat)
+    (hHeightLt : height < 256) (hChainBound : 32 * L < 256 ^ 8)
+    (H : List UInt8 → Digest256) (masterSeed : Digest256)
+    (digitsOf : Digest256 → List (Fin 4))
+    (msg : List UInt8) (sig : QuorumJortsSig)
+    (hAcc : verifyQuorumJortsSigAt L targetSum H
+      (deriveQuorumValidatorPublicKey L height H masterSeed) digitsOf msg sig = true) :
+    let pk := deriveQuorumValidatorPublicKey L height H masterSeed
+    let digits := digitsOf (quorumCounterDigest H (quorumMessageHash H pk sig.leaf msg) sig.counter)
+    let refNodes := (quorumJortsReferenceSign H masterSeed sig.leaf sig.counter digits sig.authPath).nodes
+    PSum (sig.nodes = refNodes)
+      (PSum (WotsChainCollisionWitness (quorumChainStep H pk.pkSeed sig.leaf) 4)
+            (HashCollision256 H)) :=
+  let pk := deriveQuorumValidatorPublicKey L height H masterSeed
+  let digits := digitsOf (quorumCounterDigest H (quorumMessageHash H pk sig.leaf msg) sig.counter)
+  let refNodes := (quorumJortsReferenceSign H masterSeed sig.leaf sig.counter digits sig.authPath).nodes
+  have hPkH : pk.height.toNat = height := uint8_ofNat_toNat_of_lt hHeightLt
+  have hUnpack :
+      sig.leaf.toNat < 2 ^ height ∧
+      sig.authPath.length = height ∧
+      sig.nodes.length = L ∧
+      digits.length = L ∧
+      quorumWalkMerklePath H pk.pkSeed 0 sig.leaf.toNat
+        (quorumLeafHash H pk.pkSeed sig.leaf
+          (quorumSigChainEnds L H pk.pkSeed sig.leaf digits sig.nodes))
+        sig.authPath = pk.root := by
+    unfold verifyQuorumJortsSigAt at hAcc
+    dsimp only at hAcc
+    rcases Bool.and_eq_true_iff.mp hAcc with ⟨h16, hWalkB⟩
+    rcases Bool.and_eq_true_iff.mp h16 with ⟨h15, _⟩
+    rcases Bool.and_eq_true_iff.mp h15 with ⟨h14, _⟩
+    rcases Bool.and_eq_true_iff.mp h14 with ⟨h13, hDigB⟩
+    rcases Bool.and_eq_true_iff.mp h13 with ⟨h12, hNodesB⟩
+    rcases Bool.and_eq_true_iff.mp h12 with ⟨hLeafB, hPathB⟩
+    exact ⟨hPkH ▸ of_decide_eq_true hLeafB,
+           hPkH ▸ of_decide_eq_true hPathB,
+           of_decide_eq_true hNodesB,
+           of_decide_eq_true hDigB,
+           of_decide_eq_true hWalkB⟩
+  let sigEnds := quorumSigChainEnds L H pk.pkSeed sig.leaf digits sig.nodes
+  let honEnds := quorumHonestChainEnds L H masterSeed sig.leaf
+  let sigLeafDig := quorumLeafHash H pk.pkSeed sig.leaf sigEnds
+  let honLeafDig := quorumTreeNode H pk.pkSeed (quorumHonestLeafDigest L H masterSeed) 0 sig.leaf.toNat
+  if hLeafEq : sigLeafDig = honLeafDig then
+    have hLeafHashEq :
+        quorumLeafHash H pk.pkSeed sig.leaf sigEnds =
+        quorumLeafHash H pk.pkSeed sig.leaf honEnds := by
+      have hHonDef : honLeafDig = quorumLeafHash H pk.pkSeed sig.leaf honEnds := by
+        dsimp only [honLeafDig, quorumTreeNode, quorumHonestLeafDigest, pk,
+          deriveQuorumValidatorPublicKey, honEnds]
+        rw [uint64_ofNat_toNat_self]
+      exact hLeafEq.trans hHonDef
+    if hEndsEq : sigEnds = honEnds then
+      have hRefLen : refNodes.length = L := by
+        simp [refNodes, quorumJortsReferenceSign, hUnpack.2.2.2.1]
+      match findListDiffAt sig.nodes refNodes 0 (hUnpack.2.2.1.trans hRefLen.symm) with
+      | .inl hNodesEq => .inl hNodesEq
+      | .inr ⟨k, hkLtSig, hkNe⟩ =>
+        have hkLtL : k < L := hUnpack.2.2.1 ▸ hkLtSig
+        have hEndK : sigEnds[k]'(by rw [quorumSigChainEnds_length]; exact hkLtL) =
+            honEnds[k]'(by rw [quorumHonestChainEnds_length]; exact hkLtL) := by
+          simp [hEndsEq]
+        have hRefEnds : quorumSigChainEnds L H pk.pkSeed sig.leaf digits refNodes = honEnds :=
+          quorumSigChainEnds_reference L H masterSeed sig.leaf sig.counter digits sig.authPath
+            hUnpack.2.2.2.1
+        have hIterEq :
+            wotsChainIter (quorumChainStep H pk.pkSeed sig.leaf) k
+              (digits.getD k ⟨0, by decide⟩).val (3 - (digits.getD k ⟨0, by decide⟩).val)
+              (sig.nodes.getD k 0#256) =
+            wotsChainIter (quorumChainStep H pk.pkSeed sig.leaf) k
+              (digits.getD k ⟨0, by decide⟩).val (3 - (digits.getD k ⟨0, by decide⟩).val)
+              (refNodes.getD k 0#256) := by
+          have h1 : sigEnds[k]'(by rw [quorumSigChainEnds_length]; exact hkLtL) =
+              wotsChainIter (quorumChainStep H pk.pkSeed sig.leaf) k
+                (digits.getD k ⟨0, by decide⟩).val (3 - (digits.getD k ⟨0, by decide⟩).val)
+                (sig.nodes.getD k 0#256) := by
+            simp [sigEnds, quorumSigChainEnds]
+          have h2 : (quorumSigChainEnds L H pk.pkSeed sig.leaf digits refNodes)[k]'(by
+                rw [quorumSigChainEnds_length]; exact hkLtL) =
+              wotsChainIter (quorumChainStep H pk.pkSeed sig.leaf) k
+                (digits.getD k ⟨0, by decide⟩).val (3 - (digits.getD k ⟨0, by decide⟩).val)
+                (refNodes.getD k 0#256) := by
+            simp [quorumSigChainEnds]
+          rw [← h1, ← h2]
+          simp [hEndsEq, hRefEnds]
+        have hdLe : (digits.getD k ⟨0, by decide⟩).val ≤ 3 := by
+          have := (digits.getD k ⟨0, by decide⟩).isLt; omega
+        .inr (.inl (extractChainClawLocal (quorumChainStep H pk.pkSeed sig.leaf) k
+          (digits.getD k ⟨0, by decide⟩).val (3 - (digits.getD k ⟨0, by decide⟩).val)
+          (sig.nodes.getD k 0#256) (refNodes.getD k 0#256) (by omega) hkNe hIterEq))
+    else
+      .inr (.inr (extractQuorumLeafHashCollision H pk.pkSeed sig.leaf sigEnds honEnds
+        (by rw [quorumSigChainEnds_length, quorumHonestChainEnds_length])
+        (by rw [quorumSigChainEnds_length]; exact hChainBound)
+        hEndsEq hLeafHashEq))
+  else
+    .inr (.inr (extractQuorumMerkleWalkCollision H pk.pkSeed
+      (quorumHonestLeafDigest L H masterSeed) sig.authPath 0 sig.leaf.toNat sigLeafDig hLeafEq
+      (by
+        rw [Nat.zero_add, hUnpack.2.1, Nat.div_eq_of_lt hUnpack.1]
+        exact hUnpack.2.2.2.2)))
+
+/-- Propositional soundness wrapper around `verifyQuorumJortsSigAt_extract_reference_or_collision`
+    for constructive kernel auditing (`#verify_constructive`). -/
+theorem verifyQuorumJortsSigAt_extract_sound (L targetSum height : Nat)
+    (hHeightLt : height < 256) (hChainBound : 32 * L < 256 ^ 8)
+    (H : List UInt8 → Digest256) (masterSeed : Digest256)
+    (digitsOf : Digest256 → List (Fin 4))
+    (msg : List UInt8) (sig : QuorumJortsSig)
+    (hAcc : verifyQuorumJortsSigAt L targetSum H
+      (deriveQuorumValidatorPublicKey L height H masterSeed) digitsOf msg sig = true) :
+    let pk := deriveQuorumValidatorPublicKey L height H masterSeed
+    let digits := digitsOf (quorumCounterDigest H (quorumMessageHash H pk sig.leaf msg) sig.counter)
+    sig.nodes = (quorumJortsReferenceSign H masterSeed sig.leaf sig.counter digits sig.authPath).nodes ∨
+      Nonempty (WotsChainCollisionWitness (quorumChainStep H pk.pkSeed sig.leaf) 4) ∨
+      Nonempty (HashCollision256 H) := by
+  intro pk digits
+  cases verifyQuorumJortsSigAt_extract_reference_or_collision L targetSum height
+      hHeightLt hChainBound H masterSeed digitsOf msg sig hAcc with
+  | inl hEq => exact .inl hEq
+  | inr hCol =>
+    cases hCol with
+    | inl w => exact .inr (.inl ⟨w⟩)
+    | inr c => exact .inr (.inr ⟨c⟩)
+
+#verify_constructive Qsag.verifyQuorumJortsSigAt_extract_sound
 #verify_inhabited signingLedger_burn_safe inhabited_signing_ledger
 #tooth_pair runQuorumWireTrace_signature_safety vs tooth_used_quorum_permit_cannot_release
 #verify_constructive Qsag.inhabited_beltLatch_quorum_network_3f_plus_1
+
+/-! ### Exports for lane custody-b -/
+
+/-- What `QsBQuorumConfig.valid` checks. -/
+theorem QsBQuorumConfig.valid_iff (c : QsBQuorumConfig) :
+    c.valid = true ↔ (0 < c.n ∧ c.n ≤ 255 ∧ c.f < c.t ∧ c.t ≤ c.q ∧ c.q ≤ c.n ∧
+      2 * c.q > c.n + c.f ∧ c.n ≥ 3 * c.f + 1 ∧ c.q ≤ c.n - c.f) := by
+  unfold QsBQuorumConfig.valid
+  exact decide_eq_true_iff
 
 end Qsag
 end

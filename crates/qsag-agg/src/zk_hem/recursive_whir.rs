@@ -1283,6 +1283,7 @@ impl Oracle {
         Self::commit(Codeword::Ext(codeword), arity, stage)
     }
     fn commit(codeword: Codeword, arity: usize, stage: usize) -> Self {
+        let _phase = crate::profile::span("recursion_merkle");
         let groups = codeword.len() / arity;
         let mut leaves = vec![[F::ZERO; 4]; groups];
         crate::pcs::fill_indexed(&mut leaves, |g| {
@@ -1407,6 +1408,7 @@ pub fn commit_for_recursion(
     if evaluations.len() != 1usize << nv {
         return Err(RecursiveWhirError::InvalidParameters);
     }
+    let _phase = crate::profile::span("recursion_commit");
     let mut base = hypercube_to_monomial_coeffs(evaluations);
     let spec = params.schedule.stages[0];
     // The two overflow coefficients of the first oracle are zero, so its codeword is the
@@ -1445,6 +1447,7 @@ pub fn open_for_recursion(
     let nv = params
         .num_vars()
         .ok_or(RecursiveWhirError::InvalidParameters)?;
+    let _phase = crate::profile::span("recursion_open");
     let RecursionCommitment {
         mut coeffs,
         mut oracle,
@@ -1480,6 +1483,7 @@ pub fn open_for_recursion(
     for (stage, spec) in params.schedule.stages.iter().enumerate() {
         let mut chals = Vec::with_capacity(spec.step_vars);
         for _ in 0..spec.step_vars {
+            let _phase = crate::profile::span("recursion_fold_round");
             let mut wire = [E::ZERO; 5];
             {
                 let (c, k) = (&coeffs.0, &kernel);
@@ -1572,6 +1576,7 @@ pub fn open_for_recursion(
         let nonce = grind(&tr, params.schedule.regime.pow_bits());
         proof.query_nonces[stage] = nonce;
         pow(&mut b, &mut tr, nonce, params.schedule.regime.pow_bits());
+        let _phase = crate::profile::span("recursion_queries");
         let groups = oracle.codeword.len() / oracle.arity;
         let count = groups.min(spec.num_queries);
         let mut shifted = Vec::with_capacity(count);

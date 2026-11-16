@@ -89,7 +89,7 @@ theorem cshake32_has_output (profile : RssProduction.Profile) (request : Session
     (initialNodes_represents binding zeroRssKState [] 0)
   refine ⟨rssTakeShares 32 ⟨rateBlockBytes state.s0, rateBlockBytes state.s1,
     rateBlockBytes state.s2⟩, ?_, ?_⟩
-  · simp only [cshakeForRequest, cshakeParticipant, show 32 ≤ shake256RateBytes by decide,
+  · simp only [cshakeForRequest, cshakeParticipant, show 32 ≤ shake256RateBytes by rw [shake256RateBytes_eq]; decide,
       ↓reduceIte, cshakeNodes]
     exact rateOutputShares_represents _ _ _ _ _ h
   · simp [RssByteShares.WellFormed, rssTakeShares, rateBlockBytes_length]

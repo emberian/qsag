@@ -1,4 +1,5 @@
 module
+public import Qsag.Protocol.Threshold.SacrificeFreezeSample
 /-
 # Qsag.Top.Credentials — End-to-End Composed Anonymous Credential, Lattice, and PCG Security
 
@@ -12,12 +13,17 @@ Top-level composition module (zero `import all`) connecting:
    (`ThresholdMlDsaSecurity`, `ThresholdMlDsaAndToprf`), and
 4. `PiBlindVc` Fiat–Shamir rewound-transcript collision extraction (`BlindVcCollisionFinder`) paired
    with the authenticated-possession soundness of the ideal credential functionality
-   (`Spec.IdealCred`, `Spec.pqCredentialProfile`: `N = 256`, `33` repetitions over `GF(p^5)`), and
+   (`Spec.IdealCred`, `Spec.pqCredentialProfile`: `N = 256`, `33` repetitions over `GF(p^5)`),
+   and the interactive cut-and-choose count for that presentation profile
+   (`credential_sd_limbo256_tau33_interactive_soundness`, conditional on the algebraic
+   soundness of the per-repetition check), and
 5. The refinement obligation `CredentialImplementation`: a concrete service takes
    `(sender, wire message)` with the sender supplied by the environment, and an extractor names
    only the command. Under it a service inherits issuance, possession and TOPRF provenance about
-   the real sender; a service that authenticates nobody is refuted. The tree has no `PiBlindVc` /
-   TOPRF state machine: the only inhabitant is the ideal machine itself.
+   the real sender, with corruption read off the ideal state matching the run
+   (`CredentialImplementation.AbstractAt`; corruption is adaptive in `Spec.IdealCred`); a
+   service that authenticates nobody is refuted. The tree has no `PiBlindVc` / TOPRF state
+   machine: the only inhabitant is the ideal machine itself.
 -/
 
 public import Qsag.Spec.Primitives
@@ -28,12 +34,14 @@ public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealCred
 public import Qsag.Protocol.Threshold.LatticePreprocessingFull
-public import Qsag.Protocol.Threshold.RlweExtractionBoundary
+public import Qsag.Protocol.Threshold.RlweExtraction
+public import Qsag.Math.TapRowParityBias
 public import Qsag.Math.Lattices
-public import Qsag.Protocol.Threshold.DensePcgProductionTaps
+public import Qsag.Protocol.Threshold.DensePcgTaps
 public import Qsag.Protocol.Threshold.ThresholdMlDsaSecurity
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Protocol.Credentials.BlindVcCollisionFinder
+public import Qsag.Protocol.Credentials.RepetitionCutAndChoose
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -43,29 +51,19 @@ set_option autoImplicit false
 
 /-! ## 1. Dual-LPN Regular-Block Bias Projected Into Canonical `Spec.RatBound` + Production PCG Taps -/
 
-/-- **Dual-LPN Regular-Block Bias in Canonical `Spec.RatBound` (`pcg_dual_lpn_bias_in_spec_ratBound`)**:
-    Unifies `GaussianHvzkAndDualLpn` (`ExactRat`) with `Spec.RatBound` and `DensePcgProductionTaps`:
-    1. Projects `ExactRat.abs (parityBias ...)` via `Spec.RatBound.clampExactRat` to establish
-       `strictlyMoreThanBits 256` (`< 2^{-256}`) for any 64 balanced regular-block weights,
-    2. Certifies Stern–Dumer ISD work `> 2^{256}` (`pcg_dense_depth15_prange_and_stern_dumer_pq128`), and
-    3. Connects concrete generated production rows (`lpnMatrixRow auditSession 0 1 15 0` and `543`)
-       to their certified signed bias brackets! -/
+/-- The generated production row has bias strictly between `2^-118` and `2^-117`.
+    This concrete row calculation and the Stern–Dumer work estimate use no balance premise. -/
 theorem pcg_dual_lpn_bias_in_spec_ratBound
-    (weights : List Nat) (hLen : weights.length = 64)
-    (hBal : ∀ w ∈ weights, ((32768 : Int) - 2 * (w : Int)).natAbs ≤ 2047)
     (q l : Nat) (hq : q ≤ 32) :
-    (Qsag.Spec.RatBound.clampExactRat
-      (Qsag.ExactRat.abs
-        (Qsag.parityBias (Qsag.regularBlockXorOneProb (weights.map Qsag.depth15TreeRate))))).strictlyMoreThanBits 256 ∧
+    (Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 117 < 32768 ^ 64 ∧
+      32768 ^ 64 < Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 118) ∧
     Qsag.sternDumerWorkExceedsPow2 Qsag.pcgDepth15Cols Qsag.pcgDenseRows Qsag.pcgDenseWeightT q l 256 ∧
     Qsag.lpnMatrixRow Qsag.auditSession 0 1 15 0 = Qsag.prodRow0Taps ∧
     (Qsag.noiseSignedSum 32768 (Qsag.rowTestFns (Qsag.lpnMatrixRow Qsag.auditSession 0 1 15 0)) false).natAbs *
       2 ^ 117 < 32768 ^ 64 := by
-  have hBias := Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256 weights hLen hBal
-  have hClamp := Qsag.Spec.RatBound.clampExactRat_strictlyMoreThanBits_of_lt_twoNegPow hBias
   obtain ⟨hSd, _⟩ := Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128 q l hq
-  obtain ⟨hRow0Lt, _⟩ := Qsag.generatedRow0_bias_bracket
-  exact ⟨hClamp, hSd, Qsag.prodRow0Taps_eq_generator, hRow0Lt⟩
+  exact ⟨Qsag.TapRowBias.prodRow0_bias_bracket, hSd,
+    Qsag.prodRow0Taps_eq_generator, Qsag.generatedRow0_bias_bracket.1⟩
 
 /-! ## 2. RLWE-1024 Preprocessing, SPCOT Peer Verification, and Cyclotomic SIS Boundary -/
 
@@ -123,8 +121,10 @@ theorem threshold_mldsa_hvzk_sacrifice_and_prss_chain
     connects the `PiBlindVc` transcript model to the ideal credential machine.
     1. Ideal machine (`Spec.idealCredMachine_presentation_sound`, `…_presentation_provenance`): an
        accepted presentation after a run from the initial state uses a fresh challenge for the
-       current epoch and is backed by a record owned by the presenting holder that an issuer-port
-       event of the run issued (or the issuer is corrupt).
+       current epoch, arrived on the holder's port (or on the adversary port with that holder
+       corrupt in the current state), and is backed by a record owned by the presenting holder
+       that an event of the run issued on the issuer port (or on the adversary port, the issuer
+       being corrupt in the current state).
     2. Profile literals: `N = 256` parties, `33` repetitions, `GF(p^5)`.
     3. `BlindVcCollisionFinder.blindVc_fs_collisionFinder_mass_bound` (the 3-party ZKBoo issuance
        transcript model).
@@ -151,12 +151,14 @@ theorem blindVc_presentation_provenance_and_collision_finder_roster
       stmtCred.epoch = st.epoch ∧
       Qsag.Spec.DisclosedIndicesValid stmtCred = true ∧
       (port = Qsag.Spec.CredPort.holder holder ∨
-        (port = Qsag.Spec.CredPort.adversary ∧ holder ∈ cfg.corruptHolders)) ∧
+        (port = Qsag.Spec.CredPort.adversary ∧ holder ∈ st.corruptHolders)) ∧
       ∃ r ∈ st.records, r.credId = credId ∧ r.holder = holder ∧
         Qsag.Spec.CredentialMatchesAttributes stmtCred r.attrs = true ∧
-        (cfg.issuerCorrupt = true ∨
-          ((Qsag.Spec.CredPort.issuer, Qsag.Spec.CredCommand.issue holder r.attrs r.root),
-            Qsag.Spec.IdealCredOutput.issued credId) ∈ trace)) ∧
+        ∃ issuePort : Qsag.Spec.CredPort,
+          ((issuePort, Qsag.Spec.CredCommand.issue holder r.attrs r.root),
+            Qsag.Spec.IdealCredOutput.issued credId) ∈ trace ∧
+          (issuePort = Qsag.Spec.CredPort.issuer ∨
+            (issuePort = Qsag.Spec.CredPort.adversary ∧ st.issuerCorrupt = true))) ∧
     (Qsag.Spec.pqCredentialProfile.sdLimboParties = 256 ∧
       Qsag.Spec.pqCredentialProfile.sdRepsQuantum = 33 ∧
       Qsag.Spec.pqCredentialProfile.sdExtDegree = 5) ∧
@@ -179,6 +181,83 @@ theorem blindVc_presentation_provenance_and_collision_finder_roster
          ⟨hLimbo, hReps33, hExt5⟩,
          Qsag.blindVc_fs_collisionFinder_mass_bound H hHLen prgExpand stmtAt msgAt O' seeds weight,
          Qsag.vcRewoundCollisionFinder_honest H hHLen nonce idx tr⟩
+
+/-- **Deployed presentation profile: 256 parties, 33 repetitions, `GF(p^5)`
+    (`credential_sd_limbo256_tau33_interactive_soundness`)**.
+    1. The constants of the seed-tree model are those of `Spec.pqCredentialProfile`
+       (`VC_SD_LIMBO_PARTIES = 256`, `VC_SD_GGM_DEPTH = 8`, `sd_repetitions = 33`, extension
+       degree `5`).
+    2. For a per-repetition verifier whose opening round is the hidden-party check on the
+       repetition's check values (`CutAndChoose.DefectChecker`), and any prover whose second
+       message may depend on all folding challenges and whose third on all folding challenges
+       and evaluation points: fewer than a `2^-263` fraction of the challenge triples is
+       accepted.
+    Hypotheses, not proved from `blind_vc.rs`: `AlgebraicSound` (at most `dG` bad folding
+    challenges with `dG / |G| ≤ 2^-300`, at most `384` bad evaluation points among the
+    `p^5 - 1` nonzero ones, and a nonzero check value after good challenges). The count is for
+    independent uniform challenges per repetition; the Fiat–Shamir transform and quantum
+    adversaries are not covered. -/
+theorem credential_sd_limbo256_tau33_interactive_soundness {C G B1 R B2 : Type}
+    (K : Qsag.CutAndChoose.DefectChecker C G B1 R B2) (P : Qsag.CutAndChoose.Prover C G B1 R B2)
+    (Gs : List G) (Rs : List R) (dG : Nat)
+    (hS : K.AlgebraicSound P.commit Gs Rs dG Qsag.CutAndChoose.limboEvalDegree)
+    (hRs : Rs.length = Qsag.CutAndChoose.fp5NonzeroCount) (hG : dG * 2 ^ 300 ≤ Gs.length)
+    (hGpos : 0 < Gs.length) :
+    (Qsag.credentialSdParties = Qsag.Spec.pqCredentialProfile.sdLimboParties ∧
+      Qsag.credentialSdGgmDepth = Qsag.Spec.pqCredentialProfile.sdGgmDepth ∧
+      Qsag.credentialSdRepetitions = Qsag.Spec.pqCredentialProfile.sdRepsQuantum ∧
+      Qsag.Spec.pqCredentialProfile.sdExtDegree = 5) ∧
+    Qsag.CutAndChoose.winCount K.toChecker Qsag.credentialSdRepetitions P Gs Rs
+        Qsag.CutAndChoose.limboParties * 2 ^ 263 <
+      Qsag.CutAndChoose.challengeCount Qsag.credentialSdRepetitions Gs Rs
+        Qsag.CutAndChoose.limboParties :=
+  ⟨⟨Qsag.credentialSdParties_eq.trans (by decide), Qsag.credentialSdGgmDepth_eq.trans (by decide),
+      Qsag.credentialSdRepetitions_eq.trans (by decide), by decide⟩,
+    Qsag.CutAndChoose.limbo256_tau33_defect_check_soundness K P Gs Rs dG hS hRs hG hGpos⟩
+
+/-- **Opening round of the deployed presentation in the QROM, and seed-tree binding
+    (`credential_sd_opening_round_qrom_and_seed_tree_binding`)**.
+    1. For a `Q ≤ 2^60`-query quantum adversary against a uniform oracle with 33-byte outputs,
+       the doomed-to-live flip mass of the hidden-party round is at most `(2Q + 1)^2 / 2^264`,
+       which is below `2^-128`. A point is doomed only if its check-value table has a nonzero
+       entry in each of the 33 repetitions (`hDefect`, a hypothesis).
+    2. Two accepted openings of the same round-1 commitments `H ∘ encode` have the same digest
+       at every party both open; if the reconstructed preimages differ there, the executable
+       scan returns a collision of `H`.
+    Not covered: the folding and evaluation Fiat–Shamir rounds in the QROM and their
+    composition with this round. -/
+theorem credential_sd_opening_round_qrom_and_seed_tree_binding
+    {cardX cardAnc Q : Nat} (hQ : Q ≤ 2 ^ 60)
+    (A : Qsag.QuantumAdv cardX (8 * 33) cardAnc Q)
+    (defect : Fin cardX → Nat → Fin 256 → Qsag.CredentialFp5) (doomed : Fin cardX → Bool)
+    (hDefect : ∀ x, doomed x = true → ∀ idx < 33,
+      ∃ bad, defect x idx bad ≠ Qsag.credentialFp5Zero)
+    (prg : Qsag.CredentialGgmPrg) (H : List UInt8 → List UInt8)
+    (encode : Fin Qsag.credentialSdParties → Qsag.CredentialGgmSeed → List UInt8)
+    (commitments : Fin Qsag.credentialSdParties → List UInt8) (a b : Qsag.CredentialGgmOpening)
+    (ha : Qsag.verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments a = true)
+    (hb : Qsag.verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments b = true)
+    (party : Fin Qsag.credentialSdParties) (hpa : party ≠ a.hidden) (hpb : party ≠ b.hidden) :
+    (Qsag.RatBound.le
+      ⟨Qsag.uniformOracleSum (8 * 33) cardX
+         (fun O => Qsag.qromOrdinaryFlipMass A O id (fun _ x => doomed x)
+           (Qsag.credentialSdOpeningLiveAfter defect)),
+       (2 ^ (8 * 33)) ^ cardX *
+         (Qsag.prefixScale A Q (Nat.le_refl Q) * Qsag.QVec.stateNormSq A.init),
+       Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos _))
+         (Nat.mul_pos (Qsag.prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * 1, 2 ^ (8 * 33), Nat.two_pow_pos _⟩ ∧
+      (2 * Q + 1) ^ 2 * 2 ^ 128 < (256 : Nat) ^ 33) ∧
+    H (Qsag.credentialGgmOpenedPreimage prg encode a party) =
+      H (Qsag.credentialGgmOpenedPreimage prg encode b party) ∧
+    (Qsag.credentialGgmOpenedPreimage prg encode a party ≠
+        Qsag.credentialGgmOpenedPreimage prg encode b party →
+      (Qsag.credentialGgmCollisionFinder H prg encode a b).isSome = true) := by
+  obtain ⟨hMass, hBudget, _⟩ := Qsag.credentialSd_opening_round_qrom_bound hQ A defect doomed hDefect
+  exact ⟨⟨hMass, hBudget⟩,
+    Qsag.credentialGgmOpenedPreimage_same_digest H prg encode commitments a b ha hb party hpa hpb,
+    fun hne => Qsag.credentialGgmCollisionFinder_complete H prg encode commitments a b ha hb
+      party hpa hpb hne⟩
 
 /-! ## 5. Refinement Obligation for a Concrete Credential Service -/
 
@@ -294,10 +373,25 @@ theorem CredentialImplementation.abstract_run {Attr O S W : Type} [DecidableEq A
       exact ih a₁ (impl.reject_ok hRel hNone)
   exact hGen hTrace _ (impl.init_ok hInit)
 
+/-- `a` is an ideal state reached by an ideal run from the initial state that shows the same
+    senders and outputs as the service run `tr`, and it is related to the service state `c`.
+    Corruption is adaptive in `Spec.idealCredMachine`, so who is corrupt "now" is a fact about
+    this state, not about the configuration. -/
+def CredentialImplementation.AbstractAt {Attr O S W : Type} [DecidableEq Attr]
+    {cfg : Qsag.Spec.IdealCredConfig O}
+    {M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)}
+    (impl : CredentialImplementation Attr cfg M)
+    (tr : List ((Qsag.Spec.CredPort × W) × Qsag.Spec.IdealCredOutput O)) (c : S)
+    (a : Qsag.Spec.IdealCredState Attr O) : Prop :=
+  impl.Rel c a ∧
+  ∃ aTr : List (Qsag.Spec.IdealCredInput Attr × Qsag.Spec.IdealCredOutput O),
+    (Qsag.Spec.idealCredMachine cfg).ValidTrace (Qsag.Spec.IdealCredState.empty cfg) aTr a ∧
+    credSenderView aTr = credSenderView tr
+
 /-- **Issuance authentication for an implementation.** If the service answers `.issued credId`
-    to a message, then the message was delivered on the issuer port, or on the adversary port
-    with a corrupt issuer; and it stands for the issuance of a credential with between `1` and
-    `maxAttrs` attributes. -/
+    to a message, then there is an ideal state `a` matching the run in which: the message was
+    delivered on the issuer port, or on the adversary port with the issuer corrupt in `a`; and it
+    stands for the issuance of a credential with between `1` and `maxAttrs` attributes. -/
 theorem credentialImplementation_issuance_authenticated {Attr O S W : Type} [DecidableEq Attr]
     {cfg : Qsag.Spec.IdealCredConfig O}
     {M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)}
@@ -306,25 +400,26 @@ theorem credentialImplementation_issuance_authenticated {Attr O S W : Type} [Dec
     {sender : Qsag.Spec.CredPort} {w : W} {credId : Nat}
     (hInit : M.Init c₀) (hTrace : M.ValidTrace c₀ tr c)
     (hAccepted : M.step c (sender, w) = some (c', .issued credId)) :
-    (sender = Qsag.Spec.CredPort.issuer ∨
-      (sender = Qsag.Spec.CredPort.adversary ∧ cfg.issuerCorrupt = true)) ∧
-    ∃ (holder : Nat) (attrs : List Attr) (newRoot : Qsag.Spec.Digest256),
-      impl.extract c sender w = some (.issue holder attrs newRoot) ∧
-      0 < attrs.length ∧ attrs.length ≤ Qsag.Spec.pqCredentialProfile.maxAttrs := by
-  obtain ⟨a, aTr, hRel, hTrA, _⟩ := impl.abstract_run hInit hTrace
+    ∃ a : Qsag.Spec.IdealCredState Attr O, impl.AbstractAt tr c a ∧
+      (sender = Qsag.Spec.CredPort.issuer ∨
+        (sender = Qsag.Spec.CredPort.adversary ∧ a.issuerCorrupt = true)) ∧
+      ∃ (holder : Nat) (attrs : List Attr) (newRoot : Qsag.Spec.Digest256),
+        impl.extract c sender w = some (.issue holder attrs newRoot) ∧
+        0 < attrs.length ∧ attrs.length ≤ Qsag.Spec.pqCredentialProfile.maxAttrs := by
+  obtain ⟨a, aTr, hRel, hTrA, hView⟩ := impl.abstract_run hInit hTrace
   obtain ⟨cmd, a', hExt, hStepA, _⟩ := impl.accept_ok hRel hAccepted
   obtain ⟨holder, attrs, newRoot, hCmd⟩ := Qsag.Spec.idealCredStep_output_command hStepA
   subst hCmd
-  obtain ⟨hPort, hPos, hMax⟩ :=
-    Qsag.Spec.idealCredMachine_issuance_authenticated cfg ⟨_, aTr, rfl, hTrA⟩ hStepA
-  exact ⟨hPort, holder, attrs, newRoot, hExt, hPos, hMax⟩
+  obtain ⟨hPort, hPos, hMax⟩ := Qsag.Spec.idealCredMachine_issuance_authenticated cfg hStepA
+  exact ⟨a, ⟨hRel, aTr, hTrA, hView⟩, hPort, holder, attrs, newRoot, hExt, hPos, hMax⟩
 
 /-- **Possession provenance for an implementation.** If the service answers a message with the
-    verdict `true`, then the message stands for a presentation of some credential `credId` by some
-    `holder`; it was delivered on that holder's port (or on the adversary port with that holder
-    corrupt); the statement names the configured issuer key; and, unless the issuer is corrupt,
-    the run contains a message delivered on the issuer port that the service answered
-    `.issued credId`. -/
+    verdict `true`, then there is an ideal state `a` matching the run in which: the message
+    stands for a presentation of some credential `credId` by some `holder`; it was delivered on
+    that holder's port (or on the adversary port with that holder corrupt in `a`); the statement
+    names the configured issuer key; and the run contains a message the service answered
+    `.issued credId`, delivered on the issuer port, or on the adversary port with the issuer
+    corrupt in `a`. -/
 theorem credentialImplementation_presentation_provenance {Attr O S W : Type} [DecidableEq Attr]
     {cfg : Qsag.Spec.IdealCredConfig O}
     {M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)}
@@ -333,26 +428,29 @@ theorem credentialImplementation_presentation_provenance {Attr O S W : Type} [De
     {sender : Qsag.Spec.CredPort} {w : W}
     (hInit : M.Init c₀) (hTrace : M.ValidTrace c₀ tr c)
     (hAccepted : M.step c (sender, w) = some (c', .presentationVerdict true)) :
-    ∃ (holder credId : Nat) (stmt : Qsag.Spec.CredentialStatement Attr),
-      impl.extract c sender w = some (.present holder credId stmt) ∧
-      (sender = Qsag.Spec.CredPort.holder holder ∨
-        (sender = Qsag.Spec.CredPort.adversary ∧ holder ∈ cfg.corruptHolders)) ∧
-      stmt.issuerPk = cfg.issuerPk ∧
-      (cfg.issuerCorrupt = true ∨
-        ∃ w₀ : W, ((Qsag.Spec.CredPort.issuer, w₀), Qsag.Spec.IdealCredOutput.issued credId) ∈ tr) := by
+    ∃ a : Qsag.Spec.IdealCredState Attr O, impl.AbstractAt tr c a ∧
+      ∃ (holder credId : Nat) (stmt : Qsag.Spec.CredentialStatement Attr),
+        impl.extract c sender w = some (.present holder credId stmt) ∧
+        (sender = Qsag.Spec.CredPort.holder holder ∨
+          (sender = Qsag.Spec.CredPort.adversary ∧ holder ∈ a.corruptHolders)) ∧
+        stmt.issuerPk = cfg.issuerPk ∧
+        ∃ (issuePort : Qsag.Spec.CredPort) (w₀ : W),
+          ((issuePort, w₀), Qsag.Spec.IdealCredOutput.issued credId) ∈ tr ∧
+          (issuePort = Qsag.Spec.CredPort.issuer ∨
+            (issuePort = Qsag.Spec.CredPort.adversary ∧ a.issuerCorrupt = true)) := by
   obtain ⟨a, aTr, hRel, hTrA, hView⟩ := impl.abstract_run hInit hTrace
   obtain ⟨cmd, a', hExt, hStepA, _⟩ := impl.accept_ok hRel hAccepted
   obtain ⟨holder, credId, stmt, hCmd⟩ := Qsag.Spec.idealCredStep_output_command hStepA
   subst hCmd
-  obtain ⟨hPort, hPk, r, _, _, _, _, _, hProv⟩ :=
+  obtain ⟨hPort, hPk, r, _, _, _, _, _, issuePort, hMem, hIssuePort⟩ :=
     Qsag.Spec.idealCredMachine_presentation_provenance cfg rfl hTrA hStepA
-  refine ⟨holder, credId, stmt, hExt, hPort, hPk, ?_⟩
-  rcases hProv with hC | hMem
-  · exact Or.inl hC
-  · exact Or.inr (credSenderView_mem hView hMem)
+  obtain ⟨w₀, hw₀⟩ := credSenderView_mem hView hMem
+  exact ⟨a, ⟨hRel, aTr, hTrA, hView⟩, holder, credId, stmt, hExt, hPort, hPk,
+    issuePort, w₀, hw₀, hIssuePort⟩
 
-/-- Tooth: with an honest issuer, the service never answers `.issued` to a message delivered on
-    any port other than the issuer's — in particular to one the adversary delivered. -/
+/-- Tooth: if the issuer is not corrupt in any ideal state matching the run, the service never
+    answers `.issued` to a message delivered on any port other than the issuer's — in particular
+    to one the adversary delivered. -/
 theorem credentialImplementation_rejects_foreign_issue {Attr O S W : Type} [DecidableEq Attr]
     {cfg : Qsag.Spec.IdealCredConfig O}
     {M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)}
@@ -360,39 +458,43 @@ theorem credentialImplementation_rejects_foreign_issue {Attr O S W : Type} [Deci
     {c₀ c c' : S} {tr : List ((Qsag.Spec.CredPort × W) × Qsag.Spec.IdealCredOutput O)}
     {sender : Qsag.Spec.CredPort} {w : W} {credId : Nat}
     (hInit : M.Init c₀) (hTrace : M.ValidTrace c₀ tr c)
-    (hHonest : cfg.issuerCorrupt = false)
+    (hHonest : ∀ a : Qsag.Spec.IdealCredState Attr O, impl.AbstractAt tr c a →
+      a.issuerCorrupt = false)
     (hSender : ¬ (sender = Qsag.Spec.CredPort.issuer)) :
     ¬ (M.step c (sender, w) = some (c', .issued credId)) := by
   intro hAccepted
-  obtain ⟨hAuth, _⟩ := credentialImplementation_issuance_authenticated impl hInit hTrace hAccepted
+  obtain ⟨a, hAt, hAuth, _⟩ :=
+    credentialImplementation_issuance_authenticated impl hInit hTrace hAccepted
   rcases hAuth with hP | ⟨_, hC⟩
   · exact hSender hP
-  · rw [hHonest] at hC
+  · rw [hHonest a hAt] at hC
     cases hC
 
-/-- Tooth: with no corrupt holder, the service never answers the verdict `true` to a message the
-    adversary delivered. -/
+/-- Tooth: if no holder is corrupt in any ideal state matching the run, the service never
+    answers the verdict `true` to a message the adversary delivered. -/
 theorem credentialImplementation_rejects_foreign_presentation {Attr O S W : Type}
     [DecidableEq Attr] {cfg : Qsag.Spec.IdealCredConfig O}
     {M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)}
     (impl : CredentialImplementation Attr cfg M)
     {c₀ c c' : S} {tr : List ((Qsag.Spec.CredPort × W) × Qsag.Spec.IdealCredOutput O)} {w : W}
     (hInit : M.Init c₀) (hTrace : M.ValidTrace c₀ tr c)
-    (hHonest : cfg.corruptHolders = []) :
+    (hHonest : ∀ a : Qsag.Spec.IdealCredState Attr O, impl.AbstractAt tr c a →
+      a.corruptHolders = []) :
     ¬ (M.step c (Qsag.Spec.CredPort.adversary, w) = some (c', .presentationVerdict true)) := by
   intro hAccepted
-  obtain ⟨holder, _, _, _, hAuth, _⟩ :=
+  obtain ⟨a, hAt, holder, _, _, _, hAuth, _⟩ :=
     credentialImplementation_presentation_provenance impl hInit hTrace hAccepted
   rcases hAuth with hP | ⟨_, hC⟩
   · cases hP
-  · rw [hHonest] at hC
+  · rw [hHonest a hAt] at hC
     exact nomatch hC
 
-/-- **TOPRF provenance for an implementation.** With at most `toprfMaxCorrupt` corrupt servers,
-    if the service answers a message with a TOPRF value, the message stands for an evaluation of
-    some ticket and input, the value is the keyed-table value of `(keyId, epoch, input)`, and the
-    run contains a message delivered on the port of an honest committee server that the service
-    answered `.toprfApproved`. -/
+/-- **TOPRF provenance for an implementation.** If every ideal state matching the run has at
+    most `toprfMaxCorrupt` corrupt servers and the service answers a message with a TOPRF value,
+    then there is such a state `a` in which: the message stands for an evaluation of some ticket
+    and input, the value is the keyed-table value of `(keyId, epoch, input)`, and the run
+    contains a message delivered on the port of a committee server not corrupt in `a` that the
+    service answered `.toprfApproved`. -/
 theorem credentialImplementation_toprf_provenance {Attr O S W : Type} [DecidableEq Attr]
     {cfg : Qsag.Spec.IdealCredConfig O}
     {M : Qsag.Spec.Machine S (Qsag.Spec.CredPort × W) (Qsag.Spec.IdealCredOutput O)}
@@ -400,22 +502,26 @@ theorem credentialImplementation_toprf_provenance {Attr O S W : Type} [Decidable
     {c₀ c c' : S} {tr : List ((Qsag.Spec.CredPort × W) × Qsag.Spec.IdealCredOutput O)}
     {sender : Qsag.Spec.CredPort} {w : W} {v : O}
     (hInit : M.Init c₀) (hTrace : M.ValidTrace c₀ tr c)
-    (hCorrupt : cfg.corruptServerCount ≤ Qsag.Spec.pqCredentialProfile.toprfMaxCorrupt)
+    (hCorrupt : ∀ a : Qsag.Spec.IdealCredState Attr O, impl.AbstractAt tr c a →
+      a.corruptServerCount ≤ Qsag.Spec.pqCredentialProfile.toprfMaxCorrupt)
     (hAccepted : M.step c (sender, w) = some (c', .toprfEvaluated v)) :
-    ∃ (t : Qsag.Spec.ToprfTicket) (input : Qsag.Spec.Bytes),
-      impl.extract c sender w = some (.evalToprf t input) ∧
-      v = cfg.oprf ⟨t.keyId, t.epoch, input⟩ ∧
-      ∃ (i : Nat) (w₀ : W),
-        i < Qsag.Spec.pqCredentialProfile.toprfServers ∧ i ∉ cfg.corruptServers ∧
-        ((Qsag.Spec.CredPort.server i, w₀), Qsag.Spec.IdealCredOutput.toprfApproved) ∈ tr := by
+    ∃ a : Qsag.Spec.IdealCredState Attr O, impl.AbstractAt tr c a ∧
+      ∃ (t : Qsag.Spec.ToprfTicket) (input : Qsag.Spec.Bytes),
+        impl.extract c sender w = some (.evalToprf t input) ∧
+        v = cfg.oprf ⟨t.keyId, t.epoch, input⟩ ∧
+        ∃ (i : Nat) (w₀ : W),
+          i < Qsag.Spec.pqCredentialProfile.toprfServers ∧ i ∉ a.corruptServers ∧
+          ((Qsag.Spec.CredPort.server i, w₀), Qsag.Spec.IdealCredOutput.toprfApproved) ∈ tr := by
   obtain ⟨a, aTr, hRel, hTrA, hView⟩ := impl.abstract_run hInit hTrace
+  have hAt : impl.AbstractAt tr c a := ⟨hRel, aTr, hTrA, hView⟩
   obtain ⟨cmd, a', hExt, hStepA, _⟩ := impl.accept_ok hRel hAccepted
   obtain ⟨t, input, hCmd⟩ := Qsag.Spec.idealCredStep_output_command hStepA
   subst hCmd
-  obtain ⟨hVal, _, i, hi, hHonest, hMem⟩ :=
-    Qsag.Spec.idealCredMachine_toprf_provenance cfg rfl hTrA hCorrupt hStepA
+  obtain ⟨hVal, _, i, hi, hHonest, hMem, _⟩ :=
+    Qsag.Spec.idealCredMachine_toprf_provenance cfg rfl hTrA (hCorrupt a hAt) hStepA
   obtain ⟨w₀, hw₀⟩ := credSenderView_mem hView hMem
-  exact ⟨t, input, hExt, Qsag.Spec.IdealCredOutput.toprfEvaluated.inj hVal, i, w₀, hi, hHonest, hw₀⟩
+  exact ⟨a, hAt, t, input, hExt, Qsag.Spec.IdealCredOutput.toprfEvaluated.inj hVal, i, w₀, hi,
+    hHonest, hw₀⟩
 
 /-! ### The unauthenticated service is not an implementation -/
 
@@ -426,6 +532,7 @@ def credCommandClaimedPort {Attr : Type} : Qsag.Spec.CredCommand Attr → Qsag.S
   | .present h _ _ => .holder h
   | .approveToprf i _ => .server i
   | .evalToprf _ _ => .client
+  | .corrupt _ => .adversary
 
 /-- A service that authenticates nobody: it ignores who delivered a command and runs the ideal
     transition on the port the command claims. Any caller can issue invented attributes and
@@ -448,8 +555,18 @@ theorem unauthenticatedCredService_adversary_issues {Attr O : Type} [DecidableEq
       some (.issued 0) :=
   Qsag.Spec.idealCredStep_issuer_issues_at_init cfg holder attr newRoot
 
-/-- Tooth (referee 3, N2): with an honest issuer, the unauthenticated service satisfies
-    `CredentialImplementation` for no relation and no extractor. -/
+/-- An ideal run with no accepted input ends in the state it started from. -/
+private theorem idealCred_validTrace_nil {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O) {s a : Qsag.Spec.IdealCredState Attr O}
+    {t : List (Qsag.Spec.IdealCredInput Attr × Qsag.Spec.IdealCredOutput O)}
+    (h : (Qsag.Spec.idealCredMachine cfg).ValidTrace s t a) (ht : t = []) : a = s := by
+  induction h with
+  | nil _ => rfl
+  | accept _ _ _ => cases ht
+  | reject _ _ _ ih => exact ih ht
+
+/-- Tooth (referee 3, N2): with an issuer that is not corrupt at the start, the unauthenticated
+    service satisfies `CredentialImplementation` for no relation and no extractor. -/
 theorem unauthenticatedCredService_not_implementation {Attr O : Type} [DecidableEq Attr]
     (cfg : Qsag.Spec.IdealCredConfig O) (hHonest : cfg.issuerCorrupt = false) (attr : Attr) :
     ¬ Nonempty (CredentialImplementation Attr cfg (unauthenticatedCredService (Attr := Attr) cfg)) := by
@@ -466,14 +583,22 @@ theorem unauthenticatedCredService_not_implementation {Attr O : Type} [Decidable
     rw [hStep] at hIssues
     have hOut : out = Qsag.Spec.IdealCredOutput.issued 0 := Option.some.inj hIssues
     subst hOut
-    exact credentialImplementation_rejects_foreign_issue impl (c₀ := Qsag.Spec.IdealCredState.empty cfg)
-      rfl (.nil _) hHonest (by intro h; cases h) hStep
+    refine credentialImplementation_rejects_foreign_issue impl
+      (c₀ := Qsag.Spec.IdealCredState.empty cfg) (tr := []) rfl (.nil _) ?_
+      (by intro h; cases h) hStep
+    intro a hAt
+    obtain ⟨_, aTr, hTrA, hView⟩ := hAt
+    have hNil : aTr = [] := List.map_eq_nil_iff.mp hView
+    rw [idealCred_validTrace_nil cfg hTrA hNil]
+    exact hHonest
 
 #verify_constructive
   Qsag.Top.pcg_dual_lpn_bias_in_spec_ratBound
   Qsag.Top.rlwe_preprocessing_and_sis_boundary_chain
   Qsag.Top.threshold_mldsa_hvzk_sacrifice_and_prss_chain
   Qsag.Top.blindVc_presentation_provenance_and_collision_finder_roster
+  Qsag.Top.credential_sd_limbo256_tau33_interactive_soundness
+  Qsag.Top.credential_sd_opening_round_qrom_and_seed_tree_binding
   Qsag.Top.CredentialImplementation.abstract_run
   Qsag.Top.credentialImplementation_presentation_provenance
   Qsag.Top.credentialImplementation_issuance_authenticated
@@ -486,6 +611,24 @@ theorem unauthenticatedCredService_not_implementation {Attr O : Type} [Decidable
   Qsag.Top.credentialImplementation_rejects_foreign_presentation
 #tooth_pair Qsag.Top.credentialImplementation_issuance_authenticated vs
   Qsag.Top.unauthenticatedCredService_not_implementation
+
+
+/-- One malicious server is corrected under collision freedom only on the finite digest
+inputs associated with the consumed TOPRF cross-term calls. -/
+theorem toprf_digest_correct_on_observed_inputs
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (hCtx : ctx.length < 2 ^ 20) (bad : Fin 5)
+    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4)
+    (forgedFinal : Option (Fin 5 → Lane4))
+    (hFree : ∀ a ∈ toprfDigestObservedInputs204 H ctx layer bad fault faultDigest masks keys inputs,
+      ∀ b ∈ toprfDigestObservedInputs204 H ctx layer bad fault faultDigest masks keys inputs,
+      H a = H b → a = b) :
+    toprfActiveClient204 bad (toprfDigestCross204 H ctx layer bad fault faultDigest)
+        masks keys inputs forgedFinal =
+      some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)) :=
+  _root_.Qsag.toprfDigestClient204_correct_of_collision_free H ctx layer hCtx bad fault faultDigest
+    masks keys inputs forgedFinal hFree
 
 end Qsag.Top
 end

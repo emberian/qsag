@@ -6,21 +6,21 @@ namespace Qsag
 /-- The Goldilocks prime $p = 2^{64} - 2^{32} + 1 = 18446744069414584321$. -/
 @[expose] def goldilocksPrime : Nat := 18446744069414584321
 
-private def strictNat (n : Nat) (k : Nat → Nat) : Nat :=
+abbrev primalityStrictNat (n : Nat) (k : Nat → Nat) : Nat :=
   match n with
   | 0 => k 0
   | m + 1 => k (m + 1)
 
-private theorem strictNat_eq (n : Nat) (k : Nat → Nat) : strictNat n k = k n := by
+private theorem strictNat_eq (n : Nat) (k : Nat → Nat) : primalityStrictNat n k = k n := by
   cases n <;> rfl
 
-def modPowFuel : Nat → Nat → Nat → Nat → Nat
+@[expose] def modPowFuel : Nat → Nat → Nat → Nat → Nat
   | 0, _, _, m => 1 % m
   | fuel + 1, base, exp, m =>
     if exp = 0 then 1 % m
     else
-      strictNat (modPowFuel fuel base (exp / 2) m) fun half =>
-        strictNat ((half * half) % m) fun sq =>
+      primalityStrictNat (modPowFuel fuel base (exp / 2) m) fun half =>
+        primalityStrictNat ((half * half) % m) fun sq =>
           if exp % 2 = 1 then (sq * (base % m)) % m else sq
 
 private theorem pow_two_mul (b k : Nat) : b ^ (2 * k) = (b ^ k) * (b ^ k) := by
@@ -825,51 +825,19 @@ end Weierstrass
 
 /-! ## Kernel-Reducible Fueled Modular Power & Euclidean GCD -/
 
-def strictEval (n : Nat) (k : Nat → Nat) : Nat :=
-  match n with
-  | 0 => k 0
-  | m + 1 => k (m + 1)
+abbrev strictEval := primalityStrictNat
 
 private theorem strictEval_eq (n : Nat) (k : Nat → Nat) : strictEval n k = k n := by
   cases n <;> rfl
 
 /-- Fueled binary modular exponentiation (`O(fuel)` squarings in `decide +kernel`). -/
-@[expose] def powModFuel : Nat → Nat → Nat → Nat → Nat
-  | 0, _, _, m => 1 % m
-  | fuel + 1, base, exp, m =>
-    if exp = 0 then 1 % m
-    else
-      strictEval (powModFuel fuel base (exp / 2) m) fun half =>
-        strictEval ((half * half) % m) fun sq =>
-          if exp % 2 = 1 then (sq * (base % m)) % m else sq
+abbrev powModFuel := modPowFuel
 
 private theorem pow_two_mul_cert (b k : Nat) : b ^ (2 * k) = (b ^ k) * (b ^ k) := by
   rw [Nat.mul_comm 2 k, Nat.pow_mul, Nat.pow_succ, Nat.pow_one]
 
 theorem powModFuel_eq_pow_mod :
-    ∀ (fuel base exp m : Nat), exp < 2 ^ fuel → powModFuel fuel base exp m = (base ^ exp) % m
-  | 0, _, exp, m, hlt => by
-    have he0 : exp = 0 := by simp at hlt; omega
-    subst he0; simp [powModFuel]
-  | fuel + 1, base, exp, m, hlt => by
-    simp only [powModFuel]
-    if h0 : exp = 0 then
-      subst h0; simp
-    else
-      simp only [h0, ↓reduceIte, strictEval_eq]
-      have hexpHalf : exp / 2 < 2 ^ fuel := by rw [Nat.pow_succ] at hlt; omega
-      have ih := powModFuel_eq_pow_mod fuel base (exp / 2) m hexpHalf
-      have hsq : ((powModFuel fuel base (exp / 2) m) * (powModFuel fuel base (exp / 2) m)) % m =
-          (base ^ (2 * (exp / 2))) % m := by
-        rw [ih, ← Nat.mul_mod, ← pow_two_mul_cert]
-      have hmod2 : exp % 2 = 0 ∨ exp % 2 = 1 := by omega
-      rcases hmod2 with hr0 | hr1
-      · simp only [hr0, show ¬ (0 = 1) by decide, ↓reduceIte]
-        rw [hsq, show 2 * (exp / 2) = exp by omega]
-      · simp only [hr1, ↓reduceIte]
-        have hexp : exp = 2 * (exp / 2) + 1 := by omega
-        conv => rhs; rw [hexp, Nat.pow_add, Nat.pow_one, Nat.mul_mod]
-        rw [hsq]
+    ∀ (fuel base exp m : Nat), exp < 2 ^ fuel → powModFuel fuel base exp m = (base ^ exp) % m := modPowFuel_eq_pow_mod
 
 /-- Fueled Euclidean GCD avoiding `WellFounded.fix` inside kernel reduction (`decide +kernel`). -/
 @[expose] def gcdFuel : Nat → Nat → Nat → Nat

@@ -1,4 +1,9 @@
 module
+import all Qsag.Oracle.Keccak
+import all Qsag.Protocol.Aggregation.Aggregation
+import all Qsag.Math.QuarticExt4
+import all Qsag.Math.GoldilocksBase
+
 
 public import Qsag.Exec.PosixCrashWal
 public import Qsag.Protocol.Signing.HashSigs
@@ -9,7 +14,7 @@ import all Qsag.Math.Primality
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 import Qsag.Tactic.AssuranceKit
-import Qsag.Math.Tactic.MaskBijection
+public import Qsag.Math.Tactic.MaskBijection
 
 public section
 set_option maxRecDepth 4096

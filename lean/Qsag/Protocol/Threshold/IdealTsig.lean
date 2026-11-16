@@ -35,10 +35,6 @@ public import Qsag.Oracle.Poseidon2
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.MaliciousSecurity
-import all Qsag.Math.Counting
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.PolyRing
-import all Qsag.Math.HasseHensel
 
 public section
 namespace Qsag
@@ -2016,6 +2012,7 @@ private theorem towerK_recon (k : Nat) (c : TowerElem k) :
         (fun hx : Nat × TowerElem k => RoundPoly.evalCoeffs coeffs hx.2)) =
       RoundPoly.evalCoeffs coeffs (@CommRingOps.zero (TowerElem k) _) := by
   intro coeffs hLen
+  rw [ringDot_eq]
   rcases coeffs with _ | ⟨a, _ | ⟨b, _ | ⟨_, _⟩⟩⟩
   · exact tower_recon3_zero k
   · exact tower_recon3_one k c a

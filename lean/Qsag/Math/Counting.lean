@@ -704,7 +704,7 @@ end
 namespace Qsag
 /-- Module-local constructive finite sum `∑_{i : Fin n} f i`, keeping full definitional reduction
     available inside proofs and decidable evaluations without exposing internal `UcGames` bodies. -/
-def qsum : (n : Nat) → (Fin n → Nat) → Nat
+@[expose] def qsum : (n : Nat) → (Fin n → Nat) → Nat
   | 0, _ => 0
   | n + 1, f => f ⟨0, Nat.zero_lt_succ n⟩ + qsum n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
 
@@ -1285,4 +1285,50 @@ end Qsag
 
 namespace Qsag
  theorem prodPool_eq {α : Type} (S : List α) : prodPool S = S.flatMap (fun x => S.map (fun y => (x,y))) := by rfl
+
+/-! ### Exports for lane agg-budget -/
+
+/-- A filter whose predicate is false on every element is empty. -/
+theorem filter_eq_nil_of_all_false {α : Type} (p : α → Bool) :
+    ∀ (xs : List α), (∀ a ∈ xs, p a = false) → xs.filter p = []
+  | [], _ => rfl
+  | a :: rest, h => by
+    simp only [List.filter_cons, h a (.head rest), Bool.false_eq_true, ↓reduceIte]
+    exact filter_eq_nil_of_all_false p rest (fun x hx => h x (.tail a hx))
+
+/-- Union bound over a list of events: if each `pred a` selects at most `B` elements of `xs`,
+    the elements selected by some `a ∈ items` number at most `items.length * B`. -/
+theorem filter_any_length_le_mul {α β : Type} (items : List α) (pred : α → β → Bool)
+    (xs : List β) (B : Nat)
+    (hEach : ∀ a ∈ items, (xs.filter (pred a)).length ≤ B) :
+    (xs.filter (fun x => items.any (fun a => pred a x))).length ≤ items.length * B := by
+  induction items with
+  | nil =>
+    have hNil : xs.filter (fun _ => false) = [] :=
+      filter_eq_nil_of_all_false (fun _ => false) xs (fun _ _ => rfl)
+    simp only [List.any_nil, hNil, List.length_nil, Nat.zero_mul, Nat.le_refl]
+  | cons a rest ih =>
+    have hSub : ∀ (ys : List β),
+        (ys.filter (fun x => (a :: rest).any (fun it => pred it x))).length ≤
+          (ys.filter (pred a)).length +
+          (ys.filter (fun x => rest.any (fun it => pred it x))).length := by
+      have hAnyCons : (fun x => (a :: rest).any (fun it => pred it x)) =
+          (fun x => pred a x || rest.any (fun it => pred it x)) :=
+        funext (fun _ => List.any_cons)
+      rw [hAnyCons]
+      intro ys
+      induction ys with
+      | nil => exact Nat.le_refl 0
+      | cons y yt ihy =>
+        simp only [List.filter_cons]
+        cases h1 : pred a y <;> cases h2 : rest.any (fun it => pred it y) <;>
+          simp only [Bool.true_or, Bool.false_or, Bool.false_eq_true, ↓reduceIte,
+            List.length_cons] <;> omega
+    have hA := hEach a (.head rest)
+    have hR := ih (fun it hit => hEach it (.tail a hit))
+    have hTot := hSub xs
+    simp only [List.length_cons, Nat.succ_mul]
+    omega
+-- (end exports for lane agg-budget)
+
 end Qsag

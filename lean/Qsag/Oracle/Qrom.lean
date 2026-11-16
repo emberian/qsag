@@ -75,6 +75,13 @@ theorem evalOracleComp_pin_untouched {Dom Cod α : Type} [DecidableEq Dom]
     obtain ⟨hEval, hLog⟩ := evalOracleComp_pin_untouched O x₀ v (next (O q)) hNotMem.2
     exact ⟨hEval, congrArg (q :: ·) hLog⟩
 
+theorem queryLog_pure {Dom Cod α : Type} (O : Dom → Cod) (x : α) :
+    queryLog O (.pure x) = [] := by unfold queryLog; rfl
+
+theorem queryLog_query {Dom Cod α : Type} (O : Dom → Cod) (q : Dom)
+    (next : Cod → OracleComp Dom Cod α) :
+    queryLog O (.query q next) = q :: queryLog O (next (O q)) := by simp only [queryLog]
+
 /-- **Slice Reprogramming Lemma (`condProb_pin_untouched`)**. -/
 theorem condProb_pin_untouched {Dom Cod α : Type} [DecidableEq Dom]
     (C : Nat) (decodeCod : Fin C → Cod)
@@ -258,8 +265,8 @@ theorem RatBound.to_ratLe_iff (a b : RatBound) :
 /-! ## §2. Unitary Quantum Query Mechanics (`GaussInt`), `[BBBV97]` / `[AHU19]` One-Way-to-Hiding,
            Born Rule & Adaptive Query Trees -/
 
-private theorem ofNat_add_eq (a b : Nat) : Int.ofNat (a + b) = Int.ofNat a + Int.ofNat b := rfl
-private theorem ofNat_mul_eq (a b : Nat) : Int.ofNat (a * b) = Int.ofNat a * Int.ofNat b := rfl
+theorem ofNat_add_eq (a b : Nat) : Int.ofNat (a + b) = Int.ofNat a + Int.ofNat b := rfl
+theorem ofNat_mul_eq (a b : Nat) : Int.ofNat (a * b) = Int.ofNat a * Int.ofNat b := rfl
 
 private theorem int_sq_eq_natAbs_sq (a : Int) : a * a = Int.ofNat (a.natAbs * a.natAbs) := by
   cases a with
@@ -272,7 +279,7 @@ private theorem int_sq_nonneg (a : Int) : 0 ≤ a * a := by
 
 /-! ### §2.1 Constructive Finite Sum Combinatorics & Bijection Invariance -/
 
-private def finIntSum : (q : Nat) → (Fin q → Int) → Int
+def finIntSum : (q : Nat) → (Fin q → Int) → Int
   | 0, _ => 0
   | q + 1, f => f ⟨0, Nat.zero_lt_succ q⟩ +
       finIntSum q (fun t => f ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
@@ -498,7 +505,7 @@ def queryMassOn {cardX w cardAnc : Nat} (S : Fin cardX → Bool) (ψ : QVec card
   qsum cardX (fun x => if S x = true then queryWeight ψ x else 0)
 
 /-- Total squared Hilbert-space norm `‖ψ‖² = ∑_{x, y, a} |ψ(x, y, a)|²`. -/
-def stateNormSq {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) : Nat :=
+@[expose] def stateNormSq {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) : Nat :=
   qsum cardX (fun x => queryWeight ψ x)
 
 /-- Unnormalized Born numerator `∑_{x : E x = true} queryWeight ψ x` for projective measurement `E`
@@ -1469,7 +1476,7 @@ def shiftedFiberOracle {Code : Type} [DecidableEq Code]
 def blankFiberOracle (n w : Nat) : Fin (2 ^ n) → BitVec (w + 1) :=
   fun _ => 0#(w + 1)
 
-private theorem sum_masks_shifted_fiber {Code : Type} [DecidableEq Code]
+theorem sum_masks_shifted_fiber {Code : Type} [DecidableEq Code]
     (n : Nat) (encode : BitVec n → Code) (target : Code) (weight : Fin (2 ^ n) → Nat) :
     qsum (2 ^ n) (fun m =>
       qsum (2 ^ n) (fun x =>
@@ -7060,8 +7067,300 @@ theorem publicSpnPreimageProbability_le_one {anc q : Nat} (p : PublicPermutation
 adversary before its online run; the function family and code may depend on them.
 This does not model extra queries to OTHER chain addresses or a full signature game. -/
 def publicChainPreimageProbability {anc q : Nat}
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8) (address : PublicChainAddress)
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8) (address : PublicChainAddress)
     (adversary : PublicChainAddress → PublicSpnPreimageAdversary anc q) : RatBound :=
-  publicSpnFreshPreimageProbability (publicChainPermutation hash32 address) (adversary address)
+  publicSpnFreshPreimageProbability (publicChainPermutation framedXof address) (adversary address)
+
+/-! ### Equation lemmas for the Gaussian-integer state vectors, the query gate, the adversary
+run and the one-bit Walsh transform
+
+Each restates the defining equation of a definition whose body this module does not expose, so
+that downstream modules can rewrite with it. -/
+
+theorem GaussInt.zero_def : GaussInt.zero = ⟨0, 0⟩ := by rfl
+
+theorem GaussInt.add_def (z w : GaussInt) : GaussInt.add z w = ⟨z.re + w.re, z.im + w.im⟩ := by
+  rfl
+
+theorem GaussInt.sub_def (z w : GaussInt) : GaussInt.sub z w = ⟨z.re - w.re, z.im - w.im⟩ := by
+  rfl
+
+theorem QVec.zero_apply (cardX w cardAnc : Nat) (x : Fin cardX) (y : Fin (2 ^ w))
+    (a : Fin cardAnc) : QVec.zero cardX w cardAnc x y a = GaussInt.zero := by rfl
+
+theorem QVec.sub_apply {cardX w cardAnc : Nat} (ψ φ : QVec cardX w cardAnc) (x : Fin cardX)
+    (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    ψ.sub φ x y a = GaussInt.sub (ψ x y a) (φ x y a) := by rfl
+
+theorem oracleXor_apply {cardX w cardAnc : Nat} (H : Fin cardX → BitVec w)
+    (ψ : QVec cardX w cardAnc) (x : Fin cardX) (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    oracleXor H ψ x y a = ψ x (xorFin y (H x)) a := by rfl
+
+theorem advStateAt_zero {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) (h0 : 0 ≤ q) : advStateAt A H 0 h0 = A.init := by rfl
+
+theorem advStateAt_succ {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) (t : Nat) (ht : t + 1 ≤ q) :
+    advStateAt A H (t + 1) ht =
+      (A.steps ⟨t, ht⟩).apply (oracleXor H (advStateAt A H t (Nat.le_of_succ_le ht))) := by rfl
+
+theorem oracleWalsh_zero (f : OracleBitTable 0 → GaussInt) (u : OracleBitTable 0) :
+    oracleWalsh 0 f u = f () := by rfl
+
+theorem oracleWalsh_succ (n : Nat) (f : OracleBitTable (n + 1) → GaussInt) (b : Bool)
+    (d : OracleBitTable n) : oracleWalsh (n + 1) f (b, d) =
+      if b then (oracleWalsh n (fun h => f (false, h)) d).sub
+        (oracleWalsh n (fun h => f (true, h)) d)
+      else (oracleWalsh n (fun h => f (false, h)) d).add
+        (oracleWalsh n (fun h => f (true, h)) d) := by rfl
+
+theorem fourierOracleState_apply {n cardAnc : Nat} (ψ : CoherentBitState n cardAnc)
+    (d : OracleBitTable n) (x : Fin n) (y : Fin (2 ^ 1)) (a : Fin cardAnc) :
+    fourierOracleState ψ d x y a = oracleWalsh n (fun h => ψ h x y a) d := by rfl
+
+theorem tableWeight_zero (u : OracleBitTable 0) : tableWeight 0 u = 0 := by rfl
+
+theorem tableWeight_succ (n : Nat) (b : Bool) (d : OracleBitTable n) :
+    tableWeight (n + 1) (b, d) = (if b then 1 else 0) + tableWeight n d := by rfl
+
+theorem tableBitOracle_succ (n : Nat) (b : Bool) (h : OracleBitTable n) (x : Fin (n + 1)) :
+    tableBitOracle (n + 1) (b, h) x =
+      Fin.cases (if b then 1#1 else 0#1) (tableBitOracle n h) x := by rfl
+
+theorem QVec.queryWeight_def {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) (x : Fin cardX) :
+    QVec.queryWeight ψ x =
+      qsum (2 ^ w) (fun y => qsum cardAnc (fun a => GaussInt.normSq (ψ x y a))) := by rfl
+
+theorem QVec.queryMassOn_def {cardX w cardAnc : Nat} (S : Fin cardX → Bool)
+    (ψ : QVec cardX w cardAnc) :
+    QVec.queryMassOn S ψ = qsum cardX (fun x => if S x = true then QVec.queryWeight ψ x else 0) := by
+  rfl
+
+theorem QVec.stateNormSq_def {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) :
+    QVec.stateNormSq ψ = qsum cardX (fun x => QVec.queryWeight ψ x) := by rfl
+
+/-! ### Exports for lane threshold-a -/
+
+theorem QueryBounded_pure {Dom Cod α : Type} (Q : Nat) (a : α) :
+    QueryBounded Q (OracleComp.pure a : OracleComp Dom Cod α) = True := by
+  cases Q <;> rfl
+
+theorem QueryBounded_zero_query {Dom Cod α : Type} (q : Dom) (next : Cod → OracleComp Dom Cod α) :
+    QueryBounded 0 (OracleComp.query q next) = False := by rfl
+
+theorem QueryBounded_succ_query {Dom Cod α : Type} (Q : Nat) (q : Dom)
+    (next : Cod → OracleComp Dom Cod α) :
+    QueryBounded (Q + 1) (OracleComp.query q next) = ∀ y : Cod, QueryBounded Q (next y) := by rfl
+
+theorem keyedPrfRealAccept_def {TagDom Cod : Type} (cardB : Nat)
+    (baseO : Fin cardB × TagDom → Cod) (secretFn : TagDom → Cod)
+    (A : OracleComp (Fin cardB × TagDom) Cod Bool) :
+    keyedPrfRealAccept cardB baseO secretFn A =
+      qsum cardB (fun kStar =>
+        if evalOracleComp (fun q => if q.1 = kStar then secretFn q.2 else baseO q) A then 1 else 0) := by
+  rfl
+
+theorem keyedPrfIdealAccept_def {TagDom Cod : Type} (cardB : Nat)
+    (baseO : Fin cardB × TagDom → Cod) (A : OracleComp (Fin cardB × TagDom) Cod Bool) :
+    keyedPrfIdealAccept cardB baseO A =
+      qsum cardB (fun _ => if evalOracleComp baseO A then 1 else 0) := by
+  rfl
+
+/-! ### Exports for lane agg-whir-cert -/
+
+theorem merkleRootFromPath_nil {D : Type} (H : Nat → Nat → D → D → D) (lvl idx : Nat) (cur : D) :
+    merkleRootFromPath H lvl idx cur [] = cur := by rfl
+
+theorem merkleRootFromPath_cons {D : Type} (H : Nat → Nat → D → D → D) (lvl idx : Nat)
+    (cur sib : D) (rest : List D) :
+    merkleRootFromPath H lvl idx cur (sib :: rest) =
+      merkleRootFromPath H (lvl + 1) (idx / 2)
+        (if idx % 2 = 0 then H lvl (idx / 2) cur sib else H lvl (idx / 2) sib cur) rest := by rfl
+
+theorem qromOrdinaryFlipMass_def {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q) (H : Fin cardX → BitVec w)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool) :
+    qromOrdinaryFlipMass A H proj doomed live =
+      qsum cardX (fun x => if (doomed H x && live H x) = true then
+        QVec.queryMassOn (fun z => decide (x = proj z)) (runQuantumAdv A H) else 0) := by rfl
+
+/-! ### Exports for lane agg-budget -/
+
+/- Defining equations `f_def : f x = body` of definitions whose bodies are not exposed, for
+   downstream modules that import this one without `import all`. -/
+
+theorem fiberCard_def {Code : Type} [DecidableEq Code] (n : Nat) (encode : BitVec n → Code) (target : Code) :
+    fiberCard n encode target = qsum (2 ^ n) (fun j => if encode (BitVec.ofFin j) = target then 1 else 0) := by rfl
+
+theorem quantumZhandryMultiTargetBound_def (n M qHash : Nat) :
+    quantumZhandryMultiTargetBound n M qHash = ⟨8 * M * (qHash + 1) ^ 2, 2 ^ n, Nat.two_pow_pos n⟩ := by rfl
+
+theorem quantumGroverSingleTargetBound_def (n qHash : Nat) :
+    quantumGroverSingleTargetBound n qHash = quantumZhandryMultiTargetBound n 1 qHash := by rfl
+
+theorem groverPureSearchBound_def (n qHash : Nat) :
+    groverPureSearchBound n qHash = ⟨qHash ^ 2, 2 ^ n, Nat.two_pow_pos n⟩ := by rfl
+
+theorem classicalFiatShamirBound_def (qHash : Nat) (pErr : RatBound) :
+    classicalFiatShamirBound qHash pErr = RatBound.scale (qHash + 1) pErr := by rfl
+
+theorem quantumGroverGrindingBound_def (qHash : Nat) (pErr : RatBound) :
+    quantumGroverGrindingBound qHash pErr = RatBound.scale (8 * (qHash + 1) ^ 2) pErr := by rfl
+
+theorem quantumDfmMeasureReprogramBound_def (mu qHash : Nat) (pErr : RatBound) :
+    quantumDfmMeasureReprogramBound mu qHash pErr = RatBound.scale ((2 * qHash + 1) ^ (2 * mu)) pErr := by rfl
+
+theorem gaussDoublePow_base (z : GaussInt) : gaussDoublePow 0 z = z := by rfl
+
+theorem gaussDoublePow_step (k : Nat) (z : GaussInt) :
+    gaussDoublePow (k + 1) z = (gaussDoublePow k z).add (gaussDoublePow k z) := by rfl
+
+theorem qvecDoublePow_def {cardX w cardAnc : Nat} (k : Nat) (ψ : QVec cardX w cardAnc) :
+    qvecDoublePow k ψ = fun x y a => gaussDoublePow k (ψ x y a) := by rfl
+
+theorem QVec.zero_def (cardX w cardAnc : Nat) :
+    QVec.zero cardX w cardAnc = fun _ _ _ => GaussInt.zero := by rfl
+
+theorem QVec.add_def {cardX w cardAnc : Nat} (ψ φ : QVec cardX w cardAnc) :
+    QVec.add ψ φ = fun x y a => GaussInt.add (ψ x y a) (φ x y a) := by rfl
+
+theorem QVec.sub_def {cardX w cardAnc : Nat} (ψ φ : QVec cardX w cardAnc) :
+    QVec.sub ψ φ = fun x y a => GaussInt.sub (ψ x y a) (φ x y a) := by rfl
+
+theorem oracleXor_def {cardX w cardAnc : Nat} (H : Fin cardX → BitVec w)
+    (ψ : QVec cardX w cardAnc) :
+    oracleXor H ψ = fun x y a => ψ x (xorFin y (H x)) a := by rfl
+
+theorem runQuantumAdv_def {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) :
+    runQuantumAdv A H = advStateAt A H q (Nat.le_refl q) := by rfl
+
+theorem reprogramOracle_def {cardX w : Nat} (H : Fin cardX → BitVec w)
+    (xStar : Fin cardX) (yStar : BitVec w) :
+    reprogramOracle H xStar yStar = fun x => if x = xStar then yStar else H x := by rfl
+
+theorem uniformOracleSum_zero (w : Nat) (f : (Fin 0 → BitVec w) → Nat) :
+    uniformOracleSum w 0 f = f Fin.elim0 := by rfl
+
+theorem uniformOracleSum_succ (w n : Nat) (f : (Fin (n + 1) → BitVec w) → Nat) :
+    uniformOracleSum w (n + 1) f =
+      qsum (2 ^ w) (fun j => uniformOracleSum w n (fun H => f (Fin.cases (BitVec.ofFin j) H))) := by
+  rfl
+
+theorem measuredEventMass_def {cardX w cardAnc Q : Nat} (A : QuantumAdv cardX w cardAnc Q)
+    (event : (Fin cardX → BitVec w) → List (Fin cardX) → Fin cardX → Bool) :
+    measuredEventMass A event =
+      uniformOracleSum w cardX (fun H => sumLogs cardX Q (fun xs =>
+        QVec.queryMassOn (event H xs) (measuredStateAt A H Q (Nat.le_refl Q) xs))) := by rfl
+
+theorem quantumBhtCollisionBound_def (n qHash : Nat) :
+    quantumBhtCollisionBound n qHash = ⟨8 * (qHash + 1) ^ 3, 2 ^ n, Nat.two_pow_pos n⟩ := by rfl
+
+theorem oracleTableSum_succ (n : Nat) (f : OracleBitTable (n + 1) → Nat) :
+    oracleTableSum (n + 1) f =
+      oracleTableSum n (fun h => f (false, h)) + oracleTableSum n (fun h => f (true, h)) := by rfl
+
+theorem oracleTableSum_nil (f : OracleBitTable 0 → Nat) : oracleTableSum 0 f = f () := by rfl
+
+theorem GaussInt.normSqInt_def (z : GaussInt) :
+    GaussInt.normSqInt z = z.re * z.re + z.im * z.im := by rfl
+
+theorem GaussInt.normSq_def (z : GaussInt) :
+    GaussInt.normSq z = z.re.natAbs * z.re.natAbs + z.im.natAbs * z.im.natAbs := by rfl
+
+theorem batchMerkleFailure_def {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (slots : List (MerkleOpeningSlot cardX w))
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (x : Fin cardX) :
+    batchMerkleFailure L slots H xs x =
+      slots.any (fun s => measuredMerkleFailure L s.level s.depth s.readout H xs x) := by rfl
+
+theorem measuredMerkleFailure_def {cardX w : Nat} (L : MerkleAddressLayout cardX w) (lvl d : Nat)
+    (opening : Fin cardX → MerkleOpeningReadout w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (o : Fin cardX) :
+    measuredMerkleFailure L lvl d opening H xs o =
+      (merkleOpeningShape L d (opening o) &&
+        decide (merkleRootFromPath (L.hash H) lvl (opening o).idx (opening o).leaf
+          (opening o).path = (opening o).rt) &&
+        !decide (extractOnlineMerkleOpening (opening o).rt (merkleRecords L H xs) lvl
+          (opening o).path.length (opening o).idx = some ((opening o).leaf, (opening o).path))) := by
+  rfl
+
+theorem quantumExperimentTotal_def {cardX w cardAnc Q : Nat} (A : QuantumAdv cardX w cardAnc Q) :
+    quantumExperimentTotal A =
+      (2 ^ w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init) := by rfl
+
+-- (end exports for lane agg-budget)
+
+
+/-- Public equations for finite quantum sums and state evolution. -/
+theorem finIntSum_zero (f : Fin 0 → Int) : finIntSum 0 f = 0 := by rfl
+theorem finIntSum_succ (q : Nat) (f : Fin (q + 1) → Int) :
+    finIntSum (q + 1) f = f ⟨0, Nat.zero_lt_succ q⟩ +
+      finIntSum q (fun t => f ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩) := by rfl
+theorem finGaussSum_zero (f : Fin 0 → GaussInt) : finGaussSum 0 f = GaussInt.zero := by rfl
+theorem finGaussSum_succ (q : Nat) (f : Fin (q + 1) → GaussInt) :
+    finGaussSum (q + 1) f = GaussInt.add (f ⟨0, Nat.zero_lt_succ q⟩)
+      (finGaussSum q (fun t => f ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)) := by rfl
+theorem GaussInt.scaleInt_def (c : Int) (z : GaussInt) :
+    GaussInt.scaleInt c z = ⟨c * z.re, c * z.im⟩ := by rfl
+theorem QVec.measureNormSq_def {cardX w cardAnc : Nat} (E : Fin cardX → Bool)
+    (ψ : QVec cardX w cardAnc) : QVec.measureNormSq E ψ = QVec.queryMassOn E ψ := by rfl
+theorem QVec.bornProb_def {cardX w cardAnc : Nat} (E : Fin cardX → Bool)
+    (ψ : QVec cardX w cardAnc) (h : 0 < QVec.stateNormSq ψ) :
+    QVec.bornProb E ψ h = ⟨QVec.measureNormSq E ψ, QVec.stateNormSq ψ, h⟩ := by rfl
+theorem xorFin_def {w : Nat} (y : Fin (2 ^ w)) (v : BitVec w) :
+    xorFin y v = (BitVec.ofFin y ^^^ v).toFin := by rfl
+
+theorem prefixScale_zero {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (h : 0 ≤ q) : prefixScale A 0 h = 1 := by rfl
+theorem prefixScale_succ {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (t : Nat) (h : t + 1 ≤ q) : prefixScale A (t + 1) h =
+    (A.steps ⟨t, h⟩).scaleSq * prefixScale A t (Nat.le_of_succ_le h) := by rfl
+
+/-! ## Finite adaptive oracle traces -/
+
+def OracleComp.bind {D C A B : Type} : OracleComp D C A → (A → OracleComp D C B) → OracleComp D C B
+  | .pure a, f => f a
+  | .query q next, f => .query q (fun c => (next c).bind f)
+
+theorem evalOracleComp_bind {D C A B : Type} (O : D → C)
+    (p : OracleComp D C A) (f : A → OracleComp D C B) :
+    evalOracleComp O (p.bind f) = evalOracleComp O (f (evalOracleComp O p)) := by
+  induction p with
+  | pure a => rfl
+  | query q next ih => exact ih (O q)
+
+theorem evalOracleComp_pure {D C A : Type} (O : D → C) (a : A) :
+    evalOracleComp O (.pure a : OracleComp D C A) = a := by rfl
+
+theorem evalOracleComp_query {D C A : Type} (O : D → C) (q : D) (next : C → OracleComp D C A) :
+    evalOracleComp O (.query q next) = evalOracleComp O (next (O q)) := by rfl
+
+/-- Agreement is needed only on the finite adaptive query log of the actual execution. -/
+theorem evalOracleComp_agree_on_queryLog {D C A : Type} (actual ideal : D → C)
+    (p : OracleComp D C A) (h : ∀ q ∈ queryLog actual p, actual q = ideal q) :
+    evalOracleComp actual p = evalOracleComp ideal p := by
+  induction p with
+  | pure a => rfl
+  | query q next ih =>
+    have hq : actual q = ideal q := h q (.head _)
+    have hn : ∀ x ∈ queryLog actual (next (actual q)), actual x = ideal x :=
+      fun x hx => h x (.tail _ hx)
+    change evalOracleComp actual (next (actual q)) = evalOracleComp ideal (next (ideal q))
+    rw [← hq]
+    exact ih (actual q) hn
 
 end Qsag
+
+public section
+namespace Qsag
+
+theorem verifyCanopyMultiproof_depth1_leaf0 {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D) (commitment a b : D) :
+    verifyCanopyMultiproof nodeHash rootHash 1 commitment [(0, a)] [b] =
+      decide (rootHash 1 (nodeHash 1 a b) = commitment) := by
+  simp [verifyCanopyMultiproof, canopyIndicesOk, canopyLevels, canopyLevelStep, canopyParentHash]
+
+end Qsag
+end

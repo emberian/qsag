@@ -1,10 +1,9 @@
 module
-public import Qsag.Custody.SeparatedCustodyUcResource
+import all Qsag.Custody.CustodySuiteFull
+public import Qsag.Exec.SeparatedCustodyResource
 public import Qsag.Tests.SeparatedCustodyChecks
 public import Qsag.Tests.RssProductionProfileChecks
-import all Qsag.Custody.SeparatedCustodyUcResource
-import all Qsag.Custody.SeparatedCustodyRequestHistory
-import all Qsag.Custody.SeparatedCustodyRequestPolicy
+import all Qsag.Exec.SeparatedCustodyResource
 import all Qsag.Tests.SeparatedCustodyChecks
 import all Qsag.Tests.RssProductionProfileChecks
 public section
@@ -22,11 +21,12 @@ def input : Input :=
   ⟨request, tx.1, tx.2, 1000, 0,
     [{ Custody.Checks.opening with session := request.sessionId }]⟩
 def deployment : Deployment :=
-  { signer := Custody.Checks.cfg
+  { deploymentId := Custody.Checks.dep
+    signer := Custody.Checks.cfg
     keys := fun i => if i = 0 then Custody.Checks.key else
       ⟨List.replicate 32 0x18, List.replicate 32 0x2A, List.replicate 32 0x44⟩
     rounds := fun _ => ⟨fun _ _ => Custody.Checks.macKeys, [0],
-      fun _ => roundCommitment (intent profile input)⟩
+      fun _ => roundCommitment Custody.Checks.dep (intent profile input)⟩
     caps := fun _ => 100
     policies := fun i => demoQuorumCustodian i peerKey (List.replicate 32 0x66)
     numParties := 2

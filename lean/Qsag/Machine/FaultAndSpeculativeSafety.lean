@@ -1,4 +1,5 @@
 module
+import all Qsag.Oracle.Keccak
 
 public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Exec.PosixCrashWal
@@ -3375,7 +3376,7 @@ theorem arbitrary_depth_openings_unique_or_collision (suite : TweakableHashSuite
 
 This section lifts the all-layer fault-injection gate directly onto the Rust-exact production
 verifier (`verifyProductionPqHashSig` and `verifyProductionHypertreeLayers` in `Qsag.HashSigs`),
-where upper layers hash via `TAG_H_INTERNAL` (`productionLayerDigest`), stateless FORS indices are
+where upper layers hash via `tagHInternal` (`productionLayerDigest`), stateless FORS indices are
 threaded from `deriveProductionStatelessInputs`, FORS leaves use `(j, u)` addressing, and `.forsTree`
 Merkle nodes bind `keyPair = kp0`.
 

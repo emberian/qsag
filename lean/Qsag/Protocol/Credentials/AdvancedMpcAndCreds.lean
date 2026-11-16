@@ -5475,5 +5475,234 @@ end PresentationView
 theorem tooth_norm_rejects_modulus :
     checkCenteredInfNorm 8380417 1 [8380417] = false := by decide
 
+/-! ## Selective-disclosure presentation: `N = 256` seed tree and hidden-party opening
+
+`prove_selective_disclosure` / `verify_presentation` of `crates/qsag-cred/src/blind_vc.rs` run
+`sd_repetitions` (33 at `Quantum128`) repetitions of a `VC_SD_LIMBO_PARTIES = 256` party
+MPC-in-the-head check over `GF(p^5)`. Each repetition expands a depth-`VC_SD_GGM_DEPTH = 8`
+binary seed tree, commits to every party's leaf, and opens all parties but one by revealing the
+eight sibling seeds on the hidden party's path (`extract_ggm_copath`,
+`reconstruct_ggm_leaves_256`).
+
+This section models the seed tree and the last (opening) round only. The check values of a
+repetition are a table `defect : Fin 256 → GF(p^5)` supplied to the opening check; how the
+verifier derives them from the opened parties' tapes, the folding weights and the evaluation
+point is not modelled here. The count over all three challenge rounds is in
+`Qsag.Protocol.Credentials.RepetitionCutAndChoose`.
+
+Representation: paths and copaths are listed from the root down (Rust lists the copath from
+the leaf up), and the PRG takes the heap index of the node it expands (root `1`), which
+determines the `(depth, node_idx)` pair that `ggm_expand_children` absorbs. -/
+
+inductive CredentialVec (α : Type) : Nat → Type
+  | nil : CredentialVec α 0
+  | cons {n : Nat} : α → CredentialVec α n → CredentialVec α (n + 1)
+  deriving DecidableEq, Repr
+
+/-- `VC_SD_LIMBO_PARTIES`. -/
+def credentialSdParties : Nat := 256
+/-- `VC_SD_GGM_DEPTH`. -/
+def credentialSdGgmDepth : Nat := 8
+/-- `ZkSoundnessProfile::Quantum128.sd_repetitions()`. -/
+def credentialSdRepetitions : Nat := 33
+/-- `ZkSoundnessProfile::Classical128.sd_repetitions()`. -/
+def credentialSdRepetitionsClassical : Nat := 17
+
+theorem credentialSdParties_eq : credentialSdParties = 256 := by rfl
+theorem credentialSdGgmDepth_eq : credentialSdGgmDepth = 8 := by rfl
+theorem credentialSdRepetitions_eq : credentialSdRepetitions = 33 := by rfl
+theorem credentialSdRepetitionsClassical_eq : credentialSdRepetitionsClassical = 17 := by rfl
+
+/-- Coefficients of an element of `GF(p)[T]/(T^5 - 3)`, lowest degree first (`Fp5`). Only
+    equality with zero is used below. -/
+abbrev CredentialFp5 := Fin 5 → Goldilocks
+
+instance : DecidableEq CredentialFp5 := fun a b =>
+  if h : (List.finRange 5).all (fun i => decide (a i = b i)) = true then
+    .isTrue (funext (fun i => of_decide_eq_true
+      (List.all_eq_true.mp h i (List.mem_finRange i))))
+  else .isFalse (fun he => h (by subst he; simp))
+
+/-- `Fp5::ZERO`. -/
+def credentialFp5Zero : CredentialFp5 := fun _ => Goldilocks.zero
+
+theorem credentialFp5Zero_apply (i : Fin 5) : credentialFp5Zero i = Goldilocks.zero := by rfl
+
+abbrev CredentialGgmSeed := BitVec 256
+/-- Length-doubling expansion of one tree node: heap index and seed to the two child seeds. -/
+abbrev CredentialGgmPrg := Nat → CredentialGgmSeed → CredentialGgmSeed × CredentialGgmSeed
+
+/-- Root-to-leaf branch bits of leaf `i` in a depth-`d` tree. -/
+def credentialGgmPath : (d : Nat) → Nat → CredentialVec Bool d
+  | 0, _ => .nil
+  | d + 1, i => .cons (decide (i / 2 ^ d % 2 = 1)) (credentialGgmPath d i)
+
+/-- Leaf seed reached from `seed` at heap index `node` along `path`. -/
+def credentialGgmLeaf (prg : CredentialGgmPrg) :
+    {d : Nat} → Nat → CredentialGgmSeed → CredentialVec Bool d → CredentialGgmSeed
+  | 0, _, seed, .nil => seed
+  | _ + 1, node, seed, .cons b path =>
+    credentialGgmLeaf prg (2 * node + if b then 1 else 0)
+      (if b then (prg node seed).2 else (prg node seed).1) path
+
+/-- Sibling seeds along `path`, root level first. -/
+def credentialGgmCopath (prg : CredentialGgmPrg) :
+    {d : Nat} → Nat → CredentialGgmSeed → CredentialVec Bool d → CredentialVec CredentialGgmSeed d
+  | 0, _, _, .nil => .nil
+  | _ + 1, node, seed, .cons b path =>
+    .cons (if b then (prg node seed).1 else (prg node seed).2)
+      (credentialGgmCopath prg (2 * node + if b then 1 else 0)
+        (if b then (prg node seed).2 else (prg node seed).1) path)
+
+/-- Leaf seed at `path` recomputed from the copath of `hidden`; `0` at the hidden leaf itself,
+    whose seed the copath does not determine. -/
+def credentialGgmRecover (prg : CredentialGgmPrg) :
+    {d : Nat} → Nat → CredentialVec Bool d → CredentialVec CredentialGgmSeed d →
+      CredentialVec Bool d → CredentialGgmSeed
+  | 0, _, .nil, .nil, .nil => 0#256
+  | _ + 1, node, .cons h hidden, .cons sibling rest, .cons b path =>
+    if b = h then credentialGgmRecover prg (2 * node + if h then 1 else 0) hidden rest path
+    else credentialGgmLeaf prg (2 * node + if b then 1 else 0) sibling path
+
+/-- **Copath reconstruction.** From the copath of the hidden leaf the verifier recomputes every
+    other leaf seed of the tree, for every PRG and every depth. -/
+theorem credentialGgmRecover_exact (prg : CredentialGgmPrg) :
+    ∀ {d : Nat} (node : Nat) (seed : CredentialGgmSeed) (hidden path : CredentialVec Bool d),
+      credentialGgmRecover prg node hidden (credentialGgmCopath prg node seed hidden) path =
+        if path = hidden then 0#256 else credentialGgmLeaf prg node seed path
+  | 0, _, _, .nil, .nil => rfl
+  | _ + 1, node, seed, .cons h hidden, .cons b path => by
+    cases h <;> cases b <;>
+      simp [credentialGgmRecover, credentialGgmCopath, credentialGgmLeaf, credentialGgmRecover_exact]
+
+/-- The opening of one repetition (`OpenedLimboRepetition`: `hidden_party`, `ggm_copath`,
+    `com_1_hidden`). -/
+structure CredentialGgmOpening where
+  hidden : Fin credentialSdParties
+  copath : CredentialVec CredentialGgmSeed credentialSdGgmDepth
+  hiddenCommitment : List UInt8
+
+/-- Leaf seed of `party` recomputed from the opening. -/
+def CredentialGgmOpening.leafSeed (prg : CredentialGgmPrg) (o : CredentialGgmOpening)
+    (party : Fin credentialSdParties) : CredentialGgmSeed :=
+  credentialGgmRecover prg 1 (credentialGgmPath credentialSdGgmDepth o.hidden.val) o.copath
+    (credentialGgmPath credentialSdGgmDepth party.val)
+
+/-- Round-1 commitment check of one repetition: the hidden party's commitment is the one
+    supplied, and every other party's commitment is recomputed from its reconstructed leaf seed.
+    `commit` stands for `commit_limbo_party_r1` with nonce, repetition, salt and auxiliary digest
+    fixed. -/
+def verifyCredentialGgmOpening (prg : CredentialGgmPrg)
+    (commit : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (commitments : Fin credentialSdParties → List UInt8) (o : CredentialGgmOpening) : Bool :=
+  decide (o.hiddenCommitment = commitments o.hidden) &&
+    (List.finRange credentialSdParties).all (fun p =>
+      decide (p = o.hidden) || decide (commit p (o.leafSeed prg p) = commitments p))
+
+/-- An accepted opening recomputes the committed value of every opened party. -/
+theorem verifyCredentialGgmOpening_opened (prg : CredentialGgmPrg)
+    (commit : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (commitments : Fin credentialSdParties → List UInt8) (o : CredentialGgmOpening)
+    (h : verifyCredentialGgmOpening prg commit commitments o = true)
+    (party : Fin credentialSdParties) (hOpen : party ≠ o.hidden) :
+    commit party (o.leafSeed prg party) = commitments party := by
+  unfold verifyCredentialGgmOpening at h
+  rw [Bool.and_eq_true] at h
+  have hp := List.all_eq_true.mp h.2 party (List.mem_finRange party)
+  rw [Bool.or_eq_true, decide_eq_true_eq, decide_eq_true_eq] at hp
+  exact hp.resolve_left hOpen
+
+/-- **Two openings agree on every commonly opened party, or collide.** If two accepted openings
+    of the same round-1 commitments (for hash-based commitments `H ∘ encode`) reconstruct
+    different preimages at a party both open, those preimages are a collision of `H`. -/
+theorem credentialGgm_overlap_same_digest
+    (prg : CredentialGgmPrg) (H : List UInt8 → List UInt8)
+    (encode : Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (commitments : Fin credentialSdParties → List UInt8)
+    (a b : CredentialGgmOpening) (party : Fin credentialSdParties)
+    (ha : verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments a = true)
+    (hb : verifyCredentialGgmOpening prg (fun p seed => H (encode p seed)) commitments b = true)
+    (hpa : party ≠ a.hidden) (hpb : party ≠ b.hidden) :
+    H (encode party (a.leafSeed prg party)) = H (encode party (b.leafSeed prg party)) :=
+  (verifyCredentialGgmOpening_opened prg _ commitments a ha party hpa).trans
+    (verifyCredentialGgmOpening_opened prg _ commitments b hb party hpb).symm
+
+/-- Opening check against the check values of a repetition: every opened party's value is
+    zero. -/
+def credentialGgmCheckDefects {n : Nat} (defect : Fin n → CredentialFp5) (hidden : Fin n) : Bool :=
+  (List.finRange n).all (fun p => decide (p = hidden) || decide (defect p = credentialFp5Zero))
+
+/-- A nonzero check value passes the opening check only when its party is the hidden one. -/
+theorem credentialGgmCheckDefects_unique {n : Nat} (defect : Fin n → CredentialFp5)
+    (bad : Fin n) (hBad : defect bad ≠ credentialFp5Zero) (hidden : Fin n)
+    (h : credentialGgmCheckDefects defect hidden = true) : hidden = bad := by
+  have hp := List.all_eq_true.mp h bad (List.mem_finRange bad)
+  rw [Bool.or_eq_true, decide_eq_true_eq, decide_eq_true_eq] at hp
+  exact (hp.resolve_right hBad).symm
+
+/-- With all check values zero every hidden party passes. -/
+theorem credentialGgmCheckDefects_zero {n : Nat} (hidden : Fin n) :
+    credentialGgmCheckDefects (fun _ : Fin n => credentialFp5Zero) hidden = true := by
+  apply List.all_eq_true.mpr
+  intro p _
+  rw [Bool.or_eq_true, decide_eq_true_eq, decide_eq_true_eq]
+  exact Or.inr rfl
+
+/-- The presentation's opening round: one opening per repetition, each checked against that
+    repetition's commitments and check values. -/
+def credentialGgmPresentationAccepts
+    (prg : CredentialGgmPrg)
+    (commit : Nat → Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (commitments : Nat → Fin credentialSdParties → List UInt8)
+    (defect : Nat → Fin credentialSdParties → CredentialFp5)
+    (openings : Fin credentialSdRepetitions → CredentialGgmOpening) : Bool :=
+  (List.finRange credentialSdRepetitions).all fun r =>
+    verifyCredentialGgmOpening prg (commit r.val) (commitments r.val) (openings r) &&
+      credentialGgmCheckDefects (defect r.val) (openings r).hidden
+
+/-- **Opening round.** If every repetition has a nonzero check value at party `bad r`, an
+    accepted presentation hides exactly `bad r` in every repetition: one hidden-party vector
+    out of `256^33`. The nonzero check values are a hypothesis here. -/
+theorem credentialGgmPresentation_unique
+    (prg : CredentialGgmPrg)
+    (commit : Nat → Fin credentialSdParties → CredentialGgmSeed → List UInt8)
+    (commitments : Nat → Fin credentialSdParties → List UInt8)
+    (defect : Nat → Fin credentialSdParties → CredentialFp5)
+    (bad : Fin credentialSdRepetitions → Fin credentialSdParties)
+    (hBad : ∀ r, defect r.val (bad r) ≠ credentialFp5Zero)
+    (openings : Fin credentialSdRepetitions → CredentialGgmOpening)
+    (h : credentialGgmPresentationAccepts prg commit commitments defect openings = true) :
+    ∀ r, (openings r).hidden = bad r := by
+  intro r
+  have hr := List.all_eq_true.mp h r (List.mem_finRange r)
+  rw [Bool.and_eq_true] at hr
+  exact credentialGgmCheckDefects_unique _ _ (hBad r) _ hr.2
+
+set_option exponentiation.threshold 512 in
+/-- Size of the hidden-party challenge space: `256 = 2^8` parties, `256^33 = 2^264`, and
+    `256^17 = 2^136` for the classical profile. -/
+theorem credentialGgm_challenge_space :
+    credentialSdParties = 2 ^ credentialSdGgmDepth ∧
+    credentialSdParties ^ credentialSdRepetitions = 2 ^ 264 ∧
+    credentialSdParties ^ credentialSdRepetitionsClassical = 2 ^ 136 := by decide +kernel
+
+set_option maxRecDepth 4096 in
+#verify_constructive credentialGgmRecover_exact verifyCredentialGgmOpening_opened
+  credentialGgm_overlap_same_digest credentialGgmCheckDefects_unique
+  credentialGgmCheckDefects_zero credentialGgmPresentation_unique credentialGgm_challenge_space
+
+theorem durableBurnReserve_empty (keyId sid : List UInt8) (party : UInt16)
+    (epoch : UInt64) (attempt : UInt32) (hEpoch : epoch.toNat + 1 < 2 ^ 64) :
+    (durableBurnReserve ⟨keyId, [], false⟩ party epoch sid attempt true).1 = true := by
+  simp only [durableBurnReserve, durableBurnAvailable, hEpoch, decide_true,
+    Bool.not_false, Bool.true_and, List.all_nil, ↓reduceIte]
+
+theorem durableBurnReserve_failed_write (store : DurableNonceBurnStore)
+    (party : UInt16) (epoch : UInt64) (sid : List UInt8) (att : UInt32) :
+    (durableBurnReserve store party epoch sid att false).1 = false := by
+  unfold durableBurnReserve
+  cases durableBurnAvailable store party epoch sid att <;> rfl
+
+
 end Qsag
 end

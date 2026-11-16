@@ -1,9 +1,8 @@
 module
-public import Qsag.Custody.SeparatedCustodyHistory
+import all Qsag.Custody.CustodySuiteFull
+public import Qsag.Custody.SeparatedCustody
 public import Qsag.Tests.SeparatedCustodyChecks
-import all Qsag.Custody.SeparatedCustodyHistory
-import all Qsag.Custody.SeparatedCustodyPolicy
-import all Qsag.Custody.SeparatedCustodyCore
+import all Qsag.Custody.SeparatedCustody
 import all Qsag.Tests.SeparatedCustodyChecks
 public section
 namespace Qsag.Custody.HistoryChecks
@@ -16,13 +15,14 @@ def firstIntent := transactionIntent firstTx.1 0 1
 def secondIntent := transactionIntent secondTx.1 1 2
 
 def deployment : Deployment :=
-  { signer := Checks.cfg
+  { deploymentId := Checks.dep
+    signer := Checks.cfg
     keys := fun i => if i = 0 then Checks.key else
       ⟨List.replicate 32 0x18, List.replicate 32 0x2A, List.replicate 32 0x44⟩
     rounds := fun _ =>
       ⟨fun _ _ => Checks.macKeys, [0], fun session =>
-        if session = firstIntent.session then roundCommitment firstIntent
-        else roundCommitment secondIntent⟩
+        if session = firstIntent.session then roundCommitment Checks.dep firstIntent
+        else roundCommitment Checks.dep secondIntent⟩
     caps := fun _ => 100
     policies := fun i => demoQuorumCustodian i peerKey (List.replicate 32 0x66)
     numParties := 2
@@ -57,11 +57,15 @@ def checkHistory : IO Unit := do
   let certs := certificatesFor ready firstIntent
   unless decide (certs.length = 2) do
     throw (IO.userError "two actual policy invocations did not issue two certificates")
-  unless certs.all (verifyCertificate deployment.signer (publicKeys deployment) firstIntent) do
+  unless certs.all (verifyCertificate deployment.signer (publicKeys deployment) deployment.deploymentId firstIntent) do
     throw (IO.userError "generated two-party certificates failed verification")
   let (shared, accepted) := submitRecorded deployment ready.shared firstIntent certs
   unless accepted do
     throw (IO.userError "actual two-party policy quorum rejected")
+  -- A second deployment that reuses every key and parameter and differs only in its identifier.
+  let twin := { deployment with deploymentId := Checks.dep + 1 }
+  if (submitRecorded twin (historyInitial twin).shared firstIntent certs).2 then
+    throw (IO.userError "same-key twin deployment consumed this deployment's certificates")
   let afterFirst := historyStep deployment ready (.submit firstIntent certs)
   unless decide (shared.coordinator.spent = 3 ∧ afterFirst.shared.coordinator.spent = 3 ∧
       afterFirst.shared.accepted.length = 1) do
@@ -76,7 +80,7 @@ def checkHistory : IO Unit := do
     [.invoke 0 1 secondInvocation, .invoke 1 1 secondInvocation]
   let secondCerts := certificatesFor readySecond secondIntent
   unless decide (secondCerts.length = 2) &&
-      secondCerts.all (verifyCertificate deployment.signer (publicKeys deployment) secondIntent) do
+      secondCerts.all (verifyCertificate deployment.signer (publicKeys deployment) deployment.deploymentId secondIntent) do
     throw (IO.userError "second actual transaction lacked valid two-party certificates")
   let rejected := historyStep deployment readySecond (.submit secondIntent secondCerts)
   if (submitRecorded deployment readySecond.shared secondIntent secondCerts).2 then
@@ -90,7 +94,7 @@ def checkHistory : IO Unit := do
       (aborted.parties 0).vault.attempted.length = 1 ∧ aborted.shared.coordinator.spent = 0 ∧
       aborted.shared.accepted.length = 0) && (aborted.calls.filterMap (fun e => e.output)).isEmpty do
     throw (IO.userError "failed production signing lost its burn or manufactured an output")
-  IO.println "custody history check: distinct-key two-party policy quorum, shared accepted spend/session trace, full-context rejection, valid over-cap quorum rejection, and failed-signing burn accounting passed"
+  IO.println "custody history check: distinct-key two-party policy quorum, shared accepted spend/session trace, full-context rejection, same-key twin-deployment rejection, valid over-cap quorum rejection, and failed-signing burn accounting passed"
 
 end Qsag.Custody.HistoryChecks
 end

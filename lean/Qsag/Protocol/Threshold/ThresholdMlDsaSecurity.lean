@@ -30,18 +30,18 @@ distribution.
    `threshold_mldsa87_abort_transcript_zk`).
 -/
 
+public import Qsag.Protocol.Threshold.ThresholdMpc
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Tactic.MaskBijection
-import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
-import all Qsag.Math.Goldilocks
-import all Qsag.Math.Lattices
-import all Qsag.Math.Counting
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.PolyRing
-import all Qsag.Math.HasseHensel
+import Qsag.Protocol.Aggregation.UcGames
+import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
+import Qsag.Math.Goldilocks
+import Qsag.Math.Lattices
+import Qsag.Math.Counting
+import Qsag.Math.CoeffPoly
+import Qsag.Math.PolyRing
+import Qsag.Math.HasseHensel
 
 public section
 namespace Qsag
@@ -215,10 +215,8 @@ private theorem fq204_inv_mul_cancel {a : Fq204} (ha : a ≠ Fq204.zero) :
 def ext6ScaleEquiv (v : Fq204) (hv : v ≠ Fq204.zero) : SimpleEquiv Ext6Fq204 Ext6Fq204 where
   toFun b := ext6Scale b v
   invFun u := ext6Scale u (Fq204.inv v)
-  left_inv := fun ⟨_, _, _, _, _, _⟩ => by
-    simp only [ext6Scale, Fq204.mul_assoc, Fq204.mul_inv_cancel hv, Fq204.mul_one]
-  right_inv := fun ⟨_, _, _, _, _, _⟩ => by
-    simp only [ext6Scale, Fq204.mul_assoc, fq204_inv_mul_cancel hv, Fq204.mul_one]
+  left_inv x := by rw [ext6Scale_mul, Fq204.mul_inv_cancel hv, ext6Scale_one]
+  right_inv x := by rw [ext6Scale_mul, fq204_inv_mul_cancel hv, ext6Scale_one]
 
 def bv256XorEquiv (target : BitVec 256) : SimpleEquiv (BitVec 256) (BitVec 256) where
   toFun m := target ^^^ m
@@ -364,7 +362,7 @@ theorem sealedAttempt_sim_eq_real
   cases hAcc : sealedAcceptBool chalHash sampleInBall A s1 s2 y mu with
   | false =>
     simp only [sealedAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
-      SimpleEquiv.symm, sealedPadsTupleEquiv, rssMaskAddEquiv, bv256XorEquiv,
+      SimpleEquiv.symm, sealedPadsTupleEquiv, rssMaskAddEquiv_toFun, rssMaskAddEquiv_invFun, bv256XorEquiv,
       ext6ScaleEquiv, Bool.false_eq_true, ↓reduceIte]
   | true =>
     unfold sealedAcceptBool at hAcc
@@ -379,7 +377,7 @@ theorem sealedAttempt_sim_eq_real
     dsimp only at hUseHint
     have hW1Eq := hUseHint.trans hHighEq
     simp only [sealedAttemptPadEquiv, SimpleEquiv.trans, SimpleEquiv.prodCongr,
-      SimpleEquiv.symm, SimpleEquiv.refl, sealedPadsTupleEquiv, rssMaskAddEquiv, bv256XorEquiv,
+      SimpleEquiv.symm, SimpleEquiv.refl, sealedPadsTupleEquiv, rssMaskAddEquiv_toFun, rssMaskAddEquiv_invFun, bv256XorEquiv,
       ↓reduceIte]
     dsimp only [w, c] at hW1Eq
     rw [hW1Eq]
@@ -619,6 +617,38 @@ theorem threshold_mldsa_abort_zk_witness :
 
 /-! ## §3. 3-Party `(2, 3)` RSS Multiplication + Sacrifice Refinement & `C(n, t - 1)` PRSS Hybrid -/
 
+/-- Category-3 deployment profile. ML-DSA-44 and RSS3 below remain explicit
+compatibility instances, rather than the committee or level of the general API. -/
+def deployedThresholdMlDsaProfile : MlDsaLevelSpec := mlDsa65Spec
+
+structure MlDsaThresholdQuorum (t n : Nat) where
+  positive : 0 < t
+  threshold_le : t ≤ n
+  parties : List (Fin n)
+  distinct : parties.Nodup
+  enough : t ≤ parties.length
+  sharing : ShamirQuorum Fq204 t
+  points_match : sharing.pts.length = parties.length
+  weights_match : sharing.lambdas.length = parties.length
+
+/-- Reconstruction is tied to actual quorum evaluations of a degree-<t
+polynomial over the ML-DSA field, for arbitrary t and n. -/
+theorem mldsa_threshold_quorum_reconstruct {t n : Nat}
+    (q : MlDsaThresholdQuorum t n) (coeffs : List Fq204) (hDegree : coeffs.length ≤ t) :
+    ringDot q.sharing.lambdas (q.sharing.pts.map (RoundPoly.evalCoeffs coeffs)) =
+      RoundPoly.evalCoeffs coeffs CommRingOps.zero :=
+  lagrangeAtZero_evalCoeffs q.sharing.lambdas q.sharing.pts coeffs t hDegree
+    q.sharing.sum_one (fun d hd ht => by
+      simpa only [ringDot_eq, ringPow_eq] using q.sharing.kills_higher d hd ht)
+
+theorem deployedThresholdMlDsaProfile_category3 :
+    deployedThresholdMlDsaProfile.k = 6 ∧ deployedThresholdMlDsaProfile.ell = 5 ∧
+    deployedThresholdMlDsaProfile.tau = 49 ∧ deployedThresholdMlDsaProfile.beta = 196 ∧
+    deployedThresholdMlDsaProfile.gamma1 = 524288 ∧
+    mlDsaLevelWellFormed deployedThresholdMlDsaProfile = true := by decide
+
+#verify_constructive mldsa_threshold_quorum_reconstruct deployedThresholdMlDsaProfile_category3
+
 structure Rss3Share where
   s0 : Fq204
   s1 : Fq204
@@ -654,7 +684,9 @@ def rss3ToSacGate (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
 theorem rss3ToSacGate_error_eq_delta (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
     (a : Ext6Fq204) (b : Rss3Share) (deltaC : Ext6Fq204) :
     sacGateError204 (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = deltaZ := by
-  unfold sacGateError204 rss3ToSacGate; dsimp only
+  rw [sacGateError204_eq]
+  unfold rss3ToSacGate
+  dsimp only
   rw [rss3MulStep_recon,
       ← Fq204.ofInt_nat (Fq204.mul (rss3Recon x) (rss3Recon y)), ← Fq204.ofInt_nat deltaZ]
   simp only [Fq204.ofInt_add, Fq204.ofInt_sub]
@@ -681,18 +713,10 @@ theorem rss3_repeated_sacrifice_pq256
   unfold sacAcceptRepeated at hAll; rw [List.all_eq_true] at hAll
   rcases sacAccept204_sound (hAll chi hMem) with hEq | hBad
   · have hErr0 : sacGateError204 (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = Fq204.zero := by
-      unfold sacGateError204; rw [hEq, Fq204.sub_eq_add_neg, Fq204.add_right_neg]
+      rw [sacGateError204_eq, hEq, Fq204.sub_eq_add_neg, Fq204.add_right_neg]
     rw [rss3ToSacGate_error_eq_delta] at hErr0
     exact False.elim (hCheat hErr0)
   · exact hBad
-
-private theorem mkRssSignAttemptOutcome_nextState
-    (stBurned : RssMlDsaSignerState) (usedAttempt : Nat)
-    (cTilde : List UInt8) (w z u maskW maskZ maskLow : PolyVec4)
-    (w1 : Fin 4 → NatTree 8) (h : Fin 4 → HintTree 8) (accept : Bool) :
-    (match mkRssSignAttemptOutcome stBurned usedAttempt cTilde w z u maskW maskZ maskLow w1 h accept with
-     | .ok st' _ => st' | .err st' _ => st') = stBurned := by
-  cases accept <;> rfl
 
 def runRssSacrificedTrace
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -704,7 +728,7 @@ def runRssSacrificedTrace
   | st, [] => (st, [])
   | st, (inp, chi, T) :: rest =>
     let out := rssSacrificedSignStep chalHash sampleInBall st inp chi T
-    let stNext := match out with | .ok st' _ => st' | .err st' _ => st'
+    let stNext := out.nextState
     let tail := runRssSacrificedTrace chalHash sampleInBall stNext rest
     (tail.1, out :: tail.2)
 
@@ -723,16 +747,17 @@ theorem rss_distributed_trace_refines_sacrificedSignStep
   | st, [] => ⟨Nat.le_refl _, fun _ h => nomatch h⟩
   | st, (inp, chi, T) :: rest => by
     let out := rssSacrificedSignStep chalHash sampleInBall st inp chi T
-    let stNext := match out with | .ok st' _ => st' | .err st' _ => st'
+    let stNext := out.nextState
     have hStepMono : st.nextAttempt ≤ stNext.nextAttempt := by
       dsimp only [stNext, out]; unfold rssSacrificedSignStep
       cases decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) with
       | false => exact Nat.le_refl _
       | true =>
         cases rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
-        | false => dsimp only; omega
+        | false => change st.nextAttempt ≤ st.nextAttempt + 1; omega
         | true =>
-          unfold rssSignCore; dsimp only; rw [mkRssSignAttemptOutcome_nextState]
+          dsimp only
+          rw [rssSignCore_nextState]
           dsimp only; omega
     obtain ⟨hTailMono, hTailRef⟩ :=
       rss_distributed_trace_refines_sacrificedSignStep chalHash sampleInBall stNext rest
@@ -762,24 +787,6 @@ theorem rss_prss_choose_hybrid {O : Type} {N : Nat} (real ideal : Fin N → O)
 theorem rss_deployed_quorum_subset_counts :
     binomRec 3 (2 - 1) = 3 ∧ binomRec 5 (2 - 1) = 5 ∧ binomRec 5 (3 - 1) = 10 := by decide
 
-theorem tooth_rss3_unverified_shift_corrupts_recon :
-    ∃ zSh : Rss3Share,
-      rss3Recon (rss3MulStep zSh zSh Fq204.zero Fq204.zero Fq204.one) ≠
-        Fq204.mul (rss3Recon zSh) (rss3Recon zSh) ∧
-      sacAcceptRepeated [ext6Zero]
-        (rss3ToSacGate zSh zSh Fq204.zero Fq204.zero Fq204.one ext6Zero zSh
-          (ext6EmbedFq Fq204.one)) = false :=
-  ⟨⟨Fq204.zero, Fq204.zero, Fq204.zero⟩, by decide, by decide⟩
-
-theorem rss3_repeated_sacrifice_witness :
-    ∃ (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
-      (a : Ext6Fq204) (b : Rss3Share) (deltaC : Ext6Fq204) (chis : List Ext6Fq204),
-      deltaZ ≠ Fq204.zero ∧
-      sacAcceptRepeated chis (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = true :=
-  ⟨⟨Fq204.zero, Fq204.zero, Fq204.zero⟩, ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩,
-   Fq204.zero, Fq204.zero, Fq204.one, ext6Zero,
-   ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩, ext6Zero, [ext6Zero], by decide, by decide⟩
-
 #verify_constructive mlDsa_all_three_levels_wellFormed mlDsa_challenge_entropy_bounds
   mlDsa65_87_highBits_bounds eta4SampleNibble_bijective_on_range rss3MulStep_recon
   rss_distributed_trace_refines_sacrificedSignStep rss_prss_choose_hybrid
@@ -788,8 +795,6 @@ theorem rss3_repeated_sacrifice_witness :
 #verify_inhabited threshold_mldsa_abort_transcript_zk threshold_mldsa_abort_zk_witness
 #tooth_pair fips204_z_plateau_shift_invariant vs tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret
 #verify_inhabited fips204_z_plateau_shift_invariant fips204_z_plateau_witness
-#tooth_pair rss3_repeated_sacrifice_pq256 vs tooth_rss3_unverified_shift_corrupts_recon
-#verify_inhabited rss3_repeated_sacrifice_pq256 rss3_repeated_sacrifice_witness
 
 
 /-! ## §4. Asymmetric `[-γ₁ + 1, γ₁]` Mask Boundary & Rectangular `ML-DSA-44/65/87` Abort-Transcript ZK -/

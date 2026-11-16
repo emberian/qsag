@@ -13,10 +13,6 @@ Constructive (`0 Classical.choice`, `0 sorry`) mechanization of `tau`-masked cro
 
 public import Qsag.Protocol.Threshold.Rss256TernaryRound
 
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Threshold.MaliciousSecurity
-import all Qsag.Protocol.Threshold.Rss256TernaryRound
 
 import Qsag.Tactic.AssuranceKit
 
@@ -169,20 +165,9 @@ theorem finalMaskedCrossCheck_false_bad_coins_le_two (m : FinalMasks) (sh : Fina
 
 /-! ## 1b. Inductive `b`-Variate Ternary Round Schwartz–Zippel Root Bound -/
 
-def ternaryBadBound (cardS : Nat) : Nat → Nat
-  | 0 => 0
-  | b + 1 => ternaryBadBound cardS b * cardS + 2 * cardS ^ b
-
 theorem ternaryBadBound_mul_eq (cardS b : Nat) :
-    ternaryBadBound cardS b * cardS = 2 * b * cardS ^ b := by
-  induction b with
-  | zero => simp only [ternaryBadBound, Nat.zero_mul, Nat.mul_zero]
-  | succ b ih =>
-    simp only [ternaryBadBound, Nat.add_mul]
-    rw [ih, Nat.mul_assoc (2 * b), ← Nat.pow_succ, Nat.mul_assoc 2 (cardS ^ b) cardS,
-        ← Nat.pow_succ, ← Nat.add_mul]
-    have h2 : 2 * b + 2 = 2 * (b + 1) := by omega
-    rw [h2]
+    ternaryBadBound cardS b * cardS = 2 * b * cardS ^ b :=
+  ternaryBadBound_scale cardS b
 
 theorem ternary_quad_coeffs_nonzero (e0 e1 e2 : Tower128)
     (h : e0 ≠ towerZero 7 ∨ e1 ≠ towerZero 7 ∨ e2 ≠ towerZero 7) :
@@ -200,57 +185,8 @@ theorem ternary_quad_coeffs_nonzero (e0 e1 e2 : Tower128)
 theorem ternaryEval_roots_le (S : List Tower128) (hS : S.Nodup) :
     ∀ (b : Nat) (t : TernaryTab b), t ≠ zeroTab b →
       ((challengeTuples S b).filter (fun gs => decide (ternaryEval gs t = towerZero 7))).length ≤
-        ternaryBadBound S.length b := by
-  intro b
-  induction b with
-  | zero =>
-    intro t hNe
-    cases t with | leaf tv =>
-    have hTvNe : tv ≠ towerZero 7 := fun h => hNe (by rw [h]; rfl)
-    have hF : decide (ternaryEval ChallengeTuple.nil (.leaf tv) = towerZero 7) = false :=
-      decide_eq_false_iff_not.mpr hTvNe
-    unfold challengeTuples List.filter ternaryBadBound
-    rw [hF]
-    exact Nat.le_refl 0
-  | succ b ih =>
-    intro t hNe
-    cases t with | branch t0 t1 t2 =>
-    have hPick : ∃ tStar : TernaryTab b, tStar ≠ zeroTab b ∧
-        ∀ rest : ChallengeTuple b, ternaryEval rest tStar ≠ towerZero 7 →
-          ternaryEval rest t0 ≠ towerZero 7 ∨
-          ternaryEval rest t1 ≠ towerZero 7 ∨
-          ternaryEval rest t2 ≠ towerZero 7 := by
-      by_cases ht0 : t0 = zeroTab b
-      · by_cases ht1 : t1 = zeroTab b
-        · refine ⟨t2, fun ht2 => hNe (by rw [ht0, ht1, ht2]; rfl), fun _ h => Or.inr (Or.inr h)⟩
-        · exact ⟨t1, ht1, fun _ h => Or.inr (Or.inl h)⟩
-      · exact ⟨t0, ht0, fun _ h => Or.inl h⟩
-    rcases hPick with ⟨tStar, htStar, hImp⟩
-    unfold challengeTuples ternaryBadBound
-    rw [filter_flatMap_len]
-    have hSplit := sum_map_le_split
-      (fun rest => decide (ternaryEval rest tStar = towerZero 7))
-      (fun rest => ((S.map (fun g => ChallengeTuple.cons g rest)).filter
-        (fun gs => decide (ternaryEval gs (.branch t0 t1 t2) = towerZero 7))).length)
-      S.length 2
-      (fun rest _ => by
-        rw [filter_map_len (fun g => ChallengeTuple.cons g rest) _ S]
-        exact List.length_filter_le _ S)
-      (fun rest hGood => by
-        rw [filter_map_len (fun g => ChallengeTuple.cons g rest) _ S]
-        have hPred : (fun g => decide (ternaryEval (.cons g rest) (.branch t0 t1 t2) = towerZero 7)) =
-            (fun g => decide (RoundPoly.evalCoeffs
-              [ternaryEval rest t0,
-               towerAdd 7 (towerAdd 7 (ternaryEval rest t0) (ternaryEval rest t1)) (ternaryEval rest t2),
-               ternaryEval rest t2] g = towerZero 7)) := by
-          funext g
-          exact decide_eq_decide_of_iff (by rw [ternaryEval_step_eq_evalCoeffs])
-        rw [hPred]
-        exact quadratic_roots_le_two_tower128 _ _ _ S hS
-          (ternary_quad_coeffs_nonzero _ _ _ (hImp rest (decide_eq_false_iff_not.mp hGood))))
-      (challengeTuples S b)
-    rw [challengeTuples_length, Nat.mul_comm (S.length ^ b) 2] at hSplit
-    exact Nat.le_trans hSplit (Nat.add_le_add_right (Nat.mul_le_mul_right S.length (ih tStar htStar)) _)
+        ternaryBadBound S.length b :=
+  ternaryEval_nonzero_roots_le S hS
 
 theorem nextClaim_false_bad_coins_le (b : Nat) (claim : Tower128)
     (w : BoolWeights b) (hw0 : zeroCornerBool w = towerOne 7)
@@ -387,7 +323,7 @@ theorem foldAndTau_false_claim_bad_coins_le (S : List Tower128) (hS : S.Nodup) (
     simp only [foldAndTauAccepts, List.sum_nil, Nat.mul_zero, Nat.zero_add, Nat.pow_zero, Nat.mul_one]
     have hFalseAdd : towerAdd 7 claim (towerZero 7) ≠
         towerAdd 7 (towerMul 7 xfp yfq) (towerMul 7 xfq yfp) := by
-      rw [towerAdd_zero]; exact hFalse
+      rw [towerAdd_zero, ← vecCross_leaf]; exact hFalse
     exact finalMaskedCrossCheck_false_bad_coins_le_two masks sh xfp yfq xfq yfp
       claim (towerZero 7) hFalseAdd S hS
   | cons b rs ih =>
@@ -736,24 +672,6 @@ theorem rss256_eight_wave_barrier_concrete_bound :
 def zeroFoldProver : (rs : List Nat) → FoldAndTauProver rs
   | [] => .finalShares ⟨towerZero 7, towerZero 7, towerZero 7, towerZero 7⟩
   | b :: rs => .step (zeroTab b) (fun _ => zeroFoldProver rs)
-
-theorem honestRoundTab_vecZero (m b : Nat) :
-    honestRoundTab m b (vecZero (m + b)) (vecZero (m + b))
-      (vecZero (m + b)) (vecZero (m + b)) = zeroTab b := by
-  induction b with
-  | zero =>
-    dsimp only [honestRoundTab, btreeTernaryExpand, ttreeMap4, zeroTab, vecCross]
-    rw [vecDot_zero (m + 0), towerAdd_self_zero]
-  | succ b ih =>
-    dsimp only [vecZero, honestRoundTab, btreeTernaryExpand, ttreeMap4, zeroTab]
-    change TTree.branch
-      (honestRoundTab m b (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)))
-      (honestRoundTab m b (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)) (vecZero (m + b)))
-      (honestRoundTab m b
-        (vecAdd (vecZero (m + b)) (vecZero (m + b))) (vecAdd (vecZero (m + b)) (vecZero (m + b)))
-        (vecAdd (vecZero (m + b)) (vecZero (m + b))) (vecAdd (vecZero (m + b)) (vecZero (m + b)))) =
-      TTree.branch (zeroTab b) (zeroTab b) (zeroTab b)
-    rw [vecAdd_zero, ih]
 
 theorem inhabited_rss256_two_pass_product_proof :
     ∃ (B : Nat) (foldBits : List Nat) (batch : RecordedPassBatch foldBits)

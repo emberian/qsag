@@ -32,16 +32,14 @@ fold-round obligation contains `mcaNum`, the mutual-correlated-agreement numerat
 public import Qsag.Protocol.Aggregation.ClosedFsQromCompile
 public import Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
 public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
-import all Qsag.Protocol.Aggregation.ClosedFsQromCompile
-import all Qsag.Math.Counting
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.PolyRing
-import all Qsag.Math.HasseHensel
-import all Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
-import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
-import all Qsag.Coding.Cwyz26
-import all Qsag.Protocol.Aggregation.HemSlicedFoldBudget
+import Qsag.Math.Counting
+import Qsag.Math.CoeffPoly
+import Qsag.Math.PolyRing
+import Qsag.Math.HasseHensel
+import Qsag.Protocol.Aggregation.MultiRoundFsQrom
+import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
+import Qsag.Coding.Cwyz26
+import Qsag.Protocol.Aggregation.HemOpening
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -207,7 +205,9 @@ theorem WhirStage.johnson_list_le (s : WhirStage) (h : s.johnsonOk = true) :
   exact johnson_core s.domainSize s.degBound s.agree s.etaNum s.etaDen s.listSize
     (JohnsonBound.johnsonBound s.domainSize s.agree s.degBound)
     (s.agree * s.etaDen - s.etaNum * s.domainSize) hn hAn he hAE hJ hL
-    (Nat.div_mul_le_self _ _)
+    (by simpa only [JohnsonBound.johnsonBound_eq] using
+      (Nat.div_mul_le_self (s.domainSize * (s.agree - s.degBound))
+        (s.agree * s.agree - s.domainSize * s.degBound)))
 
 /-- Outside the Johnson radius no slack and no list size pass the check. -/
 theorem WhirStage.johnsonOk_false_of_beyond_radius (s : WhirStage)
@@ -551,27 +551,6 @@ theorem whir_exec_closed_qrom_soundness {D : Type} [DecidableEq D] {cardX cardAn
     sched.roundBounds_length sc.covers
   exact RatBound.le_trans hMain (RatBound.add_le_add hSum (RatBound.le_refl _))
 
-/-- The certificate type is inhabited at the stage-free schedule, whose verifier rejects. -/
-def emptyScheduleCert (env : WhirEnv F) (nv q : Nat) (hq : 0 < q) (w : Nat) :
-    WhirScheduleCert env ⟨nv, q, hq, []⟩ w where
-  cert :=
-    { state := fun _ _ => false
-      bad := fun r => Fin.elim0 r
-      init := fun _ _ => rfl
-      accept := fun x tr h => by
-        have hv : (decide (tr.length = 0) &&
-            whirVerdict env ⟨nv, q, hq, []⟩ x.claim
-              (tr.map (fun mc => ((⟨mc.1.poly, mc.1.answers⟩ : WhirPub F), mc.2)))
-              ((whirQueries env ⟨nv, q, hq, []⟩
-                (tr.map (fun mc => ((⟨mc.1.poly, mc.1.answers⟩ : WhirPub F), mc.2)))).map
-                (fun qq => whirTable ⟨nv, q, hq, []⟩ x (tr.map (fun mc => mc.1)) qq.1 qq.2))) =
-            true := h
-        rw [Bool.and_eq_true] at hv
-        have hLen : tr = [] := List.eq_nil_of_length_eq_zero (of_decide_eq_true hv.1)
-        rw [hLen] at hv
-        exact absurd hv.2 Bool.false_ne_true
-      flip := fun _ r _ _ _ _ => Fin.elim0 r }
-  covers := fun r => Fin.elim0 r
 
 end Verifier
 
@@ -603,25 +582,227 @@ def deployedStages : List WhirStage :=
 def deployedSched : WhirVerifierSchedule :=
   ⟨24, goldilocksExt4Card, goldilocksExt4Card_pos, deployedStages⟩
 
+/-- The full concrete stage records, including the MCA profile inputs. -/
+theorem deployedStages_full_eq : deployedStages =
+  [ { foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2,
+      queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400,
+      listSize := 400, sumcheckDeg := 3, mcaNum := 1644 },
+    { foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2,
+      queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200,
+      listSize := 400, sumcheckDeg := 3, mcaNum := 824 },
+    { foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2,
+      queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125,
+      listSize := 500, sumcheckDeg := 3, mcaNum := 489 },
+    { foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2,
+      queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200,
+      listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } ] := by
+  simp only [deployedStages, hemOptimizedStageWitnesses_unitaryZeroPow_24,
+    hemStageGeoms_24_eq, deployedSlack, List.zip_cons_cons, List.zip_nil_left,
+    List.map_cons, List.map_nil, whirAffineStageSimpleNum_def]
+  rfl
+
 /-- The deployed stage parameters, spelled out. -/
 theorem deployedStages_eq :
     deployedStages.map (fun s => (s.foldK, s.logDomain, s.logInvRate, s.queryCount,
       s.degBound, s.agree, s.listSize)) =
       [(6, 20, 2, 216, 262146, 527170, 400), (4, 18, 4, 109, 16386, 66992, 400),
        (3, 17, 6, 74, 2050, 17484, 500), (3, 16, 8, 56, 258, 4482, 1594)] := by
+  rw [deployedStages_full_eq]
   rfl
 
 /-- Every deployed stage satisfies the Johnson condition with its slack, and its list size is
     the exact ceiling. -/
 theorem deployedSched_johnsonOk : deployedSched.johnsonOk = true := by
+  simp only [WhirVerifierSchedule.johnsonOk, deployedSched, deployedStages_full_eq]
   decide +kernel
 
 theorem deployedSched_numRounds : deployedSched.numRounds = 24 := by
+  simp only [WhirVerifierSchedule.numRounds, deployedSched, deployedStages_full_eq]
   decide +kernel
 
-/-- **`scheduleQromError deployedSched (2^40) ≤ 2^-128`**, list-size multipliers included. -/
+private inductive RoundBoundsLe : List RatBound → List RatBound → Prop where
+  | nil : RoundBoundsLe [] []
+  | cons {x y xs ys} : RatBound.le x y → RoundBoundsLe xs ys →
+      RoundBoundsLe (x :: xs) (y :: ys)
+
+private theorem RoundBoundsLe.append {xs ys us vs : List RatBound}
+    (h : RoundBoundsLe xs ys) (k : RoundBoundsLe us vs) :
+    RoundBoundsLe (xs ++ us) (ys ++ vs) := by
+  induction h with
+  | nil => exact k
+  | cons hxy hrest ih => exact .cons hxy ih
+
+private theorem scaled_sum_mono (Q : Nat) {xs ys : List RatBound}
+    (h : RoundBoundsLe xs ys) :
+    RatBound.le (RatBound.sumList (xs.map (dfmRoundScale Q)))
+      (RatBound.sumList (ys.map (dfmRoundScale Q))) := by
+  induction h with
+  | nil => exact RatBound.le_refl _
+  | @cons x y xs ys hxy hrest ih =>
+    apply RatBound.add_le_add ?_ ih
+    show (2 * Q + 1) ^ 2 * x.num * y.den ≤ (2 * Q + 1) ^ 2 * y.num * x.den
+    simpa only [Nat.mul_assoc] using Nat.mul_le_mul_left ((2 * Q + 1) ^ 2) hxy
+
+private def stageEnvelope (s : WhirStage) : List RatBound :=
+  List.replicate s.foldK (RatBound.invPow2 220) ++
+    [RatBound.invPow2 220, RatBound.invPow2 214]
+
+private theorem stageEnvelope_covers (q : Nat) (hq : 0 < q) (s : WhirStage)
+    (hf : (s.foldBound q hq).le (RatBound.invPow2 220))
+    (ho : (s.oodBound q hq).le (RatBound.invPow2 220))
+    (hs : (s.shiftBound q hq).le (RatBound.invPow2 214)) :
+    RoundBoundsLe (s.roundBounds q hq) (stageEnvelope s) := by
+  apply RoundBoundsLe.append
+  · induction s.foldK with
+    | zero => exact .nil
+    | succ n ih => exact .cons hf ih
+  · exact .cons ho (.cons hs .nil)
+
+private def deployedEnvelope : List RatBound := deployedStages.flatMap stageEnvelope
+
+private theorem ood_le_of_binom (q : Nat) (hq : 0 < q) (s : WhirStage) (B bits : Nat)
+    (hbin : binom2 s.listSize = B)
+    (h : B * s.degBound ^ s.oodCount * 2 ^ bits ≤ q ^ s.oodCount) :
+    (s.oodBound q hq).le (RatBound.invPow2 bits) := by
+  change binom2 s.listSize * s.degBound ^ s.oodCount * 2 ^ bits ≤ 1 * q ^ s.oodCount
+  rw [hbin, Nat.one_mul]
+  exact h
+
+private theorem binom2_400 : binom2 400 = 79800 := by
+  apply Eq.trans (binom2_eq 400)
+  exact Nat.div_eq_of_eq_mul_left (by decide : 0 < 2)
+    (by decide : 400 * (400 - 1) = 79800 * 2)
+
+private theorem binom2_500 : binom2 500 = 124750 := by
+  apply Eq.trans (binom2_eq 500)
+  exact Nat.div_eq_of_eq_mul_left (by decide : 0 < 2)
+    (by decide : 500 * (500 - 1) = 124750 * 2)
+
+private theorem binom2_1594 : binom2 1594 = 1269621 := by
+  apply Eq.trans (binom2_eq 1594)
+  exact Nat.div_eq_of_eq_mul_left (by decide : 0 < 2)
+    (by decide : 1594 * (1594 - 1) = 1269621 * 2)
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage0_fold :
+    (({ foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400, listSize := 400, sumcheckDeg := 3, mcaNum := 1644 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  change 2844 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage0_ood :
+    (({ foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400, listSize := 400, sumcheckDeg := 3, mcaNum := 1644 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  apply ood_le_of_binom _ _ _ 79800 220 binom2_400
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage0_shift :
+    (({ foldK := 6, logDomain := 20, logInvRate := 2, oodCount := 2, queryCount := 216, degBound := 262146, agree := 527170, etaNum := 1, etaDen := 400, listSize := 400, sumcheckDeg := 3, mcaNum := 1644 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 214) := by
+
+  change (527176 ^ 216 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 87200 * (1048576 ^ 216)) * 2 ^ 214 ≤ (1048576 ^ 216) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage1_fold :
+    (({ foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2, queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200, listSize := 400, sumcheckDeg := 3, mcaNum := 824 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  change 2024 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage1_ood :
+    (({ foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2, queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200, listSize := 400, sumcheckDeg := 3, mcaNum := 824 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  apply ood_le_of_binom _ _ _ 79800 220 binom2_400
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage1_shift :
+    (({ foldK := 4, logDomain := 18, logInvRate := 4, oodCount := 2, queryCount := 109, degBound := 16386, agree := 66992, etaNum := 1, etaDen := 200, listSize := 400, sumcheckDeg := 3, mcaNum := 824 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 214) := by
+
+  change (66996 ^ 109 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 44400 * (262144 ^ 109)) * 2 ^ 214 ≤ (262144 ^ 109) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage2_fold :
+    (({ foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2, queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125, listSize := 500, sumcheckDeg := 3, mcaNum := 489 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  change 1989 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage2_ood :
+    (({ foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2, queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125, listSize := 500, sumcheckDeg := 3, mcaNum := 489 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  apply ood_le_of_binom _ _ _ 124750 220 binom2_500
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage2_shift :
+    (({ foldK := 3, logDomain := 17, logInvRate := 6, oodCount := 2, queryCount := 74, degBound := 2050, agree := 17484, etaNum := 1, etaDen := 125, listSize := 500, sumcheckDeg := 3, mcaNum := 489 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 214) := by
+
+  change (17487 ^ 74 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 38000 * (131072 ^ 74)) * 2 ^ 214 ≤ (131072 ^ 74) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage3_fold :
+    (({ foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2, queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200, listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } : WhirStage).foldBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  change 5574 * 2 ^ 220 ≤ 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage3_ood :
+    (({ foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2, queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200, listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } : WhirStage).oodBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 220) := by
+
+  apply ood_le_of_binom _ _ _ 1269621 220 binom2_1594
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+private theorem deployed_stage3_shift :
+    (({ foldK := 3, logDomain := 16, logInvRate := 8, oodCount := 2, queryCount := 56, degBound := 258, agree := 4482, etaNum := 1, etaDen := 200, listSize := 1594, sumcheckDeg := 3, mcaNum := 792 } : WhirStage).shiftBound goldilocksExt4Card goldilocksExt4Card_pos).le
+      (RatBound.invPow2 214) := by
+
+  change (4485 ^ 56 * 115792089129476408817739443160502628952720274482139873392618675794070921543681 + 92452 * (65536 ^ 56)) * 2 ^ 214 ≤ (65536 ^ 56) * 115792089129476408817739443160502628952720274482139873392618675794070921543681
+  decide +kernel
+
+private theorem deployedEnvelope_covers :
+    RoundBoundsLe deployedSched.roundBounds deployedEnvelope := by
+  simp only [WhirVerifierSchedule.roundBounds, deployedSched, deployedEnvelope,
+    deployedStages_full_eq, stagesRoundBounds, List.flatMap_cons, List.flatMap_nil]
+  refine RoundBoundsLe.append ?_ (RoundBoundsLe.append ?_
+    (RoundBoundsLe.append ?_ (RoundBoundsLe.append ?_ .nil)))
+
+  · exact stageEnvelope_covers _ _ _ deployed_stage0_fold deployed_stage0_ood deployed_stage0_shift
+
+  · exact stageEnvelope_covers _ _ _ deployed_stage1_fold deployed_stage1_ood deployed_stage1_shift
+
+  · exact stageEnvelope_covers _ _ _ deployed_stage2_fold deployed_stage2_ood deployed_stage2_shift
+
+  · exact stageEnvelope_covers _ _ _ deployed_stage3_fold deployed_stage3_ood deployed_stage3_shift
+
+set_option maxRecDepth 8192 in
+/-- **`scheduleQromError deployedSched (2^40) ≤ 2^-128`**, list-size multipliers included.
+Each stage is bounded before summation, avoiding products of the unreduced query denominators. -/
 theorem deployedSched_error_at_2pow40 :
     atLeastBits 128 (scheduleQromError deployedSched (2 ^ 40)) := by
+  apply atLeastBits_of_le (scaled_sum_mono (2 ^ 40) deployedEnvelope_covers)
+  simp only [deployedEnvelope, deployedStages_full_eq, List.flatMap_cons, List.flatMap_nil,
+    stageEnvelope, List.replicate_succ, List.replicate_zero, List.cons_append,
+    List.nil_append, List.map_cons, List.map_nil]
   decide +kernel
 
 /-- Monotonicity in the query budget. -/

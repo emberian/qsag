@@ -2307,7 +2307,7 @@ end Qsag.RingHom
 
 namespace Qsag
 /-- Variable-length polynomial coefficient addition over any ring `F`. -/
-def polyAddVar {F : Type} [CommRingOps F] : List F → List F → List F := rawAddCoeffs
+abbrev polyAddVar {F : Type} [CommRingOps F] : List F → List F → List F := rawAddCoeffs
 
 /-- Variable-length polynomial subtraction `P - Q` over any ring `F`. -/
 def polySubVar {F : Type} [CommRingOps F] : List F → List F → List F
@@ -2481,4 +2481,32 @@ theorem polyScaleVar_length {F : Type} [CommRingOps F] (c : F) (xs : List F) :
     (polyScaleVar c xs).length = xs.length := by unfold polyScaleVar; exact List.length_map _
 theorem shiftPoly_length {F : Type} [CommRingOps F] (xs : List F) :
     (shiftPoly xs).length = xs.length + 1 := by unfold shiftPoly; rfl
+end Qsag
+
+namespace Qsag
+/-! ### Exports for lane agg-whir-cert -/
+
+theorem shiftPoly_eq {F : Type} [CommRingOps F] (xs : List F) :
+    shiftPoly xs = CommRingOps.zero :: xs := by rfl
+
+/-! ### Exports for lane agg-budget -/
+
+/- Defining equations `f_def : f x = body` of definitions whose bodies are not exposed, for
+   downstream modules that import this one without `import all`. -/
+
+theorem polyAddVar_def {F : Type} [CommRingOps F] :
+    (polyAddVar : List F → List F → List F) = rawAddCoeffs := by rfl
+
+theorem polyScaleVar_def {F : Type} [CommRingOps F] (c : F) :
+    polyScaleVar c = List.map (CommRingOps.mul c) := by rfl
+
+theorem affineCombine_def {F : Type} [CommRingOps F] (θ α β : F) (F_poly G_poly : List F) :
+    affineCombine θ α β F_poly G_poly =
+      polyAddVar G_poly
+        (polyAddVar (polyScaleVar α (polyAddVar F_poly (polyScaleVar θ G_poly)))
+          (polyScaleVar β (shiftPoly (polyAddVar F_poly (polyScaleVar θ G_poly))))) := by
+  rfl
+
+-- (end exports for lane agg-budget)
+
 end Qsag

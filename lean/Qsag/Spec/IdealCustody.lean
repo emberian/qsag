@@ -21,10 +21,13 @@ take the number of approving parties as an argument.
 Scope of the refinements into this functionality: `Qsag.Top.certCustodyMachine`, a certificate-pool
 coordinator model with a raw certificate interface that reuses `custodyLedgerSign`, is related to it
 on traces without a forgery event. The real coordinator `Custody.submitRecorded` is related to it by
-`Qsag.Top.separatedCustody_refines_idealCustody_of` on runs satisfying three named, unproved run
-assumptions (no forgery event, a single deployment, increasing leaves); that theorem covers the
-verdict and state correspondence only, not the signature output or WAL replay. The `IdealTsig`, ELF,
-MIR, RSS and WAL machines are not proved to refine this functionality.
+`Qsag.Top.separatedCustody_refines_idealCustody_of` on runs satisfying two named, unproved run
+assumptions (no forgery event, increasing leaves); that theorem covers the
+verdict and state correspondence only, not the signature output or WAL replay. The distributed
+`(t, n)` Shamir custody machine `Qsag.DistCustody.distMachine` (custodians, network buffer, adaptive
+corruption, coordinator ledger) refines it up to interface maps, signature output and WAL replay
+included (`Qsag.DistCustody.distCustody_refines_ideal`). The `IdealTsig`, ELF, MIR, RSS and WAL
+machines are not proved to refine this functionality.
 
 The digest is a parameter (`CustodyDigestScheme`) whose only law is joint injectivity in
 `(deploymentId, intent)`.
@@ -500,6 +503,121 @@ theorem custodyLedgerSign_mono
       subst hL'
       subst hOut
       exact custody_if_neg Bool.false_ne_true _ _
+
+/-- A WAL replay consults neither the signing oracle nor the approval count. -/
+theorem custodyLedgerSign_replay_irrelevant
+    {o o' : D → Sig} {L : CustodyLedger PK D Sig} {n m dep : Nat} {i : CustodyIntent} {ab : Bool}
+    {r : CustodyRelease D Sig}
+    (hF : findReleasedEpoch L.releasedHistory i.epoch = some r) :
+    custodyLedgerSign S o L n dep i ab = custodyLedgerSign S o' L m dep i ab := by
+  unfold custodyLedgerSign
+  by_cases hg : L.poisoned = false ∧ dep = L.deploymentId
+  · rw [custody_if_pos hg, custody_if_pos hg, hF]
+  · rw [custody_if_neg hg, custody_if_neg hg]
+
+/-- The signing transition never changes the deployment identifier, the enrolled key or the
+    quorum profile of the ledger. -/
+theorem custodyLedgerSign_static
+    {L L' : CustodyLedger PK D Sig} {n dep : Nat} {i : CustodyIntent} {ab : Bool}
+    {out : CustodyOutcome Sig}
+    (h : custodyLedgerSign S oracleSign L n dep i ab = some (L', out)) :
+    L'.deploymentId = L.deploymentId ∧ L'.enrolledPk = L.enrolledPk ∧ L'.quorum = L.quorum := by
+  obtain ⟨_, _, hCase⟩ := custodyLedgerSign_inv h
+  rcases hCase with ⟨_, _, _, hSame, _⟩ | ⟨_, _, _, _, _, hAb⟩
+  · subst hSame
+    exact ⟨rfl, rfl, rfl⟩
+  · rcases hAb with ⟨_, hL', _⟩ | ⟨_, hL', _⟩
+    · subst hL'
+      exact ⟨rfl, rfl, rfl⟩
+    · subst hL'
+      exact ⟨rfl, rfl, rfl⟩
+
+/-- Completeness of the ledger: an unpoisoned ledger with no committed record at `i.epoch`, a fresh
+    epoch and session, a quorum of approvals and room in the budget releases the oracle's
+    signature on `digest L.deploymentId i`. -/
+theorem custodyLedgerSign_fresh_release
+    {L : CustodyLedger PK D Sig} {n dep : Nat} {i : CustodyIntent}
+    (hP : L.poisoned = false) (hD : dep = L.deploymentId)
+    (hF : findReleasedEpoch L.releasedHistory i.epoch = none)
+    (hEp : L.nextFreshEpoch ≤ i.epoch) (hSess : i.sessionId ∉ L.usedSessions)
+    (hQ : L.quorum.threshold ≤ n) (hCap : L.spent + i.spend ≤ L.quorum.spendCap) :
+    custodyLedgerSign S oracleSign L n dep i false =
+      some ({ L.authorize i with
+              releasedHistory :=
+                ⟨i, S.digest L.deploymentId i, oracleSign (S.digest L.deploymentId i)⟩ ::
+                  L.releasedHistory },
+            .released (oracleSign (S.digest L.deploymentId i))) := by
+  unfold custodyLedgerSign
+  rw [custody_if_pos (And.intro hP hD), hF]
+  dsimp only
+  rw [custody_if_pos (show L.nextFreshEpoch ≤ i.epoch ∧ i.sessionId ∉ L.usedSessions ∧
+    L.quorum.threshold ≤ n ∧ L.spent + i.spend ≤ L.quorum.spendCap from ⟨hEp, hSess, hQ, hCap⟩)]
+  exact custody_if_neg Bool.false_ne_true _ _
+
+/-- Unfolding of `custodyRevealed` at a new permit of the same party. -/
+theorem custodyRevealed_cons_self (honest : List CustodyApproval) (p dep : Nat)
+    (i : CustodyIntent) :
+    custodyRevealed (CustodyApproval.mk p dep i :: honest) p = i :: custodyRevealed honest p := by
+  unfold custodyRevealed
+  have hf : (CustodyApproval.mk p dep i :: honest).filter (fun a => decide (a.party = p)) =
+      CustodyApproval.mk p dep i :: honest.filter (fun a => decide (a.party = p)) :=
+    List.filter_cons_of_pos (decide_eq_true rfl)
+  rw [hf, List.map_cons]
+
+/-- A new permit of another party does not change what `p` reveals. -/
+theorem custodyRevealed_cons_ne (honest : List CustodyApproval) {p q : Nat} (dep : Nat)
+    (i : CustodyIntent) (h : q ≠ p) :
+    custodyRevealed (CustodyApproval.mk q dep i :: honest) p = custodyRevealed honest p := by
+  unfold custodyRevealed
+  have hf : (CustodyApproval.mk q dep i :: honest).filter (fun a => decide (a.party = p)) =
+      honest.filter (fun a => decide (a.party = p)) :=
+    List.filter_cons_of_neg (fun hd => h (of_decide_eq_true hd))
+  rw [hf]
+
+/-- Introduction form of the `.approve` port. -/
+theorem idealCustodyStep_approve_of
+    {st : IdealCustodyState PK D Sig} {p dep : Nat} (i : CustodyIntent)
+    (hg : p < st.ledger.quorum.numParties ∧ p ∉ st.corruptParties ∧
+      dep = st.ledger.deploymentId) :
+    idealCustodyStep S oracleSign st (.approve p dep i) =
+      some ({ st with honestApprovals := CustodyApproval.mk p dep i :: st.honestApprovals },
+            .approvalRecorded) := by
+  unfold idealCustodyStep
+  exact custody_if_pos hg _ _
+
+/-- Introduction form of the `.advApprove` port. -/
+theorem idealCustodyStep_advApprove_of
+    {st : IdealCustodyState PK D Sig} {p dep : Nat} (i : CustodyIntent)
+    (hg : p ∈ st.corruptParties ∧ dep = st.ledger.deploymentId) :
+    idealCustodyStep S oracleSign st (.advApprove p dep i) =
+      some ({ st with corruptApprovals := CustodyApproval.mk p dep i :: st.corruptApprovals },
+            .approvalRecorded) := by
+  unfold idealCustodyStep
+  exact custody_if_pos hg _ _
+
+/-- Introduction form of the `.corrupt` port. -/
+theorem idealCustodyStep_corrupt_of
+    {st : IdealCustodyState PK D Sig} {p : Nat}
+    (hg : p < st.ledger.quorum.numParties ∧ p ∉ st.corruptParties ∧
+      st.corruptParties.length + 1 < st.ledger.quorum.threshold) :
+    idealCustodyStep S oracleSign st (.corrupt p) =
+      some ({ st with corruptParties := p :: st.corruptParties },
+            .corrupted (custodyRevealed st.honestApprovals p)) := by
+  unfold idealCustodyStep
+  exact custody_if_pos hg _ _
+
+/-- Introduction form of the `.sign` port from an accepted ledger transition. -/
+theorem idealCustodyStep_sign_of
+    {st : IdealCustodyState PK D Sig} {dep : Nat} {i : CustodyIntent} {ab : Bool}
+    {L' : CustodyLedger PK D Sig} {out : CustodyOutcome Sig}
+    (h : custodyLedgerSign S oracleSign st.ledger
+        (custodyApprovers st.ledger.quorum.numParties st.honestApprovals st.corruptApprovals
+          st.ledger.deploymentId i).length dep i ab = some (L', out)) :
+    idealCustodyStep S oracleSign st (.sign dep i ab) = some ({ st with ledger := L' }, out) := by
+  unfold idealCustodyStep
+  dsimp only
+  rw [h]
+  rfl
 
 theorem idealCustodyStep_approve_inv
     {st st' : IdealCustodyState PK D Sig} {p dep : Nat} {i : CustodyIntent}

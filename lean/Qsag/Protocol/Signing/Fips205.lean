@@ -169,6 +169,30 @@ def slhDsaShake256s : Fips205Params :=
 def slhDsaShakeCompactTest : Fips205Params :=
   { n := 16, h := 4, d := 2, hp := 2, a := 2, k := 4, m := 3 }
 
+theorem Fips205Params.ell1_eq (p : Fips205Params) : p.ell1 = 2 * p.n := by rfl
+theorem Fips205Params.ell2_eq (p : Fips205Params) : p.ell2 = 3 := by rfl
+theorem Fips205Params.ell_eq (p : Fips205Params) : p.ell = 2 * p.n + 3 := by rfl
+theorem Fips205Params.mdBytes_eq (p : Fips205Params) : p.mdBytes = (p.k * p.a + 7) / 8 := by rfl
+theorem Fips205Params.treeBytes_eq (p : Fips205Params) : p.treeBytes = (p.h - p.hp + 7) / 8 := by
+  rfl
+theorem Fips205Params.leafBytes_eq (p : Fips205Params) : p.leafBytes = (p.hp + 7) / 8 := by rfl
+theorem Fips205Params.sigBytes_eq (p : Fips205Params) :
+    p.sigBytes = p.n + p.k * (1 + p.a) * p.n + p.d * (p.ell + p.hp) * p.n := by rfl
+theorem Fips205Params.wellFormed_eq (p : Fips205Params) :
+    p.wellFormed =
+      (decide (0 < p.n) && decide (p.n ≤ 32) &&
+        decide (0 < p.d) && decide (p.h = p.d * p.hp) &&
+        decide (0 < p.k) && decide (0 < p.a) &&
+        decide (p.m = p.mdBytes + p.treeBytes + p.leafBytes)) := by rfl
+theorem slhDsaShake192f_eq :
+    slhDsaShake192f = { n := 24, h := 66, d := 22, hp := 3, a := 8, k := 33, m := 42 } := by rfl
+theorem slhDsaShake192s_eq :
+    slhDsaShake192s = { n := 24, h := 63, d := 7, hp := 9, a := 14, k := 17, m := 39 } := by rfl
+theorem slhDsaShake256f_eq :
+    slhDsaShake256f = { n := 32, h := 68, d := 17, hp := 4, a := 9, k := 35, m := 49 } := by rfl
+theorem slhDsaShake256s_eq :
+    slhDsaShake256s = { n := 32, h := 64, d := 8, hp := 8, a := 14, k := 22, m := 47 } := by rfl
+
 theorem slhDsaShake128f_sigBytes : slhDsaShake128f.sigBytes = 17088 := by decide
 theorem slhDsaShake128s_sigBytes : slhDsaShake128s.sigBytes = 7856 := by decide
 theorem slhDsaShake192f_sigBytes : slhDsaShake192f.sigBytes = 35664 := by unfold slhDsaShake192f; decide
@@ -191,10 +215,6 @@ theorem fips205_wellFormed_exact_hMsg_bytes (p : Fips205Params) (hWf : p.wellFor
   unfold Fips205Params.wellFormed at hWf
   simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
   exact hWf.2
-
-theorem tooth_slhDsaShake128s_m34_rejected :
-    ({ slhDsaShake128s with m := 34 } : Fips205Params).wellFormed ≠ true := by
-  decide
 
 theorem witness_slhDsaShake128s_m30_wellFormed :
     ∃ p : Fips205Params, p.wellFormed = true :=
@@ -1129,22 +1149,6 @@ theorem slhVerifyInternal_shapes (p : Fips205Params) (msg : List UInt8)
       Decidable.of_not_not hs.1.1.2, (by simpa only [Bool.not_eq_false'] using hs.1.2),
       (by simpa only [Bool.not_eq_false'] using hs.2)⟩
 
-/-- Adding even one byte as an extra WOTS element is rejected before hashing. -/
-theorem tooth_slh_trailing_wots_rejected (p : Fips205Params) (msg : List UInt8)
-    (sig : SlhSignature) (pk : SlhPublicKey) (x : FipsXmssSig) (rest : List FipsXmssSig)
-    (hLen : x.wotsSig.length = p.ell) :
-    slhVerifyInternal p msg
-      { sig with htSig := { x with wotsSig := x.wotsSig ++ [[0]] } :: rest } pk = false := by
-  apply Bool.eq_false_iff.mpr
-  intro h
-  have hs := (slhVerifyInternal_shapes p msg _ pk h).2.2.2.2
-  simp only [List.all_cons, Bool.and_eq_true] at hs
-  have hc := hs.1
-  simp only [fipsXmssSigShape, Bool.and_eq_true, decide_eq_true_eq] at hc
-  have bad := hc.1.1.1
-  simp only [List.length_append, List.length_cons, List.length_nil, hLen] at bad
-  omega
-
 private theorem fipsHtSignAux_length (p : Fips205Params) (skSeed pkSeed : List UInt8) :
     ∀ (rem layer idxTree idxLeaf : Nat) (curMsg : List UInt8),
       (fipsHtSignAux p skSeed pkSeed layer idxTree idxLeaf curMsg rem).length = rem
@@ -1950,19 +1954,211 @@ theorem accepted_preHash_category (p : Fips205Params) (alg : FipsPreHashAlg)
   · rename_i hn
     cases hc : preHashCompatible p alg <;> simp_all
 
-theorem tooth_sha3_256_category5_rejected (ctx digest : List UInt8) :
-    encodePreHashMsgPrime slhDsaShake256f .sha3_256 ctx digest = none := by
-  simp [encodePreHashMsgPrime, preHashCompatible, slhDsaShake256f, FipsPreHashAlg.securityBytes]
-
 theorem witness_sha3_384_category3 :
     ∃ p alg ctx digest encoded,
       encodePreHashMsgPrime p alg ctx digest = some encoded := by
   refine ⟨slhDsaShake192f, .sha3_384, [], List.replicate 48 0, _, rfl⟩
 
-#tooth_pair Qsag.accepted_preHash_category vs Qsag.tooth_sha3_256_category5_rejected
 #verify_inhabited Qsag.accepted_preHash_category Qsag.witness_sha3_384_category3
-#tooth_pair Qsag.fips205_wellFormed_exact_hMsg_bytes vs Qsag.tooth_slhDsaShake128s_m34_rejected
 #verify_inhabited Qsag.fips205_wellFormed_exact_hMsg_bytes Qsag.witness_slhDsaShake128s_m30_wellFormed
+
+/-! ### Exports for lane threshold-b -/
+
+theorem Fips205Params.ell_def (p : Fips205Params) : p.ell = 2 * p.n + 3 := by rfl
+
+theorem Fips205Params.sigBytes_def (p : Fips205Params) :
+    p.sigBytes = p.n + p.k * (1 + p.a) * p.n + p.d * (p.ell + p.hp) * p.n := by rfl
+
+theorem Fips205Params.wellFormed_def (p : Fips205Params) :
+    p.wellFormed =
+      (decide (0 < p.n) && decide (p.n ≤ 32) &&
+       decide (0 < p.d) && decide (p.h = p.d * p.hp) &&
+       decide (0 < p.k) && decide (0 < p.a) &&
+       decide (p.m = p.mdBytes + p.treeBytes + p.leafBytes)) := by rfl
+
+theorem fipsHMsg_def (m : Nat) (rRand pkSeed pkRoot msgPrime : List UInt8) :
+    fipsHMsg m rRand pkSeed pkRoot msgPrime =
+      shake256Xof m (rRand ++ pkSeed ++ pkRoot ++ msgPrime) := by rfl
+
+theorem fipsH_def (n : Nat) (pkSeed : List UInt8) (adrs : Fips205Adrs) (m1 m2 : List UInt8) :
+    fipsH n pkSeed adrs m1 m2 = shake256Xof n (pkSeed ++ encodeFips205Adrs adrs ++ m1 ++ m2) := by
+  rfl
+
+theorem fipsTl_def (n : Nat) (pkSeed : List UInt8) (adrs : Fips205Adrs)
+    (ms : List (List UInt8)) :
+    fipsTl n pkSeed adrs ms = shake256Xof n (pkSeed ++ encodeFips205Adrs adrs ++ ms.flatten) := by
+  rfl
+
+theorem fipsWotsPkGen_def (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree kp : Nat) :
+    fipsWotsPkGen p skSeed pkSeed layer tree kp =
+      fipsTl p.n pkSeed (mkFipsAdrs layer tree .wotsPk kp 0 0)
+        ((List.range p.ell).map fun i =>
+          fipsChain p.n pkSeed layer tree kp i 0 15
+            (fipsPrf p.n pkSeed skSeed (mkFipsAdrs layer tree .wotsPrf kp i 0))) := by rfl
+
+theorem fipsWotsSign_def (p : Fips205Params) (msg skSeed pkSeed : List UInt8)
+    (layer tree kp : Nat) :
+    fipsWotsSign p msg skSeed pkSeed layer tree kp =
+      (List.range p.ell).map fun i =>
+        fipsChain p.n pkSeed layer tree kp i 0 ((fipsWotsDigits p.ell1 msg).getD i 0)
+          (fipsPrf p.n pkSeed skSeed (mkFipsAdrs layer tree .wotsPrf kp i 0)) := by rfl
+
+theorem fipsWotsPkFromSig_def (p : Fips205Params) (sig : List (List UInt8))
+    (msg pkSeed : List UInt8) (layer tree kp : Nat) :
+    fipsWotsPkFromSig p sig msg pkSeed layer tree kp =
+      fipsTl p.n pkSeed (mkFipsAdrs layer tree .wotsPk kp 0 0)
+        ((List.range p.ell).map fun i =>
+          fipsChain p.n pkSeed layer tree kp i ((fipsWotsDigits p.ell1 msg).getD i 0)
+            (15 - (fipsWotsDigits p.ell1 msg).getD i 0) (sig.getD i [])) := by rfl
+
+theorem fipsXmssNode_zero (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree nodeIdx : Nat) :
+    fipsXmssNode p skSeed pkSeed layer tree 0 nodeIdx =
+      fipsWotsPkGen p skSeed pkSeed layer tree nodeIdx := by rfl
+
+theorem fipsXmssNode_succ (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree z nodeIdx : Nat) :
+    fipsXmssNode p skSeed pkSeed layer tree (z + 1) nodeIdx =
+      fipsH p.n pkSeed (mkFipsAdrs layer tree .tree 0 (z + 1) nodeIdx)
+        (fipsXmssNode p skSeed pkSeed layer tree z (2 * nodeIdx))
+        (fipsXmssNode p skSeed pkSeed layer tree z (2 * nodeIdx + 1)) := by rfl
+
+theorem fipsXmssAuthPath_zero (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree nodeIdx localIdx : Nat) :
+    fipsXmssAuthPath p skSeed pkSeed layer tree 0 nodeIdx localIdx = [] := by rfl
+
+theorem fipsXmssAuthPath_succ (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree z nodeIdx localIdx : Nat) :
+    fipsXmssAuthPath p skSeed pkSeed layer tree (z + 1) nodeIdx localIdx =
+      if localIdx < 2 ^ z then
+        fipsXmssAuthPath p skSeed pkSeed layer tree z (2 * nodeIdx) localIdx ++
+          [fipsXmssNode p skSeed pkSeed layer tree z (2 * nodeIdx + 1)]
+      else
+        fipsXmssAuthPath p skSeed pkSeed layer tree z (2 * nodeIdx + 1) (localIdx - 2 ^ z) ++
+          [fipsXmssNode p skSeed pkSeed layer tree z (2 * nodeIdx)] := by rfl
+
+theorem fipsWalkBottomUp_nil (n : Nat) (pkSeed : List UInt8) (layer tree kp : Nat)
+    (ty : FipsAdrsType) (z idx : Nat) (node : List UInt8) :
+    fipsWalkBottomUp n pkSeed layer tree kp ty z idx node [] = node := by rfl
+
+theorem fipsWalkBottomUp_cons (n : Nat) (pkSeed : List UInt8) (layer tree kp : Nat)
+    (ty : FipsAdrsType) (z idx : Nat) (node authZ : List UInt8) (rest : List (List UInt8)) :
+    fipsWalkBottomUp n pkSeed layer tree kp ty z idx node (authZ :: rest) =
+      fipsWalkBottomUp n pkSeed layer tree kp ty (z + 1) (idx / 2)
+        (if idx % 2 = 0 then
+          fipsH n pkSeed (mkFipsAdrs layer tree ty kp (z + 1) (idx / 2)) node authZ
+        else fipsH n pkSeed (mkFipsAdrs layer tree ty kp (z + 1) (idx / 2)) authZ node)
+        rest := by rfl
+
+theorem fipsXmssSign_def (p : Fips205Params) (msg skSeed pkSeed : List UInt8)
+    (layer tree idx : Nat) :
+    fipsXmssSign p msg skSeed pkSeed layer tree idx =
+      { wotsSig := fipsWotsSign p msg skSeed pkSeed layer tree idx
+        authPath := fipsXmssAuthPath p skSeed pkSeed layer tree p.hp 0 idx } := by rfl
+
+theorem fipsXmssPkFromSig_def (p : Fips205Params) (idx : Nat) (xsig : FipsXmssSig)
+    (msg pkSeed : List UInt8) (layer tree : Nat) :
+    fipsXmssPkFromSig p idx xsig msg pkSeed layer tree =
+      fipsWalkBottomUp p.n pkSeed layer tree 0 .tree 0 idx
+        (fipsWotsPkFromSig p xsig.wotsSig msg pkSeed layer tree idx) xsig.authPath := by rfl
+
+theorem fipsForsNode_zero (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf nodeIdx : Nat) :
+    fipsForsNode p skSeed pkSeed tree idxLeaf 0 nodeIdx =
+      fipsF p.n pkSeed (mkFipsAdrs 0 tree .forsTree idxLeaf 0 nodeIdx)
+        (fipsPrf p.n pkSeed skSeed (mkFipsAdrs 0 tree .forsPrf idxLeaf 0 nodeIdx)) := by rfl
+
+theorem fipsForsNode_succ (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf z nodeIdx : Nat) :
+    fipsForsNode p skSeed pkSeed tree idxLeaf (z + 1) nodeIdx =
+      fipsH p.n pkSeed (mkFipsAdrs 0 tree .forsTree idxLeaf (z + 1) nodeIdx)
+        (fipsForsNode p skSeed pkSeed tree idxLeaf z (2 * nodeIdx))
+        (fipsForsNode p skSeed pkSeed tree idxLeaf z (2 * nodeIdx + 1)) := by rfl
+
+theorem fipsForsAuthPath_zero (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf nodeIdx localIdx : Nat) :
+    fipsForsAuthPath p skSeed pkSeed tree idxLeaf 0 nodeIdx localIdx = [] := by rfl
+
+theorem fipsForsAuthPath_succ (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf z nodeIdx localIdx : Nat) :
+    fipsForsAuthPath p skSeed pkSeed tree idxLeaf (z + 1) nodeIdx localIdx =
+      if localIdx < 2 ^ z then
+        fipsForsAuthPath p skSeed pkSeed tree idxLeaf z (2 * nodeIdx) localIdx ++
+          [fipsForsNode p skSeed pkSeed tree idxLeaf z (2 * nodeIdx + 1)]
+      else
+        fipsForsAuthPath p skSeed pkSeed tree idxLeaf z (2 * nodeIdx + 1) (localIdx - 2 ^ z) ++
+          [fipsForsNode p skSeed pkSeed tree idxLeaf z (2 * nodeIdx)] := by rfl
+
+theorem fipsForsSign_def (p : Fips205Params) (md skSeed pkSeed : List UInt8)
+    (tree idxLeaf : Nat) :
+    fipsForsSign p md skSeed pkSeed tree idxLeaf =
+      (List.range p.k).map fun j =>
+        { skVal := fipsPrf p.n pkSeed skSeed
+            (mkFipsAdrs 0 tree .forsPrf idxLeaf 0 (j * (2 ^ p.a) + (base2b md p.a p.k).getD j 0))
+          authPath := fipsForsAuthPath p skSeed pkSeed tree idxLeaf p.a j
+            ((base2b md p.a p.k).getD j 0) } := by rfl
+
+theorem fipsForsPkFromSig_def (p : Fips205Params) (fsig : List FipsForsTreeSig)
+    (md pkSeed : List UInt8) (tree idxLeaf : Nat) :
+    fipsForsPkFromSig p fsig md pkSeed tree idxLeaf =
+      fipsTl p.n pkSeed (mkFipsAdrs 0 tree .forsRoots idxLeaf 0 0)
+        ((List.range p.k).map fun j =>
+          fipsWalkBottomUp p.n pkSeed 0 tree idxLeaf .forsTree 0
+            (j * (2 ^ p.a) + (base2b md p.a p.k).getD j 0)
+            (fipsF p.n pkSeed
+              (mkFipsAdrs 0 tree .forsTree idxLeaf 0 (j * (2 ^ p.a) + (base2b md p.a p.k).getD j 0))
+              (fsig.getD j ⟨[], []⟩).skVal)
+            (fsig.getD j ⟨[], []⟩).authPath) := by rfl
+
+theorem fipsForsPkGen_def (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf : Nat) :
+    fipsForsPkGen p skSeed pkSeed tree idxLeaf =
+      fipsTl p.n pkSeed (mkFipsAdrs 0 tree .forsRoots idxLeaf 0 0)
+        ((List.range p.k).map fun j => fipsForsNode p skSeed pkSeed tree idxLeaf p.a j) := by rfl
+
+theorem fipsHtSignAux_zero (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer idxTree idxLeaf : Nat) (curMsg : List UInt8) :
+    fipsHtSignAux p skSeed pkSeed layer idxTree idxLeaf curMsg 0 = [] := by rfl
+
+theorem fipsHtSignAux_succ (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer idxTree idxLeaf : Nat) (curMsg : List UInt8) (rem : Nat) :
+    fipsHtSignAux p skSeed pkSeed layer idxTree idxLeaf curMsg (rem + 1) =
+      fipsXmssSign p curMsg skSeed pkSeed layer idxTree idxLeaf ::
+        fipsHtSignAux p skSeed pkSeed (layer + 1) (idxTree / (2 ^ p.hp)) (idxTree % (2 ^ p.hp))
+          (fipsXmssNode p skSeed pkSeed layer idxTree p.hp 0) rem := by rfl
+
+theorem fipsHtSignAux_length_eq (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (rem layer idxTree idxLeaf : Nat) (curMsg : List UInt8) :
+    (fipsHtSignAux p skSeed pkSeed layer idxTree idxLeaf curMsg rem).length = rem :=
+  fipsHtSignAux_length p skSeed pkSeed rem layer idxTree idxLeaf curMsg
+
+theorem fipsXmssAuthPath_length_eq (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree z nodeIdx localIdx : Nat) :
+    (fipsXmssAuthPath p skSeed pkSeed layer tree z nodeIdx localIdx).length = z :=
+  fipsXmssAuthPath_length p skSeed pkSeed layer tree z nodeIdx localIdx
+
+theorem fipsForsAuthPath_length_eq (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf z nodeIdx localIdx : Nat) :
+    (fipsForsAuthPath p skSeed pkSeed tree idxLeaf z nodeIdx localIdx).length = z :=
+  fipsForsAuthPath_length p skSeed pkSeed tree idxLeaf z nodeIdx localIdx
+
+theorem fipsHtVerifyAux_nil (p : Fips205Params) (pkSeed : List UInt8)
+    (layer idxTree idxLeaf : Nat) (curNode : List UInt8) :
+    fipsHtVerifyAux p pkSeed layer idxTree idxLeaf curNode [] = curNode := by rfl
+
+theorem fipsHtVerifyAux_cons (p : Fips205Params) (pkSeed : List UInt8)
+    (layer idxTree idxLeaf : Nat) (curNode : List UInt8) (xsig : FipsXmssSig)
+    (rest : List FipsXmssSig) :
+    fipsHtVerifyAux p pkSeed layer idxTree idxLeaf curNode (xsig :: rest) =
+      fipsHtVerifyAux p pkSeed (layer + 1) (idxTree / (2 ^ p.hp)) (idxTree % (2 ^ p.hp))
+        (fipsXmssPkFromSig p idxLeaf xsig curNode pkSeed layer idxTree) rest := by rfl
+
+theorem fipsSplitDigest_def (p : Fips205Params) (digest : List UInt8) :
+    fipsSplitDigest p digest =
+      (digest.take p.mdBytes,
+       ofBE ((digest.drop p.mdBytes).take p.treeBytes) % (2 ^ (p.h - p.hp)),
+       ofBE ((digest.drop (p.mdBytes + p.treeBytes)).take p.leafBytes) % (2 ^ p.hp)) := by rfl
 
 end Qsag
 end

@@ -1,9 +1,8 @@
 module
-public import Qsag.Custody.SeparatedCustodyRelease
+public import Qsag.Custody.SeparatedCustody
 public import Qsag.Tests.SeparatedCustodyHistoryChecks
-import all Qsag.Custody.SeparatedCustodyRelease
+import all Qsag.Custody.SeparatedCustody
 import all Qsag.Tests.SeparatedCustodyHistoryChecks
-import all Qsag.Custody.SeparatedCustodyHistory
 import all Qsag.Tests.SeparatedCustodyChecks
 public section
 namespace Qsag.Custody.ReleaseChecks
@@ -31,7 +30,8 @@ def check : IO Unit := do
     throw (IO.userError "crash before compute refunded or manufactured a signature")
   let made := compute deployment.signer (deployment.keys 0) begun
   let some c := made.buffered | throw (IO.userError "actual partial production signer failed fixture")
-  unless verify deployment.signer (publicKeys deployment 0) c.party c.intent c.signature do
+  unless verify deployment.signer (publicKeys deployment 0) deployment.deploymentId
+      c.party c.intent c.signature do
     throw (IO.userError "split producer returned an invalid certificate")
   let postCrash := publish (crash made)
   unless postCrash.published.isEmpty && postCrash.buffered.isNone &&

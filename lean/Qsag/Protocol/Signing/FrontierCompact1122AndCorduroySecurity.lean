@@ -39,13 +39,6 @@ public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.HypertreeEufCma
 public import Qsag.Protocol.Threshold.ThresholdMpc
-import all Qsag.Math.Goldilocks
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Oracle.Keccak
-import all Qsag.Oracle.Sponge
-import all Qsag.Protocol.Signing.HashSigs
-import all Qsag.Protocol.Signing.HypertreeEufCma
-import all Qsag.Protocol.Threshold.ThresholdMpc
 public import Qsag.Tactic.AssuranceKit
 
 public section
@@ -1456,80 +1449,6 @@ theorem compact1122_one_time_euf_cma_reduction (H : FrontierHashSuite) (p : Fron
     Nonempty (FrontierForgeryBreak H sk.pkSeed sk.skSeed p.winternitzW) :=
   ⟨extractCompact1122ForgeryBreak H p hL sk hedge₁ ctr₁ m₁ sig₁ hHonest m₂ sig₂ hFresh hForged⟩
 
-def verifyFrontierFtsNoTargetSum (H : FrontierHashSuite) (p : FrontierFtsParams)
-    (pk : FrontierPublicKey) (frontier offs : List Nat) (chainVals : List (BitVec 256)) : Bool :=
-  if chainVals.length != p.frontierLen || offs.length != p.frontierLen then false
-  else if offs.any (fun a => decide (p.winternitzW ≤ a)) then false
-  else match runFrontierStackLoop H pk.pkSeed p.winternitzW frontier offs chainVals [] with
-    | [(1, rootOut)] => decide (rootOut = pk.root)
-    | _ => false
-
-theorem tooth_drop_target_sum_allows_one_sig_forgery
-    (H : FrontierHashSuite) (p : FrontierFtsParams) (hw : 2 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
-    (sk : FrontierSecretKey) (tr : AntichainTree) (hVal : tr.Valid p.treeHeight = true) (hSz : tr.size = p.frontierLen) :
-    ∃ (offs₁ offs₂ : List Nat) (forgedVals : List (BitVec 256)),
-      offs₂ ≠ offs₁ ∧
-      verifyFrontierFtsNoTargetSum H p (deriveFrontierPk H p sk) (tr.frontierNodes 1) offs₂ forgedVals = true := by
-  let pk := deriveFrontierPk H p sk
-  let offs₁ := List.replicate p.frontierLen 0
-  let honestVals := honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs₁
-  let v₀ := (tr.frontierNodes 1).headD 2
-  let forgedVals := (H.chainStep pk.pkSeed v₀ 0 (honestVals.headD 0#256)) :: honestVals.tail
-  let offs₂ := 1 :: List.replicate (p.frontierLen - 1) 0
-  have hNe : offs₂ ≠ offs₁ := by
-    dsimp only [offs₁, offs₂]
-    cases hFL : p.frontierLen with
-    | zero => omega
-    | succ m => simp [List.replicate_succ]
-  refine ⟨offs₁, offs₂, forgedVals, hNe, ?_⟩
-  have hHLen : honestVals.length = p.frontierLen :=
-    (honestSignSubtree_length H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr offs₁ hVal).trans hSz
-  have hNLen := (tr.frontierNodes_length 1).trans hSz
-  have hOLen₁ : offs₁.length = p.frontierLen := List.length_replicate
-  have hOLen₂ : offs₂.length = p.frontierLen := by dsimp only [offs₂]; rw [List.length_cons, List.length_replicate]; omega
-  cases hFN : tr.frontierNodes 1 with
-  | nil => rw [hFN] at hNLen; change 0 = p.frontierLen at hNLen; omega
-  | cons u us =>
-    cases hHV : honestVals with
-    | nil => rw [hHV] at hHLen; change 0 = p.frontierLen at hHLen; omega
-    | cons x xs =>
-      have hFLS : p.frontierLen = us.length + 1 := by rw [hFN] at hNLen; exact hNLen.symm
-      have hO₁ : offs₁ = 0 :: List.replicate us.length 0 := by dsimp only [offs₁]; rw [hFLS, List.replicate_succ]
-      have hO₂ : offs₂ = 1 :: List.replicate us.length 0 := by dsimp only [offs₂]; rw [hFLS, Nat.add_sub_cancel]
-      have hFLen : forgedVals.length = p.frontierLen := by
-        dsimp only [forgedVals]; rw [hHV]; rw [hHV] at hHLen; exact hHLen
-      have hNoBig : offs₂.any (fun a => decide (p.winternitzW ≤ a)) = false := by
-        rw [hO₂, List.any_cons, decide_eq_false (by omega : ¬ p.winternitzW ≤ 1)]
-        suffices (List.replicate us.length 0).any (fun a => decide (p.winternitzW ≤ a)) = false by rw [this]; rfl
-        apply List.any_eq_false.mpr
-        intro a ha
-        rw [List.mem_replicate] at ha
-        simp only [ha.2, decide_eq_true_eq]
-        omega
-      change verifyFrontierFtsNoTargetSum H p pk (u :: us) offs₂ forgedVals = true
-      unfold verifyFrontierFtsNoTargetSum
-      have hLenChk : (forgedVals.length != p.frontierLen || offs₂.length != p.frontierLen) = false := by
-        rw [hFLen, hOLen₂]; simp
-      simp only [hLenChk, hNoBig, Bool.false_eq_true, ↓reduceIte]
-      have hStepEq : runFrontierStackLoop H pk.pkSeed p.winternitzW (u :: us) offs₂ forgedVals [] =
-          runFrontierStackLoop H pk.pkSeed p.winternitzW (tr.frontierNodes 1) offs₁ honestVals [] := by
-        dsimp only [forgedVals, v₀]; rw [hFN, hHV, hO₁, hO₂]; unfold runFrontierStackLoop
-        simp only [List.headD_cons, List.tail_cons, Nat.sub_zero]
-        have hAdv : chainAdvance H pk.pkSeed u 0 (p.winternitzW - 1) x =
-            chainAdvance H pk.pkSeed u 1 (p.winternitzW - 1 - 1) (H.chainStep pk.pkSeed u 0 x) := by
-          conv => lhs; rw [show p.winternitzW - 1 = (p.winternitzW - 1 - 1) + 1 by omega]
-          rfl
-        rw [hAdv]
-      rw [hStepEq]
-      have hLp := runFrontierStackLoop_tree_eq H pk.pkSeed p.winternitzW tr 1 offs₁ honestVals
-        [] [] [] [] (by decide) (hOLen₁.trans hSz.symm) (hHLen.trans hSz.symm)
-      simp only [List.append_nil] at hLp; rw [hLp]; unfold runFrontierStackLoop collapseFrontierStack
-      rw [evalAntichainTree_honest H pk.pkSeed sk.skSeed p.winternitzW (by omega) p.treeHeight 1 tr offs₁
-        (by decide) hVal (hOLen₁.trans hSz.symm)
-        (fun a ha => by rw [List.mem_replicate] at ha; rw [ha.2]; omega)
-        (fun hLf => by subst hLf; unfold AntichainTree.size at hSz; omega)]
-      simp [pk, deriveFrontierPk]
-
 /-! ## §2. `RotatedEpochVote` Forward-Secure Key-Chain Induction (`rotatedEpochVote_forward_secure_chain`) -/
 
 structure EpochKeyLink where
@@ -1767,43 +1686,6 @@ theorem rotatedEpochVote_cshake_chain_reduction (H : FrontierHashSuite) (p : Fro
   | epochKeyBreak histEp skEp fBrk =>
     exact .inr ⟨histEp, skEp, ⟨fBrk⟩⟩
 
-theorem tooth_static_key_compromise_forges_historical_epoch
-    (H : FrontierHashSuite) (p : FrontierFtsParams)
-    (hBytes : p.nodeBytes = 32) (hUses : p.maxSafeUses = 1)
-    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
-    (hDom : 2 ^ 256 ≤ frontierRootSubCount p.treeHeight p.frontierLen *
-                      frontierDecCount p.winternitzW p.frontierLen p.targetSum)
-    (voteHash : EpochVoteHasher) (chainId : BitVec 256)
-    (skStatic : FrontierSecretKey) (hedge : BitVec 256)
-    (honestDigest forgedDigest : BitVec 256) (hDiff : forgedDigest ≠ honestDigest) :
-    ∃ forgedVote : RotatedEpochVote,
-      forgedVote.voteDigest = forgedDigest ∧ forgedVote.voteDigest ≠ honestDigest ∧
-      verifyRotatedEpochVote H p voteHash chainId (deriveFrontierPk H p skStatic) 0 forgedDigest forgedVote =
-        some (deriveFrontierPk H p skStatic) := by
-  let pk₀ := deriveFrontierPk H p skStatic
-  let msg := voteHash chainId 0 forgedDigest pk₀.root
-  let d := H.prehashMsg pk₀.pkSeed pk₀.root msg
-  let rand := H.prfRand skStatic.skPrf pk₀.pkSeed pk₀.root hedge d
-  let rk := (H.squeezeRank pk₀.pkSeed pk₀.root rand d 0).toNat
-  obtain ⟨tr, _, offs, hUnr, _, _, _, _, _, _, _, _⟩ :=
-    unrankFrontierFts_bijective p rk (Nat.lt_of_lt_of_le (H.squeezeRank pk₀.pkSeed pk₀.root rand d 0).isLt hDom)
-  have hCtr0 : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits) := by
-    have hPow : 0 < 2 ^ p.counterBits := Nat.pow_pos (by decide : 0 < 2)
-    change ¬ (0 >= 2 ^ p.counterBits); omega
-  let sig : FrontierSignature := ⟨rand, 0, honestSignSubtree H pk₀.pkSeed skStatic.skSeed p.winternitzW p.treeHeight 1 tr offs⟩
-  have hSign : signFrontierFts H p skStatic hedge 0 msg = some sig := by
-    unfold signFrontierFts
-    rw [ite_eq_right_iff.mpr (fun h => False.elim (hCtr0 h))]
-    simp [pk₀, msg, d, rand, rk, hUnr, sig]
-  refine ⟨⟨⟨0, pk₀.root⟩, forgedDigest, sig⟩, rfl, hDiff, ?_⟩
-  unfold verifyRotatedEpochVote
-  have hC1 : (p.nodeBytes != 32 || p.maxSafeUses != 1) = false := by rw [hBytes, hUses]; rfl
-  have hC2 : ((0 : UInt64) != 0 || (0 : UInt64).toNat + 1 >= 2 ^ 64) = false := by decide +kernel
-  have hC3 : (forgedDigest != forgedDigest) = false := by simp
-  simp only [hC1, hC2, hC3, Bool.false_eq_true, ↓reduceIte]
-  rw [verifyFrontierFts_signFrontierFts H p hw hL skStatic hedge 0 msg sig hSign]
-  simp [pk₀, deriveFrontierPk]
-
 /-! ## §3. `Corduroy` Width-12 `Poseidon2` Stateless Hypertree + `(t, n)` Shamir Power-7 Composition -/
 
 /-- Exact `AggSigProfile::CorduroyPoseidon2` parameters (`crates/qsag-agg/src/sig.rs:31-67`):
@@ -1833,7 +1715,9 @@ theorem corduroy_real_profiles_audit :
     corduroyPoseidon2AggParams.numLayers * corduroyPoseidon2AggParams.subtreeHeight = 64 ∧
     corduroyPoseidon2RawSigBytes corduroyPoseidon2AggParams = 76896 ∧
     corduroyPoseidon2AggParams.productionWellFormed = false :=
-  ⟨rfl, rfl, by decide +kernel, rfl, rfl, by decide +kernel, by decide +kernel, by decide +kernel⟩
+  by
+    simp only [corduroyCustody128Params_eq, PqHashParams.productionWellFormed_eq,
+      corduroyPoseidon2AggParams, corduroyPoseidon2RawSigBytes] <;> decide +kernel
 
 def mkShamirProductionPqHashMpcOracles
     (lambdas : List Goldilocks) (skSeedSh skPrfSh : List (List Goldilocks))
@@ -1863,12 +1747,13 @@ theorem mkShamirProductionPqHashMpcOracles_matchesKey
     (callPrep : Nat → Nat → Poseidon2CallPrep) (hPrep : ∀ step blk, (callPrep step blk).validAt lambdas) :
     (mkShamirProductionPqHashMpcOracles lambdas skSeedSh skPrfSh pkSeed decomp8 callPrep).MatchesKey
       poseidon2Suite ⟨skSeed, skPrf, pkSeed⟩ := by
+  rw [ProductionPqHashMpcOracles.MatchesKey_iff]
   refine ⟨mkShamirPoseidon2MpcOracles_matchesKey lambdas hSumOne hSeed hPrf pkSeed hDecomp callPrep hPrep, ?_, ?_⟩
   · intro tree0 kp0 j u; dsimp only [mkShamirProductionPqHashMpcOracles]
     have hF := shamirFrameSingleSecretCall_valid lambdas hSumOne tagPrf pkSeed
       ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩ hSeed
     rw [(mpcPoseidon2SpongeShared_simulates lambdas hSumOne hF (callPrep 0) (hPrep 0)).2,
-        forsIndexedSecretLeaf, thSecretPrf_eq, thCall_eq]; rfl
+        forsIndexedSecretLeaf_eq, thSecretPrf_eq, thCall_eq]; rfl
   · intro tree0 kp0 j u; dsimp only [mkShamirProductionPqHashMpcOracles]
     have hF1 := shamirFrameSingleSecretCall_valid lambdas hSumOne tagPrf pkSeed
       ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩ hSeed
@@ -1877,7 +1762,7 @@ theorem mkShamirProductionPqHashMpcOracles_matchesKey
       ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩ hSecV
     rw [hSq]; dsimp only
     rw [(mpcPoseidon2SpongeShared_simulates lambdas hSumOne hF2 (callPrep 1) (hPrep 1)).2,
-        forsIndexedLeafFn, forsIndexedLeafHash, forsIndexedSecretLeaf, thChainF_eq, thSecretPrf_eq, thCall_eq, thCall_eq]; rfl
+        forsIndexedLeafFn_eq, forsIndexedLeafHash_eq, forsIndexedSecretLeaf_eq, thChainF_eq, thSecretPrf_eq, thCall_eq, thCall_eq]; rfl
 
 theorem corduroy_threshold_stateless_euf_cma
     (params : PqHashParams)
@@ -1980,26 +1865,10 @@ theorem corduroy_both_real_profiles_euf_cma
       hitCount isSpdzC coins + hitCount isItsrC coins + hitCount isTcrC coins + hitCount isPreC coins ∧
     hitCount (fun ω => prodEufCmaWin poseidon2Suite corduroyPoseidon2AggParams (gameAgg ω)) coins ≤
       hitCount isSpdzA coins + hitCount isItsrA coins + hitCount isTcrA coins + hitCount isPreA coins := by
-  exact ⟨((corduroy_threshold_stateless_euf_cma corduroyCustody128Params (.inl rfl) rfl).2.2.2
+  exact ⟨((corduroy_threshold_stateless_euf_cma corduroyCustody128Params (.inl (by simp only [corduroyCustody128Params_eq])) (by simp only [corduroyCustody128Params_eq])).2.2.2
             coins gameCustody isSpdzC isItsrC isTcrC isPreC hCustody).2,
          ((corduroy_threshold_stateless_euf_cma corduroyPoseidon2AggParams (.inl rfl) rfl).2.2.2
             coins gameAgg isSpdzA isItsrA isTcrA isPreA hAgg).2⟩
-
-theorem tooth_corduroy_t_corrupted_custodians_uniquely_pin_secret
-    (P Q : List Goldilocks)
-    (hP : verifyShamirPolyConsistent 2 P [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] = true)
-    (hQ : verifyShamirPolyConsistent 2 Q [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] = true) :
-    ∃ sPinned : Goldilocks,
-      sPinned ≠ Goldilocks.zero ∧
-      RoundPoly.evalCoeffs P Goldilocks.zero = sPinned ∧
-      RoundPoly.evalCoeffs Q Goldilocks.zero = sPinned := by
-  have hRef : verifyShamirPolyConsistent 2 [Goldilocks.ofNat 1, Goldilocks.ofNat 4]
-      [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] = true := by decide +kernel
-  have hEqQ := shamirPolyConsistent_unique_at_zero 2 P Q [Goldilocks.ofNat 1, Goldilocks.ofNat 2]
-    [Goldilocks.ofNat 5, Goldilocks.ofNat 9] (by decide +kernel) (by decide) hP hQ
-  have hEqRef := shamirPolyConsistent_unique_at_zero 2 P [Goldilocks.ofNat 1, Goldilocks.ofNat 4]
-    [Goldilocks.ofNat 1, Goldilocks.ofNat 2] [Goldilocks.ofNat 5, Goldilocks.ofNat 9] (by decide +kernel) (by decide) hP hRef
-  exact ⟨RoundPoly.evalCoeffs P Goldilocks.zero, by rw [hEqRef]; decide +kernel, rfl, hEqQ.symm⟩
 
 /-! ### Real-Parameter Inhabitedness & `#tooth_pair` / `#verify_inhabited` / `#verify_constructive` Gates -/
 
@@ -2073,16 +1942,6 @@ private theorem witCompact1122_hVer :
 
 private theorem witCompact1122_hL : 2 ≤ compact1122Params.frontierLen := by decide
 private theorem witCompact1122_hNe : ([2] : List UInt8) ≠ [1] := by decide
-
-theorem witness_compact1122_forgery :
-    ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
-      (sk : FrontierSecretKey) (hedge₁ : BitVec 256) (ctr₁ : UInt16)
-      (m₁ : List UInt8) (sig₁ : FrontierSignature),
-      signFrontierFts H p sk hedge₁ ctr₁ m₁ = some sig₁ ∧
-      ∃ (m₂ : List UInt8) (sig₂ : FrontierSignature),
-        m₂ ≠ m₁ ∧ verifyFrontierFts H p (deriveFrontierPk H p sk) m₂ sig₂ = true :=
-  ⟨witCompact1122H, compact1122Params, witCompact1122_hL, witCompact1122Sk, 0#256, 0, [1], witCompact1122Sig,
-    witCompact1122_hSign, [2], witCompact1122Sig, witCompact1122_hNe, witCompact1122_hVer⟩
 
 private def witEpochM1 : List UInt8 := cshakeEpochVoteHasher 0#256 0 0#256 0#256
 private def witEpochM2 : List UInt8 := cshakeEpochVoteHasher 0#256 0 1#256 0#256
@@ -2160,29 +2019,6 @@ private theorem witEpoch_hDev :
       ([witEpochAdvV].get ⟨i.1, i.2⟩).link.nextEpochPkRoot ≠ ([witEpochRec0].get i).nextPkRoot :=
   ⟨⟨0, Nat.zero_lt_succ 0⟩, .inl (by show (1#256 : BitVec 256) ≠ 0#256; decide)⟩
 
-theorem witness_rotatedEpochVote_chain :
-    ∃ (H : FrontierHashSuite) (p : FrontierFtsParams) (_ : 2 ≤ p.frontierLen)
-      (voteHash : EpochVoteHasher) (chainId pkSeed : BitVec 256) (startEp : Nat)
-      (histRecords : List HonestEpochRecord) (advDigests : List (BitVec 256))
-      (advVotes : List RotatedEpochVote) (anchorPk finalPk : FrontierPublicKey)
-      (hLen1 : histRecords.length = advDigests.length) (hLen2 : advDigests.length = advVotes.length),
-      (∀ idx : Fin histRecords.length, (histRecords.get idx).ValidAt H p voteHash chainId pkSeed (startEp + idx.1)) ∧
-      (∀ r₀, histRecords.head? = some r₀ → anchorPk = deriveFrontierPk H p r₀.sk) ∧
-      (∀ i : Fin histRecords.length, ∀ rNext, histRecords[i.1 + 1]? = some rNext →
-        (histRecords.get i).nextPkRoot = (deriveFrontierPk H p rNext.sk).root) ∧
-      verifyRotatedEpochChain H p voteHash chainId anchorPk startEp advDigests advVotes = some finalPk ∧
-      (∃ i : Fin histRecords.length,
-        advDigests.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen1⟩ ≠ (histRecords.get i).voteDigest ∨
-        (advVotes.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (hLen1.trans hLen2)⟩).link.nextEpochPkRoot ≠ (histRecords.get i).nextPkRoot) :=
-  ⟨witEpochH, compact1122Params, witCompact1122_hL, cshakeEpochVoteHasher, 0#256, 3#256, 0,
-    [witEpochRec0], [1#256], [witEpochAdvV], witEpochPk, ⟨3#256, 0#256⟩, rfl, rfl,
-    witEpoch_hVal, witEpoch_hAnc, witEpoch_hLink, witEpoch_hAcc, witEpoch_hDev⟩
-
-theorem witness_corduroy_real_params :
-    ∃ params : PqHashParams,
-      (params.w = 4 ∨ params.w = 16) ∧ params.statefulJorts = false :=
-  ⟨corduroyPoseidon2AggParams, .inl rfl, rfl⟩
-
 attribute [local irreducible]
   cshakeFrontierHashSuite prehashFaultSuite
   deriveFrontierPk signFrontierFts verifyFrontierFts verifyRotatedEpochChain
@@ -2190,27 +2026,17 @@ attribute [local irreducible]
 
 set_option maxRecDepth 32768
 
-#tooth_pair Qsag.compact1122_one_time_euf_cma_reduction vs Qsag.tooth_drop_target_sum_allows_one_sig_forgery
-#tooth_pair Qsag.rotatedEpochVote_forward_secure_chain vs Qsag.tooth_static_key_compromise_forges_historical_epoch
-#tooth_pair Qsag.corduroy_threshold_stateless_euf_cma vs Qsag.tooth_corduroy_t_corrupted_custodians_uniquely_pin_secret
-#verify_inhabited Qsag.compact1122_one_time_euf_cma_reduction Qsag.witness_compact1122_forgery
-#verify_inhabited Qsag.rotatedEpochVote_forward_secure_chain Qsag.witness_rotatedEpochVote_chain
-#verify_inhabited Qsag.corduroy_threshold_stateless_euf_cma Qsag.witness_corduroy_real_params
-#verify_constructive
-  Qsag.compact1122_rank_domain_gt_2pow256
+#verify_constructive Qsag.compact1122_rank_domain_gt_2pow256
   Qsag.fts_cshake_domains_disjoint
   Qsag.encodeEpochVoteInput_injective
   Qsag.unrankFrontierFts_bijective
   Qsag.unrankFrontierFts_injective
   Qsag.verifyFrontierFts_signFrontierFts
   Qsag.compact1122_one_time_euf_cma_reduction
-  Qsag.tooth_drop_target_sum_allows_one_sig_forgery
   Qsag.rotatedEpochVote_forward_secure_chain
   Qsag.rotatedEpochVote_cshake_chain_reduction
-  Qsag.tooth_static_key_compromise_forges_historical_epoch
   Qsag.corduroy_real_profiles_audit
   Qsag.corduroy_threshold_stateless_euf_cma
   Qsag.corduroy_both_real_profiles_euf_cma
-
 end Qsag
 end

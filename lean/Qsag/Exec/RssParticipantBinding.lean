@@ -85,7 +85,7 @@ theorem cshakeForRequest_refines_existing (profile : RssProduction.Profile)
     ((cshakeForRequest profile request invocation phase customization input localTape).2.map
       reconstructRssBytes) =
       some (reconstructRssBytes (mpcCshake256SharedRss 32 customization input oldTape)) := by
-  exact cshakeParticipant_refines_existing 32 _ _ _ _ _ hWf (by decide)
+  exact cshakeParticipant_refines_existing 32 _ _ _ _ _ hWf (by rw [shake256RateBytes_eq]; decide)
 
 /-- A message for a distinct invocation cannot be accepted even if its local
 round number and nominal sender are otherwise valid. -/

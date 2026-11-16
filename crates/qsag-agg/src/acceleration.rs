@@ -207,10 +207,24 @@ pub(crate) fn report_cpu_poseidon_canopy() {
     }
 }
 
+// Whole coset encodings against the host's coset-decomposed encoder (RX 6750 XT against an
+// i9-12900 with 22 workers, blowup 4, `encode_crossover`): the single GPU transform wins only
+// in the small queueing window (1.24 ms against 1.42 ms on a 2^16 domain) and loses above it
+// (63 against 50 ms at 2^22, 257 against 240 ms at 2^24, 1,331 against 981 ms at 2^26). A
+// shard commitment that does not fit the VRAM arena therefore encodes on the host.
+fn gpu_encode_length(domain_len: usize) -> bool {
+    (1 << 14..=1 << 16).contains(&domain_len)
+}
+
 pub(crate) fn encode(coeffs: &[Goldilocks], domain_len: usize) -> Option<Vec<Goldilocks>> {
-    if !gpu_ntt_length(domain_len) || device().is_none() {
+    if !gpu_encode_length(domain_len) || device().is_none() {
         return None;
     }
+    gpu_encode(coeffs, domain_len)
+}
+
+/// One coset encoding as a single GPU transform of the shifted coefficients.
+fn gpu_encode(coeffs: &[Goldilocks], domain_len: usize) -> Option<Vec<Goldilocks>> {
     let mut values = alloc::vec![Goldilocks::ZERO; domain_len];
     let mut shift = Goldilocks::ONE;
     for (out, &c) in values.iter_mut().zip(coeffs) {
@@ -276,6 +290,39 @@ mod tests {
         }
     }
 
+    /// Whole coset encodings: the host's coset-decomposed encoder against one GPU transform
+    /// with both transfers, at the sizes shard commitments use.
+    #[test]
+    #[ignore = "RX 6750 XT crossover, run with QSAG_ACCEL=vulkan --ignored --nocapture"]
+    fn encode_crossover() {
+        device().expect("audited GPU required");
+        for log in [14usize, 20, 22, 24] {
+            let coeffs: Vec<_> = (0..1usize << log)
+                .map(|i| Goldilocks::from_u64_reduced(i as u64 * 7919 + 17))
+                .collect();
+            let mut cpu_ms = Vec::new();
+            let mut gpu_ms = Vec::new();
+            for _ in 0..4 {
+                let t = std::time::Instant::now();
+                let cpu = crate::field::encode_rs_coset_goldilocks_cpu(&coeffs, 4);
+                cpu_ms.push(t.elapsed().as_secs_f64() * 1000.);
+                let t = std::time::Instant::now();
+                let gpu = gpu_encode(&coeffs, 4 << log).expect("GPU encode");
+                gpu_ms.push(t.elapsed().as_secs_f64() * 1000.);
+                assert_eq!(cpu, gpu);
+            }
+            cpu_ms.remove(0);
+            gpu_ms.remove(0);
+            cpu_ms.sort_by(f64::total_cmp);
+            gpu_ms.sort_by(f64::total_cmp);
+            std::println!(
+                "ENCODE_CROSSOVER log={log} blowup=4 cpu_ms={:.3} gpu_ms={:.3}",
+                cpu_ms[1],
+                gpu_ms[1]
+            );
+        }
+    }
+
     #[test]
     fn nested_commit_preserves_the_live_session() {
         if std::env::var("QSAG_ACCEL").ok().as_deref() != Some("vulkan") {
@@ -318,7 +365,9 @@ mod tests {
                 .iter()
                 .all(|v| *v == Goldilocks::ZERO)
         );
-        let shifted = encode(&coeffs, n).expect("GPU coset encoding");
+        // The device computes the coset encoding; the host encoder is preferred at this size.
+        assert!(encode(&coeffs, n).is_none());
+        let shifted = gpu_encode(&coeffs, n).expect("GPU coset encoding");
         for i in [0, 1, 7, 511, 8191, 16383] {
             let x = Goldilocks::NON_RESIDUE * omega.pow(i as u64);
             let expected = coeffs

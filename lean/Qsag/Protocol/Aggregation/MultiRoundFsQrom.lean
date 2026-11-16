@@ -3,15 +3,12 @@ public import Qsag.Tactic.Prelude
 public import Qsag.Oracle.Qrom
 public import Qsag.Oracle.FiatShamir
 public import Qsag.Math.Goldilocks
-import all Qsag.Math.Goldilocks
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.PolyRing
-import all Qsag.Math.QuarticExt4
+import Qsag.Math.CoeffPoly
+import Qsag.Math.PolyRing
+import Qsag.Math.QuarticExt4
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 public import Qsag.Coding.Cwyz26
-import all Qsag.Coding.Cwyz26
 
 public import Qsag.Tactic.AssuranceKit
 
@@ -429,6 +426,7 @@ end AffineWeld
     `affineCommittedRbr` has no radius hypothesis and applies at every `A`. -/
 theorem tooth_deployed_rows_exceed_welch_berlekamp_radius :
     ∀ w ∈ whirAffineStageWitnesses 24 true, ¬ (2 * w.n + w.d + 1 < 3 * w.A) := by
+  rw [whirAffineStageWitnesses_qrom_eq_deployed.2]
   decide +kernel
 
 /-- The two composed theorems at the deployed field `QuarticGoldilocks` (`𝔽_{p^4}`). -/
@@ -489,14 +487,14 @@ theorem inhabited_affineMcaBound
 /-! ### §2.1 `QuarticGoldilocks` Polynomial Algebra & 5-Scalar Linear-Functional Bridge -/
 
 theorem ringDot_nil_left {F : Type} [CommRingOps F] (v : List F) :
-    ringDot [] v = CommRingOps.zero := by unfold ringDot; exact dotVec_nil_left v
+    ringDot [] v = CommRingOps.zero := by rw [ringDot_eq]; exact dotVec_nil_left v
 
 theorem ringDot_nil_right {F : Type} [CommRingOps F] (xs : List F) :
-    ringDot xs [] = CommRingOps.zero := by unfold ringDot; exact dotVec_nil_right xs
+    ringDot xs [] = CommRingOps.zero := by rw [ringDot_eq]; exact dotVec_nil_right xs
 
 theorem ringDot_cons_cons {F : Type} [CommRingOps F] (a b : F) (as bs : List F) :
     ringDot (a :: as) (b :: bs) = CommRingOps.add (CommRingOps.mul a b) (ringDot as bs) := by
-  unfold ringDot; exact dotVec_cons a b as bs
+  simp only [ringDot_eq]; exact dotVec_cons a b as bs
 
 theorem polyAddVar_nil_left {F : Type} [CommRingOps F] (ys : List F) :
     polyAddVar [] ys = ys := by unfold polyAddVar; cases ys <;> rfl
@@ -526,13 +524,11 @@ theorem ringDot_polyAddVar {F : Type} [LawfulCommRing F] :
 theorem ringDot_polyScaleVar {F : Type} [LawfulCommRing F] (c : F) :
     ∀ (xs v : List F),
       ringDot (polyScaleVar c xs) v = CommRingOps.mul c (ringDot xs v)
-  | [], _ => by simp only [polyScaleVar, List.map_nil, ringDot_nil_left, LawfulCommRing.mul_zero]
-  | _ :: _, [] => by simp only [polyScaleVar, List.map_cons, ringDot_nil_right, LawfulCommRing.mul_zero]
+  | [], _ => by simp only [polyScaleVar_def, List.map_nil, ringDot_nil_left, LawfulCommRing.mul_zero]
+  | _ :: _, [] => by simp only [polyScaleVar_def, List.map_cons, ringDot_nil_right, LawfulCommRing.mul_zero]
   | x :: xs, k :: ks => by
-    simp only [polyScaleVar, List.map_cons, ringDot_cons_cons]
-    change CommRingOps.add (CommRingOps.mul (CommRingOps.mul c x) k)
-        (ringDot (polyScaleVar c xs) ks) = _
-    rw [ringDot_polyScaleVar c xs ks, LawfulCommRing.mul_assoc c x k, ← LawfulCommRing.left_distrib]
+    simp only [polyScaleVar_def, List.map_cons, ringDot_cons_cons]
+    rw [← polyScaleVar_def c, ringDot_polyScaleVar c xs ks, LawfulCommRing.mul_assoc c x k, ← LawfulCommRing.left_distrib]
 
 /-- **5-Scalar Linear-Functional Bridge Identity (`ringDot_affineCombine_eq_bridge`)**:
     Proves constructively over any commutative ring `F` (`QuarticGoldilocks`) that the inner
@@ -553,20 +549,19 @@ theorem ringDot_affineCombine_eq_bridge {F : Type} [LawfulCommRing F]
         CommRingOps.add (ringDot (shiftPoly a) k) (ringDot (shiftPoly b) k) := by
     intro a b k
     cases k with
-    | nil => simp only [shiftPoly, ringDot_nil_right, LawfulCommRing.add_zero]
+    | nil => simp only [shiftPoly_eq, ringDot_nil_right, LawfulCommRing.add_zero]
     | cons _ ks =>
-      simp only [shiftPoly, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+      simp only [shiftPoly_eq, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
       exact ringDot_polyAddVar a b ks
   have hShiftScale : ∀ (c : F) (a k : List F),
       ringDot (shiftPoly (polyScaleVar c a)) k = CommRingOps.mul c (ringDot (shiftPoly a) k) := by
     intro c a k
     cases k with
-    | nil => simp only [shiftPoly, ringDot_nil_right, LawfulCommRing.mul_zero]
+    | nil => simp only [shiftPoly_eq, ringDot_nil_right, LawfulCommRing.mul_zero]
     | cons _ ks =>
-      simp only [shiftPoly, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+      simp only [shiftPoly_eq, ringDot_cons_cons, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
       exact ringDot_polyScaleVar c a ks
-  unfold affineCombine
-  dsimp only
+  rw [affineCombine_def]
   rw [ringDot_polyAddVar, ringDot_polyAddVar,
       ringDot_polyScaleVar, ringDot_polyScaleVar,
       ringDot_polyAddVar, ringDot_polyScaleVar,
@@ -576,6 +571,9 @@ theorem ringDot_affineCombine_eq_bridge {F : Type} [LawfulCommRing F]
 
 /-- Exact unordered pair count `binomial(L, 2) = L * (L - 1) / 2`. -/
 def binom2 (L : Nat) : Nat := L * (L - 1) / 2
+
+theorem binom2_eq (L : Nat) : binom2 L = L * (L - 1) / 2 := by unfold binom2; rfl
+
 
 private theorem binom2_succ (L : Nat) : binom2 (L + 1) = L + binom2 L := by
   unfold binom2
@@ -964,6 +962,10 @@ def hemKernelFold {F : Type} [CommRingOps F] (φ : F) : List F → List F
   | a :: b :: rest => CommRingOps.add a (CommRingOps.mul φ b) :: hemKernelFold φ rest
   | _ => [CommRingOps.zero]
 
+theorem hemKernelFold_pair {F : Type} [LawfulCommRing F] (φ k : F) :
+    hemKernelFold φ [k, CommRingOps.zero] = [k, CommRingOps.zero] := by
+  simp only [hemKernelFold, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+
 /-- `affine.rs::bridge_finish`: from the five bridge wires `(w₀, w₁, w₂, c_F, c_G)`
     (`WHIR_AFFINE_CROSS` ×3, then `WHIR_AFFINE_SHIFT` ×2), the running claim and the challenges
     `(φ, θ, α, β)`, the verifier DERIVES `f = w₀ + φ w₁`, `g = w₂ + φ (claim - w₀)` and the next
@@ -1042,6 +1044,30 @@ theorem hem_bridge_fold_claim_eq_dot {F : Type} [LawfulCommRing F]
   rw [ringDot_affineCombine_eq_bridge, ringDot_zipFold φ cE kE kO h,
       ringDot_zipFold φ cO kE kO h, hSub]
 
+/-- A monomial-shift round spends one point of agreement slack. At an exhaustive
+    threshold no slack remains to spend; thresholds already above the domain stay invalid. -/
+def hemNextMinAgree (domainSize curAgree : Nat) : Nat :=
+  if curAgree < domainSize then curAgree + 1 else curAgree
+
+@[simp] theorem hemNextMinAgree_exhaustive (n : Nat) : hemNextMinAgree n n = n := by
+  simp [hemNextMinAgree]
+
+theorem hemNextMinAgree_mono (n A : Nat) : A ≤ hemNextMinAgree n A := by
+  unfold hemNextMinAgree
+  split <;> omega
+
+theorem hemNextMinAgree_increments (n A : Nat) (h : A < n) :
+    hemNextMinAgree n A = A + 1 := by simp [hemNextMinAgree, h]
+
+/-- `#tooth`: two consecutive non-exhaustive transitions must spend two points,
+    whereas the unincremented transition spends none. -/
+theorem tooth_hem_agreement_two_rounds :
+    ∃ threshold : Nat, threshold = 4 ∧
+    hemNextMinAgree 5 (hemNextMinAgree 5 2) = threshold ∧
+    hemNextMinAgree 5 (hemNextMinAgree 5 2) ≠ 2 ∧
+    hemNextMinAgree 3 3 = 3 ∧ hemNextMinAgree 3 4 = 4 := by
+  exact ⟨4, by decide⟩
+
 def evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F]
     (curLive : Bool)
     (curOracle : Nat → F)
@@ -1054,8 +1080,8 @@ def evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F]
   | remStages, .cascade _ _ cascadeDecoded :: restTr =>
     let nextLive :=
       cascadeDecoded.any (fun P =>
-        polyWitnessValid curDom curMinAgree (curDeg + 1) curOracle curKernel curClaim P)
-    evalHemRbrPrefix (curLive || nextLive) curOracle curDom (curDeg + 1) curMinAgree
+        polyWitnessValid curDom (hemNextMinAgree curDom.length curMinAgree) (curDeg + 1) curOracle curKernel curClaim P)
+    evalHemRbrPrefix (curLive || nextLive) curOracle curDom (curDeg + 1) (hemNextMinAgree curDom.length curMinAgree)
       curKernel curClaim remStages restTr
   | st :: remStages,
     .stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded :: restTr =>
@@ -1074,6 +1100,21 @@ def evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F]
     checkQueriedCosets curDom curOracle finalCoeffs
       (List.range (Nat.min curMinAgree curDom.length))
   | _, _ => false
+
+/-- The recursive prefix transition carries the incremented agreement into its
+    continuation, including when the current decoded list is empty. -/
+theorem hemRbrPrefix_cascade_step {F : Type} [CommRingOps F] [DecidableEq F]
+    (live : Bool) (oracle : Nat → F) (domain : List F) (degree agree : Nat)
+    (kernel : List F) (claim : F) (stages : List (HemWhirStageSpec F))
+    (shifts : List F) (weights : List (F × F)) (decoded : List (List F))
+    (rest : List (HemTranscriptRound F)) :
+    evalHemRbrPrefix live oracle domain degree agree kernel claim stages
+      (.cascade shifts weights decoded :: rest) =
+    evalHemRbrPrefix
+      (live || decoded.any (fun P => polyWitnessValid domain
+        (hemNextMinAgree domain.length agree) (degree + 1) oracle kernel claim P))
+      oracle domain (degree + 1) (hemNextMinAgree domain.length agree) kernel claim stages rest := by
+  rfl
 
 /-- Boolean liveness of a nonempty transcript prefix of the `Hem` v6 model: Round 0 asymmetric
     cascade (`S_poly ≤ 16`), `S` stages of monomial-shift affine folding with the `affine.rs`
@@ -1094,10 +1135,10 @@ def hemPrefixState {F : Type} [CommRingOps F] [DecidableEq F]
       let combOracle := evalCascadeOracle inst.initDomainPts inst.batchOracles weights
       let cascadeLive :=
         cascadeDecoded.any (fun P =>
-          polyWitnessValid inst.initDomainPts inst.initMinAgree (inst.initDegBound + 1)
+          polyWitnessValid inst.initDomainPts (hemNextMinAgree inst.initDomainPts.length inst.initMinAgree) (inst.initDegBound + 1)
             combOracle inst.initKernel combClaim P)
       evalHemRbrPrefix cascadeLive combOracle inst.initDomainPts (inst.initDegBound + 1)
-        inst.initMinAgree inst.initKernel combClaim inst.stages restTr
+        (hemNextMinAgree inst.initDomainPts.length inst.initMinAgree) inst.initKernel combClaim inst.stages restTr
     else false
   | _ => false
 
@@ -1112,7 +1153,7 @@ def hemPrefixState {F : Type} [CommRingOps F] [DecidableEq F]
   | [] => HemStatementValid inst
   | _ :: _ => hemPrefixState inst tr = true
 
-def verifyHemStages {F : Type} [CommRingOps F] [DecidableEq F]
+@[expose] def verifyHemStages {F : Type} [CommRingOps F] [DecidableEq F]
     (curOracle : Nat → F)
     (curDom : List F)
     (curDeg curMinAgree : Nat)
@@ -1139,6 +1180,40 @@ def verifyHemStages {F : Type} [CommRingOps F] [DecidableEq F]
 
 /-- Deterministic `Hem` v6 full-transcript verifier (`verifyHemAffineWhir`). -/
 @[expose] def verifyHemAffineWhir {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
+  match tr with
+  | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
+    decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16 ∧
+      inst.batchClaims.length = inst.batchOracles.length) &&
+    decide (absorbedShifts.length = inst.batchClaims.length) &&
+    decide (weights.length = inst.batchClaims.length) &&
+    let combClaim := evalCascadeClaim inst.batchClaims absorbedShifts weights
+    let combOracle := evalCascadeOracle inst.initDomainPts inst.batchOracles weights
+    cascadeDecoded.any (fun P =>
+      polyWitnessValid inst.initDomainPts (hemNextMinAgree inst.initDomainPts.length inst.initMinAgree) (inst.initDegBound + 1)
+        combOracle inst.initKernel combClaim P) &&
+    verifyHemStages combOracle inst.initDomainPts (inst.initDegBound + 1)
+      (hemNextMinAgree inst.initDomainPts.length inst.initMinAgree) inst.initKernel combClaim inst.stages restTr
+  | _ => false
+
+/-- Accepted cascades expose a witness at the incremented agreement threshold. -/
+theorem verifyHemAffineWhir_incremented_cascade_witness {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (shifts : List F) (weights : List (F × F))
+    (decoded : List (List F)) (rest : List (HemTranscriptRound F))
+    (h : verifyHemAffineWhir inst (.cascade shifts weights decoded :: rest) = true) :
+    inst.batchClaims.length = inst.batchOracles.length ∧
+    shifts.length = inst.batchClaims.length ∧ weights.length = inst.batchClaims.length ∧
+    ∃ P ∈ decoded, polyWitnessValid inst.initDomainPts
+      (hemNextMinAgree inst.initDomainPts.length inst.initMinAgree)
+      (inst.initDegBound + 1) (evalCascadeOracle inst.initDomainPts inst.batchOracles weights)
+      inst.initKernel (evalCascadeClaim inst.batchClaims shifts weights) P = true := by
+  unfold verifyHemAffineWhir at h
+  dsimp only at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+  exact ⟨h.1.1.1.2.2, h.1.1.2, h.1.2, List.any_eq_true.mp h.2.1⟩
+
+/-- Deliberately stale cascade transition, retained only as an attack witness. -/
+def mutantVerifyHemAffineWhirUnincremented {F : Type} [CommRingOps F] [DecidableEq F]
     (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
   match tr with
   | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
@@ -1215,9 +1290,9 @@ private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [
   have hPCombLen : P_comb.length ≤ (d₀ + 1) + 1 := by
     dsimp only [P_comb, evalCascadePolySum]
     have h1 : (polyScaleVar α W).length ≤ d₀ + 2 := by
-      simp only [polyScaleVar, List.length_map]; omega
+      simp only [polyScaleVar_def, List.length_map]; omega
     have h2 : (polyScaleVar β (shiftPoly W)).length ≤ d₀ + 2 := by
-      simp only [polyScaleVar, shiftPoly, List.length_map, List.length_cons]; omega
+      simp only [polyScaleVar_def, shiftPoly_eq, List.length_map, List.length_cons]; omega
     have h3 := polyAddVar_length_le _ _ (d₀ + 2) h1 h2
     exact polyAddVar_length_le _ [] (d₀ + 2) h3 (Nat.zero_le _)
   have hPCombEval : ∀ z : F,
@@ -1302,6 +1377,7 @@ private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [
         [ .cascade [ringDot (shiftPoly W) kernel] [(α, β)] [P_comb],
           .finalQuery P_comb ] = true := by
     unfold verifyHemAffineWhir
+    simp only [hemNextMinAgree_exhaustive]
     dsimp only [polyWitnessValid, verifyHemStages, List.length_cons, List.length_nil,
       List.any_cons, List.any_nil]
     rw [hAgreeComb, hDotComb, hQueriedComb]
@@ -1381,6 +1457,17 @@ theorem hemAffineWhir_rbr_completeness_and_doomed_init :
     rcases honest_cascade_completeness_poly W kernel domPts d₀ α β hWLen with ⟨hVal, hVer⟩
     exact ⟨hVal, accept_implies_live_poly _ _ hVer, hVer⟩
 
+/-- `#tooth`: the actual prefix evaluator carries the updated threshold across two
+    cascade rounds. The fourth query exposes the mismatch that a stale threshold misses. -/
+theorem tooth_hem_prefix_two_round_agreement :
+    ∃ (D : List QuarticGoldilocks) (oracle : Nat → QuarticGoldilocks),
+    evalHemRbrPrefix false oracle D 0 2 [] CommRingOps.zero [] [.finalQuery []] = true ∧
+    evalHemRbrPrefix false oracle D 0 2 [] CommRingOps.zero []
+      [.cascade [] [] [], .cascade [] [] [], .finalQuery []] = false := by
+  refine ⟨[CommRingOps.zero, CommRingOps.one, CommRingOps.zero, CommRingOps.one, CommRingOps.zero],
+    (fun i => if i = 3 then CommRingOps.one else CommRingOps.zero), ?_⟩
+  decide +kernel
+
 /-- A false `Hem` statement: the zero oracle on the domain `{0, 1}` with the claim that its
     degree-0 interpolant evaluates to `1` under the functional `[1]`. -/
 def hemFalseClaimInstance : HemWhirInstance QuarticGoldilocks :=
@@ -1418,6 +1505,7 @@ theorem hemFalseClaimInstance_invalid : ¬ HemStatementValid hemFalseClaimInstan
           rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
         rw [e] at h
         exact h.symm
+      unfold hemCosetAgreeCount at hAg
       change 2 ≤ (if (CommRingOps.zero : QuarticGoldilocks) =
             RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks) then 1 else 0) +
           ((if (CommRingOps.zero : QuarticGoldilocks) =
@@ -1469,11 +1557,16 @@ def hemV6FiveRoundRbrBounds : List RatBound :=
   hemV6CascadeRbrBound ::
     (whirAffineStageWitnesses 24 true).map whirAffineEqualDegreeCommitFoldBound
 
+attribute [local irreducible] hemV6FiveRoundRbrBounds
+
 /-- The conditional profile inputs evaluate to `(4182, 1644, 824, 489, 792) / p^4` (total `7931 / p^4`). -/
 theorem hemV6FiveRoundRbrBounds_eq_deployed :
     hemV6FiveRoundRbrBounds.map (fun b => (b.num, b.den)) =
       [4182, 1644, 824, 489, 792].map (fun n => (n, goldilocksExt4Card)) := by
-  decide +kernel
+  unfold hemV6FiveRoundRbrBounds hemV6CascadeRbrBound
+  rw [whirAffineStageWitnesses_qrom_eq_deployed.2]
+  simp only [List.map_cons, List.map_nil, whirAffineEqualDegreeCommitFoldBound_def,
+    whirAffineStageSimpleNum_def] <;> decide +kernel
 
 /-- Pure 4-stage `Hem` v6 coset-query error bounds under default `BciksJohnsonQrom128`, DERIVED
     from the same deployed `whirAffineStageWitnesses 24 true` rows as the fold bounds: the exact
@@ -1482,15 +1575,101 @@ theorem hemV6FiveRoundRbrBounds_eq_deployed :
 def hemV6BciksJohnsonQueryBounds : List RatBound :=
   (whirAffineStageWitnesses 24 true).map whirAffinePureQueryBoundOrOne
 
-private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
+attribute [local irreducible] hemV6BciksJohnsonQueryBounds
+
+private theorem compiler_query_upper (Q roots bits : Nat) (rb qb : List RatBound)
+    (upper : RatBound) (h : ∀ q ∈ qb, q.le upper) :
+    (multiRoundFsQromCompilerBound Q roots bits rb qb).le
+      (multiRoundFsQromCompilerBound Q roots bits rb (List.replicate qb.length upper)) := by
+  unfold multiRoundFsQromCompilerBound
+  apply RatBound.add_le_add (RatBound.le_refl _)
+  apply RatBound.add_le_add (RatBound.le_refl _)
+  induction qb with
+  | nil => exact RatBound.le_refl _
+  | cons q qs ih =>
+    simp only [List.map_cons, List.length_cons, List.replicate_succ, RatBound.sumList_cons]
+    apply RatBound.add_le_add
+    · simp only [quantumGroverGrindingBound_def]
+      exact RatBound.scale_mono _ (h q (.head qs))
+    · exact ih (fun x hx => h x (.tail q hx))
+
+private theorem compiler_bht_lower (Q bits : Nat) (rb qb : List RatBound) :
+    (RatBound.scale 5 (quantumBhtCollisionBound bits Q)).le
+      (multiRoundFsQromCompilerBound Q 5 bits rb qb) := by
+  have hm : (RatBound.scale 5 (quantumBhtCollisionBound bits Q)).le
+      (qromMerkleOnlineExtractBound 5 bits Q) :=
+    RatBound.scale_mono 5 (RatBound.le_add_right _ _)
+  exact RatBound.le_trans hm (RatBound.le_trans (RatBound.le_add_left _ _)
+    (RatBound.le_add_right _ _))
+
+private theorem hemV6Query_upper :
+    ∀ q ∈ hemV6BciksJohnsonQueryBounds, q.le (RatBound.invPow2 256) := by
+  intro q hq
+  unfold hemV6BciksJohnsonQueryBounds at hq
+  obtain ⟨w, hw, rfl⟩ := List.mem_map.mp hq
+  exact (atLeastBits_iff_le_invPow2 _ _).mp
+    (Nat.le_of_lt (whirAffine_deployed_pure_query_bounds 24 (by decide) (by decide) w hw))
+
+private theorem hemV6Query_length : hemV6BciksJohnsonQueryBounds.length = 4 := by
+  unfold hemV6BciksJohnsonQueryBounds
+  rw [List.length_map, whirAffineStageWitnesses_qrom_eq_deployed.2]
+  rfl
+
+private theorem hemV6Rbr_explicit :
+    hemV6FiveRoundRbrBounds = [4182, 1644, 824, 489, 792].map
+      (fun n => RatBound.mk n goldilocksExt4Card goldilocksExt4Card_pos) := by
+  unfold hemV6FiveRoundRbrBounds hemV6CascadeRbrBound
+  rw [whirAffineStageWitnesses_qrom_eq_deployed.2]
+  simp only [List.map_cons, List.map_nil, whirAffineEqualDegreeCommitFoldBound_def,
+    whirAffineStageSimpleNum_def] <;> decide +kernel
+
+private theorem hemV6_budget_of_upper (Q bits : Nat)
+    (hUpper : strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 bits
+      ([4182, 1644, 824, 489, 792].map
+        (fun n => RatBound.mk n goldilocksExt4Card goldilocksExt4Card_pos))
+      (List.replicate 4 (RatBound.invPow2 256)))) :
+    strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 bits
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  have h := compiler_query_upper Q 5 bits hemV6FiveRoundRbrBounds
+    hemV6BciksJohnsonQueryBounds (RatBound.invPow2 256) hemV6Query_upper
+  apply RatBound.strictlyMoreThanBits_of_le h
+  rw [hemV6Query_length, hemV6Rbr_explicit]
+  exact hUpper
+
+private theorem compiler_upper_40_256 :
+    strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound (2 ^ 40 - 1) 5 256
+      ([4182, 1644, 824, 489, 792].map
+        (fun n => RatBound.mk n goldilocksExt4Card goldilocksExt4Card_pos))
+      (List.replicate 4 (RatBound.invPow2 256))) := by
+  simp only [multiRoundFsQromCompilerBound, quantumGroverGrindingBound_def,
+    quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def, quantumBhtCollisionBound_def,
+    qromMerkleOnlineExtractBound, dfmRoundScale, goldilocksExt4Card, goldilocksPrime,
+    strictlyMoreThanBits, RatBound.sumList, RatBound.zero, RatBound.add, RatBound.scale,
+    RatBound.invPow2, List.map_cons, List.map_nil, List.replicate_succ, List.replicate_zero]
+  decide +kernel
+
+private theorem compiler_upper_56_384 :
+    strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound (2 ^ 56) 5 384
+      ([4182, 1644, 824, 489, 792].map
+        (fun n => RatBound.mk n goldilocksExt4Card goldilocksExt4Card_pos))
+      (List.replicate 4 (RatBound.invPow2 256))) := by
+  simp only [multiRoundFsQromCompilerBound, quantumGroverGrindingBound_def,
+    quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def, quantumBhtCollisionBound_def,
+    qromMerkleOnlineExtractBound, dfmRoundScale, goldilocksExt4Card, goldilocksPrime,
+    strictlyMoreThanBits, RatBound.sumList, RatBound.zero, RatBound.add, RatBound.scale,
+    RatBound.invPow2, List.map_cons, List.map_nil, List.replicate_succ, List.replicate_zero]
+  decide +kernel
+
+private theorem compiler_budget_up_to (rbrBounds queryBounds : List RatBound)
+    (QMax digestBits : Nat)
     (hBciksMax : strictlyMoreThanBits 128
       (multiRoundFsQromCompilerBound QMax 5 digestBits
-        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :
+        rbrBounds queryBounds)) :
     ∀ Q : Nat, Q ≤ QMax →
       strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
-        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+        rbrBounds queryBounds) ∧
       atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
-        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+        rbrBounds queryBounds) := by
   have hMonoScale : ∀ {a b : Nat} (hab : a ≤ b) (r : RatBound),
       RatBound.le (RatBound.scale a r) (RatBound.scale b r) := by
     intro a b hab r
@@ -1550,16 +1729,16 @@ private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
       exact Nat.not_le_of_gt h3 hGe
   have hCompilerMono : ∀ {Q : Nat} (hQ : Q ≤ QMax) (qBounds : List RatBound),
       RatBound.le
-        (multiRoundFsQromCompilerBound Q 5 digestBits hemV6FiveRoundRbrBounds qBounds)
-        (multiRoundFsQromCompilerBound QMax 5 digestBits hemV6FiveRoundRbrBounds qBounds) := by
+        (multiRoundFsQromCompilerBound Q 5 digestBits rbrBounds qBounds)
+        (multiRoundFsQromCompilerBound QMax 5 digestBits rbrBounds qBounds) := by
     intro Q hQ qBounds
     unfold multiRoundFsQromCompilerBound
     have hSqLe : (2 * Q + 1) ^ 2 ≤ (2 * QMax + 1) ^ 2 :=
       Nat.pow_le_pow_left (by omega) 2
     have hRbrLe :
         RatBound.le
-          (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale Q)))
-          (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale QMax))) := by
+          (RatBound.sumList (rbrBounds.map (dfmRoundScale Q)))
+          (RatBound.sumList (rbrBounds.map (dfmRoundScale QMax))) := by
       apply hMonoSum _ _ (by simp only [List.length_map])
       intro i
       simp only [List.get_eq_getElem, List.getElem_map]
@@ -1573,6 +1752,7 @@ private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
       apply hMonoSum _ _ (by simp only [List.length_map])
       intro i
       simp only [List.get_eq_getElem, List.getElem_map]
+      simp only [quantumGroverGrindingBound_def]
       exact hMonoScale hGrindLe _
     have hMerkleLe :
         RatBound.le (qromMerkleOnlineExtractBound 5 digestBits Q)
@@ -1580,18 +1760,32 @@ private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
       unfold qromMerkleOnlineExtractBound
       apply hScaleMono
       apply RatBound.add_le_add
-      · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+      · simp only [quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def]
+        unfold RatBound.le
         dsimp only
         exact Nat.mul_le_mul_right _
           (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
-      · unfold RatBound.le quantumBhtCollisionBound
+      · simp only [quantumBhtCollisionBound_def]
+        unfold RatBound.le
         dsimp only
         exact Nat.mul_le_mul_right _
           (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
     exact RatBound.add_le_add hRbrLe (RatBound.add_le_add hMerkleLe hQueryLe)
   intro Q hQ
-  have hb := hStrictOfLe (hCompilerMono hQ hemV6BciksJohnsonQueryBounds) hBciksMax
+  have hb := hStrictOfLe (hCompilerMono hQ queryBounds) hBciksMax
   exact ⟨hb, Nat.le_of_lt hb⟩
+
+private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
+    (hMax : strictlyMoreThanBits 128
+      (multiRoundFsQromCompilerBound QMax 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :
+    ∀ Q : Nat, Q ≤ QMax →
+      strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+      atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
+  compiler_budget_up_to hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds
+    QMax digestBits hMax
 
 /-- **Multi-round Fiat–Shamir QROM numerical budget (`multiRoundFsQrom_budget_bound`)**.
     For every oracle budget `Q + 1 ≤ 2^40`, `multiRoundFsQromCompilerBound` at the deployed
@@ -1616,9 +1810,12 @@ theorem multiRoundFsQrom_budget_bound :
       atLeastBits 128
         (multiRoundFsQromCompilerBound Q 5 256
           hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
-  refine ⟨by decide +kernel, ?_⟩
-  intro Q hQ
-  exact hemCompiler_budget_up_to (2 ^ 40 - 1) 256 (by decide +kernel) Q (by omega)
+  refine ⟨?_, ?_⟩
+  · rw [hemV6Rbr_explicit, List.length_map]
+    rfl
+  · intro Q hQ
+    exact hemCompiler_budget_up_to (2 ^ 40 - 1) 256
+      (hemV6_budget_of_upper _ _ compiler_upper_40_256) Q (by omega)
 
 
 /-- `#tooth`: the oracle-budget range of `multiRoundFsQrom_budget_bound` is not slack. One more
@@ -1628,7 +1825,13 @@ theorem tooth_multiRoundFsQrom_budget_fails_at_2pow41 :
     ¬ atLeastBits 128
       (multiRoundFsQromCompilerBound (2 ^ 41 - 1) 5 256
         hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
-  decide +kernel
+  intro hBits
+  have h := atLeastBits_of_le (compiler_bht_lower (2 ^ 41 - 1) 256
+    hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) hBits
+  have hNot : ¬ atLeastBits 128 (RatBound.scale 5 (quantumBhtCollisionBound 256 (2 ^ 41 - 1))) := by
+    simp only [quantumBhtCollisionBound_def]
+    decide +kernel
+  exact hNot h
 
 
 /-! ## §4. Fiat–Shamir Ordering `#tooth` Witness (`tooth_unabsorbed_shifted_claim_breaks_rbr`) -/
@@ -1740,8 +1943,8 @@ private theorem unabsorbed_shift_forgery_prob_one_poly
       S_θ.length * (S_α.length * S_β.length) := by
     rw [qsum_congr (fun i => hInnerα (S_θ.get i)), qsum_const]
   refine ⟨hHitEq, ?_, ?_⟩
-  · unfold RatBound.le RatBound.one; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
-  · unfold RatBound.le RatBound.one; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
+  · unfold RatBound.le; rw [RatBound.one_num, RatBound.one_den]; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
+  · unfold RatBound.le; rw [RatBound.one_num, RatBound.one_den]; dsimp only; rw [hHitEq, Nat.one_mul, Nat.mul_one]; exact Nat.le_refl _
 
 private theorem absorbed_shift_preserves_soundness_poly
     {F : Type} [LawfulCommRing F] [DecidableEq F]
@@ -1875,11 +2078,19 @@ theorem inhabited_multi_round_fs_qrom :
          4 * QVec.stateNormSq (runQuantumAdv A H),
          Nat.mul_pos (by decide) (runQuantumAdv_normSq_pos A H)⟩
         ⟨(2 * 1 + 1) ^ 2 * 1, 4, by decide⟩) := by
-  refine ⟨by decide +kernel, ?_⟩
+  refine ⟨?_, ?_⟩
+  · apply RatBound.num_pos_of_le (a := RatBound.scale 5 (quantumBhtCollisionBound 256 (2 ^ 39)))
+      (b := multiRoundFsQromCompilerBound (2 ^ 39) 5 256
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)
+    · simp only [quantumBhtCollisionBound_def, RatBound.scale]
+      decide +kernel
+    · exact compiler_bht_lower _ _ _ _
   let initVec : QVec 2 2 1 := fun x y _ =>
-    if x.1 == 0 && y.1 == 0 then GaussInt.one else GaussInt.zero
+    if x.1 == 0 && y.1 == 0 then ⟨1, 0⟩ else ⟨0, 0⟩
   have hInitPos : 0 < QVec.stateNormSq initVec := by
-    unfold QVec.stateNormSq QVec.queryWeight initVec GaussInt.normSq GaussInt.one GaussInt.zero
+    rw [QVec.stateNormSq_def]
+    simp only [QVec.queryWeight_def, GaussInt.normSq_def]
+    unfold initVec
     decide
   let A : QuantumAdv 2 2 1 1 :=
     { init := initVec
@@ -1904,13 +2115,20 @@ theorem multiRoundFsQrom_budget_384_at_2pow56 (Q : Nat) (hQ : Q ≤ 2 ^ 56) :
       hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
     atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
       hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
-  hemCompiler_budget_up_to (2 ^ 56) 384 (by decide +kernel) Q hQ
+  hemCompiler_budget_up_to (2 ^ 56) 384
+    (hemV6_budget_of_upper _ _ compiler_upper_56_384) Q hQ
 
 /-- Keeping the deployed 256-bit commitment parameter fails the requested budget. -/
 theorem tooth_multiRoundFsQrom_256_at_2pow56 :
     ¬ atLeastBits 128 (multiRoundFsQromCompilerBound (2 ^ 56) 5 256
       hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
-  decide +kernel
+  intro hBits
+  have h := atLeastBits_of_le (compiler_bht_lower (2 ^ 56) 256
+    hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) hBits
+  have hNot : ¬ atLeastBits 128 (RatBound.scale 5 (quantumBhtCollisionBound 256 (2 ^ 56))) := by
+    simp only [quantumBhtCollisionBound_def]
+    decide +kernel
+  exact hNot h
 
 /-- Nonzero portfolio query budget satisfying the repaired bound. -/
 theorem inhabited_multiRoundFsQrom_384 :
@@ -1920,9 +2138,173 @@ theorem inhabited_multiRoundFsQrom_384 :
   ⟨2 ^ 56, rfl, Nat.le_refl _,
     (multiRoundFsQrom_budget_384_at_2pow56 (2 ^ 56) (Nat.le_refl _)).2⟩
 
+#tooth_pair hemNextMinAgree_increments vs tooth_hem_agreement_two_rounds
+#tooth_pair hemRbrPrefix_cascade_step vs tooth_hem_prefix_two_round_agreement
 #tooth_pair multiRoundFsQrom_budget_384_at_2pow56 vs tooth_multiRoundFsQrom_256_at_2pow56
 #tooth_pair hemAffineWhir_rbr_completeness_and_doomed_init vs hemFalseClaimInstance_invalid
 #tooth_pair hem_johnson_fold_state_restoration_of_mca vs tooth_deployed_rows_exceed_welch_berlekamp_radius
 #verify_inhabited multiRoundFsQrom_budget_384_at_2pow56 inhabited_multiRoundFsQrom_384
 
+/-! ### Exports for lane agg-whir-cert -/
+
+theorem qsum_get_filter_length {α : Type} (p : α → Bool) (S : List α) :
+    qsum S.length (fun i => if p (S.get i) = true then 1 else 0) = (S.filter p).length :=
+  qsum_get_filter_eq p S
+
+theorem hemCosetAgreeCount_def {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (oracleAt : Nat → F) (P : List F) :
+    hemCosetAgreeCount domPts oracleAt P =
+      qsum domPts.length (fun idx =>
+        if oracleAt idx.1 = RoundPoly.evalCoeffs P (domPts.get idx) then 1 else 0) := by rfl
+
+theorem polyWitnessValid_def {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (minAgree degBound : Nat)
+    (oracleAt : Nat → F) (kernel : List F) (claim : F) (P : List F) :
+    polyWitnessValid domPts minAgree degBound oracleAt kernel claim P =
+      (decide (P.length ≤ degBound + 1) &&
+        decide (minAgree ≤ hemCosetAgreeCount domPts oracleAt P) &&
+        decide (ringDot P kernel = claim)) := by rfl
+
+theorem HemBatchValid_nil_nil {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (minAgree degBound : Nat) (kernel : List F) :
+    HemBatchValid domPts minAgree degBound kernel [] [] := by
+  unfold HemBatchValid; trivial
+
+theorem HemBatchValid_cons_cons_iff {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (minAgree degBound : Nat) (kernel : List F)
+    (O : Nat → F) (os : List (Nat → F)) (e : F) (es : List F) :
+    HemBatchValid domPts minAgree degBound kernel (O :: os) (e :: es) ↔
+      (∃ P : List F, polyWitnessValid domPts minAgree degBound O kernel e P = true) ∧
+        HemBatchValid domPts minAgree degBound kernel os es := by
+  exact Iff.rfl
+
+theorem HemStatementValid_iff {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) :
+    HemStatementValid inst ↔
+      (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) ∧
+      HemBatchValid inst.initDomainPts inst.initMinAgree inst.initDegBound inst.initKernel
+        inst.batchOracles inst.batchClaims := by
+  exact Iff.rfl
+
+theorem checkQueriedCosets_nil {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (oracleAt : Nat → F) (P : List F) :
+    checkQueriedCosets domPts oracleAt P [] = true := by rfl
+
+theorem checkQueriedCosets_cons {F : Type} [CommRingOps F] [DecidableEq F]
+    (domPts : List F) (oracleAt : Nat → F) (P : List F) (idx : Nat) (rest : List Nat) :
+    checkQueriedCosets domPts oracleAt P (idx :: rest) =
+      (decide (idx < domPts.length) &&
+        decide (oracleAt idx = RoundPoly.evalCoeffs P (domPts.getD idx CommRingOps.zero)) &&
+        checkQueriedCosets domPts oracleAt P rest) := by rfl
+
+theorem hemKernelFold_cons_cons {F : Type} [CommRingOps F] (φ a b : F) (rest : List F) :
+    hemKernelFold φ (a :: b :: rest) =
+      CommRingOps.add a (CommRingOps.mul φ b) :: hemKernelFold φ rest := by rfl
+
+theorem hemKernelFold_nil {F : Type} [CommRingOps F] (φ : F) :
+    hemKernelFold φ ([] : List F) = [CommRingOps.zero] := by rfl
+
+theorem hemKernelFold_singleton {F : Type} [CommRingOps F] (φ a : F) :
+    hemKernelFold φ [a] = [CommRingOps.zero] := by rfl
+
+theorem hemBridgeFoldClaim_def {F : Type} [CommRingOps F]
+    (claim w₀ w₁ w₂ c_F c_G φ θ α β : F) :
+    hemBridgeFoldClaim claim w₀ w₁ w₂ c_F c_G φ θ α β =
+      CommRingOps.add
+        (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀)))
+        (CommRingOps.add
+          (CommRingOps.mul α
+            (CommRingOps.add (CommRingOps.add w₀ (CommRingOps.mul φ w₁))
+              (CommRingOps.mul θ
+                (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀))))))
+          (CommRingOps.mul β (CommRingOps.add c_F (CommRingOps.mul θ c_G)))) := by rfl
+
+theorem verifyHemStages_nil_finalQuery {F : Type} [CommRingOps F] [DecidableEq F]
+    (curOracle : Nat → F) (curDom : List F) (curDeg curMinAgree : Nat)
+    (curKernel : List F) (curClaim : F) (finalCoeffs : List F) :
+    verifyHemStages curOracle curDom curDeg curMinAgree curKernel curClaim []
+        [.finalQuery finalCoeffs] =
+      (decide (finalCoeffs.length ≤ curDeg + 1) &&
+        decide (ringDot finalCoeffs curKernel = curClaim) &&
+        checkQueriedCosets curDom curOracle finalCoeffs
+          (List.range (Nat.min curMinAgree curDom.length))) := by rfl
+
+theorem verifyHemStages_cons_stageFold {F : Type} [CommRingOps F] [DecidableEq F]
+    (curOracle : Nat → F) (curDom : List F) (curDeg curMinAgree : Nat)
+    (curKernel : List F) (curClaim : F)
+    (st : HemWhirStageSpec F) (remStages : List (HemWhirStageSpec F))
+    (stageOracle : Nat → F) (w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ : F)
+    (stageDecoded : List (List F)) (restTr : List (HemTranscriptRound F)) :
+    verifyHemStages curOracle curDom curDeg curMinAgree curKernel curClaim (st :: remStages)
+        (.stageFold stageOracle w₀ w₁ w₂ c_F c_G φ θ α β z₀ z₁ ood₀ ood₁ stageDecoded ::
+          restTr) =
+      (stageDecoded.any (fun P =>
+          polyWitnessValid st.domainPts st.minAgree st.degBound stageOracle
+            (hemKernelFold φ curKernel)
+            (hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G φ θ α β) P &&
+          decide (RoundPoly.evalCoeffs P z₀ = ood₀) &&
+          decide (RoundPoly.evalCoeffs P z₁ = ood₁) &&
+          checkQueriedCosets st.domainPts stageOracle P st.queriedCosets) &&
+        verifyHemStages stageOracle st.domainPts st.degBound st.minAgree
+          (hemKernelFold φ curKernel)
+          (hemBridgeFoldClaim curClaim w₀ w₁ w₂ c_F c_G φ θ α β) remStages restTr) := by rfl
+
+theorem evalCascadeClaim_nil {F : Type} [CommRingOps F] (ss : List F) (abs : List (F × F)) :
+    evalCascadeClaim ([] : List F) ss abs = CommRingOps.zero := by rfl
+
+theorem evalCascadeClaim_cons {F : Type} [CommRingOps F]
+    (e : F) (es : List F) (s : F) (ss : List F) (ab : F × F) (abs : List (F × F)) :
+    evalCascadeClaim (e :: es) (s :: ss) (ab :: abs) =
+      CommRingOps.add
+        (CommRingOps.add (CommRingOps.mul ab.1 e) (CommRingOps.mul ab.2 s))
+        (evalCascadeClaim es ss abs) := by
+  cases ab; rfl
+
+theorem evalCascadeOracle_nil {F : Type} [CommRingOps F] (domPts : List F)
+    (abs : List (F × F)) (idx : Nat) :
+    evalCascadeOracle domPts [] abs idx = CommRingOps.zero := by rfl
+
+theorem evalCascadeOracle_cons {F : Type} [CommRingOps F] (domPts : List F)
+    (O : Nat → F) (os : List (Nat → F)) (ab : F × F) (abs : List (F × F)) (idx : Nat) :
+    evalCascadeOracle domPts (O :: os) (ab :: abs) idx =
+      CommRingOps.add
+        (CommRingOps.mul
+          (CommRingOps.add ab.1 (CommRingOps.mul ab.2 (domPts.getD idx CommRingOps.zero)))
+          (O idx))
+        (evalCascadeOracle domPts os abs idx) := by
+  cases ab; rfl
+
+theorem hemFalseClaimInstance_def :
+    hemFalseClaimInstance =
+      { batchOracles := [fun _ => CommRingOps.zero]
+        batchClaims := [CommRingOps.one]
+        initDomainPts := [CommRingOps.zero, CommRingOps.one]
+        initDegBound := 0
+        initMinAgree := 2
+        initKernel := [CommRingOps.one]
+        stages := [] } := by rfl
+
 end Qsag
+
+public section
+namespace Qsag
+
+theorem hemFoldClaimUpdate_def {F : Type} [CommRingOps F] (gF gG cF cG theta alpha beta : F) :
+    hemFoldClaimUpdate gF gG cF cG theta alpha beta =
+      CommRingOps.add gG (CommRingOps.add
+        (CommRingOps.mul alpha (CommRingOps.add gF (CommRingOps.mul theta gG)))
+        (CommRingOps.mul beta (CommRingOps.add cF (CommRingOps.mul theta cG)))) := by
+  unfold hemFoldClaimUpdate
+  rfl
+
+end Qsag
+end
+
+public section
+namespace Qsag
+ theorem hemInterleave_nil_left {F : Type} (ys : List F) : hemInterleave [] ys = [] := by
+  cases ys <;> rfl
+ theorem hemInterleave_cons_cons {F : Type} (a b : F) (xs ys : List F) :
+    hemInterleave (a :: xs) (b :: ys) = a :: b :: hemInterleave xs ys := by rfl
+end Qsag
+end

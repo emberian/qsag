@@ -1,6 +1,6 @@
 module
 /-
-# Qsag.Spec.Assumptions — Cryptographic Experiments, Oracle-Model Locales, and Platform Contracts
+# Qsag.Spec.Assumptions — Cryptographic Experiments, Hardness Propositions, and Platform Contracts
 
 Experiments, hardness propositions and platform contracts referenced by top-level security
 theorems (zero `axiom` declarations).
@@ -12,7 +12,8 @@ theorems (zero `axiom` declarations).
   over every adversary with programs in `𝒜` and every uniform challenger sampler, with challenger
   coins and adversary coins as independent coordinates of the coin space (`CoinSplit`,
   `UniformOn`; `SmDtTcrHard`, `SmDtPreHard`, `ItsrHard`, `PrfHard`, `DecisionRlweHard`,
-  `ModuleSisHard`, `DualLpnHard`). The class is a parameter because this development has no
+  `ModuleSisHard`, `DualLpnHard`, and `RegularDualLpnHard` for the regular noise and fixed
+  code of the dense PCG). The class is a parameter because this development has no
   running-time model. `…Hard 𝒜` is meaningful only for a class that excludes exhaustive search:
   against the unrestricted class `SM-DT-PRE` hardness is false for every tweakable hash
   (`smDtPreHard_unrestricted_refuted`). That a class excludes such adversaries and that a
@@ -906,6 +907,71 @@ def DualLpnHard (𝒜 : (List (List Bool) × List Bool → Bool) → Prop) (N ro
           (FinGame.mk hPos (fun ω => dist (π.advc ω)
             ((sample (π.chal ω)).parity, (sample (π.chal ω)).uniform)))) ε
 
+/-- Regular noise: `blocks` consecutive blocks of `blockLen` bits with exactly one set bit in
+    each. This is the noise of a PCG that punctures one leaf per GGM tree
+    (`densePcgV3Profile`: `treesPerBundle` blocks of `leavesPerTree` bits). -/
+def regularNoiseOk (blocks blockLen : Nat) (e : List Bool) : Bool :=
+  decide (e.length = blocks * blockLen) &&
+    (List.range blocks).all
+      (fun b => decide (((e.drop (b * blockLen)).take blockLen).count true = 1))
+
+/-- Challenger sample of the regular dual-LPN experiment for a fixed code. -/
+structure RegularDualLpnSample where
+  noise : List Bool
+  uniform : List Bool
+
+/-- **Regular dual-LPN hardness for a fixed public code.** `H` is one fixed parity-check
+    matrix (the deployed generator uses a fixed quasi-cyclic tap matrix, not a sampled one);
+    the noise is uniform among the regular vectors of `blocks` blocks of `blockLen` bits; the
+    comparison string is uniform among the strings of `H.length` bits. Every distinguisher of
+    `H · e` from the uniform string with decision functions in the class `𝒜` has advantage at
+    most `ε`.
+
+    `DualLpnHard` above is the textbook variant (uniform matrix, noise uniform among all
+    vectors of a given Hamming weight). The two are different assumptions: a regular vector
+    has weight `blocks`, but a vector of weight `blocks` need not be regular
+    (`regularNoise_not_implied_by_weight`), and a fixed code has no matrix coins. -/
+def RegularDualLpnHard (𝒜 : (List Bool → Bool) → Prop) (H : List (List Bool))
+    (blocks blockLen : Nat) (ε : RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA)
+    (sample : Fin nC → RegularDualLpnSample),
+    UniformOn (fun x : RegularDualLpnSample =>
+      regularNoiseOk blocks blockLen x.noise = true ∧ x.uniform.length = H.length) sample →
+    ∀ dist : Fin nA → List Bool → Bool, (∀ a : Fin nA, 𝒜 (dist a)) →
+      GameBound
+        (AdvDist
+          (FinGame.mk hPos (fun ω => dist (π.advc ω)
+            (lpnSyndrome H (sample (π.chal ω)).noise)))
+          (FinGame.mk hPos (fun ω => dist (π.advc ω) (sample (π.chal ω)).uniform))) ε
+
+/-- A vector with one set bit in each of two blocks of two bits is regular. -/
+theorem regularNoise_example : regularNoiseOk 2 2 [true, false, false, true] = true := by decide
+
+/-- Hamming weight `blocks` does not make a vector regular: `1100` has weight two and both set
+    bits in the first block. -/
+theorem regularNoise_not_implied_by_weight :
+    ¬ (([true, true, false, false].count true = 2) →
+      regularNoiseOk 2 2 [true, true, false, false] = true) := by decide
+
+/-- For the code with no parity checks the syndrome and the comparison string are both empty:
+    the two games coincide and the advantage is `0`, whatever the class. The proposition
+    carries information only for a code with rows. -/
+theorem regularDualLpnHard_noRows (𝒜 : (List Bool → Bool) → Prop) (blocks blockLen : Nat) :
+    RegularDualLpnHard 𝒜 [] blocks blockLen RatBound.zero := by
+  intro n nC nA hPos π sample hU dist _
+  have hEq : FinGame.mk hPos (fun ω => dist (π.advc ω)
+        (lpnSyndrome [] (sample (π.chal ω)).noise)) =
+      FinGame.mk hPos (fun ω => dist (π.advc ω) (sample (π.chal ω)).uniform) := by
+    refine FinGame.ext_win (fun ω => ?_)
+    have hLen : (sample (π.chal ω)).uniform.length = 0 := (hU.mem (π.chal ω)).2
+    have hNil : (sample (π.chal ω)).uniform = [] := List.eq_nil_of_length_eq_zero hLen
+    show dist (π.advc ω) (lpnSyndrome [] (sample (π.chal ω)).noise) =
+      dist (π.advc ω) (sample (π.chal ω)).uniform
+    rw [hNil]
+    rfl
+  rw [hEq]
+  exact adv_refl _
+
 /-- Hardness weakens along the bound. -/
 theorem SmDtTcrHard.mono {𝒜 : Code targetIface TargetBreak → Prop}
     {th : Bytes → Bytes → Bytes → Bytes} {seedLen q : Nat}
@@ -1211,6 +1277,7 @@ theorem moduleSisHard_noRows_refuted (𝒜 : (List (List (List Nat)) → List (L
   decide
 
 #tooth_pair smDtTcrHard_one vs smDtTcrHard_constHash_refuted
+#tooth_pair regularNoise_example vs regularNoise_not_implied_by_weight
 #tooth_pair SmDtTcrHard.mono vs smDtTcrHard_constHash_refuted_seedless
 #tooth_pair SmDtPreHard.mono vs smDtPreHard_constHash_refuted
 #tooth_pair ItsrHard.mono vs itsrHard_emptySelector_refuted
@@ -1360,43 +1427,13 @@ theorem smDtPreHard_unrestricted_refuted_trivialSizes (th : Bytes → Bytes → 
 #tooth_pair smDtPreHard_emptyClass vs smDtPreHard_unrestricted_refuted_trivialSizes
 #tooth_pair SmDtTcrHard.anti vs smDtPreHard_preimageSearch_refuted
 
-/-! ## 3. Idealized-Oracle Parameter Records (ROM / Ideal Permutation / Compressed QROM)
-
-These three records carry the sizes and query budgets that bound expressions elsewhere are
-written in. They are parameter carriers, not assumptions: none of them states a sampling law, and
-a theorem that takes one as an argument assumes nothing about any oracle. An experiment in which
-an oracle is sampled states that explicitly, as the hardness propositions of section 2e do with
-`UniformOn` and as `aggregateSoundnessGame` (`Spec.IdealAggregate`) does with its oracle family. -/
-
-/-- Parameter record of a random-oracle analysis: digest bit-width `digestBits` and query budget
-    `qRo`. Not an assumption. -/
-structure RandomOracleModel where
-  digestBits : Nat
-  qRo : Nat
-  h_width : 256 ≤ digestBits
-
-/-- Parameter record of an ideal-permutation / sponge analysis: state width `stateBits`,
-    capacity `capacityBits` and permutation query budget `qPerm`. Not an assumption. -/
-structure IdealPermutationModel where
-  stateBits : Nat
-  capacityBits : Nat
-  qPerm : Nat
-  h_cap : 256 ≤ capacityBits ∧ capacityBits ≤ stateBits
-
-/-- Parameter record of a compressed-oracle (`QROM`) analysis: digest width `digestBits` and
-    superposition query budget `qQuantum`. Not an assumption. -/
-structure CompressedQromModel where
-  digestBits : Nat
-  qQuantum : Nat
-  h_width : 256 ≤ digestBits
-
-/-! ## 4. Operating-System and Hardware Platform Contracts
+/-! ## 3. Operating-System and Hardware Platform Contracts
 
 Each contract is a set of laws over the event traces of an explicit environment model. A model
 that does not behave as required has no contract; each section gives a reference model that
 satisfies the laws and a faulty model that provably does not. -/
 
-/-! ### 4a. Crash-consistent storage (`fsync` + atomic `rename` + external monotone anchor) -/
+/-! ### 3a. Crash-consistent storage (`fsync` + atomic `rename` + external monotone anchor) -/
 
 /-- Storage event of a write-ahead log. -/
 inductive FsyncOp where
@@ -1624,7 +1661,7 @@ theorem fsyncJournal_commit_flushes_pending_rename :
   intro h
   exact absurd (congrArg List.length (h ⟨[], [[1]], none, false, 0⟩ [])) (by decide)
 
-/-! ### 4b. Authenticated point-to-point channels -/
+/-! ### 3b. Authenticated point-to-point channels -/
 
 /-- Message on a point-to-point channel between custody / MPC peers. -/
 structure ChannelMsg where
@@ -1772,7 +1809,7 @@ theorem empty_network_has_no_channel_contract :
     ¬ AuthenticatedChannelContract (fun _ => False) :=
   fun c => c.honestRunsAdmitted [] List.nodup_nil
 
-/-! ### 4c. Secret-share erasure at quarantine -/
+/-! ### 3c. Secret-share erasure at quarantine -/
 
 /-- Event on the memory holding secret shares. -/
 inductive ShareMemOp where
@@ -1806,8 +1843,9 @@ def ShareMemoryModel.run (M : ShareMemoryModel) : M.State → List ShareMemOp �
 
     No instance exists in this library; `shareMemoryModel_contract` is a reference model only.
     The execution layer models erasure logically (`shareSlot := none`), and the machine layer
-    proves `ct_memzero` per function; neither is a `ShareMemoryModel` with a physical residue
-    across a quarantine event. -/
+    has one refinement theorem per wipe routine (`Qsag.ct_memzero_x86_64_mc_refines`,
+    `Qsag.ct_memzero_aarch64_mc_refines`); neither is a `ShareMemoryModel` with a physical
+    residue across a quarantine event. -/
 structure KeyErasureContract (M : ShareMemoryModel) : Prop where
   /-- A loaded share is physically present in its slot. -/
   loadStoresShare : ∀ (s : M.State) (slot : Nat) (bytes : Bytes),
@@ -1862,7 +1900,7 @@ theorem elided_zeroization_has_no_erasure_contract :
     c.quarantineZeroizesShares (fun _ => [1]) [] 0 (fun _ h => nomatch h) 1 (List.Mem.head _)
   exact absurd h (by decide)
 
-/-! ### 4d. Data-independent timing and SIMT workgroup execution -/
+/-! ### 3d. Data-independent timing and SIMT workgroup execution -/
 
 /-- Hardware data-independent timing (`DOIT` / `DIT`) contract. `observe mode op data` is the
     timing observation of executing `op` on operand values `data` with the processor in mode
@@ -2085,6 +2123,9 @@ theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSi
   Qsag.Spec.ItsrHard.mono
   Qsag.Spec.smDtTcrHard_one
   Qsag.Spec.decisionRlweHard_zero_samples
+  Qsag.Spec.regularDualLpnHard_noRows
+  Qsag.Spec.regularNoise_example
+  Qsag.Spec.regularNoise_not_implied_by_weight
   Qsag.Spec.hashSig_forger_bound
   Qsag.Spec.smDtTcrHard_constHash_refuted
   Qsag.Spec.uniformOn_emptyBytes

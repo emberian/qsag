@@ -57,10 +57,6 @@ public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Signing.HypertreeEufCma
 public import Qsag.Protocol.Threshold.ThresholdMpc
 
-import all Qsag.Math.Goldilocks
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Threshold.Preprocessing
-import all Qsag.Protocol.Threshold.ThresholdMpc
 
 import Qsag.Tactic.AssuranceKit
 
@@ -337,14 +333,14 @@ def verifySharedDkgFrobenius_sound (k d : Nat)
     let yTrue := ringDot lambdas frobSh
     if hOpenEq : yOpened = yTrue then
       .inl (by
-        have hValid : sqTriple.validAt lambdas := ⟨hALen, hBLen, hCLen, hcEq⟩
+        have hValid : sqTriple.validAt lambdas :=
+          (SharedBeaverTriple.validAt_iff _ _).mpr ⟨hALen, hBLen, hCLen, hcEq⟩
         obtain ⟨hSqLen, _, _, hSqDot⟩ :=
           evalSharedBeaverMul_correct lambdas xSh xSh sqTriple hSumOne hXLen hXLen hValid
         have hY0 : yOpened = towerZero k := of_decide_eq_true (Bool.and_eq_true_iff.mp hCondAndEq.1).1
         have hFrobDot : yTrue = towerFrobeniusPoly k (ringDot lambdas xSh) := by
           dsimp only [yTrue]
           rw [← hCondAndEq.2]
-          dsimp only [evalSharedBeaverMul]
           rw [ringDot_zipSub (hSqLen.trans hXLen.symm), hSqDot]
           rfl
         exact (towerFrobenius_eq_zero_iff_bit k (ringDot lambdas xSh)).mp
@@ -401,11 +397,52 @@ private theorem demoTower7_macKey_nonzero :
     towerAdd 7 ((towerZero 6, towerOne 6) : TowerElem 7) (towerOne 6, towerZero 6) ≠ towerZero 7 := by
   decide +kernel
 
+private def demoTower3DiffInv : TowerElem 3 :=
+  (((true, true), (true, false)), ((false, true), (true, false)))
+
+/-- The inverse used by the demo Lagrange weights, pinned by uniqueness of inverses. -/
+private theorem demoTower3_diffInv :
+    towerInv 3 (towerAdd 3 (towerOne 3) demoTower3Pt2) = demoTower3DiffInv := by
+  have hne : towerAdd 3 (towerOne 3) demoTower3Pt2 ≠ towerZero 3 := by decide +kernel
+  have h1 := towerMul_inv 3 _ hne
+  have h2 : towerMul 3 (towerAdd 3 (towerOne 3) demoTower3Pt2) demoTower3DiffInv = towerOne 3 := by
+    decide +kernel
+  have h3 := towerMul_assoc 3 (towerInv 3 (towerAdd 3 (towerOne 3) demoTower3Pt2))
+    (towerAdd 3 (towerOne 3) demoTower3Pt2) demoTower3DiffInv
+  rw [towerMul_comm 3 (towerInv 3 (towerAdd 3 (towerOne 3) demoTower3Pt2)), h1, h2, towerOne_mul,
+    towerMul_one] at h3
+  exact h3.symm
+
+private theorem demoTower3Lambdas2_eq :
+    demoTower3Lambdas2 =
+      [towerMul 3 demoTower3Pt2 demoTower3DiffInv, towerMul 3 (towerOne 3) demoTower3DiffInv] := by
+  simp only [demoTower3Lambdas2, demoTower3_diffInv]
+
 private theorem demoTower3_shares_open_to_one :
     ringDot demoTower3Lambdas2
       [towerAdd 3 (towerOne 3) demoTower3Pt2,
        towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)] = towerOne 3 := by
-  decide +kernel
+  rw [ringDot_eq, demoTower3Lambdas2_eq]; decide +kernel
+
+private theorem demoTower3Lambdas2_sum : ringListSum demoTower3Lambdas2 = towerOne 3 := by
+  rw [demoTower3Lambdas2_eq]; decide +kernel
+
+private theorem demoTower3BeaverSq_validAt : demoTower3BeaverSq.validAt demoTower3Lambdas2 :=
+  (SharedBeaverTriple.validAt_iff _ _).mpr
+    ⟨rfl, rfl, rfl, by simp only [ringDot_eq, demoTower3Lambdas2_eq]; decide +kernel⟩
+
+/-- The squaring residual of the demo Beaver triple recombines to `x² ⊕ x`, for any share
+    vector of committee size. -/
+private theorem demoTower3_frobenius_residual (xSh : List (TowerElem 3))
+    (hLen : xSh.length = demoTower3Lambdas2.length) :
+    ringDot demoTower3Lambdas2
+      (shareZipSub (evalSharedBeaverMul demoTower3Lambdas2 xSh xSh demoTower3BeaverSq).1 xSh) =
+      CommRingOps.sub
+        (CommRingOps.mul (ringDot demoTower3Lambdas2 xSh) (ringDot demoTower3Lambdas2 xSh))
+        (ringDot demoTower3Lambdas2 xSh) := by
+  obtain ⟨hSqLen, _, _, hSqDot⟩ := evalSharedBeaverMul_correct demoTower3Lambdas2 xSh xSh
+    demoTower3BeaverSq demoTower3Lambdas2_sum hLen hLen demoTower3BeaverSq_validAt
+  rw [ringDot_zipSub (hSqLen.trans hLen.symm), hSqDot]
 
 private theorem demoTower3_frobenius_residual_zero :
     ringDot demoTower3Lambdas2
@@ -418,6 +455,42 @@ private theorem demoTower3_frobenius_residual_zero :
           demoTower3BeaverSq).1
         [towerAdd 3 (towerOne 3) demoTower3Pt2,
          towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)]) = towerZero 3 := by
+  rw [demoTower3_frobenius_residual [towerAdd 3 (towerOne 3) demoTower3Pt2,
+       towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)] rfl, demoTower3_shares_open_to_one]
+  decide +kernel
+
+private theorem evalSharedDkgFrobenius_eq_none_of_residual (k d : Nat)
+    (lambdas xSh : List (TowerElem k))
+    (sqTriple : SharedBeaverTriple (TowerElem k))
+    (yOpened : TowerElem k) (sigmas : List (TowerElem (k + d)))
+    (h : ¬ (yOpened = towerZero k ∧
+      ringDot lambdas
+        (shareZipSub (evalSharedBeaverMul lambdas xSh xSh sqTriple).1 xSh) = yOpened)) :
+    evalSharedDkgFrobenius k d lambdas xSh sqTriple yOpened sigmas = none := by
+  unfold evalSharedDkgFrobenius
+  dsimp only
+  split
+  next hc =>
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+    exact absurd ⟨hc.1.1, hc.2⟩ h
+  next => rfl
+
+private theorem demoTower3_nonbinary_shares_open :
+    ringDot demoTower3Lambdas2
+      [towerAdd 3 demoTower3Pt2 (towerOne 3), towerAdd 3 demoTower3Pt2 demoTower3Pt2] =
+        demoTower3Pt2 := by
+  rw [ringDot_eq, demoTower3Lambdas2_eq]; decide +kernel
+
+private theorem demoTower3_nonbinary_residual_ne_zero :
+    ringDot demoTower3Lambdas2
+      (shareZipSub
+        (evalSharedBeaverMul demoTower3Lambdas2
+          [towerAdd 3 demoTower3Pt2 (towerOne 3), towerAdd 3 demoTower3Pt2 demoTower3Pt2]
+          [towerAdd 3 demoTower3Pt2 (towerOne 3), towerAdd 3 demoTower3Pt2 demoTower3Pt2]
+          demoTower3BeaverSq).1
+        [towerAdd 3 demoTower3Pt2 (towerOne 3), towerAdd 3 demoTower3Pt2 demoTower3Pt2]) ≠
+      towerZero 3 := by
+  rw [demoTower3_frobenius_residual [towerAdd 3 demoTower3Pt2 (towerOne 3), towerAdd 3 demoTower3Pt2 demoTower3Pt2] rfl, demoTower3_nonbinary_shares_open]
   decide +kernel
 
 /-- **Inhabitedness Witness (`shared_dkg_frobenius_inhabited`)**:
@@ -472,7 +545,12 @@ theorem tooth_shared_dkg_frobenius_rejects_nonbinary_shares :
     alphaSum ≠ towerZero 7 ∧
     evalSharedDkgFrobenius 3 4 demoTower3Lambdas2 xSh demoTower3BeaverSq yTrue honestSigmas = none ∧
     evalSharedDkgFrobenius 3 4 demoTower3Lambdas2 xSh demoTower3BeaverSq (towerZero 3) forgedZeroSigmas = none := by
-  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+  intro xBad xSh frobSh yTrue alpha0 alpha1 alphaSum mac0 mac1 honestSigmas forgedZeroSigmas
+  refine ⟨demoTower7_macKey_nonzero, ?_, ?_⟩
+  · exact evalSharedDkgFrobenius_eq_none_of_residual 3 4 _ _ _ _ _
+      (fun h => demoTower3_nonbinary_residual_ne_zero h.1)
+  · exact evalSharedDkgFrobenius_eq_none_of_residual 3 4 _ _ _ _ _
+      (fun h => demoTower3_nonbinary_residual_ne_zero h.2)
 
 /-! ## 2. Polynomial Coefficient Non-Vanishing, `SPDZ` & 2-Lane `BDOZ` Batch MAC Soundness -/
 
@@ -1532,7 +1610,7 @@ private theorem dealReshareSubPolys_constSum {R : Type} [LawfulCommRing R] :
       tls.length = ls.length →
       ((dealReshareSubPolys ls ss tls).map (fun p => RoundPoly.evalCoeffs p CommRingOps.zero)).foldr
         CommRingOps.add CommRingOps.zero = ringDot ls ss
-  | [], [], [], _, _ => rfl
+  | [], [], [], _, _ => (ringDot_nilLeftC _).symm
   | l :: ls, s :: ss, tl :: tls, hSLen, hTLen => by
     simp only [dealReshareSubPolys, List.map_cons, List.foldr_cons, RoundPoly.evalCoeffs,
       LawfulCommRing.zero_mul, LawfulCommRing.add_zero, ringDot_consC,
@@ -1573,8 +1651,7 @@ theorem reshare_from_shares_without_cleartext_recombines_secret
   refine ⟨hGLen, hG0, ?_⟩
   unfold lagrangeCombine
   rw [hNewEq]
-  exact (lagrangeAtZero_evalCoeffs Q_new.lambdas Q_new.pts G tPrime hGLen Q_new.sum_one
-    Q_new.kills_higher).trans hG0
+  exact (Q_new.reconstruct G hGLen).trans hG0
 
 /-- **`(t' - 1)` Corrupt New-Committee Reshare View Bijection (`reshare_corrupt_view_bijection`)**:
     For ANY `< t'` corrupt new-committee points `corruptNewPts` (`corruptNewPts.length + 1 ≤ t'`,
@@ -1633,7 +1710,12 @@ theorem reshare_from_shares_inhabited :
     oldShares ≠ newSharesAt23 ∧
     lagrangeCombine shamirGoldilocksQuorum23.lambdas newSharesAt23 = Goldilocks.ofNat 5 ∧
     (eraseOldShareAfterReshare ⟨1, some (Goldilocks.ofNat 12)⟩).heldShare = none := by
-  refine ⟨by decide +kernel, by decide +kernel, rfl⟩
+  refine ⟨?_, ?_, rfl⟩
+  · simp only [shamirGoldilocksQuorum12_lambdas, shamirGoldilocksQuorum23_pts]
+    decide +kernel
+  · simp only [lagrangeCombine, ringDot_eq, shamirGoldilocksQuorum12_lambdas,
+      shamirGoldilocksQuorum23_pts, shamirGoldilocksQuorum23_lambdas]
+    decide +kernel
 
 /-! ## 6. Constructive Simplex Quorum Intersection & `Jorts` Non-Equivocation -/
 
@@ -2021,7 +2103,7 @@ private theorem threshold_jorts_wal_quorum_never_double_signs
         SQ₁.pts.map (fun x => RoundPoly.evalCoeffs skPoly x) := by
       rw [hPts1, List.map_map]; rfl
     rw [hMap1]
-    exact lagrangeAtZero_evalCoeffs SQ₁.lambdas SQ₁.pts skPoly (2 * f + 1) hDeg SQ₁.sum_one SQ₁.kills_higher
+    exact SQ₁.reconstruct skPoly hDeg
   have hRec2 : lagrangeCombine SQ₂.lambdas (Q₂.map (fun p => RoundPoly.evalCoeffs skPoly (evalPoint p))) =
       RoundPoly.evalCoeffs skPoly Goldilocks.zero := by
     unfold lagrangeCombine
@@ -2029,7 +2111,7 @@ private theorem threshold_jorts_wal_quorum_never_double_signs
         SQ₂.pts.map (fun x => RoundPoly.evalCoeffs skPoly x) := by
       rw [hPts2, List.map_map]; rfl
     rw [hMap2]
-    exact lagrangeAtZero_evalCoeffs SQ₂.lambdas SQ₂.pts skPoly (2 * f + 1) hDeg SQ₂.sum_one SQ₂.kills_higher
+    exact SQ₂.reconstruct skPoly hDeg
   let ⟨h, hIn1, hIn2, hHonest⟩ := extractHonestQuorumIntersection f V Q₁ Q₂ corrupt
     hVNodup hVLen hQ1Nd hQ1Sub hQ1Len hQ2Nd hQ2Sub hQ2Len hCorruptLen
   obtain ⟨sh₁, hEm1⟩ := hCert1 h hIn1 hHonest
@@ -3105,7 +3187,7 @@ theorem tooth_static_key_share_quorum_exposes_master_secret
     (SQ : ShamirQuorum Tower128 (2 * f + 1)) :
     let slot0EmittedShares := SQ.pts.map (fun pt => RoundPoly.evalCoeffs skPoly pt)
     lagrangeCombine SQ.lambdas slot0EmittedShares = RoundPoly.evalCoeffs skPoly (towerZero 7) :=
-  lagrangeAtZero_evalCoeffs SQ.lambdas SQ.pts skPoly (2 * f + 1) hDeg SQ.sum_one SQ.kills_higher
+  SQ.reconstruct skPoly hDeg
 
 
 /-- Reachable initial invariant for the context-bound cut transition. -/

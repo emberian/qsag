@@ -82,9 +82,9 @@ theorem runPrepared_query_log {α : Type} (profile : RssProduction.Profile)
     (runPrepared (preparePublic profile request) profile.material tape first program).cuts.map
       CutEvidence.query = queryLog (answer (RssProduction.sharedOracle profile)) program := by
   induction program generalizing first with
-  | pure result => rfl
+  | pure result => simp only [runPrepared, List.map_nil, queryLog_pure]
   | query query next ih =>
-      simp only [runPrepared, List.map_cons, queryLog]
+      simp only [runPrepared, List.map_cons, queryLog_query]
       rw [(queryRun_correct profile request first query tape).2, ih]
 
 def signingProgram (profile : RssProduction.Profile) (request : SessionScheduleReq) :

@@ -2,10 +2,7 @@ module
 public import Qsag.Math.Tactic.CommRing
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
-import all Qsag.Protocol.Threshold.ThresholdApproval
-import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
-import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Protocol.Aggregation.UcGames
+public import Qsag.Protocol.Aggregation.HemOpening
 public section
 namespace Qsag.Composed
 set_option autoImplicit false
@@ -64,7 +61,7 @@ Header equality pins both supported regimes; classical acceptance is never promo
 def checkTree {n : Nat} (root : Header) (verify : Shard n → Bool) :
     Nat → MergeTree n → Bool
   | _, .leaf s => decide (s.header = root) &&
-    decide (2 ≤ s.numVars ∧ s.numVars ≤ 24 ∧ s.schedule = root.regime.schedule s.numVars) &&
+    decide (2 ≤ s.numVars ∧ s.numVars ≤ 28 ∧ s.schedule = root.regime.schedule s.numVars) &&
     decide (0 < weight s.bitmap) && verify s
   | 0, .branch _ _ _ => false
   | d + 1, .branch l r b =>
@@ -79,7 +76,7 @@ theorem binary_merge_sound {n : Nat} (root : Header) (verify : Shard n → Bool)
     (∀ v : Nat, (tree.leaves.countP fun s => s.bitmap.getLsbD v) =
       if tree.bitmap.getLsbD v then 1 else 0) ∧
     (∀ s ∈ tree.leaves, s.header = root ∧ verify s = true ∧
-      2 ≤ s.numVars ∧ s.numVars ≤ 24 ∧ s.schedule = root.regime.schedule s.numVars) ∧
+      2 ≤ s.numVars ∧ s.numVars ≤ 28 ∧ s.schedule = root.regime.schedule s.numVars) ∧
     tree.leaves.length ≤ 2 ^ d := by
   induction tree generalizing d with
   | leaf s =>
@@ -624,27 +621,18 @@ theorem schedule_floor {n : Nat} (root : Header) (verify : Shard n → Bool)
     (tree : MergeTree n) (h : checkTree root verify 16 tree = true)
     (s : Shard n) (hs : s ∈ tree.leaves) (st : WhirStageSpec) (ht : st ∈ s.schedule.stages) :
     2 ^ root.regime.queryExponentBits ≤ st.queryErrorDenominator := by
-  obtain ⟨_, _, h2, h24, he⟩ := (binary_merge_sound root verify tree 16 h).2.2.1 s hs
+  obtain ⟨_, _, h2, h28, he⟩ := (binary_merge_sound root verify tree 16 h).2.2.1 s hs
   rw [he] at ht
-  exact whirSchedule_stage_query_ge root.regime s.numVars h2 h24 st ht
-/-! Reachable fixtures and mutations. The leaf-verifier fixture tests the structural layer;
+  exact whirSchedule_stage_query_ge root.regime s.numVars h2 h28 st ht
+/-! Reachable fixtures and mutations. The fixtures that evaluate `checkTree` on `exampleTree`
+(`inhabited_tree`, `tooth_overlap`, `inhabited_reduction`, `inhabited_shard_bound`) and their
+audits are in `Tests/CompositionInstances.lean`. The leaf-verifier fixture tests the structural layer;
 it is deliberately not represented as a deployed WHIR proof. -/
 def exampleHeader : Header := ⟨[0], .xmssPoseidon2, .bciksJohnsonQrom128, .shared [1]⟩
 def exampleShard (b : BitVec 2) : Shard 2 := ⟨exampleHeader, b, [1], 2, (Qsag.WhirSecurityRegime.bciksJohnsonQrom128).schedule 2⟩
 def exampleVerifier (s : Shard 2) : Bool := s.proof == [1]
 def exampleTree : MergeTree 2 := .branch (.leaf (exampleShard 1#2))
   (.leaf (exampleShard 2#2)) 3#2
-theorem inhabited_tree : ∃ root verify tree,
-    checkTree (n := 2) root verify 16 tree = true ∧ tree.bitmap.getLsbD 0 = true ∧
-    ∃ s ∈ tree.leaves, ∃ st : WhirStageSpec, st ∈ s.schedule.stages :=
-  ⟨exampleHeader, exampleVerifier, exampleTree, by decide, by decide,
-    exampleShard 1#2, by simp [exampleTree, MergeTree.leaves],
-    (whirStageSchedule 2).stages.headD ⟨0,0,0⟩, by decide⟩
-theorem tooth_overlap : ∃ a b : BitVec 2,
-    a &&& b ≠ 0#2 ∧ weight (a ||| b) < weight a + weight b ∧
-    checkTree exampleHeader exampleVerifier 16
-      (.branch (.leaf (exampleShard a)) (.leaf (exampleShard b)) (a ||| b)) = false :=
-  ⟨1#2, 1#2, by decide, by decide, by decide⟩
 theorem tooth_downgrade : ∃ s : Shard 2,
     s.header.regime ≠ exampleHeader.regime ∧
     checkTree exampleHeader exampleVerifier 16 (.leaf s) = false :=
@@ -667,7 +655,9 @@ theorem tooth_full_corrupt : ∃ q : Custody,
 theorem tooth_omit_outer : ∃ total outer : Fin 1 → Bool,
     (∀ ω, total ω = true → outer ω = true) ∧
     (qsum 1 fun ω => if total ω then 1 else 0) > 0 :=
-  ⟨fun _ => true, fun _ => true, fun _ _ => rfl, by decide⟩
+  ⟨fun _ => true, fun _ => true, fun _ _ => rfl, by
+    show (qsum 1 fun _ => 1) > 0
+    rw [qsum_const]; decide⟩
 local instance : DecidableEq (TowerElem 1) := towerDecidableEq 1
 local instance : DecidableEq (Bool × Bool) := towerDecidableEq 1
 local instance : LawfulCommRing (Bool × Bool) := towerRing 1
@@ -707,21 +697,16 @@ theorem tooth_retained_polynomial : ∃ p q : List (TowerElem 1),
   · unfold epochCompatible; decide
   · unfold epochCompatible; decide
   · decide
-/-- The outer-bad branch is reachable; the honest approval branch has its own fixture. -/
-theorem inhabited_reduction : ∃ geom custody verify bad,
-    ExtractionBoundary (n := 2) geom custody verify bad ∧
-    ∃ s : Shard 2, ∃ v : Fin 2, verify s = true ∧ s.bitmap.getLsbD v.val = true ∧
-    ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true := by
-  refine ⟨compactAuditGeom, (fun _ => exampleCustody), exampleVerifier,
-    (fun _ => True), ⟨fun _ _ => .inl trivial⟩, exampleShard 1#2, ⟨0, by decide⟩,
-    by decide, by decide, exampleHeader, exampleTree, by decide, by decide⟩
 theorem inhabited_union : ∃ total outer : Fin 2 → Bool,
     ∃ quorum : Fin 2 → Fin 2 → Bool, ∃ B : BitVec 2,
     (∀ ω, total ω = true → outer ω = true ∨
       ∃ v : Fin 2, B.getLsbD v.val = true ∧ quorum ω v = true) ∧
     (qsum 2 fun ω => if total ω then 1 else 0) = 2 := by
   refine ⟨(fun _ => true), (fun ω => decide (ω.val = 0)),
-    (fun ω v => decide (ω.val = 1 ∧ v.val = 1)), 3#2, ?_, ?_⟩ <;> decide
+    (fun ω v => decide (ω.val = 1 ∧ v.val = 1)), 3#2, ?_, ?_⟩
+  · decide
+  · show (qsum 2 fun _ => 1) = 2
+    rw [qsum_const]
 theorem inhabited_composed_game : ∃ (geom : AggSigGeometry) (custody : Fin 2 → Custody)
     (verify outer : Shard 2 → Bool),
     ExtractionBoundary (n := 2) geom custody verify (fun s => outer s = true) ∧
@@ -748,10 +733,6 @@ theorem inhabited_reconstruction : ∃ domain : List (TowerElem 1),
   refine ⟨fourElements, by decide, four_complete, towerMul_inv 1, [((true,false),(false,true)),((false,true),(false,false))],
     by decide, [(true,false),(true,true)], [(true,false),(true,true)], ?_, ?_⟩ <;>
     (unfold Matches; decide)
-theorem inhabited_shard_bound : ∃ root verify tree, ∃ bad : Fin 2 → Shard 2 → Bool,
-    checkTree root verify 16 tree = true ∧
-    (qsum 2 fun ω => if treeBad (bad ω) tree then 1 else 0) = 2 :=
-  ⟨exampleHeader, exampleVerifier, exampleTree, (fun _ _ => true), by decide, by decide⟩
 #verify_constructive weight_union binary_merge_sound depth_sixteen honest_threshold
 #verify_constructive quorum_aggregation_reduction composed_advantage_bound quorum_advantage_from_extraction
 #verify_constructive insert_length eval_insert eval_insert_self quot_insert insert_quot
@@ -760,32 +741,20 @@ theorem inhabited_shard_bound : ∃ root verify tree, ∃ bad : Fin 2 → Shard 
 #verify_constructive mobile_uniform_fibers retained_shares_determine_secret
 #verify_constructive tree_union_bound additive_shard_bound selected_leaf schedule_floor
 #verify_constructive merged_quorum_reduction mobile_covers_entire_roster
-#verify_inhabited binary_merge_sound inhabited_tree
-#verify_inhabited additive_shard_bound inhabited_shard_bound
-#verify_inhabited depth_sixteen inhabited_tree
-#verify_inhabited selected_leaf inhabited_tree
-#verify_inhabited schedule_floor inhabited_tree
 #verify_inhabited honest_threshold inhabited_approval
-#verify_inhabited quorum_aggregation_reduction inhabited_reduction
-#verify_inhabited merged_quorum_reduction inhabited_reduction
-#verify_inhabited composed_advantage_bound inhabited_union
 #verify_inhabited quorum_advantage_from_extraction inhabited_composed_game
 #verify_inhabited retained_shares_determine_secret inhabited_reconstruction
 #verify_inhabited solutions_exact inhabited_reconstruction
 #verify_inhabited mobile_uniform_fibers inhabited_mobile
-#tooth_pair binary_merge_sound vs tooth_overlap
 #tooth_pair binary_merge_sound vs tooth_downgrade
 #tooth_pair schedule_floor vs tooth_downgrade
 #tooth_pair honest_threshold vs tooth_full_corrupt
 #tooth_pair quorum_aggregation_reduction vs tooth_full_corrupt
 #tooth_pair merged_quorum_reduction vs tooth_full_corrupt
-#tooth_pair composed_advantage_bound vs tooth_omit_outer
-#tooth_pair quorum_advantage_from_extraction vs tooth_omit_outer
 #tooth_pair mobile_uniform_fibers vs tooth_retained_polynomial
 #tooth_pair epoch_exact vs tooth_retained_polynomial
 #tooth_pair solutions_exact vs tooth_retained_polynomial
 #tooth_pair retained_shares_determine_secret vs tooth_retained_polynomial
-#tooth_pair additive_shard_bound vs tooth_overlap
 /-- Publicly determined nonconstant coefficients make even one share distinguish secrets. -/
 theorem tooth_public_coefficients {F : Type} [LawfulCommRing F] (s t x : F) (r : List F)
     (hne : s ≠ t) : RoundPoly.evalCoeffs (s :: r) x ≠ RoundPoly.evalCoeffs (t :: r) x := by
@@ -794,4 +763,86 @@ theorem tooth_public_coefficients {F : Type} [LawfulCommRing F] (s t x : F) (r :
   apply LawfulCommRing.add_left_cancel (a := CommRingOps.mul x (RoundPoly.evalCoeffs r x))
   simpa only [RoundPoly.evalCoeffs_cons, LawfulCommRing.add_comm] using h
 #tooth_pair mobile_uniform_fibers vs tooth_public_coefficients
+end Qsag.Composed
+
+/-! ## Bridges from the committee AIR and the HEM opening batch to `ExtractionBoundary` -/
+namespace Qsag.CompositionInstances
+open Qsag.Composed
+
+/-- Consumer bridge to the row-committed AIR of `SuccinctAggregationIop`. The boundary follows
+from (a) knowledge extraction of a constraint-satisfying trace for the statement the shard
+decodes to, and (b) that statement naming the enrolled key and the header message of each
+active validator. AIR soundness (`extractValidCommitteeSigsFromTrace`) supplies the native
+signatures. `AggArithPublicStmt` carries one message, so (b) holds only when all active
+validators share it. -/
+theorem boundary_of_committee_trace {n : Nat} (geom : AggSigGeometry)
+    (custody : Fin n → Custody) (verify : Shard n → Bool) (bad : Shard n → Prop)
+    (stmt : Shard n → AggArithPublicStmt) (slot : Fin n → Nat)
+    (knowledge : ∀ s, verify s = true →
+      bad s ∨ ∃ tr, traceSatisfiesAllConstraints (stmt s) tr = true)
+    (binds : ∀ s, verify s = true → (stmt s).geom = geom ∧
+      ∀ v : Fin n, s.bitmap.getLsbD v.val = true →
+        (stmt s).committeePks[slot v]? = some (custody v).state.pk ∧
+        (stmt s).msg = s.header.mode.message v.val) :
+    ExtractionBoundary geom custody verify bad := by
+  refine ⟨fun s h => ?_⟩
+  rcases knowledge s h with hb | ⟨tr, hsat⟩
+  · exact .inl hb
+  · refine .inr fun v hv => ?_
+    obtain ⟨hg, hb⟩ := binds s h
+    obtain ⟨hpk, hm⟩ := hb v hv
+    obtain ⟨hk, he⟩ := List.getElem?_eq_some_iff.mp hpk
+    obtain ⟨sig, hsig⟩ := extractValidCommitteeSigsFromTrace (stmt s) tr hsat (slot v) hk
+    rw [he, hg, hm] at hsig
+    exact ⟨sig, hsig⟩
+
+/-- Consumer bridge from authenticated `verifyHemOpeningBatch` (`verifyOpeningBatch` + multistage
+`verifyHemAffineWhir`) + `SuccinctAggregationIop` AIR trace constraints directly to
+`Composed.ExtractionBoundary`, eliminating `transparentVerify`'s signature-table premise for any
+succinct shard verifier factored through `verifyHemOpeningBatch`. -/
+theorem boundary_of_hem_opening_batch {n cardX w : Nat}
+    (geom : AggSigGeometry) (custody : Fin n → Custody) (bad : Shard n → Prop)
+    (L : MerkleAddressLayout cardX w) (slots : List (MerkleOpeningSlot cardX w))
+    (hemInst : Shard n → HemWhirInstance QuarticGoldilocks)
+    (decode : Shard n → Fin cardX → List (Option (MerkleOpeningValue w)) →
+      List (HemTranscriptRound QuarticGoldilocks))
+    (oracleOf : Shard n → Fin cardX → BitVec w)
+    (outOf : Shard n → Fin cardX)
+    (modeOk : Shard n → Bool)
+    (stmt : Shard n → AggArithPublicStmt) (slot : Fin n → Nat)
+    (hemSound : ∀ s,
+      verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) = true →
+      modeOk s = true →
+      bad s ∨ HemStatementValid (hemInst s))
+    (hemToTrace : ∀ s, HemStatementValid (hemInst s) → modeOk s = true →
+      ∃ tr, traceSatisfiesAllConstraints (stmt s) tr = true)
+    (binds : ∀ s, modeOk s = true → (stmt s).geom = geom ∧
+      ∀ v : Fin n, s.bitmap.getLsbD v.val = true →
+        (stmt s).committeePks[slot v]? = some (custody v).state.pk ∧
+        (stmt s).msg = s.header.mode.message v.val) :
+    ExtractionBoundary geom custody
+      (fun s => verifyHemOpeningBatch L slots (hemInst s) (decode s) (oracleOf s) (outOf s) && modeOk s)
+      bad := by
+  refine boundary_of_committee_trace geom custody _ bad stmt slot (fun s h => ?_) (fun s h => ?_)
+  · obtain ⟨hHem, hMode⟩ := Bool.and_eq_true_iff.mp h
+    rcases hemSound s hHem hMode with hb | hValid
+    · exact .inl hb
+    · exact .inr (hemToTrace s hValid hMode)
+  · exact binds s (Bool.and_eq_true_iff.mp h).2
+
+#verify_constructive boundary_of_committee_trace boundary_of_hem_opening_batch
+
+end Qsag.CompositionInstances
+
+namespace Qsag.Composed
+/-! ### Exports for lane agg-whir-cert -/
+
+/-- Defining statement of `QuorumForgery`: a verifying native signature under the custody key on a
+message the quorum did not participate in. -/
+theorem quorumForgery_iff (geom : AggSigGeometry) (q : Custody) (msg : List UInt8) :
+    QuorumForgery geom q msg ↔
+      ∃ sig : AggNativeSignature,
+        verifyAggNativeSig geom q.state.pk msg sig = true ∧ quorumParticipated q msg = false :=
+  Iff.rfl
+
 end Qsag.Composed

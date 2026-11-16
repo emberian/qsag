@@ -217,13 +217,13 @@ theorem atLeastBits_add_union_loss {b : Nat} {r₁ r₂ : RatBound}
     exact Nat.add_le_add m₁ m₂'
   exact Nat.le_of_mul_le_mul_right sum2 (by decide)
 
-private theorem sumList_le_length_mul {bound : RatBound} :
+theorem RatBound.sumList_le_length_mul {bound : RatBound} :
     ∀ (xs : List RatBound), (∀ r ∈ xs, RatBound.le r bound) →
       RatBound.le (RatBound.sumList xs) (RatBound.scale xs.length bound)
   | [], _ => by simp [RatBound.sumList, RatBound.zero, RatBound.scale, RatBound.le]
   | x :: xs, hAll => by
     have hx := hAll x (.head _)
-    have hxs := sumList_le_length_mul xs (fun r hr => hAll r (.tail _ hr))
+    have hxs := RatBound.sumList_le_length_mul xs (fun r hr => hAll r (.tail _ hr))
     have hAdd := RatBound.add_le_add hx hxs
     apply RatBound.le_trans hAdd
     unfold RatBound.add RatBound.scale RatBound.le
@@ -248,7 +248,7 @@ theorem atLeastBits_sumList_union_loss {b loss : Nat} {xs : List RatBound}
     atLeastBits b (RatBound.sumList xs) := by
   have hLeInv : ∀ r ∈ xs, RatBound.le r (RatBound.invPow2 (b + loss)) :=
     fun r hr => (atLeastBits_iff_le_invPow2 (b + loss) r).mp (hEach r hr)
-  have hSumLe := sumList_le_length_mul xs hLeInv
+  have hSumLe := RatBound.sumList_le_length_mul xs hLeInv
   apply atLeastBits_of_le hSumLe
   unfold atLeastBits RatBound.scale RatBound.invPow2
   dsimp only
@@ -299,3 +299,52 @@ namespace Qsag.RatBound
 @[simp] theorem one_num : one.num = 1 := by rfl
 @[simp] theorem one_den : one.den = 1 := by rfl
 end Qsag.RatBound
+
+namespace Qsag
+public section
+
+theorem RatBound.scale_mono {a b : RatBound} (k : Nat) (h : a.le b) :
+    (a.scale k).le (b.scale k) := by
+  unfold RatBound.le RatBound.scale at *
+  dsimp only
+  simpa only [Nat.mul_assoc] using Nat.mul_le_mul_left k h
+
+theorem RatBound.le_add_left (a b : RatBound) : a.le (a.add b) := by
+  unfold RatBound.le RatBound.add
+  dsimp only
+  rw [Nat.add_mul, ← Nat.mul_assoc, Nat.mul_right_comm a.num a.den b.den]
+  exact Nat.le_add_right _ _
+
+theorem RatBound.le_add_right (a b : RatBound) : b.le (a.add b) := by
+  unfold RatBound.le RatBound.add
+  dsimp only
+  rw [Nat.add_mul]
+  have h : b.num * (a.den * b.den) = b.num * a.den * b.den := (Nat.mul_assoc _ _ _).symm
+  rw [h]
+  exact Nat.le_add_left _ _
+
+theorem RatBound.strictlyMoreThanBits_of_le {a b : RatBound} {bits : Nat}
+    (hab : a.le b) (hb : strictlyMoreThanBits bits b) : strictlyMoreThanBits bits a := by
+  unfold RatBound.le at hab
+  unfold strictlyMoreThanBits at *
+  have hm := Nat.mul_le_mul_right (2 ^ bits) hab
+  have hs := Nat.mul_lt_mul_of_pos_right hb a.h_pos
+  have hlt : a.num * 2 ^ bits * b.den < a.den * b.den := by
+    have he1 : a.num * b.den * 2 ^ bits = a.num * 2 ^ bits * b.den := by rw [Nat.mul_right_comm]
+    have he2 : b.num * a.den * 2 ^ bits = b.num * 2 ^ bits * a.den := by rw [Nat.mul_right_comm]
+    rw [he1, he2] at hm
+    exact Nat.lt_of_le_of_lt hm (by simpa only [Nat.mul_comm a.den b.den] using hs)
+  if hSmall : a.num * 2 ^ bits < a.den then
+    exact hSmall
+  else
+    have hGe := Nat.mul_le_mul_right b.den (Nat.le_of_not_lt hSmall)
+    exact False.elim (Nat.not_le_of_gt hlt hGe)
+
+theorem RatBound.num_pos_of_le {a b : RatBound} (ha : 0 < a.num) (h : a.le b) : 0 < b.num := by
+  have hp := Nat.mul_pos ha b.h_pos
+  unfold RatBound.le at h
+  have hb : 0 < b.num * a.den := Nat.lt_of_lt_of_le hp h
+  exact Nat.pos_of_mul_pos_right hb
+
+end
+end Qsag

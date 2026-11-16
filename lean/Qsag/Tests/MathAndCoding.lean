@@ -1,4 +1,8 @@
 module
+import all Qsag.Math.MlDsaField
+import all Qsag.Math.MlDsaNtt
+import all Qsag.Math.CyclotomicRlwe
+import all Qsag.Math.GoldilocksBase
 public import Qsag.Math.Lattices
 import all Qsag.Math.Lattices
 import all Qsag.Coding.AffineProximity
@@ -602,12 +606,6 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
     change (S_γ.filter (fun z => decide (RoundPoly.evalCoeffs G_poly z = fg.2 z))).length < A - s
     omega
 
-private theorem filter_eq_nil_of_all_false {α : Type} (p : α → Bool) :
-    ∀ (xs : List α), (∀ x ∈ xs, p x = false) → xs.filter p = []
-  | [], _ => rfl
-  | x :: xs, h => by
-    simp [List.filter, h x (.head _), filter_eq_nil_of_all_false p xs (fun y hy => h y (.tail _ hy))]
-
 private theorem filter_eq_singleton_of_nodup_iff {α : Type} (p : α → Bool) (z₀ : α) :
     ∀ {xs : List α}, xs.Nodup → z₀ ∈ xs → (∀ x ∈ xs, p x = true ↔ x = z₀) → xs.filter p = [z₀]
   | [], _, hz, _ => by cases hz
@@ -1109,7 +1107,7 @@ theorem inhabited_deployed_gs_dimensions :
     { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
       m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
   refine ⟨24, w, rfl, by decide, by decide, ?_, rfl, rfl⟩
-  decide +kernel
+  exact List.mem_cons_self ..
 
 #verify_inhabited hem_gs_interpolation_dimensions inhabited_deployed_gs_dimensions
 

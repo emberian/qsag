@@ -501,11 +501,19 @@ private meta partial def auditDag (env : Environment) (todo : List Name)
         `Lean.trustCompiler].contains n then
       throwError "constructive audit: forbidden dependency {n}"
     let some ci := env.checked.get.find? n | throwError "constructive audit: missing dependency {n}"
-    if let .axiomInfo _ := ci then
+    -- Public imported declarations carry Lean's transitive axiom inventory. Their
+    -- private generated helpers need not be exported, even when the definition is
+    -- exposed. Follow that inventory at the boundary, as Lean.collectAxioms does.
+    -- Missing declarations still fail above; current-module proof bodies are walked.
+    if (env.getModuleIdxFor? n).isSome && ((env.setExporting true).find? n).isSome then
       let axs ← Lean.collectAxioms n
       for ax in axs do
         unless ax == ``propext || ax == ``Quot.sound do
           throwError "constructive audit: forbidden axiom {ax} via {n}"
+      return ← auditDag env rest seen
+    if let .axiomInfo _ := ci then
+      unless n == ``propext || n == ``Quot.sound do
+        throwError "constructive audit: forbidden axiom {n}"
     let deps := ci.type.getUsedConstants.toList ++
       (ci.value? (allowOpaque := true)).toList.flatMap (·.getUsedConstants.toList)
     let deps := match ci with

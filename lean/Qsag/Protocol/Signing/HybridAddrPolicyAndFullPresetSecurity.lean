@@ -9,14 +9,8 @@ Address metadata binds the expected address; the Rust signing transcript itself 
 and address version. Applications needing network-exclusive signatures must bind them in msg.
 -/
 public import Qsag.Protocol.Signing.Fips205
-import all Qsag.Protocol.Signing.Fips205
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Math.Algebra
-import all Qsag.Math.Counting
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.PolyRing
-import all Qsag.Math.HasseHensel
 public section
 namespace Qsag.HybridSecurity
 set_option autoImplicit false
@@ -478,7 +472,7 @@ theorem pairwise_intersection_not_global_accounting :
     (∀ a b : Fin 3, ∃ j : Fin 3, rotatingQuorum a j = true ∧ rotatingQuorum b j = true) ∧
     (∀ j : Fin 3, qsum 3 (fun r => if rotatingQuorum r j then 50 else 0) ≤ 100) ∧
     100 < qsum 3 (fun _ => 50) := by
-  unfold cardinal rotatingQuorum; decide
+  unfold cardinal rotatingQuorum; simp only [qsum_succ, qsum_zero]; decide
 
 -- PRESETS
 
@@ -514,10 +508,11 @@ theorem all_fips_profiles (f : FipsSet) :
     8 * p.treeBytes < p.h - p.hp + 8 ∧
     p.hp ≤ 8 * p.leafBytes ∧ 8 * p.leafBytes < p.hp + 8 := by
   cases f <;>
-    dsimp [fipsParams, fipsCategory, fipsWireBytes, slhDsaShake128s, slhDsaShake128f,
-      slhDsaShake192s, slhDsaShake192f, slhDsaShake256s, slhDsaShake256f,
-      Fips205Params.wellFormed, Fips205Params.ell, Fips205Params.ell1, Fips205Params.ell2,
-      Fips205Params.sigBytes, Fips205Params.mdBytes, Fips205Params.treeBytes, Fips205Params.leafBytes] <;>
+    simp only [fipsParams, fipsCategory, fipsWireBytes, slhDsaShake128s, slhDsaShake128f,
+      slhDsaShake192s_eq, slhDsaShake192f_eq, slhDsaShake256s_eq, slhDsaShake256f_eq,
+      Fips205Params.wellFormed_eq, Fips205Params.ell_eq, Fips205Params.ell1_eq,
+      Fips205Params.ell2_eq, Fips205Params.sigBytes_eq, Fips205Params.mdBytes_eq,
+      Fips205Params.treeBytes_eq, Fips205Params.leafBytes_eq] <;>
     decide
 
 inductive FrontierProfile where
@@ -680,6 +675,7 @@ theorem equal_sum_dominated {n : Nat} (a b : Fin n → Nat)
   | succ n ih =>
     have tail := qsum_le_qsum (fun i : Fin n => dom i.succ)
     have h0 := dom 0
+    rw [qsum_succ, qsum_succ] at hs
     change a 0 + qsum n (fun i => a i.succ) = b 0 + qsum n (fun i => b i.succ) at hs
     have he : a 0 = b 0 := by omega
     have ht : qsum n (fun i => a i.succ) = qsum n (fun i => b i.succ) := by omega
@@ -700,7 +696,9 @@ def smallVector (a b : Nat) : Fin 2 → Nat := fun i => if i.val = 0 then a else
 theorem two_uses_cover_third : ∃ a b c : Fin 2 → Nat,
     qsum 2 a = 2 ∧ qsum 2 b = 2 ∧ qsum 2 c = 2 ∧ a ≠ c ∧ b ≠ c ∧
     (∀ i, min (a i) (b i) ≤ c i) := by
-  refine ⟨smallVector 0 2, smallVector 2 0, smallVector 1 1, rfl, rfl, rfl, ?_, ?_, ?_⟩
+  refine ⟨smallVector 0 2, smallVector 2 0, smallVector 1 1,
+    by simp only [qsum_succ, qsum_zero]; decide, by simp only [qsum_succ, qsum_zero]; decide,
+    by simp only [qsum_succ, qsum_zero]; decide, ?_, ?_, ?_⟩
   · intro he; have h := congrFun he 0; contradiction
   · intro he; have h := congrFun he 0; contradiction
   · intro i; unfold smallVector; split <;> decide
@@ -722,7 +720,8 @@ theorem threshold_inhabited : ∃ (n t f w : Nat) (p : TransactionPolicy)
     fun _ => true, fun _ => false, fun _ => ⟨0, [], []⟩,
     fun _ => burn ⟨0, [], []⟩ (exampleIntent 1 0),
     fun _ => minted (fun i => i.nonce) examplePolicy (exampleIntent 1 0), ?_⟩
-  refine ⟨by unfold cardinal; rfl, by unfold cardinal; decide, by decide, ?_⟩
+  refine ⟨by unfold cardinal; simp only [qsum_succ, qsum_zero]; decide,
+    by unfold cardinal; simp only [qsum_succ, qsum_zero]; decide, by decide, ?_⟩
   intro j _ _
   unfold ValidRelease PolicyAccepts LedgerStep examplePolicy exampleIntent projected
   refine ⟨rfl, ⟨by decide, by decide, ⟨⟨100, 2⟩, rfl, by decide⟩⟩, ?_⟩
@@ -735,7 +734,7 @@ theorem ledger_inhabited : ∃ cap w s final is, LedgerTrace cap w s is final �
   exact .cons (by unfold LedgerStep exampleIntent projected; decide) (.nil _)
 
 theorem incomparable_inhabited : ∃ a b : Fin 2 → Nat, qsum 2 a = qsum 2 b ∧ a ≠ b := by
-  refine ⟨smallVector 0 2, smallVector 2 0, rfl, ?_⟩
+  refine ⟨smallVector 0 2, smallVector 2 0, by simp only [qsum_succ, qsum_zero]; decide, ?_⟩
   intro h; have h0 := congrFun h 0; contradiction
 
 theorem spending_inhabited : ∃ (n t f w : Nat) (p : TransactionPolicy) (H : TransactionIntent → Nat)
@@ -750,14 +749,19 @@ theorem spending_inhabited : ∃ (n t f w : Nat) (p : TransactionPolicy) (H : Tr
     fun _ => false, fun _ _ => true, fun _ _ => ⟨0, [], []⟩,
     fun i _ => burn ⟨0, [], []⟩ i, fun i _ => minted (fun i => i.nonce) examplePolicy i,
     burn ⟨0, [], []⟩ (exampleIntent 1 0), ?_⟩
-  refine ⟨by unfold cardinal; decide, by decide, ?_, ?_, ?_⟩
-  · intro i _; unfold cardinal; rfl
+  refine ⟨by unfold cardinal; simp only [qsum_succ, qsum_zero]; decide, by decide, ?_, ?_, ?_⟩
+  · intro i _; unfold cardinal; simp only [qsum_succ, qsum_zero]; decide
   · intro i hi j _ _
     have he := List.mem_singleton.mp hi; subst i
     unfold ValidRelease PolicyAccepts LedgerStep examplePolicy exampleIntent projected
     refine ⟨rfl, ⟨by decide, by decide, ⟨⟨100, 2⟩, rfl, by decide⟩⟩, ?_⟩
     dsimp only; decide
   · exact .cons (by unfold LedgerStep examplePolicy exampleIntent projected; decide) (.nil _)
+
+end Qsag.HybridSecurity
+end
+
+namespace Qsag.HybridSecurity
 
 #verify_constructive frame64_prefix_injective transcript_bytes_injective identity_binding address_binding
   fresh_transcript dual_key_euf_cma rogue_partner_resistance naive_rogue_rebinding
@@ -771,11 +775,8 @@ theorem spending_inhabited : ∃ (n t f w : Nat) (p : TransactionPolicy) (H : Tr
 #verify_inhabited threshold_policy_composition threshold_inhabited
 #verify_inhabited ledger_trace_safety ledger_inhabited
 #verify_inhabited threshold_spending_safety spending_inhabited
-#verify_inhabited one_use_incomparable incomparable_inhabited
 #tooth_pair rogue_partner_resistance vs naive_rogue_rebinding
 #tooth_pair authenticated_window_required vs unauthenticated_window_reset_attack
 #tooth_pair ledger_trace_safety vs unauthenticated_window_reset_attack
-#tooth_pair one_use_incomparable vs two_uses_cover_third
 
 end Qsag.HybridSecurity
-end

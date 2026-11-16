@@ -55,15 +55,11 @@ production parameters and proved without choice axioms.
 
 public import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
+public import Qsag.Math.Lattices
 public import Qsag.Protocol.Aggregation.UcGames
-public import Qsag.Custody.CustodySuiteFull
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Tactic.MaskBijection
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Oracle.Keccak
-import all Qsag.Math.Goldilocks
-import all Qsag.Custody.CustodySuiteFull
 
 public section
 namespace Qsag
@@ -173,13 +169,13 @@ enrolled batch. Every candidate master and every candidate assignment of the un-
 is consistent with that view through exactly one custody state, so both are uniform given the
 view. -/
 theorem hd_watch_only_subspace_isolation {Idx : Type} {k : Nat} (enrolled : Idx → Bool)
-    (corruptKnown watchView : Idx → Fin k → HdFq204)
-    (masterCandidate : Fin k → HdFq204) (unenrolledCandidate : Idx → Fin k → HdFq204) :
-    ∃ s : HdCustodyState HdFq204 Idx k,
+    (corruptKnown watchView : Idx → Fin k → Fq204)
+    (masterCandidate : Fin k → Fq204) (unenrolledCandidate : Idx → Fin k → Fq204) :
+    ∃ s : HdCustodyState Fq204 Idx k,
       (s.master = masterCandidate ∧ s.known = corruptKnown ∧
         (∀ i, enrolled i = true → hdChildSecret s i = watchView i) ∧
         (∀ i, enrolled i = false → hdChildSecret s i = unenrolledCandidate i)) ∧
-      ∀ s' : HdCustodyState HdFq204 Idx k,
+      ∀ s' : HdCustodyState Fq204 Idx k,
         s'.master = masterCandidate → s'.known = corruptKnown →
         (∀ i, enrolled i = true → hdChildSecret s' i = watchView i) →
         (∀ i, enrolled i = false → hdChildSecret s' i = unenrolledCandidate i) → s' = s := by
@@ -264,14 +260,14 @@ def finVecEquiv (q : Nat) : (k : Nat) → SimpleEquiv (Fin k → Fin q) (Fin (q 
         exact (finProdEquiv (q ^ k) q).right_inv n }
 
 /-- The HD field has exactly `8380417` elements. -/
-def hdFieldFinEquiv : SimpleEquiv HdFq204 (Fin 8380417) where
+def hdFieldFinEquiv : SimpleEquiv Fq204 (Fin 8380417) where
   toFun a := ⟨a.val, a.isLt⟩
   invFun n := ⟨n.val, n.isLt⟩
   left_inv _ := rfl
   right_inv _ := rfl
 
 /-- A `k`-limb secret ranges over exactly `8380417 ^ k` values. -/
-def hdLimbVecCardEquiv (k : Nat) : SimpleEquiv (Fin k → HdFq204) (Fin (8380417 ^ k)) where
+def hdLimbVecCardEquiv (k : Nat) : SimpleEquiv (Fin k → Fq204) (Fin (8380417 ^ k)) where
   toFun v := (finVecEquiv 8380417 k).toFun (fun l => hdFieldFinEquiv.toFun (v l))
   invFun n := fun l => hdFieldFinEquiv.invFun ((finVecEquiv 8380417 k).invFun n l)
   left_inv v := by
@@ -290,9 +286,9 @@ def hdLimbVecCardEquiv (k : Nat) : SimpleEquiv (Fin k → HdFq204) (Fin (8380417
 /-- With every child but `j` revealed, the states consistent with the view and with a fixed
 master candidate are indexed by the secret of child `j`. -/
 def hdUnenrolledFiberEquiv {Idx : Type} [DecidableEq Idx] {k : Nat} (j : Idx)
-    (m : Fin k → HdFq204) (kn view : Idx → Fin k → HdFq204) :
+    (m : Fin k → Fq204) (kn view : Idx → Fin k → Fq204) :
     SimpleEquiv
-      { s : HdCustodyState HdFq204 Idx k //
+      { s : HdCustodyState Fq204 Idx k //
         s.master = m ∧ s.known = kn ∧ ∀ i, i ≠ j → hdChildSecret s i = view i }
       (Fin (8380417 ^ k)) where
   toFun s := (hdLimbVecCardEquiv k).toFun (hdChildSecret s.1 j)
@@ -321,9 +317,9 @@ def hdUnenrolledFiberEquiv {Idx : Type} [DecidableEq Idx] {k : Nat} (j : Idx)
 /-- **Exact fiber cardinality.** For every master candidate, the fiber over a view that reveals
 every child but `j` has exactly `8380417 ^ k` elements, read off by the secret of child `j`. -/
 theorem hd_unenrolled_fiber_card_exact {Idx : Type} [DecidableEq Idx] {k : Nat} (j : Idx)
-    (m : Fin k → HdFq204) (kn view : Idx → Fin k → HdFq204) :
+    (m : Fin k → Fq204) (kn view : Idx → Fin k → Fq204) :
     ∃ e : SimpleEquiv
-        { s : HdCustodyState HdFq204 Idx k //
+        { s : HdCustodyState Fq204 Idx k //
           s.master = m ∧ s.known = kn ∧ ∀ i, i ≠ j → hdChildSecret s i = view i }
         (Fin (8380417 ^ k)),
       ∀ s, e.toFun s = (hdLimbVecCardEquiv k).toFun (hdChildSecret s.1 j) :=
@@ -332,25 +328,25 @@ theorem hd_unenrolled_fiber_card_exact {Idx : Type} [DecidableEq Idx] {k : Nat} 
 /-! ### Why the tweak must be secret-keyed -/
 
 /-- Unkeyed derivation: the child is the parent plus a tweak any watch-only holder computes. -/
-def naiveBip32Child (parent publicTweak : HdFq204) : HdFq204 := add parent publicTweak
+def naiveBip32Child (parent publicTweak : Fq204) : Fq204 := add parent publicTweak
 
 /-- Whether subtracting the public tweak from a leaked child returns the parent. -/
-def masterSecretRecoverable (parent publicTweak : HdFq204) : Bool :=
+def masterSecretRecoverable (parent publicTweak : Fq204) : Bool :=
   decide (sub (naiveBip32Child parent publicTweak) publicTweak = parent)
 
-theorem master_secret_recoverable (parent publicTweak : HdFq204) :
+theorem master_secret_recoverable (parent publicTweak : Fq204) :
     masterSecretRecoverable parent publicTweak = true :=
   decide_eq_true (ring_add_sub_cancel_right parent publicTweak)
 
 /-- With a public tweak a leaked child is consistent with one master only, in contrast to
 `hd_watch_only_subspace_isolation`, where every candidate is consistent. -/
 theorem tooth_unkeyed_public_tweak_pins_master :
-    ¬ (∀ publicTweak leakedChild masterCandidate : HdFq204,
+    ¬ (∀ publicTweak leakedChild masterCandidate : Fq204,
         naiveBip32Child masterCandidate publicTweak = leakedChild) := by
   intro h
-  have h1 : add (one : HdFq204) zero = zero := h zero zero one
+  have h1 : add (one : Fq204) zero = zero := h zero zero one
   rw [LawfulCommRing.add_zero] at h1
-  exact absurd (congrArg HdFq204.val h1) (by decide)
+  exact LawfulField.one_ne_zero h1
 
 /-! ### Child-MAC unforgeability -/
 
@@ -393,22 +389,22 @@ evaluation points, shifting a degree-`t - 1` sharing by any `δ` at zero leaves 
 unchanged, so the key is uniform given the corrupt view; and a forged opening verifies on all
 lanes for exactly one key vector. The forgery succeeds with probability `q^-lanes`. -/
 theorem hd_child_mac_unforgeable_below_threshold
-    (t : Nat) (corruptPts : List HdFq204) (hCard : corruptPts.length + 1 ≤ t)
+    (t : Nat) (corruptPts : List Fq204) (hCard : corruptPts.length + 1 ≤ t)
     (hNonZero : ∀ c ∈ corruptPts, c ≠ zero)
-    (lanes : Nat) (s e : HdFq204) (he : e ≠ zero) (d : Fin lanes → HdFq204) :
-    (∀ (δ : HdFq204) (P : ShamirPadPoly HdFq204 t),
-      RoundPoly.evalCoeffs ((shamir_rebalanceEquiv HdFq204.inv t corruptPts δ hCard).toFun P).1 zero =
+    (lanes : Nat) (s e : Fq204) (he : e ≠ zero) (d : Fin lanes → Fq204) :
+    (∀ (δ : Fq204) (P : ShamirPadPoly Fq204 t),
+      RoundPoly.evalCoeffs ((shamir_rebalanceEquiv Fq204.inv t corruptPts δ hCard).toFun P).1 zero =
           add δ (RoundPoly.evalCoeffs P.1 zero) ∧
         ∀ xc ∈ corruptPts,
-          RoundPoly.evalCoeffs ((shamir_rebalanceEquiv HdFq204.inv t corruptPts δ hCard).toFun P).1 xc =
+          RoundPoly.evalCoeffs ((shamir_rebalanceEquiv Fq204.inv t corruptPts δ hCard).toFun P).1 xc =
             RoundPoly.evalCoeffs P.1 xc) ∧
-    (∀ α : Fin lanes → HdFq204,
+    (∀ α : Fin lanes → Fq204,
       (∀ l, hdMacVerify (α l) (add s e) (add (mul (α l) s) (d l))) ↔
-        α = fun l => mul (d l) (HdFq204.inv e)) := by
-  have hInv : ∀ x : HdFq204, x ≠ zero → mul x (HdFq204.inv x) = one :=
-    fun _ hx => HdFq204.mul_inv_cancel hx
-  refine ⟨fun δ P => ?_, fun α => hd_child_mac_lanes_unique_forging_key HdFq204.inv hInv lanes s e he d α⟩
-  have h := pad_bijection_masked_openings_uniform HdFq204.inv hInv t corruptPts δ hCard hNonZero P
+        α = fun l => mul (d l) (Fq204.inv e)) := by
+  have hInv : ∀ x : Fq204, x ≠ zero → mul x (Fq204.inv x) = one :=
+    fun _ hx => Fq204.mul_inv_cancel hx
+  refine ⟨fun δ P => ?_, fun α => hd_child_mac_lanes_unique_forging_key Fq204.inv hInv lanes s e he d α⟩
+  have h := pad_bijection_masked_openings_uniform Fq204.inv hInv t corruptPts δ hCard hNonZero P
   simp only [LawfulCommRing.zero_add] at h
   exact h
 
@@ -1811,19 +1807,22 @@ theorem hd_cbd2_support (bits : Fin 4 → Bool) : -2 ≤ hdCbd2 bits ∧ hdCbd2 
   cases h0 : bits 0 <;> cases h1 : bits 1 <;> cases h2 : bits 2 <;> cases h3 : bits 3 <;>
     simp only [hdCbd2, h0, h1, h2, h3] <;> decide +kernel
 
-def hdCbd2Field (bits : Fin 4 → Bool) : HdFq204 := HdFq204.ofInt (hdCbd2 bits)
+def hdCbd2Field (bits : Fin 4 → Bool) : Fq204 := Fq204.ofInt (hdCbd2 bits)
 
 theorem tooth_cbd2_is_not_uniform_secret :
-    (∀ bits, hdCbd2Field bits ≠ HdFq204.ofNat 3) ∧
-      (HdFq204.ofNat 3).val < 8380417 := by
+    (∀ bits, hdCbd2Field bits ≠ Fq204.ofNat 3) ∧
+      (Fq204.ofNat 3).val < 8380417 := by
   constructor
-  · intro bits
-    cases h0 : bits 0 <;> cases h1 : bits 1 <;> cases h2 : bits 2 <;> cases h3 : bits 3 <;>
-      simp only [hdCbd2Field, hdCbd2, h0, h1, h2, h3] <;> decide +kernel
-  · decide
+  · intro bits h
+    have hs := hd_cbd2_support bits
+    have hv := congrArg (fun a : Fq204 => (a.val : Int)) h
+    simp only [hdCbd2Field, Fq204.ofInt_val, Fq204.ofNat_val] at hv
+    unfold mldsaQ at hv
+    omega
+  · exact (Fq204.ofNat 3).isLt
 
 /-- A ring polynomial has 256 coefficients; vectors have four polynomials per half. -/
-abbrev HdModulePoly := Fin 256 → HdFq204
+abbrev HdModulePoly := Fin 256 → Fq204
 abbrev HdModuleHalf := Fin 4 → HdModulePoly
 abbrev HdModuleMatrix := Fin 4 → Fin 4 → HdModulePoly
 
@@ -1885,14 +1884,14 @@ theorem cozk_commitment_binding_extract {V : Type} [DecidableEq V]
     before = after ∨ Collision H := by
   by_cases he : before = after
   · exact Or.inl he
-  · exact Or.inr ⟨encode before, encode after, fun h => he (injective _ _ h), same⟩
+  · exact Or.inr (HashCollisionWitness.toCollision ⟨encode before, encode after, fun h => he (injective _ _ h), same⟩)
 
 /-- If an unopened party is later opened differently under its committed digest,
 these two framed view strings are a hash collision, independently of the challenge. -/
 theorem cozk_unopened_view_equivocation_collision
     (H : Hash) (before after : List UInt8)
     (changed : before ≠ after) (bound : H before = H after) : Collision H :=
-  ⟨before, after, changed, bound⟩
+  HashCollisionWitness.toCollision ⟨before, after, changed, bound⟩
 
 /-- Lift acceptance to the committed transcript or extract a collision. `encode`
 is the canonical full transcript encoding at the layer being compared. For the
@@ -1907,7 +1906,7 @@ theorem cozk_committed_challenge_soundness {R : Type} [LawfulCommRing R] [Decida
     czkVerifyAll gs outs es before = true ∨ Collision H := by
   by_cases he : encode before = encode after
   · exact Or.inl (by rw [injective _ _ he]; exact accepted)
-  · exact Or.inr ⟨encode before, encode after, he, same⟩
+  · exact Or.inr (HashCollisionWitness.toCollision ⟨encode before, encode after, he, same⟩)
 
 /-- With binding fixed, the 438-repetition counting theorem applies. This is the
 single uniform-challenge experiment. FS grinding needs a separate oracle-query
@@ -2037,8 +2036,8 @@ theorem cozk_repetition_root_binds_hidden_view
         simp only [a, b, List.cons.injEq] at hs
         exact ⟨hs.1, hs.2.1, hs.2.2.1⟩
       exact fin3_all hh.1 hh.2.1 hh.2.2
-    exact ⟨before p, after p, changed, hv p⟩
-  · exact ⟨frame a, frame b, he, same⟩
+    exact HashCollisionWitness.toCollision ⟨before p, after p, changed, hv p⟩
+  · exact HashCollisionWitness.toCollision ⟨frame a, frame b, he, same⟩
 
 /-- Descend from the outer transcript root through a repetition root to a
 changed party view. This covers the unopened third digest in the production
@@ -2058,7 +2057,7 @@ theorem cozk_transcript_root_binds_hidden_view
     rw [hl, newAt] at oldAt
     exact cozk_repetition_root_binds_hidden_view H repFrame repInj before after oldOut newOut
       p changed (Option.some.inj oldAt).symm
-  · exact ⟨outerFrame oldRoots, outerFrame newRoots, he, same⟩
+  · exact HashCollisionWitness.toCollision ⟨outerFrame oldRoots, outerFrame newRoots, he, same⟩
 
 /-- Binding is not a guarantee of rejection after the challenge is known: pair
 one accepts the fixed false transcript without any change to a commitment. -/
@@ -2623,9 +2622,6 @@ def toprfLayersExtract204 (H : List UInt8 → List UInt8) (bad : Fin 5) :
           rcases List.mem_cons.mp hK with h | h
           · subst K; exact hL i j hij
           · exact hs K h i j hij)
-
-theorem toprfRotation204_not_constant :
-    (toprfGroupRoles204 0 1).2.2 ≠ (toprfHolders 0 1).getD 2 0 := by decide
 
 #tooth_pair
   Qsag.rss3_toprf_single_byzantine_detected

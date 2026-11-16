@@ -27,13 +27,10 @@ Constructive (`0 Classical.choice`, `0 sorry`) formalization of:
      `tooth_unauthenticated_partial_eval_corrupts_voprf`.
 -/
 
-public import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
+public import Qsag.Math.CommitteeMasks
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 public import Qsag.Protocol.Threshold.Preprocessing
-import all Qsag.Custody.JortsBeltLatchAndQuorumSwitching
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import Qsag.Tactic.AssuranceKit
 import Qsag.Math.Tactic.CommRing
 
@@ -347,7 +344,7 @@ theorem prp_striped_qsa_committee_unlinkability
         (KeyCard * qsum (2 ^ h) (fun y => if D y then 1 else 0))
         (2 ^ h * qsum KeyCard (fun k => if D ((prpFamily k).toFun (rawCommitteeSlot hCap c2 s2)) then 1 else 0)) ≤
         epsPrpNum := by
-      unfold natAbsDiff at h2 ⊢
+      rw [natAbsDiff_eq] at h2 ⊢
       split at h2 <;> split <;> omega
     have hTri := natAbsDiff_triangle
       (2 ^ h * qsum KeyCard (fun k => if D (prpStripedLeafIndex hCap (prpFamily k) c1 s1) then 1 else 0))
@@ -751,6 +748,11 @@ def lagrangeToAdditiveShare {F : Type} [LawfulField F] [DecidableEq F]
     (S : List F) (xi si : F) : F :=
   CommRingOps.mul (lagrangeWeightAtZero S xi) si
 
+/-- Public equation used by custody interpolation, without unfolding the threshold module. -/
+theorem lagrangeToAdditiveShare_eq {F : Type} [LawfulField F] [DecidableEq F]
+    (S : List F) (xi si : F) :
+    lagrangeToAdditiveShare S xi si = CommRingOps.mul (lagrangeWeightAtZero S xi) si := by rfl
+
 private theorem eval_lagrangeBasis_zero {F : Type} [LawfulField F] (xi : F) :
     ∀ (others : List F),
       RoundPoly.evalCoeffs (lagrangeBasisFromOthers xi others) CommRingOps.zero =
@@ -1036,10 +1038,9 @@ private def shamirShiftPoly {F : Type} [LawfulField F] (d : Nat) (corruptPts : L
 private theorem shamirShiftPoly_length {F : Type} [LawfulField F] {d : Nat} {corruptPts : List F}
     (sk1 sk2 : F) (hCard : corruptPts.length ≤ d) :
     (shamirShiftPoly d corruptPts sk1 sk2).length = d + 1 := by
-  unfold shamirShiftPoly vanishCorruptUnit0
-  dsimp only
-  rw [polyScale_length, List.length_append, List.length_replicate, vanishCorruptRaw_length]
-  omega
+  unfold shamirShiftPoly
+  rw [polyScale_length]
+  exact vanishCorruptUnit0_length _ _ _ (by omega)
 
 private theorem shamirShiftPoly_tail_length {F : Type} [LawfulField F] {d : Nat}
     {corruptPts : List F} (sk1 sk2 : F) (hCard : corruptPts.length ≤ d) :
@@ -1099,6 +1100,7 @@ private theorem shamirTailEquiv_eval {F : Type} [LawfulField F] (d : Nat)
       rw [hLen, List.length_cons, r.2]
     have hAdd := evalCoeffs_addFixed (sk1 :: r.1) (d0 :: ds) xc hEqLen
     rw [hAtC, LawfulCommRing.add_zero] at hAdd
+    rw [polyAddFixed_cons] at hAdd
     exact (congrArg (fun c0 => RoundPoly.evalCoeffs (c0 :: polyAddFixed r.1 ds) xc) hHead).trans hAdd
 
 /-- **`(t - 1)`-Corruption Shamir & Additive-Share Zero-Knowledge Over `ZMod q`
@@ -1571,6 +1573,7 @@ theorem inhabited_lagrange_to_additive_reconstructs_sk :
 #tooth_pair Qsag.lagrange_to_additive_reconstructs_sk vs Qsag.tooth_t_minus_1_shares_cannot_forge_or_reconstruct
 #tooth_pair Qsag.shamir_t_minus_1_shares_independent_of_sk vs Qsag.tooth_t_minus_1_shares_cannot_forge_or_reconstruct
 #tooth_pair Qsag.threshold_voprf_active_dzk_sound vs Qsag.tooth_unauthenticated_partial_eval_corrupts_voprf
+
 
 end Qsag
 end

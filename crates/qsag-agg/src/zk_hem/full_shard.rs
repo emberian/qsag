@@ -1004,6 +1004,7 @@ pub fn prove_recursive_shard(
     {
         return Err(FullShardError::InvalidStatement);
     }
+    let phase = crate::profile::span("recursive_shard_signatures");
     let signers: Vec<ShardSigner> = indices
         .iter()
         .map(|&i| {
@@ -1019,6 +1020,7 @@ pub fn prove_recursive_shard(
     {
         return Err(FullShardError::InvalidSignature);
     }
+    drop(phase);
     let witness = build_shard_witness(&params.circuit, &signers, signatures, blinding_seed);
     let committed = commit_for_recursion(&params.whir, &witness).map_err(FullShardError::Whir)?;
     let commitment = committed.root();

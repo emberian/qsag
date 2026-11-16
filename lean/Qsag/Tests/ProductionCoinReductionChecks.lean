@@ -1,4 +1,5 @@
 module
+import all Qsag.Oracle.Keccak
 import Qsag.Protocol.Threshold.ProductionCoinReduction
 import all Qsag.Protocol.Threshold.ProductionCoinReduction
 import all Qsag.Protocol.Threshold.RssSlhFullSecurity
