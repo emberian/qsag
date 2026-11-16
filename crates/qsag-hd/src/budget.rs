@@ -26,6 +26,9 @@ const DATA_SEAL_BYTES: usize = 16;
 // - `[16..24)`: `QSHDQB04` format magic
 // - `[24..48)`: `lock_identity` (`dev_le64 || ino_le64 || seal8` of the `.lock` sidecar)
 // - `[48..80)`: `genesis_seal_mac` authenticating `(key, family, lock_identity, data_seal, LIMIT)`
+// Every record MAC and both HWM slot MACs also bind the full 24-byte `lock_identity`
+// (domains `QSAG.HD.QUERY_BUDGET.V4` / `QSAG.HD.QUERY_BUDGET.HWM.V5`), so a journal
+// only authenticates against the exact `.lock` inode that was held at genesis.
 // - `[80..4080)`: reserved zero padding before Slot A on physical page 1 (`4096`).
 const FORMAT_MAGIC: &[u8; 8] = b"QSHDQB04";
 const LOCK_IDENTITY_OFFSET: usize = DATA_SEAL_BYTES + FORMAT_MAGIC.len();
@@ -67,26 +70,27 @@ fn guard_key(mut raw: [u8; 32]) -> RedactedSecret<32> {
 }
 
 /// Everything a journal's MACs bind besides the record itself: the storage key,
-/// the family, the lock sidecar's full `(dev, ino, seal)` identity (via the genesis
-/// Page-0 seal MAC) and creation seal, and the data file's `(dev, ino)`.
+/// the family, the lock sidecar's full 24-byte `(dev, ino, seal)` identity, and the
+/// data file's `(dev, ino)`. The identity is bound into the genesis Page-0 seal MAC,
+/// every chain record MAC and both HWM slot MACs.
 struct Binding<'a> {
     key: &'a [u8; 32],
     family: &'a [u8; 32],
-    lock_seal: [u8; 8],
+    lock_identity: [u8; LOCK_IDENTITY_BYTES],
     data_seal: [u8; 16],
 }
 
 impl Binding<'_> {
     /// Authenticates the 24-byte `.lock` sidecar `(dev, ino, seal)` identity in Page 0.
-    /// Length-framed with 5 slices (24-byte `lock_identity` at index 2), strictly disjoint
-    /// from the 7-slice `record()` preimage (8-byte `lock_seal` at index 2).
-    fn genesis_seal_mac(&self, lock_identity: &[u8; LOCK_IDENTITY_BYTES]) -> [u8; 32] {
+    /// Length-framed with 5 slices, strictly disjoint from the 7-slice `record()`
+    /// preimage under the same domain.
+    fn genesis_seal_mac(&self) -> [u8; 32] {
         cshake256_framed_32(
-            b"QSAG.HD.QUERY_BUDGET.V3",
+            b"QSAG.HD.QUERY_BUDGET.V4",
             &[
                 self.key,
                 self.family,
-                lock_identity,
+                &self.lock_identity,
                 &self.data_seal,
                 &LIMIT.to_le_bytes(),
             ],
@@ -98,11 +102,11 @@ impl Binding<'_> {
         let mut out = [0u8; RECORD];
         out[..8].copy_from_slice(&count.to_le_bytes());
         let mac = cshake256_framed_32(
-            b"QSAG.HD.QUERY_BUDGET.V3",
+            b"QSAG.HD.QUERY_BUDGET.V4",
             &[
                 self.key,
                 self.family,
-                &self.lock_seal,
+                &self.lock_identity,
                 &self.data_seal,
                 &LIMIT.to_le_bytes(),
                 &out[..8],
@@ -118,11 +122,11 @@ impl Binding<'_> {
     fn with_hwm<T>(&self, f: impl FnOnce(&TwoSlotHwm<'_>) -> T) -> T {
         let mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], reserved: &[u8; 8]| {
             cshake256_framed_32(
-                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
+                b"QSAG.HD.QUERY_BUDGET.HWM.V5",
                 &[
                     self.key,
                     self.family,
-                    &self.lock_seal,
+                    &self.lock_identity,
                     &self.data_seal,
                     &[slot],
                     &LIMIT.to_le_bytes(),
@@ -273,14 +277,15 @@ impl DurableQueryBudget {
         if !meta.is_file() {
             return Err(HdError::BudgetStorageFailed);
         }
+        // Genesis: the identity is taken from the descriptor `create_new` just locked.
+        let lock_identity = record.lock_identity_seal();
         let binding = Binding {
             key: key_secret.expose(),
             family: &family,
-            lock_seal: record.lock_seal(),
+            lock_identity,
             data_seal: file_identity(&meta),
         };
-        let lock_identity = record.lock_identity_seal();
-        let genesis_seal_mac = binding.genesis_seal_mac(&lock_identity);
+        let genesis_seal_mac = binding.genesis_seal_mac();
         let (genesis_rec, genesis_mac) = binding.record(0, &[0u8; 32]);
         let (slot_a, slot_b) = binding.with_hwm(|hwm| {
             (
@@ -387,26 +392,30 @@ impl DurableQueryBudget {
             return Err(HdError::BudgetStorageFailed);
         }
 
-        let binding = Binding {
-            key: key_secret.expose(),
-            family: &family,
-            lock_seal: record.lock_seal(),
-            data_seal,
-        };
         let stored_lock_identity: [u8; LOCK_IDENTITY_BYTES] = payload
             [LOCK_IDENTITY_OFFSET..LOCK_IDENTITY_OFFSET + LOCK_IDENTITY_BYTES]
             .try_into()
             .map_err(|_| HdError::BudgetStorageFailed)?;
+        let binding = Binding {
+            key: key_secret.expose(),
+            family: &family,
+            lock_identity: stored_lock_identity,
+            data_seal,
+        };
         let stored_seal_mac = &payload[GENESIS_SEAL_MAC_OFFSET..GENESIS_SEAL_END];
-        let expected_seal_mac = binding.genesis_seal_mac(&stored_lock_identity);
-        if !ct_eq_bytes(&stored_lock_identity[16..24], &record.lock_seal())
-            || !ct_eq_bytes(stored_seal_mac, &expected_seal_mac)
+        let expected_seal_mac = binding.genesis_seal_mac();
+        if !ct_eq_bytes(stored_seal_mac, &expected_seal_mac)
             || payload[GENESIS_SEAL_END..HWM_SLOT_A_PAYLOAD_OFFSET]
                 .iter()
                 .any(|&b| b != 0)
         {
             return Err(HdError::BudgetStorageFailed);
         }
+        // `stored_lock_identity` is now authenticated under the key. The live OS
+        // `(dev, ino)` of the `.lock` descriptor `LockedRecord` holds (captured by `fstat`
+        // at acquisition and re-checked against the pathname), plus its seal, must equal it
+        // before any chain record (which also binds it) is trusted.
+        storage(record.verify_lock_identity(&stored_lock_identity))?;
         let mut prev_mac = [0u8; 32];
         let mut penultimate_mac = [0u8; 32];
         // Records from the genesis record on that continue the chain. Whatever follows
@@ -437,9 +446,8 @@ impl DurableQueryBudget {
         let slot_b =
             &payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES];
 
-        // `read_bounded` used its own descriptor. Before any repair write, confirm the
-        // held `.lock` sidecar matches the MAC-authenticated genesis `stored_lock_identity`
-        // (never comparing `record.lock_identity_seal()` tautologically against itself)
+        // `read_bounded` used its own descriptor. Before any repair write, re-confirm the
+        // held `.lock` sidecar still matches the MAC-authenticated `stored_lock_identity`
         // and the path still names the descriptor held here.
         storage(record.verify_lock_identity(&stored_lock_identity))?;
         verify_data_identity(&path_buf, &file, &data_seal, file_meta.len())?;
@@ -501,7 +509,7 @@ impl DurableQueryBudget {
         Binding {
             key: self.key.expose(),
             family: &self.family,
-            lock_seal: self.record.lock_seal(),
+            lock_identity: self.lock_identity,
             data_seal: self.data_seal,
         }
     }
@@ -676,6 +684,33 @@ mod tests {
                 DurableQueryBudget::open(&path, [1; 32], [2; 32]).err(),
                 Some(HdError::BudgetStorageFailed)
             );
+            // Strongest variant: even re-sealing Page 0 for the new `.lock` inode WITH the
+            // storage key still fails, because every chain record and HWM slot MAC binds
+            // the genesis 24-byte lock identity, not just the 8-byte seal.
+            let mut forged_identity = [0u8; LOCK_IDENTITY_BYTES];
+            forged_identity[..16].copy_from_slice(&new_lock_id);
+            forged_identity[16..].copy_from_slice(&lock_bytes[8..16]);
+            let data_seal: [u8; 16] = data_bytes[RECORD_HEADER_BYTES..][..DATA_SEAL_BYTES]
+                .try_into()
+                .unwrap();
+            let forged = Binding {
+                key: &[2; 32],
+                family: &[1; 32],
+                lock_identity: forged_identity,
+                data_seal,
+            };
+            data_bytes[RECORD_HEADER_BYTES + LOCK_IDENTITY_OFFSET
+                ..RECORD_HEADER_BYTES + LOCK_IDENTITY_OFFSET + LOCK_IDENTITY_BYTES]
+                .copy_from_slice(&forged_identity);
+            data_bytes[RECORD_HEADER_BYTES + GENESIS_SEAL_MAC_OFFSET
+                ..RECORD_HEADER_BYTES + GENESIS_SEAL_END]
+                .copy_from_slice(&forged.genesis_seal_mac());
+            std::fs::write(&path, &data_bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(
+                DurableQueryBudget::open(&path, [1; 32], [2; 32]).err(),
+                Some(HdError::BudgetStorageFailed)
+            );
         }
         std::fs::remove_file(&lock).unwrap();
         symlink(dir.join("old.lock"), &lock).unwrap();
@@ -739,7 +774,7 @@ mod tests {
         );
 
         // Even patching the header's `data_seal` to match the new inode fails closed because
-        // `data_seal` is cryptographically authenticated inside `QSAG.HD.QUERY_BUDGET.V3`.
+        // `data_seal` is cryptographically authenticated inside `QSAG.HD.QUERY_BUDGET.V4`.
         let new_meta = std::fs::symlink_metadata(&replay_path).unwrap();
         let forged_seal = file_identity(&new_meta);
         let mut patched = saved_genesis_bytes.clone();

@@ -46,6 +46,8 @@ enum Sidecar {
     CreateOrOpen,
     MustCreate,
     MustExist,
+    /// The sidecar must exist; the record may be absent. Nothing is created.
+    Provisioned,
 }
 
 fn side_path(path: &Path, suffix: &str) -> PathBuf {
@@ -214,6 +216,14 @@ impl LockedRecord {
         Self::acquire_with(path.into(), Sidecar::MustExist)
     }
 
+    /// Reopen a provisioned slot whose record file may have been lost: the sidecar must
+    /// already exist (a missing one is `NotFound`, or `InvalidData` beside a present
+    /// record), and neither file is created. With the record absent, `read` reports
+    /// `NotFound` and `replace` rewrites it under the original sidecar identity.
+    pub fn open_provisioned(path: impl Into<PathBuf>) -> io::Result<Self> {
+        Self::acquire_with(path.into(), Sidecar::Provisioned)
+    }
+
     fn acquire_with(path: PathBuf, sidecar: Sidecar) -> io::Result<Self> {
         if sidecar == Sidecar::MustCreate {
             match fs::symlink_metadata(&path) {
@@ -251,7 +261,7 @@ impl LockedRecord {
                 })
         };
         let (mut lock, fresh) = match sidecar {
-            Sidecar::MustExist => (open_present()?, false),
+            Sidecar::MustExist | Sidecar::Provisioned => (open_present()?, false),
             Sidecar::CreateOrOpen if present => (open_present()?, false),
             Sidecar::MustCreate | Sidecar::CreateOrOpen => {
                 match no_follow_options()?
@@ -883,6 +893,49 @@ mod tests {
         let record = LockedRecord::open_existing(&path).unwrap();
         record.verify_lock_identity(&expected).unwrap();
         assert_eq!(record.read().unwrap(), b"fresh");
+    }
+
+    #[test]
+    fn provisioned_open_never_creates_a_sidecar_and_rewrites_a_lost_record() {
+        let temp = Temp::new();
+        let path = temp.record();
+        let lock = side_path(&path, ".lock");
+        // Never provisioned: refused as missing, and no sidecar appears.
+        for _ in 0..2 {
+            assert_eq!(
+                LockedRecord::open_provisioned(&path).err().unwrap().kind(),
+                io::ErrorKind::NotFound
+            );
+            assert!(!lock.exists());
+        }
+        let record = LockedRecord::create_new(&path).unwrap();
+        record.replace(b"slot").unwrap();
+        let expected = record.lock_identity_seal();
+        drop(record);
+        // The record file is lost but its sidecar survives: reopened under the same
+        // identity, unreadable until rewritten, and rewritten in place.
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            LockedRecord::open_existing(&path).err().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+        let record = LockedRecord::open_provisioned(&path).unwrap();
+        assert!(!record.is_fresh());
+        assert_eq!(record.lock_identity_seal(), expected);
+        assert_eq!(record.read().unwrap_err().kind(), io::ErrorKind::NotFound);
+        record.replace(b"rewritten").unwrap();
+        drop(record);
+        let record = LockedRecord::open_existing(&path).unwrap();
+        record.verify_lock_identity(&expected).unwrap();
+        assert_eq!(record.read().unwrap(), b"rewritten");
+        drop(record);
+        // A record without its sidecar is damage: refused, and no sidecar is created.
+        fs::remove_file(&lock).unwrap();
+        assert_eq!(
+            LockedRecord::open_provisioned(&path).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!lock.exists());
     }
 
     #[test]
