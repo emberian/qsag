@@ -3,7 +3,7 @@
 This document specifies **Pillar 3** of qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation:
 
 1. **`crates/qsag-asm`**: Zero-dependency `#![no_std]` crate with 19 `x86_64` and 9 `aarch64` hand-written assembly kernels (`AVX2`, `GFNI`, `VPCLMULQDQ`/`PCLMULQDQ`, `BMI2`/`ADX`; `ARMv8.2-SHA3`, `PMULL`, `NEON`, `ARMv8.4-DIT`), compiled-Rust SIMD modules for `AVX-512`, `SHA-NI`, `vpshufb` and `NEON` (Section 2.3), runtime `CPUID`/`XGETBV`/`AT_HWCAP`/`sysctlbyname` capability probing across five backend tiers, and a branchless portable fallback with no secret-indexed table.
-2. **`scripts/audit_elf_ct.py`**: Automated static binary disassembly verifier auditing every required assembly symbol and selected compiled Rust SIMD/wipe functions in native `.o` or `.rlib`, and both Linux ELF and Apple Mach-O `aarch64` assembly kernels, with negative `#tooth` self-tests. `crates/qsag-asm/scripts/audit_elf_ct.py` is a seven-line compatibility entry point that runs the repository-root script.
+2. **`scripts/audit_elf_ct.py`**: Automated static binary disassembly verifier auditing every required assembly symbol and compiled Rust functions selected by `is_rust_crypto_symbol` in native `.o` or `.rlib`, and both Linux ELF and Apple Mach-O `aarch64` assembly kernels, with negative `#tooth` self-tests. `crates/qsag-asm/scripts/audit_elf_ct.py` is a seven-line compatibility entry point that runs the repository-root script.
 3. **`lean/Qsag/Machine/`**: Lean 4.35 leakage semantics and taint-noninterference checkers (`0 sorry`, `0 axiom`, `0 native_decide`). `ConstantTimeIsa.lean` is the checker over a hand-written instruction AST and models no `qsag-asm` kernel; the kernels are proved on their **decoded bytes** in `IsaCt.lean`, `ElfVerify.lean`, `ElfFixtureVerify.lean`, `McRefine.lean`, `ElfFunctionalEquiv.lean`, `SydTv.lean` and `ClmulSimd.lean` (Section 6).
 4. **`crates/qsag-asm/{examples,tests}/ct_dudect.rs`**: Empirical Welch's $t$-test constant-time harness (`1,000,192` cycle-counter traces per kernel in deep mode; `25,600`-trace sub-second CI gate via `QSAG_DUDECT_SAMPLES`), validated on both **Intel Core i9-12900 (`Alder Lake`, `AVX2+GFNI+VPCLMULQDQ`)** and **AMD EPYC-Milan (`Zen 3`, `AVX2+PCLMULQDQ`)**.
 
@@ -22,9 +22,10 @@ The binary auditor covers the 16 x86 kernels of `x86_64_asm.rs` (ELF, Windows CO
 Mach-O), the 7 AArch64 kernels of `aarch64_kernels.s` / `aarch64_asm.rs` (ELF and Mach-O), the
 5 `bitslice.rs` kernels (3 x86, 2 AArch64; in the compiled ELF, and the two AArch64 bodies by
 cross-assembly), and emitted Rust crypto functions: 19 x86-64 and 9 AArch64 assembly symbols
-in all. Compiled Rust checks select the `target_feature` SIMD entries, bitslice/linear-map functions
-and wipe helpers for control-flow/dataflow screening. Other compiled Rust functions are
-counted and reported without being checked. This is not a whole-program taint proof. The empirical harness exercises **10 dispatched
+in all. Compiled Rust control-flow/dataflow checks use `is_rust_crypto_symbol`, which includes
+root dispatch wrappers and nested crypto modules while excluding tests, durable storage
+and identified support helpers. Vector-wipe enforcement uses a narrower SIMD-name
+classification; other vector-writing functions in the screened set are reported separately. This is not a whole-program taint proof. The empirical harness exercises **10 dispatched
 operations**, including `qsag_asm_goldilocks_mul_ct`; backend selection determines which
 assembly implementation runs. A passing timing sample is evidence, not universal timing proof.
 

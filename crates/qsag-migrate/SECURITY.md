@@ -355,7 +355,8 @@ commitment. Only serialization conversions are avoided; every conversion
 required by the circuit still executes. After the challenge, public lane
 selectors multiply unchallenged field lanes by zero before authenticated
 opening; bit lanes use the equivalent Boolean mask. Canonical packing occurs
-only on these public values. Replicated and Shamir parity tests check both
+only on these public values. Boolean openings remain bitsliced; only field
+entries occupy the flat six-limb scratch buffer. Replicated and Shamir parity tests check both
 selected values and zeroed unselected lanes in every supported field.
 
 Local sub-seeds, salts, flat tape contribution buffers, shared views and

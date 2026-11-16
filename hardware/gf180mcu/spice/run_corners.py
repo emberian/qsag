@@ -64,11 +64,11 @@ def puf_summary(freq: list[float], enrolled: list[float]) -> dict:
 
 
 def run_one(base: Path, output: Path, deck: str, corner: str, temp: int, seed: int,
-            timeout: int, slew: int) -> dict:
+            timeout: int, slew: int, executable: str, pdk: str) -> dict:
     label = f'{deck}_{corner}_{temp:+d}' + (f'_sl{slew}' if deck == DECKS[3] else '')
     case = output/label
     case.mkdir(parents=True, exist_ok=True)
-    source = (base/(deck+'.sp')).read_text()
+    source = (base/(deck+'.sp')).read_text().replace('/spice/pdk', pdk)
     flavor, voltage, cap_factor = CORNER[corner]
     a, b = source.index('* __CORNER_BEGIN__'), source.index('* __CORNER_END__')
     block = source[a:b].replace(' typical', ' '+flavor)
@@ -84,7 +84,7 @@ def run_one(base: Path, output: Path, deck: str, corner: str, temp: int, seed: i
     init = (base/'.spiceinit').read_text()
     init = re.sub(r'setseed \d+', f'setseed {seed}', init)
     (case/'.spiceinit').write_text(init)
-    command = ['ngspice','-b','deck.sp']
+    command = [executable,'-b','deck.sp']
     start = time.monotonic()
     with (case/'ngspice.log').open('w') as log:
         try:
@@ -98,7 +98,7 @@ def run_one(base: Path, output: Path, deck: str, corner: str, temp: int, seed: i
     expected = 130 if deck == DECKS[1] else 3
     errors = [line.strip() for line in logtext.splitlines()
               if re.search(r'error:|failed!|aborted|timestep too small|cannot compute',line,re.I)]
-    complete = code == 0 and not errors and 'ngspice-45 done' in logtext and len(flags) == expected
+    complete = code == 0 and not errors and bool(re.search(r'ngspice-\S+ done', logtext)) and len(flags) == expected
     status = 'PASS' if complete and all(v == 1 for v in flags.values()) else 'FAIL' if complete else 'ERROR'
     result = {'case':label,'deck':deck,'corner':corner,'temp_c':temp,'vdd':voltage,
               'seed':seed,'slew':slew if deck == DECKS[3] else None,
@@ -113,6 +113,8 @@ def run_one(base: Path, output: Path, deck: str, corner: str, temp: int, seed: i
 
 def main() -> int:
     ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--ngspice',default='ngspice')
+    ap.add_argument('--pdk',default='/spice/pdk')
     ap.add_argument('--decks',nargs='+',choices=DECKS,default=DECKS)
     ap.add_argument('--corners',nargs='+',choices=CORNER,default=list(CORNER))
     ap.add_argument('--temps',nargs='+',type=int,default=[-40,27,125])
@@ -130,7 +132,7 @@ def main() -> int:
     output=args.output.resolve();output.mkdir(parents=True,exist_ok=True)
     results=[]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures=[pool.submit(run_one,base,output,d,c,t,args.seed,args.timeout,s)
+        futures=[pool.submit(run_one,base,output,d,c,t,args.seed,args.timeout,s,args.ngspice,args.pdk)
                  for d in args.decks for c in args.corners for t in args.temps
                  for s in (args.slews if d==DECKS[3] else [1])]
         for f in concurrent.futures.as_completed(futures):results.append(f.result())

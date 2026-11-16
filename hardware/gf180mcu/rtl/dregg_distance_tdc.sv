@@ -1,10 +1,22 @@
-// Dregg-180 Organ 4: < 5 ns Brands-Chaum 64-Round Rapid-Bit Responder + 32-Tap Vernier TDC.
+// Dregg-180 Organ 4: 64-round rapid-bit responder (Hancke-Kuhn style) + 32-tap Vernier TDC.
 //
-// Ultra-compact (~3.0 kGE!) silicon-hardened responder & sub-gate-delay speed-of-light TDC:
-//   * Single-gate `mux2_4` (`u_rapid_mux`) on `db_chal_pad_in -> db_resp_pad_out` (~2.9 ns TT,
-//     ~4.6 ns SS!) with non-dont_touch `qsag_iso_buf` isolation buffers (`RSZ-3006` immune).
-//   * 64-round ($2^{-64}$ relay-cheat bound!) shift-out `r0_sr[63:0]` / `r1_sr[63:0]` (`0` 128:1
-//     bit-index muxes!) and in-place 64-bit `chal_log` + `resp_log` shift registers.
+// Rapid-bit responder. Each round i has two secret response bits r0[i], r1[i]; the verifier is
+// entitled to exactly one of them. Per round (R1 B3):
+//   * The round opens a few clocks after `arm_responder` / `step_round`. Until something is
+//     committed the response pad drives 0: neither bit is on the pad.
+//   * Challenge 1 = the challenge pad goes high while the round is open. The pad sets the
+//     single-shot lock `u_lock` through one AOI21, and the lock selects r1[i] in `u_rapid_mux`
+//     (pad -> AOI21 -> mux2_4 -> pad is the timed path). The lock holds until the next round, so
+//     further edges on the pad change nothing and r0[i] never appears.
+//   * Challenge 0 = the pad stays low for ROUND_WINDOW core clocks. The round then closes (the
+//     lock can no longer be set), and only after the synchronized lock state has been seen clear
+//     for four more clocks is r0[i] put on the pad. From then on the pad cannot select r1[i].
+//   * `step_round` logs the committed challenge and response, clears the lock, and only then
+//     shifts to the next pair of bits, so the next bits are never visible through a stale select.
+// A challenge-0 round is therefore not time-critical (the response appears when the window ends);
+// the verifier times the challenge-1 rounds, as in the previous design where r0 was simply always
+// on the pad. What changed is that r0[i] and r1[i] can no longer both be read.
+//   * 64-round shift-out `r0_sr[63:0]` / `r1_sr[63:0]` and 64-bit `chal_log` + `resp_log`.
 //   * `db_resp_pad_loopback` (`.IE=1` during ping) cancels outbound `bi_24t` A->PAD delay, and
 //     one-shot self-locking `echo_hit_async` blocks reflection re-clocking of `u_tdc`.
 `default_nettype none
@@ -80,8 +92,20 @@ module dregg_distance_tdc (
     output logic        dist_timeout,
     output logic [31:0] dist_cycles
 );
+    // 2^18 core clocks (5.2 ms at 50 MHz): time the verifier has, after the step command, to send
+    // a challenge-1 edge. Longer than an SPI transaction plus host scheduling, short enough that
+    // 64 challenge-0 rounds stay below half a second.
+    localparam int ROUND_WINDOW_LOG2 = 18;
+
     wire [63:0] r0_sr, r1_sr;
-    wire        rb_shift = responder_armed & step_round;
+    logic [1:0] rph;            // round sequencer: 0 live, 1 shift, 2 release the lock clear, 3 open
+    logic       round_open;     // the lock may be set by the challenge pad
+    logic       locked0;        // challenge 0 committed: r0 bit is on the pad
+    logic       lock_clr;
+    logic [ROUND_WINDOW_LOG2-1:0] rw_cnt;
+    logic [1:0] close_dly;
+    wire        step_now = responder_armed & step_round & (rph == 2'd0);
+    wire        rb_shift = (rph == 2'd1);
     qsag_ereg #(.W(64)) u_r0 (
         .clk(clk), .rst_n(srst_n), .en(load_r0 | rb_shift),
         .d(load_r0 ? load_wdata : {1'b0, r0_sr[63:1]}), .q(r0_sr)
@@ -94,24 +118,32 @@ module dregg_distance_tdc (
     logic ping_active, ping_cal_mode, ping_tx_q, cal_stop_q;
     wire  rapid_mux_y;
 
-    wire mux_i0_raw = (ping_active && !ping_cal_mode) ? ping_tx_q : r0_sr[0];
-    wire mux_i1_raw = (ping_active && !ping_cal_mode) ? ping_tx_q : r1_sr[0];
+    wire ping_drive = ping_active && !ping_cal_mode;
+    wire mux_i0_raw = ping_drive ? ping_tx_q : (r0_sr[0] & locked0);
+    wire mux_i1_raw = ping_drive ? ping_tx_q : r1_sr[0];
     wire mux_i0_iso, mux_i1_iso;
     qsag_iso_buf u_mi0 (.a(mux_i0_raw), .y(mux_i0_iso));
     qsag_iso_buf u_mi1 (.a(mux_i1_raw), .y(mux_i1_iso));
 
+    // Single-shot challenge lock. hit_n low selects the r1 input; it can only fall while the round
+    // is open and only rises again through lock_clr (a flop, asserted between rounds).
+    wire lock_hit_n, lock_hit;
+    qsag_chal_lock u_lock (
+        .chal(db_chal_pad_in), .open(round_open), .clr(lock_clr), .hit_n(lock_hit_n), .hit(lock_hit)
+    );
     qsag_fast_mux2 u_rapid_mux (
-        .a(mux_i0_iso), .b(mux_i1_iso), .sel(db_chal_pad_in), .y(rapid_mux_y)
+        .a(mux_i1_iso), .b(mux_i0_iso), .sel(lock_hit_n), .y(rapid_mux_y)
     );
     assign db_resp_pad_out      = rapid_mux_y;
-    assign db_resp_pad_oe       = responder_armed | (ping_active & ~ping_cal_mode);
-    assign db_resp_pad_ie_force = ping_active & ~ping_cal_mode;
+    assign db_resp_pad_oe       = responder_armed | ping_drive;
+    assign db_resp_pad_ie_force = ping_drive;
 
     wire chal_side_iso;
     qsag_iso_buf u_csiso (.a(db_chal_pad_in), .y(chal_side_iso));
 
+    // Committed challenge of the current round, as seen by the core clock
     wire chal_s;
-    qsag_sync2 #(.RV(1'b0)) u_cs (.clk(clk), .rst_n(rst_n), .d(chal_side_iso), .q(chal_s));
+    qsag_sync2 #(.RV(1'b0)) u_cs (.clk(clk), .rst_n(rst_n), .d(lock_hit), .q(chal_s));
 
     logic tdc_arm_n;
     wire  hit_rn   = rst_n & tdc_arm_n;
@@ -138,11 +170,11 @@ module dregg_distance_tdc (
     wire [63:0] clog_q, rlog_q;
     wire        rbit_cur = chal_s ? r1_sr[0] : r0_sr[0];
     qsag_ereg_nr #(.W(64)) u_clog (
-        .clk(clk), .en(arm_responder | rb_shift),
+        .clk(clk), .en(arm_responder | step_now),
         .d(arm_responder ? 64'd0 : {chal_s, clog_q[63:1]}), .q(clog_q)
     );
     qsag_ereg_nr #(.W(64)) u_rlog (
-        .clk(clk), .en(arm_responder | rb_shift),
+        .clk(clk), .en(arm_responder | step_now),
         .d(arm_responder ? 64'd0 : {rbit_cur, rlog_q[63:1]}), .q(rlog_q)
     );
     assign chal_log_lo = (rounds_done != 7'd0) ? clog_q : 64'd0;
@@ -154,6 +186,12 @@ module dregg_distance_tdc (
         if (!srst_n) begin
             responder_armed <= 1'b0;
             rounds_done     <= '0;
+            rph             <= 2'd0;
+            round_open      <= 1'b0;
+            locked0         <= 1'b0;
+            lock_clr        <= 1'b1;
+            rw_cnt          <= '0;
+            close_dly       <= '0;
             ping_active     <= 1'b0;
             ping_cal_mode   <= 1'b0;
             ping_tx_q       <= 1'b0;
@@ -167,12 +205,51 @@ module dregg_distance_tdc (
             if (dist_consume) dist_valid <= 1'b0;
 
             if (arm_responder) begin
+                // (re)start: everything closed and cleared, first round opens two clocks later
                 responder_armed <= 1'b1;
                 rounds_done     <= 7'd0;
-            end else if (rb_shift) begin
-                rounds_done <= rounds_done + 7'd1;
-                if (rounds_done == 7'd63)
-                    responder_armed <= 1'b0;
+                round_open      <= 1'b0;
+                locked0         <= 1'b0;
+                lock_clr        <= 1'b1;
+                rph             <= 2'd2;
+            end else if (step_now) begin
+                // close the round: the response pad goes back to 0 and the lock is cleared before
+                // the registers shift (next clock)
+                round_open <= 1'b0;
+                locked0    <= 1'b0;
+                lock_clr   <= 1'b1;
+                rph        <= 2'd1;
+            end else begin
+                unique case (rph)
+                    2'd1: begin
+                        rounds_done <= rounds_done + 7'd1;
+                        if (rounds_done == 7'd63) begin
+                            responder_armed <= 1'b0;   // lock stays cleared, pad released
+                            rph             <= 2'd0;
+                        end else rph <= 2'd2;
+                    end
+                    2'd2: begin
+                        lock_clr <= 1'b0;
+                        rph      <= 2'd3;
+                    end
+                    2'd3: begin
+                        round_open <= 1'b1;
+                        rw_cnt     <= '0;
+                        close_dly  <= 2'd0;
+                        rph        <= 2'd0;
+                    end
+                    default: if (responder_armed) begin
+                        if (round_open) begin
+                            if (chal_s || (&rw_cnt)) round_open <= 1'b0;
+                            else                     rw_cnt     <= rw_cnt + 1'b1;
+                        end else if (!locked0 && !chal_s && !lock_clr) begin
+                            // window ended without a challenge: the lock can no longer be set;
+                            // wait out the synchronizer before committing to challenge 0
+                            if (close_dly == 2'd3) locked0 <= 1'b1;
+                            else                   close_dly <= close_dly + 2'd1;
+                        end
+                    end
+                endcase
             end
 
             if (launch_ping || cal_ping) begin

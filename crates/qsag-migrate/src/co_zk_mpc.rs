@@ -849,7 +849,10 @@ impl CoZkCustodianShare {
             compute_batches(e, circuit, witness, &local_batches, children, &self.entropy)?;
 
         #[cfg(test)]
-        std::eprintln!("BENCH cozk phase=evaluate elapsed_ns={}", phase_start.elapsed().as_nanos());
+        std::eprintln!(
+            "BENCH cozk phase=evaluate elapsed_ns={}",
+            phase_start.elapsed().as_nanos()
+        );
         // Cross-batch barrier: all custodians confirm every batch passed active
         // multiplication verification before ANY view commitment or output opens.
         e.agree(cshake256_framed_32(
@@ -872,7 +875,10 @@ impl CoZkCustodianShare {
         }
 
         #[cfg(test)]
-        std::eprintln!("BENCH cozk phase=commit elapsed_ns={}", phase_start.elapsed().as_nanos());
+        std::eprintln!(
+            "BENCH cozk phase=commit elapsed_ns={}",
+            phase_start.elapsed().as_nanos()
+        );
         let roots: Vec<_> = public
             .iter()
             .enumerate()
@@ -1079,7 +1085,10 @@ impl CoZkCustodianShare {
             repetitions,
         };
         #[cfg(test)]
-        std::eprintln!("BENCH cozk phase=open elapsed_ns={}", phase_start.elapsed().as_nanos());
+        std::eprintln!(
+            "BENCH cozk phase=open elapsed_ns={}",
+            phase_start.elapsed().as_nanos()
+        );
         verify_fn(&proof)?;
         #[cfg(test)]
         std::eprintln!(

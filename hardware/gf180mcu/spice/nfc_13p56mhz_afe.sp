@@ -21,11 +21,21 @@
 .model ISO_N NMOS(LEVEL=1 VTO=1.3 KP=0.15 LAMBDA=0.02 RD=2 RS=2)
 .model BODY D(IS=1n RS=2 CJO=10p BV=50 IBV=10u)
 V_MAIN MAIN 0 {vdd_val}
-V_HOT MAIN VDD_HOT 0
+V_HOT MAIN SUP_HOT 0
 * Cold rail held at 0V: worst-case injection into a discharged board bypass.
 * Separate senses distinguish foundry upper ESD current from external pullup.
-V_COLD 0 VDD_COLD 0
-V_BAD 0 VDD_BAD 0
+V_COLD 0 SUP_COLD 0
+V_BAD 0 SUP_BAD 0
+* Finite package supply resistance and inductance, including cold rails.
+R_HOT SUP_HOT BH 125m
+L_HOT BH VDD_HOT 1.8n
+R_COLD SUP_COLD BC 125m
+L_COLD BC VDD_COLD 1.8n
+R_BADSUP SUP_BAD BB 125m
+L_BAD BB VDD_BAD 1.8n
+C_HOT VDD_HOT 0 1p
+C_COLD VDD_COLD 0 1p
+C_BAD VDD_BAD 0 1p
 V_EMF EMF 0 SIN(0 7.5 13.56meg)
 R_CU EMF LR {0.988*(1+0.00393*(temper-25))}
 L_COIL LR LD 1.4662u
@@ -60,8 +70,8 @@ X_COLD TANK 0 PAD_COLD RECT isolated_rx
 * Unprotected witness retains the same 2.2k resistor: it alone cannot isolate.
 R_BAD TANK PAD_BAD 2.2k
 X_PAD_HOT 0 MAIN VDD_HOT 0 MAIN 0 PAD_HOT 0 0 MAIN MAIN 0 Y_HOT gf180mcu_fd_io__bi_24t
-X_PAD_COLD 0 0 VDD_COLD 0 0 0 PAD_COLD 0 0 0 0 0 Y_COLD gf180mcu_fd_io__bi_24t
-X_PAD_BAD 0 0 VDD_BAD 0 0 0 PAD_BAD 0 0 0 0 0 Y_BAD gf180mcu_fd_io__bi_24t
+X_PAD_COLD 0 0 VDD_COLD 0 0 0 PAD_COLD 0 0 0 VDD_COLD 0 Y_COLD gf180mcu_fd_io__bi_24t
+X_PAD_BAD 0 0 VDD_BAD 0 0 0 PAD_BAD 0 0 0 VDD_BAD 0 Y_BAD gf180mcu_fd_io__bi_24t
 .save v(TANK) v(RECT) v(PAD_HOT) v(PAD_COLD) v(PAD_BAD) v(Y_HOT) i(V_COLD) i(V_BAD) v(X_HOT.GATE)
 .tran 1n 4u 0 1n
 .meas tran tank_pk MAX v(TANK) FROM=2u TO=4u
