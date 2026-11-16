@@ -27,6 +27,16 @@ case "$case" in
   gf)         gold=lec_gf_gold;     gate=lec_gf_gate ;;
   gf_mut)     gold=lec_gf_gold;     gate=lec_gf_mut; expect=sat ;;
   mul)        gold=lec_mul_gold;    gate=lec_mul_gate ;;
+  step)       gold=lec_step_gold;   gate=lec_step_gate ;;
+  me_int)     gold=lec_me_int;      gate=lec_me_gate ;;        # carry-save M_E lane == reduce(integer sum)
+  me_spec)    gold=lec_me_gold;     gate=lec_me_int ;;         # Obend chain == reduce(integer sum)
+  mi_int)     gold=lec_mi_int;      gate=lec_mi_gate ;;
+  mi_spec)    gold=lec_mi_gold;     gate=lec_mi_int ;;
+  me_int_mut) gold=lec_me_int;      gate=lec_me_mut; expect=sat ;;
+  mi_int_mut) gold=lec_mi_int;      gate=lec_mi_mut; expect=sat ;;
+  fold_c0)    gold=lec_reduce_gold; gate=lec_fold_c0_gate ;;
+  fold_s0)    gold=lec_reduce_gold; gate=lec_fold_s0_gate ;;
+  clmul)      gold=lec_clmul_gold;  gate=lec_clmul_gate ;;
   *) echo "unknown case $case"; exit 2 ;;
 esac
 tag="$case${lane:+_l$lane}"
@@ -50,7 +60,7 @@ res=""
 for solver in z3 bitwuzla; do
   t0=$(date +%s.%N)
   if [[ $solver == z3 ]]; then v=$($RUN z3 -T:"$SECS" "$work/query.smt2" 2>&1 | grep -v swarm-build | head -1)
-  else v=$($RUN bitwuzla -t "$SECS" "$work/query.smt2" 2>&1 | grep -v swarm-build | head -1); fi
+  else v=$($RUN bitwuzla -t "$((SECS * 1000))" "$work/query.smt2" 2>&1 | grep -v swarm-build | head -1); fi
   dt=$(printf '%.1f' "$(echo "$(date +%s.%N) - $t0" | bc)")
   res="$res $solver=$v(${dt}s)"
 done

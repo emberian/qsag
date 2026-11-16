@@ -130,3 +130,79 @@ module lec_mul_gate (input wire [63:0] a, input wire [63:0] b, output wire [63:0
   qsag_gl64_mul_csa u (.a(a), .b(b), .r(r));
 endmodule
 `default_nettype wire
+
+// =====================================================================================
+// Decomposed miters. The direct miters "modular-add chain vs carry-save network" above do not
+// finish in SAT; these split each proof at the integer sum.
+// =====================================================================================
+`default_nettype none
+// canonical (t mod p) of a 72-bit integer, chained-adder form (the function of qsag_gl64_final_seq)
+module lec_reduce72 (input wire [71:0] t, output wire [63:0] r);
+  qsag_gl64_final_seq #(.W(72)) u (.x(t), .y(72'b0), .r(r));
+endmodule
+
+// Step lemma (one query, independent of the number of operands): reducing after adding one more
+// canonicalized word equals the modular add of the reduced partial sum.
+//   reduce(T + x) == glAdd(reduce(T), canon(x))     for every T < 2^71, x < 2^64
+module lec_step_gold (input wire [70:0] t, input wire [63:0] x, output wire [63:0] r);
+  wire [63:0] rt, cx;
+  lec_reduce72 u_t (.t({1'b0, t}), .r(rt));
+  assign cx = (x >= 64'hFFFF_FFFF_0000_0001) ? x - 64'hFFFF_FFFF_0000_0001 : x;
+  qsag_gl64_addsub u_a (.a(rt), .b(cx), .sub(1'b0), .r(r));
+endmodule
+module lec_step_gate (input wire [70:0] t, input wire [63:0] x, output wire [63:0] r);
+  lec_reduce72 u (.t({1'b0, t} + {8'b0, x}), .r(r));
+endmodule
+
+// Integer-sum forms of the linear layers: y_l = reduce(sum_j m_lj * x_j + rc_l) with plain adders.
+module lec_me_int #(parameter int LANE = 0) (input wire [767:0] x, input wire [767:0] rc, output wire [63:0] r);
+  // lane(b, i) = 3i + b ; y(b,i) = 2x(b,i) + 3x(b,i+1) + x(b,i+2) + x(b,i+3) ; out(b,i) = y(b,i) + sum_b' y(b',i)
+  localparam int B = LANE % 3;
+  localparam int I = LANE / 3;
+  function automatic logic [71:0] m4row(input logic [767:0] v, input int b, input int i);
+    m4row = {7'b0, v[64*(3*(i % 4) + b) +: 64], 1'b0}
+          + {7'b0, v[64*(3*((i + 1) % 4) + b) +: 64], 1'b0} + {8'b0, v[64*(3*((i + 1) % 4) + b) +: 64]}
+          + {8'b0, v[64*(3*((i + 2) % 4) + b) +: 64]} + {8'b0, v[64*(3*((i + 3) % 4) + b) +: 64]};
+  endfunction
+  wire [71:0] t = {m4row(x, B, I)[70:0], 1'b0} + m4row(x, (B + 1) % 3, I) + m4row(x, (B + 2) % 3, I)
+                + {8'b0, rc[64*LANE +: 64]};
+  lec_reduce72 u (.t(t), .r(r));
+endmodule
+module lec_mi_int #(parameter int LANE = 0) (input wire [767:0] x, input wire [767:0] rc, output logic [63:0] r);
+  // lane 0: sum_j x_j - 64 x_0 (as + 64 * (p - x_0) on canonical x_0 is not assumed; use + 64*(2^64-1-x_0) + 64 - 64*2^64 folded:
+  // -64 x_0 = 64 * (~x_0) - 64 * (2^64 - 1), and -64 * (2^64 - 1) = 64 * (p - 2^32 + 1) - ... is taken mod p as the constant K below.
+  localparam logic [63:0] PRIME = 64'hFFFF_FFFF_0000_0001;
+  // K = (-64 * (2^64 - 1)) mod p = 64 * (p - (2^32 - 2)) mod p
+  localparam logic [71:0] K = 72'd64 * (72'(PRIME) - 72'd4294967294);
+  logic [71:0] s;
+  wire  [63:0] rr;
+  always_comb begin
+    s = {8'b0, rc[64*LANE +: 64]};
+    for (int j = 0; j < 12; j++) s += {8'b0, x[64*j +: 64]};
+    if (LANE == 0) s += {2'b0, ~x[63:0], 6'b0} + K;
+    else s += 72'(x[64*LANE +: 64]) << (LANE - 1);
+  end
+  lec_reduce72 u (.t(s), .r(rr));
+  assign r = rr;
+endmodule
+
+// the multiplier fold with one row tied off: fold(s, 0) and fold(0, c) against the reducer spec
+module lec_fold_c0_gate (input wire [127:0] v, output wire [63:0] r);
+  lec_fold_gate u (.s(v), .c(128'b0), .r(r));
+endmodule
+module lec_fold_s0_gate (input wire [127:0] v, output wire [63:0] r);
+  lec_fold_gate u (.s(128'b0), .c(v), .r(r));
+endmodule
+
+// GF(2^128) pieces: 64x64 carry-less tree against the bit-serial definition; reduction of a 255-bit
+// polynomial against the bit-serial reduction.
+module lec_clmul_gold (input wire [63:0] a, input wire [63:0] b, output logic [126:0] p);
+  always_comb begin
+    p = '0;
+    for (int i = 0; i < 64; i++) if (b[i]) p ^= {63'b0, a} << i;
+  end
+endmodule
+module lec_clmul_gate (input wire [63:0] a, input wire [63:0] b, output wire [126:0] p);
+  qsag_clmul64 u (.a(a), .b(b), .p(p));
+endmodule
+`default_nettype wire
