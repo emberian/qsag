@@ -317,19 +317,22 @@ output-zero checks, multiplication checks and freeze/completion barriers remain.
 
 V5 removes interactive hashing of the large views without opening their
 plaintext. For each `(repetition, head, custodian)` the existing private
-sub-seed drives a separate `QSAG.COZK.VIEW.MASK.V5` XOF, bound to the repetition
+sub-seed drives a separate `QSAG.COZK.VIEW.FIELD.MASK.V5` seed derivation and tape sampler, bound to the repetition
 and head and independent of the inner tape domain. Each custodian inputs its
 mask through the same private masked-input primitive. After every circuit
 batch passes its active checks and the cross-batch barrier, the custodians
-open only `C = view XOR mask_0 XOR ... XOR mask_(m-1)` and the constrained
-public outputs. They hash this masked byte string locally with the same
+open only `C = view + mask_0 + ... + mask_(m-1)` in each entry's original
+additive group (XOR for bits, modular addition for fields), and the constrained
+public outputs. Each field mask uses the same canonical uniform sampler as
+the inner tapes. They serialize these public masked values and hash them with the same
 12-round tree, under the V5 magic. The root includes the ordered, position-bound
 `QSAG.COZK.SEED.COMMIT.V5` hashes, which were broadcast and agreed alongside the
 salted seed commitments before evaluation.
 
 The binding argument is explicit: a fixed ordered seed-commitment vector fixes
 the seeds under collision resistance, and thus fixes the mask. A fixed masked
-view then fixes exactly one plaintext view. Altering either the seed vector or
+view then fixes exactly one plaintext view by subtracting the fixed masks.
+The public circuit fixes the type and order of every entry. Altering either the seed vector or
 the masked view requires a collision in a committed hash. The verifier
 recomputes both from each challenged view, including the first view's
 reconstructed multiplication messages. Every transcript and length field is
@@ -345,6 +348,14 @@ virtual heads unmasks only those two heads: head/repetition separation and
 fresh custodian entropy remain mandatory. The masks do not replace any
 multiplication check or the output-zero check. Custodians still verify the
 finished public proof before the final agreement.
+
+Field-valued view entries remain arithmetic shares throughout evaluation and
+commitment. Only serialization conversions are avoided; every conversion
+required by the circuit still executes. After the challenge, public lane
+selectors multiply unchallenged field lanes by zero before authenticated
+opening; bit lanes use the equivalent Boolean mask. Canonical packing occurs
+only on these public values. Replicated and Shamir parity tests check both
+selected values and zeroed unselected lanes in every supported field.
 
 Local sub-seeds, salts, flat tape contribution buffers, shared views and
 unreleased decommitment buffers have wipe-on-drop owners, including error and

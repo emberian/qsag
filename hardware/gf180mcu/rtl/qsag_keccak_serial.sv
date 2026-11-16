@@ -168,11 +168,9 @@ module qsag_keccak_serial (
     qsag_ereg_nr #(.W(64)) u_w1 (.clk(clk), .en(w1_en), .d(w1_d), .q(w1));
 
 `ifdef QSAG_LATCH_RF
-    wire b0_gate, b1_gate;
-    qsag_clkgate_1 u_b0cg (.clk(clk), .en(st == K_CR && step == 5'd1), .gclk(b0_gate));
-    qsag_clkgate_1 u_b1cg (.clk(clk), .en(st == K_CW && step == 5'd0), .gclk(b1_gate));
-    qsag_latch_word_rst #(.W(64)) u_b0s (.gate(b0_gate), .rst_n(srst_n), .d(w0), .q(b0_save));
-    qsag_latch_word_rst #(.W(64)) u_b1s (.gate(b1_gate), .rst_n(srst_n), .d(w1), .q(b1_save));
+    wire b_gate;
+    qsag_clkgate_1 u_bcg (.clk(clk), .en(st == K_CR && step == 5'd1), .gclk(b_gate));
+    qsag_latch_word_rst #(.W(128)) u_bs (.gate(b_gate), .rst_n(srst_n), .d({w1, w0}), .q({b1_save, b0_save}));
 `else
     qsag_ereg_nr #(.W(64)) u_b0s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd0)), .d(w_clr ? 64'd0 : port), .q(b0_save));
     qsag_ereg_nr #(.W(64)) u_b1s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd1)), .d(w_clr ? 64'd0 : port), .q(b1_save));
