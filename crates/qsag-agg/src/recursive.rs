@@ -3282,6 +3282,7 @@ impl SubtreeLeafMergeRelation {
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
         qsag_asm::volatile_fill(&mut z, Goldilocks::ZERO);
+        drop(z);
         let hologram = crate::zk_hem::protocol::ShapeHologram::compile(&shape, params.regime())
             .map_err(|_| FullShardError::InvalidParameters)?;
         let stats = FullShardRelationStats {
@@ -3754,6 +3755,7 @@ impl SubtreeInternalMergeRelation {
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
         qsag_asm::volatile_fill(&mut z, Goldilocks::ZERO);
+        drop(z);
         let hologram = crate::zk_hem::protocol::ShapeHologram::compile(&shape, parent_regime)
             .map_err(|_| FullShardError::InvalidParameters)?;
         let stats = FullShardRelationStats {
@@ -6487,13 +6489,13 @@ mod tests {
 
         // Leaf proofs bind each real shard and its weighted roster opening.
         let t_l1 = Instant::now();
-        let prove_pair = |offset: usize, seed: &[u8; 32]| {
+        let prove_leaf_node = |offset: usize, seed: &[u8; 32]| {
             if let Some(registry) = &registry {
                 let openings: Vec<_> = policies[offset..offset + 1]
                     .iter()
                     .map(|p| registry.opening(p.shard_id).unwrap())
                     .collect();
-                prove_subtree_roster_leaf_merge_for_recursion(
+                SplitSubtreeProof::prove_roster_leaf(
                     &l1_rel,
                     &policies[offset..offset + 1],
                     &openings,
@@ -6503,7 +6505,7 @@ mod tests {
                     seed,
                 )
             } else {
-                prove_subtree_leaf_merge_for_recursion(
+                SplitSubtreeProof::prove_leaf(
                     &l1_rel,
                     &policies[offset..offset + 1],
                     epoch_floor,
@@ -6516,8 +6518,7 @@ mod tests {
         };
         let mut children = Vec::with_capacity(shard_count);
         for s in 0..shard_count {
-            let (public, proof) = prove_pair(s, &[(s + 17) as u8; 32]);
-            children.push(SplitSubtreeProof::leaf(public, proof));
+            children.push(prove_leaf_node(s, &[(s + 17) as u8; 32]));
             std::println!("SUBTREE_LEAF_PROVED index={s}");
         }
         let l1_ms = t_l1.elapsed().as_secs_f64() * 1000.0;
