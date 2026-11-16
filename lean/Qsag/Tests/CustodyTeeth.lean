@@ -74,7 +74,9 @@ def toyShamirOpening (r : Custody.Intent) : Custody.RoundOpening :=
 theorem toyShamirPolicy_checkRound (r : Custody.Intent) :
     Custody.checkRound (toyShamirPolicy r) toyDeploymentId r (Custody.roundCommitment toyDeploymentId r)
       [toyShamirOpening r] = true := by
-  unfold Custody.checkRound toyShamirPolicy toyShamirOpening Custody.roundCommitment
+  simp only [Custody.checkRound.public_eqs]
+  unfold toyShamirPolicy toyShamirOpening
+  simp only [Custody.roundCommitment.public_eqs]
   have hLen : (cshake256Bytes Custody.roundDomain (Custody.payload toyDeploymentId 0 r)).length = 32 :=
     cshake256Bytes_length _ _
   have hMac : verifyBdozPairMac
@@ -90,8 +92,9 @@ private theorem toy_mintGuard_initial (r : Custody.Intent) (id : Custody.VaultId
     Custody.mintGuard (toyShamirPolicy r) 100 (Custody.initial id)
       { intent := r, digest := Custody.roundCommitment toyDeploymentId r,
         openings := [toyShamirOpening r] } = true := by
-  unfold Custody.mintGuard
-  rw [show (Custody.initial id).identity.deploymentId = toyDeploymentId from hId,
+  simp only [Custody.mintGuard.public_eqs]
+  simp only [Custody.initial.public_eqs]
+  rw [hId,
     toyShamirPolicy_checkRound, Bool.and_true]
   refine decide_eq_true ⟨Nat.zero_le _, hRound, ?_, fun h => absurd h List.not_mem_nil, hMsg⟩
   show 0 + r.spend ≤ 100
@@ -108,8 +111,7 @@ private theorem beltLatchBindStep_init22_epoch0 (rec : BeltLatchRecord) (hEp : r
         nextEpoch := 1, inFlight := some rec,
         disk := .persisted { nextEpoch := 1, inFlight := some rec } } .fresh := by
   have hEpNat : rec.epoch.toNat = 0 := by rw [hEp]; rfl
-  dsimp only [beltLatchBindStep, BeltLatchNodeState.init]
-  simp [hEpNat]
+  simp [beltLatchBindStep.public_eqs, BeltLatchNodeState.init.public_eqs, hEpNat]
 
 private theorem checkLatchCertifiedBurn_finRange {n : Nat}
     (H : List UInt8 → Digest256)
@@ -135,7 +137,7 @@ private theorem checkLatchCertifiedBurn_finRange {n : Nat}
         { sender := s, receiver := v, record := rec,
           binding := beltRecordBinding H rec,
           macTag := computeBeltEchoMac MAC (mk s v) s v rec })) = true := by
-    unfold verifyQuorumEchoCertificate
+    simp only [verifyQuorumEchoCertificate.public_eqs]
     rw [Bool.and_eq_true_iff]
     refine ⟨decide_eq_true hQ, List.all_eq_true.mpr ?_⟩
     intro s _
@@ -147,12 +149,12 @@ private theorem checkLatchCertifiedBurn_finRange {n : Nat}
                 binding := beltRecordBinding H rec,
                 macTag := computeBeltEchoMac MAC (mk s v) s v rec },
               List.mem_map.mpr ⟨s, List.mem_finRange s, rfl⟩, ?_⟩
-      unfold verifyAuthenticatedBeltEcho
+      simp only [verifyAuthenticatedBeltEcho.public_eqs]
       simp
-  unfold checkLatchCertifiedBurn
+  simp only [checkLatchCertifiedBurn.public_eqs]
   have h2_64 : b.intent.leaf < 2 ^ 64 := by rw [hLeaf0]; exact two_pow_64_pos_local
   have hEpEq : rec.epoch = UInt64.ofNat b.intent.leaf := by rw [hRecEp, hLeaf0]; rfl
-  simp [BeltLatchNodeState.init, h2_64, hEpEq, hRecMd, hVerQ]
+  simp [BeltLatchNodeState.init.public_eqs, h2_64, hEpEq, hRecMd, hVerQ]
 
 /-! ### Single-turn transition lemmas (used to execute concrete multi-turn witnesses) -/
 
@@ -162,12 +164,12 @@ private theorem beltLatchEmitEcho_keeps_state {n : Nat}
     (k : Digest256) (s r : Fin n) (nodeSt : BeltLatchNodeState) :
     (∃ e, beltLatchEmitEcho H MAC k s r nodeSt = .accepted nodeSt e) ∨
       (∃ err, beltLatchEmitEcho H MAC k s r nodeSt = .rejected nodeSt err) := by
-  unfold beltLatchEmitEcho
+  simp only [beltLatchEmitEcho.public_eqs]
   split
   · exact .inr ⟨_, rfl⟩
-  · split
-    · exact .inr ⟨_, rfl⟩
-    · exact .inl ⟨_, rfl⟩
+  · cases hFlight : nodeSt.inFlight with
+    | none => exact .inr ⟨_, rfl⟩
+    | some rec => exact .inl ⟨_, rfl⟩
 
 private theorem stepBeltNetwork_honestEmitEcho_nodes {n : Nat}
     (H : List UInt8 → Digest256)
@@ -176,8 +178,7 @@ private theorem stepBeltNetwork_honestEmitEcho_nodes {n : Nat}
     (Corrupt : CustodiansMask n) (q : Nat)
     (net : BeltLatchNetworkState n) (s r j : Fin n) :
     (stepBeltNetwork H MAC macKeys Corrupt q net (.honestEmitEcho s r)).nodes j = net.nodes j := by
-  unfold stepBeltNetwork
-  dsimp only
+  simp only [stepBeltNetwork.public_eqs]
   split
   · rfl
   · have hIte : (if j = s then net.nodes s else net.nodes j) = net.nodes j := by
@@ -196,11 +197,13 @@ private theorem stepBeltNetwork_honestBind_nodes_ne {n : Nat}
     (net : BeltLatchNetworkState n) (p : Fin n) (rec : BeltLatchRecord)
     (j : Fin n) (hj : j ≠ p) :
     (stepBeltNetwork H MAC macKeys Corrupt q net (.honestBind p rec)).nodes j = net.nodes j := by
-  unfold stepBeltNetwork
-  dsimp only
+  simp only [stepBeltNetwork.public_eqs]
   split
   · rfl
-  · split <;> exact ite_eq_right_of_eq_false _ _ (eq_false hj)
+  · cases hBind : beltLatchBindStep (net.nodes p) rec with
+    | rejected next err => exact ite_eq_right_of_eq_false _ _ (eq_false hj)
+    | accepted next outcome =>
+      cases outcome <;> exact ite_eq_right_of_eq_false _ _ (eq_false hj)
 
 private theorem stepBeltNetwork_honestBind_fresh_node {n : Nat}
     (H : List UInt8 → Digest256)
@@ -212,8 +215,7 @@ private theorem stepBeltNetwork_honestBind_fresh_node {n : Nat}
     (hC : Corrupt.mem p = false)
     (hB : beltLatchBindStep (net.nodes p) rec = .accepted nodeSt' .fresh) :
     (stepBeltNetwork H MAC macKeys Corrupt q net (.honestBind p rec)).nodes p = nodeSt' := by
-  unfold stepBeltNetwork
-  dsimp only
+  simp only [stepBeltNetwork.public_eqs]
   rw [hB, hC]
   exact ite_eq_left_of_eq_true _ _ (eq_self p)
 
@@ -222,7 +224,7 @@ private theorem stepShamirCustody_belt_beltNet {n L d : Nat}
     (dep : ShamirValidatorDeployment n L d) (st : ShamirCustodyNetworkState n L)
     (b : BeltNetworkTurn n) :
     (stepShamirCustody dep st (.belt b)).beltNet =
-      stepBeltNetwork dep.H dep.MAC dep.macKeys dep.Corrupt dep.q st.beltNet b := rfl
+      stepBeltNetwork dep.H dep.MAC dep.macKeys dep.Corrupt dep.q st.beltNet b := by rw [stepShamirCustody]
 
 /-- A belt turn leaves vaults, share releases, and combined signatures untouched. -/
 private theorem stepShamirCustody_belt_frame {n L d : Nat}
@@ -231,7 +233,7 @@ private theorem stepShamirCustody_belt_frame {n L d : Nat}
     (stepShamirCustody dep st (.belt b)).vaults = st.vaults ∧
     (stepShamirCustody dep st (.belt b)).honestShareReleases = st.honestShareReleases ∧
     (stepShamirCustody dep st (.belt b)).combinedSignatures = st.combinedSignatures :=
-  ⟨rfl, rfl, rfl⟩
+  by simp only [stepShamirCustody]; exact ⟨trivial, trivial, trivial⟩
 
 private theorem stepShamirCustody_echo_nodes {n L d : Nat}
     (dep : ShamirValidatorDeployment n L d) (st : ShamirCustodyNetworkState n L)
@@ -276,8 +278,7 @@ private theorem stepShamirCustody_certifiedMint_ok {n L d : Nat}
       Custody.mint (dep.policies p) (dep.caps p) anchor (st.vaults p) b ∧
     ∀ j, j ≠ p →
       (stepShamirCustody dep st (.certifiedMint p anchor Q rec echoes b)).vaults j = st.vaults j := by
-  unfold stepShamirCustody
-  dsimp only
+  simp only [stepShamirCustody]
   rw [hC, hChk]
   simp only [Bool.false_eq_true, ↓reduceIte]
   split
@@ -306,10 +307,9 @@ private theorem stepShamirCustody_releaseShare_ok {n L d : Nat}
   have hCond : ((st.vaults p).poisoned || decide ((st.vaults p).durable.anchor ≠ anchor)) = false := by
     rw [hP, hA, Bool.false_or]
     exact decide_eq_false (fun h => h rfl)
-  unfold stepShamirCustody
-  dsimp only
+  simp only [stepShamirCustody]
   rw [hC]
-  unfold releaseShamirShareFromVault
+  simp only [releaseShamirShareFromVault.public_eqs]
   rw [hCond]
   simp only [Bool.false_eq_true, ↓reduceIte, hAct]
   exact ⟨trivial, trivial, rfl, fun j hj => ite_eq_right_of_eq_false _ _ (eq_false hj)⟩
@@ -328,8 +328,7 @@ private theorem stepShamirCustody_combineSig_some {n L d : Nat}
     (stepShamirCustody dep st
         (.combineSig leafChainPk lambdas r counter submitted authPath)).honestShareReleases =
       st.honestShareReleases := by
-  unfold stepShamirCustody
-  dsimp only
+  simp only [stepShamirCustody]
   rw [hSig]
   exact ⟨rfl, rfl⟩
 
@@ -341,8 +340,8 @@ private theorem custody_mint_initial_ok (pol : Custody.RoundPolicy) (cap : Nat) 
     (Custody.mint pol cap 0 (Custody.initial id) b).poisoned = false ∧
     (Custody.mint pol cap 0 (Custody.initial id) b).durable.anchor = 1 ∧
     (Custody.mint pol cap 0 (Custody.initial id) b).active = some b.intent := by
-  unfold Custody.mint
-  rw [hMG]
+  simp only [Custody.mint.public_eqs]
+  rw [hMG, Custody.initial.public_eqs]
   exact ⟨rfl, rfl, rfl⟩
 
 def toyShamirIntent : Custody.Intent :=
@@ -454,12 +453,12 @@ theorem witness_shamir_custody_nonvacuous :
       (by decide +kernel) rfl rfl rfl
   have hMG (j : Fin 4) : Custody.mintGuard (toyShamirPolicy toyShamirIntent) 100
       (Custody.initial (dep.vaultIdentity j)) burn₀ = true :=
-    toy_mintGuard_initial toyShamirIntent _ rfl (List.cons_ne_nil _ _) rfl
+    toy_mintGuard_initial toyShamirIntent _ (by rw [ShamirValidatorDeployment.vaultIdentity.public_eqs]; rfl) (List.cons_ne_nil _ _) rfl
       (show (10 : Nat) ≤ 100 by decide)
   have h2_16 : 0 < 2 ^ 16 := by decide
   have hComb := (shamir_custody_combined_sig_verifies_or_collision dep
     (by decide : dep.height < 256)
-    (Nat.lt_trans (by decide : 32 * 1 < 64) pow256_8_gt_64_local)).1
+    (Nat.lt_trans (by decide : 32 * 1 < 64) (by decide))).1
     [p0, p1] lambdas toyShamirIntent 0 shamirPts4_lagrange01
     (by decide) two_pow_64_pos_local h2_16 rfl rfl
   have hBind0 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₀ = .accepted bound .fresh :=
@@ -677,12 +676,14 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
       .releaseShare p1 1 r₂ 0 ]
   refine ⟨dep, r₁, r₂, S₁, S₂, trace,
     by decide +kernel, rfl, rfl, rfl, by decide +kernel, by decide +kernel,
-    by decide +kernel, by decide +kernel, rfl, rfl, by decide +kernel, ?_⟩
+    by decide +kernel, by decide +kernel, rfl, rfl, (by intro h; have hS := congrArg Custody.Intent.session h; cases hS), ?_⟩
   dsimp only
   have hDigNe : dep.H (intentCanonicalPayload dep.deploymentId r₁) ≠ dep.H (intentCanonicalPayload dep.deploymentId r₂) := by
     have hMem1 : decide ((0x20 : UInt8) ∈ intentCanonicalPayload toyDeploymentId r₁) = false := by
+      simp only [intentCanonicalPayload.public_eqs]
       decide +kernel
     have hMem2 : decide ((0x20 : UInt8) ∈ intentCanonicalPayload toyDeploymentId r₂) = true := by
+      simp only [intentCanonicalPayload.public_eqs]
       decide +kernel
     have h1 : dep.H (intentCanonicalPayload dep.deploymentId r₁) = 0#256 := by
       dsimp only [dep, toyShamirDeployment]
@@ -714,10 +715,10 @@ theorem tooth_under_quorum_latch_allows_shamir_equivocation :
       (by decide +kernel) rfl rfl rfl
   have hMG1 : Custody.mintGuard (toyShamirPolicy r₁) 100
       (Custody.initial (dep.vaultIdentity p0)) burn₁ = true :=
-    toy_mintGuard_initial r₁ _ rfl (List.cons_ne_nil _ _) rfl (show (10 : Nat) ≤ 100 by decide)
+    toy_mintGuard_initial r₁ _ (by rw [ShamirValidatorDeployment.vaultIdentity.public_eqs]; rfl) (List.cons_ne_nil _ _) rfl (show (10 : Nat) ≤ 100 by decide)
   have hMG2 : Custody.mintGuard (toyShamirPolicy r₂) 100
       (Custody.initial (dep.vaultIdentity p1)) burn₂ = true :=
-    toy_mintGuard_initial r₂ _ rfl (List.cons_ne_nil _ _) rfl (show (10 : Nat) ≤ 100 by decide)
+    toy_mintGuard_initial r₂ _ (by rw [ShamirValidatorDeployment.vaultIdentity.public_eqs]; rfl) (List.cons_ne_nil _ _) rfl (show (10 : Nat) ≤ 100 by decide)
   have hB1 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₁ = .accepted bound₁ .fresh :=
     beltLatchBindStep_init22_epoch0 rec₁ rfl
   have hB2 : beltLatchBindStep (BeltLatchNodeState.init 2 2) rec₂ = .accepted bound₂ .fresh :=
@@ -841,9 +842,10 @@ theorem tooth_unverified_lagrange_corrupt_share_forges_node :
       rw [hEq, hHon]
       exact towerAdd_self_zero 7 (towerOne 7)
     dsimp only [lambdas, lagrange2WeightsTower, s₁_corrupt] at hSub
-    simp only [ringDot_eq, dotVec_cons, dotVec_nil_left] at hSub
-    dsimp only [CommRingOps.add, CommRingOps.mul, CommRingOps.zero] at hSub
-    simp only [towerAdd_zero] at hSub
+    simp only [ringDot_eq] at hSub
+    try simp only [dotVec_cons, dotVec_nil_left] at hSub
+    try dsimp only [CommRingOps.add, CommRingOps.mul, CommRingOps.zero] at hSub
+    try simp only [towerAdd_zero] at hSub
     rw [towerMul_add_distrib] at hSub
     have hCancel : ∀ (a b c : TowerElem 7),
         towerAdd 7 (towerAdd 7 a (towerAdd 7 b c)) (towerAdd 7 a b) = c := fun a b c => by
@@ -900,6 +902,7 @@ theorem tooth_duplicate_points_do_not_reconstruct :
         (([(⟨0, by decide⟩ : Fin 4), ⟨1, by decide⟩].map
             toyShamirDeploymentDuplicatePoints.evalPts).map
           (fun x => RoundPoly.evalCoeffs [towerOne 7, towerOne 7] x)) = towerOne 7) := by
+  rw [ShamirValidatorDeployment.lagrangeWeights.public_eqs]
   decide +kernel
 
 /-- Tooth for `evalPts_nonzero`: a custodian at the evaluation point `0` holds the shared value
@@ -957,5 +960,72 @@ theorem toyShamirDeployment_pairs_reconstruct (c₀ : TowerElem 7)
 #verify_inhabited Qsag.shamir_custody_epoch_non_equivocation Qsag.witness_shamir_custody_nonvacuous
 #tooth_pair Qsag.shamir_custody_epoch_non_equivocation vs Qsag.tooth_under_quorum_latch_allows_shamir_equivocation
 #tooth_pair Qsag.shamir_custody_combined_sig_verifies_or_collision vs Qsag.tooth_unverified_lagrange_corrupt_share_forges_node
+
+/-! ## Personal-quorum safety and mutation controls -/
+
+def abqsTwoView : Spec.AsymmetricQuorumSystem Bool where
+  quorumsOf i Q := false ∈ Q ∧ (i = true → true ∈ Q)
+  faultSets _ _ F := ¬ F false
+  quorums_monotone := by
+    intro i Q Q' hQ hSub
+    exact ⟨hSub false hQ.1, fun hi => hSub true (hQ.2 hi)⟩
+  honest_intersection := by
+    intro i j Q₁ Q₂ F h₁ h₂ hF
+    exact ⟨false, h₁.1, h₂.1, hF⟩
+
+/-- Both unequal personal quorums are inhabited and agree at one key/leaf. -/
+theorem witness_abqs_personal_quorums :
+    abqsTwoView.quorumsOf false [false] ∧
+    abqsTwoView.quorumsOf true [false, true] ∧
+    [false] ≠ [false, true] ∧
+    Spec.BeltLatchHistorySafe (fun _ : Bool => False)
+      (fun (_ : Bool) (pk leaf_idx msg : Nat) => msg = pk + leaf_idx) := by
+  refine ⟨?_, ?_, by decide, ?_⟩
+  · change false ∈ [false] ∧ (false = true → true ∈ [false])
+    decide
+  · change false ∈ [false, true] ∧ (true = true → true ∈ [false, true])
+    decide
+  · intro p hp pk leaf_idx m₁ m₂ h₁ h₂
+    exact h₁.trans h₂.symm
+
+/-- Replacing honest intersection with mere intersection permits conflicting certificates:
+the shared voter is faulty, and each message has a different honest supporter. -/
+theorem tooth_abqs_faulty_only_intersection :
+    let F : Nat → Prop := fun p => p = 0
+    let bound : Nat → Nat → Nat → Nat → Prop := fun p _ _ m => p = m
+    Spec.BeltLatchHistorySafe F bound ∧
+    (∀ p ∈ [0, 1], ¬ F p → bound p 7 9 1) ∧
+    (∀ p ∈ [0, 2], ¬ F p → bound p 7 9 2) ∧
+    (0 ∈ [0, 1] ∧ 0 ∈ [0, 2]) ∧ (1 : Nat) ≠ 2 := by
+  refine ⟨?_, ?_, ?_, by decide, by decide⟩
+  · intro p _ _ _ m₁ m₂ h₁ h₂
+    exact h₁.symm.trans h₂
+  · intro p hp hF
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
+    rcases hp with hp | hp
+    · exact False.elim (hF hp)
+    · exact hp
+  · intro p hp hF
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
+    rcases hp with hp | hp
+    · exact False.elim (hF hp)
+    · exact hp
+
+/-- A volatile latch that changes its message has consistent individual snapshots but an unsafe
+history. Honest intersection alone cannot repair forgotten or overwritten bindings. -/
+theorem tooth_abqs_nonpersistent_latch :
+    let latch : Nat → Bool → Nat → Nat → Option Nat := fun t _ _ _ => some t
+    ¬ Spec.BeltLatchHistorySafe (fun _ : Bool => False)
+      (fun p pk leaf_idx m => ∃ t, latch t p pk leaf_idx = some m) := by
+  intro latch hSafe
+  have h := hSafe false (fun h => h) 7 9 0 1 ⟨0, rfl⟩ ⟨1, rfl⟩
+  exact Nat.noConfusion h
+
+#verify_constructive witness_abqs_personal_quorums tooth_abqs_faulty_only_intersection
+  tooth_abqs_nonpersistent_latch
+#verify_kernel Spec.abqs_belt_latch_unique_msg
+#verify_constructive tooth_abqs_faulty_only_intersection
+#verify_kernel Spec.beltLatch_persistent_history_safe
+#verify_constructive tooth_abqs_nonpersistent_latch
 
 end Qsag

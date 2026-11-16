@@ -31,6 +31,7 @@ import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag.AggregationParityTeeth
 set_option autoImplicit false
+attribute [-instance] Fin.instLinearOrderPackage UInt8.instLawfulEqOrd
 
 open Qsag.GoldilocksField.GoldilocksExt4 (Ext4Poly towerToPoly polyToTower)
 
@@ -56,7 +57,7 @@ theorem inhabited_isoQuarticToPoly :
     encodeExt4PolyBytes32 (Math.isoQuarticToPoly.toFun sampleX) = encodeExt4Bytes32 sampleX ∧
     decodeExt4PolyBytes32 (encodeExt4Bytes32 sampleX) =
       some (Math.isoQuarticToPoly.toFun sampleX) :=
-  ⟨by rfl, Math.isoQuarticToPoly.map_mul _ _, Math.isoQuarticToPoly.map_inv _,
+  ⟨by rw [Math.isoQuarticToPoly_toFun]; rfl, Math.isoQuarticToPoly.map_mul _ _, Math.isoQuarticToPoly.map_inv _,
     Math.isoQuarticToPoly_encode _, by
       rw [Math.isoQuarticToPoly_decode, decodeExt4Bytes32_encode]; rfl⟩
 
@@ -66,7 +67,7 @@ theorem inhabited_ext4Poly_mul_value :
     towerToPoly (CommRingOps.mul sampleX sampleY) =
       ⟨Goldilocks.ofNat 1793, Goldilocks.ofNat 1125, Goldilocks.ofNat 1075,
         Goldilocks.ofNat 231⟩ := by
-  decide +kernel
+  rfl
 
 /-- Reading the tower limbs `[c0.c0, c0.c1, c1.c0, c1.c1]` in storage order as the coefficients of
     `1, v, v^2, v^3`. -/
@@ -78,13 +79,23 @@ theorem tooth_identity_limb_order_not_multiplicative :
     ¬ (identityLimbOrder (CommRingOps.mul QuarticGoldilocks.vBasis QuarticGoldilocks.vBasis) =
       CommRingOps.mul (identityLimbOrder QuarticGoldilocks.vBasis)
         (identityLimbOrder QuarticGoldilocks.vBasis)) := by
-  decide +kernel
+  intro h
+  have hc := congrArg Ext4Poly.a1 h
+  change Goldilocks.ofNat 1 = Goldilocks.ofNat 0 at hc
+  exact (by decide : Goldilocks.ofNat 1 ≠ Goldilocks.ofNat 0) hc
 
 /-- `#tooth`: the storage-order reading also disagrees with the wire: its polynomial-basis bytes
     are not the bytes `field.rs:to_le_bytes` writes. -/
 theorem tooth_identity_limb_order_wrong_wire :
     ¬ (encodeExt4PolyBytes32 (identityLimbOrder sampleX) = encodeExt4Bytes32 sampleX) := by
-  decide +kernel
+  intro h
+  have hd := congrArg decodeExt4PolyBytes32 h
+  rw [decodeExt4PolyBytes32_encode, ← Math.isoQuarticToPoly_encode,
+    decodeExt4PolyBytes32_encode] at hd
+  have hc := congrArg (fun p => p.a1) (Option.some.inj hd)
+  rw [Math.isoQuarticToPoly_toFun] at hc
+  change Goldilocks.ofNat 3 = Goldilocks.ofNat 5 at hc
+  exact (by decide : Goldilocks.ofNat 3 ≠ Goldilocks.ofNat 5) hc
 
 /-! ## B. Squeezed challenges -/
 
@@ -92,6 +103,7 @@ theorem tooth_identity_limb_order_wrong_wire :
 theorem inhabited_zero_word_preimages :
     Goldilocks.ofNat 0 = Goldilocks.zero ∧ Goldilocks.ofNat goldilocksPrime = Goldilocks.zero ∧
       goldilocksPrime < 2 ^ 64 ∧ Goldilocks.wordMultiplicity Goldilocks.zero = 2 := by
+  rw [Goldilocks.wordMultiplicity.public_eqs]
   decide
 
 /-- A residue `≥ 2^32 - 1` has one preimage, so the multiplicity is not constant. -/
@@ -100,6 +112,7 @@ theorem inhabited_word_multiplicity_one :
       ext4WordMultiplicity
         ⟨⟨Goldilocks.ofNat (2 ^ 32), Goldilocks.ofNat (2 ^ 32)⟩,
           ⟨Goldilocks.ofNat (2 ^ 32), Goldilocks.ofNat (2 ^ 32)⟩⟩ = 1 := by
+  simp only [ext4WordMultiplicity.public_eqs, Goldilocks.wordMultiplicity.public_eqs]
   decide
 
 /-- Exactly sixteen of the `2^256` word quadruples reduce to zero. -/
@@ -138,7 +151,7 @@ theorem inhabited_six_regime_tags :
     ([2, 4, 5, 6, 7, 8] : List UInt8).map Aggregation.WhirSecurityRegime.decodeTag? =
       Aggregation.WhirSecurityRegime.all.map some ∧
     Aggregation.WhirSecurityRegime.decodeTag? 9 = none := by
-  decide
+  exact ⟨rfl, rfl⟩
 
 /-- The four CDHZ25 regimes at the 28-variable cap. -/
 theorem inhabited_cdhz25_schedule_28 :
@@ -146,7 +159,7 @@ theorem inhabited_cdhz25_schedule_28 :
       [⟨4, 6, 202⟩, ⟨16, 6, 102⟩, ⟨64, 4, 70⟩, ⟨256, 4, 52⟩] ∧
     (WhirSecurityRegime.schedule .poseidon2Cdhz25ZeroPowQrom128 28).stages =
       [⟨4, 6, 216⟩, ⟨16, 6, 109⟩, ⟨64, 4, 74⟩, ⟨256, 4, 56⟩] := by
-  decide
+  exact ⟨rfl, rfl⟩
 
 /-- `#tooth`: the CDHZ25 PoW table does not reach the `2^-256` query target of the default
     Johnson regime (its first stage has `(√B)^q = 2^202`). -/
@@ -177,7 +190,12 @@ theorem inhabited_checkTree_28_vars :
       (.leaf { exampleShard 1#2 with
         numVars := 28, schedule := WhirSecurityRegime.schedule .bciksJohnsonQrom128 28 }) =
       true := by
-  decide +kernel
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨?_, rfl⟩
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨?_, by decide +kernel⟩
+  apply Bool.and_eq_true_iff.mpr
+  exact ⟨decide_eq_true rfl, decide_eq_true ⟨by decide, by decide, rfl⟩⟩
 
 open Qsag.Composed in
 /-- `#tooth`: a leaf claiming 29 variables is rejected even with the schedule function's own
@@ -187,7 +205,11 @@ theorem tooth_checkTree_29_vars_rejected :
       (.leaf { exampleShard 1#2 with
         numVars := 29, schedule := WhirSecurityRegime.schedule .bciksJohnsonQrom128 29 }) =
       true) := by
-  decide +kernel
+  intro h
+  have h1 := (Bool.and_eq_true_iff.mp h).1
+  have h2 := (Bool.and_eq_true_iff.mp h1).1
+  have hg := of_decide_eq_true (Bool.and_eq_true_iff.mp h2).2
+  exact (by decide : ¬ (29 ≤ 28)) hg.2.1
 
 /-! ## E. Label inventory -/
 
@@ -238,13 +260,11 @@ namespace Qsag.Aggregation
     nonce `70035`) on the digest of `powWitnessSeed` (`"WHIR_STAGE_POW"` under
     `"QSAG.AGG.FS_TRANSCRIPT/v1"`), checked by the Lean kernel. -/
 theorem inhabited_whir_stage_pow_16 :
-    verifyWhirStagePow (stagePowDigest powWitnessSeed) 70035 16 = true := by
-  decide +kernel
+    verifyWhirStagePow (stagePowDigest powWitnessSeed) 70035 16 = true := stage_pow_fixture_accepts
 
 /-- `#tooth` Invalid PoW Nonce Rejection (`powNonce = 0` fails 16-bit PoW on the witness digest). -/
 theorem tooth_whir_pow16_nonce0_rejected :
-    verifyWhirStagePow (stagePowDigest powWitnessSeed) 0 16 = false := by
-  decide +kernel
+    verifyWhirStagePow (stagePowDigest powWitnessSeed) 0 16 = false := stage_pow_fixture_rejects_zero
 
 theorem tooth_whir_pow_nonce_mutation :
     ∃ nonce : Nat, nonce ≠ 70035 ∧
@@ -284,23 +304,25 @@ theorem tooth_whir_dual_ood_samples_enforced :
         sampleFuel := 1 }
     spBad.oodChallenge = deriveStageOodChallenge powWitnessSeed spBad.stageRoot ∧
     verifyOneWhirStage [] [] powWitnessSeed sdom0 spBad none = false := by
-  refine ⟨rfl, rfl, ?_⟩
+  refine ⟨by rw [whirOodSamples.public_eqs], ?_, ?_⟩
+  · simp only [WhirStageProof.oodChallenge.public_eqs, deriveStageOodChallenge.public_eqs]
   apply tooth_whir_wrong_second_ood_challenge_rejected
   intro hEq
+  simp only [WhirStageProof.oodChallenge2.public_eqs] at hEq
   have hSub : CommRingOps.sub
       (CommRingOps.add (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2
         GoldilocksExt4.one)
       (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2 =
       GoldilocksExt4.zero := by
     rw [hEq, LawfulCommRing.sub_self]
+    exact GoldilocksExt4.zero_eq_ringZero.symm
   have hOne : CommRingOps.sub
       (CommRingOps.add (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2
         GoldilocksExt4.one)
       (deriveStageOodChallenges powWitnessSeed (stagePowDigest powWitnessSeed)).2 =
       GoldilocksExt4.one := by
-    change QuarticGoldilocks.sub (QuarticGoldilocks.add _ QuarticGoldilocks.one) _ =
-      QuarticGoldilocks.one
-    constructive_ring
+    rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_comm _ GoldilocksExt4.one,
+      LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
   exact LawfulField.one_ne_zero (F := QuarticGoldilocks) (hOne.symm.trans hSub)
 
 end Qsag.Aggregation
@@ -332,6 +354,16 @@ def canopyAuditCommitment : CanopyDigest32 :=
     (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length 1
       (canopyConstDigest 5) (canopyConstDigest 7))
 
+private theorem canopyAudit_accepts (b : UInt8) :
+    verifyCanopyMultiproof (canopyNodeHashOf canopyPrefixHash canopyPrefixHash_length)
+      (canopyRootHashOf canopyPrefixHash canopyPrefixHash_length) 1 canopyAuditCommitment
+      [(0, canopyConstDigest 5)] [canopyConstDigest b] = true := by
+  rw [verifyCanopyMultiproof_one, decide_eq_true_eq]
+  apply Subtype.ext
+  simp only [canopyAuditCommitment, canopyRootHashOf_val, canopyNodeHashOf_val,
+    canopyNodeFrame.public_eqs, canopyRootFrame.public_eqs, canopyPrefixHash, canopyConstDigest]
+  rfl
+
 /-- Inhabitedness witness for the transcript extractor over a `ByteArray → ByteArray` 32-byte
     digest: under `canopyPrefixHash`, two `CanopyMultiProof` openings of leaf `0` with different
     siblings are both accepted against `canopyAuditCommitment`, so the hypotheses of
@@ -345,10 +377,15 @@ theorem inhabited_canopy_collision_extractor :
         (canopyRootHashOf canopyPrefixHash canopyPrefixHash_length) 1 canopyAuditCommitment
         [(0, canopyConstDigest 5)] [canopyConstDigest 8] = true ∧
     Nonempty (ExtractedHashCollision canopyPrefixHash) :=
-  ⟨by decide, by decide,
+  ⟨canopyAudit_accepts 7, canopyAudit_accepts 8,
     ⟨extractHashCollisionFromCanopyTranscripts canopyPrefixHash canopyPrefixHash_length 1
       canopyAuditCommitment [(0, canopyConstDigest 5)] [(0, canopyConstDigest 5)]
-      [canopyConstDigest 7] [canopyConstDigest 8] rfl (by decide) (by decide) (by decide)⟩⟩
+      [canopyConstDigest 7] [canopyConstDigest 8] rfl
+        (canopyAudit_accepts 7) (canopyAudit_accepts 8) (by
+          intro h
+          have hs := congrArg Prod.snd h
+          have hc := congrArg (fun d : CanopyDigest32 => d.val.data.toList) (List.cons.inj hs).1
+          exact (by decide : List.replicate 32 (7 : UInt8) ≠ List.replicate 32 8) hc)⟩⟩
 
 end Qsag
 end

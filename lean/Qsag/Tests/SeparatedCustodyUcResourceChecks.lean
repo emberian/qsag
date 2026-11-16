@@ -1,8 +1,12 @@
 module
 public import Qsag.Custody.CustodySuiteFull
+meta import Qsag.Custody.CustodySuiteFull
 public import Qsag.Exec.SeparatedCustodyResource
+meta import Qsag.Exec.SeparatedCustodyResource
 public import Qsag.Tests.SeparatedCustodyChecks
+meta import Qsag.Tests.SeparatedCustodyChecks
 public import Qsag.Tests.RssProductionProfileChecks
+meta import Qsag.Tests.RssProductionProfileChecks
 public section
 namespace Qsag.Custody.RequestPolicy.Checks
 set_option autoImplicit false

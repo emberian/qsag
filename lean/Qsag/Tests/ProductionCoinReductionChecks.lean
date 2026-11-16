@@ -1,7 +1,7 @@
 module
 public import Qsag.Oracle.Keccak
 import Qsag.Protocol.Threshold.ProductionCoinReduction
-public import Qsag.Protocol.Threshold.ProductionCoinReduction
+public meta import Qsag.Protocol.Threshold.ProductionCoinReduction
 public import Qsag.Protocol.Threshold.RssSlhFullSecurity
 
 open Qsag Qsag.ProductionCoinReduction
