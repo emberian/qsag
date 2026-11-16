@@ -416,37 +416,45 @@ def hrpQs : Bytes := [113, 115]
 def paid : Bytes := [0x70, 0x61, 0x79]
 def unpaid : Bytes := [0x70, 0x61, 0x7A]
 
+/-- Unfold the hybrid-envelope predicates of `HybridSecurity` through their exported equations,
+together with the fixtures of this section that mention them. -/
+local macro "hybrid_unfold" : tactic => `(tactic| simp only [
+  verifyWith.public_eq_1, validateForAddress.public_eq_1, addressOf.public_eq_1,
+  transcript.public_eq_1, idCommit.public_eq_1, idInput.public_eq_1, keyHash.public_eq_1,
+  hybridWins_eq, mass.public_eq_1, suiteBytes_secpMl44, suiteBytes_edMl65,
+  toyHash, encodePre, transcriptFields, toySign, toyVerifier, envelopeFor, hk])
+
 theorem hybrid_honest_accepts :
     validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 1) ∧
     verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) paid := by
-  unfold validateForAddress verifyWith; decide +kernel
+  hybrid_unfold; decide +kernel
 theorem hybrid_rejects_other_message :
     ¬ verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) unpaid := by
-  unfold verifyWith; decide +kernel
+  hybrid_unfold; decide +kernel
 /-- The envelope carries no HRP or version, so it validates for every address derived from the
 same keys. Network exclusivity has to be bound in the message, as the source module states. -/
 theorem hybrid_envelope_valid_for_every_network :
     validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk [113, 116] 1) ∧
     validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 2) := by
-  unfold validateForAddress; decide +kernel
+  hybrid_unfold; decide +kernel
 /-- Address metadata is bound by the commitment: relabelling the HRP or the version without
 recomputing the commitment is rejected. -/
 theorem hybrid_rejects_relabelled_hrp :
     ¬ validateForAddress toyHash (envelopeFor hk paid)
       { addressOf toyHash hk hrpQs 1 with hrp := [113, 116] } := by
-  unfold validateForAddress; decide +kernel
+  hybrid_unfold; decide +kernel
 theorem hybrid_rejects_relabelled_version :
     ¬ validateForAddress toyHash (envelopeFor hk paid)
       { addressOf toyHash hk hrpQs 1 with version := 2 } := by
-  unfold validateForAddress; decide +kernel
+  hybrid_unfold; decide +kernel
 theorem hybrid_address_commitments_differ :
     (addressOf toyHash hk [113, 116] 1).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment ∧
     (addressOf toyHash hk hrpQs 2).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment := by
-  decide +kernel
+  hybrid_unfold; decide +kernel
 theorem hybrid_rejects_other_keys_address :
     ¬ validateForAddress toyHash (envelopeFor hk paid)
       (addressOf toyHash { hk with classical := [3, 0xA1, 0xA2] } hrpQs 1) := by
-  unfold validateForAddress; decide +kernel
+  hybrid_unfold; decide +kernel
 /-- Identical component keys and one verification algorithm: the role flag in the transcript
 alone keeps a classical-role signature from being accepted in the PQ role. -/
 def twin : Keys := ⟨.secpMl44, [9], [9]⟩
@@ -455,11 +463,11 @@ theorem hybrid_rejects_swapped_roles :
     ¬ verifyWith toyHash toyVerifier toyVerifier
       ⟨twin, (envelopeFor twin paid).pqSignature, (envelopeFor twin paid).classicalSignature⟩
       paid := by
-  unfold verifyWith; decide +kernel
+  hybrid_unfold; simp only [twin, suiteBytes_secpMl44]; decide +kernel
 /-- An honest PQ signature is not accepted next to a substituted classical key. -/
 theorem hybrid_rejects_rogue_partner :
     ¬ (toyVerifier hk.pq (transcript toyHash { hk with classical := [0xEE] } true paid)
-      (envelopeFor hk paid).pqSignature = true) := by decide +kernel
+      (envelopeFor hk paid).pqSignature = true) := by hybrid_unfold; decide +kernel
 
 theorem hybrid_keybound_instance : ∃ (H : HybridSecurity.Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes)
     (v : Nat) (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
@@ -471,6 +479,8 @@ def brokenClassical : Verifier := fun _ _ _ => true
 /-- Output `0`: junk signatures on a fresh message. Output `1`: replay of a queried message. -/
 def advOut (j : Fin 2) : HybridPinnedEnvelope × Bytes :=
   if j.val = 0 then (⟨hk, [0], [0]⟩, unpaid) else (envelopeFor hk paid, paid)
+theorem advOut_zero (h : 0 < 2) : advOut ⟨0, h⟩ = (⟨hk, [0], [0]⟩, unpaid) := by rfl
+theorem advOut_one (h : 0 + 1 < 2) : advOut ⟨0 + 1, h⟩ = (envelopeFor hk paid, paid) := by rfl
 /-- Classical component accepting everything, PQ component binding: the hybrid win mass is
 `0` while the classical component game is won with mass `1`. -/
 theorem robust_combiner_instance :
@@ -482,11 +492,17 @@ theorem robust_combiner_instance :
     mass (fun _ : Fin 2 => 1) (fun j =>
       toyVerifier hk.pq (transcript toyHash hk true (advOut j).2)
         (advOut j).1.pqSignature && decide ((advOut j).2 ∉ [paid])) = 0 := by
+  simp only [mass.public_eq_1, hybridWins_eq, qsum_succ, qsum_zero, advOut_zero, advOut_one]
+  hybrid_unfold
+  simp only [decide_true, Bool.true_and]
   decide +kernel
 /-- Both components accepting everything: the fresh junk output wins. -/
 theorem both_components_broken_instance :
     mass (fun _ : Fin 2 => 1) (fun j =>
       hybridWins toyHash brokenClassical brokenClassical hk hrpQs 1 [paid] (advOut j)) = 1 := by
+  simp only [mass.public_eq_1, hybridWins_eq, qsum_succ, qsum_zero, advOut_zero, advOut_one]
+  hybrid_unfold
+  simp only [decide_true, Bool.true_and]
   decide +kernel
 
 /-! ### Real `cSHAKE256` (`keccakF1600`) + `verifyAggNativeSig` (`Poseidon2` Jorts) Hybrid Envelope -/

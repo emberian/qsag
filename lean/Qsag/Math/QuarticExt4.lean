@@ -1682,4 +1682,21 @@ public section
 
 #verify_constructive Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel
 
+namespace Qsag
+
+/-- A limb equal to `p` (a non-canonical encoding of `0`) is rejected; the zero string decodes
+    to zero. -/
+theorem decodeExt4Bytes32_noncanonical_limb_kat :
+    decodeExt4Bytes32
+      ([1, 0, 0, 0, 255, 255, 255, 255] ++ List.replicate 24 (0 : UInt8)) = none ∧
+    decodeExt4Bytes32 (List.replicate 32 (0 : UInt8)) = some GoldilocksExt4.zero := by
+  decide
+
+/-- The inverse of the base-field element `3` in the quartic extension is nonzero. -/
+theorem GoldilocksField.GoldilocksExt4.inv_three_ne_zero_kat :
+    (⟨⟨⟨3, by decide⟩, ⟨0, by decide⟩⟩, ⟨⟨0, by decide⟩, ⟨0, by decide⟩⟩⟩ :
+      GoldilocksField.GoldilocksExt4)⁻¹ ≠ GoldilocksField.GoldilocksExt4.zero := by decide
+
+end Qsag
+
 end

@@ -783,3 +783,35 @@ namespace Qsag.HybridSecurity
 #tooth_pair security_regime_separation vs tooth_narrow_16byte_frontier_excluded
 
 end Qsag.HybridSecurity
+
+/-! ### Exports for lane misc -/
+
+public section
+namespace Qsag.HybridSecurity
+
+#export_eqns keyHash idInput idCommit addressOf transcript verifyWith validateForAddress
+#export_eqns mass cardinal PolicyAccepts projected burn LedgerStep minted ValidRelease
+#export_eqns advanceWindow advanceAuthorized
+
+theorem hybridWins_eq (H : Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes) (v : Nat)
+    (qs : List Bytes) (o : HybridPinnedEnvelope × Bytes) :
+    hybridWins H vc vp k hrp v qs o =
+      (decide (o.1.keys.suite = k.suite) &&
+      decide (H (.address hrp v o.1.keys.suite (idCommit H o.1.keys)) =
+        (addressOf H k hrp v).commitment) &&
+      vc o.1.keys.classical (transcript H o.1.keys false o.2) o.1.classicalSignature &&
+      vp o.1.keys.pq (transcript H o.1.keys true o.2) o.1.pqSignature && decide (o.2 ∉ qs)) := by
+  rfl
+
+theorem suiteBytes_secpMl44 : suiteBytes .secpMl44 = [5, 1, 0, 1, 1, 1] := by rfl
+theorem suiteBytes_edMl65 : suiteBytes .edMl65 = [5, 2, 0, 2, 1, 2] := by rfl
+
+end Qsag.HybridSecurity
+end
+
+/-! ### Exports for lane sig -/
+public section
+
+#verify_inhabited Qsag.HybridSecurity.one_use_incomparable Qsag.HybridSecurity.incomparable_inhabited
+
+end

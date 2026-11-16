@@ -3528,6 +3528,12 @@ theorem rustSpnIter_chain_kat (rcLit : List (BitVec 128 × BitVec 128))
     (step 16 _ (by decide)).trans K.2.2.1, (step 24 _ (by decide)).trans K.2.2.2.1,
     (step 32 _ (by decide)).trans K.2.2.2.2.1, (step 40 _ (by decide)).trans K.2.2.2.2.2⟩
 
+theorem publicSpnFeedForward_eq (p : PublicPermutation PublicSpnState) (x : PublicSpnState) :
+    publicSpnFeedForward p x = ((p.forward x).1 ^^^ x.1, (p.forward x).2 ^^^ x.2) := by rfl
+
+theorem identityPublicPermutation_forward (x : PublicSpnState) :
+    identityPublicPermutation.forward x = x := by rfl
+
 #verify_constructive spnLinearMix_branch_number_three
   sbox7MaxDiffProb128_eq_three_div_two_pow_127 spnRound128_nonzero_rc_breaks_zero_fixpoint
   spn48_active_sboxes_ge_72

@@ -2206,7 +2206,10 @@ mod base_ntt_tests {
             let expected = encode_rs_coset_goldilocks_cpu(&coeffs, blowup);
             let mut owned = Vec::with_capacity(coeffs.len() * blowup);
             owned.extend_from_slice(&coeffs);
-            assert_eq!(encode_rs_coset_goldilocks_owned_cpu(owned, blowup), expected);
+            assert_eq!(
+                encode_rs_coset_goldilocks_owned_cpu(owned, blowup),
+                expected
+            );
         }
     }
 

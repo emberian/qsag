@@ -11264,3 +11264,27 @@ theorem canopyRootHashOf_val (H : ByteArray → ByteArray)
 #export_eqns canopyNodeFrame canopyRootFrame
 end Qsag
 end
+
+/-! ### Exports for lane misc -/
+
+public section
+namespace Qsag
+set_option maxRecDepth 1000000
+
+/-! Kernel KATs of the native signer and verifier on `compactAuditGeom`, stated on literal keys
+and signatures. Two validators: secret seeds `auditSkSeed` and `(12, 23, 34, 45)`, leaves `0`
+and `1`, target-sum counters `37` and `45`, message `auditMsg`. -/
+
+local notation "L4[" a ", " b ", " c ", " d "]" =>
+  Lane4.mk (Goldilocks.ofNat a) (Goldilocks.ofNat b) (Goldilocks.ofNat c) (Goldilocks.ofNat d)
+
+theorem compactAuditGeom_eq :
+    compactAuditGeom = ⟨.xmssPoseidon2, 2, 3, 1, 1, 0, 0⟩ := by rfl
+
+theorem auditSkSeed_eq : auditSkSeed = L4[11, 22, 33, 44] := by rfl
+theorem auditPkSeed_eq : auditPkSeed = L4[55, 66, 77, 88] := by rfl
+theorem auditRRand_eq : auditRRand = L4[99, 101, 102, 103] := by rfl
+theorem auditMsg_eq : auditMsg = [0x51, 0x53, 0x41, 0x47] := by rfl
+
+end Qsag
+end

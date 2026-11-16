@@ -46,9 +46,9 @@ use alloc::vec::Vec;
 use crate::field::GoldilocksOps as _;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
-    encode_rs_coset_goldilocks_owned_cpu, encode_rs_coset_goldilocks_with_secret, eq_poly_ext4, eval_univariate_base_at_ext4_pair,
-    eval_univariate_ext4, eval_univariate_ext4_at_base, fold_first_var_in_place_ext4,
-    pow2_point_ext4,
+    encode_rs_coset_goldilocks_owned_cpu, encode_rs_coset_goldilocks_with_secret, eq_poly_ext4,
+    eval_univariate_base_at_ext4_pair, eval_univariate_ext4, eval_univariate_ext4_at_base,
+    fold_first_var_in_place_ext4, pow2_point_ext4,
 };
 use crate::sponge::{
     CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE, TURBOSHAKE_CANOPY_MIDSTATE,
@@ -3654,8 +3654,7 @@ fn build_cpu_round0(
     group_arity_0: usize,
     secret: bool,
 ) -> (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
-    let (monomial_coeffs_0, codewords_0) =
-        build_cpu_round0_codewords(polys, blowup, secret, true);
+    let (monomial_coeffs_0, codewords_0) = build_cpu_round0_codewords(polys, blowup, secret, true);
     let tree_0 = build_cpu_round0_tree(&codewords_0, salt_seed, regime, group_arity_0);
     (monomial_coeffs_0, codewords_0, tree_0)
 }
@@ -3668,11 +3667,17 @@ fn build_cpu_round0_codewords(
 ) -> (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>) {
     let encode = |evals: &Vec<Goldilocks>| {
         if evals.len() >= (1 << 22) {
-            let domain_len = evals.len().checked_mul(blowup).expect("RS domain size overflow");
+            let domain_len = evals
+                .len()
+                .checked_mul(blowup)
+                .expect("RS domain size overflow");
             let mut coeffs = Vec::with_capacity(domain_len);
             coeffs.extend_from_slice(evals);
             hypercube_to_monomial_in_place(&mut coeffs, 1 << 14);
-            return (Vec::new(), encode_rs_coset_goldilocks_owned_cpu(coeffs, blowup));
+            return (
+                Vec::new(),
+                encode_rs_coset_goldilocks_owned_cpu(coeffs, blowup),
+            );
         }
         let mut coeffs = hypercube_to_monomial_coeffs(evals);
         let codeword = encode_rs_coset_goldilocks_with_secret(&coeffs, blowup, secret);
@@ -4279,7 +4284,9 @@ fn whir_open_core(
                 }
                 let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) =
                     match &lazy_cpu_r0 {
-                        Some((codewords, tree)) => (codewords.as_slice(), tree.as_ref().unwrap_or(&state.tree_0)),
+                        Some((codewords, tree)) => {
+                            (codewords.as_slice(), tree.as_ref().unwrap_or(&state.tree_0))
+                        }
                         None => (state.codewords_0.as_slice(), &state.tree_0),
                     };
                 let num_groups_0 = state.num_groups_0();
@@ -4432,7 +4439,9 @@ fn whir_open_core(
                 }
                 let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) =
                     match &lazy_cpu_r0 {
-                        Some((codewords, tree)) => (codewords.as_slice(), tree.as_ref().unwrap_or(&state.tree_0)),
+                        Some((codewords, tree)) => {
+                            (codewords.as_slice(), tree.as_ref().unwrap_or(&state.tree_0))
+                        }
                         None => (state.codewords_0.as_slice(), &state.tree_0),
                     };
                 let num_groups_0 = state.num_groups_0();

@@ -2308,3 +2308,41 @@ theorem inhabited_rssSacrificedSignStep_mldsaQ6_frozen_soundness :
   inhabited_rssSacrificedSignStep_mldsaQ6_frozen_soundness
 
 end Qsag
+
+/-! ### Exports for lane cust -/
+
+public section
+namespace Qsag
+
+/-- Zero shares with multiplication shift `1`: the reconstructed product is off by the shift. -/
+theorem rss3_zero_shares_unit_shift_recon_ne :
+    rss3Recon (rss3MulStep ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩
+        ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩ Fq204.zero Fq204.zero Fq204.one) ≠
+      Fq204.mul (rss3Recon ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩)
+        (rss3Recon ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩) := by decide
+
+/-- The shifted gate with triple error `1` is refused by one sacrifice at the zero challenge. -/
+theorem rss3_zero_shares_unit_shift_sacrifice_rejected :
+    sacAcceptRepeated [ext6Zero]
+      (rss3ToSacGate ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩ ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩
+        Fq204.zero Fq204.zero Fq204.one ext6Zero ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩
+        (ext6EmbedFq Fq204.one)) = false := by
+  show (sacAccept204 ext6Zero _ && true) = false
+  rw [Bool.and_true]
+  exact sacAccept204_zero_challenge_shifted_gate_rejected
+
+/-- The shifted gate with a correct triple passes one sacrifice at the zero challenge, which is
+its bad challenge. -/
+theorem rss3_zero_shares_unit_shift_sacrifice_accepted :
+    sacAcceptRepeated [ext6Zero]
+      (rss3ToSacGate ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩ ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩
+        Fq204.zero Fq204.zero Fq204.one ext6Zero ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩
+        ext6Zero) = true := by
+  show (sacAccept204 ext6Zero _ && true) = true
+  rw [Bool.and_true]
+  exact sacAccept204_zero_challenge_shifted_gate_accepted
+
+#verify_constructive rss3_repeated_sacrifice_pq256
+
+end Qsag
+end

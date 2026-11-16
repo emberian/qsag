@@ -5103,3 +5103,14 @@ theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSi
 
 end Qsag.Spec
 end
+
+/-! ### Exports for lane cust -/
+
+public section
+namespace Qsag.Spec
+
+theorem honestChannelRun_singleton (m : ChannelMsg) :
+    honestChannelRun [m] = [.send m, .deliver m] := by rfl
+
+end Qsag.Spec
+end

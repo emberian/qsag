@@ -8,8 +8,7 @@
 // k/2 of either bank is read before any result that lands on it is written. A round over n
 // entries takes n/2 + FOLD_LAT clocks. The last result (n = 2) is also latched in `fold_res`.
 //
-// The same MAC is offered to the surrounding logic on the `mac_*` port (Horner evaluation of
-// sumcheck round polynomials, single products) whenever no fold is running.
+// The same 9-multiply Karatsuba MAC is offered to the surrounding logic on `mac_*`.
 // Table entries and operands must be canonical.
 module qsag_ext4_mac_bfly #(
     parameter int TAW = 10,
@@ -95,12 +94,21 @@ module qsag_ext4_mac_bfly #(
         .clk(clk), .we(bw_en && bw_idx[0]), .wa(bw_idx[TAW-1:1]), .wd(wr_data),
         .ra(k[BAW-1:0]), .rd(od_rd));
 
-    // d = odd - even (mod p), one stage.
+    // d = odd - even (mod p), parallel speculative subtract + split carry (no cascaded carry chain!).
     logic [255:0] d_q, e_q;
     for (genvar i = 0; i < 4; i++) begin : g_sub
-        logic [64:0] df;
-        assign df = {1'b0, od_rd[64*i +: 64]} - {1'b0, ev_rd[64*i +: 64]};
-        always_ff @(posedge clk) d_q[64*i +: 64] <= df[64] ? (df[63:0] + GL_P) : df[63:0];
+        wire [63:0] od_i = od_rd[64*i +: 64];
+        wire [63:0] ev_i = ev_rd[64*i +: 64];
+        /* verilator lint_off UNUSEDSIGNAL */
+        logic [64:0] d_raw, d_addp;
+        /* verilator lint_on UNUSEDSIGNAL */
+        // d_raw  = {1'b0, od_i} + ~{1'b0, ev_i} + 1
+        // d_addp = {1'b0, od_i} + ~{1'b0, ev_i} + (GL_P + 1)
+        qsag_sum_csa #(.W(65), .N(3), .CHUNK(16)) u_dr (
+            .x({65'd1, ~{1'b0, ev_i}, {1'b0, od_i}}), .y(d_raw));
+        qsag_sum_csa #(.W(65), .N(3), .CHUNK(16)) u_dp (
+            .x({{1'b0, GL_P} + 65'd1, ~{1'b0, ev_i}, {1'b0, od_i}}), .y(d_addp));
+        always_ff @(posedge clk) d_q[64*i +: 64] <= d_raw[64] ? d_addp[63:0] : d_raw[63:0];
     end
     always_ff @(posedge clk) e_q <= ev_rd;
 

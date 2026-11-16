@@ -4138,3 +4138,15 @@ end
 #verify_constructive Qsag.evalProdAdaptiveTree_budgets
   Qsag.prodAdaptive_eufCma_to_budgeted_events
   Qsag.corduroyCustody128_target_pool_budget
+
+/-! ### Exports for lane sig -/
+public section
+namespace Qsag
+
+#export_eqns eufCmaWithinWin eufCmaRealWithinWins smDtTcrWithinWin smDtTcrWithinWins
+  smDtTcrChallengerCheck tcrExtractorAdv advCollectTcrSubmissions HashSignAdv.map HashSignAdv.bind
+  advRawHash runHashSignAdv challengerSignStep challengerEpochConflict bestTcrExtractorAdv
+  runSeedWithheldEufCma evalProdAdaptiveTree publicVerifierWithTcrCands hypertreeLayersWithCands
+
+end Qsag
+end

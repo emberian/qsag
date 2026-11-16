@@ -4194,6 +4194,8 @@ end
 public section
 namespace Qsag
 
+#export_eqns AdrsKind.toCode tagHMsg tagHPre zeroAdrs tagPrfMsg
+
 theorem ProductionParameterProfile_iff (p : PqHashParams) :
     ProductionParameterProfile p ↔ p.productionWellFormed = true := Iff.rfl
 
