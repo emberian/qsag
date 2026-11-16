@@ -566,12 +566,12 @@ theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂
   cshake256_encodings_ne m₁ m₂ hN₁ hS₁ hN₂ hS₂ hNe
 
 theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
-    absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyLeaf ++ m₁) ≠
-      absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyNode ++ m₂) ∧
-    absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyLeaf ++ m₁) ≠
-      absorbPayload 136 domCshake256 (cshakePrefix [] tagWhirFold ++ m₂) ∧
-    absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyNode ++ m₁) ≠
-      absorbPayload 136 domCshake256 (cshakePrefix [] tagWhirFold ++ m₂) :=
+    absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyLeaf ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyNode ++ m₂) ∧
+    absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyLeaf ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFiatShamir ++ m₂) ∧
+    absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFiatShamir ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagFtsOtPad ++ m₂) :=
   qsag_tags_sponge_encodings_ne m₁ m₂
 end Qsag
 end
