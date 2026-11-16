@@ -3537,6 +3537,7 @@ pub(crate) fn lane_bytes(words: &[u64], lane: usize) -> Vec<u8> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn encode<B: ShareBit>(out: &mut Word<B>, value: &[B]) {
     out.extend_from_slice(value);
     out.resize(out.len().div_ceil(8) * 8, B::default());
