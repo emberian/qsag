@@ -14,7 +14,7 @@ use qsag_accel::gf2_128::gf2_128_mul;
 use qsag_accel::goldilocks::pack_bytes32_to_limbs56;
 use qsag_accel::keccak::{commit_mpc_broadcast, cshake256_framed_32, cshake256_framed_xof};
 use qsag_accel::poseidon2::poseidon2_hash_limbs;
-use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretVec};
+use qsag_asm::wipe::{SecretBuffer, SecretBytes, SecretVec, SecretWipe, wipe};
 
 /// Nonzero MDS diffusion constants in $\mathbb{F}_{2^{128}}$ for 2-lane Davies-Meyer compression.
 const GF128_MDS_A: u128 = 0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835;
@@ -22,8 +22,9 @@ const GF128_MDS_B: u128 = 0xBF58_476D_1CE4_E5B9_94D0_49BB_1331_11EB;
 
 /// Maximum default allocation of single-use authenticated power tuples per party.
 pub const DEFAULT_BEAVER_TRIPLE_POOL: usize = 131_072;
-/// Upper bound on public `grind_counter` trials enforced symmetrically by signing, canonical
-/// wire decoding, and verification.
+/// Exclusive upper bound on the public `grind_counter`. Signing tries counters below it;
+/// the canonical decoder and the verifier refuse a counter at or above it before hashing
+/// anything under it.
 pub const MAX_GRIND_COUNTER: u32 = 1_000_000;
 const SPN_ROUNDS: usize = 48;
 
@@ -163,10 +164,15 @@ struct AuthWire128 {
     mac: [u128; 2],
 }
 
-impl Drop for AuthWire128 {
-    fn drop(&mut self) {
+impl SecretWipe for AuthWire128 {
+    fn secret_wipe(&mut self) {
         ct_zeroize_u128s(core::slice::from_mut(&mut self.val_sh));
         ct_zeroize_u128s(&mut self.mac);
+    }
+}
+impl Drop for AuthWire128 {
+    fn drop(&mut self) {
+        self.secret_wipe();
     }
 }
 impl Drop for AuthenticatedPowerShare {
@@ -270,12 +276,37 @@ impl ParallelSeededPartyShare {
         self.poisoned = true;
         self.clear_pending_openings();
     }
+    /// Erases every pending opening and the spare capacity behind them. The zeroed
+    /// allocation is kept for the next batch.
     pub(crate) fn clear_pending_openings(&mut self) {
-        // The authenticated wire wipes itself when dropped.
-        for (opened, _) in &mut self.pending_openings {
-            ct_zeroize_u128s(core::slice::from_mut(opened));
-        }
+        wipe(&mut self.pending_openings);
         self.pending_openings.clear();
+    }
+    /// Room for `additional` more pending openings. Each entry carries this party's
+    /// share and MAC share of a masked wire, so the buffer never grows through `Vec`'s
+    /// own reallocation, which would free the old storage as it is. Growth copies the
+    /// entries into the larger allocation and erases the old one, entries and spare
+    /// capacity, before releasing it.
+    fn reserve_pending_openings(&mut self, additional: usize) {
+        let needed = self.pending_openings.len().saturating_add(additional);
+        if needed <= self.pending_openings.capacity() {
+            return;
+        }
+        let mut grown = Vec::with_capacity(needed);
+        grown.extend(self.pending_openings.iter().cloned());
+        wipe(&mut self.pending_openings);
+        #[cfg(test)]
+        pending_probe::retired(&self.pending_openings);
+        self.pending_openings = grown;
+    }
+    /// Records a masked opening for the next intermediate MAC check. Callers that know
+    /// the batch size reserve it first with [`Self::reserve_pending_openings`]; a push
+    /// past the reservation still goes through the erasing growth path.
+    fn push_pending_opening(&mut self, opened: u128, wire: AuthWire128) {
+        if self.pending_openings.len() == self.pending_openings.capacity() {
+            self.reserve_pending_openings(self.pending_openings.len().max(4));
+        }
+        self.pending_openings.push((opened, wire));
     }
     fn erase(&mut self) {
         self.clear_pending_openings();
@@ -334,7 +365,8 @@ impl ParallelSeededSignature {
         out
     }
 
-    /// Strict decoder: exact length for `params`, an in-range epoch, and canonical field limbs.
+    /// Strict decoder: exact length for `params`, an in-range epoch, a grind counter below
+    /// [`MAX_GRIND_COUNTER`], and canonical field limbs.
     pub fn from_bytes_canonical(
         params: &ParallelSeededParams,
         bytes: &[u8],
@@ -350,6 +382,10 @@ impl ParallelSeededSignature {
         if (epoch as u64) >> params.tree_height != 0 {
             return Err(ParallelSeededError::EpochOutOfRange);
         }
+        let grind_counter = word(36);
+        if grind_counter >= MAX_GRIND_COUNTER {
+            return Err(malformed);
+        }
         let mut randomizer = [0u8; 32];
         randomizer.copy_from_slice(&bytes[4..36]);
         let (nodes, siblings) = bytes[40..].split_at(32 * params.num_chains);
@@ -364,10 +400,6 @@ impl ParallelSeededSignature {
                 }
             }
             merkle_siblings.push(limbs);
-        }
-        let grind_counter = word(36);
-        if grind_counter >= MAX_GRIND_COUNTER {
-            return Err(malformed);
         }
         Ok(Self {
             epoch,
@@ -640,6 +672,8 @@ fn derive_sum_constrained_offsets(
     let ctr_be = counter.to_be_bytes();
     let mut storage = [0u8; 512];
     let stream = storage.get_mut(..params.num_chains.checked_mul(2)?)?;
+    #[cfg(test)]
+    grind_probe::derived();
     cshake256_framed_xof(
         b"QSAG.PSFTS.HMSG.V2",
         &[pk_seed, &root_bytes, &ep_be, randomizer, &ctr_be, msg],
@@ -663,6 +697,70 @@ fn derive_sum_constrained_offsets(
         Some(out[..params.num_chains].to_vec())
     } else {
         None
+    }
+}
+
+/// Counts, on the current thread, the pending-opening buffers that growth retired while
+/// they held entries, and how many of those entries were still nonzero after the erase.
+#[cfg(test)]
+pub(crate) mod pending_probe {
+    extern crate std;
+    use core::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct Counts {
+        /// Retired buffers that held at least one entry.
+        pub(crate) buffers: usize,
+        /// Entries those buffers held.
+        pub(crate) entries: usize,
+        /// Entries read back nonzero from a retired buffer.
+        pub(crate) unerased: usize,
+    }
+    std::thread_local! {
+        static COUNTS: Cell<Counts> = const {
+            Cell::new(Counts { buffers: 0, entries: 0, unerased: 0 })
+        };
+    }
+    pub(crate) fn reset() {
+        COUNTS.with(|c| c.set(Counts::default()));
+    }
+    pub(crate) fn counts() -> Counts {
+        COUNTS.with(Cell::get)
+    }
+    /// Reads the retired buffer back after the erase and before it is released.
+    pub(super) fn retired(old: &[(u128, super::AuthWire128)]) {
+        let unerased = old
+            .iter()
+            .filter(|(opened, wire)| *opened != 0 || wire.val_sh != 0 || wire.mac != [0; 2])
+            .count();
+        COUNTS.with(|c| {
+            let mut counts = c.get();
+            counts.buffers += usize::from(!old.is_empty());
+            counts.entries += old.len();
+            counts.unerased += unerased;
+            c.set(counts);
+        });
+    }
+}
+
+/// Counts, on the current thread, the codeword derivations (one XOF call each) that a
+/// verification or a grind performs.
+#[cfg(test)]
+pub(crate) mod grind_probe {
+    extern crate std;
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static DERIVED: Cell<usize> = const { Cell::new(0) };
+    }
+    pub(crate) fn reset() {
+        DERIVED.with(|c| c.set(0));
+    }
+    pub(crate) fn count() -> usize {
+        DERIVED.with(Cell::get)
+    }
+    pub(super) fn derived() {
+        DERIVED.with(|c| c.set(c.get() + 1));
     }
 }
 
@@ -749,9 +847,9 @@ fn mpc_pow7(
     }
     let mut out = Vec::with_capacity(shares.len());
     for (party, (sh, xi)) in shares.iter_mut().zip(x).enumerate() {
+        let masked = auth_xor(xi, &sh.beaver_pool[sh.beaver_cursor].powers[0]);
+        sh.push_pending_opening(d, masked);
         let power = &mut sh.beaver_pool[sh.beaver_cursor];
-        sh.pending_openings
-            .push((d, auth_xor(xi, &power.powers[0])));
         out.push(apply_power(power, d, sh.bdoz_alpha_share, party == 0));
         power.zeroize();
         sh.beaver_cursor += 1;
@@ -790,6 +888,18 @@ fn mpc_algebraic_step(
         *y = auth_xor(y, v);
     }
     Ok((state0, state1))
+}
+
+/// One batch of authenticated wires to open behind the MAC check: `wires[k][p]` is party
+/// `p`'s share of wire `k`.
+struct WireOpening<'r> {
+    session_id: &'r [u8; 32],
+    round_tag: u32,
+    wires: &'r [Vec<AuthWire128>],
+    /// The constant-sum codeword the wires answer, when they are signature chain nodes.
+    signature_codeword: Option<&'r [u8]>,
+    /// `(party, wire, delta)` added to one broadcast share; `None` outside fault tests.
+    injected_fault: Option<(usize, usize, u128)>,
 }
 
 /// Clears every party's pending masked openings when an opening attempt ends,
@@ -1203,6 +1313,10 @@ impl ParallelSeededThresholdSetup {
         );
         let n = self.shares.len();
 
+        // Two masked openings per round of the randomizer step.
+        for sh in &mut self.shares {
+            sh.reserve_pending_openings(2 * SPN_ROUNDS);
+        }
         // Authenticated evaluation of `randomizer` (`0` sk_prf reconstruction!)
         let prf_in0: Vec<AuthWire128> = self
             .shares
@@ -1238,7 +1352,7 @@ impl ParallelSeededThresholdSetup {
         // Public grinding (`0` MPC rounds!)
         let mut chosen_ctr = None;
         let mut chosen_offsets = Vec::new();
-        for ctr in 0..1_000_000u32 {
+        for ctr in 0..MAX_GRIND_COUNTER {
             if let Some(offs) = derive_sum_constrained_offsets(
                 &self.pk.params,
                 &self.pk.pk_seed_bytes,
@@ -1255,6 +1369,12 @@ impl ParallelSeededThresholdSetup {
         }
         let grind_counter = chosen_ctr.ok_or(ParallelSeededError::GrindingExhausted)?;
 
+        // One seed step per chain plus `target_sum` chain steps, two openings per round.
+        let chain_openings =
+            2 * SPN_ROUNDS * (self.pk.params.num_chains + self.pk.params.target_sum);
+        for sh in &mut self.shares {
+            sh.reserve_pending_openings(chain_openings);
+        }
         // Authenticated evaluation of all `L` parallel chains (`0` sk_seed reconstruction!)
         let seed_in0: Vec<AuthWire128> = (0..n)
             .map(|p| AuthWire128 {
@@ -1356,26 +1476,30 @@ impl ParallelSeededThresholdSetup {
         Self::open_and_verify_shares(
             &mut self.shares,
             &params,
+            WireOpening {
+                session_id,
+                round_tag,
+                wires,
+                signature_codeword,
+                injected_fault,
+            },
+            accel,
+        )
+    }
+
+    fn open_and_verify_shares<B: AcceleratorBackend>(
+        shares: &mut [ParallelSeededPartyShare],
+        params: &ParallelSeededParams,
+        opening: WireOpening<'_>,
+        accel: &B,
+    ) -> Result<Vec<u128>, ParallelSeededError> {
+        let WireOpening {
             session_id,
             round_tag,
             wires,
             signature_codeword,
             injected_fault,
-            accel,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn open_and_verify_shares<B: AcceleratorBackend>(
-        shares: &mut [ParallelSeededPartyShare],
-        params: &ParallelSeededParams,
-        session_id: &[u8; 32],
-        round_tag: u32,
-        wires: &[Vec<AuthWire128>],
-        signature_codeword: Option<&[u8]>,
-        injected_fault: Option<(usize, usize, u128)>,
-        accel: &B,
-    ) -> Result<Vec<u128>, ParallelSeededError> {
+        } = opening;
         // Declared first, so it is dropped last: every exit below clears the
         // pending openings after the MAC rounds have released their shares.
         let pending_guard = PendingOpeningsGuard(shares);
@@ -1415,11 +1539,13 @@ impl ParallelSeededThresholdSetup {
             Self::open_and_verify_shares(
                 shares,
                 params,
-                session_id,
-                round_tag ^ 0x8000_0000,
-                &combined,
-                None,
-                None,
+                WireOpening {
+                    session_id,
+                    round_tag: round_tag ^ 0x8000_0000,
+                    wires: &combined,
+                    signature_codeword: None,
+                    injected_fault: None,
+                },
                 accel,
             )?;
         }
@@ -1540,6 +1666,8 @@ impl ParallelSeededThresholdSetup {
     }
 }
 
+/// Refuses a signature whose counter is not the first one that yields a constant-sum
+/// codeword. Costs up to `grind_counter` hashes, so callers bound the counter first.
 pub(crate) fn verify_canonical_minimal_grind_counter(
     pk: &ParallelSeededPublicKey,
     msg: &[u8],
@@ -1593,6 +1721,7 @@ pub fn verify_parallel_seeded_fts<B: AcceleratorBackend>(
     if (sig.epoch as usize) >= (1usize << params.tree_height) {
         return Err(ParallelSeededError::EpochOutOfRange);
     }
+    // Before the first hash that depends on `grind_counter`.
     if sig.chain_nodes.len() != params.num_chains
         || sig.merkle_siblings.len() != params.tree_height
         || sig.grind_counter >= MAX_GRIND_COUNTER
@@ -1645,6 +1774,8 @@ pub fn verify_parallel_seeded_fts<B: AcceleratorBackend>(
     if cur_hash != pk.merkle_root {
         return Err(ParallelSeededError::SignatureVerificationFailed);
     }
+    // Last: the scan below hashes once per counter under `grind_counter`, so it runs
+    // only for a signature whose chains and Merkle path already authenticate.
     verify_canonical_minimal_grind_counter(pk, msg, sig)?;
     Ok(())
 }
@@ -2099,7 +2230,6 @@ mod boundary_tests {
 mod secret_guard_tests {
     use super::*;
     use core::cell::Cell;
-    use qsag_asm::wipe::SecretWipe;
 
     /// Counts erasures of slots that still hold a value.
     #[derive(Clone, Copy)]
@@ -2160,41 +2290,231 @@ mod secret_guard_tests {
         );
         assert!(setup.shares.iter().all(|s| s.pending_openings.is_empty()));
     }
+}
 
-    #[test]
-    fn verifier_and_decoder_reject_excessive_grind_counter_in_o1() {
-        let accel = qsag_accel::CpuReferenceBackend::new();
-        let params = ParallelSeededParams {
-            tree_height: 1,
-            winternitz_w: 2,
-            num_chains: 2,
-            target_sum: 1,
-        };
-        let setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
-            params,
+#[cfg(test)]
+mod pending_opening_tests {
+    use super::*;
+    use qsag_accel::CpuReferenceBackend;
+
+    const PARAMS: ParallelSeededParams = ParallelSeededParams {
+        tree_height: 1,
+        winternitz_w: 2,
+        num_chains: 2,
+        target_sum: 1,
+    };
+    fn setup() -> ParallelSeededThresholdSetup {
+        ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            PARAMS,
             2,
-            [71; 32],
-            [72; 32],
-            &accel,
+            [81; 32],
+            [82; 32],
+            &CpuReferenceBackend,
+        )
+        .unwrap()
+    }
+    fn entry(i: u128) -> (u128, AuthWire128) {
+        (
+            i + 1,
+            AuthWire128 {
+                val_sh: 100 + i,
+                mac: [200 + i, 300 + i],
+            },
+        )
+    }
+    fn same(a: &(u128, AuthWire128), b: &(u128, AuthWire128)) -> bool {
+        a.0 == b.0 && a.1.val_sh == b.1.val_sh && a.1.mac == b.1.mac
+    }
+
+    /// Pushing past the capacity moves the entries to a larger buffer and erases the one
+    /// they leave. The probe reads the retired buffer back after the erase.
+    #[test]
+    fn growth_keeps_every_entry_and_erases_the_retired_buffer() {
+        let mut setup = setup();
+        let share = &mut setup.shares[0];
+        pending_probe::reset();
+        for i in 0..4 {
+            let (opened, wire) = entry(i);
+            share.push_pending_opening(opened, wire);
+        }
+        // The first allocation replaced an empty buffer: nothing to erase yet.
+        assert_eq!(pending_probe::counts(), pending_probe::Counts::default());
+        assert_eq!(share.pending_openings.len(), share.pending_openings.capacity());
+        let (opened, wire) = entry(4);
+        share.push_pending_opening(opened, wire);
+        assert_eq!(
+            pending_probe::counts(),
+            pending_probe::Counts {
+                buffers: 1,
+                entries: 4,
+                unerased: 0
+            }
+        );
+        assert_eq!(share.pending_openings.len(), 5);
+        for (i, held) in share.pending_openings.iter().enumerate() {
+            assert!(same(held, &entry(i as u128)), "entry {i}");
+        }
+        // A reservation that already fits changes nothing.
+        let (before, capacity) = (
+            share.pending_openings.as_ptr(),
+            share.pending_openings.capacity(),
+        );
+        share.reserve_pending_openings(capacity - 5);
+        assert_eq!(share.pending_openings.as_ptr(), before);
+        assert_eq!(share.pending_openings.capacity(), capacity);
+        assert_eq!(pending_probe::counts().buffers, 1);
+
+        share.clear_pending_openings();
+        assert!(share.pending_openings.is_empty());
+        assert_eq!(share.pending_openings.as_ptr(), before);
+    }
+
+    /// The reference runner reserves each batch before the first masked opening, so no
+    /// buffer holding shares is ever replaced during a signature.
+    #[test]
+    fn reference_signing_never_regrows_a_buffer_that_holds_openings() {
+        let accel = CpuReferenceBackend::new();
+        let mut setup = setup();
+        pending_probe::reset();
+        let sig = setup
+            .threshold_sign(
+                0,
+                b"reserved",
+                [83; 32],
+                &mut InMemoryBurnLog::default(),
+                &accel,
+            )
+            .unwrap();
+        verify_parallel_seeded_fts(&setup.pk, b"reserved", &sig, &accel).unwrap();
+        assert_eq!(pending_probe::counts(), pending_probe::Counts::default());
+        let chain_openings = 2 * SPN_ROUNDS * (PARAMS.num_chains + PARAMS.target_sum);
+        for share in &setup.shares {
+            assert!(share.pending_openings.is_empty());
+            assert!(share.pending_openings.capacity() >= chain_openings);
+        }
+    }
+}
+
+#[cfg(test)]
+mod grind_counter_tests {
+    use super::*;
+    use qsag_accel::CpuReferenceBackend;
+
+    const PARAMS: ParallelSeededParams = ParallelSeededParams {
+        tree_height: 1,
+        winternitz_w: 2,
+        num_chains: 2,
+        target_sum: 1,
+    };
+    const MSG: &[u8] = b"grind-counter";
+
+    fn signed() -> (ParallelSeededPublicKey, ParallelSeededSignature) {
+        let accel = CpuReferenceBackend::new();
+        let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            PARAMS, 2, [71; 32], [72; 32], &accel,
         )
         .unwrap();
-        for bad_ctr in [MAX_GRIND_COUNTER, u32::MAX] {
-            let sig = ParallelSeededSignature {
-                epoch: 0,
-                randomizer: [0x55; 32],
-                grind_counter: bad_ctr,
-                chain_nodes: vec![[0u8; 32]; params.num_chains],
-                merkle_siblings: vec![[0u64; 4]; params.tree_height],
-            };
-            let wire = sig.to_bytes();
+        let sig = setup
+            .threshold_sign(0, MSG, [73; 32], &mut InMemoryBurnLog::default(), &accel)
+            .unwrap();
+        verify_parallel_seeded_fts(&setup.pk, MSG, &sig, &accel).unwrap();
+        (setup.pk.clone(), sig)
+    }
+    fn offsets_at(
+        pk: &ParallelSeededPublicKey,
+        sig: &ParallelSeededSignature,
+        counter: u32,
+    ) -> Option<Vec<u8>> {
+        derive_sum_constrained_offsets(
+            &pk.params,
+            &pk.pk_seed_bytes,
+            &pk.merkle_root,
+            sig.epoch,
+            &sig.randomizer,
+            MSG,
+            counter,
+        )
+    }
+
+    #[test]
+    fn decoder_refuses_a_counter_at_or_above_the_bound() {
+        let (_, mut sig) = signed();
+        sig.grind_counter = MAX_GRIND_COUNTER - 1;
+        assert_eq!(
+            ParallelSeededSignature::from_bytes_canonical(&PARAMS, &sig.to_bytes()),
+            Ok(sig.clone())
+        );
+        for counter in [MAX_GRIND_COUNTER, MAX_GRIND_COUNTER + 1, u32::MAX] {
+            sig.grind_counter = counter;
             assert_eq!(
-                ParallelSeededSignature::from_bytes_canonical(&params, &wire).err(),
-                Some(ParallelSeededError::SignatureVerificationFailed)
-            );
-            assert_eq!(
-                verify_parallel_seeded_fts(&setup.pk, b"dos-probe", &sig, &accel).err(),
-                Some(ParallelSeededError::SignatureVerificationFailed)
+                ParallelSeededSignature::from_bytes_canonical(&PARAMS, &sig.to_bytes()),
+                Err(ParallelSeededError::SignatureVerificationFailed),
+                "counter {counter}"
             );
         }
+    }
+
+    /// An oversized counter is refused before a single codeword derivation, on an
+    /// otherwise authentic signature.
+    #[test]
+    fn verifier_refuses_an_oversized_counter_before_any_derivation() {
+        let accel = CpuReferenceBackend::new();
+        let (pk, mut sig) = signed();
+        for counter in [MAX_GRIND_COUNTER, MAX_GRIND_COUNTER + 1, u32::MAX] {
+            sig.grind_counter = counter;
+            grind_probe::reset();
+            assert_eq!(
+                verify_parallel_seeded_fts(&pk, MSG, &sig, &accel),
+                Err(ParallelSeededError::SignatureVerificationFailed),
+                "counter {counter}"
+            );
+            assert_eq!(grind_probe::count(), 0, "counter {counter}");
+        }
+    }
+
+    /// A forgery pays for one derivation: its chains fail before the scan over the
+    /// counters below its own.
+    #[test]
+    fn forged_chains_are_refused_before_the_minimal_counter_scan() {
+        let accel = CpuReferenceBackend::new();
+        let (pk, sig) = signed();
+        // A later counter that also yields a codeword, so the forgery reaches the chains.
+        let later = (sig.grind_counter + 1..MAX_GRIND_COUNTER)
+            .find(|&counter| offsets_at(&pk, &sig, counter).is_some())
+            .unwrap();
+        let mut forged = sig.clone();
+        forged.grind_counter = later;
+        forged.chain_nodes[0][0] ^= 1;
+        forged.chain_nodes[1][31] ^= 0x80;
+        grind_probe::reset();
+        assert_eq!(
+            verify_parallel_seeded_fts(&pk, MSG, &forged, &accel),
+            Err(ParallelSeededError::SignatureVerificationFailed)
+        );
+        assert_eq!(grind_probe::count(), 1);
+    }
+
+    /// A counter that is not the first valid one is refused even when the chains and the
+    /// Merkle path authenticate: the scan still runs, after them.
+    #[test]
+    fn non_minimal_counter_is_refused_on_authentic_chains() {
+        let accel = CpuReferenceBackend::new();
+        let (pk, sig) = signed();
+        let minimal = sig.grind_counter;
+        let codeword = offsets_at(&pk, &sig, minimal).unwrap();
+        assert!((0..minimal).all(|counter| offsets_at(&pk, &sig, counter).is_none()));
+        // A later counter with the same codeword: the same chain nodes answer it.
+        let later = (minimal + 1..MAX_GRIND_COUNTER)
+            .find(|&counter| offsets_at(&pk, &sig, counter).as_ref() == Some(&codeword))
+            .unwrap();
+        let mut replayed = sig.clone();
+        replayed.grind_counter = later;
+        grind_probe::reset();
+        assert_eq!(
+            verify_parallel_seeded_fts(&pk, MSG, &replayed, &accel),
+            Err(ParallelSeededError::SignatureVerificationFailed)
+        );
+        // Its own derivation, then the scan up to and including the minimal counter.
+        assert_eq!(grind_probe::count(), 1 + minimal as usize + 1);
     }
 }

@@ -36,6 +36,7 @@ pub(crate) mod probe {
         static CREATED: Cell<usize> = const { Cell::new(0) };
         static WIPED: Cell<usize> = const { Cell::new(0) };
         static RELEASED: Cell<usize> = const { Cell::new(0) };
+        static QUARANTINED_ON_DROP: Cell<usize> = const { Cell::new(0) };
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +50,7 @@ pub(crate) mod probe {
         CREATED.with(|c| c.set(0));
         WIPED.with(|c| c.set(0));
         RELEASED.with(|c| c.set(0));
+        QUARANTINED_ON_DROP.with(|c| c.set(0));
     }
     pub(crate) fn counts() -> Counts {
         Counts {
@@ -65,6 +67,13 @@ pub(crate) mod probe {
     }
     pub(super) fn released() {
         RELEASED.with(|c| c.set(c.get() + 1));
+    }
+    /// Held sessions that were still live when dropped and left their slot quarantined.
+    pub(crate) fn quarantined_on_drop() -> usize {
+        QUARANTINED_ON_DROP.with(Cell::get)
+    }
+    pub(super) fn quarantined_a_live_session_on_drop() {
+        QUARANTINED_ON_DROP.with(|c| c.set(c.get() + 1));
     }
 }
 
@@ -121,8 +130,55 @@ impl Drop for OpenedCandidates {
     }
 }
 
+/// One verified session in a fixed slot.
+///
+/// `FtsDeferredMacSession` transitions consume the session and return its successor.
+/// [`Self::step`] stores the successor in the slot its predecessor occupied, so the
+/// candidate wires never move to another allocation, and a refusing transition, whose
+/// successor is the quarantined session with zero wires, overwrites them where they were.
+///
+/// Dropping a session quarantines it the same way. The wires are private to
+/// `qsag-verified`, so that overwrite is the state machine's own ordinary store, kept
+/// from elimination with `black_box`, not a volatile write.
+struct HeldSession(FtsDeferredMacSession);
+
+impl HeldSession {
+    /// Stands in the slot while a transition runs: quarantined, with zero wires.
+    const VACANT: FtsDeferredMacSession =
+        FtsDeferredMacSession::new_spn48_evaluated([0; 32], 0, 0, 0);
+
+    fn step<R>(
+        &mut self,
+        transition: impl FnOnce(FtsDeferredMacSession) -> (FtsDeferredMacSession, R),
+    ) -> R {
+        let (next, outcome) = transition(core::mem::replace(&mut self.0, Self::VACANT));
+        self.0 = next;
+        outcome
+    }
+
+    /// Drives the session into verified quarantine, which zeroes its candidate wires.
+    fn destroy(&mut self) {
+        // A MAC check under any other session identifier is refused in every state.
+        let mismatched = self.0.session_id().map(|byte| !byte);
+        let _refused = self.step(|session| session.verify_intermediate_mac(mismatched, 1, 1));
+        core::hint::black_box(&mut self.0);
+    }
+}
+
+impl Drop for HeldSession {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        let live = !self.0.is_quarantined();
+        self.destroy();
+        #[cfg(test)]
+        if live && self.0.is_quarantined() {
+            probe::quarantined_a_live_session_on_drop();
+        }
+    }
+}
+
 enum Held {
-    Verified(Vec<FtsDeferredMacSession>),
+    Verified(Vec<HeldSession>),
     Bound {
         values: Vec<u128>,
         binding: [u8; 32],
@@ -167,11 +223,12 @@ impl OutputGate {
             && values.len() == 2 * WOTS_CS_CHAINS
         {
             let rounds = u8::try_from(spn_rounds).unwrap_or(0);
+            // Sized exactly: the sessions are built in the slots they stay in.
             let mut sessions = Vec::with_capacity(values.len() / 2);
             for pair in values.as_chunks::<2>().0 {
-                sessions.push(FtsDeferredMacSession::new_spn48_evaluated(
+                sessions.push(HeldSession(FtsDeferredMacSession::new_spn48_evaluated(
                     session, rounds, pair[0], pair[1],
-                ));
+                )));
             }
             ct_zeroize_u128s(&mut values);
             Held::Verified(sessions)
@@ -195,16 +252,9 @@ impl OutputGate {
     fn wipe(&mut self) {
         match &mut self.held {
             Held::Verified(sessions) => {
-                // A mismatched request drives each session into verified quarantine,
-                // which zeroes its candidate wires.
-                let mismatched = self.session.map(|byte| !byte);
-                let old = core::mem::take(sessions);
-                sessions.reserve_exact(old.len());
-                for session in old {
-                    let (next, _) = session.verify_intermediate_mac(mismatched, 1, 1);
-                    sessions.push(next);
+                for session in sessions.iter_mut() {
+                    session.destroy();
                 }
-                core::hint::black_box(sessions);
             }
             Held::Bound {
                 values,
@@ -226,13 +276,12 @@ impl OutputGate {
         let accepted = match &mut self.held {
             Held::Verified(sessions) => {
                 let mut accepted = !sessions.is_empty();
-                let old = core::mem::take(sessions);
-                sessions.reserve_exact(old.len());
-                for session in old {
-                    let (next, result) =
-                        session.verify_intermediate_mac(request, residual[0], residual[1]);
-                    accepted &= result.is_ok();
-                    sessions.push(next);
+                for session in sessions.iter_mut() {
+                    accepted &= session
+                        .step(|held| {
+                            held.verify_intermediate_mac(request, residual[0], residual[1])
+                        })
+                        .is_ok();
                 }
                 accepted
             }
@@ -266,22 +315,16 @@ impl OutputGate {
         let request = self.session;
         let released = match &mut self.held {
             Held::Verified(sessions) => {
-                let mut out = Vec::with_capacity(2 * sessions.len());
+                // Sized exactly, and erased unless every session releases.
+                let mut out = SecretVec::<u128>::with_capacity(2 * sessions.len());
                 let mut accepted = !sessions.is_empty();
-                for session in core::mem::take(sessions) {
-                    let (next, result) = session.release_spn_output(request, digits);
-                    match result {
+                for session in sessions.iter_mut() {
+                    match session.step(|held| held.release_spn_output(request, digits)) {
                         Ok((lo, hi)) => out.extend_from_slice(&[lo, hi]),
                         Err(_) => accepted = false,
                     }
-                    sessions.push(next);
                 }
-                if accepted {
-                    Some(out)
-                } else {
-                    ct_zeroize_u128s(&mut out);
-                    None
-                }
+                accepted.then(|| out.into_inner())
             }
             Held::Bound {
                 values,
@@ -327,7 +370,7 @@ impl Drop for OutputGate {
 impl OutputGate {
     fn is_destroyed(&self) -> bool {
         match &self.held {
-            Held::Verified(sessions) => sessions.iter().all(|s| s.is_quarantined()),
+            Held::Verified(sessions) => sessions.iter().all(|s| s.0.is_quarantined()),
             Held::Bound { values, permit, .. } => values.is_empty() && permit.is_none(),
         }
     }
@@ -458,6 +501,99 @@ mod tests {
         assert_eq!(gate.release(&codeword()).unwrap(), candidates());
         // Released once.
         assert!(gate.release(&codeword()).is_err());
+    }
+
+    fn slots(gate: &OutputGate) -> (*const HeldSession, usize, usize) {
+        match &gate.held {
+            Held::Verified(sessions) => (sessions.as_ptr(), sessions.len(), sessions.capacity()),
+            Held::Bound { .. } => panic!("not held in verified sessions"),
+        }
+    }
+
+    /// Accepting, refusing, releasing and destroying all rewrite the sessions where they
+    /// were built: no step moves the candidates to another allocation and leaves the
+    /// first one behind.
+    #[test]
+    fn verified_sessions_never_leave_the_slots_they_were_built_in() {
+        // Accept, then release.
+        let mut gate = custody_gate(48);
+        let built = slots(&gate);
+        assert_eq!((built.1, built.2), (WOTS_CS_CHAINS, WOTS_CS_CHAINS));
+        gate.verify_mac([0, 0]).unwrap();
+        assert_eq!(slots(&gate), built);
+        assert_eq!(gate.release(&codeword()).unwrap(), candidates());
+        assert_eq!(slots(&gate), built);
+        // Refused MAC check.
+        let mut gate = custody_gate(48);
+        let built = slots(&gate);
+        assert!(gate.verify_mac([1, 0]).is_err());
+        assert_eq!(slots(&gate), built);
+        assert!(gate.is_destroyed());
+        // Refused codeword after an accepted MAC check.
+        let mut gate = custody_gate(48);
+        let built = slots(&gate);
+        gate.verify_mac([0, 0]).unwrap();
+        assert!(gate.release(&[]).is_err());
+        assert_eq!(slots(&gate), built);
+        assert!(gate.is_destroyed());
+        // Explicit destruction.
+        let mut gate = custody_gate(48);
+        let built = slots(&gate);
+        gate.wipe();
+        assert_eq!(slots(&gate), built);
+        assert!(gate.is_destroyed());
+    }
+
+    #[test]
+    fn a_destroyed_session_holds_no_candidates_in_any_state() {
+        let fresh = || HeldSession(FtsDeferredMacSession::new_spn48_evaluated([7; 32], 48, 5, 6));
+        // Never checked.
+        let mut unchecked = fresh();
+        unchecked.destroy();
+        // MAC accepted, not released: the state that still carries both wires.
+        let mut accepted = fresh();
+        accepted
+            .step(|held| held.verify_intermediate_mac([7; 32], 0, 0))
+            .unwrap();
+        assert!(!accepted.0.is_quarantined());
+        accepted.destroy();
+        for mut session in [unchecked, accepted] {
+            assert!(session.0.is_quarantined());
+            assert!(
+                session
+                    .step(|held| held.release_spn_output([7; 32], &codeword()))
+                    .is_err()
+            );
+        }
+    }
+
+    /// Dropping a session that still holds candidates quarantines it; the gate's own
+    /// drop relies on this for any session a refusal has not already destroyed.
+    #[test]
+    fn dropping_a_live_session_quarantines_it() {
+        let fresh = || HeldSession(FtsDeferredMacSession::new_spn48_evaluated([7; 32], 48, 5, 6));
+        // Unchecked candidates.
+        probe::reset();
+        drop(fresh());
+        assert_eq!(probe::quarantined_on_drop(), 1);
+        // MAC accepted, never released.
+        probe::reset();
+        let mut accepted = fresh();
+        accepted
+            .step(|held| held.verify_intermediate_mac([7; 32], 0, 0))
+            .unwrap();
+        drop(accepted);
+        assert_eq!(probe::quarantined_on_drop(), 1);
+        // A whole set of sessions, as the gate holds them.
+        probe::reset();
+        drop((0..WOTS_CS_CHAINS).map(|_| fresh()).collect::<Vec<_>>());
+        assert_eq!(probe::quarantined_on_drop(), WOTS_CS_CHAINS);
+        // Already destroyed: nothing live is left to quarantine.
+        probe::reset();
+        let mut destroyed = fresh();
+        destroyed.destroy();
+        drop(destroyed);
+        assert_eq!(probe::quarantined_on_drop(), 0);
     }
 
     #[test]

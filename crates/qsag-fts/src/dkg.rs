@@ -47,7 +47,9 @@ pub struct ParallelSeededDkgConfig {
     pub params: ParallelSeededParams,
     pub roster: Vec<u16>,
     pub session: [u8; 32],
+    /// Single-use power tuples to produce: `1..=DEFAULT_BEAVER_TRIPLE_POOL`.
     pub power_count: usize,
+    /// Ordinary Beaver triples to produce: at most `DEFAULT_BEAVER_TRIPLE_POOL`.
     pub beaver_count: usize,
 }
 
@@ -115,7 +117,9 @@ impl ParallelSeededDkgRound1State {
             && config.roster.windows(2).all(|w| w[0] < w[1])
             && config.roster.contains(&party_id)
             && config.power_count > 0
-            // Bounded to `DEFAULT_BEAVER_TRIPLE_POOL` (`131_072`, up to 4 custody leaves per reservoir batch).
+            // One ceremony fills at most one pool (`DEFAULT_BEAVER_TRIPLE_POOL` = 131,072
+            // tuples, four custody leaves at 32,640 each): the bound of the reservoir that
+            // adopts, snapshots and refills the output.
             && config.power_count <= DEFAULT_BEAVER_TRIPLE_POOL
             && config.beaver_count <= DEFAULT_BEAVER_TRIPLE_POOL;
         if !valid {
@@ -220,6 +224,8 @@ impl ParallelSeededDkgRound1State {
         }
         let context = self.frozen_context()?;
         self.packages_sent = true;
+        // Counted first: every package carries a pair seed, so the vector is allocated
+        // once at its final size and no push copies seeds out of a buffer it then frees.
         let count = self
             .config
             .roster
@@ -2247,5 +2253,86 @@ mod gilboa_tests {
             assert_eq!(party.keyed_products([0; 32], roster, 1, &[0]), invalid);
         }
         assert!(mailbox.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bound_and_package_tests {
+    use super::*;
+
+    fn config(roster: Vec<u16>, power_count: usize, beaver_count: usize) -> ParallelSeededDkgConfig {
+        ParallelSeededDkgConfig {
+            params: ParallelSeededParams {
+                tree_height: 2,
+                winternitz_w: 2,
+                num_chains: 2,
+                target_sum: 1,
+            },
+            roster,
+            session: [51; 32],
+            power_count,
+            beaver_count,
+        }
+    }
+
+    /// A ceremony may produce exactly what one reservoir pool can hold; the reservoir
+    /// refuses anything larger, so a larger ceremony could never be adopted or refilled.
+    #[test]
+    fn ceremony_power_count_is_bounded_by_the_reservoir_pool() {
+        let begins = |power_count, beaver_count| {
+            ParallelSeededDkgRound1State::begin(
+                config(vec![0, 1, 2], power_count, beaver_count),
+                0,
+                [7; 32],
+            )
+            .is_ok()
+        };
+        assert!(begins(1, 0));
+        assert!(begins(
+            DEFAULT_BEAVER_TRIPLE_POOL,
+            DEFAULT_BEAVER_TRIPLE_POOL
+        ));
+        assert!(!begins(0, 0));
+        assert!(!begins(DEFAULT_BEAVER_TRIPLE_POOL + 1, 0));
+        assert!(!begins(1_048_576, 0));
+        assert!(!begins(usize::MAX, 0));
+        assert!(!begins(1, DEFAULT_BEAVER_TRIPLE_POOL + 1));
+        // The pool holds four custody leaves and not five.
+        let per_leaf = ParallelSeededParams::CUSTODY_H10_W5.leaf_preparation_power_count();
+        assert_eq!(DEFAULT_BEAVER_TRIPLE_POOL / per_leaf, 4);
+    }
+
+    /// The package vector is sized before the first seed is derived, so its capacity is
+    /// its length. Collected through a filter it starts at four slots and, past four
+    /// recipients, reallocates with seeds already in it.
+    #[test]
+    fn private_packages_are_allocated_once_at_their_final_size() {
+        let roster: Vec<u16> = (0..6).collect();
+        let mut states: Vec<_> = roster
+            .iter()
+            .map(|&id| {
+                ParallelSeededDkgRound1State::begin(config(roster.clone(), 4, 0), id, [id as u8; 32])
+                    .unwrap()
+            })
+            .collect();
+        let commits: Vec<_> = states
+            .iter()
+            .map(ParallelSeededDkgRound1State::commitment)
+            .collect();
+        for state in &mut states {
+            state.open(&commits).unwrap();
+        }
+        for (state, &id) in states.iter_mut().zip(&roster) {
+            let packages = state.private_packages().unwrap();
+            let recipients: Vec<u16> = packages.iter().map(|p| p.recipient).collect();
+            assert_eq!(recipients, roster[usize::from(id) + 1..]);
+            assert_eq!(packages.capacity(), packages.len(), "party {id}");
+            assert!(packages.iter().all(|p| p.sender == id && p.seed != [0; 32]));
+            for (i, a) in packages.iter().enumerate() {
+                assert!(packages[i + 1..].iter().all(|b| a.seed != b.seed));
+            }
+            // One set of packages per ceremony.
+            assert!(state.private_packages().is_err());
+        }
     }
 }

@@ -222,24 +222,19 @@ impl ParallelSeededDkgReservoir {
             ct_zeroize_bytes(&mut arr);
             Ok(v)
         };
-        let read_bytes32 = |cursor: &mut usize| -> Result<[u8; 32], ParallelSeededError> {
-            let b = take(cursor, 32)?;
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(b);
-            Ok(arr)
-        };
+        // Secret seeds are copied straight into a guard: no unguarded array holds them.
         let read_secret_bytes32 =
             |cursor: &mut usize| -> Result<SecretBytes<32>, ParallelSeededError> {
-                let b = take(cursor, 32)?;
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(b);
-                let guarded = SecretBytes::new(arr);
-                ct_zeroize_bytes(&mut arr);
+                let mut guarded = SecretBytes::<32>::zeroed();
+                guarded.copy_from_slice(take(cursor, 32)?);
                 Ok(guarded)
             };
 
         let generation = read_u64(&mut cursor)?;
-        let pk_seed_bytes = read_bytes32(&mut cursor)?;
+        // Public key seed.
+        let pk_seed_bytes: [u8; 32] = take(&mut cursor, 32)?
+            .try_into()
+            .map_err(|_| invalid)?;
         let party_id = read_u16(&mut cursor)?;
         let params = ParallelSeededParams {
             tree_height: read_u32(&mut cursor)? as usize,
