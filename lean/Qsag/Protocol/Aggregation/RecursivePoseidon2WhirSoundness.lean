@@ -2832,3 +2832,134 @@ attribute [local irreducible] Goldilocks.mul poseidon2Perm12
 
 end Qsag
 end
+
+/-! ### Exports for lane agg -/
+public section
+namespace Qsag
+open Aggregation
+
+#export_eqns leafShardHeaderPreimage hashLeafShardHeader verifyRecursiveShardHeader
+  mkLeafShardHeader
+
+/-- The leaf shards of a depth-1 node are the shards of its children, in order. -/
+theorem recursiveHemLeafShards_depth1 (sd : Lane4) (op : ChildWhirWitness)
+    (cs : List RecursiveHemLeafCert) :
+    recursiveHemLeafShards 1
+      ({ summaryDigest := sd, outerProof := op, children := cs } :
+        RecursiveHemOuterCert (RecursiveHemAggregate 0)) = cs.map (·.shard) := by
+  show (cs.flatMap (fun c => [c])).map (·.shard) = cs.map (·.shard)
+  induction cs with
+  | nil => rfl
+  | cons c cs ih => rw [List.flatMap_cons, List.map_append, ih]; rfl
+
+/-- The squeezed challenge as the duplex fold over the block addends. -/
+private theorem fsSqueeze_eq_addend_fold (frames : List FsFrame) :
+    fsSqueeze frames =
+      lane4ToExt4 (List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩ ((fsTranscriptBlocks frames).map FsBlock.addend)).b0 := by
+  unfold fsSqueeze
+  rw [fsSpongeState_eq_blocks, List.foldl_map]
+  rfl
+
+/-- Two frame lists whose squeezed challenges agree have equal `b0` limb values after the duplex
+    fold over their block addends. -/
+private theorem fsSqueeze_eq_imp_fold_vals {fs gs : List FsFrame} (h : fsSqueeze fs = fsSqueeze gs) :
+    (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩ ((fsTranscriptBlocks fs).map FsBlock.addend)
+      [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) =
+    (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
+        ⟨lane4Zero, lane4Zero, lane4Zero⟩ ((fsTranscriptBlocks gs).map FsBlock.addend)
+      [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) := by
+  rw [fsSqueeze_eq_addend_fold, fsSqueeze_eq_addend_fold] at h
+  exact congrArg (fun l : Lane4 => [l.x0.val, l.x1.val, l.x2.val, l.x3.val])
+    (lane4ToExt4_injective h)
+
+/-- KAT: exchanging two round messages changes the derived challenges. The permutation chain is
+    evaluated by `poseidon2Duplex_swapped_rounds_kat`. -/
+theorem fsDeriveChallenges_swapped_rounds_kat :
+    ¬ (fsDeriveChallenges
+        [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1], [Goldilocks.ofNat 11]⟩,
+         ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2], [Goldilocks.ofNat 11]⟩] =
+       fsDeriveChallenges
+        [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2], [Goldilocks.ofNat 11]⟩,
+         ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1], [Goldilocks.ofNat 11]⟩]) := by
+  intro h
+  have hS : fsSqueeze
+      [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩,
+      ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩] =
+    fsSqueeze
+      [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩,
+      ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩] :=
+    (List.cons.inj h).1
+  exact poseidon2Duplex_swapped_rounds_kat (fsSqueeze_eq_imp_fold_vals hS)
+
+/-- `theta` of a child proof with two sumcheck rounds is the first challenge of round `5`. -/
+private theorem childWhirChallenges_theta_two_rounds (publicDigest salt canopyRoot : Lane4)
+    (bottomDepth canopyDepth : Nat) (initialClaim : QuarticGoldilocks)
+    (polys : List (List QuarticGoldilocks)) (hl : polys.length = 2) :
+    (childWhirChallenges publicDigest bottomDepth canopyDepth salt initialClaim canopyRoot
+      polys []).theta =
+      (fsDeriveChallenges ((childWhirRounds publicDigest bottomDepth canopyDepth salt initialClaim
+        canopyRoot polys []).take (3 + 2 + 1))).getD 0 CommRingOps.zero := by
+  have h := childWhirTranscript_challenge publicDigest bottomDepth canopyDepth salt initialClaim
+    canopyRoot polys [] (3 + 2) (by rw [hl]; decide)
+  unfold childWhirChallenges
+  dsimp only
+  rw [hl, List.getD_eq_getElem?_getD, h]
+  rfl
+
+/-- KAT: exchanging the sumcheck round polynomials `[1]` and `[0]` of a child proof on the zero
+    digest, salt, claim and root changes the fold challenge `theta`. The permutation chain is
+    evaluated by `poseidon2Duplex_swapped_sumcheck_kat`. -/
+theorem childWhirChallenges_swapped_sumcheck_theta_kat :
+    ¬ ((childWhirChallenges ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+          1 0 ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+          ⟨⟨Goldilocks.zero, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩
+          ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+          [[⟨⟨Goldilocks.one, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩],
+           [⟨⟨Goldilocks.zero, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩]] []).theta =
+       (childWhirChallenges ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+          1 0 ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+          ⟨⟨Goldilocks.zero, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩
+          ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+          [[⟨⟨Goldilocks.zero, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩],
+           [⟨⟨Goldilocks.one, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩]] []).theta) := by
+  intro h
+  rw [childWhirChallenges_theta_two_rounds _ _ _ _ _ _ _ rfl,
+    childWhirChallenges_theta_two_rounds _ _ _ _ _ _ _ rfl] at h
+  have hS : fsSqueeze
+      [⟨Goldilocks.ofNat 1, [Goldilocks.ofNat 0x4657484952000001, Goldilocks.ofNat 1, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 2, [Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 3, [Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩,
+      ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩,
+      ⟨Goldilocks.ofNat 12, []⟩,
+      ⟨Goldilocks.ofNat 13, []⟩] =
+    fsSqueeze
+      [⟨Goldilocks.ofNat 1, [Goldilocks.ofNat 0x4657484952000001, Goldilocks.ofNat 1, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 2, [Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 3, [Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩,
+      ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0]⟩,
+      ⟨Goldilocks.ofNat 11, []⟩,
+      ⟨Goldilocks.ofNat 12, []⟩,
+      ⟨Goldilocks.ofNat 13, []⟩] := h
+  exact poseidon2Duplex_swapped_sumcheck_kat (fsSqueeze_eq_imp_fold_vals hS)
+
+/-- Kernel KAT: one frame `[1, 2]` and the two frames `[1]`, `[2]` under the same tag have
+    different block encodings. -/
+theorem fsTranscriptBlocks_frame_boundary_kat :
+    ¬ (fsTranscriptBlocks [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1, Goldilocks.ofNat 2]⟩] =
+       fsTranscriptBlocks [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1]⟩,
+         ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2]⟩]) := by
+  decide
+
+end Qsag
+end
