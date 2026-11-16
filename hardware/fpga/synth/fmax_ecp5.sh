@@ -7,9 +7,14 @@ top="$1"; tag="${2:-$top}"; shift; [ $# -gt 0 ] && shift
 mkdir -p build/synth
 SRC="$(tr '\n' ' ' < synth/srcs.txt) synth/fmax_wrap.sv"
 out="build/synth/$tag.pnr"
-yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; synth_ecp5 -top $top -json $out.json" > /dev/null
+INLINE_CSA="flatten t:*qsag_sum_csa*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_add_split*; opt -fast;"
+if [ "${NOFLAT:-0}" = "1" ]; then
+    yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -noflatten -top $top; flatten; opt_clean; write_json $out.json" > /dev/null
+else
+    yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -top $top -json $out.json" > /dev/null
+fi
 nextpnr-ecp5 --um5g-85k --package CABGA381 --speed 8 --json "$out.json" --freq "${FREQ:-150}" \
-    --timing-allow-fail --seed 1 --threads 8 ${NEXTPNR_ARGS:-} --report "$out.report.json" -q -l "$out.log" || true
+    --timing-allow-fail --seed "${SEED:-1}" --threads 8 ${NEXTPNR_ARGS:-} --report "$out.report.json" -q -l "$out.log" || true
 python3 - "$out.report.json" "$tag" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))

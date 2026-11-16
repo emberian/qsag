@@ -150,7 +150,6 @@ module qsag_keccak_compact (
 
     assign cmd_ready = !rst && (st == K_IDLE);
     assign busy      = (st != K_IDLE);
-    assign rd_data   = a_rd;
 
     always_comb begin
         a_we = 1'b0;
@@ -227,6 +226,7 @@ module qsag_keccak_compact (
                 end
                 K_XOR_WR: st <= K_IDLE;
                 K_RD_OUT: begin
+                    rd_data  <= a_rd;
                     rd_valid <= 1'b1;
                     st       <= K_IDLE;
                 end

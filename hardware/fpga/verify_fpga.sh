@@ -32,7 +32,7 @@ case "$what" in
     lint)  ./lint.sh ;;
     units) sim UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv" ;;
     top)   sim TOP qsag_ni_fpga_top ;;
-    compact) SIM_CFLAGS=-DQSAG_COMPACT SIM_PARAMS="-GPROFILE_COMPACT=1 -GFOLD_TAW=12 -GKECCAK_RPC=1 -GAW=16 -GBW=16" sim TOP qsag_ni_fpga_top ;;
+    compact) SIM_CFLAGS=-DQSAG_COMPACT SIM_PARAMS="-GPROFILE_COMPACT=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16" sim TOP qsag_ni_fpga_top ;;
     pipe) SIM_CFLAGS=-DQSAG_PIPE SIM_PARAMS="-GP2_UNROLLED=1" sim TOP qsag_ni_fpga_top ;;
     lec-*) ./lec/lec.sh "${what#lec-}" ;;
     all)   ./lint.sh; sim UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv"; sim TOP qsag_ni_fpga_top; ./lec/lec.sh ;;

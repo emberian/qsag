@@ -57,7 +57,7 @@ module fmax_compact_top(input logic clk, rst, si, output logic so);
         sr <= {sr[577:0],si};
         so <= ^{awready,wready,bvalid,arready,rvalid,tready,bresp,rresp,rdata};
     end
-    qsag_ni_fpga_top #(.PROFILE_COMPACT(1),.FOLD_TAW(12),.KECCAK_RPC(1),.AW(16),.BW(16)) dut (
+    qsag_ni_fpga_top #(.PROFILE_COMPACT(1),.FOLD_TAW(11),.KECCAK_RPC(1),.AW(16),.BW(16)) dut (
         .clk(clk),.rst(rst),
         .s_axis_tdata(sr[511:0]),.s_axis_tvalid(sr[512]),.s_axis_tready(tready),
         .s_axil_awaddr(sr[524:513]),.s_axil_awvalid(sr[525]),.s_axil_awready(awready),

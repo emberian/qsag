@@ -423,6 +423,7 @@ pub fn poseidon2_sponge_hash_limbs_with_cap(
         *dst = gl_reduce_u64(limb);
     }
     absorb(&mut st, &block);
+    ct_zeroize_u64s(&mut block);
 
     let mut pos = head;
     while pos + 8 <= limbs.len() {
@@ -431,6 +432,7 @@ pub fn poseidon2_sponge_hash_limbs_with_cap(
             full[i] = gl_reduce_u64(limbs[pos + i]);
         }
         absorb(&mut st, &full);
+        ct_zeroize_u64s(&mut full);
         pos += 8;
     }
     if pos < limbs.len() {
@@ -439,6 +441,7 @@ pub fn poseidon2_sponge_hash_limbs_with_cap(
             *dst = gl_reduce_u64(limb);
         }
         absorb(&mut st, &tail_blk);
+        ct_zeroize_u64s(&mut tail_blk);
     }
     let out = [
         gl_reduce_u64(st[0]),

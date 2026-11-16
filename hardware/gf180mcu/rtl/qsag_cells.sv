@@ -403,4 +403,46 @@ module qsag_dly_inv #(
     assign y = ~a;
 `endif
 endmodule
+
+// Mixed-cell critical-path replica stages: stacked AOI21 + XOR2 gates tracking SS/125C/4.50V
+// PMOS/NMOS series-stack roll-off of the Han-Carlson + Karatsuba-CSA datapath.
+module qsag_dly_aoi21 #(
+    parameter int TD = 210
+) (
+    input  wire a,
+    output wire y
+);
+`ifdef QSAG_GF180_CELLS
+    wire tie_hi;
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tieh    u_th  (.Z(tie_hi));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__aoi21_1 u_aoi (.A1(a), .A2(tie_hi), .B(a), .ZN(y));
+`elsif QSAG_SIM_DELAYS
+    logic yr;
+    initial yr = #(TD) ~a;
+    always @(a) yr <= #(TD) ~a;
+    assign y = yr;
+`else
+    assign y = ~a;
+`endif
+endmodule
+
+module qsag_dly_xor2 #(
+    parameter int TD = 250
+) (
+    input  wire a,
+    output wire y
+);
+`ifdef QSAG_GF180_CELLS
+    wire tie_lo;
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tiel   u_tl  (.ZN(tie_lo));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__xor2_1 u_xor (.A1(a), .A2(tie_lo), .Z(y));
+`elsif QSAG_SIM_DELAYS
+    logic yr;
+    initial yr = #(TD) a;
+    always @(a) yr <= #(TD) a;
+    assign y = yr;
+`else
+    assign y = a;
+`endif
+endmodule
 `default_nettype wire

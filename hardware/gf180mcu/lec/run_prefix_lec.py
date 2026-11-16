@@ -55,19 +55,23 @@ def sqrows_query(sfile, tag):
     t_sq = l.smt(sfile, "qsag_gl64_sqrows", tag)
     n = lambda x: f"(|{tag}_n {x}| s)"
     m = f"(concat {n('p01')} #b0)"
-    m0 = l.zx(f"((_ extract 31 0) {m})", 32, AW)
-    m1 = l.zx(f"((_ extract 63 32) {m})", 32, AW)
-    m2 = l.zx(f"((_ extract 64 64) {m})", 1, AW)
-    l2 = l.zx(f"((_ extract 31 0) {n('z2')})", 32, AW)
-    h2 = l.zx(f"((_ extract 63 32) {n('z2')})", 32, AW)
-    z0 = l.zx(n("z0"), 64, AW)
-    sh32 = lambda v: f"(bvshl {v} {l.bv(W, AW)})"
-    exp = (f"(bvadd {z0} {sh32(f'(bvadd {m0} {m1})')} (bvneg {m1}) (bvneg {m2}) "
-           f"{sh32(l2)} (bvneg {l2}) (bvneg {h2}) {l.bv(P, AW)})")
-    return t_sq + f"(declare-fun s () |{tag}_s|)\n(assert (not (= (bvadd {n('s')} {n('c')}) {exp})))"
+    m0 = f"((_ extract 31 0) {m})"
+    m1 = f"((_ extract 63 32) {m})"
+    m2 = f"((_ extract 64 64) {m})"
+    l2 = f"((_ extract 31 0) {n('z2')})"
+    h2 = f"((_ extract 63 32) {n('z2')})"
+    er1 = l.zx(n("z0"), 64, AW)
+    er2 = l.zx(f"(concat {m0} (bvnot {m1}))", 64, AW)
+    er3 = l.zx(f"(concat {m1} (_ bv0 29) (ite (= {m2} #b1) #b011 #b100))", 64, AW)
+    er4 = l.zx(f"(concat {l2} (bvnot {l2}))", 64, AW)
+    er5 = l.zx(f"(concat #xfffffffc (bvnot {h2}))", 64, AW)
+    # Check each row's exact integer value without chaining five 76-bit ripple-add miters
+    return (t_sq + f"(declare-fun s () |{tag}_s|)\n"
+            f"(assert (not (and (= {n('r1')} {er1}) (= {n('r2')} {er2}) (= {n('r3')} {er3}) "
+            f"(= {n('r4')} {er4}) (= {n('r5')} {er5}))))")
 
 
-l.check("qsag_gl64_sqrows W=32 RTL 5-row sum == exact algebraic form", "unsat", sqrows_query(src, "sq64"))
+l.check("qsag_gl64_sqrows W=32 RTL 5-row exact bitvectors", "unsat", sqrows_query(src, "sq64"))
 l.check("qsag_gl64_sqrows W=32 integer congruence == z0 + m*phi + z2*(phi-1) mod p", "unsat", f"""
 (declare-const z0 Int) (declare-const l2 Int) (declare-const h2 Int)
 (declare-const m0 Int) (declare-const m1 Int) (declare-const m2 Int)
@@ -76,10 +80,15 @@ l.check("qsag_gl64_sqrows W=32 integer congruence == z0 + m*phi + z2*(phi-1) mod
 (assert (and (<= 0 m0) (< m0 phi) (<= 0 m1) (< m1 phi) (<= 0 m2) (< m2 2)))
 (define-fun z2 () Int (+ l2 (* h2 phi)))
 (define-fun m  () Int (+ m0 (* m1 phi) (* m2 phi phi)))
-(define-fun T  () Int (+ z0 (* (+ m0 m1) phi) (- m1) (- m2) (* l2 phi) (- l2) (- h2) p))
+(define-fun r1 () Int z0)
+(define-fun r2 () Int (+ (* m0 phi) (- phi 1 m1)))
+(define-fun r3 () Int (+ (* m1 phi) (- 4 m2)))
+(define-fun r4 () Int (+ (* l2 phi) (- phi 1 l2)))
+(define-fun r5 () Int (+ (* (- phi 4) phi) (- phi 1 h2)))
+(define-fun T  () Int (+ r1 r2 r3 r4 r5))
 (define-fun V  () Int (+ z0 (* m phi) (* z2 phi phi)))
 (assert (not (and (<= 0 T) (< T {1 << AW})
-                  (= V (+ T (* (- (+ h2 m1 (* m2 (+ phi 1))) 1) p))))))
+                  (= V (+ T (* (- (+ l2 (* h2 (+ phi 1)) m1 (* m2 (+ phi 1))) 1) p))))))
 """)
 
 text = open(src).read()

@@ -33,7 +33,7 @@ module qsag_ext4_compact_bfly #(
     state_t st;
 
     logic [TAW-2:0] pair_idx, last_pair;
-    logic [255:0]   a_q, b_q, c_q, r_q, ev_rd, od_rd, ev_q, od_q, diff_q;
+    logic [255:0]   a_q, b_q, c_q, r_q, ev_rd, od_rd, ev_q, od_q;
     logic [4:0]     step;
     logic [71:0]    acc_q, red_in_q;
     logic [63:0]    mul_r, red_r;
@@ -69,7 +69,7 @@ module qsag_ext4_compact_bfly #(
         ? {72'd1, ~{8'd0, mul_r}, {5'd0, mul_r, 3'd0}, acc_base}
         : {72'd0, 72'd0,          {8'd0, mul_r},       acc_base};
     logic [71:0] acc_next;
-    qsag_sum_csa #(.W(72), .N(4), .CHUNK(16)) u_acc (.x(acc_terms), .y(acc_next));
+    qsag_sum_csa #(.W(72), .N(4), .CHUNK(24)) u_acc (.x(acc_terms), .y(acc_next));
 
     // When out_i == 3 (at step = ML + 3, ML + 7, ML + 11, ML + 15), red_in_q latches acc_next;
     // 2 clocks later (step = ML + 6, ML + 10, ML + 14, ML + 18), red_r holds canonical mac_y limb!
@@ -96,9 +96,9 @@ module qsag_ext4_compact_bfly #(
         /* verilator lint_off UNUSEDSIGNAL */
         logic [64:0] dr, dp;
         /* verilator lint_on UNUSEDSIGNAL */
-        qsag_sum_csa #(.W(65), .N(3), .CHUNK(16)) u_dr (
+        qsag_sum_csa #(.W(65), .N(3), .CHUNK(24)) u_dr (
             .x({65'd1, ~{1'b0, ev_n}, {1'b0, od_n}}), .y(dr));
-        qsag_sum_csa #(.W(65), .N(3), .CHUNK(16)) u_dp (
+        qsag_sum_csa #(.W(65), .N(3), .CHUNK(24)) u_dp (
             .x({{1'b0, GL_P} + 65'd1, ~{1'b0, ev_n}, {1'b0, od_n}}), .y(dp));
         assign diff_d[64*n +: 64] = dr[64] ? dp[63:0] : dr[63:0];
     end
@@ -135,12 +135,11 @@ module qsag_ext4_compact_bfly #(
                     st   <= SUB_REG;
                 end
                 SUB_REG: begin
-                    a_q    <= r_q;
-                    b_q    <= diff_d;
-                    c_q    <= ev_q;
-                    diff_q <= diff_d;
-                    step   <= 5'd0;
-                    st     <= STREAM_MAC;
+                    a_q  <= r_q;
+                    b_q  <= diff_d;
+                    c_q  <= ev_q;
+                    step <= 5'd0;
+                    st   <= STREAM_MAC;
                 end
                 STREAM_MAC: begin
                     if (step >= 5'(ML) && step < 5'(ML + 16)) begin
@@ -177,5 +176,5 @@ module qsag_ext4_compact_bfly #(
         end
     end
     logic unused_dq;
-    assign unused_dq = &{1'b0, diff_q, red_step[4]};
+    assign unused_dq = &{1'b0, out_step[4], red_step[4]};
 endmodule

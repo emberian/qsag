@@ -16,12 +16,15 @@ rtl/qsag_poseidon2_12_pipe.sv
 rtl/qsag_ext4_mac.sv
 rtl/qsag_ext4_mac_bfly.sv
 rtl/qsag_keccak_turboshake.sv
+rtl/qsag_keccak_compact.sv
+rtl/qsag_keccak_p12_pipe.sv
+rtl/qsag_ts_canopy_engine.sv
 rtl/qsag_clmul_kara.sv
 rtl/qsag_gf128_reduce.sv
 rtl/qsag_gf128_clmul.sv
+rtl/qsag_gf128_tower_map.sv
+rtl/qsag_gf128_tower_mul.sv
 rtl/qsag_p2_chain_engine.sv
 rtl/qsag_p2_compact.sv
 rtl/qsag_ext4_compact_bfly.sv
 rtl/qsag_ni_fpga_top.sv
-rtl/qsag_gf128_tower_map.sv
-rtl/qsag_gf128_tower_mul.sv

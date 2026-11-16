@@ -1,8 +1,5 @@
 // Streaming valid/ready trace-driven co-simulation of qsag_ni_asic_top.
-// Supports zero-bubble II = 1 streaming on consecutive single-cycle commands!
-// Each trace line (hex):
-//   op idx addr data chk exp
-// op = F0 is a cycle/command marker (prints delta cycles & commands since previous marker).
+// Drives commands synchronously on negedge clk with zero-bubble II = 1 throughput!
 `timescale 1ns/1ps
 module tb_top;
   logic clk = 0, rst = 1;
@@ -21,7 +18,6 @@ module tb_top;
   longint cyc = 0, mark_cyc = 0, cmds = 0, mark_cmds = 0, checks = 0, errors = 0;
   always @(posedge clk) cyc++;
 
-  // Response check FIFO (decouples II=1 command issue from 1-cycle registered rsp_valid)
   typedef struct packed {
     logic        chk;
     logic [7:0]  op;
@@ -32,7 +28,7 @@ module tb_top;
   } exp_t;
   exp_t rsp_q [$];
 
-  always @(negedge clk) begin
+  task automatic check_rsp();
     if (!rst && rsp_valid) begin
       if (rsp_q.size() == 0) begin
         $display("UNEXPECTED rsp_valid at cyc %0d", cyc);
@@ -50,7 +46,7 @@ module tb_top;
         end
       end
     end
-  end
+  endtask
 
   int fd;
   logic [7:0]  op;
@@ -69,25 +65,32 @@ module tb_top;
     @(negedge clk);
     while ($fscanf(fd, "%h %h %h %h %h %h", op, idx, addr, data, chk, exp) == 6) begin
       if (op == 8'hF0) begin
-        // Drain any in-flight command before sampling marker cycle counter
         cmd_valid = 0;
-        while (rsp_q.size() > 0 || !cmd_ready) @(negedge clk);
+        while (rsp_q.size() > 0 || !cmd_ready) begin
+          @(negedge clk);
+          check_rsp();
+        end
         $display("MARK tag=%0d label=%0d cycles=%0d cmds=%0d", data, addr, cyc - mark_cyc, cmds - mark_cmds);
         mark_cyc = cyc; mark_cmds = cmds;
       end else begin
+        while (!cmd_ready) begin
+          cmd_valid = 0;
+          @(negedge clk);
+          check_rsp();
+        end
+        // At negedge clk with cmd_ready == 1: command will handshake at the upcoming posedge clk!
         cmd_valid = 1; cmd_op = op; cmd_idx = idx[4:0]; cmd_addr = addr; cmd_data = data;
-        // Wait until posedge clk where (cmd_valid && cmd_ready) handshakes
-        do begin
-          @(posedge clk);
-        end while (!cmd_ready);
         cmds++;
         rsp_q.push_back('{chk: (chk != 0), op: op, idx: idx[4:0], addr: addr, exp: exp, seq: cmds});
-        #0.1; // advance slightly past posedge so next command drives before next posedge (II = 1!)
+        @(negedge clk);
+        check_rsp();
       end
     end
-    @(negedge clk);
     cmd_valid = 0;
-    while (rsp_q.size() > 0 || !cmd_ready) @(negedge clk);
+    while (rsp_q.size() > 0 || !cmd_ready) begin
+      @(negedge clk);
+      check_rsp();
+    end
     $display("tb_top %s: %0d commands, %0d checked words, %0d errors, %0d cycles", trace, cmds, checks, errors, cyc);
     if (errors == 0 && checks > 0) $display("TB_TOP PASS"); else $display("TB_TOP FAIL");
     $finish;

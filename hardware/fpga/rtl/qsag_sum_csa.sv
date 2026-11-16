@@ -1,5 +1,6 @@
 // Balanced 3:2 carry-save (CSA) LUT compressor tree followed by one split parallel-prefix
 // carry-select adder, modulo 2^W.
+(* flatten *)
 module qsag_sum_csa #(
     parameter int W = 128,
     parameter int N = 4,

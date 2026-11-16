@@ -1,16 +1,12 @@
 // Dregg-180 Organ 4: < 6 ns Brands-Chaum Distance-Bounding Responder + 32-Tap Vernier TDC.
 //
-// Defends capability invocations against Mafia-fraud / wormhole / relay attacks at speed of light
-// (c = 30 cm/ns -> 15 cm round-trip distance per nanosecond of excess propagation time):
-//   1. Pre-committed 128-bit rapid-bit registers (r0[127:0], r1[127:0]) cleared on srst_n.
-//      Before each round idx, r0_pre_q = r0[idx] and r1_pre_q = r1[idx] are pre-staged so the
-//      live pad-to-pad turnaround path from DB_CHAL_IN to DB_RESP_OUT traverses ONE single
-//      (* keep *) gf180mcu_fd_sc_mcu7t5v0__mux2_4 gate (< 4.2 ns pad-to-pad in gf180mcuD 5V!).
-//   2. 32-Stage (* keep *) Vernier Delay-Line Time-to-Digital Converter (TDC):
-//      Pairs a 32-tap slow delay chain (dlya_1, ~450 ps/tap) against a 32-tap fast buffer chain
-//      (buf_2, ~220 ps/tap) for ~230 ps (~3.5 cm) sub-cycle Vernier time resolution alongside a
-//      16-bit coarse core-clock cycle counter, producing `dist_measured = {coarse[15:0], fine[5:0]}`
-//      enforced directly against `SpongeMacaroon.max_distance_cycles` inside `dregg_captp_vat`.
+// GOTCHA #5 silicon fix:
+//   * Triggers `u_tdc.start_pulse` from `db_resp_pad_loopback` (`bidir_in[p_resp]` with `.IE=1`
+//     enabled during ping!), cancelling the ~3.5 ns outbound `bi_24t` A->PAD buffer delay AND
+//     matching the inbound `bi_24t` PAD->Y receiver delay across PVT!
+//   * Captures echo arrival via an edge-latched flip-flop (`posedge chal_clk_buf`) rather than
+//     sampling `db_chal_pad_in` directly with `clk_core`, so sub-cycle return pulses are never
+//     missed while `vernier_fine[5:0]` resolves arrival within ~230 ps (~3.5 cm)!
 `default_nettype none
 `timescale 1ps / 1ps
 
@@ -43,7 +39,6 @@ module dregg_vernier_tdc32 (
         end
     endgenerate
 
-    // Population count / thermometer-to-binary encoder (0..32)
     logic [5:0] pop;
     always_comb begin
         pop = 6'd0;
@@ -61,16 +56,18 @@ module dregg_distance_tdc (
     input  wire         db_chal_pad_in,
     output wire         db_resp_pad_out,
     output wire         db_resp_pad_oe,
+    output wire         db_resp_pad_ie_force,  // keeps receiver `.Y` active during ping loopback!
+    input  wire         db_resp_pad_loopback,  // `bidir_in[p_resp]` physical pin loopback!
     // Control from Wire Engine / CapTP Vat
     input  wire         load_r0_lo,
     input  wire         load_r0_hi,
     input  wire         load_r1_lo,
     input  wire         load_r1_hi,
     input  wire  [63:0] load_wdata,
-    input  wire         arm_responder,     // arms 128-round < 6 ns rapid-bit responder
-    input  wire         step_round,        // host/protocol round advance strobe (or auto on pulse)
-    input  wire         launch_ping,       // launches speed-of-light RTT measurement pulse
-    input  wire         dist_consume,      // single-use consume by CapTP Vat
+    input  wire         arm_responder,
+    input  wire         step_round,
+    input  wire         launch_ping,
+    input  wire         dist_consume,
     // Transcript & TDC outputs
     output logic        responder_armed,
     output logic [7:0]  rounds_done,
@@ -80,9 +77,8 @@ module dregg_distance_tdc (
     output logic [63:0] resp_log_hi,
     output logic        dist_valid,
     output logic        dist_timeout,
-    output logic [31:0] dist_cycles        // [21:6] coarse core clocks, [5:0] Vernier 230 ps taps
+    output logic [31:0] dist_cycles
 );
-    // Secret pre-committed rapid-bit vectors r0[127:0], r1[127:0]
     wire [63:0] r0_lo, r0_hi, r1_lo, r1_hi;
     qsag_ereg #(.W(64)) u_r0l (.clk(clk), .rst_n(srst_n), .en(load_r0_lo), .d(load_wdata), .q(r0_lo));
     qsag_ereg #(.W(64)) u_r0h (.clk(clk), .rst_n(srst_n), .en(load_r0_hi), .d(load_wdata), .q(r0_hi));
@@ -92,31 +88,42 @@ module dregg_distance_tdc (
     wire [127:0] r0_vec = {r0_hi, r0_lo};
     wire [127:0] r1_vec = {r1_hi, r1_lo};
 
-    // Pre-staged current round bits so ONLY u_rapid_mux sits on DB_CHAL_IN -> DB_RESP_OUT!
-    logic        r0_pre_q, r1_pre_q;
-    logic        ping_active, ping_tx_q;
-    wire         rapid_mux_y;
+    logic r0_pre_q, r1_pre_q;
+    logic ping_active, ping_tx_q;
+    wire  rapid_mux_y;
 
-    // In rapid-bit responder mode: responder_armed == 1, ping_active == 0 -> pure mux2_4 path!
-    // In active RTT ping mode: ping_active == 1 -> drives ping_tx_q launch edge!
     wire mux_i0 = ping_active ? ping_tx_q : r0_pre_q;
     wire mux_i1 = ping_active ? ping_tx_q : r1_pre_q;
     qsag_fast_mux2 u_rapid_mux (
         .a(mux_i0), .b(mux_i1), .sel(db_chal_pad_in), .y(rapid_mux_y)
     );
-    assign db_resp_pad_out = rapid_mux_y;
-    assign db_resp_pad_oe  = responder_armed | ping_active;
+    assign db_resp_pad_out      = rapid_mux_y;
+    assign db_resp_pad_oe       = responder_armed | ping_active;
+    assign db_resp_pad_ie_force = ping_active;
 
-    // Synchronized observation of challenge/echo pad in clk_core
+    // Synchronized level for rapid-bit logging
     wire chal_s;
     qsag_sync2 #(.RV(1'b0)) u_cs (.clk(clk), .rst_n(rst_n), .d(db_chal_pad_in), .q(chal_s));
 
-    // Vernier TDC instance: start_pulse = ping_tx_q, stop_pulse = db_chal_pad_in
-    logic        tdc_arm_n;
+    // Edge-latched echo detector clocked directly on posedge db_chal_pad_in (never misses narrow echoes!)
+    logic       tdc_arm_n;
+    wire        hit_rn = rst_n & tdc_arm_n;
+    wire        chal_clk_buf;
+    logic       echo_hit_async;
+    wire        echo_hit_s;
+    qsag_clkbuf u_ccb (.a(db_chal_pad_in), .y(chal_clk_buf));
+    always_ff @(posedge chal_clk_buf or negedge hit_rn)
+        if (!hit_rn) echo_hit_async <= 1'b0;
+        else         echo_hit_async <= 1'b1;
+    qsag_sync2 #(.RV(1'b0)) u_ehs (.clk(clk), .rst_n(rst_n), .d(echo_hit_async), .q(echo_hit_s));
+
+    // Pad-loopback start pulse cancels outbound bi_24t buffer delay!
     wire  [5:0]  vernier_fine;
     wire  [31:0] vernier_thermo;
     dregg_vernier_tdc32 u_tdc (
-        .rst_n(rst_n), .arm_n(tdc_arm_n), .start_pulse(ping_tx_q), .stop_pulse(db_chal_pad_in),
+        .rst_n(rst_n), .arm_n(tdc_arm_n),
+        .start_pulse(db_resp_pad_loopback),
+        .stop_pulse(db_chal_pad_in),
         .fine_code(vernier_fine), .thermo_raw(vernier_thermo)
     );
 
@@ -142,9 +149,7 @@ module dregg_distance_tdc (
             dist_timeout    <= 1'b0;
             dist_cycles     <= 32'hFFFF_FFFF;
         end else begin
-            if (dist_consume) begin
-                dist_valid <= 1'b0;
-            end
+            if (dist_consume) dist_valid <= 1'b0;
 
             if (arm_responder) begin
                 responder_armed <= 1'b1;
@@ -188,13 +193,14 @@ module dregg_distance_tdc (
                 if (!tdc_arm_n) begin
                     tdc_arm_n <= 1'b1;
                 end else if (!ping_tx_q) begin
-                    ping_tx_q  <= 1'b1; // Launch outbound pulse edge!
+                    ping_tx_q  <= 1'b1;
                     coarse_cnt <= 16'd0;
-                end else if (chal_s) begin
+                end else if (echo_hit_s) begin
                     ping_active <= 1'b0;
                     ping_tx_q   <= 1'b0;
                     dist_valid  <= 1'b1;
-                    dist_cycles <= {10'd0, coarse_cnt, vernier_fine};
+                    // Subtract 2 synchronizer cycles from coarse_cnt (saturated at 0)
+                    dist_cycles <= {10'd0, (coarse_cnt >= 16'd2) ? (coarse_cnt - 16'd2) : 16'd0, vernier_fine};
                 end else if (coarse_cnt == 16'h0FFF) begin
                     ping_active  <= 1'b0;
                     ping_tx_q    <= 1'b0;
