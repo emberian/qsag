@@ -1,7 +1,6 @@
 module
 public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Signing.HashSigs
-import all Qsag.Protocol.Signing.HashSigs
 public section
 namespace Qsag.PreprocessingGame
 /-! ## Production signature/Merkle seed encoding connection
@@ -24,8 +23,8 @@ theorem nodeRequest_seed_separation {seed₁ seed₂ : List UInt8}
 theorem nodeRequest_is_production (suite : TweakableHashSuite) (seed : List UInt8)
     (adrs : HashAdrs) (left right : List UInt8) :
     thNodeH suite seed adrs left right = suite.rawHash (nodeRequest seed adrs left right) := by
-  unfold thNodeH thCall nodeRequest
-  rfl
+  unfold nodeRequest
+  rw [thNodeH_eq, thCall_eq]
 
 /-- Concrete reduction output: distinct accepted node pairs give the two actual
 encoded raw-hash inputs, not merely a proposition that a collision exists. -/

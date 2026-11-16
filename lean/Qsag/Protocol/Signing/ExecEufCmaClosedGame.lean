@@ -17,44 +17,48 @@ hypothesis. Here the experiment is closed:
 * `ExecEufCmaGame`: the `FinGame n` whose sample point selects the key (`keygen ω`) and the
   adversary (`adv ω`), and whose win predicate is `prodEufCmaWin`: the executable verifier
   `verifyProductionPqHashSig` accepts and the message was not answered by the signer.
-* `execEufCmaItsrReduction`, `execEufCmaTcrReduction`, `execEufCmaPreReduction`: the reduction
-  games, whose win predicates are the extractor-defined events on the same run.
-* `jorts_baggy_closed_euf_cma`: `Pr[ExecEufCmaGame] ≤ Pr[R_itsr] + (Pr[R_tcr] + Pr[R_pre])`.
-* `ExecEufCmaReductionEmbedding`: the open obligation that turns the three extractor events into
-  wins of adversaries in the `ITSR`, `SM-DT-TCR` and `SM-DT-PRE` experiments of `Spec.Assumptions`.
-  What the structure enforces: the reduction adversaries belong to the adversary classes the
-  hardness hypotheses are stated for; `th` agrees with the suite's tweakable hash call `thCall`
-  under a tweak / argument codec; the challenge seed of the `SM-DT-TCR` and `SM-DT-PRE`
-  experiments is the public seed of the key of the forger's experiment on the same coin, so it
-  is uniform and independent of the reduction adversary's coordinate
-  (`ExecEufCmaReductionEmbedding.tcr_adversary_blind_to_pkSeed`). What it does not enforce: the
-  subset hash `hmsg`, the `ITSR` randomizers and the hidden `SM-DT-PRE` inputs are not tied to
-  the suite or to the run (the production signer derives randomizers and chain secrets with a
-  PRF, and its index derivation depends on the public key), and a reduction adversary's
-  coordinate may hold the secret part of the key. It is a hypothesis; no instance is
-  constructed in this library.
-* `jorts_baggy_closed_euf_cma_assumption_bound`: for an experiment whose key generator reads the
-  challenger coordinate and whose forger reads the adversary coordinate, under such an embedding
-  and the hardness propositions `Spec.ItsrHard`, `Spec.SmDtTcrHard`, `Spec.SmDtPreHard` for the
-  embedding's adversary classes, the forger wins with probability at most `εItsr + εTcr + εPre`.
-  The hardness propositions are false for the unrestricted class
-  (`Spec.smDtPreHard_unrestricted_refuted`), so the classes must exclude exhaustive search; no
-  such class is defined here.
+* `execEufCmaItsrReduction`, `execEufCmaTcrReduction`, `execEufCmaPreReduction`: the three
+  extractor events on the run, as games. Their win predicates are computed from the whole
+  outcome, secret key included.
+* `jorts_baggy_closed_euf_cma_same_trace_classification`:
+  `Pr[ExecEufCmaGame] ≤ Pr[R_itsr] + (Pr[R_tcr] + Pr[R_pre])`, a partition of the winning coins.
+* `SeedWithheldOracleAdv`, `execSubsetCoverGame`, `execKeyedPathCollisionGame`,
+  `execKeyedSecretPreimageGame`: games played by a program that receives the public key and
+  queries the hash and the latched signer. The first is decided on the public transcript; in
+  the other two the challenger compares the adversary's output with the signer's own hash input
+  at the named position.
+* `execCollisionReductionAdv`, `execPreimageReductionAdv`: the reduction adversaries. They run
+  the forger, record the answered signing queries, and run the public-data extractor
+  `prodPublicExtract` (a function of public key, log and forgery; `ProdHashReductions` §4) as a
+  hash-oracle program. Budgets: the forger's, plus `prodTcrReductionHashBudget params`,
+  respectively `1 + prodXofHashBudget params`, hash queries.
+* `execEufCma_win_reduction_adversary_wins`: on every winning coin the forger wins the
+  subset-cover game or one of the reduction adversaries wins its keyed game.
+* `jorts_baggy_closed_euf_cma_keyed_target_bound`: under hardness of the three games for
+  classes containing those adversaries, the forger wins with probability at most
+  `εI + prodPathTargetCount params qSign · εT + prodPreCandidateCount params · εP`.
 * `jorts_baggy_closed_euf_cma_keygen_hop`: a key-generation game hop under `Spec.PrfHard` for a
   distinguisher class containing the simulating distinguisher. Its simulation hypotheses say
   that the experiment under the real key generator is the real PRF game of an oracle
   distinguisher, and under the ideal key generator its ideal game.
 
-The hop replaces the key generator only. The signer's internal use of `skPrf` and `skSeed` is not
-idealised: `prodSignQuery` has no oracle-parameterised variant to hop to.
+What is not here. The keyed games are not the `SM-DT-TCR` and `SM-DT-PRE` experiments of
+`Spec.Assumptions` and the subset-cover game is not its `ITSR` experiment: the targets are the
+signer's hash inputs and the randomizers are the signer's, both functions of the secret key,
+where the `Spec` experiments have targets committed before the seed is revealed, uniform hidden
+inputs and uniform randomizers. A reduction to `Spec.ItsrHard`, `Spec.SmDtTcrHard` and
+`Spec.SmDtPreHard` needs the signer simulated from target-oracle answers, a PRF hop for the
+chain secrets and randomizers, and an undetectability hop for chain positions above `0`. None
+of the three is constructed. The hardness hypotheses are false for classes that contain
+exhaustive search; the classes are parameters.
+
+The key-generation hop replaces the key generator only. The signer's internal use of `skPrf` and
+`skSeed` is not idealised: `prodSignQuery` has no oracle-parameterised variant to hop to.
 -/
 
-public import Qsag.Protocol.Signing.ProdAdaptiveTcrReduction
+public import Qsag.Protocol.Signing.ProdHashReductions
 public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
-import all Qsag.Protocol.Signing.ProdAdaptiveTcrReduction
-import all Qsag.Protocol.Signing.ProdCollisionEvents
-import all Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -180,7 +184,7 @@ theorem prodSignQuery_verifies (suite : TweakableHashSuite) (params : PqHashPara
     (h : prodSignQuery suite params sk q = some sig) :
     verifyProductionPqHashSig suite params (derivePublicKey suite params sk) q.message sig =
       true := by
-  unfold prodSignQuery at h
+  rw [prodSignQuery_eq] at h
   cases hSt : params.statefulJorts
   · rw [hSt] at h
     simp only [Bool.false_eq_true, ↓reduceIte] at h
@@ -207,7 +211,7 @@ theorem prodSignQuery_verifies (suite : TweakableHashSuite) (params : PqHashPara
 
 /-- The experiment with the latch switchable; `latchOn = false` is the mutation used by the
     tooth. The win predicate is `prodEufCmaWin`. -/
-@[expose] def execEufCmaGameWith {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
+def execEufCmaGameWith {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (keygen : Fin n → PqSecretKey)
     (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) : Spec.FinGame n :=
@@ -238,8 +242,9 @@ theorem execEufCmaOutcome_queries_le {n qHash qSign : Nat} (latchOn : Bool)
     (prodSignQuery suite params (keygen ω)) _ 0
     ((adv ω).bounded (derivePublicKey suite params (keygen ω)))
 
-/-- Reduction to `ITSR`: wins on the coins where the extractor returns a few-time subset cover. -/
-@[expose] def execEufCmaItsrReduction {n qHash qSign : Nat} (hPos : 0 < n)
+/-- Extractor event, index coverage: wins on the coins where the extractor run on the whole
+    outcome returns a few-time subset cover. -/
+def execEufCmaItsrReduction {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
     (keygen : Fin n → PqSecretKey)
@@ -247,9 +252,9 @@ theorem execEufCmaOutcome_queries_le {n qHash qSign : Nat} (latchOn : Bool)
   ⟨hPos, fun ω => prodItsrEvent suite params hw (execEufCmaOutcome true suite params keygen adv ω)
     (fun _ => execEufCmaOutcome_oneTime suite params keygen adv ω)⟩
 
-/-- Reduction to `SM-DT-TCR`: wins on the coins where the extractor returns an on-path target
-    and a colliding input. -/
-@[expose] def execEufCmaTcrReduction {n qHash qSign : Nat} (hPos : 0 < n)
+/-- Extractor event, collision: wins on the coins where the extractor run on the whole outcome
+    returns an on-path target and a colliding input. -/
+def execEufCmaTcrReduction {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
     (keygen : Fin n → PqSecretKey)
@@ -257,8 +262,9 @@ theorem execEufCmaOutcome_queries_le {n qHash qSign : Nat} (latchOn : Bool)
   ⟨hPos, fun ω => prodTcrEvent suite params hw (execEufCmaOutcome true suite params keygen adv ω)
     (fun _ => execEufCmaOutcome_oneTime suite params keygen adv ω)⟩
 
-/-- Reduction to `SM-DT-PRE`: wins on the coins where the extractor returns a chain preimage. -/
-@[expose] def execEufCmaPreReduction {n qHash qSign : Nat} (hPos : 0 < n)
+/-- Extractor event, preimage: wins on the coins where the extractor run on the whole outcome
+    returns a chain or FORS-leaf preimage. -/
+def execEufCmaPreReduction {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
     (keygen : Fin n → PqSecretKey)
@@ -266,7 +272,8 @@ theorem execEufCmaOutcome_queries_le {n qHash qSign : Nat} (latchOn : Bool)
   ⟨hPos, fun ω => prodPreEvent suite params hw (execEufCmaOutcome true suite params keygen adv ω)
     (fun _ => execEufCmaOutcome_oneTime suite params keygen adv ω)⟩
 
-/-- Every winning coin of the experiment is a winning coin of one of the three reductions. -/
+/-- Every winning coin of the experiment is a winning coin of one of the three extractor
+    events. -/
 theorem execEufCma_win_classified {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
@@ -281,11 +288,14 @@ theorem execEufCma_win_classified {n qHash qSign : Nat} (hPos : 0 < n)
 
 /-! ## §3. The bound -/
 
-/-- **Closed EUF-CMA reduction.** For every key generator and every family of seed-withheld
-    adaptive adversaries, the probability that the executable verifier accepts a message the
-    latched signer did not answer is at most the sum of the winning probabilities of the three
-    reduction games built from the same run. -/
-theorem jorts_baggy_closed_euf_cma {n qHash qSign : Nat} (hPos : 0 < n)
+/-- **Same-trace classification of the closed experiment.** For every key generator and every
+    family of seed-withheld adaptive adversaries, the probability that the executable verifier
+    accepts a message the latched signer did not answer is at most the sum of the probabilities
+    of the three extractor events on the same run. The events are indicators computed from the
+    whole outcome, secret key included: this is a partition of the winning coins, not a bound by
+    the advantage of an adversary. The bound by adversaries that see only the public key and the
+    oracles is `jorts_baggy_closed_euf_cma_keyed_target_bound`. -/
+theorem jorts_baggy_closed_euf_cma_same_trace_classification {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
     (keygen : Fin n → PqSecretKey)
@@ -320,153 +330,502 @@ theorem jorts_baggy_closed_euf_cma {n qHash qSign : Nat} (hPos : 0 < n)
       · exact .inl rfl)
   exact Spec.RatBound.le_trans h1 (Spec.RatBound.add_le_add (Spec.RatBound.le_refl _) h2)
 
-/-- **Reduction embedding (open obligation).** Data that realises the three extractor events
-    of the closed experiment as wins in the `ITSR`, `SM-DT-TCR` and `SM-DT-PRE` experiments of the
-    subset hash `hmsg` and the tweakable hash `th`, by adversaries of the classes `𝒜I`, `𝒜T`,
-    `𝒜P`.
+/-! ## §4. Reduction adversaries that see the public key and the oracles only
 
-    For each experiment the embedding gives a split of the coin space (`πi`, `πt`, `πp`), a
-    challenger sampler on the challenger coordinate with its `UniformOn` law, and a reduction
-    adversary on the adversary coordinate whose programs belong to the class. The laws `itsr`,
-    `tcr`, `pre` say that on every coin where the extractor returns a subset cover, an on-path
-    target collision or a chain preimage, that reduction adversary wins its experiment.
+The three games below are played by an adversary of type `SeedWithheldOracleAdv`: a program
+that receives the public key, queries the raw hash and the latched signer, and returns its
+output. The challenger holds the key, answers the queries and decides the win.
 
-    Enforced ties to the experiment:
-    * `th_suite`: on encoded points `th` is the suite's tweakable hash call `thCall`, so `th`
-      depends on its seed argument exactly as the suite does;
-    * `seed_is_pkSeed`, `sample_seed_is_pkSeed`: the challenge seed of the `SM-DT-TCR` and
-      `SM-DT-PRE` experiments is the public seed of the experiment's key on the same coin. With
-      `seed_uniform` this makes `seedLen` the length of the public seeds the key generator
-      produces, and the public seed independent of the reduction adversary's coordinate.
+* `execSubsetCoverGame`: the adversary returns a message and a signature; the win is the public
+  verdict `prodPublicSubsetCoverCheck` on `(pk, log, output)`.
+* `execKeyedPathCollisionGame`: the adversary names a position on a verification path and an
+  input; it wins if the input differs from the input the signer hashes at that position and
+  has the same digest (`smDtTcrChallengerCheck`).
+* `execKeyedSecretPreimageGame`: the adversary names an unopened FORS leaf or an unrevealed
+  WOTS chain position and a value; it wins if the value hashes to the signer's value there
+  (`smDtPreChallengerCheck`).
 
-    Not enforced: `hmsg` is a free parameter (the production index derivation depends on the
-    public key and the hypertree leaf, which the keyless `Spec.ItsrHard` does not express); the
-    `ITSR` randomizers and the hidden `SM-DT-PRE` inputs are not related to the signer's
-    PRF-derived randomizers and chain secrets; a reduction adversary's coordinate may hold the
-    secret seeds of the key. Providing an embedding means writing the three simulations of the
-    forger against the primitives of `suite`; none is constructed in this library. -/
-structure ExecEufCmaReductionEmbedding {n nK nA qHash qSign : Nat} (hPos : 0 < n)
+In the last two the targets are the signer's own hash inputs, which are functions of the secret
+key. They are not the `SM-DT-TCR` and `SM-DT-PRE` experiments of `Spec.Assumptions`, where the
+adversary commits the targets before the seed is revealed and the hidden inputs are uniform;
+and in the first the randomizers are the signer's, not uniform samples. Relating the three to
+`Spec.ItsrHard`, `Spec.SmDtTcrHard` and `Spec.SmDtPreHard` needs a simulation of the signer
+from target-oracle answers and a PRF hop, which this module does not contain. -/
+
+/-- An oracle adversary with output type `α`: it receives the public key only and makes at most
+    `qHash` raw-hash queries and `qSign` signing queries. -/
+structure SeedWithheldOracleAdv (α : Type) (qHash qSign : Nat) where
+  run : PqPublicKey → ProdAdaptiveTree α
+  bounded : ∀ pk, ProdDualBounded qHash qSign (run pk)
+
+/-- A forger is an oracle adversary whose output is a message and a signature. -/
+@[expose] def SeedWithheldEufCmaAdv.toOracleAdv {qHash qSign : Nat}
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    SeedWithheldOracleAdv (List UInt8 × PqHashSig) qHash qSign :=
+  ⟨A.run, A.bounded⟩
+
+/-- Run an oracle adversary against the raw hash and the latched signer under key `sk`: its
+    output and the log of admitted signing requests. -/
+@[expose] def execLatchedRun {α : Type} {qHash qSign : Nat} (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (B : SeedWithheldOracleAdv α qHash qSign) :
+    α × List ProdSigningQuery :=
+  evalLatchedAdaptiveTree true suite.rawHash (prodSignQuery suite params sk)
+    (B.run (derivePublicKey suite params sk)) 0
+
+theorem execLatchedRun_queries_le {α : Type} {qHash qSign : Nat} (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (B : SeedWithheldOracleAdv α qHash qSign) :
+    (execLatchedRun suite params sk B).2.length ≤ qSign :=
+  evalLatchedAdaptiveTree_log_length true suite.rawHash (prodSignQuery suite params sk) _ 0
+    (B.bounded (derivePublicKey suite params sk))
+
+/-- **Subset-cover game.** The win is decided on the public transcript. -/
+@[expose] def execSubsetCoverGame {n qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams) (keygen : Fin n → PqSecretKey)
+    (B : Fin n → SeedWithheldOracleAdv (List UInt8 × PqHashSig) qHash qSign) : Spec.FinGame n :=
+  ⟨hPos, fun ω =>
+    prodPublicSubsetCoverCheck suite params (derivePublicKey suite params (keygen ω))
+      (productionSigningLog suite params (keygen ω)
+        (execLatchedRun suite params (keygen ω) (B ω)).2)
+      (execLatchedRun suite params (keygen ω) (B ω)).1.1
+      (execLatchedRun suite params (keygen ω) (B ω)).1.2⟩
+
+/-- **Keyed path-collision game.** The target is the signer's input at the named position. -/
+@[expose] def execKeyedPathCollisionGame {n qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams) (keygen : Fin n → PqSecretKey)
+    (B : Fin n → SeedWithheldOracleAdv (Option SmDtTcrSubmission) qHash qSign) : Spec.FinGame n :=
+  ⟨hPos, fun ω =>
+    smDtTcrChallengerCheck suite params (keygen ω)
+      (execLatchedRun suite params (keygen ω) (B ω)).2
+      (execLatchedRun suite params (keygen ω) (B ω)).1⟩
+
+/-- **Keyed secret-preimage game.** The target is the signer's value at an unopened position. -/
+@[expose] def execKeyedSecretPreimageGame {n qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams) (keygen : Fin n → PqSecretKey)
+    (B : Fin n → SeedWithheldOracleAdv (Option SmDtPreSubmission) qHash qSign) : Spec.FinGame n :=
+  ⟨hPos, fun ω =>
+    smDtPreChallengerCheck suite params (keygen ω)
+      (execLatchedRun suite params (keygen ω) (B ω)).2
+      (execLatchedRun suite params (keygen ω) (B ω)).1⟩
+
+/-- A winning coin of the subset-cover game carries the FORS index-coverage event. -/
+theorem execSubsetCoverGame_win_sound {n qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams) (keygen : Fin n → PqSecretKey)
+    (B : Fin n → SeedWithheldOracleAdv (List UInt8 × PqHashSig) qHash qSign) (ω : Fin n)
+    (hWin : (execSubsetCoverGame hPos suite params keygen B).win ω = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params (keygen ω))
+      (productionSigningLog suite params (keygen ω)
+        (execLatchedRun suite params (keygen ω) (B ω)).2)
+      (execLatchedRun suite params (keygen ω) (B ω)).1.1
+      (execLatchedRun suite params (keygen ω) (B ω)).1.2 :=
+  prodPublicSubsetCoverCheck_sound suite params _ _ _ _ hWin
+
+/-- A winning coin of the keyed path-collision game carries a collision of `suite.rawHash`
+    with an input the signer hashes. -/
+theorem execKeyedPathCollisionGame_win_sound {n qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams) (keygen : Fin n → PqSecretKey)
+    (B : Fin n → SeedWithheldOracleAdv (Option SmDtTcrSubmission) qHash qSign) (ω : Fin n)
+    (hWin : (execKeyedPathCollisionGame hPos suite params keygen B).win ω = true) :
+    ProdSmTcrBreak suite params (keygen ω)
+      (productionSigningLog suite params (keygen ω)
+        (execLatchedRun suite params (keygen ω) (B ω)).2) := by
+  have hChk : smDtTcrChallengerCheck suite params (keygen ω)
+      (execLatchedRun suite params (keygen ω) (B ω)).2
+      (execLatchedRun suite params (keygen ω) (B ω)).1 = true := hWin
+  cases hOut : (execLatchedRun suite params (keygen ω) (B ω)).1 with
+  | none =>
+    rw [hOut, smDtTcrChallengerCheck_none] at hChk
+    cases hChk
+  | some sub =>
+    rw [hOut] at hChk
+    exact smDtTcrChallengerCheck_sound suite params _ _ sub hChk
+
+/-! ### Evaluation of composed programs under the latch -/
+
+/-- A program without signing queries does not touch the latch or the log. -/
+theorem evalLatchedAdaptiveTree_signFree {α : Type} (latchOn : Bool)
+    (rawHash : List UInt8 → List UInt8) (sign : ProdSigningQuery → Option PqHashSig) :
+    ∀ {qH : Nat} (t : ProdAdaptiveTree α) (lo : Nat), ProdDualBounded qH 0 t →
+      evalLatchedAdaptiveTree latchOn rawHash sign t lo = (t.hashOnlyValue rawHash, [])
+  | _, .pure _, _, _ => rfl
+  | 0, .hashQuery _ _, _, h => False.elim h
+  | _ + 1, .hashQuery x next, lo, h =>
+    evalLatchedAdaptiveTree_signFree latchOn rawHash sign (next (rawHash x)) lo (h (rawHash x))
+  | _, .signQuery _ _, _, h => False.elim h
+
+theorem evalLatchedAdaptiveTree_bind_signFree {α β : Type} (latchOn : Bool)
+    (rawHash : List UInt8 → List UInt8) (sign : ProdSigningQuery → Option PqHashSig)
+    {qH : Nat} (f : α → ProdAdaptiveTree β) (hf : ∀ a, ProdDualBounded qH 0 (f a)) :
+    ∀ (t : ProdAdaptiveTree α) (lo : Nat),
+      evalLatchedAdaptiveTree latchOn rawHash sign (t.bind f) lo =
+        ((f (evalLatchedAdaptiveTree latchOn rawHash sign t lo).1).hashOnlyValue rawHash,
+          (evalLatchedAdaptiveTree latchOn rawHash sign t lo).2)
+  | .pure a, lo => evalLatchedAdaptiveTree_signFree latchOn rawHash sign (f a) lo (hf a)
+  | .hashQuery x next, lo =>
+    evalLatchedAdaptiveTree_bind_signFree latchOn rawHash sign f hf (next (rawHash x)) lo
+  | .signQuery q next, lo => by
+    show evalLatchedAdaptiveTree latchOn rawHash sign
+      (.signQuery q (fun s => (next s).bind f)) lo = _
+    rw [evalLatchedAdaptiveTree_sign, evalLatchedAdaptiveTree_sign]
+    if hc : latchOn = false ∨ lo ≤ q.epoch then
+      rw [ite_eq_left hc, ite_eq_left hc]
+      dsimp only
+      rw [evalLatchedAdaptiveTree_bind_signFree latchOn rawHash sign f hf (next (sign q))
+        (q.epoch + 1)]
+    else
+      rw [ite_eq_right hc, ite_eq_right hc]
+      exact evalLatchedAdaptiveTree_bind_signFree latchOn rawHash sign f hf (next none) lo
+
+/-- The tracked log is the signer's transcript of the admitted requests. -/
+theorem evalLatchedAdaptiveTree_trackSignLog {α : Type} (latchOn : Bool)
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) :
+    ∀ (t : ProdAdaptiveTree α) (acc : List (List UInt8 × PqHashSig)) (lo : Nat),
+      evalLatchedAdaptiveTree latchOn suite.rawHash (prodSignQuery suite params sk)
+          (prodTrackSignLog acc t) lo =
+        (((evalLatchedAdaptiveTree latchOn suite.rawHash (prodSignQuery suite params sk) t lo).1,
+          acc ++ productionSigningLog suite params sk
+            (evalLatchedAdaptiveTree latchOn suite.rawHash (prodSignQuery suite params sk) t
+              lo).2),
+          (evalLatchedAdaptiveTree latchOn suite.rawHash (prodSignQuery suite params sk) t lo).2)
+  | .pure a, acc, lo => by
+    show ((a, acc), ([] : List ProdSigningQuery)) =
+      ((a, acc ++ productionSigningLog suite params sk []), [])
+    rw [productionSigningLog_nil, List.append_nil]
+  | .hashQuery x next, acc, lo =>
+    evalLatchedAdaptiveTree_trackSignLog latchOn suite params sk (next (suite.rawHash x)) acc lo
+  | .signQuery q next, acc, lo => by
+    show evalLatchedAdaptiveTree latchOn suite.rawHash (prodSignQuery suite params sk)
+      (.signQuery q (fun resp =>
+        prodTrackSignLog
+          (match resp with
+            | none => acc
+            | some sig => acc ++ [(q.message, sig)])
+          (next resp))) lo = _
+    rw [evalLatchedAdaptiveTree_sign, evalLatchedAdaptiveTree_sign]
+    if hc : latchOn = false ∨ lo ≤ q.epoch then
+      rw [ite_eq_left hc, ite_eq_left hc]
+      dsimp only
+      rw [evalLatchedAdaptiveTree_trackSignLog latchOn suite params sk
+        (next (prodSignQuery suite params sk q)) _ (q.epoch + 1), productionSigningLog_cons]
+      cases prodSignQuery suite params sk q with
+      | none => rfl
+      | some sig =>
+        dsimp only
+        rw [List.append_assoc]
+    else
+      rw [ite_eq_right hc, ite_eq_right hc]
+      exact evalLatchedAdaptiveTree_trackSignLog latchOn suite params sk (next none) acc lo
+
+/-! ### The three reduction adversaries -/
+
+/-- **Collision reduction adversary** for candidate `slot`: run the forger, record the answered
+    signing queries, run the collision-candidate program on `(pk, log, forgery)`. It makes the
+    forger's queries and at most `prodTcrReductionHashBudget params` further hash queries. -/
+def execCollisionReductionAdv {qHash qSign : Nat} (params : PqHashParams) (slot : Nat)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    SeedWithheldOracleAdv (Option SmDtTcrSubmission)
+      (qHash + prodTcrReductionHashBudget params) qSign where
+  run pk := (prodTrackSignLog [] (A.run pk)).bind fun outLog =>
+    prodPublicCollisionProgram params slot pk outLog.2 outLog.1.1 outLog.1.2
+  bounded pk :=
+    ProdDualBounded.bind
+      (fun outLog => prodPublicCollisionProgram_bounded params slot pk outLog.2 outLog.1.1
+        outLog.1.2)
+      (prodTrackSignLog_bounded [] (A.bounded pk))
+
+/-- **Preimage reduction adversary** for candidate `slot`: run the forger, then the
+    preimage-candidate program on `(pk, forgery)`. It makes the forger's queries and at most
+    `1 + prodXofHashBudget params` further hash queries. -/
+def execPreimageReductionAdv {qHash qSign : Nat} (params : PqHashParams) (slot : Nat)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    SeedWithheldOracleAdv (Option SmDtPreSubmission)
+      (qHash + (1 + prodXofHashBudget params)) qSign where
+  run pk := (A.run pk).bind fun out => prodPublicPreimageProgram params slot pk out.1 out.2
+  bounded pk :=
+    ProdDualBounded.bind
+      (fun out => prodPublicPreimageProgram_bounded params slot pk out.1 out.2)
+      (A.bounded pk)
+
+/-- The collision reduction adversary returns candidate `slot` of the public-data extractor on
+    the forger's own run, and its signing log is the forger's. -/
+theorem execLatchedRun_collisionReduction {qHash qSign : Nat} (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (slot : Nat)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    execLatchedRun suite params sk (execCollisionReductionAdv params slot A) =
+      ((prodPublicExtract suite params (derivePublicKey suite params sk)
+          (productionSigningLog suite params sk (execLatchedRun suite params sk A.toOracleAdv).2)
+          (execLatchedRun suite params sk A.toOracleAdv).1.1
+          (execLatchedRun suite params sk A.toOracleAdv).1.2).collisions[slot]?,
+        (execLatchedRun suite params sk A.toOracleAdv).2) := by
+  show evalLatchedAdaptiveTree true suite.rawHash (prodSignQuery suite params sk)
+    ((prodTrackSignLog [] (A.run (derivePublicKey suite params sk))).bind fun outLog =>
+      prodPublicCollisionProgram params slot (derivePublicKey suite params sk) outLog.2
+        outLog.1.1 outLog.1.2) 0 = _
+  rw [evalLatchedAdaptiveTree_bind_signFree true suite.rawHash (prodSignQuery suite params sk)
+    (fun outLog : (List UInt8 × PqHashSig) × List (List UInt8 × PqHashSig) =>
+      prodPublicCollisionProgram params slot (derivePublicKey suite params sk) outLog.2
+        outLog.1.1 outLog.1.2)
+    (fun outLog => prodPublicCollisionProgram_bounded params slot _ outLog.2 outLog.1.1
+      outLog.1.2),
+    evalLatchedAdaptiveTree_trackSignLog]
+  dsimp only
+  rw [prodPublicCollisionProgram_value, List.nil_append]
+  rfl
+
+/-- The preimage reduction adversary returns candidate `slot` of the public-data extractor on
+    the forger's own run, and its signing log is the forger's. -/
+theorem execLatchedRun_preimageReduction {qHash qSign : Nat} (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (slot : Nat)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    execLatchedRun suite params sk (execPreimageReductionAdv params slot A) =
+      ((prodPublicExtract suite params (derivePublicKey suite params sk)
+          (productionSigningLog suite params sk (execLatchedRun suite params sk A.toOracleAdv).2)
+          (execLatchedRun suite params sk A.toOracleAdv).1.1
+          (execLatchedRun suite params sk A.toOracleAdv).1.2).preimages[slot]?,
+        (execLatchedRun suite params sk A.toOracleAdv).2) := by
+  show evalLatchedAdaptiveTree true suite.rawHash (prodSignQuery suite params sk)
+    ((A.run (derivePublicKey suite params sk)).bind fun out =>
+      prodPublicPreimageProgram params slot (derivePublicKey suite params sk) out.1 out.2) 0 = _
+  rw [evalLatchedAdaptiveTree_bind_signFree true suite.rawHash (prodSignQuery suite params sk)
+    (fun out : List UInt8 × PqHashSig =>
+      prodPublicPreimageProgram params slot (derivePublicKey suite params sk) out.1 out.2)
+    (fun out => prodPublicPreimageProgram_bounded params slot _ out.1 out.2)]
+  rw [prodPublicPreimageProgram_value suite params slot _
+    (productionSigningLog suite params sk (execLatchedRun suite params sk A.toOracleAdv).2)]
+  rfl
+
+/-- **Every forgery is a win of one of the three reduction adversaries.** On a winning coin of
+    the closed experiment, the forger itself wins the subset-cover game, or for some `slot`
+    below `prodPathTargetCount params qSign` the collision reduction adversary wins the keyed
+    path-collision game, or for some `slot` below `prodPreCandidateCount params` the preimage
+    reduction adversary wins the keyed secret-preimage game, on the same coin. -/
+theorem execEufCma_win_reduction_adversary_wins {n qHash qSign : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (keygen : Fin n → PqSecretKey)
+    (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) (ω : Fin n)
+    (hWin : (ExecEufCmaGame hPos suite params keygen adv).win ω = true) :
+    (execSubsetCoverGame hPos suite params keygen (fun ω => (adv ω).toOracleAdv)).win ω = true ∨
+    (∃ slot : Fin (prodPathTargetCount params qSign),
+      (execKeyedPathCollisionGame hPos suite params keygen
+        (fun ω => execCollisionReductionAdv params slot.val (adv ω))).win ω = true) ∨
+    (∃ slot : Fin (prodPreCandidateCount params),
+      (execKeyedSecretPreimageGame hPos suite params keygen
+        (fun ω => execPreimageReductionAdv params slot.val (adv ω))).win ω = true) := by
+  have hWin' : prodEufCmaWin suite params (execEufCmaOutcome true suite params keygen adv ω) =
+      true := hWin
+  rcases prodPublicExtract_complete suite params hw
+      (execEufCmaOutcome true suite params keygen adv ω)
+      (fun _ => execEufCmaOutcome_oneTime suite params keygen adv ω) hWin' with hI | hT | hP
+  · exact .inl ((prodPublicExtract_subsetCover suite params _ _ _ _).symm.trans hI)
+  · refine .inr (.inl ?_)
+    obtain ⟨sub, hMem, hChk⟩ := hT
+    obtain ⟨idx, hIdxLt, hIdxEq⟩ := List.mem_iff_getElem.mp hMem
+    have hLogLe : (productionSigningLog suite params (keygen ω)
+        (execEufCmaOutcome true suite params keygen adv ω).queries).length ≤ qSign :=
+      Nat.le_trans (productionSigningLog_length_le suite params (keygen ω) _)
+        (execEufCmaOutcome_queries_le true suite params keygen adv ω)
+    refine ⟨⟨idx, Nat.lt_of_lt_of_le hIdxLt
+      (Nat.le_trans (prodPublicExtract_collisions_length_le suite params _ _ _ _)
+        (prodPathTargetCount_mono params hLogLe))⟩, ?_⟩
+    show smDtTcrChallengerCheck suite params (keygen ω)
+      (execLatchedRun suite params (keygen ω) (execCollisionReductionAdv params idx (adv ω))).2
+      (execLatchedRun suite params (keygen ω) (execCollisionReductionAdv params idx (adv ω))).1 =
+        true
+    rw [execLatchedRun_collisionReduction]
+    dsimp only
+    have hGet : (prodPublicExtract suite params (derivePublicKey suite params (keygen ω))
+        (productionSigningLog suite params (keygen ω)
+          (execLatchedRun suite params (keygen ω) (adv ω).toOracleAdv).2)
+        (execLatchedRun suite params (keygen ω) (adv ω).toOracleAdv).1.1
+        (execLatchedRun suite params (keygen ω) (adv ω).toOracleAdv).1.2).collisions[idx]? =
+        some sub :=
+      (List.getElem?_eq_getElem hIdxLt).trans (congrArg some hIdxEq)
+    rw [hGet]
+    exact hChk
+  · refine .inr (.inr ?_)
+    obtain ⟨sub, hMem, hChk⟩ := hP
+    obtain ⟨idx, hIdxLt, hIdxEq⟩ := List.mem_iff_getElem.mp hMem
+    refine ⟨⟨idx, by
+      rw [← prodPublicExtract_preimages_length suite params
+        (derivePublicKey suite params (keygen ω))
+        (productionSigningLog suite params (keygen ω)
+          (execEufCmaOutcome true suite params keygen adv ω).queries)
+        (execEufCmaOutcome true suite params keygen adv ω).msgStar
+        (execEufCmaOutcome true suite params keygen adv ω).sigStar]
+      exact hIdxLt⟩, ?_⟩
+    show smDtPreChallengerCheck suite params (keygen ω)
+      (execLatchedRun suite params (keygen ω) (execPreimageReductionAdv params idx (adv ω))).2
+      (execLatchedRun suite params (keygen ω) (execPreimageReductionAdv params idx (adv ω))).1 =
+        true
+    rw [execLatchedRun_preimageReduction]
+    dsimp only
+    have hGet : (prodPublicExtract suite params (derivePublicKey suite params (keygen ω))
+        (productionSigningLog suite params (keygen ω)
+          (execLatchedRun suite params (keygen ω) (adv ω).toOracleAdv).2)
+        (execLatchedRun suite params (keygen ω) (adv ω).toOracleAdv).1.1
+        (execLatchedRun suite params (keygen ω) (adv ω).toOracleAdv).1.2).preimages[idx]? =
+        some sub :=
+      (List.getElem?_eq_getElem hIdxLt).trans (congrArg some hIdxEq)
+    rw [hGet]
+    exact hChk
+
+/-! ## §5. The bound -/
+
+/-- Some game of the family is won on the coin. -/
+def anySlotWins {n : Nat} : (M : Nat) → (Fin M → Spec.FinGame n) → Fin n → Bool
+  | 0, _, _ => false
+  | M + 1, R, ω =>
+    (R ⟨0, Nat.succ_pos M⟩).win ω ||
+      anySlotWins M (fun k => R ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩) ω
+
+theorem anySlotWins_of_win {n : Nat} :
+    ∀ (M : Nat) (R : Fin M → Spec.FinGame n) (ω : Fin n) (k : Fin M),
+      (R k).win ω = true → anySlotWins M R ω = true
+  | 0, _, _, k, _ => absurd k.2 (Nat.not_lt_zero _)
+  | M + 1, R, ω, ⟨0, _⟩, h => by
+    show ((R ⟨0, Nat.succ_pos M⟩).win ω ||
+      anySlotWins M (fun k => R ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩) ω) = true
+    rw [h]
+    rfl
+  | M + 1, R, ω, ⟨k + 1, hk⟩, h => by
+    show ((R ⟨0, Nat.succ_pos M⟩).win ω ||
+      anySlotWins M (fun k => R ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩) ω) = true
+    rw [anySlotWins_of_win M (fun k => R ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩) ω
+      ⟨k, Nat.lt_of_succ_lt_succ hk⟩ h]
+    exact Bool.or_true _
+
+/-- **Union bound over a family of games.** If each of `M` games has probability at most `ε`,
+    the event that one of them is won has probability at most `M · ε`. -/
+theorem anySlotWins_bound {n : Nat} (hPos : 0 < n) {ε : Spec.RatBound} :
+    ∀ (M : Nat) (R : Fin M → Spec.FinGame n),
+      (∀ k, Spec.GameBound (R k).winProb ε) →
+      Spec.GameBound (Spec.FinGame.mk hPos (anySlotWins M R)).winProb (Spec.RatBound.scale M ε)
+  | 0, _, _ =>
+    Spec.RatBound.le_trans
+      (Spec.FinGame.bound_zero_of_forall_lose (Spec.FinGame.mk hPos (anySlotWins 0 _))
+        (fun _ => rfl))
+      (by
+        show 0 * ε.den ≤ 0 * ε.num * 1
+        rw [Nat.zero_mul, Nat.zero_mul, Nat.zero_mul]
+        exact Nat.le_refl 0)
+  | M + 1, R, h => by
+    have h1 := Spec.event_le_two_reductions (Spec.FinGame.mk hPos (anySlotWins (M + 1) R))
+      (R ⟨0, Nat.succ_pos M⟩)
+      (Spec.FinGame.mk hPos (anySlotWins M (fun k => R ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩)))
+      (fun ω hw => by
+        have hw' : ((R ⟨0, Nat.succ_pos M⟩).win ω ||
+            anySlotWins M (fun k => R ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩) ω) = true := hw
+        cases h0 : (R ⟨0, Nat.succ_pos M⟩).win ω
+        · rw [h0] at hw'
+          exact .inr hw'
+        · exact .inl rfl)
+    have h2 := anySlotWins_bound hPos M (fun k => R ⟨k.1 + 1, Nat.succ_lt_succ k.2⟩)
+      (fun k => h _)
+    refine Spec.RatBound.le_trans h1
+      (Spec.RatBound.le_trans (Spec.RatBound.add_le_add (h _) h2) ?_)
+    show (ε.num * ε.den + M * ε.num * ε.den) * ε.den ≤ (M + 1) * ε.num * (ε.den * ε.den)
+    rw [← Nat.add_mul, Nat.mul_assoc, Nat.succ_mul, Nat.add_comm (M * ε.num) ε.num]
+    exact Nat.le_refl _
+
+/-- **Hardness of the subset-cover game** for the signer of `suite`, `params` with keys uniform
+    on `KeyOk`, against adversaries with programs in `𝒜` making at most `qHash` hash and `qSign`
+    signing queries. -/
+@[expose] def ExecSubsetCoverHard
+    (𝒜 : (PqPublicKey → ProdAdaptiveTree (List UInt8 × PqHashSig)) → Prop)
+    (suite : TweakableHashSuite) (params : PqHashParams) (KeyOk : PqSecretKey → Prop)
+    (qHash qSign : Nat) (ε : Spec.RatBound) : Prop :=
+  ∀ (n nK nA : Nat) (hPos : 0 < n) (π : Spec.CoinSplit n nK nA) (keygen : Fin nK → PqSecretKey),
+    Spec.UniformOn KeyOk keygen →
+    ∀ B : Fin nA → SeedWithheldOracleAdv (List UInt8 × PqHashSig) qHash qSign,
+      (∀ a : Fin nA, 𝒜 (B a).run) →
+      Spec.GameBound (execSubsetCoverGame hPos suite params (fun ω => keygen (π.chal ω))
+        (fun ω => B (π.advc ω))).winProb ε
+
+/-- **Hardness of the keyed path-collision game**, same quantification. -/
+@[expose] def ExecKeyedPathCollisionHard
+    (𝒜 : (PqPublicKey → ProdAdaptiveTree (Option SmDtTcrSubmission)) → Prop)
+    (suite : TweakableHashSuite) (params : PqHashParams) (KeyOk : PqSecretKey → Prop)
+    (qHash qSign : Nat) (ε : Spec.RatBound) : Prop :=
+  ∀ (n nK nA : Nat) (hPos : 0 < n) (π : Spec.CoinSplit n nK nA) (keygen : Fin nK → PqSecretKey),
+    Spec.UniformOn KeyOk keygen →
+    ∀ B : Fin nA → SeedWithheldOracleAdv (Option SmDtTcrSubmission) qHash qSign,
+      (∀ a : Fin nA, 𝒜 (B a).run) →
+      Spec.GameBound (execKeyedPathCollisionGame hPos suite params (fun ω => keygen (π.chal ω))
+        (fun ω => B (π.advc ω))).winProb ε
+
+/-- **Hardness of the keyed secret-preimage game**, same quantification. -/
+@[expose] def ExecKeyedSecretPreimageHard
+    (𝒜 : (PqPublicKey → ProdAdaptiveTree (Option SmDtPreSubmission)) → Prop)
+    (suite : TweakableHashSuite) (params : PqHashParams) (KeyOk : PqSecretKey → Prop)
+    (qHash qSign : Nat) (ε : Spec.RatBound) : Prop :=
+  ∀ (n nK nA : Nat) (hPos : 0 < n) (π : Spec.CoinSplit n nK nA) (keygen : Fin nK → PqSecretKey),
+    Spec.UniformOn KeyOk keygen →
+    ∀ B : Fin nA → SeedWithheldOracleAdv (Option SmDtPreSubmission) qHash qSign,
+      (∀ a : Fin nA, 𝒜 (B a).run) →
+      Spec.GameBound (execKeyedSecretPreimageGame hPos suite params
+        (fun ω => keygen (π.chal ω)) (fun ω => B (π.advc ω))).winProb ε
+
+/-- **EUF-CMA bound by three games played without the secret key.** The experiment draws the
+    key from the challenger coordinate of the coin, uniformly on `KeyOk`, and the forger from
+    the adversary coordinate. The reduction adversaries are the forger itself,
+    `execCollisionReductionAdv params slot` and `execPreimageReductionAdv params slot`: programs
+    that receive the public key and query the hash and the latched signer, with the query
+    budgets in their types. If the classes `𝒜I`, `𝒜T`, `𝒜P` contain them and the three games are
+    hard against those classes at those budgets, the forger wins with probability at most
+    `εI + prodPathTargetCount params qSign · εT + prodPreCandidateCount params · εP`.
+
+    The collision and preimage games are keyed: their targets are the signer's hash inputs.
+    The hypotheses are false for classes that contain exhaustive search, and for a suite whose
+    hash is constant (`Tests/SigningTeeth`). -/
+theorem jorts_baggy_closed_euf_cma_keyed_target_bound {n nK nA qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
     (π : Spec.CoinSplit n nK nA)
-    (keygen : Fin nK → PqSecretKey)
+    (keygen : Fin nK → PqSecretKey) {KeyOk : PqSecretKey → Prop}
+    (hKey : Spec.UniformOn KeyOk keygen)
     (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
-    (𝒜I : Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes) → Prop)
-    (𝒜T 𝒜P : Spec.Code Spec.targetIface Spec.TargetBreak → Prop)
-    (hmsg : Spec.Bytes → Spec.Bytes → List Nat)
-    (th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes)
-    (randLen seedLen inputLen qItsr qTcr qPre : Nat) where
-  nCi : Nat
-  nAi : Nat
-  nCt : Nat
-  nAt : Nat
-  nCp : Nat
-  nAp : Nat
-  πi : Spec.CoinSplit n nCi nAi
-  πt : Spec.CoinSplit n nCt nAt
-  πp : Spec.CoinSplit n nCp nAp
-  rand : Fin nCi → List Spec.Bytes
-  rand_uniform : Spec.UniformOn (Spec.ItsrSampleOk randLen qItsr) rand
-  seed : Fin nCt → Spec.Bytes
-  seed_uniform : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed
-  sample : Fin nCp → Spec.Bytes × List Spec.Bytes
-  sample_uniform : Spec.UniformOn (Spec.SmDtPreSampleOk seedLen inputLen qPre) sample
-  /-- Tweak of a role tag and a hash address. -/
-  tweakOf : List UInt8 → HashAdrs → Spec.Bytes
-  /-- Message of an argument list. -/
-  argsOf : List (List UInt8) → Spec.Bytes
-  th_suite : ∀ (role seed : List UInt8) (adrs : HashAdrs) (args : List (List UInt8)),
-    th seed (tweakOf role adrs) (argsOf args) = thCall suite role seed adrs args
-  seed_is_pkSeed : ∀ ω : Fin n, seed (πt.chal ω) = (keygen (π.chal ω)).pkSeed
-  sample_seed_is_pkSeed : ∀ ω : Fin n, (sample (πp.chal ω)).1 = (keygen (π.chal ω)).pkSeed
-  itsrAdv : Fin nAi → Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes)
-  tcrAdv : Fin nAt → Spec.Code Spec.targetIface Spec.TargetBreak
-  preAdv : Fin nAp → Spec.Code Spec.targetIface Spec.TargetBreak
-  itsrAdv_mem : ∀ a : Fin nAi, 𝒜I (itsrAdv a)
-  tcrAdv_mem : ∀ a : Fin nAt, 𝒜T (tcrAdv a)
-  preAdv_mem : ∀ a : Fin nAp, 𝒜P (preAdv a)
-  itsr : ∀ ω : Fin n,
-    (execEufCmaItsrReduction hPos suite params hw (fun ω => keygen (π.chal ω))
-      (fun ω => adv (π.advc ω))).win ω = true →
-    (Spec.itsrGame hPos hmsg qItsr (fun ω i => (rand (πi.chal ω)).getD i [])
-      (fun ω => itsrAdv (πi.advc ω))).win ω = true
-  tcr : ∀ ω : Fin n,
-    (execEufCmaTcrReduction hPos suite params hw (fun ω => keygen (π.chal ω))
-      (fun ω => adv (π.advc ω))).win ω = true →
-    (Spec.smDtTcrGame hPos th qTcr (fun ω => seed (πt.chal ω))
-      (fun ω => tcrAdv (πt.advc ω))).win ω = true
-  pre : ∀ ω : Fin n,
-    (execEufCmaPreReduction hPos suite params hw (fun ω => keygen (π.chal ω))
-      (fun ω => adv (π.advc ω))).win ω = true →
-    (Spec.smDtPreGame hPos th qPre (fun ω => (sample (πp.chal ω)).1)
-      (fun ω i => (sample (πp.chal ω)).2.getD i []) (fun ω => preAdv (πp.advc ω))).win ω = true
-
-/-- **The `SM-DT-TCR` reduction adversary is blind to the public seed.** Under an embedding, if
-    two different byte strings of length `seedLen` exist, then no function of the reduction
-    adversary's coordinate equals the public seed of the experiment's key: for every guess and
-    every adversary coin, some coin with that adversary coordinate carries a key whose public
-    seed differs from the guess. -/
-theorem ExecEufCmaReductionEmbedding.tcr_adversary_blind_to_pkSeed
-    {n nK nA qHash qSign : Nat} {hPos : 0 < n}
-    {suite : TweakableHashSuite} {params : PqHashParams}
-    {hw : params.w = 4 ∨ params.w = 16}
-    {π : Spec.CoinSplit n nK nA}
-    {keygen : Fin nK → PqSecretKey}
-    {adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign}
-    {𝒜I : Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes) → Prop}
-    {𝒜T 𝒜P : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
-    {hmsg : Spec.Bytes → Spec.Bytes → List Nat}
-    {th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes}
-    {randLen seedLen inputLen qItsr qTcr qPre : Nat}
-    (E : ExecEufCmaReductionEmbedding hPos suite params hw π keygen adv 𝒜I 𝒜T 𝒜P hmsg th
-      randLen seedLen inputLen qItsr qTcr qPre)
-    {x y : Spec.Bytes} (hx : x.length = seedLen) (hy : y.length = seedLen) (hxy : x ≠ y)
-    (guess : Fin E.nAt → Spec.Bytes) (a : Fin E.nAt) :
-    ∃ ω : Fin n, E.πt.advc ω = a ∧ (keygen (π.chal ω)).pkSeed ≠ guess (E.πt.advc ω) := by
-  obtain ⟨ω, hA, hNe⟩ :=
-    E.πt.sample_not_adversary_determined E.seed_uniform hx hy hxy guess a
-  exact ⟨ω, hA, fun h => hNe ((E.seed_is_pkSeed ω).trans h)⟩
-
-/-- **EUF-CMA bound from hardness of the primitives.** The experiment draws the key from the
-    challenger coordinate of the coin and the forger from the adversary coordinate. Under a
-    reduction embedding into the experiments of `hmsg` and `th` with reduction adversaries of the
-    classes `𝒜I`, `𝒜T`, `𝒜P`, and under `ITSR` hardness of `hmsg` and `SM-DT-TCR` /
-    `SM-DT-PRE` hardness of `th` against those classes, the forger wins with probability at
-    most `εItsr + εTcr + εPre`.
-
-    The hardness hypotheses are false for the unrestricted classes
-    (`Spec.smDtPreHard_unrestricted_refuted`): the statement has content only for classes that
-    exclude exhaustive search and still contain the embedding's reduction adversaries. -/
-theorem jorts_baggy_closed_euf_cma_assumption_bound {n nK nA qHash qSign : Nat} (hPos : 0 < n)
-    (suite : TweakableHashSuite) (params : PqHashParams)
-    (hw : params.w = 4 ∨ params.w = 16)
-    (π : Spec.CoinSplit n nK nA)
-    (keygen : Fin nK → PqSecretKey)
-    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
-    {𝒜I : Spec.Code Spec.byteOracleIface (Spec.Bytes × Spec.Bytes) → Prop}
-    {𝒜T 𝒜P : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
-    {hmsg : Spec.Bytes → Spec.Bytes → List Nat}
-    {th : Spec.Bytes → Spec.Bytes → Spec.Bytes → Spec.Bytes}
-    {randLen seedLen inputLen qItsr qTcr qPre : Nat}
-    (E : ExecEufCmaReductionEmbedding hPos suite params hw π keygen adv 𝒜I 𝒜T 𝒜P hmsg th
-      randLen seedLen inputLen qItsr qTcr qPre)
-    {εItsr εTcr εPre : Spec.RatBound}
-    (hItsr : Spec.ItsrHard 𝒜I hmsg randLen qItsr εItsr)
-    (hTcr : Spec.SmDtTcrHard 𝒜T th seedLen qTcr εTcr)
-    (hPre : Spec.SmDtPreHard 𝒜P th seedLen inputLen qPre εPre) :
+    {𝒜I : (PqPublicKey → ProdAdaptiveTree (List UInt8 × PqHashSig)) → Prop}
+    {𝒜T : (PqPublicKey → ProdAdaptiveTree (Option SmDtTcrSubmission)) → Prop}
+    {𝒜P : (PqPublicKey → ProdAdaptiveTree (Option SmDtPreSubmission)) → Prop}
+    (hAI : ∀ a : Fin nA, 𝒜I (adv a).run)
+    (hAT : ∀ (slot : Nat) (a : Fin nA), 𝒜T (execCollisionReductionAdv params slot (adv a)).run)
+    (hAP : ∀ (slot : Nat) (a : Fin nA), 𝒜P (execPreimageReductionAdv params slot (adv a)).run)
+    {εI εT εP : Spec.RatBound}
+    (hI : ExecSubsetCoverHard 𝒜I suite params KeyOk qHash qSign εI)
+    (hT : ExecKeyedPathCollisionHard 𝒜T suite params KeyOk
+      (qHash + prodTcrReductionHashBudget params) qSign εT)
+    (hP : ExecKeyedSecretPreimageHard 𝒜P suite params KeyOk
+      (qHash + (1 + prodXofHashBudget params)) qSign εP) :
     Spec.GameBound
       (ExecEufCmaGame hPos suite params (fun ω => keygen (π.chal ω))
         (fun ω => adv (π.advc ω))).winProb
-      ((εItsr.add εTcr).add εPre) :=
-  Spec.hashSig_forger_bound
+      ((εI.add (Spec.RatBound.scale (prodPathTargetCount params qSign) εT)).add
+        (Spec.RatBound.scale (prodPreCandidateCount params) εP)) := by
+  let tcrGames : Fin (prodPathTargetCount params qSign) → Spec.FinGame n := fun slot =>
+    execKeyedPathCollisionGame hPos suite params (fun ω => keygen (π.chal ω))
+      (fun ω => execCollisionReductionAdv params slot.val (adv (π.advc ω)))
+  let preGames : Fin (prodPreCandidateCount params) → Spec.FinGame n := fun slot =>
+    execKeyedSecretPreimageGame hPos suite params (fun ω => keygen (π.chal ω))
+      (fun ω => execPreimageReductionAdv params slot.val (adv (π.advc ω)))
+  exact Spec.event_le_three_reductions
     (ExecEufCmaGame hPos suite params (fun ω => keygen (π.chal ω)) (fun ω => adv (π.advc ω)))
-    hItsr hTcr hPre E.πi E.πt E.πp E.rand E.rand_uniform E.seed E.seed_uniform
-    E.sample E.sample_uniform E.itsrAdv E.itsrAdv_mem E.tcrAdv E.tcrAdv_mem E.preAdv E.preAdv_mem
+    (execSubsetCoverGame hPos suite params (fun ω => keygen (π.chal ω))
+      (fun ω => (adv (π.advc ω)).toOracleAdv))
+    (Spec.FinGame.mk hPos (anySlotWins _ tcrGames))
+    (Spec.FinGame.mk hPos (anySlotWins _ preGames))
     (fun ω hWin => by
-      rcases execEufCma_win_classified hPos suite params hw _ _ ω hWin with h | h | h
-      · exact .inl (E.itsr ω h)
-      · exact .inr (.inl (E.tcr ω h))
-      · exact .inr (.inr (E.pre ω h)))
+      rcases execEufCma_win_reduction_adversary_wins hPos suite params hw
+          (fun ω => keygen (π.chal ω)) (fun ω => adv (π.advc ω)) ω hWin with h | ⟨slot, h⟩ | ⟨slot, h⟩
+      · exact .inl h
+      · exact .inr (.inl (anySlotWins_of_win _ tcrGames ω slot h))
+      · exact .inr (.inr (anySlotWins_of_win _ preGames ω slot h)))
+    (hI n nK nA hPos π keygen hKey (fun a => (adv a).toOracleAdv) hAI)
+    (anySlotWins_bound hPos _ tcrGames (fun slot =>
+      hT n nK nA hPos π keygen hKey (fun a => execCollisionReductionAdv params slot.val (adv a))
+        (hAT slot.val)))
+    (anySlotWins_bound hPos _ preGames (fun slot =>
+      hP n nK nA hPos π keygen hKey (fun a => execPreimageReductionAdv params slot.val (adv a))
+        (hAP slot.val)))
 
 /-- A game's winning probability is at most another's plus their distinguishing advantage. -/
 theorem winProb_le_add_advDist {n : Nat} (G₁ G₀ : Spec.FinGame n) :
@@ -528,7 +887,8 @@ theorem jorts_baggy_closed_euf_cma_keygen_hop {n nC nA qHash qSign : Nat} (hPos 
     (winProb_le_add_advDist (ExecEufCmaGame hPos suite params keygenReal adv)
       (ExecEufCmaGame hPos suite params keygenIdeal adv))
     (Spec.RatBound.add_le_add
-      (jorts_baggy_closed_euf_cma hPos suite params hw keygenIdeal adv) hAdv)
+      (jorts_baggy_closed_euf_cma_same_trace_classification hPos suite params hw keygenIdeal adv)
+      hAdv)
 
 #verify_constructive
   Qsag.evalLatchedAdaptiveTree_log_increasing
@@ -537,14 +897,16 @@ theorem jorts_baggy_closed_euf_cma_keygen_hop {n nC nA qHash qSign : Nat} (hPos 
   Qsag.prodSignQuery_verifies
   Qsag.execEufCmaOutcome_oneTime
   Qsag.execEufCmaOutcome_queries_le
-  Qsag.jorts_baggy_closed_euf_cma
-  Qsag.ExecEufCmaReductionEmbedding.tcr_adversary_blind_to_pkSeed
-  Qsag.jorts_baggy_closed_euf_cma_assumption_bound
+  Qsag.jorts_baggy_closed_euf_cma_same_trace_classification
+  Qsag.evalLatchedAdaptiveTree_bind_signFree
+  Qsag.evalLatchedAdaptiveTree_trackSignLog
+  Qsag.execLatchedRun_collisionReduction
+  Qsag.execLatchedRun_preimageReduction
+  Qsag.execEufCma_win_reduction_adversary_wins
+  Qsag.anySlotWins_bound
+  Qsag.jorts_baggy_closed_euf_cma_keyed_target_bound
   Qsag.winProb_le_add_advDist
   Qsag.jorts_baggy_closed_euf_cma_keygen_hop
 
 end Qsag
 end
-
-#print axioms Qsag.jorts_baggy_closed_euf_cma
-#print axioms Qsag.jorts_baggy_closed_euf_cma_keygen_hop
