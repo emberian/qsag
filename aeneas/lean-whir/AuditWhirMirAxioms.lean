@@ -297,7 +297,7 @@ run_cmd do
   logInfo m!"WHIR MIR audit: {checked} declarations across QsagWhirVerified + Aeneas ({requiredWhirMirTheorems.size} anchored theorems), zero rejected (allowlist: propext, Quot.sound)"
 
 public def main : IO UInt32 := do
-  initSearchPath (← findSysroot) [".lake/build/lib/lean"]
+  initSearchPath (← findSysroot) [".lake/build/lib/lean", "../../lean/.lake/build/lib/lean"]
   let imported ← importModules #[{ module := `AuditWhirMirAxioms, importAll := true }] {}
   let env := imported.setExporting false
   let summaries := exportedAxiomsExt.getState (asyncMode := .mainOnly) env

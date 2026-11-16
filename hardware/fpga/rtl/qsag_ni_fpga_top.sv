@@ -513,13 +513,18 @@ module qsag_ni_fpga_top #(
     // Stage 1: sc_raw_q <= a + b + (c0 ? b : 0) (< 3*2^64, <= 13 levels).
     // Stage 2: fold 2-bit hi = sc_raw_q[65:64] via lo + hi*(2^32 - 1) (< 2*GL_P for all 2^66 inputs,
     //          <= 15 levels) -> sc_sum_q.
-    logic [255:0]    claim_q, sc_sum_q, sc_chal_q, sc_horner_q;
-    logic            sc_fail_q, sc_s2_en, sc_is_c0_q;
-    logic [7:0]      sc_idx, sc_deg;
-    logic [3:0]      sc_h_sub;
-    logic [4*66-1:0] sc_raw_d, sc_raw_q;
-    logic [255:0]    sc_can_d, sc_add_b;
-    logic            sc_add_c0;
+    // PROFILE_COMPACT folds the 4 limbs onto ONE rotating 64-bit lane (-3,300 LUT4, <= 15 levels).
+    localparam int          SC_LANES = PROFILE_COMPACT ? 1 : 4;
+    logic [255:0]           claim_q, sc_sum_q, sc_chal_q, sc_horner_q, sc_vec_q;
+    logic                   sc_fail_q, sc_s2_en, sc_is_c0_q, sc_c0_q;
+    logic [7:0]             sc_idx, sc_deg;
+    logic [3:0]             sc_h_sub;
+    logic [2:0]             sc_k;
+    logic [1:0]             sc_term;
+    logic [SC_LANES*66-1:0] sc_raw_d, sc_raw_q;
+    logic [SC_LANES*64-1:0] sc_can_d;
+    logic [255:0]           sc_add_b;
+    logic                   sc_add_c0;
 
     always_comb begin
         if (op_st == O_SC_SUM) begin
@@ -537,11 +542,12 @@ module qsag_ni_fpga_top #(
         end
     end
 
-    for (genvar i = 0; i < 4; i++) begin : g_sc_pipe
+    for (genvar i = 0; i < SC_LANES; i++) begin : g_sc_pipe
         wire [63:0] a_l = sc_sum_q[64*i +: 64];
-        wire [63:0] b_l = sc_add_b[64*i +: 64];
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(34)) u_s1 (
-            .x({sc_add_c0 ? {2'b0, b_l} : 66'd0, {2'b0, b_l}, {2'b0, a_l}}),
+        wire [63:0] b_l = PROFILE_COMPACT ? sc_vec_q[63:0] : sc_add_b[64*i +: 64];
+        wire        c0l = PROFILE_COMPACT ? sc_c0_q        : sc_add_c0;
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(22)) u_s1 (
+            .x({c0l ? {2'b0, b_l} : 66'd0, {2'b0, b_l}, {2'b0, a_l}}),
             .y(sc_raw_d[66*i +: 66]));
 
         wire [1:0]  hi = sc_raw_q[66*i + 64 +: 2];
@@ -551,8 +557,8 @@ module qsag_ni_fpga_top #(
         /* verilator lint_on UNUSEDSIGNAL */
         wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
         wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r0 (.x(tr0), .y(r0));
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r1 (.x(tr1), .y(r1));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r0 (.x(tr0), .y(r0));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r1 (.x(tr1), .y(r1));
         assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
     end
 
@@ -599,18 +605,17 @@ module qsag_ni_fpga_top #(
             mid_rom_q <= mid_rom_mem[{mid_rom_sel, mid_rom_idx}];
         end
 
-        // Store the 1,024-bit KEC_STREAM_SPONGE rate buffer in BRAM instead of 1,024 shift FFs.
+        // Store the 1,024-bit KEC_STREAM_SPONGE rate buffer in DP16KD block RAM (AW=9 -> 0 LUTRAM).
         logic [511:0] ksp_bram_rd;
-        wire  [4:0]   ksp_next_idx = kcmp_idx + 5'd1;
-        wire          ksp_bram_ra  = (op_st == O_KSP_CMP_XOR)
-                                   ? (kcmd_ready ? ksp_next_idx[3] : kcmp_idx[3])
-                                   : 1'b0;
-        qsag_sdp_bram #(.AW(1), .DW(512)) u_ksp_bram (
+        wire          ksp_bram_ra = (op_st == O_KSP_CMP_XOR)
+                                  ? (kcmp_idx[3] | (kcmd_ready && (kcmp_idx[2:0] == 3'd7)))
+                                  : 1'b0;
+        qsag_sdp_bram #(.AW(9), .DW(512)) u_ksp_bram (
             .clk(clk),
             .we((op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat < 2'd2)),
-            .wa(ksp_beat[0]),
+            .wa({8'd0, ksp_beat[0]}),
             .wd(s_axis_tdata),
-            .ra(ksp_bram_ra),
+            .ra({8'd0, ksp_bram_ra}),
             .rd(ksp_bram_rd));
 
         logic        top_kcmd_valid, top_kcmd_nr12;
@@ -816,7 +821,7 @@ module qsag_ni_fpga_top #(
         gf_start      <= 1'b0;
         eng_clr       <= 1'b0;
         sc_s2_en      <= 1'b0;
-        if (sc_s2_en) sc_sum_q <= sc_can_d;
+        if (!PROFILE_COMPACT && sc_s2_en) sc_sum_q <= 256'(sc_can_d);
 
         if (rst) begin
             op_st         <= O_IDLE;
@@ -1069,8 +1074,15 @@ module qsag_ni_fpga_top #(
                     end
                 end
                 O_SC_SUM: begin
-                    sc_raw_q      <= sc_raw_d;
-                    sc_s2_en      <= 1'b1;
+                    if (PROFILE_COMPACT) begin
+                        sc_vec_q <= x_q[15:12];
+                        sc_c0_q  <= 1'b0;
+                        sc_term  <= 2'd0;
+                        sc_k     <= 3'd0;
+                    end else begin
+                        sc_raw_q <= sc_raw_d;
+                        sc_s2_en <= 1'b1;
+                    end
                     mac_valid_fsm <= 1'b1;
                     mac_a_fsm     <= x_q[15:12];
                     mac_b_fsm     <= x_q[19:16];
@@ -1080,7 +1092,27 @@ module qsag_ni_fpga_top #(
                     op_st         <= O_SC_H;
                 end
                 O_SC_H: begin
-                    if (sc_h_sub < 4'd8) begin
+                    if (PROFILE_COMPACT) begin
+                        if (sc_k <= 3'd4) begin
+                            sc_raw_q <= sc_raw_d;
+                            sc_vec_q <= {64'd0, sc_vec_q[255:64]};
+                            sc_sum_q <= (sc_k == 3'd0) ? {sc_sum_q[63:0], sc_sum_q[255:64]}
+                                                       : {sc_can_d[63:0], sc_sum_q[255:64]};
+                            if (sc_k == 3'd4) begin
+                                case (sc_term)
+                                    2'd0: begin sc_vec_q <= x_q[11:8]; sc_c0_q <= 1'b0; sc_term <= 2'd1; sc_k <= 3'd0; end
+                                    2'd1: begin sc_vec_q <= x_q[7:4];  sc_c0_q <= 1'b0; sc_term <= 2'd2; sc_k <= 3'd0; end
+                                    2'd2: begin sc_vec_q <= x_q[3:0];  sc_c0_q <= 1'b1; sc_term <= 2'd3; sc_k <= 3'd0; end
+                                    default: sc_k <= 3'd5;
+                                endcase
+                            end else begin
+                                sc_k <= sc_k + 3'd1;
+                            end
+                        end else if (sc_k == 3'd5) begin
+                            sc_k <= 3'd6;
+                            if (sc_sum_q != claim_q) sc_fail_q <= 1'b1;
+                        end
+                    end else if (sc_h_sub < 4'd8) begin
                         sc_h_sub <= sc_h_sub + 4'd1;
                         if (!sc_h_sub[0]) begin
                             sc_raw_q <= sc_raw_d;
@@ -1113,14 +1145,26 @@ module qsag_ni_fpga_top #(
                             sc_is_c0_q <= 1'b0;
                         end else if (sc_idx == 8'd1) begin
                             sc_horner_q <= s_axis_tdata[255:0];
-                            sc_raw_q    <= sc_raw_d;
-                            sc_s2_en    <= 1'b1;
-                            sc_idx      <= 8'd2;
-                            sc_is_c0_q  <= (sc_deg == 8'd1);
-                            op_st       <= O_SC_STR_S2;
+                            if (PROFILE_COMPACT) begin
+                                sc_vec_q <= s_axis_tdata[255:0];
+                                sc_c0_q  <= 1'b0;
+                                sc_k     <= 3'd0;
+                            end else begin
+                                sc_raw_q <= sc_raw_d;
+                                sc_s2_en <= 1'b1;
+                            end
+                            sc_idx     <= 8'd2;
+                            sc_is_c0_q <= (sc_deg == 8'd1);
+                            op_st      <= O_SC_STR_S2;
                         end else begin
-                            sc_raw_q      <= sc_raw_d;
-                            sc_s2_en      <= 1'b1;
+                            if (PROFILE_COMPACT) begin
+                                sc_vec_q <= s_axis_tdata[255:0];
+                                sc_c0_q  <= sc_is_c0_q;
+                                sc_k     <= 3'd0;
+                            end else begin
+                                sc_raw_q <= sc_raw_d;
+                                sc_s2_en <= 1'b1;
+                            end
                             mac_valid_fsm <= 1'b1;
                             mac_a_fsm     <= sc_horner_q;
                             mac_b_fsm     <= sc_chal_q;
@@ -1130,9 +1174,25 @@ module qsag_ni_fpga_top #(
                     end
                 end
                 O_SC_STR_S2: begin
-                    op_st <= O_SC_STR;
+                    if (PROFILE_COMPACT) begin
+                        sc_raw_q <= sc_raw_d;
+                        sc_vec_q <= {64'd0, sc_vec_q[255:64]};
+                        sc_sum_q <= (sc_k == 3'd0) ? {sc_sum_q[63:0], sc_sum_q[255:64]}
+                                                   : {sc_can_d[63:0], sc_sum_q[255:64]};
+                        if (sc_k == 3'd4) op_st <= O_SC_STR;
+                        else              sc_k  <= sc_k + 3'd1;
+                    end else begin
+                        op_st <= O_SC_STR;
+                    end
                 end
                 O_SC_STR_WAIT: begin
+                    if (PROFILE_COMPACT && sc_k <= 3'd4) begin
+                        sc_raw_q <= sc_raw_d;
+                        sc_vec_q <= {64'd0, sc_vec_q[255:64]};
+                        sc_sum_q <= (sc_k == 3'd0) ? {sc_sum_q[63:0], sc_sum_q[255:64]}
+                                                   : {sc_can_d[63:0], sc_sum_q[255:64]};
+                        sc_k <= sc_k + 3'd1;
+                    end
                     if (mac_done) begin
                         sc_horner_q <= mac_y;
                         if (sc_is_c0_q) begin
@@ -1344,7 +1404,8 @@ module qsag_ni_fpga_top #(
     /* verilator lint_off UNUSEDSIGNAL */
     logic unused_top;
     assign unused_top = &{1'b0, s_axil_awaddr[1:0], s_axil_araddr[1:0],
-                          stream_q[27:20], cmd_a0_q, cmd_a1_q, ksp_flags_q, sc_h_sub[3],
+                          stream_q[27:20], cmd_a0_q, cmd_a1_q, ksp_flags_q, sc_h_sub,
+                          sc_s2_en, sc_add_b, sc_add_c0, sc_vec_q, sc_c0_q, sc_k, sc_term,
                           chain_busy, chain_done, chain_ok, kec_y_out,
                           eb_a_q, eb_b_q, ksp_buf_q};
     /* verilator lint_on UNUSEDSIGNAL */
