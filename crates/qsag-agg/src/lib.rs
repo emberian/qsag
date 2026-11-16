@@ -28,10 +28,12 @@
 //!   escalated-rate WHIR layers.
 //! - **Across shard batches nothing is compressed.** [`HemAggregator::merge`] ([`merge_aggregates`])
 //!   takes two finished proofs. The merging party holds no witness, and no relation in this crate
-//!   executes a shard batch's verifier (its row sumcheck, AIR check and Steiner-multiproof opening),
-//!   so it cannot produce a new opening for the children's committed polynomials. The recursive
-//!   relation that does exist ([`recursive::SuccinctShardWhirAggregate`]) verifies fixed-path WHIR
-//!   openings only and is not used here.
+//!   executes the verifier of a finished shard batch (its byte transcript, row sumcheck, AIR check
+//!   and Steiner-multiproof opening), so it cannot produce a new opening for the children's
+//!   committed polynomials. The recursive relations that exist verify other objects and are not
+//!   used here: [`recursive::SuccinctShardWhirAggregate`] verifies fixed-path WHIR openings only,
+//!   and `recursive::SuccinctFullShardAggregate` (`std`) runs a shard's whole verifier, but only
+//!   for shards proved in the recursion format (field-native transcript, fixed-path commitment).
 //!   A [`MergeNode::Branch`] is therefore plain concatenation: it adds no proof content, the merged
 //!   proof contains both children in full, and [`HemAggregator::verify`] ([`verify_aggregate`])
 //!   verifies every leaf. What a `Branch` enforces is the statement-level structure: its children's
@@ -56,7 +58,8 @@
 #![forbid(unsafe_code)]
 
 extern crate alloc;
-#[cfg(feature = "std")]
+// Unit tests run under the standard test harness whether or not the `std` feature is on.
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 pub mod arithmetize;

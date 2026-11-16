@@ -562,6 +562,13 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
     if let Some(values) = crate::acceleration::encode(coeffs, domain_len) {
         return values;
     }
+    encode_rs_coset_goldilocks_cpu(coeffs, blowup)
+}
+
+/// [`encode_rs_coset_goldilocks`] on the host only.
+pub(crate) fn encode_rs_coset_goldilocks_cpu(coeffs: &[Goldilocks], blowup: usize) -> Vec<Goldilocks> {
+    let n_c = coeffs.len();
+    let domain_len = n_c * blowup;
 
     // Coset decomposition: `B = blowup` independent size-`N` shifted NTTs (`out[q * B + r] = NTT_N(c_i * (g * w_D^r)^i)[q]`),
     // keeping each sub-NTT L2/L3-cache resident with zero cross-coset synchronization.
@@ -665,7 +672,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
         buf[i] = c.const_mul(shift_pow);
         shift_pow = shift_pow.const_mul(shift);
     }
-    ntt_goldilocks(&mut buf);
+    ntt_goldilocks_cpu(&mut buf);
     buf
 }
 

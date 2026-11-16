@@ -4,6 +4,8 @@
 //! Poseidon2 chain over shard summaries and child-proof digests. It does not execute a child
 //! verifier, so quorum authorization needs [`crate::VerifiedHierarchicalHemEvidence`]. Closing
 //! that gap means proving, inside an outer relation, every check a child verifier performs.
+//! [`crate::zk_hem::full_shard`] does so for shards proved in the recursion format; the counts
+//! below are for the byte-transcript proofs, which no relation verifies.
 //!
 //! This module measures the largest fixed part of that work on real proof objects: the
 //! Merkle-Canopy authentication of each WHIR opening. Counts are derived only from
