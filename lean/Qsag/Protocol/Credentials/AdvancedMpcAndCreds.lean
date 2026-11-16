@@ -5706,28 +5706,3 @@ theorem durableBurnReserve_failed_write (store : DurableNonceBurnStore)
 
 end Qsag
 end
-
-/-! ### Exports for lane cust -/
-
-public section
-namespace Qsag
-
-/-- The opening check passes exactly when every party other than the hidden one has a zero
-check value. -/
-theorem credentialGgmCheckDefects_eq_true_iff {n : Nat} (defect : Fin n → CredentialFp5)
-    (hidden : Fin n) :
-    credentialGgmCheckDefects defect hidden = true ↔
-      ∀ p : Fin n, p = hidden ∨ defect p = credentialFp5Zero := by
-  constructor
-  · intro h p
-    have hp := List.all_eq_true.mp h p (List.mem_finRange p)
-    rw [Bool.or_eq_true, decide_eq_true_eq, decide_eq_true_eq] at hp
-    exact hp
-  · intro h
-    apply List.all_eq_true.mpr
-    intro p _
-    rw [Bool.or_eq_true, decide_eq_true_eq, decide_eq_true_eq]
-    exact h p
-
-end Qsag
-end

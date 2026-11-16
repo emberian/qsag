@@ -2308,10 +2308,3 @@ namespace Qsag
     hemInterleave (a :: xs) (b :: ys) = a :: b :: hemInterleave xs ys := by rfl
 end Qsag
 end
-
-/-! ### Exports for lane agg -/
-public section
-namespace Qsag
-#export_eqns evalCascadePolySum
-end Qsag
-end

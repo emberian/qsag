@@ -2162,35 +2162,3 @@ theorem fipsSplitDigest_def (p : Fips205Params) (digest : List UInt8) :
 
 end Qsag
 end
-
-/-! ### Exports for lane sig -/
-public section
-namespace Qsag
-
-/-- The `128s` profile with the `128f` digest length `m = 34` fails the exact `H_msg` length gate. -/
-theorem slhDsaShake128s_m34_wellFormed_false :
-    ({ slhDsaShake128s with m := 34 } : Fips205Params).wellFormed = false := by decide
-
-theorem fipsXmssSigShape_def (p : Fips205Params) (sig : FipsXmssSig) :
-    fipsXmssSigShape p sig =
-      (decide (sig.wotsSig.length = p.ell) &&
-       sig.wotsSig.all (fun x => decide (x.length = p.n)) &&
-       decide (sig.authPath.length = p.hp) &&
-       sig.authPath.all (fun x => decide (x.length = p.n))) := by rfl
-
-theorem preHashCompatible_def (p : Fips205Params) (alg : FipsPreHashAlg) :
-    preHashCompatible p alg = decide (p.n ≤ alg.securityBytes) := by rfl
-
-theorem encodePreHashMsgPrime_def (p : Fips205Params) (alg : FipsPreHashAlg)
-    (ctx phDigest : List UInt8) :
-    encodePreHashMsgPrime p alg ctx phDigest =
-      if 255 < ctx.length || !preHashCompatible p alg || phDigest.length ≠ alg.digestBytes then none
-      else some ((0x01 : UInt8) :: UInt8.ofNat ctx.length :: (ctx ++ (alg.oidBytes ++ phDigest))) := by
-  rfl
-
-theorem slhDsaShake256f_n : slhDsaShake256f.n = 32 := by rfl
-
-theorem FipsPreHashAlg.securityBytes_sha3_256 : FipsPreHashAlg.sha3_256.securityBytes = 16 := by rfl
-
-end Qsag
-end

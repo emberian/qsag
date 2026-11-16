@@ -1059,15 +1059,3 @@ theorem inhabited_piToprfCredService_issuance :
 
 end Qsag.Top
 end
-
-/-! ### Exports for lane cust -/
-
-public section
-namespace Qsag.Top
-
-theorem credPartyInCommittee_issuer : CredPartyInCommittee .issuer := trivial
-
-theorem credPartyEndpointId_issuer : credPartyEndpointId .issuer = 0 := by rfl
-
-end Qsag.Top
-end

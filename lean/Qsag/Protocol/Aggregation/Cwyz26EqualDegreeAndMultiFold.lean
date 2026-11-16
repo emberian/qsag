@@ -2506,10 +2506,3 @@ theorem slicedMultiFoldStageBound_den (g : HemStageGeom) (r : Nat × Nat × Nat 
 
 end Qsag
 end
-
-/-! ### Exports for lane agg -/
-public section
-namespace Qsag
-#export_eqns splitEvenOdd threePool
-end Qsag
-end
