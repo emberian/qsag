@@ -24,6 +24,12 @@ pub mod wipe;
 #[forbid(unsafe_code)]
 pub mod field;
 
+/// General monotone custody policies and additive share projection.
+pub mod access;
+
+/// Public rank checks for fresh resharing masks.
+pub mod reshare;
+
 #[forbid(unsafe_code)]
 pub mod sponge;
 
