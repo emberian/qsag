@@ -56,8 +56,11 @@
 //!
 //! Preprocessing generates the full requested batch of `sboxes` power tuples and
 //! `triples` Beaver triples in a single dealerless `run_dealerless_pi_pow7_with_alpha`
-//! ceremony and retains the monotone [`OtMesh`] inside the reservoir so online
-//! `MacCheck` openings run in single-digit milliseconds with zero Ring-LWE base-OT setups.
+//! ceremony. The reservoir keeps that ceremony's [`OtMesh`] and the quorum's public
+//! interpolation tables, so an online MAC check needs no further base-OT setup. Both
+//! belong to the one ordered quorum the reservoir was prepared for; every other
+//! quorum, including a reordering or a superset, is refused with [`Error::Context`]
+//! and needs a reservoir of its own.
 //!
 //! A tuple is consumed by advancing a vault cursor before the tuple is read, so no
 //! path hands one out twice. A request the session refuses (wrong context, a
@@ -1931,6 +1934,72 @@ mod tests {
             pool.begin(&mut quorum, &mut refs, [0x65; 32], 3, 1),
             Err(Error::Quota)
         ));
+    }
+
+    #[test]
+    fn each_quorum_of_a_committee_needs_its_own_reservoir_and_computes_the_same_function() {
+        let mut servers = spdz_dkg(
+            SpdzConfig::new(2, 3).unwrap(),
+            [0x91; 32],
+            &entropy(3, 0x92),
+        )
+        .unwrap();
+        let public = servers[0].public().clone();
+        let key = reconstruct(&[&servers[0], &servers[1]]);
+        let mut stores = [Store(None), Store(None), Store(None)];
+        let inputs: [&[u8]; 1] = [b"three quorums"];
+        let mut counter = 0;
+        // Quorums {0, 1}, {1, 2} and {0, 2}: three different sets of evaluation
+        // points, hence three different sets of interpolation weights.
+        for (round, absent) in [2usize, 0, 1].into_iter().enumerate() {
+            let batch = [0x93 + round as u8; 32];
+            let mut pool = {
+                let mut quorum: Vec<_> = servers.iter_mut().filter(|s| s.party != absent).collect();
+                let seeds = entropy(2, 0x96 + round as u8);
+                SpdzReservoir::prepare(&mut quorum, batch, 2, 2, &seeds).unwrap()
+            };
+
+            // Every other quorum is refused before a counter is burned or a tuple spent.
+            let high_water = stores.each_ref().map(|store| store.0);
+            for other in (0..4).filter(|&party| party != absent) {
+                let mut wrong: Vec<_> = servers.iter_mut().filter(|s| s.party != other).collect();
+                let mut refs: Vec<&mut dyn CounterStore> = stores
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(party, _)| *party != other)
+                    .map(|(_, store)| store as &mut dyn CounterStore)
+                    .collect();
+                assert!(matches!(
+                    pool.begin(&mut wrong, &mut refs, batch, counter, 1),
+                    Err(Error::Context)
+                ));
+            }
+            assert_eq!(stores.each_ref().map(|store| store.0), high_water);
+            assert_eq!(pool.state.pool.remaining_pow7(), 2 * SBOXES_PER_ITEM);
+
+            let mut quorum: Vec<_> = servers.iter_mut().filter(|s| s.party != absent).collect();
+            let mut refs: Vec<&mut dyn CounterStore> = stores
+                .iter_mut()
+                .enumerate()
+                .filter(|(party, _)| *party != absent)
+                .map(|(_, store)| store as &mut dyn CounterStore)
+                .collect();
+            for _ in 0..2 {
+                let (session, grants) = pool
+                    .begin(&mut quorum, &mut refs, batch, counter, 1)
+                    .unwrap();
+                let (client, request) =
+                    spdz_blind(&public, &inputs, batch, counter, &grants).unwrap();
+                assert_eq!(
+                    client
+                        .finalize(&session.evaluate(&request).unwrap())
+                        .unwrap()
+                        .values(),
+                    &[plaintext(&key, inputs[0])]
+                );
+                counter += 1;
+            }
+        }
     }
 
     #[test]

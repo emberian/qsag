@@ -972,8 +972,8 @@ impl core::fmt::Debug for MlDsaSigningKey {
     }
 }
 
+/// Secret polynomials. Each [`Poly256`] wipes itself on drop.
 struct SecretPolys(Vec<Poly256>);
-// Each Poly256 and SecretBytes field already wipes itself on drop, including errors.
 
 #[cfg(test)]
 fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
