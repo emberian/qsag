@@ -1015,6 +1015,26 @@ theorem tooth_open_relay_spoofs_issuer_credPort :
   exact ⟨[.deliver m, .deliver m], m, Qsag.Spec.open_relay_has_no_channel_contract,
     rfl, hPort, List.Mem.head _, fun h => nomatch h⟩
 
+theorem inhabited_blindVc_cut_and_choose_gameBound :
+    ∃ P : Qsag.CutAndChoose.Prover Qsag.BlindVcCommittedProof Qsag.BlindVcFp5
+      Qsag.BlindVcR2aMsg Qsag.BlindVcFp5 Qsag.BlindVcR2bMsg,
+      ∀ j : Nat, Qsag.BlindVcRepHasGateFault P.commit j :=
+  ⟨Qsag.faultyBlindVcProver, Qsag.faultyBlindVcProver_has_gate_fault⟩
+
+theorem inhabited_piToprfCredService_issuance :
+    ∃ (cfg : Qsag.Spec.IdealCredConfig Nat)
+      (c₀ c' : Qsag.PiToprfCredState Nat Nat)
+      (tr : List ((Qsag.Spec.CredPort × Qsag.ToprfCredWire Nat) × Qsag.Spec.IdealCredOutput Nat))
+      (w : Qsag.ToprfCredWire Nat),
+      (Qsag.piToprfCredService cfg).Init c₀ ∧
+      (Qsag.piToprfCredService cfg).ValidTrace c₀ tr c₀ ∧
+      (Qsag.piToprfCredService cfg).step c₀ (.issuer, w) = some (c', .issued 0) := by
+  let cfg := Qsag.Spec.idealCredDemoConfig false
+  obtain ⟨c', hInit, hStep⟩ :=
+    Qsag.piToprfCredService_issuer_issues_at_init (Attr := Nat) cfg 1 11 1#256 0xCAFE#256
+  exact ⟨cfg, Qsag.PiToprfCredState.init cfg, c', [], .issueWire 1 [11] 1#256 0xCAFE#256,
+    hInit, .nil _, hStep⟩
+
 #verify_constructive
   Qsag.Top.blindVc_cut_and_choose_gameBound
   Qsag.Top.blindVc_concrete_fp5_qrom_opening_soundness
@@ -1024,9 +1044,18 @@ theorem tooth_open_relay_spoofs_issuer_credPort :
   Qsag.Top.piToprfCredService_toprf_provenance
   Qsag.Top.credPort_authenticated_by_channel_contract
   Qsag.Top.tooth_open_relay_spoofs_issuer_credPort
+  Qsag.Top.inhabited_blindVc_cut_and_choose_gameBound
+  Qsag.Top.inhabited_piToprfCredService_issuance
+
+#verify_inhabited Qsag.Top.blindVc_cut_and_choose_gameBound
+  Qsag.Top.inhabited_blindVc_cut_and_choose_gameBound
+#verify_inhabited Qsag.Top.piToprfCredService_issuance_authenticated
+  Qsag.Top.inhabited_piToprfCredService_issuance
 
 #tooth_pair Qsag.Top.credPort_authenticated_by_channel_contract vs
   Qsag.Top.tooth_open_relay_spoofs_issuer_credPort
+#tooth_pair Qsag.Top.piToprfCredService_issuance_authenticated vs
+  Qsag.Top.unauthenticatedCredService_not_implementation
 
 end Qsag.Top
 end

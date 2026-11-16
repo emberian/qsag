@@ -34,6 +34,8 @@ public import Qsag.Oracle.PrefixMerkleExtraction
 public import Qsag.Oracle.TwoWayQipmCompression
 public import Qsag.Oracle.TwoWayQipmSwapAverage
 public import Qsag.Oracle.ConstructiveQuantumHilbert
+public import Qsag.Protocol.Threshold.MacBlind
+public import Qsag.Protocol.Threshold.SacrificeFreezeSample
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -164,5 +166,12 @@ theorem cliffordT_measure_reprogram_rbr_step {cardX cardY cardAnc : Nat} {Y : Ty
   Qsag.Top.Foundations.weighted_compression_ideal_permutation_margin
   Qsag.Top.Foundations.two_way_transposition_average_o2h
   Qsag.Top.Foundations.cliffordT_measure_reprogram_rbr_step
+
+/-- **Three-Projection Boolean MAC Blinding Bound (`L-Ex-14`)**:
+    Over any field/ring projection modulus `q ≥ 2`, `(q² + q - 1)³ < q⁷`, i.e.,
+    `(q⁻¹ + (1 - q⁻¹) q⁻²)³ < q⁻²`, and `Tower128` 2-round blinding has `2⁻²⁵⁶` soundness. -/
+theorem threshold_three_projection_mac_blind_bound (q : Nat) (hq : 2 ≤ q) :
+    (q ^ 2 + q - 1) ^ 3 < q ^ 7 :=
+  Qsag.MacBlind.three_projection_mac_blind_bound q hq
 
 end Qsag.Top.Foundations

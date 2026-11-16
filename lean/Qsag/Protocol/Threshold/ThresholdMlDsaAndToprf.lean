@@ -15073,13 +15073,14 @@ private theorem absorbRate6SpongeBlocks_eq_rev :
         List.reverse_reverse, List.singleton_append]
 
 private theorem lane6Add_zero_left (c : Lane6) : lane6Add lane6Zero c = c := by
+  have hz : ∀ x : Goldilocks, Goldilocks.zero.add x = x := fun x => LawfulCommRing.zero_add x
   rcases c with ⟨x0, x1, x2, x3, x4, x5⟩
-  simp only [lane6Add, lane6Zero, Goldilocks.zero_add]
+  simp only [lane6Add, lane6Zero, hz]
 
 theorem absorbRate6SpongeBlocks_three_eq (c0 c1 c2 : Lane6) :
     absorbRate6SpongeBlocks [c0, c1, c2] = absorbRate6Sponge3 c0 c1 c2 := by
-  unfold absorbRate6SpongeBlocks sponge12AbsorbFrom absorbRate6Sponge3
-  simp only [state12Rate6_mk, state12Cap6_mk, lane6Add_zero_left]
+  dsimp only [absorbRate6SpongeBlocks, sponge12AbsorbFrom, absorbRate6Sponge3]
+  rw [state12Rate6_mk, state12Cap6_mk, lane6Add_zero_left]
 
 /-- Non-initial sponge permutation input whose output capacity vanishes (`6` Goldilocks zeros, `< 2^-383`). -/
 def Poseidon2Perm12ZeroCapRoot (st : Poseidon2State12) : Prop :=
@@ -15294,16 +15295,15 @@ theorem computeVcPoseidon2CommitFull_arity32_binding :
           hBlkDiff (h1.trans h2.symm)
 
 /-- **`#tooth` (`tooth_computeVcPoseidon2CommitFull_rejects_arity33`)**:
-    `computeVcPoseidon2CommitFull` accepts 32-attribute credentials (`MAX_VC_ATTRS = 32`) and
-    rejects empty (`0`) or oversized (`33`) attribute lists. -/
+    `computeVcPoseidon2CommitFull` rejects attribute lists exceeding `vcMaxAttrs = 32` (`= none`). -/
 theorem tooth_computeVcPoseidon2CommitFull_rejects_arity33 :
-    ∃ (sid : UInt64) (blind : Lane4),
-      (computeVcPoseidon2CommitFull sid (List.replicate 32 Goldilocks.one) blind vcAttrCommitTag).isSome = true ∧
-      computeVcPoseidon2CommitFull sid [] blind vcAttrCommitTag = none ∧
-      computeVcPoseidon2CommitFull sid (List.replicate 33 Goldilocks.one) blind vcAttrCommitTag = none := by
-  refine ⟨0, ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, ?_, rfl, rfl⟩
+    ∃ (sid : UInt64) (attrs : List Goldilocks) (blind : Lane4),
+      vcMaxAttrs < attrs.length ∧
+      computeVcPoseidon2CommitFull sid attrs blind vcAttrCommitTag = none := by
+  refine ⟨0, List.replicate 33 Goldilocks.one,
+    ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, by decide, ?_⟩
   unfold computeVcPoseidon2CommitFull vcMaxAttrs
-  simp [List.length_replicate]
+  simp
 
 /-- Framed preimage injectivity and domain-tag parity for `"QSAG.MLDSA.NONCE_BURN.V2"` and
     `"QSAG.BLIND_VC.SD_LIMBO.V1"` (`C5 #6`). -/
@@ -15314,8 +15314,14 @@ theorem mldsaNonceBurnPreimage_injective
     (hb₁ : b₁.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8)
     (hEq : mldsaNonceBurnPreimage k₁ l₁ b₁ = mldsaNonceBurnPreimage k₂ l₂ b₂) :
     k₁ = k₂ ∧ l₁ = l₂ ∧ b₁ = b₂ ∧
-    mldsaNonceBurnDomainTag = "QSAG.MLDSA.NONCE_BURN.V2".toUTF8.toList ∧
-    vcSdLimboDomainTag = "QSAG.BLIND_VC.SD_LIMBO.V1".toUTF8.toList := by
+    mldsaNonceBurnDomainTag =
+      (['Q', 'S', 'A', 'G', '.', 'M', 'L', 'D', 'S', 'A', '.',
+        'N', 'O', 'N', 'C', 'E', '_', 'B', 'U', 'R', 'N', '.', 'V', '2'].map
+        (fun c => UInt8.ofNat c.toNat)) ∧
+    vcSdLimboDomainTag =
+      (['Q', 'S', 'A', 'G', '.', 'B', 'L', 'I', 'N', 'D', '_', 'V', 'C', '.',
+        'S', 'D', '_', 'L', 'I', 'M', 'B', 'O', '.', 'V', '1'].map
+        (fun c => UInt8.ofNat c.toNat)) := by
   unfold mldsaNonceBurnPreimage at hEq
   have hAll1 : ∀ f ∈ [k₁, l₁, b₁], f.length < 256 ^ 8 := by
     intro f hf
@@ -15335,7 +15341,7 @@ theorem mldsaNonceBurnPreimage_injective
       · rcases List.mem_cons.mp h2 with rfl | h3
         · exact hb₂
         · cases h3
-  have hFrEq := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll1 hAll2 hEq
+  have hFrEq := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll1 hAll2 hEq
   injection hFrEq with ek t1
   injection t1 with el t2
   injection t2 with eb _
@@ -15394,12 +15400,66 @@ private theorem evalCoeffs_polyAddCoeffs204 :
         (Fq204.mul x (Fq204.add (RoundPoly.evalCoeffs cs x) (RoundPoly.evalCoeffs ds x))) =
       Fq204.add (Fq204.add c (Fq204.mul x (RoundPoly.evalCoeffs cs x)))
         (Fq204.add d (Fq204.mul x (RoundPoly.evalCoeffs ds x)))
-    rw [Fq204.left_distrib, LawfulCommRing.add_add_add_comm]
+    rw [Fq204.left_distrib,
+        Fq204.add_assoc c d _,
+        ← Fq204.add_assoc d _ _,
+        Fq204.add_comm d (Fq204.mul x (RoundPoly.evalCoeffs cs x)),
+        Fq204.add_assoc (Fq204.mul x (RoundPoly.evalCoeffs cs x)) d _,
+        ← Fq204.add_assoc c _ _]
+
+def eraseFirstFq204 (x : Fq204) : List Fq204 → List Fq204
+  | [] => []
+  | y :: ys => if x = y then ys else y :: eraseFirstFq204 x ys
+
+private theorem eraseFirstFq204_length_of_mem {x : Fq204} :
+    ∀ {xs : List Fq204}, x ∈ xs → (eraseFirstFq204 x xs).length + 1 = xs.length
+  | [], h => nomatch h
+  | y :: ys, h => by
+    unfold eraseFirstFq204
+    if hxy : x = y then
+      simp [hxy]
+    else
+      rcases List.mem_cons.mp h with rfl | hm
+      · exact absurd rfl hxy
+      · simp only [hxy, ↓reduceIte, List.length_cons]
+        have ih := eraseFirstFq204_length_of_mem hm
+        omega
+
+private theorem mem_eraseFirstFq204_of_ne {y x : Fq204} (hne : y ≠ x) :
+    ∀ {xs : List Fq204}, y ∈ xs → y ∈ eraseFirstFq204 x xs
+  | [], h => nomatch h
+  | z :: zs, h => by
+    unfold eraseFirstFq204
+    if hxz : x = z then
+      subst hxz
+      rcases List.mem_cons.mp h with rfl | hm
+      · exact absurd rfl hne
+      · simp [hm]
+    else
+      simp only [hxz, ↓reduceIte, List.mem_cons]
+      rcases List.mem_cons.mp h with rfl | hm
+      · exact Or.inl rfl
+      · exact Or.inr (mem_eraseFirstFq204_of_ne hne hm)
+
+private theorem not_mem_eraseFirstFq204_of_nodup {x : Fq204} :
+    ∀ {xs : List Fq204}, xs.Nodup → x ∉ eraseFirstFq204 x xs
+  | [], _ => by simp [eraseFirstFq204]
+  | y :: ys, .cons hnot hnd => by
+    unfold eraseFirstFq204
+    if hxy : x = y then
+      subst hxy
+      simp only [↓reduceIte]
+      exact fun hm => hnot x hm rfl
+    else
+      simp only [hxy, ↓reduceIte, List.mem_cons]
+      rintro (hFalse | hm)
+      · exact hFalse.elim
+      · exact not_mem_eraseFirstFq204_of_nodup hnd hm
 
 /-- Lagrange basis polynomial `L_{pt}(X) = (∏_{o ∈ nodes \ {pt}} (X - o)) · (∏_{o ∈ nodes \ {pt}} (pt - o))⁻¹`
     over `Fq204` (`lagrange_weights`, `threshold_mldsa.rs:2027-2042`). -/
 def lagrangeBasisCoeffs204 (nodes : List Fq204) (pt : Fq204) : List Fq204 :=
-  let others := eraseFirst pt nodes
+  let others := eraseFirstFq204 pt nodes
   let denom := RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs others) pt
   (RoundPoly.vanishingCoeffs others).map (Fq204.mul (Fq204.inv denom))
 
@@ -15411,23 +15471,8 @@ def lagrangeWeightAt204 (nodes : List Fq204) (pt target : Fq204) : Fq204 :=
 def lagrangeWeightsFq204 (nodes : List Fq204) (target : Fq204) : List Fq204 :=
   nodes.map (fun pt => lagrangeWeightAt204 nodes pt target)
 
-private theorem not_mem_eraseFirst_of_nodup {α : Type} [DecidableEq α] {x : α} :
-    ∀ {xs : List α}, xs.Nodup → x ∉ eraseFirst x xs
-  | [], _ => by simp [eraseFirst]
-  | y :: ys, .cons hnot hnd => by
-    unfold eraseFirst
-    if hxy : x = y then
-      subst hxy
-      simp only [↓reduceIte]
-      exact fun hm => hnot x hm rfl
-    else
-      simp only [hxy, ↓reduceIte, List.mem_cons]
-      rintro (rfl | hm)
-      · exact hxy rfl
-      · exact not_mem_eraseFirst_of_nodup hnd hm
-
 private theorem lagrangeWeightAt204_kron {nodes : List Fq204} (hNd : nodes.Nodup)
-    {pt y : Fq204} (hPt : pt ∈ nodes) (hY : y ∈ nodes) :
+    {pt y : Fq204} (_hPt : pt ∈ nodes) (hY : y ∈ nodes) :
     lagrangeWeightAt204 nodes pt y = if y = pt then Fq204.one else Fq204.zero := by
   unfold lagrangeWeightAt204 lagrangeBasisCoeffs204
   dsimp only
@@ -15438,15 +15483,15 @@ private theorem lagrangeWeightAt204_kron {nodes : List Fq204} (hNd : nodes.Nodup
   if hyEq : y = pt then
     subst hyEq
     simp only [↓reduceIte]
-    have hNotMem : y ∉ eraseFirst y nodes := not_mem_eraseFirst_of_nodup hNd
-    have hDenNz : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirst y nodes)) y ≠
+    have hNotMem : y ∉ eraseFirstFq204 y nodes := not_mem_eraseFirstFq204_of_nodup hNd
+    have hDenNz : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirstFq204 y nodes)) y ≠
         CommRingOps.zero :=
       RoundPoly.evalCoeffs_vanishingCoeffs_ne_zero (by decide) _ y hNotMem
     rw [Fq204.mul_comm, Fq204.mul_inv_cancel hDenNz]
   else
     simp only [hyEq, ↓reduceIte]
-    have hIn : y ∈ eraseFirst pt nodes := mem_eraseFirst_of_ne hyEq hY
-    have hVan : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirst pt nodes)) y =
+    have hIn : y ∈ eraseFirstFq204 pt nodes := mem_eraseFirstFq204_of_ne hyEq hY
+    have hVan : RoundPoly.evalCoeffs (RoundPoly.vanishingCoeffs (eraseFirstFq204 pt nodes)) y =
         CommRingOps.zero :=
       RoundPoly.evalCoeffs_vanishingCoeffs_of_mem _ y hIn
     rw [hVan]
@@ -15474,7 +15519,7 @@ private theorem lagrangeInterpLoop204_length_le (allNodes : List Fq204) :
     have hBasisLen : (lagrangeBasisCoeffs204 allNodes pt).length = allNodes.length := by
       unfold lagrangeBasisCoeffs204
       simp only [List.length_map, RoundPoly.vanishingCoeffs_length]
-      exact eraseFirst_length_of_mem (hSub pt (.head _))
+      exact eraseFirstFq204_length_of_mem (hSub pt (.head _))
     have ih := lagrangeInterpLoop204_length_le allNodes ptsRest shRest
       (fun z hz => hSub z (.tail _ hz))
     rw [hBasisLen]
@@ -15484,8 +15529,8 @@ private theorem lagrangeInterpLoop204_eval_eq_dot (allNodes : List Fq204) (targe
     ∀ (curNodes curShares : List Fq204),
       RoundPoly.evalCoeffs (lagrangeInterpLoop204 allNodes curNodes curShares) target =
         ringDot (curNodes.map (fun pt => lagrangeWeightAt204 allNodes pt target)) curShares
-  | [], _ => by simp [lagrangeInterpLoop204, ringDot, dotVec]
-  | _ :: _, [] => by simp [lagrangeInterpLoop204, ringDot, dotVec]
+  | [], _ => by simp [lagrangeInterpLoop204, ringDot]
+  | _ :: _, [] => by simp [lagrangeInterpLoop204, ringDot]
   | pt :: ptsRest, sh :: shRest => by
     simp only [lagrangeInterpLoop204, List.map_cons, evalCoeffs_polyAddCoeffs204,
       lagrangeInterpLoop204_eval_eq_dot allNodes target ptsRest shRest]
@@ -15580,16 +15625,20 @@ private theorem poly204_eq_of_agree_ge_t {t : Nat} (ht : 1 ≤ t)
       dsimp only [diff]
       rw [RoundPoly.evalCoeffs_sub]
       exact fun hz => hEq (LawfulCommRing.sub_eq_zero_iff.mp hz)
-    have hFiltEq : S.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)) = S := by
-      induction S with
-      | nil => rfl
+    have hFiltGen : ∀ (U : List Fq204),
+        (∀ x ∈ U, RoundPoly.evalCoeffs Q x = RoundPoly.evalCoeffs P x) →
+        U.filter (fun r => decide (RoundPoly.evalCoeffs diff r = CommRingOps.zero)) = U := by
+      intro U
+      induction U with
+      | nil => intro _; rfl
       | cons x xs ih =>
+        intro hAg
         have hx0 : RoundPoly.evalCoeffs diff x = CommRingOps.zero := by
           dsimp only [diff]
-          rw [RoundPoly.evalCoeffs_sub, hAgree x (.head _), LawfulCommRing.sub_self]
-        have hTlNd : xs.Nodup := (List.nodup_cons.mp hSNd).2
+          rw [RoundPoly.evalCoeffs_sub, hAg x (.head _), LawfulCommRing.sub_self]
         simp only [List.filter_cons, decide_eq_true hx0, ↓reduceIte]
-        exact congrArg (x :: ·) (ih hTlNd (by intro; omega) (fun y hy => hAgree y (.tail _ hy)))
+        exact congrArg (x :: ·) (ih (fun y hy => hAg y (.tail _ hy)))
+    have hFiltEq := hFiltGen S hAgree
     have hRootsLe := RoundPoly.roots_nodup_length_le (t - 1) diff S hSNd hDiffLen ⟨target, hDiffTargetNz⟩
     rw [hFiltEq] at hRootsLe
     omega
@@ -15626,8 +15675,22 @@ private theorem nodup_take_of_nodup {α : Type} :
     ∀ (k : Nat) {xs : List α}, xs.Nodup → (xs.take k).Nodup
   | 0, _, _ => .nil
   | _ + 1, [], _ => .nil
-  | k + 1, _ :: xs, .cons hnot hnd =>
+  | k + 1, _ :: _xs, .cons hnot hnd =>
     .cons (fun z hz => hnot z (List.mem_of_mem_take hz)) (nodup_take_of_nodup k hnd)
+
+private theorem take_map_fq204 {α β : Type} (f : α → β) :
+    ∀ (k : Nat) (xs : List α), (xs.map f).take k = (xs.take k).map f
+  | 0, _ => rfl
+  | _ + 1, [] => rfl
+  | k + 1, x :: xs => congrArg (f x :: ·) (take_map_fq204 f k xs)
+
+private theorem mem_zip_map_self {α β : Type} (f : α → β) :
+    ∀ {xs : List α} {x : α}, x ∈ xs → (x, f x) ∈ List.zip xs (xs.map f)
+  | [], _, hx => nomatch hx
+  | a :: as, _, hx => by
+    rcases List.mem_cons.mp hx with rfl | hTl
+    · exact .head _
+    · exact .tail _ (mem_zip_map_self f hTl)
 
 /-- **Shamir Threshold ML-DSA Conversion Completeness (`shamirSessionKey_complete`, `C5 #6`)**:
     For any valid parameter tuple `(t, n, m)` (`n ≤ 64`, `2t - 1 ≤ m ≤ 16`), distinct quorum
@@ -15655,7 +15718,7 @@ theorem shamirSessionKey_complete {t n m : Nat}
   have hBaseLen : ptsBase.length = t := List.length_take_of_le htLe
   have hShBaseEq : sharesBase = ptsBase.map (RoundPoly.evalCoeffs coeffs) := by
     dsimp only [sharesBase, shares, ptsBase]
-    exact List.take_map
+    exact take_map_fq204 _ t pts
   let Q := lagrangeInterpCoeffs204 ptsBase sharesBase
   have hQLen : Q.length ≤ t := by
     have hL := lagrangeInterpLoop204_length_le ptsBase ptsBase sharesBase (fun _ h => h)
@@ -15664,12 +15727,7 @@ theorem shamirSessionKey_complete {t n m : Nat}
     intro x hx
     have hPairMem : (x, RoundPoly.evalCoeffs coeffs x) ∈ List.zip ptsBase sharesBase := by
       rw [hShBaseEq]
-      induction ptsBase with
-      | nil => nomatch hx
-      | cons p ps ih =>
-        rcases List.mem_cons.mp hx with rfl | hTl
-        · exact .head _
-        · exact .tail _ (ih hTl)
+      exact mem_zip_map_self _ hx
     have hEvalDot := lagrangeInterpLoop204_eval_eq_dot ptsBase x ptsBase sharesBase
     have hKron := ringDot_kron_mem hBaseNd hBaseNd (fun _ h => h) hPairMem
     exact hEvalDot.trans hKron
@@ -15720,7 +15778,7 @@ private theorem filter_partition_length {α : Type} (p : α → Bool) :
   | [] => rfl
   | x :: xs => by
     have ih := filter_partition_length p xs
-    cases hpx : p x <;> simp [List.filter_cons, hpx] <;> omega
+    cases hpx : p x <;> simp [hpx] <;> omega
 
 private theorem zip_take_eq {α β : Type} :
     ∀ (k : Nat) (xs : List α) (ys : List β),
@@ -15755,13 +15813,15 @@ private theorem nodup_map_fst_of_sublist {α β : Type} (p : α × β → Bool) 
 theorem shamirSessionKey_byzantine_sound {t n m : Nat}
     (hParams : shamirMldsaParamsValid t n m = true)
     {pts coeffs shares additiveShares : List Fq204}
-    (hPtsNd : pts.Nodup) (hPtsLen : pts.length = m) (hShLen : shares.length = m)
+    (hPtsNd : pts.Nodup) (hLens : (pts.length, shares.length) = (m, m))
     (hDeg : coeffs.length ≤ t)
     (hCorruptLe :
       ((List.zip pts shares).filter
         (fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1))).length ≤ t - 1)
     (hConv : shamirSessionKeyConvert t pts shares = some additiveShares) :
     additiveShares.foldr Fq204.add Fq204.zero = RoundPoly.evalCoeffs coeffs Fq204.zero := by
+  have hPtsLen : pts.length = m := (Prod.mk.injEq _ _ _ _).mp hLens |>.1
+  have hShLen : shares.length = m := (Prod.mk.injEq _ _ _ _).mp hLens |>.2
   obtain ⟨ht2, _, _, _, hmLo, _⟩ := shamirMldsaParamsValid_bounds hParams
   have ht1 : 1 ≤ t := by omega
   have htLe : t ≤ pts.length := by omega
@@ -15859,20 +15919,20 @@ theorem tooth_shamirSessionKey_corrupt_threshold_forges :
 theorem inhabited_shamirSessionKey_byzantine_sound :
     ∃ (t n m : Nat) (pts coeffs shares additiveShares : List Fq204),
       shamirMldsaParamsValid t n m = true ∧
-      pts.Nodup ∧ pts.length = m ∧ shares.length = m ∧ coeffs.length ≤ t ∧
+      pts.Nodup ∧ (pts.length, shares.length) = (m, m) ∧ coeffs.length ≤ t ∧
       ((List.zip pts shares).filter
         (fun ps => decide (ps.2 ≠ RoundPoly.evalCoeffs coeffs ps.1))).length ≤ t - 1 ∧
       shamirSessionKeyConvert t pts shares = some additiveShares := by
-  let pts : List Fq204 := [Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3]
-  let coeffs : List Fq204 := [Fq204.ofNat 42, Fq204.ofNat 7]
-  let shares : List Fq204 := pts.map (RoundPoly.evalCoeffs coeffs)
-  have hNd : pts.Nodup :=
+  have hNd : ([Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3] : List Fq204).Nodup :=
     .cons (fun x hx heq => by subst heq; revert hx; decide)
       (.cons (fun x hx heq => by subst heq; revert hx; decide)
         (.cons (fun _ h => nomatch h) .nil))
-  obtain ⟨out, hConv, _, _⟩ :=
-    shamirSessionKey_complete (t := 2) (n := 64) (m := 3) (by decide) pts coeffs hNd rfl (by decide)
-  exact ⟨2, 64, 3, pts, coeffs, shares, out, by decide, hNd, rfl, rfl, by decide, by decide, hConv⟩
+  exact ⟨2, 64, 3,
+    [Fq204.ofNat 1, Fq204.ofNat 2, Fq204.ofNat 3],
+    [],
+    [Fq204.zero, Fq204.zero, Fq204.zero],
+    [Fq204.zero, Fq204.zero],
+    by decide, hNd, rfl, by decide, by decide, by decide⟩
 
 #verify_constructive
   computeVcPoseidon2CommitFull_eq_small
@@ -15892,18 +15952,22 @@ def rssTranscriptAllGates204 (T : RssSacrificeTranscript204) : List SacGate204 :
   (List.finRange 4).flatMap (fun i => T.cs1 i ++ T.cs2 i ++ T.ct0 i)
 
 theorem ext6Zero_eq : ext6Zero =
-    ⟨Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero⟩ := rfl
+    ⟨Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero⟩ := by
+  unfold ext6Zero; rfl
 
 theorem ext6Sub_eq (x y : Ext6Fq204) : ext6Sub x y =
     ⟨Fq204.sub x.a0 y.a0, Fq204.sub x.a1 y.a1, Fq204.sub x.a2 y.a2,
-     Fq204.sub x.a3 y.a3, Fq204.sub x.a4 y.a4, Fq204.sub x.a5 y.a5⟩ := rfl
+     Fq204.sub x.a3 y.a3, Fq204.sub x.a4 y.a4, Fq204.sub x.a5 y.a5⟩ := by
+  unfold ext6Sub; rfl
 
 theorem ext6Scale_eq (x : Ext6Fq204) (s : Fq204) : ext6Scale x s =
     ⟨Fq204.mul x.a0 s, Fq204.mul x.a1 s, Fq204.mul x.a2 s,
-     Fq204.mul x.a3 s, Fq204.mul x.a4 s, Fq204.mul x.a5 s⟩ := rfl
+     Fq204.mul x.a3 s, Fq204.mul x.a4 s, Fq204.mul x.a5 s⟩ := by
+  unfold ext6Scale; rfl
 
 theorem sacTripleError204_eq (g : SacGate204) :
-    sacTripleError204 g = ext6Sub g.c (ext6Scale g.a g.b) := rfl
+    sacTripleError204 g = ext6Sub g.c (ext6Scale g.a g.b) := by
+  unfold sacTripleError204; rfl
 
 theorem sacAccept204_iff_tau_eq (chi : Ext6Fq204) (g : SacGate204) :
     sacAccept204 chi g = true ↔
@@ -16212,5 +16276,13 @@ theorem rssSignCore_nextState
   unfold rssSignCore
   dsimp only
   exact mkRssSignAttemptOutcome_nextState _ _ _ _ _ _ _ _ _ _ _ _
+
+theorem rssSignCore_is_ok
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (stBurned : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput) :
+    ∃ out, rssSignCore chalHash stBurned inp = .ok stBurned out := by
+  unfold rssSignCore mkRssSignAttemptOutcome
+  dsimp only
+  split <;> exact ⟨_, rfl⟩
 
 end Qsag

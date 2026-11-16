@@ -2902,6 +2902,10 @@ theorem tooth_unratcheted_failed_slot_recycles_counter :
   Qsag.tooth_omitting_cursor_advance_reuses_pow7_tuples
 #tooth_pair Qsag.spdz_quorum_contains_honest_server vs
   Qsag.tooth_below_threshold_quorum_all_corrupt
+#tooth_pair Qsag.partial_reserve_burns_without_recycle vs
+  Qsag.tooth_unratcheted_failed_slot_recycles_counter
+#verify_inhabited Qsag.partial_reserve_burns_without_recycle
+  Qsag.spdz_partial_reserve_burns_witness
 
 end Qsag
 end
