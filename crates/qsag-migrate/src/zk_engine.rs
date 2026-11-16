@@ -1292,7 +1292,10 @@ pub(crate) fn verify_cozk_v4_proof_body(
         });
     }
     let opened_commits = if v5 {
-        crate::batch_hash::commit_cozk_v5_indexed(&indexed, &crate::batch_hash::CozkViewLayout::new(circuit))?
+        crate::batch_hash::commit_cozk_v5_indexed(
+            &indexed,
+            &crate::batch_hash::CozkViewLayout::new(circuit),
+        )?
     } else {
         crate::batch_hash::commit_cozk_v4_indexed(&indexed)
     };
@@ -1720,16 +1723,18 @@ pub(crate) mod tests {
                 let commits = core::array::from_fn(|h| {
                     if v5 {
                         let (subseeds, input) = parse_cozk_v4_inputs(&views[h]).unwrap();
-                        crate::batch_hash::commit_cozk_v5_indexed(&[
-                            crate::batch_hash::CozkIndexedView {
+                        crate::batch_hash::commit_cozk_v5_indexed(
+                            &[crate::batch_hash::CozkIndexedView {
                                 rep,
                                 head: h,
                                 subseeds,
                                 head_inputs: input,
                                 products: &views[h].products,
                                 outputs: &views[h].outputs,
-                            },
-                        ], &crate::batch_hash::CozkViewLayout::new(&circuit)).unwrap()[0]
+                            }],
+                            &crate::batch_hash::CozkViewLayout::new(&circuit),
+                        )
+                        .unwrap()[0]
                     } else {
                         commit_cozk_v4(rep, h, &views[h])
                     }

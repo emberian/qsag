@@ -276,8 +276,8 @@ opens.
 
 The default distributed prover uses the `COZKVW05` view envelope and
 `COZKRP05` repetition-root domain. Verification also retains `COZKVW04` /
-`COZKRP04`; mixed versions within a proof are rejected. The legacy verifier remains available for
-proofs without this envelope; the legacy shared-sponge parity and rejection
+`COZKRP04`; mixed versions within a proof are rejected. The legacy verifier
+remains available for proofs without this envelope; the legacy shared-sponge parity and rejection
 sampling tests still exercise that format. Native local migration proofs retain
 their previous format.
 
@@ -293,7 +293,7 @@ single custodian therefore never learns the combined tape of the hidden head.
 The replicated backend's V4 pairwise PRSS stream interleaves four independent
 full-24-round cSHAKE256 streams through the existing SIMD implementation, under
 `QSAG.OUTER.PADS.V4`. Partial reads preserve the stream position. The initial
-statement agreement includes the V4 magic, so interactive peers must use the
+statement agreement includes the V5 magic, so interactive peers must use the
 same profile. This changes the online ceremony; verification of stored legacy
 proofs does not invoke the outer MPC and is unaffected.
 
@@ -317,13 +317,14 @@ output-zero checks, multiplication checks and freeze/completion barriers remain.
 
 V5 removes interactive hashing of the large views without opening their
 plaintext. For each `(repetition, head, custodian)` the existing private
-sub-seed drives a separate `QSAG.COZK.VIEW.FIELD.MASK.V5` seed derivation and tape sampler, bound to the repetition
-and head and independent of the inner tape domain. Each custodian inputs its
+sub-seed drives a separate `QSAG.COZK.VIEW.FIELD.MASK.V5` seed derivation and
+tape sampler, bound to the repetition and head and independent of the inner
+tape domain. Each custodian inputs its
 mask through the same private masked-input primitive. After every circuit
 batch passes its active checks and the cross-batch barrier, the custodians
 open only `C = view + mask_0 + ... + mask_(m-1)` in each entry's original
 additive group (XOR for bits, modular addition for fields), and the constrained
-public outputs. Each field mask uses the same canonical uniform sampler as
+public outputs. Each field mask uses the same canonical field sampler as
 the inner tapes. They serialize these public masked values and hash them with the same
 12-round tree, under the V5 magic. The root includes the ordered, position-bound
 `QSAG.COZK.SEED.COMMIT.V5` hashes, which were broadcast and agreed alongside the

@@ -535,7 +535,14 @@ pub(crate) fn cozk_seed_commit(
 }
 
 pub(crate) fn view_mask_seed(seed: &[u8; 32], rep: usize, head: usize) -> [u8; 32] {
-    qsag_accel::keccak::cshake256_framed_32(b"QSAG.COZK.VIEW.FIELD.MASK.V5", &[seed, &(rep as u64).to_le_bytes(), &(head as u64).to_le_bytes()])
+    qsag_accel::keccak::cshake256_framed_32(
+        b"QSAG.COZK.VIEW.FIELD.MASK.V5",
+        &[
+            seed,
+            &(rep as u64).to_le_bytes(),
+            &(head as u64).to_le_bytes(),
+        ],
+    )
 }
 
 pub(crate) struct CozkViewLayout {
@@ -547,38 +554,86 @@ impl CozkViewLayout {
     pub fn new(c: &crate::circuit::Circuit) -> Self {
         use crate::circuit::Op;
         Self {
-            inputs: c.nodes.iter().filter(|n| matches!(n.op, Op::Input)).map(|n| n.domain).collect(),
-            products: c.nodes.iter().filter(|n| matches!(n.op, Op::Mul(_, _))).map(|n| n.domain).collect(),
+            inputs: c
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.op, Op::Input))
+                .map(|n| n.domain)
+                .collect(),
+            products: c
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.op, Op::Mul(_, _)))
+                .map(|n| n.domain)
+                .collect(),
             outputs: c.outputs.iter().map(|&i| c.nodes[i].domain).collect(),
         }
     }
 }
 
-fn commit_cozk_v5_one(v: &CozkIndexedView<'_>, layout: &CozkViewLayout) -> Result<[u8; 32], crate::MigrateError> {
+fn commit_cozk_v5_one(
+    v: &CozkIndexedView<'_>,
+    layout: &CozkViewLayout,
+) -> Result<[u8; 32], crate::MigrateError> {
     use crate::zk_engine::{BitPackedReader, BitPacker, PublicTape};
-    let mut masks: Vec<_> = v.subseeds.iter().map(|seed| {
-        let seed = Secret(view_mask_seed(seed, v.rep, v.head));
-        PublicTape::new(&seed)
-    }).collect();
-    let domains = [if v.head == 2 { layout.inputs.as_slice() } else { &[] }, layout.products.as_slice(), layout.outputs.as_slice()];
+    let mut masks: Vec<_> = v
+        .subseeds
+        .iter()
+        .map(|seed| {
+            let seed = Secret(view_mask_seed(seed, v.rep, v.head));
+            PublicTape::new(&seed)
+        })
+        .collect();
+    let domains = [
+        if v.head == 2 {
+            layout.inputs.as_slice()
+        } else {
+            &[]
+        },
+        layout.products.as_slice(),
+        layout.outputs.as_slice(),
+    ];
     let mut packed = Vec::with_capacity(3);
-    for (bytes, domains) in [v.head_inputs, v.products, v.outputs].into_iter().zip(domains) {
+    for (bytes, domains) in [v.head_inputs, v.products, v.outputs]
+        .into_iter()
+        .zip(domains)
+    {
         let mut reader = BitPackedReader::new(bytes);
         let mut writer = BitPacker::with_capacity(bytes.len());
         for &d in domains {
             let mut value = reader.take_value(d)?;
-            for tape in &mut masks { value = d.add(value, tape.sample(d)); }
+            for tape in &mut masks {
+                value = d.add(value, tape.sample(d));
+            }
             writer.push_value(d, value);
         }
         reader.finish()?;
         packed.push(writer.into_bytes());
     }
-    let seed_commits: Vec<_> = v.subseeds.iter().enumerate().map(|(i, s)| cozk_seed_commit(v.rep, v.head, i, s)).collect();
-    Ok(commit_cozk_tree_one(&COZK_VIEW_MAGIC_V5, v.rep, v.head, &seed_commits, &packed[0], &packed[1], &packed[2]))
+    let seed_commits: Vec<_> = v
+        .subseeds
+        .iter()
+        .enumerate()
+        .map(|(i, s)| cozk_seed_commit(v.rep, v.head, i, s))
+        .collect();
+    Ok(commit_cozk_tree_one(
+        &COZK_VIEW_MAGIC_V5,
+        v.rep,
+        v.head,
+        &seed_commits,
+        &packed[0],
+        &packed[1],
+        &packed[2],
+    ))
 }
 
-pub(crate) fn commit_cozk_v5_indexed(views: &[CozkIndexedView<'_>], layout: &CozkViewLayout) -> Result<Vec<[u8; 32]>, crate::MigrateError> {
-    crate::parallel::map(views.len(), |i| commit_cozk_v5_one(&views[i], layout)).into_iter().collect()
+pub(crate) fn commit_cozk_v5_indexed(
+    views: &[CozkIndexedView<'_>],
+    layout: &CozkViewLayout,
+) -> Result<Vec<[u8; 32]>, crate::MigrateError> {
+    crate::parallel::map(views.len(), |i| commit_cozk_v5_one(&views[i], layout))
+        .into_iter()
+        .collect()
 }
 
 pub(crate) struct CozkIndexedView<'a> {
