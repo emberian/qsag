@@ -1917,6 +1917,64 @@ mod tests {
     }
 
     #[test]
+    fn zero_through_eight_hops_and_overlong_attenuation() {
+        let params = CapabilityParams { batch_size: 1, max_hops: MAX_CAP_HOPS,
+            issuer_depth: 1, revocation_depth: 1 };
+        let relation = CapabilityRelation::new(params).unwrap();
+        let request = CapabilityRequest { audience: [f(3); 4], resource: [f(4); 4],
+            actions: 1, amount: u128::MAX, now: u64::MAX };
+        let tree = SortedRevocationTree::new(1, 0, &[]).unwrap();
+        let mut cap = BearerCapability::issue(&[f(9); 4], id(0, 0, 0, 1), request.audience).unwrap();
+        for hops in 0..=MAX_CAP_HOPS {
+            let directory = CapabilityIssuerDirectory::new(1, &[cap.mint_leaf()]).unwrap();
+            let mut inputs = [CapabilityPresentationInput { capability: cap.clone(), issuer_index: 0,
+                issuer_siblings: directory.opening(0).unwrap(),
+                non_membership: tree.prove_non_membership(cap.token_id()).unwrap() }];
+            let statement = CapabilityBatchStatement::prepare_sorted(directory.root(), tree.root(), 0,
+                request, &mut inputs, b"hops").unwrap();
+            let slots = relation.validate_and_build_slots(&statement, &inputs, b"hops").unwrap();
+            let (shape, z) = synthesize_raw(params, &statement, b"hops", &slots);
+            assert_eq!(&shape, relation.shape());
+            assert!(shape.is_satisfied(&z));
+            if hops < MAX_CAP_HOPS { cap.attenuate(CapCaveat::Actions(1)).unwrap(); }
+        }
+        let saved = cap.clone();
+        assert_eq!(cap.attenuate(CapCaveat::Actions(0)), Err(CapabilityZkError::TooManyCaveats));
+        assert_eq!(cap, saved);
+    }
+
+    #[test]
+    fn raw_numeric_payload_overflow_is_rejected_even_with_matching_enrollment() {
+        let params = CapabilityParams { batch_size: 1, max_hops: 1, issuer_depth: 1, revocation_depth: 1 };
+        let request = CapabilityRequest { audience: [f(3); 4], resource: [f(4); 4], actions: 0, amount: 0, now: 0 };
+        let tree = SortedRevocationTree::new(1, 0, &[]).unwrap();
+        // Commit to a deliberately malformed numeric payload, so enrollment and tag
+        // constraints succeed; only the numeric range constraints can reject it.
+        for kind in [1, 2, 4, 5] {
+            let mut slot = CapSlot::placeholder(params);
+            slot.root_tag = [f(9); 4];
+            slot.hops[0] = HopSlot { active: true, kind, payload: [f(1u64 << 32), F::ZERO, F::ZERO, F::ZERO] };
+            if kind == 1 { slot.hops[0].payload[1] = F::ONE; }
+            slot.final_tag = chain_step_raw_native(&slot.root_tag, kind, &slot.hops[0].payload, 0);
+            let mut msg = slot.root_tag.to_vec();
+            msg.extend_from_slice(&slot.final_tag);
+            msg.extend_from_slice(&[F::ONE, f(CAP_MINT_LEAF_TAG)]);
+            let enrollment = first4(sponge12_native(&msg));
+            let leaf = compute_mint_leaf(&slot.token_id, &request.audience, &enrollment);
+            let directory = CapabilityIssuerDirectory::new(1, &[leaf]).unwrap();
+            slot.issuer_siblings = directory.opening(0).unwrap();
+            let nm = tree.prove_non_membership(&slot.token_id).unwrap();
+            slot.path_lo = nm.path_lo.clone();
+            slot.path_hi = nm.path_hi.clone();
+            let statement = CapabilityBatchStatement { issuer_root: directory.root(), revocation_root: tree.root(),
+                revocation_epoch: 0, request, presentation_tags: vec![compute_presentation_tag(
+                    &slot.final_tag, &slot.token_id, &context_digest(b"range"))] };
+            let (shape, z) = synthesize_raw(params, &statement, b"range", &[slot]);
+            assert!(!shape.is_satisfied(&z), "kind {kind}");
+        }
+    }
+
+    #[test]
     fn sorted_revocation_tree_proves_absent_and_rejects_revoked_and_sentinels() {
         let r0 = id(0, 0, 0, 50);
         let r1 = id(0, 0, 5, 0);

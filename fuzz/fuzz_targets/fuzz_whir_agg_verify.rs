@@ -134,11 +134,13 @@ fn fixtures() -> &'static FuzzFixtures {
                 actions: 1, amount: 100, now: 1_700_000_000,
             }, &mut inputs, b"fuzz-cap",
         ).unwrap();
-        let cap_proof = cap_rel.prove(&cap_stmt, &inputs, b"fuzz-cap",
-            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, &[0x42; 32]).unwrap();
+        // Generated without coverage instrumentation by examples/capability_seed.rs.
+        // Do not grind a proof inside libFuzzer's per-input timeout.
+        let cap_seed = include_bytes!("../seeds/capability.bin").to_vec();
+        let seeded = ZkCapabilityBatchProof::from_bytes(&cap_seed, &cap_rel,
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128).expect("canonical capability seed");
         assert!(cap_rel.verify(&cap_stmt, b"fuzz-cap",
-            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, &cap_proof));
-        let cap_seed = cap_proof.to_bytes();
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128, &seeded));
 
         // 5. `FixedPathWhirParams` + 1-child `ChildWhirMergeRelation`.
         let fp_regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;

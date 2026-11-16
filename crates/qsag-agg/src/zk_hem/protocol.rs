@@ -1875,8 +1875,23 @@ impl core::fmt::Debug for ShapeHologram {
 }
 
 impl ShapeHologram {
-    /// Deterministically compile the residual sparse hologram of `shape` under `regime`.
+    /// Deterministically compile the residual sparse hologram of `shape` under `regime`,
+    /// including the Poseidon2 recursive hologram commitment when `regime.uses_poseidon2_canopy()`.
     pub fn compile(shape: &Shape, regime: WhirSecurityRegime) -> Result<Self, ZkHemError> {
+        Self::compile_with_options(shape, regime, true)
+    }
+
+    /// Deterministically compile only the native 2-poly hologram commitment (`rec_h = None`),
+    /// avoiding the `ell_nz + 3` recursive commitment for root/leaf-only native relations.
+    pub fn compile_native(shape: &Shape, regime: WhirSecurityRegime) -> Result<Self, ZkHemError> {
+        Self::compile_with_options(shape, regime, false)
+    }
+
+    fn compile_with_options(
+        shape: &Shape,
+        regime: WhirSecurityRegime,
+        include_recursive: bool,
+    ) -> Result<Self, ZkHemError> {
         let layout = public_layout(shape, regime).ok_or(ZkHemError::RelationTooLarge)?;
         let var_bits = layout.var_bits;
         let num_rows = shape.num_rows();
@@ -1965,7 +1980,7 @@ impl ShapeHologram {
         h_super[5 * nz_cap..6 * nz_cap].copy_from_slice(&count_x);
         h_super[6 * nz_cap..7 * nz_cap].copy_from_slice(&count_y);
 
-        let rec_h = if regime.uses_poseidon2_canopy() {
+        let rec_h = if include_recursive && regime.uses_poseidon2_canopy() {
             let rec_params =
                 FixedPathWhirParams::new(regime, pack_vars).map_err(|_| ZkHemError::RelationTooLarge)?;
             Some(
@@ -1978,8 +1993,8 @@ impl ShapeHologram {
         let rec_hologram_root = rec_h.as_ref().map(PublicRecursionCommitment::root);
 
         let half_h = 4 * nz_cap;
-        let h0 = h_super[..half_h].to_vec();
-        let h1 = h_super[half_h..].to_vec();
+        let h1 = h_super.split_off(half_h);
+        let h0 = h_super;
         let h_pair_monos = [
             hypercube_to_monomial_coeffs(&h0),
             hypercube_to_monomial_coeffs(&h1),
