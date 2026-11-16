@@ -21,10 +21,11 @@
 //! arms its per-input watchdog.
 //!
 //! Not covered here: `FullShardMergeProof::from_bytes` (`QSAGFSM1`) and
-//! `SuccinctFullShardAggregate::from_bytes_canonical` (`QSAGFSA1`). Both decode against a
-//! `FullShardMergeRelation`, whose constructor synthesizes the in-circuit WHIR verifier
+//! `SuccinctFullShardAggregate::from_bytes_canonical` (`QSAGFSA1`). Both take a
+//! `&FullShardMergeRelation`, whose only constructor synthesizes the in-circuit WHIR verifier
 //! (about 2.7M rows per child) and compiles its hologram: minutes under coverage
-//! instrumentation. They need a decode context that does not require compiling the relation.
+//! instrumentation. The `HologramPublicProof` decoder and verifier both wrap, and the
+//! key-only `QSAGSTA1` subtree carriers, are fuzzed in `fuzz_hologram_and_subtree_decode`.
 
 use std::sync::OnceLock;
 
@@ -295,8 +296,8 @@ fuzz_target!(init: {
     // exercises an unchanged valid proof; each subsequent (offset:u32, xor:u8) edits it.
     if let Some(edits) = data.strip_prefix(&[0xca, 0x50]) {
         let mut candidate = fx.cap_seed.clone();
-        for edit in edits.chunks_exact(5) {
-            let offset = u32::from_le_bytes(edit[..4].try_into().unwrap()) as usize;
+        for edit in edits.as_chunks::<5>().0 {
+            let offset = u32::from_le_bytes([edit[0], edit[1], edit[2], edit[3]]) as usize;
             let index = offset % candidate.len();
             candidate[index] ^= edit[4];
         }

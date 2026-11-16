@@ -125,13 +125,12 @@ fn xor_block(state: &mut [u64; 25], block: &[u8]) {
 /// Sponge with rate 136 over `tiny_keccak::keccakf`, final `suffix` byte and `0x80`.
 fn keccak_sponge_256(input: &[u8], suffix: u8, out: &mut [u8]) {
     let mut state = [0u64; 25];
-    let mut blocks = input.chunks_exact(RATE);
-    for block in &mut blocks {
+    let (blocks, tail) = input.as_chunks::<RATE>();
+    for block in blocks {
         xor_block(&mut state, block);
         tiny_keccak::keccakf(&mut state);
     }
     let mut last = [0u8; RATE];
-    let tail = blocks.remainder();
     last[..tail.len()].copy_from_slice(tail);
     last[tail.len()] ^= suffix;
     last[RATE - 1] ^= 0x80;
@@ -253,7 +252,7 @@ fn check_goldilocks_base(a: u64, b: u64, backend: SimdBackend) {
     });
     let accel_inv = accel_gl::gl_inv_or_zero(a);
     assert!(accel_inv < P);
-    assert_eq!(r_mul(a, accel_inv), u64::from(a % P != 0));
+    assert_eq!(r_mul(a, accel_inv), u64::from(!a.is_multiple_of(P)));
 
     // `qsag-core` field element built from the raw word.
     let (qa, qb) = (CoreGl::from_u64_reduced(a), CoreGl::from_u64_reduced(b));
@@ -270,7 +269,7 @@ fn check_goldilocks_base(a: u64, b: u64, backend: SimdBackend) {
     assert_eq!(CoreGl::reduce128(wide).to_canonical_u64(), (wide % P128) as u64);
     assert_eq!(CoreGl::from_u128_reduced(wide).to_canonical_u64(), (wide % P128) as u64);
     let core_inv = qa.inv().to_canonical_u64();
-    assert_eq!(r_mul(a, core_inv), u64::from(a % P != 0));
+    assert_eq!(r_mul(a, core_inv), u64::from(!a.is_multiple_of(P)));
     assert_eq!(
         core_inv,
         pa.try_inverse().map_or(0, |v| v.as_canonical_u64())
@@ -414,7 +413,7 @@ fuzz_target!(|input: DiffFuzzInput| {
     // Customization string of up to 300 bytes. Two classes pin its length to 129 and 265,
     // where the unpadded `bytepad` header is exactly one and two rate blocks.
     let mut custom = input.custom[..input.custom.len().min(300)].to_vec();
-    let pinned_len = match input.custom_len_class & 3 {
+    let pinned_len: Option<usize> = match input.custom_len_class & 3 {
         1 => Some(129),
         2 => Some(265),
         _ => None,

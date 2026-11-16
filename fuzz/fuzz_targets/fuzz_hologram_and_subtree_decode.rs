@@ -103,7 +103,7 @@ fn fixtures() -> &'static Fixtures {
         let f = Goldilocks::from_u64_reduced;
         let root_limbs = [f(0x1111), f(0x2222), f(0x3333), f(0x4444)];
         let mut roster_root = [0u8; 32];
-        for (chunk, limb) in roster_root.chunks_exact_mut(8).zip(root_limbs) {
+        for (chunk, limb) in roster_root.as_chunks_mut::<8>().0.iter_mut().zip(root_limbs) {
             chunk.copy_from_slice(&limb.to_le_bytes());
         }
         let public = SubtreePublic {
@@ -197,8 +197,8 @@ fn check_proof(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
     let carrier_wire = carrier.to_bytes();
     assert_eq!(carrier_wire[..8], *SUCCINCT_FULL_SHARD_WIRE_MAGIC);
     assert_eq!(carrier_wire[8..12], (counts.len() as u32).to_le_bytes());
-    for (chunk, count) in carrier_wire[12..24].chunks_exact(4).zip(&counts) {
-        assert_eq!(chunk, count.to_le_bytes());
+    for (chunk, count) in carrier_wire[12..24].as_chunks::<4>().0.iter().zip(&counts) {
+        assert_eq!(*chunk, count.to_le_bytes());
     }
     assert_eq!(carrier_wire[24..], merge_wire);
 
@@ -255,7 +255,7 @@ fn check_split_aggregate(fx: &Fixtures, bytes: &[u8]) {
 /// `seed` with sparse `(offset: u32 LE, xor: u8)` edits applied.
 fn edited(seed: &[u8], edits: &[u8]) -> Vec<u8> {
     let mut candidate = seed.to_vec();
-    for edit in edits.chunks_exact(5) {
+    for edit in edits.as_chunks::<5>().0 {
         let offset = u32::from_le_bytes([edit[0], edit[1], edit[2], edit[3]]) as usize;
         let index = offset % candidate.len();
         candidate[index] ^= edit[4];
