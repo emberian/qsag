@@ -39,7 +39,7 @@ structure State where
 
 def initial : State := ⟨[], 0, [], [], []⟩
 
-def approvalState (c : Config) (s : State) : ThresholdIdealService.State :=
+@[expose] def approvalState (c : Config) (s : State) : ThresholdIdealService.State :=
   ⟨s.approvals, [], RssProduction.initial c.profile⟩
 
 def update : List Slot → Nat → Slot → List Slot
@@ -164,11 +164,8 @@ theorem start_then_crash_burns (p : RssProduction.Profile) (compute : Compute) :
   have hRes : reserved = ⟨[(0, req)], 1, [req], [], [⟨req, .reserved⟩]⟩ := by
     dsimp only [reserved]
     rw [hs]
-    dsimp only [stepWith]
-    rw [ite_eq_left (ThresholdIdealService.fixtureRequest_authorized p (RssProduction.initial p))]
-    rw [ite_eq_left (by dsimp only [c, ThresholdIdealService.fixtureConfig]; decide)]
-    dsimp only [List.find?]
-    rw [ite_eq_left (by dsimp only [req, ThresholdIdealService.fixtureRequest])]
+    simp [stepWith, approvalState, ThresholdIdealService.authorized, c, req,
+      ThresholdIdealService.fixtureConfig, ThresholdIdealService.fixtureRequest]
   rw [hRes]
   exact ⟨rfl, rfl⟩
 
@@ -202,21 +199,16 @@ theorem crash_cannot_reuse_reserved_leaf (p : RssProduction.Profile) (compute : 
   have hRes : reserved = ⟨[(0, req)], 1, [req], [], [⟨req, .reserved⟩]⟩ := by
     dsimp only [reserved]
     rw [hs]
-    dsimp only [stepWith]
-    rw [ite_eq_left (ThresholdIdealService.fixtureRequest_authorized p (RssProduction.initial p))]
-    rw [ite_eq_left (by dsimp only [c, ThresholdIdealService.fixtureConfig]; decide)]
-    dsimp only [List.find?]
-    rw [ite_eq_left (by dsimp only [req, ThresholdIdealService.fixtureRequest])]
+    simp [stepWith, approvalState, ThresholdIdealService.authorized, c, req,
+      ThresholdIdealService.fixtureConfig, ThresholdIdealService.fixtureRequest]
   have hCrash : crashed = ⟨[(0, req)], 1, [req], [], [⟨req, .closed⟩]⟩ := by
     dsimp only [crashed]
     rw [hRes]
     rfl
   rw [hCrash]
-  dsimp only [stepWith]
-  rw [ite_eq_left (ThresholdIdealService.fixtureRequest_authorized p (RssProduction.initial p))]
-  rw [ite_eq_left (by dsimp only [c, ThresholdIdealService.fixtureConfig]; decide)]
-  dsimp only [List.find?]
-  rw [ite_eq_right (by dsimp only [req, ThresholdIdealService.fixtureRequest]; decide)]
+  simp [stepWith, approvalState, ThresholdIdealService.authorized, c, req,
+    ThresholdIdealService.fixtureConfig, ThresholdIdealService.fixtureRequest]
+
 
 /-- Retry execution is independent of the signing algorithm and its coins. -/
 theorem replay_does_not_recompute (c : Config) (first second : Compute)

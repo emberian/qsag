@@ -15,7 +15,7 @@ def hemDuetFold (v0 v1 : GoldilocksExt4) (invTwoY0 invTwo : Goldilocks)
 
 /-- Extracted `qsag_whir_verified::fold_duet_affine_ext4` (`cwyz_duet_fold`), defined directly
     via `Qsag.Aggregation.foldDuetExt4` on the asymmetric `even + theta * odd` coset combination. -/
-def hemAffineDuetFold (v0 v1 : GoldilocksExt4) (x : Goldilocks)
+@[expose] def hemAffineDuetFold (v0 v1 : GoldilocksExt4) (x : Goldilocks)
     (theta alpha beta : GoldilocksExt4) : GoldilocksExt4 :=
   let half := Goldilocks.inv (Goldilocks.ofNat 2)
   let invTwoX := Goldilocks.mul half (Goldilocks.inv x)

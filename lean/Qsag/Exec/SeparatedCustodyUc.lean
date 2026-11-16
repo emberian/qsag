@@ -185,7 +185,7 @@ theorem acceptQuorum_implies_validThresholdApproval {PK Msg : Type}
     let hon := custodyQuorumHonestApprovers st.corruptParties certs
     hon ≠ [] ∧ validThresholdApproval st hon = true := by
   intro hon
-  unfold Custody.acceptQuorum at hAcc
+  simp only [Custody.acceptQuorum.public_eq_1] at hAcc
   rcases Bool.and_eq_true_iff.mp hAcc with ⟨hLeft, _hVerAll⟩
   rcases Bool.and_eq_true_iff.mp hLeft with ⟨_hFresh, hBoundsDec⟩
   rcases of_decide_eq_true hBoundsDec with ⟨hThPos, hThLeCerts, hIdsNd, hCertsRng⟩
@@ -308,7 +308,7 @@ theorem custodyHistory_submit_validThresholdApproval_and_provenance {PK SK Sig :
         | .signed _ => .halt true
         | _ => .halt false)) = (true, { st with approvedMsgs := r.message :: st.approvedMsgs }) := by
     dsimp only [hon]
-    simp only [execIdealTsig, hValApp, ↓reduceIte]
+    simp only [execIdealTsig.public_eqs, hValApp, ↓reduceIte]
   obtain ⟨c, hcMem, hcNotCorr, hProv⟩ :=
     Custody.generated_submit_provenance d commands st.corruptParties r certs
       hRadix hStateful hAlign.corruptMinor hSub
@@ -327,7 +327,7 @@ theorem tooth_unauthenticated_approvers_bypass_without_custody_certs
       Custody.acceptQuorum cfg pks dep 3 2 [] r [] = false ∧
       validThresholdApproval st (custodyQuorumHonestApprovers st.corruptParties []) = false := by
   refine ⟨⟨(), 2, 3, [2], [], []⟩, by decide, ?_, ?_⟩
-  · simp [Custody.acceptQuorum]
+  · simp [Custody.acceptQuorum.public_eq_1]
   · exact empty_honest_approvers_rejected _
 
 /-! ## 3. Party-Local Custody Roster & Non-Hiding Stateful/Stateless Production Signing Release -/
@@ -435,8 +435,8 @@ theorem GroundedRssSigningBundle.matchesKey (b : GroundedRssSigningBundle) :
 theorem GroundedRssSigningBundle.mpcDerivedPk_eq_enrolledPk (b : GroundedRssSigningBundle) :
     derivePublicKeyMpc cshake256Suite b.params b.mpcOracles.toPqHashMpcOracles b.pkSeed =
       b.enrolledPk := by
-  unfold derivePublicKeyMpc GroundedRssSigningBundle.enrolledPk
-  dsimp only
+  rw [derivePublicKeyMpc.public_eq_1]
+  unfold GroundedRssSigningBundle.enrolledPk
   have hRoot := mpcComputeXmssSubtreeRoot_eq cshake256Suite b.params
     b.mpcOracles.toPqHashMpcOracles b.secretKey b.matchesKey.1
   dsimp only [GroundedRssSigningBundle.secretKey] at hRoot
@@ -536,7 +536,7 @@ private theorem signProductionHypertreeCore_zero_grind
     (leafGlobalIdx : Nat) (forsIdxs : Option (List Nat))
     (hPos : 0 < params.numLayers) :
     signProductionHypertreeCore suite params sk pk msg mu rRand leafGlobalIdx forsIdxs 0 = none := by
-  unfold signProductionHypertreeCore
+  rw [signProductionHypertreeCore_def]
   dsimp only
   cases hs : params.statefulJorts
   · simp only [Bool.false_eq_true, ↓reduceIte]
@@ -546,11 +546,11 @@ private theorem signProductionHypertreeCore_zero_grind
       dsimp only
       obtain ⟨rem, hLayers⟩ := Nat.exists_eq_succ_of_ne_zero (Nat.ne_of_gt hPos)
       rw [hLayers, signProductionHypertreeLayers_succ]
-      simp [hs, grindTswInternalCounterAux]
+      simp [hs, grindTswInternalCounterAux.public_eqs]
   · simp only [↓reduceIte]
     obtain ⟨rem, hLayers⟩ := Nat.exists_eq_succ_of_ne_zero (Nat.ne_of_gt hPos)
     rw [hLayers, signProductionHypertreeLayers_succ]
-    simp [hs, grindTswLeafCounterAux]
+    simp [hs, grindTswLeafCounterAux.public_eqs]
 
 /-- **`#tooth` `Option`-Hiding Serializer vs Non-Hiding Cut Release (`tooth_option_hiding_vs_non_hiding_zero_grind`)**:
     When `grindLimit = 0`, WOTS+C counter grinding exhausts immediately (`= none`).
@@ -580,7 +580,7 @@ theorem tooth_option_hiding_vs_non_hiding_zero_grind
     · cases hWf : b.params.productionWellFormed
       · simp
       · cases hNum : b.params.numLayers with
-        | zero => simp [PqHashParams.productionWellFormed, hNum] at hWf
+        | zero => simp [PqHashParams.productionWellFormed.public_eq_1, hNum] at hWf
         | succ rem =>
           simp only [Bool.not_true, Bool.false_or, Bool.false_eq_true, ↓reduceIte]
           cases hDer : deriveProductionStatelessInputs cshake256Suite b.params
@@ -599,7 +599,7 @@ theorem tooth_option_hiding_vs_non_hiding_zero_grind
               (hNum ▸ Nat.succ_pos rem)
     · simp
   refine ⟨req, ?_, ?_⟩
-  · unfold productionThresholdSignOracle
+  · simp only [productionThresholdSignOracle.public_eq_1]
     rw [hStatelessNone req.msg]
   · unfold evalNonHidingRssCutRelease
     dsimp only
@@ -619,7 +619,7 @@ theorem tooth_option_hiding_vs_non_hiding_zero_grind
       · cases hRng : b.params.productionLeafIdxInRange req.reqEpoch
         · simp [hMode]
         · cases hNum : b.params.numLayers with
-          | zero => simp [PqHashParams.productionWellFormed, hNum] at hWf
+          | zero => simp [PqHashParams.productionWellFormed.public_eq_1, hNum] at hWf
           | succ rem =>
             simp only [hMode, Bool.not_true, Bool.or_false, Bool.false_eq_true, ↓reduceIte]
             rw [signProductionHypertreeCore_zero_grind cshake256Suite b.params b.secretKey
@@ -850,7 +850,7 @@ theorem tooth_unanchored_snapshot_rollback_replays_epoch :
   let wal1 := walCommitAuthorized wal0 0 [0x01] (packWire [0x99])
   let anchor1 : ExternalMonotoneAnchor := ⟨1, List.replicate 32 0xBB⟩
   let oldTag := List.replicate 32 (0xCC : UInt8)
-  refine ⟨pkDig, wal0, wal1, anchor1, oldTag, by decide, ?_, by decide⟩
+  refine ⟨pkDig, wal0, wal1, anchor1, oldTag, by rfl, ?_, by rfl⟩
   exact externalAnchor_rejects_whole_disk_rollback oldTag (by decide : 0 < 1)
 
 /-- Concrete inhabitedness witness demonstrating `acceptQuorum_implies_validThresholdApproval`

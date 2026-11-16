@@ -85,6 +85,7 @@ structure SlotWrite (Tip : Type) where
   slot : Slot
   ctr : Nat
   tip : Tip
+  deriving DecidableEq
 
 /-- `TwoSlotHwm::commit`: slot A, then slot B. -/
 @[expose] def commitWrites (c : Nat) (t : Tip) : List (SlotWrite Tip) := [⟨.a, c, t⟩, ⟨.b, c, t⟩]
