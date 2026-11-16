@@ -39,12 +39,12 @@ use crate::keccak_mpc::{
     KeccakMpcError, SpdzAuthenticatedKeyShare, SpdzMacWord, TSW_F_SECRET_OFFSET,
     TSW_PRF_SECRET_OFFSET, TSW_SUITE_MIDSTATE, add_public_u64_to_spdz_word,
     eval_spdz_keccak_f1600_batch64, eval_spdz_keccak_f1600_single, tsw_secret32_frame,
-    verify_pending_spdz_mac_batch,
+    verify_pending_spdz_mac_batch_with_mesh,
 };
 use crate::preprocessing::{
     KeccakBitTripleShare64, OtMesh, PartyPrivateRng, PreprocessedKeccakPartyVault,
-    commit_and_open_spdz_bs_gf256_batch_quorum, run_dealerless_pcg_keccak_vaults_with_alpha,
-    validate_all_eval_points_gf256,
+    commit_and_open_spdz_bs_gf256_batch_quorum_with_mesh,
+    run_dealerless_pcg_keccak_vaults_with_alpha, validate_all_eval_points_gf256,
 };
 use crate::rss256::Rss256Error;
 use crate::sponge::keccak::SHAKE256_RATE_BYTES;
@@ -275,6 +275,8 @@ pub struct SpdzSweepEngine<'a> {
     keys: &'a [SpdzAuthenticatedKeyShare],
     party_rngs: &'a mut [PartyPrivateRng],
     triples: &'a mut dyn SpdzTripleSource,
+    online_mesh: Option<&'a mut OtMesh>,
+    owned_online_mesh: Option<OtMesh>,
     /// MAC key shares of the quorum, as the most recent vaults carried them.
     alpha: Option<SecretVec<[Tower128; 2]>>,
     perm_ctr: usize,
@@ -319,6 +321,8 @@ impl<'a> SpdzSweepEngine<'a> {
             keys,
             party_rngs,
             triples,
+            online_mesh: None,
+            owned_online_mesh: None,
             alpha: None,
             perm_ctr: 0,
             flush_ctr: 0,
@@ -329,6 +333,38 @@ impl<'a> SpdzSweepEngine<'a> {
             verify_each_permutation: false,
             poisoned: false,
         })
+    }
+
+    /// Reuse a separately provisioned online mesh for all MAC barriers and cut openings.
+    /// The mesh must have one endpoint per signing quorum member, in that same order.
+    pub fn new_with_mesh(
+        session_id: [u8; 32],
+        t: usize,
+        keys: &'a [SpdzAuthenticatedKeyShare],
+        party_rngs: &'a mut [PartyPrivateRng],
+        triples: &'a mut dyn SpdzTripleSource,
+        online_mesh: &'a mut OtMesh,
+    ) -> Result<Self, KeccakMpcError> {
+        if online_mesh.n != keys.len() {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let mut engine = Self::new(session_id, t, keys, party_rngs, triples)?;
+        engine.online_mesh = Some(online_mesh);
+        Ok(engine)
+    }
+
+    fn ensure_online_mesh(&mut self) -> Result<(), BaggyError> {
+        if self.online_mesh.is_none() && self.owned_online_mesh.is_none() {
+            let sid = crate::sponge::keccak::cshake256_32_multi_frame(
+                b"QSAG.SPDZ.BLIND.OT/v1",
+                &[&self.session_id, b"spdz-sweep-online"],
+            );
+            match OtMesh::try_establish(sid, self.party_rngs) {
+                Ok(mesh) => self.owned_online_mesh = Some(mesh),
+                Err(e) => return self.fail(e.into()),
+            }
+        }
+        Ok(())
     }
 
     /// Threshold `t` and quorum size `m`.
@@ -362,11 +398,12 @@ impl<'a> SpdzSweepEngine<'a> {
             b"QSAG.SPDZ_SWEEP.VERIFY.V1",
             &[&self.session_id, &flush_idx.to_le_bytes()],
         );
+        self.ensure_online_mesh()?;
         let alpha = self
             .alpha
             .as_ref()
             .ok_or_else(|| mpc(KeccakMpcError::InvalidParameters))?;
-        let checked = verify_pending_spdz_mac_batch(
+        let checked = verify_pending_spdz_mac_batch_with_mesh(
             &verify_sid,
             "baggy_spdz_chi",
             self.t,
@@ -375,6 +412,9 @@ impl<'a> SpdzSweepEngine<'a> {
             &self.pending_macs,
             alpha,
             self.party_rngs,
+            self.online_mesh
+                .as_deref_mut()
+                .or(self.owned_online_mesh.as_mut()),
         );
         self.pending_opened.clear();
         for macs in self.pending_macs.iter_mut() {
@@ -629,6 +669,7 @@ impl<'a> SpdzSweepEngine<'a> {
         groups: &[(&SharedDigests, u64)],
     ) -> Result<Vec<Vec<[u8; 32]>>, BaggyError> {
         self.verify_now()?;
+        self.ensure_online_mesh()?;
         let Some(alpha) = self.alpha.as_ref().map(|a| SecretVec::new(a.to_vec())) else {
             // Nothing was ever evaluated, so there is nothing to open.
             return self.fail(KeccakMpcError::InvalidParameters);
@@ -670,7 +711,7 @@ impl<'a> SpdzSweepEngine<'a> {
             b"QSAG.SPDZ_SWEEP.OPEN.V1",
             &[&self.session_id, &open_idx.to_le_bytes()],
         );
-        let opened = match commit_and_open_spdz_bs_gf256_batch_quorum(
+        let opened = match commit_and_open_spdz_bs_gf256_batch_quorum_with_mesh(
             &open_sid,
             "baggy_spdz_open",
             self.t,
@@ -678,6 +719,9 @@ impl<'a> SpdzSweepEngine<'a> {
             &cut_sh,
             &cut_mac,
             &alpha,
+            self.online_mesh
+                .as_deref_mut()
+                .or(self.owned_online_mesh.as_mut()),
             self.party_rngs,
         ) {
             Ok(words) => words,

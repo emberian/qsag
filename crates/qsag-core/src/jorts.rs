@@ -225,9 +225,25 @@ pub fn jorts_verify(params: &JortsParams, pk: &JortsPublicKey, msg: &[u8], sig: 
     {
         return false;
     }
-    let md = jorts_msg_digest(pk, msg);
+    jorts_verify_digest(params, pk, &jorts_msg_digest(pk, msg), sig)
+}
+
+fn jorts_verify_digest(
+    params: &JortsParams,
+    pk: &JortsPublicKey,
+    md: &[u8; 32],
+    sig: &JortsSig,
+) -> bool {
+    if !params.is_well_formed()
+        || sig.epoch >= params.capacity()
+        || sig.chains.len() != params.wots.chains
+        || sig.auth.len() != params.height
+        || sig.ctr >= params.max_grind
+    {
+        return false;
+    }
     let Some(digits) =
-        jorts_grinder(pk, sig.epoch, &sig.retry_salt, &md).digits_at(&params.wots, sig.ctr)
+        jorts_grinder(pk, sig.epoch, &sig.retry_salt, md).digits_at(&params.wots, sig.ctr)
     else {
         return false;
     };
@@ -255,6 +271,175 @@ pub fn jorts_verify(params: &JortsParams, pk: &JortsPublicKey, msg: &[u8], sig: 
         leaf,
         &sig.auth,
     ) == Some(pk.pk_root)
+}
+
+/// Causal block header signed as ordinary Jorts message bytes. No new hash customization
+/// label: the whole fixed-length frame is covered by the existing Jorts message binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlocklaceLeafAnchor {
+    pub constitution_epoch: u64,
+    pub constitution_root: [u8; 32],
+    pub seq: u64,
+    pub prev_tips_digest: [u8; 32],
+    pub payload_digest: [u8; 32],
+}
+impl BlocklaceLeafAnchor {
+    /// Verify the causal header and the exact `seq == signature.epoch` binding together.
+    pub fn verify_signature(
+        &self,
+        params: &JortsParams,
+        pk: &JortsPublicKey,
+        signature: &JortsSig,
+    ) -> bool {
+        self.message_for_leaf(signature.epoch)
+            .is_some_and(|message| jorts_verify(params, pk, &message, signature))
+    }
+
+    pub fn message_for_leaf(&self, leaf_idx: u64) -> Option<[u8; 120]> {
+        if self.seq != leaf_idx {
+            return None;
+        }
+        let mut out = [0; 120];
+        out[..8].copy_from_slice(b"QBLACE01");
+        out[8..16].copy_from_slice(&self.constitution_epoch.to_be_bytes());
+        out[16..48].copy_from_slice(&self.constitution_root);
+        out[48..56].copy_from_slice(&self.seq.to_be_bytes());
+        out[56..88].copy_from_slice(&self.prev_tips_digest);
+        out[88..].copy_from_slice(&self.payload_digest);
+        Some(out)
+    }
+}
+
+/// Self-contained evidence of two distinct message digests signed by one key at one
+/// leaf. Both full signatures are necessary with the current compressed WOTS endpoint
+/// commitment. A bare 264-byte pair of chain nodes is forgeable from a single signature:
+/// anybody can hash an earlier node forward. Constant sum proves digit incomparability,
+/// not authentication of the two messages. No timestamps or blocklace history are needed.
+#[derive(Clone, Debug)]
+pub struct JortsEquivocationEvidence {
+    pub public_key: JortsPublicKey,
+    pub message_digests: [[u8; 32]; 2],
+    pub signatures: [JortsSig; 2],
+}
+impl JortsEquivocationEvidence {
+    pub fn extract(
+        params: &JortsParams,
+        pk: &JortsPublicKey,
+        messages: [&[u8]; 2],
+        signatures: [&JortsSig; 2],
+    ) -> Option<Self> {
+        let evidence = Self {
+            public_key: *pk,
+            message_digests: messages.map(|m| jorts_msg_digest(pk, m)),
+            signatures: signatures.map(Clone::clone),
+        };
+        evidence.verify(params).then_some(evidence)
+    }
+    pub fn verify(&self, params: &JortsParams) -> bool {
+        self.message_digests[0] != self.message_digests[1]
+            && self.signatures[0].epoch == self.signatures[1].epoch
+            && (0..2).all(|i| {
+                jorts_verify_digest(
+                    params,
+                    &self.public_key,
+                    &self.message_digests[i],
+                    &self.signatures[i],
+                )
+            })
+    }
+    /// Two opposite strict inequalities, if the digests' digit vectors differ.
+    /// Even a hash collision yielding identical vectors leaves the two-message proof
+    /// valid, so verification does not incorrectly require an incomparable witness.
+    pub fn incomparable_chains(&self, params: &JortsParams) -> Option<(usize, usize)> {
+        if !self.verify(params) {
+            return None;
+        }
+        let digits: Vec<_> = (0..2)
+            .map(|i| {
+                let s = &self.signatures[i];
+                jorts_grinder(
+                    &self.public_key,
+                    s.epoch,
+                    &s.retry_salt,
+                    &self.message_digests[i],
+                )
+                .digits_at(&params.wots, s.ctr)
+            })
+            .collect();
+        let a = digits[0].as_ref()?;
+        let b = digits[1].as_ref()?;
+        Some((
+            (0..a.len()).find(|&j| a[j] < b[j])?,
+            (0..a.len()).find(|&j| b[j] < a[j])?,
+        ))
+    }
+    /// Canonical self-contained encoding, 136 + twice the signature size bytes.
+    pub fn to_bytes(&self, params: &JortsParams) -> Option<Vec<u8>> {
+        if !self.verify(params) {
+            return None;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"QJEV0001");
+        out.extend_from_slice(&self.public_key.pk_seed);
+        out.extend_from_slice(&self.public_key.pk_root);
+        for md in &self.message_digests {
+            out.extend_from_slice(md);
+        }
+        for s in &self.signatures {
+            out.extend_from_slice(&s.epoch.to_be_bytes());
+            out.extend_from_slice(&s.retry_salt);
+            out.extend_from_slice(&s.ctr.to_be_bytes());
+            for node in s.chains.iter().chain(&s.auth) {
+                out.extend_from_slice(node);
+            }
+        }
+        Some(out)
+    }
+    /// Exact length, parameter, and signature validation before accepting evidence.
+    pub fn from_bytes(params: &JortsParams, bytes: &[u8]) -> Option<Self> {
+        if !params.is_well_formed()
+            || bytes.len() != 136 + 2 * params.sig_bytes()
+            || &bytes[..8] != b"QJEV0001"
+        {
+            return None;
+        }
+        let pk = JortsPublicKey {
+            pk_seed: bytes[8..40].try_into().ok()?,
+            pk_root: bytes[40..72].try_into().ok()?,
+        };
+        let message_digests = [
+            bytes[72..104].try_into().ok()?,
+            bytes[104..136].try_into().ok()?,
+        ];
+        let mut pos = 136;
+        let mut read_sig = || -> Option<JortsSig> {
+            let epoch = u64::from_be_bytes(bytes[pos..pos + 8].try_into().ok()?);
+            pos += 8;
+            let retry_salt = bytes[pos..pos + 32].try_into().ok()?;
+            pos += 32;
+            let ctr = u32::from_be_bytes(bytes[pos..pos + 4].try_into().ok()?);
+            pos += 4;
+            let mut nodes = Vec::new();
+            for _ in 0..params.wots.chains + params.height {
+                nodes.push(bytes[pos..pos + 32].try_into().ok()?);
+                pos += 32;
+            }
+            let auth = nodes.split_off(params.wots.chains);
+            Some(JortsSig {
+                epoch,
+                retry_salt,
+                ctr,
+                chains: nodes,
+                auth,
+            })
+        };
+        let evidence = Self {
+            public_key: pk,
+            message_digests,
+            signatures: [read_sig()?, read_sig()?],
+        };
+        evidence.verify(params).then_some(evidence)
+    }
 }
 
 fn key_material_from_leaves(pk_seed: [u8; 32], leaves: &[[u8; 32]]) -> JortsKeyMaterial {
@@ -868,6 +1053,56 @@ mod tests {
             pk_seed: engine.pk_seed(),
         };
         (engine, sk)
+    }
+
+    #[test]
+    fn equivocation_evidence_authenticates_both_messages_and_rejects_forgery() {
+        let (_, sk) = test_engine(0x19);
+        let params = JortsParams::with_height(1);
+        let key = jorts_reference_keygen(&params, &sk);
+        let a = jorts_reference_sign(&params, &sk, &key, 0, &[1; 32], b"fork a").unwrap();
+        let b = jorts_reference_sign(&params, &sk, &key, 0, &[2; 32], b"fork b").unwrap();
+        let proof =
+            JortsEquivocationEvidence::extract(&params, &key.pk, [b"fork a", b"fork b"], [&a, &b])
+                .unwrap();
+        assert!(proof.incomparable_chains(&params).is_some());
+        let raw = proof.to_bytes(&params).unwrap();
+        assert_eq!(raw.len(), 136 + 2 * params.sig_bytes());
+        assert!(JortsEquivocationEvidence::from_bytes(&params, &raw).is_some());
+        let mut tamper = raw.clone();
+        tamper[104] ^= 1;
+        assert!(JortsEquivocationEvidence::from_bytes(&params, &tamper).is_none());
+        assert!(JortsEquivocationEvidence::from_bytes(&params, &raw[..raw.len() - 1]).is_none());
+        assert!(
+            JortsEquivocationEvidence::extract(&params, &key.pk, [b"fork a", b"fork b"], [&a, &a])
+                .is_none()
+        );
+        assert!(
+            JortsEquivocationEvidence::extract(&params, &key.pk, [b"fork a", b"fork a"], [&a, &a])
+                .is_none()
+        );
+        let c = jorts_reference_sign(&params, &sk, &key, 1, &[2; 32], b"fork b").unwrap();
+        assert!(
+            JortsEquivocationEvidence::extract(&params, &key.pk, [b"fork a", b"fork b"], [&a, &c])
+                .is_none()
+        );
+        let anchor = BlocklaceLeafAnchor {
+            constitution_epoch: 7,
+            constitution_root: [1; 32],
+            seq: 0,
+            prev_tips_digest: [2; 32],
+            payload_digest: [3; 32],
+        };
+        assert!(anchor.message_for_leaf(1).is_none());
+        assert_ne!(
+            anchor.message_for_leaf(0).unwrap(),
+            BlocklaceLeafAnchor {
+                constitution_epoch: 8,
+                ..anchor
+            }
+            .message_for_leaf(0)
+            .unwrap()
+        );
     }
 
     fn fresh_wals() -> [MemoryWal; 3] {

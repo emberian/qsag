@@ -1703,11 +1703,20 @@ mod tests {
 
         let mut reopened = FsCeremonyJournal::open_existing_at_least(&path, key_id, mac_key, ckpt)
             .expect("reopen u128 ceremony journal");
-        assert_eq!(reopened.entries.last().unwrap().context.spend_amount, high_spend);
-        let mut wrong_ctx = ctx;
-        wrong_ctx.spend_amount ^= 1;
+        assert_eq!(
+            reopened.entries.last().unwrap().context.spend_amount,
+            high_spend
+        );
+        // A retry must have a fresh ceremony ID, nonce and burn cursors. Keep
+        // those valid so this rejection specifically checks the upper spend bits.
+        let retry_ctx = CeremonyContext {
+            mpc_nonce_epoch: 20,
+            ..ctx
+        };
+        let mut wrong_ctx = retry_ctx;
+        wrong_ctx.spend_amount ^= 1u128 << 104;
         let retry_res = || CeremonyReservation {
-            ceremony_id: [0x11; 32],
+            ceremony_id: [0x12; 32],
             key_id,
             epoch_or_codeword: [0x22; 32],
             seed_burn_cursor: 6,
@@ -1719,12 +1728,12 @@ mod tests {
                 .is_err()
         );
         let retry_permit = reopened
-            .persist_with_context(retry_res(), Some(3), true, ctx)
+            .persist_with_context(retry_res(), Some(3), true, retry_ctx)
             .expect("retry with matching full u128 spend_amount succeeds");
         let released = reopened
-            .consume_release_with_context(retry_permit, ctx)
+            .consume_release_with_context(retry_permit, retry_ctx)
             .expect("exact u128 spend context matches");
-        assert_eq!(released.ceremony_id, [0x11; 32]);
+        assert_eq!(released.ceremony_id, [0x12; 32]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
