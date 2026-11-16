@@ -43,7 +43,7 @@ mod linux {
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use qsag_core::baggy::{BaggyParams, BaggyPublicKey, WaistbandCache, baggy_keygen_mpc};
-    use qsag_core::keccak_mpc::run_dealerless_rss_dkg_2of3;
+    use qsag_core::keccak_mpc::{RssKeyShare256, run_dealerless_rss_dkg_2of3};
     use qsag_core::preprocessing::PartyPrivateRng;
     use qsag_core::rss256::Rss256Engine;
     use qsag_quorum::quorum_jorts::grind;
@@ -60,8 +60,9 @@ mod linux {
         Args, CliError, MAX_MSG_BYTES, MAX_SIG_PROOF_BYTES, Secret32, ZeroizingBuf, exit,
         os_random_32, private_dir, read_bounded_file, read_input, read_text, write_new,
     };
-    use crate::codec::{Json, from_hex_exact, to_hex};
+    use crate::codec::{Json, from_hex_exact, to_hex, to_hex_zeroizing};
     use crate::quorum::ensure_absent;
+    use crate::vault::Vault;
 
     const SCHEME_NAME: &str = "baggy-volatile-coupon";
     const ROOT_PUBLIC_FORMAT: &str = "qsag-quorum-coupon-root-v1";
@@ -191,8 +192,16 @@ signature stops verifying when its coupon expires.
             .into_owned()
     }
 
-    /// The root engine over the key shares the three party seeds determine, and its
-    /// `pk_seed`. The engine's own randomness is fresh.
+    fn engine_from_shares(shares: [RssKeyShare256; 3]) -> Result<Rss256Engine, CliError> {
+        let engine_rngs = [
+            PartyPrivateRng::from_seed(os_random_32()?, ENGINE_RNG_LABEL),
+            PartyPrivateRng::from_seed(os_random_32()?, ENGINE_RNG_LABEL),
+            PartyPrivateRng::from_seed(os_random_32()?, ENGINE_RNG_LABEL),
+        ];
+        Rss256Engine::new(os_random_32()?, shares, engine_rngs)
+            .map_err(|e| CliError::state(format!("initializing 2-of-3 MPC engine failed: {e}")))
+    }
+
     fn root_engine(
         dkg_session_id: [u8; 32],
         seeds: &[Secret32; 3],
@@ -201,14 +210,7 @@ signature stops verifying when its coupon expires.
             std::array::from_fn(|p| PartyPrivateRng::from_seed(seeds[p].0, DKG_RNG_LABEL));
         let (shares, pk_seed) = run_dealerless_rss_dkg_2of3(dkg_session_id, 32, &mut dkg_rngs)
             .map_err(|e| CliError::state(format!("dealerless 2-of-3 root DKG failed: {e}")))?;
-        let engine_rngs = [
-            PartyPrivateRng::from_seed(os_random_32()?, ENGINE_RNG_LABEL),
-            PartyPrivateRng::from_seed(os_random_32()?, ENGINE_RNG_LABEL),
-            PartyPrivateRng::from_seed(os_random_32()?, ENGINE_RNG_LABEL),
-        ];
-        let engine = Rss256Engine::new(os_random_32()?, shares, engine_rngs)
-            .map_err(|e| CliError::state(format!("initializing 2-of-3 MPC engine failed: {e}")))?;
-        Ok((engine, pk_seed))
+        Ok((engine_from_shares(shares)?, pk_seed))
     }
 
     fn public_json(params_name: &str, pk: &BaggyPublicKey) -> Json {
@@ -268,19 +270,28 @@ signature stops verifying when its coupon expires.
         }
 
         for (party, path) in paths.iter().enumerate() {
+            let mut vault = Vault::acquire(path, true)?;
+            let nonce = Secret32::new(os_random_32()?);
+            let share_bytes = engine.keys()[party].to_secret_bytes();
+            let share_hex = to_hex_zeroizing(&share_bytes.0);
+            let share_hex_str = String::from_utf8(share_hex.0.clone())
+                .map_err(|_| CliError::state("encoding RSS key share hex failed"))?;
             let mut secret = Json::object(vec![
                 ("format", Json::str(ROOT_PARTY_FORMAT)),
                 ("scheme", Json::str(SCHEME_NAME)),
                 ("params", Json::str(params_name)),
                 ("party_id", Json::num(party)),
-                ("dkg_session_id", Json::hex(&dkg_session_id)),
+                ("enrollment_nonce", Json::hex(&nonce.0[..16])),
                 ("pk_seed", Json::hex(&pk.pk_seed)),
                 ("pk_root", Json::hex(&pk.pk_root)),
-                ("seed", Json::hex(&seeds[party].0)),
+                ("secret_key", Json::Str(share_hex_str)),
             ]);
+            vault.set_key_material(&crate::envelope::open(&secret, None)?);
             if let Some(pass) = &passphrase {
                 crate::envelope::seal(&mut secret, pass)?;
             }
+            vault.bind(&mut secret)?;
+            vault.seal(&mut secret)?;
             let encoded = ZeroizingBuf::new(secret.to_pretty().into_bytes());
             write_new(path, &encoded.0, true)?;
         }
@@ -298,23 +309,33 @@ signature stops verifying when its coupon expires.
     }
 
     struct Root {
+        _vaults: Vec<Vault>,
         params_name: String,
         params: BaggyParams,
         pk: BaggyPublicKey,
-        dkg_session_id: [u8; 32],
-        seeds: [Secret32; 3],
+        engine: Rss256Engine,
     }
 
     fn load_root(vault_dir: &str, passphrase: Option<&[u8]>) -> Result<Root, CliError> {
         private_dir(vault_dir, false)?;
-        let mut header: Option<(String, [u8; 32], BaggyPublicKey)> = None;
-        let mut seeds = [
+        let mut header: Option<(String, BaggyPublicKey)> = None;
+        let mut vaults = Vec::with_capacity(3);
+        let mut loaded_shares: [Option<RssKeyShare256>; 3] = [None, None, None];
+        let mut legacy_seeds = [
             Secret32::new([0; 32]),
             Secret32::new([0; 32]),
             Secret32::new([0; 32]),
         ];
-        for (party, seed) in seeds.iter_mut().enumerate() {
+        let mut legacy_dkg_sid: Option<[u8; 32]> = None;
+
+        for party in 0..3 {
             let path = party_path(vault_dir, party);
+            let has_lock = std::fs::symlink_metadata(format!("{path}.vault.lock")).is_ok();
+            let mut vault_opt = if has_lock {
+                Some(Vault::acquire(&path, false)?)
+            } else {
+                None
+            };
             let text = read_text(&path)?;
             let json = Json::parse(&text)?;
             if json.field_str("format")? != ROOT_PARTY_FORMAT
@@ -327,7 +348,6 @@ signature stops verifying when its coupon expires.
             }
             let this = (
                 json.field_str("params")?.to_owned(),
-                from_hex_exact(json.field_str("dkg_session_id")?, "dkg_session_id")?,
                 BaggyPublicKey {
                     pk_seed: from_hex_exact(json.field_str("pk_seed")?, "pk_seed")?,
                     pk_root: from_hex_exact(json.field_str("pk_root")?, "pk_root")?,
@@ -342,16 +362,61 @@ signature stops verifying when its coupon expires.
                     )));
                 }
             }
-            *seed = crate::envelope::open(&json, passphrase)?.seed()?;
+            let opened = crate::envelope::open(&json, passphrase)?;
+            if let Some(vault) = &mut vault_opt {
+                vault.set_key_material(&opened);
+                vault.authenticate(&json)?;
+            }
+            if json.get("secret_key").is_some() {
+                if vault_opt.is_none() {
+                    return Err(crate::vault::corrupt());
+                }
+                let share = RssKeyShare256::from_secret_bytes(opened.secret_key()?).map_err(
+                    |e| CliError::state(format!("corrupt coupon root RSS share ({path}): {e}")),
+                )?;
+                if share.party_id != party || share.pk_seed != header.as_ref().unwrap().1.pk_seed {
+                    return Err(CliError::state(format!(
+                        "{path} RSS share identity does not match root header"
+                    )));
+                }
+                loaded_shares[party] = Some(share);
+                vaults.push(vault_opt.unwrap());
+            } else {
+                let dkg_sid: [u8; 32] =
+                    from_hex_exact(json.field_str("dkg_session_id")?, "dkg_session_id")?;
+                if let Some(prev) = legacy_dkg_sid
+                    && prev != dkg_sid
+                {
+                    return Err(CliError::state(
+                        "legacy coupon party dkg_session_id mismatch",
+                    ));
+                }
+                legacy_dkg_sid = Some(dkg_sid);
+                legacy_seeds[party] = opened.seed()?;
+            }
         }
-        let (params_name, dkg_session_id, pk) =
+        let (params_name, pk) =
             header.ok_or_else(|| CliError::state("no coupon root party file"))?;
+        let engine = if loaded_shares.iter().all(Option::is_some) {
+            let shares = [
+                loaded_shares[0].take().unwrap(),
+                loaded_shares[1].take().unwrap(),
+                loaded_shares[2].take().unwrap(),
+            ];
+            engine_from_shares(shares)?
+        } else if let Some(dkg_sid) = legacy_dkg_sid {
+            root_engine(dkg_sid, &legacy_seeds)?.0
+        } else {
+            return Err(CliError::state(
+                "mixed legacy and RSS-persisted coupon party files",
+            ));
+        };
         Ok(Root {
+            _vaults: vaults,
             params: params_by_name(&params_name)?,
             params_name,
             pk,
-            dkg_session_id,
-            seeds,
+            engine,
         })
     }
 
@@ -553,15 +618,20 @@ signature stops verifying when its coupon expires.
         // Before any seed is read: lock every mapping and disable core dumps for good.
         let protection = protect()?;
         let started = Instant::now();
-        let root = load_root(vault_dir, passphrase.as_deref().map(Vec::as_slice))?;
-        let (mut engine, _) = root_engine(root.dkg_session_id, &root.seeds)?;
+        let Root {
+            _vaults: held_vaults,
+            params_name,
+            params,
+            pk,
+            mut engine,
+        } = load_root(vault_dir, passphrase.as_deref().map(Vec::as_slice))?;
         let (parent, binding) =
-            baggy_keygen_mpc(&mut engine, &root.params, &mut WaistbandCache::disabled()).map_err(
+            baggy_keygen_mpc(&mut engine, &params, &mut WaistbandCache::disabled()).map_err(
                 |e| CliError::state(format!("recomputing the Baggy root key failed: {e}")),
             )?;
-        if parent != root.pk {
+        if parent != pk {
             return Err(CliError::state(
-                "the party seeds do not produce the root public key recorded with them",
+                "the party shares do not produce the root public key recorded with them",
             ));
         }
         eprintln!(
@@ -603,7 +673,7 @@ signature stops verifying when its coupon expires.
         let started = Instant::now();
         let mut waistband = AuthenticatedWaistband::new(
             parent,
-            root.params,
+            params,
             binding,
             waistband_layers as usize,
             WAISTBAND_ENTRIES,
@@ -614,6 +684,7 @@ signature stops verifying when its coupon expires.
             .map_err(|e| coupon_error("certifying the coupon batch under the root key", e))?;
         drop(waistband);
         drop(engine);
+        let _ = &held_vaults;
         eprintln!(
             "qsag: certified {coupons} coupon(s) under the root key ({:.1} s)",
             started.elapsed().as_secs_f64()
@@ -630,7 +701,7 @@ signature stops verifying when its coupon expires.
             &Json::object(vec![
                 ("format", Json::str(SESSION_FORMAT)),
                 ("scheme", Json::str(SCHEME_NAME)),
-                ("params", Json::str(root.params_name.as_str())),
+                ("params", Json::str(params_name.as_str())),
                 ("pk_seed", Json::hex(&parent.pk_seed)),
                 ("pk_root", Json::hex(&parent.pk_root)),
                 ("threshold", Json::num(members.len())),
@@ -645,8 +716,8 @@ signature stops verifying when its coupon expires.
         )?;
 
         let mut session = Session {
-            params_name: root.params_name,
-            params: root.params,
+            params_name,
+            params,
             parent,
             initiator,
             pools,

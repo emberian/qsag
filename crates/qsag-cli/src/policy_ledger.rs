@@ -1480,15 +1480,15 @@ fn init(raw: &[String]) -> Result<(), CliError> {
             "policy init requires --accept-single-host-custody: one provisioning seed on this host derives every guard share",
         ));
     }
+    let anchor_cfg = AnchorConfig::for_vault(&args, dir, "anchor-dir", "allow-single-disk-anchor")?;
     crate::anchor::require_anchor_or_waiver(
-        args.get("anchor-dir").is_some(),
+        anchor_cfg.is_some(),
         args.flag("ephemeral-unanchored"),
         "anchor-dir",
     )?;
     let policy_text = read_text(args.require("policy")?)?;
     let (policy, committee) = policy_from_json(&Json::parse(&policy_text)?)?;
     let passphrase = crate::envelope::passphrase(&args)?;
-    let anchor_cfg = AnchorConfig::for_vault(&args, dir, "anchor-dir", "allow-single-disk-anchor")?;
 
     private_dir(dir, true)?;
     let occupied = std::fs::read_dir(dir)
