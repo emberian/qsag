@@ -9,11 +9,10 @@ impl Drop for Temp {
 }
 fn run(args: &[&str], success: bool) {
     let mut args = args.to_vec();
-    let stateful = match (args.first(), args.get(1)) {
-        (Some(&"hd"), Some(&"keygen" | &"recover" | &"export-rss")) => true,
-        (Some(&"sign"), _) => true,
-        _ => false,
-    };
+    let stateful = matches!(
+        (args.first(), args.get(1)),
+        (Some(&"hd"), Some(&"keygen" | &"recover" | &"export-rss")) | (Some(&"sign"), _)
+    );
     let has_anchor = args.iter().any(|a| {
         matches!(
             *a,
