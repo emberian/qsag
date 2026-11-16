@@ -226,6 +226,7 @@ structure Head (Tip : Type) where
   len : Nat
   tip : Tip
   prev : Tip
+  deriving DecidableEq
 
 /-- Sector size and the three offsets a journal format fixes. -/
 structure Layout where

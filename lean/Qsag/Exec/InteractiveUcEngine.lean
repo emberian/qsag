@@ -5024,3 +5024,8 @@ theorem tooth_active_shamir_zero_point_breaks_simulation
 
 end Qsag
 end
+
+public section
+namespace Qsag
+#export_eqns productionThresholdSignOracle
+end Qsag
