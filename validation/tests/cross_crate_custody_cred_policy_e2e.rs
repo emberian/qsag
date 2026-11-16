@@ -194,10 +194,8 @@ impl MpcTransport for MpcEndpoint {
             if posted.kind != info.kind {
                 return Err(MpcTransportError);
             }
-            if sender != self.me {
-                inbox.private[sender] = posted.private[self.me].clone();
-                inbox.broadcast[sender] = posted.broadcast.clone();
-            }
+            inbox.private[sender] = posted.private[self.me].clone();
+            inbox.broadcast[sender] = posted.broadcast.clone();
         }
         state.taken[self.me] = true;
         if state.taken.iter().all(|&t| t) {
@@ -614,14 +612,17 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     assert_eq!(WitnessSuiteTag::JortsPoseidon2 as u16, 0x0214);
     assert_eq!(WitnessSuiteTag::CorduroyPoseidon2 as u16, 0x0215);
 
-    let party_ids = [10u16, 20, 30];
+    // RSS Threshold ML-DSA (`threshold = 2`) requires `2t - 1 = 3` signing custodians; combined
+    // with `forbid_initiator_self_approval = true`, a 4-custodian desk `[10, 20, 30, 40]` allows
+    // custodian `10` to initiate while `[20, 30, 40]` form the 3-of-4 BDOZ & RSS signing quorum!
+    let party_ids = [10u16, 20, 30, 40];
     let dkg_cfg = ThresholdMlDsaDkgConfig {
         level: MlDsaLevel::MlDsa44,
         threshold: 2,
         party_ids: party_ids.to_vec(),
         session_id: [0x31; 32],
     };
-    let mut mldsa_shares = run_mpc_parties(vec![0u8, 1, 2], |_, idx, net| {
+    let mut mldsa_shares = run_mpc_parties(vec![0u8, 1, 2, 3], |_, idx, net| {
         threshold_mldsa_dkg_party(&dkg_cfg, party_ids[idx as usize], &[0x40 + idx; 32], net)
             .expect("threshold_mldsa_dkg_party")
     });
@@ -682,9 +683,9 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     let engine = PolicyEngine::new(&policy, required_actions);
     let authority_pk = [0xAA; 32];
     let signing_ctx = b"qsag-policy-gated-mldsa-v1";
-    // Custodian `10` initiates (`forbid_initiator_self_approval = true`), so custodians `[20, 30]`
-    // (including hardware guardian `30`) form the 2-of-3 BDOZ approval & threshold signing quorum!
-    let quorum = [20u16, 30];
+    // Custodian `10` initiates (`forbid_initiator_self_approval = true`), so custodians `[20, 30, 40]`
+    // (including hardware guardian `30`) form the `2t - 1 = 3` BDOZ approval & RSS signing quorum!
+    let quorum = [20u16, 30, 40];
 
     let mut guards = provision_dealerless_policy_guards(&party_ids, [0x51; 32], 6);
 
@@ -713,7 +714,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     )
     .window_id(0)
     .timestamp_secs(2_500)
-    .initiator_and_approvers(10, &[20, 30])
+    .initiator_and_approvers(10, &[20, 30, 40])
     .bind_signing_payload(
         &SigningPayloadBinding {
             key_id: canonical_key_id,
@@ -769,7 +770,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
                 session_b1,
                 2_500,
                 Some(&bad_gate),
-                &mut guards[1..3],
+                &mut guards[1..4],
                 &accel,
             )
             .err(),
@@ -798,20 +799,20 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             session_b1,
             2_500,
             Some(&mac_gate),
-            &mut guards[1..3],
+            &mut guards[1..4],
             &accel,
         )
         .expect("PolicyEngine authorize B1");
     assert_eq!(guards[0].accumulated_window_spend(), 0);
-    assert!(guards[1..3].iter().all(|g| g.accumulated_window_spend() == 4_500));
+    assert!(guards[1..4].iter().all(|g| g.accumulated_window_spend() == 4_500));
 
     let party_tokens_b1 = release_b1.into_quorum_party_tokens();
-    assert_eq!(party_tokens_b1.len(), 2);
+    assert_eq!(party_tokens_b1.len(), 3);
 
-    // Execute real policy-gated 2-of-3 threshold ML-DSA signing across `[20, 30]`!
-    let party_inputs_b1: Vec<_> = mldsa_shares[1..3]
+    // Execute real policy-gated 3-of-4 (`2t - 1 = 3`) threshold ML-DSA signing across `[20, 30, 40]`!
+    let party_inputs_b1: Vec<_> = mldsa_shares[1..4]
         .iter_mut()
-        .zip(burn_stores[1..3].iter_mut())
+        .zip(burn_stores[1..4].iter_mut())
         .zip(party_tokens_b1)
         .enumerate()
         .map(|(idx, ((sh, burn), tok))| (idx, sh, burn, tok))
@@ -864,7 +865,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     .rolling_window(4_500, [0; 32])
     .window_id(0)
     .timestamp_secs(3_000)
-    .initiator_and_approvers(10, &[20, 30])
+    .initiator_and_approvers(10, &[20, 30, 40])
     .bind_signing_payload(
         &SigningPayloadBinding {
             key_id: canonical_key_id,
@@ -910,7 +911,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
                 session_b2,
                 3_000,
                 Some(&unsealed_gate),
-                &mut guards[1..3],
+                &mut guards[1..4],
                 &accel,
             )
             .is_err()
@@ -957,17 +958,17 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             session_b2,
             3_000,
             Some(&biscuit_gate),
-            &mut guards[1..3],
+            &mut guards[1..4],
             &accel,
         )
         .expect("PolicyEngine authorize B2 via Compact1122 PqBiscuit");
-    assert!(guards[1..3].iter().all(|g| g.accumulated_window_spend() == 5_300));
+    assert!(guards[1..4].iter().all(|g| g.accumulated_window_spend() == 5_300));
 
     let party_tokens_b2 = release_b2.into_quorum_party_tokens();
-    assert_eq!(party_tokens_b2.len(), 2);
-    let party_inputs_b2: Vec<_> = mldsa_shares[1..3]
+    assert_eq!(party_tokens_b2.len(), 3);
+    let party_inputs_b2: Vec<_> = mldsa_shares[1..4]
         .iter_mut()
-        .zip(burn_stores[1..3].iter_mut())
+        .zip(burn_stores[1..4].iter_mut())
         .zip(party_tokens_b2)
         .enumerate()
         .map(|(idx, ((sh, burn), tok))| (idx, sh, burn, tok))
@@ -1005,7 +1006,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     .rolling_window(5_300, [0; 32])
     .window_id(0)
     .timestamp_secs(3_100)
-    .initiator_and_approvers(10, &[20, 30])
+    .initiator_and_approvers(10, &[20, 30, 40])
     .bind_signing_payload(
         &SigningPayloadBinding {
             key_id: canonical_key_id,
@@ -1024,7 +1025,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
         .expect("authenticate_initiated_intent B3");
     let intent_digest_b3 = intent_b3.canonical_digest();
     let release_b3 = engine
-        .authorize_committed_barrier(&intent_b3, session_b3, 3_100, None, &mut guards[1..3], &accel)
+        .authorize_committed_barrier(&intent_b3, session_b3, 3_100, None, &mut guards[1..4], &accel)
         .expect("PolicyEngine authorize B3");
     let mut party_tokens_b3 = release_b3.into_quorum_party_tokens();
     let tok0_b3 = party_tokens_b3.remove(0);
@@ -1523,4 +1524,167 @@ fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
             Some(HdError::BudgetStorageFailed)
         );
     }
+}
+
+#[test]
+fn e2e_shamir_17_custodian_committee_policy_gated_mldsa_signing() {
+    // C5 §6(e): Committees above 16 custodians (`17 <= n <= 64`) switch from direct RSS subsets
+    // to Shamir secret sharing (`is_shamir() == true`) with on-the-fly Shamir -> RSS projection
+    // onto the active `2t - 1` signing quorum.
+    let accel = CpuReferenceBackend::new();
+    let tmp = TempDirGuard::new("shamir-17-mldsa");
+    let party_ids: Vec<u16> = (1..=17).map(|i| i * 10).collect();
+    let dkg_cfg = ThresholdMlDsaDkgConfig {
+        level: MlDsaLevel::MlDsa44,
+        threshold: 2,
+        party_ids: party_ids.clone(),
+        session_id: [0x9A; 32],
+    };
+    let committee_cfg = dkg_cfg.shamir_committee().expect("shamir_committee");
+    let mut committee_shares = run_mpc_parties(vec![0u8, 1, 2], |_, idx, net| {
+        threshold_mldsa_dkg_party(
+            &committee_cfg,
+            committee_cfg.party_ids[idx as usize],
+            &[0x05 + idx; 32],
+            net,
+        )
+        .expect("3-party sampling committee DKG")
+    });
+    let expand_inputs: Vec<(u8, Option<_>)> = (0..17u8)
+        .map(|idx| {
+            let cs = if idx < 3 {
+                Some(committee_shares.remove(0))
+            } else {
+                None
+            };
+            (idx, cs)
+        })
+        .collect();
+    let mut shares = run_mpc_parties(expand_inputs, |_, (idx, cs), net| {
+        qsag_cred::threshold_mldsa_shamir_expand_party(
+            &dkg_cfg,
+            party_ids[idx as usize],
+            cs,
+            &[0x10 + idx; 32],
+            net,
+        )
+        .expect("17-party threshold_mldsa_shamir_expand_party")
+    });
+    assert!(shares.iter().all(|s| s.is_shamir()));
+
+    let pack = shares[0].verification_pack().clone();
+    let canonical_key_id = policy_signing_key_id(WitnessSuiteTag::MlDsa44, &pack.pk_bytes);
+    assert_eq!(pack.policy_signing_key_id(), canonical_key_id);
+    let upstream_pk =
+        ml_dsa_44::PublicKey::try_from_bytes(pack.pk_bytes.as_slice().try_into().unwrap())
+            .expect("upstream fips204::ml_dsa_44::PublicKey");
+
+    let recipient = QsagAddress::from_pubkey_poseidon2(
+        "qsag",
+        WitnessSuiteTag::MlDsa44,
+        KeyIdentityKind::SingleOrThreshold,
+        b"shamir-17-recipient-vault",
+    )
+    .unwrap();
+    let policy = TransactionPolicy {
+        chain_id: 2026,
+        pinned_suite: WitnessSuiteTag::MlDsa44,
+        recipient_allowlist: vec![recipient.commitment_256],
+        max_single_tx_amount: 10_000,
+        velocity_window_cap: 10_000,
+        valid_not_before_secs: 100,
+        valid_not_after_secs: 900,
+        forbid_initiator_self_approval: true,
+        hardware_guardian_party: Some(170),
+        quorum_tiers: vec![QuorumTierRule {
+            max_amount_units: 10_000,
+            min_approvers: 3,
+            require_hardware_guardian: true,
+        }],
+    };
+    // Provision dealerless BDOZ policy guards for initiator `10` + far-apart quorum `[50, 110, 170]`.
+    let active_guard_committee = [10u16, 50, 110, 170];
+    let mut guards = provision_dealerless_policy_guards(&active_guard_committee, [0x9B; 32], 2);
+    let quorum = [50u16, 110, 170];
+    let session_id = [0x9C; 32];
+    let signing_ctx = b"qsag-shamir-17-policy-mldsa";
+
+    let (mut intent, _) = TransactionIntent::builder(
+        2026,
+        WitnessSuiteTag::MlDsa44,
+        recipient,
+        2_500,
+    )
+    .window_id(0)
+    .timestamp_secs(500)
+    .initiator_and_approvers(10, &quorum)
+    .bind_signing_payload(
+        &SigningPayloadBinding {
+            key_id: canonical_key_id,
+            payload: b"shamir-17-transfer: 2500 units",
+            ctx: signing_ctx,
+            session_id,
+            policy_revision: 1,
+            quorum: &quorum,
+            authority_pk: [0xAB; 32],
+        },
+        &policy,
+    )
+    .unwrap();
+    let signing_bytes = guards[0]
+        .authenticate_initiated_intent(&policy, &mut intent)
+        .unwrap();
+    let intent_digest = intent.canonical_digest();
+
+    let engine = PolicyEngine::new(&policy, 0);
+    let release = engine
+        .authorize_committed_barrier(&intent, session_id, 500, None, &mut guards[1..4], &accel)
+        .expect("PolicyEngine authorize Shamir-17");
+    let party_tokens = release.into_quorum_party_tokens();
+    assert_eq!(party_tokens.len(), 3);
+
+    // Extract shares for `[50, 110, 170]` (indices `4, 10, 16`) in ascending order!
+    let selected_indices = [4usize, 10, 16];
+    let mut selected_shares: Vec<_> = shares
+        .drain(..)
+        .enumerate()
+        .filter_map(|(i, s)| selected_indices.contains(&i).then_some(s))
+        .collect();
+    let mut burn_stores: Vec<_> = quorum
+        .iter()
+        .map(|&pid| {
+            FsNonceBurnStore::create(
+                tmp.path().join(format!("shamir-burn-{pid}")),
+                canonical_key_id,
+                [0x70 + (pid / 10) as u8; 32],
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let inputs: Vec<_> = selected_shares
+        .iter_mut()
+        .zip(burn_stores.iter_mut())
+        .zip(party_tokens)
+        .enumerate()
+        .map(|(idx, ((sh, burn), tok))| (idx, sh, burn, tok))
+        .collect();
+    let outputs = run_mpc_parties(inputs, |_, (idx, sh, burn, tok), net| {
+        threshold_sign_mldsa_party_policy_gated(
+            sh,
+            ThresholdPolicyGate {
+                token: tok,
+                expected_intent_digest: &intent_digest,
+                quorum: &quorum,
+            },
+            &signing_bytes,
+            signing_ctx,
+            &[0xE0 + idx as u8; 32],
+            burn as &mut dyn NonceBurnPersistence,
+            net,
+        )
+        .expect("Shamir-17 threshold_sign_mldsa_party_policy_gated")
+    });
+    let sig_arr: [u8; ml_dsa_44::SIG_LEN] = outputs[0].signature.as_slice().try_into().unwrap();
+    assert!(upstream_pk.verify(&signing_bytes, &sig_arr, signing_ctx));
 }
